@@ -1472,15 +1472,13 @@ def plot_coil_currents(h5path_or_header, scan_val=None):
     if not h5path.endswith(".h5"):
         h5path = os.path.abspath(f"{h5path}.h5")
 
-    n = count_equilibria(h5path, scan_value=scan_val)
-    if n == 0:
+    all_entries = _load_all_perturbations(h5path, scan_value=scan_val)
+    if not all_entries:
         print("No equilibria found.")
         return None, None
 
     all_cc = []
-    for i in range(n):
-        entry = load_equilibrium_by_path(h5path, count=i,
-                                         scan_value=scan_val)
+    for entry in all_entries:
         if "coil_currents" in entry:
             all_cc.append(entry["coil_currents"])
 
