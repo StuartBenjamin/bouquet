@@ -1053,10 +1053,55 @@ def perturb_kinetic_equilibrium(
     # state rather than to whatever shape SWB happens to amplitude-
     # scale a seed into.
     if recalculate_j_BS:
+        # ---- SWB call hygiene ---------------------------------------
+        # solve_with_bootstrap is sensitive to two things beyond
+        # kinetics:
+        #
+        #   1. mygs state (q profile, FSA quantities) — drifts
+        #      between calls if perturb is invoked from a non-recon
+        #      state.
+        #   2. inductive_jphi seed shape — SWB amplitude-only-scales
+        #      its seed and its bootstrap iteration's convergence path
+        #      depends on the seed.  Feeding recon's *converged* peaky
+        #      ``j_inductive_fit`` produces a 22% bootstrap drift vs
+        #      feeding the same broad ``create_power_flux_fun`` seed
+        #      that recon used.
+        #
+        # Both fixes here:
+        #   (a) State anchor: one solve at recon's exact j_phi +
+        #       targets to put mygs in recon's converged state.
+        #   (b) Synthesise the SAME broad SWB seed that
+        #       ``reconstruct_equilibrium`` uses internally.  This
+        #       decouples the SWB seed (purely a bootstrap-iteration
+        #       starting point) from ``input_jinductive`` (the GPR
+        #       baseline shape used downstream).
+        _pre_pp = {"type": "linterp",
+                   "y": np.gradient(pressure) /
+                        (np.gradient(psi_N) *
+                         (mygs.psi_bounds[1] - mygs.psi_bounds[0])),
+                   "x": psi_N}
+        _pre_pp["y"][-1] = 0.0
+        _pre_ffp = {"type": "jphi-linterp",
+                    "y": input_j_phi.copy(),
+                    "x": psi_N}
+        mygs.set_targets(Ip=Ip_target, pax=pressure[0])
+        mygs.set_profiles(pp_prof=_pre_pp, ffp_prof=_pre_ffp)
+        try:
+            mygs.solve()
+        except (ValueError, RuntimeError):
+            # Anchor failed (rare); fall through and let SWB cope.
+            pass
+
+        # SWB seed: broad ``(1−ψ̂^1.5)^1.5`` shape — matches the seed
+        # passed to SWB inside ``reconstruct_equilibrium`` so the
+        # bootstrap iteration follows the same convergence path.
+        from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
+        _swb_seed = create_power_flux_fun(npsi, 1.5, 1.5)['y']
+
         results = solve_with_bootstrap(
             mygs,
             ne_eq, te_eq, ni_eq, ti_eq,
-            Zeff, Ip_target, input_jinductive,
+            Zeff, Ip_target, _swb_seed,
             scale_jBS=scale_jBS,
             isolate_edge_jBS=isolate_edge_jBS,
             diagnostic_plots=False,
