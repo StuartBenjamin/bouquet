@@ -24,6 +24,13 @@ import time
 import numpy as np
 import matplotlib.pyplot as plt
 
+# Pad used when tracing the lock-mode reference LCFS contour.  Smaller
+# than the OFT solver psi_pad (typically 1e-3) so the dpsi/grad_psi
+# conversion in psi_boundary_deviation isn't contaminated by the pad
+# itself — at psi_pad=1e-3 the phantom offset is ~15 mm on DIII-D.
+# 1e-6 is safely traceable while keeping the phantom < 1 μm.
+_LOCK_REF_TRACE_PAD = 1.0e-6
+
 from .sampling import (
     generate_perturbed_GPR,
     calc_cylindrical_li_proxy,
@@ -407,7 +414,8 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
                             baseline_li_proxy,
                             k=3, psi_bridge=0.99,
                             rescale_j_BS=False,
-                            shelf_psi_N=0.0):
+                            shelf_psi_N=0.0,
+                            n_spline_pts=32):
     r"""Fit a smooth inductive current profile and scale it to match
     a target cylindrical :math:`l_i` proxy.
 
@@ -476,10 +484,9 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
     residual = eqdsk_jtor - j_BS_work
     mask_core = psi_N <= psi_bridge
 
-    edge_target = eqdsk_jtor[-1] - j_BS_work[-1]  # used when rescale_j_BS
+    edge_target = max(eqdsk_jtor[-1] - j_BS_work[-1], 0.0)
     psi_trusted = np.concatenate([psi_N[mask_core], [1.0]])
-    res_trusted = np.concatenate([residual[mask_core],
-                                    [edge_target if rescale_j_BS else 0.0]])
+    res_trusted = np.concatenate([residual[mask_core], [edge_target]])
 
     # Use a smoothing spline followed by PCHIP to eliminate ringing.
     # Step 1: smooth the residual with a generous smoothing factor
@@ -489,16 +496,24 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
     # profile on the full psi_N grid.
     from scipy.interpolate import PchipInterpolator
 
-    _s_factor = len(psi_trusted) * np.var(res_trusted) * 0.1
+    # Smoothing factor: tighter when more points are used (captures
+    # finer features); looser for the default 32-point subsampling.
+    _s_scale = 0.1 * (32 / max(n_spline_pts, 1))
+    _s_factor = len(psi_trusted) * np.var(res_trusted) * _s_scale
     _smooth_spline = UnivariateSpline(psi_trusted, res_trusted, k=k,
                                        s=_s_factor)
 
-    # Subsample to ~32 points for PCHIP (enough to capture the shape,
-    # few enough to avoid oscillation)
-    _n_sub = min(32, len(psi_N))
+    # Subsample for PCHIP.  More points = finer feature resolution
+    # but more susceptible to oscillation.  Default 32 is conservative;
+    # increase to 64-128 to capture shorter length-scale structure.
+    _n_sub = min(n_spline_pts, len(psi_N))
     _psi_sub = np.linspace(psi_N[0], psi_N[-1], _n_sub)
     _res_sub = _smooth_spline(_psi_sub)
     _res_sub = np.maximum(_res_sub, 0.0)
+
+    # Force the edge point to match the edge anchor exactly
+    # (smoothing spline may not interpolate through it)
+    _res_sub[-1] = max(edge_target, 0.0)
 
     _pchip = PchipInterpolator(_psi_sub, _res_sub)
     j_inductive_basis = _pchip(psi_N)
@@ -555,6 +570,200 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
     }
 
 # ====================================================================
+#  Locked-coil helpers
+# ====================================================================
+#  These support the "lock_coils" mode of generate_bouquet, where each
+#  perturbed equilibrium is solved with coil currents pinned to the
+#  reconstructed-baseline values.  Boundary deviations and X-point
+#  deviations from the baseline are recorded as diagnostics and (in
+#  PR2) used as accept/reject filters.
+# ====================================================================
+def lock_coils_to_baseline(mygs, ref_coil_currents, weight=1.0e2,
+                            vsc_weight=1.0):
+    r"""Soft-lock coils via strong regularisation toward reference values.
+
+    Replaces the existing coil regularisation with terms that pin each
+    coil close to ``ref_coil_currents`` through TokaMaker's reg
+    framework, then re-asserts the saddle constraint as cleared.
+    **Isoflux is intentionally left in place** so the inverse solver
+    has constraint freedom to converge under perturbed profiles —
+    pure forward GS solves at fixed currents (``set_coil_currents`` +
+    ``set_isoflux(None)``) fail with "Matrix solve failed for
+    targets" on physical DIII-D meshes.
+
+    The default ``weight=1e2`` produces ~1% coil drift on typical
+    profile perturbations on DIII-D (max |drift| ~ 1.7 kA on
+    180 kA F-coils).  Raise the weight for tighter coil pinning at
+    the cost of larger boundary deviation; lower it for the inverse
+    trade-off.  Drift saturates above ``weight ≈ 1e4`` because
+    isoflux + Ip targets become the binding constraints.
+
+    Parameters
+    ----------
+    mygs : TokaMaker
+        TokaMaker GS solver, already set up and converged on the
+        baseline equilibrium (e.g. via ``reconstruct_equilibrium``).
+    ref_coil_currents : dict
+        Mapping ``{coil_name: current_A}`` from
+        ``mygs.get_coil_currents()`` on the baseline solve.
+    weight : float
+        Regularisation weight per coil reg term.  Default ``1e2``.
+    vsc_weight : float
+        Regularisation weight on the virtual stability circuit
+        (``#VSC``) term.  Default ``1.0``.
+
+    Notes
+    -----
+    Call once after the baseline reconstruction; no per-iteration
+    re-pinning is needed because the reg is part of the inverse
+    solve at every step.  After installing the lock, run one more
+    ``mygs.solve()`` to obtain the lock-mode baseline state — this
+    is the reference state for downstream perturbation deviation
+    measurements.
+    """
+    mygs.set_saddles(None)
+    rt = []
+    for name, target in ref_coil_currents.items():
+        rt.append(mygs.coil_reg_term({name: 1.0}, target=target,
+                                       weight=weight))
+    rt.append(mygs.coil_reg_term({'#VSC': 1.0}, target=0.0,
+                                   weight=vsc_weight))
+    mygs.set_coil_reg(reg_terms=rt)
+
+
+def psi_boundary_deviation(mygs, ref_R, ref_Z):
+    r"""Spatial deviation of the current LCFS from reference points.
+
+    For each reference boundary point :math:`(R, Z)`, evaluates
+    :math:`\psi` at that location and converts the offset from
+    :math:`\psi_{\rm LCFS}` into a spatial distance via the local
+    poloidal field magnitude :math:`|\nabla\psi| = R\,|B_p|`:
+
+    .. math::
+
+       \delta r \;\approx\; \frac{|\psi(R,Z) - \psi_{\rm LCFS}|}
+                                 {R\,|B_p(R,Z)|}.
+
+    This avoids brittle contour extraction of the perturbed LCFS and
+    reuses TokaMaker's field evaluators directly.
+
+    Parameters
+    ----------
+    mygs : TokaMaker
+        TokaMaker solver in its post-``solve`` state.
+    ref_R, ref_Z : ndarray
+        1-D reference boundary point coordinates [m].  Typically the
+        TokaMaker baseline LCFS extracted right after
+        ``reconstruct_equilibrium``.
+
+    Returns
+    -------
+    rms_m : float
+        RMS deviation across all reference points [m].
+    max_m : float
+        Maximum deviation across all reference points [m].
+    devs_m : ndarray
+        Per-point deviation [m], aligned with ``ref_R`` / ``ref_Z``.
+    """
+    psi_eval = mygs.get_field_eval('psi')
+    B_eval = mygs.get_field_eval('B')
+    psi_lcfs = float(mygs.psi_bounds[0])
+    psi_axis = float(mygs.psi_bounds[1])
+    dpsi_total = abs(psi_lcfs - psi_axis)
+
+    devs = np.empty(len(ref_R), dtype=np.float64)
+    for k, (R, Z) in enumerate(zip(ref_R, ref_Z)):
+        pt = np.array([R, Z], dtype=np.float64)
+        psi_val = psi_eval.eval(pt)[0]
+        B_vec = B_eval.eval(pt)        # [BR, Bt, BZ]
+        BR, BZ = B_vec[0], B_vec[2]
+        Bpol = np.sqrt(BR * BR + BZ * BZ)
+        grad_psi = R * Bpol            # |grad psi|
+        dpsi = abs(psi_val - psi_lcfs)
+        if grad_psi > 1e-6:
+            devs[k] = dpsi / grad_psi
+        else:
+            # Fallback: dimensionless dpsi/dpsi_total (rare, near
+            # nulls).  Caller can detect via huge values relative to
+            # machine size.
+            devs[k] = dpsi / dpsi_total if dpsi_total > 0 else 0.0
+
+    rms_m = float(np.sqrt(np.mean(devs * devs)))
+    max_m = float(np.max(devs))
+    return rms_m, max_m, devs
+
+
+def xpoint_deviation(mygs, ref_xpts, max_pair_dist_m=0.1):
+    r"""Per-X-point deviation between current and reference equilibria.
+
+    Pairs each baseline X-point to the nearest perturbed X-point via
+    Euclidean distance and returns per-pair displacement.  Pairs
+    farther than ``max_pair_dist_m`` are treated as "lost" (NaN
+    deviation) — this catches transient solves where an X-point
+    disappears or splits.
+
+    Parameters
+    ----------
+    mygs : TokaMaker
+        TokaMaker solver in its post-``solve`` state.
+    ref_xpts : ndarray, shape (n_ref, 2)
+        Baseline X-point coordinates ``[(R, Z), ...]`` from
+        ``mygs.get_xpoints()[0].copy()`` taken on the baseline solve.
+    max_pair_dist_m : float
+        Maximum allowed pairing distance [m].  Above this, the
+        baseline X-point is reported as unmatched (NaN deviation).
+
+    Returns
+    -------
+    rms_m : float
+        RMS deviation across paired X-points [m].  NaN if every
+        baseline X-point is unmatched.
+    max_m : float
+        Max deviation across paired X-points [m].  NaN if all
+        unmatched.
+    devs_m : ndarray, shape (n_ref,)
+        Per-baseline-X-point deviation [m].  NaN entries indicate
+        unmatched baseline X-points.
+    paired_RZ : ndarray, shape (n_ref, 2)
+        Coordinates of the paired perturbed X-point for each baseline
+        X-point.  NaN rows for unmatched baselines.
+    """
+    ref_xpts = np.asarray(ref_xpts, dtype=np.float64)
+    n_ref = ref_xpts.shape[0]
+    devs_m = np.full(n_ref, np.nan, dtype=np.float64)
+    paired_RZ = np.full((n_ref, 2), np.nan, dtype=np.float64)
+
+    if n_ref == 0:
+        return float('nan'), float('nan'), devs_m, paired_RZ
+
+    pert_xpts, _ = mygs.get_xpoints()
+    if pert_xpts is None or len(pert_xpts) == 0:
+        return float('nan'), float('nan'), devs_m, paired_RZ
+
+    pert_xpts = np.asarray(pert_xpts, dtype=np.float64)
+
+    # Pair each baseline X-point to its nearest perturbed counterpart.
+    # n_ref is small (typically 1–2 for diverted DIII-D), so an O(n*m)
+    # loop is fine and avoids a SciPy KDTree dependency just for this.
+    for i in range(n_ref):
+        d2 = np.sum((pert_xpts - ref_xpts[i]) ** 2, axis=1)
+        j = int(np.argmin(d2))
+        d = float(np.sqrt(d2[j]))
+        if d <= max_pair_dist_m:
+            devs_m[i] = d
+            paired_RZ[i] = pert_xpts[j]
+
+    finite = devs_m[np.isfinite(devs_m)]
+    if finite.size == 0:
+        rms_m = float('nan')
+        max_m = float('nan')
+    else:
+        rms_m = float(np.sqrt(np.mean(finite * finite)))
+        max_m = float(np.max(finite))
+    return rms_m, max_m, devs_m, paired_RZ
+
+
+# ====================================================================
 #  Core perturbation routine
 # ====================================================================
 def perturb_kinetic_equilibrium(
@@ -592,6 +801,10 @@ def perturb_kinetic_equilibrium(
     max_li_iter=_MAX_LI_ITER,
     psi_N_kinetic=None,
     max_proxy_draws=500,
+    ref_lcfs_R=None,
+    ref_lcfs_Z=None,
+    ref_x_points=None,
+    ref_coil_currents=None,
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
     match :math:`I_p` and :math:`l_i` targets.
@@ -676,6 +889,23 @@ def perturb_kinetic_equilibrium(
         pressure matching and equilibrium solving.  Returned
         perturbed profiles are on ``psi_N_kinetic``.  If ``None``,
         ``psi_N`` is used for everything (original behaviour).
+    ref_lcfs_R, ref_lcfs_Z : ndarray or None
+        Reference LCFS coordinates [m] from the reconstructed-baseline
+        TokaMaker solve.  When supplied (i.e. ``generate_bouquet`` was
+        called with ``lock_coils=True``), boundary deviation is
+        evaluated at these points after the perturbed solve and added
+        to ``diagnostics`` (``boundary_rms_mm``, ``boundary_max_mm``,
+        ``boundary_devs_mm``).
+    ref_x_points : ndarray or None, shape (n_ref, 2)
+        Baseline X-point coordinates ``[(R, Z), ...]`` from
+        ``mygs.get_xpoints()[0]`` on the baseline solve.  When
+        supplied, X-point deviation is computed and added to
+        ``diagnostics`` (``x_point_rms_mm``, ``x_point_max_mm``,
+        ``x_point_devs_mm``, ``x_points_RZ``).
+    ref_coil_currents : dict or None
+        ``{name: current_A}`` from the baseline solve.  When supplied,
+        post-solve coil drift is recorded in
+        ``diagnostics['coil_drift_A']`` so the lock can be verified.
 
     Returns
     -------
@@ -803,10 +1033,26 @@ def perturb_kinetic_equilibrium(
     iteration_l_is = []
     iteration_Ips = []
 
+    # ----------------------------------------------------------------
+    #  4b.  Bootstrap recompute on perturbed kinetics
+    # ----------------------------------------------------------------
+    # Architectural choice: ``solve_with_bootstrap`` is used **only** as
+    # a bootstrap calculator.  Its ``j_inductive`` and ``total_j_phi``
+    # outputs are *discarded* because SWB only amplitude-scales whatever
+    # ``inductive_jphi`` seed it receives — it does not reshape it, so
+    # those outputs inherit the seed's shape rather than producing a
+    # physically reconstructed inductive.
+    #
+    # The inductive shape we use downstream is ``input_jinductive`` (=
+    # ``result['j_inductive_fit']`` from ``reconstruct_equilibrium``).
+    # That profile was *spline-fit* by ``fit_inductive_profile`` to
+    # ``eqdsk_jtor − j_BS`` and is the right shape for the converged
+    # equilibrium — we just GPR-perturb it for σ > 0.
+    #
+    # This makes σ → 0 collapse cleanly to reconstruct's converged
+    # state rather than to whatever shape SWB happens to amplitude-
+    # scale a seed into.
     if recalculate_j_BS:
-        # Always suppress solve_with_bootstrap's internal j_phi iteration
-        # plots; the useful diagnostic is the "jphi-linterp | l_i iter"
-        # figure produced later in the l_i loop.
         results = solve_with_bootstrap(
             mygs,
             ne_eq, te_eq, ni_eq, ti_eq,
@@ -818,20 +1064,33 @@ def perturb_kinetic_equilibrium(
         )
         eq_stats = mygs.get_stats(lcfs_pad=psi_pad)
 
-        new_jphi = results["total_j_phi"]
+        # Bootstrap pieces — kept.
         full_j_BS = results["j_BS"]
         spike_profile = results["isolated_j_BS"]
-        baseline_li_proxy = calc_cylindrical_li_proxy(mygs, new_jphi, psi_pad)
+
+        # Reconstructed total at recon's inductive shape + this run's
+        # bootstrap.  This is the "baseline j_phi" from which we'll
+        # GPR-perturb in the l_i loop.
+        baseline_jphi = input_jinductive + spike_profile
+        baseline_li_proxy = calc_cylindrical_li_proxy(
+            mygs, baseline_jphi, psi_pad)
 
         j0_scales.append(results["scale_j0"])
         Ip_scales.append(results["scale_Ip"])
         iteration_l_is.append(eq_stats["l_i"])
         iteration_Ips.append(eq_stats["Ip"])
     else:
-        # When bootstrap is not recalculated there is no edge spike
-        full_j_BS = np.zeros_like(psi_N)
-        spike_profile = np.zeros_like(psi_N)
-        baseline_li_proxy = calc_cylindrical_li_proxy(mygs, input_j_phi, psi_pad)
+        # When bootstrap is not recalculated, freeze it at the recon-
+        # supplied value: ``spike_profile = input_j_phi - input_jinductive``.
+        # Since the user passes ``input_j_phi = result['j_phi_fit']``
+        # and ``input_jinductive = result['j_inductive_fit']``, this
+        # difference equals ``result['j_BS_used']`` exactly — recon's
+        # converged bootstrap, used verbatim.  No SWB-state drift.
+        spike_profile = input_j_phi - input_jinductive
+        full_j_BS = spike_profile.copy()
+        baseline_jphi = input_j_phi.copy()
+        baseline_li_proxy = calc_cylindrical_li_proxy(
+            mygs, input_j_phi, psi_pad)
 
     # ----------------------------------------------------------------
     #  5.  l_i matching loop
@@ -839,9 +1098,10 @@ def perturb_kinetic_equilibrium(
     l_i = np.inf
     final_scale_j0 = 1.0
     final_scale_Ip = 1.0
-    matched_j_inductive = (
-        results["j_inductive"] if recalculate_j_BS else input_j_phi.copy()
-    )
+    # Inductive seed = recon's spline-fit (not SWB's amplitude-scaled
+    # output).  GPR-perturbed below.
+    matched_j_inductive = (input_jinductive.copy()
+                           if recalculate_j_BS else input_j_phi.copy())
 
     # The proxy target starts at the baseline proxy value but is
     # adaptively corrected after each TokaMaker solve to account for
@@ -858,9 +1118,19 @@ def perturb_kinetic_equilibrium(
         t_phase = time.perf_counter()
 
         # ---- 5a. Draw j_phi perturbation matching l_i proxy --------
-        step_j_phi = (
-            results["j_inductive"] if recalculate_j_BS else input_j_phi
-        )
+        # GPR seed is recon's spline-fit inductive (NOT SWB's amplitude-
+        # scaled output, NOT input_j_phi which already includes the
+        # bootstrap).  The bootstrap (perturbed via SWB or frozen from
+        # recon) is added back as ``spike_profile`` after the GPR draw.
+        # Always use input_jinductive when provided so we don't double-
+        # add the bootstrap.
+        if input_jinductive is not None:
+            step_j_phi = input_jinductive
+        else:
+            # Legacy fallback: user didn't supply an inductive
+            # decomposition, so treat input_j_phi as a single profile
+            # and zero the spike (matches old behaviour).
+            step_j_phi = input_j_phi
         j_phi_0 = step_j_phi[0]
 
         # Pre-compute geometry once for the inner proxy loop (the
@@ -890,15 +1160,22 @@ def perturb_kinetic_equilibrium(
             if np.any(jphi_perturb < 0.0):
                 continue
 
-            result_root = root_scalar(
-                Ip_flux_integral_vs_target,
-                args=(mygs, jphi_perturb, spike_profile, psi_N, Ip_target),
-                bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
-                method="brentq",
-                rtol=1e-6,
-            )
-            a_optimal = result_root.root
-            matched_jphi_perturb = a_optimal * jphi_perturb + spike_profile
+            # Architectural change: no a_optimal scaling.  Previously
+            # ``a_optimal`` was solved via ``Ip_flux_integral_vs_target``
+            # to make ``∫(a × jphi_perturb + spike) = Ip_target`` exactly.
+            # That used the *current* mygs state's volume metric, which
+            # drifts during the perturb pipeline and produces a_optimal
+            # values that cause large profile-magnitude shifts (down to
+            # 0.6× of recon's profile in σ → 0 testing) — the dominant
+            # source of the perturbed-vs-recon equilibrium offset.
+            #
+            # The minimal-resolve test (set profile + Ip target + solve)
+            # reproduces recon's equilibrium to <0.5% l_i without this
+            # scaling.  We therefore use the GPR-drawn inductive plus
+            # the spike directly; the inverse solver naturally settles
+            # near the right Ip when given recon's profile shape.
+            a_optimal = 1.0
+            matched_jphi_perturb = jphi_perturb + spike_profile
 
             # Fast proxy: uses cached geometry, no TokaMaker calls
             tmp_li_proxy = calc_cylindrical_li_proxy_fast(
@@ -924,38 +1201,29 @@ def perturb_kinetic_equilibrium(
             "x": psi_N,
         }
 
-        matched_j_inductive = a_optimal * jphi_perturb
+        matched_j_inductive = jphi_perturb        # no a_optimal scaling
 
-        # ---- 5c. Find optimal scale factors -------------------------
-        t_scale = time.perf_counter()
-        final_scale_j0, final_jphi = find_optimal_scale(
-            mygs, psi_N, pres_tmp, ffp_prof, pp_prof,
-            matched_j_inductive, Ip_target, psi_pad,
-            spike_prof=spike_profile, find_j0=True,
-            diagnostic_plots=False, verbose=False,
-        )
+        # ---- 5c. Skip ``find_optimal_scale`` entirely --------------
+        # Both ``scale_j0`` (profile shape scaling) and ``scale_Ip``
+        # (Ip target scaling) introduced shifts away from the
+        # reconstruction baseline.  The minimal-resolve sanity check
+        # (set recon's exact profile + Ip target + solve) reproduces
+        # recon to <0.5% l_i, so neither compensation is needed.
+        # The inverse solver's natural Ip undershoot (~0.7%) is small
+        # and physically acceptable.
+        final_scale_j0 = 1.0
+        final_scale_Ip = 1.0
 
-        # Preliminary q_0 check: the j_phi scale solve has already
-        # converged, so we can reject before the more expensive Ip
-        # scale solve.  A definitive check follows after Ip scaling.
+        # Quick q_0 check before the corrective iter
         if constrain_sawteeth:
+            mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
+            mygs.set_profiles(pp_prof=pp_prof, ffp_prof=ffp_prof)
+            mygs.solve()
             _, q_pre, _, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
             if q_pre[0] < 1.0:
-                dt_scale = time.perf_counter() - t_scale
-                print(f"  [li_iter={li_iter}] find_optimal_scale: {dt_scale:.1f}s")
                 print("Skipping this equilibrium, q_0 < 1.0 (pre-check)")
                 l_i = np.inf
                 continue
-
-        final_scale_Ip, _ = find_optimal_scale(
-            mygs, psi_N, pres_tmp, ffp_prof, pp_prof,
-            matched_j_inductive, Ip_target, psi_pad,
-            spike_prof=spike_profile, find_j0=False,
-            scale_j0=final_scale_j0, tolerance=0.001,
-            diagnostic_plots=False, verbose=False,
-        )
-        dt_scale = time.perf_counter() - t_scale
-        print(f"  [li_iter={li_iter}] find_optimal_scale: {dt_scale:.1f}s")
 
         # ---- 5d. Definitive sawtooth constraint (after Ip scaling) --
         if constrain_sawteeth:
@@ -1077,6 +1345,42 @@ def perturb_kinetic_equilibrium(
         "j_BS_edge": spike_profile,
     }
 
+    # ----------------------------------------------------------------
+    #  6b.  Lock-coil diagnostics (boundary + X-point deviation)
+    # ----------------------------------------------------------------
+    # Populated only when lock-coil reference data is supplied (i.e.
+    # generate_bouquet was called with lock_coils=True).  In that mode
+    # mygs has just completed a forward solve at fixed coil currents,
+    # so the live psi/B fields and X-point list reflect the perturbed
+    # equilibrium and we can measure displacement from the baseline.
+    if ref_lcfs_R is not None and ref_lcfs_Z is not None:
+        bnd_rms_m, bnd_max_m, bnd_devs_m = psi_boundary_deviation(
+            mygs, ref_lcfs_R, ref_lcfs_Z
+        )
+        diagnostics["boundary_rms_mm"] = bnd_rms_m * 1e3
+        diagnostics["boundary_max_mm"] = bnd_max_m * 1e3
+        diagnostics["boundary_devs_mm"] = bnd_devs_m * 1e3
+
+    if ref_x_points is not None and len(ref_x_points) > 0:
+        xpt_rms_m, xpt_max_m, xpt_devs_m, paired_RZ = xpoint_deviation(
+            mygs, ref_x_points
+        )
+        diagnostics["x_point_rms_mm"] = xpt_rms_m * 1e3 \
+            if np.isfinite(xpt_rms_m) else float('nan')
+        diagnostics["x_point_max_mm"] = xpt_max_m * 1e3 \
+            if np.isfinite(xpt_max_m) else float('nan')
+        diagnostics["x_point_devs_mm"] = xpt_devs_m * 1e3
+        diagnostics["x_points_RZ"] = paired_RZ
+
+    # Surface coil drift so testing can verify the pin held.
+    if ref_coil_currents is not None:
+        cur, _ = mygs.get_coil_currents()
+        diagnostics["coil_drift_A"] = {
+            n: float(cur[n] - ref_coil_currents[n])
+            for n in ref_coil_currents
+            if n in cur
+        }
+
     return (
         ne_perturb,
         te_perturb,
@@ -1128,6 +1432,8 @@ def generate_bouquet(
     baseline_pfile_bytes=None,
     psi_N_kinetic=None,
     max_proxy_draws=500,
+    lock_coils=False,
+    lock_coils_weight=1.0e2,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -1204,6 +1510,21 @@ def generate_bouquet(
         Raw p-file content to store alongside each equilibrium.
     Zeff_profile : array-like or None
         1-D effective charge profile to store in HDF5.
+    lock_coils : bool
+        When ``True``, install a strong coil regularisation that pins
+        each perturbed-equilibrium coil current near the
+        reconstruction-baseline value.  Isoflux is retained so the
+        inverse solver has constraint freedom; the saddle constraint
+        is cleared.  Boundary and X-point deviations from the *post-
+        lock* baseline are recorded as diagnostics and HDF5 fields —
+        useful for filtering perturbations that move the boundary far
+        from the reconstruction.  Default ``False`` preserves the
+        legacy workflow with no coil pinning.
+    lock_coils_weight : float
+        Regularisation weight per coil reg term when
+        ``lock_coils=True``.  Default ``1e2`` (~1% drift on typical
+        perturbations on DIII-D).  Drift saturates above ``1e4``
+        because isoflux + Ip become the binding constraints.
 
     Returns
     -------
@@ -1225,14 +1546,19 @@ def generate_bouquet(
         pressure = EC * (ne * te + ni * ti)
     npsi = len(psi_N)
 
-    # --- Auto-override constrain_sawteeth for sawtoothing baselines ---
-    # If the baseline equilibrium already has q_0 < 1, constraining
-    # perturbed equilibria to q_0 >= 1 is incompatible and will cause
-    # every candidate to be rejected.  Detect this and override.
-    # Re-solve with the baseline profiles first so the check reflects
-    # the reconstruction state (not a corrective-iteration state that
-    # may have altered q_0).
-    if constrain_sawteeth:
+    # --- Baseline solve (sawtooth detection + lock-coil ref capture) ---
+    # Always run a fresh baseline solve when sawtooth detection is on
+    # OR when lock_coils is on:
+    #   - sawtooth: q_0 must reflect the baseline state (not a
+    #     corrective-iteration state that may have altered q_0).
+    #   - lock_coils: we capture coil currents, the LCFS contour, and
+    #     X-points from this solve to use as the reference for
+    #     perturbed-equilibrium deviation measurements.
+    ref_coil_currents = None
+    ref_lcfs_R = None
+    ref_lcfs_Z = None
+    ref_x_points = None
+    if constrain_sawteeth or lock_coils:
         _pp_check = {"type": "linterp",
                       "y": np.gradient(pressure) / (np.gradient(psi_N)
                            * (mygs.psi_bounds[1] - mygs.psi_bounds[0])),
@@ -1243,17 +1569,77 @@ def generate_bouquet(
         mygs.set_targets(Ip=initial_Ip_target, pax=pressure[0])
         mygs.set_profiles(pp_prof=_pp_check, ffp_prof=_ffp_check)
         mygs.solve()
-        _, q_baseline_check, _, _, _, _ = mygs.get_q(
-            npsi=len(psi_N), psi_pad=psi_pad
-        )
-        if q_baseline_check[0] < 1.0:
-            print(
-                f"NOTE: Baseline equilibrium has q(0) = {q_baseline_check[0]:.4f} < 1.0 "
-                f"(sawtoothing plasma).\n"
-                f"      Overriding constrain_sawteeth = False so perturbed "
-                f"equilibria are not rejected."
+
+        if constrain_sawteeth:
+            _, q_baseline_check, _, _, _, _ = mygs.get_q(
+                npsi=len(psi_N), psi_pad=psi_pad
             )
-            constrain_sawteeth = False
+            if q_baseline_check[0] < 1.0:
+                print(
+                    f"NOTE: Baseline equilibrium has q(0) = {q_baseline_check[0]:.4f} < 1.0 "
+                    f"(sawtoothing plasma).\n"
+                    f"      Overriding constrain_sawteeth = False so perturbed "
+                    f"equilibria are not rejected."
+                )
+                constrain_sawteeth = False
+
+        if lock_coils:
+            # 1. Capture coil currents from the reconstruction
+            #    baseline (pre-lock state) — these are the targets
+            #    the lock will pin to.
+            _ref_dict, _ = mygs.get_coil_currents()
+            ref_coil_currents_initial = dict(_ref_dict)
+
+            # 2. Install the soft lock (strong reg targeting the
+            #    reconstruction-baseline coil values; isoflux retained
+            #    so the inverse solver has constraint freedom).
+            lock_coils_to_baseline(mygs, ref_coil_currents_initial,
+                                    weight=lock_coils_weight)
+
+            # 3. Re-solve under the lock to obtain the *lock-mode*
+            #    baseline.  The inverse solver finds a slightly
+            #    different equilibrium because the reg targets shifted
+            #    from zero (reconstruction) to ref_coils (lock).  This
+            #    new state is the true reference for perturbed-
+            #    equilibrium deviations.
+            mygs.set_targets(Ip=initial_Ip_target, pax=pressure[0])
+            mygs.set_profiles(pp_prof=_pp_check, ffp_prof=_ffp_check)
+            mygs.solve()
+
+            # 4. Capture lock-mode reference state.
+            _ref_dict_post, _ = mygs.get_coil_currents()
+            ref_coil_currents = dict(_ref_dict_post)
+            _lcfs_RZ = mygs.trace_surf(1.0 - _LOCK_REF_TRACE_PAD)
+            if _lcfs_RZ is None:
+                # Fall back to a slightly larger pad if the tight one
+                # fails (rare; happens when the surface is too close
+                # to the X-point cusp for the tracer).
+                _lcfs_RZ = mygs.trace_surf(1.0 - 1e-4)
+            if _lcfs_RZ is None or len(_lcfs_RZ) == 0:
+                raise RuntimeError(
+                    "lock_coils=True: failed to extract lock-mode "
+                    "baseline LCFS via mygs.trace_surf().")
+            ref_lcfs_R = _lcfs_RZ[:, 0].copy()
+            ref_lcfs_Z = _lcfs_RZ[:, 1].copy()
+
+            _xpts, _ = mygs.get_xpoints()
+            ref_x_points = (np.asarray(_xpts, dtype=np.float64).copy()
+                            if _xpts is not None else
+                            np.zeros((0, 2), dtype=np.float64))
+
+            # Coil drift induced by the lock install (interesting to
+            # see how far the reg targets pulled the inverse solution
+            # away from the original reconstruct-only converged state).
+            _max_install_drift = max(
+                abs(ref_coil_currents[n] - ref_coil_currents_initial[n])
+                for n in ref_coil_currents
+                if n in ref_coil_currents_initial)
+            print(f"[lock_coils] installed (weight={lock_coils_weight:.1e}); "
+                  f"post-lock baseline captured: "
+                  f"{len(ref_coil_currents)} coils, "
+                  f"{len(ref_lcfs_R)} LCFS pts, "
+                  f"{len(ref_x_points)} X-pts; "
+                  f"install drift max = {_max_install_drift:.1f} A")
 
     # Pre-compute jBS scale factors for the whole batch (if requested).
     # Uses a uniform distribution within the specified range so that
@@ -1317,6 +1703,11 @@ def generate_bouquet(
         eqdsk_bytes=baseline_eqdsk_bytes,
         pfile_bytes=stored_pfile_bytes,
         psi_N_kinetic=psi_N_kinetic,
+        coils_locked=lock_coils,
+        ref_coil_currents=ref_coil_currents,
+        ref_lcfs_R=ref_lcfs_R,
+        ref_lcfs_Z=ref_lcfs_Z,
+        ref_x_points=ref_x_points,
     )
 
     t_batch_start = time.perf_counter()
@@ -1347,6 +1738,11 @@ def generate_bouquet(
               f"(scale_jBS={scale_jBS:.4f}){eta_str}")
         print(f"{'='*60}")
         t_start = time.perf_counter()
+
+        # No per-iteration re-pin under strong-reg lock — the
+        # regularisation is part of every inverse solve and the
+        # reconstruct/perturb workflow only set_targets/set_profiles
+        # between solves, which doesn't disturb the reg.
 
         try:
             (
@@ -1384,6 +1780,10 @@ def generate_bouquet(
                 diagnostic_plots=diagnostic_plots,
                 psi_N_kinetic=psi_N_kinetic,
                 max_proxy_draws=max_proxy_draws,
+                ref_lcfs_R=ref_lcfs_R,
+                ref_lcfs_Z=ref_lcfs_Z,
+                ref_x_points=ref_x_points,
+                ref_coil_currents=ref_coil_currents,
             )
         except (RuntimeError, ValueError) as e:
             print(f"\n  STOPPED: {e}")
@@ -1540,6 +1940,14 @@ def generate_bouquet(
             Zeff=Zeff_profile,
             coil_currents=coil_current_dict,
             psi_N_kinetic=psi_N_kinetic,
+            boundary_devs_mm=diagnostics.get("boundary_devs_mm"),
+            boundary_rms_mm=diagnostics.get("boundary_rms_mm"),
+            boundary_max_mm=diagnostics.get("boundary_max_mm"),
+            x_point_devs_mm=diagnostics.get("x_point_devs_mm"),
+            x_point_rms_mm=diagnostics.get("x_point_rms_mm"),
+            x_point_max_mm=diagnostics.get("x_point_max_mm"),
+            x_points_RZ=diagnostics.get("x_points_RZ"),
+            coil_drift_A=diagnostics.get("coil_drift_A"),
         )
 
         # Clean up on-disk eqdsk after archiving
@@ -1560,10 +1968,12 @@ def generate_bouquet(
 # ====================================================================
 #  Single-equilibrium reconstruction from geqdsk + kinetic profiles
 # ====================================================================
-def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff, 
+def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                             isoflux_pts, weights, psi_pad,
                             guess_jinductive,n_k,psi_bridge,rescale_j_BS,
-                            shelf_psi_N,initialize_psi=True):
+                            shelf_psi_N,initialize_psi=True,
+                            isolate_edge_jBS=True,
+                            n_spline_pts=32):
     r"""Reconstruct a single Grad-Shafranov equilibrium from a geqdsk
     reference and kinetic profiles, matching the EFIT :math:`l_i(1)`.
 
@@ -1626,6 +2036,11 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         If ``True`` (default), call ``mygs.init_psi`` using LCFS
         geometry estimated from the geqdsk boundary.  Set to ``False``
         to skip initialisation (e.g. when reusing a prior solution).
+    isolate_edge_jBS : bool
+        If ``True`` (default), isolate the edge bootstrap spike from
+        the core bootstrap current via ``analyze_bootstrap_edge_spike``.
+        If ``False``, the full bootstrap current is used as the spike
+        profile (no core/edge separation).
 
     Returns
     -------
@@ -1653,7 +2068,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         mygs, ne, te, ni, ti, Zeff,
         abs(eqdsk.Ip), guess_jinductive,
         scale_jBS=1.0,
-        isolate_edge_jBS=True,
+        isolate_edge_jBS=isolate_edge_jBS,
         diagnostic_plots=False,
     )
 
@@ -1678,6 +2093,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         k=n_k, psi_bridge=psi_bridge,
         rescale_j_BS=rescale_j_BS,
         shelf_psi_N=shelf_psi_N,
+        n_spline_pts=n_spline_pts,
     )
 
     j_inductive_fit_raw = fit_result['j_inductive_fit']

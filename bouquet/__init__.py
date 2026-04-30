@@ -24,6 +24,9 @@ from .TokaMaker_interface import (
     perturb_kinetic_equilibrium,
     generate_bouquet,
     reconstruct_equilibrium,
+    lock_coils_to_baseline,
+    psi_boundary_deviation,
+    xpoint_deviation,
 )
 
 from .uncertainties import (

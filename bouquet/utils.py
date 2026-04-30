@@ -154,6 +154,14 @@ def store_equilibrium(
     Zeff=None,
     coil_currents=None,
     psi_N_kinetic=None,
+    boundary_devs_mm=None,
+    boundary_rms_mm=None,
+    boundary_max_mm=None,
+    x_point_devs_mm=None,
+    x_point_rms_mm=None,
+    x_point_max_mm=None,
+    x_points_RZ=None,
+    coil_drift_A=None,
 ):
     """
     Write one perturbed equilibrium into the HDF5 database.
@@ -187,6 +195,27 @@ def store_equilibrium(
         1-D effective charge profile (dimensionless).
     coil_currents : dict or None
         Coil currents {name: current_A} from TokaMaker.
+    boundary_devs_mm : array_like or None
+        Per-LCFS-point boundary deviation [mm] from the
+        reconstructed-baseline LCFS (lock-coil diagnostic).
+    boundary_rms_mm, boundary_max_mm : float or None
+        Scalar boundary deviation summaries [mm] (lock-coil
+        diagnostic).  Stored as group attributes.
+    x_point_devs_mm : array_like or None
+        Per-baseline-X-point deviation [mm].  ``NaN`` entries
+        indicate baseline X-points without a paired perturbed
+        counterpart within the matching radius.
+    x_point_rms_mm, x_point_max_mm : float or None
+        Scalar X-point deviation summaries [mm].  ``NaN`` if all
+        X-points were unmatched.  Stored as group attributes.
+    x_points_RZ : array_like or None, shape (n_ref, 2)
+        Coordinates of the perturbed X-points paired to each
+        baseline X-point [m].  ``NaN`` rows indicate unmatched
+        baseline X-points.
+    coil_drift_A : dict or None
+        ``{name: I_perturbed - I_baseline}`` [A] per coil.  Recorded
+        even with ``lock_coils=True`` so testing can verify the pin
+        held.
     """
     db_path = os.path.abspath(f"{header}.h5")
     if not os.path.isfile(db_path):
@@ -255,6 +284,40 @@ def store_equilibrium(
             values = np.array([coil_currents[n] for n in names], dtype=np.float64)
             grp.create_dataset("coil_currents [A]", data=values)
             grp.attrs["coil_names"] = json.dumps(names)
+
+        # ---- optional: lock-coil deviation diagnostics --------------------
+        if boundary_devs_mm is not None:
+            grp.create_dataset(
+                "boundary_devs [mm]",
+                data=np.asarray(boundary_devs_mm, dtype=np.float64),
+            )
+        if boundary_rms_mm is not None:
+            grp.attrs["boundary_rms_mm"] = float(boundary_rms_mm)
+        if boundary_max_mm is not None:
+            grp.attrs["boundary_max_mm"] = float(boundary_max_mm)
+
+        if x_point_devs_mm is not None:
+            grp.create_dataset(
+                "x_point_devs [mm]",
+                data=np.asarray(x_point_devs_mm, dtype=np.float64),
+            )
+        if x_point_rms_mm is not None:
+            grp.attrs["x_point_rms_mm"] = float(x_point_rms_mm)
+        if x_point_max_mm is not None:
+            grp.attrs["x_point_max_mm"] = float(x_point_max_mm)
+        if x_points_RZ is not None:
+            grp.create_dataset(
+                "x_points_RZ [m]",
+                data=np.asarray(x_points_RZ, dtype=np.float64),
+            )
+
+        if coil_drift_A is not None and len(coil_drift_A) > 0:
+            import json
+            drift_names = list(coil_drift_A.keys())
+            drift_vals = np.array([coil_drift_A[n] for n in drift_names],
+                                   dtype=np.float64)
+            grp.create_dataset("coil_drift [A]", data=drift_vals)
+            grp.attrs["coil_drift_names"] = json.dumps(drift_names)
 
 
 def load_equilibrium(header, count, scan_val=None, eqdsk_out_dir=None):
@@ -334,6 +397,20 @@ def load_equilibrium(header, count, scan_val=None, eqdsk_out_dir=None):
             names = json.loads(grp.attrs.get("coil_names", "[]"))
             result["coil_currents"] = dict(zip(names, values))
 
+        # ---- optional: lock-coil deviation diagnostics --------------------
+        for key in ("boundary_devs [mm]", "x_point_devs [mm]",
+                    "x_points_RZ [m]", "coil_drift [A]"):
+            if key in grp:
+                result[key] = np.array(grp[key])
+        for attr_key in ("boundary_rms_mm", "boundary_max_mm",
+                         "x_point_rms_mm", "x_point_max_mm"):
+            if attr_key in grp.attrs:
+                result[attr_key] = float(grp.attrs[attr_key])
+        if "coil_drift [A]" in grp and "coil_drift_names" in grp.attrs:
+            import json
+            names = json.loads(grp.attrs["coil_drift_names"])
+            result["coil_drift"] = dict(zip(names, result["coil_drift [A]"]))
+
     return result
 
 
@@ -360,6 +437,11 @@ def store_baseline_profiles(
     eqdsk_bytes=None,
     pfile_bytes=None,
     psi_N_kinetic=None,
+    coils_locked=False,
+    ref_coil_currents=None,
+    ref_lcfs_R=None,
+    ref_lcfs_Z=None,
+    ref_x_points=None,
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -376,6 +458,19 @@ def store_baseline_profiles(
         from perturbed equilibria.
     pfile_bytes : bytes or None
         Raw baseline p-file content.
+    coils_locked : bool
+        Whether the run pinned coil currents to the reconstructed
+        baseline.  Written as a group attribute; ``True`` implies the
+        ``ref_*`` fields below are populated.
+    ref_coil_currents : dict or None
+        Reference (locked-target) coil currents ``{name: A}`` from the
+        TokaMaker baseline solve.
+    ref_lcfs_R, ref_lcfs_Z : ndarray or None
+        Reference LCFS coordinates [m] from the TokaMaker baseline
+        solve.  Used as the deviation-evaluation points for perturbed
+        equilibria.
+    ref_x_points : ndarray or None, shape (n_ref, 2)
+        Reference X-point coordinates [m] from the TokaMaker baseline.
 
     This data is written once per scan-point and is required by the
     plotting GUI to be fully self-contained.
@@ -417,6 +512,31 @@ def store_baseline_profiles(
             grp.create_dataset("baseline.eqdsk", data=np.void(eqdsk_bytes))
         if pfile_bytes is not None:
             grp.create_dataset("baseline.pfile", data=np.void(pfile_bytes))
+
+        # ---- optional: lock-coil reference state ---------------------------
+        grp.attrs["coils_locked"] = bool(coils_locked)
+        if ref_coil_currents is not None:
+            import json
+            names = list(ref_coil_currents.keys())
+            values = np.array([ref_coil_currents[n] for n in names],
+                              dtype=np.float64)
+            grp.create_dataset("ref_coil_currents [A]", data=values)
+            grp.attrs["ref_coil_names"] = json.dumps(names)
+        if ref_lcfs_R is not None:
+            grp.create_dataset(
+                "ref_lcfs_R [m]",
+                data=np.asarray(ref_lcfs_R, dtype=np.float64),
+            )
+        if ref_lcfs_Z is not None:
+            grp.create_dataset(
+                "ref_lcfs_Z [m]",
+                data=np.asarray(ref_lcfs_Z, dtype=np.float64),
+            )
+        if ref_x_points is not None:
+            grp.create_dataset(
+                "ref_x_points_RZ [m]",
+                data=np.asarray(ref_x_points, dtype=np.float64),
+            )
 
 
 # ====================================================================
@@ -511,6 +631,15 @@ def load_baseline_profiles(h5path, scan_value=None):
         for attr in grp.attrs:
             result[attr] = grp.attrs[attr]
 
+        # Convenience: rebuild the ref coil-current dict from its
+        # name/value side-tables (mirrors the per-equilibrium pattern).
+        if ("ref_coil_currents [A]" in grp
+                and "ref_coil_names" in grp.attrs):
+            import json
+            names = json.loads(grp.attrs["ref_coil_names"])
+            values = np.array(grp["ref_coil_currents [A]"])
+            result["ref_coil_currents"] = dict(zip(names, values))
+
     return result
 
 
@@ -555,6 +684,20 @@ def load_equilibrium_by_path(h5path, count, scan_value=None):
             values = np.array(grp["coil_currents [A]"])
             names = json.loads(grp.attrs.get("coil_names", "[]"))
             result["coil_currents"] = dict(zip(names, values))
+
+        # Lock-coil deviation diagnostics (PR1).
+        for key in ("boundary_devs [mm]", "x_point_devs [mm]",
+                    "x_points_RZ [m]", "coil_drift [A]"):
+            if key in grp:
+                result[key] = np.array(grp[key])
+        for attr_key in ("boundary_rms_mm", "boundary_max_mm",
+                         "x_point_rms_mm", "x_point_max_mm"):
+            if attr_key in grp.attrs:
+                result[attr_key] = float(grp.attrs[attr_key])
+        if "coil_drift [A]" in grp and "coil_drift_names" in grp.attrs:
+            import json
+            names = json.loads(grp.attrs["coil_drift_names"])
+            result["coil_drift"] = dict(zip(names, result["coil_drift [A]"]))
 
         result["l_i(1)"] = float(grp.attrs["l_i(1)"])
         result["l_i(3)"] = float(grp.attrs["l_i(3)"])
