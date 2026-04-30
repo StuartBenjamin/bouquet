@@ -805,9 +805,6 @@ def perturb_kinetic_equilibrium(
     ref_lcfs_Z=None,
     ref_x_points=None,
     ref_coil_currents=None,
-    match_Ip_target=True,
-    Ip_target_tol=0.001,
-    max_Ip_target_iter=4,
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
     match :math:`I_p` and :math:`l_i` targets.
@@ -909,19 +906,6 @@ def perturb_kinetic_equilibrium(
         ``{name: current_A}`` from the baseline solve.  When supplied,
         post-solve coil drift is recorded in
         ``diagnostics['coil_drift_A']`` so the lock can be verified.
-    match_Ip_target : bool
-        If ``True`` (default), iterate the *Ip target value* (not the
-        profile shape) at the end of the pipeline so the converged
-        actual Ip matches the requested ``Ip_target`` to within
-        ``Ip_target_tol``.  This is a modular patch around
-        TokaMaker's systematic ~1% Ip undershoot in the inverse
-        solver with locked coils.  Set to ``False`` (and the patch
-        block can be deleted) once the OFT fix lands.
-    Ip_target_tol : float
-        Relative tolerance for the Ip-target match (default 0.001 =
-        0.1%).
-    max_Ip_target_iter : int
-        Maximum secant iterations in the Ip-target patch (default 4).
 
     Returns
     -------
@@ -1317,74 +1301,6 @@ def perturb_kinetic_equilibrium(
         if _n_corr > 2:
             print(f"  [jphi correction] {_n_corr} iterations, "
                   f"edge RMS: {_corr_hist[0]/1e6:.4f} → {_corr_hist[-1]/1e6:.4f} MA/m²")
-
-        # ============================================================
-        # ---- 5e2. Ip-target secant search (modular patch) ----
-        # ============================================================
-        # Patch: TokaMaker's inverse solver with isoflux + locked coils
-        # systematically undershoots the requested Ip_target by ~1%
-        # because the inverse solver minimises a weighted sum of
-        # constraint residuals, not Ip exactly.  The corrective_jphi
-        # iteration above pins j_phi shape but does not touch Ip; this
-        # block iterates the *Ip target value* passed to set_targets
-        # until the converged actual Ip matches the requested
-        # ``Ip_target`` to within ``Ip_target_tol``.
-        #
-        # ``reconstruct_equilibrium`` already does this via [Ip match];
-        # this block is the analog for perturb_kinetic_equilibrium.
-        # Runtime cost: 2-4 extra GS solves per equilibrium.
-        #
-        # REMOVAL: when OFT lands a fix that hits Ip_target accurately
-        # in the inverse solve, set ``match_Ip_target=False`` (or
-        # delete this whole block 5e2).  The kwargs
-        # ``match_Ip_target`` / ``Ip_target_tol`` / ``max_Ip_target_iter``
-        # exist solely to gate this patch.
-        if match_Ip_target:
-            from OpenFUSIONToolkit.TokaMaker.util import get_jphi_from_GS
-            _Ip_iter_target = Ip_target * final_scale_Ip
-            _ip_history = []
-            for _ip_it in range(max_Ip_target_iter):
-                _Ip_actual = mygs.get_globals()[0]
-                _ip_err = (_Ip_actual - Ip_target) / Ip_target
-                _ip_history.append((_Ip_iter_target, _Ip_actual, _ip_err))
-                if abs(_ip_err) <= Ip_target_tol:
-                    break
-                # Proportional correction: scale the target by the
-                # observed undershoot ratio.  Converges geometrically
-                # because the inverse-solver Ip response is locally
-                # linear in Ip_target.
-                _Ip_iter_target = _Ip_iter_target * (Ip_target / _Ip_actual)
-                # Reapply target + corrected jphi and re-solve.  Use
-                # the corrective_iter's converged ffp_prof input as
-                # the starting point (matches output_jphi); pp_prof
-                # unchanged.
-                _ffp_iter = {"type": "jphi-linterp",
-                             "y": output_jphi.copy(), "x": psi_N}
-                mygs.set_targets(Ip=_Ip_iter_target, pax=pres_tmp[0])
-                mygs.set_profiles(pp_prof=pp_prof, ffp_prof=_ffp_iter)
-                try:
-                    mygs.solve()
-                except (ValueError, RuntimeError) as e:
-                    print(f"  [Ip target] iter {_ip_it+1} solve failed: {e}")
-                    break
-                # Refresh output_jphi for any later use
-                _, _f, _fp, _, _pp = mygs.get_profiles(npsi=npsi,
-                                                        psi_pad=psi_pad)
-                _, _, _ravgs, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
-                output_jphi = get_jphi_from_GS(_f * _fp, _pp,
-                                                _ravgs[0], _ravgs[1])
-            else:
-                # Loop exhausted without break.
-                _Ip_actual = mygs.get_globals()[0]
-                _ip_err = (_Ip_actual - Ip_target) / Ip_target
-                print(f"  [Ip target] did not converge after "
-                      f"{max_Ip_target_iter} iters, residual "
-                      f"err={100*_ip_err:.3f}%")
-            if len(_ip_history) > 1:
-                print(f"  [Ip target] {len(_ip_history)} iters: "
-                      f"target {_ip_history[0][0]:.0f}→{_Ip_iter_target:.0f}, "
-                      f"actual {_ip_history[0][1]:.0f}→{_Ip_actual:.0f}, "
-                      f"final err={100*_ip_err:+.3f}%")
 
         if diagnostic_plots:
             fig, ax = plt.subplots(figsize=(5, 4))
