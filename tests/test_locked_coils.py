@@ -357,6 +357,53 @@ class TestHDF5LockCoilRoundTrip:
         for name, val in ref_coils.items():
             assert bl["ref_coil_currents"][name] == pytest.approx(val)
 
+    def test_baseline_persists_filter_thresholds(self, tmp_db):
+        """coil_drift / boundary / xpoint thresholds round-trip as
+        baseline HDF5 attrs so plotters and post-hoc analysis can show
+        which filter caps were in effect for the run."""
+        header, db_path = tmp_db
+        psi_N, ones = self._profiles()
+        store_baseline_profiles(
+            header, psi_N,
+            ne=ones, te=ones, ni=ones, ti=ones,
+            pressure=ones, j_phi=ones,
+            sigma_ne=ones, sigma_te=ones,
+            sigma_ni=ones, sigma_ti=ones,
+            sigma_jphi=ones,
+            Ip_target=1e6, l_i_target=0.8,
+            coils_locked=True,
+            ref_coil_currents={'F1A': 1.0e3},
+            lock_coils_weight=1.0e2,
+            coil_drift_threshold_A=5000.0,
+            boundary_max_threshold_mm=10.0,
+            xpoint_max_threshold_mm=20.0,
+        )
+        bl = load_baseline_profiles(db_path)
+        assert bl['coil_drift_threshold_A'] == pytest.approx(5000.0)
+        assert bl['boundary_max_threshold_mm'] == pytest.approx(10.0)
+        assert bl['xpoint_max_threshold_mm'] == pytest.approx(20.0)
+
+    def test_baseline_default_no_filter_thresholds(self, tmp_db):
+        """When no thresholds are passed, the attrs are absent (legacy
+        layout untouched)."""
+        header, db_path = tmp_db
+        psi_N, ones = self._profiles()
+        store_baseline_profiles(
+            header, psi_N,
+            ne=ones, te=ones, ni=ones, ti=ones,
+            pressure=ones, j_phi=ones,
+            sigma_ne=ones, sigma_te=ones,
+            sigma_ni=ones, sigma_ti=ones,
+            sigma_jphi=ones,
+            Ip_target=1e6, l_i_target=0.8,
+            coils_locked=False,
+        )
+        bl = load_baseline_profiles(db_path)
+        for key in ('coil_drift_threshold_A',
+                    'boundary_max_threshold_mm',
+                    'xpoint_max_threshold_mm'):
+            assert key not in bl
+
     def test_baseline_default_no_lock_fields(self, tmp_db):
         header, db_path = tmp_db
         psi_N, ones = self._profiles()
@@ -440,3 +487,122 @@ class TestHDF5LockCoilRoundTrip:
                     "coil_drift [A]"):
             assert key not in result
         os.remove(eqdsk_path)
+
+
+# ====================================================================
+#  Smoke tests for new lock-coil plot helpers
+# ====================================================================
+#
+# These don't validate visual correctness — they only verify that the
+# plotting helpers can be called against a synthetic HDF5 fixture without
+# raising, so the import / data-loading wiring stays intact.  Visual
+# review is the user's job.
+class TestLockCoilPlotters:
+
+    @pytest.fixture()
+    def lock_db(self, tmp_path):
+        """Build a 3-equilibrium HDF5 with full lock-coil diagnostics."""
+        import matplotlib
+        matplotlib.use("Agg")
+        header = str(tmp_path / "plot_smoke")
+        initialize_equilibrium_database(header)
+        psi_N = np.linspace(0.0, 1.0, 33)
+        ones = np.ones_like(psi_N)
+        ref_coils = {'F1A': 1.0e3, 'F2A': -2.0e3, 'F9A': 3.0e3,
+                     'F9B': -3.0e3, 'ECOILA': 5.0e2}
+        ref_xpts = np.array([[1.5, -1.2], [1.5, 1.2]])
+        ref_lcfs_R = np.linspace(1.0, 2.4, 16)
+        ref_lcfs_Z = np.zeros(16)
+        store_baseline_profiles(
+            header, psi_N,
+            ne=ones, te=ones, ni=ones, ti=ones,
+            pressure=ones, j_phi=ones,
+            sigma_ne=ones, sigma_te=ones,
+            sigma_ni=ones, sigma_ti=ones,
+            sigma_jphi=ones,
+            Ip_target=1.0e6, l_i_target=0.9,
+            scan_val=0,
+            coils_locked=True,
+            ref_coil_currents=ref_coils,
+            ref_lcfs_R=ref_lcfs_R, ref_lcfs_Z=ref_lcfs_Z,
+            ref_x_points=ref_xpts,
+            lock_coils_weight=1.0e2,
+            coil_drift_threshold_A=5000.0,
+            boundary_max_threshold_mm=10.0,
+            xpoint_max_threshold_mm=20.0,
+        )
+        # Three perturbed equilibria with synthetic diagnostics
+        for c in range(3):
+            eqdsk_path = str(tmp_path / f"plot_smoke_count={c}.eqdsk")
+            with open(eqdsk_path, "wb") as f:
+                f.write(b"fake")
+            store_equilibrium(
+                header, count=c, eqdsk_filepath=eqdsk_path,
+                psi_N=psi_N, j_phi=ones, j_BS=ones, j_inductive=ones,
+                n_e=ones, T_e=ones, n_i=ones, T_i=ones, w_ExB=ones,
+                li1=0.9 + 0.01 * c, li3=0.92 + 0.01 * c,
+                scan_val=0,
+                boundary_devs_mm=np.array([0.5 * (c + 1), 0.7, 0.6, 1.1]),
+                boundary_rms_mm=float(0.7 * (c + 1)),
+                boundary_max_mm=float(1.1 * (c + 1)),
+                x_point_devs_mm=np.array([1.0 * (c + 1), 1.5 * (c + 1)]),
+                x_point_rms_mm=float(1.25 * (c + 1)),
+                x_point_max_mm=float(1.5 * (c + 1)),
+                x_points_RZ=np.array([[1.5, -1.21], [1.5, 1.19]]),
+                coil_drift_A={'F1A': 12.0 * (c + 1), 'F2A': -4.0 * (c + 1),
+                               'F9A': 200.0 * (c + 1),
+                               'F9B': -200.0 * (c + 1),
+                               'ECOILA': 5.0 * (c + 1)},
+            )
+            os.remove(eqdsk_path)
+        return header
+
+    def test_plot_boundary_deviations_runs(self, lock_db):
+        from bouquet import plot_boundary_deviations
+        fig, ax = plot_boundary_deviations(lock_db, scan_value=0)
+        assert fig is not None and ax is not None
+
+    def test_plot_xpoint_deviations_runs(self, lock_db):
+        from bouquet import plot_xpoint_deviations
+        fig, ax = plot_xpoint_deviations(lock_db, scan_value=0)
+        assert fig is not None and ax is not None
+
+    def test_plot_coil_drift_runs(self, lock_db):
+        from bouquet import plot_coil_drift
+        fig, axes = plot_coil_drift(lock_db, scan_value=0)
+        assert fig is not None and axes is not None
+
+    def test_plot_coil_drift_respects_explicit_order(self, lock_db):
+        from bouquet import plot_coil_drift
+        # Custom ordering: only ECOILA + F9A; everything else hidden.
+        fig, axes = plot_coil_drift(
+            lock_db, scan_value=0,
+            coil_order=['ECOILA', 'F9A'])
+        assert fig is not None
+        # Two coils + ± threshold lines = 3 legend entries
+        # (subtle; just verify a legend exists)
+        assert fig.legends
+        assert len(fig.legends[0].get_lines()) >= 2
+
+    def test_plot_xpoint_deviations_no_baseline_xpts_returns_none(
+            self, tmp_path):
+        """When baseline X-points are not stored (lock_coils=False),
+        the helper should bail out cleanly."""
+        from bouquet import plot_xpoint_deviations
+        header = str(tmp_path / "no_xpt")
+        initialize_equilibrium_database(header)
+        psi_N = np.linspace(0.0, 1.0, 33)
+        ones = np.ones_like(psi_N)
+        store_baseline_profiles(
+            header, psi_N,
+            ne=ones, te=ones, ni=ones, ti=ones,
+            pressure=ones, j_phi=ones,
+            sigma_ne=ones, sigma_te=ones,
+            sigma_ni=ones, sigma_ti=ones,
+            sigma_jphi=ones,
+            Ip_target=1e6, l_i_target=0.8,
+            scan_val=0,
+            coils_locked=False,
+        )
+        fig, ax = plot_xpoint_deviations(header, scan_value=0)
+        assert fig is None and ax is None

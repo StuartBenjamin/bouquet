@@ -47,6 +47,9 @@ from .plotting import (
     plot_kinetic_profiles,
     plot_jphi_profiles,
     plot_traces,
+    plot_boundary_deviations,
+    plot_xpoint_deviations,
+    plot_coil_drift,
 )
 
 from .io import (

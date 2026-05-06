@@ -1728,4 +1728,367 @@ def plot_traces(h5path_or_header, scan_value="all"):
     axes_bnd[1].grid(True, alpha=0.3)
     fig_bnd.tight_layout()
 
-    return [fig_li, fig_Ip, fig_bnd]
+    # ---- Figure 4: X-point deviation (only if any scan stored it) ----
+    # Uses the per-equilibrium ``x_point_max_mm`` attribute populated by
+    # ``generate_bouquet`` under ``lock_coils=True``.  When no scan stored
+    # X-point diagnostics, this figure is skipped.
+    fig_xpt = None
+    have_any_xpt = False
+    xpt_traces = {}
+    for sv in scan_vals:
+        with h5py.File(h5path, "r") as hf:
+            bkey = _scan_val_key(sv)
+            parent = hf[f"scan/{bkey}"] if bkey is not None else hf
+            stored_counts = sorted(
+                int(k) for k in parent.keys()
+                if k not in ("_baseline", "scan") and k.isdigit()
+            )
+            xpt_max_vals = []
+            for count in stored_counts:
+                grp = parent[str(count)]
+                v = float(grp.attrs.get("x_point_max_mm", np.nan))
+                xpt_max_vals.append(v)
+            if any(np.isfinite(v) for v in xpt_max_vals):
+                have_any_xpt = True
+            xpt_traces[sv] = (np.arange(len(stored_counts)),
+                               np.array(xpt_max_vals))
+
+    if have_any_xpt:
+        fig_xpt, ax_xpt = plt.subplots(1, 1, figsize=(8, 4))
+        for (sv, (xi, vals)), c in zip(xpt_traces.items(), colors):
+            lbl = f"scan={sv}" if len(scan_vals) > 1 else None
+            ax_xpt.plot(xi, vals, 's-', color=c, lw=1.5, ms=4, label=lbl)
+        ax_xpt.set_xlabel("Equilibrium index")
+        ax_xpt.set_ylabel("Max X-point dev [mm]")
+        ax_xpt.set_title("X-point deviation vs lock-mode baseline")
+        ax_xpt.grid(True, alpha=0.3)
+        if len(scan_vals) > 1:
+            ax_xpt.legend(fontsize=7)
+        fig_xpt.tight_layout()
+
+    out = [fig_li, fig_Ip, fig_bnd]
+    if fig_xpt is not None:
+        out.append(fig_xpt)
+    return out
+
+
+# =====================================================================
+#  Lock-coil diagnostic plots: boundary / X-point / per-coil drift
+# =====================================================================
+#
+# These three helpers visualise the per-equilibrium deviation diagnostics
+# that ``generate_bouquet`` stores under ``lock_coils=True``.  They are
+# the library equivalents of the inline diagnostic cells in the IDA
+# notebooks; promoting them here keeps a single source of truth.
+
+# DIII-D F-coil + E-coil ordering — used as the default ``coil_order``
+# when the caller doesn't pass one.  Other devices supply their own.
+_DEFAULT_DIIID_COIL_ORDER = (
+    'F1A', 'F2A', 'F3A', 'F4A', 'F5A', 'F6A', 'F7A', 'F8A', 'F9A',
+    'F1B', 'F2B', 'F3B', 'F4B', 'F5B', 'F6B', 'F7B', 'F8B', 'F9B',
+    'ECOILA', 'ECOILB',
+)
+_COIL_DRIFT_MARKERS = ('o', 's', 'D', '^', 'v', '<', '>', 'p', '*',
+                        'X', 'h', 'P')
+
+
+def _resolve_h5path(h5path_or_header):
+    if h5path_or_header.endswith(".h5"):
+        return os.path.abspath(h5path_or_header)
+    return os.path.abspath(f"{h5path_or_header}.h5")
+
+
+def _read_lock_diagnostics(h5path, scan_value=None):
+    """Read per-equilibrium lock-coil diagnostics.
+
+    Returns a dict with keys:
+        ``counts``, ``bnd_rms``, ``bnd_max``, ``xpt_max``,
+        ``xpt_devs`` (list of arrays, one per eq),
+        ``coil_drifts`` (list of dicts, one per eq),
+        ``ref_coil_currents`` (dict),
+        ``ref_x_points`` (ndarray or None),
+        ``coil_drift_threshold_A``, ``boundary_max_threshold_mm``,
+        ``xpoint_max_threshold_mm``, ``lock_coils_weight``.
+
+    Empty arrays / ``None`` are returned for fields not present in the
+    HDF5 (lets the caller skip optional plots cleanly).
+    """
+    import json as _json
+    from .utils import _scan_val_key
+    bkey = _scan_val_key(scan_value)
+    out = dict(counts=[], bnd_rms=[], bnd_max=[], xpt_max=[],
+               xpt_devs=[], coil_drifts=[],
+               ref_coil_currents={}, ref_x_points=None,
+               coil_drift_threshold_A=None,
+               boundary_max_threshold_mm=None,
+               xpoint_max_threshold_mm=None,
+               lock_coils_weight=None,
+               coils_locked=False)
+    with h5py.File(h5path, 'r') as hf:
+        parent = hf[f'scan/{bkey}'] if bkey is not None else hf
+        if '_baseline' in parent:
+            bl = parent['_baseline']
+            out['coils_locked'] = bool(bl.attrs.get('coils_locked', False))
+            for attr in ('coil_drift_threshold_A',
+                          'boundary_max_threshold_mm',
+                          'xpoint_max_threshold_mm',
+                          'lock_coils_weight'):
+                if attr in bl.attrs:
+                    out[attr] = float(bl.attrs[attr])
+            if ('ref_coil_currents [A]' in bl
+                    and 'ref_coil_names' in bl.attrs):
+                names = _json.loads(bl.attrs['ref_coil_names'])
+                vals = np.array(bl['ref_coil_currents [A]'])
+                out['ref_coil_currents'] = dict(zip(names, vals))
+            if 'ref_x_points_RZ [m]' in bl:
+                out['ref_x_points'] = np.array(bl['ref_x_points_RZ [m]'])
+        counts = sorted(int(k) for k in parent.keys() if k.isdigit())
+        out['counts'] = counts
+        for c in counts:
+            g = parent[str(c)]
+            out['bnd_rms'].append(float(g.attrs.get('boundary_rms_mm',
+                                                      np.nan)))
+            out['bnd_max'].append(float(g.attrs.get('boundary_max_mm',
+                                                      np.nan)))
+            out['xpt_max'].append(float(g.attrs.get('x_point_max_mm',
+                                                      np.nan)))
+            if 'x_point_devs [mm]' in g:
+                out['xpt_devs'].append(np.array(g['x_point_devs [mm]']))
+            else:
+                out['xpt_devs'].append(np.array([np.nan]))
+            if ('coil_drift [A]' in g
+                    and 'coil_drift_names' in g.attrs):
+                names = _json.loads(g.attrs['coil_drift_names'])
+                vals = np.array(g['coil_drift [A]'])
+                out['coil_drifts'].append(dict(zip(names, vals)))
+            else:
+                out['coil_drifts'].append({})
+    out['bnd_rms'] = np.array(out['bnd_rms'])
+    out['bnd_max'] = np.array(out['bnd_max'])
+    out['xpt_max'] = np.array(out['xpt_max'])
+    return out
+
+
+def plot_boundary_deviations(h5path_or_header, scan_value=None,
+                               threshold_mm=None):
+    r"""Bar plot of LCFS boundary deviation per perturbed equilibrium.
+
+    Plots both RMS deviation and max deviation for each equilibrium in a
+    grouped bar chart.  Reads ``boundary_rms_mm`` and ``boundary_max_mm``
+    attrs that ``generate_bouquet`` stores under ``lock_coils=True``.
+
+    Parameters
+    ----------
+    h5path_or_header : str
+        Path to ``.h5`` file or header string.
+    scan_value : str, float, int or None
+        Scan value to plot.
+    threshold_mm : float, optional
+        If provided, draw a horizontal reference line.  Defaults to the
+        ``boundary_max_threshold_mm`` HDF5 baseline attribute (i.e. the
+        filter cap used at run time), if present.
+
+    Returns
+    -------
+    fig, ax
+    """
+    h5path = _resolve_h5path(h5path_or_header)
+    diag = _read_lock_diagnostics(h5path, scan_value=scan_value)
+    n = len(diag['counts'])
+    if n == 0:
+        print("No equilibria with boundary diagnostics found.")
+        return None, None
+    if threshold_mm is None and diag['boundary_max_threshold_mm']:
+        threshold_mm = diag['boundary_max_threshold_mm']
+
+    fig, ax = plt.subplots(1, 1, figsize=(11, 4))
+    x = np.arange(n)
+    w = 0.4
+    ax.bar(x - w / 2, diag['bnd_rms'], w, label='RMS',
+           color='C0', edgecolor='k', alpha=0.85)
+    ax.bar(x + w / 2, diag['bnd_max'], w, label='Max',
+           color='C1', edgecolor='k', alpha=0.85)
+    if threshold_mm is not None and np.isfinite(threshold_mm):
+        ax.axhline(threshold_mm, ls='--', color='k', lw=1.2,
+                   label=f'threshold ({threshold_mm:.1f} mm)')
+    ax.set_xlabel("Perturbed equilibrium index")
+    ax.set_ylabel("Boundary deviation [mm]")
+    ax.set_title("LCFS deviation from lock-mode baseline")
+    ax.legend(loc='best', fontsize=9)
+    ax.grid(ls=':', alpha=0.4, axis='y')
+    fig.tight_layout()
+    return fig, ax
+
+
+def plot_xpoint_deviations(h5path_or_header, scan_value=None,
+                             threshold_mm=None):
+    r"""Bar plot of X-point displacement per perturbed equilibrium.
+
+    Each baseline X-point gets its own bar group.  Bars for unmatched
+    X-points (where the perturbed equilibrium failed to produce a
+    detectable X-point near the reference) are missing (NaN-skipped).
+
+    Parameters
+    ----------
+    h5path_or_header : str
+        Path to ``.h5`` file or header string.
+    scan_value : str, float, int or None
+        Scan value to plot.
+    threshold_mm : float, optional
+        If provided, draw a horizontal reference line.  Defaults to the
+        ``xpoint_max_threshold_mm`` HDF5 baseline attribute, if present.
+
+    Returns
+    -------
+    fig, ax  --  ``(None, None)`` if there are no stored baseline
+    X-points or no equilibria.
+    """
+    h5path = _resolve_h5path(h5path_or_header)
+    diag = _read_lock_diagnostics(h5path, scan_value=scan_value)
+    n = len(diag['counts'])
+    ref_xpts = diag['ref_x_points']
+    if n == 0:
+        print("No equilibria found.")
+        return None, None
+    if ref_xpts is None or len(ref_xpts) == 0:
+        print("No baseline X-points stored — skipping plot "
+              "(was the run done with lock_coils=True?).")
+        return None, None
+    if threshold_mm is None and diag['xpoint_max_threshold_mm']:
+        threshold_mm = diag['xpoint_max_threshold_mm']
+
+    n_xpts = ref_xpts.shape[0]
+    devs_matrix = np.full((n, n_xpts), np.nan)
+    for i, d in enumerate(diag['xpt_devs']):
+        devs_matrix[i, :len(d)] = d[:n_xpts]
+
+    fig, ax = plt.subplots(1, 1, figsize=(11, 4))
+    x = np.arange(n)
+    bar_w = 0.8 / max(n_xpts, 1)
+    for k in range(n_xpts):
+        ax.bar(x + (k - (n_xpts - 1) / 2) * bar_w,
+               devs_matrix[:, k], bar_w, edgecolor='k', alpha=0.85,
+               label=(f"X-pt {k}  "
+                      f"(R={ref_xpts[k, 0]:.2f}, "
+                      f"Z={ref_xpts[k, 1]:+.2f})"))
+    if threshold_mm is not None and np.isfinite(threshold_mm):
+        ax.axhline(threshold_mm, ls='--', color='k', lw=1.2,
+                   label=f'threshold ({threshold_mm:.1f} mm)')
+    ax.set_xlabel("Perturbed equilibrium index")
+    ax.set_ylabel("X-point displacement [mm]")
+    ax.set_title("X-point drift from lock-mode baseline")
+    ax.legend(loc='best', fontsize=8)
+    ax.grid(ls=':', alpha=0.4, axis='y')
+    fig.tight_layout()
+    return fig, ax
+
+
+def plot_coil_drift(h5path_or_header, scan_value=None,
+                      coil_order=None, threshold_A=None):
+    r"""Per-coil drift plot across the perturbed-equilibrium bouquet.
+
+    Two stacked panels: drift in absolute Amps (top) and percent
+    deviation from the locked-target baseline (bottom).  Each coil gets
+    a unique ``(rainbow color, marker)`` style, repeated across both
+    panels so individual coils can be tracked vertically by eye.
+
+    Parameters
+    ----------
+    h5path_or_header : str
+        Path to ``.h5`` file or header string.
+    scan_value : str, float, int, or None
+        Scan value to plot.
+    coil_order : sequence of str, optional
+        Coil names in display / color-assignment order.  Defaults to a
+        DIII-D-flavoured ordering when no coils are passed; coils not
+        present in the HDF5 are silently skipped.  Pass an explicit
+        list for non-DIII-D devices or to control colour grouping.
+    threshold_A : float, optional
+        If provided, draw a horizontal reference line at ±threshold on
+        the Amps panel.  Defaults to the ``coil_drift_threshold_A``
+        HDF5 baseline attribute (i.e. the filter cap used at run time).
+
+    Returns
+    -------
+    fig, (ax_A, ax_pct)  --  ``(None, None)`` when there is no coil-
+    drift data to plot.
+    """
+    from matplotlib.lines import Line2D
+    h5path = _resolve_h5path(h5path_or_header)
+    diag = _read_lock_diagnostics(h5path, scan_value=scan_value)
+    eq_records = list(zip(diag['counts'], diag['coil_drifts']))
+    eq_records = [(c, d) for c, d in eq_records if d]
+    if not eq_records:
+        print("No coil-drift records found.")
+        return None, None
+    if threshold_A is None and diag['coil_drift_threshold_A']:
+        threshold_A = diag['coil_drift_threshold_A']
+
+    # Resolve coil_order: prefer caller, else default DIII-D, then
+    # filter to coils actually present in at least one equilibrium.
+    seen_coils = set()
+    for _, d in eq_records:
+        seen_coils.update(d.keys())
+    if coil_order is None:
+        coil_order = [c for c in _DEFAULT_DIIID_COIL_ORDER if c in seen_coils]
+        # Append any seen coils not in the default ordering, sorted.
+        coil_order.extend(sorted(seen_coils - set(coil_order)))
+    else:
+        coil_order = [c for c in coil_order if c in seen_coils]
+    if not coil_order:
+        print("No coils to plot.")
+        return None, None
+
+    cmap = plt.get_cmap('gist_rainbow')
+    n_coils = len(coil_order)
+    coil_style = {
+        name: dict(color=cmap(i / max(n_coils - 1, 1)),
+                   marker=_COIL_DRIFT_MARKERS[i % len(_COIL_DRIFT_MARKERS)])
+        for i, name in enumerate(coil_order)
+    }
+    ref = diag['ref_coil_currents']
+    n_eq = len(eq_records)
+    x = np.arange(n_eq)
+
+    fig, (ax_A, ax_pct) = plt.subplots(2, 1, figsize=(13, 9), sharex=True)
+    legend_handles = []
+    for coil in coil_order:
+        st = coil_style[coil]
+        drifts_A = []
+        errs_pct = []
+        for _, dr in eq_records:
+            d = dr.get(coil, np.nan)
+            drifts_A.append(d)
+            ref_val = ref.get(coil, 0.0)
+            if abs(ref_val) > 1.0 and np.isfinite(d):
+                errs_pct.append(100.0 * d / ref_val)
+            else:
+                errs_pct.append(np.nan)
+        ax_A.plot(x, drifts_A, '-', color=st['color'],
+                   marker=st['marker'], markersize=5, alpha=0.75, lw=1.0)
+        ax_pct.plot(x, errs_pct, '-', color=st['color'],
+                     marker=st['marker'], markersize=5, alpha=0.75, lw=1.0)
+        legend_handles.append(
+            Line2D([0], [0], color=st['color'], marker=st['marker'],
+                   markersize=6, lw=1.5, label=coil))
+    for ax, ylabel in [(ax_A, 'Coil drift [A]'),
+                       (ax_pct, 'Coil drift [% of baseline]')]:
+        ax.axhline(0.0, color='k', lw=0.8)
+        ax.set_ylabel(ylabel)
+        ax.grid(ls=':', alpha=0.4, axis='y')
+    if threshold_A is not None and np.isfinite(threshold_A):
+        ax_A.axhline(+threshold_A, color='k', ls='--', lw=1.2)
+        ax_A.axhline(-threshold_A, color='k', ls='--', lw=1.2)
+        legend_handles.append(
+            Line2D([0], [0], color='k', ls='--', lw=1.2,
+                   label=f'± thr ({threshold_A:.0f} A)'))
+    fig.legend(handles=legend_handles, loc='center left',
+               bbox_to_anchor=(0.91, 0.5), fontsize=8, ncol=1,
+               frameon=True, title='Coil')
+    ax_pct.set_xlabel('Perturbed equilibrium index')
+    title = f'Per-coil drift and % deviation ({n_eq} equilibria)'
+    if diag['lock_coils_weight'] is not None:
+        title += f', lock weight={diag["lock_coils_weight"]:.0e}'
+    fig.suptitle(title)
+    fig.tight_layout(rect=[0, 0, 0.90, 1])
+    return fig, (ax_A, ax_pct)

@@ -99,6 +99,11 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
     npsi = len(psi_N)
     edge_mask = psi_N > 0.9
     j_phi_input = target_jphi.copy()
+    # Initialise j_phi_output so the function can return safely if the
+    # very first solve fails — without this, hitting ``break`` on the
+    # first iteration left j_phi_output unbound and the return raised
+    # a NameError that escaped to the bouquet runner.
+    j_phi_output = target_jphi.copy()
     edge_rms_history = []
 
     for it in range(max_iters):
@@ -579,7 +584,7 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
 #  PR2) used as accept/reject filters.
 # ====================================================================
 def lock_coils_to_baseline(mygs, ref_coil_currents, weight=1.0e2,
-                            vsc_weight=1.0):
+                            vsc_weight=1.0, per_coil_weight=None):
     r"""Soft-lock coils via strong regularisation toward reference values.
 
     Replaces the existing coil regularisation with terms that pin each
@@ -607,10 +612,21 @@ def lock_coils_to_baseline(mygs, ref_coil_currents, weight=1.0e2,
         Mapping ``{coil_name: current_A}`` from
         ``mygs.get_coil_currents()`` on the baseline solve.
     weight : float
-        Regularisation weight per coil reg term.  Default ``1e2``.
+        Default regularisation weight per coil reg term.  Default
+        ``1e2``.  Used for any coil not listed in
+        ``per_coil_weight``.
     vsc_weight : float
         Regularisation weight on the virtual stability circuit
-        (``#VSC``) term.  Default ``1.0``.
+        (``#VSC``) term.  Default ``1.0``.  Raise for tighter
+        vertical-stability coil control (e.g. on DIII-D, where
+        ``F9A``/``F9B`` form the VSC pair and would otherwise
+        absorb residual perturbation drift).
+    per_coil_weight : dict or None
+        Per-coil weight overrides as ``{coil_name: weight}``.  Coils
+        not in the dict get the default ``weight``.  Useful when
+        certain coils need tighter (or looser) control than others —
+        e.g. pinning DIII-D's vertical-stability coils via
+        ``per_coil_weight={'F9A': 1e4, 'F9B': 1e4}``.
 
     Notes
     -----
@@ -621,11 +637,14 @@ def lock_coils_to_baseline(mygs, ref_coil_currents, weight=1.0e2,
     is the reference state for downstream perturbation deviation
     measurements.
     """
+    if per_coil_weight is None:
+        per_coil_weight = {}
     mygs.set_saddles(None)
     rt = []
     for name, target in ref_coil_currents.items():
+        w = per_coil_weight.get(name, weight)
         rt.append(mygs.coil_reg_term({name: 1.0}, target=target,
-                                       weight=weight))
+                                       weight=w))
     rt.append(mygs.coil_reg_term({'#VSC': 1.0}, target=0.0,
                                    weight=vsc_weight))
     mygs.set_coil_reg(reg_terms=rt)
@@ -1479,6 +1498,11 @@ def generate_bouquet(
     max_proxy_draws=500,
     lock_coils=False,
     lock_coils_weight=1.0e2,
+    lock_coils_vsc_weight=1.0,
+    lock_coils_per_coil_weight=None,
+    coil_drift_threshold_A=None,
+    boundary_max_threshold_mm=None,
+    xpoint_max_threshold_mm=None,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -1566,10 +1590,51 @@ def generate_bouquet(
         from the reconstruction.  Default ``False`` preserves the
         legacy workflow with no coil pinning.
     lock_coils_weight : float
-        Regularisation weight per coil reg term when
+        Default regularisation weight per coil reg term when
         ``lock_coils=True``.  Default ``1e2`` (~1% drift on typical
         perturbations on DIII-D).  Drift saturates above ``1e4``
-        because isoflux + Ip become the binding constraints.
+        because isoflux + Ip become the binding constraints.  Used
+        for any coil not listed in ``lock_coils_per_coil_weight``.
+    lock_coils_vsc_weight : float
+        Regularisation weight on the virtual stability circuit
+        (``#VSC``) term.  Default ``1.0``.  On DIII-D the VSC pair
+        (F9A/F9B) tends to absorb residual drift because the
+        antisymmetric mode is the plasma's only vertical-position
+        DOF; raising this weight (e.g. ``1e2``) tightens vertical
+        control alongside the individual coil reg.
+    lock_coils_per_coil_weight : dict or None
+        Per-coil weight overrides as ``{coil_name: weight}``.  Coils
+        not in the dict get ``lock_coils_weight``.  Useful for
+        tightening specific coils (e.g.
+        ``{'F9A': 1e4, 'F9B': 1e4}`` to pin DIII-D's VSC pair while
+        keeping the rest at default).
+    coil_drift_threshold_A : float or None
+        If set (and ``lock_coils=True``), perturbed equilibria whose
+        max ``|coil_drift|`` exceeds this threshold (in Amps) are
+        discarded — not stored to HDF5.  This filters out
+        perturbations where the inverse solver had to drift coils
+        far enough that the lock is functionally broken.  Default
+        ``None`` (no filter).  Recommended starting value on DIII-D:
+        ~5000 A.
+    boundary_max_threshold_mm : float or None
+        If set (and ``lock_coils=True``), perturbed equilibria whose
+        max boundary deviation from the lock-mode baseline LCFS
+        exceeds this threshold (in millimetres) are discarded.  This
+        is the most physically-defensible realism filter: anything
+        moving the LCFS by more than the magnetics-diagnostic noise
+        floor would have been detected experimentally and is therefore
+        not a plausible alternative equilibrium.  Default ``None`` (no
+        filter).  Recommended starting value on DIII-D: ~10 mm
+        (roughly the magnetics-resolution boundary uncertainty for a
+        well-fit reconstruction).
+    xpoint_max_threshold_mm : float or None
+        If set (and ``lock_coils=True``), perturbed equilibria whose
+        max X-point displacement from any lock-mode-baseline X-point
+        exceeds this threshold (in millimetres) are discarded.  Useful
+        because X-point position is a localised feature easy to miss
+        with a boundary-only filter — sparse isoflux can let the
+        X-point cusp drift even when the upper LCFS stays close to
+        baseline.  Default ``None`` (no filter).
 
     Returns
     -------
@@ -1638,8 +1703,12 @@ def generate_bouquet(
             # 2. Install the soft lock (strong reg targeting the
             #    reconstruction-baseline coil values; isoflux retained
             #    so the inverse solver has constraint freedom).
-            lock_coils_to_baseline(mygs, ref_coil_currents_initial,
-                                    weight=lock_coils_weight)
+            lock_coils_to_baseline(
+                mygs, ref_coil_currents_initial,
+                weight=lock_coils_weight,
+                vsc_weight=lock_coils_vsc_weight,
+                per_coil_weight=lock_coils_per_coil_weight,
+            )
 
             # 3. Re-solve under the lock to obtain the *lock-mode*
             #    baseline.  The inverse solver finds a slightly
@@ -1753,6 +1822,10 @@ def generate_bouquet(
         ref_lcfs_R=ref_lcfs_R,
         ref_lcfs_Z=ref_lcfs_Z,
         ref_x_points=ref_x_points,
+        lock_coils_weight=(lock_coils_weight if lock_coils else None),
+        coil_drift_threshold_A=coil_drift_threshold_A,
+        boundary_max_threshold_mm=boundary_max_threshold_mm,
+        xpoint_max_threshold_mm=xpoint_max_threshold_mm,
     )
 
     t_batch_start = time.perf_counter()
@@ -1884,6 +1957,57 @@ def generate_bouquet(
 
         # Extract coil currents from TokaMaker
         coil_current_dict, _ = mygs.get_coil_currents()
+
+        # ---- Coil-drift filter ----------------------------------------
+        # If the user set a ``coil_drift_threshold_A`` and any coil's
+        # |drift| from the lock-mode baseline exceeds it, drop this
+        # equilibrium.  Filters perturbations where the inverse solver
+        # had to drift coils far enough that the lock is broken.
+        if coil_drift_threshold_A is not None and lock_coils \
+                and ref_coil_currents is not None:
+            _drifts = {n: float(coil_current_dict[n] - ref_coil_currents[n])
+                       for n in ref_coil_currents
+                       if n in coil_current_dict}
+            if _drifts:
+                _max_drift = max(abs(v) for v in _drifts.values())
+                if _max_drift > coil_drift_threshold_A:
+                    _worst = max(_drifts, key=lambda k: abs(_drifts[k]))
+                    print(f"  [coil_drift_filter] discarded: "
+                          f"max |drift| = {_max_drift:.0f} A on {_worst} "
+                          f"> threshold {coil_drift_threshold_A:.0f} A")
+                    if pbar is not None:
+                        pbar.update(1)
+                    continue
+
+        # ---- Boundary-deviation filter --------------------------------
+        # Discard perturbations whose LCFS moved farther from the lock-
+        # mode baseline than the magnetics-diagnostic noise floor — these
+        # would have been distinguishable in the experimental
+        # reconstruction and are therefore implausible alternatives.
+        if boundary_max_threshold_mm is not None and lock_coils:
+            _bnd_max = diagnostics.get("boundary_max_mm", float('nan'))
+            if np.isfinite(_bnd_max) and _bnd_max > boundary_max_threshold_mm:
+                print(f"  [boundary_filter] discarded: "
+                      f"max boundary dev = {_bnd_max:.1f} mm "
+                      f"> threshold {boundary_max_threshold_mm:.1f} mm")
+                if pbar is not None:
+                    pbar.update(1)
+                continue
+
+        # ---- X-point-deviation filter ---------------------------------
+        # Independent of the boundary filter because the X-point cusp is
+        # a localised feature; a perturbation can shift the X-point even
+        # when the rest of the LCFS stays well within the boundary
+        # tolerance (or vice versa).
+        if xpoint_max_threshold_mm is not None and lock_coils:
+            _xpt_max = diagnostics.get("x_point_max_mm", float('nan'))
+            if np.isfinite(_xpt_max) and _xpt_max > xpoint_max_threshold_mm:
+                print(f"  [xpoint_filter] discarded: "
+                      f"max X-point dev = {_xpt_max:.1f} mm "
+                      f"> threshold {xpoint_max_threshold_mm:.1f} mm")
+                if pbar is not None:
+                    pbar.update(1)
+                continue
 
         # ---- Build a perturbed p-file from the baseline p-file --------
         # Start from the baseline so that profiles we don't perturb

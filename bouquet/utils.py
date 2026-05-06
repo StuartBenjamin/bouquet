@@ -442,6 +442,10 @@ def store_baseline_profiles(
     ref_lcfs_R=None,
     ref_lcfs_Z=None,
     ref_x_points=None,
+    lock_coils_weight=None,
+    coil_drift_threshold_A=None,
+    boundary_max_threshold_mm=None,
+    xpoint_max_threshold_mm=None,
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -471,6 +475,19 @@ def store_baseline_profiles(
         equilibria.
     ref_x_points : ndarray or None, shape (n_ref, 2)
         Reference X-point coordinates [m] from the TokaMaker baseline.
+    lock_coils_weight : float or None
+        Reg weight used when ``lock_coils=True``; stored as an HDF5
+        attribute for reproducibility / plotting metadata.
+    coil_drift_threshold_A : float or None
+        Coil-drift filter threshold (Amps) used at ``generate_bouquet``
+        time.  Stored as an HDF5 attribute so plotters can show the
+        filter cap.
+    boundary_max_threshold_mm : float or None
+        Boundary-deviation filter threshold (millimetres) used at
+        ``generate_bouquet`` time.  Stored as an HDF5 attribute.
+    xpoint_max_threshold_mm : float or None
+        X-point deviation filter threshold (millimetres) used at
+        ``generate_bouquet`` time.  Stored as an HDF5 attribute.
 
     This data is written once per scan-point and is required by the
     plotting GUI to be fully self-contained.
@@ -515,6 +532,17 @@ def store_baseline_profiles(
 
         # ---- optional: lock-coil reference state ---------------------------
         grp.attrs["coils_locked"] = bool(coils_locked)
+        if lock_coils_weight is not None:
+            grp.attrs["lock_coils_weight"] = float(lock_coils_weight)
+        if coil_drift_threshold_A is not None:
+            grp.attrs["coil_drift_threshold_A"] = float(
+                coil_drift_threshold_A)
+        if boundary_max_threshold_mm is not None:
+            grp.attrs["boundary_max_threshold_mm"] = float(
+                boundary_max_threshold_mm)
+        if xpoint_max_threshold_mm is not None:
+            grp.attrs["xpoint_max_threshold_mm"] = float(
+                xpoint_max_threshold_mm)
         if ref_coil_currents is not None:
             import json
             names = list(ref_coil_currents.keys())
