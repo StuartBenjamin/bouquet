@@ -19,6 +19,77 @@ HDF5 database.
 
 ---
 
+## What "plausible" means in bouquet
+
+Bouquet's job is to propagate kinetic-profile uncertainty (the IDA σ
+envelope on n_e, T_e, n_i, T_i) into uncertainty on derived
+equilibrium quantities — l_i, q profile, x-point location, divertor
+strike points, etc. — by sampling profiles, re-solving the
+Grad–Shafranov equation, and archiving the family of converged
+equilibria.
+
+Each perturbed equilibrium is meant to be a *plausible alternative
+state of the same shot*, not just a numerical solution to the GS
+equation.  That word **plausible** carries a specific operational
+meaning here.  Bouquet treats the experimental shot as having two
+classes of input:
+
+| Class | Quantities | How bouquet treats them |
+|-------|------------|-------------------------|
+| **Well-known machine inputs** | I_p, B_t, separatrix shape, coil program | Held fixed (within tolerances corresponding to actual diagnostic resolution).  Any perturbed equilibrium that fails to reproduce these is rejected. |
+| **Uncertain internal state** | n_e, T_e, n_i, T_i (and derived: pressure, j_BS, j_inductive) | Sampled from the IDA-derived envelope.  *This* is the uncertainty the bouquet propagates. |
+
+The lock-coil mode (`lock_coils=True`) implements the first row by
+soft-pinning every coil to its baseline (reconstructed) current and
+adding three filter caps:
+
+- `boundary_max_threshold_mm` — discard equilibria whose LCFS moves
+  beyond the magnetics-diagnostic noise floor (recommended ~10 mm on
+  DIII-D).  This is the primary realism gate.
+- `xpoint_max_threshold_mm` — discard equilibria whose X-point cusp
+  drifts beyond a threshold (~20 mm on DIII-D).  Catches localised
+  drift even when the rest of the LCFS is fine.
+- l_i tolerance — the perturbed profile must reproduce the baseline
+  internal inductance within a user-specified % tolerance.
+
+### The one explicit caveat: the VSC pair must remain free
+
+There is exactly one well-known machine input that bouquet *cannot*
+hold fixed: the antisymmetric vertical-stability circuit (the VSC
+pair, e.g. F9A/F9B on DIII-D).  Pinning every coil including the VSC
+over-constrains the inverse Grad–Shafranov problem; the solver
+either fails to converge or settles into a worse local minimum with
+larger boundary error.  So bouquet pins every coil *except* the
+antisymmetric mode, which is the plasma's vertical-position degree
+of freedom.
+
+**The good news**: the VSC drift produced by this freedom is
+*regularisation bookkeeping for the perturbed profile's vertical
+footprint*, not real shape work.  The diagnostics in
+`IDA_workflow_examples/204441_4400/` (the F9-swap test) confirm that
+swapping the VSC pair from baseline value to perturbed value while
+holding all other coils + perturbed profiles fixed moves the LCFS
+by less than 0.3 mm.  In other words, the kA-scale F9 swing each
+perturbation produces does not represent a kA-scale change in
+vertical position; it represents the antisymmetric mode amplitude
+that the perturbed profile would require for vertical equilibrium,
+projected onto the VSC by construction.
+
+So the realism statement that bouquet supports is:
+
+> *For the same coil program DIII-D ran (modulo the VSC), the same
+> measured separatrix (within magnetics resolution), the same I_p,
+> the same B_t, and the same internal inductance (within IDA
+> tolerance), this family of internal kinetic profiles is plausibly
+> consistent with the shot.*
+
+Plotters `plot_boundary_deviations`, `plot_xpoint_deviations`, and
+`plot_coil_drift` make these gates auditable from the HDF5 file
+post-hoc.  See [Lock-coil mode](#lock-coil-mode) for the full
+mechanism, kwargs, and HDF5 schema.
+
+---
+
 ## Citation
 
 If you use Bouquet in your research, please cite:
@@ -28,6 +99,7 @@ If you use Bouquet in your research, please cite:
 
 ## Contents
 
+- [What "plausible" means in bouquet](#what-plausible-means-in-bouquet)
 - [Features](#features)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
@@ -254,12 +326,98 @@ Baseline g-file + p-file
 | Total pressure (p_tot) | ✓ | Recomputed from perturbed kinetics |
 | Bootstrap current (j_BS) | ✓ | Sauter model (optional) |
 | Inductive current (j_ind) | ✓ | Scaled to match l_i |
-| Coil currents | ✓ | Adjusted by TokaMaker to match I_p |
+| Coil currents | ✓/✗ | Adjusted by TokaMaker to match I_p when free; soft-pinned to baseline values when `lock_coils=True` (see [Lock-coil mode](#lock-coil-mode)) |
 | Diamagnetic rotations | ✓ | Recomputed from perturbed n, T |
 | E_r, ω_HB | ✓ | Recomputed using exact midplane B-fields |
 | n_z1 (impurity density) | ✗ | Preserved from baseline |
 | n_b, p_b (beam) | ✗ | Preserved from baseline |
 | Toroidal/poloidal rotation | ✗ | Preserved from baseline |
+
+### Lock-coil mode
+
+By default the inverse solver is free to drive the coil currents to
+whatever is needed to match the boundary + I_p targets under each
+perturbed profile.  Pass `lock_coils=True` to `generate_bouquet()` to
+soft-pin every coil close to the reconstruction-baseline value via a
+strong-regularisation penalty.  Use this when you want to claim "for
+the same coil program DIII-D ran, what range of internal profiles is
+plausible?" — i.e. when the coil currents are part of "what is
+known," not "what is uncertain."
+
+```python
+generate_bouquet(
+    mygs, psi_N, n_equils, header,
+    ...                                    # usual args
+    lock_coils=True,
+    lock_coils_weight=1.0e2,                # default — ~1% drift on
+                                            # well-behaved DIII-D shots
+    lock_coils_vsc_weight=1.0,              # weight on the antisymmetric
+                                            # virtual-stability circuit
+    lock_coils_per_coil_weight=None,        # dict for per-coil overrides
+                                            # e.g. {'F9A': 1e4, 'F9B': 1e4}
+    coil_drift_threshold_A=None,            # filter caps — discard
+    boundary_max_threshold_mm=10.0,         # equilibria that exceed
+    xpoint_max_threshold_mm=20.0,           # any of these
+)
+```
+
+**What the lock retains and what it lets float**
+
+- *Retained*: baseline coil currents (within ~1% under the default
+  weight), the LCFS shape, the X-point location.  These are
+  experimentally-measured quantities.
+- *Floating*: the antisymmetric vertical-stability mode (typically
+  absorbed by the VSC pair, e.g. F9A/F9B on DIII-D).  This shows up
+  as kA-scale drift on the VSC coils even when no other coil moves
+  more than ~1%.  Diagnostic studies in this repository confirm that
+  this drift is regularisation bookkeeping for the perturbed
+  profile's vertical footprint, **not** real shape work — the LCFS
+  doesn't move with it (see [`xpoint_deviation`](#deviation-diagnostics)
+  diagnostics).
+
+**Filters**
+
+`generate_bouquet` discards any perturbed equilibrium that exceeds
+any of the three threshold kwargs, *not* storing it to HDF5:
+
+| Filter | Recommended start (DIII-D) | When to use |
+|--------|----------------------------|-------------|
+| `boundary_max_threshold_mm` | 10 mm | Realism — discard equilibria whose LCFS moves beyond the magnetics noise floor.  Most physically defensible. |
+| `xpoint_max_threshold_mm`   | 20 mm | Cusp-localised — catches X-point drift even when the rest of the LCFS stays close. |
+| `coil_drift_threshold_A`    | 5000 A | Coil-side check — useful for diagnosing solver pathologies, but tightening can bias against profiles whose VSC footprint happens to be larger than typical. |
+
+In practice the boundary-deviation filter is the cleanest realism
+gate; coil-drift filtering tends to filter out otherwise-valid
+profile uncertainty that happens to load the VSC.
+
+**Caveat: chaining bouquets in one Python session**
+
+Each `generate_bouquet()` call leaves the TokaMaker solver in a
+perturbed end-state.  Subsequent calls in the same Python process
+under `lock_coils=True` capture coil-current references from that
+drifted state, which can drift the lock target progressively further
+from the true reconstruction baseline and eventually cause the
+lock-mode baseline solve to fail.  **Run multi-scheme parameter
+sweeps as separate processes** (one fresh `setup_and_reconstruct`
+per scheme) rather than chaining in one session.
+
+### Deviation diagnostics
+
+When `lock_coils=True`, `generate_bouquet` writes per-equilibrium
+deviation diagnostics into the HDF5 file:
+
+- `boundary_devs [mm]` — per-LCFS-point Δr deviation from the
+  lock-mode baseline boundary, derived from local |∇ψ|.  Plus
+  scalar `boundary_rms_mm` and `boundary_max_mm` summaries.
+- `x_point_devs [mm]` — displacement of each lock-mode-baseline
+  X-point in the perturbed equilibrium, paired by nearest-neighbour.
+  NaN when no X-point matches within a cutoff.  Plus scalar RMS and
+  max summaries.
+- `coil_drift [A]` — per-coil current minus the locked target, plus
+  a `coil_drift_names` companion attribute.
+
+Visualise these with `plot_boundary_deviations`,
+`plot_xpoint_deviations`, and `plot_coil_drift`.
 
 ---
 
@@ -340,18 +498,28 @@ All plotting functions return `(fig, axes)` and work in two modes:
 ```python
 from bouquet import (
     plot_bouquet,               # Full overview (kinetics + jphi + coils)
-    plot_traces,                # l_i, Ip, boundary deviation traces
+    plot_traces,                # l_i, Ip, boundary, X-point deviation traces
     plot_geqdsk_bouquet,        # 3×3 grid: pressure, current, q, geometry, li, flux surfaces
     plot_pfile_bouquet,         # Multi-panel: densities, temperatures, rotations
     plot_coil_currents,         # Bar chart of coil currents
     plot_tokamaker_comparison,  # TokaMaker vs source geqdsk comparison
     classify_jphi_profile,      # Edge current profile classifier
+    # Lock-coil deviation diagnostics (require lock_coils=True at run time)
+    plot_boundary_deviations,   # Bar plot of LCFS RMS+max deviation per eq
+    plot_xpoint_deviations,     # Bar plot of X-point displacement per eq
+    plot_coil_drift,            # Per-coil drift + % deviation, rainbow styling
+    # Lower-level drawing helpers
     draw_kinetic_profiles,      # ne, Te, ni, Ti on existing axes
     draw_pressure_profiles,     # Pressure + perturbed ensemble
     draw_jphi_total,            # j_phi with uncertainty band
     draw_jphi_components,       # Bootstrap + inductive decomposition
 )
 ```
+
+`plot_traces` returns three figures (l_i, I_p, boundary) by default and
+adds a fourth (X-point trace) when the database contains lock-coil
+diagnostics — backward-compatible if you index by name rather than
+unpack.
 
 ### Filtering by scan value
 
@@ -388,15 +556,32 @@ run.h5
 ├── scan/
 │   └── {scan_val}/
 │       ├── _baseline/
-│       │   ├── baseline.eqdsk       # raw geqdsk bytes
-│       │   ├── baseline.pfile       # raw p-file bytes
-│       │   ├── ne, te, ni, ti, …    # baseline 1-D profiles
-│       │   └── sigma_ne, sigma_te … # uncertainty envelopes
+│       │   ├── baseline.eqdsk          # raw geqdsk bytes
+│       │   ├── baseline.pfile          # raw p-file bytes
+│       │   ├── ne, te, ni, ti, …       # baseline 1-D profiles
+│       │   ├── sigma_ne, sigma_te …    # uncertainty envelopes
+│       │   ├── ref_coil_currents [A]   # locked-target coils (lock_coils=True only)
+│       │   ├── ref_lcfs_R/Z [m]        # baseline LCFS reference points
+│       │   ├── ref_x_points_RZ [m]     # baseline X-points (n_xpts, 2)
+│       │   └── attrs:
+│       │     ├── coils_locked            # bool
+│       │     ├── lock_coils_weight       # reg weight used
+│       │     ├── coil_drift_threshold_A  # filter cap, if any
+│       │     ├── boundary_max_threshold_mm
+│       │     └── xpoint_max_threshold_mm
 │       ├── 0/
-│       │   ├── header_sv_0.eqdsk    # perturbed geqdsk bytes
-│       │   ├── header_sv_0.pfile    # perturbed p-file bytes
-│       │   ├── psi_N, j_phi, ne, …  # perturbed 1-D profiles
-│       │   └── li1, li3, Zeff       # scalar diagnostics
+│       │   ├── header_sv_0.eqdsk       # perturbed geqdsk bytes
+│       │   ├── header_sv_0.pfile       # perturbed p-file bytes
+│       │   ├── psi_N, j_phi, ne, …     # perturbed 1-D profiles
+│       │   ├── coil_currents [A]       # per-eq coil currents
+│       │   ├── boundary_devs [mm]      # per-LCFS-pt Δr (lock_coils=True only)
+│       │   ├── x_point_devs [mm]       # per-baseline-X-pt displacement (lock_coils=True only)
+│       │   ├── x_points_RZ [m]         # paired (R, Z) of perturbed X-points
+│       │   ├── coil_drift [A]          # per-coil current minus locked target
+│       │   └── attrs: li1, li3, Zeff,
+│       │            boundary_rms_mm, boundary_max_mm,
+│       │            x_point_rms_mm, x_point_max_mm,
+│       │            coil_drift_names (JSON-encoded list)
 │       ├── 1/ …
 │       └── N/ …
 └── (flat layout also supported without scan/ prefix)
@@ -531,10 +716,13 @@ in [`architecture.md`](architecture.md). Key topics include:
 | Function | Description |
 |----------|-------------|
 | `plot_bouquet()` | Notebook-friendly overview plot |
-| `plot_traces()` | l_i, Ip, and boundary deviation traces across equilibria |
+| `plot_traces()` | l_i, I_p, boundary, and (lock_coils=True only) X-point traces across equilibria |
 | `plot_geqdsk_bouquet()` | GEQDSK multi-panel (9 panels: pressure, current, q, geometry, …) |
 | `plot_pfile_bouquet()` | P-file multi-panel (densities, temperatures, rotations) |
 | `plot_coil_currents()` | Coil current bar chart |
+| `plot_boundary_deviations()` | LCFS RMS + max deviation per equilibrium (lock_coils=True) |
+| `plot_xpoint_deviations()` | X-point displacement per baseline X-point (lock_coils=True) |
+| `plot_coil_drift()` | Per-coil drift in Amps + % of baseline (lock_coils=True) |
 | `plot_tokamaker_comparison()` | TokaMaker reconstruction comparison |
 
 ---

@@ -47,6 +47,96 @@ Bouquet generates families ("bouquets") of perturbed tokamak equilibria by:
 
 Each of these steps carries assumptions documented below.
 
+### 1.1 The realism principle
+
+Each perturbed equilibrium is meant to be a *plausible alternative
+state of the same shot*, not just a numerical solution to the GS
+equation.  The word "plausible" carries a specific operational
+meaning:
+
+**Bouquet preserves what is experimentally well-known and samples
+what is experimentally uncertain.**
+
+| Class | Quantities | Treatment |
+|-------|------------|-----------|
+| Well-known machine inputs | I_p, B_t, separatrix shape, coil program | Held fixed (within tolerances corresponding to actual diagnostic resolution) |
+| Uncertain internal state | n_e, T_e, n_i, T_i (and derived: pressure, j_BS, j_inductive) | Sampled from the IDA-derived envelope.  This is the uncertainty being propagated. |
+
+`lock_coils=True` (introduced in PR1) implements the first row by
+soft-pinning every coil to the reconstructed-baseline value with a
+strong regularisation penalty, and supplying three filter caps:
+
+- `boundary_max_threshold_mm` — discards equilibria whose LCFS moves
+  beyond the magnetics-diagnostic noise floor (default ~10 mm on
+  DIII-D).  This is the **primary realism gate** because the LCFS is
+  what the magnetic diagnostics actually constrain.
+- `xpoint_max_threshold_mm` — catches localised X-point cusp drift
+  that a boundary-RMS filter could miss.
+- l_i tolerance — the perturbed profile must reproduce the baseline
+  internal inductance within a user-specified % tolerance.
+
+Coil-drift filtering (`coil_drift_threshold_A`) exists as a
+diagnostic but is *not* recommended as a primary realism gate; see
+[Section 3.6](#36-lock-coil-mode) for why.
+
+#### The one explicit caveat: the VSC pair must remain free
+
+There is exactly one well-known machine input that bouquet cannot
+hold fixed: the antisymmetric vertical-stability circuit (the VSC
+pair, e.g. F9A/F9B on DIII-D).  Pinning every coil including the VSC
+over-constrains the inverse Grad–Shafranov problem; the solver
+either fails to converge or settles into a worse local minimum with
+larger boundary error (empirically: ~3× worse boundary RMS, ~5%
+shift in l_i toward an unphysical basin).
+
+The drift produced by leaving the VSC free is **regularisation
+bookkeeping for the perturbed profile's vertical-stability footprint
+— not real shape work**.  This was verified by the F9-swap diagnostic
+(`IDA_workflow_examples/204441_4400/204441_f9_swap.py`): blending
+F9A/F9B from baseline to perturbed value while holding all other
+coils + perturbed profiles fixed moves the LCFS by less than 0.3 mm,
+even when the F9 swing itself is several kA.  The kA-scale F9 swing
+is the antisymmetric mode amplitude the perturbed profile *requires*
+for vertical equilibrium, projected onto the VSC by construction.
+
+The realism statement bouquet supports is thus:
+
+> *For the same coil program DIII-D ran (modulo the VSC), the same
+> measured separatrix (within magnetics resolution), the same I_p,
+> the same B_t, and the same internal inductance (within IDA
+> tolerance), this family of internal kinetic profiles is plausibly
+> consistent with the shot.*
+
+#### Caveat on DIII-D vertical stability physics
+
+The current `DIIID_mesh.h5` contains only the F-coils (F1A–F9A,
+F1B–F9B) plus the E-coils (ECOILA, ECOILB; ohmic/solenoid).  No
+C-coils, I-coils, or in-vessel coils.  This is consistent with how
+DIII-D actually does vertical stability:
+
+- **Fast (sub-ms) vertical stability** is supplied by induced eddy
+  currents in the conducting vacuum vessel — *not* by any active
+  coil.  The vessel drags the plasma's vertical-instability growth
+  rate from order kHz down to tens of Hz, slow enough for the
+  F-coils to respond.
+- **Slow (10s of ms) active control** is supplied by the F-coils in
+  antisymmetric configuration, exactly as bouquet uses F9A/F9B
+  here.
+- C-coils on DIII-D are primarily used for error-field correction
+  and resistive-wall-mode control, not vertical stability.
+- I-coils (in-vessel) are used for ELM/RMP studies, not vertical
+  stability.
+
+The Grad–Shafranov solve averages over the fast (vessel-eddy)
+timescale, so the steady-state equilibrium does not carry vessel
+currents as DOFs — the F-coil VSC is the natural representation of
+the antisymmetric mode in a steady-state inverse solve.  The F9
+amplitudes our perturbed equilibria produce should therefore not be
+read as "DIII-D's F9 swung by kA in real time"; they should be read
+as "the steady-state vertical-equilibrium projection of the
+perturbed profile's vertical footprint, expressed in the VSC
+basis."
+
 ---
 
 ## 2. Coordinate Systems and Sign Conventions
@@ -267,7 +357,7 @@ rejected equilibria still cost a TokaMaker call.
 | Total pressure (ptot) | Yes | Recomputed from perturbed kinetics |
 | Bootstrap current (j_BS) | Yes (optional) | Recomputed from Sauter model if `recalculate_j_BS=True` |
 | Inductive current (j_ind) | Yes | Scaled to match li |
-| Coil currents | Yes | Adjusted by TokaMaker to match Ip |
+| Coil currents | Yes / No | Free under default; soft-pinned to baseline values when `lock_coils=True`; see [Section 3.6](#36-lock-coil-mode) |
 | nz1 (impurity density) | **No** | Kept from baseline; see [Section 4](#4-quasi-neutrality-and-impurity-handling) |
 | nb (beam density) | **No** | Preserved from baseline p-file |
 | pb (beam pressure) | **No** | Preserved from baseline p-file |
@@ -277,6 +367,95 @@ rejected equilibria still cost a TokaMaker call.
 | E×B rotation (w_ExB) | **No** | Zero placeholder stored; see [Section 15](#15-known-limitations-and-future-work) |
 | Diamagnetic rotations | Yes | Recomputed from perturbed ne, Te, ni, Ti + baseline nz1 |
 | Er, Hahm-Burrell rate | Yes | Recomputed using exact midplane B-fields |
+
+### 3.6 Lock-Coil Mode
+
+This section describes the *mechanism* of lock-coil mode.  For the
+*motivation* — the realism principle bouquet implements when
+`lock_coils=True` — see [Section 1.1](#11-the-realism-principle).
+
+When `generate_bouquet(... lock_coils=True)` is set, every perturbed
+equilibrium is solved with each coil's current soft-pinned to the
+reconstruction-baseline value via TokaMaker's regularisation framework
+(`coil_reg_term` with `target=ref_value, weight=lock_coils_weight`).
+Isoflux is intentionally retained — pure forward GS solves at fixed
+coil currents (`set_coil_currents` + `set_isoflux(None)`) fail with
+"Matrix solve failed for targets" on physical DIII-D meshes.
+
+**Workflow inside `generate_bouquet` when `lock_coils=True`:**
+
+1. Reconstruct baseline equilibrium (free coils).
+2. Capture coil currents from that solve as the lock targets.
+3. Replace the coil regularisation with strong-pin terms targeting
+   those captured currents.
+4. Re-solve once to obtain the *lock-mode* baseline state — this is
+   slightly different from the free-coil baseline because the reg
+   targets shifted from zero to non-zero.
+5. Capture the lock-mode LCFS contour and X-points; these become the
+   reference for per-equilibrium deviation diagnostics.
+6. Loop over perturbations.  Each perturbed inverse solve runs under
+   the same strong-pin reg, so coils stay close to baseline; the
+   antisymmetric vertical-stability mode (the VSC) is the only DOF
+   that absorbs residual stress freely.
+
+**Per-equilibrium deviation diagnostics** (stored to HDF5):
+
+- `boundary_devs`: spatial Δr at each lock-mode-baseline LCFS point,
+  computed as `|psi(R,Z) - psi_LCFS| / (R |B_p|)` rather than via
+  contour extraction (see [Section 8.1](#81-contour-tracing)) — this
+  avoids the brittle contour-tracer near the X-point cusp.
+- `x_point_devs`: nearest-neighbour pairing between lock-mode-
+  baseline X-points and perturbed X-points, with NaN entries for
+  unmatched references (X-point disappeared / moved beyond cutoff).
+- `coil_drift`: per-coil current minus the locked target.
+
+**Filters** (also at `generate_bouquet` time):
+
+- `boundary_max_threshold_mm` discards equilibria whose max boundary
+  deviation exceeds the threshold.  This is the most physically
+  defensible realism gate: anything moving the LCFS beyond the
+  magnetics-diagnostic noise floor would have been distinguishable
+  experimentally, so it's not a plausible alternative equilibrium.
+  Recommended start on DIII-D: ~10 mm.
+- `xpoint_max_threshold_mm` is similar but for X-point displacement.
+  Useful because the cusp is a localised feature that can drift even
+  when the rest of the LCFS stays close.
+- `coil_drift_threshold_A` exists for diagnostic purposes but is
+  *not* recommended as a primary realism filter; coil drift in the
+  VSC pair is regularisation bookkeeping for the perturbed profile's
+  vertical-stability footprint, not real shape work.  Filtering on
+  coil drift biases against profiles whose vertical footprint
+  happens to differ from the baseline's, which is part of the
+  uncertainty we're trying to sample.
+
+**Why VSC drift is not "shape work":** see the
+`F9-swap` diagnostic in `IDA_workflow_examples/204441_4400/`.
+Blending F9A/F9B from baseline back to the perturbed value while
+holding all other coils at the perturbed value (and using the
+perturbed pp/ffp) produces a near-flat boundary deviation across
+the blend — the F9 swing absorbs antisymmetric mode amplitude that
+maps onto the VSC by construction, but the LCFS doesn't move with it.
+
+**Observation: coil-drift floor is profile-driven, not isoflux-driven.**
+Sweeps over isoflux density (5 → 320 points), isoflux weight, saddle
+constraints, and per-coil reg weights all converged on F9 drift in
+the 4–7 kA range on DIII-D shot 204441 with realistic IDA envelopes.
+This floor is set by the kinetic-profile perturbation magnitude
+(σ_ne, σ_Te, σ_ni, σ_Ti from IDA, plus GPR length scales) — the
+antisymmetric mode the perturbed profile *requires*.  Tightening the
+lock by raising `lock_coils_weight` past ~1e3 saturates because
+isoflux + I_p become the binding constraints.  Tightening individual
+coils via `lock_coils_per_coil_weight` redistributes drift to other
+coils without lowering the total residual.
+
+**Caveat: state contamination across schemes in one Python session.**
+Each `generate_bouquet` call leaves the TokaMaker solver in the
+last-perturbed-equilibrium state.  A subsequent call under
+`lock_coils=True` captures coil currents from that drifted state as
+its lock target, and the bias accumulates across schemes; eventually
+the lock-mode baseline solve fails.  Run multi-scheme parameter
+sweeps as separate processes (one fresh `setup_and_reconstruct` per
+scheme).
 
 ---
 
@@ -661,14 +840,44 @@ header.h5
 +-- scan/
 |   +-- {scan_val_key}/
 |   |   +-- _baseline/
-|   |   |   +-- baseline.eqdsk          # raw geqdsk bytes
-|   |   |   +-- baseline.pfile          # raw p-file bytes (optional)
-|   |   |   +-- ne, te, ni, ti [...]    # baseline 1-D profiles
+|   |   |   +-- baseline.eqdsk             # raw geqdsk bytes
+|   |   |   +-- baseline.pfile             # raw p-file bytes (optional)
+|   |   |   +-- ne, te, ni, ti [...]       # baseline 1-D profiles
+|   |   |   +-- sigma_ne, sigma_te [...]   # uncertainty envelopes
+|   |   |   +-- ref_coil_currents [A]      # locked-target coil currents
+|   |   |                                  # (lock_coils=True only)
+|   |   |   +-- ref_lcfs_R [m], ref_lcfs_Z [m]
+|   |   |   |                              # baseline LCFS reference points
+|   |   |   |                              # (lock_coils=True only)
+|   |   |   +-- ref_x_points_RZ [m]        # baseline X-points, shape (n,2)
+|   |   |   |                              # (lock_coils=True only)
+|   |   |   +-- attrs:
+|   |   |     +-- Ip_target, l_i_target
+|   |   |     +-- coils_locked              # bool
+|   |   |     +-- ref_coil_names            # JSON-encoded list
+|   |   |     +-- lock_coils_weight         # reg weight, optional
+|   |   |     +-- coil_drift_threshold_A    # filter cap, optional
+|   |   |     +-- boundary_max_threshold_mm # filter cap, optional
+|   |   |     +-- xpoint_max_threshold_mm   # filter cap, optional
 |   |   +-- 0/
-|   |   |   +-- {header}_{sv}_{0}.eqdsk # raw geqdsk bytes
-|   |   |   +-- {header}_{sv}_{0}.pfile # raw p-file bytes (optional)
+|   |   |   +-- {header}_{sv}_{0}.eqdsk    # raw geqdsk bytes
+|   |   |   +-- {header}_{sv}_{0}.pfile    # raw p-file bytes (optional)
 |   |   |   +-- psi_N, j_phi, ne, te, ni, ti [...]
-|   |   |   +-- li1, li3, Zeff, coil_currents [A], coil_names
+|   |   |   +-- coil_currents [A]          # per-eq coil currents
+|   |   |   +-- boundary_devs [mm]         # per-LCFS-pt deviation
+|   |   |                                  # (lock_coils=True only)
+|   |   |   +-- x_point_devs [mm]          # per-baseline-X-pt displacement
+|   |   |                                  # (lock_coils=True only)
+|   |   |   +-- x_points_RZ [m]            # paired perturbed X-points
+|   |   |                                  # (NaN row when unmatched)
+|   |   |   +-- coil_drift [A]             # per-coil current minus locked
+|   |   |                                  # target (lock_coils=True only)
+|   |   |   +-- attrs:
+|   |   |     +-- l_i(1), l_i(3), Zeff
+|   |   |     +-- coil_names                # JSON-encoded list
+|   |   |     +-- boundary_rms_mm, boundary_max_mm
+|   |   |     +-- x_point_rms_mm, x_point_max_mm
+|   |   |     +-- coil_drift_names          # JSON-encoded list
 |   |   +-- 1/ ...
 |   +-- {another_scan_val}/ ...
 ```
@@ -678,12 +887,16 @@ header.h5
 - Raw geqdsk and p-file bytes are stored as opaque binary datasets.
   This enables exact round-tripping: `GEQDSKEquilibrium.from_bytes()`
   and `PFile.from_bytes()` reconstruct the original objects.
-- Scalar diagnostics (li1, li3) are stored as attributes or scalar
-  datasets.
-- Coil currents are stored as a 1-D array with coil names in a
-  companion string attribute.
+- Scalar diagnostics (li1, li3, deviation summaries) are stored as
+  attributes; per-point arrays (boundary_devs, x_point_devs,
+  coil_drift) are datasets.
+- Coil currents and coil drifts are stored as 1-D arrays with the
+  coil-name ordering preserved in companion string attributes
+  (`coil_names`, `coil_drift_names`) as JSON-encoded lists.
 - The `_baseline` group stores the unperturbed equilibrium for
-  comparison.
+  comparison.  Under `lock_coils=True`, it additionally stores the
+  reference state (coil currents, LCFS, X-points, filter caps) used
+  by the perturbed-equilibrium deviation diagnostics.
 
 ---
 
