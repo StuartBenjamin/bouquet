@@ -650,6 +650,86 @@ def lock_coils_to_baseline(mygs, ref_coil_currents, weight=1.0e2,
     mygs.set_coil_reg(reg_terms=rt)
 
 
+def lock_coils_forward_phantom(mygs, ref_coil_currents,
+                                phantom_R, phantom_dZ,
+                                phantom_gain=1.0e6):
+    r"""Switch the GS solver to forward mode with a *phantom* VSC.
+
+    Hard-pins every real coil to its reconstruction-baseline value via
+    ``set_coil_currents`` and replaces the VSC channel's flux source
+    with a non-physical antisymmetric current pair at
+    ``(phantom_R, +/-phantom_dZ)``.  The solver's existing
+    ``vcontrol_val`` machinery anchors the magnetic-axis Z to the V0
+    target on this phantom flux, so no real coil current changes to
+    enforce vertical balance.  In this mode ``get_coil_currents()``
+    returns the values you set, with zero drift on every coil.
+
+    Use case: Tier-2 bouquet runs that need every coil — including the
+    DIII-D F9A/F9B vertical-stability pair — held at experimentally-
+    measured or reconstruction-baseline values while perturbed
+    profiles drive shape evolution.  Contrast with
+    ``lock_coils_to_baseline`` (inverse mode + soft regularisation),
+    which lets the solver find an optimal coil mix at the cost of
+    1-13 kA drift on F9A/F9B.
+
+    Requires an OpenFUSIONToolkit build that exposes
+    ``mygs.set_phantom_vsc`` (the ``feat/phantom-vsc`` branch or
+    successor).  Falls back to a clear ``AttributeError`` if absent.
+
+    Caller responsibilities (not handled here):
+
+    * After this call, every ``mygs.solve()`` must use Recipe A
+      targets — ``set_targets(Ip=..., pax=..., R0=..., V0=...)`` —
+      because forward mode requires a V0 anchor and ``pax`` (the
+      ``jphi-linterp`` profile cannot normalise without it).
+    * If the caller restores plasma flux between solves via
+      ``mygs.set_psi(..., update_bounds=True)``, ``set_phantom_vsc``
+      must be re-applied afterward — ``update_bounds=True`` resets
+      the phantom-active state in the current OFT branch.
+
+    Parameters
+    ----------
+    mygs : TokaMaker
+        Solver, already set up and converged on the baseline
+        equilibrium (e.g. via ``reconstruct_equilibrium``).
+    ref_coil_currents : dict
+        ``{coil_name: current_A}`` from ``mygs.get_coil_currents()``
+        on the baseline solve.  Every key in this dict will be pinned.
+    phantom_R : float
+        Radial location of the phantom antisymmetric pair (m).  For
+        DIII-D, ``1.7`` (close to F9A/F9B's R) is a reasonable default.
+    phantom_dZ : float
+        Half-separation; phantom loops sit at ``(phantom_R, +phantom_dZ)``
+        and ``(phantom_R, -phantom_dZ)``.  For DIII-D, ``0.95`` (close
+        to F9A/F9B's Z) is a reasonable default.
+    phantom_gain : float
+        Loop current magnitude in A used to scale the phantom field;
+        sets the achievable range of ``vcontrol_val``.  ``1e6`` is a
+        safe default — large enough that ``vcontrol_val`` stays of
+        order unity, small enough to avoid numerical pathology.
+
+    Notes
+    -----
+    Empirical convergence on the DIII-D 204441@4400 ms IDA testbed
+    (sweep over pressure-scaling alpha in [0.80, 1.10]):
+    7/11 alphas converge with **zero drift on every coil**, vs.
+    10/11 with ~12 kA F9 drift under inverse-mode lock.  The phantom
+    path narrows the high-alpha basin slightly (failures appear at
+    ``alpha >= 1.075``) but eliminates the kA-scale F9 leak entirely
+    inside the basin.
+    """
+    if not hasattr(mygs, 'set_phantom_vsc'):
+        raise AttributeError(
+            "mygs.set_phantom_vsc is unavailable — this OpenFUSIONToolkit "
+            "build does not include phantom-VSC support.  Build OFT from "
+            "the feat/phantom-vsc branch (or successor) to enable it.")
+    mygs.set_isoflux(None)
+    mygs.set_saddles(None)
+    mygs.set_coil_currents(ref_coil_currents)
+    mygs.set_phantom_vsc(R=phantom_R, dZ=phantom_dZ,
+                         gain=phantom_gain, active=True)
+
+
 def psi_boundary_deviation(mygs, ref_R, ref_Z):
     r"""Spatial deviation of the current LCFS from reference points.
 

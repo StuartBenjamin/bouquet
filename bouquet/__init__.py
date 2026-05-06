@@ -25,6 +25,7 @@ from .TokaMaker_interface import (
     generate_bouquet,
     reconstruct_equilibrium,
     lock_coils_to_baseline,
+    lock_coils_forward_phantom,
     psi_boundary_deviation,
     xpoint_deviation,
 )
