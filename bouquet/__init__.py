@@ -26,6 +26,7 @@ from .TokaMaker_interface import (
     reconstruct_equilibrium,
     lock_coils_to_baseline,
     lock_coils_forward_phantom,
+    solve_tier2_phantom_equilibrium,
     psi_boundary_deviation,
     xpoint_deviation,
 )
