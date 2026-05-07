@@ -651,7 +651,7 @@ def lock_coils_to_baseline(mygs, ref_coil_currents, weight=1.0e2,
 
 
 def lock_coils_forward_phantom(mygs, ref_coil_currents,
-                                phantom_R, phantom_dZ,
+                                phantom_R=None, phantom_dZ=0.6,
                                 phantom_gain=1.0e6):
     r"""Switch the GS solver to forward mode with a *phantom* VSC.
 
@@ -676,48 +676,74 @@ def lock_coils_forward_phantom(mygs, ref_coil_currents,
     ``mygs.set_phantom_vsc`` (the ``feat/phantom-vsc`` branch or
     successor).  Falls back to a clear ``AttributeError`` if absent.
 
-    Caller responsibilities (not handled here):
+    **Caller responsibilities (CRITICAL):**
 
-    * After this call, every ``mygs.solve()`` must use Recipe A
-      targets — ``set_targets(Ip=..., pax=..., R0=..., V0=...)`` —
-      because forward mode requires a V0 anchor and ``pax`` (the
-      ``jphi-linterp`` profile cannot normalise without it).
+    * After this call, every ``mygs.solve()`` must set Recipe-A targets
+      using the **magnetic-axis** location, not the centroid::
+
+          mygs.set_targets(Ip=Ip_target,
+                           pax=pax_target,
+                           R0=mygs.o_point[0],   # axis R, NOT R_centroid
+                           V0=mygs.o_point[1])   # axis Z, NOT Z_centroid
+
+      Using the centroid (e.g. from ``mygs.get_globals()[1]``) for V0 displaces
+      the equilibrium by tens of mm in lower-single-null plasmas (axis sits
+      well above centroid in DIII-D LSN).  This breaks the σ→0 limit:
+      perturbed equilibria no longer reproduce the recon at zero perturbation.
+    * Forward mode requires both ``pax`` (the ``jphi-linterp`` profile cannot
+      normalise without it) and ``V0`` (Picard iteration is vertically
+      unstable on elongated plasmas without a Z anchor).
     * If the caller restores plasma flux between solves via
       ``mygs.set_psi(..., update_bounds=True)``, ``set_phantom_vsc``
-      must be re-applied afterward — ``update_bounds=True`` resets
-      the phantom-active state in the current OFT branch.
+      must be re-applied afterward — ``update_bounds=True`` resets the
+      phantom-active state in the current OFT branch.
 
     Parameters
     ----------
     mygs : TokaMaker
-        Solver, already set up and converged on the baseline
-        equilibrium (e.g. via ``reconstruct_equilibrium``).
+        Solver, already set up and converged on the baseline equilibrium
+        (e.g. via ``reconstruct_equilibrium``).
     ref_coil_currents : dict
-        ``{coil_name: current_A}`` from ``mygs.get_coil_currents()``
-        on the baseline solve.  Every key in this dict will be pinned.
-    phantom_R : float
-        Radial location of the phantom antisymmetric pair (m).  For
-        DIII-D, ``1.7`` (close to F9A/F9B's R) is a reasonable default.
+        ``{coil_name: current_A}`` from ``mygs.get_coil_currents()`` on the
+        baseline solve.  Every key in this dict will be pinned.
+    phantom_R : float, optional
+        Radial location of the phantom antisymmetric pair (m).  Defaults to
+        ``mygs.o_point[0]`` (the magnetic-axis R), which auto-derives a
+        per-machine-sensible value.  Override for non-tokamak geometries.
     phantom_dZ : float
         Half-separation; phantom loops sit at ``(phantom_R, +phantom_dZ)``
-        and ``(phantom_R, -phantom_dZ)``.  For DIII-D, ``0.95`` (close
-        to F9A/F9B's Z) is a reasonable default.
+        and ``(phantom_R, -phantom_dZ)``.  Default ``0.6`` was tuned on
+        DIII-D 204441@4400 ms (best basin in a 0.5-0.95 m sweep); other
+        machines may want different values, but ``0.6`` is a sensible
+        starting point for tokamaks of similar Z-extent.
     phantom_gain : float
-        Loop current magnitude in A used to scale the phantom field;
-        sets the achievable range of ``vcontrol_val``.  ``1e6`` is a
-        safe default — large enough that ``vcontrol_val`` stays of
-        order unity, small enough to avoid numerical pathology.
+        Loop current magnitude in A used to scale the phantom field; sets
+        the achievable range of ``vcontrol_val``.  ``1e6`` is a safe
+        default — large enough that ``vcontrol_val`` stays of order unity,
+        small enough to avoid numerical pathology in the 3×3 param solve.
 
     Notes
     -----
-    Empirical convergence on the DIII-D 204441@4400 ms IDA testbed
-    (sweep over pressure-scaling alpha in [0.80, 1.10]):
-    7/11 alphas converge with **zero drift on every coil**, vs.
-    10/11 with ~12 kA F9 drift under inverse-mode lock.  The phantom
-    path narrows the high-alpha basin slightly (failures appear at
-    ``alpha >= 1.075``) but eliminates the kA-scale F9 leak entirely
-    inside the basin.
+    Empirical convergence on the DIII-D 204441@4400 ms IDA testbed (10
+    GP-sampled bouquet draws spanning pax ±9% from recon) with V0 set to
+    ``mygs.o_point[1]``: **7/10 converge with F9A/F9B drift = 0 A**,
+    vs. 6/10 with 1-6 kA F9 drift under inverse-mode lock_coils.  Phantom
+    is competitive on basin coverage and eliminates the kA-scale F9 leak.
+    The σ→0 limit is preserved exactly — at baseline profiles, phantom
+    mode reproduces the recon's magnetic-axis location to numerical
+    precision (Δ < 0.01 mm).
     """
+    if phantom_R is None:
+        # Auto-derive: use the magnetic-axis R (mygs.o_point[0]).  This is
+        # set after the recon converges and gives a per-machine-sensible
+        # default without the caller having to know any tokamak-specific
+        # geometry.
+        if mygs.o_point is None:
+            raise RuntimeError(
+                "phantom_R defaults to mygs.o_point[0]; please call this "
+                "after a successful reconstruct_equilibrium so o_point is "
+                "populated, or pass phantom_R explicitly.")
+        phantom_R = float(mygs.o_point[0])
     if not hasattr(mygs, 'set_phantom_vsc'):
         raise AttributeError(
             "mygs.set_phantom_vsc is unavailable — this OpenFUSIONToolkit "
