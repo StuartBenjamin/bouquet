@@ -1290,10 +1290,16 @@ def generate_bouquet(
                 _tier3_psi_recon = mygs.get_psi(False).copy()
                 _coils_now, _ = mygs.get_coil_currents()
                 _tier3_ref_coils = {k: float(v) for k, v in _coils_now.items()}
-                _tier3_V0_target = float(mygs.o_point[1])
+                # We do NOT pass V0 to set_targets in the post-pass
+                # because the typical recon has isoflux installed and
+                # V0 would be ignored.  Vertical position is held by
+                # whatever isoflux/saddle constraints the caller set
+                # up before generate_bouquet.
+                _tier3_V0_target = None
+                _axis_z_for_log = float(mygs.o_point[1])
                 print(
                     f"[tier3] captured recon snapshot: "
-                    f"axis_Z={_tier3_V0_target:+.4f} m, "
+                    f"axis_Z={_axis_z_for_log:+.4f} m, "
                     f"{len(_tier3_ref_coils)} coils."
                 )
             except Exception as exc:
@@ -2336,8 +2342,12 @@ def solve_tier3_equilibrium(
         Recon ``psi`` to install as warm start (recommended; prevents
         cross-draw state drift).
     V0_target : float or None
-        Magnetic axis Z target [m].  ``None`` defaults to
-        ``mygs.o_point[1]`` after the warm start.
+        Magnetic axis Z target [m].  When ``None`` (the default), V0
+        is not passed to ``set_targets`` -- vertical position is then
+        controlled by whatever isoflux/saddle constraints the caller
+        has installed.  Pass an explicit ``V0_target`` only when those
+        boundary constraints are absent (the solver issues a warning
+        and ignores V0 when isoflux constraints are also present).
     vsc_coils : tuple of str
         VSC coil names for drift bookkeeping (default ('F9A','F9B')).
     uncertainty_frac : float
@@ -2392,14 +2402,10 @@ def solve_tier3_equilibrium(
             if verbose:
                 print(f"  [tier3] set_psi warm start failed: {exc}")
 
-    # V0 (axis Z) target
-    if V0_target is None:
-        try:
-            V0 = float(mygs.o_point[1])
-        except Exception:
-            V0 = 0.0
-    else:
-        V0 = float(V0_target)
+    # V0 (axis Z) target -- only set if explicitly requested.  When
+    # the caller has installed isoflux constraints, V0 is ignored by
+    # the solver and emits a warning, so we skip it on V0_target=None.
+    V0 = None if V0_target is None else float(V0_target)
 
     # Regularization
     try:
@@ -2416,18 +2422,19 @@ def solve_tier3_equilibrium(
 
     # Targets and profiles
     try:
-        mygs.set_targets(Ip=Ip_target, pax=pax_target, V0=V0)
+        if V0 is None:
+            mygs.set_targets(Ip=Ip_target, pax=pax_target)
+        else:
+            mygs.set_targets(Ip=Ip_target, pax=pax_target, V0=V0)
         mygs.set_profiles(pp_prof=pp_prof, ffp_prof=ffp_prof)
     except Exception as exc:
         out['error'] = f"set_targets/set_profiles failed: {exc}"
         return out
 
-    # Solve
+    # Solve.  TokaMaker.solve() returns None on success and raises
+    # ValueError on failure; do not compare the return value.
     try:
-        rc = mygs.solve()
-        if rc < 0:
-            out['error'] = f"mygs.solve returned {rc}"
-            return out
+        mygs.solve()
     except Exception as exc:
         out['error'] = f"mygs.solve raised: {exc}"
         return out
