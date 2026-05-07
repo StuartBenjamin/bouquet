@@ -24,6 +24,9 @@ from .TokaMaker_interface import (
     perturb_kinetic_equilibrium,
     generate_bouquet,
     reconstruct_equilibrium,
+    lock_coils_tier3,
+    solve_tier3_equilibrium,
+    compute_tier3_for_bouquet_database,
 )
 
 from .uncertainties import (

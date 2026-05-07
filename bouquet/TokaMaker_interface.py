@@ -1128,6 +1128,13 @@ def generate_bouquet(
     baseline_pfile_bytes=None,
     psi_N_kinetic=None,
     max_proxy_draws=500,
+    compute_tier3=False,
+    tier3_vsc_coils=('F9A', 'F9B'),
+    tier3_uncertainty_frac=0.01,
+    tier3_uncertainty_floor_A=50.0,
+    tier3_coil_reg_weight=1.0,
+    tier3_vsc_reg_weight=100.0,
+    tier3_overwrite=False,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -1204,6 +1211,21 @@ def generate_bouquet(
         Raw p-file content to store alongside each equilibrium.
     Zeff_profile : array-like or None
         1-D effective charge profile to store in HDF5.
+    compute_tier3 : bool
+        After the perturbation loop, run :func:`compute_tier3_for_bouquet_database`
+        on the resulting HDF5 file.  Each draw gets a ``tier3``
+        subgroup with the bounded-VSC forward-mode equilibrium.
+        Default ``False``.
+    tier3_vsc_coils : tuple of str
+        Coil names that compose the VSC pair (default ``('F9A', 'F9B')``).
+    tier3_uncertainty_frac : float
+        Fractional drift bound for the VSC channel (default 0.01).
+    tier3_uncertainty_floor_A : float
+        Absolute drift floor in amperes (default 50.0).
+    tier3_coil_reg_weight, tier3_vsc_reg_weight : float
+        Regularization weights forwarded to :func:`lock_coils_tier3`.
+    tier3_overwrite : bool
+        Replace existing ``tier3`` subgroups in the HDF5 file.
 
     Returns
     -------
@@ -1232,7 +1254,15 @@ def generate_bouquet(
     # Re-solve with the baseline profiles first so the check reflects
     # the reconstruction state (not a corrective-iteration state that
     # may have altered q_0).
-    if constrain_sawteeth:
+    #
+    # When ``compute_tier3=True`` we also do this baseline solve so
+    # the post-pass has a clean recon snapshot (psi, axis Z, and coil
+    # currents) independent of whatever last-iteration state the
+    # perturbation loop leaves on ``mygs``.
+    _tier3_psi_recon = None
+    _tier3_ref_coils = None
+    _tier3_V0_target = None
+    if constrain_sawteeth or compute_tier3:
         _pp_check = {"type": "linterp",
                       "y": np.gradient(pressure) / (np.gradient(psi_N)
                            * (mygs.psi_bounds[1] - mygs.psi_bounds[0])),
@@ -1243,17 +1273,32 @@ def generate_bouquet(
         mygs.set_targets(Ip=initial_Ip_target, pax=pressure[0])
         mygs.set_profiles(pp_prof=_pp_check, ffp_prof=_ffp_check)
         mygs.solve()
-        _, q_baseline_check, _, _, _, _ = mygs.get_q(
-            npsi=len(psi_N), psi_pad=psi_pad
-        )
-        if q_baseline_check[0] < 1.0:
-            print(
-                f"NOTE: Baseline equilibrium has q(0) = {q_baseline_check[0]:.4f} < 1.0 "
-                f"(sawtoothing plasma).\n"
-                f"      Overriding constrain_sawteeth = False so perturbed "
-                f"equilibria are not rejected."
+        if constrain_sawteeth:
+            _, q_baseline_check, _, _, _, _ = mygs.get_q(
+                npsi=len(psi_N), psi_pad=psi_pad
             )
-            constrain_sawteeth = False
+            if q_baseline_check[0] < 1.0:
+                print(
+                    f"NOTE: Baseline equilibrium has q(0) = {q_baseline_check[0]:.4f} < 1.0 "
+                    f"(sawtoothing plasma).\n"
+                    f"      Overriding constrain_sawteeth = False so perturbed "
+                    f"equilibria are not rejected."
+                )
+                constrain_sawteeth = False
+        if compute_tier3:
+            try:
+                _tier3_psi_recon = mygs.get_psi(False).copy()
+                _coils_now, _ = mygs.get_coil_currents()
+                _tier3_ref_coils = {k: float(v) for k, v in _coils_now.items()}
+                _tier3_V0_target = float(mygs.o_point[1])
+                print(
+                    f"[tier3] captured recon snapshot: "
+                    f"axis_Z={_tier3_V0_target:+.4f} m, "
+                    f"{len(_tier3_ref_coils)} coils."
+                )
+            except Exception as exc:
+                print(f"[tier3] WARNING: recon snapshot capture failed: {exc}")
+                compute_tier3 = False
 
     # Pre-compute jBS scale factors for the whole batch (if requested).
     # Uses a uniform distribution within the specified range so that
@@ -1553,6 +1598,34 @@ def generate_bouquet(
 
     if pbar is not None:
         pbar.close()
+
+    # ---- Tier-3 post-pass: bounded-VSC forward solve per draw -----
+    if compute_tier3:
+        if _tier3_psi_recon is None or _tier3_ref_coils is None:
+            print("[tier3] skipped post-pass: recon snapshot was not captured.")
+        else:
+            db_path = os.path.abspath(f"{header}.h5")
+            print(f"\n[tier3] starting post-pass on {db_path}")
+            try:
+                compute_tier3_for_bouquet_database(
+                    mygs,
+                    db_path=db_path,
+                    ref_coil_currents=_tier3_ref_coils,
+                    psi_recon=_tier3_psi_recon,
+                    Ip_target=initial_Ip_target,
+                    V0_target=_tier3_V0_target,
+                    vsc_coils=tier3_vsc_coils,
+                    uncertainty_frac=tier3_uncertainty_frac,
+                    uncertainty_floor_A=tier3_uncertainty_floor_A,
+                    coil_reg_weight=tier3_coil_reg_weight,
+                    vsc_reg_weight=tier3_vsc_reg_weight,
+                    overwrite=tier3_overwrite,
+                    verbose=True,
+                )
+            except Exception as exc:
+                import traceback
+                print(f"[tier3] post-pass failed: {exc}")
+                traceback.print_exc()
 
     return all_diagnostics
 
@@ -2135,3 +2208,528 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         'li_final': final_li,
         'quality': quality,
     }
+
+
+# ====================================================================
+#  Tier 3 -- bounded-VSC forward-mode equilibrium helpers
+# --------------------------------------------------------------------
+#  Premise
+#  -------
+#  All real coils softly pinned to baseline values.  The VSC channel
+#  (F9A/F9B antisymmetric pair on DIII-D) is allowed to drift by an
+#  amount calibrated against DIII-D's coil-current measurement
+#  uncertainty (typically 1-2 percent).  No fictitious flux is
+#  introduced; vertical stability is provided by real coils, with
+#  drift magnitudes bounded by the regularization weight on
+#  ``vcontrol_val``.
+#
+#  Caller responsibilities
+#  -----------------------
+#  Before invoking these helpers, configure ``mygs`` with mesh,
+#  regions, ``mygs.setup``, isoflux constraints, and the VSC pair via
+#  ``mygs.set_coil_vsc({'F9A': 1.0, 'F9B': -1.0})``.  This module only
+#  wires the regularization, profiles, and targets for each draw.
+# ====================================================================
+
+def _vsc_drift_band_A(ref_coil_currents, vsc_coils,
+                      uncertainty_frac, uncertainty_floor_A):
+    """Allowed drift envelope (A) per VSC coil.
+
+    Returns ``max(uncertainty_frac * |I_baseline|_max, uncertainty_floor_A)``,
+    so small baseline currents fall back to the absolute floor rather
+    than collapsing to an unphysically tight pin.
+    """
+    base_max = max(
+        (abs(float(ref_coil_currents.get(c, 0.0))) for c in vsc_coils),
+        default=0.0,
+    )
+    return float(max(uncertainty_frac * base_max, uncertainty_floor_A))
+
+
+def lock_coils_tier3(
+    mygs,
+    ref_coil_currents,
+    vsc_coils=('F9A', 'F9B'),
+    coil_reg_weight=1.0,
+    vsc_reg_weight=100.0,
+):
+    r"""Soft-pin every real coil at baseline; bound the VSC channel.
+
+    Each real coil in ``mygs.coil_sets`` is pinned at its baseline
+    value with weight ``coil_reg_weight``.  The vertical stabilization
+    coil (VSC) channel is regularized via the pseudo-coil ``#VSC``
+    with weight ``vsc_reg_weight``.  Larger ``vsc_reg_weight`` yields
+    smaller F9 drift; the appropriate value depends on the case-
+    specific vertical force and is best determined empirically by
+    inspecting the post-solve drift diagnostic.
+
+    Parameters
+    ----------
+    mygs : TokaMaker
+        Solver object with ``coil_sets`` populated.
+    ref_coil_currents : dict
+        Baseline coil currents ``{name: current_A}`` (recon state).
+    vsc_coils : tuple of str
+        Coil names that compose the VSC pair (used for drift
+        bookkeeping; the regularization itself acts on
+        ``vcontrol_val``).
+    coil_reg_weight : float
+        Soft-pinning weight for each real coil (default 1.0).
+    vsc_reg_weight : float
+        Regularization weight on ``vcontrol_val`` (default 100.0).
+
+    Returns
+    -------
+    rt : list
+        Regularization-term list installed via ``set_coil_reg``.
+    """
+    rt = []
+    for n in mygs.coil_sets:
+        target = float(ref_coil_currents.get(n, 0.0))
+        rt.append(mygs.coil_reg_term(
+            {n: 1.0}, target=target, weight=float(coil_reg_weight)))
+    rt.append(mygs.coil_reg_term(
+        {'#VSC': 1.0}, target=0.0, weight=float(vsc_reg_weight)))
+    mygs.set_coil_reg(reg_terms=rt)
+    return rt
+
+
+def solve_tier3_equilibrium(
+    mygs,
+    ref_coil_currents,
+    pp_prof,
+    ffp_prof,
+    Ip_target,
+    pax_target,
+    psi_snapshot=None,
+    V0_target=None,
+    vsc_coils=('F9A', 'F9B'),
+    uncertainty_frac=0.01,
+    uncertainty_floor_A=50.0,
+    coil_reg_weight=1.0,
+    vsc_reg_weight=100.0,
+    li_pad_seq=(1e-3, 5e-3, 1e-2),
+    verbose=False,
+):
+    r"""Solve a single Tier-3 (bounded-VSC) forward equilibrium.
+
+    Runs forward Grad-Shafranov with all real coils softly pinned at
+    baseline and the VSC channel bounded by ``vsc_reg_weight``.
+    Vertical position is enforced by the V0 target (defaults to
+    ``mygs.o_point[1]`` from the warm-start state, which equals the
+    recon's magnetic axis Z when ``psi_snapshot`` is supplied).
+
+    Parameters
+    ----------
+    mygs : TokaMaker
+        Solver, pre-configured with mesh/regions/setup/VSC/isoflux.
+    ref_coil_currents : dict
+        Baseline coil currents (recon state).
+    pp_prof, ffp_prof : dict
+        Profile dicts for ``set_profiles``.  ``pp_prof['y']`` must be
+        normalized against the *current* ``mygs.psi_bounds`` range.
+    Ip_target : float
+        Plasma current target [A].
+    pax_target : float
+        On-axis pressure target [Pa].
+    psi_snapshot : ndarray or None
+        Recon ``psi`` to install as warm start (recommended; prevents
+        cross-draw state drift).
+    V0_target : float or None
+        Magnetic axis Z target [m].  ``None`` defaults to
+        ``mygs.o_point[1]`` after the warm start.
+    vsc_coils : tuple of str
+        VSC coil names for drift bookkeeping (default ('F9A','F9B')).
+    uncertainty_frac : float
+        Fractional drift bound (default 0.01 = 1%).
+    uncertainty_floor_A : float
+        Absolute drift floor in amperes (default 50).
+    coil_reg_weight, vsc_reg_weight : float
+        Regularization weights (see :func:`lock_coils_tier3`).
+    li_pad_seq : tuple of float
+        ``lcfs_pad`` values to try for ``l_i``; first finite result wins.
+    verbose : bool
+        Print solve progress.
+
+    Returns
+    -------
+    dict
+        Keys: ``ok``, ``error``, ``axis_R``, ``axis_Z``,
+        ``centroid_R``, ``centroid_Z``, ``Ip``, ``l_i``,
+        ``li_pad_used``, ``coil_currents``, ``vsc_drifts_A``,
+        ``vsc_drift_band_A``, ``vsc_within_bounds``,
+        ``max_coil_drift_A``, ``lcfs_R``, ``lcfs_Z``.
+    """
+    out = {
+        'ok': False,
+        'error': None,
+        'axis_R': float('nan'),
+        'axis_Z': float('nan'),
+        'centroid_R': float('nan'),
+        'centroid_Z': float('nan'),
+        'Ip': float('nan'),
+        'l_i': float('nan'),
+        'li_pad_used': float('nan'),
+        'coil_currents': {},
+        'vsc_drifts_A': {},
+        'vsc_drift_band_A': float('nan'),
+        'vsc_within_bounds': False,
+        'max_coil_drift_A': float('nan'),
+        'lcfs_R': None,
+        'lcfs_Z': None,
+    }
+
+    drift_band = _vsc_drift_band_A(
+        ref_coil_currents, vsc_coils,
+        uncertainty_frac, uncertainty_floor_A)
+    out['vsc_drift_band_A'] = drift_band
+
+    # Warm start from recon snapshot (if provided).
+    if psi_snapshot is not None:
+        try:
+            mygs.set_psi(psi_snapshot)
+        except Exception as exc:
+            if verbose:
+                print(f"  [tier3] set_psi warm start failed: {exc}")
+
+    # V0 (axis Z) target
+    if V0_target is None:
+        try:
+            V0 = float(mygs.o_point[1])
+        except Exception:
+            V0 = 0.0
+    else:
+        V0 = float(V0_target)
+
+    # Regularization
+    try:
+        lock_coils_tier3(
+            mygs,
+            ref_coil_currents,
+            vsc_coils=vsc_coils,
+            coil_reg_weight=coil_reg_weight,
+            vsc_reg_weight=vsc_reg_weight,
+        )
+    except Exception as exc:
+        out['error'] = f"lock_coils_tier3 failed: {exc}"
+        return out
+
+    # Targets and profiles
+    try:
+        mygs.set_targets(Ip=Ip_target, pax=pax_target, V0=V0)
+        mygs.set_profiles(pp_prof=pp_prof, ffp_prof=ffp_prof)
+    except Exception as exc:
+        out['error'] = f"set_targets/set_profiles failed: {exc}"
+        return out
+
+    # Solve
+    try:
+        rc = mygs.solve()
+        if rc < 0:
+            out['error'] = f"mygs.solve returned {rc}"
+            return out
+    except Exception as exc:
+        out['error'] = f"mygs.solve raised: {exc}"
+        return out
+
+    # Diagnostics
+    try:
+        coil_dict, _ = mygs.get_coil_currents()
+        out['coil_currents'] = {k: float(v) for k, v in coil_dict.items()}
+
+        drifts = {}
+        for name, base in ref_coil_currents.items():
+            drifts[name] = float(coil_dict.get(name, 0.0)) - float(base)
+        out['vsc_drifts_A'] = {c: float(drifts.get(c, 0.0)) for c in vsc_coils}
+        out['max_coil_drift_A'] = (
+            max(abs(d) for d in drifts.values()) if drifts else 0.0)
+        out['vsc_within_bounds'] = bool(all(
+            abs(out['vsc_drifts_A'].get(c, 0.0)) <= drift_band
+            for c in vsc_coils
+        ))
+
+        try:
+            out['axis_R'] = float(mygs.o_point[0])
+            out['axis_Z'] = float(mygs.o_point[1])
+        except Exception:
+            pass
+
+        try:
+            stats = mygs.get_stats(li_normalization='std',
+                                    lcfs_pad=li_pad_seq[0])
+            out['Ip'] = float(stats.get('Ip', float('nan')))
+            R0_, Z0_ = stats.get('R_geo', float('nan')), stats.get('Z_geo', float('nan'))
+            if np.isfinite(R0_):
+                out['centroid_R'] = float(R0_)
+            if np.isfinite(Z0_):
+                out['centroid_Z'] = float(Z0_)
+        except Exception:
+            pass
+
+        # l_i with progressive pad fallback
+        for pad in li_pad_seq:
+            try:
+                stats = mygs.get_stats(li_normalization='std', lcfs_pad=pad)
+                li_val = stats.get('l_i', float('nan'))
+                if np.isfinite(li_val):
+                    out['l_i'] = float(li_val)
+                    out['li_pad_used'] = float(pad)
+                    if not np.isfinite(out['Ip']):
+                        out['Ip'] = float(stats.get('Ip', float('nan')))
+                    break
+            except Exception:
+                continue
+
+        # LCFS contour
+        try:
+            psi_arr = mygs.get_psi(False)
+            psi_lcfs = float(mygs.psi_bounds[0])
+            fig_tmp, ax_tmp = plt.subplots(1, 1)
+            try:
+                cs = ax_tmp.tricontour(
+                    mygs.r[:, 0], mygs.r[:, 1], mygs.lc, psi_arr,
+                    levels=[psi_lcfs])
+                segs = [v for seg in cs.allsegs
+                        for v in seg if len(v) > 4]
+            finally:
+                plt.close(fig_tmp)
+            if segs:
+                pts = max(segs, key=len)
+                out['lcfs_R'] = pts[:, 0].astype(np.float64)
+                out['lcfs_Z'] = pts[:, 1].astype(np.float64)
+        except Exception:
+            pass
+
+        out['ok'] = True
+    except Exception as exc:
+        out['error'] = f"diagnostics failed: {exc}"
+
+    return out
+
+
+def compute_tier3_for_bouquet_database(
+    mygs,
+    db_path,
+    ref_coil_currents,
+    psi_recon,
+    Ip_target=None,
+    V0_target=None,
+    vsc_coils=('F9A', 'F9B'),
+    uncertainty_frac=0.01,
+    uncertainty_floor_A=50.0,
+    coil_reg_weight=1.0,
+    vsc_reg_weight=100.0,
+    overwrite=False,
+    verbose=True,
+):
+    r"""Apply Tier-3 forward solve to every draw in a bouquet HDF5 file.
+
+    For each entry, reads the stored pressure and ``j_phi`` profiles,
+    runs :func:`solve_tier3_equilibrium`, and stores the diagnostic
+    output under a ``tier3`` subgroup.  Skips entries that already
+    contain a ``tier3`` subgroup unless ``overwrite=True``.
+
+    Parameters
+    ----------
+    mygs : TokaMaker
+        Solver, configured exactly as for the original bouquet run.
+    db_path : str
+        Absolute path to the ``.h5`` database written by
+        :func:`generate_bouquet`.
+    ref_coil_currents : dict
+        Baseline coil currents (recon state).
+    psi_recon : ndarray
+        Recon ``psi`` snapshot used as warm start.
+    Ip_target : float or None
+        Plasma current target [A].  If ``None``, read from each draw's
+        baseline group attribute ``Ip_target``.
+    V0_target : float or None
+        Recon magnetic axis Z [m].  ``None`` -> ``mygs.o_point[1]``
+        after warm-start.
+    vsc_coils, uncertainty_frac, uncertainty_floor_A,
+    coil_reg_weight, vsc_reg_weight :
+        Forwarded to :func:`solve_tier3_equilibrium`.
+    overwrite : bool
+        Replace existing ``tier3`` subgroups (default False).
+    verbose : bool
+        Print per-draw status lines.
+
+    Returns
+    -------
+    summary : dict
+        ``{n_total, n_solved, n_within_bounds, n_failed, db_path}``.
+    """
+    import h5py
+
+    n_total = 0
+    n_solved = 0
+    n_within = 0
+    n_failed = 0
+
+    with h5py.File(db_path, 'a') as hf:
+        # Discover all entries (flat or scan layout).
+        entry_paths = []
+        scan_ip_targets = {}  # scan_key -> Ip_target attr
+
+        if 'scan' in hf:
+            for skey in hf['scan']:
+                grp = hf[f'scan/{skey}']
+                bl = grp.get('_baseline')
+                if bl is not None and 'Ip_target' in bl.attrs:
+                    scan_ip_targets[skey] = float(bl.attrs['Ip_target'])
+                for ckey in grp:
+                    if ckey.isdigit():
+                        entry_paths.append(
+                            (f'scan/{skey}/{ckey}', skey))
+
+        flat_ip_target = None
+        if '_baseline' in hf and 'Ip_target' in hf['_baseline'].attrs:
+            flat_ip_target = float(hf['_baseline'].attrs['Ip_target'])
+        for top in hf:
+            if top.isdigit():
+                entry_paths.append((top, None))
+
+        n_total = len(entry_paths)
+        if verbose:
+            print(f"[tier3] {n_total} entries in "
+                  f"{os.path.basename(db_path)}")
+
+        for ipath, (gpath, skey) in enumerate(entry_paths):
+            grp = hf[gpath]
+
+            if 'tier3' in grp:
+                if overwrite:
+                    del grp['tier3']
+                else:
+                    if verbose:
+                        print(f"  [{ipath+1}/{n_total}] {gpath}: "
+                              f"tier3 exists, skipping")
+                    continue
+
+            try:
+                psi_N_d = grp['psi_N'][:]
+                jphi_d = grp['j_phi [A m^-2]'][:]
+                pres_d = (grp['pressure [Pa]'][:]
+                          if 'pressure [Pa]' in grp else None)
+            except Exception as exc:
+                if verbose:
+                    print(f"  [{ipath+1}/{n_total}] {gpath}: "
+                          f"read failed ({exc})")
+                n_failed += 1
+                continue
+
+            if pres_d is None:
+                if verbose:
+                    print(f"  [{ipath+1}/{n_total}] {gpath}: "
+                          f"no 'pressure [Pa]', skipping")
+                n_failed += 1
+                continue
+
+            # Pick Ip_target: explicit arg > scan-baseline > flat-baseline.
+            if Ip_target is not None:
+                ip_t = float(Ip_target)
+            elif skey is not None and skey in scan_ip_targets:
+                ip_t = scan_ip_targets[skey]
+            elif flat_ip_target is not None:
+                ip_t = flat_ip_target
+            else:
+                if verbose:
+                    print(f"  [{ipath+1}/{n_total}] {gpath}: "
+                          f"no Ip_target available, skipping")
+                n_failed += 1
+                continue
+
+            # Build profile dicts using the *current* mygs psi_range
+            # (which after psi_snapshot install is the recon's range).
+            # The audit-inputs lesson notes residual error if draws
+            # have meaningfully different psi_ranges from the recon;
+            # for typical DIII-D bouquet sweeps this error is small.
+            psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
+            pp_y = np.gradient(pres_d) / (np.gradient(psi_N_d) * psi_range)
+            pp_y[-1] = 0.0
+            pp_prof = {'type': 'linterp', 'y': pp_y, 'x': psi_N_d}
+            ffp_prof = {'type': 'jphi-linterp',
+                         'y': jphi_d.copy(), 'x': psi_N_d}
+
+            res = solve_tier3_equilibrium(
+                mygs,
+                ref_coil_currents=ref_coil_currents,
+                pp_prof=pp_prof,
+                ffp_prof=ffp_prof,
+                Ip_target=ip_t,
+                pax_target=float(pres_d[0]),
+                psi_snapshot=psi_recon,
+                V0_target=V0_target,
+                vsc_coils=vsc_coils,
+                uncertainty_frac=uncertainty_frac,
+                uncertainty_floor_A=uncertainty_floor_A,
+                coil_reg_weight=coil_reg_weight,
+                vsc_reg_weight=vsc_reg_weight,
+                verbose=False,
+            )
+
+            t3 = grp.create_group('tier3')
+            t3.attrs['ok'] = bool(res['ok'])
+            t3.attrs['error'] = (
+                '' if res['error'] is None else str(res['error']))
+            for k in ('axis_R', 'axis_Z', 'centroid_R', 'centroid_Z',
+                      'Ip', 'l_i', 'li_pad_used',
+                      'vsc_drift_band_A', 'max_coil_drift_A'):
+                t3.attrs[k] = float(res[k])
+            t3.attrs['vsc_within_bounds'] = bool(res['vsc_within_bounds'])
+            t3.attrs['uncertainty_frac'] = float(uncertainty_frac)
+            t3.attrs['uncertainty_floor_A'] = float(uncertainty_floor_A)
+            t3.attrs['vsc_reg_weight'] = float(vsc_reg_weight)
+            t3.attrs['coil_reg_weight'] = float(coil_reg_weight)
+
+            if res['coil_currents']:
+                cg = t3.create_group('coil_currents_A')
+                for k, v in res['coil_currents'].items():
+                    cg.attrs[k] = float(v)
+            if res['vsc_drifts_A']:
+                dg = t3.create_group('vsc_drifts_A')
+                for k, v in res['vsc_drifts_A'].items():
+                    dg.attrs[k] = float(v)
+            if res['lcfs_R'] is not None and res['lcfs_Z'] is not None:
+                t3.create_dataset('lcfs_R',
+                                   data=np.asarray(res['lcfs_R'],
+                                                    dtype=np.float64))
+                t3.create_dataset('lcfs_Z',
+                                   data=np.asarray(res['lcfs_Z'],
+                                                    dtype=np.float64))
+
+            if res['ok']:
+                n_solved += 1
+                if res['vsc_within_bounds']:
+                    n_within += 1
+                if verbose:
+                    drift_str = ', '.join(
+                        f"{c}={d:+.0f}A"
+                        for c, d in res['vsc_drifts_A'].items())
+                    flag = 'IN ' if res['vsc_within_bounds'] else 'OUT'
+                    print(f"  [{ipath+1}/{n_total}] {gpath}: ok  "
+                          f"axis=({res['axis_R']:.3f},"
+                          f"{res['axis_Z']:+.3f})  "
+                          f"l_i={res['l_i']:.3f}  "
+                          f"drift({drift_str})  "
+                          f"band=+/-{res['vsc_drift_band_A']:.0f}A  "
+                          f"[{flag}]")
+            else:
+                n_failed += 1
+                if verbose:
+                    print(f"  [{ipath+1}/{n_total}] {gpath}: "
+                          f"FAILED ({res['error']})")
+
+    summary = {
+        'n_total': n_total,
+        'n_solved': n_solved,
+        'n_within_bounds': n_within,
+        'n_failed': n_failed,
+        'db_path': db_path,
+    }
+    if verbose:
+        print(f"[tier3] done: {n_solved}/{n_total} solved, "
+              f"{n_within}/{n_solved} within +/-"
+              f"{uncertainty_frac*100:.1f}% bound, "
+              f"{n_failed} failed")
+    return summary
