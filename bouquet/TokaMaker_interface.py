@@ -928,6 +928,211 @@ def solve_tier2_phantom_equilibrium(
     return out
 
 
+def compute_tier2_for_bouquet_database(
+    mygs,
+    db_path,
+    ref_coil_currents,
+    psi_recon,
+    phantom_R=None,
+    phantom_dZ=0.6,
+    phantom_gain=1.0e6,
+    scan_val=None,
+    verbose=True,
+):
+    r"""Append Tier-2 phantom-VSC equilibria to every draw in a bouquet HDF5
+    database.
+
+    For each ``/scan/<scan_val>/<count>/`` group that has the required
+    inverse-mode result fields (``psi_N``, ``pressure [Pa]``,
+    ``j_phi [A m^-2]``), compute the Tier-2 equilibrium via
+    :func:`solve_tier2_phantom_equilibrium` and append a ``tier2``
+    subgroup with the result.  Existing ``tier2`` subgroups are
+    overwritten.
+
+    Side effect on ``mygs``: leaves it in forward+phantom mode after the
+    last successful Tier-2 solve.  Caller should restore inverse-mode
+    state if the same ``mygs`` will be reused for inverse-mode work
+    afterward.
+
+    Parameters
+    ----------
+    mygs : TokaMaker
+        Solver, post-recon (with ``set_coil_vsc`` declared).
+    db_path : str
+        Path to bouquet HDF5 database (typically ``f"{header}.h5"``).
+    ref_coil_currents : dict
+        ``{coil_name: current_A}`` — values to pin every real coil to.
+        Typically the un-locked recon-baseline coil currents.
+    psi_recon : ndarray
+        Snapshot of recon's psi (``mygs.get_psi(normalized=False)``
+        captured after recon).  Used to reset solver state between
+        draws so basin behaviour is reproducible.
+    phantom_R, phantom_dZ, phantom_gain
+        Phantom-VSC config; see :func:`solve_tier2_phantom_equilibrium`.
+    scan_val : str, float, int, or None
+        Scan-point label matching ``store_equilibrium``'s argument.
+        ``None`` for the flat (no-scan) layout; matches whatever
+        ``generate_bouquet`` used.
+    verbose : bool
+        Print per-draw outcome.
+
+    Returns
+    -------
+    dict with summary stats: ``n_draws``, ``n_ok``, ``n_fail``,
+    ``max_coil_drift_A_seen`` (over all draws — should be ~0 for any
+    healthy phantom-mode run).
+    """
+    import h5py
+    if not os.path.isfile(db_path):
+        raise FileNotFoundError(db_path)
+
+    # Group prefix that store_equilibrium uses
+    if scan_val is None:
+        scan_prefix = "/scan/0"
+    elif isinstance(scan_val, (str,)):
+        scan_prefix = f"/scan/{scan_val}"
+    else:
+        scan_prefix = f"/scan/{scan_val}"
+
+    n_ok = 0
+    n_fail = 0
+    n_total = 0
+    max_drift_seen = 0.0
+
+    with h5py.File(db_path, "a") as hf:
+        if scan_prefix not in hf:
+            raise RuntimeError(
+                f"{db_path} has no group {scan_prefix!r}. "
+                f"Did the bouquet run finish successfully?")
+        scan_grp = hf[scan_prefix]
+        # iterate per-draw groups (numeric keys)
+        draw_keys = sorted(
+            [k for k in scan_grp.keys() if k.isdigit()],
+            key=lambda k: int(k))
+
+        for k in draw_keys:
+            d = scan_grp[k]
+            # Required fields
+            if not all(name in d for name in
+                       ("psi_N", "pressure [Pa]", "j_phi [A m^-2]")):
+                if verbose:
+                    print(f"  draw {k}: missing required fields, skipping")
+                continue
+            n_total += 1
+            psi_N_d = d["psi_N"][:]
+            pressure_d = d["pressure [Pa]"][:]
+            jphi_d = d["j_phi [A m^-2]"][:]
+            Ip_attr = d.attrs.get("Ip_target_A", None)
+            if Ip_attr is None:
+                # Fall back: use the un-perturbed mygs's notion via reference
+                # ref_coil_currents-mode Ip; bouquet typically holds Ip
+                # constant across draws so any draw's stored equilibrium Ip
+                # is fine to use as the target.
+                Ip_target = float(d.attrs.get("Ip_A", 0.0)) or None
+            else:
+                Ip_target = float(Ip_attr)
+            # If we still don't have an Ip target, derive from the
+            # j_phi profile by global integration via mygs (after the
+            # solve, get_globals() returns the real Ip; for the input
+            # target we can use the typical bouquet pattern of holding
+            # Ip constant — the caller must have stored it).  For
+            # robustness here, fall back to summing the j_phi profile
+            # weighted appropriately is overkill; require the attr or
+            # keep using mygs's idea via a freshly-converged state.
+            if not Ip_target:
+                # As a last resort, rely on mygs's last-recon Ip target
+                # (the helper's set_targets will then accept it).
+                Ip_o, _, _, _, _, _, _ = mygs.get_globals()
+                Ip_target = float(abs(Ip_o))
+
+            # Build OFT-format profile dicts.  Use this draw's psi_range
+            # via a fresh computation: pp_y in OFT is dp/dpsi where psi
+            # spans [psi_axis, psi_LCFS].  The helper's set_psi(psi_recon)
+            # at start sets mygs.psi_bounds back to the recon's range,
+            # which is what we use for the normalisation -- this matches
+            # the perturb_kinetic_equilibrium internal convention (pp_y
+            # is computed against the current psi_range each iteration).
+            psi_range_recon = (
+                mygs.psi_bounds[1] - mygs.psi_bounds[0]
+            )
+            pp_y = (
+                np.gradient(pressure_d) /
+                (np.gradient(psi_N_d) * psi_range_recon)
+            )
+            pp_y[-1] = 0.0
+            pp_prof_d = {"type": "linterp", "y": pp_y, "x": psi_N_d}
+            ffp_prof_d = {"type": "jphi-linterp",
+                          "y": jphi_d.copy(), "x": psi_N_d}
+
+            tier2 = solve_tier2_phantom_equilibrium(
+                mygs,
+                ref_coil_currents=ref_coil_currents,
+                pp_prof=pp_prof_d, ffp_prof=ffp_prof_d,
+                Ip_target=Ip_target,
+                pax_target=float(pressure_d[0]),
+                psi_snapshot=psi_recon,
+                phantom_R=phantom_R,
+                phantom_dZ=phantom_dZ,
+                phantom_gain=phantom_gain,
+            )
+
+            # Overwrite existing tier2 subgroup if present
+            t2_path = f"{scan_prefix}/{k}/tier2"
+            if t2_path in hf:
+                del hf[t2_path]
+            t2 = hf.create_group(t2_path)
+            t2.attrs["ok"] = bool(tier2["ok"])
+            if tier2["error"] is not None:
+                t2.attrs["error"] = str(tier2["error"])
+            if tier2["ok"]:
+                n_ok += 1
+                t2.attrs["Ip_A"] = float(tier2["Ip"])
+                t2.attrs["axis_R_m"] = float(tier2["axis_R"])
+                t2.attrs["axis_Z_m"] = float(tier2["axis_Z"])
+                t2.attrs["centroid_R_m"] = float(tier2["centroid_R"])
+                t2.attrs["centroid_Z_m"] = float(tier2["centroid_Z"])
+                t2.attrs["l_i"] = float(tier2["l_i"])
+                if tier2.get("li_pad_used") is not None:
+                    t2.attrs["lcfs_pad_used"] = float(tier2["li_pad_used"])
+                t2.attrs["pax_target_Pa"] = float(tier2["pax"])
+                t2.attrs["max_coil_drift_A"] = float(tier2["max_coil_drift_A"])
+                max_drift_seen = max(max_drift_seen,
+                                     float(tier2["max_coil_drift_A"]))
+                # Coil currents (full dict serialised consistent with
+                # store_equilibrium's pattern)
+                if tier2["coil_currents"] is not None:
+                    import json
+                    names = list(tier2["coil_currents"].keys())
+                    values = np.array([tier2["coil_currents"][n]
+                                       for n in names],
+                                       dtype=np.float64)
+                    t2.create_dataset("coil_currents [A]", data=values)
+                    t2.attrs["coil_names"] = json.dumps(names)
+                if tier2["lcfs_R"] is not None:
+                    t2.create_dataset(
+                        "lcfs_R [m]",
+                        data=np.asarray(tier2["lcfs_R"], dtype=np.float64))
+                    t2.create_dataset(
+                        "lcfs_Z [m]",
+                        data=np.asarray(tier2["lcfs_Z"], dtype=np.float64))
+                if verbose:
+                    print(f"  draw {k}: OK  Ip={tier2['Ip']:.0f}  "
+                          f"axis_Z={tier2['axis_Z']:+.5f}  "
+                          f"l_i={tier2['l_i']:.4f}  "
+                          f"max_coil_drift={tier2['max_coil_drift_A']:.1f} A")
+            else:
+                n_fail += 1
+                if verbose:
+                    print(f"  draw {k}: FAIL  {tier2['error']}")
+
+    return {
+        "n_draws": n_total,
+        "n_ok": n_ok,
+        "n_fail": n_fail,
+        "max_coil_drift_A_seen": max_drift_seen,
+    }
+
+
 def psi_boundary_deviation(mygs, ref_R, ref_Z):
     r"""Spatial deviation of the current LCFS from reference points.
 
@@ -1781,6 +1986,10 @@ def generate_bouquet(
     coil_drift_threshold_A=None,
     boundary_max_threshold_mm=None,
     xpoint_max_threshold_mm=None,
+    compute_tier2=False,
+    phantom_R=None,
+    phantom_dZ=0.6,
+    phantom_gain=1.0e6,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -1913,6 +2122,22 @@ def generate_bouquet(
         with a boundary-only filter — sparse isoflux can let the
         X-point cusp drift even when the upper LCFS stays close to
         baseline.  Default ``None`` (no filter).
+    compute_tier2 : bool
+        If ``True``, after the main perturbation loop completes, run a
+        post-pass that computes a Tier-2 phantom-VSC equilibrium for
+        each successful draw — pinning every real coil to the
+        un-locked recon-baseline value (no F9 drift) with a phantom
+        VSC providing numerical Z-anchoring.  Results are appended
+        as a ``tier2`` subgroup in each draw's HDF5 group.  Requires
+        an OpenFUSIONToolkit build that exposes
+        ``mygs.set_phantom_vsc`` (the ``feat/phantom-vsc`` branch or
+        successor).  Default ``False``.
+    phantom_R, phantom_dZ, phantom_gain : float
+        Phantom-VSC config used when ``compute_tier2=True``.
+        ``phantom_R=None`` (default) auto-derives from
+        ``mygs.o_point[0]``.  ``phantom_dZ=0.6`` and
+        ``phantom_gain=1e6`` are DIII-D-tuned defaults.  See
+        :func:`solve_tier2_phantom_equilibrium` for details.
 
     Returns
     -------
@@ -1946,7 +2171,12 @@ def generate_bouquet(
     ref_lcfs_R = None
     ref_lcfs_Z = None
     ref_x_points = None
-    if constrain_sawteeth or lock_coils:
+    # Snapshots needed for compute_tier2 (post-loop Tier-2 batch).  Captured
+    # off the baseline solve below, which gives the un-locked recon-baseline
+    # state (true reconstruction equilibrium with un-perturbed profiles).
+    _psi_recon_snapshot = None
+    _ref_coils_for_tier2 = None
+    if constrain_sawteeth or lock_coils or compute_tier2:
         _pp_check = {"type": "linterp",
                       "y": np.gradient(pressure) / (np.gradient(psi_N)
                            * (mygs.psi_bounds[1] - mygs.psi_bounds[0])),
@@ -1957,6 +2187,18 @@ def generate_bouquet(
         mygs.set_targets(Ip=initial_Ip_target, pax=pressure[0])
         mygs.set_profiles(pp_prof=_pp_check, ffp_prof=_ffp_check)
         mygs.solve()
+
+        if compute_tier2:
+            # Capture the un-locked recon equilibrium for Tier-2 reuse.
+            # Must happen BEFORE any lock_coils install (which modifies
+            # both the coil currents and psi via its re-solve).
+            _psi_recon_snapshot = mygs.get_psi(normalized=False)
+            _ref_dict_t2, _ = mygs.get_coil_currents()
+            _ref_coils_for_tier2 = dict(_ref_dict_t2)
+            print(f"[compute_tier2] captured pre-lock baseline: "
+                  f"axis (R, Z) = ({float(mygs.o_point[0]):.4f}, "
+                  f"{float(mygs.o_point[1]):+.5f})  "
+                  f"({len(_ref_coils_for_tier2)} coils to pin)")
 
         if constrain_sawteeth:
             _, q_baseline_check, _, _, _, _ = mygs.get_q(
@@ -2408,6 +2650,44 @@ def generate_bouquet(
 
     if pbar is not None:
         pbar.close()
+
+    # ------------------------------------------------------------------
+    # Optional: post-loop Tier-2 phantom-VSC pass.  For each successful
+    # inverse-mode draw stored in the HDF5, computes the equilibrium
+    # where every real coil is held at the un-locked recon-baseline
+    # value (no F9 drift) with a phantom VSC providing numerical
+    # Z-anchoring.  Appended as a 'tier2' subgroup in each draw's
+    # group.  See bouquet.solve_tier2_phantom_equilibrium for details.
+    # ------------------------------------------------------------------
+    if compute_tier2:
+        if _ref_coils_for_tier2 is None or _psi_recon_snapshot is None:
+            print("[compute_tier2] WARNING: pre-lock baseline snapshot was "
+                  "not captured (no constrain_sawteeth, lock_coils, or "
+                  "compute_tier2 path ran the baseline solve).  Skipping "
+                  "Tier-2 pass.")
+        else:
+            db_path = os.path.abspath(f"{header}.h5")
+            print(f"\n{'='*60}\n  Tier-2 phantom-VSC post-pass on {db_path}\n{'='*60}")
+            try:
+                summary = compute_tier2_for_bouquet_database(
+                    mygs, db_path,
+                    ref_coil_currents=_ref_coils_for_tier2,
+                    psi_recon=_psi_recon_snapshot,
+                    phantom_R=phantom_R,
+                    phantom_dZ=phantom_dZ,
+                    phantom_gain=phantom_gain,
+                    scan_val=scan_val,
+                    verbose=True,
+                )
+                print(f"[compute_tier2] {summary['n_ok']}/{summary['n_draws']} "
+                      f"OK; {summary['n_fail']} failures; "
+                      f"max coil drift seen = "
+                      f"{summary['max_coil_drift_A_seen']:.3f} A "
+                      f"(should be ~0 by construction in phantom mode)")
+            except Exception as e:
+                print(f"[compute_tier2] ERROR during Tier-2 batch pass: {e}")
+                import traceback
+                traceback.print_exc()
 
     return all_diagnostics
 
