@@ -2315,6 +2315,9 @@ def solve_tier3_equilibrium(
     coil_reg_weight=1.0,
     vsc_reg_weight=100.0,
     li_pad_seq=(1e-3, 5e-3, 1e-2),
+    ip_secant=True,
+    ip_tol=5e-4,
+    ip_max_iters=8,
     verbose=False,
 ):
     r"""Solve a single Tier-3 (bounded-VSC) forward equilibrium.
@@ -2358,6 +2361,15 @@ def solve_tier3_equilibrium(
         Regularization weights (see :func:`lock_coils_tier3`).
     li_pad_seq : tuple of float
         ``lcfs_pad`` values to try for ``l_i``; first finite result wins.
+    ip_secant : bool
+        Run an outer secant loop on the Ip target to compensate for
+        the inherent drift introduced by the ``jphi-linterp`` profile
+        type (see comment in ``reconstruct_equilibrium``).  Default
+        True; mirrors the recon's own correction loop.
+    ip_tol : float
+        Relative Ip tolerance for the secant (default 5e-4).
+    ip_max_iters : int
+        Maximum secant iterations (default 8).
     verbose : bool
         Print solve progress.
 
@@ -2420,24 +2432,81 @@ def solve_tier3_equilibrium(
         out['error'] = f"lock_coils_tier3 failed: {exc}"
         return out
 
-    # Targets and profiles
+    # Set the (fixed) profiles once -- the secant loop only varies
+    # the Ip target passed to set_targets, not the profile shapes.
     try:
-        if V0 is None:
-            mygs.set_targets(Ip=Ip_target, pax=pax_target)
-        else:
-            mygs.set_targets(Ip=Ip_target, pax=pax_target, V0=V0)
         mygs.set_profiles(pp_prof=pp_prof, ffp_prof=ffp_prof)
     except Exception as exc:
-        out['error'] = f"set_targets/set_profiles failed: {exc}"
+        out['error'] = f"set_profiles failed: {exc}"
         return out
 
-    # Solve.  TokaMaker.solve() returns None on success and raises
-    # ValueError on failure; do not compare the return value.
-    try:
-        mygs.solve()
-    except Exception as exc:
-        out['error'] = f"mygs.solve raised: {exc}"
+    Ip_desired = float(abs(Ip_target))
+
+    def _set_targets(Ip_trial):
+        if V0 is None:
+            mygs.set_targets(Ip=Ip_trial, pax=pax_target)
+        else:
+            mygs.set_targets(Ip=Ip_trial, pax=pax_target, V0=V0)
+
+    def _solve_and_get_Ip(Ip_trial):
+        """Set Ip target, solve, return actual Ip from get_stats."""
+        try:
+            _set_targets(Ip_trial)
+            mygs.solve()
+        except Exception as exc:
+            return None, str(exc)
+        try:
+            stats = mygs.get_stats(li_normalization='std',
+                                     lcfs_pad=li_pad_seq[0])
+            return float(stats['Ip']), None
+        except Exception as exc:
+            return None, str(exc)
+
+    # First solve at the requested Ip target.
+    Ip_now, err_msg = _solve_and_get_Ip(Ip_desired)
+    if Ip_now is None:
+        out['error'] = f"mygs.solve raised: {err_msg}"
         return out
+
+    # Outer secant loop to compensate for jphi-linterp's geometric
+    # Ip drift.  Mirrors the loop in reconstruct_equilibrium.
+    if ip_secant:
+        Ip_err_rel = abs(Ip_now - Ip_desired) / Ip_desired
+        if verbose:
+            print(f"  [tier3 Ip] iter 0: target={Ip_desired:.0f} "
+                  f"actual={Ip_now:.0f} err={100*Ip_err_rel:+.3f}%")
+        if Ip_err_rel > ip_tol:
+            t0, Ip_0 = Ip_desired, Ip_now
+            # First-order rescaling for the secant's second point.
+            t1 = Ip_desired * (Ip_desired / Ip_now)
+            Ip_1, err_msg = _solve_and_get_Ip(t1)
+            if Ip_1 is None:
+                out['error'] = (f"Ip secant solve failed at "
+                                  f"trial={t1:.0f}: {err_msg}")
+                return out
+
+            for ip_iter in range(2, ip_max_iters + 1):
+                e0 = Ip_0 - Ip_desired
+                e1 = Ip_1 - Ip_desired
+                err_rel = abs(e1) / Ip_desired
+                if verbose:
+                    print(f"  [tier3 Ip] iter {ip_iter-1}: target={t1:.0f} "
+                          f"actual={Ip_1:.0f} err={100*err_rel:+.3f}%")
+                if err_rel < ip_tol:
+                    break
+                denom = e1 - e0
+                if abs(denom) < 1.0:
+                    break
+                t_new = t1 - e1 * (t1 - t0) / denom
+                t_new = max(t_new, 0.5 * Ip_desired)
+                t0, Ip_0 = t1, Ip_1
+                t1 = t_new
+                Ip_1, err_msg = _solve_and_get_Ip(t1)
+                if Ip_1 is None:
+                    if verbose:
+                        print(f"  [tier3 Ip] solve failed at "
+                              f"trial={t1:.0f}, keeping previous result")
+                    break
 
     # Diagnostics
     try:
