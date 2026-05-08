@@ -1128,6 +1128,8 @@ def generate_bouquet(
     baseline_pfile_bytes=None,
     psi_N_kinetic=None,
     max_proxy_draws=500,
+    coil_drift=0.01,
+    coil_drift_floor_A=50.0,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -1204,6 +1206,22 @@ def generate_bouquet(
         Raw p-file content to store alongside each equilibrium.
     Zeff_profile : array-like or None
         1-D effective charge profile to store in HDF5.
+    coil_drift : float or None
+        Symmetric ``+/-coil_drift * |I_baseline|`` hard bounds installed
+        on every coil from the reconstructed (baseline) currents, via
+        ``mygs.set_coil_bounds``.  Default 0.01 (one percent of the
+        reconstructed value -- DIII-D coil-current measurement
+        uncertainty).  Pass ``None`` to disable bounds entirely.
+
+        Bounds remain installed for every perturbed draw.  When a
+        perturbation cannot be solved within the bounds, TokaMaker
+        raises and the draw is skipped; ``mygs`` is reset to the
+        baseline ``(psi, coils)`` snapshot before the next draw.
+    coil_drift_floor_A : float
+        Absolute floor in amperes applied when
+        ``coil_drift * |I_baseline|`` falls below this value (e.g. for
+        a coil that happens to have a tiny baseline current).  Default
+        50.0 A.
 
     Returns
     -------
@@ -1232,7 +1250,15 @@ def generate_bouquet(
     # Re-solve with the baseline profiles first so the check reflects
     # the reconstruction state (not a corrective-iteration state that
     # may have altered q_0).
-    if constrain_sawteeth:
+    # We always run a baseline solve here when ``coil_drift`` bounds are
+    # requested, regardless of ``constrain_sawteeth``, so the recon's
+    # converged ``(psi, coils)`` snapshot is captured cleanly before
+    # any perturbation runs.  The same solve doubles as the q-check
+    # when ``constrain_sawteeth`` is on.
+    _need_baseline_solve = constrain_sawteeth or (coil_drift is not None)
+    _baseline_psi = None
+    _baseline_coils = None
+    if _need_baseline_solve:
         _pp_check = {"type": "linterp",
                       "y": np.gradient(pressure) / (np.gradient(psi_N)
                            * (mygs.psi_bounds[1] - mygs.psi_bounds[0])),
@@ -1243,17 +1269,51 @@ def generate_bouquet(
         mygs.set_targets(Ip=initial_Ip_target, pax=pressure[0])
         mygs.set_profiles(pp_prof=_pp_check, ffp_prof=_ffp_check)
         mygs.solve()
-        _, q_baseline_check, _, _, _, _ = mygs.get_q(
-            npsi=len(psi_N), psi_pad=psi_pad
-        )
-        if q_baseline_check[0] < 1.0:
-            print(
-                f"NOTE: Baseline equilibrium has q(0) = {q_baseline_check[0]:.4f} < 1.0 "
-                f"(sawtoothing plasma).\n"
-                f"      Overriding constrain_sawteeth = False so perturbed "
-                f"equilibria are not rejected."
+        if constrain_sawteeth:
+            _, q_baseline_check, _, _, _, _ = mygs.get_q(
+                npsi=len(psi_N), psi_pad=psi_pad
             )
-            constrain_sawteeth = False
+            if q_baseline_check[0] < 1.0:
+                print(
+                    f"NOTE: Baseline equilibrium has q(0) = {q_baseline_check[0]:.4f} < 1.0 "
+                    f"(sawtoothing plasma).\n"
+                    f"      Overriding constrain_sawteeth = False so perturbed "
+                    f"equilibria are not rejected."
+                )
+                constrain_sawteeth = False
+        if coil_drift is not None:
+            _baseline_psi = mygs.get_psi(False).copy()
+            _coils_now, _ = mygs.get_coil_currents()
+            _baseline_coils = {k: float(v) for k, v in _coils_now.items()}
+            _bounds = {}
+            for _name, _base in _baseline_coils.items():
+                _delta = max(coil_drift * abs(_base),
+                              float(coil_drift_floor_A))
+                _bounds[_name] = [_base - _delta, _base + _delta]
+            # Bound the VSC channel as well.  ``set_coil_bounds`` on
+            # individual F-coils only constrains the *bare* current;
+            # without a ``#VSC`` bound, vcontrol_val can drift freely
+            # and push the total coil current outside the +/-coil_drift
+            # band.  Sizing the VSC bound by the largest VSC-pair
+            # baseline keeps the worst-case total drift on those
+            # coils within roughly +/-2 * coil_drift -- which is the
+            # natural budget for "bare drift + VSC drift".
+            try:
+                _vsc_max_base = max(
+                    abs(_baseline_coils[c]) for c in _baseline_coils
+                    if c in ('F9A', 'F9B'))
+            except ValueError:
+                _vsc_max_base = 0.0
+            _vsc_delta = max(coil_drift * _vsc_max_base,
+                              float(coil_drift_floor_A))
+            _bounds['#VSC'] = [-_vsc_delta, _vsc_delta]
+            mygs.set_coil_bounds(_bounds)
+            print(
+                f"[coil-bounds] installed +/-{coil_drift*100:.2f}% bounds "
+                f"(floor {coil_drift_floor_A:.0f} A) on "
+                f"{len(_baseline_coils)} coils + #VSC; "
+                f"psi+coils snapshot captured."
+            )
 
     # Pre-compute jBS scale factors for the whole batch (if requested).
     # Uses a uniform distribution within the specified range so that
@@ -1388,6 +1448,17 @@ def generate_bouquet(
         except (RuntimeError, ValueError) as e:
             print(f"\n  STOPPED: {e}")
             print(f"  Skipping equilibrium {count+1}/{n_equils}.\n")
+            # When coil_drift bounds are active, restore the baseline
+            # (psi, coils) snapshot so the next draw starts from a
+            # known-good state rather than whatever partial / failed
+            # state the perturbation left behind.
+            if coil_drift is not None and _baseline_psi is not None:
+                try:
+                    mygs.set_coil_currents(_baseline_coils)
+                    mygs.set_psi(_baseline_psi)
+                    print(f"  reset mygs to baseline (psi + coils).")
+                except Exception as _reset_exc:
+                    print(f"  WARN: baseline reset failed: {_reset_exc}")
             if pbar is not None:
                 pbar.update(1)
             continue
