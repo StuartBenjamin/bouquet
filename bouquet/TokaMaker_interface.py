@@ -1132,8 +1132,9 @@ def generate_bouquet(
     tier3_vsc_coils=('F9A', 'F9B'),
     tier3_uncertainty_frac=0.01,
     tier3_uncertainty_floor_A=50.0,
-    tier3_coil_reg_weight=1.0,
-    tier3_vsc_reg_weight=100.0,
+    tier3_use_hard_bounds=True,
+    tier3_soft_reg_weight=1.0,
+    tier3_vsc_soft_reg_weight=100.0,
     tier3_overwrite=False,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
@@ -1222,8 +1223,13 @@ def generate_bouquet(
         Fractional drift bound for the VSC channel (default 0.01).
     tier3_uncertainty_floor_A : float
         Absolute drift floor in amperes (default 50.0).
-    tier3_coil_reg_weight, tier3_vsc_reg_weight : float
-        Regularization weights forwarded to :func:`lock_coils_tier3`.
+    tier3_use_hard_bounds : bool
+        Install hard +/- uncertainty bounds in the post-pass
+        (default True).  When False, only soft regularization is
+        used (legacy diagnostic mode).
+    tier3_soft_reg_weight, tier3_vsc_soft_reg_weight : float
+        Soft regularization weights forwarded to
+        :func:`lock_coils_tier3`.
     tier3_overwrite : bool
         Replace existing ``tier3`` subgroups in the HDF5 file.
 
@@ -1623,8 +1629,9 @@ def generate_bouquet(
                     vsc_coils=tier3_vsc_coils,
                     uncertainty_frac=tier3_uncertainty_frac,
                     uncertainty_floor_A=tier3_uncertainty_floor_A,
-                    coil_reg_weight=tier3_coil_reg_weight,
-                    vsc_reg_weight=tier3_vsc_reg_weight,
+                    use_hard_bounds=tier3_use_hard_bounds,
+                    soft_reg_weight=tier3_soft_reg_weight,
+                    vsc_soft_reg_weight=tier3_vsc_soft_reg_weight,
                     overwrite=tier3_overwrite,
                     verbose=True,
                 )
@@ -2256,18 +2263,26 @@ def lock_coils_tier3(
     mygs,
     ref_coil_currents,
     vsc_coils=('F9A', 'F9B'),
-    coil_reg_weight=1.0,
-    vsc_reg_weight=100.0,
+    uncertainty_frac=0.01,
+    uncertainty_floor_A=50.0,
+    use_hard_bounds=True,
+    soft_reg_weight=1.0,
+    vsc_soft_reg_weight=100.0,
 ):
-    r"""Soft-pin every real coil at baseline; bound the VSC channel.
+    r"""Pin every real coil at baseline within a +/- uncertainty band.
 
-    Each real coil in ``mygs.coil_sets`` is pinned at its baseline
-    value with weight ``coil_reg_weight``.  The vertical stabilization
-    coil (VSC) channel is regularized via the pseudo-coil ``#VSC``
-    with weight ``vsc_reg_weight``.  Larger ``vsc_reg_weight`` yields
-    smaller F9 drift; the appropriate value depends on the case-
-    specific vertical force and is best determined empirically by
-    inspecting the post-solve drift diagnostic.
+    By default this installs **hard inequality bounds** on every real
+    coil and on the VSC channel via ``mygs.set_coil_bounds``.  The
+    bounds are ``baseline +/- max(uncertainty_frac * |baseline|,
+    uncertainty_floor_A)``, so each coil is constrained to within a
+    physically meaningful uncertainty window (DIII-D's ~1-2 % coil-
+    current measurement uncertainty by default).
+
+    A weak soft regularization toward baseline is also installed.  The
+    soft penalty acts as a tiebreaker that nudges coils toward
+    baseline within the feasible region, but does not fight the
+    bounds.  When ``use_hard_bounds=False`` only the soft penalty
+    is installed -- this is the legacy behavior, kept for diagnostics.
 
     Parameters
     ----------
@@ -2277,27 +2292,52 @@ def lock_coils_tier3(
         Baseline coil currents ``{name: current_A}`` (recon state).
     vsc_coils : tuple of str
         Coil names that compose the VSC pair (used for drift
-        bookkeeping; the regularization itself acts on
-        ``vcontrol_val``).
-    coil_reg_weight : float
-        Soft-pinning weight for each real coil (default 1.0).
-    vsc_reg_weight : float
-        Regularization weight on ``vcontrol_val`` (default 100.0).
+        bookkeeping and for sizing the ``#VSC`` band).
+    uncertainty_frac : float
+        Fractional bound, default 0.01 (1 %).
+    uncertainty_floor_A : float
+        Absolute floor in amperes, default 50.0; applied so coils
+        with tiny baselines do not collapse to unphysically tight
+        windows.
+    use_hard_bounds : bool
+        Install hard inequality bounds via ``set_coil_bounds``.
+        Default True.  Set False to fall back to soft-only pinning.
+    soft_reg_weight : float
+        Soft regularization weight for each real coil (default 1.0).
+    vsc_soft_reg_weight : float
+        Soft regularization weight on ``vcontrol_val`` (default 100).
 
     Returns
     -------
-    rt : list
-        Regularization-term list installed via ``set_coil_reg``.
+    bounds : dict or None
+        The bounds dict installed (``None`` if ``use_hard_bounds``
+        is False).
     """
+    drift_band = _vsc_drift_band_A(
+        ref_coil_currents, vsc_coils, uncertainty_frac, uncertainty_floor_A)
+
+    bounds = None
+    if use_hard_bounds:
+        bounds = {}
+        for name, base in ref_coil_currents.items():
+            base = float(base)
+            delta = max(uncertainty_frac * abs(base), uncertainty_floor_A)
+            bounds[name] = [base - delta, base + delta]
+        # Hard bound on the VSC channel itself (vcontrol_val magnitude).
+        bounds['#VSC'] = [-drift_band, drift_band]
+        mygs.set_coil_bounds(bounds)
+
+    # Soft regularization toward baseline -- weak tiebreaker inside
+    # the feasible region defined by the hard bounds.
     rt = []
     for n in mygs.coil_sets:
         target = float(ref_coil_currents.get(n, 0.0))
         rt.append(mygs.coil_reg_term(
-            {n: 1.0}, target=target, weight=float(coil_reg_weight)))
+            {n: 1.0}, target=target, weight=float(soft_reg_weight)))
     rt.append(mygs.coil_reg_term(
-        {'#VSC': 1.0}, target=0.0, weight=float(vsc_reg_weight)))
+        {'#VSC': 1.0}, target=0.0, weight=float(vsc_soft_reg_weight)))
     mygs.set_coil_reg(reg_terms=rt)
-    return rt
+    return bounds
 
 
 def solve_tier3_equilibrium(
@@ -2312,8 +2352,9 @@ def solve_tier3_equilibrium(
     vsc_coils=('F9A', 'F9B'),
     uncertainty_frac=0.01,
     uncertainty_floor_A=50.0,
-    coil_reg_weight=1.0,
-    vsc_reg_weight=100.0,
+    use_hard_bounds=True,
+    soft_reg_weight=1.0,
+    vsc_soft_reg_weight=100.0,
     li_pad_seq=(1e-3, 5e-3, 1e-2),
     ip_secant=True,
     ip_tol=5e-4,
@@ -2322,11 +2363,14 @@ def solve_tier3_equilibrium(
 ):
     r"""Solve a single Tier-3 (bounded-VSC) forward equilibrium.
 
-    Runs forward Grad-Shafranov with all real coils softly pinned at
-    baseline and the VSC channel bounded by ``vsc_reg_weight``.
-    Vertical position is enforced by the V0 target (defaults to
-    ``mygs.o_point[1]`` from the warm-start state, which equals the
-    recon's magnetic axis Z when ``psi_snapshot`` is supplied).
+    Runs forward Grad-Shafranov with every real coil pinned to its
+    baseline within a +/- uncertainty band (hard bounds via
+    ``set_coil_bounds`` by default) and the VSC channel bounded
+    similarly.  When ``use_hard_bounds=False`` only the soft
+    regularization toward baseline is applied (legacy mode).
+    Vertical position is held by whatever isoflux/saddle constraints
+    the caller installed before calling this helper; see
+    ``V0_target`` for the no-isoflux case.
 
     Parameters
     ----------
@@ -2357,8 +2401,12 @@ def solve_tier3_equilibrium(
         Fractional drift bound (default 0.01 = 1%).
     uncertainty_floor_A : float
         Absolute drift floor in amperes (default 50).
-    coil_reg_weight, vsc_reg_weight : float
-        Regularization weights (see :func:`lock_coils_tier3`).
+    use_hard_bounds : bool
+        Install hard +/- uncertainty bounds via ``set_coil_bounds``.
+        Default True.  When False, only soft regularization is used
+        (legacy diagnostic mode).
+    soft_reg_weight, vsc_soft_reg_weight : float
+        Soft regularization weights (see :func:`lock_coils_tier3`).
     li_pad_seq : tuple of float
         ``lcfs_pad`` values to try for ``l_i``; first finite result wins.
     ip_secant : bool
@@ -2419,14 +2467,17 @@ def solve_tier3_equilibrium(
     # the solver and emits a warning, so we skip it on V0_target=None.
     V0 = None if V0_target is None else float(V0_target)
 
-    # Regularization
+    # Hard bounds + soft regularization
     try:
         lock_coils_tier3(
             mygs,
             ref_coil_currents,
             vsc_coils=vsc_coils,
-            coil_reg_weight=coil_reg_weight,
-            vsc_reg_weight=vsc_reg_weight,
+            uncertainty_frac=uncertainty_frac,
+            uncertainty_floor_A=uncertainty_floor_A,
+            use_hard_bounds=use_hard_bounds,
+            soft_reg_weight=soft_reg_weight,
+            vsc_soft_reg_weight=vsc_soft_reg_weight,
         )
     except Exception as exc:
         out['error'] = f"lock_coils_tier3 failed: {exc}"
@@ -2593,8 +2644,9 @@ def compute_tier3_for_bouquet_database(
     vsc_coils=('F9A', 'F9B'),
     uncertainty_frac=0.01,
     uncertainty_floor_A=50.0,
-    coil_reg_weight=1.0,
-    vsc_reg_weight=100.0,
+    use_hard_bounds=True,
+    soft_reg_weight=1.0,
+    vsc_soft_reg_weight=100.0,
     overwrite=False,
     verbose=True,
 ):
@@ -2623,7 +2675,7 @@ def compute_tier3_for_bouquet_database(
         Recon magnetic axis Z [m].  ``None`` -> ``mygs.o_point[1]``
         after warm-start.
     vsc_coils, uncertainty_frac, uncertainty_floor_A,
-    coil_reg_weight, vsc_reg_weight :
+    use_hard_bounds, soft_reg_weight, vsc_soft_reg_weight :
         Forwarded to :func:`solve_tier3_equilibrium`.
     overwrite : bool
         Replace existing ``tier3`` subgroups (default False).
@@ -2739,8 +2791,9 @@ def compute_tier3_for_bouquet_database(
                 vsc_coils=vsc_coils,
                 uncertainty_frac=uncertainty_frac,
                 uncertainty_floor_A=uncertainty_floor_A,
-                coil_reg_weight=coil_reg_weight,
-                vsc_reg_weight=vsc_reg_weight,
+                use_hard_bounds=use_hard_bounds,
+                soft_reg_weight=soft_reg_weight,
+                vsc_soft_reg_weight=vsc_soft_reg_weight,
                 verbose=False,
             )
 
@@ -2755,8 +2808,9 @@ def compute_tier3_for_bouquet_database(
             t3.attrs['vsc_within_bounds'] = bool(res['vsc_within_bounds'])
             t3.attrs['uncertainty_frac'] = float(uncertainty_frac)
             t3.attrs['uncertainty_floor_A'] = float(uncertainty_floor_A)
-            t3.attrs['vsc_reg_weight'] = float(vsc_reg_weight)
-            t3.attrs['coil_reg_weight'] = float(coil_reg_weight)
+            t3.attrs['use_hard_bounds'] = bool(use_hard_bounds)
+            t3.attrs['soft_reg_weight'] = float(soft_reg_weight)
+            t3.attrs['vsc_soft_reg_weight'] = float(vsc_soft_reg_weight)
 
             if res['coil_currents']:
                 cg = t3.create_group('coil_currents_A')
