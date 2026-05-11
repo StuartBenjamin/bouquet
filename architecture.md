@@ -23,7 +23,8 @@ understand exactly what is — and is not — guaranteed by the code.
 12. [Data Format Assumptions](#12-data-format-assumptions)
 13. [HDF5 Storage Schema](#13-hdf5-storage-schema)
 14. [Unit Conventions](#14-unit-conventions)
-15. [Known Limitations and Future Work](#15-known-limitations-and-future-work)
+15. [Coil Constraint Handling (DIII-D Reference)](#15-coil-constraint-handling-diii-d-reference)
+16. [Known Limitations and Future Work](#16-known-limitations-and-future-work)
 
 ---
 
@@ -158,7 +159,7 @@ is spatially constant.
 
 **Caveat:** A ~22% discrepancy against OMFIT's rhovn has been observed
 in testing and has not yet been fully resolved.  See
-[Section 15, Future Work](#15-known-limitations-and-future-work).
+[Section 16, Future Work](#16-known-limitations-and-future-work).
 
 ### 2.4 Midplane Convention
 
@@ -210,44 +211,91 @@ as:
 P = e_charge * (ne * Te + ni * Ti)    [Pa, with ne in m^-3 and Te in eV]
 ```
 
-The perturbed pressure is rescaled so that its volume average matches
-the baseline to within `p_thresh` (default 0.5%).
+Draws whose volume-averaged `<P>` differs from the baseline by more
+than `p_thresh` percent are rejected and re-sampled until acceptance
+or `max_pressure_iter` attempts.
 
-**Assumption:** The rescaling adjusts all four profiles uniformly.
-This preserves the shape of the perturbation but slightly alters its
-magnitude.
+**Default `p_thresh = 5%`** (was 0.5% in early versions).  The threshold
+is calibrated to DIII-D's actual pressure measurement uncertainty so
+that the accepted sampling distribution spans a physically meaningful
+range rather than a vanishingly narrow `<P>`-conserving subspace.
+
+Reference values:
+
+| Measurement | Reported uncertainty |
+|---|---|
+| Diamagnetic loop `W_MHD` (between ELMs) | ~10% |
+| Kinetic-EFIT pressure profile | ~3-6% (Thomson + CER propagated) |
+| Volume-averaged `<P>` from kinetic-EFIT | ~3-5% |
+
+A 0.5% threshold is roughly 10-20x tighter than the data warrants and
+artificially anti-correlates ne/Te perturbations in the accepted samples;
+5% reflects kinetic-EFIT propagated uncertainty.
+
+**Source:** *MHD Equilibrium Reconstruction in the DIII-D Tokamak* (Lao
+et al., GA-A24687, 2004); *Equilibrium reconstruction improvement via
+Kalman-filter-based vessel current estimation at DIII-D* (Ou, Walker,
+Schuster, Ferron, FED 2007).
+
+**Assumption:** The acceptance loop preserves the GPR-drawn profile
+shapes; no rescaling is applied.  Only draws within the threshold are
+kept.
 
 **Iteration limit:** 100 000 attempts (effectively unlimited).
 
-### 3.3 li Matching
+### 3.3 li Matching: Recon-Anchor + Adaptive Gate
 
-The internal inductance li(3) of each perturbed current profile is
-matched to the baseline value through a two-stage process:
+The internal inductance is anchored to the baseline value through a
+three-stage process designed to make the pipeline behave as a true
+forward operator (sigma -> 0 reproduces the reconstructed equilibrium):
 
-1. **Cylindrical proxy filter:** A fast 1-D proxy for li is computed
-   without solving Grad-Shafranov, using pre-computed geometry (volume,
-   area, Bp integrals from the baseline).  Draws whose proxy li falls
-   outside `l_i_proxy_threshold` (default 5%) of the target are
-   rejected cheaply.
+1. **Recon-anchor solve (NEW).**  After `solve_with_bootstrap` (SWB)
+   recomputes `j_BS` and `isolated_j_BS` from the perturbed kinetics,
+   we drop SWB's `matched_j_inductive` and substitute recon's converged
+   `j_inductive_fit` (passed via `input_jinductive`).  SWB seeds with
+   `create_power_flux_fun(1.5, 1.5)` (broad shape) and alpha-scales to
+   match Ip, but the resulting inductive has a fundamentally different
+   *shape* than recon's eqdsk-fit inductive (typical recon/SWB ratio
+   varies 1.4-3.4x with psi on DIII-D 204441@4400).  Without this
+   substitution the pipeline's "zero-perturbation baseline" lives at
+   l_i ~0.89 vs recon's 1.10 -- a ~19% systematic offset that breaks
+   sigma -> 0 reproducibility regardless of how the matching loop is
+   tuned.
 
-2. **Secant iteration on the inductive profile:** For draws that pass
-   the proxy filter, a secant method scales the inductive current-density
-   amplitude to match the true (Grad-Shafranov) li to within
-   `l_i_tolerance` (default 0.05, i.e. 5%).
+2. **Post-anchor l_i gate (NEW).**  Immediately after the recon-anchor
+   solve, check if `|l_i_actual - l_i_target| / l_i_target` is already
+   within `l_i_tolerance`.  If yes, **skip** the iterative matching
+   loop entirely and accept the anchored equilibrium.  This avoids the
+   `find_optimal_scale` and `jphi-correction` rescaling drift that
+   otherwise nudges l_i by ~1% per draw even when no kinetic perturbation
+   is present.
 
-**Proxy correction:** After each GS solve, the proxy target is
-adaptively updated based on the observed proxy-vs-reality offset,
-blended as 70% new correction / 30% old target.
+3. **Adaptive proxy + secant matching (legacy fallback).**  Only runs
+   when the gate fails (rare; typically high-sigma draws where the
+   perturbation pushes l_i outside `l_i_tolerance`):
 
-**Assumption:** The cylindrical proxy is a monotonic function of the
-scaling amplitude.  This is generally true for broad inductive profiles
-but can break down for highly hollow or peaked current configurations.
+   - **Cylindrical proxy filter:** A fast 1-D proxy for l_i is computed
+     without solving Grad-Shafranov, using pre-computed geometry.
+     Draws whose proxy l_i falls outside `l_i_proxy_threshold` (default
+     5%) of the *corrected* target are rejected cheaply.
+   - **Secant iteration:** Scales the inductive amplitude to match the
+     true Grad-Shafranov l_i within `l_i_tolerance`.
+   - **Adaptive proxy correction:** After each GS solve, the proxy
+     target is updated based on the observed proxy-vs-reality offset,
+     blended 70% new / 30% old.
 
-**Iteration limit:** 20 secant steps.  If not converged, the
-equilibrium is rejected.
+**Empirical reproducibility at sigma=0** (DIII-D 204441@4400, 6 draws):
 
-**Step clamping:** Secant steps are clamped to ±15% of the current
-amplitude to prevent runaway oscillation.
+| Quantity | recon | sigma=0 pipeline |
+|---|---|---|
+| l_i | 1.110 | 1.105-1.110 (mean offset -0.17%) |
+| bnd_RMS vs eqdsk | 2.84 mm | 3.1-4.2 mm |
+| X-pt drift | 0 | < 2 mm |
+
+**Iteration limit:** 20 secant steps.  If not converged the equilibrium
+is rejected.
+
+**Step clamping:** Secant steps clamped to +/-15% to prevent runaway.
 
 ### 3.4 Safety Factor Constraint
 
@@ -274,7 +322,7 @@ rejected equilibria still cost a TokaMaker call.
 | Toroidal rotation (omeg) | **No** | Preserved from baseline p-file |
 | Poloidal rotation (omegp) | **No** | Preserved from baseline p-file |
 | kpol | **No** | Preserved from baseline p-file |
-| E×B rotation (w_ExB) | **No** | Zero placeholder stored; see [Section 15](#15-known-limitations-and-future-work) |
+| E×B rotation (w_ExB) | **No** | Zero placeholder stored; see [Section 16](#16-known-limitations-and-future-work) |
 | Diamagnetic rotations | Yes | Recomputed from perturbed ne, Te, ni, Ti + baseline nz1 |
 | Er, Hahm-Burrell rate | Yes | Recomputed using exact midplane B-fields |
 
@@ -497,7 +545,7 @@ beta_N = beta_t / (Ip / a Bt)    [in %·m·T/MA]
 where `Bt_vac = B0 * R0 / R_boundary`.
 
 **Caveat:** Beta quantities are computed in the geqdsk reader but
-are not yet fully validated.  See [Section 15](#15-known-limitations-and-future-work).
+are not yet fully validated.  See [Section 16](#16-known-limitations-and-future-work).
 
 ---
 
@@ -664,11 +712,20 @@ header.h5
 |   |   |   +-- baseline.eqdsk          # raw geqdsk bytes
 |   |   |   +-- baseline.pfile          # raw p-file bytes (optional)
 |   |   |   +-- ne, te, ni, ti [...]    # baseline 1-D profiles
+|   |   |   +-- sigma_ne, sigma_te [...] # uncertainty envelopes
+|   |   |   +-- coil_currents [A]       # recon's converged coils
+|   |   |   +-- coil_names              # JSON list of coil names
+|   |   |   ^-- attrs: Ip_target, l_i_target
 |   |   +-- 0/
 |   |   |   +-- {header}_{sv}_{0}.eqdsk # raw geqdsk bytes
 |   |   |   +-- {header}_{sv}_{0}.pfile # raw p-file bytes (optional)
 |   |   |   +-- psi_N, j_phi, ne, te, ni, ti [...]
-|   |   |   +-- li1, li3, Zeff, coil_currents [A], coil_names
+|   |   |   +-- j_BS, j_BS,edge, j_inductive, pressure, w_ExB
+|   |   |   +-- coil_currents [A]       # this draw's converged coils
+|   |   |   ^-- attrs: count, scan_val, l_i(1), l_i(3), coil_names,
+|   |   |       homotopy_pass, homotopy_F_lim, homotopy_VSC_lim,
+|   |   |       max_F_drift_pct, max_VSC_drift_pct, in_spec,
+|   |   |       inspec_F_max, inspec_VSC_max
 |   |   +-- 1/ ...
 |   +-- {another_scan_val}/ ...
 ```
@@ -678,12 +735,17 @@ header.h5
 - Raw geqdsk and p-file bytes are stored as opaque binary datasets.
   This enables exact round-tripping: `GEQDSKEquilibrium.from_bytes()`
   and `PFile.from_bytes()` reconstruct the original objects.
-- Scalar diagnostics (li1, li3) are stored as attributes or scalar
-  datasets.
+- Scalar diagnostics (l_i(1), l_i(3)) are stored as attributes.
 - Coil currents are stored as a 1-D array with coil names in a
-  companion string attribute.
+  companion string attribute.  *Both* the `_baseline` group and every
+  per-draw group store `coil_currents [A]`, so per-draw drift can be
+  computed as `(I_draw - I_baseline) / |I_baseline|` without
+  re-running reconstruction.
 - The `_baseline` group stores the unperturbed equilibrium for
   comparison.
+- Homotopy / in-spec metadata (see [Section 15.7](#157-per-draw-h5-attributes))
+  is stored as attributes on each per-draw group so downstream
+  analysis can filter by `in_spec` or stratify by `homotopy_pass`.
 
 ---
 
@@ -723,9 +785,234 @@ header.h5
 
 ---
 
-## 15. Known Limitations and Future Work
+## 15. Coil Constraint Handling (DIII-D Reference)
 
-### 15.1 E×B Rotation (w_ExB) Not Computed from Equilibrium
+This section documents how bouquet keeps perturbed-equilibrium coil
+currents close to the reconstructed baseline, what physical
+tolerances motivate the default parameters, and how to interpret the
+per-draw `in_spec` flag.
+
+### 15.1 Why coils need explicit constraints
+
+Each perturbed equilibrium is a forward Grad-Shafranov solve.  TokaMaker
+adjusts coil currents to satisfy: (i) the isoflux constraint (LCFS at
+specified points), (ii) the requested plasma current `Ip_target`, and
+(iii) the requested current profile.  When kinetic profiles are
+perturbed, the natural minimum-energy GS solution can shift coils
+substantially -- particularly the F9A/F9B vertical-stability pair --
+producing equilibria that are mathematically valid but engineering-
+infeasible.
+
+A "perturbed equilibrium" is physically meaningful only when its
+coil currents are reachable from the reconstructed baseline within
+DIII-D's actual current-control tolerance.  Bouquet enforces this by
+adding explicit per-coil bounds to the GS solver's QP and rejecting
+draws that cannot satisfy them.
+
+### 15.2 Three coil classes on DIII-D
+
+The DIII-D coil set partitions naturally:
+
+| Class | Members | Baseline range | Role |
+|---|---|---|---|
+| **Non-VSC F-coils** | F1A-F8A, F1B-F8B (16 coils) | 35-180 kA | Shaping + position |
+| **VSC pair** | F9A, F9B | 35-50 kA, opposed signs | Vertical-stability (antisymmetric) |
+| **E-coils** | ECOILA, ECOILB | 500-1000 A | Ohmic / auxiliary |
+
+Each class has a different natural drift scale under perturbation:
+non-VSC F-coils typically need <1% to compensate kinetic perturbations,
+the VSC pair physically *requires* a few percent to track the moving
+plasma centroid, and E-coils sit near a noise floor in absolute terms.
+
+### 15.3 Engineering tolerance budget
+
+The "applied vs programmed" coil current on DIII-D is bounded by a
+combination of error sources:
+
+| Source | Typical magnitude (DIII-D F-coils) |
+|---|---|
+| Power-supply current ripple (12-pulse + filter) | 30-50 A (~1% of full scale) |
+| Rogowski coil + integrator noise | ~1-2% |
+| Steady-state regulation error (PI controller) | 10-30 A |
+| Un-modelled vessel-coupled drift during shot | 10-100 A |
+| EFIT "calculated - measured" coil delta | 10s to ~100 A |
+
+Combined, an absolute floor of **~50 A** captures the realistic
+engineering tolerance below which "drift" is indistinguishable from
+measurement + regulation noise.  For comparison, vessel induced currents
+themselves can reach 0.5-4 kA per discretized segment during plasma
+flattop -- but those are *passive* vessel currents, not coil currents,
+and EFIT models them as free parameters separately from PF coil fits.
+
+**Sources:**
+
+* *MHD Equilibrium Reconstruction in the DIII-D Tokamak* (Lao et al.,
+  GA-A24687, 2004).
+* *Magnetic diagnostic system of the DIII-D tokamak* (Strait et al.) --
+  ~250 inductive sensors; ~1% accuracy on poloidal probes and flux
+  loops.
+* *Equilibrium reconstruction improvement via Kalman-filter-based
+  vessel current estimation at DIII-D* (Ou, Walker, Schuster, Ferron,
+  *Fusion Eng. & Design* 82 (2007) 1144) -- vessel induced currents
+  0.5-4 kA per segment during flattop; PF coil currents treated as
+  free fit parameters with measurement uncertainty.
+* *GA-A24059: New measurements of coil-related magnetic field errors
+  on DIII-D* (Anderson et al., 2002) -- coil axis alignment +/-5 mm,
+  parallelism +/-0.2 deg.
+* *Observation of poloidal current flow to vacuum vessel wall during
+  DIII-D vertical instabilities* (Strait et al., *Nucl. Fusion* 31
+  (1991) 419) -- vessel can carry hundreds of kA during VDEs (not
+  applicable to steady-state shots).
+* *Performance of current measurement system in poloidal field power
+  supply for EAST* -- 12-pulse converter <1% ripple, 1% steady-state
+  error coefficient typical.
+
+### 15.4 Bound construction
+
+For each coil at each homotopy pass with parameters
+`(drift_F, drift_VSC)`, bouquet installs hard bounds:
+
+```
+For each coil 'name' with baseline I_base:
+    delta = max(drift_F * |I_base|, coil_drift_floor_A)
+    bounds[name] = [I_base - delta, I_base + delta]
+
+Additionally on the antisymmetric VSC channel:
+    vsc_delta = max(drift_VSC * min(|F9A_base|, |F9B_base|), coil_drift_floor_A)
+    bounds['#VSC'] = [-vsc_delta, +vsc_delta]
+```
+
+Per-coil and channel bounds are enforced simultaneously by the GS solver
+(TokaMaker's `set_coil_bounds`).  Notes:
+
+* The bound `delta` uses the *larger* of a relative cap (`drift_F` * the
+  coil baseline magnitude) and an absolute floor (`coil_drift_floor_A`,
+  default 50 A).  This prevents nonsense bounds on small-baseline coils
+  where a percentage bound would be smaller than measurement noise.
+* The `#VSC` channel bound uses the *minimum* of `|F9A_base|` and
+  `|F9B_base|` so that the bound is conservative for both coils (their
+  baselines are typically asymmetric: ~45 kA vs ~37 kA on
+  204441@4400).
+* Total drift on F9A/F9B = bare drift + VSC channel contribution.
+  Caller selects passes so that `drift_F + drift_VSC <=` the desired
+  total F9 tolerance.
+
+### 15.5 Progressive homotopy
+
+Hard bounds at the eventual target spec (e.g. +/-2% on all coils) are
+often QP-infeasible from a cold start because the perturbed kinetics
+naturally want a coil distribution outside the bound region.
+Bouquet supports a **progressive homotopy** via the `homotopy_passes`
+kwarg: a list of `(drift_F, drift_VSC)` tuples that the solver tries
+in order, warm-starting each pass from the prior pass's converged psi.
+
+A typical 3-pass schedule for the "strict ±2% global" spec:
+
+```python
+homotopy_passes = [
+    (0.05, 0.10),   # Pass 1: loose, get QP near optimum
+    (0.02, 0.05),   # Pass 2: intermediate tightening
+    (0.01, 0.01),   # Pass 3: total F9 drift <= 2% (bare 1% + VSC 1%)
+]
+```
+
+If a pass fails (`Closed flux volume lost` or `Matrix solve failed for
+targets`), bouquet rolls back to the prior successful pass's psi,
+re-installs that pass's bounds, re-solves once to restore mygs's
+internal flux-surface state (without this re-solve `get_stats()` returns
+`l_i = inf`), and stops tightening.  The draw is recorded with
+`homotopy_pass` = index of the last successful pass.
+
+If Pass 1 itself fails the draw is rejected outright.
+
+### 15.6 The `in_spec` criterion
+
+After homotopy, each draw is tagged `in_spec` if:
+
+```
+max_non_VSC_F_drift_pct <= inspec_F_max   AND   max_VSC_drift_pct <= inspec_VSC_max
+```
+
+The drift is computed per-coil as
+`(I_draw - I_baseline) / |I_baseline| * 100`, where
+`I_draw = mygs.get_coil_currents()` (the *total* current, i.e. bare +
+vcontrol·VSC contribution) and `I_baseline` is recon's coil currents
+captured on entry to `generate_bouquet`.
+
+**E-coils are not currently part of the `in_spec` check.**  Reason:
+their baselines (~500-1000 A) are small enough that the 50 A
+`coil_drift_floor_A` translates to 5-10% relative drift, but in
+absolute terms 50 A is the engineering noise floor (see Section 15.3).
+A user who wants strict 2% on E-coils should lower
+`coil_drift_floor_A` to ~10-15 A and accept that Pass 1 may need a
+looser absolute floor to remain feasible.
+
+### 15.7 Per-draw H5 attributes
+
+After homotopy, every stored draw carries these attributes (see
+[Section 13](#13-hdf5-storage-schema)):
+
+| Attribute | Meaning |
+|---|---|
+| `homotopy_pass` | Index of last successful pass (0-based; -1 if no hard bounds ran) |
+| `homotopy_F_lim` | `drift_F` value of the last successful pass |
+| `homotopy_VSC_lim` | `drift_VSC` value of the last successful pass |
+| `max_F_drift_pct` | Max non-VSC F-coil drift in percent |
+| `max_VSC_drift_pct` | Max F9A/F9B drift in percent |
+| `in_spec` | Boolean: did this draw satisfy the `inspec_*_max` criteria? |
+| `inspec_F_max`, `inspec_VSC_max` | The thresholds that were applied |
+
+Out-of-spec draws are still archived (with `in_spec=False`) so
+downstream analysis can filter as needed.  Empirical survival rates
+at the strict +/-2% global spec on DIII-D 204441@4400 (n=8 draws per
+sigma):
+
+| `SIGMA_SCALE` | yield | `in_spec` rate |
+|---|---|---|
+| 0.0 | 7/8 | 2/7 (28%) |
+| 0.5 | 7/8 | 1/7 (14%) |
+| 1.0 | 8/8 | 4/8 (50%) |
+
+The non-monotonic pattern is real: at sigma=0 iso-update systematically
+forces ~2.5-3.5% VSC drift even with zero kinetic perturbation, while
+at sigma=1.0 some draws happen to align with low-VSC equilibria and
+satisfy the strict bound while others need much more.
+
+### 15.8 Post-perturb pipeline summary
+
+After kinetic perturbation and the recon-anchor solve, every draw
+goes through:
+
+```
+1. Ip-secant alignment
+       Iterate until mygs.get_globals()[0] == _recon_Ip (within 0.1%)
+       with damped retries on Picard maxits failure.
+
+2. Iso-update  (only if hard bounds will be installed)
+       Replace recon's eqdsk-derived isoflux points with the post-Ip-aligned
+       LCFS so the QP has a self-consistent boundary target.
+
+3. Progressive homotopy
+       Loop over homotopy_passes, warm-starting each pass and rolling back
+       on failure (re-solving to restore mygs state for downstream stats).
+
+4. In-spec tagging
+       Compute max F-coil and max VSC drift percentages, set in_spec flag,
+       store all metadata on the H5 group.
+```
+
+Each step is independently configurable via env vars / kwargs:
+
+* `SKIP_HARD=1`: skip iso-update + homotopy (use soft-reg only)
+* `SKIP_ISO=1`: skip iso-update but keep homotopy (diagnostic)
+* `homotopy_passes=None`: single legacy pass at uniform `coil_drift`
+* `inspec_F_max`, `inspec_VSC_max`: spec thresholds (default both 0.025)
+
+---
+
+## 16. Known Limitations and Future Work
+
+### 16.1 E×B Rotation (w_ExB) Not Computed from Equilibrium
 
 The `w_ExB` field stored in the HDF5 is a **zero placeholder**.
 A self-consistent E×B rotation would require solving the radial
@@ -735,7 +1022,7 @@ and derived quantities (omgeb, Er, omghb) in the perturbed p-file
 *are* computed, but they use the baseline VxB rotation (`omgvb`)
 if present, or zero if absent.
 
-### 15.2 rhovn Discrepancy
+### 16.2 rhovn Discrepancy
 
 A ~22% discrepancy between bouquet's `rhovn` and OMFIT's `rhovn`
 has been observed.  The bouquet computation integrates q over psi_N;
@@ -743,19 +1030,19 @@ OMFIT may use a different integration scheme or include additional
 corrections.  This affects any analysis using rho as the radial
 coordinate.
 
-### 15.3 Beta Quantities
+### 16.3 Beta Quantities
 
 `beta_t`, `beta_p`, `beta_N` are computed in the geqdsk reader
 but have not been validated against EFIT or other reference codes.
 
-### 15.4 Double-Null and Upper-Single-Null Equilibria
+### 16.4 Double-Null and Upper-Single-Null Equilibria
 
 The X-point detection assumes a single lower X-point.  Double-null
 or upper-single-null configurations may produce incorrect contour
 cropping, flux-surface averaging, and geometric quantities (kappa,
 delta, squareness).
 
-### 15.5 Near-Axis Shaping
+### 16.5 Near-Axis Shaping
 
 Elongation (kappa) and triangularity (delta) are computed from the
 half-widths and extrema of each flux surface.  Near the magnetic
@@ -763,7 +1050,7 @@ axis, these quantities become noisy because the contours are nearly
 circular and the extrema are poorly defined.  No smoothing is
 currently applied.
 
-### 15.6 Uncertainty Envelope Model
+### 16.6 Uncertainty Envelope Model
 
 The default uncertainty envelope is a power-law profile:
 
@@ -776,13 +1063,13 @@ is a simple parametric model.  Users with experimentally-derived
 profile uncertainties should supply them directly rather than relying
 on this model.
 
-### 15.7 Non-Gaussian Profile Uncertainties
+### 16.7 Non-Gaussian Profile Uncertainties
 
 The GPR sampling assumes Gaussian-distributed profile uncertainties.
 Non-Gaussian features (e.g. pedestal bifurcation, ELM-induced
 transients, sawtooth mixing) are not captured.
 
-### 15.8 Single Ion Temperature
+### 16.8 Single Ion Temperature
 
 The diamagnetic rotation calculation assumes all ion species
 (main + impurity) share the same temperature `Ti` unless a separate
@@ -790,7 +1077,7 @@ impurity temperature `TI` is explicitly provided.  This is a common
 assumption in tokamak transport modelling but breaks down when strong
 ion-impurity temperature decoupling exists (e.g. during NBI heating).
 
-### 15.9 Beam and Impurity Perturbation
+### 16.9 Beam and Impurity Perturbation
 
 Currently, bouquet does not perturb:
 
@@ -803,7 +1090,7 @@ natural extension but would require additional uncertainty
 specifications and potentially different sampling strategies (e.g.
 rotation profiles are not necessarily monotonic).
 
-### 15.10 P-file Regeneration for Example Files
+### 16.10 P-file Regeneration for Example Files
 
 The example p-files shipped with the repository have rotation profiles
 computed from a specific baseline equilibrium.  If the baseline
@@ -811,7 +1098,7 @@ equilibrium is changed (e.g. different bootstrap current amplitude),
 the rotation profiles in the shipped p-file will be stale.
 Regeneration of rotation profiles for all example files is planned.
 
-### 15.11 Flux-Surface Average vs. Midplane for Diagnostics
+### 16.11 Flux-Surface Average vs. Midplane for Diagnostics
 
 Some diagnostics (e.g. Thomson scattering, charge-exchange
 recombination) measure profiles at specific poloidal locations
@@ -819,7 +1106,7 @@ recombination) measure profiles at specific poloidal locations
 Bouquet perturbs flux-surface-averaged profiles.  For strongly
 up-down asymmetric plasmas, this distinction matters.
 
-### 15.12 Bootstrap Current Model Alternatives
+### 16.12 Bootstrap Current Model Alternatives
 
 Only the Sauter model is currently implemented.  Alternative models
 (e.g. Sauter with Redl corrections, NEO, or direct drift-kinetic

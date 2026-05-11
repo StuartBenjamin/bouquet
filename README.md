@@ -37,6 +37,7 @@ If you use Bouquet in your research, please cite:
 - [HDF5 Database](#hdf5-database)
 - [Examples](#examples)
 - [Testing](#testing)
+- [Coil Constraint Handling](#coil-constraint-handling)
 - [Architecture and Assumptions](#architecture-and-assumptions)
 - [API Reference](#api-reference)
 
@@ -58,7 +59,19 @@ If you use Bouquet in your research, please cite:
   bootstrap model. Profile classifier (`H_mode`, `Lmode_like_jphi`, `L_mode`)
   with edge spike alignment metrics.
 - **Pressure and l_i matching**: perturbed profiles are constrained to match
-  the baseline volume-averaged pressure and internal inductance (% tolerance).
+  the baseline volume-averaged pressure (default `p_thresh=5%`, calibrated to
+  DIII-D's actual `<P>` measurement uncertainty) and internal inductance.
+- **Recon-anchor + adaptive l_i gate**: at sigma -> 0 the pipeline reproduces
+  the reconstructed equilibrium to within recon's own residual (l_i within
+  ~0.5% of target, X-pt within ~2 mm, bnd_RMS ~3-4 mm vs eqdsk).  See
+  [`architecture.md` §3.3](architecture.md#33-li-matching-recon-anchor--adaptive-gate).
+- **Progressive coil-bound homotopy**: per-coil hard bounds on TokaMaker's
+  QP, applied in a warm-started multi-pass schedule so engineering-feasible
+  tolerances (e.g. +/-2% on F-coils, +/-2% on the VSC pair) can be enforced
+  even from a cold start.  Each draw is tagged `in_spec` per
+  user-configurable thresholds; out-of-spec draws are still archived.  See
+  [Coil Constraint Handling](#coil-constraint-handling) and
+  [`architecture.md` §15](architecture.md#15-coil-constraint-handling-diii-d-reference).
 - **Current decomposition**: explicit bootstrap (Sauter/Redl model) + inductive
   separation with iterative l_i convergence and corrective j_phi iteration.
 - **Reconstruction quality metrics**: each reconstruction reports jphi_mode,
@@ -460,6 +473,75 @@ Test data (sample g-files and p-files) is in `tests/data/`.
 
 ---
 
+## Coil Constraint Handling
+
+Forward-mode perturbed equilibria must keep coil currents close to the
+reconstructed baseline to be engineering-realistic.  Bouquet enforces this
+via per-coil hard bounds on the TokaMaker QP, with a **progressive
+homotopy** that warm-starts each tighter pass from the prior pass's
+converged psi.  Each draw is tagged with an `in_spec` flag based on
+class-specific tolerances.
+
+### Three coil classes (DIII-D reference)
+
+| Class | Members | Baseline range | Spec interpretation |
+|---|---|---|---|
+| Non-VSC F-coils | F1A-F8A, F1B-F8B | 35-180 kA | Tight relative drift (`inspec_F_max`, default 2.5%) |
+| VSC pair | F9A, F9B | 35-50 kA | Wider relative drift (`inspec_VSC_max`, default 10%) for vertical control |
+| E-coils | ECOILA, ECOILB | 0.5-1 kA | Bounded by absolute floor (`coil_drift_floor_A`, default 50 A) -- excluded from `in_spec` because their small baselines make relative bounds engineering-meaningless |
+
+The **50 A floor** is calibrated to DIII-D's actual current-control
+tolerance budget: ~30-50 A power-supply ripple + ~30-50 A Rogowski +
+integrator noise + ~10-100 A un-modelled vessel coupling.  See
+[architecture.md §15](architecture.md#15-coil-constraint-handling-diii-d-reference)
+for the full source-cited tolerance budget.
+
+### Progressive homotopy
+
+```python
+diagnostics = generate_bouquet(
+    mygs, psi_N, n_equils, "my_run",
+    result['j_phi_fit'],
+    ne, te, ni, ti,
+    sigma_ne, sigma_te, sigma_ni, sigma_ti, sigma_jphi,
+    n_ls, t_ls, j_ls, Ip_target, l_i_target, Zeff,
+    input_jinductive=result['j_inductive_fit'],
+    # Progressive bounds: each tuple is (drift_F_bare, drift_VSC_channel)
+    # Total F9A/F9B drift = drift_F_bare + drift_VSC_channel
+    homotopy_passes=[
+        (0.05, 0.10),   # Pass 1: loose start
+        (0.02, 0.05),   # Pass 2: intermediate
+        (0.01, 0.01),   # Pass 3: strict +/-2% on F9 total
+    ],
+    inspec_F_max=0.02,      # in_spec if max non-VSC F-drift <= 2%
+    inspec_VSC_max=0.02,    # in_spec if max VSC drift <= 2%
+    p_thresh=5.0,           # accept GPR draws within 5% of baseline <P>
+)
+```
+
+Each tighter pass warm-starts from the prior pass's converged psi.  On
+infeasibility the homotopy rolls back to the last successful pass and
+re-solves to restore mygs's internal state.  Per-draw H5 attributes
+(`homotopy_pass`, `max_F_drift_pct`, `max_VSC_drift_pct`, `in_spec`,
+`inspec_F_max`, `inspec_VSC_max`) let you filter the bouquet downstream
+without re-running anything.
+
+Out-of-spec draws are still archived; just filter on the `in_spec`
+attribute when you query the H5.
+
+### Sigma -> 0 reproducibility
+
+The pipeline is designed so that at `sigma=0` (no kinetic perturbation)
+the output reproduces the reconstructed equilibrium to within recon's
+own residual: l_i within ~0.5% of target, X-pt within ~2 mm of recon,
+boundary RMS ~3-4 mm vs eqdsk (recon's own bnd_RMS is 2.84 mm on
+DIII-D 204441@4400).  This requires the recon-anchor solve in
+`perturb_kinetic_equilibrium` (replacing SWB's seed-based inductive
+with recon's `j_inductive_fit`) and a post-anchor `l_i` tolerance gate.
+See [architecture.md §3.3](architecture.md#33-li-matching-recon-anchor--adaptive-gate).
+
+---
+
 ## Architecture and Assumptions
 
 A detailed document covering all physics assumptions, numerical approximations,
@@ -471,7 +553,8 @@ in [`architecture.md`](architecture.md). Key topics include:
 - Current decomposition (Sauter bootstrap model)
 - Rotation profile computation (exact midplane, Savitzky–Golay smoothing for ω_HB)
 - Numerical floors for axis/edge singularities
-- Pressure matching and l_i iteration tolerances
+- Pressure matching (default 5%, calibrated to DIII-D `<P>` uncertainty) and l_i iteration tolerances
+- **[Coil constraint handling (DIII-D reference)](architecture.md#15-coil-constraint-handling-diii-d-reference)**: tolerance budget, progressive homotopy, in_spec criterion
 - Unit conventions (bouquet SI vs. p-file units)
 
 ---
