@@ -154,6 +154,14 @@ def store_equilibrium(
     Zeff=None,
     coil_currents=None,
     psi_N_kinetic=None,
+    homotopy_pass=None,
+    homotopy_F_lim=None,
+    homotopy_VSC_lim=None,
+    max_F_drift_pct=None,
+    max_VSC_drift_pct=None,
+    in_spec=None,
+    inspec_F_max=None,
+    inspec_VSC_max=None,
 ):
     """
     Write one perturbed equilibrium into the HDF5 database.
@@ -255,6 +263,24 @@ def store_equilibrium(
             values = np.array([coil_currents[n] for n in names], dtype=np.float64)
             grp.create_dataset("coil_currents [A]", data=values)
             grp.attrs["coil_names"] = json.dumps(names)
+
+        # ---- homotopy / in-spec metadata (per-draw) -----------------------
+        if homotopy_pass is not None:
+            grp.attrs["homotopy_pass"] = int(homotopy_pass)
+        if homotopy_F_lim is not None:
+            grp.attrs["homotopy_F_lim"] = float(homotopy_F_lim)
+        if homotopy_VSC_lim is not None:
+            grp.attrs["homotopy_VSC_lim"] = float(homotopy_VSC_lim)
+        if max_F_drift_pct is not None:
+            grp.attrs["max_F_drift_pct"] = float(max_F_drift_pct)
+        if max_VSC_drift_pct is not None:
+            grp.attrs["max_VSC_drift_pct"] = float(max_VSC_drift_pct)
+        if in_spec is not None:
+            grp.attrs["in_spec"] = bool(in_spec)
+        if inspec_F_max is not None:
+            grp.attrs["inspec_F_max"] = float(inspec_F_max)
+        if inspec_VSC_max is not None:
+            grp.attrs["inspec_VSC_max"] = float(inspec_VSC_max)
 
 
 def load_equilibrium(header, count, scan_val=None, eqdsk_out_dir=None):
@@ -360,6 +386,8 @@ def store_baseline_profiles(
     eqdsk_bytes=None,
     pfile_bytes=None,
     psi_N_kinetic=None,
+    coil_currents=None,
+    coil_names=None,
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -417,6 +445,25 @@ def store_baseline_profiles(
             grp.create_dataset("baseline.eqdsk", data=np.void(eqdsk_bytes))
         if pfile_bytes is not None:
             grp.create_dataset("baseline.pfile", data=np.void(pfile_bytes))
+
+        # Recon's converged coil currents (the perturbation reference).
+        # Saved alongside profiles so post-processors can compute
+        # absolute coil drift per draw without re-running recon.
+        if coil_currents is not None:
+            if coil_names is not None:
+                names = list(coil_names)
+                values = np.array([float(coil_currents[n]) for n in names],
+                                  dtype=np.float64)
+            elif isinstance(coil_currents, dict):
+                names = list(coil_currents.keys())
+                values = np.array([float(coil_currents[n]) for n in names],
+                                  dtype=np.float64)
+            else:
+                names = [f"coil_{i}" for i in range(len(coil_currents))]
+                values = np.asarray(coil_currents, dtype=np.float64)
+            grp.create_dataset("coil_currents [A]", data=values)
+            grp.create_dataset("coil_names",
+                               data=np.array(names, dtype=h5py.string_dtype()))
 
 
 # ====================================================================

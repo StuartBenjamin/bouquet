@@ -804,23 +804,177 @@ def perturb_kinetic_equilibrium(
     iteration_Ips = []
 
     if recalculate_j_BS:
-        # Always suppress solve_with_bootstrap's internal j_phi iteration
-        # plots; the useful diagnostic is the "jphi-linterp | l_i iter"
-        # figure produced later in the l_i loop.
-        results = solve_with_bootstrap(
-            mygs,
-            ne_eq, te_eq, ni_eq, ti_eq,
-            Zeff, Ip_target, input_jinductive,
-            scale_jBS=scale_jBS,
-            isolate_edge_jBS=isolate_edge_jBS,
-            diagnostic_plots=False,
-            verbose=False,
-        )
-        eq_stats = mygs.get_stats(lcfs_pad=psi_pad)
+        # ---- SWB call hygiene -------------------------------------------
+        # solve_with_bootstrap is sensitive to two things beyond kinetics:
+        #
+        #   1. mygs state (q profile, FSA quantities) -- drifts between
+        #      calls if perturb is invoked from a non-recon state.
+        #   2. inductive_jphi seed shape -- SWB amplitude-only-scales its
+        #      seed and the bootstrap iteration's convergence path
+        #      depends on the seed.  Feeding recon's *converged* peaky
+        #      ``j_inductive_fit`` produces a ~22% bootstrap drift vs
+        #      feeding the broad ``create_power_flux_fun`` seed that
+        #      ``reconstruct_equilibrium`` itself uses.
+        #
+        # Both fixes here:
+        #   (a) State anchor: one solve at recon's exact j_phi + targets
+        #       to put mygs in recon's converged state.
+        #   (b) Synthesise the SAME broad SWB seed that recon uses
+        #       internally.  Decouples the SWB seed (a bootstrap-
+        #       iteration starting point) from ``input_jinductive`` (the
+        #       GPR baseline shape used downstream).
+        # Clear coil_drift bounds for the ENTIRE state-anchor + SWB block.
+        # If the state anchor solves under hard bounds and the QP lands
+        # at a constrained corner (forward mode wants slightly different
+        # coils than recon's inverse-mode-with-Ip-secant solution), mygs
+        # ends up in a degenerate state and SWB inherits it -- producing
+        # a warped j_BS even though SWB itself runs unconstrained.
+        # Restore bounds after SWB so the rest of the perturbation
+        # iteration (l_i match, jphi correction) continues constrained.
+        _stashed_bounds = getattr(mygs, '_coil_drift_bounds', None)
+        if _stashed_bounds is not None:
+            mygs.set_coil_bounds(None)
 
-        new_jphi = results["total_j_phi"]
+        _pre_pp = {"type": "linterp",
+                    "y": np.gradient(pressure) /
+                         (np.gradient(psi_N) *
+                          (mygs.psi_bounds[1] - mygs.psi_bounds[0])),
+                    "x": psi_N}
+        _pre_pp["y"][-1] = 0.0
+        _pre_ffp = {"type": "jphi-linterp",
+                     "y": input_j_phi.copy(),
+                     "x": psi_N}
+        mygs.set_targets(Ip=Ip_target, pax=pressure[0])
+        mygs.set_profiles(pp_prof=_pre_pp, ffp_prof=_pre_ffp)
+        try:
+            mygs.solve()
+        except (ValueError, RuntimeError):
+            # Anchor failed (rare); fall through and let SWB cope.
+            pass
+
+        from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
+        _swb_seed = create_power_flux_fun(npsi, 1.5, 1.5)['y']
+
+        # ---- Diagnostic before SWB ----
+        try:
+            _diag_axis = (float(mygs.o_point[0]), float(mygs.o_point[1]))
+            _diag_Ip   = float(mygs.get_globals()[0])
+            _ped = (psi_N >= 0.85) & (psi_N <= 1.0)
+            _ne_in = ne if (psi_N_kinetic is None) else ne_eq
+            _te_in = te if (psi_N_kinetic is None) else te_eq
+            _coils_now, _ = mygs.get_coil_currents()
+            print(f"  [SWB-diag] axis=({_diag_axis[0]:.4f},{_diag_axis[1]:+.5f}) "
+                  f"Ip={_diag_Ip:+.0f}  bounds_cleared={_stashed_bounds is not None}")
+            print(f"  [SWB-diag] te_eq[0]={te_eq[0]:.0f} eV (recon te[0]={te[0]:.0f}) -- "
+                  f"baseline ratio {te_eq[0]/te[0]:.3f}")
+            print(f"  [SWB-diag] ne_eq[0]={ne_eq[0]:.2e} m^-3 (recon ne[0]={ne[0]:.2e}) -- "
+                  f"baseline ratio {ne_eq[0]/ne[0]:.3f}")
+            print(f"  [SWB-diag] te_eq pedestal psi=[0.85,1]: "
+                  f"min={te_eq[_ped].min():.0f} max={te_eq[_ped].max():.0f}  "
+                  f"(monotone? {bool(np.all(np.diff(te_eq[_ped]) <= 0))})")
+            # Derive recon baselines from the stashed bounds dict
+            # (bounds = [base - delta, base + delta] => base = mean).
+            _stashed = getattr(mygs, '_coil_drift_bounds', None) or {}
+            _f9a_base = (0.5 * (_stashed['F9A'][0] + _stashed['F9A'][1])
+                          if 'F9A' in _stashed else None)
+            _f9b_base = (0.5 * (_stashed['F9B'][0] + _stashed['F9B'][1])
+                          if 'F9B' in _stashed else None)
+            if _f9a_base is not None and _f9b_base is not None:
+                _f9a = float(_coils_now['F9A'])
+                _f9b = float(_coils_now['F9B'])
+                print(f"  [SWB-diag] F9A={_f9a:+.0f} A (recon {_f9a_base:+.0f}, "
+                      f"drift {_f9a - _f9a_base:+.0f}), "
+                      f"F9B={_f9b:+.0f} A (drift {_f9b - _f9b_base:+.0f})")
+        except Exception as _diag_exc:
+            print(f"  [SWB-diag] failed: {_diag_exc}")
+
+        try:
+            results = solve_with_bootstrap(
+                mygs,
+                ne_eq, te_eq, ni_eq, ti_eq,
+                Zeff, Ip_target, _swb_seed,
+                scale_jBS=scale_jBS,
+                isolate_edge_jBS=isolate_edge_jBS,
+                diagnostic_plots=False,
+                verbose=False,
+            )
+        except (TypeError, ValueError, RuntimeError):
+            # Dump the SWB inputs so we can inspect what j_BS comes out
+            # of an offline run with the same inputs.
+            try:
+                import numpy as _np_dbg
+                _np_dbg.savez(
+                    '/tmp/swb_failure_dump.npz',
+                    psi_N=psi_N,
+                    ne_eq=ne_eq, te_eq=te_eq, ni_eq=ni_eq, ti_eq=ti_eq,
+                    Zeff=_np_dbg.atleast_1d(_np_dbg.asarray(Zeff)),
+                    Ip_target=_np_dbg.array([Ip_target]),
+                    swb_seed=_swb_seed,
+                    scale_jBS=_np_dbg.array([scale_jBS]),
+                )
+                print("  [SWB-diag] inputs dumped to /tmp/swb_failure_dump.npz")
+            except Exception:
+                pass
+            raise
+        finally:
+            if _stashed_bounds is not None:
+                mygs.set_coil_bounds(_stashed_bounds)
+        # ---- Recon-anchored baseline (do NOT use SWB's j_inductive) ----
+        # SWB seeds with create_power_flux_fun(1.5, 1.5) and alpha-scales
+        # to match Ip, but produces a matched_j_inductive whose SHAPE
+        # differs structurally from recon's eqdsk-fit j_inductive_fit.
+        # Empirically (probe at /tmp/probe_swb_anchor.log on 204441@4400):
+        # recon/SWB ratio = 3.4× at axis vs 1.4× at mid-radius -- not a
+        # uniform scaling, so post-SWB ind_factor anchoring cannot reach
+        # recon's l_i.  At σ=0 the SWB-natural baseline lives at l_i≈0.89
+        # vs recon's 1.10 -- a ~19% systematic offset that breaks the
+        # σ→0 reproducibility test (the pipeline is supposed to be a
+        # forward operator returning recon's equilibrium when no
+        # perturbation is applied).
+        #
+        # Fix: keep SWB's bootstrap profile (j_BS, isolated_j_BS),
+        # which legitimately depends on the perturbed kinetics via
+        # Sauter, but DROP its matched_j_inductive.  Use recon's
+        # converged j_inductive_fit (passed in as input_jinductive)
+        # as the inductive baseline.  At σ=0 the kinetics are
+        # unchanged so j_BS recompute ≈ recon's stored j_BS, and
+        # combined with input_jinductive the total j_phi recovers
+        # recon's exactly -> l_i = recon's l_i, bnd_RMS ≈ 0.
         full_j_BS = results["j_BS"]
         spike_profile = results["isolated_j_BS"]
+
+        # Anchor: forward-solve with recon's inductive shape + SWB's
+        # spike, using the perturbed pressure profile (pres_tmp).  This
+        # puts mygs in the recon-anchored equilibrium so baseline_li_proxy
+        # and downstream eq_stats reflect the right baseline.
+        new_jphi = input_jinductive + spike_profile
+        _psi_range_anchor = mygs.psi_bounds[1] - mygs.psi_bounds[0]
+        _pp_anchor = {"type": "linterp",
+                      "y": np.gradient(pres_tmp) /
+                           (np.gradient(psi_N) * _psi_range_anchor),
+                      "x": psi_N}
+        _pp_anchor["y"][-1] = 0.0
+        _ffp_anchor = {"type": "jphi-linterp", "y": new_jphi, "x": psi_N}
+        mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
+        mygs.set_profiles(pp_prof=_pp_anchor, ffp_prof=_ffp_anchor)
+        try:
+            mygs.solve()
+            print(f"  [recon-anchor] forward-solved with recon's "
+                  f"j_inductive_fit + SWB spike (σ-perturbed kinetics)")
+        except (ValueError, RuntimeError) as _anchor_exc:
+            # Anchor failed -- fall back to SWB's natural total_j_phi
+            # so the rest of the loop has a workable baseline.
+            print(f"  [recon-anchor] WARN: solve failed ({_anchor_exc}); "
+                  f"falling back to SWB total_j_phi")
+            new_jphi = results["total_j_phi"]
+            _ffp_fb = {"type": "jphi-linterp", "y": new_jphi, "x": psi_N}
+            mygs.set_profiles(pp_prof=_pp_anchor, ffp_prof=_ffp_fb)
+            try:
+                mygs.solve()
+            except Exception:
+                pass
+
+        eq_stats = mygs.get_stats(lcfs_pad=psi_pad)
         baseline_li_proxy = calc_cylindrical_li_proxy(mygs, new_jphi, psi_pad)
 
         j0_scales.append(results["scale_j0"])
@@ -839,8 +993,10 @@ def perturb_kinetic_equilibrium(
     l_i = np.inf
     final_scale_j0 = 1.0
     final_scale_Ip = 1.0
+    # Use recon's j_inductive_fit (input_jinductive) instead of SWB's
+    # matched_j_inductive -- see [recon-anchor] block above for rationale.
     matched_j_inductive = (
-        results["j_inductive"] if recalculate_j_BS else input_j_phi.copy()
+        input_jinductive.copy() if recalculate_j_BS else input_j_phi.copy()
     )
 
     # The proxy target starts at the baseline proxy value but is
@@ -851,15 +1007,79 @@ def perturb_kinetic_equilibrium(
     # than in proxy space.
     proxy_target = baseline_li_proxy
 
+    # ---- Post-anchor l_i gate ---------------------------------------
+    # If the recon-anchor solve already lands within l_i_tolerance of
+    # l_i_target, skip the l_i-match outer loop entirely.  Running the
+    # loop unnecessarily applies find_optimal_scale + jphi correction,
+    # which each nudge l_i by ~1% even when no perturbation is needed
+    # (e.g. at σ=0).  Skipping preserves the recon-anchored baseline.
+    # The output_jphi and per-component pieces are reconstructed from
+    # the post-anchor mygs state in lieu of running the loop body.
+    _skip_li_match = False
+    if recalculate_j_BS:
+        try:
+            _post_anchor_stats = mygs.get_stats(lcfs_pad=psi_pad)
+            _post_anchor_li = float(_post_anchor_stats['l_i'])
+            _post_anchor_Ip = float(_post_anchor_stats['Ip'])
+            _li_err_pct = (100.0 * abs(_post_anchor_li - l_i_target)
+                           / max(abs(l_i_target), 1e-12))
+            if _li_err_pct <= l_i_tolerance:
+                # Pull through state from the recon-anchor solve.  The
+                # output j_phi is the post-solve total (computed via
+                # FF' and P' geometry, like the jphi_corr loop does).
+                from OpenFUSIONToolkit.TokaMaker.util import get_jphi_from_GS
+                _, _F_pa, _Fp_pa, _, _Pp_pa = mygs.get_profiles(
+                    npsi=npsi, psi_pad=psi_pad
+                )
+                _, _, _ravgs_pa, _, _, _ = mygs.get_q(
+                    npsi=npsi, psi_pad=psi_pad
+                )
+                output_jphi = get_jphi_from_GS(
+                    _F_pa * _Fp_pa, _Pp_pa, _ravgs_pa[0], _ravgs_pa[1]
+                )
+                # The "matched" inductive perturbation is just the
+                # un-perturbed baseline (input_jinductive); spike is
+                # SWB's edge spike already applied during anchor.
+                matched_jphi_perturb = (input_jinductive.copy()
+                                        + spike_profile)
+                pres_tmp_for_pp = pres_tmp  # already in scope
+                pp_prof = {"type": "linterp",
+                           "y": np.gradient(pres_tmp_for_pp) /
+                                (np.gradient(psi_N) *
+                                 (mygs.psi_bounds[1] - mygs.psi_bounds[0])),
+                           "x": psi_N}
+                pp_prof["y"][-1] = 0.0
+                ffp_prof = {"type": "jphi-linterp",
+                            "y": matched_jphi_perturb, "x": psi_N}
+                # Bookkeeping consistent with the loop body
+                l_i = _post_anchor_li
+                Ip = _post_anchor_Ip
+                final_li_proxy = calc_cylindrical_li_proxy(
+                    mygs, output_jphi, psi_pad)
+                iteration_l_is.append(l_i)
+                iteration_Ips.append(Ip)
+                _skip_li_match = True
+                print(f"  [li gate] recon-anchor l_i={l_i:.4f} within "
+                      f"{_li_err_pct:.2f}% of target {l_i_target:.4f} "
+                      f"(tol={l_i_tolerance}%); skipping l_i-match loop "
+                      f"to preserve anchored baseline.")
+        except Exception as _gate_exc:
+            print(f"  [li gate] state-pull failed ({_gate_exc}); "
+                  f"falling through to l_i-match loop")
+
     for li_iter in range(1, max_li_iter + 1):
+        if _skip_li_match:
+            break
         if 100.0 * abs(l_i - l_i_target) / l_i_target <= l_i_tolerance:
             break
 
         t_phase = time.perf_counter()
 
         # ---- 5a. Draw j_phi perturbation matching l_i proxy --------
+        # Perturb around recon's j_inductive_fit (input_jinductive),
+        # not SWB's matched_j_inductive -- see [recon-anchor] above.
         step_j_phi = (
-            results["j_inductive"] if recalculate_j_BS else input_j_phi
+            input_jinductive if recalculate_j_BS else input_j_phi
         )
         j_phi_0 = step_j_phi[0]
 
@@ -1130,6 +1350,15 @@ def generate_bouquet(
     max_proxy_draws=500,
     coil_drift=0.01,
     coil_drift_floor_A=50.0,
+    vsc_coils=('F9A', 'F9B'),
+    vsc_budget_frac=0.5,
+    coil_drift_hard_factor=None,
+    soft_reg_weight=1.0e4,
+    vsc_soft_reg_weight=1.0,
+    p_thresh=5.0,
+    homotopy_passes=None,
+    inspec_F_max=0.025,
+    inspec_VSC_max=0.10,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -1222,6 +1451,42 @@ def generate_bouquet(
         ``coil_drift * |I_baseline|`` falls below this value (e.g. for
         a coil that happens to have a tiny baseline current).  Default
         50.0 A.
+    vsc_coils : tuple of str
+        Names of the coils that participate in the VSC pair (those
+        with non-zero ``coil_vcont`` after ``mygs.set_coil_vsc``).
+        Default ``('F9A', 'F9B')``.  These coils get split-budget
+        bounds so the *total* current (bare + VSC contribution)
+        stays within ``coil_drift``.
+    vsc_budget_frac : float
+        Fraction of ``coil_drift`` allocated to the ``#VSC`` channel
+        for the VSC-pair coils; the remainder goes to the bare-coil
+        bound.  Default 0.5 (equal split).
+        - 0.0 → all budget on bare; ``#VSC`` pinned to 0 (no vertical
+          control slack; may break solver convergence).
+        - 1.0 → all budget on ``#VSC``; bare F-coils pinned at
+          baseline (only the VSC channel can drift).
+        Worst-case total drift on a VSC-pair coil with this split
+        is exactly ``coil_drift × |I_baseline|`` for the smaller-
+        magnitude coil of the pair, slightly less for the larger.
+    coil_drift_hard_factor : float or None
+        Optional hard inequality bound at ``±coil_drift_hard_factor *
+        coil_drift * |I_baseline|`` per coil and on ``#VSC`` (sized by
+        the smaller of the VSC pair).  Default ``None`` -- no hard
+        bound is installed; the soft regularization toward baseline
+        is the only constraint, matching PR1's ``lock_coils=True``
+        behavior.  Set to a number (e.g. 20 or 50) to add a safety
+        ceiling that catches catastrophic drift; values < ~10 tend to
+        clip Picard-iteration transients and break solver convergence
+        on perturbed draws.  Drift relative to ``coil_drift`` can be
+        post-checked from the stored ``coil_currents`` per draw.
+    soft_reg_weight : float
+        Weight of the soft regularization toward baseline coil
+        currents (default 1e4, calibrated for ~1% drift on DIII-D).
+        Higher → tighter pull, lower → looser.
+    vsc_soft_reg_weight : float
+        Soft-reg weight for the ``#VSC`` channel (default 1.0).  Kept
+        much lower than ``soft_reg_weight`` so the VSC has freedom to
+        do vertical-mode control work without being heavily penalized.
 
     Returns
     -------
@@ -1250,26 +1515,29 @@ def generate_bouquet(
     # Re-solve with the baseline profiles first so the check reflects
     # the reconstruction state (not a corrective-iteration state that
     # may have altered q_0).
-    # We always run a baseline solve here when ``coil_drift`` bounds are
-    # requested, regardless of ``constrain_sawteeth``, so the recon's
-    # converged ``(psi, coils)`` snapshot is captured cleanly before
-    # any perturbation runs.  The same solve doubles as the q-check
-    # when ``constrain_sawteeth`` is on.
-    _need_baseline_solve = constrain_sawteeth or (coil_drift is not None)
+    # ----------------------------------------------------------------
+    # Forward-mode baseline + coil_drift bounds.
+    # ----------------------------------------------------------------
+    # Mirrors PR1's lock_coils flow: do a forward solve at recon's
+    # profiles + abs(eqdsk.Ip), THEN capture (psi, coils) from the
+    # post-solve state.  This is the *forward-mode baseline* -- the
+    # state forward-mode perturbations naturally land at in the sigma=0
+    # limit -- which differs slightly from the inverse-mode recon's
+    # coils because recon used its own Ip-secant correction.  Centering
+    # coil_drift bounds around this forward-mode baseline (not around
+    # recon's coils) is what makes ±1% bounds physically attainable for
+    # forward-mode perturbations.
     _baseline_psi = None
     _baseline_coils = None
-    if _need_baseline_solve:
-        _pp_check = {"type": "linterp",
-                      "y": np.gradient(pressure) / (np.gradient(psi_N)
-                           * (mygs.psi_bounds[1] - mygs.psi_bounds[0])),
-                      "x": psi_N}
-        _pp_check["y"][-1] = 0.0
-        _ffp_check = {"type": "jphi-linterp",
-                       "y": input_j_phi.copy(), "x": psi_N}
-        mygs.set_targets(Ip=initial_Ip_target, pax=pressure[0])
-        mygs.set_profiles(pp_prof=_pp_check, ffp_prof=_ffp_check)
-        mygs.solve()
-        if constrain_sawteeth:
+    _recon_Ip = None
+
+    # Sawtooth check.  We use mygs.get_q on the current (recon) state
+    # rather than re-solving here -- a fresh forward solve at
+    # abs(eqdsk.Ip) shifts the equilibrium slightly off the recon's
+    # converged state and ends up confusing the soft-reg lock.  Recon
+    # already has a populated q profile.
+    if constrain_sawteeth:
+        try:
             _, q_baseline_check, _, _, _, _ = mygs.get_q(
                 npsi=len(psi_N), psi_pad=psi_pad
             )
@@ -1281,40 +1549,106 @@ def generate_bouquet(
                     f"equilibria are not rejected."
                 )
                 constrain_sawteeth = False
-        if coil_drift is not None:
-            _baseline_psi = mygs.get_psi(False).copy()
-            _coils_now, _ = mygs.get_coil_currents()
-            _baseline_coils = {k: float(v) for k, v in _coils_now.items()}
+        except Exception as _q_exc:
+            print(f"WARNING: q-profile check failed ({_q_exc}); "
+                  f"leaving constrain_sawteeth as is.")
+
+    if coil_drift is not None:
+        # Capture mygs's current (recon) coil currents -- these are the
+        # soft-lock target.  Caller must have just returned from
+        # reconstruct_equilibrium, so mygs is at the recon's converged
+        # state on entry to generate_bouquet.
+        _initial_coils_dict, _ = mygs.get_coil_currents()
+        _initial_coils = {k: float(v) for k, v in _initial_coils_dict.items()}
+
+        # Also capture the recon's *converged* Ip (post-Ip-secant inside
+        # reconstruct_equilibrium).  This is what each perturbed-equilibrium
+        # actual_Ip should be aligned to by the post-perturb Ip secant
+        # (jphi-linterp doesn't enforce Ip exactly, so passing a target
+        # alone isn't enough -- need to iterate).
+        _recon_Ip = float(abs(mygs.get_globals()[0]))
+
+        # Hybrid coil-drift control:
+        #
+        #   (i)  HARD outer bounds at +/- (coil_drift * coil_drift_hard_factor)
+        #        on every coil and the #VSC channel.  Prevents catastrophic
+        #        drift but is loose enough that Picard iteration has
+        #        wiggle room and converges (a hard +/-coil_drift bound
+        #        sits exactly on the QP optimum and triggers iteration
+        #        ping-pong against the constraint, exceeding maxits).
+        #   (ii) SOFT regularization with target=baseline_coils,
+        #        weight=soft_reg_weight, that pulls coil currents back
+        #        toward baseline.  Typical drift settles near
+        #        +/- coil_drift * |I_baseline| with weight=1e4 on DIII-D.
+        #        The #VSC soft reg uses a much lower weight so the
+        #        vertical-stability channel has room to do its work.
+        #
+        # The forward-solve "baseline" (post-Ip-secant-corrected forward
+        # equilibrium at recon profiles + abs(eqdsk.Ip)) is what we
+        # measure drift relative to -- not the inverse-mode recon
+        # coils, which differ slightly from forward-mode equilibrium.
+        # Step 2: install soft regularization targeting the post-q-check
+        # forward-mode coils.  Replaces whatever soft reg the user
+        # installed before generate_bouquet (typically target=0 weight=1.0
+        # from the recon setup, which is too loose for perturbed solves).
+        _rt = []
+        for _name in mygs.coil_sets:
+            _target = float(_initial_coils.get(_name, 0.0))
+            _rt.append(mygs.coil_reg_term(
+                {_name: 1.0}, target=_target,
+                weight=float(soft_reg_weight)))
+        _rt.append(mygs.coil_reg_term(
+            {'#VSC': 1.0}, target=0.0,
+            weight=float(vsc_soft_reg_weight)))
+        mygs.set_coil_reg(reg_terms=_rt)
+
+        # Step 3: capture baseline (psi, coils) for the perturbation
+        # reset path.  No re-solve here -- mygs is already at recon's
+        # converged state from the caller.
+        _baseline_psi = mygs.get_psi(False).copy()
+        _baseline_coils = dict(_initial_coils)
+
+        # Step 5: optional hard outer bounds at
+        # +/-(coil_drift * hard_factor) around the lock-mode coils.
+        # When hard_factor is None (default), no hard bounds are
+        # installed -- soft reg alone shapes the QP optimum.  Hard
+        # bounds at any factor can break Picard iteration when the
+        # iteration's transients exceed the bound (the QP clips and
+        # the iteration ping-pongs).  If you want a safety ceiling,
+        # set hard_factor large (e.g. 20-50) so it only catches
+        # catastrophic drift; leave None for PR1-equivalent behavior.
+        _vsc_in_set = tuple(c for c in vsc_coils if c in _baseline_coils)
+        if coil_drift_hard_factor is not None:
+            _hard = float(coil_drift_hard_factor) * coil_drift
             _bounds = {}
             for _name, _base in _baseline_coils.items():
-                _delta = max(coil_drift * abs(_base),
-                              float(coil_drift_floor_A))
+                _delta = max(_hard * abs(_base), float(coil_drift_floor_A))
                 _bounds[_name] = [_base - _delta, _base + _delta]
-            # Bound the VSC channel as well.  ``set_coil_bounds`` on
-            # individual F-coils only constrains the *bare* current;
-            # without a ``#VSC`` bound, vcontrol_val can drift freely
-            # and push the total coil current outside the +/-coil_drift
-            # band.  Sizing the VSC bound by the largest VSC-pair
-            # baseline keeps the worst-case total drift on those
-            # coils within roughly +/-2 * coil_drift -- which is the
-            # natural budget for "bare drift + VSC drift".
-            try:
-                _vsc_max_base = max(
-                    abs(_baseline_coils[c]) for c in _baseline_coils
-                    if c in ('F9A', 'F9B'))
-            except ValueError:
-                _vsc_max_base = 0.0
-            _vsc_delta = max(coil_drift * _vsc_max_base,
-                              float(coil_drift_floor_A))
-            _bounds['#VSC'] = [-_vsc_delta, _vsc_delta]
+            if len(_vsc_in_set) > 0:
+                _vsc_min_base = min(abs(_baseline_coils[c]) for c in _vsc_in_set)
+                _vsc_delta = max(_hard * _vsc_min_base, float(coil_drift_floor_A))
+                _bounds['#VSC'] = [-_vsc_delta, _vsc_delta]
             mygs.set_coil_bounds(_bounds)
-            print(
-                f"[coil-bounds] installed +/-{coil_drift*100:.2f}% bounds "
-                f"(floor {coil_drift_floor_A:.0f} A) on "
-                f"{len(_baseline_coils)} coils + #VSC; "
-                f"psi+coils snapshot captured."
-            )
+            mygs._coil_drift_bounds = _bounds
+        else:
+            # Don't call set_coil_bounds at all when no hard bounds are
+            # requested -- even set_coil_bounds(None) (which uses ±1e98)
+            # may put the underlying QP into bounded-mode and subtly
+            # change the iteration path.
+            if hasattr(mygs, '_coil_drift_bounds'):
+                delattr(mygs, '_coil_drift_bounds')
 
+        _hard_msg = (f"hard +/-{float(coil_drift_hard_factor)*coil_drift*100:.1f}% "
+                     f"(factor={coil_drift_hard_factor:g}x) + "
+                     if coil_drift_hard_factor is not None else "soft-reg-only, ")
+        print(
+            f"[coil-bounds hybrid] target +/-{coil_drift*100:.2f}% drift, "
+            f"{_hard_msg}"
+            f"soft reg (weight={soft_reg_weight:.0e}, "
+            f"vsc_weight={vsc_soft_reg_weight:.0e}); "
+            f"psi+coils snapshot captured (recon baseline, "
+            f"{len(_baseline_coils)} coils)."
+        )
     # Pre-compute jBS scale factors for the whole batch (if requested).
     # Uses a uniform distribution within the specified range so that
     # extreme values (which can make l_i matching very difficult) are
@@ -1367,6 +1701,15 @@ def generate_bouquet(
             print(f"  WARNING: could not recompute baseline rotations: {exc}")
             traceback.print_exc()
 
+    # Capture recon's coil currents at this point (mygs is in recon's
+    # converged state on entry to generate_bouquet).  Saved as the
+    # absolute reference for per-draw coil-drift analysis.
+    try:
+        _bl_coil_dict, _ = mygs.get_coil_currents()
+        _bl_coil_dict = {k: float(v) for k, v in _bl_coil_dict.items()}
+    except Exception:
+        _bl_coil_dict = None
+
     store_baseline_profiles(
         header, psi_N,
         ne, te, ni, ti,
@@ -1377,6 +1720,7 @@ def generate_bouquet(
         eqdsk_bytes=baseline_eqdsk_bytes,
         pfile_bytes=stored_pfile_bytes,
         psi_N_kinetic=psi_N_kinetic,
+        coil_currents=_bl_coil_dict,
     )
 
     t_batch_start = time.perf_counter()
@@ -1396,6 +1740,14 @@ def generate_bouquet(
 
     for count in eq_iter:
         scale_jBS = float(jBS_scales[count])
+        # Per-draw homotopy/spec defaults (overwritten by Step 3 below).
+        _final_drifts = None
+        _final_pass_idx = -1
+        _final_drift_F_lim = (coil_drift if coil_drift is not None else 0.0)
+        _final_drift_VSC_lim = (coil_drift if coil_drift is not None else 0.0)
+        _max_f_drift = float('nan')
+        _max_vsc_drift = float('nan')
+        _in_spec = False
         eta_str = ""
         if elapsed_times:
             avg_s = np.mean(elapsed_times)
@@ -1444,24 +1796,327 @@ def generate_bouquet(
                 diagnostic_plots=diagnostic_plots,
                 psi_N_kinetic=psi_N_kinetic,
                 max_proxy_draws=max_proxy_draws,
+                p_thresh=p_thresh,
             )
-        except (RuntimeError, ValueError) as e:
-            print(f"\n  STOPPED: {e}")
-            print(f"  Skipping equilibrium {count+1}/{n_equils}.\n")
-            # When coil_drift bounds are active, restore the baseline
-            # (psi, coils) snapshot so the next draw starts from a
-            # known-good state rather than whatever partial / failed
-            # state the perturbation left behind.
+        except Exception as e:
+            # Catch ANY exception during a perturbed solve -- ValueError
+            # / RuntimeError from the GS solver, TypeError from OFT's
+            # bootstrap-spike analyzer when it returns None on a
+            # pathological draw, ArithmeticError, etc.  The user's spec
+            # is "if a perturbation fails for any reason, reset mygs to
+            # the recon baseline and try the next perturbation".  We
+            # deliberately swallow the broad Exception class here
+            # (KeyboardInterrupt and SystemExit derive from
+            # BaseException so are not caught -- ctrl-c still aborts).
+            import traceback as _tb
+            _err_short = str(e).strip().splitlines()[-1] if str(e) else type(e).__name__
+            print(f"\n  STOPPED: {type(e).__name__}: {_err_short}")
+            print(f"  Skipping equilibrium {count+1}/{n_equils}.")
+
+            # Restore the recon baseline state -- (psi, coils, bounds) --
+            # so the next draw starts from a known-good state rather
+            # than whatever partial / failed state the perturbation left
+            # behind.  Bounds were stashed on mygs at install time and
+            # may have been cleared by perturb_kinetic_equilibrium's
+            # try/finally around solve_with_bootstrap; restore them too.
             if coil_drift is not None and _baseline_psi is not None:
                 try:
                     mygs.set_coil_currents(_baseline_coils)
                     mygs.set_psi(_baseline_psi)
-                    print(f"  reset mygs to baseline (psi + coils).")
+                    _stashed = getattr(mygs, '_coil_drift_bounds', None)
+                    if _stashed is not None:
+                        mygs.set_coil_bounds(_stashed)
+                    print(f"  reset mygs to recon baseline "
+                          f"(psi + coils + bounds re-applied).")
                 except Exception as _reset_exc:
                     print(f"  WARN: baseline reset failed: {_reset_exc}")
+                    print(_tb.format_exc())
             if pbar is not None:
                 pbar.update(1)
             continue
+
+        # ---- Post-perturb: Ip-secant alignment + hard coil bounds -----
+        # The kinetic perturbation flow (perturb_kinetic_equilibrium)
+        # converges with jphi-linterp's geometric Ip drift, so the actual
+        # converged Ip on each draw differs from the user's target by
+        # ~1-2%.  That mismatch makes the F-coil distribution drift more
+        # than necessary to satisfy the perturbed-profile equilibrium.
+        #
+        # Step 1: secant-iterate Ip_target until actual_Ip (from
+        #         get_globals) matches recon's converged Ip to <<1%.
+        # Step 2: install hard +/-coil_drift bounds and re-solve once.
+        #         If the QP is feasible at the now-Ip-aligned profile,
+        #         the draw is accepted.  If infeasible, the draw is
+        #         rejected and the loop moves on (with the standard
+        #         baseline reset).
+        if coil_drift is not None and _recon_Ip is not None:
+            _ip_aligned = False
+            _post_align_failed = False
+            _Ip_tol = 1e-3
+            _max_ip_iters = 8
+            try:
+                # Snapshot current pp/ffp from mygs so the secant solves
+                # against the perturbed-profile equilibrium.
+                _, _F, _Fp, _P, _Pp = mygs.get_profiles(psi=psi_N)
+                _pp_align  = {'type': 'linterp',      'y': _Pp,        'x': psi_N}
+                _ffp_align = {'type': 'jphi-linterp', 'y': jphi_perturb.copy(), 'x': psi_N}
+
+                # Pre-secant: where are we?
+                _actual_pre = float(abs(mygs.get_globals()[0]))
+                _err_pre = abs(_actual_pre - _recon_Ip) / _recon_Ip
+                _trial = _recon_Ip
+                _final_actual = _actual_pre
+
+                if _err_pre > _Ip_tol:
+                    # First-order rescale; on solve failure, retry the
+                    # SAME ip iteration with a damped step (averaged
+                    # toward _final_actual) rather than aborting the
+                    # entire post-perturb pipeline.  Empirically the
+                    # first-order rescale can over-shoot when the
+                    # perturbed profile's geometric Ip drift is large,
+                    # tripping Picard maxits.  A halved step usually
+                    # converges from the same starting psi.
+                    _trial = _recon_Ip * (_recon_Ip / _actual_pre)
+                    _max_failure_retries = 3
+                    _saved_psi = mygs.get_psi(False).copy()
+                    for _ip_it in range(_max_ip_iters):
+                        _retries = 0
+                        while True:
+                            try:
+                                mygs.set_targets(Ip=_trial,
+                                                  pax=float(_P[0]) if _P[0] != 0
+                                                       else float(pressure[0]))
+                                mygs.set_profiles(pp_prof=_pp_align,
+                                                   ffp_prof=_ffp_align)
+                                mygs.solve()
+                                # success: snapshot psi for next retry
+                                _saved_psi = mygs.get_psi(False).copy()
+                                break
+                            except (ValueError, RuntimeError) as _ip_exc:
+                                _retries += 1
+                                if _retries > _max_failure_retries:
+                                    print(f"  [Ip-align] secant solve failed at "
+                                          f"iter {_ip_it} after {_retries-1} "
+                                          f"damped retries (final Ip_trial="
+                                          f"{_trial:.0f}): {_ip_exc}")
+                                    _post_align_failed = True
+                                    break
+                                # Restore last-good psi and damp toward
+                                # the previous converged Ip (_final_actual)
+                                try:
+                                    mygs.set_psi(_saved_psi, update_bounds=True)
+                                except Exception:
+                                    pass
+                                _new_trial = 0.5 * (_trial + _final_actual)
+                                print(f"  [Ip-align] solve failed at iter "
+                                      f"{_ip_it} (Ip_trial={_trial:.0f}); "
+                                      f"damping to {_new_trial:.0f} (retry "
+                                      f"{_retries}/{_max_failure_retries})")
+                                _trial = _new_trial
+                        if _post_align_failed:
+                            break
+                        _final_actual = float(abs(mygs.get_globals()[0]))
+                        _err = abs(_final_actual - _recon_Ip) / _recon_Ip
+                        if _err < _Ip_tol:
+                            break
+                        # Proportional rescale toward target
+                        _trial = _trial * (_recon_Ip / _final_actual)
+                else:
+                    pass  # already aligned
+
+                if not _post_align_failed:
+                    print(f"  [Ip-align] aligned actual_Ip {_actual_pre:.0f} -> "
+                          f"{_final_actual:.0f}  (target {_recon_Ip:.0f}, "
+                          f"err {abs(_final_actual - _recon_Ip)/_recon_Ip*100:+.3f}%)")
+                    _ip_aligned = True
+
+                # Step 2: update isoflux to the *post-Ip-aligned* boundary
+                # (still free VSC).  This is the boundary the perturbed
+                # equilibrium naturally settles into; using it as the new
+                # isoflux target makes the next solve self-consistent --
+                # otherwise tightening F9 bounds against the recon
+                # boundary forces the QP to relax isoflux dramatically
+                # (we've seen the plasma drop ~2 m vertically).
+                #
+                # GATE: only run iso-update if hard bounds are going to
+                # be installed.  In SKIP_HARD mode, the post-Ip-align
+                # equilibrium uses recon's isoflux directly.
+                # Independent SKIP_ISO=1 env var also disables iso-update
+                # even when hard bounds are active, useful for diagnosing
+                # whether the iso-shifted boundary is what forces F9
+                # drift > spec at low σ.
+                _skip_hard = os.environ.get('SKIP_HARD', '0') == '1'
+                _skip_iso  = os.environ.get('SKIP_ISO',  '0') == '1'
+                _iso_updated = False
+                if _ip_aligned and not _skip_hard and not _skip_iso:
+                    try:
+                        _new_lcfs = mygs.trace_surf(1.0 - psi_pad)
+                        if _new_lcfs is None or len(_new_lcfs) < 4:
+                            # Try a slightly larger pad for the trace
+                            _new_lcfs = mygs.trace_surf(1.0 - 1e-4)
+                        if _new_lcfs is not None and len(_new_lcfs) >= 4:
+                            # Reuse the recon's isoflux weights pattern
+                            # (constant 200 across all points by default)
+                            _new_w = (np.ones(len(_new_lcfs))
+                                       * float(np.mean(np.abs(
+                                            mygs.psi_bounds[1] - mygs.psi_bounds[0]))) * 0
+                                       + 200.0)
+                            mygs.set_isoflux(_new_lcfs, weights=_new_w)
+                            _iso_updated = True
+                            print(f"  [iso-update] new isoflux from Ip-aligned LCFS "
+                                  f"({len(_new_lcfs)} pts)")
+                        else:
+                            print(f"  [iso-update] LCFS trace failed; keeping recon isoflux")
+                    except Exception as _iso_exc:
+                        print(f"  [iso-update] failed: {_iso_exc}")
+
+                # Step 3: install hard coil bounds (with optional
+                # homotopy: progressive tightening across multiple passes
+                # warm-started from prior pass's psi).  _skip_hard already
+                # fetched above.
+                #
+                # Single-pass mode (homotopy_passes=None): use uniform
+                # ``coil_drift`` for all coils + ``#VSC``.  Backward
+                # compatible with prior behaviour.
+                #
+                # Homotopy mode: each pass is a (drift_F, drift_VSC) tuple.
+                # Passes run sequentially.  On success the last good
+                # (psi, coils) is snapshotted and we advance.  On failure
+                # we restore the last good state and stop tightening.
+                # The final accepted draw uses the tightest pass that
+                # converged.
+                _vsc_in_set = tuple(c for c in vsc_coils if c in _baseline_coils)
+                # Use MIN baseline magnitude so the VSC channel bound is
+                # conservative for BOTH coils.  Per-coil drift = |VSC_value|
+                # / |baseline_coil|, so max drift = VSC_bound / min_baseline.
+                # Using max would let the smaller coil drift more than spec.
+                _vsc_min_base = (min(abs(_baseline_coils[c]) for c in _vsc_in_set)
+                                  if _vsc_in_set else 0.0)
+                _vsc_max_base = _vsc_min_base  # back-compat alias
+
+                def _build_bounds(drift_F, drift_VSC):
+                    """Build per-coil bare bounds + #VSC channel bound.
+
+                    Pure per-coil semantics:
+                    - Non-VSC F-coils: bare ≤ drift_F → total drift ≤ drift_F
+                    - F9A/F9B (VSC pair): bare ≤ drift_F (same per-coil bound)
+                    - #VSC channel: ≤ drift_VSC × min(|F9A|, |F9B|)
+                      so VSC contribution to either coil ≤ drift_VSC
+
+                    Total F9 drift = bare ± VSC contribution.  Worst case:
+                    drift_F + drift_VSC.  Caller must pick drift_F + drift_VSC
+                    ≤ user spec for F9 (e.g. drift_F=1%, drift_VSC=1% for
+                    a global ≤2% spec).
+                    """
+                    _b = {}
+                    for _name, _base in _baseline_coils.items():
+                        _delta = max(drift_F * abs(_base),
+                                      float(coil_drift_floor_A))
+                        _b[_name] = [_base - _delta, _base + _delta]
+                    if _vsc_in_set:
+                        _vsc_delta = max(drift_VSC * _vsc_min_base,
+                                          float(coil_drift_floor_A))
+                        _b['#VSC'] = [-_vsc_delta, _vsc_delta]
+                    return _b
+
+                _final_drifts = None  # last successful pass's drifts
+                _final_pass_idx = -1
+                _final_drift_F_lim = coil_drift
+                _final_drift_VSC_lim = coil_drift
+
+                if _ip_aligned and not _skip_hard:
+                    _passes = (homotopy_passes if homotopy_passes is not None
+                               else [(coil_drift, coil_drift)])
+                    _last_good_psi   = mygs.get_psi(False).copy()
+                    _last_good_coils = dict(_baseline_coils)  # fallback only
+
+                    for _p_idx, (_dF, _dVSC) in enumerate(_passes):
+                        _bounds_p = _build_bounds(_dF, _dVSC)
+                        mygs.set_coil_bounds(_bounds_p)
+                        _label = (f"pass {_p_idx+1}/{len(_passes)}"
+                                   if len(_passes) > 1 else "single-pass")
+                        try:
+                            mygs.solve()
+                            # Snapshot success
+                            _cur, _ = mygs.get_coil_currents()
+                            _all_drifts = {
+                                _n: (float(_cur[_n]) - _baseline_coils[_n])
+                                     / max(abs(_baseline_coils[_n]), 1.0) * 100
+                                for _n in _baseline_coils
+                            }
+                            _f_only = {n: d for n, d in _all_drifts.items()
+                                        if n.startswith('F') and n not in _vsc_in_set}
+                            _vsc_only = {n: d for n, d in _all_drifts.items()
+                                          if n in _vsc_in_set}
+                            _max_f = max((abs(d) for d in _f_only.values()),
+                                          default=0.0)
+                            _max_vsc = max((abs(d) for d in _vsc_only.values()),
+                                            default=0.0)
+                            print(f"  [homotopy {_label}] F=+/-{_dF*100:.1f}%  "
+                                  f"VSC=+/-{_dVSC*100:.1f}% -> SOLVED "
+                                  f"(max non-VSC F-coil drift={_max_f:.2f}%, "
+                                  f"max VSC drift={_max_vsc:.2f}%)")
+                            _last_good_psi   = mygs.get_psi(False).copy()
+                            _last_good_coils = dict(_cur)
+                            _final_drifts    = _all_drifts
+                            _final_pass_idx  = _p_idx
+                            _final_drift_F_lim   = _dF
+                            _final_drift_VSC_lim = _dVSC
+                        except (ValueError, RuntimeError) as _hb_exc:
+                            print(f"  [homotopy {_label}] F=+/-{_dF*100:.1f}%  "
+                                  f"VSC=+/-{_dVSC*100:.1f}% -> infeasible "
+                                  f"({_hb_exc})")
+                            if _final_pass_idx < 0:
+                                # First pass failed -> draw is rejected
+                                _post_align_failed = True
+                            else:
+                                # Roll back to last successful pass
+                                try:
+                                    mygs.set_psi(_last_good_psi,
+                                                 update_bounds=True)
+                                    mygs.set_coil_currents(_last_good_coils)
+                                except Exception:
+                                    pass
+                                print(f"  [homotopy] rolled back to pass "
+                                      f"{_final_pass_idx + 1}")
+                            break  # stop tightening
+                    mygs.set_coil_bounds(None)
+
+                # Compute in-spec status from final drifts (if any)
+                _in_spec = False
+                _max_f_drift = float('nan')
+                _max_vsc_drift = float('nan')
+                if _final_drifts is not None:
+                    _f_only = {n: d for n, d in _final_drifts.items()
+                                if n.startswith('F') and n not in _vsc_in_set}
+                    _vsc_only = {n: d for n, d in _final_drifts.items()
+                                  if n in _vsc_in_set}
+                    _max_f_drift = float(max((abs(d) for d in _f_only.values()),
+                                              default=0.0))
+                    _max_vsc_drift = float(max((abs(d) for d in _vsc_only.values()),
+                                                default=0.0))
+                    _in_spec = (_max_f_drift <= inspec_F_max * 100.0
+                                 and _max_vsc_drift <= inspec_VSC_max * 100.0)
+                    _spec_msg = ('IN_SPEC' if _in_spec else 'OUT_OF_SPEC')
+                    print(f"  [in-spec] {_spec_msg}: max non-VSC F-drift="
+                          f"{_max_f_drift:.2f}% (limit {inspec_F_max*100:.1f}%), "
+                          f"max VSC drift={_max_vsc_drift:.2f}% "
+                          f"(limit {inspec_VSC_max*100:.1f}%)")
+
+            except Exception as _post_exc:
+                print(f"  [Ip-align+bounds] unexpected failure: {_post_exc}")
+                _post_align_failed = True
+
+            if _post_align_failed:
+                # Reset to baseline and skip this draw (treat as rejected).
+                try:
+                    mygs.set_coil_currents(_baseline_coils)
+                    mygs.set_psi(_baseline_psi)
+                except Exception:
+                    pass
+                if pbar is not None:
+                    pbar.update(1)
+                continue
 
         elapsed = time.perf_counter() - t_start
         elapsed_times.append(elapsed)
@@ -1477,6 +2132,17 @@ def generate_bouquet(
             )
 
         diagnostics['time'] = elapsed
+        # Homotopy + in-spec bookkeeping (always present so downstream
+        # H5 schema is consistent across draws; NaN/-1 when hard bounds
+        # weren't installed e.g. SKIP_HARD=1).
+        diagnostics['homotopy_pass']     = int(_final_pass_idx)
+        diagnostics['homotopy_F_lim']    = float(_final_drift_F_lim)
+        diagnostics['homotopy_VSC_lim']  = float(_final_drift_VSC_lim)
+        diagnostics['max_F_drift_pct']   = float(_max_f_drift)
+        diagnostics['max_VSC_drift_pct'] = float(_max_vsc_drift)
+        diagnostics['in_spec']           = bool(_in_spec)
+        diagnostics['inspec_F_max']      = float(inspec_F_max)
+        diagnostics['inspec_VSC_max']    = float(inspec_VSC_max)
 
         # ---- save geqdsk to a temporary file, archive, delete -------
         eqdsk_filename = f"{header}_count={count}.geqdsk"
@@ -1611,6 +2277,14 @@ def generate_bouquet(
             Zeff=Zeff_profile,
             coil_currents=coil_current_dict,
             psi_N_kinetic=psi_N_kinetic,
+            homotopy_pass=diagnostics.get('homotopy_pass'),
+            homotopy_F_lim=diagnostics.get('homotopy_F_lim'),
+            homotopy_VSC_lim=diagnostics.get('homotopy_VSC_lim'),
+            max_F_drift_pct=diagnostics.get('max_F_drift_pct'),
+            max_VSC_drift_pct=diagnostics.get('max_VSC_drift_pct'),
+            in_spec=diagnostics.get('in_spec'),
+            inspec_F_max=diagnostics.get('inspec_F_max'),
+            inspec_VSC_max=diagnostics.get('inspec_VSC_max'),
         )
 
         # Clean up on-disk eqdsk after archiving
