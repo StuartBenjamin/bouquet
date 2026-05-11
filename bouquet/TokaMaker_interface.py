@@ -2070,13 +2070,25 @@ def generate_bouquet(
                                 # First pass failed -> draw is rejected
                                 _post_align_failed = True
                             else:
-                                # Roll back to last successful pass
+                                # Roll back to last successful pass and
+                                # re-solve so mygs's internal FF'/P'
+                                # state is consistent with the restored
+                                # psi.  Without this re-solve,
+                                # mygs.get_stats() returns inf because
+                                # set_psi alone doesn't recompute the
+                                # flux-surface-averaged quantities.
                                 try:
+                                    _lg_dF, _lg_dVSC = _passes[_final_pass_idx]
                                     mygs.set_psi(_last_good_psi,
                                                  update_bounds=True)
                                     mygs.set_coil_currents(_last_good_coils)
-                                except Exception:
-                                    pass
+                                    mygs.set_coil_bounds(
+                                        _build_bounds(_lg_dF, _lg_dVSC))
+                                    mygs.solve()
+                                except Exception as _rb_exc:
+                                    print(f"  [homotopy] WARN: rollback "
+                                          f"re-solve failed ({_rb_exc}); "
+                                          f"stats may be stale")
                                 print(f"  [homotopy] rolled back to pass "
                                       f"{_final_pass_idx + 1}")
                             break  # stop tightening
