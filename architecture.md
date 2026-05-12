@@ -978,7 +978,53 @@ forces ~2.5-3.5% VSC drift even with zero kinetic perturbation, while
 at sigma=1.0 some draws happen to align with low-VSC equilibria and
 satisfy the strict bound while others need much more.
 
-### 15.8 Post-perturb pipeline summary
+### 15.8 The `vsc_soft_reg_weight` knob — what it controls and what it doesn't
+
+Bouquet installs two layers of soft regularization on the F9 pair:
+
+1. **Per-coil bare soft-reg** (weight = `soft_reg_weight`, default 1e4):
+   pulls `F9A_bare` toward recon's `F9A`, and `F9B_bare` toward recon's
+   `F9B`.  This is applied identically to every non-VSC F-coil.
+2. **`#VSC` channel soft-reg** (weight = `vsc_soft_reg_weight`, default 1.0):
+   pulls the antisymmetric channel value (the additional coordinated
+   F9A↑/F9B↓ knob TokaMaker provides via `set_coil_vsc`) toward zero.
+
+The F9 pair has two physical degrees of freedom (F9A_bare, F9B_bare).
+The per-coil soft-reg already pins both at weight 1e4.  Adding
+`vsc_soft_reg_weight` is a *third* pull on a 2-DoF subspace and at
+sufficiently high weight makes the QP over-determined.  Empirical
+findings on DIII-D 204441@4400 (n=15 per setting):
+
+| `vsc_soft_reg_weight` | σ=0 outcome | σ=0.5 in-spec | σ=1.0 in-spec |
+|---|---|---|---|
+| 1.0 (default) | 0/30 in-spec | 23% (n=30) | 23% (n=30) |
+| 100 | 1/15 in-spec | **40%** | – |
+| 1e3 | **QP singular, 0/15 yield** | – | – |
+| 1e4 | **QP singular, 0/15 yield** | – | – |
+
+So `vsc_soft_reg_weight` is useful only as a moderate antisymmetric
+tightener at intermediate σ.  At low σ it does **not** rescue in-spec
+yield, because the σ=0 in-spec gap comes from the iso-update step
+shifting the LCFS, which the homotopy then must satisfy, requiring
+F9 to drift ~3% on the antisymmetric mode regardless of the soft-reg
+weight.
+
+**Recommended values:**
+
+| σ scale | `vsc_soft_reg_weight` | `homotopy_passes` |
+|---|---|---|
+| 0.0 | 1.0 | **`None`** (soft-reg-only mode; natural F9 drift ~0.6%, all in-spec) |
+| 0.5 | 100 | `[(0.05,0.10), (0.02,0.05), (0.01,0.01)]` |
+| 1.0 | 1.0 | `[(0.05,0.10), (0.02,0.05), (0.01,0.01)]` |
+
+The σ=0 case is the asymmetric one: the **iso-update step assumes a
+non-trivial boundary shift that doesn't actually happen at σ=0**, and
+the resulting F9 antisymmetric drift is what blocks the strict ±2%
+in-spec.  Skipping hard bounds entirely at σ=0 (`homotopy_passes=None`,
+optionally `SKIP_HARD=1`) returns the pipeline to soft-reg-only mode
+where natural F9 drift is 0.6% — comfortably in spec.
+
+### 15.9 Post-perturb pipeline summary
 
 After kinetic perturbation and the recon-anchor solve, every draw
 goes through:
