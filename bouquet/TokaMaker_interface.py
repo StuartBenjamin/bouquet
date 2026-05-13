@@ -1608,6 +1608,25 @@ def generate_bouquet(
         _baseline_psi = mygs.get_psi(False).copy()
         _baseline_coils = dict(_initial_coils)
 
+        # Warm-start snapshot for per-draw state restoration.
+        # Captured AT THE END of the first successful draw (not at
+        # startup): that draw's fully-converged forward-mode state
+        # (psi, coils, isoflux from iso-update) is a much better
+        # Picard initial guess for subsequent draws than the recon
+        # state itself (which forward-mode physics doesn't satisfy
+        # exactly -- the SWB pedestal spike shifts the boundary
+        # ~10 mm from recon).  Without the snapshot, each draw's
+        # Picard starts from the previous draw's converged state
+        # (non-deterministic warm-chain) -- with it, draws 2..N
+        # all start from draw 1's snapshot (deterministic warm
+        # start), so identical perturbation inputs produce
+        # repeatable outputs.
+        _warmstart_psi = None
+        _warmstart_coils = None
+        _warmstart_iso_pts = None
+        _warmstart_iso_w = None
+        _warmstart_captured = False
+
         # Step 5: optional hard outer bounds at
         # +/-(coil_drift * hard_factor) around the lock-mode coils.
         # When hard_factor is None (default), no hard bounds are
@@ -1759,6 +1778,26 @@ def generate_bouquet(
               f"(scale_jBS={scale_jBS:.4f}){eta_str}")
         print(f"{'='*60}")
         t_start = time.perf_counter()
+
+        # ---- Warm-start restore ----
+        # On draw 0, this is a no-op (snapshot not yet captured).
+        # On draws 1..N-1, restore mygs's psi/coils/isoflux to the
+        # snapshot taken at end of draw 0, so each subsequent draw's
+        # Picard begins from the same warm state.  Ip target is
+        # deliberately NOT restored -- it's overwritten by
+        # perturb_kinetic_equilibrium's internal set_targets call
+        # anyway, and resetting it independently has been observed
+        # to perturb that Picard's behaviour.
+        if _warmstart_captured:
+            try:
+                mygs.set_coil_currents(_warmstart_coils)
+                mygs.set_psi(_warmstart_psi)
+                if _warmstart_iso_pts is not None:
+                    mygs.set_isoflux(_warmstart_iso_pts,
+                                     weights=_warmstart_iso_w)
+            except Exception as _ws_rs_exc:
+                print(f"  [warmstart] restore failed "
+                      f"({_ws_rs_exc}); draw inherits prior state")
 
         try:
             (
@@ -2373,6 +2412,34 @@ def generate_bouquet(
             print(f"  WARNING: could not delete {full_path}: {exc}")
 
         all_diagnostics.append(diagnostics)
+
+        # ---- Warm-start capture (first successful draw only) ----
+        # Capture the converged forward-mode state from this draw so
+        # subsequent draws can start their Picard from the same warm
+        # reference.  Only fires once per generate_bouquet call.
+        if not _warmstart_captured:
+            try:
+                _warmstart_psi = mygs.get_psi(False).copy()
+                _wcoils, _ = mygs.get_coil_currents()
+                _warmstart_coils = {k: float(v) for k, v
+                                    in _wcoils.items()}
+                _wiso = getattr(mygs, '_isoflux_targets', None)
+                if _wiso is None:
+                    _wiso = getattr(mygs, '_isoflux', None)
+                if _wiso is not None and len(_wiso) >= 4:
+                    _warmstart_iso_pts = np.asarray(_wiso).copy()
+                    _warmstart_iso_w = (np.ones(
+                        len(_warmstart_iso_pts)) * 200.0)
+                _warmstart_captured = True
+                print(f"  [warmstart] captured draw {count+1} "
+                      f"converged state "
+                      f"({len(_warmstart_iso_pts) if _warmstart_iso_pts is not None else 0} "
+                      f"isoflux pts) -- subsequent draws will "
+                      f"restore from this snapshot")
+            except Exception as _ws_cap_exc:
+                print(f"  [warmstart] snapshot capture failed "
+                      f"({_ws_cap_exc}); subsequent draws will "
+                      f"inherit prior state as before")
 
     if pbar is not None:
         pbar.close()
