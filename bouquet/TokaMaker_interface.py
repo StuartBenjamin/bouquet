@@ -2056,6 +2056,72 @@ def generate_bouquet(
                                   f"VSC=+/-{_dVSC*100:.1f}% -> SOLVED "
                                   f"(max non-VSC F-coil drift={_max_f:.2f}%, "
                                   f"max VSC drift={_max_vsc:.2f}%)")
+
+                            # ---- QP saturation guard ----
+                            # If the QP solution sits at the bound (active
+                            # constraint), the optimiser wanted to go
+                            # further but couldn't.  Accepting that state
+                            # as the draw's final answer is the trigger
+                            # for the cascading-plasma-loss bug: at tight
+                            # bounds (esp. Pass 3) the flux topology
+                            # touches the constraint surface, save_eqdsk's
+                            # q-profile trace fails across most psi, and
+                            # mygs's internal solver state is silently
+                            # left degenerate -- the NEXT draw's anchor
+                            # solve then collapses to axis=(0.5,0), Ip=0,
+                            # and the rest of the sweep cascades.
+                            # Treating saturation as infeasible and
+                            # rolling back to the last good (looser) pass
+                            # eliminates the cascade.  The factor 0.99
+                            # absorbs QP numerical slop without missing
+                            # the active-constraint case (saturation is
+                            # ~exact in practice; non-saturation usually
+                            # leaves several % of headroom).
+                            _sat_F   = (_max_f   >= 0.99 * _dF   * 100.0)
+                            _sat_VSC = (_max_vsc >= 0.99 * _dVSC * 100.0)
+                            if _sat_F or _sat_VSC:
+                                _which = []
+                                if _sat_F:
+                                    _which.append(
+                                        f"F ({_max_f:.2f}% vs cap "
+                                        f"{_dF*100:.1f}%)")
+                                if _sat_VSC:
+                                    _which.append(
+                                        f"VSC ({_max_vsc:.2f}% vs cap "
+                                        f"{_dVSC*100:.1f}%)")
+                                print(f"  [homotopy {_label}] saturation "
+                                      f"detected on {'; '.join(_which)} "
+                                      f"-> treating as infeasible to "
+                                      f"avoid mygs state corruption")
+                                if _final_pass_idx < 0:
+                                    # No prior good pass to fall back to
+                                    # (even Pass 1 saturated).  Reject
+                                    # the draw entirely.
+                                    _post_align_failed = True
+                                else:
+                                    # Roll back to last good pass and
+                                    # re-solve so mygs's FF'/P' state
+                                    # matches the restored psi.
+                                    try:
+                                        _lg_dF, _lg_dVSC = _passes[
+                                            _final_pass_idx]
+                                        mygs.set_psi(_last_good_psi,
+                                                     update_bounds=True)
+                                        mygs.set_coil_currents(
+                                            _last_good_coils)
+                                        mygs.set_coil_bounds(
+                                            _build_bounds(_lg_dF, _lg_dVSC))
+                                        mygs.solve()
+                                    except Exception as _rb_exc:
+                                        print(f"  [homotopy] WARN: "
+                                              f"rollback re-solve failed "
+                                              f"({_rb_exc}); stats may "
+                                              f"be stale")
+                                    print(f"  [homotopy] rolled back to "
+                                          f"pass {_final_pass_idx + 1} "
+                                          f"(saturation)")
+                                break  # stop tightening
+
                             _last_good_psi   = mygs.get_psi(False).copy()
                             _last_good_coils = dict(_cur)
                             _final_drifts    = _all_drifts
