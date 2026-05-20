@@ -592,6 +592,7 @@ def perturb_kinetic_equilibrium(
     max_li_iter=_MAX_LI_ITER,
     psi_N_kinetic=None,
     max_proxy_draws=500,
+    **kwargs
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
     match :math:`I_p` and :math:`l_i` targets.
@@ -813,8 +814,7 @@ def perturb_kinetic_equilibrium(
             Zeff, Ip_target, input_jinductive,
             scale_jBS=scale_jBS,
             isolate_edge_jBS=isolate_edge_jBS,
-            diagnostic_plots=False,
-            verbose=False,
+            **kwargs
         )
         eq_stats = mygs.get_stats(lcfs_pad=psi_pad)
 
@@ -1128,6 +1128,7 @@ def generate_bouquet(
     baseline_pfile_bytes=None,
     psi_N_kinetic=None,
     max_proxy_draws=500,
+    **kwargs
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -1384,6 +1385,7 @@ def generate_bouquet(
                 diagnostic_plots=diagnostic_plots,
                 psi_N_kinetic=psi_N_kinetic,
                 max_proxy_draws=max_proxy_draws,
+                **kwargs
             )
         except (RuntimeError, ValueError) as e:
             print(f"\n  STOPPED: {e}")
@@ -1560,10 +1562,11 @@ def generate_bouquet(
 # ====================================================================
 #  Single-equilibrium reconstruction from geqdsk + kinetic profiles
 # ====================================================================
-def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff, 
+def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                             isoflux_pts, weights, psi_pad,
-                            guess_jinductive,n_k,psi_bridge,rescale_j_BS,
-                            shelf_psi_N,initialize_psi=True):
+                            guess_jinductive, n_k, psi_bridge, rescale_j_BS,
+                            shelf_psi_N, initialize_psi=True,
+                            **kwargs):
     r"""Reconstruct a single Grad-Shafranov equilibrium from a geqdsk
     reference and kinetic profiles, matching the EFIT :math:`l_i(1)`.
 
@@ -1654,7 +1657,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         abs(eqdsk.Ip), guess_jinductive,
         scale_jBS=1.0,
         isolate_edge_jBS=True,
-        diagnostic_plots=False,
+        **kwargs
     )
 
     j_BS_isolated = results['isolated_j_BS']
