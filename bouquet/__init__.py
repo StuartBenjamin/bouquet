@@ -44,6 +44,7 @@ from .plotting import (
     plot_kinetic_profiles,
     plot_jphi_profiles,
     plot_traces,
+    plot_boundary_point_traces,
 )
 
 from .io import (

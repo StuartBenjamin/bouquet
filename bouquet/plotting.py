@@ -1804,3 +1804,318 @@ def plot_traces(h5path_or_header, scan_value="all"):
     fig_bnd.tight_layout()
 
     return [fig_li, fig_Ip, fig_bnd]
+
+
+# ====================================================================
+#  Boundary-points trace plot
+# ====================================================================
+def _lcfs_intersect_horizontal(R, Z, R_axis, Z_axis):
+    """Return (R_inboard, R_outboard) where LCFS crosses Z=Z_axis.
+
+    Iterates over consecutive contour segments and linearly interpolates
+    crossings of the horizontal line ``Z=Z_axis``.  Returns the crossing
+    with R < R_axis (inboard) and R > R_axis (outboard).  Returns
+    ``(nan, nan)`` if either crossing is not found.
+    """
+    R = np.asarray(R, float); Z = np.asarray(Z, float)
+    crossings = []
+    for i in range(len(R) - 1):
+        z1, z2 = Z[i], Z[i + 1]
+        if (z1 - Z_axis) * (z2 - Z_axis) <= 0 and z1 != z2:
+            t = (Z_axis - z1) / (z2 - z1)
+            r_cross = R[i] + t * (R[i + 1] - R[i])
+            crossings.append(r_cross)
+    if not crossings:
+        return (np.nan, np.nan)
+    crossings = np.asarray(crossings)
+    inb = crossings[crossings < R_axis]
+    out = crossings[crossings > R_axis]
+    r_in = inb.max() if len(inb) else np.nan  # closest inboard to axis
+    r_out = out.min() if len(out) else np.nan  # closest outboard to axis
+    return (r_in, r_out)
+
+
+def _lcfs_intersect_vertical(R, Z, R_axis, Z_axis):
+    """Return (Z_below, Z_above) where LCFS crosses R=R_axis.
+
+    Same idea as ``_lcfs_intersect_horizontal`` but crossing the
+    vertical line ``R=R_axis``.  Returns (Z_below_axis, Z_above_axis).
+    """
+    R = np.asarray(R, float); Z = np.asarray(Z, float)
+    crossings = []
+    for i in range(len(R) - 1):
+        r1, r2 = R[i], R[i + 1]
+        if (r1 - R_axis) * (r2 - R_axis) <= 0 and r1 != r2:
+            t = (R_axis - r1) / (r2 - r1)
+            z_cross = Z[i] + t * (Z[i + 1] - Z[i])
+            crossings.append(z_cross)
+    if not crossings:
+        return (np.nan, np.nan)
+    crossings = np.asarray(crossings)
+    below = crossings[crossings < Z_axis]
+    above = crossings[crossings > Z_axis]
+    z_below = below.max() if len(below) else np.nan  # closest below
+    z_above = above.min() if len(above) else np.nan  # closest above
+    return (z_below, z_above)
+
+
+def _detect_xpoint(R, Z, R_axis, Z_axis, half="lower",
+                   corner_angle_deg=40.0):
+    """Find an X-point candidate on the LCFS in the upper or lower half.
+
+    An X-point on a separatrix shows up as a corner with a tangent
+    turn far above what a smooth flux surface would have.  We compute
+    the signed exterior turning angle at each contour vertex, look for
+    the vertex with the largest |angle| in the requested half-plane,
+    and return it if the angle exceeds ``corner_angle_deg``.
+
+    Parameters
+    ----------
+    R, Z : array_like
+        LCFS contour points (closed loop assumed; last == first not
+        required, the function handles either).
+    R_axis, Z_axis : float
+        Magnetic axis position.
+    half : 'upper' or 'lower'
+        Which side of Z_axis to search.
+    corner_angle_deg : float
+        Threshold for accepting a vertex as an X-point.  D-shaped
+        plasmas have smooth boundaries that don't exceed ~5-10 deg per
+        vertex; X-points are ~80-120 deg.
+
+    Returns
+    -------
+    (R_xpt, Z_xpt) or (nan, nan)
+        Coordinates of the detected X-point.
+    """
+    R = np.asarray(R, float); Z = np.asarray(Z, float)
+    n = len(R)
+    if n < 6:
+        return (np.nan, np.nan)
+    # Build closed loop indexing
+    angles = np.zeros(n)
+    for i in range(n):
+        i_prev = (i - 1) % n
+        i_next = (i + 1) % n
+        v1 = np.array([R[i] - R[i_prev], Z[i] - Z[i_prev]])
+        v2 = np.array([R[i_next] - R[i], Z[i_next] - Z[i]])
+        n1 = np.linalg.norm(v1); n2 = np.linalg.norm(v2)
+        if n1 < 1e-12 or n2 < 1e-12:
+            continue
+        cos_t = np.clip(np.dot(v1, v2) / (n1 * n2), -1.0, 1.0)
+        angles[i] = np.degrees(np.arccos(cos_t))
+    mask_half = (Z > Z_axis) if half == "upper" else (Z < Z_axis)
+    if not np.any(mask_half):
+        return (np.nan, np.nan)
+    cand = np.where(mask_half, angles, -np.inf)
+    i_best = int(np.argmax(cand))
+    if angles[i_best] < corner_angle_deg:
+        return (np.nan, np.nan)
+    return (float(R[i_best]), float(Z[i_best]))
+
+
+def _extract_boundary_points(R, Z, R_axis, Z_axis,
+                              prefer_xpoint=True,
+                              corner_angle_deg=40.0):
+    """Extract the four characteristic LCFS points used by the trace.
+
+    Returns dict with keys 'inboard', 'outboard', 'top', 'bottom'.
+    Each value is a (R, Z) tuple.  Top/bottom default to LCFS ∩
+    {R=R_axis} but get replaced by detected X-points (corner angle >
+    threshold) when ``prefer_xpoint`` is True.
+    """
+    r_in, r_out = _lcfs_intersect_horizontal(R, Z, R_axis, Z_axis)
+    z_below, z_above = _lcfs_intersect_vertical(R, Z, R_axis, Z_axis)
+    pts = {
+        'inboard':  (r_in,  Z_axis),
+        'outboard': (r_out, Z_axis),
+        'top':      (R_axis, z_above),
+        'bottom':   (R_axis, z_below),
+    }
+    if prefer_xpoint:
+        r_top_x, z_top_x = _detect_xpoint(R, Z, R_axis, Z_axis,
+                                          half='upper',
+                                          corner_angle_deg=corner_angle_deg)
+        if not np.isnan(r_top_x):
+            pts['top'] = (r_top_x, z_top_x)
+        r_bot_x, z_bot_x = _detect_xpoint(R, Z, R_axis, Z_axis,
+                                          half='lower',
+                                          corner_angle_deg=corner_angle_deg)
+        if not np.isnan(r_bot_x):
+            pts['bottom'] = (r_bot_x, z_bot_x)
+    return pts
+
+
+def plot_boundary_point_traces(h5path_or_header, scan_value="all",
+                                prefer_xpoint=True,
+                                corner_angle_deg=40.0):
+    r"""Trace plot of characteristic LCFS points across draws.
+
+    For each draw (and the baseline reconstruction at index 0) the
+    function extracts four boundary points from the stored geqdsk:
+
+      - **inboard midplane**: LCFS where Z = Z_axis, R < R_axis
+      - **outboard midplane**: LCFS where Z = Z_axis, R > R_axis
+      - **top**: detected upper X-point if present (corner angle >
+        ``corner_angle_deg``), else LCFS where R = R_axis, Z > Z_axis
+      - **bottom**: detected lower X-point if present, else LCFS
+        where R = R_axis, Z < Z_axis
+
+    Produces one figure with two subplots:
+
+      1. **R [m] vs draw index** for all four points
+      2. **Z [m] vs draw index** for all four points
+
+    The baseline is drawn as a horizontal dashed line on each panel
+    (the value at index 0).  Lets the user see at a glance whether the
+    bnd-diag RMS is a systematic offset (all points drifting in the
+    same direction) or random scatter around the recon (points
+    fluctuating symmetrically).
+
+    Parameters
+    ----------
+    h5path_or_header : str
+        Path to ``.h5`` file or header string (``"path/to/X.h5"`` or
+        just ``"X"``).
+    scan_value : str, float, int, or ``'all'``
+        Scan value to plot.  ``'all'`` (default) plots every scan value
+        as separate columns of markers.
+    prefer_xpoint : bool, default True
+        When True, attempt to detect X-points via tangent-corner test
+        and use them for the top/bottom traces.  When False, always
+        use the R=R_axis vertical-line intersections.
+    corner_angle_deg : float, default 40.0
+        Minimum tangent turning angle (degrees) for a LCFS vertex to
+        be accepted as an X-point.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    """
+    from .utils import read_eqdsk_from_bytes, _scan_val_key, _group_path
+
+    if not h5path_or_header.endswith(".h5"):
+        h5path = os.path.abspath(f"{h5path_or_header}.h5")
+    else:
+        h5path = os.path.abspath(h5path_or_header)
+
+    if scan_value == "all":
+        scan_vals = discover_scan_values(h5path)
+        if not scan_vals:
+            scan_vals = [None]
+    else:
+        scan_vals = [scan_value]
+
+    fig, (ax_r, ax_z) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+    point_labels = ['inboard', 'outboard', 'top', 'bottom']
+    point_colors = {'inboard':  '#1f77b4',
+                    'outboard': '#d62728',
+                    'top':      '#2ca02c',
+                    'bottom':   '#9467bd'}
+    point_markers = {'inboard': 'o', 'outboard': 's', 'top': '^', 'bottom': 'v'}
+
+    n_scan = max(len(scan_vals), 1)
+    scan_color_offset = (_cm.tab10(np.linspace(0, 0.9, n_scan))
+                          if n_scan > 1 else None)
+
+    with h5py.File(h5path, "r") as hf:
+        for i_sv, sv in enumerate(scan_vals):
+            n = count_equilibria(h5path, scan_value=sv)
+            indices = []
+            R_pts = {k: [] for k in point_labels}
+            Z_pts = {k: [] for k in point_labels}
+            sv_key = _scan_val_key(sv)
+            scan_tag = f"scan={sv}" if sv is not None else "single-scan"
+
+            # ---- Baseline at index 0 ----
+            bl_grp_path = (f"scan/{sv_key}/_baseline"
+                           if sv_key else "_baseline")
+            if bl_grp_path in hf:
+                bl_grp = hf[bl_grp_path]
+                eqdsk_keys = [k for k in bl_grp.keys()
+                              if k.endswith(".eqdsk")]
+                if eqdsk_keys:
+                    raw = bytes(bl_grp[eqdsk_keys[0]][()])
+                    try:
+                        eq_bl = read_eqdsk_from_bytes(raw, read_geqdsk)
+                        pts = _extract_boundary_points(
+                            eq_bl.boundary_R, eq_bl.boundary_Z,
+                            eq_bl.R_mag, eq_bl.Z_mag,
+                            prefer_xpoint=prefer_xpoint,
+                            corner_angle_deg=corner_angle_deg)
+                        indices.append(0)
+                        for k in point_labels:
+                            R_pts[k].append(pts[k][0])
+                            Z_pts[k].append(pts[k][1])
+                    except Exception as exc:
+                        warnings.warn(
+                            f"[plot_boundary_point_traces] baseline "
+                            f"({scan_tag}): {exc}")
+
+            # ---- Perturbed draws at indices 1..N ----
+            for i in range(n):
+                grp_path = _group_path(sv, i)
+                if grp_path not in hf:
+                    continue
+                grp = hf[grp_path]
+                eqdsk_keys = [k for k in grp.keys() if k.endswith(".eqdsk")]
+                if not eqdsk_keys:
+                    continue
+                raw = bytes(grp[eqdsk_keys[0]][()])
+                try:
+                    eq = read_eqdsk_from_bytes(raw, read_geqdsk)
+                    pts = _extract_boundary_points(
+                        eq.boundary_R, eq.boundary_Z,
+                        eq.R_mag, eq.Z_mag,
+                        prefer_xpoint=prefer_xpoint,
+                        corner_angle_deg=corner_angle_deg)
+                    indices.append(i + 1)
+                    for k in point_labels:
+                        R_pts[k].append(pts[k][0])
+                        Z_pts[k].append(pts[k][1])
+                except Exception as exc:
+                    warnings.warn(
+                        f"[plot_boundary_point_traces] draw {i} "
+                        f"({scan_tag}): {exc}")
+                    continue
+
+            if not indices:
+                continue
+
+            # Plot
+            indices = np.asarray(indices)
+            for k in point_labels:
+                col = point_colors[k]
+                mk = point_markers[k]
+                lbl_R = f"{k} R"
+                lbl_Z = f"{k} Z"
+                if scan_color_offset is not None:
+                    lbl_R += f"  ({scan_tag})"
+                    lbl_Z += f"  ({scan_tag})"
+                ax_r.plot(indices, R_pts[k], marker=mk, color=col,
+                          linestyle='-', linewidth=0.7, markersize=5,
+                          label=lbl_R if i_sv == 0 else None,
+                          alpha=0.9)
+                ax_z.plot(indices, Z_pts[k], marker=mk, color=col,
+                          linestyle='-', linewidth=0.7, markersize=5,
+                          label=lbl_Z if i_sv == 0 else None,
+                          alpha=0.9)
+                # Baseline hlines (value at index 0, if we have it)
+                if len(indices) > 0 and indices[0] == 0:
+                    ax_r.axhline(R_pts[k][0], color=col,
+                                 linestyle=':', alpha=0.4, linewidth=0.8)
+                    ax_z.axhline(Z_pts[k][0], color=col,
+                                 linestyle=':', alpha=0.4, linewidth=0.8)
+
+    ax_r.set_ylabel("R [m]")
+    ax_r.set_title("LCFS reference points vs draw index "
+                   "(index 0 = baseline recon; dotted = baseline value)")
+    ax_r.grid(True, alpha=0.3)
+    ax_r.legend(loc='best', fontsize=8, ncol=2)
+    ax_z.set_xlabel("Draw index")
+    ax_z.set_ylabel("Z [m]")
+    ax_z.grid(True, alpha=0.3)
+    ax_z.legend(loc='best', fontsize=8, ncol=2)
+    fig.tight_layout()
+
+    return fig
