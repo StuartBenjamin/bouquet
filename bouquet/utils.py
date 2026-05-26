@@ -13,6 +13,53 @@ import numpy as np
 #  Internal helpers
 # ====================================================================
 
+def safe_trace_surf(mygs, psi):
+    r'''Snapshot/restore-wrapped trace_surf.
+
+    The Fortran-side `trace_surf` has been observed to perturb subsequent
+    `get_stats` / boundary measurements via mutation of state hanging off
+    the `gs_equil` struct (mesh-cell caches, tracer step state, etc.).
+    Pre-OFT-PR-248 this was hard to undo cleanly; with PR #248 we now have
+    `mygs.copy_eq()` / `mygs.replace_eq()` which atomically swap the
+    `gs_equil` pointer.  This wrapper snapshots the equilibrium before
+    the trace, copies the returned LCFS into an owned numpy array, then
+    restores the original equilibrium.
+
+    Whatever state lives outside `gs_equil` (eg. module-level
+    `active_tracer` in `tracing_2d`) is *not* restored — but that state
+    is reset at the start of each `trace_surf` call anyway, so the only
+    risk surface is mid-trace interaction with concurrent
+    `get_stats`-like calls, which bouquet does not do.
+
+    Parameters
+    ----------
+    mygs : OpenFUSIONToolkit.TokaMaker.TokaMaker
+        Active TokaMaker instance.  Requires PR #248+ (`copy_eq` /
+        `replace_eq` available).
+    psi : float
+        Normalized psi value to trace (eg. ``1.0 - psi_pad``).
+
+    Returns
+    -------
+    numpy.ndarray or None
+        ``(N, 2)`` array of (R, Z) points along the traced surface,
+        owned by the caller (a copy, decoupled from any internal
+        TokaMaker buffers).  Returns ``None`` if the trace fails.
+    '''
+    if not hasattr(mygs, 'copy_eq') or not hasattr(mygs, 'replace_eq'):
+        # legacy OFT build: fall through to bare trace_surf (no protection)
+        result = mygs.trace_surf(psi)
+        return None if result is None else np.asarray(result).copy()
+    saved = mygs.copy_eq()
+    try:
+        result = mygs.trace_surf(psi)
+        if result is not None:
+            result = np.asarray(result).copy()
+        return result
+    finally:
+        mygs.replace_eq(source_eq=saved)
+
+
 def Ip_flux_integral_vs_target(alpha, mygs, jtor_prof, spike_profile, psi_N, Ip_target):
     r'''! Compute difference between integrated a*j_tor+j_spike profile and Ip_target
 
@@ -388,6 +435,7 @@ def store_baseline_profiles(
     psi_N_kinetic=None,
     coil_currents=None,
     coil_names=None,
+    recon_lcfs_ref=None,
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -445,6 +493,19 @@ def store_baseline_profiles(
             grp.create_dataset("baseline.eqdsk", data=np.void(eqdsk_bytes))
         if pfile_bytes is not None:
             grp.create_dataset("baseline.pfile", data=np.void(pfile_bytes))
+
+        # ---- Recon-LCFS reference for downstream boundary-deviation
+        # measurements.  Captured by the caller via mygs.trace_surf() at
+        # the SAME mygs state where the baseline.eqdsk was saved, giving
+        # a method-consistent reference (~10000 points) for plot_traces
+        # and the per-stage bnd-diag inside generate_bouquet.  Using this
+        # instead of the eqdsk's 100-pt boundary eliminates ~2-3 mm of
+        # save_eqdsk sampling noise (see Probe 2 in save_eqdsk_probe.py).
+        if recon_lcfs_ref is not None:
+            grp.create_dataset(
+                "recon_lcfs_ref",
+                data=np.asarray(recon_lcfs_ref, dtype=np.float64),
+            )
 
         # Recon's converged coil currents (the perturbation reference).
         # Saved alongside profiles so post-processors can compute

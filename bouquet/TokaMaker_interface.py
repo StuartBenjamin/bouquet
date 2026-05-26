@@ -36,6 +36,7 @@ from .sampling import (
 )
 from .utils import (
     Ip_flux_integral_vs_target,
+    safe_trace_surf,
     store_equilibrium,
     store_baseline_profiles,
 )
@@ -593,6 +594,24 @@ def perturb_kinetic_equilibrium(
     psi_N_kinetic=None,
     max_proxy_draws=500,
     bnd_diag_callback=None,
+    # Differential bootstrap (DIFF_BS=1 mode):
+    #   recon_eq_snapshot      -- TokaMaker_equilibrium snapshot of mygs
+    #                             in recon state (from copy_eq()).  When
+    #                             provided, mygs is restored to this
+    #                             state before the per-draw SWB call so
+    #                             SWB sees the same context as the
+    #                             cached recon SWB call did.
+    #   spike_profile_recon_cached -- numpy array of isolated_j_BS from
+    #                                 SWB(recon kinetics), computed once
+    #                                 before the per-draw loop.  The
+    #                                 per-draw spike is subtracted to
+    #                                 get delta_spike, which is added to
+    #                                 input_j_phi to form new_jphi.  At
+    #                                 sigma->0 delta_spike->0 and
+    #                                 new_jphi->input_j_phi exactly
+    #                                 (= PIN_JPHI behaviour).
+    recon_eq_snapshot=None,
+    spike_profile_recon_cached=None,
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
     match :math:`I_p` and :math:`l_i` targets.
@@ -804,7 +823,125 @@ def perturb_kinetic_equilibrium(
     iteration_l_is = []
     iteration_Ips = []
 
-    if recalculate_j_BS:
+    # PIN_JPHI is read here so it's in scope whether or not the
+    # recalculate_j_BS branch below runs.  See full rationale in the
+    # recon-anchor block.
+    _pin_jphi = os.environ.get('PIN_JPHI', '0') == '1'
+
+    # DIFF_BS (differential bootstrap) is structurally similar to
+    # PIN_JPHI but instead of fully bypassing SWB, it runs SWB on the
+    # perturbed kinetics from a restored recon state, subtracts a
+    # pre-cached SWB(recon kinetics) result, and adds the resulting
+    # delta to input_j_phi.  At sigma->0 this reproduces PIN_JPHI
+    # exactly (delta=0).  Requires recon_eq_snapshot and
+    # spike_profile_recon_cached kwargs to be populated by
+    # generate_bouquet before the per-draw loop.
+    _diff_bs = (os.environ.get('DIFF_BS', '0') == '1'
+                and recon_eq_snapshot is not None
+                and spike_profile_recon_cached is not None)
+    if (os.environ.get('DIFF_BS', '0') == '1'
+            and (recon_eq_snapshot is None
+                 or spike_profile_recon_cached is None)):
+        print("  [DIFF_BS] WARNING: env var set but cache/snapshot kwargs "
+              "missing; falling back to standard SWB mode")
+
+    # ---- PIN_JPHI: bypass SWB entirely ----
+    # When PIN_JPHI=1, j_phi is pinned to recon's exact converged
+    # profile (input_j_phi), so we don't need SWB's Sauter recompute
+    # of the bootstrap -- the bootstrap is implicitly embedded in
+    # input_j_phi already.  Skipping SWB removes a major failure
+    # source (DLSODE / Picard maxits inside Sauter), making this
+    # diagnostic mode actually reach the recon-anchor solve where
+    # the PIN_JPHI logic takes effect.
+    if _pin_jphi and recalculate_j_BS:
+        print(f"  [PIN_JPHI] bypassing SWB call; using recon j_phi "
+              f"as fixed forward-mode target")
+        # Provide the variables that the recon-anchor and l_i loop
+        # expect from SWB's results: spike_profile is the bootstrap
+        # implied by recon (input_j_phi - input_jinductive), full_j_BS
+        # = same (we don't track separate components here).
+        spike_profile = (input_j_phi - input_jinductive).copy()
+        full_j_BS = spike_profile.copy()
+        baseline_li_proxy = calc_cylindrical_li_proxy(
+            mygs, input_j_phi, psi_pad)
+        # Don't append SWB scale factors -- nothing to scale here
+        eq_stats = mygs.get_stats(lcfs_pad=psi_pad)
+
+    elif _diff_bs and recalculate_j_BS:
+        # ---- DIFF_BS: differential bootstrap mode -----------------------
+        # Restore mygs to the cached recon equilibrium state so SWB sees
+        # the same context the cached SWB(recon kinetics) call did, then
+        # call SWB on perturbed kinetics and subtract the cache to get a
+        # delta that's applied on top of input_j_phi (recon's exact
+        # j_phi).  At sigma->0 the perturbed kinetics == recon kinetics
+        # so SWB output is identical to the cache, delta = 0, and
+        # new_jphi = input_j_phi (= PIN_JPHI reproduction).
+        print(f"  [DIFF_BS] restoring mygs to recon snapshot before SWB")
+        mygs.replace_eq(source_eq=recon_eq_snapshot)
+        from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
+        _swb_seed = create_power_flux_fun(npsi, 1.5, 1.5)['y']
+        _stashed_bounds = getattr(mygs, '_coil_drift_bounds', None)
+        if _stashed_bounds is not None:
+            mygs.set_coil_bounds(None)
+        try:
+            _results_diff = solve_with_bootstrap(
+                mygs,
+                ne_eq, te_eq, ni_eq, ti_eq,
+                Zeff, Ip_target, _swb_seed,
+                scale_jBS=scale_jBS,
+                isolate_edge_jBS=isolate_edge_jBS,
+                diagnostic_plots=False,
+                verbose=False,
+            )
+        finally:
+            if _stashed_bounds is not None:
+                mygs.set_coil_bounds(_stashed_bounds)
+        _spike_perturbed = _results_diff["isolated_j_BS"]
+        delta_spike = _spike_perturbed - spike_profile_recon_cached
+        _delta_rms = float(np.sqrt(np.mean(delta_spike**2)))
+        _delta_max = float(np.max(np.abs(delta_spike)))
+        print(f"  [DIFF_BS] delta_spike rms={_delta_rms:.3e} A/m² "
+              f"max={_delta_max:.3e} A/m² (-> 0 at sigma=0)")
+        # Restore the recon snapshot a SECOND time so the recon-anchor
+        # solve below operates from the same pristine state PIN_JPHI
+        # sees.  Without this, the recon-anchor inherits SWB's landed
+        # state (l_i ~ 0.86, off-target geometry) which gives the GS
+        # solver a poor warm-start and produces large boundary shifts.
+        mygs.replace_eq(source_eq=recon_eq_snapshot)
+        # Build new_jphi as input_j_phi (recon exact) + delta_spike
+        spike_profile = delta_spike
+        full_j_BS = _results_diff["j_BS"]
+        # ---- DIFF_BS recon-anchor solve (mirrors regular SWB branch's
+        # recon-anchor at line ~1067 but with new_jphi = input_j_phi +
+        # delta_spike).  Without this explicit solve, mygs stays in the
+        # restored snapshot state (= recon equilibrium with recon j_phi)
+        # which is identical for every draw -- the per-draw delta_spike
+        # never reaches the equilibrium, so all draws produce bit-
+        # identical output.
+        new_jphi_diff = input_j_phi + delta_spike
+        _psi_range_diff = mygs.psi_bounds[1] - mygs.psi_bounds[0]
+        _pp_diff = {"type": "linterp",
+                    "y": np.gradient(pres_tmp) /
+                         (np.gradient(psi_N) * _psi_range_diff),
+                    "x": psi_N}
+        _pp_diff["y"][-1] = 0.0
+        _ffp_diff = {"type": "jphi-linterp", "y": new_jphi_diff, "x": psi_N}
+        mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
+        mygs.set_profiles(pp_prof=_pp_diff, ffp_prof=_ffp_diff)
+        try:
+            mygs.solve()
+            print(f"  [DIFF_BS recon-anchor] solved with input_j_phi + "
+                  f"delta_spike (perturbed pressure)")
+            if bnd_diag_callback is not None:
+                bnd_diag_callback("after DIFF_BS recon-anchor")
+        except (ValueError, RuntimeError) as _diff_anchor_exc:
+            print(f"  [DIFF_BS recon-anchor] WARN: solve failed "
+                  f"({_diff_anchor_exc}); state may be inconsistent")
+        baseline_li_proxy = calc_cylindrical_li_proxy(
+            mygs, new_jphi_diff, psi_pad)
+        eq_stats = mygs.get_stats(lcfs_pad=psi_pad)
+
+    elif recalculate_j_BS:
         # ---- SWB call hygiene -------------------------------------------
         # solve_with_bootstrap is sensitive to two things beyond kinetics:
         #
@@ -945,10 +1082,28 @@ def perturb_kinetic_equilibrium(
         spike_profile = results["isolated_j_BS"]
 
         # Anchor: forward-solve with recon's inductive shape + SWB's
-        # spike, using the perturbed pressure profile (pres_tmp).  This
-        # puts mygs in the recon-anchored equilibrium so baseline_li_proxy
-        # and downstream eq_stats reflect the right baseline.
-        new_jphi = input_jinductive + spike_profile
+        # Sauter-recomputed bootstrap spike, using the perturbed pressure
+        # profile (pres_tmp).  The SWB recompute is a core feature of
+        # the workflow -- the bootstrap legitimately responds to the
+        # per-draw perturbed kinetics via Sauter, and this is the only
+        # path by which the bootstrap shape changes between draws.
+        # Pinning to recon's stored bootstrap (the implied-bootstrap
+        # approach) gives σ=0 exact recovery but kills the per-draw
+        # Sauter response, which is the wrong trade for this study.
+        #
+        # PIN_JPHI=1 env var: diagnostic mode that pins j_phi to recon's
+        # exact converged profile (no SWB spike, no GPR perturbation),
+        # leaving only the perturbed pressure (P', pax) to drive the
+        # per-draw equilibrium response.  Useful for isolating whether
+        # the per-draw j_phi shape is causing systematic boundary shift.
+        # _pin_jphi is read above (outside the recalculate_j_BS branch).
+        if _pin_jphi:
+            new_jphi = input_j_phi.copy()
+        elif _diff_bs:
+            # spike_profile already = delta_spike (perturbed - cached recon)
+            new_jphi = input_j_phi + spike_profile
+        else:
+            new_jphi = input_jinductive + spike_profile
         _psi_range_anchor = mygs.psi_bounds[1] - mygs.psi_bounds[0]
         _pp_anchor = {"type": "linterp",
                       "y": np.gradient(pres_tmp) /
@@ -960,8 +1115,16 @@ def perturb_kinetic_equilibrium(
         mygs.set_profiles(pp_prof=_pp_anchor, ffp_prof=_ffp_anchor)
         try:
             mygs.solve()
-            print(f"  [recon-anchor] forward-solved with recon's "
-                  f"j_inductive_fit + SWB spike (σ-perturbed kinetics)")
+            if _pin_jphi:
+                print(f"  [recon-anchor] forward-solved with PINNED "
+                      f"recon j_phi (PIN_JPHI=1, only pressure perturbs)")
+            elif _diff_bs:
+                print(f"  [recon-anchor] forward-solved with input_j_phi + "
+                      f"differential-SWB delta (DIFF_BS=1)")
+            else:
+                print(f"  [recon-anchor] forward-solved with recon's "
+                      f"j_inductive_fit + SWB Sauter spike "
+                      f"(σ-perturbed kinetics)")
             if bnd_diag_callback is not None:
                 bnd_diag_callback("after recon-anchor solve")
         except (ValueError, RuntimeError) as _anchor_exc:
@@ -1010,21 +1173,45 @@ def perturb_kinetic_equilibrium(
     # than in proxy space.
     proxy_target = baseline_li_proxy
 
+    # ---- PIN_JPHI diagnostic short-circuit ----
+    # When PIN_JPHI=1, skip the GPR-sampling l_i match loop entirely
+    # and accept the recon-anchor's equilibrium (which used input_j_phi
+    # as the fixed FF' shape) as the per-draw output.  Only pressure
+    # (pres_tmp -> PP', pax) varies per draw; j_phi shape and Ip
+    # target stay locked to recon.  Diagnostic mode for isolating
+    # whether per-draw j_phi shape variation drives the boundary shift.
+    if _pin_jphi or _diff_bs:
+        _pinned_stats = mygs.get_stats(li_normalization='std', lcfs_pad=psi_pad)
+        l_i = float(_pinned_stats['l_i'])
+        Ip = float(_pinned_stats['Ip'])
+        # DIFF_BS: output = input_j_phi + delta_spike (delta=0 at sigma=0)
+        # PIN_JPHI: output = input_j_phi exactly
+        if _diff_bs:
+            output_jphi = input_j_phi + spike_profile  # spike_profile = delta_spike
+            _tag = "DIFF_BS"
+        else:
+            output_jphi = input_j_phi.copy()
+            _tag = "PIN_JPHI"
+        iteration_l_is.append(l_i)
+        iteration_Ips.append(Ip)
+        j0_scales.append(1.0)
+        Ip_scales.append(1.0)
+        final_li_proxy = calc_cylindrical_li_proxy(mygs, output_jphi, psi_pad)
+        print(f"  [{_tag}] using {'input_j_phi+delta' if _diff_bs else 'recon j_phi'} "
+              f"as output_jphi  (l_i={l_i:.4f}, Ip={Ip:.0f}); skipping l_i match loop")
+
     # ---- l_i matching loop ------------------------------------------
-    # Always runs (no early-exit gate): every draw gets a freshly
-    # GPR-sampled jphi perturbation via the inner proxy loop, so the
-    # inductive current shape genuinely responds to the σ_jphi /
-    # length-scale sampling rather than being frozen at the
-    # recon-anchored baseline.  The recon-anchor solve above still
-    # establishes a consistent starting equilibrium (Picard warm
-    # start, baseline_li_proxy calibration); the loop below then
-    # iterates on GPR samples until the post-solve equilibrium l_i is
-    # within `l_i_tolerance` of `l_i_target`, or rejects the draw
-    # after `max_li_iter` failed iterations.  An earlier "gate"
-    # short-circuited this loop when the recon-anchor l_i was within
-    # tolerance -- that preserved σ→0 reproducibility but prevented
-    # any per-draw GPR variation in the inductive current.
+    # Always runs (no early-exit gate, unless PIN_JPHI shortcut above
+    # fired): every draw gets a freshly GPR-sampled jphi perturbation
+    # via the inner proxy loop, so the inductive current shape
+    # genuinely responds to the σ_jphi / length-scale sampling.  The
+    # recon-anchor solve above establishes a Picard warm start.  The
+    # loop iterates on GPR samples until the post-solve equilibrium
+    # l_i is within `l_i_tolerance` of `l_i_target`, or rejects the
+    # draw after `max_li_iter` failed iterations.
     for li_iter in range(1, max_li_iter + 1):
+        if _pin_jphi or _diff_bs:
+            break  # PIN_JPHI / DIFF_BS shortcut handled above
         if 100.0 * abs(l_i - l_i_target) / l_i_target <= l_i_tolerance:
             break
 
@@ -1147,6 +1334,14 @@ def perturb_kinetic_equilibrium(
         # Iterate TokaMaker until its output j_phi matches the intended
         # input (j_inductive*scale + spike).  This compensates for
         # geometry coupling that distorts the edge profile.
+        #
+        # SPIKE SOURCE: SWB's Sauter-recomputed isolated_j_BS spike,
+        # matching the recon-anchor block above.  The Sauter recompute
+        # legitimately responds to the per-draw perturbed kinetics --
+        # this is the core feature of the workflow, not an artifact to
+        # be removed.  At σ=0 the SWB-vs-recon bootstrap mismatch leaves
+        # a ~5-13 mm structural floor in boundary RMS; that's the
+        # honest cost of having per-draw Sauter response.
         pprime_tmp = np.gradient(pres_tmp) / (
             np.gradient(psi_N) * psi_range
         )
@@ -1316,6 +1511,7 @@ def generate_bouquet(
     homotopy_passes=None,
     inspec_F_max=0.025,
     inspec_VSC_max=0.10,
+    recon_lcfs_ref=None,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -1526,28 +1722,37 @@ def generate_bouquet(
         _recon_Ip = float(abs(mygs.get_globals()[0]))
 
         # ---- Boundary-shift diagnostic ----
-        # Capture mygs's current LCFS once and build a cKDTree, so each
-        # per-draw stage (recon-anchor, Ip-align, post-homotopy) can
-        # report its boundary deviation from this reference.  This is
-        # purely diagnostic -- it does not change any state.  The
-        # tree captures the recon's converged boundary at the moment
-        # generate_bouquet is entered.  Toggle off by setting env var
-        # BNDDIAG=0.
+        # The reference LCFS for per-stage boundary-deviation reporting
+        # must match the snapshot that plot_traces uses as its baseline,
+        # otherwise the two diagnostics measure from different references
+        # and disagree by the state shift between snapshots.
+        #
+        # Preferred path: the caller passes `recon_lcfs_ref` (an Nx2
+        # numpy array captured via mygs.trace_surf at the SAME state
+        # where baseline.eqdsk was saved) so bnd-diag and plot_traces
+        # are method-consistent.  Falls back to a fresh trace_surf at
+        # generate_bouquet entry if no reference was provided.
+        # Toggle off entirely with env var BNDDIAG=0.
         _bnd_diag_on = os.environ.get('BNDDIAG', '1') != '0'
         _bnd_diag_tree = None
         _bnd_diag_npts = 0
+        _bnd_diag_source = "(disabled)"
         if _bnd_diag_on:
             try:
                 from scipy.spatial import cKDTree as _cKDTree_bd
-                _bd_ref = mygs.trace_surf(1.0 - psi_pad)
-                if _bd_ref is None or len(_bd_ref) < 4:
-                    _bd_ref = mygs.trace_surf(1.0 - 1e-4)
+                if recon_lcfs_ref is not None and len(recon_lcfs_ref) >= 4:
+                    _bd_ref = np.asarray(recon_lcfs_ref)
+                    _bnd_diag_source = "caller-supplied"
+                else:
+                    _bd_ref = safe_trace_surf(mygs, 1.0 - psi_pad)
+                    if _bd_ref is None or len(_bd_ref) < 4:
+                        _bd_ref = safe_trace_surf(mygs, 1.0 - 1e-4)
+                    _bnd_diag_source = "trace_surf at entry (snapshot-protected)"
                 if _bd_ref is not None and len(_bd_ref) >= 4:
                     _bnd_diag_tree = _cKDTree_bd(np.asarray(_bd_ref))
                     _bnd_diag_npts = len(_bd_ref)
-                    print(f"  [bnd-diag] captured recon LCFS "
-                          f"({_bnd_diag_npts} pts) for per-stage "
-                          f"boundary-deviation reporting")
+                    print(f"  [bnd-diag] using recon LCFS reference: "
+                          f"{_bnd_diag_npts} pts ({_bnd_diag_source})")
             except Exception as _bd_init_exc:
                 print(f"  [bnd-diag] startup capture failed "
                       f"({_bd_init_exc}); per-stage reporting disabled")
@@ -1560,9 +1765,9 @@ def generate_bouquet(
             if _bnd_diag_tree is None:
                 return
             try:
-                _lcfs = mygs.trace_surf(1.0 - psi_pad)
+                _lcfs = safe_trace_surf(mygs, 1.0 - psi_pad)
                 if _lcfs is None or len(_lcfs) < 4:
-                    _lcfs = mygs.trace_surf(1.0 - 1e-4)
+                    _lcfs = safe_trace_surf(mygs, 1.0 - 1e-4)
                 if _lcfs is not None and len(_lcfs) >= 4:
                     _devs, _ = _bnd_diag_tree.query(np.asarray(_lcfs))
                     _rms_mm = float(np.sqrt(np.mean(_devs**2)) * 1e3)
@@ -1745,7 +1950,95 @@ def generate_bouquet(
         pfile_bytes=stored_pfile_bytes,
         psi_N_kinetic=psi_N_kinetic,
         coil_currents=_bl_coil_dict,
+        recon_lcfs_ref=recon_lcfs_ref,
     )
+
+    # ---- DIFF_BS cache: snapshot mygs + cache SWB(recon kinetics) ----
+    # If DIFF_BS=1 is set, capture the recon-state equilibrium and run
+    # SWB once on the unperturbed recon kinetics.  Both are passed into
+    # perturb_kinetic_equilibrium for each draw, which restores mygs to
+    # the snapshot, calls SWB on perturbed kinetics, subtracts the
+    # cached isolated_j_BS, and applies the delta on top of input_j_phi.
+    # At sigma->0 delta -> 0 and the output exactly equals PIN_JPHI.
+    _diff_bs_env = os.environ.get('DIFF_BS', '0') == '1'
+    _diff_recon_eq_snap = None
+    _diff_spike_recon = None
+    if _diff_bs_env and recalculate_j_BS:
+        print("\n" + "=" * 60)
+        print("  [DIFF_BS] Pre-loop setup: caching SWB(recon kinetics)")
+        print("=" * 60)
+        try:
+            from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
+            from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap as _swb
+            from scipy.interpolate import interp1d as _interp1d
+            _swb_seed_cache = create_power_flux_fun(npsi, 1.5, 1.5)['y']
+            # Interpolate recon kinetic profiles to equilibrium grid if
+            # caller is using a dual-grid (mirrors `_kin_to_eq` inside
+            # perturb_kinetic_equilibrium).  SWB expects the kinetic
+            # arrays on the same grid as `_swb_seed_cache` (npsi=len(psi_N)).
+            if psi_N_kinetic is not None:
+                def _k2e(a):
+                    return _interp1d(psi_N_kinetic, a, kind='linear',
+                                     bounds_error=False,
+                                     fill_value=(a[0], a[-1]))(psi_N)
+                ne_cache = _k2e(ne); te_cache = _k2e(te)
+                ni_cache = _k2e(ni); ti_cache = _k2e(ti)
+            else:
+                ne_cache, te_cache, ni_cache, ti_cache = ne, te, ni, ti
+            # Stash bounds (SWB expects unbounded coils, see SWB hygiene block)
+            _cache_stash = getattr(mygs, '_coil_drift_bounds', None)
+            if _cache_stash is not None:
+                mygs.set_coil_bounds(None)
+            # State-anchor solve before SWB.  Mirrors per-draw flow at
+            # line ~870 -- without this, SWB sometimes inherits a stale
+            # mygs state and hits maxits.  Uses recon pressure +
+            # input_j_phi (the exact recon profile) so this is recon's
+            # natural equilibrium re-solved.
+            try:
+                _cache_pp = {"type": "linterp",
+                             "y": np.gradient(pressure) /
+                                  (np.gradient(psi_N) *
+                                   (mygs.psi_bounds[1] - mygs.psi_bounds[0])),
+                             "x": psi_N}
+                _cache_pp["y"][-1] = 0.0
+                _cache_ffp = {"type": "jphi-linterp",
+                              "y": input_j_phi.copy(), "x": psi_N}
+                mygs.set_targets(Ip=initial_Ip_target, pax=pressure[0])
+                mygs.set_profiles(pp_prof=_cache_pp, ffp_prof=_cache_ffp)
+                mygs.solve()
+                print(f"  [DIFF_BS] state-anchor solve OK; entering SWB")
+            except (ValueError, RuntimeError) as _anch_exc:
+                print(f"  [DIFF_BS] state-anchor solve failed "
+                      f"({_anch_exc}); SWB may inherit stale state")
+            try:
+                _cache_results = _swb(
+                    mygs, ne_cache, te_cache, ni_cache, ti_cache, Zeff,
+                    initial_Ip_target, _swb_seed_cache,
+                    scale_jBS=1.0,
+                    isolate_edge_jBS=isolate_edge_jBS,
+                    diagnostic_plots=False, verbose=False,
+                )
+                _diff_spike_recon = np.asarray(
+                    _cache_results["isolated_j_BS"]).copy()
+                # Snapshot AFTER the SWB call -- this is the state from
+                # which we'll re-launch SWB on perturbed kinetics each
+                # draw, so it must match what the cached SWB saw.
+                _diff_recon_eq_snap = mygs.copy_eq()
+                print(f"  [DIFF_BS] cache populated: "
+                      f"isolated_j_BS rms="
+                      f"{float(np.sqrt(np.mean(_diff_spike_recon**2))):.3e} A/m², "
+                      f"len={len(_diff_spike_recon)}; "
+                      f"snapshot held in TokaMaker_equilibrium")
+            finally:
+                if _cache_stash is not None:
+                    mygs.set_coil_bounds(_cache_stash)
+        except Exception as _cache_exc:
+            print(f"  [DIFF_BS] WARNING: cache setup failed ({_cache_exc}); "
+                  f"falling back to standard SWB per draw")
+            import traceback as _tb
+            _tb.print_exc()
+            _diff_recon_eq_snap = None
+            _diff_spike_recon = None
 
     t_batch_start = time.perf_counter()
     elapsed_times = []
@@ -1842,6 +2135,8 @@ def generate_bouquet(
                 max_proxy_draws=max_proxy_draws,
                 p_thresh=p_thresh,
                 bnd_diag_callback=_report_bnd,
+                recon_eq_snapshot=_diff_recon_eq_snap,
+                spike_profile_recon_cached=_diff_spike_recon,
             )
         except Exception as e:
             # Catch ANY exception during a perturbed solve -- ValueError
@@ -2011,6 +2306,12 @@ def generate_bouquet(
                 _iso_updated = False
                 if _ip_aligned and not _skip_hard and not _skip_iso:
                     try:
+                        # Iso-update is PHYSICS (LCFS feeds the next solve's
+                        # isoflux constraints), not a diagnostic — do NOT
+                        # use safe_trace_surf here; rolling back the
+                        # equilibrium afterwards undoes state needed
+                        # downstream and was empirically observed to
+                        # degrade in-spec yield.
                         _new_lcfs = mygs.trace_surf(1.0 - psi_pad)
                         if _new_lcfs is None or len(_new_lcfs) < 4:
                             # Try a slightly larger pad for the trace

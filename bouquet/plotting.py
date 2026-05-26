@@ -1576,18 +1576,36 @@ def plot_traces(h5path_or_header, scan_value="all"):
         bl_Ip = np.nan          # baseline (recon) Ip from baseline.eqdsk
         bl_li1 = np.nan         # baseline l_i(1)
         bl_li3 = np.nan         # baseline l_i(3)
+        bl_boundary_source = "none"
         with h5py.File(h5path, "r") as hf:
             bkey_bl = _scan_val_key(sv)
             bl_grp_path = f"scan/{bkey_bl}/_baseline" if bkey_bl else "_baseline"
             if bl_grp_path in hf:
                 bl_grp = hf[bl_grp_path]
+                # PREFERRED: recon_lcfs_ref captured via mygs.trace_surf
+                # at the same state save_eqdsk was called -- gives the
+                # method-consistent comparison that the per-draw eqdsk
+                # boundary (also from trace-based extraction) can be
+                # cleanly diff'd against.  Falls back to the eqdsk's
+                # ~100-pt boundary if the run predates this feature.
+                if "recon_lcfs_ref" in bl_grp:
+                    try:
+                        bl_boundary = np.asarray(bl_grp["recon_lcfs_ref"][()])
+                        bl_boundary_source = (
+                            f"recon_lcfs_ref ({len(bl_boundary)} pts)")
+                    except Exception:
+                        bl_boundary = None
                 eqdsk_keys = [k for k in bl_grp.keys() if k.endswith(".eqdsk")]
                 if eqdsk_keys:
                     try:
                         raw = bytes(bl_grp[eqdsk_keys[0]][()])
                         eq_bl = read_eqdsk_from_bytes(raw, read_geqdsk)
-                        bl_boundary = np.column_stack(
-                            [eq_bl.boundary_R, eq_bl.boundary_Z])
+                        if bl_boundary is None:
+                            bl_boundary = np.column_stack(
+                                [eq_bl.boundary_R, eq_bl.boundary_Z])
+                            bl_boundary_source = (
+                                f"baseline.eqdsk boundary "
+                                f"({len(bl_boundary)} pts)")
                         bl_Ip = float(abs(eq_bl.Ip))
                     except Exception:
                         pass
