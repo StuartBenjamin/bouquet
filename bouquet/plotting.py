@@ -1573,6 +1573,9 @@ def plot_traces(h5path_or_header, scan_value="all"):
         # Try baseline eqdsk bytes first, then stored boundary arrays.
         bl_boundary = None
         bl_eqdsk_key = None
+        bl_Ip = np.nan          # baseline (recon) Ip from baseline.eqdsk
+        bl_li1 = np.nan         # baseline l_i(1)
+        bl_li3 = np.nan         # baseline l_i(3)
         with h5py.File(h5path, "r") as hf:
             bkey_bl = _scan_val_key(sv)
             bl_grp_path = f"scan/{bkey_bl}/_baseline" if bkey_bl else "_baseline"
@@ -1585,8 +1588,20 @@ def plot_traces(h5path_or_header, scan_value="all"):
                         eq_bl = read_eqdsk_from_bytes(raw, read_geqdsk)
                         bl_boundary = np.column_stack(
                             [eq_bl.boundary_R, eq_bl.boundary_Z])
+                        bl_Ip = float(abs(eq_bl.Ip))
                     except Exception:
                         pass
+            # Recon's actual converged l_i values are stored under the
+            # top-level integer-keyed entry "0" by store_equilibrium
+            # (not under _baseline).  Fall back to l_i_target if
+            # unavailable.
+            if "0" in hf and hasattr(hf["0"], "attrs"):
+                bl_li1 = float(hf["0"].attrs.get(
+                    "l_i(1)", bl.get("l_i_target", np.nan)))
+                bl_li3 = float(hf["0"].attrs.get(
+                    "l_i(3)", np.nan))
+            if np.isnan(bl_li1):
+                bl_li1 = float(bl.get("l_i_target", np.nan))
         if bl_boundary is None:
             bl_boundary_R = bl.get("eqdsk_boundary_R", None)
             bl_boundary_Z = bl.get("eqdsk_boundary_Z", None)
@@ -1594,12 +1609,20 @@ def plot_traces(h5path_or_header, scan_value="all"):
                 bl_boundary = np.column_stack([bl_boundary_R, bl_boundary_Z])
 
         # Load all perturbed equilibria — read eqdsk bytes directly
-        # from HDF5 to extract Ip and boundary.
+        # from HDF5 to extract Ip and boundary.  Index 0 is reserved
+        # for the reconstructed baseline (recon's actual converged
+        # state, sourced from `_baseline/baseline.eqdsk` for Ip /
+        # boundary and from the top-level "0" entry for l_i).  This
+        # gives a visual reference point on every trace.  Perturbed
+        # draws are then indexed 1..N.
         bkey = _scan_val_key(sv)
-        indices = []
-        li1_vals, li3_vals = [], []
-        Ip_vals = []
-        bnd_rms_vals, bnd_max_vals = [], []
+        indices = [0]
+        li1_vals = [bl_li1]
+        li3_vals = [bl_li3]
+        Ip_vals = [bl_Ip]
+        # Baseline's boundary deviation from itself is 0 by construction
+        bnd_rms_vals = [0.0 if bl_boundary is not None else np.nan]
+        bnd_max_vals = [0.0 if bl_boundary is not None else np.nan]
 
         with h5py.File(h5path, "r") as hf:
             if bkey is not None:
@@ -1613,7 +1636,8 @@ def plot_traces(h5path_or_header, scan_value="all"):
 
             for idx, count in enumerate(stored_counts):
                 grp = parent[str(count)]
-                indices.append(idx)
+                # idx+1 because index 0 is the reconstructed baseline
+                indices.append(idx + 1)
                 li1_vals.append(float(grp.attrs.get("l_i(1)", np.nan)))
                 li3_vals.append(float(grp.attrs.get("l_i(3)", np.nan)))
 
@@ -1655,6 +1679,11 @@ def plot_traces(h5path_or_header, scan_value="all"):
             "li_target": li_target,
         }
 
+    # Helper to overlay the baseline (index 0) with a distinct marker
+    # so it stands out from perturbed draws on every panel.
+    _BL_KW = dict(marker='*', markersize=14, markerfacecolor='none',
+                  markeredgewidth=1.5, linestyle='none', zorder=5)
+
     # ---- Figure 1: l_i ----
     fig_li, axes_li = plt.subplots(2, 1, figsize=(8, 5), sharex=True)
 
@@ -1663,21 +1692,41 @@ def plot_traces(h5path_or_header, scan_value="all"):
         x = tr["indices"]
 
         axes_li[0].plot(x, tr["li1"], 'o-', color=c, lw=1.5, ms=4, label=lbl)
-        axes_li[0].axhline(tr["li_target"], color=c, ls='--', lw=1, alpha=0.5)
+        # Highlight baseline (index 0) — recon's converged l_i(1)
+        axes_li[0].plot([x[0]], [tr["li1"][0]], color=c,
+                        label=('baseline' if lbl is None else None),
+                        **_BL_KW)
+        # eqdsk header l_i target (for context — recon's actual l_i can
+        # differ from this since l_i is an equilibrium outcome, not a
+        # forced target during [Ip match])
+        axes_li[0].axhline(tr["li_target"], color=c, ls='--', lw=1,
+                            alpha=0.5,
+                            label=('eqdsk l_i target'
+                                   if lbl is None else None))
 
-        if tr["li_target"] > 0:
-            li_pct = 100.0 * (tr["li1"] - tr["li_target"]) / tr["li_target"]
+        # Lower panel: error is computed against the recon BASELINE
+        # l_i (so index 0 = 0 by construction, matching the Ip and
+        # boundary panels).  The eqdsk-header reference is shown as
+        # a dashed line so the recon's intrinsic offset stays visible.
+        bl_li = tr["li1"][0]
+        if bl_li > 0 and np.isfinite(bl_li):
+            li_pct = 100.0 * (tr["li1"] - bl_li) / bl_li
             axes_li[1].plot(x, li_pct, 'o-', color=c, lw=1.5, ms=4, label=lbl)
+            axes_li[1].plot([x[0]], [li_pct[0]], color=c, **_BL_KW)
             axes_li[1].axhline(0, color='k', ls=':', lw=0.5)
+            if tr["li_target"] > 0:
+                _li_eqdsk_pct = (100.0 *
+                                 (tr["li_target"] - bl_li) / bl_li)
+                axes_li[1].axhline(_li_eqdsk_pct, color=c, ls='--',
+                                    lw=1, alpha=0.5)
 
     axes_li[0].set_ylabel(r"$l_i(1)$")
-    axes_li[0].set_title(r"$l_i$ trace")
+    axes_li[0].set_title(r"$l_i$ trace  (index 0 = recon baseline)")
     axes_li[0].grid(True, alpha=0.3)
-    if len(scan_vals) > 1:
-        axes_li[0].legend(fontsize=7)
+    axes_li[0].legend(fontsize=7)
 
     axes_li[1].set_xlabel("Equilibrium index")
-    axes_li[1].set_ylabel(r"$l_i$ error [%]")
+    axes_li[1].set_ylabel(r"$l_i$ deviation from baseline [%]")
     axes_li[1].grid(True, alpha=0.3)
     fig_li.tight_layout()
 
@@ -1689,18 +1738,22 @@ def plot_traces(h5path_or_header, scan_value="all"):
         x = tr["indices"]
 
         axes_Ip[0].plot(x, tr["Ip"] / 1e6, 'o-', color=c, lw=1.5, ms=4, label=lbl)
+        # Highlight baseline (index 0) — recon's saved Ip from baseline.eqdsk
+        axes_Ip[0].plot([x[0]], [tr["Ip"][0] / 1e6], color=c,
+                        label=('baseline' if lbl is None else None),
+                        **_BL_KW)
         axes_Ip[0].axhline(tr["Ip_target"] / 1e6, color=c, ls='--', lw=1, alpha=0.5)
 
         if tr["Ip_target"] > 0:
             Ip_pct = 100.0 * (tr["Ip"] - tr["Ip_target"]) / tr["Ip_target"]
             axes_Ip[1].plot(x, Ip_pct, 'o-', color=c, lw=1.5, ms=4, label=lbl)
+            axes_Ip[1].plot([x[0]], [Ip_pct[0]], color=c, **_BL_KW)
             axes_Ip[1].axhline(0, color='k', ls=':', lw=0.5)
 
     axes_Ip[0].set_ylabel(r"$I_p$ [MA]")
-    axes_Ip[0].set_title(r"$I_p$ trace")
+    axes_Ip[0].set_title(r"$I_p$ trace  (index 0 = recon baseline)")
     axes_Ip[0].grid(True, alpha=0.3)
-    if len(scan_vals) > 1:
-        axes_Ip[0].legend(fontsize=7)
+    axes_Ip[0].legend(fontsize=7)
 
     axes_Ip[1].set_xlabel("Equilibrium index")
     axes_Ip[1].set_ylabel(r"$I_p$ error [%]")
@@ -1715,13 +1768,17 @@ def plot_traces(h5path_or_header, scan_value="all"):
         x = tr["indices"]
 
         axes_bnd[0].plot(x, tr["bnd_rms"], 'o-', color=c, lw=1.5, ms=4, label=lbl)
+        # Baseline (index 0) sits at 0 mm by construction (self-deviation)
+        axes_bnd[0].plot([x[0]], [tr["bnd_rms"][0]], color=c,
+                         label=('baseline' if lbl is None else None),
+                         **_BL_KW)
         axes_bnd[1].plot(x, tr["bnd_max"], 's-', color=c, lw=1.5, ms=4, label=lbl)
+        axes_bnd[1].plot([x[0]], [tr["bnd_max"][0]], color=c, **_BL_KW)
 
     axes_bnd[0].set_ylabel("RMS deviation [mm]")
-    axes_bnd[0].set_title("Boundary deviation vs input geqdsk")
+    axes_bnd[0].set_title("Boundary deviation vs baseline  (index 0 = recon baseline)")
     axes_bnd[0].grid(True, alpha=0.3)
-    if len(scan_vals) > 1:
-        axes_bnd[0].legend(fontsize=7)
+    axes_bnd[0].legend(fontsize=7)
 
     axes_bnd[1].set_xlabel("Equilibrium index")
     axes_bnd[1].set_ylabel("Max deviation [mm]")
