@@ -905,6 +905,20 @@ def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic"):
             figs.append(fig_bd)
             axes_list.append(ax_bd)
 
+        # Per-point boundary trace (R/Z of inboard/outboard/top/bottom
+        # vs draw index).  Reveals whether bnd-diag RMS is a systematic
+        # offset or fluctuation around recon -- a level of detail the
+        # global RMS bars above collapse into one scalar.
+        try:
+            fig_bp = plot_boundary_point_traces(
+                h5path, scan_value=scan_value)
+            figs.append(fig_bp)
+            axes_list.append(fig_bp.axes)
+        except Exception as _bp_exc:
+            warnings.warn(
+                f"[plot_bouquet] boundary-points trace failed "
+                f"({_bp_exc}); other boundary panels still rendered")
+
     if mode == "all":
         return figs, axes_list
     if len(figs) == 1:
