@@ -1871,11 +1871,44 @@ def generate_bouquet(
         # all start from draw 1's snapshot (deterministic warm
         # start), so identical perturbation inputs produce
         # repeatable outputs.
-        _warmstart_psi = None
-        _warmstart_coils = None
-        _warmstart_iso_pts = None
-        _warmstart_iso_w = None
-        _warmstart_captured = False
+        # ---- Warmstart capture: snapshot RECON state, not draw-1 ----
+        # mygs is in the recon's converged state on entry to
+        # generate_bouquet (the caller just ran reconstruct_equilibrium
+        # and re-set the recon isoflux).  Snapshot psi+coils+isoflux
+        # NOW so every per-draw iteration starts from the same clean
+        # baseline -- no draw-to-draw state pollution, no drift
+        # accumulation.  Prior versions captured the first successful
+        # draw's converged state, which locked in any small offset
+        # that draw landed at and propagated it forever (manifested
+        # as bit-identical clustering of draws 2..N at the draw-1
+        # offset, with VSC drift fighting the inherited mismatch).
+        try:
+            _warmstart_psi = mygs.get_psi(False).copy()
+            _wcoils, _ = mygs.get_coil_currents()
+            _warmstart_coils = {k: float(v) for k, v in _wcoils.items()}
+            _wiso = getattr(mygs, '_isoflux_targets', None)
+            if _wiso is None:
+                _wiso = getattr(mygs, '_isoflux', None)
+            if _wiso is not None and len(_wiso) >= 4:
+                _warmstart_iso_pts = np.asarray(_wiso).copy()
+                _warmstart_iso_w = (np.ones(
+                    len(_warmstart_iso_pts)) * 200.0)
+            else:
+                _warmstart_iso_pts = None
+                _warmstart_iso_w = None
+            _warmstart_captured = True
+            print(f"  [warmstart] snapshot of RECON state captured "
+                  f"({len(_warmstart_iso_pts) if _warmstart_iso_pts is not None else 0} "
+                  f"isoflux pts) -- every draw will restore from this "
+                  f"baseline, not propagate prior draws' state")
+        except Exception as _ws_init_exc:
+            print(f"  [warmstart] recon-state capture failed "
+                  f"({_ws_init_exc}); draws will inherit prior state")
+            _warmstart_psi = None
+            _warmstart_coils = None
+            _warmstart_iso_pts = None
+            _warmstart_iso_w = None
+            _warmstart_captured = False
 
         # Step 5: optional hard outer bounds at
         # +/-(coil_drift * hard_factor) around the lock-mode coils.
@@ -2843,33 +2876,9 @@ def generate_bouquet(
         if _new_bias is not None and np.isfinite(_new_bias) and _new_bias > 0:
             _proxy_bias_warmstart = float(_new_bias)
 
-        # ---- Warm-start capture (first successful draw only) ----
-        # Capture the converged forward-mode state from this draw so
-        # subsequent draws can start their Picard from the same warm
-        # reference.  Only fires once per generate_bouquet call.
-        if not _warmstart_captured:
-            try:
-                _warmstart_psi = mygs.get_psi(False).copy()
-                _wcoils, _ = mygs.get_coil_currents()
-                _warmstart_coils = {k: float(v) for k, v
-                                    in _wcoils.items()}
-                _wiso = getattr(mygs, '_isoflux_targets', None)
-                if _wiso is None:
-                    _wiso = getattr(mygs, '_isoflux', None)
-                if _wiso is not None and len(_wiso) >= 4:
-                    _warmstart_iso_pts = np.asarray(_wiso).copy()
-                    _warmstart_iso_w = (np.ones(
-                        len(_warmstart_iso_pts)) * 200.0)
-                _warmstart_captured = True
-                print(f"  [warmstart] captured draw {count+1} "
-                      f"converged state "
-                      f"({len(_warmstart_iso_pts) if _warmstart_iso_pts is not None else 0} "
-                      f"isoflux pts) -- subsequent draws will "
-                      f"restore from this snapshot")
-            except Exception as _ws_cap_exc:
-                print(f"  [warmstart] snapshot capture failed "
-                      f"({_ws_cap_exc}); subsequent draws will "
-                      f"inherit prior state as before")
+        # (Warmstart was captured ONCE at recon state before the loop --
+        # do NOT re-capture per draw, that would let one draw's
+        # converged state pollute all subsequent draws.)
 
     if pbar is not None:
         pbar.close()
