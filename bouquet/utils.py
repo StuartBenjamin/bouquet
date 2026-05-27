@@ -60,6 +60,42 @@ def safe_trace_surf(mygs, psi):
         mygs.replace_eq(source_eq=saved)
 
 
+def safe_save_eqdsk(mygs, filename, **kwargs):
+    r'''Snapshot/restore-wrapped save_eqdsk.
+
+    `mygs.save_eqdsk` internally re-runs the q-profile tracer (which
+    sets `active_tracer` state and may mutate cached `<R>` / `<1/R>`
+    geometry on the `gs_equil` struct) and has been empirically
+    observed to shift `mygs.get_globals()[0]` (Ip integral) by ~0.5-
+    0.8% when called against a converged equilibrium.  This wrapper
+    snapshots the equilibrium via `mygs.copy_eq()` before the save,
+    then restores via `mygs.replace_eq()` after -- so the .geqdsk
+    file is written from the unmodified state AND downstream
+    diagnostics see the same state recon converged to.
+
+    On legacy OFT builds without `copy_eq` / `replace_eq` (pre-PR
+    #248), falls through to a bare `mygs.save_eqdsk(...)` with no
+    protection.
+
+    Parameters
+    ----------
+    mygs : OpenFUSIONToolkit.TokaMaker.TokaMaker
+        Active TokaMaker instance.  Requires PR #248+ for the
+        protected snapshot/restore path.
+    filename : str
+        Same as `mygs.save_eqdsk` filename arg.
+    **kwargs
+        Passed through to `mygs.save_eqdsk(...)`.
+    '''
+    if not hasattr(mygs, 'copy_eq') or not hasattr(mygs, 'replace_eq'):
+        return mygs.save_eqdsk(filename, **kwargs)
+    saved = mygs.copy_eq()
+    try:
+        return mygs.save_eqdsk(filename, **kwargs)
+    finally:
+        mygs.replace_eq(source_eq=saved)
+
+
 def Ip_flux_integral_vs_target(alpha, mygs, jtor_prof, spike_profile, psi_N, Ip_target):
     r'''! Compute difference between integrated a*j_tor+j_spike profile and Ip_target
 

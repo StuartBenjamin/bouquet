@@ -36,6 +36,7 @@ from .sampling import (
 )
 from .utils import (
     Ip_flux_integral_vs_target,
+    safe_save_eqdsk,
     safe_trace_surf,
     store_equilibrium,
     store_baseline_profiles,
@@ -2763,7 +2764,13 @@ def generate_bouquet(
         full_path = os.path.abspath(eqdsk_filename)
         print(f"  Saving to: {full_path}")
 
-        mygs.save_eqdsk(
+        # safe_save_eqdsk: snapshot mygs equilibrium before save, restore
+        # after.  Prevents save_eqdsk's q-profile tracer from shifting
+        # mygs.get_globals()[0] by ~0.5-0.8% between this draw and the
+        # next draw's warmstart capture (the empirical save_eqdsk
+        # Ip-mutation pathology).
+        safe_save_eqdsk(
+            mygs,
             eqdsk_filename,
             nr=257, nz=257,
             truncate_eq=False,
