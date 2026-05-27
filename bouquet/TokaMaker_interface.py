@@ -862,6 +862,27 @@ def perturb_kinetic_equilibrium(
     # source (DLSODE / Picard maxits inside Sauter), making this
     # diagnostic mode actually reach the recon-anchor solve where
     # the PIN_JPHI logic takes effect.
+    # ---- PIN_JPHI / DIFF_BS pipeline probe ----
+    # Enabled by env var PINJ_PROBE=1.  Logs (l_i, Ip, axis) at every
+    # stage where mygs state could be mutated.  Used to localise the
+    # source of l_i drift between warmstart-restored recon state and
+    # the post-perturb state recorded by store_equilibrium.
+    _pinj_probe = (os.environ.get('PINJ_PROBE', '0') == '1'
+                   and (_pin_jphi or _diff_bs))
+    def _probe(label):
+        if not _pinj_probe:
+            return
+        try:
+            _st = mygs.get_stats(li_normalization='std',
+                                 lcfs_pad=psi_pad)
+            _op = mygs.o_point
+            print(f"    [probe {label:38s}] "
+                  f"l_i={float(_st['l_i']):.5f}  "
+                  f"Ip={float(_st['Ip']):.0f}  "
+                  f"axis=({float(_op[0]):.5f},{float(_op[1]):+.5f})")
+        except Exception as _pexc:
+            print(f"    [probe {label:38s}] failed ({_pexc})")
+    _probe("entry to perturb_kinetic_equilibrium")
     if _pin_jphi and recalculate_j_BS:
         print(f"  [PIN_JPHI] bypassing SWB call; using recon j_phi "
               f"as fixed forward-mode target")
@@ -871,6 +892,7 @@ def perturb_kinetic_equilibrium(
         # = same (we don't track separate components here).
         spike_profile = (input_j_phi - input_jinductive).copy()
         full_j_BS = spike_profile.copy()
+        _probe("after PIN_JPHI bypass setup")
         baseline_li_proxy = calc_cylindrical_li_proxy(
             mygs, input_j_phi, psi_pad)
         # Don't append SWB scale factors -- nothing to scale here
@@ -1120,10 +1142,15 @@ def perturb_kinetic_equilibrium(
                       "x": psi_N}
         _pp_anchor["y"][-1] = 0.0
         _ffp_anchor = {"type": "jphi-linterp", "y": new_jphi, "x": psi_N}
+
+        _probe("entry to recon-anchor block")
         mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
+        _probe("after set_targets(Ip,pax)")
         mygs.set_profiles(pp_prof=_pp_anchor, ffp_prof=_ffp_anchor)
+        _probe("after set_profiles(pp,ffp)")
         try:
             mygs.solve()
+            _probe("after solve()")
             if _pin_jphi:
                 print(f"  [recon-anchor] forward-solved with PINNED "
                       f"recon j_phi (PIN_JPHI=1, only pressure perturbs)")
@@ -1901,6 +1928,17 @@ def generate_bouquet(
                   f"({len(_warmstart_iso_pts) if _warmstart_iso_pts is not None else 0} "
                   f"isoflux pts) -- every draw will restore from this "
                   f"baseline, not propagate prior draws' state")
+            if os.environ.get('PINJ_PROBE', '0') == '1':
+                try:
+                    _gs0 = mygs.get_stats(li_normalization='std',
+                                          lcfs_pad=psi_pad)
+                    _op0 = mygs.o_point
+                    print(f"    [probe RECON reference (warmstart src)  ] "
+                          f"l_i={float(_gs0['l_i']):.5f}  "
+                          f"Ip={float(_gs0['Ip']):.0f}  "
+                          f"axis=({float(_op0[0]):.5f},{float(_op0[1]):+.5f})")
+                except Exception:
+                    pass
         except Exception as _ws_init_exc:
             print(f"  [warmstart] recon-state capture failed "
                   f"({_ws_init_exc}); draws will inherit prior state")
@@ -2199,6 +2237,19 @@ def generate_bouquet(
             except Exception as _ws_rs_exc:
                 print(f"  [warmstart] restore failed "
                       f"({_ws_rs_exc}); draw inherits prior state")
+        # PIN_JPHI/DIFF_BS probe just after warmstart restore -- shows
+        # the state perturb_kinetic_equilibrium will see on entry.
+        if os.environ.get('PINJ_PROBE', '0') == '1':
+            try:
+                _gs = mygs.get_stats(li_normalization='std',
+                                     lcfs_pad=psi_pad)
+                _op = mygs.o_point
+                print(f"    [probe just after warmstart restore     ] "
+                      f"l_i={float(_gs['l_i']):.5f}  "
+                      f"Ip={float(_gs['Ip']):.0f}  "
+                      f"axis=({float(_op[0]):.5f},{float(_op[1]):+.5f})")
+            except Exception as _pp_exc:
+                print(f"    [probe warmstart restore] failed ({_pp_exc})")
 
         try:
             (
@@ -2302,17 +2353,33 @@ def generate_bouquet(
             _post_align_failed = False
             _Ip_tol = 1e-3
             _max_ip_iters = 8
-            # Target the USER-PROVIDED Ip (eqdsk value), not the
-            # mygs-captured `_recon_Ip`.  `_recon_Ip` was originally
-            # intended to be the "forward-mode anchored Ip" but
-            # save_eqdsk's q-profile tracing in the notebook's recon
-            # archival cell silently shifts mygs.get_globals()[0] by
-            # ~0.5-0.8%, so the captured value isn't the recon's true
-            # converged Ip.  initial_Ip_target = abs(eqdsk.Ip) is the
-            # invariant reference -- it's what reconstruct_equilibrium's
-            # own [Ip match] secant aligned to (within ~0.05%), and
-            # what baseline.eqdsk's header records.
-            _ip_align_target = float(initial_Ip_target)
+            # Target RECON's actual converged Ip (`_recon_Ip` captured
+            # from mygs.get_globals() on entry to generate_bouquet),
+            # not the user-supplied `initial_Ip_target` (= eqdsk.Ip).
+            #
+            # WHY: TokaMaker's jphi-linterp profile type has a known
+            # ~0.5-1% Ip-vs-target discretization mismatch (cut-cell FE
+            # quadrature near separatrix; <R>/<1/R> averaging in
+            # jphi_update vs pointwise R in gs_comp_globals).  Recon's
+            # find_optimal_scale Brent search compensates by iterating
+            # a scale factor until get_globals()['Ip'] ~= eqdsk.Ip
+            # (within ~0.05% tolerance).  But the resulting mygs state
+            # has FFP scaled so the *cut-cell-error-included* Ip
+            # integral equals eqdsk.Ip -- meaning the "consistent"
+            # Ip that TokaMaker can naturally hold is whatever
+            # _recon_Ip actually is (close to but not equal to
+            # eqdsk.Ip).  Per-draw Ip-aligning to eqdsk.Ip then drags
+            # the equilibrium by ~4mm to re-do the same compensation
+            # recon already did, but this time without the protection
+            # of the scale-factor approach -- producing a real boundary
+            # displacement.
+            #
+            # The earlier-noted save_eqdsk Ip-shift concern (~0.5-0.8%)
+            # was resolved by the safe_trace_surf wrapper which now
+            # protects mygs state through diagnostic trace_surf calls
+            # (PR #248 copy_eq/replace_eq).  _recon_Ip is now a stable
+            # measurement of recon's converged Ip.
+            _ip_align_target = float(_recon_Ip)
             try:
                 # Snapshot current pp/ffp from mygs so the secant solves
                 # against the perturbed-profile equilibrium.
