@@ -905,20 +905,6 @@ def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic"):
             figs.append(fig_bd)
             axes_list.append(ax_bd)
 
-        # Per-point boundary trace (R/Z of inboard/outboard/top/bottom
-        # vs draw index).  Reveals whether bnd-diag RMS is a systematic
-        # offset or fluctuation around recon -- a level of detail the
-        # global RMS bars above collapse into one scalar.
-        try:
-            fig_bp = plot_boundary_point_traces(
-                h5path, scan_value=scan_value)
-            figs.append(fig_bp)
-            axes_list.append(fig_bp.axes)
-        except Exception as _bp_exc:
-            warnings.warn(
-                f"[plot_bouquet] boundary-points trace failed "
-                f"({_bp_exc}); other boundary panels still rendered")
-
     if mode == "all":
         return figs, axes_list
     if len(figs) == 1:
@@ -1835,6 +1821,24 @@ def plot_traces(h5path_or_header, scan_value="all"):
     axes_bnd[1].grid(True, alpha=0.3)
     fig_bnd.tight_layout()
 
+    # ---- Per-anchor-point deviation trace -------------------------
+    # ΔR / ΔZ at the four characteristic LCFS points (inboard
+    # midplane, outboard midplane, top, bottom) vs draw index, in mm.
+    # Complements the global RMS / max bnd-diag panels above by
+    # showing WHERE on the LCFS the deviation is concentrated and
+    # whether the bouquet has a systematic drift signature or random
+    # scatter around recon.
+    try:
+        fig_bp = plot_boundary_point_traces(
+            h5path, scan_value=scan_value)
+    except Exception as _bp_exc:
+        warnings.warn(
+            f"[plot_traces] boundary-point trace failed "
+            f"({_bp_exc}); skipping")
+        fig_bp = None
+
+    if fig_bp is not None:
+        return [fig_li, fig_Ip, fig_bnd, fig_bp]
     return [fig_li, fig_Ip, fig_bnd]
 
 
@@ -1981,7 +1985,8 @@ def _extract_boundary_points(R, Z, R_axis, Z_axis,
 def plot_boundary_point_traces(h5path_or_header, scan_value="all",
                                 prefer_xpoint=True,
                                 corner_angle_deg=40.0):
-    r"""Trace plot of characteristic LCFS points across draws.
+    r"""Trace plot of characteristic LCFS points across draws,
+    expressed as **signed deviation (mm) from the baseline recon**.
 
     For each draw (and the baseline reconstruction at index 0) the
     function extracts four boundary points from the stored geqdsk:
@@ -1995,14 +2000,14 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
 
     Produces one figure with two subplots:
 
-      1. **R [m] vs draw index** for all four points
-      2. **Z [m] vs draw index** for all four points
+      1. **ΔR [mm] vs draw index** for all four points (signed)
+      2. **ΔZ [mm] vs draw index** for all four points (signed)
 
-    The baseline is drawn as a horizontal dashed line on each panel
-    (the value at index 0).  Lets the user see at a glance whether the
-    bnd-diag RMS is a systematic offset (all points drifting in the
-    same direction) or random scatter around the recon (points
-    fluctuating symmetrically).
+    The baseline (index 0) sits at zero by construction.  A horizontal
+    dashed line at 0 mm marks the reference.  Lets the user see at a
+    glance whether bnd-diag RMS is a systematic offset (all points
+    drifting in the same direction) or random scatter around the recon
+    (points fluctuating symmetrically around 0).
 
     Parameters
     ----------
@@ -2114,38 +2119,54 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
             if not indices:
                 continue
 
-            # Plot
+            # Convert to signed deviation [mm] from the baseline
+            # (index 0 = recon).  If index 0 was successfully
+            # extracted, use it as the reference; otherwise warn and
+            # skip this scan value.
             indices = np.asarray(indices)
+            if indices[0] != 0:
+                warnings.warn(
+                    f"[plot_boundary_point_traces] no baseline at "
+                    f"index 0 for {scan_tag}; cannot compute "
+                    f"deviation -- skipping this scan value")
+                continue
             for k in point_labels:
+                R_arr = np.asarray(R_pts[k], dtype=float)
+                Z_arr = np.asarray(Z_pts[k], dtype=float)
+                R0 = R_arr[0]
+                Z0 = Z_arr[0]
+                dR_mm = (R_arr - R0) * 1e3
+                dZ_mm = (Z_arr - Z0) * 1e3
                 col = point_colors[k]
                 mk = point_markers[k]
-                lbl_R = f"{k} R"
-                lbl_Z = f"{k} Z"
+                lbl_R = k
+                lbl_Z = k
                 if scan_color_offset is not None:
                     lbl_R += f"  ({scan_tag})"
                     lbl_Z += f"  ({scan_tag})"
-                ax_r.plot(indices, R_pts[k], marker=mk, color=col,
+                ax_r.plot(indices, dR_mm, marker=mk, color=col,
                           linestyle='-', linewidth=0.7, markersize=5,
                           label=lbl_R if i_sv == 0 else None,
                           alpha=0.9)
-                ax_z.plot(indices, Z_pts[k], marker=mk, color=col,
+                ax_z.plot(indices, dZ_mm, marker=mk, color=col,
                           linestyle='-', linewidth=0.7, markersize=5,
                           label=lbl_Z if i_sv == 0 else None,
                           alpha=0.9)
-                # Baseline hlines (value at index 0, if we have it)
-                if len(indices) > 0 and indices[0] == 0:
-                    ax_r.axhline(R_pts[k][0], color=col,
-                                 linestyle=':', alpha=0.4, linewidth=0.8)
-                    ax_z.axhline(Z_pts[k][0], color=col,
-                                 linestyle=':', alpha=0.4, linewidth=0.8)
 
-    ax_r.set_ylabel("R [m]")
-    ax_r.set_title("LCFS reference points vs draw index "
-                   "(index 0 = baseline recon; dotted = baseline value)")
+    # Zero reference: by construction every point's deviation at
+    # index 0 is exactly 0, so the dashed line is a useful eye-guide.
+    ax_r.axhline(0.0, color='black', linestyle='--',
+                 alpha=0.4, linewidth=0.8)
+    ax_z.axhline(0.0, color='black', linestyle='--',
+                 alpha=0.4, linewidth=0.8)
+
+    ax_r.set_ylabel(r"$\Delta R$ [mm]")
+    ax_r.set_title("LCFS reference points: deviation from recon baseline "
+                   "(index 0 = recon, signed)")
     ax_r.grid(True, alpha=0.3)
     ax_r.legend(loc='best', fontsize=8, ncol=2)
     ax_z.set_xlabel("Draw index")
-    ax_z.set_ylabel("Z [m]")
+    ax_z.set_ylabel(r"$\Delta Z$ [mm]")
     ax_z.grid(True, alpha=0.3)
     ax_z.legend(loc='best', fontsize=8, ncol=2)
     fig.tight_layout()
