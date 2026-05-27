@@ -1673,7 +1673,23 @@ def plot_traces(h5path_or_header, scan_value="all"):
                 li1_vals.append(float(grp.attrs.get("l_i(1)", np.nan)))
                 li3_vals.append(float(grp.attrs.get("l_i(3)", np.nan)))
 
-                # Extract Ip and boundary from eqdsk bytes
+                # ---- Per-draw boundary for the bnd-diag panels.
+                # PREFER perturbed_lcfs_ref (10k-pt trace_surf at the
+                # exact mygs state save_eqdsk was called from) over the
+                # eqdsk's ~100-pt RBBBS/ZBBBS.  Apples-to-apples with
+                # the baseline.recon_lcfs_ref reference -- removes ~4
+                # mm of save_eqdsk sampling-noise floor and matches the
+                # in-loop bnd-diag values.  Falls back to eqdsk boundary
+                # for runs that predate this dataset.
+                perturbed_pts = None
+                if "perturbed_lcfs_ref" in grp:
+                    try:
+                        perturbed_pts = np.asarray(
+                            grp["perturbed_lcfs_ref"][()])
+                    except Exception:
+                        perturbed_pts = None
+                # Extract Ip from eqdsk bytes (and fall back to eqdsk
+                # boundary if no perturbed_lcfs_ref was stored)
                 eqdsk_ds = [k for k in grp.keys() if k.endswith(".eqdsk")]
                 if eqdsk_ds:
                     try:
@@ -1681,10 +1697,12 @@ def plot_traces(h5path_or_header, scan_value="all"):
                         eq = read_eqdsk_from_bytes(raw, read_geqdsk)
                         Ip_vals.append(abs(eq.Ip))
 
-                        if bl_boundary is not None:
-                            tree = _cKDTree(
-                                np.column_stack([eq.boundary_R, eq.boundary_Z])
-                            )
+                        if perturbed_pts is None:
+                            perturbed_pts = np.column_stack(
+                                [eq.boundary_R, eq.boundary_Z])
+
+                        if bl_boundary is not None and perturbed_pts is not None:
+                            tree = _cKDTree(perturbed_pts)
                             devs, _ = tree.query(bl_boundary)
                             bnd_rms_vals.append(np.sqrt(np.mean(devs**2)) * 1e3)
                             bnd_max_vals.append(np.max(devs) * 1e3)

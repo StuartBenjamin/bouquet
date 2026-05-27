@@ -581,7 +581,15 @@ def perturb_kinetic_equilibrium(
     npsi,
     p_thresh=0.5,
     input_jinductive=None,
-    l_i_tolerance=0.05,
+    # Default tightened from 5.0 -> 1.0 (% real-equilibrium l_i error).
+    # The outer loop's proxy_target correction is now a pure Newton step
+    # so 1% is reachable in 2-3 iters.  The notebook previously
+    # overrode to 10.0 to compensate for the conservative 0.7/0.3 blend
+    # accepting the proxy-biased equilibrium at iter 1; with Newton +
+    # tighter tolerance the equilibrium tracks recon l_i instead of
+    # locking in at the +5% proxy-bias offset that produced ~10 mm
+    # systematic boundary shift across all draws.
+    l_i_tolerance=1.0,
     l_i_proxy_threshold=5.0,
     psi_pad=1e-3,
     constrain_sawteeth=True,
@@ -612,6 +620,7 @@ def perturb_kinetic_equilibrium(
     #                                 (= PIN_JPHI behaviour).
     recon_eq_snapshot=None,
     spike_profile_recon_cached=None,
+    proxy_bias_warmstart=None,
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
     match :math:`I_p` and :math:`l_i` targets.
@@ -1171,7 +1180,20 @@ def perturb_kinetic_equilibrium(
     # actual equilibrium l_i.  This makes the proxy filter select
     # profiles that land near l_i_target in equilibrium space rather
     # than in proxy space.
-    proxy_target = baseline_li_proxy
+    # Initialize proxy_target.  If the caller passed a warmstart bias
+    # (proxy_bias_warmstart = proxy / real_l_i from the previous draw),
+    # use it -- so the very first outer iter of this draw lands at
+    # ~l_i_target, converging in 1 iter instead of 2.  The cylindrical
+    # proxy bias is empirically very stable across draws (~7%) so
+    # warmstart is essentially free; without it every draw has to
+    # waste one outer iter (~30s) re-discovering the bias.
+    if proxy_bias_warmstart is not None and np.isfinite(proxy_bias_warmstart):
+        proxy_target = l_i_target * proxy_bias_warmstart
+        print(f"  [proxy-warmstart] proxy_target = "
+              f"{proxy_target:.4f} (bias={proxy_bias_warmstart:.4f} from "
+              f"previous draw)")
+    else:
+        proxy_target = baseline_li_proxy
 
     # ---- PIN_JPHI diagnostic short-circuit ----
     # When PIN_JPHI=1, skip the GPR-sampling l_i match loop entirely
@@ -1396,10 +1418,14 @@ def perturb_kinetic_equilibrium(
         # Adaptive proxy target correction: use the observed
         # proxy-to-equilibrium mapping to predict what proxy value
         # would produce l_i_target in the actual equilibrium.
+        # Pure-Newton blend (1.0 / 0.0).  The cylindrical proxy has a
+        # structurally fixed bias (~7%) vs the TokaMaker equilibrium
+        # l_i for a given j_phi shape; the linearization is accurate,
+        # so a full Newton step converges in 2-3 iters where the old
+        # 0.7/0.3 blend was conservative enough that the outer loop
+        # broke on l_i_tolerance=10 default and never corrected.
         if l_i > 0 and np.isfinite(l_i):
-            corrected_target = final_li_proxy * (l_i_target / l_i)
-            # Blend: 70% new correction, 30% old target (smooths noise)
-            proxy_target = 0.7 * corrected_target + 0.3 * proxy_target
+            proxy_target = final_li_proxy * (l_i_target / l_i)
 
         print(f"  l_i target (equil):   {l_i_target:.4f}")
         print(f"  proxy target:         {proxy_target:.4f}  (corrected)")
@@ -1439,6 +1465,18 @@ def perturb_kinetic_equilibrium(
         psi_N, output_jphi, spike_profile, eqdsk_jphi=input_j_phi
     )
 
+    # Compute the cylindrical-proxy / real-l_i ratio at the converged
+    # state.  Used by generate_bouquet to warmstart the next draw's
+    # proxy_target so it converges in 1 outer iter instead of 2.
+    final_l_i_for_bias = (iteration_l_is[-1]
+                          if iteration_l_is else float('nan'))
+    if (final_l_i_for_bias and np.isfinite(final_l_i_for_bias)
+            and final_l_i_for_bias > 0
+            and 'final_li_proxy' in dir()):
+        proxy_bias_observed = final_li_proxy / final_l_i_for_bias
+    else:
+        proxy_bias_observed = None
+
     diagnostics = {
         "j0_scales": j0_scales,
         "Ip_scales": Ip_scales,
@@ -1447,6 +1485,7 @@ def perturb_kinetic_equilibrium(
         "j_inductive": j_inductive_consistent,
         "j_BS": full_j_BS,
         "j_BS_edge": spike_profile,
+        "proxy_bias_observed": proxy_bias_observed,
     }
 
     return (
@@ -1485,7 +1524,7 @@ def generate_bouquet(
     l_i_target,
     Zeff,
     input_jinductive=None,
-    l_i_tolerance=0.03,
+    l_i_tolerance=1.0,
     l_i_proxy_threshold=5.0,
     psi_pad=1e-3,
     constrain_sawteeth=True,
@@ -2040,6 +2079,14 @@ def generate_bouquet(
             _diff_recon_eq_snap = None
             _diff_spike_recon = None
 
+    # Tracks the cylindrical-proxy / real-l_i ratio observed at the
+    # end of the most recent successful draw.  Passed into the next
+    # draw's perturb_kinetic_equilibrium as proxy_bias_warmstart so its
+    # initial proxy_target lands at l_i_target * bias -> 1 outer iter
+    # convergence instead of 2 (saves ~30s/draw).  Set to None until
+    # the first successful draw establishes a baseline.
+    _proxy_bias_warmstart = None
+
     t_batch_start = time.perf_counter()
     elapsed_times = []
 
@@ -2137,6 +2184,7 @@ def generate_bouquet(
                 bnd_diag_callback=_report_bnd,
                 recon_eq_snapshot=_diff_recon_eq_snap,
                 spike_profile_recon_cached=_diff_spike_recon,
+                proxy_bias_warmstart=_proxy_bias_warmstart,
             )
         except Exception as e:
             # Catch ANY exception during a perturbed solve -- ValueError
@@ -2597,6 +2645,26 @@ def generate_bouquet(
             lcfs_pad=psi_pad,
         )
 
+        # Capture a high-resolution LCFS trace at the SAME mygs state
+        # we just saved the eqdsk from.  The eqdsk's RBBBS/ZBBBS is only
+        # ~100 pts (save_eqdsk samples coarsely), so comparing it
+        # against the 10k-pt recon_lcfs_ref in plot_traces inflates RMS
+        # by ~4 mm of pure sampling noise.  Storing this high-res trace
+        # per draw lets plot_traces do an apples-to-apples comparison
+        # (10k vs 10k) and matches the in-loop bnd-diag value.
+        try:
+            from .utils import safe_trace_surf as _safe_trace_lcfs
+            perturbed_lcfs_ref = _safe_trace_lcfs(mygs, 1.0 - psi_pad)
+            if (perturbed_lcfs_ref is None
+                    or len(perturbed_lcfs_ref) < 4):
+                # try a smaller pad if the standard one fails
+                perturbed_lcfs_ref = _safe_trace_lcfs(mygs, 1.0 - 1e-4)
+        except Exception as _lcfs_exc:
+            print(f"  WARN: high-res LCFS capture failed "
+                  f"({_lcfs_exc}); plot_traces will fall back to "
+                  f"the eqdsk's coarse boundary for this draw")
+            perturbed_lcfs_ref = None
+
         eq_stats_std = mygs.get_stats(li_normalization="std", lcfs_pad=psi_pad)
         li1 = eq_stats_std["l_i"]
         eq_stats_iter = mygs.get_stats(li_normalization="iter", lcfs_pad=psi_pad)
@@ -2726,6 +2794,7 @@ def generate_bouquet(
             in_spec=diagnostics.get('in_spec'),
             inspec_F_max=diagnostics.get('inspec_F_max'),
             inspec_VSC_max=diagnostics.get('inspec_VSC_max'),
+            perturbed_lcfs_ref=perturbed_lcfs_ref,
         )
 
         # Clean up on-disk eqdsk after archiving
@@ -2736,6 +2805,16 @@ def generate_bouquet(
             print(f"  WARNING: could not delete {full_path}: {exc}")
 
         all_diagnostics.append(diagnostics)
+
+        # ---- Proxy-bias warmstart for next draw ----
+        # Keep the most recent successful draw's observed bias factor
+        # (proxy/real_l_i).  Empirically the bias is stable across
+        # draws within a single bouquet run -- using the previous
+        # draw's bias means the next draw's first outer iter already
+        # lands at l_i_target, eliminating one ~30s outer iteration.
+        _new_bias = diagnostics.get('proxy_bias_observed')
+        if _new_bias is not None and np.isfinite(_new_bias) and _new_bias > 0:
+            _proxy_bias_warmstart = float(_new_bias)
 
         # ---- Warm-start capture (first successful draw only) ----
         # Capture the converged forward-mode state from this draw so

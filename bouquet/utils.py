@@ -209,6 +209,7 @@ def store_equilibrium(
     in_spec=None,
     inspec_F_max=None,
     inspec_VSC_max=None,
+    perturbed_lcfs_ref=None,
 ):
     """
     Write one perturbed equilibrium into the HDF5 database.
@@ -328,6 +329,19 @@ def store_equilibrium(
             grp.attrs["inspec_F_max"] = float(inspec_F_max)
         if inspec_VSC_max is not None:
             grp.attrs["inspec_VSC_max"] = float(inspec_VSC_max)
+
+        # ---- High-resolution LCFS reference for this draw.
+        # Captured by perturb_kinetic_equilibrium via safe_trace_surf at
+        # the same mygs state save_eqdsk was called from -- so this and
+        # the baseline.recon_lcfs_ref are method-consistent (both 10k-pt
+        # trace_surf at psi = 1 - psi_pad).  Eliminates the ~4 mm
+        # sampling-noise floor that the 100-pt eqdsk RBBBS introduces
+        # when used as the perturbed-side boundary in plot_traces.
+        if perturbed_lcfs_ref is not None:
+            grp.create_dataset(
+                "perturbed_lcfs_ref",
+                data=np.asarray(perturbed_lcfs_ref, dtype=np.float64),
+            )
 
 
 def load_equilibrium(header, count, scan_val=None, eqdsk_out_dir=None):
