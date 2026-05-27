@@ -1951,24 +1951,42 @@ def _detect_xpoint(R, Z, R_axis, Z_axis, half="lower",
 
 
 def _extract_boundary_points(R, Z, R_axis, Z_axis,
+                              ref_R_axis=None,
+                              ref_Z_axis=None,
                               prefer_xpoint=True,
                               corner_angle_deg=40.0):
     """Extract the four characteristic LCFS points used by the trace.
 
     Returns dict with keys 'inboard', 'outboard', 'top', 'bottom'.
-    Each value is a (R, Z) tuple.  Top/bottom default to LCFS ∩
-    {R=R_axis} but get replaced by detected X-points (corner angle >
-    threshold) when ``prefer_xpoint`` is True.
+
+    If ``ref_R_axis`` / ``ref_Z_axis`` are provided, the axis-intersection
+    anchors are computed at those FIXED reference coordinates (typically
+    the recon's magnetic axis).  This means the inboard/outboard
+    anchors are always at the same Z, and top/bottom anchors are always
+    at the same R, across all draws -- so ΔR/ΔZ deviations measure only
+    LCFS shape change, not motion of the magnetic axis.  If reference
+    coordinates are not provided, fall back to per-draw axis (legacy
+    behaviour, includes axis motion in the deviations).
+
+    Top/bottom default to LCFS ∩ {R=ref_R_axis} but get replaced by
+    detected X-points (corner angle > threshold) when ``prefer_xpoint``
+    is True.
     """
-    r_in, r_out = _lcfs_intersect_horizontal(R, Z, R_axis, Z_axis)
-    z_below, z_above = _lcfs_intersect_vertical(R, Z, R_axis, Z_axis)
+    R_anchor = ref_R_axis if ref_R_axis is not None else R_axis
+    Z_anchor = ref_Z_axis if ref_Z_axis is not None else Z_axis
+    r_in, r_out = _lcfs_intersect_horizontal(R, Z, R_anchor, Z_anchor)
+    z_below, z_above = _lcfs_intersect_vertical(R, Z, R_anchor, Z_anchor)
     pts = {
-        'inboard':  (r_in,  Z_axis),
-        'outboard': (r_out, Z_axis),
-        'top':      (R_axis, z_above),
-        'bottom':   (R_axis, z_below),
+        'inboard':  (r_in,  Z_anchor),
+        'outboard': (r_out, Z_anchor),
+        'top':      (R_anchor, z_above),
+        'bottom':   (R_anchor, z_below),
     }
     if prefer_xpoint:
+        # X-point detection uses THIS draw's own axis (X-points exist
+        # in physical space, not at fixed reference coords).  The
+        # detected X-point coords become the anchor for this draw,
+        # so deviations reflect the X-point's motion in absolute space.
         r_top_x, z_top_x = _detect_xpoint(R, Z, R_axis, Z_axis,
                                           half='upper',
                                           corner_angle_deg=corner_angle_deg)
@@ -2064,6 +2082,19 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
             sv_key = _scan_val_key(sv)
             scan_tag = f"scan={sv}" if sv is not None else "single-scan"
 
+            # Recon's axis -- used as the FIXED reference for all
+            # axis-intersection anchors across every draw so axis
+            # motion doesn't leak into the deviation signal.  Set when
+            # we process the baseline below; if absent, fall back to
+            # per-draw axis (legacy behaviour).
+            ref_R_axis = None
+            ref_Z_axis = None
+            # Whether baseline has an upper/lower X-point detected --
+            # used to decide whether the "top"/"bottom" curves are
+            # labelled as X-points in the legend.  Detected once on
+            # baseline so the legend label is stable across all draws.
+            baseline_xpoint = {'upper': False, 'lower': False}
+
             # ---- Baseline at index 0 ----
             bl_grp_path = (f"scan/{sv_key}/_baseline"
                            if sv_key else "_baseline")
@@ -2075,9 +2106,30 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
                     raw = bytes(bl_grp[eqdsk_keys[0]][()])
                     try:
                         eq_bl = read_eqdsk_from_bytes(raw, read_geqdsk)
+                        # Pin reference coordinates from the baseline.
+                        ref_R_axis = float(eq_bl.R_mag)
+                        ref_Z_axis = float(eq_bl.Z_mag)
+                        # Test X-point presence on the baseline so the
+                        # legend can label top/bottom as X-points only
+                        # when the recon actually has them.
+                        if prefer_xpoint:
+                            r_top_x, _ = _detect_xpoint(
+                                eq_bl.boundary_R, eq_bl.boundary_Z,
+                                ref_R_axis, ref_Z_axis,
+                                half='upper',
+                                corner_angle_deg=corner_angle_deg)
+                            r_bot_x, _ = _detect_xpoint(
+                                eq_bl.boundary_R, eq_bl.boundary_Z,
+                                ref_R_axis, ref_Z_axis,
+                                half='lower',
+                                corner_angle_deg=corner_angle_deg)
+                            baseline_xpoint['upper'] = not np.isnan(r_top_x)
+                            baseline_xpoint['lower'] = not np.isnan(r_bot_x)
                         pts = _extract_boundary_points(
                             eq_bl.boundary_R, eq_bl.boundary_Z,
                             eq_bl.R_mag, eq_bl.Z_mag,
+                            ref_R_axis=ref_R_axis,
+                            ref_Z_axis=ref_Z_axis,
                             prefer_xpoint=prefer_xpoint,
                             corner_angle_deg=corner_angle_deg)
                         indices.append(0)
@@ -2104,6 +2156,8 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
                     pts = _extract_boundary_points(
                         eq.boundary_R, eq.boundary_Z,
                         eq.R_mag, eq.Z_mag,
+                        ref_R_axis=ref_R_axis,
+                        ref_Z_axis=ref_Z_axis,
                         prefer_xpoint=prefer_xpoint,
                         corner_angle_deg=corner_angle_deg)
                     indices.append(i + 1)
@@ -2130,6 +2184,19 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
                     f"index 0 for {scan_tag}; cannot compute "
                     f"deviation -- skipping this scan value")
                 continue
+            # Map raw label -> legend label, surfacing X-point status
+            # from the baseline detection.  When the baseline has an
+            # X-point on a given half, the "top"/"bottom" curve is
+            # actually tracking that X-point (per _extract_boundary_points
+            # logic) -- relabel so the user knows.
+            legend_label = {
+                'inboard':  'inboard midplane',
+                'outboard': 'outboard midplane',
+                'top':      'X-pt (upper)' if baseline_xpoint['upper']
+                            else 'top (axis line)',
+                'bottom':   'X-pt (lower)' if baseline_xpoint['lower']
+                            else 'bottom (axis line)',
+            }
             for k in point_labels:
                 R_arr = np.asarray(R_pts[k], dtype=float)
                 Z_arr = np.asarray(Z_pts[k], dtype=float)
@@ -2139,8 +2206,8 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
                 dZ_mm = (Z_arr - Z0) * 1e3
                 col = point_colors[k]
                 mk = point_markers[k]
-                lbl_R = k
-                lbl_Z = k
+                lbl_R = legend_label[k]
+                lbl_Z = legend_label[k]
                 if scan_color_offset is not None:
                     lbl_R += f"  ({scan_tag})"
                     lbl_Z += f"  ({scan_tag})"
