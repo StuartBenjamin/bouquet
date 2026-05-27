@@ -210,6 +210,8 @@ def store_equilibrium(
     inspec_F_max=None,
     inspec_VSC_max=None,
     perturbed_lcfs_ref=None,
+    l_i_target_used=None,
+    l_i_uncertainty=None,
 ):
     """
     Write one perturbed equilibrium into the HDF5 database.
@@ -329,6 +331,16 @@ def store_equilibrium(
             grp.attrs["inspec_F_max"] = float(inspec_F_max)
         if inspec_VSC_max is not None:
             grp.attrs["inspec_VSC_max"] = float(inspec_VSC_max)
+        # The l_i_target this draw actually converged to.  Equal to the
+        # bouquet's l_i_target when l_i_uncertainty=0; otherwise a per-
+        # draw sample from N(l_i_target, l_i_uncertainty * l_i_target).
+        # Stored so post-run analysis can verify the sampled
+        # distribution + diagnose any draw whose realised l_i diverged
+        # from its (intentionally perturbed) target.
+        if l_i_target_used is not None:
+            grp.attrs["l_i_target_used"] = float(l_i_target_used)
+        if l_i_uncertainty is not None:
+            grp.attrs["l_i_uncertainty"] = float(l_i_uncertainty)
 
         # ---- High-resolution LCFS reference for this draw.
         # Captured by perturb_kinetic_equilibrium via safe_trace_surf at

@@ -1551,6 +1551,7 @@ def generate_bouquet(
     inspec_F_max=0.025,
     inspec_VSC_max=0.10,
     recon_lcfs_ref=None,
+    l_i_uncertainty=0.0,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -2104,6 +2105,24 @@ def generate_bouquet(
 
     for count in eq_iter:
         scale_jBS = float(jBS_scales[count])
+        # ---- Per-draw l_i_target sampling ----
+        # If l_i_uncertainty > 0, draw a perturbed target from
+        # N(l_i_target, l_i_uncertainty * l_i_target) so the bouquet
+        # spans a physical l_i distribution (e.g. 5% to mimic DIII-D's
+        # measurement uncertainty).  Each draw then converges TIGHTLY
+        # to its own sampled target (l_i_tolerance governs *that*
+        # convergence, not the spread).  l_i_uncertainty=0 (default)
+        # pins every draw to the recon's l_i exactly, as before.
+        if l_i_uncertainty > 0.0:
+            l_i_target_draw = float(np.random.normal(
+                l_i_target, l_i_uncertainty * l_i_target))
+            # Guard against pathological negative samples (4σ events
+            # for any reasonable uncertainty); clamp to a small fraction
+            # of recon to keep find_optimal_scale's Brent search valid.
+            if l_i_target_draw < 0.1 * l_i_target:
+                l_i_target_draw = 0.1 * l_i_target
+        else:
+            l_i_target_draw = float(l_i_target)
         # Per-draw homotopy/spec defaults (overwritten by Step 3 below).
         _final_drifts = None
         _final_pass_idx = -1
@@ -2121,6 +2140,10 @@ def generate_bouquet(
         print(f"\n{'='*60}")
         print(f"  Equilibrium {count+1}/{n_equils}  "
               f"(scale_jBS={scale_jBS:.4f}){eta_str}")
+        if l_i_uncertainty > 0.0:
+            _dev_pct = 100.0 * (l_i_target_draw - l_i_target) / l_i_target
+            print(f"  l_i_target sampled: {l_i_target_draw:.4f} "
+                  f"({_dev_pct:+.2f}% vs recon, σ={100*l_i_uncertainty:.1f}%)")
         print(f"{'='*60}")
         t_start = time.perf_counter()
 
@@ -2166,7 +2189,7 @@ def generate_bouquet(
                 sigma_jphi,
                 n_ls, t_ls, j_ls,
                 initial_Ip_target,
-                l_i_target,
+                l_i_target_draw,
                 Zeff,
                 npsi,
                 input_jinductive=input_jinductive,
@@ -2632,6 +2655,8 @@ def generate_bouquet(
         diagnostics['in_spec']           = bool(_in_spec)
         diagnostics['inspec_F_max']      = float(inspec_F_max)
         diagnostics['inspec_VSC_max']    = float(inspec_VSC_max)
+        diagnostics['l_i_target_used']   = float(l_i_target_draw)
+        diagnostics['l_i_uncertainty']   = float(l_i_uncertainty)
 
         # ---- save geqdsk to a temporary file, archive, delete -------
         eqdsk_filename = f"{header}_count={count}.geqdsk"
@@ -2795,6 +2820,8 @@ def generate_bouquet(
             inspec_F_max=diagnostics.get('inspec_F_max'),
             inspec_VSC_max=diagnostics.get('inspec_VSC_max'),
             perturbed_lcfs_ref=perturbed_lcfs_ref,
+            l_i_target_used=diagnostics.get('l_i_target_used'),
+            l_i_uncertainty=diagnostics.get('l_i_uncertainty'),
         )
 
         # Clean up on-disk eqdsk after archiving
