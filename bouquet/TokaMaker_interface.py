@@ -40,7 +40,10 @@ from .utils import (
     safe_trace_surf,
     store_equilibrium,
     store_baseline_profiles,
+    _scan_val_key,
+    read_eqdsk_from_bytes,
 )
+from .io.geqdsk import read_geqdsk
 
 # ---- Adaptive corrective iteration ----
 def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
@@ -898,6 +901,65 @@ def perturb_kinetic_equilibrium(
             mygs, input_j_phi, psi_pad)
         # Don't append SWB scale factors -- nothing to scale here
         eq_stats = mygs.get_stats(lcfs_pad=psi_pad)
+
+        # ---- PIN_JPHI recon-anchor solve ----
+        # The if/elif/elif chain (this branch | DIFF_BS | recalculate_j_BS)
+        # used to skip the recon-anchor solve at line ~1156 for PIN_JPHI
+        # because that solve lived inside the `elif recalculate_j_BS:`
+        # branch.  Result (bug fixed 2026-05): with PIN_JPHI=1 +
+        # nonzero kinetic σ, perturbed kinetics were drawn (ne_perturb,
+        # te_perturb, ...) and stored in H5 correctly, but they NEVER
+        # reached mygs.set_profiles / mygs.solve.  mygs stayed in the
+        # warmstart-restored recon state for every draw, so per-draw
+        # Ip, l_i, axis position, q profile, and LCFS were all bit-
+        # identical despite ±5-10% pressure perturbations on paper.
+        #
+        # Fix: inline a recon-anchor solve here, mirroring the
+        # DIFF_BS branch's solve at line ~956-977 and the standard
+        # SWB branch's solve at line ~1135-1156.  Use perturbed
+        # pres_tmp for PP' + pax, and pinned input_j_phi for the
+        # jphi-linterp FFP shape (= "PIN_JPHI" semantics: j_phi
+        # shape locked to recon, pressure free to perturb).  The
+        # dead-code `if _pin_jphi: new_jphi = input_j_phi.copy()` at
+        # line ~1135 (inside the elif branch) is now genuinely dead
+        # and could be cleaned up, but leaving it preserves symmetry
+        # with the other branches.
+        _psi_range_pin = mygs.psi_bounds[1] - mygs.psi_bounds[0]
+        _pp_pin = {"type": "linterp",
+                   "y": np.gradient(pres_tmp) /
+                        (np.gradient(psi_N) * _psi_range_pin),
+                   "x": psi_N}
+        _pp_pin["y"][-1] = 0.0
+        _ffp_pin = {"type": "jphi-linterp",
+                    "y": input_j_phi.copy(),
+                    "x": psi_N}
+        mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
+        _probe("PIN_JPHI: after set_targets(Ip,pax)")
+        mygs.set_profiles(pp_prof=_pp_pin, ffp_prof=_ffp_pin)
+        _probe("PIN_JPHI: after set_profiles(pp,ffp)")
+        try:
+            mygs.solve()
+            _probe("PIN_JPHI: after solve()")
+            print(f"  [recon-anchor] forward-solved with PINNED "
+                  f"recon j_phi (PIN_JPHI=1, only pressure perturbs)")
+            if bnd_diag_callback is not None:
+                bnd_diag_callback("after PIN_JPHI recon-anchor")
+        except (ValueError, RuntimeError) as _pin_anchor_exc:
+            # Solve failed -- mygs is in an indeterminate state.
+            # Keep going so the downstream Ip-align / save_eqdsk
+            # path at least produces something to compare; the
+            # boundary will reflect whatever state the failed
+            # solve left mygs in.
+            print(f"  [recon-anchor] PIN_JPHI solve failed "
+                  f"({_pin_anchor_exc}); proceeding with current "
+                  f"mygs state -- per-draw boundary may not "
+                  f"reflect perturbed pressure")
+        # Refresh eq_stats after the anchor solve so the PIN_JPHI
+        # short-circuit at line ~1237 reports the perturbed-pressure
+        # equilibrium's l_i / Ip, not the pre-solve warmstart state.
+        eq_stats = mygs.get_stats(lcfs_pad=psi_pad)
+        baseline_li_proxy = calc_cylindrical_li_proxy(
+            mygs, input_j_phi, psi_pad)
 
     elif _diff_bs and recalculate_j_BS:
         # ---- DIFF_BS: differential bootstrap mode -----------------------
@@ -1789,6 +1851,61 @@ def generate_bouquet(
         # alone isn't enough -- need to iterate).
         _recon_Ip = float(abs(mygs.get_globals()[0]))
 
+        # ---- Unperturbed jphi-linterp baseline solve (env JPHI_BASELINE) ----
+        # WHY: recon converges in INVERSE mode using its exact internal
+        # FF'/P' profiles.  Every ensemble member, by contrast, is solved
+        # in jphi-linterp mode (we specify <j_phi> and the solver back-
+        # solves FF').  jphi-linterp's edge realization overshoots the
+        # specified <j_phi> near the separatrix (psi_N~0.996: input 0.20 ->
+        # realized 0.29 MA/m^2, ~5% of peak), which lands the equilibrium
+        # ~1.6 mm / l_i(3) ~-0.9% off recon's inverse-mode LCFS.  This
+        # offset is CONSTANT across draws (verified: sigma=0 draws are bit-
+        # identical), so it is a representation bias, not a perturbation
+        # response -- but referencing per-draw diagnostics to recon's
+        # inverse LCFS bakes it into every draw as a spurious floor.
+        #
+        # Fix: solve recon's profiles ONCE through the same jphi-linterp
+        # machinery the draws use, and reference all per-draw diagnostics
+        # (boundary, l_i) to THIS baseline.  An unperturbed (sigma=0) draw
+        # then lands ~0 mm / ~0% from baseline by construction, and
+        # perturbations show their true incremental response.  Coils are
+        # left free (inverse + isoflux) exactly as in a draw.
+        _baseline_li1 = float(l_i_target)
+        if os.environ.get('JPHI_BASELINE', '0') == '1':
+            _psi_range_b = mygs.psi_bounds[1] - mygs.psi_bounds[0]
+            _pp_b = {"type": "linterp",
+                     "y": np.gradient(pressure) /
+                          (np.gradient(psi_N) * _psi_range_b),
+                     "x": psi_N}
+            _pp_b["y"][-1] = 0.0
+            _ffp_b = {"type": "jphi-linterp",
+                      "y": input_j_phi.copy(), "x": psi_N}
+            mygs.set_targets(Ip=initial_Ip_target, pax=float(pressure[0]))
+            mygs.set_profiles(pp_prof=_pp_b, ffp_prof=_ffp_b)
+            try:
+                mygs.solve()
+                _recon_Ip = float(abs(mygs.get_globals()[0]))
+                _baseline_li1 = float(mygs.get_stats(
+                    lcfs_pad=psi_pad, li_normalization='std')['l_i'])
+                _bl_lcfs = safe_trace_surf(mygs, 1.0 - psi_pad)
+                if _bl_lcfs is not None and len(_bl_lcfs) >= 4:
+                    # Override the trace reference so bnd-diag + plot_traces
+                    # measure against the jphi-linterp baseline, not recon.
+                    recon_lcfs_ref = np.asarray(_bl_lcfs)
+                # Re-capture coils from the baseline solve (these become the
+                # soft-reg target + drift reference, == the comment at the
+                # soft-reg block which wants the jphi-linterp baseline coils,
+                # not recon's inverse-mode coils).
+                _initial_coils_dict, _ = mygs.get_coil_currents()
+                _initial_coils = {k: float(v) for k, v in
+                                  _initial_coils_dict.items()}
+                print(f"  [jphi-baseline] unperturbed jphi-linterp baseline "
+                      f"solved: l_i(1)={_baseline_li1:.5f} Ip={_recon_Ip:.0f}; "
+                      f"per-draw boundary/l_i now reference THIS baseline")
+            except (ValueError, RuntimeError) as _bl_exc:
+                print(f"  [jphi-baseline] solve failed ({_bl_exc}); "
+                      f"falling back to recon (inverse) reference")
+
         # ---- Boundary-shift diagnostic ----
         # The reference LCFS for per-stage boundary-deviation reporting
         # must match the snapshot that plot_traces uses as its baseline,
@@ -1821,6 +1938,22 @@ def generate_bouquet(
                     _bnd_diag_npts = len(_bd_ref)
                     print(f"  [bnd-diag] using recon LCFS reference: "
                           f"{_bnd_diag_npts} pts ({_bnd_diag_source})")
+                    # Promote the fresh-trace_surf reference to the
+                    # caller's recon_lcfs_ref slot if the caller didn't
+                    # pass one explicitly.  This makes the in-loop bnd-
+                    # diag reference (built here at generate_bouquet
+                    # entry) AND the H5 _baseline/recon_lcfs_ref that
+                    # plot_traces consumes identical.  Without this,
+                    # plot_traces would fall back to the ~100-pt
+                    # baseline.eqdsk boundary against per-draw 9992-pt
+                    # perturbed_lcfs_ref, yielding a ~mm-level
+                    # sampling-noise floor that masks bit-identical
+                    # equilibria (observed 2026-05 PIN_JPHI σ=0 +
+                    # SKIP_HOMOTOPY: in-loop bnd-diag 0.00 mm
+                    # all draws, but plot_traces showed ~few-mm spread
+                    # because the comparison sampling was mismatched).
+                    if recon_lcfs_ref is None:
+                        recon_lcfs_ref = np.asarray(_bd_ref)
             except Exception as _bd_init_exc:
                 print(f"  [bnd-diag] startup capture failed "
                       f"({_bd_init_exc}); per-stage reporting disabled")
@@ -1885,6 +2018,17 @@ def generate_bouquet(
         # converged state from the caller.
         _baseline_psi = mygs.get_psi(False).copy()
         _baseline_coils = dict(_initial_coils)
+
+        # Hoist SKIP_HARD / SKIP_ISO / SKIP_HOMOTOPY env-var reads
+        # to function scope so the per-draw loop's pre-solve coil-pin
+        # block can reference them (it runs BEFORE the Step-3 homotopy
+        # block where these were originally defined).  Reading at
+        # function entry also gives a consistent view across all
+        # draws -- if a user toggles an env var mid-run we use the
+        # value captured here, not a per-draw race.
+        _skip_hard = os.environ.get('SKIP_HARD', '0') == '1'
+        _skip_iso  = os.environ.get('SKIP_ISO',  '0') == '1'
+        _skip_homotopy = os.environ.get('SKIP_HOMOTOPY', '0') == '1'
 
         # Warm-start snapshot for per-draw state restoration.
         # Captured AT THE END of the first successful draw (not at
@@ -1953,6 +2097,193 @@ def generate_bouquet(
                   f"{len(_warmstart_iso_pts) if _warmstart_iso_pts is not None else 0} "
                   f"isoflux pts) -- every draw will restore from this "
                   f"baseline, not propagate prior draws' state")
+
+            # ---- Patch the H5 top-level recon "0" group's l_i attrs
+            # to match the warmstart-converged state.
+            #
+            # Background: the typical notebook flow calls
+            # store_equilibrium(header, count=0, ...) once BEFORE
+            # generate_bouquet, writing l_i from mygs.get_stats at
+            # the post-recon / pre-generate_bouquet moment to the
+            # top-level "0" group.  But generate_bouquet's own
+            # internal recon flow (q-baseline check, jphi_corr,
+            # warmstart-setup re-solve) settles mygs into a slightly
+            # different state -- l_i typically shifts by ~0.5-2%.
+            # Per-draw equilibria are then measured against THIS new
+            # state, not the notebook's pre-bouquet snapshot.
+            #
+            # plot_traces uses top-level "0"/attrs/l_i(1) as the
+            # denominator for its "% l_i deviation" panel.  If that
+            # value is from the pre-bouquet snapshot but every per-
+            # draw l_i is from the post-recon-flow state, the plot
+            # shows a fixed ~1% offset that does NOT reflect any
+            # actual per-draw variation -- it reflects a state
+            # mismatch between the saved baseline and the
+            # measurement reference.
+            #
+            # Fix: at the warmstart-capture point (= the canonical
+            # "recon converged" state from generate_bouquet's
+            # perspective), overwrite the top-level "0" group's
+            # l_i attrs with the values mygs reports right now.
+            # Per-draw l_i values are computed at moments that are
+            # state-equivalent to here (warmstart-restored before
+            # each draw's own work), so the denominator and numerator
+            # are now consistent.
+            #
+            # The store_equilibrium pre-call from the notebook is
+            # what creates the top-level "0" group; if that wasn't
+            # done (group missing), this patch is a no-op.  We use
+            # an 'a' file open + soft-fail try block so a missing
+            # H5, missing group, or read-only file doesn't break
+            # the run -- this is a cosmetic plotting fix, not
+            # physics.
+            try:
+                import h5py as _h5_patch
+                import tempfile as _tmp_patch
+                _gs_recon = mygs.get_stats(
+                    li_normalization='std', lcfs_pad=psi_pad)
+                _gs_recon_iter = mygs.get_stats(
+                    li_normalization='iter', lcfs_pad=psi_pad)
+                _li1_recon = float(_gs_recon['l_i'])
+                _li3_recon = float(_gs_recon_iter['l_i'])
+                # mygs.get_globals()[0] = gs_comp_globals Ip (physical
+                # integral).  For Ip_target patching we instead want
+                # the gs_itor_nl-based Ip that save_eqdsk writes,
+                # since plot_traces compares per-draw eq.Ip (from
+                # eqdsk bytes) against _baseline/Ip_target attr --
+                # both must use the same integration to agree.  We
+                # capture both: Ip_target attr gets gs_itor_nl via the
+                # re-saved baseline.eqdsk (read back after save), and
+                # we also record gs_comp_globals Ip in a separate attr
+                # for diagnostic comparison.
+                _Ip_recon_compglob = float(abs(mygs.get_globals()[0]))
+                _h5_baseline_path = os.path.abspath(f"{header}.h5")
+                if os.path.isfile(_h5_baseline_path):
+                    with _h5_patch.File(_h5_baseline_path, 'a') as _hfp:
+                        # --- Top-level "0" l_i patch (existing). ---
+                        # Notebook convention: top-level "0" is the
+                        # baseline-recon entry written before
+                        # generate_bouquet ran.  Hierarchical scans
+                        # also write per-scan baselines under
+                        # scan/{key}/_baseline; those don't need this
+                        # patch because they use _baseline/attrs/
+                        # l_i_target as the reference, which is set
+                        # at recon time and is stable.
+                        if '0' in _hfp and hasattr(_hfp['0'], 'attrs'):
+                            _old_li1 = float(_hfp['0'].attrs.get(
+                                'l_i(1)', float('nan')))
+                            _hfp['0'].attrs['l_i(1)'] = _li1_recon
+                            _hfp['0'].attrs['l_i(3)'] = _li3_recon
+                            if abs(_li1_recon - _old_li1) > 1e-4:
+                                print(f"  [warmstart] patched H5 top-"
+                                      f"level '0' l_i(1) "
+                                      f"{_old_li1:.5f} -> "
+                                      f"{_li1_recon:.5f} (state "
+                                      f"shift between notebook's "
+                                      f"pre-bouquet capture and "
+                                      f"generate_bouquet's recon-"
+                                      f"converged state; "
+                                      f"plot_traces denominator now "
+                                      f"matches per-draw numerators)")
+
+            except Exception as _li_patch_exc:
+                # Cosmetic plot-consistency fix; never block the run.
+                print(f"  [warmstart] H5 top-level l_i patch skipped "
+                      f"({_li_patch_exc})")
+
+            # --- Re-save baseline.eqdsk + retarget Ip_target. ---
+            # Background: cell 22 of the typical notebook saves
+            # baseline.eqdsk from mygs's pre-bouquet state and passes
+            # those bytes + eqdsk.Ip into generate_bouquet as
+            # baseline_eqdsk_bytes / initial_Ip_target.
+            # generate_bouquet's internal recon flow (Ip-match loop,
+            # jphi_corr, warmstart-setup re-solve, OFT outer loop
+            # convergence) then settles mygs at a slightly different
+            # state -- typically ~0.3-0.5% shift in gs_itor_nl Ip (the
+            # integral save_eqdsk uses).  Per-draw equilibria are
+            # saved from the post-recon-flow state, so per-draw eq.Ip
+            # and per-draw eqdsk.boundary_R/Z all carry the recon-
+            # converged geometry, but the H5 baseline does not.
+            # Result in plot_traces / plot_boundary_point_traces: a
+            # fixed ~0.4% Ip offset and ~1 mm boundary shift between
+            # every draw and the baseline, despite the underlying
+            # mygs state being bit-identical draw-to-draw.  This is
+            # a baseline-reference mismatch, not physics.
+            #
+            # Fix: at this warmstart-capture moment (= canonical
+            # recon-converged state used by all per-draw work),
+            # re-save baseline.eqdsk to disk via mygs.save_eqdsk()
+            # and REASSIGN the local baseline_eqdsk_bytes and
+            # initial_Ip_target that store_baseline_profiles (called
+            # a few lines below) consumes.  That writes the recon-
+            # converged eqdsk into H5 _baseline.baseline.eqdsk and
+            # Ip_target.  The original input eqdsk on disk is
+            # untouched; only the H5 baseline shifts to "the
+            # canonical reference per-draw equilibria are measured
+            # against," which makes plot_traces /
+            # plot_boundary_point_traces show flat 0% / 0 mm at σ=0
+            # + PIN_JPHI + SKIP_HOMOTOPY.
+            #
+            # IMPORTANT: this MUST run AFTER the l_i patch's H5 'a'
+            # context exits (otherwise we'd hold the file open while
+            # save_eqdsk also writes), and MUST run BEFORE the
+            # store_baseline_profiles call below (which deletes and
+            # recreates the _baseline group, obliterating any direct
+            # H5 patch we'd try).  Reassigning the function-local
+            # baseline_eqdsk_bytes / initial_Ip_target propagates
+            # cleanly through the existing store_baseline_profiles
+            # call without needing schema changes.
+            #
+            # Cost: one extra save_eqdsk call per scan_val (a few
+            # hundred ms).  Soft-fails -- cosmetic plot fix, never
+            # blocks the physics run.
+            try:
+                import tempfile as _tmp_patch2
+                with _tmp_patch2.NamedTemporaryFile(
+                        suffix='.geqdsk', delete=False) as _tf:
+                    _tmp_eqdsk_path = _tf.name
+                # nr/nz=257 matches the per-draw save_eqdsk call
+                # inside the per-draw loop further down, so the
+                # baseline and per-draw eqdsks have the same grid
+                # resolution.
+                mygs.save_eqdsk(
+                    _tmp_eqdsk_path,
+                    nr=257, nz=257,
+                    truncate_eq=False,
+                    lcfs_pad=psi_pad)
+                with open(_tmp_eqdsk_path, 'rb') as _ef:
+                    _new_eqdsk_bytes = _ef.read()
+                _new_eq_obj = read_eqdsk_from_bytes(
+                    _new_eqdsk_bytes, read_geqdsk)
+                _new_eq_Ip = float(abs(_new_eq_obj.Ip))
+                _old_initial_Ip = float(initial_Ip_target)
+                # Reassign function-local variables so the upcoming
+                # store_baseline_profiles call writes the recon-
+                # converged eqdsk + Ip into the H5 _baseline group.
+                baseline_eqdsk_bytes = _new_eqdsk_bytes
+                initial_Ip_target = _new_eq_Ip
+                if abs(_new_eq_Ip - _old_initial_Ip) > 1.0:
+                    _shift_pct = (
+                        100.0 * (_new_eq_Ip - _old_initial_Ip)
+                        / max(abs(_old_initial_Ip), 1.0))
+                    print(f"  [warmstart] re-saved baseline.eqdsk at "
+                          f"recon-converged state: Ip "
+                          f"{_old_initial_Ip:.0f} -> {_new_eq_Ip:.0f} A "
+                          f"({_shift_pct:+.3f}%, was the gs_itor_nl "
+                          f"shift between notebook's pre-bouquet "
+                          f"capture and generate_bouquet's recon-"
+                          f"converged state; plot_traces Ip% and "
+                          f"plot_boundary_point_traces now reference "
+                          f"the same state per-draw equilibria "
+                          f"settle at)")
+                try:
+                    os.unlink(_tmp_eqdsk_path)
+                except Exception:
+                    pass
+            except Exception as _eq_patch_exc:
+                print(f"  [warmstart] baseline.eqdsk re-save skipped "
+                      f"({_eq_patch_exc}); H5 baseline will retain "
+                      f"the pre-bouquet snapshot")
             if os.environ.get('PINJ_PROBE', '0') == '1':
                 try:
                     _gs0 = mygs.get_stats(li_normalization='std',
@@ -2287,6 +2618,52 @@ def generate_bouquet(
             except Exception as _pp_exc:
                 print(f"    [probe warmstart restore] failed ({_pp_exc})")
 
+        # ---- SKIP_HOMOTOPY: install Tier-2 phantom-VSC coil pin ----
+        # SKIP_HOMOTOPY's original semantics were "skip the hard-bound
+        # homotopy tightening passes" -- written when the per-draw work
+        # didn't include a perturbed-pressure solve (PIN_JPHI's recon-
+        # anchor bug, fixed 2026-05).  With that bug fixed, the recon-
+        # anchor solve inside perturb_kinetic_equilibrium DOES run, and
+        # the QP behind mygs.solve freely optimizes coil currents
+        # subject to whatever bounds are in place at solve time.  With
+        # SKIP_HOMOTOPY skipping the bound install, coils are
+        # unconstrained: the QP can drift F9A (VSC) by ~5% per draw to
+        # match isoflux constraints against perturbed pressure,
+        # producing ~cm-scale boundary motion that doesn't match the
+        # intended "phantom VSC" (coils locked, boundary responds
+        # naturally) semantics.
+        #
+        # Fix: install tight hard bounds at recon ± COIL_DRIFT_FLOOR_A
+        # (a few tens of amps, essentially zero per-coil drift) so the
+        # recon-anchor + Ip-align solves can't move any coil from its
+        # recon value.  This is what Tier-2 phantom-VSC means: the QP
+        # is told "you cannot use coil currents to compensate the
+        # perturbation; whatever boundary the equilibrium settles at
+        # given recon coils + perturbed pressure + pinned j_phi is the
+        # answer."  Boundary motion now reflects the actual physical
+        # response, not coil-optimization artifact.
+        #
+        # IMPORTANT: this MUST happen AFTER warmstart restore (which
+        # may itself reset bounds via replace_eq) and BEFORE
+        # perturb_kinetic_equilibrium (which contains the per-draw
+        # solve).  The downstream SKIP_HOMOTOPY block in step 3 then
+        # measures the actual drift and reports it.
+        if _skip_homotopy and _baseline_coils is not None:
+            _pin_bounds = {}
+            _floor = float(coil_drift_floor_A)
+            for _n, _b in _baseline_coils.items():
+                _pin_bounds[_n] = [_b - _floor, _b + _floor]
+            try:
+                mygs.set_coil_bounds(_pin_bounds)
+                if os.environ.get('PINJ_PROBE', '0') == '1':
+                    print(f"    [SKIP_HOMOTOPY pre-solve] installed pin "
+                          f"bounds = recon +/- {_floor:.0f} A on "
+                          f"{len(_pin_bounds)} coils")
+            except Exception as _pin_b_exc:
+                print(f"  [SKIP_HOMOTOPY] tight-bound install failed "
+                      f"({_pin_b_exc}); coils may drift via QP "
+                      f"optimisation in the recon-anchor solve")
+
         try:
             (
                 ne_perturb,
@@ -2395,6 +2772,15 @@ def generate_bouquet(
             _post_align_failed = False
             _Ip_tol = 1e-3
             _max_ip_iters = 8
+            # SKIP_IP_ALIGN (env, default off): bypass the post-perturb Ip
+            # secant.  The OFT jphi-linterp cut-cell fix now holds Ip to
+            # <0.04% natively, so the secant's re-solve is largely
+            # redundant; worse, it nudges the equilibrium by re-solving to
+            # a slightly different Ip per draw, which introduces a small
+            # per-draw boundary spread (observed ~0.3-0.5 mm) even at
+            # sigma=0.  Skipping it leaves the recon-anchor equilibrium
+            # untouched and lets iso-update/homotopy run against it.
+            _skip_ip_align = os.environ.get('SKIP_IP_ALIGN', '0') == '1'
             # Target RECON's actual converged Ip (`_recon_Ip` captured
             # from mygs.get_globals() on entry to generate_bouquet),
             # not the user-supplied `initial_Ip_target` (= eqdsk.Ip).
@@ -2435,7 +2821,7 @@ def generate_bouquet(
                 _trial = _ip_align_target
                 _final_actual = _actual_pre
 
-                if _err_pre > _Ip_tol:
+                if _err_pre > _Ip_tol and not _skip_ip_align:
                     # First-order rescale; on solve failure, retry the
                     # SAME ip iteration with a damped step (averaged
                     # toward _final_actual) rather than aborting the
@@ -2514,8 +2900,30 @@ def generate_bouquet(
                 # even when hard bounds are active, useful for diagnosing
                 # whether the iso-shifted boundary is what forces F9
                 # drift > spec at low σ.
-                _skip_hard = os.environ.get('SKIP_HARD', '0') == '1'
-                _skip_iso  = os.environ.get('SKIP_ISO',  '0') == '1'
+                #
+                # SKIP_HOMOTOPY=1 (added 2026-05) -- diagnostic gate that
+                # bypasses the coil-bound tightening passes (Step 3 below)
+                # while STILL running iso-update.  Intended for the
+                # PIN_JPHI / Tier-2 phantom-VSC use-case ("all coils
+                # pinned"), where any homotopy-driven coil motion is
+                # outside the experiment's premise.  In that mode the
+                # Ip-aligned equilibrium is accepted as final; coil
+                # currents stay exactly at recon values, so the only
+                # remaining LCFS error is whatever the OFT solver
+                # produces from the recon-pinned j_phi (i.e. the
+                # jphi-linterp Ip-discretization residual ~ 0.04% after
+                # the OFT outer loop fix).  Empirical observation
+                # (2026-05 PIN_JPHI σ=0 sweep): homotopy pass 2 drifts
+                # F-coils 0.17% / VSC 1.75% and contributes ~1.9 mm RMS
+                # / ~7 mm max LCFS displacement vs recon -- entirely a
+                # regularization artifact, not physics.  SKIP_HOMOTOPY
+                # zeros it.  Do NOT use for the production Tier-1/3
+                # studies where bounded coil variation is part of the
+                # uncertainty model -- those need the homotopy.
+                # SKIP_HARD / SKIP_ISO / SKIP_HOMOTOPY hoisted to
+                # function scope (see line ~1965) so the pre-solve
+                # coil-pin block can see them.  Reads here removed
+                # to avoid shadowing.
                 _iso_updated = False
                 if _ip_aligned and not _skip_hard and not _skip_iso:
                     try:
@@ -2599,7 +3007,67 @@ def generate_bouquet(
                 _final_drift_F_lim = coil_drift
                 _final_drift_VSC_lim = coil_drift
 
-                if _ip_aligned and not _skip_hard:
+                # SKIP_HOMOTOPY=1 short-circuits the entire pass loop:
+                # accept the Ip-aligned (and optionally iso-updated)
+                # equilibrium as final, leaving coil currents at their
+                # recon values.  Populate the drift bookkeeping with
+                # zeros so downstream IN_SPEC and HDF5 diagnostics
+                # reflect the "all coils pinned" reality rather than
+                # NaN/False (which would suppress them from plots).
+                if _skip_homotopy and _ip_aligned and not _skip_hard:
+                    # Measure actual per-coil drift from the recon-anchor
+                    # and Ip-align solves above.  Pin bounds installed
+                    # just after warmstart restore (recon +/-
+                    # coil_drift_floor_A) should hold drift to
+                    # essentially zero, but if the QP saturated against
+                    # the tight bounds we want the diagnostic to show
+                    # it -- not a hard-coded zero.  Previously this
+                    # block populated _final_drifts = {n: 0.0 for ...}
+                    # unconditionally, which hid genuine coil motion
+                    # (observed 2026-05: F9A VSC drifted ~5% per draw
+                    # under perturbed pressure when SKIP_HOMOTOPY skipped
+                    # the bound install -- reported as 0% in the H5,
+                    # and plot_traces correctly drew nothing because
+                    # there was nothing to show).  The pin-bounds
+                    # install at warmstart fixes the physical drift;
+                    # this measurement makes sure the diagnostic
+                    # reflects reality.
+                    try:
+                        _cur_skip, _ = mygs.get_coil_currents()
+                        _final_drifts = {
+                            _n: (float(_cur_skip[_n])
+                                 - _baseline_coils[_n])
+                                / max(abs(_baseline_coils[_n]), 1.0)
+                                * 100
+                            for _n in _baseline_coils
+                        }
+                        _max_d = max((abs(d)
+                                      for d in _final_drifts.values()),
+                                     default=0.0)
+                    except Exception as _meas_exc:
+                        # Fallback: zero -- but mark the failure so
+                        # downstream readers know.
+                        print(f"  [homotopy] coil-drift measurement "
+                              f"failed in SKIP_HOMOTOPY mode "
+                              f"({_meas_exc}); reporting zeros")
+                        _final_drifts = {n: 0.0
+                                          for n in _baseline_coils}
+                        _max_d = 0.0
+                    print(f"  [homotopy] SKIPPED (SKIP_HOMOTOPY=1 -- "
+                          f"coils pinned at recon +/- "
+                          f"{coil_drift_floor_A:.0f} A; "
+                          f"measured max drift = {_max_d:.3f}%)")
+                    _final_pass_idx = 0
+                    # The "pass limit" here = 0% by design (we asked the
+                    # QP to keep coils at recon).  The MEASURED drift
+                    # goes into _final_drifts above.  If a coil
+                    # saturated the floor (e.g. drifted exactly to the
+                    # floor cap), measured drift will report it.
+                    _final_drift_F_lim = 0.0
+                    _final_drift_VSC_lim = 0.0
+                    _report_bnd("after homotopy (SKIPPED)")
+
+                if _ip_aligned and not _skip_hard and not _skip_homotopy:
                     _passes = (homotopy_passes if homotopy_passes is not None
                                else [(coil_drift, coil_drift)])
                     _last_good_psi   = mygs.get_psi(False).copy()
