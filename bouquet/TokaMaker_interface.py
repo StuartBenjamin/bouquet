@@ -1914,7 +1914,21 @@ def generate_bouquet(
             _warmstart_psi = mygs.get_psi(False).copy()
             _wcoils, _ = mygs.get_coil_currents()
             _warmstart_coils = {k: float(v) for k, v in _wcoils.items()}
-            _wiso = getattr(mygs, '_isoflux_targets', None)
+            # PR #248 moved isoflux storage to the equilibrium object.
+            # New canonical path: mygs._tMaker_equil._isoflux_constraints
+            # Legacy paths (mygs._isoflux_targets, mygs._isoflux) kept
+            # as fallbacks for older OFT builds.  Without finding the
+            # current isoflux here, the per-draw restore on line ~2219
+            # only re-applies psi+coils -- isoflux is left at whatever
+            # the previous draw's iso-update mutated it to, propagating
+            # a SHIFTED LCFS constraint across draws and pulling each
+            # draw's equilibrium ~0.5% off the recon baseline.
+            _wiso = None
+            _tm_eq = getattr(mygs, '_tMaker_equil', None)
+            if _tm_eq is not None:
+                _wiso = getattr(_tm_eq, '_isoflux_constraints', None)
+            if _wiso is None:
+                _wiso = getattr(mygs, '_isoflux_targets', None)
             if _wiso is None:
                 _wiso = getattr(mygs, '_isoflux', None)
             if _wiso is not None and len(_wiso) >= 4:
