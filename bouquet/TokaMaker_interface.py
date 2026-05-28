@@ -2245,7 +2245,17 @@ def generate_bouquet(
         if _warmstart_captured:
             try:
                 mygs.set_coil_currents(_warmstart_coils)
-                mygs.set_psi(_warmstart_psi)
+                # update_bounds=True forces re-computation of
+                # mygs.psi_bounds from the restored psi field.  Without
+                # it, psi_bounds carries over the PREVIOUS draw's
+                # iso-updated + homotopy-shifted state -- which then
+                # gets read by perturb_kinetic_equilibrium's
+                # recon-anchor as `_psi_range_anchor` to build the
+                # PP profile.  A stale psi_range produces a slightly-
+                # different PP profile, which the recon-anchor solve
+                # then converges to a slightly-different equilibrium
+                # (visible as ~0.5% Ip drift between draws 0 and 1).
+                mygs.set_psi(_warmstart_psi, update_bounds=True)
                 if _warmstart_iso_pts is not None:
                     mygs.set_isoflux(_warmstart_iso_pts,
                                      weights=_warmstart_iso_w)
