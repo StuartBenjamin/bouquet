@@ -1910,19 +1910,25 @@ def generate_bouquet(
         # that draw landed at and propagated it forever (manifested
         # as bit-identical clustering of draws 2..N at the draw-1
         # offset, with VSC drift fighting the inherited mismatch).
+        # PR #248: prefer the full equilibrium-object snapshot via
+        # copy_eq() over the partial set_psi/set_coil_currents/
+        # set_isoflux restore path.  copy_eq grabs the entire
+        # gs_equil struct (psi, FFP/PP profiles, plasma_bounds,
+        # coil_currents, isoflux_constraints, Itor_target, ffp_scale,
+        # p_scale, psiscale, ...).  replace_eq is a Fortran-level
+        # pointer swap that restores ALL of it atomically -- no
+        # leakage of derived state (axis cache, FSA quantities,
+        # cached <R>/<1/R>, etc.) that the manual restore path
+        # silently inherits from the prior draw.
+        # Falls back to the manual restore on legacy OFT builds.
+        _warmstart_eq_snap = None
         try:
+            if hasattr(mygs, 'copy_eq') and hasattr(mygs, 'replace_eq'):
+                _warmstart_eq_snap = mygs.copy_eq()
             _warmstart_psi = mygs.get_psi(False).copy()
             _wcoils, _ = mygs.get_coil_currents()
             _warmstart_coils = {k: float(v) for k, v in _wcoils.items()}
-            # PR #248 moved isoflux storage to the equilibrium object.
-            # New canonical path: mygs._tMaker_equil._isoflux_constraints
-            # Legacy paths (mygs._isoflux_targets, mygs._isoflux) kept
-            # as fallbacks for older OFT builds.  Without finding the
-            # current isoflux here, the per-draw restore on line ~2219
-            # only re-applies psi+coils -- isoflux is left at whatever
-            # the previous draw's iso-update mutated it to, propagating
-            # a SHIFTED LCFS constraint across draws and pulling each
-            # draw's equilibrium ~0.5% off the recon baseline.
+            # Isoflux capture (used for legacy fallback path only):
             _wiso = None
             _tm_eq = getattr(mygs, '_tMaker_equil', None)
             if _tm_eq is not None:
@@ -1939,8 +1945,12 @@ def generate_bouquet(
                 _warmstart_iso_pts = None
                 _warmstart_iso_w = None
             _warmstart_captured = True
+            _snap_tag = ("FULL eq object via copy_eq"
+                         if _warmstart_eq_snap is not None
+                         else "psi+coils+iso (legacy)")
             print(f"  [warmstart] snapshot of RECON state captured "
-                  f"({len(_warmstart_iso_pts) if _warmstart_iso_pts is not None else 0} "
+                  f"({_snap_tag}, "
+                  f"{len(_warmstart_iso_pts) if _warmstart_iso_pts is not None else 0} "
                   f"isoflux pts) -- every draw will restore from this "
                   f"baseline, not propagate prior draws' state")
             if os.environ.get('PINJ_PROBE', '0') == '1':
@@ -2244,21 +2254,22 @@ def generate_bouquet(
         # to perturb that Picard's behaviour.
         if _warmstart_captured:
             try:
-                mygs.set_coil_currents(_warmstart_coils)
-                # update_bounds=True forces re-computation of
-                # mygs.psi_bounds from the restored psi field.  Without
-                # it, psi_bounds carries over the PREVIOUS draw's
-                # iso-updated + homotopy-shifted state -- which then
-                # gets read by perturb_kinetic_equilibrium's
-                # recon-anchor as `_psi_range_anchor` to build the
-                # PP profile.  A stale psi_range produces a slightly-
-                # different PP profile, which the recon-anchor solve
-                # then converges to a slightly-different equilibrium
-                # (visible as ~0.5% Ip drift between draws 0 and 1).
-                mygs.set_psi(_warmstart_psi, update_bounds=True)
-                if _warmstart_iso_pts is not None:
-                    mygs.set_isoflux(_warmstart_iso_pts,
-                                     weights=_warmstart_iso_w)
+                if _warmstart_eq_snap is not None:
+                    # Full atomic equilibrium restore via PR #248
+                    # replace_eq -- Fortran-level pointer swap that
+                    # restores the entire gs_equil struct (psi, FFP/PP
+                    # profiles, plasma_bounds, coil_currents, isoflux,
+                    # Itor_target, scale factors, axis cache, FSA
+                    # quantities, ...).  No leakage of derived state
+                    # from prior draws.
+                    mygs.replace_eq(source_eq=_warmstart_eq_snap)
+                else:
+                    # Legacy partial restore (PR #248 unavailable)
+                    mygs.set_coil_currents(_warmstart_coils)
+                    mygs.set_psi(_warmstart_psi, update_bounds=True)
+                    if _warmstart_iso_pts is not None:
+                        mygs.set_isoflux(_warmstart_iso_pts,
+                                         weights=_warmstart_iso_w)
             except Exception as _ws_rs_exc:
                 print(f"  [warmstart] restore failed "
                       f"({_ws_rs_exc}); draw inherits prior state")
@@ -2341,8 +2352,14 @@ def generate_bouquet(
             # try/finally around solve_with_bootstrap; restore them too.
             if coil_drift is not None and _baseline_psi is not None:
                 try:
-                    mygs.set_coil_currents(_baseline_coils)
-                    mygs.set_psi(_baseline_psi)
+                    # Prefer full equilibrium-object restore when
+                    # available (PR #248).  Falls back to manual
+                    # restore with update_bounds=True for legacy OFT.
+                    if _warmstart_eq_snap is not None:
+                        mygs.replace_eq(source_eq=_warmstart_eq_snap)
+                    else:
+                        mygs.set_coil_currents(_baseline_coils)
+                        mygs.set_psi(_baseline_psi, update_bounds=True)
                     _stashed = getattr(mygs, '_coil_drift_bounds', None)
                     if _stashed is not None:
                         mygs.set_coil_bounds(_stashed)
@@ -2747,8 +2764,14 @@ def generate_bouquet(
             if _post_align_failed:
                 # Reset to baseline and skip this draw (treat as rejected).
                 try:
-                    mygs.set_coil_currents(_baseline_coils)
-                    mygs.set_psi(_baseline_psi)
+                    # Prefer full equilibrium-object restore when
+                    # available (PR #248).  Falls back to manual
+                    # restore with update_bounds=True for legacy OFT.
+                    if _warmstart_eq_snap is not None:
+                        mygs.replace_eq(source_eq=_warmstart_eq_snap)
+                    else:
+                        mygs.set_coil_currents(_baseline_coils)
+                        mygs.set_psi(_baseline_psi, update_bounds=True)
                 except Exception:
                     pass
                 if pbar is not None:
