@@ -1241,6 +1241,19 @@ def perturb_kinetic_equilibrium(
 
         eq_stats = mygs.get_stats(lcfs_pad=psi_pad)
         baseline_li_proxy = calc_cylindrical_li_proxy(mygs, new_jphi, psi_pad)
+        # ---- DIAG: recon-anchor (SWB) l_i vs target, BEFORE the sampling
+        # loop runs.  Quantifies how much of the per-draw l_i shift is the
+        # PHYSICAL SWB-bootstrap response (this value) vs the downstream
+        # GPR sampler.  If this already sits near l_i_target, the sampling
+        # loop is unnecessary in free-jphi mode.
+        try:
+            _ra_li1 = float(eq_stats['l_i'])
+            print(f"  [recon-anchor l_i] SWB equilibrium l_i(1)={_ra_li1:.5f} "
+                  f"vs target {l_i_target:.5f} "
+                  f"({100.0*(_ra_li1 - l_i_target)/l_i_target:+.2f}%); "
+                  f"baseline_li_proxy={baseline_li_proxy:.5f}")
+        except Exception:
+            pass
 
         j0_scales.append(results["scale_j0"])
         Ip_scales.append(results["scale_Ip"])
@@ -1312,79 +1325,85 @@ def perturb_kinetic_equilibrium(
         print(f"  [{_tag}] using {'input_j_phi+delta' if _diff_bs else 'recon j_phi'} "
               f"as output_jphi  (l_i={l_i:.4f}, Ip={Ip:.0f}); skipping l_i match loop")
 
-    # ---- l_i matching loop ------------------------------------------
-    # Always runs (no early-exit gate, unless PIN_JPHI shortcut above
-    # fired): every draw gets a freshly GPR-sampled jphi perturbation
-    # via the inner proxy loop, so the inductive current shape
-    # genuinely responds to the σ_jphi / length-scale sampling.  The
-    # recon-anchor solve above establishes a Picard warm start.  The
-    # loop iterates on GPR samples until the post-solve equilibrium
-    # l_i is within `l_i_tolerance` of `l_i_target`, or rejects the
-    # draw after `max_li_iter` failed iterations.
+    # ---- l_i band-conditioning loop ---------------------------------
+    # Rejection sampling from the GPR prior conditioned on the measured
+    # l_i: each iteration GPR-samples one jphi perturbation, solves the
+    # equilibrium, and ACCEPTS it iff the resulting equilibrium l_i lands
+    # within the measured band (`l_i_tolerance`, expressed as % of recon
+    # l_i) of `l_i_target`.  Out-of-band draws are rejected and the next
+    # iteration redraws (up to `max_li_iter`).  This preserves the
+    # flagship GPR current-profile perturbation while keeping only draws
+    # consistent with the magnetics -- it does NOT force every draw to a
+    # single point l_i (the old behavior, which fought the perturbation
+    # and was unreachable at large sigma_jphi).
+    #
+    # `l_i` is initialised to np.inf before the loop, so li_iter=1 always
+    # draws+solves; the band check below then accepts/rejects.  The
+    # accept-break sits at the TOP so an in-band draw exits before a
+    # wasted extra draw.
     for li_iter in range(1, max_li_iter + 1):
         if _pin_jphi or _diff_bs:
             break  # PIN_JPHI / DIFF_BS shortcut handled above
         if 100.0 * abs(l_i - l_i_target) / l_i_target <= l_i_tolerance:
-            break
+            break  # last draw's equilibrium l_i is within the measured band
 
         t_phase = time.perf_counter()
 
-        # ---- 5a. Draw j_phi perturbation matching l_i proxy --------
-        # Perturb around recon's j_inductive_fit (input_jinductive),
-        # not SWB's matched_j_inductive -- see [recon-anchor] above.
+        # ---- 5a. Draw ONE GPR j_phi perturbation (flagship feature) ----
+        # GPR-perturb the inductive current shape around recon's
+        # j_inductive_fit with envelope sigma_jphi (the core bouquet
+        # current-profile uncertainty sampling).
+        #
+        # Band conditioning (2026-05): we no longer home the cheap
+        # cylindrical proxy to a point `proxy_target`.  The proxy carries a
+        # ~7% (only roughly stable) bias vs the equilibrium l_i, and a
+        # point target is unreachable at large sigma_jphi (the GPR cloud
+        # sits ~20% off it -- 500 draws, best 19.6%).  Instead we draw
+        # ONCE, solve, and accept downstream iff the *equilibrium* l_i
+        # lands within the measured band (`l_i_tolerance`, % of recon l_i)
+        # of `l_i_target` -- rejection sampling from the GPR prior
+        # conditioned on the magnetics.  See the band check at the end of
+        # this loop body.  A draw that lands out-of-band is rejected and
+        # the next li_iter redraws (up to max_li_iter).
         step_j_phi = (
             input_jinductive if recalculate_j_BS else input_j_phi
         )
         j_phi_0 = step_j_phi[0]
-
-        # Pre-compute geometry once for the inner proxy loop (the
-        # equilibrium state doesn't change between proxy evaluations).
+        # Geometry cache (used only for the proxy-vs-real diagnostic below).
         _geo = get_li_proxy_geometry(mygs, npsi, psi_pad)
 
-        l_i_rel_err = np.inf
-        proxy_draws = 0
-        while l_i_rel_err > l_i_proxy_threshold:
-            proxy_draws += 1
-            if proxy_draws > max_proxy_draws:
-                raise RuntimeError(
-                    f"Proxy match not found after {max_proxy_draws} draws "
-                    f"(last err={l_i_rel_err:.3f}%, threshold={l_i_proxy_threshold}%). "
-                    f"Try increasing l_i_proxy_threshold or max_proxy_draws."
-                )
-            jphi_perturb = generate_perturbed_GPR(
+        # Single GPR draw; only redraw if a sample goes non-physical
+        # (negative current somewhere), which is rare.
+        jphi_perturb = None
+        for _gpr_try in range(1, max_proxy_draws + 1):
+            _cand = generate_perturbed_GPR(
                 psi_N,
                 step_j_phi / j_phi_0,
                 sigma_profile=sigma_jphi / j_phi_0,   # normalised σ
                 length_scale=j_ls,
                 n_samples=1,
                 diag_plot=False,
-            )
-            jphi_perturb *= j_phi_0
+            ) * j_phi_0
+            if not np.any(_cand < 0.0):
+                jphi_perturb = _cand
+                break
+        if jphi_perturb is None:
+            raise RuntimeError(
+                f"No non-negative GPR j_phi draw in {max_proxy_draws} tries")
 
-            if np.any(jphi_perturb < 0.0):
-                continue
-
-            result_root = root_scalar(
-                Ip_flux_integral_vs_target,
-                args=(mygs, jphi_perturb, spike_profile, psi_N, Ip_target),
-                bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
-                method="brentq",
-                rtol=1e-6,
-            )
-            a_optimal = result_root.root
-            matched_jphi_perturb = a_optimal * jphi_perturb + spike_profile
-
-            # Fast proxy: uses cached geometry, no TokaMaker calls
-            tmp_li_proxy = calc_cylindrical_li_proxy_fast(
-                matched_jphi_perturb, _geo
-            )
-            l_i_rel_err = (
-                100.0 * abs(tmp_li_proxy - proxy_target) / proxy_target
-            )
+        result_root = root_scalar(
+            Ip_flux_integral_vs_target,
+            args=(mygs, jphi_perturb, spike_profile, psi_N, Ip_target),
+            bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
+            method="brentq",
+            rtol=1e-6,
+        )
+        a_optimal = result_root.root
+        matched_jphi_perturb = a_optimal * jphi_perturb + spike_profile
 
         dt_proxy = time.perf_counter() - t_phase
-        print(f"  [li_iter={li_iter}] Proxy matched in {proxy_draws} draws "
-              f"({dt_proxy:.1f}s, err={l_i_rel_err:.3f}%)")
+        print(f"  [li_iter={li_iter}] GPR draw "
+              f"({_gpr_try} tries for non-neg, {dt_proxy:.1f}s)")
 
         # ---- 5b. Set up GS profiles --------------------------------
         psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
@@ -1421,15 +1440,14 @@ def perturb_kinetic_equilibrium(
                 l_i = np.inf
                 continue
 
-        final_scale_Ip, _ = find_optimal_scale(
-            mygs, psi_N, pres_tmp, ffp_prof, pp_prof,
-            matched_j_inductive, Ip_target, psi_pad,
-            spike_prof=spike_profile, find_j0=False,
-            scale_j0=final_scale_j0, tolerance=0.001,
-            diagnostic_plots=False, verbose=False,
-        )
+        # Ip-aligning removed (2026-05): the OFT jphi-linterp cut-cell fix
+        # holds Ip to <0.05% natively, so the find_j0=False Ip-scale secant
+        # is redundant and was perturbing the boundary.  find_j0=True (core
+        # j0 self-consistency) above is retained.  final_scale_Ip=1.0 keeps
+        # Ip_target unscaled downstream.
+        final_scale_Ip = 1.0
         dt_scale = time.perf_counter() - t_scale
-        print(f"  [li_iter={li_iter}] find_optimal_scale: {dt_scale:.1f}s")
+        print(f"  [li_iter={li_iter}] find_optimal_scale (j0 only): {dt_scale:.1f}s")
 
         # ---- 5d. Definitive sawtooth constraint (after Ip scaling) --
         if constrain_sawteeth:
@@ -1529,14 +1547,16 @@ def perturb_kinetic_equilibrium(
         iteration_l_is.append(l_i)
         iteration_Ips.append(Ip)
     else:
-        # Fired only if the for-loop exhausted without break
+        # Fired only if no GPR draw landed within the l_i band in
+        # max_li_iter attempts.
         raise RuntimeError(
-            f"l_i match not found after {max_li_iter} iterations "
+            f"No GPR j_phi draw landed within the l_i band after "
+            f"{max_li_iter} attempts "
             f"(last l_i error = {100.0 * abs(l_i - l_i_target) / l_i_target:.2f}%, "
-            f"tolerance = {l_i_tolerance:.2f}%, "
-            f"target={l_i_target:.4f}, best={l_i:.4f}).\n"
-            f"Try reducing your kinetic profile uncertainties or "
-            f"increasing l_i_tolerance."
+            f"band = +/-{l_i_tolerance:.2f}%, "
+            f"target={l_i_target:.4f}, last={l_i:.4f}).\n"
+            f"Try widening the l_i band (l_i_tolerance) or increasing "
+            f"max_li_iter."
         )
 
     # ----------------------------------------------------------------
@@ -2772,15 +2792,16 @@ def generate_bouquet(
             _post_align_failed = False
             _Ip_tol = 1e-3
             _max_ip_iters = 8
-            # SKIP_IP_ALIGN (env, default off): bypass the post-perturb Ip
-            # secant.  The OFT jphi-linterp cut-cell fix now holds Ip to
-            # <0.04% natively, so the secant's re-solve is largely
-            # redundant; worse, it nudges the equilibrium by re-solving to
-            # a slightly different Ip per draw, which introduces a small
-            # per-draw boundary spread (observed ~0.3-0.5 mm) even at
-            # sigma=0.  Skipping it leaves the recon-anchor equilibrium
-            # untouched and lets iso-update/homotopy run against it.
-            _skip_ip_align = os.environ.get('SKIP_IP_ALIGN', '0') == '1'
+            # Ip-aligning REMOVED (2026-05): the OFT jphi-linterp cut-cell
+            # fix holds Ip to <0.05% natively, so the post-perturb Ip secant
+            # is redundant; worse, it re-solved to a slightly different Ip
+            # per draw, introducing a per-draw boundary spread (~0.3-0.5 mm)
+            # even at sigma=0.  Hard-disabled here (the secant body below is
+            # now dead and slated for physical deletion).  _ip_aligned is
+            # still set True so iso-update/homotopy run against the
+            # recon-anchor equilibrium.  Env SKIP_IP_ALIGN retained only as
+            # an escape hatch to re-enable for debugging (default: removed).
+            _skip_ip_align = os.environ.get('SKIP_IP_ALIGN', '1') == '1'
             # Target RECON's actual converged Ip (`_recon_Ip` captured
             # from mygs.get_globals() on entry to generate_bouquet),
             # not the user-supplied `initial_Ip_target` (= eqdsk.Ip).
