@@ -594,7 +594,6 @@ def perturb_kinetic_equilibrium(
     # locking in at the +5% proxy-bias offset that produced ~10 mm
     # systematic boundary shift across all draws.
     l_i_tolerance=1.0,
-    l_i_proxy_threshold=5.0,
     psi_pad=1e-3,
     constrain_sawteeth=True,
     recalculate_j_BS=True,
@@ -680,8 +679,6 @@ def perturb_kinetic_equilibrium(
         ``recalculate_j_BS=True``).
     l_i_tolerance : float
         :math:`l_i` matching tolerance [%].
-    l_i_proxy_threshold : float
-        Proxy :math:`l_i` relative error threshold [%].
     psi_pad : float
         Padding inside the LCFS for profile queries.
     constrain_sawteeth : bool
@@ -1611,9 +1608,9 @@ def perturb_kinetic_equilibrium(
         Ip = eq_stats["Ip"]
         l_i = eq_stats["l_i"]
 
-        # Compute cylindrical proxy on the FINAL converged j_phi to
-        # measure the proxy-vs-TokaMaker offset.  This diagnostic
-        # helps calibrate the l_i_proxy_threshold parameter.
+        # Compute cylindrical proxy on the FINAL converged j_phi purely to
+        # report the proxy-vs-TokaMaker l_i offset (diagnostic; the proxy no
+        # longer gates draw acceptance -- that is the equilibrium-l_i band).
         final_li_proxy = calc_cylindrical_li_proxy_fast(output_jphi, _geo)
         proxy_vs_real = 100.0 * (final_li_proxy - l_i) / l_i if l_i != 0 else 0.0
 
@@ -1731,7 +1728,6 @@ def generate_bouquet(
     Zeff,
     input_jinductive=None,
     l_i_tolerance=1.0,
-    l_i_proxy_threshold=5.0,
     psi_pad=1e-3,
     constrain_sawteeth=True,
     recalculate_j_BS=True,
@@ -1808,8 +1804,6 @@ def generate_bouquet(
         Dimensionless inductive :math:`j_\phi` shape.
     l_i_tolerance : float
         :math:`l_i` tolerance [%].
-    l_i_proxy_threshold : float
-        Proxy :math:`l_i` relative-error threshold [%].
     psi_pad : float
         LCFS padding for profile queries.
     constrain_sawteeth : bool
@@ -2813,7 +2807,6 @@ def generate_bouquet(
                 npsi,
                 input_jinductive=input_jinductive,
                 l_i_tolerance=l_i_tolerance,
-                l_i_proxy_threshold=l_i_proxy_threshold,
                 psi_pad=psi_pad,
                 constrain_sawteeth=constrain_sawteeth,
                 recalculate_j_BS=recalculate_j_BS,
