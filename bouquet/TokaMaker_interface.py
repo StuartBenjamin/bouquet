@@ -1067,6 +1067,34 @@ def perturb_kinetic_equilibrium(
         if _stashed_bounds is not None:
             mygs.set_coil_bounds(None)
 
+        # ---- Weaken coil reg for the SWB exploration phase ----
+        # generate_bouquet installs a STRONG soft-reg (weight ~1e4 targeting
+        # recon coils) before the draw loop to keep coils near recon during
+        # the post-perturb bounded/in-spec solve.  But SWB's internal
+        # *inverse* GS solves (state-anchor + find_optimal_scale + H-mode
+        # iteration) must EXPLORE the natural perturbed equilibrium, where
+        # coils legitimately move off recon.  Leaving the strong reg active
+        # makes the reg (pull to recon) fight the isoflux constraint (settle
+        # the perturbed boundary), oscillating the fixed-point iteration ->
+        # "Exceeded maxits" for any draw that pushes coils meaningfully off
+        # recon (verified 2026-05: identical state+kinetics converge with
+        # weak reg, diverge with 1e4 reg).  Stash the strong reg, install a
+        # weak recon-like reg for the whole SWB block, restore in finally.
+        _stashed_reg = getattr(mygs, '_strong_coil_reg', None)
+        if _stashed_reg is not None:
+            try:
+                _weak_rt = []
+                for _rn in mygs.coil_sets:
+                    _weak_rt.append(mygs.coil_reg_term(
+                        {_rn: 1.0}, target=0.0, weight=1.0))
+                _weak_rt.append(mygs.coil_reg_term(
+                    {'#VSC': 1.0}, target=0.0, weight=1e-2))
+                mygs.set_coil_reg(reg_terms=_weak_rt)
+            except Exception as _wreg_exc:
+                print(f"  [SWB-hygiene] weak-reg install failed "
+                      f"({_wreg_exc}); SWB runs under strong reg")
+                _stashed_reg = None
+
         _pre_pp = {"type": "linterp",
                     "y": np.gradient(pressure) /
                          (np.gradient(psi_N) *
@@ -1120,6 +1148,33 @@ def perturb_kinetic_equilibrium(
         except Exception as _diag_exc:
             print(f"  [SWB-diag] failed: {_diag_exc}")
 
+        # ---- Pre-SWB full-state capture (env SWB_STATE_DUMP=1) ----
+        # Dump the EXACT mygs state (psi field + coil currents) AND the SWB
+        # inputs immediately before the call, so a failing draw can be
+        # replayed offline from precisely this state -- to settle whether
+        # the SWB maxits is kinetics-driven or pre-solve-state-driven.
+        # Overwritten each draw; on the run's last failure it holds that
+        # draw's pre-SWB state.
+        if os.environ.get('SWB_STATE_DUMP', '0') == '1':
+            try:
+                import numpy as _np_ps
+                _ps_coils, _ = mygs.get_coil_currents()
+                _np_ps.savez(
+                    '/tmp/swb_prestate_dump.npz',
+                    psi=mygs.get_psi(False),
+                    coil_names=_np_ps.array(list(_ps_coils.keys())),
+                    coil_vals=_np_ps.array([float(v) for v in _ps_coils.values()]),
+                    psi_N=psi_N,
+                    ne_eq=ne_eq, te_eq=te_eq, ni_eq=ni_eq, ti_eq=ti_eq,
+                    Zeff=_np_ps.atleast_1d(_np_ps.asarray(Zeff)),
+                    Ip_target=_np_ps.array([Ip_target]),
+                    swb_seed=_swb_seed,
+                    scale_jBS=_np_ps.array([scale_jBS]),
+                    isolate_edge_jBS=_np_ps.array([bool(isolate_edge_jBS)]),
+                )
+            except Exception:
+                pass
+
         try:
             results = solve_with_bootstrap(
                 mygs,
@@ -1128,8 +1183,27 @@ def perturb_kinetic_equilibrium(
                 scale_jBS=scale_jBS,
                 isolate_edge_jBS=isolate_edge_jBS,
                 diagnostic_plots=False,
-                verbose=False,
+                verbose=(os.environ.get('SWB_VERBOSE', '0') == '1'),
             )
+            # On SWB success, preserve this draw's kinetics as an in-spec
+            # control for failing-vs-succeeding spike-shape comparison.
+            if os.environ.get('SWB_STATE_DUMP', '0') == '1':
+                try:
+                    import numpy as _np_ok
+                    _np_ok.savez(
+                        '/tmp/swb_success_dump.npz',
+                        psi_N=psi_N,
+                        ne_eq=ne_eq, te_eq=te_eq, ni_eq=ni_eq, ti_eq=ti_eq,
+                        Zeff=_np_ok.atleast_1d(_np_ok.asarray(Zeff)),
+                        Ip_target=_np_ok.array([Ip_target]),
+                        swb_seed=_swb_seed,
+                        scale_jBS=_np_ok.array([scale_jBS]),
+                        isolated_j_BS=results.get('isolated_j_BS'),
+                        j_inductive=results.get('j_inductive'),
+                        total_j_phi=results.get('total_j_phi'),
+                    )
+                except Exception:
+                    pass
         except (TypeError, ValueError, RuntimeError):
             # Dump the SWB inputs so we can inspect what j_BS comes out
             # of an offline run with the same inputs.
@@ -1147,10 +1221,29 @@ def perturb_kinetic_equilibrium(
                 print("  [SWB-diag] inputs dumped to /tmp/swb_failure_dump.npz")
             except Exception:
                 pass
+            # Preserve the failing draw's pre-SWB full-state capture so it
+            # isn't overwritten by a later (possibly succeeding) draw.
+            if os.environ.get('SWB_STATE_DUMP', '0') == '1':
+                try:
+                    import shutil as _sh
+                    _sh.copyfile('/tmp/swb_prestate_dump.npz',
+                                 '/tmp/swb_prestate_FAILED.npz')
+                    print("  [SWB-diag] pre-SWB state preserved to "
+                          "/tmp/swb_prestate_FAILED.npz")
+                except Exception:
+                    pass
             raise
         finally:
             if _stashed_bounds is not None:
                 mygs.set_coil_bounds(_stashed_bounds)
+            # Restore the strong soft-reg for the constrained downstream
+            # phase (post-perturb Ip-align / in-spec / homotopy).
+            if _stashed_reg is not None:
+                try:
+                    mygs.set_coil_reg(reg_terms=_stashed_reg)
+                except Exception as _rreg_exc:
+                    print(f"  [SWB-hygiene] strong-reg restore failed "
+                          f"({_rreg_exc})")
         # ---- Recon-anchored baseline (do NOT use SWB's j_inductive) ----
         # SWB seeds with create_power_flux_fun(1.5, 1.5) and alpha-scales
         # to match Ip, but produces a matched_j_inductive whose SHAPE
@@ -2032,6 +2125,12 @@ def generate_bouquet(
             {'#VSC': 1.0}, target=0.0,
             weight=float(vsc_soft_reg_weight)))
         mygs.set_coil_reg(reg_terms=_rt)
+        # Stash the strong reg so the SWB-hygiene block in
+        # perturb_kinetic_equilibrium can swap to a weak recon-like reg for
+        # the exploratory SWB solves (which inverse-solve the *perturbed*
+        # equilibrium and oscillate under the strong reg) and restore this
+        # strong reg afterward for the constrained downstream phase.
+        mygs._strong_coil_reg = _rt
 
         # Step 3: capture baseline (psi, coils) for the perturbation
         # reset path.  No re-solve here -- mygs is already at recon's
