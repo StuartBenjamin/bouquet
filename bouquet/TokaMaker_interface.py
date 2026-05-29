@@ -1236,14 +1236,17 @@ def perturb_kinetic_equilibrium(
         finally:
             if _stashed_bounds is not None:
                 mygs.set_coil_bounds(_stashed_bounds)
-            # Restore the strong soft-reg for the constrained downstream
-            # phase (post-perturb Ip-align / in-spec / homotopy).
-            if _stashed_reg is not None:
-                try:
-                    mygs.set_coil_reg(reg_terms=_stashed_reg)
-                except Exception as _rreg_exc:
-                    print(f"  [SWB-hygiene] strong-reg restore failed "
-                          f"({_rreg_exc})")
+        # NOTE: the weak reg installed for SWB is intentionally LEFT ACTIVE
+        # through the rest of perturb_kinetic_equilibrium -- the recon-anchor
+        # solve and the l_i band loop are ALSO exploratory inverse solves
+        # that must let coils settle the perturbed equilibrium.  Restoring
+        # the strong reg here (as a first cut did) just handed the same
+        # reg-vs-isoflux oscillation to those downstream solves (verified:
+        # SWB then completed but the recon-anchor solve displaced ~35 mm and
+        # the l_i-loop solve hit maxits).  generate_bouquet restores the
+        # strong reg AFTER perturb returns, for the post-perturb bounded /
+        # homotopy / in-spec phase where keeping coils near recon is the
+        # point.
         # ---- Recon-anchored baseline (do NOT use SWB's j_inductive) ----
         # SWB seeds with create_power_flux_fun(1.5, 1.5) and alpha-scales
         # to match Ip, but produces a matched_j_inductive whose SHAPE
@@ -2864,9 +2867,31 @@ def generate_bouquet(
                 except Exception as _reset_exc:
                     print(f"  WARN: baseline reset failed: {_reset_exc}")
                     print(_tb.format_exc())
+            # Restore the strong soft-reg before moving to the next draw
+            # (perturb left the weak SWB-exploration reg active; the reset
+            # above doesn't touch coil reg).  Harmless if absent.
+            _sreg = getattr(mygs, '_strong_coil_reg', None)
+            if _sreg is not None:
+                try:
+                    mygs.set_coil_reg(reg_terms=_sreg)
+                except Exception:
+                    pass
             if pbar is not None:
                 pbar.update(1)
             continue
+
+        # ---- Restore strong coil soft-reg for the post-perturb phase ----
+        # perturb_kinetic_equilibrium runs its whole exploratory phase (SWB
+        # + recon-anchor + l_i band loop) under a WEAK reg so coils can
+        # settle the perturbed equilibrium.  The post-perturb Ip-align /
+        # in-spec / homotopy phase below is where we WANT coils held near
+        # recon, so re-install the strong reg here.
+        _sreg = getattr(mygs, '_strong_coil_reg', None)
+        if _sreg is not None:
+            try:
+                mygs.set_coil_reg(reg_terms=_sreg)
+            except Exception as _sreg_exc:
+                print(f"  [reg] strong-reg restore failed ({_sreg_exc})")
 
         # ---- Post-perturb: Ip-secant alignment + hard coil bounds -----
         # The kinetic perturbation flow (perturb_kinetic_equilibrium)
