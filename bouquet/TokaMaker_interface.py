@@ -29,6 +29,7 @@ from .sampling import (
     calc_cylindrical_li_proxy,
     get_li_proxy_geometry,
     calc_cylindrical_li_proxy_fast,
+    calc_realgeom_li_proxy_fast,
     _draw_monotonic_perturbation,
     EC,
     _MAX_PRESSURE_ITER,
@@ -1440,6 +1441,80 @@ def perturb_kinetic_equilibrium(
     # draws+solves; the band check below then accepts/rejects.  The
     # accept-break sits at the TOP so an in-band draw exits before a
     # wasted extra draw.
+    #
+    # ---- Real-geometry l_i pre-screen geometry (built ONCE per draw) ----
+    # Without a pre-screen, every GPR draw pays the full find_optimal_scale
+    # + corrective refinement (~35 s) before the band check rejects it --
+    # and at full sigma only ~30-40% of draws land in the +/-band, so ~3 of
+    # every 4 draws are expensive rejects (~105 s/draw wasted).  The cheap
+    # cylindrical proxy can't safely pre-screen them (its ~10% bias is
+    # peakedness-correlated -> would bias the accepted ensemble).
+    #
+    # The REAL-geometry proxy (snapshot flux-surface perimeters L_p in the
+    # li(1) formula) is ~unbiased (validated 0.994 vs solved l_i(1), ~1.2%
+    # scatter, device-agnostic -- the geometry IS the calibration).  We
+    # build it ONCE here, frozen on the recon-anchor equilibrium (this
+    # draw's perturbed-P' geometry), and use it to SKIP draws whose
+    # estimate is well outside the band; the real solved l_i remains the
+    # sole acceptance criterion (see end of loop body).  Conservative
+    # margin (PRESCREEN_MARGIN, default 3%) >> the proxy's bias+scatter so
+    # no in-band draw is skipped.  Set PRESCREEN=0 to disable (solve every
+    # draw, as before).
+    _prescreen_geo = None
+    # Default OFF: the interior-surface perimeter tracing in the geometry
+    # build leaves the module-level tracer state dirty, which corrupts the
+    # subsequent l_i-loop free-boundary solve (verified A/B same-seed:
+    # 2/3 without vs 0/3 with).  A final LCFS-trace reset (below) is the
+    # attempted fix; keep PRESCREEN opt-in until it's confirmed clean.
+    _prescreen_on = (os.environ.get('PRESCREEN', '0') == '1'
+                     and not (_pin_jphi or _diff_bs))
+    if _prescreen_on:
+        try:
+            _pg = get_li_proxy_geometry(mygs, npsi, psi_pad)
+            _n_trace = int(os.environ.get('PRESCREEN_NTRACE', '20'))
+            _lev = np.linspace(0.06, 1.0 - psi_pad, _n_trace)
+            # Trace each perimeter with safe_trace_surf (per-call copy_eq /
+            # replace_eq).  Raw consecutive trace_surf calls accumulate
+            # gs_equil mutations that a single end-of-loop replace_eq does
+            # NOT fully undo, corrupting the subsequent l_i-loop GS solve
+            # (verified: same-seed draw succeeds without the build, maxits
+            # with raw traces).  safe_trace_surf is the validated-clean
+            # wrapper used elsewhere before solves.
+            _Lp_lev = []
+            for _L in _lev:
+                _c = safe_trace_surf(mygs, _L)
+                if _c is None or len(_c) < 4:
+                    _Lp_lev.append(np.nan)
+                    continue
+                _c = np.asarray(_c)
+                _d = np.diff(_c, axis=0)
+                _Lp_lev.append(float(np.sum(np.hypot(_d[:, 0], _d[:, 1]))))
+            _Lp_lev = np.array(_Lp_lev)
+            # Drop any failed traces before interpolation.
+            _ok = np.isfinite(_Lp_lev)
+            _lev = _lev[_ok]; _Lp_lev = _Lp_lev[_ok]
+            _xi = np.concatenate([[0.0], _lev])
+            _yi = np.concatenate([[0.0], _Lp_lev])
+            from scipy.interpolate import interp1d as _interp1d_ps
+            _pg['L_p'] = _interp1d_ps(_xi, _yi, kind='linear',
+                                      bounds_error=False,
+                                      fill_value=(0.0, _Lp_lev[-1]))(psi_N)
+            # Reset the module-level tracer to the LCFS: the interior traces
+            # above leave it on an interior surface, which corrupts the
+            # downstream free-boundary solve's LCFS search.  A final LCFS
+            # trace leaves the tracer where the solve expects it (this is
+            # the state the bnd-diag LCFS trace normally leaves it in).
+            _ = safe_trace_surf(mygs, 1.0 - psi_pad)
+            _prescreen_geo = _pg
+            print(f"  [prescreen] real-geom geometry built "
+                  f"({_n_trace} perimeter traces; L_p edge={_pg['L_p'][-1]:.2f} m)")
+        except Exception as _ps_exc:
+            print(f"  [prescreen] geometry build failed ({_ps_exc}); "
+                  f"pre-screen disabled (solving every draw)")
+            _prescreen_geo = None
+    _prescreen_margin = float(os.environ.get('PRESCREEN_MARGIN', '3.0'))
+    _prescreen_verify = os.environ.get('PRESCREEN_VERIFY', '0') == '1'
+
     for li_iter in range(1, max_li_iter + 1):
         if _pin_jphi or _diff_bs:
             break  # PIN_JPHI / DIFF_BS shortcut handled above
@@ -1448,32 +1523,33 @@ def perturb_kinetic_equilibrium(
 
         t_phase = time.perf_counter()
 
-        # ---- 5a. Draw ONE GPR j_phi perturbation (flagship feature) ----
+        # ---- 5a. Draw a GPR j_phi perturbation (flagship), pre-screened --
         # GPR-perturb the inductive current shape around recon's
         # j_inductive_fit with envelope sigma_jphi (the core bouquet
         # current-profile uncertainty sampling).
         #
-        # Band conditioning (2026-05): we no longer home the cheap
-        # cylindrical proxy to a point `proxy_target`.  The proxy carries a
-        # ~7% (only roughly stable) bias vs the equilibrium l_i, and a
-        # point target is unreachable at large sigma_jphi (the GPR cloud
-        # sits ~20% off it -- 500 draws, best 19.6%).  Instead we draw
-        # ONCE, solve, and accept downstream iff the *equilibrium* l_i
-        # lands within the measured band (`l_i_tolerance`, % of recon l_i)
-        # of `l_i_target` -- rejection sampling from the GPR prior
-        # conditioned on the magnetics.  See the band check at the end of
-        # this loop body.  A draw that lands out-of-band is rejected and
-        # the next li_iter redraws (up to max_li_iter).
+        # Band conditioning: a draw is ACCEPTED downstream iff the *real*
+        # solved equilibrium l_i lands within `l_i_tolerance` of `l_i_target`
+        # (see end of loop body) -- rejection sampling from the GPR prior
+        # conditioned on the magnetics.  To avoid paying the full
+        # find_optimal_scale + corrective solve on draws that are obviously
+        # out-of-band, we pre-screen each GPR draw with the cheap
+        # REAL-geometry l_i proxy (frozen snapshot geometry built above) and
+        # skip the solve when its estimate is outside band + PRESCREEN_MARGIN.
+        # The margin (>> the proxy's ~0.6% bias + ~1.2% scatter) guarantees
+        # no in-band draw is skipped, so the accepted ensemble is unchanged
+        # (the proxy is a speed-only gate, NOT the acceptance test).
         step_j_phi = (
             input_jinductive if recalculate_j_BS else input_j_phi
         )
         j_phi_0 = step_j_phi[0]
-        # Geometry cache (used only for the proxy-vs-real diagnostic below).
-        _geo = get_li_proxy_geometry(mygs, npsi, psi_pad)
+        _geo = _prescreen_geo  # frozen recon-anchor geometry (or None)
 
-        # Single GPR draw; only redraw if a sample goes non-physical
-        # (negative current somewhere), which is rare.
         jphi_perturb = None
+        a_optimal = None
+        matched_jphi_perturb = None
+        _n_skipped = 0
+        _ps_window = l_i_tolerance + _prescreen_margin  # % of l_i_target
         for _gpr_try in range(1, max_proxy_draws + 1):
             _cand = generate_perturbed_GPR(
                 psi_N,
@@ -1483,26 +1559,42 @@ def perturb_kinetic_equilibrium(
                 n_samples=1,
                 diag_plot=False,
             ) * j_phi_0
-            if not np.any(_cand < 0.0):
-                jphi_perturb = _cand
-                break
+            if np.any(_cand < 0.0):
+                continue  # non-physical (negative current)
+            _root = root_scalar(
+                Ip_flux_integral_vs_target,
+                args=(mygs, _cand, spike_profile, psi_N, Ip_target),
+                bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
+                method="brentq", rtol=1e-6,
+            )
+            _a = _root.root
+            _matched = _a * _cand + spike_profile
+            # Cheap real-geom pre-screen: skip if confidently out-of-band.
+            if _prescreen_geo is not None:
+                _est = calc_realgeom_li_proxy_fast(_matched, _prescreen_geo)
+                _est_err = 100.0 * abs(_est - l_i_target) / l_i_target
+                if _est_err > _ps_window:
+                    _n_skipped += 1
+                    if _prescreen_verify and _n_skipped <= 3:
+                        print(f"    [prescreen-verify] skipped draw: "
+                              f"real-geom est l_i={_est:.4f} "
+                              f"({_est_err:.1f}% > window {_ps_window:.1f}%)")
+                    continue
+            # Passed pre-screen (or pre-screen disabled): take this draw.
+            jphi_perturb = _cand
+            a_optimal = _a
+            matched_jphi_perturb = _matched
+            break
         if jphi_perturb is None:
             raise RuntimeError(
-                f"No non-negative GPR j_phi draw in {max_proxy_draws} tries")
-
-        result_root = root_scalar(
-            Ip_flux_integral_vs_target,
-            args=(mygs, jphi_perturb, spike_profile, psi_N, Ip_target),
-            bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
-            method="brentq",
-            rtol=1e-6,
-        )
-        a_optimal = result_root.root
-        matched_jphi_perturb = a_optimal * jphi_perturb + spike_profile
+                f"No GPR j_phi draw passed the pre-screen in "
+                f"{max_proxy_draws} tries (window +/-{_ps_window:.1f}%); "
+                f"widen l_i_tolerance/PRESCREEN_MARGIN or check sigma_jphi")
 
         dt_proxy = time.perf_counter() - t_phase
         print(f"  [li_iter={li_iter}] GPR draw "
-              f"({_gpr_try} tries for non-neg, {dt_proxy:.1f}s)")
+              f"({_gpr_try} tries, {_n_skipped} pre-screen-skipped, "
+              f"{dt_proxy:.1f}s)")
 
         # ---- 5b. Set up GS profiles --------------------------------
         psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
@@ -1621,7 +1713,11 @@ def perturb_kinetic_equilibrium(
         # Compute cylindrical proxy on the FINAL converged j_phi purely to
         # report the proxy-vs-TokaMaker l_i offset (diagnostic; the proxy no
         # longer gates draw acceptance -- that is the equilibrium-l_i band).
-        final_li_proxy = calc_cylindrical_li_proxy_fast(output_jphi, _geo)
+        # _geo may be None if the pre-screen geometry build failed or
+        # PRESCREEN=0; build a one-off cylindrical cache for the diagnostic.
+        _geo_diag = _geo if _geo is not None else get_li_proxy_geometry(
+            mygs, npsi, psi_pad)
+        final_li_proxy = calc_cylindrical_li_proxy_fast(output_jphi, _geo_diag)
         proxy_vs_real = 100.0 * (final_li_proxy - l_i) / l_i if l_i != 0 else 0.0
 
         Ip_err = 100.0 * abs(Ip - Ip_target) / Ip_target
