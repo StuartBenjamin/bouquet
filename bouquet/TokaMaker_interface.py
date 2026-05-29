@@ -1172,6 +1172,7 @@ def perturb_kinetic_equilibrium(
             except Exception:
                 pass
 
+        _t_swb0 = time.perf_counter()
         try:
             results = solve_with_bootstrap(
                 mygs,
@@ -1181,7 +1182,12 @@ def perturb_kinetic_equilibrium(
                 isolate_edge_jBS=isolate_edge_jBS,
                 diagnostic_plots=False,
                 verbose=(os.environ.get('SWB_VERBOSE', '0') == '1'),
+                # SWB H-mode self-consistency iterations (default 3).  Env
+                # SWB_ITERS lets us trim for speed (2 is usually enough).
+                iterations=int(os.environ.get('SWB_ITERS', '3')),
             )
+            if os.environ.get('PROFILE', '0') == '1':
+                print(f"  [profile] SWB call: {time.perf_counter()-_t_swb0:.1f}s")
             # On SWB success, preserve this draw's kinetics as an in-spec
             # control for failing-vs-succeeding spike-shape comparison.
             if os.environ.get('SWB_STATE_DUMP', '0') == '1':
@@ -1576,7 +1582,11 @@ def perturb_kinetic_equilibrium(
         output_jphi, _n_corr, _corr_hist = _corrective_jphi_iteration(
             mygs, psi_N, target_jphi_perturb, pp_prof,
             Ip_target * final_scale_Ip, pres_tmp[0], psi_pad,
-            min_iters=2, max_iters=8, rtol=0.05, verbose=False,
+            min_iters=2,
+            # Corrective-iteration cap (default 8; observed to converge ~5).
+            # Env CORR_MAX_ITERS lets us trim for speed (4 saves ~1 solve).
+            max_iters=int(os.environ.get('CORR_MAX_ITERS', '8')),
+            rtol=0.05, verbose=False,
         )
         if _n_corr > 2:
             print(f"  [jphi correction] {_n_corr} iterations, "
