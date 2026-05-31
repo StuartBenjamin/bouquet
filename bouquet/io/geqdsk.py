@@ -594,12 +594,23 @@ def _resample_contour(R, Z, npts=257, periodic=True):
 
     # Cumulative arc-length parameter
     ds = np.sqrt(np.diff(R) ** 2 + np.diff(Z) ** 2)
+
+    # Remove consecutive duplicate points (ds == 0) which make s
+    # non-strictly-increasing and cause splrep to fail.
+    keep = np.empty(len(R), dtype=bool)
+    keep[0] = True
+    keep[1:] = ds > 0.0
+    if not keep.all():
+        R = R[keep]
+        Z = Z[keep]
+        ds = np.sqrt(np.diff(R) ** 2 + np.diff(Z) ** 2)
+
     s = np.empty(len(R))
     s[0] = 0.0
     s[1:] = np.cumsum(ds)
     s_total = s[-1]
 
-    if s_total < 1e-14:
+    if s_total < 1e-14 or len(R) < 4:
         return R, Z  # degenerate contour
 
     # Cubic spline — periodic for interior surfaces, non-periodic for
