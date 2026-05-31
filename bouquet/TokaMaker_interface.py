@@ -25,7 +25,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from .sampling import (
-    generate_perturbed_GPR,
+    GPRProfilePerturber,
     calc_cylindrical_li_proxy,
     get_li_proxy_geometry,
     calc_cylindrical_li_proxy_fast,
@@ -592,6 +592,8 @@ def perturb_kinetic_equilibrium(
     max_li_iter=_MAX_LI_ITER,
     psi_N_kinetic=None,
     max_proxy_draws=500,
+    verbose_interval=1000,
+    worker_id=None,
     **kwargs
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
@@ -710,6 +712,7 @@ def perturb_kinetic_equilibrium(
     # Kinetic grid: either the user-supplied extended grid or psi_N
     psi_kin = psi_N_kinetic if psi_N_kinetic is not None else psi_N
     _dual_grid = psi_N_kinetic is not None
+    _pfx = f"[Worker {worker_id}] " if worker_id is not None else ""
 
     def _kin_to_eq(arr_kin):
         """Interpolate a profile from kinetic grid onto equilibrium grid."""
@@ -724,33 +727,54 @@ def perturb_kinetic_equilibrium(
     # ----------------------------------------------------------------
     inp_avg = mygs.flux_integral(psi_N, pressure)
 
+    # Pre-compute GPR eigenfactors for the four kinetic profiles.
+    # psi_kin, sigma profiles, and length scales are constant for the
+    # entire pressure-matching loop — one O(n³) eigh per profile instead
+    # of one per draw.
+    _kin_rng = np.random.default_rng()
+    _ne_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=n_ls)
+    _ne_gpr.precompute_factor(psi_kin, sigma_ne / ne[0])
+    _te_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=t_ls)
+    _te_gpr.precompute_factor(psi_kin, sigma_te / te[0])
+    _ni_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=n_ls)
+    _ni_gpr.precompute_factor(psi_kin, sigma_ni / ni[0])
+    _ti_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=t_ls)
+    _ti_gpr.precompute_factor(psi_kin, sigma_ti / ti[0])
+
     p_err = np.inf
     p_iter = 0
-    print("Searching for pressure profile match...")
+    print(f"{_pfx}Searching for pressure profile match...", flush=True)
 
     while p_err > p_thresh:
         p_iter += 1
+        if verbose and (p_iter % verbose_interval == 0):
+            print(f"{_pfx}  pressure match: iter={p_iter}, err={p_err:.3f}% (threshold {p_thresh}%)", flush=True)
         if p_iter > max_pressure_iter:
             raise RuntimeError(
                 f"Pressure match not found within {max_pressure_iter} iterations "
                 f"(last error {p_err:.2f}% vs threshold {p_thresh}%)"
             )
 
-        # GPR sampling on psi_kin (kinetic grid, may include SOL)
+        # GPR sampling on psi_kin (kinetic grid, may include SOL).
+        # Pre-computed eigenfactors are reused — no repeated eigh.
         ne_perturb = _draw_monotonic_perturbation(
-            psi_kin, ne / ne[0], sigma_ne / ne[0], n_ls
+            psi_kin, ne / ne[0], sigma_ne / ne[0], n_ls,
+            perturber=_ne_gpr, rng=_kin_rng,
         ) * ne[0]
 
         te_perturb = _draw_monotonic_perturbation(
-            psi_kin, te / te[0], sigma_te / te[0], t_ls
+            psi_kin, te / te[0], sigma_te / te[0], t_ls,
+            perturber=_te_gpr, rng=_kin_rng,
         ) * te[0]
 
         ni_perturb = _draw_monotonic_perturbation(
-            psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls
+            psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls,
+            perturber=_ni_gpr, rng=_kin_rng,
         ) * ni[0]
 
         ti_perturb = _draw_monotonic_perturbation(
-            psi_kin, ti / ti[0], sigma_ti / ti[0], t_ls
+            psi_kin, ti / ti[0], sigma_ti / ti[0], t_ls,
+            perturber=_ti_gpr, rng=_kin_rng,
         ) * ti[0]
 
         # Pressure matching on equilibrium grid (psi_N, confined only)
@@ -851,6 +875,15 @@ def perturb_kinetic_equilibrium(
     # than in proxy space.
     proxy_target = baseline_li_proxy
 
+    # Pre-compute j_phi GPR eigenfactor once for all l_i iterations.
+    # step_j_phi (= results["j_inductive"]), sigma_jphi, and j_ls are
+    # all constant — one O(n³) eigh instead of one per proxy draw.
+    _jphi_const = results["j_inductive"] if recalculate_j_BS else input_j_phi
+    _j0_const   = _jphi_const[0]
+    _jphi_gpr   = GPRProfilePerturber(kernel_func="rbf", length_scale=j_ls)
+    _jphi_gpr.precompute_factor(psi_N, sigma_jphi / _j0_const)
+    _jphi_rng   = np.random.default_rng()
+
     for li_iter in range(1, max_li_iter + 1):
         if 100.0 * abs(l_i - l_i_target) / l_i_target <= l_i_tolerance:
             break
@@ -858,10 +891,8 @@ def perturb_kinetic_equilibrium(
         t_phase = time.perf_counter()
 
         # ---- 5a. Draw j_phi perturbation matching l_i proxy --------
-        step_j_phi = (
-            results["j_inductive"] if recalculate_j_BS else input_j_phi
-        )
-        j_phi_0 = step_j_phi[0]
+        step_j_phi = _jphi_const
+        j_phi_0    = _j0_const
 
         # Pre-compute geometry once for the inner proxy loop (the
         # equilibrium state doesn't change between proxy evaluations).
@@ -877,15 +908,10 @@ def perturb_kinetic_equilibrium(
                     f"(last err={l_i_rel_err:.3f}%, threshold={l_i_proxy_threshold}%). "
                     f"Try increasing l_i_proxy_threshold or max_proxy_draws."
                 )
-            jphi_perturb = generate_perturbed_GPR(
-                psi_N,
-                step_j_phi / j_phi_0,
-                sigma_profile=sigma_jphi / j_phi_0,   # normalised σ
-                length_scale=j_ls,
-                n_samples=1,
-                diag_plot=False,
-            )
-            jphi_perturb *= j_phi_0
+            # Fast draw using pre-computed eigenfactor — no per-draw eigh.
+            jphi_perturb = _jphi_gpr.draw_from_factor(
+                _jphi_const / _j0_const, 1, _jphi_rng
+            )[0] * _j0_const
 
             if np.any(jphi_perturb < 0.0):
                 continue
@@ -909,7 +935,7 @@ def perturb_kinetic_equilibrium(
             )
 
         dt_proxy = time.perf_counter() - t_phase
-        print(f"  [li_iter={li_iter}] Proxy matched in {proxy_draws} draws "
+        print(f"{_pfx}  [li_iter={li_iter}] Proxy matched in {proxy_draws} draws "
               f"({dt_proxy:.1f}s, err={l_i_rel_err:.3f}%)")
 
         # ---- 5b. Set up GS profiles --------------------------------
@@ -942,8 +968,8 @@ def perturb_kinetic_equilibrium(
             _, q_pre, _, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
             if q_pre[0] < 1.0:
                 dt_scale = time.perf_counter() - t_scale
-                print(f"  [li_iter={li_iter}] find_optimal_scale: {dt_scale:.1f}s")
-                print("Skipping this equilibrium, q_0 < 1.0 (pre-check)")
+                print(f"{_pfx}  [li_iter={li_iter}] find_optimal_scale: {dt_scale:.1f}s")
+                print(f"{_pfx}Skipping this equilibrium, q_0 < 1.0 (pre-check)")
                 l_i = np.inf
                 continue
 
@@ -955,13 +981,13 @@ def perturb_kinetic_equilibrium(
             diagnostic_plots=False, verbose=False,
         )
         dt_scale = time.perf_counter() - t_scale
-        print(f"  [li_iter={li_iter}] find_optimal_scale: {dt_scale:.1f}s")
+        print(f"{_pfx}  [li_iter={li_iter}] find_optimal_scale: {dt_scale:.1f}s")
 
         # ---- 5d. Definitive sawtooth constraint (after Ip scaling) --
         if constrain_sawteeth:
             _, q, _, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
             if q[0] < 1.0:
-                print("Skipping this equilibrium, q_0 < 1.0")
+                print(f"{_pfx}Skipping this equilibrium, q_0 < 1.0")
                 l_i = np.inf
                 continue
 
@@ -986,7 +1012,7 @@ def perturb_kinetic_equilibrium(
             min_iters=2, max_iters=8, rtol=0.05, verbose=False,
         )
         if _n_corr > 2:
-            print(f"  [jphi correction] {_n_corr} iterations, "
+            print(f"{_pfx}  [jphi correction] {_n_corr} iterations, "
                   f"edge RMS: {_corr_hist[0]/1e6:.4f} → {_corr_hist[-1]/1e6:.4f} MA/m²")
 
         if diagnostic_plots:
@@ -1031,14 +1057,14 @@ def perturb_kinetic_equilibrium(
             # Blend: 70% new correction, 30% old target (smooths noise)
             proxy_target = 0.7 * corrected_target + 0.3 * proxy_target
 
-        print(f"  l_i target (equil):   {l_i_target:.4f}")
-        print(f"  proxy target:         {proxy_target:.4f}  (corrected)")
-        print(f"  matched l_i (equil):  {l_i:.4f}")
-        print(f"  matched l_i (proxy):  {final_li_proxy:.4f}")
-        print(f"  Ip error vs target:   {Ip_err:.3f}%")
-        print(f"  proxy vs real l_i:    {proxy_vs_real:+.2f}%")
+        print(f"{_pfx}  l_i target (equil):   {l_i_target:.4f}")
+        print(f"{_pfx}  proxy target:         {proxy_target:.4f}  (corrected)")
+        print(f"{_pfx}  matched l_i (equil):  {l_i:.4f}")
+        print(f"{_pfx}  matched l_i (proxy):  {final_li_proxy:.4f}")
+        print(f"{_pfx}  Ip error vs target:   {Ip_err:.3f}%")
+        print(f"{_pfx}  proxy vs real l_i:    {proxy_vs_real:+.2f}%")
         _li_pct_err = 100.0 * abs(l_i - l_i_target) / l_i_target if l_i_target != 0 else float('inf')
-        print(f"  l_i error:            {_li_pct_err:.2f}% (tolerance: {l_i_tolerance:.2f}%)")
+        print(f"{_pfx}  l_i error:            {_li_pct_err:.2f}% (tolerance: {l_i_tolerance:.2f}%)")
 
         iteration_l_is.append(l_i)
         iteration_Ips.append(Ip)
@@ -1122,12 +1148,16 @@ def generate_bouquet(
     jBS_scale_range=None,
     diagnostic_plots=True,
     scan_val=None,
+    scan_name="scan",
     pfile_bytes=None,
     Zeff_profile=None,
     baseline_eqdsk_bytes=None,
     baseline_pfile_bytes=None,
     psi_N_kinetic=None,
     max_proxy_draws=500,
+    verbose_interval=1000,
+    keep_geqdsk=False,
+    worker_id=None,
     **kwargs
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
@@ -1205,6 +1235,11 @@ def generate_bouquet(
         Raw p-file content to store alongside each equilibrium.
     Zeff_profile : array-like or None
         1-D effective charge profile to store in HDF5.
+    keep_geqdsk : bool
+        If ``True``, the temporary per-equilibrium ``.geqdsk`` files written
+        by ``mygs.save_eqdsk`` are kept on disk after being archived into the
+        HDF5 database.  Useful for manual inspection or debugging.
+        Default is ``False`` (files are deleted after archiving).
 
     Returns
     -------
@@ -1212,6 +1247,7 @@ def generate_bouquet(
         Diagnostics from each equilibrium.
     """
     all_diagnostics = []
+    _pfx = f"[Worker {worker_id}] " if worker_id is not None else ""
 
     # self-consistent pressure for baseline <P>
     # When kinetic profiles are on a different grid, interpolate
@@ -1249,7 +1285,7 @@ def generate_bouquet(
         )
         if q_baseline_check[0] < 1.0:
             print(
-                f"NOTE: Baseline equilibrium has q(0) = {q_baseline_check[0]:.4f} < 1.0 "
+                f"{_pfx}NOTE: Baseline equilibrium has q(0) = {q_baseline_check[0]:.4f} < 1.0 "
                 f"(sawtoothing plasma).\n"
                 f"      Overriding constrain_sawteeth = False so perturbed "
                 f"equilibria are not rejected."
@@ -1305,7 +1341,7 @@ def generate_bouquet(
             stored_pfile_bytes = pf_bl.to_bytes()
         except Exception as exc:
             import traceback
-            print(f"  WARNING: could not recompute baseline rotations: {exc}")
+            print(f"{_pfx}  WARNING: could not recompute baseline rotations: {exc}")
             traceback.print_exc()
 
     store_baseline_profiles(
@@ -1343,10 +1379,10 @@ def generate_bouquet(
             remaining = avg_s * (n_equils - count)
             eta_min = remaining / 60.0
             eta_str = f"  ETA: {eta_min:.1f} min"
-        print(f"\n{'='*60}")
-        print(f"  Equilibrium {count+1}/{n_equils}  "
+        print(f"\n{_pfx}{'='*60}")
+        print(f"{_pfx}  Equilibrium {count+1}/{n_equils}  "
               f"(scale_jBS={scale_jBS:.4f}){eta_str}")
-        print(f"{'='*60}")
+        print(f"{_pfx}{'='*60}")
         t_start = time.perf_counter()
 
         try:
@@ -1385,11 +1421,13 @@ def generate_bouquet(
                 diagnostic_plots=diagnostic_plots,
                 psi_N_kinetic=psi_N_kinetic,
                 max_proxy_draws=max_proxy_draws,
+                verbose_interval=verbose_interval,
+                worker_id=worker_id,
                 **kwargs
             )
         except (RuntimeError, ValueError) as e:
-            print(f"\n  STOPPED: {e}")
-            print(f"  Skipping equilibrium {count+1}/{n_equils}.\n")
+            print(f"\n{_pfx}  STOPPED: {e}")
+            print(f"{_pfx}  Skipping equilibrium {count+1}/{n_equils}.\n")
             if pbar is not None:
                 pbar.update(1)
             continue
@@ -1397,7 +1435,7 @@ def generate_bouquet(
         elapsed = time.perf_counter() - t_start
         elapsed_times.append(elapsed)
         total_elapsed = time.perf_counter() - t_batch_start
-        print(f"  Wall-clock time: {elapsed:.1f}s  "
+        print(f"{_pfx}  Wall-clock time: {elapsed:.1f}s  "
               f"(total: {total_elapsed/60:.1f} min, "
               f"avg: {np.mean(elapsed_times):.1f}s/eq)")
 
@@ -1410,9 +1448,10 @@ def generate_bouquet(
         diagnostics['time'] = elapsed
 
         # ---- save geqdsk to a temporary file, archive, delete -------
-        eqdsk_filename = f"{header}_count={count}.geqdsk"
+        _scan_prefix = f"_{scan_name}={scan_val}" if scan_val is not None else ""
+        eqdsk_filename = f"{header}{_scan_prefix}_count={count}.geqdsk"
         full_path = os.path.abspath(eqdsk_filename)
-        print(f"  Saving to: {full_path}")
+        print(f"{_pfx}  Saving to: {full_path}")
 
         mygs.save_eqdsk(
             eqdsk_filename,
@@ -1522,7 +1561,7 @@ def generate_bouquet(
                 perturbed_pfile_bytes = pf.to_bytes()
             except Exception as exc:
                 import traceback
-                print(f"  WARNING: could not build perturbed p-file: {exc}")
+                print(f"{_pfx}  WARNING: could not build perturbed p-file: {exc}")
                 traceback.print_exc()
 
         store_equilibrium(
@@ -1545,11 +1584,14 @@ def generate_bouquet(
         )
 
         # Clean up on-disk eqdsk after archiving
-        try:
-            os.remove(full_path)
-            print(f"  Deleted temporary file: {full_path}")
-        except OSError as exc:
-            print(f"  WARNING: could not delete {full_path}: {exc}")
+        if keep_geqdsk:
+            print(f"{_pfx}  Keeping temporary file: {full_path}")
+        else:
+            try:
+                os.remove(full_path)
+                print(f"{_pfx}  Deleted temporary file: {full_path}")
+            except OSError as exc:
+                print(f"{_pfx}  WARNING: could not delete {full_path}: {exc}")
 
         all_diagnostics.append(diagnostics)
 

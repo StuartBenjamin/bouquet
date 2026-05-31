@@ -17,6 +17,7 @@ from bouquet.io.geqdsk import (
     _read_geqdsk,
     _trace_contours,
     _select_main_contour,
+    _resample_contour,
     GEQDSKEquilibrium,
     read_geqdsk,
 )
@@ -624,3 +625,45 @@ class TestThetaResample:
         """read_geqdsk convenience function should pass resample parameter."""
         eq = read_geqdsk(D3DLIKE_GFILE, nlevels=257, resample="arc_length")
         assert eq._resample_method == "arc_length"
+
+
+# ====================================================================
+#  _resample_contour — regression tests for the duplicate-point and
+#  short-contour guards added in the current diff
+# ====================================================================
+
+class TestResampleContour:
+    """Unit tests for _resample_contour edge-case guards."""
+
+    def _circle(self, n=64, r=1.0):
+        """Return a clean circular contour with n points."""
+        theta = np.linspace(0, 2 * np.pi, n, endpoint=False)
+        return r * np.cos(theta), r * np.sin(theta)
+
+    def test_normal_contour_returns_requested_npts(self):
+        R, Z = self._circle(n=64)
+        R_new, Z_new = _resample_contour(R, Z, npts=32)
+        assert len(R_new) == 32
+        assert len(Z_new) == 32
+
+    def test_duplicate_points_do_not_raise(self):
+        """Consecutive duplicate points should be silently removed."""
+        R, Z = self._circle(n=64)
+        # Insert duplicate at index 10
+        R = np.insert(R, 10, R[10])
+        Z = np.insert(Z, 10, Z[10])
+        # Should not raise (previously failed in splrep with non-strictly-increasing s)
+        R_new, Z_new = _resample_contour(R, Z, npts=32)
+        assert len(R_new) == 32
+
+    def test_fewer_than_4_points_returns_original(self):
+        """A contour reduced to < 4 unique points must be returned unchanged.
+
+        scipy.interpolate.splrep requires at least 4 data points for a cubic
+        spline (k=3).  Without the guard, passing 3 points raises a TypeError.
+        The early-return path must not raise and must hand back valid arrays.
+        """
+        R = np.array([0.0, 1.0, 0.0])
+        Z = np.array([0.0, 0.0, 1.0])
+        R_out, Z_out = _resample_contour(R, Z, npts=32)
+        assert len(R_out) == len(R)

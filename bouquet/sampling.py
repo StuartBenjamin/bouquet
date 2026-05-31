@@ -151,6 +151,72 @@ class GPRProfilePerturber:
         return prefactor * (1.0 + s + s**2 / 3.0) * np.exp(-s)
 
     # ---- core sampling method ----------------------------------------
+    def precompute_factor(
+        self,
+        psi_N: np.ndarray,
+        sigma_profile: np.ndarray,
+    ) -> None:
+        r"""Pre-compute and cache the GPR eigen-factor for reuse.
+
+        After calling this, use :meth:`draw_from_factor` to generate
+        samples without repeating the O(n³) eigendecomposition.
+
+        Parameters
+        ----------
+        psi_N : ndarray
+            1-D normalised flux grid.
+        sigma_profile : ndarray
+            1-D experimental uncertainty **in profile units** -- this
+            becomes the GP's marginal standard deviation at every
+            grid point.
+        """
+        # 1. Unit-variance base kernel
+        K = self._kernel(psi_N, psi_N)          # K(x,x) = 1
+
+        # 2. Scale by σ(x):  C_ij = σ_i · σ_j · K_ij
+        #    ⟹  C(x,x) = σ(x)²  ⟹  marginal std = σ(x)   ✓
+        S = np.outer(sigma_profile, sigma_profile)
+        K_scaled = K * S
+
+        # 3. Eigen-decomposition (symmetric → eigh)
+        vals, vecs = np.linalg.eigh(K_scaled)
+        vals = np.maximum(vals, 0.0)
+        self._cached_vecs = vecs
+        self._cached_sqrt_vals = np.sqrt(vals)
+
+    def draw_from_factor(
+        self,
+        input_profile: np.ndarray,
+        n_samples: int,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        r"""Draw perturbed profiles whose pointwise :math:`1\sigma`
+        matches the uncertainty supplied to :meth:`precompute_factor` exactly.
+
+        Call :meth:`precompute_factor` first.
+
+        Parameters
+        ----------
+        input_profile : ndarray
+            1-D baseline profile (GP mean).
+        n_samples : int
+            Number of independent draws.
+        rng : numpy.random.Generator
+            Random generator.
+
+        Returns
+        -------
+        ndarray, shape ``(n_samples, len(input_profile))``
+        """
+        n = len(input_profile)
+
+        # 4. Sample:  δf = V diag(√λ) z,   z ~ N(0, I)
+        z = rng.standard_normal((n, n_samples))
+        perturbations = self._cached_vecs @ (self._cached_sqrt_vals[:, None] * z)
+
+        # 5. Perturbed profiles  →  (n_samples, n_points)
+        return input_profile[None, :] + perturbations.T
+
     def generate_profiles(
         self,
         psi_N: np.ndarray,
@@ -372,6 +438,33 @@ def generate_perturbed_GPR(
 # ====================================================================
 #  Statistics verification
 # ====================================================================
+def _gpr_stats_from_samples(samples, profile, uncertainty_prof, confidence_band):
+    """Compute empirical statistics from a ``(n_samples, n_points)`` array.
+
+    Helper shared by the two sampling paths in :func:`verify_gpr_statistics`.
+
+    Returns
+    -------
+    dict with keys ``empirical_mean``, ``empirical_std``,
+    ``exceedance_per_point``, ``avg_exceedance``.
+    """
+    sigma_theory = uncertainty_prof
+    empirical_mean = np.mean(samples, axis=0)
+    empirical_std  = np.std(samples,  axis=0)
+
+    residuals = samples - profile[None, :]
+    outside   = np.abs(residuals) > confidence_band * sigma_theory[None, :]
+    exceedance_per_point = np.mean(outside, axis=0)
+    avg_exceedance       = np.mean(exceedance_per_point)
+
+    return {
+        "empirical_mean":       empirical_mean,
+        "empirical_std":        empirical_std,
+        "exceedance_per_point": exceedance_per_point,
+        "avg_exceedance":       avg_exceedance,
+    }
+
+
 def verify_gpr_statistics(
     psi_N,
     profile,
@@ -382,7 +475,22 @@ def verify_gpr_statistics(
 ):
     r"""Verify GPR sampling statistics against theoretical predictions.
 
-    Draws a large number of samples and checks:
+    Runs **both** sampling paths and cross-checks them:
+
+    * **Path A — re-draw** (preferred): one :meth:`GPRProfilePerturber.precompute_factor`
+      call followed by ``n_verification`` :meth:`~GPRProfilePerturber.draw_from_factor`
+      draws.  This is the method used throughout the production code.
+
+    * **Path B — generate_profiles** (reference): the original single-call
+      :meth:`~GPRProfilePerturber.generate_profiles` batch draw used in the
+      old implementation.
+
+    Both paths use the same seeded :class:`numpy.random.Generator` so the
+    draws are independent but reproducible.  The function asserts that the
+    two empirical std arrays agree to within 5 % (relative), confirming
+    statistical equivalence.
+
+    Checks performed for the re-draw path:
 
     1. Pointwise mean :math:`\approx` input profile  (bias check)
     2. Pointwise std  :math:`\approx` ``uncertainty_prof``  (variance check)
@@ -407,57 +515,67 @@ def verify_gpr_statistics(
     Returns
     -------
     dict
-        Verification diagnostics.
+        Verification diagnostics keyed by ``'redraw'`` and ``'batch'``
+        (one sub-dict per path), plus ``'sigma_theory'`` and
+        ``'theoretical_exceedance'``.
     """
-    perturber = GPRProfilePerturber(
-        kernel_func="rbf",
-        length_scale=length_scale,
-    )
-
-    rng = np.random.default_rng(42)
-    samples = perturber.generate_profiles(
-        psi_N, profile, uncertainty_prof,
-        n_samples=n_verification, rng=rng,
-    )                                          # (n_verification, n_points)
-
-    # ---- theoretical predictions ------------------------------------
-    # Marginal std equals sigma_profile exactly by construction
-    sigma_theory = uncertainty_prof
-
-    # ---- empirical statistics ---------------------------------------
-    empirical_mean = np.mean(samples, axis=0)
-    empirical_std  = np.std(samples, axis=0)
-
-    # ---- pointwise exceedance rate ----------------------------------
-    residuals = samples - profile[None, :]     # (n_verification, n_points)
-    outside = np.abs(residuals) > confidence_band * sigma_theory[None, :]
-    # Fraction of samples outside the band at each point
-    exceedance_per_point = np.mean(outside, axis=0)
-    # Overall average exceedance rate
-    avg_exceedance = np.mean(exceedance_per_point)
-
-    # ---- theoretical exceedance for a Gaussian ----------------------
+    sigma_theory           = uncertainty_prof
     theoretical_exceedance = 2.0 * norm.sf(confidence_band)  # two-tailed
 
-    # ---- report -----------------------------------------------------
-    print(f"Verification with {n_verification} samples")
+    perturber = GPRProfilePerturber(kernel_func="rbf", length_scale=length_scale)
+
+    # ---- Path A: re-draw (precompute_factor + draw_from_factor) -----
+    perturber.precompute_factor(psi_N, uncertainty_prof)
+    rng_a = np.random.default_rng(42)
+    samples_a = perturber.draw_from_factor(profile, n_verification, rng_a)
+
+    # ---- Path B: generate_profiles (batch, single eigh) -------------
+    rng_b = np.random.default_rng(42)
+    samples_b = perturber.generate_profiles(
+        psi_N, profile, uncertainty_prof, n_samples=n_verification, rng=rng_b,
+    )
+
+    stats_a = _gpr_stats_from_samples(samples_a, profile, sigma_theory, confidence_band)
+    stats_b = _gpr_stats_from_samples(samples_b, profile, sigma_theory, confidence_band)
+
+    # ---- cross-check: both paths must agree on empirical std --------
+    denom   = np.maximum(sigma_theory, 1e-30)
+    std_rel = np.abs(stats_a["empirical_std"] - stats_b["empirical_std"]) / denom
+    max_rel = np.max(std_rel)
+    if max_rel > 0.05:
+        raise RuntimeError(
+            f"Re-draw and generate_profiles empirical stds differ by "
+            f"{max_rel:.3f} (> 5 %).  The two paths are not statistically "
+            f"equivalent — check GPRProfilePerturber implementation."
+        )
+
+    # ---- report (re-draw path) --------------------------------------
+    s = stats_a
+    print(f"Verification with {n_verification} samples  [re-draw path]")
     print(f"  Mean bias   (max |empirical - input|): "
-          f"{np.max(np.abs(empirical_mean - profile)):.2e}")
+          f"{np.max(np.abs(s['empirical_mean'] - profile)):.2e}")
     print(f"  Std ratio   (mean empirical/theory):   "
-          f"{np.mean(empirical_std / np.maximum(sigma_theory, 1e-30)):.4f}"
+          f"{np.mean(s['empirical_std'] / denom):.4f}"
           f"  (should be ≈ 1.0)")
     print(f"  Exceedance  (±{confidence_band:.1f}σ):              "
-          f"{avg_exceedance:.4f}"
+          f"{s['avg_exceedance']:.4f}"
           f"  (theory: {theoretical_exceedance:.4f})")
+    print(f"  Max std diff vs generate_profiles:     {max_rel:.4f}  ✓")
 
-    # ---- plot -------------------------------------------------------
+    # ---- plot (re-draw path) ----------------------------------------
+    samples = samples_a
+    empirical_std = s["empirical_std"]
+    exceedance_per_point = s["exceedance_per_point"]
+
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
 
     # (a) Empirical vs theoretical std
     axes[0, 0].plot(psi_N, sigma_theory, "k-", lw=2, label="Theory")
-    axes[0, 0].plot(psi_N, empirical_std, "r--", lw=1.5, label="Empirical")
+    axes[0, 0].plot(psi_N, empirical_std, "r--", lw=1.5, label="Re-draw empirical")
+    axes[0, 0].plot(psi_N, stats_b["empirical_std"], "b:", lw=1.5,
+                    label="generate_profiles empirical")
     axes[0, 0].set_ylabel(r"$\sigma(x)$")
-    axes[0, 0].set_title("Pointwise std: theory vs empirical")
+    axes[0, 0].set_title("Pointwise std: theory vs both paths")
     axes[0, 0].legend()
     axes[0, 0].grid(True, alpha=0.3)
 
@@ -465,16 +583,18 @@ def verify_gpr_statistics(
     axes[0, 1].axhline(theoretical_exceedance, color="k", ls="--",
                         label=f"Theory ({theoretical_exceedance:.3f})")
     axes[0, 1].plot(psi_N, exceedance_per_point, "r-", alpha=0.7,
-                     label="Empirical")
+                     label="Re-draw empirical")
+    axes[0, 1].plot(psi_N, stats_b["exceedance_per_point"], "b:", alpha=0.7,
+                     label="generate_profiles empirical")
     axes[0, 1].set_ylabel(f"Fraction outside ±{confidence_band:.0f}σ")
     axes[0, 1].set_title("Exceedance rate per grid point")
     axes[0, 1].legend()
     axes[0, 1].grid(True, alpha=0.3)
 
-    # (c) Histogram at the midpoint
+    # (c) Histogram at the midpoint (re-draw path)
     mid = len(psi_N) // 2
     axes[1, 0].hist(
-        samples[:, mid], bins=60, density=True, alpha=0.6, label="Samples",
+        samples[:, mid], bins=60, density=True, alpha=0.6, label="Re-draw samples",
     )
     x_plot = np.linspace(
         profile[mid] - 4 * sigma_theory[mid],
@@ -491,7 +611,7 @@ def verify_gpr_statistics(
     axes[1, 0].legend()
     axes[1, 0].grid(True, alpha=0.3)
 
-    # (d) Sample spaghetti with band
+    # (d) Sample spaghetti with band (re-draw path)
     axes[1, 1].plot(psi_N, profile, "k-", lw=2, label="Mean")
     axes[1, 1].fill_between(
         psi_N,
@@ -502,7 +622,7 @@ def verify_gpr_statistics(
     n_show = min(50, n_verification)
     for i in range(n_show):
         axes[1, 1].plot(psi_N, samples[i], "-", alpha=0.08, color="tab:blue")
-    axes[1, 1].set_title(f"{n_show} sample draws")
+    axes[1, 1].set_title(f"{n_show} sample draws (re-draw path)")
     axes[1, 1].legend()
     axes[1, 1].grid(True, alpha=0.3)
 
@@ -512,11 +632,9 @@ def verify_gpr_statistics(
     plt.show()
 
     return {
-        "empirical_mean": empirical_mean,
-        "empirical_std": empirical_std,
-        "sigma_theory": sigma_theory,
-        "exceedance_per_point": exceedance_per_point,
-        "avg_exceedance": avg_exceedance,
+        "redraw": stats_a,
+        "batch":  stats_b,
+        "sigma_theory":           sigma_theory,
         "theoretical_exceedance": theoretical_exceedance,
     }
 
@@ -671,9 +789,27 @@ def _draw_monotonic_perturbation(
     sigma_profile,
     length_scale,
     max_draws=_MAX_MONOTONIC_DRAWS,
+    batch_size=128,
+    perturber=None,
+    rng=None,
 ):
     r"""Repeatedly sample a GPR perturbation until the draw is
     monotonically decreasing.
+
+    The kernel matrix and its eigendecomposition are identical for every
+    draw within a single call (only the random vector ``z`` changes), so
+    we precompute them once per batch of ``batch_size`` samples rather
+    than once per sample.  This reduces the number of O(n³)
+    eigendecompositions from ``max_draws`` to ``ceil(max_draws /
+    batch_size)``.
+
+    For maximum efficiency when calling repeatedly with the same
+    ``psi_N``, ``sigma_profile``, and ``length_scale`` (e.g. inside a
+    loop), pass a pre-computed *perturber* (a :class:`GPRProfilePerturber`
+    on which :meth:`~GPRProfilePerturber.precompute_factor` has already
+    been called) and a shared *rng*.  This reduces the cost to a single
+    O(n²) matrix-vector multiply per accepted draw, with no repeated
+    eigendecompositions across calls.
 
     Parameters
     ----------
@@ -687,7 +823,20 @@ def _draw_monotonic_perturbation(
     length_scale : float or ndarray
         GPR correlation length (scalar or spatially-varying).
     max_draws : int
-        Safety cap on the number of attempts.
+        Safety cap on the total number of sample attempts.
+    batch_size : int
+        Number of samples generated per eigendecomposition.  Larger
+        values reduce eigendecomp overhead at the cost of more memory
+        per batch (``batch_size × n_grid`` floats).
+        Ignored when *perturber* is provided (samples are drawn one
+        batch at a time via :meth:`~GPRProfilePerturber.draw_from_factor`).
+    perturber : GPRProfilePerturber or None
+        Optional pre-initialised perturber with
+        :meth:`~GPRProfilePerturber.precompute_factor` already called.
+        When provided, no eigendecomposition is performed here.
+    rng : numpy.random.Generator or None
+        Optional shared random generator.  A fresh generator is created
+        if ``None``.
 
     Returns
     -------
@@ -699,17 +848,20 @@ def _draw_monotonic_perturbation(
     RuntimeError
         If no monotonic draw is found within *max_draws* attempts.
     """
-    for _ in range(max_draws):
-        sample = generate_perturbed_GPR(
-            psi_N,
-            normalised_profile,
-            sigma_profile=sigma_profile,
-            length_scale=length_scale,
-            n_samples=1,
-            diag_plot=False,
-        )
-        if np.all(np.diff(sample) <= 0.0):
-            return sample
+    if perturber is None:
+        perturber = GPRProfilePerturber(kernel_func="rbf", length_scale=length_scale)
+        perturber.precompute_factor(psi_N, sigma_profile)
+    if rng is None:
+        rng = np.random.default_rng()
+
+    drawn = 0
+    while drawn < max_draws:
+        n_batch = min(batch_size, max_draws - drawn)
+        samples = perturber.draw_from_factor(normalised_profile, n_batch, rng)
+        for sample in samples:
+            if np.all(np.diff(sample) <= 0.0):
+                return sample
+        drawn += n_batch
 
     raise RuntimeError(
         f"No monotonically-decreasing GPR draw found in {max_draws} attempts."
