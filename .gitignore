@@ -20,7 +20,11 @@ env/
 # Scientific output files (add formats you actually use)
 *.h5
 *.hdf5
-*.nc          # NetCDF
+# ...but DO track the committed golden test fixtures (small, slimmed)
+!tests/golden/*.h5
+# NetCDF / proprietary IDA data (e.g. IDA_204441_.cdf) — never commit
+*.nc
+*.cdf
 *.dat
 *.npz
 *.npy
