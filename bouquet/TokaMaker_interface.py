@@ -592,7 +592,7 @@ def perturb_kinetic_equilibrium(
     max_li_iter=_MAX_LI_ITER,
     psi_N_kinetic=None,
     max_proxy_draws=500,
-    verbose_interval=1000,
+    verbose_interval=200,
     worker_id=None,
     **kwargs
 ):
@@ -679,6 +679,15 @@ def perturb_kinetic_equilibrium(
         pressure matching and equilibrium solving.  Returned
         perturbed profiles are on ``psi_N_kinetic``.  If ``None``,
         ``psi_N`` is used for everything (original behaviour).
+    max_proxy_draws : int
+        Maximum number of proxy-space draws attempted per :math:`l_i`
+        iteration before raising ``RuntimeError`` (default 500).
+    verbose_interval : int
+        Print pressure-matching progress every this many iterations
+        (default 200).
+    worker_id : int or None
+        Worker identifier prepended to log messages when running inside
+        a multiprocessing pool.  ``None`` (default) disables the prefix.
 
     Returns
     -------
@@ -731,6 +740,7 @@ def perturb_kinetic_equilibrium(
     # psi_kin, sigma profiles, and length scales are constant for the
     # entire pressure-matching loop — one O(n³) eigh per profile instead
     # of one per draw.
+    print("loading GPR perturbers and precomputing factors...", flush=True)
     _kin_rng = np.random.default_rng()
     _ne_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=n_ls)
     _ne_gpr.precompute_factor(psi_kin, sigma_ne / ne[0])
@@ -747,7 +757,7 @@ def perturb_kinetic_equilibrium(
 
     while p_err > p_thresh:
         p_iter += 1
-        if verbose and (p_iter % verbose_interval == 0):
+        if (p_iter % verbose_interval == 0):
             print(f"{_pfx}  pressure match: iter={p_iter}, err={p_err:.3f}% (threshold {p_thresh}%)", flush=True)
         if p_iter > max_pressure_iter:
             raise RuntimeError(
@@ -1155,7 +1165,7 @@ def generate_bouquet(
     baseline_pfile_bytes=None,
     psi_N_kinetic=None,
     max_proxy_draws=500,
-    verbose_interval=1000,
+    verbose_interval=200,
     keep_geqdsk=False,
     worker_id=None,
     **kwargs
@@ -1231,6 +1241,10 @@ def generate_bouquet(
     scan_val : str, float, int, or None
         Optional scan-point label for nested HDF5 storage.
         ``None`` gives the flat layout.
+    scan_name : str
+        Name of the scan dimension used to construct the HDF5 group key
+        when *scan_val* is not ``None`` (e.g. ``"Bt_scale"``).  Ignored
+        when *scan_val* is ``None``.
     pfile_bytes : bytes or None
         Raw p-file content to store alongside each equilibrium.
     Zeff_profile : array-like or None
@@ -1240,6 +1254,24 @@ def generate_bouquet(
         by ``mygs.save_eqdsk`` are kept on disk after being archived into the
         HDF5 database.  Useful for manual inspection or debugging.
         Default is ``False`` (files are deleted after archiving).
+    psi_N_kinetic : ndarray or None
+        Optional extended kinetic-profile grid (starting at 0, ending at
+        :math:`\hat{\psi} \geq 1`).  When provided, ``ne``, ``te``,
+        ``ni``, ``ti`` and their sigmas must be on this grid;
+        profiles are interpolated onto ``psi_N`` before the GS solve.
+        Returned perturbed profiles are on ``psi_N_kinetic``.
+        ``None`` uses ``psi_N`` for everything.
+    max_proxy_draws : int
+        Maximum proxy draws per :math:`l_i` iteration before
+        ``RuntimeError`` (default 500).  Forwarded to
+        :func:`perturb_kinetic_equilibrium`.
+    verbose_interval : int
+        Print pressure-matching progress every this many iterations
+        (default 200).  Forwarded to
+        :func:`perturb_kinetic_equilibrium`.
+    worker_id : int or None
+        Worker identifier prepended to log messages.  ``None`` (default)
+        disables the prefix.
 
     Returns
     -------
@@ -1448,7 +1480,7 @@ def generate_bouquet(
         diagnostics['time'] = elapsed
 
         # ---- save geqdsk to a temporary file, archive, delete -------
-        _scan_prefix = f"_{scan_name}={scan_val}" if scan_val is not None else ""
+        _scan_prefix = f"_{scan_name}_{scan_val}" if scan_val is not None else ""
         eqdsk_filename = f"{header}{_scan_prefix}_count={count}.geqdsk"
         full_path = os.path.abspath(eqdsk_filename)
         print(f"{_pfx}  Saving to: {full_path}")
@@ -1608,6 +1640,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                             isoflux_pts, weights, psi_pad,
                             guess_jinductive, n_k, psi_bridge, rescale_j_BS,
                             shelf_psi_N, initialize_psi=True,
+                            psi_N_kinetic=None,
                             **kwargs):
     r"""Reconstruct a single Grad-Shafranov equilibrium from a geqdsk
     reference and kinetic profiles, matching the EFIT :math:`l_i(1)`.
@@ -1641,8 +1674,13 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         Ion density on ``eqdsk.psi_N`` [m\ :sup:`-3`].
     ti : ndarray
         Ion temperature on ``eqdsk.psi_N`` [eV].
-    Zeff : ndarray
-        Effective charge on ``eqdsk.psi_N``.
+    Zeff : dict or ndarray
+        Effective ion charge profile.  Either:
+        * a dictionary ``{'x': psi_grid, 'y': values}`` giving the
+          profile on an arbitrary normalised psi grid, or
+        * a scalar float / 1-D array on ``eqdsk.psi_N`` (length
+          ``len(eqdsk.psi_N)``) or on ``psi_N_kinetic`` (length
+          ``len(psi_N_kinetic)`` when provided). 
     isoflux_pts : ndarray, shape (N, 2)
         :math:`(R, Z)` coordinates of isoflux constraint points
         [m].  Passed to ``mygs.set_isoflux``.
@@ -1671,6 +1709,13 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         If ``True`` (default), call ``mygs.init_psi`` using LCFS
         geometry estimated from the geqdsk boundary.  Set to ``False``
         to skip initialisation (e.g. when reusing a prior solution).
+    psi_N_kinetic : ndarray or None
+        Optional kinetic-profile grid (starting at 0, ending at
+        :math:`\hat{\psi} \geq 1`).  When provided, ``ne``, ``te``,
+        ``ni`` and ``ti`` are expected on this
+        grid and are interpolated onto ``eqdsk.psi_N`` before the GS
+        solve.  Mirrors the same parameter in :func:`generate_bouquet`.
+        ``guess_jinductive`` is always on ``eqdsk.psi_N``.
 
     Returns
     -------
@@ -1680,6 +1725,82 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     """
     from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
     from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
+
+    # --- Grid sanity checks ---
+    _psi = eqdsk.psi_N
+    if not (np.isclose(_psi[0], 0.0) and np.isclose(_psi[-1], 1.0)):
+        raise ValueError(
+            f"eqdsk.psi_N must run from 0 to 1; got [{_psi[0]:.6g}, {_psi[-1]:.6g}]"
+        )
+    _dpsi = np.diff(_psi)
+    if not np.allclose(_dpsi, _dpsi[0]):
+        raise ValueError(
+            "eqdsk.psi_N must be uniformly sampled; the input g-file grid "
+            "is non-uniform, which is unsupported."
+        )
+    _eq_len    = len(_psi)
+    _dual_grid = psi_N_kinetic is not None
+    _kin_len   = len(psi_N_kinetic) if _dual_grid else _eq_len
+
+    # psi_N_kinetic bounds and same-length ambiguity (mirrors generate_bouquet)
+    if _dual_grid:
+        if not (np.isclose(psi_N_kinetic[0], 0.0) and psi_N_kinetic[-1] >= 1.0):
+            raise ValueError(
+                "psi_N_kinetic must start at 0 and end at psi_N >= 1; "
+                f"got [{psi_N_kinetic[0]:.6g}, {psi_N_kinetic[-1]:.6g}]"
+            )
+        if _kin_len == _eq_len:
+            if np.allclose(psi_N_kinetic, _psi):
+                warn(
+                    "psi_N_kinetic has the same length and endpoints as eqdsk.psi_N; "
+                    "providing a separate kinetic grid of identical length is redundant. "
+                    "This usage is deprecated.",
+                    DeprecationWarning, stacklevel=2,
+                )
+            elif not isinstance(Zeff, dict) and np.ndim(Zeff) > 0:
+                raise ValueError(
+                    "psi_N_kinetic and eqdsk.psi_N have the same length but differ: "
+                    "it is ambiguous which grid array-valued Zeff belongs to. "
+                    "Use dict-format Zeff to specify the grid explicitly."
+                )
+
+    if len(guess_jinductive) != _eq_len:
+        raise ValueError(
+            f"guess_jinductive has length {len(guess_jinductive)} "
+            f"but eqdsk.psi_N has length {_eq_len}"
+        )
+    for _name, _arr in {'ne': ne, 'te': te, 'ni': ni, 'ti': ti}.items():
+        if len(_arr) != _kin_len:
+            _grid_name = 'psi_N_kinetic' if _dual_grid else 'eqdsk.psi_N'
+            raise ValueError(
+                f"{_name} has length {len(_arr)} but expected "
+                f"{_kin_len} ({_grid_name})"
+            )
+    if not isinstance(Zeff, dict):
+        Zeff = np.asarray(Zeff)
+        if Zeff.ndim > 0 and len(Zeff) not in (_kin_len, _eq_len):
+            raise ValueError(
+                f"Zeff has length {len(Zeff)} but expected either "
+                f"eqdsk.psi_N ({_eq_len})"
+                + (f" or psi_N_kinetic ({_kin_len})" if _dual_grid else "")
+            )
+
+    # Interpolate kinetic profiles from psi_N_kinetic onto the equilibrium
+    # grid eqdsk.psi_N when a separate kinetic grid is supplied.
+    # Mirrors the _kin_to_eq logic in generate_bouquet.
+    if _dual_grid:
+        from scipy.interpolate import interp1d as _interp1d_kin
+        def _kin_to_eq(_arr):
+            return _interp1d_kin(
+                psi_N_kinetic, _arr, kind='linear',
+                bounds_error=False, fill_value=(_arr[0], _arr[-1])
+            )(_psi)
+        ne   = _kin_to_eq(ne)
+        te   = _kin_to_eq(te)
+        ni   = _kin_to_eq(ni)
+        ti   = _kin_to_eq(ti)
+        if not isinstance(Zeff, dict) and Zeff.ndim > 0 and len(Zeff) == _kin_len:
+            Zeff = _kin_to_eq(Zeff)
 
     if initialize_psi:
         # Estimate shape parameters from geqdsk LCFS geometry
