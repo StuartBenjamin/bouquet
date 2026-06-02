@@ -1810,6 +1810,9 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         a = geo['a'][-1]
         kappa = geo['kappa'][-1]
         delta = geo['delta'][-1]
+        ffp_prof = create_power_flux_fun(40,1.5,2.0)
+        pp_prof = create_power_flux_fun(40,4.0,1.0)
+        mygs.set_profiles(ffp_prof=ffp_prof,pp_prof=pp_prof,foffset=kwargs.get('F0', None)) # Need to reset flux profiles to prevent old jphi-linterp or jphi-split-bootstrap ffp_profs throwing errors
         mygs.init_psi(R0, Z0, a, kappa, delta)
 
     eqdsk_jtor = abs(eqdsk.j_tor_averaged_direct)
@@ -1921,6 +1924,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         "x": eqdsk.psi_N,
     }
 
+    mygs.set_targets(Ip=abs(eqdsk.Ip), pax=pres_tmp[0])
     mygs.set_profiles(ffp_prof=ffp_prof, pp_prof=pp_prof)
     mygs.solve()
 
@@ -1963,6 +1967,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
             "y": ind_factor * j_inductive_fit + j_BS_isolated,
             "x": eqdsk.psi_N,
         }
+        mygs.set_targets(Ip=abs(eqdsk.Ip), pax=pres_tmp[0])
         mygs.set_profiles(ffp_prof=ffp_tmp, pp_prof=pp_prof)
         try:
             mygs.solve()
