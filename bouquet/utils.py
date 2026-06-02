@@ -248,6 +248,8 @@ def store_equilibrium(
     perturbed_lcfs_ref=None,
     l_i_target_used=None,
     l_i_uncertainty=None,
+    x_points=None,
+    diverted=None,
 ):
     """
     Write one perturbed equilibrium into the HDF5 database.
@@ -391,6 +393,20 @@ def store_equilibrium(
                 data=np.asarray(perturbed_lcfs_ref, dtype=np.float64),
             )
 
+        # ---- TokaMaker-computed X-point(s) for this draw ------------------
+        # The poloidal-field nulls returned by mygs.get_xpoints(), captured
+        # at the SAME solver state the eqdsk was saved from.  This is the
+        # authoritative X-point location (a true B_p=0 saddle), used by
+        # plot_boundary_point_traces in place of any geometric corner guess.
+        # Shape (N, 2) = [[R, Z], ...]; the active (boundary-defining) null
+        # is the last row when ``diverted`` is True.
+        if x_points is not None:
+            xp_arr = np.asarray(x_points, dtype=np.float64).reshape(-1, 2)
+            if xp_arr.size:
+                grp.create_dataset("x_points", data=xp_arr)
+        if diverted is not None:
+            grp.attrs["diverted"] = bool(diverted)
+
 
 def load_equilibrium(header, count, scan_val=None, eqdsk_out_dir=None):
     """
@@ -498,6 +514,8 @@ def store_baseline_profiles(
     coil_currents=None,
     coil_names=None,
     recon_lcfs_ref=None,
+    x_points=None,
+    diverted=None,
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -569,6 +587,18 @@ def store_baseline_profiles(
                 data=np.asarray(recon_lcfs_ref, dtype=np.float64),
             )
 
+        # ---- TokaMaker-computed X-point(s) for the recon baseline --------
+        # Same provenance as the per-draw ``x_points`` (mygs.get_xpoints()
+        # at the recon-converged state).  plot_boundary_point_traces uses
+        # this to decide whether the top/bottom traces are tracking a true
+        # X-point and to anchor the deviation reference.
+        if x_points is not None:
+            xp_arr = np.asarray(x_points, dtype=np.float64).reshape(-1, 2)
+            if xp_arr.size:
+                grp.create_dataset("x_points", data=xp_arr)
+        if diverted is not None:
+            grp.attrs["diverted"] = bool(diverted)
+
         # Recon's converged coil currents (the perturbation reference).
         # Saved alongside profiles so post-processors can compute
         # absolute coil drift per draw without re-running recon.
@@ -635,15 +665,36 @@ def count_equilibria(h5path, scan_value=None):
     -------
     n : int
     """
+    return len(list_equilibrium_indices(h5path, scan_value=scan_value))
+
+
+def list_equilibrium_indices(h5path, scan_value=None):
+    """Return the sorted list of integer draw indices actually stored.
+
+    Band-rejected / failed draws leave GAPS in the index sequence (e.g.
+    ``[0, 1, 2, 3, 4, 5, 7, ...]`` with draw 6 missing), so callers must
+    iterate these indices rather than ``range(count_equilibria(...))`` --
+    the latter assumes a contiguous ``0..n-1`` and KeyErrors on the gap.
+
+    Parameters
+    ----------
+    h5path : str
+        Path to the ``.h5`` file.
+    scan_value : str, float, or None
+        Scan-value key.  ``None`` for the flat layout.
+
+    Returns
+    -------
+    list of int
+        Sorted stored draw indices.
+    """
     bkey = _scan_val_key(scan_value)
     with h5py.File(h5path, "r") as hf:
-        if bkey is not None:
-            parent = hf[f"scan/{bkey}"]
-        else:
-            parent = hf
-        # Count integer-named groups (skip _baseline and other metadata)
-        return sum(1 for k in parent.keys()
-                   if k not in ("_baseline", "scan"))
+        parent = hf[f"scan/{bkey}"] if bkey is not None else hf
+        return sorted(
+            int(k) for k in parent.keys()
+            if k not in ("_baseline", "scan") and str(k).lstrip("-").isdigit()
+        )
 
 
 def load_baseline_profiles(h5path, scan_value=None):

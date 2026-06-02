@@ -27,6 +27,7 @@ from .utils import (
     load_equilibrium_by_path,
     load_baseline_profiles,
     count_equilibria,
+    list_equilibrium_indices,
     discover_scan_values,
 )
 from .io import read_geqdsk
@@ -709,12 +710,14 @@ def draw_jphi_profiles(axes, psi_N, j_phi, sigma_jphi,
 # ====================================================================
 #  Data loading helper
 # ====================================================================
-def _load_all_perturbations(h5path, scan_value=None):
+def _load_all_perturbations(h5path, scan_value=None, indices=None):
     """Load all perturbed equilibria for a scan value as a list of dicts.
 
     Handles non-contiguous indices (from skipped equilibria) by
     discovering actual stored group names rather than assuming
-    sequential 0..N-1.
+    sequential 0..N-1.  When ``indices`` is given (an iterable of stored
+    draw indices), only those draws are loaded -- used to honour a
+    filter selection.
     """
     from .utils import _scan_val_key
     bkey = _scan_val_key(scan_value)
@@ -728,25 +731,30 @@ def _load_all_perturbations(h5path, scan_value=None):
             int(k) for k in parent.keys()
             if k not in ("_baseline", "scan") and k.isdigit()
         )
+    if indices is not None:
+        keep = set(indices)
+        stored_counts = [i for i in stored_counts if i in keep]
     return [
         load_equilibrium_by_path(h5path, count=i, scan_value=scan_value)
         for i in stored_counts
     ]
 
 
-def _load_all_boundaries(h5path, scan_value=None):
+def _load_all_boundaries(h5path, scan_value=None, indices=None):
     """Load LCFS boundaries from stored geqdsk bytes for all equilibria.
 
     Returns a list of (R, Z) tuples.  Returns an empty list when the
-    HDF5 file does not contain geqdsk bytes.
+    HDF5 file does not contain geqdsk bytes.  When ``indices`` is given,
+    only those stored draws are loaded (honours a filter selection).
     """
     from .io import GEQDSKEquilibrium
     from .utils import _scan_val_key, _group_path, _eqdsk_dataset_name
 
-    n = count_equilibria(h5path, scan_value=scan_value)
+    if indices is None:
+        indices = list_equilibrium_indices(h5path, scan_value=scan_value)
     boundaries = []
     with h5py.File(h5path, "r") as hf:
-        for i in range(n):
+        for i in indices:
             sv_key = _scan_val_key(scan_value)
             grp_path = _group_path(scan_value, i)
             if grp_path not in hf:
@@ -771,7 +779,8 @@ def _load_all_boundaries(h5path, scan_value=None):
 # ====================================================================
 #  Notebook-friendly API
 # ====================================================================
-def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic"):
+def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic",
+                 selection="all"):
     """Plot a family of perturbed equilibria from an HDF5 file.
 
     Parameters
@@ -784,6 +793,15 @@ def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic"):
     mode : str
         ``'kinetic'``, ``'pressure'``, ``'j-phi'``, ``'boundary'``,
         or ``'all'``.
+    selection : str
+        Which draws to draw, honouring filter flags written by
+        :func:`bouquet.filter_coil_currents` /
+        :func:`bouquet.filter_boundaries`:
+
+          - ``'all'``      : every stored draw (default; unchanged)
+          - ``'selected'`` : only draws passing all applied filters
+            (all draws if no filter has been run)
+          - ``'excluded'`` : only draws cut by a filter
 
     Returns
     -------
@@ -796,6 +814,13 @@ def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic"):
     else:
         h5path = os.path.abspath(h5path_or_header)
 
+    # ---- resolve which draws to show (filter selection) ------------------
+    sel_indices = None
+    if selection != "all":
+        from .filtering import select_indices as _select_indices
+        sel_indices = _select_indices(h5path, scan_value=scan_value,
+                                      selection=selection)
+
     # ---- load data -------------------------------------------------------
     try:
         bl = load_baseline_profiles(h5path, scan_value=scan_value)
@@ -807,7 +832,8 @@ def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic"):
         )
         raise KeyError(msg) from None
     psi_N = bl["psi_N"]
-    perturbed = _load_all_perturbations(h5path, scan_value=scan_value)
+    perturbed = _load_all_perturbations(h5path, scan_value=scan_value,
+                                        indices=sel_indices)
 
     # Use psi_N_kinetic for kinetic profiles if available
     psi_N_kin = bl.get("psi_N_kinetic", psi_N)
@@ -860,7 +886,8 @@ def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic"):
         axes_list.append(ax_jc)
 
     if mode in ("boundary", "all"):
-        boundaries = _load_all_boundaries(h5path, scan_value=scan_value)
+        boundaries = _load_all_boundaries(h5path, scan_value=scan_value,
+                                          indices=sel_indices)
         if boundaries:
             fig_bd, ax_bd = plt.subplots(1, 2, figsize=(10, 5))
 
@@ -1038,18 +1065,21 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
         if count is not None:
             load_pairs.append((scan_val, count))
         elif scan_val is not None:
-            n = count_equilibria(h5path, scan_value=scan_val)
-            load_pairs.extend((scan_val, i) for i in range(n))
+            load_pairs.extend(
+                (scan_val, i)
+                for i in list_equilibrium_indices(h5path, scan_value=scan_val))
         else:
             # No scan_val specified: load ALL scan values
             svs = discover_scan_values(h5path)
             if svs is not None:
                 for sv in svs:
-                    n = count_equilibria(h5path, scan_value=sv)
-                    load_pairs.extend((sv, i) for i in range(n))
+                    load_pairs.extend(
+                        (sv, i)
+                        for i in list_equilibrium_indices(h5path, scan_value=sv))
             else:
-                n = count_equilibria(h5path, scan_value=None)
-                load_pairs.extend((None, i) for i in range(n))
+                load_pairs.extend(
+                    (None, i)
+                    for i in list_equilibrium_indices(h5path, scan_value=None))
 
         eqs = []
         from .utils import _group_path, _scan_val_key
@@ -1278,17 +1308,20 @@ def plot_pfile_bouquet(pfile_path_or_pf=None, x_coord="psi_N", eq=None,
         if count is not None:
             load_pairs.append((scan_val, count))
         elif scan_val is not None:
-            n = count_equilibria(h5path, scan_value=scan_val)
-            load_pairs.extend((scan_val, i) for i in range(n))
+            load_pairs.extend(
+                (scan_val, i)
+                for i in list_equilibrium_indices(h5path, scan_value=scan_val))
         else:
             svs = discover_scan_values(h5path)
             if svs is not None:
                 for sv in svs:
-                    n = count_equilibria(h5path, scan_value=sv)
-                    load_pairs.extend((sv, i) for i in range(n))
+                    load_pairs.extend(
+                        (sv, i)
+                        for i in list_equilibrium_indices(h5path, scan_value=sv))
             else:
-                n = count_equilibria(h5path, scan_value=None)
-                load_pairs.extend((None, i) for i in range(n))
+                load_pairs.extend(
+                    (None, i)
+                    for i in list_equilibrium_indices(h5path, scan_value=None))
 
         pfiles = []
         from .utils import _group_path, _scan_val_key
@@ -1472,13 +1505,15 @@ def plot_coil_currents(h5path_or_header, scan_val=None):
     if not h5path.endswith(".h5"):
         h5path = os.path.abspath(f"{h5path}.h5")
 
-    n = count_equilibria(h5path, scan_value=scan_val)
-    if n == 0:
+    indices = list_equilibrium_indices(h5path, scan_value=scan_val)
+    if not indices:
         print("No equilibria found.")
         return None, None
 
+    # Iterate the ACTUAL stored indices, not range(n): band-rejected draws
+    # leave gaps in the sequence and range() would KeyError on them.
     all_cc = []
-    for i in range(n):
+    for i in indices:
         entry = load_equilibrium_by_path(h5path, count=i,
                                          scan_value=scan_val)
         if "coil_currents" in entry:
@@ -1950,14 +1985,45 @@ def _detect_xpoint(R, Z, R_axis, Z_axis, half="lower",
     return (float(R[i_best]), float(Z[i_best]))
 
 
+def _xpoints_on_lcfs(x_points, R, Z, tol=0.03):
+    """Return the TokaMaker X-points that lie on the LCFS polyline.
+
+    ``mygs.get_xpoints()`` can return inactive nulls far from the plasma
+    alongside the boundary-defining (active) saddle(s).  Keep only those
+    within ``tol`` metres of the boundary contour ``(R, Z)`` -- these are
+    the X-points that actually sit on the separatrix and define the
+    top/bottom of the diverted boundary.
+
+    Returns a list of ``(R, Z)`` tuples (possibly empty).
+    """
+    if x_points is None:
+        return []
+    xp = np.asarray(x_points, dtype=float).reshape(-1, 2)
+    if xp.size == 0:
+        return []
+    R = np.asarray(R, dtype=float)
+    Z = np.asarray(Z, dtype=float)
+    out = []
+    for r0, z0 in xp:
+        if not (np.isfinite(r0) and np.isfinite(z0)):
+            continue
+        d = float(np.min(np.hypot(R - r0, Z - z0)))
+        if d <= tol:
+            out.append((float(r0), float(z0)))
+    return out
+
+
 def _extract_boundary_points(R, Z, R_axis, Z_axis,
                               ref_R_axis=None,
                               ref_Z_axis=None,
-                              prefer_xpoint=True,
-                              corner_angle_deg=40.0):
+                              x_points=None,
+                              xpoint_tol=0.03):
     """Extract the four characteristic LCFS points used by the trace.
 
-    Returns dict with keys 'inboard', 'outboard', 'top', 'bottom'.
+    Returns ``(pts, has_xpt)`` where ``pts`` is a dict with keys
+    ``'inboard'``, ``'outboard'``, ``'top'``, ``'bottom'`` and
+    ``has_xpt`` is ``{'upper': bool, 'lower': bool}`` recording which
+    halves are anchored on a true X-point.
 
     If ``ref_R_axis`` / ``ref_Z_axis`` are provided, the axis-intersection
     anchors are computed at those FIXED reference coordinates (typically
@@ -1968,9 +2034,11 @@ def _extract_boundary_points(R, Z, R_axis, Z_axis,
     coordinates are not provided, fall back to per-draw axis (legacy
     behaviour, includes axis motion in the deviations).
 
-    Top/bottom default to LCFS ∩ {R=ref_R_axis} but get replaced by
-    detected X-points (corner angle > threshold) when ``prefer_xpoint``
-    is True.
+    Top/bottom default to the LCFS ∩ {R=R_anchor} axis-line intersection
+    but are replaced by TokaMaker's own X-point (``x_points``, a true
+    B_p=0 saddle captured at solve time) whenever a stored null lies on
+    the boundary in that half-plane.  This is exact and resolution-
+    independent, unlike a geometric corner search on the saved polyline.
     """
     R_anchor = ref_R_axis if ref_R_axis is not None else R_axis
     Z_anchor = ref_Z_axis if ref_Z_axis is not None else Z_axis
@@ -1982,27 +2050,27 @@ def _extract_boundary_points(R, Z, R_axis, Z_axis,
         'top':      (R_anchor, z_above),
         'bottom':   (R_anchor, z_below),
     }
-    if prefer_xpoint:
-        # X-point detection uses THIS draw's own axis (X-points exist
-        # in physical space, not at fixed reference coords).  The
-        # detected X-point coords become the anchor for this draw,
-        # so deviations reflect the X-point's motion in absolute space.
-        r_top_x, z_top_x = _detect_xpoint(R, Z, R_axis, Z_axis,
-                                          half='upper',
-                                          corner_angle_deg=corner_angle_deg)
-        if not np.isnan(r_top_x):
-            pts['top'] = (r_top_x, z_top_x)
-        r_bot_x, z_bot_x = _detect_xpoint(R, Z, R_axis, Z_axis,
-                                          half='lower',
-                                          corner_angle_deg=corner_angle_deg)
-        if not np.isnan(r_bot_x):
-            pts['bottom'] = (r_bot_x, z_bot_x)
-    return pts
+    has_xpt = {'upper': False, 'lower': False}
+    # X-points live in physical space, so they are compared against THIS
+    # draw's own axis (not the fixed reference axis) to decide which half
+    # each null belongs to.  The detected X-point coords become the
+    # anchor for that half, so the trace follows the X-point's motion in
+    # absolute space.
+    for r0, z0 in _xpoints_on_lcfs(x_points, R, Z, tol=xpoint_tol):
+        if z0 < Z_axis:
+            if (not has_xpt['lower']) or z0 < pts['bottom'][1]:
+                pts['bottom'] = (r0, z0)   # lowest-Z null = lower X-point
+            has_xpt['lower'] = True
+        elif z0 > Z_axis:
+            if (not has_xpt['upper']) or z0 > pts['top'][1]:
+                pts['top'] = (r0, z0)      # highest-Z null = upper X-point
+            has_xpt['upper'] = True
+    return pts, has_xpt
 
 
 def plot_boundary_point_traces(h5path_or_header, scan_value="all",
                                 prefer_xpoint=True,
-                                corner_angle_deg=40.0):
+                                corner_angle_deg=None):
     r"""Trace plot of characteristic LCFS points across draws,
     expressed as **signed deviation (mm) from the baseline recon**.
 
@@ -2011,10 +2079,18 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
 
       - **inboard midplane**: LCFS where Z = Z_axis, R < R_axis
       - **outboard midplane**: LCFS where Z = Z_axis, R > R_axis
-      - **top**: detected upper X-point if present (corner angle >
-        ``corner_angle_deg``), else LCFS where R = R_axis, Z > Z_axis
-      - **bottom**: detected lower X-point if present, else LCFS
-        where R = R_axis, Z < Z_axis
+      - **top**: upper X-point if the equilibrium has one on the LCFS,
+        else LCFS where R = R_axis, Z > Z_axis
+      - **bottom**: lower X-point if present, else LCFS where
+        R = R_axis, Z < Z_axis
+
+    The X-points are **TokaMaker's own** (``mygs.get_xpoints()``, true
+    B_p=0 saddles) captured at solve time and stored per draw in the
+    ``x_points`` dataset.  This replaces the earlier geometric
+    turning-angle corner search, which was resolution-sensitive and
+    produced erratic X-point hops between neighbouring boundary
+    vertices.  For h5 files written before X-points were stored, the
+    top/bottom traces fall back to the R=R_axis axis-line intersection.
 
     Produces one figure with two subplots:
 
@@ -2036,18 +2112,25 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
         Scan value to plot.  ``'all'`` (default) plots every scan value
         as separate columns of markers.
     prefer_xpoint : bool, default True
-        When True, attempt to detect X-points via tangent-corner test
-        and use them for the top/bottom traces.  When False, always
-        use the R=R_axis vertical-line intersections.
-    corner_angle_deg : float, default 40.0
-        Minimum tangent turning angle (degrees) for a LCFS vertex to
-        be accepted as an X-point.
+        When True, use the stored TokaMaker X-points for the top/bottom
+        traces.  When False, always use the R=R_axis axis-line
+        intersections.
+    corner_angle_deg : float, optional
+        **Deprecated and ignored.**  The geometric corner search this
+        parameter tuned has been replaced by TokaMaker's X-point finder.
+        Retained only so existing calls don't break.
 
     Returns
     -------
     fig : matplotlib.figure.Figure
     """
-    from .utils import read_eqdsk_from_bytes, _scan_val_key, _group_path
+    from .utils import (read_eqdsk_from_bytes, _scan_val_key, _group_path,
+                        list_equilibrium_indices)
+    if corner_angle_deg is not None:
+        warnings.warn(
+            "plot_boundary_point_traces: 'corner_angle_deg' is deprecated "
+            "and ignored; X-points now come from TokaMaker's get_xpoints() "
+            "stored per draw.", DeprecationWarning, stacklevel=2)
 
     if not h5path_or_header.endswith(".h5"):
         h5path = os.path.abspath(f"{h5path_or_header}.h5")
@@ -2075,7 +2158,6 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
 
     with h5py.File(h5path, "r") as hf:
         for i_sv, sv in enumerate(scan_vals):
-            n = count_equilibria(h5path, scan_value=sv)
             indices = []
             R_pts = {k: [] for k in point_labels}
             Z_pts = {k: [] for k in point_labels}
@@ -2089,11 +2171,20 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
             # per-draw axis (legacy behaviour).
             ref_R_axis = None
             ref_Z_axis = None
-            # Whether baseline has an upper/lower X-point detected --
+            # Whether baseline has an upper/lower X-point on the LCFS --
             # used to decide whether the "top"/"bottom" curves are
-            # labelled as X-points in the legend.  Detected once on
+            # labelled as X-points in the legend.  Determined once on
             # baseline so the legend label is stable across all draws.
             baseline_xpoint = {'upper': False, 'lower': False}
+
+            def _read_xpoints(grp):
+                """Stored TokaMaker X-points for a group, or None."""
+                if not prefer_xpoint or "x_points" not in grp:
+                    return None
+                try:
+                    return np.asarray(grp["x_points"][()], dtype=float)
+                except Exception:
+                    return None
 
             # ---- Baseline at index 0 ----
             bl_grp_path = (f"scan/{sv_key}/_baseline"
@@ -2109,29 +2200,15 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
                         # Pin reference coordinates from the baseline.
                         ref_R_axis = float(eq_bl.R_mag)
                         ref_Z_axis = float(eq_bl.Z_mag)
-                        # Test X-point presence on the baseline so the
-                        # legend can label top/bottom as X-points only
-                        # when the recon actually has them.
-                        if prefer_xpoint:
-                            r_top_x, _ = _detect_xpoint(
-                                eq_bl.boundary_R, eq_bl.boundary_Z,
-                                ref_R_axis, ref_Z_axis,
-                                half='upper',
-                                corner_angle_deg=corner_angle_deg)
-                            r_bot_x, _ = _detect_xpoint(
-                                eq_bl.boundary_R, eq_bl.boundary_Z,
-                                ref_R_axis, ref_Z_axis,
-                                half='lower',
-                                corner_angle_deg=corner_angle_deg)
-                            baseline_xpoint['upper'] = not np.isnan(r_top_x)
-                            baseline_xpoint['lower'] = not np.isnan(r_bot_x)
-                        pts = _extract_boundary_points(
+                        pts, has_xpt = _extract_boundary_points(
                             eq_bl.boundary_R, eq_bl.boundary_Z,
                             eq_bl.R_mag, eq_bl.Z_mag,
                             ref_R_axis=ref_R_axis,
                             ref_Z_axis=ref_Z_axis,
-                            prefer_xpoint=prefer_xpoint,
-                            corner_angle_deg=corner_angle_deg)
+                            x_points=_read_xpoints(bl_grp))
+                        # Legend labels top/bottom as X-points only when
+                        # the recon baseline actually has them on the LCFS.
+                        baseline_xpoint = has_xpt
                         indices.append(0)
                         for k in point_labels:
                             R_pts[k].append(pts[k][0])
@@ -2141,8 +2218,9 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
                             f"[plot_boundary_point_traces] baseline "
                             f"({scan_tag}): {exc}")
 
-            # ---- Perturbed draws at indices 1..N ----
-            for i in range(n):
+            # ---- Perturbed draws (stored indices may have gaps where
+            # band-rejected draws were dropped) ----
+            for i in list_equilibrium_indices(h5path, scan_value=sv):
                 grp_path = _group_path(sv, i)
                 if grp_path not in hf:
                     continue
@@ -2153,13 +2231,12 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
                 raw = bytes(grp[eqdsk_keys[0]][()])
                 try:
                     eq = read_eqdsk_from_bytes(raw, read_geqdsk)
-                    pts = _extract_boundary_points(
+                    pts, _has_xpt = _extract_boundary_points(
                         eq.boundary_R, eq.boundary_Z,
                         eq.R_mag, eq.Z_mag,
                         ref_R_axis=ref_R_axis,
                         ref_Z_axis=ref_Z_axis,
-                        prefer_xpoint=prefer_xpoint,
-                        corner_angle_deg=corner_angle_deg)
+                        x_points=_read_xpoints(grp))
                     indices.append(i + 1)
                     for k in point_labels:
                         R_pts[k].append(pts[k][0])

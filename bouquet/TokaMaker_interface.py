@@ -584,7 +584,7 @@ def perturb_kinetic_equilibrium(
     l_i_target,
     Zeff,
     npsi,
-    p_thresh=0.5,
+    p_thresh=0.005,
     input_jinductive=None,
     # Default tightened from 5.0 -> 1.0 (% real-equilibrium l_i error).
     # The outer loop's proxy_target correction is now a pure Newton step
@@ -594,7 +594,7 @@ def perturb_kinetic_equilibrium(
     # tighter tolerance the equilibrium tracks recon l_i instead of
     # locking in at the +5% proxy-bias offset that produced ~10 mm
     # systematic boundary shift across all draws.
-    l_i_tolerance=1.0,
+    l_i_tolerance=0.01,
     psi_pad=1e-3,
     constrain_sawteeth=True,
     recalculate_j_BS=True,
@@ -625,6 +625,7 @@ def perturb_kinetic_equilibrium(
     recon_eq_snapshot=None,
     spike_profile_recon_cached=None,
     proxy_bias_warmstart=None,
+    pin_jphi=False,
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
     match :math:`I_p` and :math:`l_i` targets.
@@ -674,12 +675,14 @@ def perturb_kinetic_equilibrium(
     npsi : int
         Normalised poloidal flux grid size.
     p_thresh : float
-        Acceptable :math:`\langle P \rangle` mismatch [%].
+        Acceptable :math:`\langle P \rangle` mismatch as a FRACTION
+        (e.g. ``0.05`` == 5 %).
     input_jinductive : ndarray or None
         Dimensionless inductive :math:`j_\phi` shape (required when
         ``recalculate_j_BS=True``).
     l_i_tolerance : float
-        :math:`l_i` matching tolerance [%].
+        :math:`l_i` matching tolerance as a FRACTION of ``l_i_target``
+        (e.g. ``0.01`` == 1 %).
     psi_pad : float
         Padding inside the LCFS for profile queries.
     constrain_sawteeth : bool
@@ -756,14 +759,16 @@ def perturb_kinetic_equilibrium(
 
     p_err = np.inf
     p_iter = 0
+    # p_thresh is a FRACTION (e.g. 0.05 == 5%); p_err is computed in percent.
+    _p_thresh_pct = float(p_thresh) * 100.0
     print("Searching for pressure profile match...")
 
-    while p_err > p_thresh:
+    while p_err > _p_thresh_pct:
         p_iter += 1
         if p_iter > max_pressure_iter:
             raise RuntimeError(
                 f"Pressure match not found within {max_pressure_iter} iterations "
-                f"(last error {p_err:.2f}% vs threshold {p_thresh}%)"
+                f"(last error {p_err:.2f}% vs threshold {_p_thresh_pct:.2f}%)"
             )
 
         # GPR sampling on psi_kin (kinetic grid, may include SOL)
@@ -834,10 +839,11 @@ def perturb_kinetic_equilibrium(
     iteration_l_is = []
     iteration_Ips = []
 
-    # PIN_JPHI is read here so it's in scope whether or not the
-    # recalculate_j_BS branch below runs.  See full rationale in the
-    # recon-anchor block.
-    _pin_jphi = os.environ.get('PIN_JPHI', '0') == '1'
+    # pin_jphi: pin j_phi to recon's converged shape (only pressure perturbs
+    # per draw).  Set via the function argument; the PIN_JPHI env var is kept
+    # as a back-compat override.  Read here so it's in scope whether or not
+    # the recalculate_j_BS branch below runs (see recon-anchor block).
+    _pin_jphi = bool(pin_jphi) or os.environ.get('PIN_JPHI', '0') == '1'
 
     # DIFF_BS (differential bootstrap) is structurally similar to
     # PIN_JPHI but instead of fully bypassing SWB, it runs SWB on the
@@ -1370,7 +1376,6 @@ def perturb_kinetic_equilibrium(
     # ----------------------------------------------------------------
     l_i = np.inf
     final_scale_j0 = 1.0
-    final_scale_Ip = 1.0
     # Use recon's j_inductive_fit (input_jinductive) instead of SWB's
     # matched_j_inductive -- see [recon-anchor] block above for rationale.
     matched_j_inductive = (
@@ -1515,10 +1520,15 @@ def perturb_kinetic_equilibrium(
     _prescreen_margin = float(os.environ.get('PRESCREEN_MARGIN', '3.0'))
     _prescreen_verify = os.environ.get('PRESCREEN_VERIFY', '0') == '1'
 
+    # l_i_tolerance is a FRACTION of l_i_target (e.g. 0.05 == 5%).  Internally
+    # the acceptance band, pre-screen window and reporting are in percent, so
+    # convert once here.  (_prescreen_margin stays in percent.)
+    _li_tol_pct = float(l_i_tolerance) * 100.0
+
     for li_iter in range(1, max_li_iter + 1):
         if _pin_jphi or _diff_bs:
             break  # PIN_JPHI / DIFF_BS shortcut handled above
-        if 100.0 * abs(l_i - l_i_target) / l_i_target <= l_i_tolerance:
+        if 100.0 * abs(l_i - l_i_target) / l_i_target <= _li_tol_pct:
             break  # last draw's equilibrium l_i is within the measured band
 
         t_phase = time.perf_counter()
@@ -1549,7 +1559,7 @@ def perturb_kinetic_equilibrium(
         a_optimal = None
         matched_jphi_perturb = None
         _n_skipped = 0
-        _ps_window = l_i_tolerance + _prescreen_margin  # % of l_i_target
+        _ps_window = _li_tol_pct + _prescreen_margin  # % of l_i_target
         for _gpr_try in range(1, max_proxy_draws + 1):
             _cand = generate_perturbed_GPR(
                 psi_N,
@@ -1615,7 +1625,7 @@ def perturb_kinetic_equilibrium(
         final_scale_j0, final_jphi = find_optimal_scale(
             mygs, psi_N, pres_tmp, ffp_prof, pp_prof,
             matched_j_inductive, Ip_target, psi_pad,
-            spike_prof=spike_profile, find_j0=True,
+            spike_prof=spike_profile,
             diagnostic_plots=False, verbose=False,
         )
 
@@ -1631,12 +1641,9 @@ def perturb_kinetic_equilibrium(
                 l_i = np.inf
                 continue
 
-        # Ip-aligning removed (2026-05): the OFT jphi-linterp cut-cell fix
-        # holds Ip to <0.05% natively, so the find_j0=False Ip-scale secant
-        # is redundant and was perturbing the boundary.  find_j0=True (core
-        # j0 self-consistency) above is retained.  final_scale_Ip=1.0 keeps
-        # Ip_target unscaled downstream.
-        final_scale_Ip = 1.0
+        # Only the core-j0 scale is applied above; the OFT
+        # solver holds Ip to target natively, so Ip_target is used unscaled
+        # downstream (no Ip-scale secant).
         dt_scale = time.perf_counter() - t_scale
         print(f"  [li_iter={li_iter}] find_optimal_scale (j0 only): {dt_scale:.1f}s")
 
@@ -1649,7 +1656,7 @@ def perturb_kinetic_equilibrium(
                 continue
 
         j0_scales.append(final_scale_j0)
-        Ip_scales.append(final_scale_Ip)
+        Ip_scales.append(1.0)   # Ip held natively; no Ip-scale applied
 
         # ---- 5e. Adaptive corrective iteration ----------------------
         # Iterate TokaMaker until its output j_phi matches the intended
@@ -1673,7 +1680,7 @@ def perturb_kinetic_equilibrium(
 
         output_jphi, _n_corr, _corr_hist = _corrective_jphi_iteration(
             mygs, psi_N, target_jphi_perturb, pp_prof,
-            Ip_target * final_scale_Ip, pres_tmp[0], psi_pad,
+            Ip_target, pres_tmp[0], psi_pad,
             min_iters=2,
             # Corrective-iteration cap (default 8; observed to converge ~5).
             # Env CORR_MAX_ITERS lets us trim for speed (4 saves ~1 solve).
@@ -1741,7 +1748,7 @@ def perturb_kinetic_equilibrium(
         print(f"  Ip error vs target:   {Ip_err:.3f}%")
         print(f"  proxy vs real l_i:    {proxy_vs_real:+.2f}%")
         _li_pct_err = 100.0 * abs(l_i - l_i_target) / l_i_target if l_i_target != 0 else float('inf')
-        print(f"  l_i error:            {_li_pct_err:.2f}% (tolerance: {l_i_tolerance:.2f}%)")
+        print(f"  l_i error:            {_li_pct_err:.2f}% (tolerance: {_li_tol_pct:.2f}%)")
 
         iteration_l_is.append(l_i)
         iteration_Ips.append(Ip)
@@ -1752,7 +1759,7 @@ def perturb_kinetic_equilibrium(
             f"No GPR j_phi draw landed within the l_i band after "
             f"{max_li_iter} attempts "
             f"(last l_i error = {100.0 * abs(l_i - l_i_target) / l_i_target:.2f}%, "
-            f"band = +/-{l_i_tolerance:.2f}%, "
+            f"band = +/-{_li_tol_pct:.2f}%, "
             f"target={l_i_target:.4f}, last={l_i:.4f}).\n"
             f"Try widening the l_i band (l_i_tolerance) or increasing "
             f"max_li_iter."
@@ -1833,7 +1840,7 @@ def generate_bouquet(
     l_i_target,
     Zeff,
     input_jinductive=None,
-    l_i_tolerance=1.0,
+    l_i_tolerance=0.01,
     psi_pad=1e-3,
     constrain_sawteeth=True,
     recalculate_j_BS=True,
@@ -1854,12 +1861,16 @@ def generate_bouquet(
     coil_drift_hard_factor=None,
     soft_reg_weight=1.0e4,
     vsc_soft_reg_weight=1.0,
-    p_thresh=5.0,
+    p_thresh=0.05,
     homotopy_passes=None,
     inspec_F_max=0.025,
     inspec_VSC_max=0.10,
     recon_lcfs_ref=None,
     l_i_uncertainty=0.0,
+    save_truncate_eq=True,
+    jphi_baseline=True,
+    seed=None,
+    pin_jphi=False,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -1909,7 +1920,26 @@ def generate_bouquet(
     input_jinductive : ndarray or None
         Dimensionless inductive :math:`j_\phi` shape.
     l_i_tolerance : float
-        :math:`l_i` tolerance [%].
+        :math:`l_i` tolerance as a FRACTION of ``l_i_target`` (e.g.
+        ``0.01`` == 1 %).
+    jphi_baseline : bool
+        When True (default), solve the recon profiles ONCE through the
+        same jphi-linterp machinery the perturbed draws use and
+        reference all per-draw diagnostics (boundary, :math:`l_i`) to
+        THIS baseline rather than recon's inverse-mode LCFS.  This
+        removes the constant jphi-linterp edge-representation offset so
+        an unperturbed (:math:`\sigma=0`) draw lands ~0 mm / ~0 % from
+        baseline and perturbations show their true incremental response.
+    seed : int or None
+        If given, seed NumPy's global RNG at the start of the run for
+        reproducible draws.  ``None`` (default) leaves the RNG untouched.
+    pin_jphi : bool
+        When True, pin :math:`j_\phi` to recon's converged shape so only the
+        pressure profile perturbs per draw (the bootstrap/SWB call is
+        bypassed).  At :math:`\sigma=0` every draw then reproduces the
+        baseline exactly -- the strongest no-systematic / no-bias check.
+        Default False (full free-:math:`j_\phi` production mode).  The
+        ``PIN_JPHI`` env var remains a back-compat override.
     psi_pad : float
         LCFS padding for profile queries.
     constrain_sawteeth : bool
@@ -1992,6 +2022,11 @@ def generate_bouquet(
     list[dict]
         Diagnostics from each equilibrium.
     """
+    # Seed the RNG here (encapsulates determinism in the call instead of
+    # relying on a global np.random.seed before it).  No-op when seed=None.
+    if seed is not None:
+        np.random.seed(int(seed))
+
     all_diagnostics = []
 
     # self-consistent pressure for baseline <P>
@@ -2067,7 +2102,7 @@ def generate_bouquet(
         # alone isn't enough -- need to iterate).
         _recon_Ip = float(abs(mygs.get_globals()[0]))
 
-        # ---- Unperturbed jphi-linterp baseline solve (env JPHI_BASELINE) ----
+        # ---- Unperturbed jphi-linterp baseline solve (jphi_baseline flag) ---
         # WHY: recon converges in INVERSE mode using its exact internal
         # FF'/P' profiles.  Every ensemble member, by contrast, is solved
         # in jphi-linterp mode (we specify <j_phi> and the solver back-
@@ -2087,7 +2122,7 @@ def generate_bouquet(
         # perturbations show their true incremental response.  Coils are
         # left free (inverse + isoflux) exactly as in a draw.
         _baseline_li1 = float(l_i_target)
-        if os.environ.get('JPHI_BASELINE', '0') == '1':
+        if jphi_baseline:
             _psi_range_b = mygs.psi_bounds[1] - mygs.psi_bounds[0]
             _pp_b = {"type": "linterp",
                      "y": np.gradient(pressure) /
@@ -2471,7 +2506,7 @@ def generate_bouquet(
                 mygs.save_eqdsk(
                     _tmp_eqdsk_path,
                     nr=257, nz=257,
-                    truncate_eq=False,
+                    truncate_eq=save_truncate_eq,
                     lcfs_pad=psi_pad)
                 with open(_tmp_eqdsk_path, 'rb') as _ef:
                     _new_eqdsk_bytes = _ef.read()
@@ -2628,6 +2663,20 @@ def generate_bouquet(
     except Exception:
         _bl_coil_dict = None
 
+    # TokaMaker's built-in X-point finder, captured at the recon-converged
+    # state (the same state baseline.eqdsk was saved from).  Stored so
+    # plot_boundary_point_traces tracks true B_p=0 nulls instead of a
+    # geometric corner guess on the saved boundary polyline.
+    try:
+        _bl_xpts, _bl_div = mygs.get_xpoints()
+        _bl_xpts = (np.asarray(_bl_xpts, dtype=float)
+                    if _bl_xpts is not None else None)
+    except Exception as _xexc:
+        print(f"  WARN: baseline get_xpoints() failed ({_xexc}); "
+              f"plot_boundary_point_traces will fall back to the "
+              f"axis-line intersection for top/bottom")
+        _bl_xpts, _bl_div = None, None
+
     store_baseline_profiles(
         header, psi_N,
         ne, te, ni, ti,
@@ -2640,6 +2689,8 @@ def generate_bouquet(
         psi_N_kinetic=psi_N_kinetic,
         coil_currents=_bl_coil_dict,
         recon_lcfs_ref=recon_lcfs_ref,
+        x_points=_bl_xpts,
+        diverted=_bl_div,
     )
 
     # ---- DIFF_BS cache: snapshot mygs + cache SWB(recon kinetics) ----
@@ -2926,6 +2977,7 @@ def generate_bouquet(
                 recon_eq_snapshot=_diff_recon_eq_snap,
                 spike_profile_recon_cached=_diff_spike_recon,
                 proxy_bias_warmstart=_proxy_bias_warmstart,
+                pin_jphi=pin_jphi,
             )
         except Exception as e:
             # Catch ANY exception during a perturbed solve -- ValueError
@@ -2992,20 +3044,16 @@ def generate_bouquet(
             except Exception as _sreg_exc:
                 print(f"  [reg] strong-reg restore failed ({_sreg_exc})")
 
-        # ---- Post-perturb: Ip-secant alignment + hard coil bounds -----
-        # The kinetic perturbation flow (perturb_kinetic_equilibrium)
-        # converges with jphi-linterp's geometric Ip drift, so the actual
-        # converged Ip on each draw differs from the user's target by
-        # ~1-2%.  That mismatch makes the F-coil distribution drift more
-        # than necessary to satisfy the perturbed-profile equilibrium.
-        #
-        # Step 1: secant-iterate Ip_target until actual_Ip (from
-        #         get_globals) matches recon's converged Ip to <<1%.
-        # Step 2: install hard +/-coil_drift bounds and re-solve once.
-        #         If the QP is feasible at the now-Ip-aligned profile,
-        #         the draw is accepted.  If infeasible, the draw is
-        #         rejected and the loop moves on (with the standard
-        #         baseline reset).
+        # ---- Post-perturb: iso-update + hard coil bounds --------------
+        # The perturbed equilibrium out of perturb_kinetic_equilibrium is
+        # accepted as-is (Ip is held to <0.05% of target natively by the
+        # backend -- no per-draw Ip alignment).  We then:
+        #   Step 2: update the isoflux target to the perturbed LCFS, and
+        #   Step 3: install hard +/-coil_drift bounds and re-solve (with
+        #           optional homotopy tightening).
+        #   If the QP is feasible the draw is accepted; if infeasible the
+        #   draw is rejected and the loop moves on (standard baseline
+        #   reset).
         # Boundary diagnostic: state coming OUT of perturb_kinetic_equilibrium
         # (post-recon-anchor + post-GPR-loop + post-corrective-iteration)
         _report_bnd("after perturb_kinetic_eq")
@@ -3013,121 +3061,15 @@ def generate_bouquet(
         if coil_drift is not None and _recon_Ip is not None:
             _ip_aligned = False
             _post_align_failed = False
-            _Ip_tol = 1e-3
-            _max_ip_iters = 8
-            # Ip-aligning REMOVED (2026-05): the OFT jphi-linterp cut-cell
-            # fix holds Ip to <0.05% natively, so the post-perturb Ip secant
-            # is redundant; worse, it re-solved to a slightly different Ip
-            # per draw, introducing a per-draw boundary spread (~0.3-0.5 mm)
-            # even at sigma=0.  Hard-disabled here (the secant body below is
-            # now dead and slated for physical deletion).  _ip_aligned is
-            # still set True so iso-update/homotopy run against the
-            # recon-anchor equilibrium.  Env SKIP_IP_ALIGN retained only as
-            # an escape hatch to re-enable for debugging (default: removed).
-            _skip_ip_align = os.environ.get('SKIP_IP_ALIGN', '1') == '1'
-            # Target RECON's actual converged Ip (`_recon_Ip` captured
-            # from mygs.get_globals() on entry to generate_bouquet),
-            # not the user-supplied `initial_Ip_target` (= eqdsk.Ip).
-            #
-            # WHY: TokaMaker's jphi-linterp profile type has a known
-            # ~0.5-1% Ip-vs-target discretization mismatch (cut-cell FE
-            # quadrature near separatrix; <R>/<1/R> averaging in
-            # jphi_update vs pointwise R in gs_comp_globals).  Recon's
-            # find_optimal_scale Brent search compensates by iterating
-            # a scale factor until get_globals()['Ip'] ~= eqdsk.Ip
-            # (within ~0.05% tolerance).  But the resulting mygs state
-            # has FFP scaled so the *cut-cell-error-included* Ip
-            # integral equals eqdsk.Ip -- meaning the "consistent"
-            # Ip that TokaMaker can naturally hold is whatever
-            # _recon_Ip actually is (close to but not equal to
-            # eqdsk.Ip).  Per-draw Ip-aligning to eqdsk.Ip then drags
-            # the equilibrium by ~4mm to re-do the same compensation
-            # recon already did, but this time without the protection
-            # of the scale-factor approach -- producing a real boundary
-            # displacement.
-            #
-            # The earlier-noted save_eqdsk Ip-shift concern (~0.5-0.8%)
-            # was resolved by the safe_trace_surf wrapper which now
-            # protects mygs state through diagnostic trace_surf calls
-            # (PR #248 copy_eq/replace_eq).  _recon_Ip is now a stable
-            # measurement of recon's converged Ip.
-            _ip_align_target = float(_recon_Ip)
+            # Per-draw Ip-secant alignment was removed (2026-05): the OFT
+            # jphi-linterp cut-cell fix + the gs solver outer loop hold Ip to
+            # <0.05% of target natively, so re-solving each draw to nudge Ip
+            # was redundant and only added a per-draw boundary spread
+            # (~0.3-0.5 mm) even at sigma=0.  Accept the perturbed
+            # equilibrium as-is and run the iso-update + hard-bound homotopy
+            # below against it.
             try:
-                # Snapshot current pp/ffp from mygs so the secant solves
-                # against the perturbed-profile equilibrium.
-                _, _F, _Fp, _P, _Pp = mygs.get_profiles(psi=psi_N)
-                _pp_align  = {'type': 'linterp',      'y': _Pp,        'x': psi_N}
-                _ffp_align = {'type': 'jphi-linterp', 'y': jphi_perturb.copy(), 'x': psi_N}
-
-                # Pre-secant: where are we?
-                _actual_pre = float(abs(mygs.get_globals()[0]))
-                _err_pre = abs(_actual_pre - _ip_align_target) / _ip_align_target
-                _trial = _ip_align_target
-                _final_actual = _actual_pre
-
-                if _err_pre > _Ip_tol and not _skip_ip_align:
-                    # First-order rescale; on solve failure, retry the
-                    # SAME ip iteration with a damped step (averaged
-                    # toward _final_actual) rather than aborting the
-                    # entire post-perturb pipeline.  Empirically the
-                    # first-order rescale can over-shoot when the
-                    # perturbed profile's geometric Ip drift is large,
-                    # tripping Picard maxits.  A halved step usually
-                    # converges from the same starting psi.
-                    _trial = _ip_align_target * (_ip_align_target / _actual_pre)
-                    _max_failure_retries = 3
-                    _saved_psi = mygs.get_psi(False).copy()
-                    for _ip_it in range(_max_ip_iters):
-                        _retries = 0
-                        while True:
-                            try:
-                                mygs.set_targets(Ip=_trial,
-                                                  pax=float(_P[0]) if _P[0] != 0
-                                                       else float(pressure[0]))
-                                mygs.set_profiles(pp_prof=_pp_align,
-                                                   ffp_prof=_ffp_align)
-                                mygs.solve()
-                                # success: snapshot psi for next retry
-                                _saved_psi = mygs.get_psi(False).copy()
-                                break
-                            except (ValueError, RuntimeError) as _ip_exc:
-                                _retries += 1
-                                if _retries > _max_failure_retries:
-                                    print(f"  [Ip-align] secant solve failed at "
-                                          f"iter {_ip_it} after {_retries-1} "
-                                          f"damped retries (final Ip_trial="
-                                          f"{_trial:.0f}): {_ip_exc}")
-                                    _post_align_failed = True
-                                    break
-                                # Restore last-good psi and damp toward
-                                # the previous converged Ip (_final_actual)
-                                try:
-                                    mygs.set_psi(_saved_psi, update_bounds=True)
-                                except Exception:
-                                    pass
-                                _new_trial = 0.5 * (_trial + _final_actual)
-                                print(f"  [Ip-align] solve failed at iter "
-                                      f"{_ip_it} (Ip_trial={_trial:.0f}); "
-                                      f"damping to {_new_trial:.0f} (retry "
-                                      f"{_retries}/{_max_failure_retries})")
-                                _trial = _new_trial
-                        if _post_align_failed:
-                            break
-                        _final_actual = float(abs(mygs.get_globals()[0]))
-                        _err = abs(_final_actual - _ip_align_target) / _ip_align_target
-                        if _err < _Ip_tol:
-                            break
-                        # Proportional rescale toward target
-                        _trial = _trial * (_ip_align_target / _final_actual)
-                else:
-                    pass  # already aligned
-
-                if not _post_align_failed:
-                    print(f"  [Ip-align] aligned actual_Ip {_actual_pre:.0f} -> "
-                          f"{_final_actual:.0f}  (target {_ip_align_target:.0f}, "
-                          f"err {abs(_final_actual - _ip_align_target)/_ip_align_target*100:+.3f}%)")
-                    _report_bnd("after Ip-align")
-                    _ip_aligned = True
+                _ip_aligned = True
 
                 # Step 2: update isoflux to the *post-Ip-aligned* boundary
                 # (still free VSC).  This is the boundary the perturbed
@@ -3190,7 +3132,7 @@ def generate_bouquet(
                                        + 200.0)
                             mygs.set_isoflux(_new_lcfs, weights=_new_w)
                             _iso_updated = True
-                            print(f"  [iso-update] new isoflux from Ip-aligned LCFS "
+                            print(f"  [iso-update] new isoflux from perturbed LCFS "
                                   f"({len(_new_lcfs)} pts)")
                         else:
                             print(f"  [iso-update] LCFS trace failed; keeping recon isoflux")
@@ -3470,7 +3412,7 @@ def generate_bouquet(
                           f"(limit {inspec_VSC_max*100:.1f}%)")
 
             except Exception as _post_exc:
-                print(f"  [Ip-align+bounds] unexpected failure: {_post_exc}")
+                print(f"  [post-perturb] unexpected failure: {_post_exc}")
                 _post_align_failed = True
 
             if _post_align_failed:
@@ -3532,7 +3474,7 @@ def generate_bouquet(
             mygs,
             eqdsk_filename,
             nr=257, nz=257,
-            truncate_eq=False,
+            truncate_eq=save_truncate_eq,
             lcfs_pad=psi_pad,
         )
 
@@ -3555,6 +3497,21 @@ def generate_bouquet(
                   f"({_lcfs_exc}); plot_traces will fall back to "
                   f"the eqdsk's coarse boundary for this draw")
             perturbed_lcfs_ref = None
+
+        # TokaMaker's built-in X-point finder at this same (post-save)
+        # solver state -- the authoritative B_p=0 saddle location for this
+        # draw, stored for plot_boundary_point_traces.
+        try:
+            _draw_xpts, _draw_div = mygs.get_xpoints()
+            _draw_xpts = (np.asarray(_draw_xpts, dtype=float)
+                          if _draw_xpts is not None else None)
+        except Exception as _xexc:
+            print(f"  WARN: get_xpoints() failed ({_xexc}); "
+                  f"this draw's top/bottom traces fall back to the "
+                  f"axis-line intersection")
+            _draw_xpts, _draw_div = None, None
+        diagnostics['x_points'] = _draw_xpts
+        diagnostics['diverted'] = _draw_div
 
         eq_stats_std = mygs.get_stats(li_normalization="std", lcfs_pad=psi_pad)
         li1 = eq_stats_std["l_i"]
@@ -3688,6 +3645,8 @@ def generate_bouquet(
             perturbed_lcfs_ref=perturbed_lcfs_ref,
             l_i_target_used=diagnostics.get('l_i_target_used'),
             l_i_uncertainty=diagnostics.get('l_i_uncertainty'),
+            x_points=diagnostics.get('x_points'),
+            diverted=diagnostics.get('diverted'),
         )
 
         # Clean up on-disk eqdsk after archiving
@@ -3738,10 +3697,10 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     4. Iterate on the inductive scale factor (hybrid secant–bisection
        with step clamping and psi save/restore) until the TokaMaker
        :math:`l_i(1)` matches the geqdsk value.
-    5. Correct residual Ip drift by iterating on the Ip target passed
-       to ``mygs.set_targets(Ip=...)`` via a secant search.  The
-       :math:`j_\phi` profile shape is preserved; TokaMaker internally
-       enforces the Ip constraint.
+    5. (Residual-Ip secant removed.)  The jphi-linterp Ip drift is now
+       corrected natively by the OFT solver (cut-cell fix + Ip outer
+       loop in the gs solve), so no post-li-match Python Ip-rescaling
+       secant is needed.
 
     Parameters
     ----------
@@ -4078,87 +4037,15 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     Ip_tokamaker = _eq_stats_final['Ip']
     print(f"[li match] final li(1)={final_li:.6f}  target={li_target:.6f}  |err|={abs(final_li - li_target):.6f}")
 
-    # ---- 6. Ip-correction secant (set_targets Ip rescaling) ----------
-    #
-    # The jphi-linterp profile type has inherent Ip drift because the
-    # actual integrated current depends on the equilibrium geometry.
-    # We correct this by iterating on the Ip target passed to
-    # mygs.set_targets() — TokaMaker internally rescales the current
-    # density to enforce the constraint.  The j_phi profile *shape*
-    # is unchanged, so li is minimally perturbed.
+    # ---- 6. li-matched inductive profile (Ip-correction secant removed) --
+    # The jphi-linterp Ip drift is corrected natively by the OFT solver
+    # (cut-cell fix + Ip outer loop in the gs solve), so the post-li-match
+    # Python Ip-rescaling secant has been removed.  Retain the li-matched
+    # inductive profile, which the corrective iteration (section 7) consumes.
     Ip_desired = abs(eqdsk.Ip)
-    Ip_tol = 0.0005  # relative tolerance on Ip
-    max_Ip_iters = 8
-
-    # Current j_phi components after li convergence (fixed throughout)
     j_ind_li = ind_1 * j_inductive_fit  # li-matched inductive profile
-    j_phi_li = j_ind_li + j_BS_isolated
 
-    def _solve_and_get_Ip(Ip_trial):
-        """Set Ip target, solve, return (actual Ip, li)."""
-        mygs.set_targets(Ip=Ip_trial,pax=pres_tmp[0])
-        try:
-            mygs.solve()
-        except ValueError:
-            print(f"[Ip match]   solve failed for Ip_target={Ip_trial:.1f}, "
-                  "restoring last good psi")
-            _restore_psi()
-            return None, None
-        _save_psi()
-        stats = mygs.get_stats(li_normalization='std', lcfs_pad=psi_pad)
-        return stats['Ip'], stats['l_i']
-
-    Ip_err_rel = abs(Ip_tokamaker - Ip_desired) / Ip_desired
-    if Ip_err_rel > Ip_tol:
-        print(f"\n[Ip match] desired={Ip_desired:.1f}  current={Ip_tokamaker:.1f}  "
-              f"err={100 * (Ip_tokamaker - Ip_desired) / Ip_desired:+.4f}%")
-
-        # Two initial evaluations for secant:
-        # pt 0: Ip_target = Ip_desired (the true target), result already known
-        # pt 1: Ip_target adjusted by a first-order correction
-        t0, Ip_0 = Ip_desired, Ip_tokamaker
-        t1 = Ip_desired * (Ip_desired / Ip_tokamaker)  # first-order correction
-        Ip_1, li_1_Ip = _solve_and_get_Ip(t1)
-
-        if Ip_1 is not None:
-            print(f"[Ip match] iter 0: Ip_target={t0:.1f}  Ip={Ip_0:.1f}")
-            print(f"[Ip match] iter 1: Ip_target={t1:.1f}  Ip={Ip_1:.1f}  "
-                  f"li={li_1_Ip:.6f}")
-
-            for Ip_iter in range(2, max_Ip_iters):
-                e0 = Ip_0 - Ip_desired
-                e1 = Ip_1 - Ip_desired
-
-                if abs(e1 / Ip_desired) < Ip_tol:
-                    print(f"[Ip match] converged at iter {Ip_iter}: "
-                          f"Ip_target={t1:.1f}  Ip={Ip_1:.1f}  li={li_1_Ip:.6f}")
-                    break
-
-                denom = e1 - e0
-                if abs(denom) < 1.0:
-                    print(f"[Ip match] secant denominator ~0, stopping")
-                    break
-
-                t_new = t1 - e1 * (t1 - t0) / denom
-                t_new = max(t_new, 0.5 * Ip_desired)  # safety floor
-
-                t0, Ip_0 = t1, Ip_1
-                t1 = t_new
-                Ip_1, li_1_Ip = _solve_and_get_Ip(t1)
-                if Ip_1 is None:
-                    print(f"[Ip match] solve failed, keeping previous result")
-                    break
-
-                print(f"[Ip match] iter {Ip_iter}: Ip_target={t1:.1f}  "
-                      f"Ip={Ip_1:.1f}  li={li_1_Ip:.6f}")
-            else:
-                print(f"[Ip match] WARNING: did not converge within "
-                      f"{max_Ip_iters} iterations")
-    else:
-        print(f"\n[Ip match] already within tolerance: "
-              f"err={100 * (Ip_tokamaker - Ip_desired) / Ip_desired:+.4f}%")
-
-    # -- Final stats after Ip correction --------------------------------
+    # -- Final stats (after li match) -------------------------------------
     _eq_stats_final = mygs.get_stats(li_normalization='std', lcfs_pad=psi_pad)
     final_li = _eq_stats_final['l_i']
     Ip_tokamaker = _eq_stats_final['Ip']

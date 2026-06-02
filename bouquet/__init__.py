@@ -4,6 +4,7 @@ from . import TokaMaker_interface
 from . import plotting
 from . import utils
 from . import io
+from . import filtering
 
 # gui is NOT imported eagerly to avoid pulling in matplotlib.pyplot
 # at package load time (breaks headless / server environments).
@@ -28,6 +29,7 @@ from .TokaMaker_interface import (
 
 from .uncertainties import (
     new_uncertainty_profiles,
+    synthetic_ida_sigma,
 )
 
 from .plotting import (
@@ -54,6 +56,14 @@ from .io import (
     read_pfile,
 )
 
+from .filtering import (
+    filter_coil_currents,
+    filter_boundaries,
+    read_filter_flags,
+    select_indices,
+    export_filtered,
+)
+
 from .utils import (
     Hmode_profiles,
     Ip_flux_integral_vs_target,
@@ -65,5 +75,6 @@ from .utils import (
     load_baseline_profiles,
     discover_scan_values,
     count_equilibria,
+    list_equilibrium_indices,
     read_eqdsk_from_bytes,
 )
