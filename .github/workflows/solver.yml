@@ -1,21 +1,25 @@
 name: tests (solver / comprehensive)
 
 # The comprehensive suite: runs the live OpenFUSIONToolkit GS solver
-# (reconstruction-free replay + systematics, ~13 min).  It is a PRE-MERGE gate,
-# not a per-commit check:
-#   * `merge_group`     -> runs once when a PR enters the merge queue, as a
-#                          required status check (enable the merge queue +
-#                          branch protection on `main` in repo settings).
-#   * `workflow_dispatch` -> manual on-demand run.
+# (reconstruction-free replay + systematics, ~13 min).
 #
-# It runs on the **feynman** self-hosted runner, which has the OFT fork built
-# (with the jphi-linterp Ip fixes the solver tests depend on) and the scientific
-# Python env.  Register a runner on feynman with the labels [self-hosted,
-# feynman], and set the repo variable OFT_PYTHONPATH to the OFT python dir
-# (e.g. /path/to/OpenFUSIONToolkit/build_release/python).
+# INTERIM POLICY (until OFT publishes to PyPI): this is **manual / on-demand**
+# only.  It is NOT wired to the merge queue and is NOT a required status check,
+# so it never blocks a merge.  The comprehensive suite is instead a documented
+# pre-merge step -- run `pytest -m solver` (locally or on a box with the OFT
+# fork built) and note the result in the PR before merging.  See docs/CI.md.
+#
+# It needs the OFT fork built (the jphi-linterp Ip fixes the solver tests
+# depend on) + the scientific Python env.  When run on a self-hosted runner,
+# set the repo variable OFT_PYTHONPATH to the OFT python dir; otherwise the
+# test falls back to a sibling OpenFUSIONToolkit/ checkout.
+#
+# FUTURE (once OFT is on PyPI with the Ip fixes merged upstream): switch
+# `runs-on` to `ubuntu-latest`, add a `pip install OpenFUSIONToolkit` step, and
+# re-enable the `merge_group:` trigger to make this an automated pre-merge gate.
 on:
-  merge_group:
   workflow_dispatch:
+  # merge_group:        # <- re-enable once a runner (or PyPI OFT) is available
 
 concurrency:
   group: solver-${{ github.ref }}
