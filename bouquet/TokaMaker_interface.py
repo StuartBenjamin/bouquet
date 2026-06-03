@@ -25,7 +25,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from .sampling import (
-    generate_perturbed_GPR,
+    GPRProfilePerturber,
     calc_cylindrical_li_proxy,
     get_li_proxy_geometry,
     calc_cylindrical_li_proxy_fast,
@@ -592,6 +592,7 @@ def perturb_kinetic_equilibrium(
     max_li_iter=_MAX_LI_ITER,
     psi_N_kinetic=None,
     max_proxy_draws=500,
+    verbose_interval=1000,
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
     match :math:`I_p` and :math:`l_i` targets.
@@ -723,33 +724,53 @@ def perturb_kinetic_equilibrium(
     # ----------------------------------------------------------------
     inp_avg = mygs.flux_integral(psi_N, pressure)
 
+    # Pre-compute GPR eigenfactors for the four kinetic profiles.
+    # psi_kin, sigma profiles, and length scales are constant for the
+    # entire pressure-matching loop — one O(n³) eigh per profile instead
+    # of one per draw.
+    _kin_rng = np.random.default_rng()
+    _ne_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=n_ls)
+    _ne_gpr.precompute_factor(psi_kin, sigma_ne / ne[0])
+    _te_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=t_ls)
+    _te_gpr.precompute_factor(psi_kin, sigma_te / te[0])
+    _ni_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=n_ls)
+    _ni_gpr.precompute_factor(psi_kin, sigma_ni / ni[0])
+    _ti_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=t_ls)
+    _ti_gpr.precompute_factor(psi_kin, sigma_ti / ti[0])
+
     p_err = np.inf
     p_iter = 0
     print("Searching for pressure profile match...")
 
     while p_err > p_thresh:
         p_iter += 1
+        if (p_iter % verbose_interval == 0):
+            print(f"    pressure match: iter={p_iter}, err={p_err:.3f}% (threshold {p_thresh}%)", flush=True)
         if p_iter > max_pressure_iter:
             raise RuntimeError(
                 f"Pressure match not found within {max_pressure_iter} iterations "
                 f"(last error {p_err:.2f}% vs threshold {p_thresh}%)"
             )
 
-        # GPR sampling on psi_kin (kinetic grid, may include SOL)
+        # GPR sampling on psi_kin (kinetic grid, may include SOL).
         ne_perturb = _draw_monotonic_perturbation(
-            psi_kin, ne / ne[0], sigma_ne / ne[0], n_ls
+            psi_kin, ne / ne[0], sigma_ne / ne[0], n_ls,
+            perturber=_ne_gpr, rng=_kin_rng,
         ) * ne[0]
 
         te_perturb = _draw_monotonic_perturbation(
-            psi_kin, te / te[0], sigma_te / te[0], t_ls
+            psi_kin, te / te[0], sigma_te / te[0], t_ls,
+            perturber=_te_gpr, rng=_kin_rng,
         ) * te[0]
 
         ni_perturb = _draw_monotonic_perturbation(
-            psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls
+            psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls,
+            perturber=_ni_gpr, rng=_kin_rng,
         ) * ni[0]
 
         ti_perturb = _draw_monotonic_perturbation(
-            psi_kin, ti / ti[0], sigma_ti / ti[0], t_ls
+            psi_kin, ti / ti[0], sigma_ti / ti[0], t_ls,
+            perturber=_ti_gpr, rng=_kin_rng,
         ) * ti[0]
 
         # Pressure matching on equilibrium grid (psi_N, confined only)
@@ -851,6 +872,15 @@ def perturb_kinetic_equilibrium(
     # than in proxy space.
     proxy_target = baseline_li_proxy
 
+    # Pre-compute j_phi GPR eigenfactor once for all l_i iterations.
+    # step_j_phi (= results["j_inductive"]), sigma_jphi, and j_ls are
+    # all constant — one O(n³) eigh instead of one per proxy draw.
+    _jphi_const = results["j_inductive"] if recalculate_j_BS else input_j_phi
+    _j0_const   = _jphi_const[0]
+    _jphi_gpr   = GPRProfilePerturber(kernel_func="rbf", length_scale=j_ls)
+    _jphi_gpr.precompute_factor(psi_N, sigma_jphi / _j0_const)
+    _jphi_rng   = np.random.default_rng()
+
     for li_iter in range(1, max_li_iter + 1):
         if 100.0 * abs(l_i - l_i_target) / l_i_target <= l_i_tolerance:
             break
@@ -858,10 +888,8 @@ def perturb_kinetic_equilibrium(
         t_phase = time.perf_counter()
 
         # ---- 5a. Draw j_phi perturbation matching l_i proxy --------
-        step_j_phi = (
-            results["j_inductive"] if recalculate_j_BS else input_j_phi
-        )
-        j_phi_0 = step_j_phi[0]
+        step_j_phi = _jphi_const
+        j_phi_0    = _j0_const
 
         # Pre-compute geometry once for the inner proxy loop (the
         # equilibrium state doesn't change between proxy evaluations).
@@ -877,15 +905,10 @@ def perturb_kinetic_equilibrium(
                     f"(last err={l_i_rel_err:.3f}%, threshold={l_i_proxy_threshold}%). "
                     f"Try increasing l_i_proxy_threshold or max_proxy_draws."
                 )
-            jphi_perturb = generate_perturbed_GPR(
-                psi_N,
-                step_j_phi / j_phi_0,
-                sigma_profile=sigma_jphi / j_phi_0,   # normalised σ
-                length_scale=j_ls,
-                n_samples=1,
-                diag_plot=False,
-            )
-            jphi_perturb *= j_phi_0
+            # Fast draw using pre-computed eigenfactor — no per-draw eigh.
+            jphi_perturb = _jphi_gpr.draw_from_factor(
+                _jphi_const / _j0_const, 1, _jphi_rng
+            )[0] * _j0_const
 
             if np.any(jphi_perturb < 0.0):
                 continue
@@ -1128,6 +1151,7 @@ def generate_bouquet(
     baseline_pfile_bytes=None,
     psi_N_kinetic=None,
     max_proxy_draws=500,
+    verbose_interval=1000,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -1384,6 +1408,7 @@ def generate_bouquet(
                 diagnostic_plots=diagnostic_plots,
                 psi_N_kinetic=psi_N_kinetic,
                 max_proxy_draws=max_proxy_draws,
+                verbose_interval=verbose_interval,
             )
         except (RuntimeError, ValueError) as e:
             print(f"\n  STOPPED: {e}")
