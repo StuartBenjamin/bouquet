@@ -307,7 +307,158 @@ def _run_one(run_args):
         tb_str = traceback.format_exc()
         return idx, False, tb_str, None
 
-    
+###########################################################################################################
+# bouquet_method 're_generate_bouquet'
+###########################################################################################################
+
+_RE_GENERATE_BOUQUET_REQUIRED_KEYS = (
+    "idx", "eqdsk", "profile_bytes",
+    "psi_N",           # equilibrium (GS) grid from eqdsk
+    "psi_N_kinetic",   # kinetic profile grid (None → psi_N assumed)
+    # profiles defined on psi_N_kinetic (or psi_N should psi_N_kinetic be None)
+    "ne_SI", "te_SI", "ni_SI", "ti_SI",
+    "sigma_ne", "sigma_te", "sigma_ni", "sigma_ti",
+    "Zeff",            # either scalar, or dictionary of psi_normalised 'x' values and Zeff 'y' values 
+    "w_ExB",           # STUB (currently unused) on psi_N equilibrium grid
+    "sigma_jphi",      # on psi_N (equilibrium grid) since j_phi is an equilibrium quantity
+)
+
+def _check_data_keys(data, required_keys, tag=""):
+    """Raise ValueError listing all missing keys if *data* is incomplete."""
+    missing = [k for k in required_keys if k not in data]
+    if missing:
+        raise ValueError(
+            f"{tag} data dict is missing required keys: {missing}"
+        )
+
+def re_generate_bouquet(data):
+    # Unpack shared worker state functions. We do this because we want load errors caught by _init_worker.
+    reconstruct_equilibrium      = _worker_state["reconstruct_equilibrium"]
+    generate_bouquet             = _worker_state["generate_bouquet"]
+    store_equilibrium            = _worker_state["store_equilibrium"]
+    create_power_flux_fun        = _worker_state["create_power_flux_fun"]
+    initialize_equilibrium_database = _worker_state["initialize_equilibrium_database"]
+    # Unpack shared worker state objects
+    config                  = _worker_state["config"]
+    worker_id               = _worker_state["worker_id"]
+    mygs                    = _worker_state["mygs"]
+
+    # Reset mygs for new equilibrium, keeping mesh and coils
+    mygs.set_targets()
+
+    # --- Sanity check input data dict ---
+    idx     = data['idx']
+    _tag    = f"[Worker {worker_id} | run {idx}]"
+    _check_data_keys(data, _RE_GENERATE_BOUQUET_REQUIRED_KEYS, _tag)
+
+    # Per-run header: one HDF5 database per equilibrium, named by idx.
+    header = f"{config['header']}_idx{idx}"
+    initialize_equilibrium_database(header)
+
+    # --- Reconstruct equilibrium ---
+    print(f"{_tag} Reconstructing equilibrium...", flush=True)
+    isoflux_pts     = np.column_stack([data['eqdsk'].boundary_R, data['eqdsk'].boundary_Z])
+    isoflux_weights = np.ones(len(data['eqdsk'].boundary_R)) * config["isoflux_weight"]
+    mygs.set_isoflux(isoflux_pts, weights=isoflux_weights)
+    guess_jinductive = create_power_flux_fun(len(data['psi_N']), 1.5, 1.5)["y"]
+    result = reconstruct_equilibrium(
+        mygs,
+        data['eqdsk'],
+        data['ne_SI'],
+        data['te_SI'],
+        data['ni_SI'],
+        data['ti_SI'],
+        data['Zeff'],
+        isoflux_pts,
+        isoflux_weights,
+        config["psi_pad"],
+        guess_jinductive=guess_jinductive,
+        rescale_j_BS=False,
+        shelf_psi_N=0.0,
+        initialize_psi=True,
+        psi_N_kinetic=data['psi_N_kinetic'],
+        F0=abs(data['eqdsk'].R_center * data['eqdsk'].B_center), 
+        **config.get("reconstruct_equilibrium_kwargs", {}),
+    )
+
+    # --- Save the reconstructed geqdsk, read raw bytes, store profiles in HDF5, then clean up ---
+    eqdsk_out     = f"{header}.geqdsk"
+    eqdsk_out_abs = os.path.abspath(eqdsk_out)
+    mygs.save_eqdsk(eqdsk_out, nr=257, nz=257, truncate_eq=False, lcfs_pad=config["psi_pad"])
+    with open(eqdsk_out_abs, 'rb') as _fh:
+        baseline_eqdsk_raw = _fh.read()
+    li1 = mygs.get_stats(lcfs_pad=config["psi_pad"], li_normalization="std")["l_i"]
+    li3 = mygs.get_stats(lcfs_pad=config["psi_pad"], li_normalization="iter")["l_i"]
+    store_equilibrium(
+        header,
+        0,
+        eqdsk_out_abs,
+        data['psi_N'],
+        result["j_phi_fit"],
+        result["j_BS_used"],
+        result["j_inductive_fit"],
+        data['ne_SI'],
+        data['te_SI'],
+        data['ni_SI'],
+        data['ti_SI'],
+        data['w_ExB'],
+        li1,
+        li3,
+        Zeff=data["Zeff"],
+        psi_N_kinetic=data['psi_N_kinetic'],
+    )
+    if config.get("keep_geqdsk", False):
+        print(f"{_tag} Keeping reconstruction geqdsk: {eqdsk_out_abs}", flush=True)
+    else:
+        os.remove(eqdsk_out)
+    print(f"{_tag} Reconstruction done — li_final={result['li_final']:.4f}, li1={li1:.4f}", flush=True)
+
+    # --- j_phi uncertainty ---
+    if data['sigma_jphi'] is None:
+        data['sigma_jphi'] = config['jphi_uncertainty_gen'](result["j_phi_fit"])
+
+    # --- Generate perturbed equilibrium family ---
+    print(f"{_tag} Generating {config['n_equils']} perturbed equilibria...", flush=True)
+    mygs.set_isoflux(result["isoflux_pts"], weights=result["weights"])
+    diagnostics = generate_bouquet(
+        mygs,
+        data['psi_N'],
+        config["n_equils"],
+        header,
+        result["j_phi_fit"],
+        data['ne_SI'],
+        data['te_SI'],
+        data['ni_SI'],
+        data['ti_SI'],
+        data['sigma_ne'],
+        data['sigma_te'],
+        data['sigma_ni'],
+        data['sigma_ti'],
+        data['sigma_jphi'],
+        config["n_ls"],
+        config["t_ls"],
+        config["j_ls"],
+        abs(data['eqdsk'].Ip),
+        result["li_final"],
+        data["Zeff"],
+        input_jinductive=result["j_inductive_fit"],
+        psi_N_kinetic=data['psi_N_kinetic'],
+        pfile_bytes=data['profile_bytes'],
+        baseline_eqdsk_bytes=baseline_eqdsk_raw,
+        baseline_pfile_bytes=data['profile_bytes'],
+        diagnostic_plots=False,
+        **config.get("generate_bouquet_kwargs", {}),
+    )
+
+    # --- Final reporting ---
+    print(f"{_tag} Done — {len(diagnostics)} equilibria archived.", flush=True)
+    return {
+        "li_final": result["li_final"],
+        "li1": li1,
+        "li3": li3,
+        "n_equils_generated": len(diagnostics),
+    }
+
 def _init_OFT(worker_id_queue, master_working_dir, config, init_status_queue):
     """Pool initialiser: set up OFT/TokaMaker once per spawned worker process.
 
