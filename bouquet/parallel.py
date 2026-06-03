@@ -188,6 +188,48 @@ def parallel_runner(all_input_files, load_files_obj, bouquet_method, master_work
             f"to initialise:\n{msgs}"
         )
     
+
+    #===================================================================================
+    # Task dispatch
+    #===================================================================================
+
+    per_run_args = [(i, _all_input_files[i], load_files, bouquet_method) for i in range(n_runs)]
+
+    try:
+        with _pool:
+            for idx, success, err_msg, output in _pool.imap_unordered(_run_one, per_run_args,
+                                                                 chunksize=chunksize):
+                if not success:
+                    errors[idx] = err_msg
+                    print(
+                        f"[bouquet_parallel] WARNING: run {idx} "
+                        f"({_all_input_files[idx]}) failed:\n{err_msg}"
+                    )
+                else:
+                    if not keep_output:
+                        output = None
+                    outputs[idx] = output
+    except KeyboardInterrupt:
+        _pool.join()
+        raise
+    except Exception as _exc:
+        _pool.join()
+        raise RuntimeError(
+            f"[bouquet_parallel] FATAL error during task dispatch:\\n"
+            f"{traceback.format_exc()}"
+        ) from _exc
+
+    n_success = n_runs - len(errors)
+    print(f"[bouquet_parallel] Completed: {n_success}/{n_runs} runs succeeded.")
+
+    if errors:
+        error_path = os.path.join(master_working_dir, "errors.pkl")
+        with open(error_path, "wb") as f:
+            pkl.dump(errors, f)
+        print(f"[bouquet_parallel] Error details saved to {error_path}")
+
+    return errors, outputs
+
 def _get_num_cpus(use_logical=True):
     """Return ``(n_workers, nthreads_per_worker)`` for spawning OFT workers.
 
@@ -253,6 +295,17 @@ def _get_num_cpus(use_logical=True):
         return n_logical, 1
     else:
         return n_physical, nthreads_per_core
+
+def _run_one(run_args):
+    """Worker function: run one case of the bouquet method."""
+    idx, input_files, load_files, bouquet_method = run_args
+    try:
+        data = load_files(input_files, idx)
+        output = bouquet_method(data)
+        return idx, True, None, output
+    except Exception as exc:
+        tb_str = traceback.format_exc()
+        return idx, False, tb_str, None
 
     
 def _init_OFT(worker_id_queue, master_working_dir, config, init_status_queue):
