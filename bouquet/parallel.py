@@ -494,6 +494,92 @@ class load_files_obj:
         """Load one case using inputs from atomic_input_recast. Used when is_atomic=False."""
         raise NotImplementedError
 
+####################################################################
+# Atomic load_profile_obj
+####################################################################
+
+class load_profile_obj(load_files_obj):
+    """Load generic (geqdsk, kinetic_profile_file) pairs for re_generate_bouquet.
+
+    Each entry in all_input_files is a tuple ``(geqdsk_path, profile_path)``,
+    one per run.  Input is already atomic so no recasting is needed.
+
+    The profile_reader and uncertainty_generator in config must match the 
+    specific type of kinetic profile file used (e.g. p-file).
+
+    Parameters
+    ----------
+    config : dict
+        ...
+    """
+    is_atomic = True
+
+    def __init__(self, config):
+        self.config = config
+
+    def total_runs(self, all_input_files):
+        # Assume all_input_files is a vector of (geqdsk, pfile) pairs
+        return len(all_input_files), _IndexMap(all_input_files)
+
+    def load_files(self, input_files, idx):
+        # Take one (geqdsk, kinetic_profile_file) pair, returns data dict for bouquet method
+        geqdsk_file, profile_file = input_files
+        worker_id          = _worker_state["worker_id"]
+        read_geqdsk        = _worker_state["read_geqdsk"]
+        profile_reader     = self.config["profile_reader"]
+        uncertainty_gen    = self.config["uncertainty_generator"]
+
+        _tag = f"[Worker {worker_id} | run {idx} | {os.path.basename(geqdsk_file)}]"
+        print(f"{_tag} Starting — host={socket.gethostname()}, PID={os.getpid()}, cwd={os.getcwd()}", flush=True)
+
+        # Copy input files into the worker's private working directory so that
+        # every file read or write by TokaMaker stays within a single directory.
+        # The idx prefix prevents collisions when a worker processes multiple
+        # equilibria that share the same base filename.
+        _local_geqdsk  = os.path.join(os.getcwd(), f"idx{idx}_{os.path.basename(geqdsk_file)}")
+        _local_profile = os.path.join(os.getcwd(), f"idx{idx}_{os.path.basename(profile_file)}")
+        shutil.copy2(geqdsk_file,  _local_geqdsk)
+        shutil.copy2(profile_file, _local_profile)
+        geqdsk_file  = _local_geqdsk
+        profile_file = _local_profile
+        print(f"{_tag} Copied input files to worker directory.", flush=True)
+
+        # --- Load equilibrium ---
+        eqdsk = read_geqdsk(geqdsk_file)
+        psi_N = eqdsk.psi_N
+
+        # --- Read kinetic profiles via the pluggable reader ---
+        # Returns profiles, Zeff, raw bytes for HDF5 archival
+        ne_SI, te_SI, ni_SI, ti_SI, Zeff, psi_N_kinetic, profile_bytes = profile_reader(
+            profile_file, self.config["profile_reader_kwargs"]
+        )
+
+        # --- Generate profile uncertainties via the pluggable generator ---
+        # Returns sigma_ne, sigma_te, sigma_ni, sigma_ti on the kinetic profile grid (psi_N_kinetic),
+        # and optionally sigma_jphi on the equilibrium grid (psi_N).
+        sigma_ne, sigma_te, sigma_ni, sigma_ti, psi_N_kinetic, sigma_jphi = uncertainty_gen(
+            profile_file, profile_reader, psi_N, self.config["profile_reader_kwargs"], self.config["uncertainty_generator_kwargs"]
+        )
+
+        return {
+            "idx":           idx,
+            "eqdsk":         eqdsk,
+            "psi_N":         psi_N,
+            "psi_N_kinetic": psi_N_kinetic,
+            "ne_SI":         ne_SI,
+            "te_SI":         te_SI,
+            "ni_SI":         ni_SI,
+            "ti_SI":         ti_SI,
+            "w_ExB":         np.zeros_like(psi_N),
+            "Zeff":          Zeff,
+            "profile_bytes": profile_bytes,
+            "sigma_ne":      sigma_ne,
+            "sigma_te":      sigma_te,
+            "sigma_ni":      sigma_ni,
+            "sigma_ti":      sigma_ti,
+            "sigma_jphi":    sigma_jphi,
+        }
+
 ###########################################################################################################
 # utils
 ###########################################################################################################
