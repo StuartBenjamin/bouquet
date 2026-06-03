@@ -694,6 +694,138 @@ def pfile_uncertainty_gen(profile_file, profile_reader_fn, psi_N, reader_kwargs,
     sigma_ti = new_uncertainty_profiles(psi_N_kinetic, frac_ti, falloff_exp=falloff_ti, shelf=shelf) * ti_SI
     return sigma_ne, sigma_te, sigma_ni, sigma_ti, psi_N_kinetic, None
 
+####################################################################
+# Non-atomic load_profile_obj types
+####################################################################
+
+class load_IDA_file_obj(load_files_obj):
+    """Load timeslices from IDA-lite CDF files for re_generate_bouquet.
+
+    Each entry in all_input_files is a tuple ``(cdf_path, geqdsk_paths)``.
+    A single CDF may contain multiple timeslices, so ``is_atomic=False``:
+    ``atomic_input_recast`` expands each CDF into ``(cdf_path, geqdsk_paths, time_idx)``
+    triples and ``atomic_load_files`` loads one such triple.
+
+    ``geqdsk_paths`` must be a list/tuple of paths with one geqdsk per timeslice
+    in the CDF, in time-index order.
+
+    jphi uncertainty is not calculated, so the config dict must contain:
+
+    - ``jphi_uncertainty_gen`` : callable, e.g. ``FractionalUncertainty(0.15)``
+
+    Optional config keys:
+
+    - ``profile_reader_kwargs`` : dict of keyword arguments forwarded to
+      :class:`~bouquet.io.ida.IDALiteProfileReader` (excluding ``time_idx``).
+    - ``uncertainty_generator_kwargs`` : dict of keyword arguments forwarded to
+      :class:`~bouquet.io.ida.IDALiteUncertaintyGenerator` (excluding ``time_idx``).
+
+    Parameters
+    ----------
+    config : dict
+        ...
+    """
+    is_atomic = False
+
+    def __init__(self, config):
+        self.config = config
+
+    def total_runs(self, all_input_files):
+        """Sum timeslice counts across all CDF files and build a map from flat
+        idx to ``(cdf_path, geqdsk_path, time_idx)`` atomic input triple."""
+        import h5py
+        atomic = []
+        for cdf_path, geqdsk_paths in all_input_files:
+            with h5py.File(cdf_path, 'r') as f:
+                n_times = f['n_e'].shape[0]
+            if len(geqdsk_paths) != n_times:
+                raise ValueError(
+                    f"geqdsk_paths has {len(geqdsk_paths)} entries but "
+                    f"'{cdf_path}' contains {n_times} timeslice(s). "
+                    "Provide exactly one geqdsk path per timeslice."
+                )
+            for t in range(n_times):
+                atomic.append((cdf_path, geqdsk_paths[t], t))
+        return len(atomic), _IndexMap(atomic)
+
+    def atomic_input_recast(self, all_input_files) -> list:
+        """Expand each (cdf_path, geqdsk_paths) into flat (cdf_path, geqdsk, time_idx) triples."""
+        n_runs, map_object = self.total_runs(all_input_files)
+        return [map_object(i) for i in range(n_runs)]
+
+    def load_files_atomic(self, input_files, idx):
+        """Load one (cdf_path, geqdsk_file, time_idx) triple and return a data dict."""
+        from bouquet.io.ida import IDALiteProfileReader, IDALiteUncertaintyGenerator
+        cdf_path, geqdsk_file, time_idx = input_files
+        worker_id       = _worker_state["worker_id"]
+        read_geqdsk     = _worker_state["read_geqdsk"]
+        profile_reader  = IDALiteProfileReader(
+            **self.config.get("profile_reader_kwargs", {}), time_idx=time_idx
+        )
+        uncertainty_gen = IDALiteUncertaintyGenerator(
+            **self.config.get("uncertainty_generator_kwargs", {}), time_idx=time_idx
+        )
+
+        _tag = (
+            f"[Worker {worker_id} | run {idx} | "
+            f"{os.path.basename(cdf_path)} t={time_idx}]"
+        )
+        print(
+            f"{_tag} Starting — host={socket.gethostname()}, "
+            f"PID={os.getpid()}, cwd={os.getcwd()}",
+            flush=True,
+        )
+
+        # Copy input files into the worker's private working directory.
+        _local_geqdsk = os.path.join(os.getcwd(), f"idx{idx}_{os.path.basename(geqdsk_file)}")
+        _local_cdf    = os.path.join(os.getcwd(), os.path.basename(cdf_path))
+        shutil.copy2(geqdsk_file, _local_geqdsk)
+        if not os.path.exists(_local_cdf):
+            shutil.copy2(cdf_path, _local_cdf)
+        geqdsk_file = _local_geqdsk
+        cdf_path    = _local_cdf
+        print(f"{_tag} Copied input files to worker directory.", flush=True)
+
+        # Load equilibrium
+        eqdsk = read_geqdsk(geqdsk_file)
+        psi_N = eqdsk.psi_N
+
+        # IDALiteProfileReader interpolates profiles directly onto psi_N,
+        # so psi_N_kinetic=None.
+        ne_SI, te_SI, ni_SI, ti_SI, Zeff_eq, _ = profile_reader(
+            geqdsk_file, cdf_path, psi_N
+        )
+        profile_bytes = None
+
+        # Compute kinetic-profile sigmas.  sigma_jphi is deferred: 
+        # re_generate_bouquet will call config['jphi_uncertainty_gen'].
+        sigma_ne, sigma_te, sigma_ni, sigma_ti, _ = uncertainty_gen(
+            cdf_path, None, psi_N, np.ones_like(psi_N)
+        )
+
+        return {
+            "idx":           idx,
+            "eqdsk":         eqdsk,
+            "psi_N":         psi_N,
+            "psi_N_kinetic": None,
+            "ne_SI":         ne_SI,
+            "te_SI":         te_SI,
+            "ni_SI":         ni_SI,
+            "ti_SI":         ti_SI,
+            "w_ExB":         np.zeros_like(psi_N),
+            "Zeff":          Zeff_eq,
+            "profile_bytes": profile_bytes,
+            "sigma_ne":      sigma_ne,
+            "sigma_te":      sigma_te,
+            "sigma_ni":      sigma_ni,
+            "sigma_ti":      sigma_ti,
+            "sigma_jphi":    None,
+        }
+
+    @property
+    def atomic_load_files(self):
+        return self.load_files_atomic
+
 ###########################################################################################################
 # utils
 ###########################################################################################################
