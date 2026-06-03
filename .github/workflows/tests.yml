@@ -1,0 +1,28 @@
+name: tests (fast)
+
+# Fast unit suite — runs on every push and PR.  No OpenFUSIONToolkit / live
+# solver needed (those are the `solver`-marked tests, gated to the merge queue;
+# see solver.yml).  `pytest` is fast-by-default via `addopts = -m "not solver"`
+# in pyproject.toml.
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: fast-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install package + pytest
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . pytest
+      - name: Run fast suite (solver tests deselected by default)
+        run: pytest -q
