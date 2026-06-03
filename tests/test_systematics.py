@@ -6,37 +6,45 @@ baseline and asserts every draw reproduces the baseline -- boundary RMS ~0 mm
 and coil drift ~0 % -- so a future change that subtly introduces a systematic
 offset/bias trips this test.
 
-It needs the live GS solver (OpenFUSIONToolkit) + the DIII-D mesh, so it is
-**opt-in**: set ``BOUQUET_RUN_SOLVER_TESTS=1`` to run it.  It is skipped in the
-default fast unit suite (and whenever OFT / the mesh / baseline files are not
-available).
+It needs the live GS solver (OpenFUSIONToolkit) + the DIII-D mesh, so it runs
+**by default whenever those are available** and skips gracefully otherwise.
+It is marked ``solver`` so the fast unit loop can deselect it with
+``pytest -m "not solver"`` (it takes a few minutes: one reconstruction + a
+couple of solves).
 """
 import os
-import glob
 
 import numpy as np
 import pytest
 
-# ---- opt-in + availability gates -----------------------------------------
-_OPT_IN = os.environ.get("BOUQUET_RUN_SOLVER_TESTS", "0") == "1"
-
+# ---- availability gate (the solver + mesh + baseline must be present) -----
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_EXAMPLE = os.path.abspath(os.path.join(
-    _HERE, "..", "..", "bouquet", "examples", "D3D-like"))
+# Self-contained: use the in-repo example baseline/mesh (the mesh is a local,
+# gitignored artifact placed alongside the shipped baseline g/p-files).
+_EXAMPLE = os.path.abspath(os.path.join(_HERE, "..", "examples", "D3D-like"))
 _GEQ = os.path.join(_EXAMPLE, "D3Dlike_Hmode_baseline.geqdsk")
 _PF = os.path.join(_EXAMPLE, "D3Dlike_Hmode_baseline.peqdsk")
 _MESH = os.path.join(_EXAMPLE, "DIIID_mesh.h5")
-_OFT = os.path.abspath(os.path.join(
-    _HERE, "..", "..", "OpenFUSIONToolkit", "build_release", "python"))
 
 _files_ok = all(os.path.isfile(p) for p in (_GEQ, _PF, _MESH))
 
 
 def _oft_importable():
-    if os.path.isdir(_OFT):
-        import sys
-        if _OFT not in sys.path:
-            sys.path.append(_OFT)
+    """OpenFUSIONToolkit must be importable.  Resolution order (no
+    user-specific absolute paths):
+      1. already on PYTHONPATH / pip-installed,
+      2. the ``OFT_PYTHONPATH`` env var, if set,
+      3. a sibling ``OpenFUSIONToolkit/build_release/python`` checkout
+         (the standard dev layout).
+    """
+    import sys
+    for cand in (os.environ.get("OFT_PYTHONPATH"),
+                 os.path.join(_HERE, "..", "..", "OpenFUSIONToolkit",
+                              "build_release", "python")):
+        if cand and os.path.isdir(cand):
+            ap = os.path.abspath(cand)
+            if ap not in (os.path.abspath(p) for p in sys.path):
+                sys.path.append(ap)
     try:
         import OpenFUSIONToolkit  # noqa: F401
         return True
@@ -44,10 +52,13 @@ def _oft_importable():
         return False
 
 
-pytestmark = pytest.mark.skipif(
-    not (_OPT_IN and _files_ok and _oft_importable()),
-    reason="solver systematics test is opt-in: set BOUQUET_RUN_SOLVER_TESTS=1 "
-           "and ensure OFT + D3D-like mesh/baseline are available")
+pytestmark = [
+    pytest.mark.solver,
+    pytest.mark.skipif(
+        not (_files_ok and _oft_importable()),
+        reason="solver systematics test needs OFT + the D3D-like mesh/baseline "
+               "(mesh is a local artifact); skipped when unavailable"),
+]
 
 # Thresholds chosen from the observed pinned-σ=0 floor (very stable across
 # draws): boundary RMS ~0.525 mm, max coil drift ~0.054 %.  These are the

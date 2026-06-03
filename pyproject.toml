@@ -25,3 +25,8 @@ plot-family = "bouquet.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
+
+[tool.pytest.ini_options]
+markers = [
+    "solver: integration test that runs the live OpenFUSIONToolkit GS solver (slow; needs OFT + the D3D-like mesh). Deselect with -m 'not solver'.",
+]
