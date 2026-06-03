@@ -762,3 +762,6 @@ def _init_OFT(worker_id_queue, master_working_dir, config, init_status_queue):
             pass
         raise  # kill this worker process
 
+
+# Assign init_worker after _init_OFT is defined to avoid forward-reference error.
+load_files_obj.init_worker = staticmethod(_init_OFT)
