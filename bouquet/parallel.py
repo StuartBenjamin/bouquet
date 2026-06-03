@@ -580,6 +580,66 @@ class load_profile_obj(load_files_obj):
             "sigma_jphi":    sigma_jphi,
         }
 
+##################################
+# pfile specific reader and uncertainty generator for atomic load_profile_obj
+##################################
+def pfile_reader(pfile_file, reader_kwargs):
+    """Read an Osborne p-file and return SI kinetic profiles plus raw bytes.
+
+    Matches the ``config['profile_reader']`` contract expected by
+    :class:`~bouquet.parallel.load_profile_obj`.
+
+    All profiles are remapped onto ``ne``'s ``psinorm`` grid before use
+    (p-files allow each profile to carry its own independent grid).
+    Interpolation onto the equilibrium grid is handled downstream via the
+    ``psi_N_kinetic`` argument to
+    :func:`~bouquet.TokaMaker_interface.generate_bouquet`.
+
+    Parameters
+    ----------
+    pfile_file : str
+        Path to the p-file.
+    reader_kwargs : dict
+        Must contain ``ion_N``, ``ion_Z``, ``ion_A`` — the number of ions
+        per formula unit, charge state, and mass number of the main ion
+        species (e.g. ``{"ion_N": 1, "ion_Z": 1, "ion_A": 2}`` for
+        deuterium).
+
+    Returns
+    -------
+    ne_SI, te_SI, ni_SI, ti_SI : ndarray
+        Kinetic profiles in SI units (m\ :sup:`-3` and eV) on *psi_N_kinetic*.
+    Zeff_eq : ndarray
+        Effective ion charge on *psi_N_kinetic*, clipped to >= 1.
+    psi_N_kinetic : ndarray
+        Normalised poloidal flux grid of the p-file (``psinorm``).
+    profile_bytes : bytes
+        Raw p-file content for HDF5 archival.
+    """
+    ion_N = reader_kwargs['ion_N']
+    ion_Z = reader_kwargs['ion_Z']
+    ion_A = reader_kwargs['ion_A']
+
+    from bouquet.io.pfile import read_pfile
+    pf = read_pfile(pfile_file)
+    pf = pf.remap(key='ne')
+
+    if pf.ion_species is None:
+        pf.set_ion_species(N=ion_N, Z=ion_Z, A=ion_A)
+    pf.compute_quasineutrality()
+    psi_N_kinetic, Zeff = pf.compute_zeff()
+
+    ne_SI   = pf.ne * 1e20   # 10^20 m^-3 -> m^-3
+    te_SI   = pf.te * 1e3    # keV -> eV
+    ni_SI   = pf.ni * 1e20
+    ti_SI   = pf.ti * 1e3
+    Zeff_eq = np.clip(Zeff, 1.0, None)
+
+    with open(pfile_file, 'rb') as fh:
+        profile_bytes = fh.read()
+
+    return ne_SI, te_SI, ni_SI, ti_SI, Zeff_eq, psi_N_kinetic, profile_bytes
+
 ###########################################################################################################
 # utils
 ###########################################################################################################
