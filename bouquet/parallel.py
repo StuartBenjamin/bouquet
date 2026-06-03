@@ -640,6 +640,60 @@ def pfile_reader(pfile_file, reader_kwargs):
 
     return ne_SI, te_SI, ni_SI, ti_SI, Zeff_eq, psi_N_kinetic, profile_bytes
 
+def pfile_uncertainty_gen(profile_file, profile_reader_fn, psi_N, reader_kwargs, uncertainty_kwargs):
+    """Build radially-varying 1-sigma uncertainties from the p-file profiles.
+
+    Matches the ``config['uncertainty_generator']`` contract expected by
+    :class:`~bouquet.parallel.load_profile_obj`.
+
+    Parameters
+    ----------
+    profile_file : str
+        Path to the p-file.
+    profile_reader_fn : callable
+        A ``pfile_reader``-style callable used to load baseline profiles so
+        that fractional uncertainties can be converted to absolute ones.
+        Called as ``profile_reader_fn(profile_file, reader_kwargs)``.
+    psi_N : ndarray
+        Equilibrium normalised-flux grid.  Not used for kinetic sigmas
+        (those live on *psi_N_kinetic*); available for ``sigma_jphi`` if
+        needed.
+    reader_kwargs : dict
+        Forwarded to *profile_reader_fn* unchanged.
+    uncertainty_kwargs : dict
+        Must contain: ``frac_ne``, ``frac_te``, ``frac_ni``, ``frac_ti``
+        (fractional 1-sigma levels); ``falloff_ne``, ``falloff_te``,
+        ``falloff_ni``, ``falloff_ti`` (radial falloff exponents); ``shelf``
+        (minimum fractional floor).
+
+    Returns
+    -------
+    sigma_ne, sigma_te, sigma_ni, sigma_ti : ndarray
+        Absolute 1-sigma arrays in SI units on *psi_N_kinetic*.
+    psi_N_kinetic : ndarray
+        Normalised flux grid for the kinetic sigma arrays (from the p-file).
+    sigma_jphi : None
+        Deferred — computed inside :func:`~bouquet.parallel.re_generate_bouquet`
+        from ``j_phi_fit`` via ``config['jphi_uncertainty_gen']``.
+    """
+    frac_ne    = uncertainty_kwargs['frac_ne']
+    frac_te    = uncertainty_kwargs['frac_te']
+    frac_ni    = uncertainty_kwargs['frac_ni']
+    frac_ti    = uncertainty_kwargs['frac_ti']
+    falloff_ne = uncertainty_kwargs['falloff_ne']
+    falloff_te = uncertainty_kwargs['falloff_te']
+    falloff_ni = uncertainty_kwargs['falloff_ni']
+    falloff_ti = uncertainty_kwargs['falloff_ti']
+    shelf      = uncertainty_kwargs['shelf']
+
+    from bouquet.uncertainties import new_uncertainty_profiles
+    ne_SI, te_SI, ni_SI, ti_SI, _, psi_N_kinetic, _ = profile_reader_fn(profile_file, reader_kwargs)
+    sigma_ne = new_uncertainty_profiles(psi_N_kinetic, frac_ne, falloff_exp=falloff_ne, shelf=shelf) * ne_SI
+    sigma_te = new_uncertainty_profiles(psi_N_kinetic, frac_te, falloff_exp=falloff_te, shelf=shelf) * te_SI
+    sigma_ni = new_uncertainty_profiles(psi_N_kinetic, frac_ni, falloff_exp=falloff_ni, shelf=shelf) * ni_SI
+    sigma_ti = new_uncertainty_profiles(psi_N_kinetic, frac_ti, falloff_exp=falloff_ti, shelf=shelf) * ti_SI
+    return sigma_ne, sigma_te, sigma_ni, sigma_ti, psi_N_kinetic, None
+
 ###########################################################################################################
 # utils
 ###########################################################################################################
