@@ -459,6 +459,40 @@ def re_generate_bouquet(data):
         "n_equils_generated": len(diagnostics),
     }
 
+###########################################################################################################
+# Generic load files object (load_files_obj) for 're_generate_bouquet'
+###########################################################################################################
+
+class load_files_obj:
+    """Base interface for load_files objects used by parallel_runner.
+
+    Subclasses must set ``is_atomic`` and implement ``load_files`` (or
+    ``atomic_load_files`` + ``atomic_input_recast`` if not atomic),
+    ``total_runs``, ``init_worker``, and ``config``.
+
+    Atomic = one equilibrium per input file tuple, so no recasting needed. 
+    Non-atomic = multiple equilibria per input file tuple, so recasting needed.
+    """
+    is_atomic: bool
+    config: dict
+
+    def total_runs(self, all_input_files):
+        """Return ``(n_runs, map_object)`` where ``map_object(idx)`` gives the
+        atomic input-files tuple for run *idx*."""
+        raise NotImplementedError
+
+    def load_files(self, input_files, idx):
+        """Load one case and return a data dict for bouquet_method. Used when is_atomic=True."""
+        raise NotImplementedError
+
+    def atomic_input_recast(self, all_input_files) -> list:
+        """Expand non-atomic inputs into a flat list of input tuples for use by atomic_load_files."""
+        raise NotImplementedError
+
+    @property
+    def atomic_load_files(self):
+        """Load one case using inputs from atomic_input_recast. Used when is_atomic=False."""
+        raise NotImplementedError
 
 ###########################################################################################################
 # utils
