@@ -459,6 +459,56 @@ def re_generate_bouquet(data):
         "n_equils_generated": len(diagnostics),
     }
 
+
+###########################################################################################################
+# utils
+###########################################################################################################
+
+def _mesh_config_simp(mygs, config, local_mesh_file):
+    """Load mesh and configure TokaMaker with optional VSC and coil regularisation.
+
+    A simple mesh configuration function suitable for passing as
+    ``config['mesh_config_function']``.  Loads the worker-local mesh copy,
+    sets up the FE mesh and conductor/coil regions, applies solver settings
+    from *config*, and optionally configures a vertical stability coil and
+    coil current regularisation targets.
+
+    Parameters
+    ----------
+    mygs : TokaMaker
+        TokaMaker instance to configure (already constructed, not yet set up).
+    config : dict
+        Shared configuration dict.  Expected keys: ``oft_order``,
+        ``oft_maxits``.  Optional keys: ``vsc_coil_def``, ``target_currents``.
+    local_mesh_file : str
+        Absolute path to the worker-local copy of the mesh HDF5 file.
+    """
+    from OpenFUSIONToolkit.TokaMaker.meshing import load_gs_mesh
+    mesh_pts, mesh_lc, mesh_reg, coil_dict, cond_dict = load_gs_mesh(local_mesh_file)
+    mygs.setup_mesh(mesh_pts, mesh_lc, mesh_reg)
+    mygs.setup_regions(cond_dict=cond_dict, coil_dict=coil_dict)
+
+    mygs.setup(order=config["oft_order"])
+    mygs.settings.maxits = config["oft_maxits"]
+    mygs.settings.pm = config.get("oft_pm", False)
+    mygs.update_settings()
+
+    vsc_coil_def = config.get("vsc_coil_def")
+    if vsc_coil_def is not None:
+        mygs.set_coil_vsc(vsc_coil_def)
+
+    target_currents = config.get("target_currents")
+    if target_currents is not None:
+        reg_terms = []
+        for coil_name, val_ma in target_currents.items():
+            reg_terms.append(
+                mygs.coil_reg_term({coil_name: 1.0}, target=val_ma * 1e6, weight=1.0)
+            )
+        reg_terms.append(
+            mygs.coil_reg_term({"#VSC": 1.0}, target=0.0, weight=1e-2)
+        )
+        mygs.set_coil_reg(reg_terms=reg_terms)
+    
 def _init_OFT(worker_id_queue, master_working_dir, config, init_status_queue):
     """Pool initialiser: set up OFT/TokaMaker once per spawned worker process.
 
