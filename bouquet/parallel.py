@@ -7,6 +7,9 @@ has an associated tuple of input file names, which are read into python using th
 load method, and then passed to the bouquet method. parallel_runner distributes 
 these cases across available CPU cores and runs them in parallel.
 
+'Non atomic' input files with multiple timeslices/kinetic equilibria (eg. IDA files) 
+are supported by optional atomic_input_recast and atomic_load_files methods inside load_files_obj.
+
 Basic pfile example: 
     input_files = (eqdsk, pfile)
     load_files_obj.load_files = load_eqdsk_pfile
@@ -88,7 +91,39 @@ def parallel_runner(all_input_files, load_files_obj, bouquet_method, master_work
         n_cpus, nthreads = n_cpus_override, 1
     else:
         n_cpus, nthreads = _get_num_cpus(use_logical=use_logical_cpus)
+    n_runs, map_object = load_files_obj.total_runs(all_input_files)
+    if n_runs == 0:
+        print("[bouquet_parallel] No runs to execute.")
+        return {}, {}
+    n_workers = min(n_cpus, n_runs)
+    print(
+        f"[bouquet_parallel] Distributing {n_runs} runs across "
+        f"{n_workers} workers ({n_cpus} CPUs available, {nthreads} thread(s)/worker)."
+    )
 
+    if not load_files_obj.is_atomic:
+        _all_input_files = load_files_obj.atomic_input_recast(all_input_files)
+        load_files = load_files_obj.atomic_load_files
+    else:
+        _all_input_files = all_input_files
+        load_files = load_files_obj.load_files
+    assert len(_all_input_files) == n_runs, (
+        f"Expected {n_runs} runs from load_files_obj.total_runs, but got "
+        f"{len(_all_input_files)} from load_files_obj.atomic_input_recast"
+    )
+
+    if chunksize == 'automatic':
+        # Heuristic: 10x more tasks than workers, but no more than 1000 tasks per chunk
+        chunksize = max(1, min(1000, n_runs // (10 * n_workers)))
+        print(f"[bouquet_parallel] Using chunksize={chunksize} for dynamic scheduling.")
+    else:
+        print(f"[bouquet_parallel] Using user-specified chunksize={chunksize} for dynamic scheduling.")
+
+    # Save map_object so users can look up input files by idx after the run.
+    map_object_path = os.path.join(master_working_dir, "map_object.pkl")
+    with open(map_object_path, "wb") as f:
+        pkl.dump(map_object, f)
+    print(f"[bouquet_parallel] Saved input file map to {map_object_path}")
 def _get_num_cpus(use_logical=True):
     """Return ``(n_workers, nthreads_per_worker)`` for spawning OFT workers.
 
