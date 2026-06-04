@@ -123,6 +123,53 @@ def _resolve_fixed(comp, src_psi, dst_psi):
     return np.interp(dst_psi, np.asarray(src_psi, dtype=float), comp)
 
 
+def _load_kinetic_profiles(source) -> dict:
+    """Kinetic profiles (SI) from the reconstruction source's ``profiles_path``.
+
+    Dispatches on file type: an IDA ``.cdf`` (ni = ne, quasi-neutrality) or an
+    Osborne p-file (real ni via quasineutrality + Zeff from the ion mix). Returns
+    a dict with ``psi_N`` (native kinetic grid), ``ne``/``te``/``ni``/``ti``
+    (m^-3, eV), ``Zeff`` (clipped >= 1), and ``raw_bytes`` for archival.
+    """
+    import numpy as np
+
+    path = source.profiles_path
+    if path.endswith(".cdf"):
+        from .io.ida import read_ida
+        ida = read_ida(path, time=source.time)
+        return dict(
+            psi_N=np.asarray(ida.psi_N, dtype=float),
+            ne=np.asarray(ida.ne, dtype=float),
+            te=np.asarray(ida.te, dtype=float),
+            ni=np.asarray(ida.ni, dtype=float),
+            ti=np.asarray(ida.ti, dtype=float),
+            Zeff=np.clip(np.asarray(ida.Zeff, dtype=float), 1.0, None),
+            raw_bytes=ida.raw_bytes,
+        )
+
+    # Osborne p-file: ne/ni in 1e20 m^-3, Te/Ti in keV -> SI.
+    from .io.pfile import read_pfile
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    pf = read_pfile(path)
+    if pf.ion_species is None:
+        raise ValueError(
+            "p-file carries no ion species in its footer; cannot compute "
+            "quasineutrality / Zeff"
+        )
+    pf.compute_quasineutrality()
+    psi_pf, Zeff = pf.compute_zeff()
+    return dict(
+        psi_N=np.asarray(psi_pf, dtype=float),
+        ne=np.asarray(pf.ne, dtype=float) * 1e20,
+        te=np.asarray(pf.te, dtype=float) * 1e3,
+        ni=np.asarray(pf.ni, dtype=float) * 1e20,
+        ti=np.asarray(pf.ti, dtype=float) * 1e3,
+        Zeff=np.clip(np.asarray(Zeff, dtype=float), 1.0, None),
+        raw_bytes=raw,
+    )
+
+
 def _resolve_reconstruction(source, config, mygs) -> Baseline:
     """Reconstruction-source baseline: GS reconstruct on a live ``mygs``.
 
@@ -137,7 +184,6 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
 
     from .io.geqdsk import read_geqdsk
-    from .io.ida import read_ida
     from .TokaMaker_interface import reconstruct_equilibrium
 
     if mygs is None:
@@ -147,25 +193,21 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         )
     if source.profile_overrides:
         raise NotImplementedError("profile_overrides is not yet applied")
-    if not source.profiles_path.endswith(".cdf"):
-        raise NotImplementedError(
-            "reconstruction currently supports IDA .cdf profiles; p-file support "
-            "is a follow-up"
-        )
 
     with open(source.geqdsk_path, "rb") as fh:
         eqdsk_bytes = fh.read()
     eqdsk = read_geqdsk(source.geqdsk_path, cocos=source.cocos)
     psi_N = np.asarray(eqdsk.psi_N, dtype=float)
 
-    ida = read_ida(source.profiles_path, time=source.time)
+    kin = _load_kinetic_profiles(source)
+    psi_N_kin = kin["psi_N"]
 
-    # IDA profiles (native SI) interpolated onto the equilibrium psi_N grid
+    # kinetic profiles (native SI) interpolated onto the equilibrium psi_N grid
     def to_eq(arr):
-        return np.interp(psi_N, ida.psi_N, np.asarray(arr, dtype=float))
+        return np.interp(psi_N, psi_N_kin, np.asarray(arr, dtype=float))
 
-    ne_eq, te_eq, ni_eq, ti_eq = to_eq(ida.ne), to_eq(ida.te), to_eq(ida.ni), to_eq(ida.ti)
-    Zeff_eq = np.clip(to_eq(ida.Zeff), 1.0, None)
+    ne_eq, te_eq, ni_eq, ti_eq = to_eq(kin["ne"]), to_eq(kin["te"]), to_eq(kin["ni"]), to_eq(kin["ti"])
+    Zeff_eq = np.clip(to_eq(kin["Zeff"]), 1.0, None)
 
     # isoflux from the g-file boundary (matches the recon-stage notebook weight)
     iso_pts = np.column_stack([eqdsk.boundary_R, eqdsk.boundary_Z])
@@ -197,7 +239,6 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     j_RF = _resolve_fixed(fc.j_RF, fc.psi_N, psi_N)
     j_inductive = j_phi - j_BS - j_NBI - j_RF   # == j_inductive_fit when NBI=RF=0
 
-    psi_N_kin = np.asarray(ida.psi_N, dtype=float)
     p_fast = _resolve_fixed(fc.p_fast, fc.psi_N, psi_N_kin)
 
     return Baseline(
@@ -206,11 +247,11 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         j_inductive=j_inductive,
         j_BS=j_BS,
         psi_N_kinetic=psi_N_kin,
-        ne=np.asarray(ida.ne, dtype=float),
-        te=np.asarray(ida.te, dtype=float),
-        ni=np.asarray(ida.ni, dtype=float),
-        ti=np.asarray(ida.ti, dtype=float),
-        Zeff=np.clip(np.asarray(ida.Zeff, dtype=float), 1.0, None),
+        ne=kin["ne"],
+        te=kin["te"],
+        ni=kin["ni"],
+        ti=kin["ti"],
+        Zeff=kin["Zeff"],
         Ip_target=Ip_target,
         l_i_target=l_i_target,
         provenance="reconstruction",
@@ -218,6 +259,6 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         j_RF=j_RF,
         p_fast=p_fast,
         eqdsk_bytes=eqdsk_bytes,
-        pfile_bytes=ida.raw_bytes,
+        pfile_bytes=kin["raw_bytes"],
         recon=result,
     )
