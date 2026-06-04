@@ -140,7 +140,75 @@ class Bouquet:
         Requires :meth:`prepare_baseline` first; raises if ``self.baseline`` is
         None.
         """
-        raise NotImplementedError
+        import numpy as np
+        from .baseline import resolve_uncertainty
+        from .TokaMaker_interface import generate_bouquet
+        from .utils import initialize_equilibrium_database
+
+        if self.baseline is None:
+            raise ValueError("call prepare_baseline() before generate()")
+        if self.mygs is None:
+            raise ValueError("call setup_solver() before generate()")
+
+        bl = self.baseline
+        gc = self.config.generation
+        fc = self.config.filtering
+        n_equils = int(n if n is not None else gc.n_equils)
+
+        env = resolve_uncertainty(self.config, bl)
+        self.uncertainty = env
+
+        header = self.config.output_header
+        initialize_equilibrium_database(header)
+
+        # Restore the reconstruction isoflux targets before sampling (the recon
+        # solve leaves them in place; an explicit restore is harmless otherwise).
+        if bl.recon is not None and "isoflux_pts" in bl.recon:
+            self.mygs.set_isoflux(bl.recon["isoflux_pts"], weights=bl.recon["weights"])
+
+        psi_pad = float(getattr(self.config.source, "psi_pad", 1e-3))
+
+        # Zeff is consumed on the EQUILIBRIUM grid (psi_N) by solve_with_bootstrap,
+        # whereas the perturbed kinetic profiles (ne/te/ni/ti, sigmas) live on the
+        # kinetic grid (psi_N_kinetic). Interpolate Zeff down to psi_N.
+        Zeff_eq = np.clip(
+            np.interp(np.asarray(bl.psi_N, dtype=float),
+                      np.asarray(bl.psi_N_kinetic, dtype=float),
+                      np.asarray(bl.Zeff, dtype=float)),
+            1.0, None,
+        )
+
+        self.diagnostics = generate_bouquet(
+            self.mygs, np.asarray(bl.psi_N, dtype=float), n_equils, header,
+            np.asarray(bl.j_phi, dtype=float),
+            bl.ne, bl.te, bl.ni, bl.ti,
+            env["sigma_ne"], env["sigma_te"], env["sigma_ni"], env["sigma_ti"],
+            env["sigma_jphi"],
+            env["n_ls"], env["t_ls"], env["j_ls"],
+            bl.Ip_target, bl.l_i_target, Zeff_eq,
+            input_jinductive=np.asarray(bl.j_inductive, dtype=float),
+            l_i_tolerance=gc.l_i_tolerance,
+            psi_pad=psi_pad,
+            constrain_sawteeth=gc.constrain_sawteeth,
+            recalculate_j_BS=gc.recalculate_j_BS,
+            jBS_scale_range=gc.jBS_scale_range,
+            diagnostic_plots=gc.diagnostic_plots,
+            scan_val=0,
+            pfile_bytes=bl.pfile_bytes,
+            baseline_eqdsk_bytes=bl.eqdsk_bytes,
+            baseline_pfile_bytes=bl.pfile_bytes,
+            psi_N_kinetic=np.asarray(bl.psi_N_kinetic, dtype=float),
+            coil_drift=gc.coil_drift,
+            homotopy_passes=gc.homotopy_passes,
+            inspec_F_max=fc.inspec_F_max,
+            inspec_VSC_max=fc.inspec_VSC_max,
+            seed=gc.seed,
+            # Fixed additive components, summed into every draw, never perturbed.
+            p_fast=bl.p_fast,
+            j_NBI=bl.j_NBI,
+            j_RF=bl.j_RF,
+        )
+        return self.diagnostics
 
     def plot_bouquet(self, mode: str = "all"):
         """Overlay plots of the generated bouquet (boundaries, profiles, coils)."""

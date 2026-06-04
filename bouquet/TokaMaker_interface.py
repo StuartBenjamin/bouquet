@@ -604,6 +604,9 @@ def perturb_kinetic_equilibrium(
     max_pressure_iter=_MAX_PRESSURE_ITER,
     max_li_iter=_MAX_LI_ITER,
     psi_N_kinetic=None,
+    p_fast=None,
+    j_NBI=None,
+    j_RF=None,
     max_proxy_draws=500,
     bnd_diag_callback=None,
     # Differential bootstrap (DIFF_BS=1 mode):
@@ -752,6 +755,19 @@ def perturb_kinetic_equilibrium(
                         bounds_error=False,
                         fill_value=(arr_kin[0], arr_kin[-1]))(psi_N)
 
+    # Fixed additive currents (NBI + RF), held constant across draws. They are
+    # treated exactly like the bootstrap spike (additive, non-scaled) in the
+    # j_phi assembly below. They contribute to the total only when the inductive
+    # base (input_jinductive) excludes them; with recalculate_j_BS=False the base
+    # is input_j_phi, which already contains them, so j_fixed_eff is zero there.
+    # Defaults (None -> zero) reproduce the original behaviour exactly.
+    _jfix = np.zeros_like(psi_N)
+    if j_NBI is not None:
+        _jfix = _jfix + np.asarray(j_NBI, dtype=float)
+    if j_RF is not None:
+        _jfix = _jfix + np.asarray(j_RF, dtype=float)
+    j_fixed_eff = _jfix if recalculate_j_BS else np.zeros_like(psi_N)
+
     # ----------------------------------------------------------------
     #  3.  Perturb kinetic profiles to match <P>
     # ----------------------------------------------------------------
@@ -797,6 +813,12 @@ def perturb_kinetic_equilibrium(
         pres_tmp = EC * (ne_eq * te_eq + ni_eq * ti_eq)
         tmp_avg = mygs.flux_integral(psi_N, pres_tmp)
         p_err = np.mean(np.abs(inp_avg - tmp_avg) / inp_avg) * 100.0
+
+    # Add the fixed (fast-ion) pressure -- constant across draws, never perturbed
+    # -- to the thermal pressure for the GS solve. The pressure-match diagnostic
+    # above stays thermal-only (comparable to the thermal baseline inp_avg).
+    if p_fast is not None:
+        pres_tmp = pres_tmp + _kin_to_eq(np.asarray(p_fast, dtype=float))
 
     mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
 
@@ -1303,7 +1325,7 @@ def perturb_kinetic_equilibrium(
             # spike_profile already = delta_spike (perturbed - cached recon)
             new_jphi = input_j_phi + spike_profile
         else:
-            new_jphi = input_jinductive + spike_profile
+            new_jphi = input_jinductive + spike_profile + j_fixed_eff
         _psi_range_anchor = mygs.psi_bounds[1] - mygs.psi_bounds[0]
         _pp_anchor = {"type": "linterp",
                       "y": np.gradient(pres_tmp) /
@@ -1573,12 +1595,12 @@ def perturb_kinetic_equilibrium(
                 continue  # non-physical (negative current)
             _root = root_scalar(
                 Ip_flux_integral_vs_target,
-                args=(mygs, _cand, spike_profile, psi_N, Ip_target),
+                args=(mygs, _cand, spike_profile + j_fixed_eff, psi_N, Ip_target),
                 bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
                 method="brentq", rtol=1e-6,
             )
             _a = _root.root
-            _matched = _a * _cand + spike_profile
+            _matched = _a * _cand + spike_profile + j_fixed_eff
             # Cheap real-geom pre-screen: skip if confidently out-of-band.
             if _prescreen_geo is not None:
                 _est = calc_realgeom_li_proxy_fast(_matched, _prescreen_geo)
@@ -1625,7 +1647,7 @@ def perturb_kinetic_equilibrium(
         final_scale_j0, final_jphi = find_optimal_scale(
             mygs, psi_N, pres_tmp, ffp_prof, pp_prof,
             matched_j_inductive, Ip_target, psi_pad,
-            spike_prof=spike_profile,
+            spike_prof=spike_profile + j_fixed_eff,
             diagnostic_plots=False, verbose=False,
         )
 
@@ -1676,7 +1698,9 @@ def perturb_kinetic_equilibrium(
         pprime_tmp[-1] = 0.0
         pp_prof = {"type": "linterp", "y": pprime_tmp, "x": psi_N}
 
-        target_jphi_perturb = matched_j_inductive * final_scale_j0 + spike_profile
+        target_jphi_perturb = (
+            matched_j_inductive * final_scale_j0 + spike_profile + j_fixed_eff
+        )
 
         output_jphi, _n_corr, _corr_hist = _corrective_jphi_iteration(
             mygs, psi_N, target_jphi_perturb, pp_prof,
@@ -1871,6 +1895,9 @@ def generate_bouquet(
     jphi_baseline=True,
     seed=None,
     pin_jphi=False,
+    p_fast=None,
+    j_NBI=None,
+    j_RF=None,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -2971,6 +2998,9 @@ def generate_bouquet(
                 scale_jBS=scale_jBS,
                 diagnostic_plots=diagnostic_plots,
                 psi_N_kinetic=psi_N_kinetic,
+                p_fast=p_fast,
+                j_NBI=j_NBI,
+                j_RF=j_RF,
                 max_proxy_draws=max_proxy_draws,
                 p_thresh=p_thresh,
                 bnd_diag_callback=_report_bnd,

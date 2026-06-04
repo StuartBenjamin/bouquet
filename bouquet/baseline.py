@@ -106,6 +106,57 @@ def resolve_baseline(config: "BouquetConfig", mygs=None) -> Baseline:
     raise TypeError(f"unknown baseline source type: {type(source).__name__}")
 
 
+def resolve_uncertainty(config, baseline) -> dict:
+    """Resolve the perturbation envelope for :func:`generate_bouquet`.
+
+    Returns kinetic sigmas (on ``baseline.psi_N_kinetic``), ``sigma_jphi`` (a
+    fractional envelope on ``|baseline.j_phi|``, on ``baseline.psi_N``), and the
+    GPR correlation length scales.
+
+    Kinetic sigma source precedence:
+      1. ``UncertaintyConfig.ida_path`` if set;
+      2. else the reconstruction source's own IDA ``.cdf`` (sigmas read once);
+      3. else a fractional fallback ``fallback_frac * |profile|``.
+    """
+    import numpy as np
+    from .config import ReconstructionSource
+
+    unc = config.uncertainty
+    src = config.source
+    psi_kin = np.asarray(baseline.psi_N_kinetic, dtype=float)
+
+    ida_path = unc.ida_path
+    if ida_path is None and isinstance(src, ReconstructionSource) \
+            and src.profiles_path.endswith(".cdf"):
+        ida_path = src.profiles_path
+
+    if ida_path is not None:
+        from .io.ida import read_ida
+        ida = read_ida(
+            ida_path, time=getattr(src, "time", None),
+            sigma_mode=unc.sigma_mode, sigma_method=unc.sigma_method,
+            sigma_ni_from_ne=unc.sigma_ni_from_ne,
+        )
+
+        def to_kin(arr):
+            return np.interp(psi_kin, ida.psi_N, np.asarray(arr, dtype=float))
+
+        out = dict(
+            sigma_ne=to_kin(ida.sigma_ne), sigma_te=to_kin(ida.sigma_te),
+            sigma_ni=to_kin(ida.sigma_ni), sigma_ti=to_kin(ida.sigma_ti),
+        )
+    else:
+        f = float(unc.fallback_frac)
+        out = dict(
+            sigma_ne=f * np.abs(baseline.ne), sigma_te=f * np.abs(baseline.te),
+            sigma_ni=f * np.abs(baseline.ni), sigma_ti=f * np.abs(baseline.ti),
+        )
+
+    out["sigma_jphi"] = unc.sigma_jphi_frac * np.abs(np.asarray(baseline.j_phi, dtype=float))
+    out["n_ls"], out["t_ls"], out["j_ls"] = unc.n_ls, unc.t_ls, unc.j_ls
+    return out
+
+
 def _resolve_fixed(comp, src_psi, dst_psi):
     """Fixed additive component onto ``dst_psi`` (zeros if not supplied)."""
     import numpy as np

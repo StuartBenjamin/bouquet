@@ -195,18 +195,22 @@ class GenerationConfig:
 
     n_equils: int = 20
     seed: Optional[int] = None
-    l_i_tolerance: float = 0.01
+    l_i_tolerance: float = 0.05            # l_i acceptance band (fraction of target)
     constrain_sawteeth: bool = False
     # When True, recompute bootstrap each draw via TokaMaker solve_with_bootstrap
     # and convert its parallel output to toroidal (see physics.parallel_to_toroidal),
     # overriding the baseline/FUSE j_BS. When False, keep the baseline j_BS.
     recalculate_j_BS: bool = True
-    jBS_scale_range: Optional[tuple] = None
-    # coil handling
-    lock_coils: bool = True
-    lock_coils_weight: float = 1.0e4
-    coil_drift_threshold_A: Optional[float] = None
-    homotopy_passes: Optional[list] = None   # list of (F_tol, VSC_tol)
+    jBS_scale_range: tuple = (0.99, 1.01)  # bootstrap multiplicative spread
+    # Coil handling (homotopy-based). The inverse solve drifts coils within
+    # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
+    # stages that tighten loose->tight (each warm-starts the next). A single
+    # direct solve at the tight target is usually infeasible -- the schedule is
+    # what makes ±1% coils reachable.
+    coil_drift: float = 0.01
+    homotopy_passes: list = field(
+        default_factory=lambda: [(0.05, 0.10), (0.02, 0.05), (0.01, 0.01)]
+    )
     diagnostic_plots: bool = False
 
 
