@@ -58,7 +58,10 @@ class Bouquet:
         on source type. Generation depends only on the returned
         :class:`~bouquet.baseline.Baseline`, never on reconstruction directly.
         """
-        raise NotImplementedError
+        from .baseline import resolve_baseline
+
+        self.baseline = resolve_baseline(self.config, self.mygs)
+        return self.baseline
 
     def plot_baseline(self):
         """Diagnostic plots: kinetic profiles, separated currents, and (for the

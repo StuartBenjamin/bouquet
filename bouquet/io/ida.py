@@ -12,8 +12,10 @@ Operational DIII-D ``IDA_*.cdf`` layout (verified against IDA_204441_.cdf):
     profiles are 2-D ``(n_time, n_radial)`` with companion ``*_err`` datasets
     (direct 1-sigma); the radial grid is ``psi_n`` (n_radial,), extending past
     the separatrix to ~1.2; ``time`` is in milliseconds. Units are already SI
-    (n_e, n_12C6 in m^-3; T_e, T_12C6 in eV). There is no stored main-ion
-    density, so ``ni`` is reconstructed from quasineutrality with carbon.
+    (n_e in m^-3; T_e, T_12C6 in eV). There is no stored main-ion density, so
+    ``ni`` is taken equal to ``ne`` (quasi-neutrality approximation), matching
+    the operational IDA workflow (e.g. 204441_4400_IDA.ipynb feeds ni = ne to
+    reconstruct_equilibrium / generate_bouquet).
 """
 
 from __future__ import annotations
@@ -22,10 +24,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-
-# Fully-stripped carbon (12C6) is the CER impurity; used for quasineutrality
-# n_i = n_e - Z_imp * n_imp and is consistent with the stored Zeff.
-_IMPURITY_Z = 6.0
 
 
 @dataclass
@@ -88,8 +86,8 @@ def read_ida(
     sigma_method : {"percentile", "std"}
         Band estimator for the ensemble layout (unused for ``"direct"``).
     sigma_ni_from_ne : bool
-        If True, set ``sigma_ni = sigma_ne`` (quasi-neutrality). Otherwise the
-        ion-density sigma is propagated from the n_e and n_imp errors.
+        Retained for API symmetry. With ``ni = ne`` the ion-density sigma always
+        tracks ``sigma_ne``.
 
     Notes
     -----
@@ -122,18 +120,16 @@ def read_ida(
         ne = col("n_e")          # m^-3
         te = col("T_e")          # eV
         ti = col("T_12C6")       # eV (carbon CER temperature)
-        n_imp = col("n_12C6")    # m^-3
         Zeff = col("Zeff")
-        ni = ne - _IMPURITY_Z * n_imp   # quasineutrality (main ion = deuterium)
+        # ni ~ ne (quasi-neutrality approximation), matching the operational IDA
+        # workflow which feeds ni = ne (not an impurity-diluted main-ion density)
+        # to reconstruct_equilibrium / generate_bouquet.
+        ni = ne.copy()
 
         sigma_ne = col("n_e_err")
         sigma_te = col("T_e_err")
         sigma_ti = col("T_12C6_err")
-        if sigma_ni_from_ne:
-            sigma_ni = sigma_ne.copy()
-        else:
-            sigma_n_imp = col("n_12C6_err")
-            sigma_ni = np.hypot(sigma_ne, _IMPURITY_Z * sigma_n_imp)
+        sigma_ni = sigma_ne.copy()   # consistent with ni = ne
 
     return IDAProfiles(
         psi_N=psi_N,

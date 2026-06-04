@@ -70,16 +70,17 @@ class Baseline:
     recon: Optional[dict] = None
 
 
-def resolve_baseline(source: "BaselineSource", mygs, solver: "SolverConfig") -> Baseline:
-    """Dispatch on source type and return a populated :class:`Baseline`.
+def resolve_baseline(config: "BouquetConfig", mygs=None) -> Baseline:
+    """Dispatch on ``config.source`` and return a populated :class:`Baseline`.
 
-    * :class:`ReconstructionSource` -> read g-file + profiles (IDA .cdf or
-      p-file), run :func:`reconstruct_equilibrium`, package the fitted split
-      currents (converted to toroidal) plus any user-supplied fixed components.
     * :class:`ImasSource` -> delegate to
       :func:`bouquet.io.imas.read_imas_baseline`: take j_ohmic / j_BS / Ip / l_i
       and core_profiles directly (no GS reconstruction), convert parallel->
-      toroidal, isotropize p_fast.
+      toroidal, isotropize p_fast. ``mygs`` is unused.
+    * :class:`ReconstructionSource` -> read g-file + profiles (IDA .cdf or
+      p-file), run :func:`reconstruct_equilibrium` on ``mygs``, package the
+      fitted split currents (converted to toroidal) plus any user-supplied
+      fixed components. (Implemented in phase 2 step 3.)
 
     Both paths return a :class:`Baseline` with every current as toroidal j_phi
     and the fixed additive components (j_NBI, j_RF, p_fast) attached.
@@ -87,4 +88,22 @@ def resolve_baseline(source: "BaselineSource", mygs, solver: "SolverConfig") -> 
     Implemented as a free function so sources stay declarative (plain config)
     and the resolution logic lives in one place.
     """
-    raise NotImplementedError
+    from .config import ImasSource, ReconstructionSource
+
+    source = config.source
+
+    if isinstance(source, ImasSource):
+        from .io.imas import read_imas_baseline
+        return read_imas_baseline(
+            source,
+            fixed=config.fixed_components,
+            p_fast_reduction=config.fixed_components.p_fast_reduction,
+        )
+
+    if isinstance(source, ReconstructionSource):
+        raise NotImplementedError(
+            "ReconstructionSource baseline (g-file + IDA/p-file -> GS recon) "
+            "lands in phase 2 step 3"
+        )
+
+    raise TypeError(f"unknown baseline source type: {type(source).__name__}")

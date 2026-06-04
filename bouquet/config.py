@@ -235,4 +235,27 @@ class BouquetConfig:
 
     def __post_init__(self):
         """Validate cross-field invariants early (before any GS solve)."""
-        raise NotImplementedError
+        if not self.output_header:
+            raise ValueError("output_header must be a non-empty string")
+
+        src = self.source
+        if isinstance(src, ReconstructionSource):
+            if not src.geqdsk_path or not src.profiles_path:
+                raise ValueError(
+                    "ReconstructionSource requires geqdsk_path and profiles_path"
+                )
+        elif isinstance(src, ImasSource):
+            if not src.ids_path:
+                raise ValueError("ImasSource requires ids_path")
+        else:
+            raise TypeError(
+                "source must be a ReconstructionSource or ImasSource, got "
+                f"{type(src).__name__}"
+            )
+
+        if self.fixed_components.p_fast_reduction not in ("trace", "mean", "perp"):
+            raise ValueError(
+                "fixed_components.p_fast_reduction must be 'trace', 'mean', or 'perp'"
+            )
+        if self.uncertainty.sigma_mode not in ("direct", "ensemble"):
+            raise ValueError("uncertainty.sigma_mode must be 'direct' or 'ensemble'")
