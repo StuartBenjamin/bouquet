@@ -32,6 +32,11 @@ env/
 *.npy
 *.mat
 
+# FUSE IMAS/OMAS data dumps (proprietary DIII-D data) — never commit.
+# Only the readers in bouquet/io are synced, never the data they read.
+dd_sim.json
+*_dd_sim.json
+
 # Fortran / compiled artifacts (in case any build steps live nearby)
 *.mod
 *.o

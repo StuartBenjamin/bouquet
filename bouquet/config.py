@@ -74,6 +74,7 @@ class ReconstructionSource:
     geqdsk_path: str
     profiles_path: str                 # IDA .cdf OR p-file (auto-detected by extension)
     cocos: int = 1
+    time: Optional[float] = None       # IDA time slice [s] (multi-time .cdf files)
     profile_overrides: dict = field(default_factory=dict)  # name -> array, manual override
     # reconstruction knobs
     psi_pad: float = 1e-3

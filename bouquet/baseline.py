@@ -101,9 +101,123 @@ def resolve_baseline(config: "BouquetConfig", mygs=None) -> Baseline:
         )
 
     if isinstance(source, ReconstructionSource):
-        raise NotImplementedError(
-            "ReconstructionSource baseline (g-file + IDA/p-file -> GS recon) "
-            "lands in phase 2 step 3"
-        )
+        return _resolve_reconstruction(source, config, mygs)
 
     raise TypeError(f"unknown baseline source type: {type(source).__name__}")
+
+
+def _resolve_fixed(comp, src_psi, dst_psi):
+    """Fixed additive component onto ``dst_psi`` (zeros if not supplied)."""
+    import numpy as np
+
+    if comp is None:
+        return np.zeros_like(dst_psi)
+    comp = np.asarray(comp, dtype=float)
+    if src_psi is None:
+        if comp.shape != dst_psi.shape:
+            raise ValueError(
+                "fixed-component array length does not match the target grid; "
+                "provide FixedComponentsConfig.psi_N for resampling"
+            )
+        return comp
+    return np.interp(dst_psi, np.asarray(src_psi, dtype=float), comp)
+
+
+def _resolve_reconstruction(source, config, mygs) -> Baseline:
+    """Reconstruction-source baseline: GS reconstruct on a live ``mygs``.
+
+    Mirrors the operational notebook: read g-file + IDA profiles, interpolate
+    onto the g-file psi_N grid, run :func:`reconstruct_equilibrium`, and package
+    the (toroidal) fitted currents. The reconstructed total ``j_phi_fit`` already
+    contains all driven current, so fixed components (j_NBI / j_RF) default to
+    zero and only re-partition the inductive part if the user supplies them;
+    ``p_fast`` (absent from thermal IDA profiles) likewise defaults to zero.
+    """
+    import numpy as np
+    from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
+
+    from .io.geqdsk import read_geqdsk
+    from .io.ida import read_ida
+    from .TokaMaker_interface import reconstruct_equilibrium
+
+    if mygs is None:
+        raise ValueError(
+            "ReconstructionSource requires a live TokaMaker solver; call "
+            "setup_solver() before prepare_baseline()"
+        )
+    if source.profile_overrides:
+        raise NotImplementedError("profile_overrides is not yet applied")
+    if not source.profiles_path.endswith(".cdf"):
+        raise NotImplementedError(
+            "reconstruction currently supports IDA .cdf profiles; p-file support "
+            "is a follow-up"
+        )
+
+    with open(source.geqdsk_path, "rb") as fh:
+        eqdsk_bytes = fh.read()
+    eqdsk = read_geqdsk(source.geqdsk_path, cocos=source.cocos)
+    psi_N = np.asarray(eqdsk.psi_N, dtype=float)
+
+    ida = read_ida(source.profiles_path, time=source.time)
+
+    # IDA profiles (native SI) interpolated onto the equilibrium psi_N grid
+    def to_eq(arr):
+        return np.interp(psi_N, ida.psi_N, np.asarray(arr, dtype=float))
+
+    ne_eq, te_eq, ni_eq, ti_eq = to_eq(ida.ne), to_eq(ida.te), to_eq(ida.ni), to_eq(ida.ti)
+    Zeff_eq = np.clip(to_eq(ida.Zeff), 1.0, None)
+
+    # isoflux from the g-file boundary (matches the recon-stage notebook weight)
+    iso_pts = np.column_stack([eqdsk.boundary_R, eqdsk.boundary_Z])
+    iso_w = np.ones(len(iso_pts)) * 200.0
+    mygs.set_isoflux(iso_pts, weights=iso_w)
+
+    guess_jinductive = create_power_flux_fun(len(psi_N), 1.5, 1.5)["y"]
+
+    result = reconstruct_equilibrium(
+        mygs, eqdsk,
+        ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
+        iso_pts, iso_w, source.psi_pad,
+        guess_jinductive=guess_jinductive,
+        n_k=source.n_k,
+        psi_bridge=source.psi_bridge,
+        rescale_j_BS=source.rescale_j_BS,
+        shelf_psi_N=source.shelf_psi_N,
+        initialize_psi=True,
+    )
+
+    Ip_target = abs(float(eqdsk.Ip))
+    l_i_target = mygs.get_stats(lcfs_pad=source.psi_pad, li_normalization="std")["l_i"]
+
+    j_phi = np.asarray(result["j_phi_fit"], dtype=float)
+    j_BS = np.asarray(result["j_BS_used"], dtype=float)
+
+    fc = config.fixed_components
+    j_NBI = _resolve_fixed(fc.j_NBI, fc.psi_N, psi_N)
+    j_RF = _resolve_fixed(fc.j_RF, fc.psi_N, psi_N)
+    j_inductive = j_phi - j_BS - j_NBI - j_RF   # == j_inductive_fit when NBI=RF=0
+
+    psi_N_kin = np.asarray(ida.psi_N, dtype=float)
+    p_fast = _resolve_fixed(fc.p_fast, fc.psi_N, psi_N_kin)
+
+    return Baseline(
+        psi_N=psi_N,
+        j_phi=j_phi,
+        j_inductive=j_inductive,
+        j_BS=j_BS,
+        psi_N_kinetic=psi_N_kin,
+        ne=np.asarray(ida.ne, dtype=float),
+        te=np.asarray(ida.te, dtype=float),
+        ni=np.asarray(ida.ni, dtype=float),
+        ti=np.asarray(ida.ti, dtype=float),
+        Zeff=np.clip(np.asarray(ida.Zeff, dtype=float), 1.0, None),
+        Ip_target=Ip_target,
+        l_i_target=l_i_target,
+        provenance="reconstruction",
+        j_NBI=j_NBI,
+        j_RF=j_RF,
+        p_fast=p_fast,
+        eqdsk_bytes=eqdsk_bytes,
+        pfile_bytes=ida.raw_bytes,
+        recon=result,
+    )

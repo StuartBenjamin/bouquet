@@ -43,12 +43,73 @@ class Bouquet:
 
     # ── stage 1: solver -------------------------------------------------
     def setup_solver(self) -> "Bouquet":
-        """Read mesh, build regions, stand up ``mygs``, set isoflux + VSC.
+        """Read mesh, build regions, stand up ``mygs``, set isoflux + VSC + reg.
 
         Common to every baseline source -- perturbed draws are always solved
-        with TokaMaker. Idempotent; returns self for chaining.
+        with TokaMaker. Returns self for chaining.
+
+        F0 (= R0*B0) and the reference boundary come from the reconstruction
+        g-file when the source is a :class:`ReconstructionSource`; for an
+        :class:`ImasSource` set ``SolverConfig.F0`` explicitly (generation-side
+        solver setup for the IMAS path is wired in a later step).
         """
-        raise NotImplementedError
+        import numpy as np
+        from OpenFUSIONToolkit import OFT_env
+        from OpenFUSIONToolkit.TokaMaker import TokaMaker
+        from OpenFUSIONToolkit.TokaMaker.meshing import load_gs_mesh
+
+        from .config import ReconstructionSource, ImasSource
+        from .io.geqdsk import read_geqdsk
+
+        sc = self.config.solver
+        src = self.config.source
+
+        myOFT = OFT_env(nthreads=sc.nthreads)
+        mygs = TokaMaker(myOFT)
+
+        mesh_pts, mesh_lc, mesh_reg, coil_dict, cond_dict = load_gs_mesh(sc.mesh_path)
+        mygs.setup_mesh(mesh_pts, mesh_lc, mesh_reg)
+        mygs.setup_regions(cond_dict=cond_dict, coil_dict=coil_dict)
+
+        # F0 and reference boundary
+        F0 = sc.F0
+        eqdsk_ref = None
+        if isinstance(src, ReconstructionSource):
+            eqdsk_ref = read_geqdsk(src.geqdsk_path, cocos=src.cocos)
+            if F0 is None:
+                F0 = abs(eqdsk_ref.R_center * eqdsk_ref.B_center)
+        elif isinstance(src, ImasSource) and F0 is None:
+            raise NotImplementedError(
+                "solver setup for an ImasSource needs SolverConfig.F0 "
+                "(IMAS generation-side setup is wired in a later step)"
+            )
+        if F0 is None:
+            raise ValueError("F0 could not be determined; set SolverConfig.F0")
+
+        mygs.setup(order=sc.order, F0=F0)
+        mygs.settings.maxits = 800
+        mygs.settings.pm = False
+        mygs.update_settings()
+        mygs.set_coil_vsc(sc.coil_vsc)
+
+        # Isoflux: explicit config wins; otherwise the reconstruction g-file LCFS
+        iso_pts, iso_w = sc.isoflux_pts, sc.isoflux_weights
+        if iso_pts is None and eqdsk_ref is not None:
+            iso_pts = np.column_stack([eqdsk_ref.boundary_R, eqdsk_ref.boundary_Z])
+            iso_w = np.ones(len(iso_pts)) * 500.0
+        if iso_pts is not None:
+            mygs.set_isoflux(iso_pts, weights=iso_w)
+
+        # Weak coil regularisation toward zero + small VSC freedom
+        reg_terms = [mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.0)
+                     for name in mygs.coil_sets]
+        reg_terms.append(mygs.coil_reg_term({"#VSC": 1.0}, target=0.0, weight=1e-2))
+        mygs.set_coil_reg(reg_terms=reg_terms)
+
+        self.mygs = mygs
+        self._myOFT = myOFT          # keep the env alive
+        self._eqdsk_ref = eqdsk_ref
+        return self
 
     # ── stage 2: baseline (reconstruction OR imas) ----------------------
     def prepare_baseline(self) -> "Baseline":
