@@ -15,10 +15,9 @@ conventions:
 
 from __future__ import annotations
 
-from typing import Optional, TYPE_CHECKING
+from typing import Optional
 
-if TYPE_CHECKING:
-    import numpy as np
+import numpy as np
 
 
 def isotropize_fast_pressure(p_perp, p_par, method: str = "trace"):
@@ -48,7 +47,21 @@ def isotropize_fast_pressure(p_perp, p_par, method: str = "trace"):
       "Analysis of the isotropic and anisotropic Grad-Shafranov equation".
     - Kinetic-EFIT total-pressure constraint p_tot = p_e + p_i + p_Z + p_fast.
     """
-    raise NotImplementedError
+    p_perp = np.asarray(p_perp, dtype=float)
+    p_par = np.asarray(p_par, dtype=float)
+    if p_perp.shape != p_par.shape:
+        raise ValueError(
+            f"p_perp and p_par must have the same shape; got {p_perp.shape} vs {p_par.shape}"
+        )
+    if method == "trace":
+        return (2.0 * p_perp + p_par) / 3.0
+    if method == "mean":
+        return (p_perp + p_par) / 2.0
+    if method == "perp":
+        return p_perp
+    raise ValueError(
+        f"unknown p_fast reduction method {method!r}; expected 'trace', 'mean', or 'perp'"
+    )
 
 
 def parallel_to_toroidal(
@@ -88,4 +101,37 @@ def parallel_to_toroidal(
     Pass either (``j_parallel_total``, ``j_tor_total``) for the ratio method or
     ``geom`` for the analytic method.
     """
-    raise NotImplementedError
+    j_parallel = np.asarray(j_parallel, dtype=float)
+
+    if j_parallel_total is not None and j_tor_total is not None:
+        j_parallel_total = np.asarray(j_parallel_total, dtype=float)
+        j_tor_total = np.asarray(j_tor_total, dtype=float)
+        # Per-surface geometric factor c(psi) = j_tor_total / j_parallel_total,
+        # shared by all field-aligned components. Guard the on-axis / low-current
+        # surfaces where the total parallel current passes through zero: there the
+        # ratio is ill-defined, so fall back to the nearest well-defined factor.
+        eps = 1e-12 * np.nanmax(np.abs(j_parallel_total)) if j_parallel_total.size else 0.0
+        good = np.abs(j_parallel_total) > eps
+        if not np.any(good):
+            raise ValueError("j_parallel_total is ~0 everywhere; cannot form ratio")
+        c = np.ones_like(j_parallel_total)
+        c[good] = j_tor_total[good] / j_parallel_total[good]
+        if not np.all(good):
+            # nearest-neighbour fill for the masked (near-zero) surfaces
+            idx = np.arange(c.size)
+            c[~good] = np.interp(idx[~good], idx[good], c[good])
+        return j_parallel * c
+
+    if geom is not None:
+        # Analytic FSA conversion from equilibrium metrics. Deferred until the
+        # solve_with_bootstrap integration (step 3), where the TokaMaker
+        # equilibrium supplies <B^2>, <1/R^2>, F=R*B_phi, <1/R>.
+        raise NotImplementedError(
+            "analytic parallel->toroidal conversion not yet implemented; "
+            "pass j_parallel_total and j_tor_total to use the ratio method"
+        )
+
+    raise ValueError(
+        "provide either (j_parallel_total, j_tor_total) for the ratio method "
+        "or geom for the analytic method"
+    )

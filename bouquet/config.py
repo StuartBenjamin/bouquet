@@ -171,7 +171,7 @@ class UncertaintyConfig:
     # an IDA .cdf, reuse that file (read once); otherwise fall back to
     # `fallback_frac` * baseline profile. Set explicitly to force a sigma file.
     ida_path: Optional[str] = None
-    sigma_mode: str = "ensemble"           # "ensemble" | "direct"
+    sigma_mode: str = "direct"             # "direct" (*_err datasets) | "ensemble"
     sigma_method: str = "percentile"       # "percentile" | "std"  (ensemble only)
     sigma_ni_from_ne: bool = True          # quasi-neutrality: sigma_ni = sigma_ne
     fallback_frac: float = 0.10            # used when ida_path is None

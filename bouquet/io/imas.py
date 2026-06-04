@@ -9,18 +9,22 @@ Field mapping (verified against a D3D FUSE run)::
 
     equilibrium.time_slice[t].global_quantities.ip            -> Ip_target
     equilibrium.time_slice[t].global_quantities.li_3          -> l_i_target
-    core_profiles.profiles_1d[t].grid.{psi,rho_tor_norm}      -> radial grid
+    core_profiles.profiles_1d[t].grid.psi                     -> normalised -> psi_N
+    core_profiles.profiles_1d[t].j_total                      -> total PARALLEL current
+    core_profiles.profiles_1d[t].j_tor                        -> total TOROIDAL current
     core_profiles.profiles_1d[t].j_ohmic                      -> inductive (parallel)
     core_profiles.profiles_1d[t].j_bootstrap                  -> bootstrap (parallel)
-    core_profiles.profiles_1d[t].j_total / j_tor              -> parallel/toroidal totals
     core_profiles.profiles_1d[t].electrons.{density_thermal,temperature}
-    core_profiles.profiles_1d[t].ion[*].{density_thermal,temperature,label}
+    core_profiles.profiles_1d[t].ion[*].{density_thermal,temperature,element[].z_n}
     core_profiles.profiles_1d[t].{electrons,ion[*]}.pressure_fast_{perpendicular,parallel}
     core_sources.source[*].profiles_1d[t].j_parallel          -> beam-source j_NBI only
 
 Currents are converted parallel->toroidal (see :func:`bouquet.physics.parallel_to_toroidal`)
-and fast pressure is isotropized (see :func:`bouquet.physics.isotropize_fast_pressure`)
-before being packaged into a :class:`~bouquet.baseline.Baseline`.
+via the per-surface factor c = j_tor/j_total, and fast pressure is isotropized
+(see :func:`bouquet.physics.isotropize_fast_pressure`). The total j_phi is set to
+the authoritative toroidal ``j_tor`` and the inductive component is taken as the
+residual ``j_phi - j_BS - j_NBI - j_RF`` so the decomposition sums exactly and Ip
+is preserved.
 
 Note: ``j_BS`` read here is the FUSE bootstrap baseline, but it is *overridden*
 when ``GenerationConfig.recalculate_j_BS`` is True -- bouquet then recomputes
@@ -32,10 +36,13 @@ from __future__ import annotations
 
 from typing import Optional, TYPE_CHECKING
 
+import numpy as np
+
+from ..physics import isotropize_fast_pressure, parallel_to_toroidal
+
 if TYPE_CHECKING:
     from ..config import ImasSource, FixedComponentsConfig
     from ..baseline import Baseline
-
 
 # Core-source identifier index for neutral-beam current drive.
 NBI_SOURCE_INDEX = 2          # neutral beam injection -> summed into j_NBI
@@ -45,6 +52,41 @@ NBI_SOURCE_INDEX = 2          # neutral beam injection -> summed into j_NBI
 # if/when internal EC/IC/LH summation is wanted.
 
 
+def _nearest_index(time_array, t: Optional[float], what: str) -> int:
+    """Index of the slice nearest ``t`` (seconds) in ``time_array``."""
+    ta = np.asarray(time_array, dtype=float)
+    if ta.size == 1:
+        return 0
+    if t is None:
+        raise ValueError(
+            f"{what} has {ta.size} time slices; set ImasSource.time (seconds). "
+            f"Range [s]: [{ta.min():.4f}, {ta.max():.4f}]"
+        )
+    return int(np.argmin(np.abs(ta - t)))
+
+
+def _isotropic_fast_pressure(species: dict, method: str, n: int):
+    """Isotropized fast pressure for one species, or zeros if it carries none."""
+    if "pressure_fast_perpendicular" not in species:
+        return np.zeros(n)
+    p_perp = np.asarray(species["pressure_fast_perpendicular"], dtype=float)
+    p_par = np.asarray(species.get("pressure_fast_parallel", p_perp), dtype=float)
+    return isotropize_fast_pressure(p_perp, p_par, method=method)
+
+
+def _override(arr, src_psi, dst_psi):
+    """Resample a user-supplied fixed-component array onto the baseline grid."""
+    arr = np.asarray(arr, dtype=float)
+    if src_psi is None:
+        if arr.shape != dst_psi.shape:
+            raise ValueError(
+                "fixed-component array length does not match the baseline grid; "
+                "provide FixedComponentsConfig.psi_N for resampling"
+            )
+        return arr
+    return np.interp(dst_psi, np.asarray(src_psi, dtype=float), arr)
+
+
 def read_imas_baseline(
     source: "ImasSource",
     fixed: Optional["FixedComponentsConfig"] = None,
@@ -52,19 +94,103 @@ def read_imas_baseline(
 ) -> "Baseline":
     """Read a FUSE ``dd_sim.json`` IDS and return a separated :class:`Baseline`.
 
-    Steps:
-      1. ``json.load`` the file; select the time slice nearest ``source.time``.
-      2. Pull Ip / l_i from ``equilibrium...global_quantities``.
-      3. Pull j_ohmic / j_bootstrap (parallel) and the total parallel/toroidal
-         currents from ``core_profiles``.
-      4. Sum ``core_sources`` ``j_parallel`` over beam sources into j_NBI.
-         j_RF is left as zeros (no internal RF calculation).
-      5. Convert every parallel current to toroidal via the j_tor/j_total ratio.
-      6. Build p_fast by isotropizing per-species fast pressure
-         (``isotropize_fast_pressure``, ``method=p_fast_reduction``) and summing.
-      7. Arrays in ``fixed`` override the IDS-derived components when provided
-         (this is the only way to supply j_RF).
-
-    No Grad-Shafranov reconstruction is performed -- the provenance is "imas".
+    No Grad-Shafranov reconstruction is performed -- provenance is "imas".
     """
-    raise NotImplementedError
+    import json
+    from ..baseline import Baseline
+
+    with open(source.ids_path, "rb") as fh:
+        raw_bytes = fh.read()
+    dd = json.loads(raw_bytes)
+    T = source.time
+
+    # --- targets from the equilibrium IDS ---
+    eq = dd["equilibrium"]
+    ie = _nearest_index(eq["time"], T, "equilibrium")
+    gq = eq["time_slice"][ie]["global_quantities"]
+    Ip_target = abs(float(gq["ip"]))
+    l_i_target = float(gq["li_3"])
+
+    # --- profiles + currents from core_profiles ---
+    cp_ids = dd["core_profiles"]
+    ic = _nearest_index(cp_ids["time"], T, "core_profiles")
+    cp = cp_ids["profiles_1d"][ic]
+
+    psi = np.asarray(cp["grid"]["psi"], dtype=float)
+    psi_N = (psi - psi[0]) / (psi[-1] - psi[0])   # 0 (axis) -> 1 (boundary)
+    n = psi_N.size
+
+    j_total = np.asarray(cp["j_total"], dtype=float)   # total parallel
+    j_tor = np.asarray(cp["j_tor"], dtype=float)       # total toroidal (authoritative)
+    j_ohmic = np.asarray(cp["j_ohmic"], dtype=float)   # parallel (unused: inductive = residual)
+    j_boot = np.asarray(cp["j_bootstrap"], dtype=float)  # parallel
+
+    def to_toroidal(j_par):
+        return parallel_to_toroidal(j_par, j_parallel_total=j_total, j_tor_total=j_tor)
+
+    j_BS = to_toroidal(j_boot)
+
+    # --- NBI: sum beam-source parallel currents, then convert ---
+    src_ids = dd.get("core_sources", {})
+    isrc = _nearest_index(src_ids["time"], T, "core_sources") if src_ids.get("time") else ic
+    jnbi_par = np.zeros(n)
+    for s in src_ids.get("source", []):
+        if s.get("identifier", {}).get("index") == NBI_SOURCE_INDEX:
+            pr = s.get("profiles_1d", [])
+            if pr:
+                idx = isrc if len(pr) > isrc else 0
+                jnbi_par = jnbi_par + np.asarray(pr[idx]["j_parallel"], dtype=float)
+    j_NBI = to_toroidal(jnbi_par)
+    j_RF = np.zeros(n)   # never computed internally; user-supplied only
+
+    # --- kinetic profiles + Zeff + fast pressure ---
+    el = cp["electrons"]
+    ne = np.asarray(el["density_thermal"], dtype=float)
+    te = np.asarray(el["temperature"], dtype=float)   # eV
+    p_fast = _isotropic_fast_pressure(el, p_fast_reduction, n)
+
+    ni = None
+    ti = None
+    zeff_num = np.zeros(n)
+    for ion in cp["ion"]:
+        Z = float(ion["element"][0]["z_n"])
+        n_s = np.asarray(ion["density_thermal"], dtype=float)
+        zeff_num += n_s * Z * Z
+        p_fast = p_fast + _isotropic_fast_pressure(ion, p_fast_reduction, n)
+        if Z == 1.0 and ni is None:        # main (hydrogenic) ion
+            ni = n_s
+            ti = np.asarray(ion["temperature"], dtype=float)
+    if ni is None:
+        raise ValueError("no hydrogenic (Z=1) main ion found in core_profiles.ion")
+    Zeff = zeff_num / ne
+
+    # --- user overrides for fixed additive components ---
+    if fixed is not None:
+        if fixed.p_fast is not None:
+            p_fast = _override(fixed.p_fast, fixed.psi_N, psi_N)
+        if fixed.j_NBI is not None:
+            j_NBI = _override(fixed.j_NBI, fixed.psi_N, psi_N)
+        if fixed.j_RF is not None:
+            j_RF = _override(fixed.j_RF, fixed.psi_N, psi_N)
+
+    # Authoritative toroidal total; inductive absorbs the residual so the
+    # decomposition sums exactly and Ip is preserved.
+    j_phi = j_tor.copy()
+    j_inductive = j_phi - j_BS - j_NBI - j_RF
+
+    return Baseline(
+        psi_N=psi_N,
+        j_phi=j_phi,
+        j_inductive=j_inductive,
+        j_BS=j_BS,
+        psi_N_kinetic=psi_N,
+        ne=ne, te=te, ni=ni, ti=ti, Zeff=Zeff,
+        Ip_target=Ip_target,
+        l_i_target=l_i_target,
+        provenance="imas",
+        j_NBI=j_NBI,
+        j_RF=j_RF,
+        p_fast=p_fast,
+        eqdsk_bytes=None,
+        pfile_bytes=raw_bytes,
+    )
