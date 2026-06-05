@@ -71,18 +71,23 @@ class Bouquet:
         mygs.setup_mesh(mesh_pts, mesh_lc, mesh_reg)
         mygs.setup_regions(cond_dict=cond_dict, coil_dict=coil_dict)
 
-        # F0 and reference boundary
+        # F0 and reference LCFS boundary come from the g-file (reconstruction)
+        # or the IDS vacuum_toroidal_field + boundary outline (IMAS).
         F0 = sc.F0
         eqdsk_ref = None
+        boundary_RZ = None
         if isinstance(src, ReconstructionSource):
             eqdsk_ref = read_geqdsk(src.geqdsk_path, cocos=src.cocos)
             if F0 is None:
                 F0 = abs(eqdsk_ref.R_center * eqdsk_ref.B_center)
-        elif isinstance(src, ImasSource) and F0 is None:
-            raise NotImplementedError(
-                "solver setup for an ImasSource needs SolverConfig.F0 "
-                "(IMAS generation-side setup is wired in a later step)"
+            boundary_RZ = np.column_stack(
+                [eqdsk_ref.boundary_R, eqdsk_ref.boundary_Z]
             )
+        elif isinstance(src, ImasSource):
+            from .io.imas import read_imas_geometry
+            _imas_F0, boundary_RZ = read_imas_geometry(src)
+            if F0 is None:
+                F0 = _imas_F0
         if F0 is None:
             raise ValueError("F0 could not be determined; set SolverConfig.F0")
 
@@ -92,10 +97,10 @@ class Bouquet:
         mygs.update_settings()
         mygs.set_coil_vsc(sc.coil_vsc)
 
-        # Isoflux: explicit config wins; otherwise the reconstruction g-file LCFS
+        # Isoflux: explicit config wins; otherwise the source's LCFS boundary
         iso_pts, iso_w = sc.isoflux_pts, sc.isoflux_weights
-        if iso_pts is None and eqdsk_ref is not None:
-            iso_pts = np.column_stack([eqdsk_ref.boundary_R, eqdsk_ref.boundary_Z])
+        if iso_pts is None and boundary_RZ is not None:
+            iso_pts = boundary_RZ
             iso_w = np.ones(len(iso_pts)) * 500.0
         if iso_pts is not None:
             mygs.set_isoflux(iso_pts, weights=iso_w)
@@ -220,14 +225,35 @@ class Bouquet:
 
         Non-destructive: writes pass flags into the HDF5. Returns a summary.
         """
-        raise NotImplementedError
+        from .filtering import filter_coil_currents, filter_boundaries
+
+        header = self.config.output_header
+        fc = self.config.filtering
+        rms = fc.rms_max_mm if rms_max_mm is None else rms_max_mm
+
+        coil_summary, _ = filter_coil_currents(
+            header,
+            F_max_pct=fc.inspec_F_max * 100.0,
+            VSC_max_pct=fc.inspec_VSC_max * 100.0,
+            apply=True, plot=False,
+        )
+        bnd_summary, _ = filter_boundaries(
+            header, rms_max_mm=rms, apply=True, plot=False,
+        )
+        self._selection = {"coil": coil_summary, "boundary": bnd_summary}
+        return self._selection
 
     def export(self, out_path: Optional[str] = None, selection: str = "selected"):
         """Write a pruned HDF5 with only the selected draws.
 
         Defaults to ``{header}_selected.h5``.
         """
-        raise NotImplementedError
+        from .filtering import export_filtered
+
+        header = self.config.output_header
+        out = out_path if out_path is not None else f"{header}_selected.h5"
+        export_filtered(header, out, selection=selection, overwrite=True)
+        return out
 
     # ── convenience -----------------------------------------------------
     def run(self) -> "Bouquet":

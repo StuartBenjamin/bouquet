@@ -78,3 +78,22 @@ from .utils import (
     list_equilibrium_indices,
     read_eqdsk_from_bytes,
 )
+
+# ---- Class-based orchestrator API ----
+# (run.py imports TokaMaker/OFT lazily inside methods, so this stays import-safe
+# in headless environments.)
+from .config import (
+    BouquetConfig,
+    SolverConfig,
+    ReconstructionSource,
+    ImasSource,
+    FixedComponentsConfig,
+    UncertaintyConfig,
+    GenerationConfig,
+    FilterConfig,
+)
+from .baseline import Baseline, resolve_baseline, resolve_uncertainty
+from .physics import isotropize_fast_pressure, parallel_to_toroidal
+from .io.ida import read_ida, IDAProfiles
+from .io.imas import read_imas_baseline, read_imas_geometry
+from .run import Bouquet

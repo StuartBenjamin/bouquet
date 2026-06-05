@@ -87,6 +87,32 @@ def _override(arr, src_psi, dst_psi):
     return np.interp(dst_psi, np.asarray(src_psi, dtype=float), arr)
 
 
+def read_imas_geometry(source: "ImasSource"):
+    """Return ``(F0, boundary_RZ)`` from a FUSE IDS for TokaMaker setup.
+
+    ``F0 = |r0 * b0(t)|`` from ``equilibrium.vacuum_toroidal_field`` and the LCFS
+    isoflux points from ``equilibrium.time_slice[t].boundary.outline``. Used by
+    :meth:`Bouquet.setup_solver` when the source is an :class:`ImasSource`
+    (replacing the g-file that the reconstruction path reads F0/boundary from).
+    """
+    import json
+
+    with open(source.ids_path) as fh:
+        dd = json.load(fh)
+    eq = dd["equilibrium"]
+    ie = _nearest_index(eq["time"], source.time, "equilibrium")
+    vtf = eq["vacuum_toroidal_field"]
+    r0 = float(vtf["r0"])
+    b0 = vtf["b0"]
+    b0v = float(b0[ie]) if isinstance(b0, list) else float(b0)
+    F0 = abs(r0 * b0v)
+    out = eq["time_slice"][ie]["boundary"]["outline"]
+    boundary_RZ = np.column_stack([
+        np.asarray(out["r"], dtype=float), np.asarray(out["z"], dtype=float),
+    ])
+    return F0, boundary_RZ
+
+
 def read_imas_baseline(
     source: "ImasSource",
     fixed: Optional["FixedComponentsConfig"] = None,
