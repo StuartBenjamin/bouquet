@@ -30,6 +30,7 @@ import traceback
 import pickle as pkl
 import multiprocessing
 import numpy as np
+from threadpoolctl import threadpool_limits
 
 # Module-level state populated by _init_worker in each spawned worker process.
 _worker_state: dict = {}
@@ -299,13 +300,16 @@ def _get_num_cpus(use_logical=True):
 def _run_one(run_args):
     """Worker function: run one case of the bouquet method."""
     idx, input_files, load_files, bouquet_method = run_args
-    try:
-        data = load_files(input_files, idx)
-        output = bouquet_method(data)
-        return idx, True, None, output
-    except Exception as exc:
-        tb_str = traceback.format_exc()
-        return idx, False, tb_str, None
+
+    nthreads = _worker_state.get("config", {}).get("_nthreads", 1)
+    with threadpool_limits(limits=nthreads):
+        try:
+            data = load_files(input_files, idx)
+            output = bouquet_method(data)
+            return idx, True, None, output
+        except Exception as exc:
+            tb_str = traceback.format_exc()
+            return idx, False, tb_str, None
 
 ###########################################################################################################
 # bouquet_method 're_generate_bouquet'
