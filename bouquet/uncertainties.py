@@ -88,3 +88,79 @@ def new_uncertainty_profiles(
         profile = np.maximum(profile, 0.0)
 
     return profile + shelf
+
+
+# ====================================================================
+#  Synthetic "IDA-like" fractional-sigma profiles (sine basis).
+#
+#  A shareable, non-proprietary stand-in for the DIII-D 204441@4400 IDA
+#  uncertainty envelopes, fit to the real fractional-sigma SHAPE with an
+#  all-sine basis so it can ship in the public example + golden tests:
+#
+#     s(psi)   = sin(pi/2 * psi_N)              (0 at axis -> 1 at edge)
+#     frac(psi)= const
+#                + sum_k  c_k  * sin(k*pi*psi_N)   (core/mid oscillation; Te,Ti)
+#                + sum_p  e_p  * s**p              (edge rise/spike; e_p >= 0)
+#
+#  Coefficients were obtained by bounded least squares against the real
+#  204441@4400 IDA fractional sigma (edge powers constrained >= 0 so the
+#  edge can only add, never dig a pre-edge trough).  ne uses no harmonics
+#  (flat core + smooth edge); Te/Ti carry the mid-radius shoulder/bump.
+#  These constants ARE the golden definition -- do not refit casually.
+# ====================================================================
+_SYNTHETIC_IDA_SIGMA = {
+    # channel: (const, {harmonic_k: coeff}, {edge_power_p: coeff})  [fractional]
+    "ne": (0.0238, {},                                  {64: 0.0361}),
+    "te": (0.0317, {1: 0.0292, 2: -0.0035, 3: 0.0059},  {64: 0.0846}),
+    "ti": (0.0569, {1: 0.0139, 2: 0.0111, 3: 0.0002},   {16: 0.0045, 64: 0.0348}),
+}
+# aliases -> canonical channel key
+_SIGMA_ALIASES = {
+    "ne": "ne", "n_e": "ne", "density": "ne", "ni": "ne", "n_i": "ne",
+    "te": "te", "t_e": "te",
+    "ti": "ti", "t_i": "ti", "t_12c6": "ti",
+}
+
+
+def synthetic_ida_sigma(psi_N, channel):
+    r"""Synthetic IDA-like **fractional** 1-sigma uncertainty envelope.
+
+    Returns the fractional uncertainty :math:`\sigma_X / X` on a sine basis
+    (see module notes), calibrated to the DIII-D 204441@4400 IDA shape.
+    Multiply by the profile to get the absolute sigma, e.g.
+    ``sigma_ne = synthetic_ida_sigma(psi_N, 'ne') * ne_SI``.
+
+    Parameters
+    ----------
+    psi_N : array_like
+        Normalised poloidal flux (0 = axis, 1 = LCFS).  Values > 1 (SOL)
+        are clamped to 1 so the envelope holds its edge value.
+    channel : str
+        One of ``ne``/``ni``/``te``/``ti`` (aliases ``n_e``, ``t_e``,
+        ``t_i``, ``t_12c6``, ``density`` accepted).  ``ni`` reuses ``ne``.
+
+    Returns
+    -------
+    ndarray
+        Fractional sigma, same shape as ``psi_N``, clipped to >= 0.
+
+    Notes
+    -----
+    Used by the D3D-like example notebook and the backend golden tests as a
+    deterministic, non-proprietary uncertainty model.  The j_phi envelope is
+    handled separately (flat 10 % fractional), as in the 204441 workflow.
+    """
+    key = _SIGMA_ALIASES.get(str(channel).strip().lower())
+    if key is None:
+        raise ValueError(
+            f"Unknown channel {channel!r}; expected one of {sorted(set(_SIGMA_ALIASES))}"
+        )
+    const, harm, edge = _SYNTHETIC_IDA_SIGMA[key]
+    psi = np.clip(np.asarray(psi_N, dtype=float), 0.0, 1.0)
+    s = np.sin(np.pi / 2.0 * psi)
+    frac = np.full_like(psi, float(const))
+    for k, c in harm.items():
+        frac = frac + c * np.sin(k * np.pi * psi)
+    for p, e in edge.items():
+        frac = frac + e * s ** p
+    return np.clip(frac, 0.0, None)

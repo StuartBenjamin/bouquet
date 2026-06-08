@@ -20,7 +20,13 @@ env/
 # Scientific output files (add formats you actually use)
 *.h5
 *.hdf5
-*.nc          # NetCDF
+# ...but DO track the committed golden test fixtures (small, slimmed)
+!tests/golden/*.h5
+# ...and the small DIII-D mesh the solver suite needs in CI (~432 KB)
+!examples/D3D-like/DIIID_mesh.h5
+# NetCDF / proprietary IDA data (e.g. IDA_204441_.cdf) — never commit
+*.nc
+*.cdf
 *.dat
 *.npz
 *.npy

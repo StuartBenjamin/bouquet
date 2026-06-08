@@ -13,6 +13,89 @@ import numpy as np
 #  Internal helpers
 # ====================================================================
 
+def safe_trace_surf(mygs, psi):
+    r'''Snapshot/restore-wrapped trace_surf.
+
+    The Fortran-side `trace_surf` has been observed to perturb subsequent
+    `get_stats` / boundary measurements via mutation of state hanging off
+    the `gs_equil` struct (mesh-cell caches, tracer step state, etc.).
+    Pre-OFT-PR-248 this was hard to undo cleanly; with PR #248 we now have
+    `mygs.copy_eq()` / `mygs.replace_eq()` which atomically swap the
+    `gs_equil` pointer.  This wrapper snapshots the equilibrium before
+    the trace, copies the returned LCFS into an owned numpy array, then
+    restores the original equilibrium.
+
+    Whatever state lives outside `gs_equil` (eg. module-level
+    `active_tracer` in `tracing_2d`) is *not* restored — but that state
+    is reset at the start of each `trace_surf` call anyway, so the only
+    risk surface is mid-trace interaction with concurrent
+    `get_stats`-like calls, which bouquet does not do.
+
+    Parameters
+    ----------
+    mygs : OpenFUSIONToolkit.TokaMaker.TokaMaker
+        Active TokaMaker instance.  Requires PR #248+ (`copy_eq` /
+        `replace_eq` available).
+    psi : float
+        Normalized psi value to trace (eg. ``1.0 - psi_pad``).
+
+    Returns
+    -------
+    numpy.ndarray or None
+        ``(N, 2)`` array of (R, Z) points along the traced surface,
+        owned by the caller (a copy, decoupled from any internal
+        TokaMaker buffers).  Returns ``None`` if the trace fails.
+    '''
+    if not hasattr(mygs, 'copy_eq') or not hasattr(mygs, 'replace_eq'):
+        # legacy OFT build: fall through to bare trace_surf (no protection)
+        result = mygs.trace_surf(psi)
+        return None if result is None else np.asarray(result).copy()
+    saved = mygs.copy_eq()
+    try:
+        result = mygs.trace_surf(psi)
+        if result is not None:
+            result = np.asarray(result).copy()
+        return result
+    finally:
+        mygs.replace_eq(source_eq=saved)
+
+
+def safe_save_eqdsk(mygs, filename, **kwargs):
+    r'''Snapshot/restore-wrapped save_eqdsk.
+
+    `mygs.save_eqdsk` internally re-runs the q-profile tracer (which
+    sets `active_tracer` state and may mutate cached `<R>` / `<1/R>`
+    geometry on the `gs_equil` struct) and has been empirically
+    observed to shift `mygs.get_globals()[0]` (Ip integral) by ~0.5-
+    0.8% when called against a converged equilibrium.  This wrapper
+    snapshots the equilibrium via `mygs.copy_eq()` before the save,
+    then restores via `mygs.replace_eq()` after -- so the .geqdsk
+    file is written from the unmodified state AND downstream
+    diagnostics see the same state recon converged to.
+
+    On legacy OFT builds without `copy_eq` / `replace_eq` (pre-PR
+    #248), falls through to a bare `mygs.save_eqdsk(...)` with no
+    protection.
+
+    Parameters
+    ----------
+    mygs : OpenFUSIONToolkit.TokaMaker.TokaMaker
+        Active TokaMaker instance.  Requires PR #248+ for the
+        protected snapshot/restore path.
+    filename : str
+        Same as `mygs.save_eqdsk` filename arg.
+    **kwargs
+        Passed through to `mygs.save_eqdsk(...)`.
+    '''
+    if not hasattr(mygs, 'copy_eq') or not hasattr(mygs, 'replace_eq'):
+        return mygs.save_eqdsk(filename, **kwargs)
+    saved = mygs.copy_eq()
+    try:
+        return mygs.save_eqdsk(filename, **kwargs)
+    finally:
+        mygs.replace_eq(source_eq=saved)
+
+
 def Ip_flux_integral_vs_target(alpha, mygs, jtor_prof, spike_profile, psi_N, Ip_target):
     r'''! Compute difference between integrated a*j_tor+j_spike profile and Ip_target
 
@@ -154,6 +237,19 @@ def store_equilibrium(
     Zeff=None,
     coil_currents=None,
     psi_N_kinetic=None,
+    homotopy_pass=None,
+    homotopy_F_lim=None,
+    homotopy_VSC_lim=None,
+    max_F_drift_pct=None,
+    max_VSC_drift_pct=None,
+    in_spec=None,
+    inspec_F_max=None,
+    inspec_VSC_max=None,
+    perturbed_lcfs_ref=None,
+    l_i_target_used=None,
+    l_i_uncertainty=None,
+    x_points=None,
+    diverted=None,
 ):
     """
     Write one perturbed equilibrium into the HDF5 database.
@@ -255,6 +351,61 @@ def store_equilibrium(
             values = np.array([coil_currents[n] for n in names], dtype=np.float64)
             grp.create_dataset("coil_currents [A]", data=values)
             grp.attrs["coil_names"] = json.dumps(names)
+
+        # ---- homotopy / in-spec metadata (per-draw) -----------------------
+        if homotopy_pass is not None:
+            grp.attrs["homotopy_pass"] = int(homotopy_pass)
+        if homotopy_F_lim is not None:
+            grp.attrs["homotopy_F_lim"] = float(homotopy_F_lim)
+        if homotopy_VSC_lim is not None:
+            grp.attrs["homotopy_VSC_lim"] = float(homotopy_VSC_lim)
+        if max_F_drift_pct is not None:
+            grp.attrs["max_F_drift_pct"] = float(max_F_drift_pct)
+        if max_VSC_drift_pct is not None:
+            grp.attrs["max_VSC_drift_pct"] = float(max_VSC_drift_pct)
+        if in_spec is not None:
+            grp.attrs["in_spec"] = bool(in_spec)
+        if inspec_F_max is not None:
+            grp.attrs["inspec_F_max"] = float(inspec_F_max)
+        if inspec_VSC_max is not None:
+            grp.attrs["inspec_VSC_max"] = float(inspec_VSC_max)
+        # The l_i_target this draw actually converged to.  Equal to the
+        # bouquet's l_i_target when l_i_uncertainty=0; otherwise a per-
+        # draw sample from N(l_i_target, l_i_uncertainty * l_i_target).
+        # Stored so post-run analysis can verify the sampled
+        # distribution + diagnose any draw whose realised l_i diverged
+        # from its (intentionally perturbed) target.
+        if l_i_target_used is not None:
+            grp.attrs["l_i_target_used"] = float(l_i_target_used)
+        if l_i_uncertainty is not None:
+            grp.attrs["l_i_uncertainty"] = float(l_i_uncertainty)
+
+        # ---- High-resolution LCFS reference for this draw.
+        # Captured by perturb_kinetic_equilibrium via safe_trace_surf at
+        # the same mygs state save_eqdsk was called from -- so this and
+        # the baseline.recon_lcfs_ref are method-consistent (both 10k-pt
+        # trace_surf at psi = 1 - psi_pad).  Eliminates the ~4 mm
+        # sampling-noise floor that the 100-pt eqdsk RBBBS introduces
+        # when used as the perturbed-side boundary in plot_traces.
+        if perturbed_lcfs_ref is not None:
+            grp.create_dataset(
+                "perturbed_lcfs_ref",
+                data=np.asarray(perturbed_lcfs_ref, dtype=np.float64),
+            )
+
+        # ---- TokaMaker-computed X-point(s) for this draw ------------------
+        # The poloidal-field nulls returned by mygs.get_xpoints(), captured
+        # at the SAME solver state the eqdsk was saved from.  This is the
+        # authoritative X-point location (a true B_p=0 saddle), used by
+        # plot_boundary_point_traces in place of any geometric corner guess.
+        # Shape (N, 2) = [[R, Z], ...]; the active (boundary-defining) null
+        # is the last row when ``diverted`` is True.
+        if x_points is not None:
+            xp_arr = np.asarray(x_points, dtype=np.float64).reshape(-1, 2)
+            if xp_arr.size:
+                grp.create_dataset("x_points", data=xp_arr)
+        if diverted is not None:
+            grp.attrs["diverted"] = bool(diverted)
 
 
 def load_equilibrium(header, count, scan_val=None, eqdsk_out_dir=None):
@@ -360,6 +511,11 @@ def store_baseline_profiles(
     eqdsk_bytes=None,
     pfile_bytes=None,
     psi_N_kinetic=None,
+    coil_currents=None,
+    coil_names=None,
+    recon_lcfs_ref=None,
+    x_points=None,
+    diverted=None,
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -418,6 +574,50 @@ def store_baseline_profiles(
         if pfile_bytes is not None:
             grp.create_dataset("baseline.pfile", data=np.void(pfile_bytes))
 
+        # ---- Recon-LCFS reference for downstream boundary-deviation
+        # measurements.  Captured by the caller via mygs.trace_surf() at
+        # the SAME mygs state where the baseline.eqdsk was saved, giving
+        # a method-consistent reference (~10000 points) for plot_traces
+        # and the per-stage bnd-diag inside generate_bouquet.  Using this
+        # instead of the eqdsk's 100-pt boundary eliminates ~2-3 mm of
+        # save_eqdsk sampling noise (see Probe 2 in save_eqdsk_probe.py).
+        if recon_lcfs_ref is not None:
+            grp.create_dataset(
+                "recon_lcfs_ref",
+                data=np.asarray(recon_lcfs_ref, dtype=np.float64),
+            )
+
+        # ---- TokaMaker-computed X-point(s) for the recon baseline --------
+        # Same provenance as the per-draw ``x_points`` (mygs.get_xpoints()
+        # at the recon-converged state).  plot_boundary_point_traces uses
+        # this to decide whether the top/bottom traces are tracking a true
+        # X-point and to anchor the deviation reference.
+        if x_points is not None:
+            xp_arr = np.asarray(x_points, dtype=np.float64).reshape(-1, 2)
+            if xp_arr.size:
+                grp.create_dataset("x_points", data=xp_arr)
+        if diverted is not None:
+            grp.attrs["diverted"] = bool(diverted)
+
+        # Recon's converged coil currents (the perturbation reference).
+        # Saved alongside profiles so post-processors can compute
+        # absolute coil drift per draw without re-running recon.
+        if coil_currents is not None:
+            if coil_names is not None:
+                names = list(coil_names)
+                values = np.array([float(coil_currents[n]) for n in names],
+                                  dtype=np.float64)
+            elif isinstance(coil_currents, dict):
+                names = list(coil_currents.keys())
+                values = np.array([float(coil_currents[n]) for n in names],
+                                  dtype=np.float64)
+            else:
+                names = [f"coil_{i}" for i in range(len(coil_currents))]
+                values = np.asarray(coil_currents, dtype=np.float64)
+            grp.create_dataset("coil_currents [A]", data=values)
+            grp.create_dataset("coil_names",
+                               data=np.array(names, dtype=h5py.string_dtype()))
+
 
 # ====================================================================
 #  Introspection helpers (used by GUI and notebook API)
@@ -465,15 +665,36 @@ def count_equilibria(h5path, scan_value=None):
     -------
     n : int
     """
+    return len(list_equilibrium_indices(h5path, scan_value=scan_value))
+
+
+def list_equilibrium_indices(h5path, scan_value=None):
+    """Return the sorted list of integer draw indices actually stored.
+
+    Band-rejected / failed draws leave GAPS in the index sequence (e.g.
+    ``[0, 1, 2, 3, 4, 5, 7, ...]`` with draw 6 missing), so callers must
+    iterate these indices rather than ``range(count_equilibria(...))`` --
+    the latter assumes a contiguous ``0..n-1`` and KeyErrors on the gap.
+
+    Parameters
+    ----------
+    h5path : str
+        Path to the ``.h5`` file.
+    scan_value : str, float, or None
+        Scan-value key.  ``None`` for the flat layout.
+
+    Returns
+    -------
+    list of int
+        Sorted stored draw indices.
+    """
     bkey = _scan_val_key(scan_value)
     with h5py.File(h5path, "r") as hf:
-        if bkey is not None:
-            parent = hf[f"scan/{bkey}"]
-        else:
-            parent = hf
-        # Count integer-named groups (skip _baseline and other metadata)
-        return sum(1 for k in parent.keys()
-                   if k not in ("_baseline", "scan"))
+        parent = hf[f"scan/{bkey}"] if bkey is not None else hf
+        return sorted(
+            int(k) for k in parent.keys()
+            if k not in ("_baseline", "scan") and str(k).lstrip("-").isdigit()
+        )
 
 
 def load_baseline_profiles(h5path, scan_value=None):
