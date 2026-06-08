@@ -26,6 +26,7 @@ import matplotlib.pyplot as plt
 
 from .sampling import (
     GPRProfilePerturber,
+    generate_perturbed_GPR,
     calc_cylindrical_li_proxy,
     get_li_proxy_geometry,
     calc_cylindrical_li_proxy_fast,

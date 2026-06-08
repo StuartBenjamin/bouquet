@@ -20,13 +20,7 @@ env/
 # Scientific output files (add formats you actually use)
 *.h5
 *.hdf5
-# ...but DO track the committed golden test fixtures (small, slimmed)
-!tests/golden/*.h5
-# ...and the small DIII-D mesh the solver suite needs in CI (~432 KB)
-!examples/D3D-like/DIIID_mesh.h5
-# NetCDF / proprietary IDA data (e.g. IDA_204441_.cdf) — never commit
-*.nc
-*.cdf
+*.nc          # NetCDF
 *.dat
 *.npz
 *.npy
@@ -56,3 +50,39 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+uv.lock
+.gitignore
+bouquet/io/ida_deprecated.py
+examples/D3D-like/bouquet_parallel_example_old.py
+examples/D3D-like/output_parallel/worker_0/eqidx1_TkMkr_D3Dlike_Hmode_BSamp=1.25.geqdsk
+examples/D3D-like/output_parallel/worker_1/eqidx0_TkMkr_D3Dlike_Hmode_BSamp=1.0.geqdsk
+examples/D3D-like/output_parallel/worker_2/eqidx2_TkMkr_D3Dlike_Hmode_BSamp=1.25.geqdsk
+examples/D3D-like/output_parallel/worker_2/eqidx2_TkMkr_D3Dlike_Hmode_BSamp=1.25.peqdsk
+tests/deprecated_test_core.py
+tests/test_ida_deprecated.py
+tests/test_parallel.py
+tests/test_ida.py
+examples/D3D-like/output_parallel/worker_1/eqidx0_TkMkr_D3Dlike_Hmode_BSamp=1.0.peqdsk
+examples/D3D-like/output_parallel/worker_0/eqidx1_TkMkr_D3Dlike_Hmode_BSamp=1.25.peqdsk
+bouquet/parallel_old.py
+examples/D3D-like/output_plots/
+examples/D3D-like/output*
+examples/D3D-like/*.png
+examples/D3D-like/*.log
+examples/D3D-like/jphi_debug*
+examples/D3D-like/*.log
+examples/D3D-like/*.zip
+examples/D3D-like/__MACOSX/*
+bouquet/parallel_old2.py
+bouquet/io/204441_4400_IDA (2).ipynb
+examples/D3D-like/bouquet_D3Dlike_example.py
+examples/D3D-like/bouquet_D3Dlike_example_legacy.py
+examples/D3D-like/bouquet_D3Dlike_example_from_notebook.py
+examples/D3D-like/bouquet_D3Dlike_Jphi_error.py
+examples/D3D-like/D3Dlike_Jphi_error.py
+examples/D3D-like/bouquet_D3Dlike_recon_only.py
+examples/D3D-like/bouquet_parallel_example.py
+examples/D3D-like/IDA_10timeslice.cdf
+examples/D3D-like/IDA_10timeslices.cdf
+examples/D3D-like/IDA_199051_.cdf
+examples/D3D-like/Deprecated*/
