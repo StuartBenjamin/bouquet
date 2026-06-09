@@ -3743,10 +3743,11 @@ def generate_bouquet(
 # ====================================================================
 #  Single-equilibrium reconstruction from geqdsk + kinetic profiles
 # ====================================================================
-def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff, 
+def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                             isoflux_pts, weights, psi_pad,
-                            guess_jinductive,n_k,psi_bridge,rescale_j_BS,
-                            shelf_psi_N,initialize_psi=True,**kwargs):
+                            guess_jinductive, n_k, psi_bridge, rescale_j_BS,
+                            shelf_psi_N, initialize_psi=True,
+                            psi_N_kinetic=None, **kwargs):
     r"""Reconstruct a single Grad-Shafranov equilibrium from a geqdsk
     reference and kinetic profiles, matching the EFIT :math:`l_i(1)`.
 
@@ -3809,6 +3810,13 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         If ``True`` (default), call ``mygs.init_psi`` using LCFS
         geometry estimated from the geqdsk boundary.  Set to ``False``
         to skip initialisation (e.g. when reusing a prior solution).
+    psi_N_kinetic : ndarray or None
+        Optional kinetic-profile grid (starting at 0, ending at
+        :math:`\hat{\psi} \geq 1`).  When provided, ``ne``, ``te``,
+        ``ni`` and ``ti`` are expected on this
+        grid and are interpolated onto ``eqdsk.psi_N`` before the GS
+        solve.  Mirrors the same parameter in :func:`generate_bouquet`.
+        ``guess_jinductive`` is always on ``eqdsk.psi_N``.
 
     Returns
     -------
@@ -3818,6 +3826,60 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     """
     from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
     from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
+
+    # --- Grid sanity checks ---
+    _psi = eqdsk.psi_N
+    _dpsi = np.diff(_psi)
+    assert (np.isclose(_psi[0], 0.0) and np.isclose(_psi[-1], 1.0)), f"eqdsk.psi_N must run from 0 to 1; got [{_psi[0]:.6g}, {_psi[-1]:.6g}]"
+    assert np.allclose(_dpsi, _dpsi[0]), "eqdsk.psi_N not uniformly sampled"
+
+    _eq_len    = len(_psi)
+    _dual_grid = psi_N_kinetic is not None
+    _kin_len   = len(psi_N_kinetic) if _dual_grid else _eq_len
+
+    # psi_N_kinetic bounds and same-length ambiguity (mirrors generate_bouquet)
+    if _dual_grid:
+        if not (np.isclose(psi_N_kinetic[0], 0.0) and psi_N_kinetic[-1] >= 1.0):
+            raise ValueError(
+                "psi_N_kinetic must start at 0 and end at psi_N >= 1; "
+                f"got [{psi_N_kinetic[0]:.6g}, {psi_N_kinetic[-1]:.6g}]"
+            )
+        if _kin_len == _eq_len:
+            if np.allclose(psi_N_kinetic, _psi):
+                warn(
+                    "psi_N_kinetic has the same length and endpoints as eqdsk.psi_N; "
+                    "providing a separate kinetic grid of identical length is redundant. "
+                    "This usage is deprecated.",
+                    DeprecationWarning, stacklevel=2,
+                )
+
+    if len(guess_jinductive) != _eq_len:
+        raise ValueError(
+            f"guess_jinductive has length {len(guess_jinductive)} "
+            f"but eqdsk.psi_N has length {_eq_len}"
+        )
+    for _name, _arr in {'ne': ne, 'te': te, 'ni': ni, 'ti': ti}.items():
+        if len(_arr) != _kin_len:
+            _grid_name = 'psi_N_kinetic' if _dual_grid else 'eqdsk.psi_N'
+            raise ValueError(
+                f"{_name} has length {len(_arr)} but expected "
+                f"{_kin_len} ({_grid_name})"
+            )
+
+    # Interpolate kinetic profiles from psi_N_kinetic onto the equilibrium
+    # grid eqdsk.psi_N when a separate kinetic grid is supplied.
+    # Mirrors the _kin_to_eq logic in generate_bouquet.
+    if _dual_grid:
+        from scipy.interpolate import interp1d as _interp1d_kin
+        def _kin_to_eq(_arr):
+            return _interp1d_kin(
+                psi_N_kinetic, _arr, kind='linear',
+                bounds_error=False, fill_value=(_arr[0], _arr[-1])
+            )(_psi)
+        ne   = _kin_to_eq(ne)
+        te   = _kin_to_eq(te)
+        ni   = _kin_to_eq(ni)
+        ti   = _kin_to_eq(ti)
 
     if initialize_psi:
         # Estimate shape parameters from geqdsk LCFS geometry
