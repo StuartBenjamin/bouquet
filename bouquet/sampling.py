@@ -538,10 +538,10 @@ def verify_gpr_statistics(
     denom   = np.maximum(sigma_theory, 1e-30)
     std_rel = np.abs(stats_a["empirical_std"] - stats_b["empirical_std"]) / denom
     max_rel = np.max(std_rel)
-    if max_rel > 0.05:
+    if max_rel > 0.02:
         raise RuntimeError(
             f"Re-draw and generate_profiles empirical stds differ by "
-            f"{max_rel:.3f} (> 5 %).  The two paths are not statistically "
+            f"{max_rel:.3f} (> 2 %).  The two paths are not statistically "
             f"equivalent — check GPRProfilePerturber implementation."
         )
 
