@@ -25,6 +25,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from .sampling import (
+    GPRProfilePerturber,
     generate_perturbed_GPR,
     calc_cylindrical_li_proxy,
     get_li_proxy_geometry,
@@ -759,6 +760,16 @@ def perturb_kinetic_equilibrium(
     # ----------------------------------------------------------------
     inp_avg = mygs.flux_integral(psi_N, pressure)
 
+    # Pre-compute GPR eigenfactors for the four kinetic profiles.
+    _ne_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=n_ls)
+    _ne_gpr.precompute_factor(psi_kin, sigma_ne / ne[0])
+    _te_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=t_ls)
+    _te_gpr.precompute_factor(psi_kin, sigma_te / te[0])
+    _ni_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=n_ls)
+    _ni_gpr.precompute_factor(psi_kin, sigma_ni / ni[0])
+    _ti_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=t_ls)
+    _ti_gpr.precompute_factor(psi_kin, sigma_ti / ti[0])
+
     p_err = np.inf
     p_iter = 0
     # p_thresh is a FRACTION (e.g. 0.05 == 5%); p_err is computed in percent.
@@ -777,19 +788,19 @@ def perturb_kinetic_equilibrium(
 
         # GPR sampling on psi_kin (kinetic grid, may include SOL)
         ne_perturb = _draw_monotonic_perturbation(
-            psi_kin, ne / ne[0], sigma_ne / ne[0], n_ls
+            psi_kin, ne / ne[0], sigma_ne / ne[0], n_ls, perturber=_ne_gpr
         ) * ne[0]
 
         te_perturb = _draw_monotonic_perturbation(
-            psi_kin, te / te[0], sigma_te / te[0], t_ls
+            psi_kin, te / te[0], sigma_te / te[0], t_ls, perturber=_te_gpr
         ) * te[0]
 
         ni_perturb = _draw_monotonic_perturbation(
-            psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls
+            psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls, perturber=_ni_gpr
         ) * ni[0]
 
         ti_perturb = _draw_monotonic_perturbation(
-            psi_kin, ti / ti[0], sigma_ti / ti[0], t_ls
+            psi_kin, ti / ti[0], sigma_ti / ti[0], t_ls, perturber=_ti_gpr
         ) * ti[0]
 
         # Pressure matching on equilibrium grid (psi_N, confined only)
