@@ -2,7 +2,7 @@
 Parallel bouquet runner — DIII-D-like example
 ==============================================
 
-Runs :func:`bouquet.parallel.run_bouquet_parallel` on the D3D-like
+Runs :func:`re_generate_bouquet` on the D3D-like
 H-mode equilibrium/profile pairs bundled in this directory.
 """
 
@@ -131,13 +131,22 @@ j_ls            = 0.25    # GPR correlation length — current density
 jBS_scale_range = [0.9, 1.1]   # uniform random scale on j_BS per sample
 pad_psi         = 1e-4    # LCFS psi padding for TokaMaker queries
 
-# reconstruct_equilibrium settings
+# settings
 n_k                  = 5
 psi_bridge           = 0.99
-l_i_tolerance        = 5.0 # percent
-l_i_proxy_threshold  = 5.0
+l_i_tolerance        = 0.05
 constrain_sawteeth   = True
 recalculate_j_BS     = True
+jphi_baseline        = True
+
+# ---- coil-drift / homotopy / in-spec (DIII-D +/-2% measurement spec) ----
+# Everything is a FRACTION (decimal), never a percentage.
+coil_drift      = 0.01                   # +/-1% hard coil-current bound
+homotopy_passes = [(0.1, 0.10), (0.02, 0.05), (0.015, 0.03)]  # (F, VSC) limits
+inspec_F_max    = 0.02                   # in-spec non-VSC F-coil drift
+inspec_VSC_max  = 0.02                   # in-spec VSC (F9A/F9B) drift
+vsc_soft_reg_weight = 1.0
+p_thresh        = 0.05                   # pressure-match tolerance
 
 isoflux_weight = 500.0    # uniform weight on all isoflux boundary points
 
@@ -177,12 +186,18 @@ config = {
     },
     "generate_bouquet_kwargs": {
         "l_i_tolerance":       l_i_tolerance,
-        "l_i_proxy_threshold": l_i_proxy_threshold,
         "psi_pad":             pad_psi,
         "constrain_sawteeth":  constrain_sawteeth,
         "jBS_scale_range":     jBS_scale_range,
         "recalculate_j_BS":    recalculate_j_BS,
         "use_python_solve":    use_python_solve,
+        "jphi_baseline":       jphi_baseline,
+        "coil_drift":          coil_drift,
+        "homotopy_passes":     homotopy_passes,
+        "inspec_F_max":        inspec_F_max,
+        "inspec_VSC_max":      inspec_VSC_max,
+        "vsc_soft_reg_weight": vsc_soft_reg_weight,
+        "p_thresh":            p_thresh,
     }
 }
 
