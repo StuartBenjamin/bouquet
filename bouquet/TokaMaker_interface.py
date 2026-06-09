@@ -3780,8 +3780,13 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         Ion density on ``eqdsk.psi_N`` [m\ :sup:`-3`].
     ti : ndarray
         Ion temperature on ``eqdsk.psi_N`` [eV].
-    Zeff : ndarray
-        Effective charge on ``eqdsk.psi_N``.
+    Zeff : dict or ndarray
+        Effective ion charge profile.  Either:
+        * a dictionary ``{'x': psi_grid, 'y': values}`` giving the
+          profile on an arbitrary normalised psi grid, or
+        * a scalar float / 1-D array on ``eqdsk.psi_N`` (length
+          ``len(eqdsk.psi_N)``) or on ``psi_N_kinetic`` (length
+          ``len(psi_N_kinetic)`` when psi_N_kinetic is provided). 
     isoflux_pts : ndarray, shape (N, 2)
         :math:`(R, Z)` coordinates of isoflux constraint points
         [m].  Passed to ``mygs.set_isoflux``.
@@ -3852,6 +3857,12 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                     "This usage is deprecated.",
                     DeprecationWarning, stacklevel=2,
                 )
+            elif not isinstance(Zeff, dict) and np.ndim(Zeff) > 0:
+                raise ValueError(
+                    "psi_N_kinetic and eqdsk.psi_N have the same length but differ: "
+                    "it is ambiguous which grid array-valued Zeff belongs to. "
+                    "Use dict-format Zeff to specify the psi grid explicitly."
+                )
 
     if len(guess_jinductive) != _eq_len:
         raise ValueError(
@@ -3864,6 +3875,14 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
             raise ValueError(
                 f"{_name} has length {len(_arr)} but expected "
                 f"{_kin_len} ({_grid_name})"
+            )
+    if not isinstance(Zeff, dict):
+        Zeff = np.asarray(Zeff)
+        if Zeff.ndim > 0 and len(Zeff) not in (_kin_len, _eq_len):
+            raise ValueError(
+                f"Zeff has length {len(Zeff)} but expected either "
+                f"eqdsk.psi_N ({_eq_len})"
+                + (f" or psi_N_kinetic ({_kin_len})" if _dual_grid else "")
             )
 
     # Interpolate kinetic profiles from psi_N_kinetic onto the equilibrium
@@ -3880,6 +3899,8 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         te   = _kin_to_eq(te)
         ni   = _kin_to_eq(ni)
         ti   = _kin_to_eq(ti)
+        if not isinstance(Zeff, dict) and Zeff.ndim > 0 and len(Zeff) == _kin_len:
+            Zeff = _kin_to_eq(Zeff)
 
     if initialize_psi:
         # Estimate shape parameters from geqdsk LCFS geometry
