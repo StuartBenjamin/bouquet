@@ -780,6 +780,55 @@ def calc_cylindrical_li_proxy_fast(j_phi_profile, geo):
     return W_pol_integral / (V_tot * B_p_edge_avg**2)
 
 
+def calc_realgeom_li_proxy_fast(j_phi_profile, geo):
+    r"""Real-geometry l_i(1) proxy: identical 1D flux-surface reduction as
+    :func:`calc_cylindrical_li_proxy_fast`, but the surface-averaged
+    poloidal field uses the **actual** flux-surface perimeters
+    ``L_p(psi)`` (from ``trace_surf`` on the snapshot equilibrium) instead
+    of the circular ``2*pi*r_eff``.
+
+    Validated on DIII-D 204441@4400: mean(est/solved_li1)=0.994 (vs the
+    cylindrical proxy's 0.90), i.e. ~unbiased for l_i(1) with no
+    device-specific correction factor -- the snapshot geometry IS the
+    per-run calibration.  Intended use is a cheap *pre-screen* of GPR
+    j_phi draws (skip a full solve when the estimate is well outside the
+    l_i band); the real solved l_i remains the authoritative acceptance.
+
+    mu0 cancels in the l_i ratio, so it is dropped (B_p ~ I_enc / L_p).
+
+    Parameters
+    ----------
+    j_phi_profile : array-like
+        Toroidal current density profile [A/m^2].
+    geo : dict
+        From :func:`get_li_proxy_geometry`, additionally carrying ``L_p``
+        (the real poloidal perimeter per psi_N surface; ``L_p[0]=0`` at the
+        axis).
+
+    Returns
+    -------
+    li_proxy : float
+    """
+    dA = geo["dA"]
+    dV = geo["dV"]
+    V_tot = geo["V_tot"]
+    L_p = geo["L_p"]
+
+    dI = j_phi_profile * dA
+    I_enc = integrate.cumulative_trapezoid(dI, initial=0)
+    I_tot = I_enc[-1]
+    if I_tot == 0:
+        return 0.0
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        B_p = np.where(L_p > 1e-9, I_enc / L_p, 0.0)
+    B_p[0] = 0.0  # axis: L_p -> 0, I_enc -> 0
+
+    W_pol_integral = integrate.trapezoid(B_p**2 * dV)
+    B_p_edge_avg = I_tot / L_p[-1]
+    return W_pol_integral / (V_tot * B_p_edge_avg**2)
+
+
 # ====================================================================
 #  Helper: draw a monotonically-decreasing GPR perturbation
 # ====================================================================

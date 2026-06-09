@@ -25,3 +25,12 @@ plot-family = "bouquet.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
+
+[tool.pytest.ini_options]
+# Default `pytest` runs the FAST suite only (no live solver / OFT).  The
+# comprehensive solver suite is run explicitly with `pytest -m solver`
+# (and as the pre-merge merge-queue gate in CI).
+addopts = "-m 'not solver'"
+markers = [
+    "solver: integration test that runs the live OpenFUSIONToolkit GS solver (slow ~minutes; needs OFT + the D3D-like mesh). Run with `pytest -m solver`.",
+]
