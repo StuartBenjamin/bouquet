@@ -786,6 +786,8 @@ def _draw_monotonic_perturbation(
     sigma_profile,
     length_scale,
     max_draws=_MAX_MONOTONIC_DRAWS,
+    perturber=None,
+    rng=None,
 ):
     r"""Repeatedly sample a GPR perturbation until the draw is
     monotonically decreasing.
@@ -803,6 +805,12 @@ def _draw_monotonic_perturbation(
         GPR correlation length (scalar or spatially-varying).
     max_draws : int
         Safety cap on the number of attempts.
+    perturber : GPRProfilePerturber or None
+        Optional pre-initialised perturber with
+        :meth:`~GPRProfilePerturber.precompute_factor` already called.
+    rng : numpy.random.Generator or None
+        Optional shared random generator.  A fresh generator is created
+        if ``None``.
 
     Returns
     -------
@@ -814,15 +822,14 @@ def _draw_monotonic_perturbation(
     RuntimeError
         If no monotonic draw is found within *max_draws* attempts.
     """
+    if perturber is None:
+        perturber = GPRProfilePerturber(kernel_func="rbf", length_scale=length_scale)
+        perturber.precompute_factor(psi_N, sigma_profile)
+    if rng is None:
+        rng = np.random.default_rng()
+
     for _ in range(max_draws):
-        sample = generate_perturbed_GPR(
-            psi_N,
-            normalised_profile,
-            sigma_profile=sigma_profile,
-            length_scale=length_scale,
-            n_samples=1,
-            diag_plot=False,
-        )
+        sample = perturber.draw_from_factor(normalised_profile, 1, rng)[0]
         if np.all(np.diff(sample) <= 0.0):
             return sample
 
