@@ -481,6 +481,8 @@ def verify_gpr_statistics(
     2. Pointwise std  :math:`\approx` ``uncertainty_prof``  (variance check)
     3. Fraction of samples outside :math:`\pm k\sigma` :math:`\approx` theoretical  (tail check)
 
+    Calls both the draw_from_factor and generate_profiles methods for a peace-of-mind comparison.
+
     Parameters
     ----------
     psi_N : ndarray
@@ -507,6 +509,12 @@ def verify_gpr_statistics(
         length_scale=length_scale,
     )
 
+    # ---- Path A: re-draw (precompute_factor + draw_from_factor) -----
+    perturber.precompute_factor(psi_N, uncertainty_prof)
+    rng_a = np.random.default_rng(42)
+    samples_a = perturber.draw_from_factor(profile, n_verification, rng_a)
+
+    # ---- Path B: generate_profiles -------------
     rng = np.random.default_rng(42)
     samples = perturber.generate_profiles(
         psi_N, profile, uncertainty_prof,
@@ -517,17 +525,25 @@ def verify_gpr_statistics(
     # Marginal std equals sigma_profile exactly by construction
     sigma_theory = uncertainty_prof
 
-    # ---- empirical statistics ---------------------------------------
-    empirical_mean = np.mean(samples, axis=0)
-    empirical_std  = np.std(samples, axis=0)
+    stats_a = _gpr_stats_from_samples(samples_a, profile, sigma_theory, confidence_band)
+    samples = samples_a
+    empirical_mean = stats_a["empirical_mean"]
+    empirical_std = stats_a["empirical_std"]
+    exceedance_per_point = stats_a["exceedance_per_point"]
+    avg_exceedance = stats_a['avg_exceedance']
 
-    # ---- pointwise exceedance rate ----------------------------------
-    residuals = samples - profile[None, :]     # (n_verification, n_points)
-    outside = np.abs(residuals) > confidence_band * sigma_theory[None, :]
-    # Fraction of samples outside the band at each point
-    exceedance_per_point = np.mean(outside, axis=0)
-    # Overall average exceedance rate
-    avg_exceedance = np.mean(exceedance_per_point)
+    stats_b = _gpr_stats_from_samples(samples_b, profile, sigma_theory, confidence_band)
+
+    # ---- cross-check: both paths must agree on empirical std --------
+    denom   = np.maximum(sigma_theory, 1e-30)
+    std_rel = np.abs(stats_a["empirical_std"] - stats_b["empirical_std"]) / denom
+    max_rel = np.max(std_rel)
+    if max_rel > 0.05:
+        raise RuntimeError(
+            f"Re-draw and generate_profiles empirical stds differ by "
+            f"{max_rel:.3f} (> 5 %).  The two paths are not statistically "
+            f"equivalent — check GPRProfilePerturber implementation."
+        )
 
     # ---- theoretical exceedance for a Gaussian ----------------------
     theoretical_exceedance = 2.0 * norm.sf(confidence_band)  # two-tailed
@@ -549,6 +565,8 @@ def verify_gpr_statistics(
     # (a) Empirical vs theoretical std
     axes[0, 0].plot(psi_N, sigma_theory, "k-", lw=2, label="Theory")
     axes[0, 0].plot(psi_N, empirical_std, "r--", lw=1.5, label="Empirical")
+    axes[0, 0].plot(psi_N, stats_b["empirical_std"], "b:", lw=1.5,
+                    label="Empirical b")
     axes[0, 0].set_ylabel(r"$\sigma(x)$")
     axes[0, 0].set_title("Pointwise std: theory vs empirical")
     axes[0, 0].legend()
@@ -559,6 +577,8 @@ def verify_gpr_statistics(
                         label=f"Theory ({theoretical_exceedance:.3f})")
     axes[0, 1].plot(psi_N, exceedance_per_point, "r-", alpha=0.7,
                      label="Empirical")
+    axes[0, 1].plot(psi_N, stats_b["exceedance_per_point"], "b:", alpha=0.7,
+                     label="Empirical b")
     axes[0, 1].set_ylabel(f"Fraction outside ±{confidence_band:.0f}σ")
     axes[0, 1].set_title("Exceedance rate per grid point")
     axes[0, 1].legend()
@@ -605,11 +625,13 @@ def verify_gpr_statistics(
     plt.show()
 
     return {
-        "empirical_mean": empirical_mean,
-        "empirical_std": empirical_std,
+        "stats_a": stats_a,
+        "stats_b":  stats_b,
+        "empirical_mean": stats_a['empirical_mean'],
+        "empirical_std": stats_a['empirical_std'],
         "sigma_theory": sigma_theory,
-        "exceedance_per_point": exceedance_per_point,
-        "avg_exceedance": avg_exceedance,
+        "exceedance_per_point": stats_a['exceedance_per_point'],
+        "avg_exceedance": stats_a['avg_exceedance'],
         "theoretical_exceedance": theoretical_exceedance,
     }
 
