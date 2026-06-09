@@ -628,6 +628,7 @@ def perturb_kinetic_equilibrium(
     proxy_bias_warmstart=None,
     pin_jphi=False,
     verbose_interval=200,
+    worker_id=None,
     **kwargs
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
@@ -713,6 +714,15 @@ def perturb_kinetic_equilibrium(
         pressure matching and equilibrium solving.  Returned
         perturbed profiles are on ``psi_N_kinetic``.  If ``None``,
         ``psi_N`` is used for everything (original behaviour).
+    max_proxy_draws : int
+        Maximum number of proxy-space draws attempted per :math:`l_i`
+        iteration before raising ``RuntimeError`` (default 500).
+    verbose_interval : int
+        Print pressure-matching progress every this many iterations
+        (default 200).
+    worker_id : int or None
+        Worker identifier prepended to log messages when running inside
+        a multiprocessing pool.  ``None`` (default) disables the prefix.
 
     Returns
     -------
@@ -746,6 +756,7 @@ def perturb_kinetic_equilibrium(
     # Kinetic grid: either the user-supplied extended grid or psi_N
     psi_kin = psi_N_kinetic if psi_N_kinetic is not None else psi_N
     _dual_grid = psi_N_kinetic is not None
+    _pfx = f"[Worker {worker_id}] " if worker_id is not None else ""
 
     def _kin_to_eq(arr_kin):
         """Interpolate a profile from kinetic grid onto equilibrium grid."""
@@ -774,12 +785,12 @@ def perturb_kinetic_equilibrium(
     p_iter = 0
     # p_thresh is a FRACTION (e.g. 0.05 == 5%); p_err is computed in percent.
     _p_thresh_pct = float(p_thresh) * 100.0
-    print("Searching for pressure profile match...")
+    print(f"{_pfx}Searching for pressure profile match...")
 
     while p_err > _p_thresh_pct:
         p_iter += 1
         if (p_iter % verbose_interval == 0):
-            print(f"    pressure match: iter={p_iter}, err={p_err:.3f}% (threshold {p_thresh}%)")
+            print(f"{_pfx}  pressure match: iter={p_iter}, err={p_err:.3f}% (threshold {p_thresh}%)")
         if p_iter > max_pressure_iter:
             raise RuntimeError(
                 f"Pressure match not found within {max_pressure_iter} iterations "
@@ -1619,7 +1630,7 @@ def perturb_kinetic_equilibrium(
                 f"widen l_i_tolerance/PRESCREEN_MARGIN or check sigma_jphi")
 
         dt_proxy = time.perf_counter() - t_phase
-        print(f"  [li_iter={li_iter}] GPR draw "
+        print(f"{_pfx}  [li_iter={li_iter}] GPR draw "
               f"({_gpr_try} tries, {_n_skipped} pre-screen-skipped, "
               f"{dt_proxy:.1f}s)")
 
@@ -1653,8 +1664,8 @@ def perturb_kinetic_equilibrium(
             _, q_pre, _, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
             if q_pre[0] < 1.0:
                 dt_scale = time.perf_counter() - t_scale
-                print(f"  [li_iter={li_iter}] find_optimal_scale: {dt_scale:.1f}s")
-                print("Skipping this equilibrium, q_0 < 1.0 (pre-check)")
+                print(f"{_pfx}  [li_iter={li_iter}] find_optimal_scale: {dt_scale:.1f}s")
+                print(f"{_pfx}Skipping this equilibrium, q_0 < 1.0 (pre-check)")
                 l_i = np.inf
                 continue
 
@@ -1662,13 +1673,13 @@ def perturb_kinetic_equilibrium(
         # solver holds Ip to target natively, so Ip_target is used unscaled
         # downstream (no Ip-scale secant).
         dt_scale = time.perf_counter() - t_scale
-        print(f"  [li_iter={li_iter}] find_optimal_scale (j0 only): {dt_scale:.1f}s")
+        print(f"{_pfx}  [li_iter={li_iter}] find_optimal_scale (j0 only): {dt_scale:.1f}s")
 
         # ---- 5d. Definitive sawtooth constraint (after Ip scaling) --
         if constrain_sawteeth:
             _, q, _, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
             if q[0] < 1.0:
-                print("Skipping this equilibrium, q_0 < 1.0")
+                print(f"{_pfx}Skipping this equilibrium, q_0 < 1.0")
                 l_i = np.inf
                 continue
 
@@ -1705,7 +1716,7 @@ def perturb_kinetic_equilibrium(
             rtol=0.05, verbose=False,
         )
         if _n_corr > 2:
-            print(f"  [jphi correction] {_n_corr} iterations, "
+            print(f"{_pfx}  [jphi correction] {_n_corr} iterations, "
                   f"edge RMS: {_corr_hist[0]/1e6:.4f} → {_corr_hist[-1]/1e6:.4f} MA/m²")
 
         if diagnostic_plots:
@@ -1758,14 +1769,14 @@ def perturb_kinetic_equilibrium(
         if l_i > 0 and np.isfinite(l_i):
             proxy_target = final_li_proxy * (l_i_target / l_i)
 
-        print(f"  l_i target (equil):   {l_i_target:.4f}")
-        print(f"  proxy target:         {proxy_target:.4f}  (corrected)")
-        print(f"  matched l_i (equil):  {l_i:.4f}")
-        print(f"  matched l_i (proxy):  {final_li_proxy:.4f}")
-        print(f"  Ip error vs target:   {Ip_err:.3f}%")
-        print(f"  proxy vs real l_i:    {proxy_vs_real:+.2f}%")
+        print(f"{_pfx}  l_i target (equil):   {l_i_target:.4f}")
+        print(f"{_pfx}  proxy target:         {proxy_target:.4f}  (corrected)")
+        print(f"{_pfx}  matched l_i (equil):  {l_i:.4f}")
+        print(f"{_pfx}  matched l_i (proxy):  {final_li_proxy:.4f}")
+        print(f"{_pfx}  Ip error vs target:   {Ip_err:.3f}%")
+        print(f"{_pfx}  proxy vs real l_i:    {proxy_vs_real:+.2f}%")
         _li_pct_err = 100.0 * abs(l_i - l_i_target) / l_i_target if l_i_target != 0 else float('inf')
-        print(f"  l_i error:            {_li_pct_err:.2f}% (tolerance: {_li_tol_pct:.2f}%)")
+        print(f"{_pfx}  l_i error:            {_li_pct_err:.2f}% (tolerance: {_li_tol_pct:.2f}%)")
 
         iteration_l_is.append(l_i)
         iteration_Ips.append(Ip)
@@ -1889,6 +1900,8 @@ def generate_bouquet(
     jphi_baseline=True,
     seed=None,
     pin_jphi=False,
+    keep_geqdsk=False,
+    worker_id=None,
     **kwargs
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
@@ -2035,6 +2048,29 @@ def generate_bouquet(
         Soft-reg weight for the ``#VSC`` channel (default 1.0).  Kept
         much lower than ``soft_reg_weight`` so the VSC has freedom to
         do vertical-mode control work without being heavily penalized.
+    keep_geqdsk : bool
+        If ``True``, the temporary per-equilibrium ``.geqdsk`` files written
+        by ``mygs.save_eqdsk`` are kept on disk after being archived into the
+        HDF5 database.  Useful for manual inspection or debugging.
+        Default is ``False`` (files are deleted after archiving).
+    psi_N_kinetic : ndarray or None
+        Optional extended kinetic-profile grid (starting at 0, ending at
+        :math:`\hat{\psi} \geq 1`).  When provided, ``ne``, ``te``,
+        ``ni``, ``ti`` and their sigmas must be on this grid;
+        profiles are interpolated onto ``psi_N`` before the GS solve.
+        Returned perturbed profiles are on ``psi_N_kinetic``.
+        ``None`` uses ``psi_N`` for everything.
+    max_proxy_draws : int
+        Maximum proxy draws per :math:`l_i` iteration before
+        ``RuntimeError`` (default 500).  Forwarded to
+        :func:`perturb_kinetic_equilibrium`.
+    verbose_interval : int
+        Print pressure-matching progress every this many iterations
+        (default 200).  Forwarded to
+        :func:`perturb_kinetic_equilibrium`.
+    worker_id : int or None
+        Worker identifier prepended to log messages.  ``None`` (default)
+        disables the prefix.
 
     Returns
     -------
@@ -2047,6 +2083,7 @@ def generate_bouquet(
         np.random.seed(int(seed))
 
     all_diagnostics = []
+    _pfx = f"[Worker {worker_id}] " if worker_id is not None else ""
 
     # self-consistent pressure for baseline <P>
     # When kinetic profiles are on a different grid, interpolate
@@ -2856,14 +2893,14 @@ def generate_bouquet(
             remaining = avg_s * (n_equils - count)
             eta_min = remaining / 60.0
             eta_str = f"  ETA: {eta_min:.1f} min"
-        print(f"\n{'='*60}")
-        print(f"  Equilibrium {count+1}/{n_equils}  "
+        print(f"\n{_pfx}{'='*60}")
+        print(f"{_pfx}  Equilibrium {count+1}/{n_equils}  "
               f"(scale_jBS={scale_jBS:.4f}){eta_str}")
         if l_i_uncertainty > 0.0:
             _dev_pct = 100.0 * (l_i_target_draw - l_i_target) / l_i_target
-            print(f"  l_i_target sampled: {l_i_target_draw:.4f} "
-                  f"({_dev_pct:+.2f}% vs recon, σ={100*l_i_uncertainty:.1f}%)")
-        print(f"{'='*60}")
+            print(f"{_pfx}  l_i_target sampled: {l_i_target_draw:.4f} "
+                  f"{_pfx}({_dev_pct:+.2f}% vs recon, σ={100*l_i_uncertainty:.1f}%)")
+        print(f"{_pfx}{'='*60}")
         t_start = time.perf_counter()
 
         # ---- Warm-start restore ----
@@ -2998,6 +3035,7 @@ def generate_bouquet(
                 proxy_bias_warmstart=_proxy_bias_warmstart,
                 pin_jphi=pin_jphi,
                 verbose_interval=verbose_interval,
+                worker_id=worker_id,
                 **kwargs
             )
         except Exception as e:
@@ -3456,7 +3494,7 @@ def generate_bouquet(
         elapsed = time.perf_counter() - t_start
         elapsed_times.append(elapsed)
         total_elapsed = time.perf_counter() - t_batch_start
-        print(f"  Wall-clock time: {elapsed:.1f}s  "
+        print(f"{_pfx}  Wall-clock time: {elapsed:.1f}s  "
               f"(total: {total_elapsed/60:.1f} min, "
               f"avg: {np.mean(elapsed_times):.1f}s/eq)")
 
@@ -3484,7 +3522,7 @@ def generate_bouquet(
         # ---- save geqdsk to a temporary file, archive, delete -------
         eqdsk_filename = f"{header}_count={count}.geqdsk"
         full_path = os.path.abspath(eqdsk_filename)
-        print(f"  Saving to: {full_path}")
+        print(f"{_pfx}  Saving to: {full_path}")
 
         # safe_save_eqdsk: snapshot mygs equilibrium before save, restore
         # after.  Prevents save_eqdsk's q-profile tracer from shifting
@@ -3635,7 +3673,7 @@ def generate_bouquet(
                 perturbed_pfile_bytes = pf.to_bytes()
             except Exception as exc:
                 import traceback
-                print(f"  WARNING: could not build perturbed p-file: {exc}")
+                print(f"{_pfx}  WARNING: could not build perturbed p-file: {exc}")
                 traceback.print_exc()
 
         store_equilibrium(
@@ -3671,11 +3709,14 @@ def generate_bouquet(
         )
 
         # Clean up on-disk eqdsk after archiving
-        try:
-            os.remove(full_path)
-            print(f"  Deleted temporary file: {full_path}")
-        except OSError as exc:
-            print(f"  WARNING: could not delete {full_path}: {exc}")
+        if keep_geqdsk:
+            print(f"{_pfx}  Keeping temporary file: {full_path}")
+        else:
+            try:
+                os.remove(full_path)
+                print(f"{_pfx}  Deleted temporary file: {full_path}")
+            except OSError as exc:
+                print(f"{_pfx}  WARNING: could not delete {full_path}: {exc}")
 
         all_diagnostics.append(diagnostics)
 
