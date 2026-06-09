@@ -34,8 +34,13 @@ env/
 
 # FUSE IMAS/OMAS data dumps (proprietary DIII-D data) — never commit.
 # Only the readers in bouquet/io are synced, never the data they read.
+# dd_sim = FUSE simulation DD; dd_exp = raw experimental DD (both proprietary).
+# The synthetic example (examples/D3D-like/D3Dlike_baseline_omas.json) is a
+# different name and IS tracked.
 dd_sim.json
 *_dd_sim.json
+dd_exp.json
+*_dd_exp.json
 
 # Fortran / compiled artifacts (in case any build steps live nearby)
 *.mod
