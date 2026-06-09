@@ -151,6 +151,72 @@ class GPRProfilePerturber:
         return prefactor * (1.0 + s + s**2 / 3.0) * np.exp(-s)
 
     # ---- core sampling method ----------------------------------------
+    def precompute_factor(
+        self,
+        psi_N: np.ndarray,
+        sigma_profile: np.ndarray,
+    ) -> None:
+        r"""Pre-compute and cache GPR eigen-factor.
+
+        After calling this, use :meth:`draw_from_factor` to generate
+        samples without repeating the O(n³) eigendecomposition -> np.linalg.eigh
+
+        Parameters
+        ----------
+        psi_N : ndarray
+            1-D normalised flux grid.
+        sigma_profile : ndarray
+            1-D experimental uncertainty **in profile units** -- this
+            becomes the GP's marginal standard deviation at every
+            grid point.
+        """
+        # 1. Unit-variance base kernel
+        K = self._kernel(psi_N, psi_N)          # K(x,x) = 1
+
+        # 2. Scale by σ(x):  C_ij = σ_i · σ_j · K_ij
+        #    ⟹  C(x,x) = σ(x)²  ⟹  marginal std = σ(x)   ✓
+        S = np.outer(sigma_profile, sigma_profile)
+        K_scaled = K * S
+
+        # 3. Eigen-decomposition (symmetric → eigh)
+        vals, vecs = np.linalg.eigh(K_scaled)
+        vals = np.maximum(vals, 0.0)
+        self._cached_vecs = vecs
+        self._cached_sqrt_vals = np.sqrt(vals)
+
+    def draw_from_factor(
+        self,
+        input_profile: np.ndarray,
+        n_samples: int,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        r"""Draw perturbed profiles whose pointwise :math:`1\sigma`
+        matches the uncertainty supplied to :meth:`precompute_factor` exactly.
+
+        Call :meth:`precompute_factor` first.
+
+        Parameters
+        ----------
+        input_profile : ndarray
+            1-D baseline profile (GP mean).
+        n_samples : int
+            Number of independent profile draws.
+        rng : numpy.random.Generator
+            Random generator.
+
+        Returns
+        -------
+        ndarray, shape ``(n_samples, len(input_profile))``
+        """
+        n = len(input_profile)
+
+        # 4. Sample:  δf = V diag(√λ) z,   z ~ N(0, I)
+        z = rng.standard_normal((n, n_samples))
+        perturbations = self._cached_vecs @ (self._cached_sqrt_vals[:, None] * z)
+
+        # 5. Perturbed profiles  →  (n_samples, n_points)
+        return input_profile[None, :] + perturbations.T
+
     def generate_profiles(
         self,
         psi_N: np.ndarray,
