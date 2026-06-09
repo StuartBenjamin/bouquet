@@ -2775,7 +2775,7 @@ def generate_bouquet(
                     initial_Ip_target, _swb_seed_cache,
                     scale_jBS=1.0,
                     isolate_edge_jBS=isolate_edge_jBS,
-                    diagnostic_plots=False, verbose=False,
+                    diagnostic_plots=False, verbose=False,**kwargs
                 )
                 _diff_spike_recon = np.asarray(
                     _cache_results["isolated_j_BS"]).copy()
