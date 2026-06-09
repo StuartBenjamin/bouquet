@@ -438,6 +438,33 @@ def generate_perturbed_GPR(
 # ====================================================================
 #  Statistics verification
 # ====================================================================
+def _gpr_stats_from_samples(samples, profile, uncertainty_prof, confidence_band):
+    """Compute empirical statistics from a ``(n_samples, n_points)`` array.
+
+    Helper shared by the two sampling paths in :func:`verify_gpr_statistics`.
+
+    Returns
+    -------
+    dict with keys ``empirical_mean``, ``empirical_std``,
+    ``exceedance_per_point``, ``avg_exceedance``.
+    """
+    sigma_theory = uncertainty_prof
+    empirical_mean = np.mean(samples, axis=0)
+    empirical_std  = np.std(samples,  axis=0)
+
+    residuals = samples - profile[None, :]
+    outside   = np.abs(residuals) > confidence_band * sigma_theory[None, :]
+    exceedance_per_point = np.mean(outside, axis=0)
+    avg_exceedance       = np.mean(exceedance_per_point)
+
+    return {
+        "empirical_mean":       empirical_mean,
+        "empirical_std":        empirical_std,
+        "exceedance_per_point": exceedance_per_point,
+        "avg_exceedance":       avg_exceedance,
+    }
+
+
 def verify_gpr_statistics(
     psi_N,
     profile,
