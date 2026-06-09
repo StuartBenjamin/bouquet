@@ -15,7 +15,10 @@ import matplotlib.pyplot as plt
 
 # file options
 PLOT_ONLY = False
-use_python_solve = False
+remake_dir = True        # If true, deletes pre-existing working directory on re-runs
+use_python_solve = False # Use python bootstrap solve
+verbose=True             # If false, worker outputs are printed to individual log files
+use_logical_cpus=True    # Multi-thread based on hardware (use with caution if you're not on linux)
 
 # ---------------------------------------------------------------------------
 # OFT / TokaMaker path — adjust to your installation
@@ -23,6 +26,9 @@ use_python_solve = False
 OFT_PATH = '/home/stubenj9/src/OpenFUSIONToolkit/builds/install_release/python'
 if OFT_PATH:
     sys.path.append(OFT_PATH)
+
+# Add bouquet root so the package is importable when run directly
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 
 # ============================================================================
 # 1. Input files
@@ -166,7 +172,7 @@ def _compute():
     print(f'Running parallel run with {n_cpus} CPU core(s) available.')
 
     # Clean output directory for a fresh run
-    if os.path.exists(OUTPUT_DIR):
+    if os.path.exists(OUTPUT_DIR) and remake_dir:
         import shutil as _shutil
         _shutil.rmtree(OUTPUT_DIR)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
