@@ -69,6 +69,11 @@ class Baseline:
     # full reconstruction diagnostics, when provenance == "reconstruction"
     recon: Optional[dict] = None
 
+    # l_i sanity metrics (IMAS path): IDS-reported li_1/li_3 vs the
+    # TokaMaker-solved li_1/li_3 from the forward-solve. l_i_target is set to
+    # the TokaMaker li_1; the IDS values are kept here for comparison/plots.
+    li_metrics: Optional[dict] = None
+
 
 def resolve_baseline(config: "BouquetConfig", mygs=None) -> Baseline:
     """Dispatch on ``config.source`` and return a populated :class:`Baseline`.

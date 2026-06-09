@@ -135,7 +135,11 @@ def read_imas_baseline(
     ie = _nearest_index(eq["time"], T, "equilibrium")
     gq = eq["time_slice"][ie]["global_quantities"]
     Ip_target = abs(float(gq["ip"]))
-    l_i_target = float(gq["li_3"])
+    ids_li_1 = float(gq["li_1"]) if "li_1" in gq else None
+    ids_li_3 = float(gq["li_3"]) if "li_3" in gq else None
+    # Provisional l_i_target = IDS li_3; the IMAS forward-solve (Bouquet) replaces
+    # this with the TokaMaker-solved li_1 and records the IDS values for sanity.
+    l_i_target = ids_li_3 if ids_li_3 is not None else 0.0
 
     # --- profiles + currents from core_profiles ---
     cp_ids = dd["core_profiles"]
@@ -218,5 +222,9 @@ def read_imas_baseline(
         j_RF=j_RF,
         p_fast=p_fast,
         eqdsk_bytes=None,
-        pfile_bytes=raw_bytes,
+        # The OMAS JSON is NOT an Osborne p-file; don't pass it as pfile_bytes
+        # (generate_bouquet would try to parse it). Per-draw p-files are built
+        # from the kinetic profiles.
+        pfile_bytes=None,
+        li_metrics={"ids_li_1": ids_li_1, "ids_li_3": ids_li_3},
     )

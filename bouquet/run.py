@@ -30,6 +30,23 @@ if TYPE_CHECKING:
     from .baseline import Baseline
 
 
+def _shape_from_boundary(boundary_RZ):
+    """LCFS shape params (R0, Z0, a, kappa, delta) from boundary (R,Z) points."""
+    import numpy as np
+
+    rz = np.asarray(boundary_RZ, dtype=float)
+    R, Z = rz[:, 0], rz[:, 1]
+    Rmax, Rmin, Zmax, Zmin = R.max(), R.min(), Z.max(), Z.min()
+    R0 = 0.5 * (Rmax + Rmin)
+    a = 0.5 * (Rmax - Rmin)
+    Z0 = 0.5 * (Zmax + Zmin)
+    kappa = (Zmax - Zmin) / (Rmax - Rmin)
+    R_upper = R[int(np.argmax(Z))]
+    R_lower = R[int(np.argmin(Z))]
+    delta = 0.5 * ((R0 - R_upper) + (R0 - R_lower)) / a
+    return R0, Z0, a, kappa, delta
+
+
 class Bouquet:
     """Stateful driver: solver -> baseline -> generate -> filter -> export."""
 
@@ -114,6 +131,7 @@ class Bouquet:
         self.mygs = mygs
         self._myOFT = myOFT          # keep the env alive
         self._eqdsk_ref = eqdsk_ref
+        self._boundary_RZ = boundary_RZ   # LCFS shape for IMAS forward-solve init
         return self
 
     # ── stage 2: baseline (reconstruction OR imas) ----------------------
@@ -125,9 +143,111 @@ class Bouquet:
         :class:`~bouquet.baseline.Baseline`, never on reconstruction directly.
         """
         from .baseline import resolve_baseline
+        from .config import ImasSource
 
         self.baseline = resolve_baseline(self.config, self.mygs)
+
+        # IMAS path: read_imas_baseline does no GS solve, so establish a converged
+        # baseline equilibrium on mygs here (the reconstruction path gets this for
+        # free from reconstruct_equilibrium). This also sets l_i_target to the
+        # TokaMaker-solved li_1 and records IDS-vs-TokaMaker li for sanity.
+        if isinstance(self.config.source, ImasSource) and self.mygs is not None:
+            self._forward_solve_imas_baseline()
         return self.baseline
+
+    def _forward_solve_imas_baseline(self):
+        """Forward GS solve of the IMAS baseline (j_phi + pressure) on mygs.
+
+        Initialises psi from the IDS LCFS shape, then solves with the IMAS total
+        toroidal current (jphi-linterp) and the thermal+fast pressure. Sets
+        ``l_i_target`` to the TokaMaker-solved li_1 and stores the IDS/TokaMaker
+        li_1/li_3 comparison in ``baseline.li_metrics``.
+        """
+        import numpy as np
+
+        bl = self.baseline
+        mygs = self.mygs
+        psi_N = np.asarray(bl.psi_N, dtype=float)
+        psi_pad = 1e-3
+        EC = 1.602176634e-19
+
+        # init psi from the LCFS shape parameters
+        R0, Z0, a, kappa, delta = _shape_from_boundary(self._boundary_RZ)
+        mygs.init_psi(R0, Z0, a, kappa, delta)
+
+        # kinetic profiles + total pressure on the equilibrium grid (IMAS shares
+        # psi_N between the kinetic and current grids).
+        def k2e(arr):
+            return np.interp(psi_N, np.asarray(bl.psi_N_kinetic, dtype=float),
+                             np.asarray(arr, dtype=float))
+
+        ne, te, ni, ti = k2e(bl.ne), k2e(bl.te), k2e(bl.ni), k2e(bl.ti)
+        Zeff = np.clip(k2e(bl.Zeff), 1.0, None)
+        p_total = EC * (ne * te + ni * ti)
+        if bl.p_fast is not None:
+            p_total = p_total + k2e(bl.p_fast)
+
+        def solve_jphi(j_phi):
+            ffp = {"type": "jphi-linterp", "y": np.asarray(j_phi, dtype=float), "x": psi_N}
+            for _ in range(2):   # 2nd pass refines the jphi-linterp flux scaling
+                psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
+                pp_y = np.gradient(p_total) / (np.gradient(psi_N) * psi_range)
+                pp_y[-1] = 0.0
+                mygs.set_targets(Ip=bl.Ip_target, pax=float(p_total[0]))
+                mygs.set_profiles(
+                    pp_prof={"type": "linterp", "y": pp_y, "x": psi_N}, ffp_prof=ffp,
+                )
+                mygs.solve()
+
+        # Initial solve with the IMAS total current (also seeds SWB geometry).
+        solve_jphi(np.asarray(bl.j_phi, dtype=float))
+
+        if self.config.generation.recalculate_j_BS:
+            # The draws recompute bootstrap via SWB each iteration, which differs
+            # from the IDS/generic bootstrap. Rebuild the baseline on that SAME
+            # SWB basis (inductive*scale + SWB spike + fixed, Ip-matched) so the
+            # forward-solve l_i is reachable by the draws.
+            from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
+            from scipy.optimize import root_scalar
+            from .utils import Ip_flux_integral_vs_target
+
+            j_fixed = np.zeros_like(psi_N)
+            if bl.j_NBI is not None:
+                j_fixed = j_fixed + np.asarray(bl.j_NBI, dtype=float)
+            if bl.j_RF is not None:
+                j_fixed = j_fixed + np.asarray(bl.j_RF, dtype=float)
+
+            jind = np.asarray(bl.j_inductive, dtype=float)
+            res = solve_with_bootstrap(
+                mygs, ne, te, ni, ti, Zeff, bl.Ip_target, jind,
+                scale_jBS=1.0, isolate_edge_jBS=True, diagnostic_plots=False,
+            )
+            spike = np.asarray(res["isolated_j_BS"], dtype=float)
+            root = root_scalar(
+                Ip_flux_integral_vs_target,
+                args=(mygs, jind, spike + j_fixed, psi_N, bl.Ip_target),
+                bracket=[1e-10 * bl.Ip_target, 1e1 * bl.Ip_target],
+                method="brentq", rtol=1e-6,
+            )
+            scale = root.root
+            j_phi_swb = scale * jind + spike + j_fixed
+            solve_jphi(j_phi_swb)
+            bl.j_BS = spike                 # update decomposition to the SWB basis
+            bl.j_inductive = scale * jind
+            bl.j_phi = j_phi_swb
+
+        tok_li1 = float(mygs.get_stats(lcfs_pad=psi_pad, li_normalization="std")["l_i"])
+        tok_li3 = float(mygs.get_stats(lcfs_pad=psi_pad, li_normalization="iter")["l_i"])
+
+        metrics = dict(bl.li_metrics or {})
+        metrics.update(tokamaker_li_1=tok_li1, tokamaker_li_3=tok_li3)
+        bl.li_metrics = metrics
+        bl.l_i_target = tok_li1   # per project decision: target TokaMaker li_1
+        print(
+            f"[imas forward-solve] recalc_jBS={self.config.generation.recalculate_j_BS} "
+            f"TokaMaker li_1={tok_li1:.4f} li_3={tok_li3:.4f} | "
+            f"IDS li_1={metrics.get('ids_li_1')} li_3={metrics.get('ids_li_3')}"
+        )
 
     def plot_baseline(self):
         """Diagnostic plots: kinetic profiles, separated currents, and (for the
