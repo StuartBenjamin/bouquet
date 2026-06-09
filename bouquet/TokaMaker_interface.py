@@ -626,6 +626,7 @@ def perturb_kinetic_equilibrium(
     spike_profile_recon_cached=None,
     proxy_bias_warmstart=None,
     pin_jphi=False,
+    verbose_interval=200,
     **kwargs
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
@@ -766,6 +767,8 @@ def perturb_kinetic_equilibrium(
 
     while p_err > _p_thresh_pct:
         p_iter += 1
+        if (p_iter % verbose_interval == 0):
+            print(f"    pressure match: iter={p_iter}, err={p_err:.3f}% (threshold {p_thresh}%)")
         if p_iter > max_pressure_iter:
             raise RuntimeError(
                 f"Pressure match not found within {max_pressure_iter} iterations "
@@ -1857,6 +1860,7 @@ def generate_bouquet(
     baseline_pfile_bytes=None,
     psi_N_kinetic=None,
     max_proxy_draws=500,
+    verbose_interval=200,
     coil_drift=0.01,
     coil_drift_floor_A=50.0,
     vsc_coils=('F9A', 'F9B'),
@@ -2982,6 +2986,7 @@ def generate_bouquet(
                 spike_profile_recon_cached=_diff_spike_recon,
                 proxy_bias_warmstart=_proxy_bias_warmstart,
                 pin_jphi=pin_jphi,
+                verbose_interval=verbose_interval,
                 **kwargs
             )
         except Exception as e:
