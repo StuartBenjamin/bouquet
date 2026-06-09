@@ -16,6 +16,7 @@ from bouquet.uncertainties import new_uncertainty_profiles
 from bouquet.sampling import (
     GPRProfilePerturber,
     generate_perturbed_GPR,
+    _draw_monotonic_perturbation,
 )
 from bouquet.utils import (
     initialize_equilibrium_database,
@@ -247,6 +248,63 @@ class TestGPRProfilePerturber:
         empirical_std = np.std(combined, axis=0)
         # Check thath their standard deviation is similar
         np.testing.assert_allclose(empirical_std, sigma, rtol=0.01)
+
+
+class TestDrawMonotonicPerturbation:
+    """Quick tests for _draw_monotonic_perturbation."""
+
+    # A strictly decreasing parabola — nearly every GPR draw is monotone
+    PSI = np.linspace(0, 1, 32)
+    PROFILE = 1.0 - PSI ** 2
+    SIGMA = 0.02 * np.ones(32)
+
+    def test_returns_monotone_array(self):
+        result = _draw_monotonic_perturbation(
+            self.PSI, self.PROFILE, self.SIGMA, length_scale=0.3,
+        )
+        assert result.shape == (len(self.PSI),)
+        assert np.all(np.diff(result) <= 0.0)
+
+    def test_pre_built_perturber_accepted(self):
+        """Passing a pre-built perturber must still return a valid monotone draw."""
+        p = GPRProfilePerturber(kernel_func="rbf", length_scale=0.3)
+        p.precompute_factor(self.PSI, self.SIGMA)
+        rng = np.random.default_rng(7)
+        result = _draw_monotonic_perturbation(
+            self.PSI, self.PROFILE, self.SIGMA, length_scale=0.3,
+            perturber=p, rng=rng,
+        )
+        assert np.all(np.diff(result) <= 0.0)
+
+    def test_shared_rng_advances_state(self):
+        """Two calls with the same rng object produce different draws."""
+        p = GPRProfilePerturber(kernel_func="rbf", length_scale=0.3)
+        p.precompute_factor(self.PSI, self.SIGMA)
+        rng = np.random.default_rng(42)
+        r1 = _draw_monotonic_perturbation(
+            self.PSI, self.PROFILE, self.SIGMA, length_scale=0.3,
+            perturber=p, rng=rng,
+        )
+        r2 = _draw_monotonic_perturbation(
+            self.PSI, self.PROFILE, self.SIGMA, length_scale=0.3,
+            perturber=p, rng=rng,
+        )
+        assert not np.allclose(r1, r2)
+
+    def test_exhaustion_raises_runtime_error(self):
+        """RuntimeError must be raised when no monotone draw is found in max_draws."""
+        # Flat profile + huge sigma: draws will not be monotone in 1 attempt.
+        p = GPRProfilePerturber(kernel_func="rbf", length_scale=0.3)
+        psi = np.linspace(0, 1, 8)
+        sigma = 10.0 * np.ones(8)
+        p.precompute_factor(psi, sigma)
+        rng = np.random.default_rng(0)
+        with pytest.raises(RuntimeError, match="monotonically"):
+            _draw_monotonic_perturbation(
+                psi, np.ones(8), sigma, length_scale=0.3,
+                max_draws=1, batch_size=1, perturber=p, rng=rng,
+            )
+
 
 class TestGeneratePerturbedGPR:
     """Tests for the convenience wrapper."""
