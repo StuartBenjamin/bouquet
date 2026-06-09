@@ -157,6 +157,96 @@ class TestGPRProfilePerturber:
         result = p.generate_profiles(psi_N, profile, sigma, n_samples=3)
         assert result.shape == (3, len(psi_N))
 
+    def test_output_shape_single_redraw(self):
+        psi_N = np.linspace(0, 1, 51)
+        profile = 1.0 - psi_N
+        sigma = 0.05 * np.ones_like(psi_N)
+        p = GPRProfilePerturber(kernel_func="rbf", length_scale=0.2)
+        p.precompute_factor(psi_N, sigma)
+        rng = np.random.default_rng(0)
+        result = p.draw_from_factor(profile, 1, rng)
+        assert result.shape == (1, len(psi_N))
+
+    def test_output_shape_multi_redraw(self):
+        psi_N = np.linspace(0, 1, 51)
+        profile = 1.0 - psi_N
+        sigma = 0.05 * np.ones_like(psi_N)
+        p = GPRProfilePerturber(kernel_func="rbf", length_scale=0.2)
+        p.precompute_factor(psi_N, sigma)
+        rng = np.random.default_rng(0)
+        result = p.draw_from_factor(profile, 10, rng)
+        assert result.shape == (10, len(psi_N))
+
+    def test_zero_sigma_returns_mean_redraw(self):
+        psi_N = np.linspace(0, 1, 51)
+        profile = 1.0 - psi_N
+        sigma = np.zeros_like(psi_N)
+        p = GPRProfilePerturber(kernel_func="rbf", length_scale=0.2)
+        p.precompute_factor(psi_N, sigma)
+        rng = np.random.default_rng(0)
+        result = p.draw_from_factor(profile, 5, rng)
+        # Every row should match the input profile
+        for i in range(result.shape[0]):
+            np.testing.assert_allclose(result[i], profile, atol=1e-10)
+
+    def test_marginal_std_matches_sigma_redraw(self):
+        """Empirical pointwise std should match the input sigma."""
+        rng = np.random.default_rng(42)
+        psi_N = np.linspace(0, 1, 41)
+        profile = np.ones_like(psi_N)
+        sigma = 0.1 * np.ones_like(psi_N)
+        p = GPRProfilePerturber(kernel_func="rbf", length_scale=0.2)
+        p.precompute_factor(psi_N, sigma)
+        samples = p.draw_from_factor(profile, 5000, rng)
+        empirical_std = np.std(samples, axis=0)
+        np.testing.assert_allclose(empirical_std, sigma, rtol=0.1)
+
+    def test_redraw_matches_generate_profiles_redraw(self):
+        """Re-draw and generate_profiles must produce the same marginal std."""
+        psi_N = np.linspace(0, 1, 41)
+        profile = np.ones_like(psi_N)
+        sigma = 0.1 * np.ones_like(psi_N)
+        p = GPRProfilePerturber(kernel_func="rbf", length_scale=0.2)
+        p.precompute_factor(psi_N, sigma)
+
+        rng_a = np.random.default_rng(7)
+        samples_a = p.draw_from_factor(profile, 3000, rng_a)
+
+        rng_b = np.random.default_rng(7)
+        samples_b = p.generate_profiles(psi_N, profile, sigma, n_samples=3000, rng=rng_b)
+
+        std_a = np.std(samples_a, axis=0)
+        std_b = np.std(samples_b, axis=0)
+        # Empirical stds agree to within 1 % (Monte-Carlo noise)
+        np.testing.assert_allclose(std_a, std_b, rtol=0.01)
+
+    def test_matern52_runs_redraw(self):
+        psi_N = np.linspace(0, 1, 51)
+        profile = 1.0 - psi_N
+        sigma = 0.05 * np.ones_like(psi_N)
+        p = GPRProfilePerturber(kernel_func="matern52", length_scale=0.2)
+        p.precompute_factor(psi_N, sigma)
+        rng = np.random.default_rng(0)
+        result = p.draw_from_factor(profile, 3, rng)
+        assert result.shape == (3, len(psi_N))
+
+    def test_precompute_reuse_consistent(self):
+        """Multiple draw_from_factor calls with the same factor must be i.i.d."""
+        psi_N = np.linspace(0, 1, 31)
+        profile = np.ones_like(psi_N)
+        sigma = 0.1 * np.ones_like(psi_N)
+        p = GPRProfilePerturber(kernel_func="rbf", length_scale=0.2)
+        p.precompute_factor(psi_N, sigma)
+        rng = np.random.default_rng(99)
+        # Draw in two separate calls and stack
+        batch1 = p.draw_from_factor(profile, 3000, rng)
+        batch2 = p.draw_from_factor(profile, 3000, rng)
+        # Verify batch1 and batch2 are actually different (independent)
+        assert not np.allclose(batch1, batch2), "batch1 and batch2 should be different"
+        combined = np.vstack([batch1, batch2])
+        empirical_std = np.std(combined, axis=0)
+        # Check thath their standard deviation is similar
+        np.testing.assert_allclose(empirical_std, sigma, rtol=0.01)
 
 class TestGeneratePerturbedGPR:
     """Tests for the convenience wrapper."""
