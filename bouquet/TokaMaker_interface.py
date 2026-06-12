@@ -11,14 +11,15 @@ Provides:
   - ``perturb_kinetic_equilibrium`` – perturbs kinetic + current-density
     profiles and iterates to match :math:`I_p` and :math:`l_i` targets
     via TokaMaker.
-  - ``generate_perturbed_equilibria`` – batch driver that archives
-    perturbed equilibria to HDF5.
+  - ``generate_bouquet`` – batch driver that archives perturbed
+    equilibria to HDF5.
   - ``reconstruct_equilibrium`` – reconstruct a single equilibrium from
     a geqdsk reference and kinetic profiles, matching :math:`l_i(1)`
     via secant iteration.
 """
 
 import os
+import tempfile
 import time
 
 import numpy as np
@@ -560,6 +561,24 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
         'spline': _pchip,
     }
 
+def _swb_debug():
+    """Single switch for the SWB debugging instrumentation.
+
+    ``BOUQUET_SWB_DEBUG=1`` enables, in one place, what used to be separate
+    SWB_STATE_DUMP / SWB_VERBOSE / PROFILE toggles: the per-draw ``[SWB-diag]``
+    state prints, verbose solve_with_bootstrap output, SWB wall-time, and the
+    pre/post-state ``.npz`` dumps (written under the system temp dir, see
+    :func:`_swb_dump_path`) that let a failing draw be replayed offline.
+    Read at call time so it can be flipped mid-session in a notebook.
+    """
+    return os.environ.get('BOUQUET_SWB_DEBUG', '0') == '1'
+
+
+def _swb_dump_path(name):
+    """Path for an SWB debug dump: ``<tempdir>/bouquet_<name>.npz``."""
+    return os.path.join(tempfile.gettempdir(), f"bouquet_{name}.npz")
+
+
 def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad):
     """Convert ``solve_with_bootstrap``'s j_BS output to toroidal convention.
 
@@ -635,6 +654,7 @@ def perturb_kinetic_equilibrium(
     recalculate_j_BS=True,
     isolate_edge_jBS=True,
     scale_jBS=1.0,
+    swb_iterations=3,
     diagnostic_plots=False,
     max_pressure_iter=_MAX_PRESSURE_ITER,
     max_li_iter=_MAX_LI_ITER,
@@ -736,6 +756,10 @@ def perturb_kinetic_equilibrium(
     scale_jBS : float
         Multiplicative scale factor applied to :math:`j_{\rm BS}` in
         ``solve_with_bootstrap``.  A value of 1.0 applies no scaling.
+    swb_iterations : int
+        H-mode self-consistency iterations inside ``solve_with_bootstrap``
+        (its ``iterations`` argument). 2 is usually enough when trading
+        accuracy for speed.
     diagnostic_plots : bool
         Show diagnostic matplotlib figures (including inside
         ``solve_with_bootstrap`` and ``find_optimal_scale``).
@@ -1211,65 +1235,52 @@ def perturb_kinetic_equilibrium(
         from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
         _swb_seed = create_power_flux_fun(npsi, 1.5, 1.5)['y']
 
-        # ---- Diagnostic before SWB ----
-        try:
-            _diag_axis = (float(mygs.o_point[0]), float(mygs.o_point[1]))
-            _diag_Ip   = float(mygs.get_globals()[0])
-            _ped = (psi_N >= 0.85) & (psi_N <= 1.0)
-            _ne_in = ne if (psi_N_kinetic is None) else ne_eq
-            _te_in = te if (psi_N_kinetic is None) else te_eq
-            _coils_now, _ = mygs.get_coil_currents()
-            print(f"  [SWB-diag] axis=({_diag_axis[0]:.4f},{_diag_axis[1]:+.5f}) "
-                  f"Ip={_diag_Ip:+.0f}  bounds_cleared={_stashed_bounds is not None}")
-            print(f"  [SWB-diag] te_eq[0]={te_eq[0]:.0f} eV (recon te[0]={te[0]:.0f}) -- "
-                  f"baseline ratio {te_eq[0]/te[0]:.3f}")
-            print(f"  [SWB-diag] ne_eq[0]={ne_eq[0]:.2e} m^-3 (recon ne[0]={ne[0]:.2e}) -- "
-                  f"baseline ratio {ne_eq[0]/ne[0]:.3f}")
-            print(f"  [SWB-diag] te_eq pedestal psi=[0.85,1]: "
-                  f"min={te_eq[_ped].min():.0f} max={te_eq[_ped].max():.0f}  "
-                  f"(monotone? {bool(np.all(np.diff(te_eq[_ped]) <= 0))})")
-            # Derive recon baselines from the stashed bounds dict
-            # (bounds = [base - delta, base + delta] => base = mean).
-            _stashed = getattr(mygs, '_coil_drift_bounds', None) or {}
-            _f9a_base = (0.5 * (_stashed['F9A'][0] + _stashed['F9A'][1])
-                          if 'F9A' in _stashed else None)
-            _f9b_base = (0.5 * (_stashed['F9B'][0] + _stashed['F9B'][1])
-                          if 'F9B' in _stashed else None)
-            if _f9a_base is not None and _f9b_base is not None:
-                _f9a = float(_coils_now['F9A'])
-                _f9b = float(_coils_now['F9B'])
-                print(f"  [SWB-diag] F9A={_f9a:+.0f} A (recon {_f9a_base:+.0f}, "
-                      f"drift {_f9a - _f9a_base:+.0f}), "
-                      f"F9B={_f9b:+.0f} A (drift {_f9b - _f9b_base:+.0f})")
-        except Exception as _diag_exc:
-            print(f"  [SWB-diag] failed: {_diag_exc}")
-
-        # ---- Pre-SWB full-state capture (env SWB_STATE_DUMP=1) ----
-        # Dump the EXACT mygs state (psi field + coil currents) AND the SWB
-        # inputs immediately before the call, so a failing draw can be
-        # replayed offline from precisely this state -- to settle whether
-        # the SWB maxits is kinetics-driven or pre-solve-state-driven.
-        # Overwritten each draw; on the run's last failure it holds that
-        # draw's pre-SWB state.
-        if os.environ.get('SWB_STATE_DUMP', '0') == '1':
+        # ---- SWB debug instrumentation (BOUQUET_SWB_DEBUG=1) ----
+        # State prints + pre/post .npz dumps so a failing draw can be replayed
+        # offline from exactly this state. Dumps land in the system temp dir
+        # (see _swb_dump_path) and are overwritten each draw; on failure the
+        # pre-state is preserved separately so a later draw can't clobber it.
+        if _swb_debug():
             try:
-                import numpy as _np_ps
+                _diag_axis = (float(mygs.o_point[0]), float(mygs.o_point[1]))
+                _diag_Ip = float(mygs.get_globals()[0])
+                _ped = (psi_N >= 0.85) & (psi_N <= 1.0)
+                _coils_now, _ = mygs.get_coil_currents()
+                print(f"  [SWB-diag] axis=({_diag_axis[0]:.4f},{_diag_axis[1]:+.5f}) "
+                      f"Ip={_diag_Ip:+.0f}  bounds_cleared={_stashed_bounds is not None}")
+                print(f"  [SWB-diag] te_eq[0]={te_eq[0]:.0f} eV (baseline {te[0]:.0f}), "
+                      f"ne_eq[0]={ne_eq[0]:.2e} m^-3 (baseline {ne[0]:.2e})")
+                print(f"  [SWB-diag] te_eq pedestal psi=[0.85,1]: "
+                      f"min={te_eq[_ped].min():.0f} max={te_eq[_ped].max():.0f}  "
+                      f"(monotone? {bool(np.all(np.diff(te_eq[_ped]) <= 0))})")
+                # Largest coil drifts vs the stashed bounds midpoints
+                # (bounds = [base - delta, base + delta] => base = mean).
+                _stashed = getattr(mygs, '_coil_drift_bounds', None) or {}
+                _drifts = sorted(
+                    ((abs(float(_coils_now[_cn]) - 0.5 * (_b[0] + _b[1])),
+                      _cn, 0.5 * (_b[0] + _b[1]))
+                     for _cn, _b in _stashed.items() if _cn in _coils_now),
+                    reverse=True)
+                for _, _cn, _base in _drifts[:2]:
+                    print(f"  [SWB-diag] {_cn}={float(_coils_now[_cn]):+.0f} A "
+                          f"(recon {_base:+.0f}, drift "
+                          f"{float(_coils_now[_cn]) - _base:+.0f})")
                 _ps_coils, _ = mygs.get_coil_currents()
-                _np_ps.savez(
-                    '/tmp/swb_prestate_dump.npz',
+                np.savez(
+                    _swb_dump_path('swb_prestate'),
                     psi=mygs.get_psi(False),
-                    coil_names=_np_ps.array(list(_ps_coils.keys())),
-                    coil_vals=_np_ps.array([float(v) for v in _ps_coils.values()]),
+                    coil_names=np.array(list(_ps_coils.keys())),
+                    coil_vals=np.array([float(v) for v in _ps_coils.values()]),
                     psi_N=psi_N,
                     ne_eq=ne_eq, te_eq=te_eq, ni_eq=ni_eq, ti_eq=ti_eq,
-                    Zeff=_np_ps.atleast_1d(_np_ps.asarray(Zeff)),
-                    Ip_target=_np_ps.array([Ip_target]),
+                    Zeff=np.atleast_1d(np.asarray(Zeff)),
+                    Ip_target=np.array([Ip_target]),
                     swb_seed=_swb_seed,
-                    scale_jBS=_np_ps.array([scale_jBS]),
-                    isolate_edge_jBS=_np_ps.array([bool(isolate_edge_jBS)]),
+                    scale_jBS=np.array([scale_jBS]),
+                    isolate_edge_jBS=np.array([bool(isolate_edge_jBS)]),
                 )
-            except Exception:
-                pass
+            except Exception as _diag_exc:
+                print(f"  [SWB-diag] pre-SWB capture failed: {_diag_exc}")
 
         _t_swb0 = time.perf_counter()
         try:
@@ -1280,60 +1291,50 @@ def perturb_kinetic_equilibrium(
                 scale_jBS=scale_jBS,
                 isolate_edge_jBS=isolate_edge_jBS,
                 diagnostic_plots=False,
-                verbose=(os.environ.get('SWB_VERBOSE', '0') == '1'),
-                # SWB H-mode self-consistency iterations (default 3).  Env
-                # SWB_ITERS lets us trim for speed (2 is usually enough).
-                iterations=int(os.environ.get('SWB_ITERS', '3')),
+                verbose=_swb_debug(),
+                iterations=swb_iterations,
             )
-            if os.environ.get('PROFILE', '0') == '1':
-                print(f"  [profile] SWB call: {time.perf_counter()-_t_swb0:.1f}s")
-            # On SWB success, preserve this draw's kinetics as an in-spec
-            # control for failing-vs-succeeding spike-shape comparison.
-            if os.environ.get('SWB_STATE_DUMP', '0') == '1':
+            if _swb_debug():
+                print(f"  [SWB-diag] SWB call: {time.perf_counter()-_t_swb0:.1f}s")
+                # Preserve this draw's kinetics as an in-spec control for
+                # failing-vs-succeeding spike-shape comparison.
                 try:
-                    import numpy as _np_ok
-                    _np_ok.savez(
-                        '/tmp/swb_success_dump.npz',
+                    np.savez(
+                        _swb_dump_path('swb_success'),
                         psi_N=psi_N,
                         ne_eq=ne_eq, te_eq=te_eq, ni_eq=ni_eq, ti_eq=ti_eq,
-                        Zeff=_np_ok.atleast_1d(_np_ok.asarray(Zeff)),
-                        Ip_target=_np_ok.array([Ip_target]),
+                        Zeff=np.atleast_1d(np.asarray(Zeff)),
+                        Ip_target=np.array([Ip_target]),
                         swb_seed=_swb_seed,
-                        scale_jBS=_np_ok.array([scale_jBS]),
+                        scale_jBS=np.array([scale_jBS]),
                         isolated_j_BS=results.get('isolated_j_BS'),
                         j_inductive=results.get('j_inductive'),
                         total_j_phi=results.get('total_j_phi'),
                     )
-                except Exception:
-                    pass
+                except Exception as _dump_exc:
+                    print(f"  [SWB-diag] success dump failed: {_dump_exc}")
         except (TypeError, ValueError, RuntimeError):
-            # Dump the SWB inputs so we can inspect what j_BS comes out
-            # of an offline run with the same inputs.
-            try:
-                import numpy as _np_dbg
-                _np_dbg.savez(
-                    '/tmp/swb_failure_dump.npz',
-                    psi_N=psi_N,
-                    ne_eq=ne_eq, te_eq=te_eq, ni_eq=ni_eq, ti_eq=ti_eq,
-                    Zeff=_np_dbg.atleast_1d(_np_dbg.asarray(Zeff)),
-                    Ip_target=_np_dbg.array([Ip_target]),
-                    swb_seed=_swb_seed,
-                    scale_jBS=_np_dbg.array([scale_jBS]),
-                )
-                print("  [SWB-diag] inputs dumped to /tmp/swb_failure_dump.npz")
-            except Exception:
-                pass
-            # Preserve the failing draw's pre-SWB full-state capture so it
-            # isn't overwritten by a later (possibly succeeding) draw.
-            if os.environ.get('SWB_STATE_DUMP', '0') == '1':
+            if _swb_debug():
+                # Dump the SWB inputs for offline replay, and preserve the
+                # pre-SWB state capture from being overwritten by later draws.
                 try:
                     import shutil as _sh
-                    _sh.copyfile('/tmp/swb_prestate_dump.npz',
-                                 '/tmp/swb_prestate_FAILED.npz')
-                    print("  [SWB-diag] pre-SWB state preserved to "
-                          "/tmp/swb_prestate_FAILED.npz")
-                except Exception:
-                    pass
+                    np.savez(
+                        _swb_dump_path('swb_failure'),
+                        psi_N=psi_N,
+                        ne_eq=ne_eq, te_eq=te_eq, ni_eq=ni_eq, ti_eq=ti_eq,
+                        Zeff=np.atleast_1d(np.asarray(Zeff)),
+                        Ip_target=np.array([Ip_target]),
+                        swb_seed=_swb_seed,
+                        scale_jBS=np.array([scale_jBS]),
+                    )
+                    _sh.copyfile(_swb_dump_path('swb_prestate'),
+                                 _swb_dump_path('swb_prestate_FAILED'))
+                    print(f"  [SWB-diag] failure inputs + pre-state dumped to "
+                          f"{_swb_dump_path('swb_failure')} / "
+                          f"{_swb_dump_path('swb_prestate_FAILED')}")
+                except Exception as _dump_exc:
+                    print(f"  [SWB-diag] failure dump failed: {_dump_exc}")
             raise
         finally:
             if _stashed_bounds is not None:
@@ -1353,7 +1354,7 @@ def perturb_kinetic_equilibrium(
         # SWB seeds with create_power_flux_fun(1.5, 1.5) and alpha-scales
         # to match Ip, but produces a matched_j_inductive whose SHAPE
         # differs structurally from recon's eqdsk-fit j_inductive_fit.
-        # Empirically (probe at /tmp/probe_swb_anchor.log on 204441@4400):
+        # Empirically (DIII-D reference case probe):
         # recon/SWB ratio = 3.4× at axis vs 1.4× at mid-radius -- not a
         # uniform scaling, so post-SWB ind_factor anchoring cannot reach
         # recon's l_i.  At σ=0 the SWB-natural baseline lives at l_i≈0.89
@@ -1945,6 +1946,7 @@ def generate_bouquet(
     recalculate_j_BS=True,
     isolate_edge_jBS=True,
     jBS_scale_range=None,
+    swb_iterations=3,
     diagnostic_plots=True,
     scan_val=None,
     pfile_bytes=None,
@@ -2060,6 +2062,9 @@ def generate_bouquet(
         ``[0.8, 1.2]`` draws from :math:`\mathcal{U}(0.8, 1.2)`.
         When ``None``, no additional scaling is applied
         (``scale_jBS = 1.0`` for every sample).
+    swb_iterations : int
+        H-mode self-consistency iterations inside ``solve_with_bootstrap``
+        (its ``iterations`` argument); 2 trades a little accuracy for speed.
     diagnostic_plots : bool
         Show diagnostic matplotlib figures.
     scan_val : str, float, int, or None
@@ -2914,7 +2919,9 @@ def generate_bouquet(
     elapsed_times = []
 
     try:
-        from tqdm import tqdm as _tqdm   # text bar (stderr); tqdm.auto makes an
+        # Plain text bar on stderr: tqdm.auto would emit a Jupyter widget,
+        # which breaks under capture_native_output's fd redirect.
+        from tqdm import tqdm as _tqdm
     except ImportError:
         _tqdm = None
 
@@ -3091,6 +3098,7 @@ def generate_bouquet(
                 recalculate_j_BS=recalculate_j_BS,
                 isolate_edge_jBS=isolate_edge_jBS,
                 scale_jBS=scale_jBS,
+                swb_iterations=swb_iterations,
                 diagnostic_plots=diagnostic_plots,
                 psi_N_kinetic=psi_N_kinetic,
                 p_fast=p_fast,

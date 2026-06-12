@@ -467,17 +467,26 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved) -> dict:
     axis_off_mm = float(np.hypot(o_point[0] - g("R_mag"),
                                  o_point[1] - g("Z_mag")) * 1e3)
 
+    # Convergence of the final accepted GS state. reconstruct_equilibrium's
+    # li-match only ever keeps successful solves (a failed solve restores the
+    # last good psi and is retried), and an unrecoverable solver failure
+    # raises before reaching here -- so the honest residual check is that the
+    # final state produced finite global quantities.
+    converged = bool(np.isfinite(Ip_tok) and np.isfinite(li_tok)
+                     and np.isfinite(q95_tok))
+
     # verdict on the reconstruction *targets*: converged, Ip within 0.5%,
     # boundary RMS < 5 mm, l_i within 5%
     ip_err = pct(Ip_tok, g("Ip"))
     li_err = pct(li_tok, g("li"))
     ok = bool(
-        np.isfinite(ip_err) and abs(ip_err) < 0.5
+        converged
+        and np.isfinite(ip_err) and abs(ip_err) < 0.5
         and np.isfinite(bnd_rms) and bnd_rms < 5.0
         and np.isfinite(li_err) and abs(li_err) < 5.0
     )
     return {
-        "converged": True,
+        "converged": converged,
         "verdict": "PASS" if ok else "CHECK",
         # fidelity: TokaMaker value, EFIT reference, % error
         "Ip_MA": Ip_tok / 1e6, "Ip_efit_MA": g("Ip") / 1e6, "Ip_err_pct": ip_err,

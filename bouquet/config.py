@@ -42,6 +42,10 @@ class SolverConfig:
     """
 
     mesh_path: str
+    # NOTE: nthreads > 1 makes GS solves non-bit-reproducible (OpenMP
+    # reduction order), which the LCFS-normalised li_1 amplifies to ~±1%
+    # run-to-run (measured on the D3D-like case; volume-normalised li_3 is
+    # unaffected). Use nthreads=1 for exact-reproducibility / A-B studies.
     nthreads: int = 4
     order: int = 3
     F0: Optional[float] = None                       # vacuum R*Bt; default from g-file/IDS
@@ -229,6 +233,9 @@ class GenerationConfig:
     # overriding the baseline/FUSE j_BS. When False, keep the baseline j_BS.
     recalculate_j_BS: bool = True
     jBS_scale_range: tuple = (0.99, 1.01)  # bootstrap multiplicative spread
+    # solve_with_bootstrap H-mode self-consistency iterations per draw;
+    # 2 trades a little accuracy for speed on large bouquets.
+    swb_iterations: int = 3
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single

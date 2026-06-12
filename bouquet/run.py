@@ -281,7 +281,7 @@ class Bouquet:
             lhs = f"{format(val, fmt)}{u}"
             print(f"  {label:<12} {lhs:<13} (input {format(ref, fmt)}{u}, {err:+.2f}%)")
 
-        print(f"  {'converged':<12} yes")
+        print(f"  {'converged':<12} {'yes' if m.get('converged') else 'NO ⚠'}")
         line("Ip", m['Ip_MA'], m['Ip_efit_MA'], m['Ip_err_pct'], "MA")
         line("l_i", m['li'], m['li_efit'], m['li_err_pct'])
         line("q0", m['q0'], m['q0_efit'], m['q0_err_pct'], fmt=".2f")
@@ -331,7 +331,8 @@ class Bouquet:
 
         def solve_jphi(j_phi):
             ffp = {"type": "jphi-linterp", "y": np.asarray(j_phi, dtype=float), "x": psi_N}
-            for _ in range(2):   # 2nd pass refines the jphi-linterp flux scaling
+            nl_its = -1
+            for _pass in range(2):   # 2nd pass refines the jphi-linterp flux scaling
                 psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
                 pp_y = np.gradient(p_total) / (np.gradient(psi_N) * psi_range)
                 pp_y[-1] = 0.0
@@ -339,7 +340,15 @@ class Bouquet:
                 mygs.set_profiles(
                     pp_prof={"type": "linterp", "y": pp_y, "x": psi_N}, ffp_prof=ffp,
                 )
-                mygs.solve()
+                try:
+                    _, nl_its = mygs.solve(return_its=True)
+                except ValueError as exc:
+                    raise RuntimeError(
+                        f"IMAS forward solve failed to converge (pass {_pass + 1}/2) "
+                        f"for {self.config.source.ids_path}: {exc}. The baseline "
+                        "l_i target cannot be established from this equilibrium."
+                    ) from exc
+            return int(nl_its)
 
         # Solve with the IMAS total current. The OMAS currents are
         # reconstruction-self-consistent (bootstrap = SWB of the same kinetics),
@@ -347,17 +356,33 @@ class Bouquet:
         # draws anchor to bl.j_inductive and recompute a ~equal SWB spike. An
         # earlier SWB rebuild here shifted the baseline l_i ~6% off the draws and
         # made the l_i target unreachable (draws floored at the low tail); removed.
-        solve_jphi(np.asarray(bl.j_phi, dtype=float))
+        nl_its = solve_jphi(np.asarray(bl.j_phi, dtype=float))
+
+        # Convergence sanity: the solve completed (it raises otherwise), so
+        # verify it landed on the requested current before trusting its l_i.
+        Ip_achieved = float(mygs.get_globals()[0])
+        ip_err_pct = 100.0 * (abs(Ip_achieved) - abs(bl.Ip_target)) / abs(bl.Ip_target)
+        if abs(ip_err_pct) > 1.0:
+            import warnings
+            warnings.warn(
+                f"IMAS forward solve converged but Ip is {ip_err_pct:+.2f}% off "
+                f"target ({Ip_achieved/1e6:.3f} vs {bl.Ip_target/1e6:.3f} MA); "
+                "the derived l_i target may be unreliable."
+            )
 
         tok_li1 = float(mygs.get_stats(lcfs_pad=psi_pad, li_normalization="std")["l_i"])
         tok_li3 = float(mygs.get_stats(lcfs_pad=psi_pad, li_normalization="iter")["l_i"])
 
         metrics = dict(bl.li_metrics or {})
-        metrics.update(tokamaker_li_1=tok_li1, tokamaker_li_3=tok_li3)
+        metrics.update(tokamaker_li_1=tok_li1, tokamaker_li_3=tok_li3,
+                       forward_solve_nl_its=nl_its,
+                       forward_solve_ip_err_pct=ip_err_pct)
         bl.li_metrics = metrics
         bl.l_i_target = tok_li1   # per project decision: target TokaMaker li_1
         print(
-            f"[imas forward-solve] recalc_jBS={self.config.generation.recalculate_j_BS} "
+            f"[imas forward-solve] converged ({nl_its} its, "
+            f"Ip {ip_err_pct:+.2f}%) recalc_jBS="
+            f"{self.config.generation.recalculate_j_BS} "
             f"TokaMaker li_1={tok_li1:.4f} li_3={tok_li3:.4f} | "
             f"IDS li_1={metrics.get('ids_li_1')} li_3={metrics.get('ids_li_3')}"
         )
@@ -438,6 +463,7 @@ class Bouquet:
                 constrain_sawteeth=gc.constrain_sawteeth,
                 recalculate_j_BS=gc.recalculate_j_BS,
                 jBS_scale_range=gc.jBS_scale_range,
+                swb_iterations=gc.swb_iterations,
                 diagnostic_plots=gc.diagnostic_plots,
                 scan_val=0,
                 pfile_bytes=bl.pfile_bytes,
