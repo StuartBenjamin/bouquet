@@ -8,14 +8,14 @@ Returns the kinetic profiles together with their uncertainty (sigma) profiles,
 on the IDA psi_N grid. Both the baseline reconstruction (profiles) and the
 uncertainty envelope (sigmas) draw from this single read.
 
-Operational DIII-D ``IDA_*.cdf`` layout (verified against IDA_204441_.cdf):
+Operational DIII-D ``IDA_*.cdf`` layout (verified against a real IDA file):
     profiles are 2-D ``(n_time, n_radial)`` with companion ``*_err`` datasets
     (direct 1-sigma); the radial grid is ``psi_n`` (n_radial,), extending past
     the separatrix to ~1.2; ``time`` is in milliseconds. Units are already SI
     (n_e in m^-3; T_e, T_12C6 in eV). There is no stored main-ion density, so
     ``ni`` is taken equal to ``ne`` (quasi-neutrality approximation), matching
-    the operational IDA workflow (e.g. 204441_4400_IDA.ipynb feeds ni = ne to
-    reconstruct_equilibrium / generate_bouquet).
+    the operational IDA workflow, which feeds ni = ne to
+    reconstruct_equilibrium / generate_bouquet.
 """
 
 from __future__ import annotations

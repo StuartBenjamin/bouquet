@@ -7,10 +7,19 @@
 GP-sampled perturbed equilibria for uncertainty quantification with TokaMaker.
 
 Bouquet generates families ("bouquets") of perturbed tokamak equilibria from a
-baseline kinetic equilibrium (g-file + p-file) by drawing correlated profile
-perturbations from Gaussian process regression posteriors, solving the
-Grad–Shafranov equation for each sample, and archiving all results to a single
-HDF5 database.
+baseline kinetic equilibrium by drawing correlated profile perturbations from
+Gaussian process regression posteriors, solving the Grad–Shafranov equation for
+each sample, and archiving all results to a single HDF5 database.
+
+Two baseline sources are supported through one class-based API
+(`bouquet.Bouquet`):
+
+- **Reconstruction** — a g-file plus kinetic profiles (Osborne p-file or an
+  IDA netCDF); bouquet reconstructs the equilibrium and separates the
+  inductive / bootstrap current itself.
+- **IMAS/OMAS** — an IMAS data-dictionary JSON (e.g. FUSE output) that already
+  carries the separated currents (`j_ohmic` / `j_bootstrap`), kinetic
+  profiles, and fast-ion pressure; no reconstruction step is needed.
 
 <p align="center">
 <img src="https://img.shields.io/badge/python-%E2%89%A53.9-blue" alt="Python 3.9+"/>
@@ -59,8 +68,13 @@ If you use Bouquet in your research, please cite:
   bootstrap model. Profile classifier (`H_mode`, `Lmode_like_jphi`, `L_mode`)
   with edge spike alignment metrics.
 - **Pressure and l_i matching**: perturbed profiles are constrained to match
-  the baseline volume-averaged pressure (default `p_thresh=5%`, calibrated to
-  DIII-D's actual `<P>` measurement uncertainty) and internal inductance.
+  the baseline volume-averaged pressure (default `p_thresh=0.05`, i.e. 5%,
+  calibrated to DIII-D's actual `<P>` measurement uncertainty) and internal
+  inductance.
+- **IMAS/OMAS input pipeline**: read FUSE `dd_sim.json` baselines directly
+  (separated currents, kinetic profiles, fast-ion pressure, rotation) with
+  parallel→toroidal current conversion and anisotropic fast-pressure
+  reduction (`bouquet.physics`).
 - **Recon-anchor + adaptive l_i gate**: at sigma -> 0 the pipeline reproduces
   the reconstructed equilibrium to within recon's own residual (l_i within
   ~0.5% of target, X-pt within ~2 mm, bnd_RMS ~3-4 mm vs eqdsk).  See
@@ -99,7 +113,7 @@ If you use Bouquet in your research, please cite:
 
 ```bash
 # Clone the repository
-git clone https://github.com/<your-org>/bouquet.git
+git clone https://github.com/d-burg/bouquet.git
 cd bouquet
 
 # Install in development mode
@@ -171,52 +185,55 @@ eq2 = GEQDSKEquilibrium.from_bytes(raw_bytes, cocos=1)  # reconstruct
 
 ### Generating a bouquet (requires TokaMaker)
 
+The `Bouquet` class drives the full pipeline: solver setup → baseline →
+perturbed draws → filtering → export. TokaMaker must be importable
+(`PYTHONPATH` to your OpenFUSIONToolkit build, or `pip`-installed OFT).
+
 ```python
-import os, sys
-tokamaker_python_path = os.getenv('OFT_ROOTPATH')
-if tokamaker_python_path is not None:
-    sys.path.append(os.path.join(tokamaker_python_path, 'python'))
+import bouquet as bq
 
-from OpenFUSIONToolkit import OFT_env
-from OpenFUSIONToolkit.TokaMaker import TokaMaker
-
-from bouquet import (
-    reconstruct_equilibrium,
-    generate_bouquet,
-    plot_bouquet,
-    plot_traces,
-    plot_geqdsk_bouquet,
-    plot_pfile_bouquet,
+# --- Reconstruction source: g-file + kinetic profiles (p-file or IDA .cdf)
+b = bq.Bouquet.from_geqdsk(
+    "g123456.01000",
+    profiles="p123456.01000",     # p-file or IDA .cdf (auto-detected)
+    mesh="DIIID_mesh.h5",
+    n_draws=20, header="my_run",
 )
+b.reconstruct()                   # GS reconstruction + quality summary
+b.generate()                      # perturbed draws -> my_run.h5
+b.filter()                        # mark the machine-realizable subset
+b.export()                        # my_run_selected.h5
 
-# 1. Reconstruct baseline equilibrium
-result = reconstruct_equilibrium(
-    mygs, eqdsk,
-    ne_SI, te_SI, ni_SI, ti_SI, Zeff_eq,
-    isoflux_pts, isoflux_weights, pad_psi,
-    guess_jinductive=guess_jinductive,
+# --- IMAS/OMAS source: FUSE dd_sim.json (already-separated currents)
+b = bq.Bouquet.from_imas(
+    "dd_sim.json", mesh="DIIID_mesh.h5",
+    time=2.1, n_draws=20, header="my_imas_run",
 )
+b.run()                           # setup -> baseline -> generate -> filter -> export
+```
 
-# 2. Generate perturbed equilibria
-#    Kinetic profiles on psi_N_kinetic (IDA grid, may include SOL)
-#    Equilibrium profiles (j_phi, etc.) on psi_N (g-file grid)
-generate_bouquet(
-    mygs, psi_N, 10, "my_run",
-    result['j_phi_fit'],
-    ne_SI, te_SI, ni_SI, ti_SI,           # on psi_N or psi_N_kinetic
-    sigma_ne, sigma_te, sigma_ni, sigma_ti, sigma_jphi,
-    n_ls, t_ls, j_ls,
-    Ip_target, l_i_target, Zeff_eq,
-    input_jinductive=result['j_inductive_fit'],
-    l_i_tolerance=10,                      # % error tolerance
-    l_i_proxy_threshold=12.5,              # % proxy threshold
-    psi_N_kinetic=psi_N_kinetic,           # optional: IDA grid with SOL
-)
+Tune knobs through the config sub-objects before `generate()`:
 
-# 3. Visualise
-plot_bouquet("my_run", scan_value=0, mode="all")
+```python
+b.uncertainty.ne_scalar_sigma = 0.05   # flat 5% envelope when no IDA sigmas
+b.uncertainty.jphi_scalar_sigma = 0.10
+b.generation.n_equils = 50
+b.generation.l_i_tolerance = 0.05      # FRACTION of target (0.05 = 5%)
+b.generation.seed = 1234
+```
+
+Full control (every knob, both sources) goes through `bq.BouquetConfig` —
+see the dataclass docstrings in `bouquet/config.py`. The legacy functional
+API (`reconstruct_equilibrium` / `generate_bouquet`) remains available for
+existing scripts; its parameters are documented in their docstrings.
+Note all tolerance arguments are **fractions** (e.g. `l_i_tolerance=0.01`),
+not percentages.
+
+```python
+# Visualise any run from its HDF5 archive
+from bouquet import plot_bouquet, plot_traces
+plot_bouquet("my_run.h5", scan_value=0, mode="all")
 plot_traces("my_run", scan_value="all")
-plot_pfile_bouquet(h5path="my_run.h5", scan_val=0, x_coord="psi_N")
 ```
 
 ---
@@ -224,7 +241,7 @@ plot_pfile_bouquet(h5path="my_run.h5", scan_val=0, x_coord="psi_N")
 ## Workflow Overview
 
 ```
-Baseline g-file + p-file
+Baseline: g-file + profiles (p-file / IDA), or IMAS/OMAS JSON
         │
         ▼
 ┌───────────────────────┐
@@ -446,12 +463,14 @@ Example notebooks are in the `examples/` directory:
 
 | Notebook | Description |
 |----------|-------------|
-| `basic_example.ipynb` | Fundamental workflow walkthrough |
-| `g-file_p-file_example.ipynb` | GEQDSK and p-file I/O demonstration |
-| `D3D-like/` | DIII-D-like tokamak equilibrium perturbation |
+| `D3D-like/bouquet_D3Dlike_geqdsk_example.ipynb` | Class-API walkthrough on the synthetic D3D-like g-file + p-file baseline |
+| `D3D-like/bouquet_D3Dlike_omas_example.ipynb` | Class-API walkthrough on the synthetic IMAS/OMAS (FUSE-style) baseline |
+| `D3D-like/` | The synthetic, shareable D3D-like fixtures (g-file, p-file, OMAS JSON, mesh) + generation recipe |
 | `COCOS_Bt_Ip/cocos_and_save_example.ipynb` | COCOS conversion, Bt/Ip flip, save to disk/HDF5 |
 | `COCOS_Bt_Ip/omfit_cocos_comparison.ipynb` | Field-by-field validation against OMFIT (requires `omfit_classes`) |
 | `omfit-comparison/` | Verification against OMFIT reference values |
+
+See `examples/README.md` for environment setup and runtimes.
 
 ---
 
@@ -468,8 +487,15 @@ Tests cover:
   geometry, current density, safety factor
 - **`test_pfile.py`** — P-file parsing, rotation decomposition, byte
   serialisation round-trip
+- **`test_physics.py`** — Parallel→toroidal current conversion (ratio +
+  analytic methods) and fast-pressure isotropization
+- **`test_golden_bouquet.py`** — Golden-fixture replay of filtering,
+  boundary extraction, and HDF5 round-trips
+- **`test_systematics.py`** — Solver-marked integration tests (excluded by
+  default; run with `pytest -m solver` and a working TokaMaker)
 
-Test data (sample g-files and p-files) is in `tests/data/`.
+Test data (sample g-files and p-files) is in `tests/data/`; golden HDF5
+fixtures are in `tests/golden/`.
 
 ---
 
@@ -515,7 +541,7 @@ diagnostics = generate_bouquet(
     ],
     inspec_F_max=0.02,      # in_spec if max non-VSC F-drift <= 2%
     inspec_VSC_max=0.02,    # in_spec if max VSC drift <= 2%
-    p_thresh=5.0,           # accept GPR draws within 5% of baseline <P>
+    p_thresh=0.05,          # accept GPR draws within 5% of baseline <P> (fraction)
 )
 ```
 
@@ -535,7 +561,7 @@ The pipeline is designed so that at `sigma=0` (no kinetic perturbation)
 the output reproduces the reconstructed equilibrium to within recon's
 own residual: l_i within ~0.5% of target, X-pt within ~2 mm of recon,
 boundary RMS ~3-4 mm vs eqdsk (recon's own bnd_RMS is 2.84 mm on
-DIII-D 204441@4400).  This requires the recon-anchor solve in
+the DIII-D reference discharge).  This requires the recon-anchor solve in
 `perturb_kinetic_equilibrium` (replacing SWB's seed-based inductive
 with recon's `j_inductive_fit`) and a post-anchor `l_i` tolerance gate.
 See [architecture.md §3.3](architecture.md#33-li-matching-recon-anchor--adaptive-gate).
@@ -561,7 +587,20 @@ in [`architecture.md`](architecture.md). Key topics include:
 
 ## API Reference
 
-### Core Workflow
+### Class API (recommended)
+
+| Class / Function | Description |
+|------------------|-------------|
+| `Bouquet` | Stateful driver: `setup_solver` → `prepare_baseline`/`reconstruct` → `generate` → `filter` → `export` (or just `.run()`) |
+| `Bouquet.from_geqdsk()` / `Bouquet.from_imas()` | Minimal constructors for the two baseline sources |
+| `BouquetConfig` | Top-level typed config (`SolverConfig`, `UncertaintyConfig`, `GenerationConfig`, `FilterConfig`, `FixedComponentsConfig`) |
+| `ReconstructionSource` / `ImasSource` | Baseline source definitions (g-file + profiles, or IMAS/OMAS JSON) |
+| `Baseline` / `resolve_baseline()` | The common separated-current product every source resolves to |
+| `read_ida()` / `read_imas_baseline()` | Standalone readers for IDA `.cdf` and FUSE `dd_sim.json` |
+| `parallel_to_toroidal()` / `isotropize_fast_pressure()` | Current-convention and fast-pressure physics reductions |
+| `filter_coil_currents()` / `filter_boundaries()` / `export_filtered()` | Post-generation selection of the machine-realizable subset |
+
+### Core Workflow (functional API)
 
 | Function | Description |
 |----------|-------------|
@@ -593,7 +632,7 @@ in [`architecture.md`](architecture.md). Key topics include:
 |------------------|-------------|
 | `GEQDSKEquilibrium` | Full-featured GEQDSK reader with flux-surface analysis |
 | `read_geqdsk()` | Parse a GEQDSK file (returns GEQDSKEquilibrium) |
-| `write_geqdsk()` | Write a raw g-file dict to disk |
+| `bouquet.io.write_geqdsk()` | Write a raw g-file dict to disk (import from `bouquet.io`) |
 | `PFile` | P-file reader/writer with rotation computation |
 | `read_pfile()` | Parse a p-file (returns PFile object) |
 

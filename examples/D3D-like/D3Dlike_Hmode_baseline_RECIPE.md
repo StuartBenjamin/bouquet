@@ -5,13 +5,12 @@ self-consistent kinetic-profile / Ip / bootstrap relationship.
 
 ## Why this version (history)
 The first attempt paired generic D3D-like profiles (adapted from shot **147131**,
-Ip ~1.19 MA) with the 204441 boundary at **0.80 MA**.  That Ip mismatch (ratio
+Ip ~1.19 MA) with a reference DIII-D discharge boundary at **0.80 MA**.  That Ip mismatch (ratio
 0.67) made the Sauter bootstrap an oversized *fraction* (j_BS peak 0.96 MA/m^2
 ABOVE the total j_phi pedestal; bootstrap fraction 0.27), which evacuated the
 inductive current past psi_N~0.78 and made l_i collapse ~25% under sigma-
 perturbation.  Fixed by building from the **profiles' native shot 147131**, at
-generic round-number targets.  (Old version archived in
-`legacy/superseded_0p8MA_baseline/`.)
+generic round-number targets.  (The old derived version has been removed.)
 
 ## Inputs (all self-consistent from one shot, 147131 @ 2300 ms)
 - **Magnetic source:** `g147131.02300_DIIID_KEFIT` (GPEC kinetic-example default;

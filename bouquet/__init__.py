@@ -1,3 +1,5 @@
+__version__ = "0.2.0"
+
 from . import uncertainties
 from . import sampling
 from . import TokaMaker_interface

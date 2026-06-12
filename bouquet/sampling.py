@@ -669,7 +669,7 @@ def calc_realgeom_li_proxy_fast(j_phi_profile, geo):
     ``L_p(psi)`` (from ``trace_surf`` on the snapshot equilibrium) instead
     of the circular ``2*pi*r_eff``.
 
-    Validated on DIII-D 204441@4400: mean(est/solved_li1)=0.994 (vs the
+    Validated on an operational DIII-D case: mean(est/solved_li1)=0.994 (vs the
     cylindrical proxy's 0.90), i.e. ~unbiased for l_i(1) with no
     device-specific correction factor -- the snapshot geometry IS the
     per-run calibration.  Intended use is a cheap *pre-screen* of GPR

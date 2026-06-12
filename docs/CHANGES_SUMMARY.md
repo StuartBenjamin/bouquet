@@ -1,7 +1,9 @@
 # Bouquet + OFT — change summary (golden suite, filtering, Ip-secant removal, systematics)
 
-This documents the latest round of work across the three repos. All work lives
-on feature branches; nothing is on `main`.
+> **Historical document** (2026-05): a snapshot of the coil-bounds/golden-suite
+> round of work, kept for context. Branch/repo layout below reflects the
+> author's working setup at that time; PR #3 (feat/coil-bounds) has since
+> merged to `main`.
 
 | repo | path | branch | remote |
 |---|---|---|---|
@@ -89,10 +91,10 @@ See `OpenFUSIONToolkit` PR body draft.
 - `tests/test_golden_bouquet.py` (15 tests): scalars/coils/x-points/boundary
   vs manifest, geqdsk parse + separatrix-coarseness, filtering/selection/export.
 - `tests/test_systematics.py` (2 tests, **opt-in** via
-  `BOUQUET_RUN_SOLVER_TESTS=1`): σ=0 pinned → baseline (RMS<0.8 mm, drift<0.3 %).
+  `pytest -m solver`): σ=0 pinned → baseline (RMS<0.8 mm, drift<0.3 %).
 - `tests/test_synthetic_sigma.py` (11 tests): the sine-basis IDA σ helper.
 - **Protected proprietary data:** added `*.cdf`/`*.nc` to `.gitignore`
-  (fixed a latent inline-comment bug) — `examples/IDA_204441_.cdf` must never
+  (fixed a latent inline-comment bug) — operational `IDA_*.cdf` files must never
   be committed.
 
 **Fast suite: 123 passed, 17 skipped (the 2 solver tests skip by default).**
@@ -106,7 +108,7 @@ See `OpenFUSIONToolkit` PR body draft.
   Ip +1.20 MA, Bt −2.0 T, physical bootstrap, smooth edge).
 - **Updated example notebook** `bouquet_D3Dlike_example.ipynb`:
   top-level `REGENERATE` toggle (load golden vs rebuild), decimal knobs,
-  `jphi_baseline`/`seed` flags, §9 filtering demo, **no shot-204441 references**.
+  `jphi_baseline`/`seed` flags, §9 filtering demo, **no shot-number references**.
 - **New systematics notebook** `bouquet_D3Dlike_systematics.ipynb`: runs 3 modes
   (pinned σ=0 / pinned IDA-σ / production, n=10) and checks all traces + coil
   currents with signed-drift summaries to expose any bias.

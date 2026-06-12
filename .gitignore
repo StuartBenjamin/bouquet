@@ -24,7 +24,7 @@ env/
 !tests/golden/*.h5
 # ...and the small DIII-D mesh the solver suite needs in CI (~432 KB)
 !examples/D3D-like/DIIID_mesh.h5
-# NetCDF / proprietary IDA data (e.g. IDA_204441_.cdf) — never commit
+# NetCDF / proprietary IDA data (IDA_*.cdf) — never commit
 *.nc
 *.cdf
 *.dat
@@ -66,3 +66,14 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Test fixtures must ship (the global *.geqdsk / *.npz rules above would
+# otherwise silently drop them on fresh clones, skipping the D3D-like tests)
+!tests/data/*.geqdsk
+!tests/data/*.npz
+
+# Working notes / one-off scaffolding — never commit
+PR3_body_DRAFT.md
+PR_BODY*.md
+examples/**/_*
+examples/D3D-like/PORT_STATE.md

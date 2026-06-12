@@ -4,7 +4,7 @@
 
 | Method | Best for | Requires display? |
 |---|---|---|
-| `plot_family()` | Jupyter notebooks | No (inline rendering) |
+| `plot_bouquet()` | Jupyter notebooks | No (inline rendering) |
 | `plot-family` CLI | Terminal / desktop use | Yes |
 
 This guide covers setup for the `plot-family` CLI across common HPC and
@@ -19,7 +19,7 @@ remote-access scenarios.
 | Local desktop (Linux/Mac) | `plot-family file.h5` |
 | SSH with X11 forwarding | `MPLBACKEND=TkAgg plot-family file.h5` |
 | noVNC / VNC remote desktop | `plot-family file.h5` |
-| Jupyter notebook | `plot_family("file.h5", mode="all")` |
+| Jupyter notebook | `plot_bouquet("file.h5", mode="all")` |
 
 ---
 
@@ -170,13 +170,13 @@ or the native macOS backend).
 In a Jupyter notebook, use the Python API directly instead of the CLI:
 
 ```python
-from bouquet import plot_family
+from bouquet import plot_bouquet
 
 # Single plot type
-fig, axes = plot_family("equilibria.h5", scan_value=1.0, mode="kinetic")
+fig, axes = plot_bouquet("equilibria.h5", scan_value=1.0, mode="kinetic")
 
 # All plot types at once (returns lists)
-figs, axes_list = plot_family("equilibria.h5", scan_value=1.0, mode="all")
+figs, axes_list = plot_bouquet("equilibria.h5", scan_value=1.0, mode="all")
 ```
 
 Available modes: `"kinetic"`, `"pressure"`, `"j-phi"`, `"all"`.

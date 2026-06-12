@@ -93,9 +93,10 @@ def new_uncertainty_profiles(
 # ====================================================================
 #  Synthetic "IDA-like" fractional-sigma profiles (sine basis).
 #
-#  A shareable, non-proprietary stand-in for the DIII-D 204441@4400 IDA
-#  uncertainty envelopes, fit to the real fractional-sigma SHAPE with an
-#  all-sine basis so it can ship in the public example + golden tests:
+#  A shareable, non-proprietary stand-in for operational DIII-D IDA
+#  uncertainty envelopes, fit to a real reference case's fractional-sigma
+#  SHAPE with an all-sine basis so it can ship in the public example +
+#  golden tests:
 #
 #     s(psi)   = sin(pi/2 * psi_N)              (0 at axis -> 1 at edge)
 #     frac(psi)= const
@@ -103,7 +104,7 @@ def new_uncertainty_profiles(
 #                + sum_p  e_p  * s**p              (edge rise/spike; e_p >= 0)
 #
 #  Coefficients were obtained by bounded least squares against the real
-#  204441@4400 IDA fractional sigma (edge powers constrained >= 0 so the
+#  reference-case IDA fractional sigma (edge powers constrained >= 0 so the
 #  edge can only add, never dig a pre-edge trough).  ne uses no harmonics
 #  (flat core + smooth edge); Te/Ti carry the mid-radius shoulder/bump.
 #  These constants ARE the golden definition -- do not refit casually.
@@ -126,7 +127,7 @@ def synthetic_ida_sigma(psi_N, channel):
     r"""Synthetic IDA-like **fractional** 1-sigma uncertainty envelope.
 
     Returns the fractional uncertainty :math:`\sigma_X / X` on a sine basis
-    (see module notes), calibrated to the DIII-D 204441@4400 IDA shape.
+    (see module notes), calibrated to an operational DIII-D IDA shape.
     Multiply by the profile to get the absolute sigma, e.g.
     ``sigma_ne = synthetic_ida_sigma(psi_N, 'ne') * ne_SI``.
 
@@ -148,7 +149,7 @@ def synthetic_ida_sigma(psi_N, channel):
     -----
     Used by the D3D-like example notebook and the backend golden tests as a
     deterministic, non-proprietary uncertainty model.  The j_phi envelope is
-    handled separately (flat 10 % fractional), as in the 204441 workflow.
+    handled separately (flat 10 % fractional), as in the operational workflow.
     """
     key = _SIGMA_ALIASES.get(str(channel).strip().lower())
     if key is None:

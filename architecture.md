@@ -10,6 +10,7 @@ understand exactly what is — and is not — guaranteed by the code.
 ## Table of Contents
 
 1. [Overview](#1-overview)
+   - [1.5 Class API and Baseline Sources](#15-class-api-and-baseline-sources)
 2. [Coordinate Systems and Sign Conventions](#2-coordinate-systems-and-sign-conventions)
 3. [Equilibrium Perturbation Methodology](#3-equilibrium-perturbation-methodology)
 4. [Quasi-Neutrality and Impurity Handling](#4-quasi-neutrality-and-impurity-handling)
@@ -32,7 +33,9 @@ understand exactly what is — and is not — guaranteed by the code.
 
 Bouquet generates families ("bouquets") of perturbed tokamak equilibria by:
 
-1. Starting from a baseline kinetic equilibrium (g-file + p-file).
+1. Starting from a baseline kinetic equilibrium — either a g-file plus
+   kinetic profiles (p-file or IDA netCDF), or an IMAS/OMAS data-dictionary
+   JSON with pre-separated currents (see §1.5).
 2. Drawing correlated perturbations of ne, Te, ni, Ti from Gaussian
    process regression (GPR) posteriors, respecting user-supplied
    uncertainty envelopes.
@@ -47,6 +50,52 @@ Bouquet generates families ("bouquets") of perturbed tokamak equilibria by:
    to a single HDF5 database.
 
 Each of these steps carries assumptions documented below.
+
+### 1.5 Class API and Baseline Sources
+
+The class-based orchestrator (`bouquet/run.py`, `bouquet/config.py`,
+`bouquet/baseline.py`) wraps the functional pipeline. `Bouquet(config)` owns
+the TokaMaker solver and resolves any source to a common `Baseline`
+(separated currents + targets + kinetic profiles), so generation never
+depends on where the baseline came from:
+
+| Module | Role |
+|---|---|
+| `config.py` | Typed dataclass config: `SolverConfig`, `ReconstructionSource` / `ImasSource`, `UncertaintyConfig`, `GenerationConfig`, `FilterConfig`, `FixedComponentsConfig` |
+| `baseline.py` | `Baseline` dataclass + `resolve_baseline()` dispatch + `resolve_uncertainty()` (sigma precedence: explicit profile > IDA `.cdf` > flat scalar fraction) |
+| `io/ida.py` | DIII-D IDA netCDF reader (via h5py; profiles + `*_err` sigmas; ni = ne quasi-neutrality) |
+| `io/imas.py` | FUSE/IMAS JSON reader (stdlib json; no OMAS install needed) |
+| `physics.py` | Convention reductions shared by all sources (below) |
+| `run.py` | The `Bouquet` driver: solver → baseline → generate → filter → export |
+
+**IMAS-path physics assumptions** (all in `bouquet/physics.py` and
+`io/imas.py` docstrings, summarized here because this document is the
+assumption catalogue):
+
+* **Toroidal-current authority**: the IDS `j_tor` is taken as the total
+  `j_phi`; the inductive component is the residual
+  `j_tor − j_BS − j_NBI − j_RF`, so the decomposition sums exactly and Ip
+  is preserved.
+* **Parallel→toroidal conversion**: IMAS/neoclassical currents are FSA
+  *parallel* densities `<j·B>/B0`. Components are converted to bouquet's
+  toroidal convention `<j_phi/R>/<1/R>` by the per-surface ratio
+  `c = j_tor_total / j_parallel_total` when the source carries both totals
+  (FUSE does), or by the field-aligned analytic projection
+  `j_tor = <j·B> F <1/R²> / (<B²> <1/R>)` otherwise. The same analytic
+  projection corrects the per-draw `solve_with_bootstrap` output (which is
+  `<j_BS·B>` crudely divided by `B_phi(<R>)`); the net factor
+  `1/(<R><1/R>)` is a ~5% reduction at a DIII-D-like pedestal.
+  References: Redl et al., Phys. Plasmas 28, 022502 (2021), Eq. (2);
+  Wesson, *Tokamaks*, eqn 3.3.6.
+* **Fast-pressure isotropization**: anisotropic fast-ion pressure
+  (`pressure_fast_perpendicular` / `_parallel`) is reduced to the scalar
+  GS pressure via `tr(P)/3 = (2 p_perp + p_par)/3` by default ("trace";
+  also "mean", "perp"). Fast pressure and driven currents are *fixed
+  components*: summed into every draw, never GPR-perturbed.
+* **l_i target**: the IDS-reported `li_3` is provisional only; the
+  forward solve on the TokaMaker mesh re-evaluates the baseline and sets
+  `l_i_target` to the TokaMaker `li_1`, recording both for comparison
+  (`Baseline.li_metrics`).
 
 ---
 
@@ -256,7 +305,7 @@ forward operator (sigma -> 0 reproduces the reconstructed equilibrium):
    `create_power_flux_fun(1.5, 1.5)` (broad shape) and alpha-scales to
    match Ip, but the resulting inductive has a fundamentally different
    *shape* than recon's eqdsk-fit inductive (typical recon/SWB ratio
-   varies 1.4-3.4x with psi on DIII-D 204441@4400).  Without this
+   varies 1.4-3.4x with psi on the DIII-D reference case).  Without this
    substitution the pipeline's "zero-perturbation baseline" lives at
    l_i ~0.89 vs recon's 1.10 -- a ~19% systematic offset that breaks
    sigma -> 0 reproducibility regardless of how the matching loop is
@@ -276,15 +325,16 @@ forward operator (sigma -> 0 reproduces the reconstructed equilibrium):
 
    - **Cylindrical proxy filter:** A fast 1-D proxy for l_i is computed
      without solving Grad-Shafranov, using pre-computed geometry.
-     Draws whose proxy l_i falls outside `l_i_proxy_threshold` (default
-     5%) of the *corrected* target are rejected cheaply.
+     Draws whose proxy l_i falls outside a margin of the *corrected*
+     target (`PRESCREEN_MARGIN` x `l_i_tolerance`, default 3x) are
+     rejected cheaply before any GS solve.
    - **Secant iteration:** Scales the inductive amplitude to match the
      true Grad-Shafranov l_i within `l_i_tolerance`.
    - **Adaptive proxy correction:** After each GS solve, the proxy
      target is updated based on the observed proxy-vs-reality offset,
      blended 70% new / 30% old.
 
-**Empirical reproducibility at sigma=0** (DIII-D 204441@4400, 6 draws):
+**Empirical reproducibility at sigma=0** (DIII-D reference case, 6 draws):
 
 | Quantity | recon | sigma=0 pipeline |
 |---|---|---|
@@ -892,7 +942,7 @@ Per-coil and channel bounds are enforced simultaneously by the GS solver
 * The `#VSC` channel bound uses the *minimum* of `|F9A_base|` and
   `|F9B_base|` so that the bound is conservative for both coils (their
   baselines are typically asymmetric: ~45 kA vs ~37 kA on
-  204441@4400).
+  the reference case).
 * Total drift on F9A/F9B = bare drift + VSC channel contribution.
   Caller selects passes so that `drift_F + drift_VSC <=` the desired
   total F9 tolerance.
@@ -964,7 +1014,7 @@ After homotopy, every stored draw carries these attributes (see
 
 Out-of-spec draws are still archived (with `in_spec=False`) so
 downstream analysis can filter as needed.  Empirical survival rates
-at the strict +/-2% global spec on DIII-D 204441@4400 (n=8 draws per
+at the strict +/-2% global spec on the DIII-D reference case (n=8 draws per
 sigma):
 
 | `SIGMA_SCALE` | yield | `in_spec` rate |
@@ -993,7 +1043,7 @@ The F9 pair has two physical degrees of freedom (F9A_bare, F9B_bare).
 The per-coil soft-reg already pins both at weight 1e4.  Adding
 `vsc_soft_reg_weight` is a *third* pull on a 2-DoF subspace and at
 sufficiently high weight makes the QP over-determined.  Empirical
-findings on DIII-D 204441@4400 (n=15 per setting):
+findings on the DIII-D reference case (n=15 per setting):
 
 | `vsc_soft_reg_weight` | σ=0 outcome | σ=0.5 in-spec | σ=1.0 in-spec |
 |---|---|---|---|
