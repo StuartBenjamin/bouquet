@@ -94,9 +94,33 @@ def parallel_to_toroidal(
       component. Exact to the geometric mapping shared by field-aligned
       components; self-consistent with the source equilibrium.
 
-    * **analytic** (fallback) -- compute from equilibrium FSA metrics in ``geom``
-      (e.g. ``<B^2>``, ``<1/R^2>``, ``F = R B_phi``, ``<1/R>``) when totals are
-      unavailable (e.g. the reconstruction path).
+    * **analytic** -- compute from equilibrium FSA metrics in ``geom`` when
+      totals are unavailable (the reconstruction path, and bouquet's own
+      per-draw ``solve_with_bootstrap`` output). Models the component as
+      field-aligned, ``j = lambda(psi) B`` with ``lambda = <j.B>/<B^2>``
+      (the standard treatment of the neoclassical banana-plateau /
+      driven currents; the Pfirsch-Schlueter return current, which has
+      ``<j_PS.B> = 0``, is by construction not part of the component), so
+
+          j_tor = <j_phi/R>/<1/R> = lambda * F * <1/R^2> / <1/R>
+                = <j.B> * F * <1/R^2> / (<B^2> <1/R>)
+                = <j.B> / (F <1/R>) * [<B_phi^2>/<B^2>]
+
+      using ``<B_phi^2> = F^2 <1/R^2>`` (exact, since ``B_phi = F/R``).
+      ``geom`` keys:
+
+        ``F``          flux function ``R*B_phi`` [T m]
+        ``avg_inv_R``  ``<1/R>`` [1/m]
+        ``avg_B2``     ``<B^2>`` [T^2]
+        ``avg_inv_R2`` ``<1/R^2>`` [1/m^2], OPTIONAL -- when absent the
+                       bracket ``<B_phi^2>/<B^2>`` is taken as 1,
+                       neglecting ``<B_p^2>/<B^2> ~ (eps/q)^2`` (sub-1%%
+                       at a DIII-D edge); the retained ``1/(F<1/R>)``
+                       projection carries the O(eps^2) geometry.
+        ``B0``         normalisation of the input, OPTIONAL (default 1):
+                       pass the IMAS ``vacuum_toroidal_field`` B0 when
+                       ``j_parallel`` is the IMAS convention ``<j.B>/B0``;
+                       leave at 1 when passing raw ``<j.B>`` [T A/m^2].
 
     Pass either (``j_parallel_total``, ``j_tor_total``) for the ratio method or
     ``geom`` for the analytic method.
@@ -123,13 +147,24 @@ def parallel_to_toroidal(
         return j_parallel * c
 
     if geom is not None:
-        # Analytic FSA conversion from equilibrium metrics. Deferred until the
-        # solve_with_bootstrap integration (step 3), where the TokaMaker
-        # equilibrium supplies <B^2>, <1/R^2>, F=R*B_phi, <1/R>.
-        raise NotImplementedError(
-            "analytic parallel->toroidal conversion not yet implemented; "
-            "pass j_parallel_total and j_tor_total to use the ratio method"
-        )
+        try:
+            F = np.asarray(geom["F"], dtype=float)
+            avg_inv_R = np.asarray(geom["avg_inv_R"], dtype=float)
+            avg_B2 = np.asarray(geom["avg_B2"], dtype=float)
+        except KeyError as missing:
+            raise ValueError(
+                f"geom is missing required key {missing} "
+                "(need 'F', 'avg_inv_R', 'avg_B2'; optional 'avg_inv_R2', 'B0')"
+            ) from None
+        j_dot_B = j_parallel * float(geom.get("B0", 1.0))
+        # field-aligned component: j_tor = <j.B> F <1/R^2> / (<B^2> <1/R>);
+        # F^2 <1/R^2> == <B_phi^2>, ~= <B^2> when <1/R^2> is unavailable
+        # (neglects <B_p^2>/<B^2> ~ (eps/q)^2).
+        if "avg_inv_R2" in geom and geom["avg_inv_R2"] is not None:
+            bphi2_over_B2 = F**2 * np.asarray(geom["avg_inv_R2"], dtype=float) / avg_B2
+        else:
+            bphi2_over_B2 = 1.0
+        return j_dot_B * bphi2_over_B2 / (F * avg_inv_R)
 
     raise ValueError(
         "provide either (j_parallel_total, j_tor_total) for the ratio method "

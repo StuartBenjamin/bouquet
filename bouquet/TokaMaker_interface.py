@@ -560,6 +560,41 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
         'spline': _pchip,
     }
 
+def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad):
+    """Convert ``solve_with_bootstrap``'s j_BS output to toroidal convention.
+
+    SWB computes the Redl/Sauter bootstrap as the FSA *parallel* current
+    ``<j_BS.B>`` and projects it to A/m^2 by a zeroth-order division by the
+    toroidal field at the average radius (``j_BS_neo * R_avg/F``, with its own
+    ``# to-do: project j_BS_parallel to j_phi more accurately?``). Every other
+    current profile in bouquet is the FSA toroidal density
+    ``j_tor = <j_phi/R>/<1/R>`` (what TokaMaker's jphi-linterp / flux_integral
+    consume), so mixing the two conventions misallocates the j_BS / j_inductive
+    split, mostly in the pedestal where the spike lives.
+
+    This undoes SWB's crude factor to recover ``<j_BS.B>`` and applies the
+    field-aligned projection (see :func:`bouquet.physics.parallel_to_toroidal`,
+    analytic method). The net factor is ``1/(<R><1/R>)`` (<= 1 by
+    Cauchy-Schwarz, ~ 1 - eps^2 at the edge), evaluated on the same
+    ``mygs``/grid the SWB call just used -- call this IMMEDIATELY after
+    ``solve_with_bootstrap``, before any further mygs solve.
+    """
+    from .physics import parallel_to_toroidal
+
+    j_bs_swb = np.asarray(j_bs_swb, dtype=float)
+    npsi = len(j_bs_swb)
+    _, F, _, _, _ = mygs.get_profiles(npsi=npsi, psi_pad=psi_pad)
+    # <R>, <1/R> from get_q -- the SAME quantities SWB used for its R_avg/F
+    # projection, so the undo is exact; <B^2> from sauter_fc.
+    _, _, ravgs, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
+    _, _, _, modb_avgs = mygs.sauter_fc(npsi=npsi, psi_pad=psi_pad)
+    j_dot_B = j_bs_swb * F / ravgs[0]       # undo SWB's R_avg/F projection
+    return parallel_to_toroidal(
+        j_dot_B,
+        geom={"F": F, "avg_inv_R": ravgs[1], "avg_B2": modb_avgs[1]},
+    )
+
+
 # ====================================================================
 #  Core perturbation routine
 # ====================================================================
@@ -1044,7 +1079,14 @@ def perturb_kinetic_equilibrium(
         finally:
             if _stashed_bounds is not None:
                 mygs.set_coil_bounds(_stashed_bounds)
-        _spike_perturbed = _results_diff["isolated_j_BS"]
+        # Convert SWB's parallel-projected j_BS to toroidal convention on the
+        # SWB-landed equilibrium -- BEFORE the snapshot restore below changes
+        # mygs. The cached recon spike was converted the same way at cache
+        # time, so the delta is consistently toroidal.
+        _spike_perturbed = _swb_jbs_to_toroidal(
+            mygs, _results_diff["isolated_j_BS"], psi_pad)
+        _full_j_BS_tor = _swb_jbs_to_toroidal(
+            mygs, _results_diff["j_BS"], psi_pad)
         delta_spike = _spike_perturbed - spike_profile_recon_cached
         _delta_rms = float(np.sqrt(np.mean(delta_spike**2)))
         _delta_max = float(np.max(np.abs(delta_spike)))
@@ -1058,7 +1100,7 @@ def perturb_kinetic_equilibrium(
         mygs.replace_eq(source_eq=recon_eq_snapshot)
         # Build new_jphi as input_j_phi (recon exact) + delta_spike
         spike_profile = delta_spike
-        full_j_BS = _results_diff["j_BS"]
+        full_j_BS = _full_j_BS_tor
         # ---- DIFF_BS recon-anchor solve (mirrors regular SWB branch's
         # recon-anchor at line ~1067 but with new_jphi = input_j_phi +
         # delta_spike).  Without this explicit solve, mygs stays in the
@@ -1328,8 +1370,12 @@ def perturb_kinetic_equilibrium(
         # unchanged so j_BS recompute ≈ recon's stored j_BS, and
         # combined with input_jinductive the total j_phi recovers
         # recon's exactly -> l_i = recon's l_i, bnd_RMS ≈ 0.
-        full_j_BS = results["j_BS"]
-        spike_profile = results["isolated_j_BS"]
+        # Convert SWB's parallel-projected bootstrap (<j.B> R_avg/F) to
+        # bouquet's toroidal convention <j_phi/R>/<1/R>, evaluated on the
+        # SWB-landed equilibrium (no solves between the call and here).
+        full_j_BS = _swb_jbs_to_toroidal(mygs, results["j_BS"], psi_pad)
+        spike_profile = _swb_jbs_to_toroidal(
+            mygs, results["isolated_j_BS"], psi_pad)
 
         # Anchor: forward-solve with recon's inductive shape + SWB's
         # Sauter-recomputed bootstrap spike, using the perturbed pressure
@@ -2832,8 +2878,10 @@ def generate_bouquet(
                     isolate_edge_jBS=isolate_edge_jBS,
                     diagnostic_plots=False, verbose=False,
                 )
-                _diff_spike_recon = np.asarray(
-                    _cache_results["isolated_j_BS"]).copy()
+                # Toroidal conversion on the cache-time SWB equilibrium, so
+                # the per-draw delta (also converted) is convention-consistent.
+                _diff_spike_recon = _swb_jbs_to_toroidal(
+                    mygs, _cache_results["isolated_j_BS"], psi_pad)
                 # Snapshot AFTER the SWB call -- this is the state from
                 # which we'll re-launch SWB on perturbed kinetics each
                 # draw, so it must match what the cached SWB saw.
@@ -3859,7 +3907,10 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         diagnostic_plots=False,
     )
 
-    j_BS_isolated = results['isolated_j_BS']
+    # Convert SWB's parallel-projected bootstrap to the toroidal convention
+    # shared by eqdsk_jtor and the fitted inductive profile, so the
+    # j_BS / j_inductive split is done in a single convention.
+    j_BS_isolated = _swb_jbs_to_toroidal(mygs, results['isolated_j_BS'], psi_pad)
 
     # ---- 2b. Classify the j_phi profile ----
     jphi_mode, spike_metrics = classify_jphi_profile(
