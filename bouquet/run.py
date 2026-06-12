@@ -118,6 +118,16 @@ class Bouquet:
         """The :class:`SolverConfig` (mesh, order, threads, F0)."""
         return self.config.solver
 
+    @property
+    def source(self):
+        """The baseline source (:class:`ReconstructionSource` or :class:`ImasSource`)."""
+        return self.config.source
+
+    @property
+    def filtering(self):
+        """The :class:`FilterConfig` (boundary RMS + coil-spec thresholds)."""
+        return self.config.filtering
+
     def set_slice(self, *, time=None, header=None) -> "Bouquet":
         """Re-point to a new time slice, reusing the existing solver.
 
