@@ -74,6 +74,33 @@ class Baseline:
     # the TokaMaker li_1; the IDS values are kept here for comparison/plots.
     li_metrics: Optional[dict] = None
 
+    # extra source-provided profiles available for the switchboard perturbation
+    # (e.g. {'omega_tor': ..., 'zeff': ..., 'e_r': ..., 'chi_e': ..., 'chi_i': ...}),
+    # on psi_N_kinetic. Populated by the reader where the source has them; the
+    # user may add/override via UncertaintyConfig.extra_baseline.
+    extras: Optional[dict] = None
+
+    # curated reconstruction quality metrics (reconstruction path only): a flat
+    # dict consumed by Bouquet's reconstruction summary -- Ip/l_i target-vs-
+    # achieved, boundary RMS/max, q0/q95, shape, and a pass/fail verdict.
+    reconstruction_metrics: Optional[dict] = None
+    # full captured solver chatter from the reconstruction (when verbose=False),
+    # kept available for debugging without cluttering the notebook output.
+    reconstruction_log: Optional[str] = None
+
+    def __repr__(self):
+        # concise summary -- the default dataclass repr dumps every numpy array,
+        # which floods a notebook when `reconstruct()`/`prepare_baseline()` is the
+        # last expression in a cell.
+        import numpy as np
+        ng = len(np.atleast_1d(self.psi_N))
+        nk = len(np.atleast_1d(self.psi_N_kinetic))
+        extras = list((self.extras or {}).keys())
+        return (f"Baseline(provenance={self.provenance!r}, "
+                f"Ip={self.Ip_target/1e6:.3f} MA, l_i={self.l_i_target:.3f}, "
+                f"grids: {ng} eq / {nk} kinetic"
+                + (f", extras={extras}" if extras else "") + ")")
+
 
 def resolve_baseline(config: "BouquetConfig", mygs=None) -> Baseline:
     """Dispatch on ``config.source`` and return a populated :class:`Baseline`.
@@ -121,7 +148,8 @@ def resolve_uncertainty(config, baseline) -> dict:
     Kinetic sigma source precedence:
       1. ``UncertaintyConfig.ida_path`` if set;
       2. else the reconstruction source's own IDA ``.cdf`` (sigmas read once);
-      3. else a fractional fallback ``fallback_frac * |profile|``.
+      3. else a per-channel flat fraction ``<chan>_scalar_sigma * |profile|``.
+    An explicit ``UncertaintyConfig.sigma_profiles[chan]`` array overrides all.
     """
     import numpy as np
     from .config import ReconstructionSource
@@ -135,6 +163,8 @@ def resolve_uncertainty(config, baseline) -> dict:
             and src.profiles_path.endswith(".cdf"):
         ida_path = src.profiles_path
 
+    # IDA arrays (read once) available as a fallback below
+    ida_sig = None
     if ida_path is not None:
         from .io.ida import read_ida
         ida = read_ida(
@@ -143,22 +173,59 @@ def resolve_uncertainty(config, baseline) -> dict:
             sigma_ni_from_ne=unc.sigma_ni_from_ne,
         )
 
-        def to_kin(arr):
+        def _to_kin(arr):
             return np.interp(psi_kin, ida.psi_N, np.asarray(arr, dtype=float))
 
-        out = dict(
-            sigma_ne=to_kin(ida.sigma_ne), sigma_te=to_kin(ida.sigma_te),
-            sigma_ni=to_kin(ida.sigma_ni), sigma_ti=to_kin(ida.sigma_ti),
-        )
-    else:
-        f = float(unc.fallback_frac)
-        out = dict(
-            sigma_ne=f * np.abs(baseline.ne), sigma_te=f * np.abs(baseline.te),
-            sigma_ni=f * np.abs(baseline.ni), sigma_ti=f * np.abs(baseline.ti),
-        )
+        ida_sig = {"ne": _to_kin(ida.sigma_ne), "te": _to_kin(ida.sigma_te),
+                   "ni": _to_kin(ida.sigma_ni), "ti": _to_kin(ida.sigma_ti)}
 
-    out["sigma_jphi"] = unc.sigma_jphi_frac * np.abs(np.asarray(baseline.j_phi, dtype=float))
+    # Per-channel resolution: explicit profile > IDA > flat scalar fraction.
+    _profiles = unc.sigma_profiles or {}
+    _scalars = {"ne": unc.ne_scalar_sigma, "te": unc.te_scalar_sigma,
+                "ni": unc.ni_scalar_sigma, "ti": unc.ti_scalar_sigma}
+    _baseprof = {"ne": baseline.ne, "te": baseline.te,
+                 "ni": baseline.ni, "ti": baseline.ti}
+    out = {}
+    for _ch in ("ne", "te", "ni", "ti"):
+        if _ch in _profiles and _profiles[_ch] is not None:
+            _arr = np.asarray(_profiles[_ch], dtype=float)
+            if _arr.shape != psi_kin.shape:
+                raise ValueError(
+                    f"sigma_profiles['{_ch}'] has shape {_arr.shape}; expected "
+                    f"the kinetic grid {psi_kin.shape} (psi_N_kinetic)")
+            out[f"sigma_{_ch}"] = _arr
+        elif ida_sig is not None:
+            out[f"sigma_{_ch}"] = ida_sig[_ch]
+        else:
+            out[f"sigma_{_ch}"] = float(_scalars[_ch]) * np.abs(
+                np.asarray(_baseprof[_ch], dtype=float))
+
+    out["sigma_jphi"] = unc.jphi_scalar_sigma * np.abs(np.asarray(baseline.j_phi, dtype=float))
     out["n_ls"], out["t_ls"], out["j_ls"] = unc.n_ls, unc.t_ls, unc.j_ls
+
+    # --- switchboard: resolve the extra perturbed profiles -------------------
+    # A sigma entry enables a profile. Baseline = manual (extra_baseline) over
+    # source-provided (baseline.extras). Warn + skip if the baseline is absent or
+    # all-zero (the user supplied a sigma for nothing).
+    import warnings
+    src_extras = dict(baseline.extras or {})
+    man_base = dict(unc.extra_baseline or {})
+    resolved_sigma, resolved_base = {}, {}
+    for name, sig in (unc.extra_sigma or {}).items():
+        base = man_base.get(name, src_extras.get(name))
+        if base is None or not np.any(np.asarray(base, dtype=float)):
+            warnings.warn(
+                f"extra_sigma['{name}'] supplied but its baseline is "
+                f"{'absent' if base is None else 'all-zero'} in this source; "
+                f"perturbation of '{name}' is skipped. Provide it via "
+                f"UncertaintyConfig.extra_baseline."
+            )
+            continue
+        resolved_sigma[name] = np.asarray(sig, dtype=float)
+        resolved_base[name] = np.asarray(base, dtype=float)
+    out["extra_sigma"] = resolved_sigma
+    out["extra_baseline"] = resolved_base
+    out["extra_length_scale"] = dict(unc.extra_length_scale or {})
     return out
 
 
@@ -272,20 +339,29 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
 
     guess_jinductive = create_power_flux_fun(len(psi_N), 1.5, 1.5)["y"]
 
-    result = reconstruct_equilibrium(
-        mygs, eqdsk,
-        ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
-        iso_pts, iso_w, source.psi_pad,
-        guess_jinductive=guess_jinductive,
-        n_k=source.n_k,
-        psi_bridge=source.psi_bridge,
-        rescale_j_BS=source.rescale_j_BS,
-        shelf_psi_N=source.shelf_psi_N,
-        initialize_psi=True,
-    )
-
-    Ip_target = abs(float(eqdsk.Ip))
-    l_i_target = mygs.get_stats(lcfs_pad=source.psi_pad, li_normalization="std")["l_i"]
+    # Capture the verbose solver chatter (DLSODE / gs_get_qprof / li-match) unless
+    # the user asked for it; the curated summary is printed by Bouquet.reconstruct.
+    from .utils import capture_native_output
+    verbose = bool(getattr(config, "verbose", False))
+    with capture_native_output(enabled=not verbose) as _cap:
+        result = reconstruct_equilibrium(
+            mygs, eqdsk,
+            ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
+            iso_pts, iso_w, source.psi_pad,
+            guess_jinductive=guess_jinductive,
+            n_k=source.n_k,
+            psi_bridge=source.psi_bridge,
+            rescale_j_BS=source.rescale_j_BS,
+            shelf_psi_N=source.shelf_psi_N,
+            initialize_psi=True,
+        )
+        # get_stats traces the q-profile and can emit gs_get_qprof warnings, so
+        # keep these inside the capture too.
+        Ip_target = abs(float(eqdsk.Ip))
+        l_i_target = mygs.get_stats(
+            lcfs_pad=source.psi_pad, li_normalization="std")["l_i"]
+        recon_metrics = _reconstruction_metrics(
+            mygs, eqdsk, result, source, l_i_target)
 
     j_phi = np.asarray(result["j_phi_fit"], dtype=float)
     j_BS = np.asarray(result["j_BS_used"], dtype=float)
@@ -317,4 +393,112 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         eqdsk_bytes=eqdsk_bytes,
         pfile_bytes=kin["raw_bytes"],
         recon=result,
+        reconstruction_metrics=recon_metrics,
+        reconstruction_log=_cap["text"] or None,
     )
+
+
+def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved) -> dict:
+    """Curate a TokaMaker-vs-EFIT reconstruction-fidelity dict for the summary.
+
+    Each global scalar that isn't ~0 by construction (Ip, l_i, q0/q95, beta,
+    shape, separatrix current, stored energy) is reported as a % error against
+    the g-file's own EFIT value. Geometric residuals that *should* be ~0
+    (boundary match, axis offset, j_phi profile RMS) stay absolute. A simple
+    pass/fail verdict is applied to the reconstruction targets.
+    """
+    import numpy as np
+
+    def pct(tok, ref):
+        ref = float(ref)
+        if not np.isfinite(ref) or abs(ref) < 1e-12:
+            return float("nan")
+        return float(100.0 * (float(tok) - ref) / abs(ref))
+
+    q = dict(result.get("quality") or {})
+    stats = mygs.get_stats(lcfs_pad=source.psi_pad, li_normalization="std")
+
+    # --- TokaMaker (reconstructed) values ---
+    Ip_tok = float(result.get("Ip_tokamaker", float("nan")))
+    li_tok = float(l_i_achieved)
+    q0_tok = float(stats.get("q_0", float("nan")))
+    q95_tok = float(stats.get("q_95", float("nan")))
+    betan_tok = float(stats.get("beta_n", float("nan")))
+    betap_tok = float(stats.get("beta_pol", float("nan"))) / 100.0  # x100 -> standard
+    kappa_tok = float(stats.get("kappa", float("nan")))
+    delta_tok = float(stats.get("delta", float("nan")))
+    W_tok = float(stats.get("W_MHD", float("nan"))) / 1e6           # MJ
+    o_point = getattr(mygs, "o_point", [float("nan"), float("nan")])
+    # separatrix current evaluated just inside the LCFS (psi_N=0.99), where the
+    # edge current is better-defined than the near-singular psi_N=1 point.
+    _psiN_eq = np.asarray(eqdsk.psi_N, dtype=float)
+    _jsep_psiN = 0.99
+    jphi = np.asarray(result.get("j_phi_fit"), dtype=float)
+    jsep_tok = float(np.interp(_jsep_psiN, _psiN_eq, jphi)) / 1e6   # MA/m^2
+
+    # --- EFIT (g-file) reference values; tolerate a tracing failure ---
+    efit = {}
+    try:
+        efit["Ip"] = abs(float(eqdsk.Ip))
+        efit["li"] = float(eqdsk.li.get("li(1)", float("nan")))
+        qpsi = np.asarray(eqdsk.qpsi, dtype=float)
+        psiN = np.asarray(eqdsk.psi_N, dtype=float)
+        efit["q0"] = float(qpsi[0])
+        efit["q95"] = float(np.interp(0.95, psiN, qpsi))
+        betas = eqdsk.betas
+        efit["beta_n"] = float(betas.get("beta_n", float("nan")))
+        efit["beta_p"] = float(betas.get("beta_p", float("nan")))
+        geo = eqdsk.geometry
+        efit["kappa"] = float(np.asarray(geo["kappa"])[-1])
+        efit["delta"] = float(np.asarray(geo["delta"])[-1])
+        efit["R_mag"] = float(eqdsk.R_mag)
+        efit["Z_mag"] = float(eqdsk.Z_mag)
+        efit["W_MHD"] = 1.5 * float(eqdsk.volume_integral(eqdsk.pres)[-1]) / 1e6
+        jtor_efit = np.asarray(result.get("eqdsk_jtor"), dtype=float)
+        efit["j_sep"] = float(np.interp(_jsep_psiN, _psiN_eq, jtor_efit)) / 1e6
+    except Exception as exc:  # tracing/format issue -> % errors fall back to nan
+        import warnings
+        warnings.warn(f"EFIT reference metrics unavailable: {exc}")
+
+    g = lambda k: float(efit.get(k, float("nan")))
+
+    bnd_rms = float(q.get("boundary_rms_mm", float("nan")))
+    bnd_max = float(q.get("boundary_max_dev_mm", float("nan")))
+    axis_off_mm = float(np.hypot(o_point[0] - g("R_mag"),
+                                 o_point[1] - g("Z_mag")) * 1e3)
+
+    # verdict on the reconstruction *targets*: converged, Ip within 0.5%,
+    # boundary RMS < 5 mm, l_i within 5%
+    ip_err = pct(Ip_tok, g("Ip"))
+    li_err = pct(li_tok, g("li"))
+    ok = bool(
+        np.isfinite(ip_err) and abs(ip_err) < 0.5
+        and np.isfinite(bnd_rms) and bnd_rms < 5.0
+        and np.isfinite(li_err) and abs(li_err) < 5.0
+    )
+    return {
+        "converged": True,
+        "verdict": "PASS" if ok else "CHECK",
+        # fidelity: TokaMaker value, EFIT reference, % error
+        "Ip_MA": Ip_tok / 1e6, "Ip_efit_MA": g("Ip") / 1e6, "Ip_err_pct": ip_err,
+        "li": li_tok, "li_efit": g("li"), "li_err_pct": li_err,
+        "q0": q0_tok, "q0_efit": g("q0"), "q0_err_pct": pct(q0_tok, g("q0")),
+        "q95": q95_tok, "q95_efit": g("q95"), "q95_err_pct": pct(q95_tok, g("q95")),
+        "beta_n": betan_tok, "beta_n_efit": g("beta_n"),
+        "beta_n_err_pct": pct(betan_tok, g("beta_n")),
+        "beta_p": betap_tok, "beta_p_efit": g("beta_p"),
+        "beta_p_err_pct": pct(betap_tok, g("beta_p")),
+        "kappa": kappa_tok, "kappa_efit": g("kappa"),
+        "kappa_err_pct": pct(kappa_tok, g("kappa")),
+        "delta": delta_tok, "delta_efit": g("delta"),
+        "delta_err_pct": pct(delta_tok, g("delta")),
+        "j_sep_MA": jsep_tok, "j_sep_efit_MA": g("j_sep"),
+        "j_sep_err_pct": pct(jsep_tok, g("j_sep")),
+        "W_MHD_MJ": W_tok, "W_MHD_efit_MJ": g("W_MHD"),
+        "W_MHD_err_pct": pct(W_tok, g("W_MHD")),
+        # zero-ideal residuals (absolute)
+        "boundary_rms_mm": bnd_rms, "boundary_max_mm": bnd_max,
+        "axis_offset_mm": axis_off_mm,
+        "jphi_core_rms_MA": float(q.get("jphi_core_rms", float("nan"))) / 1e6,
+        "jphi_edge_rms_MA": float(q.get("jphi_edge_rms", float("nan"))) / 1e6,
+    }

@@ -607,6 +607,9 @@ def perturb_kinetic_equilibrium(
     p_fast=None,
     j_NBI=None,
     j_RF=None,
+    extra_sigma=None,
+    extra_baseline=None,
+    extra_length_scale=None,
     max_proxy_draws=500,
     bnd_diag_callback=None,
     # Differential bootstrap (DIFF_BS=1 mode):
@@ -819,6 +822,31 @@ def perturb_kinetic_equilibrium(
     # above stays thermal-only (comparable to the thermal baseline inp_avg).
     if p_fast is not None:
         pres_tmp = pres_tmp + _kin_to_eq(np.asarray(p_fast, dtype=float))
+
+    # --- switchboard: perturb the extra profiles (passive + active Zeff) ------
+    # GPR-sample each enabled extra once per draw (sigma presence = on). 'zeff'
+    # is ACTIVE: the perturbed Zeff is reassigned so every downstream SWB
+    # bootstrap call uses it. Passive extras (omega_tor, e_r, chi_*) are carried
+    # out for storage only. Baselines/sigmas are on the kinetic grid.
+    extras_out = {}
+    if extra_sigma:
+        for _en, _es in extra_sigma.items():
+            _eb = (extra_baseline or {}).get(_en)
+            if _eb is None:
+                continue
+            _eb = np.asarray(_eb, dtype=float)
+            _es = np.asarray(_es, dtype=float)
+            _els = (extra_length_scale or {}).get(_en, 0.4)
+            # normalize by PEAK magnitude (robust: some extras, e.g. E_r, are
+            # ~0 on axis -> a denormal _eb[0] would make _eb/_e0 overflow)
+            _e0 = float(np.max(np.abs(_eb)))
+            if not (_e0 > 0):
+                _e0 = 1.0
+            _ep = np.squeeze(generate_perturbed_GPR(
+                psi_kin, _eb / _e0, _es / _e0, length_scale=_els, n_samples=1)) * _e0
+            extras_out[_en] = np.atleast_1d(np.asarray(_ep, dtype=float))
+        if "zeff" in extras_out:                 # active -> drives the bootstrap
+            Zeff = np.clip(_kin_to_eq(extras_out["zeff"]), 1.0, None)
 
     mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
 
@@ -1826,6 +1854,7 @@ def perturb_kinetic_equilibrium(
         "j_BS": full_j_BS,
         "j_BS_edge": spike_profile,
         "proxy_bias_observed": proxy_bias_observed,
+        "extras": extras_out,
     }
 
     return (
@@ -1898,6 +1927,9 @@ def generate_bouquet(
     p_fast=None,
     j_NBI=None,
     j_RF=None,
+    extra_sigma=None,
+    extra_baseline=None,
+    extra_length_scale=None,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -2067,6 +2099,21 @@ def generate_bouquet(
         pressure = EC * (_kin2eq(ne) * _kin2eq(te) + _kin2eq(ni) * _kin2eq(ti))
     else:
         pressure = EC * (ne * te + ni * ti)
+
+    # Fixed fast-ion pressure on the equilibrium grid. The baseline jphi-linterp
+    # solve below (the per-draw boundary/l_i/coil reference) must include p_fast
+    # so it is consistent with the perturbed draws (which add p_fast in
+    # perturb_kinetic_equilibrium); otherwise p_fast's whole equilibrium response
+    # appears as spurious, systematic coil/boundary drift in every draw. The
+    # thermal-only `pressure` is kept for the perturbed-vs-baseline pressure match.
+    if p_fast is not None:
+        _p_fast_eq = (_kin2eq(np.asarray(p_fast, dtype=float))
+                      if psi_N_kinetic is not None
+                      else np.asarray(p_fast, dtype=float))
+    else:
+        _p_fast_eq = np.zeros_like(psi_N)
+    pressure_solve = pressure + _p_fast_eq
+
     npsi = len(psi_N)
 
     # --- Auto-override constrain_sawteeth for sawtoothing baselines ---
@@ -2152,13 +2199,13 @@ def generate_bouquet(
         if jphi_baseline:
             _psi_range_b = mygs.psi_bounds[1] - mygs.psi_bounds[0]
             _pp_b = {"type": "linterp",
-                     "y": np.gradient(pressure) /
+                     "y": np.gradient(pressure_solve) /
                           (np.gradient(psi_N) * _psi_range_b),
                      "x": psi_N}
             _pp_b["y"][-1] = 0.0
             _ffp_b = {"type": "jphi-linterp",
                       "y": input_j_phi.copy(), "x": psi_N}
-            mygs.set_targets(Ip=initial_Ip_target, pax=float(pressure[0]))
+            mygs.set_targets(Ip=initial_Ip_target, pax=float(pressure_solve[0]))
             mygs.set_profiles(pp_prof=_pp_b, ffp_prof=_ffp_b)
             try:
                 mygs.solve()
@@ -2819,7 +2866,7 @@ def generate_bouquet(
     elapsed_times = []
 
     try:
-        from tqdm.auto import tqdm as _tqdm
+        from tqdm import tqdm as _tqdm   # text bar (stderr); tqdm.auto makes an
     except ImportError:
         _tqdm = None
 
@@ -3001,6 +3048,9 @@ def generate_bouquet(
                 p_fast=p_fast,
                 j_NBI=j_NBI,
                 j_RF=j_RF,
+                extra_sigma=extra_sigma,
+                extra_baseline=extra_baseline,
+                extra_length_scale=extra_length_scale,
                 max_proxy_draws=max_proxy_draws,
                 p_thresh=p_thresh,
                 bnd_diag_callback=_report_bnd,
@@ -3677,6 +3727,7 @@ def generate_bouquet(
             l_i_uncertainty=diagnostics.get('l_i_uncertainty'),
             x_points=diagnostics.get('x_points'),
             diverted=diagnostics.get('diverted'),
+            extras=diagnostics.get('extras'),
         )
 
         # Clean up on-disk eqdsk after archiving

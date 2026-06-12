@@ -2,11 +2,59 @@
 HDF5 archive helpers and eqdsk I/O utilities for perturbed equilibria.
 """
 
+import contextlib
 import os
+import sys
 import tempfile
 
 import h5py
 import numpy as np
+
+
+@contextlib.contextmanager
+def capture_native_output(enabled=True):
+    """Capture *all* stdout/stderr — both Python-level and OS-level.
+
+    Two layers are needed to fully silence a TokaMaker solve:
+
+    * :func:`contextlib.redirect_stdout`/``redirect_stderr`` catch Python
+      ``print()`` (the homotopy / boundary / li-match diagnostics), which under
+      a Jupyter kernel go straight to the cell via ``sys.stdout``, bypassing the
+      file descriptors.
+    * an ``os.dup2`` file-descriptor redirect catches output from the compiled
+      extension (the Fortran/C solver: ``DLSODE``, ``gs_get_qprof`` warnings)
+      that bypasses Python's ``sys.stdout``.
+
+    Yields a dict whose ``"text"`` key holds the combined captured output once
+    the block exits (also populated if the block raises). ``enabled=False`` is a
+    no-op pass-through, so callers can gate on a ``verbose`` flag.
+    """
+    import io
+
+    holder = {"text": ""}
+    if not enabled:
+        yield holder
+        return
+    sys.stdout.flush()
+    sys.stderr.flush()
+    tmp = tempfile.TemporaryFile(mode="w+b")
+    saved_out, saved_err = os.dup(1), os.dup(2)
+    os.dup2(tmp.fileno(), 1)
+    os.dup2(tmp.fileno(), 2)
+    py_buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(py_buf), contextlib.redirect_stderr(py_buf):
+            yield holder
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(saved_out, 1)
+        os.dup2(saved_err, 2)
+        os.close(saved_out)
+        os.close(saved_err)
+        tmp.seek(0)
+        holder["text"] = py_buf.getvalue() + tmp.read().decode("utf-8", "replace")
+        tmp.close()
 
 
 # ====================================================================
@@ -250,6 +298,7 @@ def store_equilibrium(
     l_i_uncertainty=None,
     x_points=None,
     diverted=None,
+    extras=None,
 ):
     """
     Write one perturbed equilibrium into the HDF5 database.
@@ -327,6 +376,14 @@ def store_equilibrium(
 
         if pressure is not None:
             grp.create_dataset("pressure [Pa]", data=np.asarray(pressure, dtype=np.float64))
+
+        # ---- optional: switchboard extra perturbed profiles --------------
+        # Stored on psi_N_kinetic. Named "extra_<name>" (e.g. extra_omega_tor,
+        # extra_chi_e, extra_zeff) for downstream (transport) consumers.
+        if extras:
+            for _name, _arr in extras.items():
+                grp.create_dataset(f"extra_{_name}",
+                                   data=np.asarray(_arr, dtype=np.float64))
 
         # ---- scalars (group attributes) ----------------------------------
         grp.attrs["l_i(1)"] = float(li1)

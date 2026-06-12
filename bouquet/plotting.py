@@ -33,6 +33,84 @@ from .utils import (
 from .io import read_geqdsk
 
 # =====================================================================
+# Publication plot style (Wong palette, serif, dotted grids, lw=2)
+# Adapted from ~/Desktop/plasma/CTM-processing/publication_plot_rules.md.
+# Uses mathtext (not usetex) so plots render without a LaTeX install.
+# Auto-applied on import; call set_plot_style() to re-apply or tweak.
+# =====================================================================
+# Wong colorblind-safe palette (rules order)
+WONG = ['#000000', '#E69F00', '#56B4E9', '#009E73',
+        '#F0E442', '#0072B2', '#D55E00', '#CC79A7']
+#         0 black   1 orange  2 skyblue 3 bgreen
+#         4 yellow  5 blue    6 vermil  7 rpurple
+
+# Warm profile scheme: black baseline reference + gold/orange/red data, used by
+# the bouquet profile panels (matches plot_geqdsk_bouquet's black + C1=gold).
+_GOLD = '#E69F00'    # primary perturbed-draw color
+_ORANGE = '#D55E00'  # secondary component (vermilion)
+_RED = '#B22222'     # accent (e.g. edge bootstrap)
+
+
+def set_plot_style(usetex=False):
+    """Apply the bouquet publication plot style to matplotlib's rcParams.
+
+    Wong colorblind palette as the color cycle, serif fonts (mathtext Computer
+    Modern -- no LaTeX needed), dotted grids, thick lines, compact label sizes.
+    Auto-applied when ``bouquet.plotting`` is imported. ``usetex=True`` switches
+    to a real LaTeX backend (needs ``pdflatex`` + ``mathptmx`` on PATH).
+    """
+    import matplotlib as _mpl
+    from cycler import cycler
+    rc = {
+        'font.family': 'serif',
+        'mathtext.fontset': 'cm',
+        'axes.prop_cycle': cycler(color=WONG),
+        'axes.grid': True, 'grid.linestyle': ':', 'grid.alpha': 0.5,
+        'lines.linewidth': 2, 'lines.markersize': 4,
+        'axes.labelsize': 11, 'axes.titlesize': 10,
+        'xtick.labelsize': 9, 'ytick.labelsize': 9,
+        'legend.fontsize': 9, 'legend.frameon': False,
+        'figure.dpi': 90,
+    }
+    if usetex:
+        rc.update({'text.usetex': True,
+                   'text.latex.preamble': r'\usepackage{mathptmx}'})
+    _mpl.rcParams.update(rc)
+
+
+set_plot_style()   # auto-apply on import
+
+
+def _display_figs_row(figs, dpi=110):
+    """Display separate matplotlib figures side by side in a notebook.
+
+    Each figure is rendered to its own PNG and laid out in a wrapping flex row,
+    so the panels sit horizontally (less vertical scroll) while staying
+    individually copy-paste-able images. The source figures are closed so the
+    inline backend doesn't also stack them. No-op (returns False) outside a
+    notebook, leaving the figures for the caller to ``show()``.
+    """
+    try:
+        from IPython.display import HTML, display
+    except Exception:
+        return False
+    import io
+    import base64
+    parts = ['<div style="display:flex;flex-wrap:wrap;gap:8px;'
+             'align-items:flex-start;">']
+    for f in figs:
+        buf = io.BytesIO()
+        f.savefig(buf, format='png', dpi=dpi, bbox_inches='tight')
+        buf.seek(0)
+        b64 = base64.b64encode(buf.read()).decode('ascii')
+        parts.append(f'<img src="data:image/png;base64,{b64}"/>')
+        plt.close(f)
+    parts.append('</div>')
+    display(HTML(''.join(parts)))
+    return True
+
+
+# =====================================================================
 # Comparison plots: TokaMaker vs geqdsk / overview of all results
 # =====================================================================
 import matplotlib.cm as _cm
@@ -500,10 +578,10 @@ def draw_kinetic_profiles(axes, psi_N, ne, ni, te, ti,
     """
     _pairs = [
         #  axis       orig  scale  sigma      color        label      ylabel
-        (axes[0, 0], ne, 1.0,  sigma_ne, "tab:red",    r"$n_e$", r"n [m$^{-3}$]"),
-        (axes[0, 1], ni, 1.0,  sigma_ni, "tab:orange", r"$n_i$", None),
-        (axes[1, 0], te, 1e-3, sigma_te, "tab:blue",   r"$T_e$", r"T [keV]"),
-        (axes[1, 1], ti, 1e-3, sigma_ti, "tab:cyan",   r"$T_i$", None),
+        (axes[0, 0], ne, 1.0,  sigma_ne, "0.55", r"$n_e$", r"n [m$^{-3}$]"),
+        (axes[0, 1], ni, 1.0,  sigma_ni, "0.55", r"$n_i$", None),
+        (axes[1, 0], te, 1e-3, sigma_te, "0.55", r"$T_e$", r"T [keV]"),
+        (axes[1, 1], ti, 1e-3, sigma_ti, "0.55", r"$T_i$", None),
     ]
     _keys = ["n_e [m^-3]", "n_i [m^-3]", "T_e [eV]", "T_i [eV]"]
 
@@ -538,7 +616,7 @@ def draw_kinetic_profiles(axes, psi_N, ne, ni, te, ti,
             ):
                 a.plot(
                     _psi_pert, data[key] * scale,
-                    c=clr, alpha=0.65, lw=1.5,
+                    c=_GOLD, alpha=0.55, lw=1.0,
                     label=f"perturbed ({n_equils})" if i == 0 else None,
                     zorder=3,
                 )
@@ -576,7 +654,7 @@ def draw_pressure_profiles(ax, psi_N, pressure, perturbed_data_list=None):
             if "pressure [Pa]" in data:
                 ax.plot(
                     psi_N, data["pressure [Pa]"] * _kPa,
-                    c="tab:brown", alpha=0.65, lw=1.5,
+                    c=_GOLD, alpha=0.55, lw=1.0,
                     label=f"perturbed ({n_equils})" if i == 0 else None,
                     zorder=3,
                 )
@@ -607,7 +685,7 @@ def draw_jphi_total(ax, psi_N, j_phi, sigma_jphi,
         psi_N,
         (j_phi - sigma_jphi) * _MA,
         (j_phi + sigma_jphi) * _MA,
-        alpha=0.25, color="tab:purple",
+        alpha=0.22, color="0.55",
         label=r"$\pm\,1\sigma_{\rm exp}$", zorder=1,
     )
     ax.plot(psi_N, (j_phi + 2 * sigma_jphi) * _MA, c="k", ls=":", lw=1.5,
@@ -621,8 +699,8 @@ def draw_jphi_total(ax, psi_N, j_phi, sigma_jphi,
     if perturbed_data_list:
         n_equils = len(perturbed_data_list)
         for i, data in enumerate(perturbed_data_list):
-            ax.plot(psi_N, data["j_phi [A m^-2]"] * _MA, c="tab:purple",
-                    lw=1.5, alpha=0.65,
+            ax.plot(psi_N, data["j_phi [A m^-2]"] * _MA, c=_GOLD,
+                    lw=1.0, alpha=0.55,
                     label=f"perturbed ({n_equils})" if i == 0 else None,
                     zorder=3)
 
@@ -648,10 +726,10 @@ def draw_jphi_components(axes, psi_N, perturbed_data_list=None):
     _MA = 1e-6  # A → MA
 
     _sub = [
-        (axes[0], "j_BS [A m^-2]",        r"$j_{\rm BS}$",        "tab:green"),
-        (axes[1], "j_inductive [A m^-2]",  r"$j_{\rm inductive}$", "tab:orange"),
+        (axes[0], "j_BS [A m^-2]",        r"$j_{\rm BS}$",        _GOLD,   "-"),
+        (axes[1], "j_inductive [A m^-2]",  r"$j_{\rm inductive}$", _ORANGE, "--"),
     ]
-    for ax, key, label, color in _sub:
+    for ax, key, label, color, ls in _sub:
         ax.cla()
         ax.set_ylabel(f"{label} " + r"[MA/m$^2$]")
         ax.grid(ls=":")
@@ -668,17 +746,17 @@ def draw_jphi_components(axes, psi_N, perturbed_data_list=None):
                         label=r"$j_\phi$ (total)" if i == 0 else None,
                         zorder=1)
 
-            # component curves
-            for ax, key, label, color in _sub:
+            # component curves (distinguished by both color and dash style)
+            for ax, key, label, color, ls in _sub:
                 if key in data:
-                    ax.plot(psi_N, data[key] * _MA, c=color, lw=1.5,
-                            alpha=0.65, label=lbl, zorder=3)
+                    ax.plot(psi_N, data[key] * _MA, c=color, ls=ls, lw=1.5,
+                            alpha=0.7, label=lbl, zorder=3)
 
             # j_BS,edge overlay on the j_BS panel
             if "j_BS,edge [A m^-2]" in data:
                 axes[0].plot(
                     psi_N, data["j_BS,edge [A m^-2]"] * _MA,
-                    c="tab:red", ls="--", lw=1.5, alpha=0.55,
+                    c=_RED, ls="-.", lw=1.2, alpha=0.7,
                     label=r"$j_{\rm BS,edge}$" if i == 0 else None,
                     zorder=4,
                 )
@@ -705,6 +783,77 @@ def draw_jphi_profiles(axes, psi_N, j_phi, sigma_jphi,
                     perturbed_data_list=perturbed_data_list)
     draw_jphi_components(axes[1:], psi_N,
                          perturbed_data_list=perturbed_data_list)
+
+
+def _draw_boundary_panels(ax_lcfs, ax_rms, boundaries):
+    """LCFS-shape overlay (monochrome) + per-draw max/RMS deviation bars.
+
+    ``ax_lcfs`` gets the boundary curves (black baseline, gray draws);
+    ``ax_rms`` gets the categorical Max/RMS deviation bars (kept colored).
+    """
+    if not boundaries:
+        return
+    bR0, bZ0 = boundaries[0]
+    ax_lcfs.plot(bR0, bZ0, "k--", lw=1.0, label="baseline", zorder=2)
+    for i, (bR, bZ) in enumerate(boundaries[1:], 1):
+        ax_lcfs.plot(bR, bZ, "-", color=_GOLD, lw=0.7, alpha=0.7,
+                     label="perturbed" if i == 1 else None, zorder=1)
+    ax_lcfs.set_aspect("equal")
+    ax_lcfs.set_xlabel("R [m]"); ax_lcfs.set_ylabel("Z [m]")
+    ax_lcfs.set_title("LCFS shape variation")
+    ax_lcfs.legend(fontsize=8); ax_lcfs.grid(ls=":")
+
+    ref_pts = np.column_stack([bR0, bZ0])
+    tree = _cKDTree(ref_pts)
+    max_devs, rms_devs = [], []
+    for bR, bZ in boundaries[1:]:
+        dists, _ = tree.query(np.column_stack([bR, bZ]))
+        max_devs.append(np.max(dists) * 1e3)
+        rms_devs.append(np.sqrt(np.mean(dists ** 2)) * 1e3)
+    if max_devs:
+        x_idx = np.arange(len(max_devs)); w = 0.35
+        ax_rms.bar(x_idx - w / 2, max_devs, w, label="Max", color="C3", alpha=0.7)
+        ax_rms.bar(x_idx + w / 2, rms_devs, w, label="RMS", color="C0", alpha=0.7)
+        ax_rms.set_xlabel("Perturbation index")
+        ax_rms.set_ylabel("Boundary deviation [mm]")
+        ax_rms.set_title("LCFS deviation from baseline")
+        ax_rms.legend(fontsize=8); ax_rms.grid(ls=":")
+
+
+def _plot_bouquet_dashboard(psi_N, psi_N_kin, bl, perturbed):
+    """Single combined figure of the profile panels (minimal scrolling).
+
+    Layout (2x4 grid): kinetic 2x2 (left), pressure + j_phi total (top-right
+    row), j_BS + j_inductive (bottom-right row). The boundary panels get their
+    own figure (more room). Returns the figure.
+    """
+    fig = plt.figure(figsize=(11.5, 5.3))
+    outer = fig.add_gridspec(2, 4, hspace=0.32, wspace=0.42)
+
+    kin_gs = outer[0:2, 0:2].subgridspec(2, 2, hspace=0.12, wspace=0.3)
+    ax_kin = np.array([
+        [fig.add_subplot(kin_gs[0, 0]), fig.add_subplot(kin_gs[0, 1])],
+        [fig.add_subplot(kin_gs[1, 0]), fig.add_subplot(kin_gs[1, 1])],
+    ])
+    draw_kinetic_profiles(
+        ax_kin, psi_N_kin,
+        bl["n_e [m^-3]"], bl["n_i [m^-3]"], bl["T_e [eV]"], bl["T_i [eV]"],
+        bl["sigma_ne [m^-3]"], bl["sigma_ni [m^-3]"],
+        bl["sigma_te [eV]"], bl["sigma_ti [eV]"],
+        perturbed_data_list=perturbed,
+    )
+
+    ax_p = fig.add_subplot(outer[0, 2])
+    draw_pressure_profiles(ax_p, psi_N, bl["pressure [Pa]"],
+                           perturbed_data_list=perturbed)
+    ax_jt = fig.add_subplot(outer[0, 3])
+    draw_jphi_total(ax_jt, psi_N, bl["j_phi [A m^-2]"],
+                    bl["sigma_jphi [A m^-2]"], perturbed_data_list=perturbed)
+    ax_jbs = fig.add_subplot(outer[1, 2])
+    ax_jind = fig.add_subplot(outer[1, 3])
+    draw_jphi_components(np.array([ax_jbs, ax_jind]), psi_N,
+                         perturbed_data_list=perturbed)
+    return fig
 
 
 # ====================================================================
@@ -780,7 +929,7 @@ def _load_all_boundaries(h5path, scan_value=None, indices=None):
 #  Notebook-friendly API
 # ====================================================================
 def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic",
-                 selection="all"):
+                 selection="all", layout="stack", pub_style=False):
     """Plot a family of perturbed equilibria from an HDF5 file.
 
     Parameters
@@ -814,6 +963,12 @@ def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic",
     else:
         h5path = os.path.abspath(h5path_or_header)
 
+    # ---- auto-resolve scan value (so plot_bouquet(h5) "just works") ------
+    if scan_value is None:
+        _svs = discover_scan_values(h5path)
+        if _svs:
+            scan_value = _svs[0]
+
     # ---- resolve which draws to show (filter selection) ------------------
     sel_indices = None
     if selection != "all":
@@ -838,11 +993,26 @@ def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic",
     # Use psi_N_kinetic for kinetic profiles if available
     psi_N_kin = bl.get("psi_N_kinetic", psi_N)
 
+    # Default for mode='all': a combined dashboard of the profile panels plus a
+    # separate (roomier) boundary figure -- minimal scroll, but the LCFS panels
+    # aren't cramped. pub_style=True instead gives the separate publication
+    # figures.
+    if mode == "all" and not pub_style:
+        figs = [_plot_bouquet_dashboard(psi_N, psi_N_kin, bl, perturbed)]
+        boundaries = _load_all_boundaries(h5path, scan_value=scan_value,
+                                          indices=sel_indices)
+        if boundaries:
+            fig_bd, ax_bd = plt.subplots(1, 2, figsize=(9.5, 4.3))
+            _draw_boundary_panels(ax_bd[0], ax_bd[1], boundaries)
+            fig_bd.tight_layout()
+            figs.append(fig_bd)
+        return figs, [f.axes for f in figs]
+
     figs = []
     axes_list = []
 
     if mode in ("kinetic", "all"):
-        fig, ax = plt.subplots(2, 2, figsize=(8, 5), sharex=True)
+        fig, ax = plt.subplots(2, 2, figsize=(7.5, 5.5), sharex=True)
         draw_kinetic_profiles(
             ax, psi_N_kin,
             bl["n_e [m^-3]"], bl["n_i [m^-3]"],
@@ -856,7 +1026,7 @@ def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic",
         axes_list.append(ax)
 
     if mode in ("pressure", "all"):
-        fig, ax = plt.subplots(figsize=(6, 4))
+        fig, ax = plt.subplots(figsize=(5.5, 4))
         draw_pressure_profiles(
             ax, psi_N, bl["pressure [Pa]"],
             perturbed_data_list=perturbed,
@@ -866,7 +1036,7 @@ def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic",
         axes_list.append(ax)
 
     if mode in ("j-phi", "all"):
-        fig_jt, ax_jt = plt.subplots(figsize=(6, 4))
+        fig_jt, ax_jt = plt.subplots(figsize=(5.5, 4))
         draw_jphi_total(
             ax_jt, psi_N,
             bl["j_phi [A m^-2]"], bl["sigma_jphi [A m^-2]"],
@@ -876,7 +1046,7 @@ def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic",
         figs.append(fig_jt)
         axes_list.append(ax_jt)
 
-        fig_jc, ax_jc = plt.subplots(2, 1, figsize=(6, 6), sharex=True)
+        fig_jc, ax_jc = plt.subplots(2, 1, figsize=(5.5, 5), sharex=True)
         draw_jphi_components(
             ax_jc, psi_N,
             perturbed_data_list=perturbed,
@@ -889,48 +1059,16 @@ def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic",
         boundaries = _load_all_boundaries(h5path, scan_value=scan_value,
                                           indices=sel_indices)
         if boundaries:
-            fig_bd, ax_bd = plt.subplots(1, 2, figsize=(10, 5))
-
-            # Panel (a): overlaid LCFS contours — baseline behind
-            bR0, bZ0 = boundaries[0]
-            ax_bd[0].plot(bR0, bZ0, "b-", lw=1.5, label="Baseline",
-                          zorder=1)
-            for i, (bR, bZ) in enumerate(boundaries[1:], 1):
-                lbl = "Perturbed" if i == 1 else None
-                ax_bd[0].plot(bR, bZ, "-", color="C1", lw=0.6,
-                              alpha=0.5, label=lbl, zorder=2)
-            ax_bd[0].set_aspect("equal")
-            ax_bd[0].set_xlabel("R [m]")
-            ax_bd[0].set_ylabel("Z [m]")
-            ax_bd[0].set_title("LCFS shape variation")
-            ax_bd[0].legend(fontsize=8)
-            ax_bd[0].grid(ls=":")
-
-            # Panel (b): max and RMS deviation per equilibrium
-            ref_pts = np.column_stack([bR0, bZ0])
-            tree = _cKDTree(ref_pts)
-            max_devs = []
-            rms_devs = []
-            for bR, bZ in boundaries[1:]:
-                pts = np.column_stack([bR, bZ])
-                dists, _ = tree.query(pts)
-                max_devs.append(np.max(dists) * 1e3)   # mm
-                rms_devs.append(np.sqrt(np.mean(dists**2)) * 1e3)
-
-            if max_devs:
-                x_idx = np.arange(len(max_devs))
-                w = 0.35
-                ax_bd[1].bar(x_idx - w/2, max_devs, w, label="Max", color="C3", alpha=0.7)
-                ax_bd[1].bar(x_idx + w/2, rms_devs, w, label="RMS", color="C0", alpha=0.7)
-                ax_bd[1].set_xlabel("Perturbation index")
-                ax_bd[1].set_ylabel("Boundary deviation [mm]")
-                ax_bd[1].set_title("LCFS deviation from baseline")
-                ax_bd[1].legend(fontsize=8)
-                ax_bd[1].grid(ls=":")
-
+            fig_bd, ax_bd = plt.subplots(1, 2, figsize=(9, 4.5))
+            _draw_boundary_panels(ax_bd[0], ax_bd[1], boundaries)
             fig_bd.tight_layout()
             figs.append(fig_bd)
             axes_list.append(ax_bd)
+
+    # Optional side-by-side layout: render the separate figures in a wrapping
+    # flex row (less vertical scroll) while keeping each an individual image.
+    if layout == "row" and len(figs) > 1:
+        _display_figs_row(figs)
 
     if mode == "all":
         return figs, axes_list
@@ -950,7 +1088,7 @@ def plot_kinetic_profiles(header, n_equils, psi_N, ne, ni, te, ti,
         DeprecationWarning,
         stacklevel=2,
     )
-    fig, axes = plt.subplots(2, 2, figsize=(8, 5), sharex=True)
+    fig, axes = plt.subplots(2, 2, figsize=(7.5, 5.5), sharex=True)
     perturbed = [load_equilibrium(header, count=i) for i in range(n_equils)]
     draw_kinetic_profiles(
         axes, psi_N, ne, ni, te, ti,
@@ -968,7 +1106,7 @@ def plot_jphi_profiles(psi_N, input_j_phi, sigma_jphi, header, n_equils):
         DeprecationWarning,
         stacklevel=2,
     )
-    fig, axes = plt.subplots(3, 1, figsize=(6, 8), sharex=True)
+    fig, axes = plt.subplots(3, 1, figsize=(5.5, 7), sharex=True)
     perturbed = [load_equilibrium(header, count=i) for i in range(n_equils)]
     draw_jphi_profiles(
         axes, psi_N, input_j_phi, sigma_jphi,
@@ -1134,7 +1272,7 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
     # h5 mode has a real baseline; file-list mode treats all entries equally
     has_baseline = (h5path is not None and n_eq > 1)
 
-    fig = plt.figure(figsize=(14, 6))
+    fig = plt.figure(figsize=(9, 4.3))
     gs = fig.add_gridspec(2, 3, width_ratios=[0.6, 1, 1],
                           wspace=0.35, hspace=0.35)
 
@@ -1225,6 +1363,12 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
     ax_q.set_ylabel("q")
     ax_q.set_title("Safety factor")
     ax_q.grid(ls=":")
+    # always show q=1 (the sawtooth surface) on the y-axis, with a tick at 1
+    _qlo, _qhi = ax_q.get_ylim()
+    ax_q.set_ylim(min(0.9, _qlo), _qhi)
+    ax_q.set_yticks(sorted(set(list(ax_q.get_yticks()) + [1.0])))
+    ax_q.set_ylim(min(0.9, _qlo), _qhi)
+    ax_q.axhline(1.0, color="0.6", ls="--", lw=0.8, zorder=0)
 
     ax_j.set_xlabel(xlabel)
     ax_j.set_ylabel(r"$|\langle J_\phi \rangle|$ [MA/m$^2$]")
@@ -1484,87 +1628,262 @@ def plot_pfile_bouquet(pfile_path_or_pf=None, x_coord="psi_N", eq=None,
     return fig, axes
 
 
+_COIL_NON_VSC_F = ['F1A', 'F2A', 'F3A', 'F4A', 'F5A', 'F6A', 'F7A', 'F8A',
+                   'F1B', 'F2B', 'F3B', 'F4B', 'F5B', 'F6B', 'F7B', 'F8B']
+_COIL_VSC_PAIR = ['F9A', 'F9B']
+_COIL_E = ['ECOILA', 'ECOILB']
+
+
 def plot_coil_currents(h5path_or_header, scan_val=None):
-    """Plot coil current variation across a bouquet of equilibria.
+    """Per-coil current **drift** across a bouquet, by coil class.
 
-    Shows individual equilibria as thin gray lines and overlays the
-    mean with error bars.
+    Three stacked panels show ``100 * (I_draw - I_baseline) / |I_baseline|`` for
+    each coil vs. draw index, separated into the classes that define the
+    in-spec criterion:
 
-    Parameters
-    ----------
-    h5path_or_header : str
-        Path to the ``.h5`` file or header string.
-    scan_val : str, float, or None
-        Scan-value label.
+      * **non-VSC F-coils** (F1-F8 A/B) -- spec band at ``±inspec_F_max``,
+      * **VSC pair** (F9A/F9B) -- spec band at ``±inspec_VSC_max``,
+      * **E-coils** (ECOILA/B) -- *not* part of the in-spec test (absolute
+        floor-limited), shown for context.
 
-    Returns
-    -------
-    fig, ax
+    In-spec draws are shaded green, out-of-spec red. Returns ``(fig, axes)``.
     """
-    h5path = h5path_or_header
-    if not h5path.endswith(".h5"):
-        h5path = os.path.abspath(f"{h5path}.h5")
+    import json as _json
+    from matplotlib.lines import Line2D
+    from .utils import _scan_val_key
 
-    indices = list_equilibrium_indices(h5path, scan_value=scan_val)
-    if not indices:
-        print("No equilibria found.")
-        return None, None
+    h5path = (h5path_or_header if h5path_or_header.endswith(".h5")
+              else os.path.abspath(f"{h5path_or_header}.h5"))
 
-    # Iterate the ACTUAL stored indices, not range(n): band-rejected draws
-    # leave gaps in the sequence and range() would KeyError on them.
-    all_cc = []
-    for i in indices:
-        entry = load_equilibrium_by_path(h5path, count=i,
-                                         scan_value=scan_val)
-        if "coil_currents" in entry:
-            all_cc.append(entry["coil_currents"])
+    markers = ['o', 's', 'D', '^', 'v', '<', '>', 'p']
+    cmap = _cm.get_cmap('turbo')
+    f_style = {n: {'color': cmap(i / max(len(_COIL_NON_VSC_F) - 1, 1)),
+                   'marker': markers[i % len(markers)]}
+               for i, n in enumerate(_COIL_NON_VSC_F)}
+    vsc_style = {'F9A': {'color': 'black', 'marker': '*'},
+                 'F9B': {'color': 'dimgray', 'marker': '*'}}
+    e_style = {'ECOILA': {'color': '#0072B2', 'marker': 'X', 'ls': '--'},
+               'ECOILB': {'color': '#D55E00', 'marker': 'X', 'ls': '--'}}
 
-    if not all_cc:
+    records = []
+    inspec_F = inspec_VSC = None
+    svs = ([_scan_val_key(scan_val)] if scan_val is not None else None)
+    with h5py.File(h5path, 'r') as hf:
+        scan_keys = (svs if svs is not None
+                     else (sorted(hf['scan'].keys()) if 'scan' in hf else []))
+        for sk in scan_keys:
+            parent = hf.get(f'scan/{sk}')
+            if parent is None or '_baseline' not in parent:
+                continue
+            bl = parent['_baseline']
+            if 'coil_currents [A]' not in bl or 'coil_names' not in bl:
+                continue
+            ref_names = [s.decode() if isinstance(s, bytes) else s
+                         for s in np.array(bl['coil_names'])]
+            ref_dict = dict(zip(ref_names, np.array(bl['coil_currents [A]'])))
+            draws = sorted(int(k) for k in parent.keys() if k.isdigit())
+            if inspec_F is None and draws:
+                a = parent[str(draws[0])].attrs
+                inspec_F = float(a.get('inspec_F_max', 0.02))
+                inspec_VSC = float(a.get('inspec_VSC_max', 0.02))
+            for c in draws:
+                g = parent[str(c)]
+                if 'coil_currents [A]' not in g:
+                    continue
+                d_names = _json.loads(g.attrs.get('coil_names', '[]'))
+                d_dict = dict(zip(d_names, np.array(g['coil_currents [A]'])))
+                records.append((ref_dict, d_dict,
+                                bool(g.attrs.get('in_spec', False))))
+    if not records:
         print("No coil current data found in the HDF5 file.")
         return None, None
+    inspec_F = inspec_F if inspec_F is not None else 0.02
+    inspec_VSC = inspec_VSC if inspec_VSC is not None else 0.02
 
-    names = list(all_cc[0].keys())
-    values = np.array([[cc[nm] for nm in names] for cc in all_cc])
+    def drift_pct(ref, d, coil):
+        r = ref.get(coil, np.nan); v = d.get(coil, np.nan)
+        return (100.0 * (v - r) / abs(r)
+                if (np.isfinite(r) and np.isfinite(v) and abs(r) > 1.0)
+                else np.nan)
 
-    fig, ax = plt.subplots(figsize=(max(10, 0.5 * len(names)), 5))
+    n_eq = len(records)
+    x = np.arange(n_eq)
+    in_spec_arr = np.array([r[2] for r in records])
+    fig, (ax_F, ax_VSC, ax_E) = plt.subplots(3, 1, figsize=(9, 6),
+                                             sharex=True)
 
-    # Baseline (count=0) in the back
-    baseline_vals = values[0] / 1e3
-    ax.plot(names, baseline_vals, "s-", color="C0", lw=2.0, ms=5,
-            zorder=1, label="Baseline")
+    leg_F = []
+    for coil in _COIL_NON_VSC_F:
+        st = f_style[coil]
+        ys = [drift_pct(ref, d, coil) for (ref, d, _) in records]
+        ax_F.plot(x, ys, '-', color=st['color'], marker=st['marker'], ms=4,
+                  alpha=0.85, lw=1.0)
+        leg_F.append(Line2D([0], [0], color=st['color'], marker=st['marker'],
+                            ms=5, lw=1.2, label=coil))
+    for s in (+1, -1):
+        ax_F.axhline(s * inspec_F * 100, color='k', ls='--', lw=1.0)
+    ax_F.axhline(0, color='k', lw=0.7); ax_F.set_ylabel('non-VSC F [%]')
+    ax_F.set_title(f'Per-coil drift, {n_eq} draws '
+                   f'(green = in-spec, red = out-of-spec)')
 
-    # Perturbed equilibria (count>=1)
-    for i in range(1, len(all_cc)):
-        ax.plot(names, values[i] / 1e3, "-", color="0.7", lw=0.8, alpha=0.5,
-                zorder=2)
+    leg_V = []
+    for coil in _COIL_VSC_PAIR:
+        st = vsc_style[coil]
+        ys = [drift_pct(ref, d, coil) for (ref, d, _) in records]
+        ax_VSC.plot(x, ys, '-', color=st['color'], marker=st['marker'], ms=6,
+                    alpha=0.85, lw=1.2)
+        leg_V.append(Line2D([0], [0], color=st['color'], marker=st['marker'],
+                            ms=7, lw=1.2, label=coil))
+    for s in (+1, -1):
+        ax_VSC.axhline(s * inspec_VSC * 100, color='k', ls='--', lw=1.0)
+    ax_VSC.axhline(0, color='k', lw=0.7); ax_VSC.set_ylabel('VSC pair [%]')
 
-    # Mean ± std on top of everything
-    if len(all_cc) > 1:
-        pert_vals = values[1:]
-        mean = pert_vals.mean(axis=0) / 1e3
-        std = pert_vals.std(axis=0) / 1e3
-        ax.errorbar(names, mean, yerr=std, fmt="ko-", lw=1.2, capsize=3,
-                    ms=3, zorder=3, label=r"Perturbed mean $\pm$ 1$\sigma$")
+    leg_E = []
+    for coil in _COIL_E:
+        st = e_style[coil]
+        ys = [drift_pct(ref, d, coil) for (ref, d, _) in records]
+        ax_E.plot(x, ys, ls=st['ls'], color=st['color'], marker=st['marker'],
+                  ms=5, alpha=0.85, lw=1.2)
+        leg_E.append(Line2D([0], [0], color=st['color'], ls=st['ls'],
+                            marker=st['marker'], ms=6, lw=1.2, label=coil))
+    ax_E.axhline(0, color='k', lw=0.7)
+    ax_E.set_ylabel('E-coil [%]'); ax_E.set_xlabel('perturbed draw index')
 
-    ax.set_ylabel("Coil current [kA]")
-    ax.set_title("Coil currents across bouquet")
-    ax.legend(fontsize=8)
-    ax.grid(ls=":")
-    plt.xticks(rotation=45, ha="right")
-    plt.tight_layout()
-    return fig, ax
+    # smaller fonts than the default style -- this is a dense 3-panel plot, so
+    # match the visual weight of the other figures
+    for ax in (ax_F, ax_VSC, ax_E):
+        for i, ok in enumerate(in_spec_arr):
+            ax.axvspan(i - 0.4, i + 0.4,
+                       color=('tab:green' if ok else 'tab:red'),
+                       alpha=0.10 if ok else 0.06)
+        ax.tick_params(labelsize=7)
+        ax.yaxis.label.set_size(8)
+    ax_E.xaxis.label.set_size(8)
+    ax_F.title.set_size(9)
+    ax_F.legend(handles=leg_F, loc='center left', bbox_to_anchor=(1.01, 0.5),
+                fontsize=6, title='F1-F8 A/B', title_fontsize=7)
+    ax_VSC.legend(handles=leg_V, loc='center left', bbox_to_anchor=(1.01, 0.5),
+                  fontsize=7, title='VSC')
+    ax_E.legend(handles=leg_E, loc='center left', bbox_to_anchor=(1.01, 0.5),
+                fontsize=7, title='E-coils')
+    fig.tight_layout(rect=[0, 0, 0.86, 1])
+    return fig, (ax_F, ax_VSC, ax_E)
 
 
 # ====================================================================
-#  Trace plots: l_i, Ip, boundary deviation across equilibria
+#  Switchboard extra-profile ensemble + unified IMAS view
+# ====================================================================
+_EXTRA_LABELS = {
+    "omega_tor": r"$\omega_{tor}$ [rad/s]", "e_r": r"$E_r$ [V/m]",
+    "chi_e": r"$\chi_e$ [m$^2$/s]", "chi_i": r"$\chi_i$ [m$^2$/s]",
+    "zeff": r"$Z_{eff}$",
+}
+_EXTRA_ORDER = ["omega_tor", "e_r", "chi_e", "chi_i", "zeff"]
+
+
+def plot_transport_profiles(h5path_or_header, scan_value=None, names=None,
+                            selection="all"):
+    """Overlay the perturbed transport / rotation / Z_eff profiles per draw.
+
+    These are the switchboard profiles outside the core kinetic set -- toroidal
+    rotation ``omega_tor``, radial field ``e_r``, transport diffusivities
+    ``chi_e``/``chi_i`` and ``zeff`` -- read from the ``extra_<name>`` datasets
+    and overlaid on the kinetic grid, one panel per profile.
+
+    Returns ``(fig, axes)``, or ``(None, None)`` if none are stored (the
+    switchboard wasn't used).
+    """
+    from .utils import _group_path
+
+    h5path = (h5path_or_header if h5path_or_header.endswith(".h5")
+              else os.path.abspath(f"{h5path_or_header}.h5"))
+
+    svs = ([scan_value] if scan_value is not None
+           else (discover_scan_values(h5path) or [None]))
+    pairs = [(sv, i) for sv in svs
+             for i in list_equilibrium_indices(h5path, scan_value=sv)]
+    if selection != "all":
+        from .filtering import select_indices as _sel
+        keep = set(_sel(h5path, scan_value=svs[0], selection=selection))
+        pairs = [(sv, i) for (sv, i) in pairs if i in keep]
+
+    avail, xgrid = [], None
+    with h5py.File(h5path, "r") as hf:
+        for sv, i in pairs:
+            gp = _group_path(sv, i)
+            if gp in hf:
+                g = hf[gp]
+                avail = [k[len("extra_"):] for k in g.keys()
+                         if k.startswith("extra_")]
+                if "psi_N_kinetic" in g:
+                    xgrid = np.asarray(g["psi_N_kinetic"][()])
+                break
+    names = names or [n for n in _EXTRA_ORDER if n in avail] or avail
+    if not names:
+        print("No extra_* profiles stored (switchboard not used for this run).")
+        return None, None
+
+    fig, axes = plt.subplots(1, len(names), figsize=(4.2 * len(names), 3.6),
+                             squeeze=False)
+    axes = axes[0]
+    with h5py.File(h5path, "r") as hf:
+        for j, nm in enumerate(names):
+            for sv, i in pairs:
+                ds = f"{_group_path(sv, i)}/extra_{nm}"
+                if ds in hf:
+                    y = np.asarray(hf[ds][()])
+                    x = (xgrid if xgrid is not None and len(xgrid) == len(y)
+                         else np.linspace(0, 1, len(y)))
+                    axes[j].plot(x, y, color=_GOLD, lw=0.9, alpha=0.8)
+            axes[j].set_title(_EXTRA_LABELS.get(nm, nm))
+            axes[j].set_xlabel(r"$\psi_N$")
+            axes[j].grid(alpha=0.3)
+    fig.suptitle("Perturbed transport / rotation / $Z_{eff}$ profiles")
+    fig.tight_layout()
+    return fig, axes
+
+
+# Backwards-compatible alias (the figure used to be called "extra profiles").
+plot_extra_profiles = plot_transport_profiles
+
+
+def plot_imas_bouquet(h5path_or_header, scan_value=None, selection="all",
+                      layout="stack", pub_style=False):
+    """Unified bouquet view for the IMAS path: the standard ensemble panels
+    (kinetic / pressure / j_phi / boundary, via :func:`plot_bouquet`) plus the
+    perturbed switchboard extras (via :func:`plot_extra_profiles`).
+
+    ``pub_style=False`` (default) shows one combined dashboard figure;
+    ``pub_style=True`` shows the separate publication figures (``layout="row"``
+    lays those out side by side). Returns the list of figures produced.
+    """
+    figs = []
+    res = plot_bouquet(h5path_or_header, scan_value=scan_value, mode="all",
+                       selection=selection, layout=layout, pub_style=pub_style)
+    bq_figs = res[0] if isinstance(res, tuple) else res
+    figs.extend(bq_figs if isinstance(bq_figs, (list, tuple)) else [bq_figs])
+    ex_fig, _ = plot_transport_profiles(h5path_or_header, scan_value=scan_value,
+                                        selection=selection)
+    if ex_fig is not None:
+        if layout == "row" and pub_style:
+            _display_figs_row([ex_fig])
+        figs.append(ex_fig)
+    return figs
+
+
+# ====================================================================
+#  Trace plots: l_i, boundary deviation across equilibria
 # ====================================================================
 def plot_traces(h5path_or_header, scan_value="all"):
-    r"""Plot l_i, Ip, and boundary deviation traces across equilibria.
+    r"""Plot l_i and boundary deviation traces across equilibria.
 
-    Produces three figures:
+    Produces:
       1. **l_i** — top: actual l_i(1) values; bottom: % error vs target
-      2. **Ip** — top: actual Ip values; bottom: % error vs target
-      3. **Boundary** — top: RMS deviation [mm]; bottom: max deviation [mm]
+      2. **Boundary** — top: RMS deviation [mm]; bottom: max deviation [mm]
+      3. **Boundary points** (when available) — per-anchor ΔR/ΔZ traces
+
+    (The Ip trace was dropped: the GS solver holds Ip on target natively, so the
+    per-draw Ip error is ~0 by construction.)
 
     Parameters
     ----------
@@ -1577,7 +1896,7 @@ def plot_traces(h5path_or_header, scan_value="all"):
     Returns
     -------
     figs : list of Figure
-        The three figures ``[fig_li, fig_Ip, fig_boundary]``.
+        ``[fig_li, fig_boundary]`` (plus ``fig_boundary_points`` when available).
     """
     from .utils import read_eqdsk_from_bytes, _scan_val_key
 
@@ -1755,8 +2074,11 @@ def plot_traces(h5path_or_header, scan_value="all"):
     _BL_KW = dict(marker='*', markersize=14, markerfacecolor='none',
                   markeredgewidth=1.5, linestyle='none', zorder=5)
 
-    # ---- Figure 1: l_i ----
-    fig_li, axes_li = plt.subplots(2, 1, figsize=(8, 5), sharex=True)
+    # ---- One combined figure: l_i (row 0), boundary RMS/max (row 1),
+    #      per-anchor ΔR/ΔZ (row 2). All share the equilibrium-index x-axis. ----
+    fig, _axg = plt.subplots(3, 2, figsize=(11, 7.5), sharex=True)
+    axes_li = _axg[0]
+    axes_bnd = _axg[1]
 
     for (sv, tr), c in zip(all_traces.items(), colors):
         lbl = f"scan={sv}" if len(scan_vals) > 1 else None
@@ -1796,44 +2118,13 @@ def plot_traces(h5path_or_header, scan_value="all"):
     axes_li[0].grid(True, alpha=0.3)
     axes_li[0].legend(fontsize=7)
 
-    axes_li[1].set_xlabel("Equilibrium index")
-    axes_li[1].set_ylabel(r"$l_i$ deviation from baseline [%]")
+    axes_li[1].set_ylabel(r"$l_i$ dev [%]")
     axes_li[1].grid(True, alpha=0.3)
-    fig_li.tight_layout()
 
-    # ---- Figure 2: Ip ----
-    fig_Ip, axes_Ip = plt.subplots(2, 1, figsize=(8, 5), sharex=True)
+    # (Ip trace dropped -- the GS solver now holds Ip on target natively, so the
+    # per-draw Ip error is ~0 by construction and the check is no longer useful.)
 
-    for (sv, tr), c in zip(all_traces.items(), colors):
-        lbl = f"scan={sv}" if len(scan_vals) > 1 else None
-        x = tr["indices"]
-
-        axes_Ip[0].plot(x, tr["Ip"] / 1e6, 'o-', color=c, lw=1.5, ms=4, label=lbl)
-        # Highlight baseline (index 0) — recon's saved Ip from baseline.eqdsk
-        axes_Ip[0].plot([x[0]], [tr["Ip"][0] / 1e6], color=c,
-                        label=('baseline' if lbl is None else None),
-                        **_BL_KW)
-        axes_Ip[0].axhline(tr["Ip_target"] / 1e6, color=c, ls='--', lw=1, alpha=0.5)
-
-        if tr["Ip_target"] > 0:
-            Ip_pct = 100.0 * (tr["Ip"] - tr["Ip_target"]) / tr["Ip_target"]
-            axes_Ip[1].plot(x, Ip_pct, 'o-', color=c, lw=1.5, ms=4, label=lbl)
-            axes_Ip[1].plot([x[0]], [Ip_pct[0]], color=c, **_BL_KW)
-            axes_Ip[1].axhline(0, color='k', ls=':', lw=0.5)
-
-    axes_Ip[0].set_ylabel(r"$I_p$ [MA]")
-    axes_Ip[0].set_title(r"$I_p$ trace  (index 0 = recon baseline)")
-    axes_Ip[0].grid(True, alpha=0.3)
-    axes_Ip[0].legend(fontsize=7)
-
-    axes_Ip[1].set_xlabel("Equilibrium index")
-    axes_Ip[1].set_ylabel(r"$I_p$ error [%]")
-    axes_Ip[1].grid(True, alpha=0.3)
-    fig_Ip.tight_layout()
-
-    # ---- Figure 3: Boundary deviation ----
-    fig_bnd, axes_bnd = plt.subplots(2, 1, figsize=(8, 5), sharex=True)
-
+    # ---- Row 1: Boundary deviation ----
     for (sv, tr), c in zip(all_traces.items(), colors):
         lbl = f"scan={sv}" if len(scan_vals) > 1 else None
         x = tr["indices"]
@@ -1846,35 +2137,26 @@ def plot_traces(h5path_or_header, scan_value="all"):
         axes_bnd[1].plot(x, tr["bnd_max"], 's-', color=c, lw=1.5, ms=4, label=lbl)
         axes_bnd[1].plot([x[0]], [tr["bnd_max"][0]], color=c, **_BL_KW)
 
-    axes_bnd[0].set_ylabel("RMS deviation [mm]")
-    axes_bnd[0].set_title("Boundary deviation vs baseline  (index 0 = recon baseline)")
+    axes_bnd[0].set_ylabel("RMS dev [mm]")
+    axes_bnd[0].set_title("Boundary deviation vs baseline")
     axes_bnd[0].grid(True, alpha=0.3)
-    axes_bnd[0].legend(fontsize=7)
 
-    axes_bnd[1].set_xlabel("Equilibrium index")
-    axes_bnd[1].set_ylabel("Max deviation [mm]")
+    axes_bnd[1].set_ylabel("Max dev [mm]")
     axes_bnd[1].grid(True, alpha=0.3)
-    fig_bnd.tight_layout()
 
-    # ---- Per-anchor-point deviation trace -------------------------
-    # ΔR / ΔZ at the four characteristic LCFS points (inboard
-    # midplane, outboard midplane, top, bottom) vs draw index, in mm.
-    # Complements the global RMS / max bnd-diag panels above by
-    # showing WHERE on the LCFS the deviation is concentrated and
-    # whether the bouquet has a systematic drift signature or random
-    # scatter around recon.
+    # ---- Row 2: per-anchor ΔR / ΔZ at the four characteristic LCFS points
+    # (inboard/outboard midplane, top, bottom) -- shows WHERE on the LCFS the
+    # deviation concentrates. Drawn into the bottom row of this same figure. ----
     try:
-        fig_bp = plot_boundary_point_traces(
-            h5path, scan_value=scan_value)
+        plot_boundary_point_traces(h5path, scan_value=scan_value,
+                                   axes=(_axg[2, 0], _axg[2, 1]))
     except Exception as _bp_exc:
         warnings.warn(
-            f"[plot_traces] boundary-point trace failed "
-            f"({_bp_exc}); skipping")
-        fig_bp = None
+            f"[plot_traces] boundary-point trace failed ({_bp_exc}); skipping")
 
-    if fig_bp is not None:
-        return [fig_li, fig_Ip, fig_bnd, fig_bp]
-    return [fig_li, fig_Ip, fig_bnd]
+    fig.suptitle("Bouquet traces  (index 0 = recon baseline)", y=1.0)
+    fig.tight_layout()
+    return [fig]
 
 
 # ====================================================================
@@ -2003,11 +2285,21 @@ def _xpoints_on_lcfs(x_points, R, Z, tol=0.03):
         return []
     R = np.asarray(R, dtype=float)
     Z = np.asarray(Z, dtype=float)
+    A = np.column_stack([R[:-1], Z[:-1]])
+    B = np.column_stack([R[1:], Z[1:]])
+    AB = B - A
+    denom = np.einsum("ij,ij->i", AB, AB)
+    denom = np.where(denom < 1e-30, 1e-30, denom)
     out = []
     for r0, z0 in xp:
         if not (np.isfinite(r0) and np.isfinite(z0)):
             continue
-        d = float(np.min(np.hypot(R - r0, Z - z0)))
+        # point-to-SEGMENT distance: a saddle sitting on an edge between two
+        # far-apart boundary vertices is "on" the LCFS even if no vertex is near.
+        AP = np.array([r0, z0]) - A
+        t = np.clip(np.einsum("ij,ij->i", AP, AB) / denom, 0.0, 1.0)
+        proj = A + t[:, None] * AB
+        d = float(np.min(np.hypot(proj[:, 0] - r0, proj[:, 1] - z0)))
         if d <= tol:
             out.append((float(r0), float(z0)))
     return out
@@ -2017,7 +2309,8 @@ def _extract_boundary_points(R, Z, R_axis, Z_axis,
                               ref_R_axis=None,
                               ref_Z_axis=None,
                               x_points=None,
-                              xpoint_tol=0.03):
+                              xpoint_tol=0.05,
+                              require_xpoint=None):
     """Extract the four characteristic LCFS points used by the trace.
 
     Returns ``(pts, has_xpt)`` where ``pts`` is a dict with keys
@@ -2056,21 +2349,38 @@ def _extract_boundary_points(R, Z, R_axis, Z_axis,
     # each null belongs to.  The detected X-point coords become the
     # anchor for that half, so the trace follows the X-point's motion in
     # absolute space.
-    for r0, z0 in _xpoints_on_lcfs(x_points, R, Z, tol=xpoint_tol):
-        if z0 < Z_axis:
-            if (not has_xpt['lower']) or z0 < pts['bottom'][1]:
-                pts['bottom'] = (r0, z0)   # lowest-Z null = lower X-point
-            has_xpt['lower'] = True
-        elif z0 > Z_axis:
-            if (not has_xpt['upper']) or z0 > pts['top'][1]:
-                pts['top'] = (r0, z0)      # highest-Z null = upper X-point
-            has_xpt['upper'] = True
+    # Anchor top/bottom on the EXACT TokaMaker null that lies on the separatrix
+    # (the true B_p=0 saddle). Using the stored null directly -- rather than a
+    # geometric corner search -- avoids the ~vertex-spacing quantization that
+    # shows up as spurious ~cm ΔR/ΔZ jumps between draws. The on-LCFS filter
+    # rejects far inactive nulls, so a non-diverted (round) half keeps the smooth
+    # midline crossing below.
+    on_lcfs = _xpoints_on_lcfs(x_points, R, Z, tol=xpoint_tol)
+    below = [(r, z) for r, z in on_lcfs if z < Z_axis]
+    above = [(r, z) for r, z in on_lcfs if z > Z_axis]
+    if below:
+        r0, z0 = min(below, key=lambda p: p[1])   # lowest-Z = lower X-point
+        pts['bottom'] = (r0, z0); has_xpt['lower'] = True
+    if above:
+        r0, z0 = max(above, key=lambda p: p[1])   # highest-Z = upper X-point
+        pts['top'] = (r0, z0); has_xpt['upper'] = True
+
+    # Geometric fallback only where there is no on-LCFS null (e.g. legacy h5
+    # files): the 40° corner threshold leaves a genuinely round top/bottom on the
+    # smooth midline crossing.
+    for half, key in (('lower', 'bottom'), ('upper', 'top')):
+        if not has_xpt[half]:
+            rx, zx = _detect_xpoint(R, Z, R_axis, Z_axis, half=half)
+            if np.isfinite(rx) and np.isfinite(zx):
+                pts[key] = (rx, zx)
+                has_xpt[half] = True
     return pts, has_xpt
 
 
 def plot_boundary_point_traces(h5path_or_header, scan_value="all",
                                 prefer_xpoint=True,
-                                corner_angle_deg=None):
+                                corner_angle_deg=None,
+                                axes=None):
     r"""Trace plot of characteristic LCFS points across draws,
     expressed as **signed deviation (mm) from the baseline recon**.
 
@@ -2144,7 +2454,13 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
     else:
         scan_vals = [scan_value]
 
-    fig, (ax_r, ax_z) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+    # Draw into caller-provided axes (e.g. plot_traces' combined figure) or make
+    # our own compact figure.
+    if axes is not None:
+        ax_r, ax_z = axes
+        fig = ax_r.figure
+    else:
+        fig, (ax_r, ax_z) = plt.subplots(2, 1, figsize=(7.5, 3.0), sharex=True)
     point_labels = ['inboard', 'outboard', 'top', 'bottom']
     point_colors = {'inboard':  '#1f77b4',
                     'outboard': '#d62728',
@@ -2236,7 +2552,8 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
                         eq.R_mag, eq.Z_mag,
                         ref_R_axis=ref_R_axis,
                         ref_Z_axis=ref_Z_axis,
-                        x_points=_read_xpoints(grp))
+                        x_points=_read_xpoints(grp),
+                        require_xpoint=baseline_xpoint)
                     indices.append(i + 1)
                     for k in point_labels:
                         R_pts[k].append(pts[k][0])
@@ -2281,6 +2598,19 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
                 Z0 = Z_arr[0]
                 dR_mm = (R_arr - R0) * 1e3
                 dZ_mm = (Z_arr - Z0) * 1e3
+                # Sanity guard: a few-% kinetic perturbation cannot move a
+                # characteristic LCFS point by >10 cm. Anything larger is an
+                # anchor-identification artifact (e.g. a missed X-point); drop
+                # it rather than letting a spurious spike dominate the y-scale.
+                _ANCHOR_MAX_MM = 100.0
+                _bad = (np.abs(dR_mm) > _ANCHOR_MAX_MM) | (np.abs(dZ_mm) > _ANCHOR_MAX_MM)
+                if np.any(_bad):
+                    warnings.warn(
+                        f"[plot_boundary_point_traces] {k}: {_bad.sum()} draw(s) "
+                        f"with >|{_ANCHOR_MAX_MM:.0f}| mm anchor deviation dropped "
+                        f"(likely an X-point identification artifact).")
+                    dR_mm = np.where(_bad, np.nan, dR_mm)
+                    dZ_mm = np.where(_bad, np.nan, dZ_mm)
                 col = point_colors[k]
                 mk = point_markers[k]
                 lbl_R = legend_label[k]
@@ -2313,6 +2643,7 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
     ax_z.set_ylabel(r"$\Delta Z$ [mm]")
     ax_z.grid(True, alpha=0.3)
     ax_z.legend(loc='best', fontsize=8, ncol=2)
-    fig.tight_layout()
+    if axes is None:
+        fig.tight_layout()
 
     return fig

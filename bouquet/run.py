@@ -54,23 +54,107 @@ class Bouquet:
         self.config = config
         self.mygs = None                          # set by setup_solver()
         self.baseline: Optional["Baseline"] = None
-        self.uncertainty = None                   # resolved sigma profiles + length scales
+        self._resolved_uncertainty = None         # resolved sigma profiles + length scales
         self.diagnostics: Optional[list] = None   # generate() per-draw output
+        self.generation_log: Optional[str] = None # captured generate() solver chatter
         self._selection = None                    # filter() result
+
+    # ── constructors ----------------------------------------------------
+    @classmethod
+    def from_geqdsk(cls, geqdsk_path, *, profiles, mesh,
+                    n_draws=20, header="bouquet", cocos=1, time=None,
+                    **solver_kwargs) -> "Bouquet":
+        """Minimal constructor for the reconstruction path (g-file + profiles).
+
+        ``profiles`` is an IDA ``.cdf`` or a p-file (auto-detected). Extra
+        keyword args go to :class:`SolverConfig` (e.g. ``order``, ``nthreads``).
+        Reach into ``bq.uncertainty`` / ``bq.generation`` afterwards for the
+        advanced knobs.
+        """
+        from .config import (BouquetConfig, SolverConfig, ReconstructionSource,
+                             GenerationConfig)
+        cfg = BouquetConfig(
+            source=ReconstructionSource(geqdsk_path=geqdsk_path,
+                                        profiles_path=profiles,
+                                        cocos=cocos, time=time),
+            solver=SolverConfig(mesh_path=mesh, **solver_kwargs),
+            generation=GenerationConfig(n_equils=n_draws),
+            output_header=header,
+        )
+        return cls(cfg)
+
+    @classmethod
+    def from_imas(cls, ids_path, *, mesh, time=None,
+                  n_draws=20, header="bouquet", **solver_kwargs) -> "Bouquet":
+        """Minimal constructor for the IMAS/OMAS path (no reconstruction).
+
+        Extra keyword args go to :class:`SolverConfig`. Reach into
+        ``bq.uncertainty`` / ``bq.generation`` afterwards for advanced knobs.
+        """
+        from .config import (BouquetConfig, SolverConfig, ImasSource,
+                             GenerationConfig)
+        cfg = BouquetConfig(
+            source=ImasSource(ids_path=ids_path, time=time),
+            solver=SolverConfig(mesh_path=mesh, **solver_kwargs),
+            generation=GenerationConfig(n_equils=n_draws),
+            output_header=header,
+        )
+        return cls(cfg)
+
+    # ── ergonomic config accessors (so `bq.uncertainty.ne_scalar_sigma = ...`,
+    # `bq.generation.n_equils = ...` read like a control panel) ──
+    @property
+    def uncertainty(self):
+        """The :class:`UncertaintyConfig` (sigma profiles, GPR lengths, switchboard)."""
+        return self.config.uncertainty
+
+    @property
+    def generation(self):
+        """The :class:`GenerationConfig` (n_equils, tolerances, homotopy)."""
+        return self.config.generation
+
+    @property
+    def solver(self):
+        """The :class:`SolverConfig` (mesh, order, threads, F0)."""
+        return self.config.solver
+
+    def set_slice(self, *, time=None, header=None) -> "Bouquet":
+        """Re-point to a new time slice, reusing the existing solver.
+
+        For multi-slice runs in one kernel (the ``OFT_env`` singleton forbids a
+        second solver): keep one :meth:`setup_solver`, then for each slice call
+        ``set_slice(time=t, header=...)`` and :meth:`run` (or generate). Clears
+        the cached baseline/uncertainty so the next call re-solves; the new
+        baseline reconstruction/forward-solve overwrites any prior equilibrium
+        state on ``mygs``, so no explicit reset is needed.
+        """
+        if time is not None:
+            if not hasattr(self.config.source, "time"):
+                raise TypeError(
+                    f"{type(self.config.source).__name__} has no time slice")
+            self.config.source.time = time
+        if header is not None:
+            self.config.output_header = header
+        self.baseline = None
+        self._resolved_uncertainty = None
+        self.diagnostics = None
+        self._selection = None
+        return self
 
     # ── stage 1: solver -------------------------------------------------
     def setup_solver(self) -> "Bouquet":
         """Read mesh, build regions, stand up ``mygs``, set isoflux + VSC + reg.
 
         Common to every baseline source -- perturbed draws are always solved
-        with TokaMaker. Returns self for chaining.
-
-        F0 (= R0*B0) and the reference boundary come from the reconstruction
-        g-file when the source is a :class:`ReconstructionSource`; for an
-        :class:`ImasSource` set ``SolverConfig.F0`` explicitly (generation-side
-        solver setup for the IMAS path is wired in a later step).
+        with TokaMaker. Returns self for chaining. Idempotent: a no-op if
+        ``mygs`` already exists, so it is safe to call once and then reuse the
+        solver across multiple baselines/time-slices (OFT_env is a per-process
+        singleton, so re-creating it would raise).
         """
         import numpy as np
+
+        if self.mygs is not None:
+            return self
         from OpenFUSIONToolkit import OFT_env
         from OpenFUSIONToolkit.TokaMaker import TokaMaker
         from OpenFUSIONToolkit.TokaMaker.meshing import load_gs_mesh
@@ -153,7 +237,65 @@ class Bouquet:
         # TokaMaker-solved li_1 and records IDS-vs-TokaMaker li for sanity.
         if isinstance(self.config.source, ImasSource) and self.mygs is not None:
             self._forward_solve_imas_baseline()
+
+        # Reconstruction path: surface a glanceable quality summary (the verbose
+        # solver chatter was captured to baseline.reconstruction_log).
+        if self.baseline.reconstruction_metrics is not None:
+            self._print_reconstruction_summary()
         return self.baseline
+
+    def reconstruct(self) -> "Baseline":
+        """Reconstruct the baseline equilibrium and print a quality summary.
+
+        Intent-revealing entry point for the reconstruction path: ensures the
+        solver is up, runs the GS reconstruction, and prints the curated metrics
+        so you can confirm at a glance that it succeeded before spending compute
+        on the draws. Equivalent to ``setup_solver(); prepare_baseline()``.
+        """
+        from .config import ReconstructionSource
+
+        if not isinstance(self.config.source, ReconstructionSource):
+            raise TypeError(
+                "reconstruct() is for a ReconstructionSource; the IMAS path has "
+                "no reconstruction step -- call prepare_baseline() (or run())."
+            )
+        self.setup_solver()
+        return self.prepare_baseline()
+
+    def _print_reconstruction_summary(self):
+        """Print the reconstruction-fidelity block (TokaMaker vs input, % error).
+
+        Global scalars are shown as ``value (input ref, +/-% err)`` against the
+        input g-file's own values; geometric residuals that should be ~0
+        (boundary, axis offset, j_phi RMS) are shown absolute. See
+        :func:`bouquet.baseline._reconstruction_metrics`.
+        """
+        m = self.baseline.reconstruction_metrics
+        tag = self.config.source.geqdsk_path.split("/")[-1]
+        mark = "PASS ✅" if m.get("verdict") == "PASS" else "CHECK ⚠"
+        # blank lines so the summary stands out after any solver output above
+        print(f"\n\n=== Reconstruction — {tag} {'=' * max(3, 40 - len(tag))} {mark}")
+
+        def line(label, val, ref, err, unit="", fmt=".3f"):
+            u = f" {unit}" if unit else ""
+            lhs = f"{format(val, fmt)}{u}"
+            print(f"  {label:<12} {lhs:<13} (input {format(ref, fmt)}{u}, {err:+.2f}%)")
+
+        print(f"  {'converged':<12} yes")
+        line("Ip", m['Ip_MA'], m['Ip_efit_MA'], m['Ip_err_pct'], "MA")
+        line("l_i", m['li'], m['li_efit'], m['li_err_pct'])
+        line("q0", m['q0'], m['q0_efit'], m['q0_err_pct'], fmt=".2f")
+        line("q95", m['q95'], m['q95_efit'], m['q95_err_pct'], fmt=".2f")
+        line("beta_N", m['beta_n'], m['beta_n_efit'], m['beta_n_err_pct'], fmt=".2f")
+        line("beta_p", m['beta_p'], m['beta_p_efit'], m['beta_p_err_pct'], fmt=".2f")
+        line("kappa", m['kappa'], m['kappa_efit'], m['kappa_err_pct'])
+        line("delta", m['delta'], m['delta_efit'], m['delta_err_pct'])
+        line("j_sep(.99)", m['j_sep_MA'], m['j_sep_efit_MA'], m['j_sep_err_pct'], "MA/m²")
+        line("W_MHD", m['W_MHD_MJ'], m['W_MHD_efit_MJ'], m['W_MHD_err_pct'], "MJ")
+        print(f"  {'boundary':<12} RMS {m['boundary_rms_mm']:.2f} mm   "
+              f"max {m['boundary_max_mm']:.2f} mm   axis off {m['axis_offset_mm']:.2f} mm")
+        print(f"  {'jphi resid':<12} core RMS {m['jphi_core_rms_MA']:.3f}   "
+              f"edge RMS {m['jphi_edge_rms_MA']:.3f} MA/m²")
 
     def _forward_solve_imas_baseline(self):
         """Forward GS solve of the IMAS baseline (j_phi + pressure) on mygs.
@@ -199,42 +341,13 @@ class Bouquet:
                 )
                 mygs.solve()
 
-        # Initial solve with the IMAS total current (also seeds SWB geometry).
+        # Solve with the IMAS total current. The OMAS currents are
+        # reconstruction-self-consistent (bootstrap = SWB of the same kinetics),
+        # so this baseline l_i matches what the per-draw machinery produces -- the
+        # draws anchor to bl.j_inductive and recompute a ~equal SWB spike. An
+        # earlier SWB rebuild here shifted the baseline l_i ~6% off the draws and
+        # made the l_i target unreachable (draws floored at the low tail); removed.
         solve_jphi(np.asarray(bl.j_phi, dtype=float))
-
-        if self.config.generation.recalculate_j_BS:
-            # The draws recompute bootstrap via SWB each iteration, which differs
-            # from the IDS/generic bootstrap. Rebuild the baseline on that SAME
-            # SWB basis (inductive*scale + SWB spike + fixed, Ip-matched) so the
-            # forward-solve l_i is reachable by the draws.
-            from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
-            from scipy.optimize import root_scalar
-            from .utils import Ip_flux_integral_vs_target
-
-            j_fixed = np.zeros_like(psi_N)
-            if bl.j_NBI is not None:
-                j_fixed = j_fixed + np.asarray(bl.j_NBI, dtype=float)
-            if bl.j_RF is not None:
-                j_fixed = j_fixed + np.asarray(bl.j_RF, dtype=float)
-
-            jind = np.asarray(bl.j_inductive, dtype=float)
-            res = solve_with_bootstrap(
-                mygs, ne, te, ni, ti, Zeff, bl.Ip_target, jind,
-                scale_jBS=1.0, isolate_edge_jBS=True, diagnostic_plots=False,
-            )
-            spike = np.asarray(res["isolated_j_BS"], dtype=float)
-            root = root_scalar(
-                Ip_flux_integral_vs_target,
-                args=(mygs, jind, spike + j_fixed, psi_N, bl.Ip_target),
-                bracket=[1e-10 * bl.Ip_target, 1e1 * bl.Ip_target],
-                method="brentq", rtol=1e-6,
-            )
-            scale = root.root
-            j_phi_swb = scale * jind + spike + j_fixed
-            solve_jphi(j_phi_swb)
-            bl.j_BS = spike                 # update decomposition to the SWB basis
-            bl.j_inductive = scale * jind
-            bl.j_phi = j_phi_swb
 
         tok_li1 = float(mygs.get_stats(lcfs_pad=psi_pad, li_normalization="std")["l_i"])
         tok_li3 = float(mygs.get_stats(lcfs_pad=psi_pad, li_normalization="iter")["l_i"])
@@ -281,7 +394,7 @@ class Bouquet:
         n_equils = int(n if n is not None else gc.n_equils)
 
         env = resolve_uncertainty(self.config, bl)
-        self.uncertainty = env
+        self._resolved_uncertainty = env
 
         header = self.config.output_header
         initialize_equilibrium_database(header)
@@ -303,41 +416,62 @@ class Bouquet:
             1.0, None,
         )
 
-        self.diagnostics = generate_bouquet(
-            self.mygs, np.asarray(bl.psi_N, dtype=float), n_equils, header,
-            np.asarray(bl.j_phi, dtype=float),
-            bl.ne, bl.te, bl.ni, bl.ti,
-            env["sigma_ne"], env["sigma_te"], env["sigma_ni"], env["sigma_ti"],
-            env["sigma_jphi"],
-            env["n_ls"], env["t_ls"], env["j_ls"],
-            bl.Ip_target, bl.l_i_target, Zeff_eq,
-            input_jinductive=np.asarray(bl.j_inductive, dtype=float),
-            l_i_tolerance=gc.l_i_tolerance,
-            psi_pad=psi_pad,
-            constrain_sawteeth=gc.constrain_sawteeth,
-            recalculate_j_BS=gc.recalculate_j_BS,
-            jBS_scale_range=gc.jBS_scale_range,
-            diagnostic_plots=gc.diagnostic_plots,
-            scan_val=0,
-            pfile_bytes=bl.pfile_bytes,
-            baseline_eqdsk_bytes=bl.eqdsk_bytes,
-            baseline_pfile_bytes=bl.pfile_bytes,
-            psi_N_kinetic=np.asarray(bl.psi_N_kinetic, dtype=float),
-            coil_drift=gc.coil_drift,
-            homotopy_passes=gc.homotopy_passes,
-            inspec_F_max=fc.inspec_F_max,
-            inspec_VSC_max=fc.inspec_VSC_max,
-            seed=gc.seed,
-            # Fixed additive components, summed into every draw, never perturbed.
-            p_fast=bl.p_fast,
-            j_NBI=bl.j_NBI,
-            j_RF=bl.j_RF,
-        )
+        # The per-draw solver emits a large volume of diagnostic text (homotopy
+        # passes, bootstrap/boundary diagnostics, DLSODE chatter) -- enough to
+        # bloat a notebook by tens of MB. Capture it unless verbose, so output
+        # stays readable; the full text is kept on generation_log for debugging.
+        # Set BouquetConfig.verbose=True to stream it (and the tqdm progress bar).
+        from .utils import capture_native_output
+        verbose = bool(getattr(self.config, "verbose", False))
+        with capture_native_output(enabled=not verbose) as _cap:
+            self.diagnostics = generate_bouquet(
+                self.mygs, np.asarray(bl.psi_N, dtype=float), n_equils, header,
+                np.asarray(bl.j_phi, dtype=float),
+                bl.ne, bl.te, bl.ni, bl.ti,
+                env["sigma_ne"], env["sigma_te"], env["sigma_ni"], env["sigma_ti"],
+                env["sigma_jphi"],
+                env["n_ls"], env["t_ls"], env["j_ls"],
+                bl.Ip_target, bl.l_i_target, Zeff_eq,
+                input_jinductive=np.asarray(bl.j_inductive, dtype=float),
+                l_i_tolerance=gc.l_i_tolerance,
+                psi_pad=psi_pad,
+                constrain_sawteeth=gc.constrain_sawteeth,
+                recalculate_j_BS=gc.recalculate_j_BS,
+                jBS_scale_range=gc.jBS_scale_range,
+                diagnostic_plots=gc.diagnostic_plots,
+                scan_val=0,
+                pfile_bytes=bl.pfile_bytes,
+                baseline_eqdsk_bytes=bl.eqdsk_bytes,
+                baseline_pfile_bytes=bl.pfile_bytes,
+                psi_N_kinetic=np.asarray(bl.psi_N_kinetic, dtype=float),
+                coil_drift=gc.coil_drift,
+                homotopy_passes=gc.homotopy_passes,
+                inspec_F_max=fc.inspec_F_max,
+                inspec_VSC_max=fc.inspec_VSC_max,
+                seed=gc.seed,
+                # Fixed additive components, summed into every draw, never perturbed.
+                p_fast=bl.p_fast,
+                j_NBI=bl.j_NBI,
+                j_RF=bl.j_RF,
+                # Switchboard: extra perturbed profiles (passive + active Zeff).
+                extra_sigma=env.get("extra_sigma"),
+                extra_baseline=env.get("extra_baseline"),
+                extra_length_scale=env.get("extra_length_scale"),
+            )
+        self.generation_log = _cap["text"] or None
         return self.diagnostics
 
-    def plot_bouquet(self, mode: str = "all"):
-        """Overlay plots of the generated bouquet (boundaries, profiles, coils)."""
-        raise NotImplementedError
+    def plot_bouquet(self, mode: str = "all", selection: str = "all",
+                     layout: str = "stack", pub_style: bool = False):
+        """Overlay plots of the generated bouquet (kinetic / pressure / j_phi /
+        boundary). Thin wrapper over :func:`bouquet.plotting.plot_bouquet` on
+        this run's HDF5 (``{output_header}.h5``). ``pub_style=False`` (default)
+        is one combined dashboard figure; ``pub_style=True`` (with
+        ``layout="row"``) gives the separate side-by-side publication figures."""
+        from .plotting import plot_bouquet as _plot_bouquet
+        return _plot_bouquet(f"{self.config.output_header}.h5",
+                             scan_value=0, mode=mode, selection=selection,
+                             layout=layout, pub_style=pub_style)
 
     # ── stage 4: filter + export ----------------------------------------
     def filter(self, rms_max_mm: Optional[float] = None) -> dict:
@@ -361,7 +495,38 @@ class Bouquet:
             header, rms_max_mm=rms, apply=True, plot=False,
         )
         self._selection = {"coil": coil_summary, "boundary": bnd_summary}
+        self._print_generation_summary(coil_summary, bnd_summary)
         return self._selection
+
+    def _print_generation_summary(self, coil_summary, bnd_summary):
+        """Concise post-generation summary (draws / coil spec / boundary / in-spec),
+        in the style of the reconstruction summary."""
+        from .filtering import select_indices
+        header = self.config.output_header
+        n_all = len(select_indices(header, selection="all"))
+        n_sel = len(select_indices(header, selection="selected"))
+
+        def _first(summary):
+            if not summary:
+                return {}
+            if isinstance(summary, dict):
+                return next(iter(summary.values()), {}) or {}
+            return summary[0] if len(summary) else {}
+
+        cs = _first(coil_summary)
+        rs = (_first(bnd_summary).get("rms_stats") or {})
+        fc = self.config.filtering
+        tag = header.split("/")[-1]
+        frac = 100.0 * n_sel / max(n_all, 1)
+        print(f"\n=== Bouquet — {tag} {'=' * max(3, 34 - len(tag))}  "
+              f"{n_sel}/{n_all} in-spec ({frac:.0f}%)")
+        print(f"  draws         {n_all} generated")
+        print(f"  coil spec     {cs.get('n_pass', '?')}/{cs.get('n_total', '?')} "
+              f"within ±{fc.inspec_F_max * 100:.0f}%   "
+              f"({cs.get('n_fail', '?')} out-of-spec)")
+        if rs:
+            print(f"  boundary      RMS median {rs.get('median', float('nan')):.2f} mm"
+                  f"   max {rs.get('max', float('nan')):.2f} mm")
 
     def export(self, out_path: Optional[str] = None, selection: str = "selected"):
         """Write a pruned HDF5 with only the selected draws.
@@ -381,9 +546,14 @@ class Bouquet:
 
         For scripts / CI where the baseline is already trusted. Returns self,
         fully populated (baseline, diagnostics, HDF5 path all reachable).
+
+        Idempotent on the early stages: if the solver is already up (e.g. you
+        called :meth:`reconstruct` first, or are reusing it across slices) it is
+        not rebuilt, and an already-prepared baseline is not re-solved.
         """
-        self.setup_solver()
-        self.prepare_baseline()
+        self.setup_solver()                       # idempotent
+        if self.baseline is None:
+            self.prepare_baseline()
         self.generate()
         self.filter()
         self.export()

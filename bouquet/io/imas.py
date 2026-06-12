@@ -181,6 +181,7 @@ def read_imas_baseline(
 
     ni = None
     ti = None
+    main_ion = None
     zeff_num = np.zeros(n)
     for ion in cp["ion"]:
         Z = float(ion["element"][0]["z_n"])
@@ -190,9 +191,32 @@ def read_imas_baseline(
         if Z == 1.0 and ni is None:        # main (hydrogenic) ion
             ni = n_s
             ti = np.asarray(ion["temperature"], dtype=float)
+            main_ion = ion
     if ni is None:
         raise ValueError("no hydrogenic (Z=1) main ion found in core_profiles.ion")
     Zeff = zeff_num / ne
+
+    # --- extra source-provided profiles for the switchboard perturbation ------
+    # Read whatever this source carries (production FUSE files have rotation;
+    # chi/E_r are typically absent and supplied via extra_baseline). All on the
+    # core_profiles grid (== psi_N_kinetic for IMAS).
+    extras = {"zeff": np.asarray(cp["zeff"], dtype=float) if "zeff" in cp else Zeff}
+    if main_ion is not None and "rotation_frequency_tor" in main_ion:
+        extras["omega_tor"] = np.asarray(main_ion["rotation_frequency_tor"], dtype=float)
+    if "e_field" in cp and "radial" in cp["e_field"]:
+        extras["e_r"] = np.asarray(cp["e_field"]["radial"], dtype=float)
+    ctids = dd.get("core_transport")
+    if ctids and ctids.get("model"):
+        cpr = ctids["model"][0].get("profiles_1d", [])
+        ict = (_nearest_index(ctids["time"], T, "core_transport")
+               if ctids.get("time") else ic)
+        if cpr:
+            ctsl = cpr[ict if len(cpr) > ict else 0]
+            ce = ctsl.get("electrons", {}).get("energy", {})
+            if "d" in ce:
+                extras["chi_e"] = np.asarray(ce["d"], dtype=float)
+            if "d" in ctsl.get("total_ion_energy", {}):
+                extras["chi_i"] = np.asarray(ctsl["total_ion_energy"]["d"], dtype=float)
 
     # --- user overrides for fixed additive components ---
     if fixed is not None:
@@ -227,4 +251,5 @@ def read_imas_baseline(
         # from the kinetic profiles.
         pfile_bytes=None,
         li_metrics={"ids_li_1": ids_li_1, "ids_li_3": ids_li_3},
+        extras=extras,
     )

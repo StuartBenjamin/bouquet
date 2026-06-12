@@ -163,27 +163,54 @@ class UncertaintyConfig:
       * ``"direct"``    -- read the ``*_err`` datasets (n_e_err / T_e_err /
         T_12C6_err) directly.
 
-    When ``ida_path`` is None the kinetic sigmas fall back to ``fallback_frac``
-    times each baseline profile. Ion density sigma defaults to the electron
-    value (quasi-neutrality).
+    Each channel resolves independently: an explicit ``sigma_profiles`` array
+    wins, else an IDA ``.cdf``, else a per-channel flat fraction
+    (``ne``/``te``/``ni``/``ti``_scalar_sigma) times the baseline profile.
     """
 
-    # Kinetic sigma source. None -> if the baseline source's profiles come from
-    # an IDA .cdf, reuse that file (read once); otherwise fall back to
-    # `fallback_frac` * baseline profile. Set explicitly to force a sigma file.
+    # Kinetic sigma resolution, in priority order per channel (ne/te/ni/ti):
+    #   1. an explicit psi_N-dependent profile in `sigma_profiles` (absolute
+    #      sigma on the kinetic grid), e.g. from `synthetic_ida_sigma` or a real
+    #      diagnostic envelope;
+    #   2. an IDA `.cdf` (`ida_path`, or the reconstruction source's own .cdf) --
+    #      its `*_err` datasets;
+    #   3. a flat fractional fallback, `<chan>_scalar_sigma` * baseline profile.
     ida_path: Optional[str] = None
     sigma_mode: str = "direct"             # "direct" (*_err datasets) | "ensemble"
     sigma_method: str = "percentile"       # "percentile" | "std"  (ensemble only)
-    sigma_ni_from_ne: bool = True          # quasi-neutrality: sigma_ni = sigma_ne
-    fallback_frac: float = 0.10            # used when ida_path is None
+    sigma_ni_from_ne: bool = True          # IDA path only: sigma_ni = sigma_ne
+
+    # flat fractional kinetic sigma envelopes (per channel). ni/Ti default wider
+    # than ne/Te -- ion density and temperature are harder to diagnose.
+    ne_scalar_sigma: float = 0.05
+    te_scalar_sigma: float = 0.05
+    ni_scalar_sigma: float = 0.10
+    ti_scalar_sigma: float = 0.10
+    # explicit psi_N-dependent ABSOLUTE sigma profiles (on the kinetic grid),
+    # keyed by 'ne'/'te'/'ni'/'ti'. Present channels override the scalar/IDA path.
+    sigma_profiles: dict = field(default_factory=dict)
 
     # j_phi uncertainty: flat fractional envelope on |j_phi_baseline|
-    sigma_jphi_frac: float = 0.10
+    jphi_scalar_sigma: float = 0.10
 
     # GPR correlation length scales (psi_N units) -- define the perturbation
     n_ls: float = 0.5                      # density
     t_ls: float = 0.4                      # temperature
     j_ls: float = 0.25                     # current density
+
+    # --- switchboard: extra perturbed profiles (source-decoupled) ------------
+    # Supplying a sigma profile (on psi_N_kinetic) ENABLES perturbing a named
+    # profile. Baselines are auto-filled by the source where available
+    # (omega_tor from the IDS, zeff computed); otherwise supply them in
+    # extra_baseline (required for chi_e/chi_i and E_r, which production FUSE
+    # files lack, and for the reconstruction/geqdsk path). A warning is emitted
+    # if a sigma is given for a baseline that is all-zero or absent.
+    # Recognised names: 'zeff' (ACTIVE -- re-enters the per-draw SWB bootstrap),
+    # 'omega_tor', 'e_r', 'chi_e', 'chi_i' (passive: perturbed + stored, not GS
+    # inputs). Works identically for ImasSource and ReconstructionSource.
+    extra_sigma: dict = field(default_factory=dict)         # {name: sigma(psi_N)}
+    extra_baseline: dict = field(default_factory=dict)      # {name: baseline(psi_N)}
+    extra_length_scale: dict = field(default_factory=dict)  # {name: GPR length} (default 0.4)
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +264,11 @@ class BouquetConfig:
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     filtering: FilterConfig = field(default_factory=FilterConfig)
     fixed_components: FixedComponentsConfig = field(default_factory=FixedComponentsConfig)
+    # When False (default) the verbose TokaMaker solver chatter emitted during
+    # baseline reconstruction (DLSODE / gs_get_qprof / li-match iteration) is
+    # captured to baseline.reconstruction_log and only a curated quality summary
+    # is printed. Set True to stream the full solver output for debugging.
+    verbose: bool = False
 
     def __post_init__(self):
         """Validate cross-field invariants early (before any GS solve)."""
