@@ -170,3 +170,50 @@ def parallel_to_toroidal(
         "provide either (j_parallel_total, j_tor_total) for the ratio method "
         "or geom for the analytic method"
     )
+
+
+def effective_impurity_charge(ne, ni, zeff, min_dilution=1e-3):
+    """Effective single-impurity charge Z_imp from a baseline (ne, ni, Zeff).
+
+    Quasineutrality with one impurity species (main ion Z=1) gives, per flux
+    surface::
+
+        Z_imp = 1 + ne (Zeff - 1) / (ne - ni)
+
+    Returns the median over surfaces with meaningful dilution
+    (``(ne - ni)/ne > min_dilution`` and ``Zeff > 1``), which is robust to
+    edge noise and to the axis where dilution can vanish. Returns ``None``
+    when the baseline carries no dilution information at all (``ni ~= ne``
+    everywhere, e.g. the IDA ``ni = ne`` workflow) -- in that case a Zeff
+    draw cannot be mapped onto a main-ion density.
+    """
+    ne = np.asarray(ne, dtype=float)
+    ni = np.asarray(ni, dtype=float)
+    zeff = np.asarray(zeff, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dil = (ne - ni) / ne
+        z = 1.0 + ne * (zeff - 1.0) / (ne - ni)
+    ok = np.isfinite(z) & (dil > min_dilution) & (zeff > 1.0)
+    if not np.any(ok):
+        return None
+    return float(np.median(z[ok]))
+
+
+def main_ion_density_from_zeff(ne, zeff, Z_imp):
+    """Main-ion density from (ne, Zeff) under single-impurity quasineutrality.
+
+    ::
+
+        ni  = ne (Z_imp - Zeff) / (Z_imp - 1)
+        nz  = (ne - ni) / Z_imp            (the implied impurity density)
+
+    For ``1 <= Zeff <= Z_imp`` this guarantees ``0 <= ni <= ne`` and
+    ``nz >= 0`` -- the consistent (ne, ni, Zeff, nz) set that the independent
+    per-channel draws cannot provide. Returns ``ni``.
+    """
+    ne = np.asarray(ne, dtype=float)
+    zeff = np.asarray(zeff, dtype=float)
+    Z_imp = float(Z_imp)
+    if not Z_imp > 1.0:
+        raise ValueError(f"Z_imp must exceed 1 (got {Z_imp})")
+    return ne * (Z_imp - zeff) / (Z_imp - 1.0)

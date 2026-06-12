@@ -489,10 +489,11 @@ class Bouquet:
                 p_fast=bl.p_fast,
                 j_NBI=bl.j_NBI,
                 j_RF=bl.j_RF,
-                # Switchboard: extra perturbed profiles (passive + active Zeff).
-                extra_sigma=env.get("extra_sigma"),
-                extra_baseline=env.get("extra_baseline"),
-                extra_length_scale=env.get("extra_length_scale"),
+                # Switchboard: auxiliary perturbed profiles -- rotation /
+                # transport channels (passive) + Zeff (active).
+                aux_sigmas=env.get("aux_sigmas"),
+                aux_baselines=env.get("aux_baselines"),
+                aux_length_scales=env.get("aux_length_scales"),
             )
         self.generation_log = _cap["text"] or None
         return self.diagnostics

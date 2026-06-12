@@ -161,3 +161,57 @@ class TestParallelToToroidalAnalytic:
     def test_no_method_selected_raises(self):
         with pytest.raises(ValueError, match="ratio method"):
             parallel_to_toroidal(np.ones(2))
+
+
+# ---------------------------------------------------------------------------
+# impurity derivation -- effective_impurity_charge / main_ion_density_from_zeff
+# ---------------------------------------------------------------------------
+from bouquet.physics import effective_impurity_charge, main_ion_density_from_zeff
+
+
+class TestImpurityDerivation:
+    def test_round_trip_consistent_baseline(self):
+        # build a consistent (ne, ni, zeff) set from known carbon Z=6, then
+        # recover Z_imp and re-derive ni exactly
+        Z = 6.0
+        psi = np.linspace(0, 1, 50)
+        ne = 5e19 * (1 - 0.8 * psi**2)
+        zeff = 2.0 + 0.3 * psi          # 2.0 .. 2.3
+        ni = ne * (Z - zeff) / (Z - 1.0)
+        Z_rec = effective_impurity_charge(ne, ni, zeff)
+        assert Z_rec is not None
+        assert np.isclose(Z_rec, Z, rtol=1e-10)
+        ni_rec = main_ion_density_from_zeff(ne, zeff, Z_rec)
+        assert np.allclose(ni_rec, ni)
+
+    def test_no_dilution_returns_none(self):
+        # the IDA ni = ne workflow carries no dilution information
+        ne = np.full(20, 4e19)
+        assert effective_impurity_charge(ne, ne.copy(), np.full(20, 1.8)) is None
+
+    def test_physical_bounds(self):
+        # for 1 <= zeff <= Z_imp: 0 <= ni <= ne and nz >= 0
+        Z = 6.0
+        ne = np.full(11, 5e19)
+        zeff = np.linspace(1.0, Z, 11)
+        ni = main_ion_density_from_zeff(ne, zeff, Z)
+        nz = (ne - ni) / Z
+        assert np.all(ni >= -1e-6) and np.all(ni <= ne + 1e-6)
+        assert np.all(nz >= -1e-6)
+        assert np.isclose(ni[0], ne[0])     # zeff=1 -> pure plasma
+        assert np.isclose(ni[-1], 0.0)      # zeff=Z -> fully diluted
+
+    def test_invalid_z_imp_raises(self):
+        with pytest.raises(ValueError, match="exceed 1"):
+            main_ion_density_from_zeff(np.ones(3), np.ones(3), 1.0)
+
+    def test_zeff_floor_ignored_in_median(self):
+        # surfaces with zeff <= 1 or negligible dilution must not poison Z_imp
+        Z = 6.0
+        ne = np.full(30, 5e19)
+        zeff = np.full(30, 2.0)
+        ni = ne * (Z - zeff) / (Z - 1.0)
+        zeff_noisy = zeff.copy(); zeff_noisy[:3] = 0.99   # bad edge points
+        ni_noisy = ni.copy(); ni_noisy[3:6] = ne[3:6]     # zero-dilution points
+        Z_rec = effective_impurity_charge(ne, ni_noisy, zeff_noisy)
+        assert Z_rec is not None and np.isclose(Z_rec, Z, rtol=1e-9)

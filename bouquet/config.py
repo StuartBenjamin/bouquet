@@ -202,19 +202,19 @@ class UncertaintyConfig:
     t_ls: float = 0.4                      # temperature
     j_ls: float = 0.25                     # current density
 
-    # --- switchboard: extra perturbed profiles (source-decoupled) ------------
+    # --- switchboard: auxiliary perturbed profiles (source-decoupled) --------
     # Supplying a sigma profile (on psi_N_kinetic) ENABLES perturbing a named
     # profile. Baselines are auto-filled by the source where available
     # (omega_tor from the IDS, zeff computed); otherwise supply them in
-    # extra_baseline (required for chi_e/chi_i and E_r, which production FUSE
+    # aux_baselines (required for chi_e/chi_i and E_r, which production FUSE
     # files lack, and for the reconstruction/geqdsk path). A warning is emitted
     # if a sigma is given for a baseline that is all-zero or absent.
     # Recognised names: 'zeff' (ACTIVE -- re-enters the per-draw SWB bootstrap),
     # 'omega_tor', 'e_r', 'chi_e', 'chi_i' (passive: perturbed + stored, not GS
     # inputs). Works identically for ImasSource and ReconstructionSource.
-    extra_sigma: dict = field(default_factory=dict)         # {name: sigma(psi_N)}
-    extra_baseline: dict = field(default_factory=dict)      # {name: baseline(psi_N)}
-    extra_length_scale: dict = field(default_factory=dict)  # {name: GPR length} (default 0.4)
+    aux_sigmas: dict = field(default_factory=dict)         # {name: sigma(psi_N)}
+    aux_baselines: dict = field(default_factory=dict)      # {name: baseline(psi_N)}
+    aux_length_scales: dict = field(default_factory=dict)  # {name: GPR length} (default 0.4)
 
 
 # ---------------------------------------------------------------------------

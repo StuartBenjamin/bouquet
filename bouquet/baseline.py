@@ -74,11 +74,12 @@ class Baseline:
     # the TokaMaker li_1; the IDS values are kept here for comparison/plots.
     li_metrics: Optional[dict] = None
 
-    # extra source-provided profiles available for the switchboard perturbation
-    # (e.g. {'omega_tor': ..., 'zeff': ..., 'e_r': ..., 'chi_e': ..., 'chi_i': ...}),
+    # auxiliary source-provided profiles available to the perturbation
+    # switchboard -- rotation ('omega_tor', 'e_r'), transport ('chi_e',
+    # 'chi_i') and impurity ('zeff') channels --
     # on psi_N_kinetic. Populated by the reader where the source has them; the
-    # user may add/override via UncertaintyConfig.extra_baseline.
-    extras: Optional[dict] = None
+    # user may add/override via UncertaintyConfig.aux_baselines.
+    aux: Optional[dict] = None
 
     # curated reconstruction quality metrics (reconstruction path only): a flat
     # dict consumed by Bouquet's reconstruction summary -- Ip/l_i target-vs-
@@ -95,11 +96,11 @@ class Baseline:
         import numpy as np
         ng = len(np.atleast_1d(self.psi_N))
         nk = len(np.atleast_1d(self.psi_N_kinetic))
-        extras = list((self.extras or {}).keys())
+        aux = list((self.aux or {}).keys())
         return (f"Baseline(provenance={self.provenance!r}, "
                 f"Ip={self.Ip_target/1e6:.3f} MA, l_i={self.l_i_target:.3f}, "
                 f"grids: {ng} eq / {nk} kinetic"
-                + (f", extras={extras}" if extras else "") + ")")
+                + (f", aux={aux}" if aux else "") + ")")
 
 
 def resolve_baseline(config: "BouquetConfig", mygs=None) -> Baseline:
@@ -203,29 +204,29 @@ def resolve_uncertainty(config, baseline) -> dict:
     out["sigma_jphi"] = unc.jphi_scalar_sigma * np.abs(np.asarray(baseline.j_phi, dtype=float))
     out["n_ls"], out["t_ls"], out["j_ls"] = unc.n_ls, unc.t_ls, unc.j_ls
 
-    # --- switchboard: resolve the extra perturbed profiles -------------------
-    # A sigma entry enables a profile. Baseline = manual (extra_baseline) over
-    # source-provided (baseline.extras). Warn + skip if the baseline is absent or
+    # --- switchboard: resolve the auxiliary perturbed profiles ---------------
+    # A sigma entry enables a profile. Baseline = manual (aux_baselines) over
+    # source-provided (baseline.aux). Warn + skip if the baseline is absent or
     # all-zero (the user supplied a sigma for nothing).
     import warnings
-    src_extras = dict(baseline.extras or {})
-    man_base = dict(unc.extra_baseline or {})
+    src_aux = dict(baseline.aux or {})
+    man_base = dict(unc.aux_baselines or {})
     resolved_sigma, resolved_base = {}, {}
-    for name, sig in (unc.extra_sigma or {}).items():
-        base = man_base.get(name, src_extras.get(name))
+    for name, sig in (unc.aux_sigmas or {}).items():
+        base = man_base.get(name, src_aux.get(name))
         if base is None or not np.any(np.asarray(base, dtype=float)):
             warnings.warn(
-                f"extra_sigma['{name}'] supplied but its baseline is "
+                f"aux_sigmas['{name}'] supplied but its baseline is "
                 f"{'absent' if base is None else 'all-zero'} in this source; "
                 f"perturbation of '{name}' is skipped. Provide it via "
-                f"UncertaintyConfig.extra_baseline."
+                f"UncertaintyConfig.aux_baselines."
             )
             continue
         resolved_sigma[name] = np.asarray(sig, dtype=float)
         resolved_base[name] = np.asarray(base, dtype=float)
-    out["extra_sigma"] = resolved_sigma
-    out["extra_baseline"] = resolved_base
-    out["extra_length_scale"] = dict(unc.extra_length_scale or {})
+    out["aux_sigmas"] = resolved_sigma
+    out["aux_baselines"] = resolved_base
+    out["aux_length_scales"] = dict(unc.aux_length_scales or {})
     return out
 
 

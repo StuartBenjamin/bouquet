@@ -298,7 +298,7 @@ def store_equilibrium(
     l_i_uncertainty=None,
     x_points=None,
     diverted=None,
-    extras=None,
+    aux=None,
 ):
     """
     Write one perturbed equilibrium into the HDF5 database.
@@ -377,12 +377,12 @@ def store_equilibrium(
         if pressure is not None:
             grp.create_dataset("pressure [Pa]", data=np.asarray(pressure, dtype=np.float64))
 
-        # ---- optional: switchboard extra perturbed profiles --------------
-        # Stored on psi_N_kinetic. Named "extra_<name>" (e.g. extra_omega_tor,
-        # extra_chi_e, extra_zeff) for downstream (transport) consumers.
-        if extras:
-            for _name, _arr in extras.items():
-                grp.create_dataset(f"extra_{_name}",
+        # ---- optional: auxiliary perturbed profiles (the switchboard) ----
+        # Stored on psi_N_kinetic. Named "aux_<name>" (e.g. aux_omega_tor,
+        # aux_chi_e, aux_zeff) for downstream (transport) consumers.
+        if aux:
+            for _name, _arr in aux.items():
+                grp.create_dataset(f"aux_{_name}",
                                    data=np.asarray(_arr, dtype=np.float64))
 
         # ---- scalars (group attributes) ----------------------------------
@@ -573,6 +573,8 @@ def store_baseline_profiles(
     recon_lcfs_ref=None,
     x_points=None,
     diverted=None,
+    aux_baselines=None,
+    aux_sigmas=None,
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -622,6 +624,17 @@ def store_baseline_profiles(
 
         if psi_N_kinetic is not None:
             grp.create_dataset("psi_N_kinetic", data=np.asarray(psi_N_kinetic, dtype=np.float64))
+
+        # ---- auxiliary-profile baselines + sigmas (on the kinetic
+        # grid), so plot_transport_profiles can draw input +/- sigma bands
+        if aux_baselines:
+            for _n, _a in aux_baselines.items():
+                grp.create_dataset(f"aux_{_n}",
+                                   data=np.asarray(_a, dtype=np.float64))
+        if aux_sigmas:
+            for _n, _a in aux_sigmas.items():
+                grp.create_dataset(f"sigma_aux_{_n}",
+                                   data=np.asarray(_a, dtype=np.float64))
 
         grp.attrs["Ip_target"]  = float(Ip_target)
         grp.attrs["l_i_target"] = float(l_i_target)

@@ -785,11 +785,16 @@ def draw_jphi_profiles(axes, psi_N, j_phi, sigma_jphi,
                          perturbed_data_list=perturbed_data_list)
 
 
-def _draw_boundary_panels(ax_lcfs, ax_rms, boundaries):
-    """LCFS-shape overlay (monochrome) + per-draw max/RMS deviation bars.
+def _draw_boundary_panels(ax_lcfs, ax_zoom, boundaries):
+    """LCFS-shape overlay + zoom on the maximum-deviation region.
 
-    ``ax_lcfs`` gets the boundary curves (black baseline, gray draws);
-    ``ax_rms`` gets the categorical Max/RMS deviation bars (kept colored).
+    ``ax_lcfs`` gets the full boundary curves (black dashed baseline, gold
+    draws); ``ax_zoom`` magnifies the neighbourhood of the baseline vertex
+    with the largest mean deviation across draws -- at full scale the curves
+    are indistinguishable (mm deviations on a metre-scale plot). Per-draw
+    RMS/max deviation numbers live in ``plot_traces`` / ``plot_spec_summary``
+    (the bar panel that used to be here duplicated them, and silently
+    dropped draws with no stored boundary).
     """
     if not boundaries:
         return
@@ -801,23 +806,39 @@ def _draw_boundary_panels(ax_lcfs, ax_rms, boundaries):
     ax_lcfs.set_aspect("equal")
     ax_lcfs.set_xlabel("R [m]"); ax_lcfs.set_ylabel("Z [m]")
     ax_lcfs.set_title("LCFS shape variation")
-    ax_lcfs.legend(fontsize=8); ax_lcfs.grid(ls=":")
+    _framed_legend(ax_lcfs, fontsize=8)
+    ax_lcfs.grid(ls=":")
 
+    # mean deviation of each baseline vertex across draws -> zoom center
     ref_pts = np.column_stack([bR0, bZ0])
-    tree = _cKDTree(ref_pts)
-    max_devs, rms_devs = [], []
+    dev_sum = np.zeros(len(ref_pts))
+    n_dev = 0
     for bR, bZ in boundaries[1:]:
-        dists, _ = tree.query(np.column_stack([bR, bZ]))
-        max_devs.append(np.max(dists) * 1e3)
-        rms_devs.append(np.sqrt(np.mean(dists ** 2)) * 1e3)
-    if max_devs:
-        x_idx = np.arange(len(max_devs)); w = 0.35
-        ax_rms.bar(x_idx - w / 2, max_devs, w, label="Max", color="C3", alpha=0.7)
-        ax_rms.bar(x_idx + w / 2, rms_devs, w, label="RMS", color="C0", alpha=0.7)
-        ax_rms.set_xlabel("Perturbation index")
-        ax_rms.set_ylabel("Boundary deviation [mm]")
-        ax_rms.set_title("LCFS deviation from baseline")
-        ax_rms.legend(fontsize=8); ax_rms.grid(ls=":")
+        tree = _cKDTree(np.column_stack([bR, bZ]))
+        d, _ = tree.query(ref_pts)
+        dev_sum += d
+        n_dev += 1
+    if n_dev == 0:
+        ax_zoom.axis("off")
+        return
+    dev_mean = dev_sum / n_dev
+    ic = int(np.argmax(dev_mean))
+    Rc, Zc = ref_pts[ic]
+    half = max(4.0 * float(np.max(dev_mean)), 0.01)   # window >= ±1 cm
+    for bR, bZ in boundaries[1:]:
+        ax_zoom.plot(bR, bZ, "-", color=_GOLD, lw=1.0, alpha=0.8, zorder=1)
+    ax_zoom.plot(bR0, bZ0, "k--", lw=1.2, zorder=2)
+    ax_zoom.set_xlim(Rc - half, Rc + half)
+    ax_zoom.set_ylim(Zc - half, Zc + half)
+    ax_zoom.set_aspect("equal")
+    ax_zoom.set_xlabel("R [m]"); ax_zoom.set_ylabel("Z [m]")
+    ax_zoom.set_title(f"zoom: max-deviation region  "
+                      f"(mean {dev_mean[ic] * 1e3:.1f} mm)", fontsize=10)
+    ax_zoom.grid(ls=":")
+    # mark the zoomed window on the full view
+    from matplotlib.patches import Rectangle
+    ax_lcfs.add_patch(Rectangle((Rc - half, Zc - half), 2 * half, 2 * half,
+                                fill=False, edgecolor="0.4", lw=0.8))
 
 
 def _plot_bouquet_dashboard(psi_N, psi_N_kin, bl, perturbed):
@@ -827,7 +848,7 @@ def _plot_bouquet_dashboard(psi_N, psi_N_kin, bl, perturbed):
     row), j_BS + j_inductive (bottom-right row). The boundary panels get their
     own figure (more room). Returns the figure.
     """
-    fig = plt.figure(figsize=(11.5, 5.3))
+    fig = plt.figure(figsize=(9.5, 4.6))
     outer = fig.add_gridspec(2, 4, hspace=0.32, wspace=0.42)
 
     kin_gs = outer[0:2, 0:2].subgridspec(2, 2, hspace=0.12, wspace=0.3)
@@ -1002,7 +1023,7 @@ def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic",
         boundaries = _load_all_boundaries(h5path, scan_value=scan_value,
                                           indices=sel_indices)
         if boundaries:
-            fig_bd, ax_bd = plt.subplots(1, 2, figsize=(9.5, 4.3))
+            fig_bd, ax_bd = plt.subplots(1, 2, figsize=(8.5, 4.0))
             _draw_boundary_panels(ax_bd[0], ax_bd[1], boundaries)
             fig_bd.tight_layout()
             figs.append(fig_bd)
@@ -1059,7 +1080,7 @@ def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic",
         boundaries = _load_all_boundaries(h5path, scan_value=scan_value,
                                           indices=sel_indices)
         if boundaries:
-            fig_bd, ax_bd = plt.subplots(1, 2, figsize=(9, 4.5))
+            fig_bd, ax_bd = plt.subplots(1, 2, figsize=(8.5, 4.0))
             _draw_boundary_panels(ax_bd[0], ax_bd[1], boundaries)
             fig_bd.tight_layout()
             figs.append(fig_bd)
@@ -1380,13 +1401,18 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
     ax_ff.set_xlabel(xlabel)
     ax_ff.set_ylabel("Normalized")
     ax_ff.set_title(r"$p'$ and $FF'$ (normalized)")
-    ax_ff.legend(fontsize=7)
+    if ax_ff.get_legend_handles_labels()[0]:   # single-eq view has no labels
+        ax_ff.legend(fontsize=7)
     ax_ff.grid(ls=":")
 
     if has_baseline:
         ax_p.legend(fontsize=6)
 
-    plt.tight_layout()
+    # the flux-surface panel's fixed aspect is formally incompatible with
+    # tight_layout; the result is fine, so silence the cosmetic warning
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        plt.tight_layout()
     return fig, fig.axes
 
 
@@ -1628,167 +1654,296 @@ def plot_pfile_bouquet(pfile_path_or_pf=None, x_coord="psi_N", eq=None,
     return fig, axes
 
 
-_COIL_NON_VSC_F = ['F1A', 'F2A', 'F3A', 'F4A', 'F5A', 'F6A', 'F7A', 'F8A',
-                   'F1B', 'F2B', 'F3B', 'F4B', 'F5B', 'F6B', 'F7B', 'F8B']
-_COIL_VSC_PAIR = ['F9A', 'F9B']
-_COIL_E = ['ECOILA', 'ECOILB']
 
 
-def plot_coil_currents(h5path_or_header, scan_val=None):
-    """Per-coil current **drift** across a bouquet, by coil class.
+def _framed_legend(ax, handles=None, **kw):
+    """Legend with a readable semi-opaque frame.
 
-    Three stacked panels show ``100 * (I_draw - I_baseline) / |I_baseline|`` for
-    each coil vs. draw index, separated into the classes that define the
-    in-spec criterion:
+    The per-draw diagnostics scatter markers across the whole axis, so an
+    unframed legend ends up with data markers directly adjacent to (and
+    indistinguishable from) the legend keys.
+    """
+    opts = dict(framealpha=0.92, fancybox=True, borderpad=0.5)
+    opts.update(kw)
+    leg = (ax.legend(handles=handles, **opts) if handles is not None
+           else ax.legend(**opts))
+    leg.get_frame().set_edgecolor('0.8')
+    leg.set_zorder(10)
+    return leg
 
-      * **non-VSC F-coils** (F1-F8 A/B) -- spec band at ``±inspec_F_max``,
-      * **VSC pair** (F9A/F9B) -- spec band at ``±inspec_VSC_max``,
-      * **E-coils** (ECOILA/B) -- *not* part of the in-spec test (absolute
-        floor-limited), shown for context.
 
-    In-spec draws are shaded green, out-of-spec red. Returns ``(fig, axes)``.
+def plot_coil_currents(h5path_or_header, scan_val=None, vsc_coils=('F9A', 'F9B'),
+                       exclude_coils=('ECOILA', 'ECOILB'), annotate=None):
+    """Per-coil drift heatmap: coils x draws, % drift from the recon baseline.
+
+    One diverging-colormap panel where each cell is
+    ``100 * (I_draw - I_baseline) / |I_baseline|``, saturating at the in-spec
+    limit -- a cell at full color is at or beyond spec, and cells exceeding
+    their class spec are edged in black. The VSC pair (``vsc_coils``) is split
+    off at the bottom with its own spec. ``exclude_coils`` (default: the
+    DIII-D E-coils) are omitted -- they are floor-limited in the QP, not
+    relative-drift-limited, and excluded from ``in_spec``; coils with a tiny
+    baseline current (< 5% of the median |I_baseline|) are likewise dropped,
+    since relative drift on a ~zero baseline is not engineering-meaningful.
+    Draw tick labels are red for out-of-spec draws.
+
+    Parameters
+    ----------
+    h5path_or_header : str
+        Path to the ``.h5`` file or header string.
+    scan_val : float or int, optional
+        Scan value; defaults to the first one in the file.
+    vsc_coils : tuple of str
+        Names of the vertical-stability pair (separate spec class).
+    annotate : bool, optional
+        Write the % value in each cell. Default: only when the grid is
+        small enough to stay legible (<= 12 draws and <= 24 coils).
+
+    Returns
+    -------
+    (fig, ax)
     """
     import json as _json
-    from matplotlib.lines import Line2D
+    import matplotlib.colors as _mcolors
     from .utils import _scan_val_key
 
     h5path = (h5path_or_header if h5path_or_header.endswith(".h5")
               else os.path.abspath(f"{h5path_or_header}.h5"))
 
-    markers = ['o', 's', 'D', '^', 'v', '<', '>', 'p']
-    cmap = _cm.get_cmap('turbo')
-    f_style = {n: {'color': cmap(i / max(len(_COIL_NON_VSC_F) - 1, 1)),
-                   'marker': markers[i % len(markers)]}
-               for i, n in enumerate(_COIL_NON_VSC_F)}
-    vsc_style = {'F9A': {'color': 'black', 'marker': '*'},
-                 'F9B': {'color': 'dimgray', 'marker': '*'}}
-    e_style = {'ECOILA': {'color': '#0072B2', 'marker': 'X', 'ls': '--'},
-               'ECOILB': {'color': '#D55E00', 'marker': 'X', 'ls': '--'}}
-
-    records = []
-    inspec_F = inspec_VSC = None
-    svs = ([_scan_val_key(scan_val)] if scan_val is not None else None)
     with h5py.File(h5path, 'r') as hf:
-        scan_keys = (svs if svs is not None
-                     else (sorted(hf['scan'].keys()) if 'scan' in hf else []))
-        for sk in scan_keys:
-            parent = hf.get(f'scan/{sk}')
-            if parent is None or '_baseline' not in parent:
+        scan_keys = sorted(hf['scan'].keys()) if 'scan' in hf else []
+        if scan_val is not None:
+            sk = _scan_val_key(scan_val)
+        elif scan_keys:
+            sk = scan_keys[0]
+            if len(scan_keys) > 1:
+                print(f"plot_coil_currents: multiple scan values "
+                      f"{scan_keys}; showing scan {sk}")
+        else:
+            print("No scan groups found in the HDF5 file.")
+            return None, None
+        parent = hf.get(f'scan/{sk}')
+        if parent is None or '_baseline' not in parent:
+            print("No baseline coil data found in the HDF5 file.")
+            return None, None
+        bl = parent['_baseline']
+        if 'coil_currents [A]' not in bl or 'coil_names' not in bl:
+            print("No baseline coil data found in the HDF5 file.")
+            return None, None
+        ref_names = [s.decode() if isinstance(s, bytes) else s
+                     for s in np.array(bl['coil_names'])]
+        ref = dict(zip(ref_names, np.asarray(bl['coil_currents [A]'], dtype=float)))
+        draws = sorted(int(k) for k in parent.keys() if k.isdigit())
+        cols, in_spec, spec_F, spec_VSC = [], [], 0.02, 0.02
+        for c in draws:
+            g = parent[str(c)]
+            if 'coil_currents [A]' not in g:
                 continue
-            bl = parent['_baseline']
-            if 'coil_currents [A]' not in bl or 'coil_names' not in bl:
-                continue
-            ref_names = [s.decode() if isinstance(s, bytes) else s
-                         for s in np.array(bl['coil_names'])]
-            ref_dict = dict(zip(ref_names, np.array(bl['coil_currents [A]'])))
-            draws = sorted(int(k) for k in parent.keys() if k.isdigit())
-            if inspec_F is None and draws:
-                a = parent[str(draws[0])].attrs
-                inspec_F = float(a.get('inspec_F_max', 0.02))
-                inspec_VSC = float(a.get('inspec_VSC_max', 0.02))
-            for c in draws:
-                g = parent[str(c)]
-                if 'coil_currents [A]' not in g:
-                    continue
-                d_names = _json.loads(g.attrs.get('coil_names', '[]'))
-                d_dict = dict(zip(d_names, np.array(g['coil_currents [A]'])))
-                records.append((ref_dict, d_dict,
-                                bool(g.attrs.get('in_spec', False))))
-    if not records:
+            d_names = _json.loads(g.attrs.get('coil_names', '[]'))
+            cols.append((c, dict(zip(d_names,
+                                     np.asarray(g['coil_currents [A]'], dtype=float)))))
+            in_spec.append(bool(g.attrs.get('in_spec', True)))
+            spec_F = float(g.attrs.get('inspec_F_max', spec_F))
+            spec_VSC = float(g.attrs.get('inspec_VSC_max', spec_VSC))
+    if not cols:
         print("No coil current data found in the HDF5 file.")
         return None, None
-    inspec_F = inspec_F if inspec_F is not None else 0.02
-    inspec_VSC = inspec_VSC if inspec_VSC is not None else 0.02
 
-    def drift_pct(ref, d, coil):
-        r = ref.get(coil, np.nan); v = d.get(coil, np.nan)
-        return (100.0 * (v - r) / abs(r)
-                if (np.isfinite(r) and np.isfinite(v) and abs(r) > 1.0)
-                else np.nan)
+    # row selection: drop spec-exempt coils (E-coils by default -- they are
+    # floor-limited in the QP, not relative-drift-limited) and any coil with
+    # a tiny baseline (relative drift on ~zero is meaningless); order
+    # non-VSC first, then the VSC pair under a separator
+    base_mag = {n: abs(v) for n, v in ref.items()}
+    floor = 0.05 * np.median([m for m in base_mag.values()]) if base_mag else 0.0
+    rows = [n for n in ref_names
+            if base_mag.get(n, 0.0) >= floor
+            and n not in vsc_coils and n not in exclude_coils]
+    rows += [n for n in vsc_coils if n in ref_names]
+    dropped = [n for n in ref_names if n not in rows]
+    n_vsc = sum(1 for n in vsc_coils if n in ref_names)
 
-    n_eq = len(records)
-    x = np.arange(n_eq)
-    in_spec_arr = np.array([r[2] for r in records])
-    fig, (ax_F, ax_VSC, ax_E) = plt.subplots(3, 1, figsize=(9, 6),
-                                             sharex=True)
+    M = np.full((len(rows), len(cols)), np.nan)
+    for j, (_, d) in enumerate(cols):
+        for i, n in enumerate(rows):
+            r, v = ref.get(n, np.nan), d.get(n, np.nan)
+            if np.isfinite(r) and np.isfinite(v) and abs(r) > 0:
+                M[i, j] = 100.0 * (v - r) / abs(r)
 
-    leg_F = []
-    for coil in _COIL_NON_VSC_F:
-        st = f_style[coil]
-        ys = [drift_pct(ref, d, coil) for (ref, d, _) in records]
-        ax_F.plot(x, ys, '-', color=st['color'], marker=st['marker'], ms=4,
-                  alpha=0.85, lw=1.0)
-        leg_F.append(Line2D([0], [0], color=st['color'], marker=st['marker'],
-                            ms=5, lw=1.2, label=coil))
-    for s in (+1, -1):
-        ax_F.axhline(s * inspec_F * 100, color='k', ls='--', lw=1.0)
-    ax_F.axhline(0, color='k', lw=0.7); ax_F.set_ylabel('non-VSC F [%]')
-    ax_F.set_title(f'Per-coil drift, {n_eq} draws '
-                   f'(green = in-spec, red = out-of-spec)')
+    specF_pct, specV_pct = 100.0 * spec_F, 100.0 * spec_VSC
+    vmax = max(specF_pct, specV_pct)
+    fig, ax = plt.subplots(
+        figsize=(min(2.8 + 0.5 * len(cols), 11.0),
+                 min(1.5 + 0.28 * len(rows), 6.5)))
+    im = ax.imshow(M, aspect='auto', cmap='RdBu_r',
+                   norm=_mcolors.TwoSlopeNorm(vcenter=0.0, vmin=-vmax, vmax=vmax))
+    # thin white grid + spec-violation edges
+    ax.set_xticks(np.arange(len(cols)) - 0.5, minor=True)
+    ax.set_yticks(np.arange(len(rows)) - 0.5, minor=True)
+    ax.grid(which='minor', color='white', lw=0.6)
+    ax.tick_params(which='minor', length=0)
+    from matplotlib.patches import Rectangle
+    for i in range(len(rows)):
+        spec = specV_pct if rows[i] in vsc_coils else specF_pct
+        for j in range(len(cols)):
+            if np.isfinite(M[i, j]) and abs(M[i, j]) > spec:
+                ax.add_patch(Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False,
+                                       edgecolor='black', lw=1.4))
+    if n_vsc and len(rows) > n_vsc:
+        ax.axhline(len(rows) - n_vsc - 0.5, color='black', lw=1.0)
+    if annotate is None:
+        annotate = (len(cols) <= 12 and len(rows) <= 24)
+    if annotate:
+        for i in range(len(rows)):
+            for j in range(len(cols)):
+                if np.isfinite(M[i, j]):
+                    ax.text(j, i, f"{M[i, j]:+.1f}", ha='center', va='center',
+                            fontsize=6.5,
+                            color=('white' if abs(M[i, j]) > 0.7 * vmax else 'black'))
+    ax.set_xticks(range(len(cols)))
+    ax.set_xticklabels([str(c) for c, _ in cols])
+    for tick, ok in zip(ax.get_xticklabels(), in_spec):
+        tick.set_color('black' if ok else '#D55E00')
+    ax.set_yticks(range(len(rows)))
+    ax.set_yticklabels(rows, fontsize=8)
+    ax.set_xlabel('draw  (red = out-of-spec)')
+    note = f"; {'/'.join(dropped)} excluded from spec" if dropped else ""
+    ax.set_title(f"Coil drift from baseline  "
+                 f"(spec ±{specF_pct:.0f}% F, ±{specV_pct:.0f}% VSC{note})",
+                 fontsize=10)
+    cb = fig.colorbar(im, ax=ax, pad=0.01)
+    cb.set_label('drift [%]')
+    if specF_pct < vmax:   # mark the tighter (F) spec when the classes differ
+        for s in (-specF_pct, specF_pct):
+            cb.ax.axhline(s, color='black', lw=0.8, ls=':')
+    fig.tight_layout()
+    return fig, ax
 
-    leg_V = []
-    for coil in _COIL_VSC_PAIR:
-        st = vsc_style[coil]
-        ys = [drift_pct(ref, d, coil) for (ref, d, _) in records]
-        ax_VSC.plot(x, ys, '-', color=st['color'], marker=st['marker'], ms=6,
-                    alpha=0.85, lw=1.2)
-        leg_V.append(Line2D([0], [0], color=st['color'], marker=st['marker'],
-                            ms=7, lw=1.2, label=coil))
-    for s in (+1, -1):
-        ax_VSC.axhline(s * inspec_VSC * 100, color='k', ls='--', lw=1.0)
-    ax_VSC.axhline(0, color='k', lw=0.7); ax_VSC.set_ylabel('VSC pair [%]')
 
-    leg_E = []
-    for coil in _COIL_E:
-        st = e_style[coil]
-        ys = [drift_pct(ref, d, coil) for (ref, d, _) in records]
-        ax_E.plot(x, ys, ls=st['ls'], color=st['color'], marker=st['marker'],
-                  ms=5, alpha=0.85, lw=1.2)
-        leg_E.append(Line2D([0], [0], color=st['color'], ls=st['ls'],
-                            marker=st['marker'], ms=6, lw=1.2, label=coil))
-    ax_E.axhline(0, color='k', lw=0.7)
-    ax_E.set_ylabel('E-coil [%]'); ax_E.set_xlabel('perturbed draw index')
+def plot_spec_summary(h5path_or_header, scan_value=None, rms_max_mm=5.0):
+    """The in-spec filter story in one figure.
 
-    # smaller fonts than the default style -- this is a dense 3-panel plot, so
-    # match the visual weight of the other figures
-    for ax in (ax_F, ax_VSC, ax_E):
-        for i, ok in enumerate(in_spec_arr):
-            ax.axvspan(i - 0.4, i + 0.4,
-                       color=('tab:green' if ok else 'tab:red'),
-                       alpha=0.10 if ok else 0.06)
-        ax.tick_params(labelsize=7)
-        ax.yaxis.label.set_size(8)
-    ax_E.xaxis.label.set_size(8)
-    ax_F.title.set_size(9)
-    ax_F.legend(handles=leg_F, loc='center left', bbox_to_anchor=(1.01, 0.5),
-                fontsize=6, title='F1-F8 A/B', title_fontsize=7)
-    ax_VSC.legend(handles=leg_V, loc='center left', bbox_to_anchor=(1.01, 0.5),
-                  fontsize=7, title='VSC')
-    ax_E.legend(handles=leg_E, loc='center left', bbox_to_anchor=(1.01, 0.5),
-                fontsize=7, title='E-coils')
-    fig.tight_layout(rect=[0, 0, 0.86, 1])
-    return fig, (ax_F, ax_VSC, ax_E)
+    Left: per-draw **fraction of spec** for the two filter criteria --
+    coil drift (the worse of max-F/spec_F and max-VSC/spec_VSC) and LCFS
+    RMS deviation (RMS / ``rms_max_mm``). 1.0 = exactly at spec; a draw
+    above the dashed line fails that criterion.
+    Right: the same two fractions as one point per draw, with the pass
+    region shaded -- where each draw sits relative to BOTH specs at once.
+    Fill = selected, open red = excluded (the stored ``selected`` flag).
+
+    Returns
+    -------
+    (fig, axes)
+    """
+    from .utils import _scan_val_key
+    from .filtering import _baseline_boundary, _boundary_devs
+
+    h5path = (h5path_or_header if h5path_or_header.endswith(".h5")
+              else os.path.abspath(f"{h5path_or_header}.h5"))
+
+    idxs, coil_f, bnd_f, selected = [], [], [], []
+    with h5py.File(h5path, 'r') as hf:
+        scan_keys = sorted(hf['scan'].keys()) if 'scan' in hf else []
+        sk = (_scan_val_key(scan_value) if scan_value is not None
+              else (scan_keys[0] if scan_keys else None))
+        parent = hf.get(f'scan/{sk}') if sk is not None else None
+        if parent is None:
+            print("No scan group found in the HDF5 file.")
+            return None, None
+        # pass the raw key (str) through: _scan_val_key(str) is identity, so
+        # this hits the same "scan/<key>" path the draws were stored under
+        bl_boundary = _baseline_boundary(hf, scan_value if scan_value is not None
+                                         else sk)
+        for c in sorted(int(k) for k in parent.keys() if k.isdigit()):
+            g = parent[str(c)]
+            a = g.attrs
+            fF = (float(a.get('max_F_drift_pct', np.nan))
+                  / (100.0 * float(a.get('inspec_F_max', 0.02))))
+            fV = (float(a.get('max_VSC_drift_pct', np.nan))
+                  / (100.0 * float(a.get('inspec_VSC_max', 0.02))))
+            rms, _mx = _boundary_devs(bl_boundary, g)
+            idxs.append(c)
+            coil_f.append(np.nanmax([fF, fV]))
+            bnd_f.append(rms / rms_max_mm if np.isfinite(rms) else np.nan)
+            selected.append(bool(a.get('selected', True)))
+    if not idxs:
+        print("No draws found in the HDF5 file.")
+        return None, None
+    coil_f, bnd_f = np.asarray(coil_f), np.asarray(bnd_f)
+    sel = np.asarray(selected)
+    x = np.arange(len(idxs))
+    PASS, FAIL = '#009E73', '#D55E00'
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 3.6),
+                             gridspec_kw={'width_ratios': [1.5, 1.0]})
+    from matplotlib.lines import Line2D
+
+    ax = axes[0]
+    for off, vals, mk in ((-0.16, coil_f, 'o'), (+0.16, bnd_f, 's')):
+        col = np.where(vals > 1.0, FAIL, '#0072B2' if off < 0 else _GOLD)
+        ax.vlines(x + off, 0, vals, color=col, lw=1.6)
+        ax.scatter(x + off, vals, c=col, marker=mk, s=26, zorder=3)
+    ax.axhline(1.0, color='black', ls='--', lw=1.0)
+    h = [Line2D([], [], color='#0072B2', marker='o', ls='none',
+                label='coil drift'),
+         Line2D([], [], color=_GOLD, marker='s', ls='none',
+                label='boundary RMS'),
+         Line2D([], [], color=FAIL, marker='o', ls='none', label='over spec'),
+         Line2D([], [], color='black', ls='--', label='spec')]
+    ax.set_xticks(x); ax.set_xticklabels([str(i) for i in idxs])
+    ax.set_xlabel('draw'); ax.set_ylabel('fraction of spec')
+    ax.set_ylim(0, max(1.25, np.nanmax([coil_f.max(), np.nanmax(bnd_f)]) * 1.12))
+    _framed_legend(ax, handles=h, fontsize=8, loc='upper left', ncol=2)
+    ax.set_title(f'Per-draw spec fractions  '
+                 f'({int(sel.sum())}/{len(sel)} selected)', fontsize=10)
+    ax.grid(ls=':', axis='y')
+
+    ax2 = axes[1]
+    lim = max(1.25, np.nanmax([coil_f.max(), np.nanmax(bnd_f)]) * 1.12)
+    ax2.add_patch(plt.Rectangle((0, 0), 1, 1, facecolor=PASS, alpha=0.12,
+                                edgecolor=PASS, lw=1.0))
+    ax2.scatter(coil_f[sel], bnd_f[sel], c=PASS, s=34, zorder=3,
+                label='selected (filled)')
+    ax2.scatter(coil_f[~sel], bnd_f[~sel], facecolor='none', edgecolor=FAIL,
+                s=40, zorder=3, label='excluded (open)')
+    # annotate every draw on small bouquets; only the failing ones on large
+    for i, cf, bf, s in zip(np.asarray(idxs), coil_f, bnd_f, sel):
+        if not (np.isfinite(cf) and np.isfinite(bf)):
+            continue
+        if len(idxs) <= 12 or not s:
+            ax2.annotate(str(i), (cf, bf), textcoords='offset points',
+                         xytext=(4, 3), fontsize=7)
+    ax2.axvline(1.0, color='black', ls='--', lw=0.8)
+    ax2.axhline(1.0, color='black', ls='--', lw=0.8)
+    ax2.set_xlim(0, lim); ax2.set_ylim(0, lim)
+    ax2.set_xlabel('coil drift / spec'); ax2.set_ylabel('boundary RMS / spec')
+    ax2.set_title('Spec box (pass region shaded)', fontsize=10)
+    _framed_legend(ax2, fontsize=8, loc='upper right')
+    fig.tight_layout()
+    return fig, axes
 
 
 # ====================================================================
-#  Switchboard extra-profile ensemble + unified IMAS view
+#  Auxiliary-profile (rotation / transport / impurity) ensemble + IMAS view
 # ====================================================================
-_EXTRA_LABELS = {
+_AUX_LABELS = {
     "omega_tor": r"$\omega_{tor}$ [rad/s]", "e_r": r"$E_r$ [V/m]",
     "chi_e": r"$\chi_e$ [m$^2$/s]", "chi_i": r"$\chi_i$ [m$^2$/s]",
     "zeff": r"$Z_{eff}$",
 }
-_EXTRA_ORDER = ["omega_tor", "e_r", "chi_e", "chi_i", "zeff"]
+_AUX_ORDER = ["omega_tor", "e_r", "chi_e", "chi_i", "zeff"]
 
 
-def plot_transport_profiles(h5path_or_header, scan_value=None, names=None,
+def plot_aux_profiles(h5path_or_header, scan_value=None, names=None,
                             selection="all"):
     """Overlay the perturbed transport / rotation / Z_eff profiles per draw.
 
     These are the switchboard profiles outside the core kinetic set -- toroidal
     rotation ``omega_tor``, radial field ``e_r``, transport diffusivities
-    ``chi_e``/``chi_i`` and ``zeff`` -- read from the ``extra_<name>`` datasets
-    and overlaid on the kinetic grid, one panel per profile.
+    ``chi_e``/``chi_i`` and ``zeff`` -- read from the ``aux_<name>`` datasets
+    (legacy ``extra_<name>`` archives are still read),
+    one panel per profile in the same style as the kinetic dashboard: black
+    input profile, shaded ±1σ and dotted ±2σ envelopes (when the baseline
+    aux baselines/sigmas are stored in the archive), gold perturbed family.
 
     Returns ``(fig, axes)``, or ``(None, None)`` if none are stored (the
     switchboard wasn't used).
@@ -1804,8 +1959,18 @@ def plot_transport_profiles(h5path_or_header, scan_value=None, names=None,
              for i in list_equilibrium_indices(h5path, scan_value=sv)]
     if selection != "all":
         from .filtering import select_indices as _sel
-        keep = set(_sel(h5path, scan_value=svs[0], selection=selection))
-        pairs = [(sv, i) for (sv, i) in pairs if i in keep]
+        keep = {(sv, i) for sv in svs
+                for i in _sel(h5path, scan_value=sv, selection=selection)}
+        pairs = [p for p in pairs if p in keep]
+
+    # dataset names: "aux_<name>" (current) with "extra_<name>" fallback for
+    # archives written before the aux rename
+    def _aux_ds(grp, nm, sigma=False):
+        for key in ((f"sigma_aux_{nm}", f"sigma_extra_{nm}") if sigma
+                    else (f"aux_{nm}", f"extra_{nm}")):
+            if key in grp:
+                return np.asarray(grp[key][()])
+        return None
 
     avail, xgrid = [], None
     with h5py.File(h5path, "r") as hf:
@@ -1813,45 +1978,101 @@ def plot_transport_profiles(h5path_or_header, scan_value=None, names=None,
             gp = _group_path(sv, i)
             if gp in hf:
                 g = hf[gp]
-                avail = [k[len("extra_"):] for k in g.keys()
-                         if k.startswith("extra_")]
+                avail = sorted({k.split("_", 1)[1] for k in g.keys()
+                                if k.startswith(("aux_", "extra_"))})
                 if "psi_N_kinetic" in g:
                     xgrid = np.asarray(g["psi_N_kinetic"][()])
                 break
-    names = names or [n for n in _EXTRA_ORDER if n in avail] or avail
+    names = names or [n for n in _AUX_ORDER if n in avail] or avail
     if not names:
-        print("No extra_* profiles stored (switchboard not used for this run).")
+        print("No aux_* profiles stored (switchboard not used for this run).")
         return None, None
 
-    fig, axes = plt.subplots(1, len(names), figsize=(4.2 * len(names), 3.6),
+    # baseline + sigma (stored by store_baseline_profiles since the
+    # aux-bands feature; older files fall back to draws-only)
+    from .utils import _scan_val_key
+    bl_prof, bl_sig, bl_x = {}, {}, None
+    with h5py.File(h5path, "r") as hf:
+        bkey = _scan_val_key(pairs[0][0]) if pairs else None
+        bl_path = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
+        if bl_path in hf:
+            bl = hf[bl_path]
+            if "psi_N_kinetic" in bl:
+                bl_x = np.asarray(bl["psi_N_kinetic"][()])
+            for nm in names:
+                v = _aux_ds(bl, nm)
+                if v is not None:
+                    bl_prof[nm] = v
+                s = _aux_ds(bl, nm, sigma=True)
+                if s is not None:
+                    bl_sig[nm] = s
+
+    ncols = min(3, len(names))
+    nrows = int(np.ceil(len(names) / ncols))
+    fig, axes = plt.subplots(nrows, ncols,
+                             figsize=(3.2 * ncols, 2.9 * nrows),
                              squeeze=False)
-    axes = axes[0]
+    flat = axes.ravel()
+    n_drawn = 0
     with h5py.File(h5path, "r") as hf:
         for j, nm in enumerate(names):
+            ax = flat[j]
+            n_drawn = 0
             for sv, i in pairs:
-                ds = f"{_group_path(sv, i)}/extra_{nm}"
-                if ds in hf:
-                    y = np.asarray(hf[ds][()])
+                gp = _group_path(sv, i)
+                y = _aux_ds(hf[gp], nm) if gp in hf else None
+                if y is not None:
                     x = (xgrid if xgrid is not None and len(xgrid) == len(y)
                          else np.linspace(0, 1, len(y)))
-                    axes[j].plot(x, y, color=_GOLD, lw=0.9, alpha=0.8)
-            axes[j].set_title(_EXTRA_LABELS.get(nm, nm))
-            axes[j].set_xlabel(r"$\psi_N$")
-            axes[j].grid(alpha=0.3)
-    fig.suptitle("Perturbed transport / rotation / $Z_{eff}$ profiles")
+                    ax.plot(x, y, color=_GOLD, lw=0.9, alpha=0.8, zorder=2)
+                    n_drawn += 1
+            # input profile + sigma envelopes, matching the kinetic dashboard
+            if nm in bl_prof:
+                y0 = bl_prof[nm]
+                x0 = (bl_x if bl_x is not None and len(bl_x) == len(y0)
+                      else np.linspace(0, 1, len(y0)))
+                ax.plot(x0, y0, c="k", lw=2, zorder=3)
+                if nm in bl_sig and len(bl_sig[nm]) == len(y0):
+                    sg = bl_sig[nm]
+                    ax.fill_between(x0, y0 - sg, y0 + sg, alpha=0.25,
+                                    color="0.45", zorder=1)
+                    ax.plot(x0, y0 + 2 * sg, c="k", ls=":", lw=1.5,
+                            alpha=0.5, zorder=1)
+                    ax.plot(x0, y0 - 2 * sg, c="k", ls=":", lw=1.5,
+                            alpha=0.5, zorder=1)
+            ax.set_title(_AUX_LABELS.get(nm, nm), fontsize=10)
+            if j // ncols == nrows - 1 or j + ncols >= len(names):
+                ax.set_xlabel(r"$\psi_N$")
+            ax.grid(ls=":")
+        for j in range(len(names), nrows * ncols):
+            flat[j].axis("off")
+    # one legend for the whole figure (same encoding as the dashboard)
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    handles = [Line2D([], [], c="k", lw=2, label="input"),
+               Patch(facecolor="0.45", alpha=0.25,
+                     label=r"$\pm\,1\sigma_{\rm exp}$"),
+               Line2D([], [], c="k", ls=":", lw=1.5, alpha=0.5,
+                      label=r"$\pm\,2\sigma_{\rm exp}$"),
+               Line2D([], [], color=_GOLD, lw=1.2,
+                      label=f"perturbed ({n_drawn})")]
+    if not bl_prof:   # legacy file: only the draws are available
+        handles = [handles[-1]]
+    _framed_legend(flat[0], handles=handles, fontsize=7, loc="best")
     fig.tight_layout()
     return fig, axes
 
 
-# Backwards-compatible alias (the figure used to be called "extra profiles").
-plot_extra_profiles = plot_transport_profiles
+# Alias kept for early class-API notebooks (the figure was first exposed
+# as "transport profiles" before the aux rename).
+plot_transport_profiles = plot_aux_profiles
 
 
 def plot_imas_bouquet(h5path_or_header, scan_value=None, selection="all",
                       layout="stack", pub_style=False):
     """Unified bouquet view for the IMAS path: the standard ensemble panels
     (kinetic / pressure / j_phi / boundary, via :func:`plot_bouquet`) plus the
-    perturbed switchboard extras (via :func:`plot_extra_profiles`).
+    perturbed auxiliary profiles (via :func:`plot_aux_profiles`).
 
     ``pub_style=False`` (default) shows one combined dashboard figure;
     ``pub_style=True`` shows the separate publication figures (``layout="row"``
@@ -1862,7 +2083,7 @@ def plot_imas_bouquet(h5path_or_header, scan_value=None, selection="all",
                        selection=selection, layout=layout, pub_style=pub_style)
     bq_figs = res[0] if isinstance(res, tuple) else res
     figs.extend(bq_figs if isinstance(bq_figs, (list, tuple)) else [bq_figs])
-    ex_fig, _ = plot_transport_profiles(h5path_or_header, scan_value=scan_value,
+    ex_fig, _ = plot_aux_profiles(h5path_or_header, scan_value=scan_value,
                                         selection=selection)
     if ex_fig is not None:
         if layout == "row" and pub_style:
@@ -1874,291 +2095,219 @@ def plot_imas_bouquet(h5path_or_header, scan_value=None, selection="all",
 # ====================================================================
 #  Trace plots: l_i, boundary deviation across equilibria
 # ====================================================================
-def plot_traces(h5path_or_header, scan_value="all"):
-    r"""Plot l_i and boundary deviation traces across equilibria.
+def plot_traces(h5path_or_header, scan_value="all", li_band=None, rms_max_mm=None):
+    r"""Compact per-draw diagnostics: l_i, LCFS deviation, anchor heatmap.
 
-    Produces:
-      1. **l_i** — top: actual l_i(1) values; bottom: % error vs target
-      2. **Boundary** — top: RMS deviation [mm]; bottom: max deviation [mm]
-      3. **Boundary points** (when available) — per-anchor ΔR/ΔZ traces
+    One row of three panels (per scan value):
 
-    (The Ip trace was dropped: the GS solver holds Ip on target natively, so the
-    per-draw Ip error is ~0 by construction.)
+      1. **l_i(1)** per draw with the recon baseline (black star at draw 0),
+         the l_i target (dashed) and, when ``li_band`` is given (fraction,
+         e.g. ``0.05``), the acceptance band.
+      2. **LCFS deviation** from the recon baseline: RMS (filled) and max
+         (open) [mm], with the ``rms_max_mm`` threshold when given.
+      3. **Anchor displacement** |Δ| [mm] of the four LCFS reference points
+         (inboard/outboard midplane, top, lower X-point) as an
+         anchors x draws heatmap. Signed ΔR/ΔZ detail lives in
+         :func:`plot_boundary_point_traces`.
 
-    Parameters
-    ----------
-    h5path_or_header : str
-        Path to ``.h5`` file or header string.
-    scan_value : str, float, int, or ``'all'``
-        Scan value to plot.  ``'all'`` (default) plots all scan values
-        on the same axes with different colours.
+    Selected draws are filled; excluded draws are open markers.
 
     Returns
     -------
     figs : list of Figure
-        ``[fig_li, fig_boundary]`` (plus ``fig_boundary_points`` when available).
+        One figure per scan value.
     """
     from .utils import read_eqdsk_from_bytes, _scan_val_key
+    from .filtering import _baseline_boundary, _boundary_devs
 
     if not h5path_or_header.endswith(".h5"):
         h5path = os.path.abspath(f"{h5path_or_header}.h5")
     else:
         h5path = os.path.abspath(h5path_or_header)
 
-    # Discover scan values
     if scan_value == "all":
-        scan_vals = discover_scan_values(h5path)
-        if not scan_vals:
-            scan_vals = [None]
+        scan_vals = discover_scan_values(h5path) or [None]
     else:
         scan_vals = [scan_value]
 
-    colors = _cm.tab10(np.linspace(0, 0.9, max(len(scan_vals), 1)))
-
-    # ---- Collect data across all scan values ----
-    all_traces = {}  # {scan_val: {indices, li1, li3, Ip, bnd_rms, bnd_max}}
-
+    figs = []
     for sv in scan_vals:
         bl = load_baseline_profiles(h5path, scan_value=sv)
-        Ip_target = float(bl.get("Ip_target", 0))
-        li_target = float(bl.get("l_i_target", 0))
+        li_target = float(bl.get("l_i_target", np.nan))
 
-        # Get input geqdsk boundary for deviation calculation.
-        # Try baseline eqdsk bytes first, then stored boundary arrays.
-        bl_boundary = None
-        bl_eqdsk_key = None
-        bl_Ip = np.nan          # baseline (recon) Ip from baseline.eqdsk
-        bl_li1 = np.nan         # baseline l_i(1)
-        bl_li3 = np.nan         # baseline l_i(3)
-        bl_boundary_source = "none"
+        idxs, li1, sel = [], [], []
+        rms_mm, max_mm = [], []
+        anchors = []          # per draw: dict name -> (R, Z)
+        bl_anchor_pts = None
+        anchor_names = ['inboard', 'outboard', 'top', 'bottom']
+        xpt_label = 'bottom'
+
         with h5py.File(h5path, "r") as hf:
-            bkey_bl = _scan_val_key(sv)
-            bl_grp_path = f"scan/{bkey_bl}/_baseline" if bkey_bl else "_baseline"
-            if bl_grp_path in hf:
-                bl_grp = hf[bl_grp_path]
-                # PREFERRED: recon_lcfs_ref captured via mygs.trace_surf
-                # at the same state save_eqdsk was called -- gives the
-                # method-consistent comparison that the per-draw eqdsk
-                # boundary (also from trace-based extraction) can be
-                # cleanly diff'd against.  Falls back to the eqdsk's
-                # ~100-pt boundary if the run predates this feature.
-                if "recon_lcfs_ref" in bl_grp:
+            bkey = _scan_val_key(sv)
+            parent = hf[f"scan/{bkey}"] if bkey is not None else hf
+            bl_grp = parent.get("_baseline")
+            bl_boundary = _baseline_boundary(hf, sv)
+
+            # baseline magnetic axis (fixed anchor reference for ALL draws)
+            R_axis = Z_axis = None
+            if bl_grp is not None:
+                eqk = [k for k in bl_grp.keys() if k.endswith(".eqdsk")]
+                if eqk:
                     try:
-                        bl_boundary = np.asarray(bl_grp["recon_lcfs_ref"][()])
-                        bl_boundary_source = (
-                            f"recon_lcfs_ref ({len(bl_boundary)} pts)")
-                    except Exception:
-                        bl_boundary = None
-                eqdsk_keys = [k for k in bl_grp.keys() if k.endswith(".eqdsk")]
-                if eqdsk_keys:
-                    try:
-                        raw = bytes(bl_grp[eqdsk_keys[0]][()])
-                        eq_bl = read_eqdsk_from_bytes(raw, read_geqdsk)
-                        if bl_boundary is None:
-                            bl_boundary = np.column_stack(
-                                [eq_bl.boundary_R, eq_bl.boundary_Z])
-                            bl_boundary_source = (
-                                f"baseline.eqdsk boundary "
-                                f"({len(bl_boundary)} pts)")
-                        bl_Ip = float(abs(eq_bl.Ip))
+                        eq_bl = read_eqdsk_from_bytes(
+                            bytes(bl_grp[eqk[0]][()]), read_geqdsk)
+                        R_axis, Z_axis = float(eq_bl.R_mag), float(eq_bl.Z_mag)
                     except Exception:
                         pass
-            # Recon's actual converged l_i values are stored under the
-            # top-level integer-keyed entry "0" by store_equilibrium
-            # (not under _baseline).  Fall back to l_i_target if
-            # unavailable.
-            if "0" in hf and hasattr(hf["0"], "attrs"):
-                bl_li1 = float(hf["0"].attrs.get(
-                    "l_i(1)", bl.get("l_i_target", np.nan)))
-                bl_li3 = float(hf["0"].attrs.get(
-                    "l_i(3)", np.nan))
-            if np.isnan(bl_li1):
-                bl_li1 = float(bl.get("l_i_target", np.nan))
-        if bl_boundary is None:
-            bl_boundary_R = bl.get("eqdsk_boundary_R", None)
-            bl_boundary_Z = bl.get("eqdsk_boundary_Z", None)
-            if bl_boundary_R is not None and bl_boundary_Z is not None:
-                bl_boundary = np.column_stack([bl_boundary_R, bl_boundary_Z])
+            if R_axis is None and bl_boundary is not None:
+                R_axis = float(np.mean(bl_boundary[:, 0]))
+                Z_axis = float(np.mean(bl_boundary[:, 1]))
 
-        # Load all perturbed equilibria — read eqdsk bytes directly
-        # from HDF5 to extract Ip and boundary.  Index 0 is reserved
-        # for the reconstructed baseline (recon's actual converged
-        # state, sourced from `_baseline/baseline.eqdsk` for Ip /
-        # boundary and from the top-level "0" entry for l_i).  This
-        # gives a visual reference point on every trace.  Perturbed
-        # draws are then indexed 1..N.
-        bkey = _scan_val_key(sv)
-        indices = [0]
-        li1_vals = [bl_li1]
-        li3_vals = [bl_li3]
-        Ip_vals = [bl_Ip]
-        # Baseline's boundary deviation from itself is 0 by construction
-        bnd_rms_vals = [0.0 if bl_boundary is not None else np.nan]
-        bnd_max_vals = [0.0 if bl_boundary is not None else np.nan]
+            def _anchor_pts(boundary, grp_or_none):
+                if boundary is None or R_axis is None:
+                    return None
+                xpts = None
+                if grp_or_none is not None and "x_points" in grp_or_none:
+                    try:
+                        xpts = np.asarray(grp_or_none["x_points"][()])
+                    except Exception:
+                        xpts = None
+                # close the polyline: trace_surf starts/ends at the outboard
+                # midplane, so the un-closed seam sits exactly on the
+                # outboard intersection and the bracket test misses it
+                closed = np.vstack([boundary, boundary[:1]])
+                pts, has_xpt = _extract_boundary_points(
+                    closed[:, 0], closed[:, 1], R_axis, Z_axis,
+                    ref_R_axis=R_axis, ref_Z_axis=Z_axis, x_points=xpts)
+                return pts, has_xpt
 
-        with h5py.File(h5path, "r") as hf:
-            if bkey is not None:
-                parent = hf[f"scan/{bkey}"]
-            else:
-                parent = hf
-            stored_counts = sorted(
-                int(k) for k in parent.keys()
-                if k not in ("_baseline", "scan") and k.isdigit()
-            )
+            res = _anchor_pts(bl_boundary, bl_grp)
+            if res is not None:
+                bl_anchor_pts, bl_has_xpt = res
+                if bl_has_xpt.get('lower'):
+                    xpt_label = 'X-pt'
 
-            for idx, count in enumerate(stored_counts):
-                grp = parent[str(count)]
-                # idx+1 because index 0 is the reconstructed baseline
-                indices.append(idx + 1)
-                li1_vals.append(float(grp.attrs.get("l_i(1)", np.nan)))
-                li3_vals.append(float(grp.attrs.get("l_i(3)", np.nan)))
-
-                # ---- Per-draw boundary for the bnd-diag panels.
-                # PREFER perturbed_lcfs_ref (10k-pt trace_surf at the
-                # exact mygs state save_eqdsk was called from) over the
-                # eqdsk's ~100-pt RBBBS/ZBBBS.  Apples-to-apples with
-                # the baseline.recon_lcfs_ref reference -- removes ~4
-                # mm of save_eqdsk sampling-noise floor and matches the
-                # in-loop bnd-diag values.  Falls back to eqdsk boundary
-                # for runs that predate this dataset.
-                perturbed_pts = None
+            for c in sorted(int(k) for k in parent.keys()
+                            if k not in ("_baseline", "scan") and k.isdigit()):
+                grp = parent[str(c)]
+                idxs.append(c)
+                li1.append(float(grp.attrs.get("l_i(1)", np.nan)))
+                sel.append(bool(grp.attrs.get("selected", True)))
+                r, m = _boundary_devs(bl_boundary, grp)
+                rms_mm.append(r); max_mm.append(m)
+                pb = None
                 if "perturbed_lcfs_ref" in grp:
                     try:
-                        perturbed_pts = np.asarray(
-                            grp["perturbed_lcfs_ref"][()])
+                        pb = np.asarray(grp["perturbed_lcfs_ref"][()])
                     except Exception:
-                        perturbed_pts = None
-                # Extract Ip from eqdsk bytes (and fall back to eqdsk
-                # boundary if no perturbed_lcfs_ref was stored)
-                eqdsk_ds = [k for k in grp.keys() if k.endswith(".eqdsk")]
-                if eqdsk_ds:
-                    try:
-                        raw = bytes(grp[eqdsk_ds[0]][()])
-                        eq = read_eqdsk_from_bytes(raw, read_geqdsk)
-                        Ip_vals.append(abs(eq.Ip))
+                        pb = None
+                res = _anchor_pts(pb, grp) if pb is not None else None
+                anchors.append(res[0] if res is not None else None)
 
-                        if perturbed_pts is None:
-                            perturbed_pts = np.column_stack(
-                                [eq.boundary_R, eq.boundary_Z])
+        if not idxs:
+            continue
+        # x = the STORED draw indices (same labels as the coil heatmap, the
+        # spec summary, and the HDF5 groups); the recon baseline sits one
+        # slot to the left of the first draw
+        x = np.asarray(idxs, dtype=float)
+        x_bl = x[0] - 1.0
+        sel = np.asarray(sel)
+        li1 = np.asarray(li1)
+        rms_mm = np.asarray(rms_mm); max_mm = np.asarray(max_mm)
 
-                        if bl_boundary is not None and perturbed_pts is not None:
-                            tree = _cKDTree(perturbed_pts)
-                            devs, _ = tree.query(bl_boundary)
-                            bnd_rms_vals.append(np.sqrt(np.mean(devs**2)) * 1e3)
-                            bnd_max_vals.append(np.max(devs) * 1e3)
-                        else:
-                            bnd_rms_vals.append(np.nan)
-                            bnd_max_vals.append(np.nan)
-                    except Exception:
-                        Ip_vals.append(np.nan)
-                        bnd_rms_vals.append(np.nan)
-                        bnd_max_vals.append(np.nan)
-                else:
-                    Ip_vals.append(np.nan)
-                    bnd_rms_vals.append(np.nan)
-                    bnd_max_vals.append(np.nan)
+        # anchor |displacement| matrix [mm]
+        D = np.full((len(anchor_names), len(idxs)), np.nan)
+        if bl_anchor_pts is not None:
+            for j, pts in enumerate(anchors):
+                if pts is None:
+                    continue
+                for i, name in enumerate(anchor_names):
+                    p0, p1 = bl_anchor_pts.get(name), pts.get(name)
+                    if p0 is not None and p1 is not None and \
+                            np.all(np.isfinite(p0)) and np.all(np.isfinite(p1)):
+                        D[i, j] = np.hypot(p1[0] - p0[0], p1[1] - p0[1]) * 1e3
 
-        all_traces[sv] = {
-            "indices": np.array(indices),
-            "li1": np.array(li1_vals),
-            "li3": np.array(li3_vals),
-            "Ip": np.array(Ip_vals),
-            "bnd_rms": np.array(bnd_rms_vals),
-            "bnd_max": np.array(bnd_max_vals),
-            "Ip_target": Ip_target,
-            "li_target": li_target,
-        }
+        fig, axes = plt.subplots(
+            1, 3, figsize=(10.0, 3.3),
+            gridspec_kw={'width_ratios': [1.0, 1.0, 1.25]})
+        sv_tag = f"  (scan {sv})" if sv is not None and len(scan_vals) > 1 else ""
 
-    # Helper to overlay the baseline (index 0) with a distinct marker
-    # so it stands out from perturbed draws on every panel.
-    _BL_KW = dict(marker='*', markersize=14, markerfacecolor='none',
-                  markeredgewidth=1.5, linestyle='none', zorder=5)
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import Patch
 
-    # ---- One combined figure: l_i (row 0), boundary RMS/max (row 1),
-    #      per-anchor ΔR/ΔZ (row 2). All share the equilibrium-index x-axis. ----
-    fig, _axg = plt.subplots(3, 2, figsize=(11, 7.5), sharex=True)
-    axes_li = _axg[0]
-    axes_bnd = _axg[1]
+        # -- panel 1: l_i --
+        ax = axes[0]
+        h1 = []
+        if np.isfinite(li_target):
+            ax.axhline(li_target, color='gray', ls='--', lw=1.0, zorder=1)
+            h1.append(Line2D([], [], color='gray', ls='--',
+                             label=r'$l_i$ target'))
+            if li_band is not None:
+                ax.axhspan(li_target * (1 - li_band), li_target * (1 + li_band),
+                           color='gray', alpha=0.15, zorder=0)
+                h1.append(Patch(facecolor='gray', alpha=0.15,
+                                label=f'±{100*li_band:.0f}% band'))
+            ax.plot(x_bl, li_target, marker='*', ms=12, color='black', ls='none',
+                    zorder=3)
+            h1.append(Line2D([], [], color='black', marker='*', ms=11, ls='none',
+                             label='baseline'))
+            ax.axvline(x_bl + 0.5, color='lightgray', lw=0.8)
+        ax.plot(x[sel], li1[sel], 'o', color=_GOLD, ms=5, zorder=3)
+        ax.plot(x[~sel], li1[~sel], 'o', mfc='none', mec=_GOLD, ms=5, zorder=3)
+        h1 += [Line2D([], [], color=_GOLD, marker='o', ls='none', ms=5,
+                      label='selected (filled)'),
+               Line2D([], [], mfc='none', mec=_GOLD, color=_GOLD, marker='o',
+                      ls='none', ms=5, label='excluded (open)')]
+        ax.set_xlabel('draw'); ax.set_ylabel(r'$l_i(1)$')
+        ax.set_title(r'$l_i$ per draw' + sv_tag, fontsize=10)
+        _framed_legend(ax, handles=h1, fontsize=7, loc='best')
+        ax.grid(ls=':')
+        ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
 
-    for (sv, tr), c in zip(all_traces.items(), colors):
-        lbl = f"scan={sv}" if len(scan_vals) > 1 else None
-        x = tr["indices"]
+        # -- panel 2: boundary deviation --
+        ax = axes[1]
+        ax.plot(x[sel], rms_mm[sel], 'o', color=_GOLD, ms=5, zorder=3)
+        ax.plot(x[~sel], rms_mm[~sel], 'o', mfc='none', mec=_GOLD, ms=5, zorder=3)
+        ax.plot(x, max_mm, 's', mfc='none', mec='black', ms=4.5, zorder=2)
+        h2 = [Line2D([], [], color=_GOLD, marker='o', ls='none', ms=5,
+                     label='RMS — selected'),
+              Line2D([], [], mfc='none', mec=_GOLD, color=_GOLD, marker='o',
+                     ls='none', ms=5, label='RMS — excluded'),
+              Line2D([], [], mfc='none', mec='black', color='black', marker='s',
+                     ls='none', ms=4.5, label='max')]
+        if rms_max_mm is not None:
+            ax.axhline(rms_max_mm, color='black', ls='--', lw=1.0)
+            h2.append(Line2D([], [], color='black', ls='--',
+                             label=f'RMS spec {rms_max_mm:g} mm'))
+        ax.set_ylim(bottom=0)
+        ax.set_xlabel('draw'); ax.set_ylabel('LCFS deviation [mm]')
+        ax.set_title('Boundary vs baseline', fontsize=10)
+        _framed_legend(ax, handles=h2, fontsize=7, loc='best')
+        ax.grid(ls=':')
+        ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
 
-        axes_li[0].plot(x, tr["li1"], 'o-', color=c, lw=1.5, ms=4, label=lbl)
-        # Highlight baseline (index 0) — recon's converged l_i(1)
-        axes_li[0].plot([x[0]], [tr["li1"][0]], color=c,
-                        label=('baseline' if lbl is None else None),
-                        **_BL_KW)
-        # eqdsk header l_i target (for context — recon's actual l_i can
-        # differ from this since l_i is an equilibrium outcome, not a
-        # forced target during [Ip match])
-        axes_li[0].axhline(tr["li_target"], color=c, ls='--', lw=1,
-                            alpha=0.5,
-                            label=('eqdsk l_i target'
-                                   if lbl is None else None))
-
-        # Lower panel: error is computed against the recon BASELINE
-        # l_i (so index 0 = 0 by construction, matching the Ip and
-        # boundary panels).  The eqdsk-header reference is shown as
-        # a dashed line so the recon's intrinsic offset stays visible.
-        bl_li = tr["li1"][0]
-        if bl_li > 0 and np.isfinite(bl_li):
-            li_pct = 100.0 * (tr["li1"] - bl_li) / bl_li
-            axes_li[1].plot(x, li_pct, 'o-', color=c, lw=1.5, ms=4, label=lbl)
-            axes_li[1].plot([x[0]], [li_pct[0]], color=c, **_BL_KW)
-            axes_li[1].axhline(0, color='k', ls=':', lw=0.5)
-            if tr["li_target"] > 0:
-                _li_eqdsk_pct = (100.0 *
-                                 (tr["li_target"] - bl_li) / bl_li)
-                axes_li[1].axhline(_li_eqdsk_pct, color=c, ls='--',
-                                    lw=1, alpha=0.5)
-
-    axes_li[0].set_ylabel(r"$l_i(1)$")
-    axes_li[0].set_title(r"$l_i$ trace  (index 0 = recon baseline)")
-    axes_li[0].grid(True, alpha=0.3)
-    axes_li[0].legend(fontsize=7)
-
-    axes_li[1].set_ylabel(r"$l_i$ dev [%]")
-    axes_li[1].grid(True, alpha=0.3)
-
-    # (Ip trace dropped -- the GS solver now holds Ip on target natively, so the
-    # per-draw Ip error is ~0 by construction and the check is no longer useful.)
-
-    # ---- Row 1: Boundary deviation ----
-    for (sv, tr), c in zip(all_traces.items(), colors):
-        lbl = f"scan={sv}" if len(scan_vals) > 1 else None
-        x = tr["indices"]
-
-        axes_bnd[0].plot(x, tr["bnd_rms"], 'o-', color=c, lw=1.5, ms=4, label=lbl)
-        # Baseline (index 0) sits at 0 mm by construction (self-deviation)
-        axes_bnd[0].plot([x[0]], [tr["bnd_rms"][0]], color=c,
-                         label=('baseline' if lbl is None else None),
-                         **_BL_KW)
-        axes_bnd[1].plot(x, tr["bnd_max"], 's-', color=c, lw=1.5, ms=4, label=lbl)
-        axes_bnd[1].plot([x[0]], [tr["bnd_max"][0]], color=c, **_BL_KW)
-
-    axes_bnd[0].set_ylabel("RMS dev [mm]")
-    axes_bnd[0].set_title("Boundary deviation vs baseline")
-    axes_bnd[0].grid(True, alpha=0.3)
-
-    axes_bnd[1].set_ylabel("Max dev [mm]")
-    axes_bnd[1].grid(True, alpha=0.3)
-
-    # ---- Row 2: per-anchor ΔR / ΔZ at the four characteristic LCFS points
-    # (inboard/outboard midplane, top, bottom) -- shows WHERE on the LCFS the
-    # deviation concentrates. Drawn into the bottom row of this same figure. ----
-    try:
-        plot_boundary_point_traces(h5path, scan_value=scan_value,
-                                   axes=(_axg[2, 0], _axg[2, 1]))
-    except Exception as _bp_exc:
-        warnings.warn(
-            f"[plot_traces] boundary-point trace failed ({_bp_exc}); skipping")
-
-    fig.suptitle("Bouquet traces  (index 0 = recon baseline)", y=1.0)
-    fig.tight_layout()
-    return [fig]
-
-
+        # -- panel 3: anchor heatmap --
+        ax = axes[2]
+        row_labels = [n if n != 'bottom' else xpt_label for n in anchor_names]
+        im = ax.imshow(D, aspect='auto', cmap='YlOrBr', vmin=0.0)
+        ax.set_yticks(range(len(row_labels))); ax.set_yticklabels(row_labels, fontsize=8)
+        ax.set_xticks(range(len(idxs)))
+        ax.set_xticklabels([str(i) for i in idxs], fontsize=7)
+        ax.set_xlabel('draw')
+        ax.set_title('Anchor displacement', fontsize=10)
+        if len(idxs) <= 12:
+            vmax_d = np.nanmax(D) if np.any(np.isfinite(D)) else 1.0
+            for i in range(D.shape[0]):
+                for j in range(D.shape[1]):
+                    if np.isfinite(D[i, j]):
+                        ax.text(j, i, f"{D[i, j]:.1f}", ha='center', va='center',
+                                fontsize=6.5,
+                                color=('white' if D[i, j] > 0.7 * vmax_d else 'black'))
+        cb = fig.colorbar(im, ax=ax, pad=0.02)
+        cb.set_label(r'$|\Delta|$ [mm]', fontsize=8)
+        fig.tight_layout()
+        figs.append(fig)
+    return figs
 # ====================================================================
 #  Boundary-points trace plot
 # ====================================================================

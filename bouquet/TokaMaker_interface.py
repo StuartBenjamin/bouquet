@@ -662,9 +662,9 @@ def perturb_kinetic_equilibrium(
     p_fast=None,
     j_NBI=None,
     j_RF=None,
-    extra_sigma=None,
-    extra_baseline=None,
-    extra_length_scale=None,
+    aux_sigmas=None,
+    aux_baselines=None,
+    aux_length_scales=None,
     max_proxy_draws=500,
     bnd_diag_callback=None,
     # Differential bootstrap (DIFF_BS=1 mode):
@@ -837,6 +837,26 @@ def perturb_kinetic_equilibrium(
 
     p_err = np.inf
     p_iter = 0
+    # --- Zeff-primary main-ion derivation (active zeff channel) -----------
+    # When the zeff aux channel is enabled AND the baseline carries dilution
+    # information (ni < ne), ni is DERIVED per draw from the drawn (ne, Zeff)
+    # via single-impurity quasineutrality instead of drawn independently:
+    # one mutually consistent (ne, ni, Zeff, nz) set per draw, used by the
+    # bootstrap, the archived profiles, and the per-draw p-file alike.
+    # sigma_ni is not used in this mode. See physics.main_ion_density_from_zeff.
+    _zeff_active = bool(aux_sigmas) and ('zeff' in aux_sigmas) \
+        and (aux_baselines or {}).get('zeff') is not None
+    _Z_imp = None
+    _zeff_draw = None
+    if _zeff_active:
+        from .physics import effective_impurity_charge
+        _Z_imp = effective_impurity_charge(
+            ne, ni, np.asarray(aux_baselines['zeff'], dtype=float))
+        if _Z_imp is None:
+            print("  [zeff] baseline has no ne-ni dilution (ni ~= ne): Zeff "
+                  "draws still drive the bootstrap, but ni remains an "
+                  "independent channel")
+
     # p_thresh is a FRACTION (e.g. 0.05 == 5%); p_err is computed in percent.
     _p_thresh_pct = float(p_thresh) * 100.0
     print("Searching for pressure profile match...")
@@ -858,9 +878,25 @@ def perturb_kinetic_equilibrium(
             psi_kin, te / te[0], sigma_te / te[0], t_ls
         ) * te[0]
 
-        ni_perturb = _draw_monotonic_perturbation(
-            psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls
-        ) * ni[0]
+        if _zeff_active and _Z_imp is not None:
+            # draw Zeff, derive ni (quasineutrality): ni and the pressure it
+            # feeds stay inside the pressure-match loop with the other draws
+            from .physics import main_ion_density_from_zeff
+            _zb = np.asarray(aux_baselines['zeff'], dtype=float)
+            _zs = np.asarray(aux_sigmas['zeff'], dtype=float)
+            _z0 = float(np.max(np.abs(_zb))) or 1.0
+            _zeff_draw = np.atleast_1d(np.asarray(np.squeeze(
+                generate_perturbed_GPR(
+                    psi_kin, _zb / _z0, _zs / _z0,
+                    length_scale=(aux_length_scales or {}).get('zeff', 0.4),
+                    n_samples=1)) * _z0, dtype=float))
+            # 1 <= Zeff <= Z_imp guarantees 0 <= ni <= ne and nz >= 0
+            _zeff_draw = np.clip(_zeff_draw, 1.0, _Z_imp * (1.0 - 1e-9))
+            ni_perturb = main_ion_density_from_zeff(ne_perturb, _zeff_draw, _Z_imp)
+        else:
+            ni_perturb = _draw_monotonic_perturbation(
+                psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls
+            ) * ni[0]
 
         ti_perturb = _draw_monotonic_perturbation(
             psi_kin, ti / ti[0], sigma_ti / ti[0], t_ls
@@ -882,30 +918,35 @@ def perturb_kinetic_equilibrium(
     if p_fast is not None:
         pres_tmp = pres_tmp + _kin_to_eq(np.asarray(p_fast, dtype=float))
 
-    # --- switchboard: perturb the extra profiles (passive + active Zeff) ------
-    # GPR-sample each enabled extra once per draw (sigma presence = on). 'zeff'
+    # --- switchboard: perturb the auxiliary profiles (rotation / transport /
+    # impurity). GPR-sample each enabled channel once per draw (sigma
+    # presence = on). 'zeff'
     # is ACTIVE: the perturbed Zeff is reassigned so every downstream SWB
-    # bootstrap call uses it. Passive extras (omega_tor, e_r, chi_*) are carried
+    # bootstrap call uses it. Passive aux (omega_tor, e_r, chi_*) are carried
     # out for storage only. Baselines/sigmas are on the kinetic grid.
-    extras_out = {}
-    if extra_sigma:
-        for _en, _es in extra_sigma.items():
-            _eb = (extra_baseline or {}).get(_en)
+    aux_out = {}
+    if aux_sigmas:
+        for _en, _es in aux_sigmas.items():
+            if _en == 'zeff' and _zeff_draw is not None:
+                continue          # already drawn inside the pressure loop
+            _eb = (aux_baselines or {}).get(_en)
             if _eb is None:
                 continue
             _eb = np.asarray(_eb, dtype=float)
             _es = np.asarray(_es, dtype=float)
-            _els = (extra_length_scale or {}).get(_en, 0.4)
-            # normalize by PEAK magnitude (robust: some extras, e.g. E_r, are
+            _els = (aux_length_scales or {}).get(_en, 0.4)
+            # normalize by PEAK magnitude (robust: some aux, e.g. E_r, are
             # ~0 on axis -> a denormal _eb[0] would make _eb/_e0 overflow)
             _e0 = float(np.max(np.abs(_eb)))
             if not (_e0 > 0):
                 _e0 = 1.0
             _ep = np.squeeze(generate_perturbed_GPR(
                 psi_kin, _eb / _e0, _es / _e0, length_scale=_els, n_samples=1)) * _e0
-            extras_out[_en] = np.atleast_1d(np.asarray(_ep, dtype=float))
-        if "zeff" in extras_out:                 # active -> drives the bootstrap
-            Zeff = np.clip(_kin_to_eq(extras_out["zeff"]), 1.0, None)
+            aux_out[_en] = np.atleast_1d(np.asarray(_ep, dtype=float))
+        if _zeff_draw is not None:
+            aux_out['zeff'] = _zeff_draw      # the draw ni was derived from
+        if "zeff" in aux_out:                 # active -> drives the bootstrap
+            Zeff = np.clip(_kin_to_eq(aux_out["zeff"]), 1.0, None)
 
     mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
 
@@ -1901,7 +1942,7 @@ def perturb_kinetic_equilibrium(
         "j_BS": full_j_BS,
         "j_BS_edge": spike_profile,
         "proxy_bias_observed": proxy_bias_observed,
-        "extras": extras_out,
+        "aux": aux_out,
     }
 
     return (
@@ -1975,9 +2016,9 @@ def generate_bouquet(
     p_fast=None,
     j_NBI=None,
     j_RF=None,
-    extra_sigma=None,
-    extra_baseline=None,
-    extra_length_scale=None,
+    aux_sigmas=None,
+    aux_baselines=None,
+    aux_length_scales=None,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -2816,7 +2857,30 @@ def generate_bouquet(
         recon_lcfs_ref=recon_lcfs_ref,
         x_points=_bl_xpts,
         diverted=_bl_div,
+        aux_baselines=aux_baselines,
+        aux_sigmas=aux_sigmas,
     )
+
+    # ---- Purge stale draws for THIS scan value -------------------------
+    # The database is opened append-mode (multi-scan runs accumulate scan
+    # values across calls), so draws from a previous run of the SAME header
+    # + scan value would survive wherever this run has failures -- a mixed
+    # archive whose ghost draws carry a different baseline/target. Delete
+    # the numeric draw groups under this scan value up front; _baseline and
+    # other scan values are untouched.
+    import h5py as _h5_purge
+    from .utils import _scan_val_key as _svk
+    with _h5_purge.File(f"{header}.h5", "a") as _hf_purge:
+        _bk = _svk(scan_val)
+        _parent = (_hf_purge.get(f"scan/{_bk}") if _bk is not None
+                   else _hf_purge)
+        if _parent is not None:
+            _stale = [k for k in _parent.keys() if k.isdigit()]
+            for _k in _stale:
+                del _parent[_k]
+            if _stale:
+                print(f"  purged {len(_stale)} stale draw group(s) from a "
+                      f"previous run of this header/scan")
 
     # ---- DIFF_BS cache: snapshot mygs + cache SWB(recon kinetics) ----
     # If DIFF_BS=1 is set, capture the recon-state equilibrium and run
@@ -2914,6 +2978,18 @@ def generate_bouquet(
     # convergence instead of 2 (saves ~30s/draw).  Set to None until
     # the first successful draw establishes a baseline.
     _proxy_bias_warmstart = None
+
+    # One-time notice for the Zeff-primary mode (the per-draw mechanics live
+    # in perturb_kinetic_equilibrium; see physics.main_ion_density_from_zeff).
+    if aux_sigmas and 'zeff' in aux_sigmas:
+        from .physics import effective_impurity_charge
+        _zimp_note = effective_impurity_charge(
+            ne, ni, np.asarray((aux_baselines or {}).get('zeff', Zeff),
+                               dtype=float))
+        if _zimp_note is not None:
+            print(f"NOTE: zeff channel active -> ni is DERIVED per draw from "
+                  f"(ne, Zeff) via quasineutrality (Z_imp = {_zimp_note:.2f}); "
+                  f"the independent sigma_ni input is not used.")
 
     t_batch_start = time.perf_counter()
     elapsed_times = []
@@ -3104,9 +3180,9 @@ def generate_bouquet(
                 p_fast=p_fast,
                 j_NBI=j_NBI,
                 j_RF=j_RF,
-                extra_sigma=extra_sigma,
-                extra_baseline=extra_baseline,
-                extra_length_scale=extra_length_scale,
+                aux_sigmas=aux_sigmas,
+                aux_baselines=aux_baselines,
+                aux_length_scales=aux_length_scales,
                 max_proxy_draws=max_proxy_draws,
                 p_thresh=p_thresh,
                 bnd_diag_callback=_report_bnd,
@@ -3709,15 +3785,29 @@ def generate_bouquet(
                         )(psi_grid)
                         pf.set_profile(pf_key, psi_grid, vals)
 
-                # Keep baseline nz1 rather than recomputing from
-                # quasi-neutrality.  Bouquet perturbs ne and ni
-                # independently, which can push nz1 = (ne-ni-nb)/Z
-                # negative — an unphysical result that produces
-                # sign-flipped diamagnetic terms and spikes in Er/omghb.
-                # The baseline nz1 is a physically consistent impurity
-                # density and a reasonable approximation for the
-                # perturbed case since we are not perturbing the
-                # impurity content itself.
+                # Recompute the impurity density from THIS draw's (ne, ni)
+                # via quasineutrality, so the p-file species block implies
+                # exactly this draw's Zeff -- one Zeff per draw across the
+                # archive, the aux datasets, and the solve. With the active
+                # zeff channel, ni was derived from the drawn Zeff, so
+                # nz1 >= 0 by construction; in independent-ni mode an
+                # over-drawn ni can leave small negative nz1 values, which
+                # are clipped to zero (the old behaviour FROZE the baseline
+                # nz1 instead, which made the p-file imply a second,
+                # uncorrelated Zeff realization).
+                try:
+                    import warnings as _qn_w
+                    with _qn_w.catch_warnings():
+                        _qn_w.simplefilter("ignore", UserWarning)
+                        pf.compute_quasineutrality()
+                    _nz_entry = pf["nz1"]
+                    _nz_vals = np.asarray(_nz_entry["data"], dtype=float)
+                    if np.any(_nz_vals < 0):
+                        pf.set_profile("nz1", _nz_entry["psinorm"],
+                                       np.clip(_nz_vals, 0.0, None))
+                except Exception as _qn_exc:
+                    print(f"  WARNING: per-draw nz1 recompute failed "
+                          f"({_qn_exc}); baseline nz1 retained")
 
                 # Recompute total pressure
                 pf.compute_pressure()
@@ -3783,7 +3873,7 @@ def generate_bouquet(
             l_i_uncertainty=diagnostics.get('l_i_uncertainty'),
             x_points=diagnostics.get('x_points'),
             diverted=diagnostics.get('diverted'),
-            extras=diagnostics.get('extras'),
+            aux=diagnostics.get('aux'),
         )
 
         # Clean up on-disk eqdsk after archiving
