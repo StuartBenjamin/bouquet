@@ -215,3 +215,24 @@ class TestImpurityDerivation:
         ni_noisy = ni.copy(); ni_noisy[3:6] = ne[3:6]     # zero-dilution points
         Z_rec = effective_impurity_charge(ne, ni_noisy, zeff_noisy)
         assert Z_rec is not None and np.isclose(Z_rec, Z, rtol=1e-9)
+
+
+class TestImpurityRoundTrip:
+    def test_ida_derivation_recovers_Z_imp(self):
+        # IDA reader path: (ne, Zeff, Z=6) -> ni; effective_impurity_charge
+        # back-derives Z_imp = 6 from the resulting (ne, ni, Zeff)
+        Z = 6.0
+        ne = 5e19 * (1 - 0.7 * np.linspace(0, 1, 40)**2)
+        zeff = 1.8 + 0.4 * np.linspace(0, 1, 40)
+        ni = main_ion_density_from_zeff(ne, np.clip(zeff, 1, Z), Z)
+        assert np.all((ni >= 0) & (ni <= ne))
+        assert np.isclose(effective_impurity_charge(ne, ni, zeff), Z, rtol=1e-9)
+
+    def test_tungsten_Z(self):
+        # a high-Z machine: ni stays close to ne (tiny W density dilutes a lot)
+        ZW = 74.0
+        ne = np.full(20, 1e20)
+        zeff = np.full(20, 1.6)
+        ni = main_ion_density_from_zeff(ne, zeff, ZW)
+        assert np.all(ni < ne) and np.all(ni > 0.98 * ne)  # ni/ne = (74-1.6)/73
+        assert np.isclose((ne[0] - ni[0]) / ne[0], (zeff[0] - 1) / (ZW - 1), rtol=1e-9)

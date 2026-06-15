@@ -73,12 +73,22 @@ class ReconstructionSource:
     No mixing by default: one file supplies the full profile set. Individual
     profiles can still be replaced via ``profile_overrides`` (e.g.
     ``{"ti": my_ti_array}``) on the kinetic psi_N grid.
+
+    ``impurity_Z`` is the **machine impurity charge** used to map between Z_eff
+    and the main-ion density under single-impurity quasineutrality. It is the
+    controlling input for the IDA path (which measures ne + Z_eff and derives
+    ni = ne (Z_imp - Zeff)/(Z_imp - 1)); the default 6.0 is **carbon**, correct
+    for DIII-D and other carbon-wall machines. **Set it for your device** --
+    e.g. tungsten ~ 74 (use the effective radiating charge if W is not fully
+    stripped), beryllium 4, neon 10. For a p-file this is informational: the
+    Osborne ``N Z A`` footer carries the species directly and is authoritative.
     """
 
     geqdsk_path: str
     profiles_path: str                 # IDA .cdf OR p-file (auto-detected by extension)
     cocos: int = 1
     time: Optional[float] = None       # IDA time slice [s] (multi-time .cdf files)
+    impurity_Z: float = 6.0            # effective impurity charge (carbon); set per machine
     profile_overrides: dict = field(default_factory=dict)  # name -> array, manual override
     # reconstruction knobs
     psi_pad: float = 1e-3
@@ -196,6 +206,17 @@ class UncertaintyConfig:
 
     # j_phi uncertainty: flat fractional envelope on |j_phi_baseline|
     jphi_scalar_sigma: float = 0.10
+
+    # Z_eff uncertainty: flat fractional envelope that ENABLES the zeff channel
+    # by default for every source (the physically-consistent density scheme --
+    # see the aux block below). Each draw perturbs Z_eff within this band and
+    # DERIVES the main-ion density ni from (ne, Z_eff) via quasineutrality, so
+    # ni/nz/Z_eff stay mutually consistent and ni_scalar_sigma is unused.
+    # Real Z_eff (visible bremsstrahlung / CER) is ~10-20% uncertain; the 0.05
+    # default is deliberately conservative -- widen it for a realistic envelope.
+    # Set 0.0 to disable (Z_eff held at baseline, ni drawn independently).
+    # An explicit aux_sigmas['zeff'] always overrides this.
+    zeff_scalar_sigma: float = 0.05
 
     # GPR correlation length scales (psi_N units) -- define the perturbation
     n_ls: float = 0.5                      # density

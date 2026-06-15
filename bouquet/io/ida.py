@@ -12,10 +12,15 @@ Operational DIII-D ``IDA_*.cdf`` layout (verified against a real IDA file):
     profiles are 2-D ``(n_time, n_radial)`` with companion ``*_err`` datasets
     (direct 1-sigma); the radial grid is ``psi_n`` (n_radial,), extending past
     the separatrix to ~1.2; ``time`` is in milliseconds. Units are already SI
-    (n_e in m^-3; T_e, T_12C6 in eV). There is no stored main-ion density, so
-    ``ni`` is taken equal to ``ne`` (quasi-neutrality approximation), matching
-    the operational IDA workflow, which feeds ni = ne to
-    reconstruct_equilibrium / generate_bouquet.
+    (n_e in m^-3; T_e, T_12C6 in eV). There is no stored main-ion density, but
+    the file carries ``Zeff`` (visible bremsstrahlung), so ``ni`` is derived
+    from ``(ne, Zeff)`` under single-impurity quasineutrality with the machine
+    impurity charge ``impurity_Z`` (carbon Z=6 by default; the carbon CER
+    ``T_12C6`` is itself the carbon diagnostic). This makes the IDA baseline
+    information-equivalent to a p-file's ``(ne, ni)`` and self-consistent
+    between its pressure and its Z_eff -- unlike the legacy ``ni = ne``, which
+    silently meant Z_eff = 1 for the pressure while feeding the real Z_eff to
+    the bootstrap.
 """
 
 from __future__ import annotations
@@ -70,6 +75,7 @@ def read_ida(
     sigma_mode: str = "direct",
     sigma_method: str = "percentile",   # reserved for the ensemble layout
     sigma_ni_from_ne: bool = True,
+    impurity_Z: float = 6.0,
 ) -> IDAProfiles:
     """Read an IDA ``.cdf`` and return profiles + sigmas at ``time``.
 
@@ -119,17 +125,25 @@ def read_ida(
 
         ne = col("n_e")          # m^-3
         te = col("T_e")          # eV
-        ti = col("T_12C6")       # eV (carbon CER temperature)
+        ti = col("T_12C6")       # eV (carbon CER temperature -> carbon impurity)
         Zeff = col("Zeff")
-        # ni ~ ne (quasi-neutrality approximation), matching the operational IDA
-        # workflow which feeds ni = ne (not an impurity-diluted main-ion density)
-        # to reconstruct_equilibrium / generate_bouquet.
-        ni = ne.copy()
+        # Main-ion density from the measured (ne, Zeff) via single-impurity
+        # quasineutrality: ni = ne (Z_imp - Zeff)/(Z_imp - 1). The IDA file
+        # carries Z_eff directly (visible bremsstrahlung), so the dilution is
+        # measured, not assumed -- equivalent in information to a p-file's
+        # (ne, ni). Z_eff is clipped to [1, Z_imp] so 0 <= ni <= ne.
+        from ..physics import main_ion_density_from_zeff
+        Zeff_c = np.clip(Zeff, 1.0, impurity_Z)
+        ni = main_ion_density_from_zeff(ne, Zeff_c, impurity_Z)
 
         sigma_ne = col("n_e_err")
         sigma_te = col("T_e_err")
         sigma_ti = col("T_12C6_err")
-        sigma_ni = sigma_ne.copy()   # consistent with ni = ne
+        # sigma_ni is only used in the (now rare) independent-ni fallback;
+        # propagate the ne fractional error onto the derived ni.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            _frac = np.where(ne > 0, sigma_ne / ne, 0.0)
+        sigma_ni = np.abs(ni) * _frac
 
     return IDAProfiles(
         psi_N=psi_N,

@@ -211,8 +211,24 @@ def resolve_uncertainty(config, baseline) -> dict:
     import warnings
     src_aux = dict(baseline.aux or {})
     man_base = dict(unc.aux_baselines or {})
+
+    # Z_eff channel is enabled by default for EVERY source (the consistent
+    # density scheme): unless the user set an explicit aux_sigmas['zeff'], a
+    # flat fractional envelope zeff_scalar_sigma * Z_eff_baseline is injected.
+    # The baseline Z_eff is source-provided (baseline.aux['zeff'] for IMAS,
+    # else baseline.Zeff for the reconstruction path), on the kinetic grid.
+    user_sigmas = dict(unc.aux_sigmas or {})
+    if "zeff" not in user_sigmas and float(getattr(unc, "zeff_scalar_sigma", 0.0)) > 0:
+        base_zeff = src_aux.get("zeff")
+        if base_zeff is None:
+            base_zeff = np.asarray(baseline.Zeff, dtype=float)
+        if "zeff" not in man_base:
+            man_base["zeff"] = np.asarray(base_zeff, dtype=float)
+        user_sigmas["zeff"] = unc.zeff_scalar_sigma * np.abs(
+            np.asarray(man_base["zeff"], dtype=float))
+
     resolved_sigma, resolved_base = {}, {}
-    for name, sig in (unc.aux_sigmas or {}).items():
+    for name, sig in user_sigmas.items():
         base = man_base.get(name, src_aux.get(name))
         if base is None or not np.any(np.asarray(base, dtype=float)):
             warnings.warn(
@@ -260,7 +276,7 @@ def _load_kinetic_profiles(source) -> dict:
     path = source.profiles_path
     if path.endswith(".cdf"):
         from .io.ida import read_ida
-        ida = read_ida(path, time=source.time)
+        ida = read_ida(path, time=source.time, impurity_Z=source.impurity_Z)
         return dict(
             psi_N=np.asarray(ida.psi_N, dtype=float),
             ne=np.asarray(ida.ne, dtype=float),
@@ -393,6 +409,10 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         p_fast=p_fast,
         eqdsk_bytes=eqdsk_bytes,
         pfile_bytes=kin["raw_bytes"],
+        # expose the baseline Z_eff (kinetic grid) as a switchboard channel,
+        # mirroring the IMAS path -- so the zeff channel resolves its baseline
+        # for both the default auto-injection and an explicit aux_sigmas['zeff']
+        aux={"zeff": np.asarray(kin["Zeff"], dtype=float)},
         recon=result,
         reconstruction_metrics=recon_metrics,
         reconstruction_log=_cap["text"] or None,

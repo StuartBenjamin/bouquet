@@ -63,20 +63,24 @@ class Bouquet:
     @classmethod
     def from_geqdsk(cls, geqdsk_path, *, profiles, mesh,
                     n_draws=20, header="bouquet", cocos=1, time=None,
-                    **solver_kwargs) -> "Bouquet":
+                    impurity_Z=6.0, **solver_kwargs) -> "Bouquet":
         """Minimal constructor for the reconstruction path (g-file + profiles).
 
-        ``profiles`` is an IDA ``.cdf`` or a p-file (auto-detected). Extra
-        keyword args go to :class:`SolverConfig` (e.g. ``order``, ``nthreads``).
-        Reach into ``bq.uncertainty`` / ``bq.generation`` afterwards for the
-        advanced knobs.
+        ``profiles`` is an IDA ``.cdf`` or a p-file (auto-detected).
+        ``impurity_Z`` is the machine impurity charge (carbon 6.0 by default;
+        set it for your device -- it controls the Z_eff<->ni mapping and is the
+        IDA path's main-ion derivation, see :class:`ReconstructionSource`).
+        Extra keyword args go to :class:`SolverConfig` (e.g. ``order``,
+        ``nthreads``). Reach into ``bq.uncertainty`` / ``bq.generation``
+        afterwards for the advanced knobs.
         """
         from .config import (BouquetConfig, SolverConfig, ReconstructionSource,
                              GenerationConfig)
         cfg = BouquetConfig(
             source=ReconstructionSource(geqdsk_path=geqdsk_path,
                                         profiles_path=profiles,
-                                        cocos=cocos, time=time),
+                                        cocos=cocos, time=time,
+                                        impurity_Z=impurity_Z),
             solver=SolverConfig(mesh_path=mesh, **solver_kwargs),
             generation=GenerationConfig(n_equils=n_draws),
             output_header=header,

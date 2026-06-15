@@ -1356,13 +1356,13 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
         pp_max = np.max(np.abs(pp)) if np.max(np.abs(pp)) > 0 else 1.0
         ff_max = np.max(np.abs(ff)) if np.max(np.abs(ff)) > 0 else 1.0
         if is_baseline:
-            ax_ff.plot(x, pp / pp_max, "-", color="r", lw=lw,
+            ax_ff.plot(x, pp / pp_max, "-", color=_GOLD, lw=lw,
                        label=r"$p' / |p'|_{\max}$")
-            ax_ff.plot(x, ff / ff_max, "--", color="b", lw=lw,
+            ax_ff.plot(x, ff / ff_max, "--", color=_ORANGE, lw=lw,
                        label=r"$FF' / |FF'|_{\max}$")
         else:
-            ax_ff.plot(x, pp / pp_max, "-", color="r", lw=lw, alpha=alpha)
-            ax_ff.plot(x, ff / ff_max, "--", color="b", lw=lw, alpha=alpha)
+            ax_ff.plot(x, pp / pp_max, "-", color=_GOLD, lw=lw, alpha=alpha)
+            ax_ff.plot(x, ff / ff_max, "--", color=_ORANGE, lw=lw, alpha=alpha)
 
     # Labels and formatting (use first eq for sign labels)
     eq0 = eqs[0]
@@ -1663,7 +1663,13 @@ def _framed_legend(ax, handles=None, **kw):
     unframed legend ends up with data markers directly adjacent to (and
     indistinguishable from) the legend keys.
     """
-    opts = dict(framealpha=0.92, fancybox=True, borderpad=0.5)
+    # fully opaque white: with translucent frames, bouquet markers behind the
+    # legend remain visible and read as extra legend entries
+    # frameon=True is REQUIRED: the bouquet publication style sets
+    # legend.frameon=False in rcParams, which silently discards the frame
+    # patch no matter what framealpha/facecolor say
+    opts = dict(frameon=True, framealpha=1.0, facecolor='white',
+                fancybox=True, borderpad=0.5)
     opts.update(kw)
     leg = (ax.legend(handles=handles, **opts) if handles is not None
            else ax.legend(**opts))
