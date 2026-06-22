@@ -342,6 +342,8 @@ def store_equilibrium(
 
         # ---- optional: Zeff profile ----------------------------------------
         if Zeff is not None:
+            if isinstance(Zeff,dict):
+                raise NotImplementedError("No support for saving Zeff dict type")
             grp.create_dataset("Zeff", data=np.asarray(Zeff, dtype=np.float64))
 
         # ---- optional: coil currents ---------------------------------------
