@@ -1877,7 +1877,6 @@ def generate_bouquet(
     diagnostic_plots=True,
     scan_val=None,
     pfile_bytes=None,
-    Zeff_profile=None,
     baseline_eqdsk_bytes=None,
     baseline_pfile_bytes=None,
     psi_N_kinetic=None,
@@ -1994,8 +1993,6 @@ def generate_bouquet(
         ``None`` gives the flat layout.
     pfile_bytes : bytes or None
         Raw p-file content to store alongside each equilibrium.
-    Zeff_profile : array-like or None
-        1-D effective charge profile to store in HDF5.
     coil_drift : float or None
         Symmetric ``+/-coil_drift * |I_baseline|`` hard bounds installed
         on every coil from the reconstructed (baseline) currents, via
@@ -3690,7 +3687,7 @@ def generate_bouquet(
             pressure=pressure_perturb,
             j_BS_edge=diagnostics["j_BS_edge"],
             pfile_bytes=perturbed_pfile_bytes,
-            Zeff=Zeff_profile,
+            Zeff=Zeff,
             coil_currents=coil_current_dict,
             psi_N_kinetic=psi_N_kinetic,
             homotopy_pass=diagnostics.get('homotopy_pass'),
