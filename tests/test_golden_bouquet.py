@@ -54,7 +54,7 @@ def tol(manifest):
 
 
 def _scan_args(bkey):
-    """Map a manifest scan key back to a scan_value argument."""
+    """Map a manifest scan key back to a scan_key argument."""
     return None if bkey == "None" else bkey
 
 
@@ -68,7 +68,7 @@ def _iter_scans(manifest):
 # ---------------------------------------------------------------------------
 def test_fixture_structure(manifest):
     for bkey, sv, entry in _iter_scans(manifest):
-        idxs = bouquet.utils.list_equilibrium_indices(_SLIM, scan_value=sv)
+        idxs = bouquet.utils.list_equilibrium_indices(_SLIM, scan_key=sv)
         assert idxs == entry["draw_indices"]
         assert len(idxs) == entry["n_draws"]
 
@@ -157,9 +157,9 @@ def test_xpoints_match_manifest(manifest, tol):
 def test_boundary_deviations_match_manifest(manifest, tol):
     """filter_boundaries (apply=False) must reproduce the manifest RMS/max."""
     for bkey, sv, entry in _iter_scans(manifest):
-        summ, _ = filter_boundaries(_SLIM, scan_value=sv, apply=False,
+        summ, _ = filter_boundaries(_SLIM, scan_key=sv, apply=False,
                                     plot=False)
-        draws = summ[sv]["draws"]
+        draws = summ["draws"]
         for sidx, exp in entry["draws"].items():
             got = draws[int(sidx)]
             assert got["rms_mm"] == pytest.approx(
@@ -266,9 +266,9 @@ def test_selection_partition(tmp_path, manifest):
     shutil.copy(_SLIM, work)
     filter_coil_currents(work, apply=True, plot=False)
     for bkey, sv, entry in _iter_scans(manifest):
-        alli = select_indices(work, scan_value=sv, selection="all")
-        sel = select_indices(work, scan_value=sv, selection="selected")
-        exc = select_indices(work, scan_value=sv, selection="excluded")
+        alli = select_indices(work, scan_key=sv, selection="all")
+        sel = select_indices(work, scan_key=sv, selection="selected")
+        exc = select_indices(work, scan_key=sv, selection="excluded")
         assert sorted(sel + exc) == sorted(alli)        # partition
         assert set(sel).isdisjoint(exc)
         assert len(sel) == entry["n_in_spec"]
@@ -276,9 +276,9 @@ def test_selection_partition(tmp_path, manifest):
 
 def test_selection_unfiltered_defaults():
     """Before any filter is applied, 'selected' == all, 'excluded' == none."""
-    assert select_indices(_SLIM, scan_value="0", selection="selected") == \
-        select_indices(_SLIM, scan_value="0", selection="all")
-    assert select_indices(_SLIM, scan_value="0", selection="excluded") == []
+    assert select_indices(_SLIM, scan_key="0", selection="selected") == \
+        select_indices(_SLIM, scan_key="0", selection="all")
+    assert select_indices(_SLIM, scan_key="0", selection="excluded") == []
 
 
 def test_export_filtered_keeps_selected(tmp_path, manifest):
@@ -290,8 +290,8 @@ def test_export_filtered_keeps_selected(tmp_path, manifest):
     total_sel = sum(e["n_in_spec"] for _, _, e in _iter_scans(manifest))
     assert kept == total_sel
     for bkey, sv, entry in _iter_scans(manifest):
-        got = bouquet.utils.list_equilibrium_indices(out, scan_value=sv)
-        assert got == select_indices(work, scan_value=sv, selection="selected")
+        got = bouquet.utils.list_equilibrium_indices(out, scan_key=sv)
+        assert got == select_indices(work, scan_key=sv, selection="selected")
         # baseline preserved
         with h5py.File(out, "r") as hf:
             bl = f"scan/{bkey}/_baseline" if sv is not None else "_baseline"

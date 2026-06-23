@@ -23,7 +23,7 @@ from bouquet.utils import (
     load_equilibrium,
     store_baseline_profiles,
     load_baseline_profiles,
-    discover_scan_values,
+    discover_scan_keys,
     count_equilibria,
     Hmode_profiles,
 )
@@ -273,7 +273,7 @@ class TestHDF5RoundTrip:
 
 
 # ====================================================================
-#  discover_scan_values sorting
+#  discover_scan_keys sorting
 # ====================================================================
 class TestDiscoverScanValues:
     """Test that scan values are sorted numerically when possible."""
@@ -286,7 +286,7 @@ class TestDiscoverScanValues:
             for key in ["10", "2", "1", "20"]:
                 scan.create_group(key)
 
-        result = discover_scan_values(db_path)
+        result = discover_scan_keys(db_path)
         assert result == ["1", "2", "10", "20"]
 
     def test_string_sort_fallback(self, tmp_path):
@@ -297,7 +297,7 @@ class TestDiscoverScanValues:
             for key in ["beta", "alpha", "gamma"]:
                 scan.create_group(key)
 
-        result = discover_scan_values(db_path)
+        result = discover_scan_keys(db_path)
         assert result == ["alpha", "beta", "gamma"]
 
     def test_flat_layout_returns_none(self, tmp_path):
@@ -306,7 +306,7 @@ class TestDiscoverScanValues:
         with h5py.File(db_path, "w") as hf:
             hf.create_group("_baseline")
 
-        result = discover_scan_values(db_path)
+        result = discover_scan_keys(db_path)
         assert result is None
 
 

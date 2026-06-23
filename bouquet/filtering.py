@@ -30,9 +30,9 @@ from scipy.spatial import cKDTree as _cKDTree
 
 from .utils import (
     list_equilibrium_indices,
-    discover_scan_values,
+    discover_scan_keys,
     read_eqdsk_from_bytes,
-    _scan_val_key,
+    _scan_key,
     _group_path,
 )
 from .io import read_geqdsk
@@ -57,11 +57,26 @@ def _resolve(h5path_or_header):
     return os.path.abspath(h5path_or_header)
 
 
-def _iter_scan_vals(h5path, scan_value):
-    if scan_value is not None:
-        return [scan_value]
-    svs = discover_scan_values(h5path)
+def _iter_scan_keys(h5path, scan_key):
+    if scan_key is not None:
+        return [scan_key]
+    svs = discover_scan_keys(h5path)
     return svs if svs else [None]
+
+
+def _finalize_scan_result(result, scan_key):
+    """Intent-driven return shape, shared by the selection/filter accessors.
+
+    An explicit ``scan_key`` returns that one scan's value (unwrapped); the
+    default ``scan_key=None`` ("all scans") returns the ``{scan_key: value}``
+    dict -- even for a single scan. So the shape is predictable from the CALL,
+    not from how many scans the file happens to hold: name a key, get one;
+    ask for all, get the collection. Applied uniformly across
+    ``select_indices`` / ``read_filter_flags`` / the two filters.
+    """
+    if scan_key is not None:
+        return next(iter(result.values()))
+    return result
 
 
 def _recompute_selected(grp):
@@ -70,11 +85,11 @@ def _recompute_selected(grp):
     grp.attrs["selected"] = bool(all(flags)) if flags else True
 
 
-def _write_filter_result(h5path, scan_value, results, flag_name):
+def _write_filter_result(h5path, scan_key, results, flag_name):
     """Persist a {idx: bool} result under ``flag_name`` and refresh selected."""
     with h5py.File(h5path, "a") as hf:
         for idx, passed in results.items():
-            gp = _group_path(scan_value, idx)
+            gp = _group_path(scan_key, idx)
             if gp not in hf:
                 continue
             grp = hf[gp]
@@ -82,9 +97,9 @@ def _write_filter_result(h5path, scan_value, results, flag_name):
             _recompute_selected(grp)
 
 
-def _baseline_boundary(hf, scan_value):
+def _baseline_boundary(hf, scan_key):
     """Recon baseline LCFS (recon_lcfs_ref preferred, else eqdsk boundary)."""
-    bkey = _scan_val_key(scan_value)
+    bkey = _scan_key(scan_key)
     bl_path = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
     if bl_path not in hf:
         return None
@@ -141,19 +156,22 @@ def _boundary_devs(bl_boundary, grp):
 # --------------------------------------------------------------------------
 #  selection accessors
 # --------------------------------------------------------------------------
-def read_filter_flags(h5path_or_header, scan_value=None):
-    """Return ``{scan_val: {idx: {flag: value, ...}}}`` for stored draws.
+def read_filter_flags(h5path_or_header, scan_key=None):
+    """Per-draw filter flags: ``{idx: {flag: value, ...}}`` for stored draws.
 
     Each inner dict carries ``passes_coil_filter``, ``passes_boundary_filter``
     and ``selected`` when present (missing flags are omitted), plus the raw
-    metrics ``max_F_drift_pct``, ``max_VSC_drift_pct``, ``in_spec``.
+    metrics ``max_F_drift_pct``, ``max_VSC_drift_pct``, ``in_spec``. An explicit
+    ``scan_key`` returns the ``{idx: {...}}`` dict directly; the default
+    ``scan_key=None`` returns ``{scan_key: {idx: {...}}}`` (shape follows the
+    call, same convention as the other accessors).
     """
     h5path = _resolve(h5path_or_header)
     out = {}
     with h5py.File(h5path, "r") as hf:
-        for sv in _iter_scan_vals(h5path, scan_value):
+        for sv in _iter_scan_keys(h5path, scan_key):
             sv_out = {}
-            for i in list_equilibrium_indices(h5path, scan_value=sv):
+            for i in list_equilibrium_indices(h5path, scan_key=sv):
                 gp = _group_path(sv, i)
                 if gp not in hf:
                     continue
@@ -168,10 +186,10 @@ def read_filter_flags(h5path_or_header, scan_value=None):
                                   else bool(a[k]))
                 sv_out[i] = rec
             out[sv] = sv_out
-    return out
+    return _finalize_scan_result(out, scan_key)
 
 
-def select_indices(h5path_or_header, scan_value=None, selection="selected"):
+def select_indices(h5path_or_header, scan_key=None, selection="selected"):
     """Stored draw indices filtered by ``selection``.
 
     ``selection`` is one of:
@@ -183,18 +201,19 @@ def select_indices(h5path_or_header, scan_value=None, selection="selected"):
       - ``'excluded'`` : the complement of ``'selected'`` among stored
         draws (empty on an unfiltered file).
 
-    Returns a flat sorted list when a single scan value is in play, or a
-    ``{scan_val: [idx, ...]}`` dict when iterating multiple scan values.
+    With an explicit ``scan_key`` returns a flat sorted list for that scan;
+    with the default ``scan_key=None`` returns ``{scan_key: [idx, ...]}`` over
+    all scans (shape follows the call, not the file's scan count).
     """
     if selection not in ("all", "selected", "excluded"):
         raise ValueError(
             f"selection must be 'all'|'selected'|'excluded', got {selection!r}")
     h5path = _resolve(h5path_or_header)
-    svs = _iter_scan_vals(h5path, scan_value)
+    svs = _iter_scan_keys(h5path, scan_key)
     result = {}
     with h5py.File(h5path, "r") as hf:
         for sv in svs:
-            idxs = list_equilibrium_indices(h5path, scan_value=sv)
+            idxs = list_equilibrium_indices(h5path, scan_key=sv)
             if selection == "all":
                 result[sv] = idxs
                 continue
@@ -210,15 +229,13 @@ def select_indices(h5path_or_header, scan_value=None, selection="selected"):
                 result[sv] = sel
             else:
                 result[sv] = [i for i in idxs if i not in set(sel)]
-    if len(svs) == 1:
-        return result[svs[0]]
-    return result
+    return _finalize_scan_result(result, scan_key)
 
 
 # --------------------------------------------------------------------------
 #  the two filters
 # --------------------------------------------------------------------------
-def filter_coil_currents(h5path_or_header, scan_value=None,
+def filter_coil_currents(h5path_or_header, scan_key=None,
                           F_max_pct=None, VSC_max_pct=None,
                           apply=True, plot=True):
     """Coil-current spec filter (the binding in-spec constraint).
@@ -241,14 +258,16 @@ def filter_coil_currents(h5path_or_header, scan_value=None,
     Returns
     -------
     (summary, fig)
-        ``summary`` is ``{scan_val: {...counts, 'draws': {idx: {...}}}}``;
-        ``fig`` is the distribution figure (or None).
+        An explicit ``scan_key`` gives a single ``{...counts, 'draws':
+        {idx: {...}}}`` dict; the default ``scan_key=None`` gives
+        ``{scan_key: {...}}`` across all scans (same convention as
+        :func:`select_indices`). ``fig`` is the distribution figure (or None).
     """
     h5path = _resolve(h5path_or_header)
     summary = {}
     fig_payload = []
-    for sv in _iter_scan_vals(h5path, scan_value):
-        idxs = list_equilibrium_indices(h5path, scan_value=sv)
+    for sv in _iter_scan_keys(h5path, scan_key):
+        idxs = list_equilibrium_indices(h5path, scan_key=sv)
         rows = []
         with h5py.File(h5path, "r") as hf:
             for i in idxs:
@@ -277,10 +296,10 @@ def filter_coil_currents(h5path_or_header, scan_value=None,
                        "n_fail": len(results) - n_pass, "draws": draws}
         fig_payload.append((sv, rows, results))
     fig = _plot_coil_filter(fig_payload) if plot else None
-    return summary, fig
+    return _finalize_scan_result(summary, scan_key), fig
 
 
-def filter_boundaries(h5path_or_header, scan_value=None,
+def filter_boundaries(h5path_or_header, scan_key=None,
                        rms_max_mm=None, max_max_mm=None,
                        apply=True, plot=True):
     """LCFS boundary-deviation filter.
@@ -298,8 +317,8 @@ def filter_boundaries(h5path_or_header, scan_value=None,
     cutting = (rms_max_mm is not None) or (max_max_mm is not None)
     summary = {}
     fig_payload = []
-    for sv in _iter_scan_vals(h5path, scan_value):
-        idxs = list_equilibrium_indices(h5path, scan_value=sv)
+    for sv in _iter_scan_keys(h5path, scan_key):
+        idxs = list_equilibrium_indices(h5path, scan_key=sv)
         rows = []
         with h5py.File(h5path, "r") as hf:
             bl = _baseline_boundary(hf, sv)
@@ -328,7 +347,7 @@ def filter_boundaries(h5path_or_header, scan_value=None,
                        "draws": draws}
         fig_payload.append((sv, rows, results, rms_max_mm, max_max_mm, cutting))
     fig = _plot_boundary_filter(fig_payload) if plot else None
-    return summary, fig
+    return _finalize_scan_result(summary, scan_key), fig
 
 
 def _stats(vals):
@@ -343,7 +362,7 @@ def _stats(vals):
 # --------------------------------------------------------------------------
 #  export
 # --------------------------------------------------------------------------
-def export_filtered(h5path_or_header, out_path, scan_value=None,
+def export_filtered(h5path_or_header, out_path, scan_key=None,
                     selection="selected", overwrite=False):
     """Write a pruned copy of the database keeping only ``selection`` draws.
 
@@ -363,9 +382,9 @@ def export_filtered(h5path_or_header, out_path, scan_value=None,
     shutil.copy(src, out)
     kept = 0
     with h5py.File(out, "a") as hf:
-        for sv in _iter_scan_vals(out, scan_value):
-            keep = set(select_indices(out, scan_value=sv, selection=selection))
-            for i in list_equilibrium_indices(out, scan_value=sv):
+        for sv in _iter_scan_keys(out, scan_key):
+            keep = set(select_indices(out, scan_key=sv, selection=selection))
+            for i in list_equilibrium_indices(out, scan_key=sv):
                 if i in keep:
                     kept += 1
                 else:

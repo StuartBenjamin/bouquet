@@ -111,7 +111,6 @@ class ImasSource:
 
     ids_path: str                      # IMAS/OMAS file (FUSE output)
     time: Optional[float] = None       # time slice [s]; None -> single/first slice
-    occurrence: int = 0
 
 
 BaselineSource = Union[ReconstructionSource, ImasSource]
@@ -247,6 +246,10 @@ class GenerationConfig:
 
     n_equils: int = 20
     seed: Optional[int] = None
+    # Label for this bouquet within the HDF5 file: draws are stored under
+    # scan/<scan_key>/. Use it to keep several bouquets in one file under a
+    # meaningful key (a time in ms, a beta value, ...). Default 0.
+    scan_key: float = 0
     l_i_tolerance: float = 0.05            # l_i acceptance band (fraction of target)
     constrain_sawteeth: bool = False
     # When True, recompute bootstrap each draw via TokaMaker solve_with_bootstrap
@@ -254,8 +257,24 @@ class GenerationConfig:
     # overriding the baseline/FUSE j_BS. When False, keep the baseline j_BS.
     recalculate_j_BS: bool = True
     jBS_scale_range: tuple = (0.99, 1.01)  # bootstrap multiplicative spread
-    # solve_with_bootstrap H-mode self-consistency iterations per draw;
-    # 2 trades a little accuracy for speed on large bouquets.
+    # Bootstrap profile mode in solve_with_bootstrap. True (default) isolates the
+    # edge spike, yielding a clean positive bootstrap; False uses the full SWB
+    # profile, which for FUSE equilibria carries an unphysical inner negative
+    # lobe (must then be floored, leaving kinks -- see baseline_jphi_caseA plots).
+    isolate_edge_jBS: bool = True
+    # How the SWB bootstrap is reconciled with the FUSE baseline on the IMAS
+    # path (see run._forward_solve_imas_baseline):
+    #   "diff"    : keep FUSE total; add fixed correction diff = FUSE_jBS - SWB
+    #               to baseline and every draw (anchors to FUSE; risks edge
+    #               misalignment when the perturbed pedestal moves).
+    #   "rescale" : keep FUSE ohmic; rescale SWB by a single factor so l_i
+    #               matches the source (fully self-consistent bootstrap).
+    jBS_baseline_mode: str = "diff"
+    # Floor the SWB bootstrap at 0 (drop unphysical negative excursions) before
+    # it enters j_phi, in both the baseline and every draw.
+    floor_j_BS: bool = True
+    # solve_with_bootstrap H-mode self-consistency iterations per draw (default
+    # 3); lowering to 2 trades a little accuracy for speed on large bouquets.
     swb_iterations: int = 3
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
@@ -324,3 +343,8 @@ class BouquetConfig:
             )
         if self.uncertainty.sigma_mode not in ("direct", "ensemble"):
             raise ValueError("uncertainty.sigma_mode must be 'direct' or 'ensemble'")
+        if self.uncertainty.sigma_method not in ("percentile", "std"):
+            raise ValueError(
+                "uncertainty.sigma_method must be 'percentile' or 'std'")
+        if self.generation.n_equils < 1:
+            raise ValueError("generation.n_equils must be >= 1")

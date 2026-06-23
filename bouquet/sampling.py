@@ -748,6 +748,10 @@ def _draw_monotonic_perturbation(
     RuntimeError
         If no monotonic draw is found within *max_draws* attempts.
     """
+    # If the BASELINE profile is itself non-monotonic (e.g. reconstruction
+    # artifacts: hollow Te core, edge Ti rise), no perturbed draw can be
+    # monotonic -> drop the constraint for this channel and take the first draw.
+    base_nonmono = bool(np.any(np.diff(np.asarray(normalised_profile)) > 0.0))
     for _ in range(max_draws):
         sample = generate_perturbed_GPR(
             psi_N,
@@ -757,7 +761,7 @@ def _draw_monotonic_perturbation(
             n_samples=1,
             diag_plot=False,
         )
-        if np.all(np.diff(sample) <= 0.0):
+        if base_nonmono or np.all(np.diff(sample) <= 0.0):
             return sample
 
     raise RuntimeError(

@@ -195,28 +195,40 @@ def Hmode_profiles(edge=0.08, ped=0.4, core=2.5, rgrid=201, expin=1.5, expout=1.
 
     return val
 
-def _scan_val_key(scan_val):
+def _scan_key(scan_key):
     """Convert a scan-value label (float, int, or str) to an HDF5-safe string.
 
-    Returns ``None`` when *scan_val* is ``None`` (flat layout).
+    Returns ``None`` when *scan_key* is ``None`` (flat layout).
     """
-    if scan_val is None:
+    if scan_key is None:
         return None
-    return str(scan_val)
+    return str(scan_key)
 
 
-def _group_path(scan_val, count):
+def _resolve_h5(h5path_or_header):
+    """Resolve an archive reference to an absolute ``.h5`` path.
+
+    Accepts either a full path ending in ``.h5`` (returned unchanged) or a
+    bare *header* stem, in which case ``<header>.h5`` is resolved to an
+    absolute path.  This is the single place archive references are
+    normalized, so every reader/writer accepts the same two forms.
+    """
+    p = str(h5path_or_header)
+    return p if p.endswith(".h5") else os.path.abspath(f"{p}.h5")
+
+
+def _group_path(scan_key, count):
     """Return the internal HDF5 group path for a given entry."""
-    bkey = _scan_val_key(scan_val)
+    bkey = _scan_key(scan_key)
     if bkey is not None:
         return f"scan/{bkey}/{int(count)}"
     return str(int(count))
 
 
-def _eqdsk_dataset_name(header, scan_val, count):
+def _eqdsk_dataset_name(header, scan_key, count):
     """Return the dataset name used for the raw eqdsk bytes."""
     base = os.path.basename(header)
-    bkey = _scan_val_key(scan_val)
+    bkey = _scan_key(scan_key)
     if bkey is not None:
         safe_key = bkey.replace("/", "_").replace(" ", "_")
         return f"{base}_{safe_key}_{int(count)}.eqdsk"
@@ -278,7 +290,7 @@ def store_equilibrium(
     w_ExB,
     li1,
     li3,
-    scan_val=None,
+    scan_key=None,
     pressure=None,
     j_BS_edge=None,
     pfile_bytes=None,
@@ -319,7 +331,7 @@ def store_equilibrium(
         Internal inductance l_i(1).
     li3 : float
         Internal inductance l_i(3).
-    scan_val : str, float, int, or None
+    scan_key : str, float, int, or None
         Scan-point label.  When provided, an extra ``scan/{label}/``
         group layer is inserted.  ``None`` gives the flat layout.
     pressure : array_like or None
@@ -343,8 +355,8 @@ def store_equilibrium(
     with open(eqdsk_filepath, "rb") as fh:
         eqdsk_bytes = fh.read()
 
-    grp_path = _group_path(scan_val, count)
-    ds_name  = _eqdsk_dataset_name(header, scan_val, count)
+    grp_path = _group_path(scan_key, count)
+    ds_name  = _eqdsk_dataset_name(header, scan_key, count)
 
     with h5py.File(db_path, "a") as hf:
         # clean slate if this entry already exists
@@ -389,8 +401,8 @@ def store_equilibrium(
         grp.attrs["l_i(1)"] = float(li1)
         grp.attrs["l_i(3)"] = float(li3)
         grp.attrs["count"]  = int(count)
-        if scan_val is not None:
-            grp.attrs["scan_val"] = scan_val
+        if scan_key is not None:
+            grp.attrs["scan_key"] = scan_key
 
         # ---- optional: p-file bytes ----------------------------------------
         if pfile_bytes is not None:
@@ -465,7 +477,7 @@ def store_equilibrium(
             grp.attrs["diverted"] = bool(diverted)
 
 
-def load_equilibrium(header, count, scan_val=None, eqdsk_out_dir=None):
+def load_equilibrium(header, count, scan_key=None, eqdsk_out_dir=None):
     """
     Retrieve one equilibrium entry from the HDF5 database.
 
@@ -475,7 +487,7 @@ def load_equilibrium(header, count, scan_val=None, eqdsk_out_dir=None):
         Base name of the database.
     count : int
         Perturbation index.
-    scan_val : str, float, int, or None
+    scan_key : str, float, int, or None
         Scan-point label (must match what was used at write time).
     eqdsk_out_dir : str or None, optional
         If given, the raw eqdsk is written to a file in this directory.
@@ -489,8 +501,8 @@ def load_equilibrium(header, count, scan_val=None, eqdsk_out_dir=None):
         ``"coil_currents"``, ``"pfile_bytes"``.
     """
     db_path  = os.path.abspath(f"{header}.h5")
-    grp_path = _group_path(scan_val, count)
-    ds_name  = _eqdsk_dataset_name(header, scan_val, count)
+    grp_path = _group_path(scan_key, count)
+    ds_name  = _eqdsk_dataset_name(header, scan_key, count)
 
     result = {}
 
@@ -564,7 +576,7 @@ def store_baseline_profiles(
     sigma_jphi,
     Ip_target,
     l_i_target,
-    scan_val=None,
+    scan_key=None,
     eqdsk_bytes=None,
     pfile_bytes=None,
     psi_N_kinetic=None,
@@ -579,7 +591,7 @@ def store_baseline_profiles(
     """
     Store the input (baseline) profiles and their uncertainties.
 
-    For hierarchical layout (*scan_val* is not ``None``), these are
+    For hierarchical layout (*scan_key* is not ``None``), these are
     stored in ``scan/{label}/_baseline/``.  For flat layout they go
     in ``_baseline/``.
 
@@ -596,7 +608,7 @@ def store_baseline_profiles(
     plotting GUI to be fully self-contained.
     """
     db_path = os.path.abspath(f"{header}.h5")
-    bkey = _scan_val_key(scan_val)
+    bkey = _scan_key(scan_key)
 
     if bkey is not None:
         grp_path = f"scan/{bkey}/_baseline"
@@ -692,21 +704,23 @@ def store_baseline_profiles(
 # ====================================================================
 #  Introspection helpers (used by GUI and notebook API)
 # ====================================================================
-def discover_scan_values(h5path):
+def discover_scan_keys(h5path_or_header):
     """
     Discover all scan values in an HDF5 equilibrium database.
 
     Parameters
     ----------
-    h5path : str
-        Path to the ``.h5`` file.
+    h5path_or_header : str
+        Archive reference -- either a full ``.h5`` path or a bare header
+        stem (``<header>.h5`` is resolved).
 
     Returns
     -------
-    scan_values : list[str] or None
+    scan_keys : list[str] or None
         Sorted list of scan-value keys, or ``None`` if the file uses
         the flat layout (no ``scan/`` group).
     """
+    h5path = _resolve_h5(h5path_or_header)
     with h5py.File(h5path, "r") as hf:
         if "scan" not in hf:
             return None
@@ -720,25 +734,25 @@ def discover_scan_values(h5path):
         return sorted(keys)
 
 
-def count_equilibria(h5path, scan_value=None):
+def count_equilibria(h5path_or_header, scan_key=None):
     """
     Count the number of perturbed equilibria stored for a scan value.
 
     Parameters
     ----------
-    h5path : str
-        Path to the ``.h5`` file.
-    scan_value : str, float, or None
+    h5path_or_header : str
+        Archive reference -- full ``.h5`` path or bare header stem.
+    scan_key : str, float, or None
         Scan-value key.  ``None`` for the flat layout.
 
     Returns
     -------
     n : int
     """
-    return len(list_equilibrium_indices(h5path, scan_value=scan_value))
+    return len(list_equilibrium_indices(h5path_or_header, scan_key=scan_key))
 
 
-def list_equilibrium_indices(h5path, scan_value=None):
+def list_equilibrium_indices(h5path_or_header, scan_key=None):
     """Return the sorted list of integer draw indices actually stored.
 
     Band-rejected / failed draws leave GAPS in the index sequence (e.g.
@@ -748,9 +762,9 @@ def list_equilibrium_indices(h5path, scan_value=None):
 
     Parameters
     ----------
-    h5path : str
-        Path to the ``.h5`` file.
-    scan_value : str, float, or None
+    h5path_or_header : str
+        Archive reference -- full ``.h5`` path or bare header stem.
+    scan_key : str, float, or None
         Scan-value key.  ``None`` for the flat layout.
 
     Returns
@@ -758,7 +772,8 @@ def list_equilibrium_indices(h5path, scan_value=None):
     list of int
         Sorted stored draw indices.
     """
-    bkey = _scan_val_key(scan_value)
+    h5path = _resolve_h5(h5path_or_header)
+    bkey = _scan_key(scan_key)
     with h5py.File(h5path, "r") as hf:
         parent = hf[f"scan/{bkey}"] if bkey is not None else hf
         return sorted(
@@ -767,15 +782,15 @@ def list_equilibrium_indices(h5path, scan_value=None):
         )
 
 
-def load_baseline_profiles(h5path, scan_value=None):
+def load_baseline_profiles(h5path_or_header, scan_key=None):
     """
     Load the baseline profiles and uncertainties for a given scan value.
 
     Parameters
     ----------
-    h5path : str
-        Path to the ``.h5`` file.
-    scan_value : str, float, or None
+    h5path_or_header : str
+        Archive reference -- full ``.h5`` path or bare header stem.
+    scan_key : str, float, or None
         ``None`` for flat-layout files.
 
     Returns
@@ -783,7 +798,8 @@ def load_baseline_profiles(h5path, scan_value=None):
     result : dict
         All stored baseline arrays and scalar attributes.
     """
-    bkey = _scan_val_key(scan_value)
+    h5path = _resolve_h5(h5path_or_header)
+    bkey = _scan_key(scan_key)
     if bkey is not None:
         grp_path = f"scan/{bkey}/_baseline"
     else:
@@ -805,16 +821,17 @@ def load_baseline_profiles(h5path, scan_value=None):
     return result
 
 
-def load_equilibrium_by_path(h5path, count, scan_value=None):
+def load_equilibrium_by_path(h5path_or_header, count, scan_key=None):
     """
-    Load one perturbed equilibrium from an HDF5 file by path.
+    Load one perturbed equilibrium (profiles + scalars only).
 
-    Like :func:`load_equilibrium` but takes a file path instead of a
-    header string, and uses *scan_value* instead of *baseline*.  Does
-    **not** extract the raw eqdsk bytes (use :func:`load_equilibrium`
-    if you need those).
+    Like :func:`load_equilibrium`, but addressed by *scan_key* and does
+    **not** extract the raw eqdsk bytes (use :func:`load_equilibrium` if
+    you need those).  Accepts either a full ``.h5`` path or a bare header
+    stem for *h5path_or_header*.
     """
-    bkey = _scan_val_key(scan_value)
+    h5path = _resolve_h5(h5path_or_header)
+    bkey = _scan_key(scan_key)
     if bkey is not None:
         grp_path = f"scan/{bkey}/{int(count)}"
     else:

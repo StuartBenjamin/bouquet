@@ -77,3 +77,14 @@ PR3_body_DRAFT.md
 PR_BODY*.md
 examples/**/_*
 examples/D3D-like/PORT_STATE.md
+
+# Notebook §8 demo outputs (extracted g/p-files, reconstructed IMAS IDS)
+examples/D3D-like/extracted/
+examples/D3D-like/imas_out/
+examples/D3D-like/*_perturbed.json
+examples/D3D-like/*_draw*.json
+
+# Local-only generator for the synthetic fixture (needs OFT + SPARC + a live
+# solver). Not committed -- only its output D3Dlike_baseline_omas.json ships.
+examples/D3D-like/build_synthetic_omas.py
+examples/D3D-like/slurm_jobs/*.pkl

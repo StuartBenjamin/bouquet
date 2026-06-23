@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bouquet"
-version = "0.2.0"
+dynamic = ["version"]   # single source of truth: bouquet.__version__
 description = "GP-sampled perturbed equilibria for uncertainty quantification with TokaMaker"
 requires-python = ">=3.9"
 readme = "README.md"
@@ -22,6 +22,9 @@ dev = ["jupyter", "pytest"]
 
 [project.scripts]
 plot-family = "bouquet.gui:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "bouquet.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["."]

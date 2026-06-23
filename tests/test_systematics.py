@@ -206,7 +206,7 @@ def replay(tmp_path_factory):
             constrain_sawteeth=False, recalculate_j_BS=True,
             pfile_bytes=pf_raw, baseline_eqdsk_bytes=geq_raw,
             baseline_pfile_bytes=pf_raw,
-            diagnostic_plots=False, scan_val=0, psi_N_kinetic=psi_pf,
+            diagnostic_plots=False, scan_key=0, psi_N_kinetic=psi_pf,
             coil_drift=0.01,
             homotopy_passes=[(0.05, 0.10), (0.02, 0.05), (0.01, 0.01)],
             inspec_F_max=0.02, inspec_VSC_max=0.02, p_thresh=0.05,

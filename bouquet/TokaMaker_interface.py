@@ -42,7 +42,7 @@ from .utils import (
     safe_trace_surf,
     store_equilibrium,
     store_baseline_profiles,
-    _scan_val_key,
+    _scan_key,
     read_eqdsk_from_bytes,
 )
 from .io.geqdsk import read_geqdsk
@@ -654,6 +654,8 @@ def perturb_kinetic_equilibrium(
     recalculate_j_BS=True,
     isolate_edge_jBS=True,
     scale_jBS=1.0,
+    floor_j_BS=True,
+    jBS_diff=None,
     swb_iterations=3,
     diagnostic_plots=False,
     max_pressure_iter=_MAX_PRESSURE_ITER,
@@ -731,8 +733,9 @@ def perturb_kinetic_equilibrium(
         Target plasma current [A].
     l_i_target : float
         Target internal inductance.
-    Zeff : float
-        Effective ion charge (scalar).
+    Zeff : ndarray
+        Effective ion charge profile on ``psi_N`` (scalar accepted and
+        broadcast). With the active zeff channel this is re-drawn per draw.
     npsi : int
         Normalised poloidal flux grid size.
     p_thresh : float
@@ -1419,6 +1422,21 @@ def perturb_kinetic_equilibrium(
         spike_profile = _swb_jbs_to_toroidal(
             mygs, results["isolated_j_BS"], psi_pad)
 
+        # Floor the SWB bootstrap at 0 (drop unphysical negative excursions)
+        # before it enters j_phi. Then, in Case-B "diff" mode, add the fixed
+        # correction jBS_diff = FUSE_jBS - SWB_baseline so the bootstrap term
+        # becomes SWB(perturbed) + (FUSE_jBS - SWB_baseline): at sigma=0 it
+        # reduces to FUSE_jBS exactly, and per-draw it tracks the SWB delta.
+        # spike_profile feeds EVERY downstream j_phi build (recon-anchor,
+        # l_i-match, corrective), so this single reassignment covers them all.
+        # (Not re-floored after the diff: a negative excursion there is the
+        # genuine Case-B edge-misalignment signal we want to surface, not hide.)
+        if floor_j_BS:
+            full_j_BS = np.clip(full_j_BS, 0.0, None)
+            spike_profile = np.clip(spike_profile, 0.0, None)
+        if jBS_diff is not None:
+            spike_profile = spike_profile + np.asarray(jBS_diff, dtype=float)
+
         # Anchor: forward-solve with recon's inductive shape + SWB's
         # Sauter-recomputed bootstrap spike, using the perturbed pressure
         # profile (pres_tmp).  The SWB recompute is a core feature of
@@ -1986,10 +2004,12 @@ def generate_bouquet(
     constrain_sawteeth=True,
     recalculate_j_BS=True,
     isolate_edge_jBS=True,
+    floor_j_BS=True,
+    jBS_diff=None,
     jBS_scale_range=None,
     swb_iterations=3,
     diagnostic_plots=True,
-    scan_val=None,
+    scan_key=None,
     pfile_bytes=None,
     Zeff_profile=None,
     baseline_eqdsk_bytes=None,
@@ -2019,6 +2039,7 @@ def generate_bouquet(
     aux_sigmas=None,
     aux_baselines=None,
     aux_length_scales=None,
+    progress_callback=None,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -2063,8 +2084,10 @@ def generate_bouquet(
         Target plasma current [A].
     l_i_target : float
         Target internal inductance.
-    Zeff : float
-        Effective ion charge.
+    Zeff : ndarray
+        Effective ion charge profile on the equilibrium grid ``psi_N``
+        (consumed by ``solve_with_bootstrap``). A scalar is accepted and
+        broadcast, but the class API always passes the per-draw profile.
     input_jinductive : ndarray or None
         Dimensionless inductive :math:`j_\phi` shape.
     l_i_tolerance : float
@@ -2108,7 +2131,7 @@ def generate_bouquet(
         (its ``iterations`` argument); 2 trades a little accuracy for speed.
     diagnostic_plots : bool
         Show diagnostic matplotlib figures.
-    scan_val : str, float, int, or None
+    scan_key : str, float, int, or None
         Optional scan-point label for nested HDF5 storage.
         ``None`` gives the flat layout.
     pfile_bytes : bytes or None
@@ -2657,7 +2680,7 @@ def generate_bouquet(
             # cleanly through the existing store_baseline_profiles
             # call without needing schema changes.
             #
-            # Cost: one extra save_eqdsk call per scan_val (a few
+            # Cost: one extra save_eqdsk call per scan_key (a few
             # hundred ms).  Soft-fails -- cosmetic plot fix, never
             # blocks the physics run.
             try:
@@ -2849,7 +2872,7 @@ def generate_bouquet(
         pressure, input_j_phi,
         sigma_ne, sigma_te, sigma_ni, sigma_ti, sigma_jphi,
         initial_Ip_target, l_i_target,
-        scan_val=scan_val,
+        scan_key=scan_key,
         eqdsk_bytes=baseline_eqdsk_bytes,
         pfile_bytes=stored_pfile_bytes,
         psi_N_kinetic=psi_N_kinetic,
@@ -2869,9 +2892,9 @@ def generate_bouquet(
     # the numeric draw groups under this scan value up front; _baseline and
     # other scan values are untouched.
     import h5py as _h5_purge
-    from .utils import _scan_val_key as _svk
+    from .utils import _scan_key as _svk
     with _h5_purge.File(f"{header}.h5", "a") as _hf_purge:
-        _bk = _svk(scan_val)
+        _bk = _svk(scan_key)
         _parent = (_hf_purge.get(f"scan/{_bk}") if _bk is not None
                    else _hf_purge)
         if _parent is not None:
@@ -3009,6 +3032,13 @@ def generate_bouquet(
     eq_iter = pbar if pbar is not None else range(n_equils)
 
     for count in eq_iter:
+        if progress_callback is not None:
+            # one tick per draw attempt -- fed to a parent aggregate bar in the
+            # process-parallel path (worker tqdm/stderr is suppressed there).
+            try:
+                progress_callback(count)
+            except Exception:
+                pass
         scale_jBS = float(jBS_scales[count])
         # ---- Per-draw l_i_target sampling ----
         # If l_i_uncertainty > 0, draw a perturbed target from
@@ -3173,6 +3203,8 @@ def generate_bouquet(
                 constrain_sawteeth=constrain_sawteeth,
                 recalculate_j_BS=recalculate_j_BS,
                 isolate_edge_jBS=isolate_edge_jBS,
+                floor_j_BS=floor_j_BS,
+                jBS_diff=jBS_diff,
                 scale_jBS=scale_jBS,
                 swb_iterations=swb_iterations,
                 diagnostic_plots=diagnostic_plots,
@@ -3853,7 +3885,7 @@ def generate_bouquet(
             ni_perturb, ti_perturb,
             w_ExB,
             li1, li3,
-            scan_val=scan_val,
+            scan_key=scan_key,
             pressure=pressure_perturb,
             j_BS_edge=diagnostics["j_BS_edge"],
             pfile_bytes=perturbed_pfile_bytes,

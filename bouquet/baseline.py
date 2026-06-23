@@ -62,6 +62,18 @@ class Baseline:
     j_RF: Optional["np.ndarray"] = None     # RF-driven current [A/m^2]
     p_fast: Optional["np.ndarray"] = None   # fast/beam pressure [Pa]
 
+    # bootstrap amplitude factor applied when the j_BS/j_inductive split is
+    # rebuilt against SWB and calibrated to the measured l_i (IMAS path's
+    # _forward_solve_imas_baseline, mirroring the g-file fit_inductive_profile).
+    # 1.0 means no rebuild was done (raw source split kept).
+    bs_scale: float = 1.0
+
+    # Case-B ("diff") fixed bootstrap correction profile [A/m^2] = FUSE_jBS - SWB,
+    # added to the baseline AND every draw's j_phi so the total anchors to the
+    # FUSE bootstrap while the SWB delta tracks per-draw kinetics. None => not in
+    # diff mode (Case-A "rescale" or no SWB rebuild).
+    jBS_diff: Optional["np.ndarray"] = None
+
     # raw bytes preserved for archival into the HDF5 (optional)
     eqdsk_bytes: Optional[bytes] = None
     pfile_bytes: Optional[bytes] = None

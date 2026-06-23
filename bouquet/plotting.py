@@ -28,7 +28,7 @@ from .utils import (
     load_baseline_profiles,
     count_equilibria,
     list_equilibrium_indices,
-    discover_scan_values,
+    discover_scan_keys,
 )
 from .io import read_geqdsk
 
@@ -880,7 +880,7 @@ def _plot_bouquet_dashboard(psi_N, psi_N_kin, bl, perturbed):
 # ====================================================================
 #  Data loading helper
 # ====================================================================
-def _load_all_perturbations(h5path, scan_value=None, indices=None):
+def _load_all_perturbations(h5path, scan_key=None, indices=None):
     """Load all perturbed equilibria for a scan value as a list of dicts.
 
     Handles non-contiguous indices (from skipped equilibria) by
@@ -889,8 +889,8 @@ def _load_all_perturbations(h5path, scan_value=None, indices=None):
     draw indices), only those draws are loaded -- used to honour a
     filter selection.
     """
-    from .utils import _scan_val_key
-    bkey = _scan_val_key(scan_value)
+    from .utils import _scan_key
+    bkey = _scan_key(scan_key)
     with h5py.File(h5path, "r") as hf:
         if bkey is not None:
             parent = hf[f"scan/{bkey}"]
@@ -905,12 +905,12 @@ def _load_all_perturbations(h5path, scan_value=None, indices=None):
         keep = set(indices)
         stored_counts = [i for i in stored_counts if i in keep]
     return [
-        load_equilibrium_by_path(h5path, count=i, scan_value=scan_value)
+        load_equilibrium_by_path(h5path, count=i, scan_key=scan_key)
         for i in stored_counts
     ]
 
 
-def _load_all_boundaries(h5path, scan_value=None, indices=None):
+def _load_all_boundaries(h5path, scan_key=None, indices=None):
     """Load LCFS boundaries from stored geqdsk bytes for all equilibria.
 
     Returns a list of (R, Z) tuples.  Returns an empty list when the
@@ -918,15 +918,15 @@ def _load_all_boundaries(h5path, scan_value=None, indices=None):
     only those stored draws are loaded (honours a filter selection).
     """
     from .io import GEQDSKEquilibrium
-    from .utils import _scan_val_key, _group_path, _eqdsk_dataset_name
+    from .utils import _scan_key, _group_path, _eqdsk_dataset_name
 
     if indices is None:
-        indices = list_equilibrium_indices(h5path, scan_value=scan_value)
+        indices = list_equilibrium_indices(h5path, scan_key=scan_key)
     boundaries = []
     with h5py.File(h5path, "r") as hf:
         for i in indices:
-            sv_key = _scan_val_key(scan_value)
-            grp_path = _group_path(scan_value, i)
+            sv_key = _scan_key(scan_key)
+            grp_path = _group_path(scan_key, i)
             if grp_path not in hf:
                 continue
             grp = hf[grp_path]
@@ -949,7 +949,7 @@ def _load_all_boundaries(h5path, scan_value=None, indices=None):
 # ====================================================================
 #  Notebook-friendly API
 # ====================================================================
-def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic",
+def plot_bouquet(h5path_or_header, scan_key=None, mode="kinetic",
                  selection="all", layout="stack", pub_style=False):
     """Plot a family of perturbed equilibria from an HDF5 file.
 
@@ -958,7 +958,7 @@ def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic",
     h5path_or_header : str
         Path to the ``.h5`` file, or the header string (without
         extension).
-    scan_value : str, float, or None
+    scan_key : str, float, or None
         Baseline scan-value label.  ``None`` for flat-layout files.
     mode : str
         ``'kinetic'``, ``'pressure'``, ``'j-phi'``, ``'boundary'``,
@@ -985,30 +985,30 @@ def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic",
         h5path = os.path.abspath(h5path_or_header)
 
     # ---- auto-resolve scan value (so plot_bouquet(h5) "just works") ------
-    if scan_value is None:
-        _svs = discover_scan_values(h5path)
+    if scan_key is None:
+        _svs = discover_scan_keys(h5path)
         if _svs:
-            scan_value = _svs[0]
+            scan_key = _svs[0]
 
     # ---- resolve which draws to show (filter selection) ------------------
     sel_indices = None
     if selection != "all":
         from .filtering import select_indices as _select_indices
-        sel_indices = _select_indices(h5path, scan_value=scan_value,
+        sel_indices = _select_indices(h5path, scan_key=scan_key,
                                       selection=selection)
 
     # ---- load data -------------------------------------------------------
     try:
-        bl = load_baseline_profiles(h5path, scan_value=scan_value)
+        bl = load_baseline_profiles(h5path, scan_key=scan_key)
     except KeyError:
-        avail = discover_scan_values(h5path)
+        avail = discover_scan_keys(h5path)
         msg = (
-            f"No data for scan_value={scan_value!r} in {h5path}.\n"
+            f"No data for scan_key={scan_key!r} in {h5path}.\n"
             f"Available scan values: {avail}"
         )
         raise KeyError(msg) from None
     psi_N = bl["psi_N"]
-    perturbed = _load_all_perturbations(h5path, scan_value=scan_value,
+    perturbed = _load_all_perturbations(h5path, scan_key=scan_key,
                                         indices=sel_indices)
 
     # Use psi_N_kinetic for kinetic profiles if available
@@ -1020,7 +1020,7 @@ def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic",
     # figures.
     if mode == "all" and not pub_style:
         figs = [_plot_bouquet_dashboard(psi_N, psi_N_kin, bl, perturbed)]
-        boundaries = _load_all_boundaries(h5path, scan_value=scan_value,
+        boundaries = _load_all_boundaries(h5path, scan_key=scan_key,
                                           indices=sel_indices)
         if boundaries:
             fig_bd, ax_bd = plt.subplots(1, 2, figsize=(8.5, 4.0))
@@ -1077,7 +1077,7 @@ def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic",
         axes_list.append(ax_jc)
 
     if mode in ("boundary", "all"):
-        boundaries = _load_all_boundaries(h5path, scan_value=scan_value,
+        boundaries = _load_all_boundaries(h5path, scan_key=scan_key,
                                           indices=sel_indices)
         if boundaries:
             fig_bd, ax_bd = plt.subplots(1, 2, figsize=(8.5, 4.0))
@@ -1167,7 +1167,7 @@ def _resolve_x_coord(psi_N, x_coord, eq=None, psi_pf=None):
 
 
 def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
-                        h5path=None, scan_val=None, count=None):
+                        h5path=None, scan_key=None, count=None):
     """Plot one or more geqdsk equilibria: LCFS contours + profile panels.
 
     Layout: narrow flux-surface panel on the left, 2x2 grid of profiles
@@ -1182,10 +1182,10 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
        ``plot_geqdsk_bouquet(h5path="header.h5")``
 
     3. **All perturbed from HDF5 for one scan value:**
-       ``plot_geqdsk_bouquet(h5path="header.h5", scan_val=0)``
+       ``plot_geqdsk_bouquet(h5path="header.h5", scan_key=0)``
 
     4. **Single perturbed case from HDF5:**
-       ``plot_geqdsk_bouquet(h5path="header.h5", scan_val=0, count=2)``
+       ``plot_geqdsk_bouquet(h5path="header.h5", scan_key=0, count=2)``
 
     5. **Multiple files overplotted:**
        ``plot_geqdsk_bouquet(["a.geqdsk", "b.geqdsk"])``
@@ -1201,9 +1201,9 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
     h5path : str or None
         Path to a bouquet HDF5 database.  When provided, loads and
         overplots all stored geqdsk equilibria (or a single one if
-        *count* is specified).  When *scan_val* is ``None``, loads
+        *count* is specified).  When *scan_key* is ``None``, loads
         all scan values.
-    scan_val : str, float, or None
+    scan_key : str, float, or None
         Scan-value label for HDF5 mode.  ``None`` loads all.
     count : int or None
         If given with *h5path*, load only this equilibrium index.
@@ -1219,36 +1219,36 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
         if not h5path.endswith(".h5"):
             h5path = os.path.abspath(f"{h5path}.h5")
 
-        # Build list of (scan_val, count) pairs to load
+        # Build list of (scan_key, count) pairs to load
         load_pairs = []
         if count is not None:
-            load_pairs.append((scan_val, count))
-        elif scan_val is not None:
+            load_pairs.append((scan_key, count))
+        elif scan_key is not None:
             load_pairs.extend(
-                (scan_val, i)
-                for i in list_equilibrium_indices(h5path, scan_value=scan_val))
+                (scan_key, i)
+                for i in list_equilibrium_indices(h5path, scan_key=scan_key))
         else:
-            # No scan_val specified: load ALL scan values
-            svs = discover_scan_values(h5path)
+            # No scan_key specified: load ALL scan values
+            svs = discover_scan_keys(h5path)
             if svs is not None:
                 for sv in svs:
                     load_pairs.extend(
                         (sv, i)
-                        for i in list_equilibrium_indices(h5path, scan_value=sv))
+                        for i in list_equilibrium_indices(h5path, scan_key=sv))
             else:
                 load_pairs.extend(
                     (None, i)
-                    for i in list_equilibrium_indices(h5path, scan_value=None))
+                    for i in list_equilibrium_indices(h5path, scan_key=None))
 
         eqs = []
-        from .utils import _group_path, _scan_val_key
+        from .utils import _group_path, _scan_key
 
         # Load baseline geqdsk from _baseline group if available
         baseline_eq = None
-        bl_scan = scan_val if scan_val is not None else (
+        bl_scan = scan_key if scan_key is not None else (
             load_pairs[0][0] if load_pairs else None)
         if bl_scan is not None:
-            bl_key = _scan_val_key(bl_scan)
+            bl_key = _scan_key(bl_scan)
             bl_grp = f"scan/{bl_key}/_baseline" if bl_key else "_baseline"
         else:
             bl_grp = "_baseline"
@@ -1417,7 +1417,7 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
 
 
 def plot_pfile_bouquet(pfile_path_or_pf=None, x_coord="psi_N", eq=None,
-                       h5path=None, scan_val=None, count=None):
+                       h5path=None, scan_key=None, count=None):
     """Plot one or more p-file kinetic profiles in a multi-panel grid.
 
     Automatically includes all available profiles, skipping any that
@@ -1430,10 +1430,10 @@ def plot_pfile_bouquet(pfile_path_or_pf=None, x_coord="psi_N", eq=None,
        ``plot_pfile_bouquet("shot.peqdsk")``
 
     2. **All perturbed from HDF5 (requires pfile_bytes stored):**
-       ``plot_pfile_bouquet(h5path="header.h5", scan_val=0)``
+       ``plot_pfile_bouquet(h5path="header.h5", scan_key=0)``
 
     3. **Single perturbed case from HDF5:**
-       ``plot_pfile_bouquet(h5path="header.h5", scan_val=0, count=2)``
+       ``plot_pfile_bouquet(h5path="header.h5", scan_key=0, count=2)``
 
     4. **Multiple files overplotted:**
        ``plot_pfile_bouquet(["a.peqdsk", "b.peqdsk"])``
@@ -1457,7 +1457,7 @@ def plot_pfile_bouquet(pfile_path_or_pf=None, x_coord="psi_N", eq=None,
     h5path : str or None
         Path to a bouquet HDF5 database.  When provided, loads and
         overplots all stored p-file equilibria.
-    scan_val : str, float, or None
+    scan_key : str, float, or None
         Scan-value label for HDF5 mode.
     count : int or None
         If given with *h5path*, load only this p-file index.
@@ -1473,35 +1473,35 @@ def plot_pfile_bouquet(pfile_path_or_pf=None, x_coord="psi_N", eq=None,
         if not h5path.endswith(".h5"):
             h5path = os.path.abspath(f"{h5path}.h5")
 
-        # Build list of (scan_val, count) pairs to load
+        # Build list of (scan_key, count) pairs to load
         load_pairs = []
         if count is not None:
-            load_pairs.append((scan_val, count))
-        elif scan_val is not None:
+            load_pairs.append((scan_key, count))
+        elif scan_key is not None:
             load_pairs.extend(
-                (scan_val, i)
-                for i in list_equilibrium_indices(h5path, scan_value=scan_val))
+                (scan_key, i)
+                for i in list_equilibrium_indices(h5path, scan_key=scan_key))
         else:
-            svs = discover_scan_values(h5path)
+            svs = discover_scan_keys(h5path)
             if svs is not None:
                 for sv in svs:
                     load_pairs.extend(
                         (sv, i)
-                        for i in list_equilibrium_indices(h5path, scan_value=sv))
+                        for i in list_equilibrium_indices(h5path, scan_key=sv))
             else:
                 load_pairs.extend(
                     (None, i)
-                    for i in list_equilibrium_indices(h5path, scan_value=None))
+                    for i in list_equilibrium_indices(h5path, scan_key=None))
 
         pfiles = []
-        from .utils import _group_path, _scan_val_key
+        from .utils import _group_path, _scan_key
 
         # Load baseline pfile from _baseline group if available
         baseline_pf = None
-        bl_scan = scan_val if scan_val is not None else (
+        bl_scan = scan_key if scan_key is not None else (
             load_pairs[0][0] if load_pairs else None)
         if bl_scan is not None:
-            bl_key = _scan_val_key(bl_scan)
+            bl_key = _scan_key(bl_scan)
             bl_grp = f"scan/{bl_key}/_baseline" if bl_key else "_baseline"
         else:
             bl_grp = "_baseline"
@@ -1678,7 +1678,7 @@ def _framed_legend(ax, handles=None, **kw):
     return leg
 
 
-def plot_coil_currents(h5path_or_header, scan_val=None, vsc_coils=('F9A', 'F9B'),
+def plot_coil_currents(h5path_or_header, scan_key=None, vsc_coils=('F9A', 'F9B'),
                        exclude_coils=('ECOILA', 'ECOILB'), annotate=None):
     """Per-coil drift heatmap: coils x draws, % drift from the recon baseline.
 
@@ -1697,7 +1697,7 @@ def plot_coil_currents(h5path_or_header, scan_val=None, vsc_coils=('F9A', 'F9B')
     ----------
     h5path_or_header : str
         Path to the ``.h5`` file or header string.
-    scan_val : float or int, optional
+    scan_key : float or int, optional
         Scan value; defaults to the first one in the file.
     vsc_coils : tuple of str
         Names of the vertical-stability pair (separate spec class).
@@ -1711,15 +1711,15 @@ def plot_coil_currents(h5path_or_header, scan_val=None, vsc_coils=('F9A', 'F9B')
     """
     import json as _json
     import matplotlib.colors as _mcolors
-    from .utils import _scan_val_key
+    from .utils import _scan_key
 
     h5path = (h5path_or_header if h5path_or_header.endswith(".h5")
               else os.path.abspath(f"{h5path_or_header}.h5"))
 
     with h5py.File(h5path, 'r') as hf:
         scan_keys = sorted(hf['scan'].keys()) if 'scan' in hf else []
-        if scan_val is not None:
-            sk = _scan_val_key(scan_val)
+        if scan_key is not None:
+            sk = _scan_key(scan_key)
         elif scan_keys:
             sk = scan_keys[0]
             if len(scan_keys) > 1:
@@ -1825,7 +1825,7 @@ def plot_coil_currents(h5path_or_header, scan_val=None, vsc_coils=('F9A', 'F9B')
     return fig, ax
 
 
-def plot_spec_summary(h5path_or_header, scan_value=None, rms_max_mm=5.0):
+def plot_spec_summary(h5path_or_header, scan_key=None, rms_max_mm=5.0):
     """The in-spec filter story in one figure.
 
     Left: per-draw **fraction of spec** for the two filter criteria --
@@ -1840,7 +1840,7 @@ def plot_spec_summary(h5path_or_header, scan_value=None, rms_max_mm=5.0):
     -------
     (fig, axes)
     """
-    from .utils import _scan_val_key
+    from .utils import _scan_key
     from .filtering import _baseline_boundary, _boundary_devs
 
     h5path = (h5path_or_header if h5path_or_header.endswith(".h5")
@@ -1849,15 +1849,15 @@ def plot_spec_summary(h5path_or_header, scan_value=None, rms_max_mm=5.0):
     idxs, coil_f, bnd_f, selected = [], [], [], []
     with h5py.File(h5path, 'r') as hf:
         scan_keys = sorted(hf['scan'].keys()) if 'scan' in hf else []
-        sk = (_scan_val_key(scan_value) if scan_value is not None
+        sk = (_scan_key(scan_key) if scan_key is not None
               else (scan_keys[0] if scan_keys else None))
         parent = hf.get(f'scan/{sk}') if sk is not None else None
         if parent is None:
             print("No scan group found in the HDF5 file.")
             return None, None
-        # pass the raw key (str) through: _scan_val_key(str) is identity, so
+        # pass the raw key (str) through: _scan_key(str) is identity, so
         # this hits the same "scan/<key>" path the draws were stored under
-        bl_boundary = _baseline_boundary(hf, scan_value if scan_value is not None
+        bl_boundary = _baseline_boundary(hf, scan_key if scan_key is not None
                                          else sk)
         for c in sorted(int(k) for k in parent.keys() if k.isdigit()):
             g = parent[str(c)]
@@ -1939,7 +1939,7 @@ _AUX_LABELS = {
 _AUX_ORDER = ["omega_tor", "e_r", "chi_e", "chi_i", "zeff"]
 
 
-def plot_aux_profiles(h5path_or_header, scan_value=None, names=None,
+def plot_aux_profiles(h5path_or_header, scan_key=None, names=None,
                             selection="all"):
     """Overlay the perturbed transport / rotation / Z_eff profiles per draw.
 
@@ -1959,14 +1959,14 @@ def plot_aux_profiles(h5path_or_header, scan_value=None, names=None,
     h5path = (h5path_or_header if h5path_or_header.endswith(".h5")
               else os.path.abspath(f"{h5path_or_header}.h5"))
 
-    svs = ([scan_value] if scan_value is not None
-           else (discover_scan_values(h5path) or [None]))
+    svs = ([scan_key] if scan_key is not None
+           else (discover_scan_keys(h5path) or [None]))
     pairs = [(sv, i) for sv in svs
-             for i in list_equilibrium_indices(h5path, scan_value=sv)]
+             for i in list_equilibrium_indices(h5path, scan_key=sv)]
     if selection != "all":
         from .filtering import select_indices as _sel
         keep = {(sv, i) for sv in svs
-                for i in _sel(h5path, scan_value=sv, selection=selection)}
+                for i in _sel(h5path, scan_key=sv, selection=selection)}
         pairs = [p for p in pairs if p in keep]
 
     # dataset names: "aux_<name>" (current) with "extra_<name>" fallback for
@@ -1996,10 +1996,10 @@ def plot_aux_profiles(h5path_or_header, scan_value=None, names=None,
 
     # baseline + sigma (stored by store_baseline_profiles since the
     # aux-bands feature; older files fall back to draws-only)
-    from .utils import _scan_val_key
+    from .utils import _scan_key
     bl_prof, bl_sig, bl_x = {}, {}, None
     with h5py.File(h5path, "r") as hf:
-        bkey = _scan_val_key(pairs[0][0]) if pairs else None
+        bkey = _scan_key(pairs[0][0]) if pairs else None
         bl_path = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
         if bl_path in hf:
             bl = hf[bl_path]
@@ -2074,7 +2074,7 @@ def plot_aux_profiles(h5path_or_header, scan_value=None, names=None,
 plot_transport_profiles = plot_aux_profiles
 
 
-def plot_imas_bouquet(h5path_or_header, scan_value=None, selection="all",
+def plot_imas_bouquet(h5path_or_header, scan_key=None, selection="all",
                       layout="stack", pub_style=False):
     """Unified bouquet view for the IMAS path: the standard ensemble panels
     (kinetic / pressure / j_phi / boundary, via :func:`plot_bouquet`) plus the
@@ -2085,11 +2085,11 @@ def plot_imas_bouquet(h5path_or_header, scan_value=None, selection="all",
     lays those out side by side). Returns the list of figures produced.
     """
     figs = []
-    res = plot_bouquet(h5path_or_header, scan_value=scan_value, mode="all",
+    res = plot_bouquet(h5path_or_header, scan_key=scan_key, mode="all",
                        selection=selection, layout=layout, pub_style=pub_style)
     bq_figs = res[0] if isinstance(res, tuple) else res
     figs.extend(bq_figs if isinstance(bq_figs, (list, tuple)) else [bq_figs])
-    ex_fig, _ = plot_aux_profiles(h5path_or_header, scan_value=scan_value,
+    ex_fig, _ = plot_aux_profiles(h5path_or_header, scan_key=scan_key,
                                         selection=selection)
     if ex_fig is not None:
         if layout == "row" and pub_style:
@@ -2098,10 +2098,134 @@ def plot_imas_bouquet(h5path_or_header, scan_value=None, selection="all",
     return figs
 
 
+def plot_bouquet_timeseries(entries, scan_key=None, draws=True, envelopes=True,
+                            selection="all", cmap="viridis", time_label="time [s]"):
+    r"""Overlay bouquet profile families from MULTIPLE time slices, colored by time.
+
+    One 2x3 dashboard (n_e, T_e, n_i, T_i, pressure, j_phi) in which every slice
+    contributes its baseline and its perturbed draws (all one thin weight,
+    since the per-slice cluster is too tight to separate), and -- for the
+    kinetic / j_phi panels -- its baseline +/-1 sigma envelope (light band). All
+    of a slice's curves share one colour, set by its time on a ``viridis``
+    colour bar, so the bouquet's *evolution* and its per-slice spread read off a
+    single figure.
+
+    Parameters
+    ----------
+    entries : dict ``{time: header_or_h5path}`` or list of ``(time, header)``
+        One bouquet archive per time slice (e.g. the per-slice outputs of a
+        ``set_slice`` sweep). Headers and ``.h5`` paths are both accepted.
+    scan_key : int/float, optional
+        The scan key under which each archive's draws are stored. ``None``
+        (default) uses each entry's *time* as its own scan key -- i.e. each
+        slice was generated with ``generation.scan_key = time`` -- so the time
+        is both the colour value and the storage key. Pass a scalar to use one
+        shared key for every archive.
+    draws : bool
+        Overlay the per-draw curves (default True).
+    envelopes : bool
+        Shade each slice's baseline +/-1 sigma band (default True).
+    selection : {"all", "selected"}
+        Which draws to overlay.
+    cmap : str
+        Colour map for the time axis.
+    time_label : str
+        Colour-bar label (e.g. ``"time [ms]"`` for a relabelled axis).
+
+    Returns
+    -------
+    (fig, axes)
+    """
+    import matplotlib.colors as _mcolors
+    from .utils import _scan_key, _group_path
+
+    # keep the ORIGINAL key form (int 1600 -> group "1600", float 2.1 -> "2.1");
+    # float() only the numeric used for the colour norm, not the scan-key lookup
+    items = list(entries.items()) if isinstance(entries, dict) else list(entries)
+    items = sorted(items, key=lambda kv: float(kv[0]))
+    if not items:
+        print("plot_bouquet_timeseries: no entries given.")
+        return None, None
+    times = [float(k) for k, _ in items]
+    norm = _mcolors.Normalize(vmin=min(times), vmax=max(times)
+                              if max(times) > min(times) else min(times) + 1e-9)
+    import matplotlib as _mpl
+    cm_obj = _mpl.colormaps[cmap]
+
+    # (title, dataset, grid-key, scale, sigma-dataset)
+    PANELS = [
+        (r"$n_e$ [$10^{19}$ m$^{-3}$]", "n_e [m^-3]", "psi_N_kinetic", 1e-19, "sigma_ne [m^-3]"),
+        (r"$T_e$ [keV]",               "T_e [eV]",    "psi_N_kinetic", 1e-3,  "sigma_te [eV]"),
+        (r"$n_i$ [$10^{19}$ m$^{-3}$]", "n_i [m^-3]", "psi_N_kinetic", 1e-19, "sigma_ni [m^-3]"),
+        (r"$T_i$ [keV]",               "T_i [eV]",    "psi_N_kinetic", 1e-3,  "sigma_ti [eV]"),
+        (r"$p$ [kPa]",                 "pressure [Pa]", "psi_N",       1e-3,  None),
+        (r"$j_\phi$ [MA/m$^2$]",       "j_phi [A m^-2]", "psi_N",      1e-6,  "sigma_jphi [A m^-2]"),
+    ]
+    fig, axes = plt.subplots(2, 3, figsize=(11, 6), sharex=True)
+    flat = axes.ravel()
+
+    for (orig_key, path) in items:
+        h5 = path if str(path).endswith(".h5") else os.path.abspath(f"{path}.h5")
+        col = cm_obj(norm(float(orig_key)))
+        # scan key for THIS archive: explicit scalar, else the entry's own key
+        # (preserve its original form so int 1600 -> group "1600")
+        key_this = scan_key if scan_key is not None else orig_key
+        bkey = _scan_key(key_this)
+        bl_path = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
+        try:
+            sel_idx = set(select_indices(h5, scan_key=key_this, selection=selection)) \
+                if selection != "all" else None
+        except Exception:
+            sel_idx = None
+        with h5py.File(h5, "r") as hf:
+            if bl_path not in hf:
+                continue
+            bl = hf[bl_path]
+            grids = {g: np.asarray(bl[g][()]) for g in ("psi_N", "psi_N_kinetic") if g in bl}
+            draw_keys = sorted(int(k) for k in hf[f"scan/{bkey}" if bkey is not None else "."].keys()
+                               if k.isdigit()) if True else []
+            for j, (title, ds, gk, sc, sds) in enumerate(PANELS):
+                ax = flat[j]
+                x = grids.get(gk)
+                if x is None or ds not in bl:
+                    continue
+                y0 = np.asarray(bl[ds][()]) * sc
+                if envelopes and sds and sds in bl:
+                    s = np.asarray(bl[sds][()]) * sc
+                    if s.shape == y0.shape:
+                        # translucent GRAY band (slice-independent), behind everything
+                        ax.fill_between(x, y0 - s, y0 + s, color="0.5", alpha=0.18,
+                                        lw=0, zorder=1)
+                if draws:
+                    for c in draw_keys:
+                        if sel_idx is not None and c not in sel_idx:
+                            continue
+                        g = hf[_group_path(key_this, c)]
+                        if ds not in g:
+                            continue
+                        yd = np.asarray(g[ds][()]) * sc
+                        xg = grids.get(gk)
+                        if len(yd) == len(xg):
+                            ax.plot(xg, yd, "-", color=col, lw=1.1, alpha=0.65, zorder=2)
+                # baseline at the SAME thin weight as the draws (the per-slice
+                # cluster is too tight to distinguish a bold baseline anyway);
+                # slightly more opaque so it still reads as the slice's centre
+                ax.plot(x, y0, "-", color=col, lw=1.1, alpha=0.9, zorder=3)
+                ax.set_title(title, fontsize=10); ax.grid(ls=":")
+
+    for j in (3, 4, 5):
+        flat[j].set_xlabel(r"$\psi_N$")
+    sm = _cm.ScalarMappable(norm=norm, cmap=cm_obj); sm.set_array([])
+    cb = fig.colorbar(sm, ax=axes.ravel().tolist(), pad=0.02, label=time_label)
+    fig.suptitle("Bouquet time evolution  (lines = baseline + draws, "
+                 "band = $\\pm1\\sigma$; colour = time)", fontsize=11)
+    return fig, axes
+
+
 # ====================================================================
 #  Trace plots: l_i, boundary deviation across equilibria
 # ====================================================================
-def plot_traces(h5path_or_header, scan_value="all", li_band=None, rms_max_mm=None):
+def plot_traces(h5path_or_header, scan_key="all", li_band=None, rms_max_mm=None):
     r"""Compact per-draw diagnostics: l_i, LCFS deviation, anchor heatmap.
 
     One row of three panels (per scan value):
@@ -2123,7 +2247,7 @@ def plot_traces(h5path_or_header, scan_value="all", li_band=None, rms_max_mm=Non
     figs : list of Figure
         One figure per scan value.
     """
-    from .utils import read_eqdsk_from_bytes, _scan_val_key
+    from .utils import read_eqdsk_from_bytes, _scan_key
     from .filtering import _baseline_boundary, _boundary_devs
 
     if not h5path_or_header.endswith(".h5"):
@@ -2131,14 +2255,14 @@ def plot_traces(h5path_or_header, scan_value="all", li_band=None, rms_max_mm=Non
     else:
         h5path = os.path.abspath(h5path_or_header)
 
-    if scan_value == "all":
-        scan_vals = discover_scan_values(h5path) or [None]
+    if scan_key == "all":
+        scan_keys = discover_scan_keys(h5path) or [None]
     else:
-        scan_vals = [scan_value]
+        scan_keys = [scan_key]
 
     figs = []
-    for sv in scan_vals:
-        bl = load_baseline_profiles(h5path, scan_value=sv)
+    for sv in scan_keys:
+        bl = load_baseline_profiles(h5path, scan_key=sv)
         li_target = float(bl.get("l_i_target", np.nan))
 
         idxs, li1, sel = [], [], []
@@ -2149,7 +2273,7 @@ def plot_traces(h5path_or_header, scan_value="all", li_band=None, rms_max_mm=Non
         xpt_label = 'bottom'
 
         with h5py.File(h5path, "r") as hf:
-            bkey = _scan_val_key(sv)
+            bkey = _scan_key(sv)
             parent = hf[f"scan/{bkey}"] if bkey is not None else hf
             bl_grp = parent.get("_baseline")
             bl_boundary = _baseline_boundary(hf, sv)
@@ -2236,7 +2360,7 @@ def plot_traces(h5path_or_header, scan_value="all", li_band=None, rms_max_mm=Non
         fig, axes = plt.subplots(
             1, 3, figsize=(10.0, 3.3),
             gridspec_kw={'width_ratios': [1.0, 1.0, 1.25]})
-        sv_tag = f"  (scan {sv})" if sv is not None and len(scan_vals) > 1 else ""
+        sv_tag = f"  (scan {sv})" if sv is not None and len(scan_keys) > 1 else ""
 
         from matplotlib.lines import Line2D
         from matplotlib.patches import Patch
@@ -2532,7 +2656,7 @@ def _extract_boundary_points(R, Z, R_axis, Z_axis,
     return pts, has_xpt
 
 
-def plot_boundary_point_traces(h5path_or_header, scan_value="all",
+def plot_boundary_point_traces(h5path_or_header, scan_key="all",
                                 prefer_xpoint=True,
                                 corner_angle_deg=None,
                                 axes=None):
@@ -2573,7 +2697,7 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
     h5path_or_header : str
         Path to ``.h5`` file or header string (``"path/to/X.h5"`` or
         just ``"X"``).
-    scan_value : str, float, int, or ``'all'``
+    scan_key : str, float, int, or ``'all'``
         Scan value to plot.  ``'all'`` (default) plots every scan value
         as separate columns of markers.
     prefer_xpoint : bool, default True
@@ -2589,7 +2713,7 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
     -------
     fig : matplotlib.figure.Figure
     """
-    from .utils import (read_eqdsk_from_bytes, _scan_val_key, _group_path,
+    from .utils import (read_eqdsk_from_bytes, _scan_key, _group_path,
                         list_equilibrium_indices)
     if corner_angle_deg is not None:
         warnings.warn(
@@ -2602,12 +2726,12 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
     else:
         h5path = os.path.abspath(h5path_or_header)
 
-    if scan_value == "all":
-        scan_vals = discover_scan_values(h5path)
-        if not scan_vals:
-            scan_vals = [None]
+    if scan_key == "all":
+        scan_keys = discover_scan_keys(h5path)
+        if not scan_keys:
+            scan_keys = [None]
     else:
-        scan_vals = [scan_value]
+        scan_keys = [scan_key]
 
     # Draw into caller-provided axes (e.g. plot_traces' combined figure) or make
     # our own compact figure.
@@ -2623,16 +2747,16 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
                     'bottom':   '#9467bd'}
     point_markers = {'inboard': 'o', 'outboard': 's', 'top': '^', 'bottom': 'v'}
 
-    n_scan = max(len(scan_vals), 1)
+    n_scan = max(len(scan_keys), 1)
     scan_color_offset = (_cm.tab10(np.linspace(0, 0.9, n_scan))
                           if n_scan > 1 else None)
 
     with h5py.File(h5path, "r") as hf:
-        for i_sv, sv in enumerate(scan_vals):
+        for i_sv, sv in enumerate(scan_keys):
             indices = []
             R_pts = {k: [] for k in point_labels}
             Z_pts = {k: [] for k in point_labels}
-            sv_key = _scan_val_key(sv)
+            sv_key = _scan_key(sv)
             scan_tag = f"scan={sv}" if sv is not None else "single-scan"
 
             # Recon's axis -- used as the FIXED reference for all
@@ -2691,7 +2815,7 @@ def plot_boundary_point_traces(h5path_or_header, scan_value="all",
 
             # ---- Perturbed draws (stored indices may have gaps where
             # band-rejected draws were dropped) ----
-            for i in list_equilibrium_indices(h5path, scan_value=sv):
+            for i in list_equilibrium_indices(h5path, scan_key=sv):
                 grp_path = _group_path(sv, i)
                 if grp_path not in hf:
                     continue

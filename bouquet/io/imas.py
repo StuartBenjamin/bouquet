@@ -253,3 +253,215 @@ def read_imas_baseline(
         li_metrics={"ids_li_1": ids_li_1, "ids_li_3": ids_li_3},
         aux=aux,
     )
+
+
+# ===========================================================================
+#  Perturbed-draw IMAS/OMAS write-back
+#
+#  TODO(backend): the FINAL implementation should obtain the equilibrium IDS
+#  DIRECTLY from the live TokaMaker equilibrium object at generate time (full
+#  finite-element fidelity, exact FSA metrics for the toroidal<->parallel
+#  current conversion), once OFT exposes an IMAS/ODS export. The eqdsk-based
+#  reconstruction below is an INTERIM bridge: the equilibrium IDS is lossless
+#  to the archived 257^2 eqdsk (machine-precision GS for stability codes) and
+#  j_tor is exact, but the parallel-current split (j_ohmic/j_bootstrap/j_total)
+#  uses the baseline IDS factor c(psi)=j_tor/j_total -- exact only when the
+#  draw's flux geometry matches the baseline. Do NOT treat this as final.
+# ===========================================================================
+def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
+                    scan_key=None, time=None):
+    """Reconstruct a perturbed IMAS/OMAS IDS for one draw from the bouquet HDF5.
+
+    INTERIM (see module TODO): maps the draw's archived eqdsk to the
+    ``equilibrium`` IDS (``profiles_1d`` / ``profiles_2d`` / ``global_quantities``
+    / ``boundary`` -- lossless to the eqdsk grid, machine-precision GS) and the
+    draw's ``.h5`` kinetics/currents to ``core_profiles``. ``j_tor`` is exact;
+    the parallel split is reconstructed with the baseline ratio (interim).
+
+    Parameters
+    ----------
+    h5path_or_header : str
+        Bouquet archive reference -- ``.h5`` path or bare header stem.
+    draw_index : int
+        Per-draw index within the scan group.
+    template_ids_path : str
+        The source IMAS/OMAS JSON, used as the structural template.
+    out_path : str
+        Where to write the perturbed IDS JSON.
+    scan_key : str, float, or None
+        Scan value selecting the ``scan/<scan_key>`` group.  The default
+        ``None`` auto-resolves a single-scan archive (and is the flat layout
+        for flat files); pass the explicit value only when the archive holds
+        more than one scan.
+    time : float, optional
+        Time slice [s]; defaults to the template's nearest single slice.
+
+    Returns
+    -------
+    str
+        ``out_path``.
+    """
+    import json
+    import copy
+    import h5py
+    from .geqdsk import read_geqdsk
+    from ..utils import read_eqdsk_from_bytes, _group_path, _resolve_h5
+
+    with open(template_ids_path) as fh:
+        out = json.load(fh)
+
+    eq_ids = out["equilibrium"]
+    ie = _nearest_index(eq_ids["time"], time, "equilibrium")
+    cp_ids = out["core_profiles"]
+    ic = _nearest_index(cp_ids["time"], time, "core_profiles")
+
+    h5 = _resolve_h5(h5path_or_header)
+    if scan_key is None:
+        # Convenience: a single-scan archive resolves unambiguously, so the
+        # caller need not echo the generation scan_key.  Flat-layout files
+        # (discover_scan_keys -> None) keep scan_key=None.
+        from ..utils import discover_scan_keys
+        keys = discover_scan_keys(h5)
+        if keys:
+            if len(keys) != 1:
+                raise ValueError(
+                    f"{h5} holds {len(keys)} scans {keys}; pass an explicit "
+                    "scan_key to write_imas_draw().")
+            scan_key = keys[0]
+    gp = _group_path(scan_key, draw_index)
+    with h5py.File(h5, "r") as hf:
+        if gp not in hf:
+            raise KeyError(f"draw {draw_index} (scan {scan_key}) not in {h5}")
+        g = hf[gp]
+        ne = np.asarray(g["n_e [m^-3]"][()]); te = np.asarray(g["T_e [eV]"][()])
+        ni = np.asarray(g["n_i [m^-3]"][()]); ti = np.asarray(g["T_i [eV]"][()])
+        pkin = np.asarray(g["psi_N_kinetic"][()]); peq = np.asarray(g["psi_N"][()])
+        j_tor = np.asarray(g["j_phi [A m^-2]"][()])
+        j_ind = np.asarray(g["j_inductive [A m^-2]"][()])
+        j_bs = np.asarray(g["j_BS [A m^-2]"][()])
+        zeff = np.asarray(g["aux_zeff"][()]) if "aux_zeff" in g else None
+        li1 = float(g.attrs.get("l_i(1)", np.nan))
+        li3 = float(g.attrs.get("l_i(3)", np.nan))
+        eqk = [k for k in g.keys() if k.endswith(".eqdsk")]
+        if not eqk:
+            raise KeyError(f"draw {draw_index} has no archived eqdsk")
+        geq = read_eqdsk_from_bytes(bytes(g[eqk[0]][()]), read_geqdsk)
+
+    # --- equilibrium IDS from the eqdsk (lossless to the eqdsk grid) ---------
+    ts = eq_ids["time_slice"][ie]
+    psi1d = geq.psi_axis + geq.psi_N * (geq.psi_boundary - geq.psi_axis)
+    q95 = float(np.interp(0.95, geq.psi_N, geq.qpsi))
+    ts["profiles_1d"] = {
+        "psi": psi1d.tolist(),
+        "q": geq.qpsi.tolist(),
+        "pressure": geq.pres.tolist(),
+        "f": geq.fpol.tolist(),
+        "dpressure_dpsi": geq.pprime.tolist(),
+        "f_df_dpsi": geq.ffprim.tolist(),
+    }
+    ts["profiles_2d"] = [{
+        "grid_type": {"name": "rectangular", "index": 1},
+        "grid": {"dim1": geq.R_grid.tolist(), "dim2": geq.Z_grid.tolist()},
+        # psi_RZ is indexed [R][Z], matching IMAS dim1=R, dim2=Z
+        "psi": geq.psi_RZ.tolist(),
+    }]
+    gq = dict(ts.get("global_quantities", {}))
+    gq.update(
+        ip=float(geq.Ip), psi_axis=float(geq.psi_axis),
+        psi_boundary=float(geq.psi_boundary),
+        magnetic_axis={"r": float(geq.R_mag), "z": float(geq.Z_mag)},
+        q_axis=float(geq.qpsi[0]), q_95=q95,
+        li_3=li3 if np.isfinite(li3) else geq.li.get("li(3)"),
+        beta_normal=geq.betas.get("beta_n"), beta_pol=geq.betas.get("beta_p"),
+        beta_tor=geq.betas.get("beta_t"),
+    )
+    if np.isfinite(li1):
+        gq["li_1"] = li1
+    ts["global_quantities"] = gq
+    ts["boundary"] = {"outline": {"r": geq.boundary_R.tolist(),
+                                  "z": geq.boundary_Z.tolist()}}
+
+    # --- core_profiles from the draw (kinetics + currents) ------------------
+    cp = cp_ids["profiles_1d"][ic]
+    psi = np.asarray(cp["grid"]["psi"], dtype=float)
+    psiN_t = (psi - psi[0]) / (psi[-1] - psi[0])
+
+    def to_t(arr, src):     # interp draw array (on src grid) -> template psi grid
+        return np.interp(psiN_t, src, arr)
+
+    cp["electrons"]["density_thermal"] = to_t(ne, pkin).tolist()
+    cp["electrons"]["temperature"] = to_t(te, pkin).tolist()
+    for ion in cp["ion"]:
+        if float(ion["element"][0]["z_n"]) == 1.0:
+            ion["density_thermal"] = to_t(ni, pkin).tolist()
+            ion["temperature"] = to_t(ti, pkin).tolist()
+            break
+    if zeff is not None:
+        cp["zeff"] = to_t(zeff, pkin).tolist()
+
+    # j_tor exact; parallel split via the baseline factor c=j_tor/j_total
+    # (INTERIM -- see module TODO). Guard near-axis where j_total -> 0.
+    jt_t = to_t(j_tor, peq)
+    cp["j_tor"] = jt_t.tolist()
+    if "j_total" in cp and "j_tor" in cp:
+        base_jtot = np.asarray(cp["j_total"], dtype=float)
+        base_jtor = np.asarray(cp["j_tor"], dtype=float)
+        eps = 1e-9 * np.nanmax(np.abs(base_jtot)) if base_jtot.size else 0.0
+        good = np.abs(base_jtot) > eps
+        c = np.ones_like(base_jtot)
+        c[good] = base_jtor[good] / base_jtot[good]
+        if not np.all(good):
+            idx = np.arange(c.size)
+            c[~good] = np.interp(idx[~good], idx[good], c[good])
+        with np.errstate(divide="ignore", invalid="ignore"):
+            cp["j_total"] = (jt_t / c).tolist()
+            cp["j_ohmic"] = (to_t(j_ind, peq) / c).tolist()
+            cp["j_bootstrap"] = (to_t(j_bs, peq) / c).tolist()
+
+    with open(out_path, "w") as fh:
+        json.dump(out, fh)
+    return out_path
+
+
+def export_imas_drawset(h5path_or_header, template_ids_path, out_dir,
+                        scan_key=None, time=None, selection="selected"):
+    """Write one perturbed IMAS/OMAS IDS per draw (see :func:`write_imas_draw`).
+
+    INTERIM (see module TODO). Files are ``{out_dir}/{header}_draw{idx}.json``.
+    ``selection`` is ``"selected"`` (in-spec only) or ``"all"``.
+
+    Operates on a single scan.  Pass ``scan_key`` to select it; the default
+    ``scan_key=None`` is the flat layout, and is only unambiguous when the
+    file holds exactly one scan (otherwise raises -- pass an explicit key).
+
+    Parameters
+    ----------
+    h5path_or_header : str
+        Bouquet archive reference -- ``.h5`` path or bare header stem.
+
+    Returns
+    -------
+    list of str
+        The written IDS paths.
+    """
+    import os
+    from ..filtering import select_indices
+    from ..utils import _resolve_h5
+
+    os.makedirs(out_dir, exist_ok=True)
+    h5 = _resolve_h5(h5path_or_header)
+    base = os.path.basename(h5).replace(".h5", "")
+    idxs = select_indices(h5, scan_key=scan_key, selection=selection)
+    if isinstance(idxs, dict):
+        # scan_key=None over a scan-layout file -> ambiguous unless single.
+        if len(idxs) != 1:
+            raise ValueError(
+                f"{h5} holds {len(idxs)} scans {sorted(idxs)}; pass an "
+                "explicit scan_key to export_imas_drawset().")
+        scan_key, idxs = next(iter(idxs.items()))
+    paths = []
+    for i in idxs:
+        out = os.path.join(out_dir, f"{base}_draw{i}.json")
+        paths.append(write_imas_draw(h5, i, template_ids_path, out,
+                                     scan_key=scan_key, time=time))
+    return paths
