@@ -54,6 +54,7 @@ from .plotting import (
     plot_spec_summary,
     plot_kinetic_profiles,
     plot_jphi_profiles,
+    plot_jphi,
     plot_traces,
     plot_boundary_point_traces,
 )
@@ -142,7 +143,7 @@ __all__ = [
     "plot_aux_profiles", "plot_transport_profiles", "plot_tokamaker_comparison",
     "plot_coil_currents", "plot_spec_summary",
     "plot_kinetic_profiles", "plot_jphi_profiles",
-    "plot_traces", "plot_boundary_point_traces",
+    "plot_traces", "plot_boundary_point_traces", "plot_jphi",
     "draw_kinetic_profiles", "draw_pressure_profiles",
     "draw_jphi_total", "draw_jphi_components", "draw_jphi_profiles",
     # ---- physics helpers ----

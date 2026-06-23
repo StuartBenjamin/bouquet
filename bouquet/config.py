@@ -270,6 +270,13 @@ class GenerationConfig:
     #   "rescale" : keep FUSE ohmic; rescale SWB by a single factor so l_i
     #               matches the source (fully self-consistent bootstrap).
     jBS_baseline_mode: str = "diff"
+    # Fix B: when the recon-anchor's equilibrium l_i is already within the band,
+    # accept the anchor and skip find_optimal_scale + the corrective iteration
+    # (which otherwise overshoot l_i and drift degenerate coils off baseline).
+    accept_anchor_inband: bool = False
+    # Fix C: GPR-perturb the inductive in the recon-anchor itself (then accept),
+    # restoring per-draw j_ind diversity without the destabilizing match loop.
+    perturb_jind_in_anchor: bool = False
     # Floor the SWB bootstrap at 0 (drop unphysical negative excursions) before
     # it enters j_phi, in both the baseline and every draw.
     floor_j_BS: bool = True
@@ -282,6 +289,11 @@ class GenerationConfig:
     # direct solve at the tight target is usually infeasible -- the schedule is
     # what makes ±1% coils reachable.
     coil_drift: float = 0.01
+    # Optional HARD inequality bounds at +/- coil_drift_hard_factor*coil_drift,
+    # enforced in every solve (not just the soft homotopy). None = soft only.
+    # Backstop for degenerate-coil drift (e.g. F9B) at the cost of possible
+    # boundary error when the reshaped equilibrium genuinely wants the coil off.
+    coil_drift_hard_factor: float = None
     homotopy_passes: list = field(
         default_factory=lambda: [(0.05, 0.10), (0.02, 0.05), (0.01, 0.01)]
     )

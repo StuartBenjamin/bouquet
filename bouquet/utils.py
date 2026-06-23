@@ -587,6 +587,8 @@ def store_baseline_profiles(
     diverted=None,
     aux_baselines=None,
     aux_sigmas=None,
+    j_BS=None,
+    j_inductive=None,
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -628,6 +630,10 @@ def store_baseline_profiles(
         grp.create_dataset("T_i [eV]",           data=np.asarray(ti,         dtype=np.float64))
         grp.create_dataset("pressure [Pa]",       data=np.asarray(pressure,   dtype=np.float64))
         grp.create_dataset("j_phi [A m^-2]",      data=np.asarray(j_phi,      dtype=np.float64))
+        if j_BS is not None:
+            grp.create_dataset("j_BS [A m^-2]",        data=np.asarray(j_BS,        dtype=np.float64))
+        if j_inductive is not None:
+            grp.create_dataset("j_inductive [A m^-2]", data=np.asarray(j_inductive, dtype=np.float64))
         grp.create_dataset("sigma_ne [m^-3]",    data=np.asarray(sigma_ne,   dtype=np.float64))
         grp.create_dataset("sigma_te [eV]",      data=np.asarray(sigma_te,   dtype=np.float64))
         grp.create_dataset("sigma_ni [m^-3]",    data=np.asarray(sigma_ni,   dtype=np.float64))

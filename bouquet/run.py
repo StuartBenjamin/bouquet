@@ -714,6 +714,9 @@ class Bouquet:
                 env["n_ls"], env["t_ls"], env["j_ls"],
                 bl.Ip_target, bl.l_i_target, Zeff_eq,
                 input_jinductive=np.asarray(bl.j_inductive, dtype=float),
+                baseline_j_BS=(np.asarray(bl.j_BS, dtype=float)
+                               + (0.0 if bl.jBS_diff is None
+                                  else np.asarray(bl.jBS_diff, dtype=float))),
                 l_i_tolerance=gc.l_i_tolerance,
                 psi_pad=psi_pad,
                 constrain_sawteeth=gc.constrain_sawteeth,
@@ -722,6 +725,8 @@ class Bouquet:
                 floor_j_BS=gc.floor_j_BS,
                 jBS_diff=(None if bl.jBS_diff is None
                           else np.asarray(bl.jBS_diff, dtype=float)),
+                accept_anchor_inband=gc.accept_anchor_inband,
+                perturb_jind_in_anchor=gc.perturb_jind_in_anchor,
                 jBS_scale_range=_jbs_range,
                 swb_iterations=gc.swb_iterations,
                 diagnostic_plots=gc.diagnostic_plots,
@@ -731,6 +736,7 @@ class Bouquet:
                 baseline_pfile_bytes=bl.pfile_bytes,
                 psi_N_kinetic=np.asarray(bl.psi_N_kinetic, dtype=float),
                 coil_drift=gc.coil_drift,
+                coil_drift_hard_factor=gc.coil_drift_hard_factor,
                 homotopy_passes=gc.homotopy_passes,
                 inspec_F_max=fc.inspec_F_max,
                 inspec_VSC_max=fc.inspec_VSC_max,

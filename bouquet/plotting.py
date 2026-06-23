@@ -2926,3 +2926,132 @@ def plot_boundary_point_traces(h5path_or_header, scan_key="all",
         fig.tight_layout()
 
     return fig
+
+
+def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
+              selection="all", save=None):
+    r"""Three-panel current decomposition: total / inductive / bootstrap,
+    overlaying the raw input (FUSE OMAS or geqdsk), the SWB-reconstructed
+    baseline, and the perturbed draws.
+
+    Uses the FAITHFUL components actually summed into TokaMaker --
+    ``j_inductive = j_phi - j_BS,edge - j_fixed`` (which closes to the total
+    exactly) -- NOT the post-hoc shelf-blend ``j_inductive`` stored in the
+    archive (that over-states the core and does not sum back to the total).
+
+    Parameters
+    ----------
+    h5path_or_header : str
+        Bouquet archive (``.h5`` path or header stem).
+    scan_key : int/str or None
+        Scan group; defaults to the first scan in the file.
+    source : str or None
+        Raw input to overlay. IMAS ``dd_sim.json`` -> raw FUSE j_tor /
+        j_bootstrap / j_ohmic (toroidal). g-file -> its direct j_phi used as
+        the input reference in all three panels (no FUSE component split).
+    source_kind : {'auto','imas','geqdsk'}
+    selection : {'all','selected'}
+    save : str or None
+        If given, savefig to this path.
+    """
+    import json
+    import numpy as np
+    import h5py
+    import matplotlib.pyplot as plt
+
+    h5 = h5path_or_header if str(h5path_or_header).endswith(".h5") else f"{h5path_or_header}.h5"
+    with h5py.File(h5, "r") as hf:
+        sk = str(scan_key) if scan_key is not None else list(hf["scan"].keys())[0]
+        g = hf[f"scan/{sk}"]
+        psi = np.asarray(g["_baseline/psi_N"][:], float)
+        base_total = np.asarray(g["_baseline/j_phi [A m^-2]"][:], float)
+        base_jBS = (np.asarray(g["_baseline/j_BS [A m^-2]"][:], float)
+                    if "j_BS [A m^-2]" in g["_baseline"] else None)
+        ids = [k for k in g if k.isdigit()]
+        D = {d: dict(total=np.asarray(g[f"{d}/j_phi [A m^-2]"][:], float),
+                     spike=np.asarray(g[f"{d}/j_BS,edge [A m^-2]"][:], float))
+             for d in ids}
+
+    sel = None
+    if selection == "selected":
+        try:
+            from .filtering import select_indices
+            sel = set(str(i) for i in select_indices(
+                h5path_or_header, scan_key=int(sk), selection="selected"))
+        except Exception:
+            sel = None
+
+    fixed = np.zeros_like(psi)
+    F = None; Flabel = "input"
+    if source is not None:
+        kind = source_kind
+        if kind == "auto":
+            kind = "imas" if (str(source).endswith(".json") or "dd_sim" in str(source)) else "geqdsk"
+        try:
+            if kind == "imas":
+                from .physics import parallel_to_toroidal
+                cp = json.load(open(source))["core_profiles"]
+                ic = int(np.argmin(np.abs(np.asarray(cp["time"], float) - float(int(sk)) / 1000.0)))
+                c = cp["profiles_1d"][ic]
+                p = np.asarray(c["grid"]["psi"], float); pN = (p - p[0]) / (p[-1] - p[0])
+                jtot = np.asarray(c["j_total"], float); jtor = np.asarray(c["j_tor"], float)
+                tt = lambda jp: parallel_to_toroidal(jp, j_parallel_total=jtot, j_tor_total=jtor)
+                F = dict(total=np.interp(psi, pN, jtor),
+                         jBS=np.interp(psi, pN, tt(np.asarray(c["j_bootstrap"], float))),
+                         jind=np.interp(psi, pN, tt(np.asarray(c["j_ohmic"], float))))
+                fixed = F["total"] - F["jBS"] - F["jind"]; Flabel = "FUSE"
+            else:
+                from .io.geqdsk import read_geqdsk
+                eq = read_geqdsk(source)
+                jg = getattr(eq, "j_tor_averaged", None)
+                if jg is None:
+                    jg = getattr(eq, "j_tor_averaged_direct", None)
+                jg = np.asarray(jg, float).ravel()
+                F = dict(total=np.interp(psi, np.asarray(eq.psi_N, float).ravel(), jg),
+                         jBS=None, jind=None); Flabel = "geqdsk"
+        except Exception as e:
+            print(f"plot_jphi: source not read ({e!r}); baseline + draws only")
+            F = None
+
+    if base_jBS is None and D:
+        base_jBS = np.mean([D[d]["spike"] for d in D], axis=0)
+        base_jBS_label = r"SWB baseline $j_{BS}$ (ens.-mean)"
+    else:
+        base_jBS_label = r"SWB baseline $j_{BS}$"
+
+    OR, FU = "tab:orange", "tab:blue"
+    keep = [d for d in ids if (sel is None or d in sel)]
+    fig, ax = plt.subplots(1, 3, figsize=(17, 5.2))
+    if F is not None:
+        ax[0].plot(psi, F["total"] / 1e6, "--", color=FU, lw=1.6, label=rf"{Flabel} $j_\phi$")
+    ax[0].plot(psi, base_total / 1e6, "k-", lw=2.4, zorder=5, label=r"SWB baseline $j_\phi$")
+    for i, d in enumerate(keep):
+        ax[0].plot(psi, D[d]["total"] / 1e6, "-", color=OR, lw=0.8, alpha=0.55,
+                   label="perturbed" if i == 0 else None)
+    ax[0].set_title(r"total $j_\phi$")
+
+    if F is not None:
+        ax[1].plot(psi, (F["jind"] if F.get("jind") is not None else F["total"]) / 1e6,
+                   "--", color=FU, lw=1.6, label=rf"{Flabel} $j_{{ind}}$" if F.get("jind") is not None else rf"{Flabel} $j_\phi$")
+    for i, d in enumerate(keep):
+        ax[1].plot(psi, (D[d]["total"] - D[d]["spike"] - fixed) / 1e6, "-", color=OR,
+                   lw=0.8, alpha=0.55, label=r"perturbed $j_{ind}$" if i == 0 else None)
+    ax[1].set_title(r"$j_{inductive}$  (= total $-\,j_{BS,edge}-$ fixed)")
+
+    if F is not None:
+        ax[2].plot(psi, (F["jBS"] if F.get("jBS") is not None else F["total"]) / 1e6,
+                   "--", color=FU, lw=1.6, label=rf"{Flabel} $j_{{BS}}$" if F.get("jBS") is not None else rf"{Flabel} $j_\phi$")
+    if base_jBS is not None:
+        ax[2].plot(psi, base_jBS / 1e6, "k-", lw=2.0, zorder=5, label=base_jBS_label)
+    for i, d in enumerate(keep):
+        ax[2].plot(psi, D[d]["spike"] / 1e6, "-", color=OR, lw=0.8, alpha=0.55,
+                   label=r"perturbed $j_{BS}$" if i == 0 else None)
+    ax[2].set_title(r"$j_{BS}$  (isolate-edge spike)")
+
+    for a in ax:
+        a.axhline(0, color="gray", lw=0.5); a.set_xlim(0, 1); a.grid(alpha=0.3)
+        a.set_xlabel(r"$\psi_N$"); a.set_ylabel(r"$j$ [MA/m$^2$]"); a.legend(fontsize=8)
+    fig.tight_layout()
+    if save:
+        fig.savefig(save)
+    return fig, ax

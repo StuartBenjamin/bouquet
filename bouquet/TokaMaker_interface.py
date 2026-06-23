@@ -579,6 +579,23 @@ def _swb_dump_path(name):
     return os.path.join(tempfile.gettempdir(), f"bouquet_{name}.npz")
 
 
+def _ket_stage_diag(mygs, tag, extra=""):
+    """Guarded per-stage trace (KET_STAGE_DIAG=1): log F9B coil, magnetic axis,
+    and Ip at a draw-pipeline stage, to localize where the systematic coil /
+    boundary drift is injected (recon-anchor vs find_optimal_scale vs corrective).
+    No-op unless the env var is set, so it is inert in normal runs."""
+    if os.environ.get("KET_STAGE_DIAG", "0") != "1":
+        return
+    try:
+        _cc, _ = mygs.get_coil_currents()
+        _op = mygs.o_point
+        print(f"  [STAGE-DIAG {tag}] F9B={_cc.get('F9B', float('nan')):+.1f}A "
+              f"axis=({_op[0]:.4f},{_op[1]:+.5f}) Ip={mygs.get_globals()[0]:+.0f}{extra}",
+              flush=True)
+    except Exception as _e:
+        print(f"  [STAGE-DIAG {tag}] failed: {_e}", flush=True)
+
+
 def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad):
     """Convert ``solve_with_bootstrap``'s j_BS output to toroidal convention.
 
@@ -656,6 +673,8 @@ def perturb_kinetic_equilibrium(
     scale_jBS=1.0,
     floor_j_BS=True,
     jBS_diff=None,
+    accept_anchor_inband=False,
+    perturb_jind_in_anchor=False,
     swb_iterations=3,
     diagnostic_plots=False,
     max_pressure_iter=_MAX_PRESSURE_ITER,
@@ -1459,7 +1478,30 @@ def perturb_kinetic_equilibrium(
             # spike_profile already = delta_spike (perturbed - cached recon)
             new_jphi = input_j_phi + spike_profile
         else:
-            new_jphi = input_jinductive + spike_profile + j_fixed_eff
+            _anchor_jind = input_jinductive
+            if perturb_jind_in_anchor:
+                # Fix C: GPR-perturb the inductive HERE (then accept the anchor),
+                # so each draw carries a genuinely different j_ind without the
+                # downstream find_optimal_scale/corrective that homogenize it.
+                _j0a = input_jinductive[0]
+                _candA = input_jinductive
+                for _tryA in range(20):
+                    _c = generate_perturbed_GPR(
+                        psi_N, input_jinductive / _j0a,
+                        sigma_profile=sigma_jphi / _j0a, length_scale=j_ls,
+                        n_samples=1, diag_plot=False) * _j0a
+                    if np.all(_c >= 0.0):
+                        _candA = _c
+                        break
+                _rA = root_scalar(
+                    Ip_flux_integral_vs_target,
+                    args=(mygs, _candA, spike_profile + j_fixed_eff, psi_N, Ip_target),
+                    bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
+                    method="brentq", rtol=1e-6)
+                _anchor_jind = _rA.root * _candA
+                print(f"  [perturb-anchor] GPR-perturbed j_ind in anchor "
+                      f"(Ip-renorm scale={_rA.root:.4f})")
+            new_jphi = _anchor_jind + spike_profile + j_fixed_eff
         _psi_range_anchor = mygs.psi_bounds[1] - mygs.psi_bounds[0]
         _pp_anchor = {"type": "linterp",
                       "y": np.gradient(pres_tmp) /
@@ -1488,6 +1530,7 @@ def perturb_kinetic_equilibrium(
                       f"(σ-perturbed kinetics)")
             if bnd_diag_callback is not None:
                 bnd_diag_callback("after recon-anchor solve")
+            _ket_stage_diag(mygs, "1-recon-anchor")
         except (ValueError, RuntimeError) as _anchor_exc:
             # Anchor failed -- fall back to SWB's natural total_j_phi
             # so the rest of the loop has a workable baseline.
@@ -1503,6 +1546,47 @@ def perturb_kinetic_equilibrium(
 
         eq_stats = mygs.get_stats(lcfs_pad=psi_pad)
         baseline_li_proxy = calc_cylindrical_li_proxy(mygs, new_jphi, psi_pad)
+
+        # Fix C band-conditioning: an UNCONDITIONAL accept passed pathological
+        # GPR draws on hard/high-l_i cases (204441: l_i -30% accepted -> garbage).
+        # Resample the GPR inductive (re-solving the anchor) until its l_i is in
+        # band or max_li_iter is hit; on exhaustion REJECT the draw (raise,
+        # caught per-draw by generate_bouquet) rather than accept it.
+        if perturb_jind_in_anchor:
+            _tolp = float(l_i_tolerance) * 100.0
+            _j0a = input_jinductive[0]
+            _nr = 0
+            while (100.0 * abs(float(eq_stats['l_i']) - l_i_target) / l_i_target > _tolp
+                   and _nr < int(max_li_iter)):
+                _nr += 1
+                for _t in range(20):
+                    _c = generate_perturbed_GPR(
+                        psi_N, input_jinductive / _j0a, sigma_profile=sigma_jphi / _j0a,
+                        length_scale=j_ls, n_samples=1, diag_plot=False) * _j0a
+                    if np.all(_c >= 0.0):
+                        break
+                _rA = root_scalar(
+                    Ip_flux_integral_vs_target,
+                    args=(mygs, _c, spike_profile + j_fixed_eff, psi_N, Ip_target),
+                    bracket=[1e-10 * Ip_target, 1e1 * Ip_target], method="brentq", rtol=1e-6)
+                new_jphi = _rA.root * _c + spike_profile + j_fixed_eff
+                mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
+                mygs.set_profiles(pp_prof=_pp_anchor,
+                                  ffp_prof={"type": "jphi-linterp", "y": new_jphi, "x": psi_N})
+                try:
+                    mygs.solve()
+                except Exception:
+                    continue
+                eq_stats = mygs.get_stats(lcfs_pad=psi_pad)
+            _erp = 100.0 * abs(float(eq_stats['l_i']) - l_i_target) / l_i_target
+            print(f"  [perturb-anchor] band-conditioned: {_nr} resample(s), "
+                  f"l_i={float(eq_stats['l_i']):.4f} ({_erp:.2f}% vs band {_tolp:.2f}%)",
+                  flush=True)
+            if _erp > _tolp:
+                raise RuntimeError(
+                    f"perturb_jind_in_anchor: no in-band draw in {int(max_li_iter)} "
+                    f"resamples (last l_i err {_erp:.1f}%)")
+            baseline_li_proxy = calc_cylindrical_li_proxy(mygs, new_jphi, psi_pad)
         # ---- DIAG: recon-anchor (SWB) l_i vs target, BEFORE the sampling
         # loop runs.  Quantifies how much of the per-draw l_i shift is the
         # PHYSICAL SWB-bootstrap response (this value) vs the downstream
@@ -1681,9 +1765,37 @@ def perturb_kinetic_equilibrium(
     # convert once here.  (_prescreen_margin stays in percent.)
     _li_tol_pct = float(l_i_tolerance) * 100.0
 
+    # Fix B/C: accept the recon-anchor and skip find_optimal_scale + corrective
+    # (which overshoot l_i and drift degenerate coils off baseline). B accepts
+    # only when the anchor l_i is already in-band; C accepts always (the
+    # perturbed-in-anchor j_ind IS the draw; l_i floats with the bounded GPR).
+    _accept_anchor = False
+    if (recalculate_j_BS and not (_pin_jphi or _diff_bs)
+            and (perturb_jind_in_anchor or accept_anchor_inband)):
+        try:
+            _anchor_li = float(eq_stats['l_i'])
+            _inband = 100.0 * abs(_anchor_li - l_i_target) / l_i_target <= _li_tol_pct
+            if perturb_jind_in_anchor or _inband:
+                _accept_anchor = True
+                l_i = _anchor_li
+                Ip = float(eq_stats['Ip'])
+                output_jphi = new_jphi.copy()
+                iteration_l_is.append(l_i)
+                iteration_Ips.append(Ip)
+                j0_scales.append(1.0)
+                Ip_scales.append(1.0)
+                final_li_proxy = calc_cylindrical_li_proxy(mygs, output_jphi, psi_pad)
+                _why = "C/perturb-anchor" if perturb_jind_in_anchor else "B/inband"
+                print(f"  [ACCEPT-ANCHOR {_why}] l_i={l_i:.4f} "
+                      f"({100.0*abs(_anchor_li-l_i_target)/l_i_target:.2f}% vs "
+                      f"band {_li_tol_pct:.2f}%); skip find_optimal_scale+corrective",
+                      flush=True)
+        except Exception as _e:
+            print(f"  [ACCEPT-ANCHOR] check failed: {_e!r}", flush=True)
+
     for li_iter in range(1, max_li_iter + 1):
-        if _pin_jphi or _diff_bs:
-            break  # PIN_JPHI / DIFF_BS shortcut handled above
+        if _pin_jphi or _diff_bs or _accept_anchor:
+            break  # PIN_JPHI / DIFF_BS / accept-anchor shortcut handled above
         if 100.0 * abs(l_i - l_i_target) / l_i_target <= _li_tol_pct:
             break  # last draw's equilibrium l_i is within the measured band
 
@@ -1802,6 +1914,8 @@ def perturb_kinetic_equilibrium(
         # downstream (no Ip-scale secant).
         dt_scale = time.perf_counter() - t_scale
         print(f"  [li_iter={li_iter}] find_optimal_scale (j0 only): {dt_scale:.1f}s")
+        _ket_stage_diag(mygs, f"2-after-find_optimal_scale[iter{li_iter}]",
+                        extra=f" j0_scale={final_scale_j0:.4f}")
 
         # ---- 5d. Definitive sawtooth constraint (after Ip scaling) --
         if constrain_sawteeth:
@@ -1882,6 +1996,7 @@ def perturb_kinetic_equilibrium(
         # PRESCREEN=0; build a one-off cylindrical cache for the diagnostic.
         _geo_diag = _geo if _geo is not None else get_li_proxy_geometry(
             mygs, npsi, psi_pad)
+        _ket_stage_diag(mygs, f"3-after-corrective[iter{li_iter}]")
         final_li_proxy = calc_cylindrical_li_proxy_fast(output_jphi, _geo_diag)
         proxy_vs_real = 100.0 * (final_li_proxy - l_i) / l_i if l_i != 0 else 0.0
 
@@ -1999,6 +2114,7 @@ def generate_bouquet(
     l_i_target,
     Zeff,
     input_jinductive=None,
+    baseline_j_BS=None,
     l_i_tolerance=0.01,
     psi_pad=1e-3,
     constrain_sawteeth=True,
@@ -2006,6 +2122,8 @@ def generate_bouquet(
     isolate_edge_jBS=True,
     floor_j_BS=True,
     jBS_diff=None,
+    accept_anchor_inband=False,
+    perturb_jind_in_anchor=False,
     jBS_scale_range=None,
     swb_iterations=3,
     diagnostic_plots=True,
@@ -2882,6 +3000,8 @@ def generate_bouquet(
         diverted=_bl_div,
         aux_baselines=aux_baselines,
         aux_sigmas=aux_sigmas,
+        j_BS=baseline_j_BS,
+        j_inductive=input_jinductive,
     )
 
     # ---- Purge stale draws for THIS scan value -------------------------
@@ -3205,6 +3325,8 @@ def generate_bouquet(
                 isolate_edge_jBS=isolate_edge_jBS,
                 floor_j_BS=floor_j_BS,
                 jBS_diff=jBS_diff,
+                accept_anchor_inband=accept_anchor_inband,
+                perturb_jind_in_anchor=perturb_jind_in_anchor,
                 scale_jBS=scale_jBS,
                 swb_iterations=swb_iterations,
                 diagnostic_plots=diagnostic_plots,
