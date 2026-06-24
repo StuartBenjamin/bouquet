@@ -85,6 +85,9 @@ class Bouquet:
             generation=GenerationConfig(n_equils=n_draws),
             output_header=header,
         )
+        # geqdsk validated default workflow: the standard flagship l_i loop
+        # (Fix C / perturb_jind_in_anchor drops draws on stiff geqdsks).
+        cfg.generation.perturb_jind_in_anchor = False
         return cls(cfg)
 
     @classmethod
@@ -103,6 +106,11 @@ class Bouquet:
             generation=GenerationConfig(n_equils=n_draws),
             output_header=header,
         )
+        # IMAS validated default workflow: diff+C (anchor bootstrap to the source
+        # via the fixed FUSE_jBS-SWB diff, and perturb j_ind in the recon-anchor
+        # to avoid the find_optimal_scale/corrector homogenization).
+        cfg.generation.jBS_baseline_mode = "diff"
+        cfg.generation.perturb_jind_in_anchor = True
         return cls(cfg)
 
     # ── ergonomic config accessors (so `bq.uncertainty.ne_scalar_sigma = ...`,
@@ -639,6 +647,51 @@ class Bouquet:
         return fig, ax
 
     # ── stage 3: perturbed bouquet --------------------------------------
+    def _validate_workflow(self) -> None:
+        """Hard guard enforcing the validated per-path workflow at generate().
+
+        ``from_imas`` auto-applies diff+C; ``from_geqdsk`` auto-applies the
+        standard flagship l_i loop. This raises on a known-bad override so a
+        user can't accidentally select a workflow that won't work. Set
+        ``config.generation.allow_unsafe_workflow=True`` to bypass (warns
+        instead) for deliberate backend tests / experiments.
+        """
+        from .config import ReconstructionSource, ImasSource
+        gc = self.config.generation
+        uc = self.config.uncertainty
+        problems = []
+        # Rule: j_inductive must be perturbed (both workflows do it via
+        # jphi_scalar_sigma; zero sigma freezes it).
+        if float(getattr(uc, "jphi_scalar_sigma", 0.0)) <= 0.0:
+            problems.append("jphi_scalar_sigma<=0 freezes j_inductive "
+                            "perturbation (violates the all-profiles rule)")
+        if isinstance(self.config.source, ReconstructionSource):
+            if gc.perturb_jind_in_anchor:
+                problems.append("geqdsk path + perturb_jind_in_anchor=True "
+                                "(Fix C) drops draws on stiff geqdsks; use the "
+                                "standard l_i loop (perturb_jind_in_anchor=False)")
+        elif isinstance(self.config.source, ImasSource):
+            if not gc.perturb_jind_in_anchor:
+                problems.append("IMAS path without Fix C "
+                                "(perturb_jind_in_anchor=False): the "
+                                "find_optimal_scale/corrector matching loop "
+                                "homogenizes draws; use diff+C "
+                                "(perturb_jind_in_anchor=True)")
+            if gc.jBS_baseline_mode not in ("diff", "rescale"):
+                problems.append(f"IMAS path jBS_baseline_mode="
+                                f"{gc.jBS_baseline_mode!r} not in "
+                                f"('diff','rescale')")
+        if not problems:
+            return
+        msg = ("bouquet workflow guard: " + "; ".join(problems)
+               + ". This is the validated per-path workflow lock; set "
+               "config.generation.allow_unsafe_workflow=True to override "
+               "(backend tests / experiments only).")
+        if gc.allow_unsafe_workflow:
+            print("WARN: " + msg)
+        else:
+            raise ValueError(msg)
+
     def generate(self, n: Optional[int] = None, progress_callback=None) -> list:
         """Generate the perturbed bouquet and archive to ``{header}.h5``.
 
@@ -658,6 +711,8 @@ class Bouquet:
             raise ValueError("call prepare_baseline() before generate()")
         if self.mygs is None:
             raise ValueError("call setup_solver() before generate()")
+
+        self._validate_workflow()
 
         bl = self.baseline
         gc = self.config.generation

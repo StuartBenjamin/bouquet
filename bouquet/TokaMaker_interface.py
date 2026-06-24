@@ -1451,6 +1451,16 @@ def perturb_kinetic_equilibrium(
         # (Not re-floored after the diff: a negative excursion there is the
         # genuine Case-B edge-misalignment signal we want to surface, not hide.)
         if floor_j_BS:
+            _fdp = os.environ.get('FLOOR_DIAG', '')
+            if _fdp:
+                _nc = int((spike_profile < 0).sum())
+                with open(_fdp, 'a') as _fh:
+                    if _nc:
+                        _wn = psi_N[spike_profile < 0]
+                        _fh.write(f"clipped {_nc} pts min={spike_profile.min()/1e3:+.1f}kA "
+                                  f"psiN=[{_wn.min():.3f},{_wn.max():.3f}]\n")
+                    else:
+                        _fh.write(f"noop min={spike_profile.min()/1e3:+.1f}kA\n")
             full_j_BS = np.clip(full_j_BS, 0.0, None)
             spike_profile = np.clip(spike_profile, 0.0, None)
         if jBS_diff is not None:
@@ -3359,6 +3369,10 @@ def generate_bouquet(
             _err_short = str(e).strip().splitlines()[-1] if str(e) else type(e).__name__
             print(f"\n  STOPPED: {type(e).__name__}: {_err_short}")
             print(f"  Skipping equilibrium {count+1}/{n_equils}.")
+            _skl = os.environ.get('BQ_SKIPLOG')
+            if _skl:
+                with open(_skl, 'a') as _skf:
+                    _skf.write(f"draw {count+1}/{n_equils}: {type(e).__name__}: {_err_short}\n")
 
             # Restore the recon baseline state -- (psi, coils, bounds) --
             # so the next draw starts from a known-good state rather
@@ -3879,10 +3893,21 @@ def generate_bouquet(
         diagnostics['x_points'] = _draw_xpts
         diagnostics['diverted'] = _draw_div
 
-        eq_stats_std = mygs.get_stats(li_normalization="std", lcfs_pad=psi_pad)
-        li1 = eq_stats_std["l_i"]
-        eq_stats_iter = mygs.get_stats(li_normalization="iter", lcfs_pad=psi_pad)
-        li3 = eq_stats_iter["l_i"]
+        # Guard get_stats: a degenerate draw (Ip->0 / collapsed plasma, e.g.
+        # after Sauter "corrector convergence failed") makes OFT's l_i
+        # normalization divide by zero. Don't let one bad draw crash the whole
+        # run (which would discard every already-stored draw's filtering/figs):
+        # set l_i to nan so the draw is filtered out downstream and continue.
+        try:
+            eq_stats_std = mygs.get_stats(li_normalization="std", lcfs_pad=psi_pad)
+            li1 = eq_stats_std["l_i"]
+            eq_stats_iter = mygs.get_stats(li_normalization="iter", lcfs_pad=psi_pad)
+            li3 = eq_stats_iter["l_i"]
+        except Exception as _stats_exc:
+            print(f"  WARN: per-draw get_stats failed ({_stats_exc}); "
+                  f"degenerate equilibrium -> l_i=nan (draw filtered out, "
+                  f"run continues)")
+            li1 = float('nan'); li3 = float('nan')
 
         # Pressure on the equilibrium grid (for storage and plotting).
         # Interpolate kinetic profiles onto psi_N if on a different grid.

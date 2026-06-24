@@ -274,12 +274,34 @@ class GenerationConfig:
     # accept the anchor and skip find_optimal_scale + the corrective iteration
     # (which otherwise overshoot l_i and drift degenerate coils off baseline).
     accept_anchor_inband: bool = False
-    # Fix C: GPR-perturb the inductive in the recon-anchor itself (then accept),
-    # restoring per-draw j_ind diversity without the destabilizing match loop.
+    # Fix C: GPR-perturb the inductive in the recon-anchor itself (then accept).
+    # This is an ALTERNATIVE to the standard flagship l_i loop, which ALREADY
+    # GPR-perturbs j_inductive (rejection sampling, TokaMaker_interface.py ~1842);
+    # BOTH consume sigma_jphi/j_ls and BOTH satisfy the "perturb all profiles incl.
+    # j_inductive" rule. Difference: Fix C accepts the perturbed-in-anchor draw and
+    # skips find_optimal_scale + the corrective (which can homogenize draws).
+    # Default False = the standard flagship loop -- the mechanism geqdsks used
+    # successfully (high draw completion). Set True for FUSE/IMAS diff mode (avoids
+    # the matching-loop homogenization: 148798 diff+C = 15/15); but it DROPS draws
+    # on stiff high-l_i geqdsks (204441) via band-conditioning rejection, so it is
+    # NOT a good geqdsk default. FUSE runs opt in explicitly. (Only the PIN_JPHI /
+    # DIFF_BS-at-sigma=0 diagnostic modes actually freeze j_ind -- those are the
+    # backend-test exceptions to the rule.)
     perturb_jind_in_anchor: bool = False
+    # Escape hatch for the per-path workflow guard (run._validate_workflow):
+    # from_imas/from_geqdsk auto-apply their validated workflow (IMAS=diff+C,
+    # geqdsk=standard l_i loop) and generate() raises on a known-bad combo
+    # (geqdsk+Fix C, IMAS without Fix C, or jphi_scalar_sigma<=0 which freezes
+    # j_inductive). Set True ONLY for deliberate backend tests / experiments to
+    # bypass the guard (it will warn instead of raise).
+    allow_unsafe_workflow: bool = False
     # Floor the SWB bootstrap at 0 (drop unphysical negative excursions) before
-    # it enters j_phi, in both the baseline and every draw.
-    floor_j_BS: bool = True
+    # it enters j_phi, in both the baseline and every draw. Default False: only
+    # needed for the isolate_edge_jBS=False full-profile mode (which carries an
+    # inner negative lobe). With the default isolate_edge_jBS=True the spike is
+    # already ~clean, so flooring is redundant -- and it REGRESSED 204441
+    # (clipping its high-l_i isolate-edge spike drove yield to 0; off -> restored).
+    floor_j_BS: bool = False
     # solve_with_bootstrap H-mode self-consistency iterations per draw (default
     # 3); lowering to 2 trades a little accuracy for speed on large bouquets.
     swb_iterations: int = 3
