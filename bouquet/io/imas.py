@@ -38,7 +38,11 @@ from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 
-from ..physics import isotropize_fast_pressure, parallel_to_toroidal
+from ..physics import (effective_impurity_charge, impurity_pressure,
+                       isotropize_fast_pressure, parallel_to_toroidal)
+
+# Elementary charge [C]: thermal pressure p = e * sum_s(n_s * T_s).
+_EC = 1.602176634e-19
 
 if TYPE_CHECKING:
     from ..config import ImasSource, FixedComponentsConfig
@@ -113,10 +117,84 @@ def read_imas_geometry(source: "ImasSource"):
     return F0, boundary_RZ
 
 
+def _validate_pressure_completeness(cp, ne, te, ni, ti, p_fast, p_imp,
+                                    p_equilibrium, allow_incomplete):
+    """Fail-fast when the IMAS source carries pressure the reconstruction omits.
+
+    Hard fails (raise, or warn if ``allow_incomplete``) on DROPPED reconstructable
+    components -- a thermal species or the fast channel:
+      1. species  -- e*(ne*Te + ni*Ti) + impurity(nz*Ti) vs e*(ne*Te + Sum n_s*T_s)
+      2. fast     -- any species carries pressure_fast_* but assembled p_fast ~ 0
+    Plus a non-fatal backstop (warning only):
+      3. reconstructed total vs equilibrium.pressure -- the equilibrium routinely
+         carries more (anisotropic/beam + equilibrium-vs-transport gap) which the
+         p_diff anchor absorbs; informational, not blocking.
+    """
+    problems = []
+    # 1. species completeness (single-impurity model vs full Sum_s n_s T_s)
+    full_thermal = _EC * ne * te
+    for ion in cp["ion"]:
+        full_thermal = full_thermal + _EC * (
+            np.asarray(ion["density_thermal"], dtype=float)
+            * np.asarray(ion["temperature"], dtype=float))
+    recon_thermal = _EC * (ne * te + ni * ti) + p_imp
+    denom = float(np.mean(np.abs(full_thermal))) or 1.0
+    sp_gap = float(np.mean(np.abs(full_thermal - recon_thermal))) / denom
+    if sp_gap > 0.02:
+        problems.append(
+            f"thermal species gap {sp_gap*100:.1f}% (>2%): single-impurity model "
+            f"(Z_imp from Zeff, impurity at main-ion Ti) does not reproduce "
+            f"Sum_s(n_s*T_s) over {len(cp['ion'])} ion species -- multiple "
+            f"impurities or T_imp != Ti.")
+    # 2. fast completeness
+    avail_fast = 0.0
+    for sp in [cp["electrons"]] + cp["ion"]:
+        if "pressure_fast_perpendicular" in sp:
+            avail_fast = max(avail_fast, float(np.max(np.abs(
+                np.asarray(sp["pressure_fast_perpendicular"], dtype=float)))))
+    if avail_fast > 0.0 and float(np.max(np.abs(p_fast))) <= 1e-3 * avail_fast:
+        problems.append(
+            f"fast pressure present in source (max {avail_fast/1e3:.1f} kPa) but "
+            f"assembled p_fast ~ 0 -- fast-ion channel dropped.")
+    # 3. backstop vs authoritative equilibrium pressure -- WARNING only, not a
+    #    hard fail. The equilibrium.pressure routinely exceeds the core_profiles
+    #    thermal+fast reconstruction (anisotropic/beam pressure that is large early
+    #    in a beam-heavy discharge, plus the equilibrium-vs-transport inconsistency
+    #    -- the pressure analogue of the j_tor gap). p_diff anchors the baseline to
+    #    equilibrium.pressure EXACTLY regardless; this residual just rides fixed
+    #    (it is fast/non-thermal, which the thermal perturbation should hold fixed
+    #    anyway). So inform, don't block. Dropped *reconstructable* thermal/fast
+    #    components are the hard fails (#1/#2 above).
+    recon_total = recon_thermal + p_fast
+    pe = float(np.mean(np.abs(p_equilibrium))) or 1.0
+    bk = float(np.mean(np.abs(recon_total - p_equilibrium))) / pe
+    if bk > 0.05:
+        import warnings
+        warnings.warn(
+            f"reconstructed total pressure is {bk*100:.1f}% below dd "
+            f"equilibrium.pressure; the p_diff anchor absorbs it (baseline still "
+            f"matches FUSE), so this fraction rides fixed (mostly fast/anisotropic "
+            f"pressure). Not perturbed in the UQ.")
+    if problems:
+        msg = ("IMAS pressure completeness check failed:\n  - "
+               + "\n  - ".join(problems)
+               + "\nThe diff anchor still matches the baseline to FUSE, but the "
+               "per-draw thermal perturbation omits the flagged component(s). "
+               "Set GenerationConfig.allow_incomplete_pressure=True to bypass "
+               "(backend tests only).")
+        if allow_incomplete:
+            import warnings
+            warnings.warn(msg)
+        else:
+            raise ValueError(msg)
+
+
 def read_imas_baseline(
     source: "ImasSource",
     fixed: Optional["FixedComponentsConfig"] = None,
     p_fast_reduction: str = "trace",
+    allow_incomplete_pressure: bool = False,
+    anchor_jtor_to_equilibrium: bool = True,
 ) -> "Baseline":
     """Read a FUSE ``dd_sim.json`` IDS and return a separated :class:`Baseline`.
 
@@ -232,6 +310,41 @@ def read_imas_baseline(
     j_phi = j_tor.copy()
     j_inductive = j_phi - j_BS - j_NBI - j_RF
 
+    # --- pressure anchor ("diff" approach) + completeness validation ----------
+    # The authoritative dd equilibrium pressure (GS-consistent total, incl.
+    # thermal impurity + isotropized fast) interpolated onto psi_N. The solve
+    # builds e*(ne*Te + ni*Ti) + impurity(nz*Ti) + p_fast; p_diff anchors that to
+    # FUSE exactly (mirrors jBS_diff) so the per-draw kinetics perturb the thermal
+    # while the carbon/fast/GS residual rides as a fixed offset. Z_imp is the
+    # single effective impurity charge (one-Zeff single-impurity model).
+    eqp1 = eq["time_slice"][ie]["profiles_1d"]
+    psi_eq = np.asarray(eqp1["psi"], dtype=float)
+    psiN_eq = (psi_eq - psi_eq[0]) / (psi_eq[-1] - psi_eq[0])
+    _o = np.argsort(psiN_eq)
+    p_equilibrium = np.interp(psi_N, psiN_eq[_o],
+                              np.asarray(eqp1["pressure"], dtype=float)[_o])
+    Z_imp = effective_impurity_charge(ne, ni, Zeff)
+    p_imp = impurity_pressure(ne, ni, ti, Z_imp)
+    p_recon = _EC * (ne * te + ni * ti) + p_imp + p_fast
+    p_diff = p_equilibrium - p_recon
+    _validate_pressure_completeness(cp, ne, te, ni, ti, p_fast, p_imp,
+                                    p_equilibrium, allow_incomplete_pressure)
+
+    # --- total-current anchor: equilibrium.j_tor vs core_profiles.j_tor --------
+    # core_profiles.j_tor (== j_phi here) is the transport parallel-current sum
+    # (QED-diffused ohmic + Sauter bootstrap + NBI) converted to toroidal; it
+    # differs from the GS-consistent equilibrium.j_tor (which GPEC reads) from
+    # ~q=2 outward (the equilibrium carries more pedestal current). jphi_diff
+    # anchors the total to the equilibrium as a FIXED offset (mirrors jBS_diff):
+    # added to the baseline + every draw while the SWB bootstrap / perturbed
+    # j_inductive ride underneath. jphi_diff integrates to ~0 (both totals carry
+    # the same Ip), so it redistributes rather than adds net current.
+    jphi_diff = None
+    if anchor_jtor_to_equilibrium:
+        eq_jtor = np.interp(psi_N, psiN_eq[_o],
+                            np.asarray(eqp1["j_tor"], dtype=float)[_o])
+        jphi_diff = eq_jtor - j_phi
+
     return Baseline(
         psi_N=psi_N,
         j_phi=j_phi,
@@ -245,6 +358,10 @@ def read_imas_baseline(
         j_NBI=j_NBI,
         j_RF=j_RF,
         p_fast=p_fast,
+        p_equilibrium=p_equilibrium,
+        p_diff=p_diff,
+        Z_imp=Z_imp,
+        jphi_diff=jphi_diff,
         eqdsk_bytes=None,
         # The OMAS JSON is NOT an Osborne p-file; don't pass it as pfile_bytes
         # (generate_bouquet would try to parse it). Per-draw p-files are built

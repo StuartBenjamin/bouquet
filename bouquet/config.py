@@ -42,11 +42,15 @@ class SolverConfig:
     """
 
     mesh_path: str
-    # NOTE: nthreads > 1 makes GS solves non-bit-reproducible (OpenMP
-    # reduction order), which the LCFS-normalised li_1 amplifies to ~±1%
-    # run-to-run (measured on the D3D-like case; volume-normalised li_3 is
-    # unaffected). Use nthreads=1 for exact-reproducibility / A-B studies.
-    nthreads: int = 4
+    # Default nthreads=1: GS solves are then bit-reproducible. nthreads>1 uses
+    # OpenMP whose reduction order is non-deterministic -- which the LCFS-normalised
+    # li_1 amplifies to ~±1% run-to-run, AND (at stiff slices, e.g. beam-heavy
+    # equilibria with a sharp pedestal current) can occasionally tip the GS DLSODE
+    # solve into a non-convergence loop on the unlucky thread schedule (a hard hang).
+    # nthreads=1 removes both at ~no speed cost here (the solve barely thread-scales);
+    # for throughput, run multiple single-threaded PROCESSES in parallel, one per
+    # slice, each BLAS-pinned (VECLIB_MAXIMUM_THREADS=1 etc.), NOT nthreads>1.
+    nthreads: int = 1
     order: int = 3
     F0: Optional[float] = None                       # vacuum R*Bt; default from g-file/IDS
     isoflux_pts: Optional["np.ndarray"] = None       # (N, 2) boundary constraints
@@ -295,6 +299,20 @@ class GenerationConfig:
     # j_inductive). Set True ONLY for deliberate backend tests / experiments to
     # bypass the guard (it will warn instead of raise).
     allow_unsafe_workflow: bool = False
+    # Fail-fast (IMAS path) if the source carries more thermal pressure than the
+    # reconstructed total used by the solve -- a dropped impurity species or a
+    # fast-ion channel left out. io.imas.read_imas_baseline raises naming the
+    # missing component + magnitude; the diff anchor then absorbs only the small
+    # residual. Set True ONLY for backend tests to bypass (warns instead).
+    allow_incomplete_pressure: bool = False
+    # Anchor the total j_phi to equilibrium.profiles_1d.j_tor (the GS-consistent
+    # current GPEC reads, carrying the pedestal current) instead of
+    # core_profiles.j_tor (the transport parallel-current sum, which differs from
+    # ~q=2 outward). Adds a FIXED jphi_diff = equilibrium.j_tor - core_profiles.j_tor
+    # to the baseline AND every draw (mirroring jBS_diff/p_diff); the SWB bootstrap
+    # + perturbed j_ind ride underneath so the edge current still carries Sauter UQ.
+    # IMAS path only (geqdsk reads its total from the g-file). Default True.
+    anchor_jtor_to_equilibrium: bool = True
     # Floor the SWB bootstrap at 0 (drop unphysical negative excursions) before
     # it enters j_phi, in both the baseline and every draw. Default False: only
     # needed for the isolate_edge_jBS=False full-profile mode (which carries an

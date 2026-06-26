@@ -111,6 +111,12 @@ class Bouquet:
         # to avoid the find_optimal_scale/corrector homogenization).
         cfg.generation.jBS_baseline_mode = "diff"
         cfg.generation.perturb_jind_in_anchor = True
+        # FUSE/IMAS sources carry a FULL Sauter bootstrap (core hump + edge), not
+        # an isolated edge spike, so the edge-spike isolation + shelf-blend
+        # decomposition (a DIII-D g-file construct) does not apply: it mislabels a
+        # redundant j_BS,edge and mangles the per-draw j_inductive. Use the full
+        # profile; the draws then store the clean residual j_phi - j_BS - j_NBI.
+        cfg.generation.isolate_edge_jBS = False
         return cls(cfg)
 
     # ── ergonomic config accessors (so `bq.uncertainty.ne_scalar_sigma = ...`,
@@ -449,6 +455,14 @@ class Bouquet:
         p_total = EC * (ne * te + ni * ti)
         if bl.p_fast is not None:
             p_total = p_total + k2e(bl.p_fast)
+        # Impurity (carbon) thermal pressure + diff anchor so the baseline forward
+        # solve uses the full dd equilibrium.pressure (mirrors generate_bouquet /
+        # perturb_kinetic_equilibrium; single-ion e*(ne*Te+ni*Ti) omits carbon).
+        if getattr(bl, "Z_imp", None):
+            from .physics import impurity_pressure
+            p_total = p_total + impurity_pressure(ne, ni, ti, bl.Z_imp)
+        if getattr(bl, "p_diff", None) is not None:
+            p_total = p_total + k2e(bl.p_diff)
 
         def solve_jphi(j_phi):
             ffp = {"type": "jphi-linterp", "y": np.asarray(j_phi, dtype=float), "x": psi_N}
@@ -556,7 +570,14 @@ class Bouquet:
                 raise ValueError(f"unknown jBS_baseline_mode {mode!r} "
                                  "(expected 'diff' or 'rescale')")
             # Solve the resulting total so coils + li_1 reflect this equilibrium.
-            nl_its = solve_jphi(bl.j_phi)
+            # Anchor to equilibrium.j_tor (add the fixed jphi_diff) so the baseline
+            # l_i/coils reflect the same total the draws use (== equilibrium.j_tor),
+            # not the core_profiles total. The diff-mode component split above stays
+            # on core_profiles.j_tor; jphi_diff is the fixed equilibrium offset.
+            _jphi_solve = np.asarray(bl.j_phi, dtype=float)
+            if getattr(bl, "jphi_diff", None) is not None:
+                _jphi_solve = _jphi_solve + k2e(bl.jphi_diff)
+            nl_its = solve_jphi(_jphi_solve)
 
         # Convergence sanity: the solve completed (it raises otherwise), so
         # verify it landed on the requested current before trusting its l_i.
@@ -798,6 +819,14 @@ class Bouquet:
                 seed=gc.seed,
                 # Fixed additive components, summed into every draw, never perturbed.
                 p_fast=bl.p_fast,
+                # Pressure anchor: impurity (carbon) thermal pressure via the
+                # single effective Z_imp, + the diff offset that anchors the solve
+                # pressure to the dd equilibrium.pressure (mirrors jBS_diff).
+                Z_imp=getattr(bl, "Z_imp", None),
+                p_diff=getattr(bl, "p_diff", None),
+                # Total-current anchor to equilibrium.j_tor (fixed offset; rides
+                # under the SWB bootstrap + perturbed j_ind in every draw).
+                jphi_diff=getattr(bl, "jphi_diff", None),
                 j_NBI=bl.j_NBI,
                 j_RF=bl.j_RF,
                 # Switchboard: auxiliary perturbed profiles -- rotation /

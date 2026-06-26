@@ -217,3 +217,25 @@ def main_ion_density_from_zeff(ne, zeff, Z_imp):
     if not Z_imp > 1.0:
         raise ValueError(f"Z_imp must exceed 1 (got {Z_imp})")
     return ne * (Z_imp - zeff) / (Z_imp - 1.0)
+
+
+# Elementary charge [C] -- thermal pressure p = e * sum_s(n_s * T_s) with n in
+# m^-3 and T in eV.
+_EC = 1.602176634e-19
+
+
+def impurity_pressure(ne, ni, ti, Z_imp):
+    """Thermal pressure of the (single, effective) impurity species [Pa].
+
+    One-Zeff single-impurity model: the impurity density follows from the SAME
+    ``(ne, ni, Z_imp)`` set that derives the main ion, ``nz = (ne - ni)/Z_imp``,
+    assumed thermalized at the main-ion ``ti``. This is the carbon (impurity)
+    pressure term that single-ion ``e*(ne*Te + ni*Ti)`` omits. Returns zeros if
+    ``Z_imp`` is falsy/None (no measured dilution -> no impurity to add), so the
+    same call is safe on impurity-free sources.
+    """
+    if not Z_imp:
+        return np.zeros_like(np.asarray(ni, dtype=float))
+    nz = np.clip((np.asarray(ne, dtype=float) - np.asarray(ni, dtype=float))
+                 / float(Z_imp), 0.0, None)
+    return _EC * nz * np.asarray(ti, dtype=float)

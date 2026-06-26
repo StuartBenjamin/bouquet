@@ -74,6 +74,27 @@ class Baseline:
     # diff mode (Case-A "rescale" or no SWB rebuild).
     jBS_diff: Optional["np.ndarray"] = None
 
+    # IMAS pressure anchor ("diff" approach, mirroring jBS_diff). p_equilibrium
+    # is the authoritative dd equilibrium.pressure on psi_N; p_diff =
+    # p_equilibrium - reconstructed baseline pressure (e*(ne*Te + ni*Ti) +
+    # impurity + p_fast). p_diff is added to the baseline AND every draw so the
+    # solve pressure anchors to FUSE exactly while the reconstructed thermal
+    # delta tracks per-draw kinetics. Z_imp is the single effective impurity
+    # charge (one-Zeff single-impurity model) used to recover nz = (ne-ni)/Z_imp
+    # for the impurity (carbon) pressure term. All None on the geqdsk path
+    # (p-file pressure is already the total).
+    p_equilibrium: Optional["np.ndarray"] = None
+    p_diff: Optional["np.ndarray"] = None
+    Z_imp: Optional[float] = None
+
+    # IMAS total-current anchor: jphi_diff = equilibrium.profiles_1d.j_tor
+    # (the GS-consistent current GPEC reads, with the pedestal current) minus the
+    # reconstructed core_profiles.j_tor total. A FIXED offset added to the baseline
+    # AND every draw so the total anchors to the equilibrium while the SWB bootstrap
+    # + perturbed j_inductive ride underneath. None on the geqdsk path / when
+    # GenerationConfig.anchor_jtor_to_equilibrium is False.
+    jphi_diff: Optional["np.ndarray"] = None
+
     # raw bytes preserved for archival into the HDF5 (optional)
     eqdsk_bytes: Optional[bytes] = None
     pfile_bytes: Optional[bytes] = None
@@ -143,6 +164,8 @@ def resolve_baseline(config: "BouquetConfig", mygs=None) -> Baseline:
             source,
             fixed=config.fixed_components,
             p_fast_reduction=config.fixed_components.p_fast_reduction,
+            allow_incomplete_pressure=config.generation.allow_incomplete_pressure,
+            anchor_jtor_to_equilibrium=config.generation.anchor_jtor_to_equilibrium,
         )
 
     if isinstance(source, ReconstructionSource):

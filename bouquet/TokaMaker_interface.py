@@ -708,6 +708,9 @@ def perturb_kinetic_equilibrium(
     spike_profile_recon_cached=None,
     proxy_bias_warmstart=None,
     pin_jphi=False,
+    Z_imp=None,
+    p_diff=None,
+    jphi_diff=None,
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
     match :math:`I_p` and :math:`l_i` targets.
@@ -851,6 +854,15 @@ def perturb_kinetic_equilibrium(
     if j_RF is not None:
         _jfix = _jfix + np.asarray(j_RF, dtype=float)
     j_fixed_eff = _jfix if recalculate_j_BS else np.zeros_like(psi_N)
+    # Total-current anchor: fold jphi_diff (= equilibrium.j_tor - core_profiles
+    # total) into the fixed additive so it rides under EVERY downstream new_jphi
+    # build (recon-anchor / l_i-match / corrective; all use j_fixed_eff), exactly
+    # like jBS_diff in spike_profile. The perturbed j_inductive + SWB bootstrap
+    # move underneath this fixed offset; at sigma=0 the total == equilibrium.j_tor.
+    # jphi_diff integrates to ~0, so the Ip renorm (which holds spike+j_fixed_eff
+    # fixed while scaling j_inductive) is unaffected.
+    if jphi_diff is not None and recalculate_j_BS:
+        j_fixed_eff = j_fixed_eff + np.asarray(jphi_diff, dtype=float)
 
     # ----------------------------------------------------------------
     #  3.  Perturb kinetic profiles to match <P>
@@ -939,6 +951,20 @@ def perturb_kinetic_equilibrium(
     # above stays thermal-only (comparable to the thermal baseline inp_avg).
     if p_fast is not None:
         pres_tmp = pres_tmp + _kin_to_eq(np.asarray(p_fast, dtype=float))
+
+    # Impurity (carbon) thermal pressure: single-impurity model on the SAME
+    # (ne, ni, Z_imp) set that derived the main ion (one Zeff). Computed from the
+    # converged draw's (ne_eq, ni_eq) so it perturbs with the kinetics; the match
+    # loop above stays thermal-D-only. Single-ion e*(ne*Te + ni*Ti) omits this.
+    if Z_imp:
+        from .physics import impurity_pressure
+        pres_tmp = pres_tmp + impurity_pressure(ne_eq, ni_eq, ti_eq, Z_imp)
+    # Pressure-diff anchor: fixed offset (= equilibrium.pressure - reconstructed
+    # baseline) added to baseline AND every draw, mirroring jBS_diff, so the solve
+    # pressure anchors to FUSE exactly while the reconstructed thermal delta tracks
+    # per-draw kinetics. At sigma=0 pres_tmp == dd equilibrium.pressure.
+    if p_diff is not None:
+        pres_tmp = pres_tmp + np.asarray(p_diff, dtype=float)
 
     # --- switchboard: perturb the auxiliary profiles (rotation / transport /
     # impurity). GPR-sample each enabled channel once per draw (sigma
@@ -2058,11 +2084,27 @@ def perturb_kinetic_equilibrium(
     # output tuple and HDF5 schema remain forward-compatible.
     w_ExB = np.zeros_like(psi_N)
 
-    # Shelf-blend decomposition: j_inductive tapers to zero at the
-    # edge where the Sauter spike dominates.
-    j_inductive_consistent, _ = _shelf_blend_decompose(
-        psi_N, output_jphi, spike_profile, eqdsk_jphi=input_j_phi
-    )
+    # j_inductive decomposition. Two regimes:
+    #   isolate_edge_jBS=True  (DIII-D g-file edge-spike work): the bootstrap is
+    #     an isolated flat-shelf + edge spike, so j_inductive tapers to zero at
+    #     the edge where the spike dominates -- the shelf-blend Hermite handles
+    #     the C1 join and edge taper.
+    #   isolate_edge_jBS=False (FUSE/IMAS full bootstrap): spike_profile is NOT a
+    #     flat-shelf spike (it is a full Sauter profile / its delta), so the
+    #     shelf-blend mis-detects the shelf and mangles the core. Use the clean
+    #     residual j_inductive = j_phi - j_BS - j_NBI - j_RF instead -- it sums
+    #     exactly and mirrors read_imas_baseline's baseline decomposition.
+    if isolate_edge_jBS:
+        j_inductive_consistent, _ = _shelf_blend_decompose(
+            psi_N, output_jphi, spike_profile, eqdsk_jphi=input_j_phi
+        )
+    else:
+        _jfix_store = np.zeros_like(psi_N)
+        if j_NBI is not None:
+            _jfix_store = _jfix_store + np.asarray(j_NBI, dtype=float)
+        if j_RF is not None:
+            _jfix_store = _jfix_store + np.asarray(j_RF, dtype=float)
+        j_inductive_consistent = output_jphi - full_j_BS - _jfix_store
 
     # Compute the cylindrical-proxy / real-l_i ratio at the converged
     # state.  Used by generate_bouquet to warmstart the next draw's
@@ -2083,7 +2125,10 @@ def perturb_kinetic_equilibrium(
         "iteration_Ips": iteration_Ips,
         "j_inductive": j_inductive_consistent,
         "j_BS": full_j_BS,
-        "j_BS_edge": spike_profile,
+        # Only an isolated edge spike is a meaningful separate "j_BS,edge"; in
+        # full-bootstrap mode spike_profile == j_BS (or its delta), so storing it
+        # would just draw a redundant/mislabelled curve. Drop it there.
+        "j_BS_edge": spike_profile if isolate_edge_jBS else None,
         "proxy_bias_observed": proxy_bias_observed,
         "aux": aux_out,
     }
@@ -2162,6 +2207,9 @@ def generate_bouquet(
     seed=None,
     pin_jphi=False,
     p_fast=None,
+    Z_imp=None,
+    p_diff=None,
+    jphi_diff=None,
     j_NBI=None,
     j_RF=None,
     aux_sigmas=None,
@@ -2355,7 +2403,22 @@ def generate_bouquet(
                       else np.asarray(p_fast, dtype=float))
     else:
         _p_fast_eq = np.zeros_like(psi_N)
-    pressure_solve = pressure + _p_fast_eq
+    # Impurity (carbon) + pressure-diff anchor on the equilibrium grid, matching
+    # perturb_kinetic_equilibrium so the baseline reference solve equals every
+    # draw at sigma=0 and anchors to the dd equilibrium.pressure. (Single-ion
+    # `pressure` above is kept thermal-only for the perturbed-vs-baseline match.)
+    if Z_imp:
+        from .physics import impurity_pressure
+        if psi_N_kinetic is not None:
+            _p_imp_eq = impurity_pressure(_kin2eq(ne), _kin2eq(ni),
+                                          _kin2eq(ti), Z_imp)
+        else:
+            _p_imp_eq = impurity_pressure(ne, ni, ti, Z_imp)
+    else:
+        _p_imp_eq = np.zeros_like(psi_N)
+    _p_diff_eq = (np.asarray(p_diff, dtype=float) if p_diff is not None
+                  else np.zeros_like(psi_N))
+    pressure_solve = pressure + _p_imp_eq + _p_fast_eq + _p_diff_eq
 
     npsi = len(psi_N)
 
@@ -2446,8 +2509,13 @@ def generate_bouquet(
                           (np.gradient(psi_N) * _psi_range_b),
                      "x": psi_N}
             _pp_b["y"][-1] = 0.0
+            # Anchor the baseline reference equilibrium (this solve is re-saved as
+            # baseline.eqdsk, the profile GPEC reads) to equilibrium.j_tor by
+            # adding the fixed jphi_diff, matching every draw's total at sigma=0.
+            _jphi_b = (input_j_phi + np.asarray(jphi_diff, dtype=float)
+                       if jphi_diff is not None else input_j_phi.copy())
             _ffp_b = {"type": "jphi-linterp",
-                      "y": input_j_phi.copy(), "x": psi_N}
+                      "y": _jphi_b, "x": psi_N}
             mygs.set_targets(Ip=initial_Ip_target, pax=float(pressure_solve[0]))
             mygs.set_profiles(pp_prof=_pp_b, ffp_prof=_ffp_b)
             try:
@@ -2997,7 +3065,16 @@ def generate_bouquet(
     store_baseline_profiles(
         header, psi_N,
         ne, te, ni, ti,
-        pressure, input_j_phi,
+        # Store the ACTUAL solved quantities, not the un-anchored inputs, so the
+        # archived _baseline diagnostics match what was solved (== dd equilibrium):
+        #  - pressure_solve = thermal + impurity + fast + p_diff anchor (not thermal-D)
+        #  - input_j_phi + jphi_diff = equilibrium.j_tor anchor (not the smooth
+        #    core_profiles.j_tor input). Without the +jphi_diff the stored j_phi is
+        #    the un-anchored parallel-transport total and any analysis reading it
+        #    compares against the wrong profile.
+        pressure_solve,
+        (input_j_phi + np.asarray(jphi_diff, dtype=float)
+         if jphi_diff is not None else input_j_phi),
         sigma_ne, sigma_te, sigma_ni, sigma_ti, sigma_jphi,
         initial_Ip_target, l_i_target,
         scan_key=scan_key,
@@ -3335,6 +3412,9 @@ def generate_bouquet(
                 isolate_edge_jBS=isolate_edge_jBS,
                 floor_j_BS=floor_j_BS,
                 jBS_diff=jBS_diff,
+                Z_imp=Z_imp,
+                p_diff=p_diff,
+                jphi_diff=jphi_diff,
                 accept_anchor_inband=accept_anchor_inband,
                 perturb_jind_in_anchor=perturb_jind_in_anchor,
                 scale_jBS=scale_jBS,
