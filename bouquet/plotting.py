@@ -841,39 +841,37 @@ def _draw_boundary_panels(ax_lcfs, ax_zoom, boundaries):
                                 fill=False, edgecolor="0.4", lw=0.8))
 
 
-def _plot_bouquet_dashboard(psi_N, psi_N_kin, bl, perturbed):
-    """Single combined figure of the profile panels (minimal scrolling).
+def _plot_bouquet_dashboard(psi_N, psi_N_kin, bl, perturbed,
+                            baseline_ff=None, perturbed_ff=None):
+    r"""Single combined figure of the profile panels (minimal scrolling).
 
-    Layout (2x4 grid): kinetic 2x2 (left), pressure + j_phi total (top-right
-    row), j_BS + j_inductive (bottom-right row). The boundary panels get their
-    own figure (more room). Returns the figure.
+    Layout: kinetic 2x2 on the left; a 3x2 block on the right holding
+    pressure, :math:`j_\phi` total, :math:`FF'`, q, :math:`j_{\rm BS}`,
+    :math:`j_{\rm inductive}`. The boundary panels get their own figure
+    (more room). ``baseline_ff`` / ``perturbed_ff`` are the flux-function
+    payloads from :func:`_load_flux_functions`; when absent the FF'/q panels
+    are left blank. Returns the figure.
     """
-    fig = plt.figure(figsize=(9.5, 4.6))
-    outer = fig.add_gridspec(2, 4, hspace=0.32, wspace=0.42)
+    fig, axes = plt.subplots(5, 2, figsize=(9.5, 13.5))
 
-    kin_gs = outer[0:2, 0:2].subgridspec(2, 2, hspace=0.12, wspace=0.3)
-    ax_kin = np.array([
-        [fig.add_subplot(kin_gs[0, 0]), fig.add_subplot(kin_gs[0, 1])],
-        [fig.add_subplot(kin_gs[1, 0]), fig.add_subplot(kin_gs[1, 1])],
-    ])
     draw_kinetic_profiles(
-        ax_kin, psi_N_kin,
+        axes[0:2, :], psi_N_kin,
         bl["n_e [m^-3]"], bl["n_i [m^-3]"], bl["T_e [eV]"], bl["T_i [eV]"],
         bl["sigma_ne [m^-3]"], bl["sigma_ni [m^-3]"],
         bl["sigma_te [eV]"], bl["sigma_ti [eV]"],
         perturbed_data_list=perturbed,
     )
 
-    ax_p = fig.add_subplot(outer[0, 2])
-    draw_pressure_profiles(ax_p, psi_N, bl["pressure [Pa]"],
+    draw_pressure_profiles(axes[2, 0], psi_N, bl["pressure [Pa]"],
                            perturbed_data_list=perturbed)
-    ax_jt = fig.add_subplot(outer[0, 3])
-    draw_jphi_total(ax_jt, psi_N, bl["j_phi [A m^-2]"],
+    draw_jphi_total(axes[2, 1], psi_N, bl["j_phi [A m^-2]"],
                     bl["sigma_jphi [A m^-2]"], perturbed_data_list=perturbed)
-    ax_jbs = fig.add_subplot(outer[1, 2])
-    ax_jind = fig.add_subplot(outer[1, 3])
-    draw_jphi_components(np.array([ax_jbs, ax_jind]), psi_N,
-                         perturbed_data_list=perturbed)
+    draw_flux_function(axes[3, 0], "ffprime", r"$FF'$ [T$^2$ m$^2$/Wb]",
+                       baseline_ff, perturbed_ff)
+    draw_flux_function(axes[3, 1], "q", r"$q$", baseline_ff, perturbed_ff,
+                       q_marker=True)
+    draw_jphi_components(axes[4, :], psi_N, perturbed_data_list=perturbed)
+    fig.tight_layout()
     return fig
 
 
@@ -946,6 +944,83 @@ def _load_all_boundaries(h5path, scan_key=None, indices=None):
     return boundaries
 
 
+def _load_flux_functions(h5path, scan_key=None, indices=None):
+    r"""Per-draw (and baseline) safety factor q and :math:`FF'`.
+
+    Both live in the stored eqdsk bytes (``GEQDSKEquilibrium.qpsi`` /
+    ``.ffprim``) on the geqdsk's own uniform :math:`\hat\psi` grid (0..1,
+    length ``nw``), which is independent of the kinetic ``psi_N``. Returns
+    ``(baseline, draws)`` where each entry is a dict
+    ``{"psi_N", "q", "ffprime"}`` (``baseline`` is ``None`` when the
+    baseline group carries no eqdsk; draws without eqdsk are skipped).
+    """
+    from .io import GEQDSKEquilibrium
+    from .utils import _scan_key, _group_path
+
+    def _ff(raw):
+        eq = GEQDSKEquilibrium.from_bytes(raw)
+        q = np.asarray(eq.qpsi, dtype=float)
+        return {"psi_N": np.linspace(0.0, 1.0, len(q)),
+                "q": q, "ffprime": np.asarray(eq.ffprim, dtype=float)}
+
+    def _eqdsk_in(grp):
+        names = [k for k in grp.keys() if k.endswith(".eqdsk")]
+        if not names:
+            return None
+        try:
+            return _ff(bytes(grp[names[0]][()]))
+        except Exception:
+            return None
+
+    bkey = _scan_key(scan_key)
+    bl_grp = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
+    baseline = None
+    with h5py.File(h5path, "r") as hf:
+        if bl_grp in hf:
+            baseline = _eqdsk_in(hf[bl_grp])
+
+    if indices is None:
+        indices = list_equilibrium_indices(h5path, scan_key=scan_key)
+    draws = []
+    with h5py.File(h5path, "r") as hf:
+        for i in indices:
+            grp_path = _group_path(scan_key, i)
+            if grp_path not in hf:
+                continue
+            ff = _eqdsk_in(hf[grp_path])
+            if ff is not None:
+                draws.append(ff)
+    return baseline, draws
+
+
+def draw_flux_function(ax, key, ylabel, baseline_ff, perturbed_ff,
+                       q_marker=False):
+    r"""Draw a flux-function profile (``key`` = ``"q"`` or ``"ffprime"``).
+
+    Baseline in black, perturbed draws as thin gold curves -- mirroring
+    :func:`draw_jphi_total`. Each draw carries its own ``psi_N`` (the
+    geqdsk grid). ``q_marker`` adds the q=1 sawtooth reference line.
+    """
+    ax.cla()
+    ax.set_ylabel(ylabel)
+    ax.set_xlabel(r"$\hat{\psi}$")
+    ax.grid(ls=":")
+    if perturbed_ff:
+        n = len(perturbed_ff)
+        for i, d in enumerate(perturbed_ff):
+            if d is None:
+                continue
+            ax.plot(d["psi_N"], d[key], c=_GOLD, lw=1.0, alpha=0.55,
+                    label=f"perturbed ({n})" if i == 0 else None, zorder=3)
+    if baseline_ff is not None:
+        ax.plot(baseline_ff["psi_N"], baseline_ff[key], c="k", lw=2,
+                label="baseline", zorder=1)
+    if q_marker:
+        ax.axhline(1.0, color="0.6", ls="--", lw=0.8, zorder=0)
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(loc="best", fontsize=8)
+
+
 # ====================================================================
 #  Notebook-friendly API
 # ====================================================================
@@ -1014,12 +1089,23 @@ def plot_bouquet(h5path_or_header, scan_key=None, mode="kinetic",
     # Use psi_N_kinetic for kinetic profiles if available
     psi_N_kin = bl.get("psi_N_kinetic", psi_N)
 
+    # Flux functions (q, FF') from the stored eqdsk -- only the j_phi-bearing
+    # views need them; absent eqdsk leaves the panels blank rather than failing.
+    baseline_ff = perturbed_ff = None
+    if mode in ("all", "j-phi"):
+        try:
+            baseline_ff, perturbed_ff = _load_flux_functions(
+                h5path, scan_key=scan_key, indices=sel_indices)
+        except Exception:
+            baseline_ff = perturbed_ff = None
+
     # Default for mode='all': a combined dashboard of the profile panels plus a
     # separate (roomier) boundary figure -- minimal scroll, but the LCFS panels
     # aren't cramped. pub_style=True instead gives the separate publication
     # figures.
     if mode == "all" and not pub_style:
-        figs = [_plot_bouquet_dashboard(psi_N, psi_N_kin, bl, perturbed)]
+        figs = [_plot_bouquet_dashboard(psi_N, psi_N_kin, bl, perturbed,
+                                        baseline_ff, perturbed_ff)]
         boundaries = _load_all_boundaries(h5path, scan_key=scan_key,
                                           indices=sel_indices)
         if boundaries:
@@ -1075,6 +1161,17 @@ def plot_bouquet(h5path_or_header, scan_key=None, mode="kinetic",
         fig_jc.tight_layout()
         figs.append(fig_jc)
         axes_list.append(ax_jc)
+
+        # Flux-function pair (FF', q) -- the equilibrium analogue of the j_phi
+        # decomposition, on the geqdsk's own psi grid.
+        fig_ff, ax_ff = plt.subplots(1, 2, figsize=(8.5, 3.6))
+        draw_flux_function(ax_ff[0], "ffprime", r"$FF'$ [T$^2$ m$^2$/Wb]",
+                           baseline_ff, perturbed_ff)
+        draw_flux_function(ax_ff[1], "q", r"$q$", baseline_ff, perturbed_ff,
+                           q_marker=True)
+        fig_ff.tight_layout()
+        figs.append(fig_ff)
+        axes_list.append(ax_ff)
 
     if mode in ("boundary", "all"):
         boundaries = _load_all_boundaries(h5path, scan_key=scan_key,

@@ -40,6 +40,7 @@ from .plotting import (
     draw_jphi_total,
     draw_jphi_components,
     draw_jphi_profiles,
+    draw_flux_function,
     set_plot_style,
     WONG,
     plot_bouquet,
@@ -146,6 +147,7 @@ __all__ = [
     "plot_traces", "plot_boundary_point_traces", "plot_jphi",
     "draw_kinetic_profiles", "draw_pressure_profiles",
     "draw_jphi_total", "draw_jphi_components", "draw_jphi_profiles",
+    "draw_flux_function",
     # ---- physics helpers ----
     "isotropize_fast_pressure", "parallel_to_toroidal",
     "Hmode_profiles",

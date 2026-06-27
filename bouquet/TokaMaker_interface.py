@@ -254,6 +254,67 @@ def classify_jphi_profile(psi_N, eqdsk_jphi, spike_profile,
         return 'Lmode_like_jphi', metrics
 
 
+# ---- Coil-current drift metric (in-spec) -------------------------------------
+# Additive coil-current measurement+eddy-current uncertainty for the VSC in-spec
+# channel metric, carried as a denominator floor [A]. ASSUMPTION: no published
+# DIII-D coil-current measurement-noise figure was found; the literature puts
+# Rogowski/PF current measurement at ~0.1-1%, with eddy currents in the vessel/
+# passive structure contributing a current-INDEPENDENT (additive) term. So this
+# is a deliberately conservative placeholder -- at the 2% inspec gain it
+# corresponds to a ~200 A additive tolerance. Replace with the real transducer
+# offset + eddy-equivalent figure when available (see README "VSC drift metric").
+_COIL_DRIFT_DENOM_FLOOR_A = 10000.0
+
+
+def _coil_drift_pct(cur, baseline):
+    r"""Per-coil current drift [%] = ``100 * (I_draw - I_base) / max(|I_base|, 1)``.
+
+    Used for the SOLVE-time homotopy bounds/saturation (per coil, per power
+    supply) and for the non-VSC F-coil in-spec metric -- there the measurement
+    uncertainty is gain-dominated (~2% of 35-180 kA), so a relative % is the
+    right scale. The anti-series VSC pair is scored separately by
+    :func:`_vsc_channel_drift_pct` (per-coil % breaks on its near-zero coil).
+    Signed; caller takes abs()/max().
+    """
+    return {n: (float(cur[n]) - baseline[n]) / max(abs(baseline[n]), 1.0) * 100.0
+            for n in baseline}
+
+
+def _vsc_channel_drift_pct(cur, baseline, vsc_set,
+                           denom_floor_A=_COIL_DRIFT_DENOM_FLOOR_A):
+    r"""VSC-pair in-spec drift [%] via common-mode + differential channels.
+
+    The anti-series VSC pair (F9A, F9B) carries a vertical-CONTROL common-mode
+    current ``I_cm = (F9A - F9B)/2`` and a shaping differential
+    ``I_df = (F9A + F9B)/2``. Both are linear combinations of two INDEPENDENTLY-
+    measured coils, so each channel's measurement tolerance PROPAGATES IN
+    QUADRATURE from the per-coil uncertainties ``sigma_coil = gain*|I_coil|``
+    (the ±1/2 channel coefficients give the same sigma for both channels)::
+
+        sigma_VSC = sqrt(|F9A|^2 + |F9B|^2) / 2  (+ denom_floor_A, the offset/gain)
+        drift     = 100 * max(|dI_cm|, |dI_df|) / sigma_VSC
+
+    (the gain cancels into the inspec_VSC_max threshold, so it is not needed
+    here). Because ``sigma_VSC`` is built from the COIL magnitudes, it never goes
+    near zero -- robust to BOTH a near-zero coil (F9A on the FUSE/IMAS baseline)
+    AND a near-zero common-mode baseline (a co-current pair, e.g. the geqdsk
+    baseline where F9A≈F9B). Gating either channel against its OWN baseline
+    blows up in one of those cases; the propagated sigma does not. The
+    differential channel still catches a genuinely asymmetric/same-sign
+    excursion. Falls back to the per-coil max when the pair is not two coils.
+    """
+    if len(vsc_set) != 2:
+        d = _coil_drift_pct(cur, baseline)
+        return float(max((abs(d[n]) for n in vsc_set), default=0.0))
+    a, b = vsc_set
+    dA = float(cur[a]) - baseline[a]
+    dB = float(cur[b]) - baseline[b]
+    cm = abs((dA - dB) / 2.0)
+    df = abs((dA + dB) / 2.0)
+    sigma = float(np.hypot(baseline[a], baseline[b])) / 2.0 + denom_floor_A
+    return float(100.0 * max(cm, df) / sigma) if sigma > 0 else 0.0
+
+
 # ---- Shelf-blend decomposition helper ----
 def _shelf_blend_decompose(psi_N, j_phi_total, spike_profile,
                            eqdsk_jphi=None):
@@ -3680,13 +3741,8 @@ def generate_bouquet(
                     # reflects reality.
                     try:
                         _cur_skip, _ = mygs.get_coil_currents()
-                        _final_drifts = {
-                            _n: (float(_cur_skip[_n])
-                                 - _baseline_coils[_n])
-                                / max(abs(_baseline_coils[_n]), 1.0)
-                                * 100
-                            for _n in _baseline_coils
-                        }
+                        _final_drifts = _coil_drift_pct(
+                            _cur_skip, _baseline_coils)
                         _max_d = max((abs(d)
                                       for d in _final_drifts.values()),
                                      default=0.0)
@@ -3728,11 +3784,8 @@ def generate_bouquet(
                             mygs.solve()
                             # Snapshot success
                             _cur, _ = mygs.get_coil_currents()
-                            _all_drifts = {
-                                _n: (float(_cur[_n]) - _baseline_coils[_n])
-                                     / max(abs(_baseline_coils[_n]), 1.0) * 100
-                                for _n in _baseline_coils
-                            }
+                            _all_drifts = _coil_drift_pct(
+                                _cur, _baseline_coils)
                             _f_only = {n: d for n, d in _all_drifts.items()
                                         if n.startswith('F') and n not in _vsc_in_set}
                             _vsc_only = {n: d for n, d in _all_drifts.items()
@@ -3817,6 +3870,30 @@ def generate_bouquet(
                             _final_pass_idx  = _p_idx
                             _final_drift_F_lim   = _dF
                             _final_drift_VSC_lim = _dVSC
+
+                            # ---- Early stop: skip a tighter pass the current
+                            # solution already can't satisfy ----
+                            # This pass solved with HEADROOM (not saturated), so
+                            # _max_f/_max_vsc are the minimal coil drift needed to
+                            # hold the boundary. If the NEXT pass's bound is
+                            # tighter than that minimum, it cannot hold the
+                            # boundary within bound -- it will saturate or burn a
+                            # full maxits solve and roll right back here. Stop now
+                            # and keep this solution (the in-spec verdict is
+                            # already determined by these drifts). This also
+                            # covers the "coils unchanged vs the previous pass"
+                            # case (bound not binding), in its general form.
+                            if _p_idx + 1 < len(_passes):
+                                _nF, _nVSC = _passes[_p_idx + 1]
+                                if (_max_f > _nF * 100.0
+                                        or _max_vsc > _nVSC * 100.0):
+                                    print(f"  [homotopy {_label}] natural drift "
+                                          f"(F={_max_f:.2f}%, VSC={_max_vsc:.2f}%) "
+                                          f"exceeds next-pass bound "
+                                          f"(F=+/-{_nF*100:.1f}%, "
+                                          f"VSC=+/-{_nVSC*100:.1f}%) -> stop "
+                                          f"(skip infeasible tighter pass)")
+                                    break
                         except (ValueError, RuntimeError) as _hb_exc:
                             print(f"  [homotopy {_label}] F=+/-{_dF*100:.1f}%  "
                                   f"VSC=+/-{_dVSC*100:.1f}% -> infeasible "
@@ -3857,12 +3934,22 @@ def generate_bouquet(
                 if _final_drifts is not None:
                     _f_only = {n: d for n, d in _final_drifts.items()
                                 if n.startswith('F') and n not in _vsc_in_set}
-                    _vsc_only = {n: d for n, d in _final_drifts.items()
-                                  if n in _vsc_in_set}
                     _max_f_drift = float(max((abs(d) for d in _f_only.values()),
                                               default=0.0))
-                    _max_vsc_drift = float(max((abs(d) for d in _vsc_only.values()),
-                                                default=0.0))
+                    # VSC SELECTION metric: common-mode + differential channel
+                    # gate (NOT the per-coil drift -- F9A's near-zero baseline
+                    # makes a per-coil % meaningless for the anti-series pair).
+                    # Computed from the post-homotopy coil currents; falls back
+                    # to the per-coil max if the query fails.
+                    try:
+                        _cur_fin, _ = mygs.get_coil_currents()
+                        _max_vsc_drift = _vsc_channel_drift_pct(
+                            _cur_fin, _baseline_coils, _vsc_in_set)
+                    except Exception:
+                        _vsc_only = {n: d for n, d in _final_drifts.items()
+                                      if n in _vsc_in_set}
+                        _max_vsc_drift = float(max(
+                            (abs(d) for d in _vsc_only.values()), default=0.0))
                     _in_spec = (_max_f_drift <= inspec_F_max * 100.0
                                  and _max_vsc_drift <= inspec_VSC_max * 100.0)
                     _spec_msg = ('IN_SPEC' if _in_spec else 'OUT_OF_SPEC')

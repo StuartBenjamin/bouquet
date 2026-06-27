@@ -291,6 +291,32 @@ Baseline: g-file + profiles (p-file / IDA), or IMAS/OMAS JSON
 | n_b, p_b (beam) | ✗ | Preserved from baseline |
 | Toroidal/poloidal rotation | ✗ | Preserved from baseline |
 
+### Scope of the in-spec ensemble (what it is, and isn't)
+
+The selected (in-spec) draws are a **realizability-filtered sensitivity
+ensemble**, not a calibrated Bayesian posterior. Read them as *"equilibria
+consistent with the stated kinetic-profile uncertainty that remain broadly
+machine-realizable"* — useful for sensitivity and what-if analysis. They are
+**not** a posterior you should quote calibrated probabilistic confidence
+intervals from. Specifically:
+
+- Only the **kinetic profiles** are sampled (the prior); the equilibrium is
+  forward-solved with the **boundary held** and the **coils left to drift**.
+  Pinning the coils instead (and letting the boundary move) gives a *different*
+  ensemble — neither is "the" posterior; the choice privileges the
+  magnetics-measured boundary.
+- Selection is a **hard threshold** on coil drift and boundary RMS (approximate
+  Bayesian computation), **not** a likelihood weighting by the real measurement
+  covariances, and there is no joint correlation structure between the perturbed
+  quantities and the constraints.
+- The coil thresholds (esp. the VSC metric below) are **engineering heuristics**,
+  not the true measurement/control uncertainties — see the VSC note for the
+  specific assumption and its limits.
+
+A genuinely calibrated posterior would replace the hard cut with soft likelihood
+weighting using the joint coil/magnetics/kinetics covariances; that is future
+work.
+
 ---
 
 ## IO Modules
@@ -521,6 +547,66 @@ tolerance budget: ~30-50 A power-supply ripple + ~30-50 A Rogowski +
 integrator noise + ~10-100 A un-modelled vessel coupling.  See
 [architecture.md §15](architecture.md#15-coil-constraint-handling-diii-d-reference)
 for the full source-cited tolerance budget.
+
+### VSC drift metric (anti-series pair)
+
+F9A/F9B are an **anti-series VSC pair**: they move together as a common-mode
+current `±ΔI` that controls the plasma's vertical position. On vertically-
+sensitive equilibria one of the pair routinely sits near a **current
+zero-crossing** (e.g. F9A ≈ −16 kA while F9B ≈ +93 kA). The naive per-coil
+metric `|ΔI| / |I_baseline|` then divides a *benign* common-mode current by
+F9A's near-zero baseline and reports a spurious large drift — e.g. a 400 A
+common-mode reads as 2.4% on F9A but only 0.4% on F9B, falsely rejecting the
+draw. This is the same small-baseline pathology that excludes the E-coils
+above, and it silently tanks the in-spec yield on any peaked/vertically-
+unstable baseline.
+
+Bouquet scores the VSC **selection** metric by decomposing the pair into its
+two physical degrees of freedom and gating their changes against the
+**error-propagated** measurement uncertainty (`_vsc_channel_drift_pct` in
+`TokaMaker_interface.py`):
+
+```
+I_cm = (F9A − F9B)/2   # common-mode = vertical control
+I_df = (F9A + F9B)/2   # differential = shaping residual
+
+# both channels are linear combos of two independently-measured coils, so their
+# uncertainty propagates IN QUADRATURE from the per-coil uncertainties:
+sigma_VSC = sqrt(|F9A|² + |F9B|²) / 2  + denom_floor       # (= offset/gain)
+drift_VSC = 100 · max(|ΔI_cm|, |ΔI_df|) / sigma_VSC
+```
+
+- **The tolerance is built from the coil magnitudes, not the channel baselines**,
+  so it never goes near zero. Gating a channel against *its own* baseline blows
+  up whenever that baseline is small — and there are **two** such cases on real
+  equilibria: a near-zero *coil* (F9A ≈ −16 kA on the FUSE/IMAS baseline, which
+  breaks the naive per-coil `|ΔI|/|I_base|`) **and** a near-zero *common-mode
+  baseline* (a co-current pair, e.g. the geqdsk baseline F9A ≈ F9B ≈ −65 kA,
+  where `(F9A−F9B)/2 ≈ 7 kA`). The propagated `sigma_VSC` is immune to both,
+  because a small difference of two large, imprecisely-known currents is itself
+  imprecisely known: `σ` comes from the coil errors, not the (small) channel
+  value. (An earlier larger-pair and a channel-baseline version each fixed only
+  one of the two cases; the quadrature fixes both.)
+- **The quadrature** (sum of squares, ÷2) is exactly the propagation of two
+  *independent* transducer errors through the ±½ channel coefficients; the
+  differential channel still catches a genuinely asymmetric/same-sign excursion.
+- **`denom_floor`** (`_COIL_DRIFT_DENOM_FLOOR_A`, default 10 kA = offset/gain)
+  carries the additive **measurement + eddy-current** uncertainty: real
+  coil-current noise is `gain·|I| + offset`, where the offset (sensor zero +
+  vessel/passive-structure eddy contribution) is *current-independent*. At the
+  2% spec this floor ≈ a 200 A additive tolerance. **ASSUMPTION:** no published
+  DIII-D coil-current measurement-noise figure was found (Rogowski/PF
+  measurement is ~0.1–1% in the literature; eddy adds a current-independent
+  term), so this is a deliberately conservative placeholder — replace the
+  constant with the real transducer offset + eddy-equivalent figure when
+  available.
+
+This is the *measurement-uncertainty* reading ("states consistent with the
+measured VSC currents"). The non-VSC F-coils keep the relative `|ΔI|/|I_base|`
+metric (their uncertainty is gain-dominated). If the binding constraint is
+instead the VSC power-supply
+**control authority** (not measurement uncertainty), gate `|ΔI_cm|` against that
+amp budget directly — same structure, different number.
 
 ### Progressive homotopy
 
