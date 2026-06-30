@@ -2314,6 +2314,7 @@ def generate_bouquet(
     aux_baselines=None,
     aux_length_scales=None,
     progress_callback=None,
+    source_kind=None,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -3190,6 +3191,7 @@ def generate_bouquet(
         aux_sigmas=aux_sigmas,
         j_BS=baseline_j_BS,
         j_inductive=input_jinductive,
+        source_kind=source_kind,
     )
 
     # ---- Purge stale draws for THIS scan value -------------------------

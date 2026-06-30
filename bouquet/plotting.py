@@ -578,10 +578,10 @@ def draw_kinetic_profiles(axes, psi_N, ne, ni, te, ti,
     """
     _pairs = [
         #  axis       orig  scale  sigma      color        label      ylabel
-        (axes[0, 0], ne, 1.0,  sigma_ne, "0.55", r"$n_e$", r"n [m$^{-3}$]"),
-        (axes[0, 1], ni, 1.0,  sigma_ni, "0.55", r"$n_i$", None),
-        (axes[1, 0], te, 1e-3, sigma_te, "0.55", r"$T_e$", r"T [keV]"),
-        (axes[1, 1], ti, 1e-3, sigma_ti, "0.55", r"$T_i$", None),
+        (axes[0, 0], ne, 1.0,  sigma_ne, "0.55", r"$n_e$", r"$n_e$ [m$^{-3}$]"),
+        (axes[0, 1], ni, 1.0,  sigma_ni, "0.55", r"$n_i$", r"$n_i$ [m$^{-3}$]"),
+        (axes[1, 0], te, 1e-3, sigma_te, "0.55", r"$T_e$", r"$T_e$ [keV]"),
+        (axes[1, 1], ti, 1e-3, sigma_ti, "0.55", r"$T_i$", r"$T_i$ [keV]"),
     ]
     _keys = ["n_e [m^-3]", "n_i [m^-3]", "T_e [eV]", "T_i [eV]"]
 
@@ -628,8 +628,18 @@ def draw_kinetic_profiles(axes, psi_N, ne, ni, te, ti,
     axes[1, 1].set_xlabel(r"$\hat{\psi}$")
 
 
-def draw_pressure_profiles(ax, psi_N, pressure, perturbed_data_list=None):
-    """Draw total pressure overlay on a single axes.
+def draw_pressure_profiles(ax, psi_N, pressure, perturbed_data_list=None,
+                           pressure_thermal=None, bl=None):
+    """Draw the TOTAL pressure overlay (baseline + perturbed draws), with the
+    baseline thermal / impurity / fast components as gray reference lines.
+
+    Only the total is drawn as a draw cloud -- a single, easy-to-follow gold
+    cloud. When ``bl`` (the baseline dict) is given, the fixed decomposition is
+    overlaid in gray with distinct line styles -- thermal dashed, fast dotted,
+    impurity dash-dot -- so thermal+impurity+fast = the total is visible without
+    a second panel. Fast is the fixed beam pressure and impurity perturbs only
+    negligibly, so these baseline curves represent every draw. Falls back to just
+    the dashed thermal line when only ``pressure_thermal`` is available.
 
     Parameters
     ----------
@@ -638,28 +648,93 @@ def draw_pressure_profiles(ax, psi_N, pressure, perturbed_data_list=None):
     pressure : 1-D array
         Baseline total pressure [Pa].
     perturbed_data_list : list[dict] or None
-        Each dict must have ``'pressure [Pa]'``.
+        Each dict provides ``'pressure [Pa]'`` (total).
+    pressure_thermal : 1-D array or None
+        Baseline thermal pressure [Pa] (dashed reference fallback).
+    bl : dict or None
+        Baseline dict; when present, thermal/impurity/fast are overlaid.
     """
     _kPa = 1e-3
     ax.cla()
-    ax.plot(psi_N, pressure * _kPa, c="k", lw=2,
-            label="input pressure", zorder=1)
-    ax.grid(ls=":")
-    ax.set_xlabel(r"$\hat{\psi}$")
-    ax.set_ylabel("Pressure [kPa]")
 
+    # perturbed TOTAL cloud only (single colour -> easy to read)
     if perturbed_data_list:
         n_equils = len(perturbed_data_list)
         for i, data in enumerate(perturbed_data_list):
             if "pressure [Pa]" in data:
-                ax.plot(
-                    psi_N, data["pressure [Pa]"] * _kPa,
-                    c=_GOLD, alpha=0.55, lw=1.0,
-                    label=f"perturbed ({n_equils})" if i == 0 else None,
-                    zorder=3,
-                )
+                ax.plot(psi_N, data["pressure [Pa]"] * _kPa,
+                        c=_GOLD, alpha=0.55, lw=1.0,
+                        label=f"perturbed total ({n_equils})" if i == 0 else None,
+                        zorder=3)
 
-    ax.legend(loc="best", fontsize=8)
+    ax.plot(psi_N, pressure * _kPa, c="k", lw=2,
+            label="baseline total", zorder=5)
+
+    comp = _pressure_components(bl, psi_eq=psi_N) if bl is not None else None
+    if comp is not None:
+        thermal, imp, fast = comp
+        ax.plot(psi_N, thermal * _kPa, c="0.45", lw=1.1, ls="--",
+                label="thermal", zorder=4)
+        ax.plot(psi_N, fast * _kPa, c="0.45", lw=1.1, ls=":",
+                label="fast", zorder=4)
+        ax.plot(psi_N, imp * _kPa, c="0.45", lw=1.1, ls="-.",
+                label="impurity (C)", zorder=4)
+    elif pressure_thermal is not None:
+        ax.plot(psi_N, pressure_thermal * _kPa, c="0.45", lw=1.2, ls="--",
+                label="baseline thermal", zorder=4)
+
+    ax.grid(ls=":")
+    ax.set_xlabel(r"$\hat{\psi}$")
+    ax.set_ylabel("Pressure [kPa]")
+    ax.legend(loc="best", fontsize=7)
+
+
+def _pressure_components(bl, psi_eq=None):
+    r"""Split a baseline dict into (thermal, impurity, fast) pressure [Pa].
+
+    Thermal is stored (``pressure_thermal``); impurity is recomputed from the
+    stored kinetics via the same ``impurity_pressure`` the solve used; fast is
+    the remainder ``total - thermal - impurity`` (the fixed beam/fast-ion
+    pressure, which does not perturb). Returns ``None`` if the inputs needed
+    are missing (e.g. an older archive without ``pressure_thermal``).
+
+    Dual-grid archives (e.g. the geqdsk p-file path) store kinetics on
+    ``psi_N_kinetic`` while the total/thermal pressure live on the equilibrium
+    grid ``psi_eq``. The impurity term -- recomputed from the kinetics -- is
+    regridded onto the total's grid before differencing. Single-grid archives
+    (OMAS) skip this since the shapes already match.
+    """
+    if "pressure [Pa]" not in bl or "pressure_thermal [Pa]" not in bl:
+        return None
+    total = np.asarray(bl["pressure [Pa]"], float)
+    thermal = np.asarray(bl["pressure_thermal [Pa]"], float)
+    imp = np.zeros_like(total)
+    try:
+        ne = np.asarray(bl["n_e [m^-3]"], float)
+        ni = np.asarray(bl["n_i [m^-3]"], float)
+        ti = np.asarray(bl["T_i [eV]"], float)
+        zeff = np.asarray(bl["aux_zeff"] if "aux_zeff" in bl else bl["Zeff"], float)
+        from .physics import effective_impurity_charge, impurity_pressure
+        imp = impurity_pressure(ne, ni, ti, effective_impurity_charge(ne, ni, zeff))
+    except Exception:
+        imp = np.zeros_like(total)
+    # Align kinetics-derived terms (imp; thermal defensively) onto the total's
+    # grid when an archive is dual-grid.
+    psi_kin = np.asarray(bl["psi_N_kinetic"], float) if "psi_N_kinetic" in bl else None
+    def _to_total(arr):
+        if arr.shape == total.shape:
+            return arr
+        if psi_eq is not None and psi_kin is not None and arr.shape == psi_kin.shape:
+            return np.interp(np.asarray(psi_eq, float), psi_kin, arr)
+        return None
+    imp = _to_total(imp)
+    if imp is None:                     # can't regrid -> drop impurity, keep thermal/fast
+        imp = np.zeros_like(total)
+    thermal = _to_total(thermal)
+    if thermal is None:                 # can't align thermal -> no component overlay
+        return None
+    fast = total - thermal - imp
+    return thermal, imp, fast
 
 
 def draw_jphi_total(ax, psi_N, j_phi, sigma_jphi,
@@ -708,59 +783,62 @@ def draw_jphi_total(ax, psi_N, j_phi, sigma_jphi,
 
 
 def draw_jphi_components(axes, psi_N, perturbed_data_list=None):
-    r"""Draw :math:`j_\phi` component decomposition on a (2, 1) axes array.
+    r"""Draw the :math:`j_\phi` component decomposition on a (2,) axes array.
 
-    ``axes[0]`` = :math:`j_{\rm BS}` (solid) with :math:`j_{\rm BS,edge}`
-    (dashed), ``axes[1]`` = :math:`j_{\rm inductive}`.  Total
-    :math:`j_\phi` is shown as a black dashed reference on both panels.
+    ``axes[0]`` = the bootstrap variant ACTUALLY summed into :math:`j_\phi` --
+    the isolated edge spike when the run used ``isolate_edge_jBS=True`` (archives
+    that carry ``j_BS,edge``), otherwise the full Sauter ``j_BS``. Only that one
+    variant is drawn -- never both the isolated edge and the full Sauter
+    bootstrap. ``axes[1]`` = :math:`j_{\rm inductive}`, computed the FAITHFUL way
+    :func:`plot_jphi` uses -- ``j_phi - that_j_BS`` -- so it closes to the total
+    and never exceeds it, rather than the post-hoc stored ``j_inductive`` (which
+    can over-state the core). Total :math:`j_\phi` is the dashed reference.
 
     Parameters
     ----------
     axes : array-like of 2 Axes
     psi_N : 1-D array
     perturbed_data_list : list[dict] or None
-        Each dict must have ``'j_phi [A m^-2]'``, ``'j_BS [A m^-2]'``,
-        ``'j_inductive [A m^-2]'``.  ``'j_BS,edge [A m^-2]'`` is
-        optional.
+        Each dict must have ``'j_phi [A m^-2]'`` and the applied bootstrap
+        (``'j_BS,edge [A m^-2]'`` if isolated, else ``'j_BS [A m^-2]'``).
     """
     _MA = 1e-6  # A → MA
-
-    _sub = [
-        (axes[0], "j_BS [A m^-2]",        r"$j_{\rm BS}$",        _GOLD,   "-"),
-        (axes[1], "j_inductive [A m^-2]",  r"$j_{\rm inductive}$", _ORANGE, "--"),
-    ]
-    for ax, key, label, color, ls in _sub:
+    for ax in axes:
         ax.cla()
-        ax.set_ylabel(f"{label} " + r"[MA/m$^2$]")
         ax.grid(ls=":")
 
-    if perturbed_data_list:
-        n_equils = len(perturbed_data_list)
-        for i, data in enumerate(perturbed_data_list):
-            lbl = f"perturbed ({n_equils})" if i == 0 else None
+    if not perturbed_data_list:
+        axes[0].set_ylabel(r"$j_{\rm BS}$ [MA/m$^2$]")
+        axes[1].set_ylabel(r"$j_{\rm inductive}$ [MA/m$^2$]")
+        axes[-1].set_xlabel(r"$\hat{\psi}$")
+        return
 
-            # reference: total j_phi on both panels
-            for ax, *_ in _sub:
-                ax.plot(psi_N, data["j_phi [A m^-2]"] * _MA,
-                        c="k", ls="--", lw=1.2, alpha=0.4,
-                        label=r"$j_\phi$ (total)" if i == 0 else None,
-                        zorder=1)
+    n_equils = len(perturbed_data_list)
+    # Which bootstrap variant was applied to j_phi? The isolated edge spike if
+    # the run stored one (isolate_edge_jBS=True), else the full Sauter j_BS.
+    has_spike = "j_BS,edge [A m^-2]" in perturbed_data_list[0]
+    bs_key = "j_BS,edge [A m^-2]" if has_spike else "j_BS [A m^-2]"
+    bs_label = r"$j_{\rm BS,edge}$" if has_spike else r"$j_{\rm BS}$"
 
-            # component curves (distinguished by both color and dash style)
-            for ax, key, label, color, ls in _sub:
-                if key in data:
-                    ax.plot(psi_N, data[key] * _MA, c=color, ls=ls, lw=1.5,
-                            alpha=0.7, label=lbl, zorder=3)
+    for i, data in enumerate(perturbed_data_list):
+        if "j_phi [A m^-2]" not in data or bs_key not in data:
+            continue
+        lbl = f"perturbed ({n_equils})" if i == 0 else None
+        total = np.asarray(data["j_phi [A m^-2]"], float)
+        bs = np.asarray(data[bs_key], float)
+        jind = total - bs   # faithful inductive: closes to total, <= total
 
-            # j_BS,edge overlay on the j_BS panel
-            if "j_BS,edge [A m^-2]" in data:
-                axes[0].plot(
-                    psi_N, data["j_BS,edge [A m^-2]"] * _MA,
-                    c=_RED, ls="-.", lw=1.2, alpha=0.7,
-                    label=r"$j_{\rm BS,edge}$" if i == 0 else None,
-                    zorder=4,
-                )
+        # reference: total j_phi on both panels
+        for ax in axes:
+            ax.plot(psi_N, total * _MA, c="k", ls="--", lw=1.2, alpha=0.4,
+                    label=r"$j_\phi$ (total)" if i == 0 else None, zorder=1)
+        axes[0].plot(psi_N, bs * _MA, c=_GOLD, ls="-", lw=1.5, alpha=0.7,
+                     label=lbl, zorder=3)
+        axes[1].plot(psi_N, jind * _MA, c=_GOLD, ls="--", lw=1.5, alpha=0.7,
+                     label=lbl, zorder=3)
 
+    axes[0].set_ylabel(bs_label + r" [MA/m$^2$]")
+    axes[1].set_ylabel(r"$j_{\rm inductive}$ [MA/m$^2$]")
     for ax in axes:
         ax.legend(loc="best", fontsize=8)
     axes[-1].set_xlabel(r"$\hat{\psi}$")
@@ -841,18 +919,53 @@ def _draw_boundary_panels(ax_lcfs, ax_zoom, boundaries):
                                 fill=False, edgecolor="0.4", lw=0.8))
 
 
+def draw_zeff(ax, psi_N_kin, bl, perturbed_data_list=None):
+    r"""Draw the effective charge :math:`Z_{\rm eff}` profile: the baseline
+    (with its :math:`\pm1\sigma_{\rm exp}` band) and the perturbed draws.
+
+    Read from the stored ``aux_zeff`` datasets (one :math:`Z_{\rm eff}` per
+    draw, the Z_eff-primary perturbation scheme), on the kinetic grid.
+    """
+    ax.cla()
+    ax.grid(ls=":")
+    ax.set_ylabel(r"$Z_{\rm eff}$")
+    ax.set_xlabel(r"$\hat{\psi}$")
+
+    if perturbed_data_list:
+        n_equils = len(perturbed_data_list)
+        for i, data in enumerate(perturbed_data_list):
+            z = data.get("aux_zeff", data.get("Zeff"))
+            if z is None:
+                continue
+            x = data.get("psi_N_kinetic", psi_N_kin)
+            ax.plot(x, z, c=_GOLD, alpha=0.55, lw=1.0,
+                    label=f"perturbed ({n_equils})" if i == 0 else None,
+                    zorder=3)
+
+    zb = bl.get("aux_zeff", bl.get("Zeff"))
+    if zb is not None:
+        zb = np.asarray(zb, float)
+        sb = bl.get("sigma_aux_zeff")
+        if sb is not None and np.shape(sb) == np.shape(zb):
+            sb = np.asarray(sb, float)
+            ax.fill_between(psi_N_kin, zb - sb, zb + sb, color="0.7",
+                            alpha=0.3, zorder=2, label=r"$\pm\,1\sigma_{\rm exp}$")
+        ax.plot(psi_N_kin, zb, c="k", lw=2, label="baseline", zorder=5)
+    ax.legend(loc="best", fontsize=7)
+
+
 def _plot_bouquet_dashboard(psi_N, psi_N_kin, bl, perturbed,
                             baseline_ff=None, perturbed_ff=None):
     r"""Single combined figure of the profile panels (minimal scrolling).
 
-    Layout: kinetic 2x2 on the left; a 3x2 block on the right holding
-    pressure, :math:`j_\phi` total, :math:`FF'`, q, :math:`j_{\rm BS}`,
-    :math:`j_{\rm inductive}`. The boundary panels get their own figure
-    (more room). ``baseline_ff`` / ``perturbed_ff`` are the flux-function
-    payloads from :func:`_load_flux_functions`; when absent the FF'/q panels
-    are left blank. Returns the figure.
+    Layout (4x2): kinetic 2x2 on top (:math:`n_e, n_i, T_e, T_i`); then
+    pressure / :math:`j_\phi` total; then :math:`Z_{\rm eff}` / q. The boundary
+    panels and the roomier :math:`j_\phi` decomposition (total / inductive /
+    bootstrap) get their own figures. ``baseline_ff`` / ``perturbed_ff`` are the
+    flux-function payloads from :func:`_load_flux_functions`; when absent the q
+    panel is left blank. Returns the figure.
     """
-    fig, axes = plt.subplots(5, 2, figsize=(9.5, 13.5))
+    fig, axes = plt.subplots(4, 2, figsize=(9.5, 11.0))
 
     draw_kinetic_profiles(
         axes[0:2, :], psi_N_kin,
@@ -863,14 +976,14 @@ def _plot_bouquet_dashboard(psi_N, psi_N_kin, bl, perturbed,
     )
 
     draw_pressure_profiles(axes[2, 0], psi_N, bl["pressure [Pa]"],
-                           perturbed_data_list=perturbed)
+                           perturbed_data_list=perturbed,
+                           pressure_thermal=bl.get("pressure_thermal [Pa]"),
+                           bl=bl)
     draw_jphi_total(axes[2, 1], psi_N, bl["j_phi [A m^-2]"],
                     bl["sigma_jphi [A m^-2]"], perturbed_data_list=perturbed)
-    draw_flux_function(axes[3, 0], "ffprime", r"$FF'$ [T$^2$ m$^2$/Wb]",
-                       baseline_ff, perturbed_ff)
+    draw_zeff(axes[3, 0], psi_N_kin, bl, perturbed_data_list=perturbed)
     draw_flux_function(axes[3, 1], "q", r"$q$", baseline_ff, perturbed_ff,
                        q_marker=True)
-    draw_jphi_components(axes[4, :], psi_N, perturbed_data_list=perturbed)
     fig.tight_layout()
     return fig
 
@@ -908,22 +1021,139 @@ def _load_all_perturbations(h5path, scan_key=None, indices=None):
     ]
 
 
+def _has_aux(h5path, scan_key=None):
+    r"""True when the archive carries plottable "switchboard" auxiliary profiles
+    -- the rotation / transport ``aux_<name>`` datasets (omega_tor, chi_e, chi_i,
+    e_r) that :func:`plot_aux_profiles` renders.
+
+    This drives whether :func:`plot_bouquet` appends the auxiliary-profile
+    figure. It is deliberately keyed on the *presence of aux profiles*, NOT on
+    the source path: the switchboard is source-decoupled (it lives in
+    ``UncertaintyConfig.aux_baselines``), so a geqdsk run that supplies and
+    perturbs ``omega_tor`` / ``chi`` gets the figure too -- which is what you'd
+    want. In practice IMAS runs always have these and plain reconstruction runs
+    do not, so it also happens to separate the two paths. ``aux_zeff`` is
+    excluded -- both paths store it (the Z_eff-primary scheme that derives ni) --
+    so a run with only ``aux_zeff`` reads as no switchboard. ``False`` on any
+    read error.
+    """
+    try:
+        from .utils import _scan_key
+        bkey = _scan_key(scan_key)
+        with h5py.File(h5path, "r") as hf:
+            if bkey is not None and f"scan/{bkey}" in hf:
+                grp = hf[f"scan/{bkey}"]
+            elif "scan" in hf and len(hf["scan"].keys()):
+                grp = hf["scan"][next(iter(hf["scan"].keys()))]
+            else:
+                grp = hf
+            cand = []
+            if "_baseline" in grp:
+                cand.append(grp["_baseline"])
+            cand += [grp[k] for k in grp.keys() if str(k).isdigit()][:1]
+            for g in cand:
+                if hasattr(g, "keys") and any(
+                        str(k).startswith(("aux_", "extra_"))
+                        and not str(k).endswith("zeff")
+                        for k in g.keys()):
+                    return True
+        return False
+    except Exception:
+        return False
+
+
+def _source_kind(h5path, scan_key=None):
+    r"""Return the stored provenance marker (``'imas'`` / ``'geqdsk'``) written
+    on the baseline group, or ``None`` for archives generated before it existed.
+
+    This is the robust path discriminator -- independent of the source-decoupled
+    aux switchboard, so it is not fooled by a geqdsk run that supplies
+    ``omega_tor`` / ``chi``. Plotting falls back to :func:`_has_aux` when the
+    marker is absent (older archives).
+    """
+    try:
+        from .utils import _scan_key
+        bkey = _scan_key(scan_key)
+        bl_path = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
+        with h5py.File(h5path, "r") as hf:
+            if bl_path in hf and "source_kind" in hf[bl_path].attrs:
+                v = hf[bl_path].attrs["source_kind"]
+                return v.decode() if isinstance(v, bytes) else str(v)
+        return None
+    except Exception:
+        return None
+
+
+def _lcfs_from_psigrid(eq):
+    r"""Contour the LCFS from an eqdsk's 2-D :math:`\psi` grid (``psi_RZ``).
+
+    Uses the same marching-squares + main-contour-selection + X-point
+    closure path as bouquet's geqdsk flux-surface tracer. The stored
+    ``boundary_R/Z`` (RBBBS) are TokaMaker's ``trace_surf`` points, which
+    pile unevenly near the X-point (hundreds of extra vertices at the lower
+    null) -- that uneven sampling skews vertex-wise comparisons and makes the
+    overlay look offset where it is densest. Contouring the grid instead
+    yields a uniformly-sampled curve produced the SAME way for the baseline
+    and every draw, so the overlay is directly comparable. Returns ``(R, Z)``
+    or ``None`` (caller falls back to the stored boundary).
+    """
+    from .io.geqdsk import (_trace_contours, _select_main_contour,
+                            _crop_at_xpoint)
+    try:
+        R = np.asarray(eq.R_grid, float)
+        Z = np.asarray(eq.Z_grid, float)
+        PSI = np.asarray(eq.psi_RZ, float)
+        R0 = float(eq._raw["RMAXIS"]); Z0 = float(eq._raw["ZMAXIS"])
+        segs = _trace_contours(R, Z, PSI, [float(eq.psi_boundary)])[0]
+        seg = _select_main_contour(segs, R0, Z0, 1, 1)
+        if seg is None or len(seg) < 10:
+            return None
+        seg = _crop_at_xpoint(seg, R0, Z0)
+        if seg is None or len(seg) < 4:
+            return None
+        seg = np.asarray(seg)
+        return seg[:, 0], seg[:, 1]
+    except Exception:
+        return None
+
+
 def _load_all_boundaries(h5path, scan_key=None, indices=None):
     """Load LCFS boundaries from stored geqdsk bytes for all equilibria.
 
-    Returns a list of (R, Z) tuples.  Returns an empty list when the
-    HDF5 file does not contain geqdsk bytes.  When ``indices`` is given,
-    only those stored draws are loaded (honours a filter selection).
+    Returns a list of (R, Z) tuples with the **baseline first** (so callers
+    overlaying against ``boundaries[0]`` reference the true baseline, not the
+    first draw), followed by the draws. Each boundary is re-contoured from the
+    eqdsk's 2-D psi grid via :func:`_lcfs_from_psigrid` (uniform, identical
+    sampling for clean overlay), falling back to the stored ``boundary_R/Z``.
+    Returns an empty list when the file contains no geqdsk bytes. When
+    ``indices`` is given, only those stored draws are loaded (honours a filter
+    selection).
     """
     from .io import GEQDSKEquilibrium
     from .utils import _scan_key, _group_path, _eqdsk_dataset_name
 
     if indices is None:
         indices = list_equilibrium_indices(h5path, scan_key=scan_key)
+
+    def _bnd(eq):
+        lc = _lcfs_from_psigrid(eq)
+        return lc if lc is not None else (eq.boundary_R, eq.boundary_Z)
+
     boundaries = []
     with h5py.File(h5path, "r") as hf:
+        # Baseline first -- contoured the same way as the draws so the overlay
+        # references the TRUE baseline rather than draw 0.
+        _bk = _scan_key(scan_key)
+        bl_path = f"scan/{_bk}/_baseline" if _bk is not None else "_baseline"
+        if bl_path in hf and "baseline.eqdsk" in hf[bl_path]:
+            try:
+                beq = GEQDSKEquilibrium.from_bytes(
+                    bytes(hf[bl_path]["baseline.eqdsk"][()]))
+                boundaries.append(_bnd(beq))
+            except Exception:
+                pass
+
         for i in indices:
-            sv_key = _scan_key(scan_key)
             grp_path = _group_path(scan_key, i)
             if grp_path not in hf:
                 continue
@@ -937,7 +1167,7 @@ def _load_all_boundaries(h5path, scan_key=None, indices=None):
             raw = bytes(grp[eqdsk_ds[0]][()])
             try:
                 eq = GEQDSKEquilibrium.from_bytes(raw)
-                boundaries.append((eq.boundary_R, eq.boundary_Z))
+                boundaries.append(_bnd(eq))
             except Exception:
                 continue
 
@@ -1113,6 +1343,28 @@ def plot_bouquet(h5path_or_header, scan_key=None, mode="kinetic",
             _draw_boundary_panels(ax_bd[0], ax_bd[1], boundaries)
             fig_bd.tight_layout()
             figs.append(fig_bd)
+
+        # j_phi current decomposition (total / inductive / bootstrap) for a
+        # roomier zoom than the dashboard's single j_phi cell.
+        try:
+            _jr = plot_jphi(h5path, scan_key=scan_key, selection=selection)
+            figs.append(_jr[0] if isinstance(_jr, tuple) else _jr)
+        except Exception:
+            pass
+
+        # Append the auxiliary-profile figure when the run carries switchboard
+        # profiles: always for IMAS (provenance marker), and for any run -- incl.
+        # geqdsk -- that supplied omega_tor / chi (aux-presence fallback, also
+        # covers archives written before the marker existed).
+        if _source_kind(h5path, scan_key) == "imas" or _has_aux(h5path, scan_key):
+            try:
+                ex_fig, _ = plot_aux_profiles(h5path, scan_key=scan_key,
+                                              selection=selection)
+                if ex_fig is not None:
+                    figs.append(ex_fig)
+            except Exception:
+                pass
+
         return figs, [f.axes for f in figs]
 
     figs = []
@@ -1137,6 +1389,8 @@ def plot_bouquet(h5path_or_header, scan_key=None, mode="kinetic",
         draw_pressure_profiles(
             ax, psi_N, bl["pressure [Pa]"],
             perturbed_data_list=perturbed,
+            pressure_thermal=bl.get("pressure_thermal [Pa]"),
+            bl=bl,
         )
         fig.tight_layout()
         figs.append(fig)
@@ -1182,6 +1436,20 @@ def plot_bouquet(h5path_or_header, scan_key=None, mode="kinetic",
             fig_bd.tight_layout()
             figs.append(fig_bd)
             axes_list.append(ax_bd)
+
+    # Auxiliary-profile figure: always for IMAS (provenance marker), else when
+    # switchboard profiles are present (geqdsk runs that supplied omega_tor/chi,
+    # and pre-marker archives).
+    if mode == "all" and (_source_kind(h5path, scan_key) == "imas"
+                          or _has_aux(h5path, scan_key)):
+        try:
+            ex_fig, _ = plot_aux_profiles(h5path, scan_key=scan_key,
+                                          selection=selection)
+            if ex_fig is not None:
+                figs.append(ex_fig)
+                axes_list.append(ex_fig.axes)
+        except Exception:
+            pass
 
     # Optional side-by-side layout: render the separate figures in a wrapping
     # flex row (less vertical scroll) while keeping each an individual image.
@@ -2173,26 +2441,22 @@ plot_transport_profiles = plot_aux_profiles
 
 def plot_imas_bouquet(h5path_or_header, scan_key=None, selection="all",
                       layout="stack", pub_style=False):
-    """Unified bouquet view for the IMAS path: the standard ensemble panels
-    (kinetic / pressure / j_phi / boundary, via :func:`plot_bouquet`) plus the
-    perturbed auxiliary profiles (via :func:`plot_aux_profiles`).
+    """**Deprecated alias** for :func:`plot_bouquet` (``mode='all'``).
 
-    ``pub_style=False`` (default) shows one combined dashboard figure;
-    ``pub_style=True`` shows the separate publication figures (``layout="row"``
-    lays those out side by side). Returns the list of figures produced.
+    :func:`plot_bouquet` now auto-detects the archive type and appends the
+    perturbed auxiliary-profile figure for IMAS runs (geqdsk runs skip it), so a
+    single ``plot_bouquet(header, mode='all')`` covers both paths. Retained for
+    backward compatibility; returns the list of figures.
     """
-    figs = []
+    warnings.warn(
+        "plot_imas_bouquet() is deprecated -- plot_bouquet(mode='all') now "
+        "auto-detects IMAS vs geqdsk archives and appends aux profiles itself.",
+        DeprecationWarning, stacklevel=2,
+    )
     res = plot_bouquet(h5path_or_header, scan_key=scan_key, mode="all",
                        selection=selection, layout=layout, pub_style=pub_style)
-    bq_figs = res[0] if isinstance(res, tuple) else res
-    figs.extend(bq_figs if isinstance(bq_figs, (list, tuple)) else [bq_figs])
-    ex_fig, _ = plot_aux_profiles(h5path_or_header, scan_key=scan_key,
-                                        selection=selection)
-    if ex_fig is not None:
-        if layout == "row" and pub_style:
-            _display_figs_row([ex_fig])
-        figs.append(ex_fig)
-    return figs
+    figs = res[0] if isinstance(res, tuple) else res
+    return list(figs) if isinstance(figs, (list, tuple)) else [figs]
 
 
 def plot_bouquet_timeseries(entries, scan_key=None, draws=True, envelopes=True,
@@ -3065,8 +3329,14 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
         base_jBS = (np.asarray(g["_baseline/j_BS [A m^-2]"][:], float)
                     if "j_BS [A m^-2]" in g["_baseline"] else None)
         ids = [k for k in g if k.isdigit()]
+        # IMAS / full-bootstrap archives (isolate_edge_jBS=False) store no edge
+        # spike -- fall back to the full j_BS, so j_ind = total - j_BS - fixed
+        # closes exactly there too.
+        has_spike = bool(ids) and "j_BS,edge [A m^-2]" in g[ids[0]]
+        _bs_key = "j_BS,edge [A m^-2]" if has_spike else "j_BS [A m^-2]"
         D = {d: dict(total=np.asarray(g[f"{d}/j_phi [A m^-2]"][:], float),
-                     spike=np.asarray(g[f"{d}/j_BS,edge [A m^-2]"][:], float))
+                     spike=(np.asarray(g[f"{d}/{_bs_key}"][:], float)
+                            if _bs_key in g[d] else np.zeros_like(psi)))
              for d in ids}
 
     sel = None
@@ -3116,14 +3386,14 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
     else:
         base_jBS_label = r"SWB baseline $j_{BS}$"
 
-    OR, FU = "tab:orange", "tab:blue"
+    OR, FU = _GOLD, "tab:blue"   # gold draws (matches the other plots)
     keep = [d for d in ids if (sel is None or d in sel)]
-    fig, ax = plt.subplots(1, 3, figsize=(17, 5.2))
+    fig, ax = plt.subplots(1, 3, figsize=(13.0, 3.8))
     if F is not None:
         ax[0].plot(psi, F["total"] / 1e6, "--", color=FU, lw=1.6, label=rf"{Flabel} $j_\phi$")
-    ax[0].plot(psi, base_total / 1e6, "k-", lw=2.4, zorder=5, label=r"SWB baseline $j_\phi$")
+    ax[0].plot(psi, base_total / 1e6, "k-", lw=2.0, zorder=5, label=r"SWB baseline $j_\phi$")
     for i, d in enumerate(keep):
-        ax[0].plot(psi, D[d]["total"] / 1e6, "-", color=OR, lw=0.8, alpha=0.55,
+        ax[0].plot(psi, D[d]["total"] / 1e6, "-", color=OR, lw=1.0, alpha=0.55,
                    label="perturbed" if i == 0 else None)
     ax[0].set_title(r"total $j_\phi$")
 
@@ -3132,8 +3402,9 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
                    "--", color=FU, lw=1.6, label=rf"{Flabel} $j_{{ind}}$" if F.get("jind") is not None else rf"{Flabel} $j_\phi$")
     for i, d in enumerate(keep):
         ax[1].plot(psi, (D[d]["total"] - D[d]["spike"] - fixed) / 1e6, "-", color=OR,
-                   lw=0.8, alpha=0.55, label=r"perturbed $j_{ind}$" if i == 0 else None)
-    ax[1].set_title(r"$j_{inductive}$  (= total $-\,j_{BS,edge}-$ fixed)")
+                   lw=1.0, alpha=0.55, label=r"perturbed $j_{ind}$" if i == 0 else None)
+    ax[1].set_title(r"$j_{inductive}$  (= total $-\,%s-$ fixed)"
+                    % ("j_{BS,edge}" if has_spike else "j_{BS}"))
 
     if F is not None:
         ax[2].plot(psi, (F["jBS"] if F.get("jBS") is not None else F["total"]) / 1e6,
@@ -3141,9 +3412,10 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
     if base_jBS is not None:
         ax[2].plot(psi, base_jBS / 1e6, "k-", lw=2.0, zorder=5, label=base_jBS_label)
     for i, d in enumerate(keep):
-        ax[2].plot(psi, D[d]["spike"] / 1e6, "-", color=OR, lw=0.8, alpha=0.55,
+        ax[2].plot(psi, D[d]["spike"] / 1e6, "-", color=OR, lw=1.0, alpha=0.55,
                    label=r"perturbed $j_{BS}$" if i == 0 else None)
-    ax[2].set_title(r"$j_{BS}$  (isolate-edge spike)")
+    ax[2].set_title(r"$j_{BS}$  (%s)"
+                    % ("isolate-edge spike" if has_spike else "full bootstrap"))
 
     for a in ax:
         a.axhline(0, color="gray", lw=0.5); a.set_xlim(0, 1); a.grid(alpha=0.3)

@@ -292,6 +292,7 @@ def store_equilibrium(
     li3,
     scan_key=None,
     pressure=None,
+    pressure_thermal=None,
     j_BS_edge=None,
     pfile_bytes=None,
     Zeff=None,
@@ -388,6 +389,12 @@ def store_equilibrium(
 
         if pressure is not None:
             grp.create_dataset("pressure [Pa]", data=np.asarray(pressure, dtype=np.float64))
+        # Thermal (main-ion + electron) pressure alongside the total stored above,
+        # so plots can show what the kinetic profiles contribute vs the impurity +
+        # fast-ion pressure the GS solve actually used (total - thermal).
+        if pressure_thermal is not None:
+            grp.create_dataset("pressure_thermal [Pa]",
+                               data=np.asarray(pressure_thermal, dtype=np.float64))
 
         # ---- optional: auxiliary perturbed profiles (the switchboard) ----
         # Stored on psi_N_kinetic. Named "aux_<name>" (e.g. aux_omega_tor,
@@ -533,6 +540,8 @@ def load_equilibrium(header, count, scan_key=None, eqdsk_out_dir=None):
 
         if "pressure [Pa]" in grp:
             result["pressure [Pa]"] = np.array(grp["pressure [Pa]"])
+        if "pressure_thermal [Pa]" in grp:
+            result["pressure_thermal [Pa]"] = np.array(grp["pressure_thermal [Pa]"])
 
         # ---- scalars ----------------------------------------------------
         result["l_i(1)"] = float(grp.attrs["l_i(1)"])
@@ -577,6 +586,7 @@ def store_baseline_profiles(
     Ip_target,
     l_i_target,
     scan_key=None,
+    pressure_thermal=None,
     eqdsk_bytes=None,
     pfile_bytes=None,
     psi_N_kinetic=None,
@@ -589,6 +599,7 @@ def store_baseline_profiles(
     aux_sigmas=None,
     j_BS=None,
     j_inductive=None,
+    source_kind=None,
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -629,6 +640,8 @@ def store_baseline_profiles(
         grp.create_dataset("n_i [m^-3]",         data=np.asarray(ni,         dtype=np.float64))
         grp.create_dataset("T_i [eV]",           data=np.asarray(ti,         dtype=np.float64))
         grp.create_dataset("pressure [Pa]",       data=np.asarray(pressure,   dtype=np.float64))
+        if pressure_thermal is not None:
+            grp.create_dataset("pressure_thermal [Pa]", data=np.asarray(pressure_thermal, dtype=np.float64))
         grp.create_dataset("j_phi [A m^-2]",      data=np.asarray(j_phi,      dtype=np.float64))
         if j_BS is not None:
             grp.create_dataset("j_BS [A m^-2]",        data=np.asarray(j_BS,        dtype=np.float64))
@@ -656,6 +669,10 @@ def store_baseline_profiles(
 
         grp.attrs["Ip_target"]  = float(Ip_target)
         grp.attrs["l_i_target"] = float(l_i_target)
+        # Provenance marker for robust path detection in plotting (independent of
+        # the source-decoupled aux switchboard): "imas" or "geqdsk".
+        if source_kind is not None:
+            grp.attrs["source_kind"] = str(source_kind)
 
         if eqdsk_bytes is not None:
             grp.create_dataset("baseline.eqdsk", data=np.void(eqdsk_bytes))
@@ -857,12 +874,21 @@ def load_equilibrium_by_path(h5path_or_header, count, scan_key=None):
 
         if "pressure [Pa]" in grp:
             result["pressure [Pa]"] = np.array(grp["pressure [Pa]"])
+        if "pressure_thermal [Pa]" in grp:
+            result["pressure_thermal [Pa]"] = np.array(grp["pressure_thermal [Pa]"])
 
         if "psi_N_kinetic" in grp:
             result["psi_N_kinetic"] = np.array(grp["psi_N_kinetic"])
 
         if "Zeff" in grp:
             result["Zeff"] = np.array(grp["Zeff"])
+
+        # auxiliary ("switchboard") perturbed profiles -- aux_zeff, aux_omega_tor,
+        # aux_chi_e, ... on psi_N_kinetic -- so per-draw plots (draw_zeff, the aux
+        # figure) can overlay the draws, not just the baseline.
+        for _k in grp.keys():
+            if str(_k).startswith("aux_"):
+                result[str(_k)] = np.array(grp[_k])
 
         if "coil_currents [A]" in grp:
             import json

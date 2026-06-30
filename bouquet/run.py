@@ -859,6 +859,11 @@ class Bouquet:
                 aux_baselines=env.get("aux_baselines"),
                 aux_length_scales=env.get("aux_length_scales"),
                 progress_callback=progress_callback,
+                # Provenance marker stored on the baseline for robust path
+                # detection in plotting (independent of the aux switchboard).
+                source_kind=("imas"
+                             if type(self.config.source).__name__ == "ImasSource"
+                             else "geqdsk"),
             )
         self.generation_log = _cap["text"] or None
         return self.diagnostics
