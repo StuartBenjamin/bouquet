@@ -39,7 +39,8 @@ from typing import Optional, TYPE_CHECKING
 import numpy as np
 
 from ..physics import (effective_impurity_charge, impurity_pressure,
-                       isotropize_fast_pressure, parallel_to_toroidal)
+                       isotropize_fast_pressure, main_ion_density_from_zeff,
+                       parallel_to_toroidal)
 
 # Elementary charge [C]: thermal pressure p = e * sum_s(n_s * T_s).
 _EC = 1.602176634e-19
@@ -110,10 +111,22 @@ def read_imas_geometry(source: "ImasSource"):
     b0 = vtf["b0"]
     b0v = float(b0[ie]) if isinstance(b0, list) else float(b0)
     F0 = abs(r0 * b0v)
-    out = eq["time_slice"][ie]["boundary"]["outline"]
-    boundary_RZ = np.column_stack([
-        np.asarray(out["r"], dtype=float), np.asarray(out["z"], dtype=float),
-    ])
+    # Separatrix: a magnetics-only EFIT01 g-file (if given) provides the most
+    # accurate LCFS; otherwise use the FUSE dd boundary outline. F0 stays from the
+    # dd vacuum field either way (same shot).
+    efit01 = getattr(source, "efit01_geqdsk", None)
+    if efit01:
+        from .geqdsk import read_geqdsk
+        g = read_geqdsk(efit01)
+        boundary_RZ = np.column_stack([
+            np.asarray(g.boundary_R, dtype=float),
+            np.asarray(g.boundary_Z, dtype=float),
+        ])
+    else:
+        out = eq["time_slice"][ie]["boundary"]["outline"]
+        boundary_RZ = np.column_stack([
+            np.asarray(out["r"], dtype=float), np.asarray(out["z"], dtype=float),
+        ])
     return F0, boundary_RZ
 
 
@@ -189,12 +202,52 @@ def _validate_pressure_completeness(cp, ne, te, ni, ti, p_fast, p_imp,
             raise ValueError(msg)
 
 
+def _read_ida_omega(path, time_s, psi_N):
+    """IDA toroidal rotation (omega_tor_12C6) resampled onto psi_N; None if absent.
+    Mirrors read_ida's nearest-time selection (IDA time is ms; ``time_s`` is s)."""
+    try:
+        import h5py
+        with h5py.File(path, "r") as f:
+            if "omega_tor_12C6" not in f:
+                return None
+            it = np.asarray(f["time"], dtype=float)            # ms
+            tms = (time_s * 1e3) if time_s is not None else float(it[0])
+            j = int(np.argmin(np.abs(it - tms)))
+            ipsi = np.asarray(f["psi_n"], dtype=float)
+            om = np.asarray(f["omega_tor_12C6"], dtype=float)[j]
+            return np.interp(psi_N, ipsi, om)
+    except Exception:
+        return None
+
+
+def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impurity_Z):
+    """IDA-hybrid kinetics: replace FUSE ne/Te/Ti (+omega) with IDA fits, resampled
+    onto the FUSE ``psi_N`` grid (single-grid; keeps psi_N == psi_N_kinetic).
+
+    Z_eff stays FUSE (IDA's reported Z_eff is internally inconsistent with its own
+    carbon density), and ni is re-derived from the FUSE Z_eff under single-impurity
+    quasineutrality applied to the IDA electron density. Returns
+    ``(ne, te, ti, ni, omega_tor_or_None)``.
+    """
+    from .ida import read_ida
+    ida = read_ida(ida_path, time=time, impurity_Z=impurity_Z)
+    _ipsi = np.asarray(ida.psi_N, dtype=float)
+    g = lambda a: np.interp(psi_N, _ipsi, np.asarray(a, dtype=float))
+    ne, te, ti = g(ida.ne), g(ida.te), g(ida.ti)
+    # ni from FUSE Z_eff + IDA ne (single-impurity dilution; Z_imp = machine charge)
+    ni = main_ion_density_from_zeff(ne, np.clip(Zeff_fuse, 1.0, impurity_Z), impurity_Z)
+    omega = _read_ida_omega(ida_path, time, psi_N)
+    return ne, te, ti, ni, omega
+
+
 def read_imas_baseline(
     source: "ImasSource",
     fixed: Optional["FixedComponentsConfig"] = None,
     p_fast_reduction: str = "trace",
     allow_incomplete_pressure: bool = False,
     anchor_jtor_to_equilibrium: bool = True,
+    kinetic_source: str = "fuse",
+    anchor_pressure_to_equilibrium: bool = False,
 ) -> "Baseline":
     """Read a FUSE ``dd_sim.json`` IDS and return a separated :class:`Baseline`.
 
@@ -296,6 +349,16 @@ def read_imas_baseline(
             if "d" in ctsl.get("total_ion_energy", {}):
                 aux["chi_i"] = np.asarray(ctsl["total_ion_energy"]["d"], dtype=float)
 
+    # --- IDA-hybrid: swap FUSE ne/Te/Ti/omega for externally-fit IDA profiles -----
+    # Z_eff/ni-dilution stay FUSE; p_fast/currents/equilibrium/anchors stay FUSE.
+    # Done before the pressure block so p_recon/Z_imp/p_imp use the IDA kinetics.
+    if kinetic_source == "ida_hybrid" and getattr(source, "ida_path", None):
+        ne, te, ti, ni, _omega = _merge_ida_kinetics(
+            psi_N, ne, ni, Zeff, source.ida_path, T,
+            getattr(source, "impurity_Z", 6.0))
+        if _omega is not None:
+            aux["omega_tor"] = _omega
+
     # --- user overrides for fixed additive components ---
     if fixed is not None:
         if fixed.p_fast is not None:
@@ -326,9 +389,15 @@ def read_imas_baseline(
     Z_imp = effective_impurity_charge(ne, ni, Zeff)
     p_imp = impurity_pressure(ne, ni, ti, Z_imp)
     p_recon = _EC * (ne * te + ni * ti) + p_imp + p_fast
-    p_diff = p_equilibrium - p_recon
-    _validate_pressure_completeness(cp, ne, te, ni, ti, p_fast, p_imp,
-                                    p_equilibrium, allow_incomplete_pressure)
+    # p_diff anchors the solve thermal pressure to the FUSE equilibrium.pressure.
+    # Gated OFF by default: with IDA-hybrid kinetics we trust IDA's pressure and do
+    # NOT force it back onto the FUSE total. When None, no anchor offset is added.
+    p_diff = (p_equilibrium - p_recon) if anchor_pressure_to_equilibrium else None
+    # The completeness guard compares the FUSE thermal/fast pressure against the FUSE
+    # equilibrium.pressure; it is meaningless once ne/Te/Ti are swapped to IDA.
+    if kinetic_source != "ida_hybrid":
+        _validate_pressure_completeness(cp, ne, te, ni, ti, p_fast, p_imp,
+                                        p_equilibrium, allow_incomplete_pressure)
 
     # --- total-current anchor: equilibrium.j_tor vs core_profiles.j_tor --------
     # core_profiles.j_tor (== j_phi here) is the transport parallel-current sum

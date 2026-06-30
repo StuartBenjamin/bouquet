@@ -115,6 +115,20 @@ class ImasSource:
 
     ids_path: str                      # IMAS/OMAS file (FUSE output)
     time: Optional[float] = None       # time slice [s]; None -> single/first slice
+    # --- IDA-hybrid kinetics (GenerationConfig.kinetic_source = "ida_hybrid") ---
+    # When set, the baseline ne/Te/Ti/omega_tor are taken from this IDA .cdf
+    # (externally fit, smoother across time than FUSE's per-slice profile fits),
+    # resampled onto the FUSE core_profiles psi_N grid. Z_eff / Z_imp / the ni
+    # dilution stay FUSE (IDA's reported Z_eff is unreliable -- internally
+    # inconsistent with its own carbon density). Everything else (currents,
+    # equilibrium, p_fast, anchors) stays FUSE. Also wire it to
+    # UncertaintyConfig.ida_path so the sigma envelopes come from the same IDA.
+    ida_path: Optional[str] = None
+    impurity_Z: float = 6.0            # machine impurity charge (carbon); ni dilution
+    # Magnetics-only EFIT01 gEQDSK whose LCFS replaces the FUSE dd boundary as the
+    # isoflux separatrix target (theoretically the most accurate separatrix). One
+    # g-file per slice; the driver picks the nearest EFIT01 time.
+    efit01_geqdsk: Optional[str] = None
 
 
 BaselineSource = Union[ReconstructionSource, ImasSource]
@@ -313,6 +327,19 @@ class GenerationConfig:
     # + perturbed j_ind ride underneath so the edge current still carries Sauter UQ.
     # IMAS path only (geqdsk reads its total from the g-file). Default True.
     anchor_jtor_to_equilibrium: bool = True
+    # Source of the baseline kinetic profiles on the IMAS path:
+    #   "fuse"       -> FUSE core_profiles ne/Te/Ti (default; original behaviour)
+    #   "ida_hybrid" -> ne/Te/Ti/omega_tor from ImasSource.ida_path (resampled onto
+    #                   the FUSE psi_N grid); Z_eff/Z_imp/ni-dilution stay FUSE;
+    #                   currents/equilibrium/p_fast/anchors stay FUSE.
+    kinetic_source: str = "fuse"
+    # Anchor the solve thermal pressure to equilibrium.pressure via the fixed
+    # p_diff = equilibrium.pressure - p_reconstructed offset. With FUSE kinetics
+    # this re-adds the carbon/fast/GS residual the recon omits. With IDA-hybrid
+    # kinetics it would force the (trusted) IDA pressure back onto the FUSE total,
+    # which we do NOT want -- so default False. When False, p_diff is None and the
+    # solve pressure is e(ne*Te+ni*Ti) + impurity + p_fast with no equilibrium anchor.
+    anchor_pressure_to_equilibrium: bool = False
     # Floor the SWB bootstrap at 0 (drop unphysical negative excursions) before
     # it enters j_phi, in both the baseline and every draw. Default False: only
     # needed for the isolate_edge_jBS=False full-profile mode (which carries an

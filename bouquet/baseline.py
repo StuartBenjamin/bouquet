@@ -166,6 +166,8 @@ def resolve_baseline(config: "BouquetConfig", mygs=None) -> Baseline:
             p_fast_reduction=config.fixed_components.p_fast_reduction,
             allow_incomplete_pressure=config.generation.allow_incomplete_pressure,
             anchor_jtor_to_equilibrium=config.generation.anchor_jtor_to_equilibrium,
+            kinetic_source=config.generation.kinetic_source,
+            anchor_pressure_to_equilibrium=config.generation.anchor_pressure_to_equilibrium,
         )
 
     if isinstance(source, ReconstructionSource):

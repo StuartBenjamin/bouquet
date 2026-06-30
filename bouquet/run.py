@@ -88,24 +88,48 @@ class Bouquet:
         # geqdsk validated default workflow: the standard flagship l_i loop
         # (Fix C / perturb_jind_in_anchor drops draws on stiff geqdsks).
         cfg.generation.perturb_jind_in_anchor = False
+        # Unified forward decomposition (matches the IMAS path): j_inductive is
+        # pure ohmic and j_BS carries the full recon-anchored bootstrap. Closes
+        # exactly, is non-negative, and yields better than the isolated-edge-spike
+        # split. Flip to True only for dedicated edge-spike studies.
+        cfg.generation.isolate_edge_jBS = False
         return cls(cfg)
 
     @classmethod
     def from_imas(cls, ids_path, *, mesh, time=None,
-                  n_draws=20, header="bouquet", **solver_kwargs) -> "Bouquet":
+                  n_draws=20, header="bouquet",
+                  ida_path=None, efit01_geqdsk=None, impurity_Z=6.0,
+                  kinetic_source=None, anchor_pressure_to_equilibrium=False,
+                  **solver_kwargs) -> "Bouquet":
         """Minimal constructor for the IMAS/OMAS path (no reconstruction).
 
         Extra keyword args go to :class:`SolverConfig`. Reach into
         ``bq.uncertainty`` / ``bq.generation`` afterwards for advanced knobs.
+
+        IDA-hybrid kinetics: pass ``ida_path`` (an IDA ``.cdf``) to take the
+        baseline ne/Te/Ti/omega_tor (and sigma envelopes) from IDA fits while
+        keeping FUSE Z_eff/currents/equilibrium. ``efit01_geqdsk`` (a
+        magnetics-only EFIT01 g-file) replaces the FUSE boundary as the isoflux
+        separatrix. ``kinetic_source`` defaults to ``"ida_hybrid"`` when an
+        ``ida_path`` is given, else ``"fuse"``.
         """
         from .config import (BouquetConfig, SolverConfig, ImasSource,
                              GenerationConfig)
+        if kinetic_source is None:
+            kinetic_source = "ida_hybrid" if ida_path else "fuse"
         cfg = BouquetConfig(
-            source=ImasSource(ids_path=ids_path, time=time),
+            source=ImasSource(ids_path=ids_path, time=time, ida_path=ida_path,
+                              impurity_Z=impurity_Z, efit01_geqdsk=efit01_geqdsk),
             solver=SolverConfig(mesh_path=mesh, **solver_kwargs),
-            generation=GenerationConfig(n_equils=n_draws),
+            generation=GenerationConfig(n_equils=n_draws,
+                                        kinetic_source=kinetic_source,
+                                        anchor_pressure_to_equilibrium=anchor_pressure_to_equilibrium),
             output_header=header,
         )
+        # IDA-hybrid: source the kinetic sigma envelopes from the same IDA .cdf
+        # (resolve_uncertainty fires its IDA branch whenever unc.ida_path is set).
+        if ida_path:
+            cfg.uncertainty.ida_path = ida_path
         # IMAS validated default workflow: diff+C (anchor bootstrap to the source
         # via the fixed FUSE_jBS-SWB diff, and perturb j_ind in the recon-anchor
         # to avoid the find_optimal_scale/corrector homogenization).
