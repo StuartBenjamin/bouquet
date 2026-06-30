@@ -106,7 +106,11 @@ print("[gen147] reconstruct_equilibrium ...", flush=True)
 result = reconstruct_equilibrium(
     mygs, eqdsk, ne_SI, te_SI, ni_SI, ti_SI, Zeff_eq, iso, isow, PSI_PAD,
     guess_jinductive=guess, n_k=5, psi_bridge=0.99, rescale_j_BS=False,
-    shelf_psi_N=0.0, initialize_psi=True)
+    shelf_psi_N=0.0, initialize_psi=True,
+    # As-built: the committed D3Dlike fixture was generated with the isolated
+    # edge spike (flat-shelf core). Pinned for reproducibility -- the recon path
+    # (Bouquet.from_geqdsk) now defaults to the full Sauter bootstrap instead.
+    isolate_edge_jBS=True)
 st = mygs.get_stats(lcfs_pad=PSI_PAD, li_normalization='std')
 jbs=np.abs(result['j_BS_used']); jphi=np.abs(result['j_phi_fit'])
 print(f"[gen147] solved: li(1)={st['l_i']:.4f} q95={st['q_95']:.3f} q0={st['q_0']:.3f} Ip={st['Ip']:.4e}", flush=True)

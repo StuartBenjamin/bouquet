@@ -2156,16 +2156,53 @@ def perturb_kinetic_equilibrium(
     #     residual j_inductive = j_phi - j_BS - j_NBI - j_RF instead -- it sums
     #     exactly and mirrors read_imas_baseline's baseline decomposition.
     if isolate_edge_jBS:
-        j_inductive_consistent, _ = _shelf_blend_decompose(
-            psi_N, output_jphi, spike_profile, eqdsk_jphi=input_j_phi
-        )
+        # Closing decomposition (option A), replacing the non-closing shelf-blend
+        # Hermite: j_inductive = j_phi - j_BS,edge - j_fixed, so the stored
+        # components sum exactly to j_phi (the old shelf-blend substituted a
+        # Hermite taper past the shelf, so j_ind + spike != j_phi at the edge).
+        # The core bootstrap stays folded into j_inductive -- the isolated-edge-
+        # spike construct -- only the non-closing edge substitution is removed.
+        _jfix_iso = np.zeros_like(psi_N)
+        if j_NBI is not None:
+            _jfix_iso = _jfix_iso + np.asarray(j_NBI, dtype=float)
+        if j_RF is not None:
+            _jfix_iso = _jfix_iso + np.asarray(j_RF, dtype=float)
+        j_inductive_consistent = output_jphi - spike_profile - _jfix_iso
+        # Where the edge spike locally exceeds the available current (near the
+        # spike peak -- what the Hermite used to smooth), floor j_inductive at 0
+        # and cap the stored edge spike so both stay >= 0 and closure holds.
+        _neg = j_inductive_consistent < 0.0
+        if np.any(_neg):
+            j_inductive_consistent = np.maximum(j_inductive_consistent, 0.0)
+            spike_profile = np.where(_neg, output_jphi - _jfix_iso, spike_profile)
     else:
         _jfix_store = np.zeros_like(psi_N)
         if j_NBI is not None:
             _jfix_store = _jfix_store + np.asarray(j_NBI, dtype=float)
         if j_RF is not None:
             _jfix_store = _jfix_store + np.asarray(j_RF, dtype=float)
+        # j_BS is the PHYSICAL bootstrap that was summed into the solve:
+        # spike_profile == Sauter(perturbed kinetics) * scale_jBS + jBS_diff
+        # (the recomputed Sauter on the per-draw kinetics, anchored by the kept
+        # baseline diff) -- a forward-COMPUTED quantity, not a residual. The ohmic
+        # is then j_phi - j_BS - j_fixed, which recovers exactly the GPR-perturbed,
+        # Ip-renormalised inductive that went into the anchor (output ~= anchor
+        # total = _anchor_jind + spike_profile + j_fixed), so it keeps its physical
+        # edge foot and its genuine per-draw spread.
+        #
+        # The previous code subtracted `full_j_BS` (Sauter WITHOUT the diff)
+        # instead, so jBS_diff leaked into the ohmic residual and dragged it to 0 /
+        # negative at the pedestal -- the unphysical early cutoff. Using
+        # spike_profile (WITH the diff) fixes both: physical j_BS, physical ohmic.
+        full_j_BS = spike_profile.copy()
         j_inductive_consistent = output_jphi - full_j_BS - _jfix_store
+        # Safety: the GPR Ip-renorm + edge realisation can leave a sub-kA negative
+        # sliver in the ohmic at the very separatrix; floor it and absorb into j_BS
+        # (bootstrap fraction -> 1 there) so both stay >= 0 and closure holds.
+        _neg = j_inductive_consistent < 0.0
+        if np.any(_neg):
+            j_inductive_consistent = np.maximum(j_inductive_consistent, 0.0)
+            full_j_BS = output_jphi - j_inductive_consistent - _jfix_store
 
     # Compute the cylindrical-proxy / real-l_i ratio at the converged
     # state.  Used by generate_bouquet to warmstart the next draw's
@@ -3139,6 +3176,9 @@ def generate_bouquet(
         sigma_ne, sigma_te, sigma_ni, sigma_ti, sigma_jphi,
         initial_Ip_target, l_i_target,
         scan_key=scan_key,
+        # thermal-only part, so plots can separate it from the impurity+fast
+        # the GS solve added (pressure_solve - pressure).
+        pressure_thermal=pressure,
         eqdsk_bytes=baseline_eqdsk_bytes,
         pfile_bytes=stored_pfile_bytes,
         psi_N_kinetic=psi_N_kinetic,
@@ -4083,11 +4123,31 @@ def generate_bouquet(
             _to_eq = lambda arr: _interp1d_pp(
                 psi_N_kinetic, arr, kind='linear', bounds_error=False,
                 fill_value=(arr[0], arr[-1]))(psi_N)
-            pressure_perturb = EC * (_to_eq(ne_perturb) * _to_eq(te_perturb)
-                                      + _to_eq(ni_perturb) * _to_eq(ti_perturb))
+            _ne_eqp, _te_eqp = _to_eq(ne_perturb), _to_eq(te_perturb)
+            _ni_eqp, _ti_eqp = _to_eq(ni_perturb), _to_eq(ti_perturb)
         else:
-            pressure_perturb = EC * (ne_perturb * te_perturb
-                                      + ni_perturb * ti_perturb)
+            _ne_eqp, _te_eqp, _ni_eqp, _ti_eqp = (
+                ne_perturb, te_perturb, ni_perturb, ti_perturb)
+        # Thermal (main-ion + electron) pressure -- the part that perturbs with
+        # the kinetic draw.
+        pressure_perturb = EC * (_ne_eqp * _te_eqp + _ni_eqp * _ti_eqp)
+        # Total pressure the GS solve actually used for this draw: thermal +
+        # impurity(carbon) + fast + p_diff anchor, recomputed exactly as
+        # perturb_kinetic_equilibrium built its solve pressure (same components
+        # and grid). Stored as "pressure [Pa]"; the thermal part is stored
+        # separately so plots show the impurity+fast the solve added.
+        pressure_total_perturb = pressure_perturb.copy()
+        if Z_imp:
+            from .physics import impurity_pressure as _impP
+            pressure_total_perturb = pressure_total_perturb + _impP(
+                _ne_eqp, _ni_eqp, _ti_eqp, Z_imp)
+        if p_fast is not None:
+            _pf_eq = np.asarray(p_fast, dtype=float)
+            pressure_total_perturb = pressure_total_perturb + (
+                _to_eq(_pf_eq) if psi_N_kinetic is not None else _pf_eq)
+        if p_diff is not None:
+            pressure_total_perturb = pressure_total_perturb + np.asarray(
+                p_diff, dtype=float)
 
         # Extract coil currents from TokaMaker
         coil_current_dict, _ = mygs.get_coil_currents()
@@ -4200,7 +4260,8 @@ def generate_bouquet(
             w_ExB,
             li1, li3,
             scan_key=scan_key,
-            pressure=pressure_perturb,
+            pressure=pressure_total_perturb,
+            pressure_thermal=pressure_perturb,
             j_BS_edge=diagnostics["j_BS_edge"],
             pfile_bytes=perturbed_pfile_bytes,
             Zeff=Zeff_profile,
@@ -4254,10 +4315,11 @@ def generate_bouquet(
 # ====================================================================
 #  Single-equilibrium reconstruction from geqdsk + kinetic profiles
 # ====================================================================
-def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff, 
+def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                             isoflux_pts, weights, psi_pad,
                             guess_jinductive,n_k,psi_bridge,rescale_j_BS,
-                            shelf_psi_N,initialize_psi=True):
+                            shelf_psi_N,initialize_psi=True,
+                            isolate_edge_jBS=False):
     r"""Reconstruct a single Grad-Shafranov equilibrium from a geqdsk
     reference and kinetic profiles, matching the EFIT :math:`l_i(1)`.
 
@@ -4343,11 +4405,17 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     eqdsk_jtor = abs(eqdsk.j_tor_averaged_direct)
 
     # ---- 2. Bootstrap current ----
+    # isolate_edge_jBS=False keeps the FULL Sauter bootstrap (physical core hump
+    # + edge spike) so the reconstructed j_BS/j_inductive split matches what the
+    # draws recompute via solve_with_bootstrap. isolate_edge_jBS=True instead
+    # isolates the edge spike and parks a flat shelf in the (g-file-degenerate)
+    # core -- robust but non-physical, and 2x below the draws' Sauter hump, which
+    # left the stored baseline ohmic inflated relative to every draw.
     results = solve_with_bootstrap(
         mygs, ne, te, ni, ti, Zeff,
         abs(eqdsk.Ip), guess_jinductive,
         scale_jBS=1.0,
-        isolate_edge_jBS=True,
+        isolate_edge_jBS=isolate_edge_jBS,
         diagnostic_plots=False,
     )
 
