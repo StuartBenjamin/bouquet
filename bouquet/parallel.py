@@ -41,6 +41,28 @@ def _shard_size(total, n_workers, worker_id):
     return base + (1 if worker_id < rem else 0)
 
 
+def _warn_multithreaded(threads_per_worker):
+    """Warn when a worker's TokaMaker would run nthreads>1.
+
+    One solver per core is the validated regime: nthreads>1 makes the OpenMP
+    reduction order non-deterministic (~±1% li_1 jitter -- so workers converge
+    to DIFFERENT l_i targets and the merged draw set mixes acceptance bands)
+    and can tip the GS DLSODE solve into a non-convergence hang on stiff
+    slices (on SLURM that burns the task's whole time limit and loses the
+    shard). For throughput, raise n_workers instead.
+    """
+    if int(threads_per_worker) > 1:
+        import warnings
+        warnings.warn(
+            f"threads_per_worker={threads_per_worker} sets nthreads="
+            f"{threads_per_worker} on every worker's TokaMaker. This breaks "
+            "run-to-run determinism (~±1% li_1 jitter -> workers accept draws "
+            "against different l_i targets) and risks DLSODE hangs on stiff "
+            "slices. Use threads_per_worker=1 and more workers instead.",
+            stacklevel=3,
+        )
+
+
 # --------------------------------------------------------------------------
 #  worker: generate one shard
 # --------------------------------------------------------------------------
@@ -84,6 +106,17 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
         cfg.generation.scan_key = scan_key
         cfg.output_header = f"{out_header}_w{worker_id}"
 
+        # Fresh shard: the archive writer opens the h5 in append mode and only
+        # deletes the draw groups it rewrites, so a leftover shard from a
+        # previous run (crash before cleanup, cancelled SLURM array, or a
+        # re-run with fewer draws per worker) would keep its stale
+        # higher-index draws -- and merge_archives copies every draw group it
+        # finds. Remove any pre-existing file so the shard holds ONLY this
+        # run's draws.
+        _shard_h5 = os.path.abspath(f"{cfg.output_header}.h5")
+        if os.path.exists(_shard_h5):
+            os.remove(_shard_h5)
+
         # per-draw progress -> parent aggregate bar (one tick per draw attempt)
         cb = None
         if progress_q is not None:
@@ -111,7 +144,8 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
 # --------------------------------------------------------------------------
 #  merge per-worker shards into one archive
 # --------------------------------------------------------------------------
-def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False):
+def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
+                   baseline_match_rtol=1e-6):
     """Concatenate per-worker shard archives into ``{out_header}.h5``.
 
     Draw groups are renumbered to a contiguous running index, and the raw
@@ -120,19 +154,71 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False):
     keeps working alongside the suffix-based readers. The ``_baseline`` group is
     copied once (the baseline is identical across workers). Returns
     ``(out_path, n_draws)``.
+
+    Every shard's stored baseline (``_baseline`` attrs ``l_i_target`` /
+    ``Ip_target``) is verified against the first shard's before anything is
+    copied; a drift beyond ``baseline_match_rtol`` raises. This is the merge's
+    own guard -- unlike the pre-merge check in :func:`parallel_generate` it
+    also covers the SLURM CLI path, where drifted baselines (heterogeneous
+    nodes, a stray ``nthreads>1``) would otherwise merge silently, mixing
+    draws accepted against different l_i targets. A listed shard that does not
+    exist on disk raises (missing workers must be handled by the caller, not
+    dropped silently).
     """
+    import warnings
     import h5py
     from .utils import (initialize_equilibrium_database, _scan_key,
                         _group_path, _eqdsk_dataset_name)
+
+    bkey = _scan_key(scan_key)
+    base_path = f"scan/{bkey}" if bkey is not None else None
+    bl_dst = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
+
+    # ---- pre-pass: shard existence + cross-shard baseline consistency ----
+    def _baseline_targets(src):
+        parent = src[base_path] if base_path else src
+        if "_baseline" not in parent:
+            return None
+        a = parent["_baseline"].attrs
+        if "l_i_target" not in a or "Ip_target" not in a:
+            return None
+        return float(a["l_i_target"]), float(a["Ip_target"])
+
+    targets = []
+    for sp in shard_paths:
+        if sp is None:
+            continue
+        if not os.path.exists(sp):
+            raise FileNotFoundError(
+                f"shard archive not found: {sp}. Merging a partial set "
+                "silently shrinks the bouquet -- re-run the missing worker, "
+                "or drop the path explicitly from shard_paths.")
+        with h5py.File(sp, "r") as src:
+            targets.append((sp, _baseline_targets(src)))
+    present = [(sp, t) for sp, t in targets if t is not None]
+    unchecked = [sp for sp, t in targets if t is None]
+    if unchecked and present:
+        warnings.warn(
+            "shard(s) without stored baseline targets (l_i_target/Ip_target "
+            f"attrs) skipped the baseline consistency check: {unchecked}")
+    if len(present) >= 2:
+        sp0, (li0, ip0) = present[0]
+        for sp, (li, ip) in present[1:]:
+            if (abs(li - li0) > baseline_match_rtol * abs(li0) or
+                    abs(ip - ip0) > baseline_match_rtol * abs(ip0)):
+                raise RuntimeError(
+                    f"shard baseline drifted: {sp} has l_i={li:.8f}, "
+                    f"Ip={ip:.6e} vs {sp0} l_i={li0:.8f}, Ip={ip0:.6e} "
+                    f"(rtol={baseline_match_rtol:g}). Workers did not "
+                    "converge to the same baseline -- check nthreads=1 "
+                    "(threads_per_worker=1), identical source/config, and "
+                    "on SLURM that all array tasks ran on the same node "
+                    "architecture. Nothing was merged.")
 
     out_path = os.path.abspath(f"{out_header}.h5")
     if os.path.exists(out_path):
         os.remove(out_path)                  # fresh archive (init opens append)
     initialize_equilibrium_database(out_header)
-
-    bkey = _scan_key(scan_key)
-    base_path = f"scan/{bkey}" if bkey is not None else None
-    bl_dst = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
 
     offset = 0
     with h5py.File(out_path, "a") as out:
@@ -203,6 +289,8 @@ def parallel_generate(config, *, n_workers, threads_per_worker=1, seed=0,
 
     if backend != "laptop":
         raise ValueError(f"backend must be 'laptop' or 'slurm', got {backend!r}")
+
+    _warn_multithreaded(threads_per_worker)
 
     from concurrent.futures import ProcessPoolExecutor, as_completed
     import multiprocessing as mp
@@ -320,6 +408,7 @@ def emit_slurm_script(config, *, n_workers, seed, threads_per_worker,
     scripts plus a ``{job_name}_submit.sh`` that chains them with
     ``--dependency=afterok``. Nothing is launched. Returns the written paths.
     """
+    _warn_multithreaded(threads_per_worker)
     os.makedirs(out_dir, exist_ok=True)
     bundle = dict(
         config=config, n_workers=int(n_workers), seed=int(seed),
@@ -376,7 +465,7 @@ def _cli(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if len(argv) < 2:
         raise SystemExit("usage: python -m bouquet.parallel {shard <bundle> "
-                         "<worker_id> | merge <bundle>}")
+                         "<worker_id> | merge <bundle> [--allow-missing]}")
     cmd, bpath = argv[0], argv[1]
     with open(bpath, "rb") as fh:
         b = pickle.load(fh)
@@ -386,9 +475,26 @@ def _cli(argv=None):
                   out_header=b["out_header"], scan_key=b["scan_key"],
                   threads_per_worker=b["threads_per_worker"])
     elif cmd == "merge":
-        paths = [f"{b['out_header']}_w{i}.h5" for i in range(b["n_workers"])]
-        paths = [p for p in paths if os.path.exists(p)]
-        out_path, n = merge_archives(paths, b["out_header"],
+        allow_missing = "--allow-missing" in argv[2:]
+        # workers assigned zero draws legitimately produce no shard file;
+        # only count the ones that were expected to write one.
+        expected = [i for i in range(b["n_workers"])
+                    if _shard_size(b["n_equils_total"], b["n_workers"], i) > 0]
+        paths = {i: f"{b['out_header']}_w{i}.h5" for i in expected}
+        missing = sorted(i for i, p in paths.items() if not os.path.exists(p))
+        if missing:
+            msg = (f"missing shard archive(s) for worker(s) {missing}: "
+                   f"expected {len(expected)}, found "
+                   f"{len(expected) - len(missing)}")
+            if not allow_missing:
+                raise SystemExit(
+                    "merge aborted: " + msg + ". Re-run those array indices "
+                    "(sbatch --array=" + ",".join(map(str, missing)) +
+                    " <array.sbatch>), or pass --allow-missing to merge the "
+                    "partial set.")
+            print(f"WARN: {msg} -- merging the partial set")
+        shard_list = [p for i, p in sorted(paths.items()) if i not in missing]
+        out_path, n = merge_archives(shard_list, b["out_header"],
                                      scan_key=b["scan_key"], cleanup=True)
         print(f"merged {n} draws -> {out_path}")
     else:
