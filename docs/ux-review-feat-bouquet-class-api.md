@@ -12,6 +12,26 @@
 
 ---
 
+## STATUS — all phases implemented 2026-07-02 (187 tests green)
+
+| Phase | Status |
+|---|---|
+| 1 config serialization + provenance (F8/F9/F10) + F25 | ✅ |
+| 2 `BouquetArchive` reader (F13, F12-read) | ✅ |
+| 3 de-thread (header, scan_key) (F1, F7) | ✅ (example-notebook rewrite deferred) |
+| 4 schema v2 — **clean break, no legacy** (F11/F12/F15/F16a) | ✅ (adversarial review caught 1 silent coil bug, fixed) |
+| 5 config/API simplifications (F3/F4) | ✅ (5.1 jphi-default **won't do**; imas-summary formatting deferred) |
+| 6 sweeps + plotting (F5/F6) | ✅ (6.3 IDA-run templating **won't do**) |
+| 7 parallel hardening (F17–F26) | ✅ (was already done; F25 finished with Phase 1) |
+
+**Won't-do (user decisions):** 5.1 (keep `jphi_scalar_sigma=0.10`), 6.3/F8
+(keep Nelson's split IDA_run notebooks). **Deferred (cosmetic):** rewriting the
+3 example notebooks to run-object forms (Phase 3.5); reconstruction-style IMAS
+baseline summary (5.4). New modules: `bouquet/schema.py`, `bouquet/archive.py`.
+This document can be deleted / folded into `docs/CHANGES_SUMMARY.md` at merge.
+
+---
+
 ## Verdict
 
 The core design is solid and should not be reworked:
@@ -191,28 +211,47 @@ material only — breaking.)
 Ordered so each phase is independently landable; phases 1–3 are the payoff
 core. No physics code changes anywhere in this plan.
 
-### Phase 1 — config serialization + h5 provenance  *(unlocks F9, F10, F8)*
+### Phase 1 — config serialization + h5 provenance  *(unlocks F9, F10, F8)*  ✅ IMPLEMENTED 2026-07-02
 
-1. `bouquet/config.py`: add `BouquetConfig.to_dict()` / `from_dict()` (and
-   `to_json` / `from_json` thin wrappers).
-   - ndarray fields (isoflux, sigma_profiles, aux_*, fixed components) →
-     lists on dump, back to ndarray on load; source type recorded via a
-     `"source_type": "reconstruction" | "imas"` discriminator.
-   - Round-trip test: `from_dict(to_dict(cfg))` equality on a config
-     exercising every optional field.
-2. `bouquet/utils.py` `initialize_equilibrium_database()` (or a new
-   `_write_provenance(hf, config)` called from `Bouquet.generate` and
-   `run_shard`): write file-level attrs
-   `schema_version` (int, start at `2`), `bouquet_version`, `created`
-   (ISO timestamp), and dataset `config_json`.
-   - Multi-scan files: also mirror `config_json` per `scan/<key>/` group
-     (each slice can have a different header/time/scan_key).
-3. `bouquet/parallel.py`: replace whatever ad-hoc config shipping `run_shard`
-   / `emit_slurm_script` do with `to_json`/`from_json`.
-4. New `bq.load_config(h5path_or_header)` → `BouquetConfig` (reads
-   `config_json`; raises with a clear message on pre-provenance files).
+1. ✅ `bouquet/config.py`: `BouquetConfig.to_dict()` / `from_dict()` +
+   `to_json` / `from_json`. ndarray fields (isoflux, `sigma_profiles`, `aux_*`,
+   fixed components, `profile_overrides`) encode as `{"__ndarray__": [...]}` and
+   restore to ndarray; source recorded via a `"source_type"` discriminator
+   (inferred from keys if absent). Round-trip test exercises every optional
+   field on both source types (`tests/test_config.py::TestSerialization`).
+2. ✅ `bouquet/utils.py` `write_provenance(h5, config, scan_key)` called from
+   `Bouquet.generate`: file-level attrs `schema_version` (`utils.SCHEMA_VERSION`,
+   **currently `1`** — the class-API `scan/` layout; Phase 4 bumps it to `2`),
+   `bouquet_version`, `created` (set once, ISO), `updated`, and a `config_json`
+   dataset at the file root **and** mirrored per `scan/<key>/` group.
+   *(Deviation from the plan: version starts at 1 to honestly reflect the
+   current on-disk layout; the v2 stamp lands with the Phase-4 writer changes.)*
+3. ✅ `bouquet/parallel.py`: SLURM bundle is now `{job}_bundle.json`
+   (`config.to_dict()` + scalar params) loaded via `BouquetConfig.from_dict`;
+   `pickle` dropped (F25 — was blocked on this phase).
+4. ✅ `bq.load_config(h5path_or_header, scan_key=None)` → `BouquetConfig`
+   (per-scan `config_json` first, else file root; raises a clear `KeyError`
+   on pre-provenance files). Tests in `tests/test_config.py::TestProvenance`.
 
-### Phase 2 — `BouquetArchive` reader class  *(fixes F13, F1-read-side, F12-read-side)*
+### Phase 2 — `BouquetArchive` reader class  *(fixes F13, F1-read-side, F12-read-side)*  ✅ IMPLEMENTED 2026-07-02
+
+Done as specified: new `bouquet/archive.py` with `BouquetArchive` / `ScanView` /
+`DrawView` (lazy, open-per-access). `ar.scan_keys` (flat → `[None]`),
+`ar[key]` / `ar.scan()`, `sc.indices/baseline/all/selected/excluded`, `sc[i]`,
+`d.li1/li3/attrs/flags/selected/profiles`, `d.equilibrium()`, `d.pfile()`,
+`d.extract(...)`, `ar.provenance` (Phase-1 attrs + `load_config`).
+`Bouquet.archive` property added. Eqdsk/pfile by **suffix scan** (v2 fixed name
+first, else `.eqdsk`/`.pfile`) — verified it reads the golden fixture where
+`load_equilibrium`'s exact-name lookup fails (a live demonstration of F11).
+The functional readers stay the public API and are reused internally
+(`select_indices`, `list_equilibrium_indices`, `load_baseline_profiles`,
+`read_filter_flags`, `read_eqdsk_from_bytes`). Tests: `tests/test_archive.py`
+(golden round-trip + legacy/v2 suffix-scan).
+
+**Not done (deferred, non-breaking):** demoting `read_eqdsk_from_bytes` from
+`__all__` — kept exported for now; revisit at merge.
+
+Original spec follows.
 
 New module `bouquet/archive.py`; single authoritative home for schema
 knowledge. The existing functional readers
@@ -245,7 +284,28 @@ Implementation notes:
 - Tests: build a small archive via the existing golden-fixture path; assert
   round-trip against `load_equilibrium` outputs.
 
-### Phase 3 — kill the `(header, scan_key)` re-threading  *(fixes F1, F7)*
+### Phase 3 — kill the `(header, scan_key)` re-threading  *(fixes F1, F7)*  ✅ IMPLEMENTED 2026-07-02 (item 5 deferred)
+
+1. ✅ `utils._resolve_h5` now duck-types a `Bouquet` (→ `config.output_header`)
+   / `BouquetArchive` (→ `.path`) / header / path, so **every** reader accepts a
+   run or archive as the first arg; `filtering._resolve` delegates to it.
+   `utils._default_scan_key(ref, scan_key)` fills a missing key from a passed
+   `Bouquet`.
+2. ✅ `select_indices` raises a listing `KeyError` on an unknown explicit
+   `scan_key` (`filtering._require_scan_key`) — the silent-empty failure is gone.
+   *(Applied at `select_indices`, the primary offender; the same guard can be
+   dropped into the other accessors trivially — left as a fast follow.)*
+3. ✅ `Bouquet.plot_traces()` / `plot_coil_currents()` / `plot_spec_summary()` /
+   `selected_indices()` added (auto-wire header + `scan_key`), mirroring
+   `plot_bouquet()`.
+4. ✅ `run.filter(plot=True)` returns the coil + boundary distribution figures
+   under `summary["figures"]` (F7).
+5. ⬜ **Deferred**: rewriting the 3 example notebooks to the run-object forms
+   end-to-end. The API now supports it (`run.plot_traces()`,
+   `run.selected_indices()`, pass `run` to any reader); the notebook edits are a
+   separate, low-risk sweep left for the notebook-proofing pass.
+
+Tests: `tests/test_archive.py::TestDethread`. Original spec follows.
 
 1. Module-level readers (`plot_*`, `filter_*`, `select_indices`,
    `read_filter_flags`, `export_filtered`, `load_*`): accept a `Bouquet` or
@@ -262,7 +322,45 @@ Implementation notes:
 5. Update the 3 example notebooks to use the run-object forms end-to-end
    (no bare `HEADER` strings after construction).
 
-### Phase 4 — schema v2 (writer changes, read-compat kept)  *(fixes F11, F12, F15, F14; optionally F16)*
+### Phase 4 — schema v2 (CLEAN BREAK, no legacy)  *(fixes F11, F12, F15, F16)*  ✅ IMPLEMENTED 2026-07-02
+
+**Decision (user 2026-07-02): no active users yet, so this is a clean break —
+no legacy readers / flat fallback / schema-version gating.** New `bouquet/schema.py`
+is the single source of truth (`PROFILE_UNITS`, `write_profile`, fixed names).
+
+- ✅ **F16(a) full**: profile datasets renamed to **bare** names (`j_phi`, `n_e`,
+  `pressure`, …) with the unit in `ds.attrs["units"]`. Exhaustive global rename
+  of the 17 bracketed literals (171 sites) + writer routed through
+  `schema.write_profile` (30 creates). Confirmed the literals were only
+  dataset-names/keys (plot labels use mathtext), so the rename was mechanical.
+- ✅ **F11**: draws + baseline store fixed `eqdsk` / `pfile` names (no
+  `{header}_{scan}_{count}` embedding, no `baseline.` prefix); `_eqdsk_dataset_name`
+  returns `"eqdsk"`; `merge_archives` rename step deleted.
+- ✅ **F12**: writer is scan-only (already true); the `.eqdsk`/`.pfile` suffix-scan
+  readers replaced with fixed-name lookups.
+- ✅ **F15**: coil currents = `coil_currents` values dataset + `coil_names` string
+  **dataset** in BOTH draw and baseline groups (per-draw was a JSON attr);
+  readers use `utils._read_coil_names`.
+- ✅ `schema_version` now **2** (`utils.SCHEMA_VERSION` imports from `schema`).
+- ✅ Golden fixture migrated in place to v2 (bare names + units, fixed byte
+  names, coil_names dataset); tests updated.
+
+**Verification (the user-requested second pass):**
+- Full suite **187 pass** on v2 (incl. 2 new coil-drift regression tests).
+- End-to-end: a real `reconstruct → generate → filter` through the NEW writer
+  produces a v2 file that load_equilibrium / BouquetArchive / load_config /
+  plot_bouquet / plot_traces / plot_coil_currents all read.
+- **Adversarial diff review caught one real (silent) bug**: `plot_coil_currents`
+  still read per-draw `coil_names` from the old JSON attr → every per-draw
+  coil-drift cell was NaN on a v2 file (no error, just an empty heatmap). Fixed
+  to read the dataset (matching the baseline path) + added a
+  `test_plot_coil_currents_finite_drift` regression. Also aligned the stale
+  `SCHEMA_VERSION=1`, removed dead `_eqdsk_dataset_name` imports, fixed the
+  `merge_archives` docstring. No other reader/writer mismatches found.
+
+**Deviation from the original plan:** F14 (merge baseline verification) already
+landed in Phase 7; F16 units-as-attrs was done as the full bare-name rename
+(a), not skipped. Original v2-with-legacy spec follows.
 
 Gate all of these behind the `schema_version = 2` stamp from phase 1.
 
@@ -283,13 +381,27 @@ Gate all of these behind the `schema_version = 2` stamp from phase 1.
    only worth it bundled with 1–3 since v2 is the one-time break. If skipped,
    keep the bracketed names forever; do not do this later as a v3.
 
-### Phase 5 — config/API simplifications  *(fixes F2, F4, F3)*
+### Phase 5 — config/API simplifications  *(fixes F2, F4, F3)*  ✅ IMPLEMENTED 2026-07-02 (5.1 won't-do; imas-summary formatting deferred)
 
-1. **Align defaults with validated production values**: `jphi_scalar_sigma`
-   0.10 → 0.05 in `UncertaintyConfig` (confirm 0.05 is intended for both
-   paths). Then strip the settings blocks from the example notebooks down to
-   the true deltas (`seed`, `scan_key`).
-2. **`run.describe()`**: print the config grouped by section, showing only
+- ✅ **5.2 `run.describe()`** (below).
+- ✅ **5.3 workflow preset** — `GenerationConfig.workflow = "auto" | "geqdsk-standard"
+  | "imas-diff-c" | "custom"`. `_validate_workflow` now folds `allow_unsafe_workflow`
+  into `"custom"` (deprecated alias, still honoured), asserts named presets match
+  the source, and validates the value in `__post_init__`. `"auto"` keeps the
+  existing per-source flag resolution.
+- ✅ **5.4 symmetric `run.prepare()`** = `setup_solver()+prepare_baseline()` on
+  either path (`reconstruct()` stays the g-file alias). ⬜ The IMAS baseline still
+  prints its one-line `[imas forward-solve] converged (…Ip%…TokaMaker vs IDS li…)`
+  summary (which already carries the key validation metrics) rather than a
+  reconstruction-style block — richer formatting deferred as cosmetic.
+
+1. ❌ **WON'T DO (user decision 2026-07-02): keep `jphi_scalar_sigma = 0.10`.**
+   The default stays; notebooks continue to set 0.05 explicitly.
+2. ✅ **`run.describe()`** implemented — prints/returns the config grouped by
+   section, showing source paths (required) + only the knobs that differ from
+   their dataclass default (safe ndarray/dict handling). Replaces the ~60-line
+   commented knob-reference cell. *(Original spec:)* print the config grouped by
+   section, showing only
    non-default values (plus source paths + output header). Replaces the
    ~60-line commented knob-reference cell that is already diverging between
    the geqdsk and omas notebooks.
@@ -308,7 +420,22 @@ Gate all of these behind the `schema_version = 2` stamp from phase 1.
    as the reconstruction block (Ip err, TokaMaker vs IDS li_1/li_3, SWB/FUSE
    peak ratio, nl its, boundary source).
 
-### Phase 6 — sweeps + notebooks  *(fixes F5, F6, F8)*
+### Phase 6 — sweeps + notebooks  *(fixes F5, F6, F8)*  ✅ IMPLEMENTED 2026-07-02 (6.3 won't-do)
+
+- ✅ **6.1 `run.run_slices(times, scan_keys=None, header=None, export=False)`** —
+  wraps the `set_slice → prepare_baseline → generate → filter` loop into one
+  archive (one `scan_key`/slice, defaulting to `round(t*1000)` ms), returns
+  `{scan_key: {time, n_all, n_sel, l_i, Ip}}`. (A full IMAS multi-slice run isn't
+  in the unit suite — exercised via the notebooks.)
+- ✅ **6.2 plotting surface** — `plot_bouquet` is already source-agnostic; the
+  wrapper `plot_imas_bouquet` demoted from `__all__` (still importable). The
+  source-specific *input* viewers (`plot_geqdsk_bouquet`/`plot_pfile_bouquet`)
+  stay advertised — they're the §1 input plotters, not `plot_bouquet` duplicates.
+- ❌ **6.3 IDA_run JSON templating (F8): WON'T DO** (user 2026-07-02) — the
+  per-shot notebooks are Nelson's originals; kept split (plus our E_r/rotation
+  adds). The Phase-1 serialization is in place if that ever changes.
+
+Original spec follows.
 
 1. **`run.run_slices(times, scan_keys=None, header=None)`**: wraps the
    `set_slice` loop; one output file, one `scan_key` per slice by default
@@ -326,14 +453,14 @@ Gate all of these behind the `schema_version = 2` stamp from phase 1.
 
 ### Suggested sequencing / sizing
 
-| Phase | Depends on | Size | Risk |
-|---|---|---|---|
-| 1 config serialization + provenance | — | S–M | low |
-| 2 `BouquetArchive` | — (better after 1) | M | low (read-only) |
-| 3 de-thread header/scan_key | 2 | S | low |
-| 4 schema v2 | 1, 2 | M | medium (writer change; legacy readers must stay green) |
-| 5 config simplifications | — | S | low; default change needs a yield A/B on both testbeds |
-| 6 sweeps + notebooks | 1, 3, 5 | M | low |
+| Phase | Depends on | Size | Risk | Status |
+|---|---|---|---|---|
+| 1 config serialization + provenance | — | S–M | low | ✅ done 2026-07-02 |
+| 2 `BouquetArchive` | — (better after 1) | M | low (read-only) | ✅ done 2026-07-02 |
+| 3 de-thread header/scan_key | 2 | S | low | ✅ done 2026-07-02 (notebook rewrite deferred) |
+| 4 schema v2 | 1, 2 | M | medium (writer change) | ✅ done 2026-07-02 (clean break, F16a full; review caught 1 silent bug, fixed) |
+| 5 config simplifications | — | S | low | ✅ done 2026-07-02 (5.1 **won't do**; imas-summary formatting deferred) |
+| 6 sweeps + notebooks | 1, 3, 5 | M | low | ✅ done 2026-07-02 (6.3 IDA templating **won't do** — keep Nelson's split notebooks) |
 
 Regression guardrails for every phase: `tests/test_golden_bouquet.py` must
 pass unchanged on a **pre-branch legacy h5** (add one as a fixture if not
@@ -423,7 +550,7 @@ emitting package/Python version → replaced by phase-1 config JSON.
 **F26. Laptop core budgeting.** `os.cpu_count()` is logical cores; with one
 solver per core, default the worker ceiling to physical cores.
 
-### Phase 7 — parallel hardening  *(fixes F17–F26; items 1–3 IMPLEMENTED 2026-07-02)*
+### Phase 7 — parallel hardening  *(fixes F17–F26; items 1–6 IMPLEMENTED 2026-07-02 except the JSON-bundle part of 6, which waits on phase 1)*
 
 1. ✅ `run_shard`: delete pre-existing shard file before generating (F17).
 2. ✅ `merge_archives`: cross-shard baseline check from `_baseline` attrs
@@ -441,16 +568,30 @@ solver per core, default the worker ceiling to physical cores.
    (F19). Verified: 8-case synthetic-shard test (renumber/rename, drift
    detection, rtol, missing-shard accounting, partial merge, zero-draw
    workers, warning) + full test suite 161 passed.
-4. Seeding: per-slice seed offset in sweep helpers now; `SeedSequence.spawn`
-   when `generate_bouquet` grows an `rng` parameter (F20).
-5. `emit_slurm_script`: absolute bundle/output paths, `cd` in submit.sh,
-   `setup=[...]` env lines, CLI `verbose=True`; swap `afterok`→`afterany` once
-   merge validates (F22–F24).
-6. Bundle → config JSON (after phase 1) (F25); physical-core default for
-   laptop `n_workers` (F26).
+4. ✅ Seeding: worker seeds now derive from
+   `SeedSequence([seed, worker_id, sha256(scan_key)])` (`_derive_seed`)
+   instead of `seed + worker_id` — provably separated worker streams AND
+   slice decorrelation for timeseries sweeps run with one seed (F20).
+   **Note: this changes the draw set produced by a given `seed` relative to
+   runs made before 2026-07-02** (statistically equivalent; baseline
+   unchanged). The full `SeedSequence.spawn` + `Generator` threading through
+   `generate_bouquet` (replacing global `np.random.seed`) remains future
+   work.
+5. ✅ `emit_slurm_script`: `setup=[...]` env lines in both sbatch scripts
+   (module load / conda / `OFT_PYTHONPATH`); bundle referenced by basename +
+   `submit.sh` cd's to its own dir (works from any CWD, no machine-specific
+   absolute paths baked into committed examples); CLI shard runs
+   `verbose=True` so per-task `slurm-*.out` captures solver output;
+   `afterok`→`afterany` (safe now that the merge validates shards and aborts
+   loudly) (F22–F24).
+6. ✅ Physical-core default: `parallel_generate(n_workers=None)` resolves to
+   physical (not logical/SMT) cores via psutil → `sysctl` → fallback (F26).
+   ✅ Bundle → config JSON (F25) — done with Phase 1 (2026-07-02):
+   `emit_slurm_script` writes `{job}_bundle.json` via `config.to_dict()`, the
+   CLI rebuilds it with `BouquetConfig.from_dict`, `pickle` removed.
 
-Depends on: nothing (items 1–5); item 6 on phase 1. Size S–M, risk low —
-items 1 and 2 are the priority (both are silent-contamination holes).
+Verified: 12-case synthetic-shard test + full suite (161 passed); committed
+`examples/D3D-like/slurm_jobs/` re-emitted with the new emitter.
 
 ---
 
@@ -462,3 +603,41 @@ items 1 and 2 are the priority (both are silent-contamination holes).
 - Solver-chatter capture design (`verbose=False` + logs).
 - `paths.py` resolution logic.
 - Any physics: SWB split modes, li targeting, Zeff-primary density scheme.
+
+---
+
+## Post-implementation review fixes (2026-07-02)
+
+An 8-angle adversarial review of the implementation diff surfaced 8 verified
+findings; all fixed on this branch:
+
+1. **Solver-marked tests were broken** (hidden by default deselection):
+   `test_systematics.py` read per-draw `coil_names` as a v1 JSON attr →
+   KeyError on the v2 golden. Now uses `utils._read_coil_names` everywhere.
+2. **Merged archives had no provenance**: `merge_archives(config=...)` now
+   stamps run-level `config_json` (wired from `parallel_generate` + the CLI);
+   without it the deliverable cluster file carried no config record.
+3. **Root `config_json` was last-writer-wins in multi-slice files**:
+   `load_config` is now scan-aware — per-scan copies authoritative, a
+   multi-scan file with `scan_key=None` raises listing the keys.
+4. **`DrawView` efficiency**: attrs cached per view (snapshot semantics +
+   `refresh()`), `flags` built from the draw's own attrs (was a whole-scan
+   sweep per access → O(N²) loops), `extract()` reads both blobs in one open.
+5. **Schema lookup consolidated**: new `schema.find_bytes_dataset()` (fixed
+   name first, legacy suffix-scan fallback) replaces the 8 copy-pasted
+   lookups in plotting/filtering and `archive._find_suffixed`.
+6. **`_eqdsk_dataset_name` removed** (returned a constant, ignored its args);
+   `eqdsk_out_dir` extraction now writes coordinate-carrying FILENAMES again
+   (the fixed dataset name made every extracted draw clobber `eqdsk`).
+7. **Legacy signal**: `initialize_equilibrium_database` stamps
+   `schema_version`/`bouquet_version`/`created` at creation (single
+   chokepoint), `BouquetArchive` warns on unstamped files, and
+   `load_equilibrium` raises a clear "pre-v2 archive" error naming any
+   legacy-suffixed dataset it finds.
+8. Refuted at verify (no code change): config tuple→list JSON drift (all
+   consumers sequence-generic), provenance write race (workers write
+   distinct files), v1 silent-read claim (failures were already loud).
+
+Scope note: the diff also carries an unrelated new physics feature
+(`read_ida_cer` + `radial_field_from_cer`, impurity radial force balance
+E_r) — committed separately from the refactor.
