@@ -54,7 +54,7 @@ def tol(manifest):
 
 
 def _scan_args(bkey):
-    """Map a manifest scan key back to a scan_value argument."""
+    """Map a manifest scan key back to a scan_key argument."""
     return None if bkey == "None" else bkey
 
 
@@ -68,7 +68,7 @@ def _iter_scans(manifest):
 # ---------------------------------------------------------------------------
 def test_fixture_structure(manifest):
     for bkey, sv, entry in _iter_scans(manifest):
-        idxs = bouquet.utils.list_equilibrium_indices(_SLIM, scan_value=sv)
+        idxs = bouquet.utils.list_equilibrium_indices(_SLIM, scan_key=sv)
         assert idxs == entry["draw_indices"]
         assert len(idxs) == entry["n_draws"]
 
@@ -78,7 +78,7 @@ def test_no_pfile_blobs_in_fixture():
     bad = []
     with h5py.File(_SLIM, "r") as hf:
         def _check(name, obj):
-            if isinstance(obj, h5py.Dataset) and name.endswith(".pfile"):
+            if isinstance(obj, h5py.Dataset) and (name.endswith(".pfile") or name == "pfile"):
                 bad.append(name)
         hf.visititems(_check)
     assert not bad, f"slim fixture still has p-file blobs: {bad}"
@@ -91,7 +91,7 @@ def test_geqdsks_retained_per_manifest(manifest):
             prefix = f"scan/{bkey}/" if sv is not None else ""
             for i in entry["eqdsk_indices"]:
                 grp = hf[f"{prefix}{i}"]
-                eqk = [k for k in grp.keys() if k.endswith(".eqdsk")]
+                eqk = (["eqdsk"] if "eqdsk" in grp else [])
                 assert eqk, f"draw {i} missing its retained geqdsk"
                 # stored gzip-compressed to keep the fixture small
                 assert grp[eqk[0]].compression == "gzip"
@@ -127,8 +127,8 @@ def test_coil_currents_match_manifest(manifest, tol):
                 if "coil_currents" not in exp:
                     continue
                 grp = hf[f"{prefix}{sidx}"]
-                names = json.loads(grp.attrs["coil_names"])
-                vals = np.asarray(grp["coil_currents [A]"][()], dtype=float)
+                names = [n.decode() if isinstance(n, bytes) else str(n) for n in grp["coil_names"][()]]
+                vals = np.asarray(grp["coil_currents"][()], dtype=float)
                 got = {n: float(v) for n, v in zip(names, vals)}
                 assert set(got) == set(exp["coil_currents"])
                 for n, v in exp["coil_currents"].items():
@@ -157,9 +157,9 @@ def test_xpoints_match_manifest(manifest, tol):
 def test_boundary_deviations_match_manifest(manifest, tol):
     """filter_boundaries (apply=False) must reproduce the manifest RMS/max."""
     for bkey, sv, entry in _iter_scans(manifest):
-        summ, _ = filter_boundaries(_SLIM, scan_value=sv, apply=False,
+        summ, _ = filter_boundaries(_SLIM, scan_key=sv, apply=False,
                                     plot=False)
-        draws = summ[sv]["draws"]
+        draws = summ["draws"]
         for sidx, exp in entry["draws"].items():
             got = draws[int(sidx)]
             assert got["rms_mm"] == pytest.approx(
@@ -179,12 +179,12 @@ def _iter_stored_geqdsks(manifest):
             # baseline
             if entry["baseline"].get("has_eqdsk"):
                 grp = hf[f"{prefix}_baseline"]
-                eqk = [k for k in grp.keys() if k.endswith(".eqdsk")][0]
+                eqk = "eqdsk"
                 yield (bytes(grp[eqk][()]), entry["baseline"]["Ip"],
                        f"{bkey}/baseline")
             for i in entry["eqdsk_indices"]:
                 grp = hf[f"{prefix}{i}"]
-                eqk = [k for k in grp.keys() if k.endswith(".eqdsk")][0]
+                eqk = "eqdsk"
                 yield (bytes(grp[eqk][()]),
                        entry["draws"][str(i)]["Ip"], f"{bkey}/{i}")
 
@@ -232,7 +232,7 @@ def test_geqdsk_separatrix_is_coarse(manifest):
                 grp = hf[f"{prefix}{i}"]
                 if "perturbed_lcfs_ref" not in grp:
                     continue
-                eqk = [k for k in grp.keys() if k.endswith(".eqdsk")][0]
+                eqk = "eqdsk"
                 eq = read_eqdsk_from_bytes(bytes(grp[eqk][()]), read_geqdsk)
                 fine = np.asarray(grp["perturbed_lcfs_ref"][()])
                 assert len(fine) > 5 * len(eq.boundary_R), (
@@ -266,9 +266,9 @@ def test_selection_partition(tmp_path, manifest):
     shutil.copy(_SLIM, work)
     filter_coil_currents(work, apply=True, plot=False)
     for bkey, sv, entry in _iter_scans(manifest):
-        alli = select_indices(work, scan_value=sv, selection="all")
-        sel = select_indices(work, scan_value=sv, selection="selected")
-        exc = select_indices(work, scan_value=sv, selection="excluded")
+        alli = select_indices(work, scan_key=sv, selection="all")
+        sel = select_indices(work, scan_key=sv, selection="selected")
+        exc = select_indices(work, scan_key=sv, selection="excluded")
         assert sorted(sel + exc) == sorted(alli)        # partition
         assert set(sel).isdisjoint(exc)
         assert len(sel) == entry["n_in_spec"]
@@ -276,9 +276,9 @@ def test_selection_partition(tmp_path, manifest):
 
 def test_selection_unfiltered_defaults():
     """Before any filter is applied, 'selected' == all, 'excluded' == none."""
-    assert select_indices(_SLIM, scan_value="0", selection="selected") == \
-        select_indices(_SLIM, scan_value="0", selection="all")
-    assert select_indices(_SLIM, scan_value="0", selection="excluded") == []
+    assert select_indices(_SLIM, scan_key="0", selection="selected") == \
+        select_indices(_SLIM, scan_key="0", selection="all")
+    assert select_indices(_SLIM, scan_key="0", selection="excluded") == []
 
 
 def test_export_filtered_keeps_selected(tmp_path, manifest):
@@ -290,8 +290,8 @@ def test_export_filtered_keeps_selected(tmp_path, manifest):
     total_sel = sum(e["n_in_spec"] for _, _, e in _iter_scans(manifest))
     assert kept == total_sel
     for bkey, sv, entry in _iter_scans(manifest):
-        got = bouquet.utils.list_equilibrium_indices(out, scan_value=sv)
-        assert got == select_indices(work, scan_value=sv, selection="selected")
+        got = bouquet.utils.list_equilibrium_indices(out, scan_key=sv)
+        assert got == select_indices(work, scan_key=sv, selection="selected")
         # baseline preserved
         with h5py.File(out, "r") as hf:
             bl = f"scan/{bkey}/_baseline" if sv is not None else "_baseline"

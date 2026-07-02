@@ -72,7 +72,7 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import Button, RadioButtons, Slider
 
 from .utils import (
-    discover_scan_values,
+    discover_scan_keys,
     load_baseline_profiles,
     count_equilibria,
 )
@@ -98,8 +98,8 @@ class EquilibriumBrowser:
 
     def __init__(self, h5path):
         self.h5path = os.path.abspath(h5path)
-        self.scan_values = discover_scan_values(self.h5path)
-        self.has_scan = self.scan_values is not None and len(self.scan_values) > 0
+        self.scan_keys = discover_scan_keys(self.h5path)
+        self.has_scan = self.scan_keys is not None and len(self.scan_keys) > 0
 
         # state
         self._current_tab = self.TABS[0]
@@ -114,7 +114,7 @@ class EquilibriumBrowser:
     def _current_scan_value(self):
         if not self.has_scan:
             return None
-        return self.scan_values[self._current_scan_idx]
+        return self.scan_keys[self._current_scan_idx]
 
     # ------------------------------------------------------------------
     #  Figure construction
@@ -174,12 +174,12 @@ class EquilibriumBrowser:
         # ---- scan slider (only for hierarchical files) -------------------
         self.slider = None
         self._scan_label = None
-        if self.has_scan and len(self.scan_values) > 1:
+        if self.has_scan and len(self.scan_keys) > 1:
             slider_ax = self.fig.add_axes([left, 0.02, 0.55, 0.03])
             self.slider = Slider(
                 slider_ax, "Scan",
                 valmin=0,
-                valmax=len(self.scan_values) - 1,
+                valmax=len(self.scan_keys) - 1,
                 valinit=0,
                 valstep=1,
                 valfmt="%d",
@@ -187,7 +187,7 @@ class EquilibriumBrowser:
             self.slider.on_changed(self._on_slider_change)
             self._scan_label = self.fig.text(
                 left + 0.58, 0.025,
-                f"= {self.scan_values[0]}",
+                f"= {self.scan_keys[0]}",
                 fontsize=10, va="center",
             )
 
@@ -218,7 +218,7 @@ class EquilibriumBrowser:
         self._current_scan_idx = int(val)
         if self._scan_label is not None:
             self._scan_label.set_text(
-                f"= {self.scan_values[self._current_scan_idx]}"
+                f"= {self.scan_keys[self._current_scan_idx]}"
             )
         self._update_plot()
         self.fig.canvas.draw_idle()
@@ -228,8 +228,8 @@ class EquilibriumBrowser:
     # ------------------------------------------------------------------
     def _update_plot(self):
         sv = self._current_scan_value()
-        bl = load_baseline_profiles(self.h5path, scan_value=sv)
-        perturbed = _load_all_perturbations(self.h5path, scan_value=sv)
+        bl = load_baseline_profiles(self.h5path, scan_key=sv)
+        perturbed = _load_all_perturbations(self.h5path, scan_key=sv)
         psi_N = bl["psi_N"]
 
         tab = self._current_tab
@@ -237,24 +237,24 @@ class EquilibriumBrowser:
         if tab == self.TABS[0]:  # Kinetic
             draw_kinetic_profiles(
                 self.kinetic_axes, psi_N,
-                bl["n_e [m^-3]"],  bl["n_i [m^-3]"],
-                bl["T_e [eV]"],    bl["T_i [eV]"],
-                bl["sigma_ne [m^-3]"], bl["sigma_ni [m^-3]"],
-                bl["sigma_te [eV]"],   bl["sigma_ti [eV]"],
+                bl["n_e"],  bl["n_i"],
+                bl["T_e"],    bl["T_i"],
+                bl["sigma_ne"], bl["sigma_ni"],
+                bl["sigma_te"],   bl["sigma_ti"],
                 perturbed_data_list=perturbed,
             )
 
         elif tab == self.TABS[1]:  # Pressure
             draw_pressure_profiles(
                 self.pressure_ax, psi_N,
-                bl["pressure [Pa]"],
+                bl["pressure"],
                 perturbed_data_list=perturbed,
             )
 
         elif tab == self.TABS[2]:  # j_phi (total)
             draw_jphi_total(
                 self.jphi_total_ax, psi_N,
-                bl["j_phi [A m^-2]"], bl["sigma_jphi [A m^-2]"],
+                bl["j_phi"], bl["sigma_jphi"],
                 perturbed_data_list=perturbed,
             )
 

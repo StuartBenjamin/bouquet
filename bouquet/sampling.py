@@ -669,7 +669,7 @@ def calc_realgeom_li_proxy_fast(j_phi_profile, geo):
     ``L_p(psi)`` (from ``trace_surf`` on the snapshot equilibrium) instead
     of the circular ``2*pi*r_eff``.
 
-    Validated on DIII-D 204441@4400: mean(est/solved_li1)=0.994 (vs the
+    Validated on an operational DIII-D case: mean(est/solved_li1)=0.994 (vs the
     cylindrical proxy's 0.90), i.e. ~unbiased for l_i(1) with no
     device-specific correction factor -- the snapshot geometry IS the
     per-run calibration.  Intended use is a cheap *pre-screen* of GPR
@@ -748,6 +748,10 @@ def _draw_monotonic_perturbation(
     RuntimeError
         If no monotonic draw is found within *max_draws* attempts.
     """
+    # If the BASELINE profile is itself non-monotonic (e.g. reconstruction
+    # artifacts: hollow Te core, edge Ti rise), no perturbed draw can be
+    # monotonic -> drop the constraint for this channel and take the first draw.
+    base_nonmono = bool(np.any(np.diff(np.asarray(normalised_profile)) > 0.0))
     for _ in range(max_draws):
         sample = generate_perturbed_GPR(
             psi_N,
@@ -757,7 +761,7 @@ def _draw_monotonic_perturbation(
             n_samples=1,
             diag_plot=False,
         )
-        if np.all(np.diff(sample) <= 0.0):
+        if base_nonmono or np.all(np.diff(sample) <= 0.0):
             return sample
 
     raise RuntimeError(

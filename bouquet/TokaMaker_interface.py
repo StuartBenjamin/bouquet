@@ -11,14 +11,15 @@ Provides:
   - ``perturb_kinetic_equilibrium`` – perturbs kinetic + current-density
     profiles and iterates to match :math:`I_p` and :math:`l_i` targets
     via TokaMaker.
-  - ``generate_perturbed_equilibria`` – batch driver that archives
-    perturbed equilibria to HDF5.
+  - ``generate_bouquet`` – batch driver that archives perturbed
+    equilibria to HDF5.
   - ``reconstruct_equilibrium`` – reconstruct a single equilibrium from
     a geqdsk reference and kinetic profiles, matching :math:`l_i(1)`
     via secant iteration.
 """
 
 import os
+import tempfile
 import time
 
 import numpy as np
@@ -41,7 +42,7 @@ from .utils import (
     safe_trace_surf,
     store_equilibrium,
     store_baseline_profiles,
-    _scan_val_key,
+    _scan_key,
     read_eqdsk_from_bytes,
 )
 from .io.geqdsk import read_geqdsk
@@ -251,6 +252,67 @@ def classify_jphi_profile(psi_N, eqdsk_jphi, spike_profile,
               f"Sauter spike at psi_N={metrics['spike_psiN_sauter']:.4f} "
               f"({metrics['spike_height_sauter']/1e6:.4f} MA/m²)")
         return 'Lmode_like_jphi', metrics
+
+
+# ---- Coil-current drift metric (in-spec) -------------------------------------
+# Additive coil-current measurement+eddy-current uncertainty for the VSC in-spec
+# channel metric, carried as a denominator floor [A]. ASSUMPTION: no published
+# DIII-D coil-current measurement-noise figure was found; the literature puts
+# Rogowski/PF current measurement at ~0.1-1%, with eddy currents in the vessel/
+# passive structure contributing a current-INDEPENDENT (additive) term. So this
+# is a deliberately conservative placeholder -- at the 2% inspec gain it
+# corresponds to a ~200 A additive tolerance. Replace with the real transducer
+# offset + eddy-equivalent figure when available (see README "VSC drift metric").
+_COIL_DRIFT_DENOM_FLOOR_A = 10000.0
+
+
+def _coil_drift_pct(cur, baseline):
+    r"""Per-coil current drift [%] = ``100 * (I_draw - I_base) / max(|I_base|, 1)``.
+
+    Used for the SOLVE-time homotopy bounds/saturation (per coil, per power
+    supply) and for the non-VSC F-coil in-spec metric -- there the measurement
+    uncertainty is gain-dominated (~2% of 35-180 kA), so a relative % is the
+    right scale. The anti-series VSC pair is scored separately by
+    :func:`_vsc_channel_drift_pct` (per-coil % breaks on its near-zero coil).
+    Signed; caller takes abs()/max().
+    """
+    return {n: (float(cur[n]) - baseline[n]) / max(abs(baseline[n]), 1.0) * 100.0
+            for n in baseline}
+
+
+def _vsc_channel_drift_pct(cur, baseline, vsc_set,
+                           denom_floor_A=_COIL_DRIFT_DENOM_FLOOR_A):
+    r"""VSC-pair in-spec drift [%] via common-mode + differential channels.
+
+    The anti-series VSC pair (F9A, F9B) carries a vertical-CONTROL common-mode
+    current ``I_cm = (F9A - F9B)/2`` and a shaping differential
+    ``I_df = (F9A + F9B)/2``. Both are linear combinations of two INDEPENDENTLY-
+    measured coils, so each channel's measurement tolerance PROPAGATES IN
+    QUADRATURE from the per-coil uncertainties ``sigma_coil = gain*|I_coil|``
+    (the ±1/2 channel coefficients give the same sigma for both channels)::
+
+        sigma_VSC = sqrt(|F9A|^2 + |F9B|^2) / 2  (+ denom_floor_A, the offset/gain)
+        drift     = 100 * max(|dI_cm|, |dI_df|) / sigma_VSC
+
+    (the gain cancels into the inspec_VSC_max threshold, so it is not needed
+    here). Because ``sigma_VSC`` is built from the COIL magnitudes, it never goes
+    near zero -- robust to BOTH a near-zero coil (F9A on the FUSE/IMAS baseline)
+    AND a near-zero common-mode baseline (a co-current pair, e.g. the geqdsk
+    baseline where F9A≈F9B). Gating either channel against its OWN baseline
+    blows up in one of those cases; the propagated sigma does not. The
+    differential channel still catches a genuinely asymmetric/same-sign
+    excursion. Falls back to the per-coil max when the pair is not two coils.
+    """
+    if len(vsc_set) != 2:
+        d = _coil_drift_pct(cur, baseline)
+        return float(max((abs(d[n]) for n in vsc_set), default=0.0))
+    a, b = vsc_set
+    dA = float(cur[a]) - baseline[a]
+    dB = float(cur[b]) - baseline[b]
+    cm = abs((dA - dB) / 2.0)
+    df = abs((dA + dB) / 2.0)
+    sigma = float(np.hypot(baseline[a], baseline[b])) / 2.0 + denom_floor_A
+    return float(100.0 * max(cm, df) / sigma) if sigma > 0 else 0.0
 
 
 # ---- Shelf-blend decomposition helper ----
@@ -560,6 +622,76 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
         'spline': _pchip,
     }
 
+def _swb_debug():
+    """Single switch for the SWB debugging instrumentation.
+
+    ``BOUQUET_SWB_DEBUG=1`` enables, in one place, what used to be separate
+    SWB_STATE_DUMP / SWB_VERBOSE / PROFILE toggles: the per-draw ``[SWB-diag]``
+    state prints, verbose solve_with_bootstrap output, SWB wall-time, and the
+    pre/post-state ``.npz`` dumps (written under the system temp dir, see
+    :func:`_swb_dump_path`) that let a failing draw be replayed offline.
+    Read at call time so it can be flipped mid-session in a notebook.
+    """
+    return os.environ.get('BOUQUET_SWB_DEBUG', '0') == '1'
+
+
+def _swb_dump_path(name):
+    """Path for an SWB debug dump: ``<tempdir>/bouquet_<name>.npz``."""
+    return os.path.join(tempfile.gettempdir(), f"bouquet_{name}.npz")
+
+
+def _ket_stage_diag(mygs, tag, extra=""):
+    """Guarded per-stage trace (KET_STAGE_DIAG=1): log F9B coil, magnetic axis,
+    and Ip at a draw-pipeline stage, to localize where the systematic coil /
+    boundary drift is injected (recon-anchor vs find_optimal_scale vs corrective).
+    No-op unless the env var is set, so it is inert in normal runs."""
+    if os.environ.get("KET_STAGE_DIAG", "0") != "1":
+        return
+    try:
+        _cc, _ = mygs.get_coil_currents()
+        _op = mygs.o_point
+        print(f"  [STAGE-DIAG {tag}] F9B={_cc.get('F9B', float('nan')):+.1f}A "
+              f"axis=({_op[0]:.4f},{_op[1]:+.5f}) Ip={mygs.get_globals()[0]:+.0f}{extra}",
+              flush=True)
+    except Exception as _e:
+        print(f"  [STAGE-DIAG {tag}] failed: {_e}", flush=True)
+
+
+def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad):
+    """Convert ``solve_with_bootstrap``'s j_BS output to toroidal convention.
+
+    SWB computes the Redl/Sauter bootstrap as the FSA *parallel* current
+    ``<j_BS.B>`` and projects it to A/m^2 by a zeroth-order division by the
+    toroidal field at the average radius (``j_BS_neo * R_avg/F``, with its own
+    ``# to-do: project j_BS_parallel to j_phi more accurately?``). Every other
+    current profile in bouquet is the FSA toroidal density
+    ``j_tor = <j_phi/R>/<1/R>`` (what TokaMaker's jphi-linterp / flux_integral
+    consume), so mixing the two conventions misallocates the j_BS / j_inductive
+    split, mostly in the pedestal where the spike lives.
+
+    This undoes SWB's crude factor to recover ``<j_BS.B>`` and applies the
+    field-aligned projection (see :func:`bouquet.physics.parallel_to_toroidal`,
+    analytic method). The net factor is ``1/(<R><1/R>)`` (<= 1 by
+    Cauchy-Schwarz, ~ 1 - eps^2 at the edge), evaluated on the same
+    ``mygs``/grid the SWB call just used -- call this IMMEDIATELY after
+    ``solve_with_bootstrap``, before any further mygs solve.
+    """
+    from .physics import parallel_to_toroidal
+
+    j_bs_swb = np.asarray(j_bs_swb, dtype=float)
+    npsi = len(j_bs_swb)
+    _, F, _, _, _ = mygs.get_profiles(npsi=npsi, psi_pad=psi_pad)
+    # <R>, <1/R> from get_q -- the SAME quantities SWB used for its R_avg/F
+    # projection, so the undo is exact; <B^2> from sauter_fc.
+    _, _, ravgs, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
+    _, _, _, modb_avgs = mygs.sauter_fc(npsi=npsi, psi_pad=psi_pad)
+    j_dot_B = j_bs_swb * F / ravgs[0]       # undo SWB's R_avg/F projection
+    return parallel_to_toroidal(
+        j_dot_B,
+        geom={"F": F, "avg_inv_R": ravgs[1], "avg_B2": modb_avgs[1]},
+    )
+
+
 # ====================================================================
 #  Core perturbation routine
 # ====================================================================
@@ -600,10 +732,21 @@ def perturb_kinetic_equilibrium(
     recalculate_j_BS=True,
     isolate_edge_jBS=True,
     scale_jBS=1.0,
+    floor_j_BS=True,
+    jBS_diff=None,
+    accept_anchor_inband=False,
+    perturb_jind_in_anchor=False,
+    swb_iterations=3,
     diagnostic_plots=False,
     max_pressure_iter=_MAX_PRESSURE_ITER,
     max_li_iter=_MAX_LI_ITER,
     psi_N_kinetic=None,
+    p_fast=None,
+    j_NBI=None,
+    j_RF=None,
+    aux_sigmas=None,
+    aux_baselines=None,
+    aux_length_scales=None,
     max_proxy_draws=500,
     bnd_diag_callback=None,
     # Differential bootstrap (DIFF_BS=1 mode):
@@ -626,6 +769,9 @@ def perturb_kinetic_equilibrium(
     spike_profile_recon_cached=None,
     proxy_bias_warmstart=None,
     pin_jphi=False,
+    Z_imp=None,
+    p_diff=None,
+    jphi_diff=None,
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
     match :math:`I_p` and :math:`l_i` targets.
@@ -637,7 +783,7 @@ def perturb_kinetic_equilibrium(
     psi_N : ndarray
         1-D normalised poloidal flux grid :math:`\hat{\psi}`.
     pressure : ndarray
-        1-D baseline total pressure [Pa].
+        1-D baseline total pressure.
     ne : ndarray
         1-D electron density [m\ :sup:`-3`].
     te : ndarray
@@ -670,8 +816,9 @@ def perturb_kinetic_equilibrium(
         Target plasma current [A].
     l_i_target : float
         Target internal inductance.
-    Zeff : float
-        Effective ion charge (scalar).
+    Zeff : ndarray
+        Effective ion charge profile on ``psi_N`` (scalar accepted and
+        broadcast). With the active zeff channel this is re-drawn per draw.
     npsi : int
         Normalised poloidal flux grid size.
     p_thresh : float
@@ -695,6 +842,10 @@ def perturb_kinetic_equilibrium(
     scale_jBS : float
         Multiplicative scale factor applied to :math:`j_{\rm BS}` in
         ``solve_with_bootstrap``.  A value of 1.0 applies no scaling.
+    swb_iterations : int
+        H-mode self-consistency iterations inside ``solve_with_bootstrap``
+        (its ``iterations`` argument). 2 is usually enough when trading
+        accuracy for speed.
     diagnostic_plots : bool
         Show diagnostic matplotlib figures (including inside
         ``solve_with_bootstrap`` and ``find_optimal_scale``).
@@ -752,6 +903,28 @@ def perturb_kinetic_equilibrium(
                         bounds_error=False,
                         fill_value=(arr_kin[0], arr_kin[-1]))(psi_N)
 
+    # Fixed additive currents (NBI + RF), held constant across draws. They are
+    # treated exactly like the bootstrap spike (additive, non-scaled) in the
+    # j_phi assembly below. They contribute to the total only when the inductive
+    # base (input_jinductive) excludes them; with recalculate_j_BS=False the base
+    # is input_j_phi, which already contains them, so j_fixed_eff is zero there.
+    # Defaults (None -> zero) reproduce the original behaviour exactly.
+    _jfix = np.zeros_like(psi_N)
+    if j_NBI is not None:
+        _jfix = _jfix + np.asarray(j_NBI, dtype=float)
+    if j_RF is not None:
+        _jfix = _jfix + np.asarray(j_RF, dtype=float)
+    j_fixed_eff = _jfix if recalculate_j_BS else np.zeros_like(psi_N)
+    # Total-current anchor: fold jphi_diff (= equilibrium.j_tor - core_profiles
+    # total) into the fixed additive so it rides under EVERY downstream new_jphi
+    # build (recon-anchor / l_i-match / corrective; all use j_fixed_eff), exactly
+    # like jBS_diff in spike_profile. The perturbed j_inductive + SWB bootstrap
+    # move underneath this fixed offset; at sigma=0 the total == equilibrium.j_tor.
+    # jphi_diff integrates to ~0, so the Ip renorm (which holds spike+j_fixed_eff
+    # fixed while scaling j_inductive) is unaffected.
+    if jphi_diff is not None and recalculate_j_BS:
+        j_fixed_eff = j_fixed_eff + np.asarray(jphi_diff, dtype=float)
+
     # ----------------------------------------------------------------
     #  3.  Perturb kinetic profiles to match <P>
     # ----------------------------------------------------------------
@@ -759,6 +932,26 @@ def perturb_kinetic_equilibrium(
 
     p_err = np.inf
     p_iter = 0
+    # --- Zeff-primary main-ion derivation (active zeff channel) -----------
+    # When the zeff aux channel is enabled AND the baseline carries dilution
+    # information (ni < ne), ni is DERIVED per draw from the drawn (ne, Zeff)
+    # via single-impurity quasineutrality instead of drawn independently:
+    # one mutually consistent (ne, ni, Zeff, nz) set per draw, used by the
+    # bootstrap, the archived profiles, and the per-draw p-file alike.
+    # sigma_ni is not used in this mode. See physics.main_ion_density_from_zeff.
+    _zeff_active = bool(aux_sigmas) and ('zeff' in aux_sigmas) \
+        and (aux_baselines or {}).get('zeff') is not None
+    _Z_imp = None
+    _zeff_draw = None
+    if _zeff_active:
+        from .physics import effective_impurity_charge
+        _Z_imp = effective_impurity_charge(
+            ne, ni, np.asarray(aux_baselines['zeff'], dtype=float))
+        if _Z_imp is None:
+            print("  [zeff] baseline has no ne-ni dilution (ni ~= ne): Zeff "
+                  "draws still drive the bootstrap, but ni remains an "
+                  "independent channel")
+
     # p_thresh is a FRACTION (e.g. 0.05 == 5%); p_err is computed in percent.
     _p_thresh_pct = float(p_thresh) * 100.0
     print("Searching for pressure profile match...")
@@ -780,9 +973,25 @@ def perturb_kinetic_equilibrium(
             psi_kin, te / te[0], sigma_te / te[0], t_ls
         ) * te[0]
 
-        ni_perturb = _draw_monotonic_perturbation(
-            psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls
-        ) * ni[0]
+        if _zeff_active and _Z_imp is not None:
+            # draw Zeff, derive ni (quasineutrality): ni and the pressure it
+            # feeds stay inside the pressure-match loop with the other draws
+            from .physics import main_ion_density_from_zeff
+            _zb = np.asarray(aux_baselines['zeff'], dtype=float)
+            _zs = np.asarray(aux_sigmas['zeff'], dtype=float)
+            _z0 = float(np.max(np.abs(_zb))) or 1.0
+            _zeff_draw = np.atleast_1d(np.asarray(np.squeeze(
+                generate_perturbed_GPR(
+                    psi_kin, _zb / _z0, _zs / _z0,
+                    length_scale=(aux_length_scales or {}).get('zeff', 0.4),
+                    n_samples=1)) * _z0, dtype=float))
+            # 1 <= Zeff <= Z_imp guarantees 0 <= ni <= ne and nz >= 0
+            _zeff_draw = np.clip(_zeff_draw, 1.0, _Z_imp * (1.0 - 1e-9))
+            ni_perturb = main_ion_density_from_zeff(ne_perturb, _zeff_draw, _Z_imp)
+        else:
+            ni_perturb = _draw_monotonic_perturbation(
+                psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls
+            ) * ni[0]
 
         ti_perturb = _draw_monotonic_perturbation(
             psi_kin, ti / ti[0], sigma_ti / ti[0], t_ls
@@ -797,6 +1006,56 @@ def perturb_kinetic_equilibrium(
         pres_tmp = EC * (ne_eq * te_eq + ni_eq * ti_eq)
         tmp_avg = mygs.flux_integral(psi_N, pres_tmp)
         p_err = np.mean(np.abs(inp_avg - tmp_avg) / inp_avg) * 100.0
+
+    # Add the fixed (fast-ion) pressure -- constant across draws, never perturbed
+    # -- to the thermal pressure for the GS solve. The pressure-match diagnostic
+    # above stays thermal-only (comparable to the thermal baseline inp_avg).
+    if p_fast is not None:
+        pres_tmp = pres_tmp + _kin_to_eq(np.asarray(p_fast, dtype=float))
+
+    # Impurity (carbon) thermal pressure: single-impurity model on the SAME
+    # (ne, ni, Z_imp) set that derived the main ion (one Zeff). Computed from the
+    # converged draw's (ne_eq, ni_eq) so it perturbs with the kinetics; the match
+    # loop above stays thermal-D-only. Single-ion e*(ne*Te + ni*Ti) omits this.
+    if Z_imp:
+        from .physics import impurity_pressure
+        pres_tmp = pres_tmp + impurity_pressure(ne_eq, ni_eq, ti_eq, Z_imp)
+    # Pressure-diff anchor: fixed offset (= equilibrium.pressure - reconstructed
+    # baseline) added to baseline AND every draw, mirroring jBS_diff, so the solve
+    # pressure anchors to FUSE exactly while the reconstructed thermal delta tracks
+    # per-draw kinetics. At sigma=0 pres_tmp == dd equilibrium.pressure.
+    if p_diff is not None:
+        pres_tmp = pres_tmp + np.asarray(p_diff, dtype=float)
+
+    # --- switchboard: perturb the auxiliary profiles (rotation / transport /
+    # impurity). GPR-sample each enabled channel once per draw (sigma
+    # presence = on). 'zeff'
+    # is ACTIVE: the perturbed Zeff is reassigned so every downstream SWB
+    # bootstrap call uses it. Passive aux (omega_tor, e_r, chi_*) are carried
+    # out for storage only. Baselines/sigmas are on the kinetic grid.
+    aux_out = {}
+    if aux_sigmas:
+        for _en, _es in aux_sigmas.items():
+            if _en == 'zeff' and _zeff_draw is not None:
+                continue          # already drawn inside the pressure loop
+            _eb = (aux_baselines or {}).get(_en)
+            if _eb is None:
+                continue
+            _eb = np.asarray(_eb, dtype=float)
+            _es = np.asarray(_es, dtype=float)
+            _els = (aux_length_scales or {}).get(_en, 0.4)
+            # normalize by PEAK magnitude (robust: some aux, e.g. E_r, are
+            # ~0 on axis -> a denormal _eb[0] would make _eb/_e0 overflow)
+            _e0 = float(np.max(np.abs(_eb)))
+            if not (_e0 > 0):
+                _e0 = 1.0
+            _ep = np.squeeze(generate_perturbed_GPR(
+                psi_kin, _eb / _e0, _es / _e0, length_scale=_els, n_samples=1)) * _e0
+            aux_out[_en] = np.atleast_1d(np.asarray(_ep, dtype=float))
+        if _zeff_draw is not None:
+            aux_out['zeff'] = _zeff_draw      # the draw ni was derived from
+        if "zeff" in aux_out:                 # active -> drives the bootstrap
+            Zeff = np.clip(_kin_to_eq(aux_out["zeff"]), 1.0, None)
 
     mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
 
@@ -994,7 +1253,14 @@ def perturb_kinetic_equilibrium(
         finally:
             if _stashed_bounds is not None:
                 mygs.set_coil_bounds(_stashed_bounds)
-        _spike_perturbed = _results_diff["isolated_j_BS"]
+        # Convert SWB's parallel-projected j_BS to toroidal convention on the
+        # SWB-landed equilibrium -- BEFORE the snapshot restore below changes
+        # mygs. The cached recon spike was converted the same way at cache
+        # time, so the delta is consistently toroidal.
+        _spike_perturbed = _swb_jbs_to_toroidal(
+            mygs, _results_diff["isolated_j_BS"], psi_pad)
+        _full_j_BS_tor = _swb_jbs_to_toroidal(
+            mygs, _results_diff["j_BS"], psi_pad)
         delta_spike = _spike_perturbed - spike_profile_recon_cached
         _delta_rms = float(np.sqrt(np.mean(delta_spike**2)))
         _delta_max = float(np.max(np.abs(delta_spike)))
@@ -1008,7 +1274,7 @@ def perturb_kinetic_equilibrium(
         mygs.replace_eq(source_eq=recon_eq_snapshot)
         # Build new_jphi as input_j_phi (recon exact) + delta_spike
         spike_profile = delta_spike
-        full_j_BS = _results_diff["j_BS"]
+        full_j_BS = _full_j_BS_tor
         # ---- DIFF_BS recon-anchor solve (mirrors regular SWB branch's
         # recon-anchor at line ~1067 but with new_jphi = input_j_phi +
         # delta_spike).  Without this explicit solve, mygs stays in the
@@ -1119,65 +1385,52 @@ def perturb_kinetic_equilibrium(
         from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
         _swb_seed = create_power_flux_fun(npsi, 1.5, 1.5)['y']
 
-        # ---- Diagnostic before SWB ----
-        try:
-            _diag_axis = (float(mygs.o_point[0]), float(mygs.o_point[1]))
-            _diag_Ip   = float(mygs.get_globals()[0])
-            _ped = (psi_N >= 0.85) & (psi_N <= 1.0)
-            _ne_in = ne if (psi_N_kinetic is None) else ne_eq
-            _te_in = te if (psi_N_kinetic is None) else te_eq
-            _coils_now, _ = mygs.get_coil_currents()
-            print(f"  [SWB-diag] axis=({_diag_axis[0]:.4f},{_diag_axis[1]:+.5f}) "
-                  f"Ip={_diag_Ip:+.0f}  bounds_cleared={_stashed_bounds is not None}")
-            print(f"  [SWB-diag] te_eq[0]={te_eq[0]:.0f} eV (recon te[0]={te[0]:.0f}) -- "
-                  f"baseline ratio {te_eq[0]/te[0]:.3f}")
-            print(f"  [SWB-diag] ne_eq[0]={ne_eq[0]:.2e} m^-3 (recon ne[0]={ne[0]:.2e}) -- "
-                  f"baseline ratio {ne_eq[0]/ne[0]:.3f}")
-            print(f"  [SWB-diag] te_eq pedestal psi=[0.85,1]: "
-                  f"min={te_eq[_ped].min():.0f} max={te_eq[_ped].max():.0f}  "
-                  f"(monotone? {bool(np.all(np.diff(te_eq[_ped]) <= 0))})")
-            # Derive recon baselines from the stashed bounds dict
-            # (bounds = [base - delta, base + delta] => base = mean).
-            _stashed = getattr(mygs, '_coil_drift_bounds', None) or {}
-            _f9a_base = (0.5 * (_stashed['F9A'][0] + _stashed['F9A'][1])
-                          if 'F9A' in _stashed else None)
-            _f9b_base = (0.5 * (_stashed['F9B'][0] + _stashed['F9B'][1])
-                          if 'F9B' in _stashed else None)
-            if _f9a_base is not None and _f9b_base is not None:
-                _f9a = float(_coils_now['F9A'])
-                _f9b = float(_coils_now['F9B'])
-                print(f"  [SWB-diag] F9A={_f9a:+.0f} A (recon {_f9a_base:+.0f}, "
-                      f"drift {_f9a - _f9a_base:+.0f}), "
-                      f"F9B={_f9b:+.0f} A (drift {_f9b - _f9b_base:+.0f})")
-        except Exception as _diag_exc:
-            print(f"  [SWB-diag] failed: {_diag_exc}")
-
-        # ---- Pre-SWB full-state capture (env SWB_STATE_DUMP=1) ----
-        # Dump the EXACT mygs state (psi field + coil currents) AND the SWB
-        # inputs immediately before the call, so a failing draw can be
-        # replayed offline from precisely this state -- to settle whether
-        # the SWB maxits is kinetics-driven or pre-solve-state-driven.
-        # Overwritten each draw; on the run's last failure it holds that
-        # draw's pre-SWB state.
-        if os.environ.get('SWB_STATE_DUMP', '0') == '1':
+        # ---- SWB debug instrumentation (BOUQUET_SWB_DEBUG=1) ----
+        # State prints + pre/post .npz dumps so a failing draw can be replayed
+        # offline from exactly this state. Dumps land in the system temp dir
+        # (see _swb_dump_path) and are overwritten each draw; on failure the
+        # pre-state is preserved separately so a later draw can't clobber it.
+        if _swb_debug():
             try:
-                import numpy as _np_ps
+                _diag_axis = (float(mygs.o_point[0]), float(mygs.o_point[1]))
+                _diag_Ip = float(mygs.get_globals()[0])
+                _ped = (psi_N >= 0.85) & (psi_N <= 1.0)
+                _coils_now, _ = mygs.get_coil_currents()
+                print(f"  [SWB-diag] axis=({_diag_axis[0]:.4f},{_diag_axis[1]:+.5f}) "
+                      f"Ip={_diag_Ip:+.0f}  bounds_cleared={_stashed_bounds is not None}")
+                print(f"  [SWB-diag] te_eq[0]={te_eq[0]:.0f} eV (baseline {te[0]:.0f}), "
+                      f"ne_eq[0]={ne_eq[0]:.2e} m^-3 (baseline {ne[0]:.2e})")
+                print(f"  [SWB-diag] te_eq pedestal psi=[0.85,1]: "
+                      f"min={te_eq[_ped].min():.0f} max={te_eq[_ped].max():.0f}  "
+                      f"(monotone? {bool(np.all(np.diff(te_eq[_ped]) <= 0))})")
+                # Largest coil drifts vs the stashed bounds midpoints
+                # (bounds = [base - delta, base + delta] => base = mean).
+                _stashed = getattr(mygs, '_coil_drift_bounds', None) or {}
+                _drifts = sorted(
+                    ((abs(float(_coils_now[_cn]) - 0.5 * (_b[0] + _b[1])),
+                      _cn, 0.5 * (_b[0] + _b[1]))
+                     for _cn, _b in _stashed.items() if _cn in _coils_now),
+                    reverse=True)
+                for _, _cn, _base in _drifts[:2]:
+                    print(f"  [SWB-diag] {_cn}={float(_coils_now[_cn]):+.0f} A "
+                          f"(recon {_base:+.0f}, drift "
+                          f"{float(_coils_now[_cn]) - _base:+.0f})")
                 _ps_coils, _ = mygs.get_coil_currents()
-                _np_ps.savez(
-                    '/tmp/swb_prestate_dump.npz',
+                np.savez(
+                    _swb_dump_path('swb_prestate'),
                     psi=mygs.get_psi(False),
-                    coil_names=_np_ps.array(list(_ps_coils.keys())),
-                    coil_vals=_np_ps.array([float(v) for v in _ps_coils.values()]),
+                    coil_names=np.array(list(_ps_coils.keys())),
+                    coil_vals=np.array([float(v) for v in _ps_coils.values()]),
                     psi_N=psi_N,
                     ne_eq=ne_eq, te_eq=te_eq, ni_eq=ni_eq, ti_eq=ti_eq,
-                    Zeff=_np_ps.atleast_1d(_np_ps.asarray(Zeff)),
-                    Ip_target=_np_ps.array([Ip_target]),
+                    Zeff=np.atleast_1d(np.asarray(Zeff)),
+                    Ip_target=np.array([Ip_target]),
                     swb_seed=_swb_seed,
-                    scale_jBS=_np_ps.array([scale_jBS]),
-                    isolate_edge_jBS=_np_ps.array([bool(isolate_edge_jBS)]),
+                    scale_jBS=np.array([scale_jBS]),
+                    isolate_edge_jBS=np.array([bool(isolate_edge_jBS)]),
                 )
-            except Exception:
-                pass
+            except Exception as _diag_exc:
+                print(f"  [SWB-diag] pre-SWB capture failed: {_diag_exc}")
 
         _t_swb0 = time.perf_counter()
         try:
@@ -1188,60 +1441,50 @@ def perturb_kinetic_equilibrium(
                 scale_jBS=scale_jBS,
                 isolate_edge_jBS=isolate_edge_jBS,
                 diagnostic_plots=False,
-                verbose=(os.environ.get('SWB_VERBOSE', '0') == '1'),
-                # SWB H-mode self-consistency iterations (default 3).  Env
-                # SWB_ITERS lets us trim for speed (2 is usually enough).
-                iterations=int(os.environ.get('SWB_ITERS', '3')),
+                verbose=_swb_debug(),
+                iterations=swb_iterations,
             )
-            if os.environ.get('PROFILE', '0') == '1':
-                print(f"  [profile] SWB call: {time.perf_counter()-_t_swb0:.1f}s")
-            # On SWB success, preserve this draw's kinetics as an in-spec
-            # control for failing-vs-succeeding spike-shape comparison.
-            if os.environ.get('SWB_STATE_DUMP', '0') == '1':
+            if _swb_debug():
+                print(f"  [SWB-diag] SWB call: {time.perf_counter()-_t_swb0:.1f}s")
+                # Preserve this draw's kinetics as an in-spec control for
+                # failing-vs-succeeding spike-shape comparison.
                 try:
-                    import numpy as _np_ok
-                    _np_ok.savez(
-                        '/tmp/swb_success_dump.npz',
+                    np.savez(
+                        _swb_dump_path('swb_success'),
                         psi_N=psi_N,
                         ne_eq=ne_eq, te_eq=te_eq, ni_eq=ni_eq, ti_eq=ti_eq,
-                        Zeff=_np_ok.atleast_1d(_np_ok.asarray(Zeff)),
-                        Ip_target=_np_ok.array([Ip_target]),
+                        Zeff=np.atleast_1d(np.asarray(Zeff)),
+                        Ip_target=np.array([Ip_target]),
                         swb_seed=_swb_seed,
-                        scale_jBS=_np_ok.array([scale_jBS]),
+                        scale_jBS=np.array([scale_jBS]),
                         isolated_j_BS=results.get('isolated_j_BS'),
                         j_inductive=results.get('j_inductive'),
                         total_j_phi=results.get('total_j_phi'),
                     )
-                except Exception:
-                    pass
+                except Exception as _dump_exc:
+                    print(f"  [SWB-diag] success dump failed: {_dump_exc}")
         except (TypeError, ValueError, RuntimeError):
-            # Dump the SWB inputs so we can inspect what j_BS comes out
-            # of an offline run with the same inputs.
-            try:
-                import numpy as _np_dbg
-                _np_dbg.savez(
-                    '/tmp/swb_failure_dump.npz',
-                    psi_N=psi_N,
-                    ne_eq=ne_eq, te_eq=te_eq, ni_eq=ni_eq, ti_eq=ti_eq,
-                    Zeff=_np_dbg.atleast_1d(_np_dbg.asarray(Zeff)),
-                    Ip_target=_np_dbg.array([Ip_target]),
-                    swb_seed=_swb_seed,
-                    scale_jBS=_np_dbg.array([scale_jBS]),
-                )
-                print("  [SWB-diag] inputs dumped to /tmp/swb_failure_dump.npz")
-            except Exception:
-                pass
-            # Preserve the failing draw's pre-SWB full-state capture so it
-            # isn't overwritten by a later (possibly succeeding) draw.
-            if os.environ.get('SWB_STATE_DUMP', '0') == '1':
+            if _swb_debug():
+                # Dump the SWB inputs for offline replay, and preserve the
+                # pre-SWB state capture from being overwritten by later draws.
                 try:
                     import shutil as _sh
-                    _sh.copyfile('/tmp/swb_prestate_dump.npz',
-                                 '/tmp/swb_prestate_FAILED.npz')
-                    print("  [SWB-diag] pre-SWB state preserved to "
-                          "/tmp/swb_prestate_FAILED.npz")
-                except Exception:
-                    pass
+                    np.savez(
+                        _swb_dump_path('swb_failure'),
+                        psi_N=psi_N,
+                        ne_eq=ne_eq, te_eq=te_eq, ni_eq=ni_eq, ti_eq=ti_eq,
+                        Zeff=np.atleast_1d(np.asarray(Zeff)),
+                        Ip_target=np.array([Ip_target]),
+                        swb_seed=_swb_seed,
+                        scale_jBS=np.array([scale_jBS]),
+                    )
+                    _sh.copyfile(_swb_dump_path('swb_prestate'),
+                                 _swb_dump_path('swb_prestate_FAILED'))
+                    print(f"  [SWB-diag] failure inputs + pre-state dumped to "
+                          f"{_swb_dump_path('swb_failure')} / "
+                          f"{_swb_dump_path('swb_prestate_FAILED')}")
+                except Exception as _dump_exc:
+                    print(f"  [SWB-diag] failure dump failed: {_dump_exc}")
             raise
         finally:
             if _stashed_bounds is not None:
@@ -1261,7 +1504,7 @@ def perturb_kinetic_equilibrium(
         # SWB seeds with create_power_flux_fun(1.5, 1.5) and alpha-scales
         # to match Ip, but produces a matched_j_inductive whose SHAPE
         # differs structurally from recon's eqdsk-fit j_inductive_fit.
-        # Empirically (probe at /tmp/probe_swb_anchor.log on 204441@4400):
+        # Empirically (DIII-D reference case probe):
         # recon/SWB ratio = 3.4× at axis vs 1.4× at mid-radius -- not a
         # uniform scaling, so post-SWB ind_factor anchoring cannot reach
         # recon's l_i.  At σ=0 the SWB-natural baseline lives at l_i≈0.89
@@ -1278,8 +1521,37 @@ def perturb_kinetic_equilibrium(
         # unchanged so j_BS recompute ≈ recon's stored j_BS, and
         # combined with input_jinductive the total j_phi recovers
         # recon's exactly -> l_i = recon's l_i, bnd_RMS ≈ 0.
-        full_j_BS = results["j_BS"]
-        spike_profile = results["isolated_j_BS"]
+        # Convert SWB's parallel-projected bootstrap (<j.B> R_avg/F) to
+        # bouquet's toroidal convention <j_phi/R>/<1/R>, evaluated on the
+        # SWB-landed equilibrium (no solves between the call and here).
+        full_j_BS = _swb_jbs_to_toroidal(mygs, results["j_BS"], psi_pad)
+        spike_profile = _swb_jbs_to_toroidal(
+            mygs, results["isolated_j_BS"], psi_pad)
+
+        # Floor the SWB bootstrap at 0 (drop unphysical negative excursions)
+        # before it enters j_phi. Then, in Case-B "diff" mode, add the fixed
+        # correction jBS_diff = FUSE_jBS - SWB_baseline so the bootstrap term
+        # becomes SWB(perturbed) + (FUSE_jBS - SWB_baseline): at sigma=0 it
+        # reduces to FUSE_jBS exactly, and per-draw it tracks the SWB delta.
+        # spike_profile feeds EVERY downstream j_phi build (recon-anchor,
+        # l_i-match, corrective), so this single reassignment covers them all.
+        # (Not re-floored after the diff: a negative excursion there is the
+        # genuine Case-B edge-misalignment signal we want to surface, not hide.)
+        if floor_j_BS:
+            _fdp = os.environ.get('FLOOR_DIAG', '')
+            if _fdp:
+                _nc = int((spike_profile < 0).sum())
+                with open(_fdp, 'a') as _fh:
+                    if _nc:
+                        _wn = psi_N[spike_profile < 0]
+                        _fh.write(f"clipped {_nc} pts min={spike_profile.min()/1e3:+.1f}kA "
+                                  f"psiN=[{_wn.min():.3f},{_wn.max():.3f}]\n")
+                    else:
+                        _fh.write(f"noop min={spike_profile.min()/1e3:+.1f}kA\n")
+            full_j_BS = np.clip(full_j_BS, 0.0, None)
+            spike_profile = np.clip(spike_profile, 0.0, None)
+        if jBS_diff is not None:
+            spike_profile = spike_profile + np.asarray(jBS_diff, dtype=float)
 
         # Anchor: forward-solve with recon's inductive shape + SWB's
         # Sauter-recomputed bootstrap spike, using the perturbed pressure
@@ -1303,7 +1575,30 @@ def perturb_kinetic_equilibrium(
             # spike_profile already = delta_spike (perturbed - cached recon)
             new_jphi = input_j_phi + spike_profile
         else:
-            new_jphi = input_jinductive + spike_profile
+            _anchor_jind = input_jinductive
+            if perturb_jind_in_anchor:
+                # Fix C: GPR-perturb the inductive HERE (then accept the anchor),
+                # so each draw carries a genuinely different j_ind without the
+                # downstream find_optimal_scale/corrective that homogenize it.
+                _j0a = input_jinductive[0]
+                _candA = input_jinductive
+                for _tryA in range(20):
+                    _c = generate_perturbed_GPR(
+                        psi_N, input_jinductive / _j0a,
+                        sigma_profile=sigma_jphi / _j0a, length_scale=j_ls,
+                        n_samples=1, diag_plot=False) * _j0a
+                    if np.all(_c >= 0.0):
+                        _candA = _c
+                        break
+                _rA = root_scalar(
+                    Ip_flux_integral_vs_target,
+                    args=(mygs, _candA, spike_profile + j_fixed_eff, psi_N, Ip_target),
+                    bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
+                    method="brentq", rtol=1e-6)
+                _anchor_jind = _rA.root * _candA
+                print(f"  [perturb-anchor] GPR-perturbed j_ind in anchor "
+                      f"(Ip-renorm scale={_rA.root:.4f})")
+            new_jphi = _anchor_jind + spike_profile + j_fixed_eff
         _psi_range_anchor = mygs.psi_bounds[1] - mygs.psi_bounds[0]
         _pp_anchor = {"type": "linterp",
                       "y": np.gradient(pres_tmp) /
@@ -1332,6 +1627,7 @@ def perturb_kinetic_equilibrium(
                       f"(σ-perturbed kinetics)")
             if bnd_diag_callback is not None:
                 bnd_diag_callback("after recon-anchor solve")
+            _ket_stage_diag(mygs, "1-recon-anchor")
         except (ValueError, RuntimeError) as _anchor_exc:
             # Anchor failed -- fall back to SWB's natural total_j_phi
             # so the rest of the loop has a workable baseline.
@@ -1347,6 +1643,47 @@ def perturb_kinetic_equilibrium(
 
         eq_stats = mygs.get_stats(lcfs_pad=psi_pad)
         baseline_li_proxy = calc_cylindrical_li_proxy(mygs, new_jphi, psi_pad)
+
+        # Fix C band-conditioning: an UNCONDITIONAL accept passed pathological
+        # GPR draws on hard/high-l_i cases (204441: l_i -30% accepted -> garbage).
+        # Resample the GPR inductive (re-solving the anchor) until its l_i is in
+        # band or max_li_iter is hit; on exhaustion REJECT the draw (raise,
+        # caught per-draw by generate_bouquet) rather than accept it.
+        if perturb_jind_in_anchor:
+            _tolp = float(l_i_tolerance) * 100.0
+            _j0a = input_jinductive[0]
+            _nr = 0
+            while (100.0 * abs(float(eq_stats['l_i']) - l_i_target) / l_i_target > _tolp
+                   and _nr < int(max_li_iter)):
+                _nr += 1
+                for _t in range(20):
+                    _c = generate_perturbed_GPR(
+                        psi_N, input_jinductive / _j0a, sigma_profile=sigma_jphi / _j0a,
+                        length_scale=j_ls, n_samples=1, diag_plot=False) * _j0a
+                    if np.all(_c >= 0.0):
+                        break
+                _rA = root_scalar(
+                    Ip_flux_integral_vs_target,
+                    args=(mygs, _c, spike_profile + j_fixed_eff, psi_N, Ip_target),
+                    bracket=[1e-10 * Ip_target, 1e1 * Ip_target], method="brentq", rtol=1e-6)
+                new_jphi = _rA.root * _c + spike_profile + j_fixed_eff
+                mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
+                mygs.set_profiles(pp_prof=_pp_anchor,
+                                  ffp_prof={"type": "jphi-linterp", "y": new_jphi, "x": psi_N})
+                try:
+                    mygs.solve()
+                except Exception:
+                    continue
+                eq_stats = mygs.get_stats(lcfs_pad=psi_pad)
+            _erp = 100.0 * abs(float(eq_stats['l_i']) - l_i_target) / l_i_target
+            print(f"  [perturb-anchor] band-conditioned: {_nr} resample(s), "
+                  f"l_i={float(eq_stats['l_i']):.4f} ({_erp:.2f}% vs band {_tolp:.2f}%)",
+                  flush=True)
+            if _erp > _tolp:
+                raise RuntimeError(
+                    f"perturb_jind_in_anchor: no in-band draw in {int(max_li_iter)} "
+                    f"resamples (last l_i err {_erp:.1f}%)")
+            baseline_li_proxy = calc_cylindrical_li_proxy(mygs, new_jphi, psi_pad)
         # ---- DIAG: recon-anchor (SWB) l_i vs target, BEFORE the sampling
         # loop runs.  Quantifies how much of the per-draw l_i shift is the
         # PHYSICAL SWB-bootstrap response (this value) vs the downstream
@@ -1525,9 +1862,37 @@ def perturb_kinetic_equilibrium(
     # convert once here.  (_prescreen_margin stays in percent.)
     _li_tol_pct = float(l_i_tolerance) * 100.0
 
+    # Fix B/C: accept the recon-anchor and skip find_optimal_scale + corrective
+    # (which overshoot l_i and drift degenerate coils off baseline). B accepts
+    # only when the anchor l_i is already in-band; C accepts always (the
+    # perturbed-in-anchor j_ind IS the draw; l_i floats with the bounded GPR).
+    _accept_anchor = False
+    if (recalculate_j_BS and not (_pin_jphi or _diff_bs)
+            and (perturb_jind_in_anchor or accept_anchor_inband)):
+        try:
+            _anchor_li = float(eq_stats['l_i'])
+            _inband = 100.0 * abs(_anchor_li - l_i_target) / l_i_target <= _li_tol_pct
+            if perturb_jind_in_anchor or _inband:
+                _accept_anchor = True
+                l_i = _anchor_li
+                Ip = float(eq_stats['Ip'])
+                output_jphi = new_jphi.copy()
+                iteration_l_is.append(l_i)
+                iteration_Ips.append(Ip)
+                j0_scales.append(1.0)
+                Ip_scales.append(1.0)
+                final_li_proxy = calc_cylindrical_li_proxy(mygs, output_jphi, psi_pad)
+                _why = "C/perturb-anchor" if perturb_jind_in_anchor else "B/inband"
+                print(f"  [ACCEPT-ANCHOR {_why}] l_i={l_i:.4f} "
+                      f"({100.0*abs(_anchor_li-l_i_target)/l_i_target:.2f}% vs "
+                      f"band {_li_tol_pct:.2f}%); skip find_optimal_scale+corrective",
+                      flush=True)
+        except Exception as _e:
+            print(f"  [ACCEPT-ANCHOR] check failed: {_e!r}", flush=True)
+
     for li_iter in range(1, max_li_iter + 1):
-        if _pin_jphi or _diff_bs:
-            break  # PIN_JPHI / DIFF_BS shortcut handled above
+        if _pin_jphi or _diff_bs or _accept_anchor:
+            break  # PIN_JPHI / DIFF_BS / accept-anchor shortcut handled above
         if 100.0 * abs(l_i - l_i_target) / l_i_target <= _li_tol_pct:
             break  # last draw's equilibrium l_i is within the measured band
 
@@ -1573,12 +1938,12 @@ def perturb_kinetic_equilibrium(
                 continue  # non-physical (negative current)
             _root = root_scalar(
                 Ip_flux_integral_vs_target,
-                args=(mygs, _cand, spike_profile, psi_N, Ip_target),
+                args=(mygs, _cand, spike_profile + j_fixed_eff, psi_N, Ip_target),
                 bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
                 method="brentq", rtol=1e-6,
             )
             _a = _root.root
-            _matched = _a * _cand + spike_profile
+            _matched = _a * _cand + spike_profile + j_fixed_eff
             # Cheap real-geom pre-screen: skip if confidently out-of-band.
             if _prescreen_geo is not None:
                 _est = calc_realgeom_li_proxy_fast(_matched, _prescreen_geo)
@@ -1625,7 +1990,7 @@ def perturb_kinetic_equilibrium(
         final_scale_j0, final_jphi = find_optimal_scale(
             mygs, psi_N, pres_tmp, ffp_prof, pp_prof,
             matched_j_inductive, Ip_target, psi_pad,
-            spike_prof=spike_profile,
+            spike_prof=spike_profile + j_fixed_eff,
             diagnostic_plots=False, verbose=False,
         )
 
@@ -1646,6 +2011,8 @@ def perturb_kinetic_equilibrium(
         # downstream (no Ip-scale secant).
         dt_scale = time.perf_counter() - t_scale
         print(f"  [li_iter={li_iter}] find_optimal_scale (j0 only): {dt_scale:.1f}s")
+        _ket_stage_diag(mygs, f"2-after-find_optimal_scale[iter{li_iter}]",
+                        extra=f" j0_scale={final_scale_j0:.4f}")
 
         # ---- 5d. Definitive sawtooth constraint (after Ip scaling) --
         if constrain_sawteeth:
@@ -1676,7 +2043,9 @@ def perturb_kinetic_equilibrium(
         pprime_tmp[-1] = 0.0
         pp_prof = {"type": "linterp", "y": pprime_tmp, "x": psi_N}
 
-        target_jphi_perturb = matched_j_inductive * final_scale_j0 + spike_profile
+        target_jphi_perturb = (
+            matched_j_inductive * final_scale_j0 + spike_profile + j_fixed_eff
+        )
 
         output_jphi, _n_corr, _corr_hist = _corrective_jphi_iteration(
             mygs, psi_N, target_jphi_perturb, pp_prof,
@@ -1724,6 +2093,7 @@ def perturb_kinetic_equilibrium(
         # PRESCREEN=0; build a one-off cylindrical cache for the diagnostic.
         _geo_diag = _geo if _geo is not None else get_li_proxy_geometry(
             mygs, npsi, psi_pad)
+        _ket_stage_diag(mygs, f"3-after-corrective[iter{li_iter}]")
         final_li_proxy = calc_cylindrical_li_proxy_fast(output_jphi, _geo_diag)
         proxy_vs_real = 100.0 * (final_li_proxy - l_i) / l_i if l_i != 0 else 0.0
 
@@ -1775,11 +2145,64 @@ def perturb_kinetic_equilibrium(
     # output tuple and HDF5 schema remain forward-compatible.
     w_ExB = np.zeros_like(psi_N)
 
-    # Shelf-blend decomposition: j_inductive tapers to zero at the
-    # edge where the Sauter spike dominates.
-    j_inductive_consistent, _ = _shelf_blend_decompose(
-        psi_N, output_jphi, spike_profile, eqdsk_jphi=input_j_phi
-    )
+    # j_inductive decomposition. Two regimes:
+    #   isolate_edge_jBS=True  (DIII-D g-file edge-spike work): the bootstrap is
+    #     an isolated flat-shelf + edge spike, so j_inductive tapers to zero at
+    #     the edge where the spike dominates -- the shelf-blend Hermite handles
+    #     the C1 join and edge taper.
+    #   isolate_edge_jBS=False (FUSE/IMAS full bootstrap): spike_profile is NOT a
+    #     flat-shelf spike (it is a full Sauter profile / its delta), so the
+    #     shelf-blend mis-detects the shelf and mangles the core. Use the clean
+    #     residual j_inductive = j_phi - j_BS - j_NBI - j_RF instead -- it sums
+    #     exactly and mirrors read_imas_baseline's baseline decomposition.
+    if isolate_edge_jBS:
+        # Closing decomposition (option A), replacing the non-closing shelf-blend
+        # Hermite: j_inductive = j_phi - j_BS,edge - j_fixed, so the stored
+        # components sum exactly to j_phi (the old shelf-blend substituted a
+        # Hermite taper past the shelf, so j_ind + spike != j_phi at the edge).
+        # The core bootstrap stays folded into j_inductive -- the isolated-edge-
+        # spike construct -- only the non-closing edge substitution is removed.
+        _jfix_iso = np.zeros_like(psi_N)
+        if j_NBI is not None:
+            _jfix_iso = _jfix_iso + np.asarray(j_NBI, dtype=float)
+        if j_RF is not None:
+            _jfix_iso = _jfix_iso + np.asarray(j_RF, dtype=float)
+        j_inductive_consistent = output_jphi - spike_profile - _jfix_iso
+        # Where the edge spike locally exceeds the available current (near the
+        # spike peak -- what the Hermite used to smooth), floor j_inductive at 0
+        # and cap the stored edge spike so both stay >= 0 and closure holds.
+        _neg = j_inductive_consistent < 0.0
+        if np.any(_neg):
+            j_inductive_consistent = np.maximum(j_inductive_consistent, 0.0)
+            spike_profile = np.where(_neg, output_jphi - _jfix_iso, spike_profile)
+    else:
+        _jfix_store = np.zeros_like(psi_N)
+        if j_NBI is not None:
+            _jfix_store = _jfix_store + np.asarray(j_NBI, dtype=float)
+        if j_RF is not None:
+            _jfix_store = _jfix_store + np.asarray(j_RF, dtype=float)
+        # j_BS is the PHYSICAL bootstrap that was summed into the solve:
+        # spike_profile == Sauter(perturbed kinetics) * scale_jBS + jBS_diff
+        # (the recomputed Sauter on the per-draw kinetics, anchored by the kept
+        # baseline diff) -- a forward-COMPUTED quantity, not a residual. The ohmic
+        # is then j_phi - j_BS - j_fixed, which recovers exactly the GPR-perturbed,
+        # Ip-renormalised inductive that went into the anchor (output ~= anchor
+        # total = _anchor_jind + spike_profile + j_fixed), so it keeps its physical
+        # edge foot and its genuine per-draw spread.
+        #
+        # The previous code subtracted `full_j_BS` (Sauter WITHOUT the diff)
+        # instead, so jBS_diff leaked into the ohmic residual and dragged it to 0 /
+        # negative at the pedestal -- the unphysical early cutoff. Using
+        # spike_profile (WITH the diff) fixes both: physical j_BS, physical ohmic.
+        full_j_BS = spike_profile.copy()
+        j_inductive_consistent = output_jphi - full_j_BS - _jfix_store
+        # Safety: the GPR Ip-renorm + edge realisation can leave a sub-kA negative
+        # sliver in the ohmic at the very separatrix; floor it and absorb into j_BS
+        # (bootstrap fraction -> 1 there) so both stay >= 0 and closure holds.
+        _neg = j_inductive_consistent < 0.0
+        if np.any(_neg):
+            j_inductive_consistent = np.maximum(j_inductive_consistent, 0.0)
+            full_j_BS = output_jphi - j_inductive_consistent - _jfix_store
 
     # Compute the cylindrical-proxy / real-l_i ratio at the converged
     # state.  Used by generate_bouquet to warmstart the next draw's
@@ -1800,8 +2223,12 @@ def perturb_kinetic_equilibrium(
         "iteration_Ips": iteration_Ips,
         "j_inductive": j_inductive_consistent,
         "j_BS": full_j_BS,
-        "j_BS_edge": spike_profile,
+        # Only an isolated edge spike is a meaningful separate "j_BS,edge"; in
+        # full-bootstrap mode spike_profile == j_BS (or its delta), so storing it
+        # would just draw a redundant/mislabelled curve. Drop it there.
+        "j_BS_edge": spike_profile if isolate_edge_jBS else None,
         "proxy_bias_observed": proxy_bias_observed,
+        "aux": aux_out,
     }
 
     return (
@@ -1840,14 +2267,20 @@ def generate_bouquet(
     l_i_target,
     Zeff,
     input_jinductive=None,
+    baseline_j_BS=None,
     l_i_tolerance=0.01,
     psi_pad=1e-3,
     constrain_sawteeth=True,
     recalculate_j_BS=True,
     isolate_edge_jBS=True,
+    floor_j_BS=True,
+    jBS_diff=None,
+    accept_anchor_inband=False,
+    perturb_jind_in_anchor=False,
     jBS_scale_range=None,
+    swb_iterations=3,
     diagnostic_plots=True,
-    scan_val=None,
+    scan_key=None,
     pfile_bytes=None,
     Zeff_profile=None,
     baseline_eqdsk_bytes=None,
@@ -1871,6 +2304,17 @@ def generate_bouquet(
     jphi_baseline=True,
     seed=None,
     pin_jphi=False,
+    p_fast=None,
+    Z_imp=None,
+    p_diff=None,
+    jphi_diff=None,
+    j_NBI=None,
+    j_RF=None,
+    aux_sigmas=None,
+    aux_baselines=None,
+    aux_length_scales=None,
+    progress_callback=None,
+    source_kind=None,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -1915,8 +2359,10 @@ def generate_bouquet(
         Target plasma current [A].
     l_i_target : float
         Target internal inductance.
-    Zeff : float
-        Effective ion charge.
+    Zeff : ndarray
+        Effective ion charge profile on the equilibrium grid ``psi_N``
+        (consumed by ``solve_with_bootstrap``). A scalar is accepted and
+        broadcast, but the class API always passes the per-draw profile.
     input_jinductive : ndarray or None
         Dimensionless inductive :math:`j_\phi` shape.
     l_i_tolerance : float
@@ -1955,9 +2401,12 @@ def generate_bouquet(
         ``[0.8, 1.2]`` draws from :math:`\mathcal{U}(0.8, 1.2)`.
         When ``None``, no additional scaling is applied
         (``scale_jBS = 1.0`` for every sample).
+    swb_iterations : int
+        H-mode self-consistency iterations inside ``solve_with_bootstrap``
+        (its ``iterations`` argument); 2 trades a little accuracy for speed.
     diagnostic_plots : bool
         Show diagnostic matplotlib figures.
-    scan_val : str, float, int, or None
+    scan_key : str, float, int, or None
         Optional scan-point label for nested HDF5 storage.
         ``None`` gives the flat layout.
     pfile_bytes : bytes or None
@@ -2040,6 +2489,36 @@ def generate_bouquet(
         pressure = EC * (_kin2eq(ne) * _kin2eq(te) + _kin2eq(ni) * _kin2eq(ti))
     else:
         pressure = EC * (ne * te + ni * ti)
+
+    # Fixed fast-ion pressure on the equilibrium grid. The baseline jphi-linterp
+    # solve below (the per-draw boundary/l_i/coil reference) must include p_fast
+    # so it is consistent with the perturbed draws (which add p_fast in
+    # perturb_kinetic_equilibrium); otherwise p_fast's whole equilibrium response
+    # appears as spurious, systematic coil/boundary drift in every draw. The
+    # thermal-only `pressure` is kept for the perturbed-vs-baseline pressure match.
+    if p_fast is not None:
+        _p_fast_eq = (_kin2eq(np.asarray(p_fast, dtype=float))
+                      if psi_N_kinetic is not None
+                      else np.asarray(p_fast, dtype=float))
+    else:
+        _p_fast_eq = np.zeros_like(psi_N)
+    # Impurity (carbon) + pressure-diff anchor on the equilibrium grid, matching
+    # perturb_kinetic_equilibrium so the baseline reference solve equals every
+    # draw at sigma=0 and anchors to the dd equilibrium.pressure. (Single-ion
+    # `pressure` above is kept thermal-only for the perturbed-vs-baseline match.)
+    if Z_imp:
+        from .physics import impurity_pressure
+        if psi_N_kinetic is not None:
+            _p_imp_eq = impurity_pressure(_kin2eq(ne), _kin2eq(ni),
+                                          _kin2eq(ti), Z_imp)
+        else:
+            _p_imp_eq = impurity_pressure(ne, ni, ti, Z_imp)
+    else:
+        _p_imp_eq = np.zeros_like(psi_N)
+    _p_diff_eq = (np.asarray(p_diff, dtype=float) if p_diff is not None
+                  else np.zeros_like(psi_N))
+    pressure_solve = pressure + _p_imp_eq + _p_fast_eq + _p_diff_eq
+
     npsi = len(psi_N)
 
     # --- Auto-override constrain_sawteeth for sawtoothing baselines ---
@@ -2125,13 +2604,18 @@ def generate_bouquet(
         if jphi_baseline:
             _psi_range_b = mygs.psi_bounds[1] - mygs.psi_bounds[0]
             _pp_b = {"type": "linterp",
-                     "y": np.gradient(pressure) /
+                     "y": np.gradient(pressure_solve) /
                           (np.gradient(psi_N) * _psi_range_b),
                      "x": psi_N}
             _pp_b["y"][-1] = 0.0
+            # Anchor the baseline reference equilibrium (this solve is re-saved as
+            # baseline.eqdsk, the profile GPEC reads) to equilibrium.j_tor by
+            # adding the fixed jphi_diff, matching every draw's total at sigma=0.
+            _jphi_b = (input_j_phi + np.asarray(jphi_diff, dtype=float)
+                       if jphi_diff is not None else input_j_phi.copy())
             _ffp_b = {"type": "jphi-linterp",
-                      "y": input_j_phi.copy(), "x": psi_N}
-            mygs.set_targets(Ip=initial_Ip_target, pax=float(pressure[0]))
+                      "y": _jphi_b, "x": psi_N}
+            mygs.set_targets(Ip=initial_Ip_target, pax=float(pressure_solve[0]))
             mygs.set_profiles(pp_prof=_pp_b, ffp_prof=_ffp_b)
             try:
                 mygs.solve()
@@ -2491,7 +2975,7 @@ def generate_bouquet(
             # cleanly through the existing store_baseline_profiles
             # call without needing schema changes.
             #
-            # Cost: one extra save_eqdsk call per scan_val (a few
+            # Cost: one extra save_eqdsk call per scan_key (a few
             # hundred ms).  Soft-fails -- cosmetic plot fix, never
             # blocks the physics run.
             try:
@@ -2680,10 +3164,22 @@ def generate_bouquet(
     store_baseline_profiles(
         header, psi_N,
         ne, te, ni, ti,
-        pressure, input_j_phi,
+        # Store the ACTUAL solved quantities, not the un-anchored inputs, so the
+        # archived _baseline diagnostics match what was solved (== dd equilibrium):
+        #  - pressure_solve = thermal + impurity + fast + p_diff anchor (not thermal-D)
+        #  - input_j_phi + jphi_diff = equilibrium.j_tor anchor (not the smooth
+        #    core_profiles.j_tor input). Without the +jphi_diff the stored j_phi is
+        #    the un-anchored parallel-transport total and any analysis reading it
+        #    compares against the wrong profile.
+        pressure_solve,
+        (input_j_phi + np.asarray(jphi_diff, dtype=float)
+         if jphi_diff is not None else input_j_phi),
         sigma_ne, sigma_te, sigma_ni, sigma_ti, sigma_jphi,
         initial_Ip_target, l_i_target,
-        scan_val=scan_val,
+        scan_key=scan_key,
+        # thermal-only part, so plots can separate it from the impurity+fast
+        # the GS solve added (pressure_solve - pressure).
+        pressure_thermal=pressure,
         eqdsk_bytes=baseline_eqdsk_bytes,
         pfile_bytes=stored_pfile_bytes,
         psi_N_kinetic=psi_N_kinetic,
@@ -2691,7 +3187,33 @@ def generate_bouquet(
         recon_lcfs_ref=recon_lcfs_ref,
         x_points=_bl_xpts,
         diverted=_bl_div,
+        aux_baselines=aux_baselines,
+        aux_sigmas=aux_sigmas,
+        j_BS=baseline_j_BS,
+        j_inductive=input_jinductive,
+        source_kind=source_kind,
     )
+
+    # ---- Purge stale draws for THIS scan value -------------------------
+    # The database is opened append-mode (multi-scan runs accumulate scan
+    # values across calls), so draws from a previous run of the SAME header
+    # + scan value would survive wherever this run has failures -- a mixed
+    # archive whose ghost draws carry a different baseline/target. Delete
+    # the numeric draw groups under this scan value up front; _baseline and
+    # other scan values are untouched.
+    import h5py as _h5_purge
+    from .utils import _scan_key as _svk
+    with _h5_purge.File(f"{header}.h5", "a") as _hf_purge:
+        _bk = _svk(scan_key)
+        _parent = (_hf_purge.get(f"scan/{_bk}") if _bk is not None
+                   else _hf_purge)
+        if _parent is not None:
+            _stale = [k for k in _parent.keys() if k.isdigit()]
+            for _k in _stale:
+                del _parent[_k]
+            if _stale:
+                print(f"  purged {len(_stale)} stale draw group(s) from a "
+                      f"previous run of this header/scan")
 
     # ---- DIFF_BS cache: snapshot mygs + cache SWB(recon kinetics) ----
     # If DIFF_BS=1 is set, capture the recon-state equilibrium and run
@@ -2758,8 +3280,10 @@ def generate_bouquet(
                     isolate_edge_jBS=isolate_edge_jBS,
                     diagnostic_plots=False, verbose=False,
                 )
-                _diff_spike_recon = np.asarray(
-                    _cache_results["isolated_j_BS"]).copy()
+                # Toroidal conversion on the cache-time SWB equilibrium, so
+                # the per-draw delta (also converted) is convention-consistent.
+                _diff_spike_recon = _swb_jbs_to_toroidal(
+                    mygs, _cache_results["isolated_j_BS"], psi_pad)
                 # Snapshot AFTER the SWB call -- this is the state from
                 # which we'll re-launch SWB on perturbed kinetics each
                 # draw, so it must match what the cached SWB saw.
@@ -2788,11 +3312,25 @@ def generate_bouquet(
     # the first successful draw establishes a baseline.
     _proxy_bias_warmstart = None
 
+    # One-time notice for the Zeff-primary mode (the per-draw mechanics live
+    # in perturb_kinetic_equilibrium; see physics.main_ion_density_from_zeff).
+    if aux_sigmas and 'zeff' in aux_sigmas:
+        from .physics import effective_impurity_charge
+        _zimp_note = effective_impurity_charge(
+            ne, ni, np.asarray((aux_baselines or {}).get('zeff', Zeff),
+                               dtype=float))
+        if _zimp_note is not None:
+            print(f"NOTE: zeff channel active -> ni is DERIVED per draw from "
+                  f"(ne, Zeff) via quasineutrality (Z_imp = {_zimp_note:.2f}); "
+                  f"the independent sigma_ni input is not used.")
+
     t_batch_start = time.perf_counter()
     elapsed_times = []
 
     try:
-        from tqdm.auto import tqdm as _tqdm
+        # Plain text bar on stderr: tqdm.auto would emit a Jupyter widget,
+        # which breaks under capture_native_output's fd redirect.
+        from tqdm import tqdm as _tqdm
     except ImportError:
         _tqdm = None
 
@@ -2804,6 +3342,13 @@ def generate_bouquet(
     eq_iter = pbar if pbar is not None else range(n_equils)
 
     for count in eq_iter:
+        if progress_callback is not None:
+            # one tick per draw attempt -- fed to a parent aggregate bar in the
+            # process-parallel path (worker tqdm/stderr is suppressed there).
+            try:
+                progress_callback(count)
+            except Exception:
+                pass
         scale_jBS = float(jBS_scales[count])
         # ---- Per-draw l_i_target sampling ----
         # If l_i_uncertainty > 0, draw a perturbed target from
@@ -2968,9 +3513,23 @@ def generate_bouquet(
                 constrain_sawteeth=constrain_sawteeth,
                 recalculate_j_BS=recalculate_j_BS,
                 isolate_edge_jBS=isolate_edge_jBS,
+                floor_j_BS=floor_j_BS,
+                jBS_diff=jBS_diff,
+                Z_imp=Z_imp,
+                p_diff=p_diff,
+                jphi_diff=jphi_diff,
+                accept_anchor_inband=accept_anchor_inband,
+                perturb_jind_in_anchor=perturb_jind_in_anchor,
                 scale_jBS=scale_jBS,
+                swb_iterations=swb_iterations,
                 diagnostic_plots=diagnostic_plots,
                 psi_N_kinetic=psi_N_kinetic,
+                p_fast=p_fast,
+                j_NBI=j_NBI,
+                j_RF=j_RF,
+                aux_sigmas=aux_sigmas,
+                aux_baselines=aux_baselines,
+                aux_length_scales=aux_length_scales,
                 max_proxy_draws=max_proxy_draws,
                 p_thresh=p_thresh,
                 bnd_diag_callback=_report_bnd,
@@ -2993,6 +3552,10 @@ def generate_bouquet(
             _err_short = str(e).strip().splitlines()[-1] if str(e) else type(e).__name__
             print(f"\n  STOPPED: {type(e).__name__}: {_err_short}")
             print(f"  Skipping equilibrium {count+1}/{n_equils}.")
+            _skl = os.environ.get('BQ_SKIPLOG')
+            if _skl:
+                with open(_skl, 'a') as _skf:
+                    _skf.write(f"draw {count+1}/{n_equils}: {type(e).__name__}: {_err_short}\n")
 
             # Restore the recon baseline state -- (psi, coils, bounds) --
             # so the next draw starts from a known-good state rather
@@ -3220,13 +3783,8 @@ def generate_bouquet(
                     # reflects reality.
                     try:
                         _cur_skip, _ = mygs.get_coil_currents()
-                        _final_drifts = {
-                            _n: (float(_cur_skip[_n])
-                                 - _baseline_coils[_n])
-                                / max(abs(_baseline_coils[_n]), 1.0)
-                                * 100
-                            for _n in _baseline_coils
-                        }
+                        _final_drifts = _coil_drift_pct(
+                            _cur_skip, _baseline_coils)
                         _max_d = max((abs(d)
                                       for d in _final_drifts.values()),
                                      default=0.0)
@@ -3268,11 +3826,8 @@ def generate_bouquet(
                             mygs.solve()
                             # Snapshot success
                             _cur, _ = mygs.get_coil_currents()
-                            _all_drifts = {
-                                _n: (float(_cur[_n]) - _baseline_coils[_n])
-                                     / max(abs(_baseline_coils[_n]), 1.0) * 100
-                                for _n in _baseline_coils
-                            }
+                            _all_drifts = _coil_drift_pct(
+                                _cur, _baseline_coils)
                             _f_only = {n: d for n, d in _all_drifts.items()
                                         if n.startswith('F') and n not in _vsc_in_set}
                             _vsc_only = {n: d for n, d in _all_drifts.items()
@@ -3357,6 +3912,30 @@ def generate_bouquet(
                             _final_pass_idx  = _p_idx
                             _final_drift_F_lim   = _dF
                             _final_drift_VSC_lim = _dVSC
+
+                            # ---- Early stop: skip a tighter pass the current
+                            # solution already can't satisfy ----
+                            # This pass solved with HEADROOM (not saturated), so
+                            # _max_f/_max_vsc are the minimal coil drift needed to
+                            # hold the boundary. If the NEXT pass's bound is
+                            # tighter than that minimum, it cannot hold the
+                            # boundary within bound -- it will saturate or burn a
+                            # full maxits solve and roll right back here. Stop now
+                            # and keep this solution (the in-spec verdict is
+                            # already determined by these drifts). This also
+                            # covers the "coils unchanged vs the previous pass"
+                            # case (bound not binding), in its general form.
+                            if _p_idx + 1 < len(_passes):
+                                _nF, _nVSC = _passes[_p_idx + 1]
+                                if (_max_f > _nF * 100.0
+                                        or _max_vsc > _nVSC * 100.0):
+                                    print(f"  [homotopy {_label}] natural drift "
+                                          f"(F={_max_f:.2f}%, VSC={_max_vsc:.2f}%) "
+                                          f"exceeds next-pass bound "
+                                          f"(F=+/-{_nF*100:.1f}%, "
+                                          f"VSC=+/-{_nVSC*100:.1f}%) -> stop "
+                                          f"(skip infeasible tighter pass)")
+                                    break
                         except (ValueError, RuntimeError) as _hb_exc:
                             print(f"  [homotopy {_label}] F=+/-{_dF*100:.1f}%  "
                                   f"VSC=+/-{_dVSC*100:.1f}% -> infeasible "
@@ -3397,12 +3976,22 @@ def generate_bouquet(
                 if _final_drifts is not None:
                     _f_only = {n: d for n, d in _final_drifts.items()
                                 if n.startswith('F') and n not in _vsc_in_set}
-                    _vsc_only = {n: d for n, d in _final_drifts.items()
-                                  if n in _vsc_in_set}
                     _max_f_drift = float(max((abs(d) for d in _f_only.values()),
                                               default=0.0))
-                    _max_vsc_drift = float(max((abs(d) for d in _vsc_only.values()),
-                                                default=0.0))
+                    # VSC SELECTION metric: common-mode + differential channel
+                    # gate (NOT the per-coil drift -- F9A's near-zero baseline
+                    # makes a per-coil % meaningless for the anti-series pair).
+                    # Computed from the post-homotopy coil currents; falls back
+                    # to the per-coil max if the query fails.
+                    try:
+                        _cur_fin, _ = mygs.get_coil_currents()
+                        _max_vsc_drift = _vsc_channel_drift_pct(
+                            _cur_fin, _baseline_coils, _vsc_in_set)
+                    except Exception:
+                        _vsc_only = {n: d for n, d in _final_drifts.items()
+                                      if n in _vsc_in_set}
+                        _max_vsc_drift = float(max(
+                            (abs(d) for d in _vsc_only.values()), default=0.0))
                     _in_spec = (_max_f_drift <= inspec_F_max * 100.0
                                  and _max_vsc_drift <= inspec_VSC_max * 100.0)
                     _spec_msg = ('IN_SPEC' if _in_spec else 'OUT_OF_SPEC')
@@ -3513,10 +4102,21 @@ def generate_bouquet(
         diagnostics['x_points'] = _draw_xpts
         diagnostics['diverted'] = _draw_div
 
-        eq_stats_std = mygs.get_stats(li_normalization="std", lcfs_pad=psi_pad)
-        li1 = eq_stats_std["l_i"]
-        eq_stats_iter = mygs.get_stats(li_normalization="iter", lcfs_pad=psi_pad)
-        li3 = eq_stats_iter["l_i"]
+        # Guard get_stats: a degenerate draw (Ip->0 / collapsed plasma, e.g.
+        # after Sauter "corrector convergence failed") makes OFT's l_i
+        # normalization divide by zero. Don't let one bad draw crash the whole
+        # run (which would discard every already-stored draw's filtering/figs):
+        # set l_i to nan so the draw is filtered out downstream and continue.
+        try:
+            eq_stats_std = mygs.get_stats(li_normalization="std", lcfs_pad=psi_pad)
+            li1 = eq_stats_std["l_i"]
+            eq_stats_iter = mygs.get_stats(li_normalization="iter", lcfs_pad=psi_pad)
+            li3 = eq_stats_iter["l_i"]
+        except Exception as _stats_exc:
+            print(f"  WARN: per-draw get_stats failed ({_stats_exc}); "
+                  f"degenerate equilibrium -> l_i=nan (draw filtered out, "
+                  f"run continues)")
+            li1 = float('nan'); li3 = float('nan')
 
         # Pressure on the equilibrium grid (for storage and plotting).
         # Interpolate kinetic profiles onto psi_N if on a different grid.
@@ -3525,11 +4125,31 @@ def generate_bouquet(
             _to_eq = lambda arr: _interp1d_pp(
                 psi_N_kinetic, arr, kind='linear', bounds_error=False,
                 fill_value=(arr[0], arr[-1]))(psi_N)
-            pressure_perturb = EC * (_to_eq(ne_perturb) * _to_eq(te_perturb)
-                                      + _to_eq(ni_perturb) * _to_eq(ti_perturb))
+            _ne_eqp, _te_eqp = _to_eq(ne_perturb), _to_eq(te_perturb)
+            _ni_eqp, _ti_eqp = _to_eq(ni_perturb), _to_eq(ti_perturb)
         else:
-            pressure_perturb = EC * (ne_perturb * te_perturb
-                                      + ni_perturb * ti_perturb)
+            _ne_eqp, _te_eqp, _ni_eqp, _ti_eqp = (
+                ne_perturb, te_perturb, ni_perturb, ti_perturb)
+        # Thermal (main-ion + electron) pressure -- the part that perturbs with
+        # the kinetic draw.
+        pressure_perturb = EC * (_ne_eqp * _te_eqp + _ni_eqp * _ti_eqp)
+        # Total pressure the GS solve actually used for this draw: thermal +
+        # impurity(carbon) + fast + p_diff anchor, recomputed exactly as
+        # perturb_kinetic_equilibrium built its solve pressure (same components
+        # and grid). Stored as "pressure"; the thermal part is stored
+        # separately so plots show the impurity+fast the solve added.
+        pressure_total_perturb = pressure_perturb.copy()
+        if Z_imp:
+            from .physics import impurity_pressure as _impP
+            pressure_total_perturb = pressure_total_perturb + _impP(
+                _ne_eqp, _ni_eqp, _ti_eqp, Z_imp)
+        if p_fast is not None:
+            _pf_eq = np.asarray(p_fast, dtype=float)
+            pressure_total_perturb = pressure_total_perturb + (
+                _to_eq(_pf_eq) if psi_N_kinetic is not None else _pf_eq)
+        if p_diff is not None:
+            pressure_total_perturb = pressure_total_perturb + np.asarray(
+                p_diff, dtype=float)
 
         # Extract coil currents from TokaMaker
         coil_current_dict, _ = mygs.get_coil_currents()
@@ -3573,15 +4193,29 @@ def generate_bouquet(
                         )(psi_grid)
                         pf.set_profile(pf_key, psi_grid, vals)
 
-                # Keep baseline nz1 rather than recomputing from
-                # quasi-neutrality.  Bouquet perturbs ne and ni
-                # independently, which can push nz1 = (ne-ni-nb)/Z
-                # negative — an unphysical result that produces
-                # sign-flipped diamagnetic terms and spikes in Er/omghb.
-                # The baseline nz1 is a physically consistent impurity
-                # density and a reasonable approximation for the
-                # perturbed case since we are not perturbing the
-                # impurity content itself.
+                # Recompute the impurity density from THIS draw's (ne, ni)
+                # via quasineutrality, so the p-file species block implies
+                # exactly this draw's Zeff -- one Zeff per draw across the
+                # archive, the aux datasets, and the solve. With the active
+                # zeff channel, ni was derived from the drawn Zeff, so
+                # nz1 >= 0 by construction; in independent-ni mode an
+                # over-drawn ni can leave small negative nz1 values, which
+                # are clipped to zero (the old behaviour FROZE the baseline
+                # nz1 instead, which made the p-file imply a second,
+                # uncorrelated Zeff realization).
+                try:
+                    import warnings as _qn_w
+                    with _qn_w.catch_warnings():
+                        _qn_w.simplefilter("ignore", UserWarning)
+                        pf.compute_quasineutrality()
+                    _nz_entry = pf["nz1"]
+                    _nz_vals = np.asarray(_nz_entry["data"], dtype=float)
+                    if np.any(_nz_vals < 0):
+                        pf.set_profile("nz1", _nz_entry["psinorm"],
+                                       np.clip(_nz_vals, 0.0, None))
+                except Exception as _qn_exc:
+                    print(f"  WARNING: per-draw nz1 recompute failed "
+                          f"({_qn_exc}); baseline nz1 retained")
 
                 # Recompute total pressure
                 pf.compute_pressure()
@@ -3627,8 +4261,9 @@ def generate_bouquet(
             ni_perturb, ti_perturb,
             w_ExB,
             li1, li3,
-            scan_val=scan_val,
-            pressure=pressure_perturb,
+            scan_key=scan_key,
+            pressure=pressure_total_perturb,
+            pressure_thermal=pressure_perturb,
             j_BS_edge=diagnostics["j_BS_edge"],
             pfile_bytes=perturbed_pfile_bytes,
             Zeff=Zeff_profile,
@@ -3647,6 +4282,7 @@ def generate_bouquet(
             l_i_uncertainty=diagnostics.get('l_i_uncertainty'),
             x_points=diagnostics.get('x_points'),
             diverted=diagnostics.get('diverted'),
+            aux=diagnostics.get('aux'),
         )
 
         # Clean up on-disk eqdsk after archiving
@@ -3681,10 +4317,11 @@ def generate_bouquet(
 # ====================================================================
 #  Single-equilibrium reconstruction from geqdsk + kinetic profiles
 # ====================================================================
-def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff, 
+def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                             isoflux_pts, weights, psi_pad,
                             guess_jinductive,n_k,psi_bridge,rescale_j_BS,
-                            shelf_psi_N,initialize_psi=True):
+                            shelf_psi_N,initialize_psi=True,
+                            isolate_edge_jBS=False):
     r"""Reconstruct a single Grad-Shafranov equilibrium from a geqdsk
     reference and kinetic profiles, matching the EFIT :math:`l_i(1)`.
 
@@ -3770,15 +4407,24 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     eqdsk_jtor = abs(eqdsk.j_tor_averaged_direct)
 
     # ---- 2. Bootstrap current ----
+    # isolate_edge_jBS=False keeps the FULL Sauter bootstrap (physical core hump
+    # + edge spike) so the reconstructed j_BS/j_inductive split matches what the
+    # draws recompute via solve_with_bootstrap. isolate_edge_jBS=True instead
+    # isolates the edge spike and parks a flat shelf in the (g-file-degenerate)
+    # core -- robust but non-physical, and 2x below the draws' Sauter hump, which
+    # left the stored baseline ohmic inflated relative to every draw.
     results = solve_with_bootstrap(
         mygs, ne, te, ni, ti, Zeff,
         abs(eqdsk.Ip), guess_jinductive,
         scale_jBS=1.0,
-        isolate_edge_jBS=True,
+        isolate_edge_jBS=isolate_edge_jBS,
         diagnostic_plots=False,
     )
 
-    j_BS_isolated = results['isolated_j_BS']
+    # Convert SWB's parallel-projected bootstrap to the toroidal convention
+    # shared by eqdsk_jtor and the fitted inductive profile, so the
+    # j_BS / j_inductive split is done in a single convention.
+    j_BS_isolated = _swb_jbs_to_toroidal(mygs, results['isolated_j_BS'], psi_pad)
 
     # ---- 2b. Classify the j_phi profile ----
     jphi_mode, spike_metrics = classify_jphi_profile(
