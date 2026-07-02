@@ -950,6 +950,10 @@ def draw_zeff(ax, psi_N_kin, bl, perturbed_data_list=None):
             sb = np.asarray(sb, float)
             ax.fill_between(psi_N_kin, zb - sb, zb + sb, color="0.7",
                             alpha=0.3, zorder=2, label=r"$\pm\,1\sigma_{\rm exp}$")
+            ax.plot(psi_N_kin, zb + 2 * sb, c="k", ls=":", lw=1.5, alpha=0.5,
+                    label=r"$\pm\,2\sigma_{\rm exp}$", zorder=2)
+            ax.plot(psi_N_kin, zb - 2 * sb, c="k", ls=":", lw=1.5, alpha=0.5,
+                    zorder=2)
         ax.plot(psi_N_kin, zb, c="k", lw=2, label="baseline", zorder=5)
     ax.legend(loc="best", fontsize=7)
 
@@ -1352,11 +1356,11 @@ def plot_bouquet(h5path_or_header, scan_key=None, mode="kinetic",
         except Exception:
             pass
 
-        # Append the auxiliary-profile figure when the run carries switchboard
-        # profiles: always for IMAS (provenance marker), and for any run -- incl.
-        # geqdsk -- that supplied omega_tor / chi (aux-presence fallback, also
-        # covers archives written before the marker existed).
-        if _source_kind(h5path, scan_key) == "imas" or _has_aux(h5path, scan_key):
+        # Append the auxiliary-profile figure only when the run carries a
+        # rotation/transport switchboard (omega_tor / chi / e_r) -- zeff alone
+        # does NOT trigger it, since zeff has its own dashboard panel. Covers
+        # both IMAS and any geqdsk run that supplied those channels.
+        if _has_aux(h5path, scan_key):
             try:
                 ex_fig, _ = plot_aux_profiles(h5path, scan_key=scan_key,
                                               selection=selection)
@@ -1437,11 +1441,9 @@ def plot_bouquet(h5path_or_header, scan_key=None, mode="kinetic",
             figs.append(fig_bd)
             axes_list.append(ax_bd)
 
-    # Auxiliary-profile figure: always for IMAS (provenance marker), else when
-    # switchboard profiles are present (geqdsk runs that supplied omega_tor/chi,
-    # and pre-marker archives).
-    if mode == "all" and (_source_kind(h5path, scan_key) == "imas"
-                          or _has_aux(h5path, scan_key)):
+    # Auxiliary-profile figure: appended only when a rotation/transport
+    # switchboard is present (zeff alone has its own dashboard panel).
+    if mode == "all" and _has_aux(h5path, scan_key):
         try:
             ex_fig, _ = plot_aux_profiles(h5path, scan_key=scan_key,
                                           selection=selection)
@@ -1529,6 +1531,122 @@ def _resolve_x_coord(psi_N, x_coord, eq=None, psi_pf=None):
         return rho, r"$\rho$"
     else:
         raise ValueError(f"x_coord must be 'psi_N' or 'rho', got {x_coord!r}")
+
+
+def _imas_input_profiles(source):
+    r"""Raw input ``(psi_N, pressure[Pa], q)`` from the IDS ``equilibrium``
+    profiles_1d at ``source.time`` -- the values the IMAS forward solve starts
+    from (for the input-vs-solved comparison). ``q`` is ``None`` when the IDS
+    does not store it (some FUSE/OMAS exports omit equilibrium q)."""
+    import json
+    d = json.load(open(source.ids_path))
+    eq = d["equilibrium"]
+    t = np.asarray(eq["time"], float)
+    tt = getattr(source, "time", None)
+    ie = 0 if tt is None else int(np.argmin(np.abs(t - float(tt))))
+    p1 = eq["time_slice"][ie]["profiles_1d"]
+    psi = np.asarray(p1["psi"], float)
+    psiN = (psi - psi[0]) / (psi[-1] - psi[0]) if psi[-1] != psi[0] else psi
+    q = np.asarray(p1["q"], float) if "q" in p1 else None
+    return psiN, np.asarray(p1["pressure"], float), q
+
+
+def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
+    r"""Compare the reconstructed / forward-solved baseline against the RAW
+    INPUT -- pressure, :math:`j_\phi`, q, and the separatrix (with the green→red
+    colour-coded boundary deviation reused from the reconstruction diagnostic).
+
+    Operates on a live :class:`~bouquet.Bouquet` ``run`` AFTER
+    ``reconstruct()`` / ``prepare_baseline()`` -- it reads ``run.baseline`` and
+    the solved ``run.mygs``. The raw input is the g-file on the reconstruction
+    path and the IDS ``equilibrium`` on the IMAS path (auto-detected via
+    ``baseline.provenance``). On the reconstruction path all four panels carry
+    signal (the fit vs the g-file); on the IMAS path the pressure / current are
+    prescribed, so those panels mostly confirm faithful input while q and the
+    separatrix show the forward solve's geometric result. Returns the Figure.
+    """
+    import matplotlib.pyplot as plt
+    from .TokaMaker_interface import safe_trace_surf
+    bl = getattr(run, "baseline", None)
+    mygs = getattr(run, "mygs", None)
+    if bl is None or mygs is None:
+        raise RuntimeError(
+            "plot_input_vs_recon(run) needs a prepared run -- call "
+            "setup_solver() then reconstruct()/prepare_baseline() first.")
+    psi_pad = float(getattr(run.config.source, "psi_pad", 1e-3))
+    is_imas = (str(getattr(bl, "provenance", "")) == "imas"
+               or type(run.config.source).__name__ == "ImasSource")
+
+    # ---- reconstructed / solved side (live TokaMaker solve) ----------------
+    psiN_p, _f, _fp, p_sol, _pp = mygs.get_profiles(npsi=npsi, psi_pad=psi_pad)
+    psiN_q, q_sol = mygs.get_q(npsi=npsi, psi_pad=psi_pad)[:2]
+    psiN_q = np.asarray(psiN_q, float)
+    if psiN_q.size and psiN_q.max() > 1.5:          # in case get_q returns psi, not psi_N
+        psiN_q = (psiN_q - psiN_q.min()) / (psiN_q.max() - psiN_q.min())
+    lcfs = np.asarray(safe_trace_surf(mygs, 1.0 - psi_pad), float)
+    j_sol_x = np.asarray(bl.psi_N, float)
+    j_sol = np.asarray(bl.j_phi, float)
+
+    # ---- raw input side ----------------------------------------------------
+    if not is_imas:
+        eq = read_geqdsk(run.config.source.geqdsk_path)
+        in_x = np.asarray(eq.psi_N, float)
+        in_p = np.asarray(eq.pres, float)
+        in_q = np.asarray(eq.q_profile, float)
+        in_jx = in_x; in_j = np.asarray(eq.j_tor_averaged_direct, float)
+        in_bR = np.asarray(eq.boundary_R, float)
+        in_bZ = np.asarray(eq.boundary_Z, float)
+        in_lbl = "input g-file"
+    else:
+        from .io.imas import read_imas_geometry
+        in_x, in_p, in_q = _imas_input_profiles(run.config.source)
+        in_jx = j_sol_x; in_j = j_sol         # IMAS input j_tor == baseline total
+        _F0, bRZ = read_imas_geometry(run.config.source)
+        bRZ = np.asarray(bRZ, float)
+        in_bR, in_bZ = bRZ[:, 0], bRZ[:, 1]
+        in_lbl = "input IDS"
+
+    # q is plotted as |q| so the input and the solve overlay regardless of the
+    # COCOS sign convention (the g-file / IDS q can carry the opposite sign to
+    # TokaMaker's), making the shape comparison direct.
+    in_q_abs = np.abs(in_q) if in_q is not None else None
+    q_sol_abs = np.abs(q_sol)
+
+    C_IN, C_SOL = "tab:blue", "k"
+    fig, ax = plt.subplots(2, 2, figsize=(10.5, 8.5))
+    _panels = [
+        (ax[0, 0], in_x, in_p / 1e3, psiN_p, p_sol / 1e3, "pressure [kPa]"),
+        (ax[0, 1], in_jx, in_j / 1e6, j_sol_x, j_sol / 1e6, r"$j_\phi$ [MA/m$^2$]"),
+        (ax[1, 0], in_x, in_q_abs, psiN_q, q_sol_abs, r"$|q|$"),
+    ]
+    for a, ix, iy, sx, sy, ylab in _panels:
+        a.cla(); a.grid(ls=":")
+        if iy is not None:                       # input may be absent (e.g. IDS q)
+            a.plot(ix, iy, ls=":", c=C_IN, lw=2.0, label=in_lbl, zorder=3)
+        else:
+            a.text(0.5, 0.92, "(input not in IDS)", fontsize=7, color=C_IN,
+                   ha="center", va="top", transform=a.transAxes)
+        a.plot(sx, sy, "-", c=C_SOL, lw=2.0, label="reconstructed", zorder=4)
+        a.set_xlabel(r"$\hat{\psi}$"); a.set_ylabel(ylab)
+        a.set_xlim(0, 1); a.legend(fontsize=8, loc="best")
+
+    # separatrix panel with the colour-coded boundary deviation
+    iso_pts = np.column_stack([in_bR, in_bZ])
+    try:
+        _, mx, rms = _isoflux_deviation_plot(
+            ax[1, 1], fig, iso_pts, lcfs, in_bR, in_bZ, max_dev_mm=max_dev_mm)
+        ax[1, 1].plot(in_bR, in_bZ, ls=":", c=C_IN, lw=1.5, label=in_lbl)
+        ax[1, 1].set_title(f"separatrix  (max {mx:.1f} mm · RMS {rms:.1f} mm)",
+                           fontsize=10)
+        ax[1, 1].legend(fontsize=8, loc="lower right")
+    except Exception as exc:                          # never let one panel kill the figure
+        ax[1, 1].text(0.5, 0.5, f"separatrix unavailable\n({exc})",
+                      ha="center", va="center", transform=ax[1, 1].transAxes)
+
+    fig.suptitle(f"Input vs reconstruction  —  {getattr(bl, 'provenance', '?')}",
+                 fontsize=12, y=0.995)
+    fig.tight_layout()
+    return fig
 
 
 def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
@@ -2354,7 +2472,11 @@ def plot_aux_profiles(h5path_or_header, scan_key=None, names=None,
                 if "psi_N_kinetic" in g:
                     xgrid = np.asarray(g["psi_N_kinetic"][()])
                 break
-    names = names or [n for n in _AUX_ORDER if n in avail] or avail
+    # Auto-selection excludes zeff -- it has its own panel in the main
+    # plot_bouquet dashboard, so showing it here too is redundant (this figure is
+    # the rotation/transport switchboard). Pass names=['zeff'] to force it.
+    names = (names or [n for n in _AUX_ORDER if n in avail and n != "zeff"]
+             or [n for n in avail if n != "zeff"])
     if not names:
         print("No aux_* profiles stored (switchboard not used for this run).")
         return None, None

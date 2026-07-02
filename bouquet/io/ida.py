@@ -72,8 +72,8 @@ def _select_time_index(time_ms: np.ndarray, time_s: Optional[float]) -> int:
 def read_ida(
     path: str,
     time: Optional[float] = None,
-    sigma_mode: str = "direct",
-    sigma_method: str = "percentile",   # reserved for the ensemble layout
+    sigma_mode: str = "auto",
+    sigma_method: str = "percentile",   # ensemble-layout band estimator
     sigma_ni_from_ne: bool = True,
     impurity_Z: float = 6.0,
 ) -> IDAProfiles:
@@ -86,11 +86,14 @@ def read_ida(
     time : float, optional
         Time slice in seconds. Required when the file holds more than one slice;
         the nearest slice is selected.
-    sigma_mode : {"direct", "ensemble"}
-        ``"direct"`` reads the ``*_err`` datasets (the operational layout).
-        ``"ensemble"`` (posterior-sample files) is not yet implemented.
+    sigma_mode : {"auto", "direct", "ensemble"}
+        ``"auto"`` (default) picks the layout from the array dimensionality.
+        ``"direct"`` reads the ``*_err`` datasets (2-D operational layout);
+        ``"ensemble"`` reduces a 3-D posterior-sample file (mean profile + a
+        sample-spread sigma). Passing a mode that contradicts the file raises.
     sigma_method : {"percentile", "std"}
-        Band estimator for the ensemble layout (unused for ``"direct"``).
+        Ensemble band estimator: ``"percentile"`` -> (p84-p16)/2 (robust),
+        ``"std"`` -> sample standard deviation. Unused for the direct layout.
     sigma_ni_from_ne : bool
         Retained for API symmetry. With ``ni = ne`` the ion-density sigma always
         tracks ``sigma_ne``.
@@ -103,42 +106,66 @@ def read_ida(
     """
     import h5py
 
-    if sigma_mode == "ensemble":
-        raise NotImplementedError(
-            "ensemble (posterior-sample) IDA layout not yet supported; "
-            "use sigma_mode='direct' for the operational IDA_*.cdf files"
-        )
-    if sigma_mode != "direct":
-        raise ValueError(f"unknown sigma_mode {sigma_mode!r}; expected 'direct' or 'ensemble'")
+    if sigma_mode not in ("direct", "ensemble", "auto"):
+        raise ValueError(
+            f"unknown sigma_mode {sigma_mode!r}; expected 'direct', 'ensemble', or 'auto'")
+    if sigma_method not in ("percentile", "std"):
+        raise ValueError(
+            f"unknown sigma_method {sigma_method!r}; expected 'percentile' or 'std'")
 
     with open(path, "rb") as fh:
         raw_bytes = fh.read()
 
-    with h5py.File(path, "r") as f:
-        def col(key):  # one radial profile at the selected time
-            return np.asarray(f[key][t_idx], dtype=float)
+    from ..physics import main_ion_density_from_zeff
 
-        psi_N = np.asarray(f["psi_n"][:], dtype=float)
-        time_ms = np.asarray(f["time"][:], dtype=float)
+    with h5py.File(path, "r") as f:
+        time_ms = np.asarray(f["time"][:], dtype=float).ravel()
         t_idx = _select_time_index(time_ms, time)
         t_sel = float(time_ms[t_idx] / 1e3)
 
-        ne = col("n_e")          # m^-3
-        te = col("T_e")          # eV
-        ti = col("T_12C6")       # eV (carbon CER temperature -> carbon impurity)
-        Zeff = col("Zeff")
+        # Two field-validated layouts, distinguished by dimensionality:
+        #   direct   : (n_time, n_radial) profiles + companion *_err datasets;
+        #   ensemble : (n_time, n_samples, n_radial) posterior samples, no *_err
+        #              -> profile = sample mean, sigma = sample spread.
+        is_ensemble = (np.asarray(f["n_e"].shape).size == 3)
+        if sigma_mode == "direct" and is_ensemble:
+            raise ValueError("sigma_mode='direct' but the file is a 3-D posterior "
+                             "(ensemble) IDA; use sigma_mode='auto' or 'ensemble'")
+        if sigma_mode == "ensemble" and not is_ensemble:
+            raise ValueError("sigma_mode='ensemble' but the file is a 2-D direct "
+                             "IDA; use sigma_mode='auto' or 'direct'")
+
+        if is_ensemble:
+            def _samples(key):  # (n_samples, n_radial) at the selected slice
+                return np.asarray(f[key][t_idx], dtype=float)
+
+            def _band(a):       # symmetric 1-sigma-equivalent over the sample axis
+                if sigma_method == "std":
+                    return np.std(a, axis=0)
+                lo, hi = np.percentile(a, [16.0, 84.0], axis=0)
+                return 0.5 * (hi - lo)
+
+            psi_N = np.asarray(f["psi_n"][t_idx], dtype=float)[0]   # shared radial grid
+            ne_s, te_s = _samples("n_e"), _samples("T_e")
+            ti_s, zf_s = _samples("T_12C6"), _samples("Zeff")
+            ne, te, ti, Zeff = (ne_s.mean(0), te_s.mean(0), ti_s.mean(0), zf_s.mean(0))
+            sigma_ne, sigma_te, sigma_ti = _band(ne_s), _band(te_s), _band(ti_s)
+        else:
+            def col(key):       # one radial profile at the selected time
+                return np.asarray(f[key][t_idx], dtype=float)
+
+            psi_N = np.asarray(f["psi_n"][:], dtype=float)
+            ne, te = col("n_e"), col("T_e")          # m^-3, eV
+            ti, Zeff = col("T_12C6"), col("Zeff")    # eV (carbon CER), dimensionless
+            sigma_ne, sigma_te, sigma_ti = col("n_e_err"), col("T_e_err"), col("T_12C6_err")
+
         # Main-ion density from the measured (ne, Zeff) via single-impurity
         # quasineutrality: ni = ne (Z_imp - Zeff)/(Z_imp - 1). The IDA file
         # carries Z_eff directly (visible bremsstrahlung), so the dilution is
         # measured, not assumed -- equivalent in information to a p-file's
         # (ne, ni). Z_eff is clipped to [1, Z_imp] so 0 <= ni <= ne.
-        from ..physics import main_ion_density_from_zeff
         Zeff_c = np.clip(Zeff, 1.0, impurity_Z)
         ni = main_ion_density_from_zeff(ne, Zeff_c, impurity_Z)
-
-        sigma_ne = col("n_e_err")
-        sigma_te = col("T_e_err")
-        sigma_ti = col("T_12C6_err")
         # sigma_ni is only used in the (now rare) independent-ni fallback;
         # propagate the ne fractional error onto the derived ni.
         with np.errstate(divide="ignore", invalid="ignore"):

@@ -171,6 +171,11 @@ class Bouquet:
         return self.config.filtering
 
     @property
+    def fixed_components(self):
+        """The :class:`FixedComponentsConfig` (fast pressure, NBI/RF current)."""
+        return self.config.fixed_components
+
+    @property
     def output_header(self):
         """The output archive header -- draws are written to ``{header}.h5``."""
         return self.config.output_header

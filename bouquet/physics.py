@@ -239,3 +239,97 @@ def impurity_pressure(ne, ni, ti, Z_imp):
     nz = np.clip((np.asarray(ne, dtype=float) - np.asarray(ni, dtype=float))
                  / float(Z_imp), 0.0, None)
     return _EC * nz * np.asarray(ti, dtype=float)
+
+
+def fast_pressure_residual(psi_N, ne, te, ni, ti, Z_imp, psi_N_gfile, p_gfile):
+    """Fast-ion pressure inferred as the g-file total minus the thermal pressure.
+
+    The reconstruction path takes thermal kinetics from the IDA ``.cdf`` (no fast
+    channel), but the g-file's ``equilibrium.pressure`` is the *total* (thermal +
+    impurity + fast) pressure that constrained the original EFIT. The difference
+    is the fast (beam) pressure plus any small GS / numerical residual::
+
+        p_fast(psi) = max( p_gfile(psi)
+                           - e (ne Te + ni Ti)        # main e + i thermal
+                           - p_impurity(ne, ni, Ti)   # carbon thermal
+                         , 0 )
+
+    ``p_gfile`` (on its own ``psi_N_gfile`` grid) is linearly interpolated onto
+    the kinetic ``psi_N`` grid before differencing, so the result is ready to feed
+    to ``FixedComponentsConfig.p_fast`` (with ``psi_N``). It is clipped at zero to
+    stay physical. Subtracting :func:`impurity_pressure` here avoids double-counting
+    the carbon term, which bouquet re-adds per draw. An explicit TRANSP/ONETWO
+    ``p_fast`` should be preferred when available; this residual is the
+    no-extra-data fallback for NBI-heated shots.
+
+    Returns ``p_fast`` [Pa] on ``psi_N``.
+    """
+    psi_N = np.asarray(psi_N, dtype=float)
+    ne = np.asarray(ne, dtype=float)
+    te = np.asarray(te, dtype=float)
+    ni = np.asarray(ni, dtype=float)
+    ti = np.asarray(ti, dtype=float)
+
+    p_gfile_kin = np.interp(psi_N, np.asarray(psi_N_gfile, dtype=float),
+                            np.asarray(p_gfile, dtype=float))
+    p_thermal = _EC * (ne * te + ni * ti)
+    p_imp = impurity_pressure(ne, ni, ti, Z_imp)
+    return np.clip(p_gfile_kin - p_thermal - p_imp, 0.0, None)
+
+
+def infer_fast_pressure(psi_N, ne, te, ni, ti, Z_imp, psi_N_gfile, p_gfile,
+                        axis_psi_N: float = 0.15):
+    """Validated fast-ion pressure from the g-file/thermal residual.
+
+    Wraps :func:`fast_pressure_residual` with a physical-validity gate. The
+    residual ``p_gfile - p_thermal - p_imp`` is only a meaningful fast pressure
+    when the g-file is a *kinetic*-EFIT whose total pressure was constrained to
+    ``p_thermal + p_fast``; for a magnetics/standard EFIT the total can fall
+    *below* the kinetic thermal pressure near the axis, and the clipped residual
+    is then an artifact (zero core, spurious mid-radius bump) rather than a real
+    beam profile -- a true NBI fast pressure peaks *at* the axis.
+
+    Gate: a real core-peaked fast profile must be non-negative on axis, so if the
+    (unclipped) residual is negative on average over the near-axis region
+    (``psi_N <= axis_psi_N``) -- thermal already exceeds the g-file total there --
+    the g-file is not usable for fast-pressure extraction, and this returns
+    **zeros** (thermal-only, matching the reference behaviour) with a diagnostic
+    message. Otherwise it returns the clipped residual.
+
+    Returns ``(p_fast, info)`` where ``info`` is a dict with ``valid`` (bool),
+    ``axis_residual_Pa``, ``peak_Pa``, ``peak_psi_N``, and a human-readable
+    ``message`` the caller can print.
+    """
+    psi_N = np.asarray(psi_N, dtype=float)
+    ne = np.asarray(ne, dtype=float); te = np.asarray(te, dtype=float)
+    ni = np.asarray(ni, dtype=float); ti = np.asarray(ti, dtype=float)
+
+    p_gfile_kin = np.interp(psi_N, np.asarray(psi_N_gfile, dtype=float),
+                            np.asarray(p_gfile, dtype=float))
+    raw = p_gfile_kin - _EC * (ne * te + ni * ti) - impurity_pressure(ne, ni, ti, Z_imp)
+
+    axis = psi_N <= axis_psi_N
+    axis_resid = float(np.mean(raw[axis])) if axis.any() else float(raw[0])
+    valid = axis_resid >= 0.0
+
+    if valid:
+        p_fast = np.clip(raw, 0.0, None)
+        ipk = int(np.argmax(p_fast))
+        info = dict(valid=True,
+                    axis_residual_Pa=axis_resid,
+                    peak_Pa=float(p_fast[ipk]),
+                    peak_psi_N=float(psi_N[ipk]),
+                    message=(f"[p_fast] kinetic-EFIT residual OK: peak "
+                             f"{p_fast[ipk]:.0f} Pa at psi_N={psi_N[ipk]:.2f}"))
+    else:
+        p_fast = np.zeros_like(psi_N)
+        info = dict(valid=False,
+                    axis_residual_Pa=axis_resid,
+                    peak_Pa=0.0,
+                    peak_psi_N=float("nan"),
+                    message=(f"[p_fast] g-file total < thermal near the axis "
+                             f"(mean near-axis residual {axis_resid:.0f} Pa < 0): "
+                             f"not a kinetic-EFIT -> p_fast=0 (thermal-only). Supply "
+                             f"a kinetic-EFIT g-file or a TRANSP/ONETWO p_fast to "
+                             f"include fast pressure."))
+    return p_fast, info

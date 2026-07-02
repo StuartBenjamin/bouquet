@@ -207,7 +207,7 @@ class UncertaintyConfig:
     #      its `*_err` datasets;
     #   3. a flat fractional fallback, `<chan>_scalar_sigma` * baseline profile.
     ida_path: Optional[str] = None
-    sigma_mode: str = "direct"             # "direct" (*_err datasets) | "ensemble"
+    sigma_mode: str = "auto"               # "auto" (by dim) | "direct" (*_err) | "ensemble"
     sigma_method: str = "percentile"       # "percentile" | "std"  (ensemble only)
     sigma_ni_from_ne: bool = True          # IDA path only: sigma_ni = sigma_ne
 
@@ -420,8 +420,8 @@ class BouquetConfig:
             raise ValueError(
                 "fixed_components.p_fast_reduction must be 'trace', 'mean', or 'perp'"
             )
-        if self.uncertainty.sigma_mode not in ("direct", "ensemble"):
-            raise ValueError("uncertainty.sigma_mode must be 'direct' or 'ensemble'")
+        if self.uncertainty.sigma_mode not in ("auto", "direct", "ensemble"):
+            raise ValueError("uncertainty.sigma_mode must be 'auto', 'direct', or 'ensemble'")
         if self.uncertainty.sigma_method not in ("percentile", "std"):
             raise ValueError(
                 "uncertainty.sigma_method must be 'percentile' or 'std'")

@@ -50,6 +50,7 @@ from .plotting import (
     plot_transport_profiles,
     plot_tokamaker_comparison,
     plot_geqdsk_bouquet,
+    plot_input_vs_recon,
     plot_pfile_bouquet,
     plot_coil_currents,
     plot_spec_summary,
@@ -104,7 +105,13 @@ from .config import (
     FilterConfig,
 )
 from .baseline import Baseline, resolve_baseline, resolve_uncertainty
-from .physics import isotropize_fast_pressure, parallel_to_toroidal
+from .physics import (
+    isotropize_fast_pressure,
+    parallel_to_toroidal,
+    fast_pressure_residual,
+    infer_fast_pressure,
+)
+from .paths import add_oft_to_path, find_mesh
 from .io.ida import read_ida, IDAProfiles
 from .io.imas import (read_imas_baseline, read_imas_geometry,
                       write_imas_draw, export_imas_drawset)
@@ -140,7 +147,7 @@ __all__ = [
     # ---- plotting ----
     "set_plot_style", "WONG",
     "plot_bouquet", "plot_imas_bouquet", "plot_bouquet_timeseries",
-    "plot_geqdsk_bouquet", "plot_pfile_bouquet",
+    "plot_geqdsk_bouquet", "plot_input_vs_recon", "plot_pfile_bouquet",
     "plot_aux_profiles", "plot_transport_profiles", "plot_tokamaker_comparison",
     "plot_coil_currents", "plot_spec_summary",
     "plot_kinetic_profiles", "plot_jphi_profiles",
@@ -150,7 +157,10 @@ __all__ = [
     "draw_flux_function",
     # ---- physics helpers ----
     "isotropize_fast_pressure", "parallel_to_toroidal",
+    "fast_pressure_residual", "infer_fast_pressure",
     "Hmode_profiles",
+    # ---- environment / path resolution ----
+    "add_oft_to_path", "find_mesh",
     # ---- profile sampling / uncertainty ----
     "GPRProfilePerturber", "generate_perturbed_GPR", "sigmoid_length_scale",
     "verify_gpr_statistics", "calc_cylindrical_li_proxy",

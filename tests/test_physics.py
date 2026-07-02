@@ -236,3 +236,53 @@ class TestImpurityRoundTrip:
         ni = main_ion_density_from_zeff(ne, zeff, ZW)
         assert np.all(ni < ne) and np.all(ni > 0.98 * ne)  # ni/ne = (74-1.6)/73
         assert np.isclose((ne[0] - ni[0]) / ne[0], (zeff[0] - 1) / (ZW - 1), rtol=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# fast_pressure_residual / infer_fast_pressure
+# ---------------------------------------------------------------------------
+class TestFastPressure:
+    def setup_method(self):
+        from bouquet.physics import impurity_pressure
+        self.psi = np.linspace(0, 1, 64)
+        self.ne = np.full(64, 5e19)
+        self.te = np.full(64, 1500.0)
+        self.ni = np.full(64, 4.5e19)
+        self.ti = np.full(64, 1500.0)
+        self.Zimp = 6.0
+        e = 1.602176634e-19
+        self._p_th = (e * (self.ne * self.te + self.ni * self.ti)
+                      + impurity_pressure(self.ne, self.ni, self.ti, self.Zimp))
+
+    def test_residual_recovers_added_fast(self):
+        from bouquet.physics import fast_pressure_residual
+        p_tot = self._p_th + 3000.0
+        pf = fast_pressure_residual(self.psi, self.ne, self.te, self.ni, self.ti,
+                                    self.Zimp, self.psi, p_tot)
+        assert np.allclose(pf, 3000.0, atol=1e-6)
+
+    def test_residual_clips_negative(self):
+        from bouquet.physics import fast_pressure_residual
+        pf = fast_pressure_residual(self.psi, self.ne, self.te, self.ni, self.ti,
+                                    self.Zimp, self.psi, self._p_th - 5000.0)
+        assert np.all(pf >= 0.0)
+
+    def test_infer_valid_core_peaked(self):
+        from bouquet.physics import infer_fast_pressure
+        fast = 8000.0 * np.exp(-(self.psi / 0.3) ** 2)   # core-peaked beam
+        pf, info = infer_fast_pressure(self.psi, self.ne, self.te, self.ni,
+                                       self.ti, self.Zimp, self.psi, self._p_th + fast)
+        assert info["valid"] is True
+        assert np.isclose(info["peak_psi_N"], 0.0, atol=0.05)
+        assert np.isclose(pf[0], 8000.0, rtol=0.02)
+
+    def test_infer_invalid_thermal_exceeds_total_on_axis(self):
+        from bouquet.physics import infer_fast_pressure
+        # total below thermal near axis (magnetics EFIT) -> invalid -> zeros
+        bad = self._p_th.copy()
+        bad[self.psi <= 0.15] -= 6000.0
+        pf, info = infer_fast_pressure(self.psi, self.ne, self.te, self.ni,
+                                       self.ti, self.Zimp, self.psi, bad)
+        assert info["valid"] is False
+        assert np.allclose(pf, 0.0)
+        assert "not a kinetic-EFIT" in info["message"]
