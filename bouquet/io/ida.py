@@ -56,6 +56,35 @@ class IDAProfiles:
     raw_bytes: Optional[bytes] = None   # original file bytes for archival
 
 
+@dataclass
+class IDACERProfiles:
+    """Impurity (carbon CER) channels for a radial-field / rotation analysis.
+
+    Everything needed for the impurity radial force balance
+    ``E_r = (dp_C/dR)/(Z_C e n_C) - v_pol B_phi + omega R B_pol`` (see
+    :func:`bouquet.physics.radial_field_from_cer`), read at one time slice on
+    ``psi_N``. SI units: ``n_carbon`` m^-3, ``t_carbon`` eV, ``omega_tor`` rad/s,
+    ``v_pol`` m/s, ``Bpol`` T, ``Rmaj`` m, ``dpsiN_dR`` 1/m. The ``sigma_*``
+    fields are the measured 1-sigma envelopes (for propagating E_r uncertainty).
+    """
+
+    psi_N: np.ndarray
+    n_carbon: np.ndarray
+    t_carbon: np.ndarray
+    omega_tor: np.ndarray
+    v_pol: np.ndarray
+    Bpol: np.ndarray
+    Rmaj: np.ndarray
+    dpsiN_dR: np.ndarray
+
+    sigma_n_carbon: np.ndarray
+    sigma_t_carbon: np.ndarray
+    sigma_omega_tor: np.ndarray
+    sigma_v_pol: np.ndarray
+
+    time: float
+
+
 def _select_time_index(time_ms: np.ndarray, time_s: Optional[float]) -> int:
     """Return the index of the slice nearest ``time_s`` (seconds)."""
     if time_ms.size == 1:
@@ -178,4 +207,67 @@ def read_ida(
         sigma_ne=sigma_ne, sigma_te=sigma_te, sigma_ni=sigma_ni, sigma_ti=sigma_ti,
         time=t_sel,
         raw_bytes=raw_bytes,
+    )
+
+
+def read_ida_cer(
+    path: str,
+    time: Optional[float] = None,
+    sigma_method: str = "percentile",
+) -> IDACERProfiles:
+    """Read the carbon-CER channels needed for a radial-field (E_r) analysis.
+
+    Returns the impurity density / temperature, toroidal + poloidal rotation, the
+    midplane poloidal field and geometry (``Rmaj``, ``dpsiN_dR``), and their
+    measured 1-sigma envelopes, at ``time`` on the IDA ``psi_N`` grid. Handles
+    both file layouts like :func:`read_ida`: direct (2-D + ``*_err``) and ensemble
+    (3-D posterior samples -> sample mean + ``sigma_method`` band). Feed the
+    result to :func:`bouquet.physics.radial_field_from_cer`.
+    """
+    import h5py
+
+    if sigma_method not in ("percentile", "std"):
+        raise ValueError(f"unknown sigma_method {sigma_method!r}")
+
+    with h5py.File(path, "r") as f:
+        time_ms = np.asarray(f["time"][:], dtype=float).ravel()
+        t_idx = _select_time_index(time_ms, time)
+        t_sel = float(time_ms[t_idx] / 1e3)
+        is_ensemble = (np.asarray(f["n_e"].shape).size == 3)
+
+        def _band(a):
+            if sigma_method == "std":
+                return np.std(a, axis=0)
+            lo, hi = np.percentile(a, [16.0, 84.0], axis=0)
+            return 0.5 * (hi - lo)
+
+        def read(key, err_key=None):
+            """(value, sigma) for one channel across either layout."""
+            if is_ensemble:
+                s = np.asarray(f[key][t_idx], dtype=float)      # (n_samples, n_radial)
+                return s.mean(0), _band(s)
+            val = np.asarray(f[key][t_idx], dtype=float)
+            sig = (np.asarray(f[err_key][t_idx], dtype=float)
+                   if err_key and err_key in f else np.zeros_like(val))
+            return val, sig
+
+        if is_ensemble:
+            psi_N = np.asarray(f["psi_n"][t_idx], dtype=float)[0]
+        else:
+            psi_N = np.asarray(f["psi_n"][:], dtype=float)
+
+        n_c, s_nc = read("n_12C6", "n_12C6_err")
+        t_c, s_tc = read("T_12C6", "T_12C6_err")
+        omg, s_om = read("omega_tor_12C6", "omega_tor_12C6_err")
+        vpol, s_vp = read("v_pol", "v_pol_err")
+        bpol, _ = read("Bpol_midplane", "Bpol_midplane_err")
+        rmaj, _ = read("Rmaj_midplane", "Rmaj_midplane_err")
+        dpsidr, _ = read("dPsiN_dR_midplane", "dPsiN_dR_midplane_err")
+
+    return IDACERProfiles(
+        psi_N=psi_N, n_carbon=n_c, t_carbon=t_c, omega_tor=omg, v_pol=vpol,
+        Bpol=bpol, Rmaj=rmaj, dpsiN_dR=dpsidr,
+        sigma_n_carbon=s_nc, sigma_t_carbon=s_tc,
+        sigma_omega_tor=s_om, sigma_v_pol=s_vp,
+        time=t_sel,
     )

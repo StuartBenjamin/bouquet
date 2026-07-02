@@ -333,3 +333,76 @@ def infer_fast_pressure(psi_N, ne, te, ni, ti, Z_imp, psi_N_gfile, p_gfile,
                              f"a kinetic-EFIT g-file or a TRANSP/ONETWO p_fast to "
                              f"include fast pressure."))
     return p_fast, info
+
+
+def radial_field_from_cer(psi_N, n_carbon, t_carbon, omega_tor, v_pol,
+                          Bpol, Rmaj, dpsiN_dR, B_phi, Z_C=6.0,
+                          sigma_n_carbon=None, sigma_t_carbon=None,
+                          sigma_omega_tor=None, sigma_v_pol=None):
+    r"""Radial electric field from the impurity (carbon CER) radial force balance.
+
+    The steady-state radial force balance of the measured impurity species
+    (charge ``e_a = Z_C e``), with inertia and viscosity neglected, is
+
+    .. math::
+
+        E_r = \frac{1}{Z_C e\, n_C}\frac{dp_C}{dR}
+              \;-\; v_\theta B_\phi \;+\; v_\phi B_\theta ,
+
+    with :math:`p_C = e\,n_C T_C`, :math:`v_\phi = \omega_{tor} R`, and
+    :math:`v_\theta` the measured poloidal velocity. This is the standard CER
+    relation (Wesson, *Tokamaks* 4th ed., momentum eq. 2.23.2 and the radial
+    force-balance passage; Burrell, *Phys. Plasmas* 4, 1499 (1997)). All three
+    terms are of comparable size at low rotation.
+
+    Inputs are SI on the common ``psi_N`` grid: ``n_carbon`` m^-3, ``t_carbon``
+    eV, ``omega_tor`` rad/s, ``v_pol`` m/s, ``Bpol``/``B_phi`` T, ``Rmaj`` m,
+    ``dpsiN_dR`` (= d psi_N / dR) 1/m. Signs are taken from the inputs as given
+    (the caller must supply ``B_phi``/``Bpol``/``v_pol``/``omega_tor`` in a
+    consistent convention); inspect the returned component terms to check.
+
+    ``dp_C/dR`` is formed as ``d p_C/d psi_N * dpsiN_dR``. If the measured
+    ``sigma_*`` envelopes are supplied, a 1-sigma ``sigma`` on E_r is propagated
+    (diamagnetic term via the fractional (n_C, T_C) errors -- approximate through
+    the gradient -- plus the exact rotation terms), suitable as a switchboard
+    ``aux_sigmas['e_r']``.
+
+    Returns ``(E_r, info)`` with ``info`` holding ``diamagnetic``, ``toroidal``
+    (:math:`v_\phi B_\theta`), ``poloidal`` (:math:`-v_\theta B_\phi`), and
+    ``sigma`` (zeros if no errors given), all [V/m].
+    """
+    psi_N = np.asarray(psi_N, dtype=float)
+    n_C = np.asarray(n_carbon, dtype=float)
+    t_C = np.asarray(t_carbon, dtype=float)
+    Z_C = float(Z_C)
+
+    p_C = _EC * n_C * t_C                                   # Pa
+    dpC_dR = np.gradient(p_C, psi_N) * np.asarray(dpsiN_dR, dtype=float)   # Pa/m
+    with np.errstate(divide="ignore", invalid="ignore"):
+        diamag = np.where(n_C > 0, dpC_dR / (Z_C * _EC * n_C), 0.0)   # V/m
+    v_phi = np.asarray(omega_tor, dtype=float) * np.asarray(Rmaj, dtype=float)
+    toroidal = v_phi * np.asarray(Bpol, dtype=float)       # v_phi B_theta
+    poloidal = -np.asarray(v_pol, dtype=float) * np.asarray(B_phi, dtype=float)  # -v_theta B_phi
+    E_r = diamag + toroidal + poloidal
+
+    sigma = np.zeros_like(E_r)
+    if any(s is not None for s in (sigma_n_carbon, sigma_t_carbon,
+                                   sigma_omega_tor, sigma_v_pol)):
+        def _frac(sig, val):
+            if sig is None:
+                return np.zeros_like(val)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                return np.where(np.abs(val) > 0, np.asarray(sig, float) / np.abs(val), 0.0)
+        # diamagnetic: approximate its relative error by the (n_C, T_C) fractional
+        # errors added in quadrature (the gradient's relative error ~ profile's).
+        rel_dia = np.sqrt(_frac(sigma_n_carbon, n_C) ** 2 + _frac(sigma_t_carbon, t_C) ** 2)
+        s_dia = np.abs(diamag) * rel_dia
+        s_tor = (np.abs(np.asarray(Rmaj, float) * np.asarray(Bpol, float))
+                 * np.asarray(sigma_omega_tor, float)) if sigma_omega_tor is not None \
+            else np.zeros_like(E_r)
+        s_pol = (np.abs(np.asarray(B_phi, float)) * np.asarray(sigma_v_pol, float)) \
+            if sigma_v_pol is not None else np.zeros_like(E_r)
+        sigma = np.sqrt(s_dia ** 2 + s_tor ** 2 + s_pol ** 2)
+
+    info = dict(diamagnetic=diamag, toroidal=toroidal, poloidal=poloidal, sigma=sigma)
+    return E_r, info
