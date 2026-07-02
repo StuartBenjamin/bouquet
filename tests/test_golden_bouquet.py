@@ -78,7 +78,7 @@ def test_no_pfile_blobs_in_fixture():
     bad = []
     with h5py.File(_SLIM, "r") as hf:
         def _check(name, obj):
-            if isinstance(obj, h5py.Dataset) and name.endswith(".pfile"):
+            if isinstance(obj, h5py.Dataset) and (name.endswith(".pfile") or name == "pfile"):
                 bad.append(name)
         hf.visititems(_check)
     assert not bad, f"slim fixture still has p-file blobs: {bad}"
@@ -91,7 +91,7 @@ def test_geqdsks_retained_per_manifest(manifest):
             prefix = f"scan/{bkey}/" if sv is not None else ""
             for i in entry["eqdsk_indices"]:
                 grp = hf[f"{prefix}{i}"]
-                eqk = [k for k in grp.keys() if k.endswith(".eqdsk")]
+                eqk = (["eqdsk"] if "eqdsk" in grp else [])
                 assert eqk, f"draw {i} missing its retained geqdsk"
                 # stored gzip-compressed to keep the fixture small
                 assert grp[eqk[0]].compression == "gzip"
@@ -127,8 +127,8 @@ def test_coil_currents_match_manifest(manifest, tol):
                 if "coil_currents" not in exp:
                     continue
                 grp = hf[f"{prefix}{sidx}"]
-                names = json.loads(grp.attrs["coil_names"])
-                vals = np.asarray(grp["coil_currents [A]"][()], dtype=float)
+                names = [n.decode() if isinstance(n, bytes) else str(n) for n in grp["coil_names"][()]]
+                vals = np.asarray(grp["coil_currents"][()], dtype=float)
                 got = {n: float(v) for n, v in zip(names, vals)}
                 assert set(got) == set(exp["coil_currents"])
                 for n, v in exp["coil_currents"].items():
@@ -179,12 +179,12 @@ def _iter_stored_geqdsks(manifest):
             # baseline
             if entry["baseline"].get("has_eqdsk"):
                 grp = hf[f"{prefix}_baseline"]
-                eqk = [k for k in grp.keys() if k.endswith(".eqdsk")][0]
+                eqk = "eqdsk"
                 yield (bytes(grp[eqk][()]), entry["baseline"]["Ip"],
                        f"{bkey}/baseline")
             for i in entry["eqdsk_indices"]:
                 grp = hf[f"{prefix}{i}"]
-                eqk = [k for k in grp.keys() if k.endswith(".eqdsk")][0]
+                eqk = "eqdsk"
                 yield (bytes(grp[eqk][()]),
                        entry["draws"][str(i)]["Ip"], f"{bkey}/{i}")
 
@@ -232,7 +232,7 @@ def test_geqdsk_separatrix_is_coarse(manifest):
                 grp = hf[f"{prefix}{i}"]
                 if "perturbed_lcfs_ref" not in grp:
                     continue
-                eqk = [k for k in grp.keys() if k.endswith(".eqdsk")][0]
+                eqk = "eqdsk"
                 eq = read_eqdsk_from_bytes(bytes(grp[eqk][()]), read_geqdsk)
                 fine = np.asarray(grp["perturbed_lcfs_ref"][()])
                 assert len(fine) > 5 * len(eq.boundary_R), (

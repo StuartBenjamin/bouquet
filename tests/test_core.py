@@ -220,7 +220,7 @@ class TestHDF5RoundTrip:
 
         bl = load_baseline_profiles(db_path)
         np.testing.assert_array_equal(bl["psi_N"], psi_N)
-        np.testing.assert_array_equal(bl["n_e [m^-3]"], ones)
+        np.testing.assert_array_equal(bl["n_e"], ones)
         assert bl["Ip_target"] == 1e6
 
     def test_store_and_load_equilibrium(self, tmp_db):

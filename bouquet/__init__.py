@@ -89,6 +89,8 @@ from .utils import (
     count_equilibria,
     list_equilibrium_indices,
     read_eqdsk_from_bytes,
+    write_provenance,
+    load_config,
 )
 
 # ---- Class-based orchestrator API ----
@@ -110,12 +112,14 @@ from .physics import (
     parallel_to_toroidal,
     fast_pressure_residual,
     infer_fast_pressure,
+    radial_field_from_cer,
 )
 from .paths import add_oft_to_path, find_mesh
-from .io.ida import read_ida, IDAProfiles
+from .io.ida import read_ida, read_ida_cer, IDAProfiles, IDACERProfiles
 from .io.imas import (read_imas_baseline, read_imas_geometry,
                       write_imas_draw, export_imas_drawset)
 from .run import Bouquet
+from .archive import BouquetArchive, ScanView, DrawView
 from .parallel import (parallel_generate, run_shard, merge_archives,
                        emit_slurm_script)
 
@@ -127,13 +131,14 @@ __all__ = [
     "__version__",
     # ---- class-based orchestrator (the primary entry point) ----
     "Bouquet",
+    "BouquetArchive", "ScanView", "DrawView",
     "BouquetConfig", "SolverConfig", "ReconstructionSource", "ImasSource",
     "FixedComponentsConfig", "UncertaintyConfig", "GenerationConfig",
     "FilterConfig",
     "Baseline", "resolve_baseline", "resolve_uncertainty",
     # ---- I/O: sources and IMAS write-back ----
     "GEQDSKEquilibrium", "read_geqdsk", "PFile", "read_pfile",
-    "read_ida", "IDAProfiles",
+    "read_ida", "read_ida_cer", "IDAProfiles", "IDACERProfiles",
     "read_imas_baseline", "read_imas_geometry",
     "write_imas_draw", "export_imas_drawset",
     "read_eqdsk_from_bytes",
@@ -141,12 +146,13 @@ __all__ = [
     "initialize_equilibrium_database",
     "load_equilibrium", "load_equilibrium_by_path", "load_baseline_profiles",
     "discover_scan_keys", "count_equilibria", "list_equilibrium_indices",
+    "write_provenance", "load_config",
     # ---- post-process filtering ----
     "filter_coil_currents", "filter_boundaries", "read_filter_flags",
     "select_indices", "export_filtered",
     # ---- plotting ----
     "set_plot_style", "WONG",
-    "plot_bouquet", "plot_imas_bouquet", "plot_bouquet_timeseries",
+    "plot_bouquet", "plot_bouquet_timeseries",  # plot_imas_bouquet demoted (F6): wrapper of plot_bouquet, still importable
     "plot_geqdsk_bouquet", "plot_input_vs_recon", "plot_pfile_bouquet",
     "plot_aux_profiles", "plot_transport_profiles", "plot_tokamaker_comparison",
     "plot_coil_currents", "plot_spec_summary",
@@ -157,7 +163,7 @@ __all__ = [
     "draw_flux_function",
     # ---- physics helpers ----
     "isotropize_fast_pressure", "parallel_to_toroidal",
-    "fast_pressure_residual", "infer_fast_pressure",
+    "fast_pressure_residual", "infer_fast_pressure", "radial_field_from_cer",
     "Hmode_profiles",
     # ---- environment / path resolution ----
     "add_oft_to_path", "find_mesh",

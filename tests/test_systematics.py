@@ -20,13 +20,14 @@ Reconstruction itself is covered by a separate test (future).  Needs OFT + the
 D3D-like mesh/baseline; runs by default when available, marked ``solver``
 (deselect with ``pytest -m "not solver"``).
 """
-import json
 import os
 
 import numpy as np
 import pytest
 
 import h5py
+
+from bouquet.utils import _read_coil_names
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _EXAMPLE = os.path.abspath(os.path.join(_HERE, "..", "examples", "D3D-like"))
@@ -87,12 +88,12 @@ def _load_golden(sv="0"):
         base = dict(
             psi_N=np.asarray(bl["psi_N"][()]),
             psi_N_kin=np.asarray(bl["psi_N_kinetic"][()]),
-            ne=np.asarray(bl["n_e [m^-3]"][()]),
-            te=np.asarray(bl["T_e [eV]"][()]),
-            ni=np.asarray(bl["n_i [m^-3]"][()]),
-            ti=np.asarray(bl["T_i [eV]"][()]),
-            jphi=np.asarray(bl["j_phi [A m^-2]"][()]),
-            pressure=np.asarray(bl["pressure [Pa]"][()]),
+            ne=np.asarray(bl["n_e"][()]),
+            te=np.asarray(bl["T_e"][()]),
+            ni=np.asarray(bl["n_i"][()]),
+            ti=np.asarray(bl["T_i"][()]),
+            jphi=np.asarray(bl["j_phi"][()]),
+            pressure=np.asarray(bl["pressure"][()]),
             recon_lcfs=np.asarray(bl["recon_lcfs_ref"][()]),
             Ip_target=float(bl.attrs["Ip_target"]),
             l_i_target=float(bl.attrs["l_i_target"]),
@@ -104,24 +105,22 @@ def _load_golden(sv="0"):
         draws = {}
         for i in idxs:
             gi = g[str(i)]
-            names = json.loads(gi.attrs["coil_names"])
+            names = _read_coil_names(gi)
             draws[i] = dict(
-                ne=np.asarray(gi["n_e [m^-3]"][()]),
-                te=np.asarray(gi["T_e [eV]"][()]),
-                ni=np.asarray(gi["n_i [m^-3]"][()]),
-                ti=np.asarray(gi["T_i [eV]"][()]),
-                jphi=np.asarray(gi["j_phi [A m^-2]"][()]),
-                jind=np.asarray(gi["j_inductive [A m^-2]"][()]),
+                ne=np.asarray(gi["n_e"][()]),
+                te=np.asarray(gi["T_e"][()]),
+                ni=np.asarray(gi["n_i"][()]),
+                ti=np.asarray(gi["T_i"][()]),
+                jphi=np.asarray(gi["j_phi"][()]),
+                jind=np.asarray(gi["j_inductive"][()]),
                 pert_lcfs=np.asarray(gi["perturbed_lcfs_ref"][()]),
                 li1=float(gi.attrs["l_i(1)"]),
                 Ip=float(gi.attrs.get("Ip", np.nan)),
                 coils=dict(zip(names,
-                               np.asarray(gi["coil_currents [A]"][()]))),
+                               np.asarray(gi["coil_currents"][()]))),
             )
-        bl_names = [(n.decode() if isinstance(n, bytes) else str(n))
-                    for n in bl["coil_names"][()]]
-        base["coils"] = dict(zip(bl_names,
-                                 np.asarray(bl["coil_currents [A]"][()])))
+        base["coils"] = dict(zip(_read_coil_names(bl),
+                                 np.asarray(bl["coil_currents"][()])))
     return base, draws
 
 
@@ -223,8 +222,8 @@ def replay(tmp_path_factory):
                 pert_lcfs=np.asarray(gi["perturbed_lcfs_ref"][()]),
                 li1=float(gi.attrs["l_i(1)"]),
                 Ip=float(gi.attrs.get("Ip", np.nan)),
-                coils=dict(zip(json.loads(gi.attrs["coil_names"]),
-                               np.asarray(gi["coil_currents [A]"][()]))),
+                coils=dict(zip(_read_coil_names(gi),
+                               np.asarray(gi["coil_currents"][()]))),
             )
 
     work = str(tmp_path_factory.mktemp("replay"))

@@ -10,6 +10,8 @@ import tempfile
 import h5py
 import numpy as np
 
+from .schema import write_profile
+
 
 @contextlib.contextmanager
 def capture_native_output(enabled=True):
@@ -208,13 +210,31 @@ def _scan_key(scan_key):
 def _resolve_h5(h5path_or_header):
     """Resolve an archive reference to an absolute ``.h5`` path.
 
-    Accepts either a full path ending in ``.h5`` (returned unchanged) or a
-    bare *header* stem, in which case ``<header>.h5`` is resolved to an
-    absolute path.  This is the single place archive references are
-    normalized, so every reader/writer accepts the same two forms.
+    Accepts (duck-typed, so no import cycle):
+      * a ``BouquetArchive`` (uses its ``.path``);
+      * a ``Bouquet`` (uses ``config.output_header``);
+      * a full path ending in ``.h5`` (returned unchanged);
+      * a bare *header* stem (``<header>.h5`` resolved to absolute).
+
+    The single place archive references are normalized, so every reader accepts
+    a run object, an archive, a header, or a path interchangeably (F1).
     """
-    p = str(h5path_or_header)
-    return p if p.endswith(".h5") else os.path.abspath(f"{p}.h5")
+    p = getattr(h5path_or_header, "path", None)          # BouquetArchive
+    if isinstance(p, str) and p.endswith(".h5"):
+        return p
+    cfg = getattr(h5path_or_header, "config", None)      # Bouquet
+    ref = getattr(cfg, "output_header", None) if cfg is not None else h5path_or_header
+    s = str(ref)
+    return s if s.endswith(".h5") else os.path.abspath(f"{s}.h5")
+
+
+def _default_scan_key(ref, scan_key):
+    """Fill a missing ``scan_key`` from a ``Bouquet`` reference's config."""
+    if scan_key is None:
+        cfg = getattr(ref, "config", None)
+        if cfg is not None:
+            return getattr(cfg.generation, "scan_key", None)
+    return scan_key
 
 
 def _group_path(scan_key, count):
@@ -225,22 +245,17 @@ def _group_path(scan_key, count):
     return str(int(count))
 
 
-def _eqdsk_dataset_name(header, scan_key, count):
-    """Return the dataset name used for the raw eqdsk bytes."""
-    base = os.path.basename(header)
-    bkey = _scan_key(scan_key)
-    if bkey is not None:
-        safe_key = bkey.replace("/", "_").replace(" ", "_")
-        return f"{base}_{safe_key}_{int(count)}.eqdsk"
-    return f"{base}_{int(count)}.eqdsk"
-
-
 # ====================================================================
 #  Database lifecycle
 # ====================================================================
 def initialize_equilibrium_database(header):
     """
     Create (or open) the top-level HDF5 database file on disk.
+
+    Stamps ``schema_version`` / ``bouquet_version`` / ``created`` at creation
+    (the single chokepoint every archive passes through), so the ABSENCE of
+    ``schema_version`` reliably identifies a pre-v2 legacy file to readers.
+    ``config_json`` provenance is added separately by :func:`write_provenance`.
 
     Parameters
     ----------
@@ -252,10 +267,97 @@ def initialize_equilibrium_database(header):
     db_path : str
         Absolute path to the HDF5 file.
     """
+    import datetime
+    from . import __version__
     db_path = os.path.abspath(f"{header}.h5")
-    with h5py.File(db_path, "a"):
-        pass
+    with h5py.File(db_path, "a") as hf:
+        hf.attrs["schema_version"] = int(SCHEMA_VERSION)
+        hf.attrs["bouquet_version"] = str(__version__)
+        if "created" not in hf.attrs:
+            hf.attrs["created"] = datetime.datetime.now().isoformat(
+                timespec="seconds")
     return db_path
+
+
+# HDF5 archive schema version -- imported from the schema module (now v2:
+# bare dataset names + units attrs, fixed eqdsk/pfile names, unified coils).
+from .schema import SCHEMA_VERSION
+
+
+def write_provenance(h5path_or_header, config=None, scan_key=None):
+    """Stamp provenance onto an archive: schema/version/timestamp + config JSON.
+
+    File-level attrs ``schema_version``, ``bouquet_version``, ``created`` (set
+    once) and ``updated``; and, when a :class:`~bouquet.BouquetConfig` is given,
+    a ``config_json`` dataset at the file root mirrored into the
+    ``scan/<key>/`` group when ``scan_key`` is provided (each slice can carry its
+    own config). The per-scan copies are AUTHORITATIVE; the root copy is only
+    the most recent write and is overwritten by each slice of a multi-slice
+    sweep -- :func:`load_config` therefore disambiguates by scan and never
+    silently serves a stale root copy. Called by ``Bouquet.generate`` /
+    ``run_shard`` / ``merge_archives``; safe to call repeatedly.
+    """
+    import datetime
+    from . import __version__
+    path = _resolve_h5(h5path_or_header)
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    with h5py.File(path, "a") as hf:
+        hf.attrs["schema_version"] = int(SCHEMA_VERSION)
+        hf.attrs["bouquet_version"] = str(__version__)
+        if "created" not in hf.attrs:
+            hf.attrs["created"] = now
+        hf.attrs["updated"] = now
+        if config is not None:
+            cj = config.to_json()
+            targets = [hf]
+            bkey = _scan_key(scan_key)
+            if bkey is not None:
+                targets.append(hf.require_group(f"scan/{bkey}"))
+            for grp in targets:
+                if "config_json" in grp:
+                    del grp["config_json"]
+                grp.create_dataset("config_json", data=cj)
+
+
+def load_config(h5path_or_header, scan_key=None):
+    """Reconstruct the :class:`~bouquet.BouquetConfig` stored in an archive.
+
+    The per-scan ``config_json`` copies are authoritative (the root copy is
+    just the most recent write). With an explicit ``scan_key``, that scan's
+    copy is read. With ``scan_key=None``: a single stored per-scan config is
+    served directly, but a MULTI-scan archive raises and lists the keys --
+    each slice of a sweep carried its own config, so "the" config is
+    ambiguous and the (last-writer-wins) root copy would silently describe
+    only the final slice. Raises a clear error on pre-provenance archives.
+    """
+    from .config import BouquetConfig
+    path = _resolve_h5(h5path_or_header)
+    with h5py.File(path, "r") as hf:
+        node = None
+        bkey = _scan_key(scan_key)
+        scan_cfgs = ([k for k in hf["scan"] if f"scan/{k}/config_json" in hf]
+                     if "scan" in hf else [])
+        if bkey is not None:
+            if f"scan/{bkey}/config_json" in hf:
+                node = hf[f"scan/{bkey}/config_json"]
+        elif len(scan_cfgs) == 1:
+            node = hf[f"scan/{scan_cfgs[0]}/config_json"]
+        elif len(scan_cfgs) > 1:
+            raise KeyError(
+                f"{path} holds per-scan configs for {len(scan_cfgs)} scan keys "
+                f"({scan_cfgs}); pass scan_key=<one of these> -- each slice of "
+                "a sweep carries its own config, so there is no single file "
+                "config to return.")
+        elif "config_json" in hf:
+            node = hf["config_json"]
+        if node is None:
+            raise KeyError(
+                f"{path} has no stored config for scan_key={scan_key!r} "
+                f"(schema_version={hf.attrs.get('schema_version', 'absent')}; "
+                f"per-scan configs present: {scan_cfgs or 'none'}). Only files "
+                "written by a provenance-aware Bouquet carry a config.")
+        raw = node[()]
+    return BouquetConfig.from_json(raw.decode() if isinstance(raw, bytes) else str(raw))
 
 
 # ====================================================================
@@ -263,16 +365,24 @@ def initialize_equilibrium_database(header):
 # ====================================================================
 _PROFILE_KEYS = [
     "psi_N",
-    "j_phi [A m^-2]",
-    "j_BS [A m^-2]",
-    "j_BS,edge [A m^-2]",
-    "j_inductive [A m^-2]",
-    "n_e [m^-3]",
-    "T_e [eV]",
-    "n_i [m^-3]",
-    "T_i [eV]",
-    "w_ExB [rad/s]",
+    "j_phi",
+    "j_BS",
+    "j_BS,edge",
+    "j_inductive",
+    "n_e",
+    "T_e",
+    "n_i",
+    "T_i",
+    "w_ExB",
 ]
+
+
+def _read_coil_names(grp):
+    """Coil-name list from the ``coil_names`` string dataset (schema v2; F15)."""
+    if "coil_names" not in grp:
+        return []
+    return [n.decode() if isinstance(n, bytes) else str(n)
+            for n in grp["coil_names"][()]]
 
 
 def store_equilibrium(
@@ -336,7 +446,7 @@ def store_equilibrium(
         Scan-point label.  When provided, an extra ``scan/{label}/``
         group layer is inserted.  ``None`` gives the flat layout.
     pressure : array_like or None
-        1-D total pressure [Pa].
+        1-D total pressure.
     j_BS_edge : array_like or None
         1-D isolated edge bootstrap current [A m^-2].
     pfile_bytes : bytes or None
@@ -357,7 +467,6 @@ def store_equilibrium(
         eqdsk_bytes = fh.read()
 
     grp_path = _group_path(scan_key, count)
-    ds_name  = _eqdsk_dataset_name(header, scan_key, count)
 
     with h5py.File(db_path, "a") as hf:
         # clean slate if this entry already exists
@@ -366,35 +475,36 @@ def store_equilibrium(
 
         grp = hf.create_group(grp_path)
 
-        # ---- raw eqdsk (opaque binary -- bit-perfect) --------------------
-        grp.create_dataset(ds_name, data=np.void(eqdsk_bytes))
+        # ---- raw eqdsk (opaque binary -- bit-perfect; schema-v2 fixed
+        # name, the group path carries the coordinates) --------------------
+        from .schema import EQDSK_DS
+        grp.create_dataset(EQDSK_DS, data=np.void(eqdsk_bytes))
 
         # ---- 1-D profiles -----------------------------------------------
-        grp.create_dataset("psi_N",               data=np.asarray(psi_N,       dtype=np.float64))
-        grp.create_dataset("j_phi [A m^-2]",       data=np.asarray(j_phi,       dtype=np.float64))
-        grp.create_dataset("j_BS [A m^-2]",        data=np.asarray(j_BS,        dtype=np.float64))
-        grp.create_dataset("j_inductive [A m^-2]", data=np.asarray(j_inductive, dtype=np.float64))
+        write_profile(grp, "psi_N", psi_N)
+        write_profile(grp, "j_phi", j_phi)
+        write_profile(grp, "j_BS", j_BS)
+        write_profile(grp, "j_inductive", j_inductive)
 
         if j_BS_edge is not None:
-            grp.create_dataset("j_BS,edge [A m^-2]", data=np.asarray(j_BS_edge, dtype=np.float64))
-        grp.create_dataset("n_e [m^-3]",          data=np.asarray(n_e,         dtype=np.float64))
-        grp.create_dataset("T_e [eV]",            data=np.asarray(T_e,         dtype=np.float64))
-        grp.create_dataset("n_i [m^-3]",          data=np.asarray(n_i,         dtype=np.float64))
-        grp.create_dataset("T_i [eV]",            data=np.asarray(T_i,         dtype=np.float64))
-        grp.create_dataset("w_ExB [rad/s]",       data=np.asarray(w_ExB,       dtype=np.float64))
+            write_profile(grp, "j_BS,edge", j_BS_edge)
+        write_profile(grp, "n_e", n_e)
+        write_profile(grp, "T_e", T_e)
+        write_profile(grp, "n_i", n_i)
+        write_profile(grp, "T_i", T_i)
+        write_profile(grp, "w_ExB", w_ExB)
 
         # ---- optional: kinetic profile grid (when different from psi_N) ----
         if psi_N_kinetic is not None:
-            grp.create_dataset("psi_N_kinetic", data=np.asarray(psi_N_kinetic, dtype=np.float64))
+            write_profile(grp, "psi_N_kinetic", psi_N_kinetic)
 
         if pressure is not None:
-            grp.create_dataset("pressure [Pa]", data=np.asarray(pressure, dtype=np.float64))
+            write_profile(grp, "pressure", pressure)
         # Thermal (main-ion + electron) pressure alongside the total stored above,
         # so plots can show what the kinetic profiles contribute vs the impurity +
         # fast-ion pressure the GS solve actually used (total - thermal).
         if pressure_thermal is not None:
-            grp.create_dataset("pressure_thermal [Pa]",
-                               data=np.asarray(pressure_thermal, dtype=np.float64))
+            write_profile(grp, "pressure_thermal", pressure_thermal)
 
         # ---- optional: auxiliary perturbed profiles (the switchboard) ----
         # Stored on psi_N_kinetic. Named "aux_<name>" (e.g. aux_omega_tor,
@@ -413,20 +523,21 @@ def store_equilibrium(
 
         # ---- optional: p-file bytes ----------------------------------------
         if pfile_bytes is not None:
-            pf_ds = ds_name.replace(".eqdsk", ".pfile")
+            pf_ds = "pfile"
             grp.create_dataset(pf_ds, data=np.void(pfile_bytes))
 
         # ---- optional: Zeff profile ----------------------------------------
         if Zeff is not None:
-            grp.create_dataset("Zeff", data=np.asarray(Zeff, dtype=np.float64))
+            write_profile(grp, "Zeff", Zeff)
 
         # ---- optional: coil currents ---------------------------------------
         if coil_currents is not None:
             import json
             names = list(coil_currents.keys())
             values = np.array([coil_currents[n] for n in names], dtype=np.float64)
-            grp.create_dataset("coil_currents [A]", data=values)
-            grp.attrs["coil_names"] = json.dumps(names)
+            grp.create_dataset("coil_currents", data=values)
+            grp.create_dataset("coil_names",
+                               data=np.array(names, dtype=h5py.string_dtype()))
 
         # ---- homotopy / in-spec metadata (per-draw) -----------------------
         if homotopy_pass is not None:
@@ -504,12 +615,13 @@ def load_equilibrium(header, count, scan_key=None, eqdsk_out_dir=None):
     result : dict
         Keys: ``"eqdsk_filepath"``, ``"eqdsk_bytes"``,
         the 1-D array names, ``"l_i(1)"``, ``"l_i(3)"``,
-        and optionally ``"pressure [Pa]"``, ``"Zeff"``,
+        and optionally ``"pressure"``, ``"Zeff"``,
         ``"coil_currents"``, ``"pfile_bytes"``.
     """
+    from .schema import EQDSK_DS
+
     db_path  = os.path.abspath(f"{header}.h5")
     grp_path = _group_path(scan_key, count)
-    ds_name  = _eqdsk_dataset_name(header, scan_key, count)
 
     result = {}
 
@@ -520,13 +632,25 @@ def load_equilibrium(header, count, scan_key=None, eqdsk_out_dir=None):
             )
         grp = hf[grp_path]
 
-        # ---- eqdsk raw bytes -------------------------------------------
-        eqdsk_bytes = bytes(grp[ds_name][()])
+        # ---- eqdsk raw bytes (schema-v2 fixed name) ----------------------
+        if EQDSK_DS not in grp:
+            legacy = [k for k in grp if k.endswith(".eqdsk")]
+            raise KeyError(
+                f"no '{EQDSK_DS}' dataset in {grp_path} of {db_path}"
+                + (f" -- found legacy-named {legacy}: this is a pre-v2 "
+                   "archive; regenerate it with the current bouquet (or "
+                   "read it via BouquetArchive, whose suffix scan still "
+                   "resolves legacy eqdsk names)." if legacy else "."))
+        eqdsk_bytes = bytes(grp[EQDSK_DS][()])
         result["eqdsk_bytes"] = eqdsk_bytes
 
         if eqdsk_out_dir is not None:
             os.makedirs(eqdsk_out_dir, exist_ok=True)
-            out_path = os.path.join(eqdsk_out_dir, ds_name)
+            # coordinate-carrying FILENAME (the fixed dataset name would
+            # make every extracted draw clobber the same 'eqdsk' file)
+            bkey = _scan_key(scan_key)
+            stem = os.path.basename(header) + (f"_{bkey}" if bkey else "")
+            out_path = os.path.join(eqdsk_out_dir, f"{stem}_{int(count)}.eqdsk")
             with open(out_path, "wb") as fh:
                 fh.write(eqdsk_bytes)
             result["eqdsk_filepath"] = os.path.abspath(out_path)
@@ -538,10 +662,10 @@ def load_equilibrium(header, count, scan_key=None, eqdsk_out_dir=None):
             if key in grp:
                 result[key] = np.array(grp[key])
 
-        if "pressure [Pa]" in grp:
-            result["pressure [Pa]"] = np.array(grp["pressure [Pa]"])
-        if "pressure_thermal [Pa]" in grp:
-            result["pressure_thermal [Pa]"] = np.array(grp["pressure_thermal [Pa]"])
+        if "pressure" in grp:
+            result["pressure"] = np.array(grp["pressure"])
+        if "pressure_thermal" in grp:
+            result["pressure_thermal"] = np.array(grp["pressure_thermal"])
 
         # ---- scalars ----------------------------------------------------
         result["l_i(1)"] = float(grp.attrs["l_i(1)"])
@@ -552,15 +676,15 @@ def load_equilibrium(header, count, scan_key=None, eqdsk_out_dir=None):
             result["Zeff"] = np.array(grp["Zeff"])
 
         # ---- optional: p-file bytes ----------------------------------------
-        pf_ds = ds_name.replace(".eqdsk", ".pfile")
+        pf_ds = "pfile"
         if pf_ds in grp:
             result["pfile_bytes"] = bytes(grp[pf_ds][()])
 
         # ---- optional: coil currents ---------------------------------------
-        if "coil_currents [A]" in grp:
+        if "coil_currents" in grp:
             import json
-            values = np.array(grp["coil_currents [A]"])
-            names = json.loads(grp.attrs.get("coil_names", "[]"))
+            values = np.array(grp["coil_currents"])
+            names = _read_coil_names(grp)
             result["coil_currents"] = dict(zip(names, values))
 
     return result
@@ -634,27 +758,27 @@ def store_baseline_profiles(
 
         grp = hf.create_group(grp_path)
 
-        grp.create_dataset("psi_N",              data=np.asarray(psi_N,      dtype=np.float64))
-        grp.create_dataset("n_e [m^-3]",         data=np.asarray(ne,         dtype=np.float64))
-        grp.create_dataset("T_e [eV]",           data=np.asarray(te,         dtype=np.float64))
-        grp.create_dataset("n_i [m^-3]",         data=np.asarray(ni,         dtype=np.float64))
-        grp.create_dataset("T_i [eV]",           data=np.asarray(ti,         dtype=np.float64))
-        grp.create_dataset("pressure [Pa]",       data=np.asarray(pressure,   dtype=np.float64))
+        write_profile(grp, "psi_N", psi_N)
+        write_profile(grp, "n_e", ne)
+        write_profile(grp, "T_e", te)
+        write_profile(grp, "n_i", ni)
+        write_profile(grp, "T_i", ti)
+        write_profile(grp, "pressure", pressure)
         if pressure_thermal is not None:
-            grp.create_dataset("pressure_thermal [Pa]", data=np.asarray(pressure_thermal, dtype=np.float64))
-        grp.create_dataset("j_phi [A m^-2]",      data=np.asarray(j_phi,      dtype=np.float64))
+            write_profile(grp, "pressure_thermal", pressure_thermal)
+        write_profile(grp, "j_phi", j_phi)
         if j_BS is not None:
-            grp.create_dataset("j_BS [A m^-2]",        data=np.asarray(j_BS,        dtype=np.float64))
+            write_profile(grp, "j_BS", j_BS)
         if j_inductive is not None:
-            grp.create_dataset("j_inductive [A m^-2]", data=np.asarray(j_inductive, dtype=np.float64))
-        grp.create_dataset("sigma_ne [m^-3]",    data=np.asarray(sigma_ne,   dtype=np.float64))
-        grp.create_dataset("sigma_te [eV]",      data=np.asarray(sigma_te,   dtype=np.float64))
-        grp.create_dataset("sigma_ni [m^-3]",    data=np.asarray(sigma_ni,   dtype=np.float64))
-        grp.create_dataset("sigma_ti [eV]",      data=np.asarray(sigma_ti,   dtype=np.float64))
-        grp.create_dataset("sigma_jphi [A m^-2]", data=np.asarray(sigma_jphi, dtype=np.float64))
+            write_profile(grp, "j_inductive", j_inductive)
+        write_profile(grp, "sigma_ne", sigma_ne)
+        write_profile(grp, "sigma_te", sigma_te)
+        write_profile(grp, "sigma_ni", sigma_ni)
+        write_profile(grp, "sigma_ti", sigma_ti)
+        write_profile(grp, "sigma_jphi", sigma_jphi)
 
         if psi_N_kinetic is not None:
-            grp.create_dataset("psi_N_kinetic", data=np.asarray(psi_N_kinetic, dtype=np.float64))
+            write_profile(grp, "psi_N_kinetic", psi_N_kinetic)
 
         # ---- auxiliary-profile baselines + sigmas (on the kinetic
         # grid), so plot_transport_profiles can draw input +/- sigma bands
@@ -675,9 +799,9 @@ def store_baseline_profiles(
             grp.attrs["source_kind"] = str(source_kind)
 
         if eqdsk_bytes is not None:
-            grp.create_dataset("baseline.eqdsk", data=np.void(eqdsk_bytes))
+            grp.create_dataset("eqdsk", data=np.void(eqdsk_bytes))
         if pfile_bytes is not None:
-            grp.create_dataset("baseline.pfile", data=np.void(pfile_bytes))
+            grp.create_dataset("pfile", data=np.void(pfile_bytes))
 
         # ---- Recon-LCFS reference for downstream boundary-deviation
         # measurements.  Captured by the caller via mygs.trace_surf() at
@@ -719,7 +843,7 @@ def store_baseline_profiles(
             else:
                 names = [f"coil_{i}" for i in range(len(coil_currents))]
                 values = np.asarray(coil_currents, dtype=np.float64)
-            grp.create_dataset("coil_currents [A]", data=values)
+            grp.create_dataset("coil_currents", data=values)
             grp.create_dataset("coil_names",
                                data=np.array(names, dtype=h5py.string_dtype()))
 
@@ -872,10 +996,10 @@ def load_equilibrium_by_path(h5path_or_header, count, scan_key=None):
             if key in grp:
                 result[key] = np.array(grp[key])
 
-        if "pressure [Pa]" in grp:
-            result["pressure [Pa]"] = np.array(grp["pressure [Pa]"])
-        if "pressure_thermal [Pa]" in grp:
-            result["pressure_thermal [Pa]"] = np.array(grp["pressure_thermal [Pa]"])
+        if "pressure" in grp:
+            result["pressure"] = np.array(grp["pressure"])
+        if "pressure_thermal" in grp:
+            result["pressure_thermal"] = np.array(grp["pressure_thermal"])
 
         if "psi_N_kinetic" in grp:
             result["psi_N_kinetic"] = np.array(grp["psi_N_kinetic"])
@@ -890,10 +1014,10 @@ def load_equilibrium_by_path(h5path_or_header, count, scan_key=None):
             if str(_k).startswith("aux_"):
                 result[str(_k)] = np.array(grp[_k])
 
-        if "coil_currents [A]" in grp:
+        if "coil_currents" in grp:
             import json
-            values = np.array(grp["coil_currents [A]"])
-            names = json.loads(grp.attrs.get("coil_names", "[]"))
+            values = np.array(grp["coil_currents"])
+            names = _read_coil_names(grp)
             result["coil_currents"] = dict(zip(names, values))
 
         result["l_i(1)"] = float(grp.attrs["l_i(1)"])

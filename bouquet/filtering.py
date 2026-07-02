@@ -28,6 +28,7 @@ import numpy as np
 import h5py
 from scipy.spatial import cKDTree as _cKDTree
 
+from .schema import find_bytes_dataset
 from .utils import (
     list_equilibrium_indices,
     discover_scan_keys,
@@ -52,9 +53,26 @@ _FILTER_FLAGS = ("passes_coil_filter", "passes_boundary_filter")
 #  internal helpers
 # --------------------------------------------------------------------------
 def _resolve(h5path_or_header):
-    if not h5path_or_header.endswith(".h5"):
-        return os.path.abspath(f"{h5path_or_header}.h5")
-    return os.path.abspath(h5path_or_header)
+    # Accept a Bouquet / BouquetArchive / header / path (F1) -- one resolver.
+    from .utils import _resolve_h5
+    return _resolve_h5(h5path_or_header)
+
+
+def _require_scan_key(h5path, scan_key):
+    """Raise a listing ``KeyError`` when an explicit ``scan_key`` is absent (F1).
+
+    Silent-empty was the old failure mode: a mistyped ``scan_key`` returned no
+    draws with no error. ``scan_key=None`` (all scans) is left untouched.
+    """
+    if scan_key is None:
+        return
+    svs = discover_scan_keys(h5path)
+    if svs is None:                      # flat/legacy file: no scan keys to match
+        return
+    if _scan_key(scan_key) not in {_scan_key(s) for s in svs}:
+        raise KeyError(
+            f"scan_key {scan_key!r} not in {os.path.basename(h5path)}; "
+            f"available: {svs}")
 
 
 def _iter_scan_keys(h5path, scan_key):
@@ -109,11 +127,11 @@ def _baseline_boundary(hf, scan_key):
             return np.asarray(bl["recon_lcfs_ref"][()], dtype=float)
         except Exception:
             pass
-    eqk = [k for k in bl.keys() if k.endswith(".eqdsk")]
-    if not eqk:
+    eqk = find_bytes_dataset(bl)
+    if eqk is None:
         return None
     try:
-        eq = read_eqdsk_from_bytes(bytes(bl[eqk[0]][()]), read_geqdsk)
+        eq = read_eqdsk_from_bytes(bytes(bl[eqk][()]), read_geqdsk)
         return np.column_stack([eq.boundary_R, eq.boundary_Z])
     except Exception:
         return None
@@ -136,11 +154,11 @@ def _boundary_devs(bl_boundary, grp):
         except Exception:
             perturbed = None
     if perturbed is None:
-        eqk = [k for k in grp.keys() if k.endswith(".eqdsk")]
-        if not eqk:
+        eqk = find_bytes_dataset(grp)
+        if eqk is None:
             return (np.nan, np.nan)
         try:
-            eq = read_eqdsk_from_bytes(bytes(grp[eqk[0]][()]), read_geqdsk)
+            eq = read_eqdsk_from_bytes(bytes(grp[eqk][()]), read_geqdsk)
             perturbed = np.column_stack([eq.boundary_R, eq.boundary_Z])
         except Exception:
             return (np.nan, np.nan)
@@ -208,7 +226,10 @@ def select_indices(h5path_or_header, scan_key=None, selection="selected"):
     if selection not in ("all", "selected", "excluded"):
         raise ValueError(
             f"selection must be 'all'|'selected'|'excluded', got {selection!r}")
+    from .utils import _default_scan_key
+    scan_key = _default_scan_key(h5path_or_header, scan_key)
     h5path = _resolve(h5path_or_header)
+    _require_scan_key(h5path, scan_key)
     svs = _iter_scan_keys(h5path, scan_key)
     result = {}
     with h5py.File(h5path, "r") as hf:

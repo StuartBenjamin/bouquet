@@ -165,7 +165,7 @@ class FixedComponentsConfig:
     convention for j_*. ``None`` -> zeros.
     """
 
-    p_fast: Optional["np.ndarray"] = None   # fast/beam pressure [Pa]
+    p_fast: Optional["np.ndarray"] = None   # fast/beam pressure
     j_NBI: Optional["np.ndarray"] = None    # beam-driven TOROIDAL current density [A/m^2]
     j_RF: Optional["np.ndarray"] = None     # RF-driven TOROIDAL current density [A/m^2]
     psi_N: Optional["np.ndarray"] = None    # grid for the above (if arrays given)
@@ -313,6 +313,14 @@ class GenerationConfig:
     # j_inductive). Set True ONLY for deliberate backend tests / experiments to
     # bypass the guard (it will warn instead of raise).
     allow_unsafe_workflow: bool = False
+    # Named workflow preset -- a clearer facade over the per-path flag combos the
+    # guard enforces (F4). "auto" (default): resolve per source type at
+    # generate() (what from_geqdsk/from_imas hardcode -- geqdsk = standard l_i
+    # loop, imas = diff+C). "geqdsk-standard" / "imas-diff-c" name those two
+    # explicitly (and assert the source matches). "custom": leave the flags as-is
+    # and downgrade the guard to a warning -- subsumes allow_unsafe_workflow,
+    # which stays as a deprecated alias (True is treated as "custom").
+    workflow: str = "auto"
     # Fail-fast (IMAS path) if the source carries more thermal pressure than the
     # reconstructed total used by the solve -- a dropped impurity species or a
     # fast-ion channel left out. io.imas.read_imas_baseline raises naming the
@@ -427,3 +435,91 @@ class BouquetConfig:
                 "uncertainty.sigma_method must be 'percentile' or 'std'")
         if self.generation.n_equils < 1:
             raise ValueError("generation.n_equils must be >= 1")
+        if self.generation.workflow not in (
+                "auto", "geqdsk-standard", "imas-diff-c", "custom"):
+            raise ValueError(
+                "generation.workflow must be 'auto', 'geqdsk-standard', "
+                "'imas-diff-c', or 'custom'")
+
+    # ── serialization (h5 provenance, per-shot templating, SLURM bundles) ──
+    def to_dict(self) -> dict:
+        """Plain-Python, JSON-round-trippable snapshot of the whole config.
+
+        ndarray fields (isoflux, ``sigma_profiles``, ``aux_*``, fixed
+        components, ``profile_overrides``) are encoded as ``{"__ndarray__":
+        [...]}``; the baseline source records a ``"source_type"`` discriminator
+        (``"reconstruction"`` | ``"imas"``). Reverse with :meth:`from_dict`.
+        """
+        d = _encode(self)
+        d["source"]["source_type"] = (
+            "reconstruction" if isinstance(self.source, ReconstructionSource) else "imas")
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "BouquetConfig":
+        """Rebuild a :class:`BouquetConfig` from :meth:`to_dict` output."""
+        d = _decode(d)
+        srcd = dict(d["source"])
+        stype = srcd.pop("source_type", None)
+        if stype is None:                       # infer if the discriminator is absent
+            stype = "reconstruction" if "geqdsk_path" in srcd else "imas"
+        SrcCls = ReconstructionSource if stype == "reconstruction" else ImasSource
+        return cls(
+            source=_build(SrcCls, srcd),
+            solver=_build(SolverConfig, d["solver"]),
+            output_header=d["output_header"],
+            uncertainty=_build(UncertaintyConfig, d.get("uncertainty", {})),
+            generation=_build(GenerationConfig, d.get("generation", {})),
+            filtering=_build(FilterConfig, d.get("filtering", {})),
+            fixed_components=_build(FixedComponentsConfig, d.get("fixed_components", {})),
+            verbose=bool(d.get("verbose", False)),
+        )
+
+    def to_json(self, indent: Optional[int] = 2) -> str:
+        """The config as a JSON string (see :meth:`to_dict`)."""
+        import json
+        return json.dumps(self.to_dict(), indent=indent)
+
+    @classmethod
+    def from_json(cls, s: str) -> "BouquetConfig":
+        """Rebuild a config from a JSON string produced by :meth:`to_json`."""
+        import json
+        return cls.from_dict(json.loads(s))
+
+
+# ---------------------------------------------------------------------------
+# Serialization helpers (used by BouquetConfig.to_dict / from_dict)
+# ---------------------------------------------------------------------------
+import dataclasses as _dc
+
+
+def _encode(v):
+    """Recursively convert a config value to a JSON-round-trippable form."""
+    import numpy as np
+    if isinstance(v, np.ndarray):
+        return {"__ndarray__": v.tolist()}
+    if _dc.is_dataclass(v) and not isinstance(v, type):
+        return {f.name: _encode(getattr(v, f.name)) for f in _dc.fields(v)}
+    if isinstance(v, dict):
+        return {k: _encode(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_encode(x) for x in v]
+    return v
+
+
+def _decode(v):
+    """Reverse :func:`_encode`: restore ndarrays; recurse dicts/lists."""
+    import numpy as np
+    if isinstance(v, dict):
+        if set(v.keys()) == {"__ndarray__"}:
+            return np.asarray(v["__ndarray__"], dtype=float)
+        return {k: _decode(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_decode(x) for x in v]
+    return v
+
+
+def _build(cls, d):
+    """Instantiate dataclass ``cls`` from decoded dict ``d`` (unknown keys dropped)."""
+    names = {f.name for f in _dc.fields(cls)}
+    return cls(**{k: v for k, v in d.items() if k in names})

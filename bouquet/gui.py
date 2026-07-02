@@ -237,24 +237,24 @@ class EquilibriumBrowser:
         if tab == self.TABS[0]:  # Kinetic
             draw_kinetic_profiles(
                 self.kinetic_axes, psi_N,
-                bl["n_e [m^-3]"],  bl["n_i [m^-3]"],
-                bl["T_e [eV]"],    bl["T_i [eV]"],
-                bl["sigma_ne [m^-3]"], bl["sigma_ni [m^-3]"],
-                bl["sigma_te [eV]"],   bl["sigma_ti [eV]"],
+                bl["n_e"],  bl["n_i"],
+                bl["T_e"],    bl["T_i"],
+                bl["sigma_ne"], bl["sigma_ni"],
+                bl["sigma_te"],   bl["sigma_ti"],
                 perturbed_data_list=perturbed,
             )
 
         elif tab == self.TABS[1]:  # Pressure
             draw_pressure_profiles(
                 self.pressure_ax, psi_N,
-                bl["pressure [Pa]"],
+                bl["pressure"],
                 perturbed_data_list=perturbed,
             )
 
         elif tab == self.TABS[2]:  # j_phi (total)
             draw_jphi_total(
                 self.jphi_total_ax, psi_N,
-                bl["j_phi [A m^-2]"], bl["sigma_jphi [A m^-2]"],
+                bl["j_phi"], bl["sigma_jphi"],
                 perturbed_data_list=perturbed,
             )
 

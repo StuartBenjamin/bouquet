@@ -783,7 +783,7 @@ def perturb_kinetic_equilibrium(
     psi_N : ndarray
         1-D normalised poloidal flux grid :math:`\hat{\psi}`.
     pressure : ndarray
-        1-D baseline total pressure [Pa].
+        1-D baseline total pressure.
     ne : ndarray
         1-D electron density [m\ :sup:`-3`].
     te : ndarray
@@ -4136,7 +4136,7 @@ def generate_bouquet(
         # Total pressure the GS solve actually used for this draw: thermal +
         # impurity(carbon) + fast + p_diff anchor, recomputed exactly as
         # perturb_kinetic_equilibrium built its solve pressure (same components
-        # and grid). Stored as "pressure [Pa]"; the thermal part is stored
+        # and grid). Stored as "pressure"; the thermal part is stored
         # separately so plots show the impurity+fast the solve added.
         pressure_total_perturb = pressure_perturb.copy()
         if Z_imp:

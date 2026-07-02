@@ -519,16 +519,16 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
         if gp not in hf:
             raise KeyError(f"draw {draw_index} (scan {scan_key}) not in {h5}")
         g = hf[gp]
-        ne = np.asarray(g["n_e [m^-3]"][()]); te = np.asarray(g["T_e [eV]"][()])
-        ni = np.asarray(g["n_i [m^-3]"][()]); ti = np.asarray(g["T_i [eV]"][()])
+        ne = np.asarray(g["n_e"][()]); te = np.asarray(g["T_e"][()])
+        ni = np.asarray(g["n_i"][()]); ti = np.asarray(g["T_i"][()])
         pkin = np.asarray(g["psi_N_kinetic"][()]); peq = np.asarray(g["psi_N"][()])
-        j_tor = np.asarray(g["j_phi [A m^-2]"][()])
-        j_ind = np.asarray(g["j_inductive [A m^-2]"][()])
-        j_bs = np.asarray(g["j_BS [A m^-2]"][()])
+        j_tor = np.asarray(g["j_phi"][()])
+        j_ind = np.asarray(g["j_inductive"][()])
+        j_bs = np.asarray(g["j_BS"][()])
         zeff = np.asarray(g["aux_zeff"][()]) if "aux_zeff" in g else None
         li1 = float(g.attrs.get("l_i(1)", np.nan))
         li3 = float(g.attrs.get("l_i(3)", np.nan))
-        eqk = [k for k in g.keys() if k.endswith(".eqdsk")]
+        eqk = (["eqdsk"] if "eqdsk" in g else [])
         if not eqk:
             raise KeyError(f"draw {draw_index} has no archived eqdsk")
         geq = read_eqdsk_from_bytes(bytes(g[eqk[0]][()]), read_geqdsk)

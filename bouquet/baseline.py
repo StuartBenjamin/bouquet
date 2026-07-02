@@ -60,7 +60,7 @@ class Baseline:
     #   p_total     = p_thermal(perturbed) + p_fast
     j_NBI: Optional["np.ndarray"] = None    # beam-driven current [A/m^2]
     j_RF: Optional["np.ndarray"] = None     # RF-driven current [A/m^2]
-    p_fast: Optional["np.ndarray"] = None   # fast/beam pressure [Pa]
+    p_fast: Optional["np.ndarray"] = None   # fast/beam pressure
 
     # bootstrap amplitude factor applied when the j_BS/j_inductive split is
     # rebuilt against SWB and calibrated to the measured l_i (IMAS path's

@@ -176,6 +176,65 @@ class Bouquet:
         return self.config.fixed_components
 
     @property
+    def archive(self):
+        """A :class:`~bouquet.BouquetArchive` over this run's ``{header}.h5``."""
+        from .archive import BouquetArchive
+        return BouquetArchive(self.config.output_header)
+
+    def describe(self, stream=None) -> str:
+        """Print (and return) the config, grouped by section, non-defaults only.
+
+        Source paths + output header always show; every other knob appears only
+        when it differs from its dataclass default -- so the true deltas of a run
+        stand out instead of being buried in a ~60-line knob dump (F2/F3).
+        """
+        import dataclasses as _dc
+        import numpy as np
+
+        def _default(f):
+            if f.default is not _dc.MISSING:
+                return f.default
+            if f.default_factory is not _dc.MISSING:      # type: ignore[attr-defined]
+                return f.default_factory()
+            return _dc.MISSING
+
+        def _differs(v, d):
+            if d is _dc.MISSING:                # required field (e.g. a path)
+                return True
+            if isinstance(v, np.ndarray) or isinstance(d, np.ndarray):
+                return v is not None           # arrays: show when set
+            try:
+                return bool(v != d)
+            except Exception:
+                return True
+
+        def _fmt(v):
+            if isinstance(v, np.ndarray):
+                return f"<ndarray {v.shape}>"
+            if isinstance(v, dict) and v:
+                return "{" + ", ".join(f"{k}: <..>" if isinstance(x, np.ndarray)
+                                       else f"{k}: {x!r}" for k, x in v.items()) + "}"
+            return repr(v)
+
+        cfg = self.config
+        lines = [f"Bouquet '{cfg.output_header}'  (source: {type(cfg.source).__name__})"]
+        # every section (source included): required fields (paths) + non-defaults
+        for name in ("source", "solver", "uncertainty", "generation", "filtering",
+                     "fixed_components"):
+            obj = getattr(cfg, name)
+            for f in _dc.fields(obj):
+                v = getattr(obj, f.name)
+                if v is None or (isinstance(v, dict) and not v):
+                    continue
+                if _differs(v, _default(f)):
+                    lines.append(f"    {name}.{f.name} = {_fmt(v)}")
+        if cfg.verbose:
+            lines.append("    verbose = True")
+        text = "\n".join(lines)
+        print(text, file=stream)
+        return text
+
+    @property
     def output_header(self):
         """The output archive header -- draws are written to ``{header}.h5``."""
         return self.config.output_header
@@ -407,6 +466,18 @@ class Bouquet:
                 "reconstruct() is for a ReconstructionSource; the IMAS path has "
                 "no reconstruction step -- call prepare_baseline() (or run())."
             )
+        self.setup_solver()
+        return self.prepare_baseline()
+
+    def prepare(self) -> "Baseline":
+        """Stand up the solver and resolve the baseline -- **either path** (F3).
+
+        Symmetric with :meth:`reconstruct` (which is the reconstruction-path
+        alias): ``prepare()`` = ``setup_solver(); prepare_baseline()`` and works
+        for both the g-file and IMAS sources, each printing its own baseline
+        quality summary. Use it when a notebook should read the same on both
+        paths; ``reconstruct()`` remains for the g-file-specific intent.
+        """
         self.setup_solver()
         return self.prepare_baseline()
 
@@ -710,6 +781,16 @@ class Bouquet:
         gc = self.config.generation
         uc = self.config.uncertainty
         problems = []
+        # Named-preset facade (F4): "custom" (or the deprecated
+        # allow_unsafe_workflow=True) downgrades the guard to a warning; the two
+        # named presets assert the source matches.
+        is_recon = isinstance(self.config.source, ReconstructionSource)
+        wf = getattr(gc, "workflow", "auto")
+        if wf == "geqdsk-standard" and not is_recon:
+            problems.append("workflow='geqdsk-standard' but the source is IMAS")
+        if wf == "imas-diff-c" and is_recon:
+            problems.append("workflow='imas-diff-c' but the source is a g-file")
+        custom = (wf == "custom") or bool(gc.allow_unsafe_workflow)
         # Rule: j_inductive must be perturbed (both workflows do it via
         # jphi_scalar_sigma; zero sigma freezes it).
         if float(getattr(uc, "jphi_scalar_sigma", 0.0)) <= 0.0:
@@ -735,9 +816,9 @@ class Bouquet:
             return
         msg = ("bouquet workflow guard: " + "; ".join(problems)
                + ". This is the validated per-path workflow lock; set "
-               "config.generation.allow_unsafe_workflow=True to override "
+               "config.generation.workflow='custom' to override "
                "(backend tests / experiments only).")
-        if gc.allow_unsafe_workflow:
+        if custom:
             print("WARN: " + msg)
         else:
             raise ValueError(msg)
@@ -871,6 +952,12 @@ class Bouquet:
                              else "geqdsk"),
             )
         self.generation_log = _cap["text"] or None
+
+        # Stamp provenance (schema/version/timestamp + full config JSON) onto the
+        # archive so the run is self-describing and load_config() can round-trip it.
+        from .utils import write_provenance
+        write_provenance(header, config=self.config, scan_key=gc.scan_key)
+
         return self.diagnostics
 
     def plot_bouquet(self, mode: str = "all", selection: str = "all",
@@ -886,11 +973,44 @@ class Bouquet:
                              mode=mode, selection=selection,
                              layout=layout, pub_style=pub_style)
 
+    # ── thin post-run wrappers (auto-wire header + scan_key -- kill the manual
+    # (HEADER, scan_key) re-threading; F1) ─────────────────────────────────
+    def plot_traces(self, **kwargs):
+        """Per-draw l_i / LCFS-deviation / anchor-displacement traces for this run."""
+        from .plotting import plot_traces as _f
+        kwargs.setdefault("li_band", self.config.generation.l_i_tolerance)
+        kwargs.setdefault("rms_max_mm", self.config.filtering.rms_max_mm)
+        return _f(f"{self.config.output_header}.h5",
+                  scan_key=self.config.generation.scan_key, **kwargs)
+
+    def plot_coil_currents(self, **kwargs):
+        """Per-coil drift heatmap for this run."""
+        from .plotting import plot_coil_currents as _f
+        return _f(f"{self.config.output_header}.h5",
+                  scan_key=self.config.generation.scan_key, **kwargs)
+
+    def plot_spec_summary(self, **kwargs):
+        """In-spec fraction summary (coil + boundary) for this run."""
+        from .plotting import plot_spec_summary as _f
+        kwargs.setdefault("rms_max_mm", self.config.filtering.rms_max_mm)
+        return _f(self.config.output_header,
+                  scan_key=self.config.generation.scan_key, **kwargs)
+
+    def selected_indices(self, selection: str = "selected") -> list:
+        """Stored draw indices for this run's scan (``selected``/``all``/``excluded``)."""
+        from .filtering import select_indices
+        return select_indices(self.config.output_header,
+                               scan_key=self.config.generation.scan_key,
+                               selection=selection)
+
     # ── stage 4: filter + export ----------------------------------------
-    def filter(self, rms_max_mm: Optional[float] = None) -> dict:
+    def filter(self, rms_max_mm: Optional[float] = None, plot: bool = False) -> dict:
         """Mark the machine-realizable subset (coil + boundary filters).
 
-        Non-destructive: writes pass flags into the HDF5. Returns a summary.
+        Non-destructive: writes pass flags into the HDF5. Returns a summary dict.
+        With ``plot=True`` the coil-drift and boundary distribution figures are
+        produced and returned under ``summary["figures"] = (coil_fig, bnd_fig)``
+        (F7 -- the notebooks re-called the module filters just to get these).
         """
         from .filtering import filter_coil_currents, filter_boundaries
 
@@ -899,17 +1019,19 @@ class Bouquet:
         rms = fc.rms_max_mm if rms_max_mm is None else rms_max_mm
 
         sk = self.config.generation.scan_key
-        coil_summary, _ = filter_coil_currents(
+        coil_summary, coil_fig = filter_coil_currents(
             header, scan_key=sk,
             F_max_pct=fc.inspec_F_max * 100.0,
             VSC_max_pct=fc.inspec_VSC_max * 100.0,
-            apply=True, plot=False,
+            apply=True, plot=plot,
         )
-        bnd_summary, _ = filter_boundaries(
-            header, scan_key=sk, rms_max_mm=rms, apply=True, plot=False,
+        bnd_summary, bnd_fig = filter_boundaries(
+            header, scan_key=sk, rms_max_mm=rms, apply=True, plot=plot,
         )
         # one scan key -> each summary is a single {counts, draws} dict
         self._selection = {"coil": coil_summary, "boundary": bnd_summary}
+        if plot:
+            self._selection["figures"] = (coil_fig, bnd_fig)
         self._print_generation_summary(coil_summary, bnd_summary)
         return self._selection
 
@@ -976,3 +1098,43 @@ class Bouquet:
         self.filter()
         self.export()
         return self
+
+    def run_slices(self, times, scan_keys=None, header=None, export=False) -> dict:
+        """Sweep an IMAS time series into ONE archive, one ``scan_key`` per slice.
+
+        Wraps the ``set_slice -> prepare_baseline -> generate -> filter`` loop
+        (F5): keeps a single solver, writes every slice's draws under
+        ``scan/<key>/`` in ``{header}.h5``, and returns a per-slice summary
+        ``{scan_key: {time, n_all, n_sel, l_i, Ip}}``. ``scan_keys`` defaults to
+        the time in ms (``round(t*1000)``). Set ``export=True`` to also write the
+        selected-only copy after the last slice.
+
+        Reconstruction sources have no time axis (:meth:`set_slice` raises on
+        ``time``); build one :class:`Bouquet` per g-file instead.
+        """
+        times = [float(t) for t in times]
+        if scan_keys is None:
+            scan_keys = [int(round(t * 1000)) for t in times]     # ms labels
+        if len(scan_keys) != len(times):
+            raise ValueError("scan_keys must match times in length")
+        if header is not None:
+            self.config.output_header = header
+        self.setup_solver()                                       # once
+        results = {}
+        for t, sk in zip(times, scan_keys):
+            self.set_slice(time=t)
+            self.config.generation.scan_key = sk
+            self.prepare_baseline()
+            self.generate()
+            self.filter()
+            bl = self.baseline
+            results[sk] = dict(
+                time=t,
+                n_all=len(self.selected_indices("all")),
+                n_sel=len(self.selected_indices("selected")),
+                l_i=float(getattr(bl, "l_i_target", float("nan"))),
+                Ip=float(getattr(bl, "Ip_target", float("nan"))),
+            )
+        if export:
+            self.export()
+        return results

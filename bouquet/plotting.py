@@ -22,6 +22,7 @@ import h5py
 import numpy as np
 import matplotlib.pyplot as plt
 
+from .schema import find_bytes_dataset
 from .utils import (
     load_equilibrium,
     load_equilibrium_by_path,
@@ -573,8 +574,8 @@ def draw_kinetic_profiles(axes, psi_N, ne, ni, te, ti,
     sigma_ne, sigma_ni, sigma_te, sigma_ti : 1-D arrays
         1-:math:`\sigma` uncertainty envelopes.
     perturbed_data_list : list[dict] or None
-        Each dict must have keys ``'n_e [m^-3]'``, ``'n_i [m^-3]'``,
-        ``'T_e [eV]'``, ``'T_i [eV]'``.
+        Each dict must have keys ``'n_e'``, ``'n_i'``,
+        ``'T_e'``, ``'T_i'``.
     """
     _pairs = [
         #  axis       orig  scale  sigma      color        label      ylabel
@@ -583,7 +584,7 @@ def draw_kinetic_profiles(axes, psi_N, ne, ni, te, ti,
         (axes[1, 0], te, 1e-3, sigma_te, "0.55", r"$T_e$", r"$T_e$ [keV]"),
         (axes[1, 1], ti, 1e-3, sigma_ti, "0.55", r"$T_i$", r"$T_i$ [keV]"),
     ]
-    _keys = ["n_e [m^-3]", "n_i [m^-3]", "T_e [eV]", "T_i [eV]"]
+    _keys = ["n_e", "n_i", "T_e", "T_i"]
 
     # ---- baseline + sigma bands ------------------------------------------
     for a, orig, scale, sig, clr, lbl, ylabel in _pairs:
@@ -646,11 +647,11 @@ def draw_pressure_profiles(ax, psi_N, pressure, perturbed_data_list=None,
     ax : Axes
     psi_N : 1-D array
     pressure : 1-D array
-        Baseline total pressure [Pa].
+        Baseline total pressure.
     perturbed_data_list : list[dict] or None
-        Each dict provides ``'pressure [Pa]'`` (total).
+        Each dict provides ``'pressure'`` (total).
     pressure_thermal : 1-D array or None
-        Baseline thermal pressure [Pa] (dashed reference fallback).
+        Baseline thermal pressure (dashed reference fallback).
     bl : dict or None
         Baseline dict; when present, thermal/impurity/fast are overlaid.
     """
@@ -661,8 +662,8 @@ def draw_pressure_profiles(ax, psi_N, pressure, perturbed_data_list=None,
     if perturbed_data_list:
         n_equils = len(perturbed_data_list)
         for i, data in enumerate(perturbed_data_list):
-            if "pressure [Pa]" in data:
-                ax.plot(psi_N, data["pressure [Pa]"] * _kPa,
+            if "pressure" in data:
+                ax.plot(psi_N, data["pressure"] * _kPa,
                         c=_GOLD, alpha=0.55, lw=1.0,
                         label=f"perturbed total ({n_equils})" if i == 0 else None,
                         zorder=3)
@@ -690,7 +691,7 @@ def draw_pressure_profiles(ax, psi_N, pressure, perturbed_data_list=None,
 
 
 def _pressure_components(bl, psi_eq=None):
-    r"""Split a baseline dict into (thermal, impurity, fast) pressure [Pa].
+    r"""Split a baseline dict into (thermal, impurity, fast) pressure.
 
     Thermal is stored (``pressure_thermal``); impurity is recomputed from the
     stored kinetics via the same ``impurity_pressure`` the solve used; fast is
@@ -704,15 +705,15 @@ def _pressure_components(bl, psi_eq=None):
     regridded onto the total's grid before differencing. Single-grid archives
     (OMAS) skip this since the shapes already match.
     """
-    if "pressure [Pa]" not in bl or "pressure_thermal [Pa]" not in bl:
+    if "pressure" not in bl or "pressure_thermal" not in bl:
         return None
-    total = np.asarray(bl["pressure [Pa]"], float)
-    thermal = np.asarray(bl["pressure_thermal [Pa]"], float)
+    total = np.asarray(bl["pressure"], float)
+    thermal = np.asarray(bl["pressure_thermal"], float)
     imp = np.zeros_like(total)
     try:
-        ne = np.asarray(bl["n_e [m^-3]"], float)
-        ni = np.asarray(bl["n_i [m^-3]"], float)
-        ti = np.asarray(bl["T_i [eV]"], float)
+        ne = np.asarray(bl["n_e"], float)
+        ni = np.asarray(bl["n_i"], float)
+        ti = np.asarray(bl["T_i"], float)
         zeff = np.asarray(bl["aux_zeff"] if "aux_zeff" in bl else bl["Zeff"], float)
         from .physics import effective_impurity_charge, impurity_pressure
         imp = impurity_pressure(ne, ni, ti, effective_impurity_charge(ne, ni, zeff))
@@ -749,7 +750,7 @@ def draw_jphi_total(ax, psi_N, j_phi, sigma_jphi,
         Baseline total :math:`j_\phi` [A m^-2].
     sigma_jphi : 1-D array
     perturbed_data_list : list[dict] or None
-        Each dict must have ``'j_phi [A m^-2]'``.
+        Each dict must have ``'j_phi'``.
     """
     _MA = 1e-6  # A → MA
 
@@ -774,7 +775,7 @@ def draw_jphi_total(ax, psi_N, j_phi, sigma_jphi,
     if perturbed_data_list:
         n_equils = len(perturbed_data_list)
         for i, data in enumerate(perturbed_data_list):
-            ax.plot(psi_N, data["j_phi [A m^-2]"] * _MA, c=_GOLD,
+            ax.plot(psi_N, data["j_phi"] * _MA, c=_GOLD,
                     lw=1.0, alpha=0.55,
                     label=f"perturbed ({n_equils})" if i == 0 else None,
                     zorder=3)
@@ -799,8 +800,8 @@ def draw_jphi_components(axes, psi_N, perturbed_data_list=None):
     axes : array-like of 2 Axes
     psi_N : 1-D array
     perturbed_data_list : list[dict] or None
-        Each dict must have ``'j_phi [A m^-2]'`` and the applied bootstrap
-        (``'j_BS,edge [A m^-2]'`` if isolated, else ``'j_BS [A m^-2]'``).
+        Each dict must have ``'j_phi'`` and the applied bootstrap
+        (``'j_BS,edge'`` if isolated, else ``'j_BS'``).
     """
     _MA = 1e-6  # A → MA
     for ax in axes:
@@ -816,15 +817,15 @@ def draw_jphi_components(axes, psi_N, perturbed_data_list=None):
     n_equils = len(perturbed_data_list)
     # Which bootstrap variant was applied to j_phi? The isolated edge spike if
     # the run stored one (isolate_edge_jBS=True), else the full Sauter j_BS.
-    has_spike = "j_BS,edge [A m^-2]" in perturbed_data_list[0]
-    bs_key = "j_BS,edge [A m^-2]" if has_spike else "j_BS [A m^-2]"
+    has_spike = "j_BS,edge" in perturbed_data_list[0]
+    bs_key = "j_BS,edge" if has_spike else "j_BS"
     bs_label = r"$j_{\rm BS,edge}$" if has_spike else r"$j_{\rm BS}$"
 
     for i, data in enumerate(perturbed_data_list):
-        if "j_phi [A m^-2]" not in data or bs_key not in data:
+        if "j_phi" not in data or bs_key not in data:
             continue
         lbl = f"perturbed ({n_equils})" if i == 0 else None
-        total = np.asarray(data["j_phi [A m^-2]"], float)
+        total = np.asarray(data["j_phi"], float)
         bs = np.asarray(data[bs_key], float)
         jind = total - bs   # faithful inductive: closes to total, <= total
 
@@ -973,18 +974,18 @@ def _plot_bouquet_dashboard(psi_N, psi_N_kin, bl, perturbed,
 
     draw_kinetic_profiles(
         axes[0:2, :], psi_N_kin,
-        bl["n_e [m^-3]"], bl["n_i [m^-3]"], bl["T_e [eV]"], bl["T_i [eV]"],
-        bl["sigma_ne [m^-3]"], bl["sigma_ni [m^-3]"],
-        bl["sigma_te [eV]"], bl["sigma_ti [eV]"],
+        bl["n_e"], bl["n_i"], bl["T_e"], bl["T_i"],
+        bl["sigma_ne"], bl["sigma_ni"],
+        bl["sigma_te"], bl["sigma_ti"],
         perturbed_data_list=perturbed,
     )
 
-    draw_pressure_profiles(axes[2, 0], psi_N, bl["pressure [Pa]"],
+    draw_pressure_profiles(axes[2, 0], psi_N, bl["pressure"],
                            perturbed_data_list=perturbed,
-                           pressure_thermal=bl.get("pressure_thermal [Pa]"),
+                           pressure_thermal=bl.get("pressure_thermal"),
                            bl=bl)
-    draw_jphi_total(axes[2, 1], psi_N, bl["j_phi [A m^-2]"],
-                    bl["sigma_jphi [A m^-2]"], perturbed_data_list=perturbed)
+    draw_jphi_total(axes[2, 1], psi_N, bl["j_phi"],
+                    bl["sigma_jphi"], perturbed_data_list=perturbed)
     draw_zeff(axes[3, 0], psi_N_kin, bl, perturbed_data_list=perturbed)
     draw_flux_function(axes[3, 1], "q", r"$q$", baseline_ff, perturbed_ff,
                        q_marker=True)
@@ -1134,7 +1135,7 @@ def _load_all_boundaries(h5path, scan_key=None, indices=None):
     selection).
     """
     from .io import GEQDSKEquilibrium
-    from .utils import _scan_key, _group_path, _eqdsk_dataset_name
+    from .utils import _scan_key, _group_path
 
     if indices is None:
         indices = list_equilibrium_indices(h5path, scan_key=scan_key)
@@ -1149,10 +1150,10 @@ def _load_all_boundaries(h5path, scan_key=None, indices=None):
         # references the TRUE baseline rather than draw 0.
         _bk = _scan_key(scan_key)
         bl_path = f"scan/{_bk}/_baseline" if _bk is not None else "_baseline"
-        if bl_path in hf and "baseline.eqdsk" in hf[bl_path]:
+        if bl_path in hf and "eqdsk" in hf[bl_path]:
             try:
                 beq = GEQDSKEquilibrium.from_bytes(
-                    bytes(hf[bl_path]["baseline.eqdsk"][()]))
+                    bytes(hf[bl_path]["eqdsk"][()]))
                 boundaries.append(_bnd(beq))
             except Exception:
                 pass
@@ -1163,12 +1164,11 @@ def _load_all_boundaries(h5path, scan_key=None, indices=None):
                 continue
             grp = hf[grp_path]
 
-            # Find the eqdsk dataset (name ends with .eqdsk)
-            eqdsk_ds = [k for k in grp.keys() if k.endswith(".eqdsk")]
-            if not eqdsk_ds:
+            eqdsk_ds = find_bytes_dataset(grp)
+            if eqdsk_ds is None:
                 continue
 
-            raw = bytes(grp[eqdsk_ds[0]][()])
+            raw = bytes(grp[eqdsk_ds][()])
             try:
                 eq = GEQDSKEquilibrium.from_bytes(raw)
                 boundaries.append(_bnd(eq))
@@ -1198,11 +1198,11 @@ def _load_flux_functions(h5path, scan_key=None, indices=None):
                 "q": q, "ffprime": np.asarray(eq.ffprim, dtype=float)}
 
     def _eqdsk_in(grp):
-        names = [k for k in grp.keys() if k.endswith(".eqdsk")]
-        if not names:
+        name = find_bytes_dataset(grp)
+        if name is None:
             return None
         try:
-            return _ff(bytes(grp[names[0]][()]))
+            return _ff(bytes(grp[name][()]))
         except Exception:
             return None
 
@@ -1378,10 +1378,10 @@ def plot_bouquet(h5path_or_header, scan_key=None, mode="kinetic",
         fig, ax = plt.subplots(2, 2, figsize=(7.5, 5.5), sharex=True)
         draw_kinetic_profiles(
             ax, psi_N_kin,
-            bl["n_e [m^-3]"], bl["n_i [m^-3]"],
-            bl["T_e [eV]"],   bl["T_i [eV]"],
-            bl["sigma_ne [m^-3]"], bl["sigma_ni [m^-3]"],
-            bl["sigma_te [eV]"],   bl["sigma_ti [eV]"],
+            bl["n_e"], bl["n_i"],
+            bl["T_e"],   bl["T_i"],
+            bl["sigma_ne"], bl["sigma_ni"],
+            bl["sigma_te"],   bl["sigma_ti"],
             perturbed_data_list=perturbed,
         )
         fig.tight_layout()
@@ -1391,9 +1391,9 @@ def plot_bouquet(h5path_or_header, scan_key=None, mode="kinetic",
     if mode in ("pressure", "all"):
         fig, ax = plt.subplots(figsize=(5.5, 4))
         draw_pressure_profiles(
-            ax, psi_N, bl["pressure [Pa]"],
+            ax, psi_N, bl["pressure"],
             perturbed_data_list=perturbed,
-            pressure_thermal=bl.get("pressure_thermal [Pa]"),
+            pressure_thermal=bl.get("pressure_thermal"),
             bl=bl,
         )
         fig.tight_layout()
@@ -1404,7 +1404,7 @@ def plot_bouquet(h5path_or_header, scan_key=None, mode="kinetic",
         fig_jt, ax_jt = plt.subplots(figsize=(5.5, 4))
         draw_jphi_total(
             ax_jt, psi_N,
-            bl["j_phi [A m^-2]"], bl["sigma_jphi [A m^-2]"],
+            bl["j_phi"], bl["sigma_jphi"],
             perturbed_data_list=perturbed,
         )
         fig_jt.tight_layout()
@@ -1736,8 +1736,8 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
         else:
             bl_grp = "_baseline"
         with h5py.File(h5path, "r") as hf:
-            if bl_grp in hf and "baseline.eqdsk" in hf[bl_grp]:
-                raw = bytes(hf[bl_grp]["baseline.eqdsk"][()])
+            if bl_grp in hf and "eqdsk" in hf[bl_grp]:
+                raw = bytes(hf[bl_grp]["eqdsk"][()])
                 baseline_eq = GEQDSKEquilibrium.from_bytes(raw)
 
         # Load perturbed equilibria
@@ -1747,9 +1747,9 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
                 if grp_path not in hf:
                     continue
                 grp = hf[grp_path]
-                eqdsk_ds = [k for k in grp.keys() if k.endswith(".eqdsk")]
-                if eqdsk_ds:
-                    raw = bytes(grp[eqdsk_ds[0]][()])
+                eqdsk_ds = find_bytes_dataset(grp)
+                if eqdsk_ds is not None:
+                    raw = bytes(grp[eqdsk_ds][()])
                     eqs.append(GEQDSKEquilibrium.from_bytes(raw))
 
         # Prepend baseline if found; otherwise first perturbed is "baseline"
@@ -1989,8 +1989,8 @@ def plot_pfile_bouquet(pfile_path_or_pf=None, x_coord="psi_N", eq=None,
         else:
             bl_grp = "_baseline"
         with h5py.File(h5path, "r") as hf:
-            if bl_grp in hf and "baseline.pfile" in hf[bl_grp]:
-                raw = bytes(hf[bl_grp]["baseline.pfile"][()])
+            if bl_grp in hf and "pfile" in hf[bl_grp]:
+                raw = bytes(hf[bl_grp]["pfile"][()])
                 baseline_pf = _PFile.from_bytes(raw)
 
         # Load perturbed pfiles (these now contain actual perturbed
@@ -2001,7 +2001,7 @@ def plot_pfile_bouquet(pfile_path_or_pf=None, x_coord="psi_N", eq=None,
                 if grp_path not in hf:
                     continue
                 grp = hf[grp_path]
-                pf_ds = [k for k in grp.keys() if k.endswith(".pfile")]
+                pf_ds = (["pfile"] if "pfile" in grp else [])
                 if pf_ds:
                     raw = bytes(grp[pf_ds[0]][()])
                     pfiles.append(_PFile.from_bytes(raw))
@@ -2216,21 +2216,24 @@ def plot_coil_currents(h5path_or_header, scan_key=None, vsc_coils=('F9A', 'F9B')
             print("No baseline coil data found in the HDF5 file.")
             return None, None
         bl = parent['_baseline']
-        if 'coil_currents [A]' not in bl or 'coil_names' not in bl:
+        if 'coil_currents' not in bl or 'coil_names' not in bl:
             print("No baseline coil data found in the HDF5 file.")
             return None, None
         ref_names = [s.decode() if isinstance(s, bytes) else s
                      for s in np.array(bl['coil_names'])]
-        ref = dict(zip(ref_names, np.asarray(bl['coil_currents [A]'], dtype=float)))
+        ref = dict(zip(ref_names, np.asarray(bl['coil_currents'], dtype=float)))
         draws = sorted(int(k) for k in parent.keys() if k.isdigit())
         cols, in_spec, spec_F, spec_VSC = [], [], 0.02, 0.02
         for c in draws:
             g = parent[str(c)]
-            if 'coil_currents [A]' not in g:
+            if 'coil_currents' not in g or 'coil_names' not in g:
                 continue
-            d_names = _json.loads(g.attrs.get('coil_names', '[]'))
+            # schema v2 (F15): per-draw coil names are a string DATASET (matching
+            # the baseline), not a JSON attr -- read them the same way as ref_names.
+            d_names = [s.decode() if isinstance(s, bytes) else s
+                       for s in np.array(g['coil_names'])]
             cols.append((c, dict(zip(d_names,
-                                     np.asarray(g['coil_currents [A]'], dtype=float)))))
+                                     np.asarray(g['coil_currents'], dtype=float)))))
             in_spec.append(bool(g.attrs.get('in_spec', True)))
             spec_F = float(g.attrs.get('inspec_F_max', spec_F))
             spec_VSC = float(g.attrs.get('inspec_VSC_max', spec_VSC))
@@ -2637,12 +2640,12 @@ def plot_bouquet_timeseries(entries, scan_key=None, draws=True, envelopes=True,
 
     # (title, dataset, grid-key, scale, sigma-dataset)
     PANELS = [
-        (r"$n_e$ [$10^{19}$ m$^{-3}$]", "n_e [m^-3]", "psi_N_kinetic", 1e-19, "sigma_ne [m^-3]"),
-        (r"$T_e$ [keV]",               "T_e [eV]",    "psi_N_kinetic", 1e-3,  "sigma_te [eV]"),
-        (r"$n_i$ [$10^{19}$ m$^{-3}$]", "n_i [m^-3]", "psi_N_kinetic", 1e-19, "sigma_ni [m^-3]"),
-        (r"$T_i$ [keV]",               "T_i [eV]",    "psi_N_kinetic", 1e-3,  "sigma_ti [eV]"),
-        (r"$p$ [kPa]",                 "pressure [Pa]", "psi_N",       1e-3,  None),
-        (r"$j_\phi$ [MA/m$^2$]",       "j_phi [A m^-2]", "psi_N",      1e-6,  "sigma_jphi [A m^-2]"),
+        (r"$n_e$ [$10^{19}$ m$^{-3}$]", "n_e", "psi_N_kinetic", 1e-19, "sigma_ne"),
+        (r"$T_e$ [keV]",               "T_e",    "psi_N_kinetic", 1e-3,  "sigma_te"),
+        (r"$n_i$ [$10^{19}$ m$^{-3}$]", "n_i", "psi_N_kinetic", 1e-19, "sigma_ni"),
+        (r"$T_i$ [keV]",               "T_i",    "psi_N_kinetic", 1e-3,  "sigma_ti"),
+        (r"$p$ [kPa]",                 "pressure", "psi_N",       1e-3,  None),
+        (r"$j_\phi$ [MA/m$^2$]",       "j_phi", "psi_N",      1e-6,  "sigma_jphi"),
     ]
     fig, axes = plt.subplots(2, 3, figsize=(11, 6), sharex=True)
     flat = axes.ravel()
@@ -2764,11 +2767,11 @@ def plot_traces(h5path_or_header, scan_key="all", li_band=None, rms_max_mm=None)
             # baseline magnetic axis (fixed anchor reference for ALL draws)
             R_axis = Z_axis = None
             if bl_grp is not None:
-                eqk = [k for k in bl_grp.keys() if k.endswith(".eqdsk")]
-                if eqk:
+                eqk = find_bytes_dataset(bl_grp)
+                if eqk is not None:
                     try:
                         eq_bl = read_eqdsk_from_bytes(
-                            bytes(bl_grp[eqk[0]][()]), read_geqdsk)
+                            bytes(bl_grp[eqk][()]), read_geqdsk)
                         R_axis, Z_axis = float(eq_bl.R_mag), float(eq_bl.Z_mag)
                     except Exception:
                         pass
@@ -3269,10 +3272,9 @@ def plot_boundary_point_traces(h5path_or_header, scan_key="all",
                            if sv_key else "_baseline")
             if bl_grp_path in hf:
                 bl_grp = hf[bl_grp_path]
-                eqdsk_keys = [k for k in bl_grp.keys()
-                              if k.endswith(".eqdsk")]
-                if eqdsk_keys:
-                    raw = bytes(bl_grp[eqdsk_keys[0]][()])
+                eqdsk_keys = find_bytes_dataset(bl_grp)
+                if eqdsk_keys is not None:
+                    raw = bytes(bl_grp[eqdsk_keys][()])
                     try:
                         eq_bl = read_eqdsk_from_bytes(raw, read_geqdsk)
                         # Pin reference coordinates from the baseline.
@@ -3303,10 +3305,10 @@ def plot_boundary_point_traces(h5path_or_header, scan_key="all",
                 if grp_path not in hf:
                     continue
                 grp = hf[grp_path]
-                eqdsk_keys = [k for k in grp.keys() if k.endswith(".eqdsk")]
-                if not eqdsk_keys:
+                eqdsk_keys = find_bytes_dataset(grp)
+                if eqdsk_keys is None:
                     continue
-                raw = bytes(grp[eqdsk_keys[0]][()])
+                raw = bytes(grp[eqdsk_keys][()])
                 try:
                     eq = read_eqdsk_from_bytes(raw, read_geqdsk)
                     pts, _has_xpt = _extract_boundary_points(
@@ -3447,16 +3449,16 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
         sk = str(scan_key) if scan_key is not None else list(hf["scan"].keys())[0]
         g = hf[f"scan/{sk}"]
         psi = np.asarray(g["_baseline/psi_N"][:], float)
-        base_total = np.asarray(g["_baseline/j_phi [A m^-2]"][:], float)
-        base_jBS = (np.asarray(g["_baseline/j_BS [A m^-2]"][:], float)
-                    if "j_BS [A m^-2]" in g["_baseline"] else None)
+        base_total = np.asarray(g["_baseline/j_phi"][:], float)
+        base_jBS = (np.asarray(g["_baseline/j_BS"][:], float)
+                    if "j_BS" in g["_baseline"] else None)
         ids = [k for k in g if k.isdigit()]
         # IMAS / full-bootstrap archives (isolate_edge_jBS=False) store no edge
         # spike -- fall back to the full j_BS, so j_ind = total - j_BS - fixed
         # closes exactly there too.
-        has_spike = bool(ids) and "j_BS,edge [A m^-2]" in g[ids[0]]
-        _bs_key = "j_BS,edge [A m^-2]" if has_spike else "j_BS [A m^-2]"
-        D = {d: dict(total=np.asarray(g[f"{d}/j_phi [A m^-2]"][:], float),
+        has_spike = bool(ids) and "j_BS,edge" in g[ids[0]]
+        _bs_key = "j_BS,edge" if has_spike else "j_BS"
+        D = {d: dict(total=np.asarray(g[f"{d}/j_phi"][:], float),
                      spike=(np.asarray(g[f"{d}/{_bs_key}"][:], float)
                             if _bs_key in g[d] else np.zeros_like(psi)))
              for d in ids}
@@ -3522,6 +3524,9 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
     if F is not None:
         ax[1].plot(psi, (F["jind"] if F.get("jind") is not None else F["total"]) / 1e6,
                    "--", color=FU, lw=1.6, label=rf"{Flabel} $j_{{ind}}$" if F.get("jind") is not None else rf"{Flabel} $j_\phi$")
+    # total j_phi reference, so the component is read against the whole current
+    ax[1].plot(psi, base_total / 1e6, "k--", lw=1.4, alpha=0.6, zorder=4,
+               label=r"baseline total $j_\phi$")
     for i, d in enumerate(keep):
         ax[1].plot(psi, (D[d]["total"] - D[d]["spike"] - fixed) / 1e6, "-", color=OR,
                    lw=1.0, alpha=0.55, label=r"perturbed $j_{ind}$" if i == 0 else None)
@@ -3533,6 +3538,9 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
                    "--", color=FU, lw=1.6, label=rf"{Flabel} $j_{{BS}}$" if F.get("jBS") is not None else rf"{Flabel} $j_\phi$")
     if base_jBS is not None:
         ax[2].plot(psi, base_jBS / 1e6, "k-", lw=2.0, zorder=5, label=base_jBS_label)
+    # total j_phi reference (dashed, to distinguish from the solid baseline j_BS)
+    ax[2].plot(psi, base_total / 1e6, "k--", lw=1.4, alpha=0.6, zorder=4,
+               label=r"baseline total $j_\phi$")
     for i, d in enumerate(keep):
         ax[2].plot(psi, D[d]["spike"] / 1e6, "-", color=OR, lw=1.0, alpha=0.55,
                    label=r"perturbed $j_{BS}$" if i == 0 else None)

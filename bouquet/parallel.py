@@ -18,14 +18,18 @@ Two launchers, one ``run_shard`` entry point:
   merge job that call ``python -m bouquet.parallel`` on the same ``run_shard``.
 
 Note: parallel draws are NOT bit-identical to a serial run of the same seed --
-each worker uses an independent RNG stream (``seed + worker_id``), so the union
-is a statistically-equivalent *different* draw set. The baseline is identical.
+each worker's ``np.random`` seed is derived from ``(seed, worker_id,
+scan_key)`` via ``np.random.SeedSequence`` (see :func:`_derive_seed`), so the
+union is a statistically-equivalent *different* draw set. The baseline is
+identical. Folding the ``scan_key`` into the derivation decorrelates a
+multi-slice sweep run with one ``seed``: draw *i* of slice A and draw *i* of
+slice B no longer share a perturbation stream.
 """
 from __future__ import annotations
 
 import copy
+import hashlib
 import os
-import pickle
 
 __all__ = [
     "run_shard",
@@ -39,6 +43,54 @@ def _shard_size(total, n_workers, worker_id):
     """Draws assigned to *worker_id* when *total* is split over *n_workers*."""
     base, rem = divmod(int(total), int(n_workers))
     return base + (1 if worker_id < rem else 0)
+
+
+def _derive_seed(seed_base, worker_id, scan_key):
+    """Per-worker ``np.random`` seed from ``(seed_base, worker_id, scan_key)``.
+
+    ``SeedSequence`` scrambles the entropy tuple into a well-separated 32-bit
+    seed, replacing the old ``seed_base + worker_id`` scheme, which (a) gave
+    adjacent-integer MT19937 seeds across workers and (b) reused the *same*
+    streams for every slice of a timeseries swept with one ``seed_base`` --
+    correlating draw *i* across time slices. The ``scan_key`` enters through
+    its canonical string form (``utils._scan_key``), so ``2000`` and
+    ``"2000"`` derive the same stream (mirroring the archive layout).
+    Deterministic: the same triple always yields the same seed.
+    """
+    import numpy as np
+    from .utils import _scan_key
+
+    entropy = [int(seed_base), int(worker_id)]
+    bkey = _scan_key(scan_key)
+    if bkey is not None:
+        entropy.append(int.from_bytes(
+            hashlib.sha256(bkey.encode()).digest()[:8], "little"))
+    return int(np.random.SeedSequence(entropy).generate_state(1)[0])
+
+
+def _physical_cores():
+    """Physical core count (one TokaMaker per physical core is the budget).
+
+    ``os.cpu_count()`` reports *logical* cores; with SMT that oversubscribes
+    the solver 2x. Try psutil, then the macOS sysctl, then fall back to
+    logical count.
+    """
+    try:
+        import psutil
+        n = psutil.cpu_count(logical=False)
+        if n:
+            return int(n)
+    except ImportError:
+        pass
+    import sys
+    if sys.platform == "darwin":
+        try:
+            import subprocess
+            return int(subprocess.check_output(
+                ["sysctl", "-n", "hw.physicalcpu"]).strip())
+        except Exception:
+            pass
+    return os.cpu_count() or 1
 
 
 def _warn_multithreaded(threads_per_worker):
@@ -102,7 +154,8 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
         cfg = copy.deepcopy(config)
         cfg.solver.nthreads = int(threads_per_worker)
         cfg.generation.n_equils = int(n)
-        cfg.generation.seed = int(seed_base) + int(worker_id)  # independent stream
+        # independent, slice-decorrelated stream (see _derive_seed)
+        cfg.generation.seed = _derive_seed(seed_base, worker_id, scan_key)
         cfg.generation.scan_key = scan_key
         cfg.output_header = f"{out_header}_w{worker_id}"
 
@@ -145,15 +198,21 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
 #  merge per-worker shards into one archive
 # --------------------------------------------------------------------------
 def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
-                   baseline_match_rtol=1e-6):
+                   baseline_match_rtol=1e-6, config=None):
     """Concatenate per-worker shard archives into ``{out_header}.h5``.
 
-    Draw groups are renumbered to a contiguous running index, and the raw
-    ``.eqdsk`` / ``.pfile`` datasets are renamed to the merged header+count form
-    so ``load_equilibrium`` (which addresses the eqdsk by reconstructed name)
-    keeps working alongside the suffix-based readers. The ``_baseline`` group is
-    copied once (the baseline is identical across workers). Returns
-    ``(out_path, n_draws)``.
+    Draw groups are renumbered to a contiguous running index; under schema v2
+    the raw bytes keep their fixed ``eqdsk`` / ``pfile`` dataset names, so no
+    rename is needed (the group path carries the coordinates). The
+    ``_baseline`` group is copied once (the baseline is identical across
+    workers). Returns ``(out_path, n_draws)``.
+
+    Pass the RUN-level ``config`` (the original :class:`~bouquet.BouquetConfig`,
+    not a per-worker mutation) to stamp ``config_json`` provenance onto the
+    merged archive -- the shards' own provenance records per-worker configs
+    (derived seed, shard n_equils, ``_w{i}`` header) and is not copied, and
+    the shards themselves are deleted under ``cleanup=True``, so without this
+    the deliverable file carries no config record.
 
     Every shard's stored baseline (``_baseline`` attrs ``l_i_target`` /
     ``Ip_target``) is verified against the first shard's before anything is
@@ -168,7 +227,7 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
     import warnings
     import h5py
     from .utils import (initialize_equilibrium_database, _scan_key,
-                        _group_path, _eqdsk_dataset_name)
+                        _group_path)
 
     bkey = _scan_key(scan_key)
     base_path = f"scan/{bkey}" if bkey is not None else None
@@ -241,16 +300,15 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                     out.copy(parent[str(i)], dst)
                     g = out[dst]
                     g.attrs["count"] = offset
-                    # rename raw eqdsk/pfile to the merged header+count naming so
-                    # load_equilibrium(out_header, count=offset) resolves them.
-                    new_eqdsk = _eqdsk_dataset_name(out_header, scan_key, offset)
-                    new_pfile = new_eqdsk.replace(".eqdsk", ".pfile")
-                    for k in list(g.keys()):
-                        if k.endswith(".eqdsk") and k != new_eqdsk:
-                            g.move(k, new_eqdsk)
-                        elif k.endswith(".pfile") and k != new_pfile:
-                            g.move(k, new_pfile)
+                    # Schema v2: draws store fixed `eqdsk`/`pfile` names, so the
+                    # copy needs no rename (F11) -- the group path carries the
+                    # coordinate. load_equilibrium resolves by the fixed name.
                     offset += 1
+
+    # Run-level provenance on the merged archive (schema/version/timestamp
+    # always; config_json when the caller supplied the run config).
+    from .utils import write_provenance
+    write_provenance(out_header, config=config, scan_key=scan_key)
 
     if cleanup:
         for sp in shard_paths:
@@ -262,7 +320,7 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
 # --------------------------------------------------------------------------
 #  orchestration
 # --------------------------------------------------------------------------
-def parallel_generate(config, *, n_workers, threads_per_worker=1, seed=0,
+def parallel_generate(config, *, n_workers=None, threads_per_worker=1, seed=0,
                       backend="laptop", baseline_match_rtol=1e-6, cleanup=True,
                       verbose=False, progress=True, slurm=None):
     """Fan ``config.generation.n_equils`` draws across worker processes, merge.
@@ -272,6 +330,10 @@ def parallel_generate(config, *, n_workers, threads_per_worker=1, seed=0,
     :func:`emit_slurm_script` (pass options as the ``slurm`` dict) and returns
     their paths without running.
 
+    ``n_workers=None`` defaults to the machine's **physical** core count
+    (one single-threaded TokaMaker per physical core; logical/SMT cores
+    oversubscribe the solver). Pass it explicitly on shared machines.
+
     The cross-worker **baseline check**: every worker reports its forward-solved
     baseline ``l_i``/``Ip``; if any drifts beyond ``baseline_match_rtol`` the run
     raises (a worker did not converge to the shared baseline -- e.g. a stray
@@ -280,6 +342,8 @@ def parallel_generate(config, *, n_workers, threads_per_worker=1, seed=0,
     n_total = int(config.generation.n_equils)
     scan_key = config.generation.scan_key
     out_header = config.output_header
+    if n_workers is None:
+        n_workers = _physical_cores()
     nw = max(1, min(int(n_workers), n_total))
 
     if backend == "slurm":
@@ -389,7 +453,7 @@ def parallel_generate(config, *, n_workers, threads_per_worker=1, seed=0,
 
     paths = [r["path"] for r in results if r and r["path"]]
     out_path, n_merged = merge_archives(paths, out_header, scan_key=scan_key,
-                                        cleanup=cleanup)
+                                        cleanup=cleanup, config=config)
     return dict(out_path=out_path, n_draws=n_merged, n_workers=nw,
                 threads_per_worker=threads_per_worker,
                 li_target=li0, Ip_target=ip0)
@@ -401,50 +465,82 @@ def parallel_generate(config, *, n_workers, threads_per_worker=1, seed=0,
 def emit_slurm_script(config, *, n_workers, seed, threads_per_worker,
                       out_dir=".", job_name="bouquet", partition=None,
                       time_limit="02:00:00", mem_per_task="16G",
-                      python="python"):
+                      python="python", setup=None):
     """Write a SLURM job-array (one shard per task) + a dependent merge job.
 
-    Serialises the run into ``{job_name}_bundle.pkl`` and writes two sbatch
+    Serialises the run into ``{job_name}_bundle.json`` (config via
+    ``BouquetConfig.to_dict``) and writes two sbatch
     scripts plus a ``{job_name}_submit.sh`` that chains them with
-    ``--dependency=afterok``. Nothing is launched. Returns the written paths.
+    ``--dependency=afterany`` (the merge validates shards itself: it aborts
+    loudly on missing workers or a drifted baseline, so it is safe -- and
+    more informative -- to let it run after a partial array instead of
+    leaving it pending forever behind ``afterok``). Nothing is launched.
+    Returns the written paths.
+
+    ``setup`` is an optional list of shell lines inserted before the payload
+    in BOTH sbatch scripts -- environment activation the compute node needs,
+    e.g. ``["module load conda", "conda activate bouquet",
+    "export OFT_PYTHONPATH=/path/to/OFT/python"]``. Without OFT importable,
+    every shard dies at ``import OpenFUSIONToolkit``.
+
+    Launch with ``{job_name}_submit.sh`` -- it ``cd``'s to its own directory
+    first, so it works from any CWD. (The sbatch scripts reference the bundle
+    by basename and therefore assume the submission CWD is ``out_dir``;
+    shard/merged ``.h5`` outputs land there too unless
+    ``config.output_header`` is an absolute path.)
     """
     _warn_multithreaded(threads_per_worker)
     os.makedirs(out_dir, exist_ok=True)
+    # Config JSON bundle (not pickle): portable across package/Python versions,
+    # human-inspectable, and the same serialization the h5 provenance uses (F25).
+    import json
     bundle = dict(
-        config=config, n_workers=int(n_workers), seed=int(seed),
+        config=config.to_dict(), n_workers=int(n_workers), seed=int(seed),
         threads_per_worker=int(threads_per_worker),
         n_equils_total=int(config.generation.n_equils),
         scan_key=config.generation.scan_key,
         out_header=config.output_header,
     )
-    bpath = os.path.join(out_dir, f"{job_name}_bundle.pkl")
-    with open(bpath, "wb") as fh:
-        pickle.dump(bundle, fh)
+    bname = f"{job_name}_bundle.json"
+    bpath = os.path.join(out_dir, bname)
+    with open(bpath, "w") as fh:
+        json.dump(bundle, fh, indent=2)
 
     part = f"#SBATCH --partition={partition}\n" if partition else ""
+    extra = "".join(f"{line}\n" for line in (setup or []))
     # threads pinned to the task's cores; BLAS held to the same to avoid nesting.
     env = (f"export OMP_NUM_THREADS={threads_per_worker}\n"
            "export OMP_PROC_BIND=close OMP_PLACES=cores\n"
            f"export OPENBLAS_NUM_THREADS={threads_per_worker} "
            f"MKL_NUM_THREADS={threads_per_worker}\n")
 
+    # The bundle is referenced by BASENAME: sbatch tasks run in the submission
+    # CWD, and submit.sh cd's to this directory first -- so the pair works
+    # from any CWD without baking a machine-specific absolute path into the
+    # scripts.
     array = (
         f"#!/bin/bash\n#SBATCH --job-name={job_name}\n"
         f"#SBATCH --array=0-{n_workers - 1}\n"
         f"#SBATCH --cpus-per-task={threads_per_worker}\n"
         f"#SBATCH --time={time_limit}\n#SBATCH --mem={mem_per_task}\n{part}"
-        f"{env}{python} -m bouquet.parallel shard {bpath} $SLURM_ARRAY_TASK_ID\n"
+        f"{extra}{env}"
+        f"{python} -m bouquet.parallel shard {bname} $SLURM_ARRAY_TASK_ID\n"
     )
     merge = (
         f"#!/bin/bash\n#SBATCH --job-name={job_name}_merge\n"
         f"#SBATCH --cpus-per-task=1\n#SBATCH --time=00:20:00\n"
-        f"#SBATCH --mem={mem_per_task}\n{part}"
-        f"{python} -m bouquet.parallel merge {bpath}\n"
+        f"#SBATCH --mem={mem_per_task}\n{part}{extra}"
+        f"{python} -m bouquet.parallel merge {bname}\n"
     )
     submit = (
-        "#!/bin/bash\n# chain the array + merge with an afterok dependency\n"
+        "#!/bin/bash\n"
+        "# run from anywhere: everything below is relative to this script\n"
+        'cd "$(dirname "$0")"\n'
+        "# chain array + merge; afterany (not afterok) so the merge still\n"
+        "# runs -- and reports exactly which shards are missing -- after a\n"
+        "# partial array, instead of pending forever.\n"
         f"aid=$(sbatch --parsable {job_name}_array.sbatch)\n"
-        f"sbatch --dependency=afterok:$aid {job_name}_merge.sbatch\n"
+        f"sbatch --dependency=afterany:$aid {job_name}_merge.sbatch\n"
     )
 
     apath = os.path.join(out_dir, f"{job_name}_array.sbatch")
@@ -467,13 +563,19 @@ def _cli(argv=None):
         raise SystemExit("usage: python -m bouquet.parallel {shard <bundle> "
                          "<worker_id> | merge <bundle> [--allow-missing]}")
     cmd, bpath = argv[0], argv[1]
-    with open(bpath, "rb") as fh:
-        b = pickle.load(fh)
+    import json
+    from .config import BouquetConfig
+    with open(bpath) as fh:
+        b = json.load(fh)
+    b["config"] = BouquetConfig.from_dict(b["config"])
     if cmd == "shard":
+        # verbose=True: SLURM already isolates each task's output in its own
+        # slurm-*.out, so the notebook flood rationale for fd-suppression does
+        # not apply -- and an empty log is useless when a shard dies.
         run_shard(b["config"], int(argv[2]), b["n_workers"],
                   n_equils_total=b["n_equils_total"], seed_base=b["seed"],
                   out_header=b["out_header"], scan_key=b["scan_key"],
-                  threads_per_worker=b["threads_per_worker"])
+                  threads_per_worker=b["threads_per_worker"], verbose=True)
     elif cmd == "merge":
         allow_missing = "--allow-missing" in argv[2:]
         # workers assigned zero draws legitimately produce no shard file;
@@ -495,7 +597,8 @@ def _cli(argv=None):
             print(f"WARN: {msg} -- merging the partial set")
         shard_list = [p for i, p in sorted(paths.items()) if i not in missing]
         out_path, n = merge_archives(shard_list, b["out_header"],
-                                     scan_key=b["scan_key"], cleanup=True)
+                                     scan_key=b["scan_key"], cleanup=True,
+                                     config=b["config"])
         print(f"merged {n} draws -> {out_path}")
     else:
         raise SystemExit(f"unknown command {cmd!r}")
