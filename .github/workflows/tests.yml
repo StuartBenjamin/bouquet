@@ -1,9 +1,15 @@
 name: tests (fast)
 
 # Fast unit suite — runs on every push and PR.  No OpenFUSIONToolkit / live
-# solver needed (those are the `solver`-marked tests, gated to the merge queue;
-# see solver.yml).  `pytest` is fast-by-default via `addopts = -m "not solver"`
-# in pyproject.toml.
+# solver needed (those are the `solver`-marked tests; see solver.yml).
+# `pytest` is fast-by-default via `addopts = -m "not solver"` in pyproject.toml.
+#
+# Two dependency sets so an upstream numpy/scipy release surfaces as its own
+# signal instead of failing unrelated feature PRs (e.g. scipy 1.18 changed
+# RectBivariateSpline.ev scalar returns; numpy 2.5 made float(shape-(1,))
+# a TypeError):
+#   * pinned — the validated floor (bump deliberately when adopting new deps)
+#   * latest — whatever pip resolves today (the early-warning canary)
 on:
   push:
   pull_request:
@@ -15,14 +21,22 @@ concurrency:
 jobs:
   fast:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        deps: [pinned, latest]
+    name: fast (${{ matrix.deps }})
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Install package + pytest
+      - name: Install package + pytest (${{ matrix.deps }} deps)
         run: |
           python -m pip install --upgrade pip
+          if [ "${{ matrix.deps }}" = "pinned" ]; then
+            pip install "numpy==2.4.*" "scipy==1.17.*"
+          fi
           pip install -e . pytest
       - name: Run fast suite (solver tests deselected by default)
         run: pytest -q

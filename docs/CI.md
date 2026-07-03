@@ -18,7 +18,12 @@ PR-controlled code on lab infrastructure.  So until OFT publishes to PyPI we kee
 the comprehensive suite off automated CI and run it deliberately.
 
 ## Workflows
-- `.github/workflows/tests.yml` — **fast** suite on `push`/`pull_request` (automated).
+- `.github/workflows/tests.yml` — **fast** suite on `push`/`pull_request`
+  (automated), run on a 2-way dependency matrix: **pinned** (the validated
+  numpy/scipy floor — bump deliberately) and **latest** (unpinned canary).
+  An upstream numpy/scipy release then breaks only the `latest` leg, as its
+  own signal, instead of failing unrelated feature PRs (this bit us when
+  scipy 1.18 + numpy 2.5 changed scalar-conversion semantics).
 - `.github/workflows/solver.yml` — **solver** suite, `workflow_dispatch` only
   (manual "Run workflow" button / `gh workflow run solver.yml`).  Not a required
   check, so it never blocks a merge.  It already contains the `runs-on`, env, and
@@ -32,8 +37,9 @@ Before merging a branch that touches the perturbation/solve pipeline into `main`
 3. The automated `fast` check must also be green.
 
 ## Branch protection (`main`)
-Require the **`fast`** status check + a review.  **Do not** require `solver`
-while it's manual — a required check with no runner would block merges forever.
+Require the **`fast (pinned)`** status check (+ optionally `fast (latest)` and
+a review).  **Do not** require `solver` while it's manual — a required check
+with no runner would block merges forever.
 
 ## Future: automate the solver gate
 Once the OFT Ip fixes are merged upstream **and** OpenFUSIONToolkit publishes to

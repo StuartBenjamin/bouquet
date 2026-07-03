@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use bouquet in your research, please cite it as below."
+title: "bouquet: BOotstrap Uncertainty QUantified Equilibrium Toolkit"
+type: software
+authors:
+  - family-names: Burgess
+    given-names: Daniel
+  - family-names: Hansen
+    given-names: Chris
+version: 0.2.0
+doi: 10.5281/zenodo.19398541
+date-released: 2026-07-02
+license: LGPL-3.0
+repository-code: "https://github.com/d-burg/bouquet"
+url: "https://d-burg.github.io/bouquet/"
+abstract: >-
+  GP-sampled perturbed tokamak equilibria for uncertainty quantification
+  with OpenFUSIONToolkit/TokaMaker. bouquet generates families ("bouquets")
+  of perturbed equilibria from a baseline kinetic equilibrium by drawing
+  correlated profile perturbations from Gaussian-process regression
+  posteriors, solving the Grad-Shafranov equation for each sample, and
+  archiving all results to a single self-describing HDF5 database.
+keywords:
+  - tokamak
+  - plasma physics
+  - equilibrium
+  - uncertainty quantification
+  - Grad-Shafranov
