@@ -1,3 +1,52 @@
+# Bouquet — change summaries
+
+## Class API + HDF5 schema v2 round (2026-07, PR #8)
+
+Decisions and outcomes folded from the (deleted) working document
+`docs/ux-review-feat-bouquet-class-api.md`:
+
+1. **Config serialization + provenance**: `BouquetConfig.to_dict/from_dict`
+   (JSON); every archive stores `schema_version` / `bouquet_version` /
+   `created` (stamped at file creation) + per-scan `config_json`
+   (`write_provenance` / `load_config`).
+2. **`BouquetArchive`** reader class (ScanView/DrawView, lazy, cached attrs,
+   fixed-name + legacy suffix-scan eqdsk/pfile lookup) — replaces downstream
+   hand-rolled h5 traversal.
+3. **De-threaded readers**: module-level plot/filter/select functions accept a
+   `Bouquet` / `BouquetArchive` / header / path uniformly; a missing explicit
+   `scan_key` raises listing available keys (was silent-empty).
+4. **Schema v2 — clean break, no legacy readers** (decision: no external users
+   yet): bare dataset names + `units` attrs, fixed `eqdsk`/`pfile` names,
+   coil names as a string dataset everywhere, `scan/<key>/` layout only.
+   Legacy files: `BouquetArchive` warns, `load_equilibrium` raises clearly.
+   Spec: `docs/archive-schema.md`; source of truth: `bouquet/schema.py`.
+5. **Config/API simplifications**: `run.describe()` (non-default knobs),
+   `workflow` preset enum (`auto` / `geqdsk-standard` / `imas-diff-c` /
+   `custom`), source-agnostic `run.prepare()`.
+6. **Sweeps + plotting**: `run.run_slices()` (one archive, one scan_key per
+   slice); `plot_bouquet` dispatches on stored `source_kind`
+   (`plot_imas_bouquet` demoted from `__all__`).
+7. **Parallel hardening**: fresh shards, merge-side baseline guard +
+   expected-shard accounting (`--allow-missing`), nthreads=1 doctrine warning,
+   `SeedSequence(seed, worker, scan_key)` slice-decorrelated seeding, JSON
+   SLURM bundles, CWD-independent submit scripts, physical-core default.
+8. **Post-review fixes** (8-angle adversarial review of the final diff):
+   solver-marked tests un-broken (coil_names dataset read), merged archives
+   get run-level `config_json`, multi-scan `load_config` disambiguation,
+   `DrawView` O(N) flags + cached attrs, `schema.find_bytes_dataset`
+   consolidation (8 duplicated lookups), unique eqdsk extraction filenames,
+   legacy-archive warnings/errors.
+9. **Won't-do (user decisions)**: `jphi_scalar_sigma` default stays 0.10;
+   IDA_run per-shot notebooks stay split (no templating).
+10. **Deferred**: example-notebook rewrite to run-object idioms;
+    reconstruction-style IMAS baseline summary block.
+
+Also in this round: scipy≥1.18/numpy≥2.5 compatibility (`.item()` at the
+axis-point `.ev()` call), and the CER/E_r feature (`read_ida_cer`,
+`radial_field_from_cer`).
+
+---
+
 # Bouquet + OFT — change summary (golden suite, filtering, Ip-secant removal, systematics)
 
 > **Historical document** (2026-05): a snapshot of the coil-bounds/golden-suite
