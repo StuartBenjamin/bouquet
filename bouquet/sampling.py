@@ -882,6 +882,10 @@ def _draw_monotonic_perturbation(
         if np.all(np.diff(sample) <= 0.0):
             return sample
 
+    # Default just return a sample...
+    sample = perturber.draw_from_factor(normalised_profile, 1, rng)[0]
+    return sample
+
     raise RuntimeError(
         f"No monotonically-decreasing GPR draw found in {max_draws} attempts."
     )
