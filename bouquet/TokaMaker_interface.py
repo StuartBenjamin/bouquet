@@ -780,6 +780,7 @@ def perturb_kinetic_equilibrium(
     _ni_gpr.precompute_factor(psi_kin, sigma_ni / ni[0])
     _ti_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=t_ls)
     _ti_gpr.precompute_factor(psi_kin, sigma_ti / ti[0])
+    _rng = np.random.default_rng()
 
     p_err = np.inf
     p_iter = 0
@@ -798,17 +799,13 @@ def perturb_kinetic_equilibrium(
             )
 
         # GPR sampling on psi_kin (kinetic grid, may include SOL)
-        ne_perturb = _draw_monotonic_perturbation(
-            psi_kin, ne / ne[0], sigma_ne / ne[0], n_ls, perturber=_ne_gpr
-        ) * ne[0]
+        ne_perturb = _ne_gpr.draw_from_factor(ne / ne[0], 1, _rng)[0] * ne[0]
 
         te_perturb = _draw_monotonic_perturbation(
             psi_kin, te / te[0], sigma_te / te[0], t_ls, perturber=_te_gpr
         ) * te[0]
 
-        ni_perturb = _draw_monotonic_perturbation(
-            psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls, perturber=_ni_gpr
-        ) * ni[0]
+        ni_perturb = _ni_gpr.draw_from_factor(ni / ni[0], 1, _rng)[0] * ni[0]
 
         ti_perturb = _draw_monotonic_perturbation(
             psi_kin, ti / ti[0], sigma_ti / ti[0], t_ls, perturber=_ti_gpr
