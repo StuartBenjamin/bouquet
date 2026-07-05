@@ -25,7 +25,7 @@ from typing import Optional
 EC = 1.6022e-19  # [J/eV]
 
 # ── default iteration caps (safety valves) ─────────────────────────
-_MAX_PRESSURE_ITER = int(1e5)
+_MAX_PRESSURE_ITER = int(3e3)
 _MAX_LI_ITER = 20
 _MAX_MONOTONIC_DRAWS = int(1e4)
 
