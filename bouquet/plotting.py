@@ -1630,6 +1630,42 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
         a.set_xlabel(r"$\hat{\psi}$"); a.set_ylabel(ylab)
         a.set_xlim(0, 1); a.legend(fontsize=8, loc="best")
 
+    # j_phi panel: decompose the reconstructed total (solid black) into its
+    # inductive + bootstrap components -- reduced-opacity dashed (j_ind) and
+    # dash-dot (j_BS) in the reconstruction colour, sitting visually beneath
+    # the input-vs-total comparison.
+    _jcomp = [(getattr(bl, "j_inductive", None), "--", r"recon $j_{ind}$"),
+              (getattr(bl, "j_BS", None), "-.", r"recon $j_{BS}$")]
+    _added_jcomp = False
+    for _jc, _ls, _lbl in _jcomp:
+        if _jc is not None:
+            ax[0, 1].plot(j_sol_x, np.asarray(_jc, float) / 1e6, ls=_ls,
+                          c=C_SOL, lw=1.5, alpha=0.45, label=_lbl, zorder=2)
+            _added_jcomp = True
+    if _added_jcomp:
+        ax[0, 1].legend(fontsize=8, loc="best")
+
+    # q panel: tame the edge divergence. q climbs steeply toward a diverted
+    # separatrix, and if one profile (the input g-file q or the solve) shoots
+    # far above the other at the edge it compresses the whole panel and buries
+    # the core/mid comparison. Cap the y-axis 1.0 above the SMALLER of the two
+    # edge q(psi_N=1) values -- the taller profile's divergent tail is clipped
+    # while both core shapes stay legible.
+    _q_edges, _q_finite = [], []
+    for _qv in (in_q_abs, q_sol_abs):
+        if _qv is None:
+            continue
+        _f = np.asarray(_qv, float)
+        _f = _f[np.isfinite(_f)]
+        if len(_f):
+            _q_edges.append(_f[-1])       # q at the edge (last valid psi_N)
+            _q_finite.append(_f)
+    if _q_edges:
+        _q_top = min(_q_edges) + 1.0
+        _q_bot = max(0.0, float(np.min(np.concatenate(_q_finite))) - 0.2)
+        if _q_top > _q_bot:
+            ax[1, 0].set_ylim(_q_bot, _q_top)
+
     # separatrix panel with the colour-coded boundary deviation
     iso_pts = np.column_stack([in_bR, in_bZ])
     try:

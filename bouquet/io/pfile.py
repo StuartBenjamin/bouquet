@@ -179,26 +179,36 @@ def _write_pfile(profiles, filename):
         Output path.
     """
     buf = []
+    # The "N Z A of ION SPECIES" ion block must be the LAST element of an
+    # Osborne p-file (it is the footer, and downstream readers expect it there).
+    # The reader detects it by header regardless of position, so an input with
+    # N Z A elsewhere is accepted -- but on write we always force it last, rather
+    # than emit in dict order, so bouquet's output is canonical no matter where
+    # the block sat in the source.
+    nza = None
     for key, val in profiles.items():
         if key == "N Z A":
-            n = len(val["A"])
-            buf.append(f"{n} N Z A of ION SPECIES\n")
-            for i in range(n):
-                buf.append(
-                    f" {val['N'][i]:f}   {val['Z'][i]:f}   {val['A'][i]:f}\n"
-                )
-        else:
-            n = len(val["data"])
-            if n <= 1:
-                continue
-            units = val.get("units", "")
-            deriv_label = val.get("deriv_label", f"d{key}/dpsiN")
-            buf.append(f"{n} psinorm {key}({units}) {deriv_label}\n")
-            for i in range(n):
-                buf.append(
-                    f" {val['psinorm'][i]:f}   {val['data'][i]:f}"
-                    f"   {val['derivative'][i]:f}\n"
-                )
+            nza = val
+            continue
+        n = len(val["data"])
+        if n <= 1:
+            continue
+        units = val.get("units", "")
+        deriv_label = val.get("deriv_label", f"d{key}/dpsiN")
+        buf.append(f"{n} psinorm {key}({units}) {deriv_label}\n")
+        for i in range(n):
+            buf.append(
+                f" {val['psinorm'][i]:f}   {val['data'][i]:f}"
+                f"   {val['derivative'][i]:f}\n"
+            )
+
+    if nza is not None:                       # ion species block -> always last
+        n = len(nza["A"])
+        buf.append(f"{n} N Z A of ION SPECIES\n")
+        for i in range(n):
+            buf.append(
+                f" {nza['N'][i]:f}   {nza['Z'][i]:f}   {nza['A'][i]:f}\n"
+            )
 
     with open(filename, "w") as f:
         f.writelines(buf)
