@@ -422,6 +422,7 @@ def store_equilibrium(
     x_points=None,
     diverted=None,
     aux=None,
+    eq_fsa=None,
 ):
     """
     Write one perturbed equilibrium into the HDF5 database.
@@ -593,6 +594,43 @@ def store_equilibrium(
                 grp.create_dataset("x_points", data=xp_arr)
         if diverted is not None:
             grp.attrs["diverted"] = bool(diverted)
+
+        # ---- Live-equilibrium FSA block (optional subgroup) --------------
+        # Captured from the converged TokaMaker equilibrium at the same state
+        # the eqdsk was saved from, so this draw's own flux geometry enables
+        # an exact toroidal<->parallel conversion at IMAS export
+        # (physics.capture_equilibrium_fsa -> physics.toroidal_to_parallel).
+        if eq_fsa:
+            from .schema import EQ_FSA_GROUP, EQ_FSA_UNITS
+            fsa_grp = grp.create_group(EQ_FSA_GROUP)
+            for _name, _arr in eq_fsa.items():
+                if _arr is None:
+                    continue
+                ds = fsa_grp.create_dataset(
+                    _name, data=np.asarray(_arr, dtype=np.float64))
+                _u = EQ_FSA_UNITS.get(_name)
+                if _u:
+                    ds.attrs["units"] = _u
+
+
+def load_eq_fsa(header, count, scan_key=None):
+    """Load one draw's live-equilibrium FSA block, or ``None`` if not captured.
+
+    Returns a dict of 1-D arrays (``psi_N``, ``F``, ``avg_inv_R``,
+    ``avg_inv_R2`` (present only when the exact quadrature succeeded),
+    ``avg_B2``, ``q``, ``dV_dpsi``, ``f_trap``, ``B_avg``) -- the geometry
+    :func:`bouquet.physics.toroidal_to_parallel` needs for an exact IMAS
+    write-back. ``None`` for archives written without live capture (fall back
+    to the baseline-ratio reconstruction).
+    """
+    from .schema import EQ_FSA_GROUP
+    h5path = _resolve_h5(header)
+    gp = _group_path(scan_key, count)
+    with h5py.File(h5path, "r") as hf:
+        if gp not in hf or EQ_FSA_GROUP not in hf[gp]:
+            return None
+        g = hf[gp][EQ_FSA_GROUP]
+        return {k: np.array(g[k], dtype=float) for k in g}
 
 
 def load_equilibrium(header, count, scan_key=None, eqdsk_out_dir=None):

@@ -2315,6 +2315,9 @@ def generate_bouquet(
     aux_length_scales=None,
     progress_callback=None,
     source_kind=None,
+    capture_live_eq=True,
+    capture_npsi=257,
+    capture_exact_inv_R2=True,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -4102,6 +4105,23 @@ def generate_bouquet(
         diagnostics['x_points'] = _draw_xpts
         diagnostics['diverted'] = _draw_div
 
+        # Live-equilibrium FSA block at the same (post-save) state, so this
+        # draw's own flux geometry travels into the archive for an exact
+        # toroidal<->parallel current conversion at IMAS export. Defensive:
+        # a capture failure never sinks a draw -- IMAS export just falls back
+        # to the baseline-ratio reconstruction for it.
+        diagnostics['eq_fsa'] = None
+        if capture_live_eq:
+            try:
+                from .physics import capture_equilibrium_fsa
+                diagnostics['eq_fsa'] = capture_equilibrium_fsa(
+                    mygs, npsi=int(capture_npsi), psi_pad=psi_pad,
+                    exact_inv_R2=bool(capture_exact_inv_R2))
+            except Exception as _fsa_exc:
+                print(f"  WARN: live-equilibrium FSA capture failed "
+                      f"({_fsa_exc}); IMAS export for this draw will use the "
+                      f"baseline-ratio reconstruction")
+
         # Guard get_stats: a degenerate draw (Ip->0 / collapsed plasma, e.g.
         # after Sauter "corrector convergence failed") makes OFT's l_i
         # normalization divide by zero. Don't let one bad draw crash the whole
@@ -4283,6 +4303,7 @@ def generate_bouquet(
             x_points=diagnostics.get('x_points'),
             diverted=diagnostics.get('diverted'),
             aux=diagnostics.get('aux'),
+            eq_fsa=diagnostics.get('eq_fsa'),
         )
 
         # Clean up on-disk eqdsk after archiving

@@ -444,25 +444,76 @@ def read_imas_baseline(
 # ===========================================================================
 #  Perturbed-draw IMAS/OMAS write-back
 #
-#  TODO(backend): the FINAL implementation should obtain the equilibrium IDS
-#  DIRECTLY from the live TokaMaker equilibrium object at generate time (full
-#  finite-element fidelity, exact FSA metrics for the toroidal<->parallel
-#  current conversion), once OFT exposes an IMAS/ODS export. The eqdsk-based
-#  reconstruction below is an INTERIM bridge: the equilibrium IDS is lossless
-#  to the archived 257^2 eqdsk (machine-precision GS for stability codes) and
-#  j_tor is exact, but the parallel-current split (j_ohmic/j_bootstrap/j_total)
-#  uses the baseline IDS factor c(psi)=j_tor/j_total -- exact only when the
-#  draw's flux geometry matches the baseline. Do NOT treat this as final.
+#  Current-split fidelity: the parallel split (j_ohmic/j_bootstrap/j_total) is
+#  now EXACT per draw (fidelity="exact"/"auto") -- it uses the draw's OWN
+#  flux-surface geometry, captured from the live TokaMaker equilibrium at
+#  generate time (physics.capture_equilibrium_fsa -> the eq_fsa archive block)
+#  and applied via physics.toroidal_to_parallel. The legacy baseline-ratio
+#  c(psi)=j_tor/j_total (fidelity="reconstruct") is kept as a fallback for
+#  archives written without capture. j_tor is exact either way.
+#
+#  Remaining refinements (not blockers): (1) the EQUILIBRIUM IDS profiles_2d
+#  still come from the archived 257^2 eqdsk (lossless to that grid,
+#  machine-precision GS) rather than the live FE fields -- a direct OFT ODS
+#  export would upgrade this; (2) exact <1/R^2> is computed by flux-surface
+#  quadrature since TokaMaker does not yet expose it
+#  (OpenFUSIONToolkit/OpenFUSIONToolkit#312) -- when it does, read it directly.
 # ===========================================================================
+def _imas_b0(out, ie, ic):
+    """Reference vacuum field B0 for the IMAS <j.B>/B0 normalisation.
+
+    Tries core_profiles then equilibrium ``vacuum_toroidal_field.b0`` (nearest
+    time index); falls back to 1.0 (raw <j.B>) if neither is present.
+    """
+    for ids_name, it in (("core_profiles", ic), ("equilibrium", ie)):
+        vtf = out.get(ids_name, {}).get("vacuum_toroidal_field")
+        if vtf and vtf.get("b0") is not None:
+            b0 = np.asarray(vtf["b0"], dtype=float)
+            if b0.size:
+                return abs(float(b0[min(it, b0.size - 1)]))
+    return 1.0
+
+
+def _eq_fsa_geom_on(eq_fsa, psiN_t, B0):
+    """Interpolate a captured eq_fsa block onto the template psi grid -> geom
+    dict for :func:`bouquet.physics.toroidal_to_parallel`. ``None`` if the
+    block lacks the required FSA metrics (caller then reconstructs)."""
+    try:
+        src = np.asarray(eq_fsa["psi_N"], dtype=float)
+        F = np.interp(psiN_t, src, np.asarray(eq_fsa["F"], dtype=float))
+        avg_inv_R = np.interp(psiN_t, src, np.asarray(eq_fsa["avg_inv_R"], dtype=float))
+        avg_B2 = np.interp(psiN_t, src, np.asarray(eq_fsa["avg_B2"], dtype=float))
+    except (KeyError, TypeError):
+        return None
+    geom = {"F": F, "avg_inv_R": avg_inv_R, "avg_B2": avg_B2, "B0": float(B0)}
+    if eq_fsa.get("avg_inv_R2") is not None:     # exact bracket when captured
+        geom["avg_inv_R2"] = np.interp(
+            psiN_t, src, np.asarray(eq_fsa["avg_inv_R2"], dtype=float))
+    return geom
+
+
 def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
-                    scan_key=None, time=None):
+                    scan_key=None, time=None, fidelity="auto"):
     """Reconstruct a perturbed IMAS/OMAS IDS for one draw from the bouquet HDF5.
 
-    INTERIM (see module TODO): maps the draw's archived eqdsk to the
-    ``equilibrium`` IDS (``profiles_1d`` / ``profiles_2d`` / ``global_quantities``
-    / ``boundary`` -- lossless to the eqdsk grid, machine-precision GS) and the
-    draw's ``.h5`` kinetics/currents to ``core_profiles``. ``j_tor`` is exact;
-    the parallel split is reconstructed with the baseline ratio (interim).
+    Maps the draw's archived eqdsk to the ``equilibrium`` IDS
+    (``profiles_1d`` / ``profiles_2d`` / ``global_quantities`` / ``boundary`` --
+    lossless to the eqdsk grid, machine-precision GS) and the draw's ``.h5``
+    kinetics/currents to ``core_profiles``. ``j_tor`` is exact.
+
+    The parallel split (``j_total`` / ``j_ohmic`` / ``j_bootstrap`` =
+    IMAS ``<j.B>/B0``) fidelity is set by ``fidelity``:
+
+      * ``"exact"``       -- convert each toroidal component with the draw's OWN
+        captured flux-surface geometry (``eq_fsa`` block, from
+        ``capture_live_eq=True`` at generate time) via
+        :func:`bouquet.physics.toroidal_to_parallel`. Raises if the block is
+        absent.
+      * ``"reconstruct"`` -- the interim baseline ratio ``c = j_tor/j_total``
+        from the template (exact only when the draw's flux geometry matches the
+        baseline's).
+      * ``"auto"`` (default) -- exact when the ``eq_fsa`` block is present,
+        else reconstruct.
 
     Parameters
     ----------
@@ -474,6 +525,8 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
         The source IMAS/OMAS JSON, used as the structural template.
     out_path : str
         Where to write the perturbed IDS JSON.
+    fidelity : {"auto", "exact", "reconstruct"}
+        Parallel-current split fidelity (see above); default ``"auto"``.
     scan_key : str, float, or None
         Scan value selecting the ``scan/<scan_key>`` group.  The default
         ``None`` auto-resolves a single-scan archive (and is the flat layout
@@ -492,6 +545,10 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     import h5py
     from .geqdsk import read_geqdsk
     from ..utils import read_eqdsk_from_bytes, _group_path, _resolve_h5
+
+    if fidelity not in ("auto", "exact", "reconstruct"):
+        raise ValueError(
+            f"fidelity must be 'auto'|'exact'|'reconstruct', got {fidelity!r}")
 
     with open(template_ids_path) as fh:
         out = json.load(fh)
@@ -528,10 +585,16 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
         zeff = np.asarray(g["aux_zeff"][()]) if "aux_zeff" in g else None
         li1 = float(g.attrs.get("l_i(1)", np.nan))
         li3 = float(g.attrs.get("l_i(3)", np.nan))
-        eqk = (["eqdsk"] if "eqdsk" in g else [])
-        if not eqk:
+        from ..schema import find_bytes_dataset, EQ_FSA_GROUP
+        eqk = find_bytes_dataset(g)
+        if eqk is None:
             raise KeyError(f"draw {draw_index} has no archived eqdsk")
-        geq = read_eqdsk_from_bytes(bytes(g[eqk[0]][()]), read_geqdsk)
+        geq = read_eqdsk_from_bytes(bytes(g[eqk][()]), read_geqdsk)
+        # optional captured live-equilibrium FSA block (exact conversion)
+        eq_fsa = None
+        if EQ_FSA_GROUP in g:
+            eq_fsa = {k: np.asarray(g[EQ_FSA_GROUP][k][()], dtype=float)
+                      for k in g[EQ_FSA_GROUP]}
 
     # --- equilibrium IDS from the eqdsk (lossless to the eqdsk grid) ---------
     ts = eq_ids["time_slice"][ie]
@@ -585,24 +648,45 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     if zeff is not None:
         cp["zeff"] = to_t(zeff, pkin).tolist()
 
-    # j_tor exact; parallel split via the baseline factor c=j_tor/j_total
-    # (INTERIM -- see module TODO). Guard near-axis where j_total -> 0.
+    # j_tor is exact (bouquet stores toroidal current directly).
     jt_t = to_t(j_tor, peq)
     cp["j_tor"] = jt_t.tolist()
+
+    # Parallel split (j_total / j_ohmic / j_bootstrap = IMAS <j.B>/B0). Two
+    # fidelities (`fidelity` arg): EXACT uses the draw's own captured
+    # flux-surface geometry (eq_fsa) via physics.toroidal_to_parallel;
+    # RECONSTRUCT falls back to the interim baseline ratio c=j_tor/j_total from
+    # the template (exact only when the draw's flux geometry matches baseline).
     if "j_total" in cp and "j_tor" in cp:
-        base_jtot = np.asarray(cp["j_total"], dtype=float)
-        base_jtor = np.asarray(cp["j_tor"], dtype=float)
-        eps = 1e-9 * np.nanmax(np.abs(base_jtot)) if base_jtot.size else 0.0
-        good = np.abs(base_jtot) > eps
-        c = np.ones_like(base_jtot)
-        c[good] = base_jtor[good] / base_jtot[good]
-        if not np.all(good):
-            idx = np.arange(c.size)
-            c[~good] = np.interp(idx[~good], idx[good], c[good])
-        with np.errstate(divide="ignore", invalid="ignore"):
-            cp["j_total"] = (jt_t / c).tolist()
-            cp["j_ohmic"] = (to_t(j_ind, peq) / c).tolist()
-            cp["j_bootstrap"] = (to_t(j_bs, peq) / c).tolist()
+        use_exact = False
+        if fidelity in ("auto", "exact") and eq_fsa is not None:
+            geom = _eq_fsa_geom_on(eq_fsa, psiN_t, _imas_b0(out, ie, ic))
+            if geom is not None:
+                from ..physics import toroidal_to_parallel
+                cp["j_total"] = toroidal_to_parallel(jt_t, geom=geom).tolist()
+                cp["j_ohmic"] = toroidal_to_parallel(to_t(j_ind, peq), geom=geom).tolist()
+                cp["j_bootstrap"] = toroidal_to_parallel(to_t(j_bs, peq), geom=geom).tolist()
+                use_exact = True
+        if fidelity == "exact" and not use_exact:
+            raise ValueError(
+                f"fidelity='exact' requested but draw {draw_index} has no "
+                "captured eq_fsa block (generate with capture_live_eq=True). "
+                "Use fidelity='auto' to fall back to the baseline-ratio "
+                "reconstruction.")
+        if not use_exact:                      # baseline-ratio reconstruction
+            base_jtot = np.asarray(cp["j_total"], dtype=float)
+            base_jtor = np.asarray(cp["j_tor"], dtype=float)
+            eps = 1e-9 * np.nanmax(np.abs(base_jtot)) if base_jtot.size else 0.0
+            good = np.abs(base_jtot) > eps
+            c = np.ones_like(base_jtot)
+            c[good] = base_jtor[good] / base_jtot[good]
+            if not np.all(good):
+                idx = np.arange(c.size)
+                c[~good] = np.interp(idx[~good], idx[good], c[good])
+            with np.errstate(divide="ignore", invalid="ignore"):
+                cp["j_total"] = (jt_t / c).tolist()
+                cp["j_ohmic"] = (to_t(j_ind, peq) / c).tolist()
+                cp["j_bootstrap"] = (to_t(j_bs, peq) / c).tolist()
 
     with open(out_path, "w") as fh:
         json.dump(out, fh)
@@ -610,11 +694,14 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
 
 
 def export_imas_drawset(h5path_or_header, template_ids_path, out_dir,
-                        scan_key=None, time=None, selection="selected"):
+                        scan_key=None, time=None, selection="selected",
+                        fidelity="auto"):
     """Write one perturbed IMAS/OMAS IDS per draw (see :func:`write_imas_draw`).
 
-    INTERIM (see module TODO). Files are ``{out_dir}/{header}_draw{idx}.json``.
-    ``selection`` is ``"selected"`` (in-spec only) or ``"all"``.
+    Files are ``{out_dir}/{header}_draw{idx}.json``. ``selection`` is
+    ``"selected"`` (in-spec only) or ``"all"``. ``fidelity`` is forwarded to
+    :func:`write_imas_draw` (``"auto"`` -> exact per-draw conversion when the
+    archive carries the captured ``eq_fsa`` block, else baseline-ratio).
 
     Operates on a single scan.  Pass ``scan_key`` to select it; the default
     ``scan_key=None`` is the flat layout, and is only unambiguous when the
@@ -649,5 +736,6 @@ def export_imas_drawset(h5path_or_header, template_ids_path, out_dir,
     for i in idxs:
         out = os.path.join(out_dir, f"{base}_draw{i}.json")
         paths.append(write_imas_draw(h5, i, template_ids_path, out,
-                                     scan_key=scan_key, time=time))
+                                     scan_key=scan_key, time=time,
+                                     fidelity=fidelity))
     return paths

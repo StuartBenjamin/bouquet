@@ -374,6 +374,20 @@ class GenerationConfig:
     )
     diagnostic_plots: bool = False
 
+    # Live-equilibrium capture for exact IMAS/OMAS export. When True (default),
+    # each draw's converged TokaMaker flux-surface-average metrics are snapshot
+    # into the archive (scan/<key>/<draw>/eq_fsa/), so IDS write-back does an
+    # exact per-draw toroidal->parallel current conversion instead of the
+    # interim baseline-ratio reconstruction. Cheap; set False to skip.
+    capture_live_eq: bool = True
+    # FSA grid for the captured block (matches the 257^2 eqdsk; >=129).
+    capture_npsi: int = 257
+    # Compute exact <1/R^2> by flux-surface quadrature (TokaMaker does not
+    # expose it) so the conversion is machine-exact rather than using the
+    # <B_phi^2>~=<B^2> bracket (~<1%). Adds ~65 surface traces/draw; set False
+    # to skip that cost (self-validated + graceful fallback either way).
+    capture_exact_inv_R2: bool = True
+
 
 @dataclass
 class FilterConfig:

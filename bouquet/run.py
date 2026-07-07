@@ -916,6 +916,9 @@ class Bouquet:
                 jBS_scale_range=_jbs_range,
                 swb_iterations=gc.swb_iterations,
                 diagnostic_plots=gc.diagnostic_plots,
+                capture_live_eq=gc.capture_live_eq,
+                capture_npsi=gc.capture_npsi,
+                capture_exact_inv_R2=gc.capture_exact_inv_R2,
                 scan_key=gc.scan_key,
                 pfile_bytes=bl.pfile_bytes,
                 baseline_eqdsk_bytes=bl.eqdsk_bytes,
@@ -1079,6 +1082,35 @@ class Bouquet:
         out = out_path if out_path is not None else f"{header}_selected.h5"
         export_filtered(header, out, selection=selection, overwrite=True)
         return out
+
+    def export_bundle(self, out_dir: str, formats=("geqdsk", "profiles"),
+                      selection: str = "selected") -> dict:
+        """Extract a per-draw file bundle (geqdsk / pfile / profiles JSON) for
+        the ``selection`` draws to ``out_dir``. Returns ``{draw: {fmt: path}}``.
+
+        Thin wrapper over :meth:`BouquetArchive.scan(...).extract`; the
+        source-agnostic hand-off to codes that don't consume the HDF5 archive
+        or IMAS IDS. For IMAS/OMAS IDS output use :func:`export_imas_drawset`.
+        """
+        sc = self.archive.scan(self.config.generation.scan_key)
+        return sc.extract(out_dir, formats=formats, selection=selection)
+
+    def export_ids(self, out_dir: str, selection: str = "selected",
+                   time=None, fidelity: str = "auto") -> list:
+        """Write one perturbed IMAS/OMAS IDS per ``selection`` draw to
+        ``out_dir`` (IMAS source only). Thin wrapper over
+        :func:`export_imas_drawset`; ``fidelity`` picks the exact
+        (captured-geometry) or baseline-ratio current split."""
+        from .config import ImasSource
+        from .io.imas import export_imas_drawset
+        if not isinstance(self.config.source, ImasSource):
+            raise TypeError("export_ids is for an ImasSource; the reconstruction "
+                            "path has no template IDS. Use export_bundle().")
+        return export_imas_drawset(
+            self.config.output_header, self.config.source.ids_path, out_dir,
+            scan_key=self.config.generation.scan_key,
+            time=self.config.source.time if time is None else time,
+            selection=selection, fidelity=fidelity)
 
     # ── convenience -----------------------------------------------------
     def run(self) -> "Bouquet":

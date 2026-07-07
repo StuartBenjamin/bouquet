@@ -50,6 +50,23 @@ PFILE_DS = "pfile"
 COIL_VALUES_DS = "coil_currents"
 COIL_NAMES_DS = "coil_names"
 
+# Live-equilibrium flux-surface-average block (optional per-draw subgroup),
+# captured from the converged TokaMaker equilibrium at generate time to enable
+# an exact toroidal<->parallel current conversion at IMAS export. All on the
+# eq_fsa psi_N grid. See physics.capture_equilibrium_fsa.
+EQ_FSA_GROUP = "eq_fsa"
+EQ_FSA_UNITS = {
+    "psi_N": "",
+    "F": "T m",             # R*B_phi
+    "avg_inv_R": "m^-1",    # <1/R>
+    "avg_inv_R2": "m^-2",   # <1/R^2> (exact quadrature; may be absent)
+    "avg_B2": "T^2",        # <B^2>
+    "q": "",
+    "dV_dpsi": "m^3 Wb^-1",
+    "f_trap": "",           # trapped fraction f_c
+    "B_avg": "T",           # <|B|>
+}
+
 
 def find_bytes_dataset(grp, kind=EQDSK_DS):
     """Name of ``grp``'s eqdsk/pfile byte blob, or ``None`` if absent.

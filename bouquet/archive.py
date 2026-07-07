@@ -172,22 +172,71 @@ class DrawView:
         from .io.pfile import PFile
         return PFile.from_bytes(b) if hasattr(PFile, "from_bytes") else None
 
+    def coil_currents(self) -> dict:
+        """Coil currents as ``{name: current_A}`` (empty if not stored)."""
+        from .utils import _read_coil_names
+        import h5py
+        with h5py.File(self._ar.path, "r") as hf:
+            grp = hf[_group_path(self.scan_key, self.count)]
+            if "coil_currents" not in grp:
+                return {}
+            vals = np.asarray(grp["coil_currents"][()], dtype=float)
+            names = _read_coil_names(grp)
+        return dict(zip(names, vals.tolist())) if names else {}
+
+    def profiles_doc(self) -> dict:
+        """Portable, self-describing dict of this draw's full profile state.
+
+        Source-agnostic (works for both geqdsk and IMAS draws): the 1-D
+        profile arrays + their units, the scalar diagnostics, coil currents,
+        and the captured live-equilibrium FSA block when present. Serialised by
+        :meth:`extract` as ``*_profiles.json``.
+        """
+        from .schema import PROFILE_UNITS, EQ_FSA_UNITS
+        from .utils import load_eq_fsa
+        prof = self.profiles
+        doc = {
+            "scan_key": _scan_key(self.scan_key),
+            "count": self.count,
+            "profiles": {k: np.asarray(v).tolist() for k, v in prof.items()},
+            "units": {k: PROFILE_UNITS.get(k, "") for k in prof},
+            "scalars": self.attrs,          # li, Ip, drifts, in_spec, ... (JSON-safe)
+            "coil_currents_A": self.coil_currents(),
+        }
+        fsa = load_eq_fsa(self._ar.path, self.count, scan_key=self.scan_key)
+        if fsa is not None:
+            doc["eq_fsa"] = {k: np.asarray(v).tolist() for k, v in fsa.items()}
+            doc["eq_fsa_units"] = {k: EQ_FSA_UNITS.get(k, "") for k in fsa}
+        return doc
+
     def extract(self, out_dir: str, formats=("geqdsk",)) -> dict:
-        """Write the stored eqdsk / pfile bytes to ``out_dir``; return the paths."""
+        """Write per-draw files to ``out_dir``; return ``{format: path}``.
+
+        Formats: ``"geqdsk"`` / ``"pfile"`` (raw stored bytes) and
+        ``"profiles"`` (a self-describing JSON of profiles + scalars + coils +
+        eq_fsa; see :meth:`profiles_doc`). Missing payloads are skipped.
+        """
         os.makedirs(out_dir, exist_ok=True)
         stem = f"{self._ar.header_basename}_{_scan_key(self.scan_key)}_{self.count}"
-        blobs = self._read_bytes(".eqdsk", ".pfile")   # one file open for both
         paths = {}
-        if "geqdsk" in formats and blobs[".eqdsk"] is not None:
-            p = os.path.join(out_dir, stem + ".geqdsk")
-            with open(p, "wb") as fh:
-                fh.write(blobs[".eqdsk"])
-            paths["geqdsk"] = os.path.abspath(p)
-        if "pfile" in formats and blobs[".pfile"] is not None:
-            p = os.path.join(out_dir, stem + ".peqdsk")
-            with open(p, "wb") as fh:
-                fh.write(blobs[".pfile"])
-            paths["pfile"] = os.path.abspath(p)
+        if "geqdsk" in formats or "pfile" in formats:
+            blobs = self._read_bytes(".eqdsk", ".pfile")   # one file open for both
+            if "geqdsk" in formats and blobs[".eqdsk"] is not None:
+                p = os.path.join(out_dir, stem + ".geqdsk")
+                with open(p, "wb") as fh:
+                    fh.write(blobs[".eqdsk"])
+                paths["geqdsk"] = os.path.abspath(p)
+            if "pfile" in formats and blobs[".pfile"] is not None:
+                p = os.path.join(out_dir, stem + ".peqdsk")
+                with open(p, "wb") as fh:
+                    fh.write(blobs[".pfile"])
+                paths["pfile"] = os.path.abspath(p)
+        if "profiles" in formats:
+            import json
+            p = os.path.join(out_dir, stem + "_profiles.json")
+            with open(p, "w") as fh:
+                json.dump(self.profiles_doc(), fh)
+            paths["profiles"] = os.path.abspath(p)
         return paths
 
 
@@ -226,6 +275,17 @@ class ScanView:
     @property
     def excluded(self) -> list:
         return self._draws("excluded")
+
+    def extract(self, out_dir: str, formats=("geqdsk", "profiles"),
+                selection: str = "selected") -> dict:
+        """Extract a bundle (geqdsk / pfile / profiles) for every draw in
+        ``selection`` to ``out_dir``; return ``{draw_index: {format: path}}``.
+
+        One call for "hand me the g-file + profiles for every in-spec draw":
+        ``ar[key].extract("out/", formats=("geqdsk", "profiles"))``.
+        """
+        return {d.count: d.extract(out_dir, formats=formats)
+                for d in self._draws(selection)}
 
     def __getitem__(self, count: int) -> DrawView:
         if int(count) not in self.indices:
