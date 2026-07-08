@@ -295,6 +295,47 @@ sc[3].extract("out/", formats=("geqdsk", "pfile"))   # write the raw files
 cfg = bq.load_config("my_run")          # the exact BouquetConfig that made it
 ```
 
+### Exporting draws
+
+Hand the ensemble off to codes that don't read the HDF5 archive. Two
+targets: a **per-draw file bundle** (g-file / p-file / self-describing
+profiles JSON) or **one IMAS/OMAS `equilibrium` + `core_profiles` IDS per
+draw**. `selection` is `"selected"` (the in-spec subset, default) or
+`"all"`.
+
+```python
+# --- File bundle: geqdsk + a self-describing profiles JSON per draw
+b.export_bundle("bundle/", formats=("geqdsk", "profiles"))   # -> {draw: {fmt: path}}
+# equivalently from an archive on disk, honouring the same selection:
+bq.BouquetArchive("my_run.h5")["0"].extract("bundle/", formats=("geqdsk", "pfile"))
+
+# --- IMAS/OMAS IDS per draw (IMAS/OMAS source only)
+b.export_ids("ids/", fidelity="exact")            # -> [path, ...]
+```
+
+The profiles JSON is source-agnostic and carries everything needed to
+rebuild the state elsewhere: the perturbed profiles + their units, scalar
+diagnostics (`l_i`, `I_p`, …), coil currents by name, and the captured
+flux-surface-averaged geometry (`eq_fsa`).
+
+**IDS current-split fidelity.** The toroidal current `j_tor` in the IDS is
+always exact. The *parallel* split IMAS stores (`j_total` / `j_ohmic` /
+`j_bootstrap` = ⟨**j**·**B**⟩/B₀) needs a flux-surface geometry factor to
+convert from bouquet's toroidal components, and `fidelity` picks where that
+factor comes from:
+
+| `fidelity` | Parallel split uses | When |
+|---|---|---|
+| `"exact"` | the draw's **own** captured `eq_fsa` geometry (`toroidal_to_parallel`) | draws deviate from the baseline; the split must track each perturbed equilibrium |
+| `"reconstruct"` | the baseline template ratio `c = j_tor/j_total` | exact only when a draw's flux geometry matches the baseline's |
+| `"auto"` *(default)* | exact when the `eq_fsa` block is present, else reconstruct | — |
+
+The `eq_fsa` block is captured at generate time from the live TokaMaker
+object (`GenerationConfig.capture_live_eq=True`, on by default), so a
+freshly generated archive supports `"exact"` out of the box. Across the
+ensemble the two paths differ by a few percent per draw — the point of
+capturing the live geometry rather than reusing the baseline's.
+
 ---
 
 ## Workflow Overview
@@ -811,12 +852,13 @@ in [`architecture.md`](architecture.md). Key topics include:
 | `Bouquet.from_geqdsk()` / `Bouquet.from_imas()` | Minimal constructors for the two baseline sources (auto-apply the validated workflow preset) |
 | `Bouquet.describe()` | Print the configuration (non-default knobs only) |
 | `Bouquet.run_slices()` | Multi-slice IMAS sweep into one archive (one `scan_key` per slice) |
+| `Bouquet.export_bundle()` / `Bouquet.export_ids()` | Per-draw file bundle (geqdsk / pfile / profiles JSON) or one IMAS/OMAS IDS per draw (`fidelity="exact"` uses captured `eq_fsa` geometry) |
 | `Bouquet.archive` | The run's `BouquetArchive` |
 | `BouquetConfig` | Top-level typed config (`SolverConfig`, `UncertaintyConfig`, `GenerationConfig`, `FilterConfig`, `FixedComponentsConfig`); JSON-serializable via `to_dict`/`from_dict` |
 | `ReconstructionSource` / `ImasSource` | Baseline source definitions (g-file + profiles, or IMAS/OMAS JSON) |
 | `Baseline` / `resolve_baseline()` | The common separated-current product every source resolves to |
 | `read_ida()` / `read_imas_baseline()` | Standalone readers for IDA `.cdf` and FUSE `dd_sim.json` |
-| `parallel_to_toroidal()` / `isotropize_fast_pressure()` | Current-convention and fast-pressure physics reductions |
+| `parallel_to_toroidal()` / `toroidal_to_parallel()` / `isotropize_fast_pressure()` | Current-convention (both directions, FSA-geometry aware) and fast-pressure physics reductions |
 | `read_ida_cer()` / `radial_field_from_cer()` | Impurity CER channels + radial-force-balance E_r |
 | `filter_coil_currents()` / `filter_boundaries()` / `export_filtered()` | Post-generation selection of the machine-realizable subset |
 | `parallel_generate()` / `emit_slurm_script()` / `merge_archives()` | Process-parallel generation (laptop pool / SLURM job-array) |
@@ -830,6 +872,7 @@ in [`architecture.md`](architecture.md). Key topics include:
 | `initialize_equilibrium_database()` | Create/open an archive (stamps `schema_version`) |
 | `store_equilibrium()` / `load_equilibrium()` | Write / read one draw |
 | `store_baseline_profiles()` / `load_baseline_profiles()` | Write / read the per-scan baseline |
+| `load_eq_fsa()` | Read the per-draw live-equilibrium flux-surface-average block (`eq_fsa/`) |
 | `discover_scan_keys()` / `count_equilibria()` / `list_equilibrium_indices()` | Archive introspection |
 | `select_indices()` / `read_filter_flags()` | Filter-flag queries |
 
@@ -870,6 +913,7 @@ in [`architecture.md`](architecture.md). Key topics include:
 | `PFile` | P-file reader/writer with rotation computation |
 | `read_pfile()` | Parse a p-file (returns PFile object) |
 | `IDAProfiles` / `IDACERProfiles` | IDA kinetic-fit and impurity-CER bundles |
+| `write_imas_draw()` / `export_imas_drawset()` | Reconstruct one / all perturbed IMAS/OMAS IDS from an archive (top-level `bq.`; `fidelity` sets the parallel current-split source) |
 
 ### Environment
 
