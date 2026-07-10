@@ -67,6 +67,19 @@ class TestArchiveGolden:
         sc = bq.BouquetArchive(_GOLDEN)["0"]
         assert len(list(sc)) == len(sc.indices)
 
+    def test_spread_reports_global_scalars(self):
+        # <P> + beta_N reported alongside the l_i variance, in one call.
+        sc = bq.BouquetArchive(_GOLDEN).scan()
+        out = sc.spread("all", print_table=False)
+        for q in ("l_i(1)", "l_i(3)", "<P> [kPa]", "beta_N"):
+            st = out[q]
+            assert st is not None and st["n"] >= 1 and st["std"] >= 0.0
+            assert st["min"] <= st["mean"] <= st["max"]
+            assert 0.0 <= st["rel_std"] < 1.0            # a sane fractional spread
+        # selected is a subset of all
+        sel = sc.spread("selected", print_table=False)
+        assert sel["<P> [kPa]"]["n"] <= out["<P> [kPa]"]["n"]
+
 
 class TestSuffixScan:
     def _make(self, path, eqdsk_name):
@@ -91,6 +104,54 @@ class TestSuffixScan:
         self._make(p, "eqdsk")                     # schema-v2 fixed name
         d = bq.BouquetArchive(p)["4400"][0]
         assert d.eqdsk_bytes == b"GEQDSK-BYTES"
+
+
+class TestBinarySourceDedup:
+    """Binary IDA .cdf sources must NOT be duplicated into every draw group
+    (the new IDA-database files are ~190 MB -> a 20-draw archive hit ~4 GB).
+    Text p-files stay per-draw (they carry the draw's perturbed kinetics)."""
+
+    def _store(self, path, pfile_bytes):
+        from bouquet.utils import store_equilibrium, store_baseline_profiles
+        stem = os.path.splitext(path)[0]
+        psi = np.linspace(0, 1, 9)
+        one = np.ones(9)
+        eq_path = stem + "_in.eqdsk"
+        with open(eq_path, "wb") as fh:
+            fh.write(b"GEQDSK-BYTES")
+        store_baseline_profiles(
+            stem, psi, one, one, one, one, one, one,          # ne te ni ti p jphi
+            one, one, one, one, one,                          # 5 sigmas
+            1e6, 1.0, scan_key="900",
+            eqdsk_bytes=b"GEQDSK-BYTES", pfile_bytes=pfile_bytes)
+        for c in range(2):
+            store_equilibrium(
+                stem, c, eq_path, psi,
+                one, one, one,                                 # j_phi j_BS j_ind
+                one, one, one, one, one,                       # ne Te ni Ti wExB
+                1.0, 0.8, scan_key="900", pfile_bytes=pfile_bytes)
+
+    def test_binary_cdf_stored_once_with_reader_fallback(self, tmp_path):
+        fake_cdf = b"\x89HDF\r\n\x1a\n" + b"x" * 4096   # netCDF4/HDF5 magic
+        p = str(tmp_path / "dedup.h5")
+        self._store(p, fake_cdf)
+        with h5py.File(p, "r") as hf:
+            assert "pfile" in hf["scan/900/_baseline"]          # stored once
+            for c in ("0", "1"):
+                assert "pfile" not in hf[f"scan/900/{c}"]        # NOT per draw
+        # readers still see the bytes via the baseline fallback
+        d = bq.BouquetArchive(p)["900"][0]
+        assert d.pfile_bytes == fake_cdf
+        rec = bq.load_equilibrium(os.path.splitext(p)[0], count=0, scan_key="900")
+        assert rec["pfile_bytes"] == fake_cdf
+
+    def test_text_pfile_still_stored_per_draw(self, tmp_path):
+        text_pf = b"5 psinorm ne(10^20/m^3) dne/dpsiN\n 0.0 1.0 0.0\n"
+        p = str(tmp_path / "textpf.h5")
+        self._store(p, text_pf)
+        with h5py.File(p, "r") as hf:
+            for c in ("0", "1"):
+                assert "pfile" in hf[f"scan/900/{c}"]            # per-draw kept
 
 
 class TestDethread:
