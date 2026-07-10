@@ -1548,7 +1548,8 @@ def _imas_input_profiles(source):
     psi = np.asarray(p1["psi"], float)
     psiN = (psi - psi[0]) / (psi[-1] - psi[0]) if psi[-1] != psi[0] else psi
     q = np.asarray(p1["q"], float) if "q" in p1 else None
-    return psiN, np.asarray(p1["pressure"], float), q
+    jt = np.asarray(p1["j_tor"], float) if "j_tor" in p1 else None
+    return psiN, np.asarray(p1["pressure"], float), q, jt
 
 
 def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
@@ -1564,6 +1565,11 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
     signal (the fit vs the g-file); on the IMAS path the pressure / current are
     prescribed, so those panels mostly confirm faithful input while q and the
     separatrix show the forward solve's geometric result. Returns the Figure.
+
+    Separatrix panel caveat: deviations concentrated at the X-point corner are
+    dominated by flux expansion (grad-psi -> 0 there, so any traced
+    near-separatrix surface pulls away from the corner), not solve error --
+    judge the solve by the rest of the boundary and the RMS.
     """
     import matplotlib.pyplot as plt
     from .TokaMaker_interface import safe_trace_surf
@@ -1583,9 +1589,36 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
     psiN_q = np.asarray(psiN_q, float)
     if psiN_q.size and psiN_q.max() > 1.5:          # in case get_q returns psi, not psi_N
         psiN_q = (psiN_q - psiN_q.min()) / (psiN_q.max() - psiN_q.min())
-    lcfs = np.asarray(safe_trace_surf(mygs, 1.0 - psi_pad), float)
+    # Trace the panel LCFS as close to the separatrix as the tracer allows
+    # (1 - 1e-4; same level as the boundary-diag fallback) rather than at
+    # 1 - psi_pad (typically 0.999): near the X-point grad-psi -> 0, so the
+    # 0.999 surface legitimately sits CENTIMETERS inside the separatrix and
+    # the deviation panel paints a large red corner that is flux expansion,
+    # not solve error. The finer level tightens that corner; deviations that
+    # REMAIN there are genuine X-point mismatch. Falls back to 1 - psi_pad
+    # if the near-separatrix trace fails.
+    _lcfs_raw = safe_trace_surf(mygs, 1.0 - min(psi_pad, 1e-4))
+    if _lcfs_raw is None:
+        _lcfs_raw = safe_trace_surf(mygs, 1.0 - psi_pad)
+    lcfs = np.asarray(_lcfs_raw, float)
     j_sol_x = np.asarray(bl.psi_N, float)
     j_sol = np.asarray(bl.j_phi, float)
+
+    # Anchors (IMAS diff workflow): jphi_diff / jBS_diff are FIXED offsets added
+    # to the solve target (bl.j_phi + jphi_diff anchors the total to the
+    # equilibrium IDS; bl.j_BS + jBS_diff is the effective/FUSE bootstrap while
+    # bl.j_BS itself is the raw SWB Sauter). Fold them in here so the plotted
+    # total and components match what was actually SOLVED (and archived) --
+    # otherwise the total's pedestal spike (equilibrium j_tor) and the raw SWB
+    # j_BS spike sit at different psi_N. Both are None on the geqdsk path.
+    _kin_x = np.asarray(getattr(bl, "psi_N_kinetic", j_sol_x), float)
+
+    def _on_eq_grid(a):
+        a = np.asarray(a, float)
+        return a if a.shape == j_sol_x.shape else np.interp(j_sol_x, _kin_x, a)
+
+    if getattr(bl, "jphi_diff", None) is not None:
+        j_sol = j_sol + _on_eq_grid(bl.jphi_diff)
 
     # ---- raw input side ----------------------------------------------------
     if not is_imas:
@@ -1599,8 +1632,11 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
         in_lbl = "input g-file"
     else:
         from .io.imas import read_imas_geometry
-        in_x, in_p, in_q = _imas_input_profiles(run.config.source)
-        in_jx = j_sol_x; in_j = j_sol         # IMAS input j_tor == baseline total
+        in_x, in_p, in_q, in_jt = _imas_input_profiles(run.config.source)
+        if in_jt is not None:
+            in_jx, in_j = in_x, in_jt         # true IDS equilibrium j_tor input
+        else:
+            in_jx, in_j = j_sol_x, j_sol      # IDS without equilibrium j_tor
         _F0, bRZ = read_imas_geometry(run.config.source)
         bRZ = np.asarray(bRZ, float)
         in_bR, in_bZ = bRZ[:, 0], bRZ[:, 1]
@@ -1630,20 +1666,34 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
         a.set_xlabel(r"$\hat{\psi}$"); a.set_ylabel(ylab)
         a.set_xlim(0, 1); a.legend(fontsize=8, loc="best")
 
-    # j_phi panel: decompose the reconstructed total (solid black) into its
+    # j_phi panel: decompose the plotted total (solid black) into its EFFECTIVE
     # inductive + bootstrap components -- reduced-opacity dashed (j_ind) and
-    # dash-dot (j_BS) in the reconstruction colour, sitting visually beneath
-    # the input-vs-total comparison.
-    _jcomp = [(getattr(bl, "j_inductive", None), "--", r"recon $j_{ind}$"),
-              (getattr(bl, "j_BS", None), "-.", r"recon $j_{BS}$")]
-    _added_jcomp = False
-    for _jc, _ls, _lbl in _jcomp:
-        if _jc is not None:
-            ax[0, 1].plot(j_sol_x, np.asarray(_jc, float) / 1e6, ls=_ls,
-                          c=C_SOL, lw=1.5, alpha=0.45, label=_lbl, zorder=2)
-            _added_jcomp = True
-    if _added_jcomp:
+    # dash-dot (j_BS) in the reconstruction colour. "Effective" = including the
+    # fixed anchors: on the IMAS diff path the bootstrap shown is
+    # bl.j_BS + jBS_diff (the FUSE bootstrap actually in the solve, with its
+    # pedestal at the right psi_N), and the inductive is the residual against
+    # the anchored total -- so the two curves SUM to the plotted total on every
+    # path. On the geqdsk path (anchors None) this reduces exactly to the
+    # archived bl.j_inductive / bl.j_BS.
+    if getattr(bl, "j_BS", None) is not None:
+        _jBS_eff = np.asarray(bl.j_BS, float).copy()
+        if getattr(bl, "jBS_diff", None) is not None:
+            _jBS_eff = _jBS_eff + _on_eq_grid(bl.jBS_diff)
+        _j_ind_eff = j_sol - _jBS_eff
+        for _fx in (getattr(bl, "j_NBI", None), getattr(bl, "j_RF", None)):
+            if _fx is not None:
+                _j_ind_eff = _j_ind_eff - _on_eq_grid(_fx)
+        ax[0, 1].plot(j_sol_x, _j_ind_eff / 1e6, ls="--", c=C_SOL, lw=1.5,
+                      alpha=0.45, label=r"recon $j_{ind}$", zorder=2)
+        ax[0, 1].plot(j_sol_x, _jBS_eff / 1e6, ls="-.", c=C_SOL, lw=1.5,
+                      alpha=0.45, label=r"recon $j_{BS}$", zorder=2)
         ax[0, 1].legend(fontsize=8, loc="best")
+    # IMAS path: the anchored total reproduces the IDS input almost exactly, so
+    # the dotted input drawn first would vanish underneath the solid recon line
+    # -- re-draw it on top so the faithful-input overlay is actually visible.
+    if is_imas and in_j is not None:
+        ax[0, 1].plot(in_jx, np.asarray(in_j, float) / 1e6, ls=":", c=C_IN,
+                      lw=2.0, zorder=6)
 
     # q panel: tame the edge divergence. q climbs steeply toward a diverted
     # separatrix, and if one profile (the input g-file q or the solve) shoots

@@ -4180,8 +4180,15 @@ def generate_bouquet(
         # Replace ne, te, ni, ti with the perturbed values, then
         # recompute derived quantities (nz1, ptot, diamagnetic
         # rotations, ExB decomposition) self-consistently.
-        perturbed_pfile_bytes = pfile_bytes  # fallback: original bytes
-        if pfile_bytes is not None:
+        # Only meaningful for a TEXT p-file source: a binary IDA .cdf cannot be
+        # draw-perturbed, and storing the raw source per draw just duplicates
+        # ~190 MB x n_draws (new IDA-database files). Binary sources store None
+        # here (the raw cdf lives once in _baseline; readers fall back).
+        from .schema import is_binary_profile_source as _is_binary_src
+        _pfile_is_text = (pfile_bytes is not None
+                          and not _is_binary_src(pfile_bytes))
+        perturbed_pfile_bytes = pfile_bytes if _pfile_is_text else None
+        if _pfile_is_text:
             try:
                 from .io.pfile import PFile as _PFile
                 from .io import GEQDSKEquilibrium as _GEQDSK

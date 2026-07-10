@@ -68,6 +68,21 @@ EQ_FSA_UNITS = {
 }
 
 
+def is_binary_profile_source(data: bytes) -> bool:
+    """True if profile-source bytes are a binary container (an IDA ``.cdf`` --
+    netCDF4/HDF5 or classic netCDF3), not an Osborne text p-file.
+
+    Drives the per-draw ``pfile`` storage policy: a TEXT p-file is rewritten
+    per draw with that draw's perturbed kinetics (real per-draw data, stored),
+    while a binary IDA source cannot be draw-perturbed and would only be
+    duplicated verbatim -- with the new IDA-database files (~190 MB) that
+    bloated a 20-draw archive to ~4 GB. Binary sources are therefore stored
+    ONCE, in ``_baseline``; per-draw readers fall back there.
+    """
+    head = bytes(data[:8])
+    return head.startswith(b"\x89HDF") or head.startswith(b"CDF")
+
+
 def find_bytes_dataset(grp, kind=EQDSK_DS):
     """Name of ``grp``'s eqdsk/pfile byte blob, or ``None`` if absent.
 

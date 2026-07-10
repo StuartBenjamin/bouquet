@@ -1006,6 +1006,17 @@ class Bouquet:
                                scan_key=self.config.generation.scan_key,
                                selection=selection)
 
+    def output_spread(self, selection: str = "all", print_table: bool = True) -> dict:
+        """Across-draw spread of the global output scalars: l_i(1)/l_i(3), the
+        volume-averaged pressure ``<P>``, and ``beta_N``.
+
+        Convenience over ``run.archive.scan().spread(...)`` -- surfaces the
+        pressure-quantity uncertainty alongside the l_i variance for this run's
+        scan in one call. See :meth:`bouquet.archive.ScanView.spread`.
+        """
+        return self.archive.scan(self.config.generation.scan_key).spread(
+            selection=selection, print_table=print_table)
+
     # ── stage 4: filter + export ----------------------------------------
     def filter(self, rms_max_mm: Optional[float] = None, plot: bool = False) -> dict:
         """Mark the machine-realizable subset (coil + boundary filters).

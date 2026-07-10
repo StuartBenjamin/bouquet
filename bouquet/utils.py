@@ -523,7 +523,14 @@ def store_equilibrium(
             grp.attrs["scan_key"] = scan_key
 
         # ---- optional: p-file bytes ----------------------------------------
-        if pfile_bytes is not None:
+        # Per-draw pfile blobs are only stored for TEXT p-files (rewritten with
+        # this draw's perturbed kinetics -- genuinely draw-specific data). A
+        # binary IDA .cdf source cannot be draw-perturbed and would only be
+        # duplicated verbatim into every draw (~190 MB x n_draws with the new
+        # IDA-database files); it lives ONCE in _baseline and per-draw readers
+        # (BouquetArchive.DrawView.pfile_bytes, load_equilibrium) fall back.
+        from .schema import is_binary_profile_source
+        if pfile_bytes is not None and not is_binary_profile_source(pfile_bytes):
             pf_ds = "pfile"
             grp.create_dataset(pf_ds, data=np.void(pfile_bytes))
 
@@ -714,9 +721,16 @@ def load_equilibrium(header, count, scan_key=None, eqdsk_out_dir=None):
             result["Zeff"] = np.array(grp["Zeff"])
 
         # ---- optional: p-file bytes ----------------------------------------
+        # Text p-file sources are stored per draw (draw-perturbed); binary IDA
+        # .cdf sources live ONCE in _baseline -- fall back there when the draw
+        # carries no blob (see store_equilibrium / is_binary_profile_source).
         pf_ds = "pfile"
         if pf_ds in grp:
             result["pfile_bytes"] = bytes(grp[pf_ds][()])
+        else:
+            _bl = grp.parent.get("_baseline") if grp.parent is not None else None
+            if _bl is not None and pf_ds in _bl:
+                result["pfile_bytes"] = bytes(_bl[pf_ds][()])
 
         # ---- optional: coil currents ---------------------------------------
         if "coil_currents" in grp:

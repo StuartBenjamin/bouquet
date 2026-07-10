@@ -154,7 +154,25 @@ class DrawView:
 
     @property
     def pfile_bytes(self) -> Optional[bytes]:
-        return self._read_bytes(".pfile")[".pfile"]
+        """Profiles-source bytes for this draw.
+
+        A text p-file source is stored per draw (rewritten with the draw's
+        perturbed kinetics). A binary IDA ``.cdf`` source is stored ONCE in
+        ``_baseline`` (it cannot be draw-perturbed, and per-draw copies bloated
+        archives ~190 MB x n_draws with the new IDA-database files) -- so when
+        the draw carries no blob, fall back to the scan's baseline copy.
+        """
+        b = self._read_bytes(".pfile")[".pfile"]
+        if b is not None:
+            return b
+        import h5py
+        with h5py.File(self._ar.path, "r") as hf:
+            bl = f"scan/{self.scan_key}/_baseline"
+            if bl in hf:
+                name = find_bytes_dataset(hf[bl], "pfile")
+                if name is not None:
+                    return bytes(hf[bl][name][()])
+        return None
 
     def equilibrium(self):
         """Parse the stored eqdsk bytes into a ``GEQDSKEquilibrium``."""
@@ -226,11 +244,14 @@ class DrawView:
                 with open(p, "wb") as fh:
                     fh.write(blobs[".eqdsk"])
                 paths["geqdsk"] = os.path.abspath(p)
-            if "pfile" in formats and blobs[".pfile"] is not None:
-                p = os.path.join(out_dir, stem + ".peqdsk")
-                with open(p, "wb") as fh:
-                    fh.write(blobs[".pfile"])
-                paths["pfile"] = os.path.abspath(p)
+            if "pfile" in formats:
+                # binary IDA sources live once in _baseline -> property fallback
+                pf = blobs[".pfile"] if blobs[".pfile"] is not None else self.pfile_bytes
+                if pf is not None:
+                    p = os.path.join(out_dir, stem + ".peqdsk")
+                    with open(p, "wb") as fh:
+                        fh.write(pf)
+                    paths["pfile"] = os.path.abspath(p)
         if "profiles" in formats:
             import json
             p = os.path.join(out_dir, stem + "_profiles.json")
@@ -286,6 +307,60 @@ class ScanView:
         """
         return {d.count: d.extract(out_dir, formats=formats)
                 for d in self._draws(selection)}
+
+    def spread(self, selection: str = "all", print_table: bool = True) -> dict:
+        r"""Across-draw spread of the bouquet's global output scalars.
+
+        For every draw in *selection* (``"all"`` / ``"selected"`` /
+        ``"excluded"``) reports the mean, 1-sigma, relative sigma, and min-max
+        range of the key global equilibrium scalars:
+
+          * ``l_i(1)`` / ``l_i(3)`` -- internal inductance (stored per draw);
+          * ``<P>``   -- volume-averaged pressure :math:`\int p\,dV / V` [kPa];
+          * ``beta_N`` -- normalized beta.
+
+        ``<P>`` and ``beta_N`` are read from each draw's g-file geometry (one
+        flux-surface trace per draw, so this is O(seconds) for a full family),
+        putting the pressure-quantity uncertainty right alongside the l_i
+        variance in a single call. Returns ``{quantity: {n, mean, std, rel_std,
+        min, max}}`` (``None`` for a quantity with no finite draws); prints a
+        formatted table unless ``print_table=False``.
+        """
+        draws = self._draws(selection)
+        cols = {"l_i(1)": [], "l_i(3)": [], "<P> [kPa]": [], "beta_N": []}
+        for d in draws:
+            cols["l_i(1)"].append(d.li1)
+            cols["l_i(3)"].append(d.li3)
+            eq = d.equilibrium()
+            vol = np.asarray(eq.geometry["vol"], dtype=float)
+            cols["<P> [kPa]"].append(
+                float(eq.volume_integral(np.asarray(eq.pres))[-1]) / float(vol[-1]) / 1e3)
+            cols["beta_N"].append(float(eq.betas["beta_n"]))
+
+        out = {}
+        for name, vals in cols.items():
+            x = np.asarray(vals, dtype=float)
+            x = x[np.isfinite(x)]
+            if x.size == 0:
+                out[name] = None
+                continue
+            m = float(x.mean())
+            s = float(x.std(ddof=1)) if x.size > 1 else 0.0
+            out[name] = {"n": int(x.size), "mean": m, "std": s,
+                         "rel_std": (s / m if m else float("nan")),
+                         "min": float(x.min()), "max": float(x.max())}
+
+        if print_table:
+            print(f"Bouquet output spread -- scan {self.scan_key!r}, "
+                  f"selection={selection!r} ({len(draws)} draws)")
+            print(f"  {'quantity':<11}{'mean':>10}{'1sigma':>10}{'σ/mean':>8}   range")
+            for name, st in out.items():
+                if st is None:
+                    print(f"  {name:<11}  (no finite draws)")
+                    continue
+                print(f"  {name:<11}{st['mean']:>10.3f}{st['std']:>10.3f}"
+                      f"{100 * st['rel_std']:>7.2f}%   [{st['min']:.3f}, {st['max']:.3f}]")
+        return out
 
     def __getitem__(self, count: int) -> DrawView:
         if int(count) not in self.indices:
