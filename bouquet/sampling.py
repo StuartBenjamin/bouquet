@@ -18,6 +18,8 @@ import matplotlib.pyplot as plt
 from scipy.spatial.distance import cdist
 from scipy import integrate
 from scipy.stats import norm
+
+from .physics import q_ravg
 from typing import Optional
 
 
@@ -549,8 +551,8 @@ def calc_cylindrical_li_proxy(mygs, j_phi_profile, psi_pad):
     psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
 
     # 1. Unpack geometry from baseline
-    R_avg = ravgs_q[0]
-    dV_dPsi = ravgs_q[2]
+    R_avg = q_ravg(ravgs_q, "<R>")
+    dV_dPsi = q_ravg(ravgs_q, "dV/dPsi")
 
     # 2. Calculate differentials
     grad_psi_N = np.gradient(psi_N)
@@ -607,8 +609,8 @@ def get_li_proxy_geometry(mygs, n_psi, psi_pad):
     _, qvals, ravgs_q, dl, rbounds, zbounds = mygs.get_q(npsi=n_psi, psi_pad=psi_pad)
     psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
 
-    R_avg = ravgs_q[0]
-    dV_dPsi = ravgs_q[2]
+    R_avg = q_ravg(ravgs_q, "<R>")
+    dV_dPsi = q_ravg(ravgs_q, "dV/dPsi")
     grad_psi_N = np.gradient(psi_N)
     d_psi_real = grad_psi_N * psi_range
     dV = dV_dPsi * d_psi_real
