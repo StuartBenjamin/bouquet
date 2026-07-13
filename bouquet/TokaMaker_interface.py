@@ -46,6 +46,7 @@ from .utils import (
     read_eqdsk_from_bytes,
 )
 from .io.geqdsk import read_geqdsk
+from .physics import q_ravg
 
 # ---- Adaptive corrective iteration ----
 def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
@@ -114,7 +115,7 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
 
         _, f, fp, _, pp = mygs.get_profiles(npsi=npsi, psi_pad=psi_pad)
         _, _, ravgs, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
-        j_phi_output = get_jphi_from_GS(f * fp, pp, ravgs[0], ravgs[1])
+        j_phi_output = get_jphi_from_GS(f * fp, pp, q_ravg(ravgs, "<R>"), q_ravg(ravgs, "<1/R>"))
 
         diff = j_phi_output - target_jphi
         rms_edge = float(np.sqrt(np.mean(diff[edge_mask]**2)))
@@ -685,10 +686,10 @@ def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad):
     # projection, so the undo is exact; <B^2> from sauter_fc.
     _, _, ravgs, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
     _, _, _, modb_avgs = mygs.sauter_fc(npsi=npsi, psi_pad=psi_pad)
-    j_dot_B = j_bs_swb * F / ravgs[0]       # undo SWB's R_avg/F projection
+    j_dot_B = j_bs_swb * F / q_ravg(ravgs, "<R>")   # undo SWB's R_avg/F projection
     return parallel_to_toroidal(
         j_dot_B,
-        geom={"F": F, "avg_inv_R": ravgs[1], "avg_B2": modb_avgs[1]},
+        geom={"F": F, "avg_inv_R": q_ravg(ravgs, "<1/R>"), "avg_B2": modb_avgs[1]},
     )
 
 

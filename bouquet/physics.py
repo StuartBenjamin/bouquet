@@ -20,6 +20,25 @@ from typing import Optional
 import numpy as np
 
 
+# Map the legacy positional index of ``TokaMaker.get_q``'s ``ravgs`` array to the
+# key used by newer OFT builds, which return ``ravgs`` as a dict.
+_GET_Q_RAVG_INDEX = {"<R>": 0, "<1/R>": 1, "dV/dPsi": 2}
+
+
+def q_ravg(ravgs, which: str):
+    """Extract a flux-surface average from the ``ravgs`` element of ``TokaMaker.get_q``.
+
+    Supports both the legacy positional array ``[<R>, <1/R>, dV/dPsi]`` and the
+    newer dict form ``{'<R>', '<1/R>', '<1/R^2>', 'dV/dPsi'}`` returned by recent
+    OpenFUSIONToolkit releases. ``which`` is one of ``'<R>'``, ``'<1/R>'``,
+    ``'dV/dPsi'`` (note the dict inserted ``'<1/R^2>'``, so the positional index
+    of ``dV/dPsi`` is unchanged at 2 in the legacy array).
+    """
+    if isinstance(ravgs, dict):
+        return ravgs[which]
+    return ravgs[_GET_Q_RAVG_INDEX[which]]
+
+
 def isotropize_fast_pressure(p_perp, p_par, method: str = "trace"):
     """Reduce anisotropic fast-ion pressure to a scalar for the scalar-p GS solve.
 
