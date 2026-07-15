@@ -6,11 +6,23 @@ import contextlib
 import os
 import sys
 import tempfile
+import warnings
 
 import h5py
 import numpy as np
 
 from .schema import write_profile
+
+
+class DerivativeSanityWarning(UserWarning):
+    """Data-sanity warning category for :func:`pchip_derivative`.
+
+    Raised (as a warning, or as ``ValueError`` when ``strict=True``) for
+    conditions that are not fatal to computing a derivative but are strong
+    signals of upstream data problems: a corrupted/duplicated ``psi_N``
+    grid, an unsorted grid, or a spike in the fitted derivative that looks
+    like an axis-mapping artifact rather than real pedestal/edge physics.
+    """
 
 
 @contextlib.contextmanager
@@ -144,6 +156,231 @@ def safe_save_eqdsk(mygs, filename, **kwargs):
         return mygs.save_eqdsk(filename, **kwargs)
     finally:
         mygs.replace_eq(source_eq=saved)
+
+
+def pchip_derivative(x, y, x_eval=None, strict=False):
+    r'''Analytic derivative dy/dx via PCHIP on the native (x, y) grid.
+
+    Replaces the ``np.gradient(y) / np.gradient(x)`` central-difference
+    pattern used throughout bouquet to build P'(psi_N) for TokaMaker's
+    ``pp_prof``. A :class:`scipy.interpolate.PchipInterpolator` is fit to
+    the *native* (unresampled) grid and differentiated analytically, which:
+
+    * avoids the smearing a resample-then-``np.gradient`` pipeline
+      introduces at sharp features (e.g. an H-mode pedestal), and
+    * is shape-preserving / no-overshoot by construction -- monotone input
+      data can never yield a derivative of the "wrong" sign, unlike an
+      interpolating cubic spline (:class:`scipy.interpolate.CubicSpline`),
+      which can ring on noisy data. On smooth (e.g. GPR) profiles PCHIP and
+      CubicSpline derivatives are numerically indistinguishable, so this
+      guranteed-safe behavior at sharp/noisy features is a pure win.
+
+    Two tiers of data-sanity checks guard against silently producing a
+    plausible-looking but wrong P' from corrupted input:
+
+    **Tier 1 -- hard errors** (always ``raise ValueError``, regardless of
+    *strict*):
+
+    1. Non-finite (``NaN``/``inf``) values in *x* or *y*.
+    2. Fewer than 2 unique *x* points after de-duplication (a degenerate
+       grid cannot support a derivative -- this must not silently return
+       zeros).
+    3. Non-finite values in the computed derivative.
+    4. Shape-guarantee tripwire: PCHIP's monotonicity invariant guarantees
+       that monotone input data can never yield a derivative of the wrong
+       sign. If the de-duplicated, sorted *y* is monotone (within
+       ``rtol=1e-12*max|y|``) but the fitted derivative disagrees in sign
+       beyond ``1e-12*max|secant slope|``, that invariant has been broken
+       -- almost certainly by scrambled ``(x, y)`` pairing rather than a
+       genuine numerical edge case -- so this raises rather than warns.
+
+    **Tier 2 -- aggressive warnings** (:class:`DerivativeSanityWarning` by
+    default; promoted to ``ValueError`` when ``strict=True``):
+
+    5. Duplicate *x* points were dropped (count + first few duplicated
+       locations reported) -- a duplicated ``psi_N`` grid is a suspected
+       upstream cause of stepwise ``j_BS`` artifacts, so this is surfaced
+       loudly rather than silently fixed.
+    6. Input *x* was not sorted (ascending sort was applied).
+    7. More than 5% of points were dropped as duplicates ("grid likely
+       corrupted").
+    8. Spike detector: the fitted derivative's peak magnitude exceeds
+       ``50 *`` the median secant-slope magnitude (guarded on
+       ``median > 0``) -- flagged as a possible unphysical feature (e.g.
+       an axis-mapping artifact) rather than real edge/pedestal physics,
+       with the spike's *x* location and the ratio reported.
+
+    Parameters
+    ----------
+    x : array_like
+        1-D abscissa (e.g. ``psi_N``). Need not be strictly increasing or
+        unique on input -- see the duplicate-handling note below.
+    y : array_like
+        1-D ordinate (e.g. pressure), same length as *x*.
+    x_eval : array_like or None, optional
+        Points at which to evaluate the derivative. Defaults to *x* itself
+        (i.e. the derivative is returned on the native grid).
+    strict : bool, optional
+        When ``True``, every Tier-2 condition that would normally emit a
+        :class:`DerivativeSanityWarning` instead raises ``ValueError``.
+        Default ``False`` (warn only); bouquet's call sites keep the
+        default so a merely-suspicious profile doesn't abort a solve.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``dy/dx`` evaluated at *x_eval* (or at the original, full-length
+        *x* when *x_eval* is ``None`` -- so the returned array matches the
+        input grid's shape even when duplicate points were dropped for
+        fitting; a repeated abscissa simply gets the same derivative value
+        at each of its occurrences).
+
+    Notes
+    -----
+    ``PchipInterpolator`` requires strictly increasing abscissas.
+    Duplicated or non-monotonic ``psi_N`` grid points are a suspected
+    cause of stepwise ``j_BS`` artifacts downstream, so this guard is
+    load-bearing, not cosmetic: repeated ``x`` values are collapsed via
+    ``np.unique`` (keeping the first occurrence of each distinct value,
+    then sorting), silently making the interpolant well-posed rather than
+    raising on real-world profile data that occasionally carries a
+    repeated grid point -- but see Tier 2 items 5-7 above: "silently"
+    well-posed does not mean "silently" as far as the user is concerned.
+    '''
+    from scipy.interpolate import PchipInterpolator
+
+    def _flag(msg):
+        """Tier-2 report: warn (default) or raise (``strict=True``).
+
+        ``stacklevel=3`` walks past this closure and ``pchip_derivative``
+        itself so the warning is attributed to the code that called
+        ``pchip_derivative``, not to a line inside this helper.
+        """
+        if strict:
+            raise ValueError(msg)
+        warnings.warn(msg, DerivativeSanityWarning, stacklevel=3)
+
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    # ---- Tier 1.1: non-finite inputs -----------------------------------
+    if not np.all(np.isfinite(x)):
+        n_bad = int(np.count_nonzero(~np.isfinite(x)))
+        raise ValueError(
+            f"pchip_derivative: x contains {n_bad} non-finite value(s) "
+            "(NaN/inf) -- cannot fit a PCHIP interpolant.")
+    if not np.all(np.isfinite(y)):
+        n_bad = int(np.count_nonzero(~np.isfinite(y)))
+        raise ValueError(
+            f"pchip_derivative: y contains {n_bad} non-finite value(s) "
+            "(NaN/inf) -- cannot fit a PCHIP interpolant.")
+
+    # ---- Tier 2.6: unsorted input ---------------------------------------
+    if x.size >= 2 and np.any(np.diff(x) < 0):
+        _flag(
+            "pchip_derivative: input x is not sorted ascending; an "
+            "ascending sort was applied before fitting. If this x grid "
+            "(e.g. psi_N) is expected to be monotonic, check upstream "
+            "for a scrambled profile.")
+
+    # ---- de-duplicate + sort -------------------------------------------
+    x_unique, idx, counts = np.unique(x, return_index=True, return_counts=True)
+    y_unique = y[idx]
+    n_total = x.size
+    n_dropped = n_total - x_unique.size
+
+    # ---- Tier 2.5 / 2.7: duplicate x points dropped ---------------------
+    if n_dropped > 0:
+        dup_locs = x_unique[counts > 1]
+        loc_str = ", ".join(f"{v:.6g}" for v in dup_locs[:5])
+        if dup_locs.size > 5:
+            loc_str += f", ... ({dup_locs.size} total distinct dup locations)"
+        frac_dropped = n_dropped / n_total
+        if frac_dropped > 0.05:
+            _flag(
+                f"pchip_derivative: {n_dropped}/{n_total} points "
+                f"({100*frac_dropped:.1f}%) dropped as duplicate x values "
+                f"(at x = {loc_str}) -- grid likely corrupted. A duplicated "
+                "psi_N grid is a suspected cause of stepwise j_BS "
+                "artifacts; check the upstream profile/grid construction.")
+        else:
+            _flag(
+                f"pchip_derivative: dropped {n_dropped} duplicate x "
+                f"point(s) (at x = {loc_str}) before fitting. A duplicated "
+                "psi_N grid is a suspected cause of stepwise j_BS "
+                "artifacts; check the upstream profile/grid construction.")
+
+    # ---- Tier 1.2: degenerate grid ---------------------------------------
+    if x_unique.size < 2:
+        raise ValueError(
+            f"pchip_derivative: only {x_unique.size} unique x point(s) "
+            "after de-duplication -- at least 2 are required to fit a "
+            "derivative; refusing to silently return zeros.")
+
+    interp = PchipInterpolator(x_unique, y_unique)
+    deriv_unique = interp.derivative()(x_unique)   # for the sanity checks below
+    x_eval = x if x_eval is None else np.asarray(x_eval, dtype=float)
+    result = interp.derivative()(x_eval)
+
+    # ---- Tier 1.3: non-finite output -------------------------------------
+    if not np.all(np.isfinite(result)):
+        n_bad = int(np.count_nonzero(~np.isfinite(result)))
+        raise ValueError(
+            f"pchip_derivative: computed derivative contains {n_bad} "
+            "non-finite value(s) -- check the input profile for "
+            "near-degenerate spacing or extreme dynamic range.")
+
+    # ---- secant slopes on the native (unique, sorted) grid ---------------
+    dx = np.diff(x_unique)
+    dy = np.diff(y_unique)
+    secants = dy / dx
+    abs_secants = np.abs(secants)
+
+    # ---- Tier 1.4: shape-guarantee tripwire ------------------------------
+    max_y = np.max(np.abs(y_unique)) if y_unique.size else 0.0
+    y_tol = 1e-12 * max_y
+    max_secant = np.max(abs_secants) if abs_secants.size else 0.0
+    slope_tol = 1e-12 * max_secant
+    non_increasing = np.all(dy <= y_tol)
+    non_decreasing = np.all(dy >= -y_tol)
+    if non_increasing and not non_decreasing:
+        bad = deriv_unique > slope_tol
+        if np.any(bad):
+            raise ValueError(
+                "pchip_derivative: internal invariant violated -- y is "
+                "monotone non-increasing but the PCHIP derivative has "
+                f"{int(np.count_nonzero(bad))} positive-sign entrie(s) "
+                "beyond tolerance. PCHIP's shape-preservation guarantee "
+                "should make this impossible; this likely indicates "
+                "scrambled (x, y) pairing rather than a numerical edge "
+                "case.")
+    elif non_decreasing and not non_increasing:
+        bad = deriv_unique < -slope_tol
+        if np.any(bad):
+            raise ValueError(
+                "pchip_derivative: internal invariant violated -- y is "
+                "monotone non-decreasing but the PCHIP derivative has "
+                f"{int(np.count_nonzero(bad))} negative-sign entrie(s) "
+                "beyond tolerance. PCHIP's shape-preservation guarantee "
+                "should make this impossible; this likely indicates "
+                "scrambled (x, y) pairing rather than a numerical edge "
+                "case.")
+
+    # ---- Tier 2.8: spike detector -----------------------------------------
+    median_secant = np.median(abs_secants) if abs_secants.size else 0.0
+    if median_secant > 0:
+        peak_idx = int(np.argmax(np.abs(deriv_unique)))
+        peak_val = float(np.abs(deriv_unique[peak_idx]))
+        ratio = peak_val / median_secant
+        if ratio > 50.0:
+            _flag(
+                f"pchip_derivative: derivative peak |dy/dx|={peak_val:.4g} "
+                f"at x={x_unique[peak_idx]:.6g} is {ratio:.1f}x the median "
+                f"secant-slope magnitude ({median_secant:.4g}) -- possible "
+                "unphysical feature in input data (e.g. an axis mapping "
+                "artifact) rather than real profile physics.")
+
+    return result
 
 
 def Ip_flux_integral_vs_target(alpha, mygs, jtor_prof, spike_profile, psi_N, Ip_target):

@@ -38,6 +38,7 @@ from .sampling import (
 )
 from .utils import (
     Ip_flux_integral_vs_target,
+    pchip_derivative,
     safe_save_eqdsk,
     safe_trace_surf,
     store_equilibrium,
@@ -52,7 +53,8 @@ from .physics import q_ravg
 def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
                                 Ip_target, pax_target, psi_pad,
                                 min_iters=2, max_iters=8,
-                                rtol=0.05, verbose=True):
+                                rtol=0.05, verbose=True,
+                                damping=1.0, protect_state=False):
     r"""Iterate TokaMaker input j_phi until the output matches a target.
 
     Uses Newton correction: ``input += (target - output)`` each step.
@@ -101,16 +103,25 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
     edge_mask = psi_N > 0.9
     j_phi_input = target_jphi.copy()
     edge_rms_history = []
+    # keep-best bookkeeping (protect_state=True): the imas anchor target comes
+    # from ANOTHER code's flux geometry and may not be exactly achievable, so
+    # undamped Newton steps can oscillate/diverge; track the best full-profile
+    # RMS state and restore it at the end instead of trusting the last iterate.
+    _can_snap = protect_state and hasattr(mygs, "copy_eq")
+    best = {"rms": np.inf, "eq": None, "out": None}
 
     for it in range(max_iters):
         ffp = {"type": "jphi-linterp", "y": j_phi_input.copy(), "x": psi_N}
         mygs.set_targets(Ip=Ip_target, pax=pax_target)
         mygs.set_profiles(pp_prof=pp_prof, ffp_prof=ffp)
+        _snap = mygs.copy_eq() if _can_snap else None
         try:
             mygs.solve()
         except (ValueError, RuntimeError) as e:
             if verbose:
                 print(f"  [jphi_corr iter {it+1}] solve failed: {e}")
+            if _snap is not None:
+                mygs.replace_eq(source_eq=_snap)   # do not leave the diverged state
             break
 
         _, f, fp, _, pp = mygs.get_profiles(npsi=npsi, psi_pad=psi_pad)
@@ -120,6 +131,10 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
         diff = j_phi_output - target_jphi
         rms_edge = float(np.sqrt(np.mean(diff[edge_mask]**2)))
         edge_rms_history.append(rms_edge)
+        if _can_snap:
+            rms_full = float(np.sqrt(np.mean(diff**2)))
+            if rms_full < best["rms"]:
+                best.update(rms=rms_full, eq=mygs.copy_eq(), out=j_phi_output.copy())
 
         if verbose:
             print(f"  [jphi_corr iter {it+1}] edge RMS = {rms_edge/1e6:.6f} MA/m²")
@@ -135,9 +150,13 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
                               f"(rel_change={rel_change:.4f} < {rtol})")
                     break
 
-        # Newton correction
-        j_phi_input = j_phi_input + (target_jphi - j_phi_output)
+        # Newton correction (optionally damped)
+        j_phi_input = j_phi_input + damping * (target_jphi - j_phi_output)
         j_phi_input = np.maximum(j_phi_input, 0.0)
+
+    if _can_snap and best["eq"] is not None:
+        mygs.replace_eq(source_eq=best["eq"])      # land on the best state seen
+        j_phi_output = best["out"]
 
     return j_phi_output, it + 1, edge_rms_history
 
@@ -622,6 +641,35 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
         'j_BS_used': j_BS_work,
         'spline': _pchip,
     }
+
+def _achieved_jphi_fsa(mygs, psi_N, psi_pad=1e-3, sign_ref=None):
+    """ACHIEVED flux-surface-averaged toroidal current of the CONVERGED solve.
+
+    ``get_jphi_from_GS`` on the live equilibrium (the same formula the recon
+    corrective loop matches), interpolated onto ``psi_N``. This is the current
+    the stored eqdsk actually carries -- as opposed to the prescribed target
+    profile, which a single-pass jphi-linterp solve reproduces only
+    approximately (measured +3.2-3.4%% high over psi_N 0.2-0.9 on the IMAS
+    path). ``sign_ref`` aligns the sign convention to the profile it replaces.
+    """
+    from OpenFUSIONToolkit.TokaMaker.util import get_jphi_from_GS
+    psi_N = np.asarray(psi_N, dtype=float)
+    ps, f, fp, _, pp = mygs.get_profiles(npsi=len(psi_N), psi_pad=psi_pad)
+    _, _, ravgs, _, _, _ = mygs.get_q(npsi=len(psi_N), psi_pad=psi_pad)
+    ps = np.asarray(ps, dtype=float)
+    if ps.size and (ps.max() > 1.5 or ps.min() < -0.5):
+        ps = (ps - ps.min()) / (ps.max() - ps.min())
+    from .physics import q_ravg
+    j = get_jphi_from_GS(np.asarray(f, float) * np.asarray(fp, float),
+                         np.asarray(pp, float),
+                         np.asarray(q_ravg(ravgs, "<R>"), float),
+                         np.asarray(q_ravg(ravgs, "<1/R>"), float))
+    j = np.interp(psi_N, ps, np.asarray(j, dtype=float))
+    if sign_ref is not None and \
+            np.nanmedian(j) * np.nanmedian(np.asarray(sign_ref, float)) < 0:
+        j = -j
+    return j
+
 
 def _swb_debug():
     """Single switch for the SWB debugging instrumentation.
@@ -1190,8 +1238,7 @@ def perturb_kinetic_equilibrium(
         # with the other branches.
         _psi_range_pin = mygs.psi_bounds[1] - mygs.psi_bounds[0]
         _pp_pin = {"type": "linterp",
-                   "y": np.gradient(pres_tmp) /
-                        (np.gradient(psi_N) * _psi_range_pin),
+                   "y": pchip_derivative(psi_N, pres_tmp) / _psi_range_pin,
                    "x": psi_N}
         _pp_pin["y"][-1] = 0.0
         _ffp_pin = {"type": "jphi-linterp",
@@ -1286,8 +1333,7 @@ def perturb_kinetic_equilibrium(
         new_jphi_diff = input_j_phi + delta_spike
         _psi_range_diff = mygs.psi_bounds[1] - mygs.psi_bounds[0]
         _pp_diff = {"type": "linterp",
-                    "y": np.gradient(pres_tmp) /
-                         (np.gradient(psi_N) * _psi_range_diff),
+                    "y": pchip_derivative(psi_N, pres_tmp) / _psi_range_diff,
                     "x": psi_N}
         _pp_diff["y"][-1] = 0.0
         _ffp_diff = {"type": "jphi-linterp", "y": new_jphi_diff, "x": psi_N}
@@ -1367,9 +1413,8 @@ def perturb_kinetic_equilibrium(
                 _stashed_reg = None
 
         _pre_pp = {"type": "linterp",
-                    "y": np.gradient(pressure) /
-                         (np.gradient(psi_N) *
-                          (mygs.psi_bounds[1] - mygs.psi_bounds[0])),
+                    "y": pchip_derivative(psi_N, pressure) /
+                         (mygs.psi_bounds[1] - mygs.psi_bounds[0]),
                     "x": psi_N}
         _pre_pp["y"][-1] = 0.0
         _pre_ffp = {"type": "jphi-linterp",
@@ -1602,8 +1647,7 @@ def perturb_kinetic_equilibrium(
             new_jphi = _anchor_jind + spike_profile + j_fixed_eff
         _psi_range_anchor = mygs.psi_bounds[1] - mygs.psi_bounds[0]
         _pp_anchor = {"type": "linterp",
-                      "y": np.gradient(pres_tmp) /
-                           (np.gradient(psi_N) * _psi_range_anchor),
+                      "y": pchip_derivative(psi_N, pres_tmp) / _psi_range_anchor,
                       "x": psi_N}
         _pp_anchor["y"][-1] = 0.0
         _ffp_anchor = {"type": "jphi-linterp", "y": new_jphi, "x": psi_N}
@@ -1920,6 +1964,15 @@ def perturb_kinetic_equilibrium(
         )
         j_phi_0 = step_j_phi[0]
         _geo = _prescreen_geo  # frozen recon-anchor geometry (or None)
+        # Floor zone: where the GPR mean is at/near zero (<= sigma), e.g. the
+        # zero-anchored edge or a floored pedestal residual, a Gaussian sample
+        # is negative with O(50%) probability PER POINT -- hard-rejecting those
+        # draws can exhaust all tries (observed 0/500 on 201586@4200). There a
+        # non-negative quantity is properly half-Gaussian: CLIP to zero instead.
+        # Negative excursions where the mean is materially positive (> sigma)
+        # still reject the draw -- that remains a genuinely pathological sample.
+        _floor_zone = np.asarray(step_j_phi, dtype=float) <= np.asarray(
+            sigma_jphi, dtype=float)
 
         jphi_perturb = None
         a_optimal = None
@@ -1935,8 +1988,9 @@ def perturb_kinetic_equilibrium(
                 n_samples=1,
                 diag_plot=False,
             ) * j_phi_0
-            if np.any(_cand < 0.0):
-                continue  # non-physical (negative current)
+            if np.any((_cand < 0.0) & ~_floor_zone):
+                continue  # non-physical (negative current where mean >> 0)
+            _cand = np.clip(_cand, 0.0, None)   # half-Gaussian at the floor
             _root = root_scalar(
                 Ip_flux_integral_vs_target,
                 args=(mygs, _cand, spike_profile + j_fixed_eff, psi_N, Ip_target),
@@ -1974,7 +2028,7 @@ def perturb_kinetic_equilibrium(
 
         # ---- 5b. Set up GS profiles --------------------------------
         psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-        pprime_tmp = np.gradient(pres_tmp) / (np.gradient(psi_N) * psi_range)
+        pprime_tmp = pchip_derivative(psi_N, pres_tmp) / psi_range
         pprime_tmp[-1] = 0.0
 
         pp_prof = {"type": "linterp", "y": pprime_tmp, "x": psi_N}
@@ -2038,9 +2092,7 @@ def perturb_kinetic_equilibrium(
         # be removed.  At σ=0 the SWB-vs-recon bootstrap mismatch leaves
         # a ~5-13 mm structural floor in boundary RMS; that's the
         # honest cost of having per-draw Sauter response.
-        pprime_tmp = np.gradient(pres_tmp) / (
-            np.gradient(psi_N) * psi_range
-        )
+        pprime_tmp = pchip_derivative(psi_N, pres_tmp) / psi_range
         pprime_tmp[-1] = 0.0
         pp_prof = {"type": "linterp", "y": pprime_tmp, "x": psi_N}
 
@@ -2319,6 +2371,14 @@ def generate_bouquet(
     capture_live_eq=True,
     capture_npsi=257,
     capture_exact_inv_R2=True,
+    # Archive the ACHIEVED FSA j_phi of each converged solve (baseline + every
+    # draw) instead of the prescribed target profile. Set on the IMAS path,
+    # where the single-pass jphi-linterp solve lands a few % off its anchor, so
+    # the stored 1-D j_phi matches the stored eqdsk (option-A semantics);
+    # j_inductive is recomputed as the residual so closure stays exact. The
+    # geqdsk path leaves this False: its corrective iteration already drives
+    # achieved ~= target, and its baseline stores the corrective output.
+    store_achieved_jphi=False,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -2608,8 +2668,7 @@ def generate_bouquet(
         if jphi_baseline:
             _psi_range_b = mygs.psi_bounds[1] - mygs.psi_bounds[0]
             _pp_b = {"type": "linterp",
-                     "y": np.gradient(pressure_solve) /
-                          (np.gradient(psi_N) * _psi_range_b),
+                     "y": pchip_derivative(psi_N, pressure_solve) / _psi_range_b,
                      "x": psi_N}
             _pp_b["y"][-1] = 0.0
             # Anchor the baseline reference equilibrium (this solve is re-saved as
@@ -3108,7 +3167,11 @@ def generate_bouquet(
     # baseline and perturbed omghb / Er are computed consistently and
     # can be compared directly in plots.
     stored_pfile_bytes = baseline_pfile_bytes
-    if baseline_pfile_bytes is not None and baseline_eqdsk_bytes is not None:
+    from .schema import is_binary_profile_source as _is_bin_src
+    if (baseline_pfile_bytes is not None and baseline_eqdsk_bytes is not None
+            and not _is_bin_src(baseline_pfile_bytes)):
+        # (binary IDA .cdf sources carry no p-file rotation blocks to rebuild;
+        # attempting to parse them as text only produced a decode warning)
         try:
             from .io.pfile import PFile as _PFile
             from .io import GEQDSKEquilibrium as _GEQDSK
@@ -3165,19 +3228,52 @@ def generate_bouquet(
               f"axis-line intersection for top/bottom")
         _bl_xpts, _bl_div = None, None
 
+    # ---- What to archive as the baseline currents -----------------------
+    # Default (geqdsk path / gate off): the anchored target profile
+    # (input_j_phi + jphi_diff = equilibrium.j_tor) with the model split.
+    # store_achieved_jphi (IMAS path): the ACHIEVED FSA j_phi of the converged
+    # solve (mygs is in the baseline-converged state here), so the 1-D j_phi
+    # dataset matches the stored baseline eqdsk instead of sitting a few %
+    # off it; j_inductive is recomputed as the residual against the physical
+    # bootstrap so closure (j_phi = j_ind + j_BS + fixed) stays exact, with
+    # any sub-zero sliver floored and absorbed into j_BS (same convention as
+    # the per-draw split).
+    _bl_jphi_store = (input_j_phi + np.asarray(jphi_diff, dtype=float)
+                      if jphi_diff is not None else input_j_phi)
+    _bl_jBS_store = baseline_j_BS
+    _bl_jind_store = input_jinductive
+    if store_achieved_jphi:
+        try:
+            _bl_jphi_store = _achieved_jphi_fsa(
+                mygs, psi_N, psi_pad, sign_ref=_bl_jphi_store)
+            if baseline_j_BS is not None:
+                _fx = np.zeros_like(np.asarray(psi_N, dtype=float))
+                if j_NBI is not None:
+                    _fx = _fx + np.asarray(j_NBI, dtype=float)
+                if j_RF is not None:
+                    _fx = _fx + np.asarray(j_RF, dtype=float)
+                _bl_jind_store = (_bl_jphi_store
+                                  - np.asarray(baseline_j_BS, dtype=float) - _fx)
+                if np.any(_bl_jind_store < 0.0):
+                    _bl_jind_store = np.maximum(_bl_jind_store, 0.0)
+                    _bl_jBS_store = _bl_jphi_store - _bl_jind_store - _fx
+            print("  [archive] baseline j_phi = achieved FSA current "
+                  "(matches baseline eqdsk)")
+        except Exception as _aexc:
+            print(f"  WARN: achieved-jphi baseline archival failed ({_aexc}); "
+                  f"storing the anchored target instead")
+
     store_baseline_profiles(
         header, psi_N,
         ne, te, ni, ti,
         # Store the ACTUAL solved quantities, not the un-anchored inputs, so the
         # archived _baseline diagnostics match what was solved (== dd equilibrium):
         #  - pressure_solve = thermal + impurity + fast + p_diff anchor (not thermal-D)
-        #  - input_j_phi + jphi_diff = equilibrium.j_tor anchor (not the smooth
-        #    core_profiles.j_tor input). Without the +jphi_diff the stored j_phi is
-        #    the un-anchored parallel-transport total and any analysis reading it
-        #    compares against the wrong profile.
+        #  - with store_achieved_jphi, j_phi is the ACHIEVED FSA current of the
+        #    converged solve (matches the stored eqdsk); otherwise the anchored
+        #    target input_j_phi + jphi_diff (= equilibrium.j_tor).
         pressure_solve,
-        (input_j_phi + np.asarray(jphi_diff, dtype=float)
-         if jphi_diff is not None else input_j_phi),
+        _bl_jphi_store,
         sigma_ne, sigma_te, sigma_ni, sigma_ti, sigma_jphi,
         initial_Ip_target, l_i_target,
         scan_key=scan_key,
@@ -3193,8 +3289,8 @@ def generate_bouquet(
         diverted=_bl_div,
         aux_baselines=aux_baselines,
         aux_sigmas=aux_sigmas,
-        j_BS=baseline_j_BS,
-        j_inductive=input_jinductive,
+        j_BS=_bl_jBS_store,
+        j_inductive=_bl_jind_store,
         source_kind=source_kind,
     )
 
@@ -3262,9 +3358,8 @@ def generate_bouquet(
             # natural equilibrium re-solved.
             try:
                 _cache_pp = {"type": "linterp",
-                             "y": np.gradient(pressure) /
-                                  (np.gradient(psi_N) *
-                                   (mygs.psi_bounds[1] - mygs.psi_bounds[0])),
+                             "y": pchip_derivative(psi_N, pressure) /
+                                  (mygs.psi_bounds[1] - mygs.psi_bounds[0]),
                              "x": psi_N}
                 _cache_pp["y"][-1] = 0.0
                 _cache_ffp = {"type": "jphi-linterp",
@@ -4279,12 +4374,44 @@ def generate_bouquet(
                 print(f"  WARNING: could not build perturbed p-file: {exc}")
                 traceback.print_exc()
 
+        # ---- Option-A archival (store_achieved_jphi): the stored per-draw
+        # j_phi is the ACHIEVED FSA current of THIS draw's converged solve
+        # (mygs is at the same state full_path's eqdsk was just saved from),
+        # not the GPR/anchor target -- so the 1-D profile matches the group's
+        # own eqdsk. j_inductive is recomputed as the residual against the
+        # physical per-draw bootstrap (closure exact; sub-zero sliver floored
+        # and absorbed into j_BS, same convention as the model split).
+        _dr_jphi_store = jphi_perturb
+        _dr_jBS_store = diagnostics["j_BS"]
+        _dr_jind_store = diagnostics["j_inductive"]
+        if store_achieved_jphi:
+            try:
+                _dr_jphi_store = _achieved_jphi_fsa(
+                    mygs, psi_N, psi_pad, sign_ref=jphi_perturb)
+                _fx = np.zeros_like(np.asarray(psi_N, dtype=float))
+                if j_NBI is not None:
+                    _fx = _fx + np.asarray(j_NBI, dtype=float)
+                if j_RF is not None:
+                    _fx = _fx + np.asarray(j_RF, dtype=float)
+                _dr_jind_store = (_dr_jphi_store
+                                  - np.asarray(diagnostics["j_BS"], dtype=float)
+                                  - _fx)
+                if np.any(_dr_jind_store < 0.0):
+                    _dr_jind_store = np.maximum(_dr_jind_store, 0.0)
+                    _dr_jBS_store = _dr_jphi_store - _dr_jind_store - _fx
+            except Exception as _aexc:
+                print(f"  WARN: achieved-jphi draw archival failed ({_aexc}); "
+                      f"storing the target profile instead")
+                _dr_jphi_store = jphi_perturb
+                _dr_jBS_store = diagnostics["j_BS"]
+                _dr_jind_store = diagnostics["j_inductive"]
+
         store_equilibrium(
             header, count, full_path,
             psi_N,
-            jphi_perturb,
-            diagnostics["j_BS"],
-            diagnostics["j_inductive"],
+            _dr_jphi_store,
+            _dr_jBS_store,
+            _dr_jind_store,
             ne_perturb, te_perturb,
             ni_perturb, ti_perturb,
             w_ExB,
@@ -4541,7 +4668,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     # ---- 4. Pressure and GS profiles ----
     pres_tmp = 1.6022e-19 * (ne * te + ni * ti)
     psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-    pprime_tmp = np.gradient(pres_tmp) / (np.gradient(eqdsk.psi_N) * psi_range)
+    pprime_tmp = pchip_derivative(eqdsk.psi_N, pres_tmp) / psi_range
     pprime_tmp[-1] = 0.0
 
     pp_prof = {"type": "linterp", "y": pprime_tmp, "x": eqdsk.psi_N}

@@ -344,6 +344,14 @@ class Bouquet:
         if iso_pts is not None:
             mygs.set_isoflux(iso_pts, weights=iso_w)
 
+        # Optional X-point pin: drive B_pol -> 0 at the configured saddle
+        # point(s). Opt-in via SolverConfig.saddle_targets (default None).
+        if sc.saddle_targets is not None:
+            _sad = np.asarray(sc.saddle_targets, dtype=np.float64).reshape(-1, 2)
+            _sw = (np.asarray(sc.saddle_weights, dtype=np.float64)
+                   if sc.saddle_weights is not None else None)
+            mygs.set_saddle_constraints(_sad, weights=_sw)
+
         # Weak coil regularisation toward zero + small VSC freedom
         reg_terms = [mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.0)
                      for name in mygs.coil_sets]
@@ -534,6 +542,8 @@ class Bouquet:
         """
         import numpy as np
 
+        from .utils import pchip_derivative
+
         bl = self.baseline
         mygs = self.mygs
         psi_N = np.asarray(bl.psi_N, dtype=float)
@@ -569,7 +579,7 @@ class Bouquet:
             nl_its = -1
             for _pass in range(2):   # 2nd pass refines the jphi-linterp flux scaling
                 psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-                pp_y = np.gradient(p_total) / (np.gradient(psi_N) * psi_range)
+                pp_y = pchip_derivative(psi_N, p_total) / psi_range
                 pp_y[-1] = 0.0
                 mygs.set_targets(Ip=bl.Ip_target, pax=float(p_total[0]))
                 mygs.set_profiles(
@@ -678,6 +688,24 @@ class Bouquet:
             if getattr(bl, "jphi_diff", None) is not None:
                 _jphi_solve = _jphi_solve + k2e(bl.jphi_diff)
             nl_its = solve_jphi(_jphi_solve)
+
+            # Corrective iteration (opt-in): the single jphi-linterp solve
+            # imposes the request with pre-solve geometry, so the ACHIEVED FSA
+            # j_phi lands a few % off the anchor once psi converges (-> l_i /
+            # q(psi_N) biased vs the equilibrium IDS). Reuse the recon path's
+            # Newton corrector to drive the output onto the anchor target.
+            if getattr(self.config.generation, "imas_corrective_jphi", False):
+                from .TokaMaker_interface import _corrective_jphi_iteration
+                _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
+                _pp_y = pchip_derivative(psi_N, p_total) / _pr
+                _pp_y[-1] = 0.0
+                _pp_prof = {"type": "linterp", "y": _pp_y, "x": psi_N}
+                _, _n_corr, _corr_hist = _corrective_jphi_iteration(
+                    mygs, psi_N, _jphi_solve, _pp_prof,
+                    abs(bl.Ip_target), float(p_total[0]), 1e-3,
+                    min_iters=2, max_iters=8, rtol=0.02, verbose=True,
+                    damping=0.5, protect_state=True)
+                print(f"[imas corrective-jphi] converged in {_n_corr} iteration(s)")
 
         # Convergence sanity: the solve completed (it raises otherwise), so
         # verify it landed on the requested current before trusting its l_i.
@@ -953,6 +981,14 @@ class Bouquet:
                 source_kind=("imas"
                              if type(self.config.source).__name__ == "ImasSource"
                              else "geqdsk"),
+                # BOTH paths: archive the ACHIEVED FSA j_phi of each converged
+                # solve (baseline + draws) so the stored 1-D current always
+                # matches the stored eqdsk in the same group. On the IMAS path
+                # the single-pass forward solve lands a few % off its anchor
+                # target; on the geqdsk path the per-draw corrective iteration
+                # bounds the target-vs-achieved gap to its tolerance (~2-3%
+                # core RMS) -- storing the achieved output removes even that.
+                store_achieved_jphi=True,
             )
         self.generation_log = _cap["text"] or None
 
