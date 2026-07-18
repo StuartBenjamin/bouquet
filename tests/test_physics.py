@@ -518,3 +518,29 @@ class TestRadialField:
         # toroidal sigma = |R Bpol| * sigma_omega ; poloidal sigma = |Bphi| * sigma_vpol
         exp = np.sqrt((1.8 * 0.2 * 1e4) ** 2 + (2.0 * 1e2) ** 2)
         assert np.allclose(info["sigma"], exp)
+
+
+class TestFloorInductiveSplit:
+    """j_inductive >= 0 convention: negative pedestal residuals are floored and
+    absorbed into j_BS with the total exactly preserved (201586@4200 regression:
+    a negative GPR mean rejected all 500 candidate draws)."""
+
+    def test_floor_and_absorb(self):
+        import numpy as np
+        from bouquet.baseline import floor_inductive_split
+        psi = np.linspace(0, 1, 11)
+        j_ind = np.array([1.5, 1.3, 1.1, 0.9, 0.7, 0.5, 0.3, 0.1, -0.02, -0.01, 0.0]) * 1e6
+        j_bs = np.full(11, 0.3e6)
+        tot = j_ind + j_bs
+        ji2, jb2 = floor_inductive_split(j_ind, j_bs, psi)
+        assert (ji2 >= 0).all()
+        assert np.allclose(ji2 + jb2, tot)               # sum preserved exactly
+        assert ji2[8] == 0.0 and jb2[8] == tot[8]        # deficit absorbed
+
+    def test_noop_when_nonnegative(self):
+        import numpy as np
+        from bouquet.baseline import floor_inductive_split
+        j_ind = np.linspace(1.5e6, 0.0, 9)
+        j_bs = np.full(9, 0.2e6)
+        ji2, jb2 = floor_inductive_split(j_ind, j_bs)
+        assert np.array_equal(ji2, j_ind) and np.array_equal(jb2, j_bs)

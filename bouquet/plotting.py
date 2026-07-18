@@ -1601,24 +1601,41 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
     if _lcfs_raw is None:
         _lcfs_raw = safe_trace_surf(mygs, 1.0 - psi_pad)
     lcfs = np.asarray(_lcfs_raw, float)
+    # "Reconstructed" j_phi = the ACHIEVED flux-surface-averaged toroidal
+    # current of the CONVERGED solve (get_jphi_from_GS on the live equilibrium,
+    # the same formula the recon corrective loop matches) -- NOT the prescribed
+    # target profile. On the geqdsk path the per-solve corrective iteration
+    # drives achieved ~= target, so this matches the archived baseline; on the
+    # IMAS path the single-pass solve lands a few % off its anchor and this
+    # panel now shows that honestly (consistent with the q panel, which is also
+    # computed from the converged state). Falls back to the baseline arrays if
+    # the live extraction fails.
     j_sol_x = np.asarray(bl.psi_N, float)
-    j_sol = np.asarray(bl.j_phi, float)
+    try:
+        from OpenFUSIONToolkit.TokaMaker.util import get_jphi_from_GS
+        _psj, _f, _fp, _, _pp = mygs.get_profiles(npsi=len(j_sol_x), psi_pad=psi_pad)
+        _, _, _ravgs, _, _, _ = mygs.get_q(npsi=len(j_sol_x), psi_pad=psi_pad)
+        _psj = np.asarray(_psj, float)
+        if _psj.size and (_psj.max() > 1.5 or _psj.min() < -0.5):
+            _psj = (_psj - _psj.min()) / (_psj.max() - _psj.min())
+        from .physics import q_ravg
+        _j_ach = np.asarray(get_jphi_from_GS(
+            np.asarray(_f, float) * np.asarray(_fp, float), np.asarray(_pp, float),
+            np.asarray(q_ravg(_ravgs, "<R>"), float),
+            np.asarray(q_ravg(_ravgs, "<1/R>"), float)), float)
+        # match the baseline current's sign convention for a direct overlay
+        if np.nanmedian(_j_ach) * np.nanmedian(np.asarray(bl.j_phi, float)) < 0:
+            _j_ach = -_j_ach
+        j_sol_x, j_sol = _psj, _j_ach
+    except Exception:
+        j_sol = np.asarray(bl.j_phi, float)
 
-    # Anchors (IMAS diff workflow): jphi_diff / jBS_diff are FIXED offsets added
-    # to the solve target (bl.j_phi + jphi_diff anchors the total to the
-    # equilibrium IDS; bl.j_BS + jBS_diff is the effective/FUSE bootstrap while
-    # bl.j_BS itself is the raw SWB Sauter). Fold them in here so the plotted
-    # total and components match what was actually SOLVED (and archived) --
-    # otherwise the total's pedestal spike (equilibrium j_tor) and the raw SWB
-    # j_BS spike sit at different psi_N. Both are None on the geqdsk path.
-    _kin_x = np.asarray(getattr(bl, "psi_N_kinetic", j_sol_x), float)
-
-    def _on_eq_grid(a):
-        a = np.asarray(a, float)
-        return a if a.shape == j_sol_x.shape else np.interp(j_sol_x, _kin_x, a)
-
-    if getattr(bl, "jphi_diff", None) is not None:
-        j_sol = j_sol + _on_eq_grid(bl.jphi_diff)
+    # Anchors (IMAS diff workflow): jphi_diff / jBS_diff are FIXED offsets on
+    # the kinetic grid (bl.j_BS + jBS_diff is the effective/FUSE bootstrap in
+    # the solve; bl.j_BS itself is the raw SWB Sauter). Used below so the
+    # component overlay reflects the bootstrap actually in the solve. Both are
+    # None on the geqdsk path.
+    _kin_x = np.asarray(getattr(bl, "psi_N_kinetic", bl.psi_N), float)
 
     # ---- raw input side ----------------------------------------------------
     if not is_imas:
@@ -1666,34 +1683,36 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
         a.set_xlabel(r"$\hat{\psi}$"); a.set_ylabel(ylab)
         a.set_xlim(0, 1); a.legend(fontsize=8, loc="best")
 
-    # j_phi panel: decompose the plotted total (solid black) into its EFFECTIVE
-    # inductive + bootstrap components -- reduced-opacity dashed (j_ind) and
-    # dash-dot (j_BS) in the reconstruction colour. "Effective" = including the
-    # fixed anchors: on the IMAS diff path the bootstrap shown is
-    # bl.j_BS + jBS_diff (the FUSE bootstrap actually in the solve, with its
-    # pedestal at the right psi_N), and the inductive is the residual against
-    # the anchored total -- so the two curves SUM to the plotted total on every
-    # path. On the geqdsk path (anchors None) this reduces exactly to the
-    # archived bl.j_inductive / bl.j_BS.
+    # j_phi panel: overlay the EFFECTIVE inductive + bootstrap components of the
+    # solve -- reduced-opacity dashed (j_ind) and dash-dot (j_BS). "Effective" =
+    # including the fixed anchors: on the IMAS diff path the bootstrap shown is
+    # bl.j_BS + jBS_diff (the FUSE bootstrap actually in the solve, pedestal at
+    # the right psi_N); the inductive is the residual against the ACHIEVED
+    # total, so the two curves sum to the plotted (solved) total on every path.
+    # All baseline arrays are interpolated from their native grids onto the
+    # solver's uniform psi_N grid (same length does NOT imply same grid).
     if getattr(bl, "j_BS", None) is not None:
-        _jBS_eff = np.asarray(bl.j_BS, float).copy()
+        _blx = np.asarray(bl.psi_N, float)
+
+        def _to_jx(a, native_x):
+            a = np.asarray(a, float)
+            return np.interp(j_sol_x, np.asarray(native_x, float), a)
+
+        _jBS_eff = _to_jx(bl.j_BS, _blx)
         if getattr(bl, "jBS_diff", None) is not None:
-            _jBS_eff = _jBS_eff + _on_eq_grid(bl.jBS_diff)
+            _d = np.asarray(bl.jBS_diff, float)
+            _jBS_eff = _jBS_eff + _to_jx(_d, _kin_x if _d.shape == _kin_x.shape else _blx)
         _j_ind_eff = j_sol - _jBS_eff
         for _fx in (getattr(bl, "j_NBI", None), getattr(bl, "j_RF", None)):
             if _fx is not None:
-                _j_ind_eff = _j_ind_eff - _on_eq_grid(_fx)
+                _fx = np.asarray(_fx, float)
+                _j_ind_eff = _j_ind_eff - _to_jx(
+                    _fx, _kin_x if _fx.shape == _kin_x.shape else _blx)
         ax[0, 1].plot(j_sol_x, _j_ind_eff / 1e6, ls="--", c=C_SOL, lw=1.5,
                       alpha=0.45, label=r"recon $j_{ind}$", zorder=2)
         ax[0, 1].plot(j_sol_x, _jBS_eff / 1e6, ls="-.", c=C_SOL, lw=1.5,
                       alpha=0.45, label=r"recon $j_{BS}$", zorder=2)
         ax[0, 1].legend(fontsize=8, loc="best")
-    # IMAS path: the anchored total reproduces the IDS input almost exactly, so
-    # the dotted input drawn first would vanish underneath the solid recon line
-    # -- re-draw it on top so the faithful-input overlay is actually visible.
-    if is_imas and in_j is not None:
-        ax[0, 1].plot(in_jx, np.asarray(in_j, float) / 1e6, ls=":", c=C_IN,
-                      lw=2.0, zorder=6)
 
     # q panel: tame the edge divergence. q climbs steeply toward a diverted
     # separatrix, and if one profile (the input g-file q or the solve) shoots
