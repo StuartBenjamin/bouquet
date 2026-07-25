@@ -11,7 +11,197 @@ per-draw bootstrap recompute:
 import numpy as np
 import pytest
 
-from bouquet.physics import isotropize_fast_pressure, parallel_to_toroidal
+from bouquet.physics import (isotropize_fast_pressure, parallel_to_toroidal,
+                             toroidal_to_parallel)
+
+
+def _fsa_metrics_circular(R0=1.7, a=0.55, F=3.4, Bp0=0.35, npol=20000):
+    """FSA metrics on one analytic flux surface via the *proper* operator
+    <A> = oint (A/B_p) dl / oint dl/B_p  (Wesson 4th ed. sec 4.4).
+
+    Concentric circular surface R=R0+a*cos(th), Z=a*sin(th) (finite aspect
+    ratio eps=a/R0), with a theta-varying poloidal field Bp = Bp0/(1+eps*cos)
+    (the large-aspect-ratio 1/R fall-off) so the FSA is genuinely weighted, not
+    a plain theta-average. Returns a geom dict + the raw per-angle fields for
+    independent-path checks.
+    """
+    th = np.linspace(0.0, 2 * np.pi, npol, endpoint=False)
+    R = R0 + a * np.cos(th)
+    dl = a                                   # |d(R,Z)/dth| for a circle (const)
+    Bp = Bp0 / (1.0 + (a / R0) * np.cos(th))
+    Bphi = F / R
+    B2 = Bphi**2 + Bp**2
+    w = dl / Bp                              # FSA weight  dl/B_p
+    def fsa(A):
+        return np.sum(A * w) / np.sum(w)
+    geom = {
+        "F": F,
+        "avg_inv_R": fsa(1.0 / R),
+        "avg_inv_R2": fsa(1.0 / R**2),
+        "avg_B2": fsa(B2),
+    }
+    return geom, dict(th=th, R=R, Bp=Bp, Bphi=Bphi, B2=B2, F=F, fsa=fsa)
+
+
+# ---------------------------------------------------------------------------
+# Physics benchmark: proper-FSA quadrature vs the conversion formula, and the
+# <B_phi^2> = F^2 <1/R^2> identity. Verified against Wesson sec 4.4 (FSA def,
+# field-aligned + Pfirsch-Schlueter split) and the IMAS/EUROfusion convention
+# j_phi == <J^phi>/<1/R>.
+# ---------------------------------------------------------------------------
+class TestFSAQuadratureBenchmark:
+    def test_forward_matches_independent_fsa_quadrature(self):
+        # For a field-aligned current j = lambda*B: the code's formula output
+        # must equal <j_phi/R>/<1/R> computed by DIRECT FSA quadrature (a fully
+        # independent path from the closed-form formula).
+        geom, f = _fsa_metrics_circular()
+        lam = 4.2e5                                  # lambda = <j.B>/<B^2>
+        jdotB = lam * geom["avg_B2"]                 # <j.B> on the surface
+        # independent direct path: j_phi = lambda*Bphi, then FSA of j_phi/R
+        j_tor_direct = f["fsa"]((lam * f["Bphi"]) / f["R"]) / geom["avg_inv_R"]
+        j_tor_formula = parallel_to_toroidal(np.array([jdotB]), geom=geom)[0]
+        assert np.isclose(j_tor_formula, j_tor_direct, rtol=1e-10)
+
+    def test_bphi2_identity(self):
+        # <B_phi^2> = F^2 <1/R^2> exactly (B_phi = F/R), the identity the
+        # analytic bracket relies on.
+        geom, f = _fsa_metrics_circular()
+        avg_Bphi2 = f["fsa"](f["Bphi"] ** 2)
+        assert np.isclose(avg_Bphi2, f["F"] ** 2 * geom["avg_inv_R2"], rtol=1e-12)
+
+    def test_finite_aspect_ratio_correction_is_real(self):
+        # sanity: at eps~0.32 the geometric factor departs from the cylinder
+        # limit by a non-trivial amount (so the test isn't vacuous)
+        geom, _ = _fsa_metrics_circular()
+        cyl = geom["F"] * geom["avg_inv_R2"] / (geom["avg_B2"] * geom["avg_inv_R"])
+        assert not np.isclose(cyl, 1.0, atol=1e-3)   # genuine O(eps^2)+Bp effect
+
+
+# ---------------------------------------------------------------------------
+# toroidal_to_parallel -- the IDS write-back inverse
+# ---------------------------------------------------------------------------
+class TestToroidalToParallel:
+    def test_round_trip_exact(self):
+        # forward(inverse) == identity to machine precision with full geom
+        geom, _ = _fsa_metrics_circular()
+        jdotB = np.array([9.1e5, 4.0e5, -1.5e5])
+        j_tor = parallel_to_toroidal(jdotB, geom=geom)
+        back = toroidal_to_parallel(j_tor, geom=geom)
+        assert np.allclose(back, jdotB, rtol=1e-11)
+
+    def test_round_trip_with_b0(self):
+        # IMAS input/output normalised by B0 must also round-trip
+        geom, _ = _fsa_metrics_circular()
+        B0 = 2.0
+        j_par_imas = np.array([1.0e6, 3.0e5])
+        j_tor = parallel_to_toroidal(j_par_imas, geom={**geom, "B0": B0})
+        back = toroidal_to_parallel(j_tor, geom={**geom, "B0": B0})
+        assert np.allclose(back, j_par_imas, rtol=1e-11)
+
+    def test_bracket_one_fallback_round_trips(self):
+        # without <1/R^2> both directions use bracket=1, so they still invert
+        # each other exactly (self-consistent, just not machine-exact physics)
+        geom, _ = _fsa_metrics_circular()
+        g = {"F": geom["F"], "avg_inv_R": geom["avg_inv_R"], "avg_B2": geom["avg_B2"]}
+        jdotB = np.array([7.7e5])
+        back = toroidal_to_parallel(parallel_to_toroidal(jdotB, geom=g), geom=g)
+        assert np.allclose(back, jdotB, rtol=1e-11)
+
+    def test_missing_key_raises(self):
+        with pytest.raises(ValueError, match="missing required key"):
+            toroidal_to_parallel(np.array([1.0]), geom={"F": 3.4, "avg_B2": 4.0})
+
+
+# ---------------------------------------------------------------------------
+# Exact <1/R^2> flux-surface quadrature (headless, via a mock equilibrium)
+# ---------------------------------------------------------------------------
+class _MockCircleEquil:
+    """Minimal mygs stand-in: concentric circular surfaces psi_hat=(r/a0)^2,
+    R=R0+r*cos, Z=r*sin, with an analytic large-aspect-ratio poloidal field
+    Bp = Bp0*R0/R and Bphi = F/R, so <1/R^2> etc. have quadrature references."""
+    def __init__(self, R0=1.7, a0=0.5, F=3.4, Bp0=0.35, npts=1200):
+        self.R0, self.a0, self.F, self.Bp0, self.npts = R0, a0, F, Bp0, npts
+
+    def get_field_eval(self, field_type):
+        assert field_type == "B"
+        R0, F, Bp0 = self.R0, self.F, self.Bp0
+        class _E:
+            def eval(self, p):
+                R, Z = float(p[0]), float(p[1])
+                Bp = Bp0 * R0 / R                    # |B_p| shape ~ 1/R
+                # split Bp into (R,Z) comps along the circle tangent direction;
+                # magnitude is what matters for the FSA weight
+                return np.array([Bp * 0.6, F / R, Bp * 0.8])  # hypot(.6,.8)=1
+        return _E()
+
+    def trace_surf(self, psi):
+        r = self.a0 * np.sqrt(psi)
+        th = np.linspace(0, 2 * np.pi, self.npts, endpoint=False)
+        return np.column_stack([self.R0 + r * np.cos(th), r * np.sin(th)])
+
+
+class TestExactInvR2Quadrature:
+    def test_fsa_matches_analytic_reference(self):
+        from bouquet.physics import _capture_exact_inv_R2
+        from bouquet.utils import safe_trace_surf
+        eq = _MockCircleEquil()
+        psi = np.array([0.25, 0.64])                 # r = a0*sqrt(psi)
+        inv_R2, inv_R_chk, _ = _capture_exact_inv_R2(eq, psi, safe_trace_surf)
+        # independent reference: same proper FSA on a dense analytic circle
+        for k, ps in enumerate(psi):
+            r = eq.a0 * np.sqrt(ps)
+            th = np.linspace(0, 2 * np.pi, 40000, endpoint=False)
+            R = eq.R0 + r * np.cos(th)
+            w = (r * (2 * np.pi / th.size)) / (eq.Bp0 * eq.R0 / R)   # dl/Bp
+            ref_inv_R2 = np.sum((1 / R**2) * w) / np.sum(w)
+            assert np.isclose(inv_R2[k], ref_inv_R2, rtol=1e-3)
+
+    def test_native_read_accepts_valid_extended_sauter(self):
+        # forward-compat: when sauter_fc grows <1/R^2> (geo row 3) and <B_phi^2>
+        # (bfield row 2), the native reader returns <1/R^2> and passes the
+        # F^2<1/R^2>==<B_phi^2> identity + Jensen.
+        from bouquet.physics import _native_fsa_inv_R2
+        n = 20
+        avg_R = np.full(n, 1.7); inv_R = np.full(n, 0.60); a = np.full(n, 0.5)
+        inv_R2 = inv_R**2 * 1.03                      # > <1/R>^2 (Jensen ok)
+        F = np.full(n, 3.4)
+        Babs = np.full(n, 2.1); B2 = np.full(n, 4.4)
+        bphi2 = F**2 * inv_R2                          # exact identity
+        geo = np.vstack([avg_R, inv_R, a, inv_R2])     # extended geo
+        bfield = np.vstack([Babs, B2, bphi2])          # extended bfield
+        got = _native_fsa_inv_R2(geo, bfield, F, inv_R)
+        assert got is not None and np.allclose(got, inv_R2)
+
+    def test_native_read_rejects_absent_and_wrong(self):
+        from bouquet.physics import _native_fsa_inv_R2
+        n = 20
+        inv_R = np.full(n, 0.60); F = np.full(n, 3.4)
+        geo3 = np.vstack([np.full(n, 1.7), inv_R, np.full(n, 0.5)])   # no 4th row
+        assert _native_fsa_inv_R2(geo3, np.vstack([np.full(n, 2.1), np.full(n, 4.4)]),
+                                  F, inv_R) is None
+        # 4th row present but violates Jensen (< <1/R>^2) -> rejected
+        bad = np.vstack([np.full(n, 1.7), inv_R, np.full(n, 0.5), inv_R**2 * 0.5])
+        assert _native_fsa_inv_R2(bad, np.vstack([np.full(n, 2.1), np.full(n, 4.4)]),
+                                  F, inv_R) is None
+        # 4th row passes Jensen but <B_phi^2> identity fails -> rejected
+        cand = inv_R**2 * 1.03
+        geo4 = np.vstack([np.full(n, 1.7), inv_R, np.full(n, 0.5), cand])
+        bf_wrong = np.vstack([np.full(n, 2.1), np.full(n, 4.4), F**2 * cand * 1.5])
+        assert _native_fsa_inv_R2(geo4, bf_wrong, F, inv_R) is None
+
+    def test_self_check_inv_R_consistent(self):
+        # the quadrature's own <1/R> must match a direct dense average (the
+        # gate that guards against bad B_p ordering / trace shape at runtime)
+        from bouquet.physics import _capture_exact_inv_R2
+        from bouquet.utils import safe_trace_surf
+        eq = _MockCircleEquil()
+        psi = np.array([0.49])
+        _, inv_R_chk, _ = _capture_exact_inv_R2(eq, psi, safe_trace_surf)
+        r = eq.a0 * 0.7
+        th = np.linspace(0, 2 * np.pi, 40000, endpoint=False)
+        R = eq.R0 + r * np.cos(th)
+        w = 1.0 / (eq.Bp0 * eq.R0 / R)
+        assert np.isclose(inv_R_chk[0], np.sum(w / R) / np.sum(w), rtol=1e-3)
 
 
 # ---------------------------------------------------------------------------
@@ -328,3 +518,29 @@ class TestRadialField:
         # toroidal sigma = |R Bpol| * sigma_omega ; poloidal sigma = |Bphi| * sigma_vpol
         exp = np.sqrt((1.8 * 0.2 * 1e4) ** 2 + (2.0 * 1e2) ** 2)
         assert np.allclose(info["sigma"], exp)
+
+
+class TestFloorInductiveSplit:
+    """j_inductive >= 0 convention: negative pedestal residuals are floored and
+    absorbed into j_BS with the total exactly preserved (201586@4200 regression:
+    a negative GPR mean rejected all 500 candidate draws)."""
+
+    def test_floor_and_absorb(self):
+        import numpy as np
+        from bouquet.baseline import floor_inductive_split
+        psi = np.linspace(0, 1, 11)
+        j_ind = np.array([1.5, 1.3, 1.1, 0.9, 0.7, 0.5, 0.3, 0.1, -0.02, -0.01, 0.0]) * 1e6
+        j_bs = np.full(11, 0.3e6)
+        tot = j_ind + j_bs
+        ji2, jb2 = floor_inductive_split(j_ind, j_bs, psi)
+        assert (ji2 >= 0).all()
+        assert np.allclose(ji2 + jb2, tot)               # sum preserved exactly
+        assert ji2[8] == 0.0 and jb2[8] == tot[8]        # deficit absorbed
+
+    def test_noop_when_nonnegative(self):
+        import numpy as np
+        from bouquet.baseline import floor_inductive_split
+        j_ind = np.linspace(1.5e6, 0.0, 9)
+        j_bs = np.full(9, 0.2e6)
+        ji2, jb2 = floor_inductive_split(j_ind, j_bs)
+        assert np.array_equal(ji2, j_ind) and np.array_equal(jb2, j_bs)

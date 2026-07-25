@@ -154,7 +154,25 @@ class DrawView:
 
     @property
     def pfile_bytes(self) -> Optional[bytes]:
-        return self._read_bytes(".pfile")[".pfile"]
+        """Profiles-source bytes for this draw.
+
+        A text p-file source is stored per draw (rewritten with the draw's
+        perturbed kinetics). A binary IDA ``.cdf`` source is stored ONCE in
+        ``_baseline`` (it cannot be draw-perturbed, and per-draw copies bloated
+        archives ~190 MB x n_draws with the new IDA-database files) -- so when
+        the draw carries no blob, fall back to the scan's baseline copy.
+        """
+        b = self._read_bytes(".pfile")[".pfile"]
+        if b is not None:
+            return b
+        import h5py
+        with h5py.File(self._ar.path, "r") as hf:
+            bl = f"scan/{self.scan_key}/_baseline"
+            if bl in hf:
+                name = find_bytes_dataset(hf[bl], "pfile")
+                if name is not None:
+                    return bytes(hf[bl][name][()])
+        return None
 
     def equilibrium(self):
         """Parse the stored eqdsk bytes into a ``GEQDSKEquilibrium``."""
@@ -172,22 +190,74 @@ class DrawView:
         from .io.pfile import PFile
         return PFile.from_bytes(b) if hasattr(PFile, "from_bytes") else None
 
+    def coil_currents(self) -> dict:
+        """Coil currents as ``{name: current_A}`` (empty if not stored)."""
+        from .utils import _read_coil_names
+        import h5py
+        with h5py.File(self._ar.path, "r") as hf:
+            grp = hf[_group_path(self.scan_key, self.count)]
+            if "coil_currents" not in grp:
+                return {}
+            vals = np.asarray(grp["coil_currents"][()], dtype=float)
+            names = _read_coil_names(grp)
+        return dict(zip(names, vals.tolist())) if names else {}
+
+    def profiles_doc(self) -> dict:
+        """Portable, self-describing dict of this draw's full profile state.
+
+        Source-agnostic (works for both geqdsk and IMAS draws): the 1-D
+        profile arrays + their units, the scalar diagnostics, coil currents,
+        and the captured live-equilibrium FSA block when present. Serialised by
+        :meth:`extract` as ``*_profiles.json``.
+        """
+        from .schema import PROFILE_UNITS, EQ_FSA_UNITS
+        from .utils import load_eq_fsa
+        prof = self.profiles
+        doc = {
+            "scan_key": _scan_key(self.scan_key),
+            "count": self.count,
+            "profiles": {k: np.asarray(v).tolist() for k, v in prof.items()},
+            "units": {k: PROFILE_UNITS.get(k, "") for k in prof},
+            "scalars": self.attrs,          # li, Ip, drifts, in_spec, ... (JSON-safe)
+            "coil_currents_A": self.coil_currents(),
+        }
+        fsa = load_eq_fsa(self._ar.path, self.count, scan_key=self.scan_key)
+        if fsa is not None:
+            doc["eq_fsa"] = {k: np.asarray(v).tolist() for k, v in fsa.items()}
+            doc["eq_fsa_units"] = {k: EQ_FSA_UNITS.get(k, "") for k in fsa}
+        return doc
+
     def extract(self, out_dir: str, formats=("geqdsk",)) -> dict:
-        """Write the stored eqdsk / pfile bytes to ``out_dir``; return the paths."""
+        """Write per-draw files to ``out_dir``; return ``{format: path}``.
+
+        Formats: ``"geqdsk"`` / ``"pfile"`` (raw stored bytes) and
+        ``"profiles"`` (a self-describing JSON of profiles + scalars + coils +
+        eq_fsa; see :meth:`profiles_doc`). Missing payloads are skipped.
+        """
         os.makedirs(out_dir, exist_ok=True)
         stem = f"{self._ar.header_basename}_{_scan_key(self.scan_key)}_{self.count}"
-        blobs = self._read_bytes(".eqdsk", ".pfile")   # one file open for both
         paths = {}
-        if "geqdsk" in formats and blobs[".eqdsk"] is not None:
-            p = os.path.join(out_dir, stem + ".geqdsk")
-            with open(p, "wb") as fh:
-                fh.write(blobs[".eqdsk"])
-            paths["geqdsk"] = os.path.abspath(p)
-        if "pfile" in formats and blobs[".pfile"] is not None:
-            p = os.path.join(out_dir, stem + ".peqdsk")
-            with open(p, "wb") as fh:
-                fh.write(blobs[".pfile"])
-            paths["pfile"] = os.path.abspath(p)
+        if "geqdsk" in formats or "pfile" in formats:
+            blobs = self._read_bytes(".eqdsk", ".pfile")   # one file open for both
+            if "geqdsk" in formats and blobs[".eqdsk"] is not None:
+                p = os.path.join(out_dir, stem + ".geqdsk")
+                with open(p, "wb") as fh:
+                    fh.write(blobs[".eqdsk"])
+                paths["geqdsk"] = os.path.abspath(p)
+            if "pfile" in formats:
+                # binary IDA sources live once in _baseline -> property fallback
+                pf = blobs[".pfile"] if blobs[".pfile"] is not None else self.pfile_bytes
+                if pf is not None:
+                    p = os.path.join(out_dir, stem + ".peqdsk")
+                    with open(p, "wb") as fh:
+                        fh.write(pf)
+                    paths["pfile"] = os.path.abspath(p)
+        if "profiles" in formats:
+            import json
+            p = os.path.join(out_dir, stem + "_profiles.json")
+            with open(p, "w") as fh:
+                json.dump(self.profiles_doc(), fh)
+            paths["profiles"] = os.path.abspath(p)
         return paths
 
 
@@ -226,6 +296,71 @@ class ScanView:
     @property
     def excluded(self) -> list:
         return self._draws("excluded")
+
+    def extract(self, out_dir: str, formats=("geqdsk", "profiles"),
+                selection: str = "selected") -> dict:
+        """Extract a bundle (geqdsk / pfile / profiles) for every draw in
+        ``selection`` to ``out_dir``; return ``{draw_index: {format: path}}``.
+
+        One call for "hand me the g-file + profiles for every in-spec draw":
+        ``ar[key].extract("out/", formats=("geqdsk", "profiles"))``.
+        """
+        return {d.count: d.extract(out_dir, formats=formats)
+                for d in self._draws(selection)}
+
+    def spread(self, selection: str = "all", print_table: bool = True) -> dict:
+        r"""Across-draw spread of the bouquet's global output scalars.
+
+        For every draw in *selection* (``"all"`` / ``"selected"`` /
+        ``"excluded"``) reports the mean, 1-sigma, relative sigma, and min-max
+        range of the key global equilibrium scalars:
+
+          * ``l_i(1)`` / ``l_i(3)`` -- internal inductance (stored per draw);
+          * ``<P>``   -- volume-averaged pressure :math:`\int p\,dV / V` [kPa];
+          * ``beta_N`` -- normalized beta.
+
+        ``<P>`` and ``beta_N`` are read from each draw's g-file geometry (one
+        flux-surface trace per draw, so this is O(seconds) for a full family),
+        putting the pressure-quantity uncertainty right alongside the l_i
+        variance in a single call. Returns ``{quantity: {n, mean, std, rel_std,
+        min, max}}`` (``None`` for a quantity with no finite draws); prints a
+        formatted table unless ``print_table=False``.
+        """
+        draws = self._draws(selection)
+        cols = {"l_i(1)": [], "l_i(3)": [], "<P> [kPa]": [], "beta_N": []}
+        for d in draws:
+            cols["l_i(1)"].append(d.li1)
+            cols["l_i(3)"].append(d.li3)
+            eq = d.equilibrium()
+            vol = np.asarray(eq.geometry["vol"], dtype=float)
+            cols["<P> [kPa]"].append(
+                float(eq.volume_integral(np.asarray(eq.pres))[-1]) / float(vol[-1]) / 1e3)
+            cols["beta_N"].append(float(eq.betas["beta_n"]))
+
+        out = {}
+        for name, vals in cols.items():
+            x = np.asarray(vals, dtype=float)
+            x = x[np.isfinite(x)]
+            if x.size == 0:
+                out[name] = None
+                continue
+            m = float(x.mean())
+            s = float(x.std(ddof=1)) if x.size > 1 else 0.0
+            out[name] = {"n": int(x.size), "mean": m, "std": s,
+                         "rel_std": (s / m if m else float("nan")),
+                         "min": float(x.min()), "max": float(x.max())}
+
+        if print_table:
+            print(f"Bouquet output spread -- scan {self.scan_key!r}, "
+                  f"selection={selection!r} ({len(draws)} draws)")
+            print(f"  {'quantity':<11}{'mean':>10}{'1sigma':>10}{'σ/mean':>8}   range")
+            for name, st in out.items():
+                if st is None:
+                    print(f"  {name:<11}  (no finite draws)")
+                    continue
+                print(f"  {name:<11}{st['mean']:>10.3f}{st['std']:>10.3f}"
+                      f"{100 * st['rel_std']:>7.2f}%   [{st['min']:.3f}, {st['max']:.3f}]")
+        return out
 
     def __getitem__(self, count: int) -> DrawView:
         if int(count) not in self.indices:

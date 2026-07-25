@@ -191,6 +191,268 @@ def parallel_to_toroidal(
     )
 
 
+def toroidal_to_parallel(j_tor, *, geom: dict):
+    """Inverse of :func:`parallel_to_toroidal` (analytic method).
+
+    Convert bouquet's toroidal current density ``<j_phi/R>/<1/R>`` back to the
+    IMAS flux-surface-averaged parallel current ``<j.B>/B0``. This is the
+    write-back direction: bouquet stores every current component (ohmic,
+    bootstrap, driven) as toroidal ``j_phi``; IMAS ``core_profiles.j_ohmic /
+    j_bootstrap / j_total`` are parallel ``<j.B>/B0`` (EUROfusion/IMAS
+    convention, with ``j_phi == <J^phi>/<1/R>``). Uses the draw's OWN
+    flux-surface-averaged (FSA) geometry, so it is exact per surface -- unlike
+    the interim baseline-ratio reconstruction it replaces.
+
+    Physics (verified against Wesson 4th ed. sec 4.4 -- FSA
+    ``<A> = oint (A/B_p) dl / oint dl/B_p``, and the field-aligned /
+    Pfirsch-Schlueter decomposition with ``<j_PS.B> = 0``). For a field-aligned
+    component ``j = lambda(psi) B`` with ``lambda = <j.B>/<B^2>`` and
+    ``B_phi = F/R``:
+
+        j_tor = <j_phi/R>/<1/R> = <j.B> F <1/R^2> / (<B^2> <1/R>)
+
+    so the inverse is
+
+        <j.B> = j_tor <B^2> <1/R> / (F <1/R^2>)
+              = j_tor F <1/R> [<B^2>/<B_phi^2>]      (<B_phi^2> = F^2 <1/R^2>)
+
+    and the IMAS parallel current is ``<j.B>/B0``.
+
+    ``geom`` keys (all per-surface arrays unless noted):
+
+        ``F``          flux function ``R*B_phi`` [T m]
+        ``avg_inv_R``  ``<1/R>`` [1/m]
+        ``avg_B2``     ``<B^2>`` [T^2]
+        ``avg_inv_R2`` ``<1/R^2>`` [1/m^2], OPTIONAL -- when absent the exact
+                       ``<B_phi^2> = F^2 <1/R^2>`` is unavailable and the
+                       bracket ``<B^2>/<B_phi^2>`` is taken as 1, neglecting
+                       ``<B_p^2>/<B^2> ~ (eps/q)^2`` (~<1%% at a DIII-D edge).
+                       Provide it (from the captured live equilibrium) for a
+                       machine-exact conversion.
+        ``B0``         output normalisation (default 1): pass the IMAS
+                       ``vacuum_toroidal_field`` B0 to return ``<j.B>/B0``;
+                       leave at 1 to return raw ``<j.B>`` [T A/m^2].
+
+    Round-trips with :func:`parallel_to_toroidal` (analytic) to machine
+    precision when the same ``geom`` (including ``avg_inv_R2``) is used.
+    """
+    j_tor = np.asarray(j_tor, dtype=float)
+    try:
+        F = np.asarray(geom["F"], dtype=float)
+        avg_inv_R = np.asarray(geom["avg_inv_R"], dtype=float)
+        avg_B2 = np.asarray(geom["avg_B2"], dtype=float)
+    except KeyError as missing:
+        raise ValueError(
+            f"geom is missing required key {missing} "
+            "(need 'F', 'avg_inv_R', 'avg_B2'; optional 'avg_inv_R2', 'B0')"
+        ) from None
+    if "avg_inv_R2" in geom and geom["avg_inv_R2"] is not None:
+        # <B^2>/<B_phi^2>, exact (B_phi = F/R -> <B_phi^2> = F^2 <1/R^2>)
+        B2_over_Bphi2 = avg_B2 / (F**2 * np.asarray(geom["avg_inv_R2"], dtype=float))
+    else:
+        B2_over_Bphi2 = 1.0
+    j_dot_B = j_tor * F * avg_inv_R * B2_over_Bphi2       # raw <j.B> [T A/m^2]
+    return j_dot_B / float(geom.get("B0", 1.0))           # IMAS <j.B>/B0
+
+
+def _fsa_over_contour(R, Z, Bp, field):
+    """Flux-surface average <field> = oint(field/Bp)dl / oint(dl/Bp) over one
+    closed (R,Z) contour with poloidal field magnitude ``Bp`` at each vertex.
+
+    Segment-midpoint quadrature: each arc element ``dl`` carries the midpoint
+    value of the integrand. The ``1/Bp`` weight's overall scale cancels in the
+    ratio, so only the *shape* of ``Bp`` around the surface matters.
+    """
+    R = np.asarray(R, float); Z = np.asarray(Z, float); Bp = np.asarray(Bp, float)
+    Rc = np.append(R, R[0]); Zc = np.append(Z, Z[0]); Bpc = np.append(Bp, Bp[0])
+    dl = np.hypot(np.diff(Rc), np.diff(Zc))
+    w = dl / (0.5 * (Bpc[:-1] + Bpc[1:]))            # dl/Bp at segment midpoints
+    fmid = 0.5 * (np.append(field, field[0])[:-1] + np.append(field, field[0])[1:])
+    return float(np.sum(fmid * w) / np.sum(w))
+
+
+def _capture_exact_inv_R2(mygs, psi_hat, safe_trace):
+    """Exact ``<1/R^2>`` per surface by FSA quadrature over traced contours.
+
+    Traces each flux surface (``safe_trace(mygs, psi)`` -> (N,2) R,Z),
+    evaluates the poloidal field ``Bp = hypot(B_R, B_Z)`` there, and forms the
+    proper FSA. Also recomputes ``<1/R>`` and ``<B^2>`` the SAME way and returns
+    them so the caller can self-validate against ``sauter_fc`` (a wrong B-field
+    component order or a bad trace shows up as a ``<1/R>`` mismatch). Returns
+    ``(inv_R2, inv_R_check, B2_check)`` on ``psi_hat``.
+    """
+    inv_R2 = np.empty(psi_hat.size)
+    inv_R_chk = np.empty(psi_hat.size)
+    B2_chk = np.empty(psi_hat.size)
+    for k, ps in enumerate(psi_hat):
+        rz = np.asarray(safe_trace(mygs, float(ps)), dtype=float)
+        # Create the field interpolator AFTER the trace: safe_trace_surf swaps
+        # the equilibrium pointer (copy_eq/replace_eq), which invalidates any
+        # interpolator made earlier -> a stale eval() segfaults. Fresh each
+        # surface (cheap) keeps it bound to the current (restored) equilibrium.
+        Beval = mygs.get_field_eval("B")             # eval([R,Z]) -> [B_R,B_t,B_Z]
+        R, Z = rz[:, 0], rz[:, 1]
+        Bvec = np.array([Beval.eval(p[:2]) for p in rz], dtype=float)
+        Bp = np.hypot(Bvec[:, 0], Bvec[:, 2])        # poloidal = (R,Z) comps
+        B2 = Bvec[:, 0] ** 2 + Bvec[:, 1] ** 2 + Bvec[:, 2] ** 2
+        inv_R2[k] = _fsa_over_contour(R, Z, Bp, 1.0 / R ** 2)
+        inv_R_chk[k] = _fsa_over_contour(R, Z, Bp, 1.0 / R)
+        B2_chk[k] = _fsa_over_contour(R, Z, Bp, B2)
+    return inv_R2, inv_R_chk, B2_chk
+
+
+def _native_fsa_inv_R2(geo_sauter, bfield, F, avg_inv_R, rtol=0.02):
+    """Extract <1/R^2> from an EXTENDED ``sauter_fc`` output, or ``None``.
+
+    Forward-compat for OpenFUSIONToolkit#312 / hansenc's branch, which adds
+    <1/R^2> (and <B_phi^2>) to ``sauter_fc``. Until then ``sauter_fc`` returns
+    geo ``[<R>, <1/R>, <a>]`` and bfield ``[<|B|>, <|B|^2>]``; the branch is
+    expected to append the new averages to those sub-arrays. When it lands this
+    reads them directly and we skip the trace quadrature entirely.
+
+    Assumed layout: geo -> ``[<R>, <1/R>, <a>, <1/R^2>]`` (extra row = <1/R^2>),
+    bfield -> ``[<|B|>, <|B|^2>, <B_phi^2>]``. That is a GUESS at the exact
+    index, so the read is only trusted when it passes physical checks -- Jensen
+    ``<1/R^2> >= <1/R>^2`` and, when <B_phi^2> is also present, the exact
+    identity ``<B_phi^2> = F^2 <1/R^2>``. A wrong index fails these and the
+    caller falls back to the (verified) quadrature. Confirm/simplify the indices
+    against the merged PR signature.
+    """
+    geo = np.asarray(geo_sauter, dtype=float)
+    if geo.ndim != 2 or geo.shape[0] < 4:
+        return None                                  # no extra average present
+    cand = geo[3]
+    inv_R = np.asarray(avg_inv_R, dtype=float)
+    if not np.all(np.isfinite(cand)) or np.any(cand < inv_R ** 2 - 1e-9):
+        return None                                  # fails Jensen -> wrong read
+    bf = np.asarray(bfield, dtype=float)
+    if bf.ndim == 2 and bf.shape[0] >= 3:            # cross-check via the identity
+        if not np.allclose(np.asarray(F, dtype=float) ** 2 * cand, bf[2], rtol=rtol):
+            return None
+    return cand
+
+
+def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
+                            exact_inv_R2: bool = True, inv_R2_npsi=None,
+                            inv_R2_check_rtol: float = 0.02):
+    """Snapshot the live TokaMaker equilibrium's FSA metrics for exact export.
+
+    Called at generate time on the converged ``mygs`` (right where the eqdsk is
+    saved) so a perturbed draw's OWN flux-surface geometry travels with it into
+    the archive, enabling an **exact** per-draw toroidal->parallel conversion at
+    IDS write-back (:func:`toroidal_to_parallel`) instead of the interim
+    baseline-ratio reconstruction.
+
+    Returns a dict of 1-D arrays on a uniform ``psi_N`` grid of ``npsi`` points
+    (default 257 to match the archived eqdsk; do not go below ~129 -- the edge
+    bootstrap needs it):
+
+        ``psi_N``       normalised poloidal flux, [npsi]
+        ``F``           R*B_phi flux function [T m]           (get_profiles)
+        ``avg_inv_R``   <1/R> [1/m]                           (sauter_fc)
+        ``avg_inv_R2``  <1/R^2> [1/m^2]                       (exact quadrature)
+        ``avg_B2``      <B^2> [T^2]                           (sauter_fc)
+        ``q``           safety factor                         (get_q)
+        ``dV_dpsi``     dV/dpsi                               (get_q, geo)
+        ``f_trap``      trapped fraction f_c                  (sauter_fc)
+        ``B_avg``       <|B|> [T]                             (sauter_fc)
+
+    ``exact_inv_R2`` (default True) computes ``<1/R^2>`` -- which TokaMaker does
+    not expose -- by flux-surface quadrature over traced contours
+    (:func:`_capture_exact_inv_R2`), making :func:`toroidal_to_parallel`
+    machine-exact instead of relying on ``<B_phi^2> ~= <B^2>`` (the
+    ``<B_p^2>/<B^2> ~ (eps/q)^2 ~<1%%`` bracket). By default it is traced on the
+    FULL ``npsi`` grid -- same resolution as every other metric, most accurate
+    at the edge where the surfaces bunch up and the bootstrap peaks; the trace
+    is cheap (a few ms/surface, ~2 s at npsi=257). ``inv_R2_npsi`` (default
+    ``None`` = ``npsi``) can be set smaller to trace ``<1/R^2>`` coarsely and
+    spline it onto ``psi_N`` -- only worth it for very large bouquets. The
+    quadrature is **self-validated** each call: its independently-recomputed
+    ``<1/R>`` must agree with ``sauter_fc`` to ``inv_R2_check_rtol`` (default
+    2%), else ``avg_inv_R2`` is dropped (with a warning) and the conversion
+    falls back to the ``<1%`` bracket -- never silently wrong.
+
+    Set ``exact_inv_R2=False`` to skip the ``<1/R^2>`` surface traces entirely
+    (bracket fallback) if the capture cost is ever material.
+
+    Pure extraction (no re-solve); ``mygs`` is passed in so this module stays
+    OFT-import-free / headless-safe.
+    """
+    import warnings
+    psi_hat = np.linspace(psi_pad, 1.0 - psi_pad, int(npsi))
+
+    # F(psi) = R*B_phi from the G-S source profiles
+    _, F, _Fp, _P, _Pp = mygs.get_profiles(psi=psi_hat)
+
+    # <1/R>, <B^2>, f_c from the Sauter flux-surface coefficients. OFT actually
+    # returns (psi_hat, f_c, [<R>,<1/R>,<a>], [<|B|>,<|B|^2>]) -- a leading psi
+    # grid the docstring omits, matching get_q/get_profiles. Take the last
+    # three fields so this is robust to the psi being present or absent.
+    f_c, geo_sauter, bfield = mygs.sauter_fc(psi=psi_hat)[-3:]
+    avg_inv_R = np.asarray(geo_sauter)[1]           # [<R>, <1/R>, <a>]
+    B_avg = np.asarray(bfield)[0]                   # [<|B|>, <|B|^2>]
+    avg_B2 = np.asarray(bfield)[1]
+
+    # q and dV/dpsi (metadata; dV/dpsi also useful for volume integrals)
+    _, q, geo_q, *_rest = mygs.get_q(psi=psi_hat, compute_geo=True)
+    dV_dpsi = np.asarray(geo_q)[2]                  # [<R>, <1/R>, dV/dpsi]
+
+    out = {
+        "psi_N": psi_hat,
+        "F": np.asarray(F, dtype=float),
+        "avg_inv_R": np.asarray(avg_inv_R, dtype=float),
+        "avg_B2": np.asarray(avg_B2, dtype=float),
+        "q": np.asarray(q, dtype=float),
+        "dV_dpsi": np.asarray(dV_dpsi, dtype=float),
+        "f_trap": np.asarray(f_c, dtype=float),
+        "B_avg": np.asarray(B_avg, dtype=float),
+    }
+
+    if exact_inv_R2:
+        # Fast path: read <1/R^2> straight from sauter_fc if this OFT build
+        # provides it (OpenFUSIONToolkit#312) -- validated, so a build without
+        # it (or a layout mismatch) falls through to the trace quadrature.
+        native = _native_fsa_inv_R2(geo_sauter, bfield, out["F"], out["avg_inv_R"])
+        if native is not None:
+            out["avg_inv_R2"] = native
+            return out
+
+        from .utils import safe_trace_surf
+        try:
+            # trace <1/R^2> on the full psi_N grid by default (same resolution
+            # as every other metric, no interpolation) -- cheap (~a few
+            # ms/surface) and most accurate at the edge where flux surfaces
+            # bunch up and the bootstrap peaks. inv_R2_npsi < npsi opts into a
+            # coarser trace + spline for the rare large-bouquet cost case.
+            n_ir2 = int(inv_R2_npsi) if inv_R2_npsi else psi_hat.size
+            if n_ir2 >= psi_hat.size:
+                grid = psi_hat
+            else:
+                grid = np.linspace(psi_pad, 1.0 - psi_pad, n_ir2)
+            inv_R2_g, inv_R_chk, _B2_chk = _capture_exact_inv_R2(
+                mygs, grid, safe_trace_surf)
+            # self-consistency: my <1/R> quadrature vs sauter_fc's <1/R>
+            ref = np.interp(grid, psi_hat, out["avg_inv_R"])
+            rel = np.nanmax(np.abs(inv_R_chk - ref) / np.abs(ref))
+            if not np.isfinite(rel) or rel > inv_R2_check_rtol:
+                raise ValueError(
+                    f"<1/R> FSA quadrature disagrees with sauter_fc by "
+                    f"{rel:.1%} (> {inv_R2_check_rtol:.0%}) -- trace/B_p "
+                    "capture unreliable")
+            if grid is psi_hat:
+                out["avg_inv_R2"] = inv_R2_g
+            else:                                   # coarse -> full psi_N grid
+                from scipy.interpolate import InterpolatedUnivariateSpline
+                out["avg_inv_R2"] = InterpolatedUnivariateSpline(
+                    grid, inv_R2_g, k=3)(psi_hat)
+        except Exception as exc:                    # pragma: no cover - live-only
+            warnings.warn(
+                f"exact <1/R^2> capture failed ({exc}); IDS export will use the "
+                "<B_phi^2>~=<B^2> bracket (~<1% at the edge). Set "
+                "exact_inv_R2=False to silence.")
+    return out
+
+
 def effective_impurity_charge(ne, ni, zeff, min_dilution=1e-3):
     """Effective single-impurity charge Z_imp from a baseline (ne, ni, Zeff).
 

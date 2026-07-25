@@ -50,6 +50,38 @@ PFILE_DS = "pfile"
 COIL_VALUES_DS = "coil_currents"
 COIL_NAMES_DS = "coil_names"
 
+# Live-equilibrium flux-surface-average block (optional per-draw subgroup),
+# captured from the converged TokaMaker equilibrium at generate time to enable
+# an exact toroidal<->parallel current conversion at IMAS export. All on the
+# eq_fsa psi_N grid. See physics.capture_equilibrium_fsa.
+EQ_FSA_GROUP = "eq_fsa"
+EQ_FSA_UNITS = {
+    "psi_N": "",
+    "F": "T m",             # R*B_phi
+    "avg_inv_R": "m^-1",    # <1/R>
+    "avg_inv_R2": "m^-2",   # <1/R^2> (exact quadrature; may be absent)
+    "avg_B2": "T^2",        # <B^2>
+    "q": "",
+    "dV_dpsi": "m^3 Wb^-1",
+    "f_trap": "",           # trapped fraction f_c
+    "B_avg": "T",           # <|B|>
+}
+
+
+def is_binary_profile_source(data: bytes) -> bool:
+    """True if profile-source bytes are a binary container (an IDA ``.cdf`` --
+    netCDF4/HDF5 or classic netCDF3), not an Osborne text p-file.
+
+    Drives the per-draw ``pfile`` storage policy: a TEXT p-file is rewritten
+    per draw with that draw's perturbed kinetics (real per-draw data, stored),
+    while a binary IDA source cannot be draw-perturbed and would only be
+    duplicated verbatim -- with the new IDA-database files (~190 MB) that
+    bloated a 20-draw archive to ~4 GB. Binary sources are therefore stored
+    ONCE, in ``_baseline``; per-draw readers fall back there.
+    """
+    head = bytes(data[:8])
+    return head.startswith(b"\x89HDF") or head.startswith(b"CDF")
+
 
 def find_bytes_dataset(grp, kind=EQDSK_DS):
     """Name of ``grp``'s eqdsk/pfile byte blob, or ``None`` if absent.

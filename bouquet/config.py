@@ -55,6 +55,13 @@ class SolverConfig:
     F0: Optional[float] = None                       # vacuum R*Bt; default from g-file/IDS
     isoflux_pts: Optional["np.ndarray"] = None       # (N, 2) boundary constraints
     isoflux_weights: Optional["np.ndarray"] = None   # (N,)
+    # Optional saddle (X-point) constraints: (N, 2) points where B_pol is driven
+    # to zero (TokaMaker set_saddle_constraints). Pins the separatrix X-point --
+    # without it a diverted forward solve typically ROUNDS the boundary corner
+    # by a few cm (isoflux alone does not localize the null). Opt-in: default
+    # None changes nothing. Weight ~ isoflux scale to start (tune per case).
+    saddle_targets: Optional["np.ndarray"] = None    # (N, 2) X-point pins
+    saddle_weights: Optional["np.ndarray"] = None    # (N,); default 1.0 each
     coil_vsc: dict = field(default_factory=lambda: {"F9A": 1.0, "F9B": -1.0})
     coil_reg: list = field(default_factory=list)
     region_overrides: Optional[dict] = None          # special-case cond/coil dict edits
@@ -348,6 +355,14 @@ class GenerationConfig:
     # which we do NOT want -- so default False. When False, p_diff is None and the
     # solve pressure is e(ne*Te+ni*Ti) + impurity + p_fast with no equilibrium anchor.
     anchor_pressure_to_equilibrium: bool = False
+    # Corrective j_phi iteration on the IMAS baseline forward solve. The single
+    # jphi-linterp solve imposes the requested j_phi(psi_N) with pre-solve
+    # geometry, so the ACHIEVED FSA j_phi drifts from the request once psi
+    # converges (measured +3.2-3.4% over psi_N 0.2-0.9 on DIII-D 154080
+    # t=3.263, appearing as l_i +3.4% and q(psi_N) -5% vs the equilibrium IDS).
+    # True re-uses the recon path's _corrective_jphi_iteration to drive the
+    # achieved profile onto the anchor target. Opt-in while being validated.
+    imas_corrective_jphi: bool = False
     # Floor the SWB bootstrap at 0 (drop unphysical negative excursions) before
     # it enters j_phi, in both the baseline and every draw. Default False: only
     # needed for the isolate_edge_jBS=False full-profile mode (which carries an
@@ -373,6 +388,20 @@ class GenerationConfig:
         default_factory=lambda: [(0.05, 0.10), (0.02, 0.05), (0.01, 0.01)]
     )
     diagnostic_plots: bool = False
+
+    # Live-equilibrium capture for exact IMAS/OMAS export. When True (default),
+    # each draw's converged TokaMaker flux-surface-average metrics are snapshot
+    # into the archive (scan/<key>/<draw>/eq_fsa/), so IDS write-back does an
+    # exact per-draw toroidal->parallel current conversion instead of the
+    # interim baseline-ratio reconstruction. Cheap; set False to skip.
+    capture_live_eq: bool = True
+    # FSA grid for the captured block (matches the 257^2 eqdsk; >=129).
+    capture_npsi: int = 257
+    # Compute exact <1/R^2> by flux-surface quadrature (TokaMaker does not
+    # expose it) so the conversion is machine-exact rather than using the
+    # <B_phi^2>~=<B^2> bracket (~<1%). Adds ~65 surface traces/draw; set False
+    # to skip that cost (self-validated + graceful fallback either way).
+    capture_exact_inv_R2: bool = True
 
 
 @dataclass

@@ -283,6 +283,42 @@ def resolve_uncertainty(config, baseline) -> dict:
     return out
 
 
+def floor_inductive_split(j_inductive, j_BS, psi_N=None, warn_frac=1e-4):
+    """Enforce the ``j_inductive >= 0`` component convention on a (j_ind, j_BS)
+    split, absorbing any negative sliver into ``j_BS`` so the pair still sums
+    exactly to the same total.
+
+    A strong pedestal can push the achieved total BELOW the full-Sauter
+    bootstrap locally, leaving a small negative inductive residual. That is
+    unphysical in this convention and -- fed to the GPR sampler as its mean --
+    makes essentially every current draw go negative and be rejected. Returns
+    ``(j_inductive_floored, j_BS_adjusted)`` (copies; inputs untouched) and
+    prints a one-line note when the correction is non-trivial.
+    """
+    import numpy as np
+
+    j_ind = np.asarray(j_inductive, dtype=float)
+    jbs = np.asarray(j_BS, dtype=float)
+    if not np.any(j_ind < 0.0):
+        return j_ind, jbs
+    j_ind_f = np.maximum(j_ind, 0.0)
+    deficit = j_ind - j_ind_f                    # <= 0 where floored
+    jbs_f = jbs + deficit                        # absorb -> sum unchanged
+    scale = float(np.max(np.abs(j_ind))) or 1.0
+    worst = float(-deficit.min())
+    if worst / scale > warn_frac:
+        n = int(np.sum(deficit < 0.0))
+        where = ""
+        if psi_N is not None:
+            pn = np.asarray(psi_N, dtype=float)
+            sel = pn[deficit < 0.0]
+            where = f" over psi_N [{sel.min():.3f}, {sel.max():.3f}]"
+        print(f"  [baseline] floored negative j_inductive ({n} pts{where}, "
+              f"worst {worst/1e6:.4f} MA/m^2, {100*worst/scale:.2f}% of peak) "
+              f"-- deficit absorbed into j_BS (split still sums to j_phi)")
+    return j_ind_f, jbs_f
+
+
 def _resolve_fixed(comp, src_psi, dst_psi):
     """Fixed additive component onto ``dst_psi`` (zeros if not supplied)."""
     import numpy as np
@@ -424,6 +460,14 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     j_NBI = _resolve_fixed(fc.j_NBI, fc.psi_N, psi_N)
     j_RF = _resolve_fixed(fc.j_RF, fc.psi_N, psi_N)
     j_inductive = j_phi - j_BS - j_NBI - j_RF   # == j_inductive_fit when NBI=RF=0
+    # Physical component convention: the inductive current is >= 0. On shots
+    # with a strong pedestal the achieved total can dip BELOW the full-Sauter
+    # bootstrap there, leaving a small negative residual (~1% of the core) --
+    # which, fed to the GPR sampler as its mean, makes essentially every draw
+    # go negative and be rejected (observed: 201586@4200, 0/500 candidates).
+    # Floor the inductive at zero and absorb the deficit into j_BS so the
+    # split still sums exactly to j_phi.
+    j_inductive, j_BS = floor_inductive_split(j_inductive, j_BS, psi_N)
 
     p_fast = _resolve_fixed(fc.p_fast, fc.psi_N, psi_N_kin)
 

@@ -344,6 +344,14 @@ class Bouquet:
         if iso_pts is not None:
             mygs.set_isoflux(iso_pts, weights=iso_w)
 
+        # Optional X-point pin: drive B_pol -> 0 at the configured saddle
+        # point(s). Opt-in via SolverConfig.saddle_targets (default None).
+        if sc.saddle_targets is not None:
+            _sad = np.asarray(sc.saddle_targets, dtype=np.float64).reshape(-1, 2)
+            _sw = (np.asarray(sc.saddle_weights, dtype=np.float64)
+                   if sc.saddle_weights is not None else None)
+            mygs.set_saddle_constraints(_sad, weights=_sw)
+
         # Weak coil regularisation toward zero + small VSC freedom
         reg_terms = [mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.0)
                      for name in mygs.coil_sets]
@@ -534,6 +542,8 @@ class Bouquet:
         """
         import numpy as np
 
+        from .utils import pchip_derivative
+
         bl = self.baseline
         mygs = self.mygs
         psi_N = np.asarray(bl.psi_N, dtype=float)
@@ -569,7 +579,7 @@ class Bouquet:
             nl_its = -1
             for _pass in range(2):   # 2nd pass refines the jphi-linterp flux scaling
                 psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-                pp_y = np.gradient(p_total) / (np.gradient(psi_N) * psi_range)
+                pp_y = pchip_derivative(psi_N, p_total) / psi_range
                 pp_y[-1] = 0.0
                 mygs.set_targets(Ip=bl.Ip_target, pax=float(p_total[0]))
                 mygs.set_profiles(
@@ -678,6 +688,24 @@ class Bouquet:
             if getattr(bl, "jphi_diff", None) is not None:
                 _jphi_solve = _jphi_solve + k2e(bl.jphi_diff)
             nl_its = solve_jphi(_jphi_solve)
+
+            # Corrective iteration (opt-in): the single jphi-linterp solve
+            # imposes the request with pre-solve geometry, so the ACHIEVED FSA
+            # j_phi lands a few % off the anchor once psi converges (-> l_i /
+            # q(psi_N) biased vs the equilibrium IDS). Reuse the recon path's
+            # Newton corrector to drive the output onto the anchor target.
+            if getattr(self.config.generation, "imas_corrective_jphi", False):
+                from .TokaMaker_interface import _corrective_jphi_iteration
+                _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
+                _pp_y = pchip_derivative(psi_N, p_total) / _pr
+                _pp_y[-1] = 0.0
+                _pp_prof = {"type": "linterp", "y": _pp_y, "x": psi_N}
+                _, _n_corr, _corr_hist = _corrective_jphi_iteration(
+                    mygs, psi_N, _jphi_solve, _pp_prof,
+                    abs(bl.Ip_target), float(p_total[0]), 1e-3,
+                    min_iters=2, max_iters=8, rtol=0.02, verbose=True,
+                    damping=0.5, protect_state=True)
+                print(f"[imas corrective-jphi] converged in {_n_corr} iteration(s)")
 
         # Convergence sanity: the solve completed (it raises otherwise), so
         # verify it landed on the requested current before trusting its l_i.
@@ -916,6 +944,9 @@ class Bouquet:
                 jBS_scale_range=_jbs_range,
                 swb_iterations=gc.swb_iterations,
                 diagnostic_plots=gc.diagnostic_plots,
+                capture_live_eq=gc.capture_live_eq,
+                capture_npsi=gc.capture_npsi,
+                capture_exact_inv_R2=gc.capture_exact_inv_R2,
                 scan_key=gc.scan_key,
                 pfile_bytes=bl.pfile_bytes,
                 baseline_eqdsk_bytes=bl.eqdsk_bytes,
@@ -950,6 +981,14 @@ class Bouquet:
                 source_kind=("imas"
                              if type(self.config.source).__name__ == "ImasSource"
                              else "geqdsk"),
+                # BOTH paths: archive the ACHIEVED FSA j_phi of each converged
+                # solve (baseline + draws) so the stored 1-D current always
+                # matches the stored eqdsk in the same group. On the IMAS path
+                # the single-pass forward solve lands a few % off its anchor
+                # target; on the geqdsk path the per-draw corrective iteration
+                # bounds the target-vs-achieved gap to its tolerance (~2-3%
+                # core RMS) -- storing the achieved output removes even that.
+                store_achieved_jphi=True,
             )
         self.generation_log = _cap["text"] or None
 
@@ -1002,6 +1041,17 @@ class Bouquet:
         return select_indices(self.config.output_header,
                                scan_key=self.config.generation.scan_key,
                                selection=selection)
+
+    def output_spread(self, selection: str = "all", print_table: bool = True) -> dict:
+        """Across-draw spread of the global output scalars: l_i(1)/l_i(3), the
+        volume-averaged pressure ``<P>``, and ``beta_N``.
+
+        Convenience over ``run.archive.scan().spread(...)`` -- surfaces the
+        pressure-quantity uncertainty alongside the l_i variance for this run's
+        scan in one call. See :meth:`bouquet.archive.ScanView.spread`.
+        """
+        return self.archive.scan(self.config.generation.scan_key).spread(
+            selection=selection, print_table=print_table)
 
     # ── stage 4: filter + export ----------------------------------------
     def filter(self, rms_max_mm: Optional[float] = None, plot: bool = False) -> dict:
@@ -1079,6 +1129,35 @@ class Bouquet:
         out = out_path if out_path is not None else f"{header}_selected.h5"
         export_filtered(header, out, selection=selection, overwrite=True)
         return out
+
+    def export_bundle(self, out_dir: str, formats=("geqdsk", "profiles"),
+                      selection: str = "selected") -> dict:
+        """Extract a per-draw file bundle (geqdsk / pfile / profiles JSON) for
+        the ``selection`` draws to ``out_dir``. Returns ``{draw: {fmt: path}}``.
+
+        Thin wrapper over :meth:`BouquetArchive.scan(...).extract`; the
+        source-agnostic hand-off to codes that don't consume the HDF5 archive
+        or IMAS IDS. For IMAS/OMAS IDS output use :func:`export_imas_drawset`.
+        """
+        sc = self.archive.scan(self.config.generation.scan_key)
+        return sc.extract(out_dir, formats=formats, selection=selection)
+
+    def export_ids(self, out_dir: str, selection: str = "selected",
+                   time=None, fidelity: str = "auto") -> list:
+        """Write one perturbed IMAS/OMAS IDS per ``selection`` draw to
+        ``out_dir`` (IMAS source only). Thin wrapper over
+        :func:`export_imas_drawset`; ``fidelity`` picks the exact
+        (captured-geometry) or baseline-ratio current split."""
+        from .config import ImasSource
+        from .io.imas import export_imas_drawset
+        if not isinstance(self.config.source, ImasSource):
+            raise TypeError("export_ids is for an ImasSource; the reconstruction "
+                            "path has no template IDS. Use export_bundle().")
+        return export_imas_drawset(
+            self.config.output_header, self.config.source.ids_path, out_dir,
+            scan_key=self.config.generation.scan_key,
+            time=self.config.source.time if time is None else time,
+            selection=selection, fidelity=fidelity)
 
     # ── convenience -----------------------------------------------------
     def run(self) -> "Bouquet":

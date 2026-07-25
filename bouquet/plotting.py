@@ -1548,7 +1548,8 @@ def _imas_input_profiles(source):
     psi = np.asarray(p1["psi"], float)
     psiN = (psi - psi[0]) / (psi[-1] - psi[0]) if psi[-1] != psi[0] else psi
     q = np.asarray(p1["q"], float) if "q" in p1 else None
-    return psiN, np.asarray(p1["pressure"], float), q
+    jt = np.asarray(p1["j_tor"], float) if "j_tor" in p1 else None
+    return psiN, np.asarray(p1["pressure"], float), q, jt
 
 
 def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
@@ -1564,6 +1565,11 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
     signal (the fit vs the g-file); on the IMAS path the pressure / current are
     prescribed, so those panels mostly confirm faithful input while q and the
     separatrix show the forward solve's geometric result. Returns the Figure.
+
+    Separatrix panel caveat: deviations concentrated at the X-point corner are
+    dominated by flux expansion (grad-psi -> 0 there, so any traced
+    near-separatrix surface pulls away from the corner), not solve error --
+    judge the solve by the rest of the boundary and the RMS.
     """
     import matplotlib.pyplot as plt
     from .TokaMaker_interface import safe_trace_surf
@@ -1583,9 +1589,53 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
     psiN_q = np.asarray(psiN_q, float)
     if psiN_q.size and psiN_q.max() > 1.5:          # in case get_q returns psi, not psi_N
         psiN_q = (psiN_q - psiN_q.min()) / (psiN_q.max() - psiN_q.min())
-    lcfs = np.asarray(safe_trace_surf(mygs, 1.0 - psi_pad), float)
+    # Trace the panel LCFS as close to the separatrix as the tracer allows
+    # (1 - 1e-4; same level as the boundary-diag fallback) rather than at
+    # 1 - psi_pad (typically 0.999): near the X-point grad-psi -> 0, so the
+    # 0.999 surface legitimately sits CENTIMETERS inside the separatrix and
+    # the deviation panel paints a large red corner that is flux expansion,
+    # not solve error. The finer level tightens that corner; deviations that
+    # REMAIN there are genuine X-point mismatch. Falls back to 1 - psi_pad
+    # if the near-separatrix trace fails.
+    _lcfs_raw = safe_trace_surf(mygs, 1.0 - min(psi_pad, 1e-4))
+    if _lcfs_raw is None:
+        _lcfs_raw = safe_trace_surf(mygs, 1.0 - psi_pad)
+    lcfs = np.asarray(_lcfs_raw, float)
+    # "Reconstructed" j_phi = the ACHIEVED flux-surface-averaged toroidal
+    # current of the CONVERGED solve (get_jphi_from_GS on the live equilibrium,
+    # the same formula the recon corrective loop matches) -- NOT the prescribed
+    # target profile. On the geqdsk path the per-solve corrective iteration
+    # drives achieved ~= target, so this matches the archived baseline; on the
+    # IMAS path the single-pass solve lands a few % off its anchor and this
+    # panel now shows that honestly (consistent with the q panel, which is also
+    # computed from the converged state). Falls back to the baseline arrays if
+    # the live extraction fails.
     j_sol_x = np.asarray(bl.psi_N, float)
-    j_sol = np.asarray(bl.j_phi, float)
+    try:
+        from OpenFUSIONToolkit.TokaMaker.util import get_jphi_from_GS
+        _psj, _f, _fp, _, _pp = mygs.get_profiles(npsi=len(j_sol_x), psi_pad=psi_pad)
+        _, _, _ravgs, _, _, _ = mygs.get_q(npsi=len(j_sol_x), psi_pad=psi_pad)
+        _psj = np.asarray(_psj, float)
+        if _psj.size and (_psj.max() > 1.5 or _psj.min() < -0.5):
+            _psj = (_psj - _psj.min()) / (_psj.max() - _psj.min())
+        from .physics import q_ravg
+        _j_ach = np.asarray(get_jphi_from_GS(
+            np.asarray(_f, float) * np.asarray(_fp, float), np.asarray(_pp, float),
+            np.asarray(q_ravg(_ravgs, "<R>"), float),
+            np.asarray(q_ravg(_ravgs, "<1/R>"), float)), float)
+        # match the baseline current's sign convention for a direct overlay
+        if np.nanmedian(_j_ach) * np.nanmedian(np.asarray(bl.j_phi, float)) < 0:
+            _j_ach = -_j_ach
+        j_sol_x, j_sol = _psj, _j_ach
+    except Exception:
+        j_sol = np.asarray(bl.j_phi, float)
+
+    # Anchors (IMAS diff workflow): jphi_diff / jBS_diff are FIXED offsets on
+    # the kinetic grid (bl.j_BS + jBS_diff is the effective/FUSE bootstrap in
+    # the solve; bl.j_BS itself is the raw SWB Sauter). Used below so the
+    # component overlay reflects the bootstrap actually in the solve. Both are
+    # None on the geqdsk path.
+    _kin_x = np.asarray(getattr(bl, "psi_N_kinetic", bl.psi_N), float)
 
     # ---- raw input side ----------------------------------------------------
     if not is_imas:
@@ -1599,8 +1649,11 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
         in_lbl = "input g-file"
     else:
         from .io.imas import read_imas_geometry
-        in_x, in_p, in_q = _imas_input_profiles(run.config.source)
-        in_jx = j_sol_x; in_j = j_sol         # IMAS input j_tor == baseline total
+        in_x, in_p, in_q, in_jt = _imas_input_profiles(run.config.source)
+        if in_jt is not None:
+            in_jx, in_j = in_x, in_jt         # true IDS equilibrium j_tor input
+        else:
+            in_jx, in_j = j_sol_x, j_sol      # IDS without equilibrium j_tor
         _F0, bRZ = read_imas_geometry(run.config.source)
         bRZ = np.asarray(bRZ, float)
         in_bR, in_bZ = bRZ[:, 0], bRZ[:, 1]
@@ -1629,6 +1682,58 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
         a.plot(sx, sy, "-", c=C_SOL, lw=2.0, label="reconstructed", zorder=4)
         a.set_xlabel(r"$\hat{\psi}$"); a.set_ylabel(ylab)
         a.set_xlim(0, 1); a.legend(fontsize=8, loc="best")
+
+    # j_phi panel: overlay the EFFECTIVE inductive + bootstrap components of the
+    # solve -- reduced-opacity dashed (j_ind) and dash-dot (j_BS). "Effective" =
+    # including the fixed anchors: on the IMAS diff path the bootstrap shown is
+    # bl.j_BS + jBS_diff (the FUSE bootstrap actually in the solve, pedestal at
+    # the right psi_N); the inductive is the residual against the ACHIEVED
+    # total, so the two curves sum to the plotted (solved) total on every path.
+    # All baseline arrays are interpolated from their native grids onto the
+    # solver's uniform psi_N grid (same length does NOT imply same grid).
+    if getattr(bl, "j_BS", None) is not None:
+        _blx = np.asarray(bl.psi_N, float)
+
+        def _to_jx(a, native_x):
+            a = np.asarray(a, float)
+            return np.interp(j_sol_x, np.asarray(native_x, float), a)
+
+        _jBS_eff = _to_jx(bl.j_BS, _blx)
+        if getattr(bl, "jBS_diff", None) is not None:
+            _d = np.asarray(bl.jBS_diff, float)
+            _jBS_eff = _jBS_eff + _to_jx(_d, _kin_x if _d.shape == _kin_x.shape else _blx)
+        _j_ind_eff = j_sol - _jBS_eff
+        for _fx in (getattr(bl, "j_NBI", None), getattr(bl, "j_RF", None)):
+            if _fx is not None:
+                _fx = np.asarray(_fx, float)
+                _j_ind_eff = _j_ind_eff - _to_jx(
+                    _fx, _kin_x if _fx.shape == _kin_x.shape else _blx)
+        ax[0, 1].plot(j_sol_x, _j_ind_eff / 1e6, ls="--", c=C_SOL, lw=1.5,
+                      alpha=0.45, label=r"recon $j_{ind}$", zorder=2)
+        ax[0, 1].plot(j_sol_x, _jBS_eff / 1e6, ls="-.", c=C_SOL, lw=1.5,
+                      alpha=0.45, label=r"recon $j_{BS}$", zorder=2)
+        ax[0, 1].legend(fontsize=8, loc="best")
+
+    # q panel: tame the edge divergence. q climbs steeply toward a diverted
+    # separatrix, and if one profile (the input g-file q or the solve) shoots
+    # far above the other at the edge it compresses the whole panel and buries
+    # the core/mid comparison. Cap the y-axis 1.0 above the SMALLER of the two
+    # edge q(psi_N=1) values -- the taller profile's divergent tail is clipped
+    # while both core shapes stay legible.
+    _q_edges, _q_finite = [], []
+    for _qv in (in_q_abs, q_sol_abs):
+        if _qv is None:
+            continue
+        _f = np.asarray(_qv, float)
+        _f = _f[np.isfinite(_f)]
+        if len(_f):
+            _q_edges.append(_f[-1])       # q at the edge (last valid psi_N)
+            _q_finite.append(_f)
+    if _q_edges:
+        _q_top = min(_q_edges) + 1.0
+        _q_bot = max(0.0, float(np.min(np.concatenate(_q_finite))) - 0.2)
+        if _q_top > _q_bot:
+            ax[1, 0].set_ylim(_q_bot, _q_top)
 
     # separatrix panel with the colour-coded boundary deviation
     iso_pts = np.column_stack([in_bR, in_bZ])

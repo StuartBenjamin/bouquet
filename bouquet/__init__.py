@@ -1,4 +1,4 @@
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from . import uncertainties
 from . import sampling
@@ -83,6 +83,7 @@ from .utils import (
     store_equilibrium,
     load_equilibrium,
     load_equilibrium_by_path,
+    load_eq_fsa,
     store_baseline_profiles,
     load_baseline_profiles,
     discover_scan_keys,
@@ -110,6 +111,7 @@ from .baseline import Baseline, resolve_baseline, resolve_uncertainty
 from .physics import (
     isotropize_fast_pressure,
     parallel_to_toroidal,
+    toroidal_to_parallel,
     fast_pressure_residual,
     infer_fast_pressure,
     radial_field_from_cer,
@@ -144,7 +146,8 @@ __all__ = [
     "read_eqdsk_from_bytes",
     # ---- archive readers ----
     "initialize_equilibrium_database",
-    "load_equilibrium", "load_equilibrium_by_path", "load_baseline_profiles",
+    "load_equilibrium", "load_equilibrium_by_path", "load_eq_fsa",
+    "load_baseline_profiles",
     "discover_scan_keys", "count_equilibria", "list_equilibrium_indices",
     "write_provenance", "load_config",
     # ---- post-process filtering ----
@@ -162,7 +165,7 @@ __all__ = [
     "draw_jphi_total", "draw_jphi_components", "draw_jphi_profiles",
     "draw_flux_function",
     # ---- physics helpers ----
-    "isotropize_fast_pressure", "parallel_to_toroidal",
+    "isotropize_fast_pressure", "parallel_to_toroidal", "toroidal_to_parallel",
     "fast_pressure_residual", "infer_fast_pressure", "radial_field_from_cer",
     "Hmode_profiles",
     # ---- environment / path resolution ----

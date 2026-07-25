@@ -39,6 +39,10 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
         ├── [aux_<name>]               perturbed switchboard channels
         ├── [coil_currents, coil_names]
         ├── [perturbed_lcfs_ref], [x_points]
+        ├── [eq_fsa/]                  live-equilibrium flux-surface averages
+        │   ├── psi_N                  (subgroup; see below)
+        │   ├── F, avg_inv_R, avg_inv_R2, avg_B2
+        │   └── q, dV_dpsi, f_trap, B_avg
         └── attrs: l_i(1), l_i(3), count, homotopy_*, max_F_drift_pct,
                    max_VSC_drift_pct, in_spec, inspec_*, l_i_target_used,
                    [diverted], [passes_coil_filter, passes_boundary_filter,
@@ -66,6 +70,18 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
   at file creation; `config_json` is added by `write_provenance` (called from
   `Bouquet.generate`, `run_shard`, and `merge_archives`). Recover the exact
   run configuration with `bq.load_config(path, scan_key=...)`.
+- **Live-equilibrium FSA (`eq_fsa/`).** Optional per-draw subgroup of
+  flux-surface averages captured directly from the live TokaMaker object at
+  generate time (`GenerationConfig.capture_live_eq`, on by default), on the
+  `psi_N` grid of `capture_npsi` points. Keys and units are `EQ_FSA_GROUP` /
+  `EQ_FSA_UNITS` in `schema.py`: `F` (T m), `avg_inv_R` (⟨1/R⟩, m⁻¹),
+  `avg_inv_R2` (⟨1/R²⟩, m⁻²), `avg_B2` (⟨B²⟩, T²), `q`, `dV_dpsi`
+  (m³ Wb⁻¹), `f_trap`, `B_avg` (⟨B⟩, T). `⟨1/R²⟩` is computed by exact
+  FSA quadrature (`capture_exact_inv_R2`, default) with a fast path for
+  `sauter_fc`'s native value when present. This is what enables the exact
+  parallel↔toroidal current split in the IMAS/OMAS exporter
+  (`write_imas_draw(..., fidelity="exact")`); read it back with
+  `bq.load_eq_fsa`.
 
 ## Legacy (pre-v2) archives
 

@@ -41,8 +41,30 @@ def _on_path(directory: str) -> bool:
     return any(ap == os.path.abspath(p) for p in sys.path)
 
 
+def _has_oft_package(directory: str) -> bool:
+    """True iff *directory* actually holds an importable ``OpenFUSIONToolkit``
+    package (an ``OpenFUSIONToolkit/__init__.py``), not merely an empty or stale
+    directory of that name.  Guards against selecting a leftover install dir that
+    exists on disk but no longer contains the package."""
+    return os.path.isfile(os.path.join(directory, "OpenFUSIONToolkit", "__init__.py"))
+
+
+def _oft_module_dir() -> str:
+    """The directory ``OpenFUSIONToolkit`` actually loaded from (parent of the
+    package dir), or ``""`` if it is not importable.  Used so the returned path
+    is honest even when OFT is already importable via a ``.pth`` / editable
+    install and no candidate directory needed to be added."""
+    try:
+        import OpenFUSIONToolkit  # noqa: F401
+        return os.path.dirname(os.path.dirname(
+            os.path.abspath(OpenFUSIONToolkit.__file__)))
+    except Exception:
+        return ""
+
+
 def add_oft_to_path(extra: Optional[str] = None, *, verbose: bool = False) -> str:
-    """Ensure ``OpenFUSIONToolkit`` is importable; return the directory used.
+    """Ensure ``OpenFUSIONToolkit`` is importable; return the directory it loads
+    from.
 
     Resolution order:
 
@@ -52,11 +74,17 @@ def add_oft_to_path(extra: Optional[str] = None, *, verbose: bool = False) -> st
     4. a walk-up from the current working directory for a sibling
        ``OpenFUSIONToolkit/build_release/python``.
 
-    The first existing directory is prepended to ``sys.path`` and confirmed with
-    ``import OpenFUSIONToolkit``.  Raises ``ModuleNotFoundError`` listing every
-    location tried if none work, so the failure is actionable on a new machine.
+    A candidate is only selected if it actually **contains** the
+    ``OpenFUSIONToolkit`` package -- a directory that exists but holds no package
+    (e.g. a stale ``/Applications`` leftover) is skipped, not chosen.  The first
+    valid directory is prepended to ``sys.path``; if OFT is already importable
+    (e.g. via a ``.pth`` / editable install) no directory is added.  Either way
+    the returned path is where the package *actually* loads from, and it is
+    confirmed with ``import OpenFUSIONToolkit``.  Raises ``ModuleNotFoundError``
+    listing every location tried (and any skipped as package-less) if none work.
     """
     tried: List[str] = []
+    skipped_no_pkg: List[str] = []
 
     def _candidates():
         yield _expand(os.environ.get("OFT_PYTHONPATH"))
@@ -77,24 +105,38 @@ def add_oft_to_path(extra: Optional[str] = None, *, verbose: bool = False) -> st
         if not cand:
             continue
         tried.append(cand)
-        if os.path.isdir(cand):
-            if not _on_path(cand):
-                sys.path.insert(0, cand)
-            chosen = cand
-            break
+        if not os.path.isdir(cand):
+            continue
+        if not _has_oft_package(cand):
+            skipped_no_pkg.append(cand)   # exists but no OpenFUSIONToolkit package
+            continue
+        if not _on_path(cand):
+            sys.path.insert(0, cand)
+        chosen = cand
+        break
 
     try:
         import OpenFUSIONToolkit  # noqa: F401
     except Exception as exc:  # pragma: no cover - environment dependent
-        raise ModuleNotFoundError(
-            "Could not import OpenFUSIONToolkit. Set OFT_PYTHONPATH to its "
-            "'python' directory, or add the install to bouquet.paths._OFT_CANDIDATES. "
-            "Tried:\n  " + "\n  ".join(tried or ["<no candidates>"])
-        ) from exc
+        msg = ["Could not import OpenFUSIONToolkit. Set OFT_PYTHONPATH to its "
+               "'python' directory, or add the install to "
+               "bouquet.paths._OFT_CANDIDATES."]
+        if skipped_no_pkg:
+            msg.append("Skipped (directory exists but has no OpenFUSIONToolkit "
+                       "package):\n  " + "\n  ".join(skipped_no_pkg))
+        msg.append("Tried:\n  " + "\n  ".join(tried or ["<no candidates>"]))
+        raise ModuleNotFoundError("\n".join(msg)) from exc
 
+    # Report where the package ACTUALLY loaded from -- honest whether we added
+    # `chosen` or it was already importable via a .pth. (These can differ if OFT
+    # was imported earlier in the session and is cached in sys.modules.)
+    actual = _oft_module_dir() or chosen or ""
     if verbose:
-        print(f"[bouquet.paths] OFT from: {chosen or '(already importable)'}")
-    return chosen or ""
+        note = ""
+        if chosen and os.path.abspath(chosen) != os.path.abspath(actual or chosen):
+            note = f" (added {chosen}, but sys.modules already had it)"
+        print(f"[bouquet.paths] OFT from: {actual or '(already importable)'}{note}")
+    return actual
 
 
 def find_mesh(
