@@ -31,7 +31,7 @@ Two baseline sources are supported through one class-based API
 If you use Bouquet in your research, please cite (see also
 [`CITATION.cff`](CITATION.cff) / the "Cite this repository" button):
 
-> Burgess, D., Hansen, C. (2026). Bouquet (v0.2.0). Zenodo. https://doi.org/10.5281/zenodo.19398541
+> Burgess, D., Hansen, C. (2026). Bouquet (v0.3.0). Zenodo. https://doi.org/10.5281/zenodo.19398541
 
 
 ## Workflow at a glance
