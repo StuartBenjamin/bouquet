@@ -1316,6 +1316,51 @@ def load_equilibrium_by_path(h5path_or_header, count, scan_key=None):
 
 
 # ====================================================================
+#  kinetic-profile regridding helper
+# ====================================================================
+def pchip_interp(x_src, y_src, x_out):
+    r'''Shape-preserving (PCHIP) regrid of a profile onto a new grid.
+
+    The single shared kin->eq regridding used everywhere a kinetic profile
+    (measured on the IDA/kinetic ``psi_N`` grid) is resampled onto the
+    equilibrium grid. Replaces the piecewise-LINEAR ``np.interp`` /
+    ``interp1d(kind='linear')`` pattern: linear regrid leaves a slope kink
+    at every source knot, so ANY subsequent derivative (including OFT's
+    PCHIP-derivative bootstrap) is a staircase with plateaus between knots
+    -- visible as stepped j_BS between the kinetic knots (verified on
+    204441@5307: |d2 j_BS| correlates 0.99 with |d2 dTe/dpsi| of the
+    linear regrid, identical in np.gradient and PCHIP OFT builds; direct
+    PCHIP regrid cuts the step energy ~7x).
+
+    PCHIP passes through the same source knot values (no alteration of the
+    measured points), is monotone/shape-preserving between them (no spline
+    ringing at a pedestal), and is C1 -- so downstream gradients are
+    smooth. Duplicate source-x points are dropped (first occurrence kept,
+    matching :func:`pchip_derivative`); outside the source range the
+    endpoint values are held constant (the fill_value=(y[0], y[-1])
+    convention of the interp1d calls this replaces).
+
+    All regrid sites must use this helper (or none): mixing linear and
+    PCHIP regrids between the recon and draw paths would break the
+    sigma=0 consistency that verify_sigma0_consistency() guards.
+    '''
+    from scipy.interpolate import PchipInterpolator
+
+    x_src = np.asarray(x_src, dtype=float)
+    y_src = np.asarray(y_src, dtype=float)
+    x_out = np.asarray(x_out, dtype=float)
+    x_u, idx = np.unique(x_src, return_index=True)
+    y_u = y_src[idx]
+    if x_u.size < 2:
+        raise ValueError("pchip_interp: fewer than 2 unique source points")
+    out = PchipInterpolator(x_u, y_u, extrapolate=False)(x_out)
+    # hold endpoint values outside the source range (no poly extrapolation)
+    out = np.where(x_out < x_u[0], y_u[0], out)
+    out = np.where(x_out > x_u[-1], y_u[-1], out)
+    return out
+
+
+# ====================================================================
 #  eqdsk byte-stream helper
 # ====================================================================
 def read_eqdsk_from_bytes(raw_bytes, reader_func):

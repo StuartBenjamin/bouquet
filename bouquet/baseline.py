@@ -415,9 +415,14 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     kin = _load_kinetic_profiles(source)
     psi_N_kin = kin["psi_N"]
 
-    # kinetic profiles (native SI) interpolated onto the equilibrium psi_N grid
+    # kinetic profiles (native SI) regridded onto the equilibrium psi_N grid.
+    # Shape-preserving PCHIP (single shared helper): a linear regrid leaves a
+    # slope kink at every kinetic knot, which the Sauter bootstrap inherits
+    # as a stepped j_BS (see utils.pchip_interp).
+    from .utils import pchip_interp
+
     def to_eq(arr):
-        return np.interp(psi_N, psi_N_kin, np.asarray(arr, dtype=float))
+        return pchip_interp(psi_N_kin, arr, psi_N)
 
     ne_eq, te_eq, ni_eq, ti_eq = to_eq(kin["ne"]), to_eq(kin["te"]), to_eq(kin["ni"]), to_eq(kin["ti"])
     Zeff_eq = np.clip(to_eq(kin["Zeff"]), 1.0, None)

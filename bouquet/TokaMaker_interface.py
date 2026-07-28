@@ -39,6 +39,7 @@ from .sampling import (
 from .utils import (
     Ip_flux_integral_vs_target,
     pchip_derivative,
+    pchip_interp,
     safe_save_eqdsk,
     safe_trace_surf,
     store_equilibrium,
@@ -207,14 +208,44 @@ def classify_jphi_profile(psi_N, eqdsk_jphi, spike_profile,
         peaks_s = np.array([], dtype=int)
 
     if len(peaks_s) == 0:
-        # No Sauter edge spike → L_mode
+        # No Sauter EDGE spike found.  Distinguish truly negligible
+        # bootstrap (classic L-mode: the split is zeroed downstream) from
+        # a profile with real bootstrap current whose edge peak merely
+        # failed the height criterion.  Zeroing the split for the latter
+        # puts the bootstrap into j_inductive AND lets the per-draw SWB
+        # recompute add it again -- a double-counted bootstrap in every
+        # draw.  Caught by the sigma=0 guard on 204441@5307: that shot's
+        # weak pedestal peak (~0.108 MA/m^2) sits within ~2 permille of
+        # the height threshold (shelf_val = spike[0], the numerically
+        # fragile collapsed axis point), so run-to-run jitter in the axis
+        # point flips the edge-peak detection -- the old-vs-new j_BS
+        # profiles themselves are essentially identical (np.gradient vs
+        # PCHIP OFT builds agree; see jbs_pchip_vs_gradient_5307.png).
+        sauter_max = float(np.max(spike_profile))
+        jphi_scale = float(np.max(np.abs(eqdsk_jphi)))
+        if jphi_scale > 0 and sauter_max >= 0.05 * jphi_scale:
+            metrics['spike_height_sauter'] = sauter_max
+            metrics['spike_psiN_sauter'] = float(
+                psi_N[int(np.argmax(spike_profile))])
+            metrics['spike_height_geqdsk'] = None
+            metrics['spike_psiN_geqdsk'] = None
+            metrics['spike_height_ratio'] = None
+            metrics['spike_psiN_offset'] = None
+            print(f"[classify] Lmode_like_jphi — no Sauter EDGE spike, but "
+                  f"the bootstrap profile is significant (max "
+                  f"{sauter_max/1e6:.4f} MA/m² = "
+                  f"{100*sauter_max/jphi_scale:.1f}% of peak j_phi at "
+                  f"psi_N={metrics['spike_psiN_sauter']:.3f}); keeping the "
+                  f"full Sauter profile in the split")
+            return 'Lmode_like_jphi', metrics
         metrics['spike_height_sauter'] = 0.0
         metrics['spike_psiN_sauter'] = None
         metrics['spike_height_geqdsk'] = None
         metrics['spike_psiN_geqdsk'] = None
         metrics['spike_height_ratio'] = None
         metrics['spike_psiN_offset'] = None
-        print(f"[classify] L_mode — no Sauter edge spike detected")
+        print(f"[classify] L_mode — no Sauter edge spike and negligible "
+              f"bootstrap profile")
         return 'L_mode', metrics
 
     # Sauter spike exists — record its peak
@@ -495,7 +526,8 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
                             baseline_li_proxy,
                             k=3, psi_bridge=0.99,
                             rescale_j_BS=False,
-                            shelf_psi_N=0.0):
+                            shelf_psi_N=0.0,
+                            core_exact_psi=0.30):
     r"""Fit a smooth inductive current profile and scale it to match
     a target cylindrical :math:`l_i` proxy.
 
@@ -533,6 +565,16 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
         If > 0, apply a flat shelf to *j_BS_isolated* for
         :math:`\hat{\psi} <` *shelf_psi_N*, using the value of
         *j_BS_isolated* at that location.  ``0`` disables the shelf.
+    core_exact_psi : float
+        For :math:`\hat{\psi} <` *core_exact_psi*, take the inductive
+        basis from the RAW residual ``eqdsk_jtor - j_BS`` (dense
+        subsample, smooth blend to the smoothing spline at the seam)
+        instead of the globally-smoothed spline.  The core residual is
+        smooth (both inputs are), but its anti-hump -- the mirror of the
+        Sauter core bump peaking near :math:`\hat{\psi} \sim 0.05` -- is
+        washed out by the global smoothing factor, which left a ±2-3%
+        S-wiggle in the total core :math:`j_\phi` vs the g-file.  ``0``
+        disables (previous behaviour).
 
     Returns
     -------
@@ -585,7 +627,22 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
     # few enough to avoid oscillation)
     _n_sub = min(32, len(psi_N))
     _psi_sub = np.linspace(psi_N[0], psi_N[-1], _n_sub)
-    _res_sub = _smooth_spline(_psi_sub)
+    if core_exact_psi and core_exact_psi > 0.0:
+        # Densify the core and take its values from the raw residual: the
+        # heavy global smoothing exists for pedestal/edge noise, but in the
+        # core it flattens the (smooth, well-resolved) anti-hump that must
+        # mirror the Sauter j_BS bump, leaving an S-wiggle in the total.
+        # Blend raw -> spline over the outer ~third of the core window so
+        # the PCHIP sees no seam.
+        _psi_core = np.linspace(psi_N[0], core_exact_psi, 16)
+        _psi_sub = np.unique(np.concatenate([_psi_core, _psi_sub]))
+        _raw_sub = np.interp(_psi_sub, psi_trusted, res_trusted)
+        _spl_sub = _smooth_spline(_psi_sub)
+        _w_core = np.clip((core_exact_psi - _psi_sub)
+                          / (0.35 * core_exact_psi), 0.0, 1.0)
+        _res_sub = _w_core * _raw_sub + (1.0 - _w_core) * _spl_sub
+    else:
+        _res_sub = _smooth_spline(_psi_sub)
     _res_sub = np.maximum(_res_sub, 0.0)
 
     _pchip = PchipInterpolator(_psi_sub, _res_sub)
@@ -741,6 +798,54 @@ def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad):
     )
 
 
+def smooth_jbs_transition(j_BS):
+    """Gaussian-smooth the shelf->spike transition / near-axis zone of a
+    (toroidal-converted) ``solve_with_bootstrap`` j_BS profile.
+
+    The innermost-surface Sauter evaluation is numerically fragile: SWB's
+    raw axis point collapses ~2x below its neighbours (verified identical
+    across recon/draw call contexts to <0.001 MA/m^2 -- it is an
+    evaluation artifact of the tiny ``psi_pad`` surface, not state noise).
+    The reconstruction has always repaired this with a localised Gaussian
+    filter around the flat-shelf end (with no shelf the window is the
+    near-axis zone, indices 0..10); until 2026-07 the per-draw path did
+    NOT, so every draw's spike kept the raw collapsed axis point while
+    riding on an inductive fit made against the smoothed split -- a 1-2
+    grid-point axis divot in every draw target (-9% j_phi(0), q0 +12%
+    wholesale at sigma=0). This helper is the single shared treatment:
+    apply it immediately after EVERY ``_swb_jbs_to_toroidal`` conversion
+    so recon and draws stay sigma=0-consistent.
+
+    Detection + window + weights are bit-identical to the original recon
+    inline block: find the leading flat shelf (values equal to j_BS[0]
+    within 1e-6 relative), Gaussian-filter (sigma=3 grid indices) a
+    +/-10-index window around the shelf end, and blend with a triangular
+    weight (1 at the shelf end, 0 at the window edges) so the exact
+    shelf value and the spike beyond the window are preserved.
+    """
+    from scipy.ndimage import gaussian_filter1d
+
+    j_BS = np.asarray(j_BS, dtype=float)
+    shelf_val = j_BS[0]
+    shelf_end = 0
+    for i in range(1, len(j_BS)):
+        if abs(j_BS[i] - shelf_val) / max(abs(shelf_val), 1e-30) < 1e-6:
+            shelf_end = i
+        else:
+            break
+
+    half = 10
+    lo = max(0, shelf_end - half)
+    hi = min(len(j_BS), shelf_end + half + 1)
+    smoothed = gaussian_filter1d(j_BS[lo:hi], sigma=3.0)
+
+    out = j_BS.copy()
+    for i in range(lo, hi):
+        w = max(0.0, 1.0 - abs(i - shelf_end) / half)
+        out[i] = w * smoothed[i - lo] + (1 - w) * j_BS[i]
+    return out
+
+
 # ====================================================================
 #  Core perturbation routine
 # ====================================================================
@@ -816,6 +921,19 @@ def perturb_kinetic_equilibrium(
     #                                 (= PIN_JPHI behaviour).
     recon_eq_snapshot=None,
     spike_profile_recon_cached=None,
+    # Delta composition (GenerationConfig.jbs_delta_mode) -- unlike DIFF_BS
+    # this composes with the full l_i band / GPR j_ind machinery:
+    #   spike_delta_ref      -- RAW sigma=0 spike (toroidal-converted, NO
+    #                           smoothing), cached once per run in the same
+    #                           pre-draw anchor context.
+    #   spike_delta_baseline -- the baseline j_BS split the draws must
+    #                           reproduce at sigma=0 (bl.j_BS [+ jBS_diff]).
+    # When both are set, the standard branch builds the per-draw spike as
+    #   spike_delta_baseline + (SWB_raw(perturbed) - spike_delta_ref)
+    # so common-mode evaluation artifacts (the collapsed innermost-surface
+    # point) cancel exactly and the per-draw Sauter response is unfiltered.
+    spike_delta_ref=None,
+    spike_delta_baseline=None,
     proxy_bias_warmstart=None,
     pin_jphi=False,
     Z_imp=None,
@@ -945,12 +1063,14 @@ def perturb_kinetic_equilibrium(
     _dual_grid = psi_N_kinetic is not None
 
     def _kin_to_eq(arr_kin):
-        """Interpolate a profile from kinetic grid onto equilibrium grid."""
+        """Regrid a profile from the kinetic onto the equilibrium grid.
+
+        Shape-preserving PCHIP via the shared helper (linear regrid leaves
+        slope kinks at every kinetic knot -> stepped Sauter j_BS; see
+        utils.pchip_interp). Must match every other kin->eq site."""
         if not _dual_grid:
             return arr_kin
-        return interp1d(psi_kin, arr_kin, kind='linear',
-                        bounds_error=False,
-                        fill_value=(arr_kin[0], arr_kin[-1]))(psi_N)
+        return pchip_interp(psi_kin, arr_kin, psi_N)
 
     # Fixed additive currents (NBI + RF), held constant across draws. They are
     # treated exactly like the bootstrap spike (additive, non-scaled) in the
@@ -1303,12 +1423,12 @@ def perturb_kinetic_equilibrium(
                 mygs.set_coil_bounds(_stashed_bounds)
         # Convert SWB's parallel-projected j_BS to toroidal convention on the
         # SWB-landed equilibrium -- BEFORE the snapshot restore below changes
-        # mygs. The cached recon spike was converted the same way at cache
-        # time, so the delta is consistently toroidal.
-        _spike_perturbed = _swb_jbs_to_toroidal(
-            mygs, _results_diff["isolated_j_BS"], psi_pad)
-        _full_j_BS_tor = _swb_jbs_to_toroidal(
-            mygs, _results_diff["j_BS"], psi_pad)
+        # mygs. The cached recon spike was converted (and axis-smoothed) the
+        # same way at cache time, so the delta is consistently toroidal.
+        _spike_perturbed = smooth_jbs_transition(_swb_jbs_to_toroidal(
+            mygs, _results_diff["isolated_j_BS"], psi_pad))
+        _full_j_BS_tor = smooth_jbs_transition(_swb_jbs_to_toroidal(
+            mygs, _results_diff["j_BS"], psi_pad))
         delta_spike = _spike_perturbed - spike_profile_recon_cached
         _delta_rms = float(np.sqrt(np.mean(delta_spike**2)))
         _delta_max = float(np.max(np.abs(delta_spike)))
@@ -1570,9 +1690,36 @@ def perturb_kinetic_equilibrium(
         # Convert SWB's parallel-projected bootstrap (<j.B> R_avg/F) to
         # bouquet's toroidal convention <j_phi/R>/<1/R>, evaluated on the
         # SWB-landed equilibrium (no solves between the call and here).
-        full_j_BS = _swb_jbs_to_toroidal(mygs, results["j_BS"], psi_pad)
-        spike_profile = _swb_jbs_to_toroidal(
-            mygs, results["isolated_j_BS"], psi_pad)
+        _use_spike_delta = (spike_delta_ref is not None
+                            and spike_delta_baseline is not None)
+        if _use_spike_delta:
+            # Delta composition: baseline split + raw SWB delta.  Both SWB
+            # terms are RAW (no smoothing of perturbed profiles): the
+            # collapsed innermost-surface point is a deterministic
+            # common-mode artifact (measured 0.44-0.51x its neighbours on
+            # all 56 draws of the 2026-07 reference case) and cancels in
+            # the difference, while the per-draw Sauter response passes
+            # through unfiltered.  At sigma=0 the spike equals the baseline
+            # split exactly.
+            _spike_raw = _swb_jbs_to_toroidal(
+                mygs, results["isolated_j_BS"], psi_pad)
+            _full_raw = _swb_jbs_to_toroidal(mygs, results["j_BS"], psi_pad)
+            _delta_bl = np.asarray(spike_delta_baseline, dtype=float)
+            _delta_ref = np.asarray(spike_delta_ref, dtype=float)
+            spike_profile = _delta_bl + (_spike_raw - _delta_ref)
+            full_j_BS = _delta_bl + (_full_raw - _delta_ref)
+            print(f"  [jBS-delta] spike = baseline + raw SWB delta "
+                  f"(|delta| rms={np.sqrt(np.mean((_spike_raw - _delta_ref)**2))/1e3:.1f} kA/m²)")
+        else:
+            # smooth_jbs_transition repairs SWB's collapsed near-axis point
+            # with the IDENTICAL treatment the recon split received --
+            # without it, every draw target carries a 1-2 grid-point axis
+            # divot vs the recon baseline (hollow core, q0 shifted +12%
+            # wholesale at sigma=0).
+            full_j_BS = smooth_jbs_transition(
+                _swb_jbs_to_toroidal(mygs, results["j_BS"], psi_pad))
+            spike_profile = smooth_jbs_transition(
+                _swb_jbs_to_toroidal(mygs, results["isolated_j_BS"], psi_pad))
 
         # Floor the SWB bootstrap at 0 (drop unphysical negative excursions)
         # before it enters j_phi. Then, in Case-B "diff" mode, add the fixed
@@ -1596,7 +1743,10 @@ def perturb_kinetic_equilibrium(
                         _fh.write(f"noop min={spike_profile.min()/1e3:+.1f}kA\n")
             full_j_BS = np.clip(full_j_BS, 0.0, None)
             spike_profile = np.clip(spike_profile, 0.0, None)
-        if jBS_diff is not None:
+        if jBS_diff is not None and not _use_spike_delta:
+            # (In delta mode spike_delta_baseline is run.py's
+            # bl.j_BS + jBS_diff, so the diff is already inside the spike --
+            # adding it again would double-count.)
             spike_profile = spike_profile + np.asarray(jBS_diff, dtype=float)
 
         # Anchor: forward-solve with recon's inductive shape + SWB's
@@ -2331,6 +2481,10 @@ def generate_bouquet(
     accept_anchor_inband=False,
     perturb_jind_in_anchor=False,
     jBS_scale_range=None,
+    # Delta composition (GenerationConfig.jbs_delta_mode): per-draw spike =
+    # baseline_j_BS + (SWB_raw(perturbed) - SWB_raw(sigma=0)); the sigma=0
+    # reference is cached once below in the same pre-draw anchor context.
+    jbs_delta_mode=False,
     swb_iterations=3,
     diagnostic_plots=True,
     scan_key=None,
@@ -2546,10 +2700,8 @@ def generate_bouquet(
     # When kinetic profiles are on a different grid, interpolate
     # onto the equilibrium grid for pressure/GS calculations.
     if psi_N_kinetic is not None:
-        from scipy.interpolate import interp1d as _interp1d_bg
-        _kin2eq = lambda arr: _interp1d_bg(
-            psi_N_kinetic, arr, kind='linear', bounds_error=False,
-            fill_value=(arr[0], arr[-1]))(psi_N)
+        # PCHIP regrid (shared helper) -- must match _kin_to_eq in the draws
+        _kin2eq = lambda arr: pchip_interp(psi_N_kinetic, arr, psi_N)
         pressure = EC * (_kin2eq(ne) * _kin2eq(te) + _kin2eq(ni) * _kin2eq(ti))
     else:
         pressure = EC * (ne * te + ni * ti)
@@ -3322,12 +3474,19 @@ def generate_bouquet(
     # the snapshot, calls SWB on perturbed kinetics, subtracts the
     # cached isolated_j_BS, and applies the delta on top of input_j_phi.
     # At sigma->0 delta -> 0 and the output exactly equals PIN_JPHI.
+    # The same cache also provides the sigma=0 RAW reference spike for the
+    # delta composition mode (jbs_delta_mode): spike = baseline_j_BS +
+    # (SWB_raw(perturbed) - SWB_raw(sigma=0)), computed in this identical
+    # pre-draw anchor context so common-mode evaluation artifacts (the
+    # collapsed innermost-surface point) cancel exactly.
     _diff_bs_env = os.environ.get('DIFF_BS', '0') == '1'
     _diff_recon_eq_snap = None
     _diff_spike_recon = None
-    if _diff_bs_env and recalculate_j_BS:
+    _delta_spike0_raw = None
+    if (_diff_bs_env or jbs_delta_mode) and recalculate_j_BS:
         print("\n" + "=" * 60)
-        print("  [DIFF_BS] Pre-loop setup: caching SWB(recon kinetics)")
+        print("  [%s] Pre-loop setup: caching SWB(recon kinetics)"
+              % ("DIFF_BS" if _diff_bs_env else "jBS-delta"))
         print("=" * 60)
         try:
             from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
@@ -3340,9 +3499,8 @@ def generate_bouquet(
             # arrays on the same grid as `_swb_seed_cache` (npsi=len(psi_N)).
             if psi_N_kinetic is not None:
                 def _k2e(a):
-                    return _interp1d(psi_N_kinetic, a, kind='linear',
-                                     bounds_error=False,
-                                     fill_value=(a[0], a[-1]))(psi_N)
+                    # PCHIP regrid -- must match _kin_to_eq in the draws
+                    return pchip_interp(psi_N_kinetic, a, psi_N)
                 ne_cache = _k2e(ne); te_cache = _k2e(te)
                 ni_cache = _k2e(ni); ti_cache = _k2e(ti)
             else:
@@ -3381,8 +3539,12 @@ def generate_bouquet(
                 )
                 # Toroidal conversion on the cache-time SWB equilibrium, so
                 # the per-draw delta (also converted) is convention-consistent.
-                _diff_spike_recon = _swb_jbs_to_toroidal(
+                # RAW profile for delta mode (artifacts cancel in the delta);
+                # smoothed version for DIFF_BS (whose per-draw spikes are also
+                # smoothed).
+                _delta_spike0_raw = _swb_jbs_to_toroidal(
                     mygs, _cache_results["isolated_j_BS"], psi_pad)
+                _diff_spike_recon = smooth_jbs_transition(_delta_spike0_raw)
                 # Snapshot AFTER the SWB call -- this is the state from
                 # which we'll re-launch SWB on perturbed kinetics each
                 # draw, so it must match what the cached SWB saw.
@@ -3402,6 +3564,14 @@ def generate_bouquet(
             _tb.print_exc()
             _diff_recon_eq_snap = None
             _diff_spike_recon = None
+            _delta_spike0_raw = None
+    if jbs_delta_mode and _delta_spike0_raw is None:
+        print("  [jBS-delta] WARNING: sigma=0 reference unavailable; draws "
+              "fall back to the shared-smoothing spike treatment")
+    if jbs_delta_mode and baseline_j_BS is None:
+        print("  [jBS-delta] WARNING: baseline_j_BS not provided; draws "
+              "fall back to the shared-smoothing spike treatment")
+        _delta_spike0_raw = None
 
     # Tracks the cylindrical-proxy / real-l_i ratio observed at the
     # end of the most recent successful draw.  Passed into the next
@@ -3634,6 +3804,12 @@ def generate_bouquet(
                 bnd_diag_callback=_report_bnd,
                 recon_eq_snapshot=_diff_recon_eq_snap,
                 spike_profile_recon_cached=_diff_spike_recon,
+                spike_delta_ref=(_delta_spike0_raw if jbs_delta_mode else None),
+                spike_delta_baseline=(np.asarray(baseline_j_BS, dtype=float)
+                                      if (jbs_delta_mode
+                                          and _delta_spike0_raw is not None
+                                          and baseline_j_BS is not None)
+                                      else None),
                 proxy_bias_warmstart=_proxy_bias_warmstart,
                 pin_jphi=pin_jphi,
             )
@@ -4237,10 +4413,8 @@ def generate_bouquet(
         # Pressure on the equilibrium grid (for storage and plotting).
         # Interpolate kinetic profiles onto psi_N if on a different grid.
         if psi_N_kinetic is not None:
-            from scipy.interpolate import interp1d as _interp1d_pp
-            _to_eq = lambda arr: _interp1d_pp(
-                psi_N_kinetic, arr, kind='linear', bounds_error=False,
-                fill_value=(arr[0], arr[-1]))(psi_N)
+            # PCHIP regrid (shared helper), matching _kin_to_eq
+            _to_eq = lambda arr: pchip_interp(psi_N_kinetic, arr, psi_N)
             _ne_eqp, _te_eqp = _to_eq(ne_perturb), _to_eq(te_perturb)
             _ni_eqp, _ti_eqp = _to_eq(ni_perturb), _to_eq(ti_perturb)
         else:
@@ -4580,16 +4754,30 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     # Convert SWB's parallel-projected bootstrap to the toroidal convention
     # shared by eqdsk_jtor and the fitted inductive profile, so the
     # j_BS / j_inductive split is done in a single convention.
-    j_BS_isolated = _swb_jbs_to_toroidal(mygs, results['isolated_j_BS'], psi_pad)
+    # Smooth the fragile near-axis / shelf-transition zone IMMEDIATELY after
+    # conversion (shared helper, also applied to every per-draw spike) so the
+    # inductive fit below sees the artifact-free profile rather than the raw
+    # collapsed axis point.
+    j_BS_isolated_raw = _swb_jbs_to_toroidal(mygs, results['isolated_j_BS'],
+                                             psi_pad)
+    j_BS_isolated = smooth_jbs_transition(j_BS_isolated_raw)
 
     # ---- 2b. Classify the j_phi profile ----
+    # Classification (and the shelf locator below) get the RAW profile:
+    # classify_jphi_profile uses spike[0] as its shelf/height reference, a
+    # convention calibrated on unsmoothed profiles. Feeding it the smoothed
+    # profile lifts that reference by ~2x and, on low-current shots whose
+    # edge spike is comparable to the core hump, silently flips the mode to
+    # L_mode -- which ZEROES the j_BS split (caught by the sigma=0 guard on
+    # 153072@3415: smoothed shelf 0.347 vs edge max 0.313 MA/m2 -> L_mode;
+    # raw shelf 0.153 -> Lmode_like_jphi, the correct historical result).
     jphi_mode, spike_metrics = classify_jphi_profile(
-        eqdsk.psi_N, eqdsk_jtor, j_BS_isolated
+        eqdsk.psi_N, eqdsk_jtor, j_BS_isolated_raw
     )
 
     # Pre-compute shelf location (needed for mode-dependent iteration)
     _, _shelf_psi_recon = _shelf_blend_decompose(
-        eqdsk.psi_N, eqdsk_jtor, j_BS_isolated, eqdsk_jphi=eqdsk_jtor
+        eqdsk.psi_N, eqdsk_jtor, j_BS_isolated_raw, eqdsk_jphi=eqdsk_jtor
     )  # just to get shelf_psi; j_ind result discarded
 
     # ---- 3. Fit inductive profile ----
@@ -4611,40 +4799,11 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     print(f"[fit] ind_scale={scale_opt:.6f}  bs_scale={bs_scale_opt:.6f}  "
           f"li_proxy={fit_result['fit_li']:.6f}  (target={baseline_li_proxy:.6f})")
 
-    # Smooth the shelf→spike transition in j_BS_isolated to eliminate
-    # second-derivative discontinuities that TokaMaker's geometry
-    # coupling amplifies into visible divots in the output j_phi.
-    # Apply a localised Gaussian filter only around the transition zone.
-    from scipy.ndimage import gaussian_filter1d
-
-    _shelf_val_sm = j_BS_isolated[0]
-    _shelf_end_sm = 0
-    for _i in range(1, len(j_BS_isolated)):
-        if abs(j_BS_isolated[_i] - _shelf_val_sm) / max(abs(_shelf_val_sm), 1e-30) < 1e-6:
-            _shelf_end_sm = _i
-        else:
-            break
-
-    # Smooth a window around the shelf end (±10 indices)
-    _sm_half = 10
-    _sm_lo = max(0, _shelf_end_sm - _sm_half)
-    _sm_hi = min(len(j_BS_isolated), _shelf_end_sm + _sm_half + 1)
-    _sm_sigma = 3.0  # Gaussian width in grid indices
-
-    _smoothed_section = gaussian_filter1d(j_BS_isolated[_sm_lo:_sm_hi], sigma=_sm_sigma)
-
-    # Blend smoothed section back — only modify the transition zone,
-    # preserve the exact shelf value in the core and exact spike beyond
-    j_BS_isolated_smooth = j_BS_isolated.copy()
-    for _i in range(_sm_lo, _sm_hi):
-        _local = _i - _sm_lo
-        # Blend weight: 1 at shelf_end, 0 at edges of window
-        _dist = abs(_i - _shelf_end_sm) / _sm_half
-        _w = max(0.0, 1.0 - _dist)  # triangular window
-        j_BS_isolated_smooth[_i] = (_w * _smoothed_section[_local]
-                                     + (1 - _w) * j_BS_isolated[_i])
-
-    j_BS_isolated = j_BS_isolated_smooth
+    # (The shelf->spike transition smoothing that used to live here is now
+    # applied by smooth_jbs_transition right after the SWB conversion above
+    # -- the same shared treatment every per-draw spike gets, keeping the
+    # recon/draw split sigma=0-consistent -- so the inductive fit also saw
+    # the artifact-free profile.)
 
     # Use the spline-fit j_inductive directly. The corrective iteration
     # (section 7) will drive TokaMaker's output to match the target

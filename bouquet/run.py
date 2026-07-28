@@ -557,8 +557,9 @@ class Bouquet:
         # kinetic profiles + total pressure on the equilibrium grid (IMAS shares
         # psi_N between the kinetic and current grids).
         def k2e(arr):
-            return np.interp(psi_N, np.asarray(bl.psi_N_kinetic, dtype=float),
-                             np.asarray(arr, dtype=float))
+            # PCHIP regrid (shared helper) -- must match the draw path
+            from .utils import pchip_interp
+            return pchip_interp(bl.psi_N_kinetic, arr, psi_N)
 
         ne, te, ni, ti = k2e(bl.ne), k2e(bl.te), k2e(bl.ni), k2e(bl.ti)
         Zeff = np.clip(k2e(bl.Zeff), 1.0, None)
@@ -631,7 +632,8 @@ class Bouquet:
         #                FUSE source; fully self-consistent (no fixed profile).
         # The SWB bootstrap is floored at 0 first (drops the inner negative lobe).
         if self.config.generation.recalculate_j_BS:
-            from .TokaMaker_interface import _swb_jbs_to_toroidal
+            from .TokaMaker_interface import (_swb_jbs_to_toroidal,
+                                              smooth_jbs_transition)
             from .sampling import calc_cylindrical_li_proxy
             from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
             from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
@@ -649,7 +651,10 @@ class Bouquet:
                 scale_jBS=1.0, isolate_edge_jBS=iso,
                 diagnostic_plots=False, verbose=False,
             )
-            j_BS_swb = _swb_jbs_to_toroidal(mygs, swb["isolated_j_BS"], psi_pad)
+            # Same axis-transition smoothing every per-draw spike receives, so
+            # the sigma=0 draw reproduces this baseline split exactly.
+            j_BS_swb = smooth_jbs_transition(
+                _swb_jbs_to_toroidal(mygs, swb["isolated_j_BS"], psi_pad))
             if gc.floor_j_BS:
                 j_BS_swb = np.clip(j_BS_swb, 0.0, None)
             ratio = j_BS_swb.max() / max(j_BS_src.max(), 1.0)
@@ -795,6 +800,140 @@ class Bouquet:
         fig.suptitle(ttl, fontsize=11); fig.tight_layout()
         return fig, ax
 
+    def verify_sigma0_consistency(self, tol_frac=0.02, swb_iterations=3):
+        """Regression guard: the draw pipeline must reproduce the baseline
+        j_BS split when the kinetics are UNPERTURBED (sigma=0).
+
+        Replays the exact per-draw pre-SWB sequence -- state-anchor solve at
+        the baseline j_phi/pressure, ``solve_with_bootstrap`` on the baseline
+        kinetics, toroidal conversion, axis-transition smoothing -- and
+        compares the resulting bootstrap spike to ``baseline.j_BS``.  Any
+        systematic deviation found here is inherited by EVERY draw as a
+        j_phi target bias: the 2026-07 hollow-core/q0-offset bug was exactly
+        such a sigma=0 inconsistency (recon-only axis smoothing), invisible
+        to l_i but a wholesale +12% shift of the q0 distribution.
+
+        Costs one SWB call (~1 min). Call after ``reconstruct()`` /
+        ``prepare_baseline()`` and before ``generate()``; leaves ``mygs``
+        re-anchored on the baseline equilibrium.
+
+        Note: this check exercises the shared-smoothing spike treatment. With
+        ``GenerationConfig.jbs_delta_mode`` the sigma=0 draw reproduces the
+        baseline split exactly by construction (the same SWB call this method
+        makes becomes the cached reference), so the check remains a pure
+        SWB-context-reproducibility probe there.
+
+        Parameters
+        ----------
+        tol_frac : float
+            Pass threshold on ``max|spike0 - j_BS|`` as a fraction of
+            ``max(j_BS)`` (default 2%).
+        swb_iterations : int
+            Iterations for the SWB call (match GenerationConfig).
+
+        Returns
+        -------
+        dict with ``spike0`` (the sigma=0 draw-context j_BS), ``max_dev``,
+        ``rms_dev`` [A/m^2], ``max_dev_frac`` (of peak j_BS), ``psi_worst``,
+        and ``passed``.
+        """
+        import numpy as np
+        from scipy.interpolate import interp1d
+        from .TokaMaker_interface import (_swb_jbs_to_toroidal,
+                                          smooth_jbs_transition)
+        from .utils import pchip_derivative
+        from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
+        from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
+
+        if self.baseline is None or self.mygs is None:
+            raise ValueError("call setup_solver() + prepare_baseline() / "
+                             "reconstruct() before verify_sigma0_consistency()")
+        bl = self.baseline
+        mygs = self.mygs
+        gc = self.config.generation
+        psi_pad = self.config.source.psi_pad
+        psi_N = np.asarray(bl.psi_N, dtype=float)
+        EC = 1.602176634e-19
+
+        # kinetics + pressure on the equilibrium grid, mirroring
+        # generate_bouquet's baseline assembly (incl. impurity/fast/diff terms)
+        from .utils import pchip_interp
+        pk = np.asarray(bl.psi_N_kinetic, dtype=float)
+        k2e = lambda a: pchip_interp(pk, a, psi_N)
+        ne_eq, te_eq = k2e(bl.ne), k2e(bl.te)
+        ni_eq, ti_eq = k2e(bl.ni), k2e(bl.ti)
+        Zeff_eq = np.clip(k2e(bl.Zeff), 1.0, None)
+        pressure = EC * (ne_eq * te_eq + ni_eq * ti_eq)
+        if getattr(bl, "Z_imp", None):
+            from .physics import impurity_pressure
+            pressure = pressure + impurity_pressure(ne_eq, ni_eq, ti_eq, bl.Z_imp)
+        if bl.p_fast is not None:
+            pressure = pressure + k2e(bl.p_fast)
+        if getattr(bl, "p_diff", None) is not None:
+            pressure = pressure + np.asarray(bl.p_diff, dtype=float)
+
+        # state-anchor solve at the baseline j_phi (mirrors the per-draw flow)
+        pp = {"type": "linterp",
+              "y": pchip_derivative(psi_N, pressure) /
+                   (mygs.psi_bounds[1] - mygs.psi_bounds[0]),
+              "x": psi_N}
+        pp["y"][-1] = 0.0
+        ffp = {"type": "jphi-linterp",
+               "y": np.asarray(bl.j_phi, dtype=float).copy(), "x": psi_N}
+        mygs.set_targets(Ip=float(bl.Ip_target), pax=float(pressure[0]))
+        mygs.set_profiles(pp_prof=pp, ffp_prof=ffp)
+        mygs.solve()
+
+        seed = create_power_flux_fun(len(psi_N), 1.5, 1.5)["y"]
+        res = solve_with_bootstrap(
+            mygs, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
+            float(bl.Ip_target), seed,
+            scale_jBS=float(getattr(bl, "bs_scale", 1.0)),
+            isolate_edge_jBS=bool(gc.isolate_edge_jBS),
+            diagnostic_plots=False, iterations=swb_iterations)
+        spike0 = smooth_jbs_transition(
+            _swb_jbs_to_toroidal(mygs, res["isolated_j_BS"], psi_pad))
+        if gc.floor_j_BS:
+            spike0 = np.clip(spike0, 0.0, None)
+
+        ref = np.asarray(bl.j_BS, dtype=float)
+        dev = spike0 - ref
+        peak = float(np.max(np.abs(ref)))
+        # Floored-zone carve-out: where floor_inductive_split clamped the
+        # baseline j_inductive to 0, the deficit was absorbed into bl.j_BS --
+        # so bl.j_BS deliberately differs from the raw SWB spike there (e.g.
+        # 201586@4200's strong pedestal, ~4% of peak at psi_N~0.98).  The
+        # per-draw sampler has its own floor-zone handling, so these points
+        # are excluded from the pass criterion and reported separately.
+        floored = np.asarray(bl.j_inductive, dtype=float) <= 0.0
+        dev_eval = np.where(floored, 0.0, dev)
+        iworst = int(np.argmax(np.abs(dev_eval)))
+        out = dict(spike0=spike0,
+                   max_dev=float(np.max(np.abs(dev_eval))),
+                   rms_dev=float(np.sqrt(np.mean(dev_eval ** 2))),
+                   max_dev_frac=float(np.max(np.abs(dev_eval)) / peak),
+                   psi_worst=float(psi_N[iworst]),
+                   n_floored=int(floored.sum()),
+                   max_dev_floored=(float(np.max(np.abs(dev[floored])))
+                                    if floored.any() else 0.0),
+                   passed=bool(np.max(np.abs(dev_eval)) <= tol_frac * peak))
+        # leave mygs re-anchored on the baseline equilibrium, not SWB's state
+        mygs.set_targets(Ip=float(bl.Ip_target), pax=float(pressure[0]))
+        mygs.set_profiles(pp_prof=pp, ffp_prof=ffp)
+        try:
+            mygs.solve()
+        except (ValueError, RuntimeError):
+            pass
+        status = "PASS" if out["passed"] else "FAIL"
+        _fl = (f"; {out['n_floored']} floored pts excluded "
+               f"(dev there {out['max_dev_floored']/1e6:.4f} MA/m²)"
+               if out["n_floored"] else "")
+        print(f"[sigma0-check] {status}: max|spike0 - j_BS| = "
+              f"{out['max_dev']/1e6:.4f} MA/m² ({100*out['max_dev_frac']:.2f}% "
+              f"of peak, worst at psi_N={out['psi_worst']:.3f}; "
+              f"tol {100*tol_frac:.1f}%{_fl})")
+        return out
+
     # ── stage 3: perturbed bouquet --------------------------------------
     def _validate_workflow(self) -> None:
         """Hard guard enforcing the validated per-path workflow at generate().
@@ -893,11 +1032,11 @@ class Bouquet:
 
         # Zeff is consumed on the EQUILIBRIUM grid (psi_N) by solve_with_bootstrap,
         # whereas the perturbed kinetic profiles (ne/te/ni/ti, sigmas) live on the
-        # kinetic grid (psi_N_kinetic). Interpolate Zeff down to psi_N.
+        # kinetic grid (psi_N_kinetic). PCHIP-regrid Zeff down to psi_N (shared
+        # helper, matching every other kin->eq site).
+        from .utils import pchip_interp
         Zeff_eq = np.clip(
-            np.interp(np.asarray(bl.psi_N, dtype=float),
-                      np.asarray(bl.psi_N_kinetic, dtype=float),
-                      np.asarray(bl.Zeff, dtype=float)),
+            pchip_interp(bl.psi_N_kinetic, bl.Zeff, np.asarray(bl.psi_N, dtype=float)),
             1.0, None,
         )
 
@@ -942,6 +1081,7 @@ class Bouquet:
                 accept_anchor_inband=gc.accept_anchor_inband,
                 perturb_jind_in_anchor=gc.perturb_jind_in_anchor,
                 jBS_scale_range=_jbs_range,
+                jbs_delta_mode=gc.jbs_delta_mode,
                 swb_iterations=gc.swb_iterations,
                 diagnostic_plots=gc.diagnostic_plots,
                 capture_live_eq=gc.capture_live_eq,

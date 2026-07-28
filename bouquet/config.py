@@ -282,6 +282,16 @@ class GenerationConfig:
     # overriding the baseline/FUSE j_BS. When False, keep the baseline j_BS.
     recalculate_j_BS: bool = True
     jBS_scale_range: tuple = (0.99, 1.01)  # bootstrap multiplicative spread
+    # Delta composition of the per-draw bootstrap (alternative to sharing the
+    # near-axis smoothing): each draw's spike is built as
+    #   baseline_j_BS + (SWB(perturbed) - SWB(sigma=0)),
+    # both SWB terms RAW (no smoothing of perturbed profiles).  Any common-mode
+    # evaluation artifact (e.g. the collapsed innermost-surface point) cancels
+    # exactly, and the per-draw Sauter response passes through unfiltered.
+    # Costs one extra solve_with_bootstrap call per run (the sigma=0 reference,
+    # computed in the same pre-draw anchor context).  False (default) keeps the
+    # shared-smoothing treatment (smooth_jbs_transition on every spike).
+    jbs_delta_mode: bool = False
     # Bootstrap profile mode in solve_with_bootstrap. True (default) isolates the
     # edge spike, yielding a clean positive bootstrap; False uses the full SWB
     # profile, which for FUSE equilibria carries an unphysical inner negative
