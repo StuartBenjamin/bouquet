@@ -197,13 +197,37 @@ def classify_jphi_profile(psi_N, eqdsk_jphi, spike_profile,
     # --- Check Sauter spike ---
     spike_edge = spike_profile[edge_mask]
     psi_edge = psi_N[edge_mask]
-    shelf_val = spike_profile[0]
-    spike_range = np.max(spike_edge) - shelf_val
 
-    if spike_range > 0:
-        min_prom_spike = prominence_frac * spike_range
-        peaks_s, _ = find_peaks(spike_edge, height=shelf_val,
-                                prominence=min_prom_spike)
+    # Robust two-pass edge-peak detection (hardened 2026-07, user-approved).
+    # The height reference used to be spike_profile[0] -- meaningful when the
+    # profile was analyze_bootstrap_edge_spike's flat-shelf output
+    # (isolate_edge_jBS=True), but with the full-Sauter default it is the
+    # numerically fragile collapsed axis point, and on weak-pedestal shots
+    # (204441@5307: peak within ~2 permille of it) detection flipped on
+    # run-to-run jitter.  Mirror analyze_bootstrap_edge_spike instead:
+    #   pass 1 -- locate candidate edge peaks with a liberal prominence-only
+    #             search (5% of the edge maximum, as in OFT);
+    #   pass 2 -- take the VALLEY (profile minimum between the edge-window
+    #             start and the tallest candidate -- the core-hump/edge-spike
+    #             saddle, OFT's shelf level) as the height reference, and
+    #             re-detect with the original height + prominence criteria
+    #             measured from that valley.
+    edge_max = float(np.max(spike_edge)) if spike_edge.size else 0.0
+    if edge_max > 0:
+        cand, _ = find_peaks(spike_edge, prominence=0.05 * edge_max)
+    else:
+        cand = np.array([], dtype=int)
+    if len(cand):
+        _tallest = cand[np.argmax(spike_edge[cand])]
+        _between = (psi_N >= edge_psi_min) & (psi_N < psi_edge[_tallest])
+        shelf_val = (float(np.min(spike_profile[_between]))
+                     if _between.any() else float(spike_edge[0]))
+        spike_range = edge_max - shelf_val
+        if spike_range > 0:
+            peaks_s, _ = find_peaks(spike_edge, height=shelf_val,
+                                    prominence=prominence_frac * spike_range)
+        else:
+            peaks_s = np.array([], dtype=int)
     else:
         peaks_s = np.array([], dtype=int)
 

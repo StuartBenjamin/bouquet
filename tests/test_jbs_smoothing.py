@@ -57,33 +57,53 @@ def test_flat_shelf_preserved():
     np.testing.assert_allclose(out[:30], 2.0e5, rtol=1e-12)
 
 
-def test_classifier_gets_raw_profile_semantics():
-    """classify_jphi_profile keys its Sauter edge-peak search off spike[0]
-    (the raw shelf). The axis-lifted SMOOTHED profile raises that reference
-    ~2x; on a shot whose edge spike is comparable to the core hump the lifted
-    shelf hides the edge peak and the classification degrades (observed as an
-    L_mode flip zeroing the j_BS split on 153072@3415, caught by the sigma=0
-    guard; the significant-bootstrap fallback now prevents the zeroed split,
-    but H-mode detection still depends on the raw shelf). This test pins the
-    sensitivity so the recon keeps feeding classification the RAW profile."""
+def test_classifier_insensitive_to_axis_treatment():
+    """With the valley height reference (min of the profile between the
+    edge-window start and the edge peak, mirroring
+    analyze_bootstrap_edge_spike), classification no longer depends on the
+    numerically fragile axis point -- raw and axis-smoothed profiles must
+    classify IDENTICALLY.  (Before the hardening, spike[0] was the height
+    bar: the smoothed profile's lifted axis hid comparable-height edge peaks
+    -- the 153072@3415 L_mode flip -- and raw-axis jitter flipped
+    weak-pedestal shots like 204441@5307.)"""
     from bouquet.TokaMaker_interface import classify_jphi_profile
 
     psi = np.linspace(0.0, 1.0, 129)
-    # Sauter-like spike whose edge peak (~0.28) is close to the core hump,
-    # with the collapsed raw axis point (the 153072 shape).
+    # edge peak (~0.28) comparable to the core hump, collapsed raw axis point
     core = 3.6e5 * np.exp(-0.5 * ((psi - 0.05) / 0.12) ** 2) + 4.0e4
     edge = 2.4e5 * np.exp(-0.5 * ((psi - 0.93) / 0.02) ** 2)
     raw = core + edge
-    raw[0] *= 0.45                       # SWB's collapsed innermost point
+    raw[0] *= 0.45
     smoothed = smooth_jbs_transition(raw)
-    # g-file WITH a matching pedestal peak -> should classify H_mode
+    # g-file WITH a matching pedestal peak -> H_mode
     jphi = (0.75e6 * (1.0 - psi) ** 1.5 + 5.0e4
             + 2.0e5 * np.exp(-0.5 * ((psi - 0.93) / 0.02) ** 2))
 
     mode_raw, _ = classify_jphi_profile(psi, jphi, raw)
     mode_sm, _ = classify_jphi_profile(psi, jphi, smoothed)
-    assert mode_raw == "H_mode"          # the correct historical result
-    assert mode_sm != "H_mode"           # the sensitivity this test documents
+    assert mode_raw == "H_mode"
+    assert mode_sm == mode_raw           # axis treatment no longer matters
+
+
+def test_weak_pedestal_peak_detected_via_valley():
+    """The 204441@5307 geometry: pedestal peak (~0.108 MA/m^2) comparable to
+    the collapsed axis point (~0.110), but prominent above the pedestal-foot
+    VALLEY (~0.05).  The valley reference must detect it as a real Sauter
+    edge spike (metrics carry its position) instead of falling through to
+    the no-edge-peak fallback."""
+    from bouquet.TokaMaker_interface import classify_jphi_profile
+
+    psi = np.linspace(0.0, 1.0, 257)
+    # monotone mantle decay + weak pedestal bump, collapsed axis point
+    prof = (3.5e5 * np.exp(-0.5 * ((psi - 0.05) / 0.20) ** 2) + 4.0e4
+            + 6.0e4 * np.exp(-0.5 * ((psi - 0.97) / 0.015) ** 2))
+    prof[0] *= 0.5
+    jphi = 1.1e6 * (1.0 - psi) ** 1.5 + 5.0e4   # no geqdsk edge peak
+
+    mode, met = classify_jphi_profile(psi, jphi, prof)
+    assert mode == "Lmode_like_jphi"
+    assert met["spike_psiN_sauter"] is not None
+    assert met["spike_psiN_sauter"] > 0.9        # the pedestal bump, found
 
 
 def test_core_hump_only_profile_is_not_L_mode():
