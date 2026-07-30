@@ -13,7 +13,7 @@
    "type": "artifact",
    "label": "aux_* profiles",
    "file": "bouquet/utils.py",
-   "line": 512,
+   "line": 750,
    "desc": "aux_<name> datasets from switchboard; on psi_N_kinetic grid",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -22,7 +22,7 @@
    "type": "artifact",
    "label": "baseline group (_baseline)",
    "file": "bouquet/utils.py",
-   "line": 759,
+   "line": 1048,
    "desc": "scan/<key>/_baseline or /_baseline: baseline profiles + sigmas",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -40,7 +40,7 @@
    "type": "artifact",
    "label": "config_json dataset",
    "file": "bouquet/utils.py",
-   "line": 319,
+   "line": 556,
    "desc": "BouquetConfig serialized at root + per-scan levels",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -67,7 +67,7 @@
    "type": "artifact",
    "label": "perturbed_lcfs_ref",
    "file": "bouquet/utils.py",
-   "line": 577,
+   "line": 822,
    "desc": "High-res LCFS boundary (~10k pts) from perturb draw via trace_surf",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -85,7 +85,7 @@
    "type": "artifact",
    "label": "profiles (psi_N, j_phi, j_BS, ...)",
    "file": "bouquet/utils.py",
-   "line": 366,
+   "line": 603,
    "desc": "1-D arrays: bare names + units attrs (schema v2); _PROFILE_KEYS list",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -94,7 +94,7 @@
    "type": "artifact",
    "label": "x_points",
    "file": "bouquet/utils.py",
-   "line": 590,
+   "line": 835,
    "desc": "X-point nulls (N, 2) shape; TokaMaker.get_xpoints() per draw+baseline",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -103,7 +103,7 @@
    "type": "artifact",
    "label": "HDF5 archive {header}.h5",
    "file": "bouquet/run.py",
-   "line": 857,
+   "line": 1026,
    "desc": "Output archive: per-draw quantities + baseline + metadata. Written by generate(). Filtered by filter(), subset exported by export().",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
@@ -173,7 +173,7 @@
    "type": "artifact",
    "label": "Perturbed draw JSON",
    "file": "bouquet/io/imas.py",
-   "line": 607,
+   "line": 691,
    "desc": "write_imas_draw(): equilibrium+core_profiles IDS from h5 eqdsk + kinetics",
    "subsystem": "IMAS/OMAS reader"
   },
@@ -182,7 +182,7 @@
    "type": "knob",
    "label": "FixedComponentsConfig.j_NBI",
    "file": "bouquet/config.py",
-   "line": 169,
+   "line": 176,
    "desc": "Beam-driven current array (optional, fixed per draw)",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -191,7 +191,7 @@
    "type": "knob",
    "label": "FixedComponentsConfig.j_RF",
    "file": "bouquet/config.py",
-   "line": 170,
+   "line": 177,
    "desc": "RF-driven current array (optional, fixed per draw)",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -200,7 +200,7 @@
    "type": "knob",
    "label": "FixedComponentsConfig.p_fast",
    "file": "bouquet/config.py",
-   "line": 168,
+   "line": 175,
    "desc": "Fast-ion pressure array (optional, fixed per draw)",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -209,7 +209,7 @@
    "type": "knob",
    "label": "FixedComponentsConfig.psi_N",
    "file": "bouquet/config.py",
-   "line": 171,
+   "line": 178,
    "desc": "Grid for fixed components; triggers resampling via _resolve_fixed",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -218,7 +218,7 @@
    "type": "knob",
    "label": "GenerationConfig.recalculate_j_BS",
    "file": "bouquet/config.py",
-   "line": 276,
+   "line": 283,
    "desc": "When True, recompute j_BS per draw via TokaMaker (default True)",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -227,7 +227,7 @@
    "type": "knob",
    "label": "ReconstructionSource.impurity_Z",
    "file": "bouquet/config.py",
-   "line": 95,
+   "line": 102,
    "desc": "Effective impurity charge (carbon=6.0 default, set per machine)",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -236,7 +236,7 @@
    "type": "knob",
    "label": "UncertaintyConfig.aux_baselines",
    "file": "bouquet/config.py",
-   "line": 254,
+   "line": 261,
    "desc": "Dict {name: baseline(psi_N)}; manual override over source-provided",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -245,7 +245,7 @@
    "type": "knob",
    "label": "UncertaintyConfig.aux_length_scales",
    "file": "bouquet/config.py",
-   "line": 255,
+   "line": 262,
    "desc": "Dict {name: GPR_length_scale}; per-channel override over default 0.4",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -254,7 +254,7 @@
    "type": "knob",
    "label": "UncertaintyConfig.aux_sigmas",
    "file": "bouquet/config.py",
-   "line": 253,
+   "line": 260,
    "desc": "Dict {name: sigma(psi_N)}; enabling auxiliary channel requires a sigma",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -263,7 +263,7 @@
    "type": "knob",
    "label": "UncertaintyConfig.ida_path",
    "file": "bouquet/config.py",
-   "line": 209,
+   "line": 216,
    "desc": "Explicit IDA path; fallback from ReconstructionSource.profiles_path if .cdf",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -272,7 +272,7 @@
    "type": "knob",
    "label": "UncertaintyConfig.jphi_scalar_sigma",
    "file": "bouquet/config.py",
-   "line": 225,
+   "line": 232,
    "desc": "Fractional envelope on |j_phi| (default 0.10)",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -281,7 +281,7 @@
    "type": "knob",
    "label": "UncertaintyConfig.ne_scalar_sigma",
    "file": "bouquet/config.py",
-   "line": 216,
+   "line": 223,
    "desc": "Flat fractional envelope on ne (default 0.05)",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -290,7 +290,7 @@
    "type": "knob",
    "label": "UncertaintyConfig.ni_scalar_sigma",
    "file": "bouquet/config.py",
-   "line": 218,
+   "line": 225,
    "desc": "Flat fractional envelope on ni (default 0.10, wider)",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -299,7 +299,7 @@
    "type": "knob",
    "label": "UncertaintyConfig.sigma_ni_from_ne",
    "file": "bouquet/config.py",
-   "line": 212,
+   "line": 219,
    "desc": "IDA path only: when True, sigma_ni = sigma_ne (default True)",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -308,7 +308,7 @@
    "type": "knob",
    "label": "UncertaintyConfig.sigma_profiles",
    "file": "bouquet/config.py",
-   "line": 222,
+   "line": 229,
    "desc": "Dict {ne/te/ni/ti: sigma_array}; explicit profiles override IDA/scalar",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -317,7 +317,7 @@
    "type": "knob",
    "label": "UncertaintyConfig.te_scalar_sigma",
    "file": "bouquet/config.py",
-   "line": 217,
+   "line": 224,
    "desc": "Flat fractional envelope on te (default 0.05)",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -326,7 +326,7 @@
    "type": "knob",
    "label": "UncertaintyConfig.ti_scalar_sigma",
    "file": "bouquet/config.py",
-   "line": 219,
+   "line": 226,
    "desc": "Flat fractional envelope on ti (default 0.10, wider)",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -335,7 +335,7 @@
    "type": "knob",
    "label": "UncertaintyConfig.zeff_scalar_sigma",
    "file": "bouquet/config.py",
-   "line": 236,
+   "line": 243,
    "desc": "Fractional envelope on Zeff that enables zeff channel by default (default 0.05)",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -352,7 +352,7 @@
    "type": "knob",
    "label": "coil_drift",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 2290,
+   "line": 2521,
    "desc": "Symmetric \u00b1coil_drift*|I_baseline| hard bounds on coils; None disables",
    "subsystem": "Draw loop (GPR sampling)"
   },
@@ -361,7 +361,7 @@
    "type": "knob",
    "label": "constrain_sawteeth",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 2265,
+   "line": 2492,
    "desc": "Reject equilibria with q0 < 1; auto-override if baseline has q0 < 1",
    "subsystem": "Draw loop (GPR sampling)"
   },
@@ -370,7 +370,7 @@
    "type": "knob",
    "label": "inspec_F_max: float = 0.02",
    "file": "bouquet/config.py",
-   "line": 383,
+   "line": 422,
    "desc": "+/-2% DIII-D coil-current spec",
    "subsystem": "Configuration"
   },
@@ -379,7 +379,7 @@
    "type": "knob",
    "label": "inspec_VSC_max: float = 0.02",
    "file": "bouquet/config.py",
-   "line": 384,
+   "line": 423,
    "desc": "VSC coil-current spec",
    "subsystem": "Configuration"
   },
@@ -388,7 +388,7 @@
    "type": "knob",
    "label": "rms_max_mm: float = 5.0",
    "file": "bouquet/config.py",
-   "line": 382,
+   "line": 421,
    "desc": "Max RMS coil-position error [mm]",
    "subsystem": "Configuration"
   },
@@ -460,7 +460,7 @@
    "type": "knob",
    "label": "j_NBI: Optional[np.ndarray] = None",
    "file": "bouquet/config.py",
-   "line": 169,
+   "line": 176,
    "desc": "Beam-driven toroidal current density [A/m^2]",
    "subsystem": "Configuration"
   },
@@ -469,7 +469,7 @@
    "type": "knob",
    "label": "j_RF: Optional[np.ndarray] = None",
    "file": "bouquet/config.py",
-   "line": 170,
+   "line": 177,
    "desc": "RF-driven toroidal current density [A/m^2]",
    "subsystem": "Configuration"
   },
@@ -478,7 +478,7 @@
    "type": "knob",
    "label": "p_fast: Optional[np.ndarray] = None",
    "file": "bouquet/config.py",
-   "line": 168,
+   "line": 175,
    "desc": "Fast/beam pressure on psi_N",
    "subsystem": "Configuration"
   },
@@ -487,7 +487,7 @@
    "type": "knob",
    "label": "p_fast_reduction: str = \"trace\"",
    "file": "bouquet/config.py",
-   "line": 179,
+   "line": 186,
    "desc": "Collapse anisotropic fast pressure: trace/mean/perp",
    "subsystem": "Configuration"
   },
@@ -496,7 +496,7 @@
    "type": "knob",
    "label": "psi_N: Optional[np.ndarray] = None",
    "file": "bouquet/config.py",
-   "line": 171,
+   "line": 178,
    "desc": "Grid for p_fast/j_NBI/j_RF arrays",
    "subsystem": "Configuration"
   },
@@ -540,7 +540,7 @@
    "type": "knob",
    "label": "config.generation.floor_j_BS",
    "file": "bouquet/run.py",
-   "line": 643,
+   "line": 658,
    "desc": "Control: clip j_BS_swb at 0 (True, drops inner negative lobe) or keep signed (False)",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
@@ -549,7 +549,7 @@
    "type": "knob",
    "label": "config.generation.isolate_edge_jBS",
    "file": "bouquet/run.py",
-   "line": 631,
+   "line": 643,
    "desc": "Control: isolate edge j_BS spike (True, reconstruction) or use full profile (False, IMAS). Defaults: False for both paths (full Sauter).",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
@@ -558,7 +558,7 @@
    "type": "knob",
    "label": "config.generation.jBS_baseline_mode",
    "file": "bouquet/run.py",
-   "line": 631,
+   "line": 643,
    "desc": "Control: 'diff' (default IMAS) or 'rescale' (self-consistent bootstrap rebuild)",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
@@ -585,7 +585,7 @@
    "type": "knob",
    "label": "config.generation.recalculate_j_BS",
    "file": "bouquet/run.py",
-   "line": 623,
+   "line": 634,
    "desc": "Control: recompute j_BS via SWB (True) or use source j_BS as-is (False)",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
@@ -594,7 +594,7 @@
    "type": "knob",
    "label": "accept_anchor_inband: bool = False",
    "file": "bouquet/config.py",
-   "line": 294,
+   "line": 311,
    "desc": "Accept anchor if l_i already in band",
    "subsystem": "Configuration"
   },
@@ -603,7 +603,7 @@
    "type": "knob",
    "label": "allow_incomplete_pressure: bool = False",
    "file": "bouquet/config.py",
-   "line": 329,
+   "line": 346,
    "desc": "Allow missing pressure components in IMAS",
    "subsystem": "Configuration"
   },
@@ -612,7 +612,7 @@
    "type": "knob",
    "label": "allow_unsafe_workflow: bool = False",
    "file": "bouquet/config.py",
-   "line": 315,
+   "line": 332,
    "desc": "Bypass workflow validation guard",
    "subsystem": "Configuration"
   },
@@ -621,7 +621,7 @@
    "type": "knob",
    "label": "anchor_jtor_to_equilibrium: bool = True",
    "file": "bouquet/config.py",
-   "line": 337,
+   "line": 354,
    "desc": "Anchor total j_phi to equilibrium.j_tor",
    "subsystem": "Configuration"
   },
@@ -630,7 +630,7 @@
    "type": "knob",
    "label": "anchor_pressure_to_equilibrium: bool = False",
    "file": "bouquet/config.py",
-   "line": 350,
+   "line": 367,
    "desc": "Anchor solve pressure to equilibrium.pressure",
    "subsystem": "Configuration"
   },
@@ -639,7 +639,7 @@
    "type": "knob",
    "label": "coil_drift: float = 0.01",
    "file": "bouquet/config.py",
-   "line": 366,
+   "line": 391,
    "desc": "Coil drift tolerance for homotopy",
    "subsystem": "Configuration"
   },
@@ -648,7 +648,7 @@
    "type": "knob",
    "label": "coil_drift_hard_factor: Optional[float] = None",
    "file": "bouquet/config.py",
-   "line": 371,
+   "line": 396,
    "desc": "Hard inequality bounds on coil drift",
    "subsystem": "Configuration"
   },
@@ -657,7 +657,7 @@
    "type": "knob",
    "label": "constrain_sawteeth: bool = False",
    "file": "bouquet/config.py",
-   "line": 272,
+   "line": 279,
    "desc": "Constrain q0 \u2265 1 to suppress sawteeth",
    "subsystem": "Configuration"
   },
@@ -666,7 +666,7 @@
    "type": "knob",
    "label": "diagnostic_plots: bool = False",
    "file": "bouquet/config.py",
-   "line": 375,
+   "line": 400,
    "desc": "Enable diagnostic plots during generation",
    "subsystem": "Configuration"
   },
@@ -675,7 +675,7 @@
    "type": "knob",
    "label": "floor_j_BS: bool = False",
    "file": "bouquet/config.py",
-   "line": 357,
+   "line": 382,
    "desc": "Floor SWB bootstrap at 0",
    "subsystem": "Configuration"
   },
@@ -684,7 +684,7 @@
    "type": "knob",
    "label": "homotopy_passes: list = [(0.05,0.10),(0.02,0.05),(0.01,0.01)]",
    "file": "bouquet/config.py",
-   "line": 372,
+   "line": 397,
    "desc": "Homotopy schedule: list of (F_tol, VSC_tol)",
    "subsystem": "Configuration"
   },
@@ -693,7 +693,7 @@
    "type": "knob",
    "label": "isolate_edge_jBS: bool = True",
    "file": "bouquet/config.py",
-   "line": 282,
+   "line": 299,
    "desc": "Isolate edge j_BS spike from inner negative lobe",
    "subsystem": "Configuration"
   },
@@ -702,7 +702,7 @@
    "type": "knob",
    "label": "jBS_baseline_mode: str = \"diff\"",
    "file": "bouquet/config.py",
-   "line": 290,
+   "line": 307,
    "desc": "SWB reconciliation on IMAS: diff/rescale",
    "subsystem": "Configuration"
   },
@@ -711,7 +711,7 @@
    "type": "knob",
    "label": "jBS_scale_range: tuple = (0.99, 1.01)",
    "file": "bouquet/config.py",
-   "line": 277,
+   "line": 284,
    "desc": "Bootstrap multiplicative spread",
    "subsystem": "Configuration"
   },
@@ -720,7 +720,7 @@
    "type": "knob",
    "label": "kinetic_source: str = \"fuse\"",
    "file": "bouquet/config.py",
-   "line": 343,
+   "line": 360,
    "desc": "Baseline kinetics on IMAS: fuse/ida_hybrid",
    "subsystem": "Configuration"
   },
@@ -729,7 +729,7 @@
    "type": "knob",
    "label": "l_i_tolerance: float = 0.05",
    "file": "bouquet/config.py",
-   "line": 271,
+   "line": 278,
    "desc": "l_i acceptance band (fraction of target)",
    "subsystem": "Configuration"
   },
@@ -738,7 +738,7 @@
    "type": "knob",
    "label": "n_equils: int = 20",
    "file": "bouquet/config.py",
-   "line": 265,
+   "line": 272,
    "desc": "Number of perturbed equilibria to generate",
    "subsystem": "Configuration"
   },
@@ -747,7 +747,7 @@
    "type": "knob",
    "label": "perturb_jind_in_anchor: bool = False",
    "file": "bouquet/config.py",
-   "line": 308,
+   "line": 325,
    "desc": "GPR-perturb j_inductive in anchor (Fix C)",
    "subsystem": "Configuration"
   },
@@ -756,7 +756,7 @@
    "type": "knob",
    "label": "recalculate_j_BS: bool = True",
    "file": "bouquet/config.py",
-   "line": 276,
+   "line": 283,
    "desc": "Recompute bootstrap each draw via solve_with_bootstrap",
    "subsystem": "Configuration"
   },
@@ -765,7 +765,7 @@
    "type": "knob",
    "label": "scan_key: float = 0",
    "file": "bouquet/config.py",
-   "line": 270,
+   "line": 277,
    "desc": "HDF5 scan/<scan_key>/ label",
    "subsystem": "Configuration"
   },
@@ -774,7 +774,7 @@
    "type": "knob",
    "label": "seed: Optional[int] = None",
    "file": "bouquet/config.py",
-   "line": 266,
+   "line": 273,
    "desc": "Random seed for reproducibility",
    "subsystem": "Configuration"
   },
@@ -783,7 +783,7 @@
    "type": "knob",
    "label": "swb_iterations: int = 3",
    "file": "bouquet/config.py",
-   "line": 360,
+   "line": 385,
    "desc": "solve_with_bootstrap self-consistency iterations",
    "subsystem": "Configuration"
   },
@@ -792,7 +792,7 @@
    "type": "knob",
    "label": "workflow: str = \"auto\"",
    "file": "bouquet/config.py",
-   "line": 323,
+   "line": 340,
    "desc": "Workflow preset: auto/geqdsk-standard/imas-diff-c/custom",
    "subsystem": "Configuration"
   },
@@ -801,7 +801,7 @@
    "type": "knob",
    "label": "efit01_geqdsk: Optional[str] = None",
    "file": "bouquet/config.py",
-   "line": 131,
+   "line": 138,
    "desc": "Magnetics-only EFIT01 g-file for LCFS boundary",
    "subsystem": "Configuration"
   },
@@ -810,7 +810,7 @@
    "type": "knob",
    "label": "ida_path: Optional[str] = None",
    "file": "bouquet/config.py",
-   "line": 126,
+   "line": 133,
    "desc": "IDA-hybrid kinetics: IDA .cdf for baseline ne/Te/Ti",
    "subsystem": "Configuration"
   },
@@ -819,7 +819,7 @@
    "type": "knob",
    "label": "ids_path: str = None",
    "file": "bouquet/config.py",
-   "line": 116,
+   "line": 123,
    "desc": "Path to FUSE IMAS/OMAS IDS file",
    "subsystem": "Configuration"
   },
@@ -828,7 +828,7 @@
    "type": "knob",
    "label": "impurity_Z: float = 6.0",
    "file": "bouquet/config.py",
-   "line": 127,
+   "line": 134,
    "desc": "Machine impurity charge (carbon); ni dilution",
    "subsystem": "Configuration"
   },
@@ -837,7 +837,7 @@
    "type": "knob",
    "label": "time: Optional[float] = None",
    "file": "bouquet/config.py",
-   "line": 117,
+   "line": 124,
    "desc": "Time slice [s]; None->first/single",
    "subsystem": "Configuration"
   },
@@ -846,7 +846,7 @@
    "type": "knob",
    "label": "isolate_edge_jBS",
    "file": "bouquet/config.py",
-   "line": 282,
+   "line": 299,
    "desc": "Separate edge bootstrap spike from core; False=full Sauter (default True)",
    "subsystem": "GS reconstruction"
   },
@@ -855,7 +855,7 @@
    "type": "knob",
    "label": "jBS_scale_range",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 2280,
+   "line": 2507,
    "desc": "[lo, hi] bounds for uniform jBS multiplicative scale factor per draw; None \u2192 all 1.0",
    "subsystem": "Draw loop (GPR sampling)"
   },
@@ -864,7 +864,7 @@
    "type": "knob",
    "label": "l_i_tolerance",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 2263,
+   "line": 2490,
    "desc": "Fraction of l_i_target for band acceptance (e.g. 0.01 = \u00b11%)",
    "subsystem": "Draw loop (GPR sampling)"
   },
@@ -873,7 +873,7 @@
    "type": "knob",
    "label": "l_i_uncertainty",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 2308,
+   "line": 2539,
    "desc": "Fractional uncertainty (e.g. 0.05 = 5%) for per-draw l_i target sampling; 0 \u2192 pin to recon",
    "subsystem": "Draw loop (GPR sampling)"
   },
@@ -914,7 +914,7 @@
    "type": "knob",
    "label": "n_equils",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 2251,
+   "line": 2478,
    "desc": "Number of perturbed equilibria to generate",
    "subsystem": "Draw loop (GPR sampling)"
   },
@@ -923,7 +923,7 @@
    "type": "knob",
    "label": "n_k (spline order)",
    "file": "bouquet/config.py",
-   "line": 99,
+   "line": 106,
    "desc": "Spline order for fit_inductive_profile (default k=3)",
    "subsystem": "GS reconstruction"
   },
@@ -972,7 +972,7 @@
    "type": "knob",
    "label": "psi_bridge",
    "file": "bouquet/config.py",
-   "line": 100,
+   "line": 107,
    "desc": "psi_N above which edge data replaced by zero anchor (default 0.99)",
    "subsystem": "GS reconstruction"
   },
@@ -981,7 +981,7 @@
    "type": "knob",
    "label": "psi_pad",
    "file": "bouquet/config.py",
-   "line": 98,
+   "line": 105,
    "desc": "Padding inside LCFS for li proxy calculation",
    "subsystem": "GS reconstruction"
   },
@@ -990,7 +990,7 @@
    "type": "knob",
    "label": "recalculate_j_BS",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 2266,
+   "line": 2493,
    "desc": "Recompute bootstrap current via solve_with_bootstrap per draw",
    "subsystem": "Draw loop (GPR sampling)"
   },
@@ -1007,7 +1007,7 @@
    "type": "knob",
    "label": "cocos: int = 1",
    "file": "bouquet/config.py",
-   "line": 93,
+   "line": 100,
    "desc": "Flux-coordinate convention",
    "subsystem": "Configuration"
   },
@@ -1016,7 +1016,7 @@
    "type": "knob",
    "label": "geqdsk_path: str = None",
    "file": "bouquet/config.py",
-   "line": 91,
+   "line": 98,
    "desc": "Path to g-file (EFIT equilibrium)",
    "subsystem": "Configuration"
   },
@@ -1025,7 +1025,7 @@
    "type": "knob",
    "label": "impurity_Z: float = 6.0",
    "file": "bouquet/config.py",
-   "line": 95,
+   "line": 102,
    "desc": "Effective impurity charge (carbon)",
    "subsystem": "Configuration"
   },
@@ -1034,7 +1034,7 @@
    "type": "knob",
    "label": "n_k: int = 5",
    "file": "bouquet/config.py",
-   "line": 99,
+   "line": 106,
    "desc": "Inductive-spline knots for reconstruction",
    "subsystem": "Configuration"
   },
@@ -1043,7 +1043,7 @@
    "type": "knob",
    "label": "profile_overrides: dict = {}",
    "file": "bouquet/config.py",
-   "line": 96,
+   "line": 103,
    "desc": "Manual profile overrides by name",
    "subsystem": "Configuration"
   },
@@ -1052,7 +1052,7 @@
    "type": "knob",
    "label": "profiles_path: str = None",
    "file": "bouquet/config.py",
-   "line": 92,
+   "line": 99,
    "desc": "Path to IDA .cdf or p-file (kinetic profiles)",
    "subsystem": "Configuration"
   },
@@ -1061,7 +1061,7 @@
    "type": "knob",
    "label": "psi_bridge: float = 0.99",
    "file": "bouquet/config.py",
-   "line": 100,
+   "line": 107,
    "desc": "Hermite edge-bridge location for psi",
    "subsystem": "Configuration"
   },
@@ -1070,7 +1070,7 @@
    "type": "knob",
    "label": "psi_pad: float = 1e-3",
    "file": "bouquet/config.py",
-   "line": 98,
+   "line": 105,
    "desc": "Reconstruction padding for psi range",
    "subsystem": "Configuration"
   },
@@ -1079,7 +1079,7 @@
    "type": "knob",
    "label": "rescale_j_BS: bool = False",
    "file": "bouquet/config.py",
-   "line": 101,
+   "line": 108,
    "desc": "Whether to rescale bootstrap current",
    "subsystem": "Configuration"
   },
@@ -1088,7 +1088,7 @@
    "type": "knob",
    "label": "shelf_psi_N: float = 0.0",
    "file": "bouquet/config.py",
-   "line": 102,
+   "line": 109,
    "desc": "Shelf location for inductive smoothing",
    "subsystem": "Configuration"
   },
@@ -1097,7 +1097,7 @@
    "type": "knob",
    "label": "time: Optional[float] = None",
    "file": "bouquet/config.py",
-   "line": 94,
+   "line": 101,
    "desc": "IDA time slice [s] for multi-time .cdf",
    "subsystem": "Configuration"
   },
@@ -1106,7 +1106,7 @@
    "type": "knob",
    "label": "rescale_j_BS",
    "file": "bouquet/config.py",
-   "line": 101,
+   "line": 108,
    "desc": "Jointly optimize bootstrap rescaling in fit_inductive_profile",
    "subsystem": "GS reconstruction"
   },
@@ -1123,7 +1123,7 @@
    "type": "knob",
    "label": "seed (RNG)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 2340,
+   "line": 2582,
    "desc": "Optional seed for reproducible np.random draws; None leaves RNG untouched",
    "subsystem": "Draw loop (GPR sampling)"
   },
@@ -1132,7 +1132,7 @@
    "type": "knob",
    "label": "shelf_psi_N",
    "file": "bouquet/config.py",
-   "line": 102,
+   "line": 109,
    "desc": "Apply flat shelf to j_BS for psi_N < shelf_psi_N (default 0.0)",
    "subsystem": "GS reconstruction"
   },
@@ -1150,7 +1150,7 @@
    "type": "knob",
    "label": "coil_reg: list = []",
    "file": "bouquet/config.py",
-   "line": 59,
+   "line": 66,
    "desc": "Coil regularization (not directly used)",
    "subsystem": "Configuration"
   },
@@ -1159,7 +1159,7 @@
    "type": "knob",
    "label": "coil_vsc: dict = {\"F9A\": 1.0, \"F9B\": -1.0}",
    "file": "bouquet/config.py",
-   "line": 58,
+   "line": 65,
    "desc": "Vertical stabilization coil configuration",
    "subsystem": "Configuration"
   },
@@ -1213,7 +1213,7 @@
    "type": "knob",
    "label": "region_overrides: Optional[dict] = None",
    "file": "bouquet/config.py",
-   "line": 60,
+   "line": 67,
    "desc": "Special-case mesh region dict overrides",
    "subsystem": "Configuration"
   },
@@ -1222,7 +1222,7 @@
    "type": "knob",
    "label": "efit01_geqdsk",
    "file": "bouquet/config.py",
-   "line": 131,
+   "line": 138,
    "desc": "magnetics-only EFIT01 g-file whose LCFS replaces the IDS boundary",
    "subsystem": "Configuration"
   },
@@ -1256,7 +1256,7 @@
    "type": "knob",
    "label": "aux_baselines: dict = {}",
    "file": "bouquet/config.py",
-   "line": 254,
+   "line": 261,
    "desc": "Baseline values for auxiliary profiles",
    "subsystem": "Configuration"
   },
@@ -1265,7 +1265,7 @@
    "type": "knob",
    "label": "aux_length_scales: dict = {}",
    "file": "bouquet/config.py",
-   "line": 255,
+   "line": 262,
    "desc": "Per-auxiliary GPR length scale (default 0.4)",
    "subsystem": "Configuration"
   },
@@ -1274,7 +1274,7 @@
    "type": "knob",
    "label": "aux_sigmas: dict = {}",
    "file": "bouquet/config.py",
-   "line": 253,
+   "line": 260,
    "desc": "Named auxiliary perturbed profiles (omega_tor, e_r, chi_e, chi_i)",
    "subsystem": "Configuration"
   },
@@ -1283,7 +1283,7 @@
    "type": "knob",
    "label": "ida_path: Optional[str] = None",
    "file": "bouquet/config.py",
-   "line": 209,
+   "line": 216,
    "desc": "IDA .cdf for kinetic sigma profiles",
    "subsystem": "Configuration"
   },
@@ -1292,7 +1292,7 @@
    "type": "knob",
    "label": "j_ls: float = 0.25",
    "file": "bouquet/config.py",
-   "line": 241,
+   "line": 248,
    "desc": "GPR correlation length (current)",
    "subsystem": "Configuration"
   },
@@ -1301,7 +1301,7 @@
    "type": "knob",
    "label": "jphi_scalar_sigma: float = 0.1",
    "file": "bouquet/config.py",
-   "line": 225,
+   "line": 232,
    "desc": "Flat fractional j_phi sigma envelope",
    "subsystem": "Configuration"
   },
@@ -1310,7 +1310,7 @@
    "type": "knob",
    "label": "n_ls: float = 0.5",
    "file": "bouquet/config.py",
-   "line": 239,
+   "line": 246,
    "desc": "GPR correlation length (density)",
    "subsystem": "Configuration"
   },
@@ -1319,7 +1319,7 @@
    "type": "knob",
    "label": "ne_scalar_sigma: float = 0.05",
    "file": "bouquet/config.py",
-   "line": 216,
+   "line": 223,
    "desc": "Flat fractional ne sigma (fallback)",
    "subsystem": "Configuration"
   },
@@ -1328,7 +1328,7 @@
    "type": "knob",
    "label": "ni_scalar_sigma: float = 0.1",
    "file": "bouquet/config.py",
-   "line": 218,
+   "line": 225,
    "desc": "Flat fractional ni sigma (fallback)",
    "subsystem": "Configuration"
   },
@@ -1337,7 +1337,7 @@
    "type": "knob",
    "label": "sigma_method: str = \"percentile\"",
    "file": "bouquet/config.py",
-   "line": 211,
+   "line": 218,
    "desc": "Ensemble sigma reduction: percentile/std",
    "subsystem": "Configuration"
   },
@@ -1346,7 +1346,7 @@
    "type": "knob",
    "label": "sigma_mode: str = \"auto\"",
    "file": "bouquet/config.py",
-   "line": 210,
+   "line": 217,
    "desc": "Sigma extraction mode: auto/direct/ensemble",
    "subsystem": "Configuration"
   },
@@ -1355,7 +1355,7 @@
    "type": "knob",
    "label": "sigma_ni_from_ne: bool = True",
    "file": "bouquet/config.py",
-   "line": 212,
+   "line": 219,
    "desc": "IDA path only: sigma_ni = sigma_ne",
    "subsystem": "Configuration"
   },
@@ -1364,7 +1364,7 @@
    "type": "knob",
    "label": "sigma_profiles: dict = {}",
    "file": "bouquet/config.py",
-   "line": 222,
+   "line": 229,
    "desc": "Explicit psi_N-dependent absolute sigma profiles",
    "subsystem": "Configuration"
   },
@@ -1373,7 +1373,7 @@
    "type": "knob",
    "label": "t_ls: float = 0.4",
    "file": "bouquet/config.py",
-   "line": 240,
+   "line": 247,
    "desc": "GPR correlation length (temperature)",
    "subsystem": "Configuration"
   },
@@ -1382,7 +1382,7 @@
    "type": "knob",
    "label": "te_scalar_sigma: float = 0.05",
    "file": "bouquet/config.py",
-   "line": 217,
+   "line": 224,
    "desc": "Flat fractional Te sigma (fallback)",
    "subsystem": "Configuration"
   },
@@ -1391,7 +1391,7 @@
    "type": "knob",
    "label": "ti_scalar_sigma: float = 0.1",
    "file": "bouquet/config.py",
-   "line": 219,
+   "line": 226,
    "desc": "Flat fractional Ti sigma (fallback)",
    "subsystem": "Configuration"
   },
@@ -1400,7 +1400,7 @@
    "type": "knob",
    "label": "zeff_scalar_sigma: float = 0.05",
    "file": "bouquet/config.py",
-   "line": 236,
+   "line": 243,
    "desc": "Flat fractional Zeff sigma (enables zeff channel)",
    "subsystem": "Configuration"
   },
@@ -1409,7 +1409,7 @@
    "type": "input",
    "label": "FilterConfig",
    "file": "bouquet/config.py",
-   "line": 379,
+   "line": 418,
    "desc": "FilterConfig dataclass",
    "subsystem": "Configuration"
   },
@@ -1418,7 +1418,7 @@
    "type": "input",
    "label": "FixedComponentsConfig",
    "file": "bouquet/config.py",
-   "line": 141,
+   "line": 148,
    "desc": "FixedComponentsConfig dataclass",
    "subsystem": "Configuration"
   },
@@ -1427,7 +1427,7 @@
    "type": "input",
    "label": "GenerationConfig",
    "file": "bouquet/config.py",
-   "line": 262,
+   "line": 269,
    "desc": "GenerationConfig dataclass",
    "subsystem": "Configuration"
   },
@@ -1436,7 +1436,7 @@
    "type": "input",
    "label": "ImasSource",
    "file": "bouquet/config.py",
-   "line": 107,
+   "line": 114,
    "desc": "ImasSource dataclass",
    "subsystem": "Configuration"
   },
@@ -1445,7 +1445,7 @@
    "type": "input",
    "label": "ReconstructionSource",
    "file": "bouquet/config.py",
-   "line": 67,
+   "line": 74,
    "desc": "ReconstructionSource dataclass",
    "subsystem": "Configuration"
   },
@@ -1463,7 +1463,7 @@
    "type": "input",
    "label": "UncertaintyConfig",
    "file": "bouquet/config.py",
-   "line": 186,
+   "line": 193,
    "desc": "UncertaintyConfig dataclass",
    "subsystem": "Configuration"
   },
@@ -1490,7 +1490,7 @@
    "type": "transform",
    "label": "_corrective_jphi_iteration",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 51,
+   "line": 54,
    "desc": "Newton-style iteration: drive TokaMaker output j_phi toward target",
    "subsystem": "GS reconstruction"
   },
@@ -1499,24 +1499,16 @@
    "type": "transform",
    "label": "generate_bouquet()",
    "file": "bouquet/run.py",
-   "line": 894,
+   "line": 1063,
    "desc": "Per-draw solver loop: perturb kinetics + jphi via GPR, apply jBS_diff offset, solve with TokaMaker, compute l_i + coil currents + boundary. Yields diagnostics.",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
-  },
-  {
-   "id": "ext.scipy_interp1d",
-   "type": "input",
-   "label": "interp1d (kinetic\u2194equilibrium grid)",
-   "desc": "Linear interpolation between dual grids",
-   "subsystem": "Per-draw solve (SWB / l_i / homotopy)",
-   "file": ""
   },
   {
    "id": "ext.solve_with_bootstrap",
    "type": "transform",
    "label": "solve_with_bootstrap()",
    "file": "bouquet/run.py",
-   "line": 637,
+   "line": 649,
    "desc": "OFT SWB solver: takes kinetics + Ip_target, returns j_BS_swb on psi_N (after floor_j_BS clipping)",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
@@ -1557,7 +1549,7 @@
    "type": "transform",
    "label": "GPRPerturber",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3160,
+   "line": 3403,
    "desc": "gp_density = GPRPerturber(length_scale=unc.n_ls)",
    "subsystem": "Configuration"
   },
@@ -1566,7 +1558,7 @@
    "type": "transform",
    "label": "coil_drift * config.generation.coil_drift_hard_factor if ... else None",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3245,
+   "line": 3297,
    "desc": "hard_bounds = coil_drift * config.generation.coil_drift_hard",
    "subsystem": "Configuration"
   },
@@ -1575,7 +1567,7 @@
    "type": "transform",
    "label": "config.generation.coil_drift",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3240,
+   "line": 3523,
    "desc": "coil_drift_spec = config.generation.coil_drift",
    "subsystem": "Configuration"
   },
@@ -1584,7 +1576,7 @@
    "type": "transform",
    "label": "config.uncertainty.aux_baselines.get",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3285,
+   "line": 1234,
    "desc": "baseline = config.uncertainty.aux_baselines.get(name) or com",
    "subsystem": "Configuration"
   },
@@ -1593,7 +1585,7 @@
    "type": "transform",
    "label": "config.uncertainty.aux_length_scales.get",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3290,
+   "line": 3575,
    "desc": "ls = config.uncertainty.aux_length_scales.get(name, 0.4)",
    "subsystem": "Configuration"
   },
@@ -1602,7 +1594,7 @@
    "type": "transform",
    "label": "config.uncertainty.jphi_scalar_sigma * abs",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3180,
+   "line": 3456,
    "desc": "sigma_jphi = config.uncertainty.jphi_scalar_sigma * abs(j_ph",
    "subsystem": "Configuration"
   },
@@ -1611,7 +1603,7 @@
    "type": "transform",
    "label": "for F_tol, VSC_tol in config.generation.homotopy_passes: ...",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3250,
+   "line": 3532,
    "desc": "for F_tol, VSC_tol in config.generation.homotopy_passes: ...",
    "subsystem": "Configuration"
   },
@@ -1620,7 +1612,7 @@
    "type": "transform",
    "label": "for i_eq in _tqdm",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3338,
+   "line": 3631,
    "desc": "for i_eq in _tqdm(range(n_equils), ...)",
    "subsystem": "Configuration"
   },
@@ -1629,7 +1621,7 @@
    "type": "transform",
    "label": "for name, sigma in config.uncertainty.aux_sigmas.items",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3280,
+   "line": 3561,
    "desc": "for name, sigma in config.uncertainty.aux_sigmas.items(): ..",
    "subsystem": "Configuration"
   },
@@ -1638,7 +1630,7 @@
    "type": "transform",
    "label": "if gc.accept_anchor_inband and in_band",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3420,
+   "line": 3713,
    "desc": "if gc.accept_anchor_inband and in_band(l_i, target): accept_",
    "subsystem": "Configuration"
   },
@@ -1647,7 +1639,7 @@
    "type": "transform",
    "label": "if gc.constrain_sawteeth and q0 < 1.0: reject",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3410,
+   "line": 3703,
    "desc": "if gc.constrain_sawteeth and q0 < 1.0: reject()",
    "subsystem": "Configuration"
   },
@@ -1656,7 +1648,7 @@
    "type": "transform",
    "label": "if not abs",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3400,
+   "line": 3693,
    "desc": "if not abs(l_i - l_i_target) <= gc.l_i_tolerance * l_i_targe",
    "subsystem": "Configuration"
   },
@@ -1665,7 +1657,7 @@
    "type": "transform",
    "label": "if unc.zeff_scalar_sigma > 0: perturb_zeff",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3210,
+   "line": 3486,
    "desc": "if unc.zeff_scalar_sigma > 0: perturb_zeff(unc.zeff_scalar_s",
    "subsystem": "Configuration"
   },
@@ -1674,7 +1666,7 @@
    "type": "transform",
    "label": "mygs.solve",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3234,
+   "line": 3517,
    "desc": "mygs.solve(..., nthreads=nthreads)",
    "subsystem": "Configuration"
   },
@@ -1683,7 +1675,7 @@
    "type": "transform",
    "label": "np.random.seed",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3100,
+   "line": 3339,
    "desc": "np.random.seed(config.generation.seed)",
    "subsystem": "Configuration"
   },
@@ -1692,7 +1684,7 @@
    "type": "transform",
    "label": "np.random.uniform",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3095,
+   "line": 3334,
    "desc": "jBS_scales = np.random.uniform(lo, hi, size=n_equils)",
    "subsystem": "Configuration"
   },
@@ -1701,7 +1693,7 @@
    "type": "transform",
    "label": "solve_with_bootstrap",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3230,
+   "line": 1627,
    "desc": "solve_with_bootstrap(..., n_iterations=config.generation.swb",
    "subsystem": "Configuration"
   },
@@ -1710,7 +1702,7 @@
    "type": "artifact",
    "label": "BouquetArchive(ref)",
    "file": "bouquet/archive.py",
-   "line": 243,
+   "line": 378,
    "desc": "High-level reader: .path, .scan_keys, .provenance; supports pre-v2 eqdsk suffix scan",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -1728,7 +1720,7 @@
    "type": "artifact",
    "label": "ScanView(archive, scan_key)",
    "file": "bouquet/archive.py",
-   "line": 194,
+   "line": 264,
    "desc": "View of scan/<key>: .indices, .baseline, .selected/.excluded/.all DrawViews",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -1737,7 +1729,7 @@
    "type": "transform",
    "label": "...",
    "file": "bouquet/baseline.py",
-   "line": 415,
+   "line": 456,
    "desc": "if field in profile_overrides: profiles[field] = ...",
    "subsystem": "Configuration"
   },
@@ -1746,7 +1738,7 @@
    "type": "transform",
    "label": "_load_kinetic_profiles(source)",
    "file": "bouquet/baseline.py",
-   "line": 303,
+   "line": 339,
    "desc": "Dispatch on profiles_path file type (.cdf|.pfile), return ne/te/ni/ti/Zeff/raw_bytes",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -1755,7 +1747,7 @@
    "type": "transform",
    "label": "_resolve_fixed(comp, src_psi, dst_psi)",
    "file": "bouquet/baseline.py",
-   "line": 286,
+   "line": 322,
    "desc": "Fixed additive component resampling/zeros; raise if shape mismatch without psi_N",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -1764,7 +1756,7 @@
    "type": "transform",
    "label": "_resolve_reconstruction(source, config, mygs)",
    "file": "bouquet/baseline.py",
-   "line": 350,
+   "line": 386,
    "desc": "Reconstruction path: read g-file + kinetics, run GS solve, extract currents",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -1782,7 +1774,7 @@
    "type": "transform",
    "label": "compute_psi_bounds",
    "file": "bouquet/baseline.py",
-   "line": 480,
+   "line": 529,
    "desc": "psi_bounds = compute_psi_bounds(eqdsk, psi_pad=source.psi_pa",
    "subsystem": "Configuration"
   },
@@ -1791,7 +1783,7 @@
    "type": "transform",
    "label": "hermite_edge_bridge",
    "file": "bouquet/baseline.py",
-   "line": 515,
+   "line": 564,
    "desc": "hermite_edge_bridge(psi_bridge=source.psi_bridge)",
    "subsystem": "Configuration"
   },
@@ -1809,7 +1801,7 @@
    "type": "transform",
    "label": "profiles.compute_ni",
    "file": "bouquet/baseline.py",
-   "line": 400,
+   "line": 441,
    "desc": "profiles.compute_ni(impurity_Z=source.impurity_Z)",
    "subsystem": "Configuration"
   },
@@ -1818,7 +1810,7 @@
    "type": "transform",
    "label": "read_geqdsk",
    "file": "bouquet/baseline.py",
-   "line": 376,
+   "line": 412,
    "desc": "eqdsk = read_geqdsk(source.geqdsk_path)",
    "subsystem": "Configuration"
   },
@@ -1827,7 +1819,7 @@
    "type": "transform",
    "label": "read_profiles",
    "file": "bouquet/baseline.py",
-   "line": 380,
+   "line": 416,
    "desc": "profiles = read_profiles(source.profiles_path, ...)",
    "subsystem": "Configuration"
   },
@@ -1863,7 +1855,7 @@
    "type": "transform",
    "label": "scaling_factor",
    "file": "bouquet/baseline.py",
-   "line": 520,
+   "line": 449,
    "desc": "if source.rescale_j_BS: j_BS *= scaling_factor",
    "subsystem": "Configuration"
   },
@@ -1899,7 +1891,7 @@
    "type": "transform",
    "label": "sigma_te or unc.te_scalar_sigma * te_baseline",
    "file": "bouquet/baseline.py",
-   "line": 240,
+   "line": 222,
    "desc": "sigma_te = sigma_te or unc.te_scalar_sigma * te_baseline",
    "subsystem": "Configuration"
   },
@@ -1917,7 +1909,7 @@
    "type": "transform",
    "label": "source.shelf_psi_N",
    "file": "bouquet/baseline.py",
-   "line": 525,
+   "line": 574,
    "desc": "shelf_psi_N=source.shelf_psi_N",
    "subsystem": "Configuration"
   },
@@ -1926,7 +1918,7 @@
    "type": "transform",
    "label": "spline_fit",
    "file": "bouquet/baseline.py",
-   "line": 510,
+   "line": 559,
    "desc": "guess_jinductive = spline_fit(..., n_knots=source.n_k)",
    "subsystem": "Configuration"
   },
@@ -1998,7 +1990,7 @@
    "type": "transform",
    "label": "if abs",
    "file": "bouquet/filtering.py",
-   "line": 50,
+   "line": 299,
    "desc": "if abs(coil_error) > config.filtering.inspec_F_max * coil_cu",
    "subsystem": "Configuration"
   },
@@ -2097,7 +2089,7 @@
    "type": "transform",
    "label": "read_ida",
    "file": "bouquet/io/ida.py",
-   "line": 45,
+   "line": 101,
    "desc": "read_ida(path, time=self.time, ...)",
    "subsystem": "Configuration"
   },
@@ -2133,7 +2125,7 @@
    "type": "transform",
    "label": "read_imas_baseline(source, fixed, ...)",
    "file": "bouquet/io/imas.py",
-   "line": 1,
+   "line": 243,
    "desc": "IMAS path: read j_ohmic/j_BS/Ip/l_i from FUSE dd, convert parallel\u2192toroidal",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -2142,7 +2134,7 @@
    "type": "transform",
    "label": "read_pfile(path) + compute_quasineutrality/compute_zeff",
    "file": "bouquet/baseline.py",
-   "line": 331,
+   "line": 367,
    "desc": "Osborne p-file: read ne/ni/te/ti [1e20 m^-3, keV], convert SI, compute Zeff from ion mix",
    "subsystem": "Baseline & uncertainty resolution"
   },
@@ -2232,7 +2224,7 @@
    "type": "transform",
    "label": "effective_impurity_charge()",
    "file": "bouquet/physics.py",
-   "line": 1,
+   "line": 473,
    "desc": "Derives Z_eff from ne/ni/Zeff under single-impurity model",
    "subsystem": "IMAS/OMAS reader"
   },
@@ -2241,7 +2233,7 @@
    "type": "transform",
    "label": "impurity_pressure()",
    "file": "bouquet/physics.py",
-   "line": 1,
+   "line": 525,
    "desc": "Computes e*nz*Ti for carbon impurity (single-impurity dilution)",
    "subsystem": "IMAS/OMAS reader"
   },
@@ -2250,7 +2242,7 @@
    "type": "transform",
    "label": "isotropize_fast_pressure",
    "file": "bouquet/physics.py",
-   "line": 420,
+   "line": 42,
    "desc": "isotropize_fast_pressure(p_perp, p_par, mode=config.p_fast_r",
    "subsystem": "Configuration"
   },
@@ -2259,7 +2251,7 @@
    "type": "transform",
    "label": "main_ion_density_from_zeff()",
    "file": "bouquet/physics.py",
-   "line": 1,
+   "line": 500,
    "desc": "Recovers ni from ne/Zeff under single-impurity quasineutrality (IDA-hybrid path)",
    "subsystem": "IMAS/OMAS reader"
   },
@@ -2268,7 +2260,7 @@
    "type": "transform",
    "label": "parallel_to_toroidal()",
    "file": "bouquet/physics.py",
-   "line": 67,
+   "line": 86,
    "desc": "Converts <j.B>/B0 parallel to <j_phi/R>/<1/R> toroidal via c(psi)=j_tor/j_parallel",
    "subsystem": "IMAS/OMAS reader"
   },
@@ -2286,7 +2278,7 @@
    "type": "transform",
    "label": "plot_coil_currents(h5path, scan_key, vsc_coils, ...)",
    "file": "bouquet/plotting.py",
-   "line": 2164,
+   "line": 2269,
    "desc": "Coil-current trace plot: perturbed vs baseline coil_currents",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -2295,7 +2287,7 @@
    "type": "transform",
    "label": "plot_geqdsk_bouquet(geqdsk_path_or_eq, ...)",
    "file": "bouquet/plotting.py",
-   "line": 1652,
+   "line": 1757,
    "desc": "Flux diagram + limits from equilibrium (parsed from eqdsk bytes)",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -2304,7 +2296,7 @@
    "type": "transform",
    "label": "plot_pfile_bouquet(pfile_path_or_pf, ...)",
    "file": "bouquet/plotting.py",
-   "line": 1902,
+   "line": 2007,
    "desc": "P-file profile plots from stored pfile bytes",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -2313,7 +2305,7 @@
    "type": "transform",
    "label": "plot_traces(h5path, scan_key, li_band, rms_max_mm)",
    "file": "bouquet/plotting.py",
-   "line": 2714,
+   "line": 2819,
    "desc": "LCFS boundary evolution: perturbed_lcfs_ref vs recon_lcfs_ref or eqdsk RBBBS",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -2349,7 +2341,7 @@
    "type": "transform",
    "label": "read_pfile()",
    "file": "bouquet/io/pfile.py",
-   "line": 825,
+   "line": 835,
    "desc": "Parse p-file into PFile object with profile dict + optional N Z A block",
    "subsystem": "Input readers (g-file / p-file / IDA)"
   },
@@ -2367,7 +2359,7 @@
    "type": "transform",
    "label": "\"ida_hybrid\": resample_ida_profiles",
    "file": "bouquet/run.py",
-   "line": 800,
+   "line": 969,
    "desc": "if config.generation.kinetic_source == \"ida_hybrid\": resampl",
    "subsystem": "Configuration"
   },
@@ -2376,7 +2368,7 @@
    "type": "transform",
    "label": "...",
    "file": "bouquet/run.py",
-   "line": 610,
+   "line": 621,
    "desc": "if config.generation.jBS_baseline_mode == \"diff\": j_BS_diff ",
    "subsystem": "Configuration"
   },
@@ -2412,7 +2404,7 @@
    "type": "transform",
    "label": "_forward_solve_imas_baseline()",
    "file": "bouquet/run.py",
-   "line": 519,
+   "line": 527,
    "desc": "IMAS forward GS solve: jphi-linterp + thermal/fast pressure. Recompute j_BS via SWB. Apply jBS_baseline_mode logic (diff vs rescale). Set l_i_target to TokaMaker li_1.",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
@@ -2421,7 +2413,7 @@
    "type": "transform",
    "label": "_repoint_imas_geometry()",
    "file": "bouquet/run.py",
-   "line": 390,
+   "line": 398,
    "desc": "Multi-slice IMAS: re-read THIS slice's boundary, re-point solver isoflux, reset coil reg/bounds. Called per slice via set_slice+prepare_baseline.",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
@@ -2430,7 +2422,7 @@
    "type": "transform",
    "label": "resolve workflow preset",
    "file": "bouquet/run.py",
-   "line": 788,
+   "line": 957,
    "desc": "map workflow auto/geqdsk-standard/imas-diff-c/custom to per-path flags",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
@@ -2439,7 +2431,7 @@
    "type": "decision",
    "label": "_validate_workflow()",
    "file": "bouquet/run.py",
-   "line": 771,
+   "line": 940,
    "desc": "Guard: enforce validated per-path workflow. Geqdsk path: no Fix C (perturb_jind_in_anchor=False). IMAS path: Fix C required (True) + jBS_baseline_mode in ('diff','rescale').",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
@@ -2457,7 +2449,7 @@
    "type": "transform",
    "label": "compute_via_swb",
    "file": "bouquet/run.py",
-   "line": 600,
+   "line": 611,
    "desc": "if config.generation.recalculate_j_BS: j_BS = compute_via_sw",
    "subsystem": "Configuration"
   },
@@ -2466,7 +2458,7 @@
    "type": "transform",
    "label": "eq.j_tor - cp.j_tor",
    "file": "bouquet/run.py",
-   "line": 650,
+   "line": 665,
    "desc": "if config.generation.anchor_jtor_to_equilibrium: jphi_diff =",
    "subsystem": "Configuration"
   },
@@ -2475,7 +2467,7 @@
    "type": "transform",
    "label": "eq.pressure - p_recon",
    "file": "bouquet/run.py",
-   "line": 820,
+   "line": 989,
    "desc": "if config.generation.anchor_pressure_to_equilibrium: p_diff ",
    "subsystem": "Configuration"
   },
@@ -2484,7 +2476,7 @@
    "type": "transform",
    "label": "export()",
    "file": "bouquet/run.py",
-   "line": 1071,
+   "line": 1263,
    "desc": "Write pruned HDF5 with selected draws only (default {header}_selected.h5).",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
@@ -2492,8 +2484,8 @@
    "id": "fn.run.fc.j_NBI or zeros_on_psi_N",
    "type": "transform",
    "label": "fc.j_NBI or zeros_on_psi_N",
-   "file": "bouquet/run.py",
-   "line": 550,
+   "file": "bouquet/baseline.py",
+   "line": 465,
    "desc": "j_NBI = fc.j_NBI or zeros_on_psi_N",
    "subsystem": "Configuration"
   },
@@ -2501,8 +2493,8 @@
    "id": "fn.run.fc.j_RF or zeros_on_psi_N",
    "type": "transform",
    "label": "fc.j_RF or zeros_on_psi_N",
-   "file": "bouquet/run.py",
-   "line": 551,
+   "file": "bouquet/baseline.py",
+   "line": 466,
    "desc": "j_RF = fc.j_RF or zeros_on_psi_N",
    "subsystem": "Configuration"
   },
@@ -2511,7 +2503,7 @@
    "type": "transform",
    "label": "fc.p_fast or compute_p_fast_from_source",
    "file": "bouquet/run.py",
-   "line": 545,
+   "line": 555,
    "desc": "p_fast = fc.p_fast or compute_p_fast_from_source(...)",
    "subsystem": "Configuration"
   },
@@ -2520,7 +2512,7 @@
    "type": "transform",
    "label": "fc.psi_N or source_psi_N",
    "file": "bouquet/run.py",
-   "line": 555,
+   "line": 566,
    "desc": "psi_N_kinetic = fc.psi_N or source_psi_N",
    "subsystem": "Configuration"
   },
@@ -2529,7 +2521,7 @@
    "type": "transform",
    "label": "filter()",
    "file": "bouquet/run.py",
-   "line": 1007,
+   "line": 1199,
    "desc": "Apply coil + boundary filters. Non-destructive: writes pass flags into HDF5. Returns summary dict.",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
@@ -2538,7 +2530,7 @@
    "type": "transform",
    "label": "generate()",
    "file": "bouquet/run.py",
-   "line": 826,
+   "line": 995,
    "desc": "Main generation loop: call generate_bouquet with baseline + uncertainty envelope. Auto-center jBS_scale_range by bs_scale. Write HDF5 archive + provenance.",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
@@ -2556,7 +2548,7 @@
    "type": "transform",
    "label": "if config.generation.diagnostic_plots: plot_diagnostics",
    "file": "bouquet/run.py",
-   "line": 900,
+   "line": 1069,
    "desc": "if config.generation.diagnostic_plots: plot_diagnostics(...)",
    "subsystem": "Configuration"
   },
@@ -2565,7 +2557,7 @@
    "type": "transform",
    "label": "if config.generation.perturb_jind_in_anchor: apply_gpr_to_anchor_j_ind",
    "file": "bouquet/run.py",
-   "line": 640,
+   "line": 652,
    "desc": "if config.generation.perturb_jind_in_anchor: apply_gpr_to_an",
    "subsystem": "Configuration"
   },
@@ -2574,7 +2566,7 @@
    "type": "transform",
    "label": "if not config.generation.allow_unsafe_workflow: validate_workflow",
    "file": "bouquet/run.py",
-   "line": 750,
+   "line": 783,
    "desc": "if not config.generation.allow_unsafe_workflow: validate_wor",
    "subsystem": "Configuration"
   },
@@ -2583,7 +2575,7 @@
    "type": "transform",
    "label": "int",
    "file": "bouquet/run.py",
-   "line": 851,
+   "line": 1020,
    "desc": "n_equils = int(n if n is not None else gc.n_equils)",
    "subsystem": "Configuration"
   },
@@ -2610,7 +2602,7 @@
    "type": "transform",
    "label": "isolate_edge_jBS",
    "file": "bouquet/run.py",
-   "line": 605,
+   "line": 616,
    "desc": "j_BS = isolate_edge_jBS(j_BS, mode=config.generation.isolate",
    "subsystem": "Configuration"
   },
@@ -2628,7 +2620,7 @@
    "type": "transform",
    "label": "np.maximum",
    "file": "bouquet/run.py",
-   "line": 615,
+   "line": 626,
    "desc": "if config.generation.floor_j_BS: j_BS = np.maximum(j_BS, 0)",
    "subsystem": "Configuration"
   },
@@ -2637,7 +2629,7 @@
    "type": "transform",
    "label": "prepare_baseline()",
    "file": "bouquet/run.py",
-   "line": 426,
+   "line": 434,
    "desc": "Delegate to resolve_baseline (dispatch on source type). For IMAS: call _forward_solve_imas_baseline. Returns Baseline (j_phi, j_ind, j_BS, Ip_target, l_i_target, kinetics).",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
@@ -2655,7 +2647,7 @@
    "type": "transform",
    "label": "resolve_workflow_from_preset",
    "file": "bouquet/run.py",
-   "line": 745,
+   "line": 778,
    "desc": "resolve_workflow_from_preset(config.generation.workflow)",
    "subsystem": "Configuration"
   },
@@ -2664,7 +2656,7 @@
    "type": "transform",
    "label": "run() [convenience]",
    "file": "bouquet/run.py",
-   "line": 1084,
+   "line": 1305,
    "desc": "Orchestrator: setup_solver \u2192 prepare_baseline \u2192 generate \u2192 filter \u2192 export. Idempotent on early stages.",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
@@ -2673,7 +2665,7 @@
    "type": "transform",
    "label": "run_slices()",
    "file": "bouquet/run.py",
-   "line": 1102,
+   "line": 1323,
    "desc": "IMAS sweep: setup_solver once, then for each time: set_slice \u2192 prepare_baseline \u2192 generate \u2192 filter. One archive, one scan_key per slice.",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
@@ -2699,8 +2691,8 @@
    "id": "fn.run.store_equilibrium",
    "type": "transform",
    "label": "store_equilibrium",
-   "file": "bouquet/run.py",
-   "line": 890,
+   "file": "bouquet/TokaMaker_interface.py",
+   "line": 4607,
    "desc": "store_equilibrium(..., scan_key=gc.scan_key, ...)",
    "subsystem": "Configuration"
   },
@@ -2709,7 +2701,7 @@
    "type": "transform",
    "label": "calc_cylindrical_li_proxy",
    "file": "bouquet/sampling.py",
-   "line": 527,
+   "line": 529,
    "desc": "Compute cylindrical li proxy from j_phi profile",
    "subsystem": "GS reconstruction"
   },
@@ -2718,7 +2710,7 @@
    "type": "transform",
    "label": "generate_perturbed_GPR (GPR sampling)",
    "file": "bouquet/sampling.py",
-   "line": 253,
+   "line": 255,
    "desc": "Draw one GPR sample from N(baseline, Cov) where Cov depends on length_scale; returns 1-D profile matching input grid/magnitude",
    "subsystem": "Draw loop (GPR sampling)"
   },
@@ -2727,7 +2719,7 @@
    "type": "transform",
    "label": "find_bytes_dataset(grp, kind)",
    "file": "bouquet/schema.py",
-   "line": 54,
+   "line": 86,
    "desc": "Locate eqdsk/pfile bytes by schema-v2 fixed name or pre-v2 suffix scan",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -2736,7 +2728,7 @@
    "type": "transform",
    "label": "write_profile(grp, name, data)",
    "file": "bouquet/schema.py",
-   "line": 72,
+   "line": 104,
    "desc": "Create dataset with unit attr from PROFILE_UNITS dict",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -2753,7 +2745,7 @@
    "type": "transform",
    "label": "_corrective_jphi_iteration (residual refinement)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 2050,
+   "line": 2277,
    "desc": "Iterate TokaMaker forward solves until output j_phi matches intended target_jphi",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
@@ -2761,17 +2753,17 @@
    "id": "fn.tmi._kin_to_eq",
    "type": "transform",
    "label": "_kin_to_eq (kinetic grid \u2192 equilibrium grid)",
-   "line": 898,
-   "desc": "Inline helper; interpolates profiles from psi_kin to psi_N",
+   "line": 1089,
+   "desc": "Inline helper; regrids kinetics from psi_kin to psi_N with utils.pchip_interp (shape-preserving; was linear interp1d)",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)",
-   "file": ""
+   "file": "bouquet/TokaMaker_interface.py"
   },
   {
    "id": "fn.tmi._shelf_blend_decompose",
    "type": "transform",
    "label": "_shelf_blend_decompose",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 319,
+   "line": 394,
    "desc": "Decompose j_phi into j_ind + spike via Hermite edge bridge",
    "subsystem": "GS reconstruction"
   },
@@ -2780,8 +2772,8 @@
    "type": "transform",
    "label": "_swb_jbs_to_toroidal",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 660,
-   "desc": "Convert solve_with_bootstrap parallel j_BS to toroidal convention",
+   "line": 790,
+   "desc": "Undo SWB's R_avg/F projection to recover <j_BS.B>, then parallel_to_toroidal (net 1/(<R><1/R>)); must be followed by smooth_jbs_transition and precede any further mygs.solve()",
    "subsystem": "GS reconstruction"
   },
   {
@@ -2789,7 +2781,7 @@
    "type": "transform",
    "label": "VSC drift (common-mode + differential, quadrature sigma)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 283,
+   "line": 358,
    "desc": "F9A/F9B in-spec drift %% via error-propagated sigma; robust to near-zero coil or channel baseline",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
@@ -2816,8 +2808,8 @@
    "type": "transform",
    "label": "classify_jphi_profile",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 145,
-   "desc": "Classify j_phi edge profile (H/L mode) by spike detection",
+   "line": 166,
+   "desc": "Classify j_phi edge profile (H_mode / Lmode_like_jphi / L_mode). Two-pass edge-peak detection: liberal prominence-only pass, then height/prominence measured from the core/edge valley (not the fragile axis point); a no-edge-peak profile with a significant bootstrap keeps the full Sauter split",
    "subsystem": "GS reconstruction"
   },
   {
@@ -2825,7 +2817,7 @@
    "type": "transform",
    "label": "find_optimal_scale (SWB OFT import)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 1990,
+   "line": 2219,
    "desc": "Inverse GS solve to scale j0 and output j_phi to match Ip target",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
@@ -2834,8 +2826,8 @@
    "type": "transform",
    "label": "fit_inductive_profile",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 474,
-   "desc": "Fit smooth inductive profile with spline, scale for li proxy match",
+   "line": 549,
+   "desc": "Fit smooth inductive profile with a monotone PCHIP/smoothing spline, scale for li proxy match; core_exact_psi keeps the core residual exact",
    "subsystem": "GS reconstruction"
   },
   {
@@ -2843,7 +2835,7 @@
    "type": "transform",
    "label": "generate_bouquet (batch driver)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 2248,
+   "line": 2475,
    "desc": "Batch orchestrator for perturbed-equilibrium draws; manages RNG seed, baseline solve, coil bounds, DIFF_BS cache, draw loop, storage",
    "subsystem": "Draw loop (GPR sampling)"
   },
@@ -2860,7 +2852,7 @@
    "type": "transform",
    "label": "get_li_proxy_geometry (real-geom prescreen)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 1815,
+   "line": 2034,
    "desc": "Build real-geometry l_i proxy (L_p) from flux-surface perimeters",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
@@ -2869,7 +2861,7 @@
    "type": "transform",
    "label": "perturb_kinetic_equilibrium (core loop)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 698,
+   "line": 876,
    "desc": "Iterative kinetic profile perturbation \u2192 pressure matching \u2192 (optional SWB/PIN_JPHI/DIFF_BS) \u2192 l_i band-conditioning loop \u2192 return perturbed kinetics + j_phi",
    "subsystem": "Draw loop (GPR sampling)"
   },
@@ -2878,7 +2870,7 @@
    "type": "transform",
    "label": "recon-anchor forward solve",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 1616,
+   "line": 1835,
    "desc": "Set perturbed pressure + pinned/delta/standard j_phi, solve GS to establish baseline geometry",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
@@ -2887,7 +2879,7 @@
    "type": "transform",
    "label": "reconstruct_equilibrium",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4320,
+   "line": 4674,
    "desc": "Main driver: orchestrates full GS reconstruction workflow",
    "subsystem": "GS reconstruction"
   },
@@ -2896,7 +2888,7 @@
    "type": "transform",
    "label": "capture_native_output (fd redirect)",
    "file": "bouquet/utils.py",
-   "line": 17,
+   "line": 29,
    "desc": "suppress native solver stdout/stderr via os.dup2; used by generate() and run_shard",
    "subsystem": "Process-parallel path"
   },
@@ -2905,7 +2897,7 @@
    "type": "transform",
    "label": "discover_scan_keys(h5path_or_header)",
    "file": "bouquet/utils.py",
-   "line": 854,
+   "line": 1143,
    "desc": "List all scan-point keys or None if flat layout",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -2914,7 +2906,7 @@
    "type": "transform",
    "label": "initialize_equilibrium_database(header)",
    "file": "bouquet/utils.py",
-   "line": 251,
+   "line": 488,
    "desc": "Create HDF5 file, stamp schema_version/bouquet_version/created attrs",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -2923,7 +2915,7 @@
    "type": "transform",
    "label": "list_equilibrium_indices(h5path, scan_key)",
    "file": "bouquet/utils.py",
-   "line": 902,
+   "line": 1191,
    "desc": "Return sorted list of stored draw indices (gap-tolerant)",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -2932,7 +2924,7 @@
    "type": "transform",
    "label": "load_baseline_profiles(h5path, scan_key)",
    "file": "bouquet/utils.py",
-   "line": 932,
+   "line": 1221,
    "desc": "Read baseline dict: all stored profiles, sigmas, scalars (Ip_target, l_i_target)",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -2941,7 +2933,7 @@
    "type": "transform",
    "label": "load_config(h5path, scan_key)",
    "file": "bouquet/utils.py",
-   "line": 322,
+   "line": 559,
    "desc": "Read config_json from archive, prioritize per-scan copy",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -2950,7 +2942,7 @@
    "type": "transform",
    "label": "load_equilibrium(header, count, scan_key, eqdsk_out_dir)",
    "file": "bouquet/utils.py",
-   "line": 598,
+   "line": 880,
    "desc": "Read one perturbed draw: eqdsk_bytes, profiles, l_i*, optional coil_currents/Zeff",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -2959,7 +2951,7 @@
    "type": "transform",
    "label": "store_baseline_profiles (baseline save)",
    "file": "bouquet/utils.py",
-   "line": 1,
+   "line": 985,
    "desc": "Archive baseline (recon) profiles, uncertainties, equilibrium reference to HDF5 _baseline group (once per generate_bouquet)",
    "subsystem": "Draw loop (GPR sampling)"
   },
@@ -2968,7 +2960,7 @@
    "type": "transform",
    "label": "store_equilibrium (per-draw save)",
    "file": "bouquet/utils.py",
-   "line": 1,
+   "line": 625,
    "desc": "Archive accepted draw to HDF5: perturbed profiles, j_phi, diagnostics (l_i, Ip, boundary, coil currents)",
    "subsystem": "Draw loop (GPR sampling)"
   },
@@ -2977,7 +2969,7 @@
    "type": "transform",
    "label": "write_provenance(h5path, config, scan_key)",
    "file": "bouquet/utils.py",
-   "line": 287,
+   "line": 524,
    "desc": "Stamp file-level attrs (updated) and config_json dataset at root/scan level",
    "subsystem": "Archive, filtering & plotting"
   },
@@ -3076,7 +3068,7 @@
    "type": "decision",
    "label": "gate.draw_accepted (final acceptance)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3354,
+   "line": 3647,
    "desc": "Draw passes all gates (li_band, sawteeth_q0, solve_failed) \u2192 increment accepted count, store_equilibrium, update proxy_bias",
    "subsystem": "Draw loop (GPR sampling)"
   },
@@ -3094,7 +3086,7 @@
    "type": "decision",
    "label": "next pass already infeasible?",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3928,
+   "line": 4227,
    "desc": "skip tighter pass when natural drift exceeds its bound (avoids futile maxits solve)",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
@@ -3103,7 +3095,7 @@
    "type": "decision",
    "label": "homotopy pass converged?",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3826,
+   "line": 4125,
    "desc": "per tighter pass: snapshot psi/coils on success; rollback to last good on infeasibility",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
@@ -3121,7 +3113,7 @@
    "type": "decision",
    "label": "in-spec verdict",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3995,
+   "line": 4294,
    "desc": "max_F_drift<=inspec_F_max AND VSC drift (via _vsc_channel_drift_pct) <= inspec_VSC_max",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
@@ -3139,7 +3131,7 @@
    "type": "decision",
    "label": "Ip convergence check",
    "file": "bouquet/run.py",
-   "line": 684,
+   "line": 717,
    "desc": "Verify forward solve landed within 1% of Ip_target; warn if not (li_target may be unreliable)",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
@@ -3148,7 +3140,7 @@
    "type": "decision",
    "label": "re-point isoflux to perturbed LCFS?",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3677,
+   "line": 3976,
    "desc": "after Ip alignment, trace LCFS at 1-psi_pad and update isoflux targets (unless SKIP_ISO)",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
@@ -3157,7 +3149,7 @@
    "type": "decision",
    "label": "jBS_baseline_mode (diff vs rescale)",
    "file": "bouquet/run.py",
-   "line": 647,
+   "line": 662,
    "desc": "Branch: reconcile FUSE/source bootstrap vs OFT SWB. 'diff' = fixed FUSE total + SWB delta. 'rescale' = rescale SWB to match FUSE l_i (self-consistent)",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
@@ -3175,8 +3167,8 @@
    "type": "decision",
    "label": "gate.jphi_classified",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4713,
-   "desc": "Branch on jphi_mode (H_mode, Lmode_like_jphi, L_mode)",
+   "line": 5052,
+   "desc": "Branch on jphi_mode: H_mode (isolated edge spike), Lmode_like_jphi (no edge peak but significant bootstrap -> keep the full Sauter split), L_mode (negligible bootstrap)",
    "subsystem": "GS reconstruction"
   },
   {
@@ -3202,7 +3194,7 @@
    "type": "decision",
    "label": "gate.li_band (l_i acceptance)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 1896,
+   "line": 2115,
    "desc": "Accept draw iff |l_i - l_i_target_draw| / l_i_target_draw <= l_i_tolerance; reject triggers rejection sampling",
    "subsystem": "Draw loop (GPR sampling)"
   },
@@ -3211,7 +3203,7 @@
    "type": "decision",
    "label": "l_i band-conditioning loop (rejection sampling)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 1893,
+   "line": 2112,
    "desc": "Iterate: GPR-draw j_phi, pre-screen, find_optimal_scale, corrective, accept if l_i in band",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
@@ -3220,7 +3212,7 @@
    "type": "decision",
    "label": "gate.li_converged",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4612,
+   "line": 4951,
    "desc": "Test |li_current - li_target| < li_tol; loop control for secant iteration",
    "subsystem": "GS reconstruction"
   },
@@ -3238,7 +3230,7 @@
    "type": "decision",
    "label": "sample per-draw l_i target?",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3361,
+   "line": 3654,
    "desc": "l_i_uncertainty>0: draw target from N(l_i_target, sigma); else use recon target exactly",
    "subsystem": "Draw loop (GPR sampling)"
   },
@@ -3274,7 +3266,7 @@
    "type": "decision",
    "label": "post-alignment failure?",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4007,
+   "line": 4306,
    "desc": "iso-update/homotopy/in-spec exception -> reset to baseline, reject draw",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
@@ -3283,7 +3275,7 @@
    "type": "decision",
    "label": "pressure-match loop",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 959,
+   "line": 1152,
    "desc": "Iterate GPR-perturbed kinetics until <P> error within tolerance",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
@@ -3292,7 +3284,7 @@
    "type": "decision",
    "label": "Profile file type?",
    "file": "bouquet/config.py",
-   "line": -1,
+   "line": 564,
    "desc": "Dispatch: IDA .cdf vs p-file based on file extension or explicit config.kinetic_source",
    "subsystem": "Input readers (g-file / p-file / IDA)"
   },
@@ -3301,7 +3293,7 @@
    "type": "decision",
    "label": "QP saturated at coil bound?",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3864,
+   "line": 4163,
    "desc": "max coil drift >= 0.99x bound = active constraint -> treat as infeasible (rollback/reject)",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
@@ -3319,7 +3311,7 @@
    "type": "decision",
    "label": "gate.sawteeth_q0 (q0 constraint)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 2020,
+   "line": 2249,
    "desc": "If constrain_sawteeth=True: reject draw iff q0 < 1.0 after find_optimal_scale (pre-check at line 2002)",
    "subsystem": "Draw loop (GPR sampling)"
   },
@@ -3382,7 +3374,7 @@
    "type": "decision",
    "label": "SKIP_HARD env?",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3645,
+   "line": 3944,
    "desc": "diagnostic: skip iso-update + homotopy entirely (recon isoflux kept)",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
@@ -3391,7 +3383,7 @@
    "type": "decision",
    "label": "SKIP_HOMOTOPY env?",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3653,
+   "line": 3952,
    "desc": "diagnostic: bypass coil-bound tightening (iso-update still runs)",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
@@ -3400,7 +3392,7 @@
    "type": "decision",
    "label": "SKIP_ISO env?",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3648,
+   "line": 3947,
    "desc": "diagnostic: disable iso-update under hard bounds (isolates iso-shift effect)",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
@@ -3409,7 +3401,7 @@
    "type": "decision",
    "label": "gate.solve_failed (solver convergence)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3354,
+   "line": 3647,
    "desc": "Catch-all try/except at per-draw level: solver maxits, other RuntimeError \u2192 skip draw, increment failed count",
    "subsystem": "Draw loop (GPR sampling)"
   },
@@ -3454,7 +3446,7 @@
    "type": "decision",
    "label": "workflow validation gate",
    "file": "bouquet/run.py",
-   "line": 815,
+   "line": 984,
    "desc": "Enforces jBS_baseline_mode + perturb_jind_in_anchor consistency per source type. Raises unless allow_unsafe_workflow=True (warns instead).",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
@@ -3499,7 +3491,7 @@
    "type": "input",
    "label": "EQDSK geqdsk equilibrium",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4320,
+   "line": 4674,
    "desc": "geqdsk reference with j_tor, Ip, li(1), psi_N, boundary",
    "subsystem": "GS reconstruction"
   },
@@ -3544,7 +3536,7 @@
    "type": "input",
    "label": "Isoflux constraint points & weights",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4359,
+   "line": 4713,
    "desc": "(R,Z) coordinates and weights for LCFS boundary",
    "subsystem": "GS reconstruction"
   },
@@ -3553,7 +3545,7 @@
    "type": "input",
    "label": "Kinetic profiles (ne, te, ni, ti, Zeff)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4349,
+   "line": 4703,
    "desc": "Electron/ion density & temperature on eqdsk.psi_N",
    "subsystem": "GS reconstruction"
   },
@@ -3562,7 +3554,7 @@
    "type": "input",
    "label": "TokaMaker GS solver",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4344,
+   "line": 4698,
    "desc": "Initialized with mesh, regions, coils",
    "subsystem": "GS reconstruction"
   },
@@ -3661,7 +3653,7 @@
    "type": "artifact",
    "label": "PFile object",
    "file": "bouquet/io/pfile.py",
-   "line": 211,
+   "line": 221,
    "desc": "Profile dict + N Z A block; accessor methods for ne/te/ni/ti/omeg/etc",
    "subsystem": "Input readers (g-file / p-file / IDA)"
   },
@@ -3670,7 +3662,7 @@
    "type": "transform",
    "label": "progress_callback (per-draw tick)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3297,
+   "line": 3582,
    "desc": "Optional per-draw progress callback (used in process-parallel path for aggregate tqdm bar)",
    "subsystem": "Draw loop (GPR sampling)"
   },
@@ -3688,7 +3680,7 @@
    "type": "quantity",
    "label": "FUSE_tot",
    "file": "bouquet/run.py",
-   "line": 634,
+   "line": 646,
    "desc": "FUSE's total toroidal current j_tor; reference value anchored in diff mode",
    "subsystem": "Shared quantities"
   },
@@ -3697,7 +3689,7 @@
    "type": "quantity",
    "label": "F (flux function)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4683,
+   "line": 812,
    "desc": "R*B_phi from GS solution",
    "subsystem": "Shared quantities"
   },
@@ -3733,7 +3725,7 @@
    "type": "quantity",
    "label": "Ip (TokaMaker output)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4683,
+   "line": 5022,
    "desc": "Plasma current from li-matched GS solution",
    "subsystem": "Shared quantities"
   },
@@ -3759,7 +3751,7 @@
    "type": "quantity",
    "label": "Zeff_eq",
    "file": "bouquet/run.py",
-   "line": 869,
+   "line": 1040,
    "desc": "Zeff interpolated to equilibrium grid psi_N (from psi_N_kinetic); clipped >= 1; consumed by solve_with_bootstrap in draws",
    "subsystem": "Shared quantities"
   },
@@ -3813,7 +3805,7 @@
    "type": "quantity",
    "label": "aux_length_scales (auxiliary GPR scales)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 2319,
+   "line": 2561,
    "desc": "Dict of GPR length scales for auxiliary channels {name \u2192 scalar or 1-D array}",
    "subsystem": "Shared quantities"
   },
@@ -3822,7 +3814,7 @@
    "type": "quantity",
    "label": "aux_out (per-draw auxiliary)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 1036,
+   "line": 1229,
    "desc": "Dict of per-draw auxiliary profiles {name \u2192 1-D perturbed profile}; includes active zeff or passive omega_tor/e_r/chi",
    "subsystem": "Shared quantities"
   },
@@ -3840,7 +3832,7 @@
    "type": "quantity",
    "label": "<B\u00b2> (FSA)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4687,
+   "line": 821,
    "desc": "Flux-surface average of B\u00b2 from sauter_fc",
    "subsystem": "Shared quantities"
   },
@@ -3849,7 +3841,7 @@
    "type": "quantity",
    "label": "<1/R> (FSA)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4686,
+   "line": 821,
    "desc": "Flux-surface average from get_q",
    "subsystem": "Shared quantities"
   },
@@ -3858,7 +3850,7 @@
    "type": "quantity",
    "label": "baseline_j_BS (+ jBS_diff)",
    "file": "bouquet/run.py",
-   "line": 903,
+   "line": 1072,
    "desc": "Baseline bootstrap passed to generate_bouquet: j_BS + jBS_diff (diff mode) or j_BS alone (rescale/raw)",
    "subsystem": "Shared quantities"
   },
@@ -3885,7 +3877,7 @@
    "type": "quantity",
    "label": "bootstrap scaling factor",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4452,
+   "line": 4820,
    "desc": "Optional bootstrap rescaling (1.0 if rescale_j_BS=False)",
    "subsystem": "Shared quantities"
   },
@@ -3920,7 +3912,7 @@
    "type": "quantity",
    "label": "diagnostics (per-draw metrics)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 2089,
+   "line": 2316,
    "desc": "Dict of per-draw observables: l_i(1), Ip, boundary, coil currents, l_i iteration count, j0_scales, Ip_scales, LCFS shift from recon",
    "subsystem": "Shared quantities"
   },
@@ -3956,7 +3948,7 @@
    "type": "quantity",
    "label": "eqdsk j_tor (baseline)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4407,
+   "line": 4761,
    "desc": "Toroidal current density from geqdsk [A/m\u00b2]",
    "subsystem": "Shared quantities"
   },
@@ -3965,7 +3957,7 @@
    "type": "quantity",
    "label": "FFp for GS (corrective)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4730,
+   "line": 5069,
    "desc": "j_phi profile dict for corrective iteration input",
    "subsystem": "Shared quantities"
   },
@@ -3974,7 +3966,7 @@
    "type": "quantity",
    "label": "FFp for GS (li-match)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4562,
+   "line": 4901,
    "desc": "j_phi profile dict with current ind_factor for li-matching solve",
    "subsystem": "Shared quantities"
   },
@@ -4019,7 +4011,7 @@
    "type": "quantity",
    "label": "guess_j_inductive",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4366,
+   "line": 4720,
    "desc": "Initial inductive j_phi shape for solve_with_bootstrap",
    "subsystem": "Shared quantities"
   },
@@ -4036,7 +4028,7 @@
    "type": "quantity",
    "label": "ind_factor (li-converged)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4692,
+   "line": 5031,
    "desc": "Final inductive scale from secant iteration (ind_1)",
    "subsystem": "Shared quantities"
   },
@@ -4045,7 +4037,7 @@
    "type": "quantity",
    "label": "inductive scaling factor",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4451,
+   "line": 4819,
    "desc": "Scale factor applied to j_inductive_basis via li proxy match",
    "subsystem": "Shared quantities"
   },
@@ -4106,7 +4098,7 @@
    "type": "quantity",
    "label": "jBS_scale_range (centered)",
    "file": "bouquet/run.py",
-   "line": 888,
+   "line": 1057,
    "desc": "Perturbed bootstrap scale range for draws: (range[0]*bs_scale, range[1]*bs_scale); centers on calibrated bs_scale from prepare_baseline",
    "subsystem": "Shared quantities"
   },
@@ -4115,7 +4107,7 @@
    "type": "quantity",
    "label": "jBS_scales (per-draw samples)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3093,
+   "line": 3332,
    "desc": "1-D array [n_equils] of uniform random jBS scale factors in [lo, hi] range; one per draw",
    "subsystem": "Shared quantities"
   },
@@ -4124,7 +4116,7 @@
    "type": "quantity",
    "label": "j_BS (bootstrap current)",
    "file": "bouquet/baseline.py",
-   "line": -1,
+   "line": 620,
    "desc": "Sauter model with full core hump + edge; set via isolate_edge_jBS flag",
    "subsystem": "Shared quantities"
   },
@@ -4133,7 +4125,7 @@
    "type": "quantity",
    "label": "j_BS_final",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4743,
+   "line": 5082,
    "desc": "Final bootstrap component (unchanged from corrective)",
    "subsystem": "Shared quantities"
   },
@@ -4142,8 +4134,8 @@
    "type": "quantity",
    "label": "j_BS_isolated (toroidal)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4427,
-   "desc": "Isolated bootstrap current after parallel\u2192toroidal conversion",
+   "line": 4787,
+   "desc": "Isolated bootstrap current after parallel->toroidal conversion AND the shared near-axis smoothing",
    "subsystem": "Shared quantities"
   },
   {
@@ -4151,17 +4143,17 @@
    "type": "quantity",
    "label": "j_BS after optional shelf",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4534,
+   "line": 4873,
    "desc": "j_BS_isolated with optional flat shelf applied if shelf_psi_N>0",
    "subsystem": "Shared quantities"
   },
   {
    "id": "qty.j_BS_smoothed",
    "type": "quantity",
-   "label": "j_BS smoothed transition",
+   "label": "j_BS near-axis smoothed",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4478,
-   "desc": "Gaussian-filtered j_BS around shelf\u2192spike transition",
+   "line": 825,
+   "desc": "smooth_jbs_transition(): shared Gaussian repair of SWB's collapsed near-axis j_BS point; applied after every _swb_jbs_to_toroidal conversion (recon + all draw paths)",
    "subsystem": "Shared quantities"
   },
   {
@@ -4169,7 +4161,7 @@
    "type": "quantity",
    "label": "j_BS_src",
    "file": "bouquet/run.py",
-   "line": 633,
+   "line": 645,
    "desc": "Source bootstrap current [A/m^2] on psi_N from FUSE/source (saved for diff-mode offset)",
    "subsystem": "Shared quantities"
   },
@@ -4178,7 +4170,7 @@
    "type": "quantity",
    "label": "j_BS from solve_with_bootstrap (parallel)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4416,
+   "line": 4770,
    "desc": "Bootstrap current (parallel convention) before conversion",
    "subsystem": "Shared quantities"
   },
@@ -4223,7 +4215,7 @@
    "type": "quantity",
    "label": "<j.B> (undo SWB projection)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4688,
+   "line": 818,
    "desc": "j_bs_swb * F / ravgs[0]; recovers parallel current before SWB's R_avg/F",
    "subsystem": "Shared quantities"
   },
@@ -4241,7 +4233,7 @@
    "type": "quantity",
    "label": "j_ind_final",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4750,
+   "line": 5089,
    "desc": "Final inductive component (j_phi_final - j_BS)",
    "subsystem": "Shared quantities"
   },
@@ -4250,7 +4242,7 @@
    "type": "quantity",
    "label": "j_ind (li-matched)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4692,
+   "line": 5031,
    "desc": "ind_factor_opt * j_inductive_fit",
    "subsystem": "Shared quantities"
   },
@@ -4259,7 +4251,7 @@
    "type": "quantity",
    "label": "j_inductive (ohmic current)",
    "file": "bouquet/baseline.py",
-   "line": -1,
+   "line": 620,
    "desc": "Pure ohmic contribution j_phi - j_BS - j_NBI; forward decomposition",
    "subsystem": "Shared quantities"
   },
@@ -4268,8 +4260,8 @@
    "type": "quantity",
    "label": "j_inductive_basis (spline fit)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4611,
-   "desc": "Fitted inductive component before scaling (PCHIP interpolant)",
+   "line": 673,
+   "desc": "Fitted inductive component before scaling (monotone PCHIP interpolant through the knots)",
    "subsystem": "Shared quantities"
   },
   {
@@ -4286,7 +4278,7 @@
    "type": "quantity",
    "label": "j_inductive_fit (scaled)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4611,
+   "line": 712,
    "desc": "ind_scale * j_inductive_basis",
    "subsystem": "Shared quantities"
   },
@@ -4295,7 +4287,7 @@
    "type": "quantity",
    "label": "j_ls (current length scale)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 2266,
+   "line": 2493,
    "desc": "GPR correlation length for j_phi (scalar or 1-D array for non-stationary Gibbs kernel)",
    "subsystem": "Shared quantities"
   },
@@ -4331,7 +4323,7 @@
    "type": "quantity",
    "label": "j_phi_corrective_target",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4725,
+   "line": 5064,
    "desc": "j_ind_li + j_BS_isolated for corrective iteration",
    "subsystem": "Shared quantities"
   },
@@ -4340,7 +4332,7 @@
    "type": "quantity",
    "label": "j_phi (diff)",
    "file": "bouquet/run.py",
-   "line": 650,
+   "line": 665,
    "desc": "diff mode: total anchored to FUSE; j_phi = FUSE_tot (unchanged)",
    "subsystem": "Shared quantities"
   },
@@ -4349,7 +4341,7 @@
    "type": "quantity",
    "label": "j_phi_final",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4742,
+   "line": 5081,
    "desc": "Final toroidal current density output",
    "subsystem": "Shared quantities"
   },
@@ -4358,7 +4350,7 @@
    "type": "quantity",
    "label": "j_phi_fit (pre-li-match)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4612,
+   "line": 4951,
    "desc": "j_inductive_fit + bs_scale*j_BS; target for li proxy",
    "subsystem": "Shared quantities"
   },
@@ -4367,7 +4359,7 @@
    "type": "quantity",
    "label": "j_phi_output (corrective)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4729,
+   "line": 5068,
    "desc": "TokaMaker output j_phi after adaptive corrective iteration",
    "subsystem": "Shared quantities"
   },
@@ -4376,7 +4368,7 @@
    "type": "quantity",
    "label": "j_phi (rescale)",
    "file": "bouquet/run.py",
-   "line": 666,
+   "line": 681,
    "desc": "rescale mode: total rebuilt from rescaled SWB; j_phi = j_ind + scale*j_BS_swb + j_fixed",
    "subsystem": "Shared quantities"
   },
@@ -4412,7 +4404,7 @@
    "type": "quantity",
    "label": "jphi_mode",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4430,
+   "line": 4798,
    "desc": "Classification result: 'H_mode', 'Lmode_like_jphi', or 'L_mode'",
    "subsystem": "Shared quantities"
   },
@@ -4447,7 +4439,7 @@
    "type": "quantity",
    "label": "l_i_target_draw (per-draw sample)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 3304,
+   "line": 3589,
    "desc": "Per-draw internal inductance target, sampled from N(l_i_target, l_i_uncertainty*l_i_target) or pinned to l_i_target",
    "subsystem": "Shared quantities"
   },
@@ -4456,7 +4448,7 @@
    "type": "quantity",
    "label": "li (TokaMaker output)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4577,
+   "line": 4916,
    "desc": "Computed li(1) from GS solver for current ind_factor",
    "subsystem": "Shared quantities"
   },
@@ -4465,7 +4457,7 @@
    "type": "quantity",
    "label": "li_final",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4682,
+   "line": 5021,
    "desc": "Final internal inductance li(1) (corrective equilibrium)",
    "subsystem": "Shared quantities"
   },
@@ -4474,7 +4466,7 @@
    "type": "quantity",
    "label": "baseline li proxy",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4440,
+   "line": 4808,
    "desc": "Cylindrical li(1) proxy from eqdsk_jtor",
    "subsystem": "Shared quantities"
   },
@@ -4510,7 +4502,7 @@
    "type": "quantity",
    "label": "n_ls (density length scale)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 2264,
+   "line": 2491,
    "desc": "GPR correlation length for density profiles (scalar or 1-D Gibbs kernel)",
    "subsystem": "Shared quantities"
   },
@@ -4519,7 +4511,7 @@
    "type": "quantity",
    "label": "ne (electron density)",
    "file": "bouquet/io/pfile.py",
-   "line": 329,
+   "line": 339,
    "desc": "From p-file or IDA; m^-3 (IDA) or 10^20/m^3 (p-file); on psinorm or psi_N",
    "subsystem": "Shared quantities"
   },
@@ -4528,7 +4520,7 @@
    "type": "quantity",
    "label": "ne_draw (per-draw perturb)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 968,
+   "line": 1161,
    "desc": "Per-draw perturbed electron density; sampled via _draw_monotonic_perturbation(ne/ne[0], sigma_ne/ne[0], n_ls)",
    "subsystem": "Shared quantities"
   },
@@ -4537,7 +4529,7 @@
    "type": "quantity",
    "label": "ne_perturb (perturbed density)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 968,
+   "line": 1161,
    "desc": "GPR-sampled electron density on psi_kin",
    "subsystem": "Shared quantities"
   },
@@ -4555,7 +4547,7 @@
    "type": "quantity",
    "label": "ni (main-ion density)",
    "file": "bouquet/io/pfile.py",
-   "line": 339,
+   "line": 349,
    "desc": "From p-file directly or derived from (ne, Zeff) via quasineutrality in IDA",
    "subsystem": "Shared quantities"
   },
@@ -4564,7 +4556,7 @@
    "type": "quantity",
    "label": "ni_draw (per-draw perturb or derived)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 990,
+   "line": 1183,
    "desc": "Per-draw ion density: DERIVED from (ne_draw, zeff_draw) via main_ion_density_from_zeff when Zeff-primary active; else sampled",
    "subsystem": "Shared quantities"
   },
@@ -4582,7 +4574,7 @@
    "type": "quantity",
    "label": "omega_tor (toroidal rotation)",
    "file": "bouquet/io/pfile.py",
-   "line": 364,
+   "line": 374,
    "desc": "From p-file omeg or IDA omega_tor_12C6 (carbon); rad/s on kinetic grid",
    "subsystem": "Shared quantities"
   },
@@ -4591,7 +4583,7 @@
    "type": "quantity",
    "label": "output_jphi (per-draw j_phi)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 2050,
+   "line": 2277,
    "desc": "Perturbed toroidal current density after corrective iteration (converged input to store_equilibrium)",
    "subsystem": "Shared quantities"
   },
@@ -4618,7 +4610,7 @@
    "type": "quantity",
    "label": "p_fast (fast-ion pressure)",
    "file": "bouquet/io/pfile.py",
-   "line": 354,
+   "line": 364,
    "desc": "From p-file pb or IDA pb (if available); fast-ion contribution for fixed-component config",
    "subsystem": "Shared quantities"
   },
@@ -4654,7 +4646,7 @@
    "type": "quantity",
    "label": "p_total",
    "file": "bouquet/run.py",
-   "line": 555,
+   "line": 566,
    "desc": "Total pressure [Pa] on psi_N: e*(ne*Te + ni*Ti) + p_fast + p_diff (impurity carbon pressure added for IMAS)",
    "subsystem": "Shared quantities"
   },
@@ -4663,8 +4655,8 @@
    "type": "quantity",
    "label": "p' (pressure gradient)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4515,
-   "desc": "Gradient of pressure profile for GS equilibrium",
+   "line": 4854,
+   "desc": "p' for the GS equilibrium via shape-preserving PCHIP derivative (utils.pchip_derivative), not np.gradient",
    "subsystem": "Shared quantities"
   },
   {
@@ -4672,7 +4664,7 @@
    "type": "quantity",
    "label": "p' for GS",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4518,
+   "line": 4857,
    "desc": "Pressure gradient dict for set_profiles",
    "subsystem": "Shared quantities"
   },
@@ -4681,7 +4673,7 @@
    "type": "quantity",
    "label": "pres_tmp (per-draw pressure)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 1006,
+   "line": 1199,
    "desc": "Per-draw thermal pressure EC*(ne_eq*te_eq + ni_eq*ti_eq) + p_imp + p_fast + p_diff_anchor; target for <P> matching",
    "subsystem": "Shared quantities"
   },
@@ -4690,7 +4682,7 @@
    "type": "quantity",
    "label": "pressure profile",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4513,
+   "line": 4852,
    "desc": "pres_tmp = 1.6022e-19 * (ne*te + ni*ti) [Pa]",
    "subsystem": "Shared quantities"
   },
@@ -4735,7 +4727,7 @@
    "type": "quantity",
    "label": "quality metrics dict",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4781,
+   "line": 5120,
    "desc": "Reconstruction quality: mode, core/edge RMS, li/Ip errors, boundary deviations",
    "subsystem": "Shared quantities"
   },
@@ -4744,7 +4736,7 @@
    "type": "quantity",
    "label": "shelf_psi (location)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4435,
+   "line": 4803,
    "desc": "psi_N where j_BS shelf transitions to spike",
    "subsystem": "Shared quantities"
   },
@@ -4798,7 +4790,7 @@
    "type": "quantity",
    "label": "spike_metrics",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 4430,
+   "line": 4798,
    "desc": "Edge spike detection metrics (heights, psi locations, ratios)",
    "subsystem": "Shared quantities"
   },
@@ -4816,7 +4808,7 @@
    "type": "quantity",
    "label": "t_ls (temperature length scale)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 2265,
+   "line": 2492,
    "desc": "GPR correlation length for temperature profiles",
    "subsystem": "Shared quantities"
   },
@@ -4834,7 +4826,7 @@
    "type": "quantity",
    "label": "te (electron temperature)",
    "file": "bouquet/io/pfile.py",
-   "line": 334,
+   "line": 344,
    "desc": "From p-file (keV) or IDA (eV); on psinorm or psi_N",
    "subsystem": "Shared quantities"
   },
@@ -4843,7 +4835,7 @@
    "type": "quantity",
    "label": "te_draw (per-draw perturb)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 972,
+   "line": 1165,
    "desc": "Per-draw perturbed electron temperature; sampled monotonically",
    "subsystem": "Shared quantities"
   },
@@ -4861,7 +4853,7 @@
    "type": "quantity",
    "label": "ti (ion temperature)",
    "file": "bouquet/io/pfile.py",
-   "line": 344,
+   "line": 354,
    "desc": "From p-file (keV) or IDA T_12C6 for carbon (eV); on psinorm or psi_N",
    "subsystem": "Shared quantities"
   },
@@ -4870,7 +4862,7 @@
    "type": "quantity",
    "label": "ti_draw (per-draw perturb)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 996,
+   "line": 1189,
    "desc": "Per-draw perturbed ion temperature; sampled monotonically",
    "subsystem": "Shared quantities"
   },
@@ -4897,7 +4889,7 @@
    "type": "quantity",
    "label": "zeff_draw (per-draw sample)",
    "file": "bouquet/TokaMaker_interface.py",
-   "line": 983,
+   "line": 1176,
    "desc": "Per-draw effective charge when zeff channel active; clipped to [1.0, Z_imp*(1-1e-9)]; triggers ni derivation",
    "subsystem": "Shared quantities"
   },
@@ -4936,6 +4928,312 @@
    "line": "158",
    "desc": "SeedSequence(entropy=[seed_base, worker_id, scan_key_hash]) -> 32-bit seed",
    "subsystem": "Process-parallel path"
+  },
+  {
+   "id": "cfg.generationconfig.jbs_delta_mode",
+   "type": "knob",
+   "label": "jbs_delta_mode",
+   "file": "bouquet/config.py",
+   "line": 294,
+   "subsystem": "Configuration",
+   "desc": "Opt-in delta composition: per-draw spike = baseline_j_BS + (raw SWB(perturbed) - raw SWB(sigma=0)); the common-mode near-axis artifact cancels exactly. Costs one extra SWB call. Default False"
+  },
+  {
+   "id": "cfg.generationconfig.capture_live_eq",
+   "type": "knob",
+   "label": "capture_live_eq",
+   "file": "bouquet/config.py",
+   "line": 407,
+   "subsystem": "Configuration",
+   "desc": "Snapshot each converged draw's flux-surface-average geometry into scan/<key>/<draw>/eq_fsa (default True)"
+  },
+  {
+   "id": "cfg.generationconfig.capture_npsi",
+   "type": "knob",
+   "label": "capture_npsi",
+   "file": "bouquet/config.py",
+   "line": 409,
+   "subsystem": "Configuration",
+   "desc": "Flux-surface grid size for the eq_fsa capture (default 257, matching the eqdsk grid; >=129)"
+  },
+  {
+   "id": "cfg.generationconfig.capture_exact_inv_R2",
+   "type": "knob",
+   "label": "capture_exact_inv_R2",
+   "file": "bouquet/config.py",
+   "line": 414,
+   "subsystem": "Configuration",
+   "desc": "Capture exact <1/R^2> (native get_q key, else flux-surface quadrature) instead of the <B_phi^2> ~= <B^2> bracket"
+  },
+  {
+   "id": "cfg.generationconfig.imas_corrective_jphi",
+   "type": "knob",
+   "label": "imas_corrective_jphi",
+   "file": "bouquet/config.py",
+   "line": 375,
+   "subsystem": "Configuration",
+   "desc": "Opt-in Newton corrector on the IMAS forward solve so the ACHIEVED FSA j_phi lands on the anchor target (single-pass jphi-linterp drifts a few %). Default False, under validation"
+  },
+  {
+   "id": "cfg.solverconfig.saddle_targets",
+   "type": "knob",
+   "label": "SolverConfig.saddle_targets",
+   "file": "bouquet/config.py",
+   "line": 63,
+   "subsystem": "Configuration",
+   "desc": "(N,2) X-point pins where B_pol is driven to zero (mygs.set_saddle_constraints); opt-in, None disables"
+  },
+  {
+   "id": "cfg.solverconfig.saddle_weights",
+   "type": "knob",
+   "label": "SolverConfig.saddle_weights",
+   "file": "bouquet/config.py",
+   "line": 64,
+   "subsystem": "Configuration",
+   "desc": "(N,) weights for saddle_targets; default 1.0 each"
+  },
+  {
+   "id": "cfg.core_exact_psi",
+   "type": "knob",
+   "label": "core_exact_psi (core-exact inductive fit)",
+   "file": "bouquet/TokaMaker_interface.py",
+   "line": 554,
+   "subsystem": "GS reconstruction",
+   "desc": "fit_inductive_profile: below psi_N=0.30 add 16 dense knots and blend the RAW eqdsk_jtor - j_BS residual into the smoothing spline, so the Sauter core anti-hump survives the global smoothing (default 0.30)"
+  },
+  {
+   "id": "fn.tmi.smooth_jbs_transition",
+   "type": "transform",
+   "label": "smooth_jbs_transition (shared near-axis j_BS repair)",
+   "file": "bouquet/TokaMaker_interface.py",
+   "line": 825,
+   "subsystem": "Shared quantities",
+   "desc": "Repairs SWB's collapsed innermost Sauter point: locate the leading flat shelf, Gaussian-filter a +/-10-index window about the shelf end, triangular-blend back. Applied after EVERY _swb_jbs_to_toroidal (recon + all draw paths) so a sigma=0 draw reproduces the baseline j_BS"
+  },
+  {
+   "id": "fn.utils.pchip_interp",
+   "type": "transform",
+   "label": "pchip_interp (kinetic -> equilibrium regrid)",
+   "file": "bouquet/utils.py",
+   "line": 1321,
+   "subsystem": "Shared quantities",
+   "desc": "Shape-preserving monotone regrid at all 8 kin->eq sites; replaces linear np.interp, whose per-knot slope kinks made the Sauter j_BS a staircase"
+  },
+  {
+   "id": "fn.utils.pchip_derivative",
+   "type": "transform",
+   "label": "pchip_derivative (analytic p')",
+   "file": "bouquet/utils.py",
+   "line": 161,
+   "subsystem": "Shared quantities",
+   "desc": "Analytic PCHIP derivative on the native psi_N grid: no pedestal smearing from resample+central difference, no-overshoot on monotone pressure; DerivativeSanityWarning tripwires"
+  },
+  {
+   "id": "fn.physics.q_ravg",
+   "type": "transform",
+   "label": "q_ravg (dict-or-positional FSA accessor)",
+   "file": "bouquet/physics.py",
+   "line": 28,
+   "subsystem": "Shared quantities",
+   "desc": "Reads named flux-surface averages ('<R>', '<1/R>', '<1/R^2>', 'dV/dPsi') from get_q/sauter_fc ravgs in either the dict (newer OFT) or positional layout"
+  },
+  {
+   "id": "qty.j_BS_isolated_raw",
+   "type": "quantity",
+   "label": "j_BS_isolated_raw (pre-smoothing)",
+   "file": "bouquet/TokaMaker_interface.py",
+   "line": 4785,
+   "subsystem": "Shared quantities",
+   "desc": "Raw toroidal conversion of SWB's isolated_j_BS, before the near-axis repair; classification is deliberately run on this so it is invariant to the axis treatment"
+  },
+  {
+   "id": "qty.eq_fsa",
+   "type": "quantity",
+   "label": "eq_fsa (per-draw flux-surface geometry)",
+   "file": "bouquet/physics.py",
+   "line": 409,
+   "subsystem": "Shared quantities",
+   "desc": "psi_N, F, <1/R>, <B^2>, q, dV/dpsi, f_trap, <|B|> (+ <1/R^2> when the exact capture succeeds) of the converged draw"
+  },
+  {
+   "id": "fn.physics.capture_equilibrium_fsa",
+   "type": "transform",
+   "label": "capture_equilibrium_fsa (live-equilibrium snapshot)",
+   "file": "bouquet/physics.py",
+   "line": 335,
+   "subsystem": "Per-draw solve (SWB / l_i / homotopy)",
+   "desc": "Extract the converged draw's own FSA metrics (no re-solve) so the toroidal<->parallel conversion at IMAS export uses that draw's geometry rather than the baseline's"
+  },
+  {
+   "id": "gate.capture_live_eq",
+   "type": "decision",
+   "label": "capture live equilibrium?",
+   "file": "bouquet/TokaMaker_interface.py",
+   "line": 4410,
+   "subsystem": "Per-draw solve (SWB / l_i / homotopy)",
+   "desc": "capture_live_eq: try/except around the FSA capture -- a failure never sinks a draw, it only warns that IMAS export falls back to the baseline-ratio reconstruction for it"
+  },
+  {
+   "id": "gate.jbs_delta_mode",
+   "type": "decision",
+   "label": "spike-delta composition branch",
+   "file": "bouquet/TokaMaker_interface.py",
+   "line": 1717,
+   "subsystem": "Per-draw solve (SWB / l_i / homotopy)",
+   "desc": "jbs_delta_mode: compose the per-draw spike as baseline_j_BS + (raw perturbed SWB - cached raw sigma=0 SWB) instead of using the smoothed conversion directly"
+  },
+  {
+   "id": "qty.delta_spike0_raw",
+   "type": "quantity",
+   "label": "_delta_spike0_raw (cached sigma=0 SWB reference)",
+   "file": "bouquet/TokaMaker_interface.py",
+   "line": 3569,
+   "subsystem": "Per-draw solve (SWB / l_i / homotopy)",
+   "desc": "Raw toroidal conversion of the pre-loop SWB(recon kinetics) spike; the reference subtracted in delta mode (its smoothed twin _diff_spike_recon feeds DIFF_BS)"
+  },
+  {
+   "id": "fn.run.verify_sigma0_consistency",
+   "type": "transform",
+   "label": "verify_sigma0_consistency() (sigma=0 guard)",
+   "file": "bouquet/run.py",
+   "line": 803,
+   "subsystem": "Bouquet orchestrator / IMAS forward solve",
+   "desc": "Regression guard: replay the per-draw pre-SWB sequence on UNPERTURBED kinetics (PCHIP regrid, pressure assembly, anchor solve, SWB, toroidal convert, smoothing) and compare the resulting spike against baseline.j_BS; reports max/rms deviation and passed"
+  },
+  {
+   "id": "gate.sigma0_floor_zone",
+   "type": "decision",
+   "label": "floor zone? (j_inductive <= 0)",
+   "file": "bouquet/run.py",
+   "line": 910,
+   "subsystem": "Bouquet orchestrator / IMAS forward solve",
+   "desc": "Points clamped by floor_inductive_split deliberately carry the deficit in baseline.j_BS; they are excluded from the deviation and reported separately as n_floored / max_dev_floored"
+  },
+  {
+   "id": "gate.imas_corrective_jphi",
+   "type": "decision",
+   "label": "IMAS corrective j_phi iteration?",
+   "file": "bouquet/run.py",
+   "line": 702,
+   "subsystem": "Bouquet orchestrator / IMAS forward solve",
+   "desc": "imas_corrective_jphi: opt-in Newton loop (min_iters=2, max_iters=8, rtol=0.02, damping=0.5) driving the achieved FSA j_phi onto the anchor target; default off"
+  },
+  {
+   "id": "fn.baseline.floor_inductive_split",
+   "type": "transform",
+   "label": "floor_inductive_split(j_inductive, j_BS)",
+   "file": "bouquet/baseline.py",
+   "line": 286,
+   "subsystem": "Baseline & uncertainty resolution",
+   "desc": "Enforce j_inductive >= 0, absorbing the negative sliver into j_BS so the pair still sums to the same total; creates the 'floor zone' the sigma=0 guard carves out"
+  },
+  {
+   "id": "art.h5.eq_fsa",
+   "type": "artifact",
+   "label": "eq_fsa group (per-draw FSA geometry)",
+   "file": "bouquet/utils.py",
+   "line": 849,
+   "subsystem": "Archive, filtering & plotting",
+   "desc": "scan/<key>/<draw>/eq_fsa/: one float64 dataset per captured FSA key with units attrs from schema.EQ_FSA_UNITS; absent when capture was off or failed"
+  },
+  {
+   "id": "fn.utils.load_eq_fsa",
+   "type": "transform",
+   "label": "load_eq_fsa(header, count, scan_key)",
+   "file": "bouquet/utils.py",
+   "line": 860,
+   "subsystem": "Archive, filtering & plotting",
+   "desc": "Read a draw's eq_fsa block as a dict of 1-D arrays; None when the group is absent"
+  },
+  {
+   "id": "fn.run.export_bundle",
+   "type": "transform",
+   "label": "export_bundle(out_dir, formats, selection)",
+   "file": "bouquet/run.py",
+   "line": 1275,
+   "subsystem": "Archive, filtering & plotting",
+   "desc": "Per-draw geqdsk / p-file / profiles-JSON bundle for the selected sub-ensemble; thin wrapper over ScanView.extract"
+  },
+  {
+   "id": "fn.run.export_ids",
+   "type": "transform",
+   "label": "export_ids(out_dir, selection, time, fidelity)",
+   "file": "bouquet/run.py",
+   "line": 1287,
+   "subsystem": "Archive, filtering & plotting",
+   "desc": "Write one IMAS/OMAS IDS per selected draw via export_imas_drawset; ImasSource only (TypeError otherwise)"
+  },
+  {
+   "id": "fn.io.imas.export_imas_drawset",
+   "type": "transform",
+   "label": "export_imas_drawset(...)",
+   "file": "bouquet/io/imas.py",
+   "line": 696,
+   "subsystem": "Archive, filtering & plotting",
+   "desc": "Loop select_indices, writing {header}_draw{i}.json against the template IDS; requires an explicit scan_key on multi-scan archives"
+  },
+  {
+   "id": "fn.io.imas.write_imas_draw",
+   "type": "transform",
+   "label": "write_imas_draw(...)",
+   "file": "bouquet/io/imas.py",
+   "line": 495,
+   "subsystem": "Archive, filtering & plotting",
+   "desc": "Core per-draw IDS writer: rebuild core_profiles + equilibrium from the archived draw (j_tor is exact in every mode)"
+  },
+  {
+   "id": "fn.io.imas._eq_fsa_geom_on",
+   "type": "transform",
+   "label": "_eq_fsa_geom_on(eq_fsa, psiN_t, B0)",
+   "file": "bouquet/io/imas.py",
+   "line": 477,
+   "subsystem": "Archive, filtering & plotting",
+   "desc": "Interpolate a captured eq_fsa block onto the template psi grid into the geom dict for toroidal_to_parallel; <1/R^2> only when captured, else the <B_phi^2> ~= <B^2> bracket"
+  },
+  {
+   "id": "fn.physics.toroidal_to_parallel",
+   "type": "transform",
+   "label": "toroidal_to_parallel()",
+   "file": "bouquet/physics.py",
+   "line": 194,
+   "subsystem": "Archive, filtering & plotting",
+   "desc": "Inverse of parallel_to_toroidal: FSA toroidal j_phi -> IMAS <j.B>/B0 for the exported IDS"
+  },
+  {
+   "id": "gate.ids_fidelity",
+   "type": "decision",
+   "label": "IDS fidelity: exact | auto | reconstruct",
+   "file": "bouquet/io/imas.py",
+   "line": 661,
+   "subsystem": "Archive, filtering & plotting",
+   "desc": "exact = this draw's eq_fsa geometry (raises if it was never captured); reconstruct = baseline-ratio c = j_tor/j_total from the template; auto = exact when eq_fsa is present, else reconstruct"
+  },
+  {
+   "id": "fn.archive.DrawView.profiles_doc",
+   "type": "transform",
+   "label": "DrawView.profiles_doc()",
+   "file": "bouquet/archive.py",
+   "line": 205,
+   "subsystem": "Archive, filtering & plotting",
+   "desc": "Portable self-describing dict of one draw's profile state; surfaces eq_fsa + eq_fsa_units when the draw carries them"
+  },
+  {
+   "id": "fn.archive.DrawView.extract",
+   "type": "transform",
+   "label": "DrawView.extract(out_dir, formats)",
+   "file": "bouquet/archive.py",
+   "line": 230,
+   "subsystem": "Archive, filtering & plotting",
+   "desc": "Write one draw's bundle to disk (geqdsk / p-file raw bytes, profiles JSON); returns {format: path}"
+  },
+  {
+   "id": "fn.archive.ScanView.extract",
+   "type": "transform",
+   "label": "ScanView.extract(out_dir, formats, selection)",
+   "file": "bouquet/archive.py",
+   "line": 300,
+   "subsystem": "Archive, filtering & plotting",
+   "desc": "Extract a bundle for every draw in the selection; returns {draw_index: {format: path}}"
   }
  ],
  "edges": [
@@ -10265,6 +10563,377 @@
    "kind": "data",
    "desc": "Per-worker seed passed to run_shard as cfg.generation.seed",
    "subsystem": "Process-parallel path"
+  },
+  {
+   "src": "fn.tmi._swb_jbs_to_toroidal",
+   "dst": "qty.j_BS_isolated_raw",
+   "kind": "data",
+   "desc": "Raw toroidal j_BS, before the near-axis repair",
+   "subsystem": "GS reconstruction"
+  },
+  {
+   "src": "qty.j_BS_isolated_raw",
+   "dst": "fn.tmi.classify_jphi_profile",
+   "kind": "data",
+   "desc": "Classification runs on the RAW conversion so it is invariant to the axis treatment",
+   "subsystem": "GS reconstruction"
+  },
+  {
+   "src": "qty.j_BS_isolated_raw",
+   "dst": "fn.tmi.smooth_jbs_transition",
+   "kind": "data",
+   "desc": "Near-axis repair of the collapsed innermost Sauter point",
+   "subsystem": "Shared quantities"
+  },
+  {
+   "src": "fn.tmi.smooth_jbs_transition",
+   "dst": "qty.j_BS_smoothed",
+   "kind": "data",
+   "desc": "Shelf-preserving Gaussian blend around the shelf end",
+   "subsystem": "Shared quantities"
+  },
+  {
+   "src": "qty.j_BS_smoothed",
+   "dst": "qty.j_BS_isolated",
+   "kind": "data",
+   "desc": "Recon path: the smoothed spike is what the inductive fit sees",
+   "subsystem": "GS reconstruction"
+  },
+  {
+   "src": "qty.j_BS_smoothed",
+   "dst": "fn.tmi.perturb_kinetic_equilibrium",
+   "kind": "data",
+   "desc": "Every per-draw SWB spike gets the same repair (fixes hollow draw cores / wholesale q0 offset)",
+   "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
+  },
+  {
+   "src": "qty.j_BS_smoothed",
+   "dst": "fn.run._forward_solve_imas_baseline",
+   "kind": "data",
+   "desc": "IMAS forward solve applies the same repair to its SWB j_BS",
+   "subsystem": "Bouquet orchestrator / IMAS forward solve"
+  },
+  {
+   "src": "fn.physics.q_ravg",
+   "dst": "fn.tmi._swb_jbs_to_toroidal",
+   "kind": "data",
+   "desc": "<R>, <1/R> from get_q in dict or positional form",
+   "subsystem": "Shared quantities"
+  },
+  {
+   "src": "cfg.core_exact_psi",
+   "dst": "fn.tmi.fit_inductive_profile",
+   "kind": "control",
+   "desc": "Carve the core Sauter anti-hump out of the global smoothing",
+   "subsystem": "GS reconstruction"
+  },
+  {
+   "src": "fn.utils.pchip_interp",
+   "dst": "fn.tmi._kin_to_eq",
+   "kind": "data",
+   "desc": "Per-draw kinetic -> equilibrium regrid",
+   "subsystem": "Shared quantities"
+  },
+  {
+   "src": "fn.utils.pchip_interp",
+   "dst": "fn.baseline._resolve_reconstruction",
+   "kind": "data",
+   "desc": "Baseline ne/te/ni/ti/Zeff onto the equilibrium grid",
+   "subsystem": "Shared quantities"
+  },
+  {
+   "src": "fn.utils.pchip_interp",
+   "dst": "fn.run._forward_solve_imas_baseline",
+   "kind": "data",
+   "desc": "IMAS-path kinetic regrid",
+   "subsystem": "Shared quantities"
+  },
+  {
+   "src": "fn.utils.pchip_interp",
+   "dst": "fn.tmi.generate_bouquet",
+   "kind": "data",
+   "desc": "Baseline assembly + sigma=0 SWB cache inputs",
+   "subsystem": "Shared quantities"
+  },
+  {
+   "src": "fn.utils.pchip_derivative",
+   "dst": "qty.pprime",
+   "kind": "data",
+   "desc": "Analytic p' on the native psi_N grid",
+   "subsystem": "Shared quantities"
+  },
+  {
+   "src": "fn.utils.pchip_derivative",
+   "dst": "fn.tmi.recon_anchor_solve",
+   "kind": "data",
+   "desc": "p' for the per-draw anchor solve",
+   "subsystem": "Shared quantities"
+  },
+  {
+   "src": "fn.tmi.smooth_jbs_transition",
+   "dst": "fn.run.verify_sigma0_consistency",
+   "kind": "data",
+   "desc": "Guard replays the exact per-draw pre-SWB sequence",
+   "subsystem": "Bouquet orchestrator / IMAS forward solve"
+  },
+  {
+   "src": "qty.j_BS",
+   "dst": "fn.run.verify_sigma0_consistency",
+   "kind": "data",
+   "desc": "Baseline j_BS is the reference the replayed spike is compared against",
+   "subsystem": "Bouquet orchestrator / IMAS forward solve"
+  },
+  {
+   "src": "fn.run.verify_sigma0_consistency",
+   "dst": "gate.sigma0_floor_zone",
+   "kind": "control",
+   "desc": "Exclude floored points from the deviation",
+   "subsystem": "Bouquet orchestrator / IMAS forward solve"
+  },
+  {
+   "src": "fn.baseline.floor_inductive_split",
+   "dst": "gate.sigma0_floor_zone",
+   "kind": "control",
+   "desc": "Defines the floor zone (j_inductive clamped to 0, deficit moved into j_BS)",
+   "subsystem": "Bouquet orchestrator / IMAS forward solve"
+  },
+  {
+   "src": "fn.baseline._resolve_reconstruction",
+   "dst": "fn.baseline.floor_inductive_split",
+   "kind": "data",
+   "desc": "Enforce a non-negative inductive split before the GPR mean is built",
+   "subsystem": "Baseline & uncertainty resolution"
+  },
+  {
+   "src": "fn.baseline.floor_inductive_split",
+   "dst": "qty.j_inductive",
+   "kind": "data",
+   "desc": "Floored inductive component",
+   "subsystem": "Baseline & uncertainty resolution"
+  },
+  {
+   "src": "fn.baseline.floor_inductive_split",
+   "dst": "qty.j_BS",
+   "kind": "data",
+   "desc": "j_BS absorbs the deficit; the sum is preserved",
+   "subsystem": "Baseline & uncertainty resolution"
+  },
+  {
+   "src": "cfg.generationconfig.jbs_delta_mode",
+   "dst": "gate.jbs_delta_mode",
+   "kind": "control",
+   "desc": "Enable delta composition against the cached sigma=0 reference",
+   "subsystem": "Configuration"
+  },
+  {
+   "src": "cfg.generationconfig.jbs_delta_mode",
+   "dst": "qty.delta_spike0_raw",
+   "kind": "control",
+   "desc": "Gates the pre-loop sigma=0 SWB cache",
+   "subsystem": "Configuration"
+  },
+  {
+   "src": "qty.delta_spike0_raw",
+   "dst": "gate.jbs_delta_mode",
+   "kind": "data",
+   "desc": "Reference subtracted from each draw's raw SWB spike",
+   "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
+  },
+  {
+   "src": "gate.jbs_delta_mode",
+   "dst": "fn.tmi.perturb_kinetic_equilibrium",
+   "kind": "control",
+   "desc": "spike = baseline_j_BS + (raw perturbed - raw sigma=0)",
+   "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
+  },
+  {
+   "src": "cfg.generationconfig.capture_live_eq",
+   "dst": "gate.capture_live_eq",
+   "kind": "control",
+   "desc": "Per-draw FSA capture on/off",
+   "subsystem": "Configuration"
+  },
+  {
+   "src": "cfg.generationconfig.capture_npsi",
+   "dst": "fn.physics.capture_equilibrium_fsa",
+   "kind": "control",
+   "desc": "Flux-surface grid size",
+   "subsystem": "Configuration"
+  },
+  {
+   "src": "cfg.generationconfig.capture_exact_inv_R2",
+   "dst": "fn.physics.capture_equilibrium_fsa",
+   "kind": "control",
+   "desc": "Exact <1/R^2> vs the <B_phi^2> ~= <B^2> bracket",
+   "subsystem": "Configuration"
+  },
+  {
+   "src": "gate.capture_live_eq",
+   "dst": "fn.physics.capture_equilibrium_fsa",
+   "kind": "control",
+   "desc": "try/except: capture failure only warns, never rejects the draw",
+   "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
+  },
+  {
+   "src": "fn.physics.q_ravg",
+   "dst": "fn.physics.capture_equilibrium_fsa",
+   "kind": "data",
+   "desc": "dict-form sauter_fc/get_q ravgs and the native <1/R^2>",
+   "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
+  },
+  {
+   "src": "fn.physics.capture_equilibrium_fsa",
+   "dst": "qty.eq_fsa",
+   "kind": "data",
+   "desc": "Converged draw's own flux-surface geometry",
+   "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
+  },
+  {
+   "src": "qty.eq_fsa",
+   "dst": "fn.utils.store_equilibrium",
+   "kind": "data",
+   "desc": "Archived alongside the draw's profiles",
+   "subsystem": "Archive, filtering & plotting"
+  },
+  {
+   "src": "fn.utils.store_equilibrium",
+   "dst": "art.h5.eq_fsa",
+   "kind": "data",
+   "desc": "One dataset per FSA key, with units attrs",
+   "subsystem": "Archive, filtering & plotting"
+  },
+  {
+   "src": "art.h5.eq_fsa",
+   "dst": "fn.utils.load_eq_fsa",
+   "kind": "data",
+   "desc": "Read back per draw",
+   "subsystem": "Archive, filtering & plotting"
+  },
+  {
+   "src": "fn.utils.load_eq_fsa",
+   "dst": "fn.io.imas._eq_fsa_geom_on",
+   "kind": "data",
+   "desc": "Geometry for the exact toroidal->parallel conversion",
+   "subsystem": "Archive, filtering & plotting"
+  },
+  {
+   "src": "fn.utils.load_eq_fsa",
+   "dst": "fn.archive.DrawView.profiles_doc",
+   "kind": "data",
+   "desc": "eq_fsa + eq_fsa_units in the portable profile document",
+   "subsystem": "Archive, filtering & plotting"
+  },
+  {
+   "src": "fn.run.export_ids",
+   "dst": "fn.io.imas.export_imas_drawset",
+   "kind": "control",
+   "desc": "Delegate; ImasSource only",
+   "subsystem": "Archive, filtering & plotting"
+  },
+  {
+   "src": "fn.filtering.select_indices",
+   "dst": "fn.io.imas.export_imas_drawset",
+   "kind": "data",
+   "desc": "Draw indices for the requested selection",
+   "subsystem": "Archive, filtering & plotting"
+  },
+  {
+   "src": "fn.io.imas.export_imas_drawset",
+   "dst": "fn.io.imas.write_imas_draw",
+   "kind": "control",
+   "desc": "One IDS per selected draw",
+   "subsystem": "Archive, filtering & plotting"
+  },
+  {
+   "src": "fn.io.imas.write_imas_draw",
+   "dst": "gate.ids_fidelity",
+   "kind": "control",
+   "desc": "Choose the parallel-split route for this draw",
+   "subsystem": "Archive, filtering & plotting"
+  },
+  {
+   "src": "fn.io.imas._eq_fsa_geom_on",
+   "dst": "gate.ids_fidelity",
+   "kind": "data",
+   "desc": "geom dict; None -> fall back to the baseline ratio",
+   "subsystem": "Archive, filtering & plotting"
+  },
+  {
+   "src": "gate.ids_fidelity",
+   "dst": "fn.physics.toroidal_to_parallel",
+   "kind": "control",
+   "desc": "Exact route: j_total / j_ohmic / j_bootstrap from this draw's geometry",
+   "subsystem": "Archive, filtering & plotting"
+  },
+  {
+   "src": "fn.physics.toroidal_to_parallel",
+   "dst": "artifact.imas_draw_json",
+   "kind": "data",
+   "desc": "<j.B>/B0 components written into the IDS",
+   "subsystem": "Archive, filtering & plotting"
+  },
+  {
+   "src": "gate.ids_fidelity",
+   "dst": "artifact.imas_draw_json",
+   "kind": "data",
+   "desc": "Reconstruct route: divide by the template ratio c = j_tor/j_total",
+   "subsystem": "Archive, filtering & plotting"
+  },
+  {
+   "src": "fn.run.export_bundle",
+   "dst": "fn.archive.ScanView.extract",
+   "kind": "control",
+   "desc": "Bundle the selected sub-ensemble",
+   "subsystem": "Archive, filtering & plotting"
+  },
+  {
+   "src": "fn.archive.ScanView.extract",
+   "dst": "fn.archive.DrawView.extract",
+   "kind": "control",
+   "desc": "Per-draw file writing",
+   "subsystem": "Archive, filtering & plotting"
+  },
+  {
+   "src": "fn.archive.DrawView.extract",
+   "dst": "fn.archive.DrawView.profiles_doc",
+   "kind": "data",
+   "desc": "profiles JSON member of the bundle",
+   "subsystem": "Archive, filtering & plotting"
+  },
+  {
+   "src": "art.h5.eqdsk",
+   "dst": "fn.archive.DrawView.extract",
+   "kind": "data",
+   "desc": "Raw geqdsk bytes written out unchanged",
+   "subsystem": "Archive, filtering & plotting"
+  },
+  {
+   "src": "cfg.generationconfig.imas_corrective_jphi",
+   "dst": "gate.imas_corrective_jphi",
+   "kind": "control",
+   "desc": "Opt-in achieved-j_phi corrector on the IMAS path",
+   "subsystem": "Configuration"
+  },
+  {
+   "src": "gate.imas_corrective_jphi",
+   "dst": "ext.corrective_jphi_iteration",
+   "kind": "control",
+   "desc": "Newton loop on the converged IMAS baseline solve",
+   "subsystem": "Bouquet orchestrator / IMAS forward solve"
+  },
+  {
+   "src": "cfg.solverconfig.saddle_targets",
+   "dst": "fn.run.setup_solver",
+   "kind": "control",
+   "desc": "mygs.set_saddle_constraints X-point pin",
+   "subsystem": "Configuration"
+  },
+  {
+   "src": "cfg.solverconfig.saddle_weights",
+   "dst": "fn.run.setup_solver",
+   "kind": "control",
+   "desc": "Per-saddle weights",
+   "subsystem": "Configuration"
   }
  ]
 }

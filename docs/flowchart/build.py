@@ -283,12 +283,23 @@ PHYS_NODES = [
         f'{V("p","imp")} + {V("p","fast")} (+ {V("p","diff")})']),
     dict(id="pgate", cluster="loop", kind="gate", lines=[
         f'⟨{V("P")}⟩ within 5%', "of baseline?"]),
+    dict(id="regrid", cluster="loop", kind="compute", lines=[
+        "kinetic → equilibrium regrid (PCHIP)",
+        f'{V("n","e")}, {V("T","e")}, {V("T","i")}, {V("Z","eff")} : '
+        f'{V("ψ","N,kin")} → {V("ψ","N,eq")}',
+        "shape-preserving (monotone, no overshoot)",
+        f'⇒ clean ∇{V("n")}, ∇{V("T")} for the Sauter coefficients']),
     dict(id="boot", cluster="loop", kind="compute", lines=[
         "bootstrap recompute (Sauter)",
         f'{V("j","BS")} = f({V("n")}, {V("T")}, {V("Z","eff")})   '
         "(3 self-consistent iterations)",
         f'parallel→toroidal: {V("c")} = 1 / (⟨{V("R")}⟩⟨1/{V("R")}⟩)',
         f'scale {V("s")} ~ U(0.99, 1.01) · {V("s","0")}']),
+    dict(id="smooth", cluster="loop", kind="compute", lines=[
+        "near-axis bootstrap repair (shared with the baseline)",
+        f'the solver collapses the innermost surface point of {V("j","BS")};',
+        "shelf-preserving Gaussian blend over the transition",
+        f'⇒ a σ = 0 draw reproduces the baseline {V("j","BS")}']),
     dict(id="rebuild", cluster="loop", kind="compute", lines=[
         "rebuild total current",
         f'{V("j","φ")} = {V("j","ind")} + {V("s")}·{V("j","BS")} '
@@ -311,6 +322,11 @@ PHYS_NODES = [
     dict(id="inspec", cluster="loop", kind="tag", lines=[
         "in-spec tag",
         "coil drift ≤ 2%;  VSC via quadrature-propagated σ"]),
+    dict(id="eqfsa", cluster="loop", kind="derived", lines=[
+        "live-equilibrium capture (this draw's own geometry)",
+        f'{V("F")}, ⟨1/{V("R")}⟩, ⟨1/{SUP(V("R"), "2")}⟩, '
+        f'⟨{SUP(V("B"), "2")}⟩, {V("q")}, d{V("V")}/d{V("ψ")}, {V("f","trap")}',
+        "flux-surface averages of the converged solve (no re-solve)"]),
 
     # ---- outputs ---------------------------------------------------------
     dict(id="archive", cluster=None, kind="output", lines=[
@@ -321,6 +337,12 @@ PHYS_NODES = [
         "post-filtering (non-destructive)",
         "boundary RMS ≤ 5 mm;  coil spec",
         "⇒ selected (machine-realizable) sub-ensemble"]),
+    dict(id="idsout", cluster=None, kind="output", lines=[
+        "IMAS/OMAS IDS export (per draw)",
+        f'{V("j","tor")} exact;  ⟨{V("j")}·{V("B")}⟩/{V("B","0")} from '
+        f'each draw’s own ⟨1/{V("R")}⟩, ⟨1/{SUP(V("R"), "2")}⟩, '
+        f'⟨{SUP(V("B"), "2")}⟩',
+        "otherwise the baseline flux-geometry ratio is used instead"]),
 ]
 
 # (src, dst, kind, label) — kinds: main | optional | yes | loop | reject
@@ -332,16 +354,20 @@ PHYS_EDGES = [
     ("recon", "quasi", "main", None), ("fsolve", "quasi", "main", None),
     ("quasi", "envel", "main", None), ("envel", "gp", "main", None),
     ("gp", "derive", "main", None), ("derive", "pgate", "main", None),
-    ("pgate", "boot", "yes", "yes"),
+    ("pgate", "regrid", "yes", "yes"),
     ("pgate", "gp", "reject", "resample"),
-    ("boot", "rebuild", "main", None), ("rebuild", "limatch", "main", None),
+    ("regrid", "boot", "main", None),
+    ("boot", "smooth", "main", None),
+    ("smooth", "rebuild", "main", None), ("rebuild", "limatch", "main", None),
     ("limatch", "gssolve", "main", None),
     ("limatch", "limatch", "loop", " iterate"),
     ("gssolve", "gssolve", "loop", " homotopy\n passes"),
     ("gssolve", "agate", "main", None),
     ("agate", "inspec", "yes", "yes"),
     ("agate", "gp", "reject", "reject draw"),
-    ("inspec", "archive", "main", None), ("archive", "filter", "main", None),
+    ("gssolve", "eqfsa", "main", None),
+    ("inspec", "archive", "main", None), ("eqfsa", "archive", "main", None),
+    ("archive", "filter", "main", None), ("archive", "idsout", "main", None),
 ]
 
 _PHYS_EDGE_STYLE = {

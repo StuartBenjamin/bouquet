@@ -983,11 +983,19 @@ After homotopy, each draw is tagged `in_spec` if:
 max_non_VSC_F_drift_pct <= inspec_F_max   AND   max_VSC_drift_pct <= inspec_VSC_max
 ```
 
-The drift is computed per-coil as
+For the **non-VSC F-coils** the drift is computed per-coil as
 `(I_draw - I_baseline) / |I_baseline| * 100`, where
 `I_draw = mygs.get_coil_currents()` (the *total* current, i.e. bare +
 vcontrol·VSC contribution) and `I_baseline` is recon's coil currents
 captured on entry to `generate_bouquet`.
+
+The **VSC pair does not use that per-coil formula.** Because F9A or F9B
+routinely sits near a current zero-crossing, `max_VSC_drift_pct` is scored on
+the common-mode / differential channel decomposition, gated against an
+error-propagated `sigma_VSC` built from the coil magnitudes
+(`_vsc_channel_drift_pct`). See
+[`docs/coil-constraints.md`](docs/coil-constraints.md#vsc-drift-metric-anti-series-pair)
+for the derivation and its assumptions.
 
 **E-coils are not currently part of the `in_spec` check.**  Reason:
 their baselines (~500-1000 A) are small enough that the 50 A
@@ -1102,7 +1110,8 @@ Each step is independently configurable via env vars / kwargs:
 * `SKIP_HARD=1`: skip iso-update + homotopy (use soft-reg only)
 * `SKIP_ISO=1`: skip iso-update but keep homotopy (diagnostic)
 * `homotopy_passes=None`: single legacy pass at uniform `coil_drift`
-* `inspec_F_max`, `inspec_VSC_max`: spec thresholds (default both 0.025)
+* `inspec_F_max`, `inspec_VSC_max`: spec thresholds (`FilterConfig`, default
+  both 0.02)
 
 ---
 

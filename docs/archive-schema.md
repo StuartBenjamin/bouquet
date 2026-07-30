@@ -1,12 +1,14 @@
 # The bouquet HDF5 archive — schema v2
 
-Authoritative description of the on-disk layout written by bouquet ≥ 0.2.0.
+Authoritative description of the on-disk layout written by bouquet ≥ 1.0.0
+(schema v2 first shipped in the 1.0.0 release).
 The single source of truth in code is [`bouquet/schema.py`](../bouquet/schema.py)
 (`SCHEMA_VERSION`, `PROFILE_UNITS`, fixed dataset names, `write_profile` /
 `find_bytes_dataset`); this document mirrors it for human readers. Prefer
 reading archives through [`bouquet.BouquetArchive`](../bouquet/archive.py) or
 the functional readers (`load_equilibrium`, `load_baseline_profiles`,
-`select_indices`, `load_config`) rather than raw `h5py`.
+`select_indices`, `load_config`) rather than raw `h5py` — see
+[workflows.md](workflows.md#reading-an-archive-back) for worked examples.
 
 ## Layout
 

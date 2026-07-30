@@ -851,7 +851,9 @@ class Bouquet:
         bl = self.baseline
         mygs = self.mygs
         gc = self.config.generation
-        psi_pad = self.config.source.psi_pad
+        # psi_pad is a ReconstructionSource field; ImasSource has none, so
+        # fall back to the pipeline default (matches the forward-solve sites).
+        psi_pad = getattr(self.config.source, "psi_pad", 1e-3)
         psi_N = np.asarray(bl.psi_N, dtype=float)
         EC = 1.602176634e-19
 
