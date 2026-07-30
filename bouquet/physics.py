@@ -385,17 +385,26 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
     _, F, _Fp, _P, _Pp = mygs.get_profiles(psi=psi_hat)
 
     # <1/R>, <B^2>, f_c from the Sauter flux-surface coefficients. OFT actually
-    # returns (psi_hat, f_c, [<R>,<1/R>,<a>], [<|B|>,<|B|^2>]) -- a leading psi
-    # grid the docstring omits, matching get_q/get_profiles. Take the last
-    # three fields so this is robust to the psi being present or absent.
+    # returns (psi_hat, f_c, r_avgs, [<|B|>,<|B|^2>]) -- a leading psi grid the
+    # docstring omits, matching get_q/get_profiles. Take the last three fields
+    # so this is robust to the psi being present or absent.  r_avgs is a DICT
+    # ({'<R>','<1/R>','<a>'}) on current OFT and a positional list
+    # ([<R>,<1/R>,<a>]) on legacy builds -- q_ravg handles both.  (The legacy
+    # positional read np.asarray(geo)[1] on a dict is 0-d -> IndexError, which
+    # the per-draw capture guard swallowed as a WARN: every archive built on a
+    # dict-era OFT silently lost its eq_fsa blocks until this was fixed.)
     f_c, geo_sauter, bfield = mygs.sauter_fc(psi=psi_hat)[-3:]
-    avg_inv_R = np.asarray(geo_sauter)[1]           # [<R>, <1/R>, <a>]
-    B_avg = np.asarray(bfield)[0]                   # [<|B|>, <|B|^2>]
-    avg_B2 = np.asarray(bfield)[1]
+    avg_inv_R = q_ravg(geo_sauter, "<1/R>")
+    if isinstance(bfield, dict):
+        B_avg = bfield["<|B|>"]
+        avg_B2 = bfield["<|B|^2>"]
+    else:
+        B_avg = np.asarray(bfield)[0]               # [<|B|>, <|B|^2>]
+        avg_B2 = np.asarray(bfield)[1]
 
     # q and dV/dpsi (metadata; dV/dpsi also useful for volume integrals)
     _, q, geo_q, *_rest = mygs.get_q(psi=psi_hat, compute_geo=True)
-    dV_dpsi = np.asarray(geo_q)[2]                  # [<R>, <1/R>, dV/dpsi]
+    dV_dpsi = q_ravg(geo_q, "dV/dPsi")
 
     out = {
         "psi_N": psi_hat,
@@ -409,9 +418,17 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
     }
 
     if exact_inv_R2:
-        # Fast path: read <1/R^2> straight from sauter_fc if this OFT build
-        # provides it (OpenFUSIONToolkit#312) -- validated, so a build without
-        # it (or a layout mismatch) falls through to the trace quadrature.
+        # Fast path 1: current OFT (OpenFUSIONToolkit#313) exposes <1/R^2>
+        # directly in get_q's ravgs dict -- exact, no tracing needed.  Jensen
+        # (<1/R^2> >= <1/R>^2) guards against a mislabeled field.
+        if isinstance(geo_q, dict) and geo_q.get("<1/R^2>") is not None:
+            _cand = np.asarray(geo_q["<1/R^2>"], dtype=float)
+            if (np.all(np.isfinite(_cand))
+                    and not np.any(_cand < out["avg_inv_R"] ** 2 - 1e-9)):
+                out["avg_inv_R2"] = _cand
+                return out
+        # Fast path 2: legacy extended-array layout guess (OFT#312 era) --
+        # validated, so a build without it falls through to the quadrature.
         native = _native_fsa_inv_R2(geo_sauter, bfield, out["F"], out["avg_inv_R"])
         if native is not None:
             out["avg_inv_R2"] = native
