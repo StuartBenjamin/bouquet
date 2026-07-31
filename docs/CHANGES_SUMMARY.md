@@ -1,5 +1,34 @@
 # Bouquet — change summaries
 
+## 1.1.0 — machine-neutral API + comment hygiene (2026-07-31)
+
+Ships the untagged 1.0.1 fix as well (`verify_sigma0_consistency` raised on the
+IMAS path: it read `psi_pad`, a `ReconstructionSource`-only field).
+
+1. **BREAKING — `ImasSource.efit01_geqdsk` -> `LCFS_geqdsk`** (also the
+   `Bouquet.from_imas` keyword). The field is an *optional* external separatrix,
+   not a specific EFIT tree: supply a g-file whose LCFS replaces the source dd
+   boundary outline, or omit it and keep the dd's own. No alias — the old keyword
+   now raises `TypeError` rather than being silently ignored, which would have
+   changed the boundary the draws are held to. All EFIT01/EFIT02 tree names are
+   gone from the code, docs and flowchart.
+2. **`radial_field_from_impurity_force_balance`** replaces
+   `radial_field_from_cer` (`n_imp`/`t_imp`/`Z_imp`/`sigma_*_imp` instead of the
+   carbon-specific spellings). The physics is generic impurity force balance;
+   only the diagnostic was DIII-D. `radial_field_from_cer` is kept as a
+   forwarding alias, so existing scripts keep working.
+3. **Discharge identifiers removed from code comments** (12 sites). Each is now
+   a descriptor of why the case mattered — "stiff high-l_i case",
+   "strong-pedestal case", "low-current case" — with the measured numbers
+   (0/500 candidates, ~2 permille, 0.347 vs 0.313 MA/m^2) kept intact.
+4. **Examples pinned to `nthreads=1`**, matching the doctrine the docs already
+   state: `_run_omas_timeseries.py`, `generate_baseline.py`,
+   `bouquet_D3Dlike_systematics.ipynb` and the legacy example no longer default
+   to 2 or 4 threads. Bit-reproducible solves, no BLAS oversubscription.
+
+`kinetic_source="ida_hybrid"` is deliberately unchanged: it names a specific
+workflow and input file format, unlike a tree name standing in for any g-file.
+
 ## Class API + HDF5 schema v2 round (2026-07, PR #8)
 
 Decisions and outcomes folded from the (deleted) working document
