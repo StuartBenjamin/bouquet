@@ -633,11 +633,12 @@ def infer_fast_pressure(psi_N, ne, te, ni, ti, Z_imp, psi_N_gfile, p_gfile,
     return p_fast, info
 
 
-def radial_field_from_cer(psi_N, n_carbon, t_carbon, omega_tor, v_pol,
-                          Bpol, Rmaj, dpsiN_dR, B_phi, Z_C=6.0,
-                          sigma_n_carbon=None, sigma_t_carbon=None,
-                          sigma_omega_tor=None, sigma_v_pol=None):
-    r"""Radial electric field from the impurity (carbon CER) radial force balance.
+def radial_field_from_impurity_force_balance(
+        psi_N, n_imp, t_imp, omega_tor, v_pol,
+        Bpol, Rmaj, dpsiN_dR, B_phi, Z_imp=6.0,
+        sigma_n_imp=None, sigma_t_imp=None,
+        sigma_omega_tor=None, sigma_v_pol=None):
+    r"""Radial electric field from the measured impurity radial force balance.
 
     The steady-state radial force balance of the measured impurity species
     (charge ``e_a = Z_C e``), with inertia and viscosity neglected, is
@@ -651,9 +652,10 @@ def radial_field_from_cer(psi_N, n_carbon, t_carbon, omega_tor, v_pol,
     :math:`v_\theta` the measured poloidal velocity. This is the standard CER
     relation (Wesson, *Tokamaks* 4th ed., momentum eq. 2.23.2 and the radial
     force-balance passage; Burrell, *Phys. Plasmas* 4, 1499 (1997)). All three
-    terms are of comparable size at low rotation.
+    terms are of comparable size at low rotation. Any measured impurity species
+    works (``Z_imp`` its charge); on DIII-D that is usually carbon from CER.
 
-    Inputs are SI on the common ``psi_N`` grid: ``n_carbon`` m^-3, ``t_carbon``
+    Inputs are SI on the common ``psi_N`` grid: ``n_imp`` m^-3, ``t_imp``
     eV, ``omega_tor`` rad/s, ``v_pol`` m/s, ``Bpol``/``B_phi`` T, ``Rmaj`` m,
     ``dpsiN_dR`` (= d psi_N / dR) 1/m. Signs are taken from the inputs as given
     (the caller must supply ``B_phi``/``Bpol``/``v_pol``/``omega_tor`` in a
@@ -670,9 +672,9 @@ def radial_field_from_cer(psi_N, n_carbon, t_carbon, omega_tor, v_pol,
     ``sigma`` (zeros if no errors given), all [V/m].
     """
     psi_N = np.asarray(psi_N, dtype=float)
-    n_C = np.asarray(n_carbon, dtype=float)
-    t_C = np.asarray(t_carbon, dtype=float)
-    Z_C = float(Z_C)
+    n_C = np.asarray(n_imp, dtype=float)
+    t_C = np.asarray(t_imp, dtype=float)
+    Z_C = float(Z_imp)
 
     p_C = _EC * n_C * t_C                                   # Pa
     dpC_dR = np.gradient(p_C, psi_N) * np.asarray(dpsiN_dR, dtype=float)   # Pa/m
@@ -684,7 +686,7 @@ def radial_field_from_cer(psi_N, n_carbon, t_carbon, omega_tor, v_pol,
     E_r = diamag + toroidal + poloidal
 
     sigma = np.zeros_like(E_r)
-    if any(s is not None for s in (sigma_n_carbon, sigma_t_carbon,
+    if any(s is not None for s in (sigma_n_imp, sigma_t_imp,
                                    sigma_omega_tor, sigma_v_pol)):
         def _frac(sig, val):
             if sig is None:
@@ -693,7 +695,7 @@ def radial_field_from_cer(psi_N, n_carbon, t_carbon, omega_tor, v_pol,
                 return np.where(np.abs(val) > 0, np.asarray(sig, float) / np.abs(val), 0.0)
         # diamagnetic: approximate its relative error by the (n_C, T_C) fractional
         # errors added in quadrature (the gradient's relative error ~ profile's).
-        rel_dia = np.sqrt(_frac(sigma_n_carbon, n_C) ** 2 + _frac(sigma_t_carbon, t_C) ** 2)
+        rel_dia = np.sqrt(_frac(sigma_n_imp, n_C) ** 2 + _frac(sigma_t_imp, t_C) ** 2)
         s_dia = np.abs(diamag) * rel_dia
         s_tor = (np.abs(np.asarray(Rmaj, float) * np.asarray(Bpol, float))
                  * np.asarray(sigma_omega_tor, float)) if sigma_omega_tor is not None \
@@ -704,3 +706,20 @@ def radial_field_from_cer(psi_N, n_carbon, t_carbon, omega_tor, v_pol,
 
     info = dict(diamagnetic=diamag, toroidal=toroidal, poloidal=poloidal, sigma=sigma)
     return E_r, info
+
+
+def radial_field_from_cer(psi_N, n_carbon, t_carbon, omega_tor, v_pol,
+                          Bpol, Rmaj, dpsiN_dR, B_phi, Z_C=6.0,
+                          sigma_n_carbon=None, sigma_t_carbon=None,
+                          sigma_omega_tor=None, sigma_v_pol=None):
+    """Deprecated diagnostic-specific alias.
+
+    Kept so existing scripts keep running; the physics is generic impurity force
+    balance, so prefer :func:`radial_field_from_impurity_force_balance`, which
+    names its inputs for the species rather than for one machine's diagnostic.
+    """
+    return radial_field_from_impurity_force_balance(
+        psi_N, n_carbon, t_carbon, omega_tor, v_pol, Bpol, Rmaj, dpsiN_dR,
+        B_phi, Z_imp=Z_C, sigma_n_imp=sigma_n_carbon, sigma_t_imp=sigma_t_carbon,
+        sigma_omega_tor=sigma_omega_tor, sigma_v_pol=sigma_v_pol)
+

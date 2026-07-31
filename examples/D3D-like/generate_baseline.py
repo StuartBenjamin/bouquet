@@ -73,7 +73,8 @@ Zeff_eq = np.clip(interp1d(psi_pf, Zeff, fill_value='extrapolate')(psi_N), 1.0, 
 print(f"[gen147] ne0={ne_SI[0]:.3e}  te0={te_SI[0]:.0f}eV  ti0={ti_SI[0]:.0f}eV", flush=True)
 
 print("[gen147] TokaMaker setup ...", flush=True)
-myOFT = OFT_env(nthreads=int(os.environ.get('NTHREADS', '4')))
+# nthreads=1 by default: bit-reproducible solves, no BLAS oversubscription.
+myOFT = OFT_env(nthreads=int(os.environ.get('NTHREADS', '1')))
 mygs = TokaMaker(myOFT)
 mp, ml, mr, cd, cnd = load_gs_mesh(MESH)
 mygs.setup_mesh(mp, ml, mr); mygs.setup_regions(cond_dict=cnd, coil_dict=cd)

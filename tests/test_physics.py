@@ -479,40 +479,40 @@ class TestFastPressure:
 
 
 # ---------------------------------------------------------------------------
-# radial_field_from_cer  (E_r via impurity force balance)
+# radial_field_from_impurity_force_balance  (E_r via impurity force balance)
 # ---------------------------------------------------------------------------
 class TestRadialField:
     def test_three_terms_and_units(self):
-        from bouquet.physics import radial_field_from_cer
+        from bouquet.physics import radial_field_from_impurity_force_balance
         psi = np.linspace(0, 1, 50)
         n = np.full(50, 1e19); t = np.full(50, 1000.0)   # flat -> no diamagnetic
         omega = np.full(50, 1e5); vpol = np.full(50, 1e3)
         Bpol = np.full(50, 0.2); Rmaj = np.full(50, 1.8); dpsidr = np.full(50, 2.0)
         Bphi = np.full(50, -2.0)
-        Er, info = radial_field_from_cer(psi, n, t, omega, vpol, Bpol, Rmaj, dpsidr, Bphi, Z_C=6.0)
+        Er, info = radial_field_from_impurity_force_balance(psi, n, t, omega, vpol, Bpol, Rmaj, dpsidr, Bphi, Z_imp=6.0)
         assert np.allclose(info["diamagnetic"], 0.0, atol=1.0)         # flat p
         assert np.allclose(info["toroidal"], 1e5 * 1.8 * 0.2)          # v_phi B_theta
         assert np.allclose(info["poloidal"], -1e3 * (-2.0))            # -v_theta B_phi
         assert np.allclose(Er, info["diamagnetic"] + info["toroidal"] + info["poloidal"])
 
     def test_diamagnetic_sign_outward_decreasing_pressure(self):
-        from bouquet.physics import radial_field_from_cer
+        from bouquet.physics import radial_field_from_impurity_force_balance
         psi = np.linspace(0, 1, 60)
         n = np.full(60, 1e19); t = 2000.0 * (1 - psi ** 2) + 50.0     # decreasing outward
         z = np.zeros(60)
-        Er, info = radial_field_from_cer(psi, n, t, z, z, z, np.full(60, 1.8),
-                                         np.full(60, 2.0), z, Z_C=6.0)
+        Er, info = radial_field_from_impurity_force_balance(psi, n, t, z, z, z, np.full(60, 1.8),
+                                         np.full(60, 2.0), z, Z_imp=6.0)
         # dp/dR < 0, positive charge -> diamagnetic E_r <= 0
         assert np.all(info["diamagnetic"][1:-1] <= 1e-9)
 
     def test_sigma_propagation_positive(self):
-        from bouquet.physics import radial_field_from_cer
+        from bouquet.physics import radial_field_from_impurity_force_balance
         psi = np.linspace(0, 1, 40)
         n = np.full(40, 1e19); t = np.full(40, 1000.0)
         omega = np.full(40, 1e5); vpol = np.full(40, 1e3)
         Bpol = np.full(40, 0.2); Rmaj = np.full(40, 1.8); dpsidr = np.full(40, 2.0)
         Bphi = np.full(40, -2.0)
-        _, info = radial_field_from_cer(psi, n, t, omega, vpol, Bpol, Rmaj, dpsidr, Bphi,
+        _, info = radial_field_from_impurity_force_balance(psi, n, t, omega, vpol, Bpol, Rmaj, dpsidr, Bphi,
                                         sigma_omega_tor=np.full(40, 1e4),
                                         sigma_v_pol=np.full(40, 1e2))
         # toroidal sigma = |R Bpol| * sigma_omega ; poloidal sigma = |Bphi| * sigma_vpol

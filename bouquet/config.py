@@ -320,8 +320,8 @@ class GenerationConfig:
     # skips find_optimal_scale + the corrective (which can homogenize draws).
     # Default False = the standard flagship loop -- the mechanism geqdsks used
     # successfully (high draw completion). Set True for FUSE/IMAS diff mode (avoids
-    # the matching-loop homogenization: 148798 diff+C = 15/15); but it DROPS draws
-    # on stiff high-l_i geqdsks (204441) via band-conditioning rejection, so it is
+    # the matching-loop homogenization: full draw yield on the reference IMAS case);
+    # but it DROPS draws on stiff high-l_i geqdsks via band-conditioning rejection, so it is
     # NOT a good geqdsk default. FUSE runs opt in explicitly. (Only the PIN_JPHI /
     # DIFF_BS-at-sigma=0 diagnostic modes actually freeze j_ind -- those are the
     # backend-test exceptions to the rule.)
@@ -371,8 +371,8 @@ class GenerationConfig:
     # Corrective j_phi iteration on the IMAS baseline forward solve. The single
     # jphi-linterp solve imposes the requested j_phi(psi_N) with pre-solve
     # geometry, so the ACHIEVED FSA j_phi drifts from the request once psi
-    # converges (measured +3.2-3.4% over psi_N 0.2-0.9 on DIII-D 154080
-    # t=3.263, appearing as l_i +3.4% and q(psi_N) -5% vs the equilibrium IDS).
+    # converges (measured +3.2-3.4% over psi_N 0.2-0.9 on the reference DIII-D
+    # case, appearing as l_i +3.4% and q(psi_N) -5% vs the equilibrium IDS).
     # True re-uses the recon path's _corrective_jphi_iteration to drive the
     # achieved profile onto the anchor target. Opt-in while being validated.
     imas_corrective_jphi: bool = False
@@ -380,8 +380,8 @@ class GenerationConfig:
     # it enters j_phi, in both the baseline and every draw. Default False: only
     # needed for the isolate_edge_jBS=False full-profile mode (which carries an
     # inner negative lobe). With the default isolate_edge_jBS=True the spike is
-    # already ~clean, so flooring is redundant -- and it REGRESSED 204441
-    # (clipping its high-l_i isolate-edge spike drove yield to 0; off -> restored).
+    # already ~clean, so flooring is redundant -- and it REGRESSED a stiff
+    # high-l_i case (clipping its isolate-edge spike drove yield to 0).
     floor_j_BS: bool = False
     # solve_with_bootstrap H-mode self-consistency iterations per draw (default
     # 3); lowering to 2 trades a little accuracy for speed on large bouquets.

@@ -1327,8 +1327,8 @@ def pchip_interp(x_src, y_src, x_out):
     ``interp1d(kind='linear')`` pattern: linear regrid leaves a slope kink
     at every source knot, so ANY subsequent derivative (including OFT's
     PCHIP-derivative bootstrap) is a staircase with plateaus between knots
-    -- visible as stepped j_BS between the kinetic knots (verified on
-    204441@5307: |d2 j_BS| correlates 0.99 with |d2 dTe/dpsi| of the
+    -- visible as stepped j_BS between the kinetic knots (verified on a
+    weak-pedestal case: |d2 j_BS| correlates 0.99 with |d2 dTe/dpsi| of the
     linear regrid, identical in np.gradient and PCHIP OFT builds; direct
     PCHIP regrid cuts the step energy ~7x).
 

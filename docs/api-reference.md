@@ -76,7 +76,7 @@ Details: [io-and-plotting.md](io-and-plotting.md).
 | `parallel_to_toroidal()` / `toroidal_to_parallel()` | Current-convention conversion, both directions, FSA-geometry aware |
 | `isotropize_fast_pressure()` | Anisotropic fast-pressure reduction for the isotropic GS solve |
 | `fast_pressure_residual()` / `infer_fast_pressure()` | Fast-ion pressure accounting |
-| `radial_field_from_cer()` | Impurity radial-force-balance E_r with propagated uncertainty |
+| `radial_field_from_impurity_force_balance()` | Impurity radial-force-balance E_r with propagated uncertainty |
 | `Hmode_profiles()` | Synthetic H-mode profile generator |
 
 ## Sampling and uncertainty

@@ -147,12 +147,12 @@ class TestReadCER:
         assert np.any(cer.sigma_v_pol > 0)
 
     def test_cer_feeds_radial_field(self, tmp_path):
-        from bouquet.physics import radial_field_from_cer
+        from bouquet.physics import radial_field_from_impurity_force_balance
         p = tmp_path / "ida_direct.cdf"
         _write_direct(str(p))
         cer = read_ida_cer(str(p), time=3.0)
         B_phi = np.full_like(cer.psi_N, -2.0)
-        E_r, info = radial_field_from_cer(
+        E_r, info = radial_field_from_impurity_force_balance(
             cer.psi_N, cer.n_carbon, cer.t_carbon, cer.omega_tor, cer.v_pol,
             cer.Bpol, cer.Rmaj, cer.dpsiN_dR, B_phi,
             sigma_omega_tor=cer.sigma_omega_tor, sigma_v_pol=cer.sigma_v_pol)

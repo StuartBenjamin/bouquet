@@ -203,7 +203,7 @@ def classify_jphi_profile(psi_N, eqdsk_jphi, spike_profile,
     # profile was analyze_bootstrap_edge_spike's flat-shelf output
     # (isolate_edge_jBS=True), but with the full-Sauter default it is the
     # numerically fragile collapsed axis point, and on weak-pedestal shots
-    # (204441@5307: peak within ~2 permille of it) detection flipped on
+    # (weak-pedestal case: peak within ~2 permille of it) detection flipped on
     # run-to-run jitter.  Mirror analyze_bootstrap_edge_spike instead:
     #   pass 1 -- locate candidate edge peaks with a liberal prominence-only
     #             search (5% of the edge maximum, as in OFT);
@@ -238,8 +238,8 @@ def classify_jphi_profile(psi_N, eqdsk_jphi, spike_profile,
         # failed the height criterion.  Zeroing the split for the latter
         # puts the bootstrap into j_inductive AND lets the per-draw SWB
         # recompute add it again -- a double-counted bootstrap in every
-        # draw.  Caught by the sigma=0 guard on 204441@5307: that shot's
-        # weak pedestal peak (~0.108 MA/m^2) sits within ~2 permille of
+        # draw.  Caught by the sigma=0 guard on a weak-pedestal case whose
+        # edge peak (~0.108 MA/m^2) sits within ~2 permille of
         # the height threshold (shelf_val = spike[0], the numerically
         # fragile collapsed axis point), so run-to-run jitter in the axis
         # point flips the edge-peak detection -- the old-vs-new j_BS
@@ -1864,7 +1864,7 @@ def perturb_kinetic_equilibrium(
         baseline_li_proxy = calc_cylindrical_li_proxy(mygs, new_jphi, psi_pad)
 
         # Fix C band-conditioning: an UNCONDITIONAL accept passed pathological
-        # GPR draws on hard/high-l_i cases (204441: l_i -30% accepted -> garbage).
+        # GPR draws on hard/high-l_i cases (l_i -30% accepted -> garbage).
         # Resample the GPR inductive (re-solving the anchor) until its l_i is in
         # band or max_li_iter is hit; on exhaustion REJECT the draw (raise,
         # caught per-draw by generate_bouquet) rather than accept it.
@@ -2141,7 +2141,7 @@ def perturb_kinetic_equilibrium(
         # Floor zone: where the GPR mean is at/near zero (<= sigma), e.g. the
         # zero-anchored edge or a floored pedestal residual, a Gaussian sample
         # is negative with O(50%) probability PER POINT -- hard-rejecting those
-        # draws can exhaust all tries (observed 0/500 on 201586@4200). There a
+        # draws can exhaust all tries (observed 0/500 on a strong-pedestal case). There a
         # non-negative quantity is properly half-Gaussian: CLIP to zero instead.
         # Negative excursions where the mean is materially positive (> sigma)
         # still reject the draw -- that remains a genuinely pathological sample.
@@ -4792,8 +4792,8 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     # convention calibrated on unsmoothed profiles. Feeding it the smoothed
     # profile lifts that reference by ~2x and, on low-current shots whose
     # edge spike is comparable to the core hump, silently flips the mode to
-    # L_mode -- which ZEROES the j_BS split (caught by the sigma=0 guard on
-    # 153072@3415: smoothed shelf 0.347 vs edge max 0.313 MA/m2 -> L_mode;
+    # L_mode -- which ZEROES the j_BS split (caught by the sigma=0 guard on a
+    # low-current case: smoothed shelf 0.347 vs edge max 0.313 MA/m2 -> L_mode;
     # raw shelf 0.153 -> Lmode_like_jphi, the correct historical result).
     jphi_mode, spike_metrics = classify_jphi_profile(
         eqdsk.psi_N, eqdsk_jtor, j_BS_isolated_raw

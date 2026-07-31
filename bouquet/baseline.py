@@ -469,7 +469,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     # with a strong pedestal the achieved total can dip BELOW the full-Sauter
     # bootstrap there, leaving a small negative residual (~1% of the core) --
     # which, fed to the GPR sampler as its mean, makes essentially every draw
-    # go negative and be rejected (observed: 201586@4200, 0/500 candidates).
+    # go negative and be rejected (observed on a strong-pedestal case:
+    # 0/500 candidates survived).
     # Floor the inductive at zero and absorb the deficit into j_BS so the
     # split still sums exactly to j_phi.
     j_inductive, j_BS = floor_inductive_split(j_inductive, j_BS, psi_N)

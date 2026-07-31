@@ -110,7 +110,7 @@ the sigma envelopes when it is used as an uncertainty source
 layout dispatch and ensemble reduction).
 
 `read_ida_cer()` loads impurity CER channels as an `IDACERProfiles` bundle, and
-`radial_field_from_cer()` evaluates the impurity radial force balance E_r from
+`radial_field_from_impurity_force_balance()` evaluates the impurity radial force balance E_r from
 them with propagated uncertainty.
 
 ## IMAS/OMAS reader and writer

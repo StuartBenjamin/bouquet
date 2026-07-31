@@ -62,7 +62,7 @@ class IDACERProfiles:
 
     Everything needed for the impurity radial force balance
     ``E_r = (dp_C/dR)/(Z_C e n_C) - v_pol B_phi + omega R B_pol`` (see
-    :func:`bouquet.physics.radial_field_from_cer`), read at one time slice on
+    :func:`bouquet.physics.radial_field_from_impurity_force_balance`), read at one time slice on
     ``psi_N``. SI units: ``n_carbon`` m^-3, ``t_carbon`` eV, ``omega_tor`` rad/s,
     ``v_pol`` m/s, ``Bpol`` T, ``Rmaj`` m, ``dpsiN_dR`` 1/m. The ``sigma_*``
     fields are the measured 1-sigma envelopes (for propagating E_r uncertainty).
@@ -222,7 +222,7 @@ def read_ida_cer(
     measured 1-sigma envelopes, at ``time`` on the IDA ``psi_N`` grid. Handles
     both file layouts like :func:`read_ida`: direct (2-D + ``*_err``) and ensemble
     (3-D posterior samples -> sample mean + ``sigma_method`` band). Feed the
-    result to :func:`bouquet.physics.radial_field_from_cer`.
+    result to :func:`bouquet.physics.radial_field_from_impurity_force_balance`.
     """
     import h5py
 

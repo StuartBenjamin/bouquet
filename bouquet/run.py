@@ -906,8 +906,8 @@ class Bouquet:
         peak = float(np.max(np.abs(ref)))
         # Floored-zone carve-out: where floor_inductive_split clamped the
         # baseline j_inductive to 0, the deficit was absorbed into bl.j_BS --
-        # so bl.j_BS deliberately differs from the raw SWB spike there (e.g.
-        # 201586@4200's strong pedestal, ~4% of peak at psi_N~0.98).  The
+        # so bl.j_BS deliberately differs from the raw SWB spike there (on a
+        # strong-pedestal case, ~4% of peak at psi_N~0.98).  The
         # per-draw sampler has its own floor-zone handling, so these points
         # are excluded from the pass criterion and reported separately.
         floored = np.asarray(bl.j_inductive, dtype=float) <= 0.0

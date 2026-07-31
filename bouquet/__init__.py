@@ -114,7 +114,8 @@ from .physics import (
     toroidal_to_parallel,
     fast_pressure_residual,
     infer_fast_pressure,
-    radial_field_from_cer,
+    radial_field_from_impurity_force_balance,
+    radial_field_from_cer,   # deprecated alias
 )
 from .paths import add_oft_to_path, find_mesh
 from .io.ida import read_ida, read_ida_cer, IDAProfiles, IDACERProfiles
@@ -166,7 +167,8 @@ __all__ = [
     "draw_flux_function",
     # ---- physics helpers ----
     "isotropize_fast_pressure", "parallel_to_toroidal", "toroidal_to_parallel",
-    "fast_pressure_residual", "infer_fast_pressure", "radial_field_from_cer",
+    "fast_pressure_residual", "infer_fast_pressure",
+    "radial_field_from_impurity_force_balance", "radial_field_from_cer",
     "Hmode_profiles",
     # ---- environment / path resolution ----
     "add_oft_to_path", "find_mesh",
