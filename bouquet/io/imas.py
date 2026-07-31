@@ -111,13 +111,13 @@ def read_imas_geometry(source: "ImasSource"):
     b0 = vtf["b0"]
     b0v = float(b0[ie]) if isinstance(b0, list) else float(b0)
     F0 = abs(r0 * b0v)
-    # Separatrix: a magnetics-only EFIT01 g-file (if given) provides the most
-    # accurate LCFS; otherwise use the FUSE dd boundary outline. F0 stays from the
-    # dd vacuum field either way (same shot).
-    efit01 = getattr(source, "efit01_geqdsk", None)
-    if efit01:
+    # Separatrix: an optional external g-file (if given) supplies the LCFS;
+    # otherwise use the dd boundary outline. F0 stays from the dd vacuum field
+    # either way (same shot).
+    lcfs_g = getattr(source, "LCFS_geqdsk", None)
+    if lcfs_g:
         from .geqdsk import read_geqdsk
-        g = read_geqdsk(efit01)
+        g = read_geqdsk(lcfs_g)
         boundary_RZ = np.column_stack([
             np.asarray(g.boundary_R, dtype=float),
             np.asarray(g.boundary_Z, dtype=float),

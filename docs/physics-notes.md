@@ -164,8 +164,9 @@ come from:
 `Bouquet.from_imas(..., ida_path=…)` selects `"ida_hybrid"` automatically and
 also points `UncertaintyConfig.ida_path` at the same file, so the sigma
 envelopes come from the measured fits rather than flat scalars. The optional
-`efit01_geqdsk` argument replaces the FUSE boundary with a magnetics-only EFIT
-separatrix.
+`LCFS_geqdsk` argument replaces the source boundary outline with the separatrix
+from a supplied g-file — use it when you have a better boundary for the slice
+than the dd carries, typically a magnetics-only equilibrium reconstruction.
 
 Note that `anchor_pressure_to_equilibrium` defaults to `False` for exactly this
 reason: with IDA-hybrid kinetics, anchoring to `equilibrium.pressure` would

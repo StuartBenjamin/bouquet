@@ -1000,14 +1000,14 @@
 </a>
 </g>
 </g>
-<!-- cfg.imassource.efit01_geqdsk -->
+<!-- cfg.imassource.LCFS_geqdsk -->
 <g id="node32" class="node">
-<title>cfg.imassource.efit01_geqdsk</title>
-<g id="a_node32"><a xlink:href="#" xlink:title="bouquet/config.py:138 — Magnetics&#45;only EFIT01 g&#45;file for LCFS boundary">
-<polygon fill="#8ecae6" stroke="black" points="1551.13,-7659.79 1385.88,-7659.79 1385.88,-7623.79 1557.13,-7623.79 1557.13,-7653.79 1551.13,-7659.79"/>
-<polyline fill="none" stroke="black" points="1551.13,-7659.79 1551.13,-7653.79"/>
-<polyline fill="none" stroke="black" points="1557.13,-7653.79 1551.13,-7653.79"/>
-<text xml:space="preserve" text-anchor="middle" x="1471.51" y="-7637.92" font-family="Helvetica,sans-Serif" font-size="10.00">efit01_geqdsk: Optional[str] = None</text>
+<title>cfg.imassource.LCFS_geqdsk</title>
+<g id="a_node32"><a xlink:href="#" xlink:title="bouquet/config.py:138 — Optional external g&#45;file supplying the LCFS boundary">
+<polygon fill="#8ecae6" stroke="black" points="1551.88,-7659.79 1385.13,-7659.79 1385.13,-7623.79 1557.88,-7623.79 1557.88,-7653.79 1551.88,-7659.79"/>
+<polyline fill="none" stroke="black" points="1551.88,-7659.79 1551.88,-7653.79"/>
+<polyline fill="none" stroke="black" points="1557.88,-7653.79 1551.88,-7653.79"/>
+<text xml:space="preserve" text-anchor="middle" x="1471.51" y="-7637.92" font-family="Helvetica,sans-Serif" font-size="10.00">LCFS_geqdsk: Optional[str] = None</text>
 </a>
 </g>
 </g>
@@ -1020,12 +1020,12 @@
 </a>
 </g>
 </g>
-<!-- cfg.imassource.efit01_geqdsk&#45;&gt;fn.run.read_geqdsk -->
+<!-- cfg.imassource.LCFS_geqdsk&#45;&gt;fn.run.read_geqdsk -->
 <g id="edge103" class="edge">
-<title>cfg.imassource.efit01_geqdsk&#45;&gt;fn.run.read_geqdsk</title>
-<g id="a_edge103"><a xlink:title="Controls efit01_geqdsk">
-<path fill="none" stroke="#666666" d="M1557.35,-7644.53C1641.72,-7647.26 1767.67,-7651.33 1832.69,-7653.43"/>
-<polygon fill="#666666" stroke="#666666" points="1832.35,-7655.52 1838.42,-7653.62 1832.49,-7651.32 1832.35,-7655.52"/>
+<title>cfg.imassource.LCFS_geqdsk&#45;&gt;fn.run.read_geqdsk</title>
+<g id="a_edge103"><a xlink:title="Controls LCFS_geqdsk">
+<path fill="none" stroke="#666666" d="M1558.34,-7644.57C1642.79,-7647.3 1768.21,-7651.35 1832.9,-7653.44"/>
+<polygon fill="#666666" stroke="#666666" points="1832.53,-7655.53 1838.6,-7653.62 1832.67,-7651.33 1832.53,-7655.53"/>
 </a>
 </g>
 </g>
@@ -1689,14 +1689,14 @@
 </a>
 </g>
 </g>
-<!-- cfg.source.efit01_geqdsk -->
+<!-- cfg.source.LCFS_geqdsk -->
 <g id="node57" class="node">
-<title>cfg.source.efit01_geqdsk</title>
-<g id="a_node57"><a xlink:href="#" xlink:title="bouquet/config.py:138 — magnetics&#45;only EFIT01 g&#45;file whose LCFS replaces the IDS boundary">
-<polygon fill="#8ecae6" stroke="black" points="1503.88,-10035.79 1433.13,-10035.79 1433.13,-9999.79 1509.88,-9999.79 1509.88,-10029.79 1503.88,-10035.79"/>
-<polyline fill="none" stroke="black" points="1503.88,-10035.79 1503.88,-10029.79"/>
-<polyline fill="none" stroke="black" points="1509.88,-10029.79 1503.88,-10029.79"/>
-<text xml:space="preserve" text-anchor="middle" x="1471.51" y="-10013.92" font-family="Helvetica,sans-Serif" font-size="10.00">efit01_geqdsk</text>
+<title>cfg.source.LCFS_geqdsk</title>
+<g id="a_node57"><a xlink:href="#" xlink:title="bouquet/config.py:138 — optional g&#45;file whose LCFS replaces the IDS boundary outline">
+<polygon fill="#8ecae6" stroke="black" points="1504.63,-10035.79 1432.38,-10035.79 1432.38,-9999.79 1510.63,-9999.79 1510.63,-10029.79 1504.63,-10035.79"/>
+<polyline fill="none" stroke="black" points="1504.63,-10035.79 1504.63,-10029.79"/>
+<polyline fill="none" stroke="black" points="1510.63,-10029.79 1504.63,-10029.79"/>
+<text xml:space="preserve" text-anchor="middle" x="1471.51" y="-10013.92" font-family="Helvetica,sans-Serif" font-size="10.00">LCFS_geqdsk</text>
 </a>
 </g>
 </g>
@@ -1709,10 +1709,10 @@
 </a>
 </g>
 </g>
-<!-- cfg.source.efit01_geqdsk&#45;&gt;fn.imas.read_imas_geometry -->
+<!-- cfg.source.LCFS_geqdsk&#45;&gt;fn.imas.read_imas_geometry -->
 <g id="edge150" class="edge">
-<title>cfg.source.efit01_geqdsk&#45;&gt;fn.imas.read_imas_geometry</title>
-<g id="a_edge150"><a xlink:title="EFIT01 LCFS replaces IDS boundary as isoflux target (io/imas.py:117&#45;120, via getattr)">
+<title>cfg.source.LCFS_geqdsk&#45;&gt;fn.imas.read_imas_geometry</title>
+<g id="a_edge150"><a xlink:title="supplied LCFS replaces IDS boundary as isoflux target (io/imas.py:117&#45;120, via getattr)">
 <path fill="none" stroke="#666666" d="M1504.99,-10036.19C1631.49,-10105.13 2097.8,-10333.82 2375.47,-10125.79 2513.14,-10022.65 2599.48,-9443.2 2617.16,-9314.23"/>
 <polygon fill="#666666" stroke="#666666" points="2619.2,-9314.8 2617.93,-9308.57 2615.04,-9314.23 2619.2,-9314.8"/>
 </a>
@@ -3532,7 +3532,7 @@
 <!-- fn.imas.read_imas_geometry&#45;&gt;qty.boundary_lcfs -->
 <g id="edge224" class="edge">
 <title>fn.imas.read_imas_geometry&#45;&gt;qty.boundary_lcfs</title>
-<g id="a_edge224"><a xlink:title="LCFS from EFIT01 or dd outline">
+<g id="a_edge224"><a xlink:title="LCFS from the supplied g&#45;file, or the dd outline">
 <path fill="none" stroke="#666666" d="M2678.2,-9298.24C2722.69,-9302.28 2783.11,-9299.29 2817.59,-9261.79 2957.39,-9109.78 2732.55,-8490.04 2867.59,-8333.79 2971.92,-8213.09 3063.89,-8298.16 3219.46,-8262.79 3401.37,-8221.44 3510.74,-8306.19 3626.35,-8159.79 3749.21,-8004.22 3568.97,-4758.43 3676.35,-4591.79 3694.53,-4563.58 3726.99,-4546.21 3757.35,-4535.62"/>
 <polygon fill="#666666" stroke="#666666" points="3757.73,-4537.7 3762.76,-4533.81 3756.4,-4533.72 3757.73,-4537.7"/>
 </a>
@@ -3727,20 +3727,20 @@
 </a>
 </g>
 </g>
-<!-- input.efit01_gfile -->
+<!-- input.lcfs_gfile -->
 <g id="node198" class="node">
-<title>input.efit01_gfile</title>
-<g id="a_node198"><a xlink:href="#" xlink:title="bouquet/io/imas.py:118 — Magnetics&#45;only LCFS boundary, preferred over FUSE dd boundary outline">
-<polygon fill="#e9edc9" stroke="black" points="2330.57,-10062.79 2171.86,-10062.79 2131.04,-10026.79 2289.74,-10026.79 2330.57,-10062.79"/>
-<text xml:space="preserve" text-anchor="middle" x="2230.8" y="-10040.92" font-family="Helvetica,sans-Serif" font-size="10.00">EFIT01 g&#45;file (optional)</text>
+<title>input.lcfs_gfile</title>
+<g id="a_node198"><a xlink:href="#" xlink:title="bouquet/io/imas.py:118 — Optional external LCFS; replaces the source dd boundary outline when supplied">
+<polygon fill="#e9edc9" stroke="black" points="2324.72,-10062.79 2175.32,-10062.79 2136.89,-10026.79 2286.28,-10026.79 2324.72,-10062.79"/>
+<text xml:space="preserve" text-anchor="middle" x="2230.8" y="-10040.92" font-family="Helvetica,sans-Serif" font-size="10.00">LCFS g&#45;file (optional)</text>
 </a>
 </g>
 </g>
-<!-- input.efit01_gfile&#45;&gt;fn.imas.read_imas_geometry -->
+<!-- input.lcfs_gfile&#45;&gt;fn.imas.read_imas_geometry -->
 <g id="edge409" class="edge">
-<title>input.efit01_gfile&#45;&gt;fn.imas.read_imas_geometry</title>
+<title>input.lcfs_gfile&#45;&gt;fn.imas.read_imas_geometry</title>
 <g id="a_edge409"><a xlink:title="preferred LCFS source (magnetics&#45;only)">
-<path fill="none" stroke="#666666" d="M2310.71,-10044.74C2333.83,-10041.09 2357.66,-10033.29 2375.47,-10017.79 2598.52,-9823.68 2619.05,-9419.86 2620.53,-9314.43"/>
+<path fill="none" stroke="#666666" d="M2306.62,-10045.34C2331,-10041.98 2356.61,-10034.2 2375.47,-10017.79 2598.52,-9823.68 2619.05,-9419.86 2620.53,-9314.43"/>
 <polygon fill="#666666" stroke="#666666" points="2622.63,-9314.61 2620.59,-9308.59 2618.43,-9314.57 2622.63,-9314.61"/>
 </a>
 </g>

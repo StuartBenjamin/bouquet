@@ -797,12 +797,12 @@
    "subsystem": "Configuration"
   },
   {
-   "id": "cfg.imassource.efit01_geqdsk",
+   "id": "cfg.imassource.LCFS_geqdsk",
    "type": "knob",
-   "label": "efit01_geqdsk: Optional[str] = None",
+   "label": "LCFS_geqdsk: Optional[str] = None",
    "file": "bouquet/config.py",
    "line": 138,
-   "desc": "Magnetics-only EFIT01 g-file for LCFS boundary",
+   "desc": "Optional external g-file supplying the LCFS boundary",
    "subsystem": "Configuration"
   },
   {
@@ -1218,12 +1218,12 @@
    "subsystem": "Configuration"
   },
   {
-   "id": "cfg.source.efit01_geqdsk",
+   "id": "cfg.source.LCFS_geqdsk",
    "type": "knob",
-   "label": "efit01_geqdsk",
+   "label": "LCFS_geqdsk",
    "file": "bouquet/config.py",
    "line": 138,
-   "desc": "magnetics-only EFIT01 g-file whose LCFS replaces the IDS boundary",
+   "desc": "optional g-file whose LCFS replaces the IDS boundary outline",
    "subsystem": "Configuration"
   },
   {
@@ -3478,12 +3478,12 @@
    "subsystem": "Process-parallel path"
   },
   {
-   "id": "input.efit01_gfile",
+   "id": "input.lcfs_gfile",
    "type": "input",
-   "label": "EFIT01 g-file (optional)",
+   "label": "LCFS g-file (optional)",
    "file": "bouquet/io/imas.py",
    "line": 118,
-   "desc": "Magnetics-only LCFS boundary, preferred over FUSE dd boundary outline",
+   "desc": "Optional external LCFS; replaces the source dd boundary outline when supplied",
    "subsystem": "IMAS/OMAS reader"
   },
   {
@@ -5952,10 +5952,10 @@
    "subsystem": "Configuration"
   },
   {
-   "src": "cfg.imassource.efit01_geqdsk",
+   "src": "cfg.imassource.LCFS_geqdsk",
    "dst": "fn.run.read_geqdsk",
    "kind": "data",
-   "desc": "Controls efit01_geqdsk",
+   "desc": "Controls LCFS_geqdsk",
    "subsystem": "Configuration"
   },
   {
@@ -6281,10 +6281,10 @@
    "subsystem": "Configuration"
   },
   {
-   "src": "cfg.source.efit01_geqdsk",
+   "src": "cfg.source.LCFS_geqdsk",
    "dst": "fn.imas.read_imas_geometry",
    "kind": "data",
-   "desc": "EFIT01 LCFS replaces IDS boundary as isoflux target (io/imas.py:117-120, via getattr)",
+   "desc": "supplied LCFS replaces IDS boundary as isoflux target (io/imas.py:117-120, via getattr)",
    "subsystem": "IMAS/OMAS reader"
   },
   {
@@ -6802,7 +6802,7 @@
    "src": "fn.imas.read_imas_geometry",
    "dst": "qty.boundary_lcfs",
    "kind": "data",
-   "desc": "LCFS from EFIT01 or dd outline",
+   "desc": "LCFS from the supplied g-file, or the dd outline",
    "subsystem": "IMAS/OMAS reader"
   },
   {
@@ -8094,7 +8094,7 @@
    "subsystem": "Process-parallel path"
   },
   {
-   "src": "input.efit01_gfile",
+   "src": "input.lcfs_gfile",
    "dst": "fn.imas.read_imas_geometry",
    "kind": "data",
    "desc": "preferred LCFS source (magnetics-only)",

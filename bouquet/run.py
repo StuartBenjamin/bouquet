@@ -98,7 +98,7 @@ class Bouquet:
     @classmethod
     def from_imas(cls, ids_path, *, mesh, time=None,
                   n_draws=20, header="bouquet",
-                  ida_path=None, efit01_geqdsk=None, impurity_Z=6.0,
+                  ida_path=None, LCFS_geqdsk=None, impurity_Z=6.0,
                   kinetic_source=None, anchor_pressure_to_equilibrium=False,
                   **solver_kwargs) -> "Bouquet":
         """Minimal constructor for the IMAS/OMAS path (no reconstruction).
@@ -108,10 +108,13 @@ class Bouquet:
 
         IDA-hybrid kinetics: pass ``ida_path`` (an IDA ``.cdf``) to take the
         baseline ne/Te/Ti/omega_tor (and sigma envelopes) from IDA fits while
-        keeping FUSE Z_eff/currents/equilibrium. ``efit01_geqdsk`` (a
-        magnetics-only EFIT01 g-file) replaces the FUSE boundary as the isoflux
-        separatrix. ``kinetic_source`` defaults to ``"ida_hybrid"`` when an
-        ``ida_path`` is given, else ``"fuse"``.
+        keeping FUSE Z_eff/currents/equilibrium. ``kinetic_source`` defaults to
+        ``"ida_hybrid"`` when an ``ida_path`` is given, else ``"fuse"``.
+
+        ``LCFS_geqdsk`` is OPTIONAL: a g-file whose LCFS replaces the source
+        boundary outline as the isoflux target, for when you have a better
+        separatrix for the slice than the dd carries (typically a magnetics-only
+        reconstruction). Omit it to use the source's own boundary.
         """
         from .config import (BouquetConfig, SolverConfig, ImasSource,
                              GenerationConfig)
@@ -119,7 +122,7 @@ class Bouquet:
             kinetic_source = "ida_hybrid" if ida_path else "fuse"
         cfg = BouquetConfig(
             source=ImasSource(ids_path=ids_path, time=time, ida_path=ida_path,
-                              impurity_Z=impurity_Z, efit01_geqdsk=efit01_geqdsk),
+                              impurity_Z=impurity_Z, LCFS_geqdsk=LCFS_geqdsk),
             solver=SolverConfig(mesh_path=mesh, **solver_kwargs),
             generation=GenerationConfig(n_equils=n_draws,
                                         kinetic_source=kinetic_source,

@@ -132,10 +132,13 @@ class ImasSource:
     # UncertaintyConfig.ida_path so the sigma envelopes come from the same IDA.
     ida_path: Optional[str] = None
     impurity_Z: float = 6.0            # machine impurity charge (carbon); ni dilution
-    # Magnetics-only EFIT01 gEQDSK whose LCFS replaces the FUSE dd boundary as the
-    # isoflux separatrix target (theoretically the most accurate separatrix). One
-    # g-file per slice; the driver picks the nearest EFIT01 time.
-    efit01_geqdsk: Optional[str] = None
+    # OPTIONAL. A gEQDSK whose LCFS replaces the dd boundary outline as the
+    # isoflux separatrix target. Leave None to use the source's own boundary.
+    # Supply one when you have a more accurate separatrix for the slice than the
+    # dd carries -- typically a magnetics-only equilibrium reconstruction, which
+    # fits the boundary to the external magnetics without kinetic assumptions.
+    # One g-file per slice; the driver picks the nearest time.
+    LCFS_geqdsk: Optional[str] = None
 
 
 BaselineSource = Union[ReconstructionSource, ImasSource]
