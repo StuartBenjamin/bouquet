@@ -299,6 +299,15 @@ class GenerationConfig:
     # The sigma=0 guard is a no-op here (there is no split to reproduce) and
     # verify_sigma0_consistency() reports that instead of running a solve.
     #
+    # SIGMA MEANING CHANGES: jphi_scalar_sigma is applied to whatever is being
+    # perturbed, which here is the TOTAL rather than the inductive component. On
+    # a baseline with a real bootstrap the same sigma is therefore a materially
+    # larger absolute current perturbation, and the draws drift the boundary and
+    # coils further (measured on an H-mode test case: 0/4 draws in spec at
+    # sigma=0.05, vs 4/5-5/5 with the split). Expect to re-tune jphi_scalar_sigma
+    # (and possibly the in-spec cuts) for this mode rather than inheriting the
+    # split-mode values.
+    #
     # SCOPE: this removes the per-draw Sauter calls (the N-times cost). On the
     # g-file path the bootstrap is still computed ONCE during reconstruction,
     # and that is not removable by simply skipping the solve: fit_inductive_profile
