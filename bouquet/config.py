@@ -284,6 +284,32 @@ class GenerationConfig:
     # and convert its parallel output to toroidal (see physics.parallel_to_toroidal),
     # overriding the baseline/FUSE j_BS. When False, keep the baseline j_BS.
     recalculate_j_BS: bool = True
+    # Treat j_phi as ONE profile: no inductive/bootstrap decomposition anywhere.
+    # The baseline total is taken straight from the source (the g-file's j_tor on
+    # the reconstruction path, equilibrium.j_tor on the IMAS path), collapsed to
+    # j_inductive = j_phi with j_BS = j_NBI = j_RF = 0, and the GPR perturbs that
+    # total directly. Implies recalculate_j_BS=False, so no Sauter/Redl
+    # solve_with_bootstrap call runs per draw.
+    #
+    # For L-mode, where the bootstrap is negligible and the Sauter edge-spike
+    # machinery (classification, shelf, edge isolation) has nothing real to act
+    # on and can misfire. NOT for H-mode: it discards the physical bootstrap and
+    # its per-draw response, so the ensemble no longer carries bootstrap UQ.
+    #
+    # The sigma=0 guard is a no-op here (there is no split to reproduce) and
+    # verify_sigma0_consistency() reports that instead of running a solve.
+    #
+    # SCOPE: this removes the per-draw Sauter calls (the N-times cost). On the
+    # g-file path the bootstrap is still computed ONCE during reconstruction,
+    # and that is not removable by simply skipping the solve: fit_inductive_profile
+    # matches l_i by scaling the inductive against a FIXED j_BS, and with j_BS = 0
+    # the cylindrical l_i proxy is scale-invariant (scaling j scales B_p, so the
+    # proxy's numerator and denominator both go as k^2). The residual then never
+    # brackets, _solve_ind_scale silently falls back to ind_scale = 1.0, and the
+    # unmatched profile makes the downstream GS solve abort (OFT error stop 255).
+    # Verified 2026-08-03. Making the skip work needs a different l_i strategy for
+    # this mode, not just an early return.
+    single_profile_jphi: bool = False
     jBS_scale_range: tuple = (0.99, 1.01)  # bootstrap multiplicative spread
     # Delta composition of the per-draw bootstrap (alternative to sharing the
     # near-axis smoothing): each draw's spike is built as

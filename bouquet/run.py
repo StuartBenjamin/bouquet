@@ -444,6 +444,14 @@ class Bouquet:
         from .baseline import resolve_baseline
         from .config import ImasSource
 
+        # single_profile_jphi: drop the per-draw Sauter recompute BEFORE the
+        # baseline work, so the IMAS forward solve does not spend a bootstrap
+        # call either. The total j_phi is anchored to the source either way, so
+        # the baseline equilibrium is unchanged -- only the (about to be
+        # collapsed) split differs.
+        if self.config.generation.single_profile_jphi:
+            self.config.generation.recalculate_j_BS = False
+
         self.baseline = resolve_baseline(self.config, self.mygs)
 
         # IMAS path: read_imas_baseline does no GS solve, so establish a converged
@@ -456,11 +464,49 @@ class Bouquet:
             self._repoint_imas_geometry()
             self._forward_solve_imas_baseline()
 
+        # single_profile_jphi: collapse the decomposition so the archive matches
+        # what the draws actually perturb (the total). Done AFTER the baseline
+        # solve so the equilibrium itself is unchanged -- only the bookkeeping
+        # split is folded back into j_inductive.
+        if self.config.generation.single_profile_jphi:
+            self._collapse_jphi_split()
+
         # Reconstruction path: surface a glanceable quality summary (the verbose
         # solver chatter was captured to baseline.reconstruction_log).
         if self.baseline.reconstruction_metrics is not None:
             self._print_reconstruction_summary()
         return self.baseline
+
+    def _collapse_jphi_split(self) -> None:
+        """Fold every j_phi component back into j_inductive (single-profile mode).
+
+        Leaves ``baseline.j_phi`` untouched -- it is already the source total --
+        and sets ``j_inductive = j_phi`` with the bootstrap and driven components
+        zeroed, so nothing downstream can reintroduce a split. Also forces
+        ``recalculate_j_BS=False``: with no baseline bootstrap there is nothing
+        for the per-draw Sauter call to anchor to, and the draw path then perturbs
+        the total directly (see TokaMaker_interface ~line 2136).
+        """
+        import numpy as np
+
+        bl = self.baseline
+        gc = self.config.generation
+        j_phi = np.asarray(bl.j_phi, dtype=float)
+        dropped = {
+            name: float(np.max(np.abs(np.asarray(getattr(bl, name), dtype=float))))
+            for name in ("j_BS", "j_NBI", "j_RF")
+            if getattr(bl, name, None) is not None
+        }
+        bl.j_inductive = j_phi.copy()
+        bl.j_BS = np.zeros_like(j_phi)
+        for name in ("j_NBI", "j_RF"):
+            if getattr(bl, name, None) is not None:
+                setattr(bl, name, np.zeros_like(j_phi))
+        gc.recalculate_j_BS = False          # already forced in prepare_baseline
+        summary = ", ".join(f"{k} peak {v/1e6:.4f}" for k, v in dropped.items()) or "none"
+        print(f"[single-profile] j_phi kept as one profile (peak "
+              f"{np.max(np.abs(j_phi))/1e6:.4f} MA/m^2); folded in: {summary} "
+              f"[MA/m^2]; recalculate_j_BS forced False (no Sauter per draw)")
 
     def reconstruct(self) -> "Baseline":
         """Reconstruct the baseline equilibrium and print a quality summary.
@@ -851,6 +897,15 @@ class Bouquet:
         if self.baseline is None or self.mygs is None:
             raise ValueError("call setup_solver() + prepare_baseline() / "
                              "reconstruct() before verify_sigma0_consistency()")
+        if self.config.generation.single_profile_jphi:
+            # No inductive/bootstrap split exists, so there is nothing for the
+            # sigma=0 draw to reproduce. Report a pass rather than spending a
+            # bootstrap solve comparing zeros.
+            print("[sigma0-check] SKIPPED: single_profile_jphi=True -- j_phi is "
+                  "one profile, so there is no j_BS split to verify")
+            return {"spike0": None, "max_dev": 0.0, "rms_dev": 0.0,
+                    "max_dev_frac": 0.0, "psi_worst": float("nan"),
+                    "passed": True, "skipped": "single_profile_jphi"}
         bl = self.baseline
         mygs = self.mygs
         gc = self.config.generation
