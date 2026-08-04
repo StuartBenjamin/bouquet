@@ -28,6 +28,11 @@ Two things can only be checked with the real GS solver:
     ``solve_with_bootstrap``'s landed equilibrium against an uncalibrated
     ``Ip_target``; see ``TokaMaker_interface._AnchorIpRenorm``.
 
+    The same probe A/Bs the FSA-measure mode (``BOUQUET_R2_IP_MODE=exact``)
+    against the default ratio calibration.  Its acceptance is separate and
+    looser BY DERIVATION, not by concession -- read ``_S_ATOL_EXACT`` before
+    touching either number.
+
 Runs on the synthetic D3D-like example (no proprietary data).  Marked
 ``solver`` like ``test_systematics.py``; deselect with ``pytest -m "not
 solver"``.
@@ -85,6 +90,16 @@ _S_ATOL = 1e-3               # |s - 1| ; measured 8.5e-4
 _LI_REL = 0.005              # l_i vs recon ; measured +0.100%
 _JBS_FRAC = 0.02             # sigma0 j_BS vs baseline split, fraction of peak
                              # (the sigma0-guard bar) ; measured 0.265%
+
+# The 'exact' measure (BOUQUET_R2_IP_MODE=exact) has its OWN acceptance, and it
+# is deliberately not _S_ATOL.  The ratio calibration is exact at sigma=0 by
+# construction; the FSA measure is not, because it also sees the two ways the
+# archived split fails to be the anchor -- the reconstruction's own j_phi
+# residual (+0.193% of Ip at the R2 state anchor, i.e. -0.25% of inductive
+# amplitude) and the sigma=0 SWB residual (-0.085%).  Measured |s-1| = 3.25e-3
+# against that -0.335% budget.  This bar is a NEW pin on NEW behaviour, not a
+# widening of _S_ATOL, which still governs the default path below.
+_S_ATOL_EXACT = 5e-3         # |s - 1| in exact mode ; measured 3.25e-3
 
 
 def _draw_groups(path):
@@ -265,10 +280,10 @@ def test_seeded_draws_are_not_all_identical(twin_runs):
 def _run_r2_probe(outdir):
     """sigma=0 route-R2 draws through ``perturb_kinetic_equilibrium``.
 
-    Runs the fixed ('anchor') path TWICE -- so the pair also tests that the
-    anchor snapshot/restore injects no state drift -- and the 'legacy' path
-    once, for the before/after contrast.  Subprocess entry point; results land
-    in ``<outdir>/r2.npz``.
+    Runs the default ('ratio') path TWICE -- so the pair also tests that the
+    anchor snapshot/restore injects no state drift -- the 'exact' FSA measure
+    twice, and the 'legacy' path once for the before/after contrast.
+    Subprocess entry point; results land in ``<outdir>/r2.npz``.
     """
     import numpy as np
     import bouquet as bq
@@ -317,12 +332,17 @@ def _run_r2_probe(outdir):
                 np.asarray(d["j_BS"], dtype=float),
                 np.asarray(d["j_inductive"], dtype=float))
 
-    s1, li1, jbs1, jind1 = _once("anchor")
-    s2, li2, jbs2, jind2 = _once("anchor")
+    s1, li1, jbs1, jind1 = _once("ratio")
+    s2, li2, jbs2, jind2 = _once("ratio")
+    s_ex1, li_ex1, jbs_ex1, jind_ex1 = _once("exact")
+    s_ex2, li_ex2, jbs_ex2, jind_ex2 = _once("exact")
     s_leg, li_leg, _, _ = _once("legacy")
     np.savez(
         os.path.join(outdir, "r2.npz"),
         s=np.array([s1, s2]), li=np.array([li1, li2]),
+        s_exact=np.array([s_ex1, s_ex2]), li_exact=np.array([li_ex1, li_ex2]),
+        jbs_exact1=jbs_ex1, jbs_exact2=jbs_ex2,
+        jind_exact1=jind_ex1, jind_exact2=jind_ex2,
         s_legacy=np.array([s_leg]), li_legacy=np.array([li_leg]),
         jbs1=jbs1, jbs2=jbs2, jind1=jind1, jind2=jind2,
         jbs_baseline=np.asarray(bl.j_BS, dtype=float),
@@ -396,6 +416,56 @@ def test_sigma0_r2_is_bit_reproducible(sigma0_anchor):
                                   err_msg="sigma=0 R2 j_BS is not bit-reproducible")
     np.testing.assert_array_equal(d["jind1"], d["jind2"],
                                   err_msg="sigma=0 R2 j_inductive is not bit-reproducible")
+
+
+def test_sigma0_r2_exact_measure_lands_in_its_own_budget(sigma0_anchor):
+    """``BOUQUET_R2_IP_MODE=exact``: the FSA current integral instead of the
+    ratio calibration (``utils.Ip_fsa_integral``).
+
+    It does NOT land closer to 1.000 -- 3.25e-3 against the calibration's
+    8.5e-4 -- and that is the expected, understood result: the calibration
+    cancels every representation error by construction, while the measure
+    additionally charges the draw for the reconstruction's own j_phi residual
+    (+0.193% of Ip at the R2 state anchor) on top of the sigma=0 SWB residual
+    (-0.085%).  -0.335% of inductive amplitude predicted, -0.325% measured.
+    """
+    s = float(sigma0_anchor["s_exact"][0])
+    assert abs(s - 1.0) <= _S_ATOL_EXACT, (
+        f"exact-mode sigma=0 Ip scale is {s:.6f}, off unity by "
+        f"{abs(s - 1.0):.3e} (bar {_S_ATOL_EXACT:.0e}) -- larger than the "
+        f"residual budget accounts for")
+    assert abs(s - 1.0) > _S_ATOL, (
+        f"exact mode returned {s:.6f}, inside the ratio mode's bar -- if the "
+        f"archived split has become self-consistent with the anchor, the "
+        f"default should be revisited (see _AnchorIpRenorm)")
+
+
+def test_sigma0_r2_exact_measure_still_recovers_the_recon_li(sigma0_anchor):
+    """The physics acceptance is unchanged by the change of measure: same 0.5%
+    bar as the default path.  Measured +0.130% (default: +0.100%)."""
+    target = float(sigma0_anchor["l_i_target"][0])
+    got = float(sigma0_anchor["li_exact"][0])
+    assert abs(got - target) / target <= _LI_REL, (
+        f"exact-mode sigma=0 l_i = {got:.5f} vs recon {target:.5f} "
+        f"({100 * (got / target - 1):+.3f}%, bar {100 * _LI_REL:.1f}%)")
+
+
+def test_sigma0_r2_exact_measure_is_bit_reproducible(sigma0_anchor):
+    """The FSA weights are captured off a ``copy_eq`` snapshot; two identical
+    calls must agree to the bit, exactly as the default path does."""
+    d = sigma0_anchor
+    assert float(d["s_exact"][0]) == float(d["s_exact"][1])
+    assert float(d["li_exact"][0]) == float(d["li_exact"][1])
+    np.testing.assert_array_equal(d["jbs_exact1"], d["jbs_exact2"])
+    np.testing.assert_array_equal(d["jind_exact1"], d["jind_exact2"])
+
+
+def test_sigma0_r2_exact_measure_leaves_the_bootstrap_alone(sigma0_anchor):
+    """Changing the measure must not move j_BS: route R2 holds the bootstrap
+    fixed and moves only the ohmic drive."""
+    np.testing.assert_array_equal(
+        sigma0_anchor["jbs_exact1"], sigma0_anchor["jbs1"],
+        err_msg="the exact measure changed the sigma=0 bootstrap")
 
 
 def test_legacy_mode_still_shows_the_defect(sigma0_anchor):

@@ -2,8 +2,10 @@
 
 ## Unreleased — reproducibility contract + trustworthy R2 Ip renormalisation
 
-Three fixes found while driving a β-scan through `generate()` at σ=0. All
-three are backwards compatible; production `generate()` defaults are unchanged.
+Four fixes found while driving a β-scan through `generate()` at σ=0. All four
+are backwards compatible; production `generate()` defaults are unchanged.
+(Fix 4 supersedes the *diagnosis* in fix 2, but not its behaviour, which stays
+the default — read them in order.)
 
 ### 1. The seed now reaches the GPR — *the reproducibility contract*
 
@@ -107,8 +109,103 @@ changing it:
   `sigma_profiles` recipe that actually works. Untouched defaults do not warn;
 * `UncertaintyConfig`'s docstring states the precedence as a table.
 
+### 4. A real `I_p` measure: `utils.Ip_fsa_integral`
+
+Fix 2 cancelled a "+12.9 % convention bias" with a ratio calibration. Chasing
+where that 12.9 % actually comes from turned up two separate errors, neither of
+them the one fix 2 named:
+
+* **`compute_flux_integral` is not `∫_plasma f dA`.** It integrates over the
+  whole `reg == 1` limiter region, and off the plasma the flux-function
+  interpolator returns the profile's **LCFS value** (`gs_prof_interp_apply`
+  CASE(4) returns 0 — the LCFS end of the internal flux coordinate — and
+  `gs_flux_int` then reads the profile there). `FI(1) = 2.83853 m²` is the
+  limiter area, **not** the plasma cross-section, which is `1.79005 m²`; fix
+  2's note to the contrary is wrong. For the archived total the 1.05 m² excess
+  is charged at the edge value, `1.36e5 A/m² × 1.05 m² = +1.43e5 A` = **+11.9 %
+  of `I_p`** — essentially the entire bias.
+* **The remaining ~1 % is a convention, but not the assumed one.** bouquet's
+  arrays are TokaMaker `jphi-linterp` values, `J = <R> P' + <1/R> FF'/µ0`
+  (`jphi_update`), not the FSA density `<j_φ/R>/<1/R>`. The two differ by
+  `<R><1/R²>/<1/R>`, up to 11 % per surface at the edge.
+
+`utils.Ip_fsa_integral` replaces the mesh integral with the textbook
+axisymmetric current integral, `I_p = ∫ dψ (V'/2π) <j_φ/R>`, taking `V'`,
+`<R>`, `<1/R>` and `<1/R²>` from `get_q`'s `ravgs` dict and folding in the
+`jphi-linterp` conversion. Supporting helpers: `fsa_current_geometry` (the
+per-surface arrays), `Ip_fsa_weights` (`I_p[J] = trapezoid(w·J) + c` — the
+measure is **affine**, the `P'` term is −3.3 % of `I_p` and lands in `c`), and
+`eq_jphi_profile` (the equilibrium's own profile in either convention).
+
+**Validation** (D3D-like, `tests/test_fsa_current_integral.py`): integrating the
+solved equilibrium's *own* current profile returns its true `I_p` to
+**+0.0071 %** against a required 0.1 %, in both conventions. On the *archived*
+total the `jphi-linterp` reading gives +0.068 % and the `fsa` reading +0.927 %;
+the former agrees to 0.011 % with the solver's own internal `jphi_norm`.
+
+Two getter traps are now closed in code rather than by luck:
+
+* `get_q(psi=…)` **silently collapses onto the magnetic axis** if the sample
+  grid contains `psi_N = 0` — `<R>` constant to 2e-15 across all 257 surfaces,
+  no exception. `fsa_current_geometry` clips to `[psi_pad, 1-psi_pad]` and
+  raises if it sees the collapse anyway.
+* `dV/dPsi` is per **dimensional** ψ (`∫ dV/dPsi dψ` recovers the volume to
+  −0.25 %; the `dψ_N` reading is out by +291 %).
+
+`_AnchorIpRenorm` gains the measure as `BOUQUET_R2_IP_MODE=exact` (and the
+literal FSA-density reading as `fsa`), alongside `ratio` (fix 2's calibration,
+also spelled `anchor`) and `legacy`. Every FSA getter runs on the frozen
+`copy_eq` snapshot — verified bit-identical to the live solver, and verified
+not to perturb it — and the weights are cached as arrays at capture time, so
+after `__init__` the root needs no solver call at all. The class self-checks
+the measure against the anchor's own profile at runtime (+0.014 % here) and
+prints it.
+
+**The default is still `ratio`, deliberately.** Measured at σ=0:
+
+| mode | `s` | `\|s−1\|` | `l_i` vs recon |
+|---|---|---|---|
+| `exact` | 0.996750 | 3.3e-3 | +0.130 % |
+| `fsa` | 0.985600 | 1.4e-2 | −0.093 % |
+| `ratio` | 0.999150 | 8.5e-4 | +0.100 % |
+| `legacy` | 0.837339 | 1.6e-1 | −2.008 % |
+
+The correct measure reproduces `s == 1.000` **less** closely, for an understood
+reason: `ratio` is exact by construction, because it asks the draw to carry the
+same mis-measured integral as the archived total, so every representation error
+cancels. `exact` asks for `Ip_target` in real amperes and therefore also
+charges the draw for the reconstruction's own `j_φ` residual (the archived
+total differs from the anchor's own profile by 1.6 % of peak *in shape*, worth
++0.193 % of `I_p` at the R2 state anchor → −0.25 % of inductive amplitude) on
+top of the σ=0 SWB residual (−0.085 %). −0.335 % predicted, −0.325 % measured.
+Both terms are real. Even a perfectly self-consistent archive would leave
+~1.1e-3, so the pinned `|s−1| ≤ 1e-3` invariant is **not attainable by any
+honest measure** on this case — flipping the default is an acceptance-criterion
+decision, not a code change, and is left to the author
+(`_R2_IP_MODE_DEFAULT`).
+
+**The production `l_i` loop is untouched** (see below), but now measured: with
+`perturb_jind_in_anchor=False` on a seeded 2-draw `generate()`, the loop's root
+returns `a = 0.785003` and `0.928871` where the FSA measure gives `0.920811`
+and `1.078281` — the loop absorbs a **+16.1 % to +17.3 %** bias in inductive
+amplitude (+14.9 % / +15.7 % under the `fsa` reading), which
+`find_optimal_scale` + the corrective iteration then re-derive away. The
+measure self-checks to +0.015 % at those states.
+
 ### Tests
 
+* `tests/test_fsa_current_integral.py` — fast half: the affine algebra, a
+  circular large-aspect-ratio geometry with an analytic answer, and that every
+  unsupported combination raises instead of returning a plausible number.
+  `solver` half (subprocess): the 0.1 % self-consistency validation, snapshot
+  ≡ live, the `dV/dPsi` Jacobian, the silent `get_q` collapse, and that
+  `compute_flux_integral(1)` is still the limiter area (so the rationale is
+  re-checked if OFT changes the interpolator).
+* `tests/test_seeded_reproducibility.py` also A/Bs `BOUQUET_R2_IP_MODE=exact`:
+  its own derived bar `_S_ATOL_EXACT = 5e-3` (measured 3.25e-3) — a **new pin
+  on new behaviour, not a widening of `_S_ATOL`**, which still governs the
+  default path — plus the same 0.5 % `l_i` acceptance, bit-reproducibility, and
+  that changing the measure leaves `j_BS` untouched.
 * `tests/test_rng_reproducibility.py` (fast) — `make_rng`; samplers honour an
   injected Generator; an AST check that **every** draw call site passes `rng=`
   (the defect was invisible at runtime, so only a structural assertion prevents
