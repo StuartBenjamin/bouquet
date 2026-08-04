@@ -80,6 +80,10 @@ from .filtering import (
 from .utils import (
     Hmode_profiles,
     Ip_flux_integral_vs_target,
+    Ip_fsa_integral,
+    Ip_fsa_weights,
+    fsa_current_geometry,
+    eq_jphi_profile,
     initialize_equilibrium_database,
     store_equilibrium,
     load_equilibrium,
@@ -171,6 +175,8 @@ __all__ = [
     "fast_pressure_residual", "infer_fast_pressure",
     "radial_field_from_impurity_force_balance", "radial_field_from_cer",
     "Hmode_profiles",
+    "Ip_fsa_integral", "Ip_fsa_weights", "fsa_current_geometry",
+    "eq_jphi_profile",
     # ---- environment / path resolution ----
     "add_oft_to_path", "find_mesh",
     # ---- profile sampling / uncertainty ----
