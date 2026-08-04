@@ -1003,6 +1003,22 @@ class Bouquet:
         user can't accidentally select a workflow that won't work. Set
         ``config.generation.allow_unsafe_workflow=True`` to bypass (warns
         instead) for deliberate backend tests / experiments.
+
+        Relaxed: ``perturb_jind_in_anchor=True`` (route R2) on the
+        reconstruction/geqdsk path used to be a hard error. It was barred
+        because R2 hands :math:`I_p` to the inductive amplitude alone via
+        ``Ip_flux_integral_vs_target``, and that root was evaluated on
+        ``solve_with_bootstrap``'s landed equilibrium rather than the anchor
+        -- measured on the synthetic D3D-like example at :math:`\\sigma=0`,
+        where the archived split must be reproduced exactly, it returned
+        ``0.8373`` instead of ``1.000`` and pulled :math:`l_i` 2.0 % low. With
+        the root pinned to the anchor geometry and calibrated against the
+        archived total (see
+        :class:`bouquet.TokaMaker_interface._AnchorIpRenorm`) the same case
+        returns ``0.99915`` with :math:`l_i` +0.10 %, so the guard no longer
+        applies to the fixed implementation and is downgraded to a one-line
+        note. ``generate()``'s production defaults are unchanged: R2 stays
+        opt-in, for the deterministic/anchor context.
         """
         from .config import ReconstructionSource, ImasSource
         gc = self.config.generation
@@ -1024,10 +1040,17 @@ class Bouquet:
             problems.append("jphi_scalar_sigma<=0 freezes j_inductive "
                             "perturbation (violates the all-profiles rule)")
         if isinstance(self.config.source, ReconstructionSource):
+            # perturb_jind_in_anchor (route R2) is no longer a hard error on
+            # the geqdsk path -- see the method docstring.  It is still not
+            # the default, so say so once when it is selected.
             if gc.perturb_jind_in_anchor:
-                problems.append("geqdsk path + perturb_jind_in_anchor=True "
-                                "(Fix C) drops draws on stiff geqdsks; use the "
-                                "standard l_i loop (perturb_jind_in_anchor=False)")
+                print("NOTE: geqdsk path + perturb_jind_in_anchor=True "
+                      "(route R2). The Ip renormalisation is now evaluated on "
+                      "the anchor geometry (sigma=0 -> scale 1.000), but R2 "
+                      "accepts the band-conditioned anchor draw and can still "
+                      "exhaust its resamples on a stiff g-file; the standard "
+                      "l_i loop (perturb_jind_in_anchor=False) remains the "
+                      "default for ensembles.")
         elif isinstance(self.config.source, ImasSource):
             if not gc.perturb_jind_in_anchor:
                 problems.append("IMAS path without Fix C "

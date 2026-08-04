@@ -823,6 +823,155 @@ def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad):
     )
 
 
+class _AnchorIpRenorm:
+    r"""Frozen anchor-geometry evaluator for the R2 :math:`I_p` renormalisation.
+
+    Route R2 (``perturb_jind_in_anchor=True``) sets the inductive AMPLITUDE by
+    rooting ``utils.Ip_flux_integral_vs_target`` on ``s*j_ind + j_BS``, holding
+    the bootstrap fixed -- the physically-correct bookkeeping, since an
+    :math:`I_p` constraint should move the ohmic drive only.  Two defects made
+    that root untrustworthy; this class fixes both.
+
+    **1. Geometry.**  The root used to run AFTER ``solve_with_bootstrap``, so
+    ``mygs.flux_integral`` was evaluated on SWB's *landed* equilibrium instead
+    of the anchor.  Measured on the synthetic D3D-like example at
+    :math:`\sigma=0`: the SWB-landed geometry gives ``s = 0.8373`` against the
+    anchor geometry's ``0.8524`` -- a 1.80 % error in the inductive amplitude
+    for no physical reason.  Here the anchor equilibrium is captured with
+    ``copy_eq()`` immediately after the state-anchor solve and every flux
+    integral is taken on that snapshot, via the equilibrium object's own
+    ``compute_flux_integral``.  ``mygs`` is never mutated, so nothing
+    downstream of the SWB call sees a different state.
+
+    **2. Convention normalisation.**  ``compute_flux_integral`` is a faithful
+    :math:`\int f\,dA` (verified: ``FI(1) ==`` plasma area, and
+    ``compute_area_integral(calc_jtor_plasma) == I_p`` to 1e-7 relative), but
+    bouquet's current profiles are the FSA toroidal density
+    :math:`\langle j_\phi/R\rangle/\langle 1/R\rangle`, whose area integral is
+    NOT :math:`I_p`.  On the D3D-like example the archived total integrates to
+    ``+12.92 %`` of :math:`I_p` -- a bias present in ANY geometry, and by far
+    the larger part of the R2 error.  Rooting against a raw ``Ip_target``
+    therefore mis-splits ohmic vs bootstrap even after the geometry is fixed.
+
+    The bias is removed by calibrating on the anchor itself: the target is
+    ``FI(reference_total) * Ip_target / Ip_anchor`` rather than ``Ip_target``.
+    ``reference_total`` is the archived total :math:`j_\phi` (``input_j_phi``),
+    whose split ``j_ind + j_BS`` the draw reproduces at :math:`\sigma=0`, so
+    the calibration makes the golden invariant exact by construction:
+
+        at :math:`\sigma=0`, ``s == 1.000`` on any case, in any geometry.
+
+    Retargeting is preserved -- the ``Ip_target / Ip_anchor`` factor scales the
+    demand when the caller asks for a current the anchor does not carry.  The
+    calibration is measured on the reference shape and applied to a perturbed
+    candidate, so it is exact at :math:`\sigma=0` and first-order accurate for
+    a draw; that is a strict improvement on carrying the full raw bias.
+
+    Set ``BOUQUET_R2_IP_MODE=legacy`` to restore the pre-fix behaviour (root
+    against ``mygs`` in whatever state it is in, target ``Ip_target``) for A/B
+    comparison.  Only route R2 uses this; the standard :math:`l_i` loop
+    (``perturb_jind_in_anchor=False``, the production ensemble path) is
+    untouched and bit-identical, because its root is followed by
+    ``find_optimal_scale`` + the corrective iteration, which re-derive the
+    amplitude from the solved equilibrium anyway.
+
+    Parameters
+    ----------
+    mygs : TokaMaker
+        Solver, positioned at the state-anchor equilibrium.  Snapshotted, not
+        modified.
+    psi_N : ndarray
+        Equilibrium flux grid the profiles live on.
+    reference_total : ndarray
+        The archived total :math:`j_\phi` the split must reproduce at
+        :math:`\sigma=0` (``input_j_phi``).
+    Ip_target : float
+        Requested plasma current [A].
+    psi_pad : float
+        LCFS padding for the anchor ``get_stats`` call.
+    """
+
+    __slots__ = ("_eq", "_psi_N", "_target", "_Ip_target", "_fi_ref",
+                 "_Ip_anchor", "_kappa")
+
+    def __init__(self, mygs, psi_N, reference_total, Ip_target, psi_pad):
+        self._eq = mygs.copy_eq()
+        self._psi_N = np.asarray(psi_N, dtype=float)
+        self._Ip_target = float(Ip_target)
+        self._fi_ref = float(self.flux_integral(
+            self._psi_N, np.asarray(reference_total, dtype=float)))
+        try:
+            self._Ip_anchor = float(mygs.get_stats(lcfs_pad=psi_pad)["Ip"])
+        except Exception:
+            self._Ip_anchor = self._Ip_target
+        if not np.isfinite(self._Ip_anchor) or self._Ip_anchor == 0.0:
+            self._Ip_anchor = self._Ip_target
+        self._kappa = self._fi_ref / self._Ip_anchor
+        self._target = self._kappa * self._Ip_target
+
+    # `Ip_flux_integral_vs_target(alpha, mygs, ...)` only ever calls
+    # `mygs.flux_integral`, so this duck-types as the solver for the root.
+    def flux_integral(self, psi_vals, field_vals):
+        """``int f dA`` on the FROZEN anchor equilibrium."""
+        return self._eq.compute_flux_integral(
+            np.asarray(psi_vals, dtype=float),
+            np.asarray(field_vals, dtype=float))
+
+    @property
+    def calibration(self):
+        """``FI(reference_total) / Ip_anchor`` -- 1.0 iff the flux-function
+        representation integrates to the true :math:`I_p`."""
+        return self._kappa
+
+    def solve_scale(self, j_ind, j_other):
+        r"""Inductive scale ``s`` with ``s*j_ind + j_other`` at the calibrated
+        :math:`I_p` demand, evaluated in the anchor geometry.
+
+        ``compute_flux_integral`` is linear in ``field_vals`` (the flux
+        function is interpolated onto the mesh and area-integrated), so the
+        root is analytic: two integrals instead of Brent's ~30.  Linearity is
+        VERIFIED here rather than assumed -- a third integral checks the
+        result and the call falls back to ``brentq`` if it does not hold.
+        """
+        fi_ind = float(self.flux_integral(self._psi_N, j_ind))
+        fi_oth = float(self.flux_integral(self._psi_N, j_other))
+        scale = None
+        if np.isfinite(fi_ind) and fi_ind != 0.0:
+            _s = (self._target - fi_oth) / fi_ind
+            resid = abs(float(self.flux_integral(
+                self._psi_N, _s * np.asarray(j_ind, dtype=float)
+                + np.asarray(j_other, dtype=float))) - self._target)
+            if np.isfinite(_s) and _s > 0.0 and \
+                    resid <= 1.0e-9 * abs(self._target):
+                scale = float(_s)
+        if scale is None:
+            # Non-linear or degenerate: fall back to the bracketed root.
+            from scipy.optimize import root_scalar
+            scale = float(root_scalar(
+                Ip_flux_integral_vs_target,
+                args=(self, j_ind, j_other, self._psi_N, self._target),
+                bracket=[1.0e-10 * self._Ip_target, 1.0e1 * self._Ip_target],
+                method="brentq", rtol=1e-6).root)
+        return scale
+
+
+def _r2_ip_scale(anchor_ip, mygs, j_ind, j_other, psi_N, Ip_target):
+    """Inductive scale for route R2, on the anchor geometry when available.
+
+    ``anchor_ip`` is the :class:`_AnchorIpRenorm` captured before the SWB
+    call.  ``None`` (capture failed, or ``BOUQUET_R2_IP_MODE=legacy``) falls
+    back to the historical bracketed root against the live ``mygs`` state.
+    """
+    if anchor_ip is not None:
+        return anchor_ip.solve_scale(j_ind, j_other)
+    from scipy.optimize import root_scalar
+    return float(root_scalar(
+        Ip_flux_integral_vs_target,
+        args=(mygs, j_ind, j_other, psi_N, Ip_target),
+        bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
+        method="brentq", rtol=1e-6).root)
+
+
 def smooth_jbs_transition(j_BS):
     """Gaussian-smooth the shelf->spike transition / near-axis zone of a
     (toroidal-converted) ``solve_with_bootstrap`` j_BS profile.
@@ -1054,6 +1203,16 @@ def perturb_kinetic_equilibrium(
         pressure matching and equilibrium solving.  Returned
         perturbed profiles are on ``psi_N_kinetic``.  If ``None``,
         ``psi_N`` is used for everything (original behaviour).
+    perturb_jind_in_anchor : bool
+        Route R2: GPR-perturb the inductive current in the recon-anchor
+        block and accept that equilibrium (band-conditioned), rather than
+        running the downstream ``find_optimal_scale`` + corrective loop.
+        :math:`I_p` then sets the inductive AMPLITUDE only, holding the
+        bootstrap fixed -- the physically-correct bookkeeping.  The
+        renormalisation is evaluated on the ANCHOR geometry, pinned before
+        the ``solve_with_bootstrap`` call (see :class:`_AnchorIpRenorm`), so
+        at :math:`\sigma=0` it returns exactly 1.000 and reproduces the
+        archived split.  Default False (the standard :math:`l_i` loop).
     rng : numpy.random.Generator, int, or None
         The Generator EVERY GPR draw in this call is taken from -- the
         kinetic channels, the aux channels and the :math:`j_\phi` draws
@@ -1306,6 +1465,9 @@ def perturb_kinetic_equilibrium(
     Ip_scales = []
     iteration_l_is = []
     iteration_Ips = []
+    # R2 inductive Ip-renorm scale actually applied (None off route R2);
+    # surfaced on diagnostics['r2_ip_scale'] -- at sigma=0 it must be 1.000.
+    _r2_scale_used = None
 
     # pin_jphi: pin j_phi to recon's converged shape (only pressure perturbs
     # per draw).  Set via the function argument; the PIN_JPHI env var is kept
@@ -1588,6 +1750,27 @@ def perturb_kinetic_equilibrium(
             # Anchor failed (rare); fall through and let SWB cope.
             pass
 
+        # ---- capture the ANCHOR geometry for the R2 Ip renormalisation ----
+        # mygs is in recon's converged state right here and nowhere later:
+        # solve_with_bootstrap (below) moves it to its own landed equilibrium,
+        # which is what the R2 root used to be evaluated on.  See
+        # _AnchorIpRenorm for the two defects that fixes and the measured
+        # numbers.  Built ONLY on the R2 path, so the production ensemble path
+        # (perturb_jind_in_anchor=False) pays nothing and is bit-identical.
+        _anchor_ip = None
+        if perturb_jind_in_anchor and \
+                os.environ.get('BOUQUET_R2_IP_MODE', 'anchor') != 'legacy':
+            try:
+                _anchor_ip = _AnchorIpRenorm(
+                    mygs, psi_N, input_j_phi, Ip_target, psi_pad)
+                print(f"  [R2-anchor] Ip renorm pinned to the anchor geometry "
+                      f"(flux-integral calibration "
+                      f"{_anchor_ip.calibration:.5f})", flush=True)
+            except Exception as _aip_exc:
+                print(f"  [R2-anchor] WARN: anchor capture failed "
+                      f"({_aip_exc}); Ip renorm falls back to the "
+                      f"SWB-landed geometry")
+
         from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
         _swb_seed = create_power_flux_fun(npsi, 1.5, 1.5)['y']
 
@@ -1826,14 +2009,15 @@ def perturb_kinetic_equilibrium(
                     if np.all(_c >= 0.0):
                         _candA = _c
                         break
-                _rA = root_scalar(
-                    Ip_flux_integral_vs_target,
-                    args=(mygs, _candA, spike_profile + j_fixed_eff, psi_N, Ip_target),
-                    bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
-                    method="brentq", rtol=1e-6)
-                _anchor_jind = _rA.root * _candA
+                # Ip renorm on the ANCHOR geometry (see _AnchorIpRenorm), not
+                # on the equilibrium SWB happened to land on.
+                _sA = _r2_ip_scale(_anchor_ip, mygs, _candA,
+                                   spike_profile + j_fixed_eff, psi_N,
+                                   Ip_target)
+                _anchor_jind = _sA * _candA
+                _r2_scale_used = float(_sA)
                 print(f"  [perturb-anchor] GPR-perturbed j_ind in anchor "
-                      f"(Ip-renorm scale={_rA.root:.4f})")
+                      f"(Ip-renorm scale={_sA:.4f})")
             new_jphi = _anchor_jind + spike_profile + j_fixed_eff
         _psi_range_anchor = mygs.psi_bounds[1] - mygs.psi_bounds[0]
         _pp_anchor = {"type": "linterp",
@@ -1898,11 +2082,11 @@ def perturb_kinetic_equilibrium(
                         diag_plot=False) * _j0a
                     if np.all(_c >= 0.0):
                         break
-                _rA = root_scalar(
-                    Ip_flux_integral_vs_target,
-                    args=(mygs, _c, spike_profile + j_fixed_eff, psi_N, Ip_target),
-                    bracket=[1e-10 * Ip_target, 1e1 * Ip_target], method="brentq", rtol=1e-6)
-                new_jphi = _rA.root * _c + spike_profile + j_fixed_eff
+                _sA = _r2_ip_scale(_anchor_ip, mygs, _c,
+                                   spike_profile + j_fixed_eff, psi_N,
+                                   Ip_target)
+                new_jphi = _sA * _c + spike_profile + j_fixed_eff
+                _r2_scale_used = float(_sA)
                 mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
                 mygs.set_profiles(pp_prof=_pp_anchor,
                                   ffp_prof={"type": "jphi-linterp", "y": new_jphi, "x": psi_N})
@@ -2473,6 +2657,10 @@ def perturb_kinetic_equilibrium(
         # would just draw a redundant/mislabelled curve. Drop it there.
         "j_BS_edge": spike_profile if isolate_edge_jBS else None,
         "proxy_bias_observed": proxy_bias_observed,
+        # Route-R2 inductive Ip-renormalisation scale (None off R2).  The
+        # golden invariant: at sigma=0 the archived split is reproduced, so
+        # this must be 1.000.  See _AnchorIpRenorm.
+        "r2_ip_scale": _r2_scale_used,
         "aux": aux_out,
     }
 
