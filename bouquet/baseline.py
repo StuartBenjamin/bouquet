@@ -188,9 +188,27 @@ def resolve_uncertainty(config, baseline) -> dict:
       2. else the reconstruction source's own IDA ``.cdf`` (sigmas read once);
       3. else a per-channel flat fraction ``<chan>_scalar_sigma * |profile|``.
     An explicit ``UncertaintyConfig.sigma_profiles[chan]`` array overrides all.
+
+    The resolved source is LOGGED, one line per channel (disable with
+    ``UncertaintyConfig.log_sigma_sources=False``), and a ``UserWarning`` is
+    raised when a ``<chan>_scalar_sigma`` was moved off its default but loses
+    the precedence to an IDA file -- most importantly the case where a user
+    zeroes the scalars intending a sigma=0 run and silently gets the full
+    operational IDA envelope instead.  See :class:`UncertaintyConfig` for the
+    full contract and the way to actually force zero.
     """
+    import os
+    import warnings
+
     import numpy as np
-    from .config import ReconstructionSource
+    from .config import ReconstructionSource, UncertaintyConfig
+
+    # Read the defaults off the dataclass so "the user changed this" can never
+    # drift from the declared defaults.
+    _SCALAR_SIGMA_DEFAULTS = {
+        _c: float(getattr(UncertaintyConfig, f"{_c}_scalar_sigma"))
+        for _c in ("ne", "te", "ni", "ti")
+    }
 
     unc = config.uncertainty
     src = config.source
@@ -224,6 +242,8 @@ def resolve_uncertainty(config, baseline) -> dict:
     _baseprof = {"ne": baseline.ne, "te": baseline.te,
                  "ni": baseline.ni, "ti": baseline.ti}
     out = {}
+    _won = {}       # channel -> human-readable winning source (for the log)
+    _shadowed = []  # channels whose deliberately-set scalar lost to the IDA
     for _ch in ("ne", "te", "ni", "ti"):
         if _ch in _profiles and _profiles[_ch] is not None:
             _arr = np.asarray(_profiles[_ch], dtype=float)
@@ -232,20 +252,58 @@ def resolve_uncertainty(config, baseline) -> dict:
                     f"sigma_profiles['{_ch}'] has shape {_arr.shape}; expected "
                     f"the kinetic grid {psi_kin.shape} (psi_N_kinetic)")
             out[f"sigma_{_ch}"] = _arr
+            _won[_ch] = "explicit sigma_profiles"
         elif ida_sig is not None:
             out[f"sigma_{_ch}"] = ida_sig[_ch]
+            _won[_ch] = f"IDA {os.path.basename(ida_path)}"
+            # A scalar the user moved off its default is being SILENTLY
+            # ignored. Zeroing them is the classic footgun: it reads like
+            # "no perturbation" but leaves the full operational IDA envelope
+            # in place, so a run intended as deterministic is a full-sigma
+            # ensemble (the 2026-08 beta-scan case).
+            if float(_scalars[_ch]) != _SCALAR_SIGMA_DEFAULTS[_ch]:
+                _shadowed.append(
+                    f"{_ch}_scalar_sigma={float(_scalars[_ch]):g}")
         else:
             out[f"sigma_{_ch}"] = float(_scalars[_ch]) * np.abs(
                 np.asarray(_baseprof[_ch], dtype=float))
+            _won[_ch] = f"scalar {float(_scalars[_ch]):g} x |baseline|"
 
     out["sigma_jphi"] = unc.jphi_scalar_sigma * np.abs(np.asarray(baseline.j_phi, dtype=float))
+    _won["jphi"] = f"scalar {float(unc.jphi_scalar_sigma):g} x |j_phi|"
     out["n_ls"], out["t_ls"], out["j_ls"] = unc.n_ls, unc.t_ls, unc.j_ls
+
+    # --- precedence audit trail ---------------------------------------------
+    # One line per channel naming the winner and the resolved magnitude. The
+    # precedence is silent by construction (a winning source simply shadows the
+    # others), and a silent win can invert the meaning of a whole run, so it is
+    # worth the four lines. Turn off with UncertaintyConfig.log_sigma_sources.
+    if bool(getattr(unc, "log_sigma_sources", True)):
+        for _ch in ("ne", "te", "ni", "ti", "jphi"):
+            _s = np.asarray(out[f"sigma_{_ch}"], dtype=float)
+            _pk = float(np.max(np.abs(_s))) if _s.size else 0.0
+            print(f"  [sigma-source] sigma_{_ch:<4s} <- {_won[_ch]:<28s} "
+                  f"(peak {_pk:.4g}{', ALL ZERO' if _pk == 0.0 else ''})")
+
+    if _shadowed:
+        warnings.warn(
+            f"resolve_uncertainty: {', '.join(_shadowed)} was set but IGNORED "
+            f"-- an IDA source ({os.path.basename(ida_path)}) is active and "
+            f"wins the kinetic sigma precedence "
+            f"(sigma_profiles > IDA .cdf > <chan>_scalar_sigma). The resolved "
+            f"sigmas are the full IDA envelope, NOT your scalars. To force a "
+            f"specific envelope (e.g. zero, for a deterministic run) pass "
+            f"explicit arrays instead:  "
+            f"unc.sigma_profiles = {{ch: np.zeros_like(baseline.psi_N_kinetic) "
+            f"for ch in ('ne','te','ni','ti')}}  -- or clear "
+            f"UncertaintyConfig.ida_path / use a non-.cdf profiles_path.",
+            stacklevel=2,
+        )
 
     # --- switchboard: resolve the auxiliary perturbed profiles ---------------
     # A sigma entry enables a profile. Baseline = manual (aux_baselines) over
     # source-provided (baseline.aux). Warn + skip if the baseline is absent or
     # all-zero (the user supplied a sigma for nothing).
-    import warnings
     src_aux = dict(baseline.aux or {})
     man_base = dict(unc.aux_baselines or {})
 
