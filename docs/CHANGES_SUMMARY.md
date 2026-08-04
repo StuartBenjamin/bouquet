@@ -1,5 +1,133 @@
 # Bouquet — change summaries
 
+## Unreleased — reproducibility contract + trustworthy R2 Ip renormalisation
+
+Three fixes found while driving a β-scan through `generate()` at σ=0. All
+three are backwards compatible; production `generate()` defaults are unchanged.
+
+### 1. The seed now reaches the GPR — *the reproducibility contract*
+
+`GenerationConfig.seed` was consumed by `np.random.seed()`
+(`TokaMaker_interface.py:2717-2719`), but every one of the nine GPR draw sites
+called `generate_perturbed_GPR(..., rng=None)` and `sampling.py:186-187`
+answers that with `np.random.default_rng()` — **fresh OS entropy per draw**.
+Only `np.random.uniform` (`scale_jBS`) and `np.random.normal` (the per-draw
+`l_i` target) honoured the seed. Seeded ensembles were not regenerable, and no
+draw-level value could be pinned as a golden. `parallel.py:158` inherited the
+same defect through `GenerationConfig.seed`.
+
+Fixed as parameter plumbing, not global state:
+
+* **`sampling.make_rng(seed)`** is the single seed → `numpy.random.Generator`
+  entry point (an existing Generator passes through; `None` = OS entropy).
+* `generate_bouquet` consumes `seed` **exactly once** into that Generator and
+  threads it into every draw: `rng=` on the `perturb_kinetic_equilibrium`
+  call, and `rng.uniform` / `rng.normal` replacing the two legacy calls. **One
+  seed governs everything.**
+* `perturb_kinetic_equilibrium` grew an `rng` argument and passes it to all
+  nine sites; `_draw_monotonic_perturbation` too, so its rejection loop — which
+  consumes a *variable* number of draws — stays on the run's stream instead of
+  desynchronising every later channel.
+* `np.random.seed(seed)` is retained only so third-party code in the solve path
+  stays deterministic; bouquet's own draws no longer read global state.
+* Parallel shards are unchanged in behaviour and now documented: `_derive_seed`
+  already derives each shard deterministically from `(seed, worker_id,
+  scan_key)` via `SeedSequence`, and that int becomes the shard's Generator, so
+  a parallel run is reproducible for a fixed `n_workers`.
+
+**Contract:** same seed + same inputs + same solver → **bitwise-identical
+archive**. `seed=None` keeps the OS-entropy behaviour.
+
+### 2. The R2 `I_p` renormalisation is evaluated on the anchor geometry
+
+Route R2 (`perturb_jind_in_anchor=True`) sets the inductive **amplitude** from
+`Ip_flux_integral_vs_target` while holding the bootstrap fixed — the correct
+bookkeeping, since an `I_p` constraint should move the ohmic drive only. Two
+defects made it untrustworthy. Both measured at σ=0 on the synthetic D3D-like
+example, where the archived split *is* the answer and the root must return
+`1.000`:
+
+1. **Geometry.** `TokaMaker_interface.py:1810-1815` rooted *after*
+   `solve_with_bootstrap`, so `mygs.flux_integral` saw SWB's landed
+   equilibrium. Anchor geometry gives `0.8524` vs the landed geometry's
+   `0.8373` — 1.80 % of inductive amplitude for no physical reason.
+2. **Convention normalisation** (found while validating 1).
+   `compute_flux_integral` is a faithful `∫f dA` — verified `FI(1)` == plasma
+   area and `compute_area_integral(calc_jtor_plasma)` == `I_p` to 1e-7 relative
+   — but bouquet's currents are the FSA toroidal density `<j_φ/R>/<1/R>`, whose
+   area integral is **not** `I_p`. The archived total integrates to **+12.92 %**
+   of `I_p`, in *any* geometry — by far the larger part of the R2 error.
+
+`_AnchorIpRenorm` fixes both: `copy_eq()` pins the anchor equilibrium
+immediately after the state-anchor solve and every flux integral runs on that
+frozen snapshot (`mygs` is never mutated), and the demand is calibrated as
+`FI(archived total) * Ip_target / Ip_anchor` instead of raw `Ip_target`, which
+cancels the representation bias and makes the golden invariant exact by
+construction while preserving `I_p` retargeting.
+
+| σ=0, D3D-like | scale `s` | `l_i` vs recon |
+|---|---|---|
+| before | 0.837339 | −2.008 % |
+| after  | 0.999150 | +0.100 % |
+
+Bit-identical across repeats. Cost: one `copy_eq` (0.1 ms) plus an analytic
+root (2 flux integrals + a linearity check, ~62 ms, replacing brentq's
+~125 ms) against a ~26 s perturb call. `BOUQUET_R2_IP_MODE=legacy` restores
+the old behaviour for A/B.
+
+**Scope: route R2 only.** The standard `l_i` loop — the production ensemble
+path, `perturb_jind_in_anchor=False` — is untouched and bit-identical; its root
+is followed by `find_optimal_scale` + the corrective iteration, which re-derive
+the amplitude from the solved equilibrium. The anchor snapshot is not even
+captured off R2.
+
+Also: `perturb_kinetic_equilibrium` diagnostics carry `r2_ip_scale` (and
+`generate_bouquet`'s per-draw diagnostics carry `scale_jBS`), and
+`run.py:_validate_workflow` no longer hard-errors on geqdsk +
+`perturb_jind_in_anchor` — that guard existed because of this defect. It prints
+a one-line note instead. R2 remains opt-in.
+
+### 3. The kinetic-sigma precedence is no longer silent
+
+`resolve_uncertainty` resolves each channel as `sigma_profiles` > IDA `.cdf` >
+`<chan>_scalar_sigma`, and `baseline.py:199-201` auto-adopts
+`ReconstructionSource.profiles_path` as the IDA source whenever it ends in
+`.cdf`. A winning source shadows the ones below it, silently — so zeroing
+`*_scalar_sigma` to get a deterministic run is a **no-op** against an IDA
+source, and every "deterministic" point is a full-σ draw.
+
+The precedence is the intended design, so this makes it loud rather than
+changing it:
+
+* one `[sigma-source]` line per channel naming the winner and the resolved
+  peak, flagging `ALL ZERO` explicitly — gated on the new
+  `UncertaintyConfig.log_sigma_sources` (default `True`);
+* a `UserWarning` when a `<chan>_scalar_sigma` moved off its dataclass default
+  but lost to an active IDA file, naming the file and giving the
+  `sigma_profiles` recipe that actually works. Untouched defaults do not warn;
+* `UncertaintyConfig`'s docstring states the precedence as a table.
+
+### Tests
+
+* `tests/test_rng_reproducibility.py` (fast) — `make_rng`; samplers honour an
+  injected Generator; an AST check that **every** draw call site passes `rng=`
+  (the defect was invisible at runtime, so only a structural assertion prevents
+  its return); and a committed bitwise golden of the seeded draw stream.
+* `tests/golden/rng_stream_manifest.json` — the first draw-level golden the
+  package can hold at all. Pure NumPy, so it is bitwise-portable. Re-pin with
+  `python tests/golden/make_golden_fixture.py --rng-stream-only`.
+* `tests/test_seeded_reproducibility.py` (`solver`) — two seeded runs produce
+  bitwise-identical archives (with `jBS_scale_range` and `l_i_uncertainty` on,
+  so the two previously-seeded streams cannot regress while the GPR is fixed),
+  and the σ=0 R2 invariant `s == 1.000`, `l_i` within 0.5 %, `j_BS` within the
+  σ0-guard bar, bit-reproducible.
+* `tests/test_sigma_precedence.py` (fast) — resolution, the warning, the log.
+
+No existing golden needed re-pinning: `golden_manifest.json` and the slim `.h5`
+are a frozen artifact read by the tests, and `test_systematics.py` replays at
+σ=0, so nothing depended on the draw stream (it could not have — an unseeded
+stream would have made such a test flaky).
+
 ## 1.1.0 — machine-neutral API + comment hygiene (2026-07-31)
 
 Ships the untagged 1.0.1 fix as well (`verify_sigma0_consistency` raised on the

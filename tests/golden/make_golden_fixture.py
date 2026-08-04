@@ -40,6 +40,7 @@ Note: eventually the default equilibrium interchange should migrate to
 IMAS/OMAS; when it does, this fixture can store those instead of geqdsks.
 """
 import argparse
+import hashlib
 import json
 import os
 
@@ -52,6 +53,11 @@ _DEFAULT_SOURCE = os.path.abspath(os.path.join(
     "D3Dlike_Hmode_golden.h5"))
 SLIM_NAME = "D3Dlike_Hmode_golden_slim.h5"
 MANIFEST_NAME = "golden_manifest.json"
+RNG_MANIFEST_NAME = "rng_stream_manifest.json"
+
+# Seed for the pinned draw stream.  Changing it re-pins every value in
+# rng_stream_manifest.json, so don't, unless that is the intent.
+RNG_STREAM_SEED = 20260804
 
 # p-file byte blobs are always dropped (not needed for equilibrium-handling
 # tests).  geqdsk retention is controlled by the --eqdsk flag.
@@ -121,6 +127,93 @@ def _select_subset(draws):
         chosen.add(min(fin, key=lambda i: rms[i]))
         chosen.add(max(fin, key=lambda i: rms[i]))
     return chosen
+
+
+def _digest(arr):
+    """SHA-256 over the raw float64 bytes -- a bitwise fingerprint."""
+    return hashlib.sha256(
+        np.ascontiguousarray(arr, dtype=np.float64).tobytes()).hexdigest()
+
+
+def draw_stream(psi_kin, psi_N, profiles, sigmas, seed=RNG_STREAM_SEED):
+    """The seeded GPR draw stream, in the draw path's own order.
+
+    Replays exactly what ``perturb_kinetic_equilibrium`` does for one draw --
+    ne, Te, ni, Ti through ``_draw_monotonic_perturbation`` (each normalised by
+    its on-axis value), then the :math:`j_\\phi` GPR candidate -- off ONE
+    ``make_rng(seed)`` Generator.  Pure NumPy: no solver, no mesh, so the
+    result is bitwise identical on any machine and can be pinned as a golden.
+
+    Returns ``{channel: ndarray}`` on the grid each channel is drawn on.
+    """
+    import sys
+    sys.path.insert(0, os.path.abspath(os.path.join(_HERE, "..", "..")))
+    from bouquet.sampling import make_rng, _draw_monotonic_perturbation
+    from bouquet.sampling import generate_perturbed_GPR
+
+    rng = make_rng(seed)
+    out = {}
+    for ch, ls in (("ne", 0.5), ("te", 0.4), ("ni", 0.5), ("ti", 0.4)):
+        p = np.asarray(profiles[ch], dtype=float)
+        s = np.asarray(sigmas[ch], dtype=float)
+        out[ch] = _draw_monotonic_perturbation(
+            psi_kin, p / p[0], s / p[0], ls, rng=rng) * p[0]
+    jp = np.asarray(profiles["jphi"], dtype=float)
+    sj = np.asarray(sigmas["jphi"], dtype=float)
+    out["jphi"] = generate_perturbed_GPR(
+        psi_N, jp / jp[0], sigma_profile=sj / jp[0], length_scale=0.25,
+        n_samples=1, rng=rng, diag_plot=False) * jp[0]
+    return out
+
+
+def build_rng_stream(source_slim=None, out_dir=_HERE, seed=RNG_STREAM_SEED):
+    """Pin the seeded draw stream against the golden baseline profiles.
+
+    Reads the baseline profiles + sigma envelopes out of the slim fixture and
+    writes ``rng_stream_manifest.json``: a SHA-256 of each drawn channel plus a
+    few sampled values, so the git diff shows both that something moved and
+    roughly where.  This is the golden that became possible only once the seed
+    actually reached the GPR -- before that the stream was OS entropy and no
+    draw-level value could be pinned at all.
+    """
+    slim = source_slim or os.path.join(out_dir, SLIM_NAME)
+    with h5py.File(slim, "r") as hf:
+        bkeys = sorted(hf["scan"].keys()) if "scan" in hf else [None]
+        bl = hf[f"scan/{bkeys[0]}/_baseline"] if bkeys[0] is not None \
+            else hf["_baseline"]
+        psi_kin = np.asarray(bl["psi_N_kinetic"][()], dtype=float)
+        psi_N = np.asarray(bl["psi_N"][()], dtype=float)
+        profiles = {"ne": bl["n_e"][()], "te": bl["T_e"][()],
+                    "ni": bl["n_i"][()], "ti": bl["T_i"][()],
+                    "jphi": bl["j_phi"][()]}
+        sigmas = {"ne": bl["sigma_ne"][()], "te": bl["sigma_te"][()],
+                  "ni": bl["sigma_ni"][()], "ti": bl["sigma_ti"][()],
+                  "jphi": bl["sigma_jphi"][()]}
+
+    drawn = draw_stream(psi_kin, psi_N, profiles, sigmas, seed=seed)
+    man = {
+        "seed": int(seed),
+        "source_fixture": os.path.basename(slim),
+        "grids": {"psi_N_kinetic": int(psi_kin.size),
+                  "psi_N": int(psi_N.size)},
+        "channels": {},
+    }
+    for ch, arr in drawn.items():
+        a = np.asarray(arr, dtype=float)
+        idx = [0, a.size // 4, a.size // 2, (3 * a.size) // 4, a.size - 1]
+        man["channels"][ch] = {
+            "n": int(a.size),
+            "sha256": _digest(a),
+            "sample_indices": idx,
+            "sample_values": [float(a[i]) for i in idx],
+            "min": float(a.min()), "max": float(a.max()),
+        }
+    path = os.path.join(out_dir, RNG_MANIFEST_NAME)
+    with open(path, "w") as fh:
+        json.dump(man, fh, indent=2, sort_keys=True)
+    print(f"[golden] wrote {path}  (seed={seed}, "
+          f"{len(man['channels'])} channels)")
+    return path
 
 
 def build(source, out_dir=_HERE, eqdsk="all"):
@@ -290,7 +383,14 @@ if __name__ == "__main__":
                     choices=("all", "subset", "none"),
                     help="geqdsk retention: all (default, ~11 MB), subset "
                          "(baseline + representative draws, ~5 MB), or none")
+    ap.add_argument("--rng-stream-only", action="store_true",
+                    help="re-pin rng_stream_manifest.json from the EXISTING "
+                         "slim fixture and stop (no --source needed)")
     args = ap.parse_args()
+    if args.rng_stream_only:
+        build_rng_stream()
+        raise SystemExit(0)
     if not os.path.isfile(args.source):
         raise SystemExit(f"source not found: {args.source}")
     build(args.source, eqdsk=args.eqdsk)
+    build_rng_stream()

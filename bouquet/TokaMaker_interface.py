@@ -4577,6 +4577,10 @@ def generate_bouquet(
         diagnostics['inspec_VSC_max']    = float(inspec_VSC_max)
         diagnostics['l_i_target_used']   = float(l_i_target_draw)
         diagnostics['l_i_uncertainty']   = float(l_i_uncertainty)
+        # The bootstrap scale this draw was sampled at (from jBS_scale_range).
+        # Not archived -- it is a sampler input, recorded here so a run can be
+        # audited against its seed without re-deriving the draw stream.
+        diagnostics['scale_jBS']         = float(scale_jBS)
 
         # ---- save geqdsk to a temporary file, archive, delete -------
         eqdsk_filename = f"{header}_count={count}.geqdsk"
