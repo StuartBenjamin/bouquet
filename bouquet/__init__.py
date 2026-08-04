@@ -16,6 +16,7 @@ from . import filtering
 from .sampling import (
     GPRProfilePerturber,
     generate_perturbed_GPR,
+    make_rng,
     sigmoid_length_scale,
     verify_gpr_statistics,
     calc_cylindrical_li_proxy,
@@ -173,7 +174,8 @@ __all__ = [
     # ---- environment / path resolution ----
     "add_oft_to_path", "find_mesh",
     # ---- profile sampling / uncertainty ----
-    "GPRProfilePerturber", "generate_perturbed_GPR", "sigmoid_length_scale",
+    "GPRProfilePerturber", "generate_perturbed_GPR", "make_rng",
+    "sigmoid_length_scale",
     "verify_gpr_statistics", "calc_cylindrical_li_proxy",
     "new_uncertainty_profiles", "synthetic_ida_sigma",
     # ---- advanced: functional (pre-class) API ----

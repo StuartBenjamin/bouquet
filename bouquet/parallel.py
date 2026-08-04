@@ -18,12 +18,20 @@ Two launchers, one ``run_shard`` entry point:
   merge job that call ``python -m bouquet.parallel`` on the same ``run_shard``.
 
 Note: parallel draws are NOT bit-identical to a serial run of the same seed --
-each worker's ``np.random`` seed is derived from ``(seed, worker_id,
-scan_key)`` via ``np.random.SeedSequence`` (see :func:`_derive_seed`), so the
-union is a statistically-equivalent *different* draw set. The baseline is
-identical. Folding the ``scan_key`` into the derivation decorrelates a
-multi-slice sweep run with one ``seed``: draw *i* of slice A and draw *i* of
-slice B no longer share a perturbation stream.
+each worker's ``GenerationConfig.seed`` (and hence the single
+``numpy.random.Generator`` its ``generate_bouquet`` builds via
+``sampling.make_rng``) is derived from ``(seed, worker_id, scan_key)`` via
+``np.random.SeedSequence`` (see :func:`_derive_seed`), so the union is a
+statistically-equivalent *different* draw set. The baseline is identical.
+Folding the ``scan_key`` into the derivation decorrelates a multi-slice sweep
+run with one ``seed``: draw *i* of slice A and draw *i* of slice B no longer
+share a perturbation stream.
+
+The parallel run IS reproducible as a whole: the derivation is a pure function
+of ``(seed, worker_id, scan_key)``, so re-running the same ``seed`` over the
+same ``n_workers`` regenerates every shard's draws bitwise. Changing
+``n_workers`` re-partitions the draws and therefore changes the ensemble --
+record it alongside the seed.
 """
 from __future__ import annotations
 
@@ -46,16 +54,21 @@ def _shard_size(total, n_workers, worker_id):
 
 
 def _derive_seed(seed_base, worker_id, scan_key):
-    """Per-worker ``np.random`` seed from ``(seed_base, worker_id, scan_key)``.
+    """Per-shard seed from ``(seed_base, worker_id, scan_key)``.
+
+    The returned int becomes the shard's ``GenerationConfig.seed``, which
+    ``generate_bouquet`` turns into that shard's one
+    ``numpy.random.Generator`` (``sampling.make_rng``). Shards are therefore
+    *independently* seeded but *deterministically derived* from the master
+    seed: same triple -> same shard, always.
 
     ``SeedSequence`` scrambles the entropy tuple into a well-separated 32-bit
     seed, replacing the old ``seed_base + worker_id`` scheme, which (a) gave
-    adjacent-integer MT19937 seeds across workers and (b) reused the *same*
-    streams for every slice of a timeseries swept with one ``seed_base`` --
+    adjacent-integer seeds across workers and (b) reused the *same* streams
+    for every slice of a timeseries swept with one ``seed_base`` --
     correlating draw *i* across time slices. The ``scan_key`` enters through
     its canonical string form (``utils._scan_key``), so ``2000`` and
     ``"2000"`` derive the same stream (mirroring the archive layout).
-    Deterministic: the same triple always yields the same seed.
     """
     import numpy as np
     from .utils import _scan_key
@@ -154,7 +167,10 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
         cfg = copy.deepcopy(config)
         cfg.solver.nthreads = int(threads_per_worker)
         cfg.generation.n_equils = int(n)
-        # independent, slice-decorrelated stream (see _derive_seed)
+        # Independent, slice-decorrelated, deterministically-derived stream:
+        # generate_bouquet consumes this into the shard's single Generator
+        # (see _derive_seed and sampling.make_rng), so re-running the same
+        # (seed_base, n_workers, scan_key) regenerates the shard bitwise.
         cfg.generation.seed = _derive_seed(seed_base, worker_id, scan_key)
         cfg.generation.scan_key = scan_key
         cfg.output_header = f"{out_header}_w{worker_id}"

@@ -273,6 +273,12 @@ class GenerationConfig:
     """Perturbed-bouquet sampling over the uncertainty neighborhood."""
 
     n_equils: int = 20
+    # The run's ONE random seed. It is consumed into a single
+    # numpy.random.Generator (sampling.make_rng) that is threaded explicitly
+    # into every draw site -- the GPR kinetic/aux/j_phi draws, the per-draw
+    # scale_jBS sample and the per-draw l_i target sample -- so two runs with
+    # the same seed, inputs and solver produce bitwise-identical archives.
+    # None (default) draws from fresh OS entropy: deliberately not regenerable.
     seed: Optional[int] = None
     # Label for this bouquet within the HDF5 file: draws are stored under
     # scan/<scan_key>/. Use it to keep several bouquets in one file under a

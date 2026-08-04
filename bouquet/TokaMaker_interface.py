@@ -27,6 +27,7 @@ import matplotlib.pyplot as plt
 
 from .sampling import (
     generate_perturbed_GPR,
+    make_rng,
     calc_cylindrical_li_proxy,
     get_li_proxy_geometry,
     calc_cylindrical_li_proxy_fast,
@@ -963,6 +964,7 @@ def perturb_kinetic_equilibrium(
     Z_imp=None,
     p_diff=None,
     jphi_diff=None,
+    rng=None,
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
     match :math:`I_p` and :math:`l_i` targets.
@@ -1052,6 +1054,13 @@ def perturb_kinetic_equilibrium(
         pressure matching and equilibrium solving.  Returned
         perturbed profiles are on ``psi_N_kinetic``.  If ``None``,
         ``psi_N`` is used for everything (original behaviour).
+    rng : numpy.random.Generator, int, or None
+        The Generator EVERY GPR draw in this call is taken from -- the
+        kinetic channels, the aux channels and the :math:`j_\phi` draws
+        alike.  ``generate_bouquet`` passes the run's single Generator (see
+        :func:`bouquet.sampling.make_rng`) so one seed governs the whole
+        ensemble.  ``None`` (default) draws from fresh OS entropy, i.e. the
+        call is NOT reproducible; an ``int`` is promoted to a Generator.
 
     Returns
     -------
@@ -1081,6 +1090,12 @@ def perturb_kinetic_equilibrium(
         raise ValueError(
             "input_jinductive must be provided when recalculate_j_BS=True"
         )
+
+    # One Generator for every draw in this call.  Promoting here (rather than
+    # defaulting each call site to None) is what makes the seed reach the GPR:
+    # a per-call-site ``np.random.default_rng()`` would re-seed from OS entropy
+    # at every draw and silently discard the run's seed.
+    rng = make_rng(rng)
 
     # Kinetic grid: either the user-supplied extended grid or psi_N
     psi_kin = psi_N_kinetic if psi_N_kinetic is not None else psi_N
@@ -1159,11 +1174,11 @@ def perturb_kinetic_equilibrium(
 
         # GPR sampling on psi_kin (kinetic grid, may include SOL)
         ne_perturb = _draw_monotonic_perturbation(
-            psi_kin, ne / ne[0], sigma_ne / ne[0], n_ls
+            psi_kin, ne / ne[0], sigma_ne / ne[0], n_ls, rng=rng
         ) * ne[0]
 
         te_perturb = _draw_monotonic_perturbation(
-            psi_kin, te / te[0], sigma_te / te[0], t_ls
+            psi_kin, te / te[0], sigma_te / te[0], t_ls, rng=rng
         ) * te[0]
 
         if _zeff_active and _Z_imp is not None:
@@ -1177,17 +1192,17 @@ def perturb_kinetic_equilibrium(
                 generate_perturbed_GPR(
                     psi_kin, _zb / _z0, _zs / _z0,
                     length_scale=(aux_length_scales or {}).get('zeff', 0.4),
-                    n_samples=1)) * _z0, dtype=float))
+                    n_samples=1, rng=rng)) * _z0, dtype=float))
             # 1 <= Zeff <= Z_imp guarantees 0 <= ni <= ne and nz >= 0
             _zeff_draw = np.clip(_zeff_draw, 1.0, _Z_imp * (1.0 - 1e-9))
             ni_perturb = main_ion_density_from_zeff(ne_perturb, _zeff_draw, _Z_imp)
         else:
             ni_perturb = _draw_monotonic_perturbation(
-                psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls
+                psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls, rng=rng
             ) * ni[0]
 
         ti_perturb = _draw_monotonic_perturbation(
-            psi_kin, ti / ti[0], sigma_ti / ti[0], t_ls
+            psi_kin, ti / ti[0], sigma_ti / ti[0], t_ls, rng=rng
         ) * ti[0]
 
         # Pressure matching on equilibrium grid (psi_N, confined only)
@@ -1243,7 +1258,8 @@ def perturb_kinetic_equilibrium(
             if not (_e0 > 0):
                 _e0 = 1.0
             _ep = np.squeeze(generate_perturbed_GPR(
-                psi_kin, _eb / _e0, _es / _e0, length_scale=_els, n_samples=1)) * _e0
+                psi_kin, _eb / _e0, _es / _e0, length_scale=_els, n_samples=1,
+                rng=rng)) * _e0
             aux_out[_en] = np.atleast_1d(np.asarray(_ep, dtype=float))
         if _zeff_draw is not None:
             aux_out['zeff'] = _zeff_draw      # the draw ni was derived from
@@ -1806,7 +1822,7 @@ def perturb_kinetic_equilibrium(
                     _c = generate_perturbed_GPR(
                         psi_N, input_jinductive / _j0a,
                         sigma_profile=sigma_jphi / _j0a, length_scale=j_ls,
-                        n_samples=1, diag_plot=False) * _j0a
+                        n_samples=1, rng=rng, diag_plot=False) * _j0a
                     if np.all(_c >= 0.0):
                         _candA = _c
                         break
@@ -1878,7 +1894,8 @@ def perturb_kinetic_equilibrium(
                 for _t in range(20):
                     _c = generate_perturbed_GPR(
                         psi_N, input_jinductive / _j0a, sigma_profile=sigma_jphi / _j0a,
-                        length_scale=j_ls, n_samples=1, diag_plot=False) * _j0a
+                        length_scale=j_ls, n_samples=1, rng=rng,
+                        diag_plot=False) * _j0a
                     if np.all(_c >= 0.0):
                         break
                 _rA = root_scalar(
@@ -2160,6 +2177,7 @@ def perturb_kinetic_equilibrium(
                 sigma_profile=sigma_jphi / j_phi_0,   # normalised σ
                 length_scale=j_ls,
                 n_samples=1,
+                rng=rng,
                 diag_plot=False,
             ) * j_phi_0
             if np.any((_cand < 0.0) & ~_floor_zone):
@@ -2619,8 +2637,14 @@ def generate_bouquet(
         an unperturbed (:math:`\sigma=0`) draw lands ~0 mm / ~0 % from
         baseline and perturbations show their true incremental response.
     seed : int or None
-        If given, seed NumPy's global RNG at the start of the run for
-        reproducible draws.  ``None`` (default) leaves the RNG untouched.
+        The run's single random seed.  It is consumed once, into one
+        ``numpy.random.Generator`` (see
+        :func:`bouquet.sampling.make_rng`) that is threaded explicitly into
+        every draw site -- the GPR kinetic/aux/:math:`j_\phi` draws, the
+        per-draw ``scale_jBS`` sample and the per-draw :math:`l_i` target
+        sample.  Two runs with the same seed, inputs and solver therefore
+        produce bitwise-identical archives.  ``None`` (default) draws from
+        fresh OS entropy, i.e. the run is deliberately not regenerable.
     pin_jphi : bool
         When True, pin :math:`j_\phi` to recon's converged shape so only the
         pressure profile perturbs per draw (the bootstrap/SWB call is
@@ -2713,8 +2737,23 @@ def generate_bouquet(
     list[dict]
         Diagnostics from each equilibrium.
     """
-    # Seed the RNG here (encapsulates determinism in the call instead of
-    # relying on a global np.random.seed before it).  No-op when seed=None.
+    # ---- the reproducibility contract: ONE Generator per run ----------
+    # `seed` is consumed exactly here and nowhere else.  The resulting
+    # Generator is threaded explicitly into every draw site -- the per-draw
+    # scale_jBS and l_i-target samples below, and (via the `rng=` argument)
+    # all nine GPR draw sites inside perturb_kinetic_equilibrium.  Nothing in
+    # the sampling path reads global RNG state, so two runs with the same
+    # seed produce bitwise-identical archives and seed=None keeps the
+    # OS-entropy behaviour.
+    #
+    # Before this was threaded, `seed` only reached np.random's legacy global
+    # state, which governed the two draws below but NOT the GPR: every draw
+    # site called np.random.default_rng() with fresh OS entropy, so seeded
+    # ensembles were not regenerable.
+    rng = make_rng(seed)
+    # The legacy global RNG is still seeded so that any third-party code in
+    # the solve path that samples from np.random stays deterministic too.
+    # bouquet's own draws no longer read it.
     if seed is not None:
         np.random.seed(int(seed))
 
@@ -3331,7 +3370,7 @@ def generate_bouquet(
     # strictly bounded.
     if jBS_scale_range is not None:
         lo, hi = jBS_scale_range
-        jBS_scales = np.random.uniform(lo, hi, size=n_equils)
+        jBS_scales = rng.uniform(lo, hi, size=n_equils)
     else:
         jBS_scales = np.ones(n_equils)
 
@@ -3652,7 +3691,7 @@ def generate_bouquet(
         # convergence, not the spread).  l_i_uncertainty=0 (default)
         # pins every draw to the recon's l_i exactly, as before.
         if l_i_uncertainty > 0.0:
-            l_i_target_draw = float(np.random.normal(
+            l_i_target_draw = float(rng.normal(
                 l_i_target, l_i_uncertainty * l_i_target))
             # Guard against pathological negative samples (4σ events
             # for any reasonable uncertainty); clamp to a small fraction
@@ -3825,6 +3864,9 @@ def generate_bouquet(
                 aux_length_scales=aux_length_scales,
                 max_proxy_draws=max_proxy_draws,
                 p_thresh=p_thresh,
+                # the run's single Generator -- every GPR draw in this draw
+                # comes off it, so `seed` governs the whole ensemble
+                rng=rng,
                 bnd_diag_callback=_report_bnd,
                 recon_eq_snapshot=_diff_recon_eq_snap,
                 spike_profile_recon_cached=_diff_spike_recon,
