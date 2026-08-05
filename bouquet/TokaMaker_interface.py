@@ -826,11 +826,13 @@ def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad):
     )
 
 
-#: Default R2 Ip measure.  Deliberately still ``ratio`` -- see the "WHICH MODE
-#: IS THE DEFAULT" section of :class:`_AnchorIpRenorm`.  Flipping it to
-#: ``exact`` is a one-token change, but it moves the pinned sigma=0 invariant
-#: from 8.5e-4 to 3.3e-3, i.e. it is an acceptance-criterion decision.
-_R2_IP_MODE_DEFAULT = 'ratio'
+#: Default R2 Ip measure.  ``exact`` (the physical FSA current integral) as
+#: of 2026-08-04, per the package author: with ``ratio`` the sigma=0
+#: invariant is true by construction, whereas ``exact`` makes |s-1| a
+#: MEASUREMENT of the archive's internal self-consistency (typically a few
+#: 1e-3; pinned at 5e-3 in the golden test with its derivation).  See the
+#: "WHICH MODE IS THE DEFAULT" section of :class:`_AnchorIpRenorm`.
+_R2_IP_MODE_DEFAULT = 'exact'
 
 
 def _r2_ip_mode():
