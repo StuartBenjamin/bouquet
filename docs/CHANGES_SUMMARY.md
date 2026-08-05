@@ -1,5 +1,230 @@
 # Bouquet — change summaries
 
+## Unreleased — reproducibility contract + trustworthy R2 Ip renormalisation
+
+Four fixes found while driving a β-scan through `generate()` at σ=0. All four
+are backwards compatible; production `generate()` defaults are unchanged.
+(Fix 4 supersedes the *diagnosis* in fix 2, but not its behaviour, which stays
+the default — read them in order.)
+
+### 1. The seed now reaches the GPR — *the reproducibility contract*
+
+`GenerationConfig.seed` was consumed by `np.random.seed()`
+(`TokaMaker_interface.py:2717-2719`), but every one of the nine GPR draw sites
+called `generate_perturbed_GPR(..., rng=None)` and `sampling.py:186-187`
+answers that with `np.random.default_rng()` — **fresh OS entropy per draw**.
+Only `np.random.uniform` (`scale_jBS`) and `np.random.normal` (the per-draw
+`l_i` target) honoured the seed. Seeded ensembles were not regenerable, and no
+draw-level value could be pinned as a golden. `parallel.py:158` inherited the
+same defect through `GenerationConfig.seed`.
+
+Fixed as parameter plumbing, not global state:
+
+* **`sampling.make_rng(seed)`** is the single seed → `numpy.random.Generator`
+  entry point (an existing Generator passes through; `None` = OS entropy).
+* `generate_bouquet` consumes `seed` **exactly once** into that Generator and
+  threads it into every draw: `rng=` on the `perturb_kinetic_equilibrium`
+  call, and `rng.uniform` / `rng.normal` replacing the two legacy calls. **One
+  seed governs everything.**
+* `perturb_kinetic_equilibrium` grew an `rng` argument and passes it to all
+  nine sites; `_draw_monotonic_perturbation` too, so its rejection loop — which
+  consumes a *variable* number of draws — stays on the run's stream instead of
+  desynchronising every later channel.
+* `np.random.seed(seed)` is retained only so third-party code in the solve path
+  stays deterministic; bouquet's own draws no longer read global state.
+* Parallel shards are unchanged in behaviour and now documented: `_derive_seed`
+  already derives each shard deterministically from `(seed, worker_id,
+  scan_key)` via `SeedSequence`, and that int becomes the shard's Generator, so
+  a parallel run is reproducible for a fixed `n_workers`.
+
+**Contract:** same seed + same inputs + same solver → **bitwise-identical
+archive**. `seed=None` keeps the OS-entropy behaviour.
+
+### 2. The R2 `I_p` renormalisation is evaluated on the anchor geometry
+
+Route R2 (`perturb_jind_in_anchor=True`) sets the inductive **amplitude** from
+`Ip_flux_integral_vs_target` while holding the bootstrap fixed — the correct
+bookkeeping, since an `I_p` constraint should move the ohmic drive only. Two
+defects made it untrustworthy. Both measured at σ=0 on the synthetic D3D-like
+example, where the archived split *is* the answer and the root must return
+`1.000`:
+
+1. **Geometry.** `TokaMaker_interface.py:1810-1815` rooted *after*
+   `solve_with_bootstrap`, so `mygs.flux_integral` saw SWB's landed
+   equilibrium. Anchor geometry gives `0.8524` vs the landed geometry's
+   `0.8373` — 1.80 % of inductive amplitude for no physical reason.
+2. **Convention normalisation** (found while validating 1).
+   `compute_flux_integral` is a faithful `∫f dA` — verified `FI(1)` == plasma
+   area and `compute_area_integral(calc_jtor_plasma)` == `I_p` to 1e-7 relative
+   — but bouquet's currents are the FSA toroidal density `<j_φ/R>/<1/R>`, whose
+   area integral is **not** `I_p`. The archived total integrates to **+12.92 %**
+   of `I_p`, in *any* geometry — by far the larger part of the R2 error.
+
+`_AnchorIpRenorm` fixes both: `copy_eq()` pins the anchor equilibrium
+immediately after the state-anchor solve and every flux integral runs on that
+frozen snapshot (`mygs` is never mutated), and the demand is calibrated as
+`FI(archived total) * Ip_target / Ip_anchor` instead of raw `Ip_target`, which
+cancels the representation bias and makes the golden invariant exact by
+construction while preserving `I_p` retargeting.
+
+| σ=0, D3D-like | scale `s` | `l_i` vs recon |
+|---|---|---|
+| before | 0.837339 | −2.008 % |
+| after  | 0.999150 | +0.100 % |
+
+Bit-identical across repeats. Cost: one `copy_eq` (0.1 ms) plus an analytic
+root (2 flux integrals + a linearity check, ~62 ms, replacing brentq's
+~125 ms) against a ~26 s perturb call. `BOUQUET_R2_IP_MODE=legacy` restores
+the old behaviour for A/B.
+
+**Scope: route R2 only.** The standard `l_i` loop — the production ensemble
+path, `perturb_jind_in_anchor=False` — is untouched and bit-identical; its root
+is followed by `find_optimal_scale` + the corrective iteration, which re-derive
+the amplitude from the solved equilibrium. The anchor snapshot is not even
+captured off R2.
+
+Also: `perturb_kinetic_equilibrium` diagnostics carry `r2_ip_scale` (and
+`generate_bouquet`'s per-draw diagnostics carry `scale_jBS`), and
+`run.py:_validate_workflow` no longer hard-errors on geqdsk +
+`perturb_jind_in_anchor` — that guard existed because of this defect. It prints
+a one-line note instead. R2 remains opt-in.
+
+### 3. The kinetic-sigma precedence is no longer silent
+
+`resolve_uncertainty` resolves each channel as `sigma_profiles` > IDA `.cdf` >
+`<chan>_scalar_sigma`, and `baseline.py:199-201` auto-adopts
+`ReconstructionSource.profiles_path` as the IDA source whenever it ends in
+`.cdf`. A winning source shadows the ones below it, silently — so zeroing
+`*_scalar_sigma` to get a deterministic run is a **no-op** against an IDA
+source, and every "deterministic" point is a full-σ draw.
+
+The precedence is the intended design, so this makes it loud rather than
+changing it:
+
+* one `[sigma-source]` line per channel naming the winner and the resolved
+  peak, flagging `ALL ZERO` explicitly — gated on the new
+  `UncertaintyConfig.log_sigma_sources` (default `True`);
+* a `UserWarning` when a `<chan>_scalar_sigma` moved off its dataclass default
+  but lost to an active IDA file, naming the file and giving the
+  `sigma_profiles` recipe that actually works. Untouched defaults do not warn;
+* `UncertaintyConfig`'s docstring states the precedence as a table.
+
+### 4. A real `I_p` measure: `utils.Ip_fsa_integral`
+
+Fix 2 cancelled a "+12.9 % convention bias" with a ratio calibration. Chasing
+where that 12.9 % actually comes from turned up two separate errors, neither of
+them the one fix 2 named:
+
+* **`compute_flux_integral` is not `∫_plasma f dA`.** It integrates over the
+  whole `reg == 1` limiter region, and off the plasma the flux-function
+  interpolator returns the profile's **LCFS value** (`gs_prof_interp_apply`
+  CASE(4) returns 0 — the LCFS end of the internal flux coordinate — and
+  `gs_flux_int` then reads the profile there). `FI(1) = 2.83853 m²` is the
+  limiter area, **not** the plasma cross-section, which is `1.79005 m²`; fix
+  2's note to the contrary is wrong. For the archived total the 1.05 m² excess
+  is charged at the edge value, `1.36e5 A/m² × 1.05 m² = +1.43e5 A` = **+11.9 %
+  of `I_p`** — essentially the entire bias.
+* **The remaining ~1 % is a convention, but not the assumed one.** bouquet's
+  arrays are TokaMaker `jphi-linterp` values, `J = <R> P' + <1/R> FF'/µ0`
+  (`jphi_update`), not the FSA density `<j_φ/R>/<1/R>`. The two differ by
+  `<R><1/R²>/<1/R>`, up to 11 % per surface at the edge.
+
+`utils.Ip_fsa_integral` replaces the mesh integral with the textbook
+axisymmetric current integral, `I_p = ∫ dψ (V'/2π) <j_φ/R>`, taking `V'`,
+`<R>`, `<1/R>` and `<1/R²>` from `get_q`'s `ravgs` dict and folding in the
+`jphi-linterp` conversion. Supporting helpers: `fsa_current_geometry` (the
+per-surface arrays), `Ip_fsa_weights` (`I_p[J] = trapezoid(w·J) + c` — the
+measure is **affine**, the `P'` term is −3.3 % of `I_p` and lands in `c`), and
+`eq_jphi_profile` (the equilibrium's own profile in either convention).
+
+**Validation** (D3D-like, `tests/test_fsa_current_integral.py`): integrating the
+solved equilibrium's *own* current profile returns its true `I_p` to
+**+0.0071 %** against a required 0.1 %, in both conventions. On the *archived*
+total the `jphi-linterp` reading gives +0.068 % and the `fsa` reading +0.927 %;
+the former agrees to 0.011 % with the solver's own internal `jphi_norm`.
+
+Two getter traps are now closed in code rather than by luck:
+
+* `get_q(psi=…)` **silently collapses onto the magnetic axis** if the sample
+  grid contains `psi_N = 0` — `<R>` constant to 2e-15 across all 257 surfaces,
+  no exception. `fsa_current_geometry` clips to `[psi_pad, 1-psi_pad]` and
+  raises if it sees the collapse anyway.
+* `dV/dPsi` is per **dimensional** ψ (`∫ dV/dPsi dψ` recovers the volume to
+  −0.25 %; the `dψ_N` reading is out by +291 %).
+
+`_AnchorIpRenorm` gains the measure as `BOUQUET_R2_IP_MODE=exact` (and the
+literal FSA-density reading as `fsa`), alongside `ratio` (fix 2's calibration,
+also spelled `anchor`) and `legacy`. Every FSA getter runs on the frozen
+`copy_eq` snapshot — verified bit-identical to the live solver, and verified
+not to perturb it — and the weights are cached as arrays at capture time, so
+after `__init__` the root needs no solver call at all. The class self-checks
+the measure against the anchor's own profile at runtime (+0.014 % here) and
+prints it.
+
+**The default is still `ratio`, deliberately.** Measured at σ=0:
+
+| mode | `s` | `\|s−1\|` | `l_i` vs recon |
+|---|---|---|---|
+| `exact` | 0.996750 | 3.3e-3 | +0.130 % |
+| `fsa` | 0.985600 | 1.4e-2 | −0.093 % |
+| `ratio` | 0.999150 | 8.5e-4 | +0.100 % |
+| `legacy` | 0.837339 | 1.6e-1 | −2.008 % |
+
+The correct measure reproduces `s == 1.000` **less** closely, for an understood
+reason: `ratio` is exact by construction, because it asks the draw to carry the
+same mis-measured integral as the archived total, so every representation error
+cancels. `exact` asks for `Ip_target` in real amperes and therefore also
+charges the draw for the reconstruction's own `j_φ` residual (the archived
+total differs from the anchor's own profile by 1.6 % of peak *in shape*, worth
++0.193 % of `I_p` at the R2 state anchor → −0.25 % of inductive amplitude) on
+top of the σ=0 SWB residual (−0.085 %). −0.335 % predicted, −0.325 % measured.
+Both terms are real. Even a perfectly self-consistent archive would leave
+~1.1e-3, so the pinned `|s−1| ≤ 1e-3` invariant is **not attainable by any
+honest measure** on this case — flipping the default is an acceptance-criterion
+decision, not a code change, and is left to the author
+(`_R2_IP_MODE_DEFAULT`).
+
+**The production `l_i` loop is untouched** (see below), but now measured: with
+`perturb_jind_in_anchor=False` on a seeded 2-draw `generate()`, the loop's root
+returns `a = 0.785003` and `0.928871` where the FSA measure gives `0.920811`
+and `1.078281` — the loop absorbs a **+16.1 % to +17.3 %** bias in inductive
+amplitude (+14.9 % / +15.7 % under the `fsa` reading), which
+`find_optimal_scale` + the corrective iteration then re-derive away. The
+measure self-checks to +0.015 % at those states.
+
+### Tests
+
+* `tests/test_fsa_current_integral.py` — fast half: the affine algebra, a
+  circular large-aspect-ratio geometry with an analytic answer, and that every
+  unsupported combination raises instead of returning a plausible number.
+  `solver` half (subprocess): the 0.1 % self-consistency validation, snapshot
+  ≡ live, the `dV/dPsi` Jacobian, the silent `get_q` collapse, and that
+  `compute_flux_integral(1)` is still the limiter area (so the rationale is
+  re-checked if OFT changes the interpolator).
+* `tests/test_seeded_reproducibility.py` also A/Bs `BOUQUET_R2_IP_MODE=exact`:
+  its own derived bar `_S_ATOL_EXACT = 5e-3` (measured 3.25e-3) — a **new pin
+  on new behaviour, not a widening of `_S_ATOL`**, which still governs the
+  default path — plus the same 0.5 % `l_i` acceptance, bit-reproducibility, and
+  that changing the measure leaves `j_BS` untouched.
+* `tests/test_rng_reproducibility.py` (fast) — `make_rng`; samplers honour an
+  injected Generator; an AST check that **every** draw call site passes `rng=`
+  (the defect was invisible at runtime, so only a structural assertion prevents
+  its return); and a committed bitwise golden of the seeded draw stream.
+* `tests/golden/rng_stream_manifest.json` — the first draw-level golden the
+  package can hold at all. Pure NumPy, so it is bitwise-portable. Re-pin with
+  `python tests/golden/make_golden_fixture.py --rng-stream-only`.
+* `tests/test_seeded_reproducibility.py` (`solver`) — two seeded runs produce
+  bitwise-identical archives (with `jBS_scale_range` and `l_i_uncertainty` on,
+  so the two previously-seeded streams cannot regress while the GPR is fixed),
+  and the σ=0 R2 invariant `s == 1.000`, `l_i` within 0.5 %, `j_BS` within the
+  σ0-guard bar, bit-reproducible.
+* `tests/test_sigma_precedence.py` (fast) — resolution, the warning, the log.
+
+No existing golden needed re-pinning: `golden_manifest.json` and the slim `.h5`
+are a frozen artifact read by the tests, and `test_systematics.py` replays at
+σ=0, so nothing depended on the draw stream (it could not have — an unseeded
+stream would have made such a test flaky).
+
 ## 1.1.0 — machine-neutral API + comment hygiene (2026-07-31)
 
 Ships the untagged 1.0.1 fix as well (`verify_sigma0_consistency` raised on the

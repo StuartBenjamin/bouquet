@@ -8,9 +8,21 @@ profiles.  These routines are pure-Python / NumPy / SciPy and do
 Provides:
   - ``GPRProfilePerturber`` – GPR-based profile perturbation class.
   - ``generate_perturbed_GPR`` – convenience one-call wrapper.
+  - ``make_rng`` – the single seed -> ``numpy.random.Generator`` entry point.
   - ``verify_gpr_statistics`` – Monte-Carlo validation of GPR sampling.
   - ``calc_cylindrical_li_proxy`` – cylindrical :math:`l_i` proxy from
     a 1-D :math:`j_\\phi` profile.
+
+Reproducibility contract
+------------------------
+Every random draw bouquet makes comes from an explicit
+``numpy.random.Generator`` that is threaded through the call chain as the
+``rng`` argument -- there is no module-level or global RNG state anywhere in
+the sampling path.  A run is therefore a pure function of its inputs plus the
+single ``GenerationConfig.seed``: :func:`make_rng` turns that seed into the one
+Generator that ``generate_bouquet`` hands to every draw site.  ``rng=None``
+(equivalently ``seed=None``) means "fresh OS entropy", the documented
+non-reproducible mode.
 """
 
 import numpy as np
@@ -30,6 +42,37 @@ EC = 1.6022e-19  # [J/eV]
 _MAX_PRESSURE_ITER = int(1e5)
 _MAX_LI_ITER = 20
 _MAX_MONOTONIC_DRAWS = int(1e4)
+
+
+# ====================================================================
+#  Seed -> Generator (the one seed-consumption point)
+# ====================================================================
+def make_rng(seed=None) -> np.random.Generator:
+    """Build the single :class:`numpy.random.Generator` a run draws from.
+
+    This is the *only* place a seed is turned into randomness in bouquet.
+    ``generate_bouquet`` calls it once and threads the returned Generator
+    through every draw site (kinetic GPR channels, the aux channels, the
+    :math:`j_\\phi` GPR draws, the per-draw ``scale_jBS`` and ``l_i`` target
+    samples), so one seed governs the whole ensemble and two runs with the
+    same seed produce bitwise-identical archives.
+
+    Parameters
+    ----------
+    seed : int, None, or numpy.random.Generator
+        ``None`` returns a fresh, OS-entropy-seeded Generator (the documented
+        non-reproducible mode).  An existing Generator is passed through
+        unchanged, so a caller that already owns a stream can inject it.
+
+    Returns
+    -------
+    numpy.random.Generator
+    """
+    if isinstance(seed, np.random.Generator):
+        return seed
+    if seed is None:
+        return np.random.default_rng()
+    return np.random.default_rng(int(seed))
 
 
 # ====================================================================
@@ -177,7 +220,8 @@ class GPRProfilePerturber:
         n_samples : int
             Number of independent draws.
         rng : numpy.random.Generator or None
-            ``None`` creates a fresh unseeded generator.
+            ``None`` creates a fresh unseeded generator (OS entropy).  Pass
+            the run's Generator (see :func:`make_rng`) for reproducibility.
 
         Returns
         -------
@@ -288,7 +332,8 @@ def generate_perturbed_GPR(
     kernel_func : str
         ``'rbf'`` or ``'matern52'``.
     rng : numpy.random.Generator or None
-        Optional random generator.
+        Generator to draw from (see :func:`make_rng`).  ``None`` creates a
+        fresh unseeded one -- the draw is then NOT reproducible.
     diag_plot : bool
         Show a three-panel diagnostic figure.
 
@@ -722,6 +767,7 @@ def _draw_monotonic_perturbation(
     sigma_profile,
     length_scale,
     max_draws=_MAX_MONOTONIC_DRAWS,
+    rng: Optional[np.random.Generator] = None,
 ):
     r"""Repeatedly sample a GPR perturbation until the draw is
     monotonically decreasing.
@@ -739,6 +785,10 @@ def _draw_monotonic_perturbation(
         GPR correlation length (scalar or spatially-varying).
     max_draws : int
         Safety cap on the number of attempts.
+    rng : numpy.random.Generator or None
+        Generator every attempt draws from (see :func:`make_rng`).  ``None``
+        creates a fresh unseeded generator *per attempt* -- reproducible runs
+        must pass one in.
 
     Returns
     -------
@@ -761,6 +811,7 @@ def _draw_monotonic_perturbation(
             sigma_profile=sigma_profile,
             length_scale=length_scale,
             n_samples=1,
+            rng=rng,
             diag_plot=False,
         )
         if base_nonmono or np.all(np.diff(sample) <= 0.0):

@@ -152,9 +152,10 @@ b.generation.seed = 1234
 | `uncertainty.ne_scalar_sigma` / `te_` / `ni_` / `ti_` | `0.05` / `0.05` / `0.10` / `0.10` | Flat fractional envelopes, used when no IDA sigmas are supplied |
 | `uncertainty.jphi_scalar_sigma` | `0.10` | Inductive-current envelope; must be > 0 |
 | `uncertainty.zeff_scalar_sigma` | `0.05` | One Z_eff per draw; n_i / n_z follow from quasi-neutrality |
-| `uncertainty.ida_path` | `None` | IDA `.cdf` supplying measured sigma envelopes instead of the scalars |
+| `uncertainty.ida_path` | `None` | IDA `.cdf` supplying measured sigma envelopes instead of the scalars. **Wins over the scalars above** — see the precedence note below |
+| `uncertainty.log_sigma_sources` | `True` | Log which source each kinetic sigma actually resolved from |
 | `generation.n_equils` | `20` | Draws to attempt |
-| `generation.seed` | `None` | Set for a reproducible ensemble |
+| `generation.seed` | `None` | The run's one seed. Set it and the ensemble is **bitwise** reproducible |
 | `generation.l_i_tolerance` | `0.05` | l_i acceptance band, as a fraction of target |
 | `generation.scan_key` | `0` | Label for this bouquet within the archive |
 | `generation.jbs_delta_mode` | `False` | Opt-in differential bootstrap: per-draw spike as baseline + raw solver delta against a cached σ=0 reference |
@@ -170,6 +171,20 @@ IMAS/geqdsk workflow presets that `from_imas` / `from_geqdsk` auto-apply, are
 in [`docs/workflows.md`](docs/workflows.md#configuration-reference). Full
 control goes through `bq.BouquetConfig`, which serializes to JSON
 (`to_dict` / `from_dict`) and is stamped into every archive.
+
+**Reproducibility.** `generation.seed` is consumed exactly once, into one
+`numpy.random.Generator` that is threaded into every draw — the GPR kinetic,
+Z_eff/aux and j_φ channels, the per-draw bootstrap scale and the per-draw l_i
+target. Same seed + same inputs + same solver (at `nthreads=1`) gives a
+**bitwise-identical** archive. `seed=None` draws from OS entropy.
+
+**Kinetic-sigma precedence.** Per channel, `uncertainty.sigma_profiles[chan]`
+beats an IDA `.cdf` beats `<chan>_scalar_sigma` — and a `.cdf` passed as
+`ReconstructionSource.profiles_path` counts as an IDA source. A winning source
+*shadows* the others, so zeroing the scalars against an IDA file does nothing:
+to force a specific envelope (e.g. zero, for a deterministic point) pass
+`sigma_profiles`. The resolved source is logged per channel, and a
+deliberately-set-but-ignored scalar raises a warning.
 
 ## Examples
 

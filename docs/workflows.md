@@ -119,6 +119,7 @@ is a navigational summary of the defaults.
 |---|---|---|
 | `ida_path` | `None` | IDA `.cdf` supplying measured sigma envelopes (overrides the scalars below) |
 | `sigma_mode` / `sigma_method` | `"auto"` / `"percentile"` | IDA layout dispatch (direct `*_err` vs. ensemble posterior) and ensemble reduction |
+| `log_sigma_sources` | `True` | Log one line per kinetic channel naming the source that actually won the precedence |
 | `ne_scalar_sigma` | `0.05` | Flat fractional envelope used when no IDA sigmas are supplied |
 | `te_scalar_sigma` | `0.05` | " |
 | `ni_scalar_sigma` | `0.10` | " |
@@ -129,12 +130,32 @@ is a navigational summary of the defaults.
 | `n_ls` / `t_ls` / `j_ls` | `0.5` / `0.4` / `0.25` | GPR correlation lengths for density / temperature / current |
 | `aux_sigmas`, `aux_baselines`, `aux_length_scales` | `{}` | The passive switchboard: any extra channel gets perturbed and archived alongside the physics |
 
+**Precedence, per kinetic channel:** `sigma_profiles[chan]` > an IDA `.cdf` >
+`<chan>_scalar_sigma`. A `.cdf` handed to `ReconstructionSource.profiles_path`
+is adopted as an IDA source automatically, so it counts here even when
+`ida_path` is unset. A winning source **shadows** the ones below it rather than
+combining with them — which means zeroing `*_scalar_sigma` to get a
+deterministic σ=0 point is a **no-op** against an IDA source, and every such
+"deterministic" point is a full-σ draw. The only setting that wins is an
+explicit profile:
+
+```python
+n_kin = len(b.baseline.psi_N_kinetic)
+b.uncertainty.sigma_profiles = {ch: np.zeros(n_kin)
+                                for ch in ("ne", "te", "ni", "ti")}
+```
+
+`resolve_uncertainty` logs the winning source per channel (disable with
+`log_sigma_sources=False`) and warns when a scalar you moved off its default is
+being ignored. `sigma_jphi` and the aux channels have no `.cdf` branch, so
+their scalars always apply.
+
 ### `GenerationConfig` (`b.generation`)
 
 | Knob | Default | Meaning |
 |---|---|---|
 | `n_equils` | `20` | Draws to attempt |
-| `seed` | `None` | RNG seed; set it for reproducible ensembles |
+| `seed` | `None` | The run's one RNG seed. Consumed once into a single `numpy.random.Generator` threaded into every draw (GPR kinetic/aux/j_φ, the per-draw `scale_jBS`, the per-draw l_i target), so the same seed + inputs + solver gives a **bitwise-identical** archive. `None` = OS entropy |
 | `scan_key` | `0` | Label for this bouquet within the archive (`scan/<key>/`) — a time in ms, a beta value, … |
 | `l_i_tolerance` | `0.05` | l_i acceptance band, as a **fraction** of target |
 | `constrain_sawteeth` | `False` | Gate draws on q0 |

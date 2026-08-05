@@ -383,6 +383,224 @@ def pchip_derivative(x, y, x_eval=None, strict=False):
     return result
 
 
+# =====================================================================
+#  Flux-surface-averaged plasma-current integral
+# =====================================================================
+#
+# ``TokaMaker.compute_flux_integral`` is NOT ``int_plasma f dA``.  Measured on
+# the synthetic D3D-like example (see ``tests/test_fsa_current_integral.py``):
+#
+#   * it integrates over the whole ``reg == 1`` (limiter) region, and the
+#     flux-function interpolator returns the profile's EDGE value everywhere
+#     outside the LCFS (``gs_prof_interp_apply`` CASE(4) returns 0 -- the LCFS
+#     end of the internal psi coordinate -- off the plasma, and ``gs_flux_int``
+#     then evaluates the profile there).  ``compute_flux_integral(1.0)`` is
+#     therefore 2.83853 m^2, the LIMITER-region area, against a true plasma
+#     cross-section of 1.79005 m^2;
+#   * so for a profile with a finite edge value the excess area is charged at
+#     ``f(psi_N=1)``.  On the archived total that is
+#     ``1.36e5 A/m^2 * 1.05 m^2 = 1.43e5 A``, i.e. +11.9 % of I_p -- almost the
+#     whole of the +12.9 % "representation bias" 7dc254b calibrated away.
+#
+# The measure below never uses the mesh integral.  It is the textbook
+# axisymmetric current integral,
+#
+#     I_p = int j_phi dA = int dpsi (V'/2pi) <j_phi/R>,
+#
+# with ``V' = dV/dpsi`` and the flux-surface averages taken from ``get_q``.
+#
+# CONVENTION.  Two readings of a bouquet current array are in play and they
+# differ by O(1 %) on a DIII-D-like case:
+#
+#   ``"fsa"``           J = <j_phi/R>/<1/R>, the FSA toroidal density
+#                       => I_p = int dpsi (V'/2pi) <1/R> J
+#   ``"jphi-linterp"``  J = <R> P' + <1/R> FF'/mu0, TokaMaker's own
+#                       ``jphi-linterp`` profile variable (``jphi_update`` in
+#                       ``grad_shaf_prof_phys.F90``), i.e. j_phi evaluated at
+#                       the surface's mean major radius
+#                       => FF'/mu0 = (J - <R> P')/<1/R> and hence
+#                          I_p = int dpsi (V'/2pi) [ J <1/R^2>/<1/R>
+#                                                    + P' (1 - <R><1/R^2>/<1/R>) ]
+#
+# bouquet's arrays are ``jphi-linterp`` values -- that is the variable they are
+# handed to ``set_profiles`` as, and the variable the reconstruction fits.  On
+# the D3D-like anchor the ``"jphi-linterp"`` reading recovers the true I_p of
+# the archived total to +0.072 %, against +0.927 % for ``"fsa"``, and it agrees
+# to 0.011 % with the solver's own internal renormalisation factor (measured
+# independently as ``<w J_eq>/<w J_archived>``).  Both readings integrate the
+# equilibrium's OWN profile to its true I_p to better than 0.01 %, which is the
+# validation that the V'/<1/R> plumbing and the psi_N -> psi Jacobian are right.
+
+_FSA_PSI_PAD = 1.0e-3
+_FSA_MU0 = 4.0e-7 * np.pi
+
+
+def fsa_current_geometry(eq, psi_N, psi_pad=_FSA_PSI_PAD, want_pprime=True):
+    r"""Per-surface FSA geometry for :func:`Ip_fsa_integral`, from ``get_q``.
+
+    *eq* is anything exposing TokaMaker's ``get_q`` / ``get_profiles`` /
+    ``psi_bounds`` -- a live ``TokaMaker`` or a ``copy_eq()`` snapshot
+    (``TokaMaker_equilibrium``); both were verified to return bit-identical
+    ``ravgs`` for the same state, and evaluating them on a snapshot does not
+    perturb the live solver.
+
+    Two traps this function exists to close:
+
+    * **exact endpoints silently collapse ``get_q``.**  ``get_q(psi=...)`` with
+      ``psi_N`` containing 0.0 (the magnetic axis) returns the AXIS values on
+      *every* surface -- ``<R>`` constant to 2e-15, ``dV/dPsi`` constant --
+      with no error and no warning; the surface tracer starts from the axis and
+      never leaves it.  The sampling grid is therefore clipped to
+      ``[psi_pad, 1 - psi_pad]`` and the collapse is asserted against.
+    * **``dV/dPsi`` is per DIMENSIONAL psi.**  ``int dV/dPsi dpsi`` recovers
+      ``get_stats()['vol']`` to -0.25 % (edge/axis truncation) while the
+      ``dpsi_N`` reading is out by +291 %.  The Jacobian is
+      ``|psi_bounds[1] - psi_bounds[0]|``, applied here once.
+
+    Returns a dict with ``psi_N``, ``R_avg``, ``inv_R``, ``inv_R2`` (``None``
+    on OFT builds whose ``ravgs`` is the legacy 3-entry positional array),
+    ``dV_dpsi`` (magnitude), ``dpsi_dpsiN``, ``pprime`` (``None`` if not
+    requested) and ``dA_dpsiN = (V'/2pi) <1/R> |dpsi/dpsi_N|``.
+    """
+    from .physics import q_ravg
+
+    psi_N = np.asarray(psi_N, dtype=float)
+    psi_q = np.ascontiguousarray(
+        np.clip(psi_N, float(psi_pad), 1.0 - float(psi_pad)), dtype=float)
+    ravgs = eq.get_q(psi=psi_q)[2]
+    R_avg = np.asarray(q_ravg(ravgs, "<R>"), dtype=float)
+    inv_R = np.asarray(q_ravg(ravgs, "<1/R>"), dtype=float)
+    dV_dpsi = np.abs(np.asarray(q_ravg(ravgs, "dV/dPsi"), dtype=float))
+    inv_R2 = None
+    if isinstance(ravgs, dict) and "<1/R^2>" in ravgs:
+        inv_R2 = np.asarray(ravgs["<1/R^2>"], dtype=float)
+
+    if R_avg.size > 1 and np.ptp(R_avg) <= 1.0e-9 * float(np.mean(R_avg)):
+        raise RuntimeError(
+            "fsa_current_geometry: get_q returned a CONSTANT <R> across all "
+            f"{R_avg.size} surfaces ({float(R_avg[0]):.6f} m) -- the surface "
+            "tracer collapsed onto the magnetic axis.  This is the silent "
+            "failure mode triggered by sampling psi_N = 0 exactly; raise "
+            "psi_pad.")
+    if not (np.all(np.isfinite(R_avg)) and np.all(np.isfinite(inv_R))
+            and np.all(np.isfinite(dV_dpsi))):
+        raise RuntimeError("fsa_current_geometry: get_q returned non-finite "
+                           "flux-surface averages")
+
+    bounds = np.asarray(eq.psi_bounds, dtype=float)
+    dpsi_dpsiN = abs(float(bounds[1]) - float(bounds[0]))
+    if not np.isfinite(dpsi_dpsiN) or dpsi_dpsiN <= 0.0:
+        raise RuntimeError(f"fsa_current_geometry: bad psi_bounds {bounds}")
+
+    pprime = None
+    if want_pprime:
+        prof = eq.get_profiles(psi=psi_q.copy())
+        pprime = np.asarray(prof[4], dtype=float)
+
+    return {
+        "psi_N": psi_N,
+        "psi_q": psi_q,
+        "R_avg": R_avg,
+        "inv_R": inv_R,
+        "inv_R2": inv_R2,
+        "dV_dpsi": dV_dpsi,
+        "dpsi_dpsiN": dpsi_dpsiN,
+        "pprime": pprime,
+        "dA_dpsiN": dV_dpsi / (2.0 * np.pi) * inv_R * dpsi_dpsiN,
+    }
+
+
+def Ip_fsa_weights(geom, convention="jphi-linterp", pprime_sign=1.0):
+    r"""``(w, c)`` such that ``I_p[J] = trapezoid(w * J, psi_N) + c``.
+
+    The measure is affine, not linear: in the ``jphi-linterp`` convention the
+    ``P'`` term of the Grad-Shafranov source is independent of *J* and lands in
+    the constant *c* (it is -3.3 % of I_p on the D3D-like anchor -- large
+    enough that dropping it costs +3.4 %).  In the ``fsa`` convention ``c`` is
+    exactly 0.
+
+    ``pprime_sign`` flips ``get_profiles``' ``P'`` if the case's flux/current
+    sign convention needs it; :class:`~bouquet.TokaMaker_interface._AnchorIpRenorm`
+    determines it from the anchor rather than assuming.
+    """
+    g = geom["dV_dpsi"] / (2.0 * np.pi) * geom["dpsi_dpsiN"]
+    if convention == "fsa":
+        return g * geom["inv_R"], 0.0
+    if convention != "jphi-linterp":
+        raise ValueError(f"unknown convention {convention!r} "
+                         "(want 'jphi-linterp' or 'fsa')")
+    inv_R2 = geom["inv_R2"]
+    if inv_R2 is None:
+        raise ValueError(
+            "the 'jphi-linterp' measure needs <1/R^2>, which this OFT build's "
+            "get_q does not return (legacy positional ravgs).  Use "
+            "convention='fsa' on that build.")
+    pprime = geom["pprime"]
+    if pprime is None:
+        raise ValueError("the 'jphi-linterp' measure needs P'; rebuild the "
+                         "geometry with want_pprime=True")
+    ratio = inv_R2 / geom["inv_R"]
+    w = g * ratio
+    c = float(_trapezoid(g * float(pprime_sign) * pprime
+                         * (1.0 - geom["R_avg"] * ratio), geom["psi_N"]))
+    return w, c
+
+
+def _trapezoid(y, x):
+    from scipy.integrate import trapezoid
+    return float(trapezoid(np.asarray(y, dtype=float),
+                           np.asarray(x, dtype=float)))
+
+
+def Ip_fsa_integral(eq, psi_N, j_profile, convention="jphi-linterp",
+                    psi_pad=_FSA_PSI_PAD, pprime_sign=1.0, geom=None):
+    r"""Plasma current [A] carried by a bouquet current profile.
+
+    The physically-exact axisymmetric current integral, evaluated on *eq*'s
+    flux-surface geometry -- see the module comment above for the two profile
+    conventions and the measured accuracy of each.  Pass a *geom* from
+    :func:`fsa_current_geometry` to reuse a frozen snapshot's geometry (and to
+    avoid re-tracing every surface on each call).
+    """
+    if geom is None:
+        geom = fsa_current_geometry(eq, psi_N, psi_pad=psi_pad,
+                                    want_pprime=(convention == "jphi-linterp"))
+    w, c = Ip_fsa_weights(geom, convention=convention, pprime_sign=pprime_sign)
+    return _trapezoid(w * np.asarray(j_profile, dtype=float),
+                      geom["psi_N"]) + c
+
+
+def eq_jphi_profile(geom, convention="jphi-linterp", eq=None, psi_N=None,
+                    pprime_sign=1.0):
+    r"""The equilibrium's OWN current profile on ``geom``'s grid, in *convention*.
+
+    Reconstructed from the Grad-Shafranov source functions -- ``jphi-linterp``
+    gives ``<R> P' + <1/R> FF'/mu0``, ``fsa`` gives
+    ``(P' + <1/R^2> FF'/mu0)/<1/R>`` -- so that
+    ``Ip_fsa_integral(..., this profile) == the equilibrium's true I_p``.  That
+    round trip is the self-consistency check the measure is validated by
+    (measured: +0.0055 % on the D3D-like anchor).
+
+    Needs ``F`` and ``F'`` as well as ``P'``, so it takes *eq* and re-reads
+    ``get_profiles`` unless *geom* already carries ``FFp``.
+    """
+    FFp = geom.get("FFp")
+    if FFp is None:
+        if eq is None:
+            raise ValueError("eq_jphi_profile needs eq (or geom['FFp'])")
+        prof = eq.get_profiles(psi=geom["psi_q"].copy())
+        FFp = np.asarray(prof[1], dtype=float) * np.asarray(prof[2], dtype=float)
+    FFp = float(pprime_sign) * np.asarray(FFp, dtype=float) / _FSA_MU0
+    pprime = float(pprime_sign) * np.asarray(geom["pprime"], dtype=float)
+    if convention == "jphi-linterp":
+        return geom["R_avg"] * pprime + geom["inv_R"] * FFp
+    if convention == "fsa":
+        if geom["inv_R2"] is None:
+            raise ValueError("the 'fsa' equilibrium profile needs <1/R^2>")
+        return (pprime + geom["inv_R2"] * FFp) / geom["inv_R"]
+    raise ValueError(f"unknown convention {convention!r}")
+
+
 def Ip_flux_integral_vs_target(alpha, mygs, jtor_prof, spike_profile, psi_N, Ip_target):
     r'''! Compute difference between integrated a*j_tor+j_spike profile and Ip_target
 

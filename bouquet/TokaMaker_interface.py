@@ -27,6 +27,7 @@ import matplotlib.pyplot as plt
 
 from .sampling import (
     generate_perturbed_GPR,
+    make_rng,
     calc_cylindrical_li_proxy,
     get_li_proxy_geometry,
     calc_cylindrical_li_proxy_fast,
@@ -38,6 +39,9 @@ from .sampling import (
 )
 from .utils import (
     Ip_flux_integral_vs_target,
+    Ip_fsa_weights,
+    eq_jphi_profile,
+    fsa_current_geometry,
     pchip_derivative,
     pchip_interp,
     safe_save_eqdsk,
@@ -822,6 +826,337 @@ def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad):
     )
 
 
+#: Default R2 Ip measure.  ``exact`` (the physical FSA current integral) as
+#: of 2026-08-04, per the package author: with ``ratio`` the sigma=0
+#: invariant is true by construction, whereas ``exact`` makes |s-1| a
+#: MEASUREMENT of the archive's internal self-consistency (typically a few
+#: 1e-3; pinned at 5e-3 in the golden test with its derivation).  See the
+#: "WHICH MODE IS THE DEFAULT" section of :class:`_AnchorIpRenorm`.
+_R2_IP_MODE_DEFAULT = 'exact'
+
+
+def _r2_ip_mode():
+    """Resolved ``BOUQUET_R2_IP_MODE``.  See :class:`_AnchorIpRenorm`."""
+    mode = os.environ.get(
+        'BOUQUET_R2_IP_MODE', _R2_IP_MODE_DEFAULT).strip().lower()
+    if mode == 'anchor':          # 7dc254b's name for the ratio calibration
+        mode = 'ratio'
+    if mode not in ('exact', 'fsa', 'ratio', 'legacy'):
+        raise ValueError(
+            f"BOUQUET_R2_IP_MODE={mode!r} is not one of "
+            "'exact' (default), 'fsa', 'ratio' ('anchor'), 'legacy'")
+    return mode
+
+
+class _AnchorIpRenorm:
+    r"""Frozen anchor-geometry evaluator for the R2 :math:`I_p` renormalisation.
+
+    Route R2 (``perturb_jind_in_anchor=True``) sets the inductive AMPLITUDE by
+    rooting on ``s*j_ind + j_BS``, holding the bootstrap fixed -- the
+    physically-correct bookkeeping, since an :math:`I_p` constraint should move
+    the ohmic drive only, and the Sauter bootstrap is an absolute current
+    density that must survive the constraint unscaled.  THREE defects made that
+    root untrustworthy.  Defects 1 and 2 were fixed in 7dc254b; defect 3 is why
+    2's fix was a calibration rather than a measure, and is now fixed properly.
+
+    **1. Geometry.**  The root used to run AFTER ``solve_with_bootstrap``, so
+    ``mygs.flux_integral`` was evaluated on SWB's *landed* equilibrium instead
+    of the anchor.  Measured on the synthetic D3D-like example at
+    :math:`\sigma=0`: the SWB-landed geometry gives ``s = 0.8373`` against the
+    anchor geometry's ``0.8524`` -- a 1.80 % error in the inductive amplitude
+    for no physical reason.  Here the anchor equilibrium is captured with
+    ``copy_eq()`` immediately after the state-anchor solve and every flux
+    integral is taken on that snapshot, via the equilibrium object's own
+    ``compute_flux_integral``.  ``mygs`` is never mutated, so nothing
+    downstream of the SWB call sees a different state.
+
+    **2. Convention normalisation.**  Rooting the raw ``Ip_target`` against
+    ``mygs.flux_integral`` mis-splits ohmic vs bootstrap even once the geometry
+    is right: on the D3D-like example the archived total flux-integrates to
+    ``+12.92 %`` of :math:`I_p`, in ANY geometry, and that bias is by far the
+    larger part of the R2 error.  7dc254b cancelled it by CALIBRATING the
+    demand on the anchor -- target ``FI(reference_total)*Ip_target/Ip_anchor``
+    instead of ``Ip_target`` -- which makes the :math:`\sigma=0` invariant
+    ``s == 1.000`` true by construction.  It works, but it is a ratio fix for a
+    measurement error, and it is only first-order accurate away from the
+    reference shape.  Available as ``BOUQUET_R2_IP_MODE=ratio``.
+
+    **3. The measure (the actual defect behind 2).**  Two separate errors were
+    hiding inside that +12.92 %, and 7dc254b attributed all of it to the
+    profile convention.  Measured on the D3D-like anchor:
+
+    * ``compute_flux_integral`` is NOT :math:`\int_{\rm plasma} f\,dA`.  It
+      integrates over the whole ``reg == 1`` limiter region, with the flux
+      function evaluated at its LCFS value everywhere outside the plasma
+      (``gs_prof_interp_apply`` CASE(4) returns 0 -- the LCFS end of the
+      internal flux coordinate -- off the plasma, and ``gs_flux_int`` then
+      reads the profile there).  ``FI(1) = 2.83853`` is the LIMITER area, not
+      the plasma area, which is ``1.79005``; 7dc254b's note that ``FI(1) ==``
+      plasma area is wrong.  For the archived total the excess area is charged
+      at the edge value, ``1.36e5 A/m^2 * 1.05 m^2 = +1.43e5 A``, i.e. +11.9 %
+      of :math:`I_p` -- essentially the whole bias.
+    * the residual ~1 % is the profile convention, and it is not the one
+      7dc254b assumed either.  bouquet's arrays are TokaMaker
+      ``jphi-linterp`` values, :math:`J = \langle R\rangle P' +
+      \langle 1/R\rangle FF'/\mu_0` (``jphi_update``), not the FSA density
+      :math:`\langle j_\phi/R\rangle/\langle 1/R\rangle`.  The two differ by
+      :math:`\langle R\rangle\langle 1/R^2\rangle/\langle 1/R\rangle`, up to
+      11 % per surface at the edge.
+
+    The fix is the measure itself: the textbook axisymmetric current integral
+
+    .. math::
+        I_p = \int j_\phi\,dA
+            = \int d\psi\,\frac{V'}{2\pi}\,\langle j_\phi/R\rangle ,
+
+    with :math:`V' = dV/d\psi` and :math:`\langle\cdot\rangle` straight from
+    ``get_q``'s ``ravgs``, and with the ``jphi-linterp`` conversion folded in
+    (:func:`bouquet.utils.Ip_fsa_integral`).  No mesh integral, no calibration,
+    no reference profile: the demand is ``Ip_target``, full stop.  Validated on
+    the solved anchor by integrating the equilibrium's OWN current profile
+    (:func:`bouquet.utils.eq_jphi_profile`) and comparing with
+    ``compute_area_integral(calc_jtor_plasma)``: **+0.0071 %**, against a
+    required 0.1 %.  The same measure recovers the true :math:`I_p` of the
+    ARCHIVED total to +0.068 %, and agrees to 0.011 % with the solver's own
+    internal ``jphi_norm`` -- an independent cross-check, since TokaMaker
+    renormalises a ``jphi-linterp`` profile by exactly that factor.
+
+    Consequence for the golden invariant: at :math:`\sigma=0` the honest answer
+    is no longer *exactly* 1.  The archived split, taken at face value, carries
+    +0.068 % more current than ``Ip_target`` (the reconstruction's own
+    :math:`j_\phi` self-consistency residual), so holding :math:`j_{BS}` fixed
+    -- which is the point of route R2 -- requires shaving that off the
+    inductive amplitude.  The measure is right; ``s`` is allowed to differ from
+    1 by the reconstruction's own residual, and does.
+
+    ``BOUQUET_R2_IP_MODE`` selects the measure, for A/B:
+
+    ``exact``   the ``jphi-linterp`` FSA current integral above;
+    ``fsa``     the same integral read as an FSA density,
+                :math:`\int d\psi (V'/2\pi)\langle 1/R\rangle J` -- correct
+                only if the arrays really are FSA densities, which they are
+                not (+0.927 % on the archived total);
+    ``ratio``   (default) 7dc254b's calibration (alias ``anchor``);
+    ``legacy``  pre-7dc254b: bracketed root against ``mygs`` in whatever state
+                it is in, target ``Ip_target``.
+
+    **WHICH MODE IS THE DEFAULT, AND WHY IT IS STILL ``ratio``.**  Measured at
+    :math:`\sigma=0` on the D3D-like example, one call per mode, twice for
+    ``exact`` (bit-identical):
+
+    ===========  ==========  ==========  ==============================
+    mode         ``s``       ``|s-1|``   ``l_i`` vs recon
+    ===========  ==========  ==========  ==============================
+    ``exact``    0.996750    3.3e-3      +0.130 %
+    ``fsa``      0.985600    1.4e-2      -0.093 %
+    ``ratio``    0.999150    8.5e-4      +0.100 %
+    ``legacy``   0.837339    1.6e-1      -2.008 %
+    ===========  ==========  ==========  ==============================
+
+    The correct measure does NOT reproduce the ``s == 1.000`` invariant more
+    closely -- it reproduces it LESS closely, and for an understood reason.
+    ``ratio`` is exact at :math:`\sigma=0` *by construction*: it asks the draw
+    to carry the same (mis-measured) integral as the archived total, so every
+    representation error cancels.  ``exact`` asks the draw to carry
+    ``Ip_target`` in real amperes, so it also picks up the two ways the
+    archived split fails to be the anchor:
+
+    * the reconstruction's own :math:`j_\phi` residual -- the archived total
+      differs from the anchor's own current profile by 1.6 % of peak in SHAPE,
+      worth +0.193 % of :math:`I_p` at the R2 state anchor (+0.068 % at the
+      baseline recon), i.e. -0.25 % of inductive amplitude; plus
+    * the :math:`\sigma=0` ``solve_with_bootstrap`` residual, -0.085 %, the
+      same term ``ratio`` is left with.
+
+    Both are real; neither is a bug in the measure, whose runtime self-check
+    against the anchor's own profile is +0.014 % here.  But it means the
+    pinned invariant ``|s-1| <= 1e-3`` is not attainable by ANY honest measure
+    on this case -- even a perfectly self-consistent archive would leave
+    ~1.1e-3 -- so flipping the default is an acceptance-criterion change, not
+    a code change, and is left to the package author.  Everything needed for
+    it is here: set ``_R2_IP_MODE_DEFAULT = 'exact'``.
+
+    Only route R2 uses this; the standard :math:`l_i` loop
+    (``perturb_jind_in_anchor=False``, the production ensemble path) is
+    untouched and bit-identical, because its root is followed by
+    ``find_optimal_scale`` + the corrective iteration, which re-derive the
+    amplitude from the solved equilibrium anyway.
+
+    Parameters
+    ----------
+    mygs : TokaMaker
+        Solver, positioned at the state-anchor equilibrium.  Snapshotted, not
+        modified -- ``copy_eq()`` supports ``get_q``/``get_profiles`` and was
+        verified to return ``ravgs`` bit-identical to the live solver's while
+        leaving the live :math:`I_p` unchanged to the last bit.
+    psi_N : ndarray
+        Equilibrium flux grid the profiles live on.
+    reference_total : ndarray
+        The archived total :math:`j_\phi` (``input_j_phi``).  The demand no
+        longer depends on it in ``exact``/``fsa`` mode; it is still used to fix
+        the sign convention of ``get_profiles``' :math:`P'` and to report the
+        measured bias.
+    Ip_target : float
+        Requested plasma current [A].
+    psi_pad : float
+        LCFS padding for the anchor ``get_stats`` call.
+    mode : str
+        Resolved :func:`_r2_ip_mode` value (``exact``/``fsa``/``ratio``).
+    """
+
+    __slots__ = ("_eq", "_psi_N", "_mode", "_target", "_Ip_target", "_fi_ref",
+                 "_Ip_anchor", "_kappa", "_w", "_c", "_pprime_sign",
+                 "_self_check", "_ref_bias")
+
+    def __init__(self, mygs, psi_N, reference_total, Ip_target, psi_pad,
+                 mode="exact"):
+        self._eq = mygs.copy_eq()
+        self._mode = str(mode)
+        self._psi_N = np.asarray(psi_N, dtype=float)
+        self._Ip_target = float(Ip_target)
+        reference_total = np.asarray(reference_total, dtype=float)
+        try:
+            self._Ip_anchor = float(mygs.get_stats(lcfs_pad=psi_pad)["Ip"])
+        except Exception:
+            self._Ip_anchor = self._Ip_target
+        if not np.isfinite(self._Ip_anchor) or self._Ip_anchor == 0.0:
+            self._Ip_anchor = self._Ip_target
+
+        if self._mode in ("exact", "fsa"):
+            self._fi_ref = None
+            self._kappa = None
+            convention = "jphi-linterp" if self._mode == "exact" else "fsa"
+            # Every FSA getter is evaluated on the FROZEN snapshot, and the
+            # per-surface weights are cached as plain arrays -- after __init__
+            # the root needs no solver call at all, so nothing downstream of
+            # solve_with_bootstrap can move the demand.
+            geom = fsa_current_geometry(self._eq, self._psi_N)
+            # get_profiles' P' sign follows the case's flux convention; take it
+            # from the anchor instead of assuming (the P' term is -3.3 % of Ip,
+            # so a sign slip would be a 6.6 % error).
+            probe = eq_jphi_profile(geom, "jphi-linterp", eq=self._eq)
+            self._pprime_sign = (
+                1.0 if float(np.dot(probe, reference_total)) > 0.0 else -1.0)
+            self._w, self._c = Ip_fsa_weights(
+                geom, convention=convention, pprime_sign=self._pprime_sign)
+            # Runtime validation of the measure ON THIS CASE: integrate the
+            # anchor's own current profile and compare with its true Ip.
+            j_eq = eq_jphi_profile(geom, convention, eq=self._eq,
+                                   pprime_sign=self._pprime_sign)
+            self._self_check = self._Ip_of(j_eq) / self._Ip_anchor - 1.0
+            self._ref_bias = self._Ip_of(reference_total) / self._Ip_anchor - 1.0
+            self._target = self._Ip_target
+        else:                                     # 'ratio' (7dc254b)
+            self._w = self._c = None
+            self._pprime_sign = None
+            self._self_check = None
+            self._fi_ref = float(self.flux_integral(
+                self._psi_N, reference_total))
+            self._kappa = self._fi_ref / self._Ip_anchor
+            self._ref_bias = self._kappa - 1.0
+            self._target = self._kappa * self._Ip_target
+
+    # `Ip_flux_integral_vs_target(alpha, mygs, ...)` only ever calls
+    # `mygs.flux_integral`, so this duck-types as the solver for the root.
+    def flux_integral(self, psi_vals, field_vals):
+        """``int f dA`` over the limiter region, on the FROZEN anchor.
+
+        Retained for ``ratio`` mode and for the brentq fallback.  NOT the
+        plasma-current measure -- see defect 3 in the class docstring.
+        """
+        return self._eq.compute_flux_integral(
+            np.asarray(psi_vals, dtype=float),
+            np.asarray(field_vals, dtype=float))
+
+    def _Ip_of(self, profile):
+        """FSA plasma current [A] of *profile* on the frozen anchor geometry."""
+        from scipy.integrate import trapezoid
+        return float(trapezoid(
+            self._w * np.asarray(profile, dtype=float), self._psi_N)) + self._c
+
+    @property
+    def mode(self):
+        return self._mode
+
+    @property
+    def self_check(self):
+        """Relative error of the measure on the anchor's own current profile
+        (``None`` in ``ratio`` mode).  The step-1 validation, at runtime."""
+        return self._self_check
+
+    @property
+    def reference_bias(self):
+        """``I_p[reference_total]/I_p(anchor) - 1``: how far the archived total
+        is from the current the anchor actually carries.  In ``ratio`` mode
+        this is the ``FI``-based calibration factor minus one (+0.129 on the
+        D3D-like case); in ``exact`` mode it is the reconstruction's own
+        :math:`j_\\phi` residual (+0.00068)."""
+        return self._ref_bias
+
+    @property
+    def calibration(self):
+        """``FI(reference_total) / Ip_anchor`` in ``ratio`` mode; ``1.0`` for
+        the measure-based modes, which apply no calibration."""
+        return 1.0 if self._kappa is None else self._kappa
+
+    def solve_scale(self, j_ind, j_other):
+        r"""Inductive scale ``s`` putting ``s*j_ind + j_other`` at the
+        :math:`I_p` demand, in the frozen anchor geometry.
+
+        Both measures are affine in the profile -- the FSA integral is
+        ``trapezoid(w*J) + c`` with a cached weight array, and
+        ``compute_flux_integral`` is linear -- so the root is analytic: two
+        integrals instead of Brent's ~30.  Affinity is VERIFIED rather than
+        assumed; a third evaluation checks the result and the call falls back
+        to ``brentq`` if it does not hold.
+        """
+        j_ind = np.asarray(j_ind, dtype=float)
+        j_other = np.asarray(j_other, dtype=float)
+        if self._w is not None:
+            eval_ip = self._Ip_of
+            i_ind = eval_ip(j_ind) - self._c        # linear part only
+        else:
+            eval_ip = lambda p: float(self.flux_integral(self._psi_N, p))  # noqa: E731
+            i_ind = eval_ip(j_ind)
+        i_oth = eval_ip(j_other)
+        scale = None
+        if np.isfinite(i_ind) and i_ind != 0.0:
+            _s = (self._target - i_oth) / i_ind
+            resid = abs(eval_ip(_s * j_ind + j_other) - self._target)
+            if np.isfinite(_s) and _s > 0.0 and \
+                    resid <= 1.0e-9 * abs(self._target):
+                scale = float(_s)
+        if scale is None:
+            # Non-affine or degenerate: fall back to the bracketed root.
+            from scipy.optimize import root_scalar
+
+            def _resid(a, *_args):
+                return eval_ip(a * j_ind + j_other) - self._target
+
+            scale = float(root_scalar(
+                _resid,
+                bracket=[1.0e-10 * self._Ip_target, 1.0e1 * self._Ip_target],
+                method="brentq", rtol=1e-6).root)
+        return scale
+
+
+def _r2_ip_scale(anchor_ip, mygs, j_ind, j_other, psi_N, Ip_target):
+    """Inductive scale for route R2, on the anchor geometry when available.
+
+    ``anchor_ip`` is the :class:`_AnchorIpRenorm` captured before the SWB
+    call.  ``None`` (capture failed, or ``BOUQUET_R2_IP_MODE=legacy``) falls
+    back to the historical bracketed root against the live ``mygs`` state.
+    """
+    if anchor_ip is not None:
+        return anchor_ip.solve_scale(j_ind, j_other)
+    from scipy.optimize import root_scalar
+    return float(root_scalar(
+        Ip_flux_integral_vs_target,
+        args=(mygs, j_ind, j_other, psi_N, Ip_target),
+        bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
+        method="brentq", rtol=1e-6).root)
+
+
 def smooth_jbs_transition(j_BS):
     """Gaussian-smooth the shelf->spike transition / near-axis zone of a
     (toroidal-converted) ``solve_with_bootstrap`` j_BS profile.
@@ -963,6 +1298,7 @@ def perturb_kinetic_equilibrium(
     Z_imp=None,
     p_diff=None,
     jphi_diff=None,
+    rng=None,
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
     match :math:`I_p` and :math:`l_i` targets.
@@ -1052,6 +1388,23 @@ def perturb_kinetic_equilibrium(
         pressure matching and equilibrium solving.  Returned
         perturbed profiles are on ``psi_N_kinetic``.  If ``None``,
         ``psi_N`` is used for everything (original behaviour).
+    perturb_jind_in_anchor : bool
+        Route R2: GPR-perturb the inductive current in the recon-anchor
+        block and accept that equilibrium (band-conditioned), rather than
+        running the downstream ``find_optimal_scale`` + corrective loop.
+        :math:`I_p` then sets the inductive AMPLITUDE only, holding the
+        bootstrap fixed -- the physically-correct bookkeeping.  The
+        renormalisation is evaluated on the ANCHOR geometry, pinned before
+        the ``solve_with_bootstrap`` call (see :class:`_AnchorIpRenorm`), so
+        at :math:`\sigma=0` it returns exactly 1.000 and reproduces the
+        archived split.  Default False (the standard :math:`l_i` loop).
+    rng : numpy.random.Generator, int, or None
+        The Generator EVERY GPR draw in this call is taken from -- the
+        kinetic channels, the aux channels and the :math:`j_\phi` draws
+        alike.  ``generate_bouquet`` passes the run's single Generator (see
+        :func:`bouquet.sampling.make_rng`) so one seed governs the whole
+        ensemble.  ``None`` (default) draws from fresh OS entropy, i.e. the
+        call is NOT reproducible; an ``int`` is promoted to a Generator.
 
     Returns
     -------
@@ -1081,6 +1434,12 @@ def perturb_kinetic_equilibrium(
         raise ValueError(
             "input_jinductive must be provided when recalculate_j_BS=True"
         )
+
+    # One Generator for every draw in this call.  Promoting here (rather than
+    # defaulting each call site to None) is what makes the seed reach the GPR:
+    # a per-call-site ``np.random.default_rng()`` would re-seed from OS entropy
+    # at every draw and silently discard the run's seed.
+    rng = make_rng(rng)
 
     # Kinetic grid: either the user-supplied extended grid or psi_N
     psi_kin = psi_N_kinetic if psi_N_kinetic is not None else psi_N
@@ -1159,11 +1518,11 @@ def perturb_kinetic_equilibrium(
 
         # GPR sampling on psi_kin (kinetic grid, may include SOL)
         ne_perturb = _draw_monotonic_perturbation(
-            psi_kin, ne / ne[0], sigma_ne / ne[0], n_ls
+            psi_kin, ne / ne[0], sigma_ne / ne[0], n_ls, rng=rng
         ) * ne[0]
 
         te_perturb = _draw_monotonic_perturbation(
-            psi_kin, te / te[0], sigma_te / te[0], t_ls
+            psi_kin, te / te[0], sigma_te / te[0], t_ls, rng=rng
         ) * te[0]
 
         if _zeff_active and _Z_imp is not None:
@@ -1177,17 +1536,17 @@ def perturb_kinetic_equilibrium(
                 generate_perturbed_GPR(
                     psi_kin, _zb / _z0, _zs / _z0,
                     length_scale=(aux_length_scales or {}).get('zeff', 0.4),
-                    n_samples=1)) * _z0, dtype=float))
+                    n_samples=1, rng=rng)) * _z0, dtype=float))
             # 1 <= Zeff <= Z_imp guarantees 0 <= ni <= ne and nz >= 0
             _zeff_draw = np.clip(_zeff_draw, 1.0, _Z_imp * (1.0 - 1e-9))
             ni_perturb = main_ion_density_from_zeff(ne_perturb, _zeff_draw, _Z_imp)
         else:
             ni_perturb = _draw_monotonic_perturbation(
-                psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls
+                psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls, rng=rng
             ) * ni[0]
 
         ti_perturb = _draw_monotonic_perturbation(
-            psi_kin, ti / ti[0], sigma_ti / ti[0], t_ls
+            psi_kin, ti / ti[0], sigma_ti / ti[0], t_ls, rng=rng
         ) * ti[0]
 
         # Pressure matching on equilibrium grid (psi_N, confined only)
@@ -1243,7 +1602,8 @@ def perturb_kinetic_equilibrium(
             if not (_e0 > 0):
                 _e0 = 1.0
             _ep = np.squeeze(generate_perturbed_GPR(
-                psi_kin, _eb / _e0, _es / _e0, length_scale=_els, n_samples=1)) * _e0
+                psi_kin, _eb / _e0, _es / _e0, length_scale=_els, n_samples=1,
+                rng=rng)) * _e0
             aux_out[_en] = np.atleast_1d(np.asarray(_ep, dtype=float))
         if _zeff_draw is not None:
             aux_out['zeff'] = _zeff_draw      # the draw ni was derived from
@@ -1290,6 +1650,9 @@ def perturb_kinetic_equilibrium(
     Ip_scales = []
     iteration_l_is = []
     iteration_Ips = []
+    # R2 inductive Ip-renorm scale actually applied (None off route R2);
+    # surfaced on diagnostics['r2_ip_scale'] -- at sigma=0 it must be 1.000.
+    _r2_scale_used = None
 
     # pin_jphi: pin j_phi to recon's converged shape (only pressure perturbs
     # per draw).  Set via the function argument; the PIN_JPHI env var is kept
@@ -1572,6 +1935,36 @@ def perturb_kinetic_equilibrium(
             # Anchor failed (rare); fall through and let SWB cope.
             pass
 
+        # ---- capture the ANCHOR geometry for the R2 Ip renormalisation ----
+        # mygs is in recon's converged state right here and nowhere later:
+        # solve_with_bootstrap (below) moves it to its own landed equilibrium,
+        # which is what the R2 root used to be evaluated on.  See
+        # _AnchorIpRenorm for the two defects that fixes and the measured
+        # numbers.  Built ONLY on the R2 path, so the production ensemble path
+        # (perturb_jind_in_anchor=False) pays nothing and is bit-identical.
+        _anchor_ip = None
+        _r2_mode = _r2_ip_mode()
+        if perturb_jind_in_anchor and _r2_mode != 'legacy':
+            try:
+                _anchor_ip = _AnchorIpRenorm(
+                    mygs, psi_N, input_j_phi, Ip_target, psi_pad,
+                    mode=_r2_mode)
+                if _anchor_ip.self_check is None:
+                    print(f"  [R2-anchor] Ip renorm pinned to the anchor "
+                          f"geometry (mode={_r2_mode}, flux-integral "
+                          f"calibration {_anchor_ip.calibration:.5f})",
+                          flush=True)
+                else:
+                    print(f"  [R2-anchor] Ip renorm on the anchor geometry "
+                          f"(mode={_r2_mode}, FSA measure self-check "
+                          f"{100 * _anchor_ip.self_check:+.4f}%, archived "
+                          f"total {100 * _anchor_ip.reference_bias:+.4f}% "
+                          f"vs anchor Ip)", flush=True)
+            except Exception as _aip_exc:
+                print(f"  [R2-anchor] WARN: anchor capture failed "
+                      f"({_aip_exc}); Ip renorm falls back to the "
+                      f"SWB-landed geometry")
+
         from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
         _swb_seed = create_power_flux_fun(npsi, 1.5, 1.5)['y']
 
@@ -1806,18 +2199,19 @@ def perturb_kinetic_equilibrium(
                     _c = generate_perturbed_GPR(
                         psi_N, input_jinductive / _j0a,
                         sigma_profile=sigma_jphi / _j0a, length_scale=j_ls,
-                        n_samples=1, diag_plot=False) * _j0a
+                        n_samples=1, rng=rng, diag_plot=False) * _j0a
                     if np.all(_c >= 0.0):
                         _candA = _c
                         break
-                _rA = root_scalar(
-                    Ip_flux_integral_vs_target,
-                    args=(mygs, _candA, spike_profile + j_fixed_eff, psi_N, Ip_target),
-                    bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
-                    method="brentq", rtol=1e-6)
-                _anchor_jind = _rA.root * _candA
+                # Ip renorm on the ANCHOR geometry (see _AnchorIpRenorm), not
+                # on the equilibrium SWB happened to land on.
+                _sA = _r2_ip_scale(_anchor_ip, mygs, _candA,
+                                   spike_profile + j_fixed_eff, psi_N,
+                                   Ip_target)
+                _anchor_jind = _sA * _candA
+                _r2_scale_used = float(_sA)
                 print(f"  [perturb-anchor] GPR-perturbed j_ind in anchor "
-                      f"(Ip-renorm scale={_rA.root:.4f})")
+                      f"(Ip-renorm scale={_sA:.4f})")
             new_jphi = _anchor_jind + spike_profile + j_fixed_eff
         _psi_range_anchor = mygs.psi_bounds[1] - mygs.psi_bounds[0]
         _pp_anchor = {"type": "linterp",
@@ -1878,14 +2272,15 @@ def perturb_kinetic_equilibrium(
                 for _t in range(20):
                     _c = generate_perturbed_GPR(
                         psi_N, input_jinductive / _j0a, sigma_profile=sigma_jphi / _j0a,
-                        length_scale=j_ls, n_samples=1, diag_plot=False) * _j0a
+                        length_scale=j_ls, n_samples=1, rng=rng,
+                        diag_plot=False) * _j0a
                     if np.all(_c >= 0.0):
                         break
-                _rA = root_scalar(
-                    Ip_flux_integral_vs_target,
-                    args=(mygs, _c, spike_profile + j_fixed_eff, psi_N, Ip_target),
-                    bracket=[1e-10 * Ip_target, 1e1 * Ip_target], method="brentq", rtol=1e-6)
-                new_jphi = _rA.root * _c + spike_profile + j_fixed_eff
+                _sA = _r2_ip_scale(_anchor_ip, mygs, _c,
+                                   spike_profile + j_fixed_eff, psi_N,
+                                   Ip_target)
+                new_jphi = _sA * _c + spike_profile + j_fixed_eff
+                _r2_scale_used = float(_sA)
                 mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
                 mygs.set_profiles(pp_prof=_pp_anchor,
                                   ffp_prof={"type": "jphi-linterp", "y": new_jphi, "x": psi_N})
@@ -2160,6 +2555,7 @@ def perturb_kinetic_equilibrium(
                 sigma_profile=sigma_jphi / j_phi_0,   # normalised σ
                 length_scale=j_ls,
                 n_samples=1,
+                rng=rng,
                 diag_plot=False,
             ) * j_phi_0
             if np.any((_cand < 0.0) & ~_floor_zone):
@@ -2455,6 +2851,10 @@ def perturb_kinetic_equilibrium(
         # would just draw a redundant/mislabelled curve. Drop it there.
         "j_BS_edge": spike_profile if isolate_edge_jBS else None,
         "proxy_bias_observed": proxy_bias_observed,
+        # Route-R2 inductive Ip-renormalisation scale (None off R2).  The
+        # golden invariant: at sigma=0 the archived split is reproduced, so
+        # this must be 1.000.  See _AnchorIpRenorm.
+        "r2_ip_scale": _r2_scale_used,
         "aux": aux_out,
     }
 
@@ -2619,8 +3019,14 @@ def generate_bouquet(
         an unperturbed (:math:`\sigma=0`) draw lands ~0 mm / ~0 % from
         baseline and perturbations show their true incremental response.
     seed : int or None
-        If given, seed NumPy's global RNG at the start of the run for
-        reproducible draws.  ``None`` (default) leaves the RNG untouched.
+        The run's single random seed.  It is consumed once, into one
+        ``numpy.random.Generator`` (see
+        :func:`bouquet.sampling.make_rng`) that is threaded explicitly into
+        every draw site -- the GPR kinetic/aux/:math:`j_\phi` draws, the
+        per-draw ``scale_jBS`` sample and the per-draw :math:`l_i` target
+        sample.  Two runs with the same seed, inputs and solver therefore
+        produce bitwise-identical archives.  ``None`` (default) draws from
+        fresh OS entropy, i.e. the run is deliberately not regenerable.
     pin_jphi : bool
         When True, pin :math:`j_\phi` to recon's converged shape so only the
         pressure profile perturbs per draw (the bootstrap/SWB call is
@@ -2713,8 +3119,23 @@ def generate_bouquet(
     list[dict]
         Diagnostics from each equilibrium.
     """
-    # Seed the RNG here (encapsulates determinism in the call instead of
-    # relying on a global np.random.seed before it).  No-op when seed=None.
+    # ---- the reproducibility contract: ONE Generator per run ----------
+    # `seed` is consumed exactly here and nowhere else.  The resulting
+    # Generator is threaded explicitly into every draw site -- the per-draw
+    # scale_jBS and l_i-target samples below, and (via the `rng=` argument)
+    # all nine GPR draw sites inside perturb_kinetic_equilibrium.  Nothing in
+    # the sampling path reads global RNG state, so two runs with the same
+    # seed produce bitwise-identical archives and seed=None keeps the
+    # OS-entropy behaviour.
+    #
+    # Before this was threaded, `seed` only reached np.random's legacy global
+    # state, which governed the two draws below but NOT the GPR: every draw
+    # site called np.random.default_rng() with fresh OS entropy, so seeded
+    # ensembles were not regenerable.
+    rng = make_rng(seed)
+    # The legacy global RNG is still seeded so that any third-party code in
+    # the solve path that samples from np.random stays deterministic too.
+    # bouquet's own draws no longer read it.
     if seed is not None:
         np.random.seed(int(seed))
 
@@ -3331,7 +3752,7 @@ def generate_bouquet(
     # strictly bounded.
     if jBS_scale_range is not None:
         lo, hi = jBS_scale_range
-        jBS_scales = np.random.uniform(lo, hi, size=n_equils)
+        jBS_scales = rng.uniform(lo, hi, size=n_equils)
     else:
         jBS_scales = np.ones(n_equils)
 
@@ -3652,7 +4073,7 @@ def generate_bouquet(
         # convergence, not the spread).  l_i_uncertainty=0 (default)
         # pins every draw to the recon's l_i exactly, as before.
         if l_i_uncertainty > 0.0:
-            l_i_target_draw = float(np.random.normal(
+            l_i_target_draw = float(rng.normal(
                 l_i_target, l_i_uncertainty * l_i_target))
             # Guard against pathological negative samples (4σ events
             # for any reasonable uncertainty); clamp to a small fraction
@@ -3825,6 +4246,9 @@ def generate_bouquet(
                 aux_length_scales=aux_length_scales,
                 max_proxy_draws=max_proxy_draws,
                 p_thresh=p_thresh,
+                # the run's single Generator -- every GPR draw in this draw
+                # comes off it, so `seed` governs the whole ensemble
+                rng=rng,
                 bnd_diag_callback=_report_bnd,
                 recon_eq_snapshot=_diff_recon_eq_snap,
                 spike_profile_recon_cached=_diff_spike_recon,
@@ -4347,6 +4771,10 @@ def generate_bouquet(
         diagnostics['inspec_VSC_max']    = float(inspec_VSC_max)
         diagnostics['l_i_target_used']   = float(l_i_target_draw)
         diagnostics['l_i_uncertainty']   = float(l_i_uncertainty)
+        # The bootstrap scale this draw was sampled at (from jBS_scale_range).
+        # Not archived -- it is a sampler input, recorded here so a run can be
+        # audited against its seed without re-deriving the draw stream.
+        diagnostics['scale_jBS']         = float(scale_jBS)
 
         # ---- save geqdsk to a temporary file, archive, delete -------
         eqdsk_filename = f"{header}_count={count}.geqdsk"

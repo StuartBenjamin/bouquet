@@ -16,6 +16,7 @@ from . import filtering
 from .sampling import (
     GPRProfilePerturber,
     generate_perturbed_GPR,
+    make_rng,
     sigmoid_length_scale,
     verify_gpr_statistics,
     calc_cylindrical_li_proxy,
@@ -64,6 +65,7 @@ from .plotting import (
 from .io import (
     GEQDSKEquilibrium,
     read_geqdsk,
+    find_lcfs_xpoints,
     PFile,
     read_pfile,
 )
@@ -79,6 +81,10 @@ from .filtering import (
 from .utils import (
     Hmode_profiles,
     Ip_flux_integral_vs_target,
+    Ip_fsa_integral,
+    Ip_fsa_weights,
+    fsa_current_geometry,
+    eq_jphi_profile,
     initialize_equilibrium_database,
     store_equilibrium,
     load_equilibrium,
@@ -140,7 +146,7 @@ __all__ = [
     "FilterConfig",
     "Baseline", "resolve_baseline", "resolve_uncertainty",
     # ---- I/O: sources and IMAS write-back ----
-    "GEQDSKEquilibrium", "read_geqdsk", "PFile", "read_pfile",
+    "GEQDSKEquilibrium", "read_geqdsk", "find_lcfs_xpoints", "PFile", "read_pfile",
     "read_ida", "read_ida_cer", "IDAProfiles", "IDACERProfiles",
     "read_imas_baseline", "read_imas_geometry",
     "write_imas_draw", "export_imas_drawset",
@@ -170,10 +176,13 @@ __all__ = [
     "fast_pressure_residual", "infer_fast_pressure",
     "radial_field_from_impurity_force_balance", "radial_field_from_cer",
     "Hmode_profiles",
+    "Ip_fsa_integral", "Ip_fsa_weights", "fsa_current_geometry",
+    "eq_jphi_profile",
     # ---- environment / path resolution ----
     "add_oft_to_path", "find_mesh",
     # ---- profile sampling / uncertainty ----
-    "GPRProfilePerturber", "generate_perturbed_GPR", "sigmoid_length_scale",
+    "GPRProfilePerturber", "generate_perturbed_GPR", "make_rng",
+    "sigmoid_length_scale",
     "verify_gpr_statistics", "calc_cylindrical_li_proxy",
     "new_uncertainty_profiles", "synthetic_ida_sigma",
     # ---- advanced: functional (pre-class) API ----

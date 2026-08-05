@@ -204,9 +204,34 @@ class UncertaintyConfig:
       * ``"direct"``    -- read the ``*_err`` datasets (n_e_err / T_e_err /
         T_12C6_err) directly.
 
-    Each channel resolves independently: an explicit ``sigma_profiles`` array
-    wins, else an IDA ``.cdf``, else a per-channel flat fraction
-    (``ne``/``te``/``ni``/``ti``_scalar_sigma) times the baseline profile.
+    Kinetic sigma precedence (per channel, highest first)
+    -----------------------------------------------------
+    Each of ``ne``/``te``/``ni``/``ti`` resolves INDEPENDENTLY, and a winning
+    source SHADOWS the ones below it -- it does not combine with them::
+
+        1. sigma_profiles[chan]        explicit absolute array, kinetic grid
+        2. an IDA .cdf                 ida_path, OR -- and this is the easy one
+                                       to miss -- ReconstructionSource.
+                                       profiles_path when it ends in '.cdf',
+                                       which baseline.resolve_uncertainty
+                                       adopts automatically
+        3. <chan>_scalar_sigma         flat fraction x |baseline profile|
+
+    **The scalars do nothing when an IDA file is in play.** Setting
+    ``ne_scalar_sigma = te_scalar_sigma = ... = 0.0`` to get a deterministic
+    (sigma=0) run is therefore a NO-OP against an IDA source: the resolved
+    sigmas stay at the full operational envelope and every "deterministic"
+    point is a full-sigma draw. ``resolve_uncertainty`` logs the winning
+    source per channel and raises a ``UserWarning`` when a scalar you moved
+    off its default is being ignored, but the only setting that actually wins
+    is an explicit profile::
+
+        n_kin = len(baseline.psi_N_kinetic)
+        unc.sigma_profiles = {ch: np.zeros(n_kin)
+                              for ch in ('ne', 'te', 'ni', 'ti')}
+
+    ``sigma_jphi`` and the aux channels have no ``.cdf`` branch, so their
+    scalars always apply.
     """
 
     # Kinetic sigma resolution, in priority order per channel (ne/te/ni/ti):
@@ -230,6 +255,11 @@ class UncertaintyConfig:
     # explicit psi_N-dependent ABSOLUTE sigma profiles (on the kinetic grid),
     # keyed by 'ne'/'te'/'ni'/'ti'. Present channels override the scalar/IDA path.
     sigma_profiles: dict = field(default_factory=dict)
+
+    # Log one line per channel naming which of the three sources above actually
+    # won, and the resolved peak. The precedence is silent by construction and a
+    # silent win can invert the meaning of a run, so this defaults ON.
+    log_sigma_sources: bool = True
 
     # j_phi uncertainty: flat fractional envelope on |j_phi_baseline|
     jphi_scalar_sigma: float = 0.10
@@ -273,6 +303,12 @@ class GenerationConfig:
     """Perturbed-bouquet sampling over the uncertainty neighborhood."""
 
     n_equils: int = 20
+    # The run's ONE random seed. It is consumed into a single
+    # numpy.random.Generator (sampling.make_rng) that is threaded explicitly
+    # into every draw site -- the GPR kinetic/aux/j_phi draws, the per-draw
+    # scale_jBS sample and the per-draw l_i target sample -- so two runs with
+    # the same seed, inputs and solver produce bitwise-identical archives.
+    # None (default) draws from fresh OS entropy: deliberately not regenerable.
     seed: Optional[int] = None
     # Label for this bouquet within the HDF5 file: draws are stored under
     # scan/<scan_key>/. Use it to keep several bouquets in one file under a
