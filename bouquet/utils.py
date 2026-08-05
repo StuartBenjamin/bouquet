@@ -13,6 +13,21 @@ import numpy as np
 
 from .schema import write_profile
 
+#: The single l_i estimator the whole reconstruction/draw chain runs on.
+#:
+#: ``"iter(li3)"`` == TokaMaker ``li_normalization='iter'``
+#: == ``2 * int(Bp^2 dV) / ((mu0 * Ip)^2 * R_axis)``
+#: == the g-file reader's ``li["li(2)"]`` key (whose name is historical and
+#: misleading -- it is not Jackson's li(2)).
+#:
+#: This is the ONLY estimator bouquet and TokaMaker agree on (0.17% across the
+#: DIII-D 169510 beta-scan g-files); the li(1)/EFIT pair differs by +3.3%
+#: because TokaMaker projects the padded surface onto the true separatrix
+#: before summing perimeter.  Targeting one and measuring the other is
+#: issue #20.  Written into every archive's ``_baseline`` group as
+#: ``l_i_scale`` so a reader never has to guess.
+LI_SCALE = "iter(li3)"
+
 
 class DerivativeSanityWarning(UserWarning):
     """Data-sanity warning category for :func:`pchip_derivative`.
@@ -1217,6 +1232,7 @@ def store_baseline_profiles(
     Ip_target,
     l_i_target,
     scan_key=None,
+    l_i_scale=LI_SCALE,
     pressure_thermal=None,
     eqdsk_bytes=None,
     pfile_bytes=None,
@@ -1300,6 +1316,12 @@ def store_baseline_profiles(
 
         grp.attrs["Ip_target"]  = float(Ip_target)
         grp.attrs["l_i_target"] = float(l_i_target)
+        # Which l_i estimator `l_i_target` is on, so the archive is
+        # self-describing and a reader can pick the matching per-draw attr
+        # (`l_i(3)` for "iter(li3)", `l_i(1)` for the legacy "std(li1)").
+        # Archives written before issue #20 lack this attr entirely --
+        # readers must default to "std(li1)".
+        grp.attrs["l_i_scale"] = str(l_i_scale)
         # Provenance marker for robust path detection in plotting (independent of
         # the source-decoupled aux switchboard): "imas" or "geqdsk".
         if source_kind is not None:

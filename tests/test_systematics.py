@@ -115,6 +115,12 @@ def _load_golden(sv="0"):
                 jind=np.asarray(gi["j_inductive"][()]),
                 pert_lcfs=np.asarray(gi["perturbed_lcfs_ref"][()]),
                 li1=float(gi.attrs["l_i(1)"]),
+                # The golden archive stores BOTH estimators per draw. Since
+                # issue #20 the draw path targets and measures li(3)/'iter',
+                # so that is the number mode 3 must be handed as its target --
+                # the same golden draw, read on the estimator the code now
+                # uses. Nothing about the golden equilibrium changed.
+                li3=float(gi.attrs["l_i(3)"]),
                 Ip=float(gi.attrs.get("Ip", np.nan)),
                 coils=dict(zip(names,
                                np.asarray(gi["coil_currents"][()]))),
@@ -182,6 +188,17 @@ def replay(tmp_path_factory):
     mygs.solve()
     base_snapshot = mygs.copy_eq()
 
+    # The golden `_baseline` group predates issue #20 and stores `l_i_target`
+    # on the legacy 'std'/li(1) scale.  The draw path now measures 'iter';
+    # measure the SAME jphi-linterp baseline equilibrium that was just solved
+    # on that scale so modes 1-3 are handed a target on the scale the code
+    # compares against.  (Modes 1/2 run pin_jphi=True, which short-circuits
+    # the l_i band entirely, so this is a labelling fix for them; mode 3 is
+    # the one that actually gates on it.)
+    base["l_i_target_std_golden"] = base["l_i_target"]
+    base["l_i_target"] = float(
+        mygs.get_stats(lcfs_pad=pad, li_normalization="iter")["l_i"])
+
     z = np.zeros_like(psi_pf)
     zj = np.zeros_like(psi_N)
     with open(_GEQ, 'rb') as fh:
@@ -221,6 +238,7 @@ def replay(tmp_path_factory):
             return dict(
                 pert_lcfs=np.asarray(gi["perturbed_lcfs_ref"][()]),
                 li1=float(gi.attrs["l_i(1)"]),
+                li3=float(gi.attrs["l_i(3)"]),
                 Ip=float(gi.attrs.get("Ip", np.nan)),
                 coils=dict(zip(_read_coil_names(gi),
                                np.asarray(gi["coil_currents"][()]))),
@@ -240,7 +258,7 @@ def replay(tmp_path_factory):
             base["jphi"], base["jphi"], base["l_i_target"], pin_jphi=True)
         results["mode3"][i] = _run(
             work + f"/m3_{i}", d["ne"], d["te"], d["ni"], d["ti"],
-            d["jphi"], d["jind"], d["li1"], pin_jphi=False)
+            d["jphi"], d["jind"], d["li3"], pin_jphi=False)
     return results
 
 
@@ -284,9 +302,14 @@ def test_mode3_production_reproduces_golden(replay):
         rms_replay = _bnd_rms_mm(base["recon_lcfs"], r["pert_lcfs"])
         rms_golden = _bnd_rms_mm(base["recon_lcfs"], d["pert_lcfs"])
         print(f"[replay mode3] draw {i}: boundary RMS replay={rms_replay:.3f} "
-              f"golden={rms_golden:.3f} mm  li replay={r['li1']:.4f} "
+              f"golden={rms_golden:.3f} mm  li(3) replay={r['li3']:.4f} "
+              f"golden={d['li3']:.4f}  li(1) replay={r['li1']:.4f} "
               f"golden={d['li1']:.4f}")
         assert abs(rms_replay - rms_golden) < _MODE3_BND_RMS_MM
+        # li(3) is the estimator the replay targets (issue #20); li(1) is
+        # checked too so a convention drift between the two shows up here.
+        # Both against the SAME _MODE3_LI_REL -- the bar is not widened.
+        assert abs(r["li3"] - d["li3"]) / d["li3"] < _MODE3_LI_REL
         assert abs(r["li1"] - d["li1"]) / d["li1"] < _MODE3_LI_REL
         if np.isfinite(d["Ip"]) and np.isfinite(r["Ip"]):
             assert abs(r["Ip"] - d["Ip"]) / abs(d["Ip"]) < _MODE3_IP_REL

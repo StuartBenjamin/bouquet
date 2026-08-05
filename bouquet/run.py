@@ -546,6 +546,8 @@ class Bouquet:
         (boundary, axis offset, j_phi RMS) are shown absolute. See
         :func:`bouquet.baseline._reconstruction_metrics`.
         """
+        import numpy as np
+
         m = self.baseline.reconstruction_metrics
         tag = self.config.source.geqdsk_path.split("/")[-1]
         mark = "PASS ✅" if m.get("verdict") == "PASS" else "CHECK ⚠"
@@ -559,7 +561,13 @@ class Bouquet:
 
         print(f"  {'converged':<12} {'yes' if m.get('converged') else 'NO ⚠'}")
         line("Ip", m['Ip_MA'], m['Ip_efit_MA'], m['Ip_err_pct'], "MA")
-        line("l_i", m['li'], m['li_efit'], m['li_err_pct'])
+        # l_i on the targeted estimator (matched pair -- ~0 by construction),
+        # then the free cross-estimator pair which is NOT driven by anything
+        # and so is the honest estimator-drift monitor (issue #20).
+        line("l_i(3)", m['li'], m['li_efit'], m['li_err_pct'])
+        if np.isfinite(m.get('li1_cross_err_pct', float('nan'))):
+            line("  l_i(1)x", m['li1_cross'], m['li1_cross_efit'],
+                 m['li1_cross_err_pct'])
         line("q0", m['q0'], m['q0_efit'], m['q0_err_pct'], fmt=".2f")
         line("q95", m['q95'], m['q95_efit'], m['q95_err_pct'], fmt=".2f")
         line("beta_N", m['beta_n'], m['beta_n_efit'], m['beta_n_err_pct'], fmt=".2f")
@@ -578,8 +586,9 @@ class Bouquet:
 
         Initialises psi from the IDS LCFS shape, then solves with the IMAS total
         toroidal current (jphi-linterp) and the thermal+fast pressure. Sets
-        ``l_i_target`` to the TokaMaker-solved li_1 and stores the IDS/TokaMaker
-        li_1/li_3 comparison in ``baseline.li_metrics``.
+        ``l_i_target`` to the TokaMaker-solved li_3 (``li_normalization='iter'``
+        -- the single scale the whole chain uses after issue #20) and stores
+        the IDS/TokaMaker li_1/li_3 comparison in ``baseline.li_metrics``.
 
         Deterministic at ``nthreads=1``: a fresh process re-running this from the
         same baseline reproduces the equilibrium bit-for-bit, which is what makes
@@ -781,7 +790,14 @@ class Bouquet:
                        forward_solve_nl_its=nl_its,
                        forward_solve_ip_err_pct=ip_err_pct)
         bl.li_metrics = metrics
-        bl.l_i_target = tok_li1   # per project decision: target TokaMaker li_1
+        # Target TokaMaker li_3 ('iter').  The IMAS path is not itself affected
+        # by the geqdsk estimator mismatch (both sides come from TokaMaker),
+        # but the DOWNSTREAM machinery is shared: perturb_kinetic_equilibrium
+        # measures every draw's l_i with li_normalization='iter' after issue
+        # #20, so l_i_target must be on that scale or the per-draw acceptance
+        # band compares two different functionals (~25% apart).
+        bl.l_i_target = tok_li3
+        bl.l_i_scale = "iter(li3)"
         print(
             f"[imas forward-solve] converged ({nl_its} its, "
             f"Ip {ip_err_pct:+.2f}%) recalc_jBS="
