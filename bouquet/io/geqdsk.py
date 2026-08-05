@@ -1833,3 +1833,86 @@ def read_geqdsk(filename, cocos=1, nlevels=None, resample="theta",
         filename, cocos=cocos, nlevels=nlevels, resample=resample,
         extrapolate_edge=extrapolate_edge,
     )
+
+
+def find_lcfs_xpoints(eqdsk, bpol_frac=0.30, max_points=2):
+    r"""Locate poloidal-field nulls **on the LCFS**, whatever the topology.
+
+    The X-point pin (:attr:`SolverConfig.saddle_targets`) needs the boundary
+    point where :math:`B_\theta \to 0`. A common shortcut is to take the
+    lowest-Z point of the boundary, which silently assumes a *lower* single
+    null. On an upper-null discharge that pins a smooth, field-carrying stretch
+    of boundary instead, and driving :math:`B_\theta \to 0` there wrecks the
+    solve rather than helping it (measured: boundary RMS 4.9 mm -> 106 mm on a
+    USN case). On a limited plasma there is no boundary null to pin at all.
+
+    This finds the nulls directly from the field: :math:`B_R = -\partial_Z
+    \psi / R`, :math:`B_Z = \partial_R \psi / R` are evaluated on the g-file
+    grid, interpolated onto the boundary, and the minima of
+    :math:`|B_\theta|` are returned when they sit well below the boundary's
+    own median -- so it reports the true null for LSN, USN or double null, and
+    nothing for a limited plasma.
+
+    Parameters
+    ----------
+    eqdsk : GEQDSKEquilibrium
+        Equilibrium to inspect (needs ``psi_RZ``, ``R_grid``, ``Z_grid`` and
+        ``boundary_R``/``boundary_Z``).
+    bpol_frac : float
+        A boundary point counts as a null when its :math:`|B_\theta|` is below
+        ``bpol_frac`` times the median over the boundary. 0.30 separates the
+        cases cleanly on DIII-D; raise it to be more permissive.
+    max_points : int
+        Cap on how many nulls to return (2 covers double null).
+
+    Returns
+    -------
+    list of (R, Z, B_pol_ratio)
+        Nulls ordered by :math:`|B_\theta|` ascending, each with its ratio to
+        the boundary median. **Empty for a limited plasma** -- callers should
+        treat that as "do not pin" rather than falling back to an extremum.
+    """
+    import numpy as np
+
+    psi = np.asarray(eqdsk.psi_RZ, dtype=float)
+    R = np.asarray(eqdsk.R_grid, dtype=float)
+    Z = np.asarray(eqdsk.Z_grid, dtype=float)
+    # psi_RZ is indexed [Z, R]; gradient returns (d/dZ, d/dR)
+    dpsi_dZ, dpsi_dR = np.gradient(psi, Z, R)
+    RR = R[None, :]
+    B_R = -dpsi_dZ / RR
+    B_Z = dpsi_dR / RR
+    B_pol = np.hypot(B_R, B_Z)
+
+    bR = np.asarray(eqdsk.boundary_R, dtype=float)
+    bZ = np.asarray(eqdsk.boundary_Z, dtype=float)
+    # bilinear sample of B_pol at each boundary point
+    iR = np.clip(np.searchsorted(R, bR) - 1, 0, len(R) - 2)
+    iZ = np.clip(np.searchsorted(Z, bZ) - 1, 0, len(Z) - 2)
+    tR = (bR - R[iR]) / (R[iR + 1] - R[iR])
+    tZ = (bZ - Z[iZ]) / (Z[iZ + 1] - Z[iZ])
+    bp = ((1 - tZ) * ((1 - tR) * B_pol[iZ, iR] + tR * B_pol[iZ, iR + 1])
+          + tZ * ((1 - tR) * B_pol[iZ + 1, iR] + tR * B_pol[iZ + 1, iR + 1]))
+
+    med = float(np.median(bp))
+    if not np.isfinite(med) or med <= 0:
+        return []
+    ratio = bp / med
+
+    # local minima of |B_pol| along the (closed) boundary, below the threshold
+    n = len(bp)
+    prev = np.roll(ratio, 1)
+    nxt = np.roll(ratio, -1)
+    cand = np.where((ratio <= prev) & (ratio <= nxt) & (ratio < bpol_frac))[0]
+    if not len(cand):
+        return []
+    # collapse neighbouring indices that belong to the same null
+    cand = cand[np.argsort(ratio[cand])]
+    out = []
+    for i in cand:
+        if any(np.hypot(bR[i] - r0, bZ[i] - z0) < 0.15 for r0, z0, _ in out):
+            continue
+        out.append((float(bR[i]), float(bZ[i]), float(ratio[i])))
+        if len(out) >= max_points:
+            break
+    return out

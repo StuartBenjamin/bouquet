@@ -65,6 +65,7 @@ from .plotting import (
 from .io import (
     GEQDSKEquilibrium,
     read_geqdsk,
+    find_lcfs_xpoints,
     PFile,
     read_pfile,
 )
@@ -145,7 +146,7 @@ __all__ = [
     "FilterConfig",
     "Baseline", "resolve_baseline", "resolve_uncertainty",
     # ---- I/O: sources and IMAS write-back ----
-    "GEQDSKEquilibrium", "read_geqdsk", "PFile", "read_pfile",
+    "GEQDSKEquilibrium", "read_geqdsk", "find_lcfs_xpoints", "PFile", "read_pfile",
     "read_ida", "read_ida_cer", "IDAProfiles", "IDACERProfiles",
     "read_imas_baseline", "read_imas_geometry",
     "write_imas_draw", "export_imas_drawset",
