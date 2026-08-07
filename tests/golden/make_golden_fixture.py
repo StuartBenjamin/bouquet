@@ -43,6 +43,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 
 import numpy as np
 import h5py
@@ -74,6 +75,16 @@ TOLERANCES = {
     "coil_atol_A": 1e-3,     # per-coil current [A]
     "xpoint_atol_m": 1e-6,   # X-point R,Z [m]
 }
+
+
+def _is_eqdsk_name(k):
+    """Both archive generations: legacy stores '<header>_count=N.eqdsk';
+    the class-API schema stores a dataset simply named 'eqdsk'."""
+    return k == "eqdsk" or k.endswith(".eqdsk")
+
+
+def _is_pfile_name(k):
+    return k == "pfile" or k.endswith(".pfile")
 
 
 def _bp_to_path(bkey):
@@ -135,14 +146,51 @@ def _digest(arr):
         np.ascontiguousarray(arr, dtype=np.float64).tobytes()).hexdigest()
 
 
+def blas_provenance():
+    """What the drawn values depend on besides bouquet itself.
+
+    The draw factorises its kernel through LAPACK, so the build is part of the
+    bitwise identity: reproducible on one machine, close-but-not-equal across
+    machines (see ``draw_stream``).
+    """
+    blas = "unknown"
+    try:                                        # numpy >= 1.25
+        cfg = np.__config__.show(mode="dicts")
+        dep = cfg["Build Dependencies"]["blas"]
+        blas = f"{dep.get('name', '?')}-{dep.get('version', '?')}"
+    except Exception:
+        pass
+    return {"platform": platform.system(),
+            "machine": platform.machine(),
+            "numpy": np.__version__,
+            "blas": blas}
+
+
 def draw_stream(psi_kin, psi_N, profiles, sigmas, seed=RNG_STREAM_SEED):
     """The seeded GPR draw stream, in the draw path's own order.
 
     Replays exactly what ``perturb_kinetic_equilibrium`` does for one draw --
     ne, Te, ni, Ti through ``_draw_monotonic_perturbation`` (each normalised by
     its on-axis value), then the :math:`j_\\phi` GPR candidate -- off ONE
-    ``make_rng(seed)`` Generator.  Pure NumPy: no solver, no mesh, so the
-    result is bitwise identical on any machine and can be pinned as a golden.
+    ``make_rng(seed)`` Generator.  No solver and no mesh, so this is cheap
+    enough to pin as a golden.
+
+    How reproducible is it?  The GP draw is a fixed-order Cholesky factor
+    applied to the seeded normals, so the values are
+
+      * **bitwise** stable for a given seed on a given machine -- the contract
+        ``generate()`` relies on, and what the manifest's SHA-256 pins;
+      * stable to ~1e-9 across LAPACK/libm builds: Cholesky has no discrete
+        choices (no eigenvector signs, no null-space basis, no pivots), so a
+        different build can only differ by rounding.  The eigh factorisation
+        this replaced handed LAPACK both a sign convention and a null-space
+        basis, and the same seed differed by 1.3% between the macOS and Linux
+        CI builds.
+
+    Bitwise equality across machines is still not a claim we can make --
+    rounding inside LAPACK and libm is build-dependent -- so the manifest
+    carries :func:`blas_provenance` and the test compares numerically
+    off-machine, bitwise on-machine.
 
     Returns ``{channel: ndarray}`` on the grid each channel is drawn on.
     """
@@ -196,6 +244,8 @@ def build_rng_stream(source_slim=None, out_dir=_HERE, seed=RNG_STREAM_SEED):
         "source_fixture": os.path.basename(slim),
         "grids": {"psi_N_kinetic": int(psi_kin.size),
                   "psi_N": int(psi_N.size)},
+        # which machine pinned it -- the SHA-256s are only meaningful there
+        "pinned_on": blas_provenance(),
         "channels": {},
     }
     for ch, arr in drawn.items():
@@ -244,7 +294,7 @@ def build(source, out_dir=_HERE, eqdsk="all"):
                 bl_boundary = np.asarray(bl["recon_lcfs_ref"][()], dtype=float)
 
             if bl is not None:
-                eqk = [k for k in bl.keys() if k.endswith(".eqdsk")]
+                eqk = [k for k in bl.keys() if _is_eqdsk_name(k)]
                 if eqk:
                     ip = _ip_from_eqdsk_bytes(bytes(bl[eqk[0]][()]))
                     ip_map[f"{base}_baseline"] = ip
@@ -268,7 +318,7 @@ def build(source, out_dir=_HERE, eqdsk="all"):
             for i in draw_keys:
                 grp = parent[str(i)]
                 rec = {}
-                eqk = [k for k in grp.keys() if k.endswith(".eqdsk")]
+                eqk = [k for k in grp.keys() if _is_eqdsk_name(k)]
                 if eqk:
                     eqk_name[i] = eqk[0]
                     ip = _ip_from_eqdsk_bytes(bytes(grp[eqk[0]][()]))
@@ -285,8 +335,16 @@ def build(source, out_dir=_HERE, eqdsk="all"):
                 rec["bnd_rms_mm"] = rms
                 rec["bnd_max_mm"] = mx
                 if "coil_currents [A]" in grp and "coil_names" in grp.attrs:
+                    # legacy layout: bracketed dataset + JSON names attr
                     names = json.loads(grp.attrs["coil_names"])
                     vals = np.asarray(grp["coil_currents [A]"][()], dtype=float)
+                    rec["coil_currents"] = {n: float(v)
+                                            for n, v in zip(names, vals)}
+                elif "coil_currents" in grp and "coil_names" in grp:
+                    # schema-v2 layout: clean dataset names
+                    names = [n.decode() if isinstance(n, bytes) else str(n)
+                             for n in grp["coil_names"][()]]
+                    vals = np.asarray(grp["coil_currents"][()], dtype=float)
                     rec["coil_currents"] = {n: float(v)
                                             for n, v in zip(names, vals)}
                 if "x_points" in grp:
@@ -337,9 +395,9 @@ def build(source, out_dir=_HERE, eqdsk="all"):
                     g.attrs[ak] = obj.attrs[ak]
                 return
             # dataset
-            if name.endswith(".pfile"):
+            if _is_pfile_name(name.rsplit("/", 1)[-1]):
                 return                      # always dropped
-            if name.endswith(".eqdsk"):
+            if _is_eqdsk_name(name.rsplit("/", 1)[-1]):
                 if name not in keep_eqdsk:
                     return                  # dropped per --eqdsk
                 raw = bytes(obj[()])

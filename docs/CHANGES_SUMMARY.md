@@ -1,6 +1,117 @@
 # Bouquet — change summaries
 
-## Unreleased — reproducibility contract + trustworthy R2 Ip renormalisation
+## 1.3.0 — the seeded draw is now machine-independent; find_ida (2026-08-05)
+
+1.2.0 shipped the contract "same seed → bitwise-identical archives". True on
+one machine; **not** true across machines: the CI golden's j_phi[0] differed by
+**1.3%** between the macOS build that pinned it and the Linux runners, and the
+draw-stream golden failed on CI from the hour it was written. This closes that
+gap.
+
+### What was wrong
+
+`GPRProfilePerturber.generate_profiles` factorised the kernel with
+`np.linalg.eigh` and used the eigenvectors raw. A squared-exponential kernel is
+numerically rank-deficient — on the golden's 257-point j_phi grid, 242 of 257
+eigenvalues sit at the double-precision floor (cond(K) ~ 8e19) — so LAPACK
+returns two things it is free to choose: an **arbitrary basis** for that null
+subspace, and an **arbitrary sign** per eigenvector. Both leave `V Λ Vᵀ`
+exactly unchanged — the sampling law was never wrong — but both change the
+individual draw. Under an eigensolver A/B (LAPACK syev/syevd/syevr) the same
+seed moved by up to ~20% on flat-sigma kernels.
+
+An intermediate fix (null-mode truncation + per-vector sign canonicalisation)
+was built and adversarially reviewed, and is worth recording because its
+failure mode is instructive: a flat sigma on a uniform grid makes K
+mirror-symmetric, its eigenvectors then peak at mirrored index pairs with
+equal magnitude, and for the antisymmetric modes those two carry opposite
+sign — so "the largest component" is decided by floating-point noise that
+grows as `eps·λ_max/λ` and defeats any fixed tie window. 35 of 72
+production-plausible configs still moved by >1e-7 across eigensolvers, and no
+per-vector rule can fix a rotation *within* a (near-)degenerate eigenspace at
+all. Per-vector canonicalisation of `eigh` is a dead end; it never shipped.
+
+### The fix
+
+The draw is now `L z` with `L` the **fixed-order Cholesky factor** of
+`K + jitter·I` (jitter = 1e-10 · n · max diag(K)). Cholesky has **no discrete
+choices** — no eigenvector signs, no null-space basis, no pivots, no ties — so
+there is nothing for a different LAPACK build to decide differently, for any
+kernel, length scale, or sigma shape; cross-build variation collapses to
+rounding accumulation. `z` keeps its full length on every path (including
+sigma = 0), so RNG consumption and channel sequencing never depend on the data.
+
+Measured (`tests/test_rng_reproducibility.py::TestDrawIsFactorizationStable`,
+sub-ulp kernel perturbation as the stand-in for a different LAPACK/libm build):
+
+| property | raw eigh | Cholesky |
+|---|---|---|
+| golden channels, cross-build residue | 1.3% (observed on CI) | ~1e-9 |
+| flat-sigma matern52 (worst prior config) | up to ~20% (driver A/B) | 3.6e-10 |
+| factorisation success, 151-config sweep | — | 151/151 |
+| marginal std vs sigma envelope | exact | +3e-8 relative (jitter) |
+| where sigma_i = 0 exactly | exactly 0 | residual std ~2e-4·max(sigma); all-zero sigma stays exactly 0 |
+
+The full covariance was re-verified empirically (20k draws match `K` to the MC
+floor), and the law tests assert it in-suite.
+
+### What this changes for you
+
+**Drawn values differ from ≤1.2.0 for the same seed** — up to ~21% pointwise on
+the golden fixture's Te channel — a different draw from the *same*
+distribution, not a correction to any one draw. Seeded ensembles generated
+under ≤1.2.0 do not reproduce under 1.3.0; regenerate them. Nothing about the
+physics, the solve, or the sigma semantics moves.
+
+### The golden's claim, corrected
+
+The 1.2.0 golden asserted the stream was "bitwise identical on any machine".
+It cannot be — rounding inside LAPACK/libm is build-dependent — so
+`rng_stream_manifest.json` now records the machine that pinned it
+(`pinned_on`: platform/arch/numpy/BLAS), and the test asserts
+
+* **numerically everywhere** — `rtol = 1e-7`, two decades above the ~1e-9
+  residue measured on the golden's own channels, so a real sampler change
+  still trips it;
+* **bitwise on the pinning machine** — the SHA-256, which is the contract
+  seeded `generate()` runs actually rely on.
+
+### The systematics golden, regenerated — and its fixture made deterministic
+
+`test_systematics`'s mode-3 golden (l_i 0.8521) was **unreachable by released
+code**: pristine 1.2.0 at `nthreads=1` lands 0.8810, bit-stable, under any
+sampler and any Ip-measure mode. The stored values dated to `0b00eb7`, with
+several intentional physics changes landed since and never re-pinned; the
+fixture's `nthreads=2` solver jitter (±1%, amplified through the l_i-matching
+loop) let the test sometimes pass anyway, so the staleness was invisible —
+solver tests do not run in CI.
+
+The golden archive is regenerated with current code (class API, 20 draws, seed
+12345, ψ-dependent synthetic-IDA sigmas, flat 10% j_φ σ, input-current
+archival — `store_achieved_jphi=False`, because a replay premise "archived
+current reproduces archived LCFS" requires the input, not the achieved,
+current). The replay fixture now runs at `nthreads=1` and stands its solver up
+**through the class API's own reconstruction**, inheriting the generator's
+isoflux set, weights, warmstart state, and `psi_pad` — four hand-copied
+constants (weight 200 vs 500, pad 1e-4 vs 1e-3, boundary point set, warmstart)
+each produced a deterministic ~2 mm replay offset when they drifted from the
+generator. All three modes now pass bit-identically across repeated runs.
+`make_golden_fixture` additionally learned the schema-v2 dataset names
+(`eqdsk`/`coil_currents`), which it silently mishandled before.
+
+### New: `find_ida` — locate kinetic-profile data that isn't in the repo
+
+`bouquet.find_ida(name, start=..., extra=...)` resolves an IDA `.cdf` at run
+time, so analysis repos stop carrying machine data (current vintages reach
+190 MB — past GitHub's 100 MB hard limit — and are regenerated as IDA-lite
+evolves). Precedence: `BOUQUET_IDA` naming a **file** → `extra=` → a walk-up
+from the notebook (the sibling copy wins) → `BOUQUET_IDA` naming a
+**directory**, searched recursively with a depth cap. Because two vintages of
+one shot commonly share a basename and both load silently, a directory search
+that finds differing copies **raises** listing them rather than guessing, and
+a miss raises listing every path tried.
+
+## 1.2.0 — reproducibility contract + trustworthy R2 Ip renormalisation (2026-08-04)
 
 Four fixes found while driving a β-scan through `generate()` at σ=0. All four
 are backwards compatible; production `generate()` defaults are unchanged.

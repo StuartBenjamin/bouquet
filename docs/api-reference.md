@@ -107,8 +107,9 @@ selection semantics: [io-and-plotting.md](io-and-plotting.md#plotting).
 |----------|-------------|
 | `add_oft_to_path()` | Make OpenFUSIONToolkit importable (`OFT_PYTHONPATH` → known locations → walk-up) |
 | `find_mesh()` | Locate the TokaMaker mesh (`BOUQUET_MESH` → walk-up → bundled example) |
+| `find_ida()` | Locate an IDA `.cdf` (`BOUQUET_IDA`-as-file → `extra` → walk-up → `BOUQUET_IDA`-as-directory, searched recursively; differing same-named vintages raise rather than guess). Data lives outside the repo — nothing is bundled |
 
-Both raise with the full list of locations tried, so failures are actionable on
+All three raise with the full list of locations tried, so failures are actionable on
 a new machine.
 
 ## Functional API (pre-class, still supported)

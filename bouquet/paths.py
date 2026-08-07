@@ -1,4 +1,4 @@
-"""Machine-portable resolution of the OpenFUSIONToolkit install and the mesh.
+"""Machine-portable resolution of the OFT install, the mesh, and IDA data.
 
 bouquet itself imports headless -- OFT is only loaded lazily inside
 ``Bouquet.setup_solver`` -- so notebooks and driver scripts are free to call
@@ -209,7 +209,127 @@ def find_mesh(
     )
 
 
-def _report(path: str, verbose: bool) -> str:
+# how deep the BOUQUET_IDA directory search will descend.  A data tree is a
+# few levels of shot directories; without a cap a typo'd BOUQUET_IDA=$HOME
+# walks the whole disk (measured: 77 s) before raising.
+_IDA_WALK_MAX_DEPTH = 6
+
+
+def find_ida(
+    name: str,
+    start: Optional[str] = None,
+    extra: Optional[str] = None,
+    *,
+    verbose: bool = False,
+) -> str:
+    """Locate an IDA ``.cdf`` kinetic-profile file; return its absolute path.
+
+    The mesh twin of this (:func:`find_mesh`) exists because the mesh ships
+    with bouquet.  This one exists for the opposite reason: IDA files are
+    machine data, frequently re-generated as the IDA-lite software evolves and
+    up to hundreds of MB, so they are kept **outside** the analysis repo and
+    located at run time.  A notebook then names the file it wants without
+    naming the machine it is on.
+
+    Resolution order:
+
+    1. ``BOUQUET_IDA`` naming a **file** -- the explicit override;
+    2. the caller-supplied ``extra`` (a file, or a directory to search);
+    3. a walk-up from ``start`` (default: cwd) checking ``<dir>/name`` and
+       ``<dir>/IDA/name`` at each level -- so the copy sitting next to the
+       notebook wins over any shared data tree;
+    4. ``BOUQUET_IDA`` naming a **directory** -- searched recursively (to
+       depth ``_IDA_WALK_MAX_DEPTH``) as the shared-data fallback.
+
+    Multiple vintages of one shot commonly share a basename and load without
+    complaint, so a silent wrong pick is worse than a miss.  Hence: a
+    directory search that finds the name more than once raises unless every
+    copy has identical size; and a miss raises ``FileNotFoundError`` listing
+    every location tried.
+    """
+    tried: List[str] = []
+
+    def _file(p: Optional[str]) -> Optional[str]:
+        ap = _expand(p)
+        if ap:
+            tried.append(ap)
+            if os.path.isfile(ap):
+                return ap
+        return None
+
+    def _dir(d: Optional[str]) -> Optional[str]:
+        """Search a directory tree for *name*, refusing to guess between
+        differing copies."""
+        ad = _expand(d)
+        if not ad or not os.path.isdir(ad):
+            return None
+        hit = _file(os.path.join(ad, name))
+        if hit:
+            return hit
+        tried.append(os.path.join(ad, "**", name) + f" (depth<={_IDA_WALK_MAX_DEPTH})")
+        base_depth = ad.rstrip(os.sep).count(os.sep)
+        matches = []
+        for root, dirs, files in os.walk(ad):
+            if root.rstrip(os.sep).count(os.sep) - base_depth >= _IDA_WALK_MAX_DEPTH:
+                dirs[:] = []                     # do not descend further
+                continue
+            dirs.sort()                          # deterministic on every filesystem
+            if name in files:
+                matches.append(os.path.join(root, name))
+        if not matches:
+            return None
+        matches.sort()
+        sizes = {m: os.path.getsize(m) for m in matches}
+        if len(set(sizes.values())) > 1:
+            listing = "\n  ".join(f"{m}  ({sizes[m]} bytes)" for m in matches)
+            raise FileNotFoundError(
+                f"{name!r} found more than once under {ad} with DIFFERING sizes "
+                f"-- likely different IDA vintages, and picking one silently "
+                f"would be worse than failing.  Point BOUQUET_IDA (or extra=) "
+                f"at the file you mean:\n  {listing}"
+            )
+        return matches[0]
+
+    # 1. env var naming a file: explicit override
+    env = _expand(os.environ.get("BOUQUET_IDA"))
+    if env and os.path.isfile(env):
+        tried.append(env)
+        return _report(env, verbose, kind="IDA")
+
+    # 2. caller hint
+    if extra:
+        ex = _expand(extra)
+        hit = _dir(ex) if (ex and os.path.isdir(ex)) else _file(extra)
+        if hit:
+            return _report(hit, verbose, kind="IDA")
+
+    # 3. walk up from start: the file next to the notebook wins over a shared tree
+    here = _expand(start) or os.getcwd()
+    for _ in range(8):
+        for cand in (os.path.join(here, name), os.path.join(here, "IDA", name)):
+            hit = _file(cand)
+            if hit:
+                return _report(hit, verbose, kind="IDA")
+        parent = os.path.dirname(here)
+        if parent == here:
+            break
+        here = parent
+
+    # 4. env var naming a directory: the shared-data fallback
+    if env and os.path.isdir(env):
+        hit = _dir(env)
+        if hit:
+            return _report(hit, verbose, kind="IDA")
+
+    raise FileNotFoundError(
+        f"Could not locate IDA file {name!r}. Set BOUQUET_IDA to the file or to "
+        f"the directory holding your IDA data, pass extra=<dir-or-file>, or "
+        f"place it on the walk-up path. Tried:\n  "
+        + "\n  ".join(tried or ["<no candidates>"])
+    )
+
+
+def _report(path: str, verbose: bool, kind: str = "mesh") -> str:
     if verbose:
-        print(f"[bouquet.paths] mesh: {path}")
+        print(f"[bouquet.paths] {kind}: {path}")
     return path

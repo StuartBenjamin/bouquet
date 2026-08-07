@@ -43,6 +43,14 @@ _MAX_PRESSURE_ITER = int(1e5)
 _MAX_LI_ITER = 20
 _MAX_MONOTONIC_DRAWS = int(1e4)
 
+# ── Cholesky regularisation for the GP kernel factorisation ────────────
+#    jitter = _CHOL_JITTER * n * max(diag(K)).  n*max_diag bounds lambda_max,
+#    so this sits ~450x above the eps*lambda_max rounding floor that makes a
+#    raw squared-exponential kernel numerically indefinite, while inflating
+#    each marginal sigma by at most a relative ~3e-8 (sqrt(1 + jitter/sigma^2)).
+#    See GPRProfilePerturber.generate_profiles for why Cholesky and not eigh.
+_CHOL_JITTER = 1e-10
+
 
 # ====================================================================
 #  Seed -> Generator (the one seed-consumption point)
@@ -205,7 +213,14 @@ class GPRProfilePerturber:
         rng: Optional[np.random.Generator] = None,
     ) -> np.ndarray:
         r"""Draw perturbed profiles whose pointwise :math:`1\sigma`
-        matches the supplied experimental uncertainty exactly.
+        matches the supplied experimental uncertainty.
+
+        The match is exact up to the Cholesky regularisation jitter: each
+        marginal std is :math:`\sqrt{\sigma_i^2 + \epsilon}` with
+        :math:`\epsilon \approx 10^{-10}\,n\,\max\sigma^2` -- a relative
+        inflation of ~3e-8 where :math:`\sigma_i \sim \max\sigma`, and a
+        residual std of ~2e-4 max(sigma) where :math:`\sigma_i = 0`.  An
+        all-zero sigma profile is returned unperturbed exactly.
 
         Parameters
         ----------
@@ -240,13 +255,45 @@ class GPRProfilePerturber:
         S = np.outer(sigma_profile, sigma_profile)
         K_scaled = K * S
 
-        # 3. Eigen-decomposition (symmetric → eigh)
-        vals, vecs = np.linalg.eigh(K_scaled)
-        vals = np.maximum(vals, 0.0)
-
-        # 4. Sample:  δf = V diag(√λ) z,   z ~ N(0, I)
+        # 3. Factorise with a fixed-order Cholesky, NOT an eigen-decomposition.
+        #
+        #    A squared-exponential kernel is numerically rank-deficient
+        #    (cond(K) ~ 1e19 on a 257-point grid), so `eigh` hands LAPACK two
+        #    choices that are convention, not mathematics: the basis of the
+        #    near-null subspace, and every eigenvector's sign.  Neither changes
+        #    the covariance -- V diag(lambda) V^T is identical either way --
+        #    but both change the individual DRAW, so the same seed produced
+        #    different profiles on different LAPACK builds (observed at 1.3%
+        #    between macOS/Accelerate and Linux/OpenBLAS on the CI golden;
+        #    up to ~20% under an eigensolver A/B on flat-sigma kernels).
+        #    Sign/tie canonicalisation shrinks that freedom but provably cannot
+        #    remove it: near-degenerate pairs can still swap or rotate.
+        #
+        #    A non-pivoted Cholesky of K + jitter*I has NO discrete choices at
+        #    all -- no eigenvector signs, no null-space basis, no pivots, no
+        #    ties.  There is nothing for a different LAPACK to decide
+        #    differently, for ANY kernel, length scale, or sigma shape;
+        #    cross-build variation collapses to rounding accumulation
+        #    (measured in tests/test_rng_reproducibility.py).  The jitter
+        #    makes the factorisation well-posed and costs at most a relative
+        #    ~3e-8 inflation of each marginal sigma; where sigma_i = 0 the
+        #    draw acquires a residual std of sqrt(jitter) ~ 2e-4 * max(sigma)
+        #    instead of exactly 0.  An all-zero sigma stays exactly zero via
+        #    the max_diag guard below.
+        #
+        # 4. Sample:  delta_f = L z,   z ~ N(0, I),   L L^T = K + jitter*I.
+        #    z is always drawn, even on the zero-sigma path, so the number of
+        #    normals consumed -- and hence every later channel in a seeded
+        #    run -- never depends on the data.
         z = rng.standard_normal((n, n_samples))
-        perturbations = vecs @ (np.sqrt(vals)[:, None] * z)
+
+        max_diag = float(K_scaled.diagonal().max()) if n else 0.0
+        if max_diag > 0.0:
+            jitter = _CHOL_JITTER * n * max_diag
+            L = np.linalg.cholesky(K_scaled + jitter * np.eye(n))
+            perturbations = L @ z
+        else:
+            perturbations = np.zeros((n, n_samples))
 
         # 5. Perturbed profiles  →  (n_samples, n_points)
         return input_profile[None, :] + perturbations.T
