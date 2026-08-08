@@ -1560,6 +1560,19 @@ class GEQDSKEquilibrium:
             "li(1)_TLUCE": li_def / circum**2 * 2 * vol / r_0 * correction_factor if circum > 0 else 0.0,
             # li(1) defaults to EFIT definition (most widely used)
             "li(1)": li_def,
+            # WARNING -- the "li(2)" key name is HISTORICAL AND MISLEADING.
+            # It is not Jackson's li(2).  Substituting li_def cancels circum
+            # and vol outright:
+            #     li_def/circum^2 * 2*vol/R0
+            #       = (Bp2_vol/vol/mu0^2/ip^2 * circum^2)/circum^2 * 2*vol/R0
+            #       = 2 * Bp2_vol / ((mu0*ip)^2 * R0)      [R0 = R_axis]
+            # i.e. this key IS the ITER-normalized li(3) evaluated at the
+            # magnetic axis -- numerically identical to TokaMaker's
+            # `get_stats(li_normalization='iter')` to 0.17%, and the estimator
+            # `reconstruct_equilibrium` targets.  (The "li(3)" key below uses
+            # r_0 = RCENTR, the vacuum-field reference radius, instead.)
+            # Renaming is deferred: the key is load-bearing in stored archives.
+            # See issue #20.
             "li(2)": li_def / circum**2 * 2 * vol / R0 if circum > 0 else 0.0,
             "li(3)": 2 * Bp2_vol / r_0 / ip**2 / constants.mu_0**2 if abs(ip) > 0 else 0.0,
         }

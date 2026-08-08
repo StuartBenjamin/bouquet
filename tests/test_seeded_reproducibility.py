@@ -328,7 +328,13 @@ def _run_r2_probe(outdir):
         )
         d = out[6]
         return (float(d["r2_ip_scale"]),
-                float(b.mygs.get_stats(lcfs_pad=psi_pad)["l_i"]),
+                # Measure l_i on the SAME estimator bl.l_i_target lives on
+                # ('iter' == li(3)); get_stats' default is 'std' == li(1),
+                # which is a different functional (~25% apart) and would make
+                # the recon-li assertions below compare apples to oranges.
+                # Issue #20 -- estimator consistency, not a tolerance change.
+                float(b.mygs.get_stats(lcfs_pad=psi_pad,
+                                       li_normalization="iter")["l_i"]),
                 np.asarray(d["j_BS"], dtype=float),
                 np.asarray(d["j_inductive"], dtype=float))
 

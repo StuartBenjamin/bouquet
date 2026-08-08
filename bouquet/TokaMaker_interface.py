@@ -1696,7 +1696,7 @@ def perturb_kinetic_equilibrium(
         if not _pinj_probe:
             return
         try:
-            _st = mygs.get_stats(li_normalization='std',
+            _st = mygs.get_stats(li_normalization='iter',
                                  lcfs_pad=psi_pad)
             _op = mygs.o_point
             print(f"    [probe {label:38s}] "
@@ -1719,7 +1719,7 @@ def perturb_kinetic_equilibrium(
         baseline_li_proxy = calc_cylindrical_li_proxy(
             mygs, input_j_phi, psi_pad)
         # Don't append SWB scale factors -- nothing to scale here
-        eq_stats = mygs.get_stats(lcfs_pad=psi_pad)
+        eq_stats = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
 
         # ---- PIN_JPHI recon-anchor solve ----
         # The if/elif/elif chain (this branch | DIFF_BS | recalculate_j_BS)
@@ -1775,7 +1775,7 @@ def perturb_kinetic_equilibrium(
         # Refresh eq_stats after the anchor solve so the PIN_JPHI
         # short-circuit at line ~1237 reports the perturbed-pressure
         # equilibrium's l_i / Ip, not the pre-solve warmstart state.
-        eq_stats = mygs.get_stats(lcfs_pad=psi_pad)
+        eq_stats = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
         baseline_li_proxy = calc_cylindrical_li_proxy(
             mygs, input_j_phi, psi_pad)
 
@@ -1857,7 +1857,7 @@ def perturb_kinetic_equilibrium(
                   f"({_diff_anchor_exc}); state may be inconsistent")
         baseline_li_proxy = calc_cylindrical_li_proxy(
             mygs, new_jphi_diff, psi_pad)
-        eq_stats = mygs.get_stats(lcfs_pad=psi_pad)
+        eq_stats = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
 
     elif recalculate_j_BS:
         # ---- SWB call hygiene -------------------------------------------
@@ -2254,7 +2254,7 @@ def perturb_kinetic_equilibrium(
             except Exception:
                 pass
 
-        eq_stats = mygs.get_stats(lcfs_pad=psi_pad)
+        eq_stats = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
         baseline_li_proxy = calc_cylindrical_li_proxy(mygs, new_jphi, psi_pad)
 
         # Fix C band-conditioning: an UNCONDITIONAL accept passed pathological
@@ -2288,7 +2288,7 @@ def perturb_kinetic_equilibrium(
                     mygs.solve()
                 except Exception:
                     continue
-                eq_stats = mygs.get_stats(lcfs_pad=psi_pad)
+                eq_stats = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
             _erp = 100.0 * abs(float(eq_stats['l_i']) - l_i_target) / l_i_target
             print(f"  [perturb-anchor] band-conditioned: {_nr} resample(s), "
                   f"l_i={float(eq_stats['l_i']):.4f} ({_erp:.2f}% vs band {_tolp:.2f}%)",
@@ -2362,7 +2362,7 @@ def perturb_kinetic_equilibrium(
     # target stay locked to recon.  Diagnostic mode for isolating
     # whether per-draw j_phi shape variation drives the boundary shift.
     if _pin_jphi or _diff_bs:
-        _pinned_stats = mygs.get_stats(li_normalization='std', lcfs_pad=psi_pad)
+        _pinned_stats = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
         l_i = float(_pinned_stats['l_i'])
         Ip = float(_pinned_stats['Ip'])
         # DIFF_BS: output = input_j_phi + delta_spike (delta=0 at sigma=0)
@@ -2705,7 +2705,7 @@ def perturb_kinetic_equilibrium(
             plt.tight_layout()
             plt.show()
 
-        eq_stats = mygs.get_stats(lcfs_pad=psi_pad)
+        eq_stats = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
         Ip = eq_stats["Ip"]
         l_i = eq_stats["l_i"]
 
@@ -3261,7 +3261,7 @@ def generate_bouquet(
         # then lands ~0 mm / ~0% from baseline by construction, and
         # perturbations show their true incremental response.  Coils are
         # left free (inverse + isoflux) exactly as in a draw.
-        _baseline_li1 = float(l_i_target)
+        _baseline_li3 = float(l_i_target)
         if jphi_baseline:
             _psi_range_b = mygs.psi_bounds[1] - mygs.psi_bounds[0]
             _pp_b = {"type": "linterp",
@@ -3280,8 +3280,8 @@ def generate_bouquet(
             try:
                 mygs.solve()
                 _recon_Ip = float(abs(mygs.get_globals()[0]))
-                _baseline_li1 = float(mygs.get_stats(
-                    lcfs_pad=psi_pad, li_normalization='std')['l_i'])
+                _baseline_li3 = float(mygs.get_stats(
+                    lcfs_pad=psi_pad, li_normalization='iter')['l_i'])
                 _bl_lcfs = safe_trace_surf(mygs, 1.0 - psi_pad)
                 if _bl_lcfs is not None and len(_bl_lcfs) >= 4:
                     # Override the trace reference so bnd-diag + plot_traces
@@ -3295,7 +3295,7 @@ def generate_bouquet(
                 _initial_coils = {k: float(v) for k, v in
                                   _initial_coils_dict.items()}
                 print(f"  [jphi-baseline] unperturbed jphi-linterp baseline "
-                      f"solved: l_i(1)={_baseline_li1:.5f} Ip={_recon_Ip:.0f}; "
+                      f"solved: l_i(3)={_baseline_li3:.5f} Ip={_recon_Ip:.0f}; "
                       f"per-draw boundary/l_i now reference THIS baseline")
             except (ValueError, RuntimeError) as _bl_exc:
                 print(f"  [jphi-baseline] solve failed ({_bl_exc}); "
@@ -3687,7 +3687,7 @@ def generate_bouquet(
                       f"the pre-bouquet snapshot")
             if os.environ.get('PINJ_PROBE', '0') == '1':
                 try:
-                    _gs0 = mygs.get_stats(li_normalization='std',
+                    _gs0 = mygs.get_stats(li_normalization='iter',
                                           lcfs_pad=psi_pad)
                     _op0 = mygs.o_point
                     print(f"    [probe RECON reference (warmstart src)  ] "
@@ -4140,7 +4140,7 @@ def generate_bouquet(
         # the state perturb_kinetic_equilibrium will see on entry.
         if os.environ.get('PINJ_PROBE', '0') == '1':
             try:
-                _gs = mygs.get_stats(li_normalization='std',
+                _gs = mygs.get_stats(li_normalization='iter',
                                      lcfs_pad=psi_pad)
                 _op = mygs.o_point
                 print(f"    [probe just after warmstart restore     ] "
@@ -5305,7 +5305,31 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     #   c) The last converged psi is saved with get_psi / set_psi so
     #      that a non-converged solve does not poison subsequent
     #      iterations.
-    li_target = eqdsk.li["li(1)_EFIT"]
+    # ---- l_i estimator: target and measure the SAME functional (issue #20) --
+    #
+    # bouquet's ``li(2)`` key (io/geqdsk.py:1562) is, despite its name,
+    # numerically the ITER-normalized li(3):
+    #
+    #     li(2)_key = li_from_definition / circum^2 * 2 * vol / R_axis
+    #               = 2 * int(Bp^2 dV) / ((mu0 * Ip)^2 * R_axis)
+    #
+    # i.e. every perimeter and volume factor cancels; only R_axis survives.
+    # That is exactly the functional TokaMaker's ``li_normalization='iter'``
+    # evaluates, and it is the ONLY estimator the two codes agree on:
+    # measured 0.17% across the 16 DIII-D 169510 beta-scan g-files.
+    # The key NAME is historical and misleading -- it is not Jackson's li(2).
+    #
+    # The previous target, ``li["li(1)_EFIT"]``, carries the g-file's
+    # RBBBS/ZBBBS polygon perimeter and volume, while the convergence
+    # measurement (`get_stats(li_normalization='std')`) carries TokaMaker's
+    # own perimeter -- and TokaMaker's `gs_get_qprof` radially PROJECTS the
+    # 1-lcfs_pad surface onto the true separatrix before summing arc length
+    # (OFT grad_shaf.F90:4447-4456, unconditional) whereas `gs_comp_globals`
+    # integrates to the separatrix with no pad.  The two li(1) numbers
+    # therefore differ by +3.34% +/- 0.09% on the same equilibrium, so the
+    # loop converged ~3.2% LOW in true l_i on every geqdsk-path
+    # reconstruction.  See issue #20 for the full forensics.
+    li_target = eqdsk.li["li(2)"]
     li_tol = 0.001
     max_li_iters = 20
     max_step_frac = 0.10  # cap secant steps at ±10 % of current value
@@ -5321,7 +5345,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         mygs.set_psi(_last_good_psi, update_bounds=True)
 
     def _solve_and_get_li(ind_factor):
-        """Set profiles with scaled j_inductive, solve, return li(1).
+        """Set profiles with scaled j_inductive, solve, return li(3)/'iter'.
 
         Saves psi on success; restores the previous good psi on
         TokaMaker solve failure so the next attempt starts clean.
@@ -5340,7 +5364,8 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
             _restore_psi()
             return None  # signal failed solve
         _save_psi()
-        eq_stats = mygs.get_stats(li_normalization='std', lcfs_pad=psi_pad)
+        # 'iter' == li(3) == the estimator li_target is on (issue #20).
+        eq_stats = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
         return eq_stats['l_i']
 
     # -- bracket bookkeeping ------------------------------------------
@@ -5358,7 +5383,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                 bracket_hi = (ind, li)
 
     # -- initial two evaluations --------------------------------------
-    eq_stats_0 = mygs.get_stats(li_normalization='std', lcfs_pad=psi_pad)
+    eq_stats_0 = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
     ind_0, li_0 = 1.0, eq_stats_0['l_i']
     _save_psi()
     _update_bracket(ind_0, li_0)
@@ -5368,7 +5393,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     if li_1_sec is not None:
         _update_bracket(ind_1, li_1_sec)
 
-    print(f"[li match] target={li_target:.6f}")
+    print(f"[li match] target={li_target:.6f}  [estimator: li(3)/'iter']")
     print(f"[li match] iter 0: ind_factor={ind_0:.6f}  li={li_0:.6f}  err={li_0 - li_target:.6f}")
     print(f"[li match] iter 1: ind_factor={ind_1:.6f}  li={li_1_sec:.6f}  err={li_1_sec - li_target:.6f}")
 
@@ -5445,10 +5470,10 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     if li_1_sec is None:
         _restore_psi()
 
-    _eq_stats_final = mygs.get_stats(li_normalization='std', lcfs_pad=psi_pad)
+    _eq_stats_final = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
     final_li = _eq_stats_final['l_i']
     Ip_tokamaker = _eq_stats_final['Ip']
-    print(f"[li match] final li(1)={final_li:.6f}  target={li_target:.6f}  |err|={abs(final_li - li_target):.6f}")
+    print(f"[li match] final li(3)={final_li:.6f}  target={li_target:.6f}  |err|={abs(final_li - li_target):.6f}")
 
     # ---- 6. li-matched inductive profile (Ip-correction secant removed) --
     # The jphi-linterp Ip drift is corrected natively by the OFT solver
@@ -5459,12 +5484,50 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     j_ind_li = ind_1 * j_inductive_fit  # li-matched inductive profile
 
     # -- Final stats (after li match) -------------------------------------
-    _eq_stats_final = mygs.get_stats(li_normalization='std', lcfs_pad=psi_pad)
+    _eq_stats_final = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
     final_li = _eq_stats_final['l_i']
     Ip_tokamaker = _eq_stats_final['Ip']
-    print(f"[final] li(1)={final_li:.6f}  Ip={Ip_tokamaker:.1f}  "
+    print(f"[final] li(3)={final_li:.6f}  Ip={Ip_tokamaker:.1f}  "
           f"Ip_err={100 * (Ip_tokamaker - Ip_desired) / Ip_desired:+.4f}%  "
           f"li_err={abs(final_li - li_target):.6f}")
+
+    # ---- Cross-estimator drift report (issue #20 de-circularization) -----
+    #
+    # `li_err` above compares the two numbers the secant loop drives
+    # together, so it reads ~0 BY CONSTRUCTION and can never expose an
+    # estimator mismatch.  Report the *other* estimator as well, computed
+    # both ways on the same converged equilibrium:
+    #
+    #   li3: g-file `li(2)` key    vs  TokaMaker 'iter'   <- the matched pair
+    #   li1: g-file `li(1)_EFIT`   vs  TokaMaker 'std'    <- the free pair
+    #
+    # The li1 pair is NOT driven by anything, so its residual is a live
+    # measurement of the geometry/convention drift between the two codes.
+    # Historically ~+3.3% on DIII-D geqdsks; a change in that number is the
+    # signal that a convention moved on one side or the other.
+    _li1_final = float(mygs.get_stats(
+        li_normalization='std', lcfs_pad=psi_pad)['l_i'])
+    _li1_gfile = float(eqdsk.li.get("li(1)_EFIT", float('nan')))
+    _li3_gfile = float(li_target)
+    def _dpct(a, b):
+        return 100.0 * (a - b) / b if (np.isfinite(b) and b != 0) else float('nan')
+    li_cross = {
+        # matched (targeted) pair -- small by construction
+        "li3_tokamaker_iter": float(final_li),
+        "li3_gfile_li2key": _li3_gfile,
+        "li3_drift_pct": _dpct(final_li, _li3_gfile),
+        # free (untargeted) pair -- the honest estimator-drift monitor
+        "li1_tokamaker_std": _li1_final,
+        "li1_gfile_efit": _li1_gfile,
+        "li1_drift_pct": _dpct(_li1_final, _li1_gfile),
+    }
+    print(f"[li cross-estimator] MATCHED li(3): TokaMaker'iter'="
+          f"{final_li:.6f} vs g-file li(2)key={_li3_gfile:.6f} "
+          f"({li_cross['li3_drift_pct']:+.3f}%)")
+    print(f"[li cross-estimator] FREE    li(1): TokaMaker'std' ="
+          f"{_li1_final:.6f} vs g-file li(1)EFIT={_li1_gfile:.6f} "
+          f"({li_cross['li1_drift_pct']:+.3f}%)  "
+          f"<- untargeted; drift here is real, not circular")
 
     # ---- 7. Mode-dependent corrective iteration ----
     #
@@ -5553,6 +5616,10 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         'jphi_edge_rms': float(np.sqrt(np.mean(
             (j_phi_final[_edge_mask] - eqdsk_jtor[_edge_mask])**2))),
         'li_error': float(abs(final_li - li_target)),
+        # l_i estimator scale that `li_error` / `final_li` are on, plus the
+        # cross-estimator pair captured at the same state (issue #20).
+        'li_scale': 'iter(li3)',
+        **{f'li_cross_{_k}': _v for _k, _v in li_cross.items()},
         'Ip_error_pct': float(100 * abs(Ip_tokamaker - Ip_desired) / Ip_desired),
         'boundary_rms_mm': _bnd_rms_mm,
         'boundary_max_dev_mm': _bnd_max_mm,

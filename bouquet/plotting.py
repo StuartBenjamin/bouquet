@@ -2821,7 +2821,9 @@ def plot_traces(h5path_or_header, scan_key="all", li_band=None, rms_max_mm=None)
 
     One row of three panels (per scan value):
 
-      1. **l_i(1)** per draw with the recon baseline (black star at draw 0),
+      1. **l_i** per draw -- on the estimator the baseline's ``l_i_scale``
+         attr names (``l_i(3)`` post-issue-#20, ``l_i(1)`` for legacy
+         archives) -- with the recon baseline (black star at draw 0),
          the l_i target (dashed) and, when ``li_band`` is given (fraction,
          e.g. ``0.05``), the acceptance band.
       2. **LCFS deviation** from the recon baseline: RMS (filled) and max
@@ -2855,6 +2857,15 @@ def plot_traces(h5path_or_header, scan_key="all", li_band=None, rms_max_mm=None)
     for sv in scan_keys:
         bl = load_baseline_profiles(h5path, scan_key=sv)
         li_target = float(bl.get("l_i_target", np.nan))
+        # The per-draw l_i must be read on the SAME estimator the target lives
+        # on, or the band is meaningless (issue #20).  Archives written after
+        # the estimator-consistency fix carry `l_i_scale`; older ones are on
+        # the legacy std/li(1) scale.
+        _li_scale = str(bl.get("l_i_scale", "std(li1)"))
+        if isinstance(_li_scale, bytes):
+            _li_scale = _li_scale.decode()
+        _li_attr = "l_i(3)" if _li_scale.startswith("iter") else "l_i(1)"
+        _li_label = r'$l_i(3)$' if _li_attr == "l_i(3)" else r'$l_i(1)$'
 
         idxs, li1, sel = [], [], []
         rms_mm, max_mm = [], []
@@ -2912,7 +2923,7 @@ def plot_traces(h5path_or_header, scan_key="all", li_band=None, rms_max_mm=None)
                             if k not in ("_baseline", "scan") and k.isdigit()):
                 grp = parent[str(c)]
                 idxs.append(c)
-                li1.append(float(grp.attrs.get("l_i(1)", np.nan)))
+                li1.append(float(grp.attrs.get(_li_attr, np.nan)))
                 sel.append(bool(grp.attrs.get("selected", True)))
                 r, m = _boundary_devs(bl_boundary, grp)
                 rms_mm.append(r); max_mm.append(m)
@@ -2979,7 +2990,7 @@ def plot_traces(h5path_or_header, scan_key="all", li_band=None, rms_max_mm=None)
                       label='selected (filled)'),
                Line2D([], [], mfc='none', mec=_GOLD, color=_GOLD, marker='o',
                       ls='none', ms=5, label='excluded (open)')]
-        ax.set_xlabel('draw'); ax.set_ylabel(r'$l_i(1)$')
+        ax.set_xlabel('draw'); ax.set_ylabel(_li_label)
         ax.set_title(r'$l_i$ per draw' + sv_tag, fontsize=10)
         _framed_legend(ax, handles=h1, fontsize=7, loc='best')
         ax.grid(ls=':')

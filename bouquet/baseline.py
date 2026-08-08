@@ -54,6 +54,13 @@ class Baseline:
     provenance: str               # "reconstruction" | "imas"
 
     # --- optional / defaulted fields -----------------------------------
+    # Which l_i estimator `l_i_target` (and every downstream l_i comparison --
+    # the per-draw acceptance band, the archive `l_i_target` attr, plot_traces)
+    # is expressed on.  "iter(li3)" == TokaMaker li_normalization='iter'
+    # == 2*int(Bp^2 dV)/((mu0 Ip)^2 R_axis).  Carried explicitly so an archive
+    # is self-describing and a future scale change cannot pass silently
+    # (issue #20).  Single source of truth: bouquet.utils.LI_SCALE.
+    l_i_scale: str = "iter(li3)"    # == utils.LI_SCALE
     # Fixed additive components -- summed into EVERY draw, never GPR-perturbed.
     # None is treated as zeros. See FixedComponentsConfig for the contract:
     #   j_phi_total = j_inductive + j_BS + j_NBI + j_RF
@@ -511,8 +518,14 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         # get_stats traces the q-profile and can emit gs_get_qprof warnings, so
         # keep these inside the capture too.
         Ip_target = abs(float(eqdsk.Ip))
+        # l_i scale: 'iter' == li(3) == 2*int(Bp^2 dV)/((mu0 Ip)^2 R_axis).
+        # This is the estimator reconstruct_equilibrium targets (the g-file's
+        # `li(2)` key, which is numerically the same functional) and the ONLY
+        # one the two codes agree on (0.17%).  The whole downstream chain --
+        # per-draw acceptance band, archive attrs, plots -- is on this scale;
+        # see issue #20.  DO NOT mix with 'std'/li(1) numbers.
         l_i_target = mygs.get_stats(
-            lcfs_pad=source.psi_pad, li_normalization="std")["l_i"]
+            lcfs_pad=source.psi_pad, li_normalization="iter")["l_i"]
         recon_metrics = _reconstruction_metrics(
             mygs, eqdsk, result, source, l_i_target)
 
@@ -582,7 +595,11 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved) -> dict:
         return float(100.0 * (float(tok) - ref) / abs(ref))
 
     q = dict(result.get("quality") or {})
-    stats = mygs.get_stats(lcfs_pad=source.psi_pad, li_normalization="std")
+    # Global scalars other than l_i are normalization-independent; take them
+    # from the 'iter' call so there is exactly one get_stats scale in play.
+    stats = mygs.get_stats(lcfs_pad=source.psi_pad, li_normalization="iter")
+    # The FREE (untargeted) li(1) pair, for the cross-estimator report below.
+    stats_std = mygs.get_stats(lcfs_pad=source.psi_pad, li_normalization="std")
 
     # --- TokaMaker (reconstructed) values ---
     Ip_tok = float(result.get("Ip_tokamaker", float("nan")))
@@ -606,7 +623,11 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved) -> dict:
     efit = {}
     try:
         efit["Ip"] = abs(float(eqdsk.Ip))
-        efit["li"] = float(eqdsk.li.get("li(1)", float("nan")))
+        # `li(2)` is the g-file-side li(3)/'iter' functional -- the estimator
+        # the reconstruction actually targets (issue #20).  `li(1)` is kept
+        # alongside it for the free cross-estimator pair.
+        efit["li"] = float(eqdsk.li.get("li(2)", float("nan")))
+        efit["li1"] = float(eqdsk.li.get("li(1)_EFIT", float("nan")))
         qpsi = np.asarray(eqdsk.qpsi, dtype=float)
         psiN = np.asarray(eqdsk.psi_N, dtype=float)
         efit["q0"] = float(qpsi[0])
@@ -645,6 +666,8 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved) -> dict:
     # boundary RMS < 5 mm, l_i within 5%
     ip_err = pct(Ip_tok, g("Ip"))
     li_err = pct(li_tok, g("li"))
+    li1_tok = float(stats_std.get("l_i", float("nan")))
+    li1_cross_err = pct(li1_tok, g("li1"))
     ok = bool(
         converged
         and np.isfinite(ip_err) and abs(ip_err) < 0.5
@@ -656,7 +679,21 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved) -> dict:
         "verdict": "PASS" if ok else "CHECK",
         # fidelity: TokaMaker value, EFIT reference, % error
         "Ip_MA": Ip_tok / 1e6, "Ip_efit_MA": g("Ip") / 1e6, "Ip_err_pct": ip_err,
+        # --- l_i, on the estimator the loop targets ('iter' == li(3)) -------
+        # `li_err_pct` is the MATCHED pair: the secant loop drives these two
+        # numbers together, so it is ~0 by construction and cannot detect an
+        # estimator mismatch.  That is precisely how issue #20 stayed hidden.
         "li": li_tok, "li_efit": g("li"), "li_err_pct": li_err,
+        "li_scale": "iter(li3)",
+        # --- cross-estimator drift monitor (de-circularization, issue #20) --
+        # The FREE pair: TokaMaker's 'std'/li(1) vs the g-file's li(1)_EFIT.
+        # Nothing drives these together, so a nonzero residual is a genuine
+        # measurement of convention/geometry drift between the two codes
+        # (historically ~+3.3% on DIII-D geqdsks, from TokaMaker's projected
+        # separatrix perimeter).  If this ever collapses to ~0 or changes
+        # sharply, an estimator moved -- investigate before trusting the run.
+        "li1_cross": li1_tok, "li1_cross_efit": g("li1"),
+        "li1_cross_err_pct": li1_cross_err,
         "q0": q0_tok, "q0_efit": g("q0"), "q0_err_pct": pct(q0_tok, g("q0")),
         "q95": q95_tok, "q95_efit": g("q95"), "q95_err_pct": pct(q95_tok, g("q95")),
         "beta_n": betan_tok, "beta_n_efit": g("beta_n"),
