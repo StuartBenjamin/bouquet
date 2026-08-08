@@ -155,7 +155,7 @@ their scalars always apply.
 | Knob | Default | Meaning |
 |---|---|---|
 | `n_equils` | `20` | Draws to attempt |
-| `seed` | `None` | The run's one RNG seed. Consumed once into a single `numpy.random.Generator` threaded into every draw (GPR kinetic/aux/j_φ, the per-draw `scale_jBS`, the per-draw l_i target), so the same seed + inputs + solver gives a **bitwise-identical** archive. `None` = OS entropy |
+| `seed` | `None` | The run's one RNG seed. Consumed once into a single `numpy.random.Generator` threaded into every draw (GPR kinetic/aux/j_φ, the per-draw `scale_jBS`, the per-draw l_i target), so the same seed + inputs + solver gives a **bitwise-identical** archive on one machine (across machines the draws agree to ~1e-9, not bitwise -- LAPACK/BLAS). `None` = OS entropy |
 | `scan_key` | `0` | Label for this bouquet within the archive (`scan/<key>/`) — a time in ms, a beta value, … |
 | `l_i_tolerance` | `0.05` | l_i acceptance band, as a **fraction** of target |
 | `constrain_sawteeth` | `False` | Gate draws on q0 |

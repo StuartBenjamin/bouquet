@@ -61,10 +61,13 @@ IDA/IMAS readers, COCOS conversion, archive reading, and all plotting — works
 without it. Python dependencies (`numpy`, `scipy`, `matplotlib`, `h5py`) are
 handled by pip.
 
-Two helpers keep setups portable: `bq.add_oft_to_path()` resolves the OFT
-install (`OFT_PYTHONPATH` env var → known locations → walk-up) and
+Three helpers keep setups portable: `bq.add_oft_to_path()` resolves the OFT
+install (`OFT_PYTHONPATH` env var → known locations → walk-up),
 `bq.find_mesh()` locates the TokaMaker mesh (`BOUQUET_MESH` → walk-up →
-bundled example mesh). Both raise with the full list of locations tried.
+bundled example mesh), and `bq.find_ida()` locates an IDA `.cdf` (`BOUQUET_IDA`,
+a file or a directory searched recursively → walk-up) — kinetic data is
+typically too large to keep in an analysis repo, so a notebook names the file
+without naming the machine. All raise with the full list of locations tried.
 
 ## Quickstart
 
@@ -176,7 +179,10 @@ control goes through `bq.BouquetConfig`, which serializes to JSON
 `numpy.random.Generator` that is threaded into every draw — the GPR kinetic,
 Z_eff/aux and j_φ channels, the per-draw bootstrap scale and the per-draw l_i
 target. Same seed + same inputs + same solver (at `nthreads=1`) gives a
-**bitwise-identical** archive. `seed=None` draws from OS entropy.
+**bitwise-identical** archive *on one machine*; across machines the draws agree
+to ~1e-9 rather than bitwise -- the GP kernel is factorised by a fixed-order
+Cholesky, which leaves a LAPACK build no discrete choices, so only rounding
+differs between builds. `seed=None` draws from OS entropy.
 
 **Kinetic-sigma precedence.** Per channel, `uncertainty.sigma_profiles[chan]`
 beats an IDA `.cdf` beats `<chan>_scalar_sigma` — and a `.cdf` passed as

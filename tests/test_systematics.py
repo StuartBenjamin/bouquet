@@ -140,61 +140,52 @@ def _bnd_rms_mm(ref, pts):
 def replay(tmp_path_factory):
     """Set up mygs, establish the jphi-linterp baseline (one forward solve,
     no reconstruct), then replay the golden draws in each mode."""
-    from scipy.interpolate import interp1d
-    from OpenFUSIONToolkit import OFT_env
-    from OpenFUSIONToolkit.TokaMaker import TokaMaker
-    from OpenFUSIONToolkit.TokaMaker.meshing import load_gs_mesh
-    from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
-    from bouquet import read_geqdsk, generate_bouquet, initialize_equilibrium_database
+    from bouquet import generate_bouquet, initialize_equilibrium_database
+    import bouquet as bq
 
     base, draws = _load_golden()
     psi_N = base["psi_N"]
     psi_pf = base["psi_N_kin"]
-    eqdsk = read_geqdsk(_GEQ, cocos=1)
-    F0 = abs(eqdsk.R_center * eqdsk.B_center)
-    pad = 1e-4
+    # MUST equal the generator's ReconstructionSource.psi_pad (class default
+    # 1e-3): every LCFS reference is a trace of the psi_N = 1 - pad surface,
+    # so a pad mismatch shifts the replay onto a DIFFERENT flux surface and
+    # shows up as a constant ~2 mm boundary "error" (the legacy notebook's
+    # 1e-4 measured 1.92 mm against the class-generated golden).
+    pad = 1e-3
     Zeff = np.ones_like(psi_N)
 
-    myOFT = OFT_env(nthreads=2)
-    mygs = TokaMaker(myOFT)
-    mp, ml, mr, cd, cnd = load_gs_mesh(_MESH)
-    mygs.setup_mesh(mp, ml, mr)
-    mygs.setup_regions(cond_dict=cnd, coil_dict=cd)
-    mygs.setup(order=3, F0=F0)
-    mygs.settings.maxits = 800
-    mygs.settings.pm = False
-    mygs.update_settings()
-    mygs.set_coil_vsc({'F9A': 1.0, 'F9B': -1.0})
-    reg = [mygs.coil_reg_term({n: 1.0}, target=0.0, weight=1.0)
-           for n in mygs.coil_sets]
-    reg.append(mygs.coil_reg_term({'#VSC': 1.0}, target=0.0, weight=1e-2))
-    mygs.set_coil_reg(reg_terms=reg)
-    iso = np.column_stack([eqdsk.boundary_R, eqdsk.boundary_Z])
-    isow = np.ones(len(iso)) * 200.0
-    mygs.set_isoflux(iso, weights=isow)
+    # Stand up the solver THROUGH THE CLASS API, because that is what generated
+    # the golden archive.  The environment a replay must reproduce is not a set
+    # of constants that can be hand-copied: run.generate() samples under the
+    # RECONSTRUCTION's isoflux points and weights (run.py restores them before
+    # sampling), from the reconstruction's converged warmstart state.  The
+    # previous hand-rolled setup (eqdsk boundary points, weight 200) replayed a
+    # different constrained optimum and sat a deterministic ~1.9 mm from the
+    # archived baseline LCFS -- masked for years by this fixture's nthreads=2
+    # jitter.  Reconstructing here (~2 min, deterministic at the class default
+    # nthreads=1) puts the replay in the generator's exact environment.
+    _work = str(tmp_path_factory.mktemp("replay_recon"))
+    run = bq.Bouquet.from_geqdsk(
+        _GEQ, profiles=_PF, mesh=_MESH, n_draws=1,
+        header=os.path.join(_work, "replay_recon"))
+    run.reconstruct()
+    mygs = run.mygs
+    bl_run = run.baseline
+    iso, isow = None, None
+    if getattr(bl_run, "recon", None) is not None and \
+            "isoflux_pts" in bl_run.recon:
+        iso, isow = bl_run.recon["isoflux_pts"], bl_run.recon["weights"]
+        mygs.set_isoflux(iso, weights=isow)
 
-    # --- establish the jphi-linterp baseline with ONE forward solve ---------
-    # (this is the same baseline generate_bouquet(jphi_baseline=True) re-solves
-    #  per call; doing it here first gives mygs a converged state to warmstart.)
-    psi_range = lambda: mygs.psi_bounds[1] - mygs.psi_bounds[0]
-    mygs.init_psi(eqdsk.R_mag, eqdsk.Z_mag, 0.6, 1.7, 0.4)
-    pp = {"type": "linterp",
-          "y": np.gradient(base["pressure"]) / (np.gradient(psi_N) * psi_range()),
-          "x": psi_N}
-    pp["y"][-1] = 0.0
-    ffp = {"type": "jphi-linterp", "y": base["jphi"].copy(), "x": psi_N}
-    mygs.set_targets(Ip=base["Ip_target"], pax=float(base["pressure"][0]))
-    mygs.set_profiles(pp_prof=pp, ffp_prof=ffp)
-    mygs.solve()
     base_snapshot = mygs.copy_eq()
 
-    # The golden `_baseline` group predates issue #20 and stores `l_i_target`
-    # on the legacy 'std'/li(1) scale.  The draw path now measures 'iter';
-    # measure the SAME jphi-linterp baseline equilibrium that was just solved
-    # on that scale so modes 1-3 are handed a target on the scale the code
-    # compares against.  (Modes 1/2 run pin_jphi=True, which short-circuits
-    # the l_i band entirely, so this is a labelling fix for them; mode 3 is
-    # the one that actually gates on it.)
+    # Hand modes 1-3 an l_i target on the scale the code compares against
+    # (issue #20: the draw path targets and measures 'iter'/li(3)).  Measured
+    # here from the class-API reconstruction state the replay warmstarts from;
+    # for a golden generated after #20 this re-measures the same number the
+    # archive already stores, and for a pre-#20 archive it converts the
+    # legacy 'std' target.  (Modes 1/2 run pin_jphi=True, which
+    # short-circuits the l_i band entirely; mode 3 is the one that gates.)
     base["l_i_target_std_golden"] = base["l_i_target"]
     base["l_i_target"] = float(
         mygs.get_stats(lcfs_pad=pad, li_normalization="iter")["l_i"])
@@ -209,7 +200,8 @@ def replay(tmp_path_factory):
     def _run(header, ne, te, ni, ti, input_jphi, input_jind, l_i_target,
              pin_jphi):
         mygs.replace_eq(base_snapshot)            # restore baseline each time
-        mygs.set_isoflux(iso, weights=isow)
+        if iso is not None:                       # re-point at the recon isoflux
+            mygs.set_isoflux(iso, weights=isow)
         if os.path.exists(header + ".h5"):
             os.remove(header + ".h5")
         initialize_equilibrium_database(header)

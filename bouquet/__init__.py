@@ -1,4 +1,4 @@
-__version__ = "1.2.1"
+__version__ = "1.3.0"
 
 from . import uncertainties
 from . import sampling
@@ -123,7 +123,7 @@ from .physics import (
     radial_field_from_impurity_force_balance,
     radial_field_from_cer,   # deprecated alias
 )
-from .paths import add_oft_to_path, find_mesh
+from .paths import add_oft_to_path, find_mesh, find_ida
 from .io.ida import read_ida, read_ida_cer, IDAProfiles, IDACERProfiles
 from .io.imas import (read_imas_baseline, read_imas_geometry,
                       write_imas_draw, export_imas_drawset)
@@ -179,7 +179,7 @@ __all__ = [
     "Ip_fsa_integral", "Ip_fsa_weights", "fsa_current_geometry",
     "eq_jphi_profile",
     # ---- environment / path resolution ----
-    "add_oft_to_path", "find_mesh",
+    "add_oft_to_path", "find_mesh", "find_ida",
     # ---- profile sampling / uncertainty ----
     "GPRProfilePerturber", "generate_perturbed_GPR", "make_rng",
     "sigmoid_length_scale",

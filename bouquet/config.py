@@ -307,7 +307,13 @@ class GenerationConfig:
     # numpy.random.Generator (sampling.make_rng) that is threaded explicitly
     # into every draw site -- the GPR kinetic/aux/j_phi draws, the per-draw
     # scale_jBS sample and the per-draw l_i target sample -- so two runs with
-    # the same seed, inputs and solver produce bitwise-identical archives.
+    # the same seed, inputs and solver produce bitwise-identical archives
+    # ON ONE MACHINE. Across machines the draws agree to ~1e-9, not bitwise:
+    # the GP kernel is factorised by a fixed-order Cholesky, which leaves a
+    # LAPACK build no discrete choices (see GPRProfilePerturber
+    # .generate_profiles), so only rounding differs between builds.  The eigh
+    # factorisation this replaced left basis freedom to the build; the same
+    # seed differed by 1.3% between the macOS and Linux CI builds.
     # None (default) draws from fresh OS entropy: deliberately not regenerable.
     seed: Optional[int] = None
     # Label for this bouquet within the HDF5 file: draws are stored under
