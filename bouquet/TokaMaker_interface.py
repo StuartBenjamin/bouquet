@@ -5103,7 +5103,8 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                             isoflux_pts, weights, psi_pad,
                             guess_jinductive,n_k,psi_bridge,rescale_j_BS,
                             shelf_psi_N,initialize_psi=True,
-                            isolate_edge_jBS=False):
+                            isolate_edge_jBS=False,
+                            p_fast=None, Z_imp=None):
     r"""Reconstruct a single Grad-Shafranov equilibrium from a geqdsk
     reference and kinetic profiles, matching the EFIT :math:`l_i(1)`.
 
@@ -5166,6 +5167,14 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         If ``True`` (default), call ``mygs.init_psi`` using LCFS
         geometry estimated from the geqdsk boundary.  Set to ``False``
         to skip initialisation (e.g. when reusing a prior solution).
+    p_fast : ndarray, optional
+        Fixed fast-ion (beam) pressure [Pa] on ``eqdsk.psi_N`` -- i.e.
+        already regridded onto the EQUILIBRIUM grid by the caller, the
+        same array the draws solve with.  ``None`` (default) means zero,
+        which reproduces the pre-fix thermal-only behaviour bitwise.
+    Z_imp : float, optional
+        Single effective impurity charge for the one-Zeff impurity
+        pressure term.  ``None``/``0`` (default) disables it.
 
     Returns
     -------
@@ -5277,7 +5286,37 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
           f"at index {_d2_idx} (psi_N={eqdsk.psi_N[_d2_idx]:.5f})")
 
     # ---- 4. Pressure and GS profiles ----
+    # The GS pressure here MUST match what every consumer of this
+    # reconstruction subsequently solves, or l_i_target is measured on a
+    # different (lower-pressure) equilibrium than the draws it targets:
+    # less pressure -> smaller Shafranov shift -> R_axis inboard ->
+    # l_i(3) ~ 1/R_axis reads HIGH.  l_i_target is load-bearing (acceptance
+    # band centre and the Newton proxy target), so that bias propagates.
+    #
+    # Term order and semantics below mirror, exactly:
+    #   perturb_kinetic_equilibrium  (per-draw)   -- thermal, +p_fast, +impurity
+    #   the state anchor `pressure_solve`         -- pressure + imp + fast + diff
+    # Keep the three sites in step; if you change one, change all of them.
     pres_tmp = 1.6022e-19 * (ne * te + ni * ti)
+
+    # Fixed fast-ion pressure -- constant across draws, never perturbed.
+    # Supplied already on the equilibrium grid (eqdsk.psi_N) by the caller,
+    # which applies the same kin->eq PCHIP the draws use.
+    if p_fast is not None:
+        pres_tmp = pres_tmp + np.asarray(p_fast, dtype=float)
+
+    # Impurity (carbon) thermal pressure: one-Zeff single-impurity model on the
+    # SAME (ne, ni, Z_imp) set that derived the main ion.  Single-ion
+    # e*(ne*Te + ni*Ti) omits this.
+    if Z_imp:
+        from .physics import impurity_pressure
+        pres_tmp = pres_tmp + impurity_pressure(ne, ni, ti, Z_imp)
+
+    # NOTE: p_diff is deliberately NOT plumbed here.  It is defined as
+    # (equilibrium.pressure - reconstructed baseline pressure), i.e. it is
+    # computed FROM this reconstruction's output; feeding it back into the
+    # reconstruction's input would be circular.  It is applied downstream, to
+    # the baseline anchor and to every draw, where that definition holds.
     psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
     pprime_tmp = pchip_derivative(eqdsk.psi_N, pres_tmp) / psi_range
     pprime_tmp[-1] = 0.0

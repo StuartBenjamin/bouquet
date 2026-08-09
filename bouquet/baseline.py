@@ -499,6 +499,34 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
 
     guess_jinductive = create_power_flux_fun(len(psi_N), 1.5, 1.5)["y"]
 
+    # Fixed (non-perturbed) pressure components must be resolved BEFORE the
+    # reconstruction, not after it: the reconstruction's GS pressure has to be
+    # the same pressure every draw solves, otherwise l_i_target is measured on
+    # a lower-pressure equilibrium than the draws it targets (see the pressure
+    # block in reconstruct_equilibrium).
+    #
+    # Grid: p_fast is resolved onto the KINETIC grid first and then mapped to
+    # the equilibrium grid with `to_eq` -- deliberately the same two-step path
+    # the draws take (baseline resolves onto psi_N_kin, then
+    # perturb_kinetic_equilibrium applies `_kin_to_eq`, which is the identical
+    # pchip_interp).  Resolving fc.psi_N -> psi_N in one hop would be a
+    # slightly different array and would reintroduce the very inconsistency
+    # this is fixing.  `p_fast_kin` is also what the returned Baseline.p_fast
+    # field carries (kinetic grid), which downstream depends on -- unchanged.
+    #
+    # When fc.p_fast is unset, pass None rather than the zeros _resolve_fixed
+    # returns, so the default-off path does not even enter the new branch and
+    # is provably a no-op (not merely "adds 0.0").
+    fc = config.fixed_components
+    p_fast_kin = _resolve_fixed(fc.p_fast, fc.psi_N, psi_N_kin)
+    p_fast_eq = to_eq(p_fast_kin) if fc.p_fast is not None else None
+    # Z_imp is plumbed for symmetry with the draw path, but is INERT here today:
+    # FixedComponentsConfig (config.py) carries no Z_imp field at all -- Z_imp is
+    # an *output* field of the Baseline dataclass, populated only on the IMAS
+    # path. getattr keeps this a no-op now and makes it activate automatically
+    # if the config ever gains the field, rather than silently diverging again.
+    Z_imp_recon = getattr(fc, "Z_imp", None)
+
     # Capture the verbose solver chatter (DLSODE / gs_get_qprof / li-match) unless
     # the user asked for it; the curated summary is printed by Bouquet.reconstruct.
     from .utils import capture_native_output
@@ -514,6 +542,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             rescale_j_BS=source.rescale_j_BS,
             shelf_psi_N=source.shelf_psi_N,
             initialize_psi=True,
+            p_fast=p_fast_eq,
+            Z_imp=Z_imp_recon,
         )
         # get_stats traces the q-profile and can emit gs_get_qprof warnings, so
         # keep these inside the capture too.
@@ -532,7 +562,6 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     j_phi = np.asarray(result["j_phi_fit"], dtype=float)
     j_BS = np.asarray(result["j_BS_used"], dtype=float)
 
-    fc = config.fixed_components
     j_NBI = _resolve_fixed(fc.j_NBI, fc.psi_N, psi_N)
     j_RF = _resolve_fixed(fc.j_RF, fc.psi_N, psi_N)
     j_inductive = j_phi - j_BS - j_NBI - j_RF   # == j_inductive_fit when NBI=RF=0
@@ -546,7 +575,9 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     # split still sums exactly to j_phi.
     j_inductive, j_BS = floor_inductive_split(j_inductive, j_BS, psi_N)
 
-    p_fast = _resolve_fixed(fc.p_fast, fc.psi_N, psi_N_kin)
+    # Resolved above (before the reconstruction, which now consumes it).
+    # Unchanged contract: the returned field is on the KINETIC grid.
+    p_fast = p_fast_kin
 
     return Baseline(
         psi_N=psi_N,
