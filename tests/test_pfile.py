@@ -8,6 +8,10 @@ import pytest
 
 from bouquet.io.pfile import PFile, _read_pfile, _write_pfile, _NT_TO_KPA, read_pfile
 
+_EXAMPLE_PFILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "examples", "D3D-like",
+    "D3Dlike_Hmode_baseline.peqdsk")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -323,9 +327,18 @@ class TestEdgeCases:
         with open(path, "w") as f:
             f.writelines(lines)
 
+        # CONTRACT CHANGE (per-quantity grid fix): reading now unifies the
+        # grid by default, because consumers pair one quantity's values with
+        # another's grid and silently misplace the profile.  The parser still
+        # reads the native grids -- opt out to get them.
         pf = PFile(path)
         assert len(pf.ne) == 32
-        assert len(pf.te) == 64
+        assert len(pf.te) == 32            # resampled onto ne's grid
+        assert len(pf.psinorm_for("te", native=True)) == 64   # native kept
+
+        raw = PFile(path, remap=False)
+        assert len(raw.ne) == 32
+        assert len(raw.te) == 64           # untouched, as read
 
     def test_no_ion_species(self, tmp_path):
         """File without N Z A block."""
@@ -620,3 +633,134 @@ class TestPhysics:
         np.testing.assert_allclose(pf2.ne, pf.ne, atol=1e-5)
         np.testing.assert_allclose(pf2.ptot, pf.ptot, atol=1e-3)
         np.testing.assert_allclose(pf2.omgeb, pf.omgeb, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+#  per-quantity psinorm grids (issue: automatic p-file remapping)
+# ---------------------------------------------------------------------------
+class TestPerQuantityGrids:
+    r"""An Osborne p-file stores a SEPARATE radial grid per quantity.
+
+    On real DIII-D files ``te``'s grid sits up to ~0.2 in psi_N from ``ne``'s,
+    so pairing one quantity's values with another's grid misplaces the profile
+    (~13 % of peak T_e, worst at the pedestal) and makes index-wise arithmetic
+    across quantities -- ``ne - ni - nb`` in quasi-neutrality -- ill-posed.
+    Both shipped example p-files happen to carry ONE grid for every quantity,
+    so a synthetic fixture cannot exercise this; the fixture below is built to
+    diverge on purpose.
+    """
+
+    @staticmethod
+    def _multigrid_pfile(tmp_path):
+        """A p-file whose te grid is deliberately offset from ne's."""
+        n = 64
+        g_ne = np.linspace(0.0, 1.0, n)
+        g_te = np.linspace(0.0, 1.0, n) ** 1.4          # same span, denser edge
+        ne = 5.0 * (1.0 - 0.8 * g_ne ** 2)
+        te = 3.0 * (1.0 - 0.9 * g_te ** 2)
+        ni = 4.0 * (1.0 - 0.8 * g_ne ** 2)
+        lines = []
+        for key, g, d, unit in (("ne", g_ne, ne, "10^20/m^3"),
+                                ("te", g_te, te, "KeV"),
+                                ("ni", g_ne, ni, "10^20/m^3")):
+            lines.append(f"{n} psinorm {key}({unit}) d{key}/dpsiN\n")
+            dv = np.gradient(d, g)
+            for i in range(n):
+                lines.append(f" {g[i]:f}   {d[i]:f}   {dv[i]:f}\n")
+        lines.append("1 N Z A of ION SPECIES\n")
+        lines.append(" 6.000000   6.000000  12.000000\n")
+        p = tmp_path / "p999999.01000"
+        p.write_text("".join(lines))
+        return p, g_ne, g_te
+
+    def test_native_grids_actually_differ_in_the_fixture(self, tmp_path):
+        """Guard the guard: a single-grid fixture would make everything below
+        pass for the wrong reason."""
+        path, g_ne, g_te = self._multigrid_pfile(tmp_path)
+        pf = read_pfile(path, remap=False)
+        assert not np.allclose(pf.psinorm_for("te"), pf.psinorm_for("ne"))
+        assert np.abs(np.asarray(pf.psinorm_for("te"))
+                      - np.asarray(pf.psinorm_for("ne"))).max() > 0.05
+
+    def test_remap_is_on_by_default_and_unifies_the_grid(self, tmp_path):
+        path, _, _ = self._multigrid_pfile(tmp_path)
+        with pytest.warns(UserWarning, match="psinorm grid per quantity"):
+            pf = read_pfile(path)
+        np.testing.assert_allclose(pf.psinorm_for("te"), pf.psinorm_for("ne"))
+
+    def test_remap_interpolates_rather_than_relabels(self, tmp_path):
+        """The values must be resampled through te's OWN grid, not simply
+        re-tagged with ne's -- relabelling is the defect being fixed."""
+        path, g_ne, g_te = self._multigrid_pfile(tmp_path)
+        raw = read_pfile(path, remap=False)
+        te_native = np.asarray(raw.te, dtype=float)
+        # grids as STORED -- the writer keeps 6 decimals, so the generator's
+        # full-precision arrays are not what was read back
+        g_ne_f = np.asarray(raw.psinorm_for("ne"), dtype=float)
+        g_te_f = np.asarray(raw.psinorm_for("te"), dtype=float)
+        with pytest.warns(UserWarning):
+            pf = read_pfile(path)
+        expected = np.interp(g_ne_f, g_te_f, te_native)
+        np.testing.assert_allclose(np.asarray(pf.te, dtype=float), expected,
+                                   rtol=1e-10)
+        assert not np.allclose(np.asarray(pf.te, dtype=float), te_native)
+
+    def test_single_grid_file_does_not_warn(self, tmp_path):
+        """No false alarm on files that already share one grid (both shipped
+        examples do)."""
+        import warnings as _w
+        with _w.catch_warnings(record=True) as rec:
+            _w.simplefilter("always")
+            read_pfile(_EXAMPLE_PFILE)
+        assert not [r for r in rec
+                    if "psinorm grid per quantity" in str(r.message)]
+
+    def test_native_grids_survive_the_remap(self, tmp_path):
+        path, g_ne, g_te = self._multigrid_pfile(tmp_path)
+        with pytest.warns(UserWarning):
+            pf = read_pfile(path)
+        np.testing.assert_allclose(pf.psinorm_for("te", native=True), g_te,
+                                   atol=1e-6)
+        assert not np.allclose(pf.psinorm_for("te", native=True),
+                               pf.psinorm_for("te"))
+
+    def test_unmodified_file_round_trips_on_native_grids(self, tmp_path):
+        """Reading and re-writing a provenance copy must not silently rewrite
+        the radial grids."""
+        path, _, g_te = self._multigrid_pfile(tmp_path)
+        with pytest.warns(UserWarning):
+            pf = read_pfile(path)
+        back = PFile.from_bytes(pf.to_bytes(), remap=False)
+        np.testing.assert_allclose(back.psinorm_for("te"), g_te, atol=1e-6)
+
+    def test_modified_file_writes_the_modified_state(self, tmp_path):
+        """A perturbed draw legitimately lives on the common grid."""
+        path, g_ne, _ = self._multigrid_pfile(tmp_path)
+        with pytest.warns(UserWarning):
+            pf = read_pfile(path)
+        pf.set_profile("te", pf.psinorm_for("te"),
+                       np.asarray(pf.te, dtype=float) * 1.5)
+        back = PFile.from_bytes(pf.to_bytes(), remap=False)
+        np.testing.assert_allclose(back.psinorm_for("te"), g_ne, atol=1e-6)
+
+    def test_quasineutrality_precondition_is_met_after_remap(self, tmp_path):
+        """`ne - ni - nb` is index-wise; on mixed grids it is not well posed
+        and can manufacture negative impurity density."""
+        path, _, _ = self._multigrid_pfile(tmp_path)
+        with pytest.warns(UserWarning):
+            pf = read_pfile(path)
+        np.testing.assert_allclose(pf.psinorm_for("ni"), pf.psinorm_for("ne"))
+        pf.compute_quasineutrality()
+        assert np.all(np.asarray(pf["nz1"]["data"], dtype=float) >= 0.0)
+
+    def test_detached_remap_copy_is_a_full_pfile(self, tmp_path):
+        """remap(overwrite=False) must return a usable object, not a shell."""
+        path, _, g_te = self._multigrid_pfile(tmp_path)
+        src = read_pfile(path, remap=False)
+        out = src.remap()
+        assert out is not src
+        np.testing.assert_allclose(out.psinorm_for("te", native=True), g_te,
+                                   atol=1e-6)
+        assert isinstance(out.to_bytes(), bytes)
+        np.testing.assert_allclose(src.psinorm_for("te"), g_te,
+                                   atol=1e-6)                     # untouched

@@ -93,6 +93,16 @@ _HEADER_RE = re.compile(
 # Low-level parser / writer
 # ---------------------------------------------------------------------------
 
+def _deepcopy_raw(raw):
+    """Copy the parsed-profile mapping, arrays included."""
+    out = OrderedDict()
+    for k, v in raw.items():
+        out[k] = {kk: (np.array(vv, copy=True)
+                       if isinstance(vv, np.ndarray) else vv)
+                  for kk, vv in v.items()}
+    return out
+
+
 def _read_pfile(filename):
     """Parse an Osborne p-file into an OrderedDict.
 
@@ -239,14 +249,50 @@ class PFile:
     True
     """
 
-    def __init__(self, filename, doRemap=True):
+    def __init__(self, filename, remap=True, remap_key="ne", doRemap=None):
         self._raw = _read_pfile(filename)
-        
-        if doRemap:
-            self.remap(overwrite=True)
+        # As-read profiles, each on ITS OWN psinorm grid.  Kept so a remap is
+        # never destructive: `psinorm_for(k, native=True)` still reports where a
+        # quantity was actually measured, and an unmodified file round-trips
+        # through save()/to_bytes() byte-for-byte on its original grids.
+        self._native = _deepcopy_raw(self._raw)
+        self._modified = set()
+        self._remapped_to = None
+        if doRemap is not None:                 # back-compat alias
+            remap = bool(doRemap)
+        # A p-file without the reference channel (partial/synthetic files) has
+        # no common grid to adopt -- leave it exactly as read rather than
+        # raising, so remap-by-default cannot break an otherwise valid file.
+        if remap and remap_key in self._raw:
+            self.remap(key=remap_key, overwrite=True, warn=True)
+
+    # -- grid bookkeeping --------------------------------------------------
+    def native_grid_spread(self, ref_key="ne"):
+        """Max |psinorm - psinorm(ref_key)| across profiles, as READ.
+
+        Nonzero means the p-file carries a genuinely different radial grid per
+        quantity -- the normal case for DIII-D Osborne files, where pairing one
+        quantity's values with another's grid misplaces the profile.
+        """
+        ref = self._native.get(ref_key)
+        if ref is None:
+            return {}
+        g0 = np.asarray(ref["psinorm"], dtype=float)
+        out = {}
+        for k, v in self._native.items():
+            if k == "N Z A" or k == ref_key:
+                continue
+            g = np.asarray(v["psinorm"], dtype=float)
+            if len(g) != len(g0):
+                out[k] = float("inf")
+            else:
+                d = float(np.abs(g - g0).max())
+                if d > 0.0:
+                    out[k] = d
+        return out
 
     @classmethod
-    def from_bytes(cls, raw_bytes):
+    def from_bytes(cls, raw_bytes, remap=True, remap_key="ne"):
         """Construct from in-memory bytes.
 
         Parameters
@@ -259,16 +305,38 @@ class PFile:
         ) as tmp:
             tmp.write(raw_bytes)
             tmp_path = tmp.name
-        return cls(tmp_path)
+        return cls(tmp_path, remap=remap, remap_key=remap_key)
 
     # --- Persistence ---
 
-    def save(self, filename):
-        """Write the profiles to *filename* in p-file format."""
-        _write_pfile(self._raw, filename)
+    def _write_source(self, native=None):
+        """Which profile set save()/to_bytes() should emit.
 
-    def to_bytes(self):
+        ``native=None`` (default) is the honest choice: a file that has only
+        been READ round-trips on its own native grids, while a file whose
+        profiles were modified (a perturbed draw, a computed rotation) emits
+        the modified state -- which necessarily lives on the common grid.
+        Pass ``True``/``False`` to force either.
+        """
+        if native is None:
+            native = not self._modified
+        if native and self._native is not None:
+            return self._native
+        return self._raw
+
+    def save(self, filename, native=None):
+        """Write the profiles to *filename* in p-file format.
+
+        See :meth:`_write_source` for what ``native`` selects.
+        """
+        _write_pfile(self._write_source(native), filename)
+
+    def to_bytes(self, native=None):
         """Serialize to in-memory bytes (round-trip with ``from_bytes``).
+
+        An unmodified file serialises on its NATIVE per-quantity grids, so
+        reading and re-writing does not silently rewrite the radial grids of a
+        provenance copy.  See :meth:`_write_source`.
 
         Returns
         -------
@@ -279,7 +347,7 @@ class PFile:
             mode="w", suffix=".pfile", delete=False
         ) as tmp:
             tmp_path = tmp.name
-        _write_pfile(self._raw, tmp_path)
+        _write_pfile(self._write_source(native), tmp_path)
         with open(tmp_path, "rb") as fh:
             data = fh.read()
         import os
@@ -308,13 +376,18 @@ class PFile:
 
     # --- Per-profile accessors ---
 
-    def psinorm_for(self, key):
+    def psinorm_for(self, key, native=False):
         """Return the psinorm grid for profile *key*.
+
+        With ``native=True``, the grid the quantity was MEASURED on, even after
+        a remap -- so provenance survives the interpolation.
 
         Returns ``None`` if *key* is not present or is the ``"N Z A"``
         block.
         """
-        entry = self._raw.get(key)
+        source = (self._native if native and self._native is not None
+                  else self._raw)
+        entry = source.get(key)
         if entry is None or key == "N Z A":
             return None
         return entry["psinorm"]
@@ -433,6 +506,11 @@ class PFile:
         """
         obj = object.__new__(cls)
         obj._raw = OrderedDict()
+        # A file built in memory has no on-disk original, so there is nothing
+        # to round-trip back to; everything written is "modified".
+        obj._native = None
+        obj._modified = set()
+        obj._remapped_to = None
         return obj
 
     def set_profile(self, key, psinorm, data, derivative=None, units=None):
@@ -454,6 +532,8 @@ class PFile:
         """
         psinorm = np.asarray(psinorm, dtype=float)
         data = np.asarray(data, dtype=float)
+        # any write makes this no longer a faithful copy of the file on disk
+        getattr(self, "_modified", set()).add(key)
         if derivative is None:
             derivative = np.gradient(data, psinorm)
         else:
@@ -768,32 +848,63 @@ class PFile:
 
     # --- Remap ---
 
-    def remap(self, psinorm=None, key="ne", overwrite=False):
-        """Return a new :class:`PFile` with all profiles on a common grid.
+    def remap(self, psinorm=None, key="ne", overwrite=False, warn=False):
+        """Put every profile on ONE common psinorm grid.
+
+        An Osborne p-file stores a separate radial grid per quantity -- on real
+        DIII-D files ``te``'s grid can sit ~0.2 in psi_N away from ``ne``'s --
+        so consumers that pair one quantity's values with another's grid
+        misplace the profile (measured: up to 13% of peak T_e, worst at the
+        pedestal) and index-wise arithmetic across quantities, such as the
+        quasi-neutrality ``ne - ni - nb``, is not even well posed.
 
         Parameters
         ----------
         psinorm : array-like, int, or None
-            Target grid.  If ``None``, use the grid from *key*.
-            If ``int``, use ``np.linspace(0, 1, psinorm)``.
+            Target grid.  ``None`` uses *key*'s grid; an ``int`` uses
+            ``np.linspace(0, 1, psinorm)``.
         key : str
-            Profile whose grid to use when *psinorm* is ``None``.
-        overwrite: bool
-            Switch to overwrite the raw profiles of the current PFile object.
+            Profile whose grid to adopt when *psinorm* is ``None``.  ``"ne"``
+            by default, because ``compute_quasineutrality`` / ``compute_zeff``
+            are written against the electron grid.  Note this resamples finer
+            grids DOWN: pass an explicit grid (or an int) to keep edge
+            resolution that only one channel carries.
+        overwrite : bool
+            Remap this object in place (and return it).  Otherwise a new
+            :class:`PFile` is returned and this one is untouched.
+        warn : bool
+            Emit a :class:`UserWarning` naming the channels whose native grid
+            actually differed, so an interpolation is never silent.
 
         Returns
         -------
         PFile
-            New instance with interpolated profiles on the common grid.
+            The remapped file (``self`` when *overwrite*).
         """
         if psinorm is None:
             if key not in self._raw:
                 raise KeyError(f"Profile {key!r} not found for grid reference")
-            target = self._raw[key]["psinorm"]
+            target = np.asarray(self._raw[key]["psinorm"], dtype=float)
         elif isinstance(psinorm, (int, np.integer)):
             target = np.linspace(0, 1, int(psinorm))
         else:
             target = np.asarray(psinorm, dtype=float)
+
+        if warn:
+            spread = self.native_grid_spread(key if psinorm is None else "ne")
+            if spread:
+                worst = sorted(spread.items(), key=lambda kv: -kv[1])[:4]
+                warnings.warn(
+                    "p-file carries a different psinorm grid per quantity; "
+                    "interpolating all profiles onto "
+                    + (f"{key!r}'s grid" if psinorm is None else "the supplied grid")
+                    + ". Largest native offsets: "
+                    + ", ".join(f"{k} {d:.3g}" for k, d in worst)
+                    + ". Native grids remain available via "
+                    "psinorm_for(key, native=True); pass remap=False to keep "
+                    "the profiles as read.",
+                    UserWarning, stacklevel=3,
+                )
 
         new_raw = OrderedDict()
         for k, val in self._raw.items():
@@ -822,14 +933,19 @@ class PFile:
                 "deriv_label": val.get("deriv_label", f"d{k}/dpsiN"),
             }
 
-        # Build a new PFile without re-parsing a file
-        obj = object.__new__(PFile)
-        obj._raw = new_raw
-        
-        # Overwrite the currently stored profiles with the ones on the common grid
         if overwrite:
             self._raw = new_raw
+            self._remapped_to = target.copy()
+            return self
 
+        # A detached copy: carry the SAME native profiles and edit state, so
+        # the returned object is a first-class PFile (round-trip, native grid
+        # reporting) rather than a bare shell.
+        obj = object.__new__(PFile)
+        obj._raw = new_raw
+        obj._native = _deepcopy_raw(self._native)
+        obj._modified = set(self._modified)
+        obj._remapped_to = target.copy()
         return obj
 
     def __repr__(self):
@@ -845,7 +961,7 @@ class PFile:
 # Convenience function
 # ---------------------------------------------------------------------------
 
-def read_pfile(filename):
+def read_pfile(filename, remap=True, remap_key="ne"):
     """Read an Osborne p-file and return a :class:`PFile` object.
 
     Parameters
@@ -857,4 +973,4 @@ def read_pfile(filename):
     -------
     PFile
     """
-    return PFile(filename)
+    return PFile(filename, remap=remap, remap_key=remap_key)
