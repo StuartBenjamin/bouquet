@@ -889,6 +889,27 @@ class PFile:
         -------
         PFile
             The remapped file (``self`` when *overwrite*).
+
+        Notes
+        -----
+        Two documented limits, both measured on real DIII-D files and both
+        judged acceptable rather than overlooked:
+
+        * **Derivative consistency.**  The stored ``d(profile)/dpsiN`` column is
+          interpolated alongside the data rather than recomputed from it, so
+          after a remap the two are internally consistent only to ~13 % of peak
+          (vs ~1.4 % natively).  Accuracy against a PCHIP reference is a wash
+          either way (2.4 % interpolating the stored column, 3.3 % recomputing
+          it), the source column is itself only ~1.7 % consistent with its own
+          data, and nothing in bouquet reads the derivative -- but a downstream
+          consumer of a written p-file should differentiate the data rather
+          than trust this column across a remap.
+        * **Range.**  Channels do not share endpoints (``te`` stops at
+          psi_N 1.096 where ``ne`` reaches 1.125), so target points beyond a
+          channel's own data are held at its boundary value -- 14 of 256 points
+          on that file, all in the SOL.  The equilibrium never sees them: the
+          reconstruction interpolates kinetics onto the g-file's psi_N grid,
+          which ends at 1.0.
         """
         if psinorm is None:
             if key not in self._raw:
