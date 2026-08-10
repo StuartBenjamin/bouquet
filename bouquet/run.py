@@ -956,6 +956,23 @@ class Bouquet:
         pp["y"][-1] = 0.0
         ffp = {"type": "jphi-linterp",
                "y": np.asarray(bl.j_phi, dtype=float).copy(), "x": psi_N}
+        # ---- psi re-initialisation before the state-anchor solve ------------
+        # The reconstruction leaves mygs on its own converged inverse-mode
+        # state.  When that state already sits (to ~1e-4 in the nonlinear
+        # residual) ON this forward jphi-linterp solve's fixed point, the
+        # under-relaxed Picard iteration has no gradient to descend and parks
+        # in a small limit cycle just ABOVE nl_tol=1e-6 instead of crossing it
+        # -- the solve then burns all 800 iterations and raises
+        # 'Exceeded "maxits"'.  Unlike the per-draw anchor
+        # (TokaMaker_interface.py) this call is not wrapped in try/except, so
+        # the failure propagates and kills the run.
+        # Re-initialising psi from the LCFS shape starts the iteration far
+        # enough from the fixed point that it converges normally (same
+        # convention as the IMAS forward-solve init at run.py:612).
+        if getattr(self, "_boundary_RZ", None) is not None:
+            _R0, _Z0, _a, _kappa, _delta = _shape_from_boundary(
+                self._boundary_RZ)
+            mygs.init_psi(_R0, _Z0, _a, _kappa, _delta)
         mygs.set_targets(Ip=float(bl.Ip_target), pax=float(pressure[0]))
         mygs.set_profiles(pp_prof=pp, ffp_prof=ffp)
         mygs.solve()
