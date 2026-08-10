@@ -764,3 +764,31 @@ class TestPerQuantityGrids:
         assert isinstance(out.to_bytes(), bytes)
         np.testing.assert_allclose(src.psinorm_for("te"), g_te,
                                    atol=1e-6)                     # untouched
+
+    def test_in_memory_pfile_has_no_native_grids_to_compare(self):
+        """PFile.new() has no on-disk original, so the grid-spread report (and
+        remap(warn=True), which uses it) must degrade gracefully rather than
+        raise on a missing native mapping."""
+        pf = PFile.new()
+        pf.set_profile("ne", np.linspace(0, 1, 8), np.ones(8))
+        assert pf.native_grid_spread() == {}
+        pf.remap(warn=True)                      # must not raise
+
+    def test_warning_uses_a_reference_channel_that_exists(self, tmp_path):
+        """With an explicit target grid on a file that has no 'ne', the warning
+        must still fire -- silence there would hide a real interpolation."""
+        n = 16
+        g1 = np.linspace(0, 1, n)
+        g2 = np.linspace(0, 1, n) ** 1.5
+        lines = []
+        for key, g in (("te", g1), ("ti", g2)):
+            lines.append(f"{n} psinorm {key}(KeV) d{key}/dpsiN\n")
+            for i in range(n):
+                lines.append(f" {g[i]:f}   {1.0:f}   {0.0:f}\n")
+        path = tmp_path / "p888888.01000"
+        path.write_text("".join(lines))
+
+        src = PFile(path, remap=False)           # no 'ne' -> load is a no-op
+        assert not np.allclose(src.psinorm_for("te"), src.psinorm_for("ti"))
+        with pytest.warns(UserWarning, match="psinorm grid per quantity"):
+            src.remap(psinorm=32, warn=True)

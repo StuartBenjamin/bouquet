@@ -235,9 +235,16 @@ class PFile:
     ----------
     filename : str or path-like
         Path to the p-file.
-    doRemap: bool
-        Switch to automatically run remap function upon loading the p-file data
-        in order to get all profiles on a common grid.
+    remap : bool
+        Put every profile on ONE common psinorm grid at load (default
+        ``True``).  A p-file stores a separate grid per quantity, and pairing
+        one quantity's values with another's grid misplaces the profile; see
+        :meth:`remap`.  ``False`` keeps the profiles exactly as read.
+    remap_key : str
+        Which profile's grid to adopt when *remap* is ``True`` (default
+        ``"ne"``).  Ignored when the file has no such channel.
+    doRemap : bool, optional
+        Deprecated alias for *remap*, kept so existing callers keep working.
 
     Examples
     --------
@@ -274,6 +281,8 @@ class PFile:
         quantity -- the normal case for DIII-D Osborne files, where pairing one
         quantity's values with another's grid misplaces the profile.
         """
+        if self._native is None:
+            return {}          # built in memory: no as-read grids to compare
         ref = self._native.get(ref_key)
         if ref is None:
             return {}
@@ -891,7 +900,13 @@ class PFile:
             target = np.asarray(psinorm, dtype=float)
 
         if warn:
-            spread = self.native_grid_spread(key if psinorm is None else "ne")
+            # Compare against a channel that EXISTS: when an explicit target
+            # grid is supplied, `key` may be absent (or irrelevant), and
+            # defaulting to a missing "ne" would silence the warning on a file
+            # whose native grids genuinely differ.
+            ref_key = key if (psinorm is None or key in self._raw) else next(
+                (k for k in self._raw if k != "N Z A"), "ne")
+            spread = self.native_grid_spread(ref_key)
             if spread:
                 worst = sorted(spread.items(), key=lambda kv: -kv[1])[:4]
                 warnings.warn(
@@ -943,7 +958,8 @@ class PFile:
         # reporting) rather than a bare shell.
         obj = object.__new__(PFile)
         obj._raw = new_raw
-        obj._native = _deepcopy_raw(self._native)
+        obj._native = (None if self._native is None
+                       else _deepcopy_raw(self._native))
         obj._modified = set(self._modified)
         obj._remapped_to = target.copy()
         return obj
