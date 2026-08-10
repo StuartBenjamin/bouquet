@@ -54,6 +54,22 @@ from .utils import (
 from .io.geqdsk import read_geqdsk
 from .physics import q_ravg
 
+# ---- Masked anchor-solve failure counter (issue #24) ------------------------
+# The per-draw anchor solves swallow failures (fallback: `pass`; band
+# resampling: `continue`).  Those masks are deliberate control flow, but the
+# failures were invisible, so the converged-on-entry degeneracy (see
+# verify_sigma0_consistency and issue #24) cannot be sized on real campaigns.
+# This counter ONLY observes: control flow is unchanged, and each increment
+# prints one line so archived genlogs carry the tally per unit.
+ANCHOR_MASKED_FAILURES = {"recon_anchor_fallback": 0, "band_resample": 0}
+
+
+def _count_masked_anchor_failure(site, exc):
+    ANCHOR_MASKED_FAILURES[site] += 1
+    print(f"  [anchor-masked-failure] {site} #{ANCHOR_MASKED_FAILURES[site]}: "
+          f"{type(exc).__name__}: {exc}", flush=True)
+
+
 # ---- Adaptive corrective iteration ----
 def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
                                 Ip_target, pax_target, psi_pad,
@@ -2251,8 +2267,9 @@ def perturb_kinetic_equilibrium(
             mygs.set_profiles(pp_prof=_pp_anchor, ffp_prof=_ffp_fb)
             try:
                 mygs.solve()
-            except Exception:
-                pass
+            except Exception as _fb_exc:
+                # deliberate mask (see issue #24) -- now counted, not silent
+                _count_masked_anchor_failure("recon_anchor_fallback", _fb_exc)
 
         eq_stats = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
         baseline_li_proxy = calc_cylindrical_li_proxy(mygs, new_jphi, psi_pad)
@@ -2286,7 +2303,9 @@ def perturb_kinetic_equilibrium(
                                   ffp_prof={"type": "jphi-linterp", "y": new_jphi, "x": psi_N})
                 try:
                     mygs.solve()
-                except Exception:
+                except Exception as _rs_exc:
+                    # deliberate mask (see issue #24) -- now counted, not silent
+                    _count_masked_anchor_failure("band_resample", _rs_exc)
                     continue
                 eq_stats = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
             _erp = 100.0 * abs(float(eq_stats['l_i']) - l_i_target) / l_i_target
