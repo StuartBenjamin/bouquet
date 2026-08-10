@@ -869,7 +869,7 @@ class Bouquet:
         """Regression guard: the draw pipeline must reproduce the baseline
         j_BS split when the kinetics are UNPERTURBED (sigma=0).
 
-        Replays the exact per-draw pre-SWB sequence -- state-anchor solve at
+        Replays the per-draw pre-SWB sequence -- state-anchor solve at
         the baseline j_phi/pressure, ``solve_with_bootstrap`` on the baseline
         kinetics, toroidal conversion, axis-transition smoothing -- and
         compares the resulting bootstrap spike to ``baseline.j_BS``.  Any
@@ -877,6 +877,19 @@ class Bouquet:
         j_phi target bias: the 2026-07 hollow-core/q0-offset bug was exactly
         such a sigma=0 inconsistency (recon-only axis smoothing), invisible
         to l_i but a wholesale +12% shift of the q0 distribution.
+
+        The anchor here is NOT started from the reconstruction's converged
+        state: psi is re-initialised (cold-started) from the LCFS shape
+        first, because inheriting that state can leave the under-relaxed
+        Picard iteration already on this forward solve's own fixed point,
+        with no gradient to descend -- it then parks just above ``nl_tol``
+        and exhausts ``maxits`` (see the comment at the call site below).
+        That makes this one step a deliberate departure from the draw path,
+        but the sequence was never a mirror of it in the first place: a
+        per-draw anchor warm-starts from the PREVIOUS draw's landed state,
+        which a single standalone check has no equivalent of.  Cold and warm
+        starts converge to the same equilibrium here; only the starting
+        point of the iteration differs.
 
         Costs one SWB call (~1 min). Call after ``reconstruct()`` /
         ``prepare_baseline()`` and before ``generate()``; leaves ``mygs``
