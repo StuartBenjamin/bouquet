@@ -61,7 +61,12 @@ from .physics import q_ravg
 # verify_sigma0_consistency and issue #24) cannot be sized on real campaigns.
 # This counter ONLY observes: control flow is unchanged, and each increment
 # prints one line so archived genlogs carry the tally per unit.
-ANCHOR_MASKED_FAILURES = {"recon_anchor_fallback": 0, "band_resample": 0}
+ANCHOR_MASKED_FAILURES = {"recon_anchor_fallback": 0, "band_resample": 0,
+                          # third site (issue #24): the unperturbed
+                          # jphi-linterp baseline solve, whose failure silently
+                          # reverts every per-draw boundary/l_i diagnostic to
+                          # recon's inverse-mode reference.
+                          "jphi_baseline": 0}
 
 
 def _count_masked_anchor_failure(site, exc):
@@ -3318,6 +3323,41 @@ def generate_bouquet(
                        if jphi_diff is not None else input_j_phi.copy())
             _ffp_b = {"type": "jphi-linterp",
                       "y": _jphi_b, "x": psi_N}
+            # ---- psi re-initialisation before the baseline solve (issue #24) --
+            # This is the THIRD site of the converged-on-entry degeneracy, and
+            # the same treatment as the sigma=0 state anchor got in #22.
+            # `mygs` arrives here on the reconstruction's own converged state;
+            # once the reconstruction solves the SAME pressure the draws do,
+            # that state sits essentially ON this forward jphi-linterp solve's
+            # fixed point.  The under-relaxed Picard iteration then has no
+            # gradient to descend, parks in a small limit cycle just above
+            # nl_tol, burns all `maxits` iterations and raises
+            # 'Exceeded "maxits"' -- a hard failure reported for a state that is
+            # physically converged.  Re-initialising psi from the LCFS shape
+            # starts the iteration far enough away that it converges normally.
+            #
+            # The shape is taken from the state we are about to leave (the same
+            # LCFS the recon landed on), which is the local equivalent of the
+            # run.py hunk's g-file boundary; `safe_trace_surf` snapshots and
+            # restores, so the trace itself perturbs nothing.  Failure to get a
+            # usable contour is not fatal: skip the re-init and solve warm, i.e.
+            # exactly the previous behaviour.
+            try:
+                _init_lcfs = safe_trace_surf(mygs, 1.0 - psi_pad)
+            except Exception:
+                _init_lcfs = None
+            if _init_lcfs is not None and len(np.asarray(_init_lcfs)) >= 4:
+                from .run import _shape_from_boundary
+                _bR0, _bZ0, _ba, _bkap, _bdel = _shape_from_boundary(_init_lcfs)
+                mygs.init_psi(_bR0, _bZ0, _ba, _bkap, _bdel)
+                print(f"  [jphi-baseline] psi re-initialised from the landed "
+                      f"LCFS (R0={_bR0:.4f} a={_ba:.4f} kappa={_bkap:.4f} "
+                      f"delta={_bdel:.4f}) before the forward solve "
+                      f"(converged-on-entry guard, issue #24)")
+            else:
+                print("  [jphi-baseline] WARN: could not trace an LCFS to "
+                      "re-initialise psi from; solving warm (the "
+                      "converged-on-entry stall of issue #24 is possible here)")
             mygs.set_targets(Ip=initial_Ip_target, pax=float(pressure_solve[0]))
             mygs.set_profiles(pp_prof=_pp_b, ffp_prof=_ffp_b)
             try:
@@ -3341,8 +3381,22 @@ def generate_bouquet(
                       f"solved: l_i(3)={_baseline_li3:.5f} Ip={_recon_Ip:.0f}; "
                       f"per-draw boundary/l_i now reference THIS baseline")
             except (ValueError, RuntimeError) as _bl_exc:
-                print(f"  [jphi-baseline] solve failed ({_bl_exc}); "
-                      f"falling back to recon (inverse) reference")
+                # Deliberate mask (issue #24, third site) -- now COUNTED, and
+                # the revert spelled out.  Previously this printed one line and
+                # moved on, so an archive could not tell you whether its
+                # per-draw boundary/l_i diagnostics were referenced to the
+                # jphi-linterp baseline the draws live in or to recon's
+                # inverse-mode LCFS -- two references ~1.6 mm / ~0.9 % in l_i(3)
+                # apart, which is the whole reason this baseline solve exists.
+                _count_masked_anchor_failure("jphi_baseline", _bl_exc)
+                print(f"  [jphi-baseline] solve failed ({_bl_exc}); REVERTING "
+                      f"to the recon (inverse) reference -- this run's "
+                      f"per-draw boundary and l_i diagnostics carry the "
+                      f"~1.6 mm / ~0.9 % representation offset the "
+                      f"jphi-linterp baseline exists to remove, and the "
+                      f"soft-reg coil target stays recon's inverse-mode set "
+                      f"(l_i(3) reference {_baseline_li3:.5f} = l_i_target, "
+                      f"NOT a solved baseline)")
 
         # ---- Boundary-shift diagnostic ----
         # The reference LCFS for per-stage boundary-deviation reporting
