@@ -1008,7 +1008,7 @@ def _resolve_x_coord(psi_N, x_coord, eq=None, psi_pf=None):
 
 
 def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
-                        h5path=None, scan_val=None, count=None):
+                        h5path=None, scan_val=None, count=None, ranges=None, return_data_only=False):
     """Plot one or more geqdsk equilibria: LCFS contours + profile panels.
 
     Layout: narrow flux-surface panel on the left, 2x2 grid of profiles
@@ -1115,8 +1115,8 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
             eqs.insert(0, baseline_eq)
 
         if not eqs:
-            print("No geqdsk data found in HDF5.")
-            return None, None
+            if not baseline_eq and len(load_pairs)==0: 
+                raise ValueError("No geqdsk data found in HDF5.")
     elif geqdsk_path_or_eq is not None:
         inputs = geqdsk_path_or_eq
         if not isinstance(inputs, (list, tuple)):
@@ -1133,6 +1133,69 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
     n_eq = len(eqs)
     # h5 mode has a real baseline; file-list mode treats all entries equally
     has_baseline = (h5path is not None and n_eq > 1)
+
+    # ------------------------------------------------------------------
+    # Data-only mode: compute axis extents without building a figure.
+    # Used for the GIF "first pass" to derive shared ranges.
+    # ------------------------------------------------------------------
+    if return_data_only:
+        n_eq = len(eqs)
+        has_baseline = (h5path is not None and n_eq > 1)
+
+        def _acc(cur, arr):
+            arr = np.asarray(arr, dtype=float)
+            arr = arr[np.isfinite(arr)]
+            if arr.size == 0:
+                return cur
+            lo, hi = float(arr.min()), float(arr.max())
+            if cur is None:
+                return [lo, hi]
+            return [min(cur[0], lo), max(cur[1], hi)]
+
+        d = {k: None for k in
+             ('lcfs_xlim', 'lcfs_ylim', 'xlim',
+              'p_ylim', 'q_ylim', 'j_ylim', 'ff_ylim')}
+
+        for idx in range(n_eq):
+            eq = eqs[idx]
+            is_baseline = has_baseline and (idx == 0)
+
+            psi_N = np.linspace(0, 1, len(eq.pres))
+            x, _ = _resolve_x_coord(psi_N, x_coord, eq=eq)
+            d['xlim'] = _acc(d['xlim'], x)
+
+            # LCFS: baseline draws the full psi grid (+limiter); all draw boundary
+            if is_baseline:
+                d['lcfs_xlim'] = _acc(d['lcfs_xlim'], eq.R_grid)
+                d['lcfs_ylim'] = _acc(d['lcfs_ylim'], eq.Z_grid)
+                if eq.limiter_R is not None and len(eq.limiter_R) > 0:
+                    d['lcfs_xlim'] = _acc(d['lcfs_xlim'], eq.limiter_R)
+                    d['lcfs_ylim'] = _acc(d['lcfs_ylim'], eq.limiter_Z)
+            d['lcfs_xlim'] = _acc(d['lcfs_xlim'], eq.boundary_R)
+            d['lcfs_ylim'] = _acc(d['lcfs_ylim'], eq.boundary_Z)
+
+            d['p_ylim'] = _acc(d['p_ylim'], eq.pres / 1e3)
+            d['q_ylim'] = _acc(d['q_ylim'], eq.qpsi)
+            d['j_ylim'] = _acc(d['j_ylim'], np.abs(eq.j_tor_averaged) / 1e6)
+
+            pp = eq.pprime
+            ff = eq.ffprim
+            pp_max = np.max(np.abs(pp)) if np.max(np.abs(pp)) > 0 else 1.0
+            ff_max = np.max(np.abs(ff)) if np.max(np.abs(ff)) > 0 else 1.0
+            d['ff_ylim'] = _acc(d['ff_ylim'], pp / pp_max)
+            d['ff_ylim'] = _acc(d['ff_ylim'], ff / ff_max)
+
+        # add a ~5% margin so data doesn't sit flush against the frame
+        def _pad(lim, frac=0.05):
+            if lim is None:
+                return None
+            lo, hi = lim
+            span = hi - lo
+            if span == 0:
+                span = abs(hi) if hi != 0 else 1.0
+            return [lo - frac * span, hi + frac * span]
+
+        return {k: _pad(v) for k, v in d.items()}
 
     fig = plt.figure(figsize=(14, 6))
     gs = fig.add_gridspec(2, 3, width_ratios=[0.6, 1, 1],
@@ -1241,6 +1304,24 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
 
     if has_baseline:
         ax_p.legend(fontsize=6)
+
+    # --- apply externally-specified axis ranges (for consistent GIF frames) ---
+    if ranges:
+        if ranges.get("lcfs_xlim") is not None:
+            ax_lcfs.set_xlim(ranges["lcfs_xlim"])
+        if ranges.get("lcfs_ylim") is not None:
+            ax_lcfs.set_ylim(ranges["lcfs_ylim"])
+        if ranges.get("xlim") is not None:
+            for a in (ax_p, ax_q, ax_j, ax_ff):
+                a.set_xlim(ranges["xlim"])
+        if ranges.get("p_ylim") is not None:
+            ax_p.set_ylim(ranges["p_ylim"])
+        if ranges.get("q_ylim") is not None:
+            ax_q.set_ylim(ranges["q_ylim"])
+        if ranges.get("j_ylim") is not None:
+            ax_j.set_ylim(ranges["j_ylim"])
+        if ranges.get("ff_ylim") is not None:
+            ax_ff.set_ylim(ranges["ff_ylim"])
 
     plt.tight_layout()
     return fig, fig.axes
