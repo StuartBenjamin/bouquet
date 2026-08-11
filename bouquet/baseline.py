@@ -544,6 +544,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             initialize_psi=True,
             p_fast=p_fast_eq,
             Z_imp=Z_imp_recon,
+            l_i_tolerance=float(config.generation.l_i_tolerance),
         )
         # get_stats traces the q-profile and can emit gs_get_qprof warnings, so
         # keep these inside the capture too.
@@ -554,10 +555,28 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         # one the two codes agree on (0.17%).  The whole downstream chain --
         # per-draw acceptance band, archive attrs, plots -- is on this scale;
         # see issue #20.  DO NOT mix with 'std'/li(1) numbers.
-        l_i_target = mygs.get_stats(
-            lcfs_pad=source.psi_pad, li_normalization="iter")["l_i"]
+        #
+        # WHICH l_i (issue #25).  This used to be a fresh get_stats read of
+        # whatever state the reconstruction happened to END on -- i.e. AFTER
+        # step 7's corrective iteration, which runs up to 8 further GS solves
+        # with a stopping rule that knows nothing about l_i.  So the number the
+        # whole ensemble is banded around was not the value step 6 matched; it
+        # was that value plus however far step 7 drifted (measured +0.50 to
+        # +0.76 % across the beta-scan family, against a 1 % per-draw band).
+        #
+        # `result['li_final']` IS the step-6 matched value: the one the secant
+        # loop drove onto the g-file's li(2), and therefore the only one with a
+        # defensible provenance as a target.  The post-corrective read is kept
+        # as a separate archived diagnostic rather than dropped, so this change
+        # ADDS provenance -- `l_i_realized_post_corrective` says where the
+        # reconstruction actually finished, and its distance from the target is
+        # reported loudly by reconstruct_equilibrium when it exceeds the band.
+        l_i_target = float(result["li_final"])
+        l_i_realized_post_corrective = float(mygs.get_stats(
+            lcfs_pad=source.psi_pad, li_normalization="iter")["l_i"])
         recon_metrics = _reconstruction_metrics(
-            mygs, eqdsk, result, source, l_i_target)
+            mygs, eqdsk, result, source, l_i_target,
+            l_i_realized_post_corrective=l_i_realized_post_corrective)
 
     j_phi = np.asarray(result["j_phi_fit"], dtype=float)
     j_BS = np.asarray(result["j_BS_used"], dtype=float)
@@ -608,7 +627,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     )
 
 
-def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved) -> dict:
+def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
+                            l_i_realized_post_corrective=None) -> dict:
     """Curate a TokaMaker-vs-EFIT reconstruction-fidelity dict for the summary.
 
     Each global scalar that isn't ~0 by construction (Ip, l_i, q0/q95, beta,
@@ -716,6 +736,20 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved) -> dict:
         # estimator mismatch.  That is precisely how issue #20 stayed hidden.
         "li": li_tok, "li_efit": g("li"), "li_err_pct": li_err,
         "li_scale": "iter(li3)",
+        # --- step-6 matched vs step-7 realized (issue #25) ------------------
+        # `li` above (== l_i_target) is the MATCHED value.  These say where the
+        # corrective iteration actually left the equilibrium, and whether that
+        # is further from the target than a draw is allowed to be.  Archived,
+        # never enforced: a visible condition, not an acceptance criterion.
+        "li_realized_post_corrective": (
+            float("nan") if l_i_realized_post_corrective is None
+            else float(l_i_realized_post_corrective)),
+        "li_corrective_drift_pct": float(
+            q.get("li3_corrective_drift_pct", float("nan"))),
+        "li_corrective_band_pct": float(
+            q.get("li3_corrective_band_pct", float("nan"))),
+        "li_corrective_out_of_band": bool(
+            q.get("li3_corrective_out_of_band", False)),
         # --- cross-estimator drift monitor (de-circularization, issue #20) --
         # The FREE pair: TokaMaker's 'std'/li(1) vs the g-file's li(1)_EFIT.
         # Nothing drives these together, so a nonzero residual is a genuine

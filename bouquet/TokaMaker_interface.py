@@ -130,6 +130,7 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
     # RMS state and restore it at the end instead of trusting the last iterate.
     _can_snap = protect_state and hasattr(mygs, "copy_eq")
     best = {"rms": np.inf, "eq": None, "out": None}
+    full_rms_history = []
 
     for it in range(max_iters):
         ffp = {"type": "jphi-linterp", "y": j_phi_input.copy(), "x": psi_N}
@@ -152,13 +153,27 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
         diff = j_phi_output - target_jphi
         rms_edge = float(np.sqrt(np.mean(diff[edge_mask]**2)))
         edge_rms_history.append(rms_edge)
+        _kept = None
         if _can_snap:
             rms_full = float(np.sqrt(np.mean(diff**2)))
-            if rms_full < best["rms"]:
+            full_rms_history.append(rms_full)
+            _kept = rms_full < best["rms"]
+            if _kept:
                 best.update(rms=rms_full, eq=mygs.copy_eq(), out=j_phi_output.copy())
 
         if verbose:
-            print(f"  [jphi_corr iter {it+1}] edge RMS = {rms_edge/1e6:.6f} MA/m²")
+            # Report the FULL-domain RMS too when keep-best is on: the stopping
+            # rule is on the edge, but the state that gets kept is chosen on the
+            # full domain, so a log showing only the edge cannot explain which
+            # iterate was landed on (issue #25).
+            if _can_snap:
+                print(f"  [jphi_corr iter {it+1}] edge RMS = "
+                      f"{rms_edge/1e6:.6f} MA/m², full RMS = "
+                      f"{full_rms_history[-1]/1e6:.6f} MA/m² "
+                      f"({'KEPT (new best)' if _kept else 'discarded'}; "
+                      f"best {best['rms']/1e6:.6f})")
+            else:
+                print(f"  [jphi_corr iter {it+1}] edge RMS = {rms_edge/1e6:.6f} MA/m²")
 
         # Check convergence after min_iters
         if it >= min_iters - 1 and len(edge_rms_history) >= 2:
@@ -178,6 +193,15 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
     if _can_snap and best["eq"] is not None:
         mygs.replace_eq(source_eq=best["eq"])      # land on the best state seen
         j_phi_output = best["out"]
+        if verbose:
+            # The kept-RMS sequence is monotone non-increasing BY CONSTRUCTION;
+            # printing it is what lets a run be checked rather than trusted.
+            _kept_traj = np.minimum.accumulate(np.asarray(full_rms_history))
+            print(f"  [jphi_corr] keep-best landed on full RMS "
+                  f"{best['rms']/1e6:.6f} MA/m² (per-iterate "
+                  + " -> ".join(f"{r/1e6:.6f}" for r in full_rms_history)
+                  + "; kept "
+                  + " -> ".join(f"{r/1e6:.6f}" for r in _kept_traj) + ")")
 
     return j_phi_output, it + 1, edge_rms_history
 
@@ -5123,7 +5147,8 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                             guess_jinductive,n_k,psi_bridge,rescale_j_BS,
                             shelf_psi_N,initialize_psi=True,
                             isolate_edge_jBS=False,
-                            p_fast=None, Z_imp=None):
+                            p_fast=None, Z_imp=None,
+                            l_i_tolerance=0.01):
     r"""Reconstruct a single Grad-Shafranov equilibrium from a geqdsk
     reference and kinetic profiles, matching the EFIT :math:`l_i(1)`.
 
@@ -5194,6 +5219,13 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     Z_imp : float, optional
         Single effective impurity charge for the one-Zeff impurity
         pressure term.  ``None``/``0`` (default) disables it.
+    l_i_tolerance : float, optional
+        The per-draw :math:`l_i` acceptance band, as a FRACTION (default 0.01
+        == 1 %; pass ``config.generation.l_i_tolerance``).  Used only to decide
+        whether the step-7 corrective iteration moved :math:`l_i(3)` off the
+        step-6 matched value by more than the draws are allowed to sit from it
+        -- a REPORTED condition, never a raise.  See the ``[li post-corrective]``
+        block and issue #25.
 
     Returns
     -------
@@ -5613,12 +5645,68 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         corr_target = (j_ind_li + j_BS_isolated).copy()
         j_BS_isolated_corr = j_BS_isolated.copy()
 
-    # Adaptive corrective iteration
+    # Adaptive corrective iteration.
+    #
+    # protect_state=True: keep-best on the FULL-DOMAIN j_phi RMS, and land on
+    # the best state seen instead of on whatever the last Newton step produced.
+    # This is the same semantics the IMAS forward-solve path has used since the
+    # corrector was reused there (run.py); the geqdsk path was the one call site
+    # still trusting its last iterate.  It matters here for the same reason it
+    # matters there -- the loop's own stopping rule is on the EDGE RMS
+    # (psi_N > 0.9), so an iterate that improves the edge while degrading the
+    # core satisfies it and is then kept.  Measured on the beta-scan family the
+    # corrective iteration was WORSENING the core j_phi RMS by ~32% and the
+    # on-axis value by ~73%; keep-best on the full-domain RMS makes the
+    # trajectory monotone non-increasing by construction.  See issue #25.
+    #
+    # No knob values change: rtol=0.05, max_iters=8, min_iters=2, damping=1.0
+    # (the IMAS site's rtol=0.02 / damping=0.5 are ITS tuning, not part of this
+    # change -- only the state protection is mirrored).
     j_phi_output_corr, _n_corr, _corr_hist = _corrective_jphi_iteration(
         mygs, eqdsk.psi_N, corr_target, pp_prof,
         Ip_final_target, pres_tmp[0], psi_pad,
         min_iters=2, max_iters=8, rtol=0.05, verbose=True,
+        protect_state=True,
     )
+
+    # ---- 7b. Did step 7 undo step 6?  (report, do not raise) -------------
+    #
+    # Step 6's secant matched l_i(3) to li_target to a fraction of a percent.
+    # Step 7 then runs up to 8 further GS solves against a j_phi target, with a
+    # stopping rule (rtol=0.05 on the EDGE RMS) that knows nothing about l_i.
+    # Nothing re-checked l_i afterwards -- and there is no reason it should
+    # land back on the matched value.  Issue #25 measured +0.50 / +0.75 / +0.76 %
+    # drifts across the beta-scan family, i.e. up to 3/4 of a percent of pure
+    # step-ordering error sitting under every draw.
+    #
+    # This is a REPORT, deliberately not a failure: making it fatal would be a
+    # new acceptance criterion, which is not approved.  It prints loudly and is
+    # archived (reconstruction_metrics), so a campaign carries the evidence
+    # instead of the operator having to have been watching stdout.
+    _li_post_corr = float(mygs.get_stats(
+        li_normalization='iter', lcfs_pad=psi_pad)['l_i'])
+    _li_corr_drift_pct = (100.0 * (_li_post_corr - final_li) / final_li
+                          if final_li else float('nan'))
+    _li_band_pct = 100.0 * float(l_i_tolerance)
+    _li_corr_out_of_band = bool(np.isfinite(_li_corr_drift_pct)
+                                and abs(_li_corr_drift_pct) > _li_band_pct)
+    if _li_corr_out_of_band:
+        print("  " + "!" * 68)
+        print(f"  [li post-corrective] WARNING: the step-7 corrective "
+              f"iteration moved l_i(3) OFF the step-6 matched value by "
+              f"{_li_corr_drift_pct:+.3f}%, which is outside the per-draw l_i "
+              f"band (+/-{_li_band_pct:.2f}%).")
+        print(f"  [li post-corrective] matched (step 6) = {final_li:.6f}; "
+              f"realized (post step 7) = {_li_post_corr:.6f}; "
+              f"target = {li_target:.6f}.")
+        print("  [li post-corrective] l_i_target is taken from the MATCHED "
+              "value, so every draw is being banded around a number this "
+              "equilibrium no longer carries.  See issue #25.")
+        print("  " + "!" * 68)
+    else:
+        print(f"  [li post-corrective] l_i(3) matched={final_li:.6f} -> "
+              f"realized={_li_post_corr:.6f} ({_li_corr_drift_pct:+.3f}%, "
+              f"band +/-{_li_band_pct:.2f}%)")
 
     # ---- 8. Final profiles ----
     # The corrective iteration drove TokaMaker's output toward
@@ -5677,6 +5765,12 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         # l_i estimator scale that `li_error` / `final_li` are on, plus the
         # cross-estimator pair captured at the same state (issue #20).
         'li_scale': 'iter(li3)',
+        # step-6 matched vs step-7 realized (issue #25).  Archived, not
+        # enforced: a loud report, not an acceptance criterion.
+        'li3_post_corrective': float(_li_post_corr),
+        'li3_corrective_drift_pct': float(_li_corr_drift_pct),
+        'li3_corrective_band_pct': float(_li_band_pct),
+        'li3_corrective_out_of_band': bool(_li_corr_out_of_band),
         **{f'li_cross_{_k}': _v for _k, _v in li_cross.items()},
         'Ip_error_pct': float(100 * abs(Ip_tokamaker - Ip_desired) / Ip_desired),
         'boundary_rms_mm': _bnd_rms_mm,
@@ -5719,6 +5813,12 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         'eqdsk_Ip': eqdsk.Ip,
         'pres_tokamaker': pres_tmp.copy(),
         'psi_N_grid': eqdsk.psi_N.copy(),
+        # `li_final` is the step-6 MATCHED l_i(3) -- the value the secant loop
+        # actually drove onto li_target, and (issue #25) the one the ensemble's
+        # l_i_target is now taken from.  The post-step-7 realized value is a
+        # SEPARATE field, so provenance grows rather than shrinks.
         'li_final': final_li,
+        'li_realized_post_corrective': float(_li_post_corr),
+        'li_corrective_drift_pct': float(_li_corr_drift_pct),
         'quality': quality,
     }
