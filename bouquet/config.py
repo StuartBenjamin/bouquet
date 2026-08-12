@@ -494,6 +494,15 @@ class GenerationConfig:
     # to skip that cost (self-validated + graceful fallback either way).
     capture_exact_inv_R2: bool = True
 
+    _RESERVED = frozenset(
+        "mygs ne Te ni Ti Zeff Ip_target inductive_jphi scale_jBS "
+        "isolate_edge_jBS verbose diagnostic_plots".split()
+    )
+
+    def __post_init__(self):
+        bad = sorted(self._RESERVED & self.bootstrap_kwargs.keys())
+        if bad:
+            raise ValueError(f"bootstrap_kwargs may not set {bad}: passed explicitly at call sites.")
 
 @dataclass
 class FilterConfig:
