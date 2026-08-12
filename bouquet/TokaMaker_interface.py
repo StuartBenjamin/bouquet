@@ -1249,7 +1249,6 @@ def perturb_kinetic_equilibrium(
     jBS_diff=None,
     accept_anchor_inband=False,
     perturb_jind_in_anchor=False,
-    swb_iterations=3,
     diagnostic_plots=False,
     max_pressure_iter=_MAX_PRESSURE_ITER,
     max_li_iter=_MAX_LI_ITER,
@@ -1299,6 +1298,7 @@ def perturb_kinetic_equilibrium(
     p_diff=None,
     jphi_diff=None,
     rng=None,
+    **kwargs,  # solve_with_bootstrap options (bootstrap_kwargs)
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
     match :math:`I_p` and :math:`l_i` targets.
@@ -1369,10 +1369,6 @@ def perturb_kinetic_equilibrium(
     scale_jBS : float
         Multiplicative scale factor applied to :math:`j_{\rm BS}` in
         ``solve_with_bootstrap``.  A value of 1.0 applies no scaling.
-    swb_iterations : int
-        H-mode self-consistency iterations inside ``solve_with_bootstrap``
-        (its ``iterations`` argument). 2 is usually enough when trading
-        accuracy for speed.
     diagnostic_plots : bool
         Show diagnostic matplotlib figures (including inside
         ``solve_with_bootstrap`` and ``find_optimal_scale``).
@@ -1804,6 +1800,7 @@ def perturb_kinetic_equilibrium(
                 isolate_edge_jBS=isolate_edge_jBS,
                 diagnostic_plots=False,
                 verbose=False,
+                **kwargs
             )
         finally:
             if _stashed_bounds is not None:
@@ -2025,7 +2022,7 @@ def perturb_kinetic_equilibrium(
                 isolate_edge_jBS=isolate_edge_jBS,
                 diagnostic_plots=False,
                 verbose=_swb_debug(),
-                iterations=swb_iterations,
+                **kwargs
             )
             if _swb_debug():
                 print(f"  [SWB-diag] SWB call: {time.perf_counter()-_t_swb0:.1f}s")
@@ -2909,7 +2906,6 @@ def generate_bouquet(
     # baseline_j_BS + (SWB_raw(perturbed) - SWB_raw(sigma=0)); the sigma=0
     # reference is cached once below in the same pre-draw anchor context.
     jbs_delta_mode=False,
-    swb_iterations=3,
     diagnostic_plots=True,
     scan_key=None,
     pfile_bytes=None,
@@ -2957,6 +2953,7 @@ def generate_bouquet(
     # geqdsk path leaves this False: its corrective iteration already drives
     # achieved ~= target, and its baseline stores the corrective output.
     store_achieved_jphi=False,
+    **kwargs,  # solve_with_bootstrap options (bootstrap_kwargs)
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -3049,9 +3046,6 @@ def generate_bouquet(
         ``[0.8, 1.2]`` draws from :math:`\mathcal{U}(0.8, 1.2)`.
         When ``None``, no additional scaling is applied
         (``scale_jBS = 1.0`` for every sample).
-    swb_iterations : int
-        H-mode self-consistency iterations inside ``solve_with_bootstrap``
-        (its ``iterations`` argument); 2 trades a little accuracy for speed.
     diagnostic_plots : bool
         Show diagnostic matplotlib figures.
     scan_key : str, float, int, or None
@@ -3113,6 +3107,9 @@ def generate_bouquet(
         Soft-reg weight for the ``#VSC`` channel (default 1.0).  Kept
         much lower than ``soft_reg_weight`` so the VSC has freedom to
         do vertical-mode control work without being heavily penalized.
+    **kwargs
+        Additional keyword options passed through to
+        :func:`solve_with_bootstrap` in OpenFUSIONToolkit.
 
     Returns
     -------
@@ -3981,6 +3978,7 @@ def generate_bouquet(
                     scale_jBS=1.0,
                     isolate_edge_jBS=isolate_edge_jBS,
                     diagnostic_plots=False, verbose=False,
+                    **kwargs,
                 )
                 # Toroidal conversion on the cache-time SWB equilibrium, so
                 # the per-draw delta (also converted) is convention-consistent.
@@ -4235,7 +4233,6 @@ def generate_bouquet(
                 accept_anchor_inband=accept_anchor_inband,
                 perturb_jind_in_anchor=perturb_jind_in_anchor,
                 scale_jBS=scale_jBS,
-                swb_iterations=swb_iterations,
                 diagnostic_plots=diagnostic_plots,
                 psi_N_kinetic=psi_N_kinetic,
                 p_fast=p_fast,
@@ -4260,6 +4257,7 @@ def generate_bouquet(
                                       else None),
                 proxy_bias_warmstart=_proxy_bias_warmstart,
                 pin_jphi=pin_jphi,
+                **kwargs,
             )
         except Exception as e:
             # Catch ANY exception during a perturbed solve -- ValueError
@@ -5103,7 +5101,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                             isoflux_pts, weights, psi_pad,
                             guess_jinductive,n_k,psi_bridge,rescale_j_BS,
                             shelf_psi_N,initialize_psi=True,
-                            isolate_edge_jBS=False):
+                            isolate_edge_jBS=False, **kwargs):
     r"""Reconstruct a single Grad-Shafranov equilibrium from a geqdsk
     reference and kinetic profiles, matching the EFIT :math:`l_i(1)`.
 
@@ -5166,6 +5164,9 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         If ``True`` (default), call ``mygs.init_psi`` using LCFS
         geometry estimated from the geqdsk boundary.  Set to ``False``
         to skip initialisation (e.g. when reusing a prior solution).
+    **kwargs
+        Additional keyword options passed through to
+        :func:`solve_with_bootstrap` in OpenFUSIONToolkit.
 
     Returns
     -------
@@ -5200,7 +5201,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         abs(eqdsk.Ip), guess_jinductive,
         scale_jBS=1.0,
         isolate_edge_jBS=isolate_edge_jBS,
-        diagnostic_plots=False,
+        **kwargs
     )
 
     # Convert SWB's parallel-projected bootstrap to the toroidal convention
