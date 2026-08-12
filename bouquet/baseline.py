@@ -514,6 +514,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             rescale_j_BS=source.rescale_j_BS,
             shelf_psi_N=source.shelf_psi_N,
             initialize_psi=True,
+            **config.generation.bootstrap_kwargs,
         )
         # get_stats traces the q-profile and can emit gs_get_qprof warnings, so
         # keep these inside the capture too.
