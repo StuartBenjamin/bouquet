@@ -1158,7 +1158,24 @@ class _AnchorIpRenorm:
         -------
         float
             ``f_ind``.  Dimensionless; ~0.45-0.95 over a single-machine beta
-            ramp, 0.772 on the D3D-like golden.
+            ramp.
+
+            Two values are quoted for the D3D-like golden, and they are
+            measurements at DIFFERENT points, not a disagreement:
+
+            * **0.772** -- the issue-#23-derived constant, measured at the
+              *baseline-recon* geometry with an independent integrator.  This
+              is the provenance of the ``3.86e-3 = 5e-3 * 0.772`` acceptance
+              bar and is frozen as the reviewed number.
+            * **0.7976** -- what THIS method returns in the fixture, measured
+              at the :math:`\sigma=0` R2 anchor in exact mode.
+
+            The few-percent gap between them is the baseline -> anchor step
+            that #23 explicitly flags as not yet decomposed.  Carrying 0.772
+            in the bar makes that bar slightly TIGHTER at the golden than a
+            re-derivation would (3.86e-3 vs 5e-3*0.7976 = 3.99e-3), so the
+            discrepancy relaxes nothing.  See
+            ``tests/test_seeded_reproducibility._S_FIND_ATOL_EXACT``.
         """
         j_ind = np.asarray(j_ind, dtype=float)
         if self._w is not None:

@@ -112,8 +112,10 @@ _JBS_FRAC = 0.02             # sigma0 j_BS vs baseline split, fraction of peak
 #  => |s - 1| * f_ind = |Delta / Ip_demand|,   f_ind = int(w*j_ind)/Ip_demand
 #
 # exactly (verified to 2.2e-16 on the archived-total probe in the #23
-# investigation).  `f_ind` is the inductive share: 0.772 on this golden, but
-# 0.45-0.95 across a single-machine beta ramp.  So a CONSTANT bar on |s-1| is
+# investigation).  `f_ind` is the inductive share: 0.772 at the baseline-recon
+# geometry of this golden (the #23-derived value -- see the two-measurement
+# note below), but 0.45-0.95 across a single-machine beta ramp.  So a CONSTANT
+# bar on |s-1| is
 # a bar whose stringency silently scales with 1/f_ind -- it reads ~2x tighter
 # on a high-bootstrap archive than on the case it was calibrated on, and #23
 # measured exactly that: archives as self-consistent as this golden
@@ -127,14 +129,24 @@ _JBS_FRAC = 0.02             # sigma0 j_BS vs baseline split, fraction of peak
 # i.e. the SAME BAR AT THE GOLDEN by construction -- what changes is only that
 # it no longer tightens itself on archives at other inductive fractions.
 #
-# HONESTY NOTE ON THAT 0.772.  Re-measured on this fixture at the sigma=0 R2
-# anchor, in exact mode, f_ind is 0.7976, not 0.772 (#23's 0.772/0.760 were
-# taken at the baseline-recon geometry with an independent integrator, and the
-# few-% spread between the two is the baseline->anchor step #23 flags as not
-# decomposed).  Carrying the approved 3.86e-3 anyway makes this bar 3.2 %
-# TIGHTER at the golden than 5e-3 was (3.86e-3 vs 5e-3*0.7976 = 3.99e-3), not
-# looser -- so nothing is being relaxed by the discrepancy, and the constant
-# stays the reviewed number rather than one this branch re-derived for itself.
+# TWO f_ind NUMBERS APPEAR BELOW, AT TWO DIFFERENT MEASUREMENT POINTS.  They
+# are not a contradiction; label them and the apparent conflict dissolves:
+#
+#   0.772  -- PROVENANCE OF THE CONSTANT.  The issue-#23-derived value, taken
+#             at the BASELINE-RECON geometry with an independent integrator
+#             (#23 quotes 0.772/0.760 there).  This is the number the approved
+#             3.86e-3 was built from, and it is frozen as such.
+#   0.7976 -- IN-FIXTURE MEASUREMENT.  What f_ind actually measures in THIS
+#             fixture at the sigma=0 R2 anchor, in exact mode -- a different
+#             geometry and a different integrator from the line above.
+#
+# The few-% spread between them IS the baseline->anchor step that #23 flags as
+# not decomposed; it is named here rather than averaged away.  Carrying the
+# approved 3.86e-3 anyway makes this bar 3.2 % TIGHTER at the golden than
+# 5e-3 was (3.86e-3 vs 5e-3*0.7976 = 3.99e-3), not looser -- so nothing is
+# relaxed by the discrepancy, and the constant stays the reviewed number
+# rather than one this branch re-derived for itself.  The 3.86e-3 below is
+# unchanged by this labelling.
 #
 # Known real drift, named rather than absorbed: #23 also measured a genuine
 # +0.077 +/- 0.009 %/beta_p rise in this residual (a P'-bookkeeping lead, NOT
@@ -499,8 +511,11 @@ def test_sigma0_r2_exact_measure_lands_in_its_own_budget(sigma0_anchor):
     The acceptance is on ``|s-1| * f_ind``, the residual IN Ip SPACE that the
     -0.335% budget is quoted in -- see ``_S_FIND_ATOL_EXACT`` for the algebra
     and for why the equivalent |s-1| statement is operating-point dependent
-    (issue #23).  At this golden the two are the same bar by construction,
-    because 3.86e-3 = 5e-3 * this fixture's own f_ind.
+    (issue #23).  At this golden the two are essentially the same bar by
+    construction, because 3.86e-3 = 5e-3 * 0.772, where 0.772 is the
+    #23-derived f_ind at the baseline-recon geometry.  (This fixture's own
+    f_ind, measured at the sigma=0 R2 anchor, is 0.7976 -- the two numbers and
+    why they differ are labelled at ``_S_FIND_ATOL_EXACT``.)
     """
     s = float(sigma0_anchor["s_exact"][0])
     f_ind = float(sigma0_anchor["f_ind_exact"][0])
