@@ -128,7 +128,15 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
     # from ANOTHER code's flux geometry and may not be exactly achievable, so
     # undamped Newton steps can oscillate/diverge; track the best full-profile
     # RMS state and restore it at the end instead of trusting the last iterate.
-    _can_snap = protect_state and hasattr(mygs, "copy_eq")
+    # Gate on BOTH halves of the snapshot/restore pair.  Every snapshot taken
+    # here is eventually consumed by `replace_eq` (the per-iteration
+    # solve-failure restore and the final keep-best restore), so a solver
+    # object exposing only `copy_eq` would pass a copy_eq-only gate and then
+    # raise AttributeError on the restore -- turning a recoverable solve
+    # failure into a hard crash.  Matches the both-methods gate already used
+    # at the warm-start snapshot site further down this module.
+    _can_snap = (protect_state and hasattr(mygs, "copy_eq")
+                 and hasattr(mygs, "replace_eq"))
     best = {"rms": np.inf, "eq": None, "out": None}
     full_rms_history = []
 

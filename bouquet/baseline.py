@@ -571,9 +571,21 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         # ADDS provenance -- `l_i_realized_post_corrective` says where the
         # reconstruction actually finished, and its distance from the target is
         # reported loudly by reconstruct_equilibrium when it exceeds the band.
+        #
+        # Consume the value reconstruct_equilibrium already measured at step 7b
+        # rather than re-reading get_stats here.  The re-read was redundant --
+        # same solver state, same lcfs_pad (source.psi_pad is exactly what was
+        # passed in above), same li_normalization='iter' -- and it cost a
+        # second q-profile trace plus its gs_get_qprof warnings.  It also had
+        # the WEAKER provenance of the two: it reported whatever state the
+        # solver happens to be in at THIS line, which is "post step 7" only for
+        # as long as nothing in between touches the equilibrium.  Consuming the
+        # returned field pins the number to the step it is named after.
+        # Verified bit-identical to the old re-read on the D3D-like fixture
+        # (delta exactly 0.0), so no archived value moves.
         l_i_target = float(result["li_final"])
-        l_i_realized_post_corrective = float(mygs.get_stats(
-            lcfs_pad=source.psi_pad, li_normalization="iter")["l_i"])
+        l_i_realized_post_corrective = float(
+            result["li_realized_post_corrective"])
         recon_metrics = _reconstruction_metrics(
             mygs, eqdsk, result, source, l_i_target,
             l_i_realized_post_corrective=l_i_realized_post_corrective)
