@@ -581,8 +581,24 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         # solver happens to be in at THIS line, which is "post step 7" only for
         # as long as nothing in between touches the equilibrium.  Consuming the
         # returned field pins the number to the step it is named after.
-        # Verified bit-identical to the old re-read on the D3D-like fixture
-        # (delta exactly 0.0), so no archived value moves.
+        # STALE RECORD CORRECTED (issue #28).  This comment used to claim the
+        # new read was "bit-identical to the old re-read" on the synthetic
+        # golden fixture, "delta exactly 0.0, so no archived value moves".
+        # That was true on #27's branch base; it is NOT true on main @
+        # 4ad4894, where the two reads differ by +0.342 %:
+        #     li_final (step-6 matched)          0.653840
+        #     li_realized_post_corrective        0.656074
+        # i.e. on this fixture the corrective iteration now DOES drift l_i(3),
+        # so switching to `li_final` moved `l_i_target` by -0.342 % and every
+        # value banded around it moved with it.  Still in-band by a wide
+        # margin (band +/-5.00 %, `li_corrective_out_of_band` False), and
+        # still the better-provenanced number for the reasons above -- but it
+        # is a change, not a no-op, and it is the direct cause of the sigma=0
+        # R2 l_i residual falling from -0.457 % to -0.083 % (see `_LI_REL` in
+        # tests/test_seeded_reproducibility.py).  What changed the fixture
+        # between #27 and main is not established here; #30 regenerated the
+        # golden and altered the jphi_baseline solve, which is the obvious
+        # candidate but was not bisected.
         l_i_target = float(result["li_final"])
         l_i_realized_post_corrective = float(
             result["li_realized_post_corrective"])

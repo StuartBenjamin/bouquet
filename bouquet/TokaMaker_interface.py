@@ -1042,11 +1042,33 @@ class _AnchorIpRenorm:
     ===========  ==========  ==========  ==============================
     mode         ``s``       ``|s-1|``   ``l_i`` vs recon
     ===========  ==========  ==========  ==============================
-    ``exact``    0.996750    3.3e-3      +0.130 %
-    ``fsa``      0.985600    1.4e-2      -0.093 %
-    ``ratio``    0.999150    8.5e-4      +0.100 %
-    ``legacy``   0.837339    1.6e-1      -2.008 %
+    ``exact``    0.996962    3.0e-3      -0.117 %
+    ``fsa``      0.986045    1.4e-2      -0.287 %
+    ``ratio``    0.999111    8.9e-4      -0.083 %
+    ``legacy``   0.825917    1.7e-1      -3.114 %
     ===========  ==========  ==========  ==============================
+
+    Provenance (table refreshed for issue #28): re-measured on main @ 4ad4894,
+    on the synthetic golden fixture used throughout this module, production
+    defaults, single-threaded BLAS.
+    ``exact``/``ratio``/``legacy`` are from the stock R2 probe
+    (``python tests/test_seeded_reproducibility.py r2 <outdir>``, seed
+    20260804).  ``fsa`` is NOT exercised by that probe; it was run separately
+    through the same ``perturb_kinetic_equilibrium`` call with
+    ``BOUQUET_R2_IP_MODE=fsa``, so its row is measured, not carried over.
+
+    THE ``l_i`` COLUMN IS l_i(3)/``iter`` AGAINST THE STEP-6 MATCHED TARGET,
+    and it is not comparable to the values this table carried before.  Two
+    re-denominations sit between them, neither of them a physics event: #20
+    moved probe and target from l_i(1)/``std`` to l_i(3)/``iter`` (functionals
+    ~29 % apart here), and #27 repointed ``l_i_target`` from the post-step-7
+    read to ``result['li_final']``.  The second matters for THIS table in
+    particular, because route R2 skips the corrective iteration (see the note
+    on the standard loop below), so the old column charged every row for a
+    +0.342 % step-7 drift the route never applies.  ``legacy`` moves most in
+    absolute terms -- it is the uncorrected control, and what it is
+    uncorrected *against* moved too; it remains far outside
+    ``10 * _S_ATOL``, so the control has not gone vacuous.
 
     The correct measure does NOT reproduce the ``s == 1.000`` invariant more
     closely -- it reproduces it LESS closely, and for an understood reason.
