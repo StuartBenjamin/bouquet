@@ -33,6 +33,12 @@ import os
 import subprocess
 import sys
 
+# Must precede the `bouquet` import below: puts the repo root on sys.path so a
+# probe invoked directly still exercises THIS tree.  See tests/_harness.py.
+import _harness
+
+_harness.ensure_repo_on_syspath()
+
 import numpy as np
 import pytest
 
@@ -236,7 +242,10 @@ def measured(tmp_path_factory):
     work = tmp_path_factory.mktemp("fsa")
     proc = subprocess.run(
         [sys.executable, os.path.abspath(__file__), str(work)],
-        env=dict(os.environ, OMP_NUM_THREADS="1", MPLBACKEND="Agg"),
+        # See tests/_harness.py: a script's sys.path[0] is <repo>/tests, so
+        # without this the probe can import an editable-installed bouquet from
+        # a different checkout and validate the wrong revision silently.
+        env=_harness.subprocess_env(OMP_NUM_THREADS="1", MPLBACKEND="Agg"),
         capture_output=True, text=True)
     if proc.returncode != 0:
         pytest.fail(f"FSA probe failed (rc={proc.returncode}):\n"
@@ -317,5 +326,7 @@ def test_compute_flux_integral_is_not_the_plasma_area(measured):
 
 
 if __name__ == "__main__":
+    _harness.ensure_repo_on_syspath()
+    _harness.assert_bouquet_is_repo_local()
     _oft_importable()
     _probe(sys.argv[1])

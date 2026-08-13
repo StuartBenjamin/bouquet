@@ -499,6 +499,34 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
 
     guess_jinductive = create_power_flux_fun(len(psi_N), 1.5, 1.5)["y"]
 
+    # Fixed (non-perturbed) pressure components must be resolved BEFORE the
+    # reconstruction, not after it: the reconstruction's GS pressure has to be
+    # the same pressure every draw solves, otherwise l_i_target is measured on
+    # a lower-pressure equilibrium than the draws it targets (see the pressure
+    # block in reconstruct_equilibrium).
+    #
+    # Grid: p_fast is resolved onto the KINETIC grid first and then mapped to
+    # the equilibrium grid with `to_eq` -- deliberately the same two-step path
+    # the draws take (baseline resolves onto psi_N_kin, then
+    # perturb_kinetic_equilibrium applies `_kin_to_eq`, which is the identical
+    # pchip_interp).  Resolving fc.psi_N -> psi_N in one hop would be a
+    # slightly different array and would reintroduce the very inconsistency
+    # this is fixing.  `p_fast_kin` is also what the returned Baseline.p_fast
+    # field carries (kinetic grid), which downstream depends on -- unchanged.
+    #
+    # When fc.p_fast is unset, pass None rather than the zeros _resolve_fixed
+    # returns, so the default-off path does not even enter the new branch and
+    # is provably a no-op (not merely "adds 0.0").
+    fc = config.fixed_components
+    p_fast_kin = _resolve_fixed(fc.p_fast, fc.psi_N, psi_N_kin)
+    p_fast_eq = to_eq(p_fast_kin) if fc.p_fast is not None else None
+    # Z_imp is plumbed for symmetry with the draw path, but is INERT here today:
+    # FixedComponentsConfig (config.py) carries no Z_imp field at all -- Z_imp is
+    # an *output* field of the Baseline dataclass, populated only on the IMAS
+    # path. getattr keeps this a no-op now and makes it activate automatically
+    # if the config ever gains the field, rather than silently diverging again.
+    Z_imp_recon = getattr(fc, "Z_imp", None)
+
     # Capture the verbose solver chatter (DLSODE / gs_get_qprof / li-match) unless
     # the user asked for it; the curated summary is printed by Bouquet.reconstruct.
     from .utils import capture_native_output
@@ -514,6 +542,9 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             rescale_j_BS=source.rescale_j_BS,
             shelf_psi_N=source.shelf_psi_N,
             initialize_psi=True,
+            p_fast=p_fast_eq,
+            Z_imp=Z_imp_recon,
+            l_i_tolerance=float(config.generation.l_i_tolerance),
             **config.generation.bootstrap_kwargs,
         )
         # get_stats traces the q-profile and can emit gs_get_qprof warnings, so
@@ -525,15 +556,44 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         # one the two codes agree on (0.17%).  The whole downstream chain --
         # per-draw acceptance band, archive attrs, plots -- is on this scale;
         # see issue #20.  DO NOT mix with 'std'/li(1) numbers.
-        l_i_target = mygs.get_stats(
-            lcfs_pad=source.psi_pad, li_normalization="iter")["l_i"]
+        #
+        # WHICH l_i (issue #25).  This used to be a fresh get_stats read of
+        # whatever state the reconstruction happened to END on -- i.e. AFTER
+        # step 7's corrective iteration, which runs up to 8 further GS solves
+        # with a stopping rule that knows nothing about l_i.  So the number the
+        # whole ensemble is banded around was not the value step 6 matched; it
+        # was that value plus however far step 7 drifted (measured +0.50 to
+        # +0.76 % across the beta-scan family, against a 1 % per-draw band).
+        #
+        # `result['li_final']` IS the step-6 matched value: the one the secant
+        # loop drove onto the g-file's li(2), and therefore the only one with a
+        # defensible provenance as a target.  The post-corrective read is kept
+        # as a separate archived diagnostic rather than dropped, so this change
+        # ADDS provenance -- `l_i_realized_post_corrective` says where the
+        # reconstruction actually finished, and its distance from the target is
+        # reported loudly by reconstruct_equilibrium when it exceeds the band.
+        #
+        # Consume the value reconstruct_equilibrium already measured at step 7b
+        # rather than re-reading get_stats here.  The re-read was redundant --
+        # same solver state, same lcfs_pad (source.psi_pad is exactly what was
+        # passed in above), same li_normalization='iter' -- and it cost a
+        # second q-profile trace plus its gs_get_qprof warnings.  It also had
+        # the WEAKER provenance of the two: it reported whatever state the
+        # solver happens to be in at THIS line, which is "post step 7" only for
+        # as long as nothing in between touches the equilibrium.  Consuming the
+        # returned field pins the number to the step it is named after.
+        # Verified bit-identical to the old re-read on the D3D-like fixture
+        # (delta exactly 0.0), so no archived value moves.
+        l_i_target = float(result["li_final"])
+        l_i_realized_post_corrective = float(
+            result["li_realized_post_corrective"])
         recon_metrics = _reconstruction_metrics(
-            mygs, eqdsk, result, source, l_i_target)
+            mygs, eqdsk, result, source, l_i_target,
+            l_i_realized_post_corrective=l_i_realized_post_corrective)
 
     j_phi = np.asarray(result["j_phi_fit"], dtype=float)
     j_BS = np.asarray(result["j_BS_used"], dtype=float)
 
-    fc = config.fixed_components
     j_NBI = _resolve_fixed(fc.j_NBI, fc.psi_N, psi_N)
     j_RF = _resolve_fixed(fc.j_RF, fc.psi_N, psi_N)
     j_inductive = j_phi - j_BS - j_NBI - j_RF   # == j_inductive_fit when NBI=RF=0
@@ -547,7 +607,9 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     # split still sums exactly to j_phi.
     j_inductive, j_BS = floor_inductive_split(j_inductive, j_BS, psi_N)
 
-    p_fast = _resolve_fixed(fc.p_fast, fc.psi_N, psi_N_kin)
+    # Resolved above (before the reconstruction, which now consumes it).
+    # Unchanged contract: the returned field is on the KINETIC grid.
+    p_fast = p_fast_kin
 
     return Baseline(
         psi_N=psi_N,
@@ -566,6 +628,18 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         j_NBI=j_NBI,
         j_RF=j_RF,
         p_fast=p_fast,
+        # SAME source as the value handed to the reconstruction above, so the
+        # two paths activate together or not at all.  The draws read
+        # `Baseline.Z_imp` (run.py hands it to generate_bouquet, and the
+        # forward / sigma=0 solves read it directly); the recon reads
+        # `Z_imp_recon`.  Leaving this at its None default while feeding
+        # `Z_imp_recon` to the recon meant that the day FixedComponentsConfig
+        # gains a Z_imp field, the reconstruction would start adding impurity
+        # pressure while the draws still did not -- silently recreating the
+        # exact recon-vs-draw pressure inconsistency this plumbing exists to
+        # remove, through the very getattr that was meant to guard it.
+        # Today both are None on this path, so this is a no-op.
+        Z_imp=Z_imp_recon,
         eqdsk_bytes=eqdsk_bytes,
         pfile_bytes=kin["raw_bytes"],
         # expose the baseline Z_eff (kinetic grid) as a switchboard channel,
@@ -578,7 +652,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     )
 
 
-def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved) -> dict:
+def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
+                            l_i_realized_post_corrective=None) -> dict:
     """Curate a TokaMaker-vs-EFIT reconstruction-fidelity dict for the summary.
 
     Each global scalar that isn't ~0 by construction (Ip, l_i, q0/q95, beta,
@@ -684,8 +759,35 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved) -> dict:
         # `li_err_pct` is the MATCHED pair: the secant loop drives these two
         # numbers together, so it is ~0 by construction and cannot detect an
         # estimator mismatch.  That is precisely how issue #20 stayed hidden.
+        #
+        # SINCE #25 IT IS VACUOUS OUTRIGHT, not merely weak.  `li` is now
+        # `l_i_target` == `result['li_final']`, the step-6 MATCHED value; so
+        # `li_err_pct` compares the secant's converged output against the very
+        # target it converged onto, and reports nothing but that loop's own
+        # tolerance.  Before #25 it was read post-step-7, so it at least
+        # carried the corrective iteration's drift.  It is kept for continuity
+        # of the summary table and because a NON-tiny value would mean the
+        # secant did not converge -- but it is not a fidelity measure.
+        # For "where did the reconstruction actually finish", read
+        # `li_realized_post_corrective` / `li_corrective_drift_pct` below; for
+        # a genuinely free estimator comparison, read the li(1) pair further
+        # down, which nothing drives together.
         "li": li_tok, "li_efit": g("li"), "li_err_pct": li_err,
         "li_scale": "iter(li3)",
+        # --- step-6 matched vs step-7 realized (issue #25) ------------------
+        # `li` above (== l_i_target) is the MATCHED value.  These say where the
+        # corrective iteration actually left the equilibrium, and whether that
+        # is further from the target than a draw is allowed to be.  Archived,
+        # never enforced: a visible condition, not an acceptance criterion.
+        "li_realized_post_corrective": (
+            float("nan") if l_i_realized_post_corrective is None
+            else float(l_i_realized_post_corrective)),
+        "li_corrective_drift_pct": float(
+            q.get("li3_corrective_drift_pct", float("nan"))),
+        "li_corrective_band_pct": float(
+            q.get("li3_corrective_band_pct", float("nan"))),
+        "li_corrective_out_of_band": bool(
+            q.get("li3_corrective_out_of_band", False)),
         # --- cross-estimator drift monitor (de-circularization, issue #20) --
         # The FREE pair: TokaMaker's 'std'/li(1) vs the g-file's li(1)_EFIT.
         # Nothing drives these together, so a nonzero residual is a genuine

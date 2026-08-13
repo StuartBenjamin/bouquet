@@ -30,21 +30,13 @@ if TYPE_CHECKING:
     from .baseline import Baseline
 
 
-def _shape_from_boundary(boundary_RZ):
-    """LCFS shape params (R0, Z0, a, kappa, delta) from boundary (R,Z) points."""
-    import numpy as np
-
-    rz = np.asarray(boundary_RZ, dtype=float)
-    R, Z = rz[:, 0], rz[:, 1]
-    Rmax, Rmin, Zmax, Zmin = R.max(), R.min(), Z.max(), Z.min()
-    R0 = 0.5 * (Rmax + Rmin)
-    a = 0.5 * (Rmax - Rmin)
-    Z0 = 0.5 * (Zmax + Zmin)
-    kappa = (Zmax - Zmin) / (Rmax - Rmin)
-    R_upper = R[int(np.argmax(Z))]
-    R_lower = R[int(np.argmin(Z))]
-    delta = 0.5 * ((R0 - R_upper) + (R0 - R_lower)) / a
-    return R0, Z0, a, kappa, delta
+# `_shape_from_boundary` now lives in `bouquet.utils` -- it is pure geometry
+# with no orchestration in it, and TokaMaker_interface needs it too.  Importing
+# it there rather than here breaks the run <-> TokaMaker_interface cycle that a
+# runtime `from .run import _shape_from_boundary` would otherwise create (run
+# already imports from TokaMaker_interface).  Re-exported here because the
+# original home is the documented one and callers import it from this module.
+from .utils import _shape_from_boundary  # noqa: F401  (compatibility re-export)
 
 
 class Bouquet:
@@ -580,6 +572,18 @@ class Bouquet:
               f"max {m['boundary_max_mm']:.2f} mm   axis off {m['axis_offset_mm']:.2f} mm")
         print(f"  {'jphi resid':<12} core RMS {m['jphi_core_rms_MA']:.3f}   "
               f"edge RMS {m['jphi_edge_rms_MA']:.3f} MA/m²")
+        # Step-6 matched (== l_i_target) vs step-7 realized, issue #25.  Printed
+        # ALWAYS, not only when out of band -- a drift that surfaces only when
+        # it breaches is a drift nobody watches shrink or grow.
+        _lr = m.get('li_realized_post_corrective', float('nan'))
+        if np.isfinite(_lr):
+            _dp = m.get('li_corrective_drift_pct', float('nan'))
+            _bp = m.get('li_corrective_band_pct', float('nan'))
+            _flag = ("  ⚠ OUTSIDE the l_i band"
+                     if m.get('li_corrective_out_of_band') else "")
+            print(f"  {'l_i post-7':<12} {_lr:.5f}       "
+                  f"(target {m['li']:.5f} = step-6 matched, {_dp:+.3f}%, "
+                  f"band ±{_bp:.2f}%){_flag}")
 
     def _forward_solve_imas_baseline(self):
         """Forward GS solve of the IMAS baseline (j_phi + pressure) on mygs.
@@ -870,7 +874,7 @@ class Bouquet:
         """Regression guard: the draw pipeline must reproduce the baseline
         j_BS split when the kinetics are UNPERTURBED (sigma=0).
 
-        Replays the exact per-draw pre-SWB sequence -- state-anchor solve at
+        Replays the per-draw pre-SWB sequence -- state-anchor solve at
         the baseline j_phi/pressure, ``solve_with_bootstrap`` on the baseline
         kinetics, toroidal conversion, axis-transition smoothing -- and
         compares the resulting bootstrap spike to ``baseline.j_BS``.  Any
@@ -878,6 +882,19 @@ class Bouquet:
         j_phi target bias: the 2026-07 hollow-core/q0-offset bug was exactly
         such a sigma=0 inconsistency (recon-only axis smoothing), invisible
         to l_i but a wholesale +12% shift of the q0 distribution.
+
+        The anchor here is NOT started from the reconstruction's converged
+        state: psi is re-initialised (cold-started) from the LCFS shape
+        first, because inheriting that state can leave the under-relaxed
+        Picard iteration already on this forward solve's own fixed point,
+        with no gradient to descend -- it then parks just above ``nl_tol``
+        and exhausts ``maxits`` (see the comment at the call site below).
+        That makes this one step a deliberate departure from the draw path,
+        but the sequence was never a mirror of it in the first place: a
+        per-draw anchor warm-starts from the PREVIOUS draw's landed state,
+        which a single standalone check has no equivalent of.  Cold and warm
+        starts converge to the same equilibrium here; only the starting
+        point of the iteration differs.
 
         Costs one SWB call (~1 min). Call after ``reconstruct()`` /
         ``prepare_baseline()`` and before ``generate()``; leaves ``mygs``
@@ -955,9 +972,45 @@ class Bouquet:
         pp["y"][-1] = 0.0
         ffp = {"type": "jphi-linterp",
                "y": np.asarray(bl.j_phi, dtype=float).copy(), "x": psi_N}
+        # ---- psi re-initialisation before the state-anchor solve ------------
+        # The reconstruction leaves mygs on its own converged inverse-mode
+        # state.  When that state already sits (to ~1e-4 in the nonlinear
+        # residual) ON this forward jphi-linterp solve's fixed point, the
+        # under-relaxed Picard iteration has no gradient to descend and parks
+        # in a small limit cycle just ABOVE nl_tol=1e-6 instead of crossing it
+        # -- the solve then burns all 800 iterations and raises
+        # 'Exceeded "maxits"'.  Unlike the per-draw anchor
+        # (TokaMaker_interface.py) this call is not wrapped in try/except, so
+        # the failure propagates and kills the run.
+        # Re-initialising psi from the LCFS shape starts the iteration far
+        # enough from the fixed point that it converges normally (same
+        # convention as the IMAS forward-solve init at run.py:612).
+        #
+        # STATE GUARD.  init_psi DISCARDS the reconstruction's converged state
+        # and installs a cold analytic psi.  Before this re-init a failed solve
+        # here left mygs on that converged state -- benign, which is why the
+        # failure was allowed to propagate untouched.  Now a failure would
+        # leave the caller holding a cold, non-converged psi instead.  The
+        # exception must stay fatal (this is a verification routine; a silent
+        # fallback would defeat it), but the state it leaves behind should be
+        # the one it was handed.  Snapshot, restore on the way out, re-raise.
+        _snap = None
+        _can_snap = (hasattr(mygs, "copy_eq") and hasattr(mygs, "replace_eq"))
+        if getattr(self, "_boundary_RZ", None) is not None:
+            if _can_snap:
+                _snap = mygs.copy_eq()
+            _R0, _Z0, _a, _kappa, _delta = _shape_from_boundary(
+                self._boundary_RZ)
+            mygs.init_psi(_R0, _Z0, _a, _kappa, _delta)
         mygs.set_targets(Ip=float(bl.Ip_target), pax=float(pressure[0]))
         mygs.set_profiles(pp_prof=pp, ffp_prof=ffp)
-        mygs.solve()
+        try:
+            mygs.solve()
+        except Exception:
+            if _snap is not None:
+                # do not hand back the cold psi this method installed
+                mygs.replace_eq(source_eq=_snap)
+            raise
 
         seed = create_power_flux_fun(len(psi_N), 1.5, 1.5)["y"]
         res = solve_with_bootstrap(

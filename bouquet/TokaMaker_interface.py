@@ -49,10 +49,54 @@ from .utils import (
     store_equilibrium,
     store_baseline_profiles,
     _scan_key,
+    _shape_from_boundary,
     read_eqdsk_from_bytes,
 )
 from .io.geqdsk import read_geqdsk
 from .physics import q_ravg
+
+# ---- Masked anchor-solve failure counter (issue #24) ------------------------
+# The per-draw anchor solves swallow failures (fallback: `pass`; band
+# resampling: `continue`).  Those masks are deliberate control flow, but the
+# failures were invisible, so the converged-on-entry degeneracy (see
+# verify_sigma0_consistency and issue #24) cannot be sized on real campaigns.
+# This counter ONLY observes: control flow is unchanged, and each increment
+# prints one line.
+#
+# WHAT THIS TALLY IS AND IS NOT.  Read before relying on it:
+#
+#  * It is a plain module-level dict and is NEVER reset.  Its value is
+#    therefore "increments since this interpreter imported the module", not
+#    "failures in this run".  The per-unit reading of an archived genlog holds
+#    only because a campaign unit is its own PROCESS; two runs in one
+#    interpreter share -- and keep accumulating into -- the same counters.
+#  * It has NO consumer beyond the print below.  Nothing archives it, nothing
+#    asserts on it, and nothing reads it at the end of a run.  The evidence a
+#    campaign keeps is the printed `[anchor-masked-failure]` lines in the
+#    captured genlog, not this dict.
+#  * Under `bouquet.parallel` it is per-WORKER.  That path uses a spawn
+#    ProcessPoolExecutor, so every worker imports its own copy; the parent's
+#    counters stay at zero no matter how many failures the workers mask, and
+#    the per-worker tallies are only visible in each worker's captured output.
+#
+# Deliberately NOT archived into the run diagnostics: the parent-side value is
+# zero under the parallel backend (so it would archive a confidently wrong
+# number), and adding a key to the archived diagnostics would move the
+# goldens, which this non-physics work must not do.  Sizing the degeneracy
+# across a real campaign should aggregate the printed lines from the genlogs.
+ANCHOR_MASKED_FAILURES = {"recon_anchor_fallback": 0, "band_resample": 0,
+                          # third site (issue #24): the unperturbed
+                          # jphi-linterp baseline solve, whose failure silently
+                          # reverts every per-draw boundary/l_i diagnostic to
+                          # recon's inverse-mode reference.
+                          "jphi_baseline": 0}
+
+
+def _count_masked_anchor_failure(site, exc):
+    ANCHOR_MASKED_FAILURES[site] += 1
+    print(f"  [anchor-masked-failure] {site} #{ANCHOR_MASKED_FAILURES[site]}: "
+          f"{type(exc).__name__}: {exc}", flush=True)
+
 
 # ---- Adaptive corrective iteration ----
 def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
@@ -112,8 +156,28 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
     # from ANOTHER code's flux geometry and may not be exactly achievable, so
     # undamped Newton steps can oscillate/diverge; track the best full-profile
     # RMS state and restore it at the end instead of trusting the last iterate.
-    _can_snap = protect_state and hasattr(mygs, "copy_eq")
+    # Gate on BOTH halves of the snapshot/restore pair.  Every snapshot taken
+    # here is eventually consumed by `replace_eq` (the per-iteration
+    # solve-failure restore and the final keep-best restore), so a solver
+    # object exposing only `copy_eq` would pass a copy_eq-only gate and then
+    # raise AttributeError on the restore -- turning a recoverable solve
+    # failure into a hard crash.  Matches the both-methods gate already used
+    # at the warm-start snapshot site further down this module.
+    _can_snap = (protect_state and hasattr(mygs, "copy_eq")
+                 and hasattr(mygs, "replace_eq"))
     best = {"rms": np.inf, "eq": None, "out": None}
+    full_rms_history = []
+    # Seed the output with the UNCORRECTED input.  If the very first solve
+    # raises, the handler below breaks out before `j_phi_output` is ever
+    # assigned, and the return statement then raised NameError -- masking a
+    # solve failure behind an unrelated-looking crash.  Seeding it means that
+    # case degrades to "no correction was applied", which is the truthful
+    # answer and matches the non-fatal intent of the break; the empty
+    # `edge_rms_history` and the warning below tell the caller it happened.
+    # (A later-iteration failure is unaffected: it keeps the last good
+    # iterate, exactly as before.)
+    j_phi_output = j_phi_input.copy()
+    it = -1
 
     for it in range(max_iters):
         ffp = {"type": "jphi-linterp", "y": j_phi_input.copy(), "x": psi_N}
@@ -125,6 +189,14 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
         except (ValueError, RuntimeError) as e:
             if verbose:
                 print(f"  [jphi_corr iter {it+1}] solve failed: {e}")
+            if it == 0:
+                # Not verbose-gated: no iterate ever succeeded, so the caller is
+                # getting its own input back with no correction applied at all.
+                # That is a materially different result from a converged one and
+                # must not be inferable only from an empty RMS history.
+                print(f"  [jphi_corr] WARNING: the FIRST corrective solve "
+                      f"failed ({e}); returning the uncorrected input j_phi "
+                      f"-- no corrective iteration was applied")
             if _snap is not None:
                 mygs.replace_eq(source_eq=_snap)   # do not leave the diverged state
             break
@@ -136,13 +208,27 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
         diff = j_phi_output - target_jphi
         rms_edge = float(np.sqrt(np.mean(diff[edge_mask]**2)))
         edge_rms_history.append(rms_edge)
+        _kept = None
         if _can_snap:
             rms_full = float(np.sqrt(np.mean(diff**2)))
-            if rms_full < best["rms"]:
+            full_rms_history.append(rms_full)
+            _kept = rms_full < best["rms"]
+            if _kept:
                 best.update(rms=rms_full, eq=mygs.copy_eq(), out=j_phi_output.copy())
 
         if verbose:
-            print(f"  [jphi_corr iter {it+1}] edge RMS = {rms_edge/1e6:.6f} MA/m²")
+            # Report the FULL-domain RMS too when keep-best is on: the stopping
+            # rule is on the edge, but the state that gets kept is chosen on the
+            # full domain, so a log showing only the edge cannot explain which
+            # iterate was landed on (issue #25).
+            if _can_snap:
+                print(f"  [jphi_corr iter {it+1}] edge RMS = "
+                      f"{rms_edge/1e6:.6f} MA/m², full RMS = "
+                      f"{full_rms_history[-1]/1e6:.6f} MA/m² "
+                      f"({'KEPT (new best)' if _kept else 'discarded'}; "
+                      f"best {best['rms']/1e6:.6f})")
+            else:
+                print(f"  [jphi_corr iter {it+1}] edge RMS = {rms_edge/1e6:.6f} MA/m²")
 
         # Check convergence after min_iters
         if it >= min_iters - 1 and len(edge_rms_history) >= 2:
@@ -162,6 +248,15 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
     if _can_snap and best["eq"] is not None:
         mygs.replace_eq(source_eq=best["eq"])      # land on the best state seen
         j_phi_output = best["out"]
+        if verbose:
+            # The kept-RMS sequence is monotone non-increasing BY CONSTRUCTION;
+            # printing it is what lets a run be checked rather than trusted.
+            _kept_traj = np.minimum.accumulate(np.asarray(full_rms_history))
+            print(f"  [jphi_corr] keep-best landed on full RMS "
+                  f"{best['rms']/1e6:.6f} MA/m² (per-iterate "
+                  + " -> ".join(f"{r/1e6:.6f}" for r in full_rms_history)
+                  + "; kept "
+                  + " -> ".join(f"{r/1e6:.6f}" for r in _kept_traj) + ")")
 
     return j_phi_output, it + 1, edge_rms_history
 
@@ -1099,6 +1194,78 @@ class _AnchorIpRenorm:
         the measure-based modes, which apply no calibration."""
         return 1.0 if self._kappa is None else self._kappa
 
+    def inductive_share(self, j_ind):
+        r"""``f_ind``: the LINEAR part of the measure on *j_ind*, over the
+        :math:`I_p` demand -- i.e. what fraction of the demanded current the
+        unscaled inductive profile carries.
+
+        .. math::
+            f_{\rm ind} = \frac{\int w\,j_{\rm ind}\,d\psi_N}{I_p^{\rm demand}}
+
+        (``exact``/``fsa``: demand ``Ip_target``, so this is literally
+        ``\int w j_ind / Ip_target``; ``ratio``: demand
+        ``kappa*Ip_target``, the calibrated one that mode roots against, so the
+        identity below holds in every mode.)
+
+        **Why this is on the class.**  ``solve_scale`` returns ``s``, and the
+        :math:`\sigma=0` invariant is stated on ``|s-1|``.  But ``s`` is not the
+        residual -- it is the residual DIVIDED by this number, because the whole
+        :math:`I_p` miss is charged to the inductive amplitude alone (route R2
+        holds :math:`j_{BS}` fixed, by design).  Writing
+        :math:`\Delta = I_p[j_{\rm ind}+j_{\rm other}] - I_p^{\rm demand}`, the
+        affine measure gives exactly
+
+        .. math::
+            s - 1 = \frac{-\Delta}{\int w\,j_{\rm ind}}
+                  \qquad\Longrightarrow\qquad
+            |s - 1|\,f_{\rm ind} = \left|\Delta / I_p^{\rm demand}\right| .
+
+        So ``|s-1|`` reported alone is not comparable across operating points:
+        the same Ip-space residual reads ~2x larger on a high-bootstrap
+        (low ``f_ind``) archive than on a low-beta one.  Reporting the pair is
+        what makes the number interpretable, and the product is the quantity
+        the acceptance budget is actually derived in -- see issue #23 and
+        ``tests/test_seeded_reproducibility._S_FIND_ATOL_EXACT``.
+
+        Parameters
+        ----------
+        j_ind : ndarray
+            The inductive profile handed to :meth:`solve_scale` (UNSCALED --
+            the same array, not ``s*j_ind``).
+
+        Returns
+        -------
+        float
+            ``f_ind``.  Dimensionless; ~0.45-0.95 over a single-machine beta
+            ramp.
+
+            Two values are quoted for the D3D-like golden, and they are
+            measurements at DIFFERENT points, not a disagreement:
+
+            * **0.772** -- the issue-#23-derived constant, measured at the
+              *baseline-recon* geometry with an independent integrator.  This
+              is the provenance of the ``3.86e-3 = 5e-3 * 0.772`` acceptance
+              bar and is frozen as the reviewed number.
+            * **0.7976** -- what THIS method returns in the fixture, measured
+              at the :math:`\sigma=0` R2 anchor in exact mode.
+
+            The few-percent gap between them is the baseline -> anchor step
+            that #23 explicitly flags as not yet decomposed.  Carrying 0.772
+            in the bar makes that bar slightly TIGHTER at the golden than a
+            re-derivation would (3.86e-3 vs 5e-3*0.7976 = 3.99e-3), so the
+            discrepancy relaxes nothing.  See
+            ``tests/test_seeded_reproducibility._S_FIND_ATOL_EXACT``.
+        """
+        j_ind = np.asarray(j_ind, dtype=float)
+        if self._w is not None:
+            i_ind = self._Ip_of(j_ind) - self._c        # linear part only
+        else:
+            i_ind = float(self.flux_integral(self._psi_N, j_ind))
+        target = self._target
+        if not np.isfinite(target) or target == 0.0:
+            return float("nan")
+        return float(i_ind / target)
+
     def solve_scale(self, j_ind, j_other):
         r"""Inductive scale ``s`` putting ``s*j_ind + j_other`` at the
         :math:`I_p` demand, in the frozen anchor geometry.
@@ -1155,6 +1322,52 @@ def _r2_ip_scale(anchor_ip, mygs, j_ind, j_other, psi_N, Ip_target):
         args=(mygs, j_ind, j_other, psi_N, Ip_target),
         bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
         method="brentq", rtol=1e-6).root)
+
+
+def _fmt_s_and_find(s, f_ind, mode=None):
+    """The R2 QC fragment: ``|s-1|``, ``f_ind`` and their product, together.
+
+    ``s`` on its own is a ratio whose denominator is the inductive share, so a
+    bare ``|s-1|`` cannot be compared between a low-beta and a high-bootstrap
+    archive.  Every place that reports the scale reports this fragment with it,
+    so the Ip-space residual ``|s-1|*f_ind`` -- the quantity the acceptance
+    budget is derived in -- is readable off the log without a second lookup.
+    See :meth:`_AnchorIpRenorm.inductive_share` and issue #23.
+
+    ``mode`` STAMPS THE MEASURE, and is not cosmetic.  ``f_ind`` is normalised
+    by the mode's own Ip demand, and those demands are not the same number: in
+    ``exact``/``fsa`` mode the denominator is the physical FSA current, while
+    in ``ratio`` mode it is the CALIBRATED demand.  MEASURED on the D3D-like
+    golden at the sigma=0 R2 anchor: f_ind = 0.7976 in exact mode vs 0.7809 in
+    ratio mode, i.e. the ratio denominator reads ~2.1% high, so ratio-mode
+    f_ind sits ~2.1% BELOW the physical share.  Two runs therefore print
+    different ``f_ind`` (and hence different products) for identical physics,
+    purely because of the measure.  Emitting them under one unlabelled
+    ``[R2-invariant]`` tag invites exactly the cross-operating-point comparison
+    issue #23 exists to prevent, so the label travels with the number.
+    """
+    out = f", |s-1|={abs(float(s) - 1.0):.3e}"
+    tag = f" [mode={mode}]" if mode else ""
+    if f_ind is None or not np.isfinite(f_ind):
+        return out + ", f_ind=n/a" + tag
+    return (out + f", f_ind={float(f_ind):.4f}"
+            f", |s-1|*f_ind={abs(float(s) - 1.0) * float(f_ind):.3e}" + tag)
+
+
+def _r2_f_ind(anchor_ip, j_ind):
+    """Inductive share for the scale returned by :func:`_r2_ip_scale`.
+
+    ``None`` when there is no frozen anchor (legacy/fallback root): the bracketed
+    root against the live solver has no cached measure to read the share off, and
+    a number computed on a DIFFERENT state would silently mis-normalise ``s``.
+    Reporting nothing is the honest answer there.
+    """
+    if anchor_ip is None:
+        return None
+    try:
+        return float(anchor_ip.inductive_share(j_ind))
+    except Exception:                       # diagnostic only -- never fatal
+        return None
 
 
 def smooth_jbs_transition(j_BS):
@@ -1652,6 +1865,12 @@ def perturb_kinetic_equilibrium(
     # R2 inductive Ip-renorm scale actually applied (None off route R2);
     # surfaced on diagnostics['r2_ip_scale'] -- at sigma=0 it must be 1.000.
     _r2_scale_used = None
+    # Inductive share f_ind at the same call (None off route R2).  `s` alone is
+    # not interpretable across operating points: |s-1| = |Delta/Ip| / f_ind, so
+    # the SAME Ip-space residual reads ~2x larger on a high-bootstrap archive.
+    # Surfaced on diagnostics['r2_f_ind'] and printed next to the scale so the
+    # pair travels together.  See _AnchorIpRenorm.inductive_share, issue #23.
+    _r2_f_ind_used = None
 
     # pin_jphi: pin j_phi to recon's converged shape (only pressure perturbs
     # per draw).  Set via the function argument; the PIN_JPHI env var is kept
@@ -2210,8 +2429,10 @@ def perturb_kinetic_equilibrium(
                                    Ip_target)
                 _anchor_jind = _sA * _candA
                 _r2_scale_used = float(_sA)
+                _r2_f_ind_used = _r2_f_ind(_anchor_ip, _candA)
                 print(f"  [perturb-anchor] GPR-perturbed j_ind in anchor "
-                      f"(Ip-renorm scale={_sA:.4f})")
+                      f"(Ip-renorm scale={_sA:.4f}"
+                      + _fmt_s_and_find(_sA, _r2_f_ind_used, _r2_mode) + ")")
             new_jphi = _anchor_jind + spike_profile + j_fixed_eff
         _psi_range_anchor = mygs.psi_bounds[1] - mygs.psi_bounds[0]
         _pp_anchor = {"type": "linterp",
@@ -2251,8 +2472,9 @@ def perturb_kinetic_equilibrium(
             mygs.set_profiles(pp_prof=_pp_anchor, ffp_prof=_ffp_fb)
             try:
                 mygs.solve()
-            except Exception:
-                pass
+            except Exception as _fb_exc:
+                # deliberate mask (see issue #24) -- now counted, not silent
+                _count_masked_anchor_failure("recon_anchor_fallback", _fb_exc)
 
         eq_stats = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
         baseline_li_proxy = calc_cylindrical_li_proxy(mygs, new_jphi, psi_pad)
@@ -2281,18 +2503,27 @@ def perturb_kinetic_equilibrium(
                                    Ip_target)
                 new_jphi = _sA * _c + spike_profile + j_fixed_eff
                 _r2_scale_used = float(_sA)
+                _r2_f_ind_used = _r2_f_ind(_anchor_ip, _c)
                 mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
                 mygs.set_profiles(pp_prof=_pp_anchor,
                                   ffp_prof={"type": "jphi-linterp", "y": new_jphi, "x": psi_N})
                 try:
                     mygs.solve()
-                except Exception:
+                except Exception as _rs_exc:
+                    # deliberate mask (see issue #24) -- now counted, not silent
+                    _count_masked_anchor_failure("band_resample", _rs_exc)
                     continue
                 eq_stats = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
             _erp = 100.0 * abs(float(eq_stats['l_i']) - l_i_target) / l_i_target
             print(f"  [perturb-anchor] band-conditioned: {_nr} resample(s), "
                   f"l_i={float(eq_stats['l_i']):.4f} ({_erp:.2f}% vs band {_tolp:.2f}%)",
                   flush=True)
+            # QC line for the sigma=0 s-invariant: NEVER |s-1| on its own.
+            if _r2_scale_used is not None:
+                print(f"  [R2-invariant] s={_r2_scale_used:.6f}"
+                      + _fmt_s_and_find(_r2_scale_used, _r2_f_ind_used,
+                                        _r2_mode)
+                      + "  (bound is on the product; issue #23)", flush=True)
             if _erp > _tolp:
                 raise RuntimeError(
                     f"perturb_jind_in_anchor: no in-band draw in {int(max_li_iter)} "
@@ -2855,6 +3086,11 @@ def perturb_kinetic_equilibrium(
         # golden invariant: at sigma=0 the archived split is reproduced, so
         # this must be 1.000.  See _AnchorIpRenorm.
         "r2_ip_scale": _r2_scale_used,
+        # ...and the inductive share it was normalised by, WITHOUT which
+        # `r2_ip_scale` is not comparable between operating points:
+        # |s-1| = |Delta/Ip| / f_ind.  The acceptance bound is on the product
+        # (issue #23); see _AnchorIpRenorm.inductive_share.
+        "r2_f_ind": _r2_f_ind_used,
         "aux": aux_out,
     }
 
@@ -3275,6 +3511,70 @@ def generate_bouquet(
                        if jphi_diff is not None else input_j_phi.copy())
             _ffp_b = {"type": "jphi-linterp",
                       "y": _jphi_b, "x": psi_N}
+            # ---- psi re-initialisation before the baseline solve (issue #24) --
+            # This is the THIRD site of the converged-on-entry degeneracy, and
+            # the same treatment as the sigma=0 state anchor got in #22.
+            # `mygs` arrives here on the reconstruction's own converged state;
+            # once the reconstruction solves the SAME pressure the draws do,
+            # that state sits essentially ON this forward jphi-linterp solve's
+            # fixed point.  The under-relaxed Picard iteration then has no
+            # gradient to descend, parks in a small limit cycle just above
+            # nl_tol, burns all `maxits` iterations and raises
+            # 'Exceeded "maxits"' -- a hard failure reported for a state that is
+            # physically converged.  Re-initialising psi from the LCFS shape
+            # starts the iteration far enough away that it converges normally.
+            #
+            # The shape is taken from the state we are about to leave (the same
+            # LCFS the recon landed on), which is the local equivalent of the
+            # run.py hunk's g-file boundary; `safe_trace_surf` snapshots and
+            # restores, so the trace itself perturbs nothing.  Failure to get a
+            # usable contour is not fatal: skip the re-init and solve warm, i.e.
+            # exactly the previous behaviour.
+            #
+            # STATE GUARD.  `init_psi` DISCARDS the state we arrive on (recon's
+            # converged equilibrium) and installs a cold analytic psi.  The
+            # handler below advertises "REVERTING to the recon (inverse)
+            # reference", and before the re-init existed that was literally
+            # true -- a failed solve left mygs untouched on recon's converged
+            # state, which is why #24 classed the fallback as benign.  With an
+            # unguarded init_psi it is no longer true: the message would be
+            # printed while mygs sits on a cold, non-converged psi, which then
+            # poisons the warm start of every subsequent draw.  Snapshot before
+            # the re-init so the revert the message promises actually happens.
+            _bl_snap = None
+            _bl_can_snap = (hasattr(mygs, "copy_eq")
+                            and hasattr(mygs, "replace_eq"))
+            _init_lcfs_exc = None
+            try:
+                _init_lcfs = safe_trace_surf(mygs, 1.0 - psi_pad)
+            except Exception as _exc:
+                _init_lcfs = None
+                _init_lcfs_exc = _exc
+            if _init_lcfs is not None and len(np.asarray(_init_lcfs)) >= 4:
+                _bR0, _bZ0, _ba, _bkap, _bdel = _shape_from_boundary(_init_lcfs)
+                if _bl_can_snap:
+                    _bl_snap = mygs.copy_eq()
+                mygs.init_psi(_bR0, _bZ0, _ba, _bkap, _bdel)
+                print(f"  [jphi-baseline] psi re-initialised from the landed "
+                      f"LCFS (R0={_bR0:.4f} a={_ba:.4f} kappa={_bkap:.4f} "
+                      f"delta={_bdel:.4f}) before the forward solve "
+                      f"(converged-on-entry guard, issue #24)")
+            else:
+                # Say WHY the trace was unusable.  The fallback is deliberately
+                # non-fatal, so this line is the only record a run keeps of it;
+                # dropping the exception detail makes a trace failure and a
+                # merely-too-short contour indistinguishable after the fact.
+                if _init_lcfs_exc is not None:
+                    _why = (f"safe_trace_surf raised "
+                            f"{type(_init_lcfs_exc).__name__}: {_init_lcfs_exc}")
+                elif _init_lcfs is None:
+                    _why = "safe_trace_surf returned None"
+                else:
+                    _why = (f"traced contour has only "
+                            f"{len(np.asarray(_init_lcfs))} points (need >= 4)")
+                print(f"  [jphi-baseline] WARN: could not trace an LCFS to "
+                      f"re-initialise psi from ({_why}); solving warm (the "
+                      f"converged-on-entry stall of issue #24 is possible here)")
             mygs.set_targets(Ip=initial_Ip_target, pax=float(pressure_solve[0]))
             mygs.set_profiles(pp_prof=_pp_b, ffp_prof=_ffp_b)
             try:
@@ -3298,8 +3598,37 @@ def generate_bouquet(
                       f"solved: l_i(3)={_baseline_li3:.5f} Ip={_recon_Ip:.0f}; "
                       f"per-draw boundary/l_i now reference THIS baseline")
             except (ValueError, RuntimeError) as _bl_exc:
-                print(f"  [jphi-baseline] solve failed ({_bl_exc}); "
-                      f"falling back to recon (inverse) reference")
+                # Deliberate mask (issue #24, third site) -- now COUNTED, and
+                # the revert spelled out.  Previously this printed one line and
+                # moved on, so an archive could not tell you whether its
+                # per-draw boundary/l_i diagnostics were referenced to the
+                # jphi-linterp baseline the draws live in or to recon's
+                # inverse-mode LCFS -- two references ~1.6 mm / ~0.9 % in l_i(3)
+                # apart, which is the whole reason this baseline solve exists.
+                # Make the revert real BEFORE announcing it (and before the
+                # count, so the counted event is the fully-handled one): put
+                # mygs back on the state init_psi discarded, or every
+                # subsequent draw warm-starts from a cold, non-converged psi.
+                if _bl_snap is not None:
+                    mygs.replace_eq(source_eq=_bl_snap)
+                    _bl_reverted = "solver state restored to recon's"
+                elif _bl_can_snap:
+                    # psi was never re-initialised (no usable LCFS trace), so
+                    # the state was never discarded -- nothing to restore.
+                    _bl_reverted = "solver state untouched (no psi re-init)"
+                else:
+                    _bl_reverted = ("solver state NOT restored: this object "
+                                    "exposes no copy_eq/replace_eq pair")
+                _count_masked_anchor_failure("jphi_baseline", _bl_exc)
+                print(f"  [jphi-baseline] solve failed ({_bl_exc}); REVERTING "
+                      f"to the recon (inverse) reference [{_bl_reverted}] -- "
+                      f"this run's "
+                      f"per-draw boundary and l_i diagnostics carry the "
+                      f"~1.6 mm / ~0.9 % representation offset the "
+                      f"jphi-linterp baseline exists to remove, and the "
+                      f"soft-reg coil target stays recon's inverse-mode set "
+                      f"(l_i(3) reference {_baseline_li3:.5f} = l_i_target, "
+                      f"NOT a solved baseline)")
 
         # ---- Boundary-shift diagnostic ----
         # The reference LCFS for per-stage boundary-deviation reporting
@@ -5104,7 +5433,9 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                             isoflux_pts, weights, psi_pad,
                             guess_jinductive,n_k,psi_bridge,rescale_j_BS,
                             shelf_psi_N,initialize_psi=True,
-                            isolate_edge_jBS=False, **kwargs):
+                            isolate_edge_jBS=False,
+                            p_fast=None, Z_imp=None,
+                            l_i_tolerance=0.01, **kwargs):
     r"""Reconstruct a single Grad-Shafranov equilibrium from a geqdsk
     reference and kinetic profiles, matching the EFIT :math:`l_i(1)`.
 
@@ -5167,6 +5498,21 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         If ``True`` (default), call ``mygs.init_psi`` using LCFS
         geometry estimated from the geqdsk boundary.  Set to ``False``
         to skip initialisation (e.g. when reusing a prior solution).
+    p_fast : ndarray, optional
+        Fixed fast-ion (beam) pressure [Pa] on ``eqdsk.psi_N`` -- i.e.
+        already regridded onto the EQUILIBRIUM grid by the caller, the
+        same array the draws solve with.  ``None`` (default) means zero,
+        which reproduces the pre-fix thermal-only behaviour bitwise.
+    Z_imp : float, optional
+        Single effective impurity charge for the one-Zeff impurity
+        pressure term.  ``None``/``0`` (default) disables it.
+    l_i_tolerance : float, optional
+        The per-draw :math:`l_i` acceptance band, as a FRACTION (default 0.01
+        == 1 %; pass ``config.generation.l_i_tolerance``).  Used only to decide
+        whether the step-7 corrective iteration moved :math:`l_i(3)` off the
+        step-6 matched value by more than the draws are allowed to sit from it
+        -- a REPORTED condition, never a raise.  See the ``[li post-corrective]``
+        block and issue #25.
     **kwargs
         Additional keyword options passed through to
         :func:`solve_with_bootstrap` in OpenFUSIONToolkit.
@@ -5177,6 +5523,33 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         Result dictionary containing reconstructed profiles, fields,
         and comparison data keyed as documented inline.
     """
+    # ---- 0. Validate the equilibrium-grid inputs (fail before the solve) ----
+    # Checked ahead of the OpenFUSIONToolkit imports below so a caller-side
+    # shape error surfaces immediately, without needing OFT present.
+    # p_fast is contractually a full EQUILIBRIUM-grid profile.  Without this
+    # check a scalar or a length-1 array is silently broadcast by `+` below,
+    # producing a flat fast-pressure offset while the draw paths (which regrid
+    # through pchip_interp) would have raised -- i.e. the recon and the draws
+    # would again solve different pressures, the exact bug this plumbing fixes.
+    if p_fast is not None:
+        p_fast = np.asarray(p_fast, dtype=float)
+        _n_eq = np.shape(eqdsk.psi_N)[0]
+        if p_fast.shape != (_n_eq,):
+            raise ValueError(
+                "reconstruct_equilibrium: p_fast must be a 1-D array on the "
+                f"equilibrium grid eqdsk.psi_N (expected shape ({_n_eq},), got "
+                f"{p_fast.shape}). Regrid the kinetic-grid profile first, e.g. "
+                "bouquet.utils.pchip_interp(psi_N_kinetic, p_fast_kin, "
+                "eqdsk.psi_N) -- the same kin->eq map the draws use. Scalars "
+                "are rejected deliberately: they would broadcast into a flat "
+                "offset instead of a profile."
+            )
+    # Z_imp needs no analogous check: it is a single effective impurity charge
+    # (a scalar by design, see the docstring), consumed only by
+    # physics.impurity_pressure, which coerces it with `float(Z_imp)`.  There
+    # is no grid for it to mismatch, and a non-scalar would already fail loudly
+    # in that coercion rather than broadcasting silently.
+
     from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
     from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
 
@@ -5281,7 +5654,37 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
           f"at index {_d2_idx} (psi_N={eqdsk.psi_N[_d2_idx]:.5f})")
 
     # ---- 4. Pressure and GS profiles ----
+    # The GS pressure here MUST match what every consumer of this
+    # reconstruction subsequently solves, or l_i_target is measured on a
+    # different (lower-pressure) equilibrium than the draws it targets:
+    # less pressure -> smaller Shafranov shift -> R_axis inboard ->
+    # l_i(3) ~ 1/R_axis reads HIGH.  l_i_target is load-bearing (acceptance
+    # band centre and the Newton proxy target), so that bias propagates.
+    #
+    # Term order and semantics below mirror, exactly:
+    #   perturb_kinetic_equilibrium  (per-draw)   -- thermal, +p_fast, +impurity
+    #   the state anchor `pressure_solve`         -- pressure + imp + fast + diff
+    # Keep the three sites in step; if you change one, change all of them.
     pres_tmp = 1.6022e-19 * (ne * te + ni * ti)
+
+    # Fixed fast-ion pressure -- constant across draws, never perturbed.
+    # Supplied already on the equilibrium grid (eqdsk.psi_N) by the caller,
+    # which applies the same kin->eq PCHIP the draws use.
+    if p_fast is not None:
+        pres_tmp = pres_tmp + np.asarray(p_fast, dtype=float)
+
+    # Impurity (carbon) thermal pressure: one-Zeff single-impurity model on the
+    # SAME (ne, ni, Z_imp) set that derived the main ion.  Single-ion
+    # e*(ne*Te + ni*Ti) omits this.
+    if Z_imp:
+        from .physics import impurity_pressure
+        pres_tmp = pres_tmp + impurity_pressure(ne, ni, ti, Z_imp)
+
+    # NOTE: p_diff is deliberately NOT plumbed here.  It is defined as
+    # (equilibrium.pressure - reconstructed baseline pressure), i.e. it is
+    # computed FROM this reconstruction's output; feeding it back into the
+    # reconstruction's input would be circular.  It is applied downstream, to
+    # the baseline anchor and to every draw, where that definition holds.
     psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
     pprime_tmp = pchip_derivative(eqdsk.psi_N, pres_tmp) / psi_range
     pprime_tmp[-1] = 0.0
@@ -5559,12 +5962,68 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         corr_target = (j_ind_li + j_BS_isolated).copy()
         j_BS_isolated_corr = j_BS_isolated.copy()
 
-    # Adaptive corrective iteration
+    # Adaptive corrective iteration.
+    #
+    # protect_state=True: keep-best on the FULL-DOMAIN j_phi RMS, and land on
+    # the best state seen instead of on whatever the last Newton step produced.
+    # This is the same semantics the IMAS forward-solve path has used since the
+    # corrector was reused there (run.py); the geqdsk path was the one call site
+    # still trusting its last iterate.  It matters here for the same reason it
+    # matters there -- the loop's own stopping rule is on the EDGE RMS
+    # (psi_N > 0.9), so an iterate that improves the edge while degrading the
+    # core satisfies it and is then kept.  Measured on the beta-scan family the
+    # corrective iteration was WORSENING the core j_phi RMS by ~32% and the
+    # on-axis value by ~73%; keep-best on the full-domain RMS makes the
+    # trajectory monotone non-increasing by construction.  See issue #25.
+    #
+    # No knob values change: rtol=0.05, max_iters=8, min_iters=2, damping=1.0
+    # (the IMAS site's rtol=0.02 / damping=0.5 are ITS tuning, not part of this
+    # change -- only the state protection is mirrored).
     j_phi_output_corr, _n_corr, _corr_hist = _corrective_jphi_iteration(
         mygs, eqdsk.psi_N, corr_target, pp_prof,
         Ip_final_target, pres_tmp[0], psi_pad,
         min_iters=2, max_iters=8, rtol=0.05, verbose=True,
+        protect_state=True,
     )
+
+    # ---- 7b. Did step 7 undo step 6?  (report, do not raise) -------------
+    #
+    # Step 6's secant matched l_i(3) to li_target to a fraction of a percent.
+    # Step 7 then runs up to 8 further GS solves against a j_phi target, with a
+    # stopping rule (rtol=0.05 on the EDGE RMS) that knows nothing about l_i.
+    # Nothing re-checked l_i afterwards -- and there is no reason it should
+    # land back on the matched value.  Issue #25 measured +0.50 / +0.75 / +0.76 %
+    # drifts across the beta-scan family, i.e. up to 3/4 of a percent of pure
+    # step-ordering error sitting under every draw.
+    #
+    # This is a REPORT, deliberately not a failure: making it fatal would be a
+    # new acceptance criterion, which is not approved.  It prints loudly and is
+    # archived (reconstruction_metrics), so a campaign carries the evidence
+    # instead of the operator having to have been watching stdout.
+    _li_post_corr = float(mygs.get_stats(
+        li_normalization='iter', lcfs_pad=psi_pad)['l_i'])
+    _li_corr_drift_pct = (100.0 * (_li_post_corr - final_li) / final_li
+                          if final_li else float('nan'))
+    _li_band_pct = 100.0 * float(l_i_tolerance)
+    _li_corr_out_of_band = bool(np.isfinite(_li_corr_drift_pct)
+                                and abs(_li_corr_drift_pct) > _li_band_pct)
+    if _li_corr_out_of_band:
+        print("  " + "!" * 68)
+        print(f"  [li post-corrective] WARNING: the step-7 corrective "
+              f"iteration moved l_i(3) OFF the step-6 matched value by "
+              f"{_li_corr_drift_pct:+.3f}%, which is outside the per-draw l_i "
+              f"band (+/-{_li_band_pct:.2f}%).")
+        print(f"  [li post-corrective] matched (step 6) = {final_li:.6f}; "
+              f"realized (post step 7) = {_li_post_corr:.6f}; "
+              f"target = {li_target:.6f}.")
+        print("  [li post-corrective] l_i_target is taken from the MATCHED "
+              "value, so every draw is being banded around a number this "
+              "equilibrium no longer carries.  See issue #25.")
+        print("  " + "!" * 68)
+    else:
+        print(f"  [li post-corrective] l_i(3) matched={final_li:.6f} -> "
+              f"realized={_li_post_corr:.6f} ({_li_corr_drift_pct:+.3f}%, "
+              f"band +/-{_li_band_pct:.2f}%)")
 
     # ---- 8. Final profiles ----
     # The corrective iteration drove TokaMaker's output toward
@@ -5623,6 +6082,12 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         # l_i estimator scale that `li_error` / `final_li` are on, plus the
         # cross-estimator pair captured at the same state (issue #20).
         'li_scale': 'iter(li3)',
+        # step-6 matched vs step-7 realized (issue #25).  Archived, not
+        # enforced: a loud report, not an acceptance criterion.
+        'li3_post_corrective': float(_li_post_corr),
+        'li3_corrective_drift_pct': float(_li_corr_drift_pct),
+        'li3_corrective_band_pct': float(_li_band_pct),
+        'li3_corrective_out_of_band': bool(_li_corr_out_of_band),
         **{f'li_cross_{_k}': _v for _k, _v in li_cross.items()},
         'Ip_error_pct': float(100 * abs(Ip_tokamaker - Ip_desired) / Ip_desired),
         'boundary_rms_mm': _bnd_rms_mm,
@@ -5665,6 +6130,12 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         'eqdsk_Ip': eqdsk.Ip,
         'pres_tokamaker': pres_tmp.copy(),
         'psi_N_grid': eqdsk.psi_N.copy(),
+        # `li_final` is the step-6 MATCHED l_i(3) -- the value the secant loop
+        # actually drove onto li_target, and (issue #25) the one the ensemble's
+        # l_i_target is now taken from.  The post-step-7 realized value is a
+        # SEPARATE field, so provenance grows rather than shrinks.
         'li_final': final_li,
+        'li_realized_post_corrective': float(_li_post_corr),
+        'li_corrective_drift_pct': float(_li_corr_drift_pct),
         'quality': quality,
     }
