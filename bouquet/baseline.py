@@ -627,6 +627,18 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         j_NBI=j_NBI,
         j_RF=j_RF,
         p_fast=p_fast,
+        # SAME source as the value handed to the reconstruction above, so the
+        # two paths activate together or not at all.  The draws read
+        # `Baseline.Z_imp` (run.py hands it to generate_bouquet, and the
+        # forward / sigma=0 solves read it directly); the recon reads
+        # `Z_imp_recon`.  Leaving this at its None default while feeding
+        # `Z_imp_recon` to the recon meant that the day FixedComponentsConfig
+        # gains a Z_imp field, the reconstruction would start adding impurity
+        # pressure while the draws still did not -- silently recreating the
+        # exact recon-vs-draw pressure inconsistency this plumbing exists to
+        # remove, through the very getattr that was meant to guard it.
+        # Today both are None on this path, so this is a no-op.
+        Z_imp=Z_imp_recon,
         eqdsk_bytes=eqdsk_bytes,
         pfile_bytes=kin["raw_bytes"],
         # expose the baseline Z_eff (kinetic grid) as a switchboard channel,
@@ -746,6 +758,19 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
         # `li_err_pct` is the MATCHED pair: the secant loop drives these two
         # numbers together, so it is ~0 by construction and cannot detect an
         # estimator mismatch.  That is precisely how issue #20 stayed hidden.
+        #
+        # SINCE #25 IT IS VACUOUS OUTRIGHT, not merely weak.  `li` is now
+        # `l_i_target` == `result['li_final']`, the step-6 MATCHED value; so
+        # `li_err_pct` compares the secant's converged output against the very
+        # target it converged onto, and reports nothing but that loop's own
+        # tolerance.  Before #25 it was read post-step-7, so it at least
+        # carried the corrective iteration's drift.  It is kept for continuity
+        # of the summary table and because a NON-tiny value would mean the
+        # secant did not converge -- but it is not a fidelity measure.
+        # For "where did the reconstruction actually finish", read
+        # `li_realized_post_corrective` / `li_corrective_drift_pct` below; for
+        # a genuinely free estimator comparison, read the li(1) pair further
+        # down, which nothing drives together.
         "li": li_tok, "li_efit": g("li"), "li_err_pct": li_err,
         "li_scale": "iter(li3)",
         # --- step-6 matched vs step-7 realized (issue #25) ------------------

@@ -61,7 +61,29 @@ from .physics import q_ravg
 # failures were invisible, so the converged-on-entry degeneracy (see
 # verify_sigma0_consistency and issue #24) cannot be sized on real campaigns.
 # This counter ONLY observes: control flow is unchanged, and each increment
-# prints one line so archived genlogs carry the tally per unit.
+# prints one line.
+#
+# WHAT THIS TALLY IS AND IS NOT.  Read before relying on it:
+#
+#  * It is a plain module-level dict and is NEVER reset.  Its value is
+#    therefore "increments since this interpreter imported the module", not
+#    "failures in this run".  The per-unit reading of an archived genlog holds
+#    only because a campaign unit is its own PROCESS; two runs in one
+#    interpreter share -- and keep accumulating into -- the same counters.
+#  * It has NO consumer beyond the print below.  Nothing archives it, nothing
+#    asserts on it, and nothing reads it at the end of a run.  The evidence a
+#    campaign keeps is the printed `[anchor-masked-failure]` lines in the
+#    captured genlog, not this dict.
+#  * Under `bouquet.parallel` it is per-WORKER.  That path uses a spawn
+#    ProcessPoolExecutor, so every worker imports its own copy; the parent's
+#    counters stay at zero no matter how many failures the workers mask, and
+#    the per-worker tallies are only visible in each worker's captured output.
+#
+# Deliberately NOT archived into the run diagnostics: the parent-side value is
+# zero under the parallel backend (so it would archive a confidently wrong
+# number), and adding a key to the archived diagnostics would move the
+# goldens, which this non-physics work must not do.  Sizing the degeneracy
+# across a real campaign should aggregate the printed lines from the genlogs.
 ANCHOR_MASKED_FAILURES = {"recon_anchor_fallback": 0, "band_resample": 0,
                           # third site (issue #24): the unperturbed
                           # jphi-linterp baseline solve, whose failure silently
@@ -145,6 +167,17 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
                  and hasattr(mygs, "replace_eq"))
     best = {"rms": np.inf, "eq": None, "out": None}
     full_rms_history = []
+    # Seed the output with the UNCORRECTED input.  If the very first solve
+    # raises, the handler below breaks out before `j_phi_output` is ever
+    # assigned, and the return statement then raised NameError -- masking a
+    # solve failure behind an unrelated-looking crash.  Seeding it means that
+    # case degrades to "no correction was applied", which is the truthful
+    # answer and matches the non-fatal intent of the break; the empty
+    # `edge_rms_history` and the warning below tell the caller it happened.
+    # (A later-iteration failure is unaffected: it keeps the last good
+    # iterate, exactly as before.)
+    j_phi_output = j_phi_input.copy()
+    it = -1
 
     for it in range(max_iters):
         ffp = {"type": "jphi-linterp", "y": j_phi_input.copy(), "x": psi_N}
@@ -156,6 +189,14 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
         except (ValueError, RuntimeError) as e:
             if verbose:
                 print(f"  [jphi_corr iter {it+1}] solve failed: {e}")
+            if it == 0:
+                # Not verbose-gated: no iterate ever succeeded, so the caller is
+                # getting its own input back with no correction applied at all.
+                # That is a materially different result from a converged one and
+                # must not be inferable only from an empty RMS history.
+                print(f"  [jphi_corr] WARNING: the FIRST corrective solve "
+                      f"failed ({e}); returning the uncorrected input j_phi "
+                      f"-- no corrective iteration was applied")
             if _snap is not None:
                 mygs.replace_eq(source_eq=_snap)   # do not leave the diverged state
             break
@@ -5309,6 +5350,33 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         Result dictionary containing reconstructed profiles, fields,
         and comparison data keyed as documented inline.
     """
+    # ---- 0. Validate the equilibrium-grid inputs (fail before the solve) ----
+    # Checked ahead of the OpenFUSIONToolkit imports below so a caller-side
+    # shape error surfaces immediately, without needing OFT present.
+    # p_fast is contractually a full EQUILIBRIUM-grid profile.  Without this
+    # check a scalar or a length-1 array is silently broadcast by `+` below,
+    # producing a flat fast-pressure offset while the draw paths (which regrid
+    # through pchip_interp) would have raised -- i.e. the recon and the draws
+    # would again solve different pressures, the exact bug this plumbing fixes.
+    if p_fast is not None:
+        p_fast = np.asarray(p_fast, dtype=float)
+        _n_eq = np.shape(eqdsk.psi_N)[0]
+        if p_fast.shape != (_n_eq,):
+            raise ValueError(
+                "reconstruct_equilibrium: p_fast must be a 1-D array on the "
+                f"equilibrium grid eqdsk.psi_N (expected shape ({_n_eq},), got "
+                f"{p_fast.shape}). Regrid the kinetic-grid profile first, e.g. "
+                "bouquet.utils.pchip_interp(psi_N_kinetic, p_fast_kin, "
+                "eqdsk.psi_N) -- the same kin->eq map the draws use. Scalars "
+                "are rejected deliberately: they would broadcast into a flat "
+                "offset instead of a profile."
+            )
+    # Z_imp needs no analogous check: it is a single effective impurity charge
+    # (a scalar by design, see the docstring), consumed only by
+    # physics.impurity_pressure, which coerces it with `float(Z_imp)`.  There
+    # is no grid for it to mismatch, and a non-scalar would already fail loudly
+    # in that coercion rather than broadcasting silently.
+
     from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
     from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
 
