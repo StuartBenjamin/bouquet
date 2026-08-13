@@ -1115,6 +1115,78 @@ class _AnchorIpRenorm:
         the measure-based modes, which apply no calibration."""
         return 1.0 if self._kappa is None else self._kappa
 
+    def inductive_share(self, j_ind):
+        r"""``f_ind``: the LINEAR part of the measure on *j_ind*, over the
+        :math:`I_p` demand -- i.e. what fraction of the demanded current the
+        unscaled inductive profile carries.
+
+        .. math::
+            f_{\rm ind} = \frac{\int w\,j_{\rm ind}\,d\psi_N}{I_p^{\rm demand}}
+
+        (``exact``/``fsa``: demand ``Ip_target``, so this is literally
+        ``\int w j_ind / Ip_target``; ``ratio``: demand
+        ``kappa*Ip_target``, the calibrated one that mode roots against, so the
+        identity below holds in every mode.)
+
+        **Why this is on the class.**  ``solve_scale`` returns ``s``, and the
+        :math:`\sigma=0` invariant is stated on ``|s-1|``.  But ``s`` is not the
+        residual -- it is the residual DIVIDED by this number, because the whole
+        :math:`I_p` miss is charged to the inductive amplitude alone (route R2
+        holds :math:`j_{BS}` fixed, by design).  Writing
+        :math:`\Delta = I_p[j_{\rm ind}+j_{\rm other}] - I_p^{\rm demand}`, the
+        affine measure gives exactly
+
+        .. math::
+            s - 1 = \frac{-\Delta}{\int w\,j_{\rm ind}}
+                  \qquad\Longrightarrow\qquad
+            |s - 1|\,f_{\rm ind} = \left|\Delta / I_p^{\rm demand}\right| .
+
+        So ``|s-1|`` reported alone is not comparable across operating points:
+        the same Ip-space residual reads ~2x larger on a high-bootstrap
+        (low ``f_ind``) archive than on a low-beta one.  Reporting the pair is
+        what makes the number interpretable, and the product is the quantity
+        the acceptance budget is actually derived in -- see issue #23 and
+        ``tests/test_seeded_reproducibility._S_FIND_ATOL_EXACT``.
+
+        Parameters
+        ----------
+        j_ind : ndarray
+            The inductive profile handed to :meth:`solve_scale` (UNSCALED --
+            the same array, not ``s*j_ind``).
+
+        Returns
+        -------
+        float
+            ``f_ind``.  Dimensionless; ~0.45-0.95 over a single-machine beta
+            ramp.
+
+            Two values are quoted for the D3D-like golden, and they are
+            measurements at DIFFERENT points, not a disagreement:
+
+            * **0.772** -- the issue-#23-derived constant, measured at the
+              *baseline-recon* geometry with an independent integrator.  This
+              is the provenance of the ``3.86e-3 = 5e-3 * 0.772`` acceptance
+              bar and is frozen as the reviewed number.
+            * **0.7976** -- what THIS method returns in the fixture, measured
+              at the :math:`\sigma=0` R2 anchor in exact mode.
+
+            The few-percent gap between them is the baseline -> anchor step
+            that #23 explicitly flags as not yet decomposed.  Carrying 0.772
+            in the bar makes that bar slightly TIGHTER at the golden than a
+            re-derivation would (3.86e-3 vs 5e-3*0.7976 = 3.99e-3), so the
+            discrepancy relaxes nothing.  See
+            ``tests/test_seeded_reproducibility._S_FIND_ATOL_EXACT``.
+        """
+        j_ind = np.asarray(j_ind, dtype=float)
+        if self._w is not None:
+            i_ind = self._Ip_of(j_ind) - self._c        # linear part only
+        else:
+            i_ind = float(self.flux_integral(self._psi_N, j_ind))
+        target = self._target
+        if not np.isfinite(target) or target == 0.0:
+            return float("nan")
+        return float(i_ind / target)
+
     def solve_scale(self, j_ind, j_other):
         r"""Inductive scale ``s`` putting ``s*j_ind + j_other`` at the
         :math:`I_p` demand, in the frozen anchor geometry.
@@ -1171,6 +1243,52 @@ def _r2_ip_scale(anchor_ip, mygs, j_ind, j_other, psi_N, Ip_target):
         args=(mygs, j_ind, j_other, psi_N, Ip_target),
         bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
         method="brentq", rtol=1e-6).root)
+
+
+def _fmt_s_and_find(s, f_ind, mode=None):
+    """The R2 QC fragment: ``|s-1|``, ``f_ind`` and their product, together.
+
+    ``s`` on its own is a ratio whose denominator is the inductive share, so a
+    bare ``|s-1|`` cannot be compared between a low-beta and a high-bootstrap
+    archive.  Every place that reports the scale reports this fragment with it,
+    so the Ip-space residual ``|s-1|*f_ind`` -- the quantity the acceptance
+    budget is derived in -- is readable off the log without a second lookup.
+    See :meth:`_AnchorIpRenorm.inductive_share` and issue #23.
+
+    ``mode`` STAMPS THE MEASURE, and is not cosmetic.  ``f_ind`` is normalised
+    by the mode's own Ip demand, and those demands are not the same number: in
+    ``exact``/``fsa`` mode the denominator is the physical FSA current, while
+    in ``ratio`` mode it is the CALIBRATED demand.  MEASURED on the D3D-like
+    golden at the sigma=0 R2 anchor: f_ind = 0.7976 in exact mode vs 0.7809 in
+    ratio mode, i.e. the ratio denominator reads ~2.1% high, so ratio-mode
+    f_ind sits ~2.1% BELOW the physical share.  Two runs therefore print
+    different ``f_ind`` (and hence different products) for identical physics,
+    purely because of the measure.  Emitting them under one unlabelled
+    ``[R2-invariant]`` tag invites exactly the cross-operating-point comparison
+    issue #23 exists to prevent, so the label travels with the number.
+    """
+    out = f", |s-1|={abs(float(s) - 1.0):.3e}"
+    tag = f" [mode={mode}]" if mode else ""
+    if f_ind is None or not np.isfinite(f_ind):
+        return out + ", f_ind=n/a" + tag
+    return (out + f", f_ind={float(f_ind):.4f}"
+            f", |s-1|*f_ind={abs(float(s) - 1.0) * float(f_ind):.3e}" + tag)
+
+
+def _r2_f_ind(anchor_ip, j_ind):
+    """Inductive share for the scale returned by :func:`_r2_ip_scale`.
+
+    ``None`` when there is no frozen anchor (legacy/fallback root): the bracketed
+    root against the live solver has no cached measure to read the share off, and
+    a number computed on a DIFFERENT state would silently mis-normalise ``s``.
+    Reporting nothing is the honest answer there.
+    """
+    if anchor_ip is None:
+        return None
+    try:
+        return float(anchor_ip.inductive_share(j_ind))
+    except Exception:                       # diagnostic only -- never fatal
+        return None
 
 
 def smooth_jbs_transition(j_BS):
@@ -1669,6 +1787,12 @@ def perturb_kinetic_equilibrium(
     # R2 inductive Ip-renorm scale actually applied (None off route R2);
     # surfaced on diagnostics['r2_ip_scale'] -- at sigma=0 it must be 1.000.
     _r2_scale_used = None
+    # Inductive share f_ind at the same call (None off route R2).  `s` alone is
+    # not interpretable across operating points: |s-1| = |Delta/Ip| / f_ind, so
+    # the SAME Ip-space residual reads ~2x larger on a high-bootstrap archive.
+    # Surfaced on diagnostics['r2_f_ind'] and printed next to the scale so the
+    # pair travels together.  See _AnchorIpRenorm.inductive_share, issue #23.
+    _r2_f_ind_used = None
 
     # pin_jphi: pin j_phi to recon's converged shape (only pressure perturbs
     # per draw).  Set via the function argument; the PIN_JPHI env var is kept
@@ -2226,8 +2350,10 @@ def perturb_kinetic_equilibrium(
                                    Ip_target)
                 _anchor_jind = _sA * _candA
                 _r2_scale_used = float(_sA)
+                _r2_f_ind_used = _r2_f_ind(_anchor_ip, _candA)
                 print(f"  [perturb-anchor] GPR-perturbed j_ind in anchor "
-                      f"(Ip-renorm scale={_sA:.4f})")
+                      f"(Ip-renorm scale={_sA:.4f}"
+                      + _fmt_s_and_find(_sA, _r2_f_ind_used, _r2_mode) + ")")
             new_jphi = _anchor_jind + spike_profile + j_fixed_eff
         _psi_range_anchor = mygs.psi_bounds[1] - mygs.psi_bounds[0]
         _pp_anchor = {"type": "linterp",
@@ -2298,6 +2424,7 @@ def perturb_kinetic_equilibrium(
                                    Ip_target)
                 new_jphi = _sA * _c + spike_profile + j_fixed_eff
                 _r2_scale_used = float(_sA)
+                _r2_f_ind_used = _r2_f_ind(_anchor_ip, _c)
                 mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
                 mygs.set_profiles(pp_prof=_pp_anchor,
                                   ffp_prof={"type": "jphi-linterp", "y": new_jphi, "x": psi_N})
@@ -2312,6 +2439,12 @@ def perturb_kinetic_equilibrium(
             print(f"  [perturb-anchor] band-conditioned: {_nr} resample(s), "
                   f"l_i={float(eq_stats['l_i']):.4f} ({_erp:.2f}% vs band {_tolp:.2f}%)",
                   flush=True)
+            # QC line for the sigma=0 s-invariant: NEVER |s-1| on its own.
+            if _r2_scale_used is not None:
+                print(f"  [R2-invariant] s={_r2_scale_used:.6f}"
+                      + _fmt_s_and_find(_r2_scale_used, _r2_f_ind_used,
+                                        _r2_mode)
+                      + "  (bound is on the product; issue #23)", flush=True)
             if _erp > _tolp:
                 raise RuntimeError(
                     f"perturb_jind_in_anchor: no in-band draw in {int(max_li_iter)} "
@@ -2874,6 +3007,11 @@ def perturb_kinetic_equilibrium(
         # golden invariant: at sigma=0 the archived split is reproduced, so
         # this must be 1.000.  See _AnchorIpRenorm.
         "r2_ip_scale": _r2_scale_used,
+        # ...and the inductive share it was normalised by, WITHOUT which
+        # `r2_ip_scale` is not comparable between operating points:
+        # |s-1| = |Delta/Ip| / f_ind.  The acceptance bound is on the product
+        # (issue #23); see _AnchorIpRenorm.inductive_share.
+        "r2_f_ind": _r2_f_ind_used,
         "aux": aux_out,
     }
 

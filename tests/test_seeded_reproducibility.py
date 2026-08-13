@@ -29,9 +29,10 @@ Two things can only be checked with the real GS solver:
     ``Ip_target``; see ``TokaMaker_interface._AnchorIpRenorm``.
 
     The same probe A/Bs the FSA-measure mode (``BOUQUET_R2_IP_MODE=exact``)
-    against the default ratio calibration.  Its acceptance is separate and
-    looser BY DERIVATION, not by concession -- read ``_S_ATOL_EXACT`` before
-    touching either number.
+    against the default ratio calibration.  Its acceptance is separate, is
+    stated on the Ip-space residual ``|s-1|*f_ind`` rather than on ``|s-1|``,
+    and is looser BY DERIVATION, not by concession -- read
+    ``_S_FIND_ATOL_EXACT`` before touching either number.
 
 Runs on the synthetic D3D-like example (no proprietary data).  Marked
 ``solver`` like ``test_systematics.py``; deselect with ``pytest -m "not
@@ -94,6 +95,19 @@ _N_DRAWS = 2                 # each draw is a full solve + SWB + homotopy
 # are quoted in the assertions; none of these may be loosened to make a run
 # pass -- a miss is a regression to report, not a tolerance to widen.
 _S_ATOL = 1e-3               # |s - 1| ; measured 8.5e-4
+#
+# WHY _S_ATOL IS STILL A BARE |s-1| BAR, given that #23's whole finding is that
+# |s-1| is not comparable across operating points.  The f_ind-denominator
+# argument does apply here too -- this bar would also tighten itself on a
+# high-bootstrap archive -- so the difference is one of ROLE, not of physics.
+# _S_ATOL governs the RATIO calibration, where s is exact at sigma=0 by
+# construction: the pass condition is "the calibration reproduced itself", and
+# 1e-3 is a numerical-noise floor on an identity, not a physics budget derived
+# in Ip space.  There is no residual to rebase, so multiplying by f_ind would
+# only make the noise floor drift with the operating point.  _S_FIND_ATOL_EXACT
+# is the one that bounds a real residual, and that is the one stated on the
+# product.  If the ratio path ever stops being exact at sigma=0, this bar
+# inherits the #23 problem and must be restated on |s-1|*f_ind as well.
 _LI_REL = 0.005              # l_i vs recon ; measured +0.100%
 _JBS_FRAC = 0.02             # sigma0 j_BS vs baseline split, fraction of peak
                              # (the sigma0-guard bar) ; measured 0.265%
@@ -103,10 +117,71 @@ _JBS_FRAC = 0.02             # sigma0 j_BS vs baseline split, fraction of peak
 # construction; the FSA measure is not, because it also sees the two ways the
 # archived split fails to be the anchor -- the reconstruction's own j_phi
 # residual (+0.193% of Ip at the R2 state anchor, i.e. -0.25% of inductive
-# amplitude) and the sigma=0 SWB residual (-0.085%).  Measured |s-1| = 3.25e-3
-# against that -0.335% budget.  This bar is a NEW pin on NEW behaviour, not a
-# widening of _S_ATOL, which still governs the default path below.
-_S_ATOL_EXACT = 5e-3         # |s - 1| in exact mode ; measured 3.25e-3
+# amplitude) and the sigma=0 SWB residual (-0.085%).  This bar is a pin on
+# behaviour _S_ATOL does not govern, not a widening of it; _S_ATOL still
+# governs the default (ratio) path below.  It may not be loosened either:
+# a miss is a regression to report.
+#
+# WHAT IS BOUNDED, AND WHY IT IS NOT |s-1| (issue #23; APPROVED CHANGE).
+#
+# The budget above is quoted in Ip space -- percentages OF Ip.  `s` is not:
+# route R2 charges the whole Ip miss to the inductive amplitude alone (j_BS is
+# held fixed, by design), so for an affine measure
+#
+#     s - 1 = -Delta / int(w * j_ind)          Delta = Ip[split] - Ip_demand
+#  => |s - 1| * f_ind = |Delta / Ip_demand|,   f_ind = int(w*j_ind)/Ip_demand
+#
+# exactly (verified to 2.2e-16 on the archived-total probe in the #23
+# investigation).  `f_ind` is the inductive share: 0.772 at the baseline-recon
+# geometry of this golden (the #23-derived value -- see the two-measurement
+# note below), but 0.45-0.95 across a single-machine beta ramp.  So a CONSTANT
+# bar on |s-1| is
+# a bar whose stringency silently scales with 1/f_ind -- it reads ~2x tighter
+# on a high-bootstrap archive than on the case it was calibrated on, and #23
+# measured exactly that: archives as self-consistent as this golden
+# (residual -0.166% vs -0.162%) tripped 5e-3 purely on the denominator.
+#
+# So the bound is rebased onto the residual it was derived in:
+#
+#     3.86e-3 = 5e-3 * 0.772
+#             = (the old |s-1| bar) * (the golden's f_ind, as derived in #23)
+#
+# i.e. the SAME BAR AT THE GOLDEN by construction -- what changes is only that
+# it no longer tightens itself on archives at other inductive fractions.
+#
+# TWO f_ind NUMBERS APPEAR BELOW, AT TWO DIFFERENT MEASUREMENT POINTS.  They
+# are not a contradiction; label them and the apparent conflict dissolves:
+#
+#   0.772  -- PROVENANCE OF THE CONSTANT.  The issue-#23-derived value, taken
+#             at the BASELINE-RECON geometry with an independent integrator
+#             (#23 quotes 0.772/0.760 there).  This is the number the approved
+#             3.86e-3 was built from, and it is frozen as such.
+#   0.7976 -- IN-FIXTURE MEASUREMENT.  What f_ind actually measures in THIS
+#             fixture at the sigma=0 R2 anchor, in exact mode -- a different
+#             geometry and a different integrator from the line above.
+#
+# The few-% spread between them IS the baseline->anchor step that #23 flags as
+# not decomposed; it is named here rather than averaged away.  Carrying the
+# approved 3.86e-3 anyway makes this bar 3.2 % TIGHTER at the golden than
+# 5e-3 was (3.86e-3 vs 5e-3*0.7976 = 3.99e-3), not looser -- so nothing is
+# relaxed by the discrepancy, and the constant stays the reviewed number
+# rather than one this branch re-derived for itself.  The 3.86e-3 below is
+# unchanged by this labelling.
+#
+# Known real drift, named rather than absorbed: #23 also measured a genuine
+# +0.077 +/- 0.009 %/beta_p rise in this residual (a P'-bookkeeping lead, NOT
+# the FF' back-solve of #25 -- opposite sign, 13x smaller slope).  Over the
+# beta_p = 0.32 -> 1.65 ramp that is ~+0.10 percentage points of Ip, which sits
+# inside this margin (beta-scan measured max 0.267% against the 0.386% bar,
+# ~31% spare).  It is inside the bar, not absent from the physics; if that
+# slope grows, this is the bound that should catch it.
+#
+# MUST NOT BE LOOSENED.  It is also not a licence to restate the bound on
+# |s-1| again: reporting |s-1| without f_ind is not interpretable across
+# operating points, which is the finding that produced this constant.
+_S_FIND_ATOL_EXACT = 3.86e-3     # |s-1| * f_ind in exact mode ; golden
+                                 # measured 2.42e-3 (|s-1| 3.04e-3,
+                                 # f_ind 0.7976) -- 37% margin
 
 
 def _draw_groups(path):
@@ -339,7 +414,13 @@ def _run_r2_probe(outdir):
             psi_N_kinetic=psi_kin, p_thresh=0.05, rng=_SEED,
         )
         d = out[6]
+        # f_ind travels WITH s, always: the acceptance is on their product and
+        # |s-1| alone is not interpretable across operating points (issue #23).
+        # nan, not a guessed 1.0, when the mode has no frozen anchor to read it
+        # off ('legacy') -- a wrong denominator would silently rescale the bar.
+        _f = d.get("r2_f_ind")
         return (float(d["r2_ip_scale"]),
+                float("nan") if _f is None else float(_f),
                 # Measure l_i on the SAME estimator bl.l_i_target lives on
                 # ('iter' == li(3)); get_stats' default is 'std' == li(1),
                 # which is a different functional (~25% apart) and would make
@@ -350,18 +431,21 @@ def _run_r2_probe(outdir):
                 np.asarray(d["j_BS"], dtype=float),
                 np.asarray(d["j_inductive"], dtype=float))
 
-    s1, li1, jbs1, jind1 = _once("ratio")
-    s2, li2, jbs2, jind2 = _once("ratio")
-    s_ex1, li_ex1, jbs_ex1, jind_ex1 = _once("exact")
-    s_ex2, li_ex2, jbs_ex2, jind_ex2 = _once("exact")
-    s_leg, li_leg, _, _ = _once("legacy")
+    s1, f1, li1, jbs1, jind1 = _once("ratio")
+    s2, f2, li2, jbs2, jind2 = _once("ratio")
+    s_ex1, f_ex1, li_ex1, jbs_ex1, jind_ex1 = _once("exact")
+    s_ex2, f_ex2, li_ex2, jbs_ex2, jind_ex2 = _once("exact")
+    s_leg, f_leg, li_leg, _, _ = _once("legacy")
     np.savez(
         os.path.join(outdir, "r2.npz"),
         s=np.array([s1, s2]), li=np.array([li1, li2]),
+        f_ind=np.array([f1, f2]),
         s_exact=np.array([s_ex1, s_ex2]), li_exact=np.array([li_ex1, li_ex2]),
+        f_ind_exact=np.array([f_ex1, f_ex2]),
         jbs_exact1=jbs_ex1, jbs_exact2=jbs_ex2,
         jind_exact1=jind_ex1, jind_exact2=jind_ex2,
         s_legacy=np.array([s_leg]), li_legacy=np.array([li_leg]),
+        f_ind_legacy=np.array([f_leg]),
         jbs1=jbs1, jbs2=jbs2, jind1=jind1, jind2=jind2,
         jbs_baseline=np.asarray(bl.j_BS, dtype=float),
         l_i_target=np.array([float(bl.l_i_target)]),
@@ -398,9 +482,11 @@ def test_sigma0_r2_ip_scale_is_unity(sigma0_anchor):
     uncalibrated Ip_target.
     """
     s = float(sigma0_anchor["s"][0])
+    f_ind = float(sigma0_anchor["f_ind"][0])
     assert abs(s - 1.0) <= _S_ATOL, (
         f"sigma=0 R2 Ip scale is {s:.6f}, off unity by {abs(s - 1.0):.3e} "
-        f"(bar {_S_ATOL:.0e}); the archived split is not being reproduced")
+        f"(bar {_S_ATOL:.0e}, f_ind={f_ind:.4f}, i.e. {abs(s - 1) * f_ind:.3e} "
+        f"in Ip space); the archived split is not being reproduced")
 
 
 def test_sigma0_r2_recovers_the_recon_li(sigma0_anchor):
@@ -440,22 +526,58 @@ def test_sigma0_r2_exact_measure_lands_in_its_own_budget(sigma0_anchor):
     """``BOUQUET_R2_IP_MODE=exact``: the FSA current integral instead of the
     ratio calibration (``utils.Ip_fsa_integral``).
 
-    It does NOT land closer to 1.000 -- 3.25e-3 against the calibration's
-    8.5e-4 -- and that is the expected, understood result: the calibration
+    It does NOT land closer to 1.000 -- 3.04e-3 against the calibration's
+    8.9e-4 -- and that is the expected, understood result: the calibration
     cancels every representation error by construction, while the measure
     additionally charges the draw for the reconstruction's own j_phi residual
     (+0.193% of Ip at the R2 state anchor) on top of the sigma=0 SWB residual
     (-0.085%).  -0.335% of inductive amplitude predicted, -0.325% measured.
+
+    The acceptance is on ``|s-1| * f_ind``, the residual IN Ip SPACE that the
+    -0.335% budget is quoted in -- see ``_S_FIND_ATOL_EXACT`` for the algebra
+    and for why the equivalent |s-1| statement is operating-point dependent
+    (issue #23).  At this golden the two are essentially the same bar by
+    construction, because 3.86e-3 = 5e-3 * 0.772, where 0.772 is the
+    #23-derived f_ind at the baseline-recon geometry.  (This fixture's own
+    f_ind, measured at the sigma=0 R2 anchor, is 0.7976 -- the two numbers and
+    why they differ are labelled at ``_S_FIND_ATOL_EXACT``.)
     """
     s = float(sigma0_anchor["s_exact"][0])
-    assert abs(s - 1.0) <= _S_ATOL_EXACT, (
-        f"exact-mode sigma=0 Ip scale is {s:.6f}, off unity by "
-        f"{abs(s - 1.0):.3e} (bar {_S_ATOL_EXACT:.0e}) -- larger than the "
-        f"residual budget accounts for")
+    f_ind = float(sigma0_anchor["f_ind_exact"][0])
+    assert np.isfinite(f_ind) and f_ind > 0.0, (
+        f"exact mode reported no usable inductive share (f_ind={f_ind}); the "
+        f"bound cannot be evaluated, and |s-1| alone is not a substitute")
+    resid = abs(s - 1.0) * f_ind
+    assert resid <= _S_FIND_ATOL_EXACT, (
+        f"exact-mode sigma=0 Ip-space residual is {resid:.3e} "
+        f"(bar {_S_FIND_ATOL_EXACT:.2e}) -- larger than the residual budget "
+        f"accounts for.  Scale s={s:.6f}, |s-1|={abs(s - 1.0):.3e}, "
+        f"f_ind={f_ind:.4f}")
     assert abs(s - 1.0) > _S_ATOL, (
-        f"exact mode returned {s:.6f}, inside the ratio mode's bar -- if the "
-        f"archived split has become self-consistent with the anchor, the "
-        f"default should be revisited (see _AnchorIpRenorm)")
+        f"exact mode returned {s:.6f} (|s-1|={abs(s - 1.0):.3e}, "
+        f"f_ind={f_ind:.4f}), inside the ratio mode's bar -- if the archived "
+        f"split has become self-consistent with the anchor, the default "
+        f"should be revisited (see _AnchorIpRenorm)")
+
+
+def test_sigma0_r2_exact_measure_reports_a_plausible_inductive_share(
+        sigma0_anchor):
+    """Guard the denominator.  ``_S_FIND_ATOL_EXACT`` is a bar on a PRODUCT, so
+    an ``f_ind`` that silently collapsed to something tiny would turn the test
+    above into a no-op that passes on any archive.
+
+    The window is deliberately wide -- it is a sanity range on a physical
+    quantity (the inductive share of Ip), not a second acceptance criterion.
+    Anything outside it means the measure, not the equilibrium, has moved.
+    """
+    f_ind = float(sigma0_anchor["f_ind_exact"][0])
+    assert 0.2 <= f_ind <= 1.2, (
+        f"exact-mode f_ind = {f_ind:.4f} is outside the physical window for an "
+        f"inductive share; the Ip-space bound's denominator is wrong, so its "
+        f"pass above means nothing")
+    assert (float(sigma0_anchor["f_ind_exact"][1])
+            == pytest.approx(f_ind, rel=0, abs=0)), \
+        "f_ind is not bit-reproducible between two identical exact-mode calls"
 
 
 def test_sigma0_r2_exact_measure_still_recovers_the_recon_li(sigma0_anchor):
