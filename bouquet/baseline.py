@@ -627,6 +627,18 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         j_NBI=j_NBI,
         j_RF=j_RF,
         p_fast=p_fast,
+        # SAME source as the value handed to the reconstruction above, so the
+        # two paths activate together or not at all.  The draws read
+        # `Baseline.Z_imp` (run.py hands it to generate_bouquet, and the
+        # forward / sigma=0 solves read it directly); the recon reads
+        # `Z_imp_recon`.  Leaving this at its None default while feeding
+        # `Z_imp_recon` to the recon meant that the day FixedComponentsConfig
+        # gains a Z_imp field, the reconstruction would start adding impurity
+        # pressure while the draws still did not -- silently recreating the
+        # exact recon-vs-draw pressure inconsistency this plumbing exists to
+        # remove, through the very getattr that was meant to guard it.
+        # Today both are None on this path, so this is a no-op.
+        Z_imp=Z_imp_recon,
         eqdsk_bytes=eqdsk_bytes,
         pfile_bytes=kin["raw_bytes"],
         # expose the baseline Z_eff (kinetic grid) as a switchboard channel,
