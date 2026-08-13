@@ -5201,6 +5201,33 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         Result dictionary containing reconstructed profiles, fields,
         and comparison data keyed as documented inline.
     """
+    # ---- 0. Validate the equilibrium-grid inputs (fail before the solve) ----
+    # Checked ahead of the OpenFUSIONToolkit imports below so a caller-side
+    # shape error surfaces immediately, without needing OFT present.
+    # p_fast is contractually a full EQUILIBRIUM-grid profile.  Without this
+    # check a scalar or a length-1 array is silently broadcast by `+` below,
+    # producing a flat fast-pressure offset while the draw paths (which regrid
+    # through pchip_interp) would have raised -- i.e. the recon and the draws
+    # would again solve different pressures, the exact bug this plumbing fixes.
+    if p_fast is not None:
+        p_fast = np.asarray(p_fast, dtype=float)
+        _n_eq = np.shape(eqdsk.psi_N)[0]
+        if p_fast.shape != (_n_eq,):
+            raise ValueError(
+                "reconstruct_equilibrium: p_fast must be a 1-D array on the "
+                f"equilibrium grid eqdsk.psi_N (expected shape ({_n_eq},), got "
+                f"{p_fast.shape}). Regrid the kinetic-grid profile first, e.g. "
+                "bouquet.utils.pchip_interp(psi_N_kinetic, p_fast_kin, "
+                "eqdsk.psi_N) -- the same kin->eq map the draws use. Scalars "
+                "are rejected deliberately: they would broadcast into a flat "
+                "offset instead of a profile."
+            )
+    # Z_imp needs no analogous check: it is a single effective impurity charge
+    # (a scalar by design, see the docstring), consumed only by
+    # physics.impurity_pressure, which coerces it with `float(Z_imp)`.  There
+    # is no grid for it to mismatch, and a non-scalar would already fail loudly
+    # in that coercion rather than broadcasting silently.
+
     from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
     from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
 
