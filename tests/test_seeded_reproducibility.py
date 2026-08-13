@@ -88,6 +88,19 @@ _N_DRAWS = 2                 # each draw is a full solve + SWB + homotopy
 # are quoted in the assertions; none of these may be loosened to make a run
 # pass -- a miss is a regression to report, not a tolerance to widen.
 _S_ATOL = 1e-3               # |s - 1| ; measured 8.5e-4
+#
+# WHY _S_ATOL IS STILL A BARE |s-1| BAR, given that #23's whole finding is that
+# |s-1| is not comparable across operating points.  The f_ind-denominator
+# argument does apply here too -- this bar would also tighten itself on a
+# high-bootstrap archive -- so the difference is one of ROLE, not of physics.
+# _S_ATOL governs the RATIO calibration, where s is exact at sigma=0 by
+# construction: the pass condition is "the calibration reproduced itself", and
+# 1e-3 is a numerical-noise floor on an identity, not a physics budget derived
+# in Ip space.  There is no residual to rebase, so multiplying by f_ind would
+# only make the noise floor drift with the operating point.  _S_FIND_ATOL_EXACT
+# is the one that bounds a real residual, and that is the one stated on the
+# product.  If the ratio path ever stops being exact at sigma=0, this bar
+# inherits the #23 problem and must be restated on |s-1|*f_ind as well.
 _LI_REL = 0.005              # l_i vs recon ; measured +0.100%
 _JBS_FRAC = 0.02             # sigma0 j_BS vs baseline split, fraction of peak
                              # (the sigma0-guard bar) ; measured 0.265%

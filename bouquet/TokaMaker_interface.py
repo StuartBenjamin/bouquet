@@ -1245,7 +1245,7 @@ def _r2_ip_scale(anchor_ip, mygs, j_ind, j_other, psi_N, Ip_target):
         method="brentq", rtol=1e-6).root)
 
 
-def _fmt_s_and_find(s, f_ind):
+def _fmt_s_and_find(s, f_ind, mode=None):
     """The R2 QC fragment: ``|s-1|``, ``f_ind`` and their product, together.
 
     ``s`` on its own is a ratio whose denominator is the inductive share, so a
@@ -1254,12 +1254,23 @@ def _fmt_s_and_find(s, f_ind):
     so the Ip-space residual ``|s-1|*f_ind`` -- the quantity the acceptance
     budget is derived in -- is readable off the log without a second lookup.
     See :meth:`_AnchorIpRenorm.inductive_share` and issue #23.
+
+    ``mode`` STAMPS THE MEASURE, and is not cosmetic.  ``f_ind`` is normalised
+    by the mode's own Ip demand, and those demands are not the same number: in
+    ``exact``/``fsa`` mode the denominator is the physical FSA current, while
+    in ``ratio`` mode it is the CALIBRATED demand, which on the D3D-like golden
+    runs ~11% below the physical share.  Two runs can therefore print quite
+    different ``f_ind`` (and hence different products) for identical physics
+    purely because of the measure.  Emitting them under one unlabelled
+    ``[R2-invariant]`` tag invites exactly the cross-operating-point comparison
+    issue #23 exists to prevent, so the label travels with the number.
     """
     out = f", |s-1|={abs(float(s) - 1.0):.3e}"
+    tag = f" [mode={mode}]" if mode else ""
     if f_ind is None or not np.isfinite(f_ind):
-        return out + ", f_ind=n/a"
+        return out + ", f_ind=n/a" + tag
     return (out + f", f_ind={float(f_ind):.4f}"
-            f", |s-1|*f_ind={abs(float(s) - 1.0) * float(f_ind):.3e}")
+            f", |s-1|*f_ind={abs(float(s) - 1.0) * float(f_ind):.3e}" + tag)
 
 
 def _r2_f_ind(anchor_ip, j_ind):
@@ -2340,7 +2351,7 @@ def perturb_kinetic_equilibrium(
                 _r2_f_ind_used = _r2_f_ind(_anchor_ip, _candA)
                 print(f"  [perturb-anchor] GPR-perturbed j_ind in anchor "
                       f"(Ip-renorm scale={_sA:.4f}"
-                      + _fmt_s_and_find(_sA, _r2_f_ind_used) + ")")
+                      + _fmt_s_and_find(_sA, _r2_f_ind_used, _r2_mode) + ")")
             new_jphi = _anchor_jind + spike_profile + j_fixed_eff
         _psi_range_anchor = mygs.psi_bounds[1] - mygs.psi_bounds[0]
         _pp_anchor = {"type": "linterp",
@@ -2429,7 +2440,8 @@ def perturb_kinetic_equilibrium(
             # QC line for the sigma=0 s-invariant: NEVER |s-1| on its own.
             if _r2_scale_used is not None:
                 print(f"  [R2-invariant] s={_r2_scale_used:.6f}"
-                      + _fmt_s_and_find(_r2_scale_used, _r2_f_ind_used)
+                      + _fmt_s_and_find(_r2_scale_used, _r2_f_ind_used,
+                                        _r2_mode)
                       + "  (bound is on the product; issue #23)", flush=True)
             if _erp > _tolp:
                 raise RuntimeError(

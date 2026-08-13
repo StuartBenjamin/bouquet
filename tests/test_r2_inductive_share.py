@@ -244,3 +244,44 @@ def test_the_qc_fragment_always_carries_both_numbers():
     assert "2.435e-03" in txt or "2.436e-03" in txt   # 3.2e-3 * 0.7614
     assert _fmt_s_and_find(0.9968, None).endswith("f_ind=n/a")
     assert _fmt_s_and_find(0.9968, float("nan")).endswith("f_ind=n/a")
+
+
+def test_the_qc_fragment_stamps_the_measure_mode():
+    """``f_ind`` is normalised by the MODE's own Ip demand, so the log must say
+    which mode produced it.
+
+    In ``exact``/``fsa`` the denominator is the physical FSA current; in
+    ``ratio`` it is the calibrated demand, ~11% below the physical share on the
+    D3D-like golden.  Two runs can print materially different ``f_ind`` -- and
+    hence different products -- for identical physics, purely because of the
+    measure.  Emitting both under one unlabelled ``[R2-invariant]`` tag invites
+    the cross-operating-point comparison issue #23 exists to prevent.
+    """
+    for mode in ("exact", "fsa", "ratio"):
+        txt = _fmt_s_and_find(0.9968, 0.7614, mode)
+        assert f"[mode={mode}]" in txt, (
+            f"the QC fragment does not stamp mode={mode!r}; a ratio-mode f_ind "
+            "is not comparable with an exact-mode one")
+    # the stamp must survive the n/a branch too -- that is where a reader has
+    # least context and most need of it
+    assert "[mode=ratio]" in _fmt_s_and_find(0.9968, None, "ratio")
+    # omitted mode stays backward-compatible (no stray tag)
+    assert "[mode=" not in _fmt_s_and_find(0.9968, 0.7614)
+
+
+def test_both_R2_invariant_log_sites_pass_the_mode():
+    """Guard the wiring, not just the formatter: an unstamped call site would
+    print exactly the ambiguous line this stamp exists to remove."""
+    import inspect
+    import re
+    from bouquet.TokaMaker_interface import perturb_kinetic_equilibrium
+
+    src = inspect.getsource(perturb_kinetic_equilibrium)
+    calls = re.findall(r"_fmt_s_and_find\(([^)]*)\)", src)
+    assert calls, "the R2 QC fragment is no longer emitted at all"
+    for args in calls:
+        assert args.count(",") >= 2, (
+            f"_fmt_s_and_find({args}) is called without a mode argument; the "
+            "[R2-invariant] line would not say which measure produced f_ind")
+        assert "_r2_mode" in args, (
+            f"_fmt_s_and_find({args}) does not pass the resolved _r2_mode")
