@@ -758,6 +758,19 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
         # `li_err_pct` is the MATCHED pair: the secant loop drives these two
         # numbers together, so it is ~0 by construction and cannot detect an
         # estimator mismatch.  That is precisely how issue #20 stayed hidden.
+        #
+        # SINCE #25 IT IS VACUOUS OUTRIGHT, not merely weak.  `li` is now
+        # `l_i_target` == `result['li_final']`, the step-6 MATCHED value; so
+        # `li_err_pct` compares the secant's converged output against the very
+        # target it converged onto, and reports nothing but that loop's own
+        # tolerance.  Before #25 it was read post-step-7, so it at least
+        # carried the corrective iteration's drift.  It is kept for continuity
+        # of the summary table and because a NON-tiny value would mean the
+        # secant did not converge -- but it is not a fidelity measure.
+        # For "where did the reconstruction actually finish", read
+        # `li_realized_post_corrective` / `li_corrective_drift_pct` below; for
+        # a genuinely free estimator comparison, read the li(1) pair further
+        # down, which nothing drives together.
         "li": li_tok, "li_efit": g("li"), "li_err_pct": li_err,
         "li_scale": "iter(li3)",
         # --- step-6 matched vs step-7 realized (issue #25) ------------------

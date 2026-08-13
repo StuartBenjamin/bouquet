@@ -368,3 +368,44 @@ def test_reconstruction_metrics_carries_the_post_corrective_fields():
     assert m["li_corrective_out_of_band"] is False
     # the target itself is still the matched value that was handed in
     assert m["li"] == pytest.approx(0.6842)
+
+
+@pytest.mark.parametrize("protect_state", [True, False])
+def test_a_first_solve_failure_returns_the_input_not_a_NameError(
+        _patched_jphi_from_GS, capsys, protect_state):
+    """If the FIRST solve raises, the function must still return sanely.
+
+    The failure handler ``break``s out of the loop, but ``j_phi_output`` is
+    only assigned AFTER a successful solve -- so on an iteration-0 failure the
+    return statement raised ``NameError: name 'j_phi_output' is not defined``,
+    masking a solve failure behind an unrelated-looking crash.  The truthful
+    degradation is "no correction was applied": return the uncorrected input.
+    """
+    from bouquet.TokaMaker_interface import _corrective_jphi_iteration
+
+    psi_N = np.linspace(0.0, 1.0, 101)
+    target = 1.0e6 * (1.0 - psi_N ** 2)
+
+    class _FailFirst(_KeepBestStub):
+        def solve(self):
+            raise RuntimeError('Exceeded "maxits"')
+
+    stub = _FailFirst(psi_N, target)
+    _patched_jphi_from_GS["stub"] = stub
+
+    out, n_iters, edge_hist = _corrective_jphi_iteration(
+        stub, psi_N, target, {"type": "linterp", "y": psi_N, "x": psi_N},
+        1.0e6, 1.0e4, 1e-3, min_iters=2, max_iters=3, rtol=0.0,
+        verbose=False, protect_state=protect_state)
+
+    np.testing.assert_array_equal(out, target), \
+        "a first-solve failure must hand back the uncorrected input j_phi"
+    assert edge_hist == [], "no iterate succeeded, so there is no RMS history"
+    assert n_iters == 1
+    # and it must SAY so, unconditionally -- not only under verbose
+    assert "no corrective iteration was applied" in capsys.readouterr().out, (
+        "a total corrective-iteration failure is silent; the caller cannot "
+        "distinguish it from a converged result without inspecting the history")
+    if protect_state:
+        assert stub.replaced_with is not None, (
+            "the failed iterate's state was not restored from the snapshot")
