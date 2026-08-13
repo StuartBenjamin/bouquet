@@ -176,6 +176,53 @@ def test_without_protect_state_the_last_iterate_is_kept(_patched_jphi_from_GS):
     assert stub.replaced_with is None
 
 
+def _stub_type_without(method):
+    """A ``_KeepBestStub`` clone that genuinely lacks ``method``.
+
+    Built by re-typing the namespace rather than subclassing, because an
+    inherited attribute cannot be deleted -- and ``hasattr`` must really
+    return False for the gate under test to be exercised.
+    """
+    ns = {k: v for k, v in vars(_KeepBestStub).items()
+          if k not in ("__dict__", "__weakref__", method)}
+    return type(f"_KeepBestStubNo_{method}", (), ns)
+
+
+@pytest.mark.parametrize("missing", ["copy_eq", "replace_eq"])
+def test_keep_best_is_disabled_unless_BOTH_snapshot_methods_exist(
+        _patched_jphi_from_GS, missing):
+    """``protect_state`` must gate on copy_eq AND replace_eq, not just one.
+
+    Every snapshot the keep-best path takes is eventually consumed by
+    ``replace_eq`` (per-iteration solve-failure restore, and the final
+    keep-best restore).  A copy_eq-only gate would let a solver object that
+    lacks ``replace_eq`` through, and the restore would then raise
+    AttributeError -- converting a recoverable state into a crash.  With
+    either half missing the iteration must simply fall back to the
+    last-iterate behaviour, exactly as protect_state=False does.
+    """
+    from bouquet.TokaMaker_interface import _corrective_jphi_iteration
+
+    psi_N = np.linspace(0.0, 1.0, 101)
+    target = 1.0e6 * (1.0 - psi_N ** 2)
+    stub = _stub_type_without(missing)(psi_N, target)
+    assert not hasattr(stub, missing), "the stub still exposes " + missing
+    _patched_jphi_from_GS["stub"] = stub
+
+    out, _n, _h = _corrective_jphi_iteration(
+        stub, psi_N, target, {"type": "linterp", "y": psi_N, "x": psi_N},
+        1.0e6, 1.0e4, 1e-3, min_iters=2, max_iters=3, rtol=0.0,
+        verbose=False, protect_state=True)
+
+    rms = lambda a: float(np.sqrt(np.mean((a - target) ** 2)))  # noqa: E731
+    assert rms(out) == pytest.approx(rms(stub._outputs[-1]), rel=1e-12), (
+        f"with {missing} absent, keep-best must be OFF and the last iterate "
+        "returned; a partially-gated keep-best ran instead")
+    if missing != "replace_eq":
+        assert stub.replaced_with is None, (
+            "keep-best attempted a restore despite the gate being unmet")
+
+
 def test_the_geqdsk_call_site_asks_for_protect_state_and_keeps_its_knobs():
     """The geqdsk path was the one corrective call still trusting its last
     iterate.  Pin BOTH halves: state protection on, knob values untouched --
@@ -205,7 +252,10 @@ def test_l_i_target_is_the_step6_matched_value_not_a_post_step7_read():
 
     The old code re-read ``get_stats`` AFTER the reconstruction returned, i.e.
     after step 7 -- so the ensemble was banded around a value step 6 had not
-    matched.  The re-read is kept, under its own name, as a diagnostic.
+    matched.  The post-corrective number is kept, under its own name, as a
+    diagnostic; it is now taken from the value ``reconstruct_equilibrium``
+    measured at step 7b rather than re-read here (same state, same result --
+    verified bit-identical -- but pinned to the step it is named after).
     """
     import bouquet.baseline as bl
 
@@ -218,9 +268,20 @@ def test_l_i_target_is_the_step6_matched_value_not_a_post_step7_read():
            "result['li_final']" in m.group(1), (
         f"l_i_target is assigned from {m.group(1).strip()!r}, not from the "
         f"step-6 matched value result['li_final'] (issue #25)")
-    assert re.search(r"^\s*l_i_realized_post_corrective = ", src, re.M), (
-        "the post-corrective get_stats read was dropped instead of being "
-        "retained as a separate diagnostic -- provenance must grow, not shrink")
+    m2 = re.search(r"^\s*l_i_realized_post_corrective = (.+(?:\n\s+.+)?)$",
+                   src, re.M)
+    assert m2, (
+        "the post-corrective diagnostic was dropped instead of being retained "
+        "under its own name -- provenance must grow, not shrink")
+    assign = m2.group(1)
+    assert "li_realized_post_corrective" in assign and "result" in assign, (
+        f"l_i_realized_post_corrective is assigned from {assign.strip()!r}; it "
+        "must consume result['li_realized_post_corrective'] (the step-7b "
+        "measurement) rather than re-reading solver state here, which is only "
+        "'post step 7' for as long as nothing in between mutates it")
+    assert "get_stats" not in assign, (
+        "the redundant get_stats re-trace is back; it costs a second "
+        "q-profile trace and can diverge in provenance from step 7b")
 
 
 def test_reconstruct_equilibrium_returns_both_l_i_numbers():
