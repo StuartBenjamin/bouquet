@@ -30,21 +30,13 @@ if TYPE_CHECKING:
     from .baseline import Baseline
 
 
-def _shape_from_boundary(boundary_RZ):
-    """LCFS shape params (R0, Z0, a, kappa, delta) from boundary (R,Z) points."""
-    import numpy as np
-
-    rz = np.asarray(boundary_RZ, dtype=float)
-    R, Z = rz[:, 0], rz[:, 1]
-    Rmax, Rmin, Zmax, Zmin = R.max(), R.min(), Z.max(), Z.min()
-    R0 = 0.5 * (Rmax + Rmin)
-    a = 0.5 * (Rmax - Rmin)
-    Z0 = 0.5 * (Zmax + Zmin)
-    kappa = (Zmax - Zmin) / (Rmax - Rmin)
-    R_upper = R[int(np.argmax(Z))]
-    R_lower = R[int(np.argmin(Z))]
-    delta = 0.5 * ((R0 - R_upper) + (R0 - R_lower)) / a
-    return R0, Z0, a, kappa, delta
+# `_shape_from_boundary` now lives in `bouquet.utils` -- it is pure geometry
+# with no orchestration in it, and TokaMaker_interface needs it too.  Importing
+# it there rather than here breaks the run <-> TokaMaker_interface cycle that a
+# runtime `from .run import _shape_from_boundary` would otherwise create (run
+# already imports from TokaMaker_interface).  Re-exported here because the
+# original home is the documented one and callers import it from this module.
+from .utils import _shape_from_boundary  # noqa: F401  (compatibility re-export)
 
 
 class Bouquet:

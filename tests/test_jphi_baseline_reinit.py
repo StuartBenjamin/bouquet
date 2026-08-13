@@ -49,9 +49,23 @@ def test_the_jphi_baseline_fallback_counts_and_names_what_reverts():
     from bouquet.TokaMaker_interface import generate_bouquet
 
     src = inspect.getsource(generate_bouquet)
-    blk = re.search(r"\[jphi-baseline\] solve failed.*?\)\n", src, re.S)
-    assert blk, "the jphi-baseline failure handler is gone"
-    handler = src[max(0, blk.start() - 600):blk.end()]
+    # Capture the ACTUAL handler block -- from its `except` clause to the
+    # section that follows it -- rather than slicing a fixed-size window back
+    # from the print.  A byte window silently changes what it covers whenever
+    # the handler or its comments are edited, so it could fail on a still-valid
+    # contract (or, worse, pass by picking up a neighbouring block).
+    blk = re.search(
+        r"except \(ValueError, RuntimeError\) as _bl_exc:"
+        r"(?P<body>.*?)"
+        r"# ---- Boundary-shift diagnostic",
+        src, re.S)
+    assert blk, (
+        "could not locate the jphi-baseline `except ... as _bl_exc:` handler "
+        "ahead of the Boundary-shift diagnostic section; the handler was "
+        "renamed, removed, or moved out of the block this test anchors on")
+    handler = blk.group("body")
+    assert "[jphi-baseline] solve failed" in handler, \
+        "the jphi-baseline failure handler is gone"
     assert '_count_masked_anchor_failure("jphi_baseline"' in handler, (
         "the jphi-baseline fallback is still an uncounted mask (issue #24)")
     assert "REVERTING" in handler, \
@@ -76,3 +90,58 @@ def test_the_jphi_baseline_solve_reinitialises_psi():
     # the re-init must precede the solve it protects
     assert body.index("init_psi(") < body.index("mygs.solve()"), \
         "psi is re-initialised AFTER the solve it is supposed to protect"
+
+
+def test_the_failed_trace_warning_carries_the_exception_detail():
+    """The non-fatal fallback must say WHY the trace was unusable.
+
+    This WARN line is the only record a run keeps of a failed LCFS trace (the
+    fallback is deliberately non-fatal), so dropping the exception detail makes
+    a raised ``safe_trace_surf`` indistinguishable from a merely-too-short
+    contour after the fact.
+    """
+    from bouquet.TokaMaker_interface import generate_bouquet
+
+    src = inspect.getsource(generate_bouquet)
+    blk = re.search(r"if jphi_baseline:(.*?)# ---- Boundary-shift diagnostic",
+                    src, re.S)
+    assert blk, "could not locate the jphi_baseline block"
+    body = blk.group(1)
+
+    # the exception must be bound, not swallowed anonymously
+    assert re.search(r"except Exception as \w+:", body), (
+        "the safe_trace_surf guard swallows its exception anonymously; bind it "
+        "so the WARN line can report it")
+    warn = re.search(r"could not trace an LCFS(.*?)\)\n", body, re.S)
+    assert warn, "the failed-trace WARN line is gone"
+    # the warning must interpolate something, not be a bare constant string
+    assert "{" in warn.group(1), (
+        "the failed-trace WARN line is a fixed string again; it must include "
+        "the caught exception / the reason the contour was rejected")
+
+
+def test_shape_from_boundary_is_shared_not_imported_from_the_orchestrator():
+    """``TokaMaker_interface`` must not import the helper from ``bouquet.run``.
+
+    ``run`` already imports from ``TokaMaker_interface``, so a runtime
+    ``from .run import _shape_from_boundary`` closes a dependency cycle and
+    couples a core library module to the orchestrator/CLI layer.  The helper
+    lives in ``bouquet.utils``; ``run`` re-exports it for its original callers.
+    """
+    import bouquet.run as run
+    import bouquet.utils as utils
+    import bouquet.TokaMaker_interface as tmi
+
+    src = inspect.getsource(tmi)
+    assert "from .run import" not in src and "from bouquet.run import" not in src, (
+        "TokaMaker_interface imports from bouquet.run -- circular-import risk; "
+        "move the shared helper into bouquet.utils instead")
+
+    assert hasattr(utils, "_shape_from_boundary"), \
+        "the shared helper is not in bouquet.utils"
+    # one function, three names -- the re-export must not be a second copy
+    assert (utils._shape_from_boundary
+            is run._shape_from_boundary
+            is tmi._shape_from_boundary), (
+        "_shape_from_boundary has been duplicated rather than re-exported; the "
+        "copies will drift")

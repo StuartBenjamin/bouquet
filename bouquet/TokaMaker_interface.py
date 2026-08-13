@@ -49,6 +49,7 @@ from .utils import (
     store_equilibrium,
     store_baseline_profiles,
     _scan_key,
+    _shape_from_boundary,
     read_eqdsk_from_bytes,
 )
 from .io.geqdsk import read_geqdsk
@@ -3350,12 +3351,13 @@ def generate_bouquet(
             # restores, so the trace itself perturbs nothing.  Failure to get a
             # usable contour is not fatal: skip the re-init and solve warm, i.e.
             # exactly the previous behaviour.
+            _init_lcfs_exc = None
             try:
                 _init_lcfs = safe_trace_surf(mygs, 1.0 - psi_pad)
-            except Exception:
+            except Exception as _exc:
                 _init_lcfs = None
+                _init_lcfs_exc = _exc
             if _init_lcfs is not None and len(np.asarray(_init_lcfs)) >= 4:
-                from .run import _shape_from_boundary
                 _bR0, _bZ0, _ba, _bkap, _bdel = _shape_from_boundary(_init_lcfs)
                 mygs.init_psi(_bR0, _bZ0, _ba, _bkap, _bdel)
                 print(f"  [jphi-baseline] psi re-initialised from the landed "
@@ -3363,9 +3365,21 @@ def generate_bouquet(
                       f"delta={_bdel:.4f}) before the forward solve "
                       f"(converged-on-entry guard, issue #24)")
             else:
-                print("  [jphi-baseline] WARN: could not trace an LCFS to "
-                      "re-initialise psi from; solving warm (the "
-                      "converged-on-entry stall of issue #24 is possible here)")
+                # Say WHY the trace was unusable.  The fallback is deliberately
+                # non-fatal, so this line is the only record a run keeps of it;
+                # dropping the exception detail makes a trace failure and a
+                # merely-too-short contour indistinguishable after the fact.
+                if _init_lcfs_exc is not None:
+                    _why = (f"safe_trace_surf raised "
+                            f"{type(_init_lcfs_exc).__name__}: {_init_lcfs_exc}")
+                elif _init_lcfs is None:
+                    _why = "safe_trace_surf returned None"
+                else:
+                    _why = (f"traced contour has only "
+                            f"{len(np.asarray(_init_lcfs))} points (need >= 4)")
+                print(f"  [jphi-baseline] WARN: could not trace an LCFS to "
+                      f"re-initialise psi from ({_why}); solving warm (the "
+                      f"converged-on-entry stall of issue #24 is possible here)")
             mygs.set_targets(Ip=initial_Ip_target, pax=float(pressure_solve[0]))
             mygs.set_profiles(pp_prof=_pp_b, ffp_prof=_ffp_b)
             try:

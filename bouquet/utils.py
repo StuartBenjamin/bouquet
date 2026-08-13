@@ -1601,6 +1601,31 @@ def pchip_interp(x_src, y_src, x_out):
 
 
 # ====================================================================
+#  LCFS shape helper
+# ====================================================================
+def _shape_from_boundary(boundary_RZ):
+    """LCFS shape params (R0, Z0, a, kappa, delta) from boundary (R,Z) points.
+
+    Lives here rather than in ``bouquet.run`` because both the orchestrator and
+    ``TokaMaker_interface`` need it, and importing it from ``run`` into
+    ``TokaMaker_interface`` at runtime would close a dependency cycle (``run``
+    already imports from ``TokaMaker_interface``).  ``bouquet.run`` re-exports
+    it for callers that use its original location.
+    """
+    rz = np.asarray(boundary_RZ, dtype=float)
+    R, Z = rz[:, 0], rz[:, 1]
+    Rmax, Rmin, Zmax, Zmin = R.max(), R.min(), Z.max(), Z.min()
+    R0 = 0.5 * (Rmax + Rmin)
+    a = 0.5 * (Rmax - Rmin)
+    Z0 = 0.5 * (Zmax + Zmin)
+    kappa = (Zmax - Zmin) / (Rmax - Rmin)
+    R_upper = R[int(np.argmax(Z))]
+    R_lower = R[int(np.argmin(Z))]
+    delta = 0.5 * ((R0 - R_upper) + (R0 - R_lower)) / a
+    return R0, Z0, a, kappa, delta
+
+
+# ====================================================================
 #  eqdsk byte-stream helper
 # ====================================================================
 def read_eqdsk_from_bytes(raw_bytes, reader_func):
