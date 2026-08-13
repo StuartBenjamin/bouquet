@@ -43,6 +43,13 @@ import os
 import subprocess
 import sys
 
+# Must precede any `bouquet` import: puts the repo root on sys.path so a probe
+# invoked directly (python tests/<this file> ...) still exercises THIS tree.
+# The pytest path and the subprocess_env path do not rely on it.
+import _harness
+
+_harness.ensure_repo_on_syspath()
+
 import numpy as np
 import pytest
 
@@ -268,7 +275,12 @@ def _generate_one_ensemble(header):
 def twin_runs(tmp_path_factory):
     """The same seeded ensemble generated twice, in two fresh interpreters."""
     work = tmp_path_factory.mktemp("twin")
-    env = dict(os.environ, OMP_NUM_THREADS="1", MPLBACKEND="Agg")
+    # subprocess_env, not dict(os.environ, ...): the child is launched as a
+    # SCRIPT, so its sys.path[0] is <repo>/tests and `import bouquet` would
+    # otherwise fall through to an editable install pointing at another
+    # checkout -- silently solving against the wrong revision.  See
+    # tests/_harness.py for the two incidents this prevents.
+    env = _harness.subprocess_env(OMP_NUM_THREADS="1", MPLBACKEND="Agg")
     out = []
     for tag in ("a", "b"):
         header = str(work / f"twin_{tag}")
@@ -453,7 +465,7 @@ def sigma0_anchor(tmp_path_factory):
     work = tmp_path_factory.mktemp("r2")
     proc = subprocess.run(
         [sys.executable, os.path.abspath(__file__), "r2", str(work)],
-        env=dict(os.environ, OMP_NUM_THREADS="1", MPLBACKEND="Agg"),
+        env=_harness.subprocess_env(OMP_NUM_THREADS="1", MPLBACKEND="Agg"),
         capture_output=True, text=True)
     if proc.returncode != 0:
         pytest.fail(f"R2 probe failed (rc={proc.returncode}):\n"
@@ -617,6 +629,11 @@ if __name__ == "__main__":
     # one `pytest -m solver` run -- and, for the twins, it is also the only
     # honest way to compare two runs' solved equilibria.  pytest never
     # executes this block.
+    # Prove we are running the tree we were launched from BEFORE any solver
+    # work -- a wrong-tree import otherwise surfaces as a downstream nan or a
+    # missing diagnostics key, far from its cause.
+    _harness.ensure_repo_on_syspath()
+    _harness.assert_bouquet_is_repo_local()
     _oft_importable()
     _WHAT, _ARG = sys.argv[1], sys.argv[2]
     if _WHAT == "ensemble":
