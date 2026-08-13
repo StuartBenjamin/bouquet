@@ -580,6 +580,18 @@ class Bouquet:
               f"max {m['boundary_max_mm']:.2f} mm   axis off {m['axis_offset_mm']:.2f} mm")
         print(f"  {'jphi resid':<12} core RMS {m['jphi_core_rms_MA']:.3f}   "
               f"edge RMS {m['jphi_edge_rms_MA']:.3f} MA/m²")
+        # Step-6 matched (== l_i_target) vs step-7 realized, issue #25.  Printed
+        # ALWAYS, not only when out of band -- a drift that surfaces only when
+        # it breaches is a drift nobody watches shrink or grow.
+        _lr = m.get('li_realized_post_corrective', float('nan'))
+        if np.isfinite(_lr):
+            _dp = m.get('li_corrective_drift_pct', float('nan'))
+            _bp = m.get('li_corrective_band_pct', float('nan'))
+            _flag = ("  ⚠ OUTSIDE the l_i band"
+                     if m.get('li_corrective_out_of_band') else "")
+            print(f"  {'l_i post-7':<12} {_lr:.5f}       "
+                  f"(target {m['li']:.5f} = step-6 matched, {_dp:+.3f}%, "
+                  f"band ±{_bp:.2f}%){_flag}")
 
     def _forward_solve_imas_baseline(self):
         """Forward GS solve of the IMAS baseline (j_phi + pressure) on mygs.
