@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import re
 import textwrap
 
 import numpy as np
@@ -212,25 +213,59 @@ def test_every_kin_to_eq_site_routes_through_pchip_interp():
     assert len(seen) == len(sites), "some kin->eq site went unchecked"
 
 
-def test_p_fast_is_additive_and_raises_the_pressure():
-    """Sign contract: adding fast pressure must RAISE the solve pressure.
+def _pressure_assembly_source():
+    """The pressure-assembly hunk of ``reconstruct_equilibrium`` (step 4)."""
+    from bouquet.TokaMaker_interface import reconstruct_equilibrium
+
+    src = inspect.getsource(reconstruct_equilibrium)
+    blk = re.search(r"# ---- 4\. Pressure and GS profiles ----(.*?)"
+                    r"pprime_tmp = ", src, re.S)
+    assert blk, "the step-4 pressure assembly is gone from reconstruct_equilibrium"
+    return blk.group(1)
+
+
+def test_p_fast_enters_the_recon_pressure_additively():
+    """Sign contract, asserted against the SHIPPED assembly, not local algebra.
 
     A larger pressure means a larger Shafranov shift, so R_axis moves outboard
-    and l_i(3) ~ 1/R_axis falls.  If this ever inverts, the mechanism behind
-    the fix is misunderstood and the reconstruction's l_i knob will compensate
-    the wrong way.
-    """
-    EC = 1.6022e-19
-    ne = np.linspace(5e19, 1e19, 32)
-    te = np.linspace(3e3, 2e2, 32)
-    ni = ne * 0.9
-    ti = te
-    p_fast = 2.1e4 * (1.0 - np.linspace(0, 1, 32) ** 2) ** 2
+    and l_i(3) ~ 1/R_axis falls.  If p_fast were ever subtracted (or made to
+    replace the thermal term) the mechanism behind the fix is inverted and the
+    reconstruction's l_i knob compensates the wrong way.
 
-    thermal = EC * (ne * te + ni * ti)
-    total = thermal + p_fast
-    assert np.all(total >= thermal)
-    assert total[0] > thermal[0], "fast pressure must raise the on-axis pressure"
+    The previous version of this test built `thermal + p_fast` out of local
+    numpy and asserted that a sum exceeds its addend -- true of arithmetic,
+    and true whatever bouquet does, so it could not fail.
+    """
+    body = _pressure_assembly_source()
+    code = "\n".join(ln for ln in body.splitlines()
+                     if not ln.strip().startswith("#"))
+
+    # the thermal base, then p_fast ADDED to it (not subtracted, not assigned)
+    assert re.search(r"pres_tmp\s*=\s*1\.6022e-19\s*\*\s*\(ne\s*\*\s*te\s*\+\s*"
+                     r"ni\s*\*\s*ti\)", code), (
+        "the thermal single-ion base of the recon pressure changed shape")
+    m = re.search(r"pres_tmp\s*=\s*pres_tmp\s*([+-])\s*np\.asarray\(p_fast",
+                  code)
+    assert m, (
+        "p_fast is no longer folded into pres_tmp as `pres_tmp = pres_tmp "
+        "+/- np.asarray(p_fast, ...)`; the recon may have stopped solving the "
+        "fast pressure the draws solve")
+    assert m.group(1) == "+", (
+        "p_fast is SUBTRACTED from the reconstruction pressure; it must be "
+        "added, as perturb_kinetic_equilibrium and the state anchor do")
+
+    # and the impurity term likewise added, under its Z_imp guard
+    assert re.search(r"pres_tmp\s*=\s*pres_tmp\s*\+\s*impurity_pressure\(",
+                     code), "the impurity term is no longer added to pres_tmp"
+
+    # numeric corroboration of the sign, using the real physics helper
+    ne = np.linspace(5e19, 1e19, 32)
+    ni = ne * 0.9
+    ti = np.linspace(3e3, 2e2, 32)
+    from bouquet.physics import impurity_pressure
+    assert np.all(impurity_pressure(ne, ni, ti, 6.0) >= 0.0), (
+        "the impurity term must be non-negative, or 'additive' lowers the "
+        "solve pressure")
 
 
 class _DummyEqdsk:
@@ -302,31 +337,156 @@ def test_Z_imp_is_scalar_by_design_and_rejects_arrays():
         impurity_pressure(ne, ni, ti, np.array([6.0, 6.0]))
 
 
-@pytest.mark.parametrize("Z_imp", [None, 6.0])
-def test_baseline_passes_p_fast_on_the_equilibrium_grid(Z_imp):
-    """``_resolve_reconstruction`` must hand the recon an EQUILIBRIUM-grid p_fast.
+def _resolve_reconstruction_source():
+    import bouquet.baseline as _baseline
+    return inspect.getsource(_baseline._resolve_reconstruction)
+
+
+def test_baseline_regrids_p_fast_before_handing_it_to_the_recon():
+    """``_resolve_reconstruction`` must pass p_fast through ``to_eq``, not raw.
 
     Guards the specific bug shape: ``Baseline.p_fast`` is contractually on the
     KINETIC grid, so passing that array straight through would feed the recon a
-    profile of the wrong length (or, worse, silently broadcast).
+    profile of the wrong length (and, before the shape guard, silently
+    broadcast a length-1 one).
+
+    Asserted on the real call site.  The previous version of this test only
+    re-did the regrid itself with local numpy and never looked at
+    ``_resolve_reconstruction``, so it passed regardless of what baseline.py
+    actually handed over.
     """
+    src = _resolve_reconstruction_source()
+
+    # p_fast_eq is built by regridding the kinetic-grid array, and is None
+    # (not zeros) when the fixed component is unset, so the default-off path
+    # provably does not enter the new branch.
+    assert re.search(r"p_fast_eq\s*=\s*to_eq\(p_fast_kin\)\s*"
+                     r"if\s+fc\.p_fast\s+is\s+not\s+None\s+else\s+None", src), (
+        "p_fast_eq is no longer `to_eq(p_fast_kin) if fc.p_fast is not None "
+        "else None`; the recon may be receiving a kinetic-grid array, or "
+        "zeros where None is required for the bitwise default-off path")
+
+    # and it is p_fast_eq -- not p_fast_kin/p_fast -- that reaches the recon
+    call = re.search(r"result\s*=\s*reconstruct_equilibrium\((.*?)\n\s*\)",
+                     src, re.S)
+    assert call, "could not find the reconstruct_equilibrium call site"
+    args = call.group(1)
+    assert re.search(r"p_fast\s*=\s*p_fast_eq", args), (
+        "reconstruct_equilibrium is not being passed p_fast=p_fast_eq; a "
+        "kinetic-grid array here is the original bug")
+
+    # the returned Baseline keeps the KINETIC-grid array (unchanged contract)
+    assert re.search(r"p_fast\s*=\s*p_fast_kin", src), (
+        "Baseline.p_fast must stay on the kinetic grid for downstream consumers")
+
+    # numeric corroboration that the two grids really are different lengths,
+    # i.e. that the regrid above is load-bearing rather than decorative
     from bouquet.baseline import _resolve_fixed
     from bouquet.utils import pchip_interp
 
     psi_src = np.linspace(0.0, 1.0, 64)
     psi_kin = np.linspace(0.0, 1.0, 150)
     psi_eq = np.linspace(0.0, 1.0, 129)
-    p_fast_src = 2.1e4 * (1.0 - psi_src ** 2) ** 2
-
-    p_fast_kin = _resolve_fixed(p_fast_src, psi_src, psi_kin)
-    assert p_fast_kin.shape == psi_kin.shape, "Baseline.p_fast stays kinetic-grid"
-
+    p_fast_kin = _resolve_fixed(2.1e4 * (1.0 - psi_src ** 2) ** 2,
+                                psi_src, psi_kin)
+    assert p_fast_kin.shape == psi_kin.shape
     p_fast_eq = pchip_interp(psi_kin, p_fast_kin, psi_eq)
-    assert p_fast_eq.shape == psi_eq.shape, (
-        "the recon must receive p_fast on the equilibrium grid"
-    )
-    # Two-step (src->kin->eq) is what the draws do; assert it stays finite and
-    # positive so a grid mix-up shows up as a failure rather than as a silent
-    # ~1% current-profile bias.
-    assert np.all(np.isfinite(p_fast_eq))
-    assert p_fast_eq.max() > 0.0
+    assert p_fast_eq.shape == psi_eq.shape != p_fast_kin.shape
+    assert np.all(np.isfinite(p_fast_eq)) and p_fast_eq.max() > 0.0
+
+
+def test_Z_imp_activates_symmetrically_on_the_recon_and_draw_paths():
+    """The recon's Z_imp and the draws' Z_imp must come from the SAME source.
+
+    ``_resolve_reconstruction`` reads ``getattr(fc, "Z_imp", None)`` for the
+    reconstruction.  The draws instead read ``Baseline.Z_imp`` (run.py hands it
+    to generate_bouquet and the forward / sigma=0 solves read it directly).
+    If the returned Baseline does not carry the same value, then the day
+    FixedComponentsConfig gains a Z_imp field the reconstruction starts adding
+    impurity pressure while the draws do not -- recreating the recon-vs-draw
+    inconsistency this module removes, through the getattr meant to guard it.
+    """
+    src = _resolve_reconstruction_source()
+
+    assert re.search(r"Z_imp_recon\s*=\s*getattr\(fc,\s*[\"']Z_imp[\"'],\s*None\)",
+                     src), "the recon's Z_imp source changed shape"
+
+    # Resolve the two call sites structurally -- a plain substring search for
+    # "Z_imp=Z_imp_recon" is satisfied by the reconstruct_equilibrium call
+    # alone and would not notice the Baseline losing it.
+    def _kwarg_source(callee):
+        for node in ast.walk(ast.parse(src)):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == callee):
+                for kw in node.keywords:
+                    if kw.arg == "Z_imp":
+                        return getattr(kw.value, "id", ast.dump(kw.value))
+                return None      # call found, kwarg absent
+        raise AssertionError(f"no call to {callee} in _resolve_reconstruction")
+
+    assert _kwarg_source("reconstruct_equilibrium") == "Z_imp_recon", (
+        "the reconstruction is no longer passed Z_imp=Z_imp_recon")
+    assert _kwarg_source("Baseline") == "Z_imp_recon", (
+        "the returned Baseline does not carry Z_imp=Z_imp_recon, so the recon "
+        "and the draws would activate impurity pressure independently -- the "
+        "recon would add impurity pressure the draws never see")
+
+    # Baseline must actually have the field for the draws to read.
+    from bouquet.baseline import Baseline
+    assert "Z_imp" in getattr(Baseline, "__dataclass_fields__", {}), \
+        "Baseline lost its Z_imp field; the draw path reads it"
+
+    # Both are None today on this path, so activation is symmetric AND off.
+    from bouquet.config import FixedComponentsConfig
+    assert not hasattr(FixedComponentsConfig, "Z_imp"), (
+        "FixedComponentsConfig gained a Z_imp field -- that is fine, but "
+        "re-verify that the recon and the draws now both see it (this test's "
+        "premise was that both are inert)")
+
+
+# ---------------------------------------------------------------------------
+#  the sigma=0 anchor's psi re-init must not lose the state it was handed
+# ---------------------------------------------------------------------------
+def test_sigma0_reinit_restores_state_before_a_failure_propagates():
+    """``verify_sigma0_consistency``'s psi re-init needs a state guard.
+
+    ``init_psi`` DISCARDS the reconstruction's converged state and installs a
+    cold analytic psi.  Before the re-init was added, a failed solve here left
+    ``mygs`` on that converged state -- benign, which is why the failure was
+    allowed to propagate untouched.  With the re-init in place and no guard, a
+    failure would instead hand the caller a cold, non-converged psi.
+
+    The exception must STAY fatal (this is a verification routine; a silent
+    fallback would defeat its purpose) -- so this asserts restore-then-re-raise,
+    not swallow.
+    """
+    import bouquet.run as _run
+
+    src = inspect.getsource(_run.Bouquet.verify_sigma0_consistency)
+
+    tree = ast.parse(textwrap.dedent(src))
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]
+    names = [n.func.attr for n in calls]
+    assert "init_psi" in names, "the sigma=0 psi re-init is gone"
+
+    # the snapshot must be taken, and taken BEFORE init_psi discards the state
+    assert "copy_eq" in names, (
+        "init_psi runs without a copy_eq snapshot; a failed solve would leave "
+        "the caller on the cold psi this method installed")
+    order = {n: src.index(f".{n}(") for n in ("copy_eq", "init_psi")}
+    assert order["copy_eq"] < order["init_psi"], (
+        "the snapshot is taken AFTER init_psi has already discarded the state")
+
+    # the solve is guarded, and the handler restores and then RE-RAISES
+    handler = re.search(r"try:\s*\n\s*mygs\.solve\(\)\s*\n\s*except\s+"
+                        r"(?:\w+)?\s*:?(?P<body>.*?)(?:\n\s{0,8}\S|\Z)",
+                        src, re.S)
+    assert handler, "mygs.solve() in the sigma=0 anchor is not wrapped at all"
+    body = handler.group("body")
+    assert "replace_eq" in body, (
+        "the failure path does not restore the snapshot; the caller is left on "
+        "a cold, non-converged psi")
+    assert re.search(r"^\s*raise\s*$", body, re.M), (
+        "the failure is being swallowed -- verify_sigma0_consistency must stay "
+        "fatal, it only needs to restore state on the way out")

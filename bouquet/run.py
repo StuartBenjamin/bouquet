@@ -982,13 +982,32 @@ class Bouquet:
         # Re-initialising psi from the LCFS shape starts the iteration far
         # enough from the fixed point that it converges normally (same
         # convention as the IMAS forward-solve init at run.py:612).
+        #
+        # STATE GUARD.  init_psi DISCARDS the reconstruction's converged state
+        # and installs a cold analytic psi.  Before this re-init a failed solve
+        # here left mygs on that converged state -- benign, which is why the
+        # failure was allowed to propagate untouched.  Now a failure would
+        # leave the caller holding a cold, non-converged psi instead.  The
+        # exception must stay fatal (this is a verification routine; a silent
+        # fallback would defeat it), but the state it leaves behind should be
+        # the one it was handed.  Snapshot, restore on the way out, re-raise.
+        _snap = None
+        _can_snap = (hasattr(mygs, "copy_eq") and hasattr(mygs, "replace_eq"))
         if getattr(self, "_boundary_RZ", None) is not None:
+            if _can_snap:
+                _snap = mygs.copy_eq()
             _R0, _Z0, _a, _kappa, _delta = _shape_from_boundary(
                 self._boundary_RZ)
             mygs.init_psi(_R0, _Z0, _a, _kappa, _delta)
         mygs.set_targets(Ip=float(bl.Ip_target), pax=float(pressure[0]))
         mygs.set_profiles(pp_prof=pp, ffp_prof=ffp)
-        mygs.solve()
+        try:
+            mygs.solve()
+        except Exception:
+            if _snap is not None:
+                # do not hand back the cold psi this method installed
+                mygs.replace_eq(source_eq=_snap)
+            raise
 
         seed = create_power_flux_fun(len(psi_N), 1.5, 1.5)["y"]
         res = solve_with_bootstrap(
