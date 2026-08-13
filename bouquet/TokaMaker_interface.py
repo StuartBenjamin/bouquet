@@ -54,6 +54,22 @@ from .utils import (
 from .io.geqdsk import read_geqdsk
 from .physics import q_ravg
 
+# ---- Masked anchor-solve failure counter (issue #24) ------------------------
+# The per-draw anchor solves swallow failures (fallback: `pass`; band
+# resampling: `continue`).  Those masks are deliberate control flow, but the
+# failures were invisible, so the converged-on-entry degeneracy (see
+# verify_sigma0_consistency and issue #24) cannot be sized on real campaigns.
+# This counter ONLY observes: control flow is unchanged, and each increment
+# prints one line so archived genlogs carry the tally per unit.
+ANCHOR_MASKED_FAILURES = {"recon_anchor_fallback": 0, "band_resample": 0}
+
+
+def _count_masked_anchor_failure(site, exc):
+    ANCHOR_MASKED_FAILURES[site] += 1
+    print(f"  [anchor-masked-failure] {site} #{ANCHOR_MASKED_FAILURES[site]}: "
+          f"{type(exc).__name__}: {exc}", flush=True)
+
+
 # ---- Adaptive corrective iteration ----
 def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
                                 Ip_target, pax_target, psi_pad,
@@ -2251,8 +2267,9 @@ def perturb_kinetic_equilibrium(
             mygs.set_profiles(pp_prof=_pp_anchor, ffp_prof=_ffp_fb)
             try:
                 mygs.solve()
-            except Exception:
-                pass
+            except Exception as _fb_exc:
+                # deliberate mask (see issue #24) -- now counted, not silent
+                _count_masked_anchor_failure("recon_anchor_fallback", _fb_exc)
 
         eq_stats = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
         baseline_li_proxy = calc_cylindrical_li_proxy(mygs, new_jphi, psi_pad)
@@ -2286,7 +2303,9 @@ def perturb_kinetic_equilibrium(
                                   ffp_prof={"type": "jphi-linterp", "y": new_jphi, "x": psi_N})
                 try:
                     mygs.solve()
-                except Exception:
+                except Exception as _rs_exc:
+                    # deliberate mask (see issue #24) -- now counted, not silent
+                    _count_masked_anchor_failure("band_resample", _rs_exc)
                     continue
                 eq_stats = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
             _erp = 100.0 * abs(float(eq_stats['l_i']) - l_i_target) / l_i_target
@@ -5103,7 +5122,8 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                             isoflux_pts, weights, psi_pad,
                             guess_jinductive,n_k,psi_bridge,rescale_j_BS,
                             shelf_psi_N,initialize_psi=True,
-                            isolate_edge_jBS=False):
+                            isolate_edge_jBS=False,
+                            p_fast=None, Z_imp=None):
     r"""Reconstruct a single Grad-Shafranov equilibrium from a geqdsk
     reference and kinetic profiles, matching the EFIT :math:`l_i(1)`.
 
@@ -5166,6 +5186,14 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         If ``True`` (default), call ``mygs.init_psi`` using LCFS
         geometry estimated from the geqdsk boundary.  Set to ``False``
         to skip initialisation (e.g. when reusing a prior solution).
+    p_fast : ndarray, optional
+        Fixed fast-ion (beam) pressure [Pa] on ``eqdsk.psi_N`` -- i.e.
+        already regridded onto the EQUILIBRIUM grid by the caller, the
+        same array the draws solve with.  ``None`` (default) means zero,
+        which reproduces the pre-fix thermal-only behaviour bitwise.
+    Z_imp : float, optional
+        Single effective impurity charge for the one-Zeff impurity
+        pressure term.  ``None``/``0`` (default) disables it.
 
     Returns
     -------
@@ -5173,6 +5201,33 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         Result dictionary containing reconstructed profiles, fields,
         and comparison data keyed as documented inline.
     """
+    # ---- 0. Validate the equilibrium-grid inputs (fail before the solve) ----
+    # Checked ahead of the OpenFUSIONToolkit imports below so a caller-side
+    # shape error surfaces immediately, without needing OFT present.
+    # p_fast is contractually a full EQUILIBRIUM-grid profile.  Without this
+    # check a scalar or a length-1 array is silently broadcast by `+` below,
+    # producing a flat fast-pressure offset while the draw paths (which regrid
+    # through pchip_interp) would have raised -- i.e. the recon and the draws
+    # would again solve different pressures, the exact bug this plumbing fixes.
+    if p_fast is not None:
+        p_fast = np.asarray(p_fast, dtype=float)
+        _n_eq = np.shape(eqdsk.psi_N)[0]
+        if p_fast.shape != (_n_eq,):
+            raise ValueError(
+                "reconstruct_equilibrium: p_fast must be a 1-D array on the "
+                f"equilibrium grid eqdsk.psi_N (expected shape ({_n_eq},), got "
+                f"{p_fast.shape}). Regrid the kinetic-grid profile first, e.g. "
+                "bouquet.utils.pchip_interp(psi_N_kinetic, p_fast_kin, "
+                "eqdsk.psi_N) -- the same kin->eq map the draws use. Scalars "
+                "are rejected deliberately: they would broadcast into a flat "
+                "offset instead of a profile."
+            )
+    # Z_imp needs no analogous check: it is a single effective impurity charge
+    # (a scalar by design, see the docstring), consumed only by
+    # physics.impurity_pressure, which coerces it with `float(Z_imp)`.  There
+    # is no grid for it to mismatch, and a non-scalar would already fail loudly
+    # in that coercion rather than broadcasting silently.
+
     from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
     from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
 
@@ -5277,7 +5332,37 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
           f"at index {_d2_idx} (psi_N={eqdsk.psi_N[_d2_idx]:.5f})")
 
     # ---- 4. Pressure and GS profiles ----
+    # The GS pressure here MUST match what every consumer of this
+    # reconstruction subsequently solves, or l_i_target is measured on a
+    # different (lower-pressure) equilibrium than the draws it targets:
+    # less pressure -> smaller Shafranov shift -> R_axis inboard ->
+    # l_i(3) ~ 1/R_axis reads HIGH.  l_i_target is load-bearing (acceptance
+    # band centre and the Newton proxy target), so that bias propagates.
+    #
+    # Term order and semantics below mirror, exactly:
+    #   perturb_kinetic_equilibrium  (per-draw)   -- thermal, +p_fast, +impurity
+    #   the state anchor `pressure_solve`         -- pressure + imp + fast + diff
+    # Keep the three sites in step; if you change one, change all of them.
     pres_tmp = 1.6022e-19 * (ne * te + ni * ti)
+
+    # Fixed fast-ion pressure -- constant across draws, never perturbed.
+    # Supplied already on the equilibrium grid (eqdsk.psi_N) by the caller,
+    # which applies the same kin->eq PCHIP the draws use.
+    if p_fast is not None:
+        pres_tmp = pres_tmp + np.asarray(p_fast, dtype=float)
+
+    # Impurity (carbon) thermal pressure: one-Zeff single-impurity model on the
+    # SAME (ne, ni, Z_imp) set that derived the main ion.  Single-ion
+    # e*(ne*Te + ni*Ti) omits this.
+    if Z_imp:
+        from .physics import impurity_pressure
+        pres_tmp = pres_tmp + impurity_pressure(ne, ni, ti, Z_imp)
+
+    # NOTE: p_diff is deliberately NOT plumbed here.  It is defined as
+    # (equilibrium.pressure - reconstructed baseline pressure), i.e. it is
+    # computed FROM this reconstruction's output; feeding it back into the
+    # reconstruction's input would be circular.  It is applied downstream, to
+    # the baseline anchor and to every draw, where that definition holds.
     psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
     pprime_tmp = pchip_derivative(eqdsk.psi_N, pres_tmp) / psi_range
     pprime_tmp[-1] = 0.0
