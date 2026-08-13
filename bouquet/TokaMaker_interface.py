@@ -3392,6 +3392,20 @@ def generate_bouquet(
             # restores, so the trace itself perturbs nothing.  Failure to get a
             # usable contour is not fatal: skip the re-init and solve warm, i.e.
             # exactly the previous behaviour.
+            #
+            # STATE GUARD.  `init_psi` DISCARDS the state we arrive on (recon's
+            # converged equilibrium) and installs a cold analytic psi.  The
+            # handler below advertises "REVERTING to the recon (inverse)
+            # reference", and before the re-init existed that was literally
+            # true -- a failed solve left mygs untouched on recon's converged
+            # state, which is why #24 classed the fallback as benign.  With an
+            # unguarded init_psi it is no longer true: the message would be
+            # printed while mygs sits on a cold, non-converged psi, which then
+            # poisons the warm start of every subsequent draw.  Snapshot before
+            # the re-init so the revert the message promises actually happens.
+            _bl_snap = None
+            _bl_can_snap = (hasattr(mygs, "copy_eq")
+                            and hasattr(mygs, "replace_eq"))
             _init_lcfs_exc = None
             try:
                 _init_lcfs = safe_trace_surf(mygs, 1.0 - psi_pad)
@@ -3400,6 +3414,8 @@ def generate_bouquet(
                 _init_lcfs_exc = _exc
             if _init_lcfs is not None and len(np.asarray(_init_lcfs)) >= 4:
                 _bR0, _bZ0, _ba, _bkap, _bdel = _shape_from_boundary(_init_lcfs)
+                if _bl_can_snap:
+                    _bl_snap = mygs.copy_eq()
                 mygs.init_psi(_bR0, _bZ0, _ba, _bkap, _bdel)
                 print(f"  [jphi-baseline] psi re-initialised from the landed "
                       f"LCFS (R0={_bR0:.4f} a={_ba:.4f} kappa={_bkap:.4f} "
@@ -3451,9 +3467,24 @@ def generate_bouquet(
                 # jphi-linterp baseline the draws live in or to recon's
                 # inverse-mode LCFS -- two references ~1.6 mm / ~0.9 % in l_i(3)
                 # apart, which is the whole reason this baseline solve exists.
+                # Make the revert real BEFORE announcing it (and before the
+                # count, so the counted event is the fully-handled one): put
+                # mygs back on the state init_psi discarded, or every
+                # subsequent draw warm-starts from a cold, non-converged psi.
+                if _bl_snap is not None:
+                    mygs.replace_eq(source_eq=_bl_snap)
+                    _bl_reverted = "solver state restored to recon's"
+                elif _bl_can_snap:
+                    # psi was never re-initialised (no usable LCFS trace), so
+                    # the state was never discarded -- nothing to restore.
+                    _bl_reverted = "solver state untouched (no psi re-init)"
+                else:
+                    _bl_reverted = ("solver state NOT restored: this object "
+                                    "exposes no copy_eq/replace_eq pair")
                 _count_masked_anchor_failure("jphi_baseline", _bl_exc)
                 print(f"  [jphi-baseline] solve failed ({_bl_exc}); REVERTING "
-                      f"to the recon (inverse) reference -- this run's "
+                      f"to the recon (inverse) reference [{_bl_reverted}] -- "
+                      f"this run's "
                       f"per-draw boundary and l_i diagnostics carry the "
                       f"~1.6 mm / ~0.9 % representation offset the "
                       f"jphi-linterp baseline exists to remove, and the "

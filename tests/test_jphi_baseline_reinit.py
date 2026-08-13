@@ -21,6 +21,7 @@ still wired in at all.
 """
 from __future__ import annotations
 
+import ast
 import inspect
 import re
 
@@ -145,3 +146,158 @@ def test_shape_from_boundary_is_shared_not_imported_from_the_orchestrator():
             is tmi._shape_from_boundary), (
         "_shape_from_boundary has been duplicated rather than re-exported; the "
         "copies will drift")
+
+
+# ---------------------------------------------------------------------------
+#  the psi re-init must not lose the state it discards
+# ---------------------------------------------------------------------------
+def _extract_jphi_baseline_block():
+    """The REAL ``if jphi_baseline:`` body, dedented and ready to exec.
+
+    Same technique as the kin->eq contract test: run the shipped source rather
+    than a paraphrase of it, so the assertions below cannot drift away from the
+    code they guard.
+    """
+    import textwrap
+    from bouquet.TokaMaker_interface import generate_bouquet
+
+    src = inspect.getsource(generate_bouquet)
+    m = re.search(r"\n[ ]*if jphi_baseline:\n(?P<body>.*?)"
+                  r"\n[ ]*# ---- Boundary-shift diagnostic", src, re.S)
+    assert m, "could not locate the jphi_baseline block"
+    return textwrap.dedent(m.group("body"))
+
+
+class _JphiBaselineStub:
+    """A solver that traces a usable LCFS and then fails its forward solve."""
+
+    def __init__(self, fail=True, snapshots=True):
+        self._fail = fail
+        self.state = "recon-converged"
+        self.init_psi_called = False
+        self.replaced_with = None
+        self._snap_id = 0
+        if not snapshots:                       # emulate a minimal solver object
+            del self.__class__.copy_eq          # (see _NoSnap below)
+
+    def copy_eq(self):
+        self._snap_id += 1
+        return ("snap", self._snap_id, self.state)
+
+    def replace_eq(self, source_eq=None):
+        self.replaced_with = source_eq
+        self.state = source_eq[2] if source_eq else self.state
+
+    def init_psi(self, R0, Z0, a, kappa, delta):
+        self.init_psi_called = True
+        self.state = "cold-analytic"            # the recon state is now GONE
+
+    def set_targets(self, Ip=None, pax=None):
+        pass
+
+    def set_profiles(self, pp_prof=None, ffp_prof=None):
+        pass
+
+    def solve(self):
+        if self._fail:
+            raise RuntimeError('Exceeded "maxits"')
+        self.state = "baseline-converged"
+
+    def get_globals(self):
+        return (1.0e6,)
+
+    def get_stats(self, lcfs_pad=None, li_normalization=None):
+        return {"l_i": 0.65}
+
+    def get_coil_currents(self):
+        return ({"F1A": 1.0}, None)
+
+    @property
+    def psi_bounds(self):
+        return (0.0, 1.0)
+
+
+def _run_block(stub, capsys=None):
+    """Exec the shipped jphi_baseline block against ``stub``."""
+    import numpy as np
+    from bouquet.TokaMaker_interface import (_count_masked_anchor_failure,
+                                             ANCHOR_MASKED_FAILURES)
+    from bouquet.utils import _shape_from_boundary, pchip_derivative
+
+    psi_N = np.linspace(0.0, 1.0, 65)
+    th = np.linspace(0.0, 2.0 * np.pi, 128)
+    lcfs = np.c_[1.7 + 0.6 * np.cos(th), 1.1 * 0.6 * np.sin(th)]
+
+    ns = dict(
+        mygs=stub, np=np, psi_N=psi_N, psi_pad=1e-3,
+        safe_trace_surf=lambda g, v: lcfs,
+        _shape_from_boundary=_shape_from_boundary,
+        pchip_derivative=pchip_derivative,
+        initial_Ip_target=1.0e6,
+        pressure_solve=1.0e4 * (1.0 - psi_N ** 2),
+        input_j_phi=1.0e6 * (1.0 - psi_N ** 2),
+        jphi_diff=None,
+        recon_lcfs_ref=None,
+        _baseline_li3=0.65,
+        _count_masked_anchor_failure=_count_masked_anchor_failure,
+    )
+    before = dict(ANCHOR_MASKED_FAILURES)
+    try:
+        exec(compile(_extract_jphi_baseline_block(),
+                     "<jphi_baseline block>", "exec"), ns)
+    finally:
+        ANCHOR_MASKED_FAILURES.update(before)   # do not leak counts across tests
+    return ns
+
+
+def test_a_failed_baseline_solve_restores_the_state_the_reinit_discarded():
+    """FAILURE INJECTION: solve raises after init_psi -> state must be restored.
+
+    ``init_psi`` throws away the reconstruction's converged equilibrium for a
+    cold analytic psi.  The handler advertises "REVERTING to the recon
+    (inverse) reference", and before the re-init existed that was literally
+    true -- a failed solve left mygs untouched on recon's converged state,
+    which is why issue #24 classed this fallback as benign.  Unguarded, the
+    message would be printed while mygs sits on a COLD, non-converged psi,
+    which then poisons the warm start of every subsequent draw.
+    """
+    stub = _JphiBaselineStub(fail=True)
+    _run_block(stub)
+
+    assert stub.init_psi_called, "the re-init did not run; test premise is void"
+    assert stub.replaced_with is not None, (
+        "the failed baseline solve did NOT restore the snapshot -- mygs is left "
+        "on the cold psi init_psi installed, and every subsequent draw "
+        "warm-starts from it")
+    assert stub.state == "recon-converged", (
+        f"state is {stub.state!r} after the fallback; the handler promises a "
+        "revert to the recon reference and must actually deliver it")
+
+
+def test_the_snapshot_is_taken_before_init_psi_discards_the_state():
+    """A snapshot taken after init_psi would preserve the cold psi, not the
+    recon state -- restoring it would be a no-op dressed as a guard."""
+    src = _extract_jphi_baseline_block()
+    tree = ast.parse(src)
+    calls = [(n.func.attr, n.lineno) for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]
+    copy_lines = [ln for name, ln in calls if name == "copy_eq"]
+    init_lines = [ln for name, ln in calls if name == "init_psi"]
+    assert copy_lines, "no copy_eq snapshot before the psi re-init"
+    assert init_lines, "the psi re-init is gone"
+    assert min(copy_lines) < min(init_lines), (
+        "the snapshot is taken AFTER init_psi has already discarded the "
+        "reconstruction's converged state")
+
+
+def test_a_successful_baseline_solve_does_not_restore_anything():
+    """Guard the guard: the restore must be on the FAILURE path only, or the
+    baseline solve's own result would be thrown away."""
+    stub = _JphiBaselineStub(fail=False)
+    _run_block(stub)
+
+    assert stub.init_psi_called
+    assert stub.replaced_with is None, (
+        "a SUCCESSFUL baseline solve restored the pre-solve snapshot, "
+        "discarding the very equilibrium it just computed")
+    assert stub.state == "baseline-converged"
