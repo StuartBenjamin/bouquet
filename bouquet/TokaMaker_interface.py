@@ -1258,9 +1258,11 @@ def _fmt_s_and_find(s, f_ind, mode=None):
     ``mode`` STAMPS THE MEASURE, and is not cosmetic.  ``f_ind`` is normalised
     by the mode's own Ip demand, and those demands are not the same number: in
     ``exact``/``fsa`` mode the denominator is the physical FSA current, while
-    in ``ratio`` mode it is the CALIBRATED demand, which on the D3D-like golden
-    runs ~11% below the physical share.  Two runs can therefore print quite
-    different ``f_ind`` (and hence different products) for identical physics
+    in ``ratio`` mode it is the CALIBRATED demand.  MEASURED on the D3D-like
+    golden at the sigma=0 R2 anchor: f_ind = 0.7976 in exact mode vs 0.7809 in
+    ratio mode, i.e. the ratio denominator reads ~2.1% high, so ratio-mode
+    f_ind sits ~2.1% BELOW the physical share.  Two runs therefore print
+    different ``f_ind`` (and hence different products) for identical physics,
     purely because of the measure.  Emitting them under one unlabelled
     ``[R2-invariant]`` tag invites exactly the cross-operating-point comparison
     issue #23 exists to prevent, so the label travels with the number.

@@ -251,10 +251,10 @@ def test_the_qc_fragment_stamps_the_measure_mode():
     which mode produced it.
 
     In ``exact``/``fsa`` the denominator is the physical FSA current; in
-    ``ratio`` it is the calibrated demand, ~11% below the physical share on the
-    D3D-like golden.  Two runs can print materially different ``f_ind`` -- and
-    hence different products -- for identical physics, purely because of the
-    measure.  Emitting both under one unlabelled ``[R2-invariant]`` tag invites
+    ``ratio`` it is the calibrated demand.  Measured on the D3D-like golden at
+    the sigma=0 R2 anchor: 0.7976 (exact) vs 0.7809 (ratio), a ~2.1% gap.  So
+    two runs print different ``f_ind`` -- and hence different products -- for
+    identical physics, purely because of the measure.  Emitting both under one unlabelled ``[R2-invariant]`` tag invites
     the cross-operating-point comparison issue #23 exists to prevent.
     """
     for mode in ("exact", "fsa", "ratio"):
