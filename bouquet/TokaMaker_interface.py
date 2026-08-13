@@ -49,6 +49,7 @@ from .utils import (
     store_equilibrium,
     store_baseline_profiles,
     _scan_key,
+    _shape_from_boundary,
     read_eqdsk_from_bytes,
 )
 from .io.geqdsk import read_geqdsk
@@ -83,7 +84,12 @@ from .physics import q_ravg
 # number), and adding a key to the archived diagnostics would move the
 # goldens, which this non-physics work must not do.  Sizing the degeneracy
 # across a real campaign should aggregate the printed lines from the genlogs.
-ANCHOR_MASKED_FAILURES = {"recon_anchor_fallback": 0, "band_resample": 0}
+ANCHOR_MASKED_FAILURES = {"recon_anchor_fallback": 0, "band_resample": 0,
+                          # third site (issue #24): the unperturbed
+                          # jphi-linterp baseline solve, whose failure silently
+                          # reverts every per-draw boundary/l_i diagnostic to
+                          # recon's inverse-mode reference.
+                          "jphi_baseline": 0}
 
 
 def _count_masked_anchor_failure(site, exc):
@@ -3505,6 +3511,70 @@ def generate_bouquet(
                        if jphi_diff is not None else input_j_phi.copy())
             _ffp_b = {"type": "jphi-linterp",
                       "y": _jphi_b, "x": psi_N}
+            # ---- psi re-initialisation before the baseline solve (issue #24) --
+            # This is the THIRD site of the converged-on-entry degeneracy, and
+            # the same treatment as the sigma=0 state anchor got in #22.
+            # `mygs` arrives here on the reconstruction's own converged state;
+            # once the reconstruction solves the SAME pressure the draws do,
+            # that state sits essentially ON this forward jphi-linterp solve's
+            # fixed point.  The under-relaxed Picard iteration then has no
+            # gradient to descend, parks in a small limit cycle just above
+            # nl_tol, burns all `maxits` iterations and raises
+            # 'Exceeded "maxits"' -- a hard failure reported for a state that is
+            # physically converged.  Re-initialising psi from the LCFS shape
+            # starts the iteration far enough away that it converges normally.
+            #
+            # The shape is taken from the state we are about to leave (the same
+            # LCFS the recon landed on), which is the local equivalent of the
+            # run.py hunk's g-file boundary; `safe_trace_surf` snapshots and
+            # restores, so the trace itself perturbs nothing.  Failure to get a
+            # usable contour is not fatal: skip the re-init and solve warm, i.e.
+            # exactly the previous behaviour.
+            #
+            # STATE GUARD.  `init_psi` DISCARDS the state we arrive on (recon's
+            # converged equilibrium) and installs a cold analytic psi.  The
+            # handler below advertises "REVERTING to the recon (inverse)
+            # reference", and before the re-init existed that was literally
+            # true -- a failed solve left mygs untouched on recon's converged
+            # state, which is why #24 classed the fallback as benign.  With an
+            # unguarded init_psi it is no longer true: the message would be
+            # printed while mygs sits on a cold, non-converged psi, which then
+            # poisons the warm start of every subsequent draw.  Snapshot before
+            # the re-init so the revert the message promises actually happens.
+            _bl_snap = None
+            _bl_can_snap = (hasattr(mygs, "copy_eq")
+                            and hasattr(mygs, "replace_eq"))
+            _init_lcfs_exc = None
+            try:
+                _init_lcfs = safe_trace_surf(mygs, 1.0 - psi_pad)
+            except Exception as _exc:
+                _init_lcfs = None
+                _init_lcfs_exc = _exc
+            if _init_lcfs is not None and len(np.asarray(_init_lcfs)) >= 4:
+                _bR0, _bZ0, _ba, _bkap, _bdel = _shape_from_boundary(_init_lcfs)
+                if _bl_can_snap:
+                    _bl_snap = mygs.copy_eq()
+                mygs.init_psi(_bR0, _bZ0, _ba, _bkap, _bdel)
+                print(f"  [jphi-baseline] psi re-initialised from the landed "
+                      f"LCFS (R0={_bR0:.4f} a={_ba:.4f} kappa={_bkap:.4f} "
+                      f"delta={_bdel:.4f}) before the forward solve "
+                      f"(converged-on-entry guard, issue #24)")
+            else:
+                # Say WHY the trace was unusable.  The fallback is deliberately
+                # non-fatal, so this line is the only record a run keeps of it;
+                # dropping the exception detail makes a trace failure and a
+                # merely-too-short contour indistinguishable after the fact.
+                if _init_lcfs_exc is not None:
+                    _why = (f"safe_trace_surf raised "
+                            f"{type(_init_lcfs_exc).__name__}: {_init_lcfs_exc}")
+                elif _init_lcfs is None:
+                    _why = "safe_trace_surf returned None"
+                else:
+                    _why = (f"traced contour has only "
+                            f"{len(np.asarray(_init_lcfs))} points (need >= 4)")
+                print(f"  [jphi-baseline] WARN: could not trace an LCFS to "
+                      f"re-initialise psi from ({_why}); solving warm (the "
+                      f"converged-on-entry stall of issue #24 is possible here)")
             mygs.set_targets(Ip=initial_Ip_target, pax=float(pressure_solve[0]))
             mygs.set_profiles(pp_prof=_pp_b, ffp_prof=_ffp_b)
             try:
@@ -3528,8 +3598,37 @@ def generate_bouquet(
                       f"solved: l_i(3)={_baseline_li3:.5f} Ip={_recon_Ip:.0f}; "
                       f"per-draw boundary/l_i now reference THIS baseline")
             except (ValueError, RuntimeError) as _bl_exc:
-                print(f"  [jphi-baseline] solve failed ({_bl_exc}); "
-                      f"falling back to recon (inverse) reference")
+                # Deliberate mask (issue #24, third site) -- now COUNTED, and
+                # the revert spelled out.  Previously this printed one line and
+                # moved on, so an archive could not tell you whether its
+                # per-draw boundary/l_i diagnostics were referenced to the
+                # jphi-linterp baseline the draws live in or to recon's
+                # inverse-mode LCFS -- two references ~1.6 mm / ~0.9 % in l_i(3)
+                # apart, which is the whole reason this baseline solve exists.
+                # Make the revert real BEFORE announcing it (and before the
+                # count, so the counted event is the fully-handled one): put
+                # mygs back on the state init_psi discarded, or every
+                # subsequent draw warm-starts from a cold, non-converged psi.
+                if _bl_snap is not None:
+                    mygs.replace_eq(source_eq=_bl_snap)
+                    _bl_reverted = "solver state restored to recon's"
+                elif _bl_can_snap:
+                    # psi was never re-initialised (no usable LCFS trace), so
+                    # the state was never discarded -- nothing to restore.
+                    _bl_reverted = "solver state untouched (no psi re-init)"
+                else:
+                    _bl_reverted = ("solver state NOT restored: this object "
+                                    "exposes no copy_eq/replace_eq pair")
+                _count_masked_anchor_failure("jphi_baseline", _bl_exc)
+                print(f"  [jphi-baseline] solve failed ({_bl_exc}); REVERTING "
+                      f"to the recon (inverse) reference [{_bl_reverted}] -- "
+                      f"this run's "
+                      f"per-draw boundary and l_i diagnostics carry the "
+                      f"~1.6 mm / ~0.9 % representation offset the "
+                      f"jphi-linterp baseline exists to remove, and the "
+                      f"soft-reg coil target stays recon's inverse-mode set "
+                      f"(l_i(3) reference {_baseline_li3:.5f} = l_i_target, "
+                      f"NOT a solved baseline)")
 
         # ---- Boundary-shift diagnostic ----
         # The reference LCFS for per-stage boundary-deviation reporting
