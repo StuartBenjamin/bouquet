@@ -94,7 +94,13 @@ _N_DRAWS = 2                 # each draw is a full solve + SWB + homotopy
 # Acceptance bars for the sigma=0 R2 invariant.  Measured values on this case
 # are quoted in the assertions; none of these may be loosened to make a run
 # pass -- a miss is a regression to report, not a tolerance to widen.
-_S_ATOL = 1e-3               # |s - 1| ; measured 8.5e-4
+#
+# PROVENANCE OF EVERY "measured" NUMBER IN THIS BLOCK: the stock R2 probe
+# (`python tests/test_seeded_reproducibility.py r2 <outdir>`, _SEED below),
+# the synthetic golden fixture, production defaults, single-threaded BLAS,
+# on main @ 4ad4894.  Quote the mode with the number -- ratio and exact are
+# different measures and do not report the same residual (issue #28).
+_S_ATOL = 1e-3               # |s - 1| ; measured 8.89e-4 (ratio) -- 89% of bar
 #
 # WHY _S_ATOL IS STILL A BARE |s-1| BAR, given that #23's whole finding is that
 # |s-1| is not comparable across operating points.  The f_ind-denominator
@@ -108,9 +114,40 @@ _S_ATOL = 1e-3               # |s - 1| ; measured 8.5e-4
 # is the one that bounds a real residual, and that is the one stated on the
 # product.  If the ratio path ever stops being exact at sigma=0, this bar
 # inherits the #23 problem and must be restated on |s-1|*f_ind as well.
-_LI_REL = 0.005              # l_i vs recon ; measured +0.100%
+#
+# QUOTE THIS RESIDUAL WITH ITS ESTIMATOR *AND* ITS TARGET (issue #28).  Both
+# have moved under this bar, and neither move was a regression -- but the
+# recorded numbers were not repinned either time, which is how a 91%-of-bar
+# scare got diagnosed as a drift that never happened.
+#
+#   * #20 put the probe AND `l_i_target` on l_i(3)/'iter'.  The pre-#20
+#     records (+0.100% / +0.130%) are the same physical miss read on
+#     l_i(1)/'std' -- a functional ~29% away on this fixture.  Relabelling,
+#     not drift.
+#   * #27 (issue #25) repointed `l_i_target` from a post-step-7 get_stats
+#     read to `result['li_final']`, the step-6 secant-MATCHED value.  That
+#     matters here specifically: route R2 with perturb_jind_in_anchor=True
+#     takes the ACCEPT-ANCHOR 'C/perturb-anchor' branch and skips
+#     find_optimal_scale + the corrective iteration entirely.  So before #27
+#     this residual charged the draw for a step-7 drift the R2 path never
+#     applies -- measured +0.342% on this golden at main @ 4ad4894
+#     (li_final 0.653840 vs li_realized_post_corrective 0.656074).  Removing
+#     that systematic is the whole reason the residual reads -0.083% here
+#     and read -0.457% at ffc02d1.  Like-for-like now: neither side of the
+#     comparison has the corrective iteration applied.
+#
+# Measured on main @ 4ad4894, golden, l_i(3)/'iter' vs the step-6 matched
+# target: ratio -0.083% (17% of bar), exact -0.117% (23% of bar).
+#
+# THE BAR ITSELF IS UNCHANGED AND ITS DERIVATION IS STILL OPEN -- 0.005 was
+# set as a round 0.5% against a number that has since been re-denominated
+# twice.  See #28.  For scale: `l_i_tolerance` (the per-draw acceptance band
+# the generation machinery actually enforces) defaults to 0.05, so this bar
+# is a 10x stricter statement than any draw is held to.
+_LI_REL = 0.005              # l_i(3)/'iter' vs recon step-6 target ; measured
+                             # -0.083% (ratio) / -0.117% (exact)
 _JBS_FRAC = 0.02             # sigma0 j_BS vs baseline split, fraction of peak
-                             # (the sigma0-guard bar) ; measured 0.265%
+                             # (the sigma0-guard bar) ; measured 0.279%
 
 # The 'exact' measure (BOUQUET_R2_IP_MODE=exact) has its OWN acceptance, and it
 # is deliberately not _S_ATOL.  The ratio calibration is exact at sigma=0 by
@@ -582,7 +619,14 @@ def test_sigma0_r2_exact_measure_reports_a_plausible_inductive_share(
 
 def test_sigma0_r2_exact_measure_still_recovers_the_recon_li(sigma0_anchor):
     """The physics acceptance is unchanged by the change of measure: same 0.5%
-    bar as the default path.  Measured +0.130% (default: +0.100%)."""
+    bar as the default path.
+
+    Measured on main @ 4ad4894: **-0.117%** on l_i(3)/'iter' against the
+    step-6 matched `l_i_target` (default/ratio path: -0.083%).  The records
+    this docstring used to carry, +0.130% / +0.100%, were the same miss read
+    on l_i(1)/'std' before #20 and against the post-step-7 target before #27
+    -- see `_LI_REL` for both re-denominations and issue #28.
+    """
     target = float(sigma0_anchor["l_i_target"][0])
     got = float(sigma0_anchor["li_exact"][0])
     assert abs(got - target) / target <= _LI_REL, (

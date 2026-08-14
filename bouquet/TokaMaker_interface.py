@@ -1026,27 +1026,50 @@ class _AnchorIpRenorm:
 
     ``BOUQUET_R2_IP_MODE`` selects the measure, for A/B:
 
-    ``exact``   the ``jphi-linterp`` FSA current integral above;
+    ``exact``   (DEFAULT, since f48cd24) the ``jphi-linterp`` FSA current
+                integral above;
     ``fsa``     the same integral read as an FSA density,
                 :math:`\int d\psi (V'/2\pi)\langle 1/R\rangle J` -- correct
                 only if the arrays really are FSA densities, which they are
                 not (+0.927 % on the archived total);
-    ``ratio``   (default) 7dc254b's calibration (alias ``anchor``);
+    ``ratio``   7dc254b's calibration (alias ``anchor``);
     ``legacy``  pre-7dc254b: bracketed root against ``mygs`` in whatever state
                 it is in, target ``Ip_target``.
 
-    **WHICH MODE IS THE DEFAULT, AND WHY IT IS STILL ``ratio``.**  Measured at
-    :math:`\sigma=0` on the D3D-like example, one call per mode, twice for
-    ``exact`` (bit-identical):
+    **WHICH MODE IS THE DEFAULT, AND WHY IT IS ``exact``.**  Measured at
+    :math:`\sigma=0` on the synthetic golden fixture, one call per mode, twice
+    for ``exact`` (bit-identical):
 
     ===========  ==========  ==========  ==============================
     mode         ``s``       ``|s-1|``   ``l_i`` vs recon
     ===========  ==========  ==========  ==============================
-    ``exact``    0.996750    3.3e-3      +0.130 %
-    ``fsa``      0.985600    1.4e-2      -0.093 %
-    ``ratio``    0.999150    8.5e-4      +0.100 %
-    ``legacy``   0.837339    1.6e-1      -2.008 %
+    ``exact``    0.996962    3.0e-3      -0.117 %
+    ``fsa``      0.986045    1.4e-2      -0.287 %
+    ``ratio``    0.999111    8.9e-4      -0.083 %
+    ``legacy``   0.825917    1.7e-1      -3.114 %
     ===========  ==========  ==========  ==============================
+
+    Provenance (table refreshed for issue #28): re-measured on main @ 4ad4894,
+    on the synthetic golden fixture used throughout this module, production
+    defaults, single-threaded BLAS.
+    ``exact``/``ratio``/``legacy`` are from the stock R2 probe
+    (``python tests/test_seeded_reproducibility.py r2 <outdir>``, seed
+    20260804).  ``fsa`` is NOT exercised by that probe; it was run separately
+    through the same ``perturb_kinetic_equilibrium`` call with
+    ``BOUQUET_R2_IP_MODE=fsa``, so its row is measured, not carried over.
+
+    THE ``l_i`` COLUMN IS l_i(3)/``iter`` AGAINST THE STEP-6 MATCHED TARGET,
+    and it is not comparable to the values this table carried before.  Two
+    re-denominations sit between them, neither of them a physics event: #20
+    moved probe and target from l_i(1)/``std`` to l_i(3)/``iter`` (functionals
+    ~29 % apart here), and #27 repointed ``l_i_target`` from the post-step-7
+    read to ``result['li_final']``.  The second matters for THIS table in
+    particular, because route R2 skips the corrective iteration (see the note
+    on the standard loop below), so the old column charged every row for a
+    +0.342 % step-7 drift the route never applies.  ``legacy`` moves most in
+    absolute terms -- it is the uncorrected control, and what it is
+    uncorrected *against* moved too; it remains far outside
+    ``10 * _S_ATOL``, so the control has not gone vacuous.
 
     The correct measure does NOT reproduce the ``s == 1.000`` invariant more
     closely -- it reproduces it LESS closely, and for an understood reason.
@@ -1058,18 +1081,48 @@ class _AnchorIpRenorm:
 
     * the reconstruction's own :math:`j_\phi` residual -- the archived total
       differs from the anchor's own current profile by 1.6 % of peak in SHAPE,
-      worth +0.193 % of :math:`I_p` at the R2 state anchor (+0.068 % at the
+      worth +0.1717 % of :math:`I_p` at the R2 state anchor (+0.068 % at the
       baseline recon), i.e. -0.25 % of inductive amplitude; plus
     * the :math:`\sigma=0` ``solve_with_bootstrap`` residual, -0.085 %, the
       same term ``ratio`` is left with.
 
     Both are real; neither is a bug in the measure, whose runtime self-check
-    against the anchor's own profile is +0.014 % here.  But it means the
+    against the anchor's own profile is +0.0173 % here.  But it means the
     pinned invariant ``|s-1| <= 1e-3`` is not attainable by ANY honest measure
     on this case -- even a perfectly self-consistent archive would leave
-    ~1.1e-3 -- so flipping the default is an acceptance-criterion change, not
-    a code change, and is left to the package author.  Everything needed for
-    it is here: set ``_R2_IP_MODE_DEFAULT = 'exact'``.
+    ~1.1e-3.  Flipping the default was therefore an acceptance-criterion
+    decision rather than a code change, and it was taken as one.
+
+    (Numbers in the two bullets and this paragraph: the runtime self-check
+    ``+0.0173 %`` and the archived-total bias ``+0.1717 %`` are re-measured on
+    main @ 4ad4894 -- the probe prints both on the ``[R2-anchor]`` line in
+    ``exact`` mode -- and were recorded as ``+0.014 %`` / ``+0.193 %`` when
+    this section was written in ``5a424d1``.  The ``-0.085 %`` SWB residual,
+    the ``1.6 %`` shape figure, the ``+0.068 %`` baseline-recon value and the
+    ``~1.1e-3`` floor derived from them are AS RECORDED AT ``5a424d1`` and
+    were not re-measured here; issue #32 is the place that needs them
+    refreshed, because they are what the ratio-path floor is built out of.)
+
+    **THE DECISION WAS TAKEN, 2026-08-04.**  This section deferred it to the
+    package author ("everything needed for it is here: set
+    ``_R2_IP_MODE_DEFAULT = 'exact'``"); ``f48cd24``, later the same day, did
+    exactly that, per package-author decision.  ``exact`` has been the default
+    ever since and nothing has flipped it back.  The argument above is kept
+    because it is the derivation BEHIND that decision and is still true -- but
+    read it as the record of a choice already made, not as a live proposal.
+    What the flip bought, in the author's framing: under ``ratio`` the
+    :math:`\sigma=0` invariant is true by construction, whereas under
+    ``exact`` ``|s-1|`` becomes a MEASUREMENT of the archive's internal
+    self-consistency.  The acceptance moved with it, and is now stated on the
+    Ip-space product ``|s-1|*f_ind`` rather than on ``|s-1|`` (issue #23,
+    PR #26); see ``_S_FIND_ATOL_EXACT`` in
+    ``tests/test_seeded_reproducibility.py``.
+
+    Note that ``_S_ATOL = 1e-3`` still exists and is still pinned -- but it
+    now governs the ``ratio`` path only, which is why the "not attainable by
+    any honest measure" sentence above is not a statement that the repo's
+    bars are unsatisfiable.  Whether 1e-3 is the right floor for the ratio
+    path is open in issue #32.
 
     Only route R2 uses this; the standard :math:`l_i` loop
     (``perturb_jind_in_anchor=False``, the production ensemble path) is

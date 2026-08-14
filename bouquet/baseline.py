@@ -572,6 +572,21 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         # reconstruction actually finished, and its distance from the target is
         # reported loudly by reconstruct_equilibrium when it exceeds the band.
         #
+        # `l_i_target` INTENTIONALLY DIFFERS FROM THE PRE-#27 ARCHIVED VALUE by
+        # exactly the step-7 corrective drift -- that IS the change described
+        # above, not a side effect of it.  Worked example, main @ 4ad4894 on
+        # the synthetic golden: the old target (the post-corrective read) was
+        # 0.656074, the new one (step-6 matched) is 0.653840, and
+        # 0.653840 * 1.003416 = 0.656074 -- the +0.342 % recorded in
+        # `li_corrective_drift_pct` and nothing else.  Still far in-band
+        # (+/-5.00 %, `li_corrective_out_of_band` False).  This is also the
+        # direct cause of the sigma=0 R2 l_i residual reading -0.083 % rather
+        # than the pre-#27 -0.457 %: route R2 skips the corrective iteration,
+        # so the old target was charging it for a drift it never applies (see
+        # `_LI_REL` in tests/test_seeded_reproducibility.py, and issue #28).
+        l_i_target = float(result["li_final"])
+        # THE NOTE BELOW IS ABOUT THIS LINE ONLY -- a bit-neutral refactor, not
+        # a claim about `l_i_target` (which moves by design, see above).
         # Consume the value reconstruct_equilibrium already measured at step 7b
         # rather than re-reading get_stats here.  The re-read was redundant --
         # same solver state, same lcfs_pad (source.psi_pad is exactly what was
@@ -581,9 +596,13 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         # solver happens to be in at THIS line, which is "post step 7" only for
         # as long as nothing in between touches the equilibrium.  Consuming the
         # returned field pins the number to the step it is named after.
-        # Verified bit-identical to the old re-read on the D3D-like fixture
-        # (delta exactly 0.0), so no archived value moves.
-        l_i_target = float(result["li_final"])
+        # Verified bit-identical to the old re-read on the synthetic golden
+        # fixture (delta exactly 0.0), so no archived value moves.  RE-VERIFIED
+        # on main @ 4ad4894 for issue #28, capturing both at this exact point
+        # in the control flow: old re-read and consumed value are both
+        # 0.6560742094407394, delta exactly 0.0.  Nothing between step 7b and
+        # here mutates the equilibrium, so the "only for as long as" caveat
+        # above still holds and is still worth keeping.
         l_i_realized_post_corrective = float(
             result["li_realized_post_corrective"])
         recon_metrics = _reconstruction_metrics(
