@@ -29,6 +29,84 @@ from .schema import write_profile
 LI_SCALE = "iter(li3)"
 
 
+class OpenLCFSContourWarning(UserWarning):
+    """No closed contour was found at the LCFS flux level.
+
+    Emitted by :func:`select_closed_lcfs` when every candidate segment is
+    open, so the caller is falling back to the longest one and any
+    boundary metric derived from it is unreliable.
+    """
+
+
+#: Endpoint gap, as a fraction of a segment's own bounding-box diagonal,
+#: under which :func:`select_closed_lcfs` calls that segment closed.
+#:
+#: matplotlib repeats the first vertex exactly when a contour closes, so a
+#: genuinely closed LCFS scores 0.0 and any positive threshold would do.
+#: The bar is kept this tight so that an OPEN branch cannot sneak through:
+#: to be misread as closed it would have to return to within 0.1% of its own
+#: extent, at which point it is closed in every sense that matters here.
+_LCFS_CLOSURE_RTOL = 1e-3
+
+
+def select_closed_lcfs(segs, context=""):
+    r"""Pick the longest **closed** contour segment from *segs*.
+
+    On a diverted equilibrium the :math:`\psi = \psi_\mathrm{LCFS}` level set
+    contains the open separatrix branch running down to the divertor as well
+    as the closed LCFS.  The open branch spans the full vessel height, so it
+    frequently carries *more* points than the closed boundary -- and a plain
+    ``max(segs, key=len)`` then silently returns the wrong curve.  Measured on
+    a diverted lower-single-null case, that mis-selection reported a boundary
+    RMS of 891.86 mm (open branch, n=1070) where the true closed-LCFS value is
+    2.06 mm (n=969), which flipped the acceptance verdict PASS -> CHECK.  A
+    second case selected the closed branch only because it happened to be
+    longer, so the defect is general rather than case-specific (issue #33).
+
+    Closedness is tested directly -- first vertex coincident with last, within
+    :data:`_LCFS_CLOSURE_RTOL` of the segment's own bounding-box diagonal --
+    rather than inferred from length.
+
+    Parameters
+    ----------
+    segs : sequence of ndarray, shape (N, 2)
+        Candidate contour segments, as returned by matplotlib ``allsegs``.
+    context : str, optional
+        Caller label, used only in the fallback warning message.
+
+    Returns
+    -------
+    ndarray, shape (N, 2) or None
+        The longest closed segment; the longest segment overall (with an
+        :class:`OpenLCFSContourWarning`) if none closes; ``None`` if *segs*
+        is empty.
+    """
+    segs = [np.asarray(s, dtype=float) for s in segs if len(s) > 4]
+    if not segs:
+        return None
+
+    closed = []
+    for s in segs:
+        span = np.ptp(s, axis=0)
+        diag = float(np.hypot(*span))
+        gap = float(np.hypot(*(s[0] - s[-1])))
+        if diag > 0.0 and gap <= _LCFS_CLOSURE_RTOL * diag:
+            closed.append(s)
+
+    if closed:
+        return max(closed, key=len)
+
+    warnings.warn(
+        f"no CLOSED contour at the LCFS flux level"
+        f"{' in ' + context if context else ''} -- falling back to the "
+        f"longest of {len(segs)} open segment(s).  Any boundary RMS/max "
+        f"derived from it is unreliable (issue #33).",
+        OpenLCFSContourWarning,
+        stacklevel=2,
+    )
+    return max(segs, key=len)
+
+
 class DerivativeSanityWarning(UserWarning):
     """Data-sanity warning category for :func:`pchip_derivative`.
 
