@@ -46,6 +46,7 @@ from .utils import (
     pchip_interp,
     safe_save_eqdsk,
     safe_trace_surf,
+    select_closed_lcfs,
     store_equilibrium,
     store_baseline_profiles,
     _scan_key,
@@ -6110,8 +6111,15 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     finally:
         plt.close(_fig_tmp)
 
-    if _segs:
-        _lcfs_pts = max(_segs, key=len)
+    # Longest CLOSED segment.  On a diverted equilibrium the open separatrix
+    # branch running to the divertor spans the full vessel height and can
+    # carry MORE points than the closed LCFS, in which case a plain
+    # max(..., key=len) measures the boundary against the wrong curve and the
+    # verdict flips on a number that is off by two orders of magnitude
+    # (issue #33).  Shared with plotting._lcfs_from_psi so the two cannot
+    # drift apart.
+    _lcfs_pts = select_closed_lcfs(_segs, context="reconstruction metrics")
+    if _lcfs_pts is not None:
         _tree = _cKDTree_q(_lcfs_pts)
         _devs, _ = _tree.query(isoflux_pts)
         _bnd_rms_mm = float(np.sqrt(np.mean(_devs**2)) * 1e3)

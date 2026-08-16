@@ -30,6 +30,7 @@ from .utils import (
     count_equilibria,
     list_equilibrium_indices,
     discover_scan_keys,
+    select_closed_lcfs,
 )
 from .io import read_geqdsk
 
@@ -154,8 +155,11 @@ def _lcfs_from_psi(mygs, psi_arr, isoflux_fallback, psi_lcfs_val=None):
         _segs = [v for seg in _cs.allsegs for v in seg if len(v) > 4]
     finally:
         plt.close(_fig_tmp)
-    if _segs:
-        return max(_segs, key=len)
+    # Longest CLOSED segment: on a diverted equilibrium the open separatrix
+    # branch to the divertor can be longer than the LCFS itself (issue #33).
+    _lcfs = select_closed_lcfs(_segs, context="_lcfs_from_psi")
+    if _lcfs is not None:
+        return _lcfs
     return isoflux_fallback
 
 
