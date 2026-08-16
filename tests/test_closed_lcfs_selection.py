@@ -114,17 +114,38 @@ class TestContract:
 class TestBothCallSitesUseTheHelper:
     """Structural guard: neither site may drift back to a bare length-max."""
 
+    #: Whitespace-tolerant: ``key = len`` must not slip past the guard.
+    _BARE_LENGTH_MAX = re.compile(
+        r"max\s*\(\s*_?segs\s*,\s*key\s*=\s*len\s*\)"
+    )
+
     @pytest.mark.parametrize("name", ["TokaMaker_interface.py", "plotting.py"])
     def test_no_bare_longest_segment_selection_remains(self, name):
         src = (_SRC / name).read_text()
 
-        offenders = re.findall(r"max\(\s*_?segs\s*,\s*key=len\s*\)", src)
+        offenders = self._BARE_LENGTH_MAX.findall(src)
 
         assert not offenders, (
             f"{name} still selects the LCFS by raw length: {offenders}. "
             "Use utils.select_closed_lcfs (issue #33)."
         )
 
+    @pytest.mark.parametrize(
+        "variant",
+        ["max(_segs, key=len)", "max(_segs, key = len)", "max( segs , key =len )"],
+    )
+    def test_the_guard_regex_catches_spacing_variants(self, variant):
+        """Negative control: the guard must not be defeated by whitespace."""
+        assert self._BARE_LENGTH_MAX.search(variant)
+
     @pytest.mark.parametrize("name", ["TokaMaker_interface.py", "plotting.py"])
-    def test_site_imports_the_shared_helper(self, name):
-        assert "select_closed_lcfs" in (_SRC / name).read_text()
+    def test_site_actually_calls_the_shared_helper(self, name):
+        """A mention in a comment or docstring must not satisfy this."""
+        src = (_SRC / name).read_text()
+        code = "\n".join(
+            ln for ln in src.splitlines() if not ln.lstrip().startswith("#")
+        )
+
+        assert re.search(r"\bselect_closed_lcfs\s*\(", code), (
+            f"{name} names select_closed_lcfs but never calls it."
+        )

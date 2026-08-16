@@ -78,8 +78,10 @@ def select_closed_lcfs(segs, context=""):
     -------
     ndarray, shape (N, 2) or None
         The longest closed segment; the longest segment overall (with an
-        :class:`OpenLCFSContourWarning`) if none closes; ``None`` if *segs*
-        is empty.
+        :class:`OpenLCFSContourWarning`) if none closes; ``None`` when no
+        candidate survives -- either *segs* was empty, or every entry had
+        4 or fewer vertices and was discarded as degenerate.  Callers must
+        treat ``None`` as "no usable contour" and fall back accordingly.
     """
     segs = [np.asarray(s, dtype=float) for s in segs if len(s) > 4]
     if not segs:
