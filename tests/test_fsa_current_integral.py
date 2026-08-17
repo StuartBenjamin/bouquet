@@ -152,17 +152,22 @@ def test_unsupported_combinations_raise_rather_than_guess():
 
 
 def test_r2_mode_resolution():
-    """The A/B switch, including 7dc254b's spelling of the ratio mode."""
+    """The A/B switch.  'ratio' (and 7dc254b's spelling, 'anchor') was
+    retired per issue #35: both must now raise with the retirement pointer,
+    not silently resolve to a different measure."""
     from bouquet.TokaMaker_interface import _r2_ip_mode, _R2_IP_MODE_DEFAULT
 
     saved = os.environ.pop("BOUQUET_R2_IP_MODE", None)
     try:
         assert _r2_ip_mode() == _R2_IP_MODE_DEFAULT
         for given, want in (("exact", "exact"), ("fsa", "fsa"),
-                            ("ratio", "ratio"), ("anchor", "ratio"),
-                            ("ANCHOR", "ratio"), (" legacy ", "legacy")):
+                            (" legacy ", "legacy")):
             os.environ["BOUQUET_R2_IP_MODE"] = given
             assert _r2_ip_mode() == want, given
+        for retired in ("ratio", "anchor", "ANCHOR"):
+            os.environ["BOUQUET_R2_IP_MODE"] = retired
+            with pytest.raises(ValueError, match="retired"):
+                _r2_ip_mode()
         os.environ["BOUQUET_R2_IP_MODE"] = "exakt"
         with pytest.raises(ValueError, match="BOUQUET_R2_IP_MODE"):
             _r2_ip_mode()
