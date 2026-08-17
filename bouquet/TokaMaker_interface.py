@@ -935,12 +935,27 @@ def _r2_ip_mode():
     """Resolved ``BOUQUET_R2_IP_MODE``.  See :class:`_AnchorIpRenorm`."""
     mode = os.environ.get(
         'BOUQUET_R2_IP_MODE', _R2_IP_MODE_DEFAULT).strip().lower()
-    if mode == 'anchor':          # 7dc254b's name for the ratio calibration
-        mode = 'ratio'
-    if mode not in ('exact', 'fsa', 'ratio', 'legacy'):
+    if mode in ('ratio', 'anchor'):   # 'anchor' was 7dc254b's name for it
+        # RETIRED 2026-08-17, per maintainer decision on issue #35.  The
+        # seven-archive decomposition showed the ratio calibration is blind
+        # by construction to the dominant sigma=0 defect (the archived-split
+        # amplitude bias: kappa absorbs it into the demand) while remaining
+        # hypersensitive to the other (SWB bootstrap non-reproduction)
+        # through compute_flux_integral -- the limiter-area measure this
+        # class's own defect-3 note discredits.  Its passes were false clean
+        # bills; its failures were real signal through a bad lens.  Raising,
+        # not silently mapping to 'exact': a run that asked for the retired
+        # measure should fail loudly, not report numbers on a different one.
+        raise ValueError(
+            f"BOUQUET_R2_IP_MODE={mode!r}: the ratio calibration was retired "
+            "(issue #35; blind to the archived-split amplitude bias, "
+            "hypersensitive to jBS non-reproduction through the limiter-area "
+            "integral).  Use 'exact' (default), 'fsa' (diagnostic A/B), or "
+            "'legacy'.")
+    if mode not in ('exact', 'fsa', 'legacy'):
         raise ValueError(
             f"BOUQUET_R2_IP_MODE={mode!r} is not one of "
-            "'exact' (default), 'fsa', 'ratio' ('anchor'), 'legacy'")
+            "'exact' (default), 'fsa', 'legacy'")
     return mode
 
 
@@ -975,7 +990,12 @@ class _AnchorIpRenorm:
     instead of ``Ip_target`` -- which makes the :math:`\sigma=0` invariant
     ``s == 1.000`` true by construction.  It works, but it is a ratio fix for a
     measurement error, and it is only first-order accurate away from the
-    reference shape.  Available as ``BOUQUET_R2_IP_MODE=ratio``.
+    reference shape.  RETIRED 2026-08-17 (issue #35): the seven-archive
+    decomposition showed the calibration absorbs the archived-split amplitude
+    bias into the demand (blind to the dominant real defect, e.g. a PASS at
+    71 % of bar on the case with the WORST +4.1 % bias) while reading SWB
+    bootstrap non-reproduction through ``compute_flux_integral`` (defect 3
+    below).  Asking for it now raises.
 
     **3. The measure (the actual defect behind 2).**  Two separate errors were
     hiding inside that +12.92 %, and 7dc254b attributed all of it to the
@@ -1033,9 +1053,12 @@ class _AnchorIpRenorm:
                 :math:`\int d\psi (V'/2\pi)\langle 1/R\rangle J` -- correct
                 only if the arrays really are FSA densities, which they are
                 not (+0.927 % on the archived total);
-    ``ratio``   7dc254b's calibration (alias ``anchor``);
     ``legacy``  pre-7dc254b: bracketed root against ``mygs`` in whatever state
                 it is in, target ``Ip_target``.
+
+    (``ratio`` -- 7dc254b's calibration, alias ``anchor`` -- was a fourth mode
+    until 2026-08-17; retired per issue #35, see defect 2 above.  Its rows in
+    the tables below are kept as historical measurements.)
 
     **WHICH MODE IS THE DEFAULT, AND WHY IT IS ``exact``.**  Measured at
     :math:`\sigma=0` on the synthetic golden fixture, one call per mode, twice
@@ -1069,8 +1092,8 @@ class _AnchorIpRenorm:
     on the standard loop below), so the old column charged every row for a
     +0.342 % step-7 drift the route never applies.  ``legacy`` moves most in
     absolute terms -- it is the uncorrected control, and what it is
-    uncorrected *against* moved too; it remains far outside
-    ``10 * _S_ATOL``, so the control has not gone vacuous.
+    uncorrected *against* moved too; it remains at ``|s-1| = 1.7e-1``, two
+    orders above every live mode, so the control has not gone vacuous.
 
     The correct measure does NOT reproduce the ``s == 1.000`` invariant more
     closely -- it reproduces it LESS closely, and for an understood reason.
@@ -1119,11 +1142,18 @@ class _AnchorIpRenorm:
     PR #26); see ``_S_FIND_ATOL_EXACT`` in
     ``tests/test_seeded_reproducibility.py``.
 
-    Note that ``_S_ATOL = 1e-3`` still exists and is still pinned -- but it
-    now governs the ``ratio`` path only, which is why the "not attainable by
-    any honest measure" sentence above is not a statement that the repo's
-    bars are unsatisfiable.  Whether 1e-3 is the right floor for the ratio
-    path is open in issue #32.
+    **THE SECOND DECISION WAS TAKEN, 2026-08-17 (issue #35).**  ``ratio``
+    itself was retired, and ``_S_ATOL = 1e-3`` -- which by then governed the
+    ratio path only -- was retired with it, per explicit maintainer approval.
+    The seven-archive decomposition settled #32's open question: the 8.9e-4
+    the fixture showed was not a noise floor but the low end of a residual
+    reaching 3.2e-2 on real geometry (a factor-965 span), driven entirely by
+    sigma=0 SWB bootstrap non-reproduction seen through the limiter-area
+    integral, while the calibration hid the archived-split amplitude bias
+    that ``exact`` correctly reports.  ``exact`` is the sole sigma=0
+    invariant (``_S_FIND_ATOL_EXACT`` on the Ip-space product); ``fsa`` is
+    kept as a diagnostic A/B that isolates the affine ``P'`` term, with no
+    acceptance bar of its own.
 
     Only route R2 uses this; the standard :math:`l_i` loop
     (``perturb_jind_in_anchor=False``, the production ensemble path) is
@@ -1150,15 +1180,23 @@ class _AnchorIpRenorm:
     psi_pad : float
         LCFS padding for the anchor ``get_stats`` call.
     mode : str
-        Resolved :func:`_r2_ip_mode` value (``exact``/``fsa``/``ratio``).
+        Resolved :func:`_r2_ip_mode` value (``exact``/``fsa``).
     """
 
-    __slots__ = ("_eq", "_psi_N", "_mode", "_target", "_Ip_target", "_fi_ref",
-                 "_Ip_anchor", "_kappa", "_w", "_c", "_pprime_sign",
+    __slots__ = ("_eq", "_psi_N", "_mode", "_target", "_Ip_target",
+                 "_Ip_anchor", "_w", "_c", "_pprime_sign",
                  "_self_check", "_ref_bias")
 
     def __init__(self, mygs, psi_N, reference_total, Ip_target, psi_pad,
                  mode="exact"):
+        # 'ratio' was retired 2026-08-17 (issue #35) -- see _r2_ip_mode for
+        # the rationale.  Guarded here too because tests construct the class
+        # directly, bypassing the env-var resolver.
+        if mode not in ("exact", "fsa"):
+            raise ValueError(
+                f"_AnchorIpRenorm mode {mode!r}: only 'exact' and 'fsa' "
+                "exist ('ratio' retired per issue #35; 'legacy' never "
+                "constructs an anchor)")
         self._eq = mygs.copy_eq()
         self._mode = str(mode)
         self._psi_N = np.asarray(psi_N, dtype=float)
@@ -1171,51 +1209,30 @@ class _AnchorIpRenorm:
         if not np.isfinite(self._Ip_anchor) or self._Ip_anchor == 0.0:
             self._Ip_anchor = self._Ip_target
 
-        if self._mode in ("exact", "fsa"):
-            self._fi_ref = None
-            self._kappa = None
-            convention = "jphi-linterp" if self._mode == "exact" else "fsa"
-            # Every FSA getter is evaluated on the FROZEN snapshot, and the
-            # per-surface weights are cached as plain arrays -- after __init__
-            # the root needs no solver call at all, so nothing downstream of
-            # solve_with_bootstrap can move the demand.
-            geom = fsa_current_geometry(self._eq, self._psi_N)
-            # get_profiles' P' sign follows the case's flux convention; take it
-            # from the anchor instead of assuming (the P' term is -3.3 % of Ip,
-            # so a sign slip would be a 6.6 % error).
-            probe = eq_jphi_profile(geom, "jphi-linterp", eq=self._eq)
-            self._pprime_sign = (
-                1.0 if float(np.dot(probe, reference_total)) > 0.0 else -1.0)
-            self._w, self._c = Ip_fsa_weights(
-                geom, convention=convention, pprime_sign=self._pprime_sign)
-            # Runtime validation of the measure ON THIS CASE: integrate the
-            # anchor's own current profile and compare with its true Ip.
-            j_eq = eq_jphi_profile(geom, convention, eq=self._eq,
-                                   pprime_sign=self._pprime_sign)
-            self._self_check = self._Ip_of(j_eq) / self._Ip_anchor - 1.0
-            self._ref_bias = self._Ip_of(reference_total) / self._Ip_anchor - 1.0
-            self._target = self._Ip_target
-        else:                                     # 'ratio' (7dc254b)
-            self._w = self._c = None
-            self._pprime_sign = None
-            self._self_check = None
-            self._fi_ref = float(self.flux_integral(
-                self._psi_N, reference_total))
-            self._kappa = self._fi_ref / self._Ip_anchor
-            self._ref_bias = self._kappa - 1.0
-            self._target = self._kappa * self._Ip_target
-
-    # `Ip_flux_integral_vs_target(alpha, mygs, ...)` only ever calls
-    # `mygs.flux_integral`, so this duck-types as the solver for the root.
-    def flux_integral(self, psi_vals, field_vals):
-        """``int f dA`` over the limiter region, on the FROZEN anchor.
-
-        Retained for ``ratio`` mode and for the brentq fallback.  NOT the
-        plasma-current measure -- see defect 3 in the class docstring.
-        """
-        return self._eq.compute_flux_integral(
-            np.asarray(psi_vals, dtype=float),
-            np.asarray(field_vals, dtype=float))
+        convention = "jphi-linterp" if self._mode == "exact" else "fsa"
+        # Every FSA getter is evaluated on the FROZEN snapshot, and the
+        # per-surface weights are cached as plain arrays -- after __init__
+        # the root needs no solver call at all, so nothing downstream of
+        # solve_with_bootstrap can move the demand.
+        geom = fsa_current_geometry(self._eq, self._psi_N)
+        # get_profiles' P' sign follows the case's flux convention; take it
+        # from the anchor instead of assuming (the P' term is -3.3 % of Ip,
+        # so a sign slip would be a 6.6 % error).
+        probe = eq_jphi_profile(geom, "jphi-linterp", eq=self._eq)
+        self._pprime_sign = (
+            1.0 if float(np.dot(probe, reference_total)) > 0.0 else -1.0)
+        self._w, self._c = Ip_fsa_weights(
+            geom, convention=convention, pprime_sign=self._pprime_sign)
+        # Runtime validation of the measure ON THIS CASE: integrate the
+        # anchor's own current profile and compare with its true Ip.
+        # Measured 0.009-0.043 % across the seven DIII-D demo archives
+        # (issue #35), so a self_check far above that is a geometry problem,
+        # not noise.
+        j_eq = eq_jphi_profile(geom, convention, eq=self._eq,
+                               pprime_sign=self._pprime_sign)
+        self._self_check = self._Ip_of(j_eq) / self._Ip_anchor - 1.0
+        self._ref_bias = self._Ip_of(reference_total) / self._Ip_anchor - 1.0
+        self._target = self._Ip_target
 
     def _Ip_of(self, profile):
         """FSA plasma current [A] of *profile* on the frozen anchor geometry."""
@@ -1229,24 +1246,18 @@ class _AnchorIpRenorm:
 
     @property
     def self_check(self):
-        """Relative error of the measure on the anchor's own current profile
-        (``None`` in ``ratio`` mode).  The step-1 validation, at runtime."""
+        """Relative error of the measure on the anchor's own current profile.
+        The step-1 validation, at runtime.  Measured 0.009-0.043 % across the
+        seven DIII-D demo archives (issue #35)."""
         return self._self_check
 
     @property
     def reference_bias(self):
         """``I_p[reference_total]/I_p(anchor) - 1``: how far the archived total
-        is from the current the anchor actually carries.  In ``ratio`` mode
-        this is the ``FI``-based calibration factor minus one (+0.129 on the
-        D3D-like case); in ``exact`` mode it is the reconstruction's own
-        :math:`j_\\phi` residual (+0.00068)."""
+        is from the current the anchor actually carries.  On the D3D-like
+        golden this is +0.00068; on the seven DIII-D demo archives it is the
+        +1.1 to +4.1 % archived-split amplitude bias of issue #35 / #15."""
         return self._ref_bias
-
-    @property
-    def calibration(self):
-        """``FI(reference_total) / Ip_anchor`` in ``ratio`` mode; ``1.0`` for
-        the measure-based modes, which apply no calibration."""
-        return 1.0 if self._kappa is None else self._kappa
 
     def inductive_share(self, j_ind):
         r"""``f_ind``: the LINEAR part of the measure on *j_ind*, over the
@@ -1311,10 +1322,7 @@ class _AnchorIpRenorm:
             ``tests/test_seeded_reproducibility._S_FIND_ATOL_EXACT``.
         """
         j_ind = np.asarray(j_ind, dtype=float)
-        if self._w is not None:
-            i_ind = self._Ip_of(j_ind) - self._c        # linear part only
-        else:
-            i_ind = float(self.flux_integral(self._psi_N, j_ind))
+        i_ind = self._Ip_of(j_ind) - self._c            # linear part only
         target = self._target
         if not np.isfinite(target) or target == 0.0:
             return float("nan")
@@ -1333,12 +1341,8 @@ class _AnchorIpRenorm:
         """
         j_ind = np.asarray(j_ind, dtype=float)
         j_other = np.asarray(j_other, dtype=float)
-        if self._w is not None:
-            eval_ip = self._Ip_of
-            i_ind = eval_ip(j_ind) - self._c        # linear part only
-        else:
-            eval_ip = lambda p: float(self.flux_integral(self._psi_N, p))  # noqa: E731
-            i_ind = eval_ip(j_ind)
+        eval_ip = self._Ip_of
+        i_ind = eval_ip(j_ind) - self._c            # linear part only
         i_oth = eval_ip(j_other)
         scale = None
         if np.isfinite(i_ind) and i_ind != 0.0:
@@ -1389,16 +1393,15 @@ def _fmt_s_and_find(s, f_ind, mode=None):
     See :meth:`_AnchorIpRenorm.inductive_share` and issue #23.
 
     ``mode`` STAMPS THE MEASURE, and is not cosmetic.  ``f_ind`` is normalised
-    by the mode's own Ip demand, and those demands are not the same number: in
-    ``exact``/``fsa`` mode the denominator is the physical FSA current, while
-    in ``ratio`` mode it is the CALIBRATED demand.  MEASURED on the D3D-like
-    golden at the sigma=0 R2 anchor: f_ind = 0.7976 in exact mode vs 0.7809 in
-    ratio mode, i.e. the ratio denominator reads ~2.1% high, so ratio-mode
-    f_ind sits ~2.1% BELOW the physical share.  Two runs therefore print
-    different ``f_ind`` (and hence different products) for identical physics,
-    purely because of the measure.  Emitting them under one unlabelled
-    ``[R2-invariant]`` tag invites exactly the cross-operating-point comparison
-    issue #23 exists to prevent, so the label travels with the number.
+    by the mode's own Ip demand, and two modes can print different ``f_ind``
+    (hence different products) for identical physics, purely because of the
+    measure.  (The worked example was ``ratio`` vs ``exact`` -- 0.7809 vs
+    0.7976 on the golden, the calibrated demand reading ~2.1 % high -- and
+    although ``ratio`` is retired (issue #35), ``exact`` vs ``fsa`` differ by
+    the affine ``P'`` constant for the same reason.)  Emitting them under one
+    unlabelled ``[R2-invariant]`` tag invites exactly the
+    cross-operating-point comparison issue #23 exists to prevent, so the
+    label travels with the number.
     """
     out = f", |s-1|={abs(float(s) - 1.0):.3e}"
     tag = f" [mode={mode}]" if mode else ""
@@ -2222,17 +2225,11 @@ def perturb_kinetic_equilibrium(
                 _anchor_ip = _AnchorIpRenorm(
                     mygs, psi_N, input_j_phi, Ip_target, psi_pad,
                     mode=_r2_mode)
-                if _anchor_ip.self_check is None:
-                    print(f"  [R2-anchor] Ip renorm pinned to the anchor "
-                          f"geometry (mode={_r2_mode}, flux-integral "
-                          f"calibration {_anchor_ip.calibration:.5f})",
-                          flush=True)
-                else:
-                    print(f"  [R2-anchor] Ip renorm on the anchor geometry "
-                          f"(mode={_r2_mode}, FSA measure self-check "
-                          f"{100 * _anchor_ip.self_check:+.4f}%, archived "
-                          f"total {100 * _anchor_ip.reference_bias:+.4f}% "
-                          f"vs anchor Ip)", flush=True)
+                print(f"  [R2-anchor] Ip renorm on the anchor geometry "
+                      f"(mode={_r2_mode}, FSA measure self-check "
+                      f"{100 * _anchor_ip.self_check:+.4f}%, archived "
+                      f"total {100 * _anchor_ip.reference_bias:+.4f}% "
+                      f"vs anchor Ip)", flush=True)
             except Exception as _aip_exc:
                 print(f"  [R2-anchor] WARN: anchor capture failed "
                       f"({_aip_exc}); Ip renorm falls back to the "

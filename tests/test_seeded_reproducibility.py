@@ -28,11 +28,13 @@ Two things can only be checked with the real GS solver:
     ``solve_with_bootstrap``'s landed equilibrium against an uncalibrated
     ``Ip_target``; see ``TokaMaker_interface._AnchorIpRenorm``.
 
-    The same probe A/Bs the FSA-measure mode (``BOUQUET_R2_IP_MODE=exact``)
-    against the default ratio calibration.  Its acceptance is separate, is
-    stated on the Ip-space residual ``|s-1|*f_ind`` rather than on ``|s-1|``,
-    and is looser BY DERIVATION, not by concession -- read
-    ``_S_FIND_ATOL_EXACT`` before touching either number.
+    ``exact`` is the sole accepted measure (the ratio calibration was
+    retired 2026-08-17, issue #35 -- see the ``_S_ATOL`` retirement record
+    below).  Its acceptance is stated on the Ip-space residual
+    ``|s-1|*f_ind`` rather than on ``|s-1|`` -- read ``_S_FIND_ATOL_EXACT``
+    before touching the number.  The probe also runs ``fsa`` once as a
+    bar-less diagnostic (isolates the affine ``P'`` term) and ``legacy``
+    once as the historical control.
 
 Runs on the synthetic D3D-like example (no proprietary data).  Marked
 ``solver`` like ``test_systematics.py``; deselect with ``pytest -m "not
@@ -98,22 +100,24 @@ _N_DRAWS = 2                 # each draw is a full solve + SWB + homotopy
 # PROVENANCE OF EVERY "measured" NUMBER IN THIS BLOCK: the stock R2 probe
 # (`python tests/test_seeded_reproducibility.py r2 <outdir>`, _SEED below),
 # the synthetic golden fixture, production defaults, single-threaded BLAS,
-# on main @ 4ad4894.  Quote the mode with the number -- ratio and exact are
-# different measures and do not report the same residual (issue #28).
-_S_ATOL = 1e-3               # |s - 1| ; measured 8.89e-4 (ratio) -- 89% of bar
+# on main @ 4ad4894.  Quote the mode with the number -- different measures
+# do not report the same residual (issue #28).
 #
-# WHY _S_ATOL IS STILL A BARE |s-1| BAR, given that #23's whole finding is that
-# |s-1| is not comparable across operating points.  The f_ind-denominator
-# argument does apply here too -- this bar would also tighten itself on a
-# high-bootstrap archive -- so the difference is one of ROLE, not of physics.
-# _S_ATOL governs the RATIO calibration, where s is exact at sigma=0 by
-# construction: the pass condition is "the calibration reproduced itself", and
-# 1e-3 is a numerical-noise floor on an identity, not a physics budget derived
-# in Ip space.  There is no residual to rebase, so multiplying by f_ind would
-# only make the noise floor drift with the operating point.  _S_FIND_ATOL_EXACT
-# is the one that bounds a real residual, and that is the one stated on the
-# product.  If the ratio path ever stops being exact at sigma=0, this bar
-# inherits the #23 problem and must be restated on |s-1|*f_ind as well.
+# _S_ATOL RETIREMENT RECORD (was: `_S_ATOL = 1e-3` on ratio-mode |s-1|).
+# Retired 2026-08-17 together with ratio mode itself, per explicit
+# maintainer approval on issue #35.  Its own escape clause fired: the bar
+# was defended as "a numerical-noise floor on an identity", with the caveat
+# that if the ratio path ever stopped being exact at sigma=0 it would have
+# to be restated.  The seven-archive decomposition (issue #35) showed the
+# 8.89e-4 the fixture measured was never a noise floor: the same quantity
+# spans 3.33e-5 to 3.22e-2 across real DIII-D archives (factor 965, 4/7
+# over the bar), driven entirely -- termA/termB decomposition, closure
+# 1e-16 -- by sigma=0 SWB bootstrap non-reproduction read through
+# compute_flux_integral, while the calibration's kappa absorbed the
+# archived-split amplitude bias (+1.1..+4.1 % of Ip) that `exact` correctly
+# reports.  A bar on a measure that is blind to the dominant defect and
+# reads the other through a discredited integral protects nothing;
+# _S_FIND_ATOL_EXACT below is the invariant now.
 #
 # QUOTE THIS RESIDUAL WITH ITS ESTIMATOR *AND* ITS TARGET (issue #28).  Both
 # have moved under this bar, and neither move was a regression -- but the
@@ -137,7 +141,7 @@ _S_ATOL = 1e-3               # |s - 1| ; measured 8.89e-4 (ratio) -- 89% of bar
 #     comparison has the corrective iteration applied.
 #
 # Measured on main @ 4ad4894, golden, l_i(3)/'iter' vs the step-6 matched
-# target: ratio -0.083% (17% of bar), exact -0.117% (23% of bar).
+# target: exact -0.117% (23% of bar); the retired ratio path read -0.083%.
 #
 # THE BAR ITSELF IS UNCHANGED AND ITS DERIVATION IS STILL OPEN -- 0.005 was
 # set as a round 0.5% against a number that has since been re-denominated
@@ -145,19 +149,18 @@ _S_ATOL = 1e-3               # |s - 1| ; measured 8.89e-4 (ratio) -- 89% of bar
 # the generation machinery actually enforces) defaults to 0.05, so this bar
 # is a 10x stricter statement than any draw is held to.
 _LI_REL = 0.005              # l_i(3)/'iter' vs recon step-6 target ; measured
-                             # -0.083% (ratio) / -0.117% (exact)
+                             # -0.117% (exact)
 _JBS_FRAC = 0.02             # sigma0 j_BS vs baseline split, fraction of peak
                              # (the sigma0-guard bar) ; measured 0.279%
 
-# The 'exact' measure (BOUQUET_R2_IP_MODE=exact) has its OWN acceptance, and it
-# is deliberately not _S_ATOL.  The ratio calibration is exact at sigma=0 by
-# construction; the FSA measure is not, because it also sees the two ways the
-# archived split fails to be the anchor -- the reconstruction's own j_phi
-# residual (+0.193% of Ip at the R2 state anchor, i.e. -0.25% of inductive
-# amplitude) and the sigma=0 SWB residual (-0.085%).  This bar is a pin on
-# behaviour _S_ATOL does not govern, not a widening of it; _S_ATOL still
-# governs the default (ratio) path below.  It may not be loosened either:
-# a miss is a regression to report.
+# The 'exact' measure (BOUQUET_R2_IP_MODE=exact, the default and -- since the
+# ratio retirement, issue #35 -- the SOLE accepted measure) is not an identity
+# at sigma=0: it sees the two ways the archived split fails to be the anchor --
+# the reconstruction's own j_phi residual (+0.193% of Ip at the R2 state
+# anchor, i.e. -0.25% of inductive amplitude) and the sigma=0 SWB residual
+# (-0.085%).  That sensitivity is exactly why it survived #35's decomposition
+# and ratio did not.  This bar may not be loosened: a miss is a regression to
+# report.
 #
 # WHAT IS BOUNDED, AND WHY IT IS NOT |s-1| (issue #23; APPROVED CHANGE).
 #
@@ -404,9 +407,11 @@ def test_seeded_draws_are_not_all_identical(twin_runs):
 def _run_r2_probe(outdir):
     """sigma=0 route-R2 draws through ``perturb_kinetic_equilibrium``.
 
-    Runs the default ('ratio') path TWICE -- so the pair also tests that the
-    anchor snapshot/restore injects no state drift -- the 'exact' FSA measure
-    twice, and the 'legacy' path once for the before/after contrast.
+    Runs the default ('exact') measure TWICE -- so the pair also tests that
+    the anchor snapshot/restore injects no state drift -- the 'fsa'
+    diagnostic once (bar-less; isolates the affine ``P'`` term, issue #35),
+    and the 'legacy' path once for the before/after contrast.  ('ratio' was
+    retired 2026-08-17, issue #35.)
     Subprocess entry point; results land in ``<outdir>/r2.npz``.
     """
     import numpy as np
@@ -468,22 +473,20 @@ def _run_r2_probe(outdir):
                 np.asarray(d["j_BS"], dtype=float),
                 np.asarray(d["j_inductive"], dtype=float))
 
-    s1, f1, li1, jbs1, jind1 = _once("ratio")
-    s2, f2, li2, jbs2, jind2 = _once("ratio")
     s_ex1, f_ex1, li_ex1, jbs_ex1, jind_ex1 = _once("exact")
     s_ex2, f_ex2, li_ex2, jbs_ex2, jind_ex2 = _once("exact")
+    s_fsa, f_fsa, li_fsa, jbs_fsa, _ = _once("fsa")
     s_leg, f_leg, li_leg, _, _ = _once("legacy")
     np.savez(
         os.path.join(outdir, "r2.npz"),
-        s=np.array([s1, s2]), li=np.array([li1, li2]),
-        f_ind=np.array([f1, f2]),
         s_exact=np.array([s_ex1, s_ex2]), li_exact=np.array([li_ex1, li_ex2]),
         f_ind_exact=np.array([f_ex1, f_ex2]),
         jbs_exact1=jbs_ex1, jbs_exact2=jbs_ex2,
         jind_exact1=jind_ex1, jind_exact2=jind_ex2,
+        s_fsa=np.array([s_fsa]), li_fsa=np.array([li_fsa]),
+        f_ind_fsa=np.array([f_fsa]), jbs_fsa=jbs_fsa,
         s_legacy=np.array([s_leg]), li_legacy=np.array([li_leg]),
         f_ind_legacy=np.array([f_leg]),
-        jbs1=jbs1, jbs2=jbs2, jind1=jind1, jind2=jind2,
         jbs_baseline=np.asarray(bl.j_BS, dtype=float),
         l_i_target=np.array([float(bl.l_i_target)]),
     )
@@ -510,65 +513,46 @@ def sigma0_anchor(tmp_path_factory):
     return np.load(str(work / "r2.npz"))
 
 
-def test_sigma0_r2_ip_scale_is_unity(sigma0_anchor):
-    """The author-requested golden: at sigma=0 the archived split sums to Ip,
-    so the inductive renormalisation must return 1.000.
-
-    Pre-fix this was 0.8043 on the operational case and 0.8373 here, because
-    the root ran in solve_with_bootstrap's landed geometry against an
-    uncalibrated Ip_target.
-    """
-    s = float(sigma0_anchor["s"][0])
-    f_ind = float(sigma0_anchor["f_ind"][0])
-    assert abs(s - 1.0) <= _S_ATOL, (
-        f"sigma=0 R2 Ip scale is {s:.6f}, off unity by {abs(s - 1.0):.3e} "
-        f"(bar {_S_ATOL:.0e}, f_ind={f_ind:.4f}, i.e. {abs(s - 1) * f_ind:.3e} "
-        f"in Ip space); the archived split is not being reproduced")
-
-
-def test_sigma0_r2_recovers_the_recon_li(sigma0_anchor):
-    """The downstream consequence the scale error used to cause."""
-    target = float(sigma0_anchor["l_i_target"][0])
-    got = float(sigma0_anchor["li"][0])
-    assert abs(got - target) / target <= _LI_REL, (
-        f"sigma=0 R2 l_i = {got:.5f} vs recon {target:.5f} "
-        f"({100 * (got / target - 1):+.3f}%, bar {100 * _LI_REL:.1f}%)")
+# (test_sigma0_r2_ip_scale_is_unity, _recovers_the_recon_li and
+#  _is_bit_reproducible ran on the retired ratio calibration and are gone
+#  with it -- issue #35.  Their exact-mode counterparts below carry every one
+#  of those claims on the surviving measure; the pre-fix history they
+#  documented -- s = 0.8373 from rooting on the SWB-landed geometry -- lives
+#  on in test_legacy_mode_still_shows_the_defect.)
 
 
 def test_sigma0_r2_reproduces_the_baseline_jbs(sigma0_anchor):
     """The premise of the invariant: at sigma=0 SWB must return the baseline
-    bootstrap, to the same bar the sigma0 guard uses."""
+    bootstrap, to the same bar the sigma0 guard uses.
+
+    NOTE the norm: max deviation as a fraction of peak.  Issue #35 measured
+    that this norm can read 0.04 % of peak while the INTEGRATED discrepancy
+    reaches 0.88 % of Ip on a real archive (201586) -- whether that is a
+    state difference or a norm insensitivity is the open question split out
+    of #35.  This bar is kept as-is until that is settled.
+    """
     jbs_bl = np.asarray(sigma0_anchor["jbs_baseline"], dtype=float)
     peak = float(np.max(np.abs(jbs_bl)))
     dev = float(np.max(np.abs(
-        np.asarray(sigma0_anchor["jbs1"], dtype=float) - jbs_bl)))
+        np.asarray(sigma0_anchor["jbs_exact1"], dtype=float) - jbs_bl)))
     assert dev / peak <= _JBS_FRAC, (
         f"sigma=0 j_BS is {100 * dev / peak:.3f}% of peak from the baseline "
         f"split (bar {100 * _JBS_FRAC:.1f}%)")
 
 
-def test_sigma0_r2_is_bit_reproducible(sigma0_anchor):
-    """Two identical sigma=0 R2 calls must agree to the bit -- the anchor
-    snapshot/restore must not inject any state drift."""
-    d = sigma0_anchor
-    assert float(d["s"][0]) == float(d["s"][1])
-    assert float(d["li"][0]) == float(d["li"][1])
-    np.testing.assert_array_equal(d["jbs1"], d["jbs2"],
-                                  err_msg="sigma=0 R2 j_BS is not bit-reproducible")
-    np.testing.assert_array_equal(d["jind1"], d["jind2"],
-                                  err_msg="sigma=0 R2 j_inductive is not bit-reproducible")
-
-
 def test_sigma0_r2_exact_measure_lands_in_its_own_budget(sigma0_anchor):
-    """``BOUQUET_R2_IP_MODE=exact``: the FSA current integral instead of the
-    ratio calibration (``utils.Ip_fsa_integral``).
+    """``BOUQUET_R2_IP_MODE=exact``: the FSA current integral
+    (``utils.Ip_fsa_integral``), the sole sigma=0 invariant since the ratio
+    retirement (issue #35).
 
-    It does NOT land closer to 1.000 -- 3.04e-3 against the calibration's
-    8.9e-4 -- and that is the expected, understood result: the calibration
-    cancels every representation error by construction, while the measure
-    additionally charges the draw for the reconstruction's own j_phi residual
-    (+0.193% of Ip at the R2 state anchor) on top of the sigma=0 SWB residual
-    (-0.085%).  -0.335% of inductive amplitude predicted, -0.325% measured.
+    It does not land AT 1.000 -- 3.04e-3 here -- and that is the expected,
+    understood result: the measure charges the draw for the reconstruction's
+    own j_phi residual (+0.193% of Ip at the R2 state anchor) on top of the
+    sigma=0 SWB residual (-0.085%).  -0.335% of inductive amplitude
+    predicted, -0.325% measured.  That sensitivity is the reason this is the
+    measure that survived #35: on real archives it correctly reports the
+    +1.1..+4.1 % archived-split amplitude bias the retired calibration
+    absorbed into its demand.
 
     The acceptance is on ``|s-1| * f_ind``, the residual IN Ip SPACE that the
     -0.335% budget is quoted in -- see ``_S_FIND_ATOL_EXACT`` for the algebra
@@ -590,11 +574,6 @@ def test_sigma0_r2_exact_measure_lands_in_its_own_budget(sigma0_anchor):
         f"(bar {_S_FIND_ATOL_EXACT:.2e}) -- larger than the residual budget "
         f"accounts for.  Scale s={s:.6f}, |s-1|={abs(s - 1.0):.3e}, "
         f"f_ind={f_ind:.4f}")
-    assert abs(s - 1.0) > _S_ATOL, (
-        f"exact mode returned {s:.6f} (|s-1|={abs(s - 1.0):.3e}, "
-        f"f_ind={f_ind:.4f}), inside the ratio mode's bar -- if the archived "
-        f"split has become self-consistent with the anchor, the default "
-        f"should be revisited (see _AnchorIpRenorm)")
 
 
 def test_sigma0_r2_exact_measure_reports_a_plausible_inductive_share(
@@ -622,7 +601,7 @@ def test_sigma0_r2_exact_measure_still_recovers_the_recon_li(sigma0_anchor):
     bar as the default path.
 
     Measured on main @ 4ad4894: **-0.117%** on l_i(3)/'iter' against the
-    step-6 matched `l_i_target` (default/ratio path: -0.083%).  The records
+    step-6 matched `l_i_target` (the retired ratio path read -0.083%).  The records
     this docstring used to carry, +0.130% / +0.100%, were the same miss read
     on l_i(1)/'std' before #20 and against the post-step-7 target before #27
     -- see `_LI_REL` for both re-denominations and issue #28.
@@ -646,17 +625,24 @@ def test_sigma0_r2_exact_measure_is_bit_reproducible(sigma0_anchor):
 
 def test_sigma0_r2_exact_measure_leaves_the_bootstrap_alone(sigma0_anchor):
     """Changing the measure must not move j_BS: route R2 holds the bootstrap
-    fixed and moves only the ohmic drive."""
+    fixed and moves only the ohmic drive.  (Compared exact-vs-ratio until the
+    ratio retirement, issue #35; exact-vs-fsa makes the same claim -- the two
+    surviving measures differ only in the Ip weights, which must not touch
+    the bootstrap.)"""
     np.testing.assert_array_equal(
-        sigma0_anchor["jbs_exact1"], sigma0_anchor["jbs1"],
-        err_msg="the exact measure changed the sigma=0 bootstrap")
+        sigma0_anchor["jbs_exact1"], sigma0_anchor["jbs_fsa"],
+        err_msg="the Ip measure changed the sigma=0 bootstrap")
 
 
 def test_legacy_mode_still_shows_the_defect(sigma0_anchor):
     """Documents what was fixed: BOUQUET_R2_IP_MODE=legacy reproduces the old
     geometry error, so the acceptance above is not vacuous."""
     s_legacy = float(sigma0_anchor["s_legacy"][0])
-    assert abs(s_legacy - 1.0) > 10 * _S_ATOL, (
+    # 1e-2 absolute: an order below the measured legacy defect (|s-1| =
+    # 1.7e-1 on this fixture) and an order above every live mode.  Was
+    # `10 * _S_ATOL` until that constant retired with ratio mode (issue #35);
+    # same protective role, now self-contained.
+    assert abs(s_legacy - 1.0) > 1e-2, (
         f"legacy mode returned {s_legacy:.6f}, which is already at unity -- "
         f"the fix may no longer be doing anything on this case")
 

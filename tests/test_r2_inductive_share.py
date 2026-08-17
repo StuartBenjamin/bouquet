@@ -77,8 +77,8 @@ class _StubEq:
         return (x, F, Fp, P, Pp)
 
     def compute_flux_integral(self, psi_vals, field_vals):
-        # 'ratio' mode's measure: linear in the field, which is all the class
-        # needs of it.  Area-weighted so the number has the right order.
+        # The retired ratio mode's measure (issue #35); kept on the stub so
+        # the retirement guard below can prove the class no longer uses it.
         from scipy.integrate import trapezoid
         return float(trapezoid(np.asarray(field_vals, dtype=float)
                                * (np.pi * _A ** 2), np.asarray(psi_vals)))
@@ -112,7 +112,7 @@ def _split(psi_N, ind_frac=0.75):
 # ---------------------------------------------------------------------------
 #  the identity
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("mode", ["exact", "fsa", "ratio"])
+@pytest.mark.parametrize("mode", ["exact", "fsa"])
 def test_s_minus_one_times_f_ind_is_the_ip_space_residual(mode):
     """``|s-1| * f_ind == |Delta / demand|`` to machine precision, in EVERY mode.
 
@@ -131,14 +131,11 @@ def test_s_minus_one_times_f_ind_is_the_ip_space_residual(mode):
     s = air.solve_scale(j_ind, j_oth)
     f_ind = air.inductive_share(j_ind)
 
-    # Delta measured against the demand this mode actually roots against
-    # ('ratio' calibrates the demand; that is the mode's definition, not a
-    # licence to compare it with the others' number).
+    # Delta measured against the demand this mode roots against.  (The
+    # retired ratio mode calibrated its demand and rooted on the limiter-area
+    # flux integral; both surviving modes root the FSA measure on Ip_target.)
     demand = air._target                                       # noqa: SLF001
-    if mode == "ratio":
-        delta = air.flux_integral(psi_N, total) - demand
-    else:
-        delta = air._Ip_of(total) - demand                     # noqa: SLF001
+    delta = air._Ip_of(total) - demand                         # noqa: SLF001
 
     assert f_ind > 0.0
     assert abs(s - 1.0) * f_ind == pytest.approx(
@@ -250,21 +247,18 @@ def test_the_qc_fragment_stamps_the_measure_mode():
     """``f_ind`` is normalised by the MODE's own Ip demand, so the log must say
     which mode produced it.
 
-    In ``exact``/``fsa`` the denominator is the physical FSA current; in
-    ``ratio`` it is the calibrated demand.  Measured on the D3D-like golden at
-    the sigma=0 R2 anchor: 0.7976 (exact) vs 0.7809 (ratio), a ~2.1% gap.  So
-    two runs print different ``f_ind`` -- and hence different products -- for
-    identical physics, purely because of the measure.  Emitting both under one unlabelled ``[R2-invariant]`` tag invites
-    the cross-operating-point comparison issue #23 exists to prevent.
+    ``exact`` and ``fsa`` differ by the affine ``P'`` constant, so their
+    products are not interchangeable either.  (The worked ~2.1% example was
+    exact-vs-ratio before the ratio retirement, issue #35.)
     """
-    for mode in ("exact", "fsa", "ratio"):
+    for mode in ("exact", "fsa"):
         txt = _fmt_s_and_find(0.9968, 0.7614, mode)
         assert f"[mode={mode}]" in txt, (
-            f"the QC fragment does not stamp mode={mode!r}; a ratio-mode f_ind "
+            f"the QC fragment does not stamp mode={mode!r}; an fsa-mode f_ind "
             "is not comparable with an exact-mode one")
     # the stamp must survive the n/a branch too -- that is where a reader has
     # least context and most need of it
-    assert "[mode=ratio]" in _fmt_s_and_find(0.9968, None, "ratio")
+    assert "[mode=fsa]" in _fmt_s_and_find(0.9968, None, "fsa")
     # omitted mode stays backward-compatible (no stray tag)
     assert "[mode=" not in _fmt_s_and_find(0.9968, 0.7614)
 
@@ -285,3 +279,18 @@ def test_both_R2_invariant_log_sites_pass_the_mode():
             "[R2-invariant] line would not say which measure produced f_ind")
         assert "_r2_mode" in args, (
             f"_fmt_s_and_find({args}) does not pass the resolved _r2_mode")
+
+
+# ---------------------------------------------------------------------------
+#  the retirement (issue #35)
+# ---------------------------------------------------------------------------
+def test_ratio_mode_is_retired():
+    """Constructing the anchor in the retired mode must raise, not silently
+    build a calibrated demand.  Direct construction bypasses _r2_ip_mode's
+    env-var guard, so the class needs its own."""
+    psi_N = _psi_grid()
+    j_ind, j_oth = _split(psi_N)
+    total = j_ind + j_oth
+    with pytest.raises(ValueError, match="retired"):
+        _AnchorIpRenorm(_StubGS(Ip=1.0e6), psi_N, total, 1.0e6, 1e-3,
+                        mode="ratio")
