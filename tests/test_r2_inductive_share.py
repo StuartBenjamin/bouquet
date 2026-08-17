@@ -114,7 +114,8 @@ def _split(psi_N, ind_frac=0.75):
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("mode", ["exact", "fsa"])
 def test_s_minus_one_times_f_ind_is_the_ip_space_residual(mode):
-    """``|s-1| * f_ind == |Delta / demand|`` to machine precision, in EVERY mode.
+    """``|s-1| * f_ind == |Delta / demand|`` to machine precision, in both
+    surviving modes (ratio retired, issue #35).
 
     This is the whole justification for stating the sigma=0 acceptance on the
     product.  #23 verified it to 2.2e-16 on real probe output; here it is
