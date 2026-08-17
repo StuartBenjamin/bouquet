@@ -5747,6 +5747,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         "x": eqdsk.psi_N,
     }
 
+    mygs.set_targets(Ip=abs(eqdsk.Ip), pax=pres_tmp[0])
     mygs.set_profiles(ffp_prof=ffp_prof, pp_prof=pp_prof)
     mygs.solve()
 
