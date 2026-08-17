@@ -5612,6 +5612,9 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         a = geo['a'][-1]
         kappa = geo['kappa'][-1]
         delta = geo['delta'][-1]
+        ffp_prof = create_power_flux_fun(40,1.5,2.0)
+        pp_prof = create_power_flux_fun(40,4.0,1.0)
+        mygs.set_profiles(ffp_prof=ffp_prof,pp_prof=pp_prof) # Reset flux profiles to prevent previous jphi-linterp / jphi-split-bootstrap ffp_prof carrying over 
         mygs.init_psi(R0, Z0, a, kappa, delta)
 
     eqdsk_jtor = abs(eqdsk.j_tor_averaged_direct)
