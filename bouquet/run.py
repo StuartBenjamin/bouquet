@@ -249,10 +249,9 @@ class Bouquet:
         second solver: keep one :meth:`setup_solver`, then for each slice call
         ``set_slice(time=t, header=...)`` and :meth:`run` (or generate). Clearing
         the cached baseline/uncertainty forces a re-solve; the next
-        :meth:`prepare_baseline` then re-reads this slice's own LCFS boundary,
-        re-points the solver isoflux, and resets the coil reg/bounds + pristine
-        equilibrium (:meth:`_repoint_imas_geometry`), so each slice is a fully
-        independent bouquet.
+        :meth:`prepare_baseline` then re-points the solver at this slice
+        (:meth:`_point_solver_at_eq`), so each slice is a fully independent
+        bouquet.
 
         Reconstruction sources are single-equilibrium (one g-file = one slice
         with its own boundary), so there is no time axis to sweep -- passing
@@ -276,7 +275,10 @@ class Bouquet:
 
     # ── stage 1: solver -------------------------------------------------
     def setup_solver(self) -> "Bouquet":
-        """Read mesh, build regions, stand up ``mygs``, set isoflux + VSC + reg.
+        """Set up ``mygs``: mesh, regions, FE order, VSC, weak coil reg.
+
+        Device-level only; everything equilibrium- or timeslice-dependent 
+        lives in :meth:`prepare_baseline`.
 
         Common to every baseline source -- perturbed draws are always solved
         with TokaMaker. Returns self for chaining. Idempotent: a no-op if
@@ -284,19 +286,13 @@ class Bouquet:
         solver across multiple baselines/time-slices (OFT_env is a per-process
         singleton, so re-creating it would raise).
         """
-        import numpy as np
-
         if self.mygs is not None:
             return self
         from OpenFUSIONToolkit import OFT_env
         from OpenFUSIONToolkit.TokaMaker import TokaMaker
         from OpenFUSIONToolkit.TokaMaker.meshing import load_gs_mesh
 
-        from .config import ReconstructionSource, ImasSource
-        from .io.geqdsk import read_geqdsk
-
         sc = self.config.solver
-        src = self.config.source
 
         myOFT = OFT_env(nthreads=sc.nthreads)
         mygs = TokaMaker(myOFT)
@@ -305,12 +301,87 @@ class Bouquet:
         mygs.setup_mesh(mesh_pts, mesh_lc, mesh_reg)
         mygs.setup_regions(cond_dict=cond_dict, coil_dict=coil_dict)
 
+        mygs.setup(order=sc.order)          # F0 is per-equilibrium, set later
+        mygs.settings.maxits = 800
+        mygs.settings.pm = False
+        mygs.update_settings()
+        mygs.set_coil_vsc(sc.coil_vsc)
+
+        self._apply_weak_coil_reg(mygs)
+
+        self.mygs = mygs
+        self._myOFT = myOFT          # keep the env alive
+        # per-equilibrium state, filled by _point_solver_at_eq
+        self._eqdsk_ref = None
+        self._boundary_RZ = None     # LCFS shape for IMAS forward-solve init
+        self._F0 = None              # vacuum R*Bt for the current slice
+        # Snapshot the pristine post-setup equilibrium (zero coils, no plasma,
+        # no constraints) for a full per-slice reset -- see
+        # _reset_solver_state. copy_eq/replace_eq need OFT PR #248+.
+        self._clean_eq = mygs.copy_eq() if hasattr(mygs, "copy_eq") else None
+        return self
+
+    @staticmethod
+    def _apply_weak_coil_reg(mygs):
+        """Weak coil regularisation toward zero + small VSC freedom."""
+        reg_terms = [mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.0)
+                     for name in mygs.coil_sets]
+        reg_terms.append(mygs.coil_reg_term({"#VSC": 1.0}, target=0.0, weight=1e-2))
+        mygs.set_coil_reg(reg_terms=reg_terms)
+
+    def _reset_solver_state(self):
+        """Restore the clean post-:meth:`setup_solver` state.
+
+        ``generate_bouquet`` installs a STRONG coil regularization (and, when
+        requested, hard drift bounds) that pull the coils toward *this run's*
+        baseline coils, leaves them active on ``mygs`` when it returns, and
+        leaves the coil currents at the last draw's drifted values. A
+        subsequent slice in a :meth:`set_slice` sweep must inherit none of that.
+        Restore the pristine post-setup equilibrium (zero coils) captured in
+        :meth:`setup_solver`, then re-apply the weak toward-zero reg and clear
+        any stashed drift bounds. ``replace_eq`` swaps the whole equilibrium,
+        so the previous slice's isoflux/saddle constraints and F0 go with it --
+        callers must re-point afterwards (:meth:`_point_solver_at_eq`).
+        """
+        mygs = self.mygs
+        # full reset of the equilibrium + coil currents to the post-setup state
+        if getattr(self, "_clean_eq", None) is not None:
+            mygs.replace_eq(source_eq=self._clean_eq)
+        self._apply_weak_coil_reg(mygs)
+        if hasattr(mygs, "_coil_drift_bounds"):
+            mygs.set_coil_bounds(None)        # widen: prior slice had bounds set
+            delattr(mygs, "_coil_drift_bounds")
+        if hasattr(mygs, "_strong_coil_reg"):
+            delattr(mygs, "_strong_coil_reg")
+
+    def _point_solver_at_eq(self):
+        """Point the already-built solver at THIS equilibrium / time slice.
+
+        F0, the reference LCFS boundary, the isoflux constraints and the
+        optional X-point pins are all per-equilibrium. Resets first, so each
+        slice of a :meth:`set_slice` sweep inherits nothing from the previous
+        one. Runs at the top of :meth:`prepare_baseline`, before any GS work,
+        so the reconstruction path (which solves inside ``resolve_baseline``)
+        sees the right constraints too. An explicit ``SolverConfig.isoflux_pts``
+        still overrides the per-slice boundary.
+        """
+        import numpy as np
+
+        from .config import ReconstructionSource, ImasSource
+
+        sc = self.config.solver
+        src = self.config.source
+        mygs = self.mygs
+
+        self._reset_solver_state()
+
         # F0 and reference LCFS boundary come from the g-file (reconstruction)
         # or the IDS vacuum_toroidal_field + boundary outline (IMAS).
         F0 = sc.F0
         eqdsk_ref = None
         boundary_RZ = None
         if isinstance(src, ReconstructionSource):
+            from .io.geqdsk import read_geqdsk
             eqdsk_ref = read_geqdsk(src.geqdsk_path, cocos=src.cocos)
             if F0 is None:
                 F0 = abs(eqdsk_ref.R_center * eqdsk_ref.B_center)
@@ -319,19 +390,18 @@ class Bouquet:
             )
         elif isinstance(src, ImasSource):
             from .io.imas import read_imas_geometry
-            _imas_F0, boundary_RZ = read_imas_geometry(src)
+            _src_F0, boundary_RZ = read_imas_geometry(src)
             if F0 is None:
-                F0 = _imas_F0
+                F0 = _src_F0
         if F0 is None:
             raise ValueError("F0 could not be determined; set SolverConfig.F0")
 
-        mygs.setup(order=sc.order, F0=F0)
-        mygs.settings.maxits = 800
-        mygs.settings.pm = False
-        mygs.update_settings()
-        mygs.set_coil_vsc(sc.coil_vsc)
+        self._eqdsk_ref = eqdsk_ref
+        self._boundary_RZ = boundary_RZ
+        self._F0 = F0
+        mygs.set_profiles(foffset=float(F0))
 
-        # Isoflux: explicit config wins; otherwise the source's LCFS boundary
+        # Isoflux: explicit config wins; otherwise this slice's LCFS boundary
         iso_pts, iso_w = sc.isoflux_pts, sc.isoflux_weights
         if iso_pts is None and boundary_RZ is not None:
             iso_pts = boundary_RZ
@@ -347,87 +417,12 @@ class Bouquet:
                    if sc.saddle_weights is not None else None)
             mygs.set_saddle_constraints(_sad, weights=_sw)
 
-        # Weak coil regularisation toward zero + small VSC freedom
-        reg_terms = [mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.0)
-                     for name in mygs.coil_sets]
-        reg_terms.append(mygs.coil_reg_term({"#VSC": 1.0}, target=0.0, weight=1e-2))
-        mygs.set_coil_reg(reg_terms=reg_terms)
-
-        self.mygs = mygs
-        self._myOFT = myOFT          # keep the env alive
-        self._eqdsk_ref = eqdsk_ref
-        self._boundary_RZ = boundary_RZ   # LCFS shape for IMAS forward-solve init
-        self._F0 = F0                     # vacuum R*Bt applied at setup (fixed)
-        # Snapshot the pristine post-setup equilibrium (zero coils, no plasma)
-        # for a full per-slice reset in a multi-slice sweep -- see
-        # _reset_solver_state. copy_eq/replace_eq need OFT PR #248+.
-        self._clean_eq = mygs.copy_eq() if hasattr(mygs, "copy_eq") else None
-        return self
-
-    def _reset_solver_state(self):
-        """Restore the clean post-:meth:`setup_solver` coil state.
-
-        ``generate_bouquet`` installs a STRONG coil regularization (and, when
-        requested, hard drift bounds) that pull the coils toward *this run's*
-        baseline coils, leaves them active on ``mygs`` when it returns, and
-        leaves the coil currents at the last draw's drifted values. A
-        subsequent slice in a :meth:`set_slice` sweep must inherit none of that.
-        Restore the pristine post-setup equilibrium (zero coils) captured in
-        :meth:`setup_solver`, then re-apply the weak toward-zero reg and clear
-        any stashed drift bounds.
-        """
-        mygs = self.mygs
-        # full reset of the equilibrium + coil currents to the post-setup state
-        if getattr(self, "_clean_eq", None) is not None:
-            mygs.replace_eq(source_eq=self._clean_eq)
-        reg_terms = [mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.0)
-                     for name in mygs.coil_sets]
-        reg_terms.append(mygs.coil_reg_term({"#VSC": 1.0}, target=0.0, weight=1e-2))
-        mygs.set_coil_reg(reg_terms=reg_terms)
-        if hasattr(mygs, "_coil_drift_bounds"):
-            mygs.set_coil_bounds(None)        # widen: prior slice had bounds set
-            delattr(mygs, "_coil_drift_bounds")
-        if hasattr(mygs, "_strong_coil_reg"):
-            delattr(mygs, "_strong_coil_reg")
-
-    def _repoint_imas_geometry(self):
-        """Re-read THIS slice's LCFS boundary and re-point the solver isoflux.
-
-        Each IMAS time slice is an *independent* equilibrium: its own boundary
-        outline drives the isoflux constraints and the forward-solve psi init,
-        so a multi-slice sweep (via :meth:`set_slice`) must not inherit the
-        first slice's shape. Also resets the coil reg/bounds
-        (:meth:`_reset_solver_state`) so the slice does not inherit the prior
-        slice's coil constraints. F0 = R*B_t is set by the slow TF coils and is
-        held fixed at :meth:`setup_solver` (changing it needs a fresh G-S
-        setup); a slice whose F0 differs materially is flagged -- a true B_t
-        ramp is out of scope for one solver. An explicit
-        ``SolverConfig.isoflux_pts`` still overrides the per-slice boundary.
-        """
-        import numpy as np
-        import warnings
-        from .io.imas import read_imas_geometry
-
-        sc = self.config.solver
-        self._reset_solver_state()
-        F0_slice, boundary_RZ = read_imas_geometry(self.config.source)
-        self._boundary_RZ = boundary_RZ
-        iso_pts, iso_w = sc.isoflux_pts, sc.isoflux_weights
-        if iso_pts is None:
-            iso_pts = boundary_RZ
-            iso_w = np.ones(len(iso_pts)) * 500.0
-        self.mygs.set_isoflux(iso_pts, weights=iso_w)
-        if sc.F0 is None and getattr(self, "_F0", None) and \
-                abs(F0_slice - self._F0) > 1e-3 * abs(self._F0):
-            warnings.warn(
-                f"IMAS slice F0={F0_slice:.4f} differs from the solver's "
-                f"F0={self._F0:.4f} (set at setup). B_t is held fixed across "
-                f"slices; a genuine B_t ramp needs a separate solver/process."
-            )
-
     # ── stage 2: baseline (reconstruction OR imas) ----------------------
     def prepare_baseline(self) -> "Baseline":
         """Resolve the baseline from ``config.source`` and cache it.
+
+        Opens by pointing solver at the equilibrium / time slice
+        (:meth:`_point_solver_at_eq`).
 
         Delegates to :func:`bouquet.baseline.resolve_baseline`, which dispatches
         on source type. Generation depends only on the returned
@@ -435,6 +430,12 @@ class Bouquet:
         """
         from .baseline import resolve_baseline
         from .config import ImasSource
+
+        # Per-equilibrium solver state FIRST: the reconstruction path solves
+        # inside resolve_baseline. (mygs may be absent on the IMAS path, which
+        # reads its baseline without touching the solver.)
+        if self.mygs is not None:
+            self._point_solver_at_eq()
 
         # single_profile_jphi: drop the per-draw Sauter recompute BEFORE the
         # baseline work, so the IMAS forward solve does not spend a bootstrap
@@ -451,9 +452,6 @@ class Bouquet:
         # free from reconstruct_equilibrium). This also sets l_i_target to the
         # TokaMaker-solved li_1 and records IDS-vs-TokaMaker li for sanity.
         if isinstance(self.config.source, ImasSource) and self.mygs is not None:
-            # re-point the solver to THIS slice's boundary first, so a
-            # multi-slice sweep treats each time as its own equilibrium
-            self._repoint_imas_geometry()
             self._forward_solve_imas_baseline()
 
         # single_profile_jphi: collapse the decomposition so the archive matches
