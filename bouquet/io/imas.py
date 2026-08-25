@@ -34,6 +34,9 @@ parallel and must be converted to toroidal; see ``parallel_to_toroidal``).
 
 from __future__ import annotations
 
+import functools
+import json
+import os
 from typing import Optional, TYPE_CHECKING
 
 import numpy as np
@@ -48,6 +51,27 @@ _EC = 1.602176634e-19
 if TYPE_CHECKING:
     from ..config import ImasSource, FixedComponentsConfig
     from ..baseline import Baseline
+
+
+@functools.lru_cache(maxsize=2)
+def _cached_dd(ids_path: str, _mtime_ns: int, _size: int) -> dict:
+    """Parsed ``dd_sim.json``, cached by (path, mtime, size).
+
+    Callers like :func:`read_imas_baseline` re-derive one :class:`Baseline` per
+    time slice from the same on-disk IDS, and these files run to ~1 GB, so
+    re-running ``json.loads`` on every call (once per slice) dominates runtime
+    for anything that loops over many slices of one shot. Keying on mtime/size
+    (not just path) invalidates the cache if the file is rewritten in place;
+    ``maxsize=2`` bounds memory to a couple of shots' worth at a time.
+    """
+    with open(ids_path, "rb") as fh:
+        return json.loads(fh.read())
+
+
+def _load_dd(ids_path: str) -> dict:
+    """``dd_sim.json`` at ``ids_path``, via :func:`_cached_dd`."""
+    st = os.stat(ids_path)
+    return _cached_dd(ids_path, st.st_mtime_ns, st.st_size)
 
 # Core-source identifier index for neutral-beam current drive.
 NBI_SOURCE_INDEX = 2          # neutral beam injection -> summed into j_NBI
@@ -100,10 +124,7 @@ def read_imas_geometry(source: "ImasSource"):
     :meth:`Bouquet.setup_solver` when the source is an :class:`ImasSource`
     (replacing the g-file that the reconstruction path reads F0/boundary from).
     """
-    import json
-
-    with open(source.ids_path) as fh:
-        dd = json.load(fh)
+    dd = _load_dd(source.ids_path)
     eq = dd["equilibrium"]
     ie = _nearest_index(eq["time"], source.time, "equilibrium")
     vtf = eq["vacuum_toroidal_field"]
@@ -253,12 +274,9 @@ def read_imas_baseline(
 
     No Grad-Shafranov reconstruction is performed -- provenance is "imas".
     """
-    import json
     from ..baseline import Baseline
 
-    with open(source.ids_path, "rb") as fh:
-        raw_bytes = fh.read()
-    dd = json.loads(raw_bytes)
+    dd = _load_dd(source.ids_path)
     T = source.time
 
     # --- targets from the equilibrium IDS ---
