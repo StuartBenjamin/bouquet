@@ -233,7 +233,8 @@ def resolve_uncertainty(config, baseline) -> dict:
         ida = read_ida(
             ida_path, time=getattr(src, "time", None),
             sigma_mode=unc.sigma_mode, sigma_method=unc.sigma_method,
-            sigma_ni_from_ne=unc.sigma_ni_from_ne,
+            ni_from_carbon=getattr(src, "ni_from_carbon", False),
+            impurity_Z=getattr(src, "impurity_Z", 6.0),
         )
 
         def _to_kin(arr):
@@ -414,7 +415,8 @@ def _load_kinetic_profiles(source) -> dict:
     path = source.profiles_path
     if path.endswith(".cdf"):
         from .io.ida import read_ida
-        ida = read_ida(path, time=source.time, impurity_Z=source.impurity_Z)
+        ida = read_ida(path, time=source.time, impurity_Z=source.impurity_Z,
+                       ni_from_carbon=source.ni_from_carbon)
         return dict(
             psi_N=np.asarray(ida.psi_N, dtype=float),
             ne=np.asarray(ida.ne, dtype=float),
