@@ -100,6 +100,70 @@ def _count_masked_anchor_failure(site, exc):
 
 
 # ---- Adaptive corrective iteration ----
+def _renormalize_target_to_Ip(mygs, psi_N, target_jphi, Ip_target, psi_pad,
+                              label="jphi_corr"):
+    """Scale a corrector target so it carries ``Ip_target`` (issue #29).
+
+    The corrective iteration hands TokaMaker a ``jphi-linterp`` input and the
+    solver renormalises that input's AMPLITUDE to hit ``Ip_target`` on every
+    iterate.  A target whose own current integral is not ``Ip_target`` is
+    therefore a shape the solver can reproduce but a total it is constrained
+    to refuse -- and the Newton update ``input += target - output`` keeps
+    re-injecting that refused current.  Measured (#29) on eight cases, the
+    reconstruction's target carried **-3.9 % to +18.7 % of Ip** (golden
+    +6.0 %; its amplitude comes from the l_i secant, which never sees Ip),
+    while every solver output sat at Ip to <= 0.06 %.
+
+    Uniform scaling is the right operation: ``l_i`` depends on the shape, not
+    the amplitude, so the step-6 match is preserved in shape; and a
+    uniformly-scaled target is exactly what ``jphi-linterp`` hands back.
+
+    The measure is the physical FSA current integral on the LIVE geometry
+    (self-validated to 0.01-0.04 % on real cases, #35) -- never the
+    limiter-area ``flux_integral``, which reads the same target +10..+44 %
+    high.  It is AFFINE, ``Ip[J] = int(w*J) + c`` (the ``P'`` term lands in
+    ``c``, -3.3 % of Ip on the golden), so the scale is solved exactly,
+    ``s = (Ip_target - c) / int(w*J)`` -- a plain ratio ``Ip_target/Ip[J]``
+    would miss by ``(1-s)*c``, measured -0.19..-0.26 % of Ip.
+
+    Returns ``(scaled_target, factor)``; factor is 1.0 (target untouched) if
+    the measure is unavailable, with a loud note, so the corrector still runs
+    rather than not at all.
+    """
+    from scipy.integrate import trapezoid
+    from .utils import (fsa_current_geometry, Ip_fsa_weights,
+                        eq_jphi_profile)
+    psi = np.asarray(psi_N, dtype=float)
+    t = np.asarray(target_jphi, dtype=float)
+    try:
+        geom = fsa_current_geometry(mygs, psi)
+        probe = eq_jphi_profile(geom, "jphi-linterp", eq=mygs)
+        sign = 1.0 if float(np.dot(probe, t)) > 0.0 else -1.0
+        w, c = Ip_fsa_weights(geom, convention="jphi-linterp",
+                              pprime_sign=sign)
+        lin = float(trapezoid(w * t, psi))
+        Ip_t = lin + c
+    except Exception as exc:          # measure unavailable: do not block
+        print(f"  [{label}] WARN: target Ip measure failed ({exc}); "
+              f"corrector target NOT renormalised (issue #29)", flush=True)
+        return t.copy(), 1.0
+    if not (np.isfinite(lin) and np.isfinite(c) and lin != 0.0
+            and np.isfinite(Ip_target)):
+        print(f"  [{label}] WARN: target Ip measure non-finite "
+              f"(lin={lin}, c={c}); corrector target NOT renormalised "
+              f"(issue #29)", flush=True)
+        return t.copy(), 1.0
+    factor = (float(Ip_target) - c) / lin
+    if not np.isfinite(factor) or factor <= 0.0:
+        print(f"  [{label}] WARN: target Ip scale {factor} is not positive; "
+              f"corrector target NOT renormalised (issue #29)", flush=True)
+        return t.copy(), 1.0
+    print(f"  [{label}] target renormalised to Ip: carried "
+          f"{100.0 * (Ip_t / float(Ip_target) - 1.0):+.3f}% of Ip_target, "
+          f"scaled x{factor:.6f} (affine-exact; issue #29)", flush=True)
+    return t * factor, factor
+
+
 def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
                                 Ip_target, pax_target, psi_pad,
                                 min_iters=2, max_iters=8,
@@ -1382,6 +1446,30 @@ def _r2_ip_scale(anchor_ip, mygs, j_ind, j_other, psi_N, Ip_target):
         method="brentq", rtol=1e-6).root)
 
 
+def _floored_zone_note(input_jinductive):
+    """Annotation for the ``[R2-invariant]`` line on floored baselines.
+
+    Where ``floor_inductive_split`` clamped the baseline ``j_inductive`` to 0,
+    the archived ``j_BS`` absorbed the deficit, so a sigma=0 draw CANNOT
+    reproduce the archived split there -- the amplitude root redistributes
+    that current and ``s`` carries it.  Real and expected, not measurement
+    error, so it is annotated rather than carved out (measured on the worst
+    demo archive: 0.873 % of Ip inside a 6-point zone, 0.006 % elsewhere;
+    issue #35 item 1).  The sigma0 guard's carve-out verifies a DIFFERENT
+    contract (SWB-context reproducibility) and does not apply here.
+
+    Returns '' when nothing is floored, so the QC line is unchanged on the
+    (typical) un-floored case.
+    """
+    if input_jinductive is None:
+        return ""
+    n = int(np.sum(np.asarray(input_jinductive, dtype=float) <= 0.0))
+    if not n:
+        return ""
+    return (f"  [{n} floored j_ind pts: the invariant carries an expected "
+            f"floor here; issue #35]")
+
+
 def _fmt_s_and_find(s, f_ind, mode=None):
     """The R2 QC fragment: ``|s-1|``, ``f_ind`` and their product, together.
 
@@ -2195,15 +2283,32 @@ def perturb_kinetic_equilibrium(
                       f"({_wreg_exc}); SWB runs under strong reg")
                 _stashed_reg = None
 
+        # Anchor at pres_tmp -- the full solve pressure (thermal + p_fast +
+        # impurity + p_diff) that every OTHER solve site in this function
+        # uses (the draw solve, PIN_JPHI, and the diff path all set
+        # pax=pres_tmp[0]).  This was the one site still on the thermal-only
+        # `pressure` argument, which made the anchor a genuinely different
+        # equilibrium from the reconstruction that produced input_j_phi
+        # (issue #35 Defect 1): on a 27 kPa-p_fast case the missing pressure
+        # shrinks the Shafranov shift enough that the archived j_phi
+        # integrates +4.1 % of Ip high on the anchor geometry.  The
+        # positional `pressure` argument CANNOT simply carry the full
+        # pressure instead: it doubles as the kinetics pressure-match target,
+        # which is thermal by construction (feeding it full pressure fails
+        # that loop by exactly the p_fast fraction -- measured 42.7 % on the
+        # same case).  Note pres_tmp is the DRAW's own perturbed pressure, so
+        # the anchor now tracks the draw it anchors, per maintainer decision
+        # (2026-08-18): at sigma=0 this equals the baseline full pressure
+        # bitwise; at sigma>0 it is the state the draw actually solves.
         _pre_pp = {"type": "linterp",
-                    "y": pchip_derivative(psi_N, pressure) /
+                    "y": pchip_derivative(psi_N, pres_tmp) /
                          (mygs.psi_bounds[1] - mygs.psi_bounds[0]),
                     "x": psi_N}
         _pre_pp["y"][-1] = 0.0
         _pre_ffp = {"type": "jphi-linterp",
                      "y": input_j_phi.copy(),
                      "x": psi_N}
-        mygs.set_targets(Ip=Ip_target, pax=pressure[0])
+        mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
         mygs.set_profiles(pp_prof=_pre_pp, ffp_prof=_pre_ffp)
         try:
             mygs.solve()
@@ -2574,7 +2679,8 @@ def perturb_kinetic_equilibrium(
                 print(f"  [R2-invariant] s={_r2_scale_used:.6f}"
                       + _fmt_s_and_find(_r2_scale_used, _r2_f_ind_used,
                                         _r2_mode)
-                      + "  (bound is on the product; issue #23)", flush=True)
+                      + "  (bound is on the product; issue #23)"
+                      + _floored_zone_note(input_jinductive), flush=True)
             if _erp > _tolp:
                 raise RuntimeError(
                     f"perturb_jind_in_anchor: no in-band draw in {int(max_li_iter)} "
@@ -2951,6 +3057,16 @@ def perturb_kinetic_equilibrium(
         target_jphi_perturb = (
             matched_j_inductive * final_scale_j0 + spike_profile + j_fixed_eff
         )
+        # Issue #29 (second site): the inductive amplitude above was rooted on
+        # the limiter-area flux integral (#15), so the assembled target does
+        # not carry Ip_target in the physical measure either.  Same uniform
+        # renormalisation as the reconstruction site -- the solver will scale
+        # the input to Ip regardless; make the target the profile it can
+        # actually return, so the Newton update stops re-injecting refused
+        # current.
+        target_jphi_perturb, _corr_ip_factor = _renormalize_target_to_Ip(
+            mygs, psi_N, target_jphi_perturb, Ip_target, psi_pad,
+            label="jphi_corr/draw")
 
         output_jphi, _n_corr, _corr_hist = _corrective_jphi_iteration(
             mygs, psi_N, target_jphi_perturb, pp_prof,
@@ -4336,18 +4452,25 @@ def generate_bouquet(
                 mygs.set_coil_bounds(None)
             # State-anchor solve before SWB.  Mirrors per-draw flow at
             # line ~870 -- without this, SWB sometimes inherits a stale
-            # mygs state and hits maxits.  Uses recon pressure +
-            # input_j_phi (the exact recon profile) so this is recon's
-            # natural equilibrium re-solved.
+            # mygs state and hits maxits.  Uses pressure_solve (thermal +
+            # p_fast + impurity + p_diff, the same assembly the baseline
+            # jphi-linterp solve uses) + input_j_phi so this is recon's
+            # natural equilibrium re-solved -- post-#22 the reconstruction
+            # solves at the FULL pressure, so anchoring this cache at the
+            # thermal-only `pressure` re-solved a different, lower-pressure
+            # equilibrium (issue #35 Defect 1, fifth site).  This is a
+            # BASELINE cache, so the baseline assembly is the consistent
+            # choice here (the per-draw anchor tracks pres_tmp instead).
             try:
                 _cache_pp = {"type": "linterp",
-                             "y": pchip_derivative(psi_N, pressure) /
+                             "y": pchip_derivative(psi_N, pressure_solve) /
                                   (mygs.psi_bounds[1] - mygs.psi_bounds[0]),
                              "x": psi_N}
                 _cache_pp["y"][-1] = 0.0
                 _cache_ffp = {"type": "jphi-linterp",
                               "y": input_j_phi.copy(), "x": psi_N}
-                mygs.set_targets(Ip=initial_Ip_target, pax=pressure[0])
+                mygs.set_targets(Ip=initial_Ip_target,
+                                 pax=float(pressure_solve[0]))
                 mygs.set_profiles(pp_prof=_cache_pp, ffp_prof=_cache_ffp)
                 mygs.solve()
                 print(f"  [DIFF_BS] state-anchor solve OK; entering SWB")
@@ -6034,6 +6157,13 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     # No knob values change: rtol=0.05, max_iters=8, min_iters=2, damping=1.0
     # (the IMAS site's rtol=0.02 / damping=0.5 are ITS tuning, not part of this
     # change -- only the state protection is mirrored).
+    # Issue #29: the target's amplitude comes from the l_i secant and never
+    # saw Ip -- measured +6.0 % of Ip on the golden, +6.2 % on a DIII-D
+    # archive.  Renormalise (uniformly; l_i is shape-only) to the current the
+    # solver will actually produce, so the corrector chases a reachable target.
+    corr_target, _corr_ip_factor = _renormalize_target_to_Ip(
+        mygs, eqdsk.psi_N, corr_target, Ip_final_target, psi_pad,
+        label="jphi_corr/recon")
     j_phi_output_corr, _n_corr, _corr_hist = _corrective_jphi_iteration(
         mygs, eqdsk.psi_N, corr_target, pp_prof,
         Ip_final_target, pres_tmp[0], psi_pad,
