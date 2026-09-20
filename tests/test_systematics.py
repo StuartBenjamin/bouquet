@@ -27,6 +27,8 @@ import pytest
 
 import h5py
 
+import _harness
+
 from bouquet.utils import _read_coil_names
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -283,8 +285,17 @@ def test_mode2_pinned_pressure_no_systematic(replay):
 
 
 def test_mode3_production_reproduces_golden(replay):
-    """Production replay reproduces each golden draw (boundary/li/Ip)."""
+    """Production replay reproduces each golden draw (boundary/li/Ip).
+
+    When this fails, WHICH side moved is the whole question: the replay runs
+    live code against a live solver, the golden is a recording, and a change in
+    either reads the same from here.  The fixture's provenance is therefore
+    printed on every assertion below -- an l_i(1) miss with l_i(3) and the
+    boundary intact is the signature of an edge-localised j_BS change, which is
+    a SOLVER-build difference far more often than a bouquet one.
+    """
     base = replay["base"]
+    prov = _harness.golden_provenance_banner(_GOLDEN)
     n_checked = 0
     for i, d in replay["draws"].items():
         r = replay["mode3"][i]
@@ -297,12 +308,25 @@ def test_mode3_production_reproduces_golden(replay):
               f"golden={rms_golden:.3f} mm  li(3) replay={r['li3']:.4f} "
               f"golden={d['li3']:.4f}  li(1) replay={r['li1']:.4f} "
               f"golden={d['li1']:.4f}")
-        assert abs(rms_replay - rms_golden) < _MODE3_BND_RMS_MM
+        assert abs(rms_replay - rms_golden) < _MODE3_BND_RMS_MM, (
+            f"draw {i}: boundary RMS replay {rms_replay:.3f} mm vs golden "
+            f"{rms_golden:.3f} mm (bar {_MODE3_BND_RMS_MM} mm)\n{prov}")
         # li(3) is the estimator the replay targets (issue #20); li(1) is
         # checked too so a convention drift between the two shows up here.
         # Both against the SAME _MODE3_LI_REL -- the bar is not widened.
-        assert abs(r["li3"] - d["li3"]) / d["li3"] < _MODE3_LI_REL
-        assert abs(r["li1"] - d["li1"]) / d["li1"] < _MODE3_LI_REL
+        assert abs(r["li3"] - d["li3"]) / d["li3"] < _MODE3_LI_REL, (
+            f"draw {i}: l_i(3) replay {r['li3']:.6f} vs golden "
+            f"{d['li3']:.6f} ({100 * abs(r['li3'] - d['li3']) / d['li3']:.2f} "
+            f"%, bar {100 * _MODE3_LI_REL:.0f} %)\n{prov}")
+        assert abs(r["li1"] - d["li1"]) / d["li1"] < _MODE3_LI_REL, (
+            f"draw {i}: l_i(1) replay {r['li1']:.6f} vs golden "
+            f"{d['li1']:.6f} ({100 * abs(r['li1'] - d['li1']) / d['li1']:.2f} "
+            f"%, bar {100 * _MODE3_LI_REL:.0f} %).  l_i(3) moved "
+            f"{100 * abs(r['li3'] - d['li3']) / d['li3']:.2f} % -- an l_i(1)-"
+            "only miss is edge-localised, so suspect the j_BS/solver build "
+            f"before suspecting a bouquet change.\n{prov}")
         if np.isfinite(d["Ip"]) and np.isfinite(r["Ip"]):
-            assert abs(r["Ip"] - d["Ip"]) / abs(d["Ip"]) < _MODE3_IP_REL
+            assert abs(r["Ip"] - d["Ip"]) / abs(d["Ip"]) < _MODE3_IP_REL, (
+                f"draw {i}: Ip replay {r['Ip']:.1f} vs golden {d['Ip']:.1f}"
+                f"\n{prov}")
     assert n_checked >= 1, "no mode-3 draws reproduced an equilibrium"

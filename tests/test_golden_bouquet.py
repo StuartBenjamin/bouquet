@@ -26,6 +26,8 @@ import pytest
 
 import h5py
 
+import _harness
+
 import bouquet
 from bouquet import (filter_coil_currents, filter_boundaries,
                      select_indices, read_filter_flags, export_filtered)
@@ -101,22 +103,52 @@ def test_geqdsks_retained_per_manifest(manifest):
 #  per-draw scalar golden values
 # ---------------------------------------------------------------------------
 def test_draw_scalars_match_manifest(manifest, tol):
+    prov = _harness.golden_provenance_banner(_SLIM)
     with h5py.File(_SLIM, "r") as hf:
         for bkey, sv, entry in _iter_scans(manifest):
             prefix = f"scan/{bkey}/" if sv is not None else ""
             for sidx, exp in entry["draws"].items():
                 a = hf[f"{prefix}{sidx}"].attrs
+                where = f"draw {sidx}\n{prov}"
                 assert a["l_i(1)"] == pytest.approx(
-                    exp["l_i(1)"], abs=tol["l_i_atol"])
+                    exp["l_i(1)"], abs=tol["l_i_atol"]), where
                 assert a["l_i(3)"] == pytest.approx(
-                    exp["l_i(3)"], abs=tol["l_i_atol"])
+                    exp["l_i(3)"], abs=tol["l_i_atol"]), where
                 assert a["Ip"] == pytest.approx(
-                    exp["Ip"], rel=tol["Ip_rtol"])
+                    exp["Ip"], rel=tol["Ip_rtol"]), where
                 assert a["max_F_drift_pct"] == pytest.approx(
-                    exp["max_F_drift_pct"], abs=tol["drift_atol"])
+                    exp["max_F_drift_pct"], abs=tol["drift_atol"]), where
                 assert a["max_VSC_drift_pct"] == pytest.approx(
-                    exp["max_VSC_drift_pct"], abs=tol["drift_atol"])
-                assert bool(a["in_spec"]) == exp["in_spec"]
+                    exp["max_VSC_drift_pct"], abs=tol["drift_atol"]), where
+                assert bool(a["in_spec"]) == exp["in_spec"], where
+
+
+def test_the_fixture_says_what_built_it(manifest):
+    """A golden with no provenance cannot be told apart from a current one.
+
+    That is not a hypothetical: the 2026-08 fixture recorded its bouquet
+    version and nothing about the solver, and when an OFT bootstrap change
+    moved l_i(1) by 3.7 % the failure was indistinguishable from a bouquet
+    regression until the two were bisected by hand.  The generator now stamps
+    the OFT build (stated commit/branch where given, content digests always,
+    plus the feature probes that separate the OFT lines) into both the fixture
+    and the manifest; this asserts it survived.
+    """
+    prov = _harness.golden_provenance(_SLIM)
+    assert prov, (
+        "the slim fixture carries no prov_* attrs -- regenerate it with "
+        "tests/golden/make_golden_fixture.py so the next staleness is "
+        "diagnosable")
+    for key in ("prov_created", "prov_bouquet_version", "prov_oft_available"):
+        assert key in prov, f"missing {key}; have {sorted(prov)}"
+    assert "provenance" in manifest, "the manifest lost its provenance block"
+    oft = manifest["provenance"]["oft"]
+    assert oft.get("available"), \
+        "the fixture was built without OFT importable -- it cannot be a " \
+        "record of a solver run"
+    assert oft.get("sources_sha256") or oft.get("library_sha256"), \
+        "no measured OFT identity was recorded (a stated commit alone can " \
+        "be wrong about the build that actually ran)"
 
 
 def test_coil_currents_match_manifest(manifest, tol):

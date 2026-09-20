@@ -146,6 +146,182 @@ def _digest(arr):
         np.ascontiguousarray(arr, dtype=np.float64).tobytes()).hexdigest()
 
 
+#: Environment variables an operator sets to name the OFT build being used.
+#: Nothing here is auto-scraped from a filesystem path: the fixture must not
+#: carry hostnames, user names or directory layouts, and a path would tell a
+#: later reader nothing a content digest does not tell them better.
+_OFT_ENV = {"commit": "BOUQUET_OFT_COMMIT",
+            "branch": "BOUQUET_OFT_BRANCH",
+            "build_id": "BOUQUET_OFT_BUILD_ID"}
+
+
+def _sha256_file(path, chunk=1 << 20):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(chunk), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _sha256_tree(root, suffixes=(".py",)):
+    """Digest of a package's sources: sorted RELATIVE paths + contents.
+
+    Relative, so two installs of the same revision in different directories
+    (or on different machines) hash identically and no absolute path is
+    embedded in the result.
+    """
+    h = hashlib.sha256()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+        for name in sorted(filenames):
+            if not name.endswith(suffixes):
+                continue
+            full = os.path.join(dirpath, name)
+            h.update(os.path.relpath(full, root).encode())
+            h.update(_sha256_file(full).encode())
+    return h.hexdigest()
+
+
+def oft_provenance():
+    """Which OpenFUSIONToolkit produced this fixture.
+
+    The fixture's physics values are a function of the OFT build as much as of
+    bouquet: an edge-localised change to the bootstrap module moves l_i(1) by
+    several percent while leaving l_i(3) and the boundary untouched, which is
+    exactly the failure signature a fixture with no OFT provenance cannot be
+    diagnosed from.  So record it.
+
+    Three kinds of field, deliberately:
+
+    * **stated** -- ``commit`` / ``branch`` / ``build_id``, from the
+      environment (:data:`_OFT_ENV`).  OFT embeds its revision in the compiled
+      library but does not expose it to Python, so this is operator-supplied
+      and may be absent.
+    * **measured** -- ``sources_sha256`` (the Python package) and
+      ``library_sha256`` (the compiled object).  Always available, immune to a
+      mis-stated commit, and the only fields that identify the *build* rather
+      than the source revision.
+    * **behavioural** -- the two feature probes that actually separate the
+      OFT lines bouquet has met.  A reader who has neither commit nor digest
+      to compare against can still tell which line a fixture came from.
+    """
+    out = {k: os.environ.get(v) for k, v in _OFT_ENV.items()}
+    try:
+        import OpenFUSIONToolkit as _oft
+    except Exception as exc:                    # pragma: no cover - no OFT
+        out["available"] = False
+        out["import_error"] = str(exc)
+        return out
+    out["available"] = True
+    out["version"] = getattr(_oft, "__version__", None)
+    pkg = os.path.dirname(os.path.abspath(_oft.__file__))
+    try:
+        out["sources_sha256"] = _sha256_tree(pkg)
+    except Exception:
+        out["sources_sha256"] = None
+    lib = None
+    for cand in ("liboftpy.so", "liboftpy.dylib"):
+        for base in (os.path.join(pkg, "..", "..", "bin"),
+                     os.path.join(pkg, "..", "..", "lib"), pkg):
+            p = os.path.abspath(os.path.join(base, cand))
+            if os.path.isfile(p):
+                lib = p
+                break
+        if lib:
+            break
+    out["library_sha256"] = _sha256_file(lib) if lib else None
+    try:
+        import inspect
+        from OpenFUSIONToolkit.TokaMaker._core import TokaMaker_equilibrium
+        import OpenFUSIONToolkit.TokaMaker.bootstrap as _bs
+        out["get_q_named_ravgs"] = \
+            "'<1/R^2>'" in inspect.getsource(TokaMaker_equilibrium.get_q)
+        out["has_get_fsa"] = hasattr(TokaMaker_equilibrium, "get_fsa")
+        out["bootstrap_second_order_stencils"] = \
+            "edge_order=2" in inspect.getsource(_bs)
+    except Exception:
+        pass
+    return out
+
+
+def bouquet_provenance():
+    """Which bouquet produced it: version, and the commit if this is a checkout."""
+    import subprocess
+    import sys
+    sys.path.insert(0, os.path.abspath(os.path.join(_HERE, "..", "..")))
+    out = {}
+    try:
+        import bouquet as _bq
+        out["version"] = getattr(_bq, "__version__", None)
+    except Exception:
+        out["version"] = None
+    repo = os.path.abspath(os.path.join(_HERE, "..", ".."))
+    for key, args in (("commit", ["rev-parse", "HEAD"]),
+                      ("branch", ["rev-parse", "--abbrev-ref", "HEAD"])):
+        try:
+            out[key] = subprocess.run(
+                ["git", "-C", repo] + args, capture_output=True, text=True,
+                check=True).stdout.strip()
+        except Exception:
+            out[key] = None
+    try:
+        dirty = subprocess.run(["git", "-C", repo, "status", "--porcelain"],
+                               capture_output=True, text=True, check=True)
+        out["dirty"] = bool(dirty.stdout.strip())
+    except Exception:
+        out["dirty"] = None
+    return out
+
+
+def fixture_provenance(source=None, eqdsk="all", seed=RNG_STREAM_SEED):
+    """Everything needed to reproduce -- or to diagnose -- this fixture.
+
+    Deliberately carries no hostname, user name or filesystem path: the source
+    is recorded by BASENAME only, and the environment by content digests.
+    """
+    import datetime
+    return {
+        "created": datetime.datetime.now().isoformat(timespec="seconds"),
+        "generator": os.path.basename(__file__),
+        "generator_args": {
+            "source_basename": os.path.basename(source) if source else None,
+            "eqdsk": eqdsk,
+            "rng_stream_seed": int(seed),
+        },
+        "bouquet": bouquet_provenance(),
+        "oft": oft_provenance(),
+        "numerics": blas_provenance(),
+    }
+
+
+#: Provenance keys mirrored onto the slim .h5 root attrs, flattened, so a
+#: reader with only the fixture in hand (no manifest) still knows what made it.
+def _flat_provenance(prov, prefix="prov"):
+    flat = {}
+
+    def _walk(node, path):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                _walk(v, f"{path}_{k}")
+        elif node is not None:
+            flat[path] = node if isinstance(node, (str, int, float, bool)) \
+                else str(node)
+    _walk(prov, prefix)
+    return flat
+
+
+def _fixture_stamp(slim_path):
+    """Read back the provenance attrs a built fixture carries (or ``{}``)."""
+    try:
+        with h5py.File(slim_path, "r") as hf:
+            return {k: (v.decode() if isinstance(v, bytes) else
+                        (v.item() if hasattr(v, "item") else v))
+                    for k, v in hf.attrs.items()
+                    if str(k).startswith("prov")}
+    except Exception:
+        return {}
+
+
 def blas_provenance():
     """What the drawn values depend on besides bouquet itself.
 
@@ -246,6 +422,10 @@ def build_rng_stream(source_slim=None, out_dir=_HERE, seed=RNG_STREAM_SEED):
                   "psi_N": int(psi_N.size)},
         # which machine pinned it -- the SHA-256s are only meaningful there
         "pinned_on": blas_provenance(),
+        # ... and what produced the fixture the stream was drawn FROM.  The
+        # stream is pure NumPy (no solver, no OFT), but its inputs are the
+        # fixture's baseline profiles, so it moves when the fixture does.
+        "source_provenance": _fixture_stamp(slim),
         "channels": {},
     }
     for ch, arr in drawn.items():
@@ -272,9 +452,11 @@ def build(source, out_dir=_HERE, eqdsk="all"):
     slim_path = os.path.join(out_dir, SLIM_NAME)
     manifest_path = os.path.join(out_dir, MANIFEST_NAME)
 
+    prov = fixture_provenance(source=source, eqdsk=eqdsk)
     manifest = {
         "source_basename": os.path.basename(source),
         "eqdsk_retention": eqdsk,
+        "provenance": prov,
         "tolerances": TOLERANCES,
         "scans": {},
     }
@@ -417,6 +599,14 @@ def build(source, out_dir=_HERE, eqdsk="all"):
         for gpath, ip in ip_map.items():
             if gpath in dst:
                 dst[gpath].attrs["Ip"] = ip
+
+        # ... and stamp the provenance onto the fixture itself, not just the
+        # manifest: a stale fixture is diagnosed from the file someone has in
+        # front of them, and the manifest can go missing or be regenerated
+        # separately.  Flattened because HDF5 attrs are scalars.
+        for k, v in _flat_provenance(prov).items():
+            dst.attrs[k] = v
+        dst.attrs["prov_schema"] = 1
 
     with open(manifest_path, "w") as fh:
         json.dump(manifest, fh, indent=2, sort_keys=True)
