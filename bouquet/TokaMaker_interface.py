@@ -2023,6 +2023,14 @@ def perturb_kinetic_equilibrium(
             ni_perturb = _draw_monotonic_perturbation(
                 psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls, rng=rng
             ) * ni[0]
+            if Z_imp:
+                # Drawn on its own, ni can exceed the thermal electrons that
+                # neutralise it (nz < 0), which impurity_pressure then clips
+                # to zero without a word.  Hold it inside the single-impurity
+                # window, as the Z_eff draw is held inside zeff_bounds.
+                ni_perturb = np.minimum(ni_perturb, np.maximum(
+                    ne_perturb - (0.0 if z_fast is None
+                                  else np.asarray(z_fast, dtype=float)), 0.0))
 
         ti_perturb = _draw_monotonic_perturbation(
             psi_kin, ti / ti[0], sigma_ti / ti[0], t_ls, rng=rng
@@ -5870,8 +5878,14 @@ def generate_bouquet(
         pressure_total_perturb = pressure_perturb.copy()
         if Z_imp:
             from .physics import impurity_pressure as _impP
+            # On ne - z_fast, as the solve does: only the thermal electrons
+            # are neutralised by the impurity (0.9 % of peak p on a 14 % beam).
+            _ne_th_eqp = (_ne_eqp if z_fast is None else np.maximum(
+                _ne_eqp - (_to_eq(np.asarray(z_fast, dtype=float))
+                           if psi_N_kinetic is not None
+                           else np.asarray(z_fast, dtype=float)), 0.0))
             pressure_total_perturb = pressure_total_perturb + _impP(
-                _ne_eqp, _ni_eqp, _ti_eqp, Z_imp)
+                _ne_th_eqp, _ni_eqp, _ti_eqp, Z_imp)
         if p_fast is not None:
             _pf_eq = np.asarray(p_fast, dtype=float)
             pressure_total_perturb = pressure_total_perturb + (
