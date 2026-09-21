@@ -1692,6 +1692,7 @@ def perturb_kinetic_equilibrium(
     zeff_includes_fast=False,
     j_NBI=None,
     j_RF=None,
+    j_other=None,
     aux_sigmas=None,
     aux_baselines=None,
     aux_length_scales=None,
@@ -1914,6 +1915,8 @@ def perturb_kinetic_equilibrium(
         _jfix = _jfix + np.asarray(j_NBI, dtype=float)
     if j_RF is not None:
         _jfix = _jfix + np.asarray(j_RF, dtype=float)
+    if j_other is not None:
+        _jfix = _jfix + np.asarray(j_other, dtype=float)
     j_fixed_eff = _jfix if recalculate_j_BS else np.zeros_like(psi_N)
     # Total-current anchor: fold jphi_diff (= equilibrium.j_tor - core_profiles
     # total) into the fixed additive so it rides under EVERY downstream new_jphi
@@ -3338,7 +3341,7 @@ def perturb_kinetic_equilibrium(
     #   isolate_edge_jBS=False (FUSE/IMAS full bootstrap): spike_profile is NOT a
     #     flat-shelf spike (it is a full Sauter profile / its delta), so the
     #     shelf-blend mis-detects the shelf and mangles the core. Use the clean
-    #     residual j_inductive = j_phi - j_BS - j_NBI - j_RF instead -- it sums
+    #     residual j_inductive = j_phi - j_BS - j_NBI - j_RF - j_other instead -- it sums
     #     exactly and mirrors read_imas_baseline's baseline decomposition.
     if isolate_edge_jBS:
         # Closing decomposition (option A), replacing the non-closing shelf-blend
@@ -3352,6 +3355,8 @@ def perturb_kinetic_equilibrium(
             _jfix_iso = _jfix_iso + np.asarray(j_NBI, dtype=float)
         if j_RF is not None:
             _jfix_iso = _jfix_iso + np.asarray(j_RF, dtype=float)
+        if j_other is not None:
+            _jfix_iso = _jfix_iso + np.asarray(j_other, dtype=float)
         j_inductive_consistent = output_jphi - spike_profile - _jfix_iso
         # Where the edge spike locally exceeds the available current (near the
         # spike peak -- what the Hermite used to smooth), floor j_inductive at 0
@@ -3366,6 +3371,8 @@ def perturb_kinetic_equilibrium(
             _jfix_store = _jfix_store + np.asarray(j_NBI, dtype=float)
         if j_RF is not None:
             _jfix_store = _jfix_store + np.asarray(j_RF, dtype=float)
+        if j_other is not None:
+            _jfix_store = _jfix_store + np.asarray(j_other, dtype=float)
         # j_BS is the PHYSICAL bootstrap that was summed into the solve:
         # spike_profile == Sauter(perturbed kinetics) * scale_jBS + jBS_diff
         # (the recomputed Sauter on the per-draw kinetics, anchored by the kept
@@ -3625,6 +3632,7 @@ def generate_bouquet(
     jphi_diff=None,
     j_NBI=None,
     j_RF=None,
+    j_other=None,
     aux_sigmas=None,
     aux_baselines=None,
     aux_length_scales=None,
@@ -4656,6 +4664,8 @@ def generate_bouquet(
                     _fx = _fx + np.asarray(j_NBI, dtype=float)
                 if j_RF is not None:
                     _fx = _fx + np.asarray(j_RF, dtype=float)
+                if j_other is not None:
+                    _fx = _fx + np.asarray(j_other, dtype=float)
                 _bl_jind_store = (_bl_jphi_store
                                   - np.asarray(baseline_j_BS, dtype=float) - _fx)
                 if np.any(_bl_jind_store < 0.0):
@@ -5220,6 +5230,7 @@ def generate_bouquet(
                 zeff_includes_fast=zeff_includes_fast,
                 j_NBI=j_NBI,
                 j_RF=j_RF,
+                j_other=j_other,
                 aux_sigmas=aux_sigmas,
                 aux_baselines=aux_baselines,
                 aux_length_scales=aux_length_scales,
@@ -6056,6 +6067,8 @@ def generate_bouquet(
                     _fx = _fx + np.asarray(j_NBI, dtype=float)
                 if j_RF is not None:
                     _fx = _fx + np.asarray(j_RF, dtype=float)
+                if j_other is not None:
+                    _fx = _fx + np.asarray(j_other, dtype=float)
                 _dr_jind_store = (_dr_jphi_store
                                   - np.asarray(diagnostics["j_BS"], dtype=float)
                                   - _fx)
