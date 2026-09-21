@@ -94,6 +94,102 @@ ANCHOR_MASKED_FAILURES = {"recon_anchor_fallback": 0, "band_resample": 0,
                           "jphi_baseline": 0}
 
 
+# ---- Draw-loop solve guard ---------------------------------------------------
+#: GS iteration cap for the draw loop.  Draw-path solves converge in <= ~25
+#: iterations; those that do not sit in a period-2 Picard cycle just above
+#: nl_tol (the converged-on-entry degeneracy, issue #24) and burn the whole
+#: cap -- at the setup cap of 800 that is 200-350 s per failed solve, all of it
+#: wasted, since the draw path already catches the failure.  Even, so a capped
+#: solve stops on the same phase of that cycle the 800 cap did.
+DRAW_SOLVE_MAXITS = 100
+
+
+def _bouquet_caller():
+    """``func:line`` of the innermost bouquet frame below the solve wrapper."""
+    import traceback
+    pkg = os.path.dirname(os.path.abspath(__file__)) + os.sep
+    for fr in reversed(traceback.extract_stack()[:-2]):
+        if os.path.abspath(fr.filename).startswith(pkg):
+            return f"{fr.name}:{fr.lineno}"
+    return "?"
+
+
+class DrawSolveGuard:
+    """Cap ``mygs`` maxits for the draw loop and record every solve that raises.
+
+    Context manager.  Wraps ``mygs.solve`` on the instance (so the solves inside
+    ``solve_bootstrap`` are seen too); on exit restores it and the solver's
+    maxits.  ``maxits=None`` keeps the solver's cap and only records.  Control
+    flow is unchanged: a failed solve still raises to its caller.  Records carry
+    the draw index set by :meth:`begin_draw`.
+    """
+
+    def __init__(self, mygs, maxits=DRAW_SOLVE_MAXITS):
+        self.mygs = mygs
+        self.maxits = None if maxits is None else int(maxits)
+        if self.maxits is not None and self.maxits < 1:
+            raise ValueError(f"draw_solve_maxits={maxits!r} must be >= 1 or None")
+        self.draw = None
+        self.n_solves = 0
+        self.records = []
+
+    def __enter__(self):
+        mygs = self.mygs
+        self._own_attr = "solve" in getattr(mygs, "__dict__", {})
+        self._orig = orig = mygs.solve
+        self._saved_maxits = None
+        if self.maxits is not None:
+            self._saved_maxits = mygs.settings.maxits
+            mygs.settings.maxits = self.maxits
+            mygs.update_settings()
+
+        def solve(*a, **k):
+            self.n_solves += 1
+            t0 = time.perf_counter()
+            try:
+                return orig(*a, **k)
+            except Exception as exc:
+                self.records.append({
+                    "draw": self.draw, "site": _bouquet_caller(),
+                    "seconds": time.perf_counter() - t0,
+                    "error": f"{type(exc).__name__}: {str(exc).strip()}"})
+                raise
+        mygs.solve = solve
+        return self
+
+    def __exit__(self, *exc_info):
+        if self._own_attr:
+            self.mygs.solve = self._orig
+        else:
+            del self.mygs.solve
+        if self._saved_maxits is not None:
+            self.mygs.settings.maxits = self._saved_maxits
+            self.mygs.update_settings()
+        return False
+
+    def begin_draw(self, draw):
+        self.draw = draw
+
+    def failures(self, draw):
+        """This draw's failed solves (list of dicts)."""
+        return [dict(r) for r in self.records if r["draw"] == draw]
+
+    def summary(self):
+        """One line: solves run, failed solves by site, time they cost."""
+        cap = self.maxits if self.maxits is not None else "solver default"
+        if not self.records:
+            return f"[draw-solves] {self.n_solves} solves, none failed (maxits {cap})"
+        from collections import Counter
+        n_max = sum("maxits" in r["error"] for r in self.records)
+        secs = sum(r["seconds"] for r in self.records)
+        sites = ", ".join(f"{s} x{n}" for s, n in
+                          Counter(r["site"] for r in self.records).most_common())
+        draws = sorted({r["draw"] for r in self.records if r["draw"] is not None})
+        return (f"[draw-solves] {len(self.records)}/{self.n_solves} solves failed "
+                f"({n_max} exceeded maxits {cap}), {secs:.0f} s, draws {draws}: "
+                f"{sites}")
+
+
 def sigma0_reference_scale(jBS_scale_range):
     """Bootstrap scale of the sigma=0 delta-mode reference spike.
 
@@ -3674,6 +3770,7 @@ def generate_bouquet(
     # geqdsk path leaves this False: its corrective iteration already drives
     # achieved ~= target, and its baseline stores the corrective output.
     store_achieved_jphi=False,
+    solve_guard=None,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -3836,6 +3933,9 @@ def generate_bouquet(
         Soft-reg weight for the ``#VSC`` channel (default 1.0).  Kept
         much lower than ``soft_reg_weight`` so the VSC has freedom to
         do vertical-mode control work without being heavily penalized.
+    solve_guard : DrawSolveGuard, optional
+        Active guard on ``mygs`` (entered by the caller).  Each draw's failed
+        solves land on its diagnostics as ``solve_failures``.
 
     Returns
     -------
@@ -5121,6 +5221,8 @@ def generate_bouquet(
                   f"({_dev_pct:+.2f}% vs recon, σ={100*l_i_uncertainty:.1f}%)")
         print(f"{'='*60}")
         t_start = time.perf_counter()
+        if solve_guard is not None:
+            solve_guard.begin_draw(count)
 
         # ---- Warm-start restore ----
         # On draw 0, this is a no-op (snapshot not yet captured).
@@ -5786,6 +5888,10 @@ def generate_bouquet(
             )
 
         diagnostics['time'] = elapsed
+        # Solves that raised in this draw (caught by the draw path): site,
+        # seconds, error.  Not archived; see DrawSolveGuard.
+        diagnostics['solve_failures'] = (solve_guard.failures(count)
+                                         if solve_guard is not None else [])
         # Homotopy + in-spec bookkeeping (always present so downstream
         # H5 schema is consistent across draws; NaN/-1 when hard bounds
         # weren't installed e.g. SKIP_HARD=1).

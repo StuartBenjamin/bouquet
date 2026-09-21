@@ -941,6 +941,12 @@ class GenerationConfig:
     # solve_with_bootstrap H-mode self-consistency iterations per draw (default
     # 3); lowering to 2 trades a little accuracy for speed on large bouquets.
     swb_iterations: int = 3
+    # GS maxits for generate()'s draw loop (TokaMaker_interface.DRAW_SOLVE_MAXITS).
+    # Draw solves converge in <= ~25 iterations; a failing one is parked in a
+    # limit cycle and burns the whole cap, and the draw path catches it anyway.
+    # None keeps the solver's setup cap (800).  Failed solves are recorded per
+    # draw (diagnostics['solve_failures']) and summarized in one printed line.
+    draw_solve_maxits: Optional[int] = 100
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single
