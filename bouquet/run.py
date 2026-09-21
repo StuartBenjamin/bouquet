@@ -3385,7 +3385,9 @@ class Bouquet:
         verbose = bool(getattr(self.config, "verbose", False))
         # Draw-loop maxits cap + failed-solve record (DrawSolveGuard).
         with capture_native_output(enabled=not verbose) as _cap, \
-                DrawSolveGuard(self.mygs, gc.draw_solve_maxits) as _solve_guard:
+                DrawSolveGuard(self.mygs, gc.draw_solve_maxits,
+                               retry_urf=gc.draw_solve_retry_urf,
+                               loose_tol=gc.draw_solve_loose_tol) as _solve_guard:
             self.diagnostics = generate_bouquet(
                 self.mygs, np.asarray(bl.psi_N, dtype=float), n_equils, header,
                 np.asarray(bl.j_phi, dtype=float),

@@ -947,6 +947,11 @@ class GenerationConfig:
     # None keeps the solver's setup cap (800).  Failed solves are recorded per
     # draw (diagnostics['solve_failures']) and summarized in one printed line.
     draw_solve_maxits: Optional[int] = 100
+    # A draw solve that hits that cap is retried from where it stopped at each
+    # of these GS under-relaxation factors, then accepted at nl_tol =
+    # draw_solve_loose_tol (None skips); recorded as recovered_by.
+    draw_solve_retry_urf: tuple = (0.1, 0.3)
+    draw_solve_loose_tol: Optional[float] = 2e-5
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single
