@@ -945,6 +945,11 @@ class GenerationConfig:
     # shelf/bridge, classifier) are read in: "psi_n", or "native" for the
     # run's own coordinate.  Identical in a psi_n run.
     window_coord: str = "psi_n"
+    # Coordinate the solve_with_bootstrap inductive seed (1 - s^1.5)^1.5 is
+    # written in: "psi_n" (s = the nodes' psi_N) or "native" (s = the run
+    # coordinate).  SWB keeps the seed's shape, so this sets the inductive
+    # current's shape in a phi_n run.  Identical in a psi_n run.
+    seed_coord: str = "psi_n"
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single

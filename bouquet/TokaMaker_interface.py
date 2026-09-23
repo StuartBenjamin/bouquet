@@ -1751,6 +1751,7 @@ def perturb_kinetic_equilibrium(
     rng=None,
     coord="psi_n",
     window_coord="psi_n",
+    seed_coord="psi_n",
     **kwargs,  # solve_with_bootstrap options (bootstrap_kwargs)
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
@@ -1872,6 +1873,9 @@ def perturb_kinetic_equilibrium(
     window_coord : str
         Coordinate the hard-coded radial windows are read in:
         ``"psi_n"`` or ``"native"`` (see :func:`bouquet.coords.window_x`).
+    seed_coord : str
+        Coordinate the inductive seed shape is written in: ``"psi_n"`` or
+        ``"native"`` (see :func:`bouquet.coords.seed_psi`).
     **kwargs
         Additional keyword options passed through to
         :func:`solve_with_bootstrap` in OpenFUSIONToolkit.
@@ -2320,7 +2324,7 @@ def perturb_kinetic_equilibrium(
         # new_jphi = input_j_phi (= PIN_JPHI reproduction).
         print(f"  [DIFF_BS] restoring mygs to recon snapshot before SWB")
         mygs.replace_eq(source_eq=recon_eq_snapshot)
-        _swb_seed = coords.swb_seed(psi_N, coords.psi_at(mygs, psi_N, coord))
+        _swb_seed = coords.swb_seed(psi_N, coords.seed_psi(mygs, psi_N, coord, seed_coord))
         _stashed_bounds = getattr(mygs, '_coil_drift_bounds', None)
         if _stashed_bounds is not None:
             mygs.set_coil_bounds(None)
@@ -2526,7 +2530,7 @@ def perturb_kinetic_equilibrium(
                       f"({_aip_exc}); Ip renorm falls back to the "
                       f"SWB-landed geometry")
 
-        _swb_seed = coords.swb_seed(psi_N, coords.psi_at(mygs, psi_N, coord))
+        _swb_seed = coords.swb_seed(psi_N, coords.seed_psi(mygs, psi_N, coord, seed_coord))
 
         # ---- SWB debug instrumentation (BOUQUET_SWB_DEBUG=1) ----
         # State prints + pre/post .npz dumps so a failing draw can be replayed
@@ -3662,6 +3666,7 @@ def generate_bouquet(
     store_achieved_jphi=False,
     coord="psi_n",
     window_coord="psi_n",
+    seed_coord="psi_n",
     **kwargs,  # solve_with_bootstrap options (bootstrap_kwargs)
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
@@ -3816,7 +3821,7 @@ def generate_bouquet(
         Soft-reg weight for the ``#VSC`` channel (default 1.0).  Kept
         much lower than ``soft_reg_weight`` so the VSC has freedom to
         do vertical-mode control work without being heavily penalized.
-    coord, window_coord : str
+    coord, window_coord, seed_coord : str
         As in :func:`perturb_kinetic_equilibrium`.
     **kwargs
         Additional keyword options passed through to
@@ -4771,7 +4776,7 @@ def generate_bouquet(
         try:
             from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap as _swb
             from scipy.interpolate import interp1d as _interp1d
-            _swb_seed_cache = coords.swb_seed(psi_N, coords.psi_at(mygs, psi_N, coord))
+            _swb_seed_cache = coords.swb_seed(psi_N, coords.seed_psi(mygs, psi_N, coord, seed_coord))
             # Interpolate recon kinetic profiles to equilibrium grid if
             # caller is using a dual-grid (mirrors `_kin_to_eq` inside
             # perturb_kinetic_equilibrium).  SWB expects the kinetic
@@ -5260,6 +5265,7 @@ def generate_bouquet(
                 pin_jphi=pin_jphi,
                 coord=coord,
                 window_coord=window_coord,
+                seed_coord=seed_coord,
                 **kwargs,
             )
         except Exception as e:

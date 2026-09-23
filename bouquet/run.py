@@ -646,9 +646,10 @@ class Bouquet:
         run_coord = coords.resolve_input_coord(
             getattr(self.config.source, "coord", coords.PSI), [])[0]
         gc = self.config.generation
-        if gc.window_coord not in (coords.PSI, "native"):
-            raise ValueError(f"window_coord must be 'psi_n' or 'native', "
-                             f"got {gc.window_coord!r}")
+        for _k in ("window_coord", "seed_coord"):
+            if getattr(gc, _k) not in (coords.PSI, "native"):
+                raise ValueError(f"{_k} must be 'psi_n' or 'native', "
+                                 f"got {getattr(gc, _k)!r}")
         if run_coord == coords.PHI:
             coords.check_backend(run_coord)
             if gc.bootstrap_kwargs.get("use_python_solve"):
@@ -2352,7 +2353,7 @@ class Bouquet:
                         np.asarray(_cap["psi_N"], float), np.asarray(_cap["avg_inv_R2"], float))
                     _anchor["inv_r2_src"] = "capture_equilibrium_fsa contour quadrature (anchor, pre-SWB)"
                 _anchor["Ip_anchor"] = abs(float(mygs.get_stats(lcfs_pad=psi_pad)["Ip"]))
-            swb_seed = coords.swb_seed(psi_N, coords.psi_at(mygs, psi_N, coord))
+            swb_seed = coords.swb_seed(psi_N, coords.seed_psi(mygs, psi_N, coord, gc.seed_coord))
             swb = solve_with_bootstrap(
                 mygs, ne, te, ni, ti, Zeff, bl.Ip_target, swb_seed,
                 scale_jBS=1.0, isolate_edge_jBS=iso,
@@ -3074,7 +3075,7 @@ class Bouquet:
                 mygs.replace_eq(source_eq=_snap)
             raise
 
-        seed = coords.swb_seed(psi_N, coords.psi_at(mygs, psi_N, coord))
+        seed = coords.swb_seed(psi_N, coords.seed_psi(mygs, psi_N, coord, gc.seed_coord))
         res = solve_with_bootstrap(
             mygs, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
             float(bl.Ip_target), seed,
@@ -3468,6 +3469,7 @@ class Bouquet:
                 store_achieved_jphi=True,
                 coord=getattr(bl, "coord", coords.PSI),
                 window_coord=gc.window_coord,
+                seed_coord=gc.seed_coord,
                 **gc.bootstrap_kwargs,
             )
         self.generation_log = _cap["text"] or None

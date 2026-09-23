@@ -963,7 +963,10 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     mygs.set_isoflux(iso_pts, weights=iso_w)
 
     from .coords import swb_seed
-    guess_jinductive = swb_seed(psi_N, None if psi_map is None else psi_map[0])
+    # Seed shape in psi_N (the g-file's nodes) or the run coordinate.
+    guess_jinductive = swb_seed(
+        psi_N, psi_map[0] if (psi_map is not None
+                              and config.generation.seed_coord == "psi_n") else None)
     _recon_coord = ({} if coord == coords.PSI else
                     dict(coord=coord, x=psi_N))
 

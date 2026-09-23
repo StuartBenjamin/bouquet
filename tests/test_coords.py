@@ -197,3 +197,18 @@ def test_seed_is_the_same_physical_profile_in_a_phi_run(swb_params):
     swb_params(set())                       # legacy toolkit: its own uniform grid
     np.testing.assert_array_equal(coords.swb_seed(xphi, psi),
                                   (1 - np.linspace(0, 1, 4) ** 1.5) ** 1.5)
+
+
+def test_seed_psi_picks_the_seed_coordinate():
+    eq, xphi = _Eq(), np.array([0.0, 0.1, 0.4, 1.0])
+    np.testing.assert_allclose(coords.seed_psi(eq, xphi, coords.PHI, "psi_n"), xphi ** 0.8)
+    assert coords.seed_psi(eq, xphi, coords.PHI, "native") is None
+    assert coords.seed_psi(eq, X, coords.PSI, "psi_n") is X
+    with pytest.raises(ValueError):
+        coords.seed_psi(eq, X, coords.PSI, "phi_n")
+
+
+def test_bad_seed_coord_is_refused_in_prepare():
+    run = TestCheckCoord()._run(seed_coord="rho")
+    with pytest.raises(ValueError, match="seed_coord"):
+        run._check_coord()

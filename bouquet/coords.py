@@ -136,13 +136,22 @@ def swb_seed(x, psi=None):
     """Inductive seed ``(1 - s^1.5)^1.5`` (OFT's ``create_power_flux_fun(n,
     1.5, 1.5)``) at the nodes of :func:`swb_grid`, with ``s`` their ψ_N.
 
-    ``psi`` is the ψ_N of the nodes ``x`` (:func:`psi_at`), so a Φ_N run seeds
-    the same physical profile as a ψ_N run; ``None`` takes ``x`` itself.
+    ``psi`` is the ψ_N of the nodes ``x`` (:func:`seed_psi`): the shape is then
+    the ψ_N one in any run; ``None`` writes it in the run coordinate.
     """
     s = swb_grid(x)
     if psi is not None and "psi_N" in _swb_params():
         s = np.asarray(psi, dtype=float)
     return np.power(1.0 - np.power(s, 1.5), 1.5)
+
+
+def seed_psi(mygs, x, coord=PSI, seed_coord=PSI):
+    """The ``psi`` argument of :func:`swb_seed` for ``seed_coord``: the nodes'
+    ψ_N (``"psi_n"``) or ``None``, the run coordinate (``"native"``).
+    """
+    if seed_coord not in (PSI, "native"):
+        raise ValueError(f"seed_coord must be 'psi_n' or 'native', got {seed_coord!r}")
+    return psi_at(mygs, x, coord) if seed_coord == PSI else None
 
 
 def check_backend(coord):

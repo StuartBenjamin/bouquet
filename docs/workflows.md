@@ -228,6 +228,7 @@ as an enormous sigma.
 | `floor_j_BS` | `False` | Clip negative bootstrap excursions; only needed with `isolate_edge_jBS=False` on sources that carry an inner negative lobe |
 | `bootstrap_kwargs` | `{}` | Additional keyword options passed through to `solve_with_bootstrap` in OpenFUSIONToolkit (e.g. `iterations`). Keys are checked against the toolkit's signatures at config time: one already fixed at the call sites (`scale_jBS`, `isolate_edge_jBS`, `verbose`, …), or not accepted by the installed toolkit, is refused there rather than failing every draw. Replaces `swb_iterations`, which is now `{"iterations": N}` |
 | `window_coord` | `"psi_n"` | Coordinate the fixed radial windows (edge > 0.9, pedestal 0.85, shelf/bridge, spike classifier) are read in: `"psi_n"` maps the run grid to ψ_N through the solver, `"native"` reads them in the run coordinate. Identical in a ψ_N run |
+| `seed_coord` | `"psi_n"` | Coordinate the `solve_with_bootstrap` inductive seed shape `(1 − s^1.5)^1.5` is written in: `"psi_n"` (s = the nodes' ψ_N) or `"native"` (s = the run coordinate). SWB keeps the seed's shape, so in a Φ_N run this sets the inductive current's shape. Identical in a ψ_N run |
 | `coil_drift` | `0.01` | Soft coil-drift target |
 | `coil_drift_hard_factor` | `None` | Optional hard inequality bounds at `± factor·coil_drift` in every solve |
 | `homotopy_passes` | `[(0.05, 0.10), (0.02, 0.05), (0.01, 0.01)]` | Progressive `(F_tol, VSC_tol)` schedule — see [coil-constraints.md](coil-constraints.md) |
