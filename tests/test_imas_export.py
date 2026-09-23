@@ -134,3 +134,20 @@ class TestExactImasExport:
         with pytest.raises(ValueError, match="fidelity must be"):
             write_imas_draw(arc, 0, tmpl, str(tmp_path / "d.json"),
                             scan_key=0, fidelity="bogus")
+
+    def test_a_phi_n_archive_lands_on_the_template_phi_n_nodes(self, tmp_path):
+        arc = str(tmp_path / "run.h5"); _make_archive(arc, with_fsa=False)
+        with h5py.File(arc, "a") as hf:
+            hf.require_group("scan/0/_baseline").attrs["profile_coord"] = "phi_n"
+        tmpl = str(tmp_path / "tmpl.json"); psi = _make_template(tmpl)
+        psiN_t = (psi - psi[0]) / (psi[-1] - psi[0])
+        rho = psiN_t ** 0.4
+        with open(tmpl) as fh:
+            t = json.load(fh)
+        t["core_profiles"]["profiles_1d"][0]["grid"]["rho_tor_norm"] = rho.tolist()
+        with open(tmpl, "w") as fh:
+            json.dump(t, fh)
+        out = str(tmp_path / "draw.json")
+        write_imas_draw(arc, 0, tmpl, out, scan_key=0, fidelity="auto")
+        cp = json.load(open(out))["core_profiles"]["profiles_1d"][0]
+        assert np.allclose(cp["j_tor"], np.interp(rho ** 2, _PEQ, _J_PHI), rtol=1e-10)

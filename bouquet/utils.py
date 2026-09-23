@@ -3088,6 +3088,20 @@ def _default_scan_key(ref, scan_key):
     return scan_key
 
 
+def profile_coord(h5path, scan_key=None):
+    """The archive's profile coordinate, the baseline group's ``profile_coord``
+    attr; ``"psi_n"`` for archives written before it existed."""
+    import h5py
+    bkey = _scan_key(scan_key)
+    bl_path = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
+    try:
+        with h5py.File(h5path, "r") as hf:
+            v = hf[bl_path].attrs.get("profile_coord", "psi_n")
+    except (OSError, KeyError):
+        return "psi_n"
+    return v.decode() if isinstance(v, bytes) else str(v)
+
+
 def _group_path(scan_key, count):
     """Return the internal HDF5 group path for a given entry."""
     bkey = _scan_key(scan_key)

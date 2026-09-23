@@ -1118,17 +1118,8 @@ def _source_kind(h5path, scan_key=None):
 
 
 def _profile_coord(h5path, scan_key=None):
-    """The archive's profile coordinate (``baseline`` attr ``profile_coord``);
-    ``"psi_n"`` for archives written before it existed."""
-    try:
-        from .utils import _scan_key
-        bkey = _scan_key(scan_key)
-        bl_path = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
-        with h5py.File(h5path, "r") as hf:
-            v = hf[bl_path].attrs.get("profile_coord", "psi_n")
-            return v.decode() if isinstance(v, bytes) else str(v)
-    except Exception:
-        return "psi_n"
+    from .utils import profile_coord
+    return profile_coord(h5path, scan_key)
 
 
 _PSI_XLABELS = (r"$\psi_N$", r"$\hat{\psi}$")

@@ -1323,9 +1323,14 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     cp = cp_ids["profiles_1d"][ic]
     psi = np.asarray(cp["grid"]["psi"], dtype=float)
     psiN_t = (psi - psi[0]) / (psi[-1] - psi[0])
+    # The draw's arrays are on the archive's run grid: a phi_n archive lands on
+    # the template's own Phi_N nodes (grid.rho_tor_norm**2).
+    from ..utils import profile_coord
+    x_t = (psiN_t if profile_coord(h5, scan_key) == "psi_n"
+           else _dd_phi_n(cp, psiN_t))
 
-    def to_t(arr, src):     # interp draw array (on src grid) -> template psi grid
-        return np.interp(psiN_t, src, arr)
+    def to_t(arr, src):     # interp draw array (on src grid) -> template grid
+        return np.interp(x_t, src, arr)
 
     cp["electrons"]["density_thermal"] = to_t(ne, pkin).tolist()
     cp["electrons"]["temperature"] = to_t(te, pkin).tolist()
