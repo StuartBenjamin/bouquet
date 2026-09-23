@@ -132,11 +132,16 @@ def swb_grid_kwargs(x, coord=PSI):
     return kw
 
 
-def swb_seed(x):
-    """Inductive seed ``(1 - s^1.5)^1.5`` on :func:`swb_grid` (the profile of
-    OFT's ``create_power_flux_fun(n, 1.5, 1.5)``, on the grid SWB uses).
+def swb_seed(x, psi=None):
+    """Inductive seed ``(1 - s^1.5)^1.5`` (OFT's ``create_power_flux_fun(n,
+    1.5, 1.5)``) at the nodes of :func:`swb_grid`, with ``s`` their ψ_N.
+
+    ``psi`` is the ψ_N of the nodes ``x`` (:func:`psi_at`), so a Φ_N run seeds
+    the same physical profile as a ψ_N run; ``None`` takes ``x`` itself.
     """
     s = swb_grid(x)
+    if psi is not None and "psi_N" in _swb_params():
+        s = np.asarray(psi, dtype=float)
     return np.power(1.0 - np.power(s, 1.5), 1.5)
 
 

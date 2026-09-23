@@ -2320,7 +2320,7 @@ def perturb_kinetic_equilibrium(
         # new_jphi = input_j_phi (= PIN_JPHI reproduction).
         print(f"  [DIFF_BS] restoring mygs to recon snapshot before SWB")
         mygs.replace_eq(source_eq=recon_eq_snapshot)
-        _swb_seed = coords.swb_seed(psi_N)
+        _swb_seed = coords.swb_seed(psi_N, coords.psi_at(mygs, psi_N, coord))
         _stashed_bounds = getattr(mygs, '_coil_drift_bounds', None)
         if _stashed_bounds is not None:
             mygs.set_coil_bounds(None)
@@ -2526,7 +2526,7 @@ def perturb_kinetic_equilibrium(
                       f"({_aip_exc}); Ip renorm falls back to the "
                       f"SWB-landed geometry")
 
-        _swb_seed = coords.swb_seed(psi_N)
+        _swb_seed = coords.swb_seed(psi_N, coords.psi_at(mygs, psi_N, coord))
 
         # ---- SWB debug instrumentation (BOUQUET_SWB_DEBUG=1) ----
         # State prints + pre/post .npz dumps so a failing draw can be replayed
@@ -4771,7 +4771,7 @@ def generate_bouquet(
         try:
             from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap as _swb
             from scipy.interpolate import interp1d as _interp1d
-            _swb_seed_cache = coords.swb_seed(psi_N)
+            _swb_seed_cache = coords.swb_seed(psi_N, coords.psi_at(mygs, psi_N, coord))
             # Interpolate recon kinetic profiles to equilibrium grid if
             # caller is using a dual-grid (mirrors `_kin_to_eq` inside
             # perturb_kinetic_equilibrium).  SWB expects the kinetic

@@ -2352,7 +2352,7 @@ class Bouquet:
                         np.asarray(_cap["psi_N"], float), np.asarray(_cap["avg_inv_R2"], float))
                     _anchor["inv_r2_src"] = "capture_equilibrium_fsa contour quadrature (anchor, pre-SWB)"
                 _anchor["Ip_anchor"] = abs(float(mygs.get_stats(lcfs_pad=psi_pad)["Ip"]))
-            swb_seed = coords.swb_seed(psi_N)
+            swb_seed = coords.swb_seed(psi_N, coords.psi_at(mygs, psi_N, coord))
             swb = solve_with_bootstrap(
                 mygs, ne, te, ni, ti, Zeff, bl.Ip_target, swb_seed,
                 scale_jBS=1.0, isolate_edge_jBS=iso,
@@ -3074,7 +3074,7 @@ class Bouquet:
                 mygs.replace_eq(source_eq=_snap)
             raise
 
-        seed = coords.swb_seed(psi_N)
+        seed = coords.swb_seed(psi_N, coords.psi_at(mygs, psi_N, coord))
         res = solve_with_bootstrap(
             mygs, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
             float(bl.Ip_target), seed,

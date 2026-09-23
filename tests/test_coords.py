@@ -187,3 +187,13 @@ def test_profile_coord_defaults_on_an_old_archive(tmp_path):
     with h5py.File(p, "a") as f:
         f["_baseline"].attrs["profile_coord"] = "phi_n"
     assert _profile_coord(str(p)) == "phi_n"
+
+
+def test_seed_is_the_same_physical_profile_in_a_phi_run(swb_params):
+    swb_params({"psi_N"})
+    xphi = np.array([0.0, 0.1, 0.4, 1.0])
+    psi = xphi ** 0.8
+    np.testing.assert_array_equal(coords.swb_seed(xphi, psi), (1 - psi ** 1.5) ** 1.5)
+    swb_params(set())                       # legacy toolkit: its own uniform grid
+    np.testing.assert_array_equal(coords.swb_seed(xphi, psi),
+                                  (1 - np.linspace(0, 1, 4) ** 1.5) ** 1.5)
