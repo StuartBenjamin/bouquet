@@ -5546,6 +5546,32 @@ def generate_bouquet(
                                else [(coil_drift, coil_drift)])
                     _last_good_psi   = mygs.get_psi(False).copy()
                     _last_good_coils = dict(_baseline_coils)  # fallback only
+                    # Full snapshot of the last good pass (psi, coils, profile
+                    # scales, toroidal-flux map); None on legacy OFT.
+                    _can_snap_h = (hasattr(mygs, "copy_eq")
+                                   and hasattr(mygs, "replace_eq"))
+                    _last_good_eq = None
+
+                    def _rollback():
+                        # Restore the last good pass; False if that failed.
+                        try:
+                            if _last_good_eq is not None:
+                                mygs.replace_eq(source_eq=_last_good_eq)
+                            else:
+                                # Legacy: re-solve so FF'/P' match the psi.
+                                _lg_dF, _lg_dVSC = _passes[_final_pass_idx]
+                                mygs.set_psi(_last_good_psi, update_bounds=True)
+                                mygs.set_coil_currents(_last_good_coils)
+                                mygs.set_coil_bounds(
+                                    _build_bounds(_lg_dF, _lg_dVSC))
+                                mygs.solve()
+                        except Exception as _rb_exc:
+                            print(f"  [homotopy] rollback failed ({_rb_exc}) "
+                                  f"-> draw rejected")
+                            return False
+                        print(f"  [homotopy] rolled back to pass "
+                              f"{_final_pass_idx + 1}")
+                        return True
 
                     for _p_idx, (_dF, _dVSC) in enumerate(_passes):
                         _bounds_p = _build_bounds(_dF, _dVSC)
@@ -5612,32 +5638,14 @@ def generate_bouquet(
                                     # (even Pass 1 saturated).  Reject
                                     # the draw entirely.
                                     _post_align_failed = True
-                                else:
-                                    # Roll back to last good pass and
-                                    # re-solve so mygs's FF'/P' state
-                                    # matches the restored psi.
-                                    try:
-                                        _lg_dF, _lg_dVSC = _passes[
-                                            _final_pass_idx]
-                                        mygs.set_psi(_last_good_psi,
-                                                     update_bounds=True)
-                                        mygs.set_coil_currents(
-                                            _last_good_coils)
-                                        mygs.set_coil_bounds(
-                                            _build_bounds(_lg_dF, _lg_dVSC))
-                                        mygs.solve()
-                                    except Exception as _rb_exc:
-                                        print(f"  [homotopy] WARN: "
-                                              f"rollback re-solve failed "
-                                              f"({_rb_exc}); stats may "
-                                              f"be stale")
-                                    print(f"  [homotopy] rolled back to "
-                                          f"pass {_final_pass_idx + 1} "
-                                          f"(saturation)")
+                                elif not _rollback():
+                                    _post_align_failed = True
                                 break  # stop tightening
 
                             _last_good_psi   = mygs.get_psi(False).copy()
                             _last_good_coils = dict(_cur)
+                            if _can_snap_h:
+                                _last_good_eq = mygs.copy_eq()
                             _final_drifts    = _all_drifts
                             _final_pass_idx  = _p_idx
                             _final_drift_F_lim   = _dF
@@ -5673,28 +5681,8 @@ def generate_bouquet(
                             if _final_pass_idx < 0:
                                 # First pass failed -> draw is rejected
                                 _post_align_failed = True
-                            else:
-                                # Roll back to last successful pass and
-                                # re-solve so mygs's internal FF'/P'
-                                # state is consistent with the restored
-                                # psi.  Without this re-solve,
-                                # mygs.get_stats() returns inf because
-                                # set_psi alone doesn't recompute the
-                                # flux-surface-averaged quantities.
-                                try:
-                                    _lg_dF, _lg_dVSC = _passes[_final_pass_idx]
-                                    mygs.set_psi(_last_good_psi,
-                                                 update_bounds=True)
-                                    mygs.set_coil_currents(_last_good_coils)
-                                    mygs.set_coil_bounds(
-                                        _build_bounds(_lg_dF, _lg_dVSC))
-                                    mygs.solve()
-                                except Exception as _rb_exc:
-                                    print(f"  [homotopy] WARN: rollback "
-                                          f"re-solve failed ({_rb_exc}); "
-                                          f"stats may be stale")
-                                print(f"  [homotopy] rolled back to pass "
-                                      f"{_final_pass_idx + 1}")
+                            elif not _rollback():
+                                _post_align_failed = True
                             break  # stop tightening
                     mygs.set_coil_bounds(None)
                     _report_bnd("after homotopy")
@@ -5808,13 +5796,30 @@ def generate_bouquet(
         # mygs.get_globals()[0] by ~0.5-0.8% between this draw and the
         # next draw's warmstart capture (the empirical save_eqdsk
         # Ip-mutation pathology).
-        safe_save_eqdsk(
-            mygs,
-            eqdsk_filename,
-            nr=257, nz=257,
-            truncate_eq=save_truncate_eq,
-            lcfs_pad=psi_pad,
-        )
+        try:
+            safe_save_eqdsk(
+                mygs,
+                eqdsk_filename,
+                nr=257, nz=257,
+                truncate_eq=save_truncate_eq,
+                lcfs_pad=psi_pad,
+            )
+        except Exception as _save_exc:
+            # A state save_eqdsk cannot trace is not a usable draw.
+            print(f"  [save] save_eqdsk failed ({_save_exc}) -> draw rejected")
+            try:
+                if _warmstart_eq_snap is not None:
+                    mygs.replace_eq(source_eq=_warmstart_eq_snap)
+                else:
+                    mygs.set_coil_currents(_baseline_coils)
+                    mygs.set_psi(_baseline_psi, update_bounds=True)
+            except Exception:
+                pass
+            if os.path.exists(eqdsk_filename):
+                os.remove(eqdsk_filename)
+            if pbar is not None:
+                pbar.update(1)
+            continue
 
         # Capture a high-resolution LCFS trace at the SAME mygs state
         # we just saved the eqdsk from.  The eqdsk's RBBBS/ZBBBS is only
