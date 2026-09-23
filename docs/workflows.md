@@ -129,8 +129,23 @@ is a navigational summary of the defaults.
 | `zeff_scalar_sigma` | `0.05` | One Z_eff perturbation per draw; n_i / n_z follow from quasi-neutrality. Also the width of the bottom tier below |
 | `zeff_sigma_source` | `"auto"` | Which tier supplies the Z_eff envelope's **magnitude**: `"auto"` / `"carbon"` / `"measured"` / `"scalar"` — see the ladder below |
 | `sigma_profiles` | `{}` | Explicit `{name: sigma(psi_N)}` envelopes, highest precedence |
-| `n_ls` / `t_ls` / `j_ls` | `0.5` / `0.4` / `0.25` | GPR correlation lengths for density / temperature / current |
+| `n_ls` / `t_ls` / `j_ls` | `0.5` / `0.4` / `0.25` | GPR correlation lengths for density / temperature / current, in units of the run coordinate (Φ_N in a `"phi_n"` run; the defaults are not converted) |
 | `aux_sigmas`, `aux_baselines`, `aux_length_scales` | `{}` | The passive switchboard: any extra channel gets perturbed and archived alongside the physics |
+
+### Radial coordinate (`b.source.coord`)
+
+`"psi_n"` (default) keeps every profile on normalised poloidal flux.
+`"phi_n"` puts the whole run on normalised toroidal flux: the reader relabels
+the source's nodes with their Φ_N (the IMAS `core_profiles` `grid.rho_tor_norm²`;
+the g-file's own q-integral `rhovn²`, with the p-file/IDA nodes inside the LCFS
+mapped through it), and every profile, envelope and GPR draw then stays on that
+grid. TokaMaker receives the profiles as-is, tagged `phi_n`, and remaps them to
+ψ each nonlinear step with the equilibrium's own q; bouquet samples readbacks at
+the ψ_N the solver's map gives for each node. `"rho_tor"` is accepted as an
+input spelling and runs as `"phi_n"` on ρ². A `"phi_n"` run needs an
+OpenFUSIONToolkit with toroidal-flux profiles (`TokaMaker.get_torflux_map`) and
+the internal bootstrap solve; both are checked in `prepare()`. The archive's
+baseline group records the coordinate as the `profile_coord` attr.
 
 **Precedence, per kinetic channel:** `sigma_profiles[chan]` > an IDA `.cdf` >
 `<chan>_scalar_sigma`. A `.cdf` handed to `ReconstructionSource.profiles_path`
@@ -212,6 +227,7 @@ as an enormous sigma.
 | `imas_corrective_jphi` | `False` | Opt-in corrective j_phi iteration on the IMAS baseline solve (still being validated) |
 | `floor_j_BS` | `False` | Clip negative bootstrap excursions; only needed with `isolate_edge_jBS=False` on sources that carry an inner negative lobe |
 | `bootstrap_kwargs` | `{}` | Additional keyword options passed through to `solve_with_bootstrap` in OpenFUSIONToolkit (e.g. `iterations`). Keys are checked against the toolkit's signatures at config time: one already fixed at the call sites (`scale_jBS`, `isolate_edge_jBS`, `verbose`, …), or not accepted by the installed toolkit, is refused there rather than failing every draw. Replaces `swb_iterations`, which is now `{"iterations": N}` |
+| `window_coord` | `"psi_n"` | Coordinate the fixed radial windows (edge > 0.9, pedestal 0.85, shelf/bridge, spike classifier) are read in: `"psi_n"` maps the run grid to ψ_N through the solver, `"native"` reads them in the run coordinate. Identical in a ψ_N run |
 | `coil_drift` | `0.01` | Soft coil-drift target |
 | `coil_drift_hard_factor` | `None` | Optional hard inequality bounds at `± factor·coil_drift` in every solve |
 | `homotopy_passes` | `[(0.05, 0.10), (0.02, 0.05), (0.01, 0.01)]` | Progressive `(F_tol, VSC_tol)` schedule — see [coil-constraints.md](coil-constraints.md) |

@@ -22,7 +22,7 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     ├── config_json                    this slice's exact config
     ├── _baseline/                     written once per scan point
     │   ├── eqdsk, [pfile]             raw byte-perfect g-file / p-file
-    │   ├── psi_N, psi_N_kinetic
+    │   ├── psi_N, psi_N_kinetic         run grids, in the `profile_coord` coordinate
     │   ├── n_e, T_e, n_i, T_i         kinetic profiles
     │   ├── pressure[, pressure_thermal]
     │   ├── j_phi[, j_BS, j_inductive] separated toroidal currents
@@ -30,7 +30,7 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │   ├── [aux_<name>, sigma_aux_<name>]   switchboard channels
     │   ├── [recon_lcfs_ref]           10k-pt LCFS reference (boundary metric)
     │   ├── [x_points], [coil_currents, coil_names]
-    │   └── attrs: Ip_target, l_i_target, source_kind, [diverted]
+    │   └── attrs: Ip_target, l_i_target, source_kind, profile_coord, [diverted]
     └── <count>/                       one group per accepted draw
         │                              (integer; gaps = rejected draws)
         ├── eqdsk, [pfile]             raw bytes, fixed names

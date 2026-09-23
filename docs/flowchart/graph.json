@@ -788,6 +788,15 @@
    "subsystem": "Configuration"
   },
   {
+   "id": "cfg.generationconfig.window_coord",
+   "type": "knob",
+   "label": "window_coord: str = \"psi_n\"",
+   "file": "bouquet/config.py",
+   "line": 947,
+   "desc": "Coordinate the fixed radial windows are read in (psi_n or the run coordinate)",
+   "subsystem": "Configuration"
+  },
+  {
    "id": "cfg.generationconfig.workflow",
    "type": "knob",
    "label": "workflow: str = \"auto\"",
@@ -1513,6 +1522,15 @@
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
   {
+   "id": "fn.coords",
+   "type": "transform",
+   "label": "coords (run coordinate at the OFT boundary)",
+   "file": "bouquet/coords.py",
+   "line": 1,
+   "desc": "Tags profiles with their coordinate; samples readbacks at the solver's psi_N for each node",
+   "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
+  },
+  {
    "id": "ext.tokamaker_get_stats",
    "type": "input",
    "label": "mygs.get_stats (extract equilibrium state)",
@@ -1759,6 +1777,15 @@
    "line": 386,
    "desc": "Reconstruction path: read g-file + kinetics, run GS solve, extract currents",
    "subsystem": "Baseline & uncertainty resolution"
+  },
+  {
+   "id": "cfg.reconstructionsource.coord",
+   "type": "knob",
+   "label": "coord: str = \"psi_n\"",
+   "file": "bouquet/config.py",
+   "line": 200,
+   "desc": "Run coordinate: psi_n, phi_n (g-file rhovn^2) or rho_tor",
+   "subsystem": "Configuration"
   },
   {
    "id": "fn.baseline._sigma_zeff_baseline",
@@ -2074,6 +2101,15 @@
    "line": 243,
    "desc": "Main reader: IMAS IDS \u2192 separated Baseline (currents, targets, kinetics)",
    "subsystem": "IMAS/OMAS reader"
+  },
+  {
+   "id": "cfg.imassource.coord",
+   "type": "knob",
+   "label": "coord: str = \"psi_n\"",
+   "file": "bouquet/config.py",
+   "line": 247,
+   "desc": "Run coordinate: psi_n, phi_n (grid.rho_tor_norm^2) or rho_tor",
+   "subsystem": "Configuration"
   },
   {
    "id": "fn.imas.read_imas_geometry",
@@ -10934,6 +10970,34 @@
    "kind": "control",
    "desc": "Per-saddle weights",
    "subsystem": "Configuration"
+  },
+  {
+   "src": "cfg.reconstructionsource.coord",
+   "dst": "fn.baseline._resolve_reconstruction",
+   "kind": "control",
+   "desc": "Relabels the g-file and kinetic nodes in the run coordinate",
+   "subsystem": "Configuration"
+  },
+  {
+   "src": "cfg.imassource.coord",
+   "dst": "fn.imas.read_imas_baseline",
+   "kind": "control",
+   "desc": "Relabels the core_profiles nodes in the run coordinate",
+   "subsystem": "Configuration"
+  },
+  {
+   "src": "cfg.generationconfig.window_coord",
+   "dst": "fn.tmi.perturb_kinetic_equilibrium",
+   "kind": "control",
+   "desc": "Coordinate of the fixed radial windows",
+   "subsystem": "Configuration"
+  },
+  {
+   "src": "fn.coords",
+   "dst": "ext.solve_with_bootstrap",
+   "kind": "data",
+   "desc": "psi_N grid (+ coord) and tagged profiles",
+   "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   }
  ]
 }
