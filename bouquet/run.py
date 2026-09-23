@@ -651,6 +651,7 @@ class Bouquet:
         # collapsed) split differs.
         if self.config.generation.single_profile_jphi:
             self.config.generation.recalculate_j_BS = False
+        self._check_structured_mse_reachable(self.config)
 
         self.baseline = resolve_baseline(self.config, self.mygs)
 
@@ -1120,6 +1121,10 @@ class Bouquet:
         sig_ind_up = getattr(gc, "structured_sigma_ind_up", None)
         if sig_ind_up is not None:
             sig_ind_up = [float(v) for v in sig_ind_up]
+        # ---- the third measurement: MSE pitch angles (optional) -----------
+        # Validated HERE, before anything is solved, so a required block that
+        # is unusable costs nothing.  None -> the channel exactly as before.
+        mse_ch, mse_status = Bouquet._structured_mse_block(gc)
         li_geom = None
         if li_target is not None:
             li_target = float(li_target)
@@ -1319,11 +1324,16 @@ class Bouquet:
               + ("KKT cond n/a (soft)" if out["kkt_cond"] is None
                  else f"KKT cond {out['kkt_cond']:.2e}"), flush=True)
 
+        if mse_status is not None:
+            extra.update(Bouquet._structured_mse_predictor_record(
+                gc, mse_ch, mse_status))
+
         # The corrector state is built whenever there is ANYTHING to correct:
         # the q0 row (gate admitted) or the l_i row.  Both corrections share
-        # the SAME single extra solve.
+        # the SAME single extra solve.  A usable MSE block needs the state too
+        # (the MSE stage runs between the predictor solve and the corrector).
         state = None
-        if gated or li_target is not None:
+        if gated or li_target is not None or mse_ch is not None:
             state = dict(
                 q0_target=q0_target, psi_q=psi_q, psi_geom=psi_geom,
                 j_ind=np.asarray(j_ind, dtype=float),
@@ -1347,8 +1357,406 @@ class Bouquet:
                 li_max_corrector_steps=int(
                     getattr(gc, "structured_li_max_corrector_steps", 1) or 1),
             )
+            if mse_ch is not None:
+                from .utils import structured_objective_no_mse
+                state.update(
+                    mse=mse_ch,
+                    mse_required=bool(getattr(gc, "structured_mse_required",
+                                              False)),
+                    mse_fd_step=float(getattr(gc, "structured_mse_fd_step",
+                                              0.02)),
+                    mse_steps=int(getattr(gc, "structured_mse_steps", 1)),
+                    x_pred=np.concatenate([np.asarray(out["a"], dtype=float),
+                                           np.asarray(out["b"], dtype=float)]),
+                    F_pred=float(structured_objective_no_mse(out)),
+                    free=np.isfinite(np.concatenate([
+                        np.asarray(out["weights_ind"], dtype=float),
+                        np.asarray(out["weights_bs"], dtype=float)])),
+                    mse_lin=None,
+                )
         return (s_ind, s_bs, float(out["ohm_scale_eff"]),
                 float(out["bs_scale_eff"]), extra, state)
+
+    # ── closure_channel="structured": MSE pitch angles ─────────────────────
+    @staticmethod
+    def _check_structured_mse_reachable(cfg):
+        """Refuse ``structured_mse_required`` on a path that never reads MSE.
+
+        The MSE term exists only in the structured closure, which runs only on
+        the IMAS path with ``recalculate_j_BS``, ``jBS_baseline_mode="ohmic"``
+        and ``closure_channel="structured"``.  A required MSE constraint on any
+        other configuration would be silently ignored -- exactly what the flag
+        is there to prevent.
+        """
+        from .config import ImasSource
+        gc = cfg.generation
+        if not bool(getattr(gc, "structured_mse_required", False)):
+            return
+        why = []
+        if not isinstance(cfg.source, ImasSource):
+            why.append("the source is not an IMAS source")
+        if not bool(getattr(gc, "recalculate_j_BS", False)):
+            why.append("recalculate_j_BS is off")
+        if str(getattr(gc, "jBS_baseline_mode", "")) != "ohmic":
+            why.append(f"jBS_baseline_mode={gc.jBS_baseline_mode!r} "
+                       "(needs 'ohmic')")
+        if str(getattr(gc, "closure_channel", "")) != "structured":
+            why.append(f"closure_channel={gc.closure_channel!r} "
+                       "(needs 'structured')")
+        if why:
+            raise ValueError(
+                "structured_mse_required=True, but the structured closure "
+                "that consumes mse_data will not run: " + "; ".join(why)
+                + ".  Refusing rather than ignoring a required constraint.")
+
+    @staticmethod
+    def _structured_mse_block(gc):
+        """``(chords, status)`` for the structured channel's MSE term.
+
+        ``(None, None)`` when no ``mse_data`` was given and none is required --
+        the channel exactly as it was.  ``(chords, "usable")`` for a block
+        :func:`bouquet.mse.mse_chords` accepts.  An absent or unusable block
+        with ``structured_mse_required`` RAISES
+        :class:`~bouquet.mse.MSEDataUnusable`; an unusable block without it is
+        WARNED and returned as ``(None, "unusable ...")`` so the record says
+        the term was not applied and why.
+        """
+        import warnings
+        from .mse import MSE_MIN_CHORDS, MSEDataUnusable, mse_chords
+
+        md = getattr(gc, "mse_data", None)
+        required = bool(getattr(gc, "structured_mse_required", False))
+        if md is None and not required:
+            return None, None
+        try:
+            ch = mse_chords(
+                md, min_chords=int(getattr(gc, "structured_mse_min_chords",
+                                           MSE_MIN_CHORDS)),
+                sigma_sys=float(getattr(gc, "structured_mse_sigma_sys", 0.0)))
+        except MSEDataUnusable as e:
+            if required:
+                raise MSEDataUnusable(
+                    "closure_channel='structured' with "
+                    f"structured_mse_required=True: {e}.  Refusing to run the "
+                    "closure without the MSE constraint it was asked for.") \
+                    from e
+            msg = (f"closure_channel='structured': mse_data is UNUSABLE ({e}); "
+                   "the MSE term is NOT applied on this slice "
+                   "(structured_mse_required=False)")
+            warnings.warn(msg, stacklevel=3)
+            print("[imas SWB-split:ohmic structured] WARNING " + msg,
+                  flush=True)
+            return None, f"unusable, not applied: {e}"
+        return ch, "usable"
+
+    @staticmethod
+    def _structured_mse_predictor_record(gc, ch, status):
+        """The predictor-stage MSE block of ``ip_closure`` (inputs only)."""
+        from .mse import mse_er_terms
+        rec = dict(
+            structured_mse=bool(ch is not None),
+            structured_mse_required=bool(getattr(gc, "structured_mse_required",
+                                                 False)),
+            structured_mse_status=str(status),
+        )
+        if ch is None:
+            return rec
+        rec.update(
+            structured_mse_n_chords=int(ch["n_active"]),
+            structured_mse_n_chords_total=int(ch["n_total"]),
+            structured_mse_chord_index=[int(i) for i in ch["index"]],
+            structured_mse_chord_R=[float(v) for v in ch["R"]],
+            structured_mse_chord_Z=[float(v) for v in ch["Z"]],
+            structured_mse_tgamma_meas=[float(v) for v in ch["tgamma"]],
+            structured_mse_sigma_eff=[float(v) for v in ch["sigma_eff"]],
+            structured_mse_sigma_sys=float(ch["sigma_sys"]),
+            structured_mse_er_applied=bool(ch["er_applied"]),
+            structured_mse_er_corrected=bool(ch["er_corrected"]),
+            structured_mse_er_terms=mse_er_terms(ch),
+            structured_mse_fd_step=float(getattr(gc, "structured_mse_fd_step",
+                                                 0.02)),
+            structured_mse_steps=int(getattr(gc, "structured_mse_steps", 1)),
+            structured_mse_forward_model=(
+                "tan(gamma) = (A1 Bz + A5 Er) / (A2 Bphi + A3 BR + A4 Bz) on "
+                "the SOLVED equilibrium (bouquet.mse); linearised in the "
+                "structured coefficients by forward differences"),
+        )
+        return rec
+
+    @staticmethod
+    def _close_ip_structured_mse_stage(state, bl, mygs, solve_jphi,
+                                       field_at=None):
+        """Add ``chi2_MSE`` to the structured closure; ``free.sum() + steps`` solves.
+
+        Runs after the common tail has SOLVED the predictor's hybrid (so
+        ``mygs`` holds the predictor equilibrium) and before
+        :meth:`_close_ip_structured_corrector`.
+
+        1. Read the field at the chords off the predictor equilibrium, fix the
+           field orientation once (:func:`bouquet.mse.mse_sign_convention`,
+           frozen for the rest of the slice) and form ``tan_gamma(x_pred)``.
+        2. :func:`bouquet.utils.structured_mse_outer`: forward-difference
+           Jacobian (one solve per free coefficient), then
+           ``structured_mse_steps`` re-solve(s) of the SAME closure (same
+           prior, Ip/axis/l_i rows) with the linearised chi^2 added, each
+           followed by a solve of the new hybrid.  The last solve is the
+           delivered equilibrium.
+        3. Refresh ``bl`` and ``ip_closure`` from the delivered closure, and
+           store the linear model re-centred on it in ``state["mse_lin"]`` so
+           every corrector re-solve keeps the MSE term.
+
+        A refusal anywhere (a closure out of its scale bounds, a failed solve,
+        an unusable field) RAISES when ``structured_mse_required``; otherwise
+        the predictor's hybrid is re-solved (the FD probes moved ``mygs``),
+        kept, and the slice is FLAGGED closure-limited.  ``field_at`` (tests)
+        replaces the live field read.  Returns the last solve's ``nl_its``.
+        """
+        import numpy as np
+
+        from .mse import (mse_er_terms, mse_field_at, mse_sign_convention,
+                          mse_tan_gamma)
+        from .utils import (MSE_FLAG_PREFIX, close_ip_structured,
+                            close_ip_structured_soft, closure_health,
+                            structured_basis_eval, structured_mse_linear_model,
+                            structured_mse_outer)
+
+        ch = state["mse"]
+        required = bool(state.get("mse_required", False))
+        soft = bool(state.get("soft"))
+        if field_at is None:
+            field_at = lambda: mse_field_at(mygs, ch["R"], ch["Z"])
+        psi_g = np.asarray(state["psi_geom"], dtype=float)
+        Phi = structured_basis_eval(state["basis"], psi_g)
+        K = Phi.shape[0]
+        j_ind = np.asarray(state["j_ind"], dtype=float)
+        j_bs = np.asarray(state["j_BS_swb"], dtype=float)
+        j_fix = np.asarray(state["j_fixed"], dtype=float)
+        last = {"nl": None}
+        # the one-sided prior's up ladder, exactly as the predictor used it
+        up_ladder = state.get("sigma_ind_up")
+
+        def _hybrid(x):
+            x = np.asarray(x, dtype=float)
+            return ((1.0 + x[:K] @ Phi) * j_ind + (1.0 + x[K:] @ Phi) * j_bs
+                    + j_fix)
+
+        def _solve(j):
+            last["nl"] = solve_jphi(np.asarray(j, dtype=float))
+
+        def _resolve(lin):
+            if soft:
+                return close_ip_structured_soft(
+                    psi_g, state["w_lin"], state["c_signed"],
+                    state["Ip_signed"],
+                    (None if state.get("ip_sigma") is None
+                     else float(state["ip_sigma"])),
+                    j_ind, j_bs, j_fix, basis=state["basis"],
+                    sigma_ind=state["sigma_ind"], sigma_bs=state["sigma_bs"],
+                    sigma_ind_up=up_ladder,
+                    li_target=state.get("li_target"),
+                    li_sigma=(None if state.get("li_sigma") is None
+                              else float(state["li_sigma"])),
+                    li_kind=str(state.get("li_kind", "li_1")),
+                    li_geom=state.get("li_geom"),
+                    axis=(None if state.get("axis") is None
+                          else dict(state["axis"])),
+                    axis_sigma=None, mse_lin=lin)
+            return close_ip_structured(
+                psi_g, state["w_lin"], state["c_signed"], state["Ip_signed"],
+                j_ind, j_bs, j_fix, basis=state["basis"],
+                weights=state["weights"],
+                axis=(None if state.get("axis") is None
+                      else dict(state["axis"])),
+                li_target=state.get("li_target"),
+                li_kind=str(state.get("li_kind", "li_1")),
+                li_geom=state.get("li_geom"),
+                sigma_ind_up=up_ladder, mse_lin=lin)
+
+        rec = {}
+        prev = getattr(bl, "ip_closure", None) or {}
+        try:
+            B0 = field_at()
+            sp, st, table = mse_sign_convention(B0, ch)
+            tg_pred = mse_tan_gamma(B0, ch, sp, st)
+            rec.update(structured_mse_sign_convention=dict(pol=sp, tor=st),
+                       structured_mse_sign_table=dict(table))
+
+            def _tan_gamma_of(x):
+                _solve(_hybrid(x))
+                return mse_tan_gamma(field_at(), ch, sp, st)
+
+            res = structured_mse_outer(
+                state["x_pred"], state["F_pred"], tg_pred, _tan_gamma_of,
+                _resolve, ch, state["free"],
+                fd_step=float(state.get("mse_fd_step", 0.02)),
+                n_steps=int(state.get("mse_steps", 1)))
+        except (RuntimeError, ValueError, FloatingPointError) as e:
+            if required:
+                raise RuntimeError(
+                    "closure_channel='structured': the MSE-constrained "
+                    f"closure could not be delivered ({e}) and "
+                    "structured_mse_required=True -- refusing to fall back "
+                    "to the closure without MSE") from e
+            # the finite-difference probes moved mygs: put the predictor's
+            # equilibrium back before anything reads it
+            _solve(bl.j_phi)
+            why = (MSE_FLAG_PREFIX + "stage refused, predictor kept "
+                   f"({str(e)[:160]})")
+            reasons = list(prev.get("closure_limited_reasons", ()) or ())
+            if why not in reasons:
+                reasons.append(why)
+            rec.update(structured_mse_status="refused, not applied: "
+                                             + str(e)[:300],
+                       closure_limited=True,
+                       closure_limited_reasons=tuple(reasons))
+            if getattr(bl, "ip_closure", None) is not None:
+                bl.ip_closure.update(rec)
+            print("[imas SWB-split:ohmic structured] WARNING closure-limited: "
+                  + why, flush=True)
+            return last["nl"]
+
+        out, R = res["out"], res["record"]
+        s_ind = np.asarray(out["s_ind"], dtype=float)
+        s_bs = np.asarray(out["s_bs"], dtype=float)
+        bl.ohm_scale = float(out["ohm_scale_eff"])
+        bl.bs_scale = float(out["bs_scale_eff"])
+        bl.j_inductive = s_ind * j_ind
+        bl.j_BS = s_bs * j_bs
+        bl.j_phi = bl.j_inductive + bl.j_BS + j_fix
+        # re-centred on the DELIVERED equilibrium, for the corrector's re-solves
+        state["mse_lin"] = structured_mse_linear_model(res["x"], res["tg"],
+                                                       R["jacobian"], ch)
+        state["mse_sign"] = (sp, st)
+        state["mse_applied"] = True
+
+        _at = lambda s: {f"{r:.2f}": float(np.interp(r, psi_g, s))
+                         for r in (0.0, 0.2, 0.4, 0.6, 0.8, 0.95, 1.0)}
+        _fl = lambda v: [float(x) for x in np.ravel(v)]
+        rec.update(
+            structured_mse_status="applied",
+            structured_mse_n_solves=int(R["n_solves"]),
+            structured_mse_n_fd_solves=int(R["n_fd_solves"]),
+            structured_mse_chi2_before=float(R["chi2_before"]),
+            structured_mse_chi2_after=float(R["chi2_after"]),
+            structured_mse_chi2_model_after=float(R["chi2_model_after"]),
+            structured_mse_chi2_red_before=float(R["chi2_before"])
+            / int(ch["n_active"]),
+            structured_mse_chi2_red_after=float(R["chi2_after"])
+            / int(ch["n_active"]),
+            structured_mse_residual_sigma_before=_fl(R["residual_sigma_before"]),
+            structured_mse_residual_sigma_after=_fl(R["residual_sigma_after"]),
+            structured_mse_tgamma_pred_before=_fl(R["tgamma_pred_before"]),
+            structured_mse_tgamma_pred_after=_fl(R["tgamma_pred_after"]),
+            structured_mse_objective_before=float(R["objective_before"]),
+            structured_mse_objective_after_model=float(
+                R["objective_after_model"]),
+            structured_mse_objective_after=float(R["objective_after"]),
+            structured_mse_linearisation_residual_max_sigma=float(
+                R["steps"][-1]["linearisation_residual_max_sigma"]),
+            structured_mse_linearisation_residual_rms_sigma=float(
+                R["steps"][-1]["linearisation_residual_rms_sigma"]),
+            structured_mse_step_log=[dict(s) for s in R["steps"]],
+            structured_mse_jacobian=[_fl(row) for row in R["jacobian"]],
+            structured_mse_er_terms=mse_er_terms(ch),
+            # the same closure fields the corrector refreshes, so every
+            # structured_* entry describes the DELIVERED multiplier profiles
+            ohm_scale=float(bl.ohm_scale), bs_scale=float(bl.bs_scale),
+            structured_coeffs_a=_fl(out["a"]),
+            structured_coeffs_b=_fl(out["b"]),
+            structured_s_ind_min=float(s_ind.min()),
+            structured_s_ind_max=float(s_ind.max()),
+            structured_s_bs_min=float(s_bs.min()),
+            structured_s_bs_max=float(s_bs.max()),
+            structured_s_ind_profile=_fl(s_ind),
+            structured_s_bs_profile=_fl(s_bs),
+            structured_s_ind_at=_at(s_ind),
+            structured_s_bs_at=_at(s_bs),
+            structured_sign_pattern=(
+                None if out.get("sign_pattern") is None else
+                "".join("+" if v else "-" for v in out["sign_pattern"])),
+            structured_n_sign_iter=int(out.get("n_sign_iter", 0) or 0),
+            structured_structure_ind=float(out["structure_ind"]),
+            structured_structure_bs=float(out["structure_bs"]),
+            structured_ip_residual=float(out["ip_residual"]),
+            structured_ip_residual_pct=float(out["ip_residual_pct"]),
+            structured_ip_posterior=abs(float(out["Ip_hybrid"])),
+            structured_axis_residual=(None if out.get("axis_residual") is None
+                                      else float(out["axis_residual"])),
+            structured_constraints=list(out["constraints"]),
+            structured_li_predicted=out.get("li_predicted"),
+            structured_li_predictor_residual=out.get("li_predictor_residual"),
+            structured_residual_sigma_Ip_model=out.get("residual_sigma_Ip"),
+            structured_residual_sigma_li_model=out.get("residual_sigma_li"),
+            structured_objective=out.get("objective"),
+            structured_prior_chi2=out.get("prior_chi2"),
+            structured_gn_iterations=out.get("n_iter"),
+        )
+        # Ip bookkeeping (soft: a new posterior) and the health record, from
+        # the DELIVERED scales -- same function, same thresholds.
+        z_ip = None
+        if soft and state.get("ip_sigma"):
+            _ip_meas = abs(float(state["Ip_signed"]))
+            _ip_post = abs(float(out["Ip_hybrid"]))
+            z_ip = (_ip_post - _ip_meas) / float(state["ip_sigma"])
+            rec.update(structured_ip_measured_residual_pct=(
+                100.0 * (_ip_post - _ip_meas) / _ip_meas),
+                structured_residual_sigma_Ip=z_ip)
+        health = closure_health(bl.ohm_scale, bl.bs_scale, state["Ip_signed"],
+                                state["c_signed"], state["ip_ind"],
+                                state["ip_bs"], state["ip_fix"],
+                                soft_ip_residual_sigma=z_ip)
+        reasons = list(health["closure_limited_reasons"])
+        for why in res["flags"]:
+            if why not in reasons:
+                reasons.append(why)
+            print("[imas SWB-split:ohmic structured] WARNING closure-limited: "
+                  + why, flush=True)
+        for k, v in health.items():
+            rec[k] = v
+        rec["closure_limited_reasons"] = tuple(reasons)
+        rec["closure_limited"] = bool(reasons)
+        if getattr(bl, "ip_closure", None) is not None:
+            bl.ip_closure.update(rec)
+        print("[imas SWB-split:ohmic structured] MSE: "
+              f"{int(ch['n_active'])} chords, orientation (pol {sp:+.0f}, tor "
+              f"{st:+.0f}), {R['n_solves']} solves "
+              f"({R['n_fd_solves']} finite-difference + {R['n_steps']} "
+              f"step); chi2 {R['chi2_before']:.2f} -> {R['chi2_after']:.2f} "
+              f"(linear model {R['chi2_model_after']:.2f}; linearisation "
+              "residual max "
+              f"{R['steps'][-1]['linearisation_residual_max_sigma']:.3f} "
+              f"sigma); objective {R['objective_before']:.4g} -> "
+              f"{R['objective_after']:.4g}; {mse_er_terms(ch)}", flush=True)
+        return last["nl"]
+
+    @staticmethod
+    def _structured_mse_delivered(state, bl, mygs, field_at=None):
+        """Record chi2_MSE on the equilibrium the slice finally DELIVERS.
+
+        The q0/l_i corrector may re-solve after the MSE stage; this re-reads
+        the field (no solve) with the frozen orientation so the record's last
+        word is about the delivered equilibrium, not an intermediate one.
+        """
+        import numpy as np
+
+        from .mse import mse_chi2, mse_field_at, mse_tan_gamma
+
+        ch = state["mse"]
+        sp, st = state["mse_sign"]
+        B = (mse_field_at(mygs, ch["R"], ch["Z"]) if field_at is None
+             else field_at())
+        tg = mse_tan_gamma(B, ch, sp, st)
+        c2, z = mse_chi2(tg, ch)
+        if getattr(bl, "ip_closure", None) is not None:
+            bl.ip_closure.update(
+                structured_mse_chi2_delivered=float(c2),
+                structured_mse_chi2_red_delivered=float(c2)
+                / int(ch["n_active"]),
+                structured_mse_residual_sigma_delivered=[
+                    float(v) for v in np.ravel(z)],
+                structured_mse_tgamma_pred_delivered=[
+                    float(v) for v in np.ravel(tg)])
+        return float(c2)
 
     @staticmethod
     def _structured_roundtrip_gate(Ip_measured):
@@ -1608,7 +2016,8 @@ class Bouquet:
                     li_target=li_row_now,
                     li_sigma=(None if li_sigma is None else float(li_sigma)),
                     li_kind=li_kind, li_geom=state.get("li_geom"),
-                    axis=axis_now, axis_sigma=None)
+                    axis=axis_now, axis_sigma=None,
+                    mse_lin=state.get("mse_lin"))
             return close_ip_structured(
                 state["psi_geom"], state["w_lin"], state["c_signed"],
                 state["Ip_signed"], state["j_ind"], state["j_BS_swb"],
@@ -1616,7 +2025,8 @@ class Bouquet:
                 weights=state["weights"], axis=axis_now,
                 li_target=li_row_now, li_kind=li_kind,
                 li_geom=state.get("li_geom"),
-                sigma_ind_up=state.get("sigma_ind_up"))
+                sigma_ind_up=state.get("sigma_ind_up"),
+                mse_lin=state.get("mse_lin"))
 
         nl_out = None
         if not (want_q0 or want_li):
@@ -1848,6 +2258,13 @@ class Bouquet:
             _reasons += [r for r in (_prev.get("closure_limited_reasons", ())
                                      or ())
                          if str(r).startswith(SOFT_IP_FLAG_PREFIX)]
+        if state.get("mse") is not None:
+            # the MSE stage's own flags are not closure_health's to re-derive
+            from .utils import MSE_FLAG_PREFIX
+            _reasons += [r for r in (_prev.get("closure_limited_reasons", ())
+                                     or ())
+                         if str(r).startswith(MSE_FLAG_PREFIX)
+                         and r not in _reasons]
 
         def _flag(why):
             if why not in _reasons:
@@ -2780,12 +3197,24 @@ class Bouquet:
             # so the gate keeps its posterior/sigma_Ip pass-through and only
             # the measurement is bound here.
             if _structured_state is not None:
+                # MSE pitch angles (only when a usable mse_data block was
+                # given): linearise tan(gamma) on solved equilibria and
+                # re-solve the closure with chi2_MSE in its objective, BEFORE
+                # the q0/l_i corrector, which then keeps the MSE term in every
+                # re-solve it takes.
+                if _structured_state.get("mse") is not None:
+                    _nl_mse = self._close_ip_structured_mse_stage(
+                        _structured_state, bl, mygs, solve_jphi)
+                    if _nl_mse is not None:
+                        nl_its = _nl_mse
                 _nl_corr = self._close_ip_structured_corrector(
                     _structured_state, bl, mygs, solve_jphi,
                     ip_of=_ip_signed,
                     roundtrip_gate=self._structured_roundtrip_gate(Ip_t))
                 if _nl_corr is not None:
                     nl_its = _nl_corr
+                if _structured_state.get("mse_applied"):
+                    self._structured_mse_delivered(_structured_state, bl, mygs)
 
         # Convergence sanity: the solve completed (it raises otherwise), so
         # verify it landed on the requested current before trusting its l_i.

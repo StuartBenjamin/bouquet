@@ -1,5 +1,23 @@
 # Bouquet — change summaries
 
+## Unreleased — MSE pitch angles on the structured closure (opt-in)
+
+`closure_channel="structured"` accepts measured MSE pitch angles
+(`GenerationConfig.mse_data`, schema in `bouquet/mse.py`) as a third
+measurement next to Ip and l_i: `chi2_MSE` joins the objective of both the hard
+and the soft solver. Because tanγ is read off the **re-solved** equilibrium,
+the forward model is linearised by forward differences on solved equilibria
+(`utils.structured_mse_jacobian`, one GS solve per free coefficient) and the
+closure re-solved (`utils.structured_mse_outer`); the q0/l_i corrector keeps
+the term in every re-solve it takes. Recorded per slice: chords used, E_r
+treatment, field orientation, chi² before/after/delivered, per-chord residuals,
+the linearisation residual and the achieved objective, which the linear step
+cannot raise — if it does, the slice is flagged closure-limited.
+`structured_mse_required=True` refuses instead of running without the
+constraint. **Nothing changes without `mse_data`**: every default is inert and
+no tolerance or acceptance criterion moved.
+
+
 ## Unreleased — the default coil acceptance criterion changed
 
 **`Bouquet.filter()` now judges coil currents with a measurement-referenced χ²

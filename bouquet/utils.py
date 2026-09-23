@@ -1990,11 +1990,278 @@ def _one_sided_ladder_check(sig_up, sig_down, who):
             "penalty")
 
 
+# ── MSE pitch angles as a third measurement on the structured closure ───────
+#
+# Ip and l_i are GLOBAL numbers; measured MSE pitch angles are LOCAL, one per
+# chord, and they see exactly the radial redistribution the multiplier
+# profiles carry.  The term added to the structured objective is
+#
+#     chi2_MSE(x) = sum_k ((tan_gamma_pred,k(x) - tan_gamma_meas,k) / sigma_eff,k)^2
+#
+# with sigma_eff = sigma / sqrt(weight) (the fit weight folded in once; see
+# bouquet.mse.mse_chords) and the forward model of bouquet.mse.mse_tan_gamma.
+#
+# Unlike Ip and l_i, tan_gamma is NOT a functional of the multiplier profiles
+# at frozen anchor geometry: it is the field of the RE-SOLVED equilibrium at
+# the chord, so every evaluation is a Grad-Shafranov solve.  The solvers below
+# therefore never see the forward model; they see its LINEARISATION about a
+# point x0 whose equilibrium has been solved,
+#
+#     tan_gamma(x) ~= tan_gamma(x0) + J (x - x0),
+#
+# with J taken by forward finite differences in the free coefficients
+# (structured_mse_jacobian, one solve per free coefficient).  Every term of the
+# objective stays quadratic or Gauss-Newton-shaped, so the hard KKT solve and
+# the soft Gauss-Newton solve take it as ordinary least-squares rows, and the
+# one-sided prior's sign iteration still applies (the objective is still
+# convex on the hard channel).  structured_mse_outer is the outer loop around
+# them: solve -> read tan_gamma off the solved equilibrium -> record how far the
+# linear model was from what the solve delivered.
+
+#: closure-health reason prefix for every flag the MSE stage raises, so a later
+#: stage that rebuilds the reason list (the q0/l_i corrector) can carry them
+#: forward instead of dropping them.
+MSE_FLAG_PREFIX = "MSE: "
+
+#: Default forward-difference step of :func:`structured_mse_jacobian`, in
+#: coefficient units (a peak-normalised basis function moves the multiplier
+#: by this much at its centre).  A numerical-differentiation step, not a
+#: tolerance: nothing is accepted or refused on it.
+STRUCTURED_MSE_FD_STEP = 0.02
+
+
+def structured_mse_linear_model(x0, tg0, J, ch, who="structured MSE"):
+    """Validated linear model of the MSE forward model about ``x0``.
+
+    ``x0`` (2K,) is the coefficient vector whose equilibrium was SOLVED,
+    ``tg0`` (n,) the synthetic tan(gamma) read off that solve, ``J`` (n, 2K)
+    ``d tan_gamma / d x`` and *ch* the chord dict of
+    :func:`bouquet.mse.mse_chords` (its ``tgamma`` and ``sigma_eff`` are the
+    measurement).  Returns the dict the structured solvers take as
+    ``mse_lin``.  Raises ``ValueError`` on a shape mismatch and
+    ``RuntimeError`` on a non-finite entry.
+    """
+    x0 = np.asarray(x0, dtype=float).ravel()
+    tg0 = np.asarray(tg0, dtype=float).ravel()
+    J = np.asarray(J, dtype=float)
+    tg = np.asarray(ch["tgamma"], dtype=float).ravel()
+    sig = np.asarray(ch["sigma_eff"], dtype=float).ravel()
+    n = tg.size
+    if tg0.shape != (n,) or sig.shape != (n,) or J.shape != (n, x0.size):
+        raise ValueError(f"{who}: linear model shapes disagree (tg0 "
+                         f"{tg0.shape}, J {J.shape}, x0 {x0.shape}, "
+                         f"{n} chords)")
+    for nm, v in (("x0", x0), ("tan_gamma(x0)", tg0), ("J", J),
+                  ("tgamma", tg), ("sigma_eff", sig)):
+        if not np.all(np.isfinite(v)):
+            raise RuntimeError(f"{who}: non-finite {nm} in the MSE linear "
+                               "model")
+    if np.any(sig <= 0.0):
+        raise ValueError(f"{who}: sigma_eff must be positive")
+    return dict(x0=x0, tg0=tg0, J=J, tgamma=tg, sigma_eff=sig, n=int(n))
+
+
+def _mse_lsq_rows(mse_lin, K, who):
+    """``(M, m)`` with the MSE residual vector ``z(x) = M x - m`` (sigma units)."""
+    J = np.asarray(mse_lin["J"], dtype=float)
+    if J.shape[1] != 2 * int(K):
+        raise ValueError(f"{who}: the MSE Jacobian has {J.shape[1]} columns "
+                         f"but the basis carries {2 * int(K)} coefficients")
+    sig = np.asarray(mse_lin["sigma_eff"], dtype=float)
+    M = J / sig[:, None]
+    m = (np.asarray(mse_lin["tgamma"], dtype=float)
+         - np.asarray(mse_lin["tg0"], dtype=float)
+         + J @ np.asarray(mse_lin["x0"], dtype=float)) / sig
+    return M, m
+
+
+def _mse_record(mse_lin, x, objective_model):
+    """The MSE block of a structured solver's result (model space)."""
+    if mse_lin is None:
+        return {}
+    M, m = _mse_lsq_rows(mse_lin, np.asarray(x).size // 2, "mse record")
+    z = M @ np.asarray(x, dtype=float) - m
+    z0 = M @ np.asarray(mse_lin["x0"], dtype=float) - m
+    return dict(
+        mse_n_chords=int(mse_lin["n"]),
+        mse_chi2_model=float(z @ z),
+        mse_chi2_linearisation_point=float(z0 @ z0),
+        mse_residual_sigma_model=z,
+        mse_objective_model=float(objective_model),
+    )
+
+
+def structured_prior_value(out):
+    """The trust-prior term of a structured result, ``sum W x^2`` as solved.
+
+    Uses the weights in force at the solution: on a one-sided inductive prior
+    the up-side weight where ``a_k > 0`` (the same ``a_k == 0`` -> down rule
+    the sign iteration uses); hard-pinned coefficients (``W = inf``) are 0 and
+    contribute nothing.
+    """
+    a = np.asarray(out["a"], dtype=float)
+    b = np.asarray(out["b"], dtype=float)
+    W_ind = np.asarray(out["weights_ind"], dtype=float)
+    W_up = out.get("weights_ind_up")
+    if W_up is not None:
+        W_ind = np.where(a > 0.0, np.asarray(W_up, dtype=float), W_ind)
+    W = np.concatenate([W_ind, np.asarray(out["weights_bs"], dtype=float)])
+    x = np.concatenate([a, b])
+    use = np.isfinite(W) & (W > 0.0)
+    return float(np.sum(W[use] * x[use] ** 2))
+
+
+def structured_objective_no_mse(out):
+    """The structured objective WITHOUT its MSE term, at the solution.
+
+    Soft solver: the posterior-mode objective (prior + Ip/l_i/axis
+    measurement terms); hard solver: the trust prior (the constraints are
+    exact and contribute nothing).  With an MSE term present its model chi^2
+    is removed, so the same number can be compared across a closure solved
+    with and without MSE.
+    """
+    if str(out.get("solver")) == "soft-GaussNewton":
+        # the Gauss-Newton objective carries the MSE rows when present
+        return (float(out["objective"])
+                - float(out.get("mse_chi2_model") or 0.0))
+    return structured_prior_value(out)
+
+
+def structured_mse_jacobian(tan_gamma_of, x0, tg0, free, step=STRUCTURED_MSE_FD_STEP):
+    """Forward-difference ``d tan_gamma / d x`` at ``x0``, free columns only.
+
+    ``tan_gamma_of(x)`` must return the synthetic tan(gamma) of the equilibrium
+    SOLVED with coefficients *x* (one GS solve per call); ``tg0`` is its value
+    at ``x0``, already known.  Columns of pinned coefficients (``free`` False)
+    are left at zero -- they cannot move.  Costs ``free.sum()`` calls.
+    """
+    x0 = np.asarray(x0, dtype=float).ravel()
+    tg0 = np.asarray(tg0, dtype=float).ravel()
+    free = np.asarray(free, dtype=bool).ravel()
+    h = float(step)
+    if not (np.isfinite(h) and h > 0.0):
+        raise ValueError(f"structured_mse_jacobian: step must be finite and "
+                         f"positive, got {step!r}")
+    if free.shape != x0.shape:
+        raise ValueError("structured_mse_jacobian: free mask and x0 differ in "
+                         "shape")
+    J = np.zeros((tg0.size, x0.size), dtype=float)
+    for i in np.nonzero(free)[0]:
+        xp = x0.copy()
+        xp[i] += h
+        tg_i = np.asarray(tan_gamma_of(xp), dtype=float).ravel()
+        if tg_i.shape != tg0.shape or not np.all(np.isfinite(tg_i)):
+            raise RuntimeError("structured_mse_jacobian: the perturbed solve "
+                               f"for coefficient {int(i)} returned an unusable "
+                               "tan(gamma)")
+        J[:, i] = (tg_i - tg0) / h
+    return J
+
+
+def structured_mse_outer(x_pred, F_pred, tg_pred, tan_gamma_of, resolve, ch,
+                         free, fd_step=STRUCTURED_MSE_FD_STEP, n_steps=1):
+    r"""Add the MSE chi^2 to a solved structured closure: linearise, re-solve.
+
+    *x_pred* is the coefficient vector of a closure solved WITHOUT the MSE term
+    and whose equilibrium has been solved; *F_pred* its objective
+    (:func:`structured_objective_no_mse`) and *tg_pred* the synthetic
+    tan(gamma) read off its equilibrium.  ``tan_gamma_of(x)`` solves the
+    equilibrium of coefficients *x* and returns its tan(gamma);
+    ``resolve(mse_lin)`` re-runs the SAME closure with the MSE linear model
+    ``mse_lin`` (:func:`structured_mse_linear_model`) and returns its result
+    dict.
+
+    **Method.**  (1) ``J`` by forward differences at *x_pred*
+    (:func:`structured_mse_jacobian`, ``free.sum()`` solves).  (2) Up to
+    *n_steps* chord-method steps: the closure is re-solved with
+    ``tan_gamma(x) ~= tan_gamma(x_lin) + J (x - x_lin)``, the new coefficients'
+    equilibrium is SOLVED and its tan(gamma) read back, and the linearisation
+    point moves there -- the offset is refreshed from the solve, ``J`` is kept.
+    Cost: ``free.sum() + n_steps`` solves, and the last solve is the delivered
+    equilibrium.
+
+    **What is approximated, and how that is measured.**  Only the forward
+    model; the Ip, l_i, axis and prior terms are the closure's own algebra.
+    Each step records the linearisation residual ``(tan_gamma_solved -
+    tan_gamma_linear) / sigma_eff`` per chord (its max and RMS), and the
+    achieved objective ``F_noMSE(x) + chi2(tan_gamma_solved)``.  The linear
+    step cannot raise the MODEL objective (the re-solve minimises it and the
+    linearisation point is feasible for it), so an achieved objective ABOVE
+    the predictor's is a statement that the linear model failed on this
+    slice; it is returned as a flag (never retried, never hidden).
+
+    Returns ``dict(out, x, tg, record, flags)``.
+    """
+    from .mse import mse_chi2
+
+    x_pred = np.asarray(x_pred, dtype=float).ravel()
+    tg_pred = np.asarray(tg_pred, dtype=float).ravel()
+    n_steps = int(n_steps)
+    if n_steps < 1:
+        raise ValueError(f"structured_mse_outer: n_steps must be >= 1, got "
+                         f"{n_steps}")
+    chi2_0, z0 = mse_chi2(tg_pred, ch)
+    F_before = float(F_pred) + chi2_0
+    J = structured_mse_jacobian(tan_gamma_of, x_pred, tg_pred, free,
+                                step=fd_step)
+    x_lin, tg_lin = x_pred, tg_pred
+    steps = []
+    out = x_new = tg_new = None
+    for _s in range(n_steps):
+        lin = structured_mse_linear_model(x_lin, tg_lin, J, ch)
+        out = resolve(lin)
+        x_new = np.concatenate([np.asarray(out["a"], dtype=float),
+                                np.asarray(out["b"], dtype=float)])
+        tg_new = np.asarray(tan_gamma_of(x_new), dtype=float).ravel()
+        if tg_new.shape != tg_pred.shape or not np.all(np.isfinite(tg_new)):
+            raise RuntimeError("structured_mse_outer: the solve of the "
+                               "MSE-constrained closure returned an unusable "
+                               "tan(gamma)")
+        tg_lin_pred = tg_lin + J @ (x_new - x_lin)
+        lres = (tg_new - tg_lin_pred) / ch["sigma_eff"]
+        chi2_new, z_new = mse_chi2(tg_new, ch)
+        F_nomse = structured_objective_no_mse(out)
+        steps.append(dict(
+            chi2_model=float(out["mse_chi2_model"]),
+            chi2_achieved=float(chi2_new),
+            objective_model=float(out["mse_objective_model"]),
+            objective_achieved=float(F_nomse + chi2_new),
+            linearisation_residual_max_sigma=float(np.max(np.abs(lres))),
+            linearisation_residual_rms_sigma=float(np.sqrt(np.mean(lres ** 2))),
+            coeff_step_max=float(np.max(np.abs(x_new - x_lin))),
+        ))
+        x_lin, tg_lin = x_new, tg_new
+    chi2_f, z_f = mse_chi2(tg_new, ch)
+    F_after = steps[-1]["objective_achieved"]
+    flags = []
+    if not (np.isfinite(F_after) and F_after <= F_before):
+        flags.append(MSE_FLAG_PREFIX
+                     + f"achieved objective rose {F_before:.6g} -> "
+                       f"{F_after:.6g} (linearisation residual max "
+                       f"{steps[-1]['linearisation_residual_max_sigma']:.3g} "
+                       "sigma): the linear tan(gamma) model failed on this "
+                       "slice")
+    record = dict(
+        chi2_before=float(chi2_0), chi2_after=float(chi2_f),
+        chi2_model_after=steps[-1]["chi2_model"],
+        residual_sigma_before=z0, residual_sigma_after=z_f,
+        tgamma_pred_before=tg_pred, tgamma_pred_after=tg_new,
+        objective_before=float(F_before),
+        objective_after_model=steps[-1]["objective_model"],
+        objective_after=float(F_after),
+        jacobian=J, fd_step=float(fd_step),
+        n_fd_solves=int(np.count_nonzero(free)), n_steps=n_steps,
+        n_solves=int(np.count_nonzero(free)) + n_steps,
+        steps=steps,
+    )
+    return dict(out=out, x=x_new, tg=tg_new, record=record, flags=flags)
+
+
 def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
                         j_ind, j_bs, j_fix, basis=None, weights=None,
                         axis=None, scale_bounds=(0.2, 5.0), cond_rtol=1e-6,
                         li_target=None, li_kind="li_1", li_geom=None,
-                        sigma_ind_up=None):
+                        sigma_ind_up=None, mse_lin=None):
     r"""Minimal-norm radial multiplier profiles closing Ip (and optionally q0).
 
     The ``closure_channel="structured"`` algebra.  Unknowns are two smooth
@@ -2093,6 +2360,18 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
     it from being pure curve-fitting, but it is NOT an independent
     confirmation, and any result obtained with this prior has to be reported
     with that caveat attached.
+
+    **MSE pitch angles (optional).**  ``mse_lin`` -- the linear model of
+    :func:`structured_mse_linear_model` -- adds
+    ``chi2_MSE(x) = sum_k ((tg0 + J (x - x0) - tg_meas)_k / sigma_eff_k)^2``
+    to the minimised norm, on the same scale (the trust weights are
+    ``sigma^-2``).  The constraints are still imposed exactly: the problem
+    becomes an equality-constrained least-squares one, solved on the
+    constraint null space in the same ``y = W^(1/2) x`` scaling (no normal
+    equations), and stays convex, so the one-sided sign iteration's exactness
+    argument is unchanged.  ``None`` (the default) leaves every line of the
+    solve above untouched.  The forward model is linearised by the CALLER
+    (:func:`structured_mse_outer`); this solver never sees an equilibrium.
 
     **Refusals** (``RuntimeError``, never a quiet clamp): a non-finite input;
     constraint rows that are DEGENERATE against the relative floor
@@ -2278,6 +2557,11 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
             "carry; Ip and the axis current cannot both be imposed on this "
             "split")
 
+    mse_M = mse_m = None
+    if mse_lin is not None:
+        _M, mse_m = _mse_lsq_rows(mse_lin, K, "close_ip_structured")
+        mse_M = _M[:, free]
+
     def _kkt(Wf_now):
         """Minimal-norm solve for ONE fixed set of trust weights.
 
@@ -2306,6 +2590,25 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
                 f"Cn W^(-1/2) is rank deficient (singular values {sv}) -- the "
                 "free coefficients cannot carry these constraints")
         y = Vt.T @ ((U.T @ dn) / sv)
+        if mse_M is not None:
+            # min ||y||^2 + ||M x - m||^2 / W_max  s.t.  Aw y = dn, with
+            # x = W^(-1/2) y (the objective x'Wx = W_max ||y||^2 in this
+            # scaling).  y_p above is the minimum-norm particular solution,
+            # orthogonal to the null space N of Aw, so y = y_p + N z and
+            # ||y||^2 = ||y_p||^2 + ||z||^2: one least-squares solve in z.
+            _wmax = float(np.max(Wf_now))
+            Mw = (mse_M * scal[None, :]) / np.sqrt(_wmax)
+            mw = mse_m / np.sqrt(_wmax)
+            Nn = np.linalg.svd(Aw, full_matrices=True)[2][Aw.shape[0]:].T
+            if Nn.shape[1]:
+                G = np.vstack([np.eye(Nn.shape[1]), Mw @ Nn])
+                hvec = np.concatenate([np.zeros(Nn.shape[1]), mw - Mw @ y])
+                zz = np.linalg.lstsq(G, hvec, rcond=None)[0]
+                if not np.all(np.isfinite(zz)):
+                    raise RuntimeError(
+                        "close_ip_structured: the MSE least-squares step is "
+                        "non-finite")
+                y = y + Nn @ zz
         x_now = np.zeros(2 * K, dtype=float)
         x_now[free] = scal * y
         return x_now, sv
@@ -2377,6 +2680,16 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
                            + (1.0 + b @ phi0) * j_bs0 + j_fix0 - j_ref0)
     li_rec = _li_record(li_model, li_anchor, li_target, li_grad, x,
                         Ip_pinned=Ip_target_signed)
+    mse_rec = {}
+    if mse_lin is not None:
+        _prior = structured_prior_value(dict(
+            a=a, b=b, weights_ind=W_ind, weights_ind_up=W_ind_up,
+            weights_bs=W_bs))
+        _Mz = _mse_lsq_rows(mse_lin, K, "close_ip_structured")
+        _z = _Mz[0] @ x - _Mz[1]
+        mse_rec = _mse_record(mse_lin, x, _prior + float(_z @ _z))
+        names = list(names) + [f"MSE tan(gamma) chi2 ({int(mse_lin['n'])} "
+                               "chords, linearised)"]
 
     return dict(
         s_ind=s_ind, s_bs=s_bs, a=a, b=b, basis=basis_spec,
@@ -2411,6 +2724,7 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
         constraint_cond=float(sv_c[0] / sv_c[-1]),
         solver="hard-KKT",
         **li_rec,
+        **mse_rec,
     )
 
 
@@ -2483,7 +2797,7 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                              li_geom=None, axis=None, axis_sigma=None,
                              scale_bounds=(0.2, 5.0), rtol=1e-10,
                              max_iter=100, cond_rtol=1e-6,
-                             sigma_ind_up=None):
+                             sigma_ind_up=None, mse_lin=None):
     r"""The POSTERIOR-MODE structured closure: Ip and l_i as measurements.
 
     :func:`close_ip_structured` treats Ip (and the axis current, and l_i) as
@@ -2573,6 +2887,13 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
     on *x*;
     a run that hits *max_iter* without either is a ``RuntimeError``, never a
     quietly-returned half-solution.
+
+    **MSE pitch angles (optional).**  ``mse_lin`` (the linear model of
+    :func:`structured_mse_linear_model`) appends one residual per chord,
+    ``(tg0 + J (x - x0) - tg_meas) / sigma_eff``, to the Gauss-Newton residual
+    vector: the chi^2 of the linearised forward model joins the objective as a
+    fourth measurement term.  Linear in *x*, so it adds nothing to the
+    solver's nonlinearity.  ``None`` (the default) leaves the solve untouched.
 
     **Refusals** (``RuntimeError``): non-finite input, a degenerate hard
     constraint system (against ``cond_rtol``), non-convergence, and -- as in
@@ -2670,6 +2991,9 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
         if s is not None and not (np.isfinite(float(s)) and float(s) > 0.0):
             raise ValueError(f"close_ip_structured_soft: {nm} must be None "
                              f"(hard) or finite and positive, got {s!r}")
+    mse_M = mse_m = None
+    if mse_lin is not None:
+        mse_M, mse_m = _mse_lsq_rows(mse_lin, K, "close_ip_structured_soft")
 
     # ---- unknowns: pinned (sigma == 0) coefficients leave the problem -------
     sig_full = np.concatenate([sig_ind, sig_bs])
@@ -2756,6 +3080,9 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                 r.append((li_x - float(li_target)) / float(li_sigma))
                 J.append(structured_li_gradient(li_model, x)[free]
                          / float(li_sigma))
+            if mse_M is not None:
+                r.extend(mse_M @ x - mse_m)
+                J.extend(mse_M[:, free])
             r = np.asarray(r, dtype=float)
             Jx = np.asarray(J, dtype=float).reshape(r.size, n)
             return r, Jx @ N
@@ -2899,7 +3226,10 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                 ["axis current (q0)" + ("" if axis_sigma is None
                                         else " (soft)")])
              + ([] if li_model is None else
-                [f"l_i ({li_model['li_kind']}, soft)"]))
+                [f"l_i ({li_model['li_kind']}, soft)"])
+             + ([] if mse_lin is None else
+                [f"MSE tan(gamma) chi2 ({int(mse_lin['n'])} chords, "
+                 "linearised)"]))
     prior_chi2 = float(np.sum(
         (x[free][prior_active] / sig_f_used[prior_active]) ** 2))
 
@@ -2945,6 +3275,7 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
         constraint_singular_values=None, constraint_cond=None,
         solver="soft-GaussNewton",
         **li_rec,
+        **_mse_record(mse_lin, x, float(F)),
     )
 
 
