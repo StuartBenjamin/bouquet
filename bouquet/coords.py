@@ -151,8 +151,8 @@ def check_backend(coord):
         return
     try:
         import inspect
-        from OpenFUSIONToolkit.TokaMaker._core import TokaMaker, TokaMaker_equilibrium
-        ok = ("coord" in inspect.signature(TokaMaker_equilibrium.solve_bootstrap).parameters
+        from OpenFUSIONToolkit.TokaMaker._core import TokaMaker
+        ok = ("coord" in inspect.signature(TokaMaker.solve_bootstrap).parameters
               and hasattr(TokaMaker, "get_torflux_map")
               and "psi_N" in _swb_params())
     except Exception:
