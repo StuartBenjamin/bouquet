@@ -364,6 +364,26 @@ def _warn_missing_parallel(species_labels, rule: str):
         f"pressure_fast_parallel. {detail}", stacklevel=3)
 
 
+def _dd_phi_n(cp, psi_N):
+    """Φ_N of the core_profiles nodes, ``grid.rho_tor_norm**2``.
+
+    Refuses a grid without ``rho_tor_norm`` or with the ``sqrt(psi_N)``
+    placeholder some writers store: neither says where the nodes sit in Φ_N.
+    """
+    rho = cp.get("grid", {}).get("rho_tor_norm")
+    if rho is None or np.shape(rho) != np.shape(psi_N):
+        raise ValueError("coord='phi_n' needs core_profiles grid.rho_tor_norm "
+                         "on the same nodes as grid.psi")
+    rho = np.asarray(rho, dtype=float)
+    if not np.all(np.diff(rho) > 0):
+        raise ValueError("coord='phi_n': grid.rho_tor_norm is not strictly increasing")
+    if np.allclose(rho, np.sqrt(np.clip(psi_N, 0.0, None)), rtol=0, atol=1e-6):
+        raise ValueError("coord='phi_n': grid.rho_tor_norm is the sqrt(psi_N) "
+                         "placeholder, not a toroidal-flux coordinate")
+    phi = rho ** 2
+    return (phi - phi[0]) / (phi[-1] - phi[0])
+
+
 def _override(arr, src_psi, dst_psi):
     """Resample a user-supplied fixed-component array onto the baseline grid."""
     arr = np.asarray(arr, dtype=float)
@@ -793,6 +813,12 @@ def read_imas_baseline(
     psi = np.asarray(cp["grid"]["psi"], dtype=float)
     psi_N = (psi - psi[0]) / (psi[-1] - psi[0])   # 0 (axis) -> 1 (boundary)
     n = psi_N.size
+    # Run grid: the same nodes, labelled in the run coordinate.  Every
+    # profile below is read (and any dd/IDA interpolation done) on the nodes'
+    # psi_N; a toroidal-flux run only relabels them.
+    from .. import coords as _coords
+    coord = _coords.resolve_input_coord(getattr(source, "coord", _coords.PSI), [])[0]
+    x_run = psi_N if coord == _coords.PSI else _dd_phi_n(cp, psi_N)
 
     j_total = np.asarray(cp["j_total"], dtype=float)   # total parallel
     j_tor = np.asarray(cp["j_tor"], dtype=float)       # total toroidal (authoritative)
@@ -984,14 +1010,14 @@ def read_imas_baseline(
     # --- user overrides for fixed additive components ---
     if fixed is not None:
         if fixed.p_fast is not None:
-            p_fast = _override(fixed.p_fast, fixed.psi_N, psi_N)
+            p_fast = _override(fixed.p_fast, fixed.psi_N, x_run)
             p_fast_meta = {**p_fast_meta, "rule": None, "basis": "user-override",
                            "evidence": "FixedComponentsConfig.p_fast supplied; the "
                                        "dd fast-pressure fields were not read"}
         if fixed.j_NBI is not None:
-            j_NBI = _override(fixed.j_NBI, fixed.psi_N, psi_N)
+            j_NBI = _override(fixed.j_NBI, fixed.psi_N, x_run)
         if fixed.j_RF is not None:
-            j_RF = _override(fixed.j_RF, fixed.psi_N, psi_N)
+            j_RF = _override(fixed.j_RF, fixed.psi_N, x_run)
 
     # The deferred factor-of-3 warning: the convention was undeterminable AND the
     # fast pressure it scales is non-zero AND it came from the dd (a user-supplied
@@ -1071,11 +1097,13 @@ def read_imas_baseline(
         jphi_diff = eq_jtor - j_phi
 
     return Baseline(
-        psi_N=psi_N,
+        psi_N=x_run,
         j_phi=j_phi,
         j_inductive=j_inductive,
         j_BS=j_BS,
-        psi_N_kinetic=psi_N,
+        psi_N_kinetic=x_run,
+        coord=coord,
+        psi_map=None if coord == _coords.PSI else (psi_N, x_run),
         ne=ne, te=te, ni=ni, ti=ti, Zeff=Zeff,
         Ip_target=Ip_target,
         l_i_target=l_i_target,

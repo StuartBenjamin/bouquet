@@ -61,6 +61,12 @@ class Baseline:
     # is self-describing and a future scale change cannot pass silently
     # (issue #20).  Single source of truth: bouquet.utils.LI_SCALE.
     l_i_scale: str = "iter(li3)"    # == utils.LI_SCALE
+    # Coordinate of psi_N / psi_N_kinetic (bouquet.coords): "psi_n" or
+    # "phi_n".  Every profile and envelope of the run is on it.
+    coord: str = "psi_n"
+    # (psi_N, x) at the source's nodes: the io-time map from a psi_N-tabulated
+    # input (an IDA sigma) to the run grid.  None in a psi_n run.
+    psi_map: Optional[tuple] = None
     # Fixed additive components -- summed into EVERY draw, never GPR-perturbed.
     # None is treated as zeros. See FixedComponentsConfig for the contract:
     #   j_phi_total = j_inductive + j_BS + j_NBI + j_RF
@@ -593,8 +599,14 @@ def resolve_uncertainty(config, baseline) -> dict:
                 impurity_Z=float(getattr(src, "impurity_Z", 6.0)),
             )
 
+        _ida_x, _ida_in = np.asarray(ida.psi_N, dtype=float), slice(None)
+        if baseline.psi_map is not None:
+            # psi_N -> run coordinate through the source's own map (inside the LCFS)
+            _ida_in = _ida_x <= 1.0
+            _ida_x = np.interp(_ida_x[_ida_in], *baseline.psi_map)
+
         def _to_kin(arr):
-            return np.interp(psi_kin, ida.psi_N, np.asarray(arr, dtype=float))
+            return np.interp(psi_kin, _ida_x, np.asarray(arr, dtype=float)[_ida_in])
 
         ida_sig = {"ne": _to_kin(ida.sigma_ne), "te": _to_kin(ida.sigma_te),
                    "ni": _to_kin(ida.sigma_ni), "ti": _to_kin(ida.sigma_ti)}
@@ -915,6 +927,24 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     kin = _load_kinetic_profiles(source)
     psi_N_kin = kin["psi_N"]
 
+    # Run coordinate.  A toroidal-flux run relabels the g-file's nodes with
+    # their Φ_N from the g-file's own q (rhovn), and the kinetic nodes inside
+    # the LCFS through the same map; nothing is resampled onto psi_N.
+    from . import coords
+    coord = coords.resolve_input_coord(getattr(source, "coord", coords.PSI), [])[0]
+    psi_map = None
+    if coord == coords.PHI:
+        x_eq = np.asarray(eqdsk.rhovn, dtype=float) ** 2
+        if x_eq.shape != psi_N.shape:
+            raise ValueError("g-file rhovn is not on the psi_N levels")
+        psi_map = (psi_N, x_eq)
+        _in = psi_N_kin <= 1.0
+        kin = {k: (np.asarray(v)[_in] if np.shape(v) == psi_N_kin.shape else v)
+               for k, v in kin.items()}
+        psi_N_kin = np.interp(psi_N_kin[_in], psi_N, x_eq)
+        kin["psi_N"] = psi_N_kin
+        psi_N = x_eq
+
     # kinetic profiles (native SI) regridded onto the equilibrium psi_N grid.
     # Shape-preserving PCHIP (single shared helper): a linear regrid leaves a
     # slope kink at every kinetic knot, which the Sauter bootstrap inherits
@@ -934,6 +964,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
 
     from .coords import swb_seed
     guess_jinductive = swb_seed(psi_N)
+    _recon_coord = ({} if coord == coords.PSI else
+                    dict(coord=coord, x=psi_N))
 
     # Fixed (non-perturbed) pressure components must be resolved BEFORE the
     # reconstruction, not after it: the reconstruction's GS pressure has to be
@@ -981,6 +1013,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             p_fast=p_fast_eq,
             Z_imp=Z_imp_recon,
             l_i_tolerance=float(config.generation.l_i_tolerance),
+            window_coord=config.generation.window_coord,
+            **_recon_coord,
             **config.generation.bootstrap_kwargs,
         )
         # get_stats traces the q-profile and can emit gs_get_qprof warnings, so
@@ -1072,6 +1106,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         j_inductive=j_inductive,
         j_BS=j_BS,
         psi_N_kinetic=psi_N_kin,
+        coord=coord,
+        psi_map=psi_map,
         ne=kin["ne"],
         te=kin["te"],
         ni=kin["ni"],

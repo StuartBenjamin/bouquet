@@ -59,31 +59,39 @@ def pp_prof(mygs, x, p, coord=PSI):
     return oft_prof("linterp", x, pchip_derivative(x, p) / psi_range, coord)
 
 
-def psi_of(mygs, x, coord=PSI, psi_pad=1e-3):
-    """ψ_N at which to sample a readback for the run grid ``x``.
+def psi_at(mygs, x, coord=PSI):
+    """ψ_N of the run-grid nodes ``x`` on ``mygs``'s last solve.
 
-    A ψ_N run clips ``x`` to ``[psi_pad, 1 - psi_pad]``; a Φ_N run maps it
-    through the last solve's toroidal-flux map, then clips.
+    ``x`` itself in a ψ_N run; the solver's toroidal-flux map in a Φ_N run.
+    This is the abscissa for anything that integrates or samples in ψ
+    (``flux_integral``, the FSA current measure, ``find_optimal_scale``).
     """
+    if check_coord(coord) == PSI:
+        return x
     x = np.asarray(x, dtype=float)
-    if check_coord(coord) == PHI:
-        x = np.asarray(mygs.get_torflux_map(x.copy(), inverse=True)[0], dtype=float)
-    return np.clip(x, psi_pad, 1.0 - psi_pad)
+    return np.asarray(mygs.get_torflux_map(x.copy(), inverse=True)[0], dtype=float)
 
 
-def window_x(mygs, x, coord=PSI, window_coord=PSI, psi_pad=1e-3):
+def psi_of(mygs, x, coord=PSI, psi_pad=1e-3):
+    """:func:`psi_at`, clipped to ``[psi_pad, 1 - psi_pad]``: where to sample
+    ``get_profiles``/``get_q``/``sauter_fc`` for the run grid ``x``.
+    """
+    return np.clip(np.asarray(psi_at(mygs, x, coord), dtype=float),
+                   psi_pad, 1.0 - psi_pad)
+
+
+def window_x(mygs, x, coord=PSI, window_coord=PSI):
     """Abscissa for a hard-coded radial window (thresholds such as ψ_N > 0.9).
 
-    ``window_coord="psi_n"`` compares thresholds in ψ_N (via :func:`psi_of`,
-    unclipped at the ends); ``"native"`` compares them in the run coordinate.
-    The two agree in a ψ_N run, where ``x`` is returned unchanged.
+    ``window_coord="psi_n"`` compares thresholds in ψ_N (:func:`psi_at`);
+    ``"native"`` compares them in the run coordinate.  The two agree in a
+    ψ_N run, where ``x`` is returned unchanged.
     """
     if window_coord not in (PSI, "native"):
         raise ValueError(f"window_coord must be 'psi_n' or 'native', got {window_coord!r}")
-    x = np.asarray(x, dtype=float)
-    if check_coord(coord) == PSI or window_coord == "native":
-        return x
-    return np.asarray(mygs.get_torflux_map(x.copy(), inverse=True)[0], dtype=float)
+    if window_coord == "native":
+        return np.asarray(x, dtype=float)
+    return np.asarray(psi_at(mygs, x, coord), dtype=float)
 
 
 def _swb_params():

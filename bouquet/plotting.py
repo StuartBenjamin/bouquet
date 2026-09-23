@@ -1117,6 +1117,33 @@ def _source_kind(h5path, scan_key=None):
         return None
 
 
+def _profile_coord(h5path, scan_key=None):
+    """The archive's profile coordinate (``baseline`` attr ``profile_coord``);
+    ``"psi_n"`` for archives written before it existed."""
+    try:
+        from .utils import _scan_key
+        bkey = _scan_key(scan_key)
+        bl_path = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
+        with h5py.File(h5path, "r") as hf:
+            v = hf[bl_path].attrs.get("profile_coord", "psi_n")
+            return v.decode() if isinstance(v, bytes) else str(v)
+    except Exception:
+        return "psi_n"
+
+
+_PSI_XLABELS = (r"$\psi_N$", r"$\hat{\psi}$")
+
+
+def _relabel_x(figs, h5path, scan_key=None):
+    """Relabel ψ_N x axes as Φ_N when the archive's profiles are on Φ_N."""
+    if _profile_coord(h5path, scan_key) != "phi_n":
+        return
+    for f in (figs if isinstance(figs, (list, tuple)) else [figs]):
+        for a in getattr(f, "axes", []):
+            if a.get_xlabel() in _PSI_XLABELS:
+                a.set_xlabel(r"$\Phi_N$")
+
+
 def _lcfs_from_psigrid(eq):
     r"""Contour the LCFS from an eqdsk's 2-D :math:`\psi` grid (``psi_RZ``).
 
@@ -1397,6 +1424,7 @@ def plot_bouquet(h5path_or_header, scan_key=None, mode="kinetic",
             except Exception:
                 pass
 
+        _relabel_x(figs, h5path, scan_key)
         return figs, [f.axes for f in figs]
 
     figs = []
@@ -1481,6 +1509,7 @@ def plot_bouquet(h5path_or_header, scan_key=None, mode="kinetic",
         except Exception:
             pass
 
+    _relabel_x(figs, h5path, scan_key)
     # Optional side-by-side layout: render the separate figures in a wrapping
     # flex row (less vertical scroll) while keeping each an individual image.
     if layout == "row" and len(figs) > 1:
@@ -2689,6 +2718,7 @@ def plot_aux_profiles(h5path_or_header, scan_key=None, names=None,
         handles = [handles[-1]]
     _framed_legend(flat[0], handles=handles, fontsize=7, loc="best")
     fig.tight_layout()
+    _relabel_x(fig, h5path, scan_key)
     return fig, axes
 
 
@@ -3694,6 +3724,7 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
     for a in ax:
         a.axhline(0, color="gray", lw=0.5); a.set_xlim(0, 1); a.grid(alpha=0.3)
         a.set_xlabel(r"$\psi_N$"); a.set_ylabel(r"$j$ [MA/m$^2$]"); a.legend(fontsize=8)
+    _relabel_x(fig, h5, scan_key)
     fig.tight_layout()
     if save:
         fig.savefig(save)

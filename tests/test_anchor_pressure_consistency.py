@@ -27,7 +27,9 @@ _SRC = (Path(__file__).resolve().parents[1] / "bouquet"
 
 #: The two spellings of a thermal-only anchor, whitespace-tolerant.
 _THERMAL_PAX = re.compile(r"pax\s*=\s*pressure\s*\[\s*0\s*\]")
-_THERMAL_PP = re.compile(r"pchip_derivative\(\s*psi_N\s*,\s*pressure\s*\)")
+_THERMAL_PP = re.compile(
+    r"(?:pchip_derivative\(\s*psi_N\s*,|pp_prof\(\s*mygs\s*,\s*psi_N\s*,)"
+    r"\s*pressure\s*[,)]")
 
 
 def _code_lines(src):
@@ -54,6 +56,7 @@ def test_no_solve_site_anchors_at_thermal_only_pressure():
     "pax = pressure[ 0 ]",
     "pchip_derivative(psi_N, pressure)",
     "pchip_derivative( psi_N , pressure )",
+    "coords.pp_prof(mygs, psi_N, pressure, coord)",
 ])
 def test_the_guard_regexes_catch_the_stock_spellings(variant):
     """Negative control: the exact pre-fix spellings (and spaced variants)
@@ -66,6 +69,8 @@ def test_the_guard_regexes_catch_the_stock_spellings(variant):
     "pax=float(pressure_solve[0])",
     "pchip_derivative(psi_N, pres_tmp)",
     "pchip_derivative(psi_N, pressure_solve)",
+    "coords.pp_prof(mygs, psi_N, pres_tmp, coord)",
+    "coords.pp_prof(mygs, psi_N, pressure_solve, coord)",
 ])
 def test_the_guard_regexes_pass_the_fixed_spellings(ok):
     """The consistent spellings must NOT match -- a guard that also fires on
@@ -78,6 +83,6 @@ def test_the_anchor_sites_use_the_full_pressure():
     jBS-delta cache anchor uses pressure_solve, as calls, not comments."""
     code = _code_lines(_SRC.read_text())
 
-    assert re.search(r"pchip_derivative\(\s*psi_N\s*,\s*pres_tmp\s*\)", code)
+    assert re.search(r"pp_prof\(\s*mygs\s*,\s*psi_N\s*,\s*pres_tmp\s*,", code)
     assert re.search(
-        r"pchip_derivative\(\s*psi_N\s*,\s*pressure_solve\s*\)", code)
+        r"pp_prof\(\s*mygs\s*,\s*psi_N\s*,\s*pressure_solve\s*,", code)

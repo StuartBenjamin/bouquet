@@ -3652,6 +3652,7 @@ def store_baseline_profiles(
     j_BS=None,
     j_inductive=None,
     source_kind=None,
+    profile_coord="psi_n",
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -3738,6 +3739,9 @@ def store_baseline_profiles(
         # the source-decoupled aux switchboard): "imas" or "geqdsk".
         if source_kind is not None:
             grp.attrs["source_kind"] = str(source_kind)
+        # Coordinate of the psi_N / psi_N_kinetic grids (bouquet.coords);
+        # absent on older archives, which are all "psi_n".
+        grp.attrs["profile_coord"] = str(profile_coord)
 
         if eqdsk_bytes is not None:
             grp.create_dataset("eqdsk", data=np.void(eqdsk_bytes))

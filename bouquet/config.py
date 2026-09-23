@@ -194,6 +194,10 @@ class ReconstructionSource:
     psi_bridge: float = 0.99          # Hermite edge-bridge location
     rescale_j_BS: bool = False
     shelf_psi_N: float = 0.0
+    # Radial coordinate of the run (bouquet.coords): "psi_n", "phi_n" (profiles,
+    # envelopes and solver inputs on normalised toroidal flux, mapped at read
+    # with the g-file's own q), or "rho_tor" (read as phi_n = rho_tor**2).
+    coord: str = "psi_n"
     # guess_jinductive is derived from the g-file j_phi when None
 
 
@@ -238,6 +242,9 @@ class ImasSource:
     # fits the boundary to the external magnetics without kinetic assumptions.
     # One g-file per slice; the driver picks the nearest time.
     LCFS_geqdsk: Optional[str] = None
+    # Radial coordinate of the run (bouquet.coords): "psi_n", "phi_n" (the
+    # dd's core_profiles grid.rho_tor_norm**2), or "rho_tor" (same run).
+    coord: str = "psi_n"
 
 
 BaselineSource = Union[ReconstructionSource, ImasSource]
@@ -934,6 +941,10 @@ class GenerationConfig:
     # for the bootstrap options bouquet does not set itself. Keys are checked
     # against the toolkit's signatures in __post_init__.
     bootstrap_kwargs: dict = field(default_factory=dict)
+    # Coordinate the hard-coded radial windows (edge > 0.9, pedestal 0.85,
+    # shelf/bridge, classifier) are read in: "psi_n", or "native" for the
+    # run's own coordinate.  Identical in a psi_n run.
+    window_coord: str = "psi_n"
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single

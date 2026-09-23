@@ -45,7 +45,8 @@ def test_pp_scale_is_the_same_in_both_coordinates():
     a = coords.pp_prof(_Eq(), X, p)["y"]
     b = coords.pp_prof(_Eq(), X, p, coords.PHI)["y"]
     np.testing.assert_array_equal(a, b)
-    np.testing.assert_allclose(a[1:-1], -2 * X[1:-1] / 1.0, rtol=0.05)
+    from bouquet.utils import pchip_derivative
+    np.testing.assert_array_equal(a, pchip_derivative(X, p) / 1.0)
 
 
 def test_psi_of():
@@ -104,3 +105,85 @@ def test_check_backend():
     coords.check_backend(coords.PSI)
     with pytest.raises(ValueError):
         coords.check_backend("rho_tor")
+
+
+def test_window_x_rejects_an_unknown_window_coord():
+    with pytest.raises(ValueError):
+        coords.window_x(_Eq(), X, coords.PHI, "phi_n")
+
+
+def test_psi_at_is_the_identity_object_in_a_psi_run():
+    assert coords.psi_at(_Eq(), X) is X
+
+
+class TestDdPhiN:
+    def _cp(self, rho):
+        return {"grid": {"rho_tor_norm": list(rho)}}
+
+    def test_relabels_the_nodes(self):
+        from bouquet.io.imas import _dd_phi_n
+        pn = np.linspace(0, 1, 11)
+        rho = pn ** 0.4
+        np.testing.assert_allclose(_dd_phi_n(self._cp(rho), pn), rho ** 2)
+
+    @pytest.mark.parametrize("rho", [None, "placeholder", "short", "decreasing"])
+    def test_refuses_a_grid_that_does_not_place_the_nodes(self, rho):
+        from bouquet.io.imas import _dd_phi_n
+        pn = np.linspace(0, 1, 11)
+        cp = {"grid": {}}
+        if rho == "placeholder":
+            cp = self._cp(np.sqrt(pn))
+        elif rho == "short":
+            cp = self._cp(pn[:-1] ** 0.4)
+        elif rho == "decreasing":
+            cp = self._cp((pn ** 0.4)[::-1])
+        with pytest.raises(ValueError):
+            _dd_phi_n(cp, pn)
+
+
+class TestCheckCoord:
+    def _run(self, coord="psi_n", **gen):
+        import bouquet as bq
+        from bouquet.config import (BouquetConfig, GenerationConfig,
+                                    ImasSource, SolverConfig)
+        cfg = BouquetConfig(source=ImasSource(ids_path="x.json", coord=coord),
+                            solver=SolverConfig(mesh_path="m.h5"),
+                            generation=GenerationConfig(**gen),
+                            output_header="t")
+        return bq.Bouquet(cfg)
+
+    def test_psi_run_passes(self):
+        assert self._run()._check_coord() == coords.PSI
+
+    def test_rho_tor_is_a_phi_run(self, monkeypatch):
+        monkeypatch.setattr(coords, "check_backend", lambda c: None)
+        assert self._run("rho_tor")._check_coord() == coords.PHI
+
+    def test_bad_window_coord(self):
+        with pytest.raises(ValueError, match="window_coord"):
+            self._run(window_coord="phi_n")._check_coord()
+
+    def test_phi_run_refuses_the_python_solve(self, monkeypatch):
+        monkeypatch.setattr(coords, "check_backend", lambda c: None)
+        run = self._run("phi_n")
+        run.config.generation.bootstrap_kwargs = {"use_python_solve": True}
+        with pytest.raises(ValueError, match="use_python_solve"):
+            run._check_coord()
+
+    def test_phi_run_refuses_a_toolkit_without_support(self, monkeypatch):
+        import sys
+        monkeypatch.setitem(sys.modules, "OpenFUSIONToolkit", None)
+        with pytest.raises(RuntimeError, match="toroidal-flux"):
+            self._run("phi_n")._check_coord()
+
+
+def test_profile_coord_defaults_on_an_old_archive(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    from bouquet.plotting import _profile_coord
+    p = tmp_path / "a.h5"
+    with h5py.File(p, "w") as f:
+        f.create_group("_baseline")
+    assert _profile_coord(str(p)) == "psi_n"
+    with h5py.File(p, "a") as f:
+        f["_baseline"].attrs["profile_coord"] = "phi_n"
+    assert _profile_coord(str(p)) == "phi_n"
