@@ -56,6 +56,7 @@ from .utils import (
 )
 from .io.geqdsk import read_geqdsk
 from .physics import q_ravg
+from . import coords
 
 # ---- Masked anchor-solve failure counter (issue #24) ------------------------
 # The per-draw anchor solves swallow failures (fallback: `pass`; band
@@ -287,7 +288,6 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
     """
     from OpenFUSIONToolkit.TokaMaker.util import get_jphi_from_GS
 
-    npsi = len(psi_N)
     edge_mask = psi_N > 0.9
     j_phi_input = target_jphi.copy()
     edge_rms_history = []
@@ -340,8 +340,9 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
                 mygs.replace_eq(source_eq=_snap)   # do not leave the diverged state
             break
 
-        _, f, fp, _, pp = mygs.get_profiles(npsi=npsi, psi_pad=psi_pad)
-        _, _, ravgs, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
+        _psi_s = coords.psi_of(mygs, psi_N, psi_pad=psi_pad)
+        _, f, fp, _, pp = mygs.get_profiles(psi=_psi_s.copy())
+        _, _, ravgs, _, _, _ = mygs.get_q(psi=_psi_s.copy())
         j_phi_output = get_jphi_from_GS(f * fp, pp, q_ravg(ravgs, "<R>"), q_ravg(ravgs, "<1/R>"))
 
         diff = j_phi_output - target_jphi
@@ -915,7 +916,7 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
     def _solve_ind_scale(bs_scale):
         def _li_residual(scale):
             j_phi = scale * j_inductive_basis + bs_scale * j_BS_work
-            return calc_cylindrical_li_proxy(mygs, j_phi, psi_pad) - baseline_li_proxy
+            return calc_cylindrical_li_proxy(mygs, j_phi, psi_pad, psi_N) - baseline_li_proxy
 
         s_lo, s_hi = 0.5, 2.0
         f_lo, f_hi = _li_residual(s_lo), _li_residual(s_hi)
@@ -949,7 +950,7 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
 
     j_inductive_fit = ind_scale * j_inductive_basis
     j_phi_fit = j_inductive_fit + bs_scale_out * j_BS_work
-    fit_li = calc_cylindrical_li_proxy(mygs, j_phi_fit, psi_pad)
+    fit_li = calc_cylindrical_li_proxy(mygs, j_phi_fit, psi_pad, psi_N)
 
     return {
         'j_inductive_fit': j_inductive_fit,
@@ -965,7 +966,7 @@ def _achieved_jphi_fsa(mygs, psi_N, psi_pad=1e-3, sign_ref=None):
     """ACHIEVED flux-surface-averaged toroidal current of the CONVERGED solve.
 
     ``get_jphi_from_GS`` on the live equilibrium (the same formula the recon
-    corrective loop matches), interpolated onto ``psi_N``. This is the current
+    corrective loop matches), sampled at ``psi_N``. This is the current
     the stored eqdsk actually carries -- as opposed to the prescribed target
     profile, which a single-pass jphi-linterp solve reproduces only
     approximately (measured +3.2-3.4%% high over psi_N 0.2-0.9 on the IMAS
@@ -973,17 +974,14 @@ def _achieved_jphi_fsa(mygs, psi_N, psi_pad=1e-3, sign_ref=None):
     """
     from OpenFUSIONToolkit.TokaMaker.util import get_jphi_from_GS
     psi_N = np.asarray(psi_N, dtype=float)
-    ps, f, fp, _, pp = mygs.get_profiles(npsi=len(psi_N), psi_pad=psi_pad)
-    _, _, ravgs, _, _, _ = mygs.get_q(npsi=len(psi_N), psi_pad=psi_pad)
-    ps = np.asarray(ps, dtype=float)
-    if ps.size and (ps.max() > 1.5 or ps.min() < -0.5):
-        ps = (ps - ps.min()) / (ps.max() - ps.min())
-    from .physics import q_ravg
+    _psi_s = coords.psi_of(mygs, psi_N, psi_pad=psi_pad)
+    _, f, fp, _, pp = mygs.get_profiles(psi=_psi_s.copy())
+    _, _, ravgs, _, _, _ = mygs.get_q(psi=_psi_s.copy())
     j = get_jphi_from_GS(np.asarray(f, float) * np.asarray(fp, float),
                          np.asarray(pp, float),
                          np.asarray(q_ravg(ravgs, "<R>"), float),
                          np.asarray(q_ravg(ravgs, "<1/R>"), float))
-    j = np.interp(psi_N, ps, np.asarray(j, dtype=float))
+    j = np.asarray(j, dtype=float)
     if sign_ref is not None and \
             np.nanmedian(j) * np.nanmedian(np.asarray(sign_ref, float)) < 0:
         j = -j
@@ -1025,7 +1023,7 @@ def _ket_stage_diag(mygs, tag, extra=""):
         print(f"  [STAGE-DIAG {tag}] failed: {_e}", flush=True)
 
 
-def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad):
+def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad, x=None):
     """Convert ``solve_with_bootstrap``'s j_BS output to toroidal convention.
 
     SWB computes the Redl/Sauter bootstrap as the FSA *parallel* current
@@ -1042,17 +1040,23 @@ def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad):
     analytic method). The net factor is ``1/(<R><1/R>)`` (<= 1 by
     Cauchy-Schwarz, ~ 1 - eps^2 at the edge), evaluated on the same
     ``mygs``/grid the SWB call just used -- call this IMMEDIATELY after
-    ``solve_with_bootstrap``, before any further mygs solve.
+    ``solve_with_bootstrap``, before any further mygs solve.  ``x`` is the
+    run grid the SWB call was given (``None``: OFT's uniform padded grid).
     """
     from .physics import parallel_to_toroidal
 
     j_bs_swb = np.asarray(j_bs_swb, dtype=float)
-    npsi = len(j_bs_swb)
-    _, F, _, _, _ = mygs.get_profiles(npsi=npsi, psi_pad=psi_pad)
+
+    def _at():
+        if x is None:
+            return dict(npsi=len(j_bs_swb), psi_pad=psi_pad)
+        return dict(psi=coords.psi_of(mygs, coords.swb_grid(x), psi_pad=psi_pad))
+
+    _, F, _, _, _ = mygs.get_profiles(**_at())
     # <R>, <1/R> from get_q -- the SAME quantities SWB used for its R_avg/F
     # projection, so the undo is exact; <B^2> from sauter_fc.
-    _, _, ravgs, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
-    _, _, _, modb_avgs = mygs.sauter_fc(npsi=npsi, psi_pad=psi_pad)
+    _, _, ravgs, _, _, _ = mygs.get_q(**_at())
+    _, _, _, modb_avgs = mygs.sauter_fc(**_at())
     j_dot_B = j_bs_swb * F / q_ravg(ravgs, "<R>")   # undo SWB's R_avg/F projection
     return parallel_to_toroidal(
         j_dot_B,
@@ -2229,7 +2233,7 @@ def perturb_kinetic_equilibrium(
         full_j_BS = spike_profile.copy()
         _probe("after PIN_JPHI bypass setup")
         baseline_li_proxy = calc_cylindrical_li_proxy(
-            mygs, input_j_phi, psi_pad)
+            mygs, input_j_phi, psi_pad, psi_N)
         # Don't append SWB scale factors -- nothing to scale here
         eq_stats = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
 
@@ -2289,7 +2293,7 @@ def perturb_kinetic_equilibrium(
         # equilibrium's l_i / Ip, not the pre-solve warmstart state.
         eq_stats = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
         baseline_li_proxy = calc_cylindrical_li_proxy(
-            mygs, input_j_phi, psi_pad)
+            mygs, input_j_phi, psi_pad, psi_N)
 
     elif _diff_bs and recalculate_j_BS:
         # ---- DIFF_BS: differential bootstrap mode -----------------------
@@ -2302,8 +2306,7 @@ def perturb_kinetic_equilibrium(
         # new_jphi = input_j_phi (= PIN_JPHI reproduction).
         print(f"  [DIFF_BS] restoring mygs to recon snapshot before SWB")
         mygs.replace_eq(source_eq=recon_eq_snapshot)
-        from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
-        _swb_seed = create_power_flux_fun(npsi, 1.5, 1.5)['y']
+        _swb_seed = coords.swb_seed(psi_N)
         _stashed_bounds = getattr(mygs, '_coil_drift_bounds', None)
         if _stashed_bounds is not None:
             mygs.set_coil_bounds(None)
@@ -2316,6 +2319,7 @@ def perturb_kinetic_equilibrium(
                 isolate_edge_jBS=isolate_edge_jBS,
                 diagnostic_plots=False,
                 verbose=False,
+                **coords.swb_grid_kwargs(psi_N),
                 **kwargs
             )
         finally:
@@ -2326,9 +2330,9 @@ def perturb_kinetic_equilibrium(
         # mygs. The cached recon spike was converted (and axis-smoothed) the
         # same way at cache time, so the delta is consistently toroidal.
         _spike_perturbed = smooth_jbs_transition(_swb_jbs_to_toroidal(
-            mygs, _results_diff["isolated_j_BS"], psi_pad))
+            mygs, _results_diff["isolated_j_BS"], psi_pad, psi_N))
         _full_j_BS_tor = smooth_jbs_transition(_swb_jbs_to_toroidal(
-            mygs, _results_diff["j_BS"], psi_pad))
+            mygs, _results_diff["j_BS"], psi_pad, psi_N))
         delta_spike = _spike_perturbed - spike_profile_recon_cached
         _delta_rms = float(np.sqrt(np.mean(delta_spike**2)))
         _delta_max = float(np.max(np.abs(delta_spike)))
@@ -2369,7 +2373,7 @@ def perturb_kinetic_equilibrium(
             print(f"  [DIFF_BS recon-anchor] WARN: solve failed "
                   f"({_diff_anchor_exc}); state may be inconsistent")
         baseline_li_proxy = calc_cylindrical_li_proxy(
-            mygs, new_jphi_diff, psi_pad)
+            mygs, new_jphi_diff, psi_pad, psi_N)
         eq_stats = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
 
     elif recalculate_j_BS:
@@ -2515,8 +2519,7 @@ def perturb_kinetic_equilibrium(
                       f"({_aip_exc}); Ip renorm falls back to the "
                       f"SWB-landed geometry")
 
-        from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
-        _swb_seed = create_power_flux_fun(npsi, 1.5, 1.5)['y']
+        _swb_seed = coords.swb_seed(psi_N)
 
         # ---- SWB debug instrumentation (BOUQUET_SWB_DEBUG=1) ----
         # State prints + pre/post .npz dumps so a failing draw can be replayed
@@ -2575,6 +2578,7 @@ def perturb_kinetic_equilibrium(
                 isolate_edge_jBS=isolate_edge_jBS,
                 diagnostic_plots=False,
                 verbose=_swb_debug(),
+                **coords.swb_grid_kwargs(psi_N),
                 **kwargs
             )
             if _swb_debug():
@@ -2669,8 +2673,8 @@ def perturb_kinetic_equilibrium(
             # through unfiltered.  At sigma=0 the spike equals the baseline
             # split exactly.
             _spike_raw = _swb_jbs_to_toroidal(
-                mygs, results["isolated_j_BS"], psi_pad)
-            _full_raw = _swb_jbs_to_toroidal(mygs, results["j_BS"], psi_pad)
+                mygs, results["isolated_j_BS"], psi_pad, psi_N)
+            _full_raw = _swb_jbs_to_toroidal(mygs, results["j_BS"], psi_pad, psi_N)
             _delta_bl = np.asarray(spike_delta_baseline, dtype=float)
             _delta_ref = np.asarray(spike_delta_ref, dtype=float)
             spike_profile = _delta_bl + (_spike_raw - _delta_ref)
@@ -2684,9 +2688,9 @@ def perturb_kinetic_equilibrium(
             # divot vs the recon baseline (hollow core, q0 shifted +12%
             # wholesale at sigma=0).
             full_j_BS = smooth_jbs_transition(
-                _swb_jbs_to_toroidal(mygs, results["j_BS"], psi_pad))
+                _swb_jbs_to_toroidal(mygs, results["j_BS"], psi_pad, psi_N))
             spike_profile = smooth_jbs_transition(
-                _swb_jbs_to_toroidal(mygs, results["isolated_j_BS"], psi_pad))
+                _swb_jbs_to_toroidal(mygs, results["isolated_j_BS"], psi_pad, psi_N))
 
         # Floor the SWB bootstrap at 0 (drop unphysical negative excursions)
         # before it enters j_phi. Then, in Case-B "diff" mode, add the fixed
@@ -2808,7 +2812,7 @@ def perturb_kinetic_equilibrium(
                 _count_masked_anchor_failure("recon_anchor_fallback", _fb_exc)
 
         eq_stats = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
-        baseline_li_proxy = calc_cylindrical_li_proxy(mygs, new_jphi, psi_pad)
+        baseline_li_proxy = calc_cylindrical_li_proxy(mygs, new_jphi, psi_pad, psi_N)
 
         # Fix C band-conditioning: an UNCONDITIONAL accept passed pathological
         # GPR draws on hard/high-l_i cases (l_i -30% accepted -> garbage).
@@ -2860,7 +2864,7 @@ def perturb_kinetic_equilibrium(
                 raise RuntimeError(
                     f"perturb_jind_in_anchor: no in-band draw in {int(max_li_iter)} "
                     f"resamples (last l_i err {_erp:.1f}%)")
-            baseline_li_proxy = calc_cylindrical_li_proxy(mygs, new_jphi, psi_pad)
+            baseline_li_proxy = calc_cylindrical_li_proxy(mygs, new_jphi, psi_pad, psi_N)
         # ---- DIAG: recon-anchor (SWB) l_i vs target, BEFORE the sampling
         # loop runs.  Quantifies how much of the per-draw l_i shift is the
         # PHYSICAL SWB-bootstrap response (this value) vs the downstream
@@ -2883,7 +2887,7 @@ def perturb_kinetic_equilibrium(
         # When bootstrap is not recalculated there is no edge spike
         full_j_BS = np.zeros_like(psi_N)
         spike_profile = np.zeros_like(psi_N)
-        baseline_li_proxy = calc_cylindrical_li_proxy(mygs, input_j_phi, psi_pad)
+        baseline_li_proxy = calc_cylindrical_li_proxy(mygs, input_j_phi, psi_pad, psi_N)
 
     # ----------------------------------------------------------------
     #  5.  l_i matching loop
@@ -2940,7 +2944,7 @@ def perturb_kinetic_equilibrium(
         iteration_Ips.append(Ip)
         j0_scales.append(1.0)
         Ip_scales.append(1.0)
-        final_li_proxy = calc_cylindrical_li_proxy(mygs, output_jphi, psi_pad)
+        final_li_proxy = calc_cylindrical_li_proxy(mygs, output_jphi, psi_pad, psi_N)
         print(f"  [{_tag}] using {'input_j_phi+delta' if _diff_bs else 'recon j_phi'} "
               f"as output_jphi  (l_i={l_i:.4f}, Ip={Ip:.0f}); skipping l_i match loop")
 
@@ -2989,7 +2993,7 @@ def perturb_kinetic_equilibrium(
                      and not (_pin_jphi or _diff_bs))
     if _prescreen_on:
         try:
-            _pg = get_li_proxy_geometry(mygs, npsi, psi_pad)
+            _pg = get_li_proxy_geometry(mygs, npsi, psi_pad, psi_N)
             _n_trace = int(os.environ.get('PRESCREEN_NTRACE', '20'))
             _lev = np.linspace(0.06, 1.0 - psi_pad, _n_trace)
             # Trace each perimeter with safe_trace_surf (per-call copy_eq /
@@ -3058,7 +3062,7 @@ def perturb_kinetic_equilibrium(
                 iteration_Ips.append(Ip)
                 j0_scales.append(1.0)
                 Ip_scales.append(1.0)
-                final_li_proxy = calc_cylindrical_li_proxy(mygs, output_jphi, psi_pad)
+                final_li_proxy = calc_cylindrical_li_proxy(mygs, output_jphi, psi_pad, psi_N)
                 _why = "C/perturb-anchor" if perturb_jind_in_anchor else "B/inband"
                 print(f"  [ACCEPT-ANCHOR {_why}] l_i={l_i:.4f} "
                       f"({100.0*abs(_anchor_li-l_i_target)/l_i_target:.2f}% vs "
@@ -3288,7 +3292,7 @@ def perturb_kinetic_equilibrium(
         # _geo may be None if the pre-screen geometry build failed or
         # PRESCREEN=0; build a one-off cylindrical cache for the diagnostic.
         _geo_diag = _geo if _geo is not None else get_li_proxy_geometry(
-            mygs, npsi, psi_pad)
+            mygs, npsi, psi_pad, psi_N)
         _ket_stage_diag(mygs, f"3-after-corrective[iter{li_iter}]")
         final_li_proxy = calc_cylindrical_li_proxy_fast(output_jphi, _geo_diag)
         proxy_vs_real = 100.0 * (final_li_proxy - l_i) / l_i if l_i != 0 else 0.0
@@ -4760,10 +4764,9 @@ def generate_bouquet(
               % ("DIFF_BS" if _diff_bs_env else "jBS-delta"))
         print("=" * 60)
         try:
-            from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
             from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap as _swb
             from scipy.interpolate import interp1d as _interp1d
-            _swb_seed_cache = create_power_flux_fun(npsi, 1.5, 1.5)['y']
+            _swb_seed_cache = coords.swb_seed(psi_N)
             # Interpolate recon kinetic profiles to equilibrium grid if
             # caller is using a dual-grid (mirrors `_kin_to_eq` inside
             # perturb_kinetic_equilibrium).  SWB expects the kinetic
@@ -4832,6 +4835,7 @@ def generate_bouquet(
                     scale_jBS=_scale_ref,
                     isolate_edge_jBS=isolate_edge_jBS,
                     diagnostic_plots=False, verbose=False,
+                    **coords.swb_grid_kwargs(psi_N),
                     **kwargs,
                 )
                 # Toroidal conversion on the cache-time SWB equilibrium, so
@@ -4840,7 +4844,7 @@ def generate_bouquet(
                 # smoothed version for DIFF_BS (whose per-draw spikes are also
                 # smoothed).
                 _delta_spike0_raw = _swb_jbs_to_toroidal(
-                    mygs, _cache_results["isolated_j_BS"], psi_pad)
+                    mygs, _cache_results["isolated_j_BS"], psi_pad, psi_N)
                 _diff_spike_recon = smooth_jbs_transition(_delta_spike0_raw)
                 # Snapshot AFTER the SWB call -- this is the state from
                 # which we'll re-launch SWB on perturbed kinetics each
@@ -6350,7 +6354,6 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     # is no grid for it to mismatch, and a non-scalar would already fail loudly
     # in that coercion rather than broadcasting silently.
 
-    from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
     from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
 
     if initialize_psi:
@@ -6377,6 +6380,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         abs(eqdsk.Ip), guess_jinductive,
         scale_jBS=1.0,
         isolate_edge_jBS=isolate_edge_jBS,
+        **coords.swb_grid_kwargs(eqdsk.psi_N),
         **kwargs
     )
 
@@ -6388,7 +6392,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     # inductive fit below sees the artifact-free profile rather than the raw
     # collapsed axis point.
     j_BS_isolated_raw = _swb_jbs_to_toroidal(mygs, results['isolated_j_BS'],
-                                             psi_pad)
+                                             psi_pad, eqdsk.psi_N)
     j_BS_isolated = smooth_jbs_transition(j_BS_isolated_raw)
 
     # ---- 2b. Classify the j_phi profile ----
@@ -6410,7 +6414,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     )  # just to get shelf_psi; j_ind result discarded
 
     # ---- 3. Fit inductive profile ----
-    baseline_li_proxy = calc_cylindrical_li_proxy(mygs, eqdsk_jtor, psi_pad)
+    baseline_li_proxy = calc_cylindrical_li_proxy(mygs, eqdsk_jtor, psi_pad, eqdsk.psi_N)
 
     fit_result = fit_inductive_profile(
         mygs, eqdsk_jtor, j_BS_isolated, eqdsk.psi_N, psi_pad,

@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 # already imports from TokaMaker_interface).  Re-exported here because the
 # original home is the documented one and callers import it from this module.
 from .utils import _shape_from_boundary  # noqa: F401  (compatibility re-export)
+from . import coords
 
 
 class Bouquet:
@@ -2265,7 +2266,6 @@ class Bouquet:
                                               smooth_jbs_transition)
             from .sampling import calc_cylindrical_li_proxy
             from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
-            from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
             from scipy.optimize import brentq
 
             gc = self.config.generation
@@ -2331,17 +2331,18 @@ class Bouquet:
                         np.asarray(_cap["psi_N"], float), np.asarray(_cap["avg_inv_R2"], float))
                     _anchor["inv_r2_src"] = "capture_equilibrium_fsa contour quadrature (anchor, pre-SWB)"
                 _anchor["Ip_anchor"] = abs(float(mygs.get_stats(lcfs_pad=psi_pad)["Ip"]))
-            swb_seed = create_power_flux_fun(psi_N.size, 1.5, 1.5)["y"]
+            swb_seed = coords.swb_seed(psi_N)
             swb = solve_with_bootstrap(
                 mygs, ne, te, ni, ti, Zeff, bl.Ip_target, swb_seed,
                 scale_jBS=1.0, isolate_edge_jBS=iso,
                 diagnostic_plots=False, verbose=False,
+                **coords.swb_grid_kwargs(psi_N),
                 **gc.bootstrap_kwargs,
             )
             # Same axis-transition smoothing every per-draw spike receives, so
             # the sigma=0 draw reproduces this baseline split exactly.
             j_BS_swb = smooth_jbs_transition(
-                _swb_jbs_to_toroidal(mygs, swb["isolated_j_BS"], psi_pad))
+                _swb_jbs_to_toroidal(mygs, swb["isolated_j_BS"], psi_pad, psi_N))
             if gc.floor_j_BS:
                 j_BS_swb = np.clip(j_BS_swb, 0.0, None)
             ratio = j_BS_swb.max() / max(j_BS_src.max(), 1.0)
@@ -2355,9 +2356,9 @@ class Bouquet:
                       f"diff min/max={bl.jBS_diff.min():.2e}/{bl.jBS_diff.max():.2e}; "
                       f"SWB/FUSE jBS peak={ratio:.3f}")
             elif mode == "rescale":
-                tgt = calc_cylindrical_li_proxy(mygs, FUSE_tot, psi_pad)
+                tgt = calc_cylindrical_li_proxy(mygs, FUSE_tot, psi_pad, psi_N)
                 _f = lambda s: calc_cylindrical_li_proxy(
-                    mygs, j_ind + s * j_BS_swb + j_fixed, psi_pad) - tgt
+                    mygs, j_ind + s * j_BS_swb + j_fixed, psi_pad, psi_N) - tgt
                 try:
                     scale = float(brentq(_f, 0.2, 4.0, xtol=1e-4))
                 except Exception:
@@ -2471,7 +2472,7 @@ class Bouquet:
                     convention="fsa", geom=_geom))   # documented ~+0.9% bias
                 _ip_oft = lambda j: float(_eq_snap.compute_flux_integral(
                     _psi_ip, np.asarray(j, dtype=float)))
-                _geo_cyl = get_li_proxy_geometry(_eq_snap, psi_N.size, psi_pad)
+                _geo_cyl = get_li_proxy_geometry(_eq_snap, psi_N.size, psi_pad, psi_N)
                 _dA_cyl = np.asarray(_geo_cyl["dA"], dtype=float)
                 _ip_cyl = lambda j: float(_integ.trapezoid(np.asarray(j, float) * _dA_cyl))
                 Ip_t = abs(float(bl.Ip_target))
@@ -2963,7 +2964,6 @@ class Bouquet:
                                           smooth_jbs_transition)
         from .utils import pchip_derivative
         from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
-        from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
 
         if self.baseline is None or self.mygs is None:
             raise ValueError("call setup_solver() + prepare_baseline() / "
@@ -3055,15 +3055,16 @@ class Bouquet:
                 mygs.replace_eq(source_eq=_snap)
             raise
 
-        seed = create_power_flux_fun(len(psi_N), 1.5, 1.5)["y"]
+        seed = coords.swb_seed(psi_N)
         res = solve_with_bootstrap(
             mygs, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
             float(bl.Ip_target), seed,
             scale_jBS=float(getattr(bl, "bs_scale", 1.0)),
             isolate_edge_jBS=bool(gc.isolate_edge_jBS),
+            **coords.swb_grid_kwargs(psi_N),
             **gc.bootstrap_kwargs)
         spike0 = smooth_jbs_transition(
-            _swb_jbs_to_toroidal(mygs, res["isolated_j_BS"], psi_pad))
+            _swb_jbs_to_toroidal(mygs, res["isolated_j_BS"], psi_pad, psi_N))
         if gc.floor_j_BS:
             spike0 = np.clip(spike0, 0.0, None)
 

@@ -895,7 +895,6 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     ``p_fast`` (absent from thermal IDA profiles) likewise defaults to zero.
     """
     import numpy as np
-    from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
 
     from .io.geqdsk import read_geqdsk
     from .TokaMaker_interface import reconstruct_equilibrium
@@ -933,7 +932,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     iso_w = np.ones(len(iso_pts)) * 200.0
     mygs.set_isoflux(iso_pts, weights=iso_w)
 
-    guess_jinductive = create_power_flux_fun(len(psi_N), 1.5, 1.5)["y"]
+    from .coords import swb_seed
+    guess_jinductive = swb_seed(psi_N)
 
     # Fixed (non-perturbed) pressure components must be resolved BEFORE the
     # reconstruction, not after it: the reconstruction's GS pressure has to be
