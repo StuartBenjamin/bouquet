@@ -3030,7 +3030,8 @@ def perturb_kinetic_equilibrium(
             from scipy.interpolate import interp1d as _interp1d_ps
             _pg['L_p'] = _interp1d_ps(_xi, _yi, kind='linear',
                                       bounds_error=False,
-                                      fill_value=(0.0, _Lp_lev[-1]))(psi_N)
+                                      fill_value=(0.0, _Lp_lev[-1]))(
+                                          coords.psi_at(mygs, psi_N, coord))
             # Reset the module-level tracer to the LCFS: the interior traces
             # above leave it on an interior surface, which corrupts the
             # downstream free-boundary solve's LCFS search.  A final LCFS
@@ -3139,7 +3140,8 @@ def perturb_kinetic_equilibrium(
             _cand = np.clip(_cand, 0.0, None)   # half-Gaussian at the floor
             _root = root_scalar(
                 Ip_flux_integral_vs_target,
-                args=(mygs, _cand, spike_profile + j_fixed_eff, psi_N, Ip_target),
+                args=(mygs, _cand, spike_profile + j_fixed_eff,
+                      coords.psi_at(mygs, psi_N, coord), Ip_target),
                 bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
                 method="brentq", rtol=1e-6,
             )
@@ -6870,8 +6872,8 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         j_ind_final = np.maximum(j_ind_final, 0.0)
 
     # ---- 9. Reconstruction quality metrics ----
-    _edge_mask = eqdsk.psi_N > 0.9
-    _core_mask = eqdsk.psi_N < 0.8
+    _edge_mask = _w > 0.9
+    _core_mask = _w < 0.8
 
     # Boundary deviation: nearest-neighbor distance from geqdsk boundary
     # points to the TokaMaker LCFS contour (same method as plotting.py)
