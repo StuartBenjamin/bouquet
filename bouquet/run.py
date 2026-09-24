@@ -643,19 +643,7 @@ class Bouquet:
     # ── stage 2: baseline (reconstruction OR imas) ----------------------
     def _check_coord(self):
         """Refuse, before any solve, a run coordinate this setup cannot run."""
-        run_coord = coords.resolve_input_coord(
-            getattr(self.config.source, "coord", coords.PSI), [])[0]
-        gc = self.config.generation
-        for _k in ("window_coord", "seed_coord"):
-            if getattr(gc, _k) not in (coords.PSI, "native"):
-                raise ValueError(f"{_k} must be 'psi_n' or 'native', "
-                                 f"got {getattr(gc, _k)!r}")
-        if run_coord == coords.PHI:
-            coords.check_backend(run_coord)
-            if gc.bootstrap_kwargs.get("use_python_solve"):
-                raise ValueError("coord='phi_n' needs the internal bootstrap "
-                                 "solve: drop use_python_solve from bootstrap_kwargs")
-        return run_coord
+        return coords.check_run(self.config)
 
     def prepare_baseline(self) -> "Baseline":
         """Resolve the baseline from ``config.source`` and cache it.
@@ -3307,6 +3295,8 @@ class Bouquet:
         self._validate_workflow()
 
         bl = self.baseline
+        # A baseline set directly skips prepare's guard: re-check its coordinate.
+        coords.check_run(self.config, getattr(bl, "coord", coords.PSI))
         gc = self.config.generation
         fc = self.config.filtering
         n_equils = int(n if n is not None else gc.n_equils)

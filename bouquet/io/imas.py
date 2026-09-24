@@ -1034,15 +1034,18 @@ def read_imas_baseline(
 
     # --- user overrides for fixed additive components ---
     if fixed is not None:
+        # fixed.psi_N given on psi_N ("psi_n") goes through the dd's own map
+        _fx = _coords.to_run_grid(fixed.psi_N, getattr(fixed, "coord", "run"),
+                                  None if coord == _coords.PSI else (psi_N, x_run))
         if fixed.p_fast is not None:
-            p_fast = _override(fixed.p_fast, fixed.psi_N, x_run)
+            p_fast = _override(fixed.p_fast, _fx, x_run)
             p_fast_meta = {**p_fast_meta, "rule": None, "basis": "user-override",
                            "evidence": "FixedComponentsConfig.p_fast supplied; the "
                                        "dd fast-pressure fields were not read"}
         if fixed.j_NBI is not None:
-            j_NBI = _override(fixed.j_NBI, fixed.psi_N, x_run)
+            j_NBI = _override(fixed.j_NBI, _fx, x_run)
         if fixed.j_RF is not None:
-            j_RF = _override(fixed.j_RF, fixed.psi_N, x_run)
+            j_RF = _override(fixed.j_RF, _fx, x_run)
 
     # The deferred factor-of-3 warning: the convention was undeterminable AND the
     # fast pressure it scales is non-zero AND it came from the dd (a user-supplied

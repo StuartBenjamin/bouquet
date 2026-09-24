@@ -105,6 +105,21 @@ class TestReadPhi:
         np.testing.assert_allclose(
             bf.p_equilibrium, np.interp(bf.psi_N, phi_eq, eqp["pressure"]), rtol=1e-12)
 
+    def test_fixed_components_on_psi_n_go_through_the_dd_map(self, tmp_path):
+        from bouquet.config import FixedComponentsConfig
+        ddp, _ = _write_dd(tmp_path)
+        g = np.linspace(0.0, 1.0, 17)
+        j = 1e5 * (1.0 - g ** 2)
+        src = ImasSource(ids_path=ddp, time=1.0, coord="phi_n")
+        run_ = read_imas_baseline(src, fixed=FixedComponentsConfig(j_NBI=j, psi_N=g),
+                                  allow_incomplete_pressure=True)
+        psi_ = read_imas_baseline(src, fixed=FixedComponentsConfig(
+            j_NBI=j, psi_N=g, coord="psi_n"), allow_incomplete_pressure=True)
+        x = run_.psi_N
+        np.testing.assert_allclose(run_.j_NBI, np.interp(x, g, j), rtol=1e-12)
+        np.testing.assert_allclose(
+            psi_.j_NBI, np.interp(x, np.interp(g, PSI, x), j), rtol=1e-12)
+
     def test_a_rho_grid_off_0_to_1_is_renormalised(self, tmp_path):
         rho, rho_eq = 0.02 + 0.97 * RHO, 0.01 + 0.98 * RHO_EQ
         ddp, eqp = _write_dd(tmp_path, rho=rho, rho_eq=rho_eq)

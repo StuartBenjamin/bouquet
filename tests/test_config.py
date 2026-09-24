@@ -161,9 +161,11 @@ class TestBootstrapKwargValidation:
         with pytest.raises(ValueError, match="passed explicitly at call sites"):
             self._check({"scale_jBS": 1.0})
 
-    def test_without_the_toolkit_only_the_reserved_check_runs(self):
+    def test_without_the_toolkit_only_the_reserved_check_runs(self, monkeypatch):
         # known=None means "cannot introspect": do not guess at the accepted
         # set, let a wrong key surface at the call as it did before.
+        import bouquet.config as _cfg
+        monkeypatch.setattr(_cfg, "_bootstrap_kwarg_names", lambda: None)
         validate_bootstrap_kwargs({"anything_at_all": 1},
                                   GenerationConfig._RESERVED, known=None)
         with pytest.raises(ValueError, match="passed explicitly"):
