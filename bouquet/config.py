@@ -200,6 +200,10 @@ class ReconstructionSource:
     coord: str = "psi_n"
     # guess_jinductive is derived from the g-file j_phi when None
 
+    def __post_init__(self):
+        from .coords import check_source_coord
+        check_source_coord(self.coord)
+
 
 @dataclass
 class ImasSource:
@@ -246,6 +250,10 @@ class ImasSource:
     # dd's core_profiles grid.rho_tor_norm**2), or "rho_tor" (same run).
     coord: str = "psi_n"
 
+    def __post_init__(self):
+        from .coords import check_source_coord
+        check_source_coord(self.coord)
+
 
 BaselineSource = Union[ReconstructionSource, ImasSource]
 
@@ -278,14 +286,17 @@ class FixedComponentsConfig:
         Always zeros unless the user supplies an array here.
 
     All arrays are on ``psi_N`` (kinetic grid, in the run coordinate --
-    Φ_N in a ``coord="phi_n"`` run), SI units, toroidal current convention
-    for j_*. ``None`` -> zeros.
+    Φ_N in a ``coord="phi_n"`` run, unless ``coord="psi_n"``), SI units,
+    toroidal current convention for j_*. ``None`` -> zeros.
     """
 
     p_fast: Optional["np.ndarray"] = None   # fast/beam pressure
     j_NBI: Optional["np.ndarray"] = None    # beam-driven TOROIDAL current density [A/m^2]
     j_RF: Optional["np.ndarray"] = None     # RF-driven TOROIDAL current density [A/m^2]
     psi_N: Optional["np.ndarray"] = None    # grid for the above (if arrays given)
+    # Coordinate of ``psi_N``: "run" (the run's), or "psi_n" (mapped to the
+    # run coordinate through the source equilibrium's psi_N -> Phi_N map).
+    coord: str = "run"
 
     # How to collapse anisotropic fast-ion pressure (p_perp, p_par) to the scalar
     # p_fast that a scalar-pressure GS solver needs. See
@@ -307,6 +318,12 @@ class FixedComponentsConfig:
     #              is applied silently. The rule used and the grounds for it are
     #              recorded on Baseline.p_fast_meta.
     p_fast_reduction: str = "auto"
+
+    def __post_init__(self):
+        from .coords import INPUT_COORDS
+        if self.coord not in INPUT_COORDS:
+            raise ValueError(f"fixed_components.coord must be one of "
+                             f"{INPUT_COORDS}, got {self.coord!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -1020,6 +1037,9 @@ class GenerationConfig:
         switches the channel on -- ``structured_preset=None`` resolves to the
         DEFAULT preset only when the channel is already ``"structured"``.
         """
+        from .coords import check_native
+        check_native("window_coord", self.window_coord)
+        check_native("seed_coord", self.seed_coord)
         validate_bootstrap_kwargs(self.bootstrap_kwargs, self._RESERVED)
         resolve_structured_preset(self, stacklevel=4)
 
@@ -1332,6 +1352,12 @@ class BouquetConfig:
                 "source must be a ReconstructionSource or ImasSource, got "
                 f"{type(src).__name__}"
             )
+
+        from .coords import PHI, resolve_input_coord
+        if (resolve_input_coord(src.coord, [])[0] == PHI
+                and self.generation.bootstrap_kwargs.get("use_python_solve")):
+            raise ValueError("coord='phi_n' needs the internal bootstrap "
+                             "solve: drop use_python_solve from bootstrap_kwargs")
 
         if self.fixed_components.p_fast_reduction not in (
                 "auto", "trace", "mean", "perp", "sum"):

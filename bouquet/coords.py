@@ -17,6 +17,9 @@ PSI, PHI = "psi_n", "phi_n"
 COORDS = (PSI, PHI)
 #: Input spelling accepted at io: ρ_tor, converted exactly to Φ_N = ρ².
 RHO = "rho_tor"
+#: Coordinates a user-supplied grid may be given in: the run's, or ψ_N.
+RUN = "run"
+INPUT_COORDS = (RUN, PSI)
 
 
 def check_coord(coord):
@@ -34,6 +37,33 @@ def resolve_input_coord(coord, x):
     if coord == RHO:
         return PHI, np.asarray(x, dtype=float) ** 2
     return check_coord(coord), x
+
+
+def check_source_coord(coord):
+    """Return ``coord`` if it is a source coordinate (a run one or ``"rho_tor"``)."""
+    if coord not in COORDS + (RHO,):
+        raise ValueError(f"source coord must be one of {COORDS + (RHO,)}, got {coord!r}")
+    return coord
+
+
+def check_native(name, value):
+    """Return ``value`` if it is ``"psi_n"`` or ``"native"`` (window/seed coords)."""
+    if value not in (PSI, "native"):
+        raise ValueError(f"{name} must be 'psi_n' or 'native', got {value!r}")
+    return value
+
+
+def to_run_grid(x, x_coord=RUN, psi_map=None):
+    """A user-supplied grid ``x`` (given in ``x_coord``) in the run coordinate.
+
+    ``"run"`` passes ``x`` through; ``"psi_n"`` maps it through ``psi_map``
+    (``(psi_N, x_run)`` pairs; ``None`` in a ψ_N run, where it is the identity).
+    """
+    if x_coord not in INPUT_COORDS:
+        raise ValueError(f"input coord must be one of {INPUT_COORDS}, got {x_coord!r}")
+    if x is None or x_coord == RUN or psi_map is None:
+        return x
+    return np.interp(np.asarray(x, dtype=float), *psi_map)
 
 
 def phi_n_from_q(psi_N, q):
@@ -108,9 +138,7 @@ def window_x(mygs, x, coord=PSI, window_coord=PSI):
     ``"native"`` compares them in the run coordinate.  The two agree in a
     ψ_N run, where ``x`` is returned unchanged.
     """
-    if window_coord not in (PSI, "native"):
-        raise ValueError(f"window_coord must be 'psi_n' or 'native', got {window_coord!r}")
-    if window_coord == "native":
+    if check_native("window_coord", window_coord) == "native":
         return np.asarray(x, dtype=float)
     return np.asarray(psi_at(mygs, x, coord), dtype=float)
 
@@ -180,17 +208,16 @@ def seed_psi(mygs, x, coord=PSI, seed_coord=PSI):
     """The ``psi`` argument of :func:`swb_seed` for ``seed_coord``: the nodes'
     ψ_N (``"psi_n"``) or ``None``, the run coordinate (``"native"``).
     """
-    if seed_coord not in (PSI, "native"):
-        raise ValueError(f"seed_coord must be 'psi_n' or 'native', got {seed_coord!r}")
+    check_native("seed_coord", seed_coord)
     return psi_at(mygs, x, coord) if seed_coord == PSI else None
 
 
 def check_backend(coord):
     """Raise unless the installed toolkit supports ``coord``.
 
-    A Φ_N run needs ``solve_bootstrap(coord=)`` and ``get_torflux_map``: an
-    older toolkit ignores a ``coord`` key in a profile dict, so it would
-    solve on ψ_N without complaint.
+    A Φ_N run needs ``solve_bootstrap(coord=)``, ``get_torflux_map`` and
+    ``solve_with_bootstrap(x, coord)``: an older toolkit ignores a ``coord``
+    key in a profile dict, so it would solve on ψ_N without complaint.
     """
     if check_coord(coord) == PSI:
         return
@@ -199,10 +226,32 @@ def check_backend(coord):
         from OpenFUSIONToolkit.TokaMaker._core import TokaMaker
         ok = ("coord" in inspect.signature(TokaMaker.solve_bootstrap).parameters
               and hasattr(TokaMaker, "get_torflux_map")
-              and _swb_grid_arg() is not None)
+              and _swb_grid_arg() is not None
+              and "coord" in _swb_params())
     except Exception:
         ok = False
     if not ok:
         raise RuntimeError(
             "coord='phi_n' needs an OpenFUSIONToolkit with toroidal-flux profile "
-            "support (solve_bootstrap(coord=) and TokaMaker.get_torflux_map).")
+            "support (solve_bootstrap(coord=), TokaMaker.get_torflux_map and "
+            "solve_with_bootstrap(x, coord)).")
+
+
+def check_run(config, coord=None):
+    """Refuse, before any solve, a run coordinate this setup cannot run.
+
+    ``coord`` defaults to the source's.  Checks the window/seed coords, and in
+    a Φ_N run the toolkit (:func:`check_backend`) and that the internal
+    bootstrap solve is used.  Returns the run coordinate.
+    """
+    if coord is None:
+        coord = resolve_input_coord(getattr(config.source, "coord", PSI), [])[0]
+    gc = config.generation
+    check_native("window_coord", gc.window_coord)
+    check_native("seed_coord", gc.seed_coord)
+    if check_coord(coord) == PHI:
+        check_backend(coord)
+        if gc.bootstrap_kwargs.get("use_python_solve"):
+            raise ValueError("coord='phi_n' needs the internal bootstrap "
+                             "solve: drop use_python_solve from bootstrap_kwargs")
+    return coord

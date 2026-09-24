@@ -601,9 +601,18 @@ def resolve_uncertainty(config, baseline) -> dict:
 
         _ida_x, _ida_in = np.asarray(ida.psi_N, dtype=float), slice(None)
         if baseline.psi_map is not None:
-            # psi_N -> run coordinate through the source's own map (inside the LCFS)
-            _ida_in = _ida_x <= 1.0
-            _ida_x = np.interp(_ida_x[_ida_in], *baseline.psi_map)
+            # psi_N -> run coordinate (inside the LCFS): through the source's
+            # own map, or a file other than the source's by its own q.
+            _map_src = (src.profiles_path if isinstance(src, ReconstructionSource)
+                        and src.profiles_path.endswith(".cdf") else
+                        _shared[0] if _shared is not None else None)
+            if (getattr(ida, "q", None) is not None
+                    and not (_map_src and _same_path(_map_src, ida_path))):
+                from .coords import phi_n_from_q
+                _ida_in, _ida_x = phi_n_from_q(_ida_x, ida.q)
+            else:
+                _ida_in = _ida_x <= 1.0
+                _ida_x = np.interp(_ida_x[_ida_in], *baseline.psi_map)
 
         def _to_kin(arr):
             return np.interp(psi_kin, _ida_x, np.asarray(arr, dtype=float)[_ida_in])
@@ -795,7 +804,8 @@ def resolve_uncertainty(config, baseline) -> dict:
     return out
 
 
-def floor_inductive_split(j_inductive, j_BS, psi_N=None, warn_frac=1e-4):
+def floor_inductive_split(j_inductive, j_BS, psi_N=None, warn_frac=1e-4,
+                          coord="psi_n"):
     """Enforce the ``j_inductive >= 0`` component convention on a (j_ind, j_BS)
     split, absorbing any negative sliver into ``j_BS`` so the pair still sums
     exactly to the same total.
@@ -805,7 +815,8 @@ def floor_inductive_split(j_inductive, j_BS, psi_N=None, warn_frac=1e-4):
     unphysical in this convention and -- fed to the GPR sampler as its mean --
     makes essentially every current draw go negative and be rejected. Returns
     ``(j_inductive_floored, j_BS_adjusted)`` (copies; inputs untouched) and
-    prints a one-line note when the correction is non-trivial.
+    prints a one-line note when the correction is non-trivial.  ``psi_N`` is
+    the grid, in ``coord`` (labels the note).
     """
     import numpy as np
 
@@ -824,7 +835,8 @@ def floor_inductive_split(j_inductive, j_BS, psi_N=None, warn_frac=1e-4):
         if psi_N is not None:
             pn = np.asarray(psi_N, dtype=float)
             sel = pn[deficit < 0.0]
-            where = f" over psi_N [{sel.min():.3f}, {sel.max():.3f}]"
+            lab = "Phi_N" if coord == "phi_n" else "psi_N"
+            where = f" over {lab} [{sel.min():.3f}, {sel.max():.3f}]"
         print(f"  [baseline] floored negative j_inductive ({n} pts{where}, "
               f"worst {worst/1e6:.4f} MA/m^2, {100*worst/scale:.2f}% of peak) "
               f"-- deficit absorbed into j_BS (split still sums to j_phi)")
@@ -954,6 +966,9 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         x_run = np.asarray(eqdsk.rhovn, dtype=float) ** 2
         if x_run.shape != psi_N.shape:
             raise ValueError("g-file rhovn is not on the psi_N levels")
+        if kin_q is None and source.profiles_path.endswith(".cdf"):
+            raise ValueError(f"coord='phi_n': {source.profiles_path!r} carries no "
+                             "q, so its profiles cannot be placed in Phi_N")
         _in, x_kin = _kinetic_phi_n(psi_N_kin, kin_q, psi_N, x_run)
         psi_map = (psi_N_kin[_in], x_kin)
         kin = {k: (np.asarray(v)[_in] if np.shape(v) == psi_N_kin.shape else v)
@@ -1003,7 +1018,10 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     # returns, so the default-off path does not even enter the new branch and
     # is provably a no-op (not merely "adds 0.0").
     fc = config.fixed_components
-    p_fast_kin = _resolve_fixed(fc.p_fast, fc.psi_N, x_kin)
+    # fc.psi_N in the run coordinate (a psi_n input via the g-file's map).
+    fc_x = coords.to_run_grid(fc.psi_N, getattr(fc, "coord", coords.RUN),
+                              None if coord == coords.PSI else (psi_N, x_run))
+    p_fast_kin = _resolve_fixed(fc.p_fast, fc_x, x_kin)
     p_fast_eq = to_eq(p_fast_kin) if fc.p_fast is not None else None
     # Z_imp is plumbed for symmetry with the draw path, but is INERT here today:
     # FixedComponentsConfig (config.py) carries no Z_imp field at all -- Z_imp is
@@ -1100,8 +1118,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     j_phi = np.asarray(result["j_phi_fit"], dtype=float)
     j_BS = np.asarray(result["j_BS_used"], dtype=float)
 
-    j_NBI = _resolve_fixed(fc.j_NBI, fc.psi_N, x_run)
-    j_RF = _resolve_fixed(fc.j_RF, fc.psi_N, x_run)
+    j_NBI = _resolve_fixed(fc.j_NBI, fc_x, x_run)
+    j_RF = _resolve_fixed(fc.j_RF, fc_x, x_run)
     j_inductive = j_phi - j_BS - j_NBI - j_RF   # == j_inductive_fit when NBI=RF=0
     # Physical component convention: the inductive current is >= 0. On shots
     # with a strong pedestal the achieved total can dip BELOW the full-Sauter
@@ -1111,7 +1129,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     # 0/500 candidates survived).
     # Floor the inductive at zero and absorb the deficit into j_BS so the
     # split still sums exactly to j_phi.
-    j_inductive, j_BS = floor_inductive_split(j_inductive, j_BS, x_run)
+    j_inductive, j_BS = floor_inductive_split(j_inductive, j_BS, x_run,
+                                              coord=coord)
 
     # Resolved above (before the reconstruction, which now consumes it).
     # Unchanged contract: the returned field is on the KINETIC grid.

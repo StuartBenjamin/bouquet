@@ -217,10 +217,9 @@ def test_seed_psi_picks_the_seed_coordinate():
         coords.seed_psi(eq, X, coords.PSI, "phi_n")
 
 
-def test_bad_seed_coord_is_refused_in_prepare():
-    run = TestCheckCoord()._run(seed_coord="rho")
+def test_bad_seed_coord_is_refused_at_construction():
     with pytest.raises(ValueError, match="seed_coord"):
-        run._check_coord()
+        TestCheckCoord()._run(seed_coord="rho")
 
 
 def test_phi_n_from_q():
