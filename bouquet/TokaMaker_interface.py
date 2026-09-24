@@ -1517,19 +1517,22 @@ class _AnchorIpRenorm:
         return scale
 
 
-def _r2_ip_scale(anchor_ip, mygs, j_ind, j_other, psi_N, Ip_target):
+def _r2_ip_scale(anchor_ip, mygs, j_ind, j_other, psi_N, Ip_target,
+                 coord="psi_n"):
     """Inductive scale for route R2, on the anchor geometry when available.
 
     ``anchor_ip`` is the :class:`_AnchorIpRenorm` captured before the SWB
     call.  ``None`` (capture failed, or ``BOUQUET_R2_IP_MODE=legacy``) falls
-    back to the historical bracketed root against the live ``mygs`` state.
+    back to the historical bracketed root against the live ``mygs`` state,
+    with ``psi_N`` (the run grid) mapped to ψ_N only there.
     """
     if anchor_ip is not None:
         return anchor_ip.solve_scale(j_ind, j_other)
     from scipy.optimize import root_scalar
     return float(root_scalar(
         Ip_flux_integral_vs_target,
-        args=(mygs, j_ind, j_other, psi_N, Ip_target),
+        args=(mygs, j_ind, j_other, coords.psi_at(mygs, psi_N, coord),
+              Ip_target),
         bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
         method="brentq", rtol=1e-6).root)
 
@@ -1626,7 +1629,8 @@ def smooth_jbs_transition(j_BS):
     within 1e-6 relative), Gaussian-filter (sigma=3 grid indices) a
     +/-10-index window around the shelf end, and blend with a triangular
     weight (1 at the shelf end, 0 at the window edges) so the exact
-    shelf value and the spike beyond the window are preserved.
+    shelf value and the spike beyond the window are preserved.  The window
+    is index-based, so its radial width follows the run grid (ψ_N or Φ_N).
     """
     from scipy.ndimage import gaussian_filter1d
 
@@ -1743,6 +1747,9 @@ def perturb_kinetic_equilibrium(
     # point) cancel exactly and the per-draw Sauter response is unfiltered.
     spike_delta_ref=None,
     spike_delta_baseline=None,
+    # The cache's SWB seed, reused by DIFF_BS and delta composition so the
+    # sigma=0 call is seeded exactly as the reference was.
+    swb_seed_ref=None,
     proxy_bias_warmstart=None,
     pin_jphi=False,
     Z_imp=None,
@@ -1793,6 +1800,7 @@ def perturb_kinetic_equilibrium(
     j_ls : float or ndarray
         GPR length-scale for :math:`j_\phi`.  A 1-D array gives a
         non-stationary Gibbs kernel (see ``sigmoid_length_scale``).
+        All three length scales are in the run coordinate (Φ_N in phi_n).
     Ip_target : float
         Target plasma current [A].
     l_i_target : float
@@ -2020,7 +2028,8 @@ def perturb_kinetic_equilibrium(
                 f"(last error {p_err:.2f}% vs threshold {_p_thresh_pct:.2f}%)"
             )
 
-        # GPR sampling on psi_kin (kinetic grid, may include SOL)
+        # GPR sampling on psi_kin (kinetic grid, may include SOL).  n_ls/t_ls
+        # (and j_ls below) are lengths in the run coordinate (Φ_N in phi_n).
         ne_perturb = _draw_monotonic_perturbation(
             psi_kin, ne / ne[0], sigma_ne / ne[0], n_ls, rng=rng
         ) * ne[0]
@@ -2324,7 +2333,8 @@ def perturb_kinetic_equilibrium(
         # new_jphi = input_j_phi (= PIN_JPHI reproduction).
         print(f"  [DIFF_BS] restoring mygs to recon snapshot before SWB")
         mygs.replace_eq(source_eq=recon_eq_snapshot)
-        _swb_seed = coords.swb_seed(psi_N, coords.seed_psi(mygs, psi_N, coord, seed_coord))
+        _swb_seed = (swb_seed_ref if swb_seed_ref is not None else
+                     coords.swb_seed(psi_N, coords.seed_psi(mygs, psi_N, coord, seed_coord)))
         _stashed_bounds = getattr(mygs, '_coil_drift_bounds', None)
         if _stashed_bounds is not None:
             mygs.set_coil_bounds(None)
@@ -2530,7 +2540,11 @@ def perturb_kinetic_equilibrium(
                       f"({_aip_exc}); Ip renorm falls back to the "
                       f"SWB-landed geometry")
 
-        _swb_seed = coords.swb_seed(psi_N, coords.seed_psi(mygs, psi_N, coord, seed_coord))
+        if (swb_seed_ref is not None and spike_delta_ref is not None
+                and spike_delta_baseline is not None):
+            _swb_seed = swb_seed_ref  # delta composition: the reference's seed
+        else:
+            _swb_seed = coords.swb_seed(psi_N, coords.seed_psi(mygs, psi_N, coord, seed_coord))
 
         # ---- SWB debug instrumentation (BOUQUET_SWB_DEBUG=1) ----
         # State prints + pre/post .npz dumps so a failing draw can be replayed
@@ -2773,7 +2787,7 @@ def perturb_kinetic_equilibrium(
                 # on the equilibrium SWB happened to land on.
                 _sA = _r2_ip_scale(_anchor_ip, mygs, _candA,
                                    spike_profile + j_fixed_eff,
-                                   coords.psi_at(mygs, psi_N, coord), Ip_target)
+                                   psi_N, Ip_target, coord)
                 _anchor_jind = _sA * _candA
                 _r2_scale_used = float(_sA)
                 _r2_f_ind_used = _r2_f_ind(_anchor_ip, _candA)
@@ -2844,7 +2858,7 @@ def perturb_kinetic_equilibrium(
                         break
                 _sA = _r2_ip_scale(_anchor_ip, mygs, _c,
                                    spike_profile + j_fixed_eff,
-                                   coords.psi_at(mygs, psi_N, coord), Ip_target)
+                                   psi_N, Ip_target, coord)
                 new_jphi = _sA * _c + spike_profile + j_fixed_eff
                 _r2_scale_used = float(_sA)
                 _r2_f_ind_used = _r2_f_ind(_anchor_ip, _c)
@@ -4766,6 +4780,7 @@ def generate_bouquet(
     _diff_recon_eq_snap = None
     _diff_spike_recon = None
     _delta_spike0_raw = None
+    _swb_seed_cache = None
     # The scale the sigma=0 reference was actually cached at (None when the
     # cache never ran or failed).  Recorded per draw so an archive can be
     # audited for which reference its deltas were composed against.
@@ -4778,11 +4793,10 @@ def generate_bouquet(
         try:
             from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap as _swb
             from scipy.interpolate import interp1d as _interp1d
-            _swb_seed_cache = coords.swb_seed(psi_N, coords.seed_psi(mygs, psi_N, coord, seed_coord))
             # Interpolate recon kinetic profiles to equilibrium grid if
             # caller is using a dual-grid (mirrors `_kin_to_eq` inside
             # perturb_kinetic_equilibrium).  SWB expects the kinetic
-            # arrays on the same grid as `_swb_seed_cache` (npsi=len(psi_N)).
+            # arrays on the same grid as the seed (npsi=len(psi_N)).
             if psi_N_kinetic is not None:
                 def _k2e(a):
                     # PCHIP regrid -- must match _kin_to_eq in the draws
@@ -4818,6 +4832,8 @@ def generate_bouquet(
             except (ValueError, RuntimeError) as _anch_exc:
                 print(f"  [DIFF_BS] state-anchor solve failed "
                       f"({_anch_exc}); SWB may inherit stale state")
+            # Seeded on the anchor state; the draws reuse it (swb_seed_ref).
+            _swb_seed_cache = coords.swb_seed(psi_N, coords.seed_psi(mygs, psi_N, coord, seed_coord))
             try:
                 # The sigma=0 reference MUST carry the CENTER of the per-draw
                 # scale distribution: OFT applies scale_jBS INSIDE SWB, so a
@@ -4885,6 +4901,7 @@ def generate_bouquet(
             _diff_spike_recon = None
             _delta_spike0_raw = None
             _scale_ref = None
+            _swb_seed_cache = None
     # Whether delta composition is ACTUALLY in force for the draws below --
     # requested mode AND both of its inputs.  Archived per draw so a silent
     # degradation cannot hide inside a normal-looking .h5.
@@ -5263,6 +5280,7 @@ def generate_bouquet(
                                           and _delta_spike0_raw is not None
                                           and baseline_j_BS is not None)
                                       else None),
+                swb_seed_ref=_swb_seed_cache,
                 proxy_bias_warmstart=_proxy_bias_warmstart,
                 pin_jphi=pin_jphi,
                 coord=coord,
@@ -5976,6 +5994,14 @@ def generate_bouquet(
                             fill_value=(arr_si[0] * scale,
                                         arr_si[-1] * scale),
                         )(psi_grid)
+                        if coord == coords.PHI:
+                            # Kinetic grid ends at the LCFS: keep the source
+                            # SOL outside the draw's ψ range, not a flat fill.
+                            _out = ((psi_grid < _psi_src[0])
+                                    | (psi_grid > _psi_src[-1]))
+                            vals = np.where(
+                                _out, np.asarray(pf[pf_key]["data"], dtype=float),
+                                vals)
                         pf.set_profile(pf_key, psi_grid, vals)
 
                 # Fast-ion block.  ni above is THERMAL whenever the source
@@ -6934,8 +6960,16 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
           f"bnd_rms={_bnd_rms_mm:.2f} mm, bnd_max={_bnd_max_mm:.2f} mm")
 
     # FF' from the converged TokaMaker equilibrium
-    _, F_prof, Fp_prof, _, _ = mygs.get_profiles(psi=np.array(coords.psi_at(mygs, _x, coord), dtype=float))
+    _psi_x = np.array(coords.psi_at(mygs, _x, coord), dtype=float)
+    _, F_prof, Fp_prof, _, _ = mygs.get_profiles(psi=_psi_x)
     ffprime_tokamaker = F_prof * Fp_prof
+    # 'pprime' is dp/dψ: pprime_tmp holds dp/dΦ_N in a Φ_N run.
+    if coord == coords.PHI:
+        pprime_out = pchip_derivative(_psi_x, pres_tmp) / (
+            mygs.psi_bounds[1] - mygs.psi_bounds[0])
+        pprime_out[-1] = 0.0
+    else:
+        pprime_out = pprime_tmp
 
     return {
         'ne': ne.copy(),
@@ -6950,7 +6984,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         'j_phi_fit': j_phi_final.copy(),
         'j_BS_used': j_BS_final.copy(),
         'psi': mygs.get_psi(False),
-        'pprime': pprime_tmp.copy(),
+        'pprime': pprime_out.copy(),
         'ffprime': ffprime_tokamaker.copy(),
         'ind_factor_final': ind_1,
         'bs_factor_final': 1.0,
