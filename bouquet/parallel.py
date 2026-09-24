@@ -256,7 +256,8 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
     own guard -- unlike the pre-merge check in :func:`parallel_generate` it
     also covers the SLURM CLI path, where drifted baselines (heterogeneous
     nodes, a stray ``nthreads>1``) would otherwise merge silently, mixing
-    draws accepted against different l_i targets. A listed shard that does not
+    draws accepted against different l_i targets. Shards whose baselines differ
+    in ``profile_coord`` (ψ_N vs Φ_N grids) also raise. A listed shard that does not
     exist on disk raises (missing workers must be handled by the caller, not
     dropped silently).
     """
@@ -279,7 +280,14 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
             return None
         return float(a["l_i_target"]), float(a["Ip_target"])
 
-    targets = []
+    def _baseline_coord(src):
+        parent = src[base_path] if base_path else src
+        if "_baseline" not in parent:
+            return None
+        c = parent["_baseline"].attrs.get("profile_coord", "psi_n")
+        return c.decode() if isinstance(c, bytes) else str(c)
+
+    targets, shard_coords = [], {}
     for sp in shard_paths:
         if sp is None:
             continue
@@ -290,6 +298,13 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                 "or drop the path explicitly from shard_paths.")
         with h5py.File(sp, "r") as src:
             targets.append((sp, _baseline_targets(src)))
+            c = _baseline_coord(src)
+            if c is not None:
+                shard_coords[sp] = c
+    if len(set(shard_coords.values())) > 1:
+        raise RuntimeError(
+            f"shards differ in profile_coord: {shard_coords}. "
+            "Nothing was merged.")
     present = [(sp, t) for sp, t in targets if t is not None]
     unchecked = [sp for sp, t in targets if t is None]
     if unchecked and present:

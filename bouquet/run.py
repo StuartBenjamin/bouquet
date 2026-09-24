@@ -2893,13 +2893,14 @@ class Bouquet:
         EC = 1.602176634e-19
         pk = np.asarray(bl.psi_N_kinetic, dtype=float)
         pe = np.asarray(bl.psi_N, dtype=float)
+        xl = r"$\Phi_N$" if getattr(bl, "coord", "psi_n") == "phi_n" else r"$\psi_N$"
 
         fig, ax = plt.subplots(1, 3, figsize=(13, 3.8))
         # kinetic profiles (densities left axis, temperatures right axis)
         a = ax[0]
         a.plot(pk, np.asarray(bl.ne) / 1e19, "-", color="tab:blue", label=r"$n_e$")
         a.plot(pk, np.asarray(bl.ni) / 1e19, "--", color="tab:blue", label=r"$n_i$")
-        a.set_ylabel(r"$n$ [$10^{19}$ m$^{-3}$]"); a.set_xlabel(r"$\psi_N$")
+        a.set_ylabel(r"$n$ [$10^{19}$ m$^{-3}$]"); a.set_xlabel(xl)
         at = a.twinx()
         at.plot(pk, np.asarray(bl.te) / 1e3, "-", color="tab:red", label=r"$T_e$")
         at.plot(pk, np.asarray(bl.ti) / 1e3, "--", color="tab:red", label=r"$T_i$")
@@ -2914,7 +2915,7 @@ class Bouquet:
         if bl.p_fast is not None:
             ax[1].plot(pk, np.asarray(bl.p_fast) / 1e3, ":", color="tab:purple",
                        label="fast")
-        ax[1].set_ylabel("p [kPa]"); ax[1].set_xlabel(r"$\psi_N$")
+        ax[1].set_ylabel("p [kPa]"); ax[1].set_xlabel(xl)
         ax[1].set_title("pressure"); ax[1].legend(fontsize=8); ax[1].grid(alpha=0.3)
 
         # separated toroidal currents
@@ -2925,7 +2926,7 @@ class Bouquet:
         for nm, arr in (("j_NBI", bl.j_NBI), ("j_RF", bl.j_RF)):
             if arr is not None and np.any(np.asarray(arr)):
                 ax[2].plot(pe, np.asarray(arr) / 1e6, "--", lw=1, label=nm)
-        ax[2].set_ylabel(r"$j$ [MA/m$^2$]"); ax[2].set_xlabel(r"$\psi_N$")
+        ax[2].set_ylabel(r"$j$ [MA/m$^2$]"); ax[2].set_xlabel(xl)
         ax[2].set_title("separated currents"); ax[2].legend(fontsize=8); ax[2].grid(alpha=0.3)
 
         ttl = (f"Baseline  Ip={bl.Ip_target/1e6:.3f} MA  "
@@ -2978,8 +2979,9 @@ class Bouquet:
         Returns
         -------
         dict with ``spike0`` (the sigma=0 draw-context j_BS), ``max_dev``,
-        ``rms_dev`` [A/m^2], ``max_dev_frac`` (of peak j_BS), ``psi_worst``,
-        and ``passed``.
+        ``rms_dev`` [A/m^2], ``max_dev_frac`` (of peak j_BS), ``x_worst``
+        (run coordinate ``coord``; ``psi_worst`` is the same value, kept for
+        back-compat), and ``passed``.
         """
         import numpy as np
         from scipy.interpolate import interp1d
@@ -2999,6 +3001,8 @@ class Bouquet:
                   "one profile, so there is no j_BS split to verify")
             return {"spike0": None, "max_dev": 0.0, "rms_dev": 0.0,
                     "max_dev_frac": 0.0, "psi_worst": float("nan"),
+                    "x_worst": float("nan"),
+                    "coord": getattr(self.baseline, "coord", coords.PSI),
                     "passed": True, "skipped": "single_profile_jphi"}
         bl = self.baseline
         mygs = self.mygs
@@ -3105,6 +3109,7 @@ class Bouquet:
                    rms_dev=float(np.sqrt(np.mean(dev_eval ** 2))),
                    max_dev_frac=float(np.max(np.abs(dev_eval)) / peak),
                    psi_worst=float(psi_N[iworst]),
+                   x_worst=float(psi_N[iworst]), coord=coord,
                    n_floored=int(floored.sum()),
                    max_dev_floored=(float(np.max(np.abs(dev[floored])))
                                     if floored.any() else 0.0),
@@ -3122,7 +3127,8 @@ class Bouquet:
                if out["n_floored"] else "")
         print(f"[sigma0-check] {status}: max|spike0 - j_BS| = "
               f"{out['max_dev']/1e6:.4f} MA/m² ({100*out['max_dev_frac']:.2f}% "
-              f"of peak, worst at psi_N={out['psi_worst']:.3f}; "
+              f"of peak, worst at {'Phi_N' if coord == coords.PHI else 'psi_N'}"
+              f"={out['x_worst']:.3f}; "
               f"tol {100*tol_frac:.1f}%{_fl})")
         return out
 
