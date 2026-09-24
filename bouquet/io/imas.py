@@ -1069,13 +1069,16 @@ def read_imas_baseline(
     psiN_eq = (psi_eq - psi_eq[0]) / (psi_eq[-1] - psi_eq[0])
     _o = np.argsort(psiN_eq)
     # Nodes of equilibrium.profiles_1d in the run coordinate: its own Φ_N
-    # (rho_tor_norm²) in a toroidal-flux run.
+    # (rho_tor_norm², else from its q) in a toroidal-flux run.
     x_eq, x_at = psiN_eq[_o], psi_N
     if coord != _coords.PSI:
         _rho = eqp1.get("rho_tor_norm")
-        if _rho is not None and np.size(_rho) == _o.size:
-            _rho = np.asarray(_rho, dtype=float)[_o]
-        x_eq = _phi_n_from_rho(_rho, x_eq, "equilibrium profiles_1d")
+        if _rho is None and "q" in eqp1:
+            x_eq = _coords.phi_n_from_q(x_eq, np.asarray(eqp1["q"], dtype=float)[_o])[1]
+        else:
+            if _rho is not None and np.size(_rho) == _o.size:
+                _rho = np.asarray(_rho, dtype=float)[_o]
+            x_eq = _phi_n_from_rho(_rho, x_eq, "equilibrium profiles_1d")
         x_at = x_run
     p_equilibrium = np.interp(x_at, x_eq,
                               np.asarray(eqp1["pressure"], dtype=float)[_o])

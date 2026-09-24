@@ -250,6 +250,8 @@ class TestIdaHybridPhi:
         # the dd's own map (q = 1 + 2 psi^2) differs from the IDA's (1 + 4 psi^2)
         dd["core_profiles"]["profiles_1d"][0]["grid"]["rho_tor_norm"] = \
             np.sqrt((3 * psi + 2 * psi ** 3) / 5).tolist()
+        dd["equilibrium"]["time_slice"][0]["profiles_1d"]["rho_tor_norm"] = \
+            np.sqrt((3 * psi + 2 * psi ** 3) / 5).tolist()
         open(ddp, "w").write(json.dumps(dd))
         if ida_q:
             with h5py.File(cdf, "a") as f:

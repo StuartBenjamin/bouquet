@@ -31,7 +31,7 @@ def _norm(phi):
     return (phi - phi[0]) / (phi[-1] - phi[0])
 
 
-def _write_dd(tmp_path, rho=RHO, rho_eq=RHO_EQ):
+def _write_dd(tmp_path, rho=RHO, rho_eq=RHO_EQ, eq_q=True):
     ne = 5.0e19 * (1.0 - 0.8 * PSI ** 2) + 1e18
     nc = 1.0e18 * (1.0 - 0.5 * PSI ** 2)
     dd, _, _ = _dd(4.0e19 * (1.0 - 0.7 * PSI ** 2), ne, nc)
@@ -45,6 +45,9 @@ def _write_dd(tmp_path, rho=RHO, rho_eq=RHO_EQ):
     eqp["psi"] = PSI_EQ.tolist()
     if rho_eq is not None:
         eqp["rho_tor_norm"] = np.asarray(rho_eq).tolist()
+    eqp.pop("q", None)
+    if eq_q:
+        eqp["q"] = (1.0 + 3.0 * PSI_EQ ** 2).tolist()
     p = tmp_path / "dd.json"
     p.write_text(json.dumps(dd))
     return str(p), eqp
@@ -88,11 +91,19 @@ class TestReadPhi:
     @pytest.mark.parametrize("bad", ["placeholder", "missing"])
     def test_an_unusable_rho_is_refused(self, tmp_path, which, bad):
         rho = {"placeholder": np.sqrt, "missing": lambda p: None}[bad]
-        kw = {"rho": rho(PSI)} if which == "cp" else {"rho_eq": rho(PSI_EQ)}
+        kw = {"rho": rho(PSI)} if which == "cp" else {"rho_eq": rho(PSI_EQ), "eq_q": False}
         ddp, _ = _write_dd(tmp_path, **kw)
         with pytest.raises(ValueError, match="rho_tor_norm"):
             _read(ddp, "phi_n")
         _read(ddp, "psi_n")                  # psi_n never looks at rho
+
+    def test_an_equilibrium_without_rho_is_placed_by_its_q(self, tmp_path):
+        from bouquet.coords import phi_n_from_q
+        ddp, eqp = _write_dd(tmp_path, rho_eq=None)
+        bf = _read(ddp, "phi_n")
+        phi_eq = phi_n_from_q(PSI_EQ, eqp["q"])[1]
+        np.testing.assert_allclose(
+            bf.p_equilibrium, np.interp(bf.psi_N, phi_eq, eqp["pressure"]), rtol=1e-12)
 
     def test_a_rho_grid_off_0_to_1_is_renormalised(self, tmp_path):
         rho, rho_eq = 0.02 + 0.97 * RHO, 0.01 + 0.98 * RHO_EQ
