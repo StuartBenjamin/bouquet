@@ -364,24 +364,30 @@ def _warn_missing_parallel(species_labels, rule: str):
         f"pressure_fast_parallel. {detail}", stacklevel=3)
 
 
-def _dd_phi_n(cp, psi_N):
-    """Φ_N of the core_profiles nodes, ``grid.rho_tor_norm**2``.
+def _phi_n_from_rho(rho, psi_N, where):
+    """Φ_N of nodes at ψ_N ``psi_N`` from their ``rho_tor_norm``: ρ², normalised
+    to [0, 1].
 
-    Refuses a grid without ``rho_tor_norm`` or with the ``sqrt(psi_N)``
-    placeholder some writers store: neither says where the nodes sit in Φ_N.
+    Refuses a missing ``rho`` or the ``sqrt(psi_N)`` placeholder some writers
+    store: neither says where the nodes sit in Φ_N.
     """
-    rho = cp.get("grid", {}).get("rho_tor_norm")
     if rho is None or np.shape(rho) != np.shape(psi_N):
-        raise ValueError("coord='phi_n' needs core_profiles grid.rho_tor_norm "
-                         "on the same nodes as grid.psi")
+        raise ValueError(f"coord='phi_n' needs {where} rho_tor_norm "
+                         "on the same nodes as its psi")
     rho = np.asarray(rho, dtype=float)
     if not np.all(np.diff(rho) > 0):
-        raise ValueError("coord='phi_n': grid.rho_tor_norm is not strictly increasing")
+        raise ValueError(f"coord='phi_n': {where} rho_tor_norm is not strictly increasing")
     if np.allclose(rho, np.sqrt(np.clip(psi_N, 0.0, None)), rtol=0, atol=1e-6):
-        raise ValueError("coord='phi_n': grid.rho_tor_norm is the sqrt(psi_N) "
+        raise ValueError(f"coord='phi_n': {where} rho_tor_norm is the sqrt(psi_N) "
                          "placeholder, not a toroidal-flux coordinate")
     phi = rho ** 2
     return (phi - phi[0]) / (phi[-1] - phi[0])
+
+
+def _dd_phi_n(cp, psi_N):
+    """Φ_N of the core_profiles nodes (:func:`_phi_n_from_rho` of ``grid``)."""
+    return _phi_n_from_rho(cp.get("grid", {}).get("rho_tor_norm"), psi_N,
+                           "core_profiles grid")
 
 
 def _override(arr, src_psi, dst_psi):
@@ -1062,7 +1068,16 @@ def read_imas_baseline(
     psi_eq = np.asarray(eqp1["psi"], dtype=float)
     psiN_eq = (psi_eq - psi_eq[0]) / (psi_eq[-1] - psi_eq[0])
     _o = np.argsort(psiN_eq)
-    p_equilibrium = np.interp(psi_N, psiN_eq[_o],
+    # Nodes of equilibrium.profiles_1d in the run coordinate: its own Φ_N
+    # (rho_tor_norm²) in a toroidal-flux run.
+    x_eq, x_at = psiN_eq[_o], psi_N
+    if coord != _coords.PSI:
+        _rho = eqp1.get("rho_tor_norm")
+        if _rho is not None and np.size(_rho) == _o.size:
+            _rho = np.asarray(_rho, dtype=float)[_o]
+        x_eq = _phi_n_from_rho(_rho, x_eq, "equilibrium profiles_1d")
+        x_at = x_run
+    p_equilibrium = np.interp(x_at, x_eq,
                               np.asarray(eqp1["pressure"], dtype=float)[_o])
     # The dd's OWN axis q -- taken at the SMALLEST psi_N (via the same ordering
     # the pressure uses), not blindly at index 0, since profiles_1d need not be
@@ -1111,7 +1126,7 @@ def read_imas_baseline(
     # the same Ip), so it redistributes rather than adds net current.
     jphi_diff = None
     if anchor_jtor_to_equilibrium:
-        eq_jtor = np.interp(psi_N, psiN_eq[_o],
+        eq_jtor = np.interp(x_at, x_eq,
                             np.asarray(eqp1["j_tor"], dtype=float)[_o])
         jphi_diff = eq_jtor - j_phi
 
@@ -1347,9 +1362,17 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     psiN_t = (psi - psi[0]) / (psi[-1] - psi[0])
     # The draw's arrays are on the archive's run grid: a phi_n archive lands on
     # the template's own Phi_N nodes (grid.rho_tor_norm**2).
+    # The draw's ψ_N at those nodes (its eqdsk's own Φ_N map) addresses its
+    # flux-surface geometry and is written as grid.psi.
     from ..utils import profile_coord
-    x_t = (psiN_t if profile_coord(h5, scan_key) == "psi_n"
-           else _dd_phi_n(cp, psiN_t))
+    x_t = psiN_fsa = psiN_t
+    if profile_coord(h5, scan_key) != "psi_n":
+        x_t = _dd_phi_n(cp, psiN_t)
+        phi_g = np.asarray(geq.rhovn, dtype=float) ** 2
+        phi_g = (phi_g - phi_g[0]) / (phi_g[-1] - phi_g[0])
+        psiN_fsa = np.interp(x_t, phi_g, np.asarray(geq.psi_N, dtype=float))
+        cp["grid"]["psi"] = (geq.psi_axis + psiN_fsa
+                             * (geq.psi_boundary - geq.psi_axis)).tolist()
 
     def to_t(arr, src):     # interp draw array (on src grid) -> template grid
         return np.interp(x_t, src, arr)
@@ -1376,7 +1399,7 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     if "j_total" in cp and "j_tor" in cp:
         use_exact = False
         if fidelity in ("auto", "exact") and eq_fsa is not None:
-            geom = _eq_fsa_geom_on(eq_fsa, psiN_t, _imas_b0(out, ie, ic))
+            geom = _eq_fsa_geom_on(eq_fsa, psiN_fsa, _imas_b0(out, ie, ic))
             if geom is not None:
                 from ..physics import toroidal_to_parallel
                 cp["j_total"] = toroidal_to_parallel(jt_t, geom=geom).tolist()
