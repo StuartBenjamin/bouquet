@@ -532,9 +532,10 @@ def _validate_pressure_completeness(cp, ne, te, ni, ti, p_fast, p_imp,
             raise ValueError(msg)
 
 
-def _read_ida_omega(path, time_s, psi_N):
+def _read_ida_omega(path, time_s, psi_N, place=None):
     """IDA toroidal rotation (omega_tor_12C6) resampled onto psi_N; None if absent.
-    Mirrors read_ida's nearest-time selection (IDA time is ms; ``time_s`` is s)."""
+    Mirrors read_ida's nearest-time selection (IDA time is ms; ``time_s`` is s).
+    ``place`` (IDA-grid array -> run nodes) replaces the psi_N interpolation."""
     try:
         import h5py
         with h5py.File(path, "r") as f:
@@ -545,7 +546,7 @@ def _read_ida_omega(path, time_s, psi_N):
             j = int(np.argmin(np.abs(it - tms)))
             ipsi = np.asarray(f["psi_n"], dtype=float)
             om = np.asarray(f["omega_tor_12C6"], dtype=float)[j]
-            return np.interp(psi_N, ipsi, om)
+            return place(om) if place is not None else np.interp(psi_N, ipsi, om)
     except Exception:
         return None
 
@@ -714,7 +715,7 @@ def _subtract_fast_ni(psi_N, ni, sigma_ni, ni_fuse_thermal, z_fast, z2_fast,
 
 def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impurity_Z,
                          ni_source="all", zeff_from_fuse=False,
-                         z_fast=None, z2_fast=None):
+                         z_fast=None, z2_fast=None, x_phi=None):
     """IDA-hybrid kinetics: replace FUSE ne/ni/Te/Ti/Zeff (+omega) with IDA fits,
     resampled onto the FUSE ``psi_N`` grid (psi_N == psi_N_kinetic).
 
@@ -733,11 +734,26 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
     re-reading the file (see ``Baseline.aux['ida_profiles']``). Re-reading
     risked a DIFFERENT slice: this path resolves ``time`` against the IMAS
     slice, while the envelope path only had the requested ``source.time``.
+
+    ``x_phi`` (the run nodes' Φ_N) places the IDA fits by their Φ_N from the
+    file's own q (:func:`bouquet.coords.phi_n_from_q`) instead of by psi_N;
+    the map is returned as a 13th element, ``(ida psi_N, ida Φ_N)`` inside the
+    LCFS, or ``None``.
     """
     from .ida import read_ida
     ida = read_ida(ida_path, time=time, impurity_Z=impurity_Z, ni_source=ni_source)
     _ipsi = np.asarray(ida.psi_N, dtype=float)
-    g = lambda a: np.interp(psi_N, _ipsi, np.asarray(a, dtype=float))
+    ida_map = None
+    if x_phi is None:
+        g = lambda a: np.interp(psi_N, _ipsi, np.asarray(a, dtype=float))
+    else:
+        if ida.q is None:
+            raise ValueError(f"coord='phi_n': {ida_path!r} carries no q, so its "
+                             "profiles cannot be placed in Phi_N")
+        from ..coords import phi_n_from_q
+        _in, _iphi = phi_n_from_q(_ipsi, ida.q)
+        ida_map = (_ipsi[_in], _iphi)
+        g = lambda a: np.interp(x_phi, _iphi, np.asarray(a, dtype=float)[_in])
     ne, ni, te, ti = g(ida.ne), g(ida.ni), g(ida.te), g(ida.ti)
     zeff = np.asarray(Zeff_fuse, dtype=float) if zeff_from_fuse else g(ida.Zeff)
     sigma_ne, sigma_te, sigma_ni, sigma_ti = (
@@ -752,9 +768,9 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
         ni_fast_meta = {"applied": False, "agrees": None, "mismatch": None,
                         "gate": None,
                         "evidence": "no fast-ion charge moments supplied"}
-    omega = _read_ida_omega(ida_path, time, psi_N)
+    omega = _read_ida_omega(ida_path, time, psi_N, place=None if x_phi is None else g)
     return (ne, te, ti, ni, zeff, omega, sigma_ne, sigma_te, sigma_ni,
-            sigma_ti, ida, ni_fast_meta)
+            sigma_ti, ida, ni_fast_meta, ida_map)
 
 
 def read_imas_baseline(
@@ -813,9 +829,9 @@ def read_imas_baseline(
     psi = np.asarray(cp["grid"]["psi"], dtype=float)
     psi_N = (psi - psi[0]) / (psi[-1] - psi[0])   # 0 (axis) -> 1 (boundary)
     n = psi_N.size
-    # Run grid: the same nodes, labelled in the run coordinate.  Every
-    # profile below is read (and any dd/IDA interpolation done) on the nodes'
-    # psi_N; a toroidal-flux run only relabels them.
+    # Run grid: the same nodes, labelled in the run coordinate.  Every dd
+    # profile below is read on the nodes' psi_N; a toroidal-flux run only
+    # relabels them.  IDA fits are placed by their own Phi_N in such a run.
     from .. import coords as _coords
     coord = _coords.resolve_input_coord(getattr(source, "coord", _coords.PSI), [])[0]
     x_run = psi_N if coord == _coords.PSI else _dd_phi_n(cp, psi_N)
@@ -967,16 +983,19 @@ def read_imas_baseline(
             warnings.warn(
                 f"{_drift['evidence']}: the dd's equilibrium is not the g-file's, "
                 "so its profiles and sources sit at shifted psi_N"
-                + (" against the IDA kinetics (placed by IDA psi_N)" if use_ida else ""))
+                + (f" against the IDA kinetics (placed by IDA "
+                   f"{'psi_N' if coord == _coords.PSI else 'Phi_N'})"
+                   if use_ida else ""))
     if use_ida:
         (ne, te, ti, ni, Zeff, _omega,
          sigma_ne_ida, sigma_te_ida, sigma_ni_ida, sigma_ti_ida,
-         _ida_read, _ni_fast_meta) = _merge_ida_kinetics(
+         _ida_read, _ni_fast_meta, _ida_map) = _merge_ida_kinetics(
             psi_N, ne, ni, Zeff, source.ida_path, T,
             getattr(source, "impurity_Z", 6.0),
             ni_source=getattr(source, "ni_source", "all"),
             zeff_from_fuse=getattr(source, "zeff_from_fuse", False),
-            z_fast=z_fast, z2_fast=z2_fast)
+            z_fast=z_fast, z2_fast=z2_fast,
+            x_phi=None if coord == _coords.PSI else x_run)
         if _ni_fast_meta["agrees"] is False and _drift is not None and _drift["exceeds"]:
             _ni_fast_meta["evidence"] += (
                 f"; likely the psi_N(rho) drift ({_drift['evidence']})")
@@ -1103,7 +1122,10 @@ def read_imas_baseline(
         j_BS=j_BS,
         psi_N_kinetic=x_run,
         coord=coord,
-        psi_map=None if coord == _coords.PSI else (psi_N, x_run),
+        # IDA sigmas follow the IDA fits: through the file's own map when the
+        # fits were placed by it, else through the dd's.
+        psi_map=(None if coord == _coords.PSI else
+                 _ida_map if use_ida else (psi_N, x_run)),
         ne=ne, te=te, ni=ni, ti=ti, Zeff=Zeff,
         Ip_target=Ip_target,
         l_i_target=l_i_target,

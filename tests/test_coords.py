@@ -212,3 +212,72 @@ def test_bad_seed_coord_is_refused_in_prepare():
     run = TestCheckCoord()._run(seed_coord="rho")
     with pytest.raises(ValueError, match="seed_coord"):
         run._check_coord()
+
+
+def test_phi_n_from_q():
+    psi = np.linspace(0.0, 1.2, 61)
+    q = 1.0 + 3.0 * psi ** 2
+    inside, phi = coords.phi_n_from_q(psi, q)
+    assert inside.sum() == 51 and phi[0] == 0.0 and phi[-1] == pytest.approx(1.0)
+    x = psi[inside]
+    np.testing.assert_allclose(phi, (x + x ** 3) / 2.0, atol=2e-4)
+    # a grid that stops short of 1 is closed at 1 by interpolation
+    _, phi2 = coords.phi_n_from_q(psi[:-2] * 1.0, q[:-2])
+    assert phi2[-1] == pytest.approx(1.0)
+    with pytest.raises(ValueError):
+        coords.phi_n_from_q(psi[1:], q[1:])
+
+
+class TestIdaHybridPhi:
+    """ida_hybrid in a phi_n run places the IDA fits by the file's own q."""
+
+    def _build(self, tmp_path, ida_q=True):
+        h5py = pytest.importorskip("h5py")
+        import json
+        from test_ni_fast_subtraction import _build
+        ddp, cdf, *_ = _build(tmp_path)
+        psi = np.linspace(0.0, 1.0, 33)
+        dd = json.loads(open(ddp).read())
+        # the dd's own map (q = 1 + 2 psi^2) differs from the IDA's (1 + 4 psi^2)
+        dd["core_profiles"]["profiles_1d"][0]["grid"]["rho_tor_norm"] = \
+            np.sqrt((3 * psi + 2 * psi ** 3) / 5).tolist()
+        open(ddp, "w").write(json.dumps(dd))
+        if ida_q:
+            with h5py.File(cdf, "a") as f:
+                f["q"] = (1.0 + 4.0 * psi ** 2)[None, :]
+        return ddp, cdf, psi
+
+    def _read(self, ddp, cdf, coord):
+        from bouquet.io.imas import read_imas_baseline
+        from bouquet.config import ImasSource
+        return read_imas_baseline(
+            ImasSource(ids_path=ddp, time=1.0, ida_path=cdf, impurity_Z=6.0,
+                       coord=coord), kinetic_source="ida_hybrid")
+
+    def test_te_is_placed_by_the_ida_phi_n(self, tmp_path):
+        ddp, cdf, psi = self._build(tmp_path)
+        bl = self._read(ddp, cdf, "phi_n")
+        ida = bl.aux["ida_profiles"][1]
+        _, phi_ida = coords.phi_n_from_q(ida.psi_N, ida.q)
+        np.testing.assert_allclose(bl.te, np.interp(bl.psi_N, phi_ida, ida.te), rtol=1e-12)
+        np.testing.assert_array_equal(bl.psi_map[1], phi_ida)
+        # not the psi_N placement the dd's own map would give
+        blp = self._read(ddp, cdf, "psi_n")
+        assert np.max(np.abs(bl.te - blp.te)) > 0.01 * np.max(blp.te)
+
+    def test_the_envelope_follows_the_same_map(self, tmp_path):
+        from bouquet.baseline import resolve_uncertainty
+        from bouquet.config import BouquetConfig, ImasSource, SolverConfig
+        ddp, cdf, _ = self._build(tmp_path)
+        bl = self._read(ddp, cdf, "phi_n")
+        cfg = BouquetConfig(
+            source=ImasSource(ids_path=ddp, time=1.0, ida_path=cdf,
+                              impurity_Z=6.0, coord="phi_n"),
+            solver=SolverConfig(mesh_path="unused"), output_header="unused")
+        env = resolve_uncertainty(cfg, bl)
+        np.testing.assert_allclose(env["sigma_te"], bl.aux["sigma_te_ida"], rtol=1e-12)
+
+    def test_an_ida_without_q_is_refused(self, tmp_path):
+        ddp, cdf, _ = self._build(tmp_path, ida_q=False)
+        with pytest.raises(ValueError, match="no q"):
+            self._read(ddp, cdf, "phi_n")

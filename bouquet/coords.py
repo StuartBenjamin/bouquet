@@ -36,6 +36,27 @@ def resolve_input_coord(coord, x):
     return check_coord(coord), x
 
 
+def phi_n_from_q(psi_N, q):
+    """``(inside, Φ_N)``: the nodes with ψ_N ≤ 1 and their Φ_N from ``q``.
+
+    Φ_N(ψ_N) = ∫₀^ψ_N q dψ_N / ∫₀¹ q dψ_N (trapezoid; ``q`` is interpolated
+    to ψ_N = 1 when the grid does not hit it).  For a source that tabulates
+    its profiles on ψ_N with its own equilibrium's q (IDA).
+    """
+    from scipy.integrate import cumulative_trapezoid
+    psi_N = np.asarray(psi_N, dtype=float)
+    q = np.abs(np.asarray(q, dtype=float))
+    inside = psi_N <= 1.0
+    x = psi_N[inside]
+    if x.size < 2 or not np.all(np.diff(x) > 0) or abs(x[0]) > 1e-9:
+        raise ValueError("phi_n_from_q: psi_N must rise from 0")
+    if not np.all(np.isfinite(q[inside])):
+        raise ValueError("phi_n_from_q: q is not finite inside the LCFS")
+    xe = x if x[-1] == 1.0 else np.append(x, 1.0)
+    phi = cumulative_trapezoid(np.interp(xe, psi_N, q), xe, initial=0.0)
+    return inside, phi[:x.size] / phi[-1]
+
+
 def oft_prof(kind, x, y, coord=PSI):
     """A TokaMaker profile dict on the run grid.
 
