@@ -150,7 +150,8 @@ baseline group records the coordinate as the `profile_coord` attr.
 With IDA-hybrid kinetics (`kinetic_source="ida_hybrid"`) the IDA fits, their
 sigmas and ω_tor are placed on the run nodes by their own Φ_N, integrated from
 the IDA file's `q`, not by the dd's map; a `"phi_n"` run refuses an IDA file
-without `q`. The structured-closure basis centres and q95 stay in ψ_N. If the
+without `q`. The g-file path does the same for an IDA `.cdf` (a p-file, which
+carries no q, goes through the g-file's map). The structured-closure basis centres and q95 stay in ψ_N. If the
 solver's toroidal-flux map cannot be built (surfaces fail to trace), the solve
 fails like any other and the draw is rejected.
 

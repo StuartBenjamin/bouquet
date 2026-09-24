@@ -871,6 +871,7 @@ def _load_kinetic_profiles(source) -> dict:
             ti=np.asarray(ida.ti, dtype=float),
             Zeff=np.clip(np.asarray(ida.Zeff, dtype=float), 1.0, None),
             raw_bytes=ida.raw_bytes,
+            q=None if ida.q is None else np.asarray(ida.q, dtype=float),
         )
 
     # Osborne p-file: ne/ni in 1e20 m^-3, Te/Ti in keV -> SI.
@@ -894,6 +895,18 @@ def _load_kinetic_profiles(source) -> dict:
         Zeff=np.clip(np.asarray(Zeff, dtype=float), 1.0, None),
         raw_bytes=raw,
     )
+
+
+def _kinetic_phi_n(psi_kin, q_kin, psi_eq, phi_eq):
+    """``(inside, Φ_N)`` of the kinetic nodes inside the LCFS: by the kinetic
+    source's own ``q`` when it has one (IDA), else through the equilibrium's
+    ``psi_eq -> phi_eq`` map (a p-file)."""
+    import numpy as np
+    from .coords import phi_n_from_q
+    if q_kin is not None:
+        return phi_n_from_q(psi_kin, q_kin)
+    inside = np.asarray(psi_kin) <= 1.0
+    return inside, np.interp(np.asarray(psi_kin)[inside], psi_eq, phi_eq)
 
 
 def _resolve_reconstruction(source, config, mygs) -> Baseline:
@@ -929,19 +942,21 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
 
     # Run coordinate.  A toroidal-flux run relabels the g-file's nodes with
     # their Φ_N from the g-file's own q (rhovn), and the kinetic nodes inside
-    # the LCFS through the same map; nothing is resampled onto psi_N.
+    # the LCFS with the kinetic source's own map: an IDA file's q, else (a
+    # p-file) the g-file's.  Nothing is resampled onto psi_N.
     from . import coords
     coord = coords.resolve_input_coord(getattr(source, "coord", coords.PSI), [])[0]
-    psi_map = None
+    kin_q = kin.pop("q", None)
+    psi_map, psi_eq = None, psi_N
     if coord == coords.PHI:
         x_eq = np.asarray(eqdsk.rhovn, dtype=float) ** 2
         if x_eq.shape != psi_N.shape:
             raise ValueError("g-file rhovn is not on the psi_N levels")
-        psi_map = (psi_N, x_eq)
-        _in = psi_N_kin <= 1.0
+        _in, _x_kin = _kinetic_phi_n(psi_N_kin, kin_q, psi_N, x_eq)
+        psi_map = (psi_N_kin[_in], _x_kin)
         kin = {k: (np.asarray(v)[_in] if np.shape(v) == psi_N_kin.shape else v)
                for k, v in kin.items()}
-        psi_N_kin = np.interp(psi_N_kin[_in], psi_N, x_eq)
+        psi_N_kin = _x_kin
         kin["psi_N"] = psi_N_kin
         psi_N = x_eq
 
@@ -965,8 +980,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     from .coords import swb_seed
     # Seed shape in psi_N (the g-file's nodes) or the run coordinate.
     guess_jinductive = swb_seed(
-        psi_N, psi_map[0] if (psi_map is not None
-                              and config.generation.seed_coord == "psi_n") else None)
+        psi_N, psi_eq if (coord == coords.PHI
+                          and config.generation.seed_coord == "psi_n") else None)
     _recon_coord = ({} if coord == coords.PSI else
                     dict(coord=coord, x=psi_N))
 

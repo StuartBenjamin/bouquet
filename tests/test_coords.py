@@ -281,3 +281,36 @@ class TestIdaHybridPhi:
         ddp, cdf, _ = self._build(tmp_path, ida_q=False)
         with pytest.raises(ValueError, match="no q"):
             self._read(ddp, cdf, "phi_n")
+
+
+class TestReconKineticPhi:
+    """g-file path: IDA nodes by the IDA's q, p-file nodes by the g-file's map."""
+
+    def test_ida_uses_its_own_q(self):
+        from bouquet.baseline import _kinetic_phi_n
+        psi = np.linspace(0.0, 1.2, 61)
+        q = 1.0 + 3.0 * psi ** 2
+        psi_eq = np.linspace(0.0, 1.0, 11)
+        inside, phi = _kinetic_phi_n(psi, q, psi_eq, psi_eq ** 0.5)
+        np.testing.assert_array_equal(phi, coords.phi_n_from_q(psi, q)[1])
+        assert inside.sum() == 51
+
+    def test_pfile_uses_the_gfile_map(self):
+        from bouquet.baseline import _kinetic_phi_n
+        psi = np.linspace(0.0, 1.1, 23)
+        psi_eq = np.linspace(0.0, 1.0, 11)
+        inside, phi = _kinetic_phi_n(psi, None, psi_eq, psi_eq ** 1.25)
+        np.testing.assert_allclose(phi, np.interp(psi[inside], psi_eq, psi_eq ** 1.25))
+
+    def test_the_ida_loader_keeps_q(self, tmp_path):
+        h5py = pytest.importorskip("h5py")
+        from test_ni_fast_subtraction import _ida_cdf
+        from bouquet.baseline import _load_kinetic_profiles
+        from bouquet.config import ReconstructionSource
+        cdf = str(tmp_path / "ida.cdf")
+        _ida_cdf(cdf)
+        with h5py.File(cdf, "a") as f:
+            f["q"] = (1.0 + np.linspace(0, 1, 33) ** 2)[None, :]
+        kin = _load_kinetic_profiles(ReconstructionSource(
+            geqdsk_path="g", profiles_path=cdf, time=1.0))
+        np.testing.assert_allclose(kin["q"], 1.0 + np.linspace(0, 1, 33) ** 2)
