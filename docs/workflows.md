@@ -128,9 +128,9 @@ is a navigational summary of the defaults.
 | `jphi_scalar_sigma` | `0.10` | Inductive-current envelope. **Must be > 0** — setting it to 0 freezes `j_inductive` and trips the workflow guard |
 | `zeff_scalar_sigma` | `0.05` | One Z_eff perturbation per draw; n_i / n_z follow from quasi-neutrality. Also the width of the bottom tier below |
 | `zeff_sigma_source` | `"auto"` | Which tier supplies the Z_eff envelope's **magnitude**: `"auto"` / `"carbon"` / `"measured"` / `"scalar"` — see the ladder below |
-| `sigma_profiles` | `{}` | Explicit `{name: sigma(psi_N)}` envelopes, highest precedence |
-| `n_ls` / `t_ls` / `j_ls` | `0.5` / `0.4` / `0.25` | GPR correlation lengths for density / temperature / current, in units of the run coordinate (Φ_N in a `"phi_n"` run; the defaults are not converted) |
-| `aux_sigmas`, `aux_baselines`, `aux_length_scales` | `{}` | The passive switchboard: any extra channel gets perturbed and archived alongside the physics |
+| `sigma_profiles` | `{}` | Explicit `{name: sigma(psi_N)}` envelopes on the kinetic run grid (`psi_N_kinetic`; Φ_N in a `"phi_n"` run), highest precedence |
+| `n_ls` / `t_ls` / `j_ls` | `0.5` / `0.4` / `0.25` | GPR correlation lengths for density / temperature / current, in units of the run coordinate (Φ_N lengths in a `"phi_n"` run; the defaults are not converted) |
+| `aux_sigmas`, `aux_baselines`, `aux_length_scales` | `{}` | The passive switchboard: any extra channel gets perturbed and archived alongside the physics. Arrays on the kinetic run grid; length scales in the run coordinate |
 
 ### Radial coordinate (`b.source.coord`)
 
@@ -153,7 +153,14 @@ With IDA-hybrid kinetics (`kinetic_source="ida_hybrid"`) the IDA fits, their
 sigmas and ω_tor are placed on the run nodes by their own Φ_N, integrated from
 the IDA file's `q`, not by the dd's map; a `"phi_n"` run refuses an IDA file
 without `q`. The g-file path does the same for an IDA `.cdf` (a p-file, which
-carries no q, goes through the g-file's map). The structured-closure basis centres and q95 stay in ψ_N. If the
+carries no q, goes through the g-file's map; an IDA `.cdf` without q is
+refused). An `UncertaintyConfig.ida_path` other than the source's IDA file is
+placed by its own q when it has one. The structured-closure basis centres and q95 stay in ψ_N.
+Window-type helpers (`sampling.sigmoid_length_scale`,
+`uncertainties.new_uncertainty_profiles`, `synthetic_ida_sigma`) take the grid
+they are given: pass the run grid and their widths/positions are Φ_N in a
+`"phi_n"` run. `window_coord`, `seed_coord` and `source.coord` are checked when
+the config is built; the toolkit is checked before the baseline and the draws. If the
 solver's toroidal-flux map cannot be built (surfaces fail to trace), the solve
 fails like any other and the draw is rejected.
 
@@ -274,7 +281,9 @@ as an enormous sigma.
 ### `FixedComponentsConfig` (`b.fixed_components`)
 
 `p_fast`, `j_NBI`, `j_RF` on their own `psi_N` grid — additive components that
-are never perturbed. `p_fast_reduction` (default `"auto"`) selects the
+are never perturbed. `coord` (default `"run"`) is the coordinate of that grid:
+`"run"` (Φ_N in a `"phi_n"` run) or `"psi_n"`, mapped to the run coordinate
+through the source equilibrium's ψ_N → Φ_N map. `p_fast_reduction` (default `"auto"`) selects the
 anisotropic fast-pressure reduction applied before the isotropic GS solve.
 
 > **`p_fast_reduction` — a factor-of-3 convention, chosen from dd provenance.**
