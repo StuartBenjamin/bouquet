@@ -145,7 +145,9 @@ the ψ_N the solver's map gives for each node. `"rho_tor"` is accepted as an
 input spelling and runs as `"phi_n"` on ρ². A `"phi_n"` run needs an
 OpenFUSIONToolkit with toroidal-flux profiles (`TokaMaker.get_torflux_map`) and
 the internal bootstrap solve; both are checked in `prepare()`. The archive's
-baseline group records the coordinate as the `profile_coord` attr.
+baseline group records the coordinate as the `profile_coord` attr. Fields and
+datasets named `psi_N` / `psi_N_kinetic` keep that name but hold the run grid:
+Φ_N in a `"phi_n"` run.
 
 With IDA-hybrid kinetics (`kinetic_source="ida_hybrid"`) the IDA fits, their
 sigmas and ω_tor are placed on the run nodes by their own Φ_N, integrated from

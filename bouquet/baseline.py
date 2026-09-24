@@ -913,7 +913,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     """Reconstruction-source baseline: GS reconstruct on a live ``mygs``.
 
     Mirrors the operational notebook: read g-file + IDA profiles, interpolate
-    onto the g-file psi_N grid, run :func:`reconstruct_equilibrium`, and package
+    onto the g-file's nodes (in the run coordinate), run :func:`reconstruct_equilibrium`, and package
     the (toroidal) fitted currents. The reconstructed total ``j_phi_fit`` already
     contains all driven current, so fixed components (j_NBI / j_RF) default to
     zero and only re-partition the inductive part if the user supplies them;
@@ -940,34 +940,33 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     kin = _load_kinetic_profiles(source)
     psi_N_kin = kin["psi_N"]
 
-    # Run coordinate.  A toroidal-flux run relabels the g-file's nodes with
-    # their Φ_N from the g-file's own q (rhovn), and the kinetic nodes inside
-    # the LCFS with the kinetic source's own map: an IDA file's q, else (a
-    # p-file) the g-file's.  Nothing is resampled onto psi_N.
+    # Run grids (x_run: the g-file's nodes; x_kin: the kinetic nodes), in the
+    # run coordinate.  psi_N / psi_N_kin stay the sources' ψ_N.  A toroidal-flux
+    # run labels the g-file's nodes with their Φ_N from the g-file's own q
+    # (rhovn), and the kinetic nodes inside the LCFS by the kinetic source's own
+    # map: an IDA file's q, else (a p-file) the g-file's.  Nothing is resampled
+    # onto ψ_N.
     from . import coords
     coord = coords.resolve_input_coord(getattr(source, "coord", coords.PSI), [])[0]
     kin_q = kin.pop("q", None)
-    psi_map, psi_eq = None, psi_N
+    psi_map, x_run, x_kin = None, psi_N, psi_N_kin
     if coord == coords.PHI:
-        x_eq = np.asarray(eqdsk.rhovn, dtype=float) ** 2
-        if x_eq.shape != psi_N.shape:
+        x_run = np.asarray(eqdsk.rhovn, dtype=float) ** 2
+        if x_run.shape != psi_N.shape:
             raise ValueError("g-file rhovn is not on the psi_N levels")
-        _in, _x_kin = _kinetic_phi_n(psi_N_kin, kin_q, psi_N, x_eq)
-        psi_map = (psi_N_kin[_in], _x_kin)
+        _in, x_kin = _kinetic_phi_n(psi_N_kin, kin_q, psi_N, x_run)
+        psi_map = (psi_N_kin[_in], x_kin)
         kin = {k: (np.asarray(v)[_in] if np.shape(v) == psi_N_kin.shape else v)
                for k, v in kin.items()}
-        psi_N_kin = _x_kin
-        kin["psi_N"] = psi_N_kin
-        psi_N = x_eq
 
-    # kinetic profiles (native SI) regridded onto the equilibrium psi_N grid.
+    # kinetic profiles (native SI) regridded onto the equilibrium nodes.
     # Shape-preserving PCHIP (single shared helper): a linear regrid leaves a
     # slope kink at every kinetic knot, which the Sauter bootstrap inherits
     # as a stepped j_BS (see utils.pchip_interp).
     from .utils import pchip_interp
 
     def to_eq(arr):
-        return pchip_interp(psi_N_kin, arr, psi_N)
+        return pchip_interp(x_kin, arr, x_run)
 
     ne_eq, te_eq, ni_eq, ti_eq = to_eq(kin["ne"]), to_eq(kin["te"]), to_eq(kin["ni"]), to_eq(kin["ti"])
     Zeff_eq = np.clip(to_eq(kin["Zeff"]), 1.0, None)
@@ -978,12 +977,12 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     mygs.set_isoflux(iso_pts, weights=iso_w)
 
     from .coords import swb_seed
-    # Seed shape in psi_N (the g-file's nodes) or the run coordinate.
+    # Seed shape in ψ_N (the g-file's nodes) or the run coordinate.
     guess_jinductive = swb_seed(
-        psi_N, psi_eq if (coord == coords.PHI
-                          and config.generation.seed_coord == "psi_n") else None)
+        x_run, psi_N if (coord == coords.PHI
+                         and config.generation.seed_coord == "psi_n") else None)
     _recon_coord = ({} if coord == coords.PSI else
-                    dict(coord=coord, x=psi_N))
+                    dict(coord=coord, x=x_run))
 
     # Fixed (non-perturbed) pressure components must be resolved BEFORE the
     # reconstruction, not after it: the reconstruction's GS pressure has to be
@@ -993,9 +992,9 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     #
     # Grid: p_fast is resolved onto the KINETIC grid first and then mapped to
     # the equilibrium grid with `to_eq` -- deliberately the same two-step path
-    # the draws take (baseline resolves onto psi_N_kin, then
+    # the draws take (baseline resolves onto x_kin, then
     # perturb_kinetic_equilibrium applies `_kin_to_eq`, which is the identical
-    # pchip_interp).  Resolving fc.psi_N -> psi_N in one hop would be a
+    # pchip_interp).  Resolving fc.psi_N -> x_run in one hop would be a
     # slightly different array and would reintroduce the very inconsistency
     # this is fixing.  `p_fast_kin` is also what the returned Baseline.p_fast
     # field carries (kinetic grid), which downstream depends on -- unchanged.
@@ -1004,7 +1003,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     # returns, so the default-off path does not even enter the new branch and
     # is provably a no-op (not merely "adds 0.0").
     fc = config.fixed_components
-    p_fast_kin = _resolve_fixed(fc.p_fast, fc.psi_N, psi_N_kin)
+    p_fast_kin = _resolve_fixed(fc.p_fast, fc.psi_N, x_kin)
     p_fast_eq = to_eq(p_fast_kin) if fc.p_fast is not None else None
     # Z_imp is plumbed for symmetry with the draw path, but is INERT here today:
     # FixedComponentsConfig (config.py) carries no Z_imp field at all -- Z_imp is
@@ -1101,8 +1100,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     j_phi = np.asarray(result["j_phi_fit"], dtype=float)
     j_BS = np.asarray(result["j_BS_used"], dtype=float)
 
-    j_NBI = _resolve_fixed(fc.j_NBI, fc.psi_N, psi_N)
-    j_RF = _resolve_fixed(fc.j_RF, fc.psi_N, psi_N)
+    j_NBI = _resolve_fixed(fc.j_NBI, fc.psi_N, x_run)
+    j_RF = _resolve_fixed(fc.j_RF, fc.psi_N, x_run)
     j_inductive = j_phi - j_BS - j_NBI - j_RF   # == j_inductive_fit when NBI=RF=0
     # Physical component convention: the inductive current is >= 0. On shots
     # with a strong pedestal the achieved total can dip BELOW the full-Sauter
@@ -1112,18 +1111,18 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     # 0/500 candidates survived).
     # Floor the inductive at zero and absorb the deficit into j_BS so the
     # split still sums exactly to j_phi.
-    j_inductive, j_BS = floor_inductive_split(j_inductive, j_BS, psi_N)
+    j_inductive, j_BS = floor_inductive_split(j_inductive, j_BS, x_run)
 
     # Resolved above (before the reconstruction, which now consumes it).
     # Unchanged contract: the returned field is on the KINETIC grid.
     p_fast = p_fast_kin
 
     return Baseline(
-        psi_N=psi_N,
+        psi_N=x_run,
         j_phi=j_phi,
         j_inductive=j_inductive,
         j_BS=j_BS,
-        psi_N_kinetic=psi_N_kin,
+        psi_N_kinetic=x_kin,
         coord=coord,
         psi_map=psi_map,
         ne=kin["ne"],
