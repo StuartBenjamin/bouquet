@@ -277,8 +277,9 @@ class FixedComponentsConfig:
       * ``j_RF`` -- **never computed internally** (RF is the least-common input).
         Always zeros unless the user supplies an array here.
 
-    All arrays are on ``psi_N`` (kinetic grid), SI units, toroidal current
-    convention for j_*. ``None`` -> zeros.
+    All arrays are on ``psi_N`` (kinetic grid, in the run coordinate --
+    Φ_N in a ``coord="phi_n"`` run), SI units, toroidal current convention
+    for j_*. ``None`` -> zeros.
     """
 
     p_fast: Optional["np.ndarray"] = None   # fast/beam pressure

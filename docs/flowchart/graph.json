@@ -792,8 +792,17 @@
    "type": "knob",
    "label": "window_coord: str = \"psi_n\"",
    "file": "bouquet/config.py",
-   "line": 947,
+   "line": 948,
    "desc": "Coordinate the fixed radial windows are read in (psi_n or the run coordinate)",
+   "subsystem": "Configuration"
+  },
+  {
+   "id": "cfg.generationconfig.seed_coord",
+   "type": "knob",
+   "label": "seed_coord: str = \"psi_n\"",
+   "file": "bouquet/config.py",
+   "line": 953,
+   "desc": "Coordinate the SWB inductive seed shape is written in (psi_n or the run coordinate)",
    "subsystem": "Configuration"
   },
   {
@@ -2108,7 +2117,7 @@
    "label": "coord: str = \"psi_n\"",
    "file": "bouquet/config.py",
    "line": 247,
-   "desc": "Run coordinate: psi_n, phi_n (grid.rho_tor_norm^2) or rho_tor",
+   "desc": "Run coordinate: psi_n, phi_n (grid.rho_tor_norm^2; IDA fits by their own q) or rho_tor",
    "subsystem": "Configuration"
   },
   {
@@ -10990,6 +10999,13 @@
    "dst": "fn.tmi.perturb_kinetic_equilibrium",
    "kind": "control",
    "desc": "Coordinate of the fixed radial windows",
+   "subsystem": "Configuration"
+  },
+  {
+   "src": "cfg.generationconfig.seed_coord",
+   "dst": "fn.tmi.perturb_kinetic_equilibrium",
+   "kind": "control",
+   "desc": "Coordinate of the SWB inductive seed shape",
    "subsystem": "Configuration"
   },
   {

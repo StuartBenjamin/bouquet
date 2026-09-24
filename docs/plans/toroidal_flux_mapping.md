@@ -2,9 +2,9 @@
 
 - **bouquet branch:** `toroidal_flux_mapping`, created off `kwargs_for_bootstrap_fortran_backend_v2` (c0c3337). The worktree goes at `/fusion/projects/tmdb/src/.bouquet_wt/torflux`.
 - **Companion OFT plan:** `/home/benjamins/.claude/plans/foamy-mixing-candle.md` (OFT branch `profiles_on_toroidal_normalised_flux`). §6 below lists what bouquet needs from OFT, with its status.
-  - As of 2026-09-22, items 1–4 are available on the OFT branch, which is uncommitted and under test (see §6).
+  - As of 2026-09-23, items 1–4 are committed on the OFT branch at `a206c21`, which bouquet was checked against (§6). Since then a failed toroidal-flux map update fails the solve (`gs_solve` error -9, a Python `ValueError`) instead of aborting the process (OFT `7778cb5`).
 - **Findability:** step 0 copies this file to `docs/plans/toroidal_flux_mapping.md` on the new branch. Both plans should link to each other.
-- **Status:** plan. Awaiting review. Nothing implemented.
+- **Status:** implemented on `toroidal_flux_mapping` (phases 0–5, commits `8c67437`..`bc58a50`), checked against OFT `a206c21`. Additions beyond the plan: `GenerationConfig.seed_coord` (the SWB inductive seed's coordinate), snapshot-based homotopy rollback, and ida_hybrid IDA fits placed by their own Φ_N (from the IDA file's q).
 
 ## Context
 FUSE and IMAS hold kinetic profiles fixed in ρ_tor while they solve. IDA and transport codes also tabulate in toroidal flux. bouquet currently converts everything to ψ_N at io and then works in ψ_N. As a result, a profile tied to toroidal flux lands at a shifted radius once the equilibrium (q) changes, and the drift check `io/imas.py:_psi_rho_drift` exists because of that. The OFT plan lets a TokaMaker `flux_func` be declared on Φ_N and remaps it internally at every nonlinear step. bouquet should then choose **one** coordinate per run at io, `psi_n` (today's behaviour) or `phi_n`, and keep every profile and every error envelope on it all the way to the OFT call.

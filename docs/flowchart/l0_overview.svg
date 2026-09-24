@@ -15,10 +15,10 @@
 <!-- Configuration -->
 <g id="node1" class="node">
 <title>Configuration</title>
-<g id="a_node1"><a xlink:href="#" xlink:title="Configuration\n(158 nodes)">
+<g id="a_node1"><a xlink:href="#" xlink:title="Configuration\n(159 nodes)">
 <path fill="#eef4fb" stroke="#000000" d="M108,-619.8665C108,-619.8665 12,-619.8665 12,-619.8665 6,-619.8665 0,-613.8665 0,-607.8665 0,-607.8665 0,-585.8665 0,-585.8665 0,-579.8665 6,-573.8665 12,-573.8665 12,-573.8665 108,-573.8665 108,-573.8665 114,-573.8665 120,-579.8665 120,-585.8665 120,-585.8665 120,-607.8665 120,-607.8665 120,-613.8665 114,-619.8665 108,-619.8665"/>
 <text text-anchor="middle" x="60" y="-600.4665" font-family="Helvetica,sans-Serif" font-size="13.00" fill="#000000">Configuration</text>
-<text text-anchor="middle" x="60" y="-586.4665" font-family="Helvetica,sans-Serif" font-size="13.00" fill="#000000">(158 nodes)</text>
+<text text-anchor="middle" x="60" y="-586.4665" font-family="Helvetica,sans-Serif" font-size="13.00" fill="#000000">(159 nodes)</text>
 </a>
 </g>
 </g>
@@ -68,7 +68,7 @@
 </g>
 </g>
 <!-- Configuration&#45;&gt;Baseline &amp; uncertainty resolution -->
-<g id="edge47" class="edge">
+<g id="edge48" class="edge">
 <title>Configuration&#45;&gt;Baseline &amp; uncertainty resolution</title>
 <path fill="none" stroke="#666666" stroke-width="1.1" d="M76.9747,-573.5116C126.6677,-507.9918 279.571,-326.1567 457,-309.8665 524.7152,-303.6495 554.9098,-270.0034 610,-309.8665 671.031,-354.0285 623.9675,-406.4342 663,-470.8665 685.7325,-508.3918 721.5803,-543.5175 748.6355,-567.0985"/>
 <polygon fill="#666666" stroke="#666666" stroke-width="1.1" points="746.5013,-569.8791 756.3695,-573.7354 751.06,-564.5669 746.5013,-569.8791"/>
@@ -102,11 +102,11 @@
 </g>
 </g>
 <!-- Configuration&#45;&gt;Draw loop (GPR sampling) -->
-<g id="edge48" class="edge">
+<g id="edge37" class="edge">
 <title>Configuration&#45;&gt;Draw loop (GPR sampling)</title>
-<path fill="none" stroke="#666666" stroke-width="1.1" d="M61.7191,-620.1051C67.2942,-682.4103 89.2945,-856.408 167,-973.8665 209.5712,-1038.2166 211.3428,-1097.8665 288.5,-1097.8665 288.5,-1097.8665 288.5,-1097.8665 1306,-1097.8665 1524.3845,-1097.8665 1586.3413,-741.8939 1600.4168,-630.0658"/>
-<polygon fill="#666666" stroke="#666666" stroke-width="1.1" points="1603.905,-630.3744 1601.6332,-620.026 1596.9558,-629.5324 1603.905,-630.3744"/>
-<text text-anchor="middle" x="785.5" y="-1100.8665" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#000000">1</text>
+<path fill="none" stroke="#666666" stroke-width="1.2" d="M61.7191,-620.1051C67.2942,-682.4103 89.2945,-856.408 167,-973.8665 209.5712,-1038.2166 211.3428,-1097.8665 288.5,-1097.8665 288.5,-1097.8665 288.5,-1097.8665 1306,-1097.8665 1524.3845,-1097.8665 1586.3413,-741.8939 1600.4168,-630.0658"/>
+<polygon fill="#666666" stroke="#666666" stroke-width="1.2" points="1603.905,-630.3744 1601.6332,-620.026 1596.9558,-629.5324 1603.905,-630.3744"/>
+<text text-anchor="middle" x="785.5" y="-1100.8665" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#000000">2</text>
 </g>
 <!-- Per&#45;draw solve (SWB / l_i / homotopy) -->
 <g id="node8" class="node">
@@ -126,7 +126,7 @@
 <text text-anchor="middle" x="934.5" y="-178.8665" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#000000">5</text>
 </g>
 <!-- Input readers (g&#45;file / p&#45;file / IDA)&#45;&gt;Configuration -->
-<g id="edge42" class="edge">
+<g id="edge43" class="edge">
 <title>Input readers (g&#45;file / p&#45;file / IDA)&#45;&gt;Configuration</title>
 <path fill="none" stroke="#b56576" stroke-width="1.1" d="M166.9639,-617.2693C157.8422,-617.3143 148.7771,-616.8945 140,-615.8665 136.739,-615.4846 133.4182,-615.0179 130.0747,-614.4848"/>
 <polygon fill="#b56576" stroke="#b56576" stroke-width="1.1" points="130.4699,-611.0005 120.013,-612.7046 129.2502,-617.8934 130.4699,-611.0005"/>
@@ -134,14 +134,14 @@
 </g>
 <!-- Input readers (g&#45;file / p&#45;file / IDA)&#45;&gt;IMAS/OMAS reader -->
 <!-- Input readers (g&#45;file / p&#45;file / IDA)&#45;&gt;IMAS/OMAS reader -->
-<g id="edge44" class="edge">
+<g id="edge45" class="edge">
 <title>Input readers (g&#45;file / p&#45;file / IDA)&#45;&gt;IMAS/OMAS reader</title>
 <path fill="none" stroke="#666666" stroke-width="1.1" d="M308.2667,-573.69C335.9167,-544.2578 388.2401,-499.2834 437,-516.8665 464.2271,-526.6848 489.2102,-547.8943 506.9319,-566.0087"/>
 <polygon fill="#666666" stroke="#666666" stroke-width="1.1" points="504.6492,-568.6883 514.0677,-573.5404 509.7307,-563.8739 504.6492,-568.6883"/>
 <text text-anchor="middle" x="433.5" y="-519.8665" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#000000">1</text>
 </g>
 <!-- Input readers (g&#45;file / p&#45;file / IDA)&#45;&gt;Baseline &amp; uncertainty resolution -->
-<g id="edge43" class="edge">
+<g id="edge44" class="edge">
 <title>Input readers (g&#45;file / p&#45;file / IDA)&#45;&gt;Baseline &amp; uncertainty resolution</title>
 <path fill="none" stroke="#666666" stroke-width="1.1" d="M315.2547,-573.7749C342.1739,-552.1914 385.9101,-521.4583 430,-508.8665 521.0914,-482.8516 551.831,-491.125 643,-516.8665 680.4493,-527.4403 718.6745,-549.6476 746.0945,-567.9876"/>
 <polygon fill="#666666" stroke="#666666" stroke-width="1.1" points="744.3683,-571.0466 754.6027,-573.7865 748.3107,-565.2624 744.3683,-571.0466"/>
@@ -162,7 +162,7 @@
 <text text-anchor="middle" x="1034.5" y="-280.8665" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#000000">7</text>
 </g>
 <!-- IMAS/OMAS reader&#45;&gt;Configuration -->
-<g id="edge37" class="edge">
+<g id="edge38" class="edge">
 <title>IMAS/OMAS reader&#45;&gt;Configuration</title>
 <path fill="none" stroke="#b56576" stroke-width="1.1" d="M467.281,-619.9103C448.9557,-625.2558 428.9033,-630.1676 410,-632.8665 303.0843,-648.1317 265.2794,-677.6456 167,-632.8665 154.6728,-627.2499 158.8771,-616.3811 147,-609.8665 141.7675,-606.9965 136.1052,-604.6997 130.2662,-602.8681"/>
 <polygon fill="#b56576" stroke="#b56576" stroke-width="1.1" points="130.8826,-599.41 120.3177,-600.2057 129.0729,-606.172 130.8826,-599.41"/>
@@ -177,7 +177,7 @@
 </g>
 <!-- IMAS/OMAS reader&#45;&gt;Baseline &amp; uncertainty resolution -->
 <!-- IMAS/OMAS reader&#45;&gt;Baseline &amp; uncertainty resolution -->
-<g id="edge26" class="edge">
+<g id="edge25" class="edge">
 <title>IMAS/OMAS reader&#45;&gt;Baseline &amp; uncertainty resolution</title>
 <path fill="none" stroke="#666666" stroke-width="1.6" d="M610.2429,-582.1036C616.906,-581.1998 623.5602,-580.4294 630,-579.8665 637.4304,-579.217 645.0563,-578.9026 652.7501,-578.8587"/>
 <polygon fill="#666666" stroke="#666666" stroke-width="1.6" points="652.8613,-582.3598 662.893,-578.9516 652.9255,-575.3601 652.8613,-582.3598"/>
@@ -208,14 +208,14 @@
 <text text-anchor="middle" x="934.5" y="-874.8665" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#000000">11</text>
 </g>
 <!-- IMAS/OMAS reader&#45;&gt;Per&#45;draw solve (SWB / l_i / homotopy) -->
-<g id="edge25" class="edge">
+<g id="edge26" class="edge">
 <title>IMAS/OMAS reader&#45;&gt;Per&#45;draw solve (SWB / l_i / homotopy)</title>
 <path fill="none" stroke="#666666" stroke-width="1.6" d="M535.3899,-620.0976C542.3088,-698.6992 569.0993,-952.4669 630,-1000.8665 717.8564,-1070.6887 1027.5257,-1034.1643 1135,-1001.8665 1441.9573,-909.6209 1453.6278,-746.4566 1751,-626.8665 1754.2274,-625.5686 1757.5217,-624.3217 1760.8651,-623.1241"/>
 <polygon fill="#666666" stroke="#666666" stroke-width="1.6" points="1762.0635,-626.4135 1770.4028,-619.8785 1759.8084,-619.7867 1762.0635,-626.4135"/>
 <text text-anchor="middle" x="1131.5" y="-1005.8665" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#000000">5</text>
 </g>
 <!-- Baseline &amp; uncertainty resolution&#45;&gt;Input readers (g&#45;file / p&#45;file / IDA) -->
-<g id="edge39" class="edge">
+<g id="edge40" class="edge">
 <title>Baseline &amp; uncertainty resolution&#45;&gt;Input readers (g&#45;file / p&#45;file / IDA)</title>
 <path fill="none" stroke="#b56576" stroke-width="1.1" d="M719.0167,-573.7898C687.4412,-559.5348 651.9047,-538.0902 630,-507.8665 604.1686,-472.225 644.1237,-438.6722 610,-410.8665 557.2849,-367.9117 519.163,-383.3027 457,-410.8665 385.7874,-442.443 331.8592,-520.6318 305.8055,-564.9268"/>
 <polygon fill="#b56576" stroke="#b56576" stroke-width="1.1" points="302.6324,-563.4234 300.6729,-573.8355 308.6977,-566.918 302.6324,-563.4234"/>
@@ -230,7 +230,7 @@
 </g>
 <!-- Baseline &amp; uncertainty resolution&#45;&gt;GS reconstruction -->
 <!-- Baseline &amp; uncertainty resolution&#45;&gt;Bouquet orchestrator / IMAS forward solve -->
-<g id="edge45" class="edge">
+<g id="edge46" class="edge">
 <title>Baseline &amp; uncertainty resolution&#45;&gt;Bouquet orchestrator / IMAS forward solve</title>
 <path fill="none" stroke="#666666" stroke-width="1.1" d="M811.5687,-620.1047C838.524,-642.4445 882.9174,-674.6996 928,-687.8665 933.5461,-689.4863 935.6057,-689.9365 941,-687.8665 952.165,-683.5821 950.1689,-674.936 961,-669.8665 1031.7604,-636.7475 1058.5594,-661.0139 1135,-644.8665 1163.7414,-638.7952 1194.7726,-630.5952 1222.409,-622.6917"/>
 <polygon fill="#666666" stroke="#666666" stroke-width="1.1" points="1223.397,-626.0495 1232.0334,-619.9125 1221.4549,-619.3242 1223.397,-626.0495"/>
@@ -252,7 +252,7 @@
 <text text-anchor="middle" x="1131.5" y="-613.8665" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#000000">4</text>
 </g>
 <!-- GS reconstruction&#45;&gt;Per&#45;draw solve (SWB / l_i / homotopy) -->
-<g id="edge38" class="edge">
+<g id="edge39" class="edge">
 <title>GS reconstruction&#45;&gt;Per&#45;draw solve (SWB / l_i / homotopy)</title>
 <path fill="none" stroke="#666666" stroke-width="1.1" d="M1104.9739,-573.8148C1121.2535,-569.2133 1138.6088,-564.8767 1155,-561.8665 1395.2353,-517.7477 1462.9095,-497.6897 1704,-536.8665 1744.3226,-543.4189 1787.8378,-557.4364 1822.26,-570.2756"/>
 <polygon fill="#666666" stroke="#666666" stroke-width="1.1" points="1821.1261,-573.5887 1831.7175,-573.8584 1823.606,-567.0427 1821.1261,-573.5887"/>
@@ -273,14 +273,14 @@
 <text text-anchor="middle" x="934.5" y="-672.8665" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#000000">11</text>
 </g>
 <!-- Bouquet orchestrator / IMAS forward solve&#45;&gt;Baseline &amp; uncertainty resolution -->
-<g id="edge24" class="edge">
+<g id="edge23" class="edge">
 <title>Bouquet orchestrator / IMAS forward solve&#45;&gt;Baseline &amp; uncertainty resolution</title>
 <path fill="none" stroke="#b56576" stroke-width="1.6" d="M1268.2616,-619.9474C1229.6282,-642.1179 1167.0459,-674.0766 1108,-686.8665 1044.1475,-700.6976 1016.2431,-721.747 961,-686.8665 943.5181,-675.8284 956.6401,-658.3885 941,-644.8665 931.5558,-636.7014 920.739,-629.9249 909.3048,-624.3009"/>
 <polygon fill="#b56576" stroke="#b56576" stroke-width="1.6" points="910.565,-621.0282 900.0169,-620.0332 907.6423,-627.3889 910.565,-621.0282"/>
 <text text-anchor="middle" x="1034.5" y="-708.8665" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#000000">5</text>
 </g>
 <!-- Bouquet orchestrator / IMAS forward solve&#45;&gt;GS reconstruction -->
-<g id="edge46" class="edge">
+<g id="edge47" class="edge">
 <title>Bouquet orchestrator / IMAS forward solve&#45;&gt;GS reconstruction</title>
 <path fill="none" stroke="#b56576" stroke-width="1.1" d="M1235.8977,-619.9524C1203.1487,-627.9445 1163.6119,-633.6162 1128,-627.8665 1120.284,-626.6207 1112.3429,-624.8317 1104.5032,-622.7332"/>
 <polygon fill="#b56576" stroke="#b56576" stroke-width="1.1" points="1105.2278,-619.3004 1094.6515,-619.927 1103.3102,-626.0326 1105.2278,-619.3004"/>
@@ -288,7 +288,7 @@
 </g>
 <!-- Bouquet orchestrator / IMAS forward solve&#45;&gt;Draw loop (GPR sampling) -->
 <!-- Bouquet orchestrator / IMAS forward solve&#45;&gt;Per&#45;draw solve (SWB / l_i / homotopy) -->
-<g id="edge23" class="edge">
+<g id="edge24" class="edge">
 <title>Bouquet orchestrator / IMAS forward solve&#45;&gt;Per&#45;draw solve (SWB / l_i / homotopy)</title>
 <path fill="none" stroke="#666666" stroke-width="1.6" d="M1386.1917,-573.8494C1421.9249,-564.7354 1464.7318,-555.368 1504,-550.8665 1592.3105,-540.743 1615.7876,-539.9205 1704,-550.8665 1736.7708,-554.933 1772.1096,-562.9577 1802.8816,-571.1818"/>
 <polygon fill="#666666" stroke="#666666" stroke-width="1.6" points="1802.1348,-574.6058 1812.703,-573.8542 1803.9727,-567.8514 1802.1348,-574.6058"/>
@@ -312,7 +312,7 @@
 <text text-anchor="middle" x="1727.5" y="-1039.8665" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#000000">6</text>
 </g>
 <!-- Draw loop (GPR sampling)&#45;&gt;Bouquet orchestrator / IMAS forward solve -->
-<g id="edge41" class="edge">
+<g id="edge42" class="edge">
 <title>Draw loop (GPR sampling)&#45;&gt;Bouquet orchestrator / IMAS forward solve</title>
 <path fill="none" stroke="#b56576" stroke-width="1.1" d="M1503.9593,-613.9096C1497.2182,-614.6864 1490.5186,-615.3537 1484,-615.8665 1478.578,-616.2931 1473.0656,-616.5726 1467.5003,-616.7231"/>
 <polygon fill="#b56576" stroke="#b56576" stroke-width="1.1" points="1467.3859,-613.2242 1457.434,-616.8585 1467.4802,-620.2236 1467.3859,-613.2242"/>
@@ -381,7 +381,7 @@
 </g>
 <!-- Archive, filtering &amp; plotting&#45;&gt;Process&#45;parallel path -->
 <!-- Process&#45;parallel path&#45;&gt;Bouquet orchestrator / IMAS forward solve -->
-<g id="edge40" class="edge">
+<g id="edge41" class="edge">
 <title>Process&#45;parallel path&#45;&gt;Bouquet orchestrator / IMAS forward solve</title>
 <path fill="none" stroke="#b56576" stroke-width="1.1" d="M2356.8599,-573.7949C2334.6936,-560.0006 2308.1382,-540.8878 2289,-518.8665 2120.1356,-324.564 2242.0189,-138.509 2022,-4.8665 2011.7929,1.3334 1515.0639,2.4264 1504,-6.8665 1429.7179,-69.2587 1496.498,-352.2633 1457,-440.8665 1433.4147,-493.7738 1383.73,-539.3777 1347.781,-567.3804"/>
 <polygon fill="#b56576" stroke="#b56576" stroke-width="1.1" points="1345.2401,-564.9172 1339.4204,-573.7706 1349.4909,-570.4788 1345.2401,-564.9172"/>
