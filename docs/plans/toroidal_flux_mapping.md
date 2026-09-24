@@ -161,7 +161,7 @@ Phases 3 and 4 need OFT (§6) for end-to-end runs. The pure-numpy parts of `coor
    - `psi_n` is the default and writes an unchanged file.
    - `jphi-linterp` supports `phi_n_relabel`.
    - pp uses `phi_n`, where y is the derivative with respect to Φ_N and OFT applies J = q/Q internally.
-2. **Available.** `solve_with_bootstrap(..., psi_N=x, coord='phi_n')` already takes `psi_N=`, and passes `coord` on to `solve_bootstrap(coord=...)`. There:
+2. **Available.** `solve_with_bootstrap(..., psi_N=x, coord='phi_n')` already takes `psi_N=`, and passes `coord` on to `solve_bootstrap(coord=...)`. (2026-09-24: the grid keyword is now `x`, with `coord` an explicit argument, so no argument named ψ_N carries Φ_N. bouquet passes whichever of `x` / `psi_N` the toolkit takes, via `coords._swb_grid_arg`.) There:
    - P′ is formed on `x` as dP/dΦ_N;
    - kinetics and jphi are relabelled (stored on their Φ_N nodes);
    - outputs are index-aligned with the input `x`, and the result includes `'psi_n'` (node ψ_N positions).

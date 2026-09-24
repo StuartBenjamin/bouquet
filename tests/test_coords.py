@@ -78,13 +78,19 @@ def test_rho_tor_input_becomes_phi_n():
         coords.resolve_input_coord("psi", X)
 
 
-def test_swb_grid_on_a_toolkit_with_psi_N(swb_params):
-    swb_params({"mygs", "ne", "psi_N"})
+@pytest.mark.parametrize("arg", ["x", "psi_N"])
+def test_swb_grid_on_a_toolkit_with_a_grid_argument(swb_params, arg):
+    swb_params({"mygs", "ne", arg})
     xi = np.array([0.0, 0.1, 0.4, 1.0])
     np.testing.assert_array_equal(coords.swb_grid(xi), xi)
-    assert list(coords.swb_grid_kwargs(xi)) == ["psi_N"]
+    assert list(coords.swb_grid_kwargs(xi)) == [arg]
     assert coords.swb_grid_kwargs(xi, coords.PHI)["coord"] == coords.PHI
     np.testing.assert_array_equal(coords.swb_seed(xi), (1 - xi ** 1.5) ** 1.5)
+
+
+def test_swb_grid_prefers_x(swb_params):
+    swb_params({"x", "psi_N"})
+    assert list(coords.swb_grid_kwargs(X)) == ["x"]
 
 
 def test_swb_grid_on_a_legacy_toolkit(swb_params):
@@ -95,7 +101,7 @@ def test_swb_grid_on_a_legacy_toolkit(swb_params):
 
 
 def test_seed_matches_oft_power_flux_fun_on_a_uniform_grid(swb_params):
-    swb_params({"psi_N"})
+    swb_params({"x"})
     s = np.linspace(0.0, 1.0, 129)
     ref = np.power(1.0 - np.power(np.linspace(0.0, 1.0, 129), 1.5), 1.5)
     np.testing.assert_array_equal(coords.swb_seed(s), ref)
@@ -172,7 +178,10 @@ class TestCheckCoord:
 
     def test_phi_run_refuses_a_toolkit_without_support(self, monkeypatch):
         import sys
-        monkeypatch.setitem(sys.modules, "OpenFUSIONToolkit", None)
+        # Also hide submodules an earlier test may have imported.
+        for m in [k for k in sys.modules if k.split(".")[0] == "OpenFUSIONToolkit"] + ["OpenFUSIONToolkit"]:
+            monkeypatch.setitem(sys.modules, m, None)
+        monkeypatch.delattr(coords, "_SWB_PARAMS", raising=False)
         with pytest.raises(RuntimeError, match="toroidal-flux"):
             self._run("phi_n")._check_coord()
 
@@ -190,7 +199,7 @@ def test_profile_coord_defaults_on_an_old_archive(tmp_path):
 
 
 def test_seed_is_the_same_physical_profile_in_a_phi_run(swb_params):
-    swb_params({"psi_N"})
+    swb_params({"x"})
     xphi = np.array([0.0, 0.1, 0.4, 1.0])
     psi = xphi ** 0.8
     np.testing.assert_array_equal(coords.swb_seed(xphi, psi), (1 - psi ** 1.5) ** 1.5)

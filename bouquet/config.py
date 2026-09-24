@@ -986,7 +986,7 @@ class GenerationConfig:
     #: value).
     _RESERVED = frozenset(
         "mygs ne Te ni Ti Zeff Ip_target inductive_jphi scale_jBS "
-        "isolate_edge_jBS verbose diagnostic_plots psi_N coord "
+        "isolate_edge_jBS verbose diagnostic_plots x psi_N coord "
         "ffp_prof ne_prof te_prof ni_prof ti_prof".split()
     )
 

@@ -181,4 +181,5 @@ class TestBootstrapKwargValidation:
         if known is None or "djBS_tol" not in known:
             pytest.skip("needs an OpenFUSIONToolkit with the internal "
                         "Fortran bootstrap solve")
-        assert GenerationConfig._RESERVED <= known
+        grid = {"x", "psi_N"}           # the grid keyword, new or old spelling
+        assert GenerationConfig._RESERVED - grid <= known and grid & known

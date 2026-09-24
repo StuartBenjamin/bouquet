@@ -131,23 +131,33 @@ def _swb_params():
     return _SWB_PARAMS
 
 
+def _swb_grid_arg():
+    """``solve_with_bootstrap``'s grid keyword: ``"x"``, the ψ_N-only
+    ``"psi_N"`` of older toolkits, or ``None`` (a uniform grid is assumed).
+    """
+    p = _swb_params()
+    return "x" if "x" in p else ("psi_N" if "psi_N" in p else None)
+
+
 def swb_grid(x):
     """The grid ``solve_with_bootstrap`` places its arrays on.
 
-    ``x`` where the toolkit takes ``psi_N=``; otherwise the uniform grid it
-    assumes, which is also the grid of its outputs.
+    ``x`` where the toolkit takes a grid argument; otherwise the uniform grid
+    it assumes, which is also the grid of its outputs.
     """
     x = np.asarray(x, dtype=float)
-    return x if "psi_N" in _swb_params() else np.linspace(0.0, 1.0, x.size)
+    return x if _swb_grid_arg() else np.linspace(0.0, 1.0, x.size)
 
 
 def swb_grid_kwargs(x, coord=PSI):
-    """Grid arguments for ``solve_with_bootstrap``: ``psi_N=x``, plus ``coord``
-    in a Φ_N run.  Empty on a toolkit without ``psi_N=`` (ψ_N runs only).
+    """Grid arguments for ``solve_with_bootstrap``: the grid (:func:`_swb_grid_arg`),
+    plus ``coord`` in a Φ_N run.  Empty on a toolkit without a grid argument
+    (ψ_N runs only).
     """
     kw = {}
-    if "psi_N" in _swb_params():
-        kw["psi_N"] = np.asarray(x, dtype=float)
+    arg = _swb_grid_arg()
+    if arg:
+        kw[arg] = np.asarray(x, dtype=float)
     if check_coord(coord) == PHI:
         kw["coord"] = PHI
     return kw
@@ -161,7 +171,7 @@ def swb_seed(x, psi=None):
     the ψ_N one in any run; ``None`` writes it in the run coordinate.
     """
     s = swb_grid(x)
-    if psi is not None and "psi_N" in _swb_params():
+    if psi is not None and _swb_grid_arg():
         s = np.asarray(psi, dtype=float)
     return np.power(1.0 - np.power(s, 1.5), 1.5)
 
@@ -189,7 +199,7 @@ def check_backend(coord):
         from OpenFUSIONToolkit.TokaMaker._core import TokaMaker
         ok = ("coord" in inspect.signature(TokaMaker.solve_bootstrap).parameters
               and hasattr(TokaMaker, "get_torflux_map")
-              and "psi_N" in _swb_params())
+              and _swb_grid_arg() is not None)
     except Exception:
         ok = False
     if not ok:
