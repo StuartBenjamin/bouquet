@@ -81,3 +81,28 @@ Real-dd probe: `.bouquet_wt/torflux_jobs/ddprobe/ddprobe.py`.
 - Fast suite, no OFT: 1238 passed, 2 skipped.
 - coords/config/phi test files with OFT (oftstage_swbx): 113 passed. This includes the base-branch failure `test_config::test_without_the_toolkit_only_the_reserved_check_runs`, which now stubs `_bootstrap_kwarg_names` so it holds with OFT importable.
 - `tests/test_phi_solver.py` with OFT: 15 passed (1:44).
+
+## IMAS Φ round trip: real FUSE dd, 174956 @ 2.0 s (2026-09-24)
+
+Setup: σ=0 `prepare()` using the production config: g-file LCFS, structured `li_soft_onesided`, ohmic split. OFT is oftstage_swbx. Drivers and logs are in `.bouquet_wt/torflux_jobs/imas_rt/` (`imas_rt.py`, `swb_ab.py`).
+
+| run | l_i(3) | l_i(1) | q0 | q95 | SWB/FUSE jBS peak |
+|---|---|---|---|---|---|
+| IDS (FUSE) | 0.781 | 0.987 | — | — | — |
+| base c0c3337, psi_n, fuse | 0.789 | 1.039 | — | — | 1.037 |
+| branch, psi_n, fuse | 0.7215 | 0.949 | 1.047 | 4.231 | 1.230 |
+| branch, phi_n, fuse | 0.7677 | 1.008 | 1.047 | 4.144 | 1.000 |
+| branch, psi_n, ida_hybrid | 0.7301 | 0.960 | 1.049 | 4.231 | 1.182 |
+| branch, phi_n, ida_hybrid | 0.7691 | 1.010 | 1.047 | 4.134 | 0.995 |
+
+- **psi_n vs phi_n differ** by +6.4 % in l_i(3) and −2 % in q95. Ip matches to 1e-6 and q0 to 0.3 %.
+  - The phi_n run is the closer of the two to the IDS l_i: −1.7 % against −7.6 % for psi_n.
+  - The phi_n run's SWB pedestal bootstrap matches FUSE's; the psi_n run's is 23 % above it.
+  - Both runs reproduce their own input j_phi (achieved against input: rms 0.01 MA/m²).
+- **Maps:** the solver's ψ_N at the dd's Φ_N nodes differs from the dd's own ψ_N by up to 0.007 in the core (ψ 0.3–0.7). At the pedestal the difference is 0.001.
+- **OFT consistency A/B** (one equilibrium state, same kinetics, seed shape in ψ_N):
+  - The non-uniform IMAS ψ_N grid and a uniform grid give the same SWB result (jBS peak 0.863 against 0.860).
+  - A Φ-tagged SWB, with Φ labels taken from the ψ-tagged run's end state, reproduces that run exactly: peak 0.8633 against 0.8632, l_i 0.7930 against 0.7933, and every node lands back at its ψ.
+  - Conclusion: the toroidal-flux path in OFT is correct. The psi/phi gap is the physical effect of which coordinate the profiles are held in.
+  - Sensitivity: when the Φ labels come from a different equilibrium, a Φ-held SWB moves l_i a lot (0.79 → 0.88 with labels from the pre-SWB state).
+- **ψ-mode change from the base branch:** the psi_n IMAS numbers moved (l_i(3) 0.789 → 0.7215, jBS peak ratio 1.04 → 1.23). This is the phase-1 grid-registration fix. The old code placed the non-uniform core_profiles arrays at ψ_N = i/(n−1), which is ≈ ρ on this grid. That was wrong in the core but roughly right at the pedestal. **Open:** the psi_n bootstrap now sits 23 % above FUSE while the pedestal placement differs from phi_n by only 0.001 in ψ. This is not explained yet.
