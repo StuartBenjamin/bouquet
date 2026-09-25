@@ -77,3 +77,7 @@ on GitHub without running anything.
 
 Real machine data (`*.cdf`, proprietary g-files, FUSE `dd_sim.json`) is
 gitignored and never committed.
+
+## Profiles on toroidal flux (`coord="phi_n"`)
+
+[`torflux_imas/`](torflux_imas/README.md) runs a σ=0 IMAS forward solve on a real FUSE dd, holding the profiles on ψ_N and then on Φ_N. It shows why the two differ and why the Φ_N run reproduces the dd's bootstrap. The dd is not included; supply your own `dd_sim.json`.

@@ -105,13 +105,9 @@ Setup: σ=0 `prepare()` using the production config: g-file LCFS, structured `li
   - A Φ-tagged SWB, with Φ labels taken from the ψ-tagged run's end state, reproduces that run exactly: peak 0.8633 against 0.8632, l_i 0.7930 against 0.7933, and every node lands back at its ψ.
   - Conclusion: the toroidal-flux path in OFT is correct. The psi/phi gap is the physical effect of which coordinate the profiles are held in.
   - Sensitivity: when the Φ labels come from a different equilibrium, a Φ-held SWB moves l_i a lot (0.79 → 0.88 with labels from the pre-SWB state).
-- **ψ-mode change from the base branch:** the psi_n IMAS numbers moved (l_i(3) 0.789 → 0.7215, jBS peak ratio 1.04 → 1.23). This is the phase-1 grid-registration fix. The old code placed the non-uniform core_profiles arrays at ψ_N = i/(n−1), which is ≈ ρ on this grid. That was wrong in the core but roughly right at the pedestal. **Resolved (the flux-surface shift of OFT `tests/physics/tokamaker_torflux_motivation.py`):**
-  - The final equilibria of the psi_n and phi_n runs have the same pedestal:
-    - peak |P′| 0.998e6 vs 0.990e6, at ψ_N 0.971/0.972;
-    - q there 4.55 vs 4.58;
-    - ψ_N = 0.97 and 0.90 outboard R within 0.5 mm;
-    - psi_range differs by 2.7 %.
-  - The difference arises *inside* SWB. There the current profile is the generic seed plus bootstrap, not FUSE's, so the equilibrium relaxes far from the dd's. ψ_N-pinned kinetics then land at a different real-space position (and gradient) than in FUSE, while Φ_N-pinned kinetics stay close.
-  - A/B from the same starting state: ψ-pinned gives a pedestal jBS peak of 0.863 MA/m²; Φ-pinned with labels consistent with that state gives 0.714. FUSE's peak is ≈ 0.70 (0.863/1.23).
-  - The closure then carries SWB's j_BS into the final solve. The edge current differs by the same factor (achieved j at ψ_N 0.95: 0.584 vs 0.473 MA/m², ratio 1.23), which moves l_i by 6 %.
-  - So the phi_n result is the faithful one. The seed-shape dependence of the SWB iteration makes the ψ_N-pinning error larger; see `torflux_jobs/ISSUE_swb_seed_shape.md`.
+- **ψ-mode change from the base branch:** the psi_n IMAS numbers moved (l_i(3) 0.789 → 0.7215, jBS peak ratio 1.04 → 1.23). This is the phase-1 grid-registration fix. The old code placed the non-uniform core_profiles arrays at ψ_N = i/(n−1), which is ≈ ρ on this grid. That was wrong in the core but roughly right at the pedestal. **Resolved.** The mechanism is documented and reproduced by `examples/torflux_imas/torflux_imas_effect.py`; see its README.
+  - Inside SWB the generic inductive seed relaxes the equilibrium: l_i ≈0.77 → 0.60, and ψ_b − ψ_a shrinks by 18 %.
+  - Held on ψ_N, the pedestal dp/dψ = (dp/dψ_N)/(ψ_b − ψ_a) rises 21 %, and j_BS rises with it (0.714 → 0.863 MA/m²). Held on Φ_N, dp/dψ follows the local q/Φ̄, so j_BS moves only 2 %.
+  - With the run's own ohmic shape as the seed, the two coordinates agree to 2 % and both sit near FUSE.
+  - The Φ_N control (labels taken from the ψ_N end state) reproduces the ψ_N run exactly, so OFT's Φ_N path is correct.
+
