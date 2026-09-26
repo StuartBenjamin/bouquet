@@ -284,7 +284,14 @@ not converge is a **failed draw** in either mode.
 - **`verify_sigma0_consistency`**: the invariant becomes the loop's own -- the
   σ=0 draw bootstrap loop, started from the state anchor with the baseline
   inductive held, must converge to the baseline bootstrap within
-  `jbs_rtol_j`/`jbs_rtol_Ip` and to its l_i within `jbs_tol_li`.
+  `jbs_rtol_j`/`jbs_rtol_Ip` and to the baseline equilibrium's l_i within
+  `jbs_tol_li`. On the geqdsk path each σ=0 solve is followed by the same
+  corrective iteration (same renormalisation and knobs) the reconstruction
+  delivered its equilibrium with, and the l_i reference is the recorded
+  post-corrective l_i (`l_i_target` there is the step-6 matched value by
+  design); a single jphi-linterp solve of an *achieved* profile does not land
+  back on the equilibrium that achieved it. Route R2's inductive Ip
+  renormalisation keeps its own, separately budgeted σ=0 invariant.
 
 `jbs_init="swb"` starts from the legacy SWB result instead (A/B only; `psi_N=`
 is passed when the OFT build accepts it and the grid allows it, and the record

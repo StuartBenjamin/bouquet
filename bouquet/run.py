@@ -4571,6 +4571,16 @@ class Bouquet:
         ref = np.asarray(bl.j_BS, dtype=float) + (0.0 if jdiff is None
                                                   else jdiff)
 
+        # The baseline equilibrium was delivered by the reconstruction's
+        # corrective iteration on the geqdsk path (and a sigma=0 standard
+        # draw ends on the same corrective iteration), so there the sigma=0
+        # equilibrium is solved the same way -- same renormalisation, same
+        # knobs (rtol=0.05, 2..8 iterations, protect_state) as the
+        # reconstruction's step 7.  A single jphi-linterp solve of the
+        # ACHIEVED profile does not land on the equilibrium it was achieved
+        # by, and the invariant would then measure that, not the loop.
+        _recon_path = (str(getattr(bl, "provenance", "")) == "reconstruction")
+
         def _solve(j):
             from .utils import pchip_derivative
             _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
@@ -4582,6 +4592,16 @@ class Bouquet:
                 "type": "jphi-linterp", "y": np.asarray(j, float),
                 "x": psi_N})
             mygs.solve()
+            if _recon_path:
+                from .TokaMaker_interface import (
+                    _corrective_jphi_iteration, _renormalize_target_to_Ip)
+                _t, _f = _renormalize_target_to_Ip(
+                    mygs, psi_N, np.asarray(j, float), abs(Ip), psi_pad,
+                    label="jphi_corr/sigma0")
+                _corrective_jphi_iteration(
+                    mygs, psi_N, _t, _pp, abs(Ip), float(pressure[0]),
+                    psi_pad, min_iters=2, max_iters=8, rtol=0.05,
+                    verbose=False, protect_state=True)
 
         def _step(spk, k):
             # the baseline's own inductive, held (TokaMaker renormalises the
@@ -4607,7 +4627,19 @@ class Bouquet:
         cmp_ = profile_residuals(res["jbs_used"], ref, w, x, abs(Ip))
         li_s0 = float(mygs.get_stats(li_normalization="iter",
                                      lcfs_pad=psi_pad)["l_i"])
-        dli = abs(li_s0 - float(bl.l_i_target))
+        # The reference is the l_i of the BASELINE EQUILIBRIUM.  On the IMAS
+        # path that is l_i_target (read off the delivered solve); on the
+        # geqdsk path l_i_target is the step-6 MATCHED value by design
+        # (issue #25) and the delivered equilibrium carries the recorded
+        # post-corrective l_i instead -- the one a sigma=0 re-solve must
+        # reproduce.
+        li_ref = float(bl.l_i_target)
+        li_ref_name = "l_i_target"
+        _rc = getattr(bl, "recon", None) or {}
+        if _recon_path and _rc.get("li_realized_post_corrective") is not None:
+            li_ref = float(_rc["li_realized_post_corrective"])
+            li_ref_name = "reconstruction li_realized_post_corrective"
+        dli = abs(li_s0 - li_ref)
         dev = np.asarray(res["jbs_used"], dtype=float) - ref
         peak = float(np.max(np.abs(ref))) or 1.0
         passed = bool(res["converged"]
@@ -4623,7 +4655,8 @@ class Bouquet:
                    loop_converged=bool(res["converged"]),
                    r_j_vs_baseline=float(cmp_["r_j"]),
                    r_I_vs_baseline=float(cmp_["r_I"]),
-                   li_sigma0=li_s0, li_baseline=float(bl.l_i_target),
+                   li_sigma0=li_s0, li_baseline=li_ref,
+                   li_baseline_reference=li_ref_name,
                    dl_i_vs_baseline=float(dli),
                    record=jsonable(res["record"]))
         # leave mygs re-anchored on the baseline equilibrium
