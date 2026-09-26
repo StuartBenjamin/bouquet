@@ -1,0 +1,508 @@
+"""The self-consistent bootstrap loop -- fast half (no GS solver).
+
+Two things are tested here without a live solver:
+
+* **The kernel** (:func:`bouquet.jbs_loop.run_jbs_loop`) on synthetic
+  fixed-point maps whose answer is known in closed form: the residual
+  definitions, the two-consecutive-pass rule, the relaxation schedule, the
+  failure policy ("raise" / "flag", early abort at the relaxation floor), and
+  the three plan tests that are properties of the ITERATION rather than of the
+  physics -- (c) a loop started at its fixed point returns it with first-pass
+  residuals below tolerance, (d) two different initial guesses converge to the
+  same fixed point, (e) non-convergence raises (default) and is recorded in
+  "flag" mode.
+
+* **The evaluator** (:func:`bouquet.physics.evaluate_jBS`) on a mock
+  equilibrium with analytic flux-surface geometry: that the geometry is
+  sampled on the CALLER'S surfaces (distinct clipped values only, never a
+  repeated surface, psi_pad unchanged), that gradients are taken on the true
+  grid, and -- the defect-A regression -- that the same physical profiles
+  sampled on a uniform and on a strongly non-uniform psi_N grid give the same
+  j_BS(psi_N) to interpolation accuracy, while the legacy "evenly sampled"
+  reading of the non-uniform array does not.  Needs OFT's pure-Python
+  ``bootstrap`` module (Redl); skipped with a reason when OFT is absent.
+
+The live halves (bit-level agreement with ``solve_with_bootstrap``'s first
+pass, the loop in every baseline mode, the sigma=0 invariants, the MSE stage)
+are in ``test_jbs_loop_solver.py`` (``pytest -m solver``).
+
+Synthetic inputs only; no device data.
+"""
+import numpy as np
+import pytest
+
+from bouquet.jbs_loop import (JBS_RELAX_FLOOR, JBSNotConverged,
+                              check_delivered, jbs_settings, jsonable,
+                              profile_residuals, run_jbs_loop,
+                              validate_jbs_settings, weighted_norm)
+
+
+class _GC:
+    """A GenerationConfig stand-in carrying only the loop fields."""
+
+    def __init__(self, **kw):
+        self.jbs_self_consistent = True
+        self.jbs_init = "anchor"
+        self.jbs_rtol_j = 1e-3
+        self.jbs_rtol_Ip = 1e-4
+        self.jbs_tol_li = 1e-3
+        self.jbs_tol_q0 = 2e-3
+        self.jbs_max_passes = 8
+        self.jbs_max_passes_draw = 6
+        self.jbs_relax = 0.7
+        self.jbs_loop_on_fail = "raise"
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+_X = np.linspace(0.0, 1.0, 101)
+_W = 1.0 + 0.5 * _X            # positive "Ip weights" on the grid
+_IP = 1.0e6
+
+
+def _shape(x=_X):
+    return 3.0e5 * np.exp(-0.5 * ((x - 0.93) / 0.03) ** 2) + 1.0e5 * (1 - x)
+
+
+def _affine_problem(contraction, fixed_scale=1.0):
+    """A fixed-point map T(j) = J* + c (j - J*), with an l_i that follows the
+    iterate: its fixed point is J* = fixed_scale*shape, reached geometrically
+    at rate |c| (relaxed: |1 - omega (1 - c)|)."""
+    Jstar = fixed_scale * _shape()
+    state = {}
+
+    def step(jbs, k):
+        state["j"] = np.asarray(jbs, dtype=float).copy()
+        li = 1.0 + 1e-7 * float(np.trapezoid(_W * jbs, _X))
+        return dict(w=_W, x=_X, li=li, q0=1.0 + 1e-9 * float(jbs[0]))
+
+    def evaluate(meas):
+        return Jstar + contraction * (state["j"] - Jstar)
+
+    return Jstar, step, evaluate
+
+
+# ---------------------------------------------------------------------------
+#  settings
+# ---------------------------------------------------------------------------
+def test_defaults_are_the_approved_values_and_off():
+    from bouquet.config import GenerationConfig
+    g = GenerationConfig()
+    assert g.jbs_self_consistent is False
+    s = jbs_settings(g)
+    assert s["enabled"] is False
+    assert (s["rtol_j"], s["rtol_Ip"], s["tol_li"], s["tol_q0"]) == \
+        (1e-3, 1e-4, 1e-3, 2e-3)
+    assert s["max_passes"] == 8 and jbs_settings(g, draw=True)[
+        "max_passes"] == 6
+    assert s["relax"] == 0.7 and s["relax_floor"] == 0.25
+    assert s["on_fail"] == "raise" and s["init"] == "anchor"
+    assert s["required_consecutive"] == 2
+
+
+@pytest.mark.parametrize("field, bad", [
+    ("jbs_init", "sbw"), ("jbs_loop_on_fail", "ignore"),
+    ("jbs_rtol_j", 0.0), ("jbs_rtol_Ip", -1e-4), ("jbs_tol_li", float("nan")),
+    ("jbs_tol_q0", "x"), ("jbs_max_passes", 1), ("jbs_max_passes_draw", 2.5),
+    ("jbs_relax", 0.1), ("jbs_relax", 1.5), ("jbs_self_consistent", "yes"),
+])
+def test_malformed_settings_are_refused_by_name(field, bad):
+    with pytest.raises(ValueError, match=field):
+        validate_jbs_settings(_GC(**{field: bad}))
+
+
+def test_bouquet_config_validates_the_loop_fields():
+    from bouquet.config import (BouquetConfig, GenerationConfig,
+                                ImasSource, SolverConfig)
+    with pytest.raises(ValueError, match="jbs_loop_on_fail"):
+        BouquetConfig(source=ImasSource(ids_path="x.json"),
+                      solver=SolverConfig(mesh_path="m.h5"), output_header="t",
+                      generation=GenerationConfig(jbs_loop_on_fail="warn"))
+
+
+def test_config_round_trips_the_loop_fields():
+    from bouquet.config import (BouquetConfig, GenerationConfig,
+                                ImasSource, SolverConfig)
+    cfg = BouquetConfig(source=ImasSource(ids_path="x.json"),
+                        solver=SolverConfig(mesh_path="m.h5"), output_header="t",
+                        generation=GenerationConfig(
+                            jbs_self_consistent=True, jbs_init="swb",
+                            jbs_loop_on_fail="flag", jbs_max_passes=5))
+    back = BouquetConfig.from_dict(cfg.to_dict())
+    g = back.generation
+    assert (g.jbs_self_consistent, g.jbs_init, g.jbs_loop_on_fail,
+            g.jbs_max_passes) == (True, "swb", "flag", 5)
+
+
+def test_an_old_config_without_the_fields_loads_with_the_loop_off():
+    from bouquet.config import (BouquetConfig, GenerationConfig,
+                                ImasSource, SolverConfig)
+    d = BouquetConfig(source=ImasSource(ids_path="x.json"),
+                      solver=SolverConfig(mesh_path="m.h5"), output_header="t",
+                      generation=GenerationConfig()).to_dict()
+    for k in list(d["generation"]):
+        if k.startswith("jbs_") and k != "jbs_delta_mode":
+            del d["generation"][k]
+    assert BouquetConfig.from_dict(d).generation.jbs_self_consistent is False
+
+
+# ---------------------------------------------------------------------------
+#  residuals
+# ---------------------------------------------------------------------------
+def test_residuals_are_current_weighted_and_unrelaxed():
+    J = _shape()
+    jb = 0.99 * J
+    r = profile_residuals(J, jb, _W, _X, _IP)
+    assert r["r_j"] == pytest.approx(0.01, rel=1e-12)
+    I = float(np.trapezoid(_W * J, _X))
+    assert r["r_I"] == pytest.approx(0.01 * I / _IP, rel=1e-12)
+    assert r["I_BS"] == pytest.approx(I, rel=1e-12)
+    # the norm weights by |w|: a change where w is large counts more
+    d = np.zeros_like(_X)
+    d[-1] = 1.0
+    d0 = np.zeros_like(_X)
+    d0[0] = 1.0
+    assert weighted_norm(d, _W, _X) > weighted_norm(d0, _W, _X)
+
+
+def test_check_delivered_uses_the_same_bars():
+    s = jbs_settings(_GC())
+    J = _shape()
+    assert check_delivered(J, J * (1 - 5e-4), _W, _X, _IP, s)["ok"]
+    assert not check_delivered(J, J * (1 - 5e-3), _W, _X, _IP, s)["ok"]
+
+
+# ---------------------------------------------------------------------------
+#  the kernel
+# ---------------------------------------------------------------------------
+def test_contraction_converges_on_two_consecutive_passing_passes():
+    s = jbs_settings(_GC())
+    Jstar, step, ev = _affine_problem(-0.1)
+    out = run_jbs_loop(0.5 * Jstar, step, ev, s, Ip=_IP,
+                       meas0=dict(li=0.0), gate_li=True)
+    rec = out["record"]
+    assert out["converged"] and rec["converged"]
+    ok = rec["pass_ok"]
+    assert ok[-1] and ok[-2] and not any(ok[:-2] if len(ok) > 2 else [])
+    assert rec["n_passes"] == len(rec["r_j"]) <= s["max_passes"]
+    # delivered: within tolerance of the fixed point
+    assert profile_residuals(Jstar, out["jbs_used"], _W, _X, _IP)["r_j"] \
+        <= s["rtol_j"] / (1 + 0.1)
+    # the record is JSON-safe and carries the plan's fields
+    rj = jsonable(rec)
+    for key in ("enabled", "init", "grid", "n_passes", "converged",
+                "tolerances", "omega", "r_j", "r_I", "dl_i", "dq0", "I_BS",
+                "jBS_peak_psiN", "jBS_peak", "wall_s",
+                "evaluate_jBS_version", "oft_build"):
+        assert key in rj, key
+    import json
+    json.dumps(rj)
+
+
+def test_c_started_at_the_fixed_point_returns_it_in_one_pass():
+    """(c): the first pass already meets every criterion and returns the fixed
+    point unchanged; the loop stops at the minimum the two-consecutive rule
+    allows (2 passes)."""
+    s = jbs_settings(_GC())
+    Jstar, step, ev = _affine_problem(0.3)
+    li_star = 1.0 + 1e-7 * float(np.trapezoid(_W * Jstar, _X))
+    out = run_jbs_loop(Jstar.copy(), step, ev, s, Ip=_IP,
+                       meas0=dict(li=li_star, q0=None), gate_li=True)
+    rec = out["record"]
+    assert rec["pass_ok"][0], "the first pass at the fixed point must pass"
+    assert rec["r_j"][0] <= 1e-15 and rec["r_I"][0] <= 1e-15
+    assert rec["n_passes"] == 2 and out["converged"]
+    # (the relaxed update (1-w)J* + wJ* reproduces J* to rounding)
+    np.testing.assert_allclose(out["jbs_used"], Jstar, rtol=1e-14, atol=0)
+
+
+def test_d_two_initial_guesses_reach_the_same_fixed_point():
+    s = jbs_settings(_GC())
+    Jstar, step, ev = _affine_problem(-0.4)
+    a = run_jbs_loop(0.2 * Jstar, step, ev, s, Ip=_IP,
+                     meas0=dict(li=0.0), init="anchor")
+    Jstar2, step2, ev2 = _affine_problem(-0.4)
+    b = run_jbs_loop(3.0 * Jstar + 1e4, step2, ev2, s, Ip=_IP,
+                     meas0=dict(li=0.0), init="swb")
+    assert a["converged"] and b["converged"]
+    d = profile_residuals(a["jbs_used"], b["jbs_used"], _W, _X, _IP)
+    assert d["r_j"] <= 2 * s["rtol_j"]
+    assert b["record"]["init"] == "swb"
+
+
+def test_e_non_convergence_raises_with_the_history():
+    s = jbs_settings(_GC(jbs_max_passes=4))
+    Jstar, step, ev = _affine_problem(0.95)      # contracts too slowly
+    with pytest.raises(JBSNotConverged) as ei:
+        run_jbs_loop(0.5 * Jstar, step, ev, s, Ip=_IP, meas0=dict(li=0.0))
+    rec = ei.value.record
+    assert rec["converged"] is False and rec["n_passes"] == 4
+    assert len(rec["r_j"]) == 4 and "pass ceiling" in rec["stop_reason"]
+    assert ei.value.history is rec
+
+
+def test_e_flag_mode_returns_the_last_iterate_and_records_it():
+    from bouquet.jbs_loop import flag_reason, JBS_FLAG_PREFIX
+    s = jbs_settings(_GC(jbs_max_passes=3, jbs_loop_on_fail="flag"))
+    Jstar, step, ev = _affine_problem(0.95)
+    out = run_jbs_loop(0.5 * Jstar, step, ev, s, Ip=_IP, meas0=dict(li=0.0))
+    assert out["converged"] is False
+    assert out["record"]["jbs_converged"] is False
+    assert out["record"]["fail_message"]
+    assert flag_reason(out["record"]).startswith(JBS_FLAG_PREFIX)
+
+
+def test_growing_residual_halves_omega_to_the_floor_then_aborts():
+    """omega 0.7 -> 0.35 -> 0.25 (floor) on growth; three growing passes AT
+    the floor abort before the pass ceiling."""
+    s = jbs_settings(_GC(jbs_max_passes=12))
+    J0 = _shape()
+    shape2 = np.sin(np.pi * _X) * 1e5
+    cnt = {"k": 0, "j": None}
+
+    def step(jbs, k):
+        cnt["k"] = k
+        cnt["j"] = np.asarray(jbs, dtype=float).copy()
+        return dict(w=_W, x=_X, li=1.0)
+
+    def ev(meas):                       # a residual that grows 3x per pass
+        return cnt["j"] + 1e-3 * 3.0 ** cnt["k"] * shape2
+
+    with pytest.raises(JBSNotConverged) as ei:
+        run_jbs_loop(J0, step, ev, s, Ip=_IP, meas0=dict(li=1.0))
+    rec = ei.value.record
+    om = [w for w in rec["omega"] if w is not None]
+    assert om[:3] == pytest.approx([0.7, 0.35, 0.25])
+    assert min(om) == pytest.approx(JBS_RELAX_FLOOR)
+    assert all(b > a for a, b in zip(rec["r_j"], rec["r_j"][1:]))
+    assert "relaxation floor" in rec["stop_reason"]
+    assert rec["n_passes"] == 6 < 12
+
+
+def test_relaxation_changes_the_path_not_the_fixed_point():
+    outs = []
+    for w in (1.0, 0.7, 0.5):
+        J2, st2, ev2 = _affine_problem(-0.1)
+        o = run_jbs_loop(0.5 * J2, st2, ev2,
+                         jbs_settings(_GC(jbs_relax=w, jbs_max_passes=16)),
+                         Ip=_IP, meas0=dict(li=0.0))
+        assert o["converged"]
+        outs.append(o["jbs_used"])
+    for o in outs[1:]:
+        assert profile_residuals(outs[0], o, _W, _X, _IP)["r_j"] <= 3e-3
+
+
+def test_dq0_gates_only_when_asked():
+    s = jbs_settings(_GC())
+    Jstar, step, ev = _affine_problem(-0.1)
+    out = run_jbs_loop(0.5 * Jstar, step, ev, s, Ip=_IP,
+                       meas0=dict(li=0.0, q0=0.0), gate_q0=True)
+    assert out["record"]["criteria"]["dq0"] is True
+    assert all(v is not None for v in out["record"]["dq0"])
+
+
+def test_the_first_pass_without_a_previous_l_i_cannot_pass():
+    """meas0=None: pass 1 has no dl_i, so it cannot count toward convergence
+    -- the rule is never satisfied by a criterion that was not measured."""
+    s = jbs_settings(_GC())
+    Jstar, step, ev = _affine_problem(0.0)
+    li_star = 1.0 + 1e-7 * float(np.trapezoid(_W * Jstar, _X))
+    out = run_jbs_loop(Jstar.copy(), step, ev, s, Ip=_IP, meas0=None)
+    assert out["record"]["pass_ok"][0] is False
+    assert out["record"]["n_passes"] == 3
+    assert out["record"]["li"][0] == pytest.approx(li_star)
+
+
+# ---------------------------------------------------------------------------
+#  the evaluator on a mock equilibrium
+# ---------------------------------------------------------------------------
+_bs = pytest.importorskip(
+    "OpenFUSIONToolkit.TokaMaker.bootstrap",
+    reason="evaluate_jBS wraps OFT's pure-Python Redl implementation; "
+           "OpenFUSIONToolkit is not importable here")
+
+
+class _MockEq:
+    """Analytic flux-surface geometry of a shaped D3D-like plasma.
+
+    Every getter is a smooth function of psi_N and RECORDS the sample array it
+    was asked for, so the tests can see exactly which surfaces the evaluator
+    queried.  Dict layouts (current OFT); ``legacy=True`` returns the
+    positional-array layout of older builds.
+    """
+
+    R0, a, B0 = 1.7, 0.6, 2.0
+
+    def __init__(self, legacy=False, psi_bounds=(-0.9, 0.1)):
+        self.legacy = legacy
+        self.psi_bounds = np.asarray(psi_bounds, dtype=float)
+        self.calls = []
+
+    def _geo(self, psi):
+        psi = np.asarray(psi, dtype=float)
+        r = self.a * np.sqrt(psi)
+        eps = r / self.R0
+        R = self.R0 * (1.0 + 0.1 * psi)
+        return psi, r, eps, R
+
+    def get_profiles(self, psi=None, **kw):
+        self.calls.append(("get_profiles", np.array(psi)))
+        psi, r, eps, R = self._geo(psi)
+        F = self.R0 * self.B0 * (1.0 - 0.02 * psi)
+        return psi, F, 0 * F, 0 * F, 0 * F
+
+    def sauter_fc(self, psi=None, **kw):
+        self.calls.append(("sauter_fc", np.array(psi)))
+        psi, r, eps, R = self._geo(psi)
+        fc = 1.0 - 1.46 * np.sqrt(eps)
+        rav = {"<R>": R, "<1/R>": 1.0 / R * (1 + eps ** 2 / 2), "<a>": r}
+        modb = np.vstack([np.full_like(psi, self.B0),
+                          (self.B0 ** 2) * (1 + eps ** 2)])
+        if self.legacy:
+            rav = np.vstack([rav["<R>"], rav["<1/R>"], rav["<a>"]])
+        return psi, fc, rav, modb
+
+    def get_q(self, psi=None, **kw):
+        self.calls.append(("get_q", np.array(psi)))
+        psi, r, eps, R = self._geo(psi)
+        q = 1.05 + 2.5 * psi ** 2
+        rav = {"<R>": R, "<1/R>": 1.0 / R, "<1/R^2>": 1.0 / R ** 2,
+               "dV/dPsi": 2 * np.pi ** 2 * self.a ** 2 * self.R0 * np.ones_like(psi)}
+        if self.legacy:
+            rav = np.vstack([rav["<R>"], rav["<1/R>"], rav["dV/dPsi"]])
+        return psi, q, rav, None, None, None
+
+
+def _kin(x):
+    """Physical H-mode-like profiles as functions of psi_N (pedestal ~0.95)."""
+    ped = 0.5 * (1 - np.tanh((x - 0.95) / 0.02))
+    ne = 1.0e19 * (0.3 + 3.0 * ped * (1 - 0.3 * x ** 2))
+    te = 30.0 + 3000.0 * ped * (1 - 0.6 * x ** 2)
+    ti = 30.0 + 2800.0 * ped * (1 - 0.6 * x ** 2)
+    ni = 0.85 * ne
+    zeff = 1.8 + 0 * x
+    return ne, te, ni, ti, zeff
+
+
+def test_geometry_is_sampled_on_the_callers_surfaces_without_repeats():
+    """The IMAS-type grid [0, 1.73e-4, 6.92e-4, 1.557e-3, ...] puts three
+    surfaces inside psi_pad = 1e-3: they must NOT be merged or dropped (each
+    keeps its own profile value and gradient) and psi_pad must NOT change;
+    only their geometry is looked up at psi_pad -- once."""
+    from bouquet.physics import evaluate_jBS
+    # uniform in a rho-like label: psi_N = (k/76)^2 -> [0, 1.73e-4, 6.92e-4,
+    # 1.558e-3, 2.77e-3, ...]
+    psi = (np.arange(77) / 76.0) ** 2
+    np.testing.assert_allclose(psi[1:4], [1.73e-4, 6.92e-4, 1.558e-3],
+                               rtol=2e-3)
+    assert np.all(np.diff(psi) > 0)
+    eq = _MockEq()
+    j, d = evaluate_jBS(eq, psi, *_kin(psi), psi_pad=1e-3, smooth_axis=False)
+    assert j.shape == psi.shape and np.all(np.isfinite(j))
+    assert d["psi_pad"] == 1e-3
+    for name, arr in eq.calls:
+        assert np.all(np.diff(arr) > 0), f"{name} was handed a repeated surface"
+        assert arr[0] == pytest.approx(1e-3) and arr[-1] <= 1 - 1e-3
+    # the 3 points inside the pad share ONE geometry sample, nothing else
+    assert d["n_geometry_surfaces"] == psi.size - 2
+    np.testing.assert_array_equal(d["psi_eval"][:3], [1e-3] * 3)
+    assert d["psi_eval"][3] == psi[3]
+    # ... but each keeps its own profile values and TRUE-grid gradient, so
+    # their Redl drives stay distinct (no surface was merged)
+    assert len(np.unique(d["j_dot_B"][:3])) == 3
+
+
+def test_gradients_are_on_the_true_grid_and_the_current_flux_range():
+    from bouquet.physics import evaluate_jBS
+    x = np.linspace(0, 1, 201)
+    eq1 = _MockEq(psi_bounds=(-0.9, 0.1))
+    eq2 = _MockEq(psi_bounds=(-1.9, 0.1))          # twice the flux range
+    j1, _ = evaluate_jBS(eq1, x, *_kin(x), smooth_axis=False)
+    j2, _ = evaluate_jBS(eq2, x, *_kin(x), smooth_axis=False)
+    # the Redl drive is linear in d/dpsi = (d/dpsi_N)/Delta_psi; collisional
+    # terms do not depend on Delta_psi, so j scales exactly as 1/Delta_psi
+    np.testing.assert_allclose(j2, 0.5 * j1, rtol=1e-12, atol=1e-9)
+
+
+def test_legacy_array_layout_gives_the_same_answer():
+    from bouquet.physics import evaluate_jBS
+    x = np.linspace(0, 1, 151)
+    ja, _ = evaluate_jBS(_MockEq(), x, *_kin(x))
+    jb, _ = evaluate_jBS(_MockEq(legacy=True), x, *_kin(x))
+    np.testing.assert_array_equal(ja, jb)
+
+
+def test_b_uniform_and_non_uniform_grids_agree_defect_A_regression():
+    """(b): the same physical profiles on a uniform and on a rho-uniform
+    (strongly non-uniform) psi_N grid give the same j_BS(psi_N) to
+    interpolation accuracy.  The legacy reading -- the non-uniform array
+    differentiated as if evenly sampled (``solve_with_bootstrap`` without
+    ``psi_N=``, defect A) -- misses by an order of magnitude more."""
+    from bouquet.physics import evaluate_jBS
+    xu = np.linspace(0.0, 1.0, 1001)
+    ju, _ = evaluate_jBS(_MockEq(), xu, *_kin(xu), smooth_axis=False)
+    # uniform in a rho-like label; fine enough to resolve the pedestal, so
+    # what is measured is the GRID MAPPING, not the finite-difference
+    # resolution of either grid
+    rho = np.linspace(0.0, 1.0, 801)
+    xn = rho ** 2 * (0.5 + 0.5 * rho)
+    jn, _ = evaluate_jBS(_MockEq(), xn, *_kin(xn), smooth_axis=False)
+    # legacy: the non-uniform ARRAYS read as if on an even grid
+    xl = np.linspace(0.0, 1.0, xn.size)
+    kin_n = _kin(xn)
+    jl, _ = evaluate_jBS(_MockEq(), xl, *kin_n, smooth_axis=False)
+    # compare on the reference (uniform) grid, current-weighted, away from
+    # the tracer-clipped axis and separatrix samples
+    sel = (xu > 0.02) & (xu < 0.995)
+    w = np.ones(sel.sum())
+    ref = ju[sel]
+    new = np.interp(xu[sel], xn, jn)
+    old = np.interp(xu[sel], xn, jl)     # legacy values, placed at their TRUE psi_N
+    e_new = weighted_norm(new - ref, w, xu[sel]) / weighted_norm(ref, w, xu[sel])
+    e_old = weighted_norm(old - ref, w, xu[sel]) / weighted_norm(ref, w, xu[sel])
+    assert e_new < 0.02, f"non-uniform grid disagrees by {e_new:.3%}"
+    assert e_old > 10 * e_new, (e_old, e_new)
+
+
+def test_evaluate_refuses_bad_grids_by_name():
+    from bouquet.physics import evaluate_jBS
+    x = np.linspace(0, 1, 11)
+    k = _kin(x)
+    with pytest.raises(ValueError, match="strictly increasing"):
+        evaluate_jBS(_MockEq(), x[::-1], *k)
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        evaluate_jBS(_MockEq(), x * 1.1, *k)
+    with pytest.raises(ValueError, match="ne has shape"):
+        evaluate_jBS(_MockEq(), x, k[0][:-1], *k[1:])
+    with pytest.raises(ValueError, match="psi_pad"):
+        evaluate_jBS(_MockEq(), x, *k, psi_pad=0.0)
+
+
+def test_draw_composer_reproduces_the_legacy_composition_rules():
+    """The per-draw composition: scale on the (isolated) spike only, floor,
+    jBS_diff outside delta mode; delta mode = baseline + (scale*raw - ref)."""
+    from bouquet.physics import evaluate_jBS
+    from bouquet.TokaMaker_interface import (_draw_jbs_composer,
+                                             smooth_jbs_transition)
+    x = np.linspace(0, 1, 129)
+    k = _kin(x)
+    base, d = evaluate_jBS(_MockEq(), x, *k)
+    diff = 1e3 * np.sin(3 * x)
+    comp = _draw_jbs_composer(x, *k, 1e-3, False, 0.9, False, diff, None,
+                              None)
+    spike, full, _ = comp(_MockEq())
+    np.testing.assert_allclose(spike, 0.9 * base + diff, rtol=1e-13)
+    np.testing.assert_allclose(
+        full, smooth_jbs_transition(d["j_tor_full_raw"]), rtol=1e-13)
+    # delta mode: at sigma=0 (same state, ref at the same scale) the spike IS
+    # the baseline split, whatever the evaluator's common-mode artifacts
+    raw, _ = evaluate_jBS(_MockEq(), x, *k, smooth_axis=False)
+    bl = 2e5 + 0 * x
+    comp_d = _draw_jbs_composer(x, *k, 1e-3, False, 0.9, False, diff,
+                                0.9 * raw, bl)
+    spike_d, _, _ = comp_d(_MockEq())
+    np.testing.assert_allclose(spike_d, bl, rtol=0, atol=1e-9)
+    # floor
+    comp_f = _draw_jbs_composer(x, *k, 1e-3, False, 1.0, True, -1e9 + 0 * x,
+                                None, None)
+    assert np.all(comp_f(_MockEq())[0] < 0)   # diff added AFTER the floor
