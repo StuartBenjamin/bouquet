@@ -3605,6 +3605,7 @@ def store_equilibrium(
     diverted=None,
     aux=None,
     eq_fsa=None,
+    jbs_loop=None,
 ):
     """
     Write one perturbed equilibrium into the HDF5 database.
@@ -3638,6 +3639,12 @@ def store_equilibrium(
         1-D effective charge profile (dimensionless).
     coil_currents : dict or None
         Coil currents {name: current_A} from TokaMaker.
+    jbs_loop : dict or None
+        The draw's self-consistent bootstrap record
+        (``GenerationConfig.jbs_self_consistent``): written as the group
+        attrs ``jbs_converged`` / ``jbs_n_passes`` and the full record as
+        JSON in ``jbs_loop_json``.  ``None`` (the legacy path) writes nothing,
+        so a legacy archive is unchanged.
     """
     db_path = os.path.abspath(f"{header}.h5")
     if not os.path.isfile(db_path):
@@ -3800,6 +3807,37 @@ def store_equilibrium(
                 _u = EQ_FSA_UNITS.get(_name)
                 if _u:
                     ds.attrs["units"] = _u
+
+        # ---- self-consistent bootstrap record (optional) ------------------
+        if jbs_loop is not None:
+            import json as _json
+            from .jbs_loop import jsonable as _jsonable
+            _rec = _jsonable(jbs_loop)
+            grp.attrs["jbs_converged"] = bool(_rec.get("converged", False))
+            grp.attrs["jbs_n_passes"] = int(_rec.get("n_passes_total", 0)
+                                            or 0)
+            grp.attrs["jbs_loop_json"] = _json.dumps(_rec)
+
+
+def load_jbs_loop(header, count, scan_key=None):
+    """The self-consistent bootstrap record of one draw, or ``None``.
+
+    Reads the ``jbs_loop_json`` attr :func:`store_equilibrium` writes when
+    ``GenerationConfig.jbs_self_consistent`` was on; legacy draws carry none.
+    """
+    import json as _json
+    db_path = os.path.abspath(f"{header}.h5") if not str(header).endswith(
+        ".h5") else os.path.abspath(str(header))
+    with h5py.File(db_path, "r") as hf:
+        grp_path = _group_path(scan_key, count)
+        if grp_path not in hf:
+            raise KeyError(f"{grp_path} not in {db_path}")
+        raw = hf[grp_path].attrs.get("jbs_loop_json")
+    if raw is None:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode()
+    return _json.loads(raw)
 
 
 def load_eq_fsa(header, count, scan_key=None):
