@@ -1782,7 +1782,8 @@ class Bouquet:
            the j_BS residuals hold on two consecutive steps AND the synthetic
            tan(gamma) moved by less than
            ``jbs_loop.MSE_CHORD_OFFSET_TOL_SIGMA`` sigma on every chord
-           (at most ``jbs_loop.MSE_CHORD_MAX_STEPS`` steps);
+           (at most ``jbs_max_passes`` steps: every chord step is also a
+           pass of the bootstrap loop, so the loop's own ceiling applies);
         3. the Jacobian recomputed ONCE at the converged state and one final
            step taken, because a stale Jacobian biases the stationary point of
            a chord iteration, not only its rate; the Jacobian change and the
@@ -1806,11 +1807,10 @@ class Bouquet:
                             structured_basis_eval, structured_mse_jacobian,
                             structured_mse_linear_model,
                             structured_objective_no_mse)
-        from .jbs_loop import (MSE_CHORD_MAX_STEPS,
-                               MSE_CHORD_OFFSET_TOL_SIGMA, JBSNotConverged,
+        from .jbs_loop import (MSE_CHORD_OFFSET_TOL_SIGMA, JBSNotConverged,
                                profile_residuals, JBS_RELAX_FLOOR,
                                JBS_REQUIRED_CONSECUTIVE,
-                               JBS_GROWTH_ABORT_PASSES, flag_reason)
+                               JBS_GROWTH_ABORT_PASSES)
 
         ch = state["mse"]
         required = bool(state.get("mse_required", False))
@@ -1870,7 +1870,7 @@ class Bouquet:
 
         srec = dict(stage=("structured MSE chord iteration with j_BS "
                            "re-evaluated after every solve"),
-                    chord_max_steps=int(MSE_CHORD_MAX_STEPS),
+                    chord_max_steps=int(settings["max_passes"]),
                     chord_offset_tol_sigma=float(MSE_CHORD_OFFSET_TOL_SIGMA),
                     jacobian_note=("forward differences with j_BS held "
                                    "fixed: an approximation of the loop "
@@ -1913,7 +1913,8 @@ class Bouquet:
             out = None
             converged = False
             n_step = 0
-            for s in range(int(MSE_CHORD_MAX_STEPS)):
+            n_chord = int(settings["max_passes"])
+            for s in range(n_chord):
                 n_step = s + 1
                 lin = structured_mse_linear_model(x_lin, tg_lin, J1, ch)
                 out = _resolve(cur, lin)
@@ -1993,7 +1994,7 @@ class Bouquet:
                     srec["stop_reason"] = ("r_j grew at the relaxation "
                                            "floor")
                     break
-                if s == int(MSE_CHORD_MAX_STEPS) - 1:
+                if s == n_chord - 1:
                     break
                 jbs = (1.0 - omega) * jbs + omega * J
                 omega_cur = omega
@@ -2003,7 +2004,7 @@ class Bouquet:
 
             if not converged:
                 srec["stop_reason"] = srec["stop_reason"] or (
-                    f"no convergence within {MSE_CHORD_MAX_STEPS} chord "
+                    f"no convergence within {n_chord} chord "
                     "steps (j_BS residuals on two consecutive steps and "
                     "tan(gamma) offset change)")
             else:
@@ -4344,11 +4345,14 @@ class Bouquet:
         point of the iteration differs.
 
         **With ``jbs_self_consistent=True``** the invariant is the loop's own:
-        the sigma=0 DRAW loop (the same composition, inductive treatment and
-        per-pass Ip renormalisation a draw uses, started from the state anchor
-        above) must converge, and converge to the BASELINE -- its bootstrap
-        within the loop's ``jbs_rtol_j``/``jbs_rtol_Ip`` of ``baseline.j_BS``
-        (+ ``jBS_diff``) and its l_i within ``jbs_tol_li`` of the baseline's.
+        the sigma=0 draw bootstrap loop (the per-draw composition, started from
+        the state anchor above, with the baseline's inductive held as the
+        standard draw anchor holds it) must converge, and converge to the
+        BASELINE -- its bootstrap within the loop's ``jbs_rtol_j`` /
+        ``jbs_rtol_Ip`` of ``baseline.j_BS`` (+ ``jBS_diff``) and its l_i
+        within ``jbs_tol_li`` of the baseline's.  (Route R2's inductive Ip
+        renormalisation is a separate sigma=0 invariant with its own budget,
+        tested in ``tests/test_seeded_reproducibility.py``.)
         ``tol_frac``/``swb_iterations`` are then unused (no SWB is called).
 
         Costs one SWB call (~1 min). Call after ``reconstruct()`` /
@@ -4541,8 +4545,7 @@ class Bouquet:
         import numpy as np
         from .jbs_loop import (profile_residuals, residual_weights,
                                run_jbs_loop, jsonable)
-        from .TokaMaker_interface import (_draw_jbs_composer, _AnchorIpRenorm,
-                                          _r2_ip_mode, _r2_ip_scale)
+        from .TokaMaker_interface import _draw_jbs_composer
 
         bl = self.baseline
         mygs = self.mygs
@@ -4567,9 +4570,6 @@ class Bouquet:
                 np.asarray(bl.jphi_diff, dtype=float), psi_N)
         ref = np.asarray(bl.j_BS, dtype=float) + (0.0 if jdiff is None
                                                   else jdiff)
-        fixc = bool(gc.perturb_jind_in_anchor)
-        r2_mode = _r2_ip_mode()
-        st = {}
 
         def _solve(j):
             from .utils import pchip_derivative
@@ -4584,16 +4584,12 @@ class Bouquet:
             mygs.solve()
 
         def _step(spk, k):
-            if fixc:
-                _aip = None
-                if r2_mode != "legacy":
-                    _aip = _AnchorIpRenorm(mygs, psi_N, bl.j_phi, Ip,
-                                           psi_pad, mode=r2_mode)
-                _s = _r2_ip_scale(_aip, mygs, j_ind, spk + j_fix, psi_N, Ip)
-            else:
-                _s = 1.0
-            st["s"] = float(_s)
-            _solve(_s * j_ind + spk + j_fix)
+            # the baseline's own inductive, held (TokaMaker renormalises the
+            # total to Ip exactly as the baseline solve did): the Ip
+            # renormalisation of route R2 / Fix C is its own sigma=0
+            # invariant (|s-1|*f_ind, tests/test_seeded_reproducibility.py)
+            # and is not re-tested here
+            _solve(j_ind + spk + j_fix)
             _snap = mygs.copy_eq()
             _w, _x, _k = residual_weights(_snap, psi_N, psi_pad)
             return dict(w=_w, x=_x, snap=_snap,
@@ -4629,7 +4625,6 @@ class Bouquet:
                    r_I_vs_baseline=float(cmp_["r_I"]),
                    li_sigma0=li_s0, li_baseline=float(bl.l_i_target),
                    dl_i_vs_baseline=float(dli),
-                   ip_renorm_scale=st.get("s"),
                    record=jsonable(res["record"]))
         # leave mygs re-anchored on the baseline equilibrium
         mygs.set_targets(Ip=Ip, pax=float(pressure[0]))

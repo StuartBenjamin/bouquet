@@ -6813,6 +6813,18 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         step-6 matched value by more than the draws are allowed to sit from it
         -- a REPORTED condition, never a raise.  See the ``[li post-corrective]``
         block and issue #25.
+    jbs_loop : dict or None
+        :func:`bouquet.jbs_loop.jbs_settings` when
+        ``GenerationConfig.jbs_self_consistent`` is on.  The bootstrap is then
+        Redl (:func:`bouquet.physics.evaluate_jBS`) on the g-file's own current
+        at the full pressure (``init="anchor"``) instead of
+        ``solve_with_bootstrap``, and the inductive fit + l_i secant are
+        iterated with it to self-consistency; the corrective iteration runs
+        once afterwards, followed by a post-corrective check (up to
+        ``jbs_max_passes`` further passes of fit + l_i match + corrective).
+        The record is
+        returned as ``result['jbs_loop']``.  ``None`` (default) is the legacy
+        path, bit for bit.
 
     Returns
     -------
@@ -7436,13 +7448,12 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     # ---- 7c. self-consistent bootstrap: post-corrective check --------------
     # The corrective iteration moved the equilibrium after the loop converged.
     # Redl on the delivered equilibrium must still match the bootstrap it
-    # carries; otherwise up to JBS_POST_HOMOTOPY_PASSES further passes (fit +
+    # carries; otherwise up to jbs_max_passes further passes (fit +
     # l_i match + the same corrective iteration), and a reconstruction that
     # cannot be brought back inside the loop tolerances follows the loop's
     # failure policy (raise / flag).
     if _jbs_on:
-        from .jbs_loop import (check_delivered, JBS_POST_HOMOTOPY_PASSES,
-                               jsonable as _jsonable)
+        from .jbs_loop import check_delivered, jsonable as _jsonable
         _snap_pc = mygs.copy_eq()
         _J_pc = _jbs_eval(dict(snap=_snap_pc))
         _w_pc, _x_pc, _k_pc = residual_weights(_snap_pc, eqdsk.psi_N, psi_pad)
@@ -7453,7 +7464,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         print(f"[reconstruct jbs-loop] post-corrective r_j={_chk['r_j']:.3e} "
               f"r_I={_chk['r_I']:.3e} -> "
               + ("inside tolerance" if _chk["ok"] else
-                 f"outside tolerance, up to {JBS_POST_HOMOTOPY_PASSES} "
+                 f"outside tolerance, up to {int(jbs_loop['max_passes'])} "
                  "further passes"), flush=True)
         if not _chk["ok"]:
             _pc_state = {}
@@ -7489,7 +7500,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                     li_normalization='iter', lcfs_pad=psi_pad)['l_i'])),
                 gate_li=True, gate_q0=False,
                 label="geqdsk reconstruction post-corrective",
-                max_passes=int(JBS_POST_HOMOTOPY_PASSES))
+                max_passes=int(jbs_loop["max_passes"]))
             _pc["passes"] = _res_pc["record"]
             if not _res_pc["converged"]:
                 _jbs_record["converged"] = False

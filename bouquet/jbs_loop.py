@@ -64,9 +64,8 @@ JBS_REQUIRED_CONSECUTIVE = 2
 JBS_GROWTH_ABORT_PASSES = 3
 #: Extra passes a draw may take at the tight coil stage after the homotopy.
 JBS_POST_HOMOTOPY_PASSES = 2
-#: MSE-constrained structured closure: ceiling on chord steps (closure with
-#: the linearised MSE term -> solve -> evaluate_jBS) after the Jacobian.
-MSE_CHORD_MAX_STEPS = 4
+#: (The MSE chord stage and the geqdsk post-corrective stage are passes of
+#: the baseline loop and take ``jbs_max_passes`` as their ceiling.)
 #: MSE chord iteration: the linearisation point has stopped moving when the
 #: synthetic tan(gamma) changes by less than this many sigma_eff on every chord
 #: between consecutive chord steps.  A NEW criterion introduced with the loop
