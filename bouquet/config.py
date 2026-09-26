@@ -950,9 +950,61 @@ class GenerationConfig:
     # already ~clean, so flooring is redundant -- and it REGRESSED a stiff
     # high-l_i case (clipping its isolate-edge spike drove yield to 0).
     floor_j_BS: bool = False
-    # solve_with_bootstrap H-mode self-consistency iterations per draw (default
-    # 3); lowering to 2 trades a little accuracy for speed on large bouquets.
+    # LEGACY (the frozen-bootstrap path, jbs_self_consistent=False, and the
+    # jbs_init="swb" A/B init only).  solve_with_bootstrap's fixed Picard pass
+    # count per draw (default 3; there is no convergence test inside it);
+    # lowering to 2 trades a little accuracy for speed on large bouquets.
+    # NOTE: the IMAS baseline's own SWB call never passed this and always ran
+    # OFT's own default (iterations=3); only the draws, the delta-mode cache
+    # and verify_sigma0_consistency read it.  With jbs_self_consistent=True
+    # the bootstrap comes from the self-consistent loop and this is unused.
     swb_iterations: int = 3
+    # --- self-consistent bootstrap loop (bouquet.jbs_loop) -------------------
+    # False (default): the bootstrap is computed once (solve_with_bootstrap on
+    # its own auxiliary equilibrium) and then only rescaled -- the historical
+    # behaviour, byte-identical to every run made before these fields existed.
+    # True: j_BS is re-evaluated (physics.evaluate_jBS: Redl on the caller's
+    # own psi_N grid and the CURRENT equilibrium's geometry) inside a relaxed
+    # outer loop closure <-> GS solve <-> Redl, in every path that builds a
+    # j_phi containing a bootstrap (the IMAS baseline in every
+    # jBS_baseline_mode and closure channel incl. the structured/MSE closures,
+    # every draw incl. Fix C and the standard l_i loop, the sigma=0 check and
+    # the geqdsk reconstruction), until the residuals below hold on TWO
+    # CONSECUTIVE passes.  See docs/physics-notes.md, "Self-consistent
+    # bootstrap".
+    jbs_self_consistent: bool = False
+    # Initial guess of the loop: "anchor" = evaluate_jBS on the anchor
+    # equilibrium (the source's own total current and full pressure); "swb" =
+    # the legacy solve_with_bootstrap result (A/B only).  The fixed point does
+    # not depend on it.
+    jbs_init: str = "anchor"
+    # Convergence tolerances (all active ones must hold on two consecutive
+    # passes):
+    #   jbs_rtol_j  -- current-weighted L2 residual of the j_BS profile
+    #   jbs_rtol_Ip -- residual of the bootstrap current integral, over Ip
+    #   jbs_tol_li  -- absolute change of the solved l_i between passes
+    #   jbs_tol_q0  -- absolute change of the solved q0 between passes (only
+    #                  where an axis row / q0 target is active)
+    jbs_rtol_j: float = 1.0e-3
+    jbs_rtol_Ip: float = 1.0e-4
+    jbs_tol_li: float = 1.0e-3
+    jbs_tol_q0: float = 2.0e-3
+    # Pass ceilings: baseline / reconstruction, and per draw (a draw gets up to
+    # jbs_loop.JBS_POST_HOMOTOPY_PASSES further passes at the tight coil stage
+    # after the post-perturb homotopy).
+    jbs_max_passes: int = 8
+    jbs_max_passes_draw: int = 6
+    # Initial under-relaxation omega: j_BS <- (1-omega) j_BS + omega Redl.
+    # Halved (floor jbs_loop.JBS_RELAX_FLOOR = 0.25) whenever r_j grows; three
+    # growing passes at the floor abort the loop.  Relaxation changes the path,
+    # not the fixed point.
+    jbs_relax: float = 0.7
+    # Non-convergence: "raise" (default) -> jbs_loop.JBSNotConverged carrying
+    # the residual history; "flag" -> keep the last iterate, record
+    # jbs_converged=False plus a closure_limited reason (drivers then exclude
+    # the slice from verdicts).  A draw whose loop does not converge is a
+    # FAILED draw in either mode.
+    jbs_loop_on_fail: str = "raise"
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single
@@ -1297,6 +1349,10 @@ class BouquetConfig:
             raise ValueError(
                 "generation.workflow must be 'auto', 'geqdsk-standard', "
                 "'imas-diff-c', or 'custom'")
+        # the self-consistent bootstrap loop's settings (values only; the
+        # workflow-level refusals live in Bouquet._validate_workflow)
+        from .jbs_loop import validate_jbs_settings
+        validate_jbs_settings(self.generation)
 
     # ── serialization (h5 provenance, per-shot templating, SLURM bundles) ──
     def to_dict(self) -> dict:
