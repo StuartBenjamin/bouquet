@@ -49,6 +49,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
                    max_VSC_drift_pct, in_spec, inspec_*, l_i_target_used,
                    [diverted], [passes_coil_filter, passes_boundary_filter,
                    selected]           ← filter flags, written post-hoc
+                   [jbs_converged, jbs_n_passes, jbs_loop_json]
+                                       ← self-consistent bootstrap only
 ```
 
 ## Conventions
@@ -84,6 +86,14 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
   parallel↔toroidal current split in the IMAS/OMAS exporter
   (`write_imas_draw(..., fidelity="exact")`); read it back with
   `bq.load_eq_fsa`.
+
+- **Self-consistent bootstrap record.** With
+  `GenerationConfig.jbs_self_consistent=True` every draw carries
+  `jbs_converged` (bool), `jbs_n_passes` (int, all loops of the draw) and the
+  full loop record as JSON in `jbs_loop_json` (residual histories, relaxation,
+  tolerances, the post-homotopy check); read it with
+  `bouquet.utils.load_jbs_loop(header, count, scan_key)`. Legacy runs write
+  none of these, so the schema version is unchanged.
 
 ## Legacy (pre-v2) archives
 
