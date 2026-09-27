@@ -446,6 +446,79 @@ def build_rng_stream(source_slim=None, out_dir=_HERE, seed=RNG_STREAM_SEED):
     return path
 
 
+# A committed fixture must not name a host, a user or a filesystem location.
+# The self-consistent bootstrap record (the jbs_loop_json attrs) carries the
+# OFT build's package PATH, which is right for a user's own archive and wrong
+# for a public fixture: keep its basename (the git hash / build identity is
+# stamped separately, by content digest).  The guard below then refuses a
+# fixture in which any absolute path survived, wherever it came from.
+_ABS_PATH_RE = None
+
+
+def _abs_path_re():
+    global _ABS_PATH_RE
+    if _ABS_PATH_RE is None:
+        import re
+        _ABS_PATH_RE = re.compile(
+            r"(?<![A-Za-z0-9_.])/(?:Users|home|mnt|tmp|private|var|scratch|"
+            r"cscratch|opt|srv|data|work|global|gpfs|lustre)/[^\s\"']*")
+    return _ABS_PATH_RE
+
+
+def _scrub_paths(node):
+    """Recursively replace absolute filesystem paths in a JSON-like record by
+    their basename."""
+    if isinstance(node, dict):
+        return {k: _scrub_paths(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_scrub_paths(v) for v in node]
+    if isinstance(node, str) and _abs_path_re().search(node):
+        return _abs_path_re().sub(
+            lambda m: os.path.basename(m.group(0).rstrip("/")) or "<path>",
+            node)
+    return node
+
+
+def _scrub_attr(key, value):
+    """The attr value to store in the fixture (loop records path-scrubbed)."""
+    if key == "jbs_loop_json":
+        raw = value.decode() if isinstance(value, bytes) else str(value)
+        return json.dumps(_scrub_paths(json.loads(raw)))
+    return value
+
+
+def assert_no_filesystem_paths(slim_path):
+    """Refuse a fixture that names an absolute filesystem path anywhere a
+    reader would see text: string attrs, string datasets (config_json) and
+    the geqdsk header lines."""
+    import gzip  # noqa: F401  (geqdsks are stored gzip-filtered by h5py)
+    rx = _abs_path_re()
+    hits = []
+    with h5py.File(slim_path, "r") as hf:
+        def _check(where, val):
+            if isinstance(val, bytes):
+                val = val.decode(errors="replace")
+            if isinstance(val, str) and rx.search(val):
+                hits.append(f"{where}: {rx.search(val).group(0)[:80]}")
+
+        for k, v in hf.attrs.items():
+            _check(f"/@{k}", v)
+
+        def _v(name, obj):
+            for k, v in obj.attrs.items():
+                _check(f"{name}@{k}", v)
+            if isinstance(obj, h5py.Dataset):
+                if _is_eqdsk_name(name.rsplit("/", 1)[-1]):
+                    head = bytes(obj[()])[:4096]
+                    _check(name + " (geqdsk head)", head)
+                elif obj.dtype.kind in ("S", "O", "U"):
+                    _check(name, obj[()])
+        hf.visititems(_v)
+    if hits:
+        raise SystemExit("REFUSING: the fixture names filesystem paths "
+                         "(public repo):\n  " + "\n  ".join(hits[:20]))
+
+
 def build(source, out_dir=_HERE, eqdsk="all"):
     if eqdsk not in ("all", "subset", "none"):
         raise ValueError("eqdsk must be 'all', 'subset', or 'none'")
@@ -574,7 +647,7 @@ def build(source, out_dir=_HERE, eqdsk="all"):
                 for ak in obj.attrs:
                     if ak in _filter_attrs:
                         continue
-                    g.attrs[ak] = obj.attrs[ak]
+                    g.attrs[ak] = _scrub_attr(ak, obj.attrs[ak])
                 return
             # dataset
             if _is_pfile_name(name.rsplit("/", 1)[-1]):
@@ -608,6 +681,7 @@ def build(source, out_dir=_HERE, eqdsk="all"):
             dst.attrs[k] = v
         dst.attrs["prov_schema"] = 1
 
+    assert_no_filesystem_paths(slim_path)
     with open(manifest_path, "w") as fh:
         json.dump(manifest, fh, indent=2, sort_keys=True)
 
