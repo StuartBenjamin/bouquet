@@ -3298,6 +3298,7 @@ def store_equilibrium(
     max_F_drift_pct=None,
     max_VSC_drift_pct=None,
     in_spec=None,
+    jbs_delta_active=None,
     inspec_F_max=None,
     inspec_VSC_max=None,
     perturbed_lcfs_ref=None,
@@ -3469,6 +3470,8 @@ def store_equilibrium(
             grp.attrs["max_VSC_drift_pct"] = float(max_VSC_drift_pct)
         if in_spec is not None:
             grp.attrs["in_spec"] = bool(in_spec)
+        if jbs_delta_active is not None:
+            grp.attrs["jbs_delta_active"] = bool(jbs_delta_active)
         if inspec_F_max is not None:
             grp.attrs["inspec_F_max"] = float(inspec_F_max)
         if inspec_VSC_max is not None:

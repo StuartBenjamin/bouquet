@@ -46,7 +46,7 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
         │   ├── F, avg_inv_R, avg_inv_R2, avg_B2
         │   └── q, dV_dpsi, f_trap, B_avg
         └── attrs: l_i(1), l_i(3), count, profile_coord, homotopy_*, max_F_drift_pct,
-                   max_VSC_drift_pct, in_spec, inspec_*, l_i_target_used,
+                   max_VSC_drift_pct, in_spec, inspec_*, l_i_target_used, [jbs_delta_active],
                    [diverted], [passes_coil_filter, passes_boundary_filter,
                    selected]           ← filter flags, written post-hoc
 ```

@@ -1658,6 +1658,27 @@ def smooth_jbs_transition(j_BS):
 # ====================================================================
 #  Core perturbation routine
 # ====================================================================
+def _install_weak_swb_coil_reg(mygs):
+    """Swap the strong coil reg for the weak SWB one (see the SWB hygiene
+    block in :func:`perturb_kinetic_equilibrium`); return the strong reg to
+    restore, or ``None`` if nothing was swapped.
+    """
+    strong = getattr(mygs, '_strong_coil_reg', None)
+    if strong is None:
+        return None
+    try:
+        weak = getattr(mygs, '_weak_coil_reg', None)
+        if weak is None:
+            weak = [mygs.coil_reg_term({rn: 1.0}, target=0.0, weight=1.0)
+                    for rn in mygs.coil_sets]
+            weak.append(mygs.coil_reg_term({'#VSC': 1.0}, target=0.0, weight=1e-2))
+        mygs.set_coil_reg(reg_terms=weak)
+    except Exception as exc:
+        print(f"  [SWB-hygiene] weak-reg install failed ({exc}); SWB runs under strong reg")
+        return None
+    return strong
+
+
 def perturb_kinetic_equilibrium(
     mygs,
     psi_N,
@@ -2470,22 +2491,7 @@ def perturb_kinetic_equilibrium(
         # constrained phase runs under it, but the exploratory path feeds the
         # state that phase starts from, so "unaffected" is only true to well
         # inside the coil measurement precision -- not bitwise.
-        _stashed_reg = getattr(mygs, '_strong_coil_reg', None)
-        if _stashed_reg is not None:
-            try:
-                _weak_rt = getattr(mygs, '_weak_coil_reg', None)
-                if _weak_rt is None:
-                    _weak_rt = []
-                    for _rn in mygs.coil_sets:
-                        _weak_rt.append(mygs.coil_reg_term(
-                            {_rn: 1.0}, target=0.0, weight=1.0))
-                    _weak_rt.append(mygs.coil_reg_term(
-                        {'#VSC': 1.0}, target=0.0, weight=1e-2))
-                mygs.set_coil_reg(reg_terms=_weak_rt)
-            except Exception as _wreg_exc:
-                print(f"  [SWB-hygiene] weak-reg install failed "
-                      f"({_wreg_exc}); SWB runs under strong reg")
-                _stashed_reg = None
+        _stashed_reg = _install_weak_swb_coil_reg(mygs)
 
         # Anchor at pres_tmp -- the full solve pressure (thermal + p_fast +
         # impurity + p_diff) that every OTHER solve site in this function
@@ -4809,6 +4815,10 @@ def generate_bouquet(
             _cache_stash = getattr(mygs, '_coil_drift_bounds', None)
             if _cache_stash is not None:
                 mygs.set_coil_bounds(None)
+            # ... and the same weak coil reg as the draws' SWB: under the
+            # strong reg the cache SWB can fail (a phi_n run: toroidal-flux
+            # map update failed), silently disabling the delta reference.
+            _cache_reg = _install_weak_swb_coil_reg(mygs)
             # State-anchor solve before SWB.  Mirrors per-draw flow at
             # line ~870 -- without this, SWB sometimes inherits a stale
             # mygs state and hits maxits.  Uses pressure_solve (thermal +
@@ -4882,6 +4892,8 @@ def generate_bouquet(
             finally:
                 if _cache_stash is not None:
                     mygs.set_coil_bounds(_cache_stash)
+                if _cache_reg is not None:
+                    mygs.set_coil_reg(reg_terms=_cache_reg)
         except Exception as _cache_exc:
             # warnings.warn, NOT print: run.py wraps generate_bouquet in
             # capture_native_output(enabled=not verbose) and verbose defaults
@@ -6166,6 +6178,8 @@ def generate_bouquet(
             diverted=diagnostics.get('diverted'),
             aux=diagnostics.get('aux'),
             eq_fsa=diagnostics.get('eq_fsa'),
+            jbs_delta_active=(diagnostics['jbs_delta_active']
+                              if jbs_delta_mode else None),
         )
 
         # Clean up on-disk eqdsk after archiving
