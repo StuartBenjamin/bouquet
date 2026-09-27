@@ -1023,7 +1023,7 @@ class Bouquet:
                                        sgn, Ip_t, w_lin, c_signed,
                                        ip_ind, ip_bs, ip_fix,
                                        psi_pad=1e-3, pprime_sign=1.0,
-                                       q0_ref=None):
+                                       q0_ref=None, x_retry=None):
         """Solve-free multiplier PROFILES for ``closure_channel="structured"``.
 
         Returns ``(s_ind, s_bs, ohm_eff, bs_eff, extra, state)``.  ``s_ind`` and
@@ -1057,12 +1057,19 @@ class Bouquet:
         ``q0_ref``: the self-consistent bootstrap loop's held anchor
         reference, exactly as in :meth:`_close_ip_q0_predictor`; ``None`` is
         the historical behaviour.
+
+        ``x_retry`` (loop passes only): the previous pass's coefficients.  If
+        the SOFT closure refuses with the Levenberg no-descent error, it is
+        retried ONCE from them (:func:`bouquet.utils.soft_closure_with_retry`,
+        recorded as ``structured_closure_retry``); a second refusal is a real
+        refusal.  ``None`` (every non-loop caller) never retries.
         """
         import numpy as np
 
         from .config import resolve_structured_preset
         from .utils import (close_ip_structured, close_ip_structured_soft,
                             li_closure_geometry, sigma_from_weights,
+                            soft_closure_with_retry,
                             structured_basis_eval, unrenormalise_q0,
                             q0_gate_admits)
 
@@ -1176,16 +1183,20 @@ class Bouquet:
         if soft:
             _K = structured_basis_eval(basis_spec, psi_geom).shape[0]
             _sig = sigma_from_weights(wspec, _K)
-            out = close_ip_structured_soft(
-                psi_geom, w_lin, c_signed, sgn * Ip_t,
-                (None if ip_sigma is None else float(ip_sigma)),
-                j_ind, j_BS_swb, j_fixed,
-                basis=basis_spec, sigma_ind=_sig["ind"], sigma_bs=_sig["bs"],
-                sigma_ind_up=sig_ind_up,
-                li_target=li_target,
-                li_sigma=(None if li_sigma is None else float(li_sigma)),
-                li_kind=li_kind, li_geom=li_geom,
-                axis=axis, axis_sigma=None)   # the q0 pin stays HARD
+            out = soft_closure_with_retry(
+                lambda _x0: close_ip_structured_soft(
+                    psi_geom, w_lin, c_signed, sgn * Ip_t,
+                    (None if ip_sigma is None else float(ip_sigma)),
+                    j_ind, j_BS_swb, j_fixed,
+                    basis=basis_spec, sigma_ind=_sig["ind"],
+                    sigma_bs=_sig["bs"],
+                    sigma_ind_up=sig_ind_up,
+                    li_target=li_target,
+                    li_sigma=(None if li_sigma is None else float(li_sigma)),
+                    li_kind=li_kind, li_geom=li_geom,
+                    axis=axis, axis_sigma=None,   # the q0 pin stays HARD
+                    x0=_x0),
+                x_prev=x_retry, who="imas SWB-split:ohmic structured")
         else:
             out = close_ip_structured(
                 psi_geom, w_lin, c_signed, sgn * Ip_t,
@@ -1329,6 +1340,15 @@ class Bouquet:
             structured_objective=out.get("objective"),
             structured_prior_chi2=out.get("prior_chi2"),
             structured_gn_iterations=out.get("n_iter"),
+            # how the soft solve stopped (noise_floor = accepted at the
+            # objective's rounding-noise floor, see close_ip_structured_soft)
+            # and whether the loop's single logged retry was needed
+            structured_gn_stop_reason=out.get("gn_stop_reason"),
+            structured_gn_stop=out.get("gn_stop"),
+            structured_n_noise_floor_accepts=out.get("n_noise_floor_accepts"),
+            structured_closure_retry=out.get("closure_retry"),
+            structured_closure_retry_first_error=out.get(
+                "closure_retry_first_error"),
         )
         if li_target is not None:
             print("[imas SWB-split:ohmic structured] l_i row "
@@ -1724,6 +1744,15 @@ class Bouquet:
             structured_objective=out.get("objective"),
             structured_prior_chi2=out.get("prior_chi2"),
             structured_gn_iterations=out.get("n_iter"),
+            # how the soft solve stopped (noise_floor = accepted at the
+            # objective's rounding-noise floor, see close_ip_structured_soft)
+            # and whether the loop's single logged retry was needed
+            structured_gn_stop_reason=out.get("gn_stop_reason"),
+            structured_gn_stop=out.get("gn_stop"),
+            structured_n_noise_floor_accepts=out.get("n_noise_floor_accepts"),
+            structured_closure_retry=out.get("closure_retry"),
+            structured_closure_retry_first_error=out.get(
+                "closure_retry_first_error"),
         )
         # Ip bookkeeping (soft: a new posterior) and the health record, from
         # the DELIVERED scales -- same function, same thresholds.
@@ -1804,6 +1833,7 @@ class Bouquet:
                           mse_sign_convention, mse_tan_gamma)
         from .utils import (MSE_FLAG_PREFIX, close_ip_structured,
                             close_ip_structured_soft, closure_health,
+                            soft_closure_with_retry,
                             structured_basis_eval, structured_mse_jacobian,
                             structured_mse_linear_model,
                             structured_objective_no_mse)
@@ -1835,25 +1865,33 @@ class Bouquet:
         def _solve(j):
             last["nl"] = solve_jphi(np.asarray(j, dtype=float))
 
-        def _resolve(st, lin):
+        def _resolve(st, lin, x_retry=None):
             if soft:
-                return close_ip_structured_soft(
-                    st["psi_geom"], st["w_lin"], st["c_signed"],
-                    st["Ip_signed"],
-                    (None if st.get("ip_sigma") is None
-                     else float(st["ip_sigma"])),
-                    st["j_ind"], st["j_BS_swb"], st["j_fixed"],
-                    basis=st["basis"], sigma_ind=st["sigma_ind"],
-                    sigma_bs=st["sigma_bs"],
-                    sigma_ind_up=st.get("sigma_ind_up"),
-                    li_target=st.get("li_target"),
-                    li_sigma=(None if st.get("li_sigma") is None
-                              else float(st["li_sigma"])),
-                    li_kind=str(st.get("li_kind", "li_1")),
-                    li_geom=st.get("li_geom"),
-                    axis=(None if st.get("axis") is None
-                          else dict(st["axis"])),
-                    axis_sigma=None, mse_lin=lin)
+                # every chord step is a pass of the bootstrap loop: ONE logged
+                # retry from the previous step's coefficients after a
+                # no-descent refusal (soft_closure_with_retry)
+                _o = soft_closure_with_retry(
+                    lambda _x0: close_ip_structured_soft(
+                        st["psi_geom"], st["w_lin"], st["c_signed"],
+                        st["Ip_signed"],
+                        (None if st.get("ip_sigma") is None
+                         else float(st["ip_sigma"])),
+                        st["j_ind"], st["j_BS_swb"], st["j_fixed"],
+                        basis=st["basis"], sigma_ind=st["sigma_ind"],
+                        sigma_bs=st["sigma_bs"],
+                        sigma_ind_up=st.get("sigma_ind_up"),
+                        li_target=st.get("li_target"),
+                        li_sigma=(None if st.get("li_sigma") is None
+                                  else float(st["li_sigma"])),
+                        li_kind=str(st.get("li_kind", "li_1")),
+                        li_geom=st.get("li_geom"),
+                        axis=(None if st.get("axis") is None
+                              else dict(st["axis"])),
+                        axis_sigma=None, mse_lin=lin, x0=_x0),
+                    x_prev=x_retry, who="jbs-loop MSE chord")
+                srec["closure_retry"].append(int(_o.get("closure_retry", 0)))
+                srec["closure_stop_reason"].append(_o.get("gn_stop_reason"))
+                return _o
             return close_ip_structured(
                 st["psi_geom"], st["w_lin"], st["c_signed"], st["Ip_signed"],
                 st["j_ind"], st["j_BS_swb"], st["j_fixed"],
@@ -1877,7 +1915,14 @@ class Bouquet:
                                    "map's Jacobian"),
                     r_j=[], r_I=[], dl_i=[], dq0=[], I_BS=[], omega=[],
                     offset_change_max_sigma=[], pass_ok=[], n_passes=0,
-                    converged=False, stop_reason=None)
+                    converged=False, stop_reason=None,
+                    relax_halve_on=int(settings.get("relax_halve_on", 1)),
+                    relax_current=None,
+                    current_relaxation=(
+                        "not applied in the chord steps: each step solves "
+                        "the closure's own current, on which the MSE "
+                        "linearisation is centred"),
+                    closure_retry=[], closure_stop_reason=[])
         rec = {}
         prev = getattr(bl, "ip_closure", None) or {}
         try:
@@ -1905,6 +1950,8 @@ class Bouquet:
                                          free, step=fd_step)
             x_lin, tg_lin = x_pred, tg_pred
             omega = float(settings["relax"])
+            halve_on = int(settings.get("relax_halve_on", 1))
+            grow_streak = 0
             omega_cur = None
             streak = 0
             grow = 0
@@ -1917,7 +1964,7 @@ class Bouquet:
             for s in range(n_chord):
                 n_step = s + 1
                 lin = structured_mse_linear_model(x_lin, tg_lin, J1, ch)
-                out = _resolve(cur, lin)
+                out = _resolve(cur, lin, x_retry=x_lin)
                 x_new = _x_of(out)
                 _solve(_hybrid(cur, jbs, x_new))
                 snap = mygs.copy_eq()
@@ -1986,9 +2033,15 @@ class Bouquet:
                         grow += 1
                     else:
                         grow = 0
-                    omega = max(0.5 * omega, JBS_RELAX_FLOOR)
+                    # halve only on SUSTAINED growth, exactly as the kernel
+                    # (jbs_relax_halve_on consecutive growing steps)
+                    grow_streak += 1
+                    if grow_streak >= halve_on:
+                        omega = max(0.5 * omega, JBS_RELAX_FLOOR)
+                        grow_streak = 0
                 else:
                     grow = 0
+                    grow_streak = 0
                 rj_prev = r["r_j"]
                 if grow >= JBS_GROWTH_ABORT_PASSES:
                     srec["stop_reason"] = ("r_j grew at the relaxation "
@@ -2018,7 +2071,7 @@ class Bouquet:
                            / max(np.linalg.norm(J1), 1e-300))
                 obj_conv = steps[-1]["objective_achieved"]
                 lin2 = structured_mse_linear_model(x_new, tg_new, J2, ch)
-                out = _resolve(cur_next, lin2)
+                out = _resolve(cur_next, lin2, x_retry=x_new)
                 x_f = _x_of(out)
                 _solve(_hybrid(cur_next, jbs_next, x_f))
                 snap = mygs.copy_eq()
@@ -2204,6 +2257,15 @@ class Bouquet:
             structured_objective=out.get("objective"),
             structured_prior_chi2=out.get("prior_chi2"),
             structured_gn_iterations=out.get("n_iter"),
+            # how the soft solve stopped (noise_floor = accepted at the
+            # objective's rounding-noise floor, see close_ip_structured_soft)
+            # and whether the loop's single logged retry was needed
+            structured_gn_stop_reason=out.get("gn_stop_reason"),
+            structured_gn_stop=out.get("gn_stop"),
+            structured_n_noise_floor_accepts=out.get("n_noise_floor_accepts"),
+            structured_closure_retry=out.get("closure_retry"),
+            structured_closure_retry_first_error=out.get(
+                "closure_retry_first_error"),
         )
         z_ip = None
         if soft and cur.get("ip_sigma"):
@@ -3298,6 +3360,7 @@ class Bouquet:
                 _q0_state = None
                 _structured_state = None
                 _pq0 = None if _pass is None else _pass.get("q0_ref")
+                _pxr = None if _pass is None else _pass.get("x_retry")
                 # Hybrid: FUSE ohmic + SWB bootstrap on the (IDA) kinetics +
                 # FUSE fixed (NBI/RF), with Ip closed by rescaling j_ohmic ONLY.
                 # Rationale: 'diff' pins the total to FUSE (erasing the pedestal
@@ -3499,7 +3562,7 @@ class Bouquet:
                             sgn, Ip_t, _w_lin, _c_signed,
                             ip_ind, ip_bs, ip_fix,
                             psi_pad=psi_pad, pprime_sign=_pps,
-                            q0_ref=_pq0)
+                            q0_ref=_pq0, x_retry=_pxr)
                 else:
                     ohm_scale, bs_scale = close_ip(
                         _chan, _Ip_signed, _c_signed, ip_ind, ip_bs, ip_fix)
@@ -3842,7 +3905,7 @@ class Bouquet:
                 if mode == "rescale":
                     st = {}
 
-                    def _step(jbs, k):
+                    def _step(jbs, k, relax=None):
                         tgt = calc_cylindrical_li_proxy(mygs, FUSE_tot,
                                                         psi_pad)
                         _f = lambda s: calc_cylindrical_li_proxy(
@@ -3860,7 +3923,8 @@ class Bouquet:
                         _js = np.asarray(bl.j_phi, dtype=float)
                         if getattr(bl, "jphi_diff", None) is not None:
                             _js = _js + k2e(bl.jphi_diff)
-                        st["nl"] = _pass_solve(_js)
+                        st["nl"] = _pass_solve(_js if relax is None
+                                               else relax(_js))
                         snap = mygs.copy_eq()
                         w, x, _wk = residual_weights(snap, psi_N, psi_pad)
                         st.setdefault("scales", []).append(float(scale))
@@ -3930,13 +3994,23 @@ class Bouquet:
                 st = dict(ctx=_anchor, pass_log=[],
                           q0s=None, ss=None, oc=None, nl=None, pass0=None)
 
-                def _step(jbs, k):
+                def _step(jbs, k, relax=None):
                     jbs = np.asarray(jbs, dtype=float)
                     _ratio = jbs.max() / max(j_BS_src.max(), 1.0)
                     q0s, ss, oc = _ohmic_close(
                         st["ctx"], jbs, _ratio,
-                        _pass=dict(q0_ref=q0_ref, k=k))
-                    st["nl"] = _pass_solve(bl.j_phi)
+                        _pass=dict(q0_ref=q0_ref, k=k,
+                                   x_retry=st.get("x_prev")))
+                    _icl0 = bl.ip_closure or {}
+                    if _icl0.get("structured_coeffs_a") is not None:
+                        st["x_prev"] = np.concatenate([
+                            np.asarray(_icl0["structured_coeffs_a"], float),
+                            np.asarray(_icl0["structured_coeffs_b"], float)])
+                    # the pass solves the closure's current relaxed against
+                    # the previous pass's solved current (jbs_relax_current);
+                    # bl.j_phi stays the closure's own assembly
+                    st["nl"] = _pass_solve(bl.j_phi if relax is None
+                                           else relax(bl.j_phi))
                     snap = mygs.copy_eq()
                     ctx_new = _closure_geometry(
                         f"j_BS loop pass {k + 1}")
@@ -3954,7 +4028,15 @@ class Bouquet:
                         fsa_roundtrip_err_pct=_icl.get(
                             "fsa_roundtrip_err_pct"),
                         closure_limited=bool(_icl.get("closure_limited",
-                                                      False))))
+                                                      False)),
+                        closure_stop_reason=_icl.get(
+                            "structured_gn_stop_reason"),
+                        closure_noise_floor_accepts=_icl.get(
+                            "structured_n_noise_floor_accepts"),
+                        closure_gn_stop=_icl.get("structured_gn_stop"),
+                        closure_retry=_icl.get("structured_closure_retry"),
+                        closure_retry_first_error=_icl.get(
+                            "structured_closure_retry_first_error")))
                     if k == 0:
                         # the "predictor" readbacks the corrector bookkeeping
                         # reports: the first pass, measured the corrector's
@@ -4007,7 +4089,19 @@ class Bouquet:
                     ctx_new = _closure_geometry(f"MSE chord step {k + 1}")
                     q0s_, ss_, oc_ = _ohmic_close(
                         ctx_new, jbs, jbs.max() / max(j_BS_src.max(), 1.0),
-                        _pass=dict(q0_ref=q0_ref, k=k))
+                        _pass=dict(q0_ref=q0_ref, k=k,
+                                   x_retry=st.get("x_prev")))
+                    _icl1 = bl.ip_closure or {}
+                    st.setdefault("refresh_log", []).append(dict(
+                        k=k, closure_stop_reason=_icl1.get(
+                            "structured_gn_stop_reason"),
+                        closure_noise_floor_accepts=_icl1.get(
+                            "structured_n_noise_floor_accepts"),
+                        closure_retry=_icl1.get("structured_closure_retry")))
+                    if _icl1.get("structured_coeffs_a") is not None:
+                        st["x_prev"] = np.concatenate([
+                            np.asarray(_icl1["structured_coeffs_a"], float),
+                            np.asarray(_icl1["structured_coeffs_b"], float)])
                     st.update(ctx=ctx_new, q0s=q0s_, ss=ss_, oc=oc_)
                     return ss_
 
@@ -4028,6 +4122,7 @@ class Bouquet:
                         settings=_jbs, Ip=Ip_abs, gate_q0=axis_active)
                     if _nl_m is not None:
                         nl = _nl_m
+                    _mse_rec["refresh_closure_log"] = st.get("refresh_log", [])
                     rec["mse_stage"] = _mse_rec
                     if not _mse_rec.get("converged", False):
                         rec["converged"] = False
@@ -4603,13 +4698,14 @@ class Bouquet:
                     psi_pad, min_iters=2, max_iters=8, rtol=0.05,
                     verbose=False, protect_state=True)
 
-        def _step(spk, k):
+        def _step(spk, k, relax=None):
             # the baseline's own inductive, held (TokaMaker renormalises the
             # total to Ip exactly as the baseline solve did): the Ip
             # renormalisation of route R2 / Fix C is its own sigma=0
             # invariant (|s-1|*f_ind, tests/test_seeded_reproducibility.py)
             # and is not re-tested here
-            _solve(j_ind + spk + j_fix)
+            _j = j_ind + spk + j_fix
+            _solve(_j if relax is None else relax(_j))
             _snap = mygs.copy_eq()
             _w, _x, _k = residual_weights(_snap, psi_N, psi_pad)
             return dict(w=_w, x=_x, snap=_snap,

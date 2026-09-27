@@ -994,11 +994,31 @@ class GenerationConfig:
     # after the post-perturb homotopy).
     jbs_max_passes: int = 8
     jbs_max_passes_draw: int = 6
-    # Initial under-relaxation omega: j_BS <- (1-omega) j_BS + omega Redl.
-    # Halved (floor jbs_loop.JBS_RELAX_FLOOR = 0.25) whenever r_j grows; three
-    # growing passes at the floor abort the loop.  Relaxation changes the path,
-    # not the fixed point.
+    # Under-relaxation omega of the bootstrap: j_BS <- (1-omega) j_BS + omega
+    # Redl.  Held fixed, and halved (floor jbs_loop.JBS_RELAX_FLOOR = 0.25)
+    # only on SUSTAINED growth of r_j: growth on jbs_relax_halve_on
+    # consecutive passes (1 = halve on every growth).  A single growth event
+    # is the forced response of the oscillating closure <-> geometry mode, not
+    # divergence.  Three growing passes at the floor abort the loop.
+    # Relaxation changes the path, not the fixed point.
     jbs_relax: float = 0.7
+    jbs_relax_halve_on: int = 3
+    # Under-relaxation beta of the SOLVED current: from the second pass on the
+    # equilibrium is solved with (1-beta) x the previous pass's solved j_phi +
+    # beta x the closure's new j_phi.  Each pass closes on the previous
+    # equilibrium's geometry, so closure and geometry form an oscillating mode
+    # (l_i swings back by a fraction g ~ -0.5 per pass) that omega does not act
+    # on; beta ~ 1/(1-g) damps it.  1 = no relaxation.  Path only: at the fixed
+    # point the solved and the closure current agree, and the loop record
+    # carries beta and the per-pass gap ||j_solved - j_closure|| / ||j_closure||
+    # (recorded, not gated).  Applied where a pass solves one assembled j_phi:
+    # the IMAS baseline loop (every jBS_baseline_mode / closure channel), the
+    # sigma=0 check and the draws' anchor loops (Fix C, standard anchor,
+    # post-homotopy).  NOT applied (the record says so) in the standard
+    # draw's l_i-match coupling and the geqdsk reconstruction, whose passes
+    # re-run multi-solve fits, nor in the MSE chord steps, whose
+    # linearisation is centred on the closure's own current.
+    jbs_relax_current: float = 0.7
     # Non-convergence: "raise" (default) -> jbs_loop.JBSNotConverged carrying
     # the residual history; "flag" -> keep the last iterate, record
     # jbs_converged=False plus a closure_limited reason (drivers then exclude

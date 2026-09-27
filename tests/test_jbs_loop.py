@@ -98,6 +98,9 @@ def test_defaults_are_the_approved_values_and_off():
     assert s["relax"] == 0.7 and s["relax_floor"] == 0.25
     assert s["on_fail"] == "raise" and s["init"] == "anchor"
     assert s["required_consecutive"] == 2
+    # the joint relaxation defaults
+    assert g.jbs_relax_current == 0.7 and s["relax_current"] == 0.7
+    assert g.jbs_relax_halve_on == 3 and s["relax_halve_on"] == 3
 
 
 @pytest.mark.parametrize("field, bad", [
@@ -105,6 +108,9 @@ def test_defaults_are_the_approved_values_and_off():
     ("jbs_rtol_j", 0.0), ("jbs_rtol_Ip", -1e-4), ("jbs_tol_li", float("nan")),
     ("jbs_tol_q0", "x"), ("jbs_max_passes", 1), ("jbs_max_passes_draw", 2.5),
     ("jbs_relax", 0.1), ("jbs_relax", 1.5), ("jbs_self_consistent", "yes"),
+    ("jbs_relax_current", 0.0), ("jbs_relax_current", 1.2),
+    ("jbs_relax_current", "x"), ("jbs_relax_halve_on", 0),
+    ("jbs_relax_halve_on", 2.5), ("jbs_relax_halve_on", True),
 ])
 def test_malformed_settings_are_refused_by_name(field, bad):
     with pytest.raises(ValueError, match=field):
@@ -252,10 +258,27 @@ def test_e_flag_mode_returns_the_last_iterate_and_records_it():
     assert flag_reason(out["record"]).startswith(JBS_FLAG_PREFIX)
 
 
+def _growing_problem():
+    J0 = _shape()
+    shape2 = np.sin(np.pi * _X) * 1e5
+    cnt = {"k": 0, "j": None}
+
+    def step(jbs, k):
+        cnt["k"] = k
+        cnt["j"] = np.asarray(jbs, dtype=float).copy()
+        return dict(w=_W, x=_X, li=1.0)
+
+    def ev(meas):                       # a residual that grows 3x per pass
+        return cnt["j"] + 1e-3 * 3.0 ** cnt["k"] * shape2
+
+    return J0, step, ev
+
+
 def test_growing_residual_halves_omega_to_the_floor_then_aborts():
-    """omega 0.7 -> 0.35 -> 0.25 (floor) on growth; three growing passes AT
-    the floor abort before the pass ceiling."""
-    s = jbs_settings(_GC(jbs_max_passes=12))
+    """The earlier schedule (``jbs_relax_halve_on=1``, halve on EVERY growth):
+    omega 0.7 -> 0.35 -> 0.25 (floor); three growing passes AT the floor abort
+    before the pass ceiling."""
+    s = jbs_settings(_GC(jbs_max_passes=12, jbs_relax_halve_on=1))
     J0 = _shape()
     shape2 = np.sin(np.pi * _X) * 1e5
     cnt = {"k": 0, "j": None}
@@ -277,6 +300,177 @@ def test_growing_residual_halves_omega_to_the_floor_then_aborts():
     assert all(b > a for a, b in zip(rec["r_j"], rec["r_j"][1:]))
     assert "relaxation floor" in rec["stop_reason"]
     assert rec["n_passes"] == 6 < 12
+
+
+def test_default_schedule_halves_only_on_sustained_growth():
+    """Default ``jbs_relax_halve_on=3``: omega stays 0.7 through two growing
+    passes and halves on the third (0.7 -> 0.35 -> 0.25); the abort rule is
+    unchanged -- three growing passes AT the floor stop the loop."""
+    s = jbs_settings(_GC(jbs_max_passes=12))
+    J0, step, ev = _growing_problem()
+    with pytest.raises(JBSNotConverged) as ei:
+        run_jbs_loop(J0, step, ev, s, Ip=_IP, meas0=dict(li=1.0))
+    rec = ei.value.record
+    om = [w for w in rec["omega"] if w is not None]
+    assert om == pytest.approx([0.7, 0.7, 0.7, 0.35, 0.35, 0.35,
+                                0.25, 0.25, 0.25])
+    assert rec["omega_halved_at_pass"] == [4, 7]
+    assert rec["relax_halve_on"] == 3
+    assert "relaxation floor" in rec["stop_reason"]
+    assert rec["n_passes"] == 10 < 12
+
+
+def test_an_oscillating_residual_does_not_halve_omega_by_default():
+    """r_j that grows and shrinks on alternate passes (the forced response of
+    the closure <-> geometry mode) never halves omega under the default; the
+    earlier schedule (halve_on=1) halved it on every growth event."""
+    shape2 = np.sin(np.pi * _X) * 1e5
+
+    def make():
+        cnt = {"k": 0, "j": None}
+
+        def step(jbs, k):
+            cnt["k"] = k
+            cnt["j"] = np.asarray(jbs, dtype=float).copy()
+            return dict(w=_W, x=_X, li=1.0)
+
+        def ev(meas):
+            amp = 2e-2 if cnt["k"] % 2 else 1e-2
+            return cnt["j"] + amp * shape2
+        return step, ev
+
+    st, ev = make()
+    out = run_jbs_loop(_shape(), st, ev,
+                       jbs_settings(_GC(jbs_max_passes=8,
+                                        jbs_loop_on_fail="flag")),
+                       Ip=_IP, meas0=dict(li=1.0))
+    om = [w for w in out["record"]["omega"] if w is not None]
+    assert om and all(w == 0.7 for w in om)
+    assert out["record"]["omega_halved_at_pass"] == []
+    st, ev = make()
+    out1 = run_jbs_loop(_shape(), st, ev,
+                        jbs_settings(_GC(jbs_max_passes=8,
+                                         jbs_loop_on_fail="flag",
+                                         jbs_relax_halve_on=1)),
+                        Ip=_IP, meas0=dict(li=1.0))
+    assert min(w for w in out1["record"]["omega"] if w is not None) \
+        == pytest.approx(JBS_RELAX_FLOOR)
+
+
+# ---------------------------------------------------------------------------
+#  relaxation of the solved current (jbs_relax_current, beta)
+# ---------------------------------------------------------------------------
+def _two_state_problem(g=-0.55, eps=0.2):
+    """closure <-> geometry: each pass closes on the PREVIOUS equilibrium's
+    geometry L_prev (an l_i-like scalar) and over-corrects, so the solved
+    geometry swings back by the fraction ``g`` per pass -- the slow
+    mode, on which omega does not act.  The bootstrap follows the geometry
+    weakly (``eps``).  Linear, so the fixed point is known in closed form."""
+    x = _X
+    phi = x.copy()
+    j_ind0 = 8e5 * (1 - x) ** 1.5 + 8e4
+    Jshape = _shape()
+    Lt, L0, mu = 1.0, 0.2, 1.0
+    I = lambda j: float(np.trapezoid(_W * phi * j, x)) / _IP  # noqa: E731
+    A, B = mu * I(j_ind0), mu * I(Jshape)
+    kappa = -g / A
+    st = dict(L=Lt)
+
+    def step(jbs, k, relax=None):
+        s = 1.0 + kappa * (Lt - st["L"])
+        jc = s * j_ind0 + np.asarray(jbs, dtype=float)
+        js = jc if relax is None else relax(jc)
+        st["L"] = L0 + mu * I(js)
+        st["jc"], st["js"] = jc, np.asarray(js, dtype=float)
+        return dict(w=_W, x=x, li=st["L"])
+
+    def evaluate(meas):
+        return Jshape * (1.0 + eps * (st["L"] - Lt))
+
+    Lstar = ((L0 + A * (1 + kappa * Lt) + B * (1 - eps * Lt))
+             / (1 + A * kappa - B * eps))
+    Jstar = Jshape * (1.0 + eps * (Lstar - Lt))
+    return step, evaluate, st, Lstar, Jstar
+
+
+def test_current_relaxation_changes_the_path_not_the_fixed_point():
+    """The fixed point reached with beta = 0.7 and without it (beta = 1)
+    agrees to the loop tolerances, and both sit on the closed-form fixed
+    point; the relaxed run needs fewer passes on the oscillating mode."""
+    outs = {}
+    for beta in (1.0, 0.7):
+        step, ev, st, Lstar, Jstar = _two_state_problem()
+        s = jbs_settings(_GC(jbs_relax_current=beta, jbs_max_passes=40))
+        o = run_jbs_loop(Jstar * 0.6, step, ev, s, Ip=_IP,
+                         meas0=dict(li=st["L"]), gate_li=True)
+        assert o["converged"], beta
+        outs[beta] = (o, st["L"])
+        tol = s
+        # on the closed-form fixed point, to the loop's own tolerances
+        assert abs(st["L"] - Lstar) <= tol["tol_li"]
+        assert profile_residuals(Jstar, o["jbs_used"], _W, _X,
+                                 _IP)["r_j"] <= tol["rtol_j"]
+    (a, La), (b, Lb) = outs[1.0], outs[0.7]
+    assert abs(La - Lb) <= s["tol_li"]
+    assert profile_residuals(a["jbs_used"], b["jbs_used"], _W, _X,
+                             _IP)["r_j"] <= s["rtol_j"]
+    assert b["record"]["n_passes"] < a["record"]["n_passes"]
+    # the record: beta, and the per-pass solved-vs-closure gap
+    ra, rb = a["record"], b["record"]
+    assert ra["relax_current"] == 1.0 and rb["relax_current"] == 0.7
+    assert all(g == 0.0 for g in ra["current_gap"])
+    assert not any(ra["current_blended"])
+    assert rb["current_gap"][0] == 0.0 and rb["current_blended"][0] is False
+    assert all(rb["current_blended"][1:])
+    assert rb["current_gap"][-1] < rb["current_gap"][1]
+    assert rb["final"]["current_gap"] == rb["current_gap"][-1]
+    import json
+    json.dumps(jsonable(rb))
+
+
+def test_current_relaxation_is_the_identity_at_the_fixed_point():
+    """(c) with beta: started at the fixed point, the blend of two equal
+    currents is the identity and the loop returns it unchanged."""
+    step, ev, st, Lstar, Jstar = _two_state_problem()
+    st["L"] = Lstar
+    s = jbs_settings(_GC())
+    o = run_jbs_loop(Jstar.copy(), step, ev, s, Ip=_IP,
+                     meas0=dict(li=Lstar), gate_li=True)
+    assert o["converged"] and o["record"]["n_passes"] == 2
+    assert max(o["record"]["current_gap"]) <= 1e-14
+    assert abs(st["L"] - Lstar) <= 1e-12
+
+
+def test_a_step_without_the_relaxer_is_recorded_as_unrelaxed():
+    s = jbs_settings(_GC())
+    Jstar, step, ev = _affine_problem(-0.1)
+    out = run_jbs_loop(0.5 * Jstar, step, ev, s, Ip=_IP, meas0=dict(li=0.0))
+    rec = out["record"]
+    assert rec["relax_current"] is None
+    assert rec["current_relaxation"].startswith("not applied")
+    assert rec["current_gap"] == [None] * rec["n_passes"]
+
+
+def test_current_relaxer_blends_against_the_previous_pass_only():
+    from bouquet.jbs_loop import CurrentRelaxer
+    r = CurrentRelaxer(0.7)
+    a, b, c = np.full(3, 1.0), np.full(3, 2.0), np.full(3, 4.0)
+    r.begin_pass()
+    np.testing.assert_array_equal(r(a), a)          # first pass: no blend
+    r.commit()
+    r.begin_pass()
+    np.testing.assert_allclose(r(b), 0.3 * a + 0.7 * b)
+    # a second call in the SAME pass blends against the same base
+    np.testing.assert_allclose(r(c), 0.3 * a + 0.7 * c)
+    gap, blended = r.gap()
+    assert blended and gap == pytest.approx(
+        np.linalg.norm(0.3 * a + 0.7 * c - c) / np.linalg.norm(c))
+    r.commit()
+    r.begin_pass()
+    np.testing.assert_allclose(r(c), 0.3 * (0.3 * a + 0.7 * c) + 0.7 * c)
+    one = CurrentRelaxer(1.0)
+    one.begin_pass(); one(a); one.commit(); one.begin_pass()
+    np.testing.assert_array_equal(one(b), b)
 
 
 def test_relaxation_changes_the_path_not_the_fixed_point():

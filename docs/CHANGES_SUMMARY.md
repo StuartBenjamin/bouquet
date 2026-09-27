@@ -20,10 +20,23 @@ Records: `li_metrics["jbs_loop"]`, `ip_closure["jbs_loop"]`,
 `reconstruction_metrics["jbs_loop"]`, per-draw archive attrs `jbs_converged` /
 `jbs_n_passes` / `jbs_loop_json`. Config: `jbs_self_consistent`, `jbs_init`,
 `jbs_rtol_j`, `jbs_rtol_Ip`, `jbs_tol_li`, `jbs_tol_q0`, `jbs_max_passes`,
-`jbs_max_passes_draw`, `jbs_relax`, `jbs_loop_on_fail`; `swb_iterations` is
+`jbs_max_passes_draw`, `jbs_relax`, `jbs_relax_halve_on`, `jbs_relax_current`,
+`jbs_loop_on_fail`; `swb_iterations` is
 now documented as legacy. **With the flag off nothing changes**: no existing
 tolerance, default or acceptance criterion moved, and the legacy code path is
 the historical one. See [physics-notes.md](physics-notes.md#self-consistent-bootstrap-jbs_self_consistent).
+
+Follow-up (loop iteration path and closure stop test): the loop relaxes the
+solved current as well as the bootstrap (`jbs_relax_current = 0.7`) and halves
+ω only on sustained growth (`jbs_relax_halve_on = 3`) — path only, the fixed
+point is unchanged (tested against the closed-form fixed point of a two-state
+model). `close_ip_structured_soft` accepts an iterate that is stationary to
+within the objective's rounding noise (`stop_reason="noise_floor"`, recorded
+with the gradient, predicted decrease and noise estimate) instead of refusing
+it — **a change of the solver's acceptance criterion, applied only where it
+previously refused** (every result it returned before is bit-identical) — and
+takes an optional start `x0`; inside the loop a refused soft closure is retried
+once from the previous pass's coefficients (`closure_retry`, logged).
 
 ## Unreleased — MSE pitch angles on the structured closure (opt-in)
 

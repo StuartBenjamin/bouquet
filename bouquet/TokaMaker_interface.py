@@ -1823,7 +1823,7 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
     pres_tmp = ctx["pres_tmp"]
     state = {}
 
-    def _step(spk, k):
+    def _step(spk, k, relax=None):
         if ctx["kind"] == "fixc":
             _aip = None
             if ctx.get("r2_mode", "exact") != "legacy":
@@ -1843,8 +1843,9 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
                "y": pchip_derivative(psi_N, pres_tmp) / _pr, "x": psi_N}
         _pp["y"][-1] = 0.0
         mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
+        _js = np.asarray(jphi, float) if relax is None else relax(jphi)
         mygs.set_profiles(pp_prof=_pp, ffp_prof={
-            "type": "jphi-linterp", "y": np.asarray(jphi, float),
+            "type": "jphi-linterp", "y": np.asarray(_js, float),
             "x": psi_N})
         mygs.solve()
         state["jphi"] = jphi
@@ -2667,7 +2668,7 @@ def perturb_kinetic_equilibrium(
             def _fixc_loop(cand, spike0, li_prev):
                 _fs = {}
 
-                def _step(spk, k):
+                def _step(spk, k, relax=None):
                     _aip = None
                     if _r2_mode != 'legacy':
                         try:
@@ -2682,7 +2683,8 @@ def perturb_kinetic_equilibrium(
                                       psi_N, Ip_target)
                     _fs.update(s=float(_s), f_ind=_r2_f_ind(_aip, cand),
                                new_jphi=_s * cand + spk + j_fixed_eff)
-                    _jl_solve(_fs["new_jphi"])
+                    _jl_solve(_fs["new_jphi"] if relax is None
+                              else relax(_fs["new_jphi"]))
                     return _jl_meas()
 
                 _r = run_jbs_loop(spike0, _step, _jl_eval, jbs_loop,
@@ -2756,8 +2758,9 @@ def perturb_kinetic_equilibrium(
             # standard path: the recon inductive shape + a self-consistent
             # bootstrap at the anchor; the l_i loop below then keeps the
             # bootstrap self-consistent for every candidate (Gauss-Seidel)
-            def _std_step(spk, k):
-                _jl_solve(input_jinductive + spk + j_fixed_eff)
+            def _std_step(spk, k, relax=None):
+                _j = input_jinductive + spk + j_fixed_eff
+                _jl_solve(_j if relax is None else relax(_j))
                 return _jl_meas()
 
             _jl_res = run_jbs_loop(spike_profile, _std_step, _jl_eval,

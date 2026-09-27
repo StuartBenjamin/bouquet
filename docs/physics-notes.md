@@ -213,9 +213,28 @@ the criterion is never looser than a step-size test. Converged means **every
 active criterion on two consecutive passes**. Ceilings: `jbs_max_passes = 8`
 (baseline / reconstruction), `jbs_max_passes_draw = 6` per draw, plus up to
 `jbs_loop.JBS_POST_HOMOTOPY_PASSES = 2` after a draw's coil homotopy.
-Relaxation: `ω = jbs_relax = 0.7`, halved (floor 0.25) whenever `r_j` grows;
-three growing passes at the floor abort early. Relaxation changes the path,
-never the fixed point. **None of the existing solver or closure tolerances
+Relaxation, on two quantities, both of the **path** only (at the fixed point
+both blends are the identity):
+
+* **the bootstrap**, `jBS_k+1 = (1 − ω) jBS_k + ω J` with `ω = jbs_relax = 0.7`,
+  held fixed and halved (floor 0.25) only on **sustained** growth of `r_j` —
+  growth on `jbs_relax_halve_on = 3` consecutive passes (`1` restores the
+  earlier halve-on-every-growth schedule). Three growing passes at the floor
+  abort early.
+* **the solved current**, `js_k = (1 − β) js_k−1 + β jc_k` (from the second pass
+  on) with `β = jbs_relax_current = 0.7`: each pass closes on the *previous*
+  equilibrium's geometry, so the closure's current `jc` and the geometry it
+  produces form an oscillating two-state mode (l_i swings back by a fraction
+  g ≈ −0.5 per pass) that ω does not act on; `β ≈ 1/(1 − g)` damps it. The
+  record carries β and the per-pass gap `‖js − jc‖_w / ‖jc‖_w` (recorded, not
+  gated). Applied where a pass solves one assembled j_phi (the IMAS baseline
+  loop in every mode and channel, the σ=0 check, the draws' anchor loops); not
+  in the standard draw's l_i-match coupling, the geqdsk reconstruction or the
+  MSE chord steps (whose linearisation is centred on the closure's own
+  current) — their records say so.
+
+A single growth of `r_j` is the forced response of that mode, not divergence,
+which is why ω is no longer halved on it. **None of the existing solver or closure tolerances
 (`nl_tol`, `maxits`, `structured_li_tol`, `q0_tol`, the soft solver's
 `rtol`/`max_iter`, `SIGN_ITER_MAX`) is touched**; these numbers define what
 "j_BS converged" means and are initial values, to be revisited with data.
@@ -529,7 +548,18 @@ Two statements about the data, one prior:
   ```
 
   over the same eight unknowns — Gauss–Newton with Levenberg damping, no GS
-  solves, converged to 1e-10 relative. The prior is the *same* one: σ = W^(−1/2)
+  solves, converged to 1e-10 relative. When no damped step can be verified
+  downhill, the iterate is accepted only if the scaled gradient is below
+  `rtol·max|J|·max(√F, 1)` (`stop_reason="gradient_floor"`), or if it is
+  stationary to within the objective's **rounding noise**
+  (`stop_reason="noise_floor"`): the gradient below the floor that noise implies
+  and every Levenberg trial's predicted decrease below
+  `noise_F = 2 ε Σ_i (2|r_i| m_i + r_i²)` (`m_i` = the magnitude of the terms
+  row i is computed from, in σ units — an MA-scale I_p difference over a
+  kA-scale σ_Ip is what makes it exceed the `F·1e-14` acceptance slack).
+  Otherwise it refuses, as before. Inside the self-consistent loop a refused
+  soft closure is retried ONCE from the previous pass's coefficients
+  (`closure_retry=1`, logged); a second refusal is a real one. The prior is the *same* one: σ = W^(−1/2)
   of `structured_weights`, so a hard/soft pair differs only in what is claimed
   about the data. The on-axis-current row stays hard in both (a q0 pin is a
   topological statement, not a measurement with a σ). `structured_ip_sigma=None`

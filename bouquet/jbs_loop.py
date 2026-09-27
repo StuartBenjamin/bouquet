@@ -7,11 +7,31 @@ containing a bootstrap runs the same relaxed outer iteration::
     E_0      = anchor equilibrium (already solved by the caller)
     jBS_0    = evaluate_jBS(E_0)            (or the legacy SWB result)
     for k = 0 .. K-1:
-        E_k+1   = step(jBS_k)               closure on E_k's geometry + GS solve
+        jc_k    = closure(E_k, jBS_k)       closure on E_k's geometry
+        js_k    = (1 - beta) js_k-1 + beta jc_k     (k >= 1; js_0 = jc_0)
+        E_k+1   = GS solve of js_k          (step(jBS_k) does both)
         J       = evaluate(E_k+1)           Redl on the NEW equilibrium
         r_k     = residuals(J, jBS_k, E_k+1, E_k)
         jBS_k+1 = (1 - omega) jBS_k + omega J
         converged when every active criterion holds on two consecutive passes
+
+Two relaxations, both of the PATH only (at the fixed point ``js = jc`` and
+``jBS = J``, so neither moves it):
+
+* ``omega`` (``jbs_relax``) on the bootstrap.  Held fixed; it is halved (floor
+  :data:`JBS_RELAX_FLOOR`) only on SUSTAINED growth of ``r_j`` -- growth on
+  ``jbs_relax_halve_on`` consecutive passes -- because a single growth event
+  is the forced response of the oscillating geometry mode below, not
+  divergence.
+* ``beta`` (``jbs_relax_current``) on the SOLVED current: the equilibrium of
+  pass k is solved with a blend of the previous pass's solved current and the
+  closure's new one.  Each pass closes on the PREVIOUS equilibrium's
+  geometry, so the closure's current and the geometry it produces form an
+  oscillating two-state mode (l_i swings back by a fraction g < 0 per pass)
+  that ``omega`` does not act on; ``beta ~ 1/(1 - g)`` damps it.  A step opts
+  in by accepting a ``relax`` keyword (:class:`CurrentRelaxer`); the record
+  carries ``beta`` and the per-pass gap ``||js - jc|| / ||jc||`` (recorded,
+  never gated).
 
 ``step`` and ``evaluate`` are supplied by the caller (the IMAS baseline, the
 structured / MSE closures, a perturbation draw, the geqdsk reconstruction);
@@ -56,7 +76,7 @@ from typing import Callable, Optional
 import numpy as np
 
 #: Floor of the under-relaxation factor (``jbs_relax`` is halved toward it
-#: whenever ``r_j`` grows).
+#: on sustained growth of ``r_j``, see ``jbs_relax_halve_on``).
 JBS_RELAX_FLOOR = 0.25
 #: Consecutive passes that must meet every active criterion.
 JBS_REQUIRED_CONSECUTIVE = 2
@@ -150,6 +170,22 @@ def validate_jbs_settings(gc) -> None:
         raise ValueError(f"generation.jbs_relax must lie in "
                          f"[{JBS_RELAX_FLOOR}, 1] (the floor is "
                          f"JBS_RELAX_FLOOR), got {w!r}")
+    b = _get("jbs_relax_current", 0.7)
+    try:
+        fb = float(b)
+    except (TypeError, ValueError):
+        raise ValueError(f"generation.jbs_relax_current must be a number in "
+                         f"(0, 1], got {b!r}") from None
+    if isinstance(b, bool) or not (np.isfinite(fb) and 0.0 < fb <= 1.0):
+        raise ValueError(f"generation.jbs_relax_current must lie in (0, 1] "
+                         f"(1 = no relaxation of the solved current), got "
+                         f"{b!r}")
+    h = _get("jbs_relax_halve_on", 3)
+    if isinstance(h, bool) or not isinstance(h, (int, np.integer)) \
+            or int(h) < 1:
+        raise ValueError(f"generation.jbs_relax_halve_on must be an integer "
+                         f">= 1 (consecutive growing passes that halve "
+                         f"omega; 1 = halve on every growth), got {h!r}")
 
 
 def jbs_settings(gc, *, draw: bool = False) -> dict:
@@ -170,6 +206,8 @@ def jbs_settings(gc, *, draw: bool = False) -> dict:
         max_passes=int(getattr(gc, "jbs_max_passes_draw", 6) if draw
                        else getattr(gc, "jbs_max_passes", 8)),
         relax=float(getattr(gc, "jbs_relax", 0.7)),
+        relax_current=float(getattr(gc, "jbs_relax_current", 0.7)),
+        relax_halve_on=int(getattr(gc, "jbs_relax_halve_on", 3)),
         on_fail=str(getattr(gc, "jbs_loop_on_fail", "raise")),
         relax_floor=float(JBS_RELAX_FLOOR),
         required_consecutive=int(JBS_REQUIRED_CONSECUTIVE),
@@ -186,6 +224,8 @@ def tolerances_record(settings: dict) -> dict:
                 required_consecutive=settings["required_consecutive"],
                 relax_start=settings["relax"],
                 relax_floor=settings["relax_floor"],
+                relax_halve_on=int(settings.get("relax_halve_on", 1)),
+                relax_current=float(settings.get("relax_current", 1.0)),
                 growth_abort_passes=settings["growth_abort_passes"])
 
 
@@ -291,6 +331,79 @@ def _finite_or_none(v):
 
 
 # ---------------------------------------------------------------------------
+#  relaxation of the solved current
+# ---------------------------------------------------------------------------
+class CurrentRelaxer:
+    """``beta``-relaxation of the current a loop pass SOLVES.
+
+    A step that accepts it (``step(jbs, k, relax=...)``) passes the current
+    its closure assembled -- the ``jphi-linterp`` input it would otherwise
+    hand the solver -- through ``relax(j_closure)`` and solves what comes
+    back::
+
+        js_0 = jc_0,    js_k = (1 - beta) js_{k-1} + beta jc_k   (k >= 1)
+
+    ``js_{k-1}`` is the current the PREVIOUS pass solved (committed by the
+    kernel after each pass), so calling ``relax`` more than once inside one
+    pass (a step that re-solves) blends against the same previous current.
+    ``beta = 1`` returns ``j_closure`` unchanged.  At the fixed point
+    ``jc_k = js_{k-1}`` and the blend is the identity: the path changes, the
+    fixed point does not.
+    """
+
+    def __init__(self, beta: float):
+        self.beta = float(beta)
+        self._prev = None            # js of the previous (committed) pass
+        self._last = None            # (jc, js) of the current pass
+        self.n_calls = 0
+
+    def __call__(self, j_closure):
+        jc = np.asarray(j_closure, dtype=float)
+        if (self.beta >= 1.0 or self._prev is None
+                or self._prev.shape != jc.shape):
+            js = jc.copy()
+        else:
+            js = (1.0 - self.beta) * self._prev + self.beta * jc
+        self._last = (jc.copy(), js.copy())
+        self.n_calls += 1
+        return js
+
+    def begin_pass(self):
+        self._last = None
+
+    def commit(self):
+        """End of a pass: the current it solved becomes the blend base."""
+        if self._last is not None:
+            self._prev = self._last[1].copy()
+
+    def gap(self, w=None, x=None):
+        """``(rel, blended)`` for the pass just taken: ``||js - jc|| / ||jc||``
+        (current-weighted with the pass's ``w``/``x`` when the shapes match,
+        plain L2 otherwise) and whether a blend was applied at all."""
+        if self._last is None:
+            return None, False
+        jc, js = self._last
+        d = js - jc
+        blended = bool(np.any(d != 0.0))
+        if (w is not None and x is not None
+                and np.shape(w) == jc.shape == np.shape(x)):
+            n = weighted_norm(jc, w, x)
+            return ((weighted_norm(d, w, x) / n) if n > 0.0 else
+                    (0.0 if not blended else float("inf"))), blended
+        n = float(np.linalg.norm(jc))
+        return ((float(np.linalg.norm(d)) / n) if n > 0.0 else
+                (0.0 if not blended else float("inf"))), blended
+
+
+def _step_takes_relax(step) -> bool:
+    import inspect
+    try:
+        return "relax" in inspect.signature(step).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+# ---------------------------------------------------------------------------
 #  the kernel
 # ---------------------------------------------------------------------------
 def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
@@ -307,11 +420,16 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
     ----------
     jbs0 : array
         Initial bootstrap profile (the one the FIRST solve is assembled with).
-    step : callable ``step(jbs, k) -> meas``
+    step : callable ``step(jbs, k) -> meas`` or ``step(jbs, k, relax=...)``
         Closure + assembly + GS solve with bootstrap ``jbs``; returns the
         measurement dict of the NEW equilibrium: ``w`` and ``x`` (the Ip weights
         and the grid ``jbs`` lives on), optionally ``li`` and ``q0``.  Any other
-        keys are carried through untouched (``meas_final``).
+        keys are carried through untouched (``meas_final``).  A step that
+        accepts a ``relax`` keyword receives the pass's
+        :class:`CurrentRelaxer` and solves ``relax(j_closure)`` instead of
+        ``j_closure`` (the ``jbs_relax_current`` relaxation of the solved
+        current); a two-argument step is called as before and the record says
+        the current was not relaxed.
     evaluate : callable ``evaluate(meas) -> J``
         Redl bootstrap on the equilibrium ``step`` just produced, composed
         exactly the way ``jbs`` is (same smoothing / isolation / scale).
@@ -351,6 +469,10 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
     floor = float(settings.get("relax_floor", JBS_RELAX_FLOOR))
     n_abort = int(settings.get("growth_abort_passes", JBS_GROWTH_ABORT_PASSES))
     omega = float(settings["relax"])
+    halve_on = int(settings.get("relax_halve_on", 1))
+    beta = float(settings.get("relax_current", 1.0))
+    takes_relax = _step_takes_relax(step)
+    relaxer = CurrentRelaxer(beta) if takes_relax else None
     if raise_on_fail is None:
         raise_on_fail = (settings.get("on_fail", "raise") == "raise")
 
@@ -365,6 +487,14 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         omega=[], r_j=[], r_I=[], dl_i=[], dq0=[], I_BS=[], I_BS_used=[],
         jBS_peak=[], jBS_peak_psiN=[], li=[], q0=[], pass_ok=[],
         wall_s=None,
+        relax_current=(beta if takes_relax else None),
+        current_relaxation=(
+            ("solved current relaxed: js_k = (1-beta) js_k-1 + beta jc_k "
+             "(k >= 1); path only, the fixed point is unchanged")
+            if takes_relax else
+            "not applied: this caller's step does not take the relaxer"),
+        current_gap=[], current_blended=[],
+        relax_halve_on=int(halve_on), omega_halved_at_pass=[],
     )
     try:
         from .physics import EVALUATE_JBS_VERSION
@@ -377,6 +507,7 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
     prev = dict(meas0 or {})
     streak = 0
     growth_at_floor = 0
+    grow_streak = 0                   # consecutive passes on which r_j grew
     omega_used_for_current = None     # omega that produced `jbs` (None: init)
     r_j_prev = None
     meas = None
@@ -385,7 +516,11 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
 
     for k in range(K):
         jbs_used = jbs
-        meas = step(jbs, k)
+        if relaxer is not None:
+            relaxer.begin_pass()
+            meas = step(jbs, k, relax=relaxer)
+        else:
+            meas = step(jbs, k)
         J = np.asarray(evaluate(meas), dtype=float)
         if J.shape != jbs.shape:
             raise ValueError(f"run_jbs_loop[{label}]: evaluate returned shape "
@@ -420,6 +555,13 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         rec["li"].append(li_new)
         rec["q0"].append(q0_new)
         rec["pass_ok"].append(ok)
+        if relaxer is not None:
+            _gap, _bl = relaxer.gap(meas.get("w"), meas.get("x"))
+            relaxer.commit()
+        else:
+            _gap, _bl = None, False
+        rec["current_gap"].append(_gap)
+        rec["current_blended"].append(bool(_bl))
         rec["n_passes"] = k + 1
         entry = dict(k=k, ok=ok, dl_i=dl_i, dq0=dq0,
                      omega_used=omega_used_for_current, **res)
@@ -431,6 +573,7 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
               + f" I_BS={res['I_BS'] / 1e3:.2f} kA"
               + ("" if omega_used_for_current is None
                  else f" omega={omega_used_for_current:.3f}")
+              + ("" if not _bl else f" |js-jc|/|jc|={_gap:.2e}")
               + (" ok" if ok else ""), flush=True)
         streak = streak + 1 if ok else 0
         if streak >= need:
@@ -440,16 +583,25 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
             if on_pass is not None:
                 on_pass(k, meas, J, dict(entry, omega_next=None))
             break
-        # ---- relaxation schedule: halve on growth, abort at the floor ----
+        # ---- relaxation schedule: halve on SUSTAINED growth (halve_on
+        # consecutive growing passes; 1 = every growth, the earlier
+        # schedule), abort after n_abort growing passes at the floor --------
         if r_j_prev is not None and res["r_j"] > r_j_prev:
             if (omega_used_for_current is not None
                     and omega_used_for_current <= floor + 1e-15):
                 growth_at_floor += 1
             else:
                 growth_at_floor = 0
-            omega = max(0.5 * omega, floor)
+            grow_streak += 1
+            if grow_streak >= halve_on:
+                _om = max(0.5 * omega, floor)
+                if _om < omega:
+                    rec["omega_halved_at_pass"].append(k + 1)
+                omega = _om
+                grow_streak = 0
         else:
             growth_at_floor = 0
+            grow_streak = 0
         r_j_prev = res["r_j"]
         stop = (growth_at_floor >= n_abort) or (k == K - 1)
         if on_pass is not None:
@@ -478,7 +630,8 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         r_I=rec["r_I"][-1] if rec["r_I"] else None,
         dl_i=rec["dl_i"][-1] if rec["dl_i"] else None,
         dq0=rec["dq0"][-1] if rec["dq0"] else None,
-        I_BS=rec["I_BS"][-1] if rec["I_BS"] else None)
+        I_BS=rec["I_BS"][-1] if rec["I_BS"] else None,
+        current_gap=rec["current_gap"][-1] if rec["current_gap"] else None)
     out = dict(jbs_used=np.asarray(jbs_used, dtype=float),
                J_final=(None if J is None else np.asarray(J, dtype=float)),
                meas_final=meas, converged=bool(rec["converged"]), record=rec)
