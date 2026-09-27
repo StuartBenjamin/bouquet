@@ -316,3 +316,29 @@ class TestJbsLoopBlockSchemaV3:
             raw = hf["scan/7/0"].attrs["jbs_loop_json"]
         json.loads(raw)                               # must not raise
 
+
+class TestBootstrapModelLabel:
+    """plotting.plot_jphi names the bootstrap model the archive records."""
+
+    def _archive(self, tmp_path, rec):
+        stem = TestJbsLoopBlockSchemaV3()._store(
+            str(tmp_path / "lbl.h5"), rec, rec, rec)
+        return stem + ".h5"
+
+    @pytest.mark.parametrize("rec, want", [
+        ({"converged": True, "n_passes": 3}, "self-consistent Redl bootstrap"),
+        (None, "frozen SWB bootstrap (legacy)"),
+    ])
+    def test_plot_jphi_labels_the_bootstrap_model(self, tmp_path, rec, want):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from bouquet.plotting import plot_jphi
+        fig, ax = plot_jphi(self._archive(tmp_path, rec), scan_key="7")
+        try:
+            assert want in ax[2].get_title()
+            labels = [ln.get_label() for ln in ax[2].get_lines()]
+            assert any(want in lb for lb in labels), labels
+            assert not any("SWB baseline" in lb for lb in labels), labels
+        finally:
+            plt.close(fig)
