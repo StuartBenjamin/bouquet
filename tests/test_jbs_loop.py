@@ -85,12 +85,12 @@ def _affine_problem(contraction, fixed_scale=1.0):
 # ---------------------------------------------------------------------------
 #  settings
 # ---------------------------------------------------------------------------
-def test_defaults_are_the_approved_values_and_off():
+def test_defaults_are_the_approved_values_and_on():
     from bouquet.config import GenerationConfig
     g = GenerationConfig()
-    assert g.jbs_self_consistent is False
+    assert g.jbs_self_consistent is True
     s = jbs_settings(g)
-    assert s["enabled"] is False
+    assert s["enabled"] is True
     assert (s["rtol_j"], s["rtol_Ip"], s["tol_li"], s["tol_q0"]) == \
         (1e-3, 1e-4, 1e-3, 2e-3)
     assert s["max_passes"] == 8 and jbs_settings(g, draw=True)[
@@ -141,6 +141,8 @@ def test_config_round_trips_the_loop_fields():
 
 
 def test_an_old_config_without_the_fields_loads_with_the_loop_off():
+    """A stored config that predates the loop was produced by the frozen
+    path; replaying it must not silently switch the bootstrap model."""
     from bouquet.config import (BouquetConfig, GenerationConfig,
                                 ImasSource, SolverConfig)
     d = BouquetConfig(source=ImasSource(ids_path="x.json"),
@@ -149,7 +151,53 @@ def test_an_old_config_without_the_fields_loads_with_the_loop_off():
     for k in list(d["generation"]):
         if k.startswith("jbs_") and k != "jbs_delta_mode":
             del d["generation"][k]
-    assert BouquetConfig.from_dict(d).generation.jbs_self_consistent is False
+    with pytest.warns(UserWarning, match="predates the self-consistent"):
+        g = BouquetConfig.from_dict(d).generation
+    assert g.jbs_self_consistent is False
+    # the other loop fields take their (inert) defaults
+    assert g.jbs_max_passes == 8 and g.jbs_relax == 0.7
+
+
+def test_a_current_config_round_trips_the_default_on_without_a_warning():
+    import warnings
+    from bouquet.config import (BouquetConfig, GenerationConfig,
+                                ImasSource, SolverConfig)
+    d = BouquetConfig(source=ImasSource(ids_path="x.json"),
+                      solver=SolverConfig(mesh_path="m.h5"), output_header="t",
+                      generation=GenerationConfig()).to_dict()
+    assert d["generation"]["jbs_self_consistent"] is True
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        back = BouquetConfig.from_dict(d)
+    assert back.generation.jbs_self_consistent is True
+
+
+def test_legacy_flag_round_trips():
+    from bouquet.config import (BouquetConfig, GenerationConfig,
+                                ImasSource, SolverConfig)
+    cfg = BouquetConfig(source=ImasSource(ids_path="x.json"),
+                        solver=SolverConfig(mesh_path="m.h5"), output_header="t",
+                        generation=GenerationConfig(jbs_self_consistent=False))
+    assert BouquetConfig.from_json(cfg.to_json()).generation\
+        .jbs_self_consistent is False
+
+
+@pytest.mark.parametrize("kw, match", [
+    (dict(single_profile_jphi=True), "single_profile_jphi"),
+    (dict(recalculate_j_BS=False), "recalculate_j_BS"),
+])
+def test_modes_without_a_bootstrap_to_iterate_are_refused_under_the_default(
+        kw, match):
+    """With the loop ON by default, a mode that has no bootstrap to iterate
+    is refused with the fix in the message -- never silently downgraded --
+    and runs once the legacy flag is set."""
+    from bouquet.config import GenerationConfig
+    from bouquet.run import Bouquet
+    with pytest.raises(ValueError, match=match) as ei:
+        Bouquet._check_jbs_loop_workflow(GenerationConfig(**kw))
+    assert "jbs_self_consistent=False" in str(ei.value)
+    Bouquet._check_jbs_loop_workflow(
+        GenerationConfig(jbs_self_consistent=False, **kw))
 
 
 # ---------------------------------------------------------------------------

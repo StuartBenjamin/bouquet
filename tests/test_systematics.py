@@ -14,7 +14,9 @@ Three modes (decompose pressure- vs current-systematics):
   * Mode 2  pinned, draw's kinetics         -> pressure-only response; bounded
             and unbiased vs the baseline (isolates pressure systematics).
   * Mode 3  production, draw's profiles      -> reproduces the golden draw
-            (full pipeline incl. bootstrap; current+pressure).
+            (full pipeline incl. bootstrap; current+pressure), on the
+            bootstrap model the golden's own stored config names (the
+            self-consistent loop, or the legacy frozen bootstrap).
 
 Reconstruction itself is covered by a separate test (future).  Needs OFT + the
 D3D-like mesh/baseline; runs by default when available, marked ``solver``
@@ -170,6 +172,21 @@ def replay(tmp_path_factory):
     run = bq.Bouquet.from_geqdsk(
         _GEQ, profiles=_PF, mesh=_MESH, n_draws=1,
         header=os.path.join(_work, "replay_recon"))
+    # Replay on the bootstrap model the golden was GENERATED with (its own
+    # stored config): the self-consistent loop for a fixture made with it,
+    # the frozen SWB bootstrap for one made before it existed (such a config
+    # loads with jbs_self_consistent=False).  The reconstruction follows the
+    # config; the functional generate_bouquet call below takes the same
+    # choice as its per-draw jbs_loop settings.  Mixing the two (a loop
+    # baseline under frozen draws, or the reverse) would replay a pipeline
+    # that never produced the fixture.
+    from bouquet.jbs_loop import jbs_settings
+    from bouquet.utils import load_config
+    _gen_golden = load_config(_GOLDEN, scan_key=0).generation
+    run.config.generation.jbs_self_consistent = bool(
+        _gen_golden.jbs_self_consistent)
+    _jbs_draw = jbs_settings(_gen_golden, draw=True)
+    _jbs_draw = _jbs_draw if _jbs_draw["enabled"] else None
     run.reconstruct()
     mygs = run.mygs
     bl_run = run.baseline
@@ -221,7 +238,7 @@ def replay(tmp_path_factory):
             homotopy_passes=[(0.05, 0.10), (0.02, 0.05), (0.01, 0.01)],
             inspec_F_max=0.02, inspec_VSC_max=0.02, p_thresh=0.05,
             save_truncate_eq=True, jphi_baseline=True, seed=12345,
-            pin_jphi=pin_jphi,
+            pin_jphi=pin_jphi, jbs_loop=_jbs_draw,
         )
         with h5py.File(header + ".h5", "r") as hf:
             g = hf["scan/0"]

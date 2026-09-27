@@ -4787,15 +4787,19 @@ class Bouquet:
             return
         if bool(getattr(gc, "single_profile_jphi", False)):
             raise ValueError(
-                "jbs_self_consistent=True with single_profile_jphi=True: "
-                "there is no bootstrap component to iterate (j_phi is one "
-                "profile).  Turn one of them off.")
+                "jbs_self_consistent=True (the default) with "
+                "single_profile_jphi=True: there is no bootstrap component "
+                "to iterate (j_phi is one profile).  Set "
+                "generation.jbs_self_consistent=False for a single-profile "
+                "run.")
         if not bool(getattr(gc, "recalculate_j_BS", True)):
             raise ValueError(
-                "jbs_self_consistent=True with recalculate_j_BS=False: the "
-                "loop re-evaluates the bootstrap on every equilibrium, which "
-                "is exactly what recalculate_j_BS=False turns off.  Turn one "
-                "of them off.")
+                "jbs_self_consistent=True (the default) with "
+                "recalculate_j_BS=False: the loop re-evaluates the bootstrap "
+                "on every equilibrium, which is exactly what "
+                "recalculate_j_BS=False turns off.  Set "
+                "generation.jbs_self_consistent=False to keep the baseline "
+                "bootstrap frozen in the draws.")
 
     # ── stage 3: perturbed bouquet --------------------------------------
     def _validate_workflow(self) -> None:
