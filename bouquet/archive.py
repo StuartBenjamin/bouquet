@@ -14,6 +14,8 @@ than hand-rolling h5 tree traversal + ``.eqdsk``-suffix scanning + byte parsing
     sc.selected, sc.excluded, sc.all     # lists of DrawView (per filter flags)
     d = sc[3]                            # DrawView (lazy)
     d.li1, d.li3, d.flags, d.attrs       # scalars + filter/spec metadata
+    d.jbs_loop, sc.baseline_jbs_loop     # self-consistent bootstrap records
+    sc.bootstrap_model                   # "self-consistent Redl bootstrap" / legacy
     d.profiles                           # dict of named arrays (psi_N, j_phi, ...)
     d.equilibrium()                      # parsed GEQDSKEquilibrium (stored bytes)
     d.pfile()                            # parsed PFile (None if absent)
@@ -40,7 +42,8 @@ from typing import Optional
 
 import numpy as np
 
-from .schema import EQDSK_DS, PFILE_DS, find_bytes_dataset
+from .schema import (EQDSK_DS, PFILE_DS, JBS_CONVERGED_ATTR,
+                     JBS_LOOP_JSON_ATTR, find_bytes_dataset)
 from .utils import (
     _resolve_h5, _scan_key, _group_path,
     discover_scan_keys, list_equilibrium_indices, load_baseline_profiles,
@@ -117,6 +120,24 @@ class DrawView:
     @property
     def selected(self) -> bool:
         return bool(self.attrs.get("selected", True))
+
+    # ---- self-consistent bootstrap record (schema v3) ----------------------
+    @property
+    def jbs_loop(self) -> Optional[dict]:
+        """The draw's self-consistent bootstrap record (the schema-v3
+        ``jbs_loop`` block, parsed), or ``None`` for a frozen-bootstrap draw
+        (a v2 archive, or ``jbs_self_consistent=False``)."""
+        import json
+        raw = self.attrs.get(JBS_LOOP_JSON_ATTR)
+        if raw is None:
+            return None
+        return json.loads(raw.decode() if isinstance(raw, bytes) else str(raw))
+
+    @property
+    def jbs_converged(self) -> Optional[bool]:
+        """``True``/``False`` for a loop draw; ``None`` for a frozen one."""
+        a = self.attrs
+        return bool(a[JBS_CONVERGED_ATTR]) if JBS_CONVERGED_ATTR in a else None
 
     # ---- profiles / bytes --------------------------------------------------
     @property
@@ -280,6 +301,28 @@ class ScanView:
     def baseline(self) -> dict:
         """Baseline profiles + sigmas dict for this scan point."""
         return load_baseline_profiles(self._ar.path, scan_key=self.scan_key)
+
+    @property
+    def baseline_jbs_loop(self) -> Optional[dict]:
+        """The baseline's self-consistent bootstrap record (schema-v3
+        ``jbs_loop`` block on ``_baseline``), or ``None`` (frozen)."""
+        from .utils import load_jbs_loop
+        try:
+            return load_jbs_loop(self._ar.path, "_baseline",
+                                 scan_key=self.scan_key)
+        except KeyError:
+            return None
+
+    @property
+    def bootstrap_model(self) -> str:
+        """How this scan's bootstrap was computed, as a label:
+        ``"self-consistent Redl bootstrap"`` when the baseline or any draw
+        carries a ``jbs_loop`` block, else ``"frozen SWB bootstrap
+        (legacy)"`` (v2 archives, ``jbs_self_consistent=False``)."""
+        from .schema import bootstrap_label
+        if self.baseline_jbs_loop is not None:
+            return bootstrap_label(True)
+        return bootstrap_label(any(d.jbs_loop is not None for d in self.all))
 
     def _draws(self, selection: str) -> list:
         idx = select_indices(self._ar.path, scan_key=self.scan_key, selection=selection)

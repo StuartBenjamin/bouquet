@@ -5171,12 +5171,31 @@ class Bouquet:
                 print(f"[until-N] target met: {_got}/{_tgt} in-spec draws "
                       f"in {_tries} attempts.")
 
+        # The baseline's self-consistent bootstrap record (schema v3 jbs_loop
+        # block on _baseline; a frozen baseline carries none).
+        from .utils import store_baseline_jbs_loop
+        store_baseline_jbs_loop(header, self._baseline_jbs_record(),
+                                scan_key=gc.scan_key)
+
         # Stamp provenance (schema/version/timestamp + full config JSON) onto the
         # archive so the run is self-describing and load_config() can round-trip it.
         from .utils import write_provenance
         write_provenance(header, config=self.config, scan_key=gc.scan_key)
 
         return self.diagnostics
+
+    def _baseline_jbs_record(self):
+        """The baseline's self-consistent bootstrap loop record, or ``None``
+        (a frozen baseline): ``li_metrics["jbs_loop"]`` on the IMAS path,
+        ``reconstruction_metrics["jbs_loop"]`` on the geqdsk path."""
+        bl = getattr(self, "baseline", None)
+        if bl is None:
+            return None
+        for attr in ("li_metrics", "reconstruction_metrics"):
+            rec = (getattr(bl, attr, None) or {}).get("jbs_loop")
+            if rec is not None:
+                return rec
+        return None
 
     def plot_bouquet(self, mode: str = "all", selection: str = "all",
                      layout: str = "stack", pub_style: bool = False):

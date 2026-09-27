@@ -229,3 +229,90 @@ class TestCoilSchemaV2:
         plt.close("all")
         assert vals, "no heatmap array found"
         assert any(np.isfinite(v).any() for v in vals), "coil-drift heatmap all-NaN"
+
+
+class TestJbsLoopBlockSchemaV3:
+    """Schema v3: the self-consistent bootstrap record (``jbs_loop`` block)
+    on draw groups and on ``_baseline``; absent = a frozen bootstrap."""
+
+    _REC = {"converged": True, "n_passes": 4, "n_passes_total": 5,
+            "r_j": [3e-2, 2e-3, 4e-4, 1e-4], "omega": [0.7, 0.7, 0.7, 0.7],
+            "tolerances": {"rtol_j": 1e-3}, "arr": np.arange(3.0)}
+
+    def _store(self, path, rec_draw0, rec_draw1, rec_baseline):
+        from bouquet.utils import (store_equilibrium, store_baseline_profiles,
+                                   store_baseline_jbs_loop,
+                                   initialize_equilibrium_database)
+        stem = os.path.splitext(path)[0]
+        initialize_equilibrium_database(stem)
+        psi = np.linspace(0, 1, 9)
+        one = np.ones(9)
+        eq_path = stem + "_in.eqdsk"
+        with open(eq_path, "wb") as fh:
+            fh.write(b"GEQDSK-BYTES")
+        store_baseline_profiles(
+            stem, psi, one, one, one, one, one, one,
+            one, one, one, one, one, 1e6, 1.0, scan_key="7",
+            eqdsk_bytes=b"GEQDSK-BYTES")
+        for c, rec in ((0, rec_draw0), (1, rec_draw1)):
+            store_equilibrium(
+                stem, c, eq_path, psi, one, one, one,
+                one, one, one, one, one, 1.0, 0.8, scan_key="7",
+                jbs_loop=rec)
+        store_baseline_jbs_loop(stem, rec_baseline, scan_key="7")
+        return stem
+
+    def test_version_is_3_and_the_block_is_named_in_the_schema(self):
+        from bouquet import schema
+        assert schema.SCHEMA_VERSION == 3
+        assert schema.JBS_LOOP_ATTRS == ("jbs_converged", "jbs_n_passes",
+                                         "jbs_loop_json")
+        assert schema.JBS_LOOP_SINCE_SCHEMA == 3
+
+    def test_block_round_trips_on_draws_and_baseline(self, tmp_path):
+        from bouquet.utils import load_jbs_loop
+        stem = self._store(str(tmp_path / "v3.h5"), self._REC, None,
+                           dict(self._REC, n_passes_total=None))
+        with h5py.File(stem + ".h5", "r") as hf:
+            assert hf.attrs["schema_version"] == 3
+            a0 = hf["scan/7/0"].attrs
+            assert bool(a0["jbs_converged"]) is True
+            assert int(a0["jbs_n_passes"]) == 5      # all loops of the draw
+            ab = hf["scan/7/_baseline"].attrs
+            assert int(ab["jbs_n_passes"]) == 4      # a baseline has n_passes
+            # a frozen draw carries none of the block
+            assert not any(k in hf["scan/7/1"].attrs
+                           for k in ("jbs_converged", "jbs_n_passes",
+                                     "jbs_loop_json"))
+        r0 = load_jbs_loop(stem, 0, scan_key="7")
+        assert r0["r_j"] == self._REC["r_j"] and r0["arr"] == [0.0, 1.0, 2.0]
+        assert load_jbs_loop(stem, 1, scan_key="7") is None
+        assert load_jbs_loop(stem, "_baseline", scan_key="7")["n_passes"] == 4
+
+    def test_archive_views_read_the_block(self, tmp_path):
+        stem = self._store(str(tmp_path / "views.h5"), self._REC, None,
+                           self._REC)
+        sc = bq.BouquetArchive(stem + ".h5")["7"]
+        assert sc[0].jbs_converged is True and sc[0].jbs_loop["n_passes"] == 4
+        assert sc[1].jbs_converged is None and sc[1].jbs_loop is None
+        assert sc.baseline_jbs_loop["converged"] is True
+        assert sc.bootstrap_model == "self-consistent Redl bootstrap"
+
+    def test_a_frozen_archive_reads_as_legacy(self, tmp_path):
+        """v2 archives and jbs_self_consistent=False runs carry no block:
+        nothing to migrate, and the readers say 'frozen'."""
+        stem = self._store(str(tmp_path / "frozen.h5"), None, None, None)
+        with h5py.File(stem + ".h5", "r") as hf:
+            assert "jbs_loop_json" not in hf["scan/7/_baseline"].attrs
+        sc = bq.BouquetArchive(stem + ".h5")["7"]
+        assert sc.baseline_jbs_loop is None
+        assert all(d.jbs_loop is None for d in sc.all)
+        assert sc.bootstrap_model == "frozen SWB bootstrap (legacy)"
+
+    def test_the_block_json_is_plain_json(self, tmp_path):
+        import json
+        stem = self._store(str(tmp_path / "j.h5"), self._REC, None, None)
+        with h5py.File(stem + ".h5", "r") as hf:
+            raw = hf["scan/7/0"].attrs["jbs_loop_json"]
+        json.loads(raw)                               # must not raise
+
