@@ -73,6 +73,8 @@ FF′/P′: g-file PPRIME/FFPRIM enter only via `j_tor_averaged_direct` (values 
   **Fix:** tests/test_phi_cfg.py (reserved kwargs, fake-toolkit `check_backend`, round trip, construction-time validation).
 - **T7** (solver) `get_torflux_map` vs ∫q; Φ-tagged vs ψ-tagged pp; plan §7 Φ round trip; `window_coord="psi_n"` classify parity.
   **Fix:** tests/test_phi_solver.py (15 `solver` tests): torflux map vs ∫q (2.2e-4) and inverse∘forward; ψ- vs Φ-tagged solve (p 1.3e-4, q95 4.7e-4); g-file σ=0 round trip psi_n vs phi_n (l_i +0.06 %, q0 +0.29 %, q95 0.03 %); `window_coord="psi_n"` classify parity (H_mode both). IMAS round trip not added (needs a dd with real `rho_tor_norm`).
+- **T8** (solver) Φ_N draws end to end: g-file, IMAS and jBS-delta σ=0.
+  **Fix:** tests/test_phi_solver_draws.py (11 `solver` tests). This exposed a pre-existing bug: the jBS-delta σ=0 cache SWB ran under the strong coil reg, so delta mode silently fell back to inactive. Fixed in `_install_weak_swb_coil_reg` (TokaMaker_interface.py), with `jbs_delta_active` now archived per draw (utils.py `store_equilibrium`).
 
 Real-dd probe: `.bouquet_wt/torflux_jobs/ddprobe/ddprobe.py`.
 
@@ -81,6 +83,7 @@ Real-dd probe: `.bouquet_wt/torflux_jobs/ddprobe/ddprobe.py`.
 - Fast suite, no OFT: 1238 passed, 2 skipped.
 - coords/config/phi test files with OFT (oftstage_swbx): 113 passed. This includes the base-branch failure `test_config::test_without_the_toolkit_only_the_reserved_check_runs`, which now stubs `_bootstrap_kwarg_names` so it holds with OFT importable.
 - `tests/test_phi_solver.py` with OFT: 15 passed (1:44).
+- `tests/test_phi_solver_draws.py` with OFT: 11 passed. Full solver suite: 62 passed, 1 failed (`test_systematics::test_mode1_pinned_baseline_reproduces_baseline`, which also fails on the base branch).
 
 ## IMAS Φ round trip: real FUSE dd, 174956 @ 2.0 s (2026-09-24)
 

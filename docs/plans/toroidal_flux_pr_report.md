@@ -1,7 +1,7 @@
 # PR: profiles on normalised toroidal flux (`coord="phi_n"`)
 
 **Branch:** `toroidal_flux_mapping` → base `kwargs_for_bootstrap_fortran_backend_v2` (c0c3337)
-**Companion OFT branch:** `profiles_on_toroidal_normalised_flux` (7239b2f); needed only for `coord="phi_n"`
+**Companion OFT branch:** `profiles_on_toroidal_normalised_flux` (33a4d90); needed only for `coord="phi_n"`
 **Attachment:** `torflux_imas_results.zip`, the output of `examples/torflux_imas/torflux_imas_effect.py` on DIII-D 174956 @ 2.0 s
 
 ## Summary
@@ -35,6 +35,7 @@ The motivation is that FUSE, IMAS, IDA and transport codes hold profiles fixed i
 - Windows follow `GenerationConfig.window_coord` (`"psi_n"` default, or `"native"`).
 - The SWB seed coordinate follows `GenerationConfig.seed_coord`.
 - σ=0 exactness is preserved: the jBS-delta/DIFF_BS cache seed is built after its anchor solve and reused by the draws.
+- **Fix (predates the branch):** the jBS-delta σ=0 cache SWB ran under `generate_bouquet`'s strong coil reg, so its iterates broke and delta mode silently fell back to inactive. Φ_N exposed this, because a Φ_N solve fails on a broken iterate. The cache now solves under the weak SWB reg (`_install_weak_swb_coil_reg`), and `jbs_delta_active` is archived on each draw.
 
 **Config and guards**
 - Coordinates are validated when the config is built.
@@ -64,6 +65,7 @@ The motivation is that FUSE, IMAS, IDA and transport codes hold profiles fixed i
 All runs are SLURM jobs against the staged companion OFT.
 
 - **Fast suite (no OFT):** 1238 passed, 2 skipped. The coordinate/config/Φ_N test files with OFT importable: 113 passed.
+- **Full solver suite:** 62 passed, 1 failed (`test_systematics::test_mode1_pinned_baseline_reproduces_baseline`, which also fails on the base branch).
 - **New pure tests:**
   - `test_coords.py`: helpers, tagging, guards, IDA placement;
   - `test_phi_io_imas.py`: IMAS read is a relabel, equilibrium placement, refusals, renormalisation, fixed-component coord, write-back;
@@ -75,6 +77,10 @@ All runs are SLURM jobs against the staged companion OFT.
   - ψ-tagged and Φ-tagged solves of the same profiles agree to ~1e-4;
   - g-file σ=0 round trip, psi_n vs phi_n: l_i +0.06 %, q0 +0.29 %, q95 0.03 %, Ip 4e-6;
   - `window_coord="psi_n"` in a Φ_N run keeps the ψ_N classifier mode.
+- **Φ_N draw solver tests (`test_phi_solver_draws.py`, 11 passed):**
+  - g-file: draws, σ=0 check and archive;
+  - IMAS: draws, `write_imas_draw` back onto Φ_N nodes;
+  - jBS-delta: σ=0 draw, with delta mode active.
 - **IMAS, real FUSE dd** (example, attached zip):
 
   | | l_i(3) | q95 | SWB/FUSE pedestal j_BS |
@@ -94,3 +100,4 @@ All runs are SLURM jobs against the staged companion OFT.
 - **Time-dependent solves:** OFT's time-dependent solvers refuse toroidal-flux profiles, and a Φ_N solve costs about 1.4× a ψ_N solve.
 - **Selecting the coordinate:** it is chosen on the source. A `GenerationConfig`-level choice was deferred.
 - **IMAS Φ_N round trip:** it needs the 500 MB dd, so it lives in `examples/`, not in the test suite.
+- **Draw robustness (pre-existing, separate issue):** some draws fail in homotopy under the strong coil reg, and a NaN iterate runs to maxits instead of failing fast; both reproduce on the base branch in ψ_N.
