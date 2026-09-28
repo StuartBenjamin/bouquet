@@ -176,6 +176,23 @@ def test_the_fixture_is_a_self_consistent_bootstrap_run():
     mgf.assert_no_filesystem_paths(_SLIM)
 
 
+def test_the_fixture_archives_the_input_current(manifest):
+    """The systematics replay feeds ``_baseline/j_phi`` back as the input of
+    its baseline solve, so the fixture must archive the INPUT current
+    (``regenerate_golden_run.py``, ``store_achieved_jphi=False``).  A fixture
+    regenerated through plain ``Bouquet.generate()`` archives the ACHIEVED
+    current instead and fails mode 1 on the coils (tests/golden/README.md,
+    "mode-1 coil drift").  The archive stamp, the fixture's provenance and the
+    manifest must all say "input"."""
+    with h5py.File(_SLIM, "r") as hf:
+        assert hf.attrs.get("golden_jphi_archival") == "input", \
+            dict(hf.attrs).get("golden_jphi_archival")
+    prov = _harness.golden_provenance(_SLIM)
+    assert prov.get("prov_generator_args_jphi_archival") == "input", prov
+    assert manifest["provenance"]["generator_args"].get(
+        "jphi_archival") == "input", manifest["provenance"]["generator_args"]
+
+
 def test_coil_currents_match_manifest(manifest, tol):
     with h5py.File(_SLIM, "r") as hf:
         for bkey, sv, entry in _iter_scans(manifest):
