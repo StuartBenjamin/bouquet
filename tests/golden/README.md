@@ -63,7 +63,9 @@ input-current rebuild of the self-consistent-bootstrap refresh):
   this is its premise ("archived current reproduces archived LCFS").
   **`Bouquet.generate()` hard-wires `store_achieved_jphi=True`**, so a plain
   notebook run does NOT follow the recipe; the refresh in 5296720 was built
-  that way and mode 1 failed on it (see "mode-1 coil drift" below).
+  that way and mode 1 failed on it (see "mode-1 coil drift" below). The
+  current fixture (bc85d46) is that refresh rebuilt with this recipe, and
+  mode 1 passes on it.
   `store_achieved_jphi` changes only what is written, never what is solved;
 * one thread (`OMP_NUM_THREADS=1`), on the OFT build the fixture pins, stated
   through `BOUQUET_OFT_COMMIT` / `BOUQUET_OFT_BRANCH` / `BOUQUET_OFT_BUILD_ID`
@@ -123,7 +125,51 @@ moved, because that channel is drawn from the fixture's baseline j_phi, which
 now carries the self-consistent bootstrap (baseline j_phi moved by ~1 % of its
 peak, sigma_jphi by ~1.5 %).
 
+**Rebuilt with input-current archival (bc85d46).** The 5296720 refresh was
+made through plain `Bouquet.generate()` and so archived the ACHIEVED current
+(see "mode-1 coil drift" below). The fixture was then rebuilt from a full run
+of `regenerate_golden_run.py`: the same stored config (seed 12345, 20 draws,
+ceilings 8 reconstruction / 12 per draw loop / 4 post-homotopy, as stored and
+as applied), the same OFT build, one thread, ~6.2 h. Archival changes only
+what is written, and the two runs agree on that. Every group, attr and dataset
+of the new archive is identical to the 5296720 one (coil currents, X-points,
+kinetic profiles, geqdsks, l_i(1) / l_i(3), in-spec flags, the `jbs_loop`
+records apart from wall time, `eq_fsa`), except `j_phi` and `j_inductive` on
+`_baseline` and on every draw. Those now hold the solver input and differ by
+1.2-1.9 % of peak. The run log's loop-pass, homotopy, in-spec and rejection
+lines are identical line for line, so the same draws were skipped and rejected
+(count 2 skipped; counts 1 and 17 rejected post-homotopy). `golden_manifest.json`
+changed only in its provenance. In `rng_stream_manifest.json` the `jphi` hash
+moved once more, because that channel is drawn from `_baseline/j_phi`, now the
+input current; the four kinetic hashes are unchanged.
+`test_the_fixture_archives_the_input_current` asserts the archival stamp in the
+fixture, its provenance and the manifest.
+
 ## `test_systematics` against the refreshed fixture
+
+**Against the input-current rebuild (bc85d46): all three modes pass** on the
+Linux production build and OFT line of the fixture, at one thread
+(`3 passed, 53 warnings in 770.30s (0:12:50)`). No bar was changed.
+
+* Mode 1: `[replay mode1] baseline RMS = 0.4418 mm (limit 0.8)`,
+  `[replay mode1] max coil drift = 0.0189% (limit 0.3)`. The replay's
+  jphi-baseline solve lands at l_i(3) = 0.65387, the regeneration's own value.
+  The drift is about twice the 0.0092 % that run B-on predicted below, and
+  16× inside the bar.
+* Mode 2: `draw 0: pressure-only boundary RMS = 0.446 mm`,
+  `draw 3: pressure-only boundary RMS = 0.953 mm` (bar 6 mm).
+* Mode 3 (with the c75576e replay of `generate()`'s bootstrap model): both
+  replayed draws now produce an equilibrium and reproduce within every bar.
+  `draw 0: boundary RMS replay=0.689 golden=2.083 mm  li(3) replay=0.6287
+  golden=0.6275  li(1) replay=0.8189 golden=0.8200`;
+  `draw 3: boundary RMS replay=0.687 golden=2.046 mm  li(3) replay=0.6234
+  golden=0.6224  li(1) replay=0.8151 golden=0.8174`. Draw 3's replay no
+  longer exhausts `maxits`, so draw 3 is checked again. The boundary-RMS
+  difference sits at 1.36-1.39 mm against the 2 mm bar, as it did before the
+  rebuild (draw 0: 0.719 vs 2.083 mm).
+
+What follows is the history against the 5296720 fixture (achieved-current
+archival).
 
 **Mode 3 (`test_mode3_production_reproduces_golden`) passes** on the Linux
 production build. Before the refresh it missed the recorded l_i(1) of draw 3
@@ -147,7 +193,7 @@ replay's own loop-on reconstruction and the fixture's loop-on baseline
 from `Bouquet(stored config) -> prepare_baseline`, the replay's from
 `Bouquet.from_geqdsk(...) -> reconstruct()`; with the frozen bootstrap the two
 agreed to 0.006 %, with the loop on they do not. The bar is not widened.
-Diagnosed in "Known limitation: mode-1 coil drift after the refresh" below.
+Diagnosed in "Resolved: mode-1 coil drift after the refresh" below.
 The two entry points reconstruct bit-identically. The drift comes from the
 refresh's archival convention (achieved rather than input baseline current),
 not from the loop.
@@ -157,8 +203,14 @@ not from the loop.
 Seen in the loop-on regeneration of this example (config seed 12345, 20
 requested draws, pass ceilings 12 per draw loop / 4 post-homotopy): archive
 counts **1** and **17** were rejected this way, both before and after the
-ceilings were raised. It is a rejected draw, loudly, never an accepted one;
-nothing here caps, retries or falls back.
+ceilings were raised, and again in the input-current rebuild (bc85d46; the
+stage took ~20-40 min for count 1 and ~40-60 min for count 17, bounded by the
+run's 10-min stack dumps). Both runs, whose logs match line for line, also
+show a slow failure one stage earlier: count 15's homotopy pass 3 of 3
+(F/VSC +/-1 %) exhausted `maxits` after ~30-50 min and was rolled back to pass 2, and the draw was kept
+(in spec). That step is the homotopy's own infeasible-pass rollback, not this
+limitation. The limitation itself ends in a rejected draw, loudly, never an
+accepted one; nothing here caps, retries or falls back.
 
 **What happens.** The draw's own loops converge (count 1: anchor 5 passes,
 l_i-match candidate 6; count 17: anchor 3, then four l_i-match candidates of
@@ -238,9 +290,18 @@ passes).
 5. *Status quo*: a rejected draw, ~30-60 min of wall time per occurrence
    (2 of 20 draws, ~1.6 h of a 6.5 h single-thread run here).
 
-## Known limitation: mode-1 coil drift after the refresh
+## Resolved: mode-1 coil drift after the refresh
 
-**Diagnosed; nothing implemented, no bar changed.** The mode-1 failure is not
+**Resolved by the input-current recipe; no bar changed.** Option 1 below was
+taken. `regenerate_golden_run.py` (f5d440f) regenerates the run with
+`store_achieved_jphi=False`, and the fixture was rebuilt from that run
+(bc85d46). Mode 1 now passes at 0.0189 % max coil drift (bar 0.3 %),
+boundary RMS 0.4418 mm (bar 0.8 mm); see "`test_systematics` against the
+refreshed fixture" above. Option 4 (mode 3 replays `generate()`'s bootstrap
+model) landed separately in c75576e. The diagnosis below is kept as history,
+written when the 5296720 fixture was current.
+
+**Diagnosed (history).** The mode-1 failure is not
 caused by the self-consistent bootstrap loop, and the two entry points do not
 reconstruct differently. It is a change in how the refreshed fixture
 archives the baseline current. The replay then solves its baseline from a
@@ -427,7 +488,14 @@ and the run was stopped. So the `maxits` is a property of what the replay
 is asked to solve, not of the coil stage. The mode-3 replay is not a
 faithful replay of the generator's draw in the first place.
 
-### Options (none implemented; each needs a decision)
+*Later:* c75576e made the mode-3 replay use `generate()`'s bootstrap model,
+and bc85d46 made the fixture archive input currents. With both, draw 3's
+replay converges its anchor loop in 3 passes (I_BS ≈ 313 kA, in line with
+the golden's draw loops) and its l_i-match loop in 3 (l_i error 0.17 %),
+solves all three homotopy stages, is accepted post-homotopy without passes
+and reproduces the golden draw (see above).
+
+### Options (as written before the resolution; 1 and 4 were taken)
 
 1. *Regenerate the fixture under the documented recipe.* Use input-current
    archival (`store_achieved_jphi=False`) with the loop on, everything else

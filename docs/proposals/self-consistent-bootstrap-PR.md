@@ -250,6 +250,21 @@ The seeded draw-stream golden (`rng_stream_manifest.json`) is unchanged for
 the kinetic channels; only the `jphi` channel's hash moved, because it is
 drawn from the baseline j_φ, which now carries the self-consistent bootstrap.
 
+**Rebuilt with input-current archival.** The first refresh went through
+plain `Bouquet.generate()`, which archives the achieved flux-surface-average
+current, and `test_systematics` mode 1 failed on it (Tests below). The fixture
+is now built from a full run of the committed recipe
+`tests/golden/regenerate_golden_run.py`: the same stored config, draw
+ceilings 8 / 12 / 4 as stored and as applied, the same OFT build, one thread,
+~6.2 h. The difference is `store_achieved_jphi=False`, stamped as
+`golden_jphi_archival = "input"` on the archive, the fixture and the
+manifest. The flag changes only what is written. Draws, coil currents, l_i,
+in-spec flags, geqdsks and loop records are identical to the first refresh,
+and so are the same skip and the same two rejections. Only `j_phi` /
+`j_inductive` differ (1.2–1.9 % of peak, now the solver input).
+`golden_manifest.json` changed only in its provenance. The `jphi` stream
+hash moved again; the kinetic hashes are unchanged.
+
 ## Known limitation: slow post-homotopy divergence of a standard draw
 
 Two of the 20 golden draws were rejected after ~30–60 min each: the
@@ -267,30 +282,36 @@ status quo.
 
 ## Tests
 
-Fast suite (no solver) on the refreshed fixture: 1165 passed on the laptop
-(the provenance test that needed the refreshed fixture now passes; the new
-`test_the_fixture_is_a_self_consistent_bootstrap_run` is included). Golden
-tests (`test_golden_bouquet.py`): 21 passed on the laptop and on the Linux
-production build. Solver suites on the Linux production build before the
-refresh: fsa 6 passed / 1 skipped (build-aware collapse demonstration),
-harness 1, loop solver 19 (incl. the legacy-flag tripwire test), l_i
-closure 10, seeded reproducibility 12, systematics 2 passed / 1 failed (the
-golden l_i(1) miss of the pre-refresh fixture, documented in
-`tests/golden/README.md`). Systematics against the refreshed fixture on
-the Linux production build: 2 passed / 1 failed. Mode 3 now passes (draw 0
-within every bar; draw 3's replay produced no equilibrium -- a `maxits`
-failure -- and was skipped by the test). Mode 1 is a NEW failure: max coil
-drift 1.2292 % against 0.3 % (maximal on F9B; the whole coil set moves), already present between the
-test's class-API loop-on reconstruction and the fixture's loop-on baseline
-(the two agreed to 0.006 % with the frozen bootstrap). Diagnosed, not fixed;
-no bar changed (`tests/golden/README.md`, "Known limitation: mode-1 coil
-drift after the refresh"): the cause is not the loop but the refresh's
-archival convention -- regenerated through `Bouquet.generate()`, the fixture
-archives the ACHIEVED baseline current, where the earlier goldens' recipe
-archived the INPUT current the replay feeds back; fed the generator's input,
-the test's own entry point reproduces the refreshed baseline coils to
-0.0006 % (mode-1 metric 0.0092 %). Options listed there; a decision is
-needed. **Blocking for the PR.**
+Against the input-current fixture:
+
+- fast suite (no solver): 1166 passed on the laptop, including the new
+  `test_the_fixture_archives_the_input_current`;
+- golden tests (`test_golden_bouquet.py`): 22 passed on the laptop. The
+  Linux production build ran 21 passed, before that test was added;
+- `test_rng_reproducibility.py`: 23 passed on the laptop;
+- `test_systematics.py` (`-m solver`, Linux production build, one thread):
+  **3 passed**, no bar changed.
+  - Mode 1: max coil drift 0.0189 % (bar 0.3 %), boundary RMS 0.4418 mm
+    (bar 0.8 mm).
+  - Mode 2: 0.446 / 0.953 mm (bar 6 mm).
+  - Mode 3: draws 0 and 3 both replayed and reproduce within every bar
+    (l_i(3) within 0.2 %, l_i(1) within 0.3 %, boundary-RMS difference
+    1.36–1.39 mm against 2 mm). Draw 3's replay no longer exhausts `maxits`,
+    now that mode 3 replays `generate()`'s bootstrap model (Z_eff,
+    edge-isolation and floor flags, baseline j_BS, bootstrap scale).
+
+The mode-1 failure against the first refresh (max coil drift 1.2292 %,
+F9B) is resolved. Its diagnosis is kept in `tests/golden/README.md`,
+"Resolved: mode-1 coil drift after the refresh": the cause was the
+archival convention, not the loop, and the fix is the recipe above, not a
+code or bar change.
+
+Solver suites on the Linux production build before the refresh; they do
+not read the fixture and were not rerun: fsa 6 passed / 1 skipped
+(build-aware collapse demonstration), harness 1, loop solver 19 (incl. the
+legacy-flag tripwire test), l_i closure 10, seeded reproducibility 12.
+
+No test status blocks the PR.
 
 ## Reviewer notes
 
