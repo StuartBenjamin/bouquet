@@ -58,5 +58,38 @@ as the shareable example artifact under
 3. Review the `golden_manifest.json` git diff — it shows exactly which physics
    values moved — then commit the new fixture + manifests together.
 
+The builder refuses to write a fixture that names an absolute filesystem path
+anywhere (string attrs, `config_json`, geqdsk headers) and reduces the paths
+inside the self-consistent bootstrap records (`jbs_loop_json`, which carry the
+OFT package path) to basenames: this repository is public, and the OFT build
+is identified by the content digests in the provenance stamp instead.
+
+## Pending: the self-consistent-bootstrap refresh
+
+`GenerationConfig.jbs_self_consistent` now defaults to `True`, but the fixture
+here is still the frozen-bootstrap run it always was (its stored config
+predates the field, so `load_config` reads it with the loop off and
+`test_systematics` replays it on the frozen path -- consistent, not stale in
+that sense). A loop-on regeneration from this fixture's own config has not
+yet produced a usable archive: on this case the standard (l_i-loop) draw's
+Gauss-Seidel bootstrap coupling contracts at ~0.38/pass from r_j ~ 2e-2..1e-1
+and needs ~7-9 passes against the per-draw ceiling of 6, and the
+post-homotopy check (ceiling 2 with the two-consecutive-pass rule) rejects any
+draw whose first pass misses. Refresh once the draw ceilings are settled; the
+ceilings are an approved convergence setting and are not changed here.
+
+## Known build-dependent failure: `test_systematics::test_mode3_production_reproduces_golden`
+
+On OFT builds that carry the 2026-08 bootstrap stencil change (the current
+line, including the macOS development build and the Linux production build)
+this replay misses the recorded l_i(1) of draw 3 by 3.74 % against its 3 %
+bar (`l_i(1) replay 0.8240 vs golden 0.8560`), with l_i(3) (2.06 %) and the
+boundary RMS inside their bars. The miss is the fixture's, not bouquet's: the
+commit that produced the fixture reproduces it to four decimals on the newer
+OFT, and passes on the older one; the signature (an l_i(1)-only, edge-localised
+change) is the end-stencil difference of the bootstrap-gradient formula. The
+bar is not widened; the failure is expected until the fixture is regenerated
+on the current OFT line (see the pending refresh above).
+
 The `*.h5` glob in `.gitignore` is negated for `tests/golden/*.h5` so the slim
 fixture is tracked while ad-hoc run outputs elsewhere stay ignored.
