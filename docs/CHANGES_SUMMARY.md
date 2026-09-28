@@ -5,8 +5,9 @@
 **This changes results.** `GenerationConfig.jbs_self_consistent` now defaults
 to `True`: every run re-evaluates the bootstrap on the delivered equilibrium
 and iterates it to self-consistency. The bootstrap/inductive split moves, and
-with it l_i, q0 and every per-draw bootstrap response; the golden regression
-fixture was regenerated with the loop on (`tests/golden/`). To reproduce a run
+with it l_i, q0 and every per-draw bootstrap response. (The golden regression
+fixture is still the frozen-bootstrap run; its loop-on refresh is pending --
+see `tests/golden/README.md`.) To reproduce a run
 made before this release, set `jbs_self_consistent=False` -- the legacy frozen
 bootstrap, bit for bit (guarded by a solver test that tripwires the loop
 kernel and the Redl evaluator on that path). Also:
