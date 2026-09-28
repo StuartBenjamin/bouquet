@@ -419,6 +419,7 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
                  Ip: float, meas0: Optional[dict] = None,
                  gate_li: bool = True, gate_q0: bool = False,
                  label: str = "", init: Optional[str] = None,
+                 init_source: Optional[str] = None,
                  grid: str = "psi_N native",
                  on_pass: Optional[Callable] = None,
                  max_passes: Optional[int] = None,
@@ -460,6 +461,14 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         relaxation the next iterate is built with; ``None`` when no further
         pass follows), so a caller's own per-pass update can be relaxed by the
         same factor.
+    init : str or None
+        The ``jbs_init`` setting recorded as ``record["init"]`` (default: the
+        settings' own).
+    init_source : str or None
+        What ``jbs0`` actually is, in words, recorded as
+        ``record["init_source"]`` (e.g. a draw's "evaluate_jBS on the draw's
+        anchor equilibrium with the draw's own perturbed kinetics").  Record
+        only: the fixed point does not depend on the initial iterate.
     max_passes : int or None
         Override of ``settings["max_passes"]`` (the post-homotopy stage).
     raise_on_fail : bool or None
@@ -488,6 +497,7 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
     rec = dict(
         enabled=True, label=str(label),
         init=str(init if init is not None else settings.get("init", "anchor")),
+        init_source=(None if init_source is None else str(init_source)),
         grid=str(grid),
         tolerances=tolerances_record(dict(settings, max_passes=K)),
         criteria=dict(r_j=True, r_I=True, dl_i=bool(gate_li),

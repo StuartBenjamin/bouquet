@@ -96,7 +96,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
   carries `jbs_converged` (bool), `jbs_n_passes` (int, all loops of the draw)
   and the full loop record as JSON in `jbs_loop_json` (residual histories,
   relaxation factors, tolerances, the post-homotopy check, the evaluator
-  version and the OFT build); the `_baseline` group carries the same three
+  version, the OFT build, and `init_source` -- what each loop started from,
+  per loop under `loops` and for the draw's first loop at the top level); the `_baseline` group carries the same three
   attrs for the baseline's own loop (`jbs_n_passes` = its pass count). Names
   in `schema.JBS_LOOP_ATTRS`; write/read with `schema.write_jbs_loop` /
   `schema.read_jbs_loop`, or read with

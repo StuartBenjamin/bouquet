@@ -1707,6 +1707,31 @@ def _draw_jbs_composer(psi_N, ne, te, ni, ti, zeff, psi_pad, isolate_edge,
                             delta_baseline)
 
 
+# What a draw's loop starts from (recorded per loop as ``init_source``).
+# Every draw loop starts from Redl on the draw's OWN perturbed kinetics: the
+# first at the draw's state anchor, later ones warm from the previous loop of
+# the same draw.  The unperturbed baseline bootstrap is never a draw's start.
+JBS_DRAW_INIT_WARM = ("warm start: this draw's previous converged bootstrap "
+                      "(Redl on the draw's own perturbed kinetics)")
+JBS_DRAW_INIT_POST_HOMOTOPY = (
+    "relaxed: (1 - omega) x the bootstrap the draw carries + omega x Redl on "
+    "the delivered post-homotopy equilibrium (the draw's own perturbed "
+    "kinetics)")
+
+
+def _draw_anchor_init_source(compose):
+    """``init_source`` of a draw's first loop: Redl at the draw's anchor."""
+    txt = ("evaluate_jBS on the draw's state-anchor equilibrium (the archived "
+           "total current at the draw's full pressure) with the draw's own "
+           "perturbed kinetics (ne, Te, ni, Ti, Zeff)")
+    if compose.use_delta:
+        txt += ("; delta composition: baseline j_BS + (that Redl - the "
+                "sigma=0 Redl reference)")
+    elif compose.jBS_diff is not None:
+        txt += "; + jBS_diff"
+    return txt
+
+
 class _GSReject(Exception):
     """A standard-path candidate rejected inside the Gauss-Seidel j_BS loop
     (q0 < 1 with ``constrain_sawteeth``) -- the l_i loop moves on."""
@@ -1903,6 +1928,7 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
                        _step_standard, _eval, settings, Ip=Ip_target,
                        meas0=dict(li=li0), gate_li=True, gate_q0=False,
                        label="draw post-homotopy",
+                       init_source=JBS_DRAW_INIT_POST_HOMOTOPY,
                        max_passes=n_ph, raise_on_fail=True)
     rec["passes"] = res["record"]
     return rec, res["jbs_used"], state.get("full", full), state.get("jphi")
@@ -2703,7 +2729,7 @@ def perturb_kinetic_equilibrium(
                     _candA = _c
                     break
 
-            def _fixc_loop(cand, spike0, li_prev):
+            def _fixc_loop(cand, spike0, li_prev, init_source):
                 _fs = {}
 
                 def _step(spk, k, relax=None):
@@ -2728,10 +2754,14 @@ def perturb_kinetic_equilibrium(
                 _r = run_jbs_loop(spike0, _step, _jl_eval, jbs_loop,
                                   Ip=_jl_Ip, meas0=dict(li=li_prev),
                                   gate_li=True, gate_q0=False,
-                                  label="draw Fix C", raise_on_fail=True)
+                                  label="draw Fix C",
+                                  init_source=init_source,
+                                  raise_on_fail=True)
                 return _r, _fs
 
-            _jl_res, _jl_fs = _fixc_loop(_candA, spike_profile, _li_E0)
+            _jl_res, _jl_fs = _fixc_loop(
+                _candA, spike_profile, _li_E0,
+                _draw_anchor_init_source(_compose))
             spike_profile = _jl_res["jbs_used"]
             full_j_BS = _jl_state["full"]
             new_jphi = _jl_fs["new_jphi"]
@@ -2763,7 +2793,8 @@ def perturb_kinetic_equilibrium(
                         break
                 try:
                     _jl_res, _jl_fs = _fixc_loop(
-                        _c, spike_profile, float(eq_stats['l_i']))
+                        _c, spike_profile, float(eq_stats['l_i']),
+                        JBS_DRAW_INIT_WARM)
                 except Exception as _rs_exc:
                     _count_masked_anchor_failure("band_resample", _rs_exc)
                     continue
@@ -2805,6 +2836,8 @@ def perturb_kinetic_equilibrium(
                                    jbs_loop, Ip=_jl_Ip,
                                    meas0=dict(li=_li_E0), gate_li=True,
                                    gate_q0=False, label="draw anchor",
+                                   init_source=_draw_anchor_init_source(
+                                       _compose),
                                    raise_on_fail=True)
             spike_profile = _jl_res["jbs_used"]
             full_j_BS = _jl_state["full"]
@@ -3739,7 +3772,8 @@ def perturb_kinetic_equilibrium(
                 _gsr = run_jbs_loop(
                     spike_profile, _gs_step, _jl_eval, jbs_loop,
                     Ip=_jl_Ip, meas0=None, gate_li=True, gate_q0=False,
-                    label=f"draw l_i iter {li_iter}", raise_on_fail=True)
+                    label=f"draw l_i iter {li_iter}",
+                    init_source=JBS_DRAW_INIT_WARM, raise_on_fail=True)
             except _GSReject:
                 print("Skipping this equilibrium, q_0 < 1.0 (j_BS loop "
                       "pass)")
@@ -3946,6 +3980,14 @@ def perturb_kinetic_equilibrium(
             kind=_jbs_draw_ctx["kind"], n_loops=len(_recs),
             n_passes_total=int(sum(int(r.get("n_passes", 0))
                                    for r in _recs)),
+            # what the draw's loops started from (the first: Redl at the
+            # draw's anchor on its own perturbed kinetics; later ones warm)
+            init_source=(_recs[0].get("init_source") if _recs else None),
+            loops=[dict(label=r.get("label"),
+                        init_source=r.get("init_source"),
+                        n_passes=int(r.get("n_passes", 0)),
+                        converged=bool(r.get("converged")))
+                   for r in _recs],
             final=_recs[-1] if _recs else None))
         # private: what the post-homotopy check needs to rebuild this draw
         # (popped by generate_bouquet before archiving)

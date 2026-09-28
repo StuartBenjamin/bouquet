@@ -4718,7 +4718,11 @@ class Bouquet:
         res = run_jbs_loop(spike0, _step,
                            lambda m: compose(m["snap"])[0], settings,
                            Ip=abs(Ip), meas0=dict(li=li0), gate_li=True,
-                           label="sigma=0 check", raise_on_fail=False)
+                           label="sigma=0 check",
+                           init_source=("evaluate_jBS on the state anchor "
+                                        "with the baseline (sigma=0) "
+                                        "kinetics"),
+                           raise_on_fail=False)
         w, x, _k = residual_weights(mygs.copy_eq(), psi_N, psi_pad)
         cmp_ = profile_residuals(res["jbs_used"], ref, w, x, abs(Ip))
         li_s0 = float(mygs.get_stats(li_normalization="iter",

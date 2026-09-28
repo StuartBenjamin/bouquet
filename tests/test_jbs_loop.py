@@ -292,6 +292,92 @@ def test_d_two_initial_guesses_reach_the_same_fixed_point():
     assert b["record"]["init"] == "swb"
 
 
+def _draw_problem(a_draw, a_base=1.0, eps=0.6, dL_p=0.01):
+    """A perturbation draw in miniature.  The Redl bootstrap scales with the
+    kinetics ``a`` and follows the geometry ``L`` (an l_i-like scalar) of the
+    equilibrium it is evaluated on; ``L`` follows the solved total current
+    and the pressure (the draw's pressure shifts it by ``dL_p``).  The
+    baseline is self-consistent at ``a_base``.  The draw's state anchor is
+    the BASELINE total (baseline inductive + baseline bootstrap) at the
+    draw's pressure, exactly as in ``perturb_kinetic_equilibrium``.  Linear,
+    so the fixed point is known in closed form.  Returns the two initial
+    iterates: the unperturbed baseline bootstrap (the counterfactual) and the
+    one a draw uses (Redl at the anchor on the draw's own kinetics)."""
+    x = _X
+    j_ind = 8e5 * (1 - x) ** 1.5 + 8e4
+    Jshape = _shape()
+    Lref, L0, mu = 1.0, 0.2, 1.0
+    I = lambda j: float(np.trapezoid(_W * x * j, x)) / _IP  # noqa: E731
+    Ij, IS = I(j_ind), I(Jshape)
+
+    def redl(a, L):
+        return a * Jshape * (1.0 + eps * (L - Lref))
+
+    def fixed_L(a, dp):
+        return ((L0 + dp + mu * Ij + mu * a * IS * (1.0 - eps * Lref))
+                / (1.0 - mu * a * IS * eps))
+
+    j_base = redl(a_base, fixed_L(a_base, 0.0))    # self-consistent baseline
+    geom = lambda j: L0 + dL_p + mu * I(j)          # noqa: E731 (draw pressure)
+    L_anchor = geom(j_ind + j_base)                 # the draw's state anchor
+    st = dict(L=L_anchor)
+
+    def step(jbs, k, relax=None):
+        jc = j_ind + np.asarray(jbs, dtype=float)
+        js = jc if relax is None else relax(jc)
+        st["L"] = geom(js)
+        return dict(w=_W, x=x, li=st["L"])
+
+    def evaluate(meas):
+        return redl(a_draw, st["L"])
+
+    Lstar = fixed_L(a_draw, dL_p)
+    return dict(step=step, evaluate=evaluate, st=st, L_anchor=L_anchor,
+                old_init=j_base, new_init=redl(a_draw, L_anchor),
+                Lstar=Lstar, Jstar=redl(a_draw, Lstar))
+
+
+def test_draw_init_from_own_kinetics_and_from_the_baseline_reach_one_fixed_point():
+    """Item 7f of the plan: a draw's loop starts from Redl at its anchor on
+    its OWN perturbed kinetics.  That is initialisation only: started from the
+    unperturbed baseline bootstrap instead (the counterfactual), the same draw
+    reaches the same fixed point, the closed-form one, to the loop's own
+    tolerances.  The own-kinetics start begins much closer to it, and the
+    record says which start was used."""
+    s = jbs_settings(_GC(), draw=True)
+    outs = {}
+    for tag in ("old", "new"):
+        p = _draw_problem(a_draw=1.06)
+        src = ("baseline j_BS (counterfactual)" if tag == "old" else
+               "evaluate_jBS at the draw's anchor, draw's own kinetics")
+        o = run_jbs_loop(p[f"{tag}_init"], p["step"], p["evaluate"], s,
+                         Ip=_IP, meas0=dict(li=p["L_anchor"]), gate_li=True,
+                         init_source=src)
+        assert o["converged"], (tag, o["record"]["r_j"])
+        assert o["record"]["init_source"] == src
+        # on the closed-form fixed point, to the loop's own tolerances
+        assert abs(p["st"]["L"] - p["Lstar"]) <= s["tol_li"]
+        assert profile_residuals(p["Jstar"], o["jbs_used"], _W, _X,
+                                 _IP)["r_j"] <= s["rtol_j"]
+        outs[tag] = o
+    a, b = outs["old"], outs["new"]
+    assert profile_residuals(a["jbs_used"], b["jbs_used"], _W, _X,
+                             _IP)["r_j"] <= s["rtol_j"]
+    # the old start carries the kinetic perturbation as residual, the new
+    # one only the anchor -> first-solve geometry step
+    assert b["record"]["r_j"][0] < 0.5 * a["record"]["r_j"][0]
+    assert b["record"]["n_passes"] <= a["record"]["n_passes"]
+
+
+def test_the_init_source_defaults_to_unrecorded():
+    s = jbs_settings(_GC())
+    Jstar, step, ev = _affine_problem(0.3)
+    o = run_jbs_loop(0.5 * Jstar, step, ev, s, Ip=_IP, meas0=dict(li=0.0),
+                     max_passes=2, raise_on_fail=False)
+    assert "init_source" in o["record"] and o["record"]["init_source"] is None
+    assert o["record"]["tolerances"]["post_homotopy_passes"] == 4
+
+
 def test_e_non_convergence_raises_with_the_history():
     s = jbs_settings(_GC(jbs_max_passes=4))
     Jstar, step, ev = _affine_problem(0.95)      # contracts too slowly

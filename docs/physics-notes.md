@@ -240,6 +240,22 @@ stage whose first pass misses needs at least 3). The draw ceilings were
 raised from 6 / 2 once the golden case showed the standard draw's l_i-match
 coupling contracting at ≈0.38/pass from r_j ≈ 2e-2…1.2e-1 (7–8 passes) --
 a limit change; no tolerance moved.
+
+**Where a draw's loop starts.** Every draw's first loop starts from
+`evaluate_jBS` on the draw's **state anchor** (the archived total current at
+the draw's full pressure) with the draw's **own perturbed kinetics**
+(n_e, T_e, n_i, T_i, Z_eff; in delta mode composed as baseline + (that Redl −
+the σ=0 Redl reference); `jBS_diff` added in diff mode) -- never from the
+unperturbed baseline bootstrap. Later loops of the same draw (the next
+l_i-match candidate, a Fix C resample) start warm from the draw's previous
+converged bootstrap; the post-homotopy stage starts from the relaxed blend of
+the bootstrap the draw carries and Redl on the delivered equilibrium. Each loop
+record says which (`init_source`), and the per-draw block repeats the first
+one. The start changes the path only (a test runs the same draw loop from the
+baseline bootstrap and from the anchor Redl and gets the same fixed point).
+The large first residual of an l_i-match candidate's loop is geometric: the
+candidate's new inductive shape moves q and the flux range, and Redl with the
+**same** kinetics on that geometry differs by a few to ~10 % in I_BS.
 Relaxation, on two quantities, both of the **path** only (at the fixed point
 both blends are the identity):
 

@@ -24,6 +24,10 @@ maps -- are in ``test_jbs_loop.py``; (d) and (e) also run live below):
 (f) the sigma=0 draw loop reproduces the baseline under the loop (IMAS diff
     mode and the reconstruction path), and a sigma=0 route-R2 draw converges;
 (g) diff mode at sigma=0 reproduces the source j_BS exactly.
+(7f) a perturbed draw's anchor loop reaches the same fixed point from its own
+    start (Redl at the anchor on the draw's own kinetics) and from the
+    unperturbed baseline bootstrap (the counterfactual), and the per-draw
+    block records the start.
 
 Plus: the loop in every IMAS baseline mode/closure channel converges and
 records its block; the structured closure's correctors are subsumed with their
@@ -359,7 +363,72 @@ def _recon_probe(outdir):
         li=float(b.mygs.get_stats(lcfs_pad=psi_pad,
                                   li_normalization="iter")["l_i"]),
         l_i_target=float(bl.l_i_target),
-        ctx_private="_jbs_ctx" in d)
+        ctx_private="_jbs_ctx" in d,
+        init_source=d["jbs_loop"].get("init_source"),
+        loops=d["jbs_loop"].get("loops"))
+
+    # ---- a perturbed draw's anchor loop from two starts (plan 7f) --------
+    # The draw's own start (Redl at its state anchor on its OWN perturbed
+    # kinetics) and the counterfactual (the unperturbed baseline bootstrap),
+    # through the same composition and the same step the standard draw's
+    # anchor loop uses (inductive held, bootstrap swapped, jphi-linterp solve
+    # of the beta-relaxed total).  Deterministic kinetic perturbation.
+    from bouquet.jbs_loop import run_jbs_loop
+    from bouquet.TokaMaker_interface import _draw_jbs_composer
+    from bouquet.utils import pchip_derivative
+    ne_d = k2e(bl.ne) * 0.95
+    te_d = k2e(bl.te) * 1.08
+    ni_d = k2e(bl.ni) * 0.95
+    ti_d = k2e(bl.ti) * 1.04
+    pres_d = 1.6022e-19 * (ne_d * te_d + ni_d * ti_d)
+    j_ind = np.asarray(bl.j_inductive, dtype=float)
+    j_phi_bl = np.asarray(bl.j_phi, dtype=float)
+    j_fix = j_phi_bl - j_ind - np.asarray(bl.j_BS, dtype=float)
+    compose = _draw_jbs_composer(
+        psi_N, ne_d, te_d, ni_d, ti_d, Zeff_eq, psi_pad,
+        bool(g.isolate_edge_jBS), float(getattr(bl, "bs_scale", 1.0)),
+        bool(g.floor_j_BS), None, None, None)
+    Ip = float(bl.Ip_target)
+    mygs = b.mygs
+
+    def _solve(j):
+        _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
+        _pp = {"type": "linterp",
+               "y": pchip_derivative(psi_N, pres_d) / _pr, "x": psi_N}
+        _pp["y"][-1] = 0.0
+        mygs.set_targets(Ip=Ip, pax=float(pres_d[0]))
+        mygs.set_profiles(pp_prof=_pp, ffp_prof={
+            "type": "jphi-linterp", "y": np.asarray(j, float), "x": psi_N})
+        mygs.solve()
+
+    def _meas():
+        _snap = mygs.copy_eq()
+        _w, _x, _k = residual_weights(_snap, psi_N, psi_pad)
+        return dict(w=_w, x=_x, snap=_snap, li=float(mygs.get_stats(
+            li_normalization="iter", lcfs_pad=psi_pad)["l_i"]))
+
+    def _step(spk, k, relax=None):
+        _j = j_ind + spk + j_fix
+        _solve(_j if relax is None else relax(_j))
+        return _meas()
+
+    out["draw_init"] = {}
+    for tag in ("baseline_jBS", "own_kinetics"):
+        _solve(j_phi_bl)                   # the draw's state anchor
+        li0 = _meas()["li"]
+        jbs0 = (np.asarray(bl.j_BS, dtype=float) if tag == "baseline_jBS"
+                else compose(mygs.copy_eq())[0])
+        r = run_jbs_loop(jbs0, _step, lambda m: compose(m["snap"])[0],
+                         jbs_settings(g, draw=True), Ip=abs(Ip),
+                         meas0=dict(li=li0), gate_li=True,
+                         label=f"draw init {tag}", init_source=tag,
+                         raise_on_fail=False)
+        out["draw_init"][tag] = dict(
+            converged=bool(r["converged"]),
+            n_passes=int(r["record"]["n_passes"]),
+            r_j=r["record"]["r_j"], init_source=r["record"]["init_source"],
+            j_BS=np.asarray(r["jbs_used"], float).tolist(),
+            li=float(_meas()["li"]))
     with open(os.path.join(outdir, "recon.json"), "w") as fh:
         json.dump(out, fh)
 
@@ -686,6 +755,29 @@ def test_f_sigma0_route_r2_draw_converges_near_the_baseline(recon):
     # the private rebuild context travels on the diagnostics until
     # generate_bouquet pops it before archiving
     assert d["ctx_private"]
+    # the draw's first loop started from Redl at its anchor on its own
+    # kinetics, and the per-draw block says so
+    assert d["init_source"].startswith(
+        "evaluate_jBS on the draw's state-anchor equilibrium"), d
+    assert d["loops"] and d["loops"][0]["init_source"] == d["init_source"]
+
+
+@pytest.mark.solver
+@solver_only
+def test_draw_fixed_point_does_not_depend_on_its_start(recon):
+    """Plan 7f: a draw's loop starts from Redl at its anchor on its OWN
+    perturbed kinetics.  Initialisation only: the same draw loop started from
+    the unperturbed baseline bootstrap (the counterfactual) converges to the
+    same fixed point; the own-kinetics start begins closer to it."""
+    a = recon["draw_init"]["baseline_jBS"]
+    b = recon["draw_init"]["own_kinetics"]
+    assert a["converged"] and b["converged"], (a["r_j"], b["r_j"])
+    assert a["init_source"] == "baseline_jBS"
+    assert b["init_source"] == "own_kinetics"
+    # the same bar as the baseline's init-independence test (d)
+    assert _rj(a["j_BS"], b["j_BS"]) <= 5 * _S["rtol_j"]
+    assert abs(a["li"] - b["li"]) <= 2 * _S["tol_li"]
+    assert b["r_j"][0] < a["r_j"][0]
 
 
 # ---------------------------------------------------------------------------
