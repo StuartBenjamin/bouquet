@@ -151,6 +151,31 @@ def test_the_fixture_says_what_built_it(manifest):
         "be wrong about the build that actually ran)"
 
 
+def test_the_fixture_is_a_self_consistent_bootstrap_run():
+    """The golden records the DEFAULT pipeline: the self-consistent bootstrap
+    loop (jbs_self_consistent=True).  Its stored config says so, the baseline
+    and every draw carry a converged schema-v3 jbs_loop block, and no loop
+    record names a filesystem path (a public fixture)."""
+    from bouquet.utils import load_config
+    from bouquet.schema import read_jbs_loop
+    import sys
+    sys.path.insert(0, _GOLDEN_DIR)
+    import make_golden_fixture as mgf
+    cfg = load_config(_SLIM, scan_key=0)
+    assert cfg.generation.jbs_self_consistent is True
+    with h5py.File(_SLIM, "r") as hf:
+        g = hf["scan/0"]
+        bl = read_jbs_loop(g["_baseline"])
+        assert bl is not None and bl["converged"], bl
+        draws = [k for k in g if k.isdigit()]
+        assert draws
+        for k in draws:
+            rec = read_jbs_loop(g[k])
+            assert rec is not None, f"draw {k} carries no jbs_loop block"
+            assert bool(g[k].attrs["jbs_converged"]), f"draw {k}: {rec}"
+    mgf.assert_no_filesystem_paths(_SLIM)
+
+
 def test_coil_currents_match_manifest(manifest, tol):
     with h5py.File(_SLIM, "r") as hf:
         for bkey, sv, entry in _iter_scans(manifest):

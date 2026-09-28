@@ -64,19 +64,25 @@ inside the self-consistent bootstrap records (`jbs_loop_json`, which carry the
 OFT package path) to basenames: this repository is public, and the OFT build
 is identified by the content digests in the provenance stamp instead.
 
-## Pending: the self-consistent-bootstrap refresh
+## The self-consistent-bootstrap refresh
 
-`GenerationConfig.jbs_self_consistent` now defaults to `True`, but the fixture
-here is still the frozen-bootstrap run it always was (its stored config
-predates the field, so `load_config` reads it with the loop off and
-`test_systematics` replays it on the frozen path -- consistent, not stale in
-that sense). A loop-on regeneration from this fixture's own config has not
-yet produced a usable archive: on this case the standard (l_i-loop) draw's
-Gauss-Seidel bootstrap coupling contracts at ~0.38/pass from r_j ~ 2e-2..1e-1
-and needs ~7-9 passes against the per-draw ceiling of 6, and the
-post-homotopy check (ceiling 2 with the two-consecutive-pass rule) rejects any
-draw whose first pass misses. Refresh once the draw ceilings are settled; the
-ceilings are an approved convergence setting and are not changed here.
+The fixture is a loop-on run: `GenerationConfig.jbs_self_consistent=True`
+(the default), regenerated from the previous fixture's own stored config with
+only the code and the bootstrap model changed, on the OFT line that carries
+the bootstrap stencil change (build identity in the provenance stamp). Pass
+ceilings 12 per draw loop and 4 post-homotopy; no tolerance moved. Of 20
+requested draws, 17 are archived (10 in spec): one draw was skipped when an
+l_i-match candidate's solve exhausted `maxits`, and two were rejected at the
+post-homotopy stage (see the known limitation below). Every archived draw's
+loops converged, the longest in 9 passes. `test_the_fixture_is_a_self_consistent_bootstrap_run`
+asserts the stored config, a converged `jbs_loop` block on the baseline and on
+every draw, and the path guard.
+
+`rng_stream_manifest.json` was re-pinned on the same machine class as before:
+the ne / Te / ni / Ti stream hashes are unchanged, and only the `jphi` hash
+moved, because that channel is drawn from the fixture's baseline j_phi, which
+now carries the self-consistent bootstrap (baseline j_phi moved by ~1 % of its
+peak, sigma_jphi by ~1.5 %).
 
 ## Known build-dependent failure: `test_systematics::test_mode3_production_reproduces_golden`
 
