@@ -111,6 +111,122 @@ No existing solver tolerance (`nl_tol`, `maxits`, `structured_li_tol`,
   hybrids and a spurious mid-radius inductive cut the frozen bootstrap forced
   on the closure disappeared; the q = 2 location moved by a few 10⁻³ in ψ_N.
 
+## Figures
+
+All five figures come from the public synthetic example only: the
+D3D-like g-file, p-file and mesh in `examples/D3D-like`, configured from the
+golden fixture's stored config (read the way
+`tests/golden/regenerate_golden_run.py` reads it). Each is a single-slice
+reconstruction on the geqdsk path, run one thread at a time, with no draws and
+no IMAS. `docs/figures/make_bootstrap_loop_figures.py` regenerates them. Each
+figure's computation is its own subcommand, taking about 1–3 min per
+reconstruction; `all` runs every subcommand. The numbers quoted below come
+from the development laptop build. The loop-on reconstruction reproduces the
+refreshed fixture's baseline j_BS to 5×10⁻⁵ of its peak, and its l_i target
+to 2×10⁻⁷. Bootstrap fractions are `I_BS / I_tor`: both are integrals of the
+delivered profiles, weighted by the loop's own current measure
+(`residual_weights`), so the normalisation of that measure cancels.
+
+**Figure 1 — what the flag changes** (`docs/figures/jbs_loop_fig1_profiles.pdf`).
+Solid lines show the delivered reconstruction with the loop on
+(self-consistent Redl bootstrap). Dashed lines show the same reconstruction
+with `jbs_self_consistent=False` (frozen SWB, legacy). Orange is j_BS, blue is
+the inductive current and black is the total j_tor, all against ψ_N. The left
+panel covers the full radius; the right panel zooms on the pedestal. The two
+totals nearly coincide, because the reconstruction fits j_tor to the g-file
+either way. What moves is the split between bootstrap and inductive current.
+The self-consistent pedestal bootstrap peak is 5 % higher (0.534 →
+0.562 MA m⁻²), and the inductive current gives up the same current (−11 kA) in the
+edge, beyond ψ_N ≈ 0.85. I_BS/I_p goes from 0.2293 to 0.2385 (I_BS 284 → 296 kA). The
+l_i target barely moves (0.653833 → 0.653864), and neither does q0
+(1.2306 → 1.2311).
+
+**Figure 2 — convergence of the loop** (`docs/figures/jbs_loop_fig2_residuals.pdf`).
+This plots the per-pass residuals of the loop-on reconstruction on a log
+scale:
+- r_j (current-weighted L2 distance between the Redl bootstrap of the new
+  equilibrium and the one it was solved with);
+- r_I (the same distance as a fraction of I_p);
+- Δl_i;
+- Δq0.
+
+Each has its tolerance as a horizontal line. Dashed means the criterion is
+gated; dotted means it is not. Δq0 is only logged here: it is not a
+criterion on the reconstruction path. The figure script records q0 per pass
+through a logging wrapper and never gates on it. Relaxation is ω = 0.7 on the
+bootstrap and β = 0.7 on the solved current, and ω is never halved.
+
+Passes 1–4 are the main loop, where each pass is an inductive fit plus the
+l_i secant. It converges in 4 passes: passes 3 and 4 are the two consecutive
+"ok" passes. r_j falls by about 0.3 per pass (1 − ω): 4.5×10⁻³ → 1.4×10⁻³ →
+4.2×10⁻⁴ → 1.3×10⁻⁴. The corrective iteration then moves the equilibrium. The
+open symbols are the post-corrective check, r_j = 1.8×10⁻³ and
+r_I = 4.9×10⁻⁴, which is outside tolerance. Three post-corrective passes
+(5–7) bring it back to r_j = 5.9×10⁻⁵ and r_I = 1.4×10⁻⁵.
+
+**Figure 3 — defect A, the grid** (`docs/figures/jbs_loop_fig3_grid.pdf`).
+Top panel: Redl j_BS on the delivered equilibrium, from the same physical
+profiles sampled in three ways:
+- black: on the uniform ψ_N grid (257 points, the reference);
+- blue dashed: on a strongly non-uniform grid (513 points uniform in √ψ_N,
+  ρ-like), with that grid passed to `evaluate_jBS`;
+- vermillion: the same non-uniform arrays read as if they were evenly
+  sampled, which is the silent assumption SWB made and bouquet never
+  corrected.
+
+Bottom panel: the difference from the reference, as a percentage of peak
+j_BS. With the grid passed, the result is grid-independent to interpolation
+accuracy. The current-weighted error is 0.17 %, and in the shaded mid-radius
+band (0.3 ≤ ψ_N ≤ 0.7) it is below 3×10⁻⁵ of the peak. The legacy reading is
+wrong everywhere. The gradient is mis-scaled by dψ_N/du = 2√ψ_N and the
+geometry is sampled on the wrong surfaces. The result is low inside
+ψ_N ≈ 0.14, 8–12 % of peak high across mid-radius, and nearly doubled (+92 %
+of peak) at the pedestal. Its weighted error is 79 %.
+
+**Figure 4 — the fixed point does not depend on the start** (`docs/figures/jbs_loop_fig4_init.pdf`).
+The same loop-on reconstruction was started from four initial bootstraps:
+- the anchor evaluation (the default);
+- the legacy SWB profile (`jbs_init="swb"`);
+- the anchor evaluation × 0.8;
+- the anchor evaluation × 1.2.
+
+The two scaled starts are made by a figure-only wrapper that multiplies the
+loop's first iterate.
+
+Left panel: the delivered j_BS of all four, with the pedestal in the inset.
+The curves lie on top of each other. The largest pairwise current-weighted
+distance is 2.6×10⁻⁵, 40× below r_j's tolerance, and the l_i targets agree to
+6×10⁻⁷. I_BS/I_p is 0.2385 in all four cases.
+
+Right panel: r_j per pass, with the main loop filled and the post-corrective
+loop open. A worse start costs passes, not accuracy:
+- anchor: 4 + 3 passes;
+- SWB: 6 + 3;
+- ×0.8: 8 + 3;
+- ×1.2: 8 + 3.
+
+Every start contracts at the same rate. The ±20 % starts converge exactly at
+the baseline ceiling of 8 passes. That is a deliberately bad start, not the
+production one, but it shows how much headroom that ceiling leaves.
+
+**Figure 5 — σ = 0 reproduces the baseline** (`docs/figures/jbs_loop_fig5_sigma0.pdf`).
+This is `verify_sigma0_consistency` under the loop on the geqdsk path, with
+no IMAS. The σ = 0 draw loop runs from the state anchor with the unperturbed
+kinetics and converges in 4 passes.
+- Top panel: its j_BS (orange dashed) over the baseline's (black).
+- Bottom panel: the difference as a percentage of peak.
+- Text box: the invariant's own measures.
+
+The differences are:
+- r_j against the baseline: 4.3×10⁻⁵ (tolerance 10⁻³);
+- r_I: 8.3×10⁻⁶ (tolerance 10⁻⁴);
+- |Δl_i|: 2.0×10⁻⁶ (tolerance 10⁻³), against the delivered baseline
+  equilibrium's post-corrective l_i of 0.656455;
+- largest pointwise difference: 5.4×10⁻⁵ of peak, at ψ_N ≈ 0.11.
+
+The σ = 0 draw therefore lands on the baseline 12–500× inside the loop's own
+tolerances.
+
 ## Golden refresh
 
 **Done.** The geqdsk-path golden fixture is regenerated loop-on from its own
