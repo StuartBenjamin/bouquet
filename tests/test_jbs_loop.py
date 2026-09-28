@@ -748,3 +748,104 @@ def test_draw_composer_reproduces_the_legacy_composition_rules():
     comp_f = _draw_jbs_composer(x, *k, 1e-3, False, 1.0, True, -1e9 + 0 * x,
                                 None, None)
     assert np.all(comp_f(_MockEq())[0] < 0)   # diff added AFTER the floor
+
+
+# ---------------------------------------------------------------------------
+#  the post-homotopy check of a draw (mocked solver)
+# ---------------------------------------------------------------------------
+class _PHEq:
+    """Just enough of a TokaMaker for _post_homotopy_jbs."""
+
+    def __init__(self):
+        self.psi_bounds = (-0.15, 0.12)
+        self.solves = 0
+        self.ffp = []
+
+    def copy_eq(self):
+        return object()
+
+    def get_stats(self, **kw):
+        return {"l_i": 0.65}
+
+    def set_targets(self, **kw):
+        pass
+
+    def set_profiles(self, pp_prof=None, ffp_prof=None):
+        self.ffp.append(np.asarray(ffp_prof["y"], float).copy())
+
+    def solve(self):
+        self.solves += 1
+
+
+def _ph_setup(monkeypatch, kind):
+    import bouquet.jbs_loop as L
+    import bouquet.TokaMaker_interface as TI
+    x = np.linspace(0.0, 1.0, 65)
+    Jstar = _shape(x)
+    calls = {"corr": [], "renorm": 0}
+    monkeypatch.setattr(L, "residual_weights",
+                        lambda eq, psi_N, psi_pad=1e-3: (np.ones_like(x), x,
+                                                         "test"))
+
+    def _renorm(mygs, psi_N, target, Ip, pad, label=""):
+        calls["renorm"] += 1
+        return np.asarray(target, float), 1.0
+
+    def _corr(mygs, psi_N, target, pp, Ip, pax, pad, **kw):
+        calls["corr"].append((np.asarray(target, float).copy(), kw))
+        return np.asarray(target, float) * 0.999, 3, [1.0]
+
+    monkeypatch.setattr(TI, "_renormalize_target_to_Ip", _renorm)
+    monkeypatch.setattr(TI, "_corrective_jphi_iteration", _corr)
+    monkeypatch.setattr(TI, "_r2_ip_scale", lambda *a, **k: 1.0)
+    j_ind = 2.0e6 * (1.0 - x) ** 2
+    ctx = dict(kind=kind, compose=lambda snap: (Jstar.copy(), Jstar.copy(),
+                                                None),
+               spike_used=1.0015 * Jstar, cand=j_ind.copy(),
+               j_ind_used=j_ind.copy(), j_fixed_eff=np.zeros_like(x),
+               pres_tmp=1e4 * (1.0 - x ** 2) + 10.0, input_j_phi=j_ind + Jstar,
+               r2_mode="legacy", j_phi_request=j_ind + Jstar,
+               isolate_edge_jBS=False)
+    s = jbs_settings(_GC(), draw=True)
+    return TI, x, Jstar, ctx, calls, s
+
+
+def test_post_homotopy_standard_draw_reaches_the_total_by_corrective_iteration(
+        monkeypatch):
+    """A standard draw's stored j_phi is the ACHIEVED current of its
+    corrective iteration; the post-homotopy passes must reach the new total
+    the same way (target renormalised to Ip + corrective iteration), never by
+    handing that achieved profile back to one jphi-linterp solve."""
+    TI, x, Jstar, ctx, calls, s = _ph_setup(monkeypatch, "standard")
+    eq = _PHEq()
+    rec, spk, full, jphi = TI._post_homotopy_jbs(eq, ctx, s, x, 1e-3, _IP)
+    assert not rec["accepted_without_passes"]
+    assert eq.solves == 0, "a bare jphi-linterp solve was issued"
+    assert calls["corr"] and calls["renorm"] == len(calls["corr"])
+    omega = s["relax"]
+    jbs0 = (1 - omega) * ctx["spike_used"] + omega * Jstar
+    t0, kw0 = calls["corr"][0]
+    np.testing.assert_allclose(t0, ctx["j_ind_used"] + jbs0, rtol=1e-12)
+    assert kw0["min_iters"] == 2 and kw0["rtol"] == 0.05
+    # the delivered current is the corrective iteration's output
+    np.testing.assert_allclose(jphi, calls["corr"][-1][0] * 0.999)
+    assert "corrective" in rec["solve"] and "beta not applied" in rec["solve"]
+    assert rec["passes"]["converged"]
+
+
+def test_post_homotopy_fixc_draw_is_one_relaxed_request_solve(monkeypatch):
+    TI, x, Jstar, ctx, calls, s = _ph_setup(monkeypatch, "fixc")
+    eq = _PHEq()
+    rec, spk, full, jphi = TI._post_homotopy_jbs(eq, ctx, s, x, 1e-3, _IP)
+    assert eq.solves >= 1 and not calls["corr"]
+    assert "Fix C" in rec["solve"]
+    assert rec["passes"]["converged"]
+
+
+def test_post_homotopy_inside_tolerance_keeps_the_draw(monkeypatch):
+    TI, x, Jstar, ctx, calls, s = _ph_setup(monkeypatch, "standard")
+    ctx["spike_used"] = Jstar.copy()
+    eq = _PHEq()
+    rec, spk, full, jphi = TI._post_homotopy_jbs(eq, ctx, s, x, 1e-3, _IP)
+    assert rec["accepted_without_passes"] and eq.solves == 0
+    assert not calls["corr"]
