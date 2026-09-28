@@ -321,7 +321,9 @@ def _mpl():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    plt.rcParams.update({"font.size": 9, "axes.grid": True,
+    plt.rcParams.update({"font.family": "sans-serif", "text.usetex": False,
+                         "mathtext.fontset": "dejavusans",
+                         "font.size": 9, "axes.grid": True,
                          "grid.linestyle": ":", "grid.alpha": 0.6,
                          "lines.linewidth": 1.6, "legend.fontsize": 7.5,
                          "legend.framealpha": 0.9})
@@ -354,9 +356,7 @@ def fig1(work):
           Line2D([], [], color="0.3", ls="-",
                  label=(f"self-consistent Redl: "
                         f"$I_{{BS}}/I_p$ = {on['I_BS'] / on['I_phi']:.4f}"))]
-    axs[0].legend(handles=h, loc="upper left")
-    axs[0].text(0.98, 0.97, "full radius", transform=axs[0].transAxes,
-                ha="right", va="top", fontsize=8)
+    axs[0].legend(handles=h, loc="upper right")
     axs[1].text(0.02, 0.97, "edge / pedestal", transform=axs[1].transAxes,
                 ha="left", va="top", fontsize=8)
     _save(fig, "jbs_loop_fig1_profiles")
@@ -514,44 +514,47 @@ def init_spread(work):
 
 def fig4(work):
     import numpy as np
-    plt = _mpl()
     runs = _init_runs(work)
-    sp = init_spread(work)
-    fig, axs = plt.subplots(1, 2, figsize=(9.0, 3.8), constrained_layout=True)
+    sp = init_spread(work)            # imports bouquet: style set after it
+    plt = _mpl()
+    fig, axs = plt.subplots(1, 2, figsize=(9.6, 4.0), constrained_layout=True)
     for tag, lab, c, ls, m in _INIT_STYLE:
         r = runs[tag]
         dl = r["delivered"]
-        axs[0].plot(dl["psi_N"], np.asarray(dl["j_BS"]) / 1e6, color=c, ls=ls,
-                    label=f"{lab}: $I_{{BS}}/I_p$ = {dl['I_BS'] / dl['I_phi']:.4f}")
+        axs[0].plot(dl["psi_N"], np.asarray(dl["j_BS"]) / 1e6, color=c, ls=ls)
         rec = r["record"]
         hist = list(rec["r_j"])
         n_main = len(hist)
         pc = ((rec.get("post_corrective") or {}).get("passes") or {})
         hist += list(pc.get("r_j") or [])
         k = np.arange(1, len(hist) + 1)
-        axs[1].semilogy(k, hist, color=c, ls=ls, marker=m, ms=4,
-                        label=(f"{lab} ({n_main} passes"
-                               + (f" + {len(hist) - n_main} post-corrective"
-                                  if len(hist) > n_main else "") + ")"))
+        axs[1].semilogy(k[:n_main], hist[:n_main], color=c, ls=ls, marker=m,
+                        ms=4, label=(f"{lab}: {n_main}"
+                                     + (f" + {len(hist) - n_main}"
+                                        if len(hist) > n_main else "")
+                                     + " passes, $I_{BS}/I_p$ = "
+                                     + f"{dl['I_BS'] / dl['I_phi']:.4f}"))
+        if len(hist) > n_main:
+            axs[1].semilogy(k[n_main:], hist[n_main:], color=c, ls=ls,
+                            marker=m, ms=4, mfc="white")
     tol = runs["anchor"]["record"]["tolerances"]["rtol_j"]
     axs[1].axhline(tol, color="0.4", ls="--", lw=1.0)
-    axs[1].text(1.0, tol, r" $r_j$ tolerance", va="bottom", fontsize=7,
+    axs[1].text(0.6, tol, r" $r_j$ tolerance", va="bottom", fontsize=7,
                 color="0.3")
     axs[0].set_xlabel(r"$\psi_N$")
     axs[0].set_ylabel(r"delivered $j_{BS}$ [MA m$^{-2}$]")
-    axs[0].legend(loc="upper left", fontsize=7)
-    ins = axs[0].inset_axes([0.52, 0.42, 0.45, 0.4])
+    ins = axs[0].inset_axes([0.36, 0.45, 0.42, 0.45])
     for tag, lab, c, ls, m in _INIT_STYLE:
         dl = runs[tag]["delivered"]
         ins.plot(dl["psi_N"], np.asarray(dl["j_BS"]) / 1e6, color=c, ls=ls)
     ins.set_xlim(0.9, 1.0)
     ins.tick_params(labelsize=6)
-    ins.set_title("pedestal", fontsize=7)
-    axs[0].text(0.02, 0.5, (f"max pairwise $r_j$ between the delivered\n"
-                            f"bootstraps: {sp['max_pairwise_rj']:.1e}\n"
-                            f"$l_i$ spread: {sp['l_i_spread']:.1e}"),
+    ins.set_title(r"pedestal, $0.9 \leq \psi_N \leq 1$", fontsize=7)
+    axs[0].text(0.02, 0.97, (f"max pairwise $r_j$ between\nthe delivered "
+                             f"bootstraps:\n{sp['max_pairwise_rj']:.1e}\n"
+                             f"$l_i$ spread: {sp['l_i_spread']:.1e}"),
                 transform=axs[0].transAxes, fontsize=7, va="top")
-    axs[1].set_xlabel("loop pass (main loop, then post-corrective passes)")
+    axs[1].set_xlabel("pass (filled: main loop; open: post-corrective loop)")
     axs[1].set_ylabel(r"$r_j$")
     axs[1].legend(loc="upper right", fontsize=7)
     _save(fig, "jbs_loop_fig4_init")
@@ -580,10 +583,11 @@ def fig5(work):
     axs[0].legend(loc="upper left")
     txt = (f"$r_j$ vs baseline = {s['r_j_vs_baseline']:.2e}  (tol {tol['rtol_j']:.0e})\n"
            f"$r_I$ vs baseline = {s['r_I_vs_baseline']:.2e}  (tol {tol['rtol_Ip']:.0e})\n"
-           f"$l_i$: $\\sigma=0$ {s['li_sigma0']:.5f} vs baseline "
+           f"$l_i$: $\\sigma=0$ {s['li_sigma0']:.5f} vs delivered baseline "
            f"{s['li_baseline']:.5f}, $|\\Delta l_i|$ = "
            f"{s['dl_i_vs_baseline']:.1e} (tol {tol['tol_li']:.0e})\n"
-           f"invariant: {'PASS' if s['passed'] else 'FAIL'}")
+           f"invariant: {'PASS' if s['passed'] else 'FAIL'} "
+           "(verify_sigma0_consistency)")
     axs[0].text(0.02, 0.45, txt, transform=axs[0].transAxes, fontsize=7,
                 va="top", bbox=dict(fc="white", ec="0.8", alpha=0.9))
     peak = float(np.max(np.abs(jb)))
