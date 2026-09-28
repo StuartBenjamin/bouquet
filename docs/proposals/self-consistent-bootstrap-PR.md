@@ -38,8 +38,10 @@ Two defects of the frozen bootstrap motivate it:
   (ω = 0.7) and of the solved current (β = 0.7; damps the closure ↔ geometry
   oscillation), ω halved only on sustained growth, convergence = every active
   residual on **two consecutive passes** (`r_j ≤ 1e-3`, `r_I ≤ 1e-4 I_p`,
-  `Δl_i ≤ 1e-3`, `Δq0 ≤ 2e-3`), ceilings 8 (baseline) / 6 (+2 post-homotopy)
-  per draw. Non-convergence raises `JBSNotConverged` with the full history,
+  `Δl_i ≤ 1e-3`, `Δq0 ≤ 2e-3`). Pass ceilings (limits, not tolerances):
+  8 for the baseline / reconstruction, 12 for each loop of a draw
+  (`jbs_max_passes_draw`) and 4 post-homotopy passes
+  (`jbs_max_passes_post_homotopy`). Non-convergence raises `JBSNotConverged` with the full history,
   or flags the slice (`jbs_loop_on_fail="flag"`); a non-converged draw is a
   failed draw.
 - **Everywhere a bootstrap enters j_φ:** the IMAS baseline in every
@@ -68,6 +70,13 @@ Two defects of the frozen bootstrap motivate it:
   `bootstrap_model`. No migration: a v2 archive reads as frozen everywhere.
 - **Plots** label the bootstrap "self-consistent Redl bootstrap" or "frozen
   SWB bootstrap (legacy)" from what the archive records.
+- **Where a draw's loop starts** (recorded per loop as `init_source`): Redl
+  at the draw's state anchor on the draw's OWN perturbed kinetics for its
+  first loop, warm from its previous converged bootstrap for later ones, and
+  a relaxed blend with Redl on the delivered equilibrium post-homotopy --
+  never the unperturbed baseline bootstrap. Initialisation only: a fast and a
+  solver test start the same draw loop from the baseline bootstrap and reach
+  the same fixed point.
 - **Post-homotopy check of a standard draw** re-solves through the draw's own
   Ip renormalisation + corrective iteration instead of handing the achieved
   current back to one jphi-linterp solve (which exhausted `maxits`).
@@ -104,27 +113,55 @@ No existing solver tolerance (`nl_tol`, `maxits`, `structured_li_tol`,
 
 ## Golden refresh
 
-**Not done — blocking.** A loop-on regeneration of the geqdsk-path golden
-(from the fixture's own stored config, 20 draws, seed 12345, one thread)
-converges the reconstruction (4 passes) but rejects essentially every draw:
-the standard draw's Gauss–Seidel bootstrap coupling contracts at ≈0.38/pass
-from r_j ≈ 2e-2…1e-1 and needs ≈7–9 passes against the per-draw ceiling of 6,
-and the post-homotopy check (ceiling 2 with the two-consecutive-pass rule)
-cannot accept a draw whose first pass misses (observed: r_I 1.08e-4 then
-2.3e-5 → rejected). 0 of the first 12 draws were accepted. The ceilings are
-approved convergence settings and are left unchanged; the fixture stays the
-frozen-bootstrap one until they are settled (see `tests/golden/README.md`).
+**Done.** The geqdsk-path golden fixture is regenerated loop-on from its own
+stored config (20 requested draws, one thread, the current OFT line; the
+build identity is stamped into the fixture and manifest):
+
+- reconstruction loop converged in 4 passes;
+- 17 draws archived, 10 in spec; one skipped (an l_i-match candidate's solve
+  exhausted `maxits`, the pre-existing failure mode of that solve) and two
+  rejected at the post-homotopy stage (known limitation below);
+- every archived draw's loops converged: anchor loops 3–6 passes, l_i-match
+  candidate loops 4–9 (mostly 7–8; 1–5 candidates per draw), post-homotopy
+  0 (accepted as delivered, 3 draws) or 2–4 passes; no loop reached its
+  ceiling;
+- recorded physics: baseline l_i target 0.65384 → 0.65386, baseline
+  I_BS/I_p 0.2285 → 0.2380; draw l_i(1) mostly 1–10 % lower and I_BS/I_p
+  higher (the draws are different realisations of the same seed, since the
+  l_i-match paths differ).
+
+The seeded draw-stream golden (`rng_stream_manifest.json`) is unchanged for
+the kinetic channels; only the `jphi` channel's hash moved, because it is
+drawn from the baseline j_φ, which now carries the self-consistent bootstrap.
+
+## Known limitation: slow post-homotopy divergence of a standard draw
+
+Two of the 20 golden draws were rejected after ~30–60 min each: the
+post-homotopy corrective re-solve (at the homotopy's coil bounds, I_p and
+p_axis pinned) diverges -- every flux-surface trace fails, the solve spends
+its whole iteration budget -- and the diverged state is refused by the
+`get_q` axis-collapse guard. The draw is rejected loudly, never accepted.
+The corrective iteration's first input is the achieved-derived target
+itself, so routing the pass through the corrective iteration did not change
+the request that fails. Options, none implemented (details in
+`tests/golden/README.md`): fail fast on a growing solve residual or failed
+trace; start the corrective iteration from the draw's last corrective input;
+`protect_state` for a clearer failure reason; a recorded failure field;
+status quo.
 
 ## Tests
 
-Fast suite (no solver): 1155 passed, 1 failed on the laptop and on the Linux
-production build — the failure is `test_the_fixture_says_what_built_it`,
-which requires the provenance stamp the (not yet refreshed) fixture predates.
-Solver suites on the Linux production build: fsa 6 passed / 1 skipped
-(build-aware collapse demonstration), harness 1, loop solver 19 (incl. the
-legacy-flag tripwire test), l_i closure 10, seeded reproducibility 12,
-systematics 2 passed / 1 failed (the pre-existing golden l_i(1) miss,
-documented in `tests/golden/README.md`).
+Fast suite (no solver) on the refreshed fixture: 1165 passed on the laptop
+(the provenance test that needed the refreshed fixture now passes; the new
+`test_the_fixture_is_a_self_consistent_bootstrap_run` is included). Golden
+tests (`test_golden_bouquet.py`): 21 passed on the laptop and on the Linux
+production build. Solver suites on the Linux production build before the
+refresh: fsa 6 passed / 1 skipped (build-aware collapse demonstration),
+harness 1, loop solver 19 (incl. the legacy-flag tripwire test), l_i
+closure 10, seeded reproducibility 12, systematics 2 passed / 1 failed (the
+golden l_i(1) miss of the pre-refresh fixture, documented in
+`tests/golden/README.md`); the systematics rerun against the refreshed
+fixture is pending.
 
 ## Reviewer notes
 
@@ -135,5 +172,10 @@ documented in `tests/golden/README.md`).
 - Drivers that relied on the loop being OFF by default for a "frozen"
   reference arm must now set `jbs_self_consistent=False` explicitly.
 - Not in this PR: iterating the diff-mode *baseline* (pinned to the source
-  total by design), a ψ_N-label remap of the kinetic profiles, and any
-  fallback for a GS failure inside a blended pass (such a pass fails loudly).
+  total by design) and a ψ_N-label remap of the kinetic profiles.
+- Follow-ups discussed but **not approved or implemented**: a fallback for a
+  GS failure inside a blended pass (such a pass fails loudly today); the
+  fail-fast guard on a diverging corrective solve (known limitation above);
+  and starting each l_i-match candidate's loop from Redl on that candidate's
+  own geometry (today later candidates start warm from the draw's previous
+  converged bootstrap; their larger first residual is geometric).
