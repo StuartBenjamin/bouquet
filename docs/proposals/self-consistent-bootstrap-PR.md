@@ -164,10 +164,17 @@ golden l_i(1) miss of the pre-refresh fixture, documented in
 the Linux production build: 2 passed / 1 failed. Mode 3 now passes (draw 0
 within every bar; draw 3's replay produced no equilibrium -- a `maxits`
 failure -- and was skipped by the test). Mode 1 is a NEW failure: max coil
-drift 1.2292 % against 0.3 %, on one coil, already present between the
+drift 1.2292 % against 0.3 % (maximal on F9B; the whole coil set moves), already present between the
 test's class-API loop-on reconstruction and the fixture's loop-on baseline
-(the two agreed to 0.006 % with the frozen bootstrap). Not yet diagnosed; no
-bar changed. **Blocking for the PR.**
+(the two agreed to 0.006 % with the frozen bootstrap). Diagnosed, not fixed;
+no bar changed (`tests/golden/README.md`, "Known limitation: mode-1 coil
+drift after the refresh"): the cause is not the loop but the refresh's
+archival convention -- regenerated through `Bouquet.generate()`, the fixture
+archives the ACHIEVED baseline current, where the earlier goldens' recipe
+archived the INPUT current the replay feeds back; fed the generator's input,
+the test's own entry point reproduces the refreshed baseline coils to
+0.0006 % (mode-1 metric 0.0092 %). Options listed there; a decision is
+needed. **Blocking for the PR.**
 
 ## Reviewer notes
 

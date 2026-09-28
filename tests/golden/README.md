@@ -107,8 +107,11 @@ replay's own loop-on reconstruction and the fixture's loop-on baseline
 (1.2278 %); the pinned draw adds only 0.005 %. The fixture's baseline comes
 from `Bouquet(stored config) -> prepare_baseline`, the replay's from
 `Bouquet.from_geqdsk(...) -> reconstruct()`; with the frozen bootstrap the two
-agreed to 0.006 %, with the loop on they do not. Not yet diagnosed; the bar
-is not widened.
+agreed to 0.006 %, with the loop on they do not. The bar is not widened.
+Diagnosed in "Known limitation: mode-1 coil drift after the refresh" below.
+The two entry points reconstruct bit-identically. The drift comes from the
+refresh's archival convention (achieved rather than input baseline current),
+not from the loop.
 
 ## Known limitation: a standard draw's post-homotopy re-solve can diverge slowly
 
@@ -195,6 +198,239 @@ passes).
    Diagnostic only.
 5. *Status quo*: a rejected draw, ~30-60 min of wall time per occurrence
    (2 of 20 draws, ~1.6 h of a 6.5 h single-thread run here).
+
+## Known limitation: mode-1 coil drift after the refresh
+
+**Diagnosed; nothing implemented, no bar changed.** The mode-1 failure is not
+caused by the self-consistent bootstrap loop, and the two entry points do not
+reconstruct differently. It is a change in how the refreshed fixture
+archives the baseline current. The replay then solves its baseline from a
+different j_phi than the generator used.
+
+**The mechanism.** `test_systematics` builds its mode-1 baseline inside
+`generate_bouquet`: the unperturbed `jphi-linterp` baseline solve
+(`jphi_baseline=True`) is handed `input_j_phi` and leaves the coils free
+under the reconstruction's isoflux set. The coil currents after that solve
+are what `_baseline/coil_currents` records and what mode 1 compares against.
+The generator hands that solve the reconstruction's own delivered current
+(`Baseline.j_phi`). The replay hands it the fixture's `_baseline/j_phi`. The
+replay is therefore a faithful replay only if `_baseline/j_phi` holds the
+INPUT current. That is the documented recipe of every earlier systematics
+golden: "input-current archival (`store_achieved_jphi=False`)", from commits
+0f92d28, bc7a49a and 060bc1f and `docs/CHANGES_SUMMARY.md`, "because a
+replay premise 'archived current reproduces archived LCFS' requires the
+input, not the achieved, current". The refresh was regenerated with
+`Bouquet(stored config) -> setup_solver -> prepare_baseline -> generate()`.
+`Bouquet.generate()` hard-wires `store_achieved_jphi=True`, so the refreshed
+fixture archives the ACHIEVED FSA current of that solve (the regeneration log
+prints `[archive] baseline j_phi = achieved FSA current`). The per-draw
+`j_phi` / `j_inductive` are archived as achieved currents too. The loop was
+switched on in the same regeneration, so the change looked like a
+loop-on/loop-off difference.
+
+### Evidence
+
+Every replay below ran on the Linux production build and OFT line of the
+refresh, at one thread, through the test's own call sequence
+(`Bouquet.from_geqdsk -> reconstruct()`, recon isoflux restored, then
+`generate_bouquet` with the test's arguments). Only what each row names was
+varied; for the mode-1 rows that is just the `input_j_phi` of the pinned
+call. The replay scripts are diagnosis scratch and are not committed.
+
+**(1) The two entry points run the same reconstruction.** `reconstruct()` is
+`setup_solver(); prepare_baseline()`, the same two calls the regeneration
+made. The fixture's stored config carries the full `jbs_*` set it was built
+with (schema v3): `jbs_self_consistent=True`, `jbs_init="anchor"`, `rtol_j
+1e-3`, `rtol_Ip 1e-4`, `tol_li 1e-3`, `tol_q0 2e-3`, ceilings 8 / 12 / 4,
+`relax 0.7`, `relax_current 0.7`, `relax_halve_on 3`, `loop_on_fail "raise"`.
+The test copies `jbs_self_consistent` from that stored config and takes the
+other `jbs_*` fields from the defaults, which are identical. A field-by-field
+diff of the stored config against the test's `from_geqdsk` config finds only
+`n_equils` (20 vs 1), `seed` (12345 vs None), `sigma_profiles` (explicit vs
+empty), `fixed_components.p_fast_reduction` (`trace` vs `auto`, with no fast
+pressure in this case), and list-vs-tuple spellings of `jBS_scale_range` and
+`homotopy_passes`. None of these reaches the reconstruction. There is no
+difference in coil regularisation, bootstrap model, `recalculate_j_BS`,
+`isolate_edge_jBS` or `perturb_jind_in_anchor`. The loop records are
+bit-identical:
+
+| reconstruction `jbs_loop` | fixture (refresh) | replay (test path) |
+|---|---|---|
+| init / init_source | anchor / none | anchor / none |
+| main loop n_passes, converged | 4, True | 4, True |
+| r_j per pass | 4.5367e-3, 1.3796e-3, 4.2161e-4, 1.3085e-4 | identical to every digit |
+| r_I, dl_i, omega per pass | (recorded) | identical to every digit |
+| post-corrective check | r_j 1.8125e-3, r_I 4.898e-4, not ok | identical |
+| post-corrective passes, r_j | 3: 5.4434e-4, 1.6541e-4, 5.5847e-5 | identical |
+| tolerances, criteria blocks | (recorded) | equal |
+
+Both paths record the delivered state after the same final solve, the last
+post-corrective pass. The reconstruction summaries agree to every printed
+digit.
+
+**(2) The difference is the mode-1 input current.**
+
+| run | bootstrap | reference fixture | mode-1 `input_j_phi` | jphi-baseline l_i(3) | baseline coils vs fixture, max | test metric (mode-1 draw vs fixture) |
+|---|---|---|---|---|---|---|
+| A-on (= the test) | loop | refreshed | archived `_baseline/j_phi` (achieved) | 0.65331 | 1.2278 % (F9B) | **1.2292 %** (fails 0.3 %) |
+| B-on | loop | refreshed | the replay's own `Baseline.j_phi` (what `generate()` passes) | 0.65387 (regeneration: 0.65387) | 0.0006 % | **0.0092 %** |
+| A-off | frozen | pre-refresh (input archival) | archived `_baseline/j_phi` (input) | 0.65369 | 0.0003 % | 0.0059 % |
+| B-off | frozen | pre-refresh | the replay's own `Baseline.j_phi` | 0.65384 | 0.4841 % (F8A) | 0.4842 % |
+| C-off | frozen | B-off's own archive, achieved archival | B-off's archived achieved j_phi | 0.65334 (B-off: 0.65384) | 2.4842 % (F9B) | **2.5015 %** (fails 0.3 %) |
+
+B-on reproduces the refreshed fixture: all 20 baseline coils within 0.0006 %,
+and the achieved current it archives matches the fixture's `_baseline/j_phi`
+to 2.8e-6 of peak. The loop-on baseline is therefore exactly reproducible
+from the test's own entry point once the solve gets the generator's input.
+C-off is the counterfactual: with the frozen bootstrap, a baseline archived
+the refresh's way and replayed the test's way fails mode 1 in the same way.
+The drift comes from the archival convention; the bootstrap model plays no
+part. The frozen counterfactual drifts further (2.50 %) than the loop-on
+fixture (1.23 %), and F9B again carries the maximum. B-off adds only a
+side fact. Today's frozen reconstruction current sits 0.28 %-of-peak
+(edge) away from the pre-refresh fixture's archived input, because the
+code moved after that fixture was pinned. The test never sees this, since
+it replays the archive.
+
+The input-vs-achieved gap on the refreshed baseline, as (`Baseline.j_phi` −
+archived achieved `j_phi`) / peak:
+
+| psi_N band | max \|d\| / peak | mean d / peak |
+|---|---|---|
+| [0, 0.5) | 5.2e-3 | +1.7e-3 |
+| [0.5, 0.9) | 8.3e-4 | +3.9e-4 |
+| [0.9, 0.98) | 1.25e-2 | +3.4e-3 |
+| [0.98, 1] | 1.74e-2 | −8.5e-3 |
+
+This is the `jphi-linterp` edge realisation gap that the jphi-baseline solve
+exists to absorb. It is a property of the representation, not of the loop:
+the frozen analogue (B-off's achieved current against its input) is about
+1.4e-2 of peak.
+
+**(3) Not a path dependence of the loop's fixed point.** The loop is
+bit-reproducible across the two entry points (table in (1)), so the
+init-independence tests are not contradicted. For the record, those tests
+(`test_d_the_fixed_point_does_not_depend_on_the_initial_guess`,
+`test_draw_fixed_point_does_not_depend_on_its_start`) compare only j_BS
+(within 5 `rtol_j`) and l_i (within 2 `tol_li`). They compare no coil
+currents and no boundary.
+
+**(4) Is F9B weakly constrained?** The shift is not one coil's. It is a
+redistribution over the whole coil set, carried mostly by the B-set coils
+and ECOILB. F9B's small current makes its share the largest in relative
+terms. The frozen counterfactual C-off shows the same pattern: F9B +2.48 %,
+ECOILB +1.04 %, F3B +0.61 %, F5B −0.54 %. Here is A-on against the fixture
+(A-t = ampere-turns):
+
+| coil | fixture [A-t] | Δ [A-t] | Δ [%] |
+|---|---|---|---|
+| F9B | −45 398 | +557 | +1.228 |
+| F3B | −57 322 | +498 | +0.869 |
+| F3A | 26 816 | −157 | −0.586 |
+| ECOILB | −30 592 | +151 | +0.492 |
+| F4B | 114 438 | −544 | −0.475 |
+| F8A | 41 780 | −182 | −0.436 |
+| F5B | 175 092 | −584 | −0.334 |
+| F8B | 182 945 | −385 | −0.210 |
+
+In this synthetic case the coils are only loosely pinned. `from_geqdsk` sets
+no `coil_reg` targets, so every coil is pulled toward zero at weight 1, with
+the VSC at 1e-2, against the reconstruction's isoflux set. F9B is also one
+half of the default VSC pair (`coil_vsc = {F9A: +1, F9B: -1}`), whose channel
+carries the weakest regularisation term. The A-on shift is not a pure VSC
+mode, though: F9A moved −95 A-t where F9B moved +557 A-t. The reconstruction's
+own inverse-mode coil set and the jphi-baseline coil set of the same plasma
+differ by up to 3.1–3.6 % (B-on / A-on, F4B). Commit 060bc1f documented the
+same degeneracy: a psi re-initialisation moved the baseline coils 0.41 % (F8A)
+for a 1.5e-5 change in l_i. Measured sensitivity here: a 1.7e-2-of-peak edge
+change (5e-3 core) moves the coils up to 1.23 %, l_i(3) by −0.086 % and the
+boundary by 0.54 mm RMS. A 2.8e-3-of-peak edge change (B-off) moves them up to
+0.48 %. So the 0.3 % bar is meaningful only when the replay's input current is
+the generator's, bit for bit. That was true under input archival and is not
+true now.
+
+Coil currents per loop pass (loop on, test path, drift against the
+reconstruction's final coils): the four main passes sit at F9B −0.41, −0.29,
+−0.26, −0.25 % (max over coils 3.15 → 3.11 %, on F4B). The post-corrective
+passes then converge to 0.016 %, 0.003 % and 0. The loop's delivered coil
+state is stable. The baseline coil record is set by the jphi-baseline solve
+that follows, not by the loop.
+
+**(5) Draw 3's mode-3 `Exceeded "maxits"`.** It is not the coil stage. The
+replay failed on the solve of pass 2 of the draw's anchor loop (`[jbs-loop
+draw anchor] pass 1/12: r_j=6.531e-03 ... I_BS=219.36 kA`, then `STOPPED:
+... Exceeded "maxits"`), before any coil homotopy. The golden's own draw 3
+converged that loop in 6 passes. The failure is input-dependent. Mode 3's
+`generate_bouquet` call differs from the one `Bouquet.generate()` makes in
+several ways, and none of them is new with the refresh except the first:
+
+* it feeds the draw's archived `j_phi` / `j_inductive`, which the refresh
+  archives as ACHIEVED currents (the per-draw half of the archival change);
+* it passes `Zeff ≡ 1`, where `generate()` passes the baseline Z_eff
+  (1.76–1.92 here);
+* it leaves `isolate_edge_jBS` at the function default `True`, where
+  `generate()` passes the geqdsk workflow's `False` (`from_geqdsk`), and it
+  passes no `baseline_j_BS` and no `jBS_scale_range`.
+
+The replay's draw loops therefore carry a different bootstrap from the
+generator's: I_BS ≈ 219–233 kA, against ≈ 295–312 kA in the golden's draw
+loops. Z_eff alone accounts for only 219 → 233 kA; the edge-isolated
+decomposition is the likely remainder, but that was not run separately.
+The same replay was rerun with only Z_eff set to the baseline value. The
+anchor solve that had exhausted `maxits` now succeeded: the anchor loop
+converged in 6 passes (I_BS 232.5 → 232.8 kA) and the l_i-match loop in 6
+(l_i error 2.10 %, inside the 5 % band). The coil homotopy then stopped at
+pass 2 of 3 on a natural VSC drift of 2.55 %, and the post-homotopy check
+came out at r_j = 1.45e-3 / r_I = 1.67e-4, outside tolerance. The draw was
+therefore in the post-homotopy corrective stage, which is the pattern of the
+known limitation above; that stage had not finished when this was written,
+and the run was stopped. So the `maxits` is a property of what the replay
+is asked to solve, not of the coil stage. The mode-3 replay is not a
+faithful replay of the generator's draw in the first place.
+
+### Options (none implemented; each needs a decision)
+
+1. *Regenerate the fixture under the documented recipe.* Use input-current
+   archival (`store_achieved_jphi=False`) with the loop on, everything else
+   unchanged. B-on predicts mode 1 at about 0.009 %. This is an
+   acceptance-artifact update (a new approved golden commit, a manifest
+   re-pin, about 6.5 h at one thread) and it restores the premise for modes
+   2 and 3 too. The `jphi` hash in `rng_stream_manifest.json` would move
+   again, because that channel is drawn from `_baseline/j_phi`.
+   `Bouquet.generate()` has no switch for this today; the regeneration
+   script would have to supply it. How the earlier recipe did
+   so is not recorded in the tree, and that gap should be closed whichever
+   route is taken.
+2. *Keep the achieved-archived fixture and feed the replay the generator's
+   input.* Mode 1 and mode 2 would pass `run.baseline.j_phi` from the
+   replay's own reconstruction. The reconstruction is reproduced exactly
+   (identical loop records), and B-on shows this puts the baseline coils
+   within 0.0006 % of the fixture. This is a test-code change only, with
+   the same bars. Mode 1 then also depends on the reconstruction reproducing,
+   which it already implicitly did. Mode 3 has no archived per-draw input
+   current, so it would need option 3 or stay the looser check it is.
+3. *Archive both currents.* An additive dataset (e.g. the input current next
+   to the achieved one) on `_baseline` and on every draw. Replays use the
+   input; plots and consumers keep the achieved current that matches the
+   eqdsk. This is a schema addition.
+4. *Make the replay's `generate_bouquet` call match `generate()`'s.* Pass
+   the baseline Z_eff, `isolate_edge_jBS=False`, `baseline_j_BS` and
+   `jBS_scale_range` as the class API does, and Z_imp / p_fast / j_NBI /
+   j_RF where set, instead of the function defaults. The simplest way is to
+   derive the arguments from the reconstructed `Bouquet` rather than
+   hand-copy them. This is a test-code change, and it concerns mode 3's
+   fidelity (and the draw-3 `maxits`), not mode 1. It is the same class of
+   drift the fixture's docstring already warns about for isoflux, psi_pad
+   and warm start.
+5. *Treat the coil set as weakly constrained and report it.* For example,
+   normalise the drift per coil by a coil-current scale or use the coil χ²
+   filter's sigma. That changes the acceptance criterion and needs explicit
+   approval. It is not recommended as the fix here: the cause is an input
+   mismatch, and B-on passes the existing bar with a 30× margin.
+6. *Diagnostics, optional.* Record coil currents in the `jbs_loop` pass
+   history, and add coil currents (or boundary RMS) to the fixed-point
+   tests. Neither would have caught this failure, since the loop is
+   bit-reproducible.
 
 The `*.h5` glob in `.gitignore` is negated for `tests/golden/*.h5` so the slim
 fixture is tracked while ad-hoc run outputs elsewhere stay ignored.
