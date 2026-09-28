@@ -7,6 +7,7 @@ Git-tracked regression fixtures for `tests/test_golden_bouquet.py`.
 | `D3Dlike_Hmode_golden_slim.h5` | a slimmed real bouquet run (~11.8 MB): `*.pfile` byte blobs dropped, the `*.eqdsk` geqdsks **kept but gzip-compressed** (~3x), `Ip` also extracted into an attr, everything the assertions need kept (attrs, `coil_currents`, `x_points`, both LCFS refs, profiles). |
 | `golden_manifest.json` | expected per-draw + baseline values (l_i, Ip, coil drifts, boundary RMS/max, coil currents, X-points) with tolerances. |
 | `rng_stream_manifest.json` | the **seeded GPR draw stream**, pinned bitwise (SHA-256 per channel + sampled values), drawn from the slim fixture's baseline profiles + sigma envelopes. |
+| `regenerate_golden_run.py` | produces that full run: the recipe (stored config, class API, INPUT-current archival). |
 | `make_golden_fixture.py` | regenerates the three files above from a full run. |
 
 ## The draw-stream golden
@@ -46,11 +47,49 @@ as the shareable example artifact under
 
 ## Updating the golden set (on purpose)
 
-1. Re-run the example notebook to produce a fresh full `.h5`.
+**The recipe** (every systematics golden: 0f92d28, bc7a49a, 060bc1f, and the
+input-current rebuild of the self-consistent-bootstrap refresh):
+
+* the fixture's **own stored config** (`scan/0/config_json`), verbatim:
+  20 draws, seed 12345, the synthetic-IDA sigmas, the `jbs_*` loop settings
+  and pass ceilings, `solver.nthreads=1`; only the archive name and the log
+  verbosity are set;
+* the **class API**: `Bouquet(cfg) -> setup_solver() -> prepare_baseline() ->
+  generate()`;
+* **input-current archival** (`store_achieved_jphi=False`): `_baseline/j_phi`
+  and each draw's `j_phi` / `j_inductive` hold the current the generator
+  handed the solver, not the achieved flux-surface average. The systematics
+  replay feeds `_baseline/j_phi` back as the input of its baseline solve, so
+  this is its premise ("archived current reproduces archived LCFS").
+  **`Bouquet.generate()` hard-wires `store_achieved_jphi=True`**, so a plain
+  notebook run does NOT follow the recipe; the refresh in 5296720 was built
+  that way and mode 1 failed on it (see "mode-1 coil drift" below).
+  `store_achieved_jphi` changes only what is written, never what is solved;
+* one thread (`OMP_NUM_THREADS=1`), on the OFT build the fixture pins, stated
+  through `BOUQUET_OFT_COMMIT` / `BOUQUET_OFT_BRANCH` / `BOUQUET_OFT_BUILD_ID`
+  when slimming.
+
+The earlier goldens switched the archival off the same way: their
+regeneration script wrapped `bouquet.TokaMaker_interface.generate_bouquet`
+(which `generate()` imports at call time) to inject
+`store_achieved_jphi=False`. That script was never committed; the commits
+stated the convention, not the mechanism, and the refresh lost it.
+`regenerate_golden_run.py` is that recipe, in the tree. It flips only
+`store_achieved_jphi` on `generate()`'s own `generate_bouquet` call, refuses
+to run if `generate()` stops passing it as `True`, and stamps the archive root
+with `golden_jphi_archival = "input"`. The builder copies that attr into the
+fixture and records it in the manifest's provenance
+(`generator_args.jphi_archival`), so a fixture says how it was archived.
+
+1. Produce the full run (~6.5 h at one thread for this example; run it on a
+   machine with the disk and the time for it):
+   ```bash
+   OMP_NUM_THREADS=1 python tests/golden/regenerate_golden_run.py RUN_DIR --verbose
+   ```
 2. Regenerate the fixture + manifest:
    ```bash
    python tests/golden/make_golden_fixture.py \
-       --source /path/to/D3Dlike_Hmode_golden.h5
+       --source RUN_DIR/D3Dlike_Hmode_golden.h5
    ```
    (defaults to the D3D-like example artifact path if `--source` is omitted;
    `rng_stream_manifest.json` is re-pinned from the new slim fixture in the

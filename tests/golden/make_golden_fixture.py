@@ -28,7 +28,9 @@ The ``--eqdsk`` flag controls geqdsk retention:
 
 Updating the golden set
 -----------------------
-Re-run the bouquet notebook to produce a fresh full ``.h5``, then::
+Regenerate the full run with ``regenerate_golden_run.py`` (the recipe: the
+fixture's own stored config, class API, INPUT-current archival -- NOT a plain
+notebook ``generate()``, which archives the achieved current), then::
 
     python tests/golden/make_golden_fixture.py \
         --source /path/to/D3Dlike_Hmode_golden.h5
@@ -273,6 +275,19 @@ def bouquet_provenance():
     return out
 
 
+def source_jphi_archival(source):
+    """The run's j_phi archival convention, as ``regenerate_golden_run.py``
+    stamps it on the archive root (``"input"``), or ``None`` when the source
+    does not say (a run not made by that recipe)."""
+    if not source or not os.path.isfile(source):
+        return None
+    with h5py.File(source, "r") as hf:
+        v = hf.attrs.get("golden_jphi_archival")
+    if isinstance(v, bytes):
+        v = v.decode()
+    return None if v is None else str(v)
+
+
 def fixture_provenance(source=None, eqdsk="all", seed=RNG_STREAM_SEED):
     """Everything needed to reproduce -- or to diagnose -- this fixture.
 
@@ -287,6 +302,9 @@ def fixture_provenance(source=None, eqdsk="all", seed=RNG_STREAM_SEED):
             "source_basename": os.path.basename(source) if source else None,
             "eqdsk": eqdsk,
             "rng_stream_seed": int(seed),
+            # input (the systematics replay premise) vs achieved current;
+            # see regenerate_golden_run.py
+            "jphi_archival": source_jphi_archival(source),
         },
         "bouquet": bouquet_provenance(),
         "oft": oft_provenance(),
@@ -688,6 +706,8 @@ def build(source, out_dir=_HERE, eqdsk="all"):
     size_mb = os.path.getsize(slim_path) / 1e6
     print(f"[golden] wrote {slim_path}  ({size_mb:.2f} MB, eqdsk={eqdsk})")
     print(f"[golden] wrote {manifest_path}")
+    print(f"[golden] j_phi archival: "
+          f"{prov['generator_args']['jphi_archival'] or 'NOT STATED by the source'}")
     for sk, se in manifest["scans"].items():
         print(f"[golden]   scan {sk}: {se['n_draws']} draws, "
               f"{se['n_in_spec']} in-spec, "
