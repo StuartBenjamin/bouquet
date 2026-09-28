@@ -29,9 +29,24 @@ What the loop is (unchanged from its opt-in introduction below): the joint
 relaxation of the bootstrap (ω = 0.7) and of the solved current (β = 0.7), ω
 halved only on sustained growth, convergence = every active residual on two
 consecutive passes (`r_j ≤ 1e-3`, `r_I ≤ 1e-4 I_p`, `Δl_i ≤ 1e-3`,
-`Δq0 ≤ 2e-3`), ceilings 8 (baseline) / 6 (+2 post-homotopy) per draw, hard
-failure by default or a flagged slice with `jbs_loop_on_fail="flag"`, and the
-soft closure's noise-aware stop test with one logged retry.
+`Δq0 ≤ 2e-3`), hard failure by default or a flagged slice with
+`jbs_loop_on_fail="flag"`, and the soft closure's noise-aware stop test with
+one logged retry. Pass ceilings (limits, not tolerances): 8 for the baseline /
+reconstruction, 12 for each loop of a draw (`jbs_max_passes_draw`, was 6) and
+4 post-homotopy passes (`jbs_max_passes_post_homotopy`, now a config field;
+was a hard-coded 2). The draw ceilings were raised when the golden refresh
+showed the standard draw's l_i-match coupling needing 7–8 passes (it contracts
+at ≈0.38/pass from r_j ≈ 2e-2…1.2e-1) and a post-homotopy stage whose first
+pass misses needing 3 under the two-consecutive rule; no tolerance moved.
+
+Where a draw's loop starts (recorded per loop as `init_source`): Redl at the
+draw's state anchor on the draw's OWN perturbed kinetics for its first loop,
+warm from its previous converged bootstrap for later ones -- never the
+unperturbed baseline bootstrap. The large first residual of an l_i-match
+candidate's loop is geometric (the candidate's new inductive shape moves q and
+the flux range; Redl with the same kinetics on that geometry differs by a few
+to ~10 % in I_BS), not a kinetic mismatch. A fast and a solver test run the
+same draw loop from the baseline bootstrap and reach the same fixed point.
 
 ### Opt-in introduction (earlier on this branch)
 
