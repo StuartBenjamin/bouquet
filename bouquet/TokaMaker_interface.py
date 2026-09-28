@@ -1795,11 +1795,22 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
     bootstrap the draw carries (loop tolerances) the draw is accepted as is.
     Otherwise up to ``JBS_POST_HOMOTOPY_PASSES`` further passes are taken AT
     THE CURRENT (tight) coil stage, rebuilding the draw's j_phi with the
-    relaxed bootstrap exactly as its loop did (Fix C: inductive Ip
-    renormalisation on the current iterate; standard: the delivered inductive
-    held).  Raises :class:`~bouquet.jbs_loop.JBSNotConverged` when that fails:
+    relaxed bootstrap exactly as its loop did.  Fix C: the candidate's
+    inductive Ip renormalisation on the current iterate, one jphi-linterp
+    solve of that request (the solved current relaxed with ``beta``).
+    Standard: the delivered inductive held, and the new total reached the way
+    the standard draw reaches every target -- Ip renormalisation of the
+    target and the corrective j_phi iteration (same knobs as the draw) --
+    because the standard draw's stored ``j_phi`` is the ACHIEVED current of
+    its corrective iteration, not the solver input that achieved it: handing
+    the achieved profile back to a single jphi-linterp solve asks for a
+    different equilibrium (measured: that solve exhausts ``maxits`` at the
+    tight coil stage).  Like the standard draw's l_i coupling, these passes
+    re-run a multi-solve fit, so ``beta`` is not applied (the record says
+    so).  Raises :class:`~bouquet.jbs_loop.JBSNotConverged` when that fails:
     the draw is then a failed draw.  Returns ``(record, spike_used, full,
-    j_phi_request)``.
+    j_phi)`` with ``j_phi`` the re-solved draw's current (the achieved
+    current on the standard path).
     """
     from .jbs_loop import (check_delivered, residual_weights, run_jbs_loop,
                            JBS_POST_HOMOTOPY_PASSES, jsonable)
@@ -1824,20 +1835,19 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
     state = {}
 
     def _step(spk, k, relax=None):
-        if ctx["kind"] == "fixc":
-            _aip = None
-            if ctx.get("r2_mode", "exact") != "legacy":
-                try:
-                    _aip = _AnchorIpRenorm(mygs, psi_N, ctx["input_j_phi"],
-                                           Ip_target, psi_pad,
-                                           mode=ctx["r2_mode"])
-                except Exception:
-                    _aip = None
-            s = _r2_ip_scale(_aip, mygs, ctx["cand"],
-                             spk + ctx["j_fixed_eff"], psi_N, Ip_target)
-            jphi = s * ctx["cand"] + spk + ctx["j_fixed_eff"]
-        else:
-            jphi = ctx["j_ind_used"] + spk + ctx["j_fixed_eff"]
+        """Fix C draw: the candidate's inductive Ip renormalisation on the
+        current iterate, one jphi-linterp solve (beta-relaxed)."""
+        _aip = None
+        if ctx.get("r2_mode", "exact") != "legacy":
+            try:
+                _aip = _AnchorIpRenorm(mygs, psi_N, ctx["input_j_phi"],
+                                       Ip_target, psi_pad,
+                                       mode=ctx["r2_mode"])
+            except Exception:
+                _aip = None
+        s = _r2_ip_scale(_aip, mygs, ctx["cand"],
+                         spk + ctx["j_fixed_eff"], psi_N, Ip_target)
+        jphi = s * ctx["cand"] + spk + ctx["j_fixed_eff"]
         _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
         _pp = {"type": "linterp",
                "y": pchip_derivative(psi_N, pres_tmp) / _pr, "x": psi_N}
@@ -1854,6 +1864,28 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
         return dict(w=_w, x=_x, snap=_s, li=float(mygs.get_stats(
             li_normalization='iter', lcfs_pad=psi_pad)['l_i']))
 
+    def _step_standard(spk, k):
+        """Standard draw: hold the delivered inductive, swap the bootstrap,
+        and reach the new total with the draw's own target renormalisation
+        + corrective iteration (see the docstring)."""
+        target = (np.asarray(ctx["j_ind_used"], float) + np.asarray(spk, float)
+                  + np.asarray(ctx["j_fixed_eff"], float))
+        _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
+        _pp = {"type": "linterp",
+               "y": pchip_derivative(psi_N, pres_tmp) / _pr, "x": psi_N}
+        _pp["y"][-1] = 0.0
+        target, _f = _renormalize_target_to_Ip(mygs, psi_N, target, Ip_target,
+                                               psi_pad, label="jphi_corr/draw")
+        out, _n, _h = _corrective_jphi_iteration(
+            mygs, psi_N, target, _pp, Ip_target, pres_tmp[0], psi_pad,
+            min_iters=2, max_iters=int(os.environ.get('CORR_MAX_ITERS', '8')),
+            rtol=0.05, verbose=False)
+        state["jphi"] = np.asarray(out, dtype=float)
+        _s = mygs.copy_eq()
+        _w, _x, _kk = residual_weights(_s, psi_N, psi_pad)
+        return dict(w=_w, x=_x, snap=_s, li=float(mygs.get_stats(
+            li_normalization='iter', lcfs_pad=psi_pad)['l_i']))
+
     def _eval(meas):
         _sp, _fu, _dd = compose(meas["snap"])
         state["full"] = _fu
@@ -1861,7 +1893,11 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
 
     li0 = float(mygs.get_stats(li_normalization='iter',
                                lcfs_pad=psi_pad)['l_i'])
-    res = run_jbs_loop(jbs0, _step, _eval, settings, Ip=Ip_target,
+    rec["solve"] = ("jphi-linterp request (Fix C)" if ctx["kind"] == "fixc"
+                    else "Ip-renormalised target + corrective iteration "
+                         "(standard; beta not applied)")
+    res = run_jbs_loop(jbs0, _step if ctx["kind"] == "fixc" else
+                       _step_standard, _eval, settings, Ip=Ip_target,
                        meas0=dict(li=li0), gate_li=True, gate_q0=False,
                        label="draw post-homotopy",
                        max_passes=int(JBS_POST_HOMOTOPY_PASSES),
