@@ -48,7 +48,8 @@ class _GC:
         self.jbs_tol_li = 1e-3
         self.jbs_tol_q0 = 2e-3
         self.jbs_max_passes = 8
-        self.jbs_max_passes_draw = 6
+        self.jbs_max_passes_draw = 12
+        self.jbs_max_passes_post_homotopy = 4
         self.jbs_relax = 0.7
         self.jbs_loop_on_fail = "raise"
         for k, v in kw.items():
@@ -93,8 +94,13 @@ def test_defaults_are_the_approved_values_and_on():
     assert s["enabled"] is True
     assert (s["rtol_j"], s["rtol_Ip"], s["tol_li"], s["tol_q0"]) == \
         (1e-3, 1e-4, 1e-3, 2e-3)
+    # ceilings: 8 baseline, 12 per draw loop, 4 post-homotopy (limits; the
+    # two-consecutive rule and every tolerance above are unchanged)
     assert s["max_passes"] == 8 and jbs_settings(g, draw=True)[
-        "max_passes"] == 6
+        "max_passes"] == 12
+    assert g.jbs_max_passes_post_homotopy == 4
+    assert s["post_homotopy_passes"] == 4
+    assert jbs_settings(g, draw=True)["post_homotopy_passes"] == 4
     assert s["relax"] == 0.7 and s["relax_floor"] == 0.25
     assert s["on_fail"] == "raise" and s["init"] == "anchor"
     assert s["required_consecutive"] == 2
@@ -107,6 +113,8 @@ def test_defaults_are_the_approved_values_and_on():
     ("jbs_init", "sbw"), ("jbs_loop_on_fail", "ignore"),
     ("jbs_rtol_j", 0.0), ("jbs_rtol_Ip", -1e-4), ("jbs_tol_li", float("nan")),
     ("jbs_tol_q0", "x"), ("jbs_max_passes", 1), ("jbs_max_passes_draw", 2.5),
+    ("jbs_max_passes_post_homotopy", 1), ("jbs_max_passes_post_homotopy", 2.5),
+    ("jbs_max_passes_post_homotopy", True),
     ("jbs_relax", 0.1), ("jbs_relax", 1.5), ("jbs_self_consistent", "yes"),
     ("jbs_relax_current", 0.0), ("jbs_relax_current", 1.2),
     ("jbs_relax_current", "x"), ("jbs_relax_halve_on", 0),

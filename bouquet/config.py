@@ -994,11 +994,17 @@ class GenerationConfig:
     jbs_rtol_Ip: float = 1.0e-4
     jbs_tol_li: float = 1.0e-3
     jbs_tol_q0: float = 2.0e-3
-    # Pass ceilings: baseline / reconstruction, and per draw (a draw gets up to
-    # jbs_loop.JBS_POST_HOMOTOPY_PASSES further passes at the tight coil stage
-    # after the post-perturb homotopy).
+    # Pass ceilings (limits, not tolerances: convergence is still every active
+    # criterion on two consecutive passes).  jbs_max_passes: the baseline /
+    # reconstruction loop.  jbs_max_passes_draw: EACH loop of a draw (its
+    # anchor loop, every l_i-match candidate's Gauss-Seidel coupling, every
+    # Fix C resample).  jbs_max_passes_post_homotopy: the passes a draw may
+    # take at the tight coil stage when Redl on the post-homotopy equilibrium
+    # misses its bootstrap (the check itself is not a pass; with the
+    # two-consecutive rule a stage whose first pass misses needs >= 3).
     jbs_max_passes: int = 8
-    jbs_max_passes_draw: int = 6
+    jbs_max_passes_draw: int = 12
+    jbs_max_passes_post_homotopy: int = 4
     # Under-relaxation omega of the bootstrap: j_BS <- (1-omega) j_BS + omega
     # Redl.  Held fixed, and halved (floor jbs_loop.JBS_RELAX_FLOOR = 0.25)
     # only on SUSTAINED growth of r_j: growth on jbs_relax_halve_on

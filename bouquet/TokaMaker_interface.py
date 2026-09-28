@@ -1793,7 +1793,9 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
 
     Evaluates Redl on the delivered equilibrium; if it still matches the
     bootstrap the draw carries (loop tolerances) the draw is accepted as is.
-    Otherwise up to ``JBS_POST_HOMOTOPY_PASSES`` further passes are taken AT
+    Otherwise up to ``settings["post_homotopy_passes"]``
+    (``GenerationConfig.jbs_max_passes_post_homotopy``) further passes are
+    taken AT
     THE CURRENT (tight) coil stage, rebuilding the draw's j_phi with the
     relaxed bootstrap exactly as its loop did.  Fix C: the candidate's
     inductive Ip renormalisation on the current iterate, one jphi-linterp
@@ -1814,6 +1816,7 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
     """
     from .jbs_loop import (check_delivered, residual_weights, run_jbs_loop,
                            JBS_POST_HOMOTOPY_PASSES, jsonable)
+    n_ph = int(settings.get("post_homotopy_passes", JBS_POST_HOMOTOPY_PASSES))
     compose = ctx["compose"]
     spike_used = np.asarray(ctx["spike_used"], dtype=float)
     snap = mygs.copy_eq()
@@ -1825,7 +1828,7 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
     print(f"  [jbs-loop post-homotopy] r_j={chk['r_j']:.3e} "
           f"r_I={chk['r_I']:.3e} -> "
           + ("inside tolerance, draw kept" if chk["ok"] else
-             f"outside tolerance, up to {JBS_POST_HOMOTOPY_PASSES} passes at "
+             f"outside tolerance, up to {n_ph} passes at "
              "the tight coil stage"), flush=True)
     if chk["ok"]:
         return rec, spike_used, full, ctx.get("j_phi_request")
@@ -1900,8 +1903,7 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
                        _step_standard, _eval, settings, Ip=Ip_target,
                        meas0=dict(li=li0), gate_li=True, gate_q0=False,
                        label="draw post-homotopy",
-                       max_passes=int(JBS_POST_HOMOTOPY_PASSES),
-                       raise_on_fail=True)
+                       max_passes=n_ph, raise_on_fail=True)
     rec["passes"] = res["record"]
     return rec, res["jbs_used"], state.get("full", full), state.get("jphi")
 

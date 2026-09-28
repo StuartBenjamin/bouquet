@@ -230,9 +230,16 @@ Residuals, **all logged every pass**:
 between the bootstrap an equilibrium was solved with and the Redl bootstrap of
 that equilibrium. That is `1/ω` times the relaxed step `‖jBS_k+1 − jBS_k‖`, so
 the criterion is never looser than a step-size test. Converged means **every
-active criterion on two consecutive passes**. Ceilings: `jbs_max_passes = 8`
-(baseline / reconstruction), `jbs_max_passes_draw = 6` per draw, plus up to
-`jbs_loop.JBS_POST_HOMOTOPY_PASSES = 2` after a draw's coil homotopy.
+active criterion on two consecutive passes**. Ceilings (limits, not
+tolerances): `jbs_max_passes = 8` (baseline / reconstruction),
+`jbs_max_passes_draw = 12` for each loop of a draw (its anchor loop, each
+l_i-match candidate's coupling, each Fix C resample), and
+`jbs_max_passes_post_homotopy = 4` passes after a draw's coil homotopy when
+Redl on the delivered equilibrium misses (with the two-consecutive rule a
+stage whose first pass misses needs at least 3). The draw ceilings were
+raised from 6 / 2 once the golden case showed the standard draw's l_i-match
+coupling contracting at ≈0.38/pass from r_j ≈ 2e-2…1.2e-1 (7–8 passes) --
+a limit change; no tolerance moved.
 Relaxation, on two quantities, both of the **path** only (at the fixed point
 both blends are the identity):
 
