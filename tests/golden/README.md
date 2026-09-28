@@ -84,18 +84,31 @@ moved, because that channel is drawn from the fixture's baseline j_phi, which
 now carries the self-consistent bootstrap (baseline j_phi moved by ~1 % of its
 peak, sigma_jphi by ~1.5 %).
 
-## Known build-dependent failure: `test_systematics::test_mode3_production_reproduces_golden`
+## `test_systematics` against the refreshed fixture
 
-On OFT builds that carry the 2026-08 bootstrap stencil change (the current
-line, including the macOS development build and the Linux production build)
-this replay misses the recorded l_i(1) of draw 3 by 3.74 % against its 3 %
-bar (`l_i(1) replay 0.8240 vs golden 0.8560`), with l_i(3) (2.06 %) and the
-boundary RMS inside their bars. The miss is the fixture's, not bouquet's: the
-commit that produced the fixture reproduces it to four decimals on the newer
-OFT, and passes on the older one; the signature (an l_i(1)-only, edge-localised
-change) is the end-stencil difference of the bootstrap-gradient formula. The
-bar is not widened; the failure is expected until the fixture is regenerated
-on the current OFT line (see the pending refresh above).
+**Mode 3 (`test_mode3_production_reproduces_golden`) passes** on the Linux
+production build. Before the refresh it missed the recorded l_i(1) of draw 3
+by 3.74 % against its 3 % bar (`l_i(1) replay 0.8240 vs golden 0.8560`), the
+end-stencil signature of the OFT bootstrap-gradient change the old fixture
+predated. Against the refreshed fixture the replayed draws are the first two
+in-spec ones (0 and 3): draw 0 reproduces within every bar (`boundary RMS
+replay=0.719 golden=2.083 mm  li(3) replay=0.6274 golden=0.6275  li(1)
+replay=0.8182 golden=0.8200`), but draw 3's mode-3 replay produced no
+equilibrium (`STOPPED: ValueError: Error in solve: Exceeded "maxits"`), and
+the test skips a replay that produced none, so draw 3 was NOT re-checked.
+No bar was changed.
+
+**Mode 1 (`test_mode1_pinned_baseline_reproduces_baseline`) now fails** --
+new with the refresh (it passed at 0.0059 % against the frozen fixture):
+`[replay mode1] max coil drift = 1.2292% (limit 0.3)` (`assert
+np.float64(1.2292165342528374) < 0.3`), boundary RMS 0.5440 mm inside its
+0.8 mm bar. The drift is on one coil (F9B) and is already present between the
+replay's own loop-on reconstruction and the fixture's loop-on baseline
+(1.2278 %); the pinned draw adds only 0.005 %. The fixture's baseline comes
+from `Bouquet(stored config) -> prepare_baseline`, the replay's from
+`Bouquet.from_geqdsk(...) -> reconstruct()`; with the frozen bootstrap the two
+agreed to 0.006 %, with the loop on they do not. Not yet diagnosed; the bar
+is not widened.
 
 ## Known limitation: a standard draw's post-homotopy re-solve can diverge slowly
 

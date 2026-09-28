@@ -160,8 +160,14 @@ refresh: fsa 6 passed / 1 skipped (build-aware collapse demonstration),
 harness 1, loop solver 19 (incl. the legacy-flag tripwire test), l_i
 closure 10, seeded reproducibility 12, systematics 2 passed / 1 failed (the
 golden l_i(1) miss of the pre-refresh fixture, documented in
-`tests/golden/README.md`); the systematics rerun against the refreshed
-fixture is pending.
+`tests/golden/README.md`). Systematics against the refreshed fixture on
+the Linux production build: 2 passed / 1 failed. Mode 3 now passes (draw 0
+within every bar; draw 3's replay produced no equilibrium -- a `maxits`
+failure -- and was skipped by the test). Mode 1 is a NEW failure: max coil
+drift 1.2292 % against 0.3 %, on one coil, already present between the
+test's class-API loop-on reconstruction and the fixture's loop-on baseline
+(the two agreed to 0.006 % with the frozen bootstrap). Not yet diagnosed; no
+bar changed. **Blocking for the PR.**
 
 ## Reviewer notes
 
