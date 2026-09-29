@@ -2089,8 +2089,14 @@ def _mse_lsq_rows(mse_lin, K, who):
     return M, m
 
 
-def _mse_record(mse_lin, x, objective_model):
-    """The MSE block of a structured solver's result (model space)."""
+def _mse_record(mse_lin, x, objective_model, free_dim=None):
+    """The MSE block of a structured solver's result (model space).
+
+    ``mse_free_dim`` is the dimension of the free-coefficient space left once
+    the HARD constraint rows are imposed -- the space the MSE term can act
+    in.  0 means the closure is fully determined by its hard rows and the MSE
+    term can only be evaluated, never fitted.
+    """
     if mse_lin is None:
         return {}
     M, m = _mse_lsq_rows(mse_lin, np.asarray(x).size // 2, "mse record")
@@ -2102,6 +2108,7 @@ def _mse_record(mse_lin, x, objective_model):
         mse_chi2_linearisation_point=float(z0 @ z0),
         mse_residual_sigma_model=z,
         mse_objective_model=float(objective_model),
+        mse_free_dim=(None if free_dim is None else int(free_dim)),
     )
 
 
@@ -2590,6 +2597,7 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
             "split")
 
     mse_M = mse_m = None
+    _mse_free_dim = [None]
     if mse_lin is not None:
         _M, mse_m = _mse_lsq_rows(mse_lin, K, "close_ip_structured")
         mse_M = _M[:, free]
@@ -2632,6 +2640,7 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
             Mw = (mse_M * scal[None, :]) / np.sqrt(_wmax)
             mw = mse_m / np.sqrt(_wmax)
             Nn = np.linalg.svd(Aw, full_matrices=True)[2][Aw.shape[0]:].T
+            _mse_free_dim[0] = int(Nn.shape[1])
             if Nn.shape[1]:
                 G = np.vstack([np.eye(Nn.shape[1]), Mw @ Nn])
                 hvec = np.concatenate([np.zeros(Nn.shape[1]), mw - Mw @ y])
@@ -2719,7 +2728,8 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
             weights_bs=W_bs))
         _Mz = _mse_lsq_rows(mse_lin, K, "close_ip_structured")
         _z = _Mz[0] @ x - _Mz[1]
-        mse_rec = _mse_record(mse_lin, x, _prior + float(_z @ _z))
+        mse_rec = _mse_record(mse_lin, x, _prior + float(_z @ _z),
+                              free_dim=_mse_free_dim[0])
         names = list(names) + [f"MSE tan(gamma) chi2 ({int(mse_lin['n'])} "
                                "chords, linearised)"]
 
@@ -3307,7 +3317,7 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
         constraint_singular_values=None, constraint_cond=None,
         solver="soft-GaussNewton",
         **li_rec,
-        **_mse_record(mse_lin, x, float(F)),
+        **_mse_record(mse_lin, x, float(F), free_dim=int(N.shape[1])),
     )
 
 

@@ -81,6 +81,18 @@ MSE_REQUIRED_KEYS = ("R", "Z", "tgamma", "sigma", "weight",
 #: Scalar orientation keys every data block must carry (see the module doc).
 MSE_ORIENTATION_KEYS = ("ip_sign", "bt_sign")
 
+#: Optional keys a data block may carry.  Anything outside
+#: ``MSE_REQUIRED_KEYS + MSE_ORIENTATION_KEYS + MSE_OPTIONAL_KEYS`` is REFUSED
+#: -- a misspelt or unsupported key (``gamma``, ``Er_kVm``, ...) would
+#: otherwise be silently ignored.
+MSE_OPTIONAL_KEYS = ("A5", "Er", "er_corrected")
+
+
+def mse_block_unknown_keys(md):
+    """Keys of data block *md* that the schema does not know (sorted)."""
+    known = set(MSE_REQUIRED_KEYS + MSE_ORIENTATION_KEYS + MSE_OPTIONAL_KEYS)
+    return sorted(str(k) for k in md if k not in known)
+
 #: The stated orientation is REPORTED as contradicted by the data when another
 #: of the four orientations fits the chords better by more than this much
 #: chi^2 -- i.e. the alternative is preferred by more than one standard
@@ -105,7 +117,9 @@ def mse_chords(md, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
     ``sigma_sys``.
 
     A chord is active when its weight is positive and ``tgamma``, ``sigma``,
-    the A-coefficients, ``R`` and ``Z`` are all finite with ``sigma > 0``.
+    the A-coefficients, ``R`` and ``Z`` (and ``Er``, when an E_r profile is
+    supplied) are all finite with ``sigma > 0``.  Every inactive chord is
+    listed in ``excluded`` as ``(input index, reason)``.
     ``sigma_eff = sqrt(sigma^2 / weight + sigma_sys^2)``: the fit weight
     folded in once, and an OPTIONAL caller-stated systematic added in
     quadrature (default 0 -- nothing is inflated unless asked for).
@@ -114,7 +128,8 @@ def mse_chords(md, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
     (floats, +-1).
 
     Raises :class:`MSEDataUnusable` (a ``ValueError``) on a missing block or
-    key, an ``ip_sign``/``bt_sign`` that is not +1 or -1, arrays of unequal
+    key, an unknown key, a non-bool ``er_corrected``, an
+    ``ip_sign``/``bt_sign`` that is not +1 or -1, arrays of unequal
     length, a non-finite or negative ``sigma_sys``, a non-zero ``Er``
     together with ``er_corrected=True``, or fewer than *min_chords* active
     chords.
@@ -124,6 +139,13 @@ def mse_chords(md, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
     if not isinstance(md, dict):
         raise MSEDataUnusable(f"the MSE data block must be a dict, got "
                               f"{type(md).__name__}")
+    unknown = mse_block_unknown_keys(md)
+    if unknown:
+        raise MSEDataUnusable(
+            "the MSE data block carries unknown key(s) " + ", ".join(unknown)
+            + " -- refused rather than ignored (known: "
+            + ", ".join(MSE_REQUIRED_KEYS + MSE_ORIENTATION_KEYS
+                        + MSE_OPTIONAL_KEYS) + ")")
     missing = [k for k in MSE_REQUIRED_KEYS + MSE_ORIENTATION_KEYS
                if k not in md]
     if missing:
@@ -163,17 +185,45 @@ def mse_chords(md, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
             "MSE arrays differ in length: "
             + ", ".join(f"{k}={arr[k].size}" for k in bad)
             + f" against tgamma={n}")
+    if isinstance(min_chords, bool) or int(min_chords) != min_chords \
+            or int(min_chords) < 1:
+        # a configuration error, not a property of the data: plain ValueError
+        raise ValueError(f"min_chords must be an integer >= 1, got "
+                         f"{min_chords!r}")
     ss = float(sigma_sys)
     if not (np.isfinite(ss) and ss >= 0.0):
         raise MSEDataUnusable(f"sigma_sys must be finite and >= 0, got "
                               f"{sigma_sys!r}")
-    er_corrected = bool(md.get("er_corrected", False))
+    er_corrected = md.get("er_corrected", False)
+    if not isinstance(er_corrected, (bool, np.bool_)):
+        raise MSEDataUnusable("MSE 'er_corrected' must be a bool, got "
+                              f"{er_corrected!r}")
+    er_corrected = bool(er_corrected)
+    er_supplied = md.get("Er") is not None
 
-    act = arr["weight"] > 0.0
-    for k in ("R", "Z", "tgamma", "sigma", "weight", "A1", "A2", "A3", "A4",
-              "A5", "Er"):
-        act &= np.isfinite(arr[k])
-    act &= arr["sigma"] > 0.0
+    # Every inactive chord gets ONE recorded reason (the first that applies),
+    # so nothing is dropped silently -- in particular a chord whose E_r is
+    # NaN inside a supplied E_r profile is EXCLUDED with that reason rather
+    # than fitted without its E_r term.
+    reasons = np.full(n, "", dtype=object)
+
+    def _why(mask, text):
+        reasons[(reasons == "") & mask] = text
+
+    _why(~np.isfinite(arr["weight"]), "weight is not finite")
+    _why(arr["weight"] <= 0.0, "weight <= 0 (excluded by its fit weight)")
+    _why(~(np.isfinite(arr["R"]) & np.isfinite(arr["Z"])),
+         "R or Z is not finite")
+    _why(~np.isfinite(arr["tgamma"]), "tgamma is not finite")
+    _why(~np.isfinite(arr["sigma"]) | ~(arr["sigma"] > 0.0),
+         "sigma is not finite and positive")
+    for k in ("A1", "A2", "A3", "A4", "A5"):
+        _why(~np.isfinite(arr[k]), f"{k} is not finite")
+    _why(~np.isfinite(arr["Er"]),
+         "E_r is not finite at this chord although an E_r profile was "
+         "supplied: it cannot carry its E_r term, so it is excluded rather "
+         "than fitted without it" if er_supplied else "E_r is not finite")
+    act = reasons == ""
     n_act = int(act.sum())
     er_applied = bool(np.any((arr["A5"][act] * arr["Er"][act]) != 0.0))
     if er_corrected and bool(np.any(arr["Er"][act] != 0.0)):
@@ -189,7 +239,9 @@ def mse_chords(md, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
     out["sigma_eff"] = np.sqrt(out["sigma"] ** 2 / out["weight"] + ss ** 2)
     out.update(index=np.nonzero(act)[0], n_total=int(n), n_active=n_act,
                er_applied=er_applied, er_corrected=er_corrected,
-               sigma_sys=ss, min_chords=int(min_chords), excluded=[],
+               sigma_sys=ss, min_chords=int(min_chords),
+               excluded=[(int(i), str(reasons[i]))
+                         for i in np.nonzero(~act)[0]],
                **signs)
     return out
 

@@ -769,7 +769,7 @@ class _Snap:
         return (np.asarray(psi, float), np.full(np.size(psi), 1.2), None, None)
 
 
-def _run_stage(gc, tamper=None, n_chords=12):
+def _run_stage(gc, tamper=None, n_chords=12, solve_wrap=None):
     """predictor -> (common-tail solve) -> MSE stage -> corrector -> delivered."""
     from bouquet.run import Bouquet
 
@@ -793,8 +793,9 @@ def _run_stage(gc, tamper=None, n_chords=12):
     cyl.solve(bl.j_phi)                           # the common-tail solve
     gs = _FakeGS(cyl)
     n0 = cyl.n_solves
+    stage_solve = cyl.solve if solve_wrap is None else solve_wrap(cyl.solve)
     if state is not None and state.get("mse") is not None:
-        Bouquet._close_ip_structured_mse_stage(state, bl, gs, cyl.solve)
+        Bouquet._close_ip_structured_mse_stage(state, bl, gs, stage_solve)
     n_stage = cyl.n_solves - n0
     if state is not None:
         Bouquet._close_ip_structured_corrector(
@@ -1287,3 +1288,188 @@ class TestArchiveSize:
                                 1.0e6, 1.0)
         with h5py.File(header + ".h5", "r") as hf:
             assert "structured_mse" not in hf["_baseline"]
+
+
+# ---------------------------------------------------------------------------
+#  configuration validation, exclusions with reasons, no-freedom, solver errors
+# ---------------------------------------------------------------------------
+class TestValidation:
+    @pytest.mark.parametrize("kw, match", [
+        (dict(structured_mse_steps=0), "structured_mse_steps"),
+        (dict(structured_mse_steps=1.5), "structured_mse_steps"),
+        (dict(structured_mse_steps=True), "structured_mse_steps"),
+        (dict(structured_mse_fd_step=0.0), "structured_mse_fd_step"),
+        (dict(structured_mse_fd_step=-0.01), "structured_mse_fd_step"),
+        (dict(structured_mse_fd_step=float("nan")), "structured_mse_fd_step"),
+        (dict(structured_mse_fd_step=float("inf")), "structured_mse_fd_step"),
+        (dict(structured_mse_sigma_sys=-1e-3), "structured_mse_sigma_sys"),
+        (dict(structured_mse_sigma_sys=float("nan")),
+         "structured_mse_sigma_sys"),
+        (dict(structured_mse_min_chords=0), "structured_mse_min_chords"),
+        (dict(structured_mse_min_chords=2.5), "structured_mse_min_chords"),
+        (dict(structured_mse_required="yes"), "structured_mse_required"),
+        (dict(mse_data=[1, 2, 3]), "must be None or a dict"),
+    ])
+    def test_bad_settings_are_refused_at_config_time(self, kw, match):
+        with pytest.raises(ValueError, match=match):
+            GenerationConfig(closure_channel="structured",
+                             jBS_baseline_mode="ohmic", **kw)
+
+    def test_unknown_block_keys_are_refused(self):
+        R, Z = _chord_geometry(5)
+        md = _mse_block([0.1] * 5, R, Z, gamma=[0.1] * 5)
+        with pytest.raises(ValueError, match="unknown key.*gamma"):
+            GenerationConfig(closure_channel="structured",
+                             jBS_baseline_mode="ohmic", mse_data=md)
+        with pytest.raises(MSEDataUnusable, match="unknown key.*gamma"):
+            mse_chords(md)
+
+    def test_corrective_jphi_with_mse_is_refused(self):
+        R, Z = _chord_geometry(5)
+        with pytest.raises(ValueError, match="imas_corrective_jphi"):
+            GenerationConfig(closure_channel="structured",
+                             jBS_baseline_mode="ohmic",
+                             imas_corrective_jphi=True,
+                             mse_data=_mse_block([0.1] * 5, R, Z))
+
+    def test_a_knob_broken_after_construction_is_refused_not_fallen_back(
+            self):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic")
+
+        def _break(g):
+            g.structured_mse_steps = 0
+        with pytest.raises(ValueError, match="structured_mse_steps"):
+            _run_stage(gc, tamper=_break)
+
+    def test_er_corrected_must_be_a_bool(self):
+        R, Z = _chord_geometry(5)
+        with pytest.raises(MSEDataUnusable, match="er_corrected"):
+            mse_chords(_mse_block([0.1] * 5, R, Z, er_corrected="False"))
+
+    def test_min_chords_below_one_is_a_config_error(self):
+        R, Z = _chord_geometry(5)
+        with pytest.raises(ValueError, match="min_chords") as ei:
+            mse_chords(_mse_block([0.1] * 5, R, Z), min_chords=0)
+        assert not isinstance(ei.value, MSEDataUnusable)
+
+
+class TestExclusionReasons:
+    def test_every_dropped_chord_has_a_reason(self):
+        R, Z = _chord_geometry(8)
+        tg = [0.1] * 8
+        tg[2] = float("nan")
+        Er = [2.0e4] * 8
+        Er[5] = float("nan")
+        md = _mse_block(tg, R, Z, weight=[1, 1, 1, 0, 1, 1, 1, 1],
+                        A5=[1e-6] * 8, Er=Er)
+        ch = mse_chords(md)
+        assert list(ch["index"]) == [0, 1, 4, 6, 7]
+        why = dict(ch["excluded"])
+        assert set(why) == {2, 3, 5}
+        assert why[2] == "tgamma is not finite"
+        assert why[3].startswith("weight <= 0")
+        assert why[5].startswith("E_r is not finite at this chord although "
+                                 "an E_r profile was supplied")
+
+    def test_nan_er_is_recorded_through_the_stage(self, capsys):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic")
+
+        def _er(g):
+            n = len(g.mse_data["R"])
+            Er = [0.0] * n
+            Er[4] = float("nan")
+            g.mse_data.update(A5=[1e-6] * n, Er=Er)
+        bl, state, n_stage, cyl, ch = _run_stage(gc, tamper=_er)
+        assert "non-finite E_r" in capsys.readouterr().out
+        rec = bl.ip_closure
+        assert rec["structured_mse_n_excluded"] == 1
+        assert list(bl.mse_record["excluded_index"]) == [4]
+        assert bl.mse_record["excluded_reason"][0].startswith(
+            "E_r is not finite")
+
+
+class TestNoFreedom:
+    #: every coefficient pinned but one: the Ip row uses it up
+    _W = {"ind": [np.inf] * 4, "bs": [np.inf, np.inf, np.inf, 1.0]}
+
+    def test_solvers_report_the_free_dimension(self):
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        mlin, _ch = _random_lin()
+        h = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+                                mse_lin=mlin)
+        assert h["mse_free_dim"] == 8 - 1
+        h0 = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+                                 weights=dict(self._W), mse_lin=mlin)
+        assert h0["mse_free_dim"] == 0
+        s = close_ip_structured_soft(psi, w, c, Ip_s, None, j_ind, j_bs,
+                                     j_fix, sigma_ind=[0.0] * 4,
+                                     sigma_bs=[0.0, 0.0, 0.0, 1.0],
+                                     mse_lin=mlin)
+        assert s["mse_free_dim"] == 0
+
+    def test_stage_records_not_applied_and_spends_nothing(self):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic",
+                              structured_preset="none",
+                              structured_weights=dict(self._W))
+        bl, state, n_stage, cyl, ch = _run_stage(gc)
+        rec = bl.ip_closure
+        assert rec["structured_mse_status"].startswith("not applied")
+        assert "no free coefficient" in rec["structured_mse_status"]
+        assert n_stage == 0 and rec["structured_mse_n_solves"] == 0
+        assert not state.get("mse_applied") and state["mse_lin"] is None
+        assert rec["n_extra_solves"] == 0
+        assert "MSE stage not applied (0 solves)" in rec["sawtooth_verdict"]
+        assert "structured_mse_chi2_after" not in rec
+
+    def test_required_refuses(self):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic",
+                              structured_preset="none",
+                              structured_weights=dict(self._W),
+                              structured_mse_required=True)
+        with pytest.raises(RuntimeError, match="no free coefficient"):
+            _run_stage(gc)
+
+
+class TestSolverFailures:
+    @staticmethod
+    def _fail_on(n_fail, exc):
+        def wrap(solve):
+            calls = {"n": 0}
+
+            def _s(j):
+                calls["n"] += 1
+                if calls["n"] == n_fail:
+                    raise exc
+                return solve(j)
+            return _s
+        return wrap
+
+    def test_bare_solver_exception_takes_the_refusal_path(self):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic")
+        bl, state, n_stage, cyl, ch = _run_stage(
+            gc, solve_wrap=self._fail_on(3, Exception("GS solve did not "
+                                                      "converge")))
+        rec = bl.ip_closure
+        assert rec["structured_mse_status"].startswith("refused")
+        assert "GS solve failed" in rec["structured_mse_status"]
+        assert rec["closure_limited"]
+        assert not state.get("mse_applied")
+
+    def test_bare_solver_exception_required_raises(self):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic",
+                              structured_mse_required=True)
+        with pytest.raises(RuntimeError, match="refusing to fall back"):
+            _run_stage(gc, solve_wrap=self._fail_on(
+                3, Exception("GS solve did not converge")))
+
+    def test_an_unrelated_error_is_not_swallowed(self):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic")
+        with pytest.raises(TypeError, match="a bug"):
+            _run_stage(gc, solve_wrap=self._fail_on(3, TypeError("a bug")))

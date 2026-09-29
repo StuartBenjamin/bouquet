@@ -1036,6 +1036,79 @@ class GenerationConfig:
         DEFAULT preset only when the channel is already ``"structured"``.
         """
         resolve_structured_preset(self, stacklevel=4)
+        validate_structured_mse_settings(self)
+
+
+def validate_structured_mse_settings(gc) -> None:
+    """Refuse invalid MSE settings at CONFIG time, before any GS solve.
+
+    Called from :meth:`GenerationConfig.__post_init__` and again at the
+    structured closure's entry (so a field changed after construction is
+    caught too).  Raises a plain ``ValueError`` -- deliberately NOT
+    :class:`bouquet.mse.MSEDataUnusable`, which the non-required path turns
+    into a per-slice "not applied" -- because a bad setting is the caller's
+    configuration error, not a property of one slice's data:
+
+    * ``structured_mse_steps`` an integer >= 1;
+    * ``structured_mse_fd_step`` a finite number > 0;
+    * ``structured_mse_sigma_sys`` a finite number >= 0;
+    * ``structured_mse_min_chords`` an integer >= 1;
+    * ``structured_mse_required`` a bool;
+    * ``mse_data`` ``None`` or a dict with no key outside the schema of
+      :mod:`bouquet.mse` (the values are judged per slice, where a block that
+      is unusable is refused or recorded as not applied);
+    * ``mse_data`` together with ``imas_corrective_jphi=True``: the MSE
+      Jacobian's finite-difference probes are plain solves, while the
+      predictor it is differenced against is solve + corrective iteration,
+      so every column would carry that difference divided by the step.
+    """
+    import math
+    import numbers
+
+    def _int_ge1(name):
+        v = getattr(gc, name, None)
+        if isinstance(v, bool) or not isinstance(v, numbers.Integral) \
+                or int(v) < 1:
+            raise ValueError(f"generation.{name} must be an integer >= 1, "
+                             f"got {v!r}")
+
+    def _real(name, lo, strict):
+        v = getattr(gc, name, None)
+        ok = (not isinstance(v, bool) and isinstance(v, numbers.Real)
+              and math.isfinite(float(v))
+              and (float(v) > lo if strict else float(v) >= lo))
+        if not ok:
+            raise ValueError(f"generation.{name} must be a finite number "
+                             f"{'>' if strict else '>='} {lo:g}, got {v!r}")
+
+    _int_ge1("structured_mse_steps")
+    _int_ge1("structured_mse_min_chords")
+    _real("structured_mse_fd_step", 0.0, strict=True)
+    _real("structured_mse_sigma_sys", 0.0, strict=False)
+    req = getattr(gc, "structured_mse_required", False)
+    if not isinstance(req, bool):
+        raise ValueError("generation.structured_mse_required must be a bool, "
+                         f"got {req!r}")
+    md = getattr(gc, "mse_data", None)
+    if md is None:
+        return
+    if not isinstance(md, dict):
+        raise ValueError("generation.mse_data must be None or a dict in the "
+                         f"schema of bouquet.mse, got {type(md).__name__}")
+    from .mse import (MSE_OPTIONAL_KEYS, MSE_ORIENTATION_KEYS,
+                      MSE_REQUIRED_KEYS, mse_block_unknown_keys)
+    unknown = mse_block_unknown_keys(md)
+    if unknown:
+        raise ValueError(
+            "generation.mse_data carries unknown key(s) " + ", ".join(unknown)
+            + " -- refused rather than ignored (known: "
+            + ", ".join(MSE_REQUIRED_KEYS + MSE_ORIENTATION_KEYS
+                        + MSE_OPTIONAL_KEYS) + ")")
+    if bool(getattr(gc, "imas_corrective_jphi", False)):
+        raise ValueError(
+            "generation.mse_data with imas_corrective_jphi=True is refused: "
+            "the MSE Jacobian differences plain solves against a predictor "
+            "solved WITH the corrective iteration, which biases every column")
 
 
 def resolve_structured_preset(gc, warn: bool = True, stacklevel: int = 3):

@@ -1489,6 +1489,10 @@ class Bouquet:
         required = bool(getattr(gc, "structured_mse_required", False))
         if md is None and not required:
             return None, None
+        # configuration errors (a bad knob, an unknown key) are REFUSED here
+        # as plain ValueErrors -- never turned into a per-slice "not applied"
+        from .config import validate_structured_mse_settings
+        validate_structured_mse_settings(gc)
         try:
             ch = mse_chords(
                 md, min_chords=int(getattr(gc, "structured_mse_min_chords",
@@ -1508,6 +1512,13 @@ class Bouquet:
             print("[imas SWB-split:ohmic structured] WARNING " + msg,
                   flush=True)
             return None, f"unusable, not applied: {e}"
+        _er_nan = [i for i, r in ch["excluded"] if r.startswith("E_r is not")]
+        if _er_nan:
+            print("[imas SWB-split:ohmic structured] WARNING MSE: "
+                  f"{len(_er_nan)} chord(s) at input index {_er_nan} have a "
+                  "non-finite E_r inside the supplied E_r profile and are "
+                  "EXCLUDED (recorded with that reason), not fitted without "
+                  "their E_r term", flush=True)
         return ch, "usable"
 
     @staticmethod
@@ -1716,9 +1727,38 @@ class Bouquet:
             return ((1.0 + x[:K] @ Phi) * j_ind + (1.0 + x[K:] @ Phi) * j_bs
                     + j_fix)
 
+        class _SolverFailure(RuntimeError):
+            """A GS solve or field read failed inside the MSE stage."""
+
+        def _is_solver_failure(e):
+            # TokaMaker raises BARE ``Exception`` for solver/field failures;
+            # bouquet's own solve wrappers raise RuntimeError / ValueError.
+            # Anything else (TypeError, KeyError, AttributeError, ...) is a
+            # bug, and is re-raised untouched rather than turned into a
+            # "refused" slice.
+            return type(e) is Exception or isinstance(
+                e, (RuntimeError, ValueError, FloatingPointError))
+
         def _solve(j):
             last["n"] += 1
-            last["nl"] = solve_jphi(np.asarray(j, dtype=float))
+            try:
+                last["nl"] = solve_jphi(np.asarray(j, dtype=float))
+            except Exception as e:
+                if _is_solver_failure(e):
+                    raise _SolverFailure(
+                        f"GS solve failed ({type(e).__name__}: {e})") from e
+                raise
+
+        _field_raw = field_at
+
+        def field_at(R, Z):
+            try:
+                return _field_raw(R, Z)
+            except Exception as e:
+                if _is_solver_failure(e):
+                    raise _SolverFailure(
+                        f"field read failed ({type(e).__name__}: {e})") from e
+                raise
 
         def _resolve(lin):
             if soft:
@@ -1824,6 +1864,38 @@ class Bouquet:
                 print("[imas SWB-split:ohmic structured] WARNING closure-"
                       "limited: " + stage_flags[-1], flush=True)
             tg_pred = mse_tan_gamma(B0, ch, sp, st)
+
+            # Can the MSE term move the closure at all?  A zero-Jacobian
+            # dry run of the SAME closure (no GS solve) reports the dimension
+            # of the free-coefficient space left once the hard rows are
+            # imposed; zero means the constraints use every free coefficient
+            # and chi2_MSE could only be recorded, never fitted.
+            _dry = _resolve(structured_mse_linear_model(
+                state["x_pred"], tg_pred,
+                np.zeros((int(ch["n_active"]), 2 * K)), ch))
+            if int(_dry.get("mse_free_dim", 1)) == 0:
+                _msg = ("no free coefficient is left once the hard "
+                        "constraints are imposed (null space of dimension 0) "
+                        "-- the MSE term cannot move this closure")
+                if required:
+                    raise RuntimeError(
+                        "closure_channel='structured': " + _msg + ", and "
+                        "structured_mse_required=True -- refusing to report "
+                        "a closure the MSE constraint did not shape")
+                state["mse_n_solves"] = 0
+                state["mse_stage_word"] = "MSE stage not applied"
+                rec.update(structured_mse_status="not applied: " + _msg,
+                           structured_mse_n_solves=0)
+                if stage_flags:
+                    _r = list(prev.get("closure_limited_reasons", ()) or ())
+                    _r += [w for w in stage_flags if w not in _r]
+                    rec.update(closure_limited=True,
+                               closure_limited_reasons=tuple(_r))
+                if getattr(bl, "ip_closure", None) is not None:
+                    bl.ip_closure.update(rec)
+                print("[imas SWB-split:ohmic structured] WARNING MSE: "
+                      + _msg + "; NOT applied (no solve spent)", flush=True)
+                return None
 
             def _tan_gamma_of(x):
                 _solve(_hybrid(x))
@@ -2735,8 +2807,9 @@ class Bouquet:
             # says where they went.  (No MSE block: nothing here runs.)
             _n_mse = int(state.get("mse_n_solves", 0) or 0)
             _n_cor = int(rec.get("n_extra_solves", 0) or 0)
-            _what = ("MSE stage" if state.get("mse_applied")
-                     else "MSE stage refused")
+            _what = state.get("mse_stage_word") or (
+                "MSE stage" if state.get("mse_applied")
+                else "MSE stage refused")
             rec["structured_corrector_n_solves"] = _n_cor
             rec["n_extra_solves"] = _n_cor + _n_mse
             _v = str(rec.get("sawtooth_verdict", ""))
