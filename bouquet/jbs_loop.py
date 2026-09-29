@@ -173,6 +173,10 @@ def validate_jbs_settings(gc) -> None:
     for name, default in (("jbs_rtol_j", 1e-3), ("jbs_rtol_Ip", 1e-4),
                           ("jbs_tol_li", 1e-3), ("jbs_tol_q0", 2e-3)):
         v = _get(name, default)
+        if isinstance(v, (bool, np.bool_)):
+            # float(True) == 1.0 would pass as a (useless) tolerance
+            raise ValueError(f"generation.{name} must be a positive number, "
+                             f"not a bool (got {v!r})")
         try:
             fv = float(v)
         except (TypeError, ValueError):
@@ -185,7 +189,8 @@ def validate_jbs_settings(gc) -> None:
                           ("jbs_max_passes_post_homotopy",
                            JBS_POST_HOMOTOPY_PASSES)):
         v = _get(name, default)
-        if isinstance(v, bool) or not isinstance(v, (int, np.integer)):
+        if isinstance(v, (bool, np.bool_)) \
+                or not isinstance(v, (int, np.integer)):
             raise ValueError(f"generation.{name} must be an integer, got "
                              f"{v!r}")
         if int(v) < JBS_REQUIRED_CONSECUTIVE:
@@ -193,6 +198,9 @@ def validate_jbs_settings(gc) -> None:
                 f"generation.{name}={int(v)} cannot converge: convergence "
                 f"needs {JBS_REQUIRED_CONSECUTIVE} consecutive passing passes")
     w = _get("jbs_relax", 0.7)
+    if isinstance(w, (bool, np.bool_)):
+        raise ValueError(f"generation.jbs_relax must be a number in "
+                         f"[{JBS_RELAX_FLOOR}, 1], not a bool (got {w!r})")
     try:
         fw = float(w)
     except (TypeError, ValueError):
@@ -208,16 +216,48 @@ def validate_jbs_settings(gc) -> None:
     except (TypeError, ValueError):
         raise ValueError(f"generation.jbs_relax_current must be a number in "
                          f"(0, 1], got {b!r}") from None
-    if isinstance(b, bool) or not (np.isfinite(fb) and 0.0 < fb <= 1.0):
+    if isinstance(b, (bool, np.bool_)) or not (np.isfinite(fb)
+                                                and 0.0 < fb <= 1.0):
         raise ValueError(f"generation.jbs_relax_current must lie in (0, 1] "
                          f"(1 = no relaxation of the solved current), got "
                          f"{b!r}")
     h = _get("jbs_relax_halve_on", 3)
-    if isinstance(h, bool) or not isinstance(h, (int, np.integer)) \
-            or int(h) < 1:
+    if isinstance(h, (bool, np.bool_)) \
+            or not isinstance(h, (int, np.integer)) or int(h) < 1:
         raise ValueError(f"generation.jbs_relax_halve_on must be an integer "
                          f">= 1 (consecutive growing passes that halve "
                          f"omega; 1 = halve on every growth), got {h!r}")
+
+
+#: ``GenerationConfig.swb_iterations`` default: the legacy
+#: ``solve_with_bootstrap`` Picard pass count.
+SWB_ITERATIONS_DEFAULT = 3
+
+
+def deprecated_jbs_settings_warning(gc, stacklevel: int = 2) -> Optional[str]:
+    """Warn (``DeprecationWarning``) about settings the loop IGNORES.
+
+    ``swb_iterations`` is the legacy frozen path's Picard pass count.  With
+    ``jbs_self_consistent=True`` it is not used (the loop has its own
+    convergence test); a value other than the default is therefore a setting
+    the user expects to act and that silently would not.  Returns the message
+    (``None`` when nothing is ignored).
+    """
+    import warnings
+    if not bool(getattr(gc, "jbs_self_consistent", False)):
+        return None
+    v = getattr(gc, "swb_iterations", SWB_ITERATIONS_DEFAULT)
+    if v == SWB_ITERATIONS_DEFAULT and not isinstance(v, bool):
+        return None
+    msg = (f"generation.swb_iterations={v!r} is IGNORED under the "
+           "self-consistent bootstrap loop (jbs_self_consistent=True): the "
+           "loop iterates to its own convergence test (jbs_rtol_j, "
+           "jbs_rtol_Ip, jbs_tol_li, jbs_tol_q0) within jbs_max_passes / "
+           "jbs_max_passes_draw.  swb_iterations is deprecated and honoured "
+           "only with jbs_self_consistent=False (the legacy frozen-bootstrap "
+           "path).")
+    warnings.warn(msg, DeprecationWarning, stacklevel=stacklevel + 1)
+    return msg
 
 
 def jbs_settings(gc, *, draw: bool = False) -> dict:
