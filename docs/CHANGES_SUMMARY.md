@@ -10,7 +10,7 @@ the forward model is linearised by forward differences on solved equilibria
 (`utils.structured_mse_jacobian`, one GS solve per free coefficient) and the
 closure re-solved (`utils.structured_mse_outer`); the q0/l_i corrector keeps
 the term in every re-solve it takes. Recorded per slice: chords used, E_r
-treatment, field orientation, chi² before/after/delivered, per-chord residuals,
+treatment, the field orientation (stated by the block's `ip_sign`/`bt_sign` and mapped onto the equilibrium's own directions — never chosen by fit; a better-fitting alternative is flagged), chi² before/after/delivered, per-chord residuals,
 the linearisation residual and the achieved objective, which the linear step
 cannot raise — if it does, the slice is flagged closure-limited.
 `structured_mse_required=True` refuses instead of running without the

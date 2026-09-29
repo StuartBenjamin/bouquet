@@ -36,8 +36,10 @@ import pytest
 from scipy.integrate import cumulative_trapezoid, trapezoid
 
 from bouquet.config import GenerationConfig
-from bouquet.mse import (MSEDataUnusable, mse_chi2, mse_chords, mse_field_at,
-                         mse_sign_convention, mse_tan_gamma)
+from bouquet.mse import (MSE_ORIENTATION_DCHI2, MSEDataUnusable, mse_chi2,
+                         mse_chords, mse_equilibrium_orientation,
+                         mse_field_at, mse_orientation, mse_orientation_check,
+                         mse_tan_gamma)
 from bouquet.utils import (MSE_FLAG_PREFIX, Ip_fsa_weights,
                            close_ip_structured, close_ip_structured_soft,
                            structured_basis_eval, structured_mse_jacobian,
@@ -135,7 +137,10 @@ class _Eval:
 
 
 class _FakeGS:
-    """``get_field_eval`` only: what ``mse_field_at`` reads."""
+    """``get_field_eval`` + ``o_point``: what the MSE stage reads."""
+
+    #: the cylinder's magnetic axis
+    o_point = np.array([R0, 0.0])
 
     def __init__(self, cyl, with_cell=True):
         self.cyl = cyl
@@ -159,12 +164,20 @@ def _hybrid(x, Phi, j_ind, j_bs, j_fix):
     return (1.0 + x[:K] @ Phi) * j_ind + (1.0 + x[K:] @ Phi) * j_bs + j_fix
 
 
+#: The analytic cylinder puts +B_theta along +Z at the outboard midplane,
+#: which in a right-handed (R, phi, Z) frame is a plasma current along -phi;
+#: its B_phi = B0 R0 / R is along +phi.  A block measured on THAT field (the
+#: synthetic data below) therefore states ip_sign=-1, bt_sign=+1.
+_CYL_IP, _CYL_BT = -1.0, 1.0
+
+
 def _mse_block(tg, R, Z, sigma=3.0e-3, weight=None, **kw):
     n = len(tg)
     md = dict(R=list(R), Z=list(Z), tgamma=list(tg),
               sigma=[sigma] * n,
               weight=([1.0] * n if weight is None else list(weight)),
-              A1=[1.0] * n, A2=[1.0] * n, A3=[0.1] * n, A4=[0.05] * n)
+              A1=[1.0] * n, A2=[1.0] * n, A3=[0.1] * n, A4=[0.05] * n,
+              ip_sign=_CYL_IP, bt_sign=_CYL_BT)
     md.update(kw)
     return md
 
@@ -216,6 +229,13 @@ class TestDataBlock:
         (lambda md: md.update(weight=[0.0] * 6), "only 0 of 6"),
         (lambda md: md.update(Er=[1e4] * 6, A5=[1e-6] * 6,
                               er_corrected=True), "count E_r twice"),
+        (lambda md: md.pop("ip_sign"), "lacks ip_sign"),
+        (lambda md: md.pop("bt_sign"), "lacks bt_sign"),
+        (lambda md: md.update(ip_sign=0), "'ip_sign' must be \\+1 or -1"),
+        (lambda md: md.update(bt_sign=2.0), "'bt_sign' must be \\+1 or -1"),
+        (lambda md: md.update(ip_sign=float("nan")), "must be \\+1 or -1"),
+        (lambda md: md.update(ip_sign="1"), "must be \\+1 or -1"),
+        (lambda md: md.update(bt_sign=True), "must be \\+1 or -1"),
     ])
     def test_refusals(self, mut, match):
         R, Z = _chord_geometry(6)
@@ -249,16 +269,99 @@ class TestForwardModel:
         np.testing.assert_allclose(mse_tan_gamma(B, ch, -1.0, -1.0), exp2,
                                    rtol=1e-14)
 
-    def test_orientation_is_recovered(self):
+    def test_equilibrium_orientation_is_read_off_the_field(self):
         _parts_, cyl, Phi, ch = _synthetic_world()
         B = cyl.field(ch["R"], ch["Z"])
-        # data in the opposite toroidal-field convention
+        o = mse_equilibrium_orientation(B, ch["R"], ch["Z"], (R0, 0.0))
+        assert (o["ip"], o["bt"]) == (_CYL_IP, _CYL_BT)
+        assert o["n_ip_agree"] == o["n_ip_used"] == ch["n_active"]
+        # the same current along +phi: B_Z < 0 outboard, and the circulation
+        # about an axis ABOVE/BELOW the chord uses B_R too
+        Bm = B * np.array([1.0, 1.0, -1.0])
+        assert mse_equilibrium_orientation(Bm, ch["R"], ch["Z"],
+                                           (R0, 0.0))["ip"] == 1.0
+        Rv, Zv = np.array([R0, R0]), np.array([0.3, -0.3])
+        # a current along +phi = y-hat (R = x-hat, Z = z-hat, right-handed):
+        # at +Z from it Biot-Savart gives y x z = +x, i.e. B_R > 0 above the
+        # axis and B_R < 0 below it
+        Bv = np.array([[0.2, 2.0, 0.0], [-0.2, 2.0, 0.0]])
+        assert mse_equilibrium_orientation(Bv, Rv, Zv, (R0, 0.0))["ip"] == 1.0
+        Bmix = B.copy()
+        Bmix[1, 1] *= -1.0
+        with pytest.raises(RuntimeError, match="one sign"):
+            mse_equilibrium_orientation(Bmix, ch["R"], ch["Z"], (R0, 0.0))
+        with pytest.raises(RuntimeError, match="axis"):
+            mse_equilibrium_orientation(B, ch["R"], ch["Z"], (-1.0, 0.0))
+
+    def test_orientation_is_stated_not_fitted(self):
+        """The data measured in the OPPOSITE toroidal-field direction: the
+        stated bt_sign alone decides; nothing is chosen by chi^2, so there is
+        no loop order to depend on."""
+        _parts_, cyl, Phi, ch = _synthetic_world()
+        B = cyl.field(ch["R"], ch["Z"])
+        o = mse_equilibrium_orientation(B, ch["R"], ch["Z"], (R0, 0.0))
         md = _mse_block(list(mse_tan_gamma(B, ch, 1.0, -1.0)), ch["R"],
-                        ch["Z"])
+                        ch["Z"], bt_sign=-_CYL_BT)
         chf = mse_chords(md)
-        sp, st, table = mse_sign_convention(B, chf)
+        sp, st = mse_orientation(chf, o)
         assert (sp, st) == (1.0, -1.0)
-        assert table["(+1,-1)"] < 1e-20 < table["(+1,+1)"]
+        chk = mse_orientation_check(B, chf, sp, st)
+        assert chk["chi2_stated"] < 1e-20 and not chk["disagrees"]
+        # its exact twin (-1,+1) fits identically: the data cannot tell them
+        # apart, which is WHY the orientation must be stated
+        assert chk["twin"] == "(-1,+1)" and chk["twin_delta_chi2"] == 0.0
+        assert "indistinguishable" in chk["note"]
+        # the SAME data with the wrong statement is reported, never switched
+        chw = mse_chords(dict(md, bt_sign=_CYL_BT))
+        spw, stw = mse_orientation(chw, o)
+        assert (spw, stw) == (1.0, 1.0)
+        bad = mse_orientation_check(B, chw, spw, stw)
+        assert bad["disagrees"] and bad["delta_chi2"] > 1e3
+        assert bad["best_other"] in ("(+1,-1)", "(-1,+1)")
+
+    @staticmethod
+    def _tg_by_hand(B, ip_rel, bt_rel, A1, A2, A3, A4, A5=0.0, Er=0.0):
+        """tan(gamma) of the DISCHARGE, written out term by term."""
+        BR, Bphi, BZ = ip_rel * B[:, 0], bt_rel * B[:, 1], ip_rel * B[:, 2]
+        return (A1 * BZ + A5 * Er) / (A2 * Bphi + A3 * BR + A4 * BZ)
+
+    @pytest.mark.parametrize("with_er", [False, True])
+    @pytest.mark.parametrize("ip_data, bt_data", [(1, 1), (1, -1), (-1, 1),
+                                                  (-1, -1)])
+    def test_reversed_ip_and_bt_with_and_without_er(self, ip_data, bt_data,
+                                                    with_er):
+        _parts_, cyl, Phi, ch = _synthetic_world()
+        R, Z = ch["R"], ch["Z"]
+        n = R.size
+        B = cyl.field(R, Z)
+        o = mse_equilibrium_orientation(B, R, Z, (R0, 0.0))
+        A5, Er = (2e-6, 2.5e4) if with_er else (0.0, 0.0)
+        tg = self._tg_by_hand(B, ip_data * o["ip"], bt_data * o["bt"],
+                              1.0, 1.0, 0.1, 0.05, A5, Er)
+        kw = dict(A5=[A5] * n, Er=[Er] * n) if with_er else {}
+        chd = mse_chords(_mse_block(list(tg), R, Z, ip_sign=ip_data,
+                                    bt_sign=bt_data, **kw))
+        assert chd["er_applied"] is with_er
+        sp, st = mse_orientation(chd, o)
+        assert (sp, st) == (ip_data * o["ip"], bt_data * o["bt"])
+        chk = mse_orientation_check(B, chd, sp, st)
+        assert chk["chi2_stated"] < 1e-18 and not chk["disagrees"]
+        # the twin: identical without E_r, separated ONLY by E_r with it
+        if with_er:
+            assert chk["twin_delta_chi2"] < -1e3
+        else:
+            assert chk["twin_delta_chi2"] == 0.0
+        # a caller who states BOTH signs wrongly: with E_r the data say so
+        # (loudly, via `disagrees`); without E_r it is undetectable by
+        # construction -- and in neither case is the orientation switched
+        chw = mse_chords(_mse_block(list(tg), R, Z, ip_sign=-ip_data,
+                                    bt_sign=-bt_data, **kw))
+        spw, stw = mse_orientation(chw, o)
+        assert (spw, stw) == (-sp, -st)
+        w = mse_orientation_check(B, chw, spw, stw)
+        assert w["disagrees"] is with_er
+        if with_er:
+            assert w["delta_chi2"] > MSE_ORIENTATION_DCHI2
 
     def test_field_read_through_the_equilibrium_interface(self):
         _parts_, cyl, Phi, ch = _synthetic_world()
@@ -688,7 +791,11 @@ class TestRunStage:
             rec["structured_mse_chi2_after"], rel=1e-12)
         assert len(rec["structured_mse_residual_sigma_after"]) == ch["n_active"]
         assert rec["structured_mse_er_applied"] is False
-        assert rec["structured_mse_sign_convention"] == dict(pol=1.0, tor=1.0)
+        o = rec["structured_mse_orientation"]
+        assert (o["pol"], o["tor"]) == (1.0, 1.0)
+        assert (o["ip_sign_equilibrium"], o["bt_sign_equilibrium"]) == (
+            _CYL_IP, _CYL_BT)
+        assert rec["structured_mse_orientation_disagrees"] is False
         # bl carries the delivered closure, and ip_closure describes it
         np.testing.assert_allclose(
             rec["structured_s_ind_profile"],
@@ -767,6 +874,19 @@ class TestRunStage:
                               structured_mse_required=True)
         with pytest.raises(RuntimeError, match="refusing to fall back"):
             _run_stage(gc, tamper=self._refusing)
+
+    def test_wrongly_stated_orientation_is_flagged_and_kept(self):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic")
+        bl, state, n_stage, cyl, ch = _run_stage(
+            gc, tamper=lambda g: g.mse_data.update(bt_sign=-_CYL_BT))
+        rec = bl.ip_closure
+        o = rec["structured_mse_orientation"]
+        assert (o["pol"], o["tor"]) == (1.0, -1.0)          # as STATED
+        assert rec["structured_mse_orientation_disagrees"] is True
+        assert rec["closure_limited"]
+        assert any("disagree with the stated field orientation" in r
+                   for r in rec["closure_limited_reasons"])
 
     def test_hard_channel_with_mse(self):
         gc = GenerationConfig(closure_channel="structured",

@@ -1502,9 +1502,17 @@ class Bouquet:
         ``mygs`` holds the predictor equilibrium) and before
         :meth:`_close_ip_structured_corrector`.
 
-        1. Read the field at the chords off the predictor equilibrium, fix the
-           field orientation once (:func:`bouquet.mse.mse_sign_convention`,
-           frozen for the rest of the slice) and form ``tan_gamma(x_pred)``.
+        1. Read the field at the chords off the predictor equilibrium, map it
+           onto the discharge's STATED orientation
+           (:func:`bouquet.mse.mse_orientation`: the block's
+           ``ip_sign``/``bt_sign`` against the equilibrium's own directions,
+           read off its field about ``mygs.o_point``; frozen for the rest of
+           the slice, never chosen by fit) and form ``tan_gamma(x_pred)``.
+           All four orientations are still evaluated
+           (:func:`bouquet.mse.mse_orientation_check`); when another fits the
+           chords better than the stated one by more than
+           ``bouquet.mse.MSE_ORIENTATION_DCHI2`` the slice is FLAGGED and the
+           stated orientation is kept.
         2. :func:`bouquet.utils.structured_mse_outer`: forward-difference
            Jacobian (one solve per free coefficient), then
            ``structured_mse_steps`` re-solve(s) of the SAME closure (same
@@ -1534,8 +1542,10 @@ class Bouquet:
         """
         import numpy as np
 
-        from .mse import (MSE_REASON_OFF_MESH, MSEDataUnusable, mse_er_terms,
-                          mse_exclude, mse_field_at, mse_sign_convention,
+        from .mse import (MSE_ORIENTATION_DCHI2, MSE_REASON_OFF_MESH,
+                          MSEDataUnusable, mse_equilibrium_orientation,
+                          mse_er_terms, mse_exclude, mse_field_at,
+                          mse_orientation, mse_orientation_check,
                           mse_tan_gamma)
         from .utils import (MSE_FLAG_PREFIX, close_ip_structured,
                             close_ip_structured_soft, closure_health,
@@ -1595,6 +1605,7 @@ class Bouquet:
                 sigma_ind_up=up_ladder, mse_lin=lin)
 
         rec = {}
+        stage_flags = []
         prev = getattr(bl, "ip_closure", None) or {}
         try:
             B0, found = field_at(ch["R"], ch["Z"])
@@ -1629,10 +1640,39 @@ class Bouquet:
                         "refusing to reuse a stale field value")
                 return np.asarray(B, dtype=float).reshape(-1, 3)
 
-            sp, st, table = mse_sign_convention(B0, ch)
+            _axis = getattr(mygs, "o_point", None)
+            eq_or = mse_equilibrium_orientation(B0, ch["R"], ch["Z"], _axis)
+            sp, st = mse_orientation(ch, eq_or)
+            chk = mse_orientation_check(B0, ch, sp, st)
+            rec.update(
+                structured_mse_orientation=dict(
+                    pol=sp, tor=st,
+                    ip_sign_data=float(ch["ip_sign"]),
+                    bt_sign_data=float(ch["bt_sign"]),
+                    ip_sign_equilibrium=float(eq_or["ip"]),
+                    bt_sign_equilibrium=float(eq_or["bt"]),
+                    n_chords_agreeing_ip=int(eq_or["n_ip_agree"]),
+                    rule=("STATED, not fitted: sign_pol = ip_sign(data) * "
+                          "ip_sign(equilibrium), sign_tor = bt_sign(data) * "
+                          "bt_sign(equilibrium); the equilibrium's signs are "
+                          "read off its field (B_phi; poloidal circulation "
+                          "about the magnetic axis)")),
+                structured_mse_orientation_chi2_table=dict(chk["table"]),
+                structured_mse_orientation_delta_chi2=float(
+                    chk["delta_chi2"]),
+                structured_mse_orientation_disagrees=bool(chk["disagrees"]),
+                structured_mse_orientation_note=chk["note"])
+            if chk["disagrees"]:
+                stage_flags.append(
+                    MSE_FLAG_PREFIX + "the data disagree with the stated field "
+                    f"orientation (sign_pol {sp:+.0f}, sign_tor {st:+.0f}): "
+                    f"orientation {chk['best_other']} fits the chords better "
+                    f"by delta chi2 = {chk['delta_chi2']:.4g} (> "
+                    f"{MSE_ORIENTATION_DCHI2:g}); the stated orientation is "
+                    "KEPT -- check ip_sign/bt_sign and the sign of E_r")
+                print("[imas SWB-split:ohmic structured] WARNING closure-"
+                      "limited: " + stage_flags[-1], flush=True)
             tg_pred = mse_tan_gamma(B0, ch, sp, st)
-            rec.update(structured_mse_sign_convention=dict(pol=sp, tor=st),
-                       structured_mse_sign_table=dict(table))
 
             def _tan_gamma_of(x):
                 _solve(_hybrid(x))
@@ -1656,8 +1696,9 @@ class Bouquet:
             why = (MSE_FLAG_PREFIX + "stage refused, predictor kept "
                    f"({str(e)[:160]})")
             reasons = list(prev.get("closure_limited_reasons", ()) or ())
-            if why not in reasons:
-                reasons.append(why)
+            for _w in stage_flags + [why]:
+                if _w not in reasons:
+                    reasons.append(_w)
             rec.update(structured_mse_status="refused, not applied: "
                                              + str(e)[:300],
                        closure_limited=True,
@@ -1759,6 +1800,9 @@ class Bouquet:
                                 state["ip_bs"], state["ip_fix"],
                                 soft_ip_residual_sigma=z_ip)
         reasons = list(health["closure_limited_reasons"])
+        for why in stage_flags:
+            if why not in reasons:
+                reasons.append(why)
         for why in res["flags"]:
             if why not in reasons:
                 reasons.append(why)

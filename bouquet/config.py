@@ -821,7 +821,11 @@ class GenerationConfig:
     #: weight, folded into ``sigma_eff = sigma/sqrt(weight)``), ``A1``..``A4``,
     #: optionally ``A5`` + ``Er`` (the E_r term is then carried by the forward
     #: model) or ``er_corrected=True`` (``tgamma`` already E_r-corrected
-    #: upstream; the forward model then carries no E_r term).  ``None`` (the
+    #: upstream; the forward model then carries no E_r term), and the REQUIRED
+    #: scalars ``ip_sign`` / ``bt_sign`` (+1 or -1: the directions of Ip and
+    #: B_t in the A-coefficients' right-handed (R, phi, Z) frame -- the field
+    #: orientation is a stated convention, never fitted; see
+    #: ``bouquet.mse``).  ``None`` (the
     #: default) adds nothing and leaves the structured closure exactly as it
     #: was.  When given, ``chi2_MSE = sum_k ((tan_gamma_pred - tgamma) /
     #: sigma_eff)^2`` joins the structured objective; tan(gamma) is linearised
