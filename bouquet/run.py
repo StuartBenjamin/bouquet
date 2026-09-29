@@ -5188,6 +5188,14 @@ class Bouquet:
         pp["y"][-1] = 0.0
         ffp = {"type": "jphi-linterp",
                "y": np.asarray(bl.j_phi, dtype=float).copy(), "x": psi_N}
+        if (bool(getattr(gc, "jbs_self_consistent", False))
+                and getattr(bl, "jphi_diff", None) is not None):
+            # self-consistent loop: the anchor is the reconstruction's own
+            # solve -- its stored request INCLUDES the fixed total-current
+            # anchor jphi_diff (as generate()'s baseline solve and every draw
+            # carry it)
+            ffp["y"] = ffp["y"] + pchip_interp(
+                pk, np.asarray(bl.jphi_diff, dtype=float), psi_N)
         # ---- psi re-initialisation before the state-anchor solve ------------
         # The reconstruction leaves mygs on its own converged inverse-mode
         # state.  When that state already sits (to ~1e-4 in the nonlinear

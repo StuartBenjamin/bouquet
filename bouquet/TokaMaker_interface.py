@@ -3112,16 +3112,22 @@ def perturb_kinetic_equilibrium(
             except Exception as _wreg_exc:
                 print(f"  [jbs-loop hygiene] weak-reg install failed "
                       f"({_wreg_exc}); the loop runs under the strong reg")
-        # state anchor: the archived total at the draw's full pressure
+        # state anchor: the archived total at the draw's full pressure --
+        # WITH the fixed total-current anchor jphi_diff, which every solve of
+        # this draw carries (j_fixed_eff), so at zero perturbation the anchor
+        # IS the reconstruction's own solve (its stored request)
         _pre_pp = {"type": "linterp",
                    "y": pchip_derivative(psi_N, pres_tmp) /
                         (mygs.psi_bounds[1] - mygs.psi_bounds[0]),
                    "x": psi_N}
         _pre_pp["y"][-1] = 0.0
+        _anchor_total = input_j_phi.copy()
+        if jphi_diff is not None:
+            _anchor_total = _anchor_total + np.asarray(jphi_diff, dtype=float)
         mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
         mygs.set_profiles(pp_prof=_pre_pp,
                           ffp_prof={"type": "jphi-linterp",
-                                    "y": input_j_phi.copy(), "x": psi_N})
+                                    "y": _anchor_total, "x": psi_N})
         try:
             mygs.solve()
         except (ValueError, RuntimeError):
@@ -5954,8 +5960,15 @@ def generate_bouquet(
                                   (mygs.psi_bounds[1] - mygs.psi_bounds[0]),
                              "x": psi_N}
                 _cache_pp["y"][-1] = 0.0
+                _cache_y = input_j_phi.copy()
+                if (jbs_loop and jbs_loop.get("enabled")
+                        and not _diff_bs_env and jphi_diff is not None):
+                    # self-consistent loop: the sigma=0 reference is taken on
+                    # the reconstruction's own state, which carries the fixed
+                    # total-current anchor (so it telescopes to 0 at sigma=0)
+                    _cache_y = _cache_y + np.asarray(jphi_diff, dtype=float)
                 _cache_ffp = {"type": "jphi-linterp",
-                              "y": input_j_phi.copy(), "x": psi_N}
+                              "y": _cache_y, "x": psi_N}
                 mygs.set_targets(Ip=initial_Ip_target,
                                  pax=float(pressure_solve[0]))
                 mygs.set_profiles(pp_prof=_cache_pp, ffp_prof=_cache_ffp)
