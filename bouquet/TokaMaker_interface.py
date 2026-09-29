@@ -2838,8 +2838,13 @@ def perturb_kinetic_equilibrium(
         # solve_with_bootstrap on its own auxiliary equilibrium and freezes it
         # for the draw.  Here the draw's bootstrap is Redl on the draw's OWN
         # equilibrium, iterated to self-consistency with the draw's inductive
-        # current (bouquet.jbs_loop).  Same state-anchor hygiene (coil bounds
-        # cleared, weak exploratory coil reg) as the legacy branch.
+        # current (bouquet.jbs_loop).  Hygiene: the weak exploratory coil reg
+        # for the whole block, as the legacy branch; but the coil bounds are
+        # cleared ONLY for the state-anchor solve and restored right after it
+        # (the legacy branch keeps them cleared through its whole SWB
+        # exploration), so with hard bounds (coil_drift_hard_factor) every
+        # loop pass below is a BOUNDED solve -- which is why each pass is then
+        # checked by the coil-saturation guard (_hard_guard).
         from .jbs_loop import (run_jbs_loop, residual_weights,
                                JBSNotConverged)
         _stashed_bounds = getattr(mygs, '_coil_drift_bounds', None)

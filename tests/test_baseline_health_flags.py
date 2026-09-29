@@ -136,3 +136,22 @@ def test_the_rescale_fallback_is_unchanged_but_loud_and_recorded():
                 "rescale_delivered_on_fallback"):
         assert f'rec["{key}"]' in blk, key
     assert "_w.warn(_msg, RuntimeWarning" in blk
+
+
+# ---------------------------------------------------------------------------
+#  the q0 corrector under the loop is described as what it is: record-only
+# ---------------------------------------------------------------------------
+def test_the_q0_corrector_text_matches_the_record_only_code():
+    """Under the loop the q0 corrector takes no Newton step and nothing moves
+    the axis row (q0_ref is held); the docstring must say so, not claim the
+    row is moved, and a q0-pinning channel announces it at run time.  The
+    behaviour itself is untouched (open design decision)."""
+    from bouquet.run import Bouquet
+    doc = Bouquet._close_ip_q0_corrector.__doc__
+    assert "moved by the measured q0" not in doc
+    assert "axis row is NOT moved" in doc and "record" in doc
+    src = inspect.getsource(Bouquet._forward_solve_imas_baseline)
+    assert "if axis_active:" in src
+    assert "NOTICE: closure_channel=" in src and "RECORD-ONLY" in src
+    # the q0 reference is still computed once and handed to every pass
+    assert "_pass=dict(q0_ref=q0_ref" in src

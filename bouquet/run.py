@@ -2654,12 +2654,18 @@ class Bouquet:
         Returns the new ``nl_its`` when a corrector solve was taken, else
         ``None``.
 
-        ``record_only=True`` (the self-consistent bootstrap loop, which
-        subsumes the corrector STEPS: every pass re-solves the predictor on
-        refreshed geometry): take no step, but read back and record every
-        residual and run every acceptance flag exactly as above, on the
-        delivered equilibrium.  ``structured_li_tol`` / ``q0_tol`` are the
-        same bars.
+        ``record_only=True`` (the self-consistent bootstrap loop): take NO
+        corrector step; read back and record every residual and run every
+        acceptance flag exactly as above, on the delivered equilibrium.
+        ``structured_li_tol`` / ``q0_tol`` are the same bars.  The loop
+        re-solves the predictor on refreshed geometry every pass, but with
+        the SAME held targets -- the axis row stays at the anchor's requested
+        axis current and the l_i row at its target; nothing moves them -- so
+        a residual the corrector step would have reduced is, under the loop,
+        only measured and flagged, not corrected.  (Whether the loop should
+        restore a per-pass row update or a final corrector step is an open
+        design decision; a NOTICE is printed whenever such a channel runs
+        with the loop on.)
         """
         import numpy as np
 
@@ -3169,11 +3175,17 @@ class Bouquet:
         same relative floor (``1e-6 * Ip_t``) :func:`~bouquet.utils.close_ip`
         uses for the component it divides by.
 
-        ``record_only=True`` (the self-consistent bootstrap loop, which
-        subsumes the Newton step -- every pass re-solves the predictor on
-        refreshed geometry with the axis row moved by the measured q0): no
-        step is taken, the residual is read back on the delivered equilibrium
-        and flagged against the unchanged ``q0_tol``.
+        ``record_only=True`` (the self-consistent bootstrap loop): NO Newton
+        step is taken.  The loop re-solves the predictor on refreshed geometry
+        every pass, but the axis row is NOT moved: ``q0_target`` and the
+        axis-current row (``j_requested0``) are computed once on the original
+        anchor and held for every pass (no ``on_pass`` update), so at the
+        fixed point the loop enforces the requested axis current, not
+        ``q0 = q0_target``.  The q0 residual is read back on the delivered
+        equilibrium and flagged against the unchanged ``q0_tol`` -- record
+        only; the residual the Newton step exists to remove is not corrected.
+        (Open design decision; a NOTICE is printed whenever this channel runs
+        with the loop on.)
         """
         import numpy as np
 
@@ -3213,12 +3225,14 @@ class Bouquet:
                   flush=True)
         elif record_only:
             rec.update(n_extra_solves=0, q0_solved=q0_tok, q0_residual=res,
-                       sawtooth_verdict="j_BS loop delivered (Newton step "
-                                        "subsumed by the loop)")
+                       sawtooth_verdict="j_BS loop delivered (record-only: "
+                                        "no Newton step under the loop; "
+                                        "axis row held)")
             print(f"[imas SWB-split:ohmic q0] solved q0={q0_tok:.4f} vs "
                   f"q0_target={q0_target:.4f} (residual {res:+.4f}, tol "
-                  f"{state['q0_tol']:g}) -- the j_BS loop subsumes the "
-                  "corrector; recorded, not stepped", flush=True)
+                  f"{state['q0_tol']:g}) -- record-only under the j_BS loop "
+                  "(axis row held, no Newton step); recorded and flagged "
+                  "against q0_tol, not corrected", flush=True)
         elif abs(state["ip_bs"]) < 1e-6 * state["Ip_t"]:
             # The Newton step moves along the Ip-closed manifold
             # s_bs(s_ohm) = (sgn*Ip - c - s_ohm*lin(ohm) - lin(fix))/lin(bs),
@@ -3475,9 +3489,10 @@ class Bouquet:
             # profile on that landed geometry read +31% of Ip on an ohmic-ramp
             # slice (vs +0.8% on the anchor) and collapsed the closure. Every Ip
             # integral in the ohmic branch is taken on this snapshot.
-            # Self-consistent bootstrap loop settings (validated).  OFF
-            # (the default) runs the historical frozen-SWB block below
-            # unchanged; ON runs _imas_jbs_loop instead.
+            # Self-consistent bootstrap loop settings (validated).  ON (the
+            # default, GenerationConfig.jbs_self_consistent=True) runs
+            # _imas_jbs_loop; OFF runs the historical frozen-SWB block below
+            # unchanged.
             from .jbs_loop import jbs_settings as _jbs_settings
             _jbs = _jbs_settings(gc)
             _loop_on = bool(_jbs["enabled"])
@@ -4215,6 +4230,14 @@ class Bouquet:
                     float(getattr(gc, "q0_gate", 1.1)))
                 axis_active = bool(_gated and _chan in ("sawtooth_bootstrap",
                                                         "structured"))
+                if axis_active:
+                    print(f"[imas jbs-loop] NOTICE: closure_channel="
+                          f"'{_chan}' pins q0 via the axis row, and under the "
+                          "self-consistent j_BS loop its q0 corrector is "
+                          "RECORD-ONLY -- the axis row is held at the "
+                          "anchor's requested axis current, no Newton step "
+                          "is taken, and the q0 residual is only flagged "
+                          "against q0_tol (open design decision)", flush=True)
                 _li_target = getattr(gc, "structured_li_target", None)
                 _li_kind = (str(getattr(gc, "structured_li_kind", "li_1"))
                             if (_chan == "structured"
@@ -4309,10 +4332,13 @@ class Bouquet:
                            pass_closure_log=st["pass_log"],
                            J_final_minus_used_max=float(np.max(np.abs(
                                res["J_final"] - res["jbs_used"]))),
-                           correctors=("subsumed by the loop: every pass "
-                                       "re-solves the predictor on refreshed "
-                                       "geometry, no row rescaling; readback "
-                                       "+ acceptance flags (structured_li_tol,"
+                           correctors=("record-only under the loop: no "
+                                       "corrector step; every pass re-solves "
+                                       "the predictor on refreshed geometry "
+                                       "with the rows held (axis row at the "
+                                       "anchor's requested axis current, no "
+                                       "row rescaling); readback + "
+                                       "acceptance flags (structured_li_tol,"
                                        " q0_tol) on the delivered "
                                        "equilibrium"))
                 if _swb_info:
@@ -4410,7 +4436,8 @@ class Bouquet:
                                     f"j_BS loop: predictor re-solved on "
                                     f"refreshed geometry for "
                                     f"{rec.get('n_passes')} pass(es) "
-                                    "(corrector steps subsumed)"))
+                                    "(record-only: no corrector step, rows "
+                                    "held)"))
                     if _p0.get("q0") is not None and (
                             ss is not None and ss.get("gated")
                             or q0s is not None):
