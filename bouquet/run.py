@@ -52,6 +52,9 @@ class Bouquet:
         # generate(): one record per REJECTED draw attempt (reason code, stage,
         # error) -- never archived, never counted toward until-N
         self.draw_rejections: list = []
+        # prepare_baseline(): a half-built baseline from a FAILED build, for
+        # debugging only -- never used by generate()
+        self._failed_baseline = None
         self._selection = None                    # filter() result
 
     # ── constructors ----------------------------------------------------
@@ -661,29 +664,52 @@ class Bouquet:
             self.config.generation.recalculate_j_BS = False
         self._check_structured_mse_reachable(self.config)
 
-        self.baseline = resolve_baseline(self.config, self.mygs)
+        # A baseline is usable only once EVERY stage below has completed.  A
+        # failure part-way (a JBSNotConverged or GS failure on pass k of the
+        # IMAS loop, a closure refusal, a failed reconstruction) used to leave
+        # self.baseline half-built -- bl.j_* and ip_closure from pass k,
+        # l_i_target still the provisional value -- and generate() only
+        # checks for None.  So: no baseline while building, none after a
+        # failure (the half-built object is kept on _failed_baseline for
+        # debugging only), and a previous slice's baseline never survives a
+        # failed rebuild.
+        self.baseline = None
+        self._failed_baseline = None
+        bl_new = resolve_baseline(self.config, self.mygs)
+        self.baseline = bl_new
+        try:
+            # IMAS path: read_imas_baseline does no GS solve, so establish a
+            # converged baseline equilibrium on mygs here (the reconstruction
+            # path gets this for free from reconstruct_equilibrium). This also
+            # sets l_i_target to the TokaMaker-solved li_1 and records
+            # IDS-vs-TokaMaker li for sanity.
+            if (isinstance(self.config.source, ImasSource)
+                    and self.mygs is not None):
+                # re-point the solver to THIS slice's boundary first, so a
+                # multi-slice sweep treats each time as its own equilibrium
+                self._repoint_imas_geometry()
+                self._forward_solve_imas_baseline()
 
-        # IMAS path: read_imas_baseline does no GS solve, so establish a converged
-        # baseline equilibrium on mygs here (the reconstruction path gets this for
-        # free from reconstruct_equilibrium). This also sets l_i_target to the
-        # TokaMaker-solved li_1 and records IDS-vs-TokaMaker li for sanity.
-        if isinstance(self.config.source, ImasSource) and self.mygs is not None:
-            # re-point the solver to THIS slice's boundary first, so a
-            # multi-slice sweep treats each time as its own equilibrium
-            self._repoint_imas_geometry()
-            self._forward_solve_imas_baseline()
+            # single_profile_jphi: collapse the decomposition so the archive
+            # matches what the draws actually perturb (the total). Done AFTER
+            # the baseline solve so the equilibrium itself is unchanged --
+            # only the bookkeeping split is folded back into j_inductive.
+            if self.config.generation.single_profile_jphi:
+                self._collapse_jphi_split()
 
-        # single_profile_jphi: collapse the decomposition so the archive matches
-        # what the draws actually perturb (the total). Done AFTER the baseline
-        # solve so the equilibrium itself is unchanged -- only the bookkeeping
-        # split is folded back into j_inductive.
-        if self.config.generation.single_profile_jphi:
-            self._collapse_jphi_split()
-
-        # Reconstruction path, jbs_loop_on_fail="flag": a baseline whose loop
-        # did not converge is delivered, so it must carry the same health
-        # flag the IMAS path sets (closure_limited + the loop's reason).
-        self._flag_nonconverged_recon_loop()
+            # Reconstruction path, jbs_loop_on_fail="flag": a baseline whose
+            # loop did not converge is delivered, so it must carry the same
+            # health flag the IMAS path sets (closure_limited + the reason).
+            self._flag_nonconverged_recon_loop()
+        except BaseException as _bl_exc:
+            self._failed_baseline = bl_new
+            self.baseline = None
+            print(f"[baseline] FAILED ({type(_bl_exc).__name__}): no usable "
+                  "baseline -- generate() / verify_sigma0_consistency() will "
+                  "refuse until prepare_baseline() succeeds (the half-built "
+                  "object is on Bouquet._failed_baseline for debugging only)",
+                  flush=True)
+            raise
 
         # Reconstruction path: surface a glanceable quality summary (the verbose
         # solver chatter was captured to baseline.reconstruction_log).
