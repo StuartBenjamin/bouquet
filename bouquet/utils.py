@@ -4130,6 +4130,31 @@ def store_baseline_jbs_loop(header, record, scan_key=None):
             write_jbs_loop(hf[gp], record)
 
 
+#: ``_baseline`` attribute carrying the ONE reconstruction state record
+#: (self-consistent loop only; JSON).  See docs/archive-schema.md.
+DELIVERED_STATE_ATTR = "delivered_state_json"
+
+
+def store_baseline_state(header, record, scan_key=None):
+    """Write the reconstruction's delivered-state record (self-consistent
+    loop) onto the archive's ``_baseline`` group as the JSON attribute
+    :data:`DELIVERED_STATE_ATTR`: the recorded l_i / q0 / q95 of the one
+    reconstruction state, the request normalisation, and what the run's
+    baseline re-solve (the saved baseline g-file) carries beside them.
+    ``None`` writes nothing; no-op without a ``_baseline`` group.
+    """
+    if record is None:
+        return
+    import json
+    from .jbs_loop import jsonable
+    db_path = _resolve_h5(header)
+    with h5py.File(db_path, "a") as hf:
+        gp = _baseline_group_path(scan_key)
+        if gp in hf:
+            hf[gp].attrs[DELIVERED_STATE_ATTR] = json.dumps(
+                jsonable(record), allow_nan=True)
+
+
 def load_eq_fsa(header, count, scan_key=None):
     """Load one draw's live-equilibrium FSA block, or ``None`` if not captured.
 

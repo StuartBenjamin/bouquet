@@ -3559,6 +3559,10 @@ class Bouquet:
         # runs AFTER the common tail's forward solve; None everywhere else.
         _q0_state = None
         _structured_state = None
+        # self-consistent loop only: the request the delivered equilibrium was
+        # solved from (recorded by the loop's pass solve), for the ONE-state
+        # storage at the end of this method.  None on the legacy path.
+        _delivery = None
         if self.config.generation.recalculate_j_BS:
             from .TokaMaker_interface import (_swb_jbs_to_toroidal,
                                               smooth_jbs_transition)
@@ -3586,6 +3590,8 @@ class Bouquet:
             from .jbs_loop import jbs_settings as _jbs_settings
             _jbs = _jbs_settings(gc)
             _loop_on = bool(_jbs["enabled"])
+            _delivery = ({"mode": str(mode), "request": None} if _loop_on
+                         else None)
 
             def _closure_geometry(_src_label):
                 """FSA closure geometry of the equilibrium mygs holds NOW.
@@ -4086,18 +4092,24 @@ class Bouquet:
                     so the delivered equilibrium is always the last pass."""
                     j_phi = np.asarray(j_phi, dtype=float)
                     nl = solve_jphi(j_phi)
+                    _delivery["request"] = j_phi.copy()
                     if _corr_on:
                         from .TokaMaker_interface import \
                             _corrective_jphi_iteration
                         _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
                         _pp_y = pchip_derivative(psi_N, p_total) / _pr
                         _pp_y[-1] = 0.0
-                        _corrective_jphi_iteration(
+                        _cr = _corrective_jphi_iteration(
                             mygs, psi_N, j_phi,
                             {"type": "linterp", "y": _pp_y, "x": psi_N},
                             abs(bl.Ip_target), float(p_total[0]), 1e-3,
                             min_iters=2, max_iters=8, rtol=0.02,
-                            verbose=True, damping=0.5, protect_state=True)
+                            verbose=True, damping=0.5, protect_state=True,
+                            return_request=True)
+                        if _cr[3] is not None:
+                            # the corrective iteration's landed state: the
+                            # request one solve reproduces it from
+                            _delivery["request"] = np.asarray(_cr[3], float)
                     return nl
 
                 def _li3(eq):
@@ -4870,6 +4882,10 @@ class Bouquet:
         # band compares two different functionals (~25% apart).
         bl.l_i_target = tok_li3
         bl.l_i_scale = "iter(li3)"
+        if (_delivery is not None and _delivery.get("request") is not None
+                and _delivery["mode"] in ("diff", "rescale")):
+            self._deliver_imas_state(_delivery, ne, te, ni, ti, Zeff, psi_pad,
+                                     k2e)
         print(
             f"[imas forward-solve] converged ({nl_its} its, "
             f"Ip {ip_err_pct:+.2f}%) recalc_jBS="
@@ -4877,6 +4893,90 @@ class Bouquet:
             f"TokaMaker li_1={tok_li1:.4f} li_3={tok_li3:.4f} | "
             f"IDS li_1={metrics.get('ids_li_1')} li_3={metrics.get('ids_li_3')}"
         )
+
+    def _deliver_imas_state(self, delivery, ne, te, ni, ti, Zeff, psi_pad,
+                            k2e):
+        """The modelling-source path's ONE state, stored in the draws' form
+        (``jbs_self_consistent=True``; ``jBS_baseline_mode`` "diff" or
+        "rescale").
+
+        ``mygs`` holds the delivered equilibrium F (``l_i_target`` was just
+        read off it) and ``delivery["request"]`` is the jphi-linterp input
+        that produced it -- the source total (+ ``jphi_diff``) in diff mode,
+        the last pass's solved current in rescale mode.  jphi-linterp scales
+        that input uniformly to Ip, and the source total reads 3.5 % short of
+        Ip in the exact FSA measure on the synthetic example, so the stored
+        split was NOT what F carries: a draw's Ip bookkeeping charged that
+        shortfall to the inductive alone (route R2 scale 1.046-1.049 at zero
+        perturbation).  Here the request is normalised to ``Ip_target`` in
+        that same 'exact' measure on F (F is unchanged: the request's SHAPE
+        is), the bootstrap stays the draws' own sigma=0 composition on F (in
+        diff mode ``j_BS + jBS_diff`` IS the source bootstrap, exactly as
+        before), the fixed parts and ``jphi_diff`` stay as read, and the
+        inductive is the residual -- so it carries the whole normalisation.
+        ``jBS_baseline_mode="ohmic"`` (baseline-only; the draws refuse it) is
+        left as it was.
+        """
+        import numpy as np
+        from .TokaMaker_interface import (DELIVERED_SPLIT_CONVENTION,
+                                          _achieved_jphi_fsa,
+                                          _deliver_request_split,
+                                          _draw_jbs_composer,
+                                          _request_offset)
+        bl = self.baseline
+        mygs = self.mygs
+        gc = self.config.generation
+        psi_N = np.asarray(bl.psi_N, dtype=float)
+        jdiff = (None if getattr(bl, "jBS_diff", None) is None
+                 else np.asarray(bl.jBS_diff, dtype=float))
+        if delivery["mode"] == "diff" and jdiff is not None:
+            # Redl on F (+ the model offset): the source bootstrap, unchanged
+            j_bs0 = np.asarray(bl.j_BS, dtype=float) + jdiff
+        else:
+            comp = _draw_jbs_composer(
+                psi_N, ne, te, ni, ti, Zeff, psi_pad,
+                bool(gc.isolate_edge_jBS), float(getattr(bl, "bs_scale", 1.0)),
+                bool(gc.floor_j_BS), jdiff, None, None)
+            j_bs0 = np.asarray(comp(mygs.copy_eq())[0], dtype=float)
+            bl.j_BS = j_bs0 - (0.0 if jdiff is None else jdiff)
+        fixed = np.zeros_like(psi_N)
+        for _nm in ("j_NBI", "j_RF"):
+            if getattr(bl, _nm, None) is not None:
+                fixed = fixed + np.asarray(getattr(bl, _nm), dtype=float)
+        jd = (np.zeros_like(psi_N) if getattr(bl, "jphi_diff", None) is None
+              else np.asarray(k2e(bl.jphi_diff), dtype=float))
+        dv = _deliver_request_split(mygs, psi_N, psi_pad, bl.Ip_target,
+                                    delivery["request"], j_bs0, fixed + jd,
+                                    label="imas delivered state")
+        bl.j_inductive = np.asarray(dv["j_inductive"], dtype=float)
+        # bl.j_phi excludes jphi_diff (generate adds it): j_phi + jphi_diff
+        # is the normalised request
+        bl.j_phi = np.asarray(dv["request"], dtype=float) - jd
+        bl.jphi_request_offset, _n_fl_t = _request_offset(
+            bl.j_inductive, dv["achieved"], j_bs0, fixed + jd)
+        _st = mygs.get_stats(lcfs_pad=psi_pad, li_normalization="iter")
+        bl.delivered_state = dict(
+            convention=DELIVERED_SPLIT_CONVENTION, path="imas",
+            jBS_baseline_mode=str(delivery["mode"]),
+            l_i=float(bl.l_i_target), l_i_scale="iter(li3)",
+            q0=float(_st.get("q_0", float("nan"))),
+            q95=float(_st.get("q_95", float("nan"))),
+            Ip_target=float(bl.Ip_target),
+            request_normalisation=float(dv["kappa"]),
+            achieved_normalisation=float(dv["kappa_achieved"]),
+            n_negative_inductive=int(dv["n_negative_inductive"]),
+            n_floored_target_inductive=int(_n_fl_t),
+            j_phi_achieved=_achieved_jphi_fsa(
+                mygs, psi_N, psi_pad,
+                sign_ref=np.asarray(dv["request"], dtype=float)),
+            how=("the forward solve's delivered equilibrium (diff: the "
+                 "source total; rescale: the loop's last pass); one "
+                 "jphi-linterp solve of j_phi + jphi_diff reproduces it"))
+        print(f"[imas delivered state] stored split = the Ip-normalised "
+              f"request of the delivered equilibrium (x{dv['kappa']:.6f} in "
+              f"the exact measure; the inductive carries it); l_i(3)="
+              f"{bl.l_i_target:.6f} q0={bl.delivered_state['q0']:.4f} "
+              f"q95={bl.delivered_state['q95']:.4f}", flush=True)
 
     def plot_baseline(self):
         """Diagnostic figure for the resolved baseline -- the gate before
@@ -5917,6 +6017,9 @@ class Bouquet:
                 # -> the legacy frozen-SWB draws, bit for bit).
                 jbs_loop=(_jbs_draw if _jbs_draw["enabled"] else None),
                 rejection_log=_rejections,
+                # the ONE reconstruction state (loop only; None = legacy)
+                jphi_request_offset=getattr(bl, "jphi_request_offset", None),
+                delivered_state=getattr(bl, "delivered_state", None),
             )
         self.generation_log = _cap["text"] or None
         self.draw_rejections = list(_rejections)
