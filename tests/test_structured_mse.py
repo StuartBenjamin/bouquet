@@ -573,6 +573,10 @@ class TestSolversWithMSE:
                                        rtol=1e-9, atol=1e-13)
 
     def test_absent_block_changes_nothing(self):
+        # NB: both calls run the SAME (current) code path, so this pins the
+        # solver's mse_lin=None default and the absence of mse_* keys only.
+        # The opt-in guarantee against the code BEFORE the MSE term is
+        # tests/test_structured_mse_optin.py.
         psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
         for fn, extra in ((close_ip_structured, {}),
                           (close_ip_structured_soft, None)):
@@ -1524,3 +1528,121 @@ class TestErTerms:
         rec = bl.ip_closure
         assert rec["structured_mse_er_neglected"] is True
         assert "(A5/A1) E_R" in rec["structured_mse_er_terms"]
+
+
+# ---------------------------------------------------------------------------
+#  the forward model against a pitch angle computed from first principles
+# ---------------------------------------------------------------------------
+class TestForwardModelFromFirstPrinciples:
+    """Independent of the A-coefficient formula: the Stark field of a beam
+    ion is E = v x B (+ the plasma's own E); the sigma-line polarisation is
+    E projected onto the plane perpendicular to the sight line, and gamma is
+    its angle from the image-plane "vertical" u towards the "horizontal" h
+    (h = z x l normalised, u = l x h).  So tan(gamma) = E.h / E.u, computed
+    here with vectors on an analytic Solov'ev-like field with B_R != 0, and
+    compared with ``mse_tan_gamma`` evaluated on A-coefficients read off the
+    same geometry: E.h = B.(h x v) + E_R h_R and E.u = B.(u x v) + E_R u_R +
+    E_Z u_Z, i.e. A1 = (h x v)_Z (h and v are horizontal, so h x v is
+    vertical: the numerator has B_Z only), A2, A3, A4 = the phi, R, Z
+    components of u x v, A5 = h_R -- and the denominator's E_R and E_Z
+    coefficients are A7 = u_R and A6 = u_Z, the standard A1..A7 form.
+    """
+
+    # psi = c1 (R^2 - R0^2)^2 + c2 R^2 Z^2 ;  B_R = -(1/R) dpsi/dZ,
+    # B_Z = (1/R) dpsi/dR, B_phi = F0 / R   -- written out by hand
+    c1, c2, F0 = 0.05, 0.3, 3.4
+
+    def _B(self, R, Z):
+        BR = -2.0 * self.c2 * R * Z
+        BZ = 4.0 * self.c1 * (R ** 2 - R0 ** 2) + 2.0 * self.c2 * Z ** 2
+        return np.array([BR, self.F0 / R, BZ])
+
+    @staticmethod
+    def _geometry(beam_deg, view_deg, view_elev_deg):
+        """Beam velocity (horizontal) and sight line in the local (R, phi, Z)
+        frame at the chord (a right-handed Cartesian frame there)."""
+        a, b = np.radians(beam_deg), np.radians(view_deg)
+        e = np.radians(view_elev_deg)
+        v = np.array([np.sin(a), np.cos(a), 0.0])
+        l = np.array([np.cos(e) * np.sin(b), np.cos(e) * np.cos(b),
+                      np.sin(e)])
+        h = np.cross([0.0, 0.0, 1.0], l)
+        h /= np.linalg.norm(h)
+        u = np.cross(l, h)
+        return v, l, h, u
+
+    def _direct(self, B, v, h, u, ER=0.0, EZ=0.0):
+        E = np.cross(v, B) + np.array([ER, 0.0, EZ])
+        return float(E @ h) / float(E @ u)
+
+    @pytest.mark.parametrize("beam, view, elev", [
+        (30.0, 110.0, 0.0), (-20.0, 75.0, 12.0), (45.0, 150.0, -8.0)])
+    def test_matches_the_vector_computation(self, beam, view, elev):
+        pts = [(2.05, 0.1), (1.9, -0.25), (2.2, 0.4), (1.55, 0.05)]
+        v, l, h, u = self._geometry(beam, view, elev)
+        hv, uv = np.cross(h, v), np.cross(u, v)
+        assert abs(hv[0]) < 1e-15 and abs(hv[1]) < 1e-15   # B_Z only
+        n = len(pts)
+        R = np.array([p[0] for p in pts])
+        Z = np.array([p[1] for p in pts])
+        B = np.array([self._B(r, z) for r, z in pts])
+        assert np.all(np.abs(B[:, 0]) > 1e-3)               # A3 exercised
+        md = dict(R=list(R), Z=list(Z), tgamma=[0.0] * n,
+                  sigma=[1e-3] * n, weight=[1.0] * n,
+                  A1=[hv[2]] * n, A2=[uv[1]] * n, A3=[uv[0]] * n,
+                  A4=[uv[2]] * n, ip_sign=1, bt_sign=1)
+        tg = mse_tan_gamma(B, mse_chords(md))
+        direct = np.array([self._direct(Bk, v, h, u) for Bk in B])
+        np.testing.assert_allclose(tg, direct, rtol=1e-12)
+        # and gamma itself, from the angle of the projected Stark field
+        E = np.cross(v, B)
+        gam = np.arctan2(E @ h, E @ u)
+        np.testing.assert_allclose(np.tan(gam), tg, rtol=1e-12)
+
+    def test_er_term_for_a_midplane_view(self):
+        """A horizontal sight line has u = z: the denominator E_R term
+        (A7 = u_R) vanishes and A5 E_R is the WHOLE E_R dependence, which is
+        what the model carries."""
+        v, l, h, u = self._geometry(35.0, 120.0, 0.0)
+        assert abs(u[0]) < 1e-15
+        hv, uv = np.cross(h, v), np.cross(u, v)
+        pts = [(2.0, 0.2), (2.15, -0.1), (1.8, 0.3), (2.3, 0.05)]
+        ER = [2.5e4, -1.0e4, 4.0e4, 1.5e4]
+        n = len(pts)
+        B = np.array([self._B(r, z) for r, z in pts])
+        md = dict(R=[p[0] for p in pts], Z=[p[1] for p in pts],
+                  tgamma=[0.0] * n, sigma=[1e-3] * n, weight=[1.0] * n,
+                  A1=[hv[2]] * n, A2=[uv[1]] * n, A3=[uv[0]] * n,
+                  A4=[uv[2]] * n, A5=[h[0]] * n, Er=ER, ip_sign=1,
+                  bt_sign=1)
+        tg = mse_tan_gamma(B, mse_chords(md))
+        direct = np.array([self._direct(Bk, v, h, u, ER=e)
+                           for Bk, e in zip(B, ER)])
+        np.testing.assert_allclose(tg, direct, rtol=1e-12)
+
+    def test_an_inclined_view_needs_a7_and_is_refused(self):
+        """With an inclined sight line u has an R component: E_R also enters
+        the DENOMINATOR (A7 = u_R), which the model does not carry -- so the
+        block is refused rather than fitted with half its E_R dependence."""
+        v, l, h, u = self._geometry(35.0, 120.0, 15.0)
+        assert abs(u[0]) > 1e-3
+        hv, uv = np.cross(h, v), np.cross(u, v)
+        pts = [(2.0, 0.2), (2.15, -0.1), (1.8, 0.3), (2.3, 0.05)]
+        n = len(pts)
+        B = np.array([self._B(r, z) for r, z in pts])
+        md = dict(R=[p[0] for p in pts], Z=[p[1] for p in pts],
+                  tgamma=[0.0] * n, sigma=[1e-3] * n, weight=[1.0] * n,
+                  A1=[hv[2]] * n, A2=[uv[1]] * n, A3=[uv[0]] * n,
+                  A4=[uv[2]] * n, A5=[h[0]] * n, A7=[u[0]] * n,
+                  Er=[2.0e4] * n, ip_sign=1, bt_sign=1)
+        with pytest.raises(MSEDataUnusable, match="A7"):
+            mse_chords(md)
+        # the vector computation confirms the A7 E_R term is real
+        ch = mse_chords(dict(md, A7=[0.0] * n))
+        with_a7 = np.array([
+            (hv[2] * Bk[2] + h[0] * 2.0e4)
+            / (uv[1] * Bk[1] + uv[0] * Bk[0] + uv[2] * Bk[2] + u[0] * 2.0e4)
+            for Bk in B])
+        direct = np.array([self._direct(Bk, v, h, u, ER=2.0e4) for Bk in B])
+        np.testing.assert_allclose(with_a7, direct, rtol=1e-12)
+        assert np.max(np.abs(mse_tan_gamma(B, ch) - direct)) > 1e-6
