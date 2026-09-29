@@ -4558,7 +4558,8 @@ class Bouquet:
         fig.suptitle(ttl, fontsize=11); fig.tight_layout()
         return fig, ax
 
-    def verify_sigma0_consistency(self, tol_frac=0.02, swb_iterations=3):
+    def verify_sigma0_consistency(self, tol_frac=0.02, swb_iterations=3,
+                                  draw_route=True, draw_routes=None):
         """Regression guard: the draw pipeline must reproduce the baseline
         j_BS split when the kinetics are UNPERTURBED (sigma=0).
 
@@ -4594,6 +4595,30 @@ class Bouquet:
         renormalisation is a separate sigma=0 invariant with its own budget,
         tested in ``tests/test_seeded_reproducibility.py``.)
         ``tol_frac``/``swb_iterations`` are then unused (no SWB is called).
+
+        What that check solves is NOT the draw's route: its solve step holds
+        the baseline inductive with no Ip renormalisation, and on the geqdsk
+        path each solve is followed by the reconstruction's renormalisation +
+        corrective iteration (keep-best) and l_i is compared with the
+        reconstruction's ``li_realized_post_corrective``.  It therefore tests
+        "the loop reproduces the baseline when solved the baseline's way".
+        Its ``passed`` is unchanged.  **Beside it** (loop on, ``draw_route``
+        True), the record carries a second block, ``draw_route``: the ACTUAL
+        draw code path -- :func:`perturb_kinetic_equilibrium` with the
+        arguments ``generate()`` hands a draw, every sigma zero, from the
+        state this method was called on -- once per route in ``draw_routes``
+        (default: the route ``generate()`` uses, ``"ip_renorm"`` when
+        ``perturb_jind_in_anchor`` else ``"standard"``; pass both to run
+        both).  Per route it reports, against the baseline: ``r_j``/``r_I``
+        of the draw's loop bootstrap vs ``baseline.j_BS`` (+ ``jBS_diff``),
+        ``|dl_i|`` against ``l_i_target`` AND against the delivered baseline
+        equilibrium's l_i, the renormalisation scale(s), the passes used, and
+        ``passed_draw_route`` at the loop's own unchanged tolerances (loop
+        converged, ``r_j <= jbs_rtol_j``, ``r_I <= jbs_rtol_Ip``,
+        ``|dl_i vs l_i_target| <= jbs_tol_li`` -- the draws are banded on
+        ``l_i_target``).  ``passed_draw_route`` gates nothing (not part of
+        ``passed``); the generate()-level coil regularisation, hard bounds and
+        homotopy are not part of this replay.
 
         Costs one SWB call (~1 min). Call after ``reconstruct()`` /
         ``prepare_baseline()`` and before ``generate()``; leaves ``mygs``
@@ -4642,6 +4667,13 @@ class Bouquet:
         bl = self.baseline
         mygs = self.mygs
         gc = self.config.generation
+        # The state this check was handed (what generate() would start its
+        # draws from): the draw-route replay under the loop starts from it.
+        _entry_snap = (mygs.copy_eq()
+                       if (draw_route
+                           and bool(getattr(gc, "jbs_self_consistent", False))
+                           and hasattr(mygs, "copy_eq")
+                           and hasattr(mygs, "replace_eq")) else None)
         # psi_pad is a ReconstructionSource field; ImasSource has none, so
         # fall back to the pipeline default (matches the forward-solve sites).
         psi_pad = getattr(self.config.source, "psi_pad", 1e-3)
@@ -4722,7 +4754,8 @@ class Bouquet:
         if _jbs["enabled"]:
             return self._verify_sigma0_jbs_loop(
                 _jbs, pp, ffp, pressure, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
-                psi_N, psi_pad)
+                psi_N, psi_pad, entry_snap=_entry_snap,
+                draw_route=draw_route, draw_routes=draw_routes)
 
         seed = create_power_flux_fun(len(psi_N), 1.5, 1.5)["y"]
         res = solve_with_bootstrap(
@@ -4775,7 +4808,9 @@ class Bouquet:
         return out
 
     def _verify_sigma0_jbs_loop(self, settings, pp, ffp, pressure, ne_eq,
-                                te_eq, ni_eq, ti_eq, Zeff_eq, psi_N, psi_pad):
+                                te_eq, ni_eq, ti_eq, Zeff_eq, psi_N, psi_pad,
+                                entry_snap=None, draw_route=True,
+                                draw_routes=None):
         """``verify_sigma0_consistency`` under the self-consistent loop.
 
         ``mygs`` holds the state anchor (baseline j_phi at the baseline
@@ -4917,7 +4952,216 @@ class Bouquet:
               f"r_j={cmp_['r_j']:.3e} (tol {settings['rtol_j']:.0e}), "
               f"r_I={cmp_['r_I']:.3e} (tol {settings['rtol_Ip']:.0e}), "
               f"|dl_i|={dli:.2e} (tol {settings['tol_li']:.0e})")
+        if draw_route:
+            # the draw's own route at sigma=0, measured beside (never inside)
+            # the check above; mygs is handed back exactly as left above
+            _post = (mygs.copy_eq() if (hasattr(mygs, "copy_eq")
+                                        and hasattr(mygs, "replace_eq"))
+                     else None)
+            try:
+                out["draw_route"] = self._sigma0_draw_route(
+                    settings, entry_snap, pressure, ne_eq, te_eq, ni_eq,
+                    ti_eq, Zeff_eq, psi_N, psi_pad, ref, li_ref, li_ref_name,
+                    routes=draw_routes)
+            finally:
+                if _post is not None:
+                    mygs.replace_eq(source_eq=_post)
         return out
+
+    def _sigma0_draw_route(self, settings, entry_snap, pressure, ne_eq,
+                           te_eq, ni_eq, ti_eq, Zeff_eq, psi_N, psi_pad, ref,
+                           li_delivered, li_delivered_name, routes=None):
+        """The ``draw_route`` block of :meth:`verify_sigma0_consistency`.
+
+        Runs :func:`perturb_kinetic_equilibrium` -- the function every draw of
+        ``generate()`` runs -- with the arguments ``generate()`` /
+        ``generate_bouquet`` hand it, every sigma set to zero (kinetic,
+        j_phi and the auxiliary channels), the bootstrap scale at the centre
+        the draws are sampled around (``sigma0_reference_scale`` of the
+        bs_scale-centred ``jBS_scale_range``) and, in ``jbs_delta_mode``, the
+        sigma=0 reference evaluated the way ``generate_bouquet`` caches it.
+        Each route starts from ``entry_snap`` (the state the check was handed).
+        Returns ``{routes: {route: record}, passed_draw_route, ...}``;
+        measurement only -- nothing here is part of ``passed``.
+        """
+        import numpy as np
+        from .baseline import resolve_uncertainty
+        from .jbs_loop import profile_residuals, residual_weights
+        from .sampling import make_rng
+        from .TokaMaker_interface import (perturb_kinetic_equilibrium,
+                                          sigma0_reference_scale)
+
+        bl = self.baseline
+        mygs = self.mygs
+        gc = self.config.generation
+        EC = 1.602176634e-19
+        Ip = float(bl.Ip_target)
+        if routes is None:
+            routes = (("ip_renorm",) if gc.perturb_jind_in_anchor
+                      else ("standard",))
+        _bs = float(getattr(bl, "bs_scale", 1.0))
+        _rng_range = (None if gc.jBS_scale_range is None
+                      else (gc.jBS_scale_range[0] * _bs,
+                            gc.jBS_scale_range[1] * _bs))
+        scale0 = float(sigma0_reference_scale(_rng_range))
+        # generate_bouquet hands every draw the THERMAL pressure on the
+        # equilibrium grid; the draw adds impurity/fast/diff itself
+        p_th = EC * (ne_eq * te_eq + ni_eq * ti_eq)
+        psi_kin = np.asarray(bl.psi_N_kinetic, dtype=float)
+        zk, zj = np.zeros_like(psi_kin), np.zeros_like(psi_N)
+        jdiff = (None if getattr(bl, "jBS_diff", None) is None
+                 else np.asarray(bl.jBS_diff, dtype=float))
+        blk = dict(
+            what=("perturb_kinetic_equilibrium at zero perturbation with "
+                  "generate()'s draw arguments (the draw's own route); "
+                  "generate()'s coil regularisation, hard bounds and "
+                  "homotopy are not part of the replay"),
+            scale_jBS=scale0, l_i_target=float(bl.l_i_target),
+            li_delivered=float(li_delivered),
+            li_delivered_reference=str(li_delivered_name),
+            tolerances=dict(rtol_j=settings["rtol_j"],
+                            rtol_Ip=settings["rtol_Ip"],
+                            tol_li=settings["tol_li"]),
+            criterion=("loop converged and r_j <= rtol_j and r_I <= rtol_Ip "
+                       "and |l_i(draw) - l_i_target| <= tol_li"),
+            gates=("nothing: recorded beside `passed`, not part of it"),
+            routes={})
+        try:
+            env = resolve_uncertainty(self.config, bl)
+        except Exception as e:
+            blk.update(error=f"resolve_uncertainty: {type(e).__name__}: "
+                             f"{str(e)[:300]}", passed_draw_route=False)
+            print("[sigma0-check draw-route] NOT RUN: " + blk["error"])
+            return blk
+        _aux = env.get("aux_sigmas")
+        aux_zero = (None if not _aux else
+                    {k: np.zeros_like(np.asarray(v, dtype=float))
+                     for k, v in _aux.items()})
+
+        def _restore():
+            if entry_snap is not None:
+                mygs.replace_eq(source_eq=entry_snap)
+
+        dref = dbase = None
+        if bool(getattr(gc, "jbs_delta_mode", False)):
+            # generate_bouquet's delta cache under the loop: evaluate_jBS
+            # (RAW, at the centre scale) on a state-anchor solve of the
+            # baseline total at the full pressure
+            from .physics import evaluate_jBS
+            from .utils import pchip_derivative
+            _restore()
+            _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
+            _pp = {"type": "linterp",
+                   "y": pchip_derivative(psi_N, pressure) / _pr, "x": psi_N}
+            _pp["y"][-1] = 0.0
+            mygs.set_targets(Ip=Ip, pax=float(pressure[0]))
+            mygs.set_profiles(pp_prof=_pp, ffp_prof={
+                "type": "jphi-linterp",
+                "y": np.asarray(bl.j_phi, dtype=float).copy(), "x": psi_N})
+            try:
+                mygs.solve()
+            except (ValueError, RuntimeError):
+                pass                      # generate_bouquet tolerates it too
+            _sel, _d = evaluate_jBS(mygs, psi_N, ne_eq, te_eq, ni_eq, ti_eq,
+                                    Zeff_eq, psi_pad=psi_pad,
+                                    isolate_edge=bool(gc.isolate_edge_jBS),
+                                    smooth_axis=False)
+            dref = scale0 * np.asarray(_sel, dtype=float)
+            dbase = np.asarray(ref, dtype=float)
+            blk["delta_mode"] = True
+
+        passed_all = True
+        for route in routes:
+            rr = dict(route=str(route),
+                      perturb_jind_in_anchor=(route == "ip_renorm"))
+            try:
+                _restore()
+                d = perturb_kinetic_equilibrium(
+                    mygs, psi_N, p_th, bl.ne, bl.te, bl.ni, bl.ti,
+                    np.asarray(bl.j_phi, dtype=float), zk, zk, zk, zk, zj,
+                    env["n_ls"], env["t_ls"], env["j_ls"], Ip,
+                    float(bl.l_i_target), Zeff_eq, len(psi_N),
+                    input_jinductive=np.asarray(bl.j_inductive, dtype=float),
+                    l_i_tolerance=gc.l_i_tolerance, psi_pad=psi_pad,
+                    constrain_sawteeth=gc.constrain_sawteeth,
+                    recalculate_j_BS=gc.recalculate_j_BS,
+                    isolate_edge_jBS=gc.isolate_edge_jBS,
+                    floor_j_BS=gc.floor_j_BS, jBS_diff=jdiff,
+                    accept_anchor_inband=gc.accept_anchor_inband,
+                    perturb_jind_in_anchor=(route == "ip_renorm"),
+                    scale_jBS=scale0, swb_iterations=gc.swb_iterations,
+                    diagnostic_plots=False, psi_N_kinetic=psi_kin,
+                    p_fast=bl.p_fast, z_fast=getattr(bl, "z_fast", None),
+                    j_NBI=bl.j_NBI, j_RF=bl.j_RF, aux_sigmas=aux_zero,
+                    aux_baselines=env.get("aux_baselines"),
+                    aux_length_scales=env.get("aux_length_scales"),
+                    # generate_bouquet's own defaults for these two
+                    max_proxy_draws=500, p_thresh=0.05,
+                    rng=make_rng(gc.seed),
+                    spike_delta_ref=dref, spike_delta_baseline=dbase,
+                    Z_imp=getattr(bl, "Z_imp", None),
+                    p_diff=getattr(bl, "p_diff", None),
+                    jphi_diff=getattr(bl, "jphi_diff", None),
+                    jbs_loop=settings)[6]
+                snap = mygs.copy_eq()
+                w, x, _k = residual_weights(snap, psi_N, psi_pad)
+                ctx = d.get("_jbs_ctx") or {}
+                if ctx.get("spike_used") is not None:
+                    spk = np.asarray(ctx["spike_used"], dtype=float)
+                    rr["bootstrap_compared"] = ("the draw's loop bootstrap "
+                                                "(composed, incl. jBS_diff)")
+                else:
+                    spk = np.asarray(d["j_BS_edge"] if d.get("j_BS_edge")
+                                     is not None else d["j_BS"], dtype=float)
+                    rr["bootstrap_compared"] = "the draw's archived j_BS split"
+                cmp_ = profile_residuals(spk, ref, w, x, abs(Ip))
+                li_d = float(mygs.get_stats(li_normalization="iter",
+                                            lcfs_pad=psi_pad)["l_i"])
+                jl = d.get("jbs_loop") or {}
+                conv = bool(jl.get("converged", False))
+                dli_t = abs(li_d - float(bl.l_i_target))
+                dli_d = abs(li_d - float(li_delivered))
+                ok = bool(conv and cmp_["r_j"] <= settings["rtol_j"]
+                          and cmp_["r_I"] <= settings["rtol_Ip"]
+                          and dli_t <= settings["tol_li"])
+                rr.update(loop_converged=conv,
+                          n_loops=jl.get("n_loops"),
+                          passes_used=jl.get("n_passes_total"),
+                          r_j=float(cmp_["r_j"]), r_I=float(cmp_["r_I"]),
+                          li_draw=li_d, dl_i_vs_l_i_target=float(dli_t),
+                          dl_i_vs_delivered=float(dli_d),
+                          r2_ip_scale=d.get("r2_ip_scale"),
+                          r2_f_ind=d.get("r2_f_ind"),
+                          j0_scales=[float(v) for v in
+                                     (d.get("j0_scales") or [])],
+                          passed_draw_route=ok, error=None)
+            except Exception as e:
+                ok = False
+                rr.update(passed_draw_route=False,
+                          error=f"{type(e).__name__}: {str(e)[:300]}")
+            passed_all = passed_all and ok
+            blk["routes"][str(route)] = rr
+            if rr.get("error"):
+                print(f"[sigma0-check draw-route {route}] FAIL: the draw "
+                      f"route raised {rr['error']}")
+            else:
+                _sc = (f"R2 scale={rr['r2_ip_scale']:.6f}"
+                       if rr.get("r2_ip_scale") is not None else
+                       "j0 scales=" + ",".join(f"{v:.4f}"
+                                               for v in rr["j0_scales"]))
+                print(f"[sigma0-check draw-route {route}] "
+                      f"{'PASS' if ok else 'FAIL'} (recorded, gates "
+                      f"nothing): loop "
+                      f"{'converged' if rr['loop_converged'] else 'NOT converged'}"
+                      f" in {rr['passes_used']} pass(es); vs baseline "
+                      f"r_j={rr['r_j']:.3e} (tol {settings['rtol_j']:.0e}), "
+                      f"r_I={rr['r_I']:.3e} (tol {settings['rtol_Ip']:.0e}), "
+                      f"|dl_i| vs l_i_target={rr['dl_i_vs_l_i_target']:.2e} "
+                      f"(tol {settings['tol_li']:.0e}), vs delivered "
+                      f"({li_delivered_name})={rr['dl_i_vs_delivered']:.2e};"
+                      f" {_sc}")
+        blk["passed_draw_route"] = bool(passed_all)
+        return blk
 
     @staticmethod
     def _check_jbs_loop_workflow(gc) -> None:

@@ -214,6 +214,7 @@ def _imas_probe(outdir, part):
         "passed", "loop_converged", "r_j_vs_baseline", "r_I_vs_baseline",
         "dl_i_vs_baseline", "invariant")}
     out["f_imas"]["n_passes"] = int(s0["record"]["n_passes"])
+    out["f_imas_draw_route"] = s0.get("draw_route")
     with open(os.path.join(outdir, "imas_core.json"), "w") as fh:
         json.dump(out, fh)
 
@@ -329,6 +330,7 @@ def _recon_probe(outdir):
     out["f_recon"] = {k: s0[k] for k in (
         "passed", "loop_converged", "r_j_vs_baseline", "r_I_vs_baseline",
         "dl_i_vs_baseline")}
+    out["f_recon_draw_route"] = s0.get("draw_route")
 
     # a sigma=0 route-R2 (Fix C) draw with the loop
     psi_N = np.asarray(bl.psi_N, dtype=float)
@@ -360,9 +362,13 @@ def _recon_probe(outdir):
         n_passes=int(d["jbs_loop"]["n_passes_total"]),
         r2_scale=float(d["r2_ip_scale"]), r2_f_ind=d.get("r2_f_ind"),
         r_j_vs_baseline=float(cmp_["r_j"]),
+        r_I_vs_baseline=float(cmp_["r_I"]),
         li=float(b.mygs.get_stats(lcfs_pad=psi_pad,
                                   li_normalization="iter")["l_i"]),
         l_i_target=float(bl.l_i_target),
+        li_realized_post_corrective=(
+            None if (bl.recon or {}).get("li_realized_post_corrective")
+            is None else float(bl.recon["li_realized_post_corrective"])),
         ctx_private="_jbs_ctx" in d,
         init_source=d["jbs_loop"].get("init_source"),
         loops=d["jbs_loop"].get("loops"))
@@ -782,6 +788,12 @@ def test_f_sigma0_route_r2_draw_converges_near_the_baseline(recon):
     # (|s-1|*f_ind <= 3.86e-3, tests/test_seeded_reproducibility.py) with the
     # loop's bootstrap in place of the frozen SWB spike
     assert abs(d["r2_scale"] - 1.0) * float(d["r2_f_ind"]) <= 3.86e-3, d
+    # ...and, at the loop's OWN tolerances, the unperturbed draw reproduces
+    # the baseline: its bootstrap (r_j) and its l_i against the target the
+    # draws are banded on.  No bar is widened for the draw route: a failure
+    # here is a finding about the draw route (review M1), not a test to tune.
+    assert d["r_j_vs_baseline"] <= _S["rtol_j"], d
+    assert abs(d["li"] - d["l_i_target"]) <= _S["tol_li"], d
     # the private rebuild context travels on the diagnostics until
     # generate_bouquet pops it before archiving
     assert d["ctx_private"]
@@ -790,6 +802,28 @@ def test_f_sigma0_route_r2_draw_converges_near_the_baseline(recon):
     assert d["init_source"].startswith(
         "evaluate_jBS on the draw's state-anchor equilibrium"), d
     assert d["loops"] and d["loops"][0]["init_source"] == d["init_source"]
+
+
+@pytest.mark.solver
+@solver_only
+@pytest.mark.parametrize("fix, key", [("imas", "f_imas_draw_route"),
+                                      ("recon", "f_recon_draw_route")])
+def test_sigma0_check_reports_the_draw_route_beside_its_verdict(request, fix,
+                                                               key):
+    """The sigma=0 check carries the draw's own route at zero perturbation
+    as a SEPARATE block; its verdict is recorded and gates nothing (the check's
+    own ``passed`` is asserted by the tests above, unchanged).  Only the
+    presence and completeness of the measurement is asserted here."""
+    blk = request.getfixturevalue(fix)[key]
+    assert blk is not None and blk["routes"], blk
+    assert "passed_draw_route" in blk
+    assert blk["gates"].startswith("nothing")
+    for route, rr in blk["routes"].items():
+        assert rr.get("error") is None, (route, rr)
+        for k in ("loop_converged", "passes_used", "r_j", "r_I", "li_draw",
+                  "dl_i_vs_l_i_target", "dl_i_vs_delivered",
+                  "passed_draw_route"):
+            assert k in rr, (route, k)
 
 
 @pytest.mark.solver
