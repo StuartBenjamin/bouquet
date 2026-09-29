@@ -15,7 +15,9 @@ such a source.
   multiplies by exactly `+1.0`; baselines, closures, draws and archives are
   bit-identical to before (verified bitwise A/B against the pre-fix build: the
   synthetic IMAS example's forward-solved baseline under four closure paths,
-  and a seeded g-file run of the golden-fixture example including its draws). **Any bouquet result built on a reversed-current dd before
+  each with the bootstrap loop off and on -- only the loop record's wall-clock
+  `wall_s` differs; on `main` also a seeded g-file run of the golden-fixture
+  example including its draws). **Any bouquet result built on a reversed-current dd before
   this change is invalid and must be regenerated.**
 - New records: `Baseline.source_current_sign` / `source_b0_sign`,
   `li_metrics.source_current_sign` / `source_b0_sign`,
