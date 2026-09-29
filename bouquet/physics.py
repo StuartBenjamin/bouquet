@@ -184,9 +184,16 @@ def parallel_to_toroidal(
         ``avg_B2``     ``<B^2>`` [T^2]
         ``avg_inv_R2`` ``<1/R^2>`` [1/m^2], OPTIONAL -- when absent the
                        bracket ``<B_phi^2>/<B^2>`` is taken as 1,
-                       neglecting ``<B_p^2>/<B^2> ~ (eps/q)^2`` (sub-1%%
-                       at a DIII-D edge); the retained ``1/(F<1/R>)``
-                       projection carries the O(eps^2) geometry.
+                       neglecting ``<B_p^2>/<B^2> ~ (eps/q)^2`` and so
+                       OVERESTIMATING j_tor by that fraction -- NOT
+                       sub-1%%.  Measured on the synthetic D3D-like
+                       golden case (17 draws): 6e-5 at psi_N = 0.001,
+                       0.6%% at 0.1, 1.4%% at 0.3, 1.8-2.1%% at
+                       mid-radius (its maximum), 1.4%% at the bootstrap
+                       peak (psi_N ~ 0.96), 1.0%% at 0.999; 1.4-1.5%% of
+                       the bootstrap current integral.  The
+                       retained ``1/(F<1/R>)`` projection carries the
+                       O(eps^2) geometry.
         ``B0``         normalisation of the input, OPTIONAL (default 1):
                        pass the IMAS ``vacuum_toroidal_field`` B0 when
                        ``j_parallel`` is the IMAS convention ``<j.B>/B0``;
@@ -229,7 +236,8 @@ def parallel_to_toroidal(
         j_dot_B = j_parallel * float(geom.get("B0", 1.0))
         # field-aligned component: j_tor = <j.B> F <1/R^2> / (<B^2> <1/R>);
         # F^2 <1/R^2> == <B_phi^2>, ~= <B^2> when <1/R^2> is unavailable
-        # (neglects <B_p^2>/<B^2> ~ (eps/q)^2).
+        # (neglects <B_p^2>/<B^2> ~ (eps/q)^2: 1-2% on a D3D-like
+        # plasma, see the docstring -- not sub-1%).
         if "avg_inv_R2" in geom and geom["avg_inv_R2"] is not None:
             bphi2_over_B2 = F**2 * np.asarray(geom["avg_inv_R2"], dtype=float) / avg_B2
         else:
@@ -277,7 +285,9 @@ def toroidal_to_parallel(j_tor, *, geom: dict):
         ``avg_inv_R2`` ``<1/R^2>`` [1/m^2], OPTIONAL -- when absent the exact
                        ``<B_phi^2> = F^2 <1/R^2>`` is unavailable and the
                        bracket ``<B^2>/<B_phi^2>`` is taken as 1, neglecting
-                       ``<B_p^2>/<B^2> ~ (eps/q)^2`` (~<1%% at a DIII-D edge).
+                       ``<B_p^2>/<B^2> ~ (eps/q)^2`` -- 1.0-2.1%% across a
+                       D3D-like plasma (see :func:`parallel_to_toroidal`),
+                       not sub-1%%.
                        Provide it (from the captured live equilibrium) for a
                        machine-exact conversion.
         ``B0``         output normalisation (default 1): pass the IMAS
@@ -412,7 +422,8 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
     not expose -- by flux-surface quadrature over traced contours
     (:func:`_capture_exact_inv_R2`), making :func:`toroidal_to_parallel`
     machine-exact instead of relying on ``<B_phi^2> ~= <B^2>`` (the
-    ``<B_p^2>/<B^2> ~ (eps/q)^2 ~<1%%`` bracket). By default it is traced on the
+    ``<B_p^2>/<B^2> ~ (eps/q)^2`` bracket: 1.0-2.1%% across a D3D-like
+    plasma, 1.4%% at the bootstrap peak -- see :func:`parallel_to_toroidal`). By default it is traced on the
     FULL ``npsi`` grid -- same resolution as every other metric, most accurate
     at the edge where the surfaces bunch up and the bootstrap peaks; the trace
     is cheap (a few ms/surface, ~2 s at npsi=257). ``inv_R2_npsi`` (default
@@ -421,7 +432,7 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
     quadrature is **self-validated** each call: its independently-recomputed
     ``<1/R>`` must agree with ``sauter_fc`` to ``inv_R2_check_rtol`` (default
     2%), else ``avg_inv_R2`` is dropped (with a warning) and the conversion
-    falls back to the ``<1%`` bracket -- never silently wrong.
+    falls back to the 1-2 %% bracket -- never silently wrong.
 
     Set ``exact_inv_R2=False`` to skip the ``<1/R^2>`` surface traces entirely
     (bracket fallback) if the capture cost is ever material.
@@ -516,7 +527,7 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
         except Exception as exc:                    # pragma: no cover - live-only
             warnings.warn(
                 f"exact <1/R^2> capture failed ({exc}); IDS export will use the "
-                "<B_phi^2>~=<B^2> bracket (~<1% at the edge). Set "
+                "<B_phi^2>~=<B^2> bracket (1-2% on a D3D-like plasma). Set "
                 "exact_inv_R2=False to silence.")
     return out
 
@@ -607,7 +618,21 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
        ``<j_BS.B>``; it is converted with
        :func:`parallel_to_toroidal` (analytic, field-aligned; ``F``, ``<1/R>``
        and ``<B^2>`` from the SAME surfaces), never through SWB's
-       ``R_avg/F`` projection and its undo.
+       ``R_avg/F`` projection and its undo.  **The conversion is the legacy
+       one:** no ``<1/R^2>`` is passed, so the bracket
+       ``<B_phi^2>/<B^2>`` is taken as 1 and the net factor is
+       ``<j.B>/(F <1/R>)`` -- exactly what the frozen path's
+       ``_swb_jbs_to_toroidal`` applies to SWB's output (there with
+       ``get_q``'s ``<1/R>``, here with ``sauter_fc``'s: the same flux-surface
+       average from two traces of the same surfaces).  The neglected
+       ``<B_p^2>/<B^2>`` makes the toroidal bootstrap ~1.4 % larger at its
+       peak than the exact field-aligned value (1.0-2.1 % across the plasma,
+       1.4-1.5 % of I_BS, synthetic D3D-like case), and it is what the IDS
+       export's :func:`toroidal_to_parallel` -- which DOES use the exact
+       ``<1/R^2>`` -- does not undo: ``<j.B>`` round-trips high by the same
+       fraction.  Kept deliberately (switching paths causes no jump);
+       whether to pass ``<1/R^2>`` here is an owner decision -- it would move
+       every loop result by that ~1.5 %.
 
     **Refusals, never a silent zero.**  The Redl expressions are undefined
     for non-physical input and on a surface the tracer failed on; the

@@ -386,3 +386,19 @@ def test_a_negative_trapped_fraction_inside_the_plasma_is_refused():
     with pytest.raises(JBSEvaluationError, match="f_T") as ei:
         evaluate_jBS(_Bad(), x, *_kin(x))
     assert ei.value.index == 30
+
+
+# ---------------------------------------------------------------------------
+#  the toroidal conversion is the legacy one (bracket <B_phi^2>/<B^2> = 1)
+# ---------------------------------------------------------------------------
+def test_the_toroidal_conversion_is_the_legacy_bracket_free_one():
+    """Pins the convention the evaluator shares with the frozen path's
+    ``_swb_jbs_to_toroidal``: ``j_tor = <j.B> / (F <1/R>)``, no
+    ``<B_phi^2>/<B^2>`` bracket (``<1/R^2>`` is not passed although ``get_q``
+    returns it).  The neglected ``<B_p^2>/<B^2>`` is 1-2 % on a D3D-like
+    plasma (physics.parallel_to_toroidal); changing it is an owner decision
+    that moves every loop result, so it must not happen by accident."""
+    x = np.linspace(0.0, 1.0, 151)
+    _j, d = evaluate_jBS(_MockEq(), x, *_kin(x), smooth_axis=False)
+    np.testing.assert_array_equal(
+        d["j_tor_full_raw"], d["j_dot_B"] * 1.0 / (d["F"] * d["avg_inv_R"]))

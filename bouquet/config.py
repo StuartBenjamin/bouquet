@@ -1064,7 +1064,8 @@ class GenerationConfig:
     capture_npsi: int = 257
     # Compute exact <1/R^2> by flux-surface quadrature (TokaMaker does not
     # expose it) so the conversion is machine-exact rather than using the
-    # <B_phi^2>~=<B^2> bracket (~<1%). Adds ~65 surface traces/draw; set False
+    # <B_phi^2>~=<B^2> bracket (1-2% on a D3D-like plasma, 1.4% at the
+    # bootstrap peak; physics.parallel_to_toroidal). Adds ~65 surface traces/draw; set False
     # to skip that cost (self-validated + graceful fallback either way).
     capture_exact_inv_R2: bool = True
 
