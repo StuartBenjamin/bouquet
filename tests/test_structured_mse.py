@@ -105,23 +105,45 @@ class _Cylinder:
         return np.column_stack([np.zeros_like(R), B0 * R0 / R, Bth])
 
 
+#: the fake solver mesh: a box around the cylinder (R_min, R_max, Z_min, Z_max)
+_MESH = (R0 - 0.95, R0 + 0.95, -1.2, 1.2)
+
+
 class _Eval:
-    def __init__(self, cyl):
+    """Mimics TokaMaker's field interpolator, INCLUDING its failure mode.
+
+    It returns a copy of its own value buffer; for a point outside the mesh it
+    writes nothing and sets the cell to 0 -- so a caller that does not check
+    reads back the PREVIOUS point's field.  ``with_cell=False`` drops the cell
+    attribute (only the buffer poisoning can then catch it).
+    """
+
+    def __init__(self, cyl, with_cell=True):
         self.cyl = cyl
+        self.val = np.zeros(3)
+        if with_cell:
+            self.cell = types.SimpleNamespace(value=-1)
 
     def eval(self, pt):
-        return self.cyl.field(np.array([pt[0]]), np.array([pt[1]]))[0]
+        r, z = float(pt[0]), float(pt[1])
+        inside = _MESH[0] <= r <= _MESH[1] and _MESH[2] <= z <= _MESH[3]
+        if hasattr(self, "cell"):
+            self.cell.value = 7 if inside else 0
+        if inside:
+            self.val[:] = self.cyl.field(np.array([r]), np.array([z]))[0]
+        return self.val[:3].copy()
 
 
 class _FakeGS:
     """``get_field_eval`` only: what ``mse_field_at`` reads."""
 
-    def __init__(self, cyl):
+    def __init__(self, cyl, with_cell=True):
         self.cyl = cyl
+        self.with_cell = with_cell
 
     def get_field_eval(self, name):
         assert name == "B"
-        return _Eval(self.cyl)
+        return _Eval(self.cyl, with_cell=self.with_cell)
 
     def copy_eq(self):
         return _Snap()
@@ -240,8 +262,78 @@ class TestForwardModel:
 
     def test_field_read_through_the_equilibrium_interface(self):
         _parts_, cyl, Phi, ch = _synthetic_world()
-        np.testing.assert_allclose(mse_field_at(_FakeGS(cyl), ch["R"], ch["Z"]),
-                                   cyl.field(ch["R"], ch["Z"]), rtol=1e-15)
+        B, found = mse_field_at(_FakeGS(cyl), ch["R"], ch["Z"])
+        assert found.all()
+        np.testing.assert_allclose(B, cyl.field(ch["R"], ch["Z"]), rtol=1e-15)
+
+
+class TestOffMesh:
+    """A chord the interpolator cannot place is never given a stale field."""
+
+    @pytest.mark.parametrize("with_cell", [True, False])
+    def test_off_mesh_point_never_reads_the_previous_chord(self, with_cell):
+        _parts_, cyl, Phi, ch = _synthetic_world()
+        R = np.array([R0 + 0.3, R0 + 3.0, R0 + 0.4, R0 + 0.2])
+        Z = np.array([0.0, 0.0, 0.0, 5.0])
+        # the raw interpolator really does hand back the previous point
+        ev = _Eval(cyl, with_cell=with_cell)
+        first = ev.eval([R[0], Z[0]])
+        np.testing.assert_array_equal(ev.eval([R[1], Z[1]]), first)
+        B, found = mse_field_at(_FakeGS(cyl, with_cell=with_cell), R, Z)
+        assert list(found) == [True, False, True, False]
+        assert np.all(np.isnan(B[~found]))
+        np.testing.assert_allclose(B[found], cyl.field(R[found], Z[found]),
+                                   rtol=1e-15)
+
+    def _add_off_mesh_chord(self, g, R_off=R0 + 3.0):
+        for k in ("R", "Z", "tgamma", "sigma", "weight", "A1", "A2", "A3",
+                  "A4"):
+            g.mse_data[k] = list(g.mse_data[k]) + [g.mse_data[k][-1]]
+        g.mse_data["R"][-1] = R_off
+
+    def test_stage_excludes_it_with_a_reason_and_matches_the_run_without_it(
+            self):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic")
+        bl0, *_ = _run_stage(gc)
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic")
+        bl, state, n_stage, cyl, ch = _run_stage(gc,
+                                                 tamper=self._add_off_mesh_chord)
+        rec = bl.ip_closure
+        assert rec["structured_mse_status"] == "applied"
+        assert rec["structured_mse_n_chords"] == ch["n_active"]
+        assert rec["structured_mse_n_chords_total"] == ch["n_active"] + 1
+        (ex,) = rec["structured_mse_excluded_chords"]
+        assert ex["index"] == ch["n_active"]
+        assert "off the solver mesh" in ex["reason"]
+        # excluding the chord is exactly the run that never had it
+        np.testing.assert_array_equal(rec["structured_coeffs_a"],
+                                      bl0.ip_closure["structured_coeffs_a"])
+        np.testing.assert_array_equal(rec["structured_coeffs_b"],
+                                      bl0.ip_closure["structured_coeffs_b"])
+
+    def _mostly_off(self, g):
+        n = len(g.mse_data["R"])
+        g.mse_data["R"] = [R0 + 3.0] * (n - 3) + list(g.mse_data["R"][-3:])
+
+    def test_too_few_chords_on_the_mesh_refuses_loudly(self):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic")
+        bl, state, n_stage, cyl, ch = _run_stage(gc, tamper=self._mostly_off)
+        rec = bl.ip_closure
+        assert rec["structured_mse_status"].startswith("refused")
+        assert "remain on the solver mesh" in rec["structured_mse_status"]
+        assert rec["closure_limited"]
+        assert len(rec["structured_mse_excluded_chords"]) == ch["n_active"] - 3
+        assert not state.get("mse_applied")
+
+    def test_too_few_chords_on_the_mesh_required_raises(self):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic",
+                              structured_mse_required=True)
+        with pytest.raises(RuntimeError, match="remain on the solver mesh"):
+            _run_stage(gc, tamper=self._mostly_off)
 
 
 # ---------------------------------------------------------------------------

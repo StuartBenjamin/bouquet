@@ -138,7 +138,7 @@ def mse_chords(md, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
     out["sigma_eff"] = np.sqrt(out["sigma"] ** 2 / out["weight"] + ss ** 2)
     out.update(index=np.nonzero(act)[0], n_total=int(n), n_active=n_act,
                er_applied=er_applied, er_corrected=er_corrected,
-               sigma_sys=ss)
+               sigma_sys=ss, min_chords=int(min_chords), excluded=[])
     return out
 
 
@@ -201,14 +201,86 @@ def mse_sign_convention(B, ch):
     return best[0], best[1], table
 
 
+#: Per-chord arrays of a chord dict (:func:`mse_chords`); every one is indexed
+#: by the ACTIVE chords, so dropping a chord drops its entry from each.
+MSE_CHORD_ARRAYS = ("R", "Z", "tgamma", "sigma", "weight", "A1", "A2", "A3",
+                    "A4", "A5", "Er", "sigma_eff", "index")
+
+#: Exclusion reason for a chord the solver's field interpolator cannot place
+#: on its mesh (see :func:`mse_field_at`).
+MSE_REASON_OFF_MESH = ("off the solver mesh (the field interpolator found no "
+                       "cell containing (R, Z)); no field can be read there")
+
+
+def mse_exclude(ch, drop, reason):
+    """A copy of chord dict *ch* without the chords where *drop* is True.
+
+    Every dropped chord is appended to ``ch["excluded"]`` as ``(input index,
+    reason)`` -- a chord is never removed without a recorded reason.
+    ``n_active`` and ``er_applied`` are recomputed on what is left; the
+    caller decides whether that is still enough chords (``ch["min_chords"]``).
+    """
+    drop = np.asarray(drop, dtype=bool).ravel()
+    if drop.shape != (int(ch["n_active"]),):
+        raise ValueError(f"mse_exclude: mask of {drop.size} entries for "
+                         f"{int(ch['n_active'])} active chords")
+    keep = ~drop
+    out = dict(ch)
+    for k in MSE_CHORD_ARRAYS:
+        if k in ch:
+            out[k] = np.asarray(ch[k])[keep].copy()
+    out["excluded"] = list(ch.get("excluded", ())) + [
+        (int(i), str(reason)) for i in np.asarray(ch["index"])[drop]]
+    out["n_active"] = int(keep.sum())
+    out["er_applied"] = bool(np.any((out["A5"] * out["Er"]) != 0.0))
+    return out
+
+
 def mse_field_at(eq, R, Z):
-    """``(n, 3)`` field ``(B_R, B_phi, B_Z)`` of a live equilibrium at (R, Z).
+    """``(B, found)``: the field of a live equilibrium at the chords.
+
+    ``B`` is ``(n, 3)`` -- ``(B_R, B_phi, B_Z)`` -- and ``found`` ``(n,)``
+    bool.  A chord the interpolator cannot place on the mesh gets
+    ``found=False`` and a row of NaN; its field is NEVER reported.
+
+    Why this has to be explicit: TokaMaker's field interpolator returns its
+    own value buffer, and when a point is not inside any mesh cell (or fails
+    the barycentric test) the Fortran routine returns WITHOUT writing it -- so
+    a plain ``eval`` of an off-mesh point hands back whatever the PREVIOUS
+    point left there, finite and wrong.  Two independent guards, either of
+    which is sufficient: the buffer is poisoned with NaN before every
+    evaluation (a point that writes nothing then reads NaN), and the cell the
+    interpolator reports is required to be a real one (``cell > 0``; the
+    Fortran sets 0 for not-found and a negative index for a failed
+    barycentric test).  An interpolator without those attributes (a test
+    double) is judged on the finiteness of what it returns.
 
     The interpolator is created FRESH on every call: an interpolator made
     before a re-solve or an equilibrium swap is bound to stale state, and
     evaluating it can crash the process.
     """
     Beval = eq.get_field_eval("B")
-    pts = np.column_stack([np.asarray(R, dtype=float),
-                           np.asarray(Z, dtype=float)])
-    return np.array([Beval.eval(p) for p in pts], dtype=float).reshape(-1, 3)
+    R = np.atleast_1d(np.asarray(R, dtype=float)).ravel()
+    Z = np.atleast_1d(np.asarray(Z, dtype=float)).ravel()
+    B = np.full((R.size, 3), np.nan, dtype=float)
+    found = np.zeros(R.size, dtype=bool)
+    buf = getattr(Beval, "val", None)
+    cell = getattr(Beval, "cell", None)
+    for k in range(R.size):
+        if not (np.isfinite(R[k]) and np.isfinite(Z[k]) and R[k] > 0.0):
+            continue
+        if isinstance(buf, np.ndarray):
+            buf[:] = np.nan
+        if cell is not None and int(getattr(cell, "value", 0)) <= 0:
+            # a not-found / failed point leaves 0 or -|cell| behind; start the
+            # next search from the interpolator's own "no guess" value
+            cell.value = -1
+        v = np.asarray(Beval.eval(np.array([R[k], Z[k]], dtype=float)),
+                       dtype=float).ravel()
+        ok = v.size == 3 and bool(np.all(np.isfinite(v)))
+        if cell is not None:
+            ok = ok and int(getattr(cell, "value", 0)) > 0
+        if ok:
+            B[k] = v
+            found[k] = True
+    return B, found

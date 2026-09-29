@@ -1461,14 +1461,8 @@ class Bouquet:
         )
         if ch is None:
             return rec
+        rec.update(Bouquet._structured_mse_chord_record(ch))
         rec.update(
-            structured_mse_n_chords=int(ch["n_active"]),
-            structured_mse_n_chords_total=int(ch["n_total"]),
-            structured_mse_chord_index=[int(i) for i in ch["index"]],
-            structured_mse_chord_R=[float(v) for v in ch["R"]],
-            structured_mse_chord_Z=[float(v) for v in ch["Z"]],
-            structured_mse_tgamma_meas=[float(v) for v in ch["tgamma"]],
-            structured_mse_sigma_eff=[float(v) for v in ch["sigma_eff"]],
             structured_mse_sigma_sys=float(ch["sigma_sys"]),
             structured_mse_er_applied=bool(ch["er_applied"]),
             structured_mse_er_corrected=bool(ch["er_corrected"]),
@@ -1482,6 +1476,22 @@ class Bouquet:
                 "structured coefficients by forward differences"),
         )
         return rec
+
+    @staticmethod
+    def _structured_mse_chord_record(ch):
+        """Which chords the MSE term uses, and every excluded one with why."""
+        return dict(
+            structured_mse_n_chords=int(ch["n_active"]),
+            structured_mse_n_chords_total=int(ch["n_total"]),
+            structured_mse_chord_index=[int(i) for i in ch["index"]],
+            structured_mse_chord_R=[float(v) for v in ch["R"]],
+            structured_mse_chord_Z=[float(v) for v in ch["Z"]],
+            structured_mse_tgamma_meas=[float(v) for v in ch["tgamma"]],
+            structured_mse_sigma_eff=[float(v) for v in ch["sigma_eff"]],
+            structured_mse_excluded_chords=[
+                dict(index=int(i), reason=str(r))
+                for i, r in ch.get("excluded", ())],
+        )
 
     @staticmethod
     def _close_ip_structured_mse_stage(state, bl, mygs, solve_jphi,
@@ -1508,12 +1518,24 @@ class Bouquet:
         A refusal anywhere (a closure out of its scale bounds, a failed solve,
         an unusable field) RAISES when ``structured_mse_required``; otherwise
         the predictor's hybrid is re-solved (the FD probes moved ``mygs``),
-        kept, and the slice is FLAGGED closure-limited.  ``field_at`` (tests)
-        replaces the live field read.  Returns the last solve's ``nl_its``.
+        kept, and the slice is FLAGGED closure-limited.  ``field_at(R, Z)``
+        (tests) replaces the live field read and returns ``(B, found)`` like
+        :func:`bouquet.mse.mse_field_at`.  Returns the last solve's ``nl_its``.
+
+        **Chords off the solver mesh.**  The first field read (on the
+        predictor equilibrium) reports, per chord, whether the interpolator
+        could place it on the mesh at all.  A chord it cannot is EXCLUDED --
+        recorded with its reason under ``structured_mse_excluded_chords`` and
+        announced -- never evaluated from a stale buffer; if that leaves fewer
+        than ``structured_mse_min_chords`` the stage refuses (loudly, by the
+        path above).  The mesh does not move between solves, so every later
+        read must find every remaining chord: one that does not is a refusal,
+        not a reused value.
         """
         import numpy as np
 
-        from .mse import (mse_er_terms, mse_field_at, mse_sign_convention,
+        from .mse import (MSE_REASON_OFF_MESH, MSEDataUnusable, mse_er_terms,
+                          mse_exclude, mse_field_at, mse_sign_convention,
                           mse_tan_gamma)
         from .utils import (MSE_FLAG_PREFIX, close_ip_structured,
                             close_ip_structured_soft, closure_health,
@@ -1524,7 +1546,7 @@ class Bouquet:
         required = bool(state.get("mse_required", False))
         soft = bool(state.get("soft"))
         if field_at is None:
-            field_at = lambda: mse_field_at(mygs, ch["R"], ch["Z"])
+            field_at = lambda R, Z: mse_field_at(mygs, R, Z)
         psi_g = np.asarray(state["psi_geom"], dtype=float)
         Phi = structured_basis_eval(state["basis"], psi_g)
         K = Phi.shape[0]
@@ -1575,7 +1597,38 @@ class Bouquet:
         rec = {}
         prev = getattr(bl, "ip_closure", None) or {}
         try:
-            B0 = field_at()
+            B0, found = field_at(ch["R"], ch["Z"])
+            B0 = np.asarray(B0, dtype=float).reshape(-1, 3)
+            found = np.asarray(found, dtype=bool).ravel()
+            if not found.all():
+                _off = [int(i) for i in np.asarray(ch["index"])[~found]]
+                ch = mse_exclude(ch, ~found, MSE_REASON_OFF_MESH)
+                state["mse"] = ch
+                B0 = B0[found]
+                rec.update(Bouquet._structured_mse_chord_record(ch))
+                print("[imas SWB-split:ohmic structured] WARNING MSE: "
+                      f"{len(_off)} chord(s) at input index {_off} are OFF "
+                      "the solver mesh and are EXCLUDED (no field can be "
+                      f"read there); {int(ch['n_active'])} chord(s) remain",
+                      flush=True)
+                if int(ch["n_active"]) < int(ch.get("min_chords", 1)):
+                    raise MSEDataUnusable(
+                        f"only {int(ch['n_active'])} MSE chord(s) remain on "
+                        f"the solver mesh (chord(s) {_off} are off it); at "
+                        f"least {int(ch['min_chords'])} are required")
+
+            def _field_strict():
+                """The field at the SAME chords; any not-found is a refusal."""
+                B, fnd = field_at(ch["R"], ch["Z"])
+                fnd = np.asarray(fnd, dtype=bool).ravel()
+                if not fnd.all():
+                    raise RuntimeError(
+                        "MSE chord(s) at input index "
+                        f"{[int(i) for i in np.asarray(ch['index'])[~fnd]]} "
+                        "were not found on the mesh on a later field read -- "
+                        "refusing to reuse a stale field value")
+                return np.asarray(B, dtype=float).reshape(-1, 3)
+
             sp, st, table = mse_sign_convention(B0, ch)
             tg_pred = mse_tan_gamma(B0, ch, sp, st)
             rec.update(structured_mse_sign_convention=dict(pol=sp, tor=st),
@@ -1583,7 +1636,7 @@ class Bouquet:
 
             def _tan_gamma_of(x):
                 _solve(_hybrid(x))
-                return mse_tan_gamma(field_at(), ch, sp, st)
+                return mse_tan_gamma(_field_strict(), ch, sp, st)
 
             res = structured_mse_outer(
                 state["x_pred"], state["F_pred"], tg_pred, _tan_gamma_of,
@@ -1743,8 +1796,15 @@ class Bouquet:
 
         ch = state["mse"]
         sp, st = state["mse_sign"]
-        B = (mse_field_at(mygs, ch["R"], ch["Z"]) if field_at is None
-             else field_at())
+        B, found = (mse_field_at(mygs, ch["R"], ch["Z"]) if field_at is None
+                    else field_at(ch["R"], ch["Z"]))
+        found = np.asarray(found, dtype=bool).ravel()
+        if not found.all():
+            raise RuntimeError(
+                "MSE chord(s) at input index "
+                f"{[int(i) for i in np.asarray(ch['index'])[~found]]} were not "
+                "found on the mesh on the delivered equilibrium -- refusing to "
+                "report a stale field value")
         tg = mse_tan_gamma(B, ch, sp, st)
         c2, z = mse_chi2(tg, ch)
         if getattr(bl, "ip_closure", None) is not None:
