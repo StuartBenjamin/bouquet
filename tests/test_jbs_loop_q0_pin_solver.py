@@ -7,7 +7,7 @@ channels that pin the on-axis safety factor:
 * ``closure_channel="sawtooth_bootstrap"``;
 * ``closure_channel="structured"`` (axis row admitted by the sawtooth gate,
   no l_i target -- the configuration of the existing structured loop test,
-  with its explicit test ceiling ``_STRUCTURED_TEST_PASSES``).
+  at the shipped default pass ceiling).
 
 Each channel is run with the flag OFF (the default: record-only, axis row
 held) and ON (axis row moved once per pass from the measured q0, and
@@ -38,8 +38,7 @@ _harness.ensure_repo_on_syspath()
 import numpy as np
 import pytest
 
-from test_jbs_loop_solver import (_MESH, _OMAS, _STRUCTURED_TEST_PASSES,
-                                  _TIME, solver_only)
+from test_jbs_loop_solver import _MESH, _OMAS, _TIME, solver_only
 
 _S = dict(rtol_j=1e-3, rtol_Ip=1e-4, tol_li=1e-3, tol_q0=2e-3)
 _CASES = ("sawtooth", "structured")
@@ -71,7 +70,7 @@ def _probe(outdir):
         else:
             g.closure_channel = "structured"
             g.structured_li_target = None
-            g.jbs_max_passes = _STRUCTURED_TEST_PASSES
+            g.jbs_max_passes = 8                     # the default ceiling
         tag = f"{case}_{'on' if pin_on else 'off'}"
         try:
             blx = b.prepare_baseline()

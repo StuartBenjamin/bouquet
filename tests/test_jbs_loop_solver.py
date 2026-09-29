@@ -79,12 +79,11 @@ solver_only = pytest.mark.skipif(
 #: The structured closure (soft preset, gated axis row) needed exactly the
 #: approved default pass ceiling (8) on this synthetic case on the development
 #: build -- its one-sided prior makes the closure map non-smooth, so an early
-#: residual growth halves omega toward the floor.  The integration tests of
-#: that channel below are about the WIRING (records, subsumed correctors, the
-#: MSE composition), not about the default ceiling, so they run with this
-#: explicit test ceiling rather than depend on a pass count that another OFT
-#: build may miss by one.  The default is NOT changed by this.
-_STRUCTURED_TEST_PASSES = 12
+#: residual growth halves omega toward the floor.  Its integration tests below
+#: run at the SHIPPED default ceiling (``GenerationConfig.jbs_max_passes``),
+#: not at a raised test-only ceiling: a build on which that channel misses
+#: the default by a pass is a finding about the default, and must show up
+#: here as a failure rather than be absorbed by the test.
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +281,9 @@ def _imas_probe_loop(outdir, part, b, g, out):
 def _imas_probe_structured(outdir, b, g, out, _run):
     import numpy as np
     g.jBS_baseline_mode = "ohmic"
-    g.jbs_max_passes = _STRUCTURED_TEST_PASSES
+    from bouquet.config import GenerationConfig
+    # the shipped default ceiling (see the note at the top of the module)
+    assert g.jbs_max_passes == GenerationConfig().jbs_max_passes
     _run("structured", closure_channel="structured",
          structured_li_target=None)
     # ---- the MSE composition: synthetic chords off the delivered field ----
