@@ -287,7 +287,11 @@ def stage_sigma0(work):
     bl = b.prepare_baseline()
     dl = _delivered(b, bl, cfg)
     s0 = b.verify_sigma0_consistency()
-    keep = ("passed", "invariant", "loop_converged", "r_j_vs_baseline",
+    # `passed` is the draws' zero-perturbation identity (the draw_route
+    # block); the loop solved the baseline's way -- what this figure plots --
+    # is `passed_baseline_way`
+    keep = ("passed", "passed_baseline_way", "draw_route", "invariant",
+            "loop_converged", "r_j_vs_baseline",
             "r_I_vs_baseline", "li_sigma0", "li_baseline",
             "li_baseline_reference", "dl_i_vs_baseline", "max_dev",
             "max_dev_frac", "psi_worst", "spike0", "record")
@@ -586,7 +590,9 @@ def fig5(work):
            f"$l_i$: $\\sigma=0$ {s['li_sigma0']:.5f} vs delivered baseline "
            f"{s['li_baseline']:.5f}, $|\\Delta l_i|$ = "
            f"{s['dl_i_vs_baseline']:.1e} (tol {tol['tol_li']:.0e})\n"
-           f"invariant: {'PASS' if s['passed'] else 'FAIL'} "
+           f"baseline's way: "
+           f"{'PASS' if s.get('passed_baseline_way', s['passed']) else 'FAIL'}"
+           f"; draw-route identity: {'PASS' if s['passed'] else 'FAIL'} "
            "(verify_sigma0_consistency)")
     axs[0].text(0.02, 0.45, txt, transform=axs[0].transAxes, fontsize=7,
                 va="top", bbox=dict(fc="white", ec="0.8", alpha=0.9))

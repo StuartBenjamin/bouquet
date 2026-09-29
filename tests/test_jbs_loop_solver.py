@@ -812,13 +812,15 @@ def test_f_sigma0_route_r2_draw_converges_near_the_baseline(recon):
 def test_sigma0_check_reports_the_draw_route_beside_its_verdict(request, fix,
                                                                key):
     """The sigma=0 check carries the draw's own route at zero perturbation
-    as a SEPARATE block; its verdict is recorded and gates nothing (the check's
-    own ``passed`` is asserted by the tests above, unchanged).  Only the
-    presence and completeness of the measurement is asserted here."""
+    as a SEPARATE block.  RE-SCOPED BY THE OWNER'S DECISION (the
+    zero-perturbation identity of the draws): its verdict used to gate
+    nothing; it now decides the check's ``passed`` (asserted by the tests
+    above and in tests/test_sigma0_identity_solver.py).  Only the presence
+    and completeness of the measurement is asserted here."""
     blk = request.getfixturevalue(fix)[key]
     assert blk is not None and blk["routes"], blk
     assert "passed_draw_route" in blk
-    assert blk["gates"].startswith("nothing")
+    assert blk["gates"].startswith("verify_sigma0_consistency's `passed`")
     for route, rr in blk["routes"].items():
         assert rr.get("error") is None, (route, rr)
         for k in ("loop_converged", "passes_used", "r_j", "r_I", "li_draw",

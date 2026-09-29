@@ -127,7 +127,10 @@ def test_the_draw_route_is_perturb_kinetic_equilibrium_at_zero_sigma(
     assert rr["dl_i_vs_l_i_target"] == pytest.approx(2e-4)
     assert rr["dl_i_vs_delivered"] == pytest.approx(2.8e-3)
     assert rr["passes_used"] == 3 and rr["j0_scales"] == [1.001]
-    assert blk["gates"].startswith("nothing")
+    # RE-SCOPED BY THE OWNER'S DECISION (the zero-perturbation identity of
+    # the draws): this block used to gate nothing; it now decides
+    # verify_sigma0_consistency's `passed` (test_the_draw_route_decides_...).
+    assert blk["gates"].startswith("verify_sigma0_consistency's `passed`")
 
 
 def test_the_configured_ip_renormalising_route_and_both_on_request(
@@ -171,14 +174,59 @@ def test_a_raising_draw_route_is_recorded_not_propagated(monkeypatch):
 
 
 def test_the_existing_check_and_its_passed_are_untouched():
-    """``passed`` is still exactly the loop check's own conjunction, computed
-    before the draw route runs; the draw route lands in its own key."""
+    """The loop check "solved the baseline's way" keeps its own conjunction,
+    computed before the draw route runs, under its own name.
+
+    RE-SCOPED BY THE OWNER'S DECISION (the zero-perturbation identity of the
+    draws): that conjunction used to BE ``passed``; it is now the separately
+    named ``passed_baseline_way`` and no longer decides ``passed`` (which the
+    draw route does -- see the next test).  Every check below is the one this
+    test always made, on the renamed result."""
     from bouquet.run import Bouquet
     src = inspect.getsource(Bouquet._verify_sigma0_jbs_loop)
-    passed_expr = src.split("passed = bool(", 1)[1].split(")\n", 1)[0]
+    passed_expr = src.split("passed_baseline_way = bool(", 1)[1].split(
+        ")\n", 1)[0]
     assert "draw_route" not in passed_expr
     for term in ('res["converged"]', 'cmp_["r_j"] <= settings["rtol_j"]',
                  'cmp_["r_I"] <= settings["rtol_Ip"]',
                  'dli <= settings["tol_li"]'):
         assert term in passed_expr
-    assert src.index("passed = bool(") < src.index('out["draw_route"]')
+    assert src.index("passed_baseline_way = bool(") < src.index(
+        'out["draw_route"]')
+
+
+def test_the_draw_route_decides_passed():
+    """With the loop on, ``passed`` REQUIRES the draw's own route(s) to
+    reproduce the reconstruction state; not running them leaves it False."""
+    from bouquet.run import Bouquet
+    src = inspect.getsource(Bouquet._verify_sigma0_jbs_loop)
+    assert 'out["passed"] = bool(out["draw_route"].get("passed_draw_route"))' \
+        in src
+    assert "passed=False, passed_baseline_way=passed_baseline_way" in src
+    # the default routes: every route the configuration can use
+    assert "routes=draw_routes" in src
+    dsrc = inspect.getsource(Bouquet._sigma0_draw_route)
+    assert "routes = self._sigma0_draw_routes()" in dsrc
+
+
+@pytest.mark.parametrize("src, jind, custom, want", [
+    ("recon", False, False, ("standard", "ip_renorm")),
+    ("recon", True, False, ("ip_renorm", "standard")),
+    ("imas", True, False, ("ip_renorm",)),
+    ("imas", True, True, ("ip_renorm", "standard"))])
+def test_default_routes_are_every_route_the_configuration_can_use(
+        src, jind, custom, want):
+    """The g-file path runs either draw route; the modelling-source path
+    refuses the standard one unless the workflow is ``custom``."""
+    from bouquet.config import (GenerationConfig, ImasSource,
+                                ReconstructionSource)
+    from bouquet.run import Bouquet
+    gc = GenerationConfig()
+    gc.perturb_jind_in_anchor = jind
+    if custom:
+        gc.workflow = "custom"
+    source = (ReconstructionSource.__new__(ReconstructionSource)
+              if src == "recon" else ImasSource.__new__(ImasSource))
+    b = Bouquet.__new__(Bouquet)
+    b.config = SimpleNamespace(generation=gc, source=source)
+    assert b._sigma0_draw_routes() == want
