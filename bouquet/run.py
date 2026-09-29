@@ -4655,6 +4655,8 @@ class Bouquet:
                     # bring them into this (positive) frame; -1 = reversed-Ip
                     # source.  current_direction_sign above is read AFTER it.
                     source_current_sign=float(getattr(bl, "source_current_sign", 1.0)),
+                    source_current_sign_origin=getattr(
+                        bl, "source_current_sign_origin", None),
                     affine_pprime_term_c_signed=float(_c_signed),
                     fsa_roundtrip_Ip=_ip_roundtrip,
                     fsa_roundtrip_err_pct=_rt_err,
@@ -5555,6 +5557,8 @@ class Bouquet:
                        bs_scale=float(getattr(bl, "bs_scale", 1.0)),
                        ohm_scale=float(getattr(bl, "ohm_scale", 1.0)),
                        source_current_sign=float(getattr(bl, "source_current_sign", 1.0)),
+                       source_current_sign_origin=getattr(
+                           bl, "source_current_sign_origin", None),
                        source_b0_sign=getattr(bl, "source_b0_sign", None))
         if getattr(bl, "ip_closure", None):
             metrics["ip_closure"] = dict(bl.ip_closure)
@@ -6986,7 +6990,9 @@ class Bouquet:
             stamp_source_orientation(
                 header, scan_key=gc.scan_key,
                 current_sign=float(getattr(bl, "source_current_sign", 1.0)),
-                b0_sign=getattr(bl, "source_b0_sign", None))
+                b0_sign=getattr(bl, "source_b0_sign", None),
+                current_sign_origin=getattr(bl, "source_current_sign_origin",
+                                            None))
 
         return self.diagnostics
 
