@@ -49,6 +49,9 @@ class Bouquet:
         self._resolved_uncertainty = None         # resolved sigma profiles + length scales
         self.diagnostics: Optional[list] = None   # generate() per-draw output
         self.generation_log: Optional[str] = None # captured generate() solver chatter
+        # generate(): one record per REJECTED draw attempt (reason code, stage,
+        # error) -- never archived, never counted toward until-N
+        self.draw_rejections: list = []
         self._selection = None                    # filter() result
 
     # ── constructors ----------------------------------------------------
@@ -5441,6 +5444,7 @@ class Bouquet:
         from .jbs_loop import jbs_settings as _jbs_settings
         _jbs_draw = _jbs_settings(gc, draw=True)
         verbose = bool(getattr(self.config, "verbose", False))
+        _rejections = []
         with capture_native_output(enabled=not verbose) as _cap:
             self.diagnostics = generate_bouquet(
                 self.mygs, np.asarray(bl.psi_N, dtype=float), n_equils, header,
@@ -5536,8 +5540,29 @@ class Bouquet:
                 # Self-consistent bootstrap: the per-draw loop settings (None
                 # -> the legacy frozen-SWB draws, bit for bit).
                 jbs_loop=(_jbs_draw if _jbs_draw["enabled"] else None),
+                rejection_log=_rejections,
             )
         self.generation_log = _cap["text"] or None
+        self.draw_rejections = list(_rejections)
+
+        # Rejected draw attempts, OUTSIDE the capture: a draw the j_BS loop
+        # (or the coil-saturation guard, or the homotopy) rejected is never
+        # archived and never counted, so the only trace of it is here.
+        from .TokaMaker_interface import _rejection_summary
+        _n_arch = len(self.diagnostics or [])
+        _summ = _rejection_summary(self.draw_rejections,
+                                   len(self.draw_rejections) + _n_arch,
+                                   _n_arch)
+        print(f"[generate] {_summ}")
+        _loop_codes = ("jbs_not_converged", "coil_saturation_jbs_loop",
+                       "jbs_post_homotopy", "coil_saturation_post_homotopy",
+                       "jbs_post_homotopy_error")
+        _n_loop = sum(1 for r in self.draw_rejections
+                      if r.get("reason") in _loop_codes)
+        if _n_loop:
+            print(f"[generate] {_n_loop} of them rejected by the "
+                  "self-consistent j_BS loop stage or its coil-saturation "
+                  "guard; per-attempt records: Bouquet.draw_rejections")
 
         # until-N outcome, OUTSIDE the capture: on the default quiet path the
         # in-loop prints and generate_bouquet's cap-missed RuntimeWarning were

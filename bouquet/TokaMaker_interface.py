@@ -91,7 +91,70 @@ ANCHOR_MASKED_FAILURES = {"recon_anchor_fallback": 0, "band_resample": 0,
                           # jphi-linterp baseline solve, whose failure silently
                           # reverts every per-draw boundary/l_i diagnostic to
                           # recon's inverse-mode reference.
-                          "jphi_baseline": 0}
+                          "jphi_baseline": 0,
+                          # a Fix C band resample whose self-consistent j_BS
+                          # loop did not converge (JBSNotConverged): the draw
+                          # moves on to the next resample, so it is counted
+                          # under its own name, not as a band_resample
+                          # solver failure
+                          "jbs_band_resample": 0}
+
+
+# ---- per-draw rejection records (generate_bouquet) ----
+#: Reason codes of a REJECTED draw attempt (never archived, never counted
+#: toward until-N).  The j_BS-loop ones are separate codes so a loop rejection
+#: is never read as a GS/homotopy failure.
+DRAW_REJECTION_REASONS = {
+    "jbs_not_converged": "the draw's self-consistent j_BS loop did not "
+                         "converge (anchor, Fix C or l_i-candidate loop)",
+    "coil_saturation_jbs_loop": "a j_BS loop pass under the hard coil bounds "
+                                "ended with a coil on its bound",
+    "jbs_post_homotopy": "the post-homotopy j_BS passes did not bring the "
+                         "draw back inside the loop tolerances",
+    "coil_saturation_post_homotopy": "a post-homotopy j_BS re-solve ended "
+                                     "with a coil on its bound",
+    "jbs_post_homotopy_error": "the post-homotopy j_BS stage raised",
+    "homotopy_saturated": "the first homotopy pass was saturated (no looser "
+                          "pass to roll back to)",
+    "homotopy_infeasible": "the first homotopy pass failed to solve",
+    "perturb_failed": "the perturbed solve failed (GS / sampler / other)",
+    "post_perturb_failed": "an unexpected failure after the perturbed solve",
+}
+
+
+def _draw_rejection_reason(exc, stage):
+    """The reason code of a draw rejected by ``exc`` at ``stage``
+    (``"perturb"`` or ``"post_homotopy"``); see
+    :data:`DRAW_REJECTION_REASONS`."""
+    from .jbs_loop import JBSNotConverged
+    if stage == "post_homotopy":
+        if isinstance(exc, CoilSaturated):
+            return "coil_saturation_post_homotopy"
+        if isinstance(exc, JBSNotConverged):
+            return "jbs_post_homotopy"
+        return "jbs_post_homotopy_error"
+    if isinstance(exc, CoilSaturated):
+        return "coil_saturation_jbs_loop"
+    if isinstance(exc, JBSNotConverged):
+        return "jbs_not_converged"
+    return "perturb_failed"
+
+
+def _rejection_summary(rejections, n_attempts, n_archived, masked=None):
+    """One line: attempts, archived, rejected by reason (+ masked loop
+    failures that did not reject a draw)."""
+    from collections import Counter
+    c = Counter(r["reason"] for r in rejections)
+    by = (", ".join(f"{k}={v}" for k, v in sorted(c.items()))
+          if c else "none")
+    txt = (f"{n_attempts} attempt(s): {n_archived} archived, "
+           f"{len(rejections)} rejected (not archived, not counted) -- by "
+           f"reason: {by}")
+    if masked:
+        _m = ", ".join(f"{k}={v}" for k, v in sorted(masked.items()) if v)
+        if _m:
+            txt += f"; masked inside kept draws: {_m}"
+    return txt
 
 
 def sigma0_reference_scale(jBS_scale_range):
@@ -2763,7 +2826,8 @@ def perturb_kinetic_equilibrium(
         # equilibrium, iterated to self-consistency with the draw's inductive
         # current (bouquet.jbs_loop).  Same state-anchor hygiene (coil bounds
         # cleared, weak exploratory coil reg) as the legacy branch.
-        from .jbs_loop import run_jbs_loop, residual_weights
+        from .jbs_loop import (run_jbs_loop, residual_weights,
+                               JBSNotConverged)
         _stashed_bounds = getattr(mygs, '_coil_drift_bounds', None)
         if _stashed_bounds is not None:
             mygs.set_coil_bounds(None)
@@ -2935,7 +2999,13 @@ def perturb_kinetic_equilibrium(
                 except CoilSaturated:
                     raise              # a saturated bounded solve: reject
                 except Exception as _rs_exc:
-                    _count_masked_anchor_failure("band_resample", _rs_exc)
+                    # a resample whose j_BS loop did not converge is counted
+                    # under its own name, never as a band_resample solver
+                    # failure (the draw moves on to the next resample)
+                    _count_masked_anchor_failure(
+                        "jbs_band_resample"
+                        if isinstance(_rs_exc, JBSNotConverged)
+                        else "band_resample", _rs_exc)
                     continue
                 spike_profile = _jl_res["jbs_used"]
                 full_j_BS = _jl_state["full"]
@@ -4361,6 +4431,9 @@ def generate_bouquet(
     # settings dict of bouquet.jbs_loop.jbs_settings(draw=True), or None (the
     # legacy frozen-SWB draws, bit for bit).
     jbs_loop=None,
+    # A list to fill with one record per REJECTED draw attempt (reason code,
+    # stage, error); None keeps them internal (still printed in the summary).
+    rejection_log=None,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -4518,11 +4591,35 @@ def generate_bouquet(
         much lower than ``soft_reg_weight`` so the VSC has freedom to
         do vertical-mode control work without being heavily penalized.
 
+    rejection_log : list or None
+        Filled with one dict per rejected draw attempt: ``draw`` (attempt
+        index), ``reason`` (a :data:`DRAW_REJECTION_REASONS` code -- the
+        j_BS-loop rejections have their own codes), ``stage``,
+        ``error_type``, ``message`` and, for a coil saturation, ``info``.  A
+        rejected draw is never archived and never counted toward until-N.
+        The run ends with a one-line summary by reason either way.
+
     Returns
     -------
     list[dict]
         Diagnostics from each equilibrium.
     """
+    # ---- rejected draw attempts: one record each, a summary at the end ----
+    _rejections = rejection_log if rejection_log is not None else []
+    _masked_at_start = dict(ANCHOR_MASKED_FAILURES)
+
+    def _reject(count_, reason, stage, exc=None, message=None):
+        _r = dict(draw=int(count_), reason=str(reason), stage=str(stage),
+                  error_type=(None if exc is None else type(exc).__name__),
+                  message=str(message if message is not None
+                              else (exc if exc is not None else ""))[:500])
+        if isinstance(exc, CoilSaturated):
+            _r["info"] = dict(exc.info)
+        _rejections.append(_r)
+        print(f"  [draw-rejected] attempt {int(count_) + 1}: {_r['reason']} "
+              f"({_r['stage']}): {_r['message'][:200]}", flush=True)
+        return _r
+
     # ---- the reproducibility contract: ONE Generator per run ----------
     # `seed` is consumed exactly here and nowhere else.  The resulting
     # Generator is threaded explicitly into every draw site -- the per-draw
@@ -6000,6 +6097,8 @@ def generate_bouquet(
             _err_short = str(e).strip().splitlines()[-1] if str(e) else type(e).__name__
             print(f"\n  STOPPED: {type(e).__name__}: {_err_short}")
             print(f"  Skipping equilibrium {count+1}/{_max_attempts}.")
+            _reject(count, _draw_rejection_reason(e, "perturb"), "perturb",
+                    exc=e, message=_err_short)
             _skl = os.environ.get('BQ_SKIPLOG')
             if _skl:
                 with open(_skl, 'a') as _skf:
@@ -6072,6 +6171,7 @@ def generate_bouquet(
         if coil_drift is not None and _recon_Ip is not None:
             _ip_aligned = False
             _post_align_failed = False
+            _post_align_reason = None      # (code, stage, exc-or-message)
             # Per-draw Ip-secant alignment was removed (2026-05): the OFT
             # jphi-linterp cut-cell fix + the gs solver outer loop hold Ip to
             # <0.05% of target natively, so re-solving each draw to nudge Ip
@@ -6327,6 +6427,9 @@ def generate_bouquet(
                                     # (even Pass 1 saturated).  Reject
                                     # the draw entirely.
                                     _post_align_failed = True
+                                    _post_align_reason = (
+                                        "homotopy_saturated", "homotopy",
+                                        f"{_label}: {'; '.join(_which)}")
                                 else:
                                     # Roll back to last good pass and
                                     # re-solve so mygs's FF'/P' state
@@ -6388,6 +6491,9 @@ def generate_bouquet(
                             if _final_pass_idx < 0:
                                 # First pass failed -> draw is rejected
                                 _post_align_failed = True
+                                _post_align_reason = (
+                                    "homotopy_infeasible", "homotopy",
+                                    _hb_exc)
                             else:
                                 # Roll back to last successful pass and
                                 # re-solve so mygs's internal FF'/P'
@@ -6467,6 +6573,10 @@ def generate_bouquet(
                                         f"{type(_ph_exc).__name__}: "
                                         f"{str(_ph_exc)[:300]}\n")
                             _post_align_failed = True
+                            _post_align_reason = (
+                                _draw_rejection_reason(_ph_exc,
+                                                       "post_homotopy"),
+                                "post-homotopy j_BS", _ph_exc)
                     mygs.set_coil_bounds(None)
                     _report_bnd("after homotopy")
 
@@ -6509,8 +6619,19 @@ def generate_bouquet(
             except Exception as _post_exc:
                 print(f"  [post-perturb] unexpected failure: {_post_exc}")
                 _post_align_failed = True
+                _post_align_reason = ("post_perturb_failed", "post-perturb",
+                                      _post_exc)
 
             if _post_align_failed:
+                _pr_code, _pr_stage, _pr_what = (
+                    _post_align_reason if _post_align_reason is not None
+                    else ("post_perturb_failed", "post-perturb",
+                          "rejected without a recorded reason"))
+                _reject(count, _pr_code, _pr_stage,
+                        exc=(_pr_what if isinstance(_pr_what, BaseException)
+                             else None),
+                        message=(None if isinstance(_pr_what, BaseException)
+                                 else _pr_what))
                 # Reset to baseline and skip this draw (treat as rejected).
                 try:
                     # Prefer full equilibrium-object restore when
@@ -6965,6 +7086,11 @@ def generate_bouquet(
         print(f"\n[until-N] WARNING: {_msg}")
         warnings.warn(_msg, RuntimeWarning, stacklevel=2)
 
+    _masked_run = {k: ANCHOR_MASKED_FAILURES[k] - _masked_at_start.get(k, 0)
+                   for k in ANCHOR_MASKED_FAILURES}
+    print("\n[draw summary] " + _rejection_summary(
+        _rejections, len(_rejections) + len(all_diagnostics),
+        len(all_diagnostics), masked=_masked_run), flush=True)
     return all_diagnostics
 
 
