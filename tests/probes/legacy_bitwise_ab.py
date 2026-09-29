@@ -6,11 +6,12 @@ Usage (on a machine with OFT; nothing here runs in the test suite)::
 
     python tests/probes/legacy_bitwise_ab.py <tree_before> <tree_after> <outdir>
 
-For each tree, in a fresh interpreter with ``PYTHONPATH=<tree>``, it runs on
-the synthetic D3D-like example with ``jbs_self_consistent=False`` and a fixed
-seed: the g-file reconstruction, ``verify_sigma0_consistency()`` and
-``generate(n=2)``; then the modelling-source (OMAS) diff baseline and
-``generate(n=1)``.  It then compares the two runs' Baseline arrays, the sigma=0
+For each tree it runs on the synthetic D3D-like example with
+``jbs_self_consistent=False`` and a fixed seed, each part in its OWN fresh
+interpreter with ``PYTHONPATH=<tree>`` (the solver environment can be created
+only once per interpreter): part ``rec`` -- the g-file reconstruction,
+``verify_sigma0_consistency()`` and ``generate(n=2)``; part ``imas`` -- the
+modelling-source (OMAS) diff baseline and ``generate(n=1)``.  It then compares the two runs' Baseline arrays, the sigma=0
 check's numbers and the two HDF5 archives dataset by dataset and numeric
 attribute by numeric attribute (``np.array_equal``; provenance/time-stamp
 strings excluded), and writes ``<outdir>/legacy_ab.json`` with every
@@ -30,7 +31,7 @@ _SKIP_ATTRS = ("config_json", "created", "timestamp", "bouquet_version",
                "generation_provenance", "git", "oft_build", "wall")
 
 
-def _child(tree, outdir, tag):
+def _child(tree, outdir, tag, part):
     import numpy as np
     sys.path.insert(0, tree)
     oft = os.environ.get("OFT_PYTHONPATH")
@@ -43,6 +44,17 @@ def _child(tree, outdir, tag):
     pf = os.path.join(_EXAMPLE, "D3Dlike_Hmode_baseline.peqdsk")
     mesh = os.path.join(_EXAMPLE, "DIIID_mesh.h5")
     omas = os.path.join(_EXAMPLE, "D3Dlike_baseline_omas.json")
+    if part == "rec":
+        _child_rec(bq, np, res, geq, pf, mesh, outdir, tag)
+    elif part == "imas":
+        _child_imas(bq, np, res, omas, mesh, outdir, tag)
+    else:
+        raise SystemExit(f"unknown part {part!r}")
+    with open(os.path.join(outdir, f"{tag}_{part}.json"), "w") as fh:
+        json.dump(res, fh)
+
+
+def _child_rec(bq, np, res, geq, pf, mesh, outdir, tag):
     b = bq.Bouquet.from_geqdsk(geq, profiles=pf, mesh=mesh, nthreads=1,
                                header=os.path.join(outdir, f"{tag}_rec"),
                                n_draws=2)
@@ -57,6 +69,9 @@ def _child(tree, outdir, tag):
     res["recon_sigma0"] = {k: float(s0[k]) for k in (
         "max_dev", "rms_dev", "max_dev_frac") if k in s0}
     b.generate()
+
+
+def _child_imas(bq, np, res, omas, mesh, outdir, tag):
     bi = bq.Bouquet.from_imas(omas, mesh=mesh, time=2.3043, n_draws=1,
                               nthreads=1,
                               header=os.path.join(outdir, f"{tag}_imas"))
@@ -68,8 +83,6 @@ def _child(tree, outdir, tag):
                             for k in ("j_phi", "j_inductive", "j_BS")}
     res["imas_l_i_target"] = float(bli.l_i_target)
     bi.generate()
-    with open(os.path.join(outdir, f"{tag}.json"), "w") as fh:
-        json.dump(res, fh)
 
 
 def _h5_diff(a, b):
@@ -110,18 +123,24 @@ def _h5_diff(a, b):
 def main(before, after, outdir):
     os.makedirs(outdir, exist_ok=True)
     for tag, tree in (("before", before), ("after", after)):
-        env = dict(os.environ, PYTHONPATH=tree, OMP_NUM_THREADS="1",
-                   MPLBACKEND="Agg")
-        p = subprocess.run([sys.executable, os.path.abspath(__file__),
-                            "--child", tree, outdir, tag], env=env,
-                           capture_output=True, text=True)
-        if p.returncode != 0:
-            raise SystemExit(f"{tag} run failed:\n{p.stderr[-4000:]}")
+        for part in ("rec", "imas"):
+            env = dict(os.environ, PYTHONPATH=tree, OMP_NUM_THREADS="1",
+                       MPLBACKEND="Agg")
+            p = subprocess.run([sys.executable, os.path.abspath(__file__),
+                                "--child", tree, outdir, tag, part], env=env,
+                               capture_output=True, text=True)
+            if p.returncode != 0:
+                raise SystemExit(f"{tag}/{part} run failed:\n"
+                                 f"{p.stderr[-4000:]}")
     out = {"diffs": {}}
-    with open(os.path.join(outdir, "before.json")) as fa, \
-            open(os.path.join(outdir, "after.json")) as fb:
-        ja, jb = json.load(fa), json.load(fb)
-    out["diffs"]["in_memory"] = sorted(k for k in ja if ja[k] != jb.get(k))
+    ja, jb = {}, {}
+    for part in ("rec", "imas"):
+        with open(os.path.join(outdir, f"before_{part}.json")) as fa, \
+                open(os.path.join(outdir, f"after_{part}.json")) as fb:
+            ja.update(json.load(fa))
+            jb.update(json.load(fb))
+    out["diffs"]["in_memory"] = sorted(
+        k for k in set(ja) | set(jb) if ja.get(k) != jb.get(k))
     for h in ("rec", "imas"):
         out["diffs"][h] = _h5_diff(os.path.join(outdir, f"before_{h}.h5"),
                                    os.path.join(outdir, f"after_{h}.h5"))
@@ -134,6 +153,6 @@ def main(before, after, outdir):
 
 if __name__ == "__main__":
     if sys.argv[1] == "--child":
-        _child(sys.argv[2], sys.argv[3], sys.argv[4])
+        _child(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
     else:
         sys.exit(main(*sys.argv[1:4]))
