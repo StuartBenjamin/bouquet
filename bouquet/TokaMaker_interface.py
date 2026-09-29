@@ -2089,7 +2089,8 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target,
         _s = mygs.copy_eq()
         _w, _x, _kk = residual_weights(_s, psi_N, psi_pad)
         return dict(w=_w, x=_x, snap=_s, li=float(mygs.get_stats(
-            li_normalization='iter', lcfs_pad=psi_pad)['l_i']))
+            li_normalization='iter', lcfs_pad=psi_pad)['l_i']),
+            j_solved=state["jphi"])   # read only by the opt-in current gate
 
     def _eval(meas):
         _sp, _fu, _dd = compose(meas["snap"])
@@ -3994,7 +3995,9 @@ def perturb_kinetic_equilibrium(
                     if _redo is None:
                         raise _GSReject()
                     _gs.update(_redo)
-                return _jl_meas()
+                # j_solved: read only by the opt-in current gate
+                return dict(_jl_meas(), j_solved=np.asarray(
+                    _gs.get("output_jphi", output_jphi), dtype=float))
 
             try:
                 _gsr = run_jbs_loop(
@@ -7720,7 +7723,9 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
             _snap = mygs.copy_eq()
             _w, _x, _kind = residual_weights(_snap, eqdsk.psi_N, psi_pad)
             return dict(w=_w, x=_x, snap=_snap, li=float(mygs.get_stats(
-                li_normalization='iter', lcfs_pad=psi_pad)['l_i']))
+                li_normalization='iter', lcfs_pad=psi_pad)['l_i']),
+                j_solved=(_st["fm"]["j_ind_li"]   # opt-in current gate only
+                          + _st["fm"]["j_BS_isolated"]))
 
         def _jbs_eval(meas):
             return _evaluate_jBS(meas["snap"], eqdsk.psi_N, ne, te, ni, ti,
@@ -7898,7 +7903,8 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                 _s = mygs.copy_eq()
                 _w2, _x2, _k2 = residual_weights(_s, eqdsk.psi_N, psi_pad)
                 return dict(w=_w2, x=_x2, snap=_s, li=float(mygs.get_stats(
-                    li_normalization='iter', lcfs_pad=psi_pad)['l_i']))
+                    li_normalization='iter', lcfs_pad=psi_pad)['l_i']),
+                    j_solved=np.asarray(_out, dtype=float))  # current gate
 
             _w0 = float(jbs_loop["relax"])
             _res_pc = run_jbs_loop(

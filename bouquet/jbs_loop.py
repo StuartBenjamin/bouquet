@@ -33,7 +33,21 @@ Two relaxations, both of the PATH only (at the fixed point ``js = jc`` and
   carries ``beta``, the per-pass gap ``||js - jc|| / ||jc||`` and, next to
   it, the UNRELAXED closure-half residual ``||jc_k - js_k-1|| / ||jc_k||``
   (``= gap / (1 - beta)`` on a blended pass; the gap understates it by
-  ``1 - beta``).  Both are recorded only, never gated.
+  ``1 - beta``).  By default both are recorded only, never gated.
+
+Opt-in current gate (``GenerationConfig.jbs_gate_current_residual``, default
+False; under evaluation).  With it ON a pass also has to satisfy
+``current_residual = ||jc_k - js_k-1||_w / ||jc_k||_w <= rtol_j`` -- computed
+directly from the two arrays: the current the previous pass SOLVED against
+the current this pass's closure composes on the equilibrium that solve
+produced -- on the same two consecutive passes as every other criterion.
+It is measured one pass late (pass 1 cannot count).  A step without the
+relaxer reports its solved current as ``meas["j_solved"]``; a step that
+reports neither stops the loop at once.  It adds a criterion and changes no
+tolerance or ceiling; with it OFF the kernel is bit-identical to the one
+before it existed.  It bounds the closure-half RESIDUAL (the delivered
+current's consistency with its own closure), not the distance to the fixed
+point on a slow monotone mode.
 
 ``step`` and ``evaluate`` are supplied by the caller (the IMAS baseline, the
 structured / MSE closures, a perturbation draw, the geqdsk reconstruction);
@@ -162,6 +176,10 @@ def validate_jbs_settings(gc) -> None:
     if not isinstance(on, (bool, np.bool_)):
         raise ValueError(f"generation.jbs_self_consistent must be a bool, got "
                          f"{on!r}")
+    gate = _get("jbs_gate_current_residual", False)
+    if not isinstance(gate, (bool, np.bool_)):
+        raise ValueError(f"generation.jbs_gate_current_residual must be a "
+                         f"bool, got {gate!r}")
     init = _get("jbs_init", "anchor")
     if init not in _INIT_CHOICES:
         raise ValueError(f"generation.jbs_init must be one of {_INIT_CHOICES},"
@@ -269,7 +287,7 @@ def jbs_settings(gc, *, draw: bool = False) -> dict:
     provenance), so every caller can gate on it.
     """
     validate_jbs_settings(gc)
-    return dict(
+    out = dict(
         enabled=bool(getattr(gc, "jbs_self_consistent", False)),
         init=str(getattr(gc, "jbs_init", "anchor")),
         rtol_j=float(getattr(gc, "jbs_rtol_j", 1e-3)),
@@ -288,6 +306,11 @@ def jbs_settings(gc, *, draw: bool = False) -> dict:
         post_homotopy_passes=int(getattr(gc, "jbs_max_passes_post_homotopy",
                                          JBS_POST_HOMOTOPY_PASSES)),
     )
+    if bool(getattr(gc, "jbs_gate_current_residual", False)):
+        # only present when ON, so the default settings dict (and every
+        # record built from it) is exactly what it was before the flag
+        out["gate_current_residual"] = True
+    return out
 
 
 def tolerances_record(settings: dict) -> dict:
@@ -524,6 +547,92 @@ class CurrentRelaxer:
                 (0.0 if not blended else float("inf"))), blended
 
 
+#: Definition string of the gated closure-half residual (recorded with it).
+CURRENT_GATE_DEFINITION = (
+    "||jc_k - js_{k-1}||_w / ||jc_k||_w, computed directly from the two "
+    "arrays: js_{k-1} is the current pass k-1 SOLVED (the jphi input of its "
+    "solve) and jc_k is the current pass k's closure COMPOSED on the "
+    "equilibrium that solve produced, with the bootstrap evaluated on it "
+    "(relaxed by omega).  It is the closure-half residual of pass k-1's "
+    "solve, measured one pass later (the closure on a solve's geometry is "
+    "only composed by the next pass).  Steps without the relaxer report "
+    "their solved current as meas['j_solved'] (beta not applied, so "
+    "jc_k = js_k).  Pass 1 has no previous solved current and cannot count.  "
+    "Norm and tolerance: the loop's current-weighted L2 norm and jbs_rtol_j.")
+
+
+def criteria_timeline(record: dict) -> dict:
+    """For every ACTIVE criterion of a loop record, the 1-based pass from
+    which it held without a break through the last pass (``None`` when it
+    does not hold on the last pass), and which criterion was the LAST to be
+    met (the latest such pass among the GATED criteria; a list, ties
+    included; ``None`` unless every gated criterion holds on the last pass).
+
+    Works on any record, gate on or off: the closure-half residual is read
+    from ``current_residual`` (gate on) or else from the record-only
+    ``current_residual_unrelaxed``, and is listed in ``gated`` only when the
+    record's criteria say it was a criterion.  Pure bookkeeping.
+    """
+    tol = dict(record.get("tolerances") or {})
+    crit = dict(record.get("criteria") or {})
+    n = int(record.get("n_passes") or 0)
+
+    def _le(v, t):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return False
+        return bool(np.isfinite(f) and f <= float(t))
+
+    series = {}
+    for name, key, tkey in (("r_j", "r_j", "rtol_j"),
+                            ("r_I", "r_I", "rtol_Ip"),
+                            ("dl_i", "dl_i", "tol_li"),
+                            ("dq0", "dq0", "tol_q0")):
+        if crit.get(name) and tkey in tol:
+            series[name] = [_le(v, tol[tkey]) for v in record.get(key, [])]
+    cur = record.get("current_residual")
+    if cur is None:
+        cur = record.get("current_residual_unrelaxed")
+    gated_cur = bool(crit.get("current_residual"))
+    if cur is not None and "rtol_j" in tol and (
+            gated_cur or any(v is not None for v in cur)):
+        series["current_residual"] = [_le(v, tol["rtol_j"]) for v in cur]
+    since = {}
+    for name, oks in series.items():
+        oks = list(oks)[:n]
+        if not oks or not oks[-1]:
+            since[name] = None
+            continue
+        i = len(oks) - 1
+        while i > 0 and oks[i - 1]:
+            i -= 1
+        since[name] = i + 1
+    gated = sorted(k for k in series if k != "current_residual" or gated_cur)
+    last = None
+    if gated and all(since[k] is not None for k in gated):
+        m = max(since[k] for k in gated)
+        last = sorted(k for k in gated if since[k] == m)
+    return dict(met_since_pass=since, last_met=last, gated=gated)
+
+
+def _relative_difference(a, b, w=None, x=None):
+    """``||a - b|| / ||a||`` -- current-weighted with ``w``/``x`` when the
+    shapes match (the loop's norm), plain L2 otherwise; ``None`` on a shape
+    mismatch."""
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    if a.shape != b.shape:
+        return None
+    d = a - b
+    if (w is not None and x is not None
+            and np.shape(w) == a.shape == np.shape(x)):
+        n, dn = weighted_norm(a, w, x), weighted_norm(d, w, x)
+    else:
+        n, dn = float(np.linalg.norm(a)), float(np.linalg.norm(d))
+    return (dn / n) if n > 0.0 else (0.0 if dn == 0.0 else float("inf"))
+
+
 def _step_takes_relax(step) -> bool:
     import inspect
     try:
@@ -649,6 +758,32 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
     except Exception:
         rec["evaluate_jBS_version"] = None
     rec["oft_build"] = oft_build_info()
+    # ---- opt-in gate on the closure-half residual (jbs_gate_current_residual)
+    # Everything below is added ONLY when the gate is on, so a default record
+    # is key-for-key and value-for-value what it was before the flag existed.
+    gate_cur = bool(settings.get("gate_current_residual", False))
+    if gate_cur:
+        rec["criteria"]["current_residual"] = True
+        rec["current_gate"] = dict(
+            active=True, tolerance=float(settings["rtol_j"]),
+            tolerance_setting="jbs_rtol_j",
+            source=("the pass's CurrentRelaxer (jc_k and js_k-1)"
+                    if takes_relax else
+                    "the step's meas['j_solved'] (beta not applied)"),
+            definition=CURRENT_GATE_DEFINITION)
+        rec["current_residual"] = []
+        rec["current_residual_estimate"] = []
+        rec["current_residual_estimate_definition"] = (
+            "current_gap / (1 - beta) on a blended pass (None otherwise): "
+            "the estimate the direct current_residual is checked against")
+        rec["current_residual_direct_over_estimate"] = []
+        rec["current_residual_ok"] = []
+        rec["current_residual_unrelaxed_definition"] = (
+            "||jc_k - js_{k-1}||_w / ||jc_k||_w = current_gap / (1 - beta) "
+            "on a blended pass: the unrelaxed closure-half residual; with "
+            "jbs_gate_current_residual=True the same quantity is GATED as "
+            "current_residual")
+    _js_prev_step = None                # j_solved of the previous pass
 
     def _nonfinite(k, what, arr, grid):
         """Raise :class:`JBSNonFinite` at the first non-finite node of
@@ -718,6 +853,38 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         if gate_q0:
             ok = ok and (dq0 is not None and dq0 <= settings["tol_q0"])
         ok = bool(ok)
+        if relaxer is not None:
+            _gap, _bl = relaxer.gap(meas.get("w"), meas.get("x"))
+            _unrel = relaxer.unrelaxed_residual(meas.get("w"), meas.get("x"))
+            relaxer.commit()
+        else:
+            _gap, _bl, _unrel = None, False, None
+        _cres = None
+        if gate_cur:
+            if relaxer is not None:
+                _cres = _unrel
+                _est = ((_gap / (1.0 - beta)) if (_bl and _gap is not None
+                                                  and beta < 1.0) else None)
+            else:
+                _js_now = meas.get("j_solved")
+                if _js_now is not None:
+                    _js_now = np.asarray(_js_now, dtype=float).copy()
+                    if _js_prev_step is not None:
+                        _cres = _relative_difference(
+                            _js_now, _js_prev_step, meas.get("w"),
+                            meas.get("x"))
+                _js_prev_step = _js_now
+                _est = None
+            _ratio = (float(_cres / _est) if (_cres is not None
+                                              and _est is not None
+                                              and _est > 0.0) else None)
+            _cok = bool(_cres is not None and np.isfinite(_cres)
+                        and _cres <= settings["rtol_j"])
+            ok = bool(ok and _cok)
+            rec["current_residual"].append(_cres)
+            rec["current_residual_estimate"].append(_est)
+            rec["current_residual_direct_over_estimate"].append(_ratio)
+            rec["current_residual_ok"].append(_cok)
         rec["omega"].append(None if omega_used_for_current is None
                             else float(omega_used_for_current))
         rec["r_j"].append(res["r_j"])
@@ -731,12 +898,6 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         rec["li"].append(li_new)
         rec["q0"].append(q0_new)
         rec["pass_ok"].append(ok)
-        if relaxer is not None:
-            _gap, _bl = relaxer.gap(meas.get("w"), meas.get("x"))
-            _unrel = relaxer.unrelaxed_residual(meas.get("w"), meas.get("x"))
-            relaxer.commit()
-        else:
-            _gap, _bl, _unrel = None, False, None
         rec["current_gap"].append(_gap)
         rec["current_blended"].append(bool(_bl))
         rec["current_residual_unrelaxed"].append(_unrel)
@@ -752,8 +913,12 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
               + ("" if omega_used_for_current is None
                  else f" omega={omega_used_for_current:.3f}")
               + ("" if not _bl else f" |js-jc|/|jc|={_gap:.2e}")
-              + ("" if (not _bl or _unrel is None)
+              + ("" if (not _bl or _unrel is None or gate_cur)
                  else f" (unrelaxed {_unrel:.2e}, record only)")
+              + ("" if not gate_cur else
+                 (" cur_res=n/a (gated)" if _cres is None else
+                  f" cur_res={_cres:.2e} (gated, tol "
+                  f"{settings['rtol_j']:.0e})"))
               + (" ok" if ok else ""), flush=True)
         # ---- a pass that can never count: stop now, not at the ceiling ----
         _never = None
@@ -766,6 +931,16 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         elif (not np.any(J != 0.0)) and np.any(jbs != 0.0):
             _never = ("the evaluated bootstrap J is identically zero while "
                       "the iterate is not (r_j is infinite)")
+        elif gate_cur and _cres is None and (
+                k >= 1 or (relaxer is None
+                           and meas.get("j_solved") is None)):
+            _never = ("the closure-half current residual cannot be "
+                      "evaluated on this step although it is a convergence "
+                      "criterion here (jbs_gate_current_residual=True): "
+                      + ("the step did not pass its current through the "
+                         "relaxer" if relaxer is not None else
+                         "the step takes no relaxer and returned no "
+                         "meas['j_solved']"))
         if _never is not None:
             rec["stop_reason"] = (f"pass {k + 1}/{K}: {_never} -- "
                                   "convergence is impossible, stopped at once "
@@ -831,6 +1006,12 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         current_residual_unrelaxed=(rec["current_residual_unrelaxed"][-1]
                                     if rec["current_residual_unrelaxed"]
                                     else None))
+    if gate_cur:
+        rec["final"]["current_residual"] = (rec["current_residual"][-1]
+                                            if rec["current_residual"]
+                                            else None)
+        rec["criteria_timeline"] = criteria_timeline(rec)
+        rec["last_criterion_met"] = rec["criteria_timeline"]["last_met"]
     out = dict(jbs_used=np.asarray(jbs_used, dtype=float),
                J_final=(None if J is None else np.asarray(J, dtype=float)),
                meas_final=meas, converged=bool(rec["converged"]), record=rec)
@@ -839,7 +1020,9 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
                f" did not converge: {rec['stop_reason']}; residual history "
                f"r_j={_fmt_hist(rec['r_j'])} r_I={_fmt_hist(rec['r_I'])}"
                + ("" if not gate_li else f" dl_i={_fmt_hist(rec['dl_i'])}")
-               + ("" if not gate_q0 else f" dq0={_fmt_hist(rec['dq0'])}"))
+               + ("" if not gate_q0 else f" dq0={_fmt_hist(rec['dq0'])}")
+               + ("" if not gate_cur else
+                  f" current_residual={_fmt_hist(rec['current_residual'])}"))
         rec["fail_message"] = msg
         print("  [jbs-loop] " + msg, flush=True)
         if raise_on_fail:

@@ -1032,6 +1032,22 @@ class GenerationConfig:
     # re-run multi-solve fits, nor in the MSE chord steps, whose
     # linearisation is centred on the closure's own current.
     jbs_relax_current: float = 0.7
+    # OPT-IN, under evaluation (default False = the loop exactly as without
+    # this field).  True ADDS one convergence criterion, on the same two
+    # consecutive passes as the others: the closure-half residual
+    # ||jc_k - js_k-1||_w / ||jc_k||_w -- the current the previous pass
+    # SOLVED against the current this pass's closure composes on the
+    # equilibrium that solve produced (with the bootstrap evaluated on it),
+    # computed directly from the two arrays -- must be <= jbs_rtol_j (same
+    # current-weighted norm, same tolerance; nothing is relaxed and the pass
+    # ceilings are unchanged).  It is measured one pass late, so pass 1 cannot
+    # count.  Steps that do not take the relaxer report their solved current
+    # (meas["j_solved"]); a step that reports neither stops the loop at once
+    # under the failure policy.  It bounds the RESIDUAL (the delivered
+    # current's consistency), not the distance to the fixed point on a slow
+    # monotone mode.  Not applied by the MSE chord stage or the post-homotopy
+    # / post-corrective acceptance checks, which have their own tests.
+    jbs_gate_current_residual: bool = False
     # Non-convergence: "raise" (default) -> jbs_loop.JBSNotConverged carrying
     # the residual history; "flag" -> keep the last iterate, record
     # jbs_converged=False plus a closure_limited reason (drivers then exclude
