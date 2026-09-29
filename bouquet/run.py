@@ -1402,34 +1402,73 @@ class Bouquet:
     # ── closure_channel="structured": MSE pitch angles ─────────────────────
     @staticmethod
     def _check_structured_mse_reachable(cfg):
-        """Refuse ``structured_mse_required`` on a path that never reads MSE.
+        """Refuse MSE settings on a path that never reads them.
 
         The MSE term exists only in the structured closure, which runs only on
         the IMAS path with ``recalculate_j_BS``, ``jBS_baseline_mode="ohmic"``
-        and ``closure_channel="structured"``.  A required MSE constraint on any
-        other configuration would be silently ignored -- exactly what the flag
-        is there to prevent.
+        and ``closure_channel="structured"``.  Anywhere else ``mse_data`` (or
+        any non-default ``structured_mse_*`` knob) would be accepted and never
+        used -- the class of silent no-op the ``closure_channel`` guard
+        refuses, and refused here the same way:
+
+        * ``structured_mse_required=True`` -- ALWAYS raises: a required
+          constraint that cannot be applied is not something a workflow
+          opt-out can waive.
+        * otherwise -- raises ``ValueError``; ``workflow='custom'`` (or the
+          deprecated ``allow_unsafe_workflow=True``) downgrades it to a printed
+          WARN, exactly as for every other workflow-guard problem, and the MSE
+          term is then NOT applied.
         """
-        from .config import ImasSource
+        from dataclasses import MISSING
+
+        from .config import GenerationConfig, ImasSource
         gc = cfg.generation
-        if not bool(getattr(gc, "structured_mse_required", False)):
+        _fields = GenerationConfig.__dataclass_fields__
+        set_knobs = []
+        for name in ("mse_data", "structured_mse_required",
+                     "structured_mse_fd_step", "structured_mse_steps",
+                     "structured_mse_sigma_sys", "structured_mse_min_chords"):
+            dflt = _fields[name].default
+            if dflt is MISSING or not hasattr(gc, name):
+                continue
+            val = getattr(gc, name)
+            if (val is not None if dflt is None else val != dflt):
+                set_knobs.append(name)
+        if not set_knobs:
             return
         why = []
         if not isinstance(cfg.source, ImasSource):
             why.append("the source is not an IMAS source")
         if not bool(getattr(gc, "recalculate_j_BS", False)):
-            why.append("recalculate_j_BS is off")
+            why.append("recalculate_j_BS is off"
+                       + (" (forced off by single_profile_jphi=True)"
+                          if bool(getattr(gc, "single_profile_jphi", False))
+                          else ""))
         if str(getattr(gc, "jBS_baseline_mode", "")) != "ohmic":
             why.append(f"jBS_baseline_mode={gc.jBS_baseline_mode!r} "
                        "(needs 'ohmic')")
         if str(getattr(gc, "closure_channel", "")) != "structured":
             why.append(f"closure_channel={gc.closure_channel!r} "
                        "(needs 'structured')")
-        if why:
+        if not why:
+            return
+        if bool(getattr(gc, "structured_mse_required", False)):
             raise ValueError(
                 "structured_mse_required=True, but the structured closure "
                 "that consumes mse_data will not run: " + "; ".join(why)
                 + ".  Refusing rather than ignoring a required constraint.")
+        msg = (", ".join(set_knobs) + " set, but the structured closure that "
+               "reads mse_data will not run: " + "; ".join(why)
+               + " -- it would otherwise be silently ignored.  Use "
+               "closure_channel='structured' with jBS_baseline_mode='ohmic' "
+               "on an IMAS source, or leave mse_data / structured_mse_* at "
+               "their defaults.")
+        if (str(getattr(gc, "workflow", "")) == "custom"
+                or bool(getattr(gc, "allow_unsafe_workflow", False))):
+            print("WARN: " + msg + " (workflow='custom': continuing; the MSE "
+                  "term is NOT applied)", flush=True)
+            return
+        raise ValueError(msg)
 
     @staticmethod
     def _structured_mse_block(gc):

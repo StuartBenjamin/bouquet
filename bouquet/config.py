@@ -845,7 +845,11 @@ class GenerationConfig:
     #: ``utils.structured_mse_outer``.  With MSE on, the structured trust
     #: weights are an ABSOLUTE ``sigma^-2`` prior (see ``structured_weights``:
     #: their overall scale now matters, and a uniform ladder is sigma = 1).
-    #: Ignored by every other channel.
+    #: On any configuration that never runs the structured closure (another
+    #: channel, a g-file source, jBS_baseline_mode != "ohmic",
+    #: recalculate_j_BS off) a supplied block -- or any non-default
+    #: ``structured_mse_*`` knob -- is REFUSED at prepare_baseline() rather
+    #: than silently ignored; ``workflow='custom'`` downgrades that to a WARN.
     mse_data: Optional[dict] = None
     #: closure_channel="structured": REFUSE (raise) when ``mse_data`` is absent
     #: or unusable (fewer than ``structured_mse_min_chords`` weighted finite
@@ -853,7 +857,9 @@ class GenerationConfig:
     #: MSE-constrained closure cannot be delivered.  Default False keeps the
     #: channel's previous behaviour: no block -> no MSE term; a block that is
     #: unusable -> no MSE term, WARNED and recorded (``structured_mse_status``)
-    #: -- never silently.  Setting it with any other closure channel is refused.
+    #: -- never silently.  Setting it on a configuration that never runs the
+    #: structured closure is refused, and ``workflow='custom'`` does NOT
+    #: downgrade that (a required constraint cannot be waived).
     structured_mse_required: bool = False
     #: closure_channel="structured" + ``mse_data``: forward-difference step of
     #: the tan(gamma) Jacobian, in coefficient units.  A numerical-

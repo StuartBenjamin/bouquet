@@ -1016,10 +1016,74 @@ class TestRequiredReachability:
                         jBS_baseline_mode="ohmic", recalculate_j_BS=True)
         Bouquet._check_structured_mse_reachable(cfg)
 
-    def test_not_required_is_never_checked(self):
+    def test_defaults_are_never_checked(self):
         from bouquet.run import Bouquet
         Bouquet._check_structured_mse_reachable(types.SimpleNamespace(
             source=None, generation=GenerationConfig()))
+
+    @staticmethod
+    def _block():
+        R, Z = _chord_geometry(5)
+        return _mse_block([0.1] * 5, R, Z)
+
+    @pytest.mark.parametrize("kw, match", [
+        (dict(closure_channel="bootstrap", jBS_baseline_mode="ohmic",
+              recalculate_j_BS=True), "closure_channel='bootstrap'"),
+        (dict(closure_channel="structured", jBS_baseline_mode="diff",
+              recalculate_j_BS=True), "jBS_baseline_mode='diff'"),
+        (dict(closure_channel="structured", jBS_baseline_mode="ohmic",
+              recalculate_j_BS=False), "recalculate_j_BS is off"),
+    ])
+    def test_unread_mse_data_is_refused(self, kw, match):
+        from bouquet.run import Bouquet
+        cfg = self._cfg(mse_data=self._block(), **kw)
+        with pytest.raises(ValueError, match="silently ignored") as ei:
+            Bouquet._check_structured_mse_reachable(cfg)
+        assert match in str(ei.value) and "mse_data" in str(ei.value)
+
+    def test_unread_on_a_gfile_source_is_refused(self):
+        from bouquet.run import Bouquet
+        cfg = types.SimpleNamespace(
+            source=None, generation=GenerationConfig(
+                closure_channel="structured", jBS_baseline_mode="ohmic",
+                mse_data=self._block()))
+        with pytest.raises(ValueError, match="not an IMAS source"):
+            Bouquet._check_structured_mse_reachable(cfg)
+
+    def test_a_non_default_knob_alone_is_refused(self):
+        from bouquet.run import Bouquet
+        cfg = self._cfg(structured_mse_steps=2)
+        with pytest.raises(ValueError, match="structured_mse_steps set"):
+            Bouquet._check_structured_mse_reachable(cfg)
+
+    def test_single_profile_jphi_is_named_as_the_cause(self):
+        from bouquet.run import Bouquet
+        cfg = self._cfg(mse_data=self._block(), closure_channel="structured",
+                        jBS_baseline_mode="ohmic", single_profile_jphi=True,
+                        recalculate_j_BS=False)
+        with pytest.raises(ValueError, match="forced off by single_profile"):
+            Bouquet._check_structured_mse_reachable(cfg)
+
+    def test_custom_workflow_downgrades_to_a_warning(self, capsys):
+        from bouquet.run import Bouquet
+        cfg = self._cfg(mse_data=self._block(), closure_channel="bootstrap",
+                        workflow="custom")
+        Bouquet._check_structured_mse_reachable(cfg)
+        out = capsys.readouterr().out
+        assert out.startswith("WARN: ") and "NOT applied" in out
+
+    def test_custom_workflow_does_not_waive_required(self):
+        from bouquet.run import Bouquet
+        cfg = self._cfg(mse_data=self._block(), closure_channel="bootstrap",
+                        structured_mse_required=True, workflow="custom")
+        with pytest.raises(ValueError, match="will not run"):
+            Bouquet._check_structured_mse_reachable(cfg)
+
+    def test_read_mse_data_passes(self):
+        from bouquet.run import Bouquet
+        cfg = self._cfg(mse_data=self._block(), closure_channel="structured",
+                        jBS_baseline_mode="ohmic", recalculate_j_BS=True)
+        Bouquet._check_structured_mse_reachable(cfg)
 
 
 class TestConfig:
