@@ -950,14 +950,16 @@ class GenerationConfig:
     # already ~clean, so flooring is redundant -- and it REGRESSED a stiff
     # high-l_i case (clipping its isolate-edge spike drove yield to 0).
     floor_j_BS: bool = False
-    # LEGACY (the frozen-bootstrap path, jbs_self_consistent=False, and the
-    # jbs_init="swb" A/B init only).  solve_with_bootstrap's fixed Picard pass
+    # DEPRECATED; LEGACY only (the frozen-bootstrap path,
+    # jbs_self_consistent=False).  solve_with_bootstrap's fixed Picard pass
     # count per draw (default 3; there is no convergence test inside it);
     # lowering to 2 trades a little accuracy for speed on large bouquets.
     # NOTE: the IMAS baseline's own SWB call never passed this and always ran
     # OFT's own default (iterations=3); only the draws, the delta-mode cache
     # and verify_sigma0_consistency read it.  With jbs_self_consistent=True
-    # the bootstrap comes from the self-consistent loop and this is unused.
+    # the bootstrap comes from the self-consistent loop and this is IGNORED:
+    # config validation (BouquetConfig) then emits a DeprecationWarning for
+    # any value other than the default.
     swb_iterations: int = 3
     # --- self-consistent bootstrap loop (bouquet.jbs_loop) -------------------
     # True (default): j_BS is re-evaluated (physics.evaluate_jBS: Redl on the
@@ -1062,7 +1064,8 @@ class GenerationConfig:
     capture_npsi: int = 257
     # Compute exact <1/R^2> by flux-surface quadrature (TokaMaker does not
     # expose it) so the conversion is machine-exact rather than using the
-    # <B_phi^2>~=<B^2> bracket (~<1%). Adds ~65 surface traces/draw; set False
+    # <B_phi^2>~=<B^2> bracket (1-2% on a D3D-like plasma, 1.4% at the
+    # bootstrap peak; physics.parallel_to_toroidal). Adds ~65 surface traces/draw; set False
     # to skip that cost (self-validated + graceful fallback either way).
     capture_exact_inv_R2: bool = True
 
@@ -1382,8 +1385,11 @@ class BouquetConfig:
                 "'imas-diff-c', or 'custom'")
         # the self-consistent bootstrap loop's settings (values only; the
         # workflow-level refusals live in Bouquet._validate_workflow)
-        from .jbs_loop import validate_jbs_settings
+        from .jbs_loop import (deprecated_jbs_settings_warning,
+                               validate_jbs_settings)
         validate_jbs_settings(self.generation)
+        # settings the loop ignores (swb_iterations): loud, not silent
+        deprecated_jbs_settings_warning(self.generation, stacklevel=3)
 
     # ── serialization (h5 provenance, per-shot templating, SLURM bundles) ──
     def to_dict(self) -> dict:
@@ -1408,21 +1414,26 @@ class BouquetConfig:
         if stype is None:                       # infer if the discriminator is absent
             stype = "reconstruction" if "geqdsk_path" in srcd else "imas"
         SrcCls = ReconstructionSource if stype == "reconstruction" else ImasSource
-        gend = dict(d.get("generation", {}))
+        gend = _checked_generation_keys(dict(d.get("generation", {})))
         if "jbs_self_consistent" not in gend:
             # A stored config written before the self-consistent bootstrap
             # existed was produced by the frozen-bootstrap path: rebuild it on
             # that path (the default flipped to True afterwards), so replaying
             # an old archive's config_json reproduces what it recorded.
             # to_dict() always writes the field, so a current config never
-            # takes this branch.
+            # takes this branch.  (A misspelt field no longer lands here: an
+            # unknown generation key is refused above.)
             import warnings
             warnings.warn(
                 "config has no generation.jbs_self_consistent (it predates "
                 "the self-consistent bootstrap loop): loading it with "
-                "jbs_self_consistent=False, the frozen-bootstrap behaviour it "
-                "was produced with.  Set the field explicitly to run the "
-                "loop.", UserWarning, stacklevel=2)
+                "jbs_self_consistent=False, the LEGACY frozen-bootstrap "
+                "behaviour it was produced with, so it reproduces its old "
+                "results.  To run the self-consistent bootstrap loop "
+                "instead, opt in explicitly: add "
+                '"jbs_self_consistent": true to the "generation" section of '
+                "the dict/JSON, or set cfg.generation.jbs_self_consistent = "
+                "True after loading.", UserWarning, stacklevel=2)
             gend["jbs_self_consistent"] = False
         return cls(
             source=_build(SrcCls, srcd),
@@ -1477,6 +1488,50 @@ def _decode(v):
     if isinstance(v, list):
         return [_decode(x) for x in v]
     return v
+
+
+#: GenerationConfig fields that existed once and were removed.  An old
+#: stored config may still carry them; they are dropped WITH a warning (they
+#: have no effect on the current code), never mistaken for a typo.
+_RETIRED_GENERATION_KEYS = ("coil_drift_threshold_A", "lock_coils",
+                            "lock_coils_weight")
+
+
+def _checked_generation_keys(gend: dict) -> dict:
+    """Refuse an unknown ``generation`` key in a config dict.
+
+    A misspelt field (``jbs_self_consistant``) used to be dropped silently by
+    :func:`_build`, leaving the default in force -- for the loop switch, with
+    a warning that wrongly said the config predates the loop.  Every key must
+    now be a :class:`GenerationConfig` field (``init=False`` recorded fields
+    included) or one of :data:`_RETIRED_GENERATION_KEYS` (dropped, with a
+    warning).  The refusal names the key and the nearest valid one.
+    """
+    import difflib
+    import warnings
+    names = {f.name for f in _dc.fields(GenerationConfig)}
+    retired = [k for k in gend if k in _RETIRED_GENERATION_KEYS]
+    unknown = sorted(k for k in gend
+                     if k not in names and k not in _RETIRED_GENERATION_KEYS)
+    if unknown:
+        parts = []
+        for k in unknown:
+            near = difflib.get_close_matches(str(k), sorted(names), n=1,
+                                             cutoff=0.0)
+            parts.append(f"{k!r} (nearest valid key: {near[0]!r})" if near
+                         else repr(k))
+        raise ValueError(
+            "config generation section has unknown key(s): "
+            + ", ".join(parts) + ".  Refusing to drop them silently (a "
+            "misspelt field would leave its default in force); fix the "
+            "spelling or remove the key.")
+    if retired:
+        warnings.warn(
+            "config generation section carries retired field(s) "
+            f"{retired}: they no longer exist and are ignored.",
+            UserWarning, stacklevel=3)
+        gend = {k: v for k, v in gend.items() if k not in retired}
+    return gend
 
 
 def _build(cls, d):

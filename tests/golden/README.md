@@ -4,7 +4,7 @@ Git-tracked regression fixtures for `tests/test_golden_bouquet.py`.
 
 | file | what it is |
 |------|------------|
-| `D3Dlike_Hmode_golden_slim.h5` | a slimmed real bouquet run (~11.8 MB): `*.pfile` byte blobs dropped, the `*.eqdsk` geqdsks **kept but gzip-compressed** (~3x), `Ip` also extracted into an attr, everything the assertions need kept (attrs, `coil_currents`, `x_points`, both LCFS refs, profiles). |
+| `D3Dlike_Hmode_golden_slim.h5` | a slimmed real bouquet run (~11.3 MB): `*.pfile` byte blobs dropped, the `*.eqdsk` geqdsks **kept but gzip-compressed** (~3x), `Ip` also extracted into an attr, everything the assertions need kept (attrs, `coil_currents`, `x_points`, both LCFS refs, profiles). |
 | `golden_manifest.json` | expected per-draw + baseline values (l_i, Ip, coil drifts, boundary RMS/max, coil currents, X-points) with tolerances. |
 | `rng_stream_manifest.json` | the **seeded GPR draw stream**, pinned bitwise (SHA-256 per channel + sampled values), drawn from the slim fixture's baseline profiles + sigma envelopes. |
 | `regenerate_golden_run.py` | produces that full run: the recipe (stored config, class API, INPUT-current archival). |
@@ -36,7 +36,7 @@ format and exercising its read/parse path on real files (see the
 `test_geqdsk_*` tests) is worthwhile. They are stored as gzipped `uint8`
 under their original `.eqdsk` dataset names, so every reader
 (`bytes(grp[k][()])`) is unaffected. `make_golden_fixture.py --eqdsk` chooses
-retention: `all` (default, ~11.8 MB), `subset` (baseline + representative
+retention: `all` (default, ~11.3 MB), `subset` (baseline + representative
 draws, ~5 MB), or `none` (~3.7 MB, no geqdsk-handling coverage). Eventually,
 when the default interchange migrates to IMAS/OMAS, the fixture can store
 those instead.
@@ -99,11 +99,22 @@ fixture and records it in the manifest's provenance
 3. Review the `golden_manifest.json` git diff — it shows exactly which physics
    values moved — then commit the new fixture + manifests together.
 
-The builder refuses to write a fixture that names an absolute filesystem path
-anywhere (string attrs, `config_json`, geqdsk headers) and reduces the paths
-inside the self-consistent bootstrap records (`jbs_loop_json`, which carry the
-OFT package path) to basenames: this repository is public, and the OFT build
-is identified by the content digests in the provenance stamp instead.
+The builder refuses to write a fixture that names a filesystem path anywhere
+a reader sees text: string attrs, string datasets (`config_json`), string
+ARRAYS (attrs and datasets, element by element), and geqdsk headers. A path is
+an absolute path under a well-known root (`/Users`, `/home`, `/usr`,
+`/Volumes`, `/opt`, `/mnt`, ...), any absolute path of two or more components
+at a token boundary, a `~/` or `~user/` path, a `../` path, or a Windows
+drive path; units and ratios such as `A/m^2` or `1/R` are not
+(`tests/test_no_paths_in_records.py` tries to defeat the guard). It reduces
+the paths inside the self-consistent bootstrap records (`jbs_loop_json`) to
+basenames: records written by earlier builds of the loop carried the OFT
+package path in `oft_build.path`; current builds record a path-free
+`oft_build = {version, git_hash, build_id}`. This repository is public, and
+the OFT build is identified by the content digests in the provenance stamp.
+The committed fixture passes the extended guard as it stands (it predates the
+path-free record, so its loop records carry the scrubbed basename
+`oft_build.path = "OpenFUSIONToolkit"`).
 
 ## The self-consistent-bootstrap refresh
 
@@ -198,6 +209,46 @@ The two entry points reconstruct bit-identically. The drift comes from the
 refresh's archival convention (achieved rather than input baseline current),
 not from the loop.
 
+## Test scope: what the tests around this fixture do not cover
+
+Stated so that a pass is not read as more than it is. None of these is a
+loosened bar; each narrows what a passing suite shows.
+
+* **The axis-collapse regression test is a build-dependent skip.**
+  `tests/test_fsa_current_integral.py::test_get_q_collapses_silently_on_an_unclipped_grid`
+  was a hard assertion (`unclipped <R> span < 1e-9`, absolute, over all
+  surfaces) and is now a measured skip: it asserts only on a build whose
+  unclipped grid collapses (at least 2 traced surfaces with a relative `<R>`
+  span <= 1e-9) and skips, with a reason, on every other build. It can
+  therefore skip with the defect present (a PARTIAL collapse that pins only
+  some surfaces, or a build that traces fewer than 2 surfaces). What runs on
+  every build instead: the unconditional invariant that the CLIPPED geometry
+  is real (`<R>` spans more than 10 % of its mean) and two solver-free tests
+  of the guard. The production guard in `utils.fsa_current_geometry` uses the
+  raw `<R>` span, zero (untraced) rows included, so an untraced row can hide
+  a collapse from it; `physics.evaluate_jBS` now refuses a zero (failed-trace)
+  row on its own surfaces.
+* **Six zero-perturbation tests run on the legacy path only.** The route-R2
+  sigma=0 tests of `tests/test_seeded_reproducibility.py`
+  (`test_sigma0_r2_reproduces_the_baseline_jbs`,
+  `test_sigma0_r2_exact_measure_lands_in_its_own_budget`,
+  `test_sigma0_r2_exact_measure_reports_a_plausible_inductive_share`,
+  `test_sigma0_r2_exact_measure_still_recovers_the_recon_li`,
+  `test_sigma0_r2_exact_measure_is_bit_reproducible`,
+  `test_sigma0_r2_exact_measure_leaves_the_bootstrap_alone`) build their
+  baseline with `jbs_self_consistent=False`: they test the legacy frozen-SWB
+  path, not the shipped default. The default path's counterpart,
+  `tests/test_jbs_loop_solver.py::test_f_sigma0_route_r2_draw_converges_near_the_baseline`,
+  checks only that the loop converges, the `|s-1|*f_ind <= 3.86e-3` budget
+  and the init-source bookkeeping -- not the other five properties.
+* **The structured solver tests run with a pass ceiling of 12; the default
+  is 8.** `tests/test_jbs_loop_solver.py` sets
+  `jbs_max_passes = _STRUCTURED_TEST_PASSES = 12` for the structured closure
+  and its MSE stage, because that synthetic case needed exactly the default 8
+  passes on the development build. The shipped default therefore has no
+  headroom on that channel, and the tests do not show that it converges
+  within 8 on another build. The default was not changed.
+
 ## Known limitation: a standard draw's post-homotopy re-solve can diverge slowly
 
 Seen in the loop-on regeneration of this example (config seed 12345, 20
@@ -238,8 +289,8 @@ degenerate state, is not distinguishable in the log). The call runs without
 it, `fsa_current_geometry`'s guard refuses it (`get_q returned a CONSTANT <R>
 across all 257 surfaces ... the surface tracer collapsed onto the magnetic
 axis`), and the draw is rejected as OUT_OF_SPEC with a NaN VSC drift. This is
-the broken state's collapse, not the build-dependent near-axis collapse of the
-section above; it occurs on the Linux build.
+the broken state's collapse, not the build-dependent near-axis collapse
+described under "Test scope" below; it occurs on the Linux build.
 
 **What the standard-draw post-homotopy fix changed, and why it did not remove
 this.** Before that fix the pass solved `j_ind_used + j_BS` as ONE

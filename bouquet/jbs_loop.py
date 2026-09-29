@@ -30,8 +30,10 @@ Two relaxations, both of the PATH only (at the fixed point ``js = jc`` and
   oscillating two-state mode (l_i swings back by a fraction g < 0 per pass)
   that ``omega`` does not act on; ``beta ~ 1/(1 - g)`` damps it.  A step opts
   in by accepting a ``relax`` keyword (:class:`CurrentRelaxer`); the record
-  carries ``beta`` and the per-pass gap ``||js - jc|| / ||jc||`` (recorded,
-  never gated).
+  carries ``beta``, the per-pass gap ``||js - jc|| / ||jc||`` and, next to
+  it, the UNRELAXED closure-half residual ``||jc_k - js_k-1|| / ||jc_k||``
+  (``= gap / (1 - beta)`` on a blended pass; the gap understates it by
+  ``1 - beta``).  Both are recorded only, never gated.
 
 ``step`` and ``evaluate`` are supplied by the caller (the IMAS baseline, the
 structured / MSE closures, a perturbation draw, the geqdsk reconstruction);
@@ -62,7 +64,12 @@ Failure is never silent: the library raises :class:`JBSNotConverged` carrying
 the full residual history; with ``jbs_loop_on_fail="flag"`` the last iterate is
 returned with ``converged=False`` and the caller records a closure-limited
 reason.  A residual that grows on ``JBS_GROWTH_ABORT_PASSES`` consecutive
-passes at the relaxation floor aborts early with the same error.
+passes at the relaxation floor aborts early with the same error, and so does a
+pass that can never count (a gated ``l_i``/``q0`` the step did not return, or
+an identically zero ``J`` against a non-zero iterate) -- at that pass, not at
+the ceiling.  A non-finite initial guess or evaluated ``J`` raises
+:class:`JBSNonFinite` at once, whatever the policy, before it can reach the
+next solve.
 
 Nothing here touches an existing solver tolerance: the GS solver's own
 ``nl_tol``/``maxits``, the closure tolerances and the correctors' acceptance
@@ -117,6 +124,26 @@ class JBSNotConverged(RuntimeError):
         self.history = self.record
 
 
+class JBSNonFinite(JBSNotConverged):
+    """The loop was handed, or evaluated, a non-finite bootstrap.
+
+    Raised at once -- before the value can be blended into the next iterate
+    and handed to a GS solve -- and REGARDLESS of the ``"flag"`` policy: a
+    non-finite iterate is not a result that can be flagged and kept.
+    ``pass_number`` is 0 for the initial guess, ``index`` / ``psi_N`` locate
+    the first non-finite node (``psi_N`` is ``None`` when the grid is not
+    known yet).  A subclass of :class:`JBSNotConverged`, so every caller that
+    treats a failed loop as a failed slice or draw does so here too.
+    """
+
+    def __init__(self, message, record=None, *, pass_number=None,
+                 index=None, psi_N=None):
+        super().__init__(message, record)
+        self.pass_number = pass_number
+        self.index = index
+        self.psi_N = psi_N
+
+
 # ---------------------------------------------------------------------------
 #  settings
 # ---------------------------------------------------------------------------
@@ -146,6 +173,10 @@ def validate_jbs_settings(gc) -> None:
     for name, default in (("jbs_rtol_j", 1e-3), ("jbs_rtol_Ip", 1e-4),
                           ("jbs_tol_li", 1e-3), ("jbs_tol_q0", 2e-3)):
         v = _get(name, default)
+        if isinstance(v, (bool, np.bool_)):
+            # float(True) == 1.0 would pass as a (useless) tolerance
+            raise ValueError(f"generation.{name} must be a positive number, "
+                             f"not a bool (got {v!r})")
         try:
             fv = float(v)
         except (TypeError, ValueError):
@@ -158,7 +189,8 @@ def validate_jbs_settings(gc) -> None:
                           ("jbs_max_passes_post_homotopy",
                            JBS_POST_HOMOTOPY_PASSES)):
         v = _get(name, default)
-        if isinstance(v, bool) or not isinstance(v, (int, np.integer)):
+        if isinstance(v, (bool, np.bool_)) \
+                or not isinstance(v, (int, np.integer)):
             raise ValueError(f"generation.{name} must be an integer, got "
                              f"{v!r}")
         if int(v) < JBS_REQUIRED_CONSECUTIVE:
@@ -166,6 +198,9 @@ def validate_jbs_settings(gc) -> None:
                 f"generation.{name}={int(v)} cannot converge: convergence "
                 f"needs {JBS_REQUIRED_CONSECUTIVE} consecutive passing passes")
     w = _get("jbs_relax", 0.7)
+    if isinstance(w, (bool, np.bool_)):
+        raise ValueError(f"generation.jbs_relax must be a number in "
+                         f"[{JBS_RELAX_FLOOR}, 1], not a bool (got {w!r})")
     try:
         fw = float(w)
     except (TypeError, ValueError):
@@ -181,16 +216,48 @@ def validate_jbs_settings(gc) -> None:
     except (TypeError, ValueError):
         raise ValueError(f"generation.jbs_relax_current must be a number in "
                          f"(0, 1], got {b!r}") from None
-    if isinstance(b, bool) or not (np.isfinite(fb) and 0.0 < fb <= 1.0):
+    if isinstance(b, (bool, np.bool_)) or not (np.isfinite(fb)
+                                                and 0.0 < fb <= 1.0):
         raise ValueError(f"generation.jbs_relax_current must lie in (0, 1] "
                          f"(1 = no relaxation of the solved current), got "
                          f"{b!r}")
     h = _get("jbs_relax_halve_on", 3)
-    if isinstance(h, bool) or not isinstance(h, (int, np.integer)) \
-            or int(h) < 1:
+    if isinstance(h, (bool, np.bool_)) \
+            or not isinstance(h, (int, np.integer)) or int(h) < 1:
         raise ValueError(f"generation.jbs_relax_halve_on must be an integer "
                          f">= 1 (consecutive growing passes that halve "
                          f"omega; 1 = halve on every growth), got {h!r}")
+
+
+#: ``GenerationConfig.swb_iterations`` default: the legacy
+#: ``solve_with_bootstrap`` Picard pass count.
+SWB_ITERATIONS_DEFAULT = 3
+
+
+def deprecated_jbs_settings_warning(gc, stacklevel: int = 2) -> Optional[str]:
+    """Warn (``DeprecationWarning``) about settings the loop IGNORES.
+
+    ``swb_iterations`` is the legacy frozen path's Picard pass count.  With
+    ``jbs_self_consistent=True`` it is not used (the loop has its own
+    convergence test); a value other than the default is therefore a setting
+    the user expects to act and that silently would not.  Returns the message
+    (``None`` when nothing is ignored).
+    """
+    import warnings
+    if not bool(getattr(gc, "jbs_self_consistent", False)):
+        return None
+    v = getattr(gc, "swb_iterations", SWB_ITERATIONS_DEFAULT)
+    if v == SWB_ITERATIONS_DEFAULT and not isinstance(v, bool):
+        return None
+    msg = (f"generation.swb_iterations={v!r} is IGNORED under the "
+           "self-consistent bootstrap loop (jbs_self_consistent=True): the "
+           "loop iterates to its own convergence test (jbs_rtol_j, "
+           "jbs_rtol_Ip, jbs_tol_li, jbs_tol_q0) within jbs_max_passes / "
+           "jbs_max_passes_draw.  swb_iterations is deprecated and honoured "
+           "only with jbs_self_consistent=False (the legacy frozen-bootstrap "
+           "path).")
+    warnings.warn(msg, DeprecationWarning, stacklevel=stacklevel + 1)
+    return msg
 
 
 def jbs_settings(gc, *, draw: bool = False) -> dict:
@@ -244,33 +311,59 @@ def tolerances_record(settings: dict) -> dict:
 _OFT_BUILD_CACHE = {}
 
 
-def oft_build_info() -> dict:
-    """``{path, git_hash}`` of the imported OpenFUSIONToolkit (cached).
+#: Characters a recorded build identifier may contain: no directory
+#: separator, no "~", nothing that could carry a filesystem location.
+_BUILD_ID_SAFE = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                           "0123456789._+-")
 
-    The git hash is read from the checkout the package lives in when there is
-    one; an install tree without ``.git`` records ``None``.  Never raises.
+
+def _build_token(v):
+    """*v* reduced to the characters of :data:`_BUILD_ID_SAFE` (``None`` when
+    nothing is left): a version string or a commit id, never a path."""
+    if v is None:
+        return None
+    t = "".join(c for c in str(v).strip() if c in _BUILD_ID_SAFE)
+    return t or None
+
+
+def oft_build_info() -> dict:
+    """``{version, git_hash, build_id}`` of the imported OpenFUSIONToolkit
+    (cached).
+
+    ``version`` is the package's ``__version__``; ``git_hash`` the SHORT
+    (12-character) commit id of the checkout the package lives in, when there
+    is one (an install tree without ``.git`` records ``None``); ``build_id``
+    the two together.  **No filesystem path is recorded** -- loop records are
+    written into archives and public fixtures, and the install location names
+    the machine and the user.  Every field is reduced to ``[A-Za-z0-9._+-]``,
+    so no directory component can survive.  Never raises.
     """
     if "info" in _OFT_BUILD_CACHE:
         return dict(_OFT_BUILD_CACHE["info"])
-    info = {"path": None, "git_hash": None}
+    info = {"version": None, "git_hash": None, "build_id": None}
     try:
         import os
         import subprocess
         import OpenFUSIONToolkit as _oft
-        path = os.path.dirname(os.path.abspath(_oft.__file__))
-        info["path"] = path
+        info["version"] = _build_token(getattr(_oft, "__version__", None))
+        pkg_dir = os.path.dirname(os.path.abspath(_oft.__file__))
         try:
             out = subprocess.run(
-                ["git", "-C", path, "rev-parse", "HEAD"],
+                ["git", "-C", pkg_dir, "rev-parse", "--short=12", "HEAD"],
                 capture_output=True, text=True, timeout=5)
             if out.returncode == 0 and out.stdout.strip():
-                info["git_hash"] = out.stdout.strip()
+                info["git_hash"] = _build_token(out.stdout.strip())
         except Exception:
             pass
     except Exception:
         pass
+    info["build_id"] = ("OpenFUSIONToolkit"
+                        + ("" if info["version"] is None
+                           else f" {info['version']}")
+                        + ("" if info["git_hash"] is None
+                           else f" git {info['git_hash']}"))
     _OFT_BUILD_CACHE["info"] = dict(info)
-    return info
+    return dict(info)
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +477,33 @@ class CurrentRelaxer:
         """End of a pass: the current it solved becomes the blend base."""
         if self._last is not None:
             self._prev = self._last[1].copy()
+
+    def unrelaxed_residual(self, w=None, x=None):
+        """``||jc_k - js_{k-1}|| / ||jc_k||`` for the pass just taken, or
+        ``None`` on a pass without a previous solved current.
+
+        The UNRELAXED residual of the closure half of the fixed point: the
+        distance between the current the closure asks for on this pass's
+        geometry and the current the previous pass solved.  For a blended
+        pass it equals ``gap / (1 - beta)`` exactly (the recorded ``gap`` is
+        scaled down by ``1 - beta``); unlike that quotient it is also defined
+        at ``beta = 1``.  RECORD ONLY -- never gated.  Current-weighted with
+        the pass's ``w``/``x`` when the shapes match, plain L2 otherwise.
+        """
+        if self._last is None or self._prev is None:
+            return None
+        jc = self._last[0]
+        if self._prev.shape != jc.shape:
+            return None
+        d = jc - self._prev
+        if (w is not None and x is not None
+                and np.shape(w) == jc.shape == np.shape(x)):
+            n = weighted_norm(jc, w, x)
+            dn = weighted_norm(d, w, x)
+        else:
+            n = float(np.linalg.norm(jc))
+            dn = float(np.linalg.norm(d))
+        return (dn / n) if n > 0.0 else (0.0 if dn == 0.0 else float("inf"))
 
     def gap(self, w=None, x=None):
         """``(rel, blended)`` for the pass just taken: ``||js - jc|| / ||jc||``
@@ -513,6 +633,14 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
             if takes_relax else
             "not applied: this caller's step does not take the relaxer"),
         current_gap=[], current_blended=[],
+        # RECORD ONLY, never gated: the unrelaxed residual of the closure
+        # half, ||jc_k - js_{k-1}|| / ||jc_k|| (= current_gap / (1 - beta)
+        # on a blended pass).  current_gap understates it by (1 - beta).
+        current_residual_unrelaxed=[],
+        current_residual_unrelaxed_definition=(
+            "||jc_k - js_{k-1}||_w / ||jc_k||_w = current_gap / (1 - beta) "
+            "on a blended pass: the unrelaxed closure-half residual; "
+            "recorded only, NOT a convergence criterion"),
         relax_halve_on=int(halve_on), omega_halved_at_pass=[],
     )
     try:
@@ -522,7 +650,33 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         rec["evaluate_jBS_version"] = None
     rec["oft_build"] = oft_build_info()
 
+    def _nonfinite(k, what, arr, grid):
+        """Raise :class:`JBSNonFinite` at the first non-finite node of
+        *arr* (pass ``k + 1``; ``k = -1`` is the initial guess)."""
+        bad = ~np.isfinite(arr)
+        i = int(np.argmax(bad))
+        psi = None
+        if grid is not None and np.shape(grid) == np.shape(arr):
+            psi = float(np.asarray(grid, dtype=float)[i])
+        where = (f"index {i}" + ("" if psi is None else f", psi_N={psi:.6g}")
+                 + f"; {int(bad.sum())} of {bad.size} node(s)")
+        when = "before pass 1" if k < 0 else f"on pass {k + 1}/{K}"
+        msg = (f"self-consistent j_BS loop"
+               f"{(' [' + label + ']') if label else ''}: {what} is "
+               f"non-finite {when} ({where}) -- refusing to blend it into "
+               "the next iterate or hand it to a GS solve")
+        rec["stop_reason"] = msg
+        rec["wall_s"] = float(time.perf_counter() - t0)
+        rec["jbs_converged"] = False
+        rec["fail_message"] = msg
+        print("  [jbs-loop] " + msg, flush=True)
+        raise JBSNonFinite(msg, rec, pass_number=max(k + 1, 0), index=i,
+                           psi_N=psi)
+
     jbs = np.asarray(jbs0, dtype=float).copy()
+    if not np.all(np.isfinite(jbs)):
+        _nonfinite(-1, "the initial bootstrap guess jbs0", jbs,
+                   (meas0 or {}).get("x"))
     prev = dict(meas0 or {})
     streak = 0
     growth_at_floor = 0
@@ -544,6 +698,9 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         if J.shape != jbs.shape:
             raise ValueError(f"run_jbs_loop[{label}]: evaluate returned shape "
                              f"{J.shape}, the iterate has {jbs.shape}")
+        if not np.all(np.isfinite(J)):
+            rec["n_passes"] = k + 1
+            _nonfinite(k, "the evaluated bootstrap J", J, meas.get("x"))
         res = profile_residuals(J, jbs, meas["w"], meas["x"], Ip)
         li_new = _finite_or_none(meas.get("li"))
         q0_new = _finite_or_none(meas.get("q0"))
@@ -576,11 +733,13 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         rec["pass_ok"].append(ok)
         if relaxer is not None:
             _gap, _bl = relaxer.gap(meas.get("w"), meas.get("x"))
+            _unrel = relaxer.unrelaxed_residual(meas.get("w"), meas.get("x"))
             relaxer.commit()
         else:
-            _gap, _bl = None, False
+            _gap, _bl, _unrel = None, False, None
         rec["current_gap"].append(_gap)
         rec["current_blended"].append(bool(_bl))
+        rec["current_residual_unrelaxed"].append(_unrel)
         rec["n_passes"] = k + 1
         entry = dict(k=k, ok=ok, dl_i=dl_i, dq0=dq0,
                      omega_used=omega_used_for_current, **res)
@@ -593,7 +752,25 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
               + ("" if omega_used_for_current is None
                  else f" omega={omega_used_for_current:.3f}")
               + ("" if not _bl else f" |js-jc|/|jc|={_gap:.2e}")
+              + ("" if (not _bl or _unrel is None)
+                 else f" (unrelaxed {_unrel:.2e}, record only)")
               + (" ok" if ok else ""), flush=True)
+        # ---- a pass that can never count: stop now, not at the ceiling ----
+        _never = None
+        if gate_li and li_new is None:
+            _never = ("the step returned no finite l_i although l_i is a "
+                      "convergence criterion here (gate_li=True)")
+        elif gate_q0 and q0_new is None:
+            _never = ("the step returned no finite q0 although q0 is a "
+                      "convergence criterion here (gate_q0=True)")
+        elif (not np.any(J != 0.0)) and np.any(jbs != 0.0):
+            _never = ("the evaluated bootstrap J is identically zero while "
+                      "the iterate is not (r_j is infinite)")
+        if _never is not None:
+            rec["stop_reason"] = (f"pass {k + 1}/{K}: {_never} -- "
+                                  "convergence is impossible, stopped at once "
+                                  "instead of running to the pass ceiling")
+            break
         streak = streak + 1 if ok else 0
         if streak >= need:
             rec["converged"] = True
@@ -650,7 +827,10 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         dl_i=rec["dl_i"][-1] if rec["dl_i"] else None,
         dq0=rec["dq0"][-1] if rec["dq0"] else None,
         I_BS=rec["I_BS"][-1] if rec["I_BS"] else None,
-        current_gap=rec["current_gap"][-1] if rec["current_gap"] else None)
+        current_gap=rec["current_gap"][-1] if rec["current_gap"] else None,
+        current_residual_unrelaxed=(rec["current_residual_unrelaxed"][-1]
+                                    if rec["current_residual_unrelaxed"]
+                                    else None))
     out = dict(jbs_used=np.asarray(jbs_used, dtype=float),
                J_final=(None if J is None else np.asarray(J, dtype=float)),
                meas_final=meas, converged=bool(rec["converged"]), record=rec)

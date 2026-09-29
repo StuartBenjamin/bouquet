@@ -140,17 +140,28 @@ probe rather than an independent check.
 is re-evaluated on the delivered equilibrium inside a relaxed outer loop
 (closure ↔ GS solve ↔ Redl) that runs to a convergence test, in every path
 that builds a j_phi containing a bootstrap. `jbs_self_consistent=False` is the
-**legacy frozen bootstrap**, bit for bit the historical code path (kept for
-A/B comparisons and for reproducing archives made before the loop existed).
+**legacy frozen bootstrap**, the historical code path (kept for A/B comparisons
+and for reproducing archives made before the loop existed). It is that path
+bit for bit because the one solver change the loop needed -- the structured
+soft closure's noise-floor acceptance, below -- is **opt-in**:
+`utils.close_ip_structured_soft(..., accept_noise_floor=True)` is passed only
+by the loop's closure calls, and every frozen-path call keeps the default
+(`False`), the historical strict solver, which refuses exactly where and with
+exactly the message it always did.
 Two consequences of the default:
 
 - `single_profile_jphi=True` and `recalculate_j_BS=False` have no bootstrap to
   iterate; they are refused unless `jbs_self_consistent=False` is set (never
   silently downgraded -- the error says so).
-- A stored config that predates the field (an old archive's `config_json`)
-  loads with `jbs_self_consistent=False` and a warning, i.e. it replays the
-  bootstrap model it was produced with; a current config always carries the
-  field.
+- A stored config that predates the field (an old archive's `config_json`,
+  or any dict/JSON without it) loads with `jbs_self_consistent=False` and a
+  warning, i.e. it replays the bootstrap model it was produced with; the
+  warning says how to opt in (`"jbs_self_consistent": true` in the
+  `generation` section). A current config always carries the field. An
+  unknown (e.g. misspelt) `generation` key is refused, naming the nearest
+  valid key, so a typo can no longer land on this legacy default.
+- `swb_iterations` is the legacy path's Picard count; under the loop it is
+  ignored, and a non-default value raises a `DeprecationWarning` saying so.
 
 The archive says which model a group carries: the schema-v3 `jbs_loop` block
 (below) is present exactly where the loop ran; plots label the bootstrap
@@ -195,7 +206,33 @@ differences, each the point of the helper:
 3. Redl's `⟨j·B⟩` is converted to the toroidal FSA density directly with
    `parallel_to_toroidal` (analytic, field-aligned; `F`, `⟨1/R⟩`, `⟨B²⟩` of the
    same surfaces) -- not through SWB's `⟨R⟩/F` projection and its undo on a
-   uniform grid.
+   uniform grid. The conversion is the **legacy one**: `⟨1/R²⟩` is not passed,
+   so the bracket `⟨B_φ²⟩/⟨B²⟩` is taken as 1 and `j_tor = ⟨j·B⟩/(F⟨1/R⟩)`,
+   exactly what the frozen path's `_swb_jbs_to_toroidal` applies (switching
+   paths causes no jump). The neglected `⟨B_p²⟩/⟨B²⟩` is **not** sub-1 %:
+   measured on the synthetic D3D-like golden draws it is 0.6 % at ψ_N = 0.1,
+   1.8–2.1 % at mid-radius, 1.4 % at the bootstrap peak (ψ_N ≈ 0.96) and
+   1.0 % at 0.999 -- 1.4–1.5 % of I_BS, by which the toroidal bootstrap is
+   high. The IDS export (`toroidal_to_parallel`, exact `⟨1/R²⟩`) does not undo
+   it, so `⟨j·B⟩` round-trips high by the same fraction. Passing `⟨1/R²⟩`
+   here would move every loop result by ~1.5 % and is left as an owner
+   decision.
+
+**Refusals, never a silent zero.** The historical evaluation mapped every NaN
+of the Redl expressions to `j_BS = 0` at that node. `evaluate_jBS` now raises
+`physics.JBSEvaluationError` (a `ValueError`), naming the quantity, the first
+ψ_N and the grid index, for non-physical input (`n_e`, `n_i`, `T_e`, `T_i`
+not strictly positive, or `Z_eff < 1`, at any node), for a surface the tracer
+failed on (the all-zero row: a non-positive `⟨R⟩`, `⟨1/R⟩`, `⟨a⟩`, `⟨B²⟩` or
+`dV/dψ`, `F = 0`, `q = 0`, `f_T ≥ 1`; also `f_T ≤ 0` away from the axis), and
+for a non-finite Redl value anywhere but the END nodes. The END nodes -- those
+whose geometry is the clipped axis or separatrix surface, `ψ_N ≤ psi_pad` or
+`ψ_N ≥ 1 − psi_pad`, identified by coordinate -- keep the historical
+treatment exactly (a non-finite value there is zeroed and counted in
+`diag["n_nonfinite_zeroed_at_ends"]`). For every accepted input the output is
+bit-identical to the evaluator before the refusals (a fast test compares it
+against a verbatim copy). The production callers clip `Z_eff` at 1 before
+calling, as they always did.
 
 On a uniform grid it reproduces SWB's first-pass `⟨j·B⟩` **bit for bit** (on a
 build whose SWB accepts `psi_N=`). Grids whose first intervals are finer than
@@ -270,8 +307,14 @@ both blends are the identity):
   equilibrium's geometry, so the closure's current `jc` and the geometry it
   produces form an oscillating two-state mode (l_i swings back by a fraction
   g ≈ −0.5 per pass) that ω does not act on; `β ≈ 1/(1 − g)` damps it. The
-  record carries β and the per-pass gap `‖js − jc‖_w / ‖jc‖_w` (recorded, not
-  gated). Applied where a pass solves one assembled j_phi (the IMAS baseline
+  record carries β, the per-pass gap `‖js − jc‖_w / ‖jc‖_w` and, next to it,
+  the **unrelaxed** closure-half residual `‖jc_k − js_k−1‖_w / ‖jc_k‖_w`
+  (`current_residual_unrelaxed`; it equals gap/(1 − β) on a blended pass, so
+  the gap understates it by the factor 1 − β, and it is also defined at
+  β = 1). Both are recorded only, **not gated**: the convergence gate is the
+  four criteria above. Whether to gate the unrelaxed residual (a stricter
+  "converged") is a pending decision, and the record exists so it can be
+  made with numbers. Applied where a pass solves one assembled j_phi (the IMAS baseline
   loop in every mode and channel, the σ=0 check, the draws' anchor loops); not
   in the standard draw's l_i-match coupling, the geqdsk reconstruction or the
   MSE chord steps (whose linearisation is centred on the closure's own
@@ -287,7 +330,14 @@ Failure is never silent. `jbs_loop_on_fail="raise"` (default) raises
 `jbs_loop.JBSNotConverged` carrying the whole residual history;
 `"flag"` delivers the last iterate with `jbs_converged=False` and a
 `"j_BS loop: …"` reason in `closure_limited_reasons`. A draw whose loop does
-not converge is a **failed draw** in either mode.
+not converge is a **failed draw** in either mode. A pass that can never count
+-- a gated l_i or q0 the step did not return (or returned non-finite), or an
+identically zero Redl bootstrap against a non-zero iterate -- ends the loop at
+that pass (then raise or flag as above) instead of running to the ceiling. A
+non-finite initial guess or evaluated bootstrap raises `jbs_loop.JBSNonFinite`
+(a `JBSNotConverged`) at once, with the pass number and the ψ_N location,
+whatever the policy: it is never blended into the next iterate or handed to a
+GS solve.
 
 ### Where it runs
 
@@ -365,14 +415,19 @@ and with `recalculate_j_BS=False`; set `jbs_self_consistent=False` for either.
 
 **Closure stop test inside the loop.** Each pass re-solves the closure on
 the new geometry, so the structured soft closure is called several times per
-slice; its acceptance was extended (a flagged change of the solver's
-acceptance criterion, applied only where it previously refused) to accept an
-iterate stationary to within the objective's rounding noise
-(`stop_reason="noise_floor"`, recorded with the gradient, predicted decrease
-and noise estimate), and a refusal inside the loop is retried once from the
-previous pass's coefficients (`closure_retry=1`, logged) -- see the soft
-closure under [the structured closure](#the-structured-closure-and-its-l_i-constraint). Every result the
-soft solver returned before is bit-identical.
+slice. **Its acceptance criterion is changed for the loop only**: old
+criterion -- when no damped step descends, accept iff the scaled gradient is
+below `rtol·max|J|·max(√F, 1)`, else refuse; new criterion (with the loop on)
+-- the same, plus accept an iterate stationary to within the objective's
+rounding noise (`stop_reason="noise_floor"`). It therefore accepts points the
+old test refused (and only those: every result the old test returned is
+unchanged). It is opt-in (`accept_noise_floor=True`, passed by the loop's
+closure calls only); every acceptance is recorded (gradient, predicted
+decrease, noise estimate, `n_noise_floor_accepts`) and printed, and a noise
+estimate that is not finite and positive accepts nothing. A refusal inside
+the loop is retried once from the previous pass's coefficients
+(`closure_retry=1`, logged) -- see the soft closure under
+[the structured closure](#the-structured-closure-and-its-l_i-constraint).
 
 ### What is recorded
 
@@ -384,8 +439,11 @@ schema-v3 `jbs_loop` block -- attrs `jbs_converged`, `jbs_n_passes`,
 `ScanView.baseline_jbs_loop`; see
 [archive-schema.md](archive-schema.md#v2--v3-the-self-consistent-bootstrap-record)): `enabled, init, grid, n_passes, converged,
 stop_reason, tolerances, omega[], r_j[], r_I[], dl_i[], dq0[], I_BS[],
-jBS_peak_psiN[], jBS_peak[], wall_s, evaluate_jBS_version, oft_build` (path +
-git hash), plus `jBS_diff_definition` in diff mode, the per-pass closure log
+jBS_peak_psiN[], jBS_peak[], wall_s, evaluate_jBS_version, oft_build`
+(`version`, 12-character `git_hash`, `build_id`; no filesystem path -- records
+written by earlier builds of this branch carried the OFT package path there),
+`current_gap[]` and, next to it, `current_residual_unrelaxed[]` (record only,
+see above), plus `jBS_diff_definition` in diff mode, the per-pass closure log
 in ohmic mode, the MSE chord-stage block, and the post-move check on draws and
 reconstructions.
 
@@ -681,6 +739,11 @@ Two statements about the data, one prior:
   `noise_F = 2 ε Σ_i (2|r_i| m_i + r_i²)` (`m_i` = the magnitude of the terms
   row i is computed from, in σ units — an MA-scale I_p difference over a
   kA-scale σ_Ip is what makes it exceed the `F·1e-14` acceptance slack).
+  The noise-floor acceptance applies **only with
+  `accept_noise_floor=True`**, which the self-consistent bootstrap loop's
+  closure calls pass; the default (`False`, every frozen-path call) is the
+  historical strict solver. An acceptance is printed as well as recorded, and
+  a non-finite or non-positive noise estimate accepts nothing.
   Otherwise it refuses, as before. Inside the self-consistent loop a refused
   soft closure is retried ONCE from the previous pass's coefficients
   (`closure_retry=1`, logged); a second refusal is a real one. The prior is the *same* one: σ = W^(−1/2)
