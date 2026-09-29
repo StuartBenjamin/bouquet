@@ -429,6 +429,36 @@ def _recon_probe(outdir):
             r_j=r["record"]["r_j"], init_source=r["record"]["init_source"],
             j_BS=np.asarray(r["jbs_used"], float).tolist(),
             li=float(_meas()["li"]))
+
+    # ---- B1: the post-homotopy re-solves go through the saturation guard --
+    # The sigma=0 route-R2 draw's own rebuild context, its bootstrap nudged
+    # 2 % off Redl so the stage must re-solve.  The guard's reference coils
+    # sit 2 % below the coils mygs holds, against a 1 % bound: the FIRST
+    # real re-solve must trip it (CoilSaturated), exactly as the homotopy's
+    # own guard treats a pass on its bound.  The wide-bound control shows the
+    # guard is called on every pass and passes a solve with headroom.
+    from bouquet.TokaMaker_interface import (CoilSaturated,
+                                             _make_coil_saturation_guard,
+                                             _post_homotopy_jbs)
+    from bouquet.jbs_loop import JBSNotConverged
+    ctx = dict(d["_jbs_ctx"])
+    ctx["spike_used"] = 1.02 * np.asarray(ctx["spike_used"], dtype=float)
+    out["b1"] = {}
+    for tag, lim in (("saturating", 0.01), ("headroom", 10.0)):
+        _solve(j_phi_bl)
+        cur, _ = mygs.get_coil_currents()
+        base = {n: float(v) / 1.02 for n, v in cur.items()}
+        guard = _make_coil_saturation_guard(mygs, base, ("F9A", "F9B"),
+                                            lim, lim, stage=f"probe {tag}")
+        try:
+            _post_homotopy_jbs(mygs, ctx, jbs_settings(g, draw=True), psi_N,
+                               psi_pad, float(bl.Ip_target), coil_guard=guard)
+            outcome = "kept"
+        except CoilSaturated:
+            outcome = "CoilSaturated"
+        except JBSNotConverged:
+            outcome = "JBSNotConverged"
+        out["b1"][tag] = dict(outcome=outcome, checks=list(guard.log))
     with open(os.path.join(outdir, "recon.json"), "w") as fh:
         json.dump(out, fh)
 
@@ -778,6 +808,23 @@ def test_draw_fixed_point_does_not_depend_on_its_start(recon):
     assert _rj(a["j_BS"], b["j_BS"]) <= 5 * _S["rtol_j"]
     assert abs(a["li"] - b["li"]) <= 2 * _S["tol_li"]
     assert b["r_j"][0] < a["r_j"][0]
+
+
+@pytest.mark.solver
+@solver_only
+def test_b1_post_homotopy_resolves_are_guarded_against_coil_saturation(
+        recon):
+    """B1 on the live solver: a post-homotopy re-solve that ends with the coils
+    beyond 0.99 x the bound rejects the draw after its FIRST re-solve; with
+    headroom every pass is checked and none is saturated."""
+    b1 = recon["b1"]
+    sat = b1["saturating"]
+    assert sat["outcome"] == "CoilSaturated", sat
+    assert len(sat["checks"]) == 1 and sat["checks"][0]["saturated"], sat
+    assert sat["checks"][0]["label"].startswith("post-homotopy pass 1"), sat
+    ok = b1["headroom"]
+    assert ok["outcome"] != "CoilSaturated", ok
+    assert ok["checks"] and not any(c["saturated"] for c in ok["checks"]), ok
 
 
 # ---------------------------------------------------------------------------

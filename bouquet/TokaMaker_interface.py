@@ -628,6 +628,100 @@ def _vsc_channel_drift_pct(cur, baseline, vsc_set,
     return float(100.0 * max(cm, df) / sigma) if sigma > 0 else 0.0
 
 
+# ---- QP coil-saturation guard (one criterion, every bounded solve) ----
+#: A bounded solve whose coil drift reaches this fraction of the installed
+#: bound is SATURATED (the QP sits on an active constraint).  The homotopy
+#: introduced the criterion (see its guard in generate_bouquet); the
+#: post-homotopy j_BS passes and the draw's j_BS loop passes under the hard
+#: coil bounds apply the SAME test through :func:`_coil_saturation`, so there is
+#: one definition of "saturated", not three.
+COIL_SATURATION_FRACTION = 0.99
+
+
+class CoilSaturated(RuntimeError):
+    """A bounded solve ended with a coil at its bound (:func:`_coil_saturation`).
+
+    Raised by the guard :func:`_make_coil_saturation_guard` builds; a draw that
+    raises it is rejected (never archived, never counted toward until-N).
+    ``info`` is the guard's measurement (the max drifts, the bounds and the
+    stage), so the rejection record says exactly what saturated.
+    """
+
+    def __init__(self, message, info=None):
+        super().__init__(message)
+        self.info = dict(info or {})
+
+
+def _coil_max_drifts(drifts, vsc_in_set):
+    """``(max non-VSC F-coil |drift| %, max VSC-coil |drift| %)`` of a
+    :func:`_coil_drift_pct` dict -- the two numbers the homotopy's saturation
+    guard tests."""
+    f_only = {n: d for n, d in drifts.items()
+              if n.startswith('F') and n not in vsc_in_set}
+    vsc_only = {n: d for n, d in drifts.items() if n in vsc_in_set}
+    max_f = max((abs(d) for d in f_only.values()), default=0.0)
+    max_vsc = max((abs(d) for d in vsc_only.values()), default=0.0)
+    return max_f, max_vsc
+
+
+def _coil_saturation(max_f, max_vsc, drift_F, drift_VSC):
+    """``(sat_F, sat_VSC)``: is either coil group at
+    ``COIL_SATURATION_FRACTION`` of its bound (``drift_F``/``drift_VSC`` as
+    fractions, the drifts in %)?  The homotopy's criterion, verbatim."""
+    sat_F = (max_f >= COIL_SATURATION_FRACTION * drift_F * 100.0)
+    sat_VSC = (max_vsc >= COIL_SATURATION_FRACTION * drift_VSC * 100.0)
+    return sat_F, sat_VSC
+
+
+def _make_coil_saturation_guard(mygs, baseline_coils, vsc_in_set, drift_F,
+                                drift_VSC, stage):
+    """A callable ``guard(label)`` that measures the coil currents mygs holds
+    NOW and raises :class:`CoilSaturated` when the solve that put them there
+    is saturated against the bounds ``(drift_F, drift_VSC)`` around
+    ``baseline_coils`` -- the homotopy's own test (:func:`_coil_saturation`).
+
+    Called after every re-solve that runs under installed coil bounds without
+    the homotopy's own guard (the post-homotopy j_BS passes; the draw's j_BS
+    loop passes under the hard bounds).  It only CHECKS: nothing is relaxed,
+    retried or rolled back here; the caller rejects the draw.  Each call is
+    appended to ``guard.log`` (label, drifts, verdict) for the draw record.
+    """
+    log = []
+
+    def guard(label):
+        cur, _ = mygs.get_coil_currents()
+        max_f, max_vsc = _coil_max_drifts(
+            _coil_drift_pct(cur, baseline_coils), vsc_in_set)
+        sat_F, sat_VSC = _coil_saturation(max_f, max_vsc, drift_F, drift_VSC)
+        entry = dict(label=str(label), max_F_drift_pct=float(max_f),
+                     max_VSC_drift_pct=float(max_vsc),
+                     saturated=bool(sat_F or sat_VSC))
+        log.append(entry)
+        if sat_F or sat_VSC:
+            which = []
+            if sat_F:
+                which.append(f"F ({max_f:.2f}% vs cap {drift_F * 100:.1f}%)")
+            if sat_VSC:
+                which.append(f"VSC ({max_vsc:.2f}% vs cap "
+                             f"{drift_VSC * 100:.1f}%)")
+            msg = (f"coil saturation after {label} [{stage}]: "
+                   f"{'; '.join(which)} -- the QP sits on its bound "
+                   f"(>= {COIL_SATURATION_FRACTION:g} x cap), the homotopy's "
+                   "infeasibility criterion")
+            print(f"  [coil-saturation guard] {msg} -> draw REJECTED",
+                  flush=True)
+            raise CoilSaturated(msg, dict(
+                entry, stage=str(stage), F_lim=float(drift_F),
+                VSC_lim=float(drift_VSC),
+                fraction=float(COIL_SATURATION_FRACTION)))
+        return entry
+
+    guard.log = log
+    guard.stage = str(stage)
+    guard.limits = (float(drift_F), float(drift_VSC))
+    return guard
+
+
 # ---- Shelf-blend decomposition helper ----
 def _shelf_blend_decompose(psi_N, j_phi_total, spike_profile,
                            eqdsk_jphi=None):
@@ -1812,7 +1906,8 @@ def _decompose_draw_currents(output_jphi, spike, full, isolate_edge_jBS,
     return j_ind, full_j, None
 
 
-def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
+def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target,
+                       coil_guard=None):
     """The post-perturb j_BS check of a draw (the homotopy moved coils and the
     boundary after the loop converged).
 
@@ -1838,6 +1933,13 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
     the draw is then a failed draw.  Returns ``(record, spike_used, full,
     j_phi)`` with ``j_phi`` the re-solved draw's current (the achieved
     current on the standard path).
+
+    ``coil_guard`` (:func:`_make_coil_saturation_guard`, built by
+    generate_bouquet at the bounds these passes run under) is called after
+    every pass's re-solve: a pass that ends with a coil on its bound raises
+    :class:`CoilSaturated` -- the homotopy's own infeasibility criterion --
+    and the draw is rejected, exactly as a non-converged stage is.  ``None``
+    (direct callers, the mocked tests) checks nothing; the record says which.
     """
     from .jbs_loop import (check_delivered, residual_weights, run_jbs_loop,
                            JBS_POST_HOMOTOPY_PASSES, jsonable)
@@ -1850,6 +1952,14 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
     chk = check_delivered(J, spike_used, w, x, Ip_target, settings)
     rec = dict(check=jsonable({k: v for k, v in chk.items()}),
                accepted_without_passes=bool(chk["ok"]))
+    rec["coil_saturation_guard"] = (
+        dict(active=False, note="no guard supplied: re-solves unchecked")
+        if coil_guard is None else
+        dict(active=True, stage=getattr(coil_guard, "stage", None),
+             F_lim=(getattr(coil_guard, "limits", (None, None))[0]),
+             VSC_lim=(getattr(coil_guard, "limits", (None, None))[1]),
+             fraction=float(COIL_SATURATION_FRACTION),
+             checks=getattr(coil_guard, "log", None)))
     print(f"  [jbs-loop post-homotopy] r_j={chk['r_j']:.3e} "
           f"r_I={chk['r_I']:.3e} -> "
           + ("inside tolerance, draw kept" if chk["ok"] else
@@ -1886,6 +1996,8 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
             "type": "jphi-linterp", "y": np.asarray(_js, float),
             "x": psi_N})
         mygs.solve()
+        if coil_guard is not None:
+            coil_guard(f"post-homotopy pass {k + 1} (Fix C re-solve)")
         state["jphi"] = jphi
         _s = mygs.copy_eq()
         _w, _x, _kk = residual_weights(_s, psi_N, psi_pad)
@@ -1908,6 +2020,8 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
             mygs, psi_N, target, _pp, Ip_target, pres_tmp[0], psi_pad,
             min_iters=2, max_iters=int(os.environ.get('CORR_MAX_ITERS', '8')),
             rtol=0.05, verbose=False)
+        if coil_guard is not None:
+            coil_guard(f"post-homotopy pass {k + 1} (corrective re-solve)")
         state["jphi"] = np.asarray(out, dtype=float)
         _s = mygs.copy_eq()
         _w, _x, _kk = residual_weights(_s, psi_N, psi_pad)
@@ -2027,6 +2141,7 @@ def perturb_kinetic_equilibrium(
     jphi_diff=None,
     rng=None,
     jbs_loop=None,
+    coil_saturation_guard=None,
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
     match :math:`I_p` and :math:`l_i` targets.
@@ -2154,6 +2269,14 @@ def perturb_kinetic_equilibrium(
         ``solve_with_bootstrap`` call.  A draw whose loop does not converge
         raises (a failed draw).  ``None`` (default) is the legacy path, bit
         for bit.
+    coil_saturation_guard : callable or None
+        :func:`_make_coil_saturation_guard` at the HARD coil bounds
+        (``coil_drift_hard_factor``), built by :func:`generate_bouquet`.  With
+        the loop on, those bounds are restored right after the draw's state
+        anchor, so every loop pass is a bounded solve; each is checked with
+        the homotopy's saturation criterion and a saturated pass raises
+        :class:`CoilSaturated` (the draw is rejected).  Ignored when no hard
+        bounds are installed and on the legacy path.
 
     Returns
     -------
@@ -2698,7 +2821,21 @@ def perturb_kinetic_equilibrium(
                                         "x": psi_N})
             mygs.solve()                 # a failed pass fails the draw
 
+        # The hard coil bounds (coil_drift_hard_factor) are back in place from
+        # here on, so every loop pass below is a BOUNDED solve.  Each one is
+        # checked with the homotopy's saturation criterion at those bounds
+        # (generate_bouquet builds the guard); a pass that ends on a bound
+        # rejects the draw.  No hard bounds -> no guard, nothing changes.
+        _hard_guard = (coil_saturation_guard
+                       if (coil_saturation_guard is not None
+                           and _stashed_bounds is not None) else None)
+        _jl_nmeas = [0]
+
         def _jl_meas():
+            if _hard_guard is not None:
+                _jl_nmeas[0] += 1
+                _hard_guard(f"draw j_BS loop solve {_jl_nmeas[0]} (hard "
+                            "coil bounds)")
             _snap = mygs.copy_eq()
             _w, _x, _k = residual_weights(_snap, psi_N, psi_pad)
             _li = float(mygs.get_stats(li_normalization='iter',
@@ -2795,6 +2932,8 @@ def perturb_kinetic_equilibrium(
                     _jl_res, _jl_fs = _fixc_loop(
                         _c, spike_profile, float(eq_stats['l_i']),
                         JBS_DRAW_INIT_WARM)
+                except CoilSaturated:
+                    raise              # a saturated bounded solve: reject
                 except Exception as _rs_exc:
                     _count_masked_anchor_failure("band_resample", _rs_exc)
                     continue
@@ -4471,6 +4610,9 @@ def generate_bouquet(
     _baseline_psi = None
     _baseline_coils = None
     _recon_Ip = None
+    # coil-saturation guard of the draw's j_BS loop passes under the HARD
+    # coil bounds (built below only when those bounds are installed)
+    _hard_sat_guard = None
 
     # Sawtooth check.  We use mygs.get_q on the current (recon) state
     # rather than re-solving here -- a fresh forward solve at
@@ -5098,6 +5240,13 @@ def generate_bouquet(
                 _bounds['#VSC'] = [-_vsc_delta, _vsc_delta]
             mygs.set_coil_bounds(_bounds)
             mygs._coil_drift_bounds = _bounds
+            if jbs_loop and jbs_loop.get("enabled"):
+                # the draw's j_BS loop passes run under these bounds: check
+                # each with the homotopy's saturation criterion at them
+                _hard_sat_guard = _make_coil_saturation_guard(
+                    mygs, _baseline_coils, _vsc_in_set, _hard, _hard,
+                    stage="draw j_BS loop under the hard coil bounds "
+                          f"(+/-{_hard * 100:.1f}%)")
         else:
             # Don't call set_coil_bounds at all when no hard bounds are
             # requested -- even set_coil_bounds(None) (which uses ±1e98)
@@ -5835,6 +5984,7 @@ def generate_bouquet(
                 proxy_bias_warmstart=_proxy_bias_warmstart,
                 pin_jphi=pin_jphi,
                 jbs_loop=jbs_loop,
+                coil_saturation_guard=_hard_sat_guard,
             )
         except Exception as e:
             # Catch ANY exception during a perturbed solve -- ValueError
@@ -6126,14 +6276,8 @@ def generate_bouquet(
                             _cur, _ = mygs.get_coil_currents()
                             _all_drifts = _coil_drift_pct(
                                 _cur, _baseline_coils)
-                            _f_only = {n: d for n, d in _all_drifts.items()
-                                        if n.startswith('F') and n not in _vsc_in_set}
-                            _vsc_only = {n: d for n, d in _all_drifts.items()
-                                          if n in _vsc_in_set}
-                            _max_f = max((abs(d) for d in _f_only.values()),
-                                          default=0.0)
-                            _max_vsc = max((abs(d) for d in _vsc_only.values()),
-                                            default=0.0)
+                            _max_f, _max_vsc = _coil_max_drifts(
+                                _all_drifts, _vsc_in_set)
                             print(f"  [homotopy {_label}] F=+/-{_dF*100:.1f}%  "
                                   f"VSC=+/-{_dVSC*100:.1f}% -> SOLVED "
                                   f"(max non-VSC F-coil drift={_max_f:.2f}%, "
@@ -6159,8 +6303,11 @@ def generate_bouquet(
                             # the active-constraint case (saturation is
                             # ~exact in practice; non-saturation usually
                             # leaves several % of headroom).
-                            _sat_F   = (_max_f   >= 0.99 * _dF   * 100.0)
-                            _sat_VSC = (_max_vsc >= 0.99 * _dVSC * 100.0)
+                            # (COIL_SATURATION_FRACTION = 0.99: the same
+                            # criterion guards the post-homotopy j_BS passes
+                            # and the j_BS loop under the hard bounds.)
+                            _sat_F, _sat_VSC = _coil_saturation(
+                                _max_f, _max_vsc, _dF, _dVSC)
                             if _sat_F or _sat_VSC:
                                 _which = []
                                 if _sat_F:
@@ -6270,14 +6417,26 @@ def generate_bouquet(
                     # still match the bootstrap it carries; if not, further
                     # passes at this (tight) coil stage, and a draw that cannot
                     # be brought back inside the loop tolerances is REJECTED.
+                    # The passes run under the bounds of the last good
+                    # homotopy pass (_final_pass_idx), so every one of them is
+                    # checked by the homotopy's own saturation criterion at
+                    # those bounds: a pass that ends on a bound REJECTS the
+                    # draw (there is no looser post-homotopy state to roll
+                    # back to -- the one before it failed the j_BS check).
                     _jctx = diagnostics.get('_jbs_ctx')
                     if (_jctx is not None and jbs_loop
                             and not _post_align_failed):
                         try:
+                            _ph_guard = _make_coil_saturation_guard(
+                                mygs, _baseline_coils, _vsc_in_set,
+                                _final_drift_F_lim, _final_drift_VSC_lim,
+                                stage=(f"post-homotopy j_BS pass at homotopy "
+                                       f"pass {_final_pass_idx + 1} bounds"))
                             _ph_rec, _ph_spk, _ph_full, _ph_jphi = \
                                 _post_homotopy_jbs(mygs, _jctx, jbs_loop,
                                                    psi_N, psi_pad,
-                                                   initial_Ip_target)
+                                                   initial_Ip_target,
+                                                   coil_guard=_ph_guard)
                             if diagnostics.get('jbs_loop') is not None:
                                 diagnostics['jbs_loop']['post_homotopy'] = \
                                     _ph_rec
