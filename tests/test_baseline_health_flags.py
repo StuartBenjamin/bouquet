@@ -113,3 +113,26 @@ def test_a_successful_build_is_delivered(monkeypatch):
     b = _bq_for_prepare(monkeypatch, lambda cfg, gs: ok)
     assert b.prepare_baseline() is ok and b.baseline is ok
     assert b._failed_baseline is None
+
+
+# ---------------------------------------------------------------------------
+#  rescale mode: the scale-1.0 fallback is loud and recorded, not changed
+# ---------------------------------------------------------------------------
+def test_the_rescale_fallback_is_unchanged_but_loud_and_recorded():
+    """The loop's rescale pass keeps the historical fallback bit for bit
+    (bracket [0.2, 4.0], xtol 1e-4, scale 1.0 on failure) -- and now prints
+    it per pass, records the passes and errors in the loop record, flags a
+    delivered pass that used it, and warns after the loop."""
+    from bouquet.run import Bouquet
+    src = inspect.getsource(Bouquet._forward_solve_imas_baseline)
+    blk = src.split("# ================= rescale", 1)[1].split(
+        "# ================= ohmic", 1)[0]
+    assert "brentq(_f, 0.2, 4.0, xtol=1e-4)" in blk
+    exc = blk.split("except Exception as _sc_exc:", 1)[1][:1200]
+    assert "scale = 1.0" in exc and "_sc_ok = False" in exc
+    assert 'st.setdefault("fallbacks", [])' in exc
+    assert "FALLING BACK to" in exc and "print(" in exc
+    for key in ("rescale_fallback_passes", "rescale_fallback_errors",
+                "rescale_delivered_on_fallback"):
+        assert f'rec["{key}"]' in blk, key
+    assert "_w.warn(_msg, RuntimeWarning" in blk

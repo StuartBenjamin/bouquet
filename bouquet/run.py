@@ -4115,9 +4115,22 @@ class Bouquet:
                         try:
                             scale = float(brentq(_f, 0.2, 4.0, xtol=1e-4))
                             _sc_ok = True
-                        except Exception:
+                        except Exception as _sc_exc:
+                            # the historical fallback, unchanged (scale 1.0,
+                            # same bracket) -- but never silently: printed,
+                            # recorded per pass, and warned after the loop
                             scale = 1.0
                             _sc_ok = False
+                            st.setdefault("fallbacks", []).append(dict(
+                                k=int(k), error=(f"{type(_sc_exc).__name__}: "
+                                                 f"{str(_sc_exc)[:200]}")))
+                            print(f"[imas jbs-loop:rescale] WARNING pass "
+                                  f"{k + 1}: the l_i-proxy root find failed "
+                                  f"on the bracket [0.2, 4.0] "
+                                  f"({type(_sc_exc).__name__}: "
+                                  f"{str(_sc_exc)[:160]}); FALLING BACK to "
+                                  "bootstrap scale 1.0 for this pass",
+                                  flush=True)
                         bl.jBS_diff = None
                         bl.bs_scale = scale
                         bl.j_BS = scale * np.asarray(jbs, dtype=float)
@@ -4145,6 +4158,28 @@ class Bouquet:
                                rescale_bracketed=st.get("scale_bracketed"),
                                J_final_minus_used_max=float(np.max(np.abs(
                                    res["J_final"] - res["jbs_used"]))))
+                    _fb = list(st.get("fallbacks") or [])
+                    rec["rescale_fallback_passes"] = [f["k"] + 1 for f in _fb]
+                    rec["rescale_fallback_errors"] = [f["error"] for f in _fb]
+                    _br = list(st.get("scale_bracketed") or [])
+                    rec["rescale_delivered_on_fallback"] = bool(
+                        _br and not _br[-1])
+                    if _fb:
+                        import warnings as _w
+                        _msg = (
+                            "IMAS rescale baseline (j_BS loop): the l_i-proxy "
+                            "root find failed on pass(es) "
+                            f"{rec['rescale_fallback_passes']} and the "
+                            "bootstrap scale FELL BACK to 1.0 there"
+                            + (" -- INCLUDING the delivered pass, so the "
+                               "delivered bs_scale=1.0 is a fallback, not a "
+                               "fit" if rec["rescale_delivered_on_fallback"]
+                               else "") + " (recorded as "
+                            "rescale_fallback_passes / rescale_fallback_errors "
+                            "in the loop record)")
+                        print("[imas jbs-loop:rescale] WARNING " + _msg,
+                              flush=True)
+                        _w.warn(_msg, RuntimeWarning, stacklevel=2)
                     if _swb_info:
                         rec.update(_swb_info)
                     return _finish(rec, st["nl"])
