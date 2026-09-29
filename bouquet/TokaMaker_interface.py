@@ -2665,6 +2665,20 @@ def perturb_kinetic_equilibrium(
         except Exception as _pexc:
             print(f"    [probe {label:38s}] failed ({_pexc})")
     _probe("entry to perturb_kinetic_equilibrium")
+    # The diagnostic PIN_JPHI / DIFF_BS modes are the first two branches
+    # below, so with the self-consistent loop on they BYPASS it: the draw's
+    # bootstrap is then pinned (PIN_JPHI) or the legacy differential SWB
+    # delta (DIFF_BS), never Redl iterated on the draw's own equilibrium.
+    # Say so on every draw and record it on the draw's jbs_loop block.
+    _jbs_bypass = None
+    if _jbs_on and recalculate_j_BS and (_pin_jphi or _diff_bs):
+        _jbs_bypass = (
+            "PIN_JPHI (pin_jphi=True or env PIN_JPHI=1): j_phi pinned to the "
+            "baseline total, no bootstrap re-evaluation" if _pin_jphi else
+            "DIFF_BS=1 (env): the legacy differential solve_with_bootstrap "
+            "delta on the baseline total")
+        print(f"  [jbs-loop] BYPASSED for this draw by {_jbs_bypass} -- "
+              "its bootstrap is NOT self-consistent", flush=True)
     if _pin_jphi and recalculate_j_BS:
         print(f"  [PIN_JPHI] bypassing SWB call; using recon j_phi "
               f"as fixed forward-mode target")
@@ -4180,6 +4194,13 @@ def perturb_kinetic_equilibrium(
         "r2_f_ind": _r2_f_ind_used,
         "aux": aux_out,
     }
+    if _jbs_bypass is not None:
+        diagnostics["jbs_loop"] = dict(
+            enabled=False, bypassed=True, bypass_reason=_jbs_bypass,
+            converged=False, n_loops=0, n_passes_total=0,
+            note=("the self-consistent loop was requested but a diagnostic "
+                  "mode took precedence; this draw's bootstrap was not "
+                  "iterated"))
     if _jbs_on and _jbs_draw_ctx is not None:
         from .jbs_loop import jsonable as _jsonable
         _recs = list(_jbs_draw_ctx.get("records") or [])
@@ -4604,6 +4625,21 @@ def generate_bouquet(
     list[dict]
         Diagnostics from each equilibrium.
     """
+    # ---- the diagnostic modes that bypass the self-consistent loop --------
+    if (jbs_loop and jbs_loop.get("enabled") and recalculate_j_BS
+            and (bool(pin_jphi) or os.environ.get('PIN_JPHI', '0') == '1'
+                 or os.environ.get('DIFF_BS', '0') == '1')):
+        _byp = ("PIN_JPHI" if (bool(pin_jphi)
+                               or os.environ.get('PIN_JPHI', '0') == '1')
+                else "DIFF_BS")
+        _byp_msg = (f"{_byp} is set: it takes precedence over the "
+                    "self-consistent j_BS loop, so every draw of this run "
+                    "BYPASSES the loop (each draw's jbs_loop block records "
+                    "bypassed=True and why); the baseline was built with the "
+                    "loop")
+        print(f"[jbs-loop] NOTICE: {_byp_msg}", flush=True)
+        warnings.warn(_byp_msg, RuntimeWarning, stacklevel=2)
+
     # ---- rejected draw attempts: one record each, a summary at the end ----
     _rejections = rejection_log if rejection_log is not None else []
     _masked_at_start = dict(ANCHOR_MASKED_FAILURES)
