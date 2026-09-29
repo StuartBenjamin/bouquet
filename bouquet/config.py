@@ -672,8 +672,9 @@ class GenerationConfig:
     #: pair (that is how the tests prove it CONTAINS close_ip / close_ip_q0),
     #: and it works on its own: with ``structured_weights`` left at ``None``
     #: the default prior is derived for the basis ACTUALLY given, so a basis
-    #: whose length is not the default 4 gets a uniform (no-prior) ladder,
-    #: named as such in the record.  The physics prior below is a ladder over
+    #: whose length is not the default 4 gets a uniform ladder (no prior
+    #: without ``mse_data``; a sigma = 1 prior with it -- see
+    #: ``structured_weights``), named as such in the record.  The physics prior below is a ladder over
     #: the DEFAULT basis's radii and has no meaning on any other basis.
     #: Peak-normalised, so a coefficient reads as "how far the multiplier moves
     #: from 1 near this radius"; the basis need not be orthogonal, since with at
@@ -702,6 +703,15 @@ class GenerationConfig:
     #: result the prior -- not the data -- is holding up.  ``numpy.inf`` hard-pins
     #: a coefficient to 0.  These are a PRIOR, not a tolerance: they change
     #: which exactly-Ip-closing profile is chosen, never what "closed" means.
+    #:
+    #: **Scale.**  Without ``mse_data`` only the RATIOS of the weights matter
+    #: (the hard closure is invariant under ``W -> c W``).  With ``mse_data``
+    #: they are ABSOLUTE: ``W = sigma^-2`` in peak-normalised coefficient units
+    #: trades against the chords' chi^2, so multiplying every weight by 100
+    #: tightens the prior tenfold in sigma and moves the answer, and the
+    #: uniform ladder is a sigma = 1 prior, not "no prior".  Write the weights
+    #: as the widths you mean when MSE is on; the ladder in force is recorded
+    #: as ``structured_mse_prior_sigma_*``.
     structured_weights: Optional[dict] = None
     #: closure_channel="structured": the SECOND global measurement.  Ip is one
     #: number against 2K coefficients and is blind to radial redistribution --
@@ -832,7 +842,10 @@ class GenerationConfig:
     #: in the coefficients by finite differences on SOLVED equilibria (one GS
     #: solve per free coefficient) and the closure re-solved
     #: ``structured_mse_steps`` time(s) -- see
-    #: ``utils.structured_mse_outer``.  Ignored by every other channel.
+    #: ``utils.structured_mse_outer``.  With MSE on, the structured trust
+    #: weights are an ABSOLUTE ``sigma^-2`` prior (see ``structured_weights``:
+    #: their overall scale now matters, and a uniform ladder is sigma = 1).
+    #: Ignored by every other channel.
     mse_data: Optional[dict] = None
     #: closure_channel="structured": REFUSE (raise) when ``mse_data`` is absent
     #: or unusable (fewer than ``structured_mse_min_chords`` weighted finite

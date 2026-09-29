@@ -1359,6 +1359,28 @@ class Bouquet:
             )
             if mse_ch is not None:
                 from .utils import structured_objective_no_mse
+
+                def _sig(W):
+                    W = np.asarray(W, dtype=float)
+                    with np.errstate(divide="ignore"):
+                        return [float(v) for v in 1.0 / np.sqrt(W)]
+                # With MSE on the trust weights are an ABSOLUTE sigma^-2 that
+                # trades against chi2_MSE (their scale is no longer free), so
+                # the ladder actually in force is recorded as widths.
+                extra.update(
+                    structured_mse_prior_sigma_ind=_sig(out["weights_ind"]),
+                    structured_mse_prior_sigma_bs=_sig(out["weights_bs"]),
+                    structured_mse_prior_sigma_ind_up=(
+                        None if out.get("weights_ind_up") is None
+                        else _sig(out["weights_ind_up"])),
+                    structured_mse_prior_weights_name=str(
+                        out.get("weights_name", "")),
+                    structured_mse_prior_scale=(
+                        "ABSOLUTE: with MSE the objective is x'Wx + chi2_MSE, "
+                        "so W = sigma^-2 in peak-normalised coefficient units "
+                        "trades against the chords; scaling W moves the "
+                        "answer, and a uniform ladder is a sigma = 1 prior, "
+                        "not 'no prior'"))
                 state.update(
                     mse=mse_ch,
                     mse_required=bool(getattr(gc, "structured_mse_required",

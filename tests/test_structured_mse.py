@@ -587,6 +587,34 @@ class TestSolversWithMSE:
                 else:
                     assert a[k] == b[k] or (a[k] != a[k] and b[k] != b[k])
 
+    def test_weight_scale_is_free_without_mse_and_absolute_with_it(self):
+        """Without MSE, W -> 100 W leaves the hard answer unchanged; with MSE
+        the weights are an ABSOLUTE sigma^-2 against the chords' chi^2, so
+        the answer moves -- to exactly the minimiser of 100 W + chi2."""
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        mlin, _ch = _random_lin()
+        W1 = {k: np.asarray(STRUCTURED_WEIGHTS_PHYSICS[k], float)
+              for k in ("ind", "bs")}
+        W100 = {k: 100.0 * v for k, v in W1.items()}
+        a1 = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+                                 weights=W1)
+        a100 = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+                                   weights=W100)
+        np.testing.assert_allclose(np.r_[a100["a"], a100["b"]],
+                                   np.r_[a1["a"], a1["b"]], rtol=1e-12,
+                                   atol=1e-15)
+        m1 = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+                                 weights=W1, mse_lin=mlin)
+        m100 = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+                                   weights=W100, mse_lin=mlin)
+        x1, x100 = np.r_[m1["a"], m1["b"]], np.r_[m100["a"], m100["b"]]
+        assert np.max(np.abs(x100 - x1)) > 1e-3 * np.max(np.abs(x1))
+        M, m = _Mm(mlin)
+        C = np.concatenate([m100["A_row"], m100["B_row"]])
+        x_ref = _kkt_reference(np.r_[W100["ind"], W100["bs"]], M, m, C,
+                               m100["deficit"])
+        np.testing.assert_allclose(x100, x_ref, rtol=1e-8, atol=1e-12)
+
     def test_jacobian_width_must_match_the_basis(self):
         psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
         mlin, _ch = _random_lin(K=3)
@@ -808,6 +836,12 @@ class TestRunStage:
                    for st_ in rec["structured_mse_step_log"])
         assert len(rec["structured_mse_residual_sigma_after"]) == ch["n_active"]
         assert rec["structured_mse_er_applied"] is False
+        # the prior in force, as the ABSOLUTE widths it is with MSE on
+        np.testing.assert_allclose(rec["structured_mse_prior_sigma_ind"],
+                                   [0.10, 0.40, 0.40, 0.40])
+        np.testing.assert_allclose(rec["structured_mse_prior_sigma_bs"],
+                                   [0.50, 0.30, 0.15, 0.10])
+        assert "ABSOLUTE" in rec["structured_mse_prior_scale"]
         o = rec["structured_mse_orientation"]
         assert (o["pol"], o["tor"]) == (1.0, 1.0)
         assert (o["ip_sign_equilibrium"], o["bt_sign_equilibrium"]) == (

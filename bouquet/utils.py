@@ -1153,8 +1153,10 @@ def structured_default_weights(K):
     ``"K basis functions but 4/4 ind/bs weights"`` -- including for the
     documented ``structured_basis={"kind": "constant"}`` one-liner, which is
     how the channel is meant to be collapsed back onto a single scalar pair.
-    For any other K the default is therefore UNIFORM (no prior), and the
-    recorded ``name`` says so, so a reader of the archive can never mistake it
+    For any other K the default is therefore UNIFORM -- no prior while the
+    closure has only Ip/axis/l_i rows, but a sigma = 1 prior on every
+    coefficient once ``mse_data`` adds its chi^2 (see
+    :data:`STRUCTURED_WEIGHTS_UNIFORM`) -- and the recorded ``name`` says so, so a reader of the archive can never mistake it
     for the physics ladder.  Supplying ``structured_weights`` explicitly is
     unaffected.
     """
@@ -1168,10 +1170,21 @@ def structured_default_weights(K):
                 ind=(1.0,) * K, bs=(1.0,) * K)
 
 
-#: The ONE documented alternative, for a sensitivity: no prior at all, every
-#: coefficient penalised equally.  The difference between the two answers is
-#: the part of the result that the physics prior -- not the data -- is holding
-#: up, and it is meant to be reported, not hidden.
+#: The ONE documented alternative, for a sensitivity: every coefficient
+#: penalised equally.  The difference between the two answers is the part of
+#: the result that the physics prior -- not the data -- is holding up, and it
+#: is meant to be reported, not hidden.
+#:
+#: "No prior" is exact only WITHOUT MSE data.  The hard channel solves
+#: ``min x'Wx s.t. C x = d``, which is invariant under ``W -> c W``: only the
+#: RATIOS of the weights matter, and uniform weights express no preference.
+#: With ``mse_data`` the objective becomes ``x'Wx + chi2_MSE(x)``, and the
+#: weights are then an ABSOLUTE ``sigma^-2`` (in peak-normalised coefficient
+#: units) that trades against the chords' chi^2 -- scaling W changes the
+#: answer, and this ladder is a sigma = 1 prior on every coefficient, not the
+#: absence of one.  (The soft solver always read its ladders as absolute
+#: sigmas; the hard channel now does too, which is what keeps the two solvers
+#: in agreement when handed the same sigma statement.)
 STRUCTURED_WEIGHTS_UNIFORM = dict(name="uniform",
                                   ind=(1.0, 1.0, 1.0, 1.0),
                                   bs=(1.0, 1.0, 1.0, 1.0))
@@ -1239,7 +1252,8 @@ STRUCTURED_PRESETS = {
 #: another device or another source, run it and read the recorded
 #: closure-health flags (the 0.2 < s < 5 scale bounds, |s_bs - 1| > 0.5, the q0
 #: miss, the l_i z-score) before trusting the answer, and consider
-#: :data:`STRUCTURED_WEIGHTS_UNIFORM` as the no-prior sensitivity.
+#: :data:`STRUCTURED_WEIGHTS_UNIFORM` as the no-prior sensitivity (without
+#: MSE data; with it the uniform ladder is a sigma = 1 prior -- see there).
 STRUCTURED_PRESET_DEFAULT = "li_soft_onesided"
 
 #: The ``structured_preset`` spelling that DECLINES the default preset and
@@ -2379,7 +2393,11 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
     :func:`structured_mse_linear_model` -- adds
     ``chi2_MSE(x) = sum_k ((tg0 + J (x - x0) - tg_meas)_k / sigma_eff_k)^2``
     to the minimised norm, on the same scale (the trust weights are
-    ``sigma^-2``).  The constraints are still imposed exactly: the problem
+    ``sigma^-2``).  This makes the ABSOLUTE scale of the weights load-bearing:
+    without MSE the answer is invariant under ``W -> c W``, with it the
+    weights trade against the chords' chi^2, so a uniform ladder is a
+    sigma = 1 prior and a ladder written in "relative" units changes meaning
+    (see :data:`STRUCTURED_WEIGHTS_UNIFORM`).  The constraints are still imposed exactly: the problem
     becomes an equality-constrained least-squares one, solved on the
     constraint null space in the same ``y = W^(1/2) x`` scaling (no normal
     equations), and stays convex, so the one-sided sign iteration's exactness
