@@ -789,6 +789,23 @@ class TestRunStage:
             "structured_mse_objective_before"]
         assert rec["structured_mse_chi2_delivered"] == pytest.approx(
             rec["structured_mse_chi2_after"], rel=1e-12)
+        # every GS solve after the predictor's is an extra solve, and the
+        # verdict says where they went
+        assert rec["n_extra_solves"] == 9
+        assert rec["structured_corrector_n_solves"] == 0
+        assert "MSE stage (9 solves)" in rec["sawtooth_verdict"]
+        assert "(0 extra solves)" not in rec["sawtooth_verdict"]
+        # the delivered equilibrium is judged, and here it is the stage's own
+        assert rec["structured_mse_delivered_worse"] is False
+        assert rec["structured_mse_objective_delivered_comparable"] is True
+        assert rec["structured_mse_objective_delivered"] == pytest.approx(
+            rec["structured_mse_objective_after"], rel=1e-12)
+        z = np.asarray(rec["structured_mse_residual_sigma_delivered"])
+        assert z.size == ch["n_active"]
+        assert rec["structured_mse_residual_sigma_delivered_max_abs"] == \
+            pytest.approx(float(np.max(np.abs(z))))
+        assert all("objective_rose_vs_previous" in st_
+                   for st_ in rec["structured_mse_step_log"])
         assert len(rec["structured_mse_residual_sigma_after"]) == ch["n_active"]
         assert rec["structured_mse_er_applied"] is False
         o = rec["structured_mse_orientation"]
@@ -862,6 +879,9 @@ class TestRunStage:
         # 8 finite-difference probes, then the predictor's hybrid re-solved so
         # mygs holds the equilibrium bl describes
         assert n_stage == 8 + 1
+        assert rec["structured_mse_n_solves"] == 9
+        assert rec["n_extra_solves"] == 9
+        assert "MSE stage refused (9 solves)" in rec["sawtooth_verdict"]
         I_kept = cyl.I.copy()
         cyl.solve(bl.j_phi)
         np.testing.assert_allclose(cyl.I, I_kept, rtol=1e-14)
@@ -887,6 +907,47 @@ class TestRunStage:
         assert rec["closure_limited"]
         assert any("disagree with the stated field orientation" in r
                    for r in rec["closure_limited_reasons"])
+
+    def test_the_flag_is_judged_on_the_delivered_equilibrium(self):
+        """A delivered equilibrium that fits the chords worse than the
+        pre-MSE closure is FLAGGED, whatever the MSE stage's own last solve
+        looked like.  Reporting only: nothing is re-solved."""
+        from bouquet.run import Bouquet
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic",
+                              structured_preset="none")
+        bl, state, n_stage, cyl, ch = _run_stage(gc)
+        assert bl.ip_closure["structured_mse_delivered_worse"] is False
+        # stand-in for a corrector re-solve that moved the equilibrium away
+        # from what the MSE stage delivered
+        n0 = cyl.n_solves
+        cyl.solve(1.6 * state["j_ind"] + state["j_BS_swb"]
+                  + state["j_fixed"])
+        state["mse_corrector_resolved"] = True
+        Bouquet._structured_mse_delivered(state, bl, _FakeGS(cyl))
+        assert cyl.n_solves == n0 + 1        # the judgement solved nothing
+        rec = bl.ip_closure
+        assert rec["structured_mse_chi2_delivered"] > rec[
+            "structured_mse_chi2_before"]
+        assert rec["structured_mse_delivered_worse"] is True
+        assert rec["closure_limited"]
+        assert any("delivered chi2" in r and r.startswith(MSE_FLAG_PREFIX)
+                   for r in rec["closure_limited_reasons"])
+        # hard channel: the prior-only objective stays comparable
+        assert rec["structured_mse_objective_delivered_comparable"] is True
+
+    def test_soft_resolved_objective_is_not_compared(self):
+        from bouquet.run import Bouquet
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic")
+        bl, state, n_stage, cyl, ch = _run_stage(gc)
+        state["mse_corrector_resolved"] = True
+        Bouquet._structured_mse_delivered(state, bl, _FakeGS(cyl))
+        rec = bl.ip_closure
+        assert rec["structured_mse_objective_delivered_comparable"] is False
+        assert rec["structured_mse_objective_delivered"] is None
+        assert "not comparable" in rec[
+            "structured_mse_objective_delivered_note"]
 
     def test_hard_channel_with_mse(self):
         gc = GenerationConfig(closure_channel="structured",
@@ -947,3 +1008,96 @@ class TestConfig:
         assert d["mse_data"]["er_corrected"] is True
         assert d["structured_mse_required"] is True
         assert BouquetConfig  # imported: the dataclass field is serialised
+
+
+# ---------------------------------------------------------------------------
+#  the corrector's entry state after an APPLIED MSE stage
+# ---------------------------------------------------------------------------
+class _LiSnap:
+    def __init__(self, world):
+        self.world = world
+
+    def get_q(self, psi=None, compute_geo=False):
+        return (np.asarray(psi, float), np.full(np.size(psi), 1.05), None,
+                None)
+
+    def get_stats(self, lcfs_pad=None, li_normalization=None):
+        return {"l_i": self.world["li"] * 1.008}
+
+
+class _LiGS:
+    def __init__(self, world):
+        self.world = world
+
+    def copy_eq(self):
+        return _LiSnap(self.world)
+
+
+def _corrector_after_mse(monkeypatch, mse_applied):
+    """The corrector on a stubbed closure, entered after an MSE stage."""
+    from bouquet import utils
+    from bouquet.run import Bouquet
+
+    world = {"li": 0.87}          # 3 % below the 0.9 target: one step
+
+    def _solver(*a, **kw):
+        return dict(s_ind=np.ones(5), s_bs=np.ones(5), a=[0.0], b=[0.0],
+                    ohm_scale_eff=1.0, bs_scale_eff=1.0, structure_ind=0.0,
+                    structure_bs=0.0, ip_residual_pct=0.0, Ip_hybrid=1.0e6,
+                    ip_residual=0.0, residual_sigma_Ip=None,
+                    li_predicted=float(kw["li_target"]))
+
+    monkeypatch.setattr(utils, "close_ip_structured", _solver)
+    monkeypatch.setattr(utils, "close_ip_structured_soft", _solver)
+    monkeypatch.setattr(utils, "li_achieved",
+                        lambda eq, li_kind="li_1", psi_pad=1e-3,
+                        perimeter=None: (float(eq.world["li"]), {}))
+
+    def _solve(j):
+        world["li"] = 0.9
+        return 7
+
+    bl = types.SimpleNamespace(
+        ip_closure={"closure_limited": False, "closure_limited_reasons": (),
+                    "structured_li_solved_predictor": 0.85,
+                    "structured_li_achieved_predictor": 0.85,
+                    "structured_li_residual_predictor": -0.05},
+        ohm_scale=1.0, bs_scale=1.0)
+    state = dict(
+        q0_target=1.05, psi_q=np.linspace(0.0, 1.0, 5),
+        psi_geom=np.linspace(0.0, 1.0, 5), j_ind=np.ones(5),
+        j_BS_swb=np.ones(5), j_fixed=np.zeros(5), axis=None,
+        w_lin=np.ones(5), c_signed=0.0, Ip_signed=1.0e6, ip_ind=7.0e5,
+        ip_bs=3.0e5, ip_fix=0.0, basis=None, weights=None, q0_tol=0.01,
+        gated=False, soft=False, ip_sigma=None, sigma_ind=None,
+        sigma_bs=None, li_target=0.9, li_sigma=None, li_kind="li_1",
+        li_geom={"perimeter": 4.2}, psi_pad=1e-3, li_tol=0.005,
+        li_max_corrector_steps=1,
+        mse={"n_active": 6}, mse_applied=mse_applied, mse_n_solves=9)
+    Bouquet._close_ip_structured_corrector(state, bl, _LiGS(world), _solve)
+    return bl.ip_closure, state
+
+
+class TestCorrectorAfterMSE:
+    def test_entry_readbacks_are_not_called_predictor(self, monkeypatch):
+        rec, state = _corrector_after_mse(monkeypatch, mse_applied=True)
+        # the predictor's values (recorded by the MSE stage) are untouched
+        assert rec["structured_li_achieved_predictor"] == 0.85
+        assert rec["structured_li_residual_predictor"] == -0.05
+        # the corrector's entry state is named for what it is
+        assert rec["structured_li_achieved_mse_stage"] == pytest.approx(0.87)
+        assert rec["structured_li_residual_mse_stage"] == pytest.approx(-0.03)
+        assert "MSE-stage equilibrium" in rec["structured_corrector_entry"]
+        # 9 MSE solves + 1 corrector solve
+        assert rec["structured_corrector_n_solves"] == 1
+        assert rec["n_extra_solves"] == 10
+        assert rec["sawtooth_verdict"].startswith(
+            "structured predictor + MSE stage (9 solves) + 1 corrector solve")
+        assert state["mse_corrector_resolved"] is True
+
+    def test_without_an_applied_stage_the_names_are_unchanged(self,
+                                                             monkeypatch):
+        rec, state = _corrector_after_mse(monkeypatch, mse_applied=False)
+        assert rec["structured_li_achieved_predictor"] == pytest.approx(0.87)
+        assert "structured_li_achieved_mse_stage" not in rec
+        assert "structured_corrector_entry" not in rec

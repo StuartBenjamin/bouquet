@@ -2188,7 +2188,14 @@ def structured_mse_outer(x_pred, F_pred, tg_pred, tan_gamma_of, resolve, ch,
     step cannot raise the MODEL objective (the re-solve minimises it and the
     linearisation point is feasible for it), so an achieved objective ABOVE
     the predictor's is a statement that the linear model failed on this
-    slice; it is returned as a flag (never retried, never hidden).
+    slice; it is returned as a flag (never retried, never hidden).  Each
+    step's achieved objective is also logged against the previous step's
+    (``objective_rose_vs_previous``) -- a record, not a stop test: the step
+    count is *n_steps*, fixed, and nothing here iterates to convergence.
+    This judges the stage's OWN last solve; whether the equilibrium the slice
+    finally delivers (after the q0/l_i corrector) is worse than the pre-MSE
+    closure is judged separately, on that equilibrium
+    (``Bouquet._structured_mse_delivered``).
 
     Returns ``dict(out, x, tg, record, flags)``.
     """
@@ -2221,6 +2228,8 @@ def structured_mse_outer(x_pred, F_pred, tg_pred, tan_gamma_of, resolve, ch,
         lres = (tg_new - tg_lin_pred) / ch["sigma_eff"]
         chi2_new, z_new = mse_chi2(tg_new, ch)
         F_nomse = structured_objective_no_mse(out)
+        _F_prev = (F_before if not steps
+                   else steps[-1]["objective_achieved"])
         steps.append(dict(
             chi2_model=float(out["mse_chi2_model"]),
             chi2_achieved=float(chi2_new),
@@ -2229,6 +2238,11 @@ def structured_mse_outer(x_pred, F_pred, tg_pred, tan_gamma_of, resolve, ch,
             linearisation_residual_max_sigma=float(np.max(np.abs(lres))),
             linearisation_residual_rms_sigma=float(np.sqrt(np.mean(lres ** 2))),
             coeff_step_max=float(np.max(np.abs(x_new - x_lin))),
+            # logged, never acted on: this step's achieved objective against
+            # the previous step's (the predictor's, for the first step)
+            objective_previous=float(_F_prev),
+            objective_rose_vs_previous=bool(
+                not (F_nomse + chi2_new <= _F_prev)),
         ))
         x_lin, tg_lin = x_new, tg_new
     chi2_f, z_f = mse_chi2(tg_new, ch)

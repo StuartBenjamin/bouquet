@@ -1494,6 +1494,43 @@ class Bouquet:
         )
 
     @staticmethod
+    def _structured_predictor_readback(state, mygs):
+        """The predictor's solved q0 / l_i, under the corrector's own names.
+
+        Exactly the corrector's readbacks (q0 from ``get_q`` at ``psi_q[0]``;
+        l_i from :func:`bouquet.utils.li_achieved` with the anchor's
+        perimeter), taken on a ``copy_eq()`` snapshot; only the quantities the
+        slice constrains are read.  No GS solve.
+        """
+        import numpy as np
+
+        from .utils import li_achieved
+
+        gated = bool(state.get("gated", state.get("axis") is not None))
+        li_target = state.get("li_target")
+        if not gated and li_target is None:
+            return {}
+        snap = mygs.copy_eq()
+        rec = {}
+        if gated:
+            q0 = float(np.asarray(snap.get_q(psi=state["psi_q"].copy())[1],
+                                  dtype=float)[0])
+            rec.update(q0_solved_predictor=q0,
+                       q0_predictor_residual=q0 - state["q0_target"])
+        if li_target is not None:
+            _per = (None if state.get("li_geom") is None
+                    else float(state["li_geom"]["perimeter"]))
+            li, _ = li_achieved(snap, li_kind=str(state.get("li_kind",
+                                                              "li_1")),
+                                psi_pad=float(state.get("psi_pad", 1e-3)),
+                                perimeter=_per)
+            rec.update(structured_li_solved_predictor=float(li),
+                       structured_li_achieved_predictor=float(li),
+                       structured_li_residual_predictor=float(li)
+                       - float(li_target))
+        return rec
+
+    @staticmethod
     def _close_ip_structured_mse_stage(state, bl, mygs, solve_jphi,
                                        field_at=None):
         """Add ``chi2_MSE`` to the structured closure; ``free.sum() + steps`` solves.
@@ -1563,7 +1600,7 @@ class Bouquet:
         j_ind = np.asarray(state["j_ind"], dtype=float)
         j_bs = np.asarray(state["j_BS_swb"], dtype=float)
         j_fix = np.asarray(state["j_fixed"], dtype=float)
-        last = {"nl": None}
+        last = {"nl": None, "n": 0}
         # the one-sided prior's up ladder, exactly as the predictor used it
         up_ladder = state.get("sigma_ind_up")
 
@@ -1573,6 +1610,7 @@ class Bouquet:
                     + j_fix)
 
         def _solve(j):
+            last["n"] += 1
             last["nl"] = solve_jphi(np.asarray(j, dtype=float))
 
         def _resolve(lin):
@@ -1607,6 +1645,12 @@ class Bouquet:
         rec = {}
         stage_flags = []
         prev = getattr(bl, "ip_closure", None) or {}
+        # The corrector reads its "*_predictor" fields off whatever mygs holds
+        # when it runs -- after this stage that is the MSE-stage equilibrium,
+        # not the predictor.  Read the predictor's q0 / l_i HERE, before the
+        # first probe moves anything, so those names keep their meaning (the
+        # corrector then records its entry state under "*_mse_stage").
+        rec.update(Bouquet._structured_predictor_readback(state, mygs))
         try:
             B0, found = field_at(ch["R"], ch["Z"])
             B0 = np.asarray(B0, dtype=float).reshape(-1, 3)
@@ -1699,8 +1743,10 @@ class Bouquet:
             for _w in stage_flags + [why]:
                 if _w not in reasons:
                     reasons.append(_w)
+            state["mse_n_solves"] = int(last["n"])
             rec.update(structured_mse_status="refused, not applied: "
                                              + str(e)[:300],
+                       structured_mse_n_solves=int(last["n"]),
                        closure_limited=True,
                        closure_limited_reasons=tuple(reasons))
             if getattr(bl, "ip_closure", None) is not None:
@@ -1722,13 +1768,21 @@ class Bouquet:
                                                        R["jacobian"], ch)
         state["mse_sign"] = (sp, st)
         state["mse_applied"] = True
+        state["mse_n_solves"] = int(last["n"])
+        # what the delivered-equilibrium check compares against, and the
+        # closure the delivered profiles come from until a corrector re-solve
+        # replaces it (see _structured_mse_delivered)
+        state["mse_chi2_before"] = float(R["chi2_before"])
+        state["mse_objective_before"] = float(R["objective_before"])
+        state["mse_delivered_out"] = out
+        state["mse_corrector_resolved"] = False
 
         _at = lambda s: {f"{r:.2f}": float(np.interp(r, psi_g, s))
                          for r in (0.0, 0.2, 0.4, 0.6, 0.8, 0.95, 1.0)}
         _fl = lambda v: [float(x) for x in np.ravel(v)]
         rec.update(
             structured_mse_status="applied",
-            structured_mse_n_solves=int(R["n_solves"]),
+            structured_mse_n_solves=int(last["n"]),
             structured_mse_n_fd_solves=int(R["n_fd_solves"]),
             structured_mse_chi2_before=float(R["chi2_before"]),
             structured_mse_chi2_after=float(R["chi2_after"]),
@@ -1828,39 +1882,108 @@ class Bouquet:
 
     @staticmethod
     def _structured_mse_delivered(state, bl, mygs, field_at=None):
-        """Record chi2_MSE on the equilibrium the slice finally DELIVERS.
+        """Judge chi2_MSE on the equilibrium the slice finally DELIVERS.
 
         The q0/l_i corrector may re-solve after the MSE stage; this re-reads
-        the field (no solve) with the frozen orientation so the record's last
-        word is about the delivered equilibrium, not an intermediate one.
+        the field (no solve) with the frozen orientation, so the record's last
+        word -- and the closure-health flags -- are about the delivered
+        equilibrium, not an intermediate one.  REPORTING ONLY: nothing here
+        solves, retries, or changes an iteration count or a tolerance.
+
+        Recorded: the delivered chi2 (total and reduced), the per-chord
+        residuals in sigma (``(tan_gamma_pred - tan_gamma_meas) / sigma_eff``)
+        and their largest magnitude, and the delivered objective
+        ``F_noMSE(delivered closure) + chi2_delivered``.  That objective is
+        COMPARABLE with the pre-MSE one (``structured_mse_objective_before``)
+        when no corrector re-solve replaced the MSE stage's closure, or on the
+        hard channel (whose ``F_noMSE`` is the trust prior alone, a function of
+        the coefficients only); on the soft channel a corrector re-solve moved
+        the l_i / axis rows the posterior objective is measured against, so it
+        is recorded as not comparable and only the chi2 rule applies.
+
+        The slice is FLAGGED closure-limited (``MSE_FLAG_PREFIX``), and
+        ``structured_mse_delivered_worse`` set, when the delivered chi2 is
+        above the pre-MSE chi2, or the delivered objective (where comparable)
+        is above the pre-MSE objective.  A chord the delivered read cannot
+        find is flagged the same way, never filled from a stale value.
         """
         import numpy as np
 
         from .mse import mse_chi2, mse_field_at, mse_tan_gamma
+        from .utils import MSE_FLAG_PREFIX, structured_objective_no_mse
 
         ch = state["mse"]
         sp, st = state["mse_sign"]
+        icl = getattr(bl, "ip_closure", None)
+        flags = []
+        rec = {}
         B, found = (mse_field_at(mygs, ch["R"], ch["Z"]) if field_at is None
                     else field_at(ch["R"], ch["Z"]))
         found = np.asarray(found, dtype=bool).ravel()
+        c2 = None
         if not found.all():
-            raise RuntimeError(
-                "MSE chord(s) at input index "
+            flags.append(
+                MSE_FLAG_PREFIX + "chord(s) at input index "
                 f"{[int(i) for i in np.asarray(ch['index'])[~found]]} were not "
-                "found on the mesh on the delivered equilibrium -- refusing to "
-                "report a stale field value")
-        tg = mse_tan_gamma(B, ch, sp, st)
-        c2, z = mse_chi2(tg, ch)
-        if getattr(bl, "ip_closure", None) is not None:
-            bl.ip_closure.update(
+                "found on the mesh on the delivered equilibrium; the delivered "
+                "chi2 is not reported (never from a stale field value)")
+            rec.update(structured_mse_chi2_delivered=None,
+                       structured_mse_delivered_worse=True)
+        else:
+            tg = mse_tan_gamma(B, ch, sp, st)
+            c2, z = mse_chi2(tg, ch)
+            c2_before = float(state.get("mse_chi2_before", float("nan")))
+            F_before = float(state.get("mse_objective_before", float("nan")))
+            out_d = state.get("mse_delivered_out")
+            resolved = bool(state.get("mse_corrector_resolved"))
+            soft = bool(state.get("soft"))
+            comparable = out_d is not None and (not resolved or not soft)
+            F_del = (float(structured_objective_no_mse(out_d)) + float(c2)
+                     if comparable else None)
+            rec.update(
                 structured_mse_chi2_delivered=float(c2),
                 structured_mse_chi2_red_delivered=float(c2)
                 / int(ch["n_active"]),
                 structured_mse_residual_sigma_delivered=[
                     float(v) for v in np.ravel(z)],
+                structured_mse_residual_sigma_delivered_max_abs=float(
+                    np.max(np.abs(z))),
                 structured_mse_tgamma_pred_delivered=[
-                    float(v) for v in np.ravel(tg)])
-        return float(c2)
+                    float(v) for v in np.ravel(tg)],
+                structured_mse_objective_delivered=F_del,
+                structured_mse_objective_delivered_comparable=bool(comparable),
+                structured_mse_objective_delivered_note=(
+                    "F_noMSE(delivered closure) + chi2_delivered, on the "
+                    + ("MSE stage's closure (no corrector re-solve)"
+                       if not resolved else
+                       "corrector's re-solved closure (hard channel: F_noMSE "
+                       "is the trust prior, a function of the coefficients "
+                       "only)") if comparable else
+                    "not comparable: a soft-channel corrector re-solve moved "
+                    "the l_i / axis rows the posterior objective is measured "
+                    "against; only the chi2 rule applies"))
+            if not (np.isfinite(c2) and c2 <= c2_before):
+                flags.append(
+                    MSE_FLAG_PREFIX + f"delivered chi2 {float(c2):.6g} is "
+                    f"above the pre-MSE chi2 {c2_before:.6g}: the delivered "
+                    "equilibrium fits the chords worse than the closure "
+                    "without MSE")
+            if comparable and not (np.isfinite(F_del) and F_del <= F_before):
+                flags.append(
+                    MSE_FLAG_PREFIX + f"delivered objective {F_del:.6g} is "
+                    f"above the pre-MSE objective {F_before:.6g}")
+            rec["structured_mse_delivered_worse"] = bool(flags)
+        if icl is not None:
+            reasons = list(icl.get("closure_limited_reasons", ()) or ())
+            for why in flags:
+                if why not in reasons:
+                    reasons.append(why)
+                print("[imas SWB-split:ohmic structured] WARNING closure-"
+                      "limited: " + why, flush=True)
+            rec["closure_limited_reasons"] = tuple(reasons)
+            rec["closure_limited"] = bool(reasons)
+            icl.update(rec)
+        return None if c2 is None else float(c2)
 
     @staticmethod
     def _structured_roundtrip_gate(Ip_measured):
@@ -2023,12 +2146,28 @@ class Bouquet:
         # None means "nothing new to say" and the predictor's flag stands.
         ip_z_final = None
         q0_tok = res = None
+        # After an APPLIED MSE stage the equilibrium this corrector starts from
+        # is the MSE stage's, not the predictor's: its entry readbacks are
+        # recorded as "*_mse_stage", and the "*_predictor" names keep the
+        # values the MSE stage read off the predictor before it moved
+        # anything.  Without an MSE stage every name is exactly as before.
+        _entry_mse = bool(state.get("mse_applied"))
+        if _entry_mse:
+            rec.update(structured_corrector_entry=(
+                "MSE-stage equilibrium: the *_mse_stage fields are this "
+                "corrector's entry readbacks; the *_predictor fields were read "
+                "off the predictor by the MSE stage before it solved anything"))
         if gated:
             q0_tok = float(np.asarray(snap.get_q(psi=state["psi_q"].copy())[1],
                                       dtype=float)[0])
             res = q0_tok - q0_target
-            rec.update(q0_solved_predictor=q0_tok, q0_predictor_residual=res,
-                       q0_tol=state["q0_tol"], q0_solved=q0_tok,
+            if _entry_mse:
+                rec.update(q0_solved_mse_stage=q0_tok,
+                           q0_mse_stage_residual=res)
+            else:
+                rec.update(q0_solved_predictor=q0_tok,
+                           q0_predictor_residual=res)
+            rec.update(q0_tol=state["q0_tol"], q0_solved=q0_tok,
                        q0_residual=res)
         li_tok = li_res = None
         li_perimeter = (None if state.get("li_geom") is None
@@ -2044,9 +2183,14 @@ class Bouquet:
                                            psi_pad=psi_pad,
                                            perimeter=li_perimeter)
             li_res = li_tok - float(li_target)
-            rec.update(structured_li_solved_predictor=li_tok,
-                       structured_li_achieved_predictor=li_tok,
-                       structured_li_residual_predictor=li_res,
+            if _entry_mse:
+                rec.update(structured_li_achieved_mse_stage=li_tok,
+                           structured_li_residual_mse_stage=li_res)
+            else:
+                rec.update(structured_li_solved_predictor=li_tok,
+                           structured_li_achieved_predictor=li_tok,
+                           structured_li_residual_predictor=li_res)
+            rec.update(
                        # "corrected" starts as the predictor and is refreshed
                        # after every corrector solve: with 0 extra solves the
                        # predictor IS the delivered equilibrium.
@@ -2222,6 +2366,10 @@ class Bouquet:
                 nl_out = solve_jphi(np.asarray(bl.j_phi, dtype=float))
                 snap2 = mygs.copy_eq()
                 n_solves += 1
+                if state.get("mse_applied"):
+                    # the delivered profiles now come from THIS closure
+                    state["mse_delivered_out"] = out
+                    state["mse_corrector_resolved"] = True
                 rec.update(
                     n_extra_solves=n_solves,
                     structured_coeffs_a=[float(v) for v in out["a"]],
@@ -2464,6 +2612,22 @@ class Bouquet:
                     _g2["err_pct"])
                 rec["structured_roundtrip_post_corrector_reference"] = \
                     _g2["reference_name"]
+        if state.get("mse") is not None:
+            # The MSE stage's solves are extra solves too: n_extra_solves
+            # counts EVERY GS solve after the predictor's, and the verdict
+            # says where they went.  (No MSE block: nothing here runs.)
+            _n_mse = int(state.get("mse_n_solves", 0) or 0)
+            _n_cor = int(rec.get("n_extra_solves", 0) or 0)
+            _what = ("MSE stage" if state.get("mse_applied")
+                     else "MSE stage refused")
+            rec["structured_corrector_n_solves"] = _n_cor
+            rec["n_extra_solves"] = _n_cor + _n_mse
+            _v = str(rec.get("sawtooth_verdict", ""))
+            _v = _v.replace("(0 extra solves)", "(0 corrector solves)")
+            rec["sawtooth_verdict"] = _v.replace(
+                "structured predictor",
+                f"structured predictor + {_what} ({_n_mse} solve"
+                f"{'' if _n_mse == 1 else 's'})", 1)
         if getattr(bl, "ip_closure", None) is not None:
             bl.ip_closure.update(rec)
         return nl_out
