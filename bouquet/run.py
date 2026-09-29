@@ -956,7 +956,11 @@ class Bouquet:
         ``j_requested0``) then carries the reference computed ONCE on the
         original anchor -- a data-derived target, held fixed, and so is the
         axis-current row derived from it.  ``None`` (the default) is the
-        historical behaviour, line for line.
+        historical behaviour, line for line.  With
+        ``jbs_loop_q0_corrector=True`` the dict also carries ``axis_row``: the
+        row the loop's q0 pin (:class:`bouquet.jbs_loop.AxisRowPin`) moved from
+        the q0 measured on the previous pass; the 2x2 then matches that row
+        instead of ``j_requested0`` (the target itself is unchanged).
         """
         import numpy as np
 
@@ -990,6 +994,12 @@ class Bouquet:
             q0_target = float(q0_ref["q0_target"])
         j_renorm_ratio = j_achieved0 / j_requested0
         j_ref0 = j_requested0
+        # jbs_loop_q0_corrector=True (loop only): the axis row the loop's
+        # q0 pin moved from the q0 measured on the previous pass
+        # (jbs_loop.AxisRowPin); absent by default -> the held row above
+        _pin_row = (None if q0_ref is None else q0_ref.get("axis_row"))
+        if _pin_row is not None:
+            j_ref0 = float(_pin_row)
         j_ind0, j_bs0, j_fix0 = _ax(j_ind), _ax(j_BS_swb), _ax(j_fixed)
 
         saw = dict(getattr(bl, "sawtooth", None) or {})
@@ -1043,6 +1053,11 @@ class Bouquet:
             j_ref0_requested=j_requested0,
             j_renorm_ratio=j_renorm_ratio,
             j_ref0_used=j_ref0,
+            **({} if _pin_row is None else dict(
+                q0_axis_row_source=(
+                    "jbs_loop_q0_corrector: the axis row moved by the loop's "
+                    "q0 pin from the q0 measured on the previous pass (the "
+                    "anchor's requested axis current is j_ref0_requested)"))),
             j_ind0=j_ind0, j_bs0=j_bs0, j_fix0=j_fix0,
             n_extra_solves=0,
         )
@@ -1131,8 +1146,9 @@ class Bouquet:
         belongs.  The rejection is printed and recorded either way.
 
         ``q0_ref``: the self-consistent bootstrap loop's held anchor
-        reference, exactly as in :meth:`_close_ip_q0_predictor`; ``None`` is
-        the historical behaviour.
+        reference, exactly as in :meth:`_close_ip_q0_predictor` (including
+        the optional ``axis_row`` of ``jbs_loop_q0_corrector=True``); ``None``
+        is the historical behaviour.
 
         ``x_retry`` (loop passes only): the previous pass's coefficients.  If
         the SOFT closure refuses with the Levenberg no-descent error, it is
@@ -1192,6 +1208,11 @@ class Bouquet:
             j_requested0 = float(q0_ref["j_requested0"])
             q0_target = float(q0_ref["q0_target"])
         j_ref0 = j_requested0
+        # jbs_loop_q0_corrector=True (loop only): the axis row moved by the
+        # loop's q0 pin (see _close_ip_q0_predictor); absent by default
+        _pin_row = (None if q0_ref is None else q0_ref.get("axis_row"))
+        if _pin_row is not None:
+            j_ref0 = float(_pin_row)
         j_ind0, j_bs0, j_fix0 = _ax(j_ind), _ax(j_BS_swb), _ax(j_fixed)
 
         saw = dict(getattr(bl, "sawtooth", None) or {})
@@ -1365,6 +1386,11 @@ class Bouquet:
             j_ref0_achieved=j_achieved0, j_ref0_requested=j_requested0,
             j_renorm_ratio=j_achieved0 / j_requested0,
             j_ref0_used=j_ref0,
+            **({} if _pin_row is None else dict(
+                q0_axis_row_source=(
+                    "jbs_loop_q0_corrector: the axis row moved by the loop's "
+                    "q0 pin from the q0 measured on the previous pass (the "
+                    "anchor's requested axis current is j_ref0_requested)"))),
             j_ind0=j_ind0, j_bs0=j_bs0, j_fix0=j_fix0,
             n_extra_solves=0,
             sawtooth_verdict=("gate admitted -> Ip + axis rows"
@@ -1876,7 +1902,8 @@ class Bouquet:
     @staticmethod
     def _structured_mse_jbs_stage(state, bl, mygs, solve_jphi, jbs0, refresh,
                                   evaluate, measure, weights, settings, Ip,
-                                  gate_q0=False, field_at=None, pre_mse=None):
+                                  gate_q0=False, field_at=None, pre_mse=None,
+                                  q0_pin=None):
         """The MSE term under the self-consistent bootstrap loop.
 
         Runs after the j_BS loop has converged WITHOUT the MSE term (``state``
@@ -1922,6 +1949,13 @@ class Bouquet:
           where gated) against the pre-MSE equilibrium's at ``tol_li``
           (``tol_q0``) -- the record's ``converged`` is that check, with the
           residuals and the reason, and the slice is flagged either way.
+
+        ``q0_pin`` (``jbs_loop_q0_corrector=True`` with an active axis row;
+        :class:`bouquet.jbs_loop.AxisRowPin`): the chord steps are passes of
+        the loop, so the pin keeps acting -- ``refresh`` moves the axis row
+        from each step's measured q0 -- and every step's criterion, the final
+        step's and the refusal re-solve's ADD ``|q0 - q0_target| <= q0_tol``
+        (recorded per step as ``q0_residual``).  ``None``: exactly as before.
         """
         import numpy as np
 
@@ -2104,6 +2138,11 @@ class Bouquet:
                       and dl_i is not None and dl_i <= settings["tol_li"]
                       and (not gate_q0 or (dq0 is not None
                                            and dq0 <= settings["tol_q0"])))
+                if q0_pin is not None:
+                    # the pin's added criterion (never a replacement)
+                    srec.setdefault("q0_residual", []).append(
+                        q0_pin.residual(m.get("q0")))
+                    ok = ok and q0_pin.within_tol(m.get("q0"))
                 ok = bool(ok)
                 chi2_new, _z = mse_chi2(tg_new, ch)
                 lres = (tg_new - (tg_lin + J1 @ (x_new - x_lin))) / sig
@@ -2208,6 +2247,17 @@ class Bouquet:
                            and dl_i <= settings["tol_li"]
                            and (not gate_q0 or (dq0 is not None and
                                                 dq0 <= settings["tol_q0"])))
+                if q0_pin is not None:
+                    # the delivered step: logged in the pin's per-pass record
+                    # (no advance -- nothing is solved after it)
+                    q0_pin.observe(
+                        mf.get("q0"),
+                        ((cur_next.get("axis") or {}).get("j_ref0",
+                                                          q0_pin.row)),
+                        stage="MSE final step")
+                    srec.setdefault("q0_residual", []).append(
+                        q0_pin.residual(mf.get("q0")))
+                    okf = bool(okf and q0_pin.within_tol(mf.get("q0")))
                 chi2_f, _zf = mse_chi2(tg_f, ch)
                 lres = (tg_f - (tg_new + J2 @ (x_f - x_new))) / sig
                 steps.append(dict(
@@ -2248,7 +2298,10 @@ class Bouquet:
                     converged = False
                     srec["stop_reason"] = ("the final step after the "
                                            "Jacobian refresh left the j_BS "
-                                           "residuals outside tolerance")
+                                           "residuals outside tolerance"
+                                           + ("" if q0_pin is None else
+                                              " (or q0 outside q0_tol: the "
+                                              "q0 pin's criterion)"))
                 else:
                     srec["stop_reason"] = (
                         "j_BS residuals on two consecutive chord steps, "
@@ -2305,6 +2358,9 @@ class Bouquet:
                        and _dli is not None and _dli <= settings["tol_li"]
                        and (not gate_q0 or (_dq0 is not None
                                             and _dq0 <= settings["tol_q0"])))
+            if q0_pin is not None:
+                # the restored pre-MSE state must still meet the pin
+                _ok = bool(_ok and q0_pin.within_tol(_mr.get("q0")))
             why = (MSE_FLAG_PREFIX + "stage refused, predictor kept "
                    f"({str(e)[:160]})")
             # reasons of the RESTORED (pre-MSE) closure record, not of the
@@ -2325,6 +2381,9 @@ class Bouquet:
                             "Redl on the re-solve vs the pre-MSE bootstrap "
                             "jbs0; l_i/q0 vs the pre-MSE equilibrium"),
                         pre_mse_final=pre.get("final"),
+                        **({} if q0_pin is None else dict(
+                            q0_residual=q0_pin.residual(_mr.get("q0")),
+                            q0_tol=q0_pin.q0_tol)),
                         solved=("the pre-MSE loop's last solved current"
                                 if pre.get("j_solved") is not None else
                                 "bl.j_phi of the restored closure"))
@@ -2346,6 +2405,12 @@ class Bouquet:
                             ", |dq0| " + ("n/a" if _dq0 is None
                                           else f"{_dq0:.2e}")
                             + f" tol {settings['tol_q0']:.0e}")
+                         + ("" if q0_pin is None else
+                            ", q0-q0_target " + (
+                                "n/a" if q0_pin.residual(_mr.get("q0"))
+                                is None else
+                                f"{q0_pin.residual(_mr.get('q0')):+.2e}")
+                            + f" q0_tol {q0_pin.q0_tol:g}")
                          + ")")
             print(("  [jbs-loop MSE refused] " if _ok else
                    "  [jbs-loop MSE refused] WARNING ") + _stop, flush=True)
@@ -2491,7 +2556,13 @@ class Bouquet:
               f"{F_after:.4g}; {mse_er_terms(ch)}", flush=True)
         if not srec["converged"]:
             msg = ("self-consistent j_BS loop [MSE chord stage] did not "
-                   f"converge: {srec['stop_reason']}")
+                   f"converge: {srec['stop_reason']}"
+                   + ("" if q0_pin is None else
+                      "; q0-q0_target per step "
+                      + "[" + ", ".join(
+                          "n/a" if v is None else f"{float(v):+.2e}"
+                          for v in srec.get("q0_residual", [])) + "]"
+                      + f" (q0_tol {q0_pin.q0_tol:g})"))
             srec["fail_message"] = msg
             print("  [jbs-loop] " + msg, flush=True)
             if settings.get("on_fail", "raise") == "raise":
@@ -2669,10 +2740,14 @@ class Bouquet:
         the SAME held targets -- the axis row stays at the anchor's requested
         axis current and the l_i row at its target; nothing moves them -- so
         a residual the corrector step would have reduced is, under the loop,
-        only measured and flagged, not corrected.  (Whether the loop should
-        restore a per-pass row update or a final corrector step is an open
-        design decision; a NOTICE is printed whenever such a channel runs
-        with the loop on.)
+        only measured and flagged, not corrected -- by default.  With
+        ``jbs_loop_q0_corrector=True`` the axis row is moved once per pass
+        from the q0 measured on that pass's equilibrium (the ``j_ref0'`` rule
+        above, applied per pass by :class:`bouquet.jbs_loop.AxisRowPin`) and
+        the loop converges only with ``|q0 - q0_target| <= q0_tol``; the l_i
+        row stays held either way (its log-gain update is not part of the
+        flag).  A NOTICE says which mode is in force whenever such a channel
+        runs with the loop on.
         """
         import numpy as np
 
@@ -3191,8 +3266,16 @@ class Bouquet:
         ``q0 = q0_target``.  The q0 residual is read back on the delivered
         equilibrium and flagged against the unchanged ``q0_tol`` -- record
         only; the residual the Newton step exists to remove is not corrected.
-        (Open design decision; a NOTICE is printed whenever this channel runs
-        with the loop on.)
+        That is the DEFAULT (``jbs_loop_q0_corrector=False``).  With
+        ``jbs_loop_q0_corrector=True`` the pin acts inside the loop instead:
+        the axis row is moved once per pass from the q0 measured on that
+        pass's equilibrium (:class:`bouquet.jbs_loop.AxisRowPin`, the
+        structured corrector's ``j_ref0' = j_ref0 * q0_solved/q0_target``
+        applied per pass; this Newton step is its first-order expansion) and
+        the loop converges only when ``|q0 - q0_target| <= q0_tol`` as well;
+        this method still runs record-only on the delivered equilibrium, which
+        then meets the target.  A NOTICE says which mode is in force whenever
+        this channel runs with the loop on.
         """
         import numpy as np
 
@@ -3558,7 +3641,9 @@ class Bouquet:
                 iterate on every pass of the self-consistent loop),
                 ``j_BS_swb`` the base bootstrap profile the channel scales,
                 ``ratio`` its peak over the source bootstrap's (recorded).
-                ``_pass`` (loop only) carries the held q0 reference.  Sets ``bl.j_*`` / ``bl.ip_closure`` exactly
+                ``_pass`` (loop only) carries the held q0 reference (and,
+                with ``jbs_loop_q0_corrector=True``, the pinned ``axis_row``
+                of this pass).  Sets ``bl.j_*`` / ``bl.ip_closure`` exactly
                 as the inline block it was lifted from did and returns
                 ``(q0_state, structured_state, closure_ctx)``.
                 """
@@ -3566,6 +3651,10 @@ class Bouquet:
                 _structured_state = None
                 _pq0 = None if _pass is None else _pass.get("q0_ref")
                 _pxr = None if _pass is None else _pass.get("x_retry")
+                if (_pass is not None and _pq0 is not None
+                        and _pass.get("axis_row") is not None):
+                    # jbs_loop_q0_corrector: this pass's pinned axis row
+                    _pq0 = dict(_pq0, axis_row=float(_pass["axis_row"]))
                 # Hybrid: FUSE ohmic + SWB bootstrap on the (IDA) kinetics +
                 # FUSE fixed (NBI/RF), with Ip closed by rescaling j_ohmic ONLY.
                 # Rationale: 'diff' pins the total to FUSE (erasing the pedestal
@@ -4237,14 +4326,46 @@ class Bouquet:
                     float(getattr(gc, "q0_gate", 1.1)))
                 axis_active = bool(_gated and _chan in ("sawtooth_bootstrap",
                                                         "structured"))
+                # ---- the q0 pin under the loop (jbs_loop_q0_corrector) ------
+                # OFF (default): record-only, the axis row held.  ON: the row
+                # is moved once per pass from the measured q0 and the loop
+                # additionally requires |q0 - q0_target| <= q0_tol.
+                _pin_flag = bool(getattr(gc, "jbs_loop_q0_corrector", False))
+                _pin = None
+                if axis_active and _pin_flag:
+                    from .jbs_loop import AxisRowPin
+                    _pin = AxisRowPin(_q0_target,
+                                      float(getattr(gc, "q0_tol", 0.01)),
+                                      _j_req0, label=f"imas baseline {_chan}")
                 if axis_active:
-                    print(f"[imas jbs-loop] NOTICE: closure_channel="
-                          f"'{_chan}' pins q0 via the axis row, and under the "
-                          "self-consistent j_BS loop its q0 corrector is "
-                          "RECORD-ONLY -- the axis row is held at the "
-                          "anchor's requested axis current, no Newton step "
-                          "is taken, and the q0 residual is only flagged "
-                          "against q0_tol (open design decision)", flush=True)
+                    if _pin is None:
+                        print(f"[imas jbs-loop] NOTICE: closure_channel="
+                              f"'{_chan}' pins q0 via the axis row, and "
+                              "under the self-consistent j_BS loop its q0 "
+                              "corrector is RECORD-ONLY -- the axis row is "
+                              "held at the anchor's requested axis current, "
+                              "no Newton step is taken, and the q0 residual "
+                              "is only flagged against q0_tol "
+                              "(jbs_loop_q0_corrector=False, the default; "
+                              "set it True for the acting pin)", flush=True)
+                    else:
+                        print(f"[imas jbs-loop] NOTICE: closure_channel="
+                              f"'{_chan}' pins q0 via the axis row, and the "
+                              "q0 pin ACTS under the self-consistent j_BS "
+                              "loop (jbs_loop_q0_corrector=True): the axis "
+                              "row is moved once per pass from the q0 "
+                              "measured on that pass's equilibrium, and "
+                              "convergence additionally requires |q0 - "
+                              f"q0_target| <= q0_tol ({_pin.q0_tol:g}; "
+                              f"q0_target {_q0_target:.4f})", flush=True)
+                elif _pin_flag:
+                    print("[imas jbs-loop] NOTICE: jbs_loop_q0_corrector=True "
+                          "has no effect on this slice: "
+                          + (f"closure_channel='{_chan}' has no axis row"
+                             if _chan not in ("sawtooth_bootstrap",
+                                              "structured")
+                             else "the sawtooth gate rejected the axis row")
+                          + " (nothing pins q0)", flush=True)
                 _li_target = getattr(gc, "structured_li_target", None)
                 _li_kind = (str(getattr(gc, "structured_li_kind", "li_1"))
                             if (_chan == "structured"
@@ -4261,13 +4382,79 @@ class Bouquet:
                 st = dict(ctx=_anchor, pass_log=[],
                           q0s=None, ss=None, oc=None, nl=None, pass0=None)
 
+                def _pin_gate(rec):
+                    """``jbs_loop_q0_corrector=True``: the q0 target checked on
+                    the DELIVERED equilibrium (after the MSE stage, when there
+                    is one) and recorded in the closure-health block.  Without
+                    an MSE stage the loop's own criterion already held on this
+                    very equilibrium; the check is kept so no path can deliver
+                    a q0 outside ``q0_tol`` as converged.  A miss fails exactly
+                    as the loop fails (raise, or flag under "flag")."""
+                    from .jbs_loop import JBSNotConverged
+                    _icl = bl.ip_closure if bl.ip_closure is not None else {}
+                    _r = _icl.get("q0_residual")
+                    try:
+                        _r = float(_r)
+                    except (TypeError, ValueError):
+                        _r = float("nan")
+                    if not np.isfinite(_r):
+                        # no corrector readback: measure it here, the same way
+                        _r = _q0_of(mygs.copy_eq()) - _q0_target
+                    _ok = bool(np.isfinite(_r) and abs(_r) <= _pin.q0_tol)
+                    _over = (float(abs(_r) / _pin.q0_tol) if np.isfinite(_r)
+                             else None)
+                    _pr = _pin.record()
+                    _pr.update(delivered_q0_residual=(float(_r)
+                                                      if np.isfinite(_r)
+                                                      else None),
+                               delivered_q0_residual_over_tol=_over,
+                               delivered_within_q0_tol=_ok)
+                    rec["q0_pin"] = _pr
+                    if bl.ip_closure is not None:
+                        bl.ip_closure.update(
+                            q0_pin_mode=("acting under the j_BS loop "
+                                         "(jbs_loop_q0_corrector=True): axis "
+                                         "row moved once per pass from the "
+                                         "measured q0"),
+                            q0_pin_acted=bool(_pin.n_updates > 0),
+                            q0_pin_n_row_updates=int(_pin.n_updates),
+                            q0_pin_axis_row_initial=float(_pin.row0),
+                            q0_pin_axis_row_final=float(_pin.row),
+                            q0_residual_over_tol=_over,
+                            q0_pin_delivered_within_tol=_ok)
+                    _ovs = "n/a" if _over is None else f"{_over:.3f}"
+                    print(f"[imas jbs-loop] q0 pin: delivered q0 - q0_target "
+                          f"= {_r:+.4e} ({_ovs} x q0_tol {_pin.q0_tol:g}) "
+                          "after "
+                          f"{_pin.n_updates} axis-row update(s); axis row "
+                          f"{_pin.row0 / 1e6:.5f} -> {_pin.row / 1e6:.5f} "
+                          "MA/m^2", flush=True)
+                    if _ok or not rec.get("converged", False):
+                        return
+                    _why = (f"q0 pin (jbs_loop_q0_corrector=True): the "
+                            f"delivered equilibrium misses q0_target by "
+                            f"{_r:+.4e} (> q0_tol {_pin.q0_tol:g}) although "
+                            "the loop's other criteria held")
+                    rec["converged"] = False
+                    rec["jbs_converged"] = False
+                    rec["stop_reason"] = _why
+                    rec["fail_message"] = ("self-consistent j_BS loop [imas "
+                                           f"baseline ohmic/{_chan}] did not "
+                                           f"converge: {_why}")
+                    print("  [jbs-loop] " + rec["fail_message"], flush=True)
+                    if _jbs.get("on_fail", "raise") == "raise":
+                        from .jbs_loop import jsonable as _js
+                        raise JBSNotConverged(rec["fail_message"], _js(rec))
+
                 def _step(jbs, k, relax=None):
                     jbs = np.asarray(jbs, dtype=float)
                     _ratio = jbs.max() / max(j_BS_src.max(), 1.0)
                     q0s, ss, oc = _ohmic_close(
                         st["ctx"], jbs, _ratio,
                         _pass=dict(q0_ref=q0_ref, k=k,
-                                   x_retry=st.get("x_prev")))
+                                   x_retry=st.get("x_prev"),
+                                   axis_row=(None if _pin is None
+                                             else _pin.row)))
                     _icl0 = bl.ip_closure or {}
                     if _icl0.get("structured_coeffs_a") is not None:
                         st["x_prev"] = np.concatenate([
@@ -4290,6 +4477,12 @@ class Bouquet:
                     meas = dict(w=w, x=np.asarray(g["psi_N"], dtype=float),
                                 li=_li_of(snap), snap=snap,
                                 q0=(_q0_of(snap) if axis_active else None))
+                    if _pin is not None:
+                        # the axis value of the current this pass SOLVED
+                        # (the relaxed blend, not the row): what the q0 pin
+                        # moves the next row from
+                        meas["axis_current_solved"] = float(np.interp(
+                            _psi_q[0], _psi_g, _j_solved))
                     _icl = bl.ip_closure or {}
                     st["pass_log"].append(dict(
                         k=k, ohm_scale=float(bl.ohm_scale),
@@ -4326,7 +4519,8 @@ class Bouquet:
                     j0, _step, lambda m: _redl(m["snap"])[0], _jbs,
                     Ip=Ip_abs, meas0=_meas0, gate_li=True,
                     gate_q0=axis_active,
-                    label=f"imas baseline ohmic/{_chan}", init=_init)
+                    label=f"imas baseline ohmic/{_chan}", init=_init,
+                    q0_pin=_pin)
                 rec = dict(res["record"])
                 rec.update(closure_channel=_chan, axis_row_active=axis_active,
                            axis_row=("held at the source's requested axis "
@@ -4348,6 +4542,22 @@ class Bouquet:
                                        "acceptance flags (structured_li_tol,"
                                        " q0_tol) on the delivered "
                                        "equilibrium"))
+                if _pin is not None:
+                    rec.update(
+                        axis_row=("moved once per pass by the q0 pin "
+                                  "(jbs_loop_q0_corrector=True) from the q0 "
+                                  "measured on that pass's equilibrium, "
+                                  "starting at the source's requested axis "
+                                  "current; convergence requires |q0 - "
+                                  "q0_target| <= q0_tol on the delivered "
+                                  "equilibrium"),
+                        correctors=("the q0 pin acts under the loop (axis "
+                                    "row moved per pass, record['q0_pin']); "
+                                    "no separate corrector step: the "
+                                    "correctors read back and flag on the "
+                                    "delivered equilibrium (q0_tol, "
+                                    "structured_li_tol); the l_i row is held "
+                                    "at its target"))
                 if _swb_info:
                     rec.update(_swb_info)
                 q0s, ss, oc = st["q0s"], st["ss"], st["oc"]
@@ -4359,11 +4569,24 @@ class Bouquet:
                     geometry with bootstrap *jbs* (the MSE chord stage's
                     per-step refresh); returns the new state."""
                     jbs = np.asarray(jbs, dtype=float)
+                    if _pin is not None:
+                        # a chord step is a pass of the loop: move the axis
+                        # row from the q0 of the step just solved.  Its
+                        # closure imposed the row exactly (hard axis row, no
+                        # current relaxation in the chord steps), so the
+                        # solved axis current IS that closure's row.
+                        _ax_prev = ((st.get("ss") or {}).get("axis") or {})
+                        _pin.observe(_q0_of(mygs.copy_eq()),
+                                     _ax_prev.get("j_ref0", _pin.row),
+                                     stage=f"MSE chord step {k + 1}")
+                        _pin.advance()
                     ctx_new = _closure_geometry(f"MSE chord step {k + 1}")
                     q0s_, ss_, oc_ = _ohmic_close(
                         ctx_new, jbs, jbs.max() / max(j_BS_src.max(), 1.0),
                         _pass=dict(q0_ref=q0_ref, k=k,
-                                   x_retry=st.get("x_prev")))
+                                   x_retry=st.get("x_prev"),
+                                   axis_row=(None if _pin is None
+                                             else _pin.row)))
                     _icl1 = bl.ip_closure or {}
                     st.setdefault("refresh_log", []).append(dict(
                         k=k, closure_stop_reason=_icl1.get(
@@ -4387,9 +4610,12 @@ class Bouquet:
                     # (the stage snapshots bl and the equilibrium itself)
                     _st_pre = {k_: st.get(k_) for k_ in
                                ("ctx", "q0s", "ss", "oc", "x_prev")}
+                    _pin_pre = None if _pin is None else _pin.snapshot()
 
                     def _restore_pre_mse():
                         st.update(_st_pre)
+                        if _pin is not None:
+                            _pin.restore(_pin_pre)
 
                     _pre_mse = dict(j_solved=st.get("j_solved"),
                                     restore=_restore_pre_mse,
@@ -4406,7 +4632,7 @@ class Bouquet:
                         weights=lambda eq: residual_weights(
                             eq, psi_N, psi_pad)[:2],
                         settings=_jbs, Ip=Ip_abs, gate_q0=axis_active,
-                        pre_mse=_pre_mse)
+                        pre_mse=_pre_mse, q0_pin=_pin)
                     if _nl_m is not None:
                         nl = _nl_m
                     _mse_rec["refresh_closure_log"] = st.get("refresh_log", [])
@@ -4457,7 +4683,15 @@ class Bouquet:
                             structured_li_solved_predictor=_p0["li"],
                             structured_li_achieved_predictor=_p0["li"],
                             structured_li_residual_predictor=_p0["li"] - _lt)
+                    if _pin is not None:
+                        _upd["sawtooth_verdict"] = (
+                            f"j_BS loop: predictor re-solved on refreshed "
+                            f"geometry for {rec.get('n_passes')} pass(es) "
+                            "with the q0 pin acting (axis row moved per "
+                            "pass; no separate corrector step)")
                     bl.ip_closure.update(_upd)
+                if _pin is not None:
+                    _pin_gate(rec)
                 return _finish(rec, nl)
 
 

@@ -263,6 +263,7 @@ Residuals, **all logged every pass**:
 | `r_I` | `|∫ w (J − jBS_k) dψ_N| / I_p` (linear part of the closure's measure) | `jbs_rtol_Ip = 1e-4` |
 | `Δl_i` | `|l_i(E_k+1) − l_i(E_k)|` | `jbs_tol_li = 1e-3` |
 | `Δq0` | `|q0(E_k+1) − q0(E_k)|`, only where an axis row is active | `jbs_tol_q0 = 2e-3` |
+| `q0 − q0_target` | the true q0 residual on the pass's solved equilibrium; a criterion only with `jbs_loop_q0_corrector=True` on an axis-row channel (below) | `q0_tol = 0.01` (unchanged) |
 
 `r_j` and `r_I` are the **unrelaxed** fixed-point residual -- the distance
 between the bootstrap an equilibrium was solved with and the Redl bootstrap of
@@ -339,6 +340,56 @@ non-finite initial guess or evaluated bootstrap raises `jbs_loop.JBSNonFinite`
 whatever the policy: it is never blended into the next iterate or handed to a
 GS solve.
 
+### The q0 pin under the loop (`jbs_loop_q0_corrector`)
+
+This applies to the channels that pin the on-axis safety factor: IMAS
+baseline, `jBS_baseline_mode="ohmic"`, with `closure_channel=
+"sawtooth_bootstrap"`, or `"structured"` when the sawtooth gate admits the
+axis row.
+
+- **Default (`False`): record-only.** Every pass closes with the axis row
+  held at the anchor's requested axis current. The delivered equilibrium's
+  `q0 − q0_target` is recorded and flagged against `q0_tol`.
+- **`True`: the pin acts.** After pass k is solved, the q0 measured on its
+  equilibrium moves the row for pass k+1:
+
+  ```
+  j_ref0(k+1) = j0_solved(k) · q0(E_k+1) / q0_target
+  ```
+
+  This is the structured corrector's `j_ref0' = j_ref0 · q0_solved/q0_target`,
+  applied once per pass; the scalar corrector's Newton step is its
+  first-order expansion. `j0_solved` is the axis value of the current the pass
+  actually solved: under `jbs_relax_current = β` the equilibrium sees
+  `(1 − β) js_k−1(0) + β j_ref0(k)`, not the row. With β = 1 the two are the
+  same.
+
+  In the `q0 ~ 1/j0` model the update lands the row in one step, and the
+  solved axis current then follows it at the β rate. At the joint fixed point
+  the row stops moving exactly when `q0 = q0_target`, so, like ω and β, the
+  update changes the path and not the answer. The pin's criterion
+  `|q0 − q0_target| ≤ q0_tol` is **added** to the pass criteria next to
+  `Δq0 ≤ jbs_tol_q0`. So the loop converges on the bootstrap, I_p, l_i and q0
+  together, and the delivered equilibrium (the last one solved, whose
+  bootstrap was the last evaluated) meets all of them.
+- **MSE chord stage.** The chord steps are passes of the loop, so the stage's
+  refresh moves the row from each step's q0. Every chord step, the final
+  step and the refusal re-solve carry the same added criterion.
+- **Unchanged.** `q0_tol`, every loop tolerance and the pass ceilings do not
+  move. A joint iteration that does not converge within the ceiling raises
+  `JBSNotConverged`, or flags the slice under `jbs_loop_on_fail="flag"`. The
+  q0 residual history is in the message and in `jbs_loop["q0_pin"]`, and the
+  reason is in `closure_limited_reasons`. The delivered equilibrium is
+  checked against `q0_tol` once more after the correctors' readback, so no
+  path delivers a q0 outside `q0_tol` as converged.
+- **Records.** Per pass, in `jbs_loop["q0_pin"]`: the axis row, the solved
+  axis current, q0, the residual, the residual / `q0_tol` and the next row.
+  In `ip_closure`: `q0_pin_acted`, `q0_pin_n_row_updates`,
+  `q0_pin_axis_row_initial` / `_final`, `q0_residual_over_tol` and
+  `q0_pin_delivered_within_tol`. The run-time NOTICE names the mode.
+- **Not covered: the l_i row.** It stays held at its target either way; its
+  log-gain row update is a separate design, not part of this flag.
+
 ### Where it runs
 
 - **IMAS baseline, `jBS_baseline_mode="ohmic"`** (every `closure_channel`):
@@ -349,12 +400,18 @@ GS solve.
   row -- computed once from the source's total on the ORIGINAL anchor, because
   they are data-derived targets, not forward-model quantities. The l_i model is
   exact given its geometry, so with `li_geom` refreshed every pass its
-  frozen-geometry error vanishes at the fixed point: the q0/l_i corrector
-  *steps* are subsumed (no row rescaling). The correctors still run, in
-  record-only mode on the delivered equilibrium, so every bookkeeping field and
-  every acceptance flag (`structured_li_tol`, `q0_tol`, the round-trip gate) is
-  written as before -- "predictor" = the first pass, "corrected" = the
-  delivered equilibrium.
+  frozen-geometry error vanishes at the fixed point, and the l_i corrector
+  *step* is not needed (no row rescaling). **The q0 residual is different.**
+  `q0_target = q0_anchor · j_ach0 / j_req0` is a first-order `q0 ~ 1/j_φ(0)`
+  mapping at the anchor, and at the loop's fixed point the held row enforces
+  `j_φ(0) = j_req0`, not `q0 = q0_target`. Refreshing the geometry therefore
+  does not remove the residual that the legacy Newton step removes. By default
+  (`jbs_loop_q0_corrector=False`) that residual is only recorded and flagged
+  against `q0_tol`; see "The q0 pin under the loop" below. The correctors
+  still run, in record-only mode on the delivered equilibrium, so every
+  bookkeeping field and every acceptance flag (`structured_li_tol`, `q0_tol`,
+  the round-trip gate) is written as before -- "predictor" = the first pass,
+  "corrected" = the delivered equilibrium.
 - **`"rescale"`**: the l_i-proxy root is re-solved on every iterate.
 - **`"diff"`**: the baseline total stays pinned to the source, so the baseline
   itself needs no loop; `jBS_diff` is redefined as

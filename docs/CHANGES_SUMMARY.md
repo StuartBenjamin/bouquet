@@ -69,7 +69,8 @@ true grid, direct toroidal conversion; bit-identical to SWB's first pass on a
 uniform grid), `bouquet/jbs_loop.py` (residuals, two-consecutive-pass
 convergence, relaxation, `JBSNotConverged` / `"flag"`), and the loop in the
 IMAS baseline (every `jBS_baseline_mode` and closure channel; the correctors'
-steps subsumed, their bookkeeping and acceptance flags kept), the structured
+steps not taken, their bookkeeping and acceptance flags kept -- for q0 that
+leaves a residual only recorded, see `jbs_loop_q0_corrector` below), the structured
 closure's MSE stage (Jacobian once, chord steps with j_BS re-evaluated, one
 final Jacobian refresh), every draw (Fix C and the standard l_i loop, a
 post-homotopy check), the σ=0 check and the geqdsk reconstruction. In diff mode
@@ -100,6 +101,42 @@ returned is unchanged). The loop's closure calls pass the flag; the default,
 and every frozen-path call, is the old criterion. `close_ip_structured_soft`
 also takes an optional start `x0`; inside the loop a refused soft closure is
 retried once from the previous pass's coefficients (`closure_retry`, logged).
+
+### The q0 pin under the loop: `jbs_loop_q0_corrector` (opt-in, default off)
+
+With the loop on, the two channels that pin the on-axis safety factor
+(`closure_channel="sawtooth_bootstrap"`, and `"structured"` when the sawtooth
+gate admits the axis row) re-solve their predictor every pass with the axis
+row HELD at the anchor's requested axis current; the corrector only records
+the q0 residual on the delivered equilibrium and flags it against `q0_tol`.
+The legacy path's Newton corrector step, which removes that residual, does not
+act under the loop. That remains the default, bit for bit.
+
+`GenerationConfig.jbs_loop_q0_corrector=True` makes the pin act inside the
+loop. Once per pass, the axis row is moved from the q0 measured on that pass's
+solved equilibrium: `j_ref0 ← j0_solved · q0 / q0_target`. This is the legacy
+structured corrector's update, applied per pass, with `j0_solved` the axis
+value of the current actually solved (the β-relaxed blend). Convergence then
+also requires `|q0 − q0_target| ≤ q0_tol` on two consecutive passes, beside
+the `jbs_tol_q0` step criterion. This adds a condition and relaxes nothing:
+`q0_tol` (0.01), every loop tolerance and every pass ceiling are unchanged.
+The MSE chord stage keeps the pin acting (every chord step is a pass). A
+joint iteration that does not converge within the ceiling fails exactly as
+the loop fails (raise, or flag under `jbs_loop_on_fail="flag"`), with the q0
+residuals in the message and in the record. The delivered equilibrium is
+checked against `q0_tol` once more, so a delivered state outside it is never
+marked converged.
+
+Records:
+- `jbs_loop["q0_pin"]`, per pass: the axis row, the solved axis current,
+  q0, the residual, the residual / `q0_tol`, and the next row.
+- `ip_closure`: `q0_pin_acted`, `q0_pin_n_row_updates`, the initial and final
+  axis row, `q0_residual_over_tol`, and `q0_pin_delivered_within_tol`.
+
+The run-time NOTICE says which mode is in force. The l_i row is not covered:
+it stays held at its target, because its log-gain update is a separate
+design. With `jbs_self_consistent=False` the flag has no effect, because the
+legacy corrector already takes its step.
 
 ### Review fixes (2026-09-29)
 

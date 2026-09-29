@@ -224,6 +224,7 @@ as an enormous sigma.
 | `jbs_relax` / `jbs_relax_halve_on` | `0.7` / `3` | Under-relaxation ω of the bootstrap; halved (floor 0.25) only when `r_j` grows on `jbs_relax_halve_on` consecutive passes (`1` = on every growth); three growing passes at the floor abort |
 | `jbs_relax_current` | `0.7` | Under-relaxation β of the SOLVED current (`(1−β)` previous solved + `β` closure), damping the closure ↔ geometry oscillation; path only, gap recorded per pass. `1` = off |
 | `jbs_loop_on_fail` | `"raise"` | Non-convergence: raise `JBSNotConverged` (with the residual history), or `"flag"` the slice closure-limited and keep the last iterate. A non-converged draw is always a failed draw |
+| `jbs_loop_q0_corrector` | `False` | The q0 pin under the loop (`"sawtooth_bootstrap"`, or `"structured"` with the axis row admitted). `False`: record-only, with the axis row held and the q0 residual flagged against `q0_tol`. `True`: the axis row is moved once per pass from the measured q0 (`j_ref0 ← j0_solved·q0/q0_target`), and convergence also requires `|q0 − q0_target| ≤ q0_tol` (unchanged); failure raises or flags like the loop. The l_i row is not covered. See [physics-notes.md](physics-notes.md#the-q0-pin-under-the-loop-jbs_loop_q0_corrector) |
 | `coil_drift` | `0.01` | Soft coil-drift target |
 | `coil_drift_hard_factor` | `None` | Optional hard inequality bounds at `± factor·coil_drift` in every solve |
 | `homotopy_passes` | `[(0.05, 0.10), (0.02, 0.05), (0.01, 0.01)]` | Progressive `(F_tol, VSC_tol)` schedule — see [coil-constraints.md](coil-constraints.md) |

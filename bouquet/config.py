@@ -874,6 +874,9 @@ class GenerationConfig:
     #: solved q0 lands further than this from q0_ref, ONE analytic Newton step
     #: along the Ip-closed manifold is taken and its result accepted whatever it
     #: gives.  There is no iteration loop -- the cost ceiling is the point.
+    #: Under the self-consistent loop the same band is the acceptance flag on
+    #: the delivered equilibrium and, with jbs_loop_q0_corrector=True, also a
+    #: convergence criterion of the loop (the value itself is unchanged).
     q0_tol: float = 0.01
     # Fix B: when the recon-anchor's equilibrium l_i is already within the band,
     # accept the anchor and skip find_optimal_scale + the corrective iteration
@@ -1038,6 +1041,33 @@ class GenerationConfig:
     # the slice from verdicts).  A draw whose loop does not converge is a
     # FAILED draw in either mode.
     jbs_loop_on_fail: str = "raise"
+    # The on-axis safety-factor pin under the loop (closure_channel=
+    # "sawtooth_bootstrap", or "structured" with the sawtooth gate admitting
+    # the axis row; the IMAS baseline in jBS_baseline_mode="ohmic").
+    # False (default): record-only, bit for bit the behaviour before the
+    # field existed -- every pass closes with the axis row held at the
+    # anchor's requested axis current, no Newton step is taken, and the q0
+    # residual |q0 - q0_target| on the delivered equilibrium is only recorded
+    # and flagged against q0_tol.  True: the pin ACTS inside the loop -- the
+    # axis row is moved once per pass from the q0 MEASURED on that pass's
+    # solved equilibrium (j_ref0 <- j0_solved * q0 / q0_target, the legacy
+    # structured corrector's update applied per pass; jbs_loop.AxisRowPin),
+    # and convergence ADDITIONALLY requires |q0 - q0_target| <= q0_tol (the
+    # unchanged q0_tol) on two consecutive passes, next to the jbs_tol_q0
+    # step criterion and the bootstrap criteria; the MSE chord stage keeps
+    # the pin acting.  So the delivered equilibrium -- the last one solved,
+    # whose bootstrap was the last evaluated -- meets the loop criteria AND
+    # the q0 target.  A joint iteration that does not converge within the
+    # unchanged pass ceiling fails exactly as the loop fails (raise, or flag
+    # with jbs_loop_on_fail="flag"), with the q0 residuals in the record.
+    # Records: ip_closure["jbs_loop"]["q0_pin"] (per pass: axis row, solved
+    # axis current, q0, residual, residual / q0_tol, next row) and, in
+    # ip_closure, q0_pin_acted / q0_pin_n_row_updates / q0_residual_over_tol.
+    # The l_i row is NOT covered (it stays held at its target either way).
+    # No effect with jbs_self_consistent=False (the legacy path's own
+    # corrector already takes its Newton step) or on a channel/slice without
+    # an axis row.
+    jbs_loop_q0_corrector: bool = False
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single
