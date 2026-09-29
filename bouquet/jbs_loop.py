@@ -271,33 +271,59 @@ def tolerances_record(settings: dict) -> dict:
 _OFT_BUILD_CACHE = {}
 
 
-def oft_build_info() -> dict:
-    """``{path, git_hash}`` of the imported OpenFUSIONToolkit (cached).
+#: Characters a recorded build identifier may contain: no directory
+#: separator, no "~", nothing that could carry a filesystem location.
+_BUILD_ID_SAFE = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                           "0123456789._+-")
 
-    The git hash is read from the checkout the package lives in when there is
-    one; an install tree without ``.git`` records ``None``.  Never raises.
+
+def _build_token(v):
+    """*v* reduced to the characters of :data:`_BUILD_ID_SAFE` (``None`` when
+    nothing is left): a version string or a commit id, never a path."""
+    if v is None:
+        return None
+    t = "".join(c for c in str(v).strip() if c in _BUILD_ID_SAFE)
+    return t or None
+
+
+def oft_build_info() -> dict:
+    """``{version, git_hash, build_id}`` of the imported OpenFUSIONToolkit
+    (cached).
+
+    ``version`` is the package's ``__version__``; ``git_hash`` the SHORT
+    (12-character) commit id of the checkout the package lives in, when there
+    is one (an install tree without ``.git`` records ``None``); ``build_id``
+    the two together.  **No filesystem path is recorded** -- loop records are
+    written into archives and public fixtures, and the install location names
+    the machine and the user.  Every field is reduced to ``[A-Za-z0-9._+-]``,
+    so no directory component can survive.  Never raises.
     """
     if "info" in _OFT_BUILD_CACHE:
         return dict(_OFT_BUILD_CACHE["info"])
-    info = {"path": None, "git_hash": None}
+    info = {"version": None, "git_hash": None, "build_id": None}
     try:
         import os
         import subprocess
         import OpenFUSIONToolkit as _oft
-        path = os.path.dirname(os.path.abspath(_oft.__file__))
-        info["path"] = path
+        info["version"] = _build_token(getattr(_oft, "__version__", None))
+        pkg_dir = os.path.dirname(os.path.abspath(_oft.__file__))
         try:
             out = subprocess.run(
-                ["git", "-C", path, "rev-parse", "HEAD"],
+                ["git", "-C", pkg_dir, "rev-parse", "--short=12", "HEAD"],
                 capture_output=True, text=True, timeout=5)
             if out.returncode == 0 and out.stdout.strip():
-                info["git_hash"] = out.stdout.strip()
+                info["git_hash"] = _build_token(out.stdout.strip())
         except Exception:
             pass
     except Exception:
         pass
+    info["build_id"] = ("OpenFUSIONToolkit"
+                        + ("" if info["version"] is None
+                           else f" {info['version']}")
+                        + ("" if info["git_hash"] is None
+                           else f" git {info['git_hash']}"))
     _OFT_BUILD_CACHE["info"] = dict(info)
-    return info
+    return dict(info)
 
 
 # ---------------------------------------------------------------------------

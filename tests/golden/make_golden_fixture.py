@@ -465,12 +465,29 @@ def build_rng_stream(source_slim=None, out_dir=_HERE, seed=RNG_STREAM_SEED):
 
 
 # A committed fixture must not name a host, a user or a filesystem location.
-# The self-consistent bootstrap record (the jbs_loop_json attrs) carries the
-# OFT build's package PATH, which is right for a user's own archive and wrong
-# for a public fixture: keep its basename (the git hash / build identity is
+# The self-consistent bootstrap record (the jbs_loop_json attrs) of an older
+# build carried the OFT build's package PATH (current builds record a
+# path-free build identifier instead, jbs_loop.oft_build_info), which is right
+# for nobody's public fixture: keep its basename (the build identity is
 # stamped separately, by content digest).  The guard below then refuses a
-# fixture in which any absolute path survived, wherever it came from.
+# fixture in which any filesystem path survived, wherever it came from.
+#
+# What counts as a path (each alternative is anchored so that it cannot start
+# in the middle of a word, a number or a unit such as "A/m^2" or "1/R"):
+#   * an absolute path under a well-known root (/Users, /home, /usr,
+#     /Volumes, /opt, /mnt, /tmp, /private, /var, ...);
+#   * ANY absolute path of two or more components ("/a/b") that starts at the
+#     beginning of a string or after whitespace, a quote, "=", ":", "," or an
+#     opening bracket;
+#   * a home-relative path: "~/..." or "~user/...";
+#   * a parent-relative path: "../...";
+#   * a Windows drive path: "C:\..." or "C:/...".
 _ABS_PATH_RE = None
+
+_PATH_ROOTS = ("Users|home|usr|Volumes|mnt|tmp|private|var|scratch|cscratch|"
+               "opt|srv|data|work|global|gpfs|lustre|net|nfs|afs|root|media|"
+               "Library|Applications|System|etc|run|proj|project|projects|"
+               "space|storage|nobackup")
 
 
 def _abs_path_re():
@@ -478,23 +495,63 @@ def _abs_path_re():
     if _ABS_PATH_RE is None:
         import re
         _ABS_PATH_RE = re.compile(
-            r"(?<![A-Za-z0-9_.])/(?:Users|home|mnt|tmp|private|var|scratch|"
-            r"cscratch|opt|srv|data|work|global|gpfs|lustre)/[^\s\"']*")
+            # a well-known root, wherever it is not glued to a word
+            r"(?<![A-Za-z0-9_.])/(?:" + _PATH_ROOTS + r")(?:/[^\s\"',;]*|\b)"
+            # any /a/b[/...] at a token boundary
+            r"|(?:^|(?<=[\s\"'=:,(\[{]))/[A-Za-z0-9_.-]+/[^\s\"',;]*"
+            # home-relative
+            r"|(?<![A-Za-z0-9_.~])~(?:[A-Za-z_][A-Za-z0-9_.-]*)?/[^\s\"',;]*"
+            # parent-relative
+            r"|(?<![A-Za-z0-9_])\.\./[^\s\"',;]*"
+            # a Windows drive
+            r"|(?<![A-Za-z0-9_])[A-Za-z]:[\\/][^\s\"',;]*")
     return _ABS_PATH_RE
 
 
 def _scrub_paths(node):
-    """Recursively replace absolute filesystem paths in a JSON-like record by
-    their basename."""
+    """Recursively replace filesystem paths in a JSON-like record by their
+    basename."""
     if isinstance(node, dict):
         return {k: _scrub_paths(v) for k, v in node.items()}
-    if isinstance(node, list):
+    if isinstance(node, (list, tuple)):
         return [_scrub_paths(v) for v in node]
     if isinstance(node, str) and _abs_path_re().search(node):
         return _abs_path_re().sub(
-            lambda m: os.path.basename(m.group(0).rstrip("/")) or "<path>",
+            lambda m: (os.path.basename(
+                m.group(0).replace("\\", "/").rstrip("/")) or "<path>"),
             node)
     return node
+
+
+def find_filesystem_paths(value):
+    """Every path-like substring in *value*: a str, bytes, a JSON document, or
+    any (nested) list / tuple / dict / numpy array of them -- string ARRAYS
+    included, element by element.  Returns a list of the matches."""
+    rx = _abs_path_re()
+    out = []
+
+    def _walk(v):
+        if isinstance(v, np.ndarray):
+            if v.dtype.kind in ("S", "O", "U"):
+                for el in v.ravel().tolist():
+                    _walk(el)
+            return
+        if isinstance(v, (bytes, np.bytes_)):
+            v = bytes(v).decode(errors="replace")
+        if isinstance(v, (str, np.str_)):
+            out.extend(m.group(0) for m in rx.finditer(str(v)))
+            return
+        if isinstance(v, dict):
+            for k, x in v.items():
+                _walk(k)
+                _walk(x)
+            return
+        if isinstance(v, (list, tuple)):
+            for x in v:
+                _walk(x)
+
+    _walk(value)
+    return out
 
 
 def _scrub_attr(key, value):
@@ -510,14 +567,13 @@ def assert_no_filesystem_paths(slim_path):
     reader would see text: string attrs, string datasets (config_json) and
     the geqdsk header lines."""
     import gzip  # noqa: F401  (geqdsks are stored gzip-filtered by h5py)
-    rx = _abs_path_re()
     hits = []
     with h5py.File(slim_path, "r") as hf:
         def _check(where, val):
-            if isinstance(val, bytes):
-                val = val.decode(errors="replace")
-            if isinstance(val, str) and rx.search(val):
-                hits.append(f"{where}: {rx.search(val).group(0)[:80]}")
+            # str, bytes, and string ARRAYS (attrs or datasets), element by
+            # element -- an array used to be skipped silently
+            for m in find_filesystem_paths(val):
+                hits.append(f"{where}: {m[:80]}")
 
         for k, v in hf.attrs.items():
             _check(f"/@{k}", v)
