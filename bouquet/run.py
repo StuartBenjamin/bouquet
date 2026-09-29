@@ -680,11 +680,54 @@ class Bouquet:
         if self.config.generation.single_profile_jphi:
             self._collapse_jphi_split()
 
+        # Reconstruction path, jbs_loop_on_fail="flag": a baseline whose loop
+        # did not converge is delivered, so it must carry the same health
+        # flag the IMAS path sets (closure_limited + the loop's reason).
+        self._flag_nonconverged_recon_loop()
+
         # Reconstruction path: surface a glanceable quality summary (the verbose
         # solver chatter was captured to baseline.reconstruction_log).
         if self.baseline.reconstruction_metrics is not None:
             self._print_reconstruction_summary()
         return self.baseline
+
+    def _flag_nonconverged_recon_loop(self) -> None:
+        """Mark a geqdsk baseline whose self-consistent j_BS loop did not
+        converge (only reachable with ``jbs_loop_on_fail="flag"``; "raise"
+        raised inside the reconstruction) as ``closure_limited``.
+
+        The IMAS path records the same thing on ``ip_closure`` /
+        ``li_metrics`` (``run.py`` ``_finish``); on the reconstruction path
+        the record was only inside ``reconstruction_metrics["jbs_loop"]``, so
+        a driver excluding closure-limited slices could not see it.  Sets
+        ``reconstruction_metrics["jbs_converged"] = False``,
+        ``["closure_limited"] = True`` and appends the loop's flag reason to
+        ``["closure_limited_reasons"]``; prints and warns.  A flag, never a
+        retry: nothing is re-solved and no bar moves.
+        """
+        import warnings
+        from .jbs_loop import flag_reason
+        bl = self.baseline
+        m = getattr(bl, "reconstruction_metrics", None)
+        if not m:
+            return
+        rec = m.get("jbs_loop")
+        if rec is None or bool(rec.get("converged", False)):
+            return
+        m = dict(m)
+        m["jbs_converged"] = False
+        reasons = list(m.get("closure_limited_reasons", ()) or ())
+        why = flag_reason(rec)
+        if why not in reasons:
+            reasons.append(why)
+        m["closure_limited_reasons"] = tuple(reasons)
+        m["closure_limited"] = True
+        msg = ("reconstruction baseline: the self-consistent j_BS loop "
+               "did NOT converge (jbs_loop_on_fail='flag') -- the slice "
+               "is delivered flagged closure_limited: " + why)
+        print("[recon jbs-loop] WARNING " + msg, flush=True)
+        warnings.warn(msg, RuntimeWarning, stacklevel=3)
+        bl.reconstruction_metrics = m
 
     def _collapse_jphi_split(self) -> None:
         """Fold every j_phi component back into j_inductive (single-profile mode).
@@ -769,6 +812,10 @@ class Bouquet:
             print(f"  {label:<12} {lhs:<13} (input {format(ref, fmt)}{u}, {err:+.2f}%)")
 
         print(f"  {'converged':<12} {'yes' if m.get('converged') else 'NO ⚠'}")
+        if m.get("closure_limited"):
+            print(f"  {'closure':<12} LIMITED ⚠ -- "
+                  + "; ".join(str(r) for r in
+                              m.get("closure_limited_reasons", ())))
         line("Ip", m['Ip_MA'], m['Ip_efit_MA'], m['Ip_err_pct'], "MA")
         # l_i on the targeted estimator (matched pair -- ~0 by construction),
         # then the free cross-estimator pair which is NOT driven by anything
