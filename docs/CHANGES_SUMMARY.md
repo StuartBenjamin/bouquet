@@ -1,50 +1,30 @@
 # Bouquet — change summaries
 
-## Unreleased — reversed-current IMAS sources (hotfix)
+## Unreleased, intended for the release after 1.4.0 — self-consistent bootstrap current (default ON)
 
-**A dd with `ip < 0` is now read into bouquet's positive-current frame.** Before
-this, `read_imas_baseline` kept the dd's (negative) current profiles while every
-bootstrap bouquet recomputes on its positive-current anchor is positive, so on
-a reversed-current source the bootstrap was added **against** Ip — in the
-legacy `solve_with_bootstrap` path, in the draws, and in the self-consistent
-loop's `evaluate_jBS` (baseline and draws, every `jBS_baseline_mode`). The Ip closure, the q0 target (negative),
-`fuse_total_err_pct` (off by 2c) and `swb_over_fuse_jBS_peak` were all wrong for
-such a source.
-
-- **Changes results only for sources with `ip < 0`.** For `ip ≥ 0` the reader
-  multiplies by exactly `+1.0`; baselines, closures, draws and archives are
-  bit-identical to before (verified bitwise A/B against the pre-fix build: the
-  synthetic IMAS example's forward-solved baseline under four closure paths,
-  each with the bootstrap loop off and on -- only the loop record's wall-clock
-  `wall_s` differs; on `main` also a seeded g-file run of the golden-fixture
-  example including its draws). **Any bouquet result built on a reversed-current dd before
-  this change is invalid and must be regenerated.**
-- New records: `Baseline.source_current_sign` / `source_b0_sign`,
-  `li_metrics.source_current_sign` / `source_b0_sign`,
-  `ip_closure.source_current_sign`, and `_baseline` attrs
-  `source_current_sign` / `source_b0_sign` / `current_frame` on IMAS archives.
-- A user-supplied `FixedComponentsConfig.j_NBI` / `j_RF` on the IMAS path is
-  taken in the dd's own orientation and normalised with it.
-- Delivered g-files are unchanged in convention (`CURRENT > 0`, `BCENTR > 0`,
-  TokaMaker's COCOS 7, for every source); they do not carry the experiment's
-  orientation. See
-  [physics-notes](physics-notes.md#current-and-field-orientation).
-
-## Unreleased — self-consistent bootstrap current (default ON)
+*Everything about the self-consistent bootstrap loop sits under this heading,
+so it can become its own release after 1.4.0. The version string is still
+1.3.1 and is not bumped here.*
 
 **This changes results.** `GenerationConfig.jbs_self_consistent` now defaults
 to `True`: every run re-evaluates the bootstrap on the delivered equilibrium
 and iterates it to self-consistency. The bootstrap/inductive split moves, and
-with it l_i, q0 and every per-draw bootstrap response. (The golden regression
-fixture is still the frozen-bootstrap run; its loop-on refresh is pending --
-see `tests/golden/README.md`.) To reproduce a run
-made before this release, set `jbs_self_consistent=False` -- the legacy frozen
-bootstrap, bit for bit (guarded by a solver test that tripwires the loop
-kernel and the Redl evaluator on that path). Also:
+with it l_i, q0 and every per-draw bootstrap response. The golden regression
+fixture has been regenerated with the loop on and input-current archival
+(17 of 20 draws archived, 10 in spec; `tests/golden/README.md`, "The
+self-consistent-bootstrap refresh"). To reproduce a run made before this
+release, set `jbs_self_consistent=False` -- the legacy frozen bootstrap, bit
+for bit (guarded by a solver test that tripwires the loop kernel and the
+Redl evaluator on that path). That holds because the one solver criterion the
+loop changed, the structured soft closure's noise-floor acceptance (below),
+is opt-in -- `close_ip_structured_soft(..., accept_noise_floor=True)`, passed
+only by the loop's closure calls -- and the frozen path's calls keep the
+default `False`, the historical strict solver. Also:
 
-- A stored config without the field (an old archive's `config_json`) loads
-  with `jbs_self_consistent=False` and a warning -- it replays the bootstrap
-  model it was produced with.
+- A stored config without the field (an old archive's `config_json`, or any
+  dict/JSON without it) loads with `jbs_self_consistent=False` and a warning
+  -- it replays the bootstrap model it was produced with; the warning says how
+  to opt in (`"jbs_self_consistent": true` in the `generation` section).
 - `single_profile_jphi=True` and `recalculate_j_BS=False` have no bootstrap to
   iterate and are refused unless `jbs_self_consistent=False` is set.
 - **Archive schema v3** (additive): the `jbs_loop` block (`jbs_converged`,
@@ -98,24 +78,97 @@ Records: `li_metrics["jbs_loop"]`, `ip_closure["jbs_loop"]`,
 `reconstruction_metrics["jbs_loop"]`, per-draw archive attrs `jbs_converged` /
 `jbs_n_passes` / `jbs_loop_json`. Config: `jbs_self_consistent`, `jbs_init`,
 `jbs_rtol_j`, `jbs_rtol_Ip`, `jbs_tol_li`, `jbs_tol_q0`, `jbs_max_passes`,
-`jbs_max_passes_draw`, `jbs_relax`, `jbs_relax_halve_on`, `jbs_relax_current`,
-`jbs_loop_on_fail`; `swb_iterations` is
-now documented as legacy. With the flag off the legacy code path is the
-historical one; no existing tolerance or solver acceptance criterion moved
-(the soft closure's noise-floor acceptance, below, applies only where it
-previously refused). See [physics-notes.md](physics-notes.md#self-consistent-bootstrap-jbs_self_consistent).
+`jbs_max_passes_draw`, `jbs_max_passes_post_homotopy`, `jbs_relax`,
+`jbs_relax_halve_on`, `jbs_relax_current`, `jbs_loop_on_fail`;
+`swb_iterations` is now documented as legacy. With the flag off the legacy
+code path is the historical one. No existing tolerance value moved; one
+acceptance criterion did (the soft closure's noise-floor acceptance, below,
+loop only). See [physics-notes.md](physics-notes.md#self-consistent-bootstrap-jbs_self_consistent).
 
 Follow-up (loop iteration path and closure stop test): the loop relaxes the
 solved current as well as the bootstrap (`jbs_relax_current = 0.7`) and halves
 ω only on sustained growth (`jbs_relax_halve_on = 3`) — path only, the fixed
 point is unchanged (tested against the closed-form fixed point of a two-state
-model). `close_ip_structured_soft` accepts an iterate that is stationary to
-within the objective's rounding noise (`stop_reason="noise_floor"`, recorded
-with the gradient, predicted decrease and noise estimate) instead of refusing
-it — **a change of the solver's acceptance criterion, applied only where it
-previously refused** (every result it returned before is bit-identical) — and
-takes an optional start `x0`; inside the loop a refused soft closure is retried
-once from the previous pass's coefficients (`closure_retry`, logged).
+model). **The structured soft closure's acceptance criterion changed, for
+the loop only.** Old: when no damped step descends, accept iff the scaled
+gradient is below `rtol·max|J|·max(√F, 1)`, else refuse. New, with
+`accept_noise_floor=True`: also accept an iterate stationary to within the
+objective's rounding noise (`stop_reason="noise_floor"`, recorded with the
+gradient, predicted decrease and noise estimate, and printed). It accepts
+points the old test refused, and only those (every result the old test
+returned is unchanged). The loop's closure calls pass the flag; the default,
+and every frozen-path call, is the old criterion. `close_ip_structured_soft`
+also takes an optional start `x0`; inside the loop a refused soft closure is
+retried once from the previous pass's coefficients (`closure_retry`, logged).
+
+### Review fixes (2026-09-29)
+
+- **Noise-floor acceptance is opt-in** (`accept_noise_floor`, default
+  `False` = the historical strict solver, raising exactly where and with
+  exactly the message it did before the loop). It had been applied to every
+  caller, the frozen path included. A non-finite or non-positive noise
+  estimate now accepts nothing; every acceptance is printed as well as
+  recorded. `NOISE_FLOOR_FACTOR` (2) and every tolerance are unchanged.
+- **`evaluate_jBS` never returns a silently zeroed bootstrap.** Non-physical
+  input (`n_e`, `n_i`, `T_e`, `T_i` not strictly positive, `Z_eff < 1`) and a
+  failed-trace geometry row raise `physics.JBSEvaluationError` (a
+  `ValueError`) naming the quantity and ψ_N; the historical `nan_to_num`
+  survives only at the clipped axis / separatrix nodes (counted in
+  `diag["n_nonfinite_zeroed_at_ends"]`). Bit-identical for every accepted
+  input. A draw whose kinetics are refused is a failed draw.
+- **The loop kernel checks finiteness.** A non-finite initial guess or Redl
+  evaluation raises `jbs_loop.JBSNonFinite` (a `JBSNotConverged`) at once,
+  with the pass and ψ_N, whatever the `"flag"` policy; a pass that can never
+  count (a gated l_i / q0 not returned, J ≡ 0 against a non-zero iterate)
+  stops the loop at that pass instead of at the ceiling.
+- **Record only:** every pass records the unrelaxed closure-half residual
+  `current_residual_unrelaxed = ‖jc_k − js_k−1‖_w / ‖jc_k‖_w`
+  (= `current_gap / (1 − β)`); the convergence gate is unchanged.
+- **No filesystem path in records.** `oft_build` is now `{version, git_hash,
+  build_id}` (was the OFT install path). The golden fixture's path guard also
+  catches `/usr`, `/Volumes`, any absolute path at a token boundary, `~`,
+  `../` and Windows paths, including inside string arrays.
+- **Config validation.** `swb_iterations` set with the loop on raises a
+  `DeprecationWarning` (ignored under the loop, honoured only with
+  `jbs_self_consistent=False`); bools are refused as tolerances, relaxation
+  factors and ceilings; an unknown `generation` key in `from_dict` /
+  `from_json` is refused with the nearest valid key (retired fields are
+  dropped with a warning).
+- **Documented, not changed:** the evaluator's toroidal conversion drops the
+  `⟨B_φ²⟩/⟨B²⟩` bracket, exactly as the legacy path does. The neglected
+  `⟨B_p²⟩/⟨B²⟩` is 1.0–2.1 % across a D3D-like plasma (1.4 % at the bootstrap
+  peak, 1.4–1.5 % of I_BS), not the "sub-1 %" the docstrings claimed, and the
+  IDS export (exact `⟨1/R²⟩`) round-trips `⟨j·B⟩` high by that fraction.
+
+## Unreleased — reversed-current IMAS sources (hotfix)
+
+**A dd with `ip < 0` is now read into bouquet's positive-current frame.** Before
+this, `read_imas_baseline` kept the dd's (negative) current profiles while every
+bootstrap bouquet recomputes on its positive-current anchor is positive, so on
+a reversed-current source the bootstrap was added **against** Ip — in the
+legacy `solve_with_bootstrap` path, in the draws, and in the self-consistent
+loop's `evaluate_jBS` (baseline and draws, every `jBS_baseline_mode`). The Ip closure, the q0 target (negative),
+`fuse_total_err_pct` (off by 2c) and `swb_over_fuse_jBS_peak` were all wrong for
+such a source.
+
+- **Changes results only for sources with `ip < 0`.** For `ip ≥ 0` the reader
+  multiplies by exactly `+1.0`; baselines, closures, draws and archives are
+  bit-identical to before (verified bitwise A/B against the pre-fix build: the
+  synthetic IMAS example's forward-solved baseline under four closure paths,
+  each with the bootstrap loop off and on -- only the loop record's wall-clock
+  `wall_s` differs; on `main` also a seeded g-file run of the golden-fixture
+  example including its draws). **Any bouquet result built on a reversed-current dd before
+  this change is invalid and must be regenerated.**
+- New records: `Baseline.source_current_sign` / `source_b0_sign`,
+  `li_metrics.source_current_sign` / `source_b0_sign`,
+  `ip_closure.source_current_sign`, and `_baseline` attrs
+  `source_current_sign` / `source_b0_sign` / `current_frame` on IMAS archives.
+- A user-supplied `FixedComponentsConfig.j_NBI` / `j_RF` on the IMAS path is
+  taken in the dd's own orientation and normalised with it.
+- Delivered g-files are unchanged in convention (`CURRENT > 0`, `BCENTR > 0`,
+  TokaMaker's COCOS 7, for every source); they do not carry the experiment's
+  orientation. See
+  [physics-notes](physics-notes.md#current-and-field-orientation).
 
 ## Unreleased — MSE pitch angles on the structured closure (opt-in)
 

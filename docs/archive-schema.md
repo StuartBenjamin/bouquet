@@ -105,8 +105,12 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
   (`GenerationConfig.jbs_self_consistent`, **the default**) every draw group
   carries `jbs_converged` (bool), `jbs_n_passes` (int, all loops of the draw)
   and the full loop record as JSON in `jbs_loop_json` (residual histories,
-  relaxation factors, tolerances, the post-homotopy check, the evaluator
-  version, the OFT build, and `init_source` -- what each loop started from,
+  relaxation factors, the solved-vs-closure gap and the record-only
+  unrelaxed closure residual `current_residual_unrelaxed`, tolerances, the
+  post-homotopy check, the evaluator version, the OFT build as a path-free
+  identifier `oft_build = {version, git_hash, build_id}` (archives written by
+  earlier builds of this branch carry `oft_build.path`, the install
+  location, instead), and `init_source` -- what each loop started from,
   per loop under `loops` and for the draw's first loop at the top level); the `_baseline` group carries the same three
   attrs for the baseline's own loop (`jbs_n_passes` = its pass count). Names
   in `schema.JBS_LOOP_ATTRS`; write/read with `schema.write_jbs_loop` /
@@ -127,7 +131,10 @@ and changes no v2 dataset, attr, name, unit or meaning.
   `schema_version == 2`.
 - **Which bootstrap is in an archive** is decided by the block, never by the
   version number: a v3 archive written with `jbs_self_consistent=False`
-  carries no block either (it is the frozen path, bit for bit), and appending
+  carries no block either (it is the frozen path, bit for bit: the one solver
+  change the loop needed, the soft closure's noise-floor acceptance, is
+  opt-in via `close_ip_structured_soft(accept_noise_floor=True)` and passed by
+  the loop's closure calls only), and appending
   to a v2 file with a current bouquet restamps `schema_version` to 3 while its
   old draws keep reading as frozen. `ScanView.bootstrap_model` gives the label
   ("self-consistent Redl bootstrap" / "frozen SWB bootstrap (legacy)").

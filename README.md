@@ -220,7 +220,7 @@ a backend-systematics study.
 | [`docs/coil-constraints.md`](docs/coil-constraints.md) | Coil classes, VSC drift metric, homotopy, `in_spec` |
 | [`docs/io-and-plotting.md`](docs/io-and-plotting.md) | Readers/writers, COCOS, plotting catalogue |
 | [`docs/api-reference.md`](docs/api-reference.md) | Every public name |
-| [`docs/archive-schema.md`](docs/archive-schema.md) | HDF5 archive layout (schema v2) |
+| [`docs/archive-schema.md`](docs/archive-schema.md) | HDF5 archive layout (schema v3) |
 | [`architecture.md`](architecture.md) | Physics assumptions, conventions, numerical approximations, limitations |
 
 ## Testing
