@@ -1271,7 +1271,12 @@ class Bouquet:
                     li_sigma=(None if li_sigma is None else float(li_sigma)),
                     li_kind=li_kind, li_geom=li_geom,
                     axis=axis, axis_sigma=None,   # the q0 pin stays HARD
-                    x0=_x0),
+                    x0=_x0,
+                    # the noise-floor acceptance belongs to the self-consistent
+                    # bootstrap loop only; the legacy path keeps the strict
+                    # stop test (it raises where it always raised)
+                    accept_noise_floor=bool(
+                        getattr(gc, "jbs_self_consistent", False))),
                 x_prev=x_retry, who="imas SWB-split:ohmic structured")
         else:
             out = close_ip_structured(
@@ -1978,7 +1983,9 @@ class Bouquet:
                         li_geom=st.get("li_geom"),
                         axis=(None if st.get("axis") is None
                               else dict(st["axis"])),
-                        axis_sigma=None, mse_lin=lin, x0=_x0),
+                        axis_sigma=None, mse_lin=lin, x0=_x0,
+                        # a pass of the self-consistent bootstrap loop
+                        accept_noise_floor=True),
                     x_prev=x_retry, who="jbs-loop MSE chord")
                 srec["closure_retry"].append(int(_o.get("closure_retry", 0)))
                 srec["closure_stop_reason"].append(_o.get("gn_stop_reason"))

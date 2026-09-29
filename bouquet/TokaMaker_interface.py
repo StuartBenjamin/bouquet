@@ -7480,7 +7480,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         # i.e. every perimeter and volume factor cancels; only R_axis survives.
         # That is exactly the functional TokaMaker's ``li_normalization='iter'``
         # evaluates, and it is the ONLY estimator the two codes agree on:
-        # measured 0.17% across the 16 DIII-D 169510 beta-scan g-files.
+        # measured 0.17% across a 16-member beta scan of g-files.
         # The key NAME is historical and misleading -- it is not Jackson's li(2).
         #
         # The previous target, ``li["li(1)_EFIT"]``, carries the g-file's
