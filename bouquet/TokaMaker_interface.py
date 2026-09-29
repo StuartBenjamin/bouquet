@@ -2142,21 +2142,39 @@ class _GSReject(Exception):
 
 def _std_candidate_solve(mygs, psi_N, pres_tmp, cand, spike, j_fixed_eff,
                          Ip_target, psi_pad, npsi, constrain_sawteeth,
-                         find_optimal_scale):
+                         find_optimal_scale, ip_mode=None,
+                         request_offset=None, input_j_phi=None):
     """Steps 5b-5e of the standard l_i loop for ONE candidate and bootstrap.
 
     The self-consistent loop re-runs them for the SAME GPR candidate whenever
     the bootstrap moved (Gauss-Seidel coupling); identical operations, solver
-    settings and tolerances as the inline first pass.  Returns ``None`` when
-    the sawtooth constraint rejects the candidate.
+    settings and tolerances as the inline first pass -- including, when the
+    first pass used them, the amplitude root in the ``ip_mode`` measure
+    ('exact' / 'fsa' on the live geometry; ``None`` or 'legacy': the
+    limiter-area flux integral) and the corrective iteration started from
+    ``target + request_offset``.  Returns ``None`` when the sawtooth
+    constraint rejects the candidate.
     """
     from scipy.optimize import root_scalar
-    _root = root_scalar(
-        Ip_flux_integral_vs_target,
-        args=(mygs, cand, spike + j_fixed_eff, psi_N, Ip_target),
-        bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
-        method="brentq", rtol=1e-6)
-    a = _root.root
+    _aip = None
+    if ip_mode is not None and ip_mode != 'legacy':
+        try:
+            _aip = _AnchorIpRenorm(mygs, psi_N,
+                                   (input_j_phi if input_j_phi is not None
+                                    else cand + spike + j_fixed_eff),
+                                   Ip_target, psi_pad, mode=ip_mode)
+        except Exception as _exc:
+            print(f"  [std candidate] WARN: the {ip_mode} Ip measure could "
+                  f"not be built ({_exc}); limiter-area root", flush=True)
+    if _aip is not None:
+        a = _aip.solve_scale(cand, spike + j_fixed_eff)
+    else:
+        _root = root_scalar(
+            Ip_flux_integral_vs_target,
+            args=(mygs, cand, spike + j_fixed_eff, psi_N, Ip_target),
+            bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
+            method="brentq", rtol=1e-6)
+        a = _root.root
     matched = a * cand + spike + j_fixed_eff
     psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
     pprime = pchip_derivative(psi_N, pres_tmp) / psi_range
@@ -2452,6 +2470,7 @@ def perturb_kinetic_equilibrium(
     rng=None,
     jbs_loop=None,
     coil_saturation_guard=None,
+    jphi_request_offset=None,
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
     match :math:`I_p` and :math:`l_i` targets.
@@ -2587,6 +2606,18 @@ def perturb_kinetic_equilibrium(
         the homotopy's saturation criterion and a saturated pass raises
         :class:`CoilSaturated` (the draw is rejected).  Ignored when no hard
         bounds are installed and on the legacy path.
+    jphi_request_offset : ndarray or None
+        ``Baseline.jphi_request_offset`` (self-consistent loop only; ignored
+        on the legacy path).  With it, the standard route's l_i-band stage
+        perturbs the ACHIEVED-convention inductive ``input_jinductive -
+        offset`` (its target is an achieved current) and starts every
+        corrective iteration from ``target + offset`` -- at zero
+        perturbation, the reconstruction's own request.  With the loop on the
+        standard route's amplitude root is also taken in the 'exact' FSA
+        current measure on the live geometry (the measure the reconstruction
+        was normalised in and route R2 roots in; ``BOUQUET_R2_IP_MODE``
+        selects it for both routes) instead of the limiter-area flux
+        integral, so it reads 1 at zero perturbation.
 
     Returns
     -------
@@ -4066,6 +4097,28 @@ def perturb_kinetic_equilibrium(
         step_j_phi = (
             input_jinductive if recalculate_j_BS else input_j_phi
         )
+        # self-consistent loop: this stage targets ACHIEVED currents (the
+        # corrective iteration below), so it perturbs the achieved-convention
+        # inductive of the reconstruction (Baseline.jphi_request_offset)
+        _req_off = (np.asarray(jphi_request_offset, dtype=float)
+                    if (_jbs_on and recalculate_j_BS
+                        and jphi_request_offset is not None) else None)
+        if _req_off is not None:
+            step_j_phi = np.asarray(input_jinductive, dtype=float) - _req_off
+        # ... and roots the inductive amplitude in the SAME Ip measure the
+        # reconstruction was normalised in (exact FSA current integral on the
+        # live geometry; frozen once per candidate stage -- no solve happens
+        # between the GPR tries), not the limiter-area flux integral
+        _std_ip = None
+        if _jbs_on and recalculate_j_BS and _r2_mode != 'legacy':
+            try:
+                _std_ip = _AnchorIpRenorm(mygs, psi_N, input_j_phi, Ip_target,
+                                          psi_pad, mode=_r2_mode)
+            except Exception as _sip_exc:
+                print(f"  [li_iter={li_iter}] WARN: the {_r2_mode} Ip "
+                      f"measure could not be built ({_sip_exc}); the "
+                      "amplitude root falls back to the limiter-area flux "
+                      "integral for this candidate", flush=True)
         j_phi_0 = step_j_phi[0]
         _geo = _prescreen_geo  # frozen recon-anchor geometry (or None)
         # Floor zone: where the GPR mean is at/near zero (<= sigma), e.g. the
@@ -4096,13 +4149,16 @@ def perturb_kinetic_equilibrium(
             if np.any((_cand < 0.0) & ~_floor_zone):
                 continue  # non-physical (negative current where mean >> 0)
             _cand = np.clip(_cand, 0.0, None)   # half-Gaussian at the floor
-            _root = root_scalar(
-                Ip_flux_integral_vs_target,
-                args=(mygs, _cand, spike_profile + j_fixed_eff, psi_N, Ip_target),
-                bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
-                method="brentq", rtol=1e-6,
-            )
-            _a = _root.root
+            if _std_ip is not None:
+                _a = _std_ip.solve_scale(_cand, spike_profile + j_fixed_eff)
+            else:
+                _root = root_scalar(
+                    Ip_flux_integral_vs_target,
+                    args=(mygs, _cand, spike_profile + j_fixed_eff, psi_N, Ip_target),
+                    bracket=[1.0e-10 * Ip_target, 1.0e1 * Ip_target],
+                    method="brentq", rtol=1e-6,
+                )
+                _a = _root.root
             _matched = _a * _cand + spike_profile + j_fixed_eff
             # Cheap real-geom pre-screen: skip if confidently out-of-band.
             if _prescreen_geo is not None:
@@ -4243,7 +4299,9 @@ def perturb_kinetic_equilibrium(
                     _redo = _std_candidate_solve(
                         mygs, psi_N, pres_tmp, jphi_perturb, spk,
                         j_fixed_eff, Ip_target, psi_pad, npsi,
-                        constrain_sawteeth, find_optimal_scale)
+                        constrain_sawteeth, find_optimal_scale,
+                        ip_mode=_r2_mode, request_offset=_req_off,
+                        input_j_phi=input_j_phi)
                     if _redo is None:
                         raise _GSReject()
                     _gs.update(_redo)
@@ -4492,7 +4550,11 @@ def perturb_kinetic_equilibrium(
             input_j_phi=np.asarray(input_j_phi, dtype=float),
             r2_mode=_r2_ip_mode(), j_phi_request=np.asarray(output_jphi,
                                                             dtype=float),
-            isolate_edge_jBS=bool(isolate_edge_jBS))
+            isolate_edge_jBS=bool(isolate_edge_jBS),
+            request_offset=(None if (jphi_request_offset is None
+                                     or not recalculate_j_BS)
+                            else np.asarray(jphi_request_offset,
+                                            dtype=float)))
 
     return (
         ne_perturb,
@@ -6441,6 +6503,9 @@ def generate_bouquet(
                 pin_jphi=pin_jphi,
                 jbs_loop=jbs_loop,
                 coil_saturation_guard=_hard_sat_guard,
+                jphi_request_offset=(jphi_request_offset
+                                     if (jbs_loop and jbs_loop.get("enabled"))
+                                     else None),
             )
         except Exception as e:
             # Catch ANY exception during a perturbed solve -- ValueError
