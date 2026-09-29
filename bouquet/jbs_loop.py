@@ -30,8 +30,10 @@ Two relaxations, both of the PATH only (at the fixed point ``js = jc`` and
   oscillating two-state mode (l_i swings back by a fraction g < 0 per pass)
   that ``omega`` does not act on; ``beta ~ 1/(1 - g)`` damps it.  A step opts
   in by accepting a ``relax`` keyword (:class:`CurrentRelaxer`); the record
-  carries ``beta`` and the per-pass gap ``||js - jc|| / ||jc||`` (recorded,
-  never gated).
+  carries ``beta``, the per-pass gap ``||js - jc|| / ||jc||`` and, next to
+  it, the UNRELAXED closure-half residual ``||jc_k - js_k-1|| / ||jc_k||``
+  (``= gap / (1 - beta)`` on a blended pass; the gap understates it by
+  ``1 - beta``).  Both are recorded only, never gated.
 
 ``step`` and ``evaluate`` are supplied by the caller (the IMAS baseline, the
 structured / MSE closures, a perturbation draw, the geqdsk reconstruction);
@@ -62,7 +64,12 @@ Failure is never silent: the library raises :class:`JBSNotConverged` carrying
 the full residual history; with ``jbs_loop_on_fail="flag"`` the last iterate is
 returned with ``converged=False`` and the caller records a closure-limited
 reason.  A residual that grows on ``JBS_GROWTH_ABORT_PASSES`` consecutive
-passes at the relaxation floor aborts early with the same error.
+passes at the relaxation floor aborts early with the same error, and so does a
+pass that can never count (a gated ``l_i``/``q0`` the step did not return, or
+an identically zero ``J`` against a non-zero iterate) -- at that pass, not at
+the ceiling.  A non-finite initial guess or evaluated ``J`` raises
+:class:`JBSNonFinite` at once, whatever the policy, before it can reach the
+next solve.
 
 Nothing here touches an existing solver tolerance: the GS solver's own
 ``nl_tol``/``maxits``, the closure tolerances and the correctors' acceptance
@@ -115,6 +122,26 @@ class JBSNotConverged(RuntimeError):
         super().__init__(message)
         self.record = dict(record or {})
         self.history = self.record
+
+
+class JBSNonFinite(JBSNotConverged):
+    """The loop was handed, or evaluated, a non-finite bootstrap.
+
+    Raised at once -- before the value can be blended into the next iterate
+    and handed to a GS solve -- and REGARDLESS of the ``"flag"`` policy: a
+    non-finite iterate is not a result that can be flagged and kept.
+    ``pass_number`` is 0 for the initial guess, ``index`` / ``psi_N`` locate
+    the first non-finite node (``psi_N`` is ``None`` when the grid is not
+    known yet).  A subclass of :class:`JBSNotConverged`, so every caller that
+    treats a failed loop as a failed slice or draw does so here too.
+    """
+
+    def __init__(self, message, record=None, *, pass_number=None,
+                 index=None, psi_N=None):
+        super().__init__(message, record)
+        self.pass_number = pass_number
+        self.index = index
+        self.psi_N = psi_N
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +412,33 @@ class CurrentRelaxer:
         if self._last is not None:
             self._prev = self._last[1].copy()
 
+    def unrelaxed_residual(self, w=None, x=None):
+        """``||jc_k - js_{k-1}|| / ||jc_k||`` for the pass just taken, or
+        ``None`` on a pass without a previous solved current.
+
+        The UNRELAXED residual of the closure half of the fixed point: the
+        distance between the current the closure asks for on this pass's
+        geometry and the current the previous pass solved.  For a blended
+        pass it equals ``gap / (1 - beta)`` exactly (the recorded ``gap`` is
+        scaled down by ``1 - beta``); unlike that quotient it is also defined
+        at ``beta = 1``.  RECORD ONLY -- never gated.  Current-weighted with
+        the pass's ``w``/``x`` when the shapes match, plain L2 otherwise.
+        """
+        if self._last is None or self._prev is None:
+            return None
+        jc = self._last[0]
+        if self._prev.shape != jc.shape:
+            return None
+        d = jc - self._prev
+        if (w is not None and x is not None
+                and np.shape(w) == jc.shape == np.shape(x)):
+            n = weighted_norm(jc, w, x)
+            dn = weighted_norm(d, w, x)
+        else:
+            n = float(np.linalg.norm(jc))
+            dn = float(np.linalg.norm(d))
+        return (dn / n) if n > 0.0 else (0.0 if dn == 0.0 else float("inf"))
+
     def gap(self, w=None, x=None):
         """``(rel, blended)`` for the pass just taken: ``||js - jc|| / ||jc||``
         (current-weighted with the pass's ``w``/``x`` when the shapes match,
@@ -513,6 +567,14 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
             if takes_relax else
             "not applied: this caller's step does not take the relaxer"),
         current_gap=[], current_blended=[],
+        # RECORD ONLY, never gated: the unrelaxed residual of the closure
+        # half, ||jc_k - js_{k-1}|| / ||jc_k|| (= current_gap / (1 - beta)
+        # on a blended pass).  current_gap understates it by (1 - beta).
+        current_residual_unrelaxed=[],
+        current_residual_unrelaxed_definition=(
+            "||jc_k - js_{k-1}||_w / ||jc_k||_w = current_gap / (1 - beta) "
+            "on a blended pass: the unrelaxed closure-half residual; "
+            "recorded only, NOT a convergence criterion"),
         relax_halve_on=int(halve_on), omega_halved_at_pass=[],
     )
     try:
@@ -522,7 +584,33 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         rec["evaluate_jBS_version"] = None
     rec["oft_build"] = oft_build_info()
 
+    def _nonfinite(k, what, arr, grid):
+        """Raise :class:`JBSNonFinite` at the first non-finite node of
+        *arr* (pass ``k + 1``; ``k = -1`` is the initial guess)."""
+        bad = ~np.isfinite(arr)
+        i = int(np.argmax(bad))
+        psi = None
+        if grid is not None and np.shape(grid) == np.shape(arr):
+            psi = float(np.asarray(grid, dtype=float)[i])
+        where = (f"index {i}" + ("" if psi is None else f", psi_N={psi:.6g}")
+                 + f"; {int(bad.sum())} of {bad.size} node(s)")
+        when = "before pass 1" if k < 0 else f"on pass {k + 1}/{K}"
+        msg = (f"self-consistent j_BS loop"
+               f"{(' [' + label + ']') if label else ''}: {what} is "
+               f"non-finite {when} ({where}) -- refusing to blend it into "
+               "the next iterate or hand it to a GS solve")
+        rec["stop_reason"] = msg
+        rec["wall_s"] = float(time.perf_counter() - t0)
+        rec["jbs_converged"] = False
+        rec["fail_message"] = msg
+        print("  [jbs-loop] " + msg, flush=True)
+        raise JBSNonFinite(msg, rec, pass_number=max(k + 1, 0), index=i,
+                           psi_N=psi)
+
     jbs = np.asarray(jbs0, dtype=float).copy()
+    if not np.all(np.isfinite(jbs)):
+        _nonfinite(-1, "the initial bootstrap guess jbs0", jbs,
+                   (meas0 or {}).get("x"))
     prev = dict(meas0 or {})
     streak = 0
     growth_at_floor = 0
@@ -544,6 +632,9 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         if J.shape != jbs.shape:
             raise ValueError(f"run_jbs_loop[{label}]: evaluate returned shape "
                              f"{J.shape}, the iterate has {jbs.shape}")
+        if not np.all(np.isfinite(J)):
+            rec["n_passes"] = k + 1
+            _nonfinite(k, "the evaluated bootstrap J", J, meas.get("x"))
         res = profile_residuals(J, jbs, meas["w"], meas["x"], Ip)
         li_new = _finite_or_none(meas.get("li"))
         q0_new = _finite_or_none(meas.get("q0"))
@@ -576,11 +667,13 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         rec["pass_ok"].append(ok)
         if relaxer is not None:
             _gap, _bl = relaxer.gap(meas.get("w"), meas.get("x"))
+            _unrel = relaxer.unrelaxed_residual(meas.get("w"), meas.get("x"))
             relaxer.commit()
         else:
-            _gap, _bl = None, False
+            _gap, _bl, _unrel = None, False, None
         rec["current_gap"].append(_gap)
         rec["current_blended"].append(bool(_bl))
+        rec["current_residual_unrelaxed"].append(_unrel)
         rec["n_passes"] = k + 1
         entry = dict(k=k, ok=ok, dl_i=dl_i, dq0=dq0,
                      omega_used=omega_used_for_current, **res)
@@ -593,7 +686,25 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
               + ("" if omega_used_for_current is None
                  else f" omega={omega_used_for_current:.3f}")
               + ("" if not _bl else f" |js-jc|/|jc|={_gap:.2e}")
+              + ("" if (not _bl or _unrel is None)
+                 else f" (unrelaxed {_unrel:.2e}, record only)")
               + (" ok" if ok else ""), flush=True)
+        # ---- a pass that can never count: stop now, not at the ceiling ----
+        _never = None
+        if gate_li and li_new is None:
+            _never = ("the step returned no finite l_i although l_i is a "
+                      "convergence criterion here (gate_li=True)")
+        elif gate_q0 and q0_new is None:
+            _never = ("the step returned no finite q0 although q0 is a "
+                      "convergence criterion here (gate_q0=True)")
+        elif (not np.any(J != 0.0)) and np.any(jbs != 0.0):
+            _never = ("the evaluated bootstrap J is identically zero while "
+                      "the iterate is not (r_j is infinite)")
+        if _never is not None:
+            rec["stop_reason"] = (f"pass {k + 1}/{K}: {_never} -- "
+                                  "convergence is impossible, stopped at once "
+                                  "instead of running to the pass ceiling")
+            break
         streak = streak + 1 if ok else 0
         if streak >= need:
             rec["converged"] = True
@@ -650,7 +761,10 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         dl_i=rec["dl_i"][-1] if rec["dl_i"] else None,
         dq0=rec["dq0"][-1] if rec["dq0"] else None,
         I_BS=rec["I_BS"][-1] if rec["I_BS"] else None,
-        current_gap=rec["current_gap"][-1] if rec["current_gap"] else None)
+        current_gap=rec["current_gap"][-1] if rec["current_gap"] else None,
+        current_residual_unrelaxed=(rec["current_residual_unrelaxed"][-1]
+                                    if rec["current_residual_unrelaxed"]
+                                    else None))
     out = dict(jbs_used=np.asarray(jbs_used, dtype=float),
                J_final=(None if J is None else np.asarray(J, dtype=float)),
                meas_final=meas, converged=bool(rec["converged"]), record=rec)
