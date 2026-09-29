@@ -2199,7 +2199,10 @@ def _std_candidate_solve(mygs, psi_N, pres_tmp, cand, spike, j_fixed_eff,
     output_jphi, n_corr, hist = _corrective_jphi_iteration(
         mygs, psi_N, target, pp_prof, Ip_target, pres_tmp[0], psi_pad,
         min_iters=2, max_iters=int(os.environ.get('CORR_MAX_ITERS', '8')),
-        rtol=0.05, verbose=False)
+        rtol=0.05, verbose=False,
+        **({} if request_offset is None else {
+            "initial_request": target + np.asarray(request_offset,
+                                                   dtype=float)}))
     return dict(output_jphi=output_jphi, matched_j_inductive=matched_j_ind,
                 final_scale_j0=final_scale_j0, a_optimal=a, n_corr=n_corr,
                 hist=hist)
@@ -2343,10 +2346,15 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target,
         _pp["y"][-1] = 0.0
         target, _f = _renormalize_target_to_Ip(mygs, psi_N, target, Ip_target,
                                                psi_pad, label="jphi_corr/draw")
+        _off = ctx.get("request_offset")
         out, _n, _h = _corrective_jphi_iteration(
             mygs, psi_N, target, _pp, Ip_target, pres_tmp[0], psi_pad,
             min_iters=2, max_iters=int(os.environ.get('CORR_MAX_ITERS', '8')),
-            rtol=0.05, verbose=False)
+            rtol=0.05, verbose=False,
+            # the draw's own start rule (target + the reconstruction's
+            # request offset), as in its l_i stage
+            **({} if _off is None else {
+                "initial_request": target + np.asarray(_off, dtype=float)}))
         if coil_guard is not None:
             coil_guard(f"post-homotopy pass {k + 1} (corrective re-solve)")
         state["jphi"] = np.asarray(out, dtype=float)
@@ -4279,6 +4287,11 @@ def perturb_kinetic_equilibrium(
             # Env CORR_MAX_ITERS lets us trim for speed (4 saves ~1 solve).
             max_iters=int(os.environ.get('CORR_MAX_ITERS', '8')),
             rtol=0.05, verbose=False,
+            # self-consistent loop: start from the reconstruction's request
+            # form of this target (target + offset) -- the reconstruction's
+            # own solve at zero perturbation (None: the target, as ever)
+            **({} if _req_off is None
+               else {"initial_request": target_jphi_perturb + _req_off}),
         )
         if _n_corr > 2:
             print(f"  [jphi correction] {_n_corr} iterations, "
