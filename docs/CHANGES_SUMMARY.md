@@ -21,6 +21,11 @@ comparable, the delivered objective — is worse than the pre-MSE closure's
 counts the MSE stage's solves; after an applied MSE stage the corrector's
 entry readbacks are recorded as `*_mse_stage`, and `*_predictor` keeps the
 predictor's values.
+Without `Er` or `er_corrected=True` the model takes E_R = 0, which biases the
+fit in a rotating plasma (to first order B_Z is read as B_Z + (A5/A1)E_R —
+a systematic reshaping of the fitted current profile); this is warned and
+recorded. The forward model is the standard A1..A7 form with E_Z = 0 and no
+denominator E_R term (a block applying E_r with non-zero A7 is refused).
 `structured_mse_required=True` refuses instead of running without the
 constraint. **Nothing changes without `mse_data`**: every default is inert and
 no tolerance or acceptance criterion moved.

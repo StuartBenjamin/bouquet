@@ -1473,3 +1473,54 @@ class TestSolverFailures:
                               jBS_baseline_mode="ohmic")
         with pytest.raises(TypeError, match="a bug"):
             _run_stage(gc, solve_wrap=self._fail_on(3, TypeError("a bug")))
+
+
+# ---------------------------------------------------------------------------
+#  E_r: the A6 / A7 coefficients and the documented neglect bias
+# ---------------------------------------------------------------------------
+class TestErTerms:
+    def test_a7_with_applied_er_is_refused(self):
+        R, Z = _chord_geometry(6)
+        md = _mse_block([0.1] * 6, R, Z, A5=[2e-6] * 6, Er=[2e4] * 6,
+                        A7=[1e-7] * 6)
+        with pytest.raises(MSEDataUnusable, match="A7"):
+            mse_chords(md)
+
+    def test_a6_and_a7_without_er_are_accepted_and_stated(self):
+        from bouquet.mse import mse_er_terms
+        R, Z = _chord_geometry(6)
+        ch = mse_chords(_mse_block([0.1] * 6, R, Z, A6=[3e-7] * 6,
+                                   A7=[1e-7] * 6))
+        t = mse_er_terms(ch)
+        assert "no E_r" in t and "BIASED" in t
+        assert "block's A6 is non-zero" in t
+        # neither enters the model: same tan(gamma) as the block without them
+        ch0 = mse_chords(_mse_block([0.1] * 6, R, Z))
+        B = np.array([[0.01, 2.0, 0.3]] * 6)
+        np.testing.assert_array_equal(mse_tan_gamma(B, ch),
+                                      mse_tan_gamma(B, ch0))
+
+    def test_neglect_bias_has_the_documented_first_order_form(self):
+        """Data carrying A5 E_R, fitted by the no-E_r model: the B_Z the
+        model needs is B_Z + (A5/A1) E_R to first order (the A4 B_Z
+        denominator term is the only correction)."""
+        A1, A2, A3, A4, A5 = 1.1, 0.95, 0.12, 0.04, 2.0e-6
+        BR, Bphi, BZ = 0.02, -1.9, -0.28
+        for Er in (-4.0e4, -1.0e4, 1.0e4, 4.0e4):
+            tg = (A1 * BZ + A5 * Er) / (A2 * Bphi + A3 * BR + A4 * BZ)
+            # B_Z' solving A1 B_Z' / (A2 Bphi + A3 BR + A4 B_Z') = tg
+            BZ_fit = tg * (A2 * Bphi + A3 * BR) / (A1 - A4 * tg)
+            d_true = BZ_fit - BZ
+            d_first = A5 * Er / A1
+            assert np.sign(d_true) == np.sign(d_first)
+            assert abs(d_true - d_first) < 0.02 * abs(d_first)
+
+    def test_stage_warns_and_records_the_neglect(self, capsys):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic")
+        bl, state, n_stage, cyl, ch = _run_stage(gc)
+        out = capsys.readouterr().out
+        assert "E_r is neither supplied" in out and "BIASED" in out
+        rec = bl.ip_closure
+        assert rec["structured_mse_er_neglected"] is True
+        assert "(A5/A1) E_R" in rec["structured_mse_er_terms"]

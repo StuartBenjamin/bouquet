@@ -1,17 +1,51 @@
 """MSE pitch-angle data and forward model, shared by the closures that use it.
 
 Motional-Stark-effect polarimetry measures, per chord, the tangent of the
-pitch angle gamma.  In the EFIT k-file convention (standard chords, A6 = A7 =
-A8 = 0) the synthetic signal of an equilibrium is
+pitch angle gamma.  The standard geometry-coefficient form (the EFIT k-file
+coefficients AA1GAM..AA7GAM; cf. B. W. Rice et al., Phys. Rev. Lett. 79,
+2694 (1997), where the E-field terms were introduced to measure E_r) is
 
 .. code-block:: text
 
-    tan(gamma) = (A1 B_Z + A5 E_r) / (A2 B_phi + A3 B_R + A4 B_Z)
+    tan(gamma) = (A1 B_Z + A5 E_R)
+               / (A2 B_phi + A3 B_R + A4 B_Z + A6 E_Z + A7 E_R)
 
-with the A-coefficients the chord's viewing geometry and ``E_r`` the radial
-electric field at the chord [V/m].  This module holds that ONE formula, the
+with A1..A4 the chord's viewing geometry, A5 and A7 the numerator and
+denominator coefficients of the radial electric field E_R [V/m] and A6 that
+of the vertical field E_Z.  bouquet evaluates
+
+.. code-block:: text
+
+    tan(gamma) = (A1 B_Z + A5 E_R) / (A2 B_phi + A3 B_R + A4 B_Z)
+
+i.e. E_Z = 0 (the A6 term is omitted -- stated in the record whenever a block
+carries a non-zero A6) and the denominator E_R term is NOT modelled: a block
+that applies E_R (``Er`` supplied) while carrying a non-zero A7 is REFUSED
+rather than fitted with half its E_R dependence -- supply E_r-corrected data
+(``er_corrected=True``) instead.  This module holds that ONE formula, the
 data-block schema it is evaluated on, and the helpers every closure that
 consumes pitch angles uses -- so the physics is written down once.
+
+**E_r neglected biases the fit.**  Without ``Er`` and without
+``er_corrected=True`` the model takes E_R = 0.  In a rotating (e.g.
+beam-heated) plasma E_R is not small, and the data then carry ``A5 E_R`` that
+the model attributes to the field: to first order (the A4 B_Z denominator
+term is small) the fit reads
+
+.. code-block:: text
+
+    B_Z,fit = B_Z + (A5 / A1) E_R          at each chord
+
+so the enclosed current inferred at an outboard-midplane chord of minor
+radius r is shifted by ``delta|I_enc| ~ -ip_sign (2 pi r / mu0) (A5/A1) E_R``
+(right-handed (R, phi, Z); a current along +phi has B_Z < 0 there).  The
+direction is set by the sign of ``A5 E_R / A1`` -- viewing geometry and
+rotation direction -- not by the measurement noise: where E_R keeps one sign
+across the chords the bias is SYSTEMATIC, it changes the radial shape of the
+fitted current (j ~ d I_enc / d r), and the structured closure absorbs it into
+s_ind / s_bs as if it were a real redistribution.  The record says which E_r
+treatment was used (:func:`mse_er_terms`), and the closure warns when E_r is
+neither supplied nor declared corrected.
 
 **Data block** (a plain dict, JSON-friendly; every array is one entry per
 chord):
@@ -25,6 +59,10 @@ chord):
                     ``weight <= 0`` is excluded
 ``A1`` .. ``A4``    viewing-geometry coefficients (required)
 ``A5``              E_r coefficient (optional; zero when absent)
+``A6``, ``A7``      optional: the E_Z and denominator-E_R coefficients.
+                    Accepted so a k-file block can be passed whole; A6 is
+                    never used (E_Z = 0, stated in the record) and a non-zero
+                    A7 together with an applied E_r is refused (see above)
 ``Er``              E_r at the chord [V/m] (optional; zero when absent).  When
                     it is supplied the forward model carries ``A5 E_r``
 ``er_corrected``    optional bool: ``tgamma`` has ALREADY been corrected for
@@ -85,7 +123,7 @@ MSE_ORIENTATION_KEYS = ("ip_sign", "bt_sign")
 #: ``MSE_REQUIRED_KEYS + MSE_ORIENTATION_KEYS + MSE_OPTIONAL_KEYS`` is REFUSED
 #: -- a misspelt or unsupported key (``gamma``, ``Er_kVm``, ...) would
 #: otherwise be silently ignored.
-MSE_OPTIONAL_KEYS = ("A5", "Er", "er_corrected")
+MSE_OPTIONAL_KEYS = ("A5", "Er", "er_corrected", "A6", "A7")
 
 
 def mse_block_unknown_keys(md):
@@ -171,7 +209,7 @@ def mse_chords(md, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
     except (TypeError, ValueError) as e:
         raise MSEDataUnusable(f"the MSE data block is not numeric ({e})")
     n = arr["tgamma"].size
-    for k in ("A5", "Er"):
+    for k in ("A5", "Er", "A6", "A7"):
         if md.get(k) is None:
             arr[k] = np.zeros(n)
         else:
@@ -226,6 +264,14 @@ def mse_chords(md, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
     act = reasons == ""
     n_act = int(act.sum())
     er_applied = bool(np.any((arr["A5"][act] * arr["Er"][act]) != 0.0))
+    if er_applied and bool(np.any(arr["A7"][act] != 0.0)):
+        raise MSEDataUnusable(
+            "the MSE block applies E_r (A5*Er != 0) and carries a non-zero "
+            "A7, the DENOMINATOR E_R coefficient of tan(gamma) = (A1 B_Z + A5 "
+            "E_R) / (A2 B_phi + A3 B_R + A4 B_Z + A6 E_Z + A7 E_R); bouquet's "
+            "forward model carries the numerator term only, so fitting it "
+            "would use half the E_r dependence -- supply E_r-corrected "
+            "tgamma (er_corrected=True) instead")
     if er_corrected and bool(np.any(arr["Er"][act] != 0.0)):
         raise MSEDataUnusable(
             "the MSE block says tgamma is ALREADY E_r-corrected "
@@ -246,14 +292,36 @@ def mse_chords(md, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
     return out
 
 
+#: The first-order E_r-neglect bias, as stated in the record (module doc).
+MSE_ER_BIAS_NOTE = (
+    "E_R taken as 0: in a rotating plasma the data carry A5*E_R, which the "
+    "fit attributes to the field -- to first order B_Z,fit = B_Z + (A5/A1) "
+    "E_R at each chord, so the enclosed current at an outboard-midplane chord "
+    "shifts by delta|I_enc| ~ -ip_sign (2 pi r/mu0)(A5/A1) E_R; the sign is "
+    "fixed by A5*E_R/A1 (geometry and rotation direction), so the bias is "
+    "systematic, reshapes the fitted current profile and is absorbed into "
+    "s_ind/s_bs")
+
+
 def mse_er_terms(ch):
-    """One-line statement of how E_r entered the forward model."""
+    """One-line statement of how E_r entered the forward model.
+
+    The model is ``(A1 B_Z + A5 E_R) / (A2 B_phi + A3 B_R + A4 B_Z)``: the
+    A6 (E_Z) term of the full geometry-coefficient form is always omitted
+    (E_Z = 0) and the A7 (denominator E_R) term is never modelled -- a block
+    that would need it is refused by :func:`mse_chords`.
+    """
+    a6 = ("A6*E_Z omitted (E_Z = 0 assumed; the block's A6 is non-zero)"
+          if bool(np.any(np.asarray(ch.get("A6", 0.0)) != 0.0))
+          else "A6*E_Z omitted (E_Z = 0)")
     if ch["er_corrected"]:
         return ("tgamma supplied E_r-CORRECTED upstream (er_corrected=True); "
-                "forward model carries no E_r term; A6(E_z)=0")
+                f"forward model carries no E_r term; {a6}")
     if ch["er_applied"]:
-        return "A5*Er applied (caller-supplied E_r at the chords); A6(E_z)=0"
-    return "no E_r: A5*Er omitted (no Er supplied); A6(E_z)=0"
+        return ("A5*E_R applied (caller-supplied E_r at the chords; A7 = 0 "
+                f"on every chord, so the denominator E_R term vanishes); {a6}")
+    return (f"no E_r: A5*E_R omitted (no Er supplied) -- BIASED if E_R is "
+            f"not small: {MSE_ER_BIAS_NOTE}; {a6}")
 
 
 def mse_tan_gamma(B, ch, sign_pol=1.0, sign_tor=1.0):
@@ -266,6 +334,12 @@ def mse_tan_gamma(B, ch, sign_pol=1.0, sign_tor=1.0):
     """
     B = np.asarray(B, dtype=float).reshape(-1, 3)
     sp, st = float(sign_pol), float(sign_tor)
+    # Standard MSE geometry-coefficient form (EFIT AA1GAM..AA7GAM; cf. Rice
+    # et al., PRL 79, 2694 (1997)):
+    #   tan(gamma) = (A1 B_Z + A5 E_R) / (A2 B_phi + A3 B_R + A4 B_Z
+    #                                     + A6 E_Z + A7 E_R)
+    # evaluated with E_Z = 0 (A6 dropped) and without the A7 E_R term, which
+    # mse_chords guarantees is zero whenever E_R is applied.
     num = ch["A1"] * sp * B[:, 2] + ch["A5"] * ch["Er"]
     den = (ch["A2"] * st * B[:, 1] + ch["A3"] * sp * B[:, 0]
            + ch["A4"] * sp * B[:, 2])
@@ -392,7 +466,7 @@ def mse_orientation_check(B, ch, sign_pol, sign_tor):
 #: Per-chord arrays of a chord dict (:func:`mse_chords`); every one is indexed
 #: by the ACTIVE chords, so dropping a chord drops its entry from each.
 MSE_CHORD_ARRAYS = ("R", "Z", "tgamma", "sigma", "weight", "A1", "A2", "A3",
-                    "A4", "A5", "Er", "sigma_eff", "index")
+                    "A4", "A5", "Er", "A6", "A7", "sigma_eff", "index")
 
 #: Exclusion reason for a chord the solver's field interpolator cannot place
 #: on its mesh (see :func:`mse_field_at`).

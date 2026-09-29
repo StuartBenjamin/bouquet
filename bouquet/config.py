@@ -835,7 +835,14 @@ class GenerationConfig:
     #: scalars ``ip_sign`` / ``bt_sign`` (+1 or -1: the directions of Ip and
     #: B_t in the A-coefficients' right-handed (R, phi, Z) frame -- the field
     #: orientation is a stated convention, never fitted; see
-    #: ``bouquet.mse``).  ``None`` (the
+    #: ``bouquet.mse``).  With neither ``Er`` nor ``er_corrected=True`` the
+    #: model takes E_R = 0, which in a rotating plasma BIASES the fit: to
+    #: first order it reads B_Z + (A5/A1) E_R as B_Z at every chord, a
+    #: systematic (not random) shift of the fitted current profile's shape
+    #: that the closure absorbs into s_ind/s_bs -- warned and recorded
+    #: (``structured_mse_er_neglected``, ``structured_mse_er_terms``).  A6
+    #: (E_Z) is never used; a non-zero A7 (the denominator E_R coefficient)
+    #: with an applied E_r is refused.  ``None`` (the
     #: default) adds nothing and leaves the structured closure exactly as it
     #: was.  When given, ``chi2_MSE = sum_k ((tan_gamma_pred - tgamma) /
     #: sigma_eff)^2`` joins the structured objective; tan(gamma) is linearised

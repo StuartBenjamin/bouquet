@@ -1483,6 +1483,7 @@ class Bouquet:
         the term was not applied and why.
         """
         import warnings
+        from .mse import MSE_ER_BIAS_NOTE as _mse_er_bias_note
         from .mse import MSE_MIN_CHORDS, MSEDataUnusable, mse_chords
 
         md = getattr(gc, "mse_data", None)
@@ -1512,6 +1513,12 @@ class Bouquet:
             print("[imas SWB-split:ohmic structured] WARNING " + msg,
                   flush=True)
             return None, f"unusable, not applied: {e}"
+        if not ch["er_applied"] and not ch["er_corrected"]:
+            print("[imas SWB-split:ohmic structured] WARNING MSE: E_r is "
+                  "neither supplied (Er) nor declared corrected "
+                  "(er_corrected=True), so the forward model takes E_R = 0 -- "
+                  "BIASED in a rotating plasma (" + _mse_er_bias_note + ")",
+                  flush=True)
         _er_nan = [i for i, r in ch["excluded"] if r.startswith("E_r is not")]
         if _er_nan:
             print("[imas SWB-split:ohmic structured] WARNING MSE: "
@@ -1539,13 +1546,18 @@ class Bouquet:
             structured_mse_er_applied=bool(ch["er_applied"]),
             structured_mse_er_corrected=bool(ch["er_corrected"]),
             structured_mse_er_terms=mse_er_terms(ch),
+            structured_mse_er_neglected=bool(not ch["er_applied"]
+                                             and not ch["er_corrected"]),
             structured_mse_fd_step=float(getattr(gc, "structured_mse_fd_step",
                                                  0.02)),
             structured_mse_steps=int(getattr(gc, "structured_mse_steps", 1)),
             structured_mse_forward_model=(
                 "tan(gamma) = (A1 Bz + A5 Er) / (A2 Bphi + A3 BR + A4 Bz) on "
-                "the SOLVED equilibrium (bouquet.mse); linearised in the "
-                "structured coefficients by forward differences"),
+                "the SOLVED equilibrium (bouquet.mse): the standard form "
+                "(A1 Bz + A5 Er) / (A2 Bphi + A3 BR + A4 Bz + A6 Ez + A7 Er) "
+                "with Ez = 0 and A7 = 0 (a block applying Er with non-zero "
+                "A7 is refused); linearised in the structured coefficients "
+                "by forward differences"),
         )
         return rec
 
