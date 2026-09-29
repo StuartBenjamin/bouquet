@@ -20,8 +20,9 @@ from .schema import write_profile
 #: == the g-file reader's ``li["li(2)"]`` key (whose name is historical and
 #: misleading -- it is not Jackson's li(2)).
 #:
-#: This is the ONLY estimator bouquet and TokaMaker agree on (0.17% across the
-#: DIII-D 169510 beta-scan g-files); the li(1)/EFIT pair differs by +3.3%
+#: This is the ONLY estimator bouquet and TokaMaker agree on (0.17% across a
+#: 16-equilibrium beta-scan set of reconstruction g-files); the li(1)/EFIT
+#: pair differs by +3.3%
 #: because TokaMaker projects the padded surface onto the true separatrix
 #: before summing perimeter.  Targeting one and measuring the other is
 #: issue #20.  Written into every archive's ``_baseline`` group as
