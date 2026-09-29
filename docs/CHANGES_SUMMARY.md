@@ -58,6 +58,80 @@ the flux range; Redl with the same kinetics on that geometry differs by a few
 to ~10 % in I_BS), not a kinetic mismatch. A fast and a solver test run the
 same draw loop from the baseline bootstrap and reach the same fixed point.
 
+### One reconstruction state; an unperturbed draw reproduces it
+
+**The rule.** There are three levels: the INPUT (a g-file, or a
+modelling-source IDS); the bouquet RECONSTRUCTION, as close to the input as it
+can be while physically valid and carrying a Redl bootstrap -- allowed to
+differ from the input, since most inputs carry no Redl/Sauter bootstrap; and
+the DRAWS, perturbations of the reconstruction. With the loop on, the
+reconstruction is ONE equilibrium -- the saved baseline g-file, `l_i_target`
+and every recorded l_i / q0 / q95, the archived baseline profiles, the centre
+of the draws' l_i band and the reference of the zero-perturbation check -- and
+a draw with every perturbation at zero reproduces it (its equilibrium, current
+profile, bootstrap, l_i, q0, q95) at the loop's existing tolerances. Nothing
+here applies with `jbs_self_consistent=False`: the legacy path is unchanged
+bit for bit (`tests/probes/legacy_bitwise_ab.py` runs the out-of-tree A/B).
+
+**What changed in the reconstruction.**
+- g-file path: before, the baseline carried three states (the step-6
+  l_i-matched value 0.653864 that `l_i_target` came from, the post-corrective
+  state 0.656455, and the saved g-file, a single re-solve of the stored
+  achieved current, 0.653866). Now every loop pass ends on the corrective
+  iteration's landed REQUEST re-matched in l_i (the step-5 secant on the
+  inductive amplitude of that request); that state is delivered, measured,
+  saved and archived, and keeps the designed l_i match to the input.
+  Alternative, not taken (the owner's choice to make): deliver the
+  post-corrective state and give up the l_i match (band centre +2.59e-3 in
+  l_i, q95 reference moves ≈0.024, about one ensemble σ).
+- Both paths: the stored split is the delivered state's jphi-linterp request,
+  normalised to I_p in the 'exact' FSA current measure on it (on the
+  modelling-source example the source total read 0.965 I_p there; the
+  solver had made the rest up uniformly), `j_BS` (+ `jBS_diff`) the draws'
+  σ=0 bootstrap composition on it, the fixed parts as read, `j_inductive` the
+  residual. In diff mode `j_BS + jBS_diff` is still the source bootstrap.
+  New: `Baseline.delivered_state`, `Baseline.jphi_request_offset`, the
+  archive attr `_baseline@delivered_state_json`
+  ([archive-schema.md](archive-schema.md)).
+
+**What changed in the draws (loop on).** Every stage is the identity at zero
+perturbation: the state anchor carries `jphi_diff`; route R2's scale reads 1;
+the standard route perturbs the achieved-convention inductive
+(`j_inductive - jphi_request_offset`), roots its amplitude in the exact
+measure on the live geometry instead of the limiter-area flux integral, and
+starts every corrective iteration from `target + jphi_request_offset`; the
+delta-mode reference anchor carries `jphi_diff`. **This moves draws with
+non-zero perturbation** (their reference moved): modelling-source R2 draws
+lose the 1.046–1.049 inductive over-scaling (expected at the band centre:
+l_i −0.9 %, q0 +0.9 %, q95 +0.3 %, from the diagnosis' s = 1 replay);
+g-file draws are centred on the re-matched state (its l_i within the
+secant's 1e-3 of the input's, as the old `l_i_target` was; its q0/q95 are
+expected of the order of the old single-solve baseline g-file's, which sat
++0.024 in q95 above the post-corrective state -- not yet measured);
+standard-route draws get a different amplitude root (the limiter measure read
+10–44 % high; `find_optimal_scale` compensated partly, j0 scale 1.153 on the
+g-file example, 1.035 on the modelling-source one) and a warm corrective
+start; the j_φ GPR envelope (`jphi_scalar_sigma·|j_phi|`) follows the
+normalised request (+3.6 % in amplitude on the modelling-source example,
+edge-shape changes of order 1 % on the g-file one).
+
+**`verify_sigma0_consistency` (loop on).** `passed` now REQUIRES the draw's own
+route -- every route the configuration can use (both on the g-file path; R2
+on the modelling-source path unless `workflow="custom"`) -- to reproduce the
+reconstruction state at `jbs_rtol_j` / `jbs_rtol_Ip` / `jbs_tol_li`, with q0,
+q95 and the total-current profile reported beside them; `draw_route=False`
+leaves it False (unverified). The loop "solved the baseline's way" is kept as
+`passed_baseline_way` and no longer decides `passed`; it now solves the way
+the reconstruction's final state is solved (one jphi-linterp solve per pass).
+Two existing test assertions that pinned the old scoping ("the draw route
+gates nothing"; `passed` is the baseline-way conjunction) were re-scoped by
+this decision, their checks kept on the renamed result. New tests: the
+stage-wise identity on a toy solver (`tests/test_sigma0_identity_stages.py`),
+live probes on both examples and both routes
+(`tests/test_sigma0_identity_solver.py`), and loop-ON twins of the six
+zero-perturbation tests in `tests/test_seeded_reproducibility.py` (the legacy
+ones are kept).
+
 ### Opt-in introduction (earlier on this branch)
 
 `GenerationConfig.jbs_self_consistent=True` replaces the once-computed, frozen

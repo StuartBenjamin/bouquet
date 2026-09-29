@@ -35,6 +35,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │              [source_current_sign, source_b0_sign, current_frame]
     │              [jbs_converged, jbs_n_passes, jbs_loop_json]
     │                                  ← the baseline's jbs_loop block (v3)
+    │              [delivered_state_json]
+    │                                  ← the ONE reconstruction state (loop)
     └── <count>/                       one group per accepted draw
         │                              (integer; gaps = rejected draws)
         ├── eqdsk, [pfile]             raw bytes, fixed names
@@ -119,6 +121,37 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
   for the baseline), `DrawView.jbs_loop` / `DrawView.jbs_converged`,
   `ScanView.baseline_jbs_loop` and `ScanView.bootstrap_model`. A group
   **without** the block carries a frozen (`solve_with_bootstrap`) bootstrap.
+
+- **The one reconstruction state (`_baseline@delivered_state_json`, loop
+  only).** The design rule: the input (g-file or modelling-source IDS), the
+  bouquet reconstruction (as close to the input as it can be while physically
+  valid and carrying a Redl bootstrap -- allowed to differ from the input),
+  and the draws (perturbations of the reconstruction; at zero perturbation
+  they reproduce it). With the loop on, the reconstruction is ONE
+  equilibrium, and `_baseline` records it and says whether the run's
+  baseline re-solve -- the saved `eqdsk` above and every draw's warm start --
+  is it. JSON keys (`utils.DELIVERED_STATE_ATTR`, written by
+  `utils.store_baseline_state`): `convention` (what the in-memory split is,
+  below), `path`, `l_i` (= `l_i_target`, l_i(3)/'iter'), `q0`, `q95`
+  (`get_stats` on the delivered state), `Ip_target`,
+  `request_normalisation` / `achieved_normalisation` (the uniform factors
+  that put the stored request / the achieved current at `Ip_target` in the
+  'exact' FSA current measure), `n_floored_inductive`,
+  `n_floored_target_inductive` (points where a zero-perturbation draw cannot
+  reproduce the state), on the g-file path `li_corrective_state`,
+  `li_step6_matched` and `li_input`, `how`, then `l_i_target`,
+  `baseline_resolve` (`l_i`, `q0`, `q95`, `Ip` of the run's baseline re-solve
+  and their differences from the recorded values) and
+  `archived_j_phi_rel_l2_vs_delivered` (the archived `j_phi` against the
+  delivered state's achieved current). Absent with
+  `jbs_self_consistent=False` (legacy archives are unchanged bit for bit).
+  With the loop on, `_baseline/j_phi` is the delivered state's ACHIEVED FSA
+  current (as before: `store_achieved_jphi`), `j_BS` the draws' σ=0
+  bootstrap composition on it (+ `jBS_diff`) and `j_inductive` their
+  residual; the in-memory `Baseline` split the draws consume is the
+  Ip-normalised jphi-linterp REQUEST of the same state (one solve of it is
+  the state), with `Baseline.jphi_request_offset` = request − achieved
+  (not archived).
 
 ## v2 → v3: the self-consistent bootstrap record
 

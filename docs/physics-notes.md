@@ -74,10 +74,13 @@ b.generate()
 
 It returns `spike0`, `max_dev`, `rms_dev`, `max_dev_frac`, `psi_worst`, and
 `passed`, and costs one bootstrap solve (~1 min). That is the **legacy**
-(`jbs_self_consistent=False`) check; by default (the self-consistent loop) it
-checks the loop's own invariant instead and returns the loop record with
-`loop_converged` and the residuals against the baseline -- see
-[the self-consistent bootstrap](#self-consistent-bootstrap-jbs_self_consistent). Call it after
+(`jbs_self_consistent=False`) check; by default (the self-consistent loop)
+`passed` means that an unperturbed draw, on every route the configuration
+can use, reproduces the one reconstruction state at the loop's tolerances
+(the `draw_route` block, with q0, q95 and the total-current profile reported
+beside them), and the loop "solved the baseline's way" is reported as
+`passed_baseline_way` -- see
+[the self-consistent bootstrap](#one-reconstruction-state-and-what-an-unperturbed-draw-reproduces). Call it after
 `reconstruct()` / `prepare_baseline()` and before `generate()`; it leaves the
 solver re-anchored on the baseline equilibrium.
 
@@ -418,7 +421,9 @@ axis row.
   `source j_BS − evaluate_jBS(delivered baseline, source kinetics)` -- a pure
   model offset on the baseline geometry, frozen in ψ_N labels. A σ=0 draw
   whose equilibrium returns to the baseline therefore reproduces the source
-  bootstrap exactly. Only the draws iterate.
+  bootstrap exactly. Only the draws iterate. The stored split is then
+  normalised to the one reconstruction state (see "One reconstruction
+  state" below); the bootstrap and `jBS_diff` are untouched by that.
 - **MSE** (`closure_channel="structured"` with `mse_data`): converge the loop
   WITHOUT the MSE term; the forward-difference Jacobian of tanγ once at that
   state (j_BS held fixed during the differences -- an approximation of the loop
@@ -449,19 +454,83 @@ axis row.
   diagnostics are unchanged.
 - **geqdsk reconstruction**: `E_0` is the g-file's own current at the full
   pressure; the loop wraps the inductive fit + l_i secant; the corrective
-  iteration runs once afterwards, followed by a post-corrective check (up to
-  `jbs_max_passes` further passes of fit + l_i match + corrective).
-- **`verify_sigma0_consistency`**: the invariant becomes the loop's own -- the
-  σ=0 draw bootstrap loop, started from the state anchor with the baseline
-  inductive held, must converge to the baseline bootstrap within
-  `jbs_rtol_j`/`jbs_rtol_Ip` and to the baseline equilibrium's l_i within
-  `jbs_tol_li`. On the geqdsk path each σ=0 solve is followed by the same
-  corrective iteration (same renormalisation and knobs) the reconstruction
-  delivered its equilibrium with, and the l_i reference is the recorded
-  post-corrective l_i (`l_i_target` there is the step-6 matched value by
-  design); a single jphi-linterp solve of an *achieved* profile does not land
-  back on the equilibrium that achieved it. Route R2's inductive Ip
-  renormalisation keeps its own, separately budgeted σ=0 invariant.
+  iteration runs once afterwards and is followed by the **l_i re-match** of
+  its landed request (below), then a post-corrective check (up to
+  `jbs_max_passes` further passes of fit + l_i match + corrective +
+  re-match). Every pass ends on the re-matched state.
+- **`verify_sigma0_consistency`**: `passed` requires the draw's OWN route(s)
+  -- every route the configuration can use -- to reproduce the one
+  reconstruction state at zero perturbation, at the loop's unchanged
+  tolerances (below). The loop "solved the baseline's way" (the baseline
+  inductive held, one jphi-linterp solve per pass, which is how the
+  reconstruction's final state is solved) is kept beside it as
+  `passed_baseline_way`. Route R2's inductive Ip renormalisation keeps its
+  own, separately budgeted σ=0 invariant as well.
+
+### One reconstruction state, and what an unperturbed draw reproduces
+
+There are three levels: the INPUT (a g-file, or a modelling-source IDS); the
+bouquet RECONSTRUCTION, as close to the input as it can be while physically
+valid and carrying a neoclassical bootstrap current -- it is allowed to
+differ from the input (the input usually carries no Redl/Sauter bootstrap);
+and the DRAWS, perturbations of the reconstruction. With the loop on:
+
+- **The reconstruction is one equilibrium F.** The saved baseline g-file,
+  `l_i_target` and every recorded l_i / q0 / q95 (`Baseline.delivered_state`,
+  `reconstruction_metrics`), the archived baseline profiles, the centre of the
+  draws' l_i band and the reference of the zero-perturbation check are all F.
+  Its bootstrap is Redl evaluated on F (loop-converged).
+- **On the g-file path F keeps the l_i match to the input.** The corrective
+  iteration shapes the current toward the fitted target but moved l_i(3)
+  +0.40 % off the step-6 match on the synthetic example, and before this
+  change the baseline carried three states: the l_i-matched target
+  (0.653864), the post-corrective state (0.656455) and the saved g-file, a
+  single re-solve of the stored achieved current (0.653866). F is now the
+  corrective iteration's landed *request* re-matched in l_i by the same
+  secant step 5 uses, on the inductive amplitude of that request (the shape
+  the corrective iteration gave the inductive is kept; only its amplitude
+  relative to the bootstrap moves). F is a single jphi-linterp solve of a
+  known request -- the route every draw pass takes. (Alternative, not
+  taken: F = the post-corrective state, `l_i_target` = its l_i. That gives
+  up the l_i match -- the band centre would move +2.59e-3 in l_i, and q95 of
+  the reference by ≈0.024, about one ensemble σ -- and a single-solve route
+  cannot reach it.)
+- **The stored split is F in the form the draws consume it.** `j_phi`
+  (+ `jphi_diff`) is F's jphi-linterp request, normalised to I_p in the
+  'exact' FSA current measure ON F (the measure route R2 roots in; a uniform
+  factor, so F is unchanged); `j_BS` (+ `jBS_diff`) is the draws' own σ=0
+  bootstrap composition on F (Redl, scale, floor, `jBS_diff`); the fixed
+  parts are as read; `j_inductive` is the residual, so it carries the whole
+  normalisation. On the modelling-source example the source total read
+  0.965 I_p in that measure and the solver made it up uniformly; the stored
+  split no longer hands the draws a total 3.5 % short. In diff mode
+  `j_BS + jBS_diff` is still the source bootstrap exactly. On the g-file path
+  the inductive is floored at zero by the usual convention; a floored point
+  is one where a zero-perturbation draw cannot reproduce F, and is counted
+  (`delivered_state["n_floored_inductive"]`).
+- **Every draw stage is the identity at zero perturbation.** The state anchor
+  is one solve of the stored request (`jphi_diff` included) -- F. Route R2's
+  scale is 1 to rounding (same measure, normalised split). The standard
+  route's l_i stage targets ACHIEVED currents: it perturbs
+  `j_inductive - jphi_request_offset` (F's achieved current minus the σ=0
+  bootstrap and fixed parts), roots its inductive amplitude in the same
+  exact measure on the live geometry (was: the limiter-area flux integral,
+  which read the total 10–44 % high), so the root is 1; `find_optimal_scale`
+  then accepts its first trial (scale 1); and the corrective iteration starts
+  from `target + jphi_request_offset`, which at zero perturbation is F's own
+  request, so its first iterate IS F. The only residual departure there is
+  the corrective target's exact-measure I_p normalisation against the
+  solver's own (the measure's self-check, 1e-5–4e-4 of I_p), second order in
+  the state. The loop passes and the post-homotopy passes then find F's
+  bootstrap already self-consistent. Every sampled perturbation (kinetics,
+  inductive GPR, bootstrap scale, l_i target) enters as a departure from the
+  reconstruction's value.
+- **What is left non-identity by construction:** the electron-charge constant
+  of the modelling-source forward solve (1.602176634e-19) differs from the
+  draws' (1.6022e-19): the σ=0 draw pressure is 1.28e-5 relative high,
+  measured at ≤ 1e-7 in l_i; for an asymmetric `jBS_scale_range` the draws'
+  centre scale is not the reconstruction's; `jBS_baseline_mode="ohmic"`
+  (baseline-only; the draws refuse it) keeps its split as before.
 
 `jbs_init="swb"` starts from the legacy SWB result instead (A/B only; `psi_N=`
 is passed when the OFT build accepts it and the grid allows it, and the record

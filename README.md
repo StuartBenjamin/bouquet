@@ -129,7 +129,7 @@ cfg = bq.load_config("my_run")       # the exact BouquetConfig that made it
 |---|---|---|
 | Solver | `setup_solver()` | Stand up TokaMaker from `SolverConfig`. Idempotent |
 | Baseline | `prepare()` — or `reconstruct()` on the g-file path | Resolve the baseline; `reconstruct()` also prints the reconstruction-fidelity summary |
-| Guard (optional) | `verify_sigma0_consistency()` | Confirms the *draw* pipeline reproduces the *baseline* j_BS split at σ=0 (with the default self-consistent bootstrap: the σ=0 draw loop converges back to the baseline) — recommended on a new machine or OFT build, before spending draw compute |
+| Guard (optional) | `verify_sigma0_consistency()` | Confirms the *draw* pipeline reproduces the *baseline* j_BS split at σ=0 (with the default self-consistent bootstrap: an unperturbed draw, on every route the configuration can use, reproduces the one reconstruction state -- bootstrap, current, l_i -- at the loop's tolerances) — recommended on a new machine or OFT build, before spending draw compute |
 | Draws | `generate()` | Sample, condition, solve, archive to `{header}.h5` |
 | Selection | `filter()` | Coil-drift + boundary-RMS filters, written as non-destructive flags |
 | Export | `export()` / `export_bundle()` / `export_ids()` | Pruned HDF5, per-draw g-file/p-file/profiles-JSON bundle, or one IMAS/OMAS IDS per draw |
