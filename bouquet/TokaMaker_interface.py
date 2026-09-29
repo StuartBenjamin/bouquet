@@ -3602,6 +3602,7 @@ def generate_bouquet(
     # geqdsk path leaves this False: its corrective iteration already drives
     # achieved ~= target, and its baseline stores the corrective output.
     store_achieved_jphi=False,
+    baseline_mse_record=None,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -4656,6 +4657,9 @@ def generate_bouquet(
         j_BS=_bl_jBS_store,
         j_inductive=_bl_jind_store,
         source_kind=source_kind,
+        # structured closure + MSE only (None otherwise): per-chord arrays as
+        # datasets, kept out of the size-capped ip_closure attribute
+        mse_record=baseline_mse_record,
     )
 
     # ---- Purge stale draws for THIS scan value -------------------------

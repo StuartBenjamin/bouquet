@@ -1326,7 +1326,7 @@ class Bouquet:
 
         if mse_status is not None:
             extra.update(Bouquet._structured_mse_predictor_record(
-                gc, mse_ch, mse_status))
+                gc, mse_ch, mse_status, bl=bl))
 
         # The corrector state is built whenever there is ANYTHING to correct:
         # the q0 row (gate admitted) or the l_i row.  Both corrections share
@@ -1511,7 +1511,7 @@ class Bouquet:
         return ch, "usable"
 
     @staticmethod
-    def _structured_mse_predictor_record(gc, ch, status):
+    def _structured_mse_predictor_record(gc, ch, status, bl=None):
         """The predictor-stage MSE block of ``ip_closure`` (inputs only)."""
         from .mse import mse_er_terms
         rec = dict(
@@ -1522,7 +1522,7 @@ class Bouquet:
         )
         if ch is None:
             return rec
-        rec.update(Bouquet._structured_mse_chord_record(ch))
+        rec.update(Bouquet._structured_mse_chord_record(ch, bl))
         rec.update(
             structured_mse_sigma_sys=float(ch["sigma_sys"]),
             structured_mse_er_applied=bool(ch["er_applied"]),
@@ -1538,20 +1538,66 @@ class Bouquet:
         )
         return rec
 
+    #: Where the per-chord MSE arrays live (named in ``ip_closure``).
+    _MSE_PER_CHORD_WHERE = (
+        "Baseline.mse_record (per-chord arrays and the Jacobian; archived as "
+        "datasets under _baseline/structured_mse, not in the ip_closure "
+        "attribute)")
+
     @staticmethod
-    def _structured_mse_chord_record(ch):
-        """Which chords the MSE term uses, and every excluded one with why."""
+    def _mse_record_put(bl, **arrays):
+        """Store per-chord MSE arrays on ``bl.mse_record`` (O(n_chords) data).
+
+        ``ip_closure`` is archived as ONE JSON attribute, whose size an HDF5
+        file caps at 64 kB; the MSE term's per-chord blocks and its
+        ``n_chords x 2K`` Jacobian grow with the chord count, so they are kept
+        OUT of it -- here, and archived as datasets (see
+        :func:`bouquet.utils.store_baseline_profiles`) -- while ``ip_closure``
+        carries only chord-count-independent scalars and summaries.
+        """
+        import numpy as np
+        if bl is None:
+            return
+        rec = getattr(bl, "mse_record", None)
+        if rec is None:
+            rec = {}
+            bl.mse_record = rec
+        for k, v in arrays.items():
+            if isinstance(v, (list, tuple)) and v and isinstance(v[0], str):
+                rec[k] = [str(x) for x in v]
+            elif isinstance(v, (list, tuple)) and not v:
+                rec[k] = np.zeros(0)
+            else:
+                rec[k] = np.asarray(v)
+
+    @staticmethod
+    def _structured_mse_chord_record(ch, bl=None):
+        """Which chords the MSE term uses, and every excluded one with why.
+
+        Returns the ``ip_closure`` summary (counts; exclusions tallied by
+        reason) and puts the per-chord arrays on ``bl.mse_record``.
+        """
+        import numpy as np
+        ex = list(ch.get("excluded", ()))
+        by_reason = {}
+        for _i, r in ex:
+            by_reason[str(r)] = by_reason.get(str(r), 0) + 1
+        Bouquet._mse_record_put(
+            bl,
+            chord_index=np.asarray(ch["index"], dtype=np.int64),
+            chord_R=np.asarray(ch["R"], dtype=float),
+            chord_Z=np.asarray(ch["Z"], dtype=float),
+            tgamma_meas=np.asarray(ch["tgamma"], dtype=float),
+            sigma_eff=np.asarray(ch["sigma_eff"], dtype=float),
+            excluded_index=np.asarray([int(i) for i, _r in ex],
+                                      dtype=np.int64),
+            excluded_reason=[str(r) for _i, r in ex])
         return dict(
             structured_mse_n_chords=int(ch["n_active"]),
             structured_mse_n_chords_total=int(ch["n_total"]),
-            structured_mse_chord_index=[int(i) for i in ch["index"]],
-            structured_mse_chord_R=[float(v) for v in ch["R"]],
-            structured_mse_chord_Z=[float(v) for v in ch["Z"]],
-            structured_mse_tgamma_meas=[float(v) for v in ch["tgamma"]],
-            structured_mse_sigma_eff=[float(v) for v in ch["sigma_eff"]],
-            structured_mse_excluded_chords=[
-                dict(index=int(i), reason=str(r))
-                for i, r in ch.get("excluded", ())],
+            structured_mse_n_excluded=len(ex),
+            structured_mse_excluded_by_reason=by_reason,
+            structured_mse_per_chord=Bouquet._MSE_PER_CHORD_WHERE,
         )
 
     @staticmethod
@@ -1721,7 +1767,7 @@ class Bouquet:
                 ch = mse_exclude(ch, ~found, MSE_REASON_OFF_MESH)
                 state["mse"] = ch
                 B0 = B0[found]
-                rec.update(Bouquet._structured_mse_chord_record(ch))
+                rec.update(Bouquet._structured_mse_chord_record(ch, bl))
                 print("[imas SWB-split:ohmic structured] WARNING MSE: "
                       f"{len(_off)} chord(s) at input index {_off} are OFF "
                       "the solver mesh and are EXCLUDED (no field can be "
@@ -1829,6 +1875,15 @@ class Bouquet:
                                                        R["jacobian"], ch)
         state["mse_sign"] = (sp, st)
         state["mse_applied"] = True
+        Bouquet._mse_record_put(
+            bl,
+            residual_sigma_before=np.asarray(R["residual_sigma_before"],
+                                             dtype=float),
+            residual_sigma_after=np.asarray(R["residual_sigma_after"],
+                                            dtype=float),
+            tgamma_pred_before=np.asarray(R["tgamma_pred_before"], dtype=float),
+            tgamma_pred_after=np.asarray(R["tgamma_pred_after"], dtype=float),
+            jacobian=np.asarray(R["jacobian"], dtype=float))
         state["mse_n_solves"] = int(last["n"])
         # what the delivered-equilibrium check compares against, and the
         # closure the delivered profiles come from until a corrector re-solve
@@ -1852,10 +1907,10 @@ class Bouquet:
             / int(ch["n_active"]),
             structured_mse_chi2_red_after=float(R["chi2_after"])
             / int(ch["n_active"]),
-            structured_mse_residual_sigma_before=_fl(R["residual_sigma_before"]),
-            structured_mse_residual_sigma_after=_fl(R["residual_sigma_after"]),
-            structured_mse_tgamma_pred_before=_fl(R["tgamma_pred_before"]),
-            structured_mse_tgamma_pred_after=_fl(R["tgamma_pred_after"]),
+            structured_mse_residual_sigma_max_abs_before=float(
+                np.max(np.abs(R["residual_sigma_before"]))),
+            structured_mse_residual_sigma_max_abs_after=float(
+                np.max(np.abs(R["residual_sigma_after"]))),
             structured_mse_objective_before=float(R["objective_before"]),
             structured_mse_objective_after_model=float(
                 R["objective_after_model"]),
@@ -1865,7 +1920,8 @@ class Bouquet:
             structured_mse_linearisation_residual_rms_sigma=float(
                 R["steps"][-1]["linearisation_residual_rms_sigma"]),
             structured_mse_step_log=[dict(s) for s in R["steps"]],
-            structured_mse_jacobian=[_fl(row) for row in R["jacobian"]],
+            structured_mse_jacobian_shape=[int(v) for v in
+                                           np.shape(R["jacobian"])],
             structured_mse_er_terms=mse_er_terms(ch),
             # the same closure fields the corrector refreshes, so every
             # structured_* entry describes the DELIVERED multiplier profiles
@@ -1952,8 +2008,9 @@ class Bouquet:
         solves, retries, or changes an iteration count or a tolerance.
 
         Recorded: the delivered chi2 (total and reduced), the per-chord
-        residuals in sigma (``(tan_gamma_pred - tan_gamma_meas) / sigma_eff``)
-        and their largest magnitude, and the delivered objective
+        residuals in sigma (``(tan_gamma_pred - tan_gamma_meas) / sigma_eff``,
+        on ``bl.mse_record`` with the other per-chord arrays) and their
+        largest magnitude (in ``ip_closure``), and the delivered objective
         ``F_noMSE(delivered closure) + chi2_delivered``.  That objective is
         COMPARABLE with the pre-MSE one (``structured_mse_objective_before``)
         when no corrector re-solve replaced the MSE stage's closure, or on the
@@ -1993,6 +2050,9 @@ class Bouquet:
         else:
             tg = mse_tan_gamma(B, ch, sp, st)
             c2, z = mse_chi2(tg, ch)
+            Bouquet._mse_record_put(
+                bl, residual_sigma_delivered=np.asarray(z, dtype=float),
+                tgamma_pred_delivered=np.asarray(tg, dtype=float))
             c2_before = float(state.get("mse_chi2_before", float("nan")))
             F_before = float(state.get("mse_objective_before", float("nan")))
             out_d = state.get("mse_delivered_out")
@@ -2005,12 +2065,8 @@ class Bouquet:
                 structured_mse_chi2_delivered=float(c2),
                 structured_mse_chi2_red_delivered=float(c2)
                 / int(ch["n_active"]),
-                structured_mse_residual_sigma_delivered=[
-                    float(v) for v in np.ravel(z)],
                 structured_mse_residual_sigma_delivered_max_abs=float(
                     np.max(np.abs(z))),
-                structured_mse_tgamma_pred_delivered=[
-                    float(v) for v in np.ravel(tg)],
                 structured_mse_objective_delivered=F_del,
                 structured_mse_objective_delivered_comparable=bool(comparable),
                 structured_mse_objective_delivered_note=(
@@ -4194,6 +4250,9 @@ class Bouquet:
                 # bounds the target-vs-achieved gap to its tolerance (~2-3%
                 # core RMS) -- storing the achieved output removes even that.
                 store_achieved_jphi=True,
+                # closure_channel="structured" + mse_data only (else None):
+                # the per-chord MSE arrays, archived as datasets
+                baseline_mse_record=getattr(bl, "mse_record", None),
             )
         self.generation_log = _cap["text"] or None
 

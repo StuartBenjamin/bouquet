@@ -3959,6 +3959,57 @@ def load_equilibrium(header, count, scan_key=None, eqdsk_out_dir=None):
 # ====================================================================
 #  Baseline (input) profile storage
 # ====================================================================
+#: Subgroup of ``_baseline`` holding :attr:`Baseline.mse_record`.
+MSE_RECORD_GROUP = "structured_mse"
+
+
+def _write_mse_record(grp, mse_record):
+    """Write ``Baseline.mse_record`` as datasets under ``grp/structured_mse``.
+
+    Every entry is a dataset (numbers as float64 / int64 arrays, strings as a
+    variable-length UTF-8 string dataset), so the size scales with the chord
+    count without touching HDF5's 64 kB attribute cap.  A value that is
+    neither numeric nor a list of strings is refused (``TypeError``) here,
+    before anything is half-written into the group.
+    """
+    prepared = {}
+    for k, v in mse_record.items():
+        if isinstance(v, (list, tuple)) and all(isinstance(x, str) for x in v) \
+                and len(v) > 0:
+            prepared[k] = ("str", [str(x) for x in v])
+            continue
+        a = np.asarray(v)
+        if a.dtype.kind in "biuf":
+            prepared[k] = ("num", a.astype(np.int64 if a.dtype.kind in "biu"
+                                           else np.float64))
+        elif a.size == 0:
+            prepared[k] = ("num", np.zeros(0, dtype=np.float64))
+        else:
+            raise TypeError(f"mse_record[{k!r}] is neither numeric nor a list "
+                            f"of strings (dtype {a.dtype}); refusing to "
+                            "archive it")
+    sub = grp.create_group(MSE_RECORD_GROUP)
+    for k, (kind, v) in prepared.items():
+        if kind == "str":
+            sub.create_dataset(k, data=np.asarray(v, dtype=object),
+                               dtype=h5py.string_dtype(encoding="utf-8"))
+        else:
+            sub.create_dataset(k, data=v)
+
+
+def _read_mse_record(sub):
+    """Inverse of :func:`_write_mse_record`: a dict of arrays / str lists."""
+    out = {}
+    for k in sub.keys():
+        ds = sub[k]
+        if h5py.check_string_dtype(ds.dtype) is not None:
+            out[k] = [x.decode() if isinstance(x, bytes) else str(x)
+                      for x in ds[()]]
+        else:
+            out[k] = np.array(ds)
+    return out
+
+
 def store_baseline_profiles(
     header,
     psi_N,
@@ -3991,6 +4042,7 @@ def store_baseline_profiles(
     j_BS=None,
     j_inductive=None,
     source_kind=None,
+    mse_record=None,
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -4007,6 +4059,13 @@ def store_baseline_profiles(
         from perturbed equilibria.
     pfile_bytes : bytes or None
         Raw baseline p-file content.
+    mse_record : dict or None
+        ``Baseline.mse_record`` (structured closure with MSE data): per-chord
+        arrays and the Jacobian, written as DATASETS in the subgroup
+        ``structured_mse`` -- never as attributes, whose size HDF5 caps at
+        64 kB -- so the archive holds any number of chords.  Strings (the
+        exclusion reasons) are stored as a variable-length string dataset.
+        ``None`` writes nothing.
 
     This data is written once per scan-point and is required by the
     plotting GUI to be fully self-contained.
@@ -4070,6 +4129,8 @@ def store_baseline_profiles(
         # the source-decoupled aux switchboard): "imas" or "geqdsk".
         if source_kind is not None:
             grp.attrs["source_kind"] = str(source_kind)
+        if mse_record:
+            _write_mse_record(grp, mse_record)
 
         if eqdsk_bytes is not None:
             grp.create_dataset("eqdsk", data=np.void(eqdsk_bytes))
@@ -4234,6 +4295,11 @@ def load_baseline_profiles(h5path_or_header, scan_key=None):
             )
         grp = hf[grp_path]
         for key in grp.keys():
+            if isinstance(grp[key], h5py.Group):
+                # the structured closure's per-chord MSE record (the only
+                # subgroup a baseline carries)
+                result[key] = _read_mse_record(grp[key])
+                continue
             result[key] = np.array(grp[key])
         for attr in grp.attrs:
             result[attr] = grp.attrs[attr]

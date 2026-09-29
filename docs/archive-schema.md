@@ -30,6 +30,10 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │   ├── [aux_<name>, sigma_aux_<name>]   switchboard channels
     │   ├── [recon_lcfs_ref]           10k-pt LCFS reference (boundary metric)
     │   ├── [x_points], [coil_currents, coil_names]
+    │   ├── [structured_mse/]          structured closure + mse_data only:
+    │   │                              per-chord arrays as DATASETS (chord_*,
+    │   │                              tgamma_meas, sigma_eff, residual_sigma_*,
+    │   │                              tgamma_pred_*, jacobian, excluded_*)
     │   └── attrs: Ip_target, l_i_target, source_kind, [diverted]
     └── <count>/                       one group per accepted draw
         │                              (integer; gaps = rejected draws)
@@ -72,6 +76,14 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
   at file creation; `config_json` is added by `write_provenance` (called from
   `Bouquet.generate`, `run_shard`, and `merge_archives`). Recover the exact
   run configuration with `bq.load_config(path, scan_key=...)`.
+- **Structured-closure MSE record (`_baseline/structured_mse/`).** Written
+  only when `closure_channel="structured"` ran with `mse_data`
+  (`Baseline.mse_record`). The per-chord arrays and the `n_chords × 2K`
+  Jacobian grow with the chord count, so they are datasets here and never
+  part of the closure record's single JSON attribute (HDF5 caps an attribute
+  at 64 kB); the closure record carries only chord-count-independent
+  summaries and points here. `load_baseline_profiles` returns the subgroup as
+  a dict under `"structured_mse"`.
 - **Live-equilibrium FSA (`eq_fsa/`).** Optional per-draw subgroup of
   flux-surface averages captured directly from the live TokaMaker object at
   generate time (`GenerationConfig.capture_live_eq`, on by default), on the

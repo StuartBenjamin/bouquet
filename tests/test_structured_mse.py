@@ -182,7 +182,7 @@ def _mse_block(tg, R, Z, sigma=3.0e-3, weight=None, **kw):
     return md
 
 
-def _synthetic_world(x_true=None, K=4):
+def _synthetic_world(x_true=None, K=4, n_chords=12):
     """(parts, cyl, Phi, chords) with data generated at x_true."""
     psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
     Phi = structured_basis_eval(None, psi)
@@ -190,7 +190,7 @@ def _synthetic_world(x_true=None, K=4):
         x_true = np.array([0.0, -0.12, -0.05, 0.0, 0.0, 0.0, 0.08, 0.0])
     cyl = _Cylinder(psi, Ip_s)
     cyl.solve(_hybrid(x_true, Phi, j_ind, j_bs, j_fix))
-    R, Z = _chord_geometry()
+    R, Z = _chord_geometry(n_chords)
     B = cyl.field(R, Z)
     ch0 = mse_chords(_mse_block(np.zeros(R.size), R, Z))
     tg_true = mse_tan_gamma(B, ch0)
@@ -407,9 +407,12 @@ class TestOffMesh:
         assert rec["structured_mse_status"] == "applied"
         assert rec["structured_mse_n_chords"] == ch["n_active"]
         assert rec["structured_mse_n_chords_total"] == ch["n_active"] + 1
-        (ex,) = rec["structured_mse_excluded_chords"]
-        assert ex["index"] == ch["n_active"]
-        assert "off the solver mesh" in ex["reason"]
+        assert rec["structured_mse_n_excluded"] == 1
+        (ex_i,) = bl.mse_record["excluded_index"]
+        (ex_r,) = bl.mse_record["excluded_reason"]
+        assert ex_i == ch["n_active"]
+        assert "off the solver mesh" in ex_r
+        assert list(rec["structured_mse_excluded_by_reason"].values()) == [1]
         # excluding the chord is exactly the run that never had it
         np.testing.assert_array_equal(rec["structured_coeffs_a"],
                                       bl0.ip_closure["structured_coeffs_a"])
@@ -428,7 +431,8 @@ class TestOffMesh:
         assert rec["structured_mse_status"].startswith("refused")
         assert "remain on the solver mesh" in rec["structured_mse_status"]
         assert rec["closure_limited"]
-        assert len(rec["structured_mse_excluded_chords"]) == ch["n_active"] - 3
+        assert rec["structured_mse_n_excluded"] == ch["n_active"] - 3
+        assert len(bl.mse_record["excluded_reason"]) == ch["n_active"] - 3
         assert not state.get("mse_applied")
 
     def test_too_few_chords_on_the_mesh_required_raises(self):
@@ -765,11 +769,11 @@ class _Snap:
         return (np.asarray(psi, float), np.full(np.size(psi), 1.2), None, None)
 
 
-def _run_stage(gc, tamper=None):
+def _run_stage(gc, tamper=None, n_chords=12):
     """predictor -> (common-tail solve) -> MSE stage -> corrector -> delivered."""
     from bouquet.run import Bouquet
 
-    parts, cyl, Phi, ch = _synthetic_world()
+    parts, cyl, Phi, ch = _synthetic_world(n_chords=n_chords)
     psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = parts
     gc.mse_data = _mse_block(list(ch["tgamma"]), ch["R"], ch["Z"])
     if tamper is not None:
@@ -828,13 +832,15 @@ class TestRunStage:
         assert rec["structured_mse_objective_delivered_comparable"] is True
         assert rec["structured_mse_objective_delivered"] == pytest.approx(
             rec["structured_mse_objective_after"], rel=1e-12)
-        z = np.asarray(rec["structured_mse_residual_sigma_delivered"])
+        z = np.asarray(bl.mse_record["residual_sigma_delivered"])
         assert z.size == ch["n_active"]
         assert rec["structured_mse_residual_sigma_delivered_max_abs"] == \
             pytest.approx(float(np.max(np.abs(z))))
         assert all("objective_rose_vs_previous" in st_
                    for st_ in rec["structured_mse_step_log"])
-        assert len(rec["structured_mse_residual_sigma_after"]) == ch["n_active"]
+        assert len(bl.mse_record["residual_sigma_after"]) == ch["n_active"]
+        assert bl.mse_record["jacobian"].shape == (ch["n_active"], 8)
+        assert rec["structured_mse_jacobian_shape"] == [ch["n_active"], 8]
         assert rec["structured_mse_er_applied"] is False
         # the prior in force, as the ABSOLUTE widths it is with MSE on
         np.testing.assert_allclose(rec["structured_mse_prior_sigma_ind"],
@@ -1199,3 +1205,85 @@ class TestCorrectorAfterMSE:
         assert rec["structured_li_achieved_predictor"] == pytest.approx(0.87)
         assert "structured_li_achieved_mse_stage" not in rec
         assert "structured_corrector_entry" not in rec
+
+
+# ---------------------------------------------------------------------------
+#  archive size: per-chord arrays are datasets, the closure record stays O(1)
+# ---------------------------------------------------------------------------
+class TestArchiveSize:
+    _BASIS6 = {"kind": "gaussian",
+               "centres": [0.1, 0.3, 0.5, 0.7, 0.85, 0.95],
+               "widths": [0.2] * 6}
+
+    def _run(self, n_chords):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic",
+                              structured_basis=dict(self._BASIS6))
+        return _run_stage(gc, n_chords=n_chords)
+
+    def test_100_chords_archive_as_datasets_and_the_record_stays_small(
+            self, tmp_path):
+        import h5py
+        from bouquet.utils import load_baseline_profiles, \
+            store_baseline_profiles
+
+        bl, state, n_stage, cyl, ch = self._run(100)
+        rec = bl.ip_closure
+        assert rec["structured_mse_status"] == "applied"
+        assert rec["structured_mse_n_chords"] == 100
+        assert bl.mse_record["jacobian"].shape == (100, 12)       # K = 6
+        # the closure record, as upstream archives it: ONE JSON attribute
+        # (inlined, this chord block + Jacobian alone would be ~47 kB of JSON
+        # at 100 chords and K = 6, on top of the ~12 kB the two s-profiles
+        # already take -- past the 64 kB attribute cap)
+        js = json.dumps({"ip_closure": rec})
+        assert len(js.encode()) < 32_000          # half the 64 kB cap
+        mse_part = json.dumps({k: v for k, v in rec.items() if "mse" in k})
+        assert len(mse_part.encode()) < 6_000
+        # ... and it does not grow with the chord count
+        bl12, *_ = self._run(12)
+        js12 = json.dumps({"ip_closure": bl12.ip_closure})
+        assert abs(len(js) - len(js12)) < 400
+        with h5py.File(tmp_path / "attr.h5", "w") as hf:
+            hf.create_group("g").attrs["li_metrics_json"] = js
+
+        # the per-chord arrays go to datasets and come back intact
+        psi = np.linspace(0.0, 1.0, 11)
+        z = np.zeros_like(psi)
+        header = str(tmp_path / "arch")
+        store_baseline_profiles(header, psi, z, z, z, z, z, z, z, z, z, z, z,
+                                1.0e6, 1.0, mse_record=bl.mse_record)
+        back = load_baseline_profiles(header)["structured_mse"]
+        assert set(back) == set(bl.mse_record)
+        for k, v in bl.mse_record.items():
+            if isinstance(v, list):
+                assert back[k] == v
+            else:
+                np.testing.assert_array_equal(back[k], v)
+
+    def test_exclusion_reasons_round_trip_as_strings(self, tmp_path):
+        from bouquet.utils import load_baseline_profiles, \
+            store_baseline_profiles
+        rec = dict(excluded_index=np.array([3, 7]),
+                   excluded_reason=["weight <= 0", "off the solver mesh"],
+                   jacobian=np.arange(6.0).reshape(3, 2))
+        psi = np.linspace(0.0, 1.0, 5)
+        z = np.zeros_like(psi)
+        header = str(tmp_path / "s")
+        store_baseline_profiles(header, psi, z, z, z, z, z, z, z, z, z, z, z,
+                                1.0e6, 1.0, mse_record=rec)
+        back = load_baseline_profiles(header)["structured_mse"]
+        assert back["excluded_reason"] == rec["excluded_reason"]
+        np.testing.assert_array_equal(back["excluded_index"], [3, 7])
+        np.testing.assert_array_equal(back["jacobian"], rec["jacobian"])
+
+    def test_no_record_writes_no_group(self, tmp_path):
+        import h5py
+        from bouquet.utils import store_baseline_profiles
+        psi = np.linspace(0.0, 1.0, 5)
+        z = np.zeros_like(psi)
+        header = str(tmp_path / "n")
+        store_baseline_profiles(header, psi, z, z, z, z, z, z, z, z, z, z, z,
+                                1.0e6, 1.0)
+        with h5py.File(header + ".h5", "r") as hf:
+            assert "structured_mse" not in hf["_baseline"]
