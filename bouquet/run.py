@@ -1795,7 +1795,7 @@ class Bouquet:
     @staticmethod
     def _structured_mse_jbs_stage(state, bl, mygs, solve_jphi, jbs0, refresh,
                                   evaluate, measure, weights, settings, Ip,
-                                  gate_q0=False, field_at=None):
+                                  gate_q0=False, field_at=None, pre_mse=None):
         """The MSE term under the self-consistent bootstrap loop.
 
         Runs after the j_BS loop has converged WITHOUT the MSE term (``state``
@@ -1824,8 +1824,23 @@ class Bouquet:
         returns ``{li, q0}``; ``weights(eq)`` returns ``(w, x)`` for the
         residual norm.  Returns ``(nl_its, final_state, record)``.  A refusal
         (closure out of bounds, failed solve, unusable field) raises when
-        ``structured_mse_required`` and otherwise re-solves the pre-MSE hybrid
-        and flags the slice, exactly like the frozen-bootstrap stage.
+        ``structured_mse_required``.  Otherwise the PRE-MSE loop result is
+        delivered, and verified, not assumed:
+
+        * the state the chord steps overwrite (``bl.j_phi / j_BS /
+          j_inductive / jBS_diff / jphi_diff / ohm_scale / bs_scale`` and
+          ``bl.ip_closure``) is snapshotted HERE, before the first chord step,
+          and restored exactly (``pre_mse["restore"]`` restores the caller's
+          own closure state the same way);
+        * mygs is put back on the pre-MSE equilibrium (``replace_eq`` of the
+          snapshot) and the current the loop's last pass actually SOLVED
+          (``pre_mse["j_solved"]``; the closure's ``bl.j_phi`` when not
+          given) is re-solved;
+        * Redl on that re-solve is checked against the pre-MSE bootstrap
+          ``jbs0`` at the loop's own ``rtol_j``/``rtol_Ip``, and its l_i (q0
+          where gated) against the pre-MSE equilibrium's at ``tol_li``
+          (``tol_q0``) -- the record's ``converged`` is that check, with the
+          residuals and the reason, and the slice is flagged either way.
         """
         import numpy as np
 
@@ -1924,9 +1939,25 @@ class Bouquet:
                         "linearisation is centred"),
                     closure_retry=[], closure_stop_reason=[])
         rec = {}
-        prev = getattr(bl, "ip_closure", None) or {}
+        # ---- the pre-MSE state, captured BEFORE any chord step: every
+        # refresh() re-closes on the latest geometry and OVERWRITES these
+        # (bl.ip_closure is replaced wholesale), so a refusal must restore
+        # this snapshot, not whatever the last refresh left ---------------
+        import copy as _copy
+        _pre_bl = {}
+        for _a in ("j_phi", "j_BS", "j_inductive", "jBS_diff", "jphi_diff",
+                   "ohm_scale", "bs_scale"):
+            if hasattr(bl, _a):
+                _v = getattr(bl, _a)
+                _pre_bl[_a] = (np.array(_v, dtype=float, copy=True)
+                               if isinstance(_v, np.ndarray) else _v)
+        _pre_icl = _copy.deepcopy(getattr(bl, "ip_closure", None))
+        _pre_eq = mygs.copy_eq() if hasattr(mygs, "copy_eq") else None
+        _pre_meas = {}
+        prev = _pre_icl or {}
         try:
             meas_prev = dict(measure(mygs.copy_eq()))
+            _pre_meas.update(meas_prev)
             B0 = field_at()
             sp, st_sign, table = mse_sign_convention(B0, ch)
             tg_pred = mse_tan_gamma(B0, ch, sp, st_sign)
@@ -2155,9 +2186,46 @@ class Bouquet:
                     f"closure could not be delivered ({e}) and "
                     "structured_mse_required=True -- refusing to fall back "
                     "to the closure without MSE") from e
-            _solve(bl.j_phi)
+            # ---- restore EXACTLY the pre-MSE state -----------------------
+            for _a, _v in _pre_bl.items():
+                setattr(bl, _a, (np.array(_v, dtype=float, copy=True)
+                                 if isinstance(_v, np.ndarray) else _v))
+            bl.ip_closure = _copy.deepcopy(_pre_icl)
+            pre = dict(pre_mse or {})
+            if pre.get("restore") is not None:
+                pre["restore"]()
+            if _pre_eq is not None and hasattr(mygs, "replace_eq"):
+                mygs.replace_eq(source_eq=_pre_eq)
+            _j_pre = pre.get("j_solved")
+            _j_pre = (np.asarray(bl.j_phi, dtype=float) if _j_pre is None
+                      else np.asarray(_j_pre, dtype=float))
+            _solve(_j_pre)
+            # ---- verify the restored solve against the pre-MSE state ------
+            if not _pre_meas and _pre_eq is not None:
+                _pre_meas.update(dict(measure(_pre_eq)))
+            _snap_r = mygs.copy_eq()
+            _Jr = np.asarray(evaluate(_snap_r), dtype=float)
+            _wr, _xr = weights(_snap_r)
+            _rr = profile_residuals(_Jr, np.asarray(jbs0, dtype=float), _wr,
+                                    _xr, Ip)
+            _mr = dict(measure(_snap_r))
+            _dli = (None if (_mr.get("li") is None
+                             or _pre_meas.get("li") is None)
+                    else abs(float(_mr["li"]) - float(_pre_meas["li"])))
+            _dq0 = (None if (_mr.get("q0") is None
+                             or _pre_meas.get("q0") is None)
+                    else abs(float(_mr["q0"]) - float(_pre_meas["q0"])))
+            _ok = bool(np.isfinite(_rr["r_j"])
+                       and _rr["r_j"] <= settings["rtol_j"]
+                       and np.isfinite(_rr["r_I"])
+                       and _rr["r_I"] <= settings["rtol_Ip"]
+                       and _dli is not None and _dli <= settings["tol_li"]
+                       and (not gate_q0 or (_dq0 is not None
+                                            and _dq0 <= settings["tol_q0"])))
             why = (MSE_FLAG_PREFIX + "stage refused, predictor kept "
                    f"({str(e)[:160]})")
+            # reasons of the RESTORED (pre-MSE) closure record, not of the
+            # dict the last refresh left behind
             reasons = list(prev.get("closure_limited_reasons", ()) or ())
             if why not in reasons:
                 reasons.append(why)
@@ -2169,9 +2237,48 @@ class Bouquet:
                 bl.ip_closure.update(rec)
             print("[imas SWB-split:ohmic structured] WARNING closure-limited: "
                   + why, flush=True)
-            srec.update(converged=True, stop_reason=(
-                "MSE stage refused (not required): the pre-MSE loop result "
-                "is delivered"), refused=str(e)[:300])
+            _chk = dict(r_j=_rr["r_j"], r_I=_rr["r_I"], dl_i=_dli, dq0=_dq0,
+                        ok=_ok, reference=(
+                            "Redl on the re-solve vs the pre-MSE bootstrap "
+                            "jbs0; l_i/q0 vs the pre-MSE equilibrium"),
+                        pre_mse_final=pre.get("final"),
+                        solved=("the pre-MSE loop's last solved current"
+                                if pre.get("j_solved") is not None else
+                                "bl.j_phi of the restored closure"))
+            if _ok:
+                _stop = ("MSE stage refused (not required): the pre-MSE loop "
+                         "state was restored and re-solved, and the re-solve "
+                         "holds the loop tolerances (r_j "
+                         f"{_rr['r_j']:.2e}, r_I {_rr['r_I']:.2e}, |dl_i| "
+                         f"{_dli:.2e})")
+            else:
+                _stop = ("MSE stage refused (not required): the restored "
+                         "pre-MSE state does NOT reproduce within the loop "
+                         f"tolerances on re-solve (r_j {_rr['r_j']:.2e} tol "
+                         f"{settings['rtol_j']:.0e}, r_I {_rr['r_I']:.2e} tol "
+                         f"{settings['rtol_Ip']:.0e}, |dl_i| "
+                         + ("n/a" if _dli is None else f"{_dli:.2e}")
+                         + f" tol {settings['tol_li']:.0e}"
+                         + ("" if not gate_q0 else
+                            ", |dq0| " + ("n/a" if _dq0 is None
+                                          else f"{_dq0:.2e}")
+                            + f" tol {settings['tol_q0']:.0e}")
+                         + ")")
+            print(("  [jbs-loop MSE refused] " if _ok else
+                   "  [jbs-loop MSE refused] WARNING ") + _stop, flush=True)
+            srec.update(converged=_ok, stop_reason=_stop,
+                        refused=str(e)[:300], restored_pre_mse=True,
+                        restore_check=_chk,
+                        final=dict(r_j=_rr["r_j"], r_I=_rr["r_I"],
+                                   dl_i=_dli, dq0=_dq0))
+            if not _ok:
+                # the same failure policy as a chord stage that does not
+                # converge (below): "raise" raises, "flag" delivers flagged
+                msg = ("self-consistent j_BS loop [MSE chord stage] did not "
+                       f"converge: {_stop}")
+                srec["fail_message"] = msg
+                if settings.get("on_fail", "raise") == "raise":
+                    raise JBSNotConverged(msg, srec)
             return last["nl"], state, srec
 
         # ---- deliver the last solve ----------------------------------------
@@ -4028,8 +4135,11 @@ class Bouquet:
                     # the pass solves the closure's current relaxed against
                     # the previous pass's solved current (jbs_relax_current);
                     # bl.j_phi stays the closure's own assembly
-                    st["nl"] = _pass_solve(bl.j_phi if relax is None
-                                           else relax(bl.j_phi))
+                    _j_solved = np.array(bl.j_phi if relax is None
+                                         else relax(bl.j_phi), dtype=float,
+                                         copy=True)
+                    st["j_solved"] = _j_solved
+                    st["nl"] = _pass_solve(_j_solved)
                     snap = mygs.copy_eq()
                     ctx_new = _closure_geometry(
                         f"j_BS loop pass {k + 1}")
@@ -4128,6 +4238,19 @@ class Bouquet:
                 # Jacobian once, chord steps with j_BS re-evaluated, one final
                 # Jacobian refresh (docs/physics-notes.md) ------------------
                 if ss is not None and ss.get("mse") is not None:
+                    # what a refusal of the stage must put back: the closure
+                    # state of the converged pass and the current it SOLVED
+                    # (the stage snapshots bl and the equilibrium itself)
+                    _st_pre = {k_: st.get(k_) for k_ in
+                               ("ctx", "q0s", "ss", "oc", "x_prev")}
+
+                    def _restore_pre_mse():
+                        st.update(_st_pre)
+
+                    _pre_mse = dict(j_solved=st.get("j_solved"),
+                                    restore=_restore_pre_mse,
+                                    final=dict(res["record"].get("final")
+                                               or {}))
                     _nl_m, ss, _mse_rec = self._structured_mse_jbs_stage(
                         ss, bl, mygs, solve_jphi=_pass_solve,
                         jbs0=res["jbs_used"],
@@ -4138,7 +4261,8 @@ class Bouquet:
                             q0=(_q0_of(eq) if axis_active else None)),
                         weights=lambda eq: residual_weights(
                             eq, psi_N, psi_pad)[:2],
-                        settings=_jbs, Ip=Ip_abs, gate_q0=axis_active)
+                        settings=_jbs, Ip=Ip_abs, gate_q0=axis_active,
+                        pre_mse=_pre_mse)
                     if _nl_m is not None:
                         nl = _nl_m
                     _mse_rec["refresh_closure_log"] = st.get("refresh_log", [])
