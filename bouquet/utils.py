@@ -3088,6 +3088,36 @@ def _default_scan_key(ref, scan_key):
     return scan_key
 
 
+def profile_coord(h5path, scan_key=None):
+    """The archive's profile coordinate, the baseline group's ``profile_coord``
+    attr; ``"psi_n"`` for archives written before it existed.
+
+    ``scan_key=None`` on a scan layout reads the scan points' baselines and
+    returns their common coordinate (raises if they differ).
+    """
+    import h5py
+
+    def _get(g):
+        v = g.attrs.get("profile_coord", "psi_n")
+        return v.decode() if isinstance(v, bytes) else str(v)
+
+    bkey = _scan_key(scan_key)
+    try:
+        with h5py.File(h5path, "r") as hf:
+            if bkey is not None:
+                return _get(hf[f"scan/{bkey}/_baseline"])
+            if "_baseline" in hf:
+                return _get(hf["_baseline"])
+            coords = {_get(g["_baseline"]) for g in hf.get("scan", {}).values()
+                      if "_baseline" in g}
+    except (OSError, KeyError):
+        return "psi_n"
+    if len(coords) > 1:
+        raise ValueError(f"{h5path}: scan points differ in profile_coord "
+                         f"{sorted(coords)}; pass scan_key")
+    return coords.pop() if coords else "psi_n"
+
+
 def _group_path(scan_key, count):
     """Return the internal HDF5 group path for a given entry."""
     bkey = _scan_key(scan_key)
@@ -3268,6 +3298,7 @@ def store_equilibrium(
     max_F_drift_pct=None,
     max_VSC_drift_pct=None,
     in_spec=None,
+    jbs_delta_active=None,
     inspec_F_max=None,
     inspec_VSC_max=None,
     perturbed_lcfs_ref=None,
@@ -3277,6 +3308,7 @@ def store_equilibrium(
     diverted=None,
     aux=None,
     eq_fsa=None,
+    profile_coord=None,
 ):
     """
     Write one perturbed equilibrium into the HDF5 database.
@@ -3310,6 +3342,9 @@ def store_equilibrium(
         1-D effective charge profile (dimensionless).
     coil_currents : dict or None
         Coil currents {name: current_A} from TokaMaker.
+    profile_coord : str or None
+        Coordinate of ``psi_N`` / ``psi_N_kinetic`` (``attrs["profile_coord"]``);
+        ``None`` inherits the baseline group's, else ``"psi_n"``.
     """
     db_path = os.path.abspath(f"{header}.h5")
     if not os.path.isfile(db_path):
@@ -3375,6 +3410,15 @@ def store_equilibrium(
         grp.attrs["count"]  = int(count)
         if scan_key is not None:
             grp.attrs["scan_key"] = scan_key
+        if profile_coord is None:
+            _bkey = _scan_key(scan_key)
+            _bl = hf.get(f"scan/{_bkey}/_baseline" if _bkey is not None
+                         else "_baseline")
+            profile_coord = (_bl.attrs.get("profile_coord", "psi_n")
+                             if _bl is not None else "psi_n")
+        if isinstance(profile_coord, bytes):
+            profile_coord = profile_coord.decode()
+        grp.attrs["profile_coord"] = str(profile_coord)
 
         # ---- optional: p-file bytes ----------------------------------------
         # Per-draw pfile blobs are only stored for TEXT p-files (rewritten with
@@ -3426,6 +3470,8 @@ def store_equilibrium(
             grp.attrs["max_VSC_drift_pct"] = float(max_VSC_drift_pct)
         if in_spec is not None:
             grp.attrs["in_spec"] = bool(in_spec)
+        if jbs_delta_active is not None:
+            grp.attrs["jbs_delta_active"] = bool(jbs_delta_active)
         if inspec_F_max is not None:
             grp.attrs["inspec_F_max"] = float(inspec_F_max)
         if inspec_VSC_max is not None:
@@ -3652,6 +3698,7 @@ def store_baseline_profiles(
     j_BS=None,
     j_inductive=None,
     source_kind=None,
+    profile_coord="psi_n",
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -3738,6 +3785,9 @@ def store_baseline_profiles(
         # the source-decoupled aux switchboard): "imas" or "geqdsk".
         if source_kind is not None:
             grp.attrs["source_kind"] = str(source_kind)
+        # Coordinate of the psi_N / psi_N_kinetic grids (bouquet.coords);
+        # absent on older archives, which are all "psi_n".
+        grp.attrs["profile_coord"] = str(profile_coord)
 
         if eqdsk_bytes is not None:
             grp.create_dataset("eqdsk", data=np.void(eqdsk_bytes))

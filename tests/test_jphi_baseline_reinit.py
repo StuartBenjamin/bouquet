@@ -223,6 +223,7 @@ def _run_block(stub, capsys=None):
     from bouquet.TokaMaker_interface import (_count_masked_anchor_failure,
                                              ANCHOR_MASKED_FAILURES)
     from bouquet.utils import _shape_from_boundary, pchip_derivative
+    from bouquet import coords
 
     psi_N = np.linspace(0.0, 1.0, 65)
     th = np.linspace(0.0, 2.0 * np.pi, 128)
@@ -233,6 +234,7 @@ def _run_block(stub, capsys=None):
         safe_trace_surf=lambda g, v: lcfs,
         _shape_from_boundary=_shape_from_boundary,
         pchip_derivative=pchip_derivative,
+        coords=coords, coord="psi_n",
         initial_Ip_target=1.0e6,
         pressure_solve=1.0e4 * (1.0 - psi_N ** 2),
         input_j_phi=1.0e6 * (1.0 - psi_N ** 2),

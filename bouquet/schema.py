@@ -20,7 +20,9 @@ from __future__ import annotations
 
 SCHEMA_VERSION = 2
 
-# Bare dataset name -> unit string (empty = dimensionless).
+# Bare dataset name -> unit string (empty = dimensionless).  ``psi_N`` /
+# ``psi_N_kinetic`` hold the run grid in the group's ``profile_coord``
+# ("psi_n" or "phi_n"; absent = "psi_n").
 PROFILE_UNITS = {
     "psi_N": "",
     "psi_N_kinetic": "",
@@ -55,7 +57,8 @@ COIL_NAMES_DS = "coil_names"
 # Live-equilibrium flux-surface-average block (optional per-draw subgroup),
 # captured from the converged TokaMaker equilibrium at generate time to enable
 # an exact toroidal<->parallel current conversion at IMAS export. All on the
-# eq_fsa psi_N grid. See physics.capture_equilibrium_fsa.
+# eq_fsa psi_N grid, which is always ψ_N, even in a Φ_N (profile_coord="phi_n")
+# archive. See physics.capture_equilibrium_fsa.
 EQ_FSA_GROUP = "eq_fsa"
 EQ_FSA_UNITS = {
     "psi_N": "",

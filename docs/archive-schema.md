@@ -22,7 +22,7 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     ├── config_json                    this slice's exact config
     ├── _baseline/                     written once per scan point
     │   ├── eqdsk, [pfile]             raw byte-perfect g-file / p-file
-    │   ├── psi_N, psi_N_kinetic
+    │   ├── psi_N, psi_N_kinetic         run grids, in the `profile_coord` coordinate
     │   ├── n_e, T_e, n_i, T_i         kinetic profiles
     │   ├── pressure[, pressure_thermal]
     │   ├── j_phi[, j_BS, j_inductive] separated toroidal currents
@@ -30,11 +30,11 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │   ├── [aux_<name>, sigma_aux_<name>]   switchboard channels
     │   ├── [recon_lcfs_ref]           10k-pt LCFS reference (boundary metric)
     │   ├── [x_points], [coil_currents, coil_names]
-    │   └── attrs: Ip_target, l_i_target, source_kind, [diverted]
+    │   └── attrs: Ip_target, l_i_target, source_kind, profile_coord, [diverted]
     └── <count>/                       one group per accepted draw
         │                              (integer; gaps = rejected draws)
         ├── eqdsk, [pfile]             raw bytes, fixed names
-        ├── psi_N[, psi_N_kinetic]
+        ├── psi_N[, psi_N_kinetic]       run grids, in `profile_coord`
         ├── j_phi, j_BS, j_inductive[, j_BS,edge]
         ├── n_e, T_e, n_i, T_i, w_ExB[, Zeff]
         ├── [pressure, pressure_thermal]
@@ -42,11 +42,11 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
         ├── [coil_currents, coil_names]
         ├── [perturbed_lcfs_ref], [x_points]
         ├── [eq_fsa/]                  live-equilibrium flux-surface averages
-        │   ├── psi_N                  (subgroup; see below)
+        │   ├── psi_N                  always ψ_N (subgroup; see below)
         │   ├── F, avg_inv_R, avg_inv_R2, avg_B2
         │   └── q, dV_dpsi, f_trap, B_avg
-        └── attrs: l_i(1), l_i(3), count, homotopy_*, max_F_drift_pct,
-                   max_VSC_drift_pct, in_spec, inspec_*, l_i_target_used,
+        └── attrs: l_i(1), l_i(3), count, profile_coord, homotopy_*, max_F_drift_pct,
+                   max_VSC_drift_pct, in_spec, inspec_*, l_i_target_used, [jbs_delta_active],
                    [diverted], [passes_coil_filter, passes_boundary_filter,
                    selected]           ← filter flags, written post-hoc
 ```
@@ -63,6 +63,11 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
 - **Always `scan/<key>/`.** The scan key is a user-chosen label
   (`GenerationConfig.scan_key`, default `0`) — a time in ms, a beta value, …
   Several bouquets can share one file under different keys.
+- **Profile coordinate.** `profile_coord` (`"psi_n"` or `"phi_n"`, on
+  `_baseline` and each draw; absent = `"psi_n"`) names the coordinate of the
+  `psi_N` / `psi_N_kinetic` grids despite their names. `eq_fsa/psi_N` is
+  always ψ_N. Read it with `bouquet.utils.profile_coord`; `merge_archives`
+  refuses shards that differ.
 - **Gap-tolerant indices.** Rejected draws leave gaps; iterate with
   `list_equilibrium_indices` / `BouquetArchive`, never `range(n)`.
 - **Filtering is non-destructive.** Filters write boolean attrs
@@ -74,8 +79,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
   run configuration with `bq.load_config(path, scan_key=...)`.
 - **Live-equilibrium FSA (`eq_fsa/`).** Optional per-draw subgroup of
   flux-surface averages captured directly from the live TokaMaker object at
-  generate time (`GenerationConfig.capture_live_eq`, on by default), on the
-  `psi_N` grid of `capture_npsi` points. Keys and units are `EQ_FSA_GROUP` /
+  generate time (`GenerationConfig.capture_live_eq`, on by default), on a
+  ψ_N grid of `capture_npsi` points (ψ_N whatever the `profile_coord`). Keys and units are `EQ_FSA_GROUP` /
   `EQ_FSA_UNITS` in `schema.py`: `F` (T m), `avg_inv_R` (⟨1/R⟩, m⁻¹),
   `avg_inv_R2` (⟨1/R²⟩, m⁻²), `avg_B2` (⟨B²⟩, T²), `q`, `dV_dpsi`
   (m³ Wb⁻¹), `f_trap`, `B_avg` (⟨B⟩, T). `⟨1/R²⟩` is computed by exact

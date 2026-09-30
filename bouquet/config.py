@@ -194,7 +194,15 @@ class ReconstructionSource:
     psi_bridge: float = 0.99          # Hermite edge-bridge location
     rescale_j_BS: bool = False
     shelf_psi_N: float = 0.0
+    # Radial coordinate of the run (bouquet.coords): "psi_n", "phi_n" (profiles,
+    # envelopes and solver inputs on normalised toroidal flux, mapped at read
+    # with the g-file's own q), or "rho_tor" (read as phi_n = rho_tor**2).
+    coord: str = "psi_n"
     # guess_jinductive is derived from the g-file j_phi when None
+
+    def __post_init__(self):
+        from .coords import check_source_coord
+        check_source_coord(self.coord)
 
 
 @dataclass
@@ -242,6 +250,13 @@ class ImasSource:
     # fits the boundary to the external magnetics without kinetic assumptions.
     # One g-file per slice; the driver picks the nearest time.
     LCFS_geqdsk: Optional[str] = None
+    # Radial coordinate of the run (bouquet.coords): "psi_n", "phi_n" (the
+    # dd's core_profiles grid.rho_tor_norm**2), or "rho_tor" (same run).
+    coord: str = "psi_n"
+
+    def __post_init__(self):
+        from .coords import check_source_coord
+        check_source_coord(self.coord)
 
 
 BaselineSource = Union[ReconstructionSource, ImasSource]
@@ -277,8 +292,9 @@ class FixedComponentsConfig:
         ``ImasSource.sawteeth_in_ohmic``) and unlisted-index ``j_parallel``;
         zero elsewhere. Explicit array wins.
 
-    All arrays are on ``psi_N`` (kinetic grid), SI units, toroidal current
-    convention for j_*. ``None`` -> zeros.
+    All arrays are on ``psi_N`` (kinetic grid, in the run coordinate --
+    Φ_N in a ``coord="phi_n"`` run, unless ``coord="psi_n"``), SI units,
+    toroidal current convention for j_*. ``None`` -> zeros.
     """
 
     p_fast: Optional["np.ndarray"] = None   # fast/beam pressure
@@ -286,6 +302,9 @@ class FixedComponentsConfig:
     j_RF: Optional["np.ndarray"] = None     # RF-driven TOROIDAL current density [A/m^2]
     j_other: Optional["np.ndarray"] = None  # other fixed driven TOROIDAL current [A/m^2]
     psi_N: Optional["np.ndarray"] = None    # grid for the above (if arrays given)
+    # Coordinate of ``psi_N``: "run" (the run's), or "psi_n" (mapped to the
+    # run coordinate through the source equilibrium's psi_N -> Phi_N map).
+    coord: str = "run"
 
     # How to collapse anisotropic fast-ion pressure (p_perp, p_par) to the scalar
     # p_fast that a scalar-pressure GS solver needs. See
@@ -307,6 +326,12 @@ class FixedComponentsConfig:
     #              is applied silently. The rule used and the grounds for it are
     #              recorded on Baseline.p_fast_meta.
     p_fast_reduction: str = "auto"
+
+    def __post_init__(self):
+        from .coords import INPUT_COORDS
+        if self.coord not in INPUT_COORDS:
+            raise ValueError(f"fixed_components.coord must be one of "
+                             f"{INPUT_COORDS}, got {self.coord!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -938,9 +963,6 @@ class GenerationConfig:
     # already ~clean, so flooring is redundant -- and it REGRESSED a stiff
     # high-l_i case (clipping its isolate-edge spike drove yield to 0).
     floor_j_BS: bool = False
-    # solve_with_bootstrap H-mode self-consistency iterations per draw (default
-    # 3); lowering to 2 trades a little accuracy for speed on large bouquets.
-    swb_iterations: int = 3
     # GS maxits for generate()'s draw loop (TokaMaker_interface.DRAW_SOLVE_MAXITS).
     # Draw solves converge in <= ~25 iterations; a failing one is parked in a
     # limit cycle and burns the whole cap, and the draw path catches it anyway.
@@ -953,6 +975,19 @@ class GenerationConfig:
     # recorded per failure as recovered_by.
     draw_solve_retry_urf: tuple = ()
     draw_solve_loose_tol: Optional[float] = 2e-5
+    # Keyword dict forwarded to every solve_with_bootstrap call, the one surface
+    # for the bootstrap options bouquet does not set itself. Keys are checked
+    # against the toolkit's signatures in __post_init__.
+    bootstrap_kwargs: dict = field(default_factory=dict)
+    # Coordinate the hard-coded radial windows (edge > 0.9, pedestal 0.85,
+    # shelf/bridge, classifier) are read in: "psi_n", or "native" for the
+    # run's own coordinate.  Identical in a psi_n run.
+    window_coord: str = "psi_n"
+    # Coordinate the solve_with_bootstrap inductive seed (1 - s^1.5)^1.5 is
+    # written in: "psi_n" (s = the nodes' psi_N) or "native" (s = the run
+    # coordinate).  SWB keeps the seed's shape, so this sets the inductive
+    # current's shape in a phi_n run.  Identical in a psi_n run.
+    seed_coord: str = "psi_n"
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single
@@ -983,8 +1018,18 @@ class GenerationConfig:
     # to skip that cost (self-validated + graceful fallback either way).
     capture_exact_inv_R2: bool = True
 
+    #: Arguments the call sites set themselves; ``bootstrap_kwargs`` may not
+    #: shadow them (duplicate keyword, or a silent override of a per-draw
+    #: value).
+    _RESERVED = frozenset(
+        "mygs ne Te ni Ti Zeff Ip_target inductive_jphi scale_jBS "
+        "isolate_edge_jBS verbose diagnostic_plots x psi_N coord "
+        "ffp_prof ne_prof te_prof ni_prof ti_prof".split()
+    )
+
     def __post_init__(self):
-        """Resolve ``structured_preset`` into the individual structured fields.
+        """Validate ``bootstrap_kwargs``, then resolve ``structured_preset``
+        into the individual structured fields.
 
         Thin wrapper over :func:`resolve_structured_preset`, which carries the
         rules (and is called again at the closure's own entry point, where it
@@ -1012,7 +1057,97 @@ class GenerationConfig:
         switches the channel on -- ``structured_preset=None`` resolves to the
         DEFAULT preset only when the channel is already ``"structured"``.
         """
+        from .coords import check_native
+        check_native("window_coord", self.window_coord)
+        check_native("seed_coord", self.seed_coord)
+        validate_bootstrap_kwargs(self.bootstrap_kwargs, self._RESERVED)
         resolve_structured_preset(self, stacklevel=4)
+
+
+#: Old spellings, so they raise with their replacement rather than as an
+#: unknown option.
+_BOOTSTRAP_KWARG_RENAMES = {"swb_iterations": "iterations"}
+
+
+def _bootstrap_kwarg_names():
+    """Every keyword ``bootstrap_kwargs`` can reach, introspected from the
+    toolkit's bootstrap entry points.  ``None`` when OpenFUSIONToolkit is not
+    importable, which skips the unknown-key check.  Cached: one import
+    attempt per process.
+    """
+    global _BOOTSTRAP_KWARG_NAMES
+    try:
+        return _BOOTSTRAP_KWARG_NAMES
+    except NameError:
+        pass
+    try:
+        import inspect
+
+        from OpenFUSIONToolkit.TokaMaker._core import TokaMaker
+        from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
+
+        # Only the entry points this toolkit has: on one without the
+        # internal solve, the accepted set is solve_with_bootstrap's own
+        # arguments, which is what it accepts there.
+        names = set()
+        for fn in (solve_with_bootstrap,
+                   getattr(TokaMaker, "solve_bootstrap", None),
+                   getattr(TokaMaker, "set_boot_ops", None)):
+            if fn is None:
+                continue
+            names |= {prm.name for prm in inspect.signature(fn).parameters.values()
+                      if prm.kind in (prm.POSITIONAL_OR_KEYWORD, prm.KEYWORD_ONLY)}
+        _BOOTSTRAP_KWARG_NAMES = frozenset(names) - {"self"}
+    except Exception:
+        # No OFT (unit tests, a docs build): cannot introspect, so do not
+        # guess.  A wrong key then surfaces where it used to, at the call.
+        _BOOTSTRAP_KWARG_NAMES = None
+    return _BOOTSTRAP_KWARG_NAMES
+
+
+def validate_bootstrap_kwargs(bootstrap_kwargs, reserved, known=None):
+    """Refuse a ``bootstrap_kwargs`` key that would not survive the call chain.
+
+    Checked here, at config time, because ``generate_bouquet`` and
+    ``perturb_kinetic_equilibrium`` end in ``**kwargs``: a wrong key is no
+    longer a ``TypeError`` at the call, it raises inside the draw loop's
+    blanket ``except Exception`` and quietly fails every draw.
+
+    Parameters
+    ----------
+    bootstrap_kwargs : dict
+        The keys to check.
+    reserved : set of str
+        Names the call sites pass themselves (``GenerationConfig._RESERVED``).
+    known : set of str, optional
+        The accepted keyword names; defaults to :func:`_bootstrap_kwarg_names`
+        (``None`` from it skips the unknown-key check).  Passed explicitly by
+        the tests, which run without OpenFUSIONToolkit.
+    """
+    keys = set(bootstrap_kwargs)
+
+    bad = sorted(reserved & keys)
+    if bad:
+        raise ValueError(
+            f"bootstrap_kwargs may not set {bad}: passed explicitly at call sites.")
+
+    renamed = sorted(keys & _BOOTSTRAP_KWARG_RENAMES.keys())
+    if renamed:
+        pairs = ", ".join(f"{k!r} -> {_BOOTSTRAP_KWARG_RENAMES[k]!r}"
+                          for k in renamed)
+        raise ValueError(
+            f"bootstrap_kwargs uses the old name(s) {renamed}: {pairs}. "
+            f"For example bootstrap_kwargs={{'iterations': 3}}.")
+
+    if known is None:
+        known = _bootstrap_kwarg_names()
+    if known is None:
+        return
+    unknown = sorted(keys - set(known))
+    if unknown:
+        raise ValueError(
+            f"bootstrap_kwargs has no such solve_with_bootstrap option(s): "
+            f"{unknown}. Accepted: {sorted(set(known) - set(reserved))}.")
 
 
 def resolve_structured_preset(gc, warn: bool = True, stacklevel: int = 3):
@@ -1237,6 +1372,12 @@ class BouquetConfig:
                 "source must be a ReconstructionSource or ImasSource, got "
                 f"{type(src).__name__}"
             )
+
+        from .coords import PHI, resolve_input_coord
+        if (resolve_input_coord(src.coord, [])[0] == PHI
+                and self.generation.bootstrap_kwargs.get("use_python_solve")):
+            raise ValueError("coord='phi_n' needs the internal bootstrap "
+                             "solve: drop use_python_solve from bootstrap_kwargs")
 
         if self.fixed_components.p_fast_reduction not in (
                 "auto", "trace", "mean", "perp", "sum"):

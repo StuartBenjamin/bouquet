@@ -100,6 +100,10 @@ class IDAProfiles:
     #: draw deriving ni from its own (ne, Zeff) adds ``zeff_dne * dne`` and
     #: draws the rest; ni then carries ``sigma_ni`` exactly (to first order).
     zeff_dne: Optional[np.ndarray] = None
+    #: The file's own safety factor on ``psi_N`` (``None`` if absent): the
+    #: fit's equilibrium, from which :func:`bouquet.coords.phi_n_from_q`
+    #: places the profiles in Φ_N.
+    q: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -372,6 +376,12 @@ def read_ida(
                             + (sigma_ne / np.clip(ne, 1e10, None)) ** 2)
                     sigma_Zeff_carbon_source = "n_12C6_err"
 
+        q_ida = None
+        if "q" in f:
+            _q = np.asarray(f["q"][t_idx], dtype=float)
+            q_ida = _q if _q.ndim == 1 else (
+                np.median(_q, axis=0) if ensemble_median else np.mean(_q, axis=0))
+
         # Zeff-vs-carbon consistency (report-only, issue-#19-adjacent QC):
         # the file reports Zeff from visible bremsstrahlung AND n_12C6 from
         # CER; under the same single-impurity assumption they must agree as
@@ -559,6 +569,7 @@ def read_ida(
         ni_route_chi=ni_route_chi,
         zeff_route_chi=zeff_route_chi,
         zeff_dne=zeff_dne,
+        q=q_ida,
     )
 
 

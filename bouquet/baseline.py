@@ -61,6 +61,12 @@ class Baseline:
     # is self-describing and a future scale change cannot pass silently
     # (issue #20).  Single source of truth: bouquet.utils.LI_SCALE.
     l_i_scale: str = "iter(li3)"    # == utils.LI_SCALE
+    # Coordinate of psi_N / psi_N_kinetic (bouquet.coords): "psi_n" or
+    # "phi_n".  Every profile and envelope of the run is on it.
+    coord: str = "psi_n"
+    # (psi_N, x) at the source's nodes: the io-time map from a psi_N-tabulated
+    # input (an IDA sigma) to the run grid.  None in a psi_n run.
+    psi_map: Optional[tuple] = None
     # Fixed additive components -- summed into EVERY draw, never GPR-perturbed.
     # None is treated as zeros. See FixedComponentsConfig for the contract:
     #   j_phi_total = j_inductive + j_BS + j_NBI + j_RF
@@ -607,8 +613,23 @@ def resolve_uncertainty(config, baseline) -> dict:
                 impurity_Z=float(getattr(src, "impurity_Z", 6.0)),
             )
 
+        _ida_x, _ida_in = np.asarray(ida.psi_N, dtype=float), slice(None)
+        if baseline.psi_map is not None:
+            # psi_N -> run coordinate (inside the LCFS): through the source's
+            # own map, or a file other than the source's by its own q.
+            _map_src = (src.profiles_path if isinstance(src, ReconstructionSource)
+                        and src.profiles_path.endswith(".cdf") else
+                        _shared[0] if _shared is not None else None)
+            if (getattr(ida, "q", None) is not None
+                    and not (_map_src and _same_path(_map_src, ida_path))):
+                from .coords import phi_n_from_q
+                _ida_in, _ida_x = phi_n_from_q(_ida_x, ida.q)
+            else:
+                _ida_in = _ida_x <= 1.0
+                _ida_x = np.interp(_ida_x[_ida_in], *baseline.psi_map)
+
         def _to_kin(arr):
-            return np.interp(psi_kin, ida.psi_N, np.asarray(arr, dtype=float))
+            return np.interp(psi_kin, _ida_x, np.asarray(arr, dtype=float)[_ida_in])
 
         ida_sig = {"ne": _to_kin(ida.sigma_ne), "te": _to_kin(ida.sigma_te),
                    "ni": _to_kin(ida.sigma_ni), "ti": _to_kin(ida.sigma_ti)}
@@ -797,7 +818,8 @@ def resolve_uncertainty(config, baseline) -> dict:
     return out
 
 
-def floor_inductive_split(j_inductive, j_BS, psi_N=None, warn_frac=1e-4):
+def floor_inductive_split(j_inductive, j_BS, psi_N=None, warn_frac=1e-4,
+                          coord="psi_n"):
     """Enforce the ``j_inductive >= 0`` component convention on a (j_ind, j_BS)
     split, absorbing any negative sliver into ``j_BS`` so the pair still sums
     exactly to the same total.
@@ -807,7 +829,8 @@ def floor_inductive_split(j_inductive, j_BS, psi_N=None, warn_frac=1e-4):
     unphysical in this convention and -- fed to the GPR sampler as its mean --
     makes essentially every current draw go negative and be rejected. Returns
     ``(j_inductive_floored, j_BS_adjusted)`` (copies; inputs untouched) and
-    prints a one-line note when the correction is non-trivial.
+    prints a one-line note when the correction is non-trivial.  ``psi_N`` is
+    the grid, in ``coord`` (labels the note).
     """
     import numpy as np
 
@@ -826,7 +849,8 @@ def floor_inductive_split(j_inductive, j_BS, psi_N=None, warn_frac=1e-4):
         if psi_N is not None:
             pn = np.asarray(psi_N, dtype=float)
             sel = pn[deficit < 0.0]
-            where = f" over psi_N [{sel.min():.3f}, {sel.max():.3f}]"
+            lab = "Phi_N" if coord == "phi_n" else "psi_N"
+            where = f" over {lab} [{sel.min():.3f}, {sel.max():.3f}]"
         print(f"  [baseline] floored negative j_inductive ({n} pts{where}, "
               f"worst {worst/1e6:.4f} MA/m^2, {100*worst/scale:.2f}% of peak) "
               f"-- deficit absorbed into j_BS (split still sums to j_phi)")
@@ -873,6 +897,7 @@ def _load_kinetic_profiles(source) -> dict:
             ti=np.asarray(ida.ti, dtype=float),
             Zeff=np.clip(np.asarray(ida.Zeff, dtype=float), 1.0, None),
             raw_bytes=ida.raw_bytes,
+            q=None if ida.q is None else np.asarray(ida.q, dtype=float),
         )
 
     # Osborne p-file: ne/ni in 1e20 m^-3, Te/Ti in keV -> SI.
@@ -898,18 +923,29 @@ def _load_kinetic_profiles(source) -> dict:
     )
 
 
+def _kinetic_phi_n(psi_kin, q_kin, psi_eq, phi_eq):
+    """``(inside, Φ_N)`` of the kinetic nodes inside the LCFS: by the kinetic
+    source's own ``q`` when it has one (IDA), else through the equilibrium's
+    ``psi_eq -> phi_eq`` map (a p-file)."""
+    import numpy as np
+    from .coords import phi_n_from_q
+    if q_kin is not None:
+        return phi_n_from_q(psi_kin, q_kin)
+    inside = np.asarray(psi_kin) <= 1.0
+    return inside, np.interp(np.asarray(psi_kin)[inside], psi_eq, phi_eq)
+
+
 def _resolve_reconstruction(source, config, mygs) -> Baseline:
     """Reconstruction-source baseline: GS reconstruct on a live ``mygs``.
 
     Mirrors the operational notebook: read g-file + IDA profiles, interpolate
-    onto the g-file psi_N grid, run :func:`reconstruct_equilibrium`, and package
+    onto the g-file's nodes (in the run coordinate), run :func:`reconstruct_equilibrium`, and package
     the (toroidal) fitted currents. The reconstructed total ``j_phi_fit`` already
     contains all driven current, so fixed components (j_NBI / j_RF) default to
     zero and only re-partition the inductive part if the user supplies them;
     ``p_fast`` (absent from thermal IDA profiles) likewise defaults to zero.
     """
     import numpy as np
-    from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
 
     from .io.geqdsk import read_geqdsk
     from .TokaMaker_interface import reconstruct_equilibrium
@@ -930,14 +966,36 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     kin = _load_kinetic_profiles(source)
     psi_N_kin = kin["psi_N"]
 
-    # kinetic profiles (native SI) regridded onto the equilibrium psi_N grid.
+    # Run grids (x_run: the g-file's nodes; x_kin: the kinetic nodes), in the
+    # run coordinate.  psi_N / psi_N_kin stay the sources' ψ_N.  A toroidal-flux
+    # run labels the g-file's nodes with their Φ_N from the g-file's own q
+    # (rhovn), and the kinetic nodes inside the LCFS by the kinetic source's own
+    # map: an IDA file's q, else (a p-file) the g-file's.  Nothing is resampled
+    # onto ψ_N.
+    from . import coords
+    coord = coords.resolve_input_coord(getattr(source, "coord", coords.PSI), [])[0]
+    kin_q = kin.pop("q", None)
+    psi_map, x_run, x_kin = None, psi_N, psi_N_kin
+    if coord == coords.PHI:
+        x_run = np.asarray(eqdsk.rhovn, dtype=float) ** 2
+        if x_run.shape != psi_N.shape:
+            raise ValueError("g-file rhovn is not on the psi_N levels")
+        if kin_q is None and source.profiles_path.endswith(".cdf"):
+            raise ValueError(f"coord='phi_n': {source.profiles_path!r} carries no "
+                             "q, so its profiles cannot be placed in Phi_N")
+        _in, x_kin = _kinetic_phi_n(psi_N_kin, kin_q, psi_N, x_run)
+        psi_map = (psi_N_kin[_in], x_kin)
+        kin = {k: (np.asarray(v)[_in] if np.shape(v) == psi_N_kin.shape else v)
+               for k, v in kin.items()}
+
+    # kinetic profiles (native SI) regridded onto the equilibrium nodes.
     # Shape-preserving PCHIP (single shared helper): a linear regrid leaves a
     # slope kink at every kinetic knot, which the Sauter bootstrap inherits
     # as a stepped j_BS (see utils.pchip_interp).
     from .utils import pchip_interp
 
     def to_eq(arr):
-        return pchip_interp(psi_N_kin, arr, psi_N)
+        return pchip_interp(x_kin, arr, x_run)
 
     ne_eq, te_eq, ni_eq, ti_eq = to_eq(kin["ne"]), to_eq(kin["te"]), to_eq(kin["ni"]), to_eq(kin["ti"])
     Zeff_eq = np.clip(to_eq(kin["Zeff"]), 1.0, None)
@@ -947,7 +1005,13 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     iso_w = np.ones(len(iso_pts)) * 200.0
     mygs.set_isoflux(iso_pts, weights=iso_w)
 
-    guess_jinductive = create_power_flux_fun(len(psi_N), 1.5, 1.5)["y"]
+    from .coords import swb_seed
+    # Seed shape in ψ_N (the g-file's nodes) or the run coordinate.
+    guess_jinductive = swb_seed(
+        x_run, psi_N if (coord == coords.PHI
+                         and config.generation.seed_coord == "psi_n") else None)
+    _recon_coord = ({} if coord == coords.PSI else
+                    dict(coord=coord, x=x_run))
 
     # Fixed (non-perturbed) pressure components must be resolved BEFORE the
     # reconstruction, not after it: the reconstruction's GS pressure has to be
@@ -957,9 +1021,9 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     #
     # Grid: p_fast is resolved onto the KINETIC grid first and then mapped to
     # the equilibrium grid with `to_eq` -- deliberately the same two-step path
-    # the draws take (baseline resolves onto psi_N_kin, then
+    # the draws take (baseline resolves onto x_kin, then
     # perturb_kinetic_equilibrium applies `_kin_to_eq`, which is the identical
-    # pchip_interp).  Resolving fc.psi_N -> psi_N in one hop would be a
+    # pchip_interp).  Resolving fc.psi_N -> x_run in one hop would be a
     # slightly different array and would reintroduce the very inconsistency
     # this is fixing.  `p_fast_kin` is also what the returned Baseline.p_fast
     # field carries (kinetic grid), which downstream depends on -- unchanged.
@@ -968,7 +1032,10 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     # returns, so the default-off path does not even enter the new branch and
     # is provably a no-op (not merely "adds 0.0").
     fc = config.fixed_components
-    p_fast_kin = _resolve_fixed(fc.p_fast, fc.psi_N, psi_N_kin)
+    # fc.psi_N in the run coordinate (a psi_n input via the g-file's map).
+    fc_x = coords.to_run_grid(fc.psi_N, getattr(fc, "coord", coords.RUN),
+                              None if coord == coords.PSI else (psi_N, x_run))
+    p_fast_kin = _resolve_fixed(fc.p_fast, fc_x, x_kin)
     p_fast_eq = to_eq(p_fast_kin) if fc.p_fast is not None else None
     # Z_imp is plumbed for symmetry with the draw path, but is INERT here today:
     # FixedComponentsConfig (config.py) carries no Z_imp field at all -- Z_imp is
@@ -995,6 +1062,9 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             p_fast=p_fast_eq,
             Z_imp=Z_imp_recon,
             l_i_tolerance=float(config.generation.l_i_tolerance),
+            window_coord=config.generation.window_coord,
+            **_recon_coord,
+            **config.generation.bootstrap_kwargs,
         )
         # get_stats traces the q-profile and can emit gs_get_qprof warnings, so
         # keep these inside the capture too.
@@ -1062,9 +1132,9 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     j_phi = np.asarray(result["j_phi_fit"], dtype=float)
     j_BS = np.asarray(result["j_BS_used"], dtype=float)
 
-    j_NBI = _resolve_fixed(fc.j_NBI, fc.psi_N, psi_N)
-    j_RF = _resolve_fixed(fc.j_RF, fc.psi_N, psi_N)
-    j_other = _resolve_fixed(getattr(fc, "j_other", None), fc.psi_N, psi_N)
+    j_NBI = _resolve_fixed(fc.j_NBI, fc_x, x_run)
+    j_RF = _resolve_fixed(fc.j_RF, fc_x, x_run)
+    j_other = _resolve_fixed(getattr(fc, "j_other", None), fc_x, x_run)
     j_inductive = j_phi - j_BS - j_NBI - j_RF - j_other   # == j_inductive_fit when all 0
     # Physical component convention: the inductive current is >= 0. On shots
     # with a strong pedestal the achieved total can dip BELOW the full-Sauter
@@ -1074,18 +1144,21 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     # 0/500 candidates survived).
     # Floor the inductive at zero and absorb the deficit into j_BS so the
     # split still sums exactly to j_phi.
-    j_inductive, j_BS = floor_inductive_split(j_inductive, j_BS, psi_N)
+    j_inductive, j_BS = floor_inductive_split(j_inductive, j_BS, x_run,
+                                              coord=coord)
 
     # Resolved above (before the reconstruction, which now consumes it).
     # Unchanged contract: the returned field is on the KINETIC grid.
     p_fast = p_fast_kin
 
     return Baseline(
-        psi_N=psi_N,
+        psi_N=x_run,
         j_phi=j_phi,
         j_inductive=j_inductive,
         j_BS=j_BS,
-        psi_N_kinetic=psi_N_kin,
+        psi_N_kinetic=x_kin,
+        coord=coord,
+        psi_map=psi_map,
         ne=kin["ne"],
         te=kin["te"],
         ni=kin["ni"],

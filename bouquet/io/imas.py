@@ -404,6 +404,32 @@ def _warn_missing_parallel(species_labels, rule: str):
         f"pressure_fast_parallel. {detail}", stacklevel=3)
 
 
+def _phi_n_from_rho(rho, psi_N, where):
+    """Φ_N of nodes at ψ_N ``psi_N`` from their ``rho_tor_norm``: ρ², normalised
+    to [0, 1].
+
+    Refuses a missing ``rho`` or the ``sqrt(psi_N)`` placeholder some writers
+    store: neither says where the nodes sit in Φ_N.
+    """
+    if rho is None or np.shape(rho) != np.shape(psi_N):
+        raise ValueError(f"coord='phi_n' needs {where} rho_tor_norm "
+                         "on the same nodes as its psi")
+    rho = np.asarray(rho, dtype=float)
+    if not np.all(np.diff(rho) > 0):
+        raise ValueError(f"coord='phi_n': {where} rho_tor_norm is not strictly increasing")
+    if np.allclose(rho, np.sqrt(np.clip(psi_N, 0.0, None)), rtol=0, atol=1e-6):
+        raise ValueError(f"coord='phi_n': {where} rho_tor_norm is the sqrt(psi_N) "
+                         "placeholder, not a toroidal-flux coordinate")
+    phi = rho ** 2
+    return (phi - phi[0]) / (phi[-1] - phi[0])
+
+
+def _dd_phi_n(cp, psi_N):
+    """Φ_N of the core_profiles nodes (:func:`_phi_n_from_rho` of ``grid``)."""
+    return _phi_n_from_rho(cp.get("grid", {}).get("rho_tor_norm"), psi_N,
+                           "core_profiles grid")
+
+
 def _override(arr, src_psi, dst_psi):
     """Resample a user-supplied fixed-component array onto the baseline grid."""
     arr = np.asarray(arr, dtype=float)
@@ -549,9 +575,10 @@ def _validate_pressure_completeness(cp, ne, te, ni, ti, p_fast, p_imp,
             raise ValueError(msg)
 
 
-def _read_ida_omega(path, time_s, psi_N):
+def _read_ida_omega(path, time_s, psi_N, place=None):
     """IDA toroidal rotation (omega_tor_12C6) resampled onto psi_N; None if absent.
-    Mirrors read_ida's nearest-time selection (IDA time is ms; ``time_s`` is s)."""
+    Mirrors read_ida's nearest-time selection (IDA time is ms; ``time_s`` is s).
+    ``place`` (IDA-grid array -> run nodes) replaces the psi_N interpolation."""
     try:
         import h5py
         with h5py.File(path, "r") as f:
@@ -562,7 +589,7 @@ def _read_ida_omega(path, time_s, psi_N):
             j = int(np.argmin(np.abs(it - tms)))
             ipsi = np.asarray(f["psi_n"], dtype=float)
             om = np.asarray(f["omega_tor_12C6"], dtype=float)[j]
-            return np.interp(psi_N, ipsi, om)
+            return place(om) if place is not None else np.interp(psi_N, ipsi, om)
     except Exception:
         return None
 
@@ -731,7 +758,7 @@ def _subtract_fast_ni(psi_N, ni, sigma_ni, ni_fuse_thermal, z_fast, z2_fast,
 
 def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impurity_Z,
                          ni_source="all", zeff_from_fuse=False,
-                         z_fast=None, z2_fast=None):
+                         z_fast=None, z2_fast=None, x_phi=None):
     """IDA-hybrid kinetics: replace FUSE ne/ni/Te/Ti/Zeff (+omega) with IDA fits,
     resampled onto the FUSE ``psi_N`` grid (psi_N == psi_N_kinetic).
 
@@ -750,11 +777,26 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
     re-reading the file (see ``Baseline.aux['ida_profiles']``). Re-reading
     risked a DIFFERENT slice: this path resolves ``time`` against the IMAS
     slice, while the envelope path only had the requested ``source.time``.
+
+    ``x_phi`` (the run nodes' Φ_N) places the IDA fits by their Φ_N from the
+    file's own q (:func:`bouquet.coords.phi_n_from_q`) instead of by psi_N;
+    the map is returned as a 13th element, ``(ida psi_N, ida Φ_N)`` inside the
+    LCFS, or ``None``.
     """
     from .ida import read_ida
     ida = read_ida(ida_path, time=time, impurity_Z=impurity_Z, ni_source=ni_source)
     _ipsi = np.asarray(ida.psi_N, dtype=float)
-    g = lambda a: np.interp(psi_N, _ipsi, np.asarray(a, dtype=float))
+    ida_map = None
+    if x_phi is None:
+        g = lambda a: np.interp(psi_N, _ipsi, np.asarray(a, dtype=float))
+    else:
+        if ida.q is None:
+            raise ValueError(f"coord='phi_n': {ida_path!r} carries no q, so its "
+                             "profiles cannot be placed in Phi_N")
+        from ..coords import phi_n_from_q
+        _in, _iphi = phi_n_from_q(_ipsi, ida.q)
+        ida_map = (_ipsi[_in], _iphi)
+        g = lambda a: np.interp(x_phi, _iphi, np.asarray(a, dtype=float)[_in])
     ne, ni, te, ti = g(ida.ne), g(ida.ni), g(ida.te), g(ida.ti)
     zeff = np.asarray(Zeff_fuse, dtype=float) if zeff_from_fuse else g(ida.Zeff)
     sigma_ne, sigma_te, sigma_ni, sigma_ti = (
@@ -769,9 +811,9 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
         ni_fast_meta = {"applied": False, "agrees": None, "mismatch": None,
                         "gate": None,
                         "evidence": "no fast-ion charge moments supplied"}
-    omega = _read_ida_omega(ida_path, time, psi_N)
+    omega = _read_ida_omega(ida_path, time, psi_N, place=None if x_phi is None else g)
     return (ne, te, ti, ni, zeff, omega, sigma_ne, sigma_te, sigma_ni,
-            sigma_ti, ida, ni_fast_meta)
+            sigma_ti, ida, ni_fast_meta, ida_map)
 
 
 def _source_slice(profiles_1d, T, parent_time=None):
@@ -931,6 +973,12 @@ def read_imas_baseline(
     psi = np.asarray(cp["grid"]["psi"], dtype=float)
     psi_N = (psi - psi[0]) / (psi[-1] - psi[0])   # 0 (axis) -> 1 (boundary)
     n = psi_N.size
+    # Run grid: the same nodes, labelled in the run coordinate.  Every dd
+    # profile below is read on the nodes' psi_N; a toroidal-flux run only
+    # relabels them.  IDA fits are placed by their own Phi_N in such a run.
+    from .. import coords as _coords
+    coord = _coords.resolve_input_coord(getattr(source, "coord", _coords.PSI), [])[0]
+    x_run = psi_N if coord == _coords.PSI else _dd_phi_n(cp, psi_N)
 
     j_total = np.asarray(cp["j_total"], dtype=float)   # total parallel
     j_tor = np.asarray(cp["j_tor"], dtype=float)       # total toroidal (authoritative)
@@ -1116,16 +1164,19 @@ def read_imas_baseline(
             warnings.warn(
                 f"{_drift['evidence']}: the dd's equilibrium is not the g-file's, "
                 "so its profiles and sources sit at shifted psi_N"
-                + (" against the IDA kinetics (placed by IDA psi_N)" if use_ida else ""))
+                + (f" against the IDA kinetics (placed by IDA "
+                   f"{'psi_N' if coord == _coords.PSI else 'Phi_N'})"
+                   if use_ida else ""))
     if use_ida:
         (ne, te, ti, ni, Zeff, _omega,
          sigma_ne_ida, sigma_te_ida, sigma_ni_ida, sigma_ti_ida,
-         _ida_read, _ni_fast_meta) = _merge_ida_kinetics(
+         _ida_read, _ni_fast_meta, _ida_map) = _merge_ida_kinetics(
             psi_N, ne, ni, Zeff, source.ida_path, T,
             getattr(source, "impurity_Z", 6.0),
             ni_source=getattr(source, "ni_source", "all"),
             zeff_from_fuse=getattr(source, "zeff_from_fuse", False),
-            z_fast=z_fast, z2_fast=z2_fast)
+            z_fast=z_fast, z2_fast=z2_fast,
+            x_phi=None if coord == _coords.PSI else x_run)
         if _ni_fast_meta["agrees"] is False and _drift is not None and _drift["exceeds"]:
             _ni_fast_meta["evidence"] += (
                 f"; likely the psi_N(rho) drift ({_drift['evidence']})")
@@ -1158,17 +1209,20 @@ def read_imas_baseline(
 
     # --- user overrides for fixed additive components ---
     if fixed is not None:
+        # fixed.psi_N given on psi_N ("psi_n") goes through the dd's own map
+        _fx = _coords.to_run_grid(fixed.psi_N, getattr(fixed, "coord", "run"),
+                                  None if coord == _coords.PSI else (psi_N, x_run))
         if fixed.p_fast is not None:
-            p_fast = _override(fixed.p_fast, fixed.psi_N, psi_N)
+            p_fast = _override(fixed.p_fast, _fx, x_run)
             p_fast_meta = {**p_fast_meta, "rule": None, "basis": "user-override",
                            "evidence": "FixedComponentsConfig.p_fast supplied; the "
                                        "dd fast-pressure fields were not read"}
         if fixed.j_NBI is not None:
-            j_NBI = _override(fixed.j_NBI, fixed.psi_N, psi_N)
+            j_NBI = _override(fixed.j_NBI, _fx, x_run)
         if fixed.j_RF is not None:
-            j_RF = _override(fixed.j_RF, fixed.psi_N, psi_N)
+            j_RF = _override(fixed.j_RF, _fx, x_run)
         if getattr(fixed, "j_other", None) is not None:
-            j_other = _override(fixed.j_other, fixed.psi_N, psi_N)
+            j_other = _override(fixed.j_other, _fx, x_run)
 
     # The deferred factor-of-3 warning: the convention was undeterminable AND the
     # fast pressure it scales is non-zero AND it came from the dd (a user-supplied
@@ -1194,7 +1248,19 @@ def read_imas_baseline(
     psi_eq = np.asarray(eqp1["psi"], dtype=float)
     psiN_eq = (psi_eq - psi_eq[0]) / (psi_eq[-1] - psi_eq[0])
     _o = np.argsort(psiN_eq)
-    p_equilibrium = np.interp(psi_N, psiN_eq[_o],
+    # Nodes of equilibrium.profiles_1d in the run coordinate: its own Φ_N
+    # (rho_tor_norm², else from its q) in a toroidal-flux run.
+    x_eq, x_at = psiN_eq[_o], psi_N
+    if coord != _coords.PSI:
+        _rho = eqp1.get("rho_tor_norm")
+        if _rho is None and "q" in eqp1:
+            x_eq = _coords.phi_n_from_q(x_eq, np.asarray(eqp1["q"], dtype=float)[_o])[1]
+        else:
+            if _rho is not None and np.size(_rho) == _o.size:
+                _rho = np.asarray(_rho, dtype=float)[_o]
+            x_eq = _phi_n_from_rho(_rho, x_eq, "equilibrium profiles_1d")
+        x_at = x_run
+    p_equilibrium = np.interp(x_at, x_eq,
                               np.asarray(eqp1["pressure"], dtype=float)[_o])
     # The dd's OWN axis q -- taken at the SMALLEST psi_N (via the same ordering
     # the pressure uses), not blindly at index 0, since profiles_1d need not be
@@ -1243,16 +1309,21 @@ def read_imas_baseline(
     # the same Ip), so it redistributes rather than adds net current.
     jphi_diff = None
     if anchor_jtor_to_equilibrium:
-        eq_jtor = np.interp(psi_N, psiN_eq[_o],
+        eq_jtor = np.interp(x_at, x_eq,
                             np.asarray(eqp1["j_tor"], dtype=float)[_o])
         jphi_diff = eq_jtor - j_phi
 
     return Baseline(
-        psi_N=psi_N,
+        psi_N=x_run,
         j_phi=j_phi,
         j_inductive=j_inductive,
         j_BS=j_BS,
-        psi_N_kinetic=psi_N,
+        psi_N_kinetic=x_run,
+        coord=coord,
+        # IDA sigmas follow the IDA fits: through the file's own map when the
+        # fits were placed by it, else through the dd's.
+        psi_map=(None if coord == _coords.PSI else
+                 _ida_map if use_ida else (psi_N, x_run)),
         ne=ne, te=te, ni=ni, ti=ti, Zeff=Zeff,
         Ip_target=Ip_target,
         l_i_target=l_i_target,
@@ -1474,9 +1545,22 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     cp = cp_ids["profiles_1d"][ic]
     psi = np.asarray(cp["grid"]["psi"], dtype=float)
     psiN_t = (psi - psi[0]) / (psi[-1] - psi[0])
+    # The draw's arrays are on the archive's run grid: a phi_n archive lands on
+    # the template's own Phi_N nodes (grid.rho_tor_norm**2).
+    # The draw's ψ_N at those nodes (its eqdsk's own Φ_N map) addresses its
+    # flux-surface geometry and is written as grid.psi.
+    from ..utils import profile_coord
+    x_t = psiN_fsa = psiN_t
+    if profile_coord(h5, scan_key) != "psi_n":
+        x_t = _dd_phi_n(cp, psiN_t)
+        phi_g = np.asarray(geq.rhovn, dtype=float) ** 2
+        phi_g = (phi_g - phi_g[0]) / (phi_g[-1] - phi_g[0])
+        psiN_fsa = np.interp(x_t, phi_g, np.asarray(geq.psi_N, dtype=float))
+        cp["grid"]["psi"] = (geq.psi_axis + psiN_fsa
+                             * (geq.psi_boundary - geq.psi_axis)).tolist()
 
-    def to_t(arr, src):     # interp draw array (on src grid) -> template psi grid
-        return np.interp(psiN_t, src, arr)
+    def to_t(arr, src):     # interp draw array (on src grid) -> template grid
+        return np.interp(x_t, src, arr)
 
     cp["electrons"]["density_thermal"] = to_t(ne, pkin).tolist()
     cp["electrons"]["temperature"] = to_t(te, pkin).tolist()
@@ -1500,7 +1584,7 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     if "j_total" in cp and "j_tor" in cp:
         use_exact = False
         if fidelity in ("auto", "exact") and eq_fsa is not None:
-            geom = _eq_fsa_geom_on(eq_fsa, psiN_t, _imas_b0(out, ie, ic))
+            geom = _eq_fsa_geom_on(eq_fsa, psiN_fsa, _imas_b0(out, ie, ic))
             if geom is not None:
                 from ..physics import toroidal_to_parallel
                 cp["j_total"] = toroidal_to_parallel(jt_t, geom=geom).tolist()

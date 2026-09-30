@@ -128,9 +128,41 @@ is a navigational summary of the defaults.
 | `jphi_scalar_sigma` | `0.10` | Inductive-current envelope. **Must be > 0** — setting it to 0 freezes `j_inductive` and trips the workflow guard |
 | `zeff_scalar_sigma` | `0.05` | One Z_eff perturbation per draw; n_i / n_z follow from quasi-neutrality. Also the width of the bottom tier below |
 | `zeff_sigma_source` | `"auto"` | Which tier supplies the Z_eff envelope's **magnitude**: `"auto"` / `"carbon"` / `"measured"` / `"scalar"` — see the ladder below |
-| `sigma_profiles` | `{}` | Explicit `{name: sigma(psi_N)}` envelopes, highest precedence |
-| `n_ls` / `t_ls` / `j_ls` | `0.5` / `0.4` / `0.25` | GPR correlation lengths for density / temperature / current |
-| `aux_sigmas`, `aux_baselines`, `aux_length_scales` | `{}` | The passive switchboard: any extra channel gets perturbed and archived alongside the physics |
+| `sigma_profiles` | `{}` | Explicit `{name: sigma(psi_N)}` envelopes on the kinetic run grid (`psi_N_kinetic`; Φ_N in a `"phi_n"` run), highest precedence |
+| `n_ls` / `t_ls` / `j_ls` | `0.5` / `0.4` / `0.25` | GPR correlation lengths for density / temperature / current, in units of the run coordinate (Φ_N lengths in a `"phi_n"` run; the defaults are not converted) |
+| `aux_sigmas`, `aux_baselines`, `aux_length_scales` | `{}` | The passive switchboard: any extra channel gets perturbed and archived alongside the physics. Arrays on the kinetic run grid; length scales in the run coordinate |
+
+### Radial coordinate (`b.source.coord`)
+
+`"psi_n"` (default) keeps every profile on normalised poloidal flux.
+`"phi_n"` puts the whole run on normalised toroidal flux: the reader relabels
+the source's nodes with their Φ_N (the IMAS `core_profiles` `grid.rho_tor_norm²`;
+the g-file's own q-integral `rhovn²`, with the p-file/IDA nodes inside the LCFS
+mapped through it), and every profile, envelope and GPR draw then stays on that
+grid. TokaMaker receives the profiles as-is, tagged `phi_n`, and remaps them to
+ψ each nonlinear step with the equilibrium's own q; bouquet samples readbacks at
+the ψ_N the solver's map gives for each node. `"rho_tor"` is accepted as an
+input spelling and runs as `"phi_n"` on ρ². A `"phi_n"` run needs an
+OpenFUSIONToolkit with toroidal-flux profiles (`TokaMaker.get_torflux_map`) and
+the internal bootstrap solve; both are checked in `prepare()`. The archive's
+baseline group records the coordinate as the `profile_coord` attr. Fields and
+datasets named `psi_N` / `psi_N_kinetic` keep that name but hold the run grid:
+Φ_N in a `"phi_n"` run.
+
+With IDA-hybrid kinetics (`kinetic_source="ida_hybrid"`) the IDA fits, their
+sigmas and ω_tor are placed on the run nodes by their own Φ_N, integrated from
+the IDA file's `q`, not by the dd's map; a `"phi_n"` run refuses an IDA file
+without `q`. The g-file path does the same for an IDA `.cdf` (a p-file, which
+carries no q, goes through the g-file's map; an IDA `.cdf` without q is
+refused). An `UncertaintyConfig.ida_path` other than the source's IDA file is
+placed by its own q when it has one. The structured-closure basis centres and q95 stay in ψ_N.
+Window-type helpers (`sampling.sigmoid_length_scale`,
+`uncertainties.new_uncertainty_profiles`, `synthetic_ida_sigma`) take the grid
+they are given: pass the run grid and their widths/positions are Φ_N in a
+`"phi_n"` run. `window_coord`, `seed_coord` and `source.coord` are checked when
+the config is built; the toolkit is checked before the baseline and the draws. If the
+solver's toroidal-flux map cannot be built (surfaces fail to trace), the solve
+fails like any other and the draw is rejected.
 
 **Precedence, per kinetic channel:** `sigma_profiles[chan]` > an IDA `.cdf` >
 `<chan>_scalar_sigma`. A `.cdf` handed to `ReconstructionSource.profiles_path`
@@ -211,7 +243,9 @@ as an enormous sigma.
 | `anchor_pressure_to_equilibrium` | `False` | IMAS path: add the fixed `p_diff = equilibrium.pressure − p_reconstructed` offset |
 | `imas_corrective_jphi` | `False` | Opt-in corrective j_phi iteration on the IMAS baseline solve (still being validated) |
 | `floor_j_BS` | `False` | Clip negative bootstrap excursions; only needed with `isolate_edge_jBS=False` on sources that carry an inner negative lobe |
-| `swb_iterations` | `3` | `solve_with_bootstrap` self-consistency iterations per draw |
+| `bootstrap_kwargs` | `{}` | Additional keyword options passed through to `solve_with_bootstrap` in OpenFUSIONToolkit (e.g. `iterations`). Keys are checked against the toolkit's signatures at config time: one already fixed at the call sites (`scale_jBS`, `isolate_edge_jBS`, `verbose`, …), or not accepted by the installed toolkit, is refused there rather than failing every draw. Replaces `swb_iterations`, which is now `{"iterations": N}` |
+| `window_coord` | `"psi_n"` | Coordinate the fixed radial windows (edge > 0.9, pedestal 0.85, shelf/bridge, spike classifier) are read in: `"psi_n"` maps the run grid to ψ_N through the solver, `"native"` reads them in the run coordinate. Identical in a ψ_N run |
+| `seed_coord` | `"psi_n"` | Coordinate the `solve_with_bootstrap` inductive seed shape `(1 − s^1.5)^1.5` is written in: `"psi_n"` (s = the nodes' ψ_N) or `"native"` (s = the run coordinate). SWB keeps the seed's shape, so in a Φ_N run this sets the inductive current's shape. Identical in a ψ_N run |
 | `draw_solve_maxits` | `50` | GS iteration cap inside `generate()`. Draw solves converge in ≤ ~25 iterations; one that does not is stuck in a limit cycle just above `nl_tol` and would burn the setup cap (800, ~200–350 s). It is re-solved from where it stopped at each `draw_solve_retry_urf` (default none), then at `nl_tol = draw_solve_loose_tol` (`2e-5`), which accepts it only if the residual really is that small. Failed solves, and what recovered each, are listed per draw in `diagnostics['solve_failures']`, on `Bouquet.solve_failures`, and in one printed `[draw-solves]` line with the largest iteration count seen. `None` keeps the setup cap |
 | `coil_drift` | `0.01` | Soft coil-drift target |
 | `coil_drift_hard_factor` | `None` | Optional hard inequality bounds at `± factor·coil_drift` in every solve |
@@ -248,7 +282,9 @@ as an enormous sigma.
 ### `FixedComponentsConfig` (`b.fixed_components`)
 
 `p_fast`, `j_NBI`, `j_RF` on their own `psi_N` grid — additive components that
-are never perturbed. `p_fast_reduction` (default `"auto"`) selects the
+are never perturbed. `coord` (default `"run"`) is the coordinate of that grid:
+`"run"` (Φ_N in a `"phi_n"` run) or `"psi_n"`, mapped to the run coordinate
+through the source equilibrium's ψ_N → Φ_N map. `p_fast_reduction` (default `"auto"`) selects the
 anisotropic fast-pressure reduction applied before the isotropic GS solve.
 
 > **`p_fast_reduction` — a factor-of-3 convention, chosen from dd provenance.**
