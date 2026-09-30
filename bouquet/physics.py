@@ -20,6 +20,36 @@ from typing import Optional
 import numpy as np
 
 
+#: Elementary charge [C] (CODATA 2018, exact): THE eV -> J factor of every
+#: thermal pressure ``p = e * sum_s(n_s * T_s)`` (n in m^-3, T in eV) and of
+#: the Redl drive -- the same constant OFT's ``solve_with_bootstrap`` uses.
+#: Every site in bouquet reads it from here.
+ELEMENTARY_CHARGE = 1.602176634e-19
+
+#: FROZEN LEGACY value (1.6022e-19, 1.46e-5 relative above the exact one)
+#: that the legacy (``jbs_self_consistent=False``) draw pressure and g-file
+#: reconstruction pressure have always used.  It is kept ONLY so the frozen
+#: legacy path stays bit for bit; nothing else may use it.  Select with
+#: :func:`thermal_pressure_charge`.
+ELEMENTARY_CHARGE_LEGACY = 1.6022e-19
+
+
+def thermal_pressure_charge(jbs_loop=None):
+    """The eV -> J factor of the thermal pressure for a run.
+
+    :data:`ELEMENTARY_CHARGE` whenever the self-consistent bootstrap loop is
+    on (``jbs_loop`` a settings dict with ``enabled``, or ``True``) -- the
+    value the modelling-source forward solve and the impurity / Redl terms
+    use, so the reconstruction and its draws share one pressure --
+    and the frozen :data:`ELEMENTARY_CHARGE_LEGACY` on the legacy path.
+    """
+    if isinstance(jbs_loop, dict):
+        on = bool(jbs_loop.get("enabled"))
+    else:
+        on = bool(jbs_loop)
+    return ELEMENTARY_CHARGE if on else ELEMENTARY_CHARGE_LEGACY
+
+
 # Map the legacy positional index of ``TokaMaker.get_q``'s ``ravgs`` array to the
 # key used by newer OFT builds, which return ``ravgs`` as a dict.
 _GET_Q_RAVG_INDEX = {"<R>": 0, "<1/R>": 1, "dV/dPsi": 2}
@@ -544,8 +574,8 @@ _SAUTER_RAVG_INDEX = {"<R>": 0, "<1/R>": 1, "<a>": 2}
 _SAUTER_MODB_INDEX = {"<|B|>": 0, "<|B|^2>": 1}
 
 #: Elementary charge [C] -- the eV -> J factor of the Redl drive, the same
-#: constant OFT's ``solve_with_bootstrap`` uses.
-_EC = 1.602176634e-19
+#: constant OFT's ``solve_with_bootstrap`` uses (:data:`ELEMENTARY_CHARGE`).
+_EC = ELEMENTARY_CHARGE
 
 
 class JBSEvaluationError(ValueError):
@@ -1014,8 +1044,8 @@ def main_ion_density_from_zeff(ne, zeff, Z_imp, z_fast=None):
 
 
 # Elementary charge [C] -- thermal pressure p = e * sum_s(n_s * T_s) with n in
-# m^-3 and T in eV.
-_EC = 1.602176634e-19
+# m^-3 and T in eV (:data:`ELEMENTARY_CHARGE`).
+_EC = ELEMENTARY_CHARGE
 
 
 def impurity_pressure(ne, ni, ti, Z_imp):

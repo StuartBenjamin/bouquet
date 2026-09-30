@@ -265,6 +265,17 @@ legacy corrector already takes its step.
   `DrawAnchorSolveFailed` and the draw is rejected, printed and recorded
   with the new reason code `anchor_solve_failed`. The frozen legacy draw
   route (loop off) is unchanged.
+- **One electron-charge constant** (`physics.ELEMENTARY_CHARGE =
+  1.602176634e-19`), read by every pressure site. **Deliberate consistency
+  fix:** under the self-consistent loop the draws' (and the g-file
+  reconstruction's) thermal pressure moves from 1.6022e-19 to it, i.e. by
+  −1.46e-5 relative (−1.3e-5 of the total with fast-ion and impurity
+  pressure), which removes the σ=0 draw's pressure offset against the
+  modelling-source forward solve. No fast-test number moved beyond rounding
+  (the toy-solver draws are bit-identical apart from the pressure itself).
+  The frozen legacy path keeps its value as `ELEMENTARY_CHARGE_LEGACY`
+  (selected by `physics.thermal_pressure_charge`), bit for bit;
+  `sampling.EC` remains as that legacy value for back-compatibility.
 
 ## Unreleased — reversed-current IMAS sources (hotfix)
 

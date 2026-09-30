@@ -525,12 +525,14 @@ and the DRAWS, perturbations of the reconstruction. With the loop on:
   bootstrap already self-consistent. Every sampled perturbation (kinetics,
   inductive GPR, bootstrap scale, l_i target) enters as a departure from the
   reconstruction's value.
-- **What is left non-identity by construction:** the electron-charge constant
-  of the modelling-source forward solve (1.602176634e-19) differs from the
-  draws' (1.6022e-19): the σ=0 draw pressure is 1.28e-5 relative high,
-  measured at ≤ 1e-7 in l_i; for an asymmetric `jBS_scale_range` the draws'
-  centre scale is not the reconstruction's; `jBS_baseline_mode="ohmic"`
-  (baseline-only; the draws refuse it) keeps its split as before.
+- **What is left non-identity by construction:** for an asymmetric
+  `jBS_scale_range` the draws' centre scale is not the reconstruction's;
+  `jBS_baseline_mode="ohmic"` (baseline-only; the draws refuse it) keeps its
+  split as before. (The electron-charge mismatch that used to sit here -- the
+  modelling-source forward solve at 1.602176634e-19 against the draws'
+  1.6022e-19, a σ=0 draw pressure 1.28e-5 relative high -- is gone under the
+  loop: every pressure there uses `physics.ELEMENTARY_CHARGE`; only the
+  frozen legacy path keeps `ELEMENTARY_CHARGE_LEGACY` for its thermal terms.)
 
 `jbs_init="swb"` starts from the legacy SWB result instead (A/B only; `psi_N=`
 is passed when the OFT build accepts it and the grid allows it, and the record

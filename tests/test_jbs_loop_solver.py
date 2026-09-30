@@ -342,7 +342,8 @@ def _recon_probe(outdir):
     psi_kin = np.asarray(bl.psi_N_kinetic, dtype=float)
     psi_pad = float(getattr(b.config.source, "psi_pad", 1e-3))
     k2e = lambda a: pchip_interp(psi_kin, np.asarray(a, float), psi_N)
-    pressure = 1.6022e-19 * (k2e(bl.ne) * k2e(bl.te)
+    from bouquet.physics import ELEMENTARY_CHARGE as _EC   # loop-on draws
+    pressure = _EC * (k2e(bl.ne) * k2e(bl.te)
                              + k2e(bl.ni) * k2e(bl.ti))
     Zeff_eq = np.clip(k2e(bl.Zeff), 1.0, None)
     zk, zj = np.zeros_like(psi_kin), np.zeros_like(psi_N)
@@ -391,7 +392,8 @@ def _recon_probe(outdir):
     te_d = k2e(bl.te) * 1.08
     ni_d = k2e(bl.ni) * 0.95
     ti_d = k2e(bl.ti) * 1.04
-    pres_d = 1.6022e-19 * (ne_d * te_d + ni_d * ti_d)
+    from bouquet.physics import ELEMENTARY_CHARGE as _EC   # loop-on draws
+    pres_d = _EC * (ne_d * te_d + ni_d * ti_d)
     j_ind = np.asarray(bl.j_inductive, dtype=float)
     j_phi_bl = np.asarray(bl.j_phi, dtype=float)
     j_fix = j_phi_bl - j_ind - np.asarray(bl.j_BS, dtype=float)

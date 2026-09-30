@@ -4115,7 +4115,7 @@ class Bouquet:
         mygs = self.mygs
         psi_N = np.asarray(bl.psi_N, dtype=float)
         psi_pad = 1e-3
-        EC = 1.602176634e-19
+        from .physics import ELEMENTARY_CHARGE as EC
 
         # init psi from the LCFS shape parameters
         R0, Z0, a, kappa, delta = _shape_from_boundary(self._boundary_RZ)
@@ -5664,7 +5664,7 @@ class Bouquet:
         if self.baseline is None:
             raise ValueError("call prepare_baseline() before plot_baseline()")
         bl = self.baseline
-        EC = 1.602176634e-19
+        from .physics import ELEMENTARY_CHARGE as EC
         pk = np.asarray(bl.psi_N_kinetic, dtype=float)
         pe = np.asarray(bl.psi_N, dtype=float)
 
@@ -5818,7 +5818,7 @@ class Bouquet:
         # fall back to the pipeline default (matches the forward-solve sites).
         psi_pad = getattr(self.config.source, "psi_pad", 1e-3)
         psi_N = np.asarray(bl.psi_N, dtype=float)
-        EC = 1.602176634e-19
+        from .physics import ELEMENTARY_CHARGE as EC
 
         # kinetics + pressure on the equilibrium grid, mirroring
         # generate_bouquet's baseline assembly (incl. impurity/fast/diff terms)
@@ -6184,7 +6184,7 @@ class Bouquet:
         bl = self.baseline
         mygs = self.mygs
         gc = self.config.generation
-        EC = 1.602176634e-19
+        from .physics import ELEMENTARY_CHARGE as EC
         Ip = float(bl.Ip_target)
         if routes is None:
             routes = self._sigma0_draw_routes()

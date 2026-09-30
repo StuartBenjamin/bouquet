@@ -34,7 +34,6 @@ from .sampling import (
     calc_cylindrical_li_proxy_fast,
     calc_realgeom_li_proxy_fast,
     _draw_monotonic_perturbation,
-    EC,
     _MAX_PRESSURE_ITER,
     _MAX_LI_ITER,
 )
@@ -56,7 +55,7 @@ from .utils import (
     read_eqdsk_from_bytes,
 )
 from .io.geqdsk import read_geqdsk
-from .physics import q_ravg
+from .physics import q_ravg, thermal_pressure_charge
 
 # ---- Masked anchor-solve failure counter (issue #24) ------------------------
 # The per-draw anchor solves swallow failures (fallback: `pass`; band
@@ -2863,7 +2862,11 @@ def perturb_kinetic_equilibrium(
         ni_eq = _kin_to_eq(ni_perturb)
         ti_eq = _kin_to_eq(ti_perturb)
 
-        pres_tmp = EC * (ne_eq * te_eq + ni_eq * ti_eq)
+        # eV -> J: the exact constant under the self-consistent loop (the
+        # value the reconstruction / modelling-source forward solve uses), the
+        # frozen legacy value otherwise (physics.thermal_pressure_charge)
+        pres_tmp = thermal_pressure_charge(jbs_loop) * (
+            ne_eq * te_eq + ni_eq * ti_eq)
         tmp_avg = mygs.flux_integral(psi_N, pres_tmp)
         p_err = np.mean(np.abs(inp_avg - tmp_avg) / inp_avg) * 100.0
 
@@ -5116,12 +5119,16 @@ def generate_bouquet(
     # self-consistent pressure for baseline <P>
     # When kinetic profiles are on a different grid, interpolate
     # onto the equilibrium grid for pressure/GS calculations.
+    # (the same eV -> J factor as the draws' own pressure: exact under the
+    # self-consistent loop, the frozen legacy value otherwise)
+    _EC_run = thermal_pressure_charge(jbs_loop)
     if psi_N_kinetic is not None:
         # PCHIP regrid (shared helper) -- must match _kin_to_eq in the draws
         _kin2eq = lambda arr: pchip_interp(psi_N_kinetic, arr, psi_N)
-        pressure = EC * (_kin2eq(ne) * _kin2eq(te) + _kin2eq(ni) * _kin2eq(ti))
+        pressure = _EC_run * (_kin2eq(ne) * _kin2eq(te)
+                              + _kin2eq(ni) * _kin2eq(ti))
     else:
-        pressure = EC * (ne * te + ni * ti)
+        pressure = _EC_run * (ne * te + ni * ti)
 
     # Fixed fast-ion pressure on the equilibrium grid. The baseline jphi-linterp
     # solve below (the per-draw boundary/l_i/coil reference) must include p_fast
@@ -7323,7 +7330,8 @@ def generate_bouquet(
                 ne_perturb, te_perturb, ni_perturb, ti_perturb)
         # Thermal (main-ion + electron) pressure -- the part that perturbs with
         # the kinetic draw.
-        pressure_perturb = EC * (_ne_eqp * _te_eqp + _ni_eqp * _ti_eqp)
+        pressure_perturb = _EC_run * (_ne_eqp * _te_eqp
+                                      + _ni_eqp * _ti_eqp)
         # Total pressure the GS solve actually used for this draw: thermal +
         # impurity(carbon) + fast + p_diff anchor, recomputed exactly as
         # perturb_kinetic_equilibrium built its solve pressure (same components
@@ -7791,7 +7799,8 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         # axis-pressure target is set from the SAME full pressure (the draws'
         # convention; the legacy path inherits SWB's thermal-only pax).
         from .physics import evaluate_jBS as _evaluate_jBS
-        _p0 = 1.6022e-19 * (ne * te + ni * ti)
+        # (loop on: the exact constant, physics.ELEMENTARY_CHARGE)
+        _p0 = thermal_pressure_charge(jbs_loop) * (ne * te + ni * ti)
         if p_fast is not None:
             _p0 = _p0 + np.asarray(p_fast, dtype=float)
         if Z_imp:
@@ -7931,7 +7940,9 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         #   perturb_kinetic_equilibrium  (per-draw)   -- thermal, +p_fast, +impurity
         #   the state anchor `pressure_solve`         -- pressure + imp + fast + diff
         # Keep the three sites in step; if you change one, change all of them.
-        pres_tmp = 1.6022e-19 * (ne * te + ni * ti)
+        # eV -> J: exact under the self-consistent loop, the frozen legacy
+        # value otherwise -- the SAME factor the draws use (see above)
+        pres_tmp = thermal_pressure_charge(jbs_loop) * (ne * te + ni * ti)
 
         # Fixed fast-ion pressure -- constant across draws, never perturbed.
         # Supplied already on the equilibrium grid (eqdsk.psi_N) by the caller,
