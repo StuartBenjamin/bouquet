@@ -199,6 +199,13 @@ class Baseline:
     # kept available for debugging without cluttering the notebook output.
     reconstruction_log: Optional[str] = None
 
+    # the unified reconstruction engine's full record
+    # (GenerationConfig.reconstruction_engine="unified" only; None on the
+    # legacy paths): contract, settings, convergence constants and their
+    # origins, per-pass log, delivery checks, the state a draw inherits and
+    # the solve counts.  See bouquet.engine / docs/engine.md.
+    engine: Optional[dict] = None
+
     def __repr__(self):
         # concise summary -- the default dataclass repr dumps every numpy array,
         # which floods a notebook when `reconstruct()`/`prepare_baseline()` is the

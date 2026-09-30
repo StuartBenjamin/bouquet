@@ -650,6 +650,15 @@ class Bouquet:
         from .baseline import resolve_baseline
         from .config import ImasSource
 
+        # GenerationConfig.reconstruction_engine="unified": the ONE
+        # reconstruction engine (bouquet.engine) builds the baseline for
+        # either input type.  The default "legacy" never enters it, and
+        # everything below is the legacy path, unchanged.
+        if getattr(self.config.generation, "reconstruction_engine",
+                   "legacy") == "unified":
+            from .engine import prepare_engine_baseline
+            return prepare_engine_baseline(self)
+
         # the self-consistent bootstrap loop runs in the baseline too, so its
         # workflow refusals fire here (before single_profile_jphi rewrites
         # recalculate_j_BS below), not only at generate()
@@ -5125,6 +5134,7 @@ class Bouquet:
         if self.baseline is None or self.mygs is None:
             raise ValueError("call setup_solver() + prepare_baseline() / "
                              "reconstruct() before verify_sigma0_consistency()")
+        self._refuse_unified_engine_draws("verify_sigma0_consistency()")
         if self.config.generation.single_profile_jphi:
             # No inductive/bootstrap split exists, so there is nothing for the
             # sigma=0 draw to reproduce. Report a pass rather than spending a
@@ -5922,6 +5932,7 @@ class Bouquet:
             raise ValueError("call prepare_baseline() before generate()")
         if self.mygs is None:
             raise ValueError("call setup_solver() before generate()")
+        self._refuse_unified_engine_draws("generate()")
 
         self._validate_workflow()
 
@@ -6165,6 +6176,30 @@ class Bouquet:
                 b0_sign=getattr(bl, "source_b0_sign", None))
 
         return self.diagnostics
+
+    def _refuse_unified_engine_draws(self, what):
+        """Refuse draws on a baseline built by the unified engine (Stage 2).
+
+        The legacy draw routes compose the bootstrap with the legacy
+        toroidal conversion (``<j.B>/(F<1/R>)``) and keep the pressure-driven
+        term frozen in the inductive, while an engine baseline stores the
+        solver-consistent ``<j.B> F<1/R>/<B^2>`` composition -- a legacy draw
+        would therefore NOT reproduce the reconstruction at zero
+        perturbation.  The draws move onto the engine in Stage 3; until then
+        this refuses rather than producing an inconsistent ensemble.
+        """
+        if getattr(self.config.generation, "reconstruction_engine",
+                   "legacy") == "unified" or getattr(
+                       getattr(self, "baseline", None), "engine",
+                       None) is not None:
+            raise NotImplementedError(
+                f"{what}: the baseline was built by the unified "
+                "reconstruction engine (reconstruction_engine='unified'); "
+                "draws on the engine are not implemented yet (Stage 3), and "
+                "the legacy draw routes would not reproduce this "
+                "reconstruction at zero perturbation (different bootstrap "
+                "conversion and pressure-term bookkeeping).  Use "
+                "reconstruction_engine='legacy' to generate a bouquet.")
 
     def _baseline_jbs_record(self):
         """The baseline's self-consistent bootstrap loop record, or ``None``
