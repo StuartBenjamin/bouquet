@@ -809,7 +809,11 @@ def run_draw(ctx, backend, inputs, *, label=None, coil_guard=None,
     clock.stop()
     if bnd_diag is not None:
         bnd_diag("after engine draw loop")
-    return _finish(ctx, backend, inputs, dp, res, m_fin, pin, label)
+    out = _finish(ctx, backend, inputs, dp, res, m_fin, pin, label)
+    from .jbs_loop import jsonable
+    # the anchor and loop stages (generate() completes the clock)
+    out["record"]["cost"] = jsonable(clock.record())
+    return out
 
 
 def _finish(ctx, backend, inputs, dp, res, m_fin, pin, label):

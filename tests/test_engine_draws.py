@@ -677,6 +677,20 @@ def test_bouquet_generate_runs_on_the_engine(tmp_path, toy_bouquet_solver):
         == ED.ENGINE_DRAW_VERSION
     sel = _quiet(b.filter)
     assert sel["boundary"]["n_total"] == 2
+    # the archived engine draws export like any draw: g-file bundle and a
+    # perturbed IDS (the example OMAS file as the template)
+    import json
+    from bouquet.io.imas import write_imas_draw
+    bun = _quiet(b.export_bundle, str(tmp_path / "bundle"),
+                 formats=("geqdsk",), selection="all")
+    assert len(bun) == 2 and all(os.path.isfile(v["geqdsk"])
+                                 for v in bun.values())
+    out = _quiet(write_imas_draw, b.config.output_header, 0,
+                 os.path.join(_EX, "D3Dlike_baseline_omas.json"),
+                 str(tmp_path / "d0.json"), time=2.3043)
+    with open(out) as fh:
+        ids = json.load(fh)
+    assert ids["core_profiles"]["profiles_1d"]
 
 
 def test_a_legacy_baseline_is_not_drawn_on_the_engine(tmp_path,
@@ -713,3 +727,23 @@ def test_the_parallel_worker_entry_point_and_merge(tmp_path,
         assert ED.read_draw_engine(out, i, scan_key=0)["version"] \
             == ED.ENGINE_DRAW_VERSION
     assert load_baseline_engine(out, scan_key=0)["draws"] is not None
+
+
+def test_the_probe_draw_mode_runs_on_the_toy(tmp_path, toy_bouquet_solver):
+    """The solver probe's sigma0 stage and draw mode, on the stand-in (so
+    the cluster run cannot fail on the probe's own bookkeeping)."""
+    import json
+    import sys
+    sys.path.insert(0, os.path.join(_HERE, "probes"))
+    import measure_engine as ME
+    from bouquet.jbs_loop import jsonable
+    b = _bq(tmp_path)
+    b.setup_solver()
+    _quiet(b.prepare_baseline)
+    z = _quiet(ME._sigma0, b)
+    assert z["passed"] and z["request_bit_identical"]
+    assert z["cost"]["anchor"]["solves"] == 0
+    d = _quiet(ME._draws, b, 2, ME.DEFAULT_SEED)
+    assert d["attempts"] == 2 == d["archived"] + d["rejected"]
+    assert set(d["stage_totals"]) == set(ED._Clock.STAGES)
+    json.dumps(jsonable(d))

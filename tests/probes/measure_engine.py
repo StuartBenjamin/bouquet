@@ -24,9 +24,23 @@ interpreter (``OFT_env`` is a per-process singleton).  Per part it records:
 
 Parts: ``recon``, ``imas`` (rows Ip + l_i), ``imas_q0`` (+ the q0 row, which
 the source's sawtooth gate admits), ``recon_dc`` (the delivery correction
-ON).  Usage::
+ON).  Every reconstruction part also runs the ENGINE DRAW at zero
+perturbation (stage ``sigma0``: ``verify_sigma0_consistency`` under the
+engine -- the request identity, ``r_j``/``r_I`` against the
+reconstruction's bootstrap, ``dl_i``, ``dq0`` at its labelled radius,
+``dq95``, the passes and solves).
+
+Draw mode (Stage 3): part ``draws_recon`` (and ``draws_imas``) builds the
+engine baseline and runs ``generate()`` with ``n_equils = --draws`` and
+``seed = --seed`` (defaults 6 and 12345, the legacy batch it is compared
+with), writing per draw: archived or rejected (with its
+``DRAW_REJECTION_REASONS`` code), in spec, the loop's passes, the Ip
+amplitude, l_i(3)/l_i(1)/beta_N/q0/q95 and their changes, the l_i
+attribution, the post-hoc verdicts, and solves / passes / wall time by
+stage (anchor, loop, homotopy, post_homotopy, filters, archive).  Usage::
 
     python tests/probes/measure_engine.py OUTDIR [--parts recon,imas,...]
+    python tests/probes/measure_engine.py OUTDIR --draws 6 --seed 12345
 
 Writes ``OUTDIR/engine_<part>.json`` per part (always, with the error in
 place of the numbers when a stage raises) and ``OUTDIR/engine_measurement
@@ -69,7 +83,12 @@ PARTS = {
     "imas": ("imas", dict()),
     "imas_q0": ("imas", dict(engine_rows=["Ip", "l_i", "q0"])),
     "recon_dc": ("recon", dict(engine_delivery_correction=True)),
+    # Stage 3: a seeded engine-draw batch (--draws / --seed)
+    "draws_recon": ("recon", dict()),
+    "draws_imas": ("imas", dict()),
 }
+#: the draw batch the legacy measurement used (6 draws, seed 12345)
+DEFAULT_DRAWS, DEFAULT_SEED = 6, 12345
 
 
 def oft_importable():
@@ -257,7 +276,69 @@ def _kin(bl, psi):
                 zeff=np.clip(k(bl.Zeff), 1.0, None))
 
 
-def child(part, outdir):
+def _sigma0(b):
+    """The engine draw at zero perturbation (verify_sigma0_consistency)."""
+    t0 = time.perf_counter()
+    v = b.verify_sigma0_consistency()
+    out = {k: v.get(k) for k in (
+        "passed", "request_bit_identical", "request_max_abs_diff",
+        "loop_converged", "n_passes", "r_j", "r_I", "dl_i", "dq0",
+        "dq0_psi_N", "dq0_stats", "dq0_stats_psi_N", "dq95", "amplitude",
+        "tolerances", "criterion")}
+    rec = v.get("record") or {}
+    out["cost"] = rec.get("cost")
+    out["solves"] = rec.get("solves")
+    out["wall_s"] = float(time.perf_counter() - t0)
+    return out
+
+
+def _draw_row(i, d):
+    e = d.get("engine") or {}
+    lp = e.get("loop") or {}
+    return dict(
+        index=int(i), archived=True, in_spec=bool(d.get("in_spec")),
+        time_s=d.get("time"), loop_passes=lp.get("n_passes"),
+        loop_converged=lp.get("converged"),
+        amplitude=(e.get("amplitude") or {}).get("final"),
+        delivered=e.get("delivered"), archived_state=e.get("archived"),
+        reference=e.get("reference"), deltas=e.get("deltas"),
+        attribution=e.get("attribution"), post_hoc=e.get("post_hoc"),
+        homotopy=e.get("homotopy"), post_homotopy=e.get("post_homotopy"),
+        cost=e.get("cost"), inputs=e.get("inputs"),
+        identity=e.get("identity"))
+
+
+def _draws(b, n, seed):
+    """A seeded engine-draw batch through generate()."""
+    g = b.config.generation
+    g.n_equils = int(n)
+    g.seed = int(seed)
+    t0 = time.perf_counter()
+    diags = b.generate() or []
+    wall = float(time.perf_counter() - t0)
+    rows = [_draw_row(i, d) for i, d in enumerate(diags)]
+    rej = [dict(r) for r in (b.draw_rejections or [])]
+    stages = ("anchor", "loop", "homotopy", "post_homotopy", "filters",
+              "archive")
+    tot = {s: dict(solves=0, passes=0, wall_s=0.0) for s in stages}
+    for r in rows:
+        for s in stages:
+            c = (r.get("cost") or {}).get(s) or {}
+            for k in ("solves", "passes", "wall_s"):
+                tot[s][k] += c.get(k) or 0
+    return dict(
+        n_equils=int(n), seed=int(seed), wall_s=wall,
+        attempts=len(rows) + len(rej), archived=len(rows),
+        rejected=len(rej), in_spec=int(sum(r["in_spec"] for r in rows)),
+        per_draw=rows, rejections=rej, stage_totals=tot,
+        solve_failures=list(getattr(b, "solve_failures", []) or []),
+        per_draw_wall_s=[r["time_s"] for r in rows],
+        note=("per-draw wall time 'time_s' is generate_bouquet's per-draw "
+              "clock (draw + homotopy + filters); 'cost' splits it by "
+              "stage including the archive write"))
+
+
+def child(part, outdir, draws=None, seed=None):
     import bouquet as bq
     _harness.assert_bouquet_is_repo_local()
     src, extra = PARTS[part]
@@ -310,10 +391,16 @@ def child(part, outdir):
                 engine_record=rec)
         _stage("build", _build)
         bl = holder.get("bl")
-        if bl is not None:
+        if bl is not None and part.startswith("draws_"):
+            nd = DEFAULT_DRAWS if draws is None else int(draws)
+            sd = DEFAULT_SEED if seed is None else int(seed)
+            out["draw_mode"] = dict(draws=nd, seed=sd)
+            _stage("draws", lambda: _draws(b, nd, sd))
+        elif bl is not None:
             _stage("distance", lambda: (_distance_gfile if src == "recon"
                                         else _distance_ids)(b, bl, psi_pad))
             _stage("resolve_self", lambda: _resolve_self(b, bl, psi_pad))
+            _stage("sigma0", lambda: _sigma0(b))
     except Exception as e:
         out["fatal"] = f"{type(e).__name__}: {e}\n" + traceback.format_exc()
     finally:
@@ -327,11 +414,14 @@ def child(part, outdir):
     return path
 
 
-def run_part(part, outdir, timeout=None):
+def run_part(part, outdir, timeout=None, draws=None, seed=None):
     """Run one part in its own interpreter; return its JSON (with ``_rc``)."""
     os.makedirs(outdir, exist_ok=True)
+    extra = ([] if draws is None else ["--draws", str(int(draws))]) \
+        + ([] if seed is None else ["--seed", str(int(seed))])
     proc = subprocess.run(
-        [sys.executable, os.path.abspath(__file__), outdir, "--child", part],
+        [sys.executable, os.path.abspath(__file__), outdir, "--child", part]
+        + extra,
         env=_harness.subprocess_env(OMP_NUM_THREADS="1", MKL_NUM_THREADS="1",
                                     OPENBLAS_NUM_THREADS="1",
                                     MPLBACKEND="Agg"),
@@ -355,16 +445,27 @@ def main(argv=None):
     ap.add_argument("--parts", default=",".join(PARTS))
     ap.add_argument("--child", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--child-timeout", type=float, default=None)
+    ap.add_argument("--draws", type=int, default=None,
+                    help="draw mode: run the seeded engine-draw batch "
+                         "(part draws_recon unless --parts names draws_*)")
+    ap.add_argument("--seed", type=int, default=None)
     a = ap.parse_args(argv)
     oft_importable()
     if a.child:
-        child(a.child, a.outdir)
+        child(a.child, a.outdir, draws=a.draws, seed=a.seed)
         return 0
+    parts = [p for p in a.parts.split(",") if p]
+    if a.draws is not None and not any(p.startswith("draws_")
+                                       for p in parts):
+        parts = ["draws_recon"]
+    elif a.draws is None and a.parts == ",".join(PARTS):
+        parts = [p for p in parts if not p.startswith("draws_")]
     res = {}
-    for part in [p for p in a.parts.split(",") if p]:
+    for part in parts:
         if part not in PARTS:
             raise SystemExit(f"unknown part {part!r}; known: {list(PARTS)}")
-        res[part] = run_part(part, a.outdir, timeout=a.child_timeout)
+        res[part] = run_part(part, a.outdir, timeout=a.child_timeout,
+                             draws=a.draws, seed=a.seed)
         print(f"[measure_engine] {part}: stages {res[part].get('stages')}",
               flush=True)
     with open(os.path.join(a.outdir, "engine_measurement.json"), "w") as fh:

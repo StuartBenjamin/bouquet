@@ -15,7 +15,16 @@ modelling source at t = 2.3043 s), with ``reconstruction_engine="unified"``:
 * the delivered state re-solves to itself from its own stored request
   (``|dl_i| <= jbs_tol_li``, ``|dq0|, |dq95| <= jbs_tol_q0``, current
   ``<= jbs_rtol_j``);
-* solve counts and wall time are recorded.
+* solve counts and wall time are recorded;
+* Stage 3, the draws: the engine draw at ZERO perturbation reproduces the
+  reconstruction on both examples (``verify_sigma0_consistency`` under the
+  engine: the first request bit-identical to the stored one, the loop
+  converged, the draw's bootstrap within ``jbs_rtol_j`` / ``jbs_rtol_Ip`` of
+  the reconstruction's, ``|dl_i| <= jbs_tol_li``); a seeded 6-draw batch on
+  the g-file example (``--draws 6 --seed 12345``, the legacy batch it is
+  compared with) is written per draw -- outcome, solves / passes / wall time
+  by stage, the l_i attribution -- and every attempt is accounted for.  No
+  runtime bar is asserted (the probe's JSON is the measurement).
 
 Every solver call runs in a subprocess of ``tests/probes/measure_engine.py``
 (``OFT_env`` is a per-process singleton); the probe writes every number, pass
@@ -128,3 +137,54 @@ def test_the_distance_to_input_table_is_written(parts, part):
              "requested_minus_achieved_pct_of_peak", "lcfs_mm"))
     for k in keys:
         assert k in t, k
+
+
+# ---------------------------------------------------------------------------
+#  Stage 3: the draws on the engine
+# ---------------------------------------------------------------------------
+@pytest.mark.solver
+@solver_only
+@pytest.mark.parametrize("part", _PARTS)
+def test_the_zero_perturbation_engine_draw_reproduces_the_reconstruction(
+        parts, part):
+    z = _need(parts[part], "sigma0")
+    assert z["request_bit_identical"] is True, z
+    assert z["loop_converged"] is True, z
+    assert z["r_j"] <= _S["rtol_j"] and z["r_I"] <= _S["rtol_Ip"], z
+    assert abs(z["dl_i"]) <= _S["tol_li"], z
+    assert z["passed"] is True, z
+    # reported beside the verdict, at their labelled radii
+    assert z["dq0_psi_N"] is not None and z["dq95"] is not None
+
+
+@pytest.fixture(scope="module")
+def draw_batch(tmp_path_factory):
+    work = str(tmp_path_factory.mktemp("engine_draws"))
+    return ME.run_part("draws_recon", work, draws=ME.DEFAULT_DRAWS,
+                       seed=ME.DEFAULT_SEED)
+
+
+@pytest.mark.solver
+@solver_only
+def test_a_seeded_engine_draw_batch_is_recorded(draw_batch):
+    from bouquet.TokaMaker_interface import DRAW_REJECTION_REASONS
+    d = _need(draw_batch, "draws")
+    assert d["n_equils"] == ME.DEFAULT_DRAWS and d["seed"] == ME.DEFAULT_SEED
+    assert d["attempts"] == d["archived"] + d["rejected"] \
+        == ME.DEFAULT_DRAWS, d
+    for r in d["rejections"]:
+        assert r["reason"] in DRAW_REJECTION_REASONS, r
+    for row in d["per_draw"]:
+        assert row["loop_converged"] is True, row
+        c = row["cost"]
+        for st in ("anchor", "loop", "homotopy", "post_homotopy", "filters",
+                   "archive"):
+            assert st in c and c[st]["wall_s"] >= 0.0, (st, c)
+        assert c["anchor"]["solves"] == 0
+        assert c["loop"]["passes"] == row["loop_passes"]
+        a = row["attribution"]
+        assert abs(sum(a["parts"].values()) + a["remainder"]
+                   - a["delta_l_i"]) <= 1e-12, a
+        ph = row["post_hoc"]
+        assert ph["in_band"] == (ph["l_i_in_band"] and ph["q0_ok"])
+        assert row["in_spec"] == (ph["coil_in_spec"] and ph["in_band"])
