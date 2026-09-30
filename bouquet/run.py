@@ -850,7 +850,14 @@ class Bouquet:
         if np.isfinite(m.get('li1_cross_err_pct', float('nan'))):
             line("  l_i(1)x", m['li1_cross'], m['li1_cross_efit'],
                  m['li1_cross_err_pct'])
-        line("q0", m['q0'], m['q0_efit'], m['q0_err_pct'], fmt=".2f")
+        # q0 at LIKE radii (both at psi_N = q0_psi_N, the solver's first
+        # traced surface); the g-file's axis value is printed beside it
+        line(f"q0@{m.get('q0_psi_N', 0.02):g}", m['q0'], m['q0_efit'],
+             m['q0_err_pct'], fmt=".2f")
+        if np.isfinite(m.get('q0_efit_axis', float('nan'))):
+            print(f"  {'':<12} {'':<13} (g-file axis q(0) "
+                  f"{m['q0_efit_axis']:.2f}, {m['q0_err_pct_vs_axis']:+.2f}% "
+                  "-- a different radius)")
         line("q95", m['q95'], m['q95_efit'], m['q95_err_pct'], fmt=".2f")
         line("beta_N", m['beta_n'], m['beta_n_efit'], m['beta_n_err_pct'], fmt=".2f")
         line("beta_p", m['beta_p'], m['beta_p_efit'], m['beta_p_err_pct'], fmt=".2f")
@@ -5625,11 +5632,15 @@ class Bouquet:
         bl.jphi_request_offset, _n_fl_t = _request_offset(
             bl.j_inductive, dv["achieved"], j_bs0, fixed + jd)
         _st = mygs.get_stats(lcfs_pad=psi_pad, li_normalization="iter")
+        from .physics import SOLVER_Q0_PSI_N
         bl.delivered_state = dict(
             convention=DELIVERED_SPLIT_CONVENTION, path="imas",
             jBS_baseline_mode=str(delivery["mode"]),
             l_i=float(bl.l_i_target), l_i_scale="iter(li3)",
             q0=float(_st.get("q_0", float("nan"))),
+            # get_stats' q0 is q at psi_N 0.02, not on axis (and not at the
+            # closure's psi_q[0], ip_closure["q0_target_psi_N"])
+            q0_psi_N=float(SOLVER_Q0_PSI_N),
             q95=float(_st.get("q_95", float("nan"))),
             Ip_target=float(bl.Ip_target),
             request_normalisation=float(dv["kappa"]),
@@ -6036,9 +6047,12 @@ class Bouquet:
         # the reference: the ONE reconstruction state (l_i_target IS its l_i)
         _ds = getattr(bl, "delivered_state", None) or {}
         _st0 = mygs.get_stats(li_normalization="iter", lcfs_pad=psi_pad)
+        from .physics import SOLVER_Q0_PSI_N
         reference = dict(
             l_i=float(bl.l_i_target),
             q0=float(_ds.get("q0", float("nan"))),
+            # every q0 in this check is get_stats' (psi_N 0.02): like for like
+            q0_psi_N=float(SOLVER_Q0_PSI_N),
             q95=float(_ds.get("q95", float("nan"))),
             recorded=bool(_ds),
             anchor_resolve=dict(l_i=float(_st0["l_i"]),

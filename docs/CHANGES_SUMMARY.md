@@ -276,6 +276,15 @@ legacy corrector already takes its step.
   The frozen legacy path keeps its value as `ELEMENTARY_CHARGE_LEGACY`
   (selected by `physics.thermal_pressure_charge`), bit for bit;
   `sampling.EC` remains as that legacy value for back-compatibility.
+- **q0 at like radii.** The solver's reported q0 (`get_stats()['q_0']`) is q
+  at ψ_N = 0.02 (`physics.SOLVER_Q0_PSI_N`), not on axis. The g-file
+  reconstruction metrics now read the g-file's q at that radius (`q0_efit`,
+  `q0_err_pct`), keep its axis value and the old solver-vs-axis error as
+  `q0_efit_axis` / `q0_err_pct_vs_axis`, and record `q0_psi_N`; the
+  delivered states, the σ=0 check's reference and the baseline re-solve
+  record carry `q0_psi_N`; the sawtooth-gate messages name the ψ_N they read.
+  No q0 target, gate, tolerance or verdict changed (the verdict never read
+  q0); the IMAS q0 closure was already like-for-like at `psi_q[0]`.
 
 ## Unreleased — reversed-current IMAS sources (hotfix)
 

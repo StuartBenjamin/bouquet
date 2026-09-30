@@ -55,7 +55,7 @@ from .utils import (
     read_eqdsk_from_bytes,
 )
 from .io.geqdsk import read_geqdsk
-from .physics import q_ravg, thermal_pressure_charge
+from .physics import SOLVER_Q0_PSI_N, q_ravg, thermal_pressure_charge
 
 # ---- Masked anchor-solve failure counter (issue #24) ------------------------
 # The per-draw anchor solves swallow failures (fallback: `pass`; band
@@ -4321,7 +4321,10 @@ def perturb_kinetic_equilibrium(
             if q_pre[0] < 1.0:
                 dt_scale = time.perf_counter() - t_scale
                 print(f"  [li_iter={li_iter}] find_optimal_scale: {dt_scale:.1f}s")
-                print("Skipping this equilibrium, q_0 < 1.0 (pre-check)")
+                # (the sawtooth gate reads q at psi_N = psi_pad, the first
+                # get_q sample -- not on axis; label only, gate unchanged)
+                print(f"Skipping this equilibrium, q_0 < 1.0 (pre-check; q "
+                      f"at psi_N={psi_pad:g} = {q_pre[0]:.4f})")
                 l_i = np.inf
                 continue
 
@@ -4337,7 +4340,8 @@ def perturb_kinetic_equilibrium(
         if constrain_sawteeth:
             _, q, _, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
             if q[0] < 1.0:
-                print("Skipping this equilibrium, q_0 < 1.0")
+                print(f"Skipping this equilibrium, q_0 < 1.0 (q at "
+                      f"psi_N={psi_pad:g} = {q[0]:.4f})")
                 l_i = np.inf
                 continue
 
@@ -4424,8 +4428,8 @@ def perturb_kinetic_equilibrium(
                     label=f"draw l_i iter {li_iter}",
                     init_source=JBS_DRAW_INIT_WARM, raise_on_fail=True)
             except _GSReject:
-                print("Skipping this equilibrium, q_0 < 1.0 (j_BS loop "
-                      "pass)")
+                print(f"Skipping this equilibrium, q_0 < 1.0 (j_BS loop "
+                      f"pass; q at psi_N={psi_pad:g})")
                 l_i = np.inf
                 continue
             spike_profile = _gsr["jbs_used"]
@@ -5474,6 +5478,8 @@ def generate_bouquet(
             _stJ = mygs.get_stats(lcfs_pad=psi_pad, li_normalization='iter')
             _J_state = dict(l_i=float(_stJ['l_i']),
                             q0=float(_stJ.get('q_0', float('nan'))),
+                            # get_stats' q0: at psi_N 0.02, not on axis
+                            q0_psi_N=float(SOLVER_Q0_PSI_N),
                             q95=float(_stJ.get('q_95', float('nan'))),
                             Ip=float(_recon_Ip))
 

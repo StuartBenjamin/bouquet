@@ -34,6 +34,15 @@ ELEMENTARY_CHARGE = 1.602176634e-19
 ELEMENTARY_CHARGE_LEGACY = 1.6022e-19
 
 
+#: The normalised poloidal flux at which the solver's reported ``q0`` lives:
+#: TokaMaker's ``get_stats()['q_0']`` is ``q`` at its ``axis_pad`` default,
+#: psi_N = 0.02 (the first traced surface), NOT the magnetic axis.  A g-file's
+#: ``qpsi[0]`` (and an IDS ``q[0]``) is the axis value, psi_N = 0.  Compare
+#: like with like: evaluate the input at this radius, or say which radius a
+#: number is at (``q0_psi_N`` in the records).
+SOLVER_Q0_PSI_N = 0.02
+
+
 def thermal_pressure_charge(jbs_loop=None):
     """The eV -> J factor of the thermal pressure for a run.
 
