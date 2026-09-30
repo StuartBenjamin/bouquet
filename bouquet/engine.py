@@ -826,6 +826,9 @@ class UnifiedEngine:
             converged = bool(res_m["converged"])
             last = res_m
         st.lambda_bs = np.asarray(last["jbs_used"], dtype=float)
+        # the fixed pressure every pass solved with (a draw perturbs it)
+        st.extras["pressure"] = np.asarray(self.c.pressure, dtype=float)
+        st.extras["Ip"] = float(self.c.Ip)
         if self.pin is not None:
             st.q0_row = float(self.pin.row)
         n_before = int(self.b.n_solves)
@@ -1113,8 +1116,11 @@ class TokaMakerBackend:
         geom["B2"] = np.asarray(d["avg_B2"], dtype=float)
         geom["li_geom"] = li_closure_geometry(eq, geom, psi_pad=pad)
         li = float(li_achieved(eq, li_kind=self.li_kind, psi_pad=pad)[0])
-        q_row = float(np.asarray(eq.get_q(psi=np.array([self.q_psi]))[1],
-                                 dtype=float)[0])
+        # q on the geometry's own surfaces (the legacy _q0_of reads index 0
+        # of the same call), at the row radius
+        _pq = np.ascontiguousarray(np.asarray(geom["psi_q"], dtype=float))
+        _q = np.asarray(eq.get_q(psi=_pq.copy())[1], dtype=float)
+        q_row = float(np.interp(self.q_psi, _pq, _q))
         Ip = abs(float(eq.get_globals()[0]))
         achieved = np.asarray(eq_jphi_profile(geom, "jphi-linterp", eq=eq),
                               dtype=float)
