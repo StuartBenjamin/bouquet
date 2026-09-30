@@ -285,6 +285,11 @@ legacy corrector already takes its step.
   record carry `q0_psi_N`; the sawtooth-gate messages name the ψ_N they read.
   No q0 target, gate, tolerance or verdict changed (the verdict never read
   q0); the IMAS q0 closure was already like-for-like at `psi_q[0]`.
+- **The legacy path stays bit for bit** under all of the above: its pressure
+  factor is the historical 1.6022e-19 exactly, the amplitude fit is
+  bit-identical to its frozen copy, the anchor rejection is loop-only and
+  the q0 changes are labels (`tests/test_legacy_path_stage0_bitwise.py`, a
+  fast form of the out-of-tree legacy A/B probe).
 
 ## Unreleased — reversed-current IMAS sources (hotfix)
 
