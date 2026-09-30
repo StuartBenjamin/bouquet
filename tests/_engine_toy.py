@@ -74,6 +74,11 @@ class ToyGS:
         self.D0sq = None                      # calibrated on the first solve
         self.state = None
         self.history = []
+        # a draw's inputs (set_inputs): the pressure the geometry's p' comes
+        # from and the kinetics the Redl bootstrap scales with; the defaults
+        # are the toy's own (bit for bit what the toy did before draws)
+        self.p = pressure(self.psi)
+        self.kin = None
 
     # ---- geometry ----------------------------------------------------------
     def geometry(self, dpsi):
@@ -85,7 +90,7 @@ class ToyGS:
         F = np.full_like(x, R0 * B0)
         Bp2 = (0.12 * B0 * eps) ** 2
         B2 = F ** 2 * inv_R2 + Bp2
-        dp = np.gradient(pressure(x), x)
+        dp = np.gradient(self.p, x)
         return dict(psi_N=x.copy(), psi_q=np.clip(x, PAD, 1 - PAD),
                     R_avg=R_avg, inv_R=inv_R, inv_R2=inv_R2,
                     dV_dpsi=np.full_like(x, VTOT / dpsi),
@@ -147,11 +152,43 @@ class ToyGS:
         self.state = {k: (v.copy() if isinstance(v, np.ndarray) else v)
                       for k, v in eq.items()}
 
+    # ---- a draw's inputs ----------------------------------------------------
+    def set_inputs(self, pressure=None, kinetics=None):
+        """The engine backend's draw hook: *pressure* feeds the geometry's
+        p' (and beta), *kinetics* scales the Redl bootstrap pointwise by
+        ``ne Te / (ne Te)_toy`` (exactly 1 for the toy's own kinetics)."""
+        self.p = (globals()["pressure"](self.psi) if pressure is None
+                  else np.asarray(pressure, dtype=float).copy())
+        self.kin = None if kinetics is None else dict(kinetics)
+
+    def _kin_factor(self, kin):
+        if kin is None:
+            return 1.0
+        return (np.asarray(kin["ne"], float) * np.asarray(kin["te"], float)
+                / (np.full(self.psi.size, 5e19) * np.full(self.psi.size,
+                                                          1e3)))
+
+    def flux_integral(self, psi_N, profile):
+        """A volume integral on the current state (uniform dV/dpsi)."""
+        from scipy.integrate import trapezoid
+        dpsi = self.dpsi0 if self.state is None else self.state["dpsi"]
+        g = self.geometry(dpsi)
+        return float(trapezoid(g["dV_dpsi"] * dpsi
+                               * np.asarray(profile, float),
+                               np.asarray(psi_N, float)))
+
+    def redl(self, kinetics=None):
+        """Redl on the CURRENT state with *kinetics* (the engine backend
+        interface; default: the backend's own)."""
+        dpsi = self.dpsi0 if self.state is None else self.state["dpsi"]
+        return self._redl_profile(dpsi, self.kin if kinetics is None
+                                  else kinetics)
+
     # ---- measurements --------------------------------------------------------
-    def redl(self, dpsi):
+    def _redl_profile(self, dpsi, kin=None):
         x = self.psi
         j = B0 * (2.4e5 * _gauss(x, 0.94, 0.03) + 6.0e4 * x * (1.0 - x)) \
-            * (self.dpsi0 / dpsi) * self.redl_scale
+            * (self.dpsi0 / dpsi) * self.redl_scale * self._kin_factor(kin)
         if self.nan_redl_at is not None and self.n_solves >= self.nan_redl_at:
             j = j.copy()
             j[50] = np.nan
@@ -181,14 +218,22 @@ class ToyGS:
         st = self.state
         g = dict(st["geom"])
         g["li_geom"] = self.li_geom(g)
-        out = dict(geom=g, redl=self.redl(st["dpsi"]), li=st["li"],
+        out = dict(geom=g, redl=self._redl_profile(st["dpsi"], self.kin),
+                   li=st["li"],
                    q_row=self.q_at(st, float(g["psi_q"][0])), Ip=self.Ip,
                    achieved=st["A"].copy())
         if want_chords and self.chords is not None:
             out["B_chords"], out["chords_found"] = self.field_at_chords(st)
             out["axis"] = (R0, 0.0)
         if final:
-            out["stats"] = dict(q_0=out["q_row"], l_i=st["li"])
+            from scipy.integrate import trapezoid
+            j95 = float(np.interp(0.95, self.psi, st["A"]))
+            pav = float(trapezoid(self.p, self.psi))
+            out["stats"] = dict(
+                q_0=out["q_row"], l_i=st["li"],
+                q_95=(self.q_scale / j95 if j95 > 0 else float("nan")),
+                beta_n=100.0 * (2.0 * MU0 * pav / B0 ** 2) * A_MIN * B0
+                / (self.Ip / 1e6))
             out["li_1"] = st["li"]
         return out
 
