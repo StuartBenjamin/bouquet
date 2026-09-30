@@ -34,7 +34,10 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │   ├── [structured_mse/]          structured closure + mse_data only:
     │   │                              per-chord arrays as DATASETS (chord_*,
     │   │                              tgamma_meas, sigma_eff, residual_sigma_*,
-    │   │                              tgamma_pred_*, jacobian, excluded_*)
+    │   │                              tgamma_pred_*, jacobian, excluded_*;
+    │   │                              unified engine: engine_mse_*)
+    │   ├── [engine_json]              the engine record as a string DATASET
+    │   │                              when too large for an attribute
     │   └── attrs: Ip_target, l_i_target, source_kind, [diverted],
     │              [source_current_sign, source_b0_sign, current_frame]
     │              [jbs_converged, jbs_n_passes, jbs_loop_json]
@@ -42,7 +45,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │              [delivered_state_json]
     │                                  ← the ONE reconstruction state (loop)
     │              [engine_json]      ← the unified engine's record (added;
-    │                                    reconstruction_engine="unified")
+    │                                    reconstruction_engine="unified"),
+    │                                    with its "draws" settings block
     └── <count>/                       one group per accepted draw
         │                              (integer; gaps = rejected draws)
         ├── eqdsk, [pfile]             raw bytes, fixed names
@@ -57,12 +61,16 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
         │   ├── psi_N                  (subgroup; see below)
         │   ├── F, avg_inv_R, avg_inv_R2, avg_B2
         │   └── q, dV_dpsi, f_trap, B_avg
+        ├── [engine_json]              engine draw record as a string DATASET
+        │                              when too large for an attribute
         └── attrs: l_i(1), l_i(3), count, homotopy_*, max_F_drift_pct,
                    max_VSC_drift_pct, in_spec, inspec_*, l_i_target_used,
                    [diverted], [passes_coil_filter, passes_boundary_filter,
                    selected]           ← filter flags, written post-hoc
                    [jbs_converged, jbs_n_passes, jbs_loop_json]
                                        ← the draw's jbs_loop block (v3)
+                   [engine_json, passes_draw_band]
+                                       ← engine draws only (added; see below)
 ```
 
 ## Conventions
@@ -166,6 +174,52 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
   Ip-normalised jphi-linterp REQUEST of the same state (one solve of it is
   the state), with `Baseline.jphi_request_offset` = request − achieved
   (not archived).
+
+- **The unified engine's records (added fields; schema stays v3).** Written
+  only with `reconstruction_engine="unified"`; a legacy archive carries none
+  of them and reads exactly as before.
+  - `engine_json` (on `_baseline` and on every draw group): the JSON record,
+    as the attribute when it fits in 60 000 bytes
+    (`engine.ENGINE_ATTR_MAX_BYTES`), else a string DATASET of the same name
+    with the attribute holding the pointer `{"stored_as": "dataset"}` (HDF5
+    caps a group's object header at 64 KiB). Read with
+    `bouquet.engine.read_engine_json(group)`,
+    `engine.load_baseline_engine(header, scan_key)` or
+    `engine_draws.read_draw_engine(header, count, scan_key)`.
+  - The baseline record is the reconstruction (contract, settings,
+    convergence constants and their origins, per-pass log, delivery checks,
+    the state, solves) plus, once `generate()` ran, a `draws` block (the
+    draws' loop settings, `rng_stream`, `q0_row`, `homotopy`,
+    `l_i_tolerance`, the Ip-row target `Ip_target_A` in the exact measure,
+    and the `reference` values every draw is compared with). Its per-chord
+    MSE arrays and Jacobians are NOT in the JSON: they are datasets
+    `engine_mse_*` under `_baseline/structured_mse/`, and the JSON holds
+    `"mse_record[<key>]"` in their place.
+  - The per-draw record (`engine_draws`, version `unified-engine-draw/1`):
+    `identity` (whether the first request was the stored one, bit for bit),
+    `inputs` (bootstrap scale, pressure-match iterations, inductive tries),
+    `rng_stream`, `amplitude` (per pass: `a_ind`, `a_bs` with the q0 row,
+    the Ip increment and the Ip in the exact measure against its target),
+    `loop` (the kernel record), `passes`, `q0_row`, `delivered` (the loop's
+    delivered draw: `l_i_3`, `l_i_1`, `beta_n`, `q0` at `q0_psi_N`,
+    `q0_stats` at `q0_stats_psi_N`, `q95`, `Ip`, the delivery check,
+    request − achieved), `archived` (the same after the homotopy stage),
+    `reference` (the reconstruction's), `deltas`, `attribution` (the linear
+    l_i parts `inductive` / `bootstrap` / `pressure` / `amplitude` [/
+    `q0_row`], `linear_total`, `delta_l_i`, `remainder` and its split into
+    `nonlinear_frozen_geometry` and `geometry_and_delivery`), `post_hoc`
+    (the l_i band and `constrain_sawteeth` verdicts, `coil_in_spec`,
+    `in_spec`), `homotopy`, `post_homotopy`, and `cost` (solves, passes and
+    wall time for the stages `anchor`, `loop`, `homotopy`, `post_homotopy`,
+    `filters`, `archive`, and their `total`).
+  - `passes_draw_band` (bool attr, engine draws only): the post-hoc band
+    verdict. It is one of the filter flags ANDed into `selected`
+    (`filtering._FILTER_FLAGS`), so `.filter()` selects what the until-N
+    ledger counted; `in_spec` is the coil verdict AND this band.
+  - A reader that predates these fields misreads nothing: every field it
+    knows keeps its name, unit and meaning. (An older package that
+    RE-FILTERS an engine archive would not AND `passes_draw_band` into
+    `selected`; `in_spec` still carries the band.)
 
 ## v2 → v3: the self-consistent bootstrap record
 

@@ -6,22 +6,26 @@ profiles) and a modelling source (IMAS / OMAS IDS) -- behind
 reconstruction and IMAS baseline paths, bit for bit; nothing in this page
 runs unless `"unified"` is set.
 
-**Status (Stage 2).** The engine builds the baseline (`Bouquet.prepare_baseline()`
+**Status (Stage 3).** The engine builds the baseline (`Bouquet.prepare_baseline()`
 returns the same `Baseline` the rest of the package consumes, plus
-`Baseline.engine`, the full record). `generate()` and
-`verify_sigma0_consistency()` **refuse** an engine baseline until the draws
-run on the engine (Stage 3): the legacy draw routes compose the bootstrap with
-a different conversion and keep the pressure-driven term frozen in the
-inductive, so a legacy draw would not reproduce the engine's reconstruction at
-zero perturbation.
+`Baseline.engine`, the full record) and runs the draws: `generate()` and
+`verify_sigma0_consistency()` run on the engine when it built the baseline in
+the same session ([Draws](#draws) below). A mismatched pair -- `"unified"`
+with a baseline the engine did not build, or `"legacy"` with an engine
+baseline -- is refused: the legacy draw routes compose the bootstrap with a
+different conversion and keep the pressure-driven term frozen in the
+inductive, so they would not reproduce an engine reconstruction at zero
+perturbation (and vice versa).
 
 Code: `bouquet/engine.py` (the engine, the TokaMaker backend, the wiring),
-`bouquet/adapters.py` (the source adapters), the kernel
-`bouquet.jbs_loop.run_jbs_loop` (unchanged except an opt-in hook for added
-criteria). Tests: `tests/test_engine.py` (a toy Grad-Shafranov stand-in),
-`tests/test_engine_adapters.py`, `tests/test_engine_wiring.py`,
-`tests/test_engine_solver.py` (`-m solver`), probe
-`tests/probes/measure_engine.py`.
+`bouquet/engine_draws.py` (the draws), `bouquet/adapters.py` (the source
+adapters), the kernel `bouquet.jbs_loop.run_jbs_loop` (unchanged except an
+opt-in hook for added criteria). Tests: `tests/test_engine.py` (a toy
+Grad-Shafranov stand-in), `tests/test_engine_adapters.py`,
+`tests/test_engine_wiring.py`, `tests/test_engine_draws.py` (the draws, on
+the toy and a TokaMaker stand-in over it), `tests/test_engine_draws_legacy_ast.py`
+(the legacy draw path is the frozen code), `tests/test_engine_solver.py`
+(`-m solver`), probe `tests/probes/measure_engine.py`.
 
 ## The picture
 
@@ -205,11 +209,11 @@ pass. A miss raises `JBSNotConverged` (or flags). That solve, its request,
 its geometry snapshot, `x*`, `lambda_BS*` and the discrepancies are the
 reconstruction: `EngineState`, recorded in `Baseline.engine["state"]`.
 
-**What a draw inherits (Stage 3).** Composing on the stored geometry
-snapshot with the stored components, `x*` and `lambda_BS*` (+ the delivery
-correction) reproduces the stored request bit for bit (tested); the state
-also carries the q0 row and target, so a draw can keep the q0 row as an
-option for sawtoothing discharges.
+**What a draw inherits.** Composing on the stored geometry snapshot with the
+stored components, `x*` and `lambda_BS*` (+ the delivery correction)
+reproduces the stored request bit for bit (tested, and re-checked by every
+draw context before it draws); the state also carries the q0 row and target,
+so a draw can keep the q0 row as an option for sawtoothing discharges.
 
 ## Presets
 
@@ -235,12 +239,151 @@ inherits. Its default is to be decided after the solver fix, by re-running
 the distance-to-input table (`tests/probes/measure_engine.py`, part
 `recon_dc`).
 
+## Draws
+
+`bouquet/engine_draws.py`; `Bouquet.generate()` builds a
+`GenerateEngineDraws` from the live reconstruction and hands it to
+`generate_bouquet(engine_draw=...)`, whose per-draw loop then calls it in
+place of the legacy `perturb_kinetic_equilibrium` (everything else --
+the warm start, the coil regularisation, the homotopy, the archive, the
+until-N ledger -- is the same code). The parallel launchers need nothing
+new: every worker runs `prepare_baseline()` + `generate()`.
+
+```
+ reconstruction state: G*, x*, lambda_BS*, (Delta*), request R*
+            |
+            v
+ sample (legacy stream): kinetics (pressure-matched), aux, ONE inductive
+ candidate (toroidal sigma_jphi, j_ls); the run's bootstrap scale
+            |
+            v
+ anchor (0 solves): lambda_0 = scale [lambda_BS* + Redl(draw kin) - Redl(recon kin)]
+            |
+            v
+ ONE loop (run_jbs_loop; ceiling jbs_max_passes_draw; current gate standing)
+   compose on G_k with x* HELD, p' from the draw's own pressure
+   close the Ip row: J + d_ind * (inductive term), exact measure
+   [+ q0 row: the two-scalar increments, AxisRowPin moves the axis row]
+   relax (beta) -> ONE solve -> measure (Redl with the draw's kinetics)
+            |
+            v
+ coil homotopy (engine_draw_homotopy, default on) -> post-homotopy check
+ (the existing _post_homotopy_jbs, the engine draw's own passes, the
+ saturation guard)
+            |
+            v
+ post-hoc filters on the archived draw: l_i band (l_i_tolerance), 
+ constrain_sawteeth; coil + boundary as always  ->  in_spec / selected
+```
+
+**Inputs.** Every perturbed quantity is formed as `base + (drawn - base)`:
+the kinetics on the kinetic grid (then PCHIP'd as the adapter does), the
+solve pressure from the adapter's own assembly (thermal + impurity + fast),
+the auxiliary channels, the parallel inductive. The random stream is the
+legacy one through the first inductive candidate (`engine_draws.RNG_STREAM`):
+the kinetic channels `ne, Te, (Zeff -> ni | ni), Ti` redrawn together until
+the flux-integrated thermal pressure matches within `p_thresh`, the
+auxiliary channels in their order, then one inductive candidate drawn IN
+TOROIDAL UNITS with the legacy call on `s_ind(x*) kappa* lambda_ind` (so its
+toroidal perturbation is the legacy draw's for the same normals: today's
+`sigma_jphi` and `j_ls`) and mapped back to `lambda_ind`; it is redrawn only
+while negative where its mean exceeds its sigma, and clipped to zero in the
+floor zone (the standard route's rule). The legacy routes then draw further
+candidates (Fix C band resampling, the standard route's l_i pre-screen); the
+engine draw does not, so a seeded engine run and a seeded legacy run share
+their streams up to the first legacy draw that resampled. The bootstrap
+scale is the run's `jBS_scale_range` sample, used as is (1.0 is the
+reconstruction's value -- `s_bs(x*)` already carries the reconstruction's
+scaling, so the legacy `bs_scale` centring is not applied).
+
+**The Ip row.** The one row a draw closes: an increment on the inductive
+term, `J = J0 + d_ind s_ind kappa lambda_ind'`, with
+`d_ind = [(Ip_lin* - Ip_lin(J0; G_k)) + (c* - c(G_k))] / Ip_lin(ind; G_k)`
+in the exact (`jphi-linterp`) measure, the target being the Ip the
+reconstruction's delivered composition carries in that measure on `G*`
+(`Ip` itself on the hard g-file row, the posterior on the soft IDS row).
+Zero extra solves; `a_ind = 1 + d_ind` is recorded per pass. With
+`engine_draw_q0_row=True` (needs the reconstruction's active q0 row) the
+sawtooth two-scalar system is solved in the same increment form on the
+inductive and bootstrap terms, and `AxisRowPin` moves the axis row once per
+pass from the measured q0 (the q0 criteria are then loop criteria).
+
+**Zero-perturbation identity by construction.** With every perturbation
+zero and the scale 1.0: the inputs are the base exactly, the first pass
+composes on `G*` (its `p'` shifted by the draw's pressure change, zero), the
+anchor increment is zero, and the Ip increment is formed from differences
+that vanish exactly -- so the first request IS the stored request, bit for
+bit (recorded per draw as `identity.pass1_request_bit_identical`). The solve
+of it from the warm state reproduces the reconstruction, the loop's pass-1
+residuals are the reconstruction's delivered ones, and the draw delivers the
+reconstruction to the loop tolerances. With the current gate standing (it is
+measured one pass late) the loop takes `JBS_REQUIRED_CONSECUTIVE + 1 = 3`
+passes. `verify_sigma0_consistency()` under the engine runs exactly this
+draw and gates `passed` on the draw-route rule at the unchanged tolerances
+(request identical, loop converged, `r_j`, `r_I` against `lambda_BS*`,
+`|dl_i| <= jbs_tol_li`), reporting `dq0` at its labelled radius and `dq95`.
+
+**Post-hoc filters, not matching.** A draw matches no l_i, q0 or MSE row;
+l_i and beta_N drift and are recorded. The l_i band
+(`|l_i - l_i*| <= l_i_tolerance l_i*`, default 0.05, around the
+reconstruction's l_i) and `constrain_sawteeth` (`q0 >= 1` at the q-row
+radius, psi_N = psi_pad, the legacy gate's radius) are applied to the
+ARCHIVED draw: a draw outside a band is archived with `in_spec=False` and
+`passes_draw_band=False`, never dropped; the until-N ledger and
+`.filter()`'s `selected` both AND the band into the coil + boundary verdict.
+Rejected (never archived, never counted), with their
+`DRAW_REJECTION_REASONS` code: a loop that does not converge
+(`jbs_not_converged`), a non-finite bootstrap (`jbs_non_finite`, at once), a
+failed first solve (`anchor_solve_failed`, the anchor's analog: the stored
+state composed with the draw's components), a refused amplitude closure
+(`engine_closure_refused`), a coil saturation (`coil_saturation_jbs_loop` /
+`_post_homotopy`), the homotopy and post-homotopy codes as before.
+
+### l_i controllability
+
+How much the draws' l_i scatters, and why, is recorded per draw so it is
+predictable and known rather than tuned away. Expected sizes (design note
+§2.8): the inductive-shape sampling dominates (the golden in-spec ensemble's
+sigma(l_i) = 0.021, about 3 %, band-truncated); kinetics through Redl and the
+pressure term and the Ip amplitude about 0.5-1.5 % (not yet measured); the
+loop itself at most `jbs_tol_li` (1e-3); the solver's delivery defect is a
+common shift, not a spread.
+
+**The attribution record** (`engine.attribution` per draw). The closure's
+own l_i gradient (`utils.structured_li_model` / `structured_li_gradient`,
+li_3) on the RECONSTRUCTION geometry `G*`, applied along the toroidal
+directions of the draw's change: `inductive` (`s_ind kappa* (lambda_ind' -
+lambda_ind)`), `bootstrap` (`s_bs kappa* (lambda_BS' - lambda_BS*)`),
+`pressure` (`P(p'_draw) - P(p'*)`), `amplitude` (`d_ind s_ind kappa*
+lambda_ind'`) and, with the q0 row, `q0_row`. `remainder = delta_l_i -
+linear_total` is split into `nonlinear_frozen_geometry` (the full model on
+`G*` minus the linear sum) and `geometry_and_delivery` (the delivered l_i
+minus the model on `G*`: the geometry's response and the solver). With Ip
+pinned by the amplitude the model is linear in the current, so on a fixed
+geometry the attribution is exact (tested on the toy: remainder at
+rounding); the remainder is the geometry and delivery part.
+
+**Cost.** Every draw records solves, passes and wall time by stage
+(`anchor` -- no solve --, `loop`, `homotopy`, `post_homotopy`, `filters`,
+`archive`), counted by the draw loop's `DrawSolveGuard` (every GS solve of
+the draw). On the toy a draw takes 3-5 loop passes (3 at zero perturbation)
+and one solve per pass; the homotopy adds one solve per stage it runs.
+`python tests/probes/measure_engine.py OUTDIR --draws 6 --seed 12345` writes
+the live numbers for the g-file example (the legacy batch measured 405-1407 s
+per draw, 4 archived / 2 rejected / 1 in spec at that seed).
+
+**The solve cap.** `draw_solve_maxits` (the ported #57 cap) is applied by
+the engine's solve wrapper (`TokaMakerBackend.solve`) to EVERY engine solve,
+reconstruction and draws, and restored after each; a solve that hits it
+fails as any failed solve.
+
 ## Cost
 
 Measured on the toy: Ip + l_i converges in 5–7 passes (the toy's flux range
 responds to l_i with the measured log-gain of 2); anchor 2 + passes + delivery
 2 solves. The MSE stage adds 1 + 8 finite-difference solves and 4–8 passes.
-The live numbers are written by the solver probe.
+A draw: 3-5 loop passes of one solve each (see [Draws](#draws)). The live
+numbers are written by the solver probe.
 
 ## Deviations from the design note
 
@@ -249,5 +392,12 @@ model on the NEW geometry (the note's `model(x_k; G_k)` form is unstable on
 the gain-2 geometry mode); the MSE linearisation is centred on the solved
 (β-blended) coefficients; `"fd_chord"` is offered beside `"fd_broyden"`;
 the q0 row starts from the anchor's achieved axis current; the IDS q0 target
-is the source's own q at the row radius; generate() refuses engine baselines
-until Stage 3.
+is the source's own q at the row radius. The draws: the inductive is drawn
+in toroidal units and its negative excursions follow the standard route's
+floor-zone rule (not Fix C's all-positive retry); the loop starts from
+`lambda_BS*` plus the Redl kinetic increment on the starting equilibrium
+(zero at identity); the first pass shifts `G*`'s `p'` by the draw's pressure
+change; the Ip-row target is the Ip the delivered composition carries in the
+exact measure (the posterior on a soft row); the optional q0 row is the
+two-scalar closure in increment form; the delivery correction, when on,
+keeps being updated per pass in the draw as in the reconstruction.

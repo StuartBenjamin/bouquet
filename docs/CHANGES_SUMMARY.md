@@ -28,9 +28,8 @@ bit-identical when absent).*
 - `Bouquet.prepare_baseline()` dispatches to the engine when selected, for
   both inputs, and returns the usual `Baseline` plus `Baseline.engine` (the
   full record: contract, settings, convergence constants with their origins,
-  per-pass log, delivery checks, state, solve counts). `generate()` and
-  `verify_sigma0_consistency()` refuse an engine baseline until the draws
-  run on the engine (Stage 3).
+  per-pass log, delivery checks, state, solve counts). (Stage 2 refused
+  engine baselines in `generate()`; Stage 3 below runs their draws.)
 - `run_jbs_loop(..., extra=None)`: an opt-in hook for criteria the kernel
   does not own; absent, the kernel is bit-identical (frozen-copy test).
 - Archive: `engine.store_baseline_engine` / `load_baseline_engine` write /
@@ -42,6 +41,33 @@ bit-identical when absent).*
   examples; identity (I2) is checked on the golden fixture's stored
   geometry; solver tests (`tests/test_engine_solver.py`, `-m solver`) and the
   probe `tests/probes/measure_engine.py` write the distance-to-input table.
+- **The draws on the engine (Stage 3, `bouquet/engine_draws.py`).** With
+  `reconstruction_engine="unified"`, `generate()` and
+  `verify_sigma0_consistency()` run on the engine: a draw starts from the
+  reconstruction's delivered state, perturbs the kinetics (the legacy
+  pressure-matched stream), the parallel inductive (today's toroidal
+  `sigma_jphi` / `j_ls`) and the bootstrap scale, holds `x*` and closes
+  only the Ip row -- a scalar amplitude on the inductive in the exact
+  measure, zero extra solves (optionally the q0 row too,
+  `engine_draw_q0_row`, default off) -- and runs ONE bootstrap loop (draw
+  ceiling, current gate standing), then the coil homotopy
+  (`engine_draw_homotopy`, default on) and the existing post-homotopy check
+  with its saturation guard. The first request of a zero-perturbation draw
+  is the stored request bit for bit, by construction. l_i and beta_N drift
+  and are recorded, with a linear l_i attribution (inductive, bootstrap,
+  pressure term, amplitude; remainder) from the closure's own gradient; the
+  l_i band (`l_i_tolerance`) and `constrain_sawteeth` are post-hoc filters
+  (out-of-band draws archived with `in_spec=False`, not counted by until-N,
+  not `selected`). Cost is recorded per draw by stage. `draw_solve_maxits`
+  now caps every engine solve. Archive: ADDED `engine_json` on draws and a
+  `draws` block on the baseline record, `passes_draw_band` (a filter flag),
+  engine MSE arrays as `structured_mse/engine_mse_*` datasets (schema stays
+  v3). New rejection codes `jbs_non_finite`, `engine_closure_refused`
+  (engine draws only). The legacy draw path is unchanged: every hook is a
+  gated block, and the functions minus those blocks are the frozen code
+  (`tests/test_engine_draws_legacy_ast.py`). Solver tests add the
+  zero-perturbation draw on both examples and a seeded 6-draw batch
+  (`measure_engine.py --draws 6 --seed 12345`).
 
 ## Unreleased, intended for the release after 1.4.0 — self-consistent bootstrap current (default ON)
 
