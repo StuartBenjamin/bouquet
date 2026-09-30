@@ -455,10 +455,10 @@ def main(argv=None):
         child(a.child, a.outdir, draws=a.draws, seed=a.seed)
         return 0
     parts = [p for p in a.parts.split(",") if p]
-    if a.draws is not None and not any(p.startswith("draws_")
-                                       for p in parts):
-        parts = ["draws_recon"]
-    elif a.draws is None and a.parts == ",".join(PARTS):
+    default = a.parts == ",".join(PARTS)
+    if a.draws is not None and default:
+        parts = ["draws_recon"]        # --draws alone: the g-file batch
+    elif default:
         parts = [p for p in parts if not p.startswith("draws_")]
     res = {}
     for part in parts:
