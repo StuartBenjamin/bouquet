@@ -245,17 +245,55 @@ def _mse_block(**over):
     return md
 
 
-def test_raw_er_mse_is_refused_and_corrected_mse_is_accepted():
+_SIGNS = dict(ip_sign=1.0, bt_sign=-1.0, basis="test source")
+
+
+def _gen(md):
     from bouquet.config import GenerationConfig
-    g = GenerationConfig(reconstruction_engine="unified",
-                         engine_rows=["Ip", "l_i", "mse"],
-                         mse_data=_mse_block(er_corrected=True))
-    r = mse_rows(g)
+    return GenerationConfig(reconstruction_engine="unified",
+                            engine_rows=["Ip", "l_i", "mse"], mse_data=md)
+
+
+def test_raw_er_mse_is_refused_and_corrected_mse_is_accepted():
+    g = _gen(_mse_block(er_corrected=True, ip_sign=1, bt_sign=-1))
+    r = mse_rows(g, _SIGNS)
     assert r["chords"]["n_active"] == 6 and r["chords"]["er_corrected"]
     for bad in (dict(), dict(A5=np.ones(6), Er=np.full(6, 1e3))):
-        g.mse_data = _mse_block(**bad)
+        g.mse_data = _mse_block(ip_sign=1, bt_sign=-1, **bad)
         with pytest.raises(EngineInputRefused, match="E_r"):
-            mse_rows(g)
+            mse_rows(g, _SIGNS)
+
+
+def test_the_mse_orientation_is_stated_by_the_block_or_the_source():
+    # a block that states nothing is completed from the source
+    r = mse_rows(_gen(_mse_block(er_corrected=True)), _SIGNS)
+    assert (r["chords"]["ip_sign"], r["chords"]["bt_sign"]) == (1.0, -1.0)
+    assert r["orientation"]["filled_from_source"] == ["ip_sign", "bt_sign"]
+    # a block that agrees keeps its statement
+    r = mse_rows(_gen(_mse_block(er_corrected=True, ip_sign=1, bt_sign=-1)),
+                 _SIGNS)
+    assert r["orientation"]["filled_from_source"] == []
+    # a block the source contradicts is refused, never resolved silently
+    with pytest.raises(EngineInputRefused, match="disagree"):
+        mse_rows(_gen(_mse_block(er_corrected=True, ip_sign=1, bt_sign=1)),
+                 _SIGNS)
+    # neither states it: refused
+    with pytest.raises(EngineInputRefused, match="bt_sign"):
+        mse_rows(_gen(_mse_block(er_corrected=True)),
+                 dict(ip_sign=1.0, bt_sign=None, basis="no b0"))
+
+
+def test_both_adapters_declare_the_same_orientation_for_the_same_discharge(
+        gfile, ids):
+    """The synthetic g-file (COCOS 1, Ip > 0, B_t < 0) and the OMAS file
+    (COCOS 11, ip > 0, b0 < 0) describe one generic discharge: both state
+    ip_sign = +1, bt_sign = -1 in the (R, phi, Z) frame."""
+    _ad, cg = gfile
+    _ai, ci, _bl = ids
+    for c in (cg, ci):
+        assert (c.signs["ip_sign_RphiZ"], c.signs["bt_sign_RphiZ"]) \
+            == (1.0, -1.0)
+        assert c.signs["orientation_basis"]
 
 
 # ---------------------------------------------------------------------------

@@ -162,12 +162,20 @@ class ToyGS:
         return self.q_scale / j0
 
     def field_at_chords(self, st):
+        """``(B, found)`` at the chords, as :func:`bouquet.mse.mse_field_at`:
+        chords on the outboard midplane at ``R = R0 + a sqrt(psi_N)``; a
+        chord beyond the LCFS (``psi_N > 1``) is off the toy's "mesh" and is
+        reported (NaN, ``found=False``), never read.  Right-handed
+        ``(R, phi, Z)``: a current along +phi has ``B_Z < 0`` outboard."""
         ch = self.chords
-        I = np.interp(ch["psi"], self.psi, st["I"])
-        r = A_MIN * np.sqrt(ch["psi"])
-        Bz = MU0 * I / (2.0 * np.pi * r)
-        Bphi = R0 * B0 / (R0 + r)
-        return np.column_stack([np.zeros_like(Bz), Bphi, Bz])
+        r = np.asarray(ch["R"], dtype=float) - R0
+        psi = (r / A_MIN) ** 2
+        found = (r > 0.0) & (psi <= 1.0)
+        I = np.interp(np.clip(psi, 0.0, 1.0), self.psi, st["I"])
+        Bz = np.where(found, -MU0 * I / (2.0 * np.pi * np.where(found, r, 1.0)),
+                      np.nan)
+        Bphi = np.where(found, R0 * B0 / (R0 + r), np.nan)
+        return np.column_stack([np.where(found, 0.0, np.nan), Bphi, Bz]), found
 
     def measure(self, want_chords=False, final=False):
         st = self.state
@@ -177,7 +185,8 @@ class ToyGS:
                    q_row=self.q_at(st, float(g["psi_q"][0])), Ip=self.Ip,
                    achieved=st["A"].copy())
         if want_chords and self.chords is not None:
-            out["B_chords"] = self.field_at_chords(st)
+            out["B_chords"], out["chords_found"] = self.field_at_chords(st)
+            out["axis"] = (R0, 0.0)
         if final:
             out["stats"] = dict(q_0=out["q_row"], l_i=st["li"])
             out["li_1"] = st["li"]
@@ -192,11 +201,14 @@ def Ip_fsa_affine_profile_cached(g):
     return Ip_fsa_affine_profile(g)
 
 
-def toy_chords(n=8):
-    """Chord geometry for the toy (tan(gamma) = B_Z / B_phi)."""
+def toy_chords(n=8, off_mesh=0):
+    """Chord geometry for the toy (tan(gamma) = B_Z / B_phi); the last
+    *off_mesh* chords sit outside the LCFS."""
     psi = np.linspace(0.08, 0.80, n)
+    if off_mesh:
+        psi[-off_mesh:] = 1.3
     r = A_MIN * np.sqrt(psi)
-    return dict(psi=psi, R=R0 + r, Z=np.zeros(n), A1=np.ones(n),
+    return dict(R=R0 + r, Z=np.zeros(n), A1=np.ones(n),
                 A2=np.ones(n), A3=np.zeros(n), A4=np.zeros(n))
 
 

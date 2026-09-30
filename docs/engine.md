@@ -77,7 +77,7 @@ signature). The q0 target is the source's own q **at the measurement radius**
 MSE rows accept **E_r-corrected** pitch angles only (`er_corrected=True`, no
 `Er`); a raw-E_r modelling request is refused.
 
-The anchor E_0 is one (two-pass) solve of the source's own total current as
+Pressures use `physics.ELEMENTARY_CHARGE`. The anchor E_0 is one (two-pass) solve of the source's own total current as
 the legacy path solves it (g-file: `|j_tor_averaged_direct|`; IDS: `j_tor`);
 it seeds the geometry and the first Redl bootstrap and does not enter the
 fixed point.
@@ -133,7 +133,23 @@ through its `extra` hook and the existing `AxisRowPin`.
 | Ip | `Ip_fsa_weights` affine exact measure | the solver imposes Ip; `c` recorded | — |
 | l_i | `structured_li_model` (li_3) | `li_achieved` | `d_k = (1−ω) d_k−1 + ω [l_i(E_k+1) − l_i_model(js_k; G_k+1)]`; the closure's target is `T − d` |
 | q0 | the axis-current row | q at the row radius | `AxisRowPin`: `j_ref0 ← j0_solved · q0 / q0_target` |
-| MSE | `tan γ ≈ tg0 + J (x − x0)` | `mse_tan_gamma` of the solved field | offset refreshed from every solve; `J` by finite differences once at convergence, then Broyden (`"fd_broyden"`) or held (`"fd_chord"`) |
+| MSE | `tan γ ≈ tg0 + J (x − x0)` | `mse_tan_gamma` of the solved field (`mse_field_at` -> `(B, found)`) | offset refreshed from every solve; `J` by finite differences once at convergence, then Broyden (`"fd_broyden"`) or held (`"fd_chord"`) |
+
+MSE, as the loop's own chord stage: at the first read (the finite-difference
+base) chords OFF the solver mesh are excluded with their reason; fewer than
+`structured_mse_min_chords` left leaves the MSE term NOT applied and the
+slice flagged (refused with `structured_mse_required=True`); a chord missing
+on a later read is a refusal. The field orientation is STATED, never fitted:
+`sign_pol = ip_sign(data)·ip_sign(equilibrium)`, `sign_tor =
+bt_sign(data)·bt_sign(equilibrium)`, the equilibrium's read off its field;
+if another orientation fits the chords better by Δχ² >
+`mse.MSE_ORIENTATION_DCHI2` the slice is flagged and the stated one KEPT.
+The adapters complete a block that states no `ip_sign`/`bt_sign` from the
+source's declared orientation in the (R, φ, Z) frame (g-file: CURRENT and
+BCENTR signs times its COCOS's σ_RpZ; IDS: `ip`, `b0` signs, COCOS 11) and
+refuse a block the source contradicts. MSE knobs the engine never reads
+(any, without the `"mse"` row; `structured_mse_steps` with it) are refused
+as on the legacy path.
 
 On a **hard** row the closure imposes `model + d = T`, so at the fixed point
 the delivered l_i is on the target. On a **soft** row the fit weighs

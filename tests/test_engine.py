@@ -62,21 +62,26 @@ def _run(adapter, backend=None, **gc):
         + (b,)
 
 
-def _mse_data(amp=0.04, sig=0.01):
+def _mse_data(amp=0.04, sig=0.01, n=8, off_mesh=0, bt_sign=1.0,
+              min_chords=4):
     """Pitch angles of a toy equilibrium whose current differs from the
-    anchor by a mid-radius bump (E_r-corrected, as the engine requires)."""
+    anchor by a mid-radius bump (E_r-corrected, as the engine requires), in
+    the toy's own right-handed frame: ``ip_sign = bt_sign = +1`` states it
+    truly (a different ``bt_sign`` states it falsely).  Off-mesh chords
+    (outside the LCFS) get a finite placeholder datum; their field cannot be
+    read."""
     from bouquet.mse import mse_chords
-    ch0 = T.toy_chords()
+    ch0 = T.toy_chords(n, off_mesh=off_mesh)
     bt = T.ToyGS(chords=ch0)
     req = T.ToyAdapter().read().anchor_request
     bt.solve(req * (1.0 + amp * np.exp(-0.5 * ((T.PSI - 0.45) / 0.15) ** 2)))
-    B = bt.field_at_chords(bt.state)
-    tg = B[:, 2] / B[:, 1]
+    B, found = bt.field_at_chords(bt.state)
+    tg = np.where(found, B[:, 2] / B[:, 1], -0.1)
     md = dict(R=ch0["R"], Z=ch0["Z"], tgamma=tg, sigma=np.abs(tg) * sig,
               weight=np.ones(tg.size), A1=ch0["A1"], A2=ch0["A2"],
-              A3=ch0["A3"], A4=ch0["A4"], er_corrected=True)
-    ch = mse_chords(md)
-    ch["psi"] = ch0["psi"]
+              A3=ch0["A3"], A4=ch0["A4"], er_corrected=True,
+              ip_sign=1.0, bt_sign=float(bt_sign))
+    ch = mse_chords(md, min_chords=min_chords)
     return md, ch
 
 
@@ -162,7 +167,8 @@ def test_ip_li_and_mse_converge(soft, scheme):
     from bouquet.mse import mse_chi2
     ad0 = T.ToyAdapter(soft=soft, li_target=LI0 * 1.01)
     _e0, _r0, _rec0, b0 = _run(ad0, T.ToyGS(chords=ch))
-    B0 = b0.field_at_chords(b0.state)
+    B0, _found = b0.field_at_chords(b0.state)
+    assert _found.all()
     assert m["chi2"] < mse_chi2(B0[:, 2] / B0[:, 1], ch)[0]
 
 
@@ -179,11 +185,82 @@ def test_every_row_is_evaluated_on_the_delivered_state():
     c = rec["delivered"]["checks"]
     assert c["l_i"]["delivered"] == st["li"]
     assert c["q0"]["delivered"] == b.q_at(st, T.PAD)
-    B = b.field_at_chords(st)
+    B, found = b.field_at_chords(st)
+    assert found.all()
     np.testing.assert_allclose(c["mse"]["tgamma"], B[:, 2] / B[:, 1],
                                rtol=1e-14)
+    # the orientation was the STATED one (the toy's own frame): recorded,
+    # agreeing with the data, no flag
+    o = rec["phases"][1]["jacobian"]["orientation"]
+    assert (o["pol"], o["tor"]) == (1.0, 1.0) and not o["disagrees"]
+    assert o["ip_sign_equilibrium"] == 1.0 and o["bt_sign_equilibrium"] == 1.0
+    assert rec["flags"] == []
     # and the Redl bootstrap of that state against the one it carries
     assert c["loop"]["ok"]
+
+
+def test_off_mesh_chords_are_excluded_with_their_reason():
+    from bouquet.mse import MSE_REASON_OFF_MESH
+    md, ch = _mse_data(n=10, off_mesh=2)
+    assert ch["n_active"] == 10
+    ad = T.ToyAdapter(li_target=LI0 * 1.01,
+                      mse=dict(chords=ch, er_terms="toy"))
+    eng, res, rec, b = _run(ad, T.ToyGS(chords=ch),
+                            engine_rows=["Ip", "l_i", "mse"], mse_data=md)
+    assert res["converged"]
+    fd = rec["phases"][1]["jacobian"]
+    assert fd["applied"] and fd["excluded_off_mesh"] == [8, 9]
+    used = eng.rows["mse"]["chords"]
+    assert used["n_active"] == 8
+    assert [(i, r) for i, r in used["excluded"]] == [
+        (8, MSE_REASON_OFF_MESH), (9, MSE_REASON_OFF_MESH)]
+    assert len(rec["delivered"]["checks"]["mse"]["tgamma"]) == 8
+    assert any("OFF the solver mesh" in n for n in rec["notices"])
+
+
+def test_too_few_on_mesh_chords_flag_or_refuse():
+    from bouquet.adapters import EngineInputRefused
+    md, ch = _mse_data(n=5, off_mesh=2)          # 3 on the mesh, 4 required
+    ad = T.ToyAdapter(li_target=LI0 * 1.01,
+                      mse=dict(chords=ch, er_terms="toy"))
+    eng, res, rec, b = _run(ad, T.ToyGS(chords=ch),
+                            engine_rows=["Ip", "l_i", "mse"], mse_data=md)
+    fd = rec["phases"][1]["jacobian"]
+    assert fd["applied"] is False and "at least 4" in fd["reason"]
+    assert rec["flags"] and "NOT applied" in rec["flags"][0]
+    assert "mse" not in rec["delivered"]["checks"]
+    # required: refused
+    ad = T.ToyAdapter(li_target=LI0 * 1.01,
+                      mse=dict(chords=ch, er_terms="toy", required=True))
+    with pytest.raises(EngineInputRefused, match="at least 4"):
+        _run(ad, T.ToyGS(chords=ch), engine_rows=["Ip", "l_i", "mse"],
+             mse_data=md, structured_mse_required=True)
+
+
+def test_a_stated_orientation_the_data_contradict_is_kept_and_flagged():
+    """The block states B_t reversed against the toy's own frame: the audit
+    flags it (delta chi2 > 1) and the STATED orientation is kept -- the
+    closure is then asked to fit data it cannot, which may refuse loudly;
+    either way the flag and the kept orientation are on the engine."""
+    md, ch = _mse_data(bt_sign=-1.0)
+    ad = T.ToyAdapter(li_target=LI0 * 1.01,
+                      mse=dict(chords=ch, er_terms="toy"))
+    c = ad.read()
+    b = T.ToyGS(chords=ch)
+    b.solve(c.anchor_request, n_passes=2)
+    a = b.measure()
+    c = ad.finalize(a["redl"], complete_geometry(a["geom"]))
+    eng = UnifiedEngine(c, b, T.settings(engine_rows=["Ip", "l_i", "mse"],
+                                         mse_data=md,
+                                         jbs_loop_on_fail="flag"),
+                        anchor=a, label="toy")
+    try:
+        _quiet(eng.run)
+    except EngineClosureRefused as e:
+        assert "closure refused" in str(e)
+    assert eng.state.mse_sign == (1.0, -1.0)            # stated, KEPT
+    assert any("disagree with the stated field orientation" in f
+               and "KEPT" in f for f in eng.flags)
 
 
 def test_the_soft_rows_delivered_residual_is_the_one_the_fit_weighed():
@@ -417,6 +494,21 @@ def test_unified_settings_round_trip():
      "mse_data"),
     (dict(reconstruction_engine="unified", jbs_self_consistent=False),
      "jbs_self_consistent"),
+    (dict(reconstruction_engine="unified", mse_data=dict(
+        R=[1.8] * 4, Z=[0.0] * 4, tgamma=[0.1] * 4, sigma=[0.01] * 4,
+        weight=[1.0] * 4, A1=[1.0] * 4, A2=[1.0] * 4, A3=[0.0] * 4,
+        A4=[0.0] * 4, ip_sign=1, bt_sign=1, er_corrected=True)),
+     "never reads"),
+    (dict(reconstruction_engine="unified", structured_mse_required=True),
+     "structured_mse_required"),
+    (dict(reconstruction_engine="unified", structured_mse_fd_step=0.01),
+     "never reads"),
+    (dict(reconstruction_engine="unified", engine_rows=["Ip", "l_i", "mse"],
+          structured_mse_steps=2, mse_data=dict(
+              R=[1.8] * 4, Z=[0.0] * 4, tgamma=[0.1] * 4, sigma=[0.01] * 4,
+              weight=[1.0] * 4, A1=[1.0] * 4, A2=[1.0] * 4, A3=[0.0] * 4,
+              A4=[0.0] * 4, ip_sign=1, bt_sign=1, er_corrected=True)),
+     "structured_mse_steps"),
     (dict(reconstruction_engine="unified", jbs_init="swb"), "anchor"),
 ])
 def test_bad_engine_settings_are_refused_by_name(gen, match):

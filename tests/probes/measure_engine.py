@@ -128,7 +128,9 @@ def _distance_gfile(b, bl, psi_pad):
     rms, mx = _lcfs_deviation_mm(mygs, bnd)
     betas = eq.betas
     W_in = 1.5 * float(eq.volume_integral(eq.pres)[-1]) / 1e6
-    q002 = float(np.abs(_q_profile(mygs, [0.02, 0.5]))[0])
+    from bouquet.physics import SOLVER_Q0_PSI_N
+    q002 = float(np.abs(_q_profile(mygs, [SOLVER_Q0_PSI_N, 0.5]))[0])
+    q_in_002 = float(np.interp(SOLVER_Q0_PSI_N, psi, qin))
     return dict(
         li3_matched=dict(input=float(eq.li["li(2)"]),
                          engine=float(st_i["l_i"]),
@@ -137,11 +139,16 @@ def _distance_gfile(b, bl, psi_pad):
                       engine=float(st_s["l_i"]),
                       delta=float(st_s["l_i"]) - float(eq.li["li(1)_EFIT"])),
         q_axis=dict(input=float(qin[0]), engine=float(qp[0]),
-                    delta=float(qp[0] - qin[0]),
-                    note="profile at psi_N = 0 (sampled at the 1e-3 clip)"),
-        q_002=dict(input=float(np.interp(0.02, psi, qin)), engine=q002,
-                   delta=q002 - float(np.interp(0.02, psi, qin)),
-                   code_q0=float(st_i.get("q_0", float("nan")))),
+                    delta=float(qp[0] - qin[0]), input_psi_N=0.0,
+                    engine_psi_N=1e-3,
+                    note=("NOT like radii: the input's qpsi[0] is on axis, "
+                          "the engine's sample is the psi_N = 1e-3 clip "
+                          "(kept for the comparison report's row)")),
+        q_002=dict(input=q_in_002, engine=q002, delta=q002 - q_in_002,
+                   psi_N=float(SOLVER_Q0_PSI_N),
+                   code_q0=float(st_i.get("q_0", float("nan"))),
+                   note=("like radii (physics.SOLVER_Q0_PSI_N, get_stats' "
+                         "q_0 radius), as reconstruction_metrics' q0")),
         q95=dict(input=float(np.interp(0.95, psi, qin)),
                  engine=float(st_i["q_95"]),
                  delta=float(st_i["q_95"]) - float(np.interp(0.95, psi,
