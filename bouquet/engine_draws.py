@@ -779,8 +779,11 @@ def run_draw(ctx, backend, inputs, *, label=None, coil_guard=None,
     start computed on ``G*``.  Zero extra solves and zero extra Redl
     evaluations (pass 1's Redl is the loop's own); the first request, every
     criterion and the fixed point are unchanged -- the path only.  At zero
-    perturbation the refreshed bootstrap is ``lambda_BS*`` to the re-solve's
-    rounding.
+    perturbation the refreshed bootstrap is ``lambda_BS*`` plus the change
+    of Redl between the stored and the RE-SOLVED equilibrium -- rounding on
+    the toy stand-in; on the live solver the re-solve reproduces the stored
+    state only to its own convergence (measured on the g-file example:
+    the refresh step r_j = 1.9e-5, against jbs_rtol_j = 1e-3).
 
     Returns a dict: ``record`` (the JSON-safe draw record), ``jbs_used``,
     ``passes`` (the :class:`_DrawPasses` of the loop, the post-homotopy stage
@@ -817,7 +820,7 @@ def run_draw(ctx, backend, inputs, *, label=None, coil_guard=None,
             # FIRST SOLVED geometry instead of G* (meas["redl"]: the loop's
             # own pass-1 Redl, the draw's kinetics, solved at the draw's
             # pressure); exactly the anchor's form, so lambda_BS* at zero
-            # perturbation up to the re-solve's rounding
+            # perturbation up to the re-solve's reproduction of G*
             return scale * (ctx.lam + (np.asarray(meas["redl"], dtype=float)
                                        - r_0))
     clock.start("loop")

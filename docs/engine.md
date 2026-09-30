@@ -356,7 +356,11 @@ extra Redl evaluations (pass 1's Redl is the loop's own). It changes the
 PATH only: the first request (still bit-identical at zero perturbation),
 every criterion, tolerance and the ceiling are untouched, and every pass is
 judged against the bootstrap it was solved with. At zero perturbation the
-refreshed bootstrap is `lambda_BS*` to the re-solve's rounding. The loop
+refreshed bootstrap is `lambda_BS*` plus the change of Redl between the
+stored and the re-solved equilibrium: rounding on the toy stand-in, and on
+the live solver the re-solve's own reproduction of `G*` (measured on the
+g-file example: a refresh step of r_j = 1.9e-5, against `jbs_rtol_j` =
+1e-3; the pass count at zero perturbation is unchanged, 3). The loop
 record carries `bootstrap_refresh` (pass 1's residuals before it, pass 2's
 after it, the refresh step, `I_BS` start / evaluated / refreshed).
 

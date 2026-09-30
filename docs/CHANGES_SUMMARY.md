@@ -76,7 +76,9 @@ bit-identical when absent).*
   (`run_jbs_loop(start_refresh=...)`, a kernel hook that is a no-op when
   `None`) -- the path only, zero extra solves, no criterion or tolerance
   changed, the zero-perturbation request still bit-identical and the
-  refreshed bootstrap `lambda_BS*` to rounding; recorded as
+  refreshed bootstrap `lambda_BS*` up to the re-solve's reproduction of
+  the stored equilibrium (rounding on the toy, r_j 1.9e-5 on the live
+  g-file example); recorded as
   `loop.bootstrap_refresh`. `draw_solve_maxits` (default `None`) now also
   governs every homotopy solve of an engine draw (installed for the stage
   when the solver does not already carry it), and a capped homotopy or
