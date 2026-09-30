@@ -1131,9 +1131,8 @@ class GenerationConfig:
     # solve checked on every row.  A stored config without the field loads
     # as "legacy".  The engine_* fields below configure "unified" only and
     # are REFUSED when changed with "legacy" (they would do nothing).
-    # Stage 2: the engine builds the baseline; generate() and
-    # verify_sigma0_consistency() refuse it until the draws run on the
-    # engine (Stage 3).
+    # The engine builds the baseline AND runs the draws (generate(),
+    # verify_sigma0_consistency(); bouquet.engine_draws, docs/engine.md).
     reconstruction_engine: str = "legacy"
     # "structured" (4-Gaussian basis, li_soft_onesided priors; the default),
     # "bootstrap_scalar" (s_bs constant; rows Ip) or "sawtooth_two_scalar"
@@ -1153,6 +1152,18 @@ class GenerationConfig:
     # fixed -- the legacy chord stage's treatment).  Either way the
     # linearisation offset is refreshed from every solve.
     engine_mse_jacobian: str = "fd_broyden"
+    # --- the draws on the engine (Stage 3; bouquet.engine_draws) ------------
+    # A draw holds the reconstruction's coefficients x* and closes ONLY the
+    # Ip row (a scalar amplitude on the inductive, in the exact measure).
+    # True additionally keeps the reconstruction's q0 row acting in every
+    # draw (bouquet.jbs_loop.AxisRowPin on a second scalar, the bootstrap
+    # amplitude) -- for sawtoothing discharges; needs "q0" in engine_rows.
+    engine_draw_q0_row: bool = False
+    # The coil homotopy stage after a draw's loop (then the existing
+    # post-homotopy bootstrap check with its saturation guard).  True is
+    # what generate() does today; False skips the homotopy and measures the
+    # coil drift of the loop's own delivered draw.
+    engine_draw_homotopy: bool = True
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single

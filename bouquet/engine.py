@@ -50,7 +50,7 @@ from typing import Optional
 import numpy as np
 
 #: Version stamp of the engine (recorded with every run).
-ENGINE_VERSION = "unified-engine/1 (Stage 2: reconstruction only)"
+ENGINE_VERSION = "unified-engine/2 (Stage 3: reconstruction and draws)"
 
 #: ``GenerationConfig.reconstruction_engine`` values.
 ENGINE_CHOICES = ("legacy", "unified")
@@ -67,6 +67,9 @@ ENGINE_FIELD_DEFAULTS = {
     "engine_rows": ("Ip", "l_i"),
     "engine_delivery_correction": False,
     "engine_mse_jacobian": "fd_broyden",
+    # the draws on the engine (bouquet.engine_draws, docs/engine.md "Draws")
+    "engine_draw_q0_row": False,
+    "engine_draw_homotopy": True,
 }
 #: Rows each preset admits (``Ip`` is mandatory for every preset).
 PRESET_ROWS = {
@@ -181,6 +184,15 @@ def validate_engine_settings(gc) -> None:
     if not isinstance(dc, (bool, np.bool_)):
         raise ValueError(f"generation.engine_delivery_correction must be a "
                          f"bool, got {dc!r}")
+    for _b in ("engine_draw_q0_row", "engine_draw_homotopy"):
+        if not isinstance(vals[_b], (bool, np.bool_)):
+            raise ValueError(f"generation.{_b} must be a bool, got "
+                             f"{vals[_b]!r}")
+    if vals["engine_draw_q0_row"] and "q0" not in rows:
+        raise ValueError("generation.engine_draw_q0_row=True keeps the "
+                         "reconstruction's q0 row in the draws, but "
+                         "engine_rows has no 'q0' (there is no row, target "
+                         "or radius to keep)")
     mj = vals["engine_mse_jacobian"]
     if mj not in ENGINE_MSE_JACOBIANS:
         raise ValueError(f"generation.engine_mse_jacobian must be one of "
@@ -270,6 +282,8 @@ def engine_settings(gc) -> dict:
         rows=tuple(gc.engine_rows),
         delivery_correction=bool(gc.engine_delivery_correction),
         mse_jacobian=str(gc.engine_mse_jacobian),
+        draw_q0_row=bool(getattr(gc, "engine_draw_q0_row", False)),
+        draw_homotopy=bool(getattr(gc, "engine_draw_homotopy", True)),
         loop=loop,
         q0_tol=float(gc.q0_tol),
         structured_li_tol=float(gc.structured_li_tol),
@@ -1184,10 +1198,20 @@ class TokaMakerBackend:
     smooth_jbs_transition`), :func:`bouquet.utils.li_closure_geometry`,
     :func:`bouquet.utils.li_achieved`, q at the row radius, the achieved
     ``<j_phi>`` (:func:`bouquet.utils.eq_jphi_profile`) and the field at the
-    MSE chords (:func:`bouquet.mse.mse_field_at`)."""
+    MSE chords (:func:`bouquet.mse.mse_field_at`).
+
+    ``maxits`` (``GenerationConfig.draw_solve_maxits``, the ported #57 cap):
+    the GS iteration cap set on the solver for EVERY engine solve --
+    reconstruction and draws alike -- and restored after it; ``None`` (the
+    default) leaves the solver's own cap untouched.  A solve that hits the
+    cap fails exactly as any failed solve (:class:`EngineSolveError`); it is
+    never re-solved at another tolerance.
+
+    :meth:`set_inputs` replaces the pressure and the kinetics a DRAW solves
+    and measures with (``None`` keeps the contract's)."""
 
     def __init__(self, mygs, contract, *, psi_pad=1e-3, li_kind="li_3",
-                 q_psi=None, chords=None):
+                 q_psi=None, chords=None, maxits=None):
         self.mygs = mygs
         self.c = contract
         self.psi = np.asarray(contract.psi_N, dtype=float)
@@ -1198,6 +1222,42 @@ class TokaMakerBackend:
         self.chords = chords
         self.n_solves = 0
         self.p = np.asarray(contract.pressure, dtype=float)
+        self.kin = None
+        if maxits is not None and (isinstance(maxits, bool) or int(maxits)
+                                   != maxits or int(maxits) < 1):
+            raise ValueError(f"engine backend: maxits={maxits!r} must be an "
+                             "integer >= 1 or None")
+        self.maxits = None if maxits is None else int(maxits)
+
+    def set_inputs(self, pressure=None, kinetics=None):
+        """The pressure [Pa] and the kinetics (``ne, te, ni, ti, zeff`` on
+        ``psi_N``) the following solves and measurements use -- a draw's
+        own; ``None`` restores the contract's."""
+        self.p = np.asarray(self.c.pressure if pressure is None else pressure,
+                            dtype=float)
+        self.kin = None if kinetics is None else dict(kinetics)
+
+    def _kinetics(self):
+        return self.c.kinetics if self.kin is None else self.kin
+
+    def flux_integral(self, psi_N, profile):
+        """The solver's flux-surface integral of *profile* on the current
+        equilibrium (the draw sampler's pressure match)."""
+        return self.mygs.flux_integral(np.asarray(psi_N, dtype=float),
+                                       np.asarray(profile, dtype=float))
+
+    def redl(self, kinetics=None):
+        """Redl ``<j.B>`` on the CURRENT equilibrium with *kinetics*
+        (default: the backend's), with the shared innermost-surface repair --
+        exactly the ``redl`` :meth:`measure` returns, without the rest."""
+        from .physics import evaluate_jBS
+        from .TokaMaker_interface import smooth_jbs_transition
+        kin = self._kinetics() if kinetics is None else kinetics
+        _j, d = evaluate_jBS(self.mygs.copy_eq(), self.psi, kin["ne"],
+                             kin["te"], kin["ni"], kin["ti"], kin["zeff"],
+                             psi_pad=self.psi_pad, isolate_edge=False,
+                             smooth_axis=False)
+        return smooth_jbs_transition(np.asarray(d["j_dot_B"], dtype=float))
 
     def solve(self, request, n_passes=1):
         from .utils import pchip_derivative
@@ -1207,20 +1267,35 @@ class TokaMakerBackend:
             raise EngineSolveError("engine: refusing to hand a non-finite "
                                    "request to the GS solver")
         ffp = {"type": "jphi-linterp", "y": req, "x": self.psi}
-        for k in range(int(n_passes)):
-            psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-            pp_y = pchip_derivative(self.psi, self.p) / psi_range
-            pp_y[-1] = 0.0
-            mygs.set_targets(Ip=float(self.c.Ip), pax=float(self.p[0]))
-            mygs.set_profiles(pp_prof={"type": "linterp", "y": pp_y,
-                                       "x": self.psi}, ffp_prof=ffp)
-            try:
-                mygs.solve()
-            except ValueError as e:
-                raise EngineSolveError(f"engine GS solve failed (pass "
-                                       f"{k + 1}/{n_passes}): {e}") from e
-            finally:
-                self.n_solves += 1
+        saved = None
+        if self.maxits is not None:
+            saved = int(mygs.settings.maxits)
+            if saved != self.maxits:
+                mygs.settings.maxits = self.maxits
+                mygs.update_settings()
+            else:
+                saved = None
+        try:
+            for k in range(int(n_passes)):
+                psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
+                pp_y = pchip_derivative(self.psi, self.p) / psi_range
+                pp_y[-1] = 0.0
+                mygs.set_targets(Ip=float(self.c.Ip), pax=float(self.p[0]))
+                mygs.set_profiles(pp_prof={"type": "linterp", "y": pp_y,
+                                           "x": self.psi}, ffp_prof=ffp)
+                try:
+                    mygs.solve()
+                except ValueError as e:
+                    raise EngineSolveError(
+                        f"engine GS solve failed (pass {k + 1}/{n_passes}"
+                        + ("" if self.maxits is None else
+                           f", maxits {self.maxits}") + f"): {e}") from e
+                finally:
+                    self.n_solves += 1
+        finally:
+            if saved is not None:
+                mygs.settings.maxits = saved
+                mygs.update_settings()
 
     def snapshot(self):
         return self.mygs.copy_eq()
@@ -1233,7 +1308,7 @@ class TokaMakerBackend:
         from .TokaMaker_interface import smooth_jbs_transition
         from .utils import (eq_jphi_profile, fsa_current_geometry,
                             li_achieved, li_closure_geometry)
-        mygs, kin, pad = self.mygs, self.c.kinetics, self.psi_pad
+        mygs, kin, pad = self.mygs, self._kinetics(), self.psi_pad
         eq = mygs.copy_eq()
         geom = fsa_current_geometry(eq, self.psi, psi_pad=pad,
                                     want_pprime=True)
@@ -1280,37 +1355,77 @@ class TokaMakerBackend:
 # ---------------------------------------------------------------------------
 #  archive (an ADDED _baseline attribute; v3 readers unaffected)
 # ---------------------------------------------------------------------------
-def store_baseline_engine(header, record, scan_key=None):
-    """Write the engine record onto the archive's ``_baseline`` group as the
-    JSON attribute :data:`ENGINE_ATTR`.  ``None`` writes nothing; no-op
-    without a ``_baseline`` group (the same contract as
-    :func:`bouquet.utils.store_baseline_state`)."""
+#: JSON longer than this is stored as a string DATASET named
+#: :data:`ENGINE_ATTR` (HDF5 caps an object header, i.e. all attributes of a
+#: group together, at 64 KiB); the attribute then carries only a pointer.
+ENGINE_ATTR_MAX_BYTES = 60000
+#: The pointer the attribute carries when the record is a dataset.
+ENGINE_DATASET_POINTER = '{"stored_as": "dataset"}'
+
+
+def write_engine_json(grp, record) -> None:
+    """Write an engine record onto an h5 group as JSON: the attribute
+    :data:`ENGINE_ATTR` when it fits (:data:`ENGINE_ATTR_MAX_BYTES`), else a
+    string dataset of the same name with :data:`ENGINE_DATASET_POINTER` in
+    the attribute.  ``None`` writes nothing."""
     if record is None:
         return
     import json
     import h5py
     from .jbs_loop import jsonable
+    txt = json.dumps(jsonable(record), allow_nan=True)
+    if ENGINE_ATTR in grp and isinstance(grp[ENGINE_ATTR], h5py.Dataset):
+        del grp[ENGINE_ATTR]
+    if len(txt.encode()) <= ENGINE_ATTR_MAX_BYTES:
+        grp.attrs[ENGINE_ATTR] = txt
+    else:
+        grp.create_dataset(ENGINE_ATTR, data=txt,
+                           dtype=h5py.string_dtype())
+        grp.attrs[ENGINE_ATTR] = ENGINE_DATASET_POINTER
+
+
+def read_engine_json(grp):
+    """Inverse of :func:`write_engine_json`: the record, or ``None``."""
+    import json
+    raw = grp.attrs.get(ENGINE_ATTR)
+    if raw is None:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode()
+    if str(raw) == ENGINE_DATASET_POINTER:
+        v = grp[ENGINE_ATTR][()]
+        raw = v.decode() if isinstance(v, bytes) else str(v)
+    return json.loads(str(raw))
+
+
+def store_baseline_engine(header, record, scan_key=None):
+    """Write the engine record onto the archive's ``_baseline`` group
+    (:func:`write_engine_json`: the JSON attribute :data:`ENGINE_ATTR`, or a
+    dataset of that name when the record is too large for an attribute).
+    ``None`` writes nothing; no-op without a ``_baseline`` group (the same
+    contract as :func:`bouquet.utils.store_baseline_state`)."""
+    if record is None:
+        return
+    import h5py
     from .utils import _baseline_group_path, _resolve_h5
     db = _resolve_h5(header)
     with h5py.File(db, "a") as hf:
         gp = _baseline_group_path(scan_key)
         if gp in hf:
-            hf[gp].attrs[ENGINE_ATTR] = json.dumps(jsonable(record),
-                                                   allow_nan=True)
+            write_engine_json(hf[gp], record)
 
 
 def load_baseline_engine(header, scan_key=None):
     """The engine record stored by :func:`store_baseline_engine`, or
     ``None`` (a legacy archive)."""
-    import json
     import h5py
     from .utils import _baseline_group_path, _resolve_h5
     db = _resolve_h5(header)
     with h5py.File(db, "r") as hf:
         gp = _baseline_group_path(scan_key)
-        if gp not in hf or ENGINE_ATTR not in hf[gp].attrs:
+        if gp not in hf:
             return None
-        return json.loads(hf[gp].attrs[ENGINE_ATTR])
+        return read_engine_json(hf[gp])
 
 
 # ---------------------------------------------------------------------------
@@ -1567,6 +1682,58 @@ def _ids_baseline(bq, eng, res, rec, bl_src):
     return bl
 
 
+#: Per-chord MSE arrays of the engine record, moved OUT of the JSON
+#: (``Baseline.engine``) into ``Baseline.mse_record`` -- archived as datasets
+#: under ``_baseline/structured_mse`` -- with the key they went to left in
+#: their place: ``(path in the record, mse_record key)``.
+ENGINE_MSE_ARRAYS = (
+    (("delivered", "checks", "mse", "tgamma"), "engine_mse_tgamma"),
+    (("delivered", "checks", "mse", "residual_sigma"),
+     "engine_mse_residual_sigma"),
+    (("state", "mse_J"), "engine_mse_J"),
+    (("state", "mse_x0"), "engine_mse_x0"),
+    (("state", "mse_tg0"), "engine_mse_tg0"),
+)
+
+
+def mse_out(bl) -> dict:
+    """Move the engine record's per-chord MSE arrays and Jacobians
+    (:data:`ENGINE_MSE_ARRAYS`, plus each MSE phase's ``J_initial`` /
+    ``tg_base``) from ``bl.engine`` to ``bl.mse_record`` (addendum item 2 of
+    the Stage 2 report: O(n_chords) data are datasets, not JSON).  Each
+    moved entry is replaced by the string ``"mse_record[<key>]"``.  Returns
+    the moved arrays (empty without MSE)."""
+    rec = getattr(bl, "engine", None)
+    if not rec:
+        return {}
+    moved = {}
+
+    def _take(node, path, key):
+        for p in path[:-1]:
+            node = node.get(p) if isinstance(node, dict) else None
+            if node is None:
+                return
+        if not isinstance(node, dict) or node.get(path[-1]) is None:
+            return
+        moved[key] = np.asarray(node[path[-1]], dtype=float)
+        node[path[-1]] = f"mse_record[{key}]"
+
+    for path, key in ENGINE_MSE_ARRAYS:
+        _take(rec, path, key)
+    for i, ph in enumerate(rec.get("phases") or ()):
+        jac = ph.get("jacobian") if isinstance(ph, dict) else None
+        if isinstance(jac, dict):
+            _take(ph, ("jacobian", "J_initial"),
+                  f"engine_mse_phase{i}_J_initial")
+            _take(ph, ("jacobian", "tg_base"),
+                  f"engine_mse_phase{i}_tg_base")
+    if moved:
+        mr = dict(getattr(bl, "mse_record", None) or {})
+        mr.update(moved)
+        bl.mse_record = mr
+    return moved
+
+
 def prepare_engine_baseline(bq):
     """``Bouquet.prepare_baseline()`` under ``reconstruction_engine=
     "unified"``, for both input types.
@@ -1590,6 +1757,7 @@ def prepare_engine_baseline(bq):
     s = engine_settings(gc)
     bq.baseline = None
     bq._failed_baseline = None
+    bq._engine_run = None
     verbose = bool(getattr(cfg, "verbose", False))
     bl = None
     try:
@@ -1622,13 +1790,15 @@ def prepare_engine_baseline(bq):
             mse = (c0.rows.get("mse") if "mse" in s["rows"] else None)
             backend = TokaMakerBackend(
                 mygs, c0, psi_pad=psi_pad, li_kind="li_3",
-                chords=(None if mse is None else mse["chords"]))
+                chords=(None if mse is None else mse["chords"]),
+                maxits=getattr(gc, "draw_solve_maxits", None))
             eng, res, rec = reconstruct(ad, backend, s,
                                         label=f"engine {c0.kind}")
             if c0.kind == "gfile":
                 bl = _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w)
             else:
                 bl = _ids_baseline(bq, eng, res, rec, bl_src)
+            mse_out(bl)
         bl.reconstruction_log = (cap["text"] or None)
     except BaseException as exc:
         bq._failed_baseline = bl
@@ -1637,6 +1807,11 @@ def prepare_engine_baseline(bq):
               "engine: no usable baseline", flush=True)
         raise
     bq.baseline = bl
+    # the LIVE reconstruction the draws inherit (bouquet.engine_draws): its
+    # contract, state, basis and delivered measurement, in this session
+    bq._engine_run = dict(engine=eng, result=res, psi_pad=float(psi_pad),
+                          q_psi=getattr(backend, "q_psi", None),
+                          baseline=bl)
     if bl.reconstruction_metrics is not None:
         bq._flag_nonconverged_recon_loop()
         bq._print_reconstruction_summary()
