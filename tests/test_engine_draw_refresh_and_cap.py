@@ -451,3 +451,31 @@ def test_a_capped_post_homotopy_solve_has_its_own_code(tmp_path,
         tmp_path / "b", monkeypatch, maxits=None, fail={})
     assert diags == [] and [r["reason"] for r in rej] \
         == ["jbs_post_homotopy_error"]
+
+
+def test_the_refresh_with_the_q0_row():
+    """The q0 row kept in draws (AxisRowPin): the refresh leaves the pin's
+    per-pass row update alone; same delivered state within the loop
+    tolerances, q0 on target within q0_tol, fewer or equal passes."""
+    b0 = T.ToyGS()
+    b0.solve(T.ToyAdapter().read().anchor_request)
+    q_anchor = b0.q_at(b0.state, T.PAD)
+    eng, res, rec, b = TD._recon(q0=q_anchor * 0.97,
+                                 engine_rows=["Ip", "l_i", "q0"])
+    ctx = TD._ctx(eng, res, q0_row=True, engine_rows=("Ip", "l_i", "q0"),
+                  engine_draw_q0_row=True)
+    s = ctx.loop
+    z = _draw(ctx, b, ctx.zero_inputs(), True)["record"]
+    assert z["identity"]["pass1_request_bit_identical"] is True
+    for seed in (21, 5, 3):
+        inp = _inputs(ctx, b, seed, scale=1.0)
+        r0 = _draw(ctx, b, inp, False)["record"]
+        r1 = _draw(ctx, b, inp, True)["record"]
+        assert r0["loop"]["converged"] and r1["loop"]["converged"]
+        assert r1["loop"]["n_passes"] <= r0["loop"]["n_passes"]
+        assert abs(r1["delivered"]["l_i_3"] - r0["delivered"]["l_i_3"]) \
+            <= s["tol_li"]
+        assert abs(r1["delivered"]["q0"] - r0["delivered"]["q0"]) \
+            <= s["tol_q0"]
+        assert abs(r1["delivered"]["q0"] - ctx.q0_target) \
+            <= eng.s["q0_tol"]
