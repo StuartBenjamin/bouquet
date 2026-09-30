@@ -1,0 +1,1486 @@
+"""The unified reconstruction engine (``GenerationConfig.reconstruction_engine
+= "unified"``; default ``"legacy"``, which never enters this module).
+
+ONE loop reconstructs the baseline for both input types (docs/engine.md):
+
+* a source adapter (:mod:`bouquet.adapters`) turns the input into a contract:
+  kinetics, the fixed pressure, PARALLEL current components ``<j.B>``
+  (inductive, fixed driven), the boundary, the measurement rows and the
+  sign frame;
+* every pass composes the solver's variable on the LATEST solved geometry
+  ``G_k`` -- the only place a toroidal current is formed::
+
+      J_k = F<1/R> [ s_ind lambda_ind + s_bs lambda_BS,k + lambda_fix ] / <B^2>
+            + p' (<R> - F^2 <1/R>/<B^2>)                      (identity I2)
+
+  (the components are stored as ``<j.B>``, so the field-aligned conversion is
+  ``<j.B> F<1/R>/<B^2>``; the pressure-driven term is recomputed every pass
+  from that pass's own ``p'`` and geometry);
+* the structured closure (zero solves) picks the scale-function coefficients
+  ``x`` so the composed current meets the rows, each row carrying the
+  discrepancy measured on the previous SOLVED equilibrium;
+* the solved current is relaxed (``CurrentRelaxer``), ONE Grad-Shafranov
+  solve is taken, and everything is measured on the new equilibrium: Redl,
+  l_i, Ip and the uniform factor, q0, tan(gamma), request minus achieved;
+* the bootstrap iterate, the discrepancies (and, optionally, the MSE Broyden
+  Jacobian and the delivery correction) are updated.
+
+The iteration is today's kernel, :func:`bouquet.jbs_loop.run_jbs_loop`, with
+``step`` = compose + closure + relax + solve + measure; the engine adds its
+rows through the kernel's ``extra`` hook and the existing
+:class:`~bouquet.jbs_loop.AxisRowPin`.  Convergence uses ONLY existing
+constants (see :func:`convergence_table`); failure is exactly the loop's.
+
+A final unrelaxed composition on the last geometry is solved (two passes) and
+checked (:func:`bouquet.jbs_loop.check_delivered` plus every row on the
+delivered equilibrium).  That solve, its request, its geometry snapshot, the
+coefficients ``x*``, ``lambda_BS*`` and the discrepancies ARE the
+reconstruction (:class:`EngineState`), and the :class:`~bouquet.baseline.
+Baseline` the rest of the package consumes is built from it.
+
+The solver is behind a small backend interface (:class:`TokaMakerBackend`;
+the fast tests drive the same engine with a toy Grad-Shafranov stand-in).
+"""
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import Optional
+
+import numpy as np
+
+#: Version stamp of the engine (recorded with every run).
+ENGINE_VERSION = "unified-engine/1 (Stage 2: reconstruction only)"
+
+#: ``GenerationConfig.reconstruction_engine`` values.
+ENGINE_CHOICES = ("legacy", "unified")
+#: ``GenerationConfig.engine_preset`` values (docs/engine.md, "Presets").
+ENGINE_PRESETS = ("structured", "bootstrap_scalar", "sawtooth_two_scalar")
+#: The measurement rows the engine knows.
+ENGINE_ROWS = ("Ip", "l_i", "q0", "mse")
+#: ``GenerationConfig.engine_mse_jacobian`` values.
+ENGINE_MSE_JACOBIANS = ("fd_broyden", "fd_chord")
+#: The engine fields of :class:`~bouquet.config.GenerationConfig` and their
+#: defaults (refused when changed with ``reconstruction_engine="legacy"``).
+ENGINE_FIELD_DEFAULTS = {
+    "engine_preset": "structured",
+    "engine_rows": ("Ip", "l_i"),
+    "engine_delivery_correction": False,
+    "engine_mse_jacobian": "fd_broyden",
+}
+#: Rows each preset admits (``Ip`` is mandatory for every preset).
+PRESET_ROWS = {
+    "structured": frozenset(("Ip", "l_i", "q0", "mse")),
+    "bootstrap_scalar": frozenset(("Ip",)),
+    "sawtooth_two_scalar": frozenset(("Ip", "q0")),
+}
+#: ``_baseline`` attribute carrying the engine record (JSON; an ADDED
+#: attribute, v3 readers are unaffected).
+ENGINE_ATTR = "engine_json"
+
+_MU0 = 4.0e-7 * np.pi
+
+
+class EngineClosureRefused(RuntimeError):
+    """The closure refused a pass (scale bounds, a degenerate row, a failed
+    Ip round trip): raised with its reason, never flagged away."""
+
+
+class EngineSolveError(RuntimeError):
+    """A Grad-Shafranov solve of the engine failed (or returned a state the
+    engine cannot measure)."""
+
+
+# ---------------------------------------------------------------------------
+#  settings
+# ---------------------------------------------------------------------------
+def gfile_li_row_tol() -> float:
+    """The g-file hard l_i row's absolute tolerance (decision 7).
+
+    NOT a new number: it is the default ``li_tol`` of
+    :func:`bouquet.TokaMaker_interface._rematch_li_request` -- the same 1e-3
+    absolute tolerance the legacy step-5 secant and its re-match use --
+    read from that function's signature so the two cannot drift apart."""
+    import inspect
+    from .TokaMaker_interface import _rematch_li_request
+    return float(inspect.signature(_rematch_li_request)
+                 .parameters["li_tol"].default)
+
+
+def _closure_scale_bounds():
+    """The closure's ``scale_bounds`` default (0.2 < s < 5), read from
+    :func:`bouquet.utils.close_ip_structured` (recorded, never passed)."""
+    import inspect
+    from .utils import close_ip_structured
+    return tuple(inspect.signature(close_ip_structured)
+                 .parameters["scale_bounds"].default)
+
+
+def _is_default(name, v):
+    d = ENGINE_FIELD_DEFAULTS[name]
+    if name == "engine_rows":
+        try:
+            return tuple(v) == tuple(d)
+        except TypeError:
+            return False
+    return (type(v) is type(d)) and v == d
+
+
+def validate_engine_settings(gc) -> None:
+    """Refuse malformed or ineffective engine settings, by name.
+
+    * ``reconstruction_engine`` must be ``"legacy"`` or ``"unified"``;
+    * with ``"legacy"`` every ``engine_*`` field must hold its default -- a
+      set value would silently do nothing;
+    * with ``"unified"``: a known preset, a row list the preset admits
+      (always with ``"Ip"``), a bool delivery correction, a known MSE
+      Jacobian scheme; the self-consistent loop on (the engine IS the loop),
+      a bootstrap to recompute, the ``anchor`` initial guess, no
+      single-profile mode; ``"mse"`` needs ``mse_data`` with E_r-corrected
+      pitch angles (checked when the rows are read).
+    """
+    eng = getattr(gc, "reconstruction_engine", "legacy")
+    if not isinstance(eng, str) or eng not in ENGINE_CHOICES:
+        raise ValueError(f"generation.reconstruction_engine must be one of "
+                         f"{ENGINE_CHOICES}, got {eng!r}")
+    vals = {k: getattr(gc, k, d) for k, d in ENGINE_FIELD_DEFAULTS.items()}
+    if eng == "legacy":
+        changed = [k for k, v in vals.items() if not _is_default(k, v)]
+        if changed:
+            raise ValueError(
+                f"generation.{', '.join(changed)} set with "
+                "reconstruction_engine='legacy': these configure the unified "
+                "engine only and would have no effect; set "
+                "reconstruction_engine='unified' or leave them at their "
+                "defaults")
+        return
+    preset = vals["engine_preset"]
+    if preset not in ENGINE_PRESETS:
+        raise ValueError(f"generation.engine_preset must be one of "
+                         f"{ENGINE_PRESETS}, got {preset!r}")
+    rows = vals["engine_rows"]
+    if isinstance(rows, str) or not isinstance(rows, (list, tuple)):
+        raise ValueError("generation.engine_rows must be a list of row "
+                         f"names from {ENGINE_ROWS}, got {rows!r}")
+    rows = tuple(rows)
+    bad = [r for r in rows if r not in ENGINE_ROWS]
+    if bad or len(set(rows)) != len(rows):
+        raise ValueError(f"generation.engine_rows: unknown or repeated row(s) "
+                         f"{bad or list(rows)} (known: {ENGINE_ROWS})")
+    if "Ip" not in rows:
+        raise ValueError("generation.engine_rows must include 'Ip'")
+    extra = set(rows) - PRESET_ROWS[preset]
+    if extra:
+        raise ValueError(f"generation.engine_preset={preset!r} admits rows "
+                         f"{sorted(PRESET_ROWS[preset])}; got also "
+                         f"{sorted(extra)}")
+    if preset == "sawtooth_two_scalar" and "q0" not in rows:
+        raise ValueError("generation.engine_preset='sawtooth_two_scalar' "
+                         "needs the 'q0' row (two scalars, two rows)")
+    dc = vals["engine_delivery_correction"]
+    if not isinstance(dc, (bool, np.bool_)):
+        raise ValueError(f"generation.engine_delivery_correction must be a "
+                         f"bool, got {dc!r}")
+    mj = vals["engine_mse_jacobian"]
+    if mj not in ENGINE_MSE_JACOBIANS:
+        raise ValueError(f"generation.engine_mse_jacobian must be one of "
+                         f"{ENGINE_MSE_JACOBIANS}, got {mj!r}")
+    if "mse" in rows and getattr(gc, "mse_data", None) is None:
+        raise ValueError("generation.engine_rows has 'mse' but "
+                         "generation.mse_data is None")
+    for name, want in (("jbs_self_consistent", True),
+                       ("recalculate_j_BS", True),
+                       ("single_profile_jphi", False)):
+        if bool(getattr(gc, name, want)) != want:
+            raise ValueError(
+                f"reconstruction_engine='unified' needs generation.{name}="
+                f"{want}: the engine is the self-consistent bootstrap loop")
+    if str(getattr(gc, "jbs_init", "anchor")) != "anchor":
+        raise ValueError("reconstruction_engine='unified' starts from the "
+                         "anchor (generation.jbs_init='anchor'); the legacy "
+                         "'swb' initial guess is not available")
+
+
+def engine_settings(gc) -> dict:
+    """The validated engine settings of a :class:`GenerationConfig`.
+
+    ``loop`` is :func:`bouquet.jbs_loop.jbs_settings` with the closure-half
+    current gate ON (decision 9: a standing criterion -- it adds one, it
+    loosens none); the other tolerances are read from where they live."""
+    from .jbs_loop import MSE_CHORD_OFFSET_TOL_SIGMA, jbs_settings
+    validate_engine_settings(gc)
+    loop = dict(jbs_settings(gc))
+    loop["gate_current_residual"] = True
+    return dict(
+        engine=str(gc.reconstruction_engine),
+        preset=str(gc.engine_preset),
+        rows=tuple(gc.engine_rows),
+        delivery_correction=bool(gc.engine_delivery_correction),
+        mse_jacobian=str(gc.engine_mse_jacobian),
+        loop=loop,
+        q0_tol=float(gc.q0_tol),
+        structured_li_tol=float(gc.structured_li_tol),
+        mse_fd_step=float(gc.structured_mse_fd_step),
+        mse_tol_sigma=float(MSE_CHORD_OFFSET_TOL_SIGMA),
+    )
+
+
+def convergence_table(settings: dict, contract=None) -> list:
+    """Every convergence constant the engine uses, with where it lives."""
+    from .utils import IP_ROUNDTRIP_TOL_PCT
+    lp = settings["loop"]
+    rows = [
+        ("r_j", lp["rtol_j"], "GenerationConfig.jbs_rtol_j"),
+        ("r_I", lp["rtol_Ip"], "GenerationConfig.jbs_rtol_Ip"),
+        ("|dl_i|", lp["tol_li"], "GenerationConfig.jbs_tol_li"),
+        ("|dq0| (q0 row active)", lp["tol_q0"], "GenerationConfig.jbs_tol_q0"),
+        ("|q0 - q0_target| (q0 row active)", settings["q0_tol"],
+         "GenerationConfig.q0_tol (via jbs_loop.AxisRowPin)"),
+        ("l_i, g-file hard row", gfile_li_row_tol(),
+         "TokaMaker_interface._rematch_li_request li_tol default"),
+        ("l_i, IDS hard row / soft-row discrepancy",
+         settings["structured_li_tol"], "GenerationConfig.structured_li_tol"),
+        ("MSE tan(gamma) change [sigma_eff]", settings["mse_tol_sigma"],
+         "jbs_loop.MSE_CHORD_OFFSET_TOL_SIGMA"),
+        ("closure-half current residual", lp["rtol_j"],
+         "GenerationConfig.jbs_rtol_j (jbs_loop current gate, standing)"),
+        ("consecutive passes", lp["required_consecutive"],
+         "jbs_loop.JBS_REQUIRED_CONSECUTIVE"),
+        ("pass ceiling", lp["max_passes"], "GenerationConfig.jbs_max_passes"),
+        ("omega floor", lp["relax_floor"], "jbs_loop.JBS_RELAX_FLOOR"),
+        ("growth abort passes", lp["growth_abort_passes"],
+         "jbs_loop.JBS_GROWTH_ABORT_PASSES"),
+        ("closure scale bounds", list(_closure_scale_bounds()),
+         "utils.close_ip_structured scale_bounds default"),
+        ("Ip round trip [%]", IP_ROUNDTRIP_TOL_PCT,
+         "utils.IP_ROUNDTRIP_TOL_PCT"),
+    ]
+    return [dict(criterion=a, value=b, origin=c) for a, b, c in rows]
+
+
+# ---------------------------------------------------------------------------
+#  composition (identity I2)
+# ---------------------------------------------------------------------------
+def conversion_factor(geom) -> np.ndarray:
+    """``F<1/R>/<B^2>``: the field-aligned ``<j.B>`` -> ``<j_phi>`` factor
+    (conversion (c) of the verification report)."""
+    F = np.asarray(geom["F"], dtype=float)
+    return F * np.asarray(geom["inv_R"], dtype=float) \
+        / np.asarray(geom["B2"], dtype=float)
+
+
+def pressure_term(geom) -> np.ndarray:
+    """``p'(<R> - F^2<1/R>/<B^2>)``: the pressure-driven (diamagnetic +
+    Pfirsch-Schlueter) part of ``<j_phi>``, whose ``<j.B>`` is zero."""
+    F = np.asarray(geom["F"], dtype=float)
+    return np.asarray(geom["pprime"], dtype=float) * (
+        np.asarray(geom["R_avg"], dtype=float)
+        - F ** 2 * np.asarray(geom["inv_R"], dtype=float)
+        / np.asarray(geom["B2"], dtype=float))
+
+
+def compose(geom, jB_ind, jB_bs, jB_fix, s_ind=1.0, s_bs=1.0):
+    """``(J, parts)``: the ``jphi-linterp`` current of the components on
+    *geom* (identity I2).  ``parts``: ``ind``, ``bs``, ``fix`` (toroidal,
+    scaled), ``pressure`` and the factor ``kappa``."""
+    kap = conversion_factor(geom)
+    P = pressure_term(geom)
+    ind = np.asarray(s_ind) * kap * np.asarray(jB_ind, dtype=float)
+    bs = np.asarray(s_bs) * kap * np.asarray(jB_bs, dtype=float)
+    fix = kap * np.asarray(jB_fix, dtype=float)
+    return ind + bs + fix + P, dict(ind=ind, bs=bs, fix=fix, pressure=P,
+                                    kappa=kap)
+
+
+def li_of_current(j, geom, li_kind):
+    """The closure's l_i model of an arbitrary ``jphi-linterp`` current on
+    *geom* (its Ip weights, affine P' term and l_i geometry)."""
+    from scipy.integrate import cumulative_trapezoid
+    from .utils import li_value
+    lg = geom["li_geom"]
+    psi = np.asarray(lg["psi_N"], dtype=float)
+    I = cumulative_trapezoid(np.asarray(geom["w_lin"], float)
+                             * np.asarray(j, float), psi, initial=0.0) \
+        + np.asarray(lg["affine_cum"], dtype=float)
+    return float(li_value(psi, I, lg, li_kind))
+
+
+def complete_geometry(geom):
+    """Add the Ip weights ``w_lin``/``c_affine`` (:func:`bouquet.utils.
+    Ip_fsa_weights`, ``jphi-linterp``) to a measured geometry dict."""
+    from .utils import Ip_fsa_weights
+    g = dict(geom)
+    w, c = Ip_fsa_weights(g, convention="jphi-linterp")
+    g["w_lin"], g["c_affine"] = np.asarray(w, dtype=float), float(c)
+    return g
+
+
+def _lin(geom, j):
+    from scipy.integrate import trapezoid
+    return float(trapezoid(np.asarray(geom["w_lin"], float)
+                           * np.asarray(j, float),
+                           np.asarray(geom["psi_N"], float)))
+
+
+def _delivery_stats(req, A, geom):
+    """``c`` (achieved / request, the uniform Ip factor, in the linear Ip
+    measure) and request - achieved/c in % of the peak, core (psi_N < 0.8)
+    and edge (psi_N >= 0.8)."""
+    psi = np.asarray(geom["psi_N"], dtype=float)
+    li_r = _lin(geom, req)
+    c = _lin(geom, A) / li_r if li_r != 0.0 else float("nan")
+    d = np.asarray(req, float) - np.asarray(A, float) / c
+    pk = float(np.max(np.abs(np.asarray(A, float) / c))) or 1.0
+    core, edge = psi < 0.8, psi >= 0.8
+
+    def _st(m):
+        v = 100.0 * d[m] / pk
+        return (float(np.max(np.abs(v))) if v.size else None,
+                float(np.sqrt(np.mean(v ** 2))) if v.size else None)
+    (cm, cr), (em, er) = _st(core), _st(edge)
+    return dict(c=float(c), core_max_pct=cm, core_rms_pct=cr,
+                edge_max_pct=em, edge_rms_pct=er,
+                edge_argmax_psiN=(float(psi[edge][int(np.argmax(np.abs(
+                    d[edge])))]) if np.any(edge) else None)), d
+
+
+# ---------------------------------------------------------------------------
+#  the state (what a draw inherits)
+# ---------------------------------------------------------------------------
+@dataclass
+class EngineState:
+    """The reconstruction's state -- designed so a draw can hold it.
+
+    A draw's first pass composes on :attr:`geom` with the unperturbed
+    components, :attr:`x` and :attr:`lambda_bs`, so its request is
+    bit-identical to :attr:`request` (docs/engine.md, "Draws")."""
+
+    x: Optional[np.ndarray] = None            # closure coefficients (2K)
+    lambda_bs: Optional[np.ndarray] = None    # Redl <j.B> iterate in use
+    li_discrepancy: float = 0.0               # l_i row d_r
+    q0_row: Optional[float] = None            # axis-current row (AxisRowPin)
+    q0_target: Optional[float] = None
+    mse_J: Optional[np.ndarray] = None        # d tan(gamma) / d x
+    mse_x0: Optional[np.ndarray] = None
+    mse_tg0: Optional[np.ndarray] = None
+    mse_sign: Optional[tuple] = None
+    delivery_correction: Optional[np.ndarray] = None   # toroidal Delta
+    geom: Optional[dict] = None               # geometry the next pass uses
+    request: Optional[np.ndarray] = None      # the last solved request
+    extras: dict = field(default_factory=dict)
+
+    def record(self) -> dict:
+        from .jbs_loop import jsonable
+        g = self.geom or {}
+        keep = ("psi_N", "psi_q", "F", "R_avg", "inv_R", "inv_R2", "B2",
+                "pprime", "dV_dpsi", "dpsi_dpsiN", "w_lin", "c_affine")
+        return jsonable(dict(
+            x=self.x, lambda_bs=self.lambda_bs,
+            li_discrepancy=self.li_discrepancy, q0_row=self.q0_row,
+            q0_target=self.q0_target, mse_J=self.mse_J, mse_x0=self.mse_x0,
+            mse_tg0=self.mse_tg0,
+            mse_sign=(None if self.mse_sign is None else list(self.mse_sign)),
+            delivery_correction=self.delivery_correction,
+            geometry_snapshot={k: g.get(k) for k in keep if k in g},
+            li_geom_snapshot=({k: v for k, v in (g.get("li_geom") or {}).items()
+                               if k in ("dpsi_dpsiN", "vol", "perimeter",
+                                        "R_axis", "affine_cum", "psi_pad")}
+                              or None),
+            request=self.request, **self.extras))
+
+
+# ---------------------------------------------------------------------------
+#  the rows the kernel does not know (its ``extra`` hook)
+# ---------------------------------------------------------------------------
+class EngineRows:
+    """The engine's added criteria: the l_i row and the MSE chords.
+
+    l_i: the delivered l_i against what the closure predicted it would be,
+    ``e = l_i(E_k+1) - (l_i_model(x_k; G_k) + d_k-1)``.  On a HARD row the
+    closure imposes ``l_i_model + d = target``, so ``e`` IS the delivered
+    residual ``l_i - target``; on a SOFT row ``e`` is the gap between the
+    residual the fit weighed and the delivered one (the LiRowPin soft
+    semantics).  ``|e| <= tol``.
+    MSE (after the Jacobian): ``max_i |tg_i(E_k+1) - tg_i(E_k)| / sigma_eff_i
+    <= MSE_CHORD_OFFSET_TOL_SIGMA``.
+    """
+
+    def __init__(self, engine, *, li_tol=None, mse_tol=None):
+        self.eng = engine
+        self.li_tol = li_tol
+        self.mse_tol = mse_tol
+        names = []
+        if li_tol is not None:
+            names.append("li_row")
+        if mse_tol is not None:
+            names.append("mse_chords")
+        self.names = tuple(names)
+        self.log = dict(li_row_error=[], li_row_ok=[], mse_dtg_max_sigma=[],
+                        mse_ok=[])
+
+    def observe(self, k, meas):
+        p = self.eng._pending
+        ok, never, txt = True, None, []
+        if self.li_tol is not None:
+            li = meas.get("li")
+            pred = p["li_predicted_plus_d"]
+            e = (None if (li is None or pred is None
+                          or not np.isfinite(li)) else float(li - pred))
+            o = bool(e is not None and abs(e) <= self.li_tol)
+            self.log["li_row_error"].append(e)
+            self.log["li_row_ok"].append(o)
+            ok = ok and o
+            if e is None:
+                never = ("the l_i row cannot be evaluated on this pass (no "
+                         "finite delivered or predicted l_i)")
+            txt.append("li_row=n/a" if e is None else
+                       f"li_row={e:+.2e} (tol {self.li_tol:g})")
+        if self.mse_tol is not None:
+            dt = p.get("mse_dtg_max_sigma")
+            o = bool(dt is not None and np.isfinite(dt) and dt <= self.mse_tol)
+            self.log["mse_dtg_max_sigma"].append(dt)
+            self.log["mse_ok"].append(o)
+            ok = ok and o
+            txt.append("mse_dtg=n/a" if dt is None else
+                       f"mse_dtg={dt:.2e}sig (tol {self.mse_tol:g})")
+        return ok, never, " ".join(txt)
+
+    def record(self):
+        from .jbs_loop import jsonable
+        return jsonable(dict(li_tol=self.li_tol, mse_tol_sigma=self.mse_tol,
+                             **self.log))
+
+    def history_text(self):
+        out = []
+        if self.li_tol is not None:
+            out.append("li_row_error=[" + ", ".join(
+                "n/a" if v is None else f"{v:+.2e}"
+                for v in self.log["li_row_error"])
+                + f"] (tol {self.li_tol:g})")
+        if self.mse_tol is not None:
+            out.append("mse_dtg_max_sigma=[" + ", ".join(
+                "n/a" if v is None else f"{v:.2e}"
+                for v in self.log["mse_dtg_max_sigma"])
+                + f"] (tol {self.mse_tol:g})")
+        return " ".join(out)
+
+
+# ---------------------------------------------------------------------------
+#  the engine
+# ---------------------------------------------------------------------------
+class UnifiedEngine:
+    """One reconstruction: the loop, the optional MSE stage, the delivery.
+
+    *backend* provides ``solve(request, n_passes=1)``, ``snapshot()``,
+    ``restore(eq)``, ``measure(want_chords=...)`` and ``n_solves`` (see
+    :class:`TokaMakerBackend`).  *anchor* is the backend measurement of the
+    anchor equilibrium E_0 (already solved)."""
+
+    def __init__(self, contract, backend, settings, *, anchor, label=""):
+        self.c = contract
+        self.b = backend
+        self.s = settings
+        self.label = str(label or f"engine {contract.kind}")
+        self.psi = np.asarray(contract.psi_N, dtype=float)
+        self.state = EngineState()
+        self.passes = []
+        self._pending = None
+        self.solves = dict(anchor=int(backend.n_solves))
+        self.notices = []
+        self._resolve_rows()
+        self._prior()
+        g0 = complete_geometry(anchor["geom"])
+        self.state.geom = g0
+        self.state.lambda_bs = np.asarray(anchor["redl"], dtype=float).copy()
+        self.anchor = anchor
+        if self.s["delivery_correction"]:
+            self.state.delivery_correction = np.zeros_like(self.psi)
+        self._mse_phase = None
+        self._phase_name = "loop"
+        self._d_first = True
+        self.pin = None
+        if "q0" in self.rows:
+            # the axis-current row, started with one AxisRowPin step from the
+            # anchor: j_ref0 = j0 * q0(anchor) / q0_target, with j0 the
+            # anchor's ACHIEVED axis current (its request need not carry Ip;
+            # every closure's current does, so the achieved one is what a
+            # closed pass solves)
+            from .jbs_loop import AxisRowPin
+            q = self.rows["q0"]
+            j0a = float(np.interp(float(g0["psi_q"][0]), self.psi,
+                                  anchor["achieved"]))
+            row0 = j0a * float(anchor["q_row"]) / float(q["target"])
+            self.pin = AxisRowPin(q["target"], self.s["q0_tol"], row0,
+                                  label=self.label)
+            self.state.q0_target = float(q["target"])
+
+    # ---- rows ------------------------------------------------------------
+    def _resolve_rows(self):
+        c, s = self.c, self.s
+        want = set(s["rows"])
+        rows = dict(Ip=c.rows["Ip"])
+        if "l_i" in want:
+            if c.rows.get("l_i") is None:
+                from .adapters import EngineInputRefused
+                raise EngineInputRefused(
+                    f"{self.label}: engine_rows has 'l_i' but the source "
+                    "carries no l_i")
+            rows["l_i"] = dict(c.rows["l_i"])
+            li = rows["l_i"]
+            if li["hard"] and li.get("tol") is None:
+                li["tol"] = s["structured_li_tol"]
+            li["criterion_tol"] = (float(li["tol"]) if li["hard"]
+                                   else s["structured_li_tol"])
+        self.preset = s["preset"]
+        if "q0" in want:
+            q = c.rows.get("q0")
+            if q is None or not q.get("admitted", False):
+                why = ("the source carries no q" if q is None else
+                       f"the sawtooth gate rejected it ({q['gate_basis']})")
+                msg = (f"[{self.label}] NOTICE: the q0 row was requested but "
+                       f"is not active: {why}")
+                if self.preset == "sawtooth_two_scalar":
+                    msg += ("; preset 'sawtooth_two_scalar' falls back to "
+                            "'bootstrap_scalar' (rows: Ip), as the legacy "
+                            "sawtooth channel falls back to 'bootstrap'")
+                    self.preset = "bootstrap_scalar"
+                print(msg, flush=True)
+                self.notices.append(msg)
+            else:
+                rows["q0"] = dict(q)
+        if "mse" in want:
+            if c.rows.get("mse") is None:
+                from .adapters import EngineInputRefused
+                raise EngineInputRefused(f"{self.label}: engine_rows has "
+                                         "'mse' but no MSE rows were read")
+            rows["mse"] = c.rows["mse"]
+        self.rows = rows
+        self.soft = bool(self.preset == "structured"
+                         and (not rows["Ip"]["hard"]
+                              or ("l_i" in rows and not rows["l_i"]["hard"])))
+        if self.soft and "l_i" in rows and rows["l_i"]["hard"]:
+            from .adapters import EngineInputRefused
+            raise EngineInputRefused(
+                f"{self.label}: a soft Ip row with a hard l_i row has no "
+                "closure (the soft solver takes l_i as a measurement and the "
+                "hard one imposes Ip exactly)")
+
+    def _prior(self):
+        from .utils import (STRUCTURED_BASIS_DEFAULT, STRUCTURED_PRESETS,
+                            _weights_from_sigma)
+        if self.preset == "structured":
+            sp = STRUCTURED_PRESETS["li_soft_onesided"]
+            self.basis = dict(STRUCTURED_BASIS_DEFAULT)
+            self.sigma_ind = np.asarray(sp["sigma_ind"], dtype=float)
+            self.sigma_bs = np.asarray(sp["sigma_bs"], dtype=float)
+            self.sigma_up = np.asarray(sp["sigma_ind_up"], dtype=float)
+            self.prior_name = "li_soft_onesided (utils.STRUCTURED_PRESETS)"
+        elif self.preset == "bootstrap_scalar":
+            self.basis = dict(kind="constant")
+            self.sigma_ind = np.array([0.0])      # pinned: s_ind = 1
+            self.sigma_bs = np.array([1.0])
+            self.sigma_up = None
+            self.prior_name = "constant basis, s_ind pinned (bootstrap)"
+        else:
+            self.basis = dict(kind="constant")
+            self.sigma_ind = np.array([1.0])
+            self.sigma_bs = np.array([1.0])
+            self.sigma_up = None
+            self.prior_name = "constant basis, two scalars (sawtooth)"
+        self.weights = dict(name=self.prior_name,
+                            ind=tuple(_weights_from_sigma(self.sigma_ind)),
+                            bs=tuple(_weights_from_sigma(self.sigma_bs)))
+
+    # ---- closure ---------------------------------------------------------
+    def close(self, geom, lam_bs, *, x=None, mse_lin=None, x_prev=None):
+        """The closure on *geom* with bootstrap *lam_bs* (zero solves).
+
+        Returns ``dict(out, jc, parts, x, li_predicted, axis, ip_gate)``;
+        ``jc`` is the INTENDED current (the delivery correction is added by
+        the caller).  With *x* given, the closure is not run: the current of
+        those coefficients is composed (the FD Jacobian's perturbed
+        requests)."""
+        from .utils import (close_ip_structured, close_ip_structured_soft,
+                            closure_sign_convention, ip_roundtrip_gate,
+                            soft_closure_with_retry, structured_basis_eval)
+        c = self.c
+        psi = self.psi
+        _, parts = compose(geom, c.jB_ind, lam_bs, c.jB_fix)
+        j_ind, j_bs = parts["ind"], parts["bs"]
+        j_fix = parts["fix"] + parts["pressure"]
+        Ip_abs = float(self.rows["Ip"]["target"])
+        ip_ind, ip_bs, ip_fix = (_lin(geom, j_ind), _lin(geom, j_bs),
+                                 _lin(geom, j_fix))
+        sgn, Ip_signed, c_signed = closure_sign_convention(
+            ip_ind, ip_bs, ip_fix, geom["c_affine"], Ip_abs)
+        axis = None
+        if "q0" in self.rows:
+            psi0 = float(geom["psi_q"][0])
+            axis = dict(psi=psi0, j_ind0=float(np.interp(psi0, psi, j_ind)),
+                        j_bs0=float(np.interp(psi0, psi, j_bs)),
+                        j_fix0=float(np.interp(psi0, psi, j_fix)),
+                        j_ref0=float(self.pin.row))
+        li_t = None
+        li = self.rows.get("l_i")
+        if li is not None:
+            li_t = float(li["target"]) - float(self.state.li_discrepancy)
+        Phi = structured_basis_eval(self.basis, psi)
+        K = Phi.shape[0]
+        if x is not None:
+            x = np.asarray(x, dtype=float)
+            s_ind, s_bs = 1.0 + x[:K] @ Phi, 1.0 + x[K:] @ Phi
+            jc = s_ind * j_ind + s_bs * j_bs + j_fix
+            return dict(out=None, jc=jc, parts=parts, x=x, axis=axis,
+                        li_predicted=None, ip_gate=None)
+        try:
+            if self.soft:
+                sig_ip = self.rows["Ip"].get("sigma")
+
+                def _solve(x0):
+                    return close_ip_structured_soft(
+                        psi, geom["w_lin"], c_signed, Ip_signed,
+                        (None if self.rows["Ip"]["hard"] else sig_ip),
+                        j_ind, j_bs, j_fix, basis=self.basis,
+                        sigma_ind=self.sigma_ind, sigma_bs=self.sigma_bs,
+                        li_target=li_t,
+                        li_sigma=(None if li is None else
+                                  (None if li["hard"] else li["sigma"])),
+                        li_kind=(li["kind"] if li else "li_1"),
+                        li_geom=(geom["li_geom"] if li else None),
+                        axis=axis, axis_sigma=None,
+                        sigma_ind_up=self.sigma_up, mse_lin=mse_lin, x0=x0,
+                        accept_noise_floor=True)
+                out = soft_closure_with_retry(_solve, x_prev=x_prev,
+                                              who=self.label + " closure")
+            else:
+                out = close_ip_structured(
+                    psi, geom["w_lin"], c_signed, Ip_signed, j_ind, j_bs,
+                    j_fix, basis=self.basis, weights=self.weights, axis=axis,
+                    li_target=li_t, li_kind=(li["kind"] if li else "li_1"),
+                    li_geom=(geom["li_geom"] if li else None),
+                    sigma_ind_up=self.sigma_up, mse_lin=mse_lin)
+            xs = np.concatenate([np.asarray(out["a"], float),
+                                 np.asarray(out["b"], float)])
+            jc = out["s_ind"] * j_ind + out["s_bs"] * j_bs + j_fix
+            ip_closed = _lin(geom, jc) + c_signed
+            gate = ip_roundtrip_gate(
+                ip_closed, Ip_abs,
+                posterior=(out["Ip_hybrid"] if self.soft else None),
+                sigma_Ip=self.rows["Ip"].get("sigma"))
+        except (RuntimeError, ValueError) as e:
+            raise EngineClosureRefused(
+                f"{self.label}: the closure refused ({e})") from e
+        lp = out.get("li_predicted")
+        return dict(out=out, jc=jc, parts=parts, x=xs, axis=axis,
+                    li_predicted=(None if lp is None else float(lp)),
+                    ip_gate=gate, sgn=float(sgn), Ip_signed=float(Ip_signed),
+                    c_signed=float(c_signed))
+
+    def _mse_lin(self):
+        if self._mse_phase is None:
+            return None
+        from .utils import structured_mse_linear_model
+        st = self.state
+        return structured_mse_linear_model(st.mse_x0, st.mse_tg0, st.mse_J,
+                                           self.rows["mse"]["chords"])
+
+    def _tg(self, m):
+        from .mse import mse_tan_gamma
+        sp, stt = self.state.mse_sign
+        return mse_tan_gamma(m["B_chords"], self.rows["mse"]["chords"], sp,
+                             stt)
+
+    # ---- one pass (the kernel's step) -----------------------------------
+    def step(self, jbs, k, relax=None):
+        st = self.state
+        geom = st.geom
+        cl = self.close(geom, jbs, mse_lin=self._mse_lin(),
+                        x_prev=st.x)
+        jint = np.asarray(relax(cl["jc"]) if relax is not None else cl["jc"],
+                          dtype=float)
+        dlt = st.delivery_correction
+        req = jint + (0.0 if dlt is None else dlt)
+        self.b.solve(req, n_passes=1)
+        m = self.b.measure(want_chords=("mse" in self.rows))
+        g1 = complete_geometry(m["geom"])
+        dstat, dvec = _delivery_stats(req, m["achieved"], g1)
+        if dlt is not None:
+            dstat["intended_minus_achieved"] = _delivery_stats(
+                jint, m["achieved"], g1)[0]
+        # the coefficients whose current was SOLVED: the relaxer's blend of
+        # the closure's coefficients (the composition is affine in x), so the
+        # MSE linearisation is centred on what the equilibrium carries
+        beta = (1.0 if relax is None else float(relax.beta))
+        xs_prev = st.extras.get("x_solved")
+        x_solved = (np.asarray(cl["x"], float) if (k == 0 or beta >= 1.0
+                                                   or xs_prev is None)
+                    else (1.0 - beta) * np.asarray(xs_prev, float)
+                    + beta * np.asarray(cl["x"], float))
+        st.extras["x_solved"] = x_solved
+        lik = self.rows.get("l_i", {}).get("kind", "li_3")
+        li_pred_d = (None if cl["li_predicted"] is None else
+                     float(cl["li_predicted"]) + float(st.li_discrepancy))
+        p = dict(k=k, cl=cl, cl_geom=geom, jint=jint, req=req, m=m, geom=g1,
+                 x_solved=x_solved,
+                 li_predicted_plus_d=li_pred_d, dvec=dvec, dstat=dstat,
+                 d_used=float(st.li_discrepancy))
+        if "l_i" in self.rows:
+            p["li_model_solved_new_geom"] = li_of_current(jint, g1, lik)
+        if self._mse_phase is not None:
+            tg = self._tg(m)
+            prev = self._mse_phase["tg_prev"]
+            p["tg"] = tg
+            p["mse_dtg_max_sigma"] = float(np.max(np.abs(tg - prev) / self.rows[
+                "mse"]["chords"]["sigma_eff"]))
+        self._pending = p
+        meas = dict(w=g1["w_lin"] * conversion_factor(g1), x=self.psi,
+                    li=m["li"], redl=m["redl"],
+                    q0=(m["q_row"] if "q0" in self.rows else None))
+        if "q0" in self.rows:
+            meas["axis_current_solved"] = float(np.interp(
+                float(g1["psi_q"][0]), self.psi, jint))
+        # the next pass composes on this pass's solved geometry
+        st.geom = g1
+        st.x = cl["x"]
+        st.request = req
+        self.passes.append(self._pass_record(p))
+        return meas
+
+    def _pass_record(self, p):
+        cl, m, out = p["cl"], p["m"], p["cl"]["out"] or {}
+        rec = dict(
+            k=int(p["k"]), phase=self._phase_name, x=cl["x"].tolist(),
+            s_ind_range=[float(np.min(out["s_ind"])), float(np.max(out[
+                "s_ind"]))] if "s_ind" in out else None,
+            s_bs_range=[float(np.min(out["s_bs"])), float(np.max(out[
+                "s_bs"]))] if "s_bs" in out else None,
+            ip_gate_err_pct=(None if cl["ip_gate"] is None
+                             else cl["ip_gate"]["err_pct"]),
+            residual_sigma_Ip=out.get("residual_sigma_Ip"),
+            closure_retry=out.get("closure_retry"),
+            closure_stop=out.get("gn_stop_reason"),
+            li=m["li"], li_predicted=cl["li_predicted"],
+            li_discrepancy_used=p["d_used"],
+            q_row=m.get("q_row"), Ip=m.get("Ip"),
+            delivery=p["dstat"],
+            n_solves=int(self.b.n_solves))
+        if "tg" in p:
+            rec["mse_dtg_max_sigma"] = p["mse_dtg_max_sigma"]
+        return rec
+
+    def on_pass(self, k, meas, J, entry):
+        """Row updates between passes (never after the last one)."""
+        p = self._pending
+        om = entry.get("omega_next")
+        if om is None:
+            return
+        st = self.state
+        if "l_i" in self.rows:
+            raw = float(p["m"]["li"]) - float(p["li_model_solved_new_geom"])
+            st.li_discrepancy = (raw if self._d_first else
+                                 (1.0 - om) * st.li_discrepancy + om * raw)
+            self._d_first = False
+            self.passes[-1]["li_discrepancy_next"] = st.li_discrepancy
+        if st.delivery_correction is not None:
+            st.delivery_correction = np.asarray(p["dvec"], dtype=float).copy()
+            self.passes[-1]["delivery_correction_max"] = float(np.max(np.abs(
+                st.delivery_correction)))
+        if self._mse_phase is not None:
+            # Broyden (good) update of d tan(gamma)/d x from the pass just
+            # solved, then refresh the linearisation point from the solve
+            x_new = np.asarray(p["x_solved"], dtype=float)
+            dx = x_new - st.mse_x0
+            dtg = p["tg"] - st.mse_tg0
+            nn = float(dx @ dx)
+            if nn > 0.0 and self.s["mse_jacobian"] == "fd_broyden":
+                st.mse_J = st.mse_J + np.outer(dtg - st.mse_J @ dx, dx) / nn
+                self._mse_phase["n_broyden"] += 1
+            st.mse_x0, st.mse_tg0 = x_new, np.asarray(p["tg"], float)
+            self._mse_phase["tg_prev"] = np.asarray(p["tg"], float)
+
+    # ---- the whole reconstruction ----------------------------------------
+    def run(self):
+        from .jbs_loop import run_jbs_loop
+        t0 = time.perf_counter()
+        s, st = self.s, self.state
+        li = self.rows.get("l_i")
+        rows_x = EngineRows(self, li_tol=(None if li is None
+                                          else li["criterion_tol"]))
+        meas0 = dict(li=self.anchor["li"],
+                     q0=(self.anchor["q_row"] if self.pin else None))
+        res = run_jbs_loop(
+            st.lambda_bs, self.step, lambda m: m["redl"], s["loop"],
+            Ip=float(self.rows["Ip"]["target"]), meas0=meas0, gate_li=True,
+            gate_q0=bool(self.pin), label=self.label,
+            init_source=("evaluate_jBS <j.B> on the anchor (the source's own "
+                         "total current at the full pressure)"),
+            on_pass=self.on_pass, q0_pin=self.pin, extra=rows_x)
+        phases = [dict(name="loop", record=res["record"])]
+        self.solves["loop"] = int(self.b.n_solves) - self.solves["anchor"]
+        converged = bool(res["converged"])
+        last = res
+        if "mse" in self.rows and converged:
+            res_m, fd = self._mse_stage(res)
+            phases.append(dict(name="mse", record=res_m["record"],
+                               jacobian=fd))
+            converged = bool(res_m["converged"])
+            last = res_m
+        st.lambda_bs = np.asarray(last["jbs_used"], dtype=float)
+        if self.pin is not None:
+            st.q0_row = float(self.pin.row)
+        n_before = int(self.b.n_solves)
+        delivered = self._deliver(last, converged)
+        self.solves["delivery"] = int(self.b.n_solves) - n_before
+        self.solves["total"] = int(self.b.n_solves)
+        return dict(converged=bool(converged and delivered["ok"]),
+                    loop_converged=converged, phases=phases,
+                    delivered=delivered, state=st,
+                    wall_s=float(time.perf_counter() - t0))
+
+    def _mse_stage(self, res):
+        """FD Jacobian at convergence (1 base + one solve per free
+        coefficient), then the loop again with the chords as rows and the
+        Jacobian Broyden-updated every pass (decision 14)."""
+        from .jbs_loop import run_jbs_loop
+        from .mse import mse_sign_convention
+        from .utils import structured_mse_jacobian
+        st, s = self.state, self.s
+        n0 = int(self.b.n_solves)
+        lam = np.asarray(res["jbs_used"], dtype=float)
+        g_last = self._geom_of_last_closure
+        x0 = np.asarray(st.x, dtype=float)
+        dlt = st.delivery_correction
+        base = self.close(g_last, lam, x=x0)["jc"] + (0.0 if dlt is None
+                                                       else dlt)
+        self.b.solve(base, n_passes=1)
+        m0 = self.b.measure(want_chords=True)
+        snap = self.b.snapshot()
+        ch = self.rows["mse"]["chords"]
+        sp, stt, table = mse_sign_convention(m0["B_chords"], ch)
+        st.mse_sign = (float(sp), float(stt))
+        tg0 = self._tg(m0)
+        free = np.concatenate([self.sigma_ind > 0, self.sigma_bs > 0])
+
+        def _tg_of(x):
+            self.b.restore(snap)
+            r = self.close(g_last, lam, x=x)["jc"] + (0.0 if dlt is None
+                                                      else dlt)
+            self.b.solve(r, n_passes=1)
+            return self._tg(self.b.measure(want_chords=True))
+
+        J = structured_mse_jacobian(_tg_of, x0, tg0, free,
+                                    step=s["mse_fd_step"])
+        self.b.restore(snap)
+        st.mse_J, st.mse_x0, st.mse_tg0 = J, x0, tg0
+        st.geom = complete_geometry(m0["geom"])
+        fd = dict(n_solves=int(self.b.n_solves) - n0,
+                  n_free=int(np.count_nonzero(free)),
+                  fd_step=float(s["mse_fd_step"]),
+                  sign_convention=dict(pol=float(sp), tor=float(stt)),
+                  sign_table={k: float(v) for k, v in table.items()},
+                  scheme=("finite differences once at convergence, then "
+                          "Broyden updates every pass"
+                          if s["mse_jacobian"] == "fd_broyden" else
+                          "finite differences once at convergence, held "
+                          "fixed (chord method; the offset is refreshed "
+                          "from every solve)"),
+                  J_initial=J.tolist(), tg_base=tg0.tolist())
+        self._mse_phase = dict(tg_prev=tg0, n_broyden=0)
+        self._phase_name = "mse"
+        loop = dict(s["loop"])
+        li = self.rows.get("l_i")
+        rows_x = EngineRows(self, li_tol=(None if li is None
+                                          else li["criterion_tol"]),
+                            mse_tol=s["mse_tol_sigma"])
+        meas0 = dict(li=m0["li"], q0=(m0["q_row"] if self.pin else None))
+        n1 = int(self.b.n_solves)
+        out = run_jbs_loop(
+            lam, self.step, lambda m: m["redl"], loop,
+            Ip=float(self.rows["Ip"]["target"]), meas0=meas0, gate_li=True,
+            gate_q0=bool(self.pin), label=self.label + " +MSE",
+            init_source="the converged loop's bootstrap iterate",
+            on_pass=self.on_pass, q0_pin=self.pin, extra=rows_x)
+        fd["n_broyden_updates"] = int(self._mse_phase["n_broyden"])
+        fd["n_pass_solves"] = int(self.b.n_solves) - n1
+        self.solves["mse_fd"] = fd["n_solves"]
+        self.solves["mse_passes"] = fd["n_pass_solves"]
+        return out, fd
+
+    @property
+    def _geom_of_last_closure(self):
+        # the geometry the LAST pass composed on is the one before the last
+        # solve; the step stores the solved one in state.geom, so keep both
+        return self._pending["cl_geom"] if "cl_geom" in (self._pending or {}) \
+            else self.state.geom
+
+    def _deliver(self, res, converged):
+        """The delivery solve and its checks (docs/engine.md, "Delivery")."""
+        from .jbs_loop import JBSNotConverged, check_delivered, jsonable
+        st, s = self.state, self.s
+        lp = s["loop"]
+        geom = st.geom
+        lam = st.lambda_bs
+        prev = self._pending
+        cl = self.close(geom, lam, mse_lin=self._mse_lin(), x_prev=st.x)
+        dlt = st.delivery_correction
+        R = cl["jc"] + (0.0 if dlt is None else dlt)
+        self.b.solve(R, n_passes=2)
+        m = self.b.measure(want_chords=("mse" in self.rows), final=True)
+        g1 = complete_geometry(m["geom"])
+        w = g1["w_lin"] * conversion_factor(g1)
+        chk = check_delivered(m["redl"], lam, w, self.psi,
+                              float(self.rows["Ip"]["target"]), lp)
+        checks = dict(loop=dict(r_j=chk["r_j"], r_I=chk["r_I"],
+                                ok=bool(chk["ok"])))
+        misses = [] if chk["ok"] else [
+            f"r_j={chk['r_j']:.2e} (tol {lp['rtol_j']:g}) / r_I="
+            f"{chk['r_I']:.2e} (tol {lp['rtol_Ip']:g})"]
+        dli = abs(float(m["li"]) - float(prev["m"]["li"]))
+        checks["dl_i"] = dict(value=dli, tol=lp["tol_li"],
+                              ok=bool(dli <= lp["tol_li"]))
+        if not checks["dl_i"]["ok"]:
+            misses.append(f"|dl_i| vs the last pass {dli:.2e} "
+                          f"(tol {lp['tol_li']:g})")
+        from .jbs_loop import _relative_difference
+        cur = _relative_difference(cl["jc"], prev["jint"], w, self.psi)
+        checks["current_residual"] = dict(value=cur, tol=lp["rtol_j"],
+                                          ok=bool(cur is not None
+                                                  and cur <= lp["rtol_j"]))
+        if not checks["current_residual"]["ok"]:
+            misses.append(f"closure-half current residual {cur} "
+                          f"(tol {lp['rtol_j']:g})")
+        li = self.rows.get("l_i")
+        if li is not None:
+            e = float(m["li"]) - (float(cl["li_predicted"])
+                                  + float(st.li_discrepancy))
+            checks["l_i"] = dict(delivered=float(m["li"]),
+                                 target=float(li["target"]),
+                                 predicted_plus_d=float(cl["li_predicted"])
+                                 + float(st.li_discrepancy),
+                                 error=e, tol=li["criterion_tol"],
+                                 hard=bool(li["hard"]),
+                                 residual_sigma=(None if li["hard"] else
+                                                 (float(m["li"]) - li["target"])
+                                                 / li["sigma"]),
+                                 ok=bool(abs(e) <= li["criterion_tol"]))
+            if not checks["l_i"]["ok"]:
+                misses.append(f"l_i row error {e:+.2e} (tol "
+                              f"{li['criterion_tol']:g})")
+        if self.pin is not None:
+            r = float(m["q_row"]) - self.pin.q0_target
+            dq = abs(float(m["q_row"]) - float(prev["m"]["q_row"]))
+            checks["q0"] = dict(delivered=float(m["q_row"]),
+                                target=self.pin.q0_target, residual=r,
+                                tol=self.pin.q0_tol,
+                                ok=bool(abs(r) <= self.pin.q0_tol),
+                                dq0=dq, dq0_tol=lp["tol_q0"],
+                                dq0_ok=bool(dq <= lp["tol_q0"]))
+            if not checks["q0"]["ok"]:
+                misses.append(f"q0 - q0_target {r:+.2e} (q0_tol "
+                              f"{self.pin.q0_tol:g})")
+            if not checks["q0"]["dq0_ok"]:
+                misses.append(f"|dq0| vs the last pass {dq:.2e} (tol "
+                              f"{lp['tol_q0']:g})")
+        if self._mse_phase is not None:
+            from .mse import mse_chi2
+            tg = self._tg(m)
+            ch = self.rows["mse"]["chords"]
+            dt = float(np.max(np.abs(tg - prev["tg"]) / ch["sigma_eff"]))
+            c2, z = mse_chi2(tg, ch)
+            checks["mse"] = dict(dtg_max_sigma=dt, tol=s["mse_tol_sigma"],
+                                 ok=bool(dt <= s["mse_tol_sigma"]),
+                                 chi2=float(c2), residual_sigma=z.tolist(),
+                                 tgamma=tg.tolist())
+            if not checks["mse"]["ok"]:
+                misses.append(f"MSE tan(gamma) change {dt:.2e} sigma (tol "
+                              f"{s['mse_tol_sigma']:g})")
+        dstat, dvec = _delivery_stats(R, m["achieved"], g1)
+        st.x = cl["x"]
+        st.request = R
+        ok = not misses
+        rec = dict(ok=bool(ok), checks=checks, misses=misses,
+                   delivery=dstat, n_passes_solve=2,
+                   closure=_closure_record(cl))
+        self.delivered_meas = m
+        self.delivered_closure = cl
+        self.delivered_geom_solved = g1
+        self.delivered_dvec = dvec
+        if not ok:
+            msg = (f"{self.label}: the delivered equilibrium fails the "
+                   "loop / row criteria: " + "; ".join(misses))
+            rec["fail_message"] = msg
+            print("  [engine] " + msg, flush=True)
+            if converged and lp.get("on_fail", "raise") == "raise":
+                raise JBSNotConverged(msg, jsonable(rec))
+        return rec
+
+
+def _closure_record(cl):
+    """JSON-safe summary of one closure result."""
+    from .jbs_loop import jsonable
+    out = cl["out"] or {}
+    keep = ("solver", "weights_name", "constraints", "ohm_scale_eff",
+            "bs_scale_eff", "structure_ind", "structure_bs", "Ip_hybrid",
+            "ip_residual_pct", "residual_sigma_Ip", "residual_sigma_li",
+            "li_target", "li_predicted", "li_anchor", "axis_residual",
+            "prior_chi2", "objective", "gn_stop_reason", "closure_retry",
+            "mse_chi2_model", "n_sign_iter", "sign_pattern", "a", "b")
+    rec = {k: out.get(k) for k in keep if k in out}
+    rec["s_ind"] = out.get("s_ind")
+    rec["s_bs"] = out.get("s_bs")
+    rec["ip_gate"] = cl.get("ip_gate")
+    rec["axis"] = cl.get("axis")
+    return jsonable(rec)
+
+
+# ---------------------------------------------------------------------------
+#  the TokaMaker backend (solver tests only; the fast suite uses a toy)
+# ---------------------------------------------------------------------------
+class TokaMakerBackend:
+    """The engine's view of a live TokaMaker solver.
+
+    ``solve`` is the IMAS baseline's ``solve_jphi`` (P' from the fixed
+    pressure over the CURRENT flux range, ``jphi-linterp`` request,
+    ``set_targets(Ip, pax)``), one or two passes; ``measure`` reads the
+    solved equilibrium: :func:`bouquet.utils.fsa_current_geometry`,
+    :func:`bouquet.physics.evaluate_jBS` (its Redl ``<j.B>`` with the shared
+    innermost-surface repair :func:`~bouquet.TokaMaker_interface.
+    smooth_jbs_transition`), :func:`bouquet.utils.li_closure_geometry`,
+    :func:`bouquet.utils.li_achieved`, q at the row radius, the achieved
+    ``<j_phi>`` (:func:`bouquet.utils.eq_jphi_profile`) and the field at the
+    MSE chords (:func:`bouquet.mse.mse_field_at`)."""
+
+    def __init__(self, mygs, contract, *, psi_pad=1e-3, li_kind="li_3",
+                 q_psi=None, chords=None):
+        self.mygs = mygs
+        self.c = contract
+        self.psi = np.asarray(contract.psi_N, dtype=float)
+        self.psi_pad = float(psi_pad)
+        self.li_kind = str(li_kind)
+        self.q_psi = (float(np.clip(self.psi[0], psi_pad, 1 - psi_pad))
+                      if q_psi is None else float(q_psi))
+        self.chords = chords
+        self.n_solves = 0
+        self.p = np.asarray(contract.pressure, dtype=float)
+
+    def solve(self, request, n_passes=1):
+        from .utils import pchip_derivative
+        mygs = self.mygs
+        req = np.asarray(request, dtype=float)
+        if not np.all(np.isfinite(req)):
+            raise EngineSolveError("engine: refusing to hand a non-finite "
+                                   "request to the GS solver")
+        ffp = {"type": "jphi-linterp", "y": req, "x": self.psi}
+        for k in range(int(n_passes)):
+            psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
+            pp_y = pchip_derivative(self.psi, self.p) / psi_range
+            pp_y[-1] = 0.0
+            mygs.set_targets(Ip=float(self.c.Ip), pax=float(self.p[0]))
+            mygs.set_profiles(pp_prof={"type": "linterp", "y": pp_y,
+                                       "x": self.psi}, ffp_prof=ffp)
+            try:
+                mygs.solve()
+            except ValueError as e:
+                raise EngineSolveError(f"engine GS solve failed (pass "
+                                       f"{k + 1}/{n_passes}): {e}") from e
+            finally:
+                self.n_solves += 1
+
+    def snapshot(self):
+        return self.mygs.copy_eq()
+
+    def restore(self, eq):
+        self.mygs.replace_eq(source_eq=eq)
+
+    def measure(self, want_chords=False, final=False):
+        from .physics import evaluate_jBS
+        from .TokaMaker_interface import smooth_jbs_transition
+        from .utils import (eq_jphi_profile, fsa_current_geometry,
+                            li_achieved, li_closure_geometry)
+        mygs, kin, pad = self.mygs, self.c.kinetics, self.psi_pad
+        eq = mygs.copy_eq()
+        geom = fsa_current_geometry(eq, self.psi, psi_pad=pad,
+                                    want_pprime=True)
+        if geom["inv_R2"] is None:
+            raise EngineSolveError("engine: this OFT build's get_q returns no "
+                                   "<1/R^2>; the jphi-linterp Ip measure "
+                                   "cannot be formed")
+        _j, d = evaluate_jBS(eq, self.psi, kin["ne"], kin["te"], kin["ni"],
+                             kin["ti"], kin["zeff"], psi_pad=pad,
+                             isolate_edge=False, smooth_axis=False)
+        redl = smooth_jbs_transition(np.asarray(d["j_dot_B"], dtype=float))
+        geom["F"] = np.asarray(d["F"], dtype=float)
+        geom["B2"] = np.asarray(d["avg_B2"], dtype=float)
+        geom["li_geom"] = li_closure_geometry(eq, geom, psi_pad=pad)
+        li = float(li_achieved(eq, li_kind=self.li_kind, psi_pad=pad)[0])
+        q_row = float(np.asarray(eq.get_q(psi=np.array([self.q_psi]))[1],
+                                 dtype=float)[0])
+        Ip = abs(float(eq.get_globals()[0]))
+        achieved = np.asarray(eq_jphi_profile(geom, "jphi-linterp", eq=eq),
+                              dtype=float)
+        out = dict(geom=geom, redl=redl, redl_I_BS=float(d["I_BS"]), li=li,
+                   q_row=q_row, Ip=Ip, achieved=achieved)
+        if want_chords and self.chords is not None:
+            from .mse import mse_field_at
+            out["B_chords"] = mse_field_at(mygs, self.chords["R"],
+                                           self.chords["Z"])
+        if final:
+            stats = mygs.get_stats(lcfs_pad=pad, li_normalization="iter")
+            out["stats"] = {k: float(v) for k, v in stats.items()
+                            if np.isscalar(v) and np.isfinite(float(v))}
+            out["li_1"] = float(li_achieved(eq, li_kind="li_1",
+                                            psi_pad=pad)[0])
+        return out
+
+
+# ---------------------------------------------------------------------------
+#  archive (an ADDED _baseline attribute; v3 readers unaffected)
+# ---------------------------------------------------------------------------
+def store_baseline_engine(header, record, scan_key=None):
+    """Write the engine record onto the archive's ``_baseline`` group as the
+    JSON attribute :data:`ENGINE_ATTR`.  ``None`` writes nothing; no-op
+    without a ``_baseline`` group (the same contract as
+    :func:`bouquet.utils.store_baseline_state`)."""
+    if record is None:
+        return
+    import json
+    import h5py
+    from .jbs_loop import jsonable
+    from .utils import _baseline_group_path, _resolve_h5
+    db = _resolve_h5(header)
+    with h5py.File(db, "a") as hf:
+        gp = _baseline_group_path(scan_key)
+        if gp in hf:
+            hf[gp].attrs[ENGINE_ATTR] = json.dumps(jsonable(record),
+                                                   allow_nan=True)
+
+
+def load_baseline_engine(header, scan_key=None):
+    """The engine record stored by :func:`store_baseline_engine`, or
+    ``None`` (a legacy archive)."""
+    import json
+    import h5py
+    from .utils import _baseline_group_path, _resolve_h5
+    db = _resolve_h5(header)
+    with h5py.File(db, "r") as hf:
+        gp = _baseline_group_path(scan_key)
+        if gp not in hf or ENGINE_ATTR not in hf[gp].attrs:
+            return None
+        return json.loads(hf[gp].attrs[ENGINE_ATTR])
+
+
+# ---------------------------------------------------------------------------
+#  the reconstruction, end to end (backend-agnostic)
+# ---------------------------------------------------------------------------
+def reconstruct(adapter, backend, settings, *, label=""):
+    """Anchor -> finalize the contract -> engine -> result + record.
+
+    The adapter's ``read()`` must have run (``adapter._c``); the backend
+    solves the anchor request (two passes, the legacy anchor), measures it,
+    the adapter finalizes the contract on it, and the engine runs.  Returns
+    ``(engine, result, record)``."""
+    t0 = time.perf_counter()
+    c0 = adapter._c
+    backend.solve(c0.anchor_request, n_passes=2)
+    anchor = backend.measure(want_chords=False)
+    ag = complete_geometry(anchor["geom"])
+    contract = adapter.finalize(anchor["redl"], ag)
+    eng = UnifiedEngine(contract, backend, settings, anchor=anchor,
+                        label=label)
+    res = eng.run()
+    rec = engine_record(eng, res, wall_s=float(time.perf_counter() - t0))
+    return eng, res, rec
+
+
+def engine_record(eng, res, wall_s=None) -> dict:
+    """The full JSON-safe engine record."""
+    from .jbs_loop import jsonable, oft_build_info
+    return jsonable(dict(
+        version=ENGINE_VERSION,
+        contract=eng.c.record(),
+        settings=dict(preset_requested=eng.s["preset"],
+                      preset_in_force=eng.preset, rows_requested=list(
+                          eng.s["rows"]), rows_active=sorted(eng.rows),
+                      solver=("soft (close_ip_structured_soft)" if eng.soft
+                              else "hard (close_ip_structured)"),
+                      prior=eng.prior_name,
+                      delivery_correction=eng.s["delivery_correction"],
+                      mse_jacobian=eng.s["mse_jacobian"],
+                      loop=eng.s["loop"]),
+        convergence=convergence_table(eng.s),
+        composition=("J = F<1/R>/<B^2> [s_ind <j.B>_ind + s_bs <j.B>_BS + "
+                     "<j.B>_fix] + p'(<R> - F^2<1/R>/<B^2>), on the latest "
+                     "solved geometry (identity I2)"),
+        row_update=("l_i: d_k = (1-omega) d_k-1 + omega [l_i(E_k+1) - "
+                    "l_i_model(solved current; G_k+1)], closure target "
+                    "T - d; q0: jbs_loop.AxisRowPin; MSE: offset refreshed "
+                    "from each solve, Jacobian Broyden-updated"),
+        notices=list(eng.notices),
+        converged=bool(res["converged"]),
+        loop_converged=bool(res["loop_converged"]),
+        phases=res["phases"], passes=eng.passes,
+        delivered=res["delivered"], state=res["state"].record(),
+        solves=dict(eng.solves), wall_s=wall_s,
+        oft_build=oft_build_info()))
+
+
+# ---------------------------------------------------------------------------
+#  wiring: Bouquet.prepare_baseline() with reconstruction_engine="unified"
+# ---------------------------------------------------------------------------
+#: What the stored current split IS on an engine baseline
+#: (``Baseline.delivered_state["convention"]``).
+ENGINE_SPLIT_CONVENTION = (
+    "unified engine: jphi-linterp REQUEST of the delivery solve (one "
+    "jphi-linterp solve of j_phi reproduces the delivered equilibrium); "
+    "j_BS = s_bs F<1/R>/<B^2> <j.B>_BS*, j_NBI/j_RF = F<1/R>/<B^2> <j.B>_fix "
+    "on the delivery composition's geometry; j_inductive the residual "
+    "(it carries s_ind F<1/R>/<B^2> <j.B>_ind, the pressure-driven term "
+    "p'(<R> - F^2<1/R>/<B^2>) and any delivery correction)")
+
+
+def _lcfs_deviation_mm(mygs, pts):
+    """``(rms, max)`` [mm] nearest-neighbour distance from *pts* to the
+    solved LCFS -- the legacy reconstruction's own measure (its step 9:
+    tricontour of psi at the LCFS level, the longest CLOSED segment)."""
+    import matplotlib.pyplot as plt
+    from scipy.spatial import cKDTree
+    from .utils import select_closed_lcfs
+    psi_arr = mygs.get_psi(False)
+    lev = float(mygs.psi_bounds[0])
+    fig, ax = plt.subplots(1, 1)
+    try:
+        cs = ax.tricontour(mygs.r[:, 0], mygs.r[:, 1], mygs.lc, psi_arr,
+                           levels=[lev])
+        segs = [v for seg in cs.allsegs for v in seg if len(v) > 4]
+    finally:
+        plt.close(fig)
+    pts_l = select_closed_lcfs(segs, context="engine reconstruction metrics")
+    if pts_l is None:
+        return float("nan"), float("nan")
+    d, _ = cKDTree(pts_l).query(np.asarray(pts, dtype=float))
+    return float(np.sqrt(np.mean(d ** 2)) * 1e3), float(np.max(d) * 1e3)
+
+
+def _split(eng, res):
+    """The Baseline's toroidal split of the delivered request."""
+    st, c = res["state"], eng.c
+    g = st.geom
+    kap = conversion_factor(g)
+    out = eng.delivered_closure["out"]
+    R = np.asarray(st.request, dtype=float)
+    j_BS = np.asarray(out["s_bs"], float) * kap * np.asarray(st.lambda_bs)
+    j_NBI = kap * np.asarray(c.jB_fix_parts["nbi"], float)
+    j_RF = kap * np.asarray(c.jB_fix_parts["rf"], float)
+    return R, R - j_BS - j_NBI - j_RF, j_BS, j_NBI, j_RF
+
+
+def _delivered_state(eng, res, rec, path):
+    m = eng.delivered_meas
+    stats = m.get("stats") or {}
+    A = np.asarray(m["achieved"], dtype=float)
+    cfac = float(rec["delivered"]["delivery"]["c"])
+    R = np.asarray(res["state"].request, dtype=float)
+    return dict(
+        convention=ENGINE_SPLIT_CONVENTION, path=path,
+        l_i=float(m["li"]), l_i_scale="iter(li3)",
+        q0=float(stats.get("q_0", float("nan"))),
+        q95=float(stats.get("q_95", float("nan"))),
+        Ip_target=float(eng.c.Ip), request_normalisation=cfac,
+        achieved_normalisation=None, n_floored_inductive=0,
+        j_phi_achieved=A,
+        how=("unified engine delivery solve: the unrelaxed composition on "
+             "the last solved geometry with x*, lambda_BS* and the row "
+             "discrepancies, solved twice; one jphi-linterp solve of j_phi "
+             "reproduces it")), R - A / cfac
+
+
+def _flag_reason(res, rec):
+    from .jbs_loop import flag_reason
+    if not res["loop_converged"]:
+        return flag_reason(rec["phases"][-1]["record"])
+    return ("unified engine: the delivered equilibrium fails "
+            + "; ".join(rec["delivered"]["misses"]))
+
+
+def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
+    from .baseline import Baseline, _reconstruction_metrics
+    mygs, src, c = bq.mygs, bq.config.source, eng.c
+    eqdsk = ad.eqdsk
+    R, j_ind, j_BS, j_NBI, j_RF = _split(eng, res)
+    ds, offset = _delivered_state(eng, res, rec, "reconstruction")
+    m = eng.delivered_meas
+    A = np.asarray(m["achieved"], dtype=float)
+    jt_in = np.abs(np.asarray(eqdsk.j_tor_averaged_direct, dtype=float))
+    psi = np.asarray(eqdsk.psi_N, dtype=float)
+    bnd_rms, bnd_max = _lcfs_deviation_mm(mygs, iso_pts)
+    core, edge = psi < 0.8, psi > 0.9
+    quality = dict(
+        jphi_core_rms=float(np.sqrt(np.mean((A[core] - jt_in[core]) ** 2))),
+        jphi_edge_rms=float(np.sqrt(np.mean((A[edge] - jt_in[edge]) ** 2))),
+        li_scale="iter(li3)", boundary_rms_mm=bnd_rms,
+        boundary_max_dev_mm=bnd_max,
+        Ip_error_pct=float(100.0 * abs(m["Ip"] - c.Ip) / c.Ip))
+    _, F_prof, Fp_prof, _, _ = mygs.get_profiles(psi=psi)
+    recon = dict(
+        ne=c.kinetics["ne"], te=c.kinetics["te"], ni=c.kinetics["ni"],
+        ti=c.kinetics["ti"], Zeff=c.kinetics["zeff"],
+        isoflux_pts=np.asarray(iso_pts, float).copy(),
+        weights=np.asarray(iso_w, float).copy(),
+        psi_lcfs_val=float(mygs.psi_bounds[0]),
+        j_inductive_fit=j_ind.copy(), j_phi_fit=A.copy(),
+        j_BS_used=j_BS.copy(), psi=mygs.get_psi(False),
+        ffprime=np.asarray(F_prof * Fp_prof, dtype=float),
+        Ip_tokamaker=float(m["Ip"]), eqdsk_jtor=jt_in,
+        eqdsk_psi_N=psi.copy(), eqdsk_pres=np.asarray(eqdsk.pres).copy(),
+        eqdsk_boundary_R=np.asarray(eqdsk.boundary_R).copy(),
+        eqdsk_boundary_Z=np.asarray(eqdsk.boundary_Z).copy(),
+        eqdsk_ffprim=np.asarray(eqdsk.ffprim).copy(),
+        eqdsk_li=dict(eqdsk.li), eqdsk_Ip=eqdsk.Ip,
+        pres_tokamaker=np.asarray(c.pressure).copy(), psi_N_grid=psi.copy(),
+        li_final=float(m["li"]), li_realized_post_corrective=float(m["li"]),
+        quality=quality, request_jphi=R.copy(), engine=True)
+    metrics = _reconstruction_metrics(mygs, eqdsk, recon, src,
+                                      float(m["li"]),
+                                      l_i_realized_post_corrective=float(
+                                          m["li"]))
+    loop_rec = dict(rec["phases"][-1]["record"])
+    loop_rec["converged"] = bool(res["converged"])
+    if not res["converged"]:
+        loop_rec["stop_reason"] = _flag_reason(res, rec)
+    metrics["jbs_loop"] = loop_rec
+    metrics["engine"] = dict(version=ENGINE_VERSION,
+                             converged=bool(res["converged"]),
+                             solves=dict(rec["solves"]))
+    with open(src.geqdsk_path, "rb") as fh:
+        eqdsk_bytes = fh.read()
+    kn = c.kinetics_native
+    return Baseline(
+        psi_N=psi, j_phi=R, j_inductive=j_ind, j_BS=j_BS,
+        psi_N_kinetic=np.asarray(kn["psi_N"], float), ne=kn["ne"],
+        te=kn["te"], ni=kn["ni"], ti=kn["ti"], Zeff=kn["Zeff"],
+        Ip_target=float(c.Ip), l_i_target=float(m["li"]),
+        provenance="reconstruction", j_NBI=j_NBI, j_RF=j_RF,
+        p_fast=kn.get("p_fast"), Z_imp=c.pressure_parts.get("Z_imp"),
+        eqdsk_bytes=eqdsk_bytes, pfile_bytes=kn.get("raw_bytes"),
+        aux={"zeff": np.asarray(kn["Zeff"], dtype=float)}, recon=recon,
+        reconstruction_metrics=metrics, jphi_request_offset=offset,
+        delivered_state=ds, engine=rec)
+
+
+def _ids_baseline(bq, eng, res, rec, bl_src):
+    import copy
+    from .utils import closure_health
+    c = eng.c
+    bl = copy.copy(bl_src)
+    R, j_ind, j_BS, j_NBI, j_RF = _split(eng, res)
+    ds, offset = _delivered_state(eng, res, rec, "imas")
+    out = eng.delivered_closure["out"]
+    cl = eng.delivered_closure
+    m = eng.delivered_meas
+    ch = closure_health(
+        out["ohm_scale_eff"], out["bs_scale_eff"], cl["Ip_signed"],
+        cl["c_signed"], out["Ip_lin_ind"], out["Ip_lin_bs"],
+        out["Ip_lin_fix"],
+        soft_ip_residual_sigma=out.get("residual_sigma_Ip"))
+    icl = dict(ch)
+    icl.update(engine=True, closure=_closure_record(cl),
+               jbs_loop=rec["phases"][-1]["record"],
+               jbs_converged=bool(res["converged"]))
+    if not res["converged"]:
+        why = _flag_reason(res, rec)
+        icl["closure_limited"] = True
+        icl["closure_limited_reasons"] = tuple(
+            list(icl.get("closure_limited_reasons", ())) + [why])
+    lim = dict(bl_src.li_metrics or {})
+    lim.update(tokamaker_li_3=float(m["li"]),
+               tokamaker_li_1=m.get("li_1"), engine=True)
+    bl.j_phi, bl.j_inductive, bl.j_BS = R, j_ind, j_BS
+    bl.j_NBI, bl.j_RF = j_NBI, j_RF
+    bl.jBS_diff, bl.jphi_diff, bl.p_diff = None, None, None
+    bl.bs_scale = float(out["bs_scale_eff"])
+    bl.ohm_scale = float(out["ohm_scale_eff"])
+    bl.l_i_target = float(m["li"])
+    bl.ip_closure = icl
+    bl.li_metrics = lim
+    bl.delivered_state = ds
+    bl.jphi_request_offset = offset
+    bl.engine = rec
+    return bl
+
+
+def prepare_engine_baseline(bq):
+    """``Bouquet.prepare_baseline()`` under ``reconstruction_engine=
+    "unified"``, for both input types.
+
+    Sets up the solver exactly as the legacy path of the same input does
+    (g-file: isoflux on the g-file boundary at weight 200 and ``init_psi``
+    from its LCFS shape; IDS: the slice's boundary re-pointed and
+    ``init_psi`` from its shape), runs :func:`reconstruct` and returns the
+    :class:`~bouquet.baseline.Baseline` the rest of the package consumes,
+    with ``Baseline.engine`` carrying the full engine record.  A failure
+    leaves no baseline (the half-built one is on
+    ``Bouquet._failed_baseline``), as the legacy path."""
+    from .adapters import GFileAdapter, IdsAdapter
+    from .config import ImasSource, ReconstructionSource
+    from .utils import _shape_from_boundary, capture_native_output
+    cfg, gc, src, mygs = bq.config, bq.config.generation, bq.config.source, \
+        bq.mygs
+    if mygs is None:
+        raise ValueError("the unified engine needs a live TokaMaker solver; "
+                         "call setup_solver() before prepare_baseline()")
+    s = engine_settings(gc)
+    bq.baseline = None
+    bq._failed_baseline = None
+    verbose = bool(getattr(cfg, "verbose", False))
+    bl = None
+    try:
+        with capture_native_output(enabled=not verbose) as cap:
+            if isinstance(src, ReconstructionSource):
+                ad = GFileAdapter(src, cfg)
+                c0 = ad.read()
+                psi_pad = float(src.psi_pad)
+                iso_pts = np.asarray(c0.boundary, dtype=float)
+                iso_w = np.ones(len(iso_pts)) * 200.0
+                mygs.set_isoflux(iso_pts, weights=iso_w)
+                geo = ad.eqdsk.geometry
+                mygs.init_psi(geo["R"][-1], geo["Z"][-1], geo["a"][-1],
+                              geo["kappa"][-1], geo["delta"][-1])
+                bl_src = None
+            elif isinstance(src, ImasSource):
+                from .baseline import resolve_baseline
+                bl_src = resolve_baseline(cfg, mygs)
+                ad = IdsAdapter(src, cfg, bl_src)
+                c0 = ad.read()
+                psi_pad = ad.psi_pad
+                bq._repoint_imas_geometry()
+                R0, Z0, a, kappa, delta = _shape_from_boundary(
+                    bq._boundary_RZ)
+                mygs.init_psi(R0, Z0, a, kappa, delta)
+                bq._seed_coil_init(mygs)
+            else:
+                raise TypeError(f"unknown baseline source type "
+                                f"{type(src).__name__}")
+            mse = (c0.rows.get("mse") if "mse" in s["rows"] else None)
+            backend = TokaMakerBackend(
+                mygs, c0, psi_pad=psi_pad, li_kind="li_3",
+                chords=(None if mse is None else mse["chords"]))
+            eng, res, rec = reconstruct(ad, backend, s,
+                                        label=f"engine {c0.kind}")
+            if c0.kind == "gfile":
+                bl = _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w)
+            else:
+                bl = _ids_baseline(bq, eng, res, rec, bl_src)
+        bl.reconstruction_log = (cap["text"] or None)
+    except BaseException as exc:
+        bq._failed_baseline = bl
+        bq.baseline = None
+        print(f"[baseline] FAILED ({type(exc).__name__}) in the unified "
+              "engine: no usable baseline", flush=True)
+        raise
+    bq.baseline = bl
+    if bl.reconstruction_metrics is not None:
+        bq._flag_nonconverged_recon_loop()
+        bq._print_reconstruction_summary()
+    print(f"[engine] {ENGINE_VERSION}: {'converged' if res['converged'] else 'NOT converged (flagged)'}; "
+          f"l_i(3)={bl.l_i_target:.6f}; solves {rec['solves']}", flush=True)
+    return bl
