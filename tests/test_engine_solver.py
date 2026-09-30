@@ -23,7 +23,8 @@ modelling source at t = 2.3043 s), with ``reconstruction_engine="unified"``:
   the reconstruction's, ``|dl_i| <= jbs_tol_li``); a seeded 6-draw batch on
   the g-file example (``--draws 6 --seed 12345``, the legacy batch it is
   compared with) is written per draw -- outcome, solves / passes / wall time
-  by stage, the l_i attribution -- and every attempt is accounted for.  No
+  by stage, the change of l_i and of the flux range -- and every attempt is
+  accounted for.  No
   runtime bar is asserted (the probe's JSON is the measurement).
 
 Every solver call runs in a subprocess of ``tests/probes/measure_engine.py``
@@ -182,9 +183,7 @@ def test_a_seeded_engine_draw_batch_is_recorded(draw_batch):
             assert st in c and c[st]["wall_s"] >= 0.0, (st, c)
         assert c["anchor"]["solves"] == 0
         assert c["loop"]["passes"] == row["loop_passes"]
-        a = row["attribution"]
-        assert abs(sum(a["parts"].values()) + a["remainder"]
-                   - a["delta_l_i"]) <= 1e-12, a
+        assert "flux_range" in row["deltas"], row["deltas"]
         ph = row["post_hoc"]
         assert ph["in_band"] == (ph["l_i_in_band"] and ph["q0_ok"])
         assert row["in_spec"] == (ph["coil_in_spec"] and ph["in_band"])

@@ -16,10 +16,10 @@ TokaMaker stand-in over that toy (``tests/_engine_fake_gs.py``).  Checked:
   kinetic and auxiliary channels as perturb_kinetic_equilibrium, same
   pressure) and today's toroidal inductive sigma, and a zero sigma is
   exactly the base;
-* a perturbed draw moves l_i and beta_N; the l_i attribution sums to the
-  delivered change with the recorded remainder, whose frozen-geometry part
-  is second order; the Ip amplitude is 1.0 at zero perturbation and the
-  exact measure holds every pass; the q0 row acts when enabled;
+* a perturbed draw moves l_i and beta_N and records the change of l_i and
+  of the poloidal flux range against the reconstruction; the Ip amplitude
+  is 1.0 at zero perturbation and the exact measure holds every pass; the
+  q0 row acts when enabled;
 * the post-hoc filters are applied to the archived draw and recorded,
   out-of-band draws are archived with in_spec=False and not counted by
   until-N; rejections carry their DRAW_REJECTION_REASONS code;
@@ -330,7 +330,7 @@ def _perturbed(ctx, b, seed=12345, f=0.03, scale=1.0):
     return _quiet(ED.run_draw, ctx, b, inp)
 
 
-def test_a_perturbed_draw_moves_li_and_beta_and_the_attribution_closes(
+def test_a_perturbed_draw_moves_li_and_beta_and_records_the_flux_range(
         recon):
     eng, res, rec, b = recon
     ctx = _ctx(eng, res)
@@ -339,38 +339,19 @@ def test_a_perturbed_draw_moves_li_and_beta_and_the_attribution_closes(
     assert r["loop"]["converged"]
     d = r["deltas"]
     assert abs(d["l_i_3"]) > 1e-4 and abs(d["beta_n"]) > 0.0
-    a = r["attribution"]
-    assert set(a["parts"]) == {"inductive", "bootstrap", "pressure",
-                               "amplitude"}
-    assert a["delta_l_i"] == d["l_i_3"]
-    assert sum(a["parts"].values()) + a["remainder"] == pytest.approx(
-        d["l_i_3"], rel=0, abs=1e-15)
-    rs = a["remainder_split"]
-    assert rs["nonlinear_frozen_geometry"] + rs["geometry_and_delivery"] \
-        == pytest.approx(a["remainder"], rel=0, abs=1e-15)
+    assert "attribution" not in r
+    # the flux range psi_b - psi_a against the reconstruction's (the toy's
+    # flux range responds to the current shape)
+    fr, fr0 = r["delivered"]["flux_range"], r["reference"]["flux_range"]
+    assert fr0 == pytest.approx(ctx.geom["dpsi_dpsiN"], rel=0, abs=0)
+    assert d["flux_range"] == fr - fr0 and d["flux_range"] != 0.0
+    assert d["flux_range_rel"] == pytest.approx((fr - fr0) / fr0,
+                                                rel=1e-14)
+    assert d["l_i_1"] is not None
     for k in ("l_i_3", "l_i_1", "beta_n", "q0", "q0_psi_N", "q95", "Ip",
-              "delivery_check"):
+              "delivery_check", "flux_range"):
         assert k in r["delivered"], k
     assert r["delivered"]["delivery_check"]["ok"]
-
-
-def test_the_linear_attribution_is_exact_on_a_fixed_geometry():
-    """Inductive-only perturbation on a toy whose geometry does not move
-    (gain off, no delivery defect): with Ip pinned by the amplitude, l_i is
-    LINEAR in the current on the frozen geometry, so the closure's gradient
-    attributes the whole change -- the remainder is rounding."""
-    eng, res, rec, b = _recon(gain=False, defect=0.0)
-    ctx = _ctx(eng, res)
-    bump = np.exp(-0.5 * ((PSI - 0.4) / 0.15) ** 2)
-    for eps in (0.04, 0.02):
-        inp = ctx.zero_inputs()
-        inp.jB_ind = np.asarray(eng.c.jB_ind) * (1.0 + eps * bump)
-        r = _quiet(ED.run_draw, ctx, b, inp)["record"]
-        a = r["attribution"]
-        assert abs(a["delta_l_i"]) > 1e-4
-        assert a["parts"]["pressure"] == 0.0
-        assert abs(a["parts"]["bootstrap"]) < 1e-9
-        assert abs(a["remainder"]) <= 1e-9 * abs(a["delta_l_i"]) + 1e-14
 
 
 def test_the_ip_amplitude_holds_the_exact_measure_every_pass(recon):
@@ -403,7 +384,6 @@ def test_the_q0_row_acts_when_enabled():
     assert qr["n_row_updates"] >= 1
     tol = eng.s["q0_tol"]
     assert abs(r["delivered"]["q0"] - ctx.q0_target) <= tol
-    assert "q0_row" in r["attribution"]["parts"]
 
 
 def test_the_q0_row_needs_the_reconstructions_q0_row(recon):
@@ -583,8 +563,7 @@ def test_generate_bouquet_runs_engine_draws_end_to_end(tmp_path,
         assert c["homotopy"]["solves"] == 2        # two homotopy passes
         assert c["total"]["wall_s"] > 0.0
         back = ED.read_draw_engine(h, i)
-        assert back["attribution"]["delta_l_i"] == e["attribution"][
-            "delta_l_i"]
+        assert back["deltas"] == e["deltas"]
         assert "cost" in back
     with h5py.File(h + ".h5", "r") as hf:
         g0 = hf["scan/0/0"] if "scan" in hf else hf["0"]

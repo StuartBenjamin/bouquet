@@ -203,11 +203,14 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     `loop` (the kernel record), `passes`, `q0_row`, `delivered` (the loop's
     delivered draw: `l_i_3`, `l_i_1`, `beta_n`, `q0` at `q0_psi_N`,
     `q0_stats` at `q0_stats_psi_N`, `q95`, `Ip`, the delivery check,
-    request − achieved), `archived` (the same after the homotopy stage),
-    `reference` (the reconstruction's), `deltas`, `attribution` (the linear
-    l_i parts `inductive` / `bootstrap` / `pressure` / `amplitude` [/
-    `q0_row`], `linear_total`, `delta_l_i`, `remainder` and its split into
-    `nonlinear_frozen_geometry` and `geometry_and_delivery`), `post_hoc`
+    request − achieved, `flux_range`), `archived` (the same after the
+    homotopy stage),
+    `reference` (the reconstruction's, with its `flux_range`), `deltas`
+    (against the reconstruction: `l_i_3`, `l_i_1`, `beta_n`, `q0`, `q95`,
+    and the poloidal flux range `psi_b - psi_a` -- `flux_range` [Wb/rad]
+    and `flux_range_rel`; `archived.deltas` the same for the archived
+    state; `delivered.flux_range` / `archived.flux_range` the values),
+    `post_hoc`
     (the l_i band and `constrain_sawteeth` verdicts, `coil_in_spec`,
     `in_spec`), `homotopy`, `post_homotopy`, and `cost` (solves, passes and
     wall time for the stages `anchor`, `loop`, `homotopy`, `post_homotopy`,

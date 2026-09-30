@@ -31,7 +31,8 @@ on) the delivery correction ``Delta*``.  It
   :func:`bouquet.TokaMaker_interface._post_homotopy_jbs`) with its
   saturation guard;
 * records l_i(3), l_i(1), beta_N, q0 at its labelled radius, q95, the Ip
-  amplitude, the loop record, the delivery check, the l_i ATTRIBUTION and
+  amplitude, the loop record, the delivery check, the change of l_i and of
+  the poloidal flux range ``psi_b - psi_a`` against the reconstruction and
   the cost by stage; the post-hoc filters (the l_i band ``l_i_tolerance``
   around the reconstruction's l_i, ``constrain_sawteeth``) are applied to
   the archived draw -- a draw outside a band is ARCHIVED with
@@ -216,7 +217,7 @@ class EngineDrawContext:
             q0_stats=_f(stats.get("q_0")),
             q0_stats_psi_N=float(SOLVER_Q0_PSI_N),
             q95=_f(stats.get("q_95")), beta_n=_f(stats.get("beta_n")),
-            Ip=_f(m.get("Ip")))
+            Ip=_f(m.get("Ip")), flux_range=_f(g.get("dpsi_dpsiN")))
         # ---- the kinetic-grid base of the sampler
         nat = dict(native)
         self.native = {k: np.asarray(v, dtype=float)
@@ -241,7 +242,6 @@ class EngineDrawContext:
                     "rejected it)")
             self.q0_target = float(st.q0_target)
             self.row0 = float(np.interp(float(psi_q[0]), self.psi, J))
-        self._li_grad = None
 
     # ---- composition -----------------------------------------------------
     def compose(self, geom, jB_ind, jB_bs):
@@ -324,56 +324,21 @@ class EngineDrawContext:
             jB_ind=np.asarray(self.c.jB_ind, dtype=float).copy(),
             scale=float(scale), sampler=dict(zero_perturbation=True))
 
-    # ---- the l_i attribution (docs/engine.md, "l_i controllability") ----
-    def attribution(self, inputs, jbs_used, amp):
-        """The l_i change of a draw split linearly with the closure's own
-        l_i gradient (:func:`bouquet.utils.structured_li_model` /
-        :func:`~bouquet.utils.structured_li_gradient` along each direction)
-        on the reconstruction geometry ``G*``.  Directions (toroidal, on
-        ``G*``): inductive shape ``s_ind kappa (lambda_ind' - lambda_ind)``,
-        bootstrap ``s_bs kappa (lambda_BS' - lambda_BS*)``, pressure term
-        ``P(p'_draw) - P(p'*)``, Ip amplitude ``d_ind s_ind kappa
-        lambda_ind'`` (and the q0 row's ``d_bs s_bs kappa lambda_BS'``).
-        Returns the per-part linear l_i changes; the caller adds the
-        remainder against the delivered l_i."""
-        from .engine import li_of_current, pressure_term
-        from .utils import structured_li_gradient, structured_li_model
-        g = self.geom
-        kap = np.asarray(self.parts_star["kappa"], dtype=float)
-        lam_d = np.asarray(inputs.jB_ind, dtype=float)
-        jb = np.asarray(jbs_used, dtype=float)
-        d = dict(
-            inductive=self.s_ind * kap * (lam_d - np.asarray(self.c.jB_ind,
-                                                             float)),
-            bootstrap=self.s_bs * kap * (jb - self.lam),
-            pressure=(pressure_term(self.geom_for_pressure(inputs.pressure))
-                      - pressure_term(g)),
-            amplitude=float(amp.get("d_ind", 0.0)) * self.s_ind * kap * lam_d)
-        if self.q0_row:
-            d["q0_row"] = float(amp.get("d_bs", 0.0)) * self.s_bs * kap * jb
-        names = list(d)
-        D = np.vstack([d[n] for n in names])
-        lg = g["li_geom"]
-        model = structured_li_model(
-            self.psi, g["w_lin"], D, np.ones_like(self.psi),
-            np.zeros_like(self.psi), self.J_star - 1.0, lg, self.Ip_star,
-            li_kind="li_3")
-        grad = structured_li_gradient(model)[:len(names)]
-        li0 = li_of_current(self.J_star, g, "li_3")
-        li_full = li_of_current(self.J_star + D.sum(axis=0), g, "li_3")
-        return dict(
-            parts={n: float(v) for n, v in zip(names, grad)},
-            linear_total=float(np.sum(grad)),
-            model_on_reconstruction_geometry=float(li_full - li0),
-            gradient=("bouquet.utils.structured_li_gradient of "
-                      "structured_li_model along each direction, on the "
-                      "reconstruction geometry G* (li_3)"),
-            directions=("toroidal currents on G*: inductive s_ind kappa "
-                        "(lambda_ind' - lambda_ind); bootstrap s_bs kappa "
-                        "(lambda_BS' - lambda_BS*); pressure P(p'_draw) - "
-                        "P(p'*); amplitude d_ind s_ind kappa lambda_ind'"
-                        + ("; q0_row d_bs s_bs kappa lambda_BS'"
-                           if self.q0_row else "")))
+
+def flux_range(m):
+    """``|psi_b - psi_a|`` [Wb/rad] of a backend measurement (its geometry's
+    ``dpsi_dpsiN``), or ``None``."""
+    g = (m or {}).get("geom") or {}
+    return _f(g.get("dpsi_dpsiN"))
+
+
+def flux_range_change(fr, fr_ref):
+    """The change of the poloidal flux range against the reconstruction's:
+    absolute [Wb/rad] and relative (``None`` where either is missing)."""
+    if fr is None or fr_ref is None or fr_ref == 0.0:
+        return dict(flux_range=None, flux_range_rel=None)
+    return dict(flux_range=float(fr - fr_ref),
+                flux_range_rel=float((fr - fr_ref) / fr_ref))
 
 
 def _f(v):
@@ -876,16 +841,9 @@ def _finish(ctx, backend, inputs, dp, res, m_fin, pin, label):
         delivery_check=dict(r_j=float(chk["r_j"]), r_I=float(chk["r_I"]),
                             ok=bool(chk["ok"])),
         request_minus_achieved=dp.passes[-1]["delivery"])
+    delivered["flux_range"] = flux_range(m_fin)
     amp = last["amp"]
-    att = ctx.attribution(inputs, jbs_used, amp)
     dli = float(m_fin["li"]) - float(ctx.ref["l_i"])
-    att["delta_l_i"] = dli
-    att["remainder"] = float(dli - att["linear_total"])
-    att["remainder_split"] = dict(
-        nonlinear_frozen_geometry=float(att["model_on_reconstruction_geometry"]
-                                        - att["linear_total"]),
-        geometry_and_delivery=float(dli
-                                    - att["model_on_reconstruction_geometry"]))
     ident = dict(
         pass1_request_bit_identical=bool(np.array_equal(dp.first_request,
                                                         ctx.request)),
@@ -926,8 +884,9 @@ def _finish(ctx, backend, inputs, dp, res, m_fin, pin, label):
                     else delivered["beta_n"] - ctx.ref["beta_n"]),
             q0=float(delivered["q0"] - ctx.ref["q_row"]),
             q95=(None if (delivered["q95"] is None or ctx.ref["q95"] is None)
-                 else delivered["q95"] - ctx.ref["q95"])),
-        attribution=att,
+                 else delivered["q95"] - ctx.ref["q95"]),
+            **flux_range_change(delivered["flux_range"],
+                                ctx.ref["flux_range"])),
         solves=dict(loop=int(backend.n_solves)))
     return dict(record=jsonable(rec), jbs_used=jbs_used, passes=dp,
                 inputs=inputs, pin=pin, measure=m_fin,
@@ -1312,9 +1271,16 @@ class GenerateEngineDraws:
             l_i_3=float(fin["li"]), l_i_1=_f(fin.get("li_1")),
             beta_n=_f(stats.get("beta_n")), q0=float(fin["q_row"]),
             q0_psi_N=float(self.ctx.ref["q_row_psi_N"]),
-            q95=_f(stats.get("q_95")),
+            q95=_f(stats.get("q_95")), flux_range=flux_range(fin),
             note=("the archived (post-homotopy) state; 'delivered' is the "
                   "loop's"))
+        rec["archived"]["deltas"] = dict(
+            l_i_3=float(fin["li"]) - float(self.ctx.ref["l_i"]),
+            l_i_1=(None if (rec["archived"]["l_i_1"] is None
+                            or self.ctx.ref["l_i_1"] is None)
+                   else rec["archived"]["l_i_1"] - self.ctx.ref["l_i_1"]),
+            **flux_range_change(rec["archived"]["flux_range"],
+                                self.ctx.ref["flux_range"]))
         rec["post_hoc"] = v
         _jl = diagnostics.get("jbs_loop") or {}
         if _jl.get("post_homotopy") is not None:

@@ -54,8 +54,10 @@ bit-identical when absent).*
   (`engine_draw_homotopy`, default on) and the existing post-homotopy check
   with its saturation guard. The first request of a zero-perturbation draw
   is the stored request bit for bit, by construction. l_i and beta_N drift
-  and are recorded, with a linear l_i attribution (inductive, bootstrap,
-  pressure term, amplitude; remainder) from the closure's own gradient; the
+  and are recorded, with the change of the poloidal flux range
+  `psi_b - psi_a` against the reconstruction (the per-part linear l_i
+  attribution of an earlier version was removed: its model holds the flux
+  range fixed, so its remainder was the geometry's response); the
   l_i band (`l_i_tolerance`) and `constrain_sawteeth` are post-hoc filters
   (out-of-band draws archived with `in_spec=False`, not counted by until-N,
   not `selected`). Cost is recorded per draw by stage. `draw_solve_maxits`

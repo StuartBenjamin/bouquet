@@ -35,8 +35,8 @@ engine baseline and runs ``generate()`` with ``n_equils = --draws`` and
 ``seed = --seed`` (defaults 6 and 12345, the legacy batch it is compared
 with), writing per draw: archived or rejected (with its
 ``DRAW_REJECTION_REASONS`` code), in spec, the loop's passes, the Ip
-amplitude, l_i(3)/l_i(1)/beta_N/q0/q95 and their changes, the l_i
-attribution, the post-hoc verdicts, and solves / passes / wall time by
+amplitude, l_i(3)/l_i(1)/beta_N/q0/q95, the flux range and their changes,
+the post-hoc verdicts, and solves / passes / wall time by
 stage (anchor, loop, homotopy, post_homotopy, filters, archive).  Usage::
 
     python tests/probes/measure_engine.py OUTDIR [--parts recon,imas,...]
@@ -308,7 +308,7 @@ def _draw_row(i, d):
         amplitude=(e.get("amplitude") or {}).get("final"),
         delivered=e.get("delivered"), archived_state=e.get("archived"),
         reference=e.get("reference"), deltas=e.get("deltas"),
-        attribution=e.get("attribution"), post_hoc=e.get("post_hoc"),
+        post_hoc=e.get("post_hoc"),
         homotopy=e.get("homotopy"), post_homotopy=e.get("post_homotopy"),
         cost=e.get("cost"), inputs=e.get("inputs"),
         identity=e.get("identity"))

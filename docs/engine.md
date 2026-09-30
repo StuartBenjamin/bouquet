@@ -366,27 +366,28 @@ after it, the refresh step, `I_BS` start / evaluated / refreshed).
 
 ### l_i controllability
 
-How much the draws' l_i scatters, and why, is recorded per draw so it is
-predictable and known rather than tuned away. Expected sizes (design note
-§2.8): the inductive-shape sampling dominates (the golden in-spec ensemble's
-sigma(l_i) = 0.021, about 3 %, band-truncated); kinetics through Redl and the
-pressure term and the Ip amplitude about 0.5-1.5 % (not yet measured); the
-loop itself at most `jbs_tol_li` (1e-3); the solver's delivery defect is a
-common shift, not a spread.
+How much the draws' l_i scatters is recorded per draw: `deltas` carries
+the change of l_i(3) and l_i(1) against the reconstruction's delivered
+values and the change of the poloidal flux range `psi_b - psi_a` (the
+geometry's `dpsi_dpsiN`), absolute [Wb/rad] and relative
+(`flux_range`, `flux_range_rel`); `archived.deltas` the same for the
+post-homotopy state. No extra solves.
 
-**The attribution record** (`engine.attribution` per draw). The closure's
-own l_i gradient (`utils.structured_li_model` / `structured_li_gradient`,
-li_3) on the RECONSTRUCTION geometry `G*`, applied along the toroidal
-directions of the draw's change: `inductive` (`s_ind kappa* (lambda_ind' -
-lambda_ind)`), `bootstrap` (`s_bs kappa* (lambda_BS' - lambda_BS*)`),
-`pressure` (`P(p'_draw) - P(p'*)`), `amplitude` (`d_ind s_ind kappa*
-lambda_ind'`) and, with the q0 row, `q0_row`. `remainder = delta_l_i -
-linear_total` is split into `nonlinear_frozen_geometry` (the full model on
-`G*` minus the linear sum) and `geometry_and_delivery` (the delivered l_i
-minus the model on `G*`: the geometry's response and the solver). With Ip
-pinned by the amplitude the model is linear in the current, so on a fixed
-geometry the attribution is exact (tested on the toy: remainder at
-rounding); the remainder is the geometry and delivery part.
+Where the scatter comes from was established by a channel-off measurement
+(the report "bouquet unified engine: why the six-draw batch looks the way
+it does"): on the g-file example, with the same realisations, the
+inductive-shape sample alone gives about 10 % RMS in l_i of the 11 % RMS
+with every channel on; the kinetics give about 2 %, the bootstrap scale
+0.1 %. The flux range moves with l_i in sign and size (-8 % to +10 % on
+those draws): it is the solved equilibrium's first-order response to the
+current shape.
+
+An earlier version recorded a per-draw linear split of the l_i change into
+inductive / bootstrap / pressure-term / amplitude parts plus a remainder,
+from the closure's l_i model on the reconstruction's geometry. That model
+holds the flux range fixed, so the remainder -- 50-86 % of the change on
+the measured draws -- was the geometry's response, and the split was
+misleading as a variance budget; it was removed.
 
 **Cost.** Every draw records solves, passes and wall time by stage
 (`anchor` -- no solve --, `loop`, `homotopy`, `post_homotopy`, `filters`,
