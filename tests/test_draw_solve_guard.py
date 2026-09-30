@@ -45,7 +45,7 @@ class FakeGS:
         self.attempts.append((n, st.urf, st.nl_tol, "ok" if ok else "fail"))
         if not ok:
             raise ValueError(MAXITS)
-        return (0, 12) if return_its else None
+        return (None, 12) if return_its else None
 
 
 def _call_site(gs):
@@ -75,7 +75,7 @@ def test_clean_summary_and_bad_arguments():
     gs = FakeGS()
     with DrawSolveGuard(gs, 100) as g:
         gs.solve()
-    assert g.summary() == "[draw-solves] 1 solves, none failed (maxits 100)"
+    assert g.summary() == "[draw-solves] 1 solves, none failed (maxits 100, its max 12)"
     for kw in ({"maxits": 0}, {"retry_urf": (0.0,)}, {"retry_urf": (1.5,)},
                {"loose_tol": 0.0}):
         with pytest.raises(ValueError):
@@ -94,7 +94,7 @@ def test_defaults_match_the_config():
 # ---- recovery ---------------------------------------------------------------
 def test_a_different_urf_saves_the_solve_first():
     gs = FakeGS(stuck={1}, escape="urf")
-    with DrawSolveGuard(gs, 100) as g:
+    with DrawSolveGuard(gs, 100, retry_urf=(0.1, 0.3)) as g:
         g.begin_draw(0)
         assert _call_site(gs) is None           # returned, not raised
     assert [a[1:] for a in gs.attempts] == [(0.2, 1e-6, "fail"), (0.1, 1e-6, "ok")]
@@ -104,7 +104,7 @@ def test_a_different_urf_saves_the_solve_first():
 
 def test_the_loose_tolerance_is_the_last_resort():
     gs = FakeGS(stuck={1}, escape="loose")
-    with DrawSolveGuard(gs, 100) as g:
+    with DrawSolveGuard(gs, 100, retry_urf=(0.1, 0.3)) as g:
         gs.solve()
     # both urfs tried at the strict tolerance, then urf 0.2 at the loose one
     assert [a[1:] for a in gs.attempts] == [
@@ -115,7 +115,7 @@ def test_the_loose_tolerance_is_the_last_resort():
 
 def test_an_unrecoverable_solve_still_raises_with_its_first_error():
     gs = FakeGS(stuck={1}, escape="never")
-    with DrawSolveGuard(gs, 100) as g:
+    with DrawSolveGuard(gs, 100, retry_urf=(0.1, 0.3)) as g:
         with pytest.raises(ValueError, match="maxits"):
             gs.solve()
     assert len(gs.attempts) == 4 and g.records[0]["recovered_by"] is None
@@ -124,7 +124,7 @@ def test_an_unrecoverable_solve_still_raises_with_its_first_error():
 
 def test_a_different_failure_during_recovery_stops_it():
     gs = FakeGS(stuck={1}, escape="error")
-    with DrawSolveGuard(gs, 100) as g:
+    with DrawSolveGuard(gs, 100, retry_urf=(0.1, 0.3)) as g:
         with pytest.raises(ValueError, match="maxits"):
             gs.solve()
     assert len(gs.attempts) == 2 and g.records[0]["recovered_by"] is None
@@ -150,6 +150,23 @@ def test_recovery_can_be_switched_off():
     assert len(gs.attempts) == 1
 
 
+def test_by_default_a_stuck_solve_goes_straight_to_the_loose_tolerance():
+    gs = FakeGS(stuck={1}, escape="loose")
+    with DrawSolveGuard(gs) as g:
+        assert gs.settings.maxits == DRAW_SOLVE_MAXITS
+        gs.solve()
+    assert [a[1:] for a in gs.attempts] == [(0.2, 1e-6, "fail"), (0.2, 2e-5, "ok")]
+    assert g.records[0]["recovered_by"] == "nl_tol=2e-05"
+
+
+def test_iterations_are_counted_without_changing_what_the_caller_gets():
+    gs = FakeGS()
+    with DrawSolveGuard(gs, 100) as g:
+        assert gs.solve() is None
+        assert gs.solve(return_its=True) == (None, 12)
+    assert g.its == [12, 12]
+
+
 # ---- the record ---------------------------------------------------------------
 def test_records_per_draw_and_the_summary():
     gs = FakeGS(stuck={2, 3, 4}, escape="never")
@@ -161,7 +178,7 @@ def test_records_per_draw_and_the_summary():
         self.escape = self.escape_by_call.get(n, "never")
         return orig(self, return_its)
     gs.solve = solve.__get__(gs)
-    with DrawSolveGuard(gs, 100) as g:
+    with DrawSolveGuard(gs, 100, retry_urf=(0.1, 0.3)) as g:
         g.begin_draw(0)
         _call_site(gs)
         _call_site(gs)                           # saved by urf
@@ -178,7 +195,7 @@ def test_records_per_draw_and_the_summary():
     assert r["seconds"] >= 0.0 and r["retry_seconds"] >= 0.0
     assert g.failures(2) == []
     s = g.summary()
-    assert s.startswith("[draw-solves] 3/4 solves failed (3 exceeded maxits 100)")
+    assert s.startswith("[draw-solves] 3/4 solves failed (3 exceeded maxits 100, its max 12)")
     assert "recovered 2 (" in s and "1 by urf=0.1" in s and "1 by nl_tol=2e-05" in s
     assert s.endswith("lost 1, draws [1]: ? x1")
 

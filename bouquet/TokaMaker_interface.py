@@ -101,15 +101,17 @@ ANCHOR_MASKED_FAILURES = {"recon_anchor_fallback": 0, "band_resample": 0,
 #: cap -- at the setup cap of 800 that is 200-350 s per failed solve, all of it
 #: wasted, since the draw path already catches the failure.  Even, so a capped
 #: solve stops on the same phase of that cycle the 800 cap did.
-DRAW_SOLVE_MAXITS = 100
+DRAW_SOLVE_MAXITS = 50
 
 #: Recovery for a draw solve that hits the cap, tried in order from the state
 #: it stopped in: re-solve at each of these under-relaxation factors (OFT's
-#: default is 0.2), then accept at :data:`DRAW_SOLVE_LOOSE_TOL`.  The cycle is
-#: a discrete switch between two states ~nl_tol/urf apart in psi (measured
-#: residual 9e-6 at urf 0.2), so a different step often breaks it, and either
-#: state is the same equilibrium far below any draw's perturbation.
-DRAW_SOLVE_RETRY_URF = (0.1, 0.3)
+#: default is 0.2), then accept at :data:`DRAW_SOLVE_LOOSE_TOL`.  The cycle
+#: parks the residual at ~9e-6 whatever the urf (0.1 and 0.3 each failed 3/3
+#: anchor solves on 174956 t=1.191), so no urf retry by default: the loose
+#: re-solve converges in a few iterations, and only if the residual really is
+#: that small.  The two cycle states are the same equilibrium far below any
+#: draw's perturbation.
+DRAW_SOLVE_RETRY_URF = ()
 DRAW_SOLVE_LOOSE_TOL = 2e-5
 
 
@@ -134,7 +136,8 @@ class DrawSolveGuard:
     ``nl_tol=loose_tol`` (None skips a step); the first that converges is
     returned.  Any other failure, or one no step recovers, raises as before.
     Every failure is recorded with the draw set by :meth:`begin_draw` and
-    ``recovered_by`` (``"urf=..."``, ``"nl_tol=..."`` or None).
+    ``recovered_by`` (``"urf=..."``, ``"nl_tol=..."`` or None).  Iteration
+    counts of the solves that converge are kept in ``its`` (headroom check).
     """
 
     def __init__(self, mygs, maxits=DRAW_SOLVE_MAXITS, retry_urf=DRAW_SOLVE_RETRY_URF,
@@ -152,6 +155,7 @@ class DrawSolveGuard:
         self.draw = None
         self.n_solves = 0
         self.records = []
+        self.its = []
 
     def _retry(self, orig, a, k, **settings):
         """One solve with ``settings`` changed; always restores them."""
@@ -177,11 +181,19 @@ class DrawSolveGuard:
             mygs.settings.maxits = self.maxits
             mygs.update_settings()
 
+        def call(*a, **k):
+            # Ask for the iteration count unless the caller did; hand back
+            # what the caller asked for.
+            want = k.get("return_its", a[1] if len(a) > 1 else False)
+            out = orig(*a[:1], **{**k, "return_its": True})
+            self.its.append(out[1])
+            return out if want else out[0]
+
         def solve(*a, **k):
             self.n_solves += 1
             t0 = time.perf_counter()
             try:
-                return orig(*a, **k)
+                return call(*a, **k)
             except Exception as exc:
                 rec = {"draw": self.draw, "site": _bouquet_caller(),
                        "seconds": time.perf_counter() - t0,
@@ -196,7 +208,7 @@ class DrawSolveGuard:
                     steps.append(({"nl_tol": self.loose_tol}, f"nl_tol={self.loose_tol:g}"))
                 for settings, label in steps:
                     try:
-                        out = self._retry(orig, a, k, **settings)
+                        out = self._retry(call, a, k, **settings)
                     except Exception as e2:
                         if "maxits" not in str(e2):
                             break
@@ -229,8 +241,10 @@ class DrawSolveGuard:
     def summary(self):
         """One line: solves run, failed solves, how they were recovered, by site."""
         cap = self.maxits if self.maxits is not None else "solver default"
+        its = f", its max {max(self.its)}" if self.its else ""
         if not self.records:
-            return f"[draw-solves] {self.n_solves} solves, none failed (maxits {cap})"
+            return (f"[draw-solves] {self.n_solves} solves, none failed "
+                    f"(maxits {cap}{its})")
         from collections import Counter
         n_max = sum("maxits" in r["error"] for r in self.records)
         secs = sum(r["seconds"] + r["retry_seconds"] for r in self.records)
@@ -241,7 +255,7 @@ class DrawSolveGuard:
         draws = sorted({r["draw"] for r in lost if r["draw"] is not None})
         how = ", ".join(f"{n} by {lab}" for lab, n in saved.most_common())
         return (f"[draw-solves] {len(self.records)}/{self.n_solves} solves failed "
-                f"({n_max} exceeded maxits {cap}), {secs:.0f} s; "
+                f"({n_max} exceeded maxits {cap}{its}), {secs:.0f} s; "
                 f"recovered {sum(saved.values())}" + (f" ({how})" if how else "")
                 + f"; lost {len(lost)}"
                 + (f", draws {draws}: {sites}" if lost else ""))
