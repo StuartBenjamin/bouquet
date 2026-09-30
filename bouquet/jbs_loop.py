@@ -808,7 +808,8 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
                  on_pass: Optional[Callable] = None,
                  max_passes: Optional[int] = None,
                  raise_on_fail: Optional[bool] = None,
-                 q0_pin: Optional[AxisRowPin] = None) -> dict:
+                 q0_pin: Optional[AxisRowPin] = None,
+                 extra=None) -> dict:
     """Iterate closure <-> GS <-> Redl to the fixed point.
 
     Parameters
@@ -867,6 +868,20 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         row once per pass when a further pass follows.  ``None`` (default):
         the kernel is exactly the one without the pin -- same criteria, same
         record keys.
+    extra : object or None
+        ADDED convergence criteria of a caller that owns rows the kernel does
+        not know (the unified reconstruction engine, :mod:`bouquet.engine`:
+        its l_i row and MSE chords).  An object with ``names`` (the criterion
+        names recorded in ``record["criteria"]``), ``observe(k, meas) ->
+        (ok, never, text)`` -- called once per pass after every built-in
+        criterion; ``ok`` is ANDed into the pass verdict (an added condition,
+        never a replacement), ``never`` a reason the pass can never count
+        (the loop then stops at once, as for a missing gated l_i) or
+        ``None``, ``text`` appended to the pass line -- and ``record()`` /
+        ``history_text()`` (the block stored as ``record["extra_criteria"]``
+        and the text appended to a failure message).  ``None`` (default):
+        exactly the kernel without it -- same criteria, same record keys, same
+        printed lines.
 
     Returns
     -------
@@ -918,6 +933,8 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
             "recorded only, NOT a convergence criterion"),
         relax_halve_on=int(halve_on), omega_halved_at_pass=[],
     )
+    if extra is not None:
+        rec["criteria"].update({str(_n): True for _n in extra.names})
     try:
         from .physics import EVALUATE_JBS_VERSION
         rec["evaluate_jBS_version"] = EVALUATE_JBS_VERSION
@@ -972,6 +989,8 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         rec["fail_message"] = msg
         if q0_pin is not None:
             rec["q0_pin"] = q0_pin.record()
+        if extra is not None:
+            rec["extra_criteria"] = extra.record()
         print("  [jbs-loop] " + msg, flush=True)
         raise JBSNonFinite(msg, rec, pass_number=max(k + 1, 0), index=i,
                            psi_N=psi)
@@ -1026,6 +1045,12 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
             # an added condition, never a replacement
             q0_res = q0_pin.observe(q0_new, meas.get("axis_current_solved"))
             ok = ok and q0_pin.within_tol(q0_new)
+        _x_never, _x_txt = None, ""
+        if extra is not None:
+            # the caller's own rows, on the pass's solved equilibrium: an
+            # added condition, never a replacement
+            _x_ok, _x_never, _x_txt = extra.observe(k, meas)
+            ok = ok and bool(_x_ok)
         ok = bool(ok)
         if relaxer is not None:
             _gap, _bl = relaxer.gap(meas.get("w"), meas.get("x"))
@@ -1086,6 +1111,7 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
               + ("" if q0_pin is None else
                  (" q0-q0_target=n/a" if q0_res is None else
                   f" q0-q0_target={q0_res:+.2e} (q0_tol {q0_pin.q0_tol:g})"))
+              + ("" if (extra is None or not _x_txt) else " " + str(_x_txt))
               + f" I_BS={res['I_BS'] / 1e3:.2f} kA"
               + ("" if omega_used_for_current is None
                  else f" omega={omega_used_for_current:.3f}")
@@ -1109,6 +1135,8 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
             _never = ("the step returned no finite q0 although the q0 pin "
                       "|q0 - q0_target| <= q0_tol is a convergence "
                       "criterion here (jbs_loop_q0_corrector)")
+        elif extra is not None and _x_never is not None:
+            _never = str(_x_never)
         elif (not np.any(J != 0.0)) and np.any(jbs != 0.0):
             _never = ("the evaluated bootstrap J is identically zero while "
                       "the iterate is not (r_j is infinite)")
@@ -1196,6 +1224,8 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         rec["final"]["q0_residual"] = rec["q0_pin"]["final_q0_residual"]
         rec["final"]["q0_residual_over_tol"] = \
             rec["q0_pin"]["final_q0_residual_over_tol"]
+    if extra is not None:
+        rec["extra_criteria"] = extra.record()
     if gate_cur:
         rec["final"]["current_residual"] = (rec["current_residual"][-1]
                                             if rec["current_residual"]
@@ -1215,7 +1245,8 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
                   f" q0-q0_target={_fmt_hist(rec['q0_pin']['q0_residual'])}"
                   f" (q0_tol {q0_pin.q0_tol:g})")
                + ("" if not gate_cur else
-                  f" current_residual={_fmt_hist(rec['current_residual'])}"))
+                  f" current_residual={_fmt_hist(rec['current_residual'])}")
+               + ("" if extra is None else " " + str(extra.history_text())))
         rec["fail_message"] = msg
         print("  [jbs-loop] " + msg, flush=True)
         if raise_on_fail:
