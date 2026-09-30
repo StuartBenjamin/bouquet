@@ -48,7 +48,10 @@ place of the numbers when a stage raises) and ``OUTDIR/engine_measurement
 count 1); no network.  OpenFUSIONToolkit is found as the solver tests find
 it (``OFT_PYTHONPATH``, else the sibling checkout's
 ``build_release/python``).  ``BQ_ENGINE_PROBE_OUT=<dir>`` also copies every
-part's JSON there.
+part's JSON there.  ``BQ_ENGINE_PROBE_GC='<json object>'`` sets further
+GenerationConfig fields on every part (after the part's own; recorded in
+the part's ``settings``), e.g. ``'{"engine_draw_bootstrap_refresh": true}'``
+to run the solver tests with a draw setting on -- no assertion changes.
 """
 from __future__ import annotations
 
@@ -299,6 +302,9 @@ def _draw_row(i, d):
         index=int(i), archived=True, in_spec=bool(d.get("in_spec")),
         time_s=d.get("time"), loop_passes=lp.get("n_passes"),
         loop_converged=lp.get("converged"),
+        loop_r_j=lp.get("r_j"), loop_r_I=lp.get("r_I"),
+        loop_last_criterion_met=lp.get("last_criterion_met"),
+        loop_bootstrap_refresh=lp.get("bootstrap_refresh"),
         amplitude=(e.get("amplitude") or {}).get("final"),
         delivered=e.get("delivered"), archived_state=e.get("archived"),
         reference=e.get("reference"), deltas=e.get("deltas"),
@@ -342,6 +348,10 @@ def child(part, outdir, draws=None, seed=None):
     import bouquet as bq
     _harness.assert_bouquet_is_repo_local()
     src, extra = PARTS[part]
+    extra = dict(extra)
+    _gc_env = os.environ.get("BQ_ENGINE_PROBE_GC")
+    if _gc_env:
+        extra.update(json.loads(_gc_env))
     out = dict(part=part, source=src, settings=dict(extra), stages={})
     path = os.path.join(outdir, f"engine_{part}.json")
 

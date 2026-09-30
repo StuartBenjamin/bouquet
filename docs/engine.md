@@ -337,7 +337,28 @@ Rejected (never archived, never counted), with their
 failed first solve (`anchor_solve_failed`, the anchor's analog: the stored
 state composed with the draw's components), a refused amplitude closure
 (`engine_closure_refused`), a coil saturation (`coil_saturation_jbs_loop` /
-`_post_homotopy`), the homotopy and post-homotopy codes as before.
+`_post_homotopy`), the homotopy and post-homotopy codes as before, and --
+only with `draw_solve_maxits` set -- `homotopy_maxits` /
+`post_homotopy_maxits` (below).
+
+**Bootstrap refresh after the first solve (`engine_draw_bootstrap_refresh`,
+default off).** The loop's start is computed on the reconstruction's
+geometry `G*`; the first solve moves the geometry (the flux range by
+several per cent for a typical inductive sample) and with it the Redl
+bootstrap, so a relaxed blend toward the stale start costs passes. With the
+setting on, after the loop's FIRST solve the anchor's form is re-evaluated
+with the draw-kinetics Redl taken on that solved geometry,
+`scale [lambda_BS* + Redl(draw kin; G_1) - Redl(recon kin; G*)]`
+(`engine_draws.REFRESH_SOURCE`), and pass 2 restarts from it instead of the
+blend `(1 - omega) lambda_0 + omega J_1`; every later pass blends as usual
+(`jbs_loop.run_jbs_loop(start_refresh=...)`). Zero extra solves and zero
+extra Redl evaluations (pass 1's Redl is the loop's own). It changes the
+PATH only: the first request (still bit-identical at zero perturbation),
+every criterion, tolerance and the ceiling are untouched, and every pass is
+judged against the bootstrap it was solved with. At zero perturbation the
+refreshed bootstrap is `lambda_BS*` to the re-solve's rounding. The loop
+record carries `bootstrap_refresh` (pass 1's residuals before it, pass 2's
+after it, the refresh step, `I_BS` start / evaluated / refreshed).
 
 ### l_i controllability
 
@@ -372,10 +393,22 @@ and one solve per pass; the homotopy adds one solve per stage it runs.
 the live numbers for the g-file example (the legacy batch measured 405-1407 s
 per draw, 4 archived / 2 rejected / 1 in spec at that seed).
 
-**The solve cap.** `draw_solve_maxits` (the ported #57 cap) is applied by
-the engine's solve wrapper (`TokaMakerBackend.solve`) to EVERY engine solve,
-reconstruction and draws, and restored after each; a solve that hits it
-fails as any failed solve.
+**The solve cap.** `draw_solve_maxits` (the ported #57 cap, default `None`
+= the solver's own cap) is applied by the engine's solve wrapper
+(`TokaMakerBackend.solve`) to EVERY engine solve -- reconstruction, the
+draw's loop and its post-homotopy passes -- and restored after each; under
+`Bouquet.generate` the draw loop's `DrawSolveGuard` also sets it on the
+solver for the whole of `generate()`, so the homotopy's own solves run
+under it; an engine draw additionally installs it for its homotopy stage
+when the solver does not already carry it (`generate_bouquet` driven
+directly) and puts the previous value back afterwards. A capped solve that
+does not converge (the solver's own `Exceeded "maxits"`) REJECTS the draw,
+loudly and with its own code: `homotopy_maxits` for a homotopy pass or a
+rollback re-solve -- never rolled back to a looser pass and archived --
+and `post_homotopy_maxits` for a post-homotopy pass. A loop solve that hits
+it keeps the loop's codes (`anchor_solve_failed` on pass 1,
+`perturb_failed` after). With the default `None` nothing is re-classified.
+The cap's value is a decision for the owner (no default is set).
 
 ## Cost
 

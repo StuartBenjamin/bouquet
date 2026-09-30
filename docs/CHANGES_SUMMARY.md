@@ -68,6 +68,24 @@ bit-identical when absent).*
   (`tests/test_engine_draws_legacy_ast.py`). Solver tests add the
   zero-perturbation draw on both examples and a seeded 6-draw batch
   (`measure_engine.py --draws 6 --seed 12345`).
+- **Engine draws: bootstrap refresh and the homotopy solve cap (both
+  default to the behaviour before them).**
+  `GenerationConfig.engine_draw_bootstrap_refresh` (default `False`): after
+  a draw's first loop solve the anchor's kinetic Redl increment is
+  re-evaluated on that solved geometry and the loop restarts from it
+  (`run_jbs_loop(start_refresh=...)`, a kernel hook that is a no-op when
+  `None`) -- the path only, zero extra solves, no criterion or tolerance
+  changed, the zero-perturbation request still bit-identical and the
+  refreshed bootstrap `lambda_BS*` to rounding; recorded as
+  `loop.bootstrap_refresh`. `draw_solve_maxits` (default `None`) now also
+  governs every homotopy solve of an engine draw (installed for the stage
+  when the solver does not already carry it), and a capped homotopy or
+  post-homotopy solve that does not converge rejects the draw with the new
+  codes `homotopy_maxits` / `post_homotopy_maxits` (never rolled back and
+  archived); with `None` nothing is re-classified. The legacy draw path is
+  unchanged (the new hooks are gated blocks; the frozen-code AST test
+  passes). The solver probe takes `BQ_ENGINE_PROBE_GC` to run the solver
+  tests with a draw setting on.
 
 ## Unreleased, intended for the release after 1.4.0 — self-consistent bootstrap current (default ON)
 
