@@ -73,6 +73,15 @@ RNG_STREAM = (
     "the engine draw none -- so from the first legacy draw that resampled, "
     "the two runs' draws start at different stream offsets.")
 
+#: What an engine draw's loop restarts from after its first solve
+#: (``engine_draw_bootstrap_refresh=True``).
+REFRESH_SOURCE = (
+    "scale x [lambda_BS* + Redl(the draw's kinetics) on the FIRST SOLVED "
+    "equilibrium (the draw's pressure) - Redl(the reconstruction's kinetics) "
+    "on the starting equilibrium]: the anchor with its draw-kinetics Redl "
+    "moved from G* to the geometry the first solve produced; pass 1's own "
+    "Redl, so 0 extra solves and 0 extra Redl evaluations")
+
 #: What an engine draw's post-homotopy loop starts from.
 INIT_POST_HOMOTOPY = (
     "relaxed: (1 - omega) x the bootstrap the draw carries + omega x Redl on "
@@ -141,7 +150,7 @@ class EngineDrawContext:
     :class:`EngineDrawRefused`."""
 
     def __init__(self, eng, res, *, loop, native, q0_row=False,
-                 label="engine draw"):
+                 label="engine draw", bootstrap_refresh=False):
         from .engine import _lin, complete_geometry  # noqa: F401
         from .utils import (closure_sign_convention, pchip_derivative,
                             structured_basis_eval)
@@ -151,6 +160,9 @@ class EngineDrawContext:
         self.psi = np.asarray(eng.psi, dtype=float)
         self.label = str(label)
         self.loop = dict(loop)
+        #: engine_draw_bootstrap_refresh: restart the loop's bootstrap after
+        #: its first solve (:func:`run_draw`)
+        self.bootstrap_refresh = bool(bootstrap_refresh)
         self.reconstruction_converged = bool(res.get("converged", False))
         self.Phi = structured_basis_eval(eng.basis, self.psi)
         K = self.Phi.shape[0]
@@ -756,8 +768,19 @@ class _Clock:
 
 
 def run_draw(ctx, backend, inputs, *, label=None, coil_guard=None,
-             clock=None, bnd_diag=None):
+             clock=None, bnd_diag=None, bootstrap_refresh=None):
     """ONE engine draw from the reconstruction state (module docstring).
+
+    *bootstrap_refresh* (default: ``ctx.bootstrap_refresh``, i.e.
+    ``GenerationConfig.engine_draw_bootstrap_refresh``): after the loop's
+    FIRST solve the anchor's kinetic increment is re-evaluated on that
+    solved geometry and the loop RESTARTS from it (:data:`REFRESH_SOURCE`,
+    ``run_jbs_loop(start_refresh=...)``) instead of blending toward the
+    start computed on ``G*``.  Zero extra solves and zero extra Redl
+    evaluations (pass 1's Redl is the loop's own); the first request, every
+    criterion and the fixed point are unchanged -- the path only.  At zero
+    perturbation the refreshed bootstrap is ``lambda_BS*`` to the re-solve's
+    rounding.
 
     Returns a dict: ``record`` (the JSON-safe draw record), ``jbs_used``,
     ``passes`` (the :class:`_DrawPasses` of the loop, the post-homotopy stage
@@ -785,6 +808,18 @@ def run_draw(ctx, backend, inputs, *, label=None, coil_guard=None,
             f"{label}: Redl on the starting equilibrium failed "
             f"({type(e).__name__}: {str(e).strip()[:300]})") from e
     jbs0 = scale * (ctx.lam + (r_d - r_0))
+    if bootstrap_refresh is None:
+        bootstrap_refresh = bool(getattr(ctx, "bootstrap_refresh", False))
+    start_refresh = None
+    if bootstrap_refresh:
+        def start_refresh(J, meas):
+            # the anchor's increment with Redl(draw kinetics) taken on the
+            # FIRST SOLVED geometry instead of G* (meas["redl"]: the loop's
+            # own pass-1 Redl, the draw's kinetics, solved at the draw's
+            # pressure); exactly the anchor's form, so lambda_BS* at zero
+            # perturbation up to the re-solve's rounding
+            return scale * (ctx.lam + (np.asarray(meas["redl"], dtype=float)
+                                       - r_0))
     clock.start("loop")
     pin = None
     if ctx.q0_row:
@@ -804,7 +839,10 @@ def run_draw(ctx, backend, inputs, *, label=None, coil_guard=None,
                      "draw's kinetics - Redl with the reconstruction's) on "
                      "the starting equilibrium, times the draw's bootstrap "
                      "scale (exactly lambda_BS* at zero perturbation)"),
-        on_pass=dp.on_pass, q0_pin=pin, raise_on_fail=True)
+        on_pass=dp.on_pass, q0_pin=pin, raise_on_fail=True,
+        start_refresh=start_refresh)
+    if start_refresh is not None:
+        res["record"]["bootstrap_refresh"]["source"] = REFRESH_SOURCE
     m_fin = backend.measure(final=True)
     clock.stop()
     if bnd_diag is not None:
@@ -1011,6 +1049,27 @@ def post_hoc_verdicts(ctx, final, *, l_i_tolerance, constrain_sawteeth,
 DRAW_BAND_FLAG = "passes_draw_band"
 
 
+#: The solver's own text for a solve that ran out of nonlinear iterations
+#: (TokaMaker: ``Exceeded "maxits"``), matched case-insensitively anywhere in
+#: the exception chain.
+_MAXITS_PATTERN = r'exceeded\s*"?maxits'
+
+
+def solve_hit_iteration_cap(exc) -> bool:
+    """Whether *exc* (or an exception it chains) is a Grad-Shafranov solve
+    that stopped at its nonlinear iteration cap -- the solver's own reason
+    text, not merely a message that mentions the cap."""
+    import re
+    seen = set()
+    e = exc
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        if re.search(_MAXITS_PATTERN, str(e), flags=re.IGNORECASE):
+            return True
+        e = e.__cause__ or e.__context__
+    return False
+
+
 def engine_rejection_reason(exc, stage):
     """The :data:`~bouquet.TokaMaker_interface.DRAW_REJECTION_REASONS` code
     of an engine draw rejected by *exc*: a non-finite bootstrap/current is
@@ -1056,6 +1115,9 @@ class GenerateEngineDraws:
         self.max_proxy_draws = int(max_proxy_draws)
         self.loop_settings = dict(ctx.loop)
         self._cur = None
+        self._cap_saved = None
+        #: capped homotopy / post-homotopy solves that did not converge
+        self.cap_events = []
 
     # ---- the pressure the baseline re-solve and every draw use --------
     def solve_pressure(self, psi_N=None):
@@ -1092,7 +1154,57 @@ class GenerateEngineDraws:
                 "silently ignored")
 
     def rejection_reason(self, exc, stage):
+        """The rejection code; with ``draw_solve_maxits`` set, a
+        post-homotopy pass whose solve stopped at the cap is
+        ``post_homotopy_maxits`` (its own code, never folded into
+        ``jbs_post_homotopy_error``)."""
+        if stage == "post_homotopy" and self.hit_cap(exc):
+            self.announce_cap("post-homotopy pass", exc)
+            return "post_homotopy_maxits"
         return engine_rejection_reason(exc, stage)
+
+    # ---- draw_solve_maxits on the homotopy and post-homotopy solves ------
+    def hit_cap(self, exc) -> bool:
+        """A solve that stopped at ``draw_solve_maxits`` (only when a cap is
+        set: with the default ``None`` nothing is re-classified)."""
+        return self.maxits is not None and solve_hit_iteration_cap(exc)
+
+    def announce_cap(self, where, exc):
+        """Print and record a capped solve that did not converge (the draw
+        is then REJECTED by the caller)."""
+        ev = dict(draw=(None if self._cur is None else self._cur["count"]),
+                  where=str(where), maxits=self.maxits,
+                  error=f"{type(exc).__name__}: {str(exc).strip()[:300]}")
+        self.cap_events.append(ev)
+        print(f"  [engine draw] {where}: the GS solve stopped at "
+              f"draw_solve_maxits={self.maxits} without converging -> draw "
+              "REJECTED (not rolled back, not archived)", flush=True)
+
+    def cap_solver(self, mygs):
+        """Set ``draw_solve_maxits`` on the solver for the homotopy stage
+        (the post-homotopy passes run through the engine backend, which
+        applies it per solve).  A no-op without a cap, or when the solver
+        already carries it (``Bouquet.generate``'s DrawSolveGuard); the
+        value found is put back by :meth:`uncap_solver`."""
+        if self.maxits is None or self._cap_saved is not None:
+            return
+        st = getattr(mygs, "settings", None)
+        if st is None:
+            return
+        cur = getattr(st, "maxits", None)
+        if cur == self.maxits:
+            return
+        self._cap_saved = (cur,)
+        st.maxits = self.maxits
+        mygs.update_settings()
+
+    def uncap_solver(self, mygs):
+        """Undo :meth:`cap_solver` (idempotent)."""
+        if self._cap_saved is None:
+            return
+        (cur,), self._cap_saved = self._cap_saved, None
+        mygs.settings.maxits = cur
+        mygs.update_settings()
 
     # ---- one draw ---------------------------------------------------------
     def draw(self, mygs, rng, scale, count, *, coil_guard=None,
@@ -1100,6 +1212,7 @@ class GenerateEngineDraws:
         """The legacy 7-tuple ``(ne, te, ni, ti, w_ExB, j_phi,
         diagnostics)`` of one engine draw (kinetic-grid profiles)."""
         ctx = self.ctx
+        self.uncap_solver(mygs)             # (a previous draw's, if any)
         b = self.backend(mygs)
         clock = _Clock((lambda: int(b.n_solves)) if solve_guard is None
                        else (lambda: int(solve_guard.n_solves)))
@@ -1227,6 +1340,7 @@ class GenerateEngineDraws:
             return
         rec["homotopy"] = dict(
             enabled=bool(self.homotopy),
+            solve_maxits=self.maxits,
             homotopy_pass=diagnostics.get("homotopy_pass"),
             homotopy_F_lim=diagnostics.get("homotopy_F_lim"),
             homotopy_VSC_lim=diagnostics.get("homotopy_VSC_lim"),
@@ -1269,6 +1383,8 @@ class GenerateEngineDraws:
         rec["draws"] = dict(
             version=ENGINE_DRAW_VERSION, rng_stream=RNG_STREAM,
             loop=self.loop_settings, q0_row=self.ctx.q0_row,
+            bootstrap_refresh=bool(self.ctx.bootstrap_refresh),
+            solve_maxits=self.maxits,
             homotopy=self.homotopy, l_i_tolerance=self.l_i_tolerance,
             ip_row=("the Ip the delivered composition carries in the exact "
                     "measure on G*"), Ip_target_A=self.ctx.Ip_star,
@@ -1345,7 +1461,9 @@ def context_from_run(run, gc, bl):
                   ti=bl.ti, z_fast=getattr(bl, "z_fast", None))
     return EngineDrawContext(
         run["engine"], run["result"], loop=draw_loop_settings(gc),
-        native=native, q0_row=bool(getattr(gc, "engine_draw_q0_row", False)))
+        native=native, q0_row=bool(getattr(gc, "engine_draw_q0_row", False)),
+        bootstrap_refresh=bool(getattr(gc, "engine_draw_bootstrap_refresh",
+                                       False)))
 
 
 # ---------------------------------------------------------------------------

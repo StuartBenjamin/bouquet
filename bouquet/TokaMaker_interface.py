@@ -129,6 +129,13 @@ DRAW_REJECTION_REASONS = {
     "engine_closure_refused": "an engine draw's Ip amplitude (or Ip + q0 "
                               "two-scalar) closure refused (degenerate or "
                               "non-finite)",
+    "homotopy_maxits": "an engine draw's homotopy solve (a pass or a "
+                       "rollback re-solve) stopped at draw_solve_maxits "
+                       "without converging -- rejected, never rolled back "
+                       "to a looser pass and archived",
+    "post_homotopy_maxits": "an engine draw's post-homotopy j_BS pass "
+                            "solve stopped at draw_solve_maxits without "
+                            "converging",
 }
 
 
@@ -7102,6 +7109,11 @@ def generate_bouquet(
                 if _ip_aligned and not _skip_hard and not _skip_homotopy:
                     _passes = (homotopy_passes if homotopy_passes is not None
                                else [(coil_drift, coil_drift)])
+                    if _eng is not None:
+                        # draw_solve_maxits on every homotopy solve of an
+                        # engine draw (a no-op under Bouquet.generate's
+                        # DrawSolveGuard, which already set the same cap)
+                        _eng.cap_solver(mygs)
                     _last_good_psi   = mygs.get_psi(False).copy()
                     _last_good_coils = dict(_baseline_coils)  # fallback only
 
@@ -7185,6 +7197,16 @@ def generate_bouquet(
                                             _build_bounds(_lg_dF, _lg_dVSC))
                                         mygs.solve()
                                     except Exception as _rb_exc:
+                                        if _eng is not None:
+                                            if _eng.hit_cap(_rb_exc):
+                                                _post_align_failed = True
+                                                _post_align_reason = (
+                                                    "homotopy_maxits",
+                                                    "homotopy rollback",
+                                                    _rb_exc)
+                                                _eng.announce_cap(
+                                                    "homotopy rollback "
+                                                    "re-solve", _rb_exc)
                                         print(f"  [homotopy] WARN: "
                                               f"rollback re-solve failed "
                                               f"({_rb_exc}); stats may "
@@ -7228,6 +7250,18 @@ def generate_bouquet(
                             print(f"  [homotopy {_label}] F=+/-{_dF*100:.1f}%  "
                                   f"VSC=+/-{_dVSC*100:.1f}% -> infeasible "
                                   f"({_hb_exc})")
+                            if _eng is not None:
+                                if _eng.hit_cap(_hb_exc):
+                                    # a capped solve that did not converge:
+                                    # REJECTED, never rolled back to a
+                                    # looser pass and archived
+                                    _post_align_failed = True
+                                    _post_align_reason = (
+                                        "homotopy_maxits", "homotopy",
+                                        _hb_exc)
+                                    _eng.announce_cap(f"homotopy {_label}",
+                                                      _hb_exc)
+                                    break
                             if _final_pass_idx < 0:
                                 # First pass failed -> draw is rejected
                                 _post_align_failed = True
@@ -7251,6 +7285,15 @@ def generate_bouquet(
                                         _build_bounds(_lg_dF, _lg_dVSC))
                                     mygs.solve()
                                 except Exception as _rb_exc:
+                                    if _eng is not None:
+                                        if _eng.hit_cap(_rb_exc):
+                                            _post_align_failed = True
+                                            _post_align_reason = (
+                                                "homotopy_maxits",
+                                                "homotopy rollback", _rb_exc)
+                                            _eng.announce_cap(
+                                                "homotopy rollback re-solve",
+                                                _rb_exc)
                                     print(f"  [homotopy] WARN: rollback "
                                           f"re-solve failed ({_rb_exc}); "
                                           f"stats may be stale")
@@ -7317,7 +7360,14 @@ def generate_bouquet(
                                 _draw_rejection_reason(_ph_exc,
                                                        "post_homotopy"),
                                 "post-homotopy j_BS", _ph_exc)
+                            if _eng is not None:
+                                _post_align_reason = (
+                                    _eng.rejection_reason(_ph_exc,
+                                                          "post_homotopy"),
+                                    "post-homotopy j_BS", _ph_exc)
                     mygs.set_coil_bounds(None)
+                    if _eng is not None:
+                        _eng.uncap_solver(mygs)
                     _report_bnd("after homotopy")
 
                 # Compute in-spec status from final drifts (if any)
@@ -7363,6 +7413,8 @@ def generate_bouquet(
                                       _post_exc)
 
             if _post_align_failed:
+                if _eng is not None:
+                    _eng.uncap_solver(mygs)
                 _pr_code, _pr_stage, _pr_what = (
                     _post_align_reason if _post_align_reason is not None
                     else ("post_perturb_failed", "post-perturb",

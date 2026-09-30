@@ -1164,6 +1164,13 @@ class GenerationConfig:
     # what generate() does today; False skips the homotopy and measures the
     # coil drift of the loop's own delivered draw.
     engine_draw_homotopy: bool = True
+    # After a draw's FIRST loop solve, re-evaluate the anchor's Redl
+    # increment on that solved geometry (the draw's kinetics and pressure)
+    # and restart the loop's bootstrap from it instead of blending toward
+    # the start computed on the reconstruction's geometry.  Changes the
+    # loop's PATH only (no criterion, tolerance or ceiling; zero extra
+    # solves).  False (default) is the behaviour before the setting existed.
+    engine_draw_bootstrap_refresh: bool = False
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single

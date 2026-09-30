@@ -715,6 +715,17 @@ CURRENT_GATE_DEFINITION = (
     "jc_k = js_k).  Pass 1 has no previous solved current and cannot count.  "
     "Norm and tolerance: the loop's current-weighted L2 norm and jbs_rtol_j.")
 
+#: What ``run_jbs_loop(start_refresh=...)`` does, as recorded.
+START_REFRESH_DEFINITION = (
+    "after pass 1 (when a further pass follows) the iterate of pass 2 is "
+    "start_refresh(J_1, meas_1) -- a restart from what pass 1 measured -- "
+    "instead of the relaxed blend (1 - omega) jbs_0 + omega J_1; every later "
+    "pass blends as usual.  r_j_before / r_I_before: pass 1's residuals (J_1 "
+    "against the start it was solved with); r_j_after / r_I_after: pass 2's "
+    "(Redl on the next solved state against the refreshed iterate).  The "
+    "path changes, not the criteria, tolerances or ceiling; zero extra "
+    "solves.")
+
 
 def criteria_timeline(record: dict) -> dict:
     """For every ACTIVE criterion of a loop record, the 1-based pass from
@@ -809,7 +820,8 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
                  max_passes: Optional[int] = None,
                  raise_on_fail: Optional[bool] = None,
                  q0_pin: Optional[AxisRowPin] = None,
-                 extra=None) -> dict:
+                 extra=None,
+                 start_refresh: Optional[Callable] = None) -> dict:
     """Iterate closure <-> GS <-> Redl to the fixed point.
 
     Parameters
@@ -882,6 +894,23 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         and the text appended to a failure message).  ``None`` (default):
         exactly the kernel without it -- same criteria, same record keys, same
         printed lines.
+    start_refresh : callable or None
+        A RESTART of the iterate after the first solve (the unified engine's
+        draws, ``engine_draw_bootstrap_refresh``): ``start_refresh(J, meas)
+        -> jbs`` is called once, after pass 1 when a further pass follows,
+        with pass 1's evaluated bootstrap ``J`` and measurement ``meas``,
+        and what it returns REPLACES the relaxed blend as the iterate of
+        pass 2 (every later pass blends with ``omega`` as usual).  It
+        changes the path only: no criterion, tolerance or ceiling is
+        touched, and a pass is still judged against the bootstrap it was
+        solved with.  Zero extra solves (it may only use what pass 1
+        measured).  Recorded as ``record["bootstrap_refresh"]`` (the
+        residuals before it -- pass 1's -- and after it -- pass 2's, the
+        refreshed iterate against Redl on the next solved state); pass 2's
+        ``omega`` entry is ``None`` (a restart, not a blend) and
+        ``on_pass`` receives ``omega_next=1.0`` after pass 1.  ``None``
+        (default): exactly the kernel without it -- same record keys, same
+        printed lines.
 
     Returns
     -------
@@ -935,6 +964,10 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
     )
     if extra is not None:
         rec["criteria"].update({str(_n): True for _n in extra.names})
+    if start_refresh is not None:
+        rec["bootstrap_refresh"] = dict(
+            requested=True, applied=False, after_pass=1,
+            definition=START_REFRESH_DEFINITION)
     try:
         from .physics import EVALUATE_JBS_VERSION
         rec["evaluate_jBS_version"] = EVALUATE_JBS_VERSION
@@ -1101,6 +1134,11 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         rec["current_blended"].append(bool(_bl))
         rec["current_residual_unrelaxed"].append(_unrel)
         rec["n_passes"] = k + 1
+        if (start_refresh is not None and k == 1
+                and rec["bootstrap_refresh"]["applied"]):
+            # the refreshed iterate judged on the next solved state
+            rec["bootstrap_refresh"].update(
+                r_j_after=float(res["r_j"]), r_I_after=float(res["r_I"]))
         entry = dict(k=k, ok=ok, dl_i=dl_i, dq0=dq0,
                      omega_used=omega_used_for_current, **res)
         print(f"  [jbs-loop{(' ' + label) if label else ''}] pass {k + 1}/{K}: "
@@ -1188,20 +1226,54 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
             # a further pass follows: move the axis row from the q0 this
             # pass measured (once per pass; never after the last one)
             q0_pin.advance()
+        _restart = bool(start_refresh is not None and k == 0 and not stop)
         if on_pass is not None:
             # omega_next: the relaxation the NEXT iterate is built with (the
             # caller relaxes any per-pass update of its own -- e.g. a moved
-            # constraint row -- by the same factor)
-            on_pass(k, meas, J, dict(entry, omega_next=(None if stop
-                                                        else omega)))
+            # constraint row -- by the same factor); 1.0 before a restart
+            on_pass(k, meas, J, dict(entry, omega_next=(
+                None if stop else (1.0 if _restart else omega))))
         if growth_at_floor >= n_abort:
             rec["stop_reason"] = (f"r_j grew on {n_abort} consecutive passes "
                                   f"at the relaxation floor omega={floor:g}")
             break
         if k == K - 1:
             break                       # no further solve: keep jbs as used
-        jbs = (1.0 - omega) * jbs + omega * J
-        omega_used_for_current = omega
+        if _restart:
+            _new = np.asarray(start_refresh(J, meas), dtype=float)
+            if _new.shape != jbs.shape:
+                raise ValueError(f"run_jbs_loop[{label}]: start_refresh "
+                                 f"returned shape {_new.shape}, the iterate "
+                                 f"has {jbs.shape}")
+            if not np.all(np.isfinite(_new)):
+                _nonfinite(k, "the refreshed bootstrap (start_refresh)",
+                           _new, meas.get("x"))
+            _step_rel = profile_residuals(_new, jbs, meas["w"], meas["x"], Ip)
+            _blend = (1.0 - omega) * jbs + omega * J
+            _vs_blend = profile_residuals(_new, _blend, meas["w"], meas["x"],
+                                          Ip)
+            rec["bootstrap_refresh"].update(
+                applied=True, r_j_before=float(res["r_j"]),
+                r_I_before=float(res["r_I"]),
+                I_BS_start=float(res["I_BS_used"]),
+                I_BS_evaluated=float(res["I_BS"]),
+                I_BS_refreshed=float(_step_rel["I_BS"]),
+                refresh_vs_start=dict(r_j=float(_step_rel["r_j"]),
+                                      r_I=float(_step_rel["r_I"])),
+                refresh_vs_blend=dict(r_j=float(_vs_blend["r_j"]),
+                                      r_I=float(_vs_blend["r_I"]),
+                                      omega=float(omega)),
+                extra_solves=0)
+            print(f"  [jbs-loop{(' ' + label) if label else ''}] bootstrap "
+                  f"refreshed after pass 1 (restart, not a blend): I_BS "
+                  f"{res['I_BS_used'] / 1e3:.2f} -> "
+                  f"{_step_rel['I_BS'] / 1e3:.2f} kA, step r_j="
+                  f"{_step_rel['r_j']:.3e}; 0 extra solves", flush=True)
+            jbs = _new
+            omega_used_for_current = None
+        else:
+            jbs = (1.0 - omega) * jbs + omega * J
+            omega_used_for_current = omega
         prev = meas
 
     rec["wall_s"] = float(time.perf_counter() - t0)

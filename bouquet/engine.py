@@ -70,6 +70,7 @@ ENGINE_FIELD_DEFAULTS = {
     # the draws on the engine (bouquet.engine_draws, docs/engine.md "Draws")
     "engine_draw_q0_row": False,
     "engine_draw_homotopy": True,
+    "engine_draw_bootstrap_refresh": False,
 }
 #: Rows each preset admits (``Ip`` is mandatory for every preset).
 PRESET_ROWS = {
@@ -184,7 +185,8 @@ def validate_engine_settings(gc) -> None:
     if not isinstance(dc, (bool, np.bool_)):
         raise ValueError(f"generation.engine_delivery_correction must be a "
                          f"bool, got {dc!r}")
-    for _b in ("engine_draw_q0_row", "engine_draw_homotopy"):
+    for _b in ("engine_draw_q0_row", "engine_draw_homotopy",
+               "engine_draw_bootstrap_refresh"):
         if not isinstance(vals[_b], (bool, np.bool_)):
             raise ValueError(f"generation.{_b} must be a bool, got "
                              f"{vals[_b]!r}")
@@ -284,6 +286,8 @@ def engine_settings(gc) -> dict:
         mse_jacobian=str(gc.engine_mse_jacobian),
         draw_q0_row=bool(getattr(gc, "engine_draw_q0_row", False)),
         draw_homotopy=bool(getattr(gc, "engine_draw_homotopy", True)),
+        draw_bootstrap_refresh=bool(getattr(
+            gc, "engine_draw_bootstrap_refresh", False)),
         loop=loop,
         q0_tol=float(gc.q0_tol),
         structured_li_tol=float(gc.structured_li_tol),
