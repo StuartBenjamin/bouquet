@@ -1084,6 +1084,37 @@ class GenerationConfig:
     # corrector already takes its Newton step) or on a channel/slice without
     # an axis row.
     jbs_loop_q0_corrector: bool = False
+    # --- the unified reconstruction engine (bouquet.engine; docs/engine.md) --
+    # "legacy" (default): prepare_baseline() runs the existing
+    # reconstruction / IMAS baseline paths, bit for bit.  "unified": ONE
+    # reconstruction loop for both input types -- parallel current
+    # components composed on the latest solved geometry, the structured
+    # closure with rows + discrepancies, one GS solve per pass, the delivery
+    # solve checked on every row.  A stored config without the field loads
+    # as "legacy".  The engine_* fields below configure "unified" only and
+    # are REFUSED when changed with "legacy" (they would do nothing).
+    # Stage 2: the engine builds the baseline; generate() and
+    # verify_sigma0_consistency() refuse it until the draws run on the
+    # engine (Stage 3).
+    reconstruction_engine: str = "legacy"
+    # "structured" (4-Gaussian basis, li_soft_onesided priors; the default),
+    # "bootstrap_scalar" (s_bs constant; rows Ip) or "sawtooth_two_scalar"
+    # (s_ind, s_bs constants; rows Ip, q0).
+    engine_preset: str = "structured"
+    # The measurement rows: "Ip" (always), "l_i", "q0" (on-axis safety
+    # factor; active only where the sawtooth gate admits it), "mse" (needs
+    # mse_data with E_r-CORRECTED pitch angles, er_corrected=True).
+    engine_rows: tuple = ("Ip", "l_i")
+    # Per-pass delivery correction (request minus achieved, one Newton step
+    # per pass, part of the state a draw inherits).  Default off; the default
+    # is to be decided after the solver's jphi-linterp defect is fixed.
+    engine_delivery_correction: bool = False
+    # How the MSE Jacobian is formed: "fd_broyden" (finite differences once
+    # at convergence, then Broyden updates every pass; the design note's
+    # recommendation) or "fd_chord" (the same finite differences, held
+    # fixed -- the legacy chord stage's treatment).  Either way the
+    # linearisation offset is refreshed from every solve.
+    engine_mse_jacobian: str = "fd_broyden"
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single
@@ -1434,6 +1465,10 @@ class BouquetConfig:
         from .jbs_loop import (deprecated_jbs_settings_warning,
                                validate_jbs_settings)
         validate_jbs_settings(self.generation)
+        # the unified reconstruction engine's settings (refused by name;
+        # engine_* fields changed under the legacy engine are refused too)
+        from .engine import validate_engine_settings
+        validate_engine_settings(self.generation)
         # settings the loop ignores (swb_iterations): loud, not silent
         deprecated_jbs_settings_warning(self.generation, stacklevel=3)
 
