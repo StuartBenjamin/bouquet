@@ -1124,7 +1124,10 @@ trusting the answer —
 
 `STRUCTURED_WEIGHTS_UNIFORM` is the no-prior sensitivity: the difference between
 the two answers is the part of the result the prior, not the data, is holding
-up, and off the original device it is the first thing to run.
+up, and off the original device it is the first thing to run. "No prior" holds
+only without MSE data: with `mse_data` the objective gains the chords' χ², the
+weights become an absolute σ⁻² that trades against it, and the uniform ladder
+is a σ = 1 prior on every coefficient.
 
 Two guards keep the default from being worse than no default:
 

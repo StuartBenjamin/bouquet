@@ -291,12 +291,34 @@ the forward model is linearised by forward differences on solved equilibria
 (`utils.structured_mse_jacobian`, one GS solve per free coefficient) and the
 closure re-solved (`utils.structured_mse_outer`); the q0/l_i corrector keeps
 the term in every re-solve it takes. Recorded per slice: chords used, E_r
-treatment, field orientation, chi² before/after/delivered, per-chord residuals,
+treatment, the field orientation (stated by the block's `ip_sign`/`bt_sign` and mapped onto the equilibrium's own directions — never chosen by fit; a better-fitting alternative is flagged), chi² before/after/delivered, per-chord residuals,
 the linearisation residual and the achieved objective, which the linear step
-cannot raise — if it does, the slice is flagged closure-limited.
+cannot raise — if it does, the slice is flagged closure-limited. The q0/l_i
+corrector may re-solve after the MSE stage, so the verdict is also taken on
+the **delivered** equilibrium: its per-chord residuals (in sigma) are
+recorded, and the slice is flagged when the delivered chi² — or, where
+comparable, the delivered objective — is worse than the pre-MSE closure's
+(reporting only; no iteration count or tolerance changed). `n_extra_solves`
+counts the MSE stage's solves; after an applied MSE stage the corrector's
+entry readbacks are recorded as `*_mse_stage`, and `*_predictor` keeps the
+predictor's values.
+Without `Er` or `er_corrected=True` the model takes E_R = 0, which biases the
+fit in a rotating plasma (to first order B_Z is read as B_Z + (A5/A1)E_R —
+a systematic reshaping of the fitted current profile); this is warned and
+recorded. The forward model is the standard A1..A7 form with E_Z = 0 and no
+denominator E_R term (a block applying E_r with non-zero A7 is refused).
 `structured_mse_required=True` refuses instead of running without the
 constraint. **Nothing changes without `mse_data`**: every default is inert and
 no tolerance or acceptance criterion moved.
+
+Under the self-consistent bootstrap loop the MSE chord stage gets the same
+review fixes as the stage above: an off-mesh chord is excluded with its reason
+(fewer than `structured_mse_min_chords` left refuses) and a chord lost on a
+later read is a refusal; the orientation is the stated one, audited and
+flagged, never fitted; every GS solve it spends (restore re-solve included) is
+counted into `n_extra_solves`; per-chord arrays and the Jacobian go to
+`Baseline.mse_record`; and the delivered-equilibrium chi² judgement runs on the
+state it delivers.
 
 
 ## Unreleased — the default coil acceptance criterion changed

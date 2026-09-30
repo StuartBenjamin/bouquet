@@ -92,6 +92,13 @@ class Baseline:
     # 'ohmic' mode bookkeeping: proxy-Ip of each component, the proxy's own
     # error on the FUSE total, and the jphi_diff anchor that was NOT applied.
     ip_closure: Optional[dict] = None
+    # closure_channel="structured" with mse_data only: the MSE term's
+    # PER-CHORD arrays (chords used, measured tan(gamma), sigma_eff, residuals
+    # in sigma before/after/delivered, predicted tan(gamma), the n x 2K
+    # Jacobian, excluded chords with reasons).  Kept out of ip_closure -- which
+    # is archived as one size-capped JSON attribute -- and archived as
+    # datasets under _baseline/structured_mse.  None otherwise.
+    mse_record: Optional[dict] = None
 
     # IMAS path only: the two slice-level facts closure_channel=
     # "sawtooth_bootstrap" gates on, read ONCE at load time because the reader

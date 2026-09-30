@@ -4797,6 +4797,7 @@ def generate_bouquet(
     # bit.
     jphi_request_offset=None,
     delivered_state=None,
+    baseline_mse_record=None,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -5919,6 +5920,9 @@ def generate_bouquet(
         j_BS=_bl_jBS_store,
         j_inductive=_bl_jind_store,
         source_kind=source_kind,
+        # structured closure + MSE only (None otherwise): per-chord arrays as
+        # datasets, kept out of the size-capped ip_closure attribute
+        mse_record=baseline_mse_record,
     )
 
     # ---- the ONE reconstruction state (self-consistent loop) ------------

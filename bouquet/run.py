@@ -1487,7 +1487,7 @@ class Bouquet:
 
         if mse_status is not None:
             extra.update(Bouquet._structured_mse_predictor_record(
-                gc, mse_ch, mse_status))
+                gc, mse_ch, mse_status, bl=bl))
 
         # The corrector state is built whenever there is ANYTHING to correct:
         # the q0 row (gate admitted) or the l_i row.  Both corrections share
@@ -1520,6 +1520,28 @@ class Bouquet:
             )
             if mse_ch is not None:
                 from .utils import structured_objective_no_mse
+
+                def _sig(W):
+                    W = np.asarray(W, dtype=float)
+                    with np.errstate(divide="ignore"):
+                        return [float(v) for v in 1.0 / np.sqrt(W)]
+                # With MSE on the trust weights are an ABSOLUTE sigma^-2 that
+                # trades against chi2_MSE (their scale is no longer free), so
+                # the ladder actually in force is recorded as widths.
+                extra.update(
+                    structured_mse_prior_sigma_ind=_sig(out["weights_ind"]),
+                    structured_mse_prior_sigma_bs=_sig(out["weights_bs"]),
+                    structured_mse_prior_sigma_ind_up=(
+                        None if out.get("weights_ind_up") is None
+                        else _sig(out["weights_ind_up"])),
+                    structured_mse_prior_weights_name=str(
+                        out.get("weights_name", "")),
+                    structured_mse_prior_scale=(
+                        "ABSOLUTE: with MSE the objective is x'Wx + chi2_MSE, "
+                        "so W = sigma^-2 in peak-normalised coefficient units "
+                        "trades against the chords; scaling W moves the "
+                        "answer, and a uniform ladder is a sigma = 1 prior, "
+                        "not 'no prior'"))
                 state.update(
                     mse=mse_ch,
                     mse_required=bool(getattr(gc, "structured_mse_required",
@@ -1541,34 +1563,73 @@ class Bouquet:
     # ── closure_channel="structured": MSE pitch angles ─────────────────────
     @staticmethod
     def _check_structured_mse_reachable(cfg):
-        """Refuse ``structured_mse_required`` on a path that never reads MSE.
+        """Refuse MSE settings on a path that never reads them.
 
         The MSE term exists only in the structured closure, which runs only on
         the IMAS path with ``recalculate_j_BS``, ``jBS_baseline_mode="ohmic"``
-        and ``closure_channel="structured"``.  A required MSE constraint on any
-        other configuration would be silently ignored -- exactly what the flag
-        is there to prevent.
+        and ``closure_channel="structured"``.  Anywhere else ``mse_data`` (or
+        any non-default ``structured_mse_*`` knob) would be accepted and never
+        used -- the class of silent no-op the ``closure_channel`` guard
+        refuses, and refused here the same way:
+
+        * ``structured_mse_required=True`` -- ALWAYS raises: a required
+          constraint that cannot be applied is not something a workflow
+          opt-out can waive.
+        * otherwise -- raises ``ValueError``; ``workflow='custom'`` (or the
+          deprecated ``allow_unsafe_workflow=True``) downgrades it to a printed
+          WARN, exactly as for every other workflow-guard problem, and the MSE
+          term is then NOT applied.
         """
-        from .config import ImasSource
+        from dataclasses import MISSING
+
+        from .config import GenerationConfig, ImasSource
         gc = cfg.generation
-        if not bool(getattr(gc, "structured_mse_required", False)):
+        _fields = GenerationConfig.__dataclass_fields__
+        set_knobs = []
+        for name in ("mse_data", "structured_mse_required",
+                     "structured_mse_fd_step", "structured_mse_steps",
+                     "structured_mse_sigma_sys", "structured_mse_min_chords"):
+            dflt = _fields[name].default
+            if dflt is MISSING or not hasattr(gc, name):
+                continue
+            val = getattr(gc, name)
+            if (val is not None if dflt is None else val != dflt):
+                set_knobs.append(name)
+        if not set_knobs:
             return
         why = []
         if not isinstance(cfg.source, ImasSource):
             why.append("the source is not an IMAS source")
         if not bool(getattr(gc, "recalculate_j_BS", False)):
-            why.append("recalculate_j_BS is off")
+            why.append("recalculate_j_BS is off"
+                       + (" (forced off by single_profile_jphi=True)"
+                          if bool(getattr(gc, "single_profile_jphi", False))
+                          else ""))
         if str(getattr(gc, "jBS_baseline_mode", "")) != "ohmic":
             why.append(f"jBS_baseline_mode={gc.jBS_baseline_mode!r} "
                        "(needs 'ohmic')")
         if str(getattr(gc, "closure_channel", "")) != "structured":
             why.append(f"closure_channel={gc.closure_channel!r} "
                        "(needs 'structured')")
-        if why:
+        if not why:
+            return
+        if bool(getattr(gc, "structured_mse_required", False)):
             raise ValueError(
                 "structured_mse_required=True, but the structured closure "
                 "that consumes mse_data will not run: " + "; ".join(why)
                 + ".  Refusing rather than ignoring a required constraint.")
+        msg = (", ".join(set_knobs) + " set, but the structured closure that "
+               "reads mse_data will not run: " + "; ".join(why)
+               + " -- it would otherwise be silently ignored.  Use "
+               "closure_channel='structured' with jBS_baseline_mode='ohmic' "
+               "on an IMAS source, or leave mse_data / structured_mse_* at "
+               "their defaults.")
+        if (str(getattr(gc, "workflow", "")) == "custom"
+                or bool(getattr(gc, "allow_unsafe_workflow", False))):
+            print("WARN: " + msg + " (workflow='custom': continuing; the MSE "
+                  "term is NOT applied)", flush=True)
+            return
+        raise ValueError(msg)
 
     @staticmethod
     def _structured_mse_block(gc):
@@ -1583,12 +1644,17 @@ class Bouquet:
         the term was not applied and why.
         """
         import warnings
+        from .mse import MSE_ER_BIAS_NOTE as _mse_er_bias_note
         from .mse import MSE_MIN_CHORDS, MSEDataUnusable, mse_chords
 
         md = getattr(gc, "mse_data", None)
         required = bool(getattr(gc, "structured_mse_required", False))
         if md is None and not required:
             return None, None
+        # configuration errors (a bad knob, an unknown key) are REFUSED here
+        # as plain ValueErrors -- never turned into a per-slice "not applied"
+        from .config import validate_structured_mse_settings
+        validate_structured_mse_settings(gc)
         try:
             ch = mse_chords(
                 md, min_chords=int(getattr(gc, "structured_mse_min_chords",
@@ -1608,10 +1674,23 @@ class Bouquet:
             print("[imas SWB-split:ohmic structured] WARNING " + msg,
                   flush=True)
             return None, f"unusable, not applied: {e}"
+        if not ch["er_applied"] and not ch["er_corrected"]:
+            print("[imas SWB-split:ohmic structured] WARNING MSE: E_r is "
+                  "neither supplied (Er) nor declared corrected "
+                  "(er_corrected=True), so the forward model takes E_R = 0 -- "
+                  "BIASED in a rotating plasma (" + _mse_er_bias_note + ")",
+                  flush=True)
+        _er_nan = [i for i, r in ch["excluded"] if r.startswith("E_r is not")]
+        if _er_nan:
+            print("[imas SWB-split:ohmic structured] WARNING MSE: "
+                  f"{len(_er_nan)} chord(s) at input index {_er_nan} have a "
+                  "non-finite E_r inside the supplied E_r profile and are "
+                  "EXCLUDED (recorded with that reason), not fitted without "
+                  "their E_r term", flush=True)
         return ch, "usable"
 
     @staticmethod
-    def _structured_mse_predictor_record(gc, ch, status):
+    def _structured_mse_predictor_record(gc, ch, status, bl=None):
         """The predictor-stage MSE block of ``ip_closure`` (inputs only)."""
         from .mse import mse_er_terms
         rec = dict(
@@ -1622,26 +1701,124 @@ class Bouquet:
         )
         if ch is None:
             return rec
+        rec.update(Bouquet._structured_mse_chord_record(ch, bl))
         rec.update(
-            structured_mse_n_chords=int(ch["n_active"]),
-            structured_mse_n_chords_total=int(ch["n_total"]),
-            structured_mse_chord_index=[int(i) for i in ch["index"]],
-            structured_mse_chord_R=[float(v) for v in ch["R"]],
-            structured_mse_chord_Z=[float(v) for v in ch["Z"]],
-            structured_mse_tgamma_meas=[float(v) for v in ch["tgamma"]],
-            structured_mse_sigma_eff=[float(v) for v in ch["sigma_eff"]],
             structured_mse_sigma_sys=float(ch["sigma_sys"]),
             structured_mse_er_applied=bool(ch["er_applied"]),
             structured_mse_er_corrected=bool(ch["er_corrected"]),
             structured_mse_er_terms=mse_er_terms(ch),
+            structured_mse_er_neglected=bool(not ch["er_applied"]
+                                             and not ch["er_corrected"]),
             structured_mse_fd_step=float(getattr(gc, "structured_mse_fd_step",
                                                  0.02)),
             structured_mse_steps=int(getattr(gc, "structured_mse_steps", 1)),
             structured_mse_forward_model=(
                 "tan(gamma) = (A1 Bz + A5 Er) / (A2 Bphi + A3 BR + A4 Bz) on "
-                "the SOLVED equilibrium (bouquet.mse); linearised in the "
-                "structured coefficients by forward differences"),
+                "the SOLVED equilibrium (bouquet.mse): the standard form "
+                "(A1 Bz + A5 Er) / (A2 Bphi + A3 BR + A4 Bz + A6 Ez + A7 Er) "
+                "with Ez = 0 and A7 = 0 (a block applying Er with non-zero "
+                "A7 is refused); linearised in the structured coefficients "
+                "by forward differences"),
         )
+        return rec
+
+    #: Where the per-chord MSE arrays live (named in ``ip_closure``).
+    _MSE_PER_CHORD_WHERE = (
+        "Baseline.mse_record (per-chord arrays and the Jacobian; archived as "
+        "datasets under _baseline/structured_mse, not in the ip_closure "
+        "attribute)")
+
+    @staticmethod
+    def _mse_record_put(bl, **arrays):
+        """Store per-chord MSE arrays on ``bl.mse_record`` (O(n_chords) data).
+
+        ``ip_closure`` is archived as ONE JSON attribute, whose size an HDF5
+        file caps at 64 kB; the MSE term's per-chord blocks and its
+        ``n_chords x 2K`` Jacobian grow with the chord count, so they are kept
+        OUT of it -- here, and archived as datasets (see
+        :func:`bouquet.utils.store_baseline_profiles`) -- while ``ip_closure``
+        carries only chord-count-independent scalars and summaries.
+        """
+        import numpy as np
+        if bl is None:
+            return
+        rec = getattr(bl, "mse_record", None)
+        if rec is None:
+            rec = {}
+            bl.mse_record = rec
+        for k, v in arrays.items():
+            if isinstance(v, (list, tuple)) and v and isinstance(v[0], str):
+                rec[k] = [str(x) for x in v]
+            elif isinstance(v, (list, tuple)) and not v:
+                rec[k] = np.zeros(0)
+            else:
+                rec[k] = np.asarray(v)
+
+    @staticmethod
+    def _structured_mse_chord_record(ch, bl=None):
+        """Which chords the MSE term uses, and every excluded one with why.
+
+        Returns the ``ip_closure`` summary (counts; exclusions tallied by
+        reason) and puts the per-chord arrays on ``bl.mse_record``.
+        """
+        import numpy as np
+        ex = list(ch.get("excluded", ()))
+        by_reason = {}
+        for _i, r in ex:
+            by_reason[str(r)] = by_reason.get(str(r), 0) + 1
+        Bouquet._mse_record_put(
+            bl,
+            chord_index=np.asarray(ch["index"], dtype=np.int64),
+            chord_R=np.asarray(ch["R"], dtype=float),
+            chord_Z=np.asarray(ch["Z"], dtype=float),
+            tgamma_meas=np.asarray(ch["tgamma"], dtype=float),
+            sigma_eff=np.asarray(ch["sigma_eff"], dtype=float),
+            excluded_index=np.asarray([int(i) for i, _r in ex],
+                                      dtype=np.int64),
+            excluded_reason=[str(r) for _i, r in ex])
+        return dict(
+            structured_mse_n_chords=int(ch["n_active"]),
+            structured_mse_n_chords_total=int(ch["n_total"]),
+            structured_mse_n_excluded=len(ex),
+            structured_mse_excluded_by_reason=by_reason,
+            structured_mse_per_chord=Bouquet._MSE_PER_CHORD_WHERE,
+        )
+
+    @staticmethod
+    def _structured_predictor_readback(state, mygs):
+        """The predictor's solved q0 / l_i, under the corrector's own names.
+
+        Exactly the corrector's readbacks (q0 from ``get_q`` at ``psi_q[0]``;
+        l_i from :func:`bouquet.utils.li_achieved` with the anchor's
+        perimeter), taken on a ``copy_eq()`` snapshot; only the quantities the
+        slice constrains are read.  No GS solve.
+        """
+        import numpy as np
+
+        from .utils import li_achieved
+
+        gated = bool(state.get("gated", state.get("axis") is not None))
+        li_target = state.get("li_target")
+        if not gated and li_target is None:
+            return {}
+        snap = mygs.copy_eq()
+        rec = {}
+        if gated:
+            q0 = float(np.asarray(snap.get_q(psi=state["psi_q"].copy())[1],
+                                  dtype=float)[0])
+            rec.update(q0_solved_predictor=q0,
+                       q0_predictor_residual=q0 - state["q0_target"])
+        if li_target is not None:
+            _per = (None if state.get("li_geom") is None
+                    else float(state["li_geom"]["perimeter"]))
+            li, _ = li_achieved(snap, li_kind=str(state.get("li_kind",
+                                                              "li_1")),
+                                psi_pad=float(state.get("psi_pad", 1e-3)),
+                                perimeter=_per)
+            rec.update(structured_li_solved_predictor=float(li),
+                       structured_li_achieved_predictor=float(li),
+                       structured_li_residual_predictor=float(li)
+                       - float(li_target))
         return rec
 
     @staticmethod
@@ -1653,9 +1830,17 @@ class Bouquet:
         ``mygs`` holds the predictor equilibrium) and before
         :meth:`_close_ip_structured_corrector`.
 
-        1. Read the field at the chords off the predictor equilibrium, fix the
-           field orientation once (:func:`bouquet.mse.mse_sign_convention`,
-           frozen for the rest of the slice) and form ``tan_gamma(x_pred)``.
+        1. Read the field at the chords off the predictor equilibrium, map it
+           onto the discharge's STATED orientation
+           (:func:`bouquet.mse.mse_orientation`: the block's
+           ``ip_sign``/``bt_sign`` against the equilibrium's own directions,
+           read off its field about ``mygs.o_point``; frozen for the rest of
+           the slice, never chosen by fit) and form ``tan_gamma(x_pred)``.
+           All four orientations are still evaluated
+           (:func:`bouquet.mse.mse_orientation_check`); when another fits the
+           chords better than the stated one by more than
+           ``bouquet.mse.MSE_ORIENTATION_DCHI2`` the slice is FLAGGED and the
+           stated orientation is kept.
         2. :func:`bouquet.utils.structured_mse_outer`: forward-difference
            Jacobian (one solve per free coefficient), then
            ``structured_mse_steps`` re-solve(s) of the SAME closure (same
@@ -1669,12 +1854,26 @@ class Bouquet:
         A refusal anywhere (a closure out of its scale bounds, a failed solve,
         an unusable field) RAISES when ``structured_mse_required``; otherwise
         the predictor's hybrid is re-solved (the FD probes moved ``mygs``),
-        kept, and the slice is FLAGGED closure-limited.  ``field_at`` (tests)
-        replaces the live field read.  Returns the last solve's ``nl_its``.
+        kept, and the slice is FLAGGED closure-limited.  ``field_at(R, Z)``
+        (tests) replaces the live field read and returns ``(B, found)`` like
+        :func:`bouquet.mse.mse_field_at`.  Returns the last solve's ``nl_its``.
+
+        **Chords off the solver mesh.**  The first field read (on the
+        predictor equilibrium) reports, per chord, whether the interpolator
+        could place it on the mesh at all.  A chord it cannot is EXCLUDED --
+        recorded with its reason under ``structured_mse_excluded_chords`` and
+        announced -- never evaluated from a stale buffer; if that leaves fewer
+        than ``structured_mse_min_chords`` the stage refuses (loudly, by the
+        path above).  The mesh does not move between solves, so every later
+        read must find every remaining chord: one that does not is a refusal,
+        not a reused value.
         """
         import numpy as np
 
-        from .mse import (mse_er_terms, mse_field_at, mse_sign_convention,
+        from .mse import (MSE_ORIENTATION_DCHI2, MSE_REASON_OFF_MESH,
+                          MSEDataUnusable, mse_equilibrium_orientation,
+                          mse_er_terms, mse_exclude, mse_field_at,
+                          mse_orientation, mse_orientation_check,
                           mse_tan_gamma)
         from .utils import (MSE_FLAG_PREFIX, close_ip_structured,
                             close_ip_structured_soft, closure_health,
@@ -1685,14 +1884,14 @@ class Bouquet:
         required = bool(state.get("mse_required", False))
         soft = bool(state.get("soft"))
         if field_at is None:
-            field_at = lambda: mse_field_at(mygs, ch["R"], ch["Z"])
+            field_at = lambda R, Z: mse_field_at(mygs, R, Z)
         psi_g = np.asarray(state["psi_geom"], dtype=float)
         Phi = structured_basis_eval(state["basis"], psi_g)
         K = Phi.shape[0]
         j_ind = np.asarray(state["j_ind"], dtype=float)
         j_bs = np.asarray(state["j_BS_swb"], dtype=float)
         j_fix = np.asarray(state["j_fixed"], dtype=float)
-        last = {"nl": None}
+        last = {"nl": None, "n": 0}
         # the one-sided prior's up ladder, exactly as the predictor used it
         up_ladder = state.get("sigma_ind_up")
 
@@ -1701,8 +1900,38 @@ class Bouquet:
             return ((1.0 + x[:K] @ Phi) * j_ind + (1.0 + x[K:] @ Phi) * j_bs
                     + j_fix)
 
+        class _SolverFailure(RuntimeError):
+            """A GS solve or field read failed inside the MSE stage."""
+
+        def _is_solver_failure(e):
+            # TokaMaker raises BARE ``Exception`` for solver/field failures;
+            # bouquet's own solve wrappers raise RuntimeError / ValueError.
+            # Anything else (TypeError, KeyError, AttributeError, ...) is a
+            # bug, and is re-raised untouched rather than turned into a
+            # "refused" slice.
+            return type(e) is Exception or isinstance(
+                e, (RuntimeError, ValueError, FloatingPointError))
+
         def _solve(j):
-            last["nl"] = solve_jphi(np.asarray(j, dtype=float))
+            last["n"] += 1
+            try:
+                last["nl"] = solve_jphi(np.asarray(j, dtype=float))
+            except Exception as e:
+                if _is_solver_failure(e):
+                    raise _SolverFailure(
+                        f"GS solve failed ({type(e).__name__}: {e})") from e
+                raise
+
+        _field_raw = field_at
+
+        def field_at(R, Z):
+            try:
+                return _field_raw(R, Z)
+            except Exception as e:
+                if _is_solver_failure(e):
+                    raise _SolverFailure(
+                        f"field read failed ({type(e).__name__}: {e})") from e
+                raise
 
         def _resolve(lin):
             if soft:
@@ -1734,17 +1963,116 @@ class Bouquet:
                 sigma_ind_up=up_ladder, mse_lin=lin)
 
         rec = {}
+        stage_flags = []
         prev = getattr(bl, "ip_closure", None) or {}
+        # The corrector reads its "*_predictor" fields off whatever mygs holds
+        # when it runs -- after this stage that is the MSE-stage equilibrium,
+        # not the predictor.  Read the predictor's q0 / l_i HERE, before the
+        # first probe moves anything, so those names keep their meaning (the
+        # corrector then records its entry state under "*_mse_stage").
+        rec.update(Bouquet._structured_predictor_readback(state, mygs))
         try:
-            B0 = field_at()
-            sp, st, table = mse_sign_convention(B0, ch)
+            B0, found = field_at(ch["R"], ch["Z"])
+            B0 = np.asarray(B0, dtype=float).reshape(-1, 3)
+            found = np.asarray(found, dtype=bool).ravel()
+            if not found.all():
+                _off = [int(i) for i in np.asarray(ch["index"])[~found]]
+                ch = mse_exclude(ch, ~found, MSE_REASON_OFF_MESH)
+                state["mse"] = ch
+                B0 = B0[found]
+                rec.update(Bouquet._structured_mse_chord_record(ch, bl))
+                print("[imas SWB-split:ohmic structured] WARNING MSE: "
+                      f"{len(_off)} chord(s) at input index {_off} are OFF "
+                      "the solver mesh and are EXCLUDED (no field can be "
+                      f"read there); {int(ch['n_active'])} chord(s) remain",
+                      flush=True)
+                if int(ch["n_active"]) < int(ch.get("min_chords", 1)):
+                    raise MSEDataUnusable(
+                        f"only {int(ch['n_active'])} MSE chord(s) remain on "
+                        f"the solver mesh (chord(s) {_off} are off it); at "
+                        f"least {int(ch['min_chords'])} are required")
+
+            def _field_strict():
+                """The field at the SAME chords; any not-found is a refusal."""
+                B, fnd = field_at(ch["R"], ch["Z"])
+                fnd = np.asarray(fnd, dtype=bool).ravel()
+                if not fnd.all():
+                    raise RuntimeError(
+                        "MSE chord(s) at input index "
+                        f"{[int(i) for i in np.asarray(ch['index'])[~fnd]]} "
+                        "were not found on the mesh on a later field read -- "
+                        "refusing to reuse a stale field value")
+                return np.asarray(B, dtype=float).reshape(-1, 3)
+
+            _axis = getattr(mygs, "o_point", None)
+            eq_or = mse_equilibrium_orientation(B0, ch["R"], ch["Z"], _axis)
+            sp, st = mse_orientation(ch, eq_or)
+            chk = mse_orientation_check(B0, ch, sp, st)
+            rec.update(
+                structured_mse_orientation=dict(
+                    pol=sp, tor=st,
+                    ip_sign_data=float(ch["ip_sign"]),
+                    bt_sign_data=float(ch["bt_sign"]),
+                    ip_sign_equilibrium=float(eq_or["ip"]),
+                    bt_sign_equilibrium=float(eq_or["bt"]),
+                    n_chords_agreeing_ip=int(eq_or["n_ip_agree"]),
+                    rule=("STATED, not fitted: sign_pol = ip_sign(data) * "
+                          "ip_sign(equilibrium), sign_tor = bt_sign(data) * "
+                          "bt_sign(equilibrium); the equilibrium's signs are "
+                          "read off its field (B_phi; poloidal circulation "
+                          "about the magnetic axis)")),
+                structured_mse_orientation_chi2_table=dict(chk["table"]),
+                structured_mse_orientation_delta_chi2=float(
+                    chk["delta_chi2"]),
+                structured_mse_orientation_disagrees=bool(chk["disagrees"]),
+                structured_mse_orientation_note=chk["note"])
+            if chk["disagrees"]:
+                stage_flags.append(
+                    MSE_FLAG_PREFIX + "the data disagree with the stated field "
+                    f"orientation (sign_pol {sp:+.0f}, sign_tor {st:+.0f}): "
+                    f"orientation {chk['best_other']} fits the chords better "
+                    f"by delta chi2 = {chk['delta_chi2']:.4g} (> "
+                    f"{MSE_ORIENTATION_DCHI2:g}); the stated orientation is "
+                    "KEPT -- check ip_sign/bt_sign and the sign of E_r")
+                print("[imas SWB-split:ohmic structured] WARNING closure-"
+                      "limited: " + stage_flags[-1], flush=True)
             tg_pred = mse_tan_gamma(B0, ch, sp, st)
-            rec.update(structured_mse_sign_convention=dict(pol=sp, tor=st),
-                       structured_mse_sign_table=dict(table))
+
+            # Can the MSE term move the closure at all?  A zero-Jacobian
+            # dry run of the SAME closure (no GS solve) reports the dimension
+            # of the free-coefficient space left once the hard rows are
+            # imposed; zero means the constraints use every free coefficient
+            # and chi2_MSE could only be recorded, never fitted.
+            _dry = _resolve(structured_mse_linear_model(
+                state["x_pred"], tg_pred,
+                np.zeros((int(ch["n_active"]), 2 * K)), ch))
+            if int(_dry.get("mse_free_dim", 1)) == 0:
+                _msg = ("no free coefficient is left once the hard "
+                        "constraints are imposed (null space of dimension 0) "
+                        "-- the MSE term cannot move this closure")
+                if required:
+                    raise RuntimeError(
+                        "closure_channel='structured': " + _msg + ", and "
+                        "structured_mse_required=True -- refusing to report "
+                        "a closure the MSE constraint did not shape")
+                state["mse_n_solves"] = 0
+                state["mse_stage_word"] = "MSE stage not applied"
+                rec.update(structured_mse_status="not applied: " + _msg,
+                           structured_mse_n_solves=0)
+                if stage_flags:
+                    _r = list(prev.get("closure_limited_reasons", ()) or ())
+                    _r += [w for w in stage_flags if w not in _r]
+                    rec.update(closure_limited=True,
+                               closure_limited_reasons=tuple(_r))
+                if getattr(bl, "ip_closure", None) is not None:
+                    bl.ip_closure.update(rec)
+                print("[imas SWB-split:ohmic structured] WARNING MSE: "
+                      + _msg + "; NOT applied (no solve spent)", flush=True)
+                return None
 
             def _tan_gamma_of(x):
                 _solve(_hybrid(x))
-                return mse_tan_gamma(field_at(), ch, sp, st)
+                return mse_tan_gamma(_field_strict(), ch, sp, st)
 
             res = structured_mse_outer(
                 state["x_pred"], state["F_pred"], tg_pred, _tan_gamma_of,
@@ -1764,10 +2092,13 @@ class Bouquet:
             why = (MSE_FLAG_PREFIX + "stage refused, predictor kept "
                    f"({str(e)[:160]})")
             reasons = list(prev.get("closure_limited_reasons", ()) or ())
-            if why not in reasons:
-                reasons.append(why)
+            for _w in stage_flags + [why]:
+                if _w not in reasons:
+                    reasons.append(_w)
+            state["mse_n_solves"] = int(last["n"])
             rec.update(structured_mse_status="refused, not applied: "
                                              + str(e)[:300],
+                       structured_mse_n_solves=int(last["n"]),
                        closure_limited=True,
                        closure_limited_reasons=tuple(reasons))
             if getattr(bl, "ip_closure", None) is not None:
@@ -1789,13 +2120,30 @@ class Bouquet:
                                                        R["jacobian"], ch)
         state["mse_sign"] = (sp, st)
         state["mse_applied"] = True
+        Bouquet._mse_record_put(
+            bl,
+            residual_sigma_before=np.asarray(R["residual_sigma_before"],
+                                             dtype=float),
+            residual_sigma_after=np.asarray(R["residual_sigma_after"],
+                                            dtype=float),
+            tgamma_pred_before=np.asarray(R["tgamma_pred_before"], dtype=float),
+            tgamma_pred_after=np.asarray(R["tgamma_pred_after"], dtype=float),
+            jacobian=np.asarray(R["jacobian"], dtype=float))
+        state["mse_n_solves"] = int(last["n"])
+        # what the delivered-equilibrium check compares against, and the
+        # closure the delivered profiles come from until a corrector re-solve
+        # replaces it (see _structured_mse_delivered)
+        state["mse_chi2_before"] = float(R["chi2_before"])
+        state["mse_objective_before"] = float(R["objective_before"])
+        state["mse_delivered_out"] = out
+        state["mse_corrector_resolved"] = False
 
         _at = lambda s: {f"{r:.2f}": float(np.interp(r, psi_g, s))
                          for r in (0.0, 0.2, 0.4, 0.6, 0.8, 0.95, 1.0)}
         _fl = lambda v: [float(x) for x in np.ravel(v)]
         rec.update(
             structured_mse_status="applied",
-            structured_mse_n_solves=int(R["n_solves"]),
+            structured_mse_n_solves=int(last["n"]),
             structured_mse_n_fd_solves=int(R["n_fd_solves"]),
             structured_mse_chi2_before=float(R["chi2_before"]),
             structured_mse_chi2_after=float(R["chi2_after"]),
@@ -1804,10 +2152,10 @@ class Bouquet:
             / int(ch["n_active"]),
             structured_mse_chi2_red_after=float(R["chi2_after"])
             / int(ch["n_active"]),
-            structured_mse_residual_sigma_before=_fl(R["residual_sigma_before"]),
-            structured_mse_residual_sigma_after=_fl(R["residual_sigma_after"]),
-            structured_mse_tgamma_pred_before=_fl(R["tgamma_pred_before"]),
-            structured_mse_tgamma_pred_after=_fl(R["tgamma_pred_after"]),
+            structured_mse_residual_sigma_max_abs_before=float(
+                np.max(np.abs(R["residual_sigma_before"]))),
+            structured_mse_residual_sigma_max_abs_after=float(
+                np.max(np.abs(R["residual_sigma_after"]))),
             structured_mse_objective_before=float(R["objective_before"]),
             structured_mse_objective_after_model=float(
                 R["objective_after_model"]),
@@ -1817,7 +2165,8 @@ class Bouquet:
             structured_mse_linearisation_residual_rms_sigma=float(
                 R["steps"][-1]["linearisation_residual_rms_sigma"]),
             structured_mse_step_log=[dict(s) for s in R["steps"]],
-            structured_mse_jacobian=[_fl(row) for row in R["jacobian"]],
+            structured_mse_jacobian_shape=[int(v) for v in
+                                           np.shape(R["jacobian"])],
             structured_mse_er_terms=mse_er_terms(ch),
             # the same closure fields the corrector refreshes, so every
             # structured_* entry describes the DELIVERED multiplier profiles
@@ -1876,6 +2225,9 @@ class Bouquet:
                                 state["ip_bs"], state["ip_fix"],
                                 soft_ip_residual_sigma=z_ip)
         reasons = list(health["closure_limited_reasons"])
+        for why in stage_flags:
+            if why not in reasons:
+                reasons.append(why)
         for why in res["flags"]:
             if why not in reasons:
                 reasons.append(why)
@@ -1959,8 +2311,11 @@ class Bouquet:
         """
         import numpy as np
 
-        from .mse import (mse_chi2, mse_er_terms, mse_field_at,
-                          mse_sign_convention, mse_tan_gamma)
+        from .mse import (MSE_ORIENTATION_DCHI2, MSE_REASON_OFF_MESH,
+                          MSEDataUnusable, mse_chi2,
+                          mse_equilibrium_orientation, mse_er_terms,
+                          mse_exclude, mse_field_at, mse_orientation,
+                          mse_orientation_check, mse_tan_gamma)
         from .utils import (MSE_FLAG_PREFIX, close_ip_structured,
                             close_ip_structured_soft, closure_health,
                             soft_closure_with_retry,
@@ -1975,8 +2330,11 @@ class Bouquet:
         ch = state["mse"]
         required = bool(state.get("mse_required", False))
         soft = bool(state.get("soft"))
+        # field_at(R, Z) -> (B, found), exactly as bouquet.mse.mse_field_at
+        # and the legacy stage's field_at: a chord the interpolator cannot
+        # place on the mesh is REPORTED, never read from a stale buffer
         if field_at is None:
-            field_at = lambda: mse_field_at(mygs, ch["R"], ch["Z"])
+            field_at = lambda R, Z: mse_field_at(mygs, R, Z)
         psi_g = np.asarray(state["psi_geom"], dtype=float)
         Phi = structured_basis_eval(state["basis"], psi_g)
         K = Phi.shape[0]
@@ -1984,7 +2342,9 @@ class Bouquet:
         fd_step = float(state.get("mse_fd_step", 0.02))
         free = state["free"]
         n_free = int(np.count_nonzero(free))
-        last = {"nl": None}
+        # "n": EVERY GS solve this stage spends (FD probes, chord steps, the
+        # final step, a refusal's restore solve); "n_fd": the FD probes alone
+        last = {"nl": None, "n": 0, "n_fd": 0}
 
         def _hybrid(st, jbs, x):
             x = np.asarray(x, dtype=float)
@@ -1992,10 +2352,52 @@ class Bouquet:
                     + (1.0 + x[K:] @ Phi) * np.asarray(jbs, float)
                     + np.asarray(st["j_fixed"], float))
 
-        def _solve(j):
-            last["nl"] = solve_jphi(np.asarray(j, dtype=float))
+        class _SolverFailure(RuntimeError):
+            """A GS solve or field read failed inside the MSE stage."""
 
-        def _resolve(st, lin, x_retry=None):
+        def _is_solver_failure(e):
+            # as the legacy stage: TokaMaker raises BARE ``Exception`` for
+            # solver/field failures, bouquet's wrappers RuntimeError /
+            # ValueError; anything else (TypeError, KeyError, ...) is a bug
+            # and is re-raised untouched, never turned into a refused slice
+            return type(e) is Exception or isinstance(
+                e, (RuntimeError, ValueError, FloatingPointError))
+
+        def _solve(j):
+            last["n"] += 1
+            try:
+                last["nl"] = solve_jphi(np.asarray(j, dtype=float))
+            except Exception as e:
+                if _is_solver_failure(e):
+                    raise _SolverFailure(
+                        f"GS solve failed ({type(e).__name__}: {e})") from e
+                raise
+
+        _field_raw = field_at
+
+        def field_at(R, Z):
+            try:
+                return _field_raw(R, Z)
+            except Exception as e:
+                if _is_solver_failure(e):
+                    raise _SolverFailure(
+                        f"field read failed ({type(e).__name__}: {e})") from e
+                raise
+
+        def _field_strict():
+            """The field at the SAME chords; a chord not found is a refusal
+            (the mesh does not move between solves), never a reused value."""
+            B, fnd = field_at(ch["R"], ch["Z"])
+            fnd = np.asarray(fnd, dtype=bool).ravel()
+            if not fnd.all():
+                raise RuntimeError(
+                    "MSE chord(s) at input index "
+                    f"{[int(i) for i in np.asarray(ch['index'])[~fnd]]} "
+                    "were not found on the mesh on a later field read -- "
+                    "refusing to reuse a stale field value")
+            return np.asarray(B, dtype=float).reshape(-1, 3)
+
+        def _resolve(st, lin, x_retry=None, log=True):
             if soft:
                 # every chord step is a pass of the bootstrap loop: ONE logged
                 # retry from the previous step's coefficients after a
@@ -2021,8 +2423,11 @@ class Bouquet:
                         # a pass of the self-consistent bootstrap loop
                         accept_noise_floor=True),
                     x_prev=x_retry, who="jbs-loop MSE chord")
-                srec["closure_retry"].append(int(_o.get("closure_retry", 0)))
-                srec["closure_stop_reason"].append(_o.get("gn_stop_reason"))
+                if log:
+                    srec["closure_retry"].append(
+                        int(_o.get("closure_retry", 0)))
+                    srec["closure_stop_reason"].append(
+                        _o.get("gn_stop_reason"))
                 return _o
             return close_ip_structured(
                 st["psi_geom"], st["w_lin"], st["c_signed"], st["Ip_signed"],
@@ -2056,6 +2461,7 @@ class Bouquet:
                         "linearisation is centred"),
                     closure_retry=[], closure_stop_reason=[])
         rec = {}
+        stage_flags = []
         # ---- the pre-MSE state, captured BEFORE any chord step: every
         # refresh() re-closes on the latest geometry and OVERWRITES these
         # (bl.ip_closure is replaced wholesale), so a refusal must restore
@@ -2075,12 +2481,65 @@ class Bouquet:
         try:
             meas_prev = dict(measure(mygs.copy_eq()))
             _pre_meas.update(meas_prev)
-            B0 = field_at()
-            sp, st_sign, table = mse_sign_convention(B0, ch)
+            # ---- chords off the solver mesh: EXCLUDED at the first read
+            # (on the converged pre-MSE equilibrium), recorded and announced;
+            # fewer than min_chords left is a refusal (as the legacy stage)
+            B0, found = field_at(ch["R"], ch["Z"])
+            B0 = np.asarray(B0, dtype=float).reshape(-1, 3)
+            found = np.asarray(found, dtype=bool).ravel()
+            if not found.all():
+                _off = [int(i) for i in np.asarray(ch["index"])[~found]]
+                ch = mse_exclude(ch, ~found, MSE_REASON_OFF_MESH)
+                state["mse"] = ch
+                sig = np.asarray(ch["sigma_eff"], dtype=float)
+                B0 = B0[found]
+                rec.update(Bouquet._structured_mse_chord_record(ch, bl))
+                print("[imas SWB-split:ohmic structured] WARNING MSE: "
+                      f"{len(_off)} chord(s) at input index {_off} are OFF "
+                      "the solver mesh and are EXCLUDED (no field can be "
+                      f"read there); {int(ch['n_active'])} chord(s) remain",
+                      flush=True)
+                if int(ch["n_active"]) < int(ch.get("min_chords", 1)):
+                    raise MSEDataUnusable(
+                        f"only {int(ch['n_active'])} MSE chord(s) remain on "
+                        f"the solver mesh (chord(s) {_off} are off it); at "
+                        f"least {int(ch['min_chords'])} are required")
+            # ---- orientation: STATED (ip_sign/bt_sign of the block against
+            # the equilibrium's own directions), never fitted; audited ----
+            _axis = getattr(mygs, "o_point", None)
+            eq_or = mse_equilibrium_orientation(B0, ch["R"], ch["Z"], _axis)
+            sp, st_sign = mse_orientation(ch, eq_or)
+            chk = mse_orientation_check(B0, ch, sp, st_sign)
+            rec.update(
+                structured_mse_orientation=dict(
+                    pol=sp, tor=st_sign,
+                    ip_sign_data=float(ch["ip_sign"]),
+                    bt_sign_data=float(ch["bt_sign"]),
+                    ip_sign_equilibrium=float(eq_or["ip"]),
+                    bt_sign_equilibrium=float(eq_or["bt"]),
+                    n_chords_agreeing_ip=int(eq_or["n_ip_agree"]),
+                    rule=("STATED, not fitted: sign_pol = ip_sign(data) * "
+                          "ip_sign(equilibrium), sign_tor = bt_sign(data) * "
+                          "bt_sign(equilibrium); the equilibrium's signs are "
+                          "read off its field (B_phi; poloidal circulation "
+                          "about the magnetic axis)")),
+                structured_mse_orientation_chi2_table=dict(chk["table"]),
+                structured_mse_orientation_delta_chi2=float(
+                    chk["delta_chi2"]),
+                structured_mse_orientation_disagrees=bool(chk["disagrees"]),
+                structured_mse_orientation_note=chk["note"])
+            if chk["disagrees"]:
+                stage_flags.append(
+                    MSE_FLAG_PREFIX + "the data disagree with the stated field "
+                    f"orientation (sign_pol {sp:+.0f}, sign_tor "
+                    f"{st_sign:+.0f}): orientation {chk['best_other']} fits "
+                    f"the chords better by delta chi2 = "
+                    f"{chk['delta_chi2']:.4g} (> {MSE_ORIENTATION_DCHI2:g}); "
+                    "the stated orientation is KEPT -- check ip_sign/bt_sign "
+                    "and the sign of E_r")
+                print("[imas SWB-split:ohmic structured] WARNING closure-"
+                      "limited: " + stage_flags[-1], flush=True)
             tg_pred = mse_tan_gamma(B0, ch, sp, st_sign)
-            rec.update(structured_mse_sign_convention=dict(pol=sp,
-                                                           tor=st_sign),
-                       structured_mse_sign_table=dict(table))
             x_pred = np.asarray(state["x_pred"], dtype=float)
             F_pred = float(state["F_pred"])
             chi2_0, z0 = mse_chi2(tg_pred, ch)
@@ -2088,10 +2547,47 @@ class Bouquet:
             jbs = np.asarray(jbs0, dtype=float)
             cur = state
 
+            # ---- can the MSE term move the closure at all?  A zero-Jacobian
+            # dry run of the SAME closure (no GS solve, not logged as a chord
+            # step's closure) reports the free dimension left once the hard
+            # rows are imposed; zero -> chi2_MSE could only be recorded ------
+            _dry = _resolve(cur, structured_mse_linear_model(
+                x_pred, tg_pred, np.zeros((int(ch["n_active"]), 2 * K)), ch),
+                log=False)
+            _fdim = (_dry or {}).get("mse_free_dim")
+            if _fdim is not None and int(_fdim) == 0:
+                _msg = ("no free coefficient is left once the hard "
+                        "constraints are imposed (null space of dimension 0) "
+                        "-- the MSE term cannot move this closure")
+                if required:
+                    raise RuntimeError(
+                        "closure_channel='structured': " + _msg + ", and "
+                        "structured_mse_required=True -- refusing to report "
+                        "a closure the MSE constraint did not shape")
+                state["mse_n_solves"] = 0
+                state["mse_stage_word"] = "MSE stage not applied"
+                rec.update(structured_mse_status="not applied: " + _msg,
+                           structured_mse_n_solves=0)
+                if stage_flags:
+                    _r = list(prev.get("closure_limited_reasons", ()) or ())
+                    _r += [w for w in stage_flags if w not in _r]
+                    rec.update(closure_limited=True,
+                               closure_limited_reasons=tuple(_r))
+                if getattr(bl, "ip_closure", None) is not None:
+                    bl.ip_closure.update(rec)
+                print("[imas SWB-split:ohmic structured] WARNING MSE: "
+                      + _msg + "; NOT applied (no solve spent)", flush=True)
+                # nothing was solved: the converged pre-MSE loop state stands
+                srec.update(converged=True, applied=False, n_solves=0,
+                            stop_reason="MSE stage not applied (no solve "
+                                        "spent): " + _msg)
+                return last["nl"], state, srec
+
             def _tg_at(st, jb):
                 def _f(x):
+                    last["n_fd"] += 1
                     _solve(_hybrid(st, jb, x))
-                    return mse_tan_gamma(field_at(), ch, sp, st_sign)
+                    return mse_tan_gamma(_field_strict(), ch, sp, st_sign)
                 return _f
 
             J1 = structured_mse_jacobian(_tg_at(cur, jbs), x_pred, tg_pred,
@@ -2116,7 +2612,7 @@ class Bouquet:
                 x_new = _x_of(out)
                 _solve(_hybrid(cur, jbs, x_new))
                 snap = mygs.copy_eq()
-                tg_new = np.asarray(mse_tan_gamma(field_at(), ch, sp,
+                tg_new = np.asarray(mse_tan_gamma(_field_strict(), ch, sp,
                                                   st_sign), dtype=float)
                 if not np.all(np.isfinite(tg_new)):
                     raise RuntimeError("the solve of the MSE-constrained "
@@ -2228,7 +2724,7 @@ class Bouquet:
                 x_f = _x_of(out)
                 _solve(_hybrid(cur_next, jbs_next, x_f))
                 snap = mygs.copy_eq()
-                tg_f = np.asarray(mse_tan_gamma(field_at(), ch, sp, st_sign),
+                tg_f = np.asarray(mse_tan_gamma(_field_strict(), ch, sp, st_sign),
                                   dtype=float)
                 if not np.all(np.isfinite(tg_f)):
                     raise RuntimeError("the final MSE step returned an "
@@ -2314,7 +2810,9 @@ class Bouquet:
                                  dl_i=srec["dl_i"][-1] if srec["dl_i"]
                                  else None,
                                  dq0=srec["dq0"][-1] if srec["dq0"] else None)
-            srec["n_fd_solves"] = n_free * (2 if converged else 1)
+            # counted, not inferred: the Jacobian refresh runs whenever the
+            # chord steps converged, even if the final step then fails
+            srec["n_fd_solves"] = int(last["n_fd"])
         except (RuntimeError, ValueError, FloatingPointError) as e:
             if required:
                 raise RuntimeError(
@@ -2366,10 +2864,16 @@ class Bouquet:
             # reasons of the RESTORED (pre-MSE) closure record, not of the
             # dict the last refresh left behind
             reasons = list(prev.get("closure_limited_reasons", ()) or ())
-            if why not in reasons:
-                reasons.append(why)
+            for _w in stage_flags + [why]:
+                if _w not in reasons:
+                    reasons.append(_w)
+            # every solve the stage spent, the restore re-solve included
+            state["mse_n_solves"] = int(last["n"])
+            srec["n_solves"] = int(last["n"])
+            srec["n_fd_solves"] = int(last["n_fd"])
             rec.update(structured_mse_status="refused, not applied: "
                                              + str(e)[:300],
+                       structured_mse_n_solves=int(last["n"]),
                        closure_limited=True,
                        closure_limited_reasons=tuple(reasons))
             if getattr(bl, "ip_closure", None) is not None:
@@ -2443,7 +2947,27 @@ class Bouquet:
         cur["mse_lin"] = structured_mse_linear_model(x_new, tg_new, J1, ch)
         cur["mse_sign"] = (sp, st_sign)
         cur["mse_applied"] = True
+        # the chords actually used (a refreshed state carries the block as it
+        # was read, before any off-mesh exclusion)
+        cur["mse"] = ch
+        # what the delivered-equilibrium check (_structured_mse_delivered)
+        # compares against, and the closure the delivered profiles come from;
+        # the loop's corrector is record-only, so nothing re-solves after it
+        cur["mse_chi2_before"] = float(chi2_0)
+        cur["mse_objective_before"] = float(F_before)
+        cur["mse_delivered_out"] = out
+        cur["mse_corrector_resolved"] = False
+        cur["mse_n_solves"] = int(last["n"])
         chi2_f, z_f = mse_chi2(tg_new, ch)
+        # per-chord arrays and the Jacobian: datasets on bl.mse_record, never
+        # the size-capped ip_closure attribute (as the legacy stage)
+        Bouquet._mse_record_put(
+            bl,
+            residual_sigma_before=np.asarray(z0, dtype=float),
+            residual_sigma_after=np.asarray(z_f, dtype=float),
+            tgamma_pred_before=np.asarray(tg_pred, dtype=float),
+            tgamma_pred_after=np.asarray(tg_new, dtype=float),
+            jacobian=np.asarray(J1, dtype=float))
         _fl = lambda v: [float(x) for x in np.ravel(v)]
         _at = lambda s: {f"{r:.2f}": float(np.interp(r, psi_g, s))
                          for r in (0.0, 0.2, 0.4, 0.6, 0.8, 0.95, 1.0)}
@@ -2456,7 +2980,9 @@ class Bouquet:
                            f"{steps[-1]['linearisation_residual_max_sigma']:.3g}"
                            " sigma): the linear tan(gamma) model failed on "
                            "this slice")
-        n_solves = int(srec["n_fd_solves"]) + int(srec["n_passes"])
+        # counted, not inferred (FD probes + chord steps + the final step)
+        n_solves = int(last["n"])
+        srec["n_solves"] = n_solves
         rec.update(
             structured_mse_status="applied",
             structured_mse_jbs_loop=True,
@@ -2467,10 +2993,10 @@ class Bouquet:
             structured_mse_chi2_model_after=float(steps[-1]["chi2_model"]),
             structured_mse_chi2_red_before=float(chi2_0) / int(ch["n_active"]),
             structured_mse_chi2_red_after=float(chi2_f) / int(ch["n_active"]),
-            structured_mse_residual_sigma_before=_fl(z0),
-            structured_mse_residual_sigma_after=_fl(z_f),
-            structured_mse_tgamma_pred_before=_fl(tg_pred),
-            structured_mse_tgamma_pred_after=_fl(tg_new),
+            structured_mse_residual_sigma_max_abs_before=float(
+                np.max(np.abs(z0))),
+            structured_mse_residual_sigma_max_abs_after=float(
+                np.max(np.abs(z_f))),
             structured_mse_objective_before=float(F_before),
             structured_mse_objective_after_model=float(
                 steps[-1]["objective_model"]),
@@ -2480,7 +3006,7 @@ class Bouquet:
             structured_mse_linearisation_residual_rms_sigma=float(
                 steps[-1]["linearisation_residual_rms_sigma"]),
             structured_mse_step_log=[dict(s) for s in steps],
-            structured_mse_jacobian=[_fl(row) for row in J1],
+            structured_mse_jacobian_shape=[int(v) for v in np.shape(J1)],
             structured_mse_er_terms=mse_er_terms(ch),
             ohm_scale=float(bl.ohm_scale), bs_scale=float(bl.bs_scale),
             structured_coeffs_a=_fl(out["a"]),
@@ -2536,6 +3062,9 @@ class Bouquet:
                                 soft_ip_residual_sigma=z_ip)
         _prev_now = getattr(bl, "ip_closure", None) or {}
         reasons = list(health["closure_limited_reasons"])
+        for why in stage_flags:
+            if why not in reasons:
+                reasons.append(why)
         for why in flags:
             if why not in reasons:
                 reasons.append(why)
@@ -2548,8 +3077,8 @@ class Bouquet:
         if getattr(bl, "ip_closure", None) is not None:
             bl.ip_closure.update(rec)
         print("[imas SWB-split:ohmic structured] MSE (j_BS loop): "
-              f"{int(ch['n_active'])} chords, orientation (pol {sp:+.0f}, "
-              f"tor {st_sign:+.0f}), {n_solves} solves "
+              f"{int(ch['n_active'])} chords, stated orientation (pol "
+              f"{sp:+.0f}, tor {st_sign:+.0f}), {n_solves} solves "
               f"({srec['n_fd_solves']} finite-difference + "
               f"{srec['n_passes']} chord/final steps); chi2 "
               f"{chi2_0:.2f} -> {chi2_f:.2f}; objective {F_before:.4g} -> "
@@ -2571,32 +3100,108 @@ class Bouquet:
 
     @staticmethod
     def _structured_mse_delivered(state, bl, mygs, field_at=None):
-        """Record chi2_MSE on the equilibrium the slice finally DELIVERS.
+        """Judge chi2_MSE on the equilibrium the slice finally DELIVERS.
 
         The q0/l_i corrector may re-solve after the MSE stage; this re-reads
-        the field (no solve) with the frozen orientation so the record's last
-        word is about the delivered equilibrium, not an intermediate one.
+        the field (no solve) with the frozen orientation, so the record's last
+        word -- and the closure-health flags -- are about the delivered
+        equilibrium, not an intermediate one.  REPORTING ONLY: nothing here
+        solves, retries, or changes an iteration count or a tolerance.
+
+        Recorded: the delivered chi2 (total and reduced), the per-chord
+        residuals in sigma (``(tan_gamma_pred - tan_gamma_meas) / sigma_eff``,
+        on ``bl.mse_record`` with the other per-chord arrays) and their
+        largest magnitude (in ``ip_closure``), and the delivered objective
+        ``F_noMSE(delivered closure) + chi2_delivered``.  That objective is
+        COMPARABLE with the pre-MSE one (``structured_mse_objective_before``)
+        when no corrector re-solve replaced the MSE stage's closure, or on the
+        hard channel (whose ``F_noMSE`` is the trust prior alone, a function of
+        the coefficients only); on the soft channel a corrector re-solve moved
+        the l_i / axis rows the posterior objective is measured against, so it
+        is recorded as not comparable and only the chi2 rule applies.
+
+        The slice is FLAGGED closure-limited (``MSE_FLAG_PREFIX``), and
+        ``structured_mse_delivered_worse`` set, when the delivered chi2 is
+        above the pre-MSE chi2, or the delivered objective (where comparable)
+        is above the pre-MSE objective.  A chord the delivered read cannot
+        find is flagged the same way, never filled from a stale value.
         """
         import numpy as np
 
         from .mse import mse_chi2, mse_field_at, mse_tan_gamma
+        from .utils import MSE_FLAG_PREFIX, structured_objective_no_mse
 
         ch = state["mse"]
         sp, st = state["mse_sign"]
-        B = (mse_field_at(mygs, ch["R"], ch["Z"]) if field_at is None
-             else field_at())
-        tg = mse_tan_gamma(B, ch, sp, st)
-        c2, z = mse_chi2(tg, ch)
-        if getattr(bl, "ip_closure", None) is not None:
-            bl.ip_closure.update(
+        icl = getattr(bl, "ip_closure", None)
+        flags = []
+        rec = {}
+        B, found = (mse_field_at(mygs, ch["R"], ch["Z"]) if field_at is None
+                    else field_at(ch["R"], ch["Z"]))
+        found = np.asarray(found, dtype=bool).ravel()
+        c2 = None
+        if not found.all():
+            flags.append(
+                MSE_FLAG_PREFIX + "chord(s) at input index "
+                f"{[int(i) for i in np.asarray(ch['index'])[~found]]} were not "
+                "found on the mesh on the delivered equilibrium; the delivered "
+                "chi2 is not reported (never from a stale field value)")
+            rec.update(structured_mse_chi2_delivered=None,
+                       structured_mse_delivered_worse=True)
+        else:
+            tg = mse_tan_gamma(B, ch, sp, st)
+            c2, z = mse_chi2(tg, ch)
+            Bouquet._mse_record_put(
+                bl, residual_sigma_delivered=np.asarray(z, dtype=float),
+                tgamma_pred_delivered=np.asarray(tg, dtype=float))
+            c2_before = float(state.get("mse_chi2_before", float("nan")))
+            F_before = float(state.get("mse_objective_before", float("nan")))
+            out_d = state.get("mse_delivered_out")
+            resolved = bool(state.get("mse_corrector_resolved"))
+            soft = bool(state.get("soft"))
+            comparable = out_d is not None and (not resolved or not soft)
+            F_del = (float(structured_objective_no_mse(out_d)) + float(c2)
+                     if comparable else None)
+            rec.update(
                 structured_mse_chi2_delivered=float(c2),
                 structured_mse_chi2_red_delivered=float(c2)
                 / int(ch["n_active"]),
-                structured_mse_residual_sigma_delivered=[
-                    float(v) for v in np.ravel(z)],
-                structured_mse_tgamma_pred_delivered=[
-                    float(v) for v in np.ravel(tg)])
-        return float(c2)
+                structured_mse_residual_sigma_delivered_max_abs=float(
+                    np.max(np.abs(z))),
+                structured_mse_objective_delivered=F_del,
+                structured_mse_objective_delivered_comparable=bool(comparable),
+                structured_mse_objective_delivered_note=(
+                    "F_noMSE(delivered closure) + chi2_delivered, on the "
+                    + ("MSE stage's closure (no corrector re-solve)"
+                       if not resolved else
+                       "corrector's re-solved closure (hard channel: F_noMSE "
+                       "is the trust prior, a function of the coefficients "
+                       "only)") if comparable else
+                    "not comparable: a soft-channel corrector re-solve moved "
+                    "the l_i / axis rows the posterior objective is measured "
+                    "against; only the chi2 rule applies"))
+            if not (np.isfinite(c2) and c2 <= c2_before):
+                flags.append(
+                    MSE_FLAG_PREFIX + f"delivered chi2 {float(c2):.6g} is "
+                    f"above the pre-MSE chi2 {c2_before:.6g}: the delivered "
+                    "equilibrium fits the chords worse than the closure "
+                    "without MSE")
+            if comparable and not (np.isfinite(F_del) and F_del <= F_before):
+                flags.append(
+                    MSE_FLAG_PREFIX + f"delivered objective {F_del:.6g} is "
+                    f"above the pre-MSE objective {F_before:.6g}")
+            rec["structured_mse_delivered_worse"] = bool(flags)
+        if icl is not None:
+            reasons = list(icl.get("closure_limited_reasons", ()) or ())
+            for why in flags:
+                if why not in reasons:
+                    reasons.append(why)
+                print("[imas SWB-split:ohmic structured] WARNING closure-"
+                      "limited: " + why, flush=True)
+            rec["closure_limited_reasons"] = tuple(reasons)
+            rec["closure_limited"] = bool(reasons)
+            icl.update(rec)
+        return None if c2 is None else float(c2)
 
     @staticmethod
     def _structured_roundtrip_gate(Ip_measured):
@@ -2777,12 +3382,28 @@ class Bouquet:
         # None means "nothing new to say" and the predictor's flag stands.
         ip_z_final = None
         q0_tok = res = None
+        # After an APPLIED MSE stage the equilibrium this corrector starts from
+        # is the MSE stage's, not the predictor's: its entry readbacks are
+        # recorded as "*_mse_stage", and the "*_predictor" names keep the
+        # values the MSE stage read off the predictor before it moved
+        # anything.  Without an MSE stage every name is exactly as before.
+        _entry_mse = bool(state.get("mse_applied"))
+        if _entry_mse:
+            rec.update(structured_corrector_entry=(
+                "MSE-stage equilibrium: the *_mse_stage fields are this "
+                "corrector's entry readbacks; the *_predictor fields were read "
+                "off the predictor by the MSE stage before it solved anything"))
         if gated:
             q0_tok = float(np.asarray(snap.get_q(psi=state["psi_q"].copy())[1],
                                       dtype=float)[0])
             res = q0_tok - q0_target
-            rec.update(q0_solved_predictor=q0_tok, q0_predictor_residual=res,
-                       q0_tol=state["q0_tol"], q0_solved=q0_tok,
+            if _entry_mse:
+                rec.update(q0_solved_mse_stage=q0_tok,
+                           q0_mse_stage_residual=res)
+            else:
+                rec.update(q0_solved_predictor=q0_tok,
+                           q0_predictor_residual=res)
+            rec.update(q0_tol=state["q0_tol"], q0_solved=q0_tok,
                        q0_residual=res)
         li_tok = li_res = None
         li_perimeter = (None if state.get("li_geom") is None
@@ -2798,9 +3419,14 @@ class Bouquet:
                                            psi_pad=psi_pad,
                                            perimeter=li_perimeter)
             li_res = li_tok - float(li_target)
-            rec.update(structured_li_solved_predictor=li_tok,
-                       structured_li_achieved_predictor=li_tok,
-                       structured_li_residual_predictor=li_res,
+            if _entry_mse:
+                rec.update(structured_li_achieved_mse_stage=li_tok,
+                           structured_li_residual_mse_stage=li_res)
+            else:
+                rec.update(structured_li_solved_predictor=li_tok,
+                           structured_li_achieved_predictor=li_tok,
+                           structured_li_residual_predictor=li_res)
+            rec.update(
                        # "corrected" starts as the predictor and is refreshed
                        # after every corrector solve: with 0 extra solves the
                        # predictor IS the delivered equilibrium.
@@ -2976,6 +3602,10 @@ class Bouquet:
                 nl_out = solve_jphi(np.asarray(bl.j_phi, dtype=float))
                 snap2 = mygs.copy_eq()
                 n_solves += 1
+                if state.get("mse_applied"):
+                    # the delivered profiles now come from THIS closure
+                    state["mse_delivered_out"] = out
+                    state["mse_corrector_resolved"] = True
                 rec.update(
                     n_extra_solves=n_solves,
                     structured_coeffs_a=[float(v) for v in out["a"]],
@@ -3218,6 +3848,23 @@ class Bouquet:
                     _g2["err_pct"])
                 rec["structured_roundtrip_post_corrector_reference"] = \
                     _g2["reference_name"]
+        if state.get("mse") is not None:
+            # The MSE stage's solves are extra solves too: n_extra_solves
+            # counts EVERY GS solve after the predictor's, and the verdict
+            # says where they went.  (No MSE block: nothing here runs.)
+            _n_mse = int(state.get("mse_n_solves", 0) or 0)
+            _n_cor = int(rec.get("n_extra_solves", 0) or 0)
+            _what = state.get("mse_stage_word") or (
+                "MSE stage" if state.get("mse_applied")
+                else "MSE stage refused")
+            rec["structured_corrector_n_solves"] = _n_cor
+            rec["n_extra_solves"] = _n_cor + _n_mse
+            _v = str(rec.get("sawtooth_verdict", ""))
+            _v = _v.replace("(0 extra solves)", "(0 corrector solves)")
+            rec["sawtooth_verdict"] = _v.replace(
+                "structured predictor",
+                f"structured predictor + {_what} ({_n_mse} solve"
+                f"{'' if _n_mse == 1 else 's'})", 1)
         if getattr(bl, "ip_closure", None) is not None:
             bl.ip_closure.update(rec)
         return nl_out
@@ -4676,13 +5323,29 @@ class Bouquet:
                 if (q0s is not None or ss is not None) \
                         and bl.ip_closure is not None:
                     _p0 = st.get("pass0") or {}
-                    _upd = dict(n_extra_solves=int(rec.get("n_passes", 1)) - 1,
+                    # n_extra_solves counts EVERY GS solve after the first
+                    # pass's: the loop's passes and, with an MSE block, the
+                    # MSE chord stage's solves (FD probes, chord steps, final
+                    # step, a refusal's restore solve) -- as the legacy stage
+                    _n_loop = int(rec.get("n_passes", 1)) - 1
+                    _n_mse = (0 if ss is None or ss.get("mse") is None
+                              else int(ss.get("mse_n_solves", 0) or 0))
+                    _upd = dict(n_extra_solves=_n_loop + _n_mse,
                                 sawtooth_verdict=(
                                     f"j_BS loop: predictor re-solved on "
                                     f"refreshed geometry for "
                                     f"{rec.get('n_passes')} pass(es) "
                                     "(record-only: no corrector step, rows "
                                     "held)"))
+                    _mse_suffix = ""
+                    if ss is not None and ss.get("mse") is not None:
+                        _what = ss.get("mse_stage_word") or (
+                            "MSE chord stage" if ss.get("mse_applied")
+                            else "MSE chord stage refused")
+                        _mse_suffix = (f" + {_what} ({_n_mse} solve"
+                                       + ("" if _n_mse == 1 else "s") + ")")
+                        _upd.update(structured_loop_n_extra_solves=_n_loop,
+                                    structured_mse_n_extra_solves=_n_mse)
                     if _p0.get("q0") is not None and (
                             ss is not None and ss.get("gated")
                             or q0s is not None):
@@ -4701,6 +5364,7 @@ class Bouquet:
                             f"geometry for {rec.get('n_passes')} pass(es) "
                             "with the q0 pin acting (axis row moved per "
                             "pass; no separate corrector step)")
+                    _upd["sawtooth_verdict"] += _mse_suffix
                     bl.ip_closure.update(_upd)
                 if _pin is not None:
                     _pin_gate(rec)
@@ -6097,6 +6761,9 @@ class Bouquet:
                 # the ONE reconstruction state (loop only; None = legacy)
                 jphi_request_offset=getattr(bl, "jphi_request_offset", None),
                 delivered_state=getattr(bl, "delivered_state", None),
+                # closure_channel="structured" + mse_data only (else None):
+                # the per-chord MSE arrays, archived as datasets
+                baseline_mse_record=getattr(bl, "mse_record", None),
             )
         self.generation_log = _cap["text"] or None
         self.draw_rejections = list(_rejections)
