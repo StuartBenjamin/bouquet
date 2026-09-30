@@ -34,7 +34,6 @@ from .sampling import (
     calc_cylindrical_li_proxy_fast,
     calc_realgeom_li_proxy_fast,
     _draw_monotonic_perturbation,
-    EC,
     _MAX_PRESSURE_ITER,
     _MAX_LI_ITER,
 )
@@ -56,7 +55,7 @@ from .utils import (
     read_eqdsk_from_bytes,
 )
 from .io.geqdsk import read_geqdsk
-from .physics import q_ravg
+from .physics import SOLVER_Q0_PSI_N, q_ravg, thermal_pressure_charge
 
 # ---- Masked anchor-solve failure counter (issue #24) ------------------------
 # The per-draw anchor solves swallow failures (fallback: `pass`; band
@@ -120,7 +119,148 @@ DRAW_REJECTION_REASONS = {
     "homotopy_infeasible": "the first homotopy pass failed to solve",
     "perturb_failed": "the perturbed solve failed (GS / sampler / other)",
     "post_perturb_failed": "an unexpected failure after the perturbed solve",
+    "anchor_solve_failed": "the self-consistent draw's state-anchor solve "
+                           "(the archived total at the draw's pressure) "
+                           "failed; the draw's bootstrap would otherwise be "
+                           "evaluated on a stale equilibrium",
 }
+
+
+class DrawAnchorSolveFailed(RuntimeError):
+    """The state-anchor GS solve of a self-consistent-loop draw failed.
+
+    Raised by :func:`perturb_kinetic_equilibrium` (``jbs_loop`` enabled)
+    instead of continuing on whatever equilibrium ``mygs`` held: the draw is
+    REJECTED with reason code ``"anchor_solve_failed"``
+    (:data:`DRAW_REJECTION_REASONS`), printed and recorded like every other
+    rejection.  The solver's own error is chained as ``__cause__``.
+    """
+
+
+# ---- Draw-loop solve guard: an optional GS iteration cap + a failure record --
+def _bouquet_caller():
+    """``func:line`` of the innermost bouquet frame below the solve wrapper."""
+    import traceback
+    pkg = os.path.dirname(os.path.abspath(__file__)) + os.sep
+    for fr in reversed(traceback.extract_stack()[:-2]):
+        if os.path.abspath(fr.filename).startswith(pkg):
+            return f"{fr.name}:{fr.lineno}"
+    return "?"
+
+
+class DrawSolveGuard:
+    """Cap the solver's Grad-Shafranov iterations for the draw loop, and record
+    every draw solve that raises.
+
+    Context manager (``GenerationConfig.draw_solve_maxits``).  ``maxits=None``
+    -- the default -- keeps the solver's own cap and changes nothing: the
+    wrapper passes every call through untouched and only records the solves
+    that raise.  An integer sets ``mygs.settings.maxits`` for the block and
+    restores it on exit.  ``mygs.solve`` is wrapped on the instance (so the
+    solves inside the solver's own bootstrap helpers are seen too) and
+    restored on exit.
+
+    A failure is re-raised exactly as before -- the draw path's own handling
+    (rejection, masked-failure counters) is unchanged; nothing is re-solved.
+    Each failure is recorded with the draw set by :meth:`begin_draw`, the
+    bouquet call site, the wall time, the error, and whether it exceeded the
+    iteration cap (``exceeded_maxits``).  With a cap set, the iteration counts
+    of the solves that converge are kept in ``its`` (headroom check).
+    """
+
+    def __init__(self, mygs, maxits=None):
+        if isinstance(maxits, bool) or (maxits is not None
+                                        and int(maxits) != maxits):
+            raise ValueError(f"draw_solve_maxits={maxits!r} must be an "
+                             "integer >= 1 or None")
+        self.maxits = None if maxits is None else int(maxits)
+        if self.maxits is not None and self.maxits < 1:
+            raise ValueError(f"draw_solve_maxits={maxits!r} must be >= 1 "
+                             "or None")
+        self.mygs = mygs
+        self.draw = None
+        self.n_solves = 0
+        self.records = []
+        self.its = []
+        self._active = False
+
+    def __enter__(self):
+        mygs = self.mygs
+        if mygs is None or not callable(getattr(mygs, "solve", None)):
+            return self                  # nothing to guard (a test double)
+        self._active = True
+        self._own_attr = "solve" in getattr(mygs, "__dict__", {})
+        self._orig = orig = mygs.solve
+        self._saved_maxits = None
+        if self.maxits is not None:
+            self._saved_maxits = mygs.settings.maxits
+            mygs.settings.maxits = self.maxits
+            mygs.update_settings()
+        count_its = self.maxits is not None
+
+        def call(*a, **k):
+            if not count_its:
+                return orig(*a, **k)     # the default: a pure pass-through
+            want = k.get("return_its", a[1] if len(a) > 1 else False)
+            out = orig(*a[:1], **{**k, "return_its": True})
+            self.its.append(out[1])
+            return out if want else out[0]
+
+        def solve(*a, **k):
+            self.n_solves += 1
+            t0 = time.perf_counter()
+            try:
+                return call(*a, **k)
+            except Exception as exc:
+                self.records.append(dict(
+                    draw=self.draw, site=_bouquet_caller(),
+                    seconds=time.perf_counter() - t0,
+                    error=f"{type(exc).__name__}: {str(exc).strip()}",
+                    exceeded_maxits="maxits" in str(exc),
+                    maxits=self.maxits))
+                raise
+        mygs.solve = solve
+        return self
+
+    def __exit__(self, *exc_info):
+        if not self._active:
+            return False
+        if self._own_attr:
+            self.mygs.solve = self._orig
+        else:
+            del self.mygs.solve
+        if self._saved_maxits is not None:
+            self.mygs.settings.maxits = self._saved_maxits
+            self.mygs.update_settings()
+        self._active = False
+        return False
+
+    def begin_draw(self, draw):
+        self.draw = draw
+
+    def failures(self, draw):
+        """This draw's failed solves (list of dicts)."""
+        return [dict(r) for r in self.records if r["draw"] == draw]
+
+    def summary(self):
+        """One line: solves run, failed solves, how many hit the cap, by
+        site."""
+        from collections import Counter
+        cap = self.maxits if self.maxits is not None else "solver default"
+        its = f", its max {max(self.its)}" if self.its else ""
+        if not self.records:
+            return (f"[draw-solves] {self.n_solves} solves, none failed "
+                    f"(maxits {cap}{its})")
+        n_max = sum(bool(r["exceeded_maxits"]) for r in self.records)
+        secs = sum(r["seconds"] for r in self.records)
+        sites = ", ".join(f"{s} x{n}" for s, n in
+                          Counter(r["site"] for r in self.records)
+                          .most_common())
+        draws = sorted({r["draw"] for r in self.records
+                        if r["draw"] is not None})
+        return (f"[draw-solves] {len(self.records)}/{self.n_solves} solves "
+                f"failed ({n_max} exceeded maxits {cap}{its}), {secs:.0f} s"
+                + (f"; draws {draws}" if draws else "") + f": {sites}")
 
 
 def _draw_rejection_reason(exc, stage):
@@ -128,6 +268,8 @@ def _draw_rejection_reason(exc, stage):
     (``"perturb"`` or ``"post_homotopy"``); see
     :data:`DRAW_REJECTION_REASONS`."""
     from .jbs_loop import JBSNotConverged
+    if isinstance(exc, DrawAnchorSolveFailed):
+        return "anchor_solve_failed"
     if stage == "post_homotopy":
         if isinstance(exc, CoilSaturated):
             return "coil_saturation_post_homotopy"
@@ -1254,6 +1396,22 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
             ``rescale_j_BS=False``).
         ``'j_BS_used'`` -- *j_BS_isolated* after optional shelving.
         ``'spline'`` -- the fitted ``UnivariateSpline`` object.
+        ``'ind_scale_fallback'`` -- ``True`` when the returned *ind_scale*
+            is the FALLBACK amplitude 1.0 because the bracket search for a
+            sign change of the l_i-proxy residual failed (see below).
+        ``'ind_scale_fallback_record'`` -- that failure (reason, final
+            bracket, residuals at its ends, target, bs_scale), or ``None``.
+        ``'n_ind_scale_fallbacks'`` -- how many amplitude searches fell back,
+            including the ones inside the ``rescale_j_BS`` bs_scale search.
+
+    Notes
+    -----
+    The amplitude is the root of ``li_proxy(scale) - baseline_li_proxy`` by
+    ``brentq``, once a sign change is bracketed (start ``[0.5, 2.0]``, widened
+    by halving/doubling up to 10 times).  When no sign change is found the
+    amplitude falls back to 1.0 -- unchanged behaviour, but no longer silent:
+    the fallback is printed with its bracket and residuals and returned in
+    the keys above, so the reconstruction metrics carry it.
     """
     from scipy.interpolate import UnivariateSpline
     from scipy.optimize import brentq, minimize_scalar
@@ -1315,7 +1473,14 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
     j_inductive_basis = np.maximum(j_inductive_basis, 0.0)
 
     # ---- Helper: solve ind_scale for a given bs_scale via brentq ----
+    # Every fallback is recorded (never silent); the value and the bracket
+    # are exactly as before.
+    _fallbacks = []
+    _last = {"fb": None}          # the most recent search's fallback, if any
+
     def _solve_ind_scale(bs_scale):
+        _last["fb"] = None
+
         def _li_residual(scale):
             j_phi = scale * j_inductive_basis + bs_scale * j_BS_work
             return calc_cylindrical_li_proxy(mygs, j_phi, psi_pad) - baseline_li_proxy
@@ -1332,7 +1497,21 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
         if f_lo * f_hi < 0:
             return brentq(_li_residual, s_lo, s_hi, xtol=1e-6)
         else:
-            return 1.0  # fallback
+            _fin = bool(np.isfinite(f_lo) and np.isfinite(f_hi))
+            _fallbacks.append(dict(
+                reason=("no sign change of the l_i-proxy residual "
+                        "li_proxy(scale) - target over the widened bracket "
+                        "(start [0.5, 2.0], 10 halvings/doublings)"
+                        if _fin else
+                        "the l_i-proxy residual is non-finite at the "
+                        "widened bracket's ends"),
+                bracket=[float(s_lo), float(s_hi)],
+                residual_at_bracket=[float(f_lo), float(f_hi)],
+                li_proxy_target=float(baseline_li_proxy),
+                bs_scale=float(bs_scale),
+                ind_scale_fallback=1.0))
+            _last["fb"] = _fallbacks[-1]
+            return 1.0  # fallback (unchanged value; recorded above)
 
     if not rescale_j_BS:
         # ---- v1: scale inductive profile only ----
@@ -1350,6 +1529,24 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
         bs_scale_out = result.x
         ind_scale = _solve_ind_scale(bs_scale_out)
 
+    # ---- the fallback, LOUD: the returned amplitude's own search is the last
+    # one made; earlier ones (inside the bs_scale search) are counted ----
+    _n_fb = len(_fallbacks)
+    _final_fb = None if _last["fb"] is None else dict(_last["fb"])
+    if _final_fb is not None:
+        print("[fit] WARNING ind_scale FALLBACK to 1.0: "
+              f"{_final_fb['reason']}; bracket [{_final_fb['bracket'][0]:.6g}, "
+              f"{_final_fb['bracket'][1]:.6g}] residuals "
+              f"[{_final_fb['residual_at_bracket'][0]:+.6g}, "
+              f"{_final_fb['residual_at_bracket'][1]:+.6g}] (target l_i proxy "
+              f"{_final_fb['li_proxy_target']:.6f}, bs_scale "
+              f"{_final_fb['bs_scale']:.6g}) -- the inductive amplitude is NOT "
+              "l_i-matched", flush=True)
+    if _n_fb and (_final_fb is None or _n_fb > 1):
+        print(f"[fit] WARNING {_n_fb - (1 if _final_fb else 0)} amplitude "
+              "search(es) inside the bs_scale optimisation fell back to "
+              "ind_scale=1.0 (no sign change bracketed)", flush=True)
+
     j_inductive_fit = ind_scale * j_inductive_basis
     j_phi_fit = j_inductive_fit + bs_scale_out * j_BS_work
     fit_li = calc_cylindrical_li_proxy(mygs, j_phi_fit, psi_pad)
@@ -1362,6 +1559,9 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
         'bs_scale': bs_scale_out,
         'j_BS_used': j_BS_work,
         'spline': _pchip,
+        'ind_scale_fallback': _final_fb is not None,
+        'ind_scale_fallback_record': _final_fb,
+        'n_ind_scale_fallbacks': _n_fb,
     }
 
 def _achieved_jphi_fsa(mygs, psi_N, psi_pad=1e-3, sign_ref=None):
@@ -2788,7 +2988,11 @@ def perturb_kinetic_equilibrium(
         ni_eq = _kin_to_eq(ni_perturb)
         ti_eq = _kin_to_eq(ti_perturb)
 
-        pres_tmp = EC * (ne_eq * te_eq + ni_eq * ti_eq)
+        # eV -> J: the exact constant under the self-consistent loop (the
+        # value the reconstruction / modelling-source forward solve uses), the
+        # frozen legacy value otherwise (physics.thermal_pressure_charge)
+        pres_tmp = thermal_pressure_charge(jbs_loop) * (
+            ne_eq * te_eq + ni_eq * ti_eq)
         tmp_avg = mygs.flux_integral(psi_N, pres_tmp)
         p_err = np.mean(np.abs(inp_avg - tmp_avg) / inp_avg) * 100.0
 
@@ -3167,12 +3371,29 @@ def perturb_kinetic_equilibrium(
         mygs.set_profiles(pp_prof=_pre_pp,
                           ffp_prof={"type": "jphi-linterp",
                                     "y": _anchor_total, "x": psi_N})
+        # A failed anchor solve REJECTS the draw (reason
+        # "anchor_solve_failed"): continuing would evaluate the draw's
+        # bootstrap -- and start its loop -- on whatever equilibrium mygs
+        # happened to hold.  (TokaMaker raises a bare Exception for solver
+        # failures; bouquet's wrappers RuntimeError / ValueError.)
+        _anchor_err = None
         try:
             mygs.solve()
-        except (ValueError, RuntimeError):
-            pass                         # same tolerance as the legacy anchor
+        except Exception as _anchor_exc:
+            if not (type(_anchor_exc) is Exception or isinstance(
+                    _anchor_exc, (ValueError, RuntimeError))):
+                raise
+            _anchor_err = _anchor_exc
         if _stashed_bounds is not None:
             mygs.set_coil_bounds(_stashed_bounds)
+        if _anchor_err is not None:
+            _anchor_msg = (f"state-anchor solve failed "
+                           f"({type(_anchor_err).__name__}: "
+                           f"{str(_anchor_err).strip()[:300]}); the draw is "
+                           "REJECTED rather than continued on a stale "
+                           "equilibrium")
+            print(f"  [jbs-loop anchor] {_anchor_msg}", flush=True)
+            raise DrawAnchorSolveFailed(_anchor_msg) from _anchor_err
         _r2_mode = _r2_ip_mode()
         _compose = _draw_jbs_composer(
             psi_N, ne_eq, te_eq, ni_eq, ti_eq, Zeff, psi_pad,
@@ -4226,7 +4447,10 @@ def perturb_kinetic_equilibrium(
             if q_pre[0] < 1.0:
                 dt_scale = time.perf_counter() - t_scale
                 print(f"  [li_iter={li_iter}] find_optimal_scale: {dt_scale:.1f}s")
-                print("Skipping this equilibrium, q_0 < 1.0 (pre-check)")
+                # (the sawtooth gate reads q at psi_N = psi_pad, the first
+                # get_q sample -- not on axis; label only, gate unchanged)
+                print(f"Skipping this equilibrium, q_0 < 1.0 (pre-check; q "
+                      f"at psi_N={psi_pad:g} = {q_pre[0]:.4f})")
                 l_i = np.inf
                 continue
 
@@ -4242,7 +4466,8 @@ def perturb_kinetic_equilibrium(
         if constrain_sawteeth:
             _, q, _, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
             if q[0] < 1.0:
-                print("Skipping this equilibrium, q_0 < 1.0")
+                print(f"Skipping this equilibrium, q_0 < 1.0 (q at "
+                      f"psi_N={psi_pad:g} = {q[0]:.4f})")
                 l_i = np.inf
                 continue
 
@@ -4329,8 +4554,8 @@ def perturb_kinetic_equilibrium(
                     label=f"draw l_i iter {li_iter}",
                     init_source=JBS_DRAW_INIT_WARM, raise_on_fail=True)
             except _GSReject:
-                print("Skipping this equilibrium, q_0 < 1.0 (j_BS loop "
-                      "pass)")
+                print(f"Skipping this equilibrium, q_0 < 1.0 (j_BS loop "
+                      f"pass; q at psi_N={psi_pad:g})")
                 l_i = np.inf
                 continue
             spike_profile = _gsr["jbs_used"]
@@ -4797,6 +5022,11 @@ def generate_bouquet(
     # bit.
     jphi_request_offset=None,
     delivered_state=None,
+    baseline_mse_record=None,
+    # An active DrawSolveGuard on mygs (entered by the caller): each draw's
+    # failed solves land on its diagnostics as ``solve_failures``.  None:
+    # nothing recorded.
+    solve_guard=None,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -5023,12 +5253,16 @@ def generate_bouquet(
     # self-consistent pressure for baseline <P>
     # When kinetic profiles are on a different grid, interpolate
     # onto the equilibrium grid for pressure/GS calculations.
+    # (the same eV -> J factor as the draws' own pressure: exact under the
+    # self-consistent loop, the frozen legacy value otherwise)
+    _EC_run = thermal_pressure_charge(jbs_loop)
     if psi_N_kinetic is not None:
         # PCHIP regrid (shared helper) -- must match _kin_to_eq in the draws
         _kin2eq = lambda arr: pchip_interp(psi_N_kinetic, arr, psi_N)
-        pressure = EC * (_kin2eq(ne) * _kin2eq(te) + _kin2eq(ni) * _kin2eq(ti))
+        pressure = _EC_run * (_kin2eq(ne) * _kin2eq(te)
+                              + _kin2eq(ni) * _kin2eq(ti))
     else:
-        pressure = EC * (ne * te + ni * ti)
+        pressure = _EC_run * (ne * te + ni * ti)
 
     # Fixed fast-ion pressure on the equilibrium grid. The baseline jphi-linterp
     # solve below (the per-draw boundary/l_i/coil reference) must include p_fast
@@ -5374,6 +5608,8 @@ def generate_bouquet(
             _stJ = mygs.get_stats(lcfs_pad=psi_pad, li_normalization='iter')
             _J_state = dict(l_i=float(_stJ['l_i']),
                             q0=float(_stJ.get('q_0', float('nan'))),
+                            # get_stats' q0: at psi_N 0.02, not on axis
+                            q0_psi_N=float(SOLVER_Q0_PSI_N),
                             q95=float(_stJ.get('q_95', float('nan'))),
                             Ip=float(_recon_Ip))
 
@@ -5919,6 +6155,9 @@ def generate_bouquet(
         j_BS=_bl_jBS_store,
         j_inductive=_bl_jind_store,
         source_kind=source_kind,
+        # structured closure + MSE only (None otherwise): per-chord arrays as
+        # datasets, kept out of the size-capped ip_closure attribute
+        mse_record=baseline_mse_record,
     )
 
     # ---- the ONE reconstruction state (self-consistent loop) ------------
@@ -6358,6 +6597,8 @@ def generate_bouquet(
                   f"({_dev_pct:+.2f}% vs recon, σ={100*l_i_uncertainty:.1f}%)")
         print(f"{'='*60}")
         t_start = time.perf_counter()
+        if solve_guard is not None:
+            solve_guard.begin_draw(count)
 
         # ---- Warm-start restore ----
         # On draw 0, this is a no-op (snapshot not yet captured).
@@ -7099,6 +7340,10 @@ def generate_bouquet(
             )
 
         diagnostics['time'] = elapsed
+        # Solves that raised in this draw (caught by the draw path): site,
+        # seconds, error, exceeded_maxits.  Not archived; see DrawSolveGuard.
+        diagnostics['solve_failures'] = (solve_guard.failures(count)
+                                         if solve_guard is not None else [])
         # the loop's private rebuild context never reaches the archive
         diagnostics.pop('_jbs_ctx', None)
         # Homotopy + in-spec bookkeeping (always present so downstream
@@ -7227,7 +7472,8 @@ def generate_bouquet(
                 ne_perturb, te_perturb, ni_perturb, ti_perturb)
         # Thermal (main-ion + electron) pressure -- the part that perturbs with
         # the kinetic draw.
-        pressure_perturb = EC * (_ne_eqp * _te_eqp + _ni_eqp * _ti_eqp)
+        pressure_perturb = _EC_run * (_ne_eqp * _te_eqp
+                                      + _ni_eqp * _ti_eqp)
         # Total pressure the GS solve actually used for this draw: thermal +
         # impurity(carbon) + fast + p_diff anchor, recomputed exactly as
         # perturb_kinetic_equilibrium built its solve pressure (same components
@@ -7695,7 +7941,8 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         # axis-pressure target is set from the SAME full pressure (the draws'
         # convention; the legacy path inherits SWB's thermal-only pax).
         from .physics import evaluate_jBS as _evaluate_jBS
-        _p0 = 1.6022e-19 * (ne * te + ni * ti)
+        # (loop on: the exact constant, physics.ELEMENTARY_CHARGE)
+        _p0 = thermal_pressure_charge(jbs_loop) * (ne * te + ni * ti)
         if p_fast is not None:
             _p0 = _p0 + np.asarray(p_fast, dtype=float)
         if Z_imp:
@@ -7764,6 +8011,11 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         eqdsk.psi_N, eqdsk_jtor, j_BS_isolated_raw, eqdsk_jphi=eqdsk_jtor
     )  # just to get shelf_psi; j_ind result discarded
 
+    # every inductive-amplitude fallback of every _fit_match call (legacy:
+    # one call; the self-consistent loop: one per pass), for the metrics
+    _ind_scale_fallbacks = []
+    _n_fit_calls = [0]
+
     def _fit_match(j_BS_isolated):
         """Steps 3-6 on bootstrap *j_BS_isolated*: fit the inductive
         residual, solve, match l_i (secant).  Called once on the legacy
@@ -7784,6 +8036,11 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         scale_opt = fit_result['ind_scale']
         bs_scale_opt = fit_result['bs_scale']
         j_BS_isolated = fit_result['j_BS_used']
+        _n_fit_calls[0] += 1
+        if fit_result.get('ind_scale_fallback'):
+            _ind_scale_fallbacks.append(dict(
+                fit_call=int(_n_fit_calls[0]),
+                **fit_result['ind_scale_fallback_record']))
 
         print(f"[fit] ind_scale={scale_opt:.6f}  bs_scale={bs_scale_opt:.6f}  "
               f"li_proxy={fit_result['fit_li']:.6f}  (target={baseline_li_proxy:.6f})")
@@ -7825,7 +8082,9 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         #   perturb_kinetic_equilibrium  (per-draw)   -- thermal, +p_fast, +impurity
         #   the state anchor `pressure_solve`         -- pressure + imp + fast + diff
         # Keep the three sites in step; if you change one, change all of them.
-        pres_tmp = 1.6022e-19 * (ne * te + ni * ti)
+        # eV -> J: exact under the self-consistent loop, the frozen legacy
+        # value otherwise -- the SAME factor the draws use (see above)
+        pres_tmp = thermal_pressure_charge(jbs_loop) * (ne * te + ni * ti)
 
         # Fixed fast-ion pressure -- constant across draws, never perturbed.
         # Supplied already on the equilibrium grid (eqdsk.psi_N) by the caller,
@@ -8496,7 +8755,18 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         'Ip_error_pct': float(100 * abs(Ip_tokamaker - Ip_desired) / Ip_desired),
         'boundary_rms_mm': _bnd_rms_mm,
         'boundary_max_dev_mm': _bnd_max_mm,
+        # the inductive-amplitude (cylindrical l_i proxy) search's fallback
+        # to 1.0 -- recorded, never silent (fit_inductive_profile)
+        'ind_scale_fallback': bool(_ind_scale_fallbacks),
+        'ind_scale_fallback_n': len(_ind_scale_fallbacks),
+        'ind_scale_fallback_n_fits': int(_n_fit_calls[0]),
+        'ind_scale_fallback_records': [dict(r) for r in _ind_scale_fallbacks],
     }
+    if _ind_scale_fallbacks:
+        print(f"[quality] WARNING the inductive amplitude fell back to 1.0 in "
+              f"{len(_ind_scale_fallbacks)} of {_n_fit_calls[0]} fit(s) "
+              "(fit_inductive_profile: no l_i-proxy bracket); see "
+              "quality['ind_scale_fallback_records']", flush=True)
     print(f"[quality] mode={jphi_mode}, core_rms={quality['jphi_core_rms']/1e6:.4f} MA/m², "
           f"edge_rms={quality['jphi_edge_rms']/1e6:.4f} MA/m², "
           f"li_err={quality['li_error']:.6f}, Ip_err={quality['Ip_error_pct']:.4f}%, "

@@ -74,14 +74,37 @@ class _Eq:
         return 7
 
 
-def _patch_mse(monkeypatch, n_ok_resolves=1):
+def _chords():
+    """The mocked chord block: the keys the stage reads (positions, input
+    indices and the STATED orientation ip_sign/bt_sign)."""
+    return dict(sigma_eff=np.ones(_NCH), n_active=_NCH,
+                R=np.linspace(1.9, 2.2, _NCH), Z=np.zeros(_NCH),
+                index=np.arange(_NCH), ip_sign=1.0, bt_sign=1.0,
+                min_chords=_NCH, er_applied=False)
+
+
+def _field_at(R, Z):
+    """``field_at(R, Z) -> (B, found)`` as bouquet.mse.mse_field_at: every
+    chord on the mesh (the tan(gamma) algebra is mocked)."""
+    n = np.size(R)
+    return np.zeros((n, 3)), np.ones(n, dtype=bool)
+
+
+# The stage runs ONE zero-Jacobian dry run of the closure (the free-dimension
+# check) before its first chord step; with n_ok_resolves=2 the first chord
+# step's closure is still the one that succeeds and the second the one that
+# refuses, as this module's scenario needs.
+def _patch_mse(monkeypatch, n_ok_resolves=2):
     import bouquet.mse as M
     import bouquet.utils as U
     calls = {"resolve": 0}
     monkeypatch.setattr(U, "structured_basis_eval",
                         lambda spec, psi: np.ones((1, np.size(psi))))
-    monkeypatch.setattr(M, "mse_sign_convention",
-                        lambda B, ch: (1.0, 1.0, {}))
+    # the equilibrium's own directions (the mocked field carries none); the
+    # stated orientation then comes from the block, as in production
+    monkeypatch.setattr(M, "mse_equilibrium_orientation",
+                        lambda B, R, Z, axis: dict(ip=1.0, bt=1.0,
+                                                   n_ip_agree=_NCH))
     monkeypatch.setattr(M, "mse_tan_gamma",
                         lambda B, ch, sp=1.0, st=1.0: np.zeros(_NCH))
     monkeypatch.setattr(M, "mse_chi2",
@@ -116,7 +139,7 @@ def _setup(monkeypatch, drift_on_restore=0.0, on_fail="raise"):
                         closure_limited_reasons=("pre-MSE reason",),
                         marker="pre-MSE"))
     eq = _Eq(j_solved)
-    state = dict(mse=dict(sigma_eff=np.ones(_NCH), n_active=_NCH),
+    state = dict(mse=_chords(),
                  mse_required=False, soft=False, psi_geom=_X, basis=None,
                  free=np.array([True, True]), x_pred=[0.0, 0.0],
                  F_pred=0.0, j_ind=j_ind, j_BS_swb=jbs0,
@@ -162,7 +185,7 @@ def _setup(monkeypatch, drift_on_restore=0.0, on_fail="raise"):
         return Bouquet._structured_mse_jbs_stage(
             state, bl, eq, _solve, jbs0, refresh, evaluate, measure,
             lambda snap: (_W, _X), s, _IP, gate_q0=False,
-            field_at=lambda: np.zeros((_NCH, 3)), pre_mse=pm)
+            field_at=_field_at, pre_mse=pm)
 
     return dict(bl=bl, eq=eq, jbs0=jbs0, j_pre=j_pre, j_solved=j_solved,
                 caller=caller, run=run)

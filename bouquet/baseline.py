@@ -92,6 +92,13 @@ class Baseline:
     # 'ohmic' mode bookkeeping: proxy-Ip of each component, the proxy's own
     # error on the FUSE total, and the jphi_diff anchor that was NOT applied.
     ip_closure: Optional[dict] = None
+    # closure_channel="structured" with mse_data only: the MSE term's
+    # PER-CHORD arrays (chords used, measured tan(gamma), sigma_eff, residuals
+    # in sigma before/after/delivered, predicted tan(gamma), the n x 2K
+    # Jacobian, excluded chords with reasons).  Kept out of ip_closure -- which
+    # is archived as one size-capped JSON attribute -- and archived as
+    # datasets under _baseline/structured_mse.  None otherwise.
+    mse_record: Optional[dict] = None
 
     # IMAS path only: the two slice-level facts closure_channel=
     # "sawtooth_bootstrap" gates on, read ONCE at load time because the reader
@@ -1136,12 +1143,14 @@ def _deliver_reconstruction_state(mygs, config, source, result, psi_N, ne_eq,
     n_floored = int(np.sum(np.asarray(dv["j_inductive"]) < 0.0))
     j_phi = j_ind + j_BS + fixed          # == dv["request"] (floor: sum kept)
     offset, n_fl_t = _request_offset(j_ind, dv["achieved"], j_bs0, fixed)
+    from .physics import SOLVER_Q0_PSI_N
     m = recon_metrics or {}
     state = dict(
         convention=DELIVERED_SPLIT_CONVENTION,
         path="reconstruction",
         l_i=float(l_i_target), l_i_scale="iter(li3)",
         q0=float(m.get("q0", float("nan"))),
+        q0_psi_N=float(m.get("q0_psi_N", SOLVER_Q0_PSI_N)),
         q95=float(m.get("q95", float("nan"))),
         Ip_target=float(Ip_target),
         request_normalisation=float(dv["kappa"]),
@@ -1178,6 +1187,7 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
             return float("nan")
         return float(100.0 * (float(tok) - ref) / abs(ref))
 
+    from .physics import SOLVER_Q0_PSI_N as _Q0_PSI_N
     q = dict(result.get("quality") or {})
     # Global scalars other than l_i are normalization-independent; take them
     # from the 'iter' call so there is exactly one get_stats scale in play.
@@ -1214,7 +1224,11 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
         efit["li1"] = float(eqdsk.li.get("li(1)_EFIT", float("nan")))
         qpsi = np.asarray(eqdsk.qpsi, dtype=float)
         psiN = np.asarray(eqdsk.psi_N, dtype=float)
-        efit["q0"] = float(qpsi[0])
+        # like for like: the solver's q0 (get_stats 'q_0') is q at psi_N =
+        # SOLVER_Q0_PSI_N, so the g-file is read at the SAME radius; its axis
+        # value (psi_N = 0) is kept under its own name
+        efit["q0"] = float(np.interp(_Q0_PSI_N, psiN, qpsi))
+        efit["q0_axis"] = float(qpsi[0])
         efit["q95"] = float(np.interp(0.95, psiN, qpsi))
         betas = eqdsk.betas
         efit["beta_n"] = float(betas.get("beta_n", float("nan")))
@@ -1305,7 +1319,14 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
         # sharply, an estimator moved -- investigate before trusting the run.
         "li1_cross": li1_tok, "li1_cross_efit": g("li1"),
         "li1_cross_err_pct": li1_cross_err,
-        "q0": q0_tok, "q0_efit": g("q0"), "q0_err_pct": pct(q0_tok, g("q0")),
+        # q0 at LIKE radii: TokaMaker's reported q0 and the g-file's q, both
+        # at psi_N = q0_psi_N (0.02, the solver's first traced surface).  The
+        # g-file's own axis value (psi_N = 0) and the solver-vs-axis error --
+        # what "q0_err_pct" used to report -- are kept under honest names.
+        "q0": q0_tok, "q0_psi_N": _Q0_PSI_N,
+        "q0_efit": g("q0"), "q0_err_pct": pct(q0_tok, g("q0")),
+        "q0_efit_axis": g("q0_axis"),
+        "q0_err_pct_vs_axis": pct(q0_tok, g("q0_axis")),
         "q95": q95_tok, "q95_efit": g("q95"), "q95_err_pct": pct(q95_tok, g("q95")),
         "beta_n": betan_tok, "beta_n_efit": g("beta_n"),
         "beta_n_err_pct": pct(betan_tok, g("beta_n")),
@@ -1324,4 +1345,10 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
         "axis_offset_mm": axis_off_mm,
         "jphi_core_rms_MA": float(q.get("jphi_core_rms", float("nan"))) / 1e6,
         "jphi_edge_rms_MA": float(q.get("jphi_edge_rms", float("nan"))) / 1e6,
+        # fit_inductive_profile's l_i-proxy amplitude search fell back to 1.0
+        # (no bracket): recorded with reason and bracket, never silent
+        "ind_scale_fallback": bool(q.get("ind_scale_fallback", False)),
+        "ind_scale_fallback_n": int(q.get("ind_scale_fallback_n", 0) or 0),
+        "ind_scale_fallback_records": [
+            dict(r) for r in (q.get("ind_scale_fallback_records") or ())],
     }

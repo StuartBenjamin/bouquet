@@ -1161,8 +1161,10 @@ def structured_default_weights(K):
     ``"K basis functions but 4/4 ind/bs weights"`` -- including for the
     documented ``structured_basis={"kind": "constant"}`` one-liner, which is
     how the channel is meant to be collapsed back onto a single scalar pair.
-    For any other K the default is therefore UNIFORM (no prior), and the
-    recorded ``name`` says so, so a reader of the archive can never mistake it
+    For any other K the default is therefore UNIFORM -- no prior while the
+    closure has only Ip/axis/l_i rows, but a sigma = 1 prior on every
+    coefficient once ``mse_data`` adds its chi^2 (see
+    :data:`STRUCTURED_WEIGHTS_UNIFORM`) -- and the recorded ``name`` says so, so a reader of the archive can never mistake it
     for the physics ladder.  Supplying ``structured_weights`` explicitly is
     unaffected.
     """
@@ -1176,10 +1178,21 @@ def structured_default_weights(K):
                 ind=(1.0,) * K, bs=(1.0,) * K)
 
 
-#: The ONE documented alternative, for a sensitivity: no prior at all, every
-#: coefficient penalised equally.  The difference between the two answers is
-#: the part of the result that the physics prior -- not the data -- is holding
-#: up, and it is meant to be reported, not hidden.
+#: The ONE documented alternative, for a sensitivity: every coefficient
+#: penalised equally.  The difference between the two answers is the part of
+#: the result that the physics prior -- not the data -- is holding up, and it
+#: is meant to be reported, not hidden.
+#:
+#: "No prior" is exact only WITHOUT MSE data.  The hard channel solves
+#: ``min x'Wx s.t. C x = d``, which is invariant under ``W -> c W``: only the
+#: RATIOS of the weights matter, and uniform weights express no preference.
+#: With ``mse_data`` the objective becomes ``x'Wx + chi2_MSE(x)``, and the
+#: weights are then an ABSOLUTE ``sigma^-2`` (in peak-normalised coefficient
+#: units) that trades against the chords' chi^2 -- scaling W changes the
+#: answer, and this ladder is a sigma = 1 prior on every coefficient, not the
+#: absence of one.  (The soft solver always read its ladders as absolute
+#: sigmas; the hard channel now does too, which is what keeps the two solvers
+#: in agreement when handed the same sigma statement.)
 STRUCTURED_WEIGHTS_UNIFORM = dict(name="uniform",
                                   ind=(1.0, 1.0, 1.0, 1.0),
                                   bs=(1.0, 1.0, 1.0, 1.0))
@@ -1247,7 +1260,8 @@ STRUCTURED_PRESETS = {
 #: another device or another source, run it and read the recorded
 #: closure-health flags (the 0.2 < s < 5 scale bounds, |s_bs - 1| > 0.5, the q0
 #: miss, the l_i z-score) before trusting the answer, and consider
-#: :data:`STRUCTURED_WEIGHTS_UNIFORM` as the no-prior sensitivity.
+#: :data:`STRUCTURED_WEIGHTS_UNIFORM` as the no-prior sensitivity (without
+#: MSE data; with it the uniform ladder is a sigma = 1 prior -- see there).
 STRUCTURED_PRESET_DEFAULT = "li_soft_onesided"
 
 #: The ``structured_preset`` spelling that DECLINES the default preset and
@@ -2090,8 +2104,14 @@ def _mse_lsq_rows(mse_lin, K, who):
     return M, m
 
 
-def _mse_record(mse_lin, x, objective_model):
-    """The MSE block of a structured solver's result (model space)."""
+def _mse_record(mse_lin, x, objective_model, free_dim=None):
+    """The MSE block of a structured solver's result (model space).
+
+    ``mse_free_dim`` is the dimension of the free-coefficient space left once
+    the HARD constraint rows are imposed -- the space the MSE term can act
+    in.  0 means the closure is fully determined by its hard rows and the MSE
+    term can only be evaluated, never fitted.
+    """
     if mse_lin is None:
         return {}
     M, m = _mse_lsq_rows(mse_lin, np.asarray(x).size // 2, "mse record")
@@ -2103,6 +2123,7 @@ def _mse_record(mse_lin, x, objective_model):
         mse_chi2_linearisation_point=float(z0 @ z0),
         mse_residual_sigma_model=z,
         mse_objective_model=float(objective_model),
+        mse_free_dim=(None if free_dim is None else int(free_dim)),
     )
 
 
@@ -2203,7 +2224,14 @@ def structured_mse_outer(x_pred, F_pred, tg_pred, tan_gamma_of, resolve, ch,
     step cannot raise the MODEL objective (the re-solve minimises it and the
     linearisation point is feasible for it), so an achieved objective ABOVE
     the predictor's is a statement that the linear model failed on this
-    slice; it is returned as a flag (never retried, never hidden).
+    slice; it is returned as a flag (never retried, never hidden).  Each
+    step's achieved objective is also logged against the previous step's
+    (``objective_rose_vs_previous``) -- a record, not a stop test: the step
+    count is *n_steps*, fixed, and nothing here iterates to convergence.
+    This judges the stage's OWN last solve; whether the equilibrium the slice
+    finally delivers (after the q0/l_i corrector) is worse than the pre-MSE
+    closure is judged separately, on that equilibrium
+    (``Bouquet._structured_mse_delivered``).
 
     Returns ``dict(out, x, tg, record, flags)``.
     """
@@ -2236,6 +2264,8 @@ def structured_mse_outer(x_pred, F_pred, tg_pred, tan_gamma_of, resolve, ch,
         lres = (tg_new - tg_lin_pred) / ch["sigma_eff"]
         chi2_new, z_new = mse_chi2(tg_new, ch)
         F_nomse = structured_objective_no_mse(out)
+        _F_prev = (F_before if not steps
+                   else steps[-1]["objective_achieved"])
         steps.append(dict(
             chi2_model=float(out["mse_chi2_model"]),
             chi2_achieved=float(chi2_new),
@@ -2244,6 +2274,11 @@ def structured_mse_outer(x_pred, F_pred, tg_pred, tan_gamma_of, resolve, ch,
             linearisation_residual_max_sigma=float(np.max(np.abs(lres))),
             linearisation_residual_rms_sigma=float(np.sqrt(np.mean(lres ** 2))),
             coeff_step_max=float(np.max(np.abs(x_new - x_lin))),
+            # logged, never acted on: this step's achieved objective against
+            # the previous step's (the predictor's, for the first step)
+            objective_previous=float(_F_prev),
+            objective_rose_vs_previous=bool(
+                not (F_nomse + chi2_new <= _F_prev)),
         ))
         x_lin, tg_lin = x_new, tg_new
     chi2_f, z_f = mse_chi2(tg_new, ch)
@@ -2380,7 +2415,11 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
     :func:`structured_mse_linear_model` -- adds
     ``chi2_MSE(x) = sum_k ((tg0 + J (x - x0) - tg_meas)_k / sigma_eff_k)^2``
     to the minimised norm, on the same scale (the trust weights are
-    ``sigma^-2``).  The constraints are still imposed exactly: the problem
+    ``sigma^-2``).  This makes the ABSOLUTE scale of the weights load-bearing:
+    without MSE the answer is invariant under ``W -> c W``, with it the
+    weights trade against the chords' chi^2, so a uniform ladder is a
+    sigma = 1 prior and a ladder written in "relative" units changes meaning
+    (see :data:`STRUCTURED_WEIGHTS_UNIFORM`).  The constraints are still imposed exactly: the problem
     becomes an equality-constrained least-squares one, solved on the
     constraint null space in the same ``y = W^(1/2) x`` scaling (no normal
     equations), and stays convex, so the one-sided sign iteration's exactness
@@ -2573,6 +2612,7 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
             "split")
 
     mse_M = mse_m = None
+    _mse_free_dim = [None]
     if mse_lin is not None:
         _M, mse_m = _mse_lsq_rows(mse_lin, K, "close_ip_structured")
         mse_M = _M[:, free]
@@ -2615,6 +2655,7 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
             Mw = (mse_M * scal[None, :]) / np.sqrt(_wmax)
             mw = mse_m / np.sqrt(_wmax)
             Nn = np.linalg.svd(Aw, full_matrices=True)[2][Aw.shape[0]:].T
+            _mse_free_dim[0] = int(Nn.shape[1])
             if Nn.shape[1]:
                 G = np.vstack([np.eye(Nn.shape[1]), Mw @ Nn])
                 hvec = np.concatenate([np.zeros(Nn.shape[1]), mw - Mw @ y])
@@ -2702,7 +2743,8 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
             weights_bs=W_bs))
         _Mz = _mse_lsq_rows(mse_lin, K, "close_ip_structured")
         _z = _Mz[0] @ x - _Mz[1]
-        mse_rec = _mse_record(mse_lin, x, _prior + float(_z @ _z))
+        mse_rec = _mse_record(mse_lin, x, _prior + float(_z @ _z),
+                              free_dim=_mse_free_dim[0])
         names = list(names) + [f"MSE tan(gamma) chi2 ({int(mse_lin['n'])} "
                                "chords, linearised)"]
 
@@ -3517,7 +3559,7 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
             1 for g in gn_stops if g.get("stop_reason") == "noise_floor")),
         started_from_x0=bool(x0 is not None),
         **li_rec,
-        **_mse_record(mse_lin, x, float(F)),
+        **_mse_record(mse_lin, x, float(F), free_dim=int(N.shape[1])),
     )
 
 
@@ -4280,6 +4322,57 @@ def load_equilibrium(header, count, scan_key=None, eqdsk_out_dir=None):
 # ====================================================================
 #  Baseline (input) profile storage
 # ====================================================================
+#: Subgroup of ``_baseline`` holding :attr:`Baseline.mse_record`.
+MSE_RECORD_GROUP = "structured_mse"
+
+
+def _write_mse_record(grp, mse_record):
+    """Write ``Baseline.mse_record`` as datasets under ``grp/structured_mse``.
+
+    Every entry is a dataset (numbers as float64 / int64 arrays, strings as a
+    variable-length UTF-8 string dataset), so the size scales with the chord
+    count without touching HDF5's 64 kB attribute cap.  A value that is
+    neither numeric nor a list of strings is refused (``TypeError``) here,
+    before anything is half-written into the group.
+    """
+    prepared = {}
+    for k, v in mse_record.items():
+        if isinstance(v, (list, tuple)) and all(isinstance(x, str) for x in v) \
+                and len(v) > 0:
+            prepared[k] = ("str", [str(x) for x in v])
+            continue
+        a = np.asarray(v)
+        if a.dtype.kind in "biuf":
+            prepared[k] = ("num", a.astype(np.int64 if a.dtype.kind in "biu"
+                                           else np.float64))
+        elif a.size == 0:
+            prepared[k] = ("num", np.zeros(0, dtype=np.float64))
+        else:
+            raise TypeError(f"mse_record[{k!r}] is neither numeric nor a list "
+                            f"of strings (dtype {a.dtype}); refusing to "
+                            "archive it")
+    sub = grp.create_group(MSE_RECORD_GROUP)
+    for k, (kind, v) in prepared.items():
+        if kind == "str":
+            sub.create_dataset(k, data=np.asarray(v, dtype=object),
+                               dtype=h5py.string_dtype(encoding="utf-8"))
+        else:
+            sub.create_dataset(k, data=v)
+
+
+def _read_mse_record(sub):
+    """Inverse of :func:`_write_mse_record`: a dict of arrays / str lists."""
+    out = {}
+    for k in sub.keys():
+        ds = sub[k]
+        if h5py.check_string_dtype(ds.dtype) is not None:
+            out[k] = [x.decode() if isinstance(x, bytes) else str(x)
+                      for x in ds[()]]
+        else:
+            out[k] = np.array(ds)
+    return out
+
+
 def store_baseline_profiles(
     header,
     psi_N,
@@ -4312,6 +4405,7 @@ def store_baseline_profiles(
     j_BS=None,
     j_inductive=None,
     source_kind=None,
+    mse_record=None,
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -4328,6 +4422,13 @@ def store_baseline_profiles(
         from perturbed equilibria.
     pfile_bytes : bytes or None
         Raw baseline p-file content.
+    mse_record : dict or None
+        ``Baseline.mse_record`` (structured closure with MSE data): per-chord
+        arrays and the Jacobian, written as DATASETS in the subgroup
+        ``structured_mse`` -- never as attributes, whose size HDF5 caps at
+        64 kB -- so the archive holds any number of chords.  Strings (the
+        exclusion reasons) are stored as a variable-length string dataset.
+        ``None`` writes nothing.
 
     This data is written once per scan-point and is required by the
     plotting GUI to be fully self-contained.
@@ -4391,6 +4492,8 @@ def store_baseline_profiles(
         # the source-decoupled aux switchboard): "imas" or "geqdsk".
         if source_kind is not None:
             grp.attrs["source_kind"] = str(source_kind)
+        if mse_record:
+            _write_mse_record(grp, mse_record)
 
         if eqdsk_bytes is not None:
             grp.create_dataset("eqdsk", data=np.void(eqdsk_bytes))
@@ -4555,6 +4658,11 @@ def load_baseline_profiles(h5path_or_header, scan_key=None):
             )
         grp = hf[grp_path]
         for key in grp.keys():
+            if isinstance(grp[key], h5py.Group):
+                # the structured closure's per-chord MSE record (the only
+                # subgroup a baseline carries)
+                result[key] = _read_mse_record(grp[key])
+                continue
             result[key] = np.array(grp[key])
         for attr in grp.attrs:
             result[attr] = grp.attrs[attr]

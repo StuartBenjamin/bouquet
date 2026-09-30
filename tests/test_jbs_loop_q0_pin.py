@@ -423,7 +423,8 @@ def _mse_stage(monkeypatch, q0_target, q0_floor=None, on_fail="raise"):
     from types import SimpleNamespace
     from bouquet.run import Bouquet
     from test_mse_refusal_restore import (_IP as IP, _NCH, _W as W, _X as X,
-                                          _Eq, _jbs0, _patch_mse)
+                                          _Eq, _chords, _field_at, _jbs0,
+                                          _patch_mse)
     _patch_mse(monkeypatch)
     monkeypatch.setattr(M, "mse_er_terms", lambda ch: "none (mocked)")
 
@@ -443,7 +444,7 @@ def _mse_stage(monkeypatch, q0_target, q0_floor=None, on_fail="raise"):
 
     def mkstate(row):
         # the closure's current has axis value == row (hard axis row)
-        return dict(mse=dict(sigma_eff=np.ones(_NCH), n_active=_NCH),
+        return dict(mse=_chords(),
                     mse_required=False, soft=False, psi_geom=X, basis=None,
                     free=np.array([True, True]), x_pred=[0.0, 0.0],
                     F_pred=0.0, j_ind=j_ind * (row - jbs0[0]) / j_ind[0],
@@ -476,7 +477,7 @@ def _mse_stage(monkeypatch, q0_target, q0_floor=None, on_fail="raise"):
         cur["st"], bl, eq, eq.solve_jphi, jbs0, refresh,
         lambda snap: jbs0, lambda snap: dict(li=0.8, q0=q0_of(snap.j)),
         lambda snap: (W, X), s, IP, gate_q0=True,
-        field_at=lambda: np.zeros((_NCH, 3)), q0_pin=pin)
+        field_at=_field_at, q0_pin=pin)
     return pin, eq, run
 
 

@@ -19,9 +19,11 @@ from collections import OrderedDict
 import numpy as np
 from scipy import interpolate
 
+from ..physics import ELEMENTARY_CHARGE
+
 # Unit conversion: n [10^20/m^3] * T [keV] -> p [kPa]
 # = 1e20 * 1e3 * e / 1e3 = e * 1e20 = 16.0218 kPa per (10^20/m^3 * keV)
-_NT_TO_KPA = 1.602176634e-19 * 1e20  # exactly 16.02176634
+_NT_TO_KPA = ELEMENTARY_CHARGE * 1e20  # exactly 16.02176634
 
 # ---------------------------------------------------------------------------
 # Known profile metadata (adapted from OMFIT OMFITpFile)
