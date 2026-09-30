@@ -862,6 +862,12 @@ class Bouquet:
               f"max {m['boundary_max_mm']:.2f} mm   axis off {m['axis_offset_mm']:.2f} mm")
         print(f"  {'jphi resid':<12} core RMS {m['jphi_core_rms_MA']:.3f}   "
               f"edge RMS {m['jphi_edge_rms_MA']:.3f} MA/m²")
+        if m.get("ind_scale_fallback"):
+            _r = (m.get("ind_scale_fallback_records") or [{}])[-1]
+            print(f"  {'ind. amp.':<12} FALLBACK 1.0 ⚠ in "
+                  f"{m.get('ind_scale_fallback_n')} fit(s): "
+                  f"{_r.get('reason', '?')}; bracket {_r.get('bracket')} "
+                  f"residuals {_r.get('residual_at_bracket')}")
         # Step-6 matched (== l_i_target) vs step-7 realized, issue #25.  Printed
         # ALWAYS, not only when out of band -- a drift that surfaces only when
         # it breaches is a drift nobody watches shrink or grow.

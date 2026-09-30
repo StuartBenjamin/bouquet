@@ -1254,6 +1254,22 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
             ``rescale_j_BS=False``).
         ``'j_BS_used'`` -- *j_BS_isolated* after optional shelving.
         ``'spline'`` -- the fitted ``UnivariateSpline`` object.
+        ``'ind_scale_fallback'`` -- ``True`` when the returned *ind_scale*
+            is the FALLBACK amplitude 1.0 because the bracket search for a
+            sign change of the l_i-proxy residual failed (see below).
+        ``'ind_scale_fallback_record'`` -- that failure (reason, final
+            bracket, residuals at its ends, target, bs_scale), or ``None``.
+        ``'n_ind_scale_fallbacks'`` -- how many amplitude searches fell back,
+            including the ones inside the ``rescale_j_BS`` bs_scale search.
+
+    Notes
+    -----
+    The amplitude is the root of ``li_proxy(scale) - baseline_li_proxy`` by
+    ``brentq``, once a sign change is bracketed (start ``[0.5, 2.0]``, widened
+    by halving/doubling up to 10 times).  When no sign change is found the
+    amplitude falls back to 1.0 -- unchanged behaviour, but no longer silent:
+    the fallback is printed with its bracket and residuals and returned in
+    the keys above, so the reconstruction metrics carry it.
     """
     from scipy.interpolate import UnivariateSpline
     from scipy.optimize import brentq, minimize_scalar
@@ -1315,7 +1331,14 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
     j_inductive_basis = np.maximum(j_inductive_basis, 0.0)
 
     # ---- Helper: solve ind_scale for a given bs_scale via brentq ----
+    # Every fallback is recorded (never silent); the value and the bracket
+    # are exactly as before.
+    _fallbacks = []
+    _last = {"fb": None}          # the most recent search's fallback, if any
+
     def _solve_ind_scale(bs_scale):
+        _last["fb"] = None
+
         def _li_residual(scale):
             j_phi = scale * j_inductive_basis + bs_scale * j_BS_work
             return calc_cylindrical_li_proxy(mygs, j_phi, psi_pad) - baseline_li_proxy
@@ -1332,7 +1355,21 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
         if f_lo * f_hi < 0:
             return brentq(_li_residual, s_lo, s_hi, xtol=1e-6)
         else:
-            return 1.0  # fallback
+            _fin = bool(np.isfinite(f_lo) and np.isfinite(f_hi))
+            _fallbacks.append(dict(
+                reason=("no sign change of the l_i-proxy residual "
+                        "li_proxy(scale) - target over the widened bracket "
+                        "(start [0.5, 2.0], 10 halvings/doublings)"
+                        if _fin else
+                        "the l_i-proxy residual is non-finite at the "
+                        "widened bracket's ends"),
+                bracket=[float(s_lo), float(s_hi)],
+                residual_at_bracket=[float(f_lo), float(f_hi)],
+                li_proxy_target=float(baseline_li_proxy),
+                bs_scale=float(bs_scale),
+                ind_scale_fallback=1.0))
+            _last["fb"] = _fallbacks[-1]
+            return 1.0  # fallback (unchanged value; recorded above)
 
     if not rescale_j_BS:
         # ---- v1: scale inductive profile only ----
@@ -1350,6 +1387,24 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
         bs_scale_out = result.x
         ind_scale = _solve_ind_scale(bs_scale_out)
 
+    # ---- the fallback, LOUD: the returned amplitude's own search is the last
+    # one made; earlier ones (inside the bs_scale search) are counted ----
+    _n_fb = len(_fallbacks)
+    _final_fb = None if _last["fb"] is None else dict(_last["fb"])
+    if _final_fb is not None:
+        print("[fit] WARNING ind_scale FALLBACK to 1.0: "
+              f"{_final_fb['reason']}; bracket [{_final_fb['bracket'][0]:.6g}, "
+              f"{_final_fb['bracket'][1]:.6g}] residuals "
+              f"[{_final_fb['residual_at_bracket'][0]:+.6g}, "
+              f"{_final_fb['residual_at_bracket'][1]:+.6g}] (target l_i proxy "
+              f"{_final_fb['li_proxy_target']:.6f}, bs_scale "
+              f"{_final_fb['bs_scale']:.6g}) -- the inductive amplitude is NOT "
+              "l_i-matched", flush=True)
+    if _n_fb and (_final_fb is None or _n_fb > 1):
+        print(f"[fit] WARNING {_n_fb - (1 if _final_fb else 0)} amplitude "
+              "search(es) inside the bs_scale optimisation fell back to "
+              "ind_scale=1.0 (no sign change bracketed)", flush=True)
+
     j_inductive_fit = ind_scale * j_inductive_basis
     j_phi_fit = j_inductive_fit + bs_scale_out * j_BS_work
     fit_li = calc_cylindrical_li_proxy(mygs, j_phi_fit, psi_pad)
@@ -1362,6 +1417,9 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
         'bs_scale': bs_scale_out,
         'j_BS_used': j_BS_work,
         'spline': _pchip,
+        'ind_scale_fallback': _final_fb is not None,
+        'ind_scale_fallback_record': _final_fb,
+        'n_ind_scale_fallbacks': _n_fb,
     }
 
 def _achieved_jphi_fsa(mygs, psi_N, psi_pad=1e-3, sign_ref=None):
@@ -7768,6 +7826,11 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         eqdsk.psi_N, eqdsk_jtor, j_BS_isolated_raw, eqdsk_jphi=eqdsk_jtor
     )  # just to get shelf_psi; j_ind result discarded
 
+    # every inductive-amplitude fallback of every _fit_match call (legacy:
+    # one call; the self-consistent loop: one per pass), for the metrics
+    _ind_scale_fallbacks = []
+    _n_fit_calls = [0]
+
     def _fit_match(j_BS_isolated):
         """Steps 3-6 on bootstrap *j_BS_isolated*: fit the inductive
         residual, solve, match l_i (secant).  Called once on the legacy
@@ -7788,6 +7851,11 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         scale_opt = fit_result['ind_scale']
         bs_scale_opt = fit_result['bs_scale']
         j_BS_isolated = fit_result['j_BS_used']
+        _n_fit_calls[0] += 1
+        if fit_result.get('ind_scale_fallback'):
+            _ind_scale_fallbacks.append(dict(
+                fit_call=int(_n_fit_calls[0]),
+                **fit_result['ind_scale_fallback_record']))
 
         print(f"[fit] ind_scale={scale_opt:.6f}  bs_scale={bs_scale_opt:.6f}  "
               f"li_proxy={fit_result['fit_li']:.6f}  (target={baseline_li_proxy:.6f})")
@@ -8500,7 +8568,18 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         'Ip_error_pct': float(100 * abs(Ip_tokamaker - Ip_desired) / Ip_desired),
         'boundary_rms_mm': _bnd_rms_mm,
         'boundary_max_dev_mm': _bnd_max_mm,
+        # the inductive-amplitude (cylindrical l_i proxy) search's fallback
+        # to 1.0 -- recorded, never silent (fit_inductive_profile)
+        'ind_scale_fallback': bool(_ind_scale_fallbacks),
+        'ind_scale_fallback_n': len(_ind_scale_fallbacks),
+        'ind_scale_fallback_n_fits': int(_n_fit_calls[0]),
+        'ind_scale_fallback_records': [dict(r) for r in _ind_scale_fallbacks],
     }
+    if _ind_scale_fallbacks:
+        print(f"[quality] WARNING the inductive amplitude fell back to 1.0 in "
+              f"{len(_ind_scale_fallbacks)} of {_n_fit_calls[0]} fit(s) "
+              "(fit_inductive_profile: no l_i-proxy bracket); see "
+              "quality['ind_scale_fallback_records']", flush=True)
     print(f"[quality] mode={jphi_mode}, core_rms={quality['jphi_core_rms']/1e6:.4f} MA/m², "
           f"edge_rms={quality['jphi_edge_rms']/1e6:.4f} MA/m², "
           f"li_err={quality['li_error']:.6f}, Ip_err={quality['Ip_error_pct']:.4f}%, "

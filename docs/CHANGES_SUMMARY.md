@@ -251,6 +251,15 @@ legacy corrector already takes its step.
   peak, 1.4–1.5 % of I_BS), not the "sub-1 %" the docstrings claimed, and the
   IDS export (exact `⟨1/R²⟩`) round-trips `⟨j·B⟩` high by that fraction.
 
+### Engine base: loud refusals and consistency fixes (Stage 0)
+
+- **The inductive-amplitude fallback is loud.** When `fit_inductive_profile`
+  cannot bracket the cylindrical l_i-proxy root it still falls back to 1.0
+  (bracket unchanged), but now prints the reason, the bracket and the
+  residuals at its ends and records them in the reconstruction metrics
+  (`ind_scale_fallback`, `ind_scale_fallback_n`,
+  `ind_scale_fallback_records`). Outputs are bit-identical otherwise.
+
 ## Unreleased — reversed-current IMAS sources (hotfix)
 
 **A dd with `ip < 0` is now read into bouquet's positive-current frame.** Before

@@ -1324,4 +1324,10 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
         "axis_offset_mm": axis_off_mm,
         "jphi_core_rms_MA": float(q.get("jphi_core_rms", float("nan"))) / 1e6,
         "jphi_edge_rms_MA": float(q.get("jphi_edge_rms", float("nan"))) / 1e6,
+        # fit_inductive_profile's l_i-proxy amplitude search fell back to 1.0
+        # (no bracket): recorded with reason and bracket, never silent
+        "ind_scale_fallback": bool(q.get("ind_scale_fallback", False)),
+        "ind_scale_fallback_n": int(q.get("ind_scale_fallback_n", 0) or 0),
+        "ind_scale_fallback_records": [
+            dict(r) for r in (q.get("ind_scale_fallback_records") or ())],
     }
