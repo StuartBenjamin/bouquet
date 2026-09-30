@@ -37,6 +37,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │                                  ← the baseline's jbs_loop block (v3)
     │              [delivered_state_json]
     │                                  ← the ONE reconstruction state (loop)
+    │              [engine_json]      ← the unified engine's record (added;
+    │                                    reconstruction_engine="unified")
     └── <count>/                       one group per accepted draw
         │                              (integer; gaps = rejected draws)
         ├── eqdsk, [pfile]             raw bytes, fixed names
