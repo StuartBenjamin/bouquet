@@ -259,6 +259,12 @@ legacy corrector already takes its step.
   residuals at its ends and records them in the reconstruction metrics
   (`ind_scale_fallback`, `ind_scale_fallback_n`,
   `ind_scale_fallback_records`). Outputs are bit-identical otherwise.
+- **A failed draw state-anchor solve rejects the draw.** Under the
+  self-consistent loop the anchor solve's failure was swallowed and the draw
+  continued on whatever equilibrium the solver held; it now raises
+  `DrawAnchorSolveFailed` and the draw is rejected, printed and recorded
+  with the new reason code `anchor_solve_failed`. The frozen legacy draw
+  route (loop off) is unchanged.
 
 ## Unreleased — reversed-current IMAS sources (hotfix)
 

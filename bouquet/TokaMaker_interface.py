@@ -120,7 +120,22 @@ DRAW_REJECTION_REASONS = {
     "homotopy_infeasible": "the first homotopy pass failed to solve",
     "perturb_failed": "the perturbed solve failed (GS / sampler / other)",
     "post_perturb_failed": "an unexpected failure after the perturbed solve",
+    "anchor_solve_failed": "the self-consistent draw's state-anchor solve "
+                           "(the archived total at the draw's pressure) "
+                           "failed; the draw's bootstrap would otherwise be "
+                           "evaluated on a stale equilibrium",
 }
+
+
+class DrawAnchorSolveFailed(RuntimeError):
+    """The state-anchor GS solve of a self-consistent-loop draw failed.
+
+    Raised by :func:`perturb_kinetic_equilibrium` (``jbs_loop`` enabled)
+    instead of continuing on whatever equilibrium ``mygs`` held: the draw is
+    REJECTED with reason code ``"anchor_solve_failed"``
+    (:data:`DRAW_REJECTION_REASONS`), printed and recorded like every other
+    rejection.  The solver's own error is chained as ``__cause__``.
+    """
 
 
 def _draw_rejection_reason(exc, stage):
@@ -128,6 +143,8 @@ def _draw_rejection_reason(exc, stage):
     (``"perturb"`` or ``"post_homotopy"``); see
     :data:`DRAW_REJECTION_REASONS`."""
     from .jbs_loop import JBSNotConverged
+    if isinstance(exc, DrawAnchorSolveFailed):
+        return "anchor_solve_failed"
     if stage == "post_homotopy":
         if isinstance(exc, CoilSaturated):
             return "coil_saturation_post_homotopy"
@@ -3225,12 +3242,29 @@ def perturb_kinetic_equilibrium(
         mygs.set_profiles(pp_prof=_pre_pp,
                           ffp_prof={"type": "jphi-linterp",
                                     "y": _anchor_total, "x": psi_N})
+        # A failed anchor solve REJECTS the draw (reason
+        # "anchor_solve_failed"): continuing would evaluate the draw's
+        # bootstrap -- and start its loop -- on whatever equilibrium mygs
+        # happened to hold.  (TokaMaker raises a bare Exception for solver
+        # failures; bouquet's wrappers RuntimeError / ValueError.)
+        _anchor_err = None
         try:
             mygs.solve()
-        except (ValueError, RuntimeError):
-            pass                         # same tolerance as the legacy anchor
+        except Exception as _anchor_exc:
+            if not (type(_anchor_exc) is Exception or isinstance(
+                    _anchor_exc, (ValueError, RuntimeError))):
+                raise
+            _anchor_err = _anchor_exc
         if _stashed_bounds is not None:
             mygs.set_coil_bounds(_stashed_bounds)
+        if _anchor_err is not None:
+            _anchor_msg = (f"state-anchor solve failed "
+                           f"({type(_anchor_err).__name__}: "
+                           f"{str(_anchor_err).strip()[:300]}); the draw is "
+                           "REJECTED rather than continued on a stale "
+                           "equilibrium")
+            print(f"  [jbs-loop anchor] {_anchor_msg}", flush=True)
+            raise DrawAnchorSolveFailed(_anchor_msg) from _anchor_err
         _r2_mode = _r2_ip_mode()
         _compose = _draw_jbs_composer(
             psi_N, ne_eq, te_eq, ni_eq, ti_eq, Zeff, psi_pad,

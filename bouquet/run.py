@@ -6785,7 +6785,7 @@ class Bouquet:
         print(f"[generate] {_summ}")
         _loop_codes = ("jbs_not_converged", "coil_saturation_jbs_loop",
                        "jbs_post_homotopy", "coil_saturation_post_homotopy",
-                       "jbs_post_homotopy_error")
+                       "jbs_post_homotopy_error", "anchor_solve_failed")
         _n_loop = sum(1 for r in self.draw_rejections
                       if r.get("reason") in _loop_codes)
         if _n_loop:
