@@ -52,6 +52,8 @@ class Bouquet:
         # generate(): one record per REJECTED draw attempt (reason code, stage,
         # error) -- never archived, never counted toward until-N
         self.draw_rejections: list = []
+        # generate(): every draw solve that raised (DrawSolveGuard records)
+        self.solve_failures: Optional[list] = None
         # prepare_baseline(): a half-built baseline from a FAILED build, for
         # debugging only -- never used by generate()
         self._failed_baseline = None
@@ -277,6 +279,7 @@ class Bouquet:
         self.baseline = None
         self._resolved_uncertainty = None
         self.diagnostics = None
+        self.solve_failures = None
         self._selection = None
         return self
 
@@ -6682,7 +6685,12 @@ class Bouquet:
         _jbs_draw = _jbs_settings(gc, draw=True)
         verbose = bool(getattr(self.config, "verbose", False))
         _rejections = []
-        with capture_native_output(enabled=not verbose) as _cap:
+        from .TokaMaker_interface import DrawSolveGuard
+        # the optional draw-loop GS iteration cap + the failed-solve record
+        # (draw_solve_maxits=None: the solver's own cap, calls untouched)
+        with capture_native_output(enabled=not verbose) as _cap, \
+                DrawSolveGuard(self.mygs, gc.draw_solve_maxits) \
+                as _solve_guard:
             self.diagnostics = generate_bouquet(
                 self.mygs, np.asarray(bl.psi_N, dtype=float), n_equils, header,
                 np.asarray(bl.j_phi, dtype=float),
@@ -6784,9 +6792,14 @@ class Bouquet:
                 # closure_channel="structured" + mse_data only (else None):
                 # the per-chord MSE arrays, archived as datasets
                 baseline_mse_record=getattr(bl, "mse_record", None),
+                solve_guard=_solve_guard,
             )
         self.generation_log = _cap["text"] or None
         self.draw_rejections = list(_rejections)
+        # Outside the capture: failed solves are caught by the draw path, so
+        # this line is their only trace in a quiet run's log.
+        self.solve_failures = list(_solve_guard.records)
+        print(_solve_guard.summary())
 
         # Rejected draw attempts, OUTSIDE the capture: a draw the j_BS loop
         # (or the coil-saturation guard, or the homotopy) rejected is never

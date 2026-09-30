@@ -994,6 +994,14 @@ class GenerationConfig:
     # config validation (BouquetConfig) then emits a DeprecationWarning for
     # any value other than the default.
     swb_iterations: int = 3
+    # GS iteration cap for generate()'s draw loop (TokaMaker_interface.
+    # DrawSolveGuard).  None (default) keeps the solver's own setup cap, so
+    # nothing changes unless it is set; a solve that hits a cap still fails
+    # the draw exactly as before (no re-solve at another tolerance).  Every
+    # draw solve that raises is recorded either way: per draw in
+    # diagnostics['solve_failures'], on Bouquet.solve_failures, and in one
+    # printed "[draw-solves]" line.
+    draw_solve_maxits: Optional[int] = None
     # --- self-consistent bootstrap loop (bouquet.jbs_loop) -------------------
     # True (default): j_BS is re-evaluated (physics.evaluate_jBS: Redl on the
     # caller's own psi_N grid and the CURRENT equilibrium's geometry) inside a
@@ -1176,6 +1184,12 @@ class GenerationConfig:
         """
         resolve_structured_preset(self, stacklevel=4)
         validate_structured_mse_settings(self)
+        _m = self.draw_solve_maxits
+        import numbers
+        if _m is not None and (isinstance(_m, bool) or not isinstance(
+                _m, numbers.Integral) or _m < 1):
+            raise ValueError(f"draw_solve_maxits={_m!r} must be an integer "
+                             ">= 1, or None for the solver's own cap")
 
 
 def validate_structured_mse_settings(gc) -> None:

@@ -290,6 +290,12 @@ legacy corrector already takes its step.
   bit-identical to its frozen copy, the anchor rejection is loop-only and
   the q0 changes are labels (`tests/test_legacy_path_stage0_bitwise.py`, a
   fast form of the out-of-tree legacy A/B probe).
+- **Optional draw-loop iteration cap** (`draw_solve_maxits`, default `None` =
+  the solver's own cap, so nothing changes unless it is set), with a record
+  of every draw solve that raises (`diagnostics['solve_failures']`,
+  `Bouquet.solve_failures`, one `[draw-solves]` line). Ported from the
+  collaborator's pull request with the same field name; its re-solve of a
+  capped solve at a looser tolerance is NOT ported (not approved).
 
 ## Unreleased — reversed-current IMAS sources (hotfix)
 

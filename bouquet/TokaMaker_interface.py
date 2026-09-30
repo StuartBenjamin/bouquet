@@ -137,6 +137,132 @@ class DrawAnchorSolveFailed(RuntimeError):
     """
 
 
+# ---- Draw-loop solve guard: an optional GS iteration cap + a failure record --
+def _bouquet_caller():
+    """``func:line`` of the innermost bouquet frame below the solve wrapper."""
+    import traceback
+    pkg = os.path.dirname(os.path.abspath(__file__)) + os.sep
+    for fr in reversed(traceback.extract_stack()[:-2]):
+        if os.path.abspath(fr.filename).startswith(pkg):
+            return f"{fr.name}:{fr.lineno}"
+    return "?"
+
+
+class DrawSolveGuard:
+    """Cap the solver's Grad-Shafranov iterations for the draw loop, and record
+    every draw solve that raises.
+
+    Context manager (``GenerationConfig.draw_solve_maxits``).  ``maxits=None``
+    -- the default -- keeps the solver's own cap and changes nothing: the
+    wrapper passes every call through untouched and only records the solves
+    that raise.  An integer sets ``mygs.settings.maxits`` for the block and
+    restores it on exit.  ``mygs.solve`` is wrapped on the instance (so the
+    solves inside the solver's own bootstrap helpers are seen too) and
+    restored on exit.
+
+    A failure is re-raised exactly as before -- the draw path's own handling
+    (rejection, masked-failure counters) is unchanged; nothing is re-solved.
+    Each failure is recorded with the draw set by :meth:`begin_draw`, the
+    bouquet call site, the wall time, the error, and whether it exceeded the
+    iteration cap (``exceeded_maxits``).  With a cap set, the iteration counts
+    of the solves that converge are kept in ``its`` (headroom check).
+    """
+
+    def __init__(self, mygs, maxits=None):
+        if isinstance(maxits, bool) or (maxits is not None
+                                        and int(maxits) != maxits):
+            raise ValueError(f"draw_solve_maxits={maxits!r} must be an "
+                             "integer >= 1 or None")
+        self.maxits = None if maxits is None else int(maxits)
+        if self.maxits is not None and self.maxits < 1:
+            raise ValueError(f"draw_solve_maxits={maxits!r} must be >= 1 "
+                             "or None")
+        self.mygs = mygs
+        self.draw = None
+        self.n_solves = 0
+        self.records = []
+        self.its = []
+        self._active = False
+
+    def __enter__(self):
+        mygs = self.mygs
+        if mygs is None or not callable(getattr(mygs, "solve", None)):
+            return self                  # nothing to guard (a test double)
+        self._active = True
+        self._own_attr = "solve" in getattr(mygs, "__dict__", {})
+        self._orig = orig = mygs.solve
+        self._saved_maxits = None
+        if self.maxits is not None:
+            self._saved_maxits = mygs.settings.maxits
+            mygs.settings.maxits = self.maxits
+            mygs.update_settings()
+        count_its = self.maxits is not None
+
+        def call(*a, **k):
+            if not count_its:
+                return orig(*a, **k)     # the default: a pure pass-through
+            want = k.get("return_its", a[1] if len(a) > 1 else False)
+            out = orig(*a[:1], **{**k, "return_its": True})
+            self.its.append(out[1])
+            return out if want else out[0]
+
+        def solve(*a, **k):
+            self.n_solves += 1
+            t0 = time.perf_counter()
+            try:
+                return call(*a, **k)
+            except Exception as exc:
+                self.records.append(dict(
+                    draw=self.draw, site=_bouquet_caller(),
+                    seconds=time.perf_counter() - t0,
+                    error=f"{type(exc).__name__}: {str(exc).strip()}",
+                    exceeded_maxits="maxits" in str(exc),
+                    maxits=self.maxits))
+                raise
+        mygs.solve = solve
+        return self
+
+    def __exit__(self, *exc_info):
+        if not self._active:
+            return False
+        if self._own_attr:
+            self.mygs.solve = self._orig
+        else:
+            del self.mygs.solve
+        if self._saved_maxits is not None:
+            self.mygs.settings.maxits = self._saved_maxits
+            self.mygs.update_settings()
+        self._active = False
+        return False
+
+    def begin_draw(self, draw):
+        self.draw = draw
+
+    def failures(self, draw):
+        """This draw's failed solves (list of dicts)."""
+        return [dict(r) for r in self.records if r["draw"] == draw]
+
+    def summary(self):
+        """One line: solves run, failed solves, how many hit the cap, by
+        site."""
+        from collections import Counter
+        cap = self.maxits if self.maxits is not None else "solver default"
+        its = f", its max {max(self.its)}" if self.its else ""
+        if not self.records:
+            return (f"[draw-solves] {self.n_solves} solves, none failed "
+                    f"(maxits {cap}{its})")
+        n_max = sum(bool(r["exceeded_maxits"]) for r in self.records)
+        secs = sum(r["seconds"] for r in self.records)
+        sites = ", ".join(f"{s} x{n}" for s, n in
+                          Counter(r["site"] for r in self.records)
+                          .most_common())
+        draws = sorted({r["draw"] for r in self.records
+                        if r["draw"] is not None})
+        return (f"[draw-solves] {len(self.records)}/{self.n_solves} solves "
+                f"failed ({n_max} exceeded maxits {cap}{its}), {secs:.0f} s"
+                + (f"; draws {draws}" if draws else "") + f": {sites}")
+
+
 def _draw_rejection_reason(exc, stage):
     """The reason code of a draw rejected by ``exc`` at ``stage``
     (``"perturb"`` or ``"post_homotopy"``); see
@@ -4897,6 +5023,10 @@ def generate_bouquet(
     jphi_request_offset=None,
     delivered_state=None,
     baseline_mse_record=None,
+    # An active DrawSolveGuard on mygs (entered by the caller): each draw's
+    # failed solves land on its diagnostics as ``solve_failures``.  None:
+    # nothing recorded.
+    solve_guard=None,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -6467,6 +6597,8 @@ def generate_bouquet(
                   f"({_dev_pct:+.2f}% vs recon, σ={100*l_i_uncertainty:.1f}%)")
         print(f"{'='*60}")
         t_start = time.perf_counter()
+        if solve_guard is not None:
+            solve_guard.begin_draw(count)
 
         # ---- Warm-start restore ----
         # On draw 0, this is a no-op (snapshot not yet captured).
@@ -7208,6 +7340,10 @@ def generate_bouquet(
             )
 
         diagnostics['time'] = elapsed
+        # Solves that raised in this draw (caught by the draw path): site,
+        # seconds, error, exceeded_maxits.  Not archived; see DrawSolveGuard.
+        diagnostics['solve_failures'] = (solve_guard.failures(count)
+                                         if solve_guard is not None else [])
         # the loop's private rebuild context never reaches the archive
         diagnostics.pop('_jbs_ctx', None)
         # Homotopy + in-spec bookkeeping (always present so downstream
