@@ -123,6 +123,12 @@ DRAW_REJECTION_REASONS = {
                            "(the archived total at the draw's pressure) "
                            "failed; the draw's bootstrap would otherwise be "
                            "evaluated on a stale equilibrium",
+    # engine draws (bouquet.engine_draws) only
+    "jbs_non_finite": "an engine draw's loop evaluated a non-finite "
+                      "bootstrap (jbs_loop.JBSNonFinite, raised at once)",
+    "engine_closure_refused": "an engine draw's Ip amplitude (or Ip + q0 "
+                              "two-scalar) closure refused (degenerate or "
+                              "non-finite)",
 }
 
 
@@ -2471,6 +2477,11 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target,
     and the draw is rejected, exactly as a non-converged stage is.  ``None``
     (direct callers, the mocked tests) checks nothing; the record says which.
     """
+    _eng = ctx.get("engine")
+    if _eng is not None:
+        # an engine draw (bouquet.engine_draws): the same check, then the
+        # engine draw's own passes
+        return _eng.post_homotopy(settings, coil_guard=coil_guard)
     from .jbs_loop import (check_delivered, residual_weights, run_jbs_loop,
                            JBS_POST_HOMOTOPY_PASSES, jsonable)
     n_ph = int(settings.get("post_homotopy_passes", JBS_POST_HOMOTOPY_PASSES))
@@ -5027,6 +5038,11 @@ def generate_bouquet(
     # failed solves land on its diagnostics as ``solve_failures``.  None:
     # nothing recorded.
     solve_guard=None,
+    # Draws on the unified reconstruction engine
+    # (reconstruction_engine="unified"): a bouquet.engine_draws.
+    # GenerateEngineDraws built by Bouquet.generate from the live
+    # reconstruction.  None: the legacy draw routes, bit for bit.
+    engine_draw=None,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -5197,6 +5213,17 @@ def generate_bouquet(
     list[dict]
         Diagnostics from each equilibrium.
     """
+    # ---- draws on the unified engine (engine_draw; None: legacy) ----------
+    _eng = engine_draw
+    if _eng is not None:
+        _eng.validate(pin_jphi=pin_jphi, jbs_delta_mode=jbs_delta_mode,
+                      l_i_uncertainty=l_i_uncertainty,
+                      recalculate_j_BS=recalculate_j_BS, jbs_loop=jbs_loop)
+        print("[engine draws] every draw runs on the unified engine "
+              "(bouquet.engine_draws): x* held, the Ip row as an inductive "
+              "amplitude, one bootstrap loop from the reconstruction state",
+              flush=True)
+
     # ---- the diagnostic modes that bypass the self-consistent loop --------
     if (jbs_loop and jbs_loop.get("enabled") and recalculate_j_BS
             and (bool(pin_jphi) or os.environ.get('PIN_JPHI', '0') == '1'
@@ -5294,6 +5321,10 @@ def generate_bouquet(
     _p_diff_eq = (np.asarray(p_diff, dtype=float) if p_diff is not None
                   else np.zeros_like(psi_N))
     pressure_solve = pressure + _p_imp_eq + _p_fast_eq + _p_diff_eq
+    if _eng is not None:
+        # the engine's own solve pressure (the contract's: thermal +
+        # impurity + fast), the one its reconstruction and every draw solve
+        pressure_solve = _eng.solve_pressure(psi_N)
 
     npsi = len(psi_N)
 
@@ -6691,76 +6722,90 @@ def generate_bouquet(
                       f"optimisation in the recon-anchor solve")
 
         try:
-            (
-                ne_perturb,
-                te_perturb,
-                ni_perturb,
-                ti_perturb,
-                w_ExB,
-                jphi_perturb,
-                diagnostics,
-            ) = perturb_kinetic_equilibrium(
-                mygs,
-                psi_N,
-                pressure,
-                ne, te, ni, ti,
-                input_j_phi,
-                sigma_ne,
-                sigma_te,
-                sigma_ni,
-                sigma_ti,
-                sigma_jphi,
-                n_ls, t_ls, j_ls,
-                initial_Ip_target,
-                l_i_target_draw,
-                Zeff,
-                npsi,
-                input_jinductive=input_jinductive,
-                l_i_tolerance=l_i_tolerance,
-                psi_pad=psi_pad,
-                constrain_sawteeth=constrain_sawteeth,
-                recalculate_j_BS=recalculate_j_BS,
-                isolate_edge_jBS=isolate_edge_jBS,
-                floor_j_BS=floor_j_BS,
-                jBS_diff=jBS_diff,
-                Z_imp=Z_imp,
-                p_diff=p_diff,
-                jphi_diff=jphi_diff,
-                accept_anchor_inband=accept_anchor_inband,
-                perturb_jind_in_anchor=perturb_jind_in_anchor,
-                scale_jBS=scale_jBS,
-                swb_iterations=swb_iterations,
-                diagnostic_plots=diagnostic_plots,
-                psi_N_kinetic=psi_N_kinetic,
-                p_fast=p_fast,
-                z_fast=z_fast,
-                j_NBI=j_NBI,
-                j_RF=j_RF,
-                aux_sigmas=aux_sigmas,
-                aux_baselines=aux_baselines,
-                aux_length_scales=aux_length_scales,
-                max_proxy_draws=max_proxy_draws,
-                p_thresh=p_thresh,
-                # the run's single Generator -- every GPR draw in this draw
-                # comes off it, so `seed` governs the whole ensemble
-                rng=rng,
-                bnd_diag_callback=_report_bnd,
-                recon_eq_snapshot=_diff_recon_eq_snap,
-                spike_profile_recon_cached=_diff_spike_recon,
-                spike_delta_ref=(_delta_spike0_raw if jbs_delta_mode else None),
-                spike_delta_baseline=(np.asarray(baseline_j_BS, dtype=float)
-                                      if (jbs_delta_mode
-                                          and _delta_spike0_raw is not None
-                                          and baseline_j_BS is not None)
-                                      else None),
-                proxy_bias_warmstart=_proxy_bias_warmstart,
-                pin_jphi=pin_jphi,
-                jbs_loop=jbs_loop,
-                coil_saturation_guard=_hard_sat_guard,
-                jphi_request_offset=(jphi_request_offset
-                                     if (jbs_loop and jbs_loop.get("enabled"))
-                                     else None),
-            )
+            if _eng is None:
+                (
+                    ne_perturb,
+                    te_perturb,
+                    ni_perturb,
+                    ti_perturb,
+                    w_ExB,
+                    jphi_perturb,
+                    diagnostics,
+                ) = perturb_kinetic_equilibrium(
+                    mygs,
+                    psi_N,
+                    pressure,
+                    ne, te, ni, ti,
+                    input_j_phi,
+                    sigma_ne,
+                    sigma_te,
+                    sigma_ni,
+                    sigma_ti,
+                    sigma_jphi,
+                    n_ls, t_ls, j_ls,
+                    initial_Ip_target,
+                    l_i_target_draw,
+                    Zeff,
+                    npsi,
+                    input_jinductive=input_jinductive,
+                    l_i_tolerance=l_i_tolerance,
+                    psi_pad=psi_pad,
+                    constrain_sawteeth=constrain_sawteeth,
+                    recalculate_j_BS=recalculate_j_BS,
+                    isolate_edge_jBS=isolate_edge_jBS,
+                    floor_j_BS=floor_j_BS,
+                    jBS_diff=jBS_diff,
+                    Z_imp=Z_imp,
+                    p_diff=p_diff,
+                    jphi_diff=jphi_diff,
+                    accept_anchor_inband=accept_anchor_inband,
+                    perturb_jind_in_anchor=perturb_jind_in_anchor,
+                    scale_jBS=scale_jBS,
+                    swb_iterations=swb_iterations,
+                    diagnostic_plots=diagnostic_plots,
+                    psi_N_kinetic=psi_N_kinetic,
+                    p_fast=p_fast,
+                    z_fast=z_fast,
+                    j_NBI=j_NBI,
+                    j_RF=j_RF,
+                    aux_sigmas=aux_sigmas,
+                    aux_baselines=aux_baselines,
+                    aux_length_scales=aux_length_scales,
+                    max_proxy_draws=max_proxy_draws,
+                    p_thresh=p_thresh,
+                    # the run's single Generator -- every GPR draw in this draw
+                    # comes off it, so `seed` governs the whole ensemble
+                    rng=rng,
+                    bnd_diag_callback=_report_bnd,
+                    recon_eq_snapshot=_diff_recon_eq_snap,
+                    spike_profile_recon_cached=_diff_spike_recon,
+                    spike_delta_ref=(_delta_spike0_raw if jbs_delta_mode else None),
+                    spike_delta_baseline=(np.asarray(baseline_j_BS, dtype=float)
+                                          if (jbs_delta_mode
+                                              and _delta_spike0_raw is not None
+                                              and baseline_j_BS is not None)
+                                          else None),
+                    proxy_bias_warmstart=_proxy_bias_warmstart,
+                    pin_jphi=pin_jphi,
+                    jbs_loop=jbs_loop,
+                    coil_saturation_guard=_hard_sat_guard,
+                    jphi_request_offset=(jphi_request_offset
+                                         if (jbs_loop and jbs_loop.get("enabled"))
+                                         else None),
+                )
+            else:
+                (
+                    ne_perturb,
+                    te_perturb,
+                    ni_perturb,
+                    ti_perturb,
+                    w_ExB,
+                    jphi_perturb,
+                    diagnostics,
+                ) = _eng.draw(mygs, rng, scale_jBS, count,
+                              coil_guard=_hard_sat_guard,
+                              bnd_diag=_report_bnd,
+                              solve_guard=solve_guard)
         except Exception as e:
             # Catch ANY exception during a perturbed solve -- ValueError
             # / RuntimeError from the GS solver, TypeError from OFT's
@@ -6775,8 +6820,12 @@ def generate_bouquet(
             _err_short = str(e).strip().splitlines()[-1] if str(e) else type(e).__name__
             print(f"\n  STOPPED: {type(e).__name__}: {_err_short}")
             print(f"  Skipping equilibrium {count+1}/{_max_attempts}.")
-            _reject(count, _draw_rejection_reason(e, "perturb"), "perturb",
-                    exc=e, message=_err_short)
+            if _eng is None:
+                _reject(count, _draw_rejection_reason(e, "perturb"),
+                        "perturb", exc=e, message=_err_short)
+            else:
+                _reject(count, _eng.rejection_reason(e, "perturb"),
+                        "perturb", exc=e, message=_err_short)
             _skl = os.environ.get('BQ_SKIPLOG')
             if _skl:
                 with open(_skl, 'a') as _skf:
@@ -6989,6 +7038,19 @@ def generate_bouquet(
                 # zeros so downstream IN_SPEC and HDF5 diagnostics
                 # reflect the "all coils pinned" reality rather than
                 # NaN/False (which would suppress them from plots).
+                if _eng is not None:
+                    if not _eng.homotopy and _ip_aligned and not _skip_hard:
+                        # engine_draw_homotopy=False: no homotopy stage --
+                        # the coil drift of the loop's own delivered draw,
+                        # judged at the spec; nothing below re-solves (the
+                        # SKIP_HOMOTOPY and homotopy blocks are gated off)
+                        (_final_drifts, _final_pass_idx, _final_drift_F_lim,
+                         _final_drift_VSC_lim) = _eng.measured_drifts(
+                            mygs, _baseline_coils, coil_drift)
+                        print("  [homotopy] SKIPPED (engine_draw_homotopy="
+                              "False): coil drift measured on the draw's "
+                              "delivered equilibrium", flush=True)
+                        _ip_aligned = False
                 if _skip_homotopy and _ip_aligned and not _skip_hard:
                     # Measure actual per-coil drift from the recon-anchor
                     # and Ip-align solves above.  Pin bounds installed
@@ -7326,6 +7388,14 @@ def generate_bouquet(
                     pbar.update(1)
                 continue
 
+        if _eng is not None:
+            # the engine draw's post-hoc filters (the l_i band around the
+            # reconstruction's l_i, constrain_sawteeth) on the state about
+            # to be archived: a draw outside a band is ARCHIVED, in_spec
+            # False, never dropped
+            _in_spec = _eng.post_hoc(mygs, diagnostics, _in_spec,
+                                     constrain_sawteeth=constrain_sawteeth,
+                                     l_i_target=l_i_target)
         elapsed = time.perf_counter() - t_start
         elapsed_times.append(elapsed)
         total_elapsed = time.perf_counter() - t_batch_start
@@ -7491,6 +7561,10 @@ def generate_bouquet(
         if p_diff is not None:
             pressure_total_perturb = pressure_total_perturb + np.asarray(
                 p_diff, dtype=float)
+        if _eng is not None:
+            # the pressure the engine draw SOLVED (its own assembly)
+            pressure_perturb, pressure_total_perturb = \
+                _eng.stored_pressures()
 
         # Extract coil currents from TokaMaker
         coil_current_dict, _ = mygs.get_coil_currents()
@@ -7666,6 +7740,9 @@ def generate_bouquet(
             eq_fsa=diagnostics.get('eq_fsa'),
             jbs_loop=diagnostics.get('jbs_loop'),
         )
+        if _eng is not None:
+            # the draw's engine block + its post-hoc band flag
+            _eng.store_draw(header, count, scan_key, diagnostics)
 
         # Clean up on-disk eqdsk after archiving
         try:
@@ -7715,6 +7792,12 @@ def generate_bouquet(
                 _coil_predicate, draw_currents=coil_current_dict,
                 rms_max_mm=inspec_rms_max_mm,
                 max_max_mm=inspec_max_max_mm)
+            if _eng is not None:
+                # an engine draw counts only inside its post-hoc band too
+                # (what .filter() ANDs into 'selected')
+                _ok, _reasons = _eng.until_n(_ok, _reasons, diagnostics,
+                                             header=header, count=count,
+                                             scan_key=scan_key)
             # the configured filter's own per-draw numbers, beside the legacy
             # drift percentages the diagnostics already carry
             diagnostics.update(_coil_info)
