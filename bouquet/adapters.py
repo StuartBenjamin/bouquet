@@ -104,7 +104,10 @@ class EngineContract:
             elif k == "mse":
                 rows[k] = dict(n_active=int(v["chords"]["n_active"]),
                                er_corrected=bool(v["chords"]["er_corrected"]),
-                               er_terms=v.get("er_terms"))
+                               er_terms=v.get("er_terms"),
+                               orientation=v.get("orientation"),
+                               excluded=[[int(i), str(r)] for i, r in
+                                         v["chords"].get("excluded", ())])
             else:
                 rows[k] = {kk: vv for kk, vv in v.items()
                            if not isinstance(vv, np.ndarray)}
@@ -291,16 +294,49 @@ def _gfile_geometry_from_parts(parts):
                 B2=parts["B2"], pprime=parts["pprime"])
 
 
-def mse_rows(gc):
+def mse_rows(gc, signs=None):
     """The MSE row block of a :class:`GenerationConfig`, or ``None``.
 
     The engine takes E_r-CORRECTED pitch angles only (decision 19): the block
     must say ``er_corrected=True`` and carry no ``Er``; a raw-E_r modelling
-    request is REFUSED (:class:`EngineInputRefused`), never modelled."""
+    request is REFUSED (:class:`EngineInputRefused`), never modelled.
+
+    **Orientation is stated, never fitted** (:mod:`bouquet.mse`): the block's
+    ``ip_sign`` / ``bt_sign`` are the directions of Ip and B_t in the
+    right-handed ``(R, phi, Z)`` frame of the A-coefficients.  *signs* is the
+    SOURCE's declared orientation in that frame (``dict(ip_sign, bt_sign,
+    basis)``, from the adapter).  A block that states neither is completed
+    from the source; a block that states one the source contradicts is
+    REFUSED -- two statements of one discharge's orientation cannot both
+    hold, and choosing one silently would hide which.  A source that cannot
+    state a sign it is asked for is refused too."""
     md = getattr(gc, "mse_data", None)
     if md is None:
         return None
-    from .mse import MSEDataUnusable, mse_chords, mse_er_terms
+    from .mse import (MSE_ORIENTATION_KEYS, MSEDataUnusable, mse_chords,
+                      mse_er_terms)
+    md = dict(md)
+    sg = dict(signs or {})
+    filled = []
+    for key in MSE_ORIENTATION_KEYS:
+        src = sg.get(key)
+        if key in md and md[key] is not None:
+            if src is not None and float(md[key]) != float(src):
+                raise EngineInputRefused(
+                    f"engine MSE rows: mse_data[{key!r}] = {md[key]!r} but "
+                    f"the source declares {float(src):+.0f} "
+                    f"({sg.get('basis', 'source orientation')}); the "
+                    "discharge's orientation is stated twice and the two "
+                    "disagree -- refusing to choose one")
+        else:
+            if src is None:
+                raise EngineInputRefused(
+                    f"engine MSE rows: mse_data carries no {key!r} and the "
+                    "source does not declare it either "
+                    f"({sg.get('basis', 'no source orientation')}); state it "
+                    "in the block (+1 or -1)")
+            md[key] = float(src)
+            filled.append(key)
     try:
         ch = mse_chords(md, min_chords=int(gc.structured_mse_min_chords),
                         sigma_sys=float(gc.structured_mse_sigma_sys))
@@ -312,7 +348,12 @@ def mse_rows(gc):
             "tan(gamma) (mse_data['er_corrected']=True, no 'Er'); a raw-E_r "
             "modelling request (A5*Er in the forward model) is refused -- "
             "correct the pitch angles upstream")
-    return dict(chords=ch, er_terms=mse_er_terms(ch))
+    return dict(chords=ch, er_terms=mse_er_terms(ch),
+                orientation=dict(ip_sign=float(ch["ip_sign"]),
+                                 bt_sign=float(ch["bt_sign"]),
+                                 filled_from_source=filled,
+                                 source_basis=sg.get("basis")),
+                required=bool(getattr(gc, "structured_mse_required", False)))
 
 
 def _q0_psi(psi_N, psi_pad):
@@ -338,7 +379,7 @@ class GFileAdapter:
         """Everything that needs no solve: the contract minus the inductive."""
         from .baseline import _load_kinetic_profiles, _resolve_fixed
         from .io.geqdsk import read_geqdsk
-        from .physics import _EC, impurity_pressure
+        from .physics import ELEMENTARY_CHARGE as _EC, impurity_pressure
         from .utils import pchip_interp
         src, cfg = self.source, self.config
         if src.profile_overrides:
@@ -363,6 +404,18 @@ class GFileAdapter:
         p_imp = (impurity_pressure(ne, ni, ti, Z_imp) if Z_imp
                  else np.zeros_like(psi_N))
         jB_in, parts = gfile_parallel_current(eqdsk)
+        # the discharge's orientation in the right-handed (R, phi, Z) frame
+        # of the MSE A-coefficients: the file's Ip and B_t signs, carried by
+        # its COCOS's sigma_RpZ (-1: (R, Z, phi) is right-handed, phi flips)
+        from .io.geqdsk import _cocos_params
+        _srpz = float(_cocos_params(eqdsk.cocos)["sigma_RpZ"])
+        _bc = float(eqdsk.B_center)
+        self.orientation = dict(
+            ip_sign=_srpz * float(parts["sign"]),
+            bt_sign=(None if not (np.isfinite(_bc) and _bc != 0.0)
+                     else _srpz * (1.0 if _bc > 0.0 else -1.0)),
+            basis=(f"g-file CURRENT and BCENTR signs in its COCOS "
+                   f"{int(eqdsk.cocos)} (sigma_RpZ {_srpz:+.0f})"))
         # user fixed parts are TOROIDAL (FixedComponentsConfig); converted to
         # parallel in finalize() with the anchor geometry
         self._fix_tor = dict(nbi=_resolve_fixed(fc.j_NBI, fc.psi_N, psi_N),
@@ -392,7 +445,7 @@ class GFileAdapter:
                     gate_basis=basis, q0_source_axis=float(qpsi[0]),
                     source=("g-file qpsi interpolated at the measurement "
                             "radius (like radii)")),
-            mse=mse_rows(cfg.generation),
+            mse=mse_rows(cfg.generation, self.orientation),
         )
         c = EngineContract(
             kind="gfile", psi_N=psi_N,
@@ -409,7 +462,11 @@ class GFileAdapter:
                               rf=np.zeros_like(psi_N)),
             boundary=np.column_stack([eqdsk.boundary_R, eqdsk.boundary_Z]),
             Ip=abs(float(eqdsk.Ip)), rows=rows,
-            signs=dict(current_sign=float(parts["sign"]), b0_sign=None,
+            signs=dict(current_sign=float(parts["sign"]),
+                       b0_sign=self.orientation["bt_sign"],
+                       ip_sign_RphiZ=self.orientation["ip_sign"],
+                       bt_sign_RphiZ=self.orientation["bt_sign"],
+                       orientation_basis=self.orientation["basis"],
                        frame="positive: |Ip|, F = |R B_phi|, <j.B> > 0 "
                              "co-current"),
             anchor_request=np.abs(np.asarray(eqdsk.j_tor_averaged_direct,
@@ -423,7 +480,7 @@ class GFileAdapter:
                          "g-file psi_N (as the legacy reconstruction)",
                 kinetics_sigma=("resolved from the Baseline by "
                                 "baseline.resolve_uncertainty (unchanged)"),
-                electron_charge="physics._EC",
+                electron_charge="physics.ELEMENTARY_CHARGE",
                 anchor=("one solve of |eqdsk.j_tor_averaged_direct| at the "
                         "full pressure (the legacy anchor request)")),
         )
@@ -514,7 +571,7 @@ class IdsAdapter:
         import json
         from .io.imas import (NBI_SOURCE_INDEX, _nearest_index,
                               read_imas_geometry, source_current_sign)
-        from .physics import _EC, impurity_pressure
+        from .physics import ELEMENTARY_CHARGE as _EC, impurity_pressure
         from .utils import STRUCTURED_PRESETS, pchip_interp, q0_gate_admits
         src, cfg, bl = self.source, self.config, self.bl
         gc = cfg.generation
@@ -529,6 +586,14 @@ class IdsAdapter:
         cp = cps["profiles_1d"][ic]
         sgn = source_current_sign(gq["ip"])
         B0, b0_from = _ids_b0(dd, ie, ic)
+        # IMAS is COCOS 11: (R, phi, Z) right-handed, so the dd's own ip and
+        # b0 signs ARE the orientation in the A-coefficients' frame
+        _b0s = getattr(bl, "source_b0_sign", None)
+        self.orientation = dict(
+            ip_sign=float(sgn),
+            bt_sign=(None if _b0s is None else float(_b0s)),
+            basis=("IDS equilibrium global_quantities.ip and "
+                   "vacuum_toroidal_field.b0 signs (COCOS 11)"))
         psi = np.asarray(cp["grid"]["psi"], dtype=float)
         psi_N = (psi - psi[0]) / (psi[-1] - psi[0])
         if not np.allclose(psi_N, np.asarray(bl.psi_N, float), rtol=0.0,
@@ -635,7 +700,7 @@ class IdsAdapter:
                 q0_source_axis=saw.get("q0_dd"),
                 source=("equilibrium profiles_1d.q interpolated at the "
                         "measurement radius (like radii)"))),
-            mse=mse_rows(gc),
+            mse=mse_rows(gc, self.orientation),
         )
         _F0, boundary = read_imas_geometry(src)
         anchor = np.asarray(bl.j_phi, dtype=float)
@@ -654,6 +719,9 @@ class IdsAdapter:
             Ip=float(bl.Ip_target), rows=rows,
             signs=dict(current_sign=float(sgn),
                        b0_sign=getattr(bl, "source_b0_sign", None),
+                       ip_sign_RphiZ=self.orientation["ip_sign"],
+                       bt_sign_RphiZ=self.orientation["bt_sign"],
+                       orientation_basis=self.orientation["basis"],
                        frame="positive: |Ip|, F = |r0 b0|, <j.B> > 0 "
                              "co-current"),
             anchor_request=anchor,
@@ -666,7 +734,7 @@ class IdsAdapter:
                              f"(from {b0_from})"),
                 fixed="core_sources NBI j_parallel x |B0|, held fixed",
                 pressure=("e (ne Te + ni Ti) + impurity + fast (no p_diff)"),
-                electron_charge="physics._EC",
+                electron_charge="physics.ELEMENTARY_CHARGE",
                 kinetics_sigma=("resolved from the Baseline by "
                                 "baseline.resolve_uncertainty (unchanged)"),
                 anchor=("one solve of the source j_tor (the legacy first "

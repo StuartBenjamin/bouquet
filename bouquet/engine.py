@@ -188,6 +188,7 @@ def validate_engine_settings(gc) -> None:
     if "mse" in rows and getattr(gc, "mse_data", None) is None:
         raise ValueError("generation.engine_rows has 'mse' but "
                          "generation.mse_data is None")
+    _mse_knobs_unread(gc, rows)
     for name, want in (("jbs_self_consistent", True),
                        ("recalculate_j_BS", True),
                        ("single_profile_jphi", False)):
@@ -199,6 +200,58 @@ def validate_engine_settings(gc) -> None:
         raise ValueError("reconstruction_engine='unified' starts from the "
                          "anchor (generation.jbs_init='anchor'); the legacy "
                          "'swb' initial guess is not available")
+
+
+#: MSE knobs the unified engine reads, with the defaults that mean "unset"
+#: (``structured_mse_steps`` is NOT read: the engine iterates the chords to
+#: convergence, so a set value would be silently ignored).
+_ENGINE_MSE_KNOBS = ("mse_data", "structured_mse_required",
+                     "structured_mse_fd_step", "structured_mse_steps",
+                     "structured_mse_sigma_sys", "structured_mse_min_chords")
+
+
+def _mse_knobs_unread(gc, rows):
+    """Refuse MSE settings the unified engine will never read -- the rule
+    ``Bouquet._check_structured_mse_reachable`` applies on the legacy path
+    (whose check the engine's dispatch never reaches), applied to the
+    engine: without the ``"mse"`` row nothing MSE is read, and with it
+    ``structured_mse_steps`` still is not.  ``structured_mse_required=True``
+    that cannot be honoured ALWAYS raises; otherwise ``workflow='custom'``
+    (or ``allow_unsafe_workflow``) downgrades the refusal to a printed WARN,
+    exactly as the legacy guard."""
+    from dataclasses import MISSING
+    from .config import GenerationConfig
+    f = GenerationConfig.__dataclass_fields__
+    set_ = []
+    for name in _ENGINE_MSE_KNOBS:
+        if name not in f or not hasattr(gc, name):
+            continue
+        d = f[name].default
+        if d is MISSING:
+            continue
+        v = getattr(gc, name)
+        if (v is not None) if d is None else (v != d):
+            set_.append(name)
+    unread = (set_ if "mse" not in rows else
+              [n for n in set_ if n == "structured_mse_steps"])
+    if not unread:
+        return
+    why = ("engine_rows has no 'mse'" if "mse" not in rows else
+           "the engine iterates the chords to convergence and never reads "
+           "structured_mse_steps")
+    if bool(getattr(gc, "structured_mse_required", False)) \
+            and "mse" not in rows:
+        raise ValueError(
+            "structured_mse_required=True, but the unified engine will not "
+            f"apply the MSE term: {why}.  Refusing rather than ignoring a "
+            "required constraint.")
+    msg = (", ".join(unread) + " set, but the unified engine never reads "
+           f"it: {why} -- it would otherwise be silently ignored")
+    if (str(getattr(gc, "workflow", "")) == "custom"
+            or bool(getattr(gc, "allow_unsafe_workflow", False))):
+        print("WARN: " + msg + " (workflow='custom': continuing)", flush=True)
+        return
+    raise ValueError(msg)
 
 
 def engine_settings(gc) -> dict:
@@ -487,6 +540,9 @@ class UnifiedEngine:
         self._pending = None
         self.solves = dict(anchor=int(backend.n_solves))
         self.notices = []
+        #: closure-limited flags the engine raised (never retried): the MSE
+        #: orientation audit, an MSE term not applied
+        self.flags = []
         self._resolve_rows()
         self._prior()
         g0 = complete_geometry(anchor["geom"])
@@ -685,7 +741,18 @@ class UnifiedEngine:
                                            self.rows["mse"]["chords"])
 
     def _tg(self, m):
+        """tan(gamma) at the chords in use.  A chord that was found at the
+        first read and is missing now is a refusal, never a stale value (the
+        mesh does not move, so it should not happen)."""
         from .mse import mse_tan_gamma
+        found = m.get("chords_found")
+        if found is not None and not bool(np.all(found)):
+            miss = [int(i) for i in np.asarray(
+                self.rows["mse"]["chords"]["index"])[~np.asarray(found)]]
+            raise EngineSolveError(
+                f"{self.label}: MSE chord(s) at input index {miss} were on "
+                "the solver mesh at the first read and are not now -- "
+                "refusing to use a field that cannot be read")
         sp, stt = self.state.mse_sign
         return mse_tan_gamma(m["B_chords"], self.rows["mse"]["chords"], sp,
                              stt)
@@ -701,7 +768,7 @@ class UnifiedEngine:
         dlt = st.delivery_correction
         req = jint + (0.0 if dlt is None else dlt)
         self.b.solve(req, n_passes=1)
-        m = self.b.measure(want_chords=("mse" in self.rows))
+        m = self.b.measure(want_chords=(self._mse_phase is not None))
         g1 = complete_geometry(m["geom"])
         dstat, dvec = _delivery_stats(req, m["achieved"], g1)
         if dlt is not None:
@@ -821,10 +888,15 @@ class UnifiedEngine:
         last = res
         if "mse" in self.rows and converged:
             res_m, fd = self._mse_stage(res)
-            phases.append(dict(name="mse", record=res_m["record"],
-                               jacobian=fd))
-            converged = bool(res_m["converged"])
-            last = res_m
+            if res_m is None:              # too few chords on the mesh
+                phases.append(dict(name="mse", record=None, jacobian=fd))
+                self._mse_phase = None
+                self.solves["mse_fd"] = fd["n_solves"]
+            else:
+                phases.append(dict(name="mse", record=res_m["record"],
+                                   jacobian=fd))
+                converged = bool(res_m["converged"])
+                last = res_m
         st.lambda_bs = np.asarray(last["jbs_used"], dtype=float)
         # the fixed pressure every pass solved with (a draw perturbs it)
         st.extras["pressure"] = np.asarray(self.c.pressure, dtype=float)
@@ -845,8 +917,10 @@ class UnifiedEngine:
         coefficient), then the loop again with the chords as rows and the
         Jacobian Broyden-updated every pass (decision 14)."""
         from .jbs_loop import run_jbs_loop
-        from .mse import mse_sign_convention
-        from .utils import structured_mse_jacobian
+        from .mse import (MSE_ORIENTATION_DCHI2, MSE_REASON_OFF_MESH,
+                          mse_equilibrium_orientation, mse_exclude,
+                          mse_orientation, mse_orientation_check)
+        from .utils import MSE_FLAG_PREFIX, structured_mse_jacobian
         st, s = self.state, self.s
         n0 = int(self.b.n_solves)
         lam = np.asarray(res["jbs_used"], dtype=float)
@@ -859,9 +933,56 @@ class UnifiedEngine:
         m0 = self.b.measure(want_chords=True)
         snap = self.b.snapshot()
         ch = self.rows["mse"]["chords"]
-        sp, stt, table = mse_sign_convention(m0["B_chords"], ch)
+        # ---- chords OFF the solver mesh: excluded at this first read, with
+        # their reason (the loop's chord stage does the same); fewer than
+        # min_chords left: not applied (flagged) or, if required, refused
+        B0 = np.asarray(m0["B_chords"], dtype=float).reshape(-1, 3)
+        found = np.asarray(m0.get("chords_found", np.isfinite(B0).all(1)),
+                           dtype=bool).ravel()
+        excl = []
+        if not found.all():
+            excl = [int(i) for i in np.asarray(ch["index"])[~found]]
+            ch = mse_exclude(ch, ~found, MSE_REASON_OFF_MESH)
+            B0 = B0[found]
+            self.rows["mse"] = dict(self.rows["mse"], chords=ch)
+            self.b.chords = ch
+            msg = (f"[{self.label}] WARNING MSE: {len(excl)} chord(s) at "
+                   f"input index {excl} are OFF the solver mesh and are "
+                   f"EXCLUDED; {int(ch['n_active'])} remain")
+            print(msg, flush=True)
+            self.notices.append(msg)
+            if int(ch["n_active"]) < int(ch.get("min_chords", 1)):
+                why = (f"only {int(ch['n_active'])} MSE chord(s) remain on "
+                       f"the solver mesh (chord(s) {excl} are off it); at "
+                       f"least {int(ch['min_chords'])} are required")
+                if self.rows["mse"].get("required"):
+                    from .adapters import EngineInputRefused
+                    raise EngineInputRefused(f"{self.label}: {why}")
+                self.flags.append(MSE_FLAG_PREFIX + why + " -- the MSE term "
+                                  "was NOT applied")
+                self.b.restore(snap)
+                return None, dict(applied=False, reason=why,
+                                  n_solves=int(self.b.n_solves) - n0,
+                                  excluded_off_mesh=excl)
+        # ---- orientation: STATED (the block's ip_sign/bt_sign against the
+        # equilibrium's own directions, read off its field), never fitted;
+        # audited, and flagged when another fits better by delta chi2 > 1
+        eq_or = mse_equilibrium_orientation(B0, ch["R"], ch["Z"], m0["axis"])
+        sp, stt = mse_orientation(ch, eq_or)
+        chk = mse_orientation_check(B0, ch, sp, stt)
         st.mse_sign = (float(sp), float(stt))
-        tg0 = self._tg(m0)
+        if chk["disagrees"]:
+            self.flags.append(
+                MSE_FLAG_PREFIX + "the data disagree with the stated field "
+                f"orientation (sign_pol {sp:+.0f}, sign_tor {stt:+.0f}): "
+                f"orientation {chk['best_other']} fits the chords better by "
+                f"delta chi2 = {chk['delta_chi2']:.4g} (> "
+                f"{MSE_ORIENTATION_DCHI2:g}); the stated orientation is KEPT "
+                "-- check ip_sign/bt_sign")
+            print(f"[{self.label}] WARNING closure-limited: "
+                  + self.flags[-1], flush=True)
+        table = chk["table"]
+        tg0 = self._tg(dict(m0, B_chords=B0, chords_found=None))
         free = np.concatenate([self.sigma_ind > 0, self.sigma_bs > 0])
 
         def _tg_of(x):
@@ -879,7 +1000,18 @@ class UnifiedEngine:
         fd = dict(n_solves=int(self.b.n_solves) - n0,
                   n_free=int(np.count_nonzero(free)),
                   fd_step=float(s["mse_fd_step"]),
-                  sign_convention=dict(pol=float(sp), tor=float(stt)),
+                  applied=True, excluded_off_mesh=excl,
+                  orientation=dict(
+                      pol=float(sp), tor=float(stt),
+                      ip_sign_data=float(ch["ip_sign"]),
+                      bt_sign_data=float(ch["bt_sign"]),
+                      ip_sign_equilibrium=float(eq_or["ip"]),
+                      bt_sign_equilibrium=float(eq_or["bt"]),
+                      rule=("STATED, not fitted: sign_pol = ip_sign(data) * "
+                            "ip_sign(equilibrium), sign_tor = bt_sign(data) "
+                            "* bt_sign(equilibrium)"),
+                      delta_chi2=float(chk["delta_chi2"]),
+                      disagrees=bool(chk["disagrees"]), note=chk["note"]),
                   sign_table={k: float(v) for k, v in table.items()},
                   scheme=("finite differences once at convergence, then "
                           "Broyden updates every pass"
@@ -928,7 +1060,8 @@ class UnifiedEngine:
         dlt = st.delivery_correction
         R = cl["jc"] + (0.0 if dlt is None else dlt)
         self.b.solve(R, n_passes=2)
-        m = self.b.measure(want_chords=("mse" in self.rows), final=True)
+        m = self.b.measure(want_chords=(self._mse_phase is not None),
+                           final=True)
         g1 = complete_geometry(m["geom"])
         w = g1["w_lin"] * conversion_factor(g1)
         chk = check_delivered(m["redl"], lam, w, self.psi,
@@ -1128,8 +1261,13 @@ class TokaMakerBackend:
                    q_row=q_row, Ip=Ip, achieved=achieved)
         if want_chords and self.chords is not None:
             from .mse import mse_field_at
-            out["B_chords"] = mse_field_at(mygs, self.chords["R"],
-                                           self.chords["Z"])
+            # (B, found): an off-mesh chord is REPORTED (NaN, found=False),
+            # never read from the interpolator's stale buffer
+            B, found = mse_field_at(mygs, self.chords["R"], self.chords["Z"])
+            out["B_chords"] = np.asarray(B, dtype=float).reshape(-1, 3)
+            out["chords_found"] = np.asarray(found, dtype=bool).ravel()
+            out["axis"] = tuple(float(v) for v in np.asarray(
+                mygs.o_point, dtype=float).ravel()[:2])
         if final:
             stats = mygs.get_stats(lcfs_pad=pad, li_normalization="iter")
             out["stats"] = {k: float(v) for k, v in stats.items()
@@ -1222,6 +1360,7 @@ def engine_record(eng, res, wall_s=None) -> dict:
                     "T - d; q0: jbs_loop.AxisRowPin; MSE: offset refreshed "
                     "from each solve, Jacobian Broyden-updated"),
         notices=list(eng.notices),
+        flags=list(eng.flags),
         converged=bool(res["converged"]),
         loop_converged=bool(res["loop_converged"]),
         phases=res["phases"], passes=eng.passes,
@@ -1281,6 +1420,7 @@ def _split(eng, res):
 
 
 def _delivered_state(eng, res, rec, path):
+    from .physics import SOLVER_Q0_PSI_N
     m = eng.delivered_meas
     stats = m.get("stats") or {}
     A = np.asarray(m["achieved"], dtype=float)
@@ -1290,6 +1430,11 @@ def _delivered_state(eng, res, rec, path):
         convention=ENGINE_SPLIT_CONVENTION, path=path,
         l_i=float(m["li"]), l_i_scale="iter(li3)",
         q0=float(stats.get("q_0", float("nan"))),
+        # get_stats' q0 is q at psi_N = SOLVER_Q0_PSI_N, not on axis; the
+        # q0 ROW is measured and targeted at its own radius (psi_q[0])
+        q0_psi_N=float(SOLVER_Q0_PSI_N),
+        q0_row_psi_N=(None if "q0" not in eng.rows
+                      else float(eng.rows["q0"]["psi"])),
         q95=float(stats.get("q_95", float("nan"))),
         Ip_target=float(eng.c.Ip), request_normalisation=cfac,
         achieved_normalisation=None, n_floored_inductive=0,
@@ -1356,7 +1501,13 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
     metrics["jbs_loop"] = loop_rec
     metrics["engine"] = dict(version=ENGINE_VERSION,
                              converged=bool(res["converged"]),
-                             solves=dict(rec["solves"]))
+                             solves=dict(rec["solves"]),
+                             flags=list(rec.get("flags", ())))
+    if rec.get("flags"):
+        metrics["closure_limited"] = True
+        metrics["closure_limited_reasons"] = tuple(
+            list(metrics.get("closure_limited_reasons", ()) or ())
+            + list(rec["flags"]))
     with open(src.geqdsk_path, "rb") as fh:
         eqdsk_bytes = fh.read()
     kn = c.kinetics_native
@@ -1392,11 +1543,13 @@ def _ids_baseline(bq, eng, res, rec, bl_src):
     icl.update(engine=True, closure=_closure_record(cl),
                jbs_loop=rec["phases"][-1]["record"],
                jbs_converged=bool(res["converged"]))
+    extra = list(rec.get("flags", ()))
     if not res["converged"]:
-        why = _flag_reason(res, rec)
+        extra.append(_flag_reason(res, rec))
+    if extra:
         icl["closure_limited"] = True
         icl["closure_limited_reasons"] = tuple(
-            list(icl.get("closure_limited_reasons", ())) + [why])
+            list(icl.get("closure_limited_reasons", ())) + extra)
     lim = dict(bl_src.li_metrics or {})
     lim.update(tokamaker_li_3=float(m["li"]),
                tokamaker_li_1=m.get("li_1"), engine=True)
