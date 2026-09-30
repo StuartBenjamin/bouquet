@@ -8,7 +8,8 @@ bit-identical when absent).*
 
 - **`GenerationConfig.reconstruction_engine`** (`"legacy"` | `"unified"`,
   default `"legacy"`) with `engine_preset` (`"structured"` |
-  `"bootstrap_scalar"` | `"sawtooth_two_scalar"`), `engine_rows` (`"Ip"`,
+  `"structured_uniform"` | `"bootstrap_scalar"` | `"sawtooth_two_scalar"` |
+  `"two_scalar_li"`), `engine_rows` (`"Ip"`,
   `"l_i"`, `"q0"`, `"mse"`), `engine_delivery_correction` (default `False`)
   and `engine_mse_jacobian` (`"fd_broyden"` | `"fd_chord"`). Validated by
   name; engine options set under `"legacy"` are refused. Stored configs
@@ -90,6 +91,34 @@ bit-identical when absent).*
   unchanged (the new hooks are gated blocks; the frozen-code AST test
   passes). The solver probe takes `BQ_ENGINE_PROBE_GC` to run the solver
   tests with a draw setting on.
+- **Engine draws: the solve cap defaults to 100, with rollback for a capped
+  homotopy stage (owner's decision, 2026-09-30).** New
+  `GenerationConfig.engine_draw_solve_maxits` (default `100`; `None` = the
+  solver's own cap) caps every GS solve inside an engine draw (loop,
+  homotopy stages, rollback re-solve, post-homotopy passes) and the
+  zero-perturbation draw; the reconstruction runs under the solver's own
+  cap. **Changed rule:** a capped homotopy STAGE is now a failed stage like
+  any other -- it rolls back to the last good stage, and the draw is
+  rejected (`homotopy_maxits`) only when there is none (it was rejected
+  outright before); a capped rollback re-solve, post-homotopy pass or loop
+  solve still rejects with its code. Every capped solve is recorded (stage,
+  iterations, seconds, outcome) on `Bouquet.engine_draw_cap_events` and the
+  draw's `homotopy.cap_events`. `draw_solve_maxits` is refused under the
+  engine; the legacy draws are unchanged (`draw_solve_maxits` default
+  `None`; frozen-code AST test passes). The fast test that asserted the old
+  rule at homotopy pass 2 now asserts the rollback.
+- **Engine presets `two_scalar_li` and `structured_uniform` (not defaults).**
+  `two_scalar_li`: one scalar on the inductive, one on the bootstrap
+  (constant basis), rows Ip + l_i -- a 2 × 2 system on the g-file's hard
+  rows, the legacy secant's l_i family and the q95 attribution study's
+  "2-scalar" state as a named preset; soft IDS rows go to the soft solver
+  with the constant basis's σ = 1 as the documented uniform prior.
+  `structured_uniform`: the shipped basis under
+  `utils.STRUCTURED_WEIGHTS_UNIFORM` (the design's prior-sensitivity run).
+  Neither adds a number. Solver test `tests/test_engine_two_scalar_solver.py`.
+- **Probe fix:** `tests/probes/measure_engine.py::_distance_ids` takes the
+  slice time from the source (it used the synthetic example's constant for
+  every dd); the table records the slice it used.
 
 ## Unreleased, intended for the release after 1.4.0 — self-consistent bootstrap current (default ON)
 

@@ -1135,8 +1135,12 @@ class GenerationConfig:
     # verify_sigma0_consistency(); bouquet.engine_draws, docs/engine.md).
     reconstruction_engine: str = "legacy"
     # "structured" (4-Gaussian basis, li_soft_onesided priors; the default),
-    # "bootstrap_scalar" (s_bs constant; rows Ip) or "sawtooth_two_scalar"
-    # (s_ind, s_bs constants; rows Ip, q0).
+    # "structured_uniform" (the same basis and rows under the documented
+    # uniform ladder utils.STRUCTURED_WEIGHTS_UNIFORM: the prior-sensitivity
+    # run), "bootstrap_scalar" (s_bs constant; rows Ip),
+    # "sawtooth_two_scalar" (s_ind, s_bs constants; rows Ip, q0) or
+    # "two_scalar_li" (s_ind, s_bs constants; rows Ip, l_i: the legacy
+    # secant's two-scalar l_i family as a named closure).
     engine_preset: str = "structured"
     # The measurement rows: "Ip" (always), "l_i", "q0" (on-axis safety
     # factor; active only where the sawtooth gate admits it), "mse" (needs
@@ -1171,6 +1175,20 @@ class GenerationConfig:
     # loop's PATH only (no criterion, tolerance or ceiling; zero extra
     # solves).  False (default) is the behaviour before the setting existed.
     engine_draw_bootstrap_refresh: bool = False
+    # The Grad-Shafranov iteration cap on EVERY solve inside an engine draw:
+    # the loop (its anchor and passes), each coil-homotopy stage, a
+    # homotopy rollback re-solve and the post-homotopy bootstrap passes (and
+    # the zero-perturbation draw of verify_sigma0_consistency).  None keeps
+    # the solver's own cap.  A capped HOMOTOPY STAGE is a failed stage like
+    # any other: it rolls back to the last good (looser) stage, and the draw
+    # is rejected only when there is none (homotopy_maxits); a capped loop
+    # solve, rollback re-solve or post-homotopy pass rejects the draw
+    # (perturb_failed / anchor_solve_failed, homotopy_maxits,
+    # post_homotopy_maxits).  Every capped solve is recorded (stage,
+    # iterations, seconds, outcome).  A solve that converges below the cap
+    # is untouched.  The engine refuses draw_solve_maxits (the legacy draws'
+    # cap); the legacy path never reads this field.
+    engine_draw_solve_maxits: Optional[int] = 100
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single

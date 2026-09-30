@@ -6005,6 +6005,7 @@ class Bouquet:
         jbs_tol_li`` -- the draw-route rule of the legacy check, at the
         unchanged loop tolerances; ``dq0`` (at its labelled radius) and
         ``dq95`` are reported beside them."""
+        from .engine import engine_draw_maxits
         from .engine_draws import (context_from_run, tokamaker_backend,
                                    verify_zero_perturbation)
         run = self._engine_run
@@ -6016,7 +6017,7 @@ class Bouquet:
             self.mygs, SimpleNamespace(psi_N=c.psi_N, pressure=c.pressure,
                                        Ip=c.Ip, kinetics=c.kinetics),
             psi_pad=run["psi_pad"], q_psi=run.get("q_psi"),
-            maxits=getattr(gc, "draw_solve_maxits", None))
+            maxits=engine_draw_maxits(gc))
         snap = (self.mygs.copy_eq() if hasattr(self.mygs, "copy_eq")
                 else None)
         try:
@@ -6923,6 +6924,21 @@ class Bouquet:
             print(f"[generate] {_n_loop} of them rejected by the "
                   "self-consistent j_BS loop stage or its coil-saturation "
                   "guard; per-attempt records: Bouquet.draw_rejections")
+        if _eng is not None:
+            # every engine-draw solve that stopped at engine_draw_solve_maxits
+            # (stage, iterations, seconds, rolled back or rejected), outside
+            # the capture
+            self.engine_draw_cap_events = [dict(e) for e in _eng.cap_events]
+            if _eng.cap_events:
+                from collections import Counter as _Ctr
+                _by = _Ctr((e["stage"], e["outcome"])
+                           for e in _eng.cap_events)
+                print(f"[generate] {len(_eng.cap_events)} engine-draw GS "
+                      f"solve(s) stopped at engine_draw_solve_maxits="
+                      f"{_eng.maxits}: " + ", ".join(
+                          f"{st} {oc} x{n}" for (st, oc), n in
+                          sorted(_by.items()))
+                      + "; per-solve records: Bouquet.engine_draw_cap_events")
 
         # until-N outcome, OUTSIDE the capture: on the default quiet path the
         # in-loop prints and generate_bouquet's cap-missed RuntimeWarning were

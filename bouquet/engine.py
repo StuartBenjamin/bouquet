@@ -55,7 +55,8 @@ ENGINE_VERSION = "unified-engine/2 (Stage 3: reconstruction and draws)"
 #: ``GenerationConfig.reconstruction_engine`` values.
 ENGINE_CHOICES = ("legacy", "unified")
 #: ``GenerationConfig.engine_preset`` values (docs/engine.md, "Presets").
-ENGINE_PRESETS = ("structured", "bootstrap_scalar", "sawtooth_two_scalar")
+ENGINE_PRESETS = ("structured", "structured_uniform", "bootstrap_scalar",
+                  "sawtooth_two_scalar", "two_scalar_li")
 #: The measurement rows the engine knows.
 ENGINE_ROWS = ("Ip", "l_i", "q0", "mse")
 #: ``GenerationConfig.engine_mse_jacobian`` values.
@@ -71,13 +72,21 @@ ENGINE_FIELD_DEFAULTS = {
     "engine_draw_q0_row": False,
     "engine_draw_homotopy": True,
     "engine_draw_bootstrap_refresh": False,
+    # the GS iteration cap on every solve inside an engine draw (the owner's
+    # value, 2026-09-30: 100; see docs/engine.md "The solve cap")
+    "engine_draw_solve_maxits": 100,
 }
 #: Rows each preset admits (``Ip`` is mandatory for every preset).
 PRESET_ROWS = {
     "structured": frozenset(("Ip", "l_i", "q0", "mse")),
+    "structured_uniform": frozenset(("Ip", "l_i", "q0", "mse")),
     "bootstrap_scalar": frozenset(("Ip",)),
     "sawtooth_two_scalar": frozenset(("Ip", "q0")),
+    "two_scalar_li": frozenset(("Ip", "l_i")),
 }
+#: Presets on the shipped four-Gaussian basis (the soft solver serves their
+#: soft rows); the others are the constant-basis scalar closures.
+STRUCTURED_BASIS_PRESETS = ("structured", "structured_uniform")
 #: ``_baseline`` attribute carrying the engine record (JSON; an ADDED
 #: attribute, v3 readers are unaffected).
 ENGINE_ATTR = "engine_json"
@@ -181,6 +190,24 @@ def validate_engine_settings(gc) -> None:
     if preset == "sawtooth_two_scalar" and "q0" not in rows:
         raise ValueError("generation.engine_preset='sawtooth_two_scalar' "
                          "needs the 'q0' row (two scalars, two rows)")
+    if preset == "two_scalar_li" and "l_i" not in rows:
+        raise ValueError("generation.engine_preset='two_scalar_li' needs "
+                         "the 'l_i' row (two scalars, two rows)")
+    mx = vals["engine_draw_solve_maxits"]
+    import numbers
+    if mx is not None and (isinstance(mx, (bool, np.bool_))
+                           or not isinstance(mx, numbers.Integral)
+                           or int(mx) < 1):
+        raise ValueError(f"generation.engine_draw_solve_maxits={mx!r} must "
+                         "be an integer >= 1, or None for the solver's own "
+                         "cap")
+    if getattr(gc, "draw_solve_maxits", None) is not None:
+        raise ValueError(
+            f"generation.draw_solve_maxits={gc.draw_solve_maxits!r} set with "
+            "reconstruction_engine='unified': it caps the LEGACY draws and "
+            "the engine never reads it (it would be silently ignored); the "
+            "engine draws' cap is generation.engine_draw_solve_maxits "
+            f"(default {ENGINE_FIELD_DEFAULTS['engine_draw_solve_maxits']})")
     dc = vals["engine_delivery_correction"]
     if not isinstance(dc, (bool, np.bool_)):
         raise ValueError(f"generation.engine_delivery_correction must be a "
@@ -268,6 +295,15 @@ def _mse_knobs_unread(gc, rows):
     raise ValueError(msg)
 
 
+def engine_draw_maxits(gc):
+    """The GS iteration cap of every solve inside an engine draw
+    (``GenerationConfig.engine_draw_solve_maxits``; ``None``: the solver's
+    own cap)."""
+    v = getattr(gc, "engine_draw_solve_maxits",
+                ENGINE_FIELD_DEFAULTS["engine_draw_solve_maxits"])
+    return None if v is None else int(v)
+
+
 def engine_settings(gc) -> dict:
     """The validated engine settings of a :class:`GenerationConfig`.
 
@@ -288,6 +324,7 @@ def engine_settings(gc) -> dict:
         draw_homotopy=bool(getattr(gc, "engine_draw_homotopy", True)),
         draw_bootstrap_refresh=bool(getattr(
             gc, "engine_draw_bootstrap_refresh", False)),
+        draw_solve_maxits=engine_draw_maxits(gc),
         loop=loop,
         q0_tol=float(gc.q0_tol),
         structured_li_tol=float(gc.structured_li_tol),
@@ -629,7 +666,11 @@ class UnifiedEngine:
                                          "'mse' but no MSE rows were read")
             rows["mse"] = c.rows["mse"]
         self.rows = rows
-        self.soft = bool(self.preset == "structured"
+        # soft rows go to the soft solver on the structured-basis presets
+        # and on two_scalar_li (whose l_i row is the one soft row an IDS
+        # carries); the other scalar presets impose their rows exactly
+        self.soft = bool(self.preset in STRUCTURED_BASIS_PRESETS
+                         + ("two_scalar_li",)
                          and (not rows["Ip"]["hard"]
                               or ("l_i" in rows and not rows["l_i"]["hard"])))
         if self.soft and "l_i" in rows and rows["l_i"]["hard"]:
@@ -649,6 +690,29 @@ class UnifiedEngine:
             self.sigma_bs = np.asarray(sp["sigma_bs"], dtype=float)
             self.sigma_up = np.asarray(sp["sigma_ind_up"], dtype=float)
             self.prior_name = "li_soft_onesided (utils.STRUCTURED_PRESETS)"
+        elif self.preset == "structured_uniform":
+            # the documented no-prior sensitivity: every coefficient
+            # penalised equally (utils.STRUCTURED_WEIGHTS_UNIFORM, W = 1 i.e.
+            # sigma = 1), no one-sided up-ladder.  On the hard closure only
+            # the weights' RATIOS matter (no preference); with soft rows or
+            # MSE chords it is an absolute sigma = 1 prior (see there).
+            from .utils import STRUCTURED_WEIGHTS_UNIFORM as _U
+            self.basis = dict(STRUCTURED_BASIS_DEFAULT)
+            self.sigma_ind = 1.0 / np.sqrt(np.asarray(_U["ind"], float))
+            self.sigma_bs = 1.0 / np.sqrt(np.asarray(_U["bs"], float))
+            self.sigma_up = None
+            self.prior_name = "uniform (utils.STRUCTURED_WEIGHTS_UNIFORM)"
+        elif self.preset == "two_scalar_li":
+            # the legacy secant's l_i family as a named closure: ONE scalar
+            # on the inductive and ONE on the bootstrap (constant basis),
+            # rows Ip + l_i.  Hard rows (g-file): a 2 x 2 system, no prior
+            # enters.  Soft rows (IDS): the soft solver, where the constant
+            # basis's sigma = 1 is the documented uniform prior.
+            self.basis = dict(kind="constant")
+            self.sigma_ind = np.array([1.0])
+            self.sigma_bs = np.array([1.0])
+            self.sigma_up = None
+            self.prior_name = "constant basis, two scalars (Ip + l_i)"
         elif self.preset == "bootstrap_scalar":
             self.basis = dict(kind="constant")
             self.sigma_ind = np.array([0.0])      # pinned: s_ind = 1
@@ -1204,10 +1268,11 @@ class TokaMakerBackend:
     ``<j_phi>`` (:func:`bouquet.utils.eq_jphi_profile`) and the field at the
     MSE chords (:func:`bouquet.mse.mse_field_at`).
 
-    ``maxits`` (``GenerationConfig.draw_solve_maxits``, the ported #57 cap):
-    the GS iteration cap set on the solver for EVERY engine solve --
-    reconstruction and draws alike -- and restored after it; ``None`` (the
-    default) leaves the solver's own cap untouched.  A solve that hits the
+    ``maxits``: the GS iteration cap set on the solver for EVERY solve of
+    this backend and restored after it; ``None`` leaves the solver's own cap
+    untouched.  The reconstruction's backend is built with ``None``; an
+    engine draw's (and the zero-perturbation draw's) with
+    ``GenerationConfig.engine_draw_solve_maxits`` (default 100).  A solve that hits the
     cap fails exactly as any failed solve (:class:`EngineSolveError`); it is
     never re-solved at another tolerance.
 
@@ -1232,6 +1297,8 @@ class TokaMakerBackend:
             raise ValueError(f"engine backend: maxits={maxits!r} must be an "
                              "integer >= 1 or None")
         self.maxits = None if maxits is None else int(maxits)
+        #: wall time [s] of the last GS solve (a failed one included)
+        self.last_solve_s = None
 
     def set_inputs(self, pressure=None, kinetics=None):
         """The pressure [Pa] and the kinetics (``ne, te, ni, ti, zeff`` on
@@ -1287,15 +1354,18 @@ class TokaMakerBackend:
                 mygs.set_targets(Ip=float(self.c.Ip), pax=float(self.p[0]))
                 mygs.set_profiles(pp_prof={"type": "linterp", "y": pp_y,
                                            "x": self.psi}, ffp_prof=ffp)
+                _t0 = time.perf_counter()
                 try:
                     mygs.solve()
                 except ValueError as e:
+                    self.last_solve_s = time.perf_counter() - _t0
                     raise EngineSolveError(
                         f"engine GS solve failed (pass {k + 1}/{n_passes}"
                         + ("" if self.maxits is None else
                            f", maxits {self.maxits}") + f"): {e}") from e
                 finally:
                     self.n_solves += 1
+                self.last_solve_s = time.perf_counter() - _t0
         finally:
             if saved is not None:
                 mygs.settings.maxits = saved
@@ -1795,7 +1865,9 @@ def prepare_engine_baseline(bq):
             backend = TokaMakerBackend(
                 mygs, c0, psi_pad=psi_pad, li_kind="li_3",
                 chords=(None if mse is None else mse["chords"]),
-                maxits=getattr(gc, "draw_solve_maxits", None))
+                # the reconstruction runs under the solver's own cap
+                # (engine_draw_solve_maxits caps the DRAWS only)
+                maxits=None)
             eng, res, rec = reconstruct(ad, backend, s,
                                         label=f"engine {c0.kind}")
             if c0.kind == "gfile":

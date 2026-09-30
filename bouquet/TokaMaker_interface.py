@@ -129,13 +129,14 @@ DRAW_REJECTION_REASONS = {
     "engine_closure_refused": "an engine draw's Ip amplitude (or Ip + q0 "
                               "two-scalar) closure refused (degenerate or "
                               "non-finite)",
-    "homotopy_maxits": "an engine draw's homotopy solve (a pass or a "
-                       "rollback re-solve) stopped at draw_solve_maxits "
-                       "without converging -- rejected, never rolled back "
-                       "to a looser pass and archived",
+    "homotopy_maxits": "an engine draw's homotopy solve stopped at "
+                       "engine_draw_solve_maxits without converging with no "
+                       "earlier good stage to roll back to (a capped later "
+                       "stage rolls back, as any failed stage), or its "
+                       "rollback re-solve stopped at the cap",
     "post_homotopy_maxits": "an engine draw's post-homotopy j_BS pass "
-                            "solve stopped at draw_solve_maxits without "
-                            "converging",
+                            "solve stopped at engine_draw_solve_maxits "
+                            "without converging",
 }
 
 
@@ -7206,7 +7207,10 @@ def generate_bouquet(
                                                     _rb_exc)
                                                 _eng.announce_cap(
                                                     "homotopy rollback "
-                                                    "re-solve", _rb_exc)
+                                                    "re-solve", _rb_exc,
+                                                    stage="homotopy_rollback",
+                                                    seconds=_eng
+                                                    .last_homotopy_solve_seconds())
                                         print(f"  [homotopy] WARN: "
                                               f"rollback re-solve failed "
                                               f"({_rb_exc}); stats may "
@@ -7252,16 +7256,18 @@ def generate_bouquet(
                                   f"({_hb_exc})")
                             if _eng is not None:
                                 if _eng.hit_cap(_hb_exc):
-                                    # a capped solve that did not converge:
-                                    # REJECTED, never rolled back to a
-                                    # looser pass and archived
-                                    _post_align_failed = True
-                                    _post_align_reason = (
-                                        "homotopy_maxits", "homotopy",
-                                        _hb_exc)
-                                    _eng.announce_cap(f"homotopy {_label}",
-                                                      _hb_exc)
-                                    break
+                                    # a capped stage solve is a failed stage
+                                    # like any other: recorded, then the rule
+                                    # below -- roll back to the last good
+                                    # stage, or reject when there is none
+                                    _eng.announce_cap(
+                                        f"homotopy {_label}", _hb_exc,
+                                        stage="homotopy",
+                                        seconds=_eng
+                                        .last_homotopy_solve_seconds(),
+                                        outcome=("rejected"
+                                                 if _final_pass_idx < 0
+                                                 else "rolled_back"))
                             if _final_pass_idx < 0:
                                 # First pass failed -> draw is rejected
                                 _post_align_failed = True
@@ -7293,12 +7299,23 @@ def generate_bouquet(
                                                 "homotopy rollback", _rb_exc)
                                             _eng.announce_cap(
                                                 "homotopy rollback re-solve",
-                                                _rb_exc)
+                                                _rb_exc,
+                                                stage="homotopy_rollback",
+                                                seconds=_eng
+                                                .last_homotopy_solve_seconds())
                                     print(f"  [homotopy] WARN: rollback "
                                           f"re-solve failed ({_rb_exc}); "
                                           f"stats may be stale")
                                 print(f"  [homotopy] rolled back to pass "
                                       f"{_final_pass_idx + 1}")
+                            if _eng is not None:
+                                if (_final_pass_idx < 0
+                                        and _eng.hit_cap(_hb_exc)):
+                                    # no earlier good stage: the capped
+                                    # stage rejects with its own code
+                                    _post_align_reason = (
+                                        "homotopy_maxits", "homotopy",
+                                        _hb_exc)
                             break  # stop tightening
                     # ---- self-consistent bootstrap: post-homotopy check ----
                     # The homotopy moved coils/boundary AFTER the draw's j_BS

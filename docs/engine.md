@@ -221,10 +221,36 @@ so a draw can keep the q0 row as an option for sawtoothing discharges.
 |---|---|---|
 | `"structured"` (default) | 4 Gaussians (ψ_N 0.15/0.45/0.75/0.95, width 0.20), `li_soft_onesided` σ ladders | Ip, l_i, q0, MSE |
 | `"bootstrap_scalar"` | constant basis, `s_ind` pinned | Ip |
+| `"structured_uniform"` | the same 4 Gaussians under `utils.STRUCTURED_WEIGHTS_UNIFORM` (σ = 1 on every coefficient, no one-sided up-ladder) | Ip, l_i, q0, MSE |
+| `"bootstrap_scalar"` | constant basis, `s_ind` pinned | Ip |
 | `"sawtooth_two_scalar"` | constant basis, two scalars | Ip, q0 (falls back to `"bootstrap_scalar"` with a notice when the gate rejects q0, as the legacy sawtooth channel) |
+| `"two_scalar_li"` | constant basis, two scalars | Ip, l_i (both required) |
 
 The scalar presets reduce exactly to `close_ip("bootstrap")` and
 `close_ip_q0` (tested).
+
+**`"two_scalar_li"`** is the legacy secant's l_i family as a named closure:
+one scalar on the inductive and one on the bootstrap, rows Ip + l_i. With
+the g-file's hard rows it is a 2 × 2 system and no prior enters (the
+weights provably do not change the answer; tested). It is exactly the state
+the q95 attribution study reached by patching the settings' preset to the
+constant two-scalar basis with rows Ip + l_i (tested bit for bit on the toy;
+the solver test `tests/test_engine_two_scalar_solver.py` checks the two
+routes agree within `jbs_tol_li` / `jbs_tol_q0` on the synthetic g-file
+example, and on the build the study used that q95 is the study's 4.5956
+within `jbs_tol_q0`). With soft rows (the IDS default) the soft solver
+serves it, and the constant basis's σ = 1 is then an absolute prior on each
+scalar -- the documented meaning of the uniform ladder; it enters the answer
+weakly. It adds no number: the basis, the σ, the rows and every tolerance
+are existing ones. It is not a default.
+
+**`"structured_uniform"`** is the prior-sensitivity run of design decision
+8: the shipped basis under the ONE documented alternative prior. On the hard
+closure only the weights' ratios matter, so it expresses no preference; with
+soft rows or MSE chords it is an absolute σ = 1 prior
+(`utils.STRUCTURED_WEIGHTS_UNIFORM`). The difference from `"structured"` is
+the part of the answer the `li_soft_onesided` prior -- not the data -- holds
+up; it is meant to be reported.
 
 ## The delivery correction (`engine_delivery_correction`, default off)
 
@@ -338,8 +364,8 @@ failed first solve (`anchor_solve_failed`, the anchor's analog: the stored
 state composed with the draw's components), a refused amplitude closure
 (`engine_closure_refused`), a coil saturation (`coil_saturation_jbs_loop` /
 `_post_homotopy`), the homotopy and post-homotopy codes as before, and --
-only with `draw_solve_maxits` set -- `homotopy_maxits` /
-`post_homotopy_maxits` (below).
+with a cap set (`engine_draw_solve_maxits`, default 100) --
+`homotopy_maxits` / `post_homotopy_maxits` (below).
 
 **Bootstrap refresh after the first solve (`engine_draw_bootstrap_refresh`,
 default off).** The loop's start is computed on the reconstruction's
@@ -398,22 +424,37 @@ and one solve per pass; the homotopy adds one solve per stage it runs.
 the live numbers for the g-file example (the legacy batch measured 405-1407 s
 per draw, 4 archived / 2 rejected / 1 in spec at that seed).
 
-**The solve cap.** `draw_solve_maxits` (the ported #57 cap, default `None`
-= the solver's own cap) is applied by the engine's solve wrapper
-(`TokaMakerBackend.solve`) to EVERY engine solve -- reconstruction, the
-draw's loop and its post-homotopy passes -- and restored after each; under
-`Bouquet.generate` the draw loop's `DrawSolveGuard` also sets it on the
-solver for the whole of `generate()`, so the homotopy's own solves run
-under it; an engine draw additionally installs it for its homotopy stage
-when the solver does not already carry it (`generate_bouquet` driven
-directly) and puts the previous value back afterwards. A capped solve that
-does not converge (the solver's own `Exceeded "maxits"`) REJECTS the draw,
-loudly and with its own code: `homotopy_maxits` for a homotopy pass or a
-rollback re-solve -- never rolled back to a looser pass and archived --
-and `post_homotopy_maxits` for a post-homotopy pass. A loop solve that hits
-it keeps the loop's codes (`anchor_solve_failed` on pass 1,
-`perturb_failed` after). With the default `None` nothing is re-classified.
-The cap's value is a decision for the owner (no default is set).
+**The solve cap.** `engine_draw_solve_maxits` (default **100**, the owner's
+value of 2026-09-30; `None` = the solver's own cap) caps EVERY
+Grad-Shafranov solve inside an engine draw: the loop (its first solve and
+every pass) and the post-homotopy passes through the engine's solve wrapper
+(`TokaMakerBackend.solve`, set and restored per solve), and every homotopy
+stage and rollback re-solve (installed on the solver for the homotopy stage
+and restored after it). The zero-perturbation draw of
+`verify_sigma0_consistency` runs under it too. The reconstruction runs
+under the solver's own cap. The legacy draws' `draw_solve_maxits` is
+REFUSED under the engine (it would be silently ignored); the legacy path
+never reads `engine_draw_solve_maxits`, so it stays bit-identical.
+
+A solve that converges under the cap is untouched (measured on the
+synthetic g-file example, fixed build: loop ≤ 15, post-homotopy ≤ 18,
+homotopy stages 13-21 iterations for every archived draw; the two slow
+homotopy solves at 264 and 384 iterations belonged to draws rejected for
+saturation anyway). A solve that stops at the cap (the solver's own
+`Exceeded "maxits"`, anywhere in the exception chain):
+
+| where | what happens | code |
+|---|---|---|
+| a homotopy STAGE | a failed stage like any other: roll back to the last good (looser) stage and re-solve there, as a non-converging stage does; with no earlier good stage the draw is rejected | `homotopy_maxits` (only when rejected) |
+| the rollback re-solve | the draw is rejected | `homotopy_maxits` |
+| a post-homotopy pass | the draw is rejected | `post_homotopy_maxits` |
+| a loop solve | the draw is rejected with the loop's code | `anchor_solve_failed` (pass 1) / `perturb_failed` |
+
+Every capped solve is recorded on `GenerateEngineDraws.cap_events` and
+`Bouquet.engine_draw_cap_events` (draw, stage, `iterations` = the cap,
+`seconds`, `outcome` = `rolled_back` | `rejected`, the error), in the
+archived draw's `homotopy.cap_events`, and summarised in one printed
+`[generate]` line.
 
 ## Cost
 

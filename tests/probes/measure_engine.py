@@ -86,6 +86,11 @@ PARTS = {
     "imas": ("imas", dict()),
     "imas_q0": ("imas", dict(engine_rows=["Ip", "l_i", "q0"])),
     "recon_dc": ("recon", dict(engine_delivery_correction=True)),
+    # the two-scalar Ip + l_i closure: the named preset, and the q95
+    # study's route to the same state (the settings' preset patched to the
+    # constant two-scalar basis, rows Ip + l_i) for the identity check
+    "recon_2s": ("recon", dict(engine_preset="two_scalar_li")),
+    "recon_2s_patched": ("recon", dict(_patched_two_scalar=True)),
     # Stage 3: a seeded engine-draw batch (--draws / --seed)
     "draws_recon": ("recon", dict()),
     "draws_imas": ("imas", dict()),
@@ -206,7 +211,11 @@ def _distance_ids(b, bl, psi_pad):
     with open(b.config.source.ids_path) as fh:
         dd = json.load(fh)
     eq = dd["equilibrium"]
-    ie = _nearest_index(eq["time"], _TIME, "equilibrium")
+    # the SOURCE's slice time (never the synthetic example's constant: the
+    # harness calls this on real dds); None -> the first slice, as the reader
+    t_src = getattr(b.config.source, "time", None)
+    t_use = float(eq["time"][0]) if t_src is None else float(t_src)
+    ie = _nearest_index(eq["time"], t_use, "equilibrium")
     p1 = eq["time_slice"][ie]["profiles_1d"]
     gq = eq["time_slice"][ie]["global_quantities"]
     psq = np.asarray(p1["psi"], float)
@@ -225,6 +234,8 @@ def _distance_ids(b, bl, psi_pad):
     _F0, bnd = read_imas_geometry(b.config.source)
     rms, mx = _lcfs_deviation_mm(mygs, bnd)
     return dict(
+        slice=dict(time_requested=t_src, time_used=t_use, index=int(ie),
+                   time_of_slice=float(eq["time"][ie])),
         li3=dict(input=float(gq["li_3"]), engine=float(st_i["l_i"]),
                  delta=float(st_i["l_i"]) - float(gq["li_3"])),
         q_axis=dict(input=float(qin[0]), engine=float(qp[0]),
@@ -353,6 +364,23 @@ def child(part, outdir, draws=None, seed=None):
     if _gc_env:
         extra.update(json.loads(_gc_env))
     out = dict(part=part, source=src, settings=dict(extra), stages={})
+    if extra.pop("_patched_two_scalar", False):
+        # the q95 attribution study's monkeypatch, reproduced exactly: the
+        # settings dict's preset -> the constant two-scalar basis (rows
+        # stay Ip + l_i, both hard on the g-file); the config is unchanged
+        from bouquet import engine as _E
+        _orig_es = _E.engine_settings
+
+        def _es(gc):
+            s = dict(_orig_es(gc))
+            s["preset"] = "sawtooth_two_scalar"
+            return s
+        _E.engine_settings = _es
+    try:
+        import OpenFUSIONToolkit as _oft
+        out["oft_file"] = os.path.realpath(_oft.__file__)
+    except Exception as e:                        # recorded, never fatal
+        out["oft_file"] = f"unavailable: {e}"
     path = os.path.join(outdir, f"engine_{part}.json")
 
     def _stage(name, fn):

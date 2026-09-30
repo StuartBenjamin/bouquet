@@ -20,12 +20,16 @@ reconstruction's geometry.  Checked on the toy Grad-Shafranov stand-in:
   within the loop tolerances (``jbs_tol_li``, ``jbs_rtol_j``,
   ``jbs_rtol_Ip``), in fewer or equal passes, with zero extra solves.
 
-The cap (default ``None``): with ``draw_solve_maxits`` set, every homotopy
-solve of an engine draw runs under it, and a homotopy solve (a pass or a
-rollback re-solve) that stops at the cap REJECTS the draw with
-``homotopy_maxits`` -- never rolled back to a looser pass and archived; a
-post-homotopy pass that stops at it is ``post_homotopy_maxits``.  With the
-default ``None`` nothing is re-classified.
+The cap (``engine_draw_solve_maxits``, default 100; the owner's rule of
+2026-09-30): every homotopy solve of an engine draw runs under it.  A capped
+homotopy STAGE is a failed stage like any other -- it rolls back to the last
+good stage, and the draw is rejected (``homotopy_maxits``) only when there
+is no earlier good stage; a capped rollback re-solve rejects
+(``homotopy_maxits``), a capped post-homotopy pass is
+``post_homotopy_maxits``, a capped loop solve keeps its loop code.  Every
+capped solve is recorded (stage, iterations, seconds, outcome).  With
+``None`` nothing is re-classified; a solve that converges under the cap is
+untouched.
 
 Synthetic inputs only; no solver, no device data.
 """
@@ -393,16 +397,68 @@ def test_every_homotopy_solve_runs_under_the_cap(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("at", [1, 2])
 def test_a_capped_homotopy_solve_rejects_the_draw(tmp_path, monkeypatch, at):
+    # The owner's rule (2026-09-30): a capped homotopy STAGE is a failed
+    # stage like any other.  CHANGED EXPECTED OUTCOME at at=2 (it asserted
+    # the earlier "reject, never roll back" rule): pass 2 capped now ROLLS
+    # BACK to pass 1 and the draw is archived there; at=1 (no earlier good
+    # stage) is still rejected with homotopy_maxits.
     diags, rej, G, fake, seen = _generate_capped(
         tmp_path / str(at), monkeypatch, maxits=40, fail={at: _CAP_ERROR})
-    # rejected with its own code -- at pass 2 too: NOT rolled back to pass
-    # 1 and archived
-    assert diags == []
-    assert [r["reason"] for r in rej] == ["homotopy_maxits"]
-    assert "maxits" in rej[0]["message"]
-    assert len(seen) == at                      # no rollback re-solve
     assert G.cap_events and G.cap_events[0]["maxits"] == 40
+    ev = G.cap_events[0]
+    assert ev["stage"] == "homotopy" and ev["iterations"] == 40
+    assert ev["seconds"] is not None and ev["seconds"] >= 0.0
     assert fake.settings.maxits == 80
+    if at == 1:
+        assert diags == []
+        assert [r["reason"] for r in rej] == ["homotopy_maxits"]
+        assert "maxits" in rej[0]["message"]
+        assert len(seen) == at                  # no rollback re-solve
+        assert ev["outcome"] == "rejected"
+    else:
+        assert rej == [] and len(diags) == 1
+        assert diags[0]["homotopy_pass"] == 0    # (0-based) pass 1
+        assert seen == [40, 40, 40]             # pass 1, pass 2, rollback
+        assert ev["outcome"] == "rolled_back"
+        rec = diags[0]["engine"]["homotopy"]
+        assert rec["cap_events"] == [ev]
+
+
+def test_a_solve_under_the_cap_is_unchanged(tmp_path, monkeypatch):
+    # no solve reaches the cap: the draw is the one without a cap, exactly
+    d0, r0, G0, f0, s0 = _generate_capped(
+        tmp_path / "none", monkeypatch, maxits=None, fail={})
+    d1, r1, G1, f1, s1 = _generate_capped(
+        tmp_path / "cap", monkeypatch, maxits=40, fail={})
+    assert r0 == r1 == [] and len(d0) == len(d1) == 1
+    assert G0.cap_events == G1.cap_events == []
+    e0, e1 = d0[0]["engine"], d1[0]["engine"]
+    assert e0["delivered"]["l_i_3"] == e1["delivered"]["l_i_3"]
+    assert e0["loop"]["n_passes"] == e1["loop"]["n_passes"]
+    np.testing.assert_array_equal(np.asarray(d0[0]["j_BS"]),
+                                  np.asarray(d1[0]["j_BS"]))
+    assert d0[0]["homotopy_pass"] == d1[0]["homotopy_pass"]
+    assert e1["homotopy"]["cap_events"] == []
+
+
+def test_a_capped_loop_solve_rejects_and_is_recorded(tmp_path, monkeypatch):
+    from bouquet.engine import EngineSolveError
+    real = ED.run_draw
+
+    def _capped(*a, **k):
+        try:
+            raise ValueError(_CAP_ERROR)
+        except ValueError as e:
+            raise EngineSolveError("engine GS solve failed (pass 1/1, "
+                                   "maxits 40): " + str(e)) from e
+
+    monkeypatch.setattr(ED, "run_draw", _capped)
+    diags, rej, G, fake, seen = _generate_capped(
+        tmp_path, monkeypatch, maxits=40, fail={})
+    assert diags == [] and [r["reason"] for r in rej] == ["perturb_failed"]
+    assert [(e["stage"], e["outcome"], e["iterations"])
+            for e in G.cap_events] == [("loop", "rejected", 40)]
+    monkeypatch.setattr(ED, "run_draw", real)
 
 
 def test_a_capped_rollback_resolve_rejects_the_draw(tmp_path, monkeypatch):
@@ -414,6 +470,50 @@ def test_a_capped_rollback_resolve_rejects_the_draw(tmp_path, monkeypatch):
     assert diags == []
     assert [r["reason"] for r in rej] == ["homotopy_maxits"]
     assert len(seen) == 3
+    assert [(e["stage"], e["outcome"]) for e in G.cap_events] \
+        == [("homotopy_rollback", "rejected")]
+
+
+def test_a_capped_stage_then_a_capped_rollback_rejects(tmp_path,
+                                                       monkeypatch):
+    # pass 2 capped -> roll back; the rollback re-solve capped too -> reject
+    diags, rej, G, fake, seen = _generate_capped(
+        tmp_path, monkeypatch, maxits=40, fail={2: _CAP_ERROR,
+                                                3: _CAP_ERROR})
+    assert diags == []
+    assert [r["reason"] for r in rej] == ["homotopy_maxits"]
+    assert [(e["stage"], e["outcome"]) for e in G.cap_events] == [
+        ("homotopy", "rolled_back"), ("homotopy_rollback", "rejected")]
+
+
+def test_the_engine_cap_setting_default_and_refusals():
+    from bouquet.engine import (ENGINE_FIELD_DEFAULTS, engine_draw_maxits,
+                                validate_engine_settings)
+    g = GenerationConfig()
+    # the legacy draws' cap is unchanged; the engine's defaults to 100
+    assert g.draw_solve_maxits is None
+    assert g.engine_draw_solve_maxits == 100
+    assert ENGINE_FIELD_DEFAULTS["engine_draw_solve_maxits"] == 100
+    validate_engine_settings(g)                 # legacy + defaults: fine
+    assert engine_draw_maxits(g) == 100
+    # changed under legacy: refused (it would do nothing)
+    with pytest.raises(ValueError, match="no effect"):
+        validate_engine_settings(GenerationConfig(
+            engine_draw_solve_maxits=50))
+    u = GenerationConfig(reconstruction_engine="unified")
+    validate_engine_settings(u)
+    for bad in (0, -3, 2.5, True):
+        u.engine_draw_solve_maxits = bad
+        with pytest.raises(ValueError, match="engine_draw_solve_maxits"):
+            validate_engine_settings(u)
+    u.engine_draw_solve_maxits = None
+    validate_engine_settings(u)
+    assert engine_draw_maxits(u) is None
+    # the legacy draws' knob under the engine: refused, never ignored
+    u.engine_draw_solve_maxits = 100
+    u.draw_solve_maxits = 40
+    with pytest.raises(ValueError, match="draw_solve_maxits"):
+        validate_engine_settings(u)
 
 
 def test_without_a_cap_the_homotopy_is_unchanged(tmp_path, monkeypatch):
@@ -447,6 +547,8 @@ def test_a_capped_post_homotopy_solve_has_its_own_code(tmp_path,
         tmp_path / "a", monkeypatch, maxits=40, fail={})
     assert diags == [] and [r["reason"] for r in rej] \
         == ["post_homotopy_maxits"]
+    assert [(e["stage"], e["outcome"]) for e in G.cap_events] \
+        == [("post_homotopy", "rejected")]
     diags, rej, G, fake, seen = _generate_capped(
         tmp_path / "b", monkeypatch, maxits=None, fail={})
     assert diags == [] and [r["reason"] for r in rej] \

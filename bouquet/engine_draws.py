@@ -1078,7 +1078,11 @@ class GenerateEngineDraws:
         self.loop_settings = dict(ctx.loop)
         self._cur = None
         self._cap_saved = None
-        #: capped homotopy / post-homotopy solves that did not converge
+        self._timer = None
+        #: every solve of a draw that stopped at the cap without converging:
+        #: ``draw``, ``stage`` / ``where``, ``maxits``, ``iterations`` (the
+        #: cap: the solver stops there), ``seconds``, ``outcome``
+        #: (``"rolled_back"`` / ``"rejected"``), ``error``
         self.cap_events = []
 
     # ---- the pressure the baseline re-solve and every draw use --------
@@ -1116,31 +1120,60 @@ class GenerateEngineDraws:
                 "silently ignored")
 
     def rejection_reason(self, exc, stage):
-        """The rejection code; with ``draw_solve_maxits`` set, a
-        post-homotopy pass whose solve stopped at the cap is
-        ``post_homotopy_maxits`` (its own code, never folded into
-        ``jbs_post_homotopy_error``)."""
+        """The rejection code; with a cap set, a post-homotopy pass whose
+        solve stopped at it is ``post_homotopy_maxits`` (its own code, never
+        folded into ``jbs_post_homotopy_error``).  A capped LOOP solve keeps
+        its code (``anchor_solve_failed`` / ``perturb_failed``) and is
+        recorded in :attr:`cap_events` too."""
         if stage == "post_homotopy" and self.hit_cap(exc):
-            self.announce_cap("post-homotopy pass", exc)
+            self.announce_cap("post-homotopy pass", exc,
+                              stage="post_homotopy",
+                              seconds=self._backend_seconds())
             return "post_homotopy_maxits"
-        return engine_rejection_reason(exc, stage)
+        code = engine_rejection_reason(exc, stage)
+        if stage == "perturb" and self.hit_cap(exc):
+            self.announce_cap("loop", exc, stage="loop",
+                              seconds=self._backend_seconds())
+        return code
+
+    def _backend_seconds(self):
+        b = None if self._cur is None else self._cur.get("backend")
+        v = getattr(b, "last_solve_s", None)
+        return None if v is None else float(v)
+
+    def last_homotopy_solve_seconds(self):
+        """Wall time [s] of the last homotopy solve (timed while the cap is
+        installed), or ``None``."""
+        t = self._timer
+        return None if t is None else t.get("last_s")
 
     # ---- draw_solve_maxits on the homotopy and post-homotopy solves ------
     def hit_cap(self, exc) -> bool:
-        """A solve that stopped at ``draw_solve_maxits`` (only when a cap is
-        set: with the default ``None`` nothing is re-classified)."""
+        """A solve that stopped at ``engine_draw_solve_maxits`` (only when a
+        cap is set: with ``None`` nothing is re-classified)."""
         return self.maxits is not None and solve_hit_iteration_cap(exc)
 
-    def announce_cap(self, where, exc):
-        """Print and record a capped solve that did not converge (the draw
-        is then REJECTED by the caller)."""
+    def announce_cap(self, where, exc, *, stage=None, seconds=None,
+                     outcome="rejected"):
+        """Print and record a capped solve that did not converge.
+        *outcome* is ``"rejected"`` (the caller rejects the draw) or
+        ``"rolled_back"`` (a homotopy stage: the draw goes back to the last
+        good stage, under the homotopy's own rule)."""
         ev = dict(draw=(None if self._cur is None else self._cur["count"]),
-                  where=str(where), maxits=self.maxits,
+                  where=str(where),
+                  stage=str(stage if stage is not None else where),
+                  maxits=self.maxits, iterations=self.maxits,
+                  seconds=(None if seconds is None else float(seconds)),
+                  outcome=str(outcome),
                   error=f"{type(exc).__name__}: {str(exc).strip()[:300]}")
         self.cap_events.append(ev)
+        what = ("draw REJECTED" if outcome == "rejected" else
+                "rolled back to the last good homotopy stage")
+        sec = "" if seconds is None else f" after {float(seconds):.1f} s"
         print(f"  [engine draw] {where}: the GS solve stopped at "
-              f"draw_solve_maxits={self.maxits} without converging -> draw "
-              "REJECTED (not rolled back, not archived)", flush=True)
+              f"engine_draw_solve_maxits={self.maxits}{sec} without "
+              f"converging -> {what}", flush=True)
+        return ev
 
     def cap_solver(self, mygs):
         """Set ``draw_solve_maxits`` on the solver for the homotopy stage
@@ -1148,7 +1181,10 @@ class GenerateEngineDraws:
         applies it per solve).  A no-op without a cap, or when the solver
         already carries it (``Bouquet.generate``'s DrawSolveGuard); the
         value found is put back by :meth:`uncap_solver`."""
-        if self.maxits is None or self._cap_saved is not None:
+        if self.maxits is None:
+            return
+        self._time_solves(mygs)
+        if self._cap_saved is not None:
             return
         st = getattr(mygs, "settings", None)
         if st is None:
@@ -1160,8 +1196,47 @@ class GenerateEngineDraws:
         st.maxits = self.maxits
         mygs.update_settings()
 
+    def _time_solves(self, mygs):
+        """Time every ``mygs.solve`` while the homotopy cap is installed (the
+        wall time of a capped stage / rollback re-solve is recorded); a pure
+        pass-through otherwise, removed by :meth:`uncap_solver`."""
+        if getattr(self, "_timer", None) is not None:
+            return
+        orig = getattr(mygs, "solve", None)
+        if not callable(orig):
+            return
+        own = "solve" in getattr(mygs, "__dict__", {})
+        t = dict(orig=orig, own=own, last_s=None)
+
+        def solve(*a, **k):
+            import time
+            t0 = time.perf_counter()
+            try:
+                return orig(*a, **k)
+            finally:
+                t["last_s"] = time.perf_counter() - t0
+        try:
+            mygs.solve = solve
+        except (AttributeError, TypeError):
+            return
+        self._timer = t
+
+    def _untime_solves(self, mygs):
+        t = getattr(self, "_timer", None)
+        if t is None:
+            return
+        self._timer = None
+        if t["own"]:
+            mygs.solve = t["orig"]
+        else:
+            try:
+                del mygs.solve
+            except AttributeError:
+                pass
+
     def uncap_solver(self, mygs):
         """Undo :meth:`cap_solver` (idempotent)."""
+        self._untime_solves(mygs)
         if self._cap_saved is None:
             return
         (cur,), self._cap_saved = self._cap_saved, None
@@ -1310,6 +1385,8 @@ class GenerateEngineDraws:
         rec["homotopy"] = dict(
             enabled=bool(self.homotopy),
             solve_maxits=self.maxits,
+            cap_events=[dict(e) for e in self.cap_events
+                        if e.get("draw") == cur["count"]],
             homotopy_pass=diagnostics.get("homotopy_pass"),
             homotopy_F_lim=diagnostics.get("homotopy_F_lim"),
             homotopy_VSC_lim=diagnostics.get("homotopy_VSC_lim"),
@@ -1412,13 +1489,14 @@ def build_generate_context(bq, env):
             "engine draws (Stage 3) need the unified engine's reconstruction "
             "from prepare_baseline() in this session (its live state is what "
             "a draw inherits); call prepare_baseline() first")
+    from .engine import engine_draw_maxits
     gc = bq.config.generation
     bl = bq.baseline
     ctx = context_from_run(run, gc, bl)
     unc = dict(env)
     return GenerateEngineDraws(
         ctx, unc=unc, psi_pad=run["psi_pad"], q_psi=run.get("q_psi"),
-        maxits=getattr(gc, "draw_solve_maxits", None),
+        maxits=engine_draw_maxits(gc),
         homotopy=bool(getattr(gc, "engine_draw_homotopy", True)),
         l_i_tolerance=float(gc.l_i_tolerance))
 
