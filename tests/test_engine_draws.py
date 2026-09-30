@@ -135,6 +135,29 @@ def test_the_first_request_is_the_stored_request_bit_for_bit(dc):
         assert np.any(res["state"].delivery_correction != 0.0)
 
 
+@pytest.mark.parametrize("case", ["soft_rows", "bootstrap_scalar"])
+def test_the_identity_holds_for_soft_rows_and_the_scalar_preset(case):
+    """The IDS-like soft rows (the Ip-row target is then the closure's
+    posterior Ip, not the measured one) and a scalar preset."""
+    import test_engine as TE
+    if case == "soft_rows":
+        ad = T.ToyAdapter(soft=True, li_target=LI0 * 1.02)
+        gc = {}
+    else:
+        ad = T.ToyAdapter(li_target=None, jB_ind=TE._consistent_inductive())
+        gc = dict(engine_preset="bootstrap_scalar", engine_rows=["Ip"])
+    ad.read()
+    b = T.ToyGS()
+    eng, res, rec = _quiet(reconstruct, ad, b, T.settings(**gc), label="t")
+    ctx = _ctx(eng, res)
+    r = _quiet(ED.run_draw, ctx, b, ctx.zero_inputs())["record"]
+    assert r["identity"]["pass1_request_bit_identical"]
+    assert r["amplitude"]["per_pass"][0]["a_ind"] == 1.0
+    assert r["loop"]["converged"]
+    if case == "soft_rows":
+        assert ctx.Ip_star != eng.c.Ip        # the posterior, recorded
+
+
 def test_pass_one_closes_with_exactly_zero_increment(recon):
     eng, res, rec, b = recon
     ctx = _ctx(eng, res)
