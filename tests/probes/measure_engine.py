@@ -633,8 +633,8 @@ def _delivered_gfiles(b, psi_pad):
     import bouquet as bq
     from bouquet.edge_pressure import load_record
     from bouquet.io.geqdsk import read_geqdsk
-    from bouquet.utils import (_baseline_group_path, find_bytes_dataset,
-                               read_eqdsk_from_bytes)
+    from bouquet.schema import find_bytes_dataset
+    from bouquet.utils import _baseline_group_path, read_eqdsk_from_bytes
     ar = bq.BouquetArchive(b)
     out = dict(draws=[])
     for sv in ar:
