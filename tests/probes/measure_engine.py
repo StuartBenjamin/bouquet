@@ -131,6 +131,37 @@ def _q_profile(mygs, psi):
     return np.asarray(mygs.get_q(psi=pq)[1], dtype=float)
 
 
+#: the grid every current comparison of the probe is made on
+COMPARISON_GRID = ("linearly interpolated from the solver's uniform sampling "
+                   "linspace(psi_pad, 1 - psi_pad, n) onto the psi_N of the "
+                   "profile it is compared with")
+
+
+def _registered(A_uniform, psi, psi_pad):
+    from bouquet.TokaMaker_interface import register_corrective_output
+    return register_corrective_output(A_uniform, psi, psi_pad)
+
+
+def _grid_note(A_uniform, psi, psi_pad):
+    """What the registration changed: the grid offset and the size of the
+    index-for-index artefact it removes (% of the achieved peak)."""
+    import numpy as np
+    from bouquet.TokaMaker_interface import corrective_output_grid
+    A_u = np.asarray(A_uniform, float)
+    psi = np.asarray(psi, float)
+    u = corrective_output_grid(A_u.size, psi_pad)
+    d = A_u - _registered(A_u, psi, psi_pad)
+    pk = float(np.max(np.abs(A_u))) or 1.0
+    return dict(
+        compared_on="the psi_N of the compared profile",
+        sampled_on="linspace(psi_pad, 1 - psi_pad, n)", n=int(A_u.size),
+        psi_pad=float(psi_pad),
+        max_grid_offset=float(np.max(np.abs(u - psi))),
+        index_for_index_artefact_pct_of_peak=dict(
+            rms=float(100.0 * np.sqrt(np.mean(d ** 2)) / pk),
+            max=float(100.0 * np.max(np.abs(d)) / pk)))
+
+
 def _distance_gfile(b, bl, psi_pad):
     """The three-state comparison report's table for the engine state."""
     import numpy as np
@@ -142,7 +173,10 @@ def _distance_gfile(b, bl, psi_pad):
     psi = np.asarray(eq.psi_N, float)
     jin = np.abs(np.asarray(eq.j_tor_averaged_direct, float))
     peak = float(np.max(jin))
-    A = np.asarray(_corrective_output_jphi(mygs, psi, psi_pad), float)
+    A_u = np.asarray(_corrective_output_jphi(mygs, psi, psi_pad), float)
+    # the achieved current is SAMPLED on the solver's uniform grid; every
+    # comparison below is on the input's psi_N (see _registered)
+    A = _registered(A_u, psi, psi_pad)
     R = np.asarray(bl.j_phi, float)
     st_i = mygs.get_stats(lcfs_pad=psi_pad, li_normalization="iter")
     st_s = mygs.get_stats(lcfs_pad=psi_pad, li_normalization="std")
@@ -198,7 +232,8 @@ def _distance_gfile(b, bl, psi_pad):
                     engine=float(st_i.get("beta_pol", float("nan"))) / 100.0),
         lcfs_mm=dict(rms=rms, max=mx),
         achieved_form="TokaMaker_interface._corrective_output_jphi (the "
-                      "comparison report's 'achieved')",
+                      "comparison report's 'achieved'), " + COMPARISON_GRID,
+        comparison_grid=_grid_note(A_u, psi, psi_pad),
         input_form="|g-file j_tor_averaged_direct| (bouquet's reader)")
 
 
@@ -222,9 +257,21 @@ def _distance_ids(b, bl, psi_pad):
     psn = (psq - psq[0]) / (psq[-1] - psq[0])
     psi = np.asarray(bl.psi_N, float)
     qin = np.abs(np.interp(psi, psn, np.asarray(p1["q"], float)))
-    jin = np.interp(psi, psn, np.asarray(p1["j_tor"], float))
+    # the source's current in the frame the solve is in: the reader's own
+    # orientation factor (a reversed-Ip source stores j_tor negative), else
+    # the sign of the slice's own Ip
+    sgn = getattr(bl, "source_current_sign", None)
+    if sgn is None:
+        ip = gq.get("ip")
+        sgn = -1.0 if (ip is not None and float(ip) < 0.0) else 1.0
+    sgn = float(sgn)
+    jin = sgn * np.interp(psi, psn, np.asarray(p1["j_tor"], float))
     peak = float(np.max(np.abs(jin)))
-    A = np.asarray(_corrective_output_jphi(mygs, psi, psi_pad), float)
+    A_u = np.asarray(_corrective_output_jphi(mygs, psi, psi_pad), float)
+    # SAMPLED on the solver's uniform grid, compared on the baseline's psi_N
+    # (an IDS grid is not uniform: index for index this compared the current
+    # at one radius with the source's at another)
+    A = _registered(A_u, psi, psi_pad)
     R = np.asarray(bl.j_phi, float)
     st_i = mygs.get_stats(lcfs_pad=psi_pad, li_normalization="iter")
     qp = np.abs(_q_profile(mygs, psi))
@@ -253,7 +300,11 @@ def _distance_ids(b, bl, psi_pad):
         requested_minus_achieved_pct_of_peak=dict(
             core=_pct_stats(R - A, peak, core),
             edge=_pct_stats(R - A, peak, edge)),
-        lcfs_mm=dict(rms=rms, max=mx))
+        lcfs_mm=dict(rms=rms, max=mx),
+        source_current_sign=sgn,
+        achieved_form="TokaMaker_interface._corrective_output_jphi, "
+                      + COMPARISON_GRID,
+        comparison_grid=_grid_note(A_u, psi, psi_pad))
 
 
 def _resolve_self(b, bl, psi_pad):

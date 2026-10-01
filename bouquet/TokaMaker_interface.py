@@ -680,6 +680,46 @@ def _corrective_output_jphi(mygs, psi_N, psi_pad):
         dtype=float)
 
 
+def corrective_output_grid(n, psi_pad):
+    """The ``psi_N`` of the ``n`` samples :func:`_corrective_output_jphi`
+    (and the corrective iteration's own measurement) returns: the solver's
+    uniform sampling ``linspace(psi_pad, 1 - psi_pad, n)`` -- NOT the
+    ``psi_N`` grid handed in, whose LENGTH alone is used."""
+    return np.linspace(float(psi_pad), 1.0 - float(psi_pad), int(n))
+
+
+def register_corrective_output(achieved, psi_N, psi_pad):
+    """*achieved* (the samples of :func:`_corrective_output_jphi`, on
+    :func:`corrective_output_grid`) linearly interpolated onto *psi_N*, so
+    it can be compared, point for point, with a profile that lives on
+    *psi_N*.
+
+    The index-for-index comparison is exact only when *psi_N* IS the
+    uniform sampling.  A reconstruction grid ``linspace(0, 1, n)`` differs
+    from it by at most ``psi_pad`` (at the two ends); a non-uniform grid (an
+    IDS ``core_profiles`` grid, dense near the axis) differs by up to tens
+    of per cent of the minor radius, and the index-for-index difference
+    then compares the current at one radius with a target at another.
+    Outside ``[psi_pad, 1 - psi_pad]`` the end sample is held (the solver
+    does not sample there).  Numpy only: usable on a stored profile.
+    """
+    A = np.asarray(achieved, dtype=float)
+    return np.interp(np.asarray(psi_N, dtype=float),
+                     corrective_output_grid(A.size, psi_pad), A)
+
+
+def index_registration_error(profile, psi_N, psi_pad):
+    """What the index-for-index comparison of :func:`_corrective_output_jphi`
+    adds on its own: for a state whose achieved current IS *profile* (on
+    *psi_N*), the difference ``sampled-on-the-uniform-grid - profile`` taken
+    index for index.  Zero for a comparison on one grid.  Report only."""
+    psi_N = np.asarray(psi_N, dtype=float)
+    prof = np.asarray(profile, dtype=float)
+    sampled = np.interp(corrective_output_grid(psi_N.size, psi_pad), psi_N,
+                        prof)
+    return sampled - prof
+
+
 def _rematch_li_request(mygs, psi_N, j_ind_request, j_bs, pp_prof,
                         Ip_target, pax, li_target, psi_pad, li_tol=0.001,
                         max_li_iters=20, max_step_frac=0.10,
