@@ -153,11 +153,15 @@ class EngineDrawContext:
     def __init__(self, eng, res, *, loop, native, q0_row=False,
                  label="engine draw", bootstrap_refresh=False):
         from .engine import _lin, complete_geometry  # noqa: F401
-        from .utils import (closure_sign_convention, pchip_derivative,
-                            structured_basis_eval)
+        from .edge_pressure import pressure_gradient, resolve_edge_pressure
+        from .utils import closure_sign_convention, structured_basis_eval
         st = res["state"]
         self.eng = eng
         self.c = eng.c
+        #: the reconstruction's edge-pressure settings (bouquet.
+        #: edge_pressure): every draw solve and report uses the same
+        self.edge = resolve_edge_pressure(
+            (getattr(eng, "s", None) or {}).get("edge_pressure"))
         self.psi = np.asarray(eng.psi, dtype=float)
         self.label = str(label)
         self.loop = dict(loop)
@@ -200,7 +204,7 @@ class EngineDrawContext:
         # ---- the pressure term's p' on G* for a draw's pressure (pass 1)
         psi_q = np.asarray(g["psi_q"], dtype=float)
         self._psi_q = psi_q
-        self.dPq_star = np.interp(psi_q, self.psi, pchip_derivative(
+        self.dPq_star = np.interp(psi_q, self.psi, pressure_gradient(
             self.psi, np.asarray(self.c.pressure, dtype=float)))
         pp = np.asarray(g["pprime"], dtype=float)
         nn = float(self.dPq_star @ self.dPq_star)
@@ -210,14 +214,18 @@ class EngineDrawContext:
         # ---- the reconstruction's delivered measurements (the reference)
         m = eng.delivered_meas
         stats = m.get("stats") or {}
+        from .engine import _full_frame
+        full = _full_frame(m)
         from .physics import SOLVER_Q0_PSI_N
         self.ref = dict(
             l_i=float(m["li"]), l_i_1=_f(m.get("li_1")),
             q_row=float(m["q_row"]), q_row_psi_N=float(psi_q[0]),
             q0_stats=_f(stats.get("q_0")),
             q0_stats_psi_N=float(SOLVER_Q0_PSI_N),
-            q95=_f(stats.get("q_95")), beta_n=_f(stats.get("beta_n")),
+            q95=_f(stats.get("q_95")), beta_n=_f(full.get("beta_n")),
             Ip=_f(m.get("Ip")), flux_range=_f(g.get("dpsi_dpsiN")))
+        if m.get("pressure_frames") is not None:
+            self.ref["pressure_frames"] = _frames(m)
         # ---- the kinetic-grid base of the sampler
         nat = dict(native)
         self.native = {k: np.asarray(v, dtype=float)
@@ -263,8 +271,8 @@ class EngineDrawContext:
         row grid, ``sigma_p`` the least-squares factor between the solver's
         ``p'`` on ``G*`` and ``d p / d psi_N``.  Exactly ``G*`` at zero
         perturbation."""
-        from .utils import pchip_derivative
-        dPq = np.interp(self._psi_q, self.psi, pchip_derivative(
+        from .edge_pressure import pressure_gradient
+        dPq = np.interp(self._psi_q, self.psi, pressure_gradient(
             self.psi, np.asarray(pressure, dtype=float)))
         g = dict(self.geom)
         g["pprime"] = np.asarray(self.geom["pprime"], dtype=float) \
@@ -339,6 +347,18 @@ def flux_range_change(fr, fr_ref):
         return dict(flux_range=None, flux_range_rel=None)
     return dict(flux_range=float(fr - fr_ref),
                 flux_range_rel=float((fr - fr_ref) / fr_ref))
+
+
+def _frames(meas):
+    """The JSON-able pressure-frames block of a final measurement
+    (:func:`bouquet.edge_pressure.pressure_frames`: ``p_sep``, the volume,
+    and beta / W_MHD in the solver's frame and with ``p_sep`` added
+    back)."""
+    pf = meas["pressure_frames"]
+    return dict(p_sep=float(pf["p_sep"]), volume=float(pf["volume"]),
+                factor=float(pf["factor"]),
+                solver={k: float(v) for k, v in pf["solver"].items()},
+                full={k: float(v) for k, v in pf["full"].items()})
 
 
 def _f(v):
@@ -831,9 +851,10 @@ def _finish(ctx, backend, inputs, dp, res, m_fin, pin, label):
     chk = check_delivered(res["J_final"], jbs_used, meas["w"], meas["x"],
                           float(ctx.c.Ip), ctx.loop)
     stats = m_fin.get("stats") or {}
+    from .engine import _full_frame
     delivered = dict(
         l_i_3=float(m_fin["li"]), l_i_1=_f(m_fin.get("li_1")),
-        beta_n=_f(stats.get("beta_n")),
+        beta_n=_f(_full_frame(m_fin).get("beta_n")),
         q0=float(m_fin["q_row"]), q0_psi_N=float(ctx.ref["q_row_psi_N"]),
         q0_stats=_f(stats.get("q_0")),
         q0_stats_psi_N=float(ctx.ref["q0_stats_psi_N"]),
@@ -842,6 +863,8 @@ def _finish(ctx, backend, inputs, dp, res, m_fin, pin, label):
                             ok=bool(chk["ok"])),
         request_minus_achieved=dp.passes[-1]["delivery"])
     delivered["flux_range"] = flux_range(m_fin)
+    if m_fin.get("pressure_frames") is not None:
+        delivered["pressure_frames"] = _frames(m_fin)
     amp = last["amp"]
     dli = float(m_fin["li"]) - float(ctx.ref["l_i"])
     ident = dict(
@@ -1051,12 +1074,15 @@ def engine_rejection_reason(exc, stage):
 # ---------------------------------------------------------------------------
 #  generate(): the hook generate_bouquet calls
 # ---------------------------------------------------------------------------
-def tokamaker_backend(mygs, contract, *, psi_pad, q_psi, maxits):
+def tokamaker_backend(mygs, contract, *, psi_pad, q_psi, maxits,
+                      edge_pressure=None):
     """The draw's backend on a live solver (monkeypatched by the fast
-    tests)."""
+    tests).  ``edge_pressure``: the reconstruction's settings
+    (:mod:`bouquet.edge_pressure`)."""
     from .engine import TokaMakerBackend
     return TokaMakerBackend(mygs, contract, psi_pad=psi_pad, li_kind="li_3",
-                            q_psi=q_psi, maxits=maxits)
+                            q_psi=q_psi, maxits=maxits,
+                            edge_pressure=edge_pressure)
 
 
 class GenerateEngineDraws:
@@ -1095,7 +1121,17 @@ class GenerateEngineDraws:
         dc = SimpleNamespace(psi_N=c.psi_N, pressure=c.pressure, Ip=c.Ip,
                              kinetics=c.kinetics)
         return tokamaker_backend(mygs, dc, psi_pad=self.psi_pad,
-                                 q_psi=self.q_psi, maxits=self.maxits)
+                                 q_psi=self.q_psi, maxits=self.maxits,
+                                 edge_pressure=self.ctx.edge)
+
+    def lcfs_pressure(self):
+        """The separatrix pressure a written g-file of the CURRENT draw
+        carries (its own ``p_sep`` under ``separatrix_pressure="offset"``,
+        0 under ``"legacy"``)."""
+        cur = self._cur
+        if cur is None or cur.get("draw") is None:
+            return self.ctx.edge.p_offset(self.ctx.c.pressure)
+        return self.ctx.edge.p_offset(cur["draw"]["inputs"].pressure)
 
     def validate(self, *, pin_jphi, jbs_delta_mode, l_i_uncertainty,
                  recalculate_j_BS, jbs_loop):
@@ -1341,14 +1377,18 @@ class GenerateEngineDraws:
         v["coil_in_spec"] = bool(in_spec)
         v["in_spec"] = bool(in_spec and v["in_band"])
         stats = fin.get("stats") or {}
+        from .engine import _full_frame
         rec = diagnostics["engine"]
         rec["archived"] = dict(
             l_i_3=float(fin["li"]), l_i_1=_f(fin.get("li_1")),
-            beta_n=_f(stats.get("beta_n")), q0=float(fin["q_row"]),
+            beta_n=_f(_full_frame(fin).get("beta_n")),
+            q0=float(fin["q_row"]),
             q0_psi_N=float(self.ctx.ref["q_row_psi_N"]),
             q95=_f(stats.get("q_95")), flux_range=flux_range(fin),
             note=("the archived (post-homotopy) state; 'delivered' is the "
                   "loop's"))
+        if fin.get("pressure_frames") is not None:
+            rec["archived"]["pressure_frames"] = _frames(fin)
         rec["archived"]["deltas"] = dict(
             l_i_3=float(fin["li"]) - float(self.ctx.ref["l_i"]),
             l_i_1=(None if (rec["archived"]["l_i_1"] is None
