@@ -1,6 +1,12 @@
 # Frozen pre-change source (Stage 3 base, before the engine-draw hooks) of the
 # legacy draw-path functions; read by tests/test_engine_draws_legacy_ast.py.
 # NOT imported, never executed.
+# RE-BASED once, by exactly one hunk: the reader's orientation-origin stamp
+# (``current_sign_origin=...`` in ``Bouquet.generate``'s
+# ``stamp_source_orientation`` call), a change of the LEGACY code made by the
+# source-orientation reader work, not by an engine hook.  The comparison this
+# file serves is unchanged: the current functions minus the gated engine
+# branches must still equal it exactly.
 
 # ==== TokaMaker_interface.generate_bouquet ====
 def generate_bouquet(
@@ -3312,7 +3318,9 @@ def generate(self, n: Optional[int] = None, progress_callback=None) -> list:
         stamp_source_orientation(
             header, scan_key=gc.scan_key,
             current_sign=float(getattr(bl, "source_current_sign", 1.0)),
-            b0_sign=getattr(bl, "source_b0_sign", None))
+            b0_sign=getattr(bl, "source_b0_sign", None),
+            current_sign_origin=getattr(bl, "source_current_sign_origin",
+                                        None))
 
     return self.diagnostics
 
