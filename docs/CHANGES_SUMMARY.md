@@ -175,6 +175,38 @@ bit-identical when absent).*
 
 ## Unreleased, intended for the release after 1.4.0 — self-consistent bootstrap current (default ON)
 
+### Approved change of a pass ceiling: `jbs_max_passes_post_homotopy` 4 → 6
+
+**This is a change of a default pass ceiling, approved by the package owner
+on 2026-10-01.** It is the only ceiling that changed: the reconstruction
+ceiling stays 8 (`jbs_max_passes`) and the draw-loop ceiling stays 12
+(`jbs_max_passes_draw`). No tolerance, no convergence criterion and not the
+two-consecutive-pass rule moved; "converged" means what it meant.
+
+- What it is: the number of further bootstrap passes a draw may take at the
+  tight coil stage after its coil homotopy, when Redl on the post-homotopy
+  equilibrium misses the bootstrap the draw carries. A draw that is not back
+  inside the loop tolerances within the ceiling is rejected
+  (`jbs_post_homotopy`).
+- Measured basis ("bouquet unified engine: measurement fixes and the
+  passes-to-convergence study", 2026-10-01): with the ceiling raised for
+  measurement only, no draw of 72 needed more than **5** post-homotopy
+  passes; the 10 draws that needed 5 are exactly the ones a ceiling of 4
+  rejects, and all 8 of them that could be compared attempt for attempt with
+  a run at the ceiling of 4 converged on the next pass and were archived.
+  The new default is the measured need plus one pass of margin.
+- Consequence: draws that were rejected as `jbs_post_homotopy` one pass
+  short of convergence are now archived (each costs one or two more solves);
+  a draw that does not converge still fails, two passes later.
+- What does not change: with `jbs_self_consistent=False` (the frozen legacy
+  path) the post-homotopy stage does not exist and nothing reads the field,
+  so that path is bit-identical. A configuration that sets the field keeps
+  its value.
+- Results obtained with the loop on and the old default can differ in which
+  draws are archived (never in an archived draw that needed 4 passes or
+  fewer). The stored reference run of the test suite was produced at the
+  ceiling of 4 and has not been regenerated here.
+
 *Everything about the self-consistent bootstrap loop sits under this heading,
 so it can become its own release after 1.4.0. The version string is still
 1.3.1 and is not bumped here.*
@@ -216,8 +248,8 @@ consecutive passes (`r_j ≤ 1e-3`, `r_I ≤ 1e-4 I_p`, `Δl_i ≤ 1e-3`,
 `jbs_loop_on_fail="flag"`, and the soft closure's noise-aware stop test with
 one logged retry. Pass ceilings (limits, not tolerances): 8 for the baseline /
 reconstruction, 12 for each loop of a draw (`jbs_max_passes_draw`, was 6) and
-4 post-homotopy passes (`jbs_max_passes_post_homotopy`, now a config field;
-was a hard-coded 2). The draw ceilings were raised when the golden refresh
+6 post-homotopy passes (`jbs_max_passes_post_homotopy`, a config field; was a
+hard-coded 2, then 4 -- see "Approved change of a pass ceiling" below). The draw ceilings were raised when the golden refresh
 showed the standard draw's l_i-match coupling needing 7–8 passes (it contracts
 at ≈0.38/pass from r_j ≈ 2e-2…1.2e-1) and a post-homotopy stage whose first
 pass misses needing 3 under the two-consecutive rule; no tolerance moved.

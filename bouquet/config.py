@@ -1078,9 +1078,15 @@ class GenerationConfig:
     # take at the tight coil stage when Redl on the post-homotopy equilibrium
     # misses its bootstrap (the check itself is not a pass; with the
     # two-consecutive rule a stage whose first pass misses needs >= 3).
+    # The post-homotopy ceiling is 6 (was 4): an owner-approved change of a
+    # pass ceiling, on measurement -- no draw of the convergence study
+    # needed more than 5, and every draw the ceiling of 4 rejected converged
+    # on the next pass; 6 is the measured need plus one pass.  No tolerance
+    # and no criterion moved; the stage does not exist with
+    # jbs_self_consistent=False, so that path is untouched.
     jbs_max_passes: int = 8
     jbs_max_passes_draw: int = 12
-    jbs_max_passes_post_homotopy: int = 4
+    jbs_max_passes_post_homotopy: int = 6
     # Under-relaxation omega of the bootstrap: j_BS <- (1-omega) j_BS + omega
     # Redl.  Held fixed, and halved (floor jbs_loop.JBS_RELAX_FLOOR = 0.25)
     # only on SUSTAINED growth of r_j: growth on jbs_relax_halve_on

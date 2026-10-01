@@ -278,12 +278,17 @@ active criterion on two consecutive passes**. Ceilings (limits, not
 tolerances): `jbs_max_passes = 8` (baseline / reconstruction),
 `jbs_max_passes_draw = 12` for each loop of a draw (its anchor loop, each
 l_i-match candidate's coupling, each Fix C resample), and
-`jbs_max_passes_post_homotopy = 4` passes after a draw's coil homotopy when
+`jbs_max_passes_post_homotopy = 6` passes after a draw's coil homotopy when
 Redl on the delivered equilibrium misses (with the two-consecutive rule a
 stage whose first pass misses needs at least 3). The draw ceilings were
 raised from 6 / 2 once the golden case showed the standard draw's l_i-match
 coupling contracting at ≈0.38/pass from r_j ≈ 2e-2…1.2e-1 (7–8 passes) --
-a limit change; no tolerance moved.
+a limit change; no tolerance moved. The post-homotopy ceiling was then
+raised from 4 to 6, an owner-approved change of a pass ceiling: in the
+passes-to-convergence study no draw needed more than 5 post-homotopy
+passes, and every draw a ceiling of 4 had rejected converged on its next
+pass; 6 is that measured need plus one pass. Again a limit change; no
+tolerance and no criterion moved.
 
 **Where a draw's loop starts.** Every draw's first loop starts from
 `evaluate_jBS` on the draw's **state anchor** (the archived total current at

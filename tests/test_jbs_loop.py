@@ -94,13 +94,17 @@ def test_defaults_are_the_approved_values_and_on():
     assert s["enabled"] is True
     assert (s["rtol_j"], s["rtol_Ip"], s["tol_li"], s["tol_q0"]) == \
         (1e-3, 1e-4, 1e-3, 2e-3)
-    # ceilings: 8 baseline, 12 per draw loop, 4 post-homotopy (limits; the
-    # two-consecutive rule and every tolerance above are unchanged)
+    # ceilings: 8 baseline, 12 per draw loop, 6 post-homotopy (limits; the
+    # two-consecutive rule and every tolerance above are unchanged).  The
+    # post-homotopy ceiling was 4: an owner-approved change of a pass
+    # ceiling on its measured need (5) plus one pass.
     assert s["max_passes"] == 8 and jbs_settings(g, draw=True)[
         "max_passes"] == 12
-    assert g.jbs_max_passes_post_homotopy == 4
-    assert s["post_homotopy_passes"] == 4
-    assert jbs_settings(g, draw=True)["post_homotopy_passes"] == 4
+    assert g.jbs_max_passes_post_homotopy == 6
+    assert s["post_homotopy_passes"] == 6
+    assert jbs_settings(g, draw=True)["post_homotopy_passes"] == 6
+    from bouquet.jbs_loop import JBS_POST_HOMOTOPY_PASSES
+    assert JBS_POST_HOMOTOPY_PASSES == 6
     assert s["relax"] == 0.7 and s["relax_floor"] == 0.25
     assert s["on_fail"] == "raise" and s["init"] == "anchor"
     assert s["required_consecutive"] == 2
@@ -943,3 +947,42 @@ def test_post_homotopy_inside_tolerance_keeps_the_draw(monkeypatch):
     rec, spk, full, jphi = TI._post_homotopy_jbs(eq, ctx, s, x, 1e-3, _IP)
     assert rec["accepted_without_passes"] and eq.solves == 0
     assert not calls["corr"]
+
+
+def test_the_post_homotopy_ceiling_is_not_read_with_the_loop_off():
+    """The approved 4 -> 6 change of the post-homotopy ceiling cannot reach
+    the frozen legacy path: with ``jbs_self_consistent=False`` the draws are
+    handed no loop settings at all (``generate()`` passes ``None``), and the
+    post-homotopy stage runs only on loop settings."""
+    import inspect
+    import re
+    from bouquet.config import GenerationConfig
+    from bouquet import TokaMaker_interface as TI
+    from bouquet.run import Bouquet
+    g = GenerationConfig(jbs_self_consistent=False)
+    assert jbs_settings(g, draw=True)["enabled"] is False
+    src = inspect.getsource(Bouquet.generate)
+    assert re.search(r'jbs_loop=\(_jbs_draw if _jbs_draw\["enabled"\] '
+                     r'else None\)', src)
+    gen = inspect.getsource(TI.generate_bouquet)
+    calls = [m.start() for m in re.finditer(r"_post_homotopy_jbs\(", gen)]
+    assert len(calls) == 1
+    # the one call sits under a guard that requires the loop settings
+    head = gen[:calls[0]]
+    guard = head[head.rindex("if (_jctx is not None and jbs_loop"):]
+    assert "and jbs_loop" in guard and guard.count("\n") < 12
+    # nothing else in the package reads the ceiling
+    import glob
+    import os
+    root = os.path.dirname(inspect.getsourcefile(TI))
+    readers = set()
+    for p in glob.glob(os.path.join(root, "**", "*.py"), recursive=True):
+        with open(p) as fh:
+            for ln in fh:
+                if ln.lstrip().startswith("#"):
+                    continue
+                if re.search(r'\[\s*"post_homotopy_passes"\s*\]|'
+                             r'get\(\s*"post_homotopy_passes"', ln):
+                    readers.add(os.path.basename(p))
+    assert readers <= {"TokaMaker_interface.py", "engine_draws.py",
+                       "jbs_loop.py"}, readers
