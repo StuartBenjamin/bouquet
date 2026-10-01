@@ -297,6 +297,142 @@ def test_both_adapters_declare_the_same_orientation_for_the_same_discharge(
 
 
 # ---------------------------------------------------------------------------
+#  IDS orientation: ONE normalisation, the reader's
+# ---------------------------------------------------------------------------
+def _ids_contract(path, fixed=None, **src):
+    """``(adapter, contract, baseline)`` of the IDS at *path* through the
+    reader and the adapter (no solver)."""
+    import warnings
+    from bouquet.baseline import resolve_baseline
+    from bouquet.config import (BouquetConfig, FixedComponentsConfig,
+                                GenerationConfig, ImasSource, SolverConfig)
+    cfg = BouquetConfig(
+        source=ImasSource(ids_path=str(path), time=_TIME, **src),
+        solver=SolverConfig(mesh_path=_MESH), output_header="t",
+        generation=GenerationConfig(reconstruction_engine="unified"),
+        fixed_components=(fixed or FixedComponentsConfig()))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        bl = resolve_baseline(cfg, None)
+    ad = IdsAdapter(cfg.source, cfg, bl)
+    return ad, ad.read(), bl
+
+
+def _example_dd():
+    import json
+    with open(_OMAS) as fh:
+        return json.load(fh)
+
+
+def _write_dd(tmp_path, dd, name):
+    import json
+    p = tmp_path / name
+    with open(p, "w") as fh:
+        json.dump(dd, fh)
+    return p
+
+
+def test_a_reversed_source_gives_the_same_contract_in_the_positive_frame(
+        tmp_path, ids):
+    """Every orientation of one discharge reads to the SAME parallel
+    components, bit for bit: the adapter applies the reader's factor."""
+    import _mirror_dd as mdd
+    _ad, ref, bl_ref = ids
+    assert ref.signs["current_sign"] == bl_ref.source_current_sign == 1.0
+    for s_ip, s_b0 in mdd.ORIENTATIONS:
+        p = _write_dd(tmp_path, mdd.mirror_dd(_example_dd(), s_ip, s_b0),
+                      f"dd_{mdd.tag(s_ip, s_b0)}.json")
+        _a, c, bl = _ids_contract(p)
+        assert c.signs["current_sign"] == bl.source_current_sign == s_ip
+        assert c.signs["current_sign_origin"] == \
+            bl.source_current_sign_origin
+        for name in ("jB_ind", "jB_fix"):
+            np.testing.assert_array_equal(getattr(c, name),
+                                          getattr(ref, name), err_msg=name)
+        np.testing.assert_array_equal(c.jB_fix_parts["nbi"],
+                                      ref.jB_fix_parts["nbi"])
+        assert np.median(c.jB_ind) > 0.0                # co-current positive
+        # the orientation the MSE rows take: the source's own directions
+        assert c.signs["ip_sign_RphiZ"] == s_ip
+        assert c.signs["bt_sign_RphiZ"] == -1.0 * s_b0   # the example: b0 < 0
+
+
+def test_the_adapter_takes_the_readers_factor_not_a_second_one(tmp_path,
+                                                               ids):
+    """A source whose currents are stored reversed against its ip, read with
+    ImasSource.current_orientation: the adapter follows the reader's factor
+    (the contract is the consistent file's), and -- the Ip direction being
+    stated twice and inconsistently -- states no ip_sign for the MSE rows."""
+    _ad, ref, _bl = ids
+    dd = _example_dd()
+    for c in dd["core_profiles"]["profiles_1d"]:
+        for k in ("j_tor", "j_total", "j_ohmic", "j_bootstrap",
+                  "j_non_inductive"):
+            if k in c:
+                c[k] = [-v for v in c[k]]
+    for s in dd["core_sources"]["source"]:
+        for pr in s["profiles_1d"]:
+            pr["j_parallel"] = [-v for v in pr["j_parallel"]]
+    for ts in dd["equilibrium"]["time_slice"]:
+        ts["profiles_1d"]["j_tor"] = [-v for v in ts["profiles_1d"]["j_tor"]]
+    p = _write_dd(tmp_path, dd, "cur_rev.json")
+    with pytest.raises(ValueError, match="disagree in sign"):
+        _ids_contract(p)                                  # the reader refuses
+    _a, c, bl = _ids_contract(p, current_orientation=-1)
+    assert bl.source_current_sign == -1.0
+    assert c.signs["current_sign"] == -1.0
+    assert "override" in c.signs["current_sign_origin"]
+    np.testing.assert_array_equal(c.jB_ind, ref.jB_ind)
+    np.testing.assert_array_equal(c.jB_fix, ref.jB_fix)
+    # ip > 0 in the file, currents read with -1: no Ip direction is stated
+    assert c.signs["ip_sign_RphiZ"] is None
+    assert "NOT stated" in c.signs["orientation_basis"]
+    assert c.signs["bt_sign_RphiZ"] == -1.0
+    # ... so an MSE row needs the block's own ip_sign
+    g = _gen(_mse_block(er_corrected=True))
+    with pytest.raises(EngineInputRefused, match="ip_sign"):
+        mse_rows(g, dict(ip_sign=c.signs["ip_sign_RphiZ"],
+                         bt_sign=c.signs["bt_sign_RphiZ"],
+                         basis=c.signs["orientation_basis"]))
+    r = mse_rows(_gen(_mse_block(er_corrected=True, ip_sign=1)),
+                 dict(ip_sign=None, bt_sign=-1.0, basis="test"))
+    assert r["chords"]["ip_sign"] == 1.0
+
+
+def test_user_driven_currents_are_positive_frame_for_any_orientation(
+        tmp_path):
+    """The same FixedComponentsConfig j_NBI / j_RF (co-current positive)
+    gives the same toroidal fixed parts whichever way the source is
+    oriented -- as the reader takes them; only the dd's own currents are
+    re-signed."""
+    import _mirror_dd as mdd
+    from bouquet.config import FixedComponentsConfig
+    x = np.linspace(0.0, 1.0, 33)
+    j_nbi = 4.0e4 * (1.0 - x ** 2)
+    j_rf = 1.5e4 * np.exp(-0.5 * ((x - 0.4) / 0.1) ** 2)
+    got = {}
+    for s_ip, s_b0 in ((1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0)):
+        p = _write_dd(tmp_path, mdd.mirror_dd(_example_dd(), s_ip, s_b0),
+                      f"dd_{mdd.tag(s_ip, s_b0)}.json")
+        ad, c, bl = _ids_contract(p, fixed=FixedComponentsConfig(
+            psi_N=x, j_NBI=j_nbi, j_RF=j_rf))
+        assert bl.source_current_sign == s_ip
+        got[(s_ip, s_b0)] = ad._user_fix_tor
+        np.testing.assert_array_equal(
+            ad._user_fix_tor["nbi"], np.interp(c.psi_N, x, j_nbi))
+        np.testing.assert_array_equal(
+            ad._user_fix_tor["rf"], np.interp(c.psi_N, x, j_rf))
+        assert np.all(ad._user_fix_tor["nbi"] >= 0.0)
+        # the reader resampled the same arrays, in the same frame
+        assert np.all(np.asarray(bl.j_NBI) >= 0.0)
+    for k in ("nbi", "rf"):
+        np.testing.assert_array_equal(got[(1.0, 1.0)][k],
+                                      got[(-1.0, 1.0)][k])
+        np.testing.assert_array_equal(got[(1.0, 1.0)][k],
+                                      got[(-1.0, -1.0)][k])
+
+
+# ---------------------------------------------------------------------------
 #  identity (I2) on the golden fixture's stored geometry (read-only)
 # ---------------------------------------------------------------------------
 def test_identity_I2_on_the_golden_fixtures_stored_geometry():
