@@ -749,3 +749,170 @@ def test_the_probe_draw_mode_runs_on_the_toy(tmp_path, toy_bouquet_solver):
     assert d["attempts"] == 2 == d["archived"] + d["rejected"]
     assert set(d["stage_totals"]) == set(ED._Clock.STAGES)
     json.dumps(jsonable(d))
+
+
+# ---------------------------------------------------------------------------
+#  non-physical DRAWN kinetics: their own rejection code, before any solve
+# ---------------------------------------------------------------------------
+def _counting(b):
+    """A backend copy that counts solves and bootstrap evaluations."""
+    b2 = copy.deepcopy(b)
+    n = dict(solve=0, redl=0)
+    _solve, _redl = b2.solve, b2.redl
+
+    def solve(*a, **k):
+        n["solve"] += 1
+        return _solve(*a, **k)
+
+    def redl(*a, **k):
+        n["redl"] += 1
+        return _redl(*a, **k)
+    b2.solve, b2.redl = solve, redl
+    return b2, n
+
+
+@pytest.mark.parametrize("name, value, rule", [
+    ("ti", -1810.0, "strictly positive"), ("te", 0.0, "strictly positive"),
+    ("ne", -1.0e18, "strictly positive"), ("ni", 0.0, "strictly positive"),
+    ("zeff", 0.9, ">= 1")])
+def test_nonphysical_drawn_kinetics_have_their_own_code(recon, name, value,
+                                                        rule):
+    from bouquet.TokaMaker_interface import (DRAW_REJECTION_REASONS,
+                                             DrawAnchorSolveFailed)
+    eng, res, _rec, b = recon
+    ctx = _ctx(eng, res)
+    inp = ctx.zero_inputs()
+    inp.kinetics = {k: np.array(v, dtype=float, copy=True)
+                    for k, v in inp.kinetics.items()}
+    inp.kinetics[name][3:9] = value
+    b2, n = _counting(b)
+    with pytest.raises(ED.DrawKineticsNonPhysical) as ei:
+        _quiet(ED.run_draw, ctx, b2, inp)
+    # found BEFORE any solve and before the first bootstrap evaluation
+    assert n == dict(solve=0, redl=0)
+    assert not isinstance(ei.value, DrawAnchorSolveFailed)
+    info = ei.value.info
+    assert info["quantity"] == name and info["rule"] == rule
+    assert info["psi_N"] == pytest.approx(float(PSI[3]))
+    assert info["value"] == pytest.approx(value)
+    assert info["n_bad"] == 6 and info["n_nodes"] == len(PSI)
+    assert name in str(ei.value) and "psi_N=" in str(ei.value)
+    assert ED.engine_rejection_reason(ei.value, "perturb") \
+        == "kinetics_nonphysical"
+    assert "kinetics_nonphysical" in DRAW_REJECTION_REASONS
+    # the record carries the quantity and where
+    rec = ED.GenerateEngineDraws.annotate_rejection(
+        None, dict(reason="kinetics_nonphysical"), ei.value)
+    assert rec["info"]["quantity"] == name
+    assert rec["info"]["psi_N"] == pytest.approx(float(PSI[3]))
+
+
+def test_a_non_finite_drawn_profile_is_the_same_code(recon):
+    eng, res, _rec, b = recon
+    ctx = _ctx(eng, res)
+    inp = ctx.zero_inputs()
+    inp.kinetics = {k: np.array(v, dtype=float, copy=True)
+                    for k, v in inp.kinetics.items()}
+    inp.kinetics["te"][5] = np.nan
+    b2, n = _counting(b)
+    with pytest.raises(ED.DrawKineticsNonPhysical) as ei:
+        _quiet(ED.run_draw, ctx, b2, inp)
+    assert n == dict(solve=0, redl=0)
+    assert ei.value.info["quantity"] == "te"
+    assert ei.value.info["rule"] == "finite"
+
+
+def test_the_first_quantity_is_the_bootstrap_evaluations_order(recon):
+    """ne, ni, te, ti, zeff -- the order evaluate_jBS checks them, so the
+    quantity named is the one that evaluation named."""
+    eng, res, _rec, b = recon
+    ctx = _ctx(eng, res)
+    inp = ctx.zero_inputs()
+    inp.kinetics = {k: np.array(v, dtype=float, copy=True)
+                    for k, v in inp.kinetics.items()}
+    inp.kinetics["ti"][0] = -5.0
+    inp.kinetics["ni"][7] = -1.0
+    with pytest.raises(ED.DrawKineticsNonPhysical) as ei:
+        _quiet(ED.run_draw, ctx, copy.deepcopy(b), inp)
+    assert ei.value.info["quantity"] == "ni"
+    assert [x["quantity"] for x in ei.value.info["all"]] == ["ni", "ti"]
+
+
+def test_the_check_is_the_bootstrap_evaluations_own_domain():
+    """Same verdict as evaluate_jBS's input checks on the same arrays: the
+    draws rejected are the ones that evaluation refused -- no more."""
+    from bouquet.physics import JBSEvaluationError, evaluate_jBS
+    n = 17
+    psi = np.linspace(0.0, 1.0, n)
+    good = dict(ne=np.full(n, 3e19), te=np.full(n, 1e3),
+                ni=np.full(n, 2.5e19), ti=np.full(n, 1.2e3),
+                zeff=np.full(n, 1.8))
+    assert ED.check_draw_kinetics(good, psi) is None
+    cases = [("ne", 0.0), ("ne", -1.0), ("ni", 0.0), ("te", -3.0),
+             ("ti", 0.0), ("ti", -1810.0), ("zeff", 0.999),
+             ("ti", 1e-30), ("zeff", 1.0), ("ne", 1.0)]
+    for name, v in cases:
+        k = {q: a.copy() for q, a in good.items()}
+        k[name][4] = v
+        try:
+            # the input checks run before the equilibrium is touched
+            evaluate_jBS(None, psi, k["ne"], k["te"], k["ni"], k["ti"],
+                         k["zeff"], psi_pad=1e-3)
+            refused = None
+        except JBSEvaluationError as e:
+            refused = e.quantity
+        except Exception:
+            refused = None          # past the input checks (no equilibrium)
+        try:
+            ED.check_draw_kinetics(k, psi)
+            mine = None
+        except ED.DrawKineticsNonPhysical as e:
+            mine = e.info["quantity"]
+        assert mine == refused, (name, v, mine, refused)
+
+
+def test_physical_draws_are_untouched(recon):
+    """A draw with physical kinetics takes the path it took: same first
+    request, same record (the check adds nothing to it)."""
+    eng, res, _rec, b = recon
+    ctx = _ctx(eng, res)
+    out = _quiet(ED.run_draw, ctx, copy.deepcopy(b), ctx.zero_inputs())
+    assert out["record"]["loop"]["converged"]
+    assert "kinetics" not in "".join(out["record"].get("notices", []))
+
+
+def test_generate_records_the_quantity_and_psi_n(tmp_path, monkeypatch,
+                                                 capsys):
+    """Through generate_bouquet: the attempt whose drawn T_i is negative is
+    rejected as kinetics_nonphysical with the quantity, value and psi_N in
+    its record; the other attempts are the draws they were (same sampler
+    stream: the check consumes nothing)."""
+    ref, _rej0, _h0, _G0 = _generate(tmp_path / "ref", monkeypatch, n=3)
+    real = ED.sample_draw_inputs
+    calls = dict(n=0)
+
+    def sample(ctx, rng, unc, flux_integral, **kw):
+        inp = real(ctx, rng, unc, flux_integral, **kw)
+        calls["n"] += 1
+        if calls["n"] == 2:
+            inp.kinetics = {k: np.array(v, dtype=float, copy=True)
+                            for k, v in inp.kinetics.items()}
+            inp.kinetics["ti"][:4] = -1810.0
+        return inp
+    monkeypatch.setattr(ED, "sample_draw_inputs", sample)
+    diags, rej, h, G = _generate(tmp_path / "bad", monkeypatch, n=3)
+    assert len(diags) == 2 and len(rej) == 1
+    r = rej[0]
+    assert r["reason"] == "kinetics_nonphysical" and r["draw"] == 1
+    assert r["stage"] == "perturb"
+    assert r["error_type"] == "DrawKineticsNonPhysical"
+    assert r["info"]["quantity"] == "ti"
+    assert r["info"]["value"] == pytest.approx(-1810.0)
+    assert r["info"]["psi_N"] == pytest.approx(float(PSI[0]))
+    assert r["info"]["n_bad"] == 4
+    assert "ti" in r["message"] and "psi_N" in r["message"]
+    # attempts 1 and 3 are the reference batch's draws 1 and 3, bit for bit
+    for mine, theirs in ((diags[0], ref[0]), (diags[1], ref[2])):
+        np.testing.assert_array_equal(mine["j_BS"], theirs["j_BS"])
+        assert mine["engine"]["delivered"]["l_i_3"] \
+            == theirs["engine"]["delivered"]["l_i_3"]

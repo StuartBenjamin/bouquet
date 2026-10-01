@@ -716,7 +716,9 @@ class Bouquet:
         if getattr(self.config.generation, "reconstruction_engine",
                    "legacy") == "unified":
             from .engine import prepare_engine_baseline
-            return prepare_engine_baseline(self)
+            _bl = prepare_engine_baseline(self)
+            self._report_sigma_exceeds_profile(_bl)
+            return _bl
 
         # the self-consistent bootstrap loop runs in the baseline too, so its
         # workflow refusals fire here (before single_profile_jphi rewrites
@@ -783,7 +785,35 @@ class Bouquet:
         # solver chatter was captured to baseline.reconstruction_log).
         if self.baseline.reconstruction_metrics is not None:
             self._print_reconstruction_summary()
+        self._report_sigma_exceeds_profile(self.baseline)
         return self.baseline
+
+    def _report_sigma_exceeds_profile(self, bl) -> None:
+        """One line at baseline time when an input kinetic sigma exceeds the
+        profile it perturbs over a stated fraction of the radius
+        (:func:`bouquet.baseline.sigma_exceeds_profile`).  REPORT ONLY: the
+        envelope is resolved as :meth:`generate` will resolve it (quietly;
+        its own log lines are printed there), nothing is stored, clipped or
+        changed, and a resolution that cannot be made yet is not an error
+        here."""
+        import contextlib
+        import io
+        import warnings
+        self.sigma_exceeds_profile = []
+        try:
+            from .baseline import (resolve_uncertainty,
+                                   sigma_exceeds_profile_line)
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                env = resolve_uncertainty(self.config, bl)
+            recs = list(env.get("sigma_exceeds_profile") or [])
+        except Exception:
+            return
+        self.sigma_exceeds_profile = recs
+        if recs:
+            print("[baseline] " + sigma_exceeds_profile_line(recs),
+                  flush=True)
 
     def _flag_nonconverged_recon_loop(self) -> None:
         """Mark a geqdsk baseline whose self-consistent j_BS loop did not

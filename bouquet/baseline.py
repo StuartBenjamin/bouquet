@@ -542,6 +542,77 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
 
 
 
+#: Fraction of the kinetic grid's psi_N extent over which an input sigma
+#: must exceed the profile it perturbs for :func:`sigma_exceeds_profile` to
+#: report the channel.  A report threshold only: nothing is clipped,
+#: nothing about the sampling changes.
+SIGMA_EXCEEDS_PROFILE_MIN_FRACTION = 0.05
+
+
+def sigma_exceeds_profile(psi_N, profiles, sigmas,
+                          min_fraction=SIGMA_EXCEEDS_PROFILE_MIN_FRACTION):
+    """Channels whose 1-sigma envelope exceeds the profile itself over at
+    least *min_fraction* of the radius (REPORT ONLY).
+
+    A Gaussian draw of a positive profile with ``sigma > value`` is negative
+    with probability > 16 % at that radius; such a draw is non-physical and
+    is rejected (``kinetics_nonphysical``), so a batch on such an input
+    yields little and its statistics say nothing about the solve.
+
+    *profiles* / *sigmas*: ``{"ne" | "te" | "ni" | "ti": array}`` on
+    *psi_N*.  The radial fraction is measured in ``psi_N`` (trapezoid
+    weights), not in node count, so a grid dense near the axis is not
+    over-counted.  Returns a list of ``dict(channel, fraction, psi_N_range,
+    max_ratio, max_ratio_psi_N, min_fraction)``, empty when nothing
+    qualifies.
+    """
+    import numpy as np
+    x = np.asarray(psi_N, dtype=float)
+    if x.ndim != 1 or x.size < 2:
+        return []
+    w = np.gradient(x)
+    w = np.abs(w) / float(np.sum(np.abs(w)))
+    out = []
+    for ch in ("ne", "te", "ni", "ti"):
+        if ch not in profiles or ch not in sigmas:
+            continue
+        v = np.abs(np.asarray(profiles[ch], dtype=float))
+        s = np.asarray(sigmas[ch], dtype=float)
+        if v.shape != x.shape or s.shape != x.shape:
+            continue
+        over = np.isfinite(s) & np.isfinite(v) & (s > v)
+        frac = float(np.sum(w[over]))
+        if not over.any() or frac < float(min_fraction):
+            continue
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where(v > 0.0, s / v, np.inf)
+        i = int(np.argmax(np.where(over, ratio, -np.inf)))
+        out.append(dict(channel=ch, fraction=frac,
+                        psi_N_range=[float(x[over][0]), float(x[over][-1])],
+                        max_ratio=(float(ratio[i]) if np.isfinite(ratio[i])
+                                   else None),
+                        max_ratio_psi_N=float(x[i]),
+                        min_fraction=float(min_fraction)))
+    return out
+
+
+def sigma_exceeds_profile_line(records) -> str:
+    """The one-line report of :func:`sigma_exceeds_profile` records."""
+    parts = []
+    for r in records:
+        mr = ("inf" if r["max_ratio"] is None else f"{r['max_ratio']:.2g}")
+        parts.append(
+            f"sigma_{r['channel']} > {r['channel']} over "
+            f"{100.0 * r['fraction']:.0f}% of psi_N "
+            f"({r['psi_N_range'][0]:.2f}-{r['psi_N_range'][1]:.2f}; max "
+            f"sigma/value {mr} at psi_N={r['max_ratio_psi_N']:.2f})")
+    return ("[sigma-check] WARNING: " + "; ".join(parts) + " -- Gaussian "
+            "draws go non-positive there and are rejected "
+            "(kinetics_nonphysical); expect a low yield.  Report only: "
+            "nothing is clipped and the sampling is unchanged (threshold: "
+            f"{100.0 * records[0]['min_fraction']:.0f}% of the radius).")
+
+
 def resolve_uncertainty(config, baseline) -> dict:
     """Resolve the perturbation envelope for :func:`generate_bouquet`.
 
@@ -647,6 +718,18 @@ def resolve_uncertainty(config, baseline) -> dict:
             out[f"sigma_{_ch}"] = float(_scalars[_ch]) * np.abs(
                 np.asarray(_baseprof[_ch], dtype=float))
             _won[_ch] = f"scalar {float(_scalars[_ch]):g} x |baseline|"
+
+    # REPORT ONLY: a kinetic sigma larger than its own profile over a stated
+    # fraction of the radius (draws through zero are rejected, never clipped)
+    try:
+        out["sigma_exceeds_profile"] = sigma_exceeds_profile(
+            psi_kin, _baseprof, {_c: out[f"sigma_{_c}"]
+                                 for _c in ("ne", "te", "ni", "ti")})
+    except Exception:           # a report must never fail the resolution
+        out["sigma_exceeds_profile"] = []
+    if out["sigma_exceeds_profile"]:
+        print("  " + sigma_exceeds_profile_line(out["sigma_exceeds_profile"]),
+              flush=True)
 
     out["sigma_jphi"] = unc.jphi_scalar_sigma * np.abs(np.asarray(baseline.j_phi, dtype=float))
     _won["jphi"] = f"scalar {float(unc.jphi_scalar_sigma):g} x |j_phi|"

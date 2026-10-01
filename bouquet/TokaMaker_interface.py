@@ -124,6 +124,14 @@ DRAW_REJECTION_REASONS = {
                            "failed; the draw's bootstrap would otherwise be "
                            "evaluated on a stale equilibrium",
     # engine draws (bouquet.engine_draws) only
+    "kinetics_nonphysical": "an engine draw's DRAWN kinetics are outside "
+                            "the physical domain of the bootstrap model "
+                            "(n_e, n_i, T_e or T_i not strictly positive, "
+                            "Z_eff < 1, or a non-finite value, at any "
+                            "node) -- found BEFORE any solve; the record's "
+                            "info names the quantity, the value and psi_N. "
+                            "No solve failed: typically an input sigma "
+                            "that exceeds the profile it perturbs",
     "jbs_non_finite": "an engine draw's loop evaluated a non-finite "
                       "bootstrap (jbs_loop.JBSNonFinite, raised at once)",
     "engine_closure_refused": "an engine draw's Ip amplitude (or Ip + q0 "
@@ -6872,8 +6880,9 @@ def generate_bouquet(
                 _reject(count, _draw_rejection_reason(e, "perturb"),
                         "perturb", exc=e, message=_err_short)
             else:
-                _reject(count, _eng.rejection_reason(e, "perturb"),
-                        "perturb", exc=e, message=_err_short)
+                _eng.annotate_rejection(
+                    _reject(count, _eng.rejection_reason(e, "perturb"),
+                            "perturb", exc=e, message=_err_short), e)
             _skl = os.environ.get('BQ_SKIPLOG')
             if _skl:
                 with open(_skl, 'a') as _skf:

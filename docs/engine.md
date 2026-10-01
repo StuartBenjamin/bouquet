@@ -358,7 +358,11 @@ ARCHIVED draw: a draw outside a band is archived with `in_spec=False` and
 `passes_draw_band=False`, never dropped; the until-N ledger and
 `.filter()`'s `selected` both AND the band into the coil + boundary verdict.
 Rejected (never archived, never counted), with their
-`DRAW_REJECTION_REASONS` code: a loop that does not converge
+`DRAW_REJECTION_REASONS` code: non-physical DRAWN kinetics
+(`kinetics_nonphysical`: n_e, n_i, T_e or T_i not strictly positive, Z_eff
+below 1 or a non-finite value at any node -- found before any solve, with the
+quantity, the value and psi_N in the rejection record's `info`; nothing is
+clipped), a loop that does not converge
 (`jbs_not_converged`), a non-finite bootstrap (`jbs_non_finite`, at once), a
 failed first solve (`anchor_solve_failed`, the anchor's analog: the stored
 state composed with the draw's components), a refused amplitude closure
