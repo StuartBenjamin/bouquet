@@ -1189,6 +1189,25 @@ class GenerationConfig:
     # is untouched.  The engine refuses draw_solve_maxits (the legacy draws'
     # cap); the legacy path never reads this field.
     engine_draw_solve_maxits: Optional[int] = 100
+    # --- the pressure handed to the GS solver (bouquet.edge_pressure) --------
+    # Both settings act on EVERY solve of the package (legacy paths, the
+    # unified engine, the draws, the zero-perturbation checks) and both
+    # default to the behaviour before they existed.
+    # edge_pprime_pin: True sets the last node of P' (psi_N = 1) to zero, so
+    # P' ramps to zero across the final grid interval; False keeps the
+    # profile's own derivative there.  False moves the edge current between
+    # the P' and FF' terms and un-zeroes the pressure-driven current at the
+    # boundary (a PHYSICS change: edge current and q95 move).
+    edge_pprime_pin: bool = True
+    # separatrix_pressure: "legacy" passes the full axis pressure as the
+    # solver's target (the solver's pressure is zero at the boundary, so a
+    # non-zero input p_sep inflates P' everywhere by p_axis/(p_axis-p_sep)
+    # and beta / W_MHD are those of a different profile).  "offset" passes
+    # p_axis - p_sep and adds p_sep back wherever pressure, beta or W_MHD is
+    # reported or delivered (records carry both frames; written g-files
+    # carry the full pressure).  A PHYSICS change when p_sep != 0: P' moves
+    # by the factor (p_axis - p_sep)/p_axis.
+    separatrix_pressure: str = "legacy"
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single
@@ -1251,6 +1270,9 @@ class GenerationConfig:
         """
         resolve_structured_preset(self, stacklevel=4)
         validate_structured_mse_settings(self)
+        from .edge_pressure import validate_edge_pressure_settings
+        validate_edge_pressure_settings(self.edge_pprime_pin,
+                                        self.separatrix_pressure)
         _m = self.draw_solve_maxits
         import numbers
         if _m is not None and (isinstance(_m, bool) or not isinstance(
@@ -1618,6 +1640,9 @@ class BouquetConfig:
         from .jbs_loop import (deprecated_jbs_settings_warning,
                                validate_jbs_settings)
         validate_jbs_settings(self.generation)
+        # the pressure handed to the solver (bouquet.edge_pressure)
+        from .edge_pressure import resolve_edge_pressure
+        resolve_edge_pressure(self.generation)
         # the unified reconstruction engine's settings (refused by name;
         # engine_* fields changed under the legacy engine are refused too)
         from .engine import validate_engine_settings
