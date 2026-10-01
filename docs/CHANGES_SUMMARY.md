@@ -116,6 +116,59 @@ bit-identical when absent).*
   `structured_uniform`: the shipped basis under
   `utils.STRUCTURED_WEIGHTS_UNIFORM` (the design's prior-sensitivity run).
   Neither adds a number. Solver test `tests/test_engine_two_scalar_solver.py`.
+- **The pressure handed to the solver: one helper, two settings (both
+  default to the behaviour before they existed; PHYSICS changes when
+  moved).** `bouquet/edge_pressure.py` now builds every `P'` profile and
+  axis-pressure target, replacing the inline `pp["y"][-1] = 0.0` /
+  `pax = p[0]` statements of the legacy reconstruction and draws, the
+  modelling-source forward solve, the zero-perturbation checks, the engine
+  backend and the engine draws. With the defaults every array is bit for bit
+  what it was (frozen-copy tests: each solve path, as an AST, against its
+  pre-change code with the helper written back inline; the helper's defaults
+  against the inline statements). Applies to BOTH engines.
+  - `GenerationConfig.edge_pprime_pin` (default `True`). `False` keeps the
+    profile's own `P'` at `psi_N = 1` instead of zeroing the last node.
+    **Physics change when off:** the pressure-driven current is no longer
+    forced to zero at the boundary and the edge current moves between the
+    `P'` and `FF'` terms. Measured on the synthetic g-file example (unified
+    engine): pressure-driven current at the boundary 0.006 -> 0.018 MA/m^2,
+    `<j_phi>` at the last node 0.076 -> 0.115 MA/m^2, the `FF'` term there
+    changes sign, `q95` +0.002, `l_i` and the core unchanged; no extra
+    passes, solves or GS iterations.
+  - `GenerationConfig.separatrix_pressure` (default `"legacy"`).
+    `"offset"` passes `p_axis - p_sep` as the solver's axis target (`p_sep`:
+    the solve pressure at `psi_N = 1`, thermal + impurity + fast; each draw
+    its own) and adds `p_sep` back wherever pressure, beta or `W_MHD` is
+    reported or delivered. **Physics change when on and `p_sep != 0`:** `P'`
+    moves by the factor `(p_axis - p_sep) / p_axis` -- under `"legacy"` the
+    solver inflates `P'` by the inverse to reach the full axis pressure with
+    a pressure that is zero at the boundary. Measured on a constructed
+    variant of the synthetic g-file example with `p_sep` = 5.4 % of the axis
+    pressure: `"legacy"` solves `P'` x 1.058 and reports `beta_N` / `W_MHD`
+    4.8 % / 5.2 % above the input's `p - p_edge` values and 7.7 % / 7.3 %
+    below its full-pressure values; `"offset"` solves `P'` x 1.002 and
+    reports -0.8 % / -0.4 % (solver frame) and +0.9 % / +1.2 % (full frame).
+  - **Reporting:** `Baseline.edge_pressure`, the engine record's
+    `edge_pressure` block, `reconstruction_metrics["pressure_like_for_like"]`
+    and every draw record carry `p_sep` and beta / `W_MHD` in two frames --
+    the solver's (from `p - p_sep`) and the full one (`W_MHD + 1.5 p_sep V`,
+    each beta times `(int p dV + p_sep V) / int p dV`, `V` and `int p dV`
+    the solved equilibrium's own) -- each compared with the input's
+    same-definition quantity. Archived as `edge_pressure_json` on
+    `_baseline` and on every draw.
+  - **Delivery:** under `"offset"` written g-files (and the IMAS export built
+    from them) carry the full pressure: `PRES` + that equilibrium's `p_sep`,
+    `PPRIME` unchanged.
+  - **Where the model stops:** a pressure jump at the boundary is not
+    physical; the real separatrix pressure continues into the scrape-off
+    layer, which a vacuum-outside free-boundary model cannot represent
+    ([physics-notes.md](physics-notes.md#the-pressure-handed-to-the-solver-separatrix-pressure-and-the-edge-p-pin)).
+  - **Not reached:** the solver's own `solve_with_bootstrap` helper (legacy
+    non-loop routes; a printed note says so when a setting is moved).
+  - Probe: `tests/probes/measure_engine.py` reports beta / `W_MHD` both ways
+    (`distance.pressure_frames`), an `edge` stage, an opt-in per-solve
+    iteration log, part `recon_legacy`, and checks of the delivered g-files.
+    Solver tests: `tests/test_edge_pressure_solver.py`.
 - **Probe fix:** `tests/probes/measure_engine.py::_distance_ids` takes the
   slice time from the source (it used the synthetic example's constant for
   every dd); the table records the slice it used.

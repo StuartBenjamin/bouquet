@@ -680,6 +680,19 @@ class Bouquet:
         # recalculate_j_BS below), not only at generate()
         self._check_jbs_loop_workflow(self.config.generation)
 
+        # the two edge-pressure settings do not reach the solver's own
+        # bootstrap helper, which the non-loop routes call: say so, once
+        _edge = resolve_edge_pressure(self.config.generation)
+        if not _edge.is_default and not bool(getattr(
+                self.config.generation, "jbs_self_consistent", False)):
+            print("[edge-pressure] NOTE: edge_pprime_pin="
+                  f"{_edge.edge_pprime_pin}, separatrix_pressure="
+                  f"{_edge.separatrix_pressure!r} act on every solve bouquet "
+                  "sets up; the solver's solve_with_bootstrap helper (used "
+                  "by the legacy non-loop routes for their intermediate "
+                  "bootstrap evaluation) builds its own P' and axis target "
+                  "and is NOT affected", flush=True)
+
         # single_profile_jphi: drop the per-draw Sauter recompute BEFORE the
         # baseline work, so the IMAS forward solve does not spend a bootstrap
         # call either. The total j_phi is anchored to the source either way, so

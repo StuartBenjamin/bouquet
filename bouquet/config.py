@@ -1197,7 +1197,11 @@ class GenerationConfig:
     # P' ramps to zero across the final grid interval; False keeps the
     # profile's own derivative there.  False moves the edge current between
     # the P' and FF' terms and un-zeroes the pressure-driven current at the
-    # boundary (a PHYSICS change: edge current and q95 move).
+    # boundary (a PHYSICS change: edge current and q95 move).  Measured on
+    # the synthetic g-file example (unified engine): pressure-driven current
+    # at the boundary 0.006 -> 0.018 MA/m^2, <j_phi> at the last node 0.076
+    # -> 0.115 MA/m^2 with the FF' term changing sign there, q95 +0.002;
+    # l_i, the core and the iteration counts unchanged.
     edge_pprime_pin: bool = True
     # separatrix_pressure: "legacy" passes the full axis pressure as the
     # solver's target (the solver's pressure is zero at the boundary, so a
