@@ -49,6 +49,9 @@ from typing import Optional
 
 import numpy as np
 
+from .edge_pressure import (pressure_frames, resolve_edge_pressure,
+                            solver_pax, solver_pp_profile)
+
 #: Version stamp of the engine (recorded with every run).
 ENGINE_VERSION = "unified-engine/2 (Stage 3: reconstruction and draws)"
 
@@ -304,6 +307,17 @@ def engine_draw_maxits(gc):
     return None if v is None else int(v)
 
 
+def _full_frame(meas) -> dict:
+    """The REPORTED pressure-integral numbers of a final measurement: its
+    full-frame block (:func:`bouquet.edge_pressure.pressure_frames`; exactly
+    the solver's stats when no separatrix pressure is added back), or the
+    stats themselves for a backend that reports no frames."""
+    pf = meas.get("pressure_frames")
+    if pf is not None:
+        return pf["full"]
+    return meas.get("stats") or {}
+
+
 def engine_settings(gc) -> dict:
     """The validated engine settings of a :class:`GenerationConfig`.
 
@@ -325,6 +339,7 @@ def engine_settings(gc) -> dict:
         draw_bootstrap_refresh=bool(getattr(
             gc, "engine_draw_bootstrap_refresh", False)),
         draw_solve_maxits=engine_draw_maxits(gc),
+        edge_pressure=resolve_edge_pressure(gc).record(),
         loop=loop,
         q0_tol=float(gc.q0_tol),
         structured_li_tol=float(gc.structured_li_tol),
@@ -1277,10 +1292,15 @@ class TokaMakerBackend:
     never re-solved at another tolerance.
 
     :meth:`set_inputs` replaces the pressure and the kinetics a DRAW solves
-    and measures with (``None`` keeps the contract's)."""
+    and measures with (``None`` keeps the contract's).
+
+    ``edge_pressure``: the two settings of :mod:`bouquet.edge_pressure`
+    (``edge_pprime_pin``, ``separatrix_pressure``); every ``P'`` and axis
+    target of this backend is built by that module's helper, and a final
+    measurement carries both pressure frames (``pressure_frames``)."""
 
     def __init__(self, mygs, contract, *, psi_pad=1e-3, li_kind="li_3",
-                 q_psi=None, chords=None, maxits=None):
+                 q_psi=None, chords=None, maxits=None, edge_pressure=None):
         self.mygs = mygs
         self.c = contract
         self.psi = np.asarray(contract.psi_N, dtype=float)
@@ -1291,6 +1311,9 @@ class TokaMakerBackend:
         self.chords = chords
         self.n_solves = 0
         self.p = np.asarray(contract.pressure, dtype=float)
+        #: the two edge-pressure settings (bouquet.edge_pressure); None:
+        #: the defaults, bit for bit the behaviour before they existed
+        self.edge = resolve_edge_pressure(edge_pressure)
         self.kin = None
         if maxits is not None and (isinstance(maxits, bool) or int(maxits)
                                    != maxits or int(maxits) < 1):
@@ -1330,8 +1353,13 @@ class TokaMakerBackend:
                              smooth_axis=False)
         return smooth_jbs_transition(np.asarray(d["j_dot_B"], dtype=float))
 
+    def p_sep(self) -> float:
+        """The separatrix pressure added back at reporting / delivery for
+        the pressure CURRENTLY set (a draw's own): ``p[-1]`` under
+        ``separatrix_pressure="offset"``, exactly 0 under ``"legacy"``."""
+        return self.edge.p_offset(self.p)
+
     def solve(self, request, n_passes=1):
-        from .utils import pchip_derivative
         mygs = self.mygs
         req = np.asarray(request, dtype=float)
         if not np.all(np.isfinite(req)):
@@ -1349,11 +1377,10 @@ class TokaMakerBackend:
         try:
             for k in range(int(n_passes)):
                 psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-                pp_y = pchip_derivative(self.psi, self.p) / psi_range
-                pp_y[-1] = 0.0
-                mygs.set_targets(Ip=float(self.c.Ip), pax=float(self.p[0]))
-                mygs.set_profiles(pp_prof={"type": "linterp", "y": pp_y,
-                                           "x": self.psi}, ffp_prof=ffp)
+                mygs.set_targets(Ip=float(self.c.Ip),
+                                 pax=solver_pax(self.p, self.edge))
+                mygs.set_profiles(pp_prof=solver_pp_profile(
+                    self.psi, self.p, psi_range, self.edge), ffp_prof=ffp)
                 _t0 = time.perf_counter()
                 try:
                     mygs.solve()
@@ -1421,6 +1448,9 @@ class TokaMakerBackend:
             stats = mygs.get_stats(lcfs_pad=pad, li_normalization="iter")
             out["stats"] = {k: float(v) for k, v in stats.items()
                             if np.isscalar(v) and np.isfinite(float(v))}
+            # both frames of beta / W_MHD: the solver's own (its pressure
+            # is zero at the boundary) and with p_sep added back
+            out["pressure_frames"] = pressure_frames(stats, self.p_sep())
             out["li_1"] = float(li_achieved(eq, li_kind="li_1",
                                             psi_pad=pad)[0])
         return out
@@ -1525,11 +1555,25 @@ def reconstruct(adapter, backend, settings, *, label=""):
     return eng, res, rec
 
 
+def edge_pressure_record(eng) -> dict:
+    """The engine record's ``edge_pressure`` block: the two settings, the
+    contract pressure's ``p_sep`` / axis value / offset applied / axis
+    target (:func:`bouquet.edge_pressure.describe`) and both pressure
+    frames of the delivered equilibrium (``None`` for a backend that
+    reports none)."""
+    from .edge_pressure import describe
+    out = describe(eng.s.get("edge_pressure"), eng.c.pressure)
+    m = getattr(eng, "delivered_meas", None) or {}
+    out["frames"] = m.get("pressure_frames")
+    return out
+
+
 def engine_record(eng, res, wall_s=None) -> dict:
     """The full JSON-safe engine record."""
     from .jbs_loop import jsonable, oft_build_info
     return jsonable(dict(
         version=ENGINE_VERSION,
+        edge_pressure=edge_pressure_record(eng),
         contract=eng.c.record(),
         settings=dict(preset_requested=eng.s["preset"],
                       preset_in_force=eng.preset, rows_requested=list(
@@ -1539,6 +1583,7 @@ def engine_record(eng, res, wall_s=None) -> dict:
                       prior=eng.prior_name,
                       delivery_correction=eng.s["delivery_correction"],
                       mse_jacobian=eng.s["mse_jacobian"],
+                      edge_pressure=eng.s.get("edge_pressure"),
                       loop=eng.s["loop"]),
         convergence=convergence_table(eng.s),
         composition=("J = F<1/R>/<B^2> [s_ind <j.B>_ind + s_bs <j.B>_BS + "
@@ -1630,6 +1675,7 @@ def _delivered_state(eng, res, rec, path):
                       else float(eng.rows["q0"]["psi"])),
         q95=float(stats.get("q_95", float("nan"))),
         Ip_target=float(eng.c.Ip), request_normalisation=cfac,
+        edge_pressure=edge_pressure_record(eng),
         achieved_normalisation=None, n_floored_inductive=0,
         j_phi_achieved=A,
         how=("unified engine delivery solve: the unrelaxed composition on "
@@ -1686,7 +1732,9 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
     metrics = _reconstruction_metrics(mygs, eqdsk, recon, src,
                                       float(m["li"]),
                                       l_i_realized_post_corrective=float(
-                                          m["li"]))
+                                          m["li"]),
+                                      edge_pressure=eng.s.get(
+                                          "edge_pressure"))
     loop_rec = dict(rec["phases"][-1]["record"])
     loop_rec["converged"] = bool(res["converged"])
     if not res["converged"]:
@@ -1714,7 +1762,8 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
         eqdsk_bytes=eqdsk_bytes, pfile_bytes=kn.get("raw_bytes"),
         aux={"zeff": np.asarray(kn["Zeff"], dtype=float)}, recon=recon,
         reconstruction_metrics=metrics, jphi_request_offset=offset,
-        delivered_state=ds, engine=rec)
+        delivered_state=ds, engine=rec,
+        edge_pressure=rec.get("edge_pressure"))
 
 
 def _ids_baseline(bq, eng, res, rec, bl_src):
@@ -1757,6 +1806,7 @@ def _ids_baseline(bq, eng, res, rec, bl_src):
     bl.delivered_state = ds
     bl.jphi_request_offset = offset
     bl.engine = rec
+    bl.edge_pressure = rec.get("edge_pressure")
     return bl
 
 
@@ -1869,6 +1919,7 @@ def prepare_engine_baseline(bq):
             backend = TokaMakerBackend(
                 mygs, c0, psi_pad=psi_pad, li_kind="li_3",
                 chords=(None if mse is None else mse["chords"]),
+                edge_pressure=s["edge_pressure"],
                 # the reconstruction runs under the solver's own cap
                 # (engine_draw_solve_maxits caps the DRAWS only)
                 maxits=None)

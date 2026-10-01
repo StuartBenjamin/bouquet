@@ -460,6 +460,52 @@ Every capped solve is recorded on `GenerateEngineDraws.cap_events` and
 archived draw's `homotopy.cap_events`, and summarised in one printed
 `[generate]` line.
 
+## The pressure handed to the solver (`edge_pprime_pin`, `separatrix_pressure`)
+
+The backend builds every `P'` profile and axis target through one helper
+(`bouquet/edge_pressure.py`; the physics is in
+[physics-notes.md](physics-notes.md#the-pressure-handed-to-the-solver-separatrix-pressure-and-the-edge-p-pin)).
+Two `GenerationConfig` settings, shared with the legacy paths and both
+defaulting to the behaviour before they existed:
+
+- `edge_pprime_pin` (default `True`): the last `P'` node is zeroed. `False`
+  keeps the profile's own derivative at `psi_N = 1`.
+- `separatrix_pressure` (default `"legacy"`): the axis target is the full
+  axis pressure; with a non-zero `p_sep` the solver inflates `P'` by
+  `p_axis / (p_axis - p_sep)`. `"offset"` passes `p_axis - p_sep` and adds
+  `p_sep` back at reporting and delivery.
+
+How they meet the engine:
+
+- **The contract's pressure is unchanged.** `p_sep` is its last node
+  (thermal + impurity + fast); a draw's is that of its own perturbed
+  pressure (`TokaMakerBackend.p_sep()` follows `set_inputs`).
+- **The composition needs nothing new.** The pressure-driven term
+  `p'(<R> - F^2<1/R>/<B^2>)` is recomputed every pass from the `p'` READ BACK
+  from the solved equilibrium, so it follows whatever the solver was handed:
+  with the pin on it goes to zero at the boundary, with the pin off it does
+  not; under `"offset"` it is smaller by `(p_axis - p_sep) / p_axis`. The
+  inductive component absorbs the difference through the rows. A draw's
+  first-pass shift of that term uses the helper's `d p / d psi_N`.
+- **The zero-perturbation identity holds by construction** under every
+  combination: the stored state composes the stored request bit for bit
+  whatever the settings, and a zero-perturbation draw's pressure (hence its
+  `p_sep`) is the contract's.
+- **Records.** `engine_record["edge_pressure"]` (and
+  `Baseline.edge_pressure`, `delivered_state["edge_pressure"]`): the
+  settings, `p_sep`, `p_axis`, `p_sep_applied`, `pax_target` and `frames` --
+  beta / `W_MHD` of the delivered equilibrium in the solver's frame and with
+  `p_sep` added back. A draw's `delivered` / `archived` blocks carry
+  `pressure_frames`; their `beta_n` is the full-frame value (the solver's
+  own when nothing is added back). The reconstruction summary and the probe
+  (`tests/probes/measure_engine.py`, `distance.pressure_frames`) compare
+  each frame with the input's same-definition quantity.
+- **Delivery.** Under `"offset"` the baseline g-file and every draw's g-file
+  are written with that equilibrium's own `p_sep` as the boundary pressure.
+
+Both settings change the physics when moved off their defaults; the
+measurement is in the change summary.
+
 ## Cost
 
 Measured on the toy: Ip + l_i converges in 5–7 passes (the toy's flux range

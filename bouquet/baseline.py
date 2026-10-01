@@ -219,6 +219,14 @@ class Baseline:
     # the solve counts.  See bouquet.engine / docs/engine.md.
     engine: Optional[dict] = None
 
+    # The pressure handed to the solver (bouquet.edge_pressure): the two
+    # settings (edge_pprime_pin, separatrix_pressure), p_sep (the solve
+    # pressure at psi_N = 1), the offset applied, the axis target, and both
+    # frames of beta / W_MHD of the delivered equilibrium (solver: the
+    # solver's own pressure, zero at the boundary; full: with p_sep added
+    # back).
+    edge_pressure: Optional[dict] = None
+
     def __repr__(self):
         # concise summary -- the default dataclass repr dumps every numpy array,
         # which floods a notebook when `reconstruct()`/`prepare_baseline()` is the
@@ -1026,6 +1034,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     from .jbs_loop import jbs_settings as _jbs_settings
     _jbs = _jbs_settings(config.generation)
     _jbs_kw = {"jbs_loop": _jbs} if _jbs["enabled"] else {}
+    from .edge_pressure import resolve_edge_pressure
+    _edge = resolve_edge_pressure(config.generation)
     with capture_native_output(enabled=not verbose) as _cap:
         result = reconstruct_equilibrium(
             mygs, eqdsk,
@@ -1040,6 +1050,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             p_fast=p_fast_eq,
             Z_imp=Z_imp_recon,
             l_i_tolerance=float(config.generation.l_i_tolerance),
+            edge_pressure=_edge,
             **_jbs_kw,
         )
         # get_stats traces the q-profile and can emit gs_get_qprof warnings, so
@@ -1103,7 +1114,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             result["li_realized_post_corrective"])
         recon_metrics = _reconstruction_metrics(
             mygs, eqdsk, result, source, l_i_target,
-            l_i_realized_post_corrective=l_i_realized_post_corrective)
+            l_i_realized_post_corrective=l_i_realized_post_corrective,
+            edge_pressure=_edge)
         if result.get("jbs_loop") is not None:
             from .jbs_loop import jsonable as _jsonable
             recon_metrics = dict(recon_metrics or {})
@@ -1193,6 +1205,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         reconstruction_log=_cap["text"] or None,
         jphi_request_offset=_request_offset,
         delivered_state=_delivered,
+        edge_pressure=(recon_metrics or {}).get("edge_pressure"),
     )
 
 
@@ -1242,6 +1255,7 @@ def _deliver_reconstruction_state(mygs, config, source, result, psi_N, ne_eq,
         q0_psi_N=float(m.get("q0_psi_N", SOLVER_Q0_PSI_N)),
         q95=float(m.get("q95", float("nan"))),
         Ip_target=float(Ip_target),
+        edge_pressure=m.get("edge_pressure"),
         request_normalisation=float(dv["kappa"]),
         achieved_normalisation=float(dv["kappa_achieved"]),
         n_floored_inductive=n_floored,
@@ -1259,7 +1273,8 @@ def _deliver_reconstruction_state(mygs, config, source, result, psi_N, ne_eq,
 
 
 def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
-                            l_i_realized_post_corrective=None) -> dict:
+                            l_i_realized_post_corrective=None,
+                            edge_pressure=None) -> dict:
     """Curate a TokaMaker-vs-EFIT reconstruction-fidelity dict for the summary.
 
     Each global scalar that isn't ~0 by construction (Ip, l_i, q0/q95, beta,
@@ -1294,6 +1309,21 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
     kappa_tok = float(stats.get("kappa", float("nan")))
     delta_tok = float(stats.get("delta", float("nan")))
     W_tok = float(stats.get("W_MHD", float("nan"))) / 1e6           # MJ
+    # Both pressure frames (bouquet.edge_pressure).  The solver's pressure is
+    # zero at the boundary; under separatrix_pressure="offset" the solve
+    # pressure's p_sep was removed from the axis target and is added back
+    # here, so the REPORTED beta / W_MHD are the full-pressure ones.  With
+    # nothing added back the two frames are the solver's own numbers.
+    from .edge_pressure import (archive_record, input_pressure_frames,
+                                resolve_edge_pressure)
+    _edge = resolve_edge_pressure(edge_pressure)
+    _edge_rec = archive_record(_edge, result.get("pres_tokamaker"),
+                               stats=stats)
+    _fr = _edge_rec.get("frames")
+    if _fr is not None and _fr["p_sep"] != 0.0:
+        betan_tok = float(_fr["full"].get("beta_n", float("nan")))
+        betap_tok = float(_fr["full"].get("beta_pol", float("nan"))) / 100.0
+        W_tok = float(_fr["full"]["W_MHD"]) / 1e6
     o_point = getattr(mygs, "o_point", [float("nan"), float("nan")])
     # separatrix current evaluated just inside the LCFS (psi_N=0.99), where the
     # edge current is better-defined than the near-singular psi_N=1 point.
@@ -1335,6 +1365,35 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
         warnings.warn(f"EFIT reference metrics unavailable: {exc}")
 
     g = lambda k: float(efit.get(k, float("nan")))
+
+    # Like for like: the solver frame against the input's (p - p_edge)
+    # quantities, the full frame against the input's full-pressure ones.
+    _like = None
+    try:
+        _pres_in = np.asarray(eqdsk.pres, dtype=float)
+        _in = input_pressure_frames(
+            float(eqdsk.volume_integral(np.ones_like(_pres_in))[-1]),
+            float(eqdsk.volume_integral(_pres_in)[-1]), float(_pres_in[-1]),
+            betas=dict(beta_n=g("beta_n"), beta_p=g("beta_p")))
+        if _fr is not None:
+            def _row(tok, ref):
+                return dict(tokamaker=float(tok), input=float(ref),
+                            err_pct=pct(tok, ref))
+            _like = dict(p_edge_input=_in["p_sep"], frames={
+                _k: dict(
+                    beta_n=_row(_fr[_k].get("beta_n", float("nan")),
+                                _in[_k]["beta_n"]),
+                    beta_p=_row(_fr[_k].get("beta_pol", float("nan")) / 100.0,
+                                _in[_k]["beta_p"]),
+                    W_MHD_MJ=_row(_fr[_k]["W_MHD"] / 1e6,
+                                  _in[_k]["W_MHD"] / 1e6))
+                for _k in ("solver", "full")},
+                note=("solver: the solver's own pressure (zero at psi_N = 1) "
+                      "against the input's p - p_edge; full: with p_sep "
+                      "added back against the input's full pressure"))
+    except Exception as exc:
+        import warnings
+        warnings.warn(f"like-for-like pressure frames unavailable: {exc}")
 
     bnd_rms = float(q.get("boundary_rms_mm", float("nan")))
     bnd_max = float(q.get("boundary_max_dev_mm", float("nan")))
@@ -1429,6 +1488,10 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
         "j_sep_err_pct": pct(jsep_tok, g("j_sep")),
         "W_MHD_MJ": W_tok, "W_MHD_efit_MJ": g("W_MHD"),
         "W_MHD_err_pct": pct(W_tok, g("W_MHD")),
+        # the edge-pressure settings, p_sep, both frames of the delivered
+        # equilibrium, and the like-for-like comparison with the input
+        "edge_pressure": _edge_rec,
+        "pressure_like_for_like": _like,
         # zero-ideal residuals (absolute)
         "boundary_rms_mm": bnd_rms, "boundary_max_mm": bnd_max,
         "axis_offset_mm": axis_off_mm,

@@ -12,6 +12,14 @@ engine_draws_legacy_prechange.py.txt``, the Stage 3 base) -- so with
 ``_eng is None`` the legacy path executes the very same statements it did
 before (docstrings and comments are not compared; they carry no behaviour).
 
+The same functions later had their inline ``P'`` / axis-target statements
+replaced by the one helper of ``bouquet.edge_pressure``.  That substitution
+is undone here too (``tests/_edge_pressure_ast.py``: every helper call is
+written back as the inline statements it stands for at the default settings,
+and what the change added is removed) BEFORE the comparison, so the frozen
+file is still the untouched Stage 3 base; that the helper's defaults are
+those inline statements bit for bit is ``tests/test_edge_pressure.py``.
+
 Solver-free; no data.
 """
 import ast
@@ -122,6 +130,9 @@ def test_the_legacy_path_is_the_frozen_code_without_the_engine_branches(name):
     cur = _Prune().visit(ast.Module(body=[_current(_targets()[name])],
                                     type_ignores=[]))
     cur = _strip_docstrings(cur)
+    import _edge_pressure_ast as EA
+    frozen = EA.common(frozen)
+    cur = EA.common(EA.expand(cur))
     a = ast.dump(frozen, include_attributes=False)
     b = ast.dump(cur, include_attributes=False)
     assert a == b, (f"{name}: the legacy path differs from the frozen "
