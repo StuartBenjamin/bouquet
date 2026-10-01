@@ -8876,7 +8876,12 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     # verdict flips on a number that is off by two orders of magnitude
     # (issue #33).  Shared with plotting._lcfs_from_psi so the two cannot
     # drift apart.
-    _lcfs_pts = select_closed_lcfs(_segs, context="reconstruction metrics")
+    # ... and, of the curves at that level, the one that goes around the
+    # magnetic axis: another CLOSED loop of the level set (around a coil, in
+    # the private flux) is not the boundary, however long.
+    from .utils import magnetic_axis_of as _magnetic_axis_of
+    _lcfs_pts = select_closed_lcfs(_segs, context="reconstruction metrics",
+                                   axis=_magnetic_axis_of(mygs))
     if _lcfs_pts is not None:
         _tree = _cKDTree_q(_lcfs_pts)
         _devs, _ = _tree.query(isoflux_pts)

@@ -1575,10 +1575,13 @@ ENGINE_SPLIT_CONVENTION = (
 def _lcfs_deviation_mm(mygs, pts):
     """``(rms, max)`` [mm] nearest-neighbour distance from *pts* to the
     solved LCFS -- the legacy reconstruction's own measure (its step 9:
-    tricontour of psi at the LCFS level, the longest CLOSED segment)."""
+    tricontour of psi at the LCFS level; of its curves, the innermost one
+    that goes around the magnetic axis, :func:`~bouquet.utils.
+    select_closed_lcfs`).  A measurement only: no solve, no filter and no
+    acceptance decision reads the contour selected here."""
     import matplotlib.pyplot as plt
     from scipy.spatial import cKDTree
-    from .utils import select_closed_lcfs
+    from .utils import magnetic_axis_of, select_closed_lcfs
     psi_arr = mygs.get_psi(False)
     lev = float(mygs.psi_bounds[0])
     fig, ax = plt.subplots(1, 1)
@@ -1588,7 +1591,8 @@ def _lcfs_deviation_mm(mygs, pts):
         segs = [v for seg in cs.allsegs for v in seg if len(v) > 4]
     finally:
         plt.close(fig)
-    pts_l = select_closed_lcfs(segs, context="engine reconstruction metrics")
+    pts_l = select_closed_lcfs(segs, context="engine reconstruction metrics",
+                               axis=magnetic_axis_of(mygs))
     if pts_l is None:
         return float("nan"), float("nan")
     d, _ = cKDTree(pts_l).query(np.asarray(pts, dtype=float))

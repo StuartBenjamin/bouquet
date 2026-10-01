@@ -157,7 +157,11 @@ def _lcfs_from_psi(mygs, psi_arr, isoflux_fallback, psi_lcfs_val=None):
         plt.close(_fig_tmp)
     # Longest CLOSED segment: on a diverted equilibrium the open separatrix
     # branch to the divertor can be longer than the LCFS itself (issue #33).
-    _lcfs = select_closed_lcfs(_segs, context="_lcfs_from_psi")
+    # ... and the one that goes around the magnetic axis, when the solver
+    # reports one (another closed loop of the level set is not the boundary)
+    from .utils import magnetic_axis_of
+    _lcfs = select_closed_lcfs(_segs, context="_lcfs_from_psi",
+                               axis=magnetic_axis_of(mygs))
     if _lcfs is not None:
         return _lcfs
     return isoflux_fallback
