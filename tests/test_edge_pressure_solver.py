@@ -119,10 +119,18 @@ def test_the_solver_was_handed_the_recorded_target(combos, pin, sep):
     assert ep["p_sep_applied"] == (ep["p_sep"] if sep == "offset" else 0.0)
     assert ep["pax_target"] == pytest.approx(
         ep["p_axis"] - ep["p_sep_applied"], rel=1e-14)
-    e = _need(d, "edge")["summary"]
-    # the solver's axis pressure IS its target (it rescales P' to it)
-    assert e["pressure_solver_axis"] == pytest.approx(ep["pax_target"],
-                                                      rel=1e-3)
+    ed = _need(d, "edge")
+    e = ed["summary"]
+    # the solver's pressure is zero at the boundary and reaches its axis
+    # target (it rescales P' to it): at the innermost sampled surface it is
+    # target * (p - p_sep) / (p_axis - p_sep) of the pressure it was handed
+    import numpy as np
+    p_at = float(np.interp(ed["psi_sampled"][0], ed["psi_N"],
+                           ed["pressure_input"]))
+    want_p = ep["pax_target"] * (p_at - ep["p_sep"]) \
+        / (ep["p_axis"] - ep["p_sep"])
+    assert e["pressure_solver_axis"] == pytest.approx(want_p, rel=1e-3)
+    assert e["pressure_solver_axis"] <= ep["pax_target"]
     # ... so P' is the input's own under "offset", and inflated by
     # p_axis / (p_axis - p_sep) under "legacy"
     want = (1.0 if sep == "offset"
