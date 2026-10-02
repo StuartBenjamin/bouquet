@@ -757,8 +757,9 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
             raise ValueError(f"coord='phi_n': {ida_path!r} carries no q, so its "
                              "profiles cannot be placed in Phi_N")
         from ..coords import phi_n_from_q
-        _in, _iphi = phi_n_from_q(_ipsi, ida.q)
-        ida_map = (_ipsi[_in], _iphi)
+        _in, _iphi = phi_n_from_q(_ipsi, ida.q, bracket=True)
+        _n = int(np.count_nonzero(_ipsi <= 1.0))     # psi_map: inside the LCFS only
+        ida_map = (_ipsi[_in][:_n], _iphi[:_n])
         g = lambda a: np.interp(x_phi, _iphi, np.asarray(a, dtype=float)[_in])
     ne, ni, te, ti = g(ida.ne), g(ida.ni), g(ida.te), g(ida.ti)
     zeff = np.asarray(Zeff_fuse, dtype=float) if zeff_from_fuse else g(ida.Zeff)

@@ -236,6 +236,27 @@ def test_phi_n_from_q():
         coords.phi_n_from_q(psi[1:], q[1:])
 
 
+def test_phi_n_from_q_bracket():
+    psi = np.linspace(0.0, 1.2, 64)                  # does not hit 1.0
+    q = 1.0 + 3.0 * psi ** 2
+    inside, phi = coords.phi_n_from_q(psi, q)
+    inb, phib = coords.phi_n_from_q(psi, q, bracket=True)
+    n, b = inside.sum(), int(inside.sum())
+    assert inb.sum() == n + 1 and inb[b] and np.array_equal(phib[:n], phi)
+    # ida_fuse ida_phi_n: trapezoid to the bracket over the integral to 1
+    x, y = psi[:b + 1], q[:b + 1]
+    cum = np.concatenate([[0.0], np.cumsum(0.5 * (y[1:] + y[:-1]) * np.diff(x))])
+    q1 = y[b - 1] + (y[b] - y[b - 1]) * (1.0 - x[b - 1]) / (x[b] - x[b - 1])
+    den = cum[b - 1] + 0.5 * (y[b - 1] + q1) * (1.0 - x[b - 1])
+    assert phib[-1] > 1.0 and phib[-1] == pytest.approx(cum[b] / den, rel=1e-12)
+    # a grid hitting 1.0, or a non-finite q at the bracket: no extra node
+    psi1 = np.linspace(0.0, 1.2, 61)
+    assert coords.phi_n_from_q(psi1, 1.0 + psi1, bracket=True)[0].sum() == 51
+    qn = q.copy()
+    qn[b] = np.nan
+    assert coords.phi_n_from_q(psi, qn, bracket=True)[0].sum() == n
+
+
 class TestIdaHybridPhi:
     """ida_hybrid in a phi_n run places the IDA fits by the file's own q."""
 

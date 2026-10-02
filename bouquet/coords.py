@@ -66,12 +66,16 @@ def to_run_grid(x, x_coord=RUN, psi_map=None):
     return np.interp(np.asarray(x, dtype=float), *psi_map)
 
 
-def phi_n_from_q(psi_N, q):
+def phi_n_from_q(psi_N, q, bracket=False):
     """``(inside, Φ_N)``: the nodes with ψ_N ≤ 1 and their Φ_N from ``q``.
 
     Φ_N(ψ_N) = ∫₀^ψ_N q dψ_N / ∫₀¹ q dψ_N (trapezoid; ``q`` is interpolated
     to ψ_N = 1 when the grid does not hit it).  For a source that tabulates
     its profiles on ψ_N with its own equilibrium's q (IDA).
+
+    ``bracket``: when the grid does not hit ψ_N = 1, also select the first
+    node past it (Φ_N > 1, same trapezoid), so profiles interpolated in Φ_N
+    reach Φ_N = 1 between data instead of clamping (ida_fuse's ida_phi_n).
     """
     from scipy.integrate import cumulative_trapezoid
     psi_N = np.asarray(psi_N, dtype=float)
@@ -84,7 +88,16 @@ def phi_n_from_q(psi_N, q):
         raise ValueError("phi_n_from_q: q is not finite inside the LCFS")
     xe = x if x[-1] == 1.0 else np.append(x, 1.0)
     phi = cumulative_trapezoid(np.interp(xe, psi_N, q), xe, initial=0.0)
-    return inside, phi[:x.size] / phi[-1]
+    out = phi[:x.size] / phi[-1]
+    if bracket and x[-1] < 1.0 and not inside.all():
+        b = int(np.argmin(inside))                  # first node past ψ_N = 1
+        if np.isfinite(q[b]):
+            q_last = q[inside][-1]
+            out = np.append(out, (phi[x.size - 1] + 0.5 * (q_last + q[b])
+                                  * (psi_N[b] - x[-1])) / phi[-1])
+            inside = inside.copy()
+            inside[b] = True
+    return inside, out
 
 
 def oft_prof(kind, x, y, coord=PSI):
