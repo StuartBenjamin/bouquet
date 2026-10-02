@@ -9,11 +9,14 @@ before comparing with the frozen code.  The normaliser
 and removes every ``_edge = ...`` binding and every ``edge_pressure=``
 keyword.  So those tests prove "the code is the frozen code, with a helper
 call wherever the inline statements were" -- and say nothing about WHICH
-settings each call is handed.  A site passing a non-default settings
-object, a site passing none while its neighbours pass the configured one,
-or a new function that calls the helper outside the compared set would all
-pass them.  Bit-identity of the legacy path at the defaults needs three
-more things, asserted here:
+settings each call is handed.  A site passing a settings object other
+than the configured one, a site passing none while its neighbours pass the
+configured one, or a new function that calls the helper outside the
+compared set would all pass them.  Bit-identity of the legacy path at the
+PRE-CHANGE settings (``edge_pprime_pin=True, separatrix_pressure="legacy"``,
+``EP.PRE_CHANGE_EDGE_PRESSURE``; NOT the defaults since 2026-10-02, whose
+separatrix setting is ``"offset"``) needs three more things, asserted
+here:
 
 1. every helper call of the package hands the helper the function's ONE
    settings object (``_edge``, or ``self.edge`` on the engine backend),
@@ -22,10 +25,12 @@ more things, asserted here:
    settings (the function's own ``edge_pressure`` parameter, the
    generation config, or the draw context), every function taking an
    ``edge_pressure`` parameter defaults it to ``None``, and every call of
-   such a function in the package passes it on -- so at the default
-   configuration every site resolves to the default settings (checked on
-   the objects themselves, not only on the source);
-3. the helper at the defaults equals the old inline expressions BIT FOR BIT
+   such a function in the package passes it on -- so a configuration with
+   the pre-change settings resolves to the pre-change settings at every
+   site, and the default configuration to the defaults (checked on the
+   objects themselves, not only on the source);
+3. the helper at the pre-change settings equals the old inline expressions
+   BIT FOR BIT
    on the arrays the legacy path itself produced: the reconstruction's and
    every archived draw's solve pressure of the stored reference archive, on
    their own grids and their own flux ranges.
@@ -200,7 +205,8 @@ def test_the_engine_branch_binding_is_gated_on_the_engine():
 
 def test_every_caller_passes_the_settings_on():
     """No call of a function that takes ``edge_pressure`` leaves it out (a
-    site that did would run at the defaults whatever was configured)."""
+    site that did would run at the defaults whatever was configured --
+    since 2026-10-02 at "offset" even under a "legacy" configuration)."""
     _c, _b, kws, _d = _collect()
     assert len(kws) >= 8
     bad = [(where, fn) for where, fn, ch in kws
@@ -229,7 +235,7 @@ def test_the_default_configuration_resolves_to_the_defaults_everywhere():
     from bouquet.engine import engine_settings
     gc = GenerationConfig()
     d = EP.EdgePressure()
-    assert d.is_default
+    assert d.is_default and d.offset and not d.is_pre_change
     assert EP.resolve_edge_pressure(None) == d
     assert EP.resolve_edge_pressure(gc) == d
     assert EP.resolve_edge_pressure({}.get("edge_pressure")) == d
@@ -238,6 +244,28 @@ def test_the_default_configuration_resolves_to_the_defaults_everywhere():
     gu = GenerationConfig(reconstruction_engine="unified")
     assert EP.resolve_edge_pressure(
         engine_settings(gu)["edge_pressure"]) == d
+
+
+def test_a_pre_change_configuration_resolves_to_the_pre_change_settings():
+    """The same routes, configured with ``separatrix_pressure="legacy"``
+    (pin at its default, on): every one resolves to the pre-change
+    settings -- the settings at which the frozen-copy tests prove the legacy
+    paths bit for bit."""
+    from bouquet.engine import engine_settings
+    pc = EP.EdgePressure.pre_change()
+    assert pc.is_pre_change and not pc.is_default
+    gc = GenerationConfig(separatrix_pressure="legacy")
+    assert EP.resolve_edge_pressure(gc) == pc
+    rec = EP.resolve_edge_pressure(gc).record()
+    assert rec == EP.PRE_CHANGE_EDGE_PRESSURE
+    assert EP.resolve_edge_pressure(rec) == pc
+    assert EP.resolve_edge_pressure(dict(edge_pressure=pc)["edge_pressure"]) \
+        is pc
+    assert EP.resolve_edge_pressure(EP.describe(pc)) == pc
+    gu = GenerationConfig(reconstruction_engine="unified",
+                          separatrix_pressure="legacy")
+    assert EP.resolve_edge_pressure(
+        engine_settings(gu)["edge_pressure"]) == pc
 
 
 # ---------------------------------------------------------------------------
@@ -285,8 +313,11 @@ def test_the_helper_is_the_old_inline_code_on_the_legacy_paths_arrays(
         i, flip):
     _lab, x, p, r = _INPUTS[i]
     r = flip * r                      # either orientation of the flux
-    for edge in (None, EP.EdgePressure(), GenerationConfig(),
-                 dict(EP.EDGE_PRESSURE_DEFAULTS)):
+    # the pre-change settings, four ways (not the defaults since 2026-10-02)
+    for edge in (EP.EdgePressure.pre_change(),
+                 GenerationConfig(separatrix_pressure="legacy"),
+                 dict(EP.PRE_CHANGE_EDGE_PRESSURE),
+                 dict(separatrix_pressure="legacy")):
         # the old inline statements, verbatim
         old = pchip_derivative(x, p) / r
         old[-1] = 0.0

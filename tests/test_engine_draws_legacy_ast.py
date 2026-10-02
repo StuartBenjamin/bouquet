@@ -15,10 +15,12 @@ before (docstrings and comments are not compared; they carry no behaviour).
 The same functions later had their inline ``P'`` / axis-target statements
 replaced by the one helper of ``bouquet.edge_pressure``.  That substitution
 is undone here too (``tests/_edge_pressure_ast.py``: every helper call is
-written back as the inline statements it stands for at the default settings,
+written back as the inline statements it stands for at the pre-change
+settings -- pin on, ``"legacy"``, no longer the defaults --
 and what the change added is removed) BEFORE the comparison, so the frozen
-file is still the untouched Stage 3 base; that the helper's defaults are
-those inline statements bit for bit is ``tests/test_edge_pressure.py``.
+file is still the untouched Stage 3 base; that the helper at the pre-change
+settings is those inline statements bit for bit is
+``tests/test_edge_pressure.py``.
 
 Solver-free; no data.
 """

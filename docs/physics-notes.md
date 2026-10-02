@@ -635,13 +635,16 @@ take any value at `psi_N = 1` (`P'` then jumps to zero across the boundary).
 So a non-zero `P'` at the boundary is representable; a non-zero pressure
 there is not, and need not be: only `P'` enters the Grad-Shafranov equation.
 
-Two settings follow, both on `GenerationConfig`, both defaulting to the
-behaviour before they existed (bit for bit, proven by frozen-copy tests):
+Two settings follow, both on `GenerationConfig`. At the PRE-CHANGE settings
+(`edge_pprime_pin=True`, `separatrix_pressure="legacy"`) every path hands
+the solver what it did before the settings existed, bit for bit (proven by
+frozen-copy tests). Since 2026-10-02 the default of `separatrix_pressure` is
+`"offset"`, so the defaults are no longer the pre-change settings:
 
 | setting | default | other value |
 |---|---|---|
-| `edge_pprime_pin` | `True`: the last node of `P'` (`psi_N = 1`) is set to zero, so `P'` ramps linearly to zero across the final grid interval | `False`: the last node keeps the profile's own derivative |
-| `separatrix_pressure` | `"legacy"`: the axis target is the full axis pressure `p_axis` | `"offset"`: the axis target is `p_axis - p_sep`, and `p_sep` is added back wherever pressure, beta or stored energy is reported or delivered |
+| `edge_pprime_pin` | `True` (pre-change): the last node of `P'` (`psi_N = 1`) is set to zero, so `P'` ramps linearly to zero across the final grid interval | `False`: the last node keeps the profile's own derivative |
+| `separatrix_pressure` | `"offset"`: the axis target is `p_axis - p_sep`, and `p_sep` is added back wherever pressure, beta or stored energy is reported or delivered | `"legacy"` (pre-change): the axis target is the full axis pressure `p_axis` |
 
 `p_sep` is the pressure handed to the solver at its last node -- the TOTAL
 solve pressure (thermal + impurity + fast, and the pressure anchor where a
@@ -657,6 +660,21 @@ values nor its `p - p_sep` values. `"offset"` hands the solver the input's
 own `P'` (factor 1), which is a PHYSICS change relative to `"legacy"`: `P'`,
 the pressure-driven current and the Shafranov shift move by the factor
 `(p_axis - p_sep) / p_axis`.
+
+**Why `"offset"` is the default (owner-approved change, 2026-10-02).** On
+real g-file and IDS cases (pin on), `"offset"` brought the full-frame
+`beta_N` and `W_MHD` closer to the input on every comparable g-file case, by
+1.4-8 points (median 3.5), and by about 0.5 points on IDS slices. Every
+case converged under it, with the same passes, solves and wall time, and
+`l_i`, `q` and the current distances did not move. The solver-frame gaps
+grew (median 1.4 points on g-files): under `"legacy"` the inflated `P'` had
+been compensating a deficit in that frame. For an existing run with
+`p_sep != 0` the change means: `P'` in the solve is scaled by
+`(p_axis - p_sep) / p_axis`, and the reported pressure, `beta`, `W_MHD` and
+the delivered `PRES` move toward the input's full-pressure values. With
+`p_sep = 0` nothing changes. `separatrix_pressure="legacy"` reproduces the
+pre-change numbers; a stored config that predates the setting reloads with
+`"legacy"`.
 
 **What the edge pin does.** With the pin on, the pressure gradient is
 truncated in the last grid interval, and the pressure-driven part of the
@@ -712,8 +730,10 @@ gradient that in reality continues outward.
 **Not covered.** The solver's own bootstrap helper (`solve_with_bootstrap`,
 used by the legacy non-loop routes for their intermediate bootstrap
 evaluation) builds its own `P'` and axis target inside the solver package
-and is not reached by either setting; the states a run delivers are solved
-by bouquet's own calls, which are. The g-file READER's edge extrapolation of
+and is not reached by either setting (it keeps the pre-change ones; a
+printed note says so whenever the settings are not the pre-change ones --
+the default included); the states a run delivers are solved by bouquet's
+own calls, which are. The g-file READER's edge extrapolation of
 `PPRIME` / `FFPRIM` is a separate, unchanged option.
 
 ## Kinetics regridding

@@ -1249,8 +1249,11 @@ class GenerationConfig:
     # p_axis - p_sep and adds p_sep back wherever pressure, beta or W_MHD is
     # reported or delivered (records carry both frames; written g-files
     # carry the full pressure).  A PHYSICS change when p_sep != 0: P' moves
-    # by the factor (p_axis - p_sep)/p_axis.
-    separatrix_pressure: str = "legacy"
+    # by the factor (p_axis - p_sep)/p_axis.  Default "legacy" -> "offset"
+    # 2026-10-02 (owner-approved physics change: on real cases it narrowed the
+    # full-frame beta_N / W_MHD gap to the input, l_i / q / cost unchanged);
+    # "legacy" restores the pre-change numbers.
+    separatrix_pressure: str = "offset"
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single
@@ -1740,6 +1743,24 @@ class BouquetConfig:
                 "the dict/JSON, or set cfg.generation.jbs_self_consistent = "
                 "True after loading.", UserWarning, stacklevel=2)
             gend["jbs_self_consistent"] = False
+        if "separatrix_pressure" not in gend:
+            # The same for the separatrix-pressure setting, whose default
+            # moved "legacy" -> "offset" (2026-10-02): a stored config that
+            # predates the setting was produced with the full axis pressure
+            # as the solver's target, so it is rebuilt with "legacy" and
+            # replays what it recorded.  to_dict() always writes the field.
+            import warnings
+            warnings.warn(
+                "config has no generation.separatrix_pressure (it predates "
+                "the setting): loading it with separatrix_pressure='legacy', "
+                "the behaviour it was produced with, so it reproduces its old "
+                "results.  The current default is 'offset' (p_sep removed "
+                "from the solver's axis target and added back in every "
+                "reported pressure, beta and W_MHD); to use it, add "
+                '"separatrix_pressure": "offset" to the "generation" section '
+                "or set cfg.generation.separatrix_pressure = 'offset' after "
+                "loading.", UserWarning, stacklevel=2)
+            gend["separatrix_pressure"] = "legacy"
         return cls(
             source=_build(SrcCls, srcd),
             solver=_build(SolverConfig, d["solver"]),

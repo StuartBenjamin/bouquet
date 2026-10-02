@@ -223,7 +223,8 @@ def _run_block(stub, capsys=None):
     from bouquet.TokaMaker_interface import (_count_masked_anchor_failure,
                                              ANCHOR_MASKED_FAILURES)
     from bouquet.utils import _shape_from_boundary, pchip_derivative
-    from bouquet.edge_pressure import (resolve_edge_pressure, solver_pax,
+    from bouquet.edge_pressure import (PRE_CHANGE_EDGE_PRESSURE,
+                                       resolve_edge_pressure, solver_pax,
                                        solver_pp_profile)
 
     psi_N = np.linspace(0.0, 1.0, 65)
@@ -236,10 +237,11 @@ def _run_block(stub, capsys=None):
         _shape_from_boundary=_shape_from_boundary,
         pchip_derivative=pchip_derivative,
         # the block builds its P' and axis target through the one helper
-        # (bouquet.edge_pressure); the defaults are the inline expressions
-        # it replaced, bit for bit (tests/test_edge_pressure.py)
+        # (bouquet.edge_pressure); at the pre-change settings it is the
+        # inline expressions it replaced, bit for bit
+        # (tests/test_edge_pressure.py)
         solver_pp_profile=solver_pp_profile, solver_pax=solver_pax,
-        _edge=resolve_edge_pressure(None),
+        _edge=resolve_edge_pressure(PRE_CHANGE_EDGE_PRESSURE),
         initial_Ip_target=1.0e6,
         pressure_solve=1.0e4 * (1.0 - psi_N ** 2),
         input_j_phi=1.0e6 * (1.0 - psi_N ** 2),

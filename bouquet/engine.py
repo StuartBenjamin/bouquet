@@ -1312,7 +1312,8 @@ class TokaMakerBackend:
         self.n_solves = 0
         self.p = np.asarray(contract.pressure, dtype=float)
         #: the two edge-pressure settings (bouquet.edge_pressure); None:
-        #: the defaults, bit for bit the behaviour before they existed
+        #: the defaults (separatrix_pressure="offset"); the pre-change
+        #: settings (EdgePressure.pre_change()) are the old arrays bit for bit
         self.edge = resolve_edge_pressure(edge_pressure)
         self.kin = None
         if maxits is not None and (isinstance(maxits, bool) or int(maxits)

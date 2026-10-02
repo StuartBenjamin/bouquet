@@ -728,9 +728,11 @@ class Bouquet:
         self._check_jbs_loop_workflow(self.config.generation)
 
         # the two edge-pressure settings do not reach the solver's own
-        # bootstrap helper, which the non-loop routes call: say so, once
+        # bootstrap helper, which the non-loop routes call (it keeps the
+        # pre-change P' and axis target): say so, once, whenever the
+        # settings are not the pre-change ones -- the default included
         _edge = resolve_edge_pressure(self.config.generation)
-        if not _edge.is_default and not bool(getattr(
+        if not _edge.is_pre_change and not bool(getattr(
                 self.config.generation, "jbs_self_consistent", False)):
             print("[edge-pressure] NOTE: edge_pprime_pin="
                   f"{_edge.edge_pprime_pin}, separatrix_pressure="

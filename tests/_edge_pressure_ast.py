@@ -4,12 +4,15 @@ Every scattered ``pp["y"][-1] = 0.0`` / ``pax = p[0]`` site was replaced by a
 call of the one helper (``solver_pp_profile`` / ``solver_pprime`` /
 ``solver_pax`` / ``solver_pressure``) carrying the settings object ``_edge``.
 :func:`expand` rewrites the CURRENT code back to the inline statements those
-calls stand for at the default settings and removes exactly what the change
+calls stand for at the PRE-CHANGE settings (``edge_pprime_pin=True``,
+``separatrix_pressure="legacy"``; :data:`bouquet.edge_pressure.
+PRE_CHANGE_EDGE_PRESSURE` -- no longer the defaults since 2026-10-02) and
+removes exactly what the change
 ADDED (the ``edge_pressure`` keyword / parameter, the ``_edge`` and
 ``_p_lcfs`` locals, the record writes, the ``lcfs_kwargs`` splat), so the
 result can be compared, as an AST, with the frozen pre-change code.  That
-the helper's defaults ARE those inline statements, bit for bit, is
-``tests/test_edge_pressure.py``.
+the helper at the pre-change settings IS those inline statements, bit for
+bit, is ``tests/test_edge_pressure.py``.
 
 :func:`common` is applied to BOTH sides: ``float(x[0])`` and ``x[0]`` are
 the same axis target (the helper returns the float), and a walrus is its

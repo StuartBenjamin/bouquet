@@ -5,12 +5,17 @@ helper written back inline (frozen-copy pattern, at the level of the code).
 statement (``pp["y"][-1] = 0.0``, ``pax = p[0]``) by one helper.  For each
 function that solves, undoing that substitution on the CURRENT code
 (``tests/_edge_pressure_ast.py``: each helper call becomes the inline
-statements it stands for at the default settings; what the change added --
+statements it stands for at the pre-change settings -- pin on,
+``"legacy"``, ``bouquet.edge_pressure.PRE_CHANGE_EDGE_PRESSURE``, which are
+no longer the defaults; what the change added --
 the ``edge_pressure`` keyword, the ``_edge`` local, the record writes -- is
 removed) must give the AST of the frozen pre-change function
-(``tests/data/edge_pressure_prechange.py.txt``).  With the helper's defaults
-bit-identical to those inline statements (``tests/test_edge_pressure.py``),
-every such path hands the solver the arrays it did before, at the defaults.
+(``tests/data/edge_pressure_prechange.py.txt``).  With the helper at the
+pre-change settings bit-identical to those inline statements
+(``tests/test_edge_pressure.py``) and every site handed the configured
+settings (``tests/test_edge_pressure_settings_reach.py``), every such path
+hands the solver the arrays it did before whenever it is configured with
+the pre-change settings (``separatrix_pressure="legacy"``).
 
 ``generate_bouquet``, ``_post_homotopy_jbs``, ``Bouquet.generate`` and
 ``Bouquet.verify_sigma0_consistency`` are compared the same way against

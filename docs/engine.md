@@ -465,15 +465,31 @@ archived draw's `homotopy.cap_events`, and summarised in one printed
 The backend builds every `P'` profile and axis target through one helper
 (`bouquet/edge_pressure.py`; the physics is in
 [physics-notes.md](physics-notes.md#the-pressure-handed-to-the-solver-separatrix-pressure-and-the-edge-p-pin)).
-Two `GenerationConfig` settings, shared with the legacy paths and both
-defaulting to the behaviour before they existed:
+Two `GenerationConfig` settings, shared with the legacy paths:
 
-- `edge_pprime_pin` (default `True`): the last `P'` node is zeroed. `False`
-  keeps the profile's own derivative at `psi_N = 1`.
-- `separatrix_pressure` (default `"legacy"`): the axis target is the full
-  axis pressure; with a non-zero `p_sep` the solver inflates `P'` by
-  `p_axis / (p_axis - p_sep)`. `"offset"` passes `p_axis - p_sep` and adds
-  `p_sep` back at reporting and delivery.
+- `edge_pprime_pin` (default `True`, the behaviour before the setting): the
+  last `P'` node is zeroed. `False` keeps the profile's own derivative at
+  `psi_N = 1`.
+- `separatrix_pressure` (default `"offset"` since 2026-10-02; `"legacy"` is
+  the behaviour before the setting): `"offset"` passes `p_axis - p_sep` as
+  the axis target and adds `p_sep` back at reporting and delivery.
+  `"legacy"` passes the full axis pressure; with a non-zero `p_sep` the
+  solver then inflates `P'` by `p_axis / (p_axis - p_sep)`.
+
+**The default changed (owner-approved physics change, 2026-10-02).**
+`separatrix_pressure` moved from `"legacy"` to `"offset"`. On real g-file
+and IDS cases (both engines' paths, pin on), `"offset"` brought the
+full-frame `beta_N` and `W_MHD` closer to the input on every comparable
+g-file case, by 1.4-8 points (median 3.5), and by about 0.5 points on IDS
+slices; every case converged, with the same passes, solves and wall time,
+and `l_i`, `q` and the current distances unchanged. What it changes for an
+existing run whose solve pressure is not zero at `psi_N = 1`: `P'` in the
+solve is scaled by `(p_axis - p_sep) / p_axis`; the reported pressure,
+`beta` and `W_MHD` (and the delivered g-files' `PRES`) move toward the
+input's full-pressure values. With `p_sep = 0` nothing changes. Set
+`separatrix_pressure="legacy"` to reproduce the pre-change numbers (bit for
+bit, proven by the frozen-copy tests); a stored config that predates the
+setting reloads with `"legacy"` and says so.
 
 How they meet the engine:
 
@@ -503,8 +519,9 @@ How they meet the engine:
 - **Delivery.** Under `"offset"` the baseline g-file and every draw's g-file
   are written with that equilibrium's own `p_sep` as the boundary pressure.
 
-Both settings change the physics when moved off their defaults; the
-measurement is in the change summary.
+Both settings change the physics when moved (and `separatrix_pressure`
+did, when its default changed); the measurements are in the change
+summary.
 
 ## Cost
 

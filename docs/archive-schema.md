@@ -84,8 +84,10 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
 `edge_pressure_json` is read with `bouquet.edge_pressure.load_record(header,
 count=None, scan_key=None)` (`count=None`: the baseline's). See
 [physics-notes.md](physics-notes.md#the-pressure-handed-to-the-solver-separatrix-pressure-and-the-edge-p-pin).
-Under `separatrix_pressure="offset"` the stored `eqdsk` bytes carry the full
-pressure (`PRES` = the solver's pressure + that equilibrium's `p_sep`).
+Under `separatrix_pressure="offset"` (the default since 2026-10-02; archives
+written before then were made with `"legacy"`)
+the stored `eqdsk` bytes carry the full pressure (`PRES` = the solver's
+pressure + that equilibrium's `p_sep`).
 
 ## Conventions
 
