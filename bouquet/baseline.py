@@ -624,7 +624,7 @@ def resolve_uncertainty(config, baseline) -> dict:
             if (getattr(ida, "q", None) is not None
                     and not (_map_src and _same_path(_map_src, ida_path))):
                 from .coords import phi_n_from_q
-                _ida_in, _ida_x = phi_n_from_q(_ida_x, ida.q)
+                _ida_in, _ida_x = phi_n_from_q(_ida_x, ida.q, bracket=True)
             else:
                 _ida_in = _ida_x <= 1.0
                 _ida_x = np.interp(_ida_x[_ida_in], *baseline.psi_map)
