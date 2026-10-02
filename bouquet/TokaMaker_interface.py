@@ -8452,11 +8452,15 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
 
         print(f"[li match] target={li_target:.6f}  [estimator: li(3)/'iter']")
         print(f"[li match] iter 0: ind_factor={ind_0:.6f}  li={li_0:.6f}  err={li_0 - li_target:.6f}")
-        print(f"[li match] iter 1: ind_factor={ind_1:.6f}  li={li_1_sec:.6f}  err={li_1_sec - li_target:.6f}")
+        # the second evaluation's solve may fail (None): reported, and the
+        # loop below takes its failed-solve branch
+        print(f"[li match] iter 1: ind_factor={ind_1:.6f}  "
+              + (f"li={li_1_sec:.6f}  err={li_1_sec - li_target:.6f}"
+                 if li_1_sec is not None else "li=FAILED  err=N/A"))
 
         for li_iter in range(2, max_li_iters):
             err_0 = li_0 - li_target
-            err_1 = li_1_sec - li_target
+            err_1 = (li_1_sec - li_target) if li_1_sec is not None else None
 
             if li_1_sec is not None and abs(err_1) < li_tol:
                 print(f"[li match] converged at iter {li_iter}: "
