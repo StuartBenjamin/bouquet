@@ -3401,11 +3401,6 @@ class Bouquet:
         # stays readable; the full text is kept on generation_log for debugging.
         # Set BouquetConfig.verbose=True to stream it (and the tqdm progress bar).
         #
-        # Center the per-draw bootstrap scale on the calibrated bs_scale so the
-        # SWB amplitude correction established in prepare_baseline applies to
-        # EVERY draw; the configured jBS_scale_range spread is retained as
-        # bootstrap-model uncertainty around that center. bs_scale == 1.0 (no
-        # SWB rebuild, e.g. reconstruction path) leaves the range unchanged.
         # The baseline built j_BS as (multiplier) x SWB(scale 1); the draws
         # apply the same multiplier after SWB (jBS_scale_profile) and keep
         # jBS_scale_range as the per-draw jitter inside it.  Passing the
