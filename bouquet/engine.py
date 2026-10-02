@@ -1646,6 +1646,7 @@ ENGINE_SPLIT_CONVENTION = (
     "unified engine: jphi-linterp REQUEST of the delivery solve (one "
     "jphi-linterp solve of j_phi reproduces the delivered equilibrium); "
     "j_BS = s_bs F<1/R>/<B^2> <j.B>_BS*, j_NBI/j_RF = F<1/R>/<B^2> <j.B>_fix "
+    "(j_RF: the rf part plus any other driven source entry) "
     "on the delivery composition's geometry; j_inductive the residual "
     "(it carries s_ind F<1/R>/<B^2> <j.B>_ind, the pressure-driven term "
     "p'(<R> - F^2<1/R>/<B^2>) and any delivery correction)")
@@ -1687,7 +1688,11 @@ def _split(eng, res):
     R = np.asarray(st.request, dtype=float)
     j_BS = np.asarray(out["s_bs"], float) * kap * np.asarray(st.lambda_bs)
     j_NBI = kap * np.asarray(c.jB_fix_parts["nbi"], float)
-    j_RF = kap * np.asarray(c.jB_fix_parts["rf"], float)
+    # j_RF carries the RF part AND any other driven core_sources entry (the
+    # IDS adapter's "other" part; absent on the g-file path), so the split
+    # sums exactly to the request
+    j_RF = kap * (np.asarray(c.jB_fix_parts["rf"], float)
+                  + np.asarray(c.jB_fix_parts.get("other", 0.0), float))
     return R, R - j_BS - j_NBI - j_RF, j_BS, j_NBI, j_RF
 
 

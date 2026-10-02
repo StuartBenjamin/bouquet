@@ -1009,8 +1009,12 @@ def _finish(ctx, backend, inputs, dp, res, m_fin, pin, label):
                            j_BS=j_bs_tor,
                            j_NBI=kap * np.asarray(
                                ctx.c.jB_fix_parts["nbi"], dtype=float),
-                           j_RF=kap * np.asarray(
-                               ctx.c.jB_fix_parts["rf"], dtype=float)))
+                           # the rf part plus any other driven source entry
+                           # (as engine._split), so the split sums exactly
+                           j_RF=kap * (np.asarray(
+                               ctx.c.jB_fix_parts["rf"], dtype=float)
+                               + np.asarray(ctx.c.jB_fix_parts.get(
+                                   "other", 0.0), dtype=float))))
 
 
 def post_homotopy(ctx, backend, draw, settings, *, coil_guard=None,
