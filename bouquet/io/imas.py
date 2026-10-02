@@ -756,6 +756,50 @@ def _subtract_fast_ni(psi_N, ni, sigma_ni, ni_fuse_thermal, z_fast, z2_fast,
         "evidence": evidence}
 
 
+def _hybrid_timing(source, T, t_eq, t_cp, aux, tol=1e-6):
+    """ida_hybrid: the IDA read time (``source.ida_time``, else ``T``), recording the dd
+    slice times on ``aux``. Warns when ``T`` is not a slice both core_profiles and
+    equilibrium hold exactly (a FUSE macro step): j_bootstrap is then not from the
+    slice asked for."""
+    t_eq, t_cp = float(t_eq), float(t_cp)
+    aux["fuse_time_cp"], aux["fuse_time_eq"] = t_cp, t_eq
+    if T is not None and (abs(t_cp - T) > tol or abs(t_eq - t_cp) > tol):
+        import warnings
+        warnings.warn(f"ida_hybrid: time={T} s is not a dd macro step (core_profiles "
+                      f"{t_cp} s, equilibrium {t_eq} s); its j_bootstrap was not computed "
+                      f"on the IDA slice it is paired with")
+    t_ida = getattr(source, "ida_time", None)
+    return T if t_ida is None else float(t_ida)
+
+
+def _check_replay_pairing(ids_path, aux, tol=1e-6):
+    """``aux['pairing_consistent']``: whether FUSE's own replay_pairing (ida_provenance.json
+    beside ``ids_path``) says dd j_bootstrap at ``aux['fuse_time_cp']`` was computed on
+    ``aux['ida_time_used']``; None when no table. Read only, never derived."""
+    import json
+    import os
+    aux["pairing_consistent"] = None
+    path = os.path.join(os.path.dirname(os.path.abspath(ids_path)), "ida_provenance.json")
+    try:
+        with open(path) as fh:
+            rows = json.load(fh).get("replay_pairing")
+    except (OSError, ValueError):
+        return
+    if not rows:
+        return
+    row = min(rows, key=lambda r: abs(float(r["t_sim"]) - aux["fuse_time_cp"]))
+    if abs(float(row["t_sim"]) - aux["fuse_time_cp"]) > tol:
+        return
+    ok = row["ida_time"] is not None and abs(float(row["ida_time"]) - aux["ida_time_used"]) <= tol
+    aux["pairing_consistent"] = ok
+    aux["replayed_ida_time"] = row["ida_time"]
+    if not ok:
+        import warnings
+        warnings.warn(f"ida_hybrid: dd j_bootstrap at {aux['fuse_time_cp']} s was computed on "
+                      f"IDA {row['ida_time']} ({row['outcome']}), not the IDA slice read "
+                      f"({aux['ida_time_used']} s)")
+
+
 def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impurity_Z,
                          ni_source="all", zeff_from_fuse=False,
                          z_fast=None, z2_fast=None, x_phi=None):
@@ -1168,10 +1212,11 @@ def read_imas_baseline(
                    f"{'psi_N' if coord == _coords.PSI else 'Phi_N'})"
                    if use_ida else ""))
     if use_ida:
+        T_ida = _hybrid_timing(source, T, eq["time"][ie], cp_ids["time"][ic], aux)
         (ne, te, ti, ni, Zeff, _omega,
          sigma_ne_ida, sigma_te_ida, sigma_ni_ida, sigma_ti_ida,
          _ida_read, _ni_fast_meta, _ida_map) = _merge_ida_kinetics(
-            psi_N, ne, ni, Zeff, source.ida_path, T,
+            psi_N, ne, ni, Zeff, source.ida_path, T_ida,
             getattr(source, "impurity_Z", 6.0),
             ni_source=getattr(source, "ni_source", "all"),
             zeff_from_fuse=getattr(source, "zeff_from_fuse", False),
@@ -1202,6 +1247,8 @@ def read_imas_baseline(
         # Read once, shared: resolve_uncertainty reuses this instead of
         # opening the same file again (and possibly at another slice).
         aux["ida_profiles"] = (str(source.ida_path), _ida_read)
+        aux["ida_time_used"] = float(_ida_read.time)
+        _check_replay_pairing(source.ids_path, aux)
         aux["sigma_ne_ida"] = sigma_ne_ida
         aux["sigma_te_ida"] = sigma_te_ida
         aux["sigma_ni_ida"] = sigma_ni_ida

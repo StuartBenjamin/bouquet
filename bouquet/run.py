@@ -90,7 +90,7 @@ class Bouquet:
         return cls(cfg)
 
     @classmethod
-    def from_imas(cls, ids_path, *, mesh, time=None,
+    def from_imas(cls, ids_path, *, mesh, time=None, ida_time=None,
                   n_draws=20, header="bouquet",
                   ida_path=None, LCFS_geqdsk=None, impurity_Z=6.0,
                   ni_source="all", zeff_from_fuse=False,
@@ -112,6 +112,21 @@ class Bouquet:
         ``sawteeth_in_ohmic=True`` leaves the dd's sawteeth current in the
         inductive (ohmic) distribution instead of holding it fixed in j_other.
 
+        ``ida_time`` picks the IDA slice (default ``time``); ``time`` then picks
+        only the dd slices. What "consistent" means for an ida_hybrid slice,
+        given FUSE_JBS_ORDER=replay_first and ``(time, ida_time)`` a row of
+        ``ida_provenance.json["replay_pairing"]``:
+
+          * j_bootstrap(time) was computed on IDA(ida_time) profiles, with the
+            equilibrium half a macro step old (picard closes that);
+          * j_total(time) is ActorQED's diffused current, driven by the
+            previous step's profiles -- not "computed on" IDA(ida_time);
+          * FUSE's D thermal density is IDA n_D minus the NBI fast D, and
+            bouquet subtracts the dd fast-ion density from IDA ni the same way.
+
+        ``aux['pairing_consistent']`` records the check against that table when
+        it sits beside ``ids_path``.
+
         ``LCFS_geqdsk`` is OPTIONAL: a g-file whose LCFS replaces the source
         boundary outline as the isoflux target, for when you have a better
         separatrix for the slice than the dd carries (typically a magnetics-only
@@ -122,7 +137,7 @@ class Bouquet:
         if kinetic_source is None:
             kinetic_source = "ida_hybrid" if ida_path else "fuse"
         cfg = BouquetConfig(
-            source=ImasSource(ids_path=ids_path, time=time, ida_path=ida_path,
+            source=ImasSource(ids_path=ids_path, time=time, ida_time=ida_time, ida_path=ida_path,
                               impurity_Z=impurity_Z, ni_source=ni_source,
                               zeff_from_fuse=zeff_from_fuse,
                               sawteeth_in_ohmic=sawteeth_in_ohmic,
@@ -253,7 +268,7 @@ class Bouquet:
         # still write to the old header.
         self.config.output_header = value
 
-    def set_slice(self, *, time=None, header=None) -> "Bouquet":
+    def set_slice(self, *, time=None, ida_time=None, header=None) -> "Bouquet":
         """Re-point to a new time slice, reusing the existing solver.
 
         The multi-slice mechanism for the **IMAS path**, where one IDS holds
@@ -278,6 +293,9 @@ class Bouquet:
                     f"{type(self.config.source).__name__} has no time axis to "
                     "sweep; build a separate Bouquet per source")
             self.config.source.time = time
+            # a stale IDA slice must not ride along to a new dd slice
+            if hasattr(self.config.source, "ida_time"):
+                self.config.source.ida_time = ida_time
         if header is not None:
             self.config.output_header = header
         self.baseline = None
