@@ -16,7 +16,8 @@ The block is taken from the CURRENT source and run on a stand-in solver
   through its failed-solve branch;
 * where the old block ran (no failure, or a failure it did not trip on),
   the current one takes exactly the path of the pre-change block (taken
-  from the frozen copy ``tests/data/edge_pressure_prechange.py.txt``): same
+  from the frozen copy ``tests/data/edge_pressure_prechange.py.txt`` with
+  this fix's own two hunks put back, see ``_frozen``): same
   solves, same scales, same result, bit for bit.
 
 Solver-free; no data.
@@ -57,11 +58,30 @@ def _current():
     return _block(inspect.getsource(reconstruct_equilibrium))
 
 
+_FIX_NEW = (
+    ('print(f"[li match] iter 1: ind_factor={ind_1:.6f}  "\n'
+     '              + (f"li={li_1_sec:.6f}  err={li_1_sec - li_target:.6f}"\n'
+     '                 if li_1_sec is not None else "li=FAILED  err=N/A"))',
+     'print(f"[li match] iter 1: ind_factor={ind_1:.6f}  '
+     'li={li_1_sec:.6f}  err={li_1_sec - li_target:.6f}")'),
+    ("err_1 = (li_1_sec - li_target) if li_1_sec is not None else None",
+     "err_1 = li_1_sec - li_target"),
+)
+
+
 def _frozen():
+    """The PRE-FIX block.  The frozen copy was re-based by this fix's own two
+    hunks (it serves the edge-pressure AST test, which compares against the
+    current code), so the pre-fix block is the frozen text with exactly those
+    two statements put back; each put-back must actually happen."""
     with open(_FROZEN) as fh:
         txt = fh.read()
     i = txt.index("def reconstruct_equilibrium(")
-    return _block(txt[i:])
+    txt = txt[i:]
+    for new, old in _FIX_NEW:
+        assert txt.count(new) == 1, new
+        txt = txt.replace(new, old)
+    return _block(txt)
 
 
 class _GS:

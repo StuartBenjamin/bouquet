@@ -2,6 +2,19 @@
 legacy solve paths whose inline P' / axis-target statements were replaced by
 the helper of ``bouquet.edge_pressure``.  Read by
 ``tests/test_edge_pressure_legacy_ast.py``; never imported, never executed.
+
+RE-BASED once, by exactly four hunks, all changes of the LEGACY code made by
+work that merged alongside the edge-pressure change (none touches a P', an
+axis target or a solve):
+  - ``reconstruct_equilibrium``: the reconstruction-metrics boundary is
+    selected with the magnetic axis (``select_closed_lcfs(..., axis=...)``
+    and its import), a reported number only;
+  - ``reconstruct_equilibrium``: the l_i secant's second-evaluation report and
+    residual survive a failed solve (``None``) instead of raising TypeError;
+  - ``_forward_solve_imas_baseline``: the ``source_current_sign_origin``
+    stamp in the ip_closure record and in the metrics record.
+The comparison this file serves is unchanged: the current functions with the
+helper written back inline must still equal it exactly.
 """
 
 
@@ -2738,11 +2751,13 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
 
         print(f"[li match] target={li_target:.6f}  [estimator: li(3)/'iter']")
         print(f"[li match] iter 0: ind_factor={ind_0:.6f}  li={li_0:.6f}  err={li_0 - li_target:.6f}")
-        print(f"[li match] iter 1: ind_factor={ind_1:.6f}  li={li_1_sec:.6f}  err={li_1_sec - li_target:.6f}")
+        print(f"[li match] iter 1: ind_factor={ind_1:.6f}  "
+              + (f"li={li_1_sec:.6f}  err={li_1_sec - li_target:.6f}"
+                 if li_1_sec is not None else "li=FAILED  err=N/A"))
 
         for li_iter in range(2, max_li_iters):
             err_0 = li_0 - li_target
-            err_1 = li_1_sec - li_target
+            err_1 = (li_1_sec - li_target) if li_1_sec is not None else None
 
             if li_1_sec is not None and abs(err_1) < li_tol:
                 print(f"[li match] converged at iter {li_iter}: "
@@ -3241,7 +3256,9 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     # verdict flips on a number that is off by two orders of magnitude
     # (issue #33).  Shared with plotting._lcfs_from_psi so the two cannot
     # drift apart.
-    _lcfs_pts = select_closed_lcfs(_segs, context="reconstruction metrics")
+    from .utils import magnetic_axis_of as _magnetic_axis_of
+    _lcfs_pts = select_closed_lcfs(_segs, context="reconstruction metrics",
+                                   axis=_magnetic_axis_of(mygs))
     if _lcfs_pts is not None:
         _tree = _cKDTree_q(_lcfs_pts)
         _devs, _ = _tree.query(isoflux_pts)
@@ -3880,6 +3897,8 @@ def _forward_solve_imas_baseline(self):
                 # bring them into this (positive) frame; -1 = reversed-Ip
                 # source.  current_direction_sign above is read AFTER it.
                 source_current_sign=float(getattr(bl, "source_current_sign", 1.0)),
+                source_current_sign_origin=getattr(
+                    bl, "source_current_sign_origin", None),
                 affine_pprime_term_c_signed=float(_c_signed),
                 fsa_roundtrip_Ip=_ip_roundtrip,
                 fsa_roundtrip_err_pct=_rt_err,
@@ -4780,6 +4799,8 @@ def _forward_solve_imas_baseline(self):
                    bs_scale=float(getattr(bl, "bs_scale", 1.0)),
                    ohm_scale=float(getattr(bl, "ohm_scale", 1.0)),
                    source_current_sign=float(getattr(bl, "source_current_sign", 1.0)),
+                   source_current_sign_origin=getattr(
+                       bl, "source_current_sign_origin", None),
                    source_b0_sign=getattr(bl, "source_b0_sign", None))
     if getattr(bl, "ip_closure", None):
         metrics["ip_closure"] = dict(bl.ip_closure)
