@@ -135,7 +135,7 @@ through its `extra` hook and the existing `AxisRowPin`.
 | row | model in the closure (on `G_k`) | measurement on `E_k+1` | update |
 |---|---|---|---|
 | Ip | `Ip_fsa_weights` affine exact measure | the solver imposes Ip; `c` recorded | — |
-| l_i | `structured_li_model` (li_3) | `li_achieved` | `d_k = (1−ω) d_k−1 + ω [l_i(E_k+1) − l_i_model(js_k; G_k+1)]`; the closure's target is `T − d` |
+| l_i | `structured_li_model` (li_3) | `li_achieved` | `d_k = (1−rω) d_k−1 + rω [l_i(E_k+1) − l_i_model(js_k; G_k+1)]`, `r = engine_li_row_relaxation` (default 1); the closure's target is `T − d` |
 | q0 | the axis-current row | q at the row radius | `AxisRowPin`: `j_ref0 ← j0_solved · q0 / q0_target` |
 | MSE | `tan γ ≈ tg0 + J (x − x0)` | `mse_tan_gamma` of the solved field (`mse_field_at` -> `(B, found)`) | offset refreshed from every solve; `J` by finite differences once at convergence, then Broyden (`"fd_broyden"`) or held (`"fd_chord"`) |
 
@@ -161,6 +161,18 @@ the delivered l_i is on the target. On a **soft** row the fit weighs
 `(l_i − T)/σ` (the `LiRowPin` soft semantics). The l_i discrepancy is taken
 against the model of the current that was actually SOLVED, evaluated on the
 NEW geometry -- see "Deviations" below.
+
+**Under-relaxing the l_i row (`engine_li_row_relaxation`, default 1.0).**
+The update above moves `d` toward the measured discrepancy by `rω` per pass
+(the first update, from `d = 0`, by `r`). Linearised, the row error obeys
+`e_k+1 = (1 − G) e_k` with `G = rω·c·(1 + s)` (`c`: the fraction of the row
+error the update measures on the new geometry; `1 + s`: how far the delivered
+l_i moves per unit move of the model's target), so a row whose `G` exceeds 2
+oscillates with a growing period-2 amplitude. `r < 1` scales `G` by `r`. It
+changes the path only: the fixed point (`d` = the measured discrepancy), the
+targets, and every tolerance, criterion and ceiling are unchanged, and
+`r = 1` is the update before the setting existed, bit for bit. Reconstruction
+only; the q0 row (`AxisRowPin`) and the MSE chords are not affected.
 
 The MSE linearisation point is the coefficient vector whose current was
 solved: with the current relaxed it is the same β-blend of the closure's

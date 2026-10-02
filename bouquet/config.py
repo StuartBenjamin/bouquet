@@ -1195,6 +1195,17 @@ class GenerationConfig:
     # fixed -- the legacy chord stage's treatment).  Either way the
     # linearisation offset is refreshed from every solve.
     engine_mse_jacobian: str = "fd_broyden"
+    # Under-relaxation r of the l_i row's discrepancy update between passes
+    # (the reconstruction only; draws carry no l_i row):
+    #   d_k = (1 - r w) d_k-1 + r w [l_i(E_k+1) - l_i_model(js_k; G_k+1)],
+    # w the loop's bootstrap omega (the first update, from d = 0, takes
+    # w = 1).  0 < r <= 1.  1.0 (default) is the update before the setting
+    # existed, bit for bit.  r < 1 shrinks the row's per-pass gain by r: a
+    # solver-side remedy for a row that overshoots (a period-2 oscillation);
+    # it changes the PATH only -- no tolerance, criterion, ceiling or target
+    # moves, and the fixed point (d = the measured discrepancy) is the same.
+    # The q0 row (AxisRowPin) and the MSE chords (Broyden) are not affected.
+    engine_li_row_relaxation: float = 1.0
     # --- the draws on the engine (Stage 3; bouquet.engine_draws) ------------
     # A draw holds the reconstruction's coefficients x* and closes ONLY the
     # Ip row (a scalar amplitude on the inductive, in the exact measure).

@@ -71,6 +71,9 @@ ENGINE_FIELD_DEFAULTS = {
     "engine_rows": ("Ip", "l_i"),
     "engine_delivery_correction": False,
     "engine_mse_jacobian": "fd_broyden",
+    # under-relaxation of the l_i row's discrepancy update (1.0: the update
+    # before the setting existed; see UnifiedEngine.on_pass)
+    "engine_li_row_relaxation": 1.0,
     # the draws on the engine (bouquet.engine_draws, docs/engine.md "Draws")
     "engine_draw_q0_row": False,
     "engine_draw_homotopy": True,
@@ -139,6 +142,11 @@ def _is_default(name, v):
             return tuple(v) == tuple(d)
         except TypeError:
             return False
+    if name == "engine_li_row_relaxation":
+        # a number equal to 1 (1 or 1.0) is the default; a bool is not
+        import numbers
+        return (isinstance(v, numbers.Real)
+                and not isinstance(v, (bool, np.bool_)) and v == d)
     return (type(v) is type(d)) and v == d
 
 
@@ -225,6 +233,12 @@ def validate_engine_settings(gc) -> None:
                          "reconstruction's q0 row in the draws, but "
                          "engine_rows has no 'q0' (there is no row, target "
                          "or radius to keep)")
+    rr = vals["engine_li_row_relaxation"]
+    if (isinstance(rr, (bool, np.bool_)) or not isinstance(rr, numbers.Real)
+            or not np.isfinite(float(rr)) or not 0.0 < float(rr) <= 1.0):
+        raise ValueError(f"generation.engine_li_row_relaxation={rr!r} must "
+                         "be a number with 0 < r <= 1 (an under-relaxation "
+                         "of the l_i row's update; 1.0 is the default)")
     mj = vals["engine_mse_jacobian"]
     if mj not in ENGINE_MSE_JACOBIANS:
         raise ValueError(f"generation.engine_mse_jacobian must be one of "
@@ -334,6 +348,9 @@ def engine_settings(gc) -> dict:
         rows=tuple(gc.engine_rows),
         delivery_correction=bool(gc.engine_delivery_correction),
         mse_jacobian=str(gc.engine_mse_jacobian),
+        li_row_relaxation=float(getattr(
+            gc, "engine_li_row_relaxation",
+            ENGINE_FIELD_DEFAULTS["engine_li_row_relaxation"])),
         draw_q0_row=bool(getattr(gc, "engine_draw_q0_row", False)),
         draw_homotopy=bool(getattr(gc, "engine_draw_homotopy", True)),
         draw_bootstrap_refresh=bool(getattr(
@@ -941,8 +958,18 @@ class UnifiedEngine:
         st = self.state
         if "l_i" in self.rows:
             raw = float(p["m"]["li"]) - float(p["li_model_solved_new_geom"])
-            st.li_discrepancy = (raw if self._d_first else
-                                 (1.0 - om) * st.li_discrepancy + om * raw)
+            r = float(self.s.get("li_row_relaxation", 1.0))
+            if r == 1.0:
+                # the update before engine_li_row_relaxation existed
+                st.li_discrepancy = (raw if self._d_first else
+                                     (1.0 - om) * st.li_discrepancy
+                                     + om * raw)
+            else:
+                # under-relaxed: the step toward the measured discrepancy is
+                # scaled by r (the first update moves d from 0 with w = 1);
+                # same fixed point, per-pass gain times r
+                w = r * (1.0 if self._d_first else float(om))
+                st.li_discrepancy = ((1.0 - w) * st.li_discrepancy + w * raw)
             self._d_first = False
             self.passes[-1]["li_discrepancy_next"] = st.li_discrepancy
         if st.delivery_correction is not None:
@@ -1584,6 +1611,7 @@ def engine_record(eng, res, wall_s=None) -> dict:
                       prior=eng.prior_name,
                       delivery_correction=eng.s["delivery_correction"],
                       mse_jacobian=eng.s["mse_jacobian"],
+                      li_row_relaxation=eng.s.get("li_row_relaxation", 1.0),
                       edge_pressure=eng.s.get("edge_pressure"),
                       loop=eng.s["loop"]),
         convergence=convergence_table(eng.s),
@@ -1593,7 +1621,12 @@ def engine_record(eng, res, wall_s=None) -> dict:
         row_update=("l_i: d_k = (1-omega) d_k-1 + omega [l_i(E_k+1) - "
                     "l_i_model(solved current; G_k+1)], closure target "
                     "T - d; q0: jbs_loop.AxisRowPin; MSE: offset refreshed "
-                    "from each solve, Jacobian Broyden-updated"),
+                    "from each solve, Jacobian Broyden-updated"
+                    + ("" if eng.s.get("li_row_relaxation", 1.0) == 1.0 else
+                       f"; the l_i step is under-relaxed: omega -> "
+                       f"{eng.s['li_row_relaxation']:g} omega "
+                       "(engine_li_row_relaxation; the first update from "
+                       f"d = 0 takes {eng.s['li_row_relaxation']:g})")),
         notices=list(eng.notices),
         flags=list(eng.flags),
         converged=bool(res["converged"]),

@@ -1,5 +1,22 @@
 # Bouquet — change summaries
 
+## Unreleased — `engine_li_row_relaxation` (unified engine; default unchanged)
+
+New `GenerationConfig.engine_li_row_relaxation` (default `1.0`): an
+under-relaxation `r` (0 < r <= 1) of the unified engine's l_i-row
+discrepancy update between reconstruction passes,
+`d_k = (1 − rω) d_k−1 + rω [measured − model]` (the first update, from
+`d = 0`, takes `r`). At the default the update is the one before the setting
+existed, bit for bit (tested). It is a solver-side remedy for a row whose
+per-pass gain exceeds the stability limit of 2 (a growing period-2
+oscillation of the l_i row was measured on a high-bootstrap-fraction case
+under the two-scalar preset, gain 2.07 at ω = 0.7); `r = 0.5` halves that
+gain. It changes the path only: no tolerance, convergence criterion, pass
+ceiling or target moves. Validated by name (refused outside `0 < r <= 1`,
+and when set with `reconstruction_engine="legacy"`). Recorded in the engine
+record (`settings.li_row_relaxation`). Draws carry no l_i row and are not
+affected; nor are the q0 row and the MSE chords.
+
 ## Unreleased — approved change of a physics default: `separatrix_pressure` `"legacy"` → `"offset"`
 
 **This is a change of a physics default, approved by the package owner on
