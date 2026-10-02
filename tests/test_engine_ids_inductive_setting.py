@@ -1,13 +1,16 @@
 """``GenerationConfig.engine_ids_inductive``: the IDS adapter's inductive
 choice, passed through the unified engine -- fast half (no GS solver).
 
-* the default is ``"auto"``; it reaches the engine settings and the record;
-  it is validated by name (one of ``adapters.IDS_INDUCTIVE_CHOICES``) and
-  refused when set with ``reconstruction_engine="legacy"``;
+* the default is ``"residual"`` (the inductive current is the parallel
+  residual by definition; owner decision 2026-10-02); it reaches the engine
+  settings and the record; it is validated by name (one of
+  ``adapters.IDS_INDUCTIVE_CHOICES``) and a non-default value is refused
+  when set with ``reconstruction_engine="legacy"``;
 * ``prepare_engine_baseline`` constructs the IDS adapter with exactly the
   configured choice (the default reproduces the adapter's own default), and
   the contract's provenance says which inductive was used;
-* set with a g-file source it is refused (it would have no effect).
+* a non-default value set with a g-file source is refused (it would have
+  no effect).
 
 Synthetic inputs only (the D3D-like example fixtures); no solver, no device data.
 """
@@ -59,10 +62,10 @@ def _gcfg(**gen):
 # ---------------------------------------------------------------------------
 #  default, settings, record, validation
 # ---------------------------------------------------------------------------
-def test_the_default_is_auto_and_reaches_the_settings_and_the_record():
-    assert GenerationConfig().engine_ids_inductive == "auto"
-    assert ENGINE_FIELD_DEFAULTS["engine_ids_inductive"] == "auto"
-    assert T.settings()["ids_inductive"] == "auto"
+def test_the_default_is_residual_and_reaches_the_settings_and_the_record():
+    assert GenerationConfig().engine_ids_inductive == "residual"
+    assert ENGINE_FIELD_DEFAULTS["engine_ids_inductive"] == "residual"
+    assert T.settings()["ids_inductive"] == "residual"
     for v in IDS_INDUCTIVE_CHOICES:
         assert T.settings(engine_ids_inductive=v)["ids_inductive"] == v
     ad = T.ToyAdapter()
@@ -70,9 +73,9 @@ def test_the_default_is_auto_and_reaches_the_settings_and_the_record():
     ad.read()
     with contextlib.redirect_stdout(io.StringIO()):
         _eng, _res, rec = reconstruct(
-            ad, b, T.settings(engine_ids_inductive="residual",
+            ad, b, T.settings(engine_ids_inductive="auto",
                               engine_rows=("Ip",)), label="toy")
-    assert rec["settings"]["ids_inductive"] == "residual"
+    assert rec["settings"]["ids_inductive"] == "auto"
 
 
 @pytest.mark.parametrize("bad", ["ohmic", "", None, 1, True, "RESIDUAL"])
@@ -82,7 +85,7 @@ def test_unknown_values_are_refused_by_name(bad):
             reconstruction_engine="unified", engine_ids_inductive=bad))
 
 
-@pytest.mark.parametrize("v", ["j_ohmic", "residual"])
+@pytest.mark.parametrize("v", ["j_ohmic", "auto"])
 def test_a_set_value_is_refused_with_the_legacy_engine(v):
     with pytest.raises(ValueError, match="engine_ids_inductive"):
         validate_engine_settings(GenerationConfig(
@@ -148,8 +151,10 @@ def test_prepare_hands_the_adapter_the_configured_choice(monkeypatch, v):
     prov = c.provenance["inductive"]
     if v == "residual":
         assert prov.startswith("residual")
-        assert c.provenance["inductive_consistency"]["action"] == \
-            "residual_requested"
+        # the j_ohmic cross-check is stamped, with no threshold
+        k = c.provenance["inductive_consistency"]
+        assert k["action"] == "residual_by_definition" and k["tol"] is None
+        assert np.isfinite(k["net_frac"]) and np.isfinite(k["rms_frac"])
     elif v == "j_ohmic":
         assert prov.startswith("j_ohmic")
     else:
@@ -164,7 +169,8 @@ def test_the_default_contract_equals_the_adapters_own_default(monkeypatch):
     import bouquet.adapters as A
     from bouquet.baseline import resolve_baseline
     cfg = _icfg()
-    _ind, c = _prepare_until_the_contract(monkeypatch, cfg)
+    ind, c = _prepare_until_the_contract(monkeypatch, cfg)
+    assert ind == "residual"
     monkeypatch.undo()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -173,10 +179,11 @@ def test_the_default_contract_equals_the_adapters_own_default(monkeypatch):
     np.testing.assert_array_equal(c.jB_ind, c0.jB_ind)
     np.testing.assert_array_equal(c.jB_fix, c0.jB_fix)
     assert c.provenance["inductive"] == c0.provenance["inductive"]
+    assert c.provenance["inductive"].startswith("residual")
 
 
 @pytest.mark.skipif(not _paths_exist(), reason="synthetic example missing")
-@pytest.mark.parametrize("v", ["j_ohmic", "residual"])
+@pytest.mark.parametrize("v", ["j_ohmic", "auto"])
 def test_a_set_value_is_refused_with_a_gfile_source(v):
     from bouquet.engine import prepare_engine_baseline
     bq = types.SimpleNamespace(config=_gcfg(engine_ids_inductive=v),

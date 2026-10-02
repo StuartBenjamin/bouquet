@@ -1,8 +1,12 @@
 # Bouquet — change summaries
 
-## Unreleased — `engine_ids_inductive` (unified engine, IDS sources; default unchanged)
+## Unreleased — `engine_ids_inductive` (unified engine, IDS sources)
 
-New `GenerationConfig.engine_ids_inductive` (default `"auto"`): passes the
+*The default is now `"residual"` (owner-approved; see "IDS inductive: the
+parallel residual by definition" in the unified-engine section below). As
+introduced, the setting defaulted to `"auto"`, as described here.*
+
+New `GenerationConfig.engine_ids_inductive` (default then `"auto"`): passes the
 IDS adapter's inductive choice (`IdsAdapter(inductive=...)`) through the
 unified engine. `"auto"` is the adapter's own default (the source's
 `j_ohmic`, or the parallel residual `j_total − j_bootstrap − Σ driven` when
@@ -103,6 +107,20 @@ which applies to every path.*
 - **`bouquet/adapters.py`**: the source-adapter contract and the g-file / IDS
   adapters (the only place, with the exporters, where a current convention is
   converted). Raw-E_r MSE is refused.
+- **IDS inductive: the parallel residual by definition (owner-approved
+  default change, 2026-10-02).** `IdsAdapter(inductive=...)` and
+  `GenerationConfig.engine_ids_inductive` default to `"residual"`: the
+  inductive current is `j_total − j_bootstrap − Σ driven`; the source's
+  `j_ohmic` becomes a cross-check, compared and stamped in
+  `provenance["inductive_consistency"]` (action `"residual_by_definition"`)
+  with no threshold and no warning. A source without `j_total` /
+  `j_bootstrap` is refused (`"j_ohmic"` uses its `j_ohmic` explicitly).
+  Evidence: on self-consistent sources the two are indistinguishable
+  (`|Δl_i| ≤ 1.8e-3`); where a source's own split is locally inconsistent the
+  residual is closer to its `<j_phi>`. `"auto"` and `"j_ohmic"` remain as
+  explicit options with their semantics unchanged. No tolerance, criterion,
+  ceiling or target moved. The IDS inductive changes on every source whose
+  `j_ohmic` does not equal the residual exactly.
 - `Bouquet.prepare_baseline()` dispatches to the engine when selected, for
   both inputs, and returns the usual `Baseline` plus `Baseline.engine` (the
   full record: contract, settings, convergence constants with their origins,

@@ -74,8 +74,9 @@ ENGINE_FIELD_DEFAULTS = {
     # under-relaxation of the l_i row's discrepancy update (1.0: the update
     # before the setting existed; see UnifiedEngine.on_pass)
     "engine_li_row_relaxation": 1.0,
-    # the IDS adapter's inductive choice (adapters.IDS_INDUCTIVE_CHOICES)
-    "engine_ids_inductive": "auto",
+    # the IDS adapter's inductive choice (adapters.IDS_INDUCTIVE_CHOICES;
+    # "residual" by definition, owner decision 2026-10-02)
+    "engine_ids_inductive": "residual",
     # the draws on the engine (bouquet.engine_draws, docs/engine.md "Draws")
     "engine_draw_q0_row": False,
     "engine_draw_homotopy": True,
@@ -1939,7 +1940,8 @@ def prepare_engine_baseline(bq):
         raise ValueError(
             f"generation.engine_ids_inductive={s['ids_inductive']!r} set "
             "with a g-file source: it configures the IDS adapter only and "
-            "would have no effect; leave it at 'auto'")
+            "would have no effect; leave it at its default "
+            f"{ENGINE_FIELD_DEFAULTS['engine_ids_inductive']!r}")
     bq.baseline = None
     bq._failed_baseline = None
     bq._engine_run = None

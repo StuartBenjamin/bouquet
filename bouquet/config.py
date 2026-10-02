@@ -1207,14 +1207,21 @@ class GenerationConfig:
     # The q0 row (AxisRowPin) and the MSE chords (Broyden) are not affected.
     engine_li_row_relaxation: float = 1.0
     # How the IDS adapter forms the inductive current (IDS sources only;
-    # bouquet.adapters.IdsAdapter's ``inductive``): "auto" (default: the
-    # source's j_ohmic, or the parallel residual j_total - j_bootstrap -
-    # driven when j_ohmic is absent or fails the adapter's consistency
-    # check), "j_ohmic" (the source's, always), "residual" (the parallel
-    # residual, always).  The consistency numbers are stamped in the
-    # contract's provenance whichever is used.  Refused with a g-file
+    # bouquet.adapters.IdsAdapter's ``inductive``).  "residual" (default,
+    # owner decision 2026-10-02): the inductive current IS the parallel
+    # residual j_total - j_bootstrap - sum(driven) by definition; the
+    # source's j_ohmic is a cross-check, compared and stamped (no threshold,
+    # no warning); a source without j_total / j_bootstrap is refused.
+    # Evidence: on self-consistent sources residual and j_ohmic are
+    # indistinguishable (|dl_i| <= 1.8e-3); on locally inconsistent ones the
+    # residual is closer to the source's own <j_phi>.  Explicit options:
+    # "j_ohmic" (the source's, warning when it misses the residual by more
+    # than the adapter's 2 % tolerance) and "auto" (j_ohmic, or the residual
+    # with a warning when j_ohmic is absent or misses by more than 2 %).
+    # The consistency numbers are stamped in the contract's provenance
+    # whichever is used.  A non-default value is refused with a g-file
     # source (it would have no effect there).
-    engine_ids_inductive: str = "auto"
+    engine_ids_inductive: str = "residual"
     # --- the draws on the engine (Stage 3; bouquet.engine_draws) ------------
     # A draw holds the reconstruction's coefficients x* and closes ONLY the
     # Ip row (a scalar amplitude on the inductive, in the exact measure).
