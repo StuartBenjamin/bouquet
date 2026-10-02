@@ -514,19 +514,27 @@ def _validate_pressure_completeness(cp, ne, te, ni, ti, p_fast, p_imp,
 
 def _read_ida_omega(path, time_s, psi_N):
     """IDA toroidal rotation (omega_tor_12C6) resampled onto psi_N; None if absent.
-    Mirrors read_ida's nearest-time selection (IDA time is ms; ``time_s`` is s)."""
+    Mirrors read_ida's nearest-time selection (IDA time is ms; ``time_s`` is s)
+    and, on the ensemble layout, its sample mean and shared radial grid."""
     try:
         import h5py
         with h5py.File(path, "r") as f:
             if "omega_tor_12C6" not in f:
                 return None
-            it = np.asarray(f["time"], dtype=float)            # ms
+            it = np.asarray(f["time"][:], dtype=float).ravel()   # ms
             tms = (time_s * 1e3) if time_s is not None else float(it[0])
             j = int(np.argmin(np.abs(it - tms)))
-            ipsi = np.asarray(f["psi_n"], dtype=float)
-            om = np.asarray(f["omega_tor_12C6"], dtype=float)[j]
+            om = np.asarray(f["omega_tor_12C6"][j], dtype=float)
+            if om.ndim == 2:            # ensemble: (n_samples, n_radial)
+                om = om.mean(axis=0)
+                ipsi = np.asarray(f["psi_n"][j], dtype=float)[0]
+            else:
+                ipsi = np.asarray(f["psi_n"][:], dtype=float)
             return np.interp(psi_N, ipsi, om)
-    except Exception:
+    except Exception as e:
+        import warnings
+        warnings.warn(f"_read_ida_omega: {path!r} rotation not read "
+                      f"({type(e).__name__}: {e}); omega left to FUSE")
         return None
 
 

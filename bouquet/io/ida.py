@@ -478,9 +478,11 @@ def read_ida(
                   f"'{zeff_tier}': the other route has no usable envelope in "
                   "this file, so no route-difference term enters sigma_ni")
 
-        # Resolved Z_eff, then ni from it.  The single-impurity clamp applies
-        # once, to the mean, so ni(mean(Zeff)) == mean(ni) stays exact.
-        zeff_res = (w_v * zeff_vb if w_v else 0.0) + (w_c * zeff_cer if w_c else 0.0)
+        # Resolved Z_eff, then ni from it.  Each route is clamped to the
+        # single-impurity window before the mean (Zeff_CER <= Z <=> ne - Z nC
+        # >= 0), so ni(mean(Zeff)) == mean of the per-route ni stays exact.
+        zeff_res = ((w_v * np.clip(zeff_vb, 1.0, impurity_Z) if w_v else 0.0)
+                    + (w_c * np.clip(zeff_cer, 1.0, impurity_Z) if w_c else 0.0))
         Zeff = np.clip(zeff_res, 1.0, impurity_Z)
         ni = main_ion_density_from_zeff(ne, Zeff, impurity_Z)
 
