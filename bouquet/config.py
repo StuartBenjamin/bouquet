@@ -1189,12 +1189,19 @@ class GenerationConfig:
     # per pass, part of the state a draw inherits).  Default off; the default
     # is to be decided after the solver's jphi-linterp defect is fixed.
     engine_delivery_correction: bool = False
-    # How the MSE Jacobian is formed: "fd_broyden" (finite differences once
-    # at convergence, then Broyden updates every pass; the design note's
-    # recommendation) or "fd_chord" (the same finite differences, held
-    # fixed -- the legacy chord stage's treatment).  Either way the
-    # linearisation offset is refreshed from every solve.
-    engine_mse_jacobian: str = "fd_broyden"
+    # How the MSE Jacobian is formed: "fd_chord" (finite differences once
+    # at convergence, held fixed -- the legacy chord stage's treatment) or
+    # "fd_broyden" (the same finite differences, then Broyden updates every
+    # pass; the design note's recommendation).  Either way the linearisation
+    # offset is refreshed from every solve.  Default "fd_broyden" ->
+    # "fd_chord" 2026-10-02 (owner-approved): on the second MSE pass the
+    # coefficients barely move while tan-gamma still changes with the
+    # relaxing bootstrap and geometry, so the rank-one update shifted the
+    # Jacobian by 17-32 % and the loop spent 4-5 passes recovering; the
+    # fixed Jacobian converged every MSE case (Broyden 8 of 10), was never
+    # slower, agreed within |dl_i| <= 5e-4 and sat 3-5 % from a fresh
+    # Jacobian against 16.5 %.
+    engine_mse_jacobian: str = "fd_chord"
     # Under-relaxation r of the l_i row's discrepancy update between passes
     # (the reconstruction only; draws carry no l_i row):
     #   d_k = (1 - r w) d_k-1 + r w [l_i(E_k+1) - l_i_model(js_k; G_k+1)],

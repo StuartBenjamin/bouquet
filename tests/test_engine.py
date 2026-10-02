@@ -610,3 +610,18 @@ def test_the_engine_record_is_stored_beside_the_baseline(tmp_path):
     with h5py.File(h + ".h5", "r") as hf:
         assert ENGINE_ATTR in hf["_baseline"].attrs
         assert int(hf.attrs["schema_version"]) == 3
+
+
+def test_the_mse_jacobian_defaults_to_the_fixed_finite_difference():
+    """Default "fd_chord" (2026-10-02): the fixed Jacobian converged every
+    MSE case where the Broyden update's second pass, fed a tan-gamma change
+    that was mostly the relaxing bootstrap and geometry, cost 4-5 extra
+    passes; "fd_broyden" stays available by name."""
+    from bouquet.config import GenerationConfig
+    from bouquet.engine import ENGINE_FIELD_DEFAULTS, ENGINE_MSE_JACOBIANS
+    assert GenerationConfig().engine_mse_jacobian == "fd_chord"
+    assert ENGINE_FIELD_DEFAULTS["engine_mse_jacobian"] == "fd_chord"
+    assert set(ENGINE_MSE_JACOBIANS) == {"fd_broyden", "fd_chord"}
+    assert GenerationConfig(reconstruction_engine="unified",
+                            engine_mse_jacobian="fd_broyden"
+                            ).engine_mse_jacobian == "fd_broyden"

@@ -70,7 +70,7 @@ ENGINE_FIELD_DEFAULTS = {
     "engine_preset": "structured",
     "engine_rows": ("Ip", "l_i"),
     "engine_delivery_correction": False,
-    "engine_mse_jacobian": "fd_broyden",
+    "engine_mse_jacobian": "fd_chord",
     # under-relaxation of the l_i row's discrepancy update (1.0: the update
     # before the setting existed; see UnifiedEngine.on_pass)
     "engine_li_row_relaxation": 1.0,

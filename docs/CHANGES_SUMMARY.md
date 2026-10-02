@@ -92,7 +92,11 @@ which applies to every path.*
   `"structured_uniform"` | `"bootstrap_scalar"` | `"sawtooth_two_scalar"` |
   `"two_scalar_li"`), `engine_rows` (`"Ip"`,
   `"l_i"`, `"q0"`, `"mse"`), `engine_delivery_correction` (default `False`)
-  and `engine_mse_jacobian` (`"fd_broyden"` | `"fd_chord"`). Validated by
+  and `engine_mse_jacobian` (`"fd_chord"` | `"fd_broyden"`; default `"fd_chord"`
+  since 2026-10-02, owner-approved: the fixed finite-difference Jacobian
+  converged every MSE validation case where Broyden's rank-one update, fed a
+  second pass whose tan γ change was mostly the relaxing bootstrap and
+  geometry, cost 4-5 extra passes and two pass-ceiling failures). Validated by
   name; engine options set under `"legacy"` are refused. Stored configs
   without the field load as `"legacy"`.
 - **`bouquet/engine.py`**: one reconstruction loop for g-file and IDS inputs
