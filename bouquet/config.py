@@ -1206,6 +1206,15 @@ class GenerationConfig:
     # moves, and the fixed point (d = the measured discrepancy) is the same.
     # The q0 row (AxisRowPin) and the MSE chords (Broyden) are not affected.
     engine_li_row_relaxation: float = 1.0
+    # How the IDS adapter forms the inductive current (IDS sources only;
+    # bouquet.adapters.IdsAdapter's ``inductive``): "auto" (default: the
+    # source's j_ohmic, or the parallel residual j_total - j_bootstrap -
+    # driven when j_ohmic is absent or fails the adapter's consistency
+    # check), "j_ohmic" (the source's, always), "residual" (the parallel
+    # residual, always).  The consistency numbers are stamped in the
+    # contract's provenance whichever is used.  Refused with a g-file
+    # source (it would have no effect there).
+    engine_ids_inductive: str = "auto"
     # --- the draws on the engine (Stage 3; bouquet.engine_draws) ------------
     # A draw holds the reconstruction's coefficients x* and closes ONLY the
     # Ip row (a scalar amplitude on the inductive, in the exact measure).

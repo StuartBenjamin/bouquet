@@ -74,6 +74,8 @@ ENGINE_FIELD_DEFAULTS = {
     # under-relaxation of the l_i row's discrepancy update (1.0: the update
     # before the setting existed; see UnifiedEngine.on_pass)
     "engine_li_row_relaxation": 1.0,
+    # the IDS adapter's inductive choice (adapters.IDS_INDUCTIVE_CHOICES)
+    "engine_ids_inductive": "auto",
     # the draws on the engine (bouquet.engine_draws, docs/engine.md "Draws")
     "engine_draw_q0_row": False,
     "engine_draw_homotopy": True,
@@ -239,6 +241,11 @@ def validate_engine_settings(gc) -> None:
         raise ValueError(f"generation.engine_li_row_relaxation={rr!r} must "
                          "be a number with 0 < r <= 1 (an under-relaxation "
                          "of the l_i row's update; 1.0 is the default)")
+    from .adapters import IDS_INDUCTIVE_CHOICES
+    ii = vals["engine_ids_inductive"]
+    if not isinstance(ii, str) or ii not in IDS_INDUCTIVE_CHOICES:
+        raise ValueError(f"generation.engine_ids_inductive must be one of "
+                         f"{IDS_INDUCTIVE_CHOICES}, got {ii!r}")
     mj = vals["engine_mse_jacobian"]
     if mj not in ENGINE_MSE_JACOBIANS:
         raise ValueError(f"generation.engine_mse_jacobian must be one of "
@@ -351,6 +358,9 @@ def engine_settings(gc) -> dict:
         li_row_relaxation=float(getattr(
             gc, "engine_li_row_relaxation",
             ENGINE_FIELD_DEFAULTS["engine_li_row_relaxation"])),
+        ids_inductive=str(getattr(
+            gc, "engine_ids_inductive",
+            ENGINE_FIELD_DEFAULTS["engine_ids_inductive"])),
         draw_q0_row=bool(getattr(gc, "engine_draw_q0_row", False)),
         draw_homotopy=bool(getattr(gc, "engine_draw_homotopy", True)),
         draw_bootstrap_refresh=bool(getattr(
@@ -1612,6 +1622,7 @@ def engine_record(eng, res, wall_s=None) -> dict:
                       delivery_correction=eng.s["delivery_correction"],
                       mse_jacobian=eng.s["mse_jacobian"],
                       li_row_relaxation=eng.s.get("li_row_relaxation", 1.0),
+                      ids_inductive=eng.s.get("ids_inductive", "auto"),
                       edge_pressure=eng.s.get("edge_pressure"),
                       loop=eng.s["loop"]),
         convergence=convergence_table(eng.s),
@@ -1922,6 +1933,13 @@ def prepare_engine_baseline(bq):
         raise ValueError("the unified engine needs a live TokaMaker solver; "
                          "call setup_solver() before prepare_baseline()")
     s = engine_settings(gc)
+    if (isinstance(src, ReconstructionSource)
+            and s["ids_inductive"] != ENGINE_FIELD_DEFAULTS[
+                "engine_ids_inductive"]):
+        raise ValueError(
+            f"generation.engine_ids_inductive={s['ids_inductive']!r} set "
+            "with a g-file source: it configures the IDS adapter only and "
+            "would have no effect; leave it at 'auto'")
     bq.baseline = None
     bq._failed_baseline = None
     bq._engine_run = None
@@ -1943,7 +1961,8 @@ def prepare_engine_baseline(bq):
             elif isinstance(src, ImasSource):
                 from .baseline import resolve_baseline
                 bl_src = resolve_baseline(cfg, mygs)
-                ad = IdsAdapter(src, cfg, bl_src)
+                ad = IdsAdapter(src, cfg, bl_src,
+                                inductive=s["ids_inductive"])
                 c0 = ad.read()
                 psi_pad = ad.psi_pad
                 bq._repoint_imas_geometry()

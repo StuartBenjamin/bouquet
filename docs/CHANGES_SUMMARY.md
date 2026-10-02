@@ -1,5 +1,20 @@
 # Bouquet — change summaries
 
+## Unreleased — `engine_ids_inductive` (unified engine, IDS sources; default unchanged)
+
+New `GenerationConfig.engine_ids_inductive` (default `"auto"`): passes the
+IDS adapter's inductive choice (`IdsAdapter(inductive=...)`) through the
+unified engine. `"auto"` is the adapter's own default (the source's
+`j_ohmic`, or the parallel residual `j_total − j_bootstrap − Σ driven` when
+`j_ohmic` is absent or fails the adapter's consistency check);
+`"j_ohmic"` and `"residual"` force one or the other. At the default the
+contract is the one before the setting existed (tested). No tolerance,
+criterion, ceiling or target moves; the consistency numbers are stamped in
+`provenance["inductive_consistency"]` whichever choice is used. Validated by
+name, refused when set with `reconstruction_engine="legacy"` and with a
+g-file source (no effect there). Recorded in the engine record
+(`settings.ids_inductive`).
+
 ## Unreleased — `engine_li_row_relaxation` (unified engine; default unchanged)
 
 New `GenerationConfig.engine_li_row_relaxation` (default `1.0`): an
