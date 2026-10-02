@@ -256,3 +256,48 @@ class TestRouteDiscrepancy:
         # Both still flag the same event.
         assert np.median(ida.ni_route_chi) > 3.0
         assert np.median(ida.zeff_route_chi) > 3.0
+
+
+def test_all_route_clamps_each_route_before_the_mean(tmp_path):
+    # Zeff_CER > Z near the axis (nC > ne/Z): that route's ni floors at 0
+    # before the mean, as ida_fuse's ida_resolve does.
+    Z, nr = 6.0, 40
+    psi = np.linspace(0, 1.2, nr)
+    ne = 5e19 * (1 - 0.8 * (psi / 1.2) ** 2)
+    nc = ne / Z * np.where(psi < 0.2, 1.05, 0.02)
+    zeff = 1.5 + 0.0 * psi
+    te = 3000.0 * (1 - 0.9 * (psi / 1.2) ** 2) + 50.0
+    p = tmp_path / "clamp.cdf"
+    with h5py.File(p, "w") as f:
+        f["time"] = np.array([3000.0])
+        f["psi_n"] = psi
+        for k, v in [("n_e", ne), ("T_e", te), ("T_12C6", 0.9 * te),
+                     ("Zeff", zeff), ("n_12C6", nc)]:
+            f[k] = v[None, :]
+        for k, v in [("n_e_err", 0.05 * ne), ("T_e_err", 0.04 * te),
+                     ("T_12C6_err", 0.06 * te), ("Zeff_err", 0.1 * zeff),
+                     ("n_12C6_err", 0.1 * nc)]:
+            f[k] = v[None, :]
+    ida = read_ida(str(p), time=3.0, impurity_Z=Z)
+    assert ida.sigma_Zeff_source == "VB+CER"
+    expected = 0.5 * (ne * (Z - zeff) / (Z - 1) + np.maximum(ne - Z * nc, 0.0))
+    np.testing.assert_allclose(ida.ni, expected, rtol=1e-12)
+    assert np.all(ida.ni <= ne)
+
+
+@pytest.mark.parametrize("layout", ["direct", "ensemble"])
+def test_read_ida_omega_both_layouts(tmp_path, layout):
+    from bouquet.io.imas import _read_ida_omega
+    p = str(tmp_path / f"{layout}.cdf")
+    psi_N = np.linspace(0.0, 1.0, 17)
+    if layout == "direct":
+        _write_direct(p)
+        with h5py.File(p, "r") as f:
+            ipsi, om = f["psi_n"][:], f["omega_tor_12C6"][1]
+        t = 3.5
+    else:
+        _write_ensemble(p)
+        with h5py.File(p, "r") as f:
+            ipsi, om = f["psi_n"][0][0], f["omega_tor_12C6"][0].mean(axis=0)
+        t = 3.0
+    np.testing.assert_allclose(_read_ida_omega(p, t, psi_N), np.interp(psi_N, ipsi, om))
