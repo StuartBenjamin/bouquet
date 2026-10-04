@@ -1939,6 +1939,9 @@ def perturb_kinetic_equilibrium(
     # The cache's SWB seed, reused by DIFF_BS and delta composition so the
     # sigma=0 call is seeded exactly as the reference was.
     swb_seed_ref=None,
+    # Source-consistent inductive seed (GenerationConfig.swb_seed="source");
+    # None: the generic seed.
+    swb_seed_profile=None,
     proxy_bias_warmstart=None,
     pin_jphi=False,
     Z_imp=None,
@@ -2075,6 +2078,9 @@ def perturb_kinetic_equilibrium(
     seed_coord : str
         Coordinate the inductive seed shape is written in: ``"psi_n"`` or
         ``"native"`` (see :func:`bouquet.coords.seed_psi`).
+    swb_seed_profile : ndarray, optional
+        Inductive seed on SWB's grid, used in place of the generic one
+        (``Baseline.swb_seed_profile``).
     **kwargs
         Additional keyword options passed through to
         :func:`solve_with_bootstrap` in OpenFUSIONToolkit.
@@ -2536,6 +2542,7 @@ def perturb_kinetic_equilibrium(
         print(f"  [DIFF_BS] restoring mygs to recon snapshot before SWB")
         mygs.replace_eq(source_eq=recon_eq_snapshot)
         _swb_seed = (swb_seed_ref if swb_seed_ref is not None else
+                     swb_seed_profile if swb_seed_profile is not None else
                      coords.swb_seed(psi_N, coords.seed_psi(mygs, psi_N, coord, seed_coord)))
         _stashed_bounds = getattr(mygs, '_coil_drift_bounds', None)
         if _stashed_bounds is not None:
@@ -2730,6 +2737,8 @@ def perturb_kinetic_equilibrium(
         if (swb_seed_ref is not None and spike_delta_ref is not None
                 and spike_delta_baseline is not None):
             _swb_seed = swb_seed_ref  # delta composition: the reference's seed
+        elif swb_seed_profile is not None:
+            _swb_seed = np.asarray(swb_seed_profile, dtype=float)
         else:
             _swb_seed = coords.swb_seed(psi_N, coords.seed_psi(mygs, psi_N, coord, seed_coord))
 
@@ -3012,7 +3021,14 @@ def perturb_kinetic_equilibrium(
             # so the rest of the loop has a workable baseline.
             print(f"  [recon-anchor] WARN: solve failed ({_anchor_exc}); "
                   f"falling back to SWB total_j_phi")
-            new_jphi = results["total_j_phi"]
+            if swb_seed_profile is not None and not (_pin_jphi or _diff_bs):
+                # Source seed: SWB's alpha * j_ind with bouquet's own spike
+                # and j_fixed, not SWB's raw (unconverted, unscaled) j_BS.
+                new_jphi = (np.interp(psi_N, coords.swb_grid(psi_N),
+                                      np.asarray(results["j_inductive"], dtype=float))
+                            + spike_profile + j_fixed_eff)
+            else:
+                new_jphi = results["total_j_phi"]
             _ffp_fb = coords.oft_prof("jphi-linterp", psi_N, new_jphi, coord)
             mygs.set_profiles(pp_prof=_pp_anchor, ffp_prof=_ffp_fb)
             try:
@@ -3877,6 +3893,8 @@ def generate_bouquet(
     coord="psi_n",
     window_coord="psi_n",
     seed_coord="psi_n",
+    swb_seed_profile=None,
+    swb_jphi_fixed=None,
     **kwargs,  # solve_with_bootstrap options (bootstrap_kwargs)
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
@@ -4042,6 +4060,10 @@ def generate_bouquet(
         solves land on its diagnostics as ``solve_failures``.
     coord, window_coord, seed_coord : str
         As in :func:`perturb_kinetic_equilibrium`.
+    swb_seed_profile, swb_jphi_fixed : ndarray, optional
+        Source-consistent SWB inputs on SWB's grid (``Baseline.swb_seed_profile``
+        / ``swb_jphi_fixed``): the inductive seed, and ``jphi_fixed``, of every
+        SWB call (cache and draws).  None: generic seed, no fixed current.
     **kwargs
         Additional keyword options passed through to
         :func:`solve_with_bootstrap` in OpenFUSIONToolkit.
@@ -4066,6 +4088,8 @@ def generate_bouquet(
     # ensembles were not regenerable.
     rng = make_rng(seed)
     coords.check_coord(coord)
+    if swb_jphi_fixed is not None:
+        kwargs["jphi_fixed"] = np.asarray(swb_jphi_fixed, dtype=float)  # every SWB call
     # The legacy global RNG is still seeded so that any third-party code in
     # the solve path that samples from np.random stays deterministic too.
     # bouquet's own draws no longer read it.
@@ -5042,7 +5066,9 @@ def generate_bouquet(
                 print(f"  [DIFF_BS] state-anchor solve failed "
                       f"({_anch_exc}); SWB may inherit stale state")
             # Seeded on the anchor state; the draws reuse it (swb_seed_ref).
-            _swb_seed_cache = coords.swb_seed(psi_N, coords.seed_psi(mygs, psi_N, coord, seed_coord))
+            _swb_seed_cache = (np.asarray(swb_seed_profile, dtype=float)
+                               if swb_seed_profile is not None else
+                               coords.swb_seed(psi_N, coords.seed_psi(mygs, psi_N, coord, seed_coord)))
             try:
                 # The sigma=0 reference MUST carry the CENTER of the per-draw
                 # scale distribution: OFT applies scale_jBS INSIDE SWB, so a
@@ -5496,6 +5522,7 @@ def generate_bouquet(
                                           and baseline_j_BS is not None)
                                       else None),
                 swb_seed_ref=_swb_seed_cache,
+                swb_seed_profile=swb_seed_profile,
                 proxy_bias_warmstart=_proxy_bias_warmstart,
                 pin_jphi=pin_jphi,
                 coord=coord,

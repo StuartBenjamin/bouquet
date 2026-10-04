@@ -2293,6 +2293,15 @@ class Bouquet:
         # runs AFTER the common tail's forward solve; None everywhere else.
         _q0_state = None
         _structured_state = None
+        # swb_seed="source": SWB inputs from the source split as read (before
+        # any closure touches bl), shared by the baseline split, the draws and
+        # the sigma=0 check.
+        bl.swb_seed_profile = bl.swb_jphi_fixed = None
+        if self.config.generation.swb_seed == "source":
+            _ji = np.asarray(bl.j_inductive, dtype=float)
+            bl.swb_seed_profile, bl.swb_jphi_fixed = coords.swb_source_seed(
+                psi_N, _ji,
+                np.asarray(bl.j_phi, dtype=float) - _ji - np.asarray(bl.j_BS, dtype=float))
         if self.config.generation.recalculate_j_BS:
             from .TokaMaker_interface import (_swb_jbs_to_toroidal,
                                               smooth_jbs_transition)
@@ -2366,12 +2375,13 @@ class Bouquet:
                         np.asarray(_cap["psi_N"], float), np.asarray(_cap["avg_inv_R2"], float))
                     _anchor["inv_r2_src"] = "capture_equilibrium_fsa contour quadrature (anchor, pre-SWB)"
                 _anchor["Ip_anchor"] = abs(float(mygs.get_stats(lcfs_pad=psi_pad)["Ip"]))
-            swb_seed = coords.swb_seed(psi_N, coords.seed_psi(mygs, psi_N, coord, gc.seed_coord))
+            swb_seed, swb_fix = self._swb_inputs(mygs, psi_N, coord)
             swb = solve_with_bootstrap(
                 mygs, ne, te, ni, ti, Zeff, bl.Ip_target, swb_seed,
                 scale_jBS=1.0, isolate_edge_jBS=iso,
                 diagnostic_plots=False, verbose=False,
                 **coords.swb_grid_kwargs(psi_N, coord),
+                **swb_fix,
                 **gc.bootstrap_kwargs,
             )
             # Same axis-transition smoothing every per-draw spike receives, so
@@ -2965,6 +2975,17 @@ class Bouquet:
         return None if bs == 1.0 else bs * np.ones_like(
             np.asarray(bl.psi_N, dtype=float))
 
+    def _swb_inputs(self, mygs, psi_N, coord):
+        """``(inductive seed, extra SWB kwargs)``: the baseline's source seed
+        and ``jphi_fixed`` when set (``swb_seed="source"``), else the generic
+        seed and no kwargs.
+        """
+        bl = self.baseline
+        if getattr(bl, "swb_seed_profile", None) is not None:
+            return bl.swb_seed_profile, {"jphi_fixed": bl.swb_jphi_fixed}
+        gc = self.config.generation
+        return coords.swb_seed(psi_N, coords.seed_psi(mygs, psi_N, coord, gc.seed_coord)), {}
+
     def verify_sigma0_consistency(self, tol_frac=0.02):
         """Regression guard: the draw pipeline must reproduce the baseline
         j_BS split when the kinetics are UNPERTURBED (sigma=0).
@@ -3110,7 +3131,7 @@ class Bouquet:
                 mygs.replace_eq(source_eq=_snap)
             raise
 
-        seed = coords.swb_seed(psi_N, coords.seed_psi(mygs, psi_N, coord, gc.seed_coord))
+        seed, swb_fix = self._swb_inputs(mygs, psi_N, coord)
         # As the draw does: SWB at the jitter's centre (1.0), then the
         # baseline's multiplier (bs_scale or s_bs(psi)) after SWB.
         _mult = self._bootstrap_multiplier()
@@ -3120,6 +3141,7 @@ class Bouquet:
             scale_jBS=1.0,
             isolate_edge_jBS=bool(gc.isolate_edge_jBS),
             **coords.swb_grid_kwargs(psi_N, coord),
+            **swb_fix,
             **gc.bootstrap_kwargs)
         spike0 = (1.0 if _mult is None else _mult) * smooth_jbs_transition(
             _swb_jbs_to_toroidal(mygs, res["isolated_j_BS"], psi_pad, psi_N, coord))
@@ -3519,6 +3541,8 @@ class Bouquet:
                 coord=getattr(bl, "coord", coords.PSI),
                 window_coord=gc.window_coord,
                 seed_coord=gc.seed_coord,
+                swb_seed_profile=getattr(bl, "swb_seed_profile", None),
+                swb_jphi_fixed=getattr(bl, "swb_jphi_fixed", None),
                 **gc.bootstrap_kwargs,
             )
         self.generation_log = _cap["text"] or None

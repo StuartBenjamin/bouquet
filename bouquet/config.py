@@ -994,6 +994,14 @@ class GenerationConfig:
     # coordinate).  SWB keeps the seed's shape, so this sets the inductive
     # current's shape in a phi_n run.  Identical in a psi_n run.
     seed_coord: str = "psi_n"
+    # solve_with_bootstrap inputs on the IMAS path (baseline split, draws and
+    # the sigma=0 check): "source" seeds SWB with the source's j_inductive and
+    # holds its j_phi - j_inductive - j_BS (NBI + RF + other) fixed via
+    # jphi_fixed, so SWB solves only for the bootstrap on an equilibrium with
+    # the source's current shape; "generic" uses the (1 - s^1.5)^1.5 seed above
+    # and no fixed current (bouquet_unified behaviour).  Paths without a source
+    # current split (g-file) always use "generic".
+    swb_seed: str = "source"
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single
@@ -1066,7 +1074,11 @@ class GenerationConfig:
         from .coords import check_native
         check_native("window_coord", self.window_coord)
         check_native("seed_coord", self.seed_coord)
-        validate_bootstrap_kwargs(self.bootstrap_kwargs, self._RESERVED)
+        if self.swb_seed not in ("source", "generic"):
+            raise ValueError(f"swb_seed={self.swb_seed!r} not in ('source', 'generic')")
+        validate_bootstrap_kwargs(
+            self.bootstrap_kwargs,
+            self._RESERVED | ({"jphi_fixed"} if self.swb_seed == "source" else set()))
         resolve_structured_preset(self, stacklevel=4)
 
 

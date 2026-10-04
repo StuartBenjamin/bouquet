@@ -217,6 +217,23 @@ def swb_seed(x, psi=None):
     return np.power(1.0 - np.power(s, 1.5), 1.5)
 
 
+def swb_source_seed(x, j_ind, j_fixed):
+    """Source-consistent SWB inputs (``GenerationConfig.swb_seed="source"``):
+    the source's inductive current as ``inductive_jphi`` (SWB rescales it to
+    Ip) and its non-inductive, non-bootstrap current as ``jphi_fixed`` (held
+    as given), both toroidal, resampled onto :func:`swb_grid`.  SWB then
+    solves only for the bootstrap.  Returns ``(seed, jphi_fixed)``.
+    """
+    if "jphi_fixed" not in _swb_params():
+        raise RuntimeError(
+            "swb_seed='source' needs an OpenFUSIONToolkit whose "
+            "solve_with_bootstrap takes jphi_fixed; set swb_seed='generic'.")
+    x = np.asarray(x, dtype=float)
+    g = swb_grid(x)
+    return (np.interp(g, x, np.asarray(j_ind, dtype=float)),
+            np.interp(g, x, np.asarray(j_fixed, dtype=float)))
+
+
 def seed_psi(mygs, x, coord=PSI, seed_coord=PSI):
     """The ``psi`` argument of :func:`swb_seed` for ``seed_coord``: the nodes'
     ψ_N (``"psi_n"``) or ``None``, the run coordinate (``"native"``).

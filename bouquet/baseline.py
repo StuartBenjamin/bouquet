@@ -99,6 +99,11 @@ class Baseline:
     # (bl.j_BS = s_bs * SWB(scale 1)); None when the multiplier is the scalar
     # bs_scale.  generate() hands it to the draws, which apply it after SWB.
     bs_scale_profile: Optional["np.ndarray"] = None
+    # swb_seed="source": the SWB inputs of the baseline split (inductive seed,
+    # jphi_fixed) on SWB's grid, reused unchanged by the draws and the sigma=0
+    # check.  None => generic seed.
+    swb_seed_profile: Optional["np.ndarray"] = None
+    swb_jphi_fixed: Optional["np.ndarray"] = None
     # 'ohmic' mode only: factor applied to FUSE j_inductive so the hybrid
     # (s*j_ohm + SWB_jBS + j_fixed) integrates to Ip_target. 1.0 otherwise.
     ohm_scale: float = 1.0
