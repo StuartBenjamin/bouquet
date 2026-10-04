@@ -916,3 +916,89 @@ def test_generate_records_the_quantity_and_psi_n(tmp_path, monkeypatch,
         np.testing.assert_array_equal(mine["j_BS"], theirs["j_BS"])
         assert mine["engine"]["delivered"]["l_i_3"] \
             == theirs["engine"]["delivered"]["l_i_3"]
+
+
+# ---------------------------------------------------------------------------
+#  verify_sigma0_consistency under the engine runs the generate() route
+# ---------------------------------------------------------------------------
+def test_the_sigma0_check_runs_the_generate_route(tmp_path,
+                                                  toy_bouquet_solver,
+                                                  monkeypatch):
+    """The check is ONE draw through generate() (generate_bouquet with the
+    engine draw, the homotopy and the post-homotopy stage), every
+    perturbation zero and scale 1.0, archived into a temporary file; both
+    stages are reported and both decide ``passed``; the configured archive,
+    the config and the attributes generate() sets are untouched."""
+    import bouquet.TokaMaker_interface as TI
+    b = _bq(tmp_path)
+    b.setup_solver()
+    _quiet(b.prepare_baseline)
+    calls = []
+    real = TI.generate_bouquet
+
+    def spy(mygs, psi_N, n_equils, header, *a, **k):
+        calls.append(dict(n=n_equils, header=header,
+                          scale=k.get("jBS_scale_range"),
+                          engine=k.get("engine_draw")))
+        return real(mygs, psi_N, n_equils, header, *a, **k)
+
+    monkeypatch.setattr(TI, "generate_bouquet", spy)
+    h5 = b.config.output_header + ".h5"
+    mtime = os.path.getmtime(h5) if os.path.exists(h5) else None
+    b.draw_rejections = ["sentinel"]
+    v = _quiet(b.verify_sigma0_consistency)
+    assert len(calls) == 1 and calls[0]["n"] == 1
+    assert calls[0]["scale"] == (1.0, 1.0)
+    assert calls[0]["header"] != b.config.output_header
+    G = calls[0]["engine"]
+    assert G is not None and G.homotopy is True
+    assert all(np.all(np.asarray(G.unc[k]) == 0.0) for k in
+               ("sigma_ne", "sigma_te", "sigma_ni", "sigma_ti",
+                "sigma_jphi"))
+    assert v["route"] == "generate()" and v["passed"]
+    st = v["stages"]
+    assert st["loop"]["passed"] and st["loop"]["request_bit_identical"]
+    assert st["archived"]["passed"]
+    assert v["r_j"] == st["archived"]["r_j"]
+    assert v["dl_i"] == st["archived"]["dl_i"]
+    assert st["archived_coils"]["homotopy_pass"] is not None
+    # the record is the archived draw's (homotopy and post-hoc included)
+    assert "post_hoc" in v["record"]
+    # nothing of the user's run was touched
+    assert b.draw_rejections == ["sentinel"]
+    assert (os.path.getmtime(h5) if os.path.exists(h5) else None) == mtime
+    assert b.config.generation.n_inspec_target is None
+    assert getattr(b, "_sigma0_route", None) is None
+
+
+def test_a_rejected_sigma0_draw_fails_the_check(tmp_path,
+                                                toy_bouquet_solver,
+                                                monkeypatch):
+    """The route's homotopy fails at its first stage: the zero-perturbation
+    draw is rejected, so the check FAILS with the rejection -- the old
+    loop-only check could not see it."""
+    b = _bq(tmp_path)
+    b.setup_solver()
+    _quiet(b.prepare_baseline)
+    fake = b.mygs
+    real = type(fake).solve
+
+    def solve(self, *a, **k):
+        G = getattr(b, "_sigma0_route", None) or {}
+        G = G.get("draws")
+        if G is not None and G._cur is not None and \
+                G._cur["clock"].cur == "homotopy":
+            raise ValueError("Error in solve: Non-finite value (NaN/Inf) "
+                             "in solution")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(type(fake), "solve", solve)
+    v = _quiet(b.verify_sigma0_consistency)
+    assert v["passed"] is False
+    assert v["rejection"]["reason"] == "homotopy_infeasible"
+    assert v["stages"]["loop"]["passed"] is True   # the loop alone passes
+    assert v["stages"]["archived"] is None
+    # the loop-only function (kept) cannot see it
+    ctx = ED.context_from_run(b._engine_run, b.config.generation,
+                              b.baseline)
+    assert _quiet(ED.verify_zero_perturbation, ctx, b.mygs.toy)["passed"]

@@ -41,6 +41,22 @@ from .edge_pressure import (resolve_edge_pressure, solver_pax,
                             solver_pp_profile, solver_pprime)
 
 
+def _zero_perturbation_env(env):
+    """The uncertainty envelope of ``generate()`` with every sigma zero (the
+    shapes, length scales and baselines kept): the zero-perturbation draw
+    of ``verify_sigma0_consistency``'s engine route."""
+    import numpy as np
+    out = dict(env)
+    for k in ("sigma_ne", "sigma_te", "sigma_ni", "sigma_ti", "sigma_jphi"):
+        if out.get(k) is not None:
+            out[k] = np.zeros_like(np.asarray(out[k], dtype=float))
+    if out.get("aux_sigmas"):
+        out["aux_sigmas"] = {
+            c: np.zeros_like(np.asarray(v, dtype=float))
+            for c, v in out["aux_sigmas"].items()}
+    return out
+
+
 def _engine_gate(config):
     """``True`` when the draws run on the unified engine
     (``reconstruction_engine="unified"``), else ``None`` -- the gate every
@@ -6175,41 +6191,131 @@ class Bouquet:
 
     def _verify_sigma0_engine(self):
         """``verify_sigma0_consistency`` under ``reconstruction_engine=
-        "unified"``: the engine draw (:func:`bouquet.engine_draws.
-        verify_zero_perturbation`) at zero perturbation and bootstrap scale
-        1.0, from the state this method was called on (restored after).
-        ``passed``: the first request is BIT-IDENTICAL to the stored request,
-        the draw's loop converged, and its bootstrap is within ``jbs_rtol_j``
-        / ``jbs_rtol_Ip`` of the reconstruction's with ``|l_i - l_i*| <=
-        jbs_tol_li`` -- the draw-route rule of the legacy check, at the
-        unchanged loop tolerances; ``dq0`` (at its labelled radius) and
-        ``dq95`` are reported beside them."""
-        from .engine import engine_draw_maxits
-        from .engine_draws import (context_from_run, tokamaker_backend,
-                                   verify_zero_perturbation)
-        run = self._engine_run
+        "unified"``: ONE draw through the very route ``generate()`` runs --
+        :meth:`generate` itself, ``n=1``, every perturbation zero and the
+        bootstrap scale 1.0, archived into a temporary file (the
+        configuration's own archive is never touched): generate_bouquet's
+        baseline re-solve and warm start, its strong coil regularisation and
+        the weak one swapped in for the loop, the isoflux re-pointed to the
+        draw's own boundary, the homotopy and the post-homotopy stage, under
+        ``engine_draw_solve_maxits``.  Judged on that route at the unchanged
+        loop tolerances, stage by stage:
+
+        * ``stages["loop"]`` -- the draw's delivered loop state (before the
+          homotopy): the first request BIT-IDENTICAL to the stored request,
+          the loop converged, its bootstrap within ``jbs_rtol_j`` /
+          ``jbs_rtol_Ip`` of ``lambda_BS*``, ``|dl_i| <= jbs_tol_li``;
+        * ``stages["archived"]`` -- the state the draw ARCHIVES (after the
+          homotopy and the post-homotopy passes): the bootstrap it carries
+          within ``jbs_rtol_j`` / ``jbs_rtol_Ip`` of ``lambda_BS*`` on that
+          geometry and ``|dl_i| <= jbs_tol_li``; the coil drift, the
+          homotopy stage and the flux-range change reported;
+        * a draw that is REJECTED fails (``rejection``).
+
+        ``passed`` needs every stage.  The top-level ``r_j`` / ``r_I`` /
+        ``dl_i`` / ``dq0`` / ``dq95`` are the ARCHIVED state's (what a draw
+        delivers); the identity and loop fields are the loop stage's.  The
+        solver state, the isoflux targets and every attribute
+        :meth:`generate` sets are put back afterwards."""
+        import os
+        import tempfile
+        from .jbs_loop import jsonable
         gc = self.config.generation
-        ctx = context_from_run(run, gc, self.baseline)
-        from types import SimpleNamespace
-        c = ctx.c
-        b = tokamaker_backend(
-            self.mygs, SimpleNamespace(psi_N=c.psi_N, pressure=c.pressure,
-                                       Ip=c.Ip, kinetics=c.kinetics),
-            psi_pad=run["psi_pad"], q_psi=run.get("q_psi"),
-            maxits=engine_draw_maxits(gc), edge_pressure=ctx.edge)
-        snap = (self.mygs.copy_eq() if hasattr(self.mygs, "copy_eq")
-                else None)
+        mygs = self.mygs
+        bl = self.baseline
+        snap = mygs.copy_eq() if hasattr(mygs, "copy_eq") else None
+        keep_attrs = ("diagnostics", "generation_log", "draw_rejections",
+                      "solve_failures", "engine_draw_cap_events",
+                      "_resolved_uncertainty")
+        saved = {k: self.__dict__[k] for k in keep_attrs
+                 if k in self.__dict__}
+        saved_cfg = dict(header=self.config.output_header,
+                         target=gc.n_inspec_target, cap=gc.max_total_draws)
+        probe = {}
+        out = dict(invariant="engine-draw", route="generate()",
+                   criterion=(
+                       "the generate() draw route with every perturbation "
+                       "zero: loop stage -- pass-1 request bit-identical, "
+                       "loop converged, r_j <= rtol_j, r_I <= rtol_Ip, "
+                       "|dl_i| <= tol_li; archived state (after the homotopy "
+                       "and the post-homotopy stage) -- r_j <= rtol_j, r_I "
+                       "<= rtol_Ip, |dl_i| <= tol_li; not rejected"))
         try:
-            out = verify_zero_perturbation(ctx, b)
+            with tempfile.TemporaryDirectory(prefix="bq_sigma0_") as td:
+                self.config.output_header = os.path.join(td, "sigma0_route")
+                gc.n_inspec_target = None
+                gc.max_total_draws = None
+                self._sigma0_route = probe
+                try:
+                    diags = self.generate(n=1)
+                finally:
+                    self._sigma0_route = None
+                rej = list(getattr(self, "draw_rejections", []) or [])
         finally:
+            self.config.output_header = saved_cfg["header"]
+            gc.n_inspec_target = saved_cfg["target"]
+            gc.max_total_draws = saved_cfg["cap"]
+            for k in keep_attrs:
+                if k in saved:
+                    self.__dict__[k] = saved[k]
+                else:
+                    self.__dict__.pop(k, None)
             if snap is not None:
-                self.mygs.replace_eq(source_eq=snap)
+                mygs.replace_eq(source_eq=snap)
+            if bl.recon is not None and "isoflux_pts" in bl.recon:
+                mygs.set_isoflux(bl.recon["isoflux_pts"],
+                                 weights=bl.recon["weights"])
+        G = probe.get("draws")
+        s = G.ctx.loop if G is not None else {}
+        out["tolerances"] = dict(rtol_j=s.get("rtol_j"),
+                                 rtol_Ip=s.get("rtol_Ip"),
+                                 tol_li=s.get("tol_li"))
+        loop, arch = probe.get("loop"), probe.get("archived")
+        d0 = diags[0] if diags else None
+        out["stages"] = dict(loop=loop, archived=arch)
+        if rej:
+            out["rejection"] = jsonable(rej[0])
+        if d0 is not None:
+            out["stages"]["archived_coils"] = dict(
+                homotopy_pass=d0.get("homotopy_pass"),
+                max_F_drift_pct=d0.get("max_F_drift_pct"),
+                max_VSC_drift_pct=d0.get("max_VSC_drift_pct"))
+        out["record"] = (d0 or {}).get("engine")
+        if loop is not None:
+            for k in ("request_bit_identical", "request_max_abs_diff",
+                      "loop_converged", "n_passes", "dq0_stats",
+                      "dq0_stats_psi_N", "amplitude", "solves"):
+                out[k] = loop.get(k)
+        if arch is not None:
+            for k in ("r_j", "r_I", "dl_i", "dq0", "dq0_psi_N", "dq95",
+                      "flux_range", "flux_range_rel"):
+                out[k] = arch.get(k)
+        ok = bool(not rej and d0 is not None and loop is not None
+                  and arch is not None and loop["passed"]
+                  and arch["passed"])
+        out["passed"] = ok
         out["passed_reason"] = (
-            "the engine draw at zero perturbation reproduces the "
-            "reconstruction (request bit-identical; loop tolerances)"
-            if out["passed"] else
-            "the engine draw at zero perturbation misses the reconstruction "
-            "(see the record)")
+            "the generate() draw route at zero perturbation reproduces the "
+            "reconstruction at both stages (loop tolerances)" if ok else
+            "the generate() draw route at zero perturbation misses the "
+            "reconstruction (see stages / rejection)")
+
+        def _f(v, fmt):
+            return "n/a" if v is None else format(v, fmt)
+        print(f"[sigma0-check engine route] {'PASS' if ok else 'FAIL'}: "
+              + (f"REJECTED ({rej[0].get('reason')}); " if rej else "")
+              + ("" if loop is None else
+                 f"loop: request {'bit-identical' if loop['request_bit_identical'] else 'DIFFERS'}, "
+                 f"{'converged' if loop['loop_converged'] else 'NOT converged'}, "
+                 f"r_j={loop['r_j']:.2e} r_I={loop['r_I']:.2e} "
+                 f"dl_i={loop['dl_i']:+.2e}; ")
+              + ("" if arch is None else
+                 f"archived: r_j={arch['r_j']:.2e} r_I={arch['r_I']:.2e} "
+                 f"dl_i={arch['dl_i']:+.2e} dq0={arch['dq0']:+.2e} "
+                 f"dq95={_f(arch['dq95'], '+.2e')} "
+                 f"dflux_rel={_f(arch['flux_range_rel'], '+.2e')}")
+              + f" (tol r_j {s.get('rtol_j')}, r_I {s.get('rtol_Ip')}, "
+                f"l_i {s.get('tol_li')})", flush=True)
         return out
 
     def _verify_sigma0_jbs_loop(self, settings, pp, ffp, pressure, ne_eq,
@@ -6910,7 +7016,15 @@ class Bouquet:
         _eng = _engine_gate(self.config)
         if _eng is not None:
             from .engine_draws import build_generate_context
+            _s0 = getattr(self, "_sigma0_route", None)
+            if _s0 is not None:
+                # verify_sigma0_consistency's route: this very draw route
+                # with every perturbation zero (and bootstrap scale 1.0)
+                env = _zero_perturbation_env(env)
             _eng = build_generate_context(self, env)
+            if _s0 is not None:
+                _eng.sigma0_probe = _s0
+                _s0["draws"] = _eng
 
         header = self.config.output_header
         initialize_equilibrium_database(header)
@@ -6954,6 +7068,8 @@ class Bouquet:
             _jbs_range = (None if gc.jBS_scale_range is None
                           else (float(gc.jBS_scale_range[0]),
                                 float(gc.jBS_scale_range[1])))
+            if getattr(self, "_sigma0_route", None) is not None:
+                _jbs_range = (1.0, 1.0)
 
         from .utils import capture_native_output
         from .jbs_loop import jbs_settings as _jbs_settings

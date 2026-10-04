@@ -390,10 +390,28 @@ of it from the warm state reproduces the reconstruction, the loop's pass-1
 residuals are the reconstruction's delivered ones, and the draw delivers the
 reconstruction to the loop tolerances. With the current gate standing (it is
 measured one pass late) the loop takes `JBS_REQUIRED_CONSECUTIVE + 1 = 3`
-passes. `verify_sigma0_consistency()` under the engine runs exactly this
-draw and gates `passed` on the draw-route rule at the unchanged tolerances
-(request identical, loop converged, `r_j`, `r_I` against `lambda_BS*`,
-`|dl_i| <= jbs_tol_li`), reporting `dq0` at its labelled radius and `dq95`.
+passes.
+
+`verify_sigma0_consistency()` under the engine runs ONE draw through the
+route `generate()` runs -- it calls `generate(n=1)` itself, with every
+perturbation zero and the bootstrap scale 1.0, archiving into a temporary
+file (the configured archive is never touched): generate_bouquet's baseline
+re-solve and warm start, its strong coil regularisation and the weak one
+swapped in for the loop, the isoflux re-pointed to the draw's own boundary,
+the homotopy and the post-homotopy stage, under `engine_draw_solve_maxits`.
+(Until 2026-10-04 it ran only the loop, `engine_draws.
+verify_zero_perturbation`, from whatever state the solver held, under
+whatever regularisation was installed -- not the draw's route; that
+function is kept, documented as the loop stage only.) `passed` needs both
+stages at the unchanged loop tolerances: the LOOP stage (`stages["loop"]`:
+request bit-identical, loop converged, `r_j`, `r_I` against `lambda_BS*`,
+`|dl_i| <= jbs_tol_li`) and the ARCHIVED state after the homotopy and the
+post-homotopy stage (`stages["archived"]`: the bootstrap the draw carries
+there against `lambda_BS*` on its geometry, `|dl_i| <= jbs_tol_li`; `dq0`,
+`dq95`, the flux-range change and the coil drift reported); a rejected draw
+fails. The top-level `r_j` / `r_I` / `dl_i` / `dq0` / `dq95` are the
+archived state's. The solver state, the isoflux targets and every
+attribute `generate()` sets are restored afterwards.
 
 **Post-hoc filters, not matching.** A draw matches no l_i, q0 or MSE row;
 l_i and beta_N drift and are recorded. The l_i band

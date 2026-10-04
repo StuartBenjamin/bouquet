@@ -43,6 +43,17 @@
   replaces it. Defaults and the factories' configs are unaffected. Legacy
   path unchanged.
 
+- **Engine: `verify_sigma0_consistency()` runs the draw's own route.** It
+  ran only the engine loop (`engine_draws.verify_zero_perturbation`) from
+  whatever state the solver held -- not the warm start, coil
+  regularisation, isoflux re-point, homotopy and post-homotopy stage a
+  `generate()` draw runs -- while the docs said it ran "exactly this draw".
+  It now calls `generate(n=1)` itself with every perturbation zero and the
+  bootstrap scale 1.0 (into a temporary archive) and judges both the loop
+  stage and the archived state at the unchanged loop tolerances
+  (`stages`); a rejected zero-perturbation draw fails. On the stand-in the
+  numbers are unchanged (no coils to move); live-solver numbers have not
+  been measured yet.
 - **Stored configs load as they were produced.** A legacy config written
   while `engine_mse_jacobian="fd_broyden"` or `engine_ids_inductive="auto"`
   was the default (to_dict writes every field) was refused by `from_dict`;

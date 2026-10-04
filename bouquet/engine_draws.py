@@ -1212,6 +1212,10 @@ class GenerateEngineDraws:
         #: every homotopy rollback re-solve that failed for another reason
         #: than the cap (the draw is rejected, ``homotopy_rollback_failed``)
         self.rollback_failures = []
+        #: set to a dict by ``Bouquet.verify_sigma0_consistency``'s route
+        #: (one zero-perturbation draw through ``generate()``): the loop
+        #: stage's and the archived state's verdicts are written into it
+        self.sigma0_probe = None
 
     # ---- the pressure the baseline re-solve and every draw use --------
     def solve_pressure(self, psi_N=None):
@@ -1449,6 +1453,11 @@ class GenerateEngineDraws:
                        clock=clock, bnd_diag=bnd_diag)
         clock.start("homotopy")
         self._cur["draw"] = out
+        if getattr(self, "sigma0_probe", None) is not None:
+            # the zero-perturbation route: the loop stage, measured here
+            # before the homotopy moves anything
+            self.sigma0_probe["loop"] = zero_perturbation_loop_verdict(ctx,
+                                                                       out)
         sp = out["split"]
         jfix = sp["j_NBI"] + sp["j_RF"]
         rec = out["record"]
@@ -1527,6 +1536,9 @@ class GenerateEngineDraws:
             **flux_range_change(rec["archived"]["flux_range"],
                                 self.ctx.ref["flux_range"]))
         rec["post_hoc"] = v
+        if getattr(self, "sigma0_probe", None) is not None:
+            self.sigma0_probe["archived"] = zero_perturbation_archived_verdict(
+                self.ctx, cur["draw"]["jbs_used"], fin)
         _jl = diagnostics.get("jbs_loop") or {}
         if _jl.get("post_homotopy") is not None:
             rec["post_homotopy"] = _jl["post_homotopy"]
@@ -1686,33 +1698,23 @@ def context_from_run(run, gc, bl):
 # ---------------------------------------------------------------------------
 #  verify_sigma0_consistency under the engine
 # ---------------------------------------------------------------------------
-def verify_zero_perturbation(ctx, backend, *, label="sigma=0 engine draw"):
-    """The engine draw at zero perturbation (bootstrap scale 1.0) from the
-    backend's current state: the request identity, and the delivered draw
-    against the reconstruction -- ``r_j`` / ``r_I`` of the draw's bootstrap
-    against ``lambda_BS*`` (the draw's final parallel weights), ``dl_i``,
-    ``dq0`` (at the row radius and at the solver's q0 radius), ``dq95``.
-    ``passed``: the request is bit-identical, the loop converged,
-    ``r_j <= rtol_j``, ``r_I <= rtol_Ip`` and ``|dl_i| <= tol_li`` -- the
-    draw-route rule of the legacy check, at the unchanged loop
-    tolerances."""
-    from .jbs_loop import JBSNotConverged, jsonable, profile_residuals
+def _zero_perturbation_tolerances(ctx):
     s = ctx.loop
-    out = dict(invariant="engine-draw", tolerances=dict(
-        rtol_j=s["rtol_j"], rtol_Ip=s["rtol_Ip"], tol_li=s["tol_li"]),
-        criterion=("pass-1 request bit-identical to the stored request, "
-                   "loop converged, r_j <= rtol_j, r_I <= rtol_Ip, "
-                   "|l_i(draw) - l_i*| <= tol_li; q0/q95 reported"))
-    try:
-        d = run_draw(ctx, backend, ctx.zero_inputs(), label=label)
-    except JBSNotConverged as e:
-        out.update(passed=False, loop_converged=False,
-                   error=f"{type(e).__name__}: {str(e)[:300]}",
-                   record=jsonable(getattr(e, "record", None)))
-        return out
+    return dict(rtol_j=s["rtol_j"], rtol_Ip=s["rtol_Ip"], tol_li=s["tol_li"])
+
+
+def zero_perturbation_loop_verdict(ctx, d):
+    """The zero-perturbation verdict of a draw's LOOP stage (the delivered
+    loop state of :func:`run_draw` output *d*, before any homotopy): the
+    request identity, convergence, ``r_j`` / ``r_I`` of the draw's bootstrap
+    against ``lambda_BS*`` (the draw's final parallel weights), ``dl_i``,
+    ``dq0`` (row radius and the solver's q0 radius), ``dq95``; ``passed`` at
+    the loop tolerances."""
+    from .jbs_loop import profile_residuals
+    from .engine import conversion_factor
+    s = ctx.loop
     rec = d["record"]
     meas = d["passes"].last
-    from .engine import conversion_factor
     w = meas["geom"]["w_lin"] * conversion_factor(meas["geom"])
     cmp_ = profile_residuals(d["jbs_used"], ctx.lam, w, ctx.psi,
                              float(ctx.c.Ip))
@@ -1722,7 +1724,7 @@ def verify_zero_perturbation(ctx, backend, *, label="sigma=0 engine draw"):
     ok = bool(ident["pass1_request_bit_identical"] and conv
               and cmp_["r_j"] <= s["rtol_j"] and cmp_["r_I"] <= s["rtol_Ip"]
               and abs(dl["l_i_3"]) <= s["tol_li"])
-    out.update(
+    return dict(
         passed=ok, request_bit_identical=ident["pass1_request_bit_identical"],
         request_max_abs_diff=ident["pass1_request_max_abs_diff"],
         loop_converged=conv, n_passes=int(rec["loop"]["n_passes"]),
@@ -1734,12 +1736,72 @@ def verify_zero_perturbation(ctx, backend, *, label="sigma=0 engine draw"):
                    else rec["delivered"]["q0_stats"] - ctx.ref["q0_stats"]),
         dq0_stats_psi_N=float(ctx.ref["q0_stats_psi_N"]),
         dq95=dl["q95"], amplitude=rec["amplitude"]["final"].get("a_ind"),
-        solves=rec["solves"], record=rec)
-    print(f"[sigma0-check engine] {'PASS' if ok else 'FAIL'}: request "
-          f"{'bit-identical' if ident['pass1_request_bit_identical'] else 'DIFFERS'}"
-          f"; loop {'converged' if conv else 'NOT converged'} in "
-          f"{out['n_passes']} pass(es); r_j={cmp_['r_j']:.3e} (tol "
-          f"{s['rtol_j']:.0e}) r_I={cmp_['r_I']:.3e} (tol {s['rtol_Ip']:.0e})"
-          f" |dl_i|={abs(dl['l_i_3']):.2e} (tol {s['tol_li']:.0e}); dq0="
-          f"{dl['q0']:+.2e} (psi_N {ctx.ref['q_row_psi_N']:g})", flush=True)
+        solves=rec["solves"])
+
+
+def zero_perturbation_archived_verdict(ctx, jbs_carried, fin):
+    """The zero-perturbation verdict of a draw's ARCHIVED state (after the
+    homotopy and the post-homotopy passes): *fin* is the backend's final
+    measurement of that state, *jbs_carried* the bootstrap the draw carries
+    there.  ``r_j`` / ``r_I`` of that bootstrap against ``lambda_BS*`` on the
+    archived geometry, ``dl_i``, ``dq0`` at the row radius, ``dq95``, the
+    flux-range change; ``passed`` at the same loop tolerances."""
+    from .jbs_loop import profile_residuals
+    from .engine import complete_geometry, conversion_factor
+    s = ctx.loop
+    g = complete_geometry(fin["geom"])
+    w = g["w_lin"] * conversion_factor(g)
+    cmp_ = profile_residuals(np.asarray(jbs_carried, dtype=float), ctx.lam,
+                             w, ctx.psi, float(ctx.c.Ip))
+    dli = float(fin["li"]) - float(ctx.ref["l_i"])
+    stats = fin.get("stats") or {}
+    q95 = _f(stats.get("q_95"))
+    out = dict(
+        r_j=float(cmp_["r_j"]), r_I=float(cmp_["r_I"]), dl_i=dli,
+        dq0=float(fin["q_row"]) - float(ctx.ref["q_row"]),
+        dq0_psi_N=float(ctx.ref["q_row_psi_N"]),
+        dq95=(None if (q95 is None or ctx.ref.get("q95") is None)
+              else float(q95) - float(ctx.ref["q95"])),
+        **flux_range_change(flux_range(fin), ctx.ref["flux_range"]))
+    out["passed"] = bool(out["r_j"] <= s["rtol_j"]
+                         and out["r_I"] <= s["rtol_Ip"]
+                         and abs(dli) <= s["tol_li"])
+    return out
+
+
+def verify_zero_perturbation(ctx, backend, *, label="sigma=0 engine draw"):
+    """The engine LOOP at zero perturbation (bootstrap scale 1.0) from the
+    backend's current state -- the loop stage of a draw only, NOT the route
+    ``generate()`` runs (no warm start, coil regularisation swap, isoflux
+    re-point, homotopy or post-homotopy stage; ``Bouquet.
+    verify_sigma0_consistency`` runs that route).  The request identity and
+    the delivered loop state against the reconstruction
+    (:func:`zero_perturbation_loop_verdict`); ``passed``: the request is
+    bit-identical, the loop converged, ``r_j <= rtol_j``, ``r_I <=
+    rtol_Ip`` and ``|dl_i| <= tol_li`` -- the unchanged loop tolerances."""
+    from .jbs_loop import JBSNotConverged, jsonable
+    s = ctx.loop
+    out = dict(invariant="engine-draw",
+               tolerances=_zero_perturbation_tolerances(ctx),
+               criterion=("pass-1 request bit-identical to the stored "
+                          "request, loop converged, r_j <= rtol_j, r_I <= "
+                          "rtol_Ip, |l_i(draw) - l_i*| <= tol_li; q0/q95 "
+                          "reported"))
+    try:
+        d = run_draw(ctx, backend, ctx.zero_inputs(), label=label)
+    except JBSNotConverged as e:
+        out.update(passed=False, loop_converged=False,
+                   error=f"{type(e).__name__}: {str(e)[:300]}",
+                   record=jsonable(getattr(e, "record", None)))
+        return out
+    v = zero_perturbation_loop_verdict(ctx, d)
+    out.update(v, record=d["record"])
+    ok = v["passed"]
+    print(f"[sigma0-check engine loop] {'PASS' if ok else 'FAIL'}: request "
+          f"{'bit-identical' if v['request_bit_identical'] else 'DIFFERS'}"
+          f"; loop {'converged' if v['loop_converged'] else 'NOT converged'}"
+          f" in {v['n_passes']} pass(es); r_j={v['r_j']:.3e} (tol "
+          f"{s['rtol_j']:.0e}) r_I={v['r_I']:.3e} (tol {s['rtol_Ip']:.0e})"
+          f" |dl_i|={abs(v['dl_i']):.2e} (tol {s['tol_li']:.0e}); dq0="
+          f"{v['dq0']:+.2e} (psi_N {ctx.ref['q_row_psi_N']:g})", flush=True)
     return out
