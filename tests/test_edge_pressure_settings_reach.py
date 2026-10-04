@@ -366,3 +366,68 @@ def test_no_inline_site_anywhere_in_the_package():
     assert not bad, bad
     assert reader == [r for r in reader if "prof[-1] = 0.0" in r]
     assert len(reader) == 1, reader
+
+
+# ---------------------------------------------------------------------------
+#  behavioural: the VALUE each executed legacy call site hands on
+# ---------------------------------------------------------------------------
+# The checks above are on the source: a site that keeps the keyword but
+# passes ``None`` (``edge_pressure=None``) passes them, and since 2026-10-02
+# ``resolve_edge_pressure(None)`` is "offset" -- so such a site would run
+# "offset" under a "legacy" configuration (the review's surviving mutants
+# S1 / S2).  These run the sites and check the object actually received.
+@pytest.mark.parametrize("sep", ["legacy", "offset"])
+def test_the_draw_loop_redo_receives_the_draws_settings(monkeypatch, sep,
+                                                        toy):
+    """perturb_kinetic_equilibrium's self-consistent-loop redo
+    (``_gs_step`` -> ``_std_candidate_solve``), executed on the toy stand-in
+    of tests/test_sigma0_identity_stages.py: every redo is handed the draw's
+    own settings object, at the configured value."""
+    import test_sigma0_identity_stages as SI
+    import bouquet.TokaMaker_interface as TI
+    seen = []
+    real = TI._std_candidate_solve
+
+    def spy(*a, **k):
+        seen.append(k.get("edge_pressure"))
+        return real(*a, **k)
+
+    monkeypatch.setattr(TI, "_std_candidate_solve", spy)
+    edge = EP.resolve_edge_pressure(dict(separatrix_pressure=sep))
+    req, jbs, fx = SI._reconstruct(toy, kappa_short=0.98)
+    dv, off, _n = SI._delivered(toy, req, jbs, fx)
+    real_pk = TI.perturb_kinetic_equilibrium
+
+    def pk(*a, **k):
+        k["edge_pressure"] = edge
+        return real_pk(*a, **k)
+
+    monkeypatch.setattr(TI, "perturb_kinetic_equilibrium", pk)
+    import contextlib
+    import io
+    with contextlib.redirect_stdout(io.StringIO()):
+        SI._draw(toy, "standard", dv["request"], dv["j_inductive"],
+                 SI._li(toy.copy_eq().achieved), SI._settings(), offset=off)
+    redo = seen[1:]                    # [0]: the candidate's first solve
+    assert redo, "the loop took no redo pass: the site was not executed"
+    assert all(e is edge for e in seen), seen
+
+
+@pytest.mark.parametrize("sep", ["legacy", "offset"])
+def test_the_legacy_sigma0_route_hands_the_configured_settings(monkeypatch,
+                                                               sep):
+    """Bouquet._sigma0_draw_route (the legacy sigma=0 draw route) runs
+    perturb_kinetic_equilibrium with the CONFIGURATION's settings, at their
+    value -- the stand-in harness of tests/test_sigma0_draw_route.py."""
+    import test_sigma0_draw_route as SR
+    b, calls = SR._bouquet(monkeypatch, li_draw=0.8002)
+    b.config.generation.separatrix_pressure = sep
+    SR._run(b)
+    assert len(calls) == 1
+    got = calls[0][1]["edge_pressure"]
+    assert got is not None
+    assert got == EP.resolve_edge_pressure(b.config.generation)
+    assert got.separatrix_pressure == sep
+
+
+from test_sigma0_identity_stages import toy  # noqa: E402,F401  (fixture)
