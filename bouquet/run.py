@@ -6786,6 +6786,31 @@ class Bouquet:
                 "bootstrap frozen in the draws.")
 
     # ── stage 3: perturbed bouquet --------------------------------------
+    def _check_edge_pressure_unchanged(self, gc) -> None:
+        """Refuse draws whose edge-pressure settings (``edge_pprime_pin``,
+        ``separatrix_pressure``) differ from the ones the baseline was
+        reconstructed with: the legacy draws read the CONFIG's at generate()
+        (their pressures would then be in another frame than the baseline
+        they perturb), the engine draws the reconstruction's (the changed
+        setting would be silently ignored).  A baseline that predates the
+        record is not checked."""
+        from .edge_pressure import resolve_edge_pressure
+        rec = getattr(self.baseline, "edge_pressure", None) or {}
+        if "separatrix_pressure" not in rec:
+            return
+        now = resolve_edge_pressure(gc).record()
+        diff = [k for k in ("edge_pprime_pin", "separatrix_pressure")
+                if k in rec and rec[k] != now[k]]
+        if diff:
+            raise ValueError(
+                "generation." + ", ".join(f"{k}={now[k]!r}" for k in diff)
+                + " differs from the baseline's ("
+                + ", ".join(f"{k}={rec[k]!r}" for k in diff)
+                + ", the settings prepare_baseline() reconstructed it with): "
+                "the draws would mix pressure frames (legacy) or ignore the "
+                "change (engine). Re-run prepare_baseline() with the new "
+                "settings, or restore them.")
+
     def _validate_workflow(self) -> None:
         """Hard guard enforcing the validated per-path workflow at generate().
 
@@ -7323,6 +7348,8 @@ class Bouquet:
                 "conversion and pressure-term bookkeeping; Stage 3 draws run "
                 "on the engine).  Set reconstruction_engine='unified' or "
                 "rebuild the baseline with 'legacy'.")
+        # the edge-pressure settings the baseline was reconstructed with
+        self._check_edge_pressure_unchanged(self.config.generation)
 
     def _baseline_jbs_record(self):
         """The baseline's self-consistent bootstrap loop record, or ``None``

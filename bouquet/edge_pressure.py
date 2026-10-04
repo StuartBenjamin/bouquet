@@ -226,6 +226,13 @@ def applied_offset(pressure, edge=None) -> float:
     if not np.isfinite(p_sep):
         raise ValueError("separatrix_pressure='offset': the pressure at "
                          f"psi_N = 1 is not finite ({p_sep!r})")
+    if p_sep < 0.0:
+        # a negative separatrix pressure is not physical (e.g. a legacy
+        # draw's perturbed edge n_e or T_e below zero): offsetting by it
+        # would RAISE the axis target and write a negative boundary PRES
+        raise ValueError("separatrix_pressure='offset': the pressure at "
+                         f"psi_N = 1 is negative ({p_sep!r} Pa); a negative "
+                         "separatrix pressure is not physical")
     return p_sep
 
 
@@ -414,6 +421,16 @@ def archive_record(edge=None, pressure=None, stats=None, p_sep_applied=None):
                                             out.get("p_sep_applied", 0.0))
         except (KeyError, TypeError, ValueError) as exc:
             out["frames_error"] = f"{type(exc).__name__}: {exc}"
+            if float(out.get("p_sep_applied", 0.0) or 0.0) != 0.0:
+                # the reported beta / W_MHD then stay in the SOLVER frame
+                # although p_sep was removed from the axis target: loud
+                import warnings
+                warnings.warn(
+                    "edge pressure: the full-pressure frame could not be "
+                    f"formed ({out['frames_error']}); the reported beta / "
+                    "W_MHD of this solve are in the SOLVER frame (p_sep = "
+                    f"{out['p_sep_applied']:g} Pa NOT added back)",
+                    RuntimeWarning, stacklevel=2)
     return out
 
 

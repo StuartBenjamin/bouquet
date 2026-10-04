@@ -346,6 +346,22 @@ def test_offset_refuses_a_target_that_is_not_positive():
         EP.solver_pax(p, None)
 
 
+def test_offset_refuses_a_negative_separatrix_pressure():
+    """A negative p_sep (e.g. a legacy draw's perturbed edge n_e or T_e
+    below zero) used to RAISE the axis target and write a negative boundary
+    PRES (review finding 14): refused under "offset"; "legacy" never reads
+    the edge value."""
+    x = np.linspace(0.0, 1.0, 33)
+    p = 1.0e4 * (1.0 - x) - 50.0                 # p_sep = -50 Pa
+    for fn in (EP.applied_offset, EP.solver_pax, EP.solver_pressure):
+        with pytest.raises(ValueError, match="negative"):
+            fn(p, dict(separatrix_pressure="offset"))
+    assert EP.solver_pax(p, dict(separatrix_pressure="legacy")) == p[0]
+    p0 = 1.0e4 * (1.0 - x)                       # p_sep = 0 exactly: fine
+    assert EP.applied_offset(p0, None) == 0.0
+    assert EP.solver_pax(p0, None) == p0[0]
+
+
 # ---------------------------------------------------------------------------
 #  the reporting formulas
 # ---------------------------------------------------------------------------
@@ -628,3 +644,45 @@ def test_the_archive_record_reports_both_frames():
     # stats without a volume: recorded, not raised
     r = EP.archive_record(None, p, stats=dict(l_i=0.9))
     assert r["frames"] is None and "frames_error" in r
+
+
+def test_plot_input_vs_recon_reports_the_full_pressure():
+    """plot_input_vs_recon compared the input's FULL pressure with the
+    solver-frame pressure (zero at psi_N = 1), so under "offset" a uniform
+    p_sep gap looked like a reconstruction error (review finding 13): the
+    solved pressure is now shown in the reported frame."""
+    from types import SimpleNamespace
+    from bouquet.plotting import _reported_pressure
+    x = np.linspace(0.0, 1.0, 9)
+    p_solver = 1.0e4 * (1.0 - x)
+    bl = SimpleNamespace(edge_pressure=EP.describe(
+        dict(separatrix_pressure="offset"), p_solver + 300.0))
+    np.testing.assert_array_equal(_reported_pressure(bl, p_solver),
+                                  p_solver + 300.0)
+    for e in (EP.describe(dict(separatrix_pressure="legacy"),
+                          p_solver + 300.0), None):
+        np.testing.assert_array_equal(
+            _reported_pressure(SimpleNamespace(edge_pressure=e), p_solver),
+            p_solver)
+
+
+@pytest.mark.parametrize("change", [dict(separatrix_pressure="legacy"),
+                                    dict(edge_pprime_pin=False)])
+def test_changing_the_edge_settings_after_the_baseline_is_refused(
+        tmp_path, change, toy_bouquet_solver):
+    """The legacy draws read the CONFIG's edge settings at generate(), the
+    engine draws the reconstruction's: a setting changed after
+    prepare_baseline() would mix pressure frames or be silently ignored
+    (review finding 16) -- refused, naming both values."""
+    b = TD._bq(tmp_path)
+    b.setup_solver()
+    TD._quiet(b.prepare_baseline)
+    for k, v in change.items():
+        setattr(b.config.generation, k, v)
+    with pytest.raises(ValueError, match="differs from the baseline"):
+        b.generate()
+    with pytest.raises(ValueError, match="differs from the baseline"):
+        b.verify_sigma0_consistency()
+
+
+toy_bouquet_solver = TD.toy_bouquet_solver

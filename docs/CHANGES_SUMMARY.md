@@ -54,6 +54,21 @@
   (`stages`); a rejected zero-perturbation draw fails. On the stand-in the
   numbers are unchanged (no coils to move); live-solver numbers have not
   been measured yet.
+- **Engine: an MSE row skipped by a non-converged loop is flagged or
+  refused.** Under `jbs_loop_on_fail="flag"` a loop that did not converge
+  delivered with no MSE stage and no word about it; now an `MSE: ... NOT
+  applied` flag and phase record, and `structured_mse_required=True`
+  refuses. A flagged engine IDS baseline is also warned about (as a g-file
+  one already was).
+- **Edge pressure: loud where it was silent.** A negative separatrix
+  pressure is refused under `"offset"` (it raised the axis target and wrote a
+  negative boundary PRES -- reachable by a legacy draw whose perturbed edge
+  n_e or T_e goes below zero: such a draw is now rejected instead of
+  archived); `plot_input_vs_recon` shows the solved pressure in the reported
+  (full) frame; a failed full-frame computation warns that beta / W_MHD stay
+  in the solver frame; changing `separatrix_pressure` / `edge_pprime_pin`
+  after `prepare_baseline()` is refused at `generate()` /
+  `verify_sigma0_consistency()`.
 - **Stored configs load as they were produced.** A legacy config written
   while `engine_mse_jacobian="fd_broyden"` or `engine_ids_inductive="auto"`
   was the default (to_dict writes every field) was refused by `from_dict`;

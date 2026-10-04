@@ -1632,6 +1632,17 @@ def _imas_input_profiles(source):
     return psiN, np.asarray(p1["pressure"], float), q, jt
 
 
+def _reported_pressure(bl, p_solver):
+    """The solver-frame pressure of a baseline's live solve (zero at
+    psi_N = 1) in the REPORTED frame: ``p_sep`` added back when the
+    reconstruction applied it (``Baseline.edge_pressure["p_sep_applied"]``,
+    ``separatrix_pressure="offset"``); unchanged otherwise (``"legacy"`` or a
+    baseline that predates the record)."""
+    psep = float(((getattr(bl, "edge_pressure", None) or {})
+                  .get("p_sep_applied")) or 0.0)
+    return np.asarray(p_solver, dtype=float) + psep
+
+
 def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
     r"""Compare the reconstructed / forward-solved baseline against the RAW
     INPUT -- pressure, :math:`j_\phi`, q, and the separatrix (with the green→red
@@ -1665,6 +1676,11 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
 
     # ---- reconstructed / solved side (live TokaMaker solve) ----------------
     psiN_p, _f, _fp, p_sol, _pp = mygs.get_profiles(npsi=npsi, psi_pad=psi_pad)
+    # the solver's pressure is zero at psi_N = 1; under
+    # separatrix_pressure="offset" the reported pressure adds p_sep back
+    # (bouquet.edge_pressure) -- so the input's full pressure is compared
+    # with the reconstruction's full pressure, not with the solver frame
+    p_sol = _reported_pressure(bl, p_sol)
     psiN_q, q_sol = mygs.get_q(npsi=npsi, psi_pad=psi_pad)[:2]
     psiN_q = np.asarray(psiN_q, float)
     if psiN_q.size and psiN_q.max() > 1.5:          # in case get_q returns psi, not psi_N
