@@ -1209,6 +1209,9 @@ class GenerateEngineDraws:
         #: cap: the solver stops there), ``seconds``, ``outcome``
         #: (``"rolled_back"`` / ``"rejected"``), ``error``
         self.cap_events = []
+        #: every homotopy rollback re-solve that failed for another reason
+        #: than the cap (the draw is rejected, ``homotopy_rollback_failed``)
+        self.rollback_failures = []
 
     # ---- the pressure the baseline re-solve and every draw use --------
     def solve_pressure(self, psi_N=None):
@@ -1316,6 +1319,26 @@ class GenerateEngineDraws:
         print(f"  [engine draw] {where}: the GS solve stopped at "
               f"engine_draw_solve_maxits={self.maxits}{sec} without "
               f"converging -> {what}", flush=True)
+        return ev
+
+    def announce_rollback_failed(self, exc, after):
+        """Print and record a homotopy rollback re-solve that failed for a
+        reason other than the cap: the draw is REJECTED
+        (``homotopy_rollback_failed``) -- an engine draw never goes on from a
+        failed solve, whatever its cause and whether or not a cap is set.
+        *after*: what triggered the rollback (``"saturation"`` /
+        ``"failed stage"``)."""
+        ev = dict(draw=(None if self._cur is None else self._cur["count"]),
+                  where="homotopy rollback re-solve",
+                  stage="homotopy_rollback", after=str(after),
+                  outcome="rejected",
+                  error=f"{type(exc).__name__}: {str(exc).strip()[:300]}")
+        if getattr(self, "rollback_failures", None) is None:
+            self.rollback_failures = []
+        self.rollback_failures.append(ev)
+        print(f"  [engine draw] homotopy rollback re-solve (after a "
+              f"{after}) FAILED ({ev['error']}) -> draw REJECTED "
+              f"(homotopy_rollback_failed)", flush=True)
         return ev
 
     def cap_solver(self, mygs):

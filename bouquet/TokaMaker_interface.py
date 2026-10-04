@@ -153,6 +153,13 @@ DRAW_REJECTION_REASONS = {
                        "earlier good stage to roll back to (a capped later "
                        "stage rolls back, as any failed stage), or its "
                        "rollback re-solve stopped at the cap",
+    "homotopy_rollback_failed": "an engine draw's homotopy rollback "
+                                "re-solve (back at the last good stage, "
+                                "after a failed or saturated tighter stage) "
+                                "failed for any reason other than the cap "
+                                "(the capped one is homotopy_maxits): the "
+                                "state left behind is not a converged "
+                                "solve, so the draw is never archived",
     "post_homotopy_maxits": "an engine draw's post-homotopy j_BS pass "
                             "solve stopped at engine_draw_solve_maxits "
                             "without converging",
@@ -7274,6 +7281,16 @@ def generate_bouquet(
                                                     stage="homotopy_rollback",
                                                     seconds=_eng
                                                     .last_homotopy_solve_seconds())
+                                            else:
+                                                # an engine draw never goes
+                                                # on from a failed re-solve
+                                                _post_align_failed = True
+                                                _post_align_reason = (
+                                                    "homotopy_rollback_failed",
+                                                    "homotopy rollback",
+                                                    _rb_exc)
+                                                _eng.announce_rollback_failed(
+                                                    _rb_exc, "saturation")
                                         print(f"  [homotopy] WARN: "
                                               f"rollback re-solve failed "
                                               f"({_rb_exc}); stats may "
@@ -7366,6 +7383,15 @@ def generate_bouquet(
                                                 stage="homotopy_rollback",
                                                 seconds=_eng
                                                 .last_homotopy_solve_seconds())
+                                        else:
+                                            # an engine draw never goes on
+                                            # from a failed re-solve
+                                            _post_align_failed = True
+                                            _post_align_reason = (
+                                                "homotopy_rollback_failed",
+                                                "homotopy rollback", _rb_exc)
+                                            _eng.announce_rollback_failed(
+                                                _rb_exc, "failed stage")
                                     print(f"  [homotopy] WARN: rollback "
                                           f"re-solve failed ({_rb_exc}); "
                                           f"stats may be stale")

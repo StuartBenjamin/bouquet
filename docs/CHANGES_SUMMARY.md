@@ -1,5 +1,22 @@
 # Bouquet — change summaries
 
+## Unreleased — review fixes to the unified engine (2026-10-04)
+
+- **Legacy g-file reconstruction (DEFAULT path): a failed last l_i-secant
+  solve hands on the restored state's inductive factor.** When the secant's
+  last solve failed, psi was restored to the last good state but the FAILED
+  `ind_factor` was handed on (as the inductive profile the corrective
+  iteration starts from). It is now the factor of the state actually held,
+  with that state's profile restored too, and the secant's previous point is
+  always a good evaluation. Runs whose secant solves all converge are
+  unchanged (tested against the frozen copy); runs with a failed last secant
+  solve change.
+- **Engine draws: a failed homotopy rollback re-solve rejects the draw**
+  (`homotopy_rollback_failed`), whatever the cause and with or without a cap.
+  Before, only a capped one did; any other failure printed "stats may be
+  stale" and the draw went on (and could be archived) from a failed solve.
+  Legacy draws unchanged.
+
 ## Unreleased — `engine_ids_inductive` (unified engine, IDS sources)
 
 *The default is now `"residual"` (owner-approved; see "IDS inductive: the

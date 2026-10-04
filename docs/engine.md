@@ -466,6 +466,16 @@ saturation anyway). A solve that stops at the cap (the solver's own
 | a post-homotopy pass | the draw is rejected | `post_homotopy_maxits` |
 | a loop solve | the draw is rejected with the loop's code | `anchor_solve_failed` (pass 1) / `perturb_failed` |
 
+A rollback re-solve that fails for ANY other reason (a non-finite abort,
+a lost plasma, ...) rejects the draw too, with its own code
+`homotopy_rollback_failed` -- with a cap set or with
+`engine_draw_solve_maxits=None` alike: the state such a failure leaves
+behind is not a converged solve, so an engine draw never goes on from it
+(recorded on `GenerateEngineDraws.rollback_failures`: stage, what triggered
+the rollback -- `saturation` or `failed stage` --, the error). The legacy
+draws keep their pre-existing behaviour there (a printed warning, the draw
+continues).
+
 Every capped solve is recorded on `GenerateEngineDraws.cap_events` and
 `Bouquet.engine_draw_cap_events` (draw, stage, `iterations` = the cap,
 `seconds`, `outcome` = `rolled_back` | `rejected`, the error), in the
