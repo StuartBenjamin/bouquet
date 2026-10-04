@@ -546,31 +546,104 @@ IDS_INDUCTIVE_DEFAULT = "residual"
 #: agrees to <= 0.8 %; the one seen inconsistent (a slice on a sawtooth
 #: step of the source's own model) missed by 7 %.
 IDS_INDUCTIVE_MISMATCH_TOL = 0.02
-#: IMAS ``core_sources`` identifier indices.  Every source carrying a
-#: ``j_parallel`` that is neither ohmic nor bootstrap is a DRIVEN current
-#: and is held fixed: beams under "nbi", ec / lh / ic under "rf", anything
-#: else (e.g. a model's sawtooth redistribution entry) under "other".
-IDS_OHMIC_SOURCE_INDEX = 7
-IDS_BOOTSTRAP_SOURCE_INDEX = 13
+#: IMAS ``core_sources`` identifier indices and how the engine's IDS adapter
+#: treats an entry's ``j_parallel``.  The table is the IMAS data dictionary's
+#: ``core_sources.source[:].identifier`` enumeration (verified against the
+#: data-dictionary structures shipped with omas, DD 3.13-3.41 and develop_3,
+#: and the IMASdd identifier table used by FUSE, which adds
+#: 409 time_derivative and 701 sawteeth).  Never "everything except ohmic and
+#: bootstrap": an AGGREGATE entry (a total, or a combination of other
+#: entries) would be counted twice.
+IDS_OHMIC_SOURCE_INDEX = 7               # j_ohmic (core_profiles) instead
+IDS_BOOTSTRAP_SOURCE_INDEX = 13          # j_bootstrap (core_profiles) instead
 IDS_RF_SOURCE_INDICES = (3, 4, 5)       # ec, lh, ic
+#: DRIVEN primary entries, held fixed, by part: nbi (2) -> "nbi"; ec / lh /
+#: ic (3, 4, 5) -> "rf"; fusion-alpha current drive (6), runaways (501) and
+#: a model's sawtooth redistribution entry (701 sawteeth, FUSE) -> "other".
+IDS_DRIVEN_SOURCE_PARTS = {2: "nbi", 3: "rf", 4: "rf", 5: "rf",
+                           6: "other", 501: "other", 701: "other"}
+#: AGGREGATE entries -- a total or a combination of other entries -- NEVER
+#: added (they would double-count their constituents): 1 total,
+#: 100 auxiliary (all auxiliary H&CD), 101-107 the ic/nbi/fusion/ec/lh
+#: combinations, 200 radiation (total), 202 cyclotron_synchrotron
+#: (201 + 9), 203 impurity_radiation (line + bremsstrahlung).  An ignored
+#: one carrying a non-zero j_parallel is stamped (provenance
+#: "ignored_sources") and warned about.
+IDS_AGGREGATE_SOURCE_INDICES = (1, 100, 101, 102, 103, 104, 105, 106, 107,
+                                200, 202, 203)
+#: Entries describing the BOOTSTRAP (or ohmic) current under another name:
+#: the engine's bootstrap is Redl / the source's core_profiles j_bootstrap,
+#: so holding one fixed would double-count it.  401 "neoclassical" is
+#: where a source may publish its bootstrap.  Ignored like an aggregate
+#: (stamped and warned when non-zero).
+IDS_BOOTSTRAP_LIKE_SOURCE_INDICES = (401,)
+#: Absolute tolerance [s] for matching an entry's own profiles_1d time to the
+#: core_sources slice time.
+IDS_SOURCE_TIME_TOL = 1e-6
+
+
+def _ids_source_slice(s, isrc, t_slice, n_time):
+    """``(profile, how)``: the entry's ``profiles_1d`` at the core_sources
+    slice *isrc* (time *t_slice*), or ``(None, why)`` when the entry has no
+    slice at that time.  An entry carrying its own per-slice times is
+    matched BY TIME (a model's entry may start later than the IDS time base,
+    so the list index is not the slice); one without them must have exactly
+    the IDS's number of slices, or it cannot be aligned and is refused --
+    never the first slice taken in place of a missing one."""
+    pr = s.get("profiles_1d", [])
+    idn = s.get("identifier", {}) or {}
+    if not pr:
+        return None, "no profiles_1d"
+    times = [q.get("time") for q in pr]
+    if t_slice is not None and all(t is not None for t in times):
+        tt = np.asarray(times, dtype=float)
+        k = int(np.argmin(np.abs(tt - t_slice)))
+        if abs(float(tt[k]) - float(t_slice)) > IDS_SOURCE_TIME_TOL:
+            return None, (f"no profiles_1d slice at t = {t_slice:.6g} s "
+                          f"(its own times span {tt.min():.6g}-"
+                          f"{tt.max():.6g} s)")
+        return pr[k], "matched by time"
+    if n_time is not None and len(pr) != n_time:
+        raise EngineInputRefused(
+            f"IDS adapter: core_sources {idn.get('name')!r} (index "
+            f"{idn.get('index')}) has {len(pr)} profiles_1d slices for "
+            f"{n_time} core_sources times and no per-slice time: it cannot be "
+            "aligned with the slice read")
+    if isrc >= len(pr):
+        raise EngineInputRefused(
+            f"IDS adapter: core_sources {idn.get('name')!r} (index "
+            f"{idn.get('index')}) has no profiles_1d slice {isrc}")
+    return pr[isrc], "by index"
 
 
 def _ids_driven_currents(srcs, isrc, n, sgn):
-    """Sum the ``j_parallel`` of every driven ``core_sources`` entry at
-    index *isrc*, split into ``nbi`` / ``rf`` / ``other`` (positive frame),
-    plus the list of the entries that contributed."""
-    from .io.imas import NBI_SOURCE_INDEX
+    """The driven ``j_parallel`` of the ``core_sources`` slice *isrc*, by
+    the explicit identifier classification above, split into ``nbi`` /
+    ``rf`` / ``other`` (positive frame).  Returns ``(parts, used, ignored)``:
+    the contributing entries, and every entry with a non-zero
+    ``j_parallel`` that was NOT added (aggregate, bootstrap-like, or with no
+    slice at this time) with its reason.  An UNKNOWN index carrying a
+    non-zero ``j_parallel`` is held fixed under "other" with a warning (its
+    nature cannot be told from the enumeration)."""
+    import warnings
     parts = {k: np.zeros(n) for k in ("nbi", "rf", "other")}
-    used = []
+    used, ignored = [], []
+    tb = srcs.get("time")
+    n_time = None if not tb else len(tb)
+    t_slice = (None if not tb else float(np.asarray(tb, dtype=float)[isrc]))
     for s in srcs.get("source", []):
         idn = s.get("identifier", {}) or {}
         idx = idn.get("index")
         if idx in (IDS_OHMIC_SOURCE_INDEX, IDS_BOOTSTRAP_SOURCE_INDEX):
             continue
-        pr = s.get("profiles_1d", [])
-        if not pr:
+        q, how = _ids_source_slice(s, isrc, t_slice, n_time)
+        if q is None:
+            if any(qq.get("j_parallel") is not None
+                   and np.any(np.asarray(qq["j_parallel"], float) != 0.0)
+                   for qq in s.get("profiles_1d", [])):
+                ignored.append(dict(name=idn.get("name"), index=idx,
+                                    reason=how))
             continue
-        q = pr[isrc if len(pr) > isrc else 0]
         if q.get("j_parallel") is None:
             continue
         jp = np.asarray(q["j_parallel"], dtype=float)
@@ -580,11 +653,40 @@ def _ids_driven_currents(srcs, isrc, n, sgn):
                 f"{idx}) j_parallel is malformed or not finite")
         if not np.any(jp != 0.0):
             continue
-        kind = ("nbi" if idx == NBI_SOURCE_INDEX else
-                "rf" if idx in IDS_RF_SOURCE_INDICES else "other")
+        if idx in IDS_AGGREGATE_SOURCE_INDICES:
+            ignored.append(dict(name=idn.get("name"), index=idx,
+                                reason="aggregate entry (a total or a "
+                                       "combination of other entries)",
+                                j_parallel_max_abs=float(np.max(np.abs(jp)))))
+            continue
+        if idx in IDS_BOOTSTRAP_LIKE_SOURCE_INDICES:
+            ignored.append(dict(name=idn.get("name"), index=idx,
+                                reason="bootstrap-like entry (the bootstrap "
+                                       "is core_profiles j_bootstrap / Redl)",
+                                j_parallel_max_abs=float(np.max(np.abs(jp)))))
+            continue
+        kind = IDS_DRIVEN_SOURCE_PARTS.get(idx)
+        rec = dict(name=idn.get("name"), index=idx, slice=how)
+        if kind is None:
+            kind = "other"
+            rec["unclassified"] = True
+            warnings.warn(
+                f"IDS adapter: core_sources {idn.get('name')!r} carries a "
+                f"non-zero j_parallel under identifier index {idx!r}, which "
+                "is not a known driven source (nbi, ec, lh, ic, fusion, "
+                "runaways, sawteeth) nor a known aggregate: it is held FIXED "
+                "as a driven current under 'other' -- check that it is not a "
+                "sum of other entries", stacklevel=3)
         parts[kind] = parts[kind] + sgn * jp
-        used.append(dict(name=idn.get("name"), index=idx, part=kind))
-    return parts, used
+        rec["part"] = kind
+        used.append(rec)
+    if ignored:
+        warnings.warn(
+            "IDS adapter: core_sources entries carrying a non-zero j_parallel "
+            "were NOT added to the driven current: "
+            + "; ".join(f"{d['name']!r} (index {d['index']}): {d['reason']}"
+                        for d in ignored), stacklevel=3)
+    return parts, used, ignored
 
 
 def _ids_inductive_mismatch(j_ohm, residual, j_tot, rho):
@@ -733,14 +835,17 @@ class IdsAdapter:
         j_ohm = _cur("j_ohmic")
         j_boot = _cur("j_bootstrap")
         j_tot = _cur("j_total")
-        # driven parallel currents: EVERY core_sources entry with a
-        # j_parallel that is neither ohmic nor bootstrap (beams -> "nbi",
-        # the reader's j_NBI before its toroidal conversion; ec/lh/ic ->
-        # "rf"; anything else -> "other"), all held fixed
+        # driven parallel currents, by the explicit IMAS identifier
+        # classification (IDS_DRIVEN_SOURCE_PARTS: beams -> "nbi", the
+        # reader's j_NBI before its toroidal conversion; ec/lh/ic -> "rf";
+        # fusion, runaways, sawteeth -> "other"; an unknown index -> "other"
+        # with a warning), all held fixed; aggregates and bootstrap-like
+        # entries are never added (stamped in provenance["ignored_sources"])
         srcs = dd.get("core_sources", {})
         isrc = (_nearest_index(srcs["time"], T, "core_sources")
                 if srcs.get("time") else ic)
-        fix_parts, driven_used = _ids_driven_currents(srcs, isrc, n, sgn)
+        fix_parts, driven_used, driven_ignored = _ids_driven_currents(
+            srcs, isrc, n, sgn)
         nbi = fix_parts["nbi"]
         driven = fix_parts["nbi"] + fix_parts["rf"] + fix_parts["other"]
         # The inductive current is the parallel residual j_total -
@@ -920,10 +1025,14 @@ class IdsAdapter:
                            + f" (IMAS <j.B>/B0) x |B0| = {B0:.6g} T "
                              f"(from {b0_from})"),
                 inductive_consistency=dict(consistency),
-                fixed=("core_sources j_parallel of every driven entry (not "
-                       "ohmic, not bootstrap) x |B0|, held fixed; parts nbi "
-                       "/ rf (ec, lh, ic) / other"),
+                fixed=("core_sources j_parallel of the DRIVEN entries by "
+                       "the IMAS identifier (adapters.IDS_DRIVEN_SOURCE_PARTS; "
+                       "an unknown index under 'other' with a warning; "
+                       "aggregates and bootstrap-like entries never) x "
+                       "|B0|, held fixed; parts nbi / rf (ec, lh, ic) / "
+                       "other"),
                 driven_sources=list(driven_used),
+                ignored_sources=list(driven_ignored),
                 pressure=("e (ne Te + ni Ti) + impurity + fast (no p_diff)"),
                 electron_charge="physics.ELEMENTARY_CHARGE",
                 kinetics_sigma=("resolved from the Baseline by "

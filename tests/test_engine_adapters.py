@@ -622,6 +622,146 @@ def test_every_driven_source_entry_is_held_fixed_and_in_the_residual(
         rtol=1e-12)
 
 
+def _driven_dd():
+    """The example dd with an ec entry and a sawteeth entry whose j_ohmic
+    accounts for them (consistent split)."""
+    dd = _example_dd()
+    ec = lambda q: 0.03 * np.asarray(q["j_total"])          # noqa: E731
+    saw = lambda q: 0.002 * np.asarray(q["j_total"])        # noqa: E731
+    _add_source(dd, "ec", 3, ec)
+    _add_source(dd, "sawteeth", 701, saw)
+    for q in dd["core_profiles"]["profiles_1d"]:
+        q["j_ohmic"] = [float(v) for v in
+                        np.asarray(q["j_ohmic"]) - ec(q) - saw(q)]
+    return dd
+
+
+@pytest.mark.parametrize("index, name", [
+    (1, "total"), (100, "auxiliary"), (101, "ic_nbi"), (104, "ec_lh"),
+    (107, "ec_lh_ic"), (203, "impurity_radiation"), (401, "neoclassical")])
+def test_an_aggregate_or_bootstrap_like_entry_is_never_added(tmp_path,
+                                                             index, name):
+    """A "total" entry (the sum of every source -- here nbi + ec + sawteeth
+    + ohmic + bootstrap, as an aggregate carries) or a combination entry,
+    or a bootstrap published as "neoclassical": NOT added to the driven
+    current (it would double-count its constituents), stamped in
+    provenance["ignored_sources"] and warned about.  The contract is the
+    one without that entry, bit for bit."""
+    import warnings
+    dd0 = _driven_dd()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        c0 = _ids_from(tmp_path, dd0, "base.json").read()
+    dd = _driven_dd()
+    _add_source(dd, name, index, lambda q: np.asarray(q["j_total"]))
+    with pytest.warns(UserWarning, match="NOT added to the driven current"):
+        c = _ids_from(tmp_path, dd, f"agg{index}.json").read()
+    np.testing.assert_array_equal(c.jB_fix, c0.jB_fix)
+    np.testing.assert_array_equal(c.jB_ind, c0.jB_ind)
+    for k in ("nbi", "rf", "other"):
+        np.testing.assert_array_equal(c.jB_fix_parts[k], c0.jB_fix_parts[k])
+    ig = c.provenance["ignored_sources"]
+    assert [(d["name"], d["index"]) for d in ig] == [(name, index)]
+    assert ig[0]["j_parallel_max_abs"] > 0.0
+    assert index not in [d["index"] for d in c.provenance["driven_sources"]]
+    assert c0.provenance["ignored_sources"] == []
+    # the j_ohmic-vs-residual cross-check and its stamp stay
+    assert c.provenance["inductive_consistency"] == \
+        c0.provenance["inductive_consistency"]
+    assert c.provenance["inductive_consistency"]["checked"] is True
+
+
+def test_the_pre_fix_rule_would_have_double_counted_a_total(tmp_path):
+    """Witness: held fixed (the old "everything except ohmic and bootstrap"
+    rule), a total entry drives the residual inductive current NEGATIVE
+    over the bulk -- what the classification prevents."""
+    dd = _driven_dd()
+    cp = dd["core_profiles"]["profiles_1d"][2]
+    jt = np.asarray(cp["j_total"], float)
+    resid_old = (jt - np.asarray(cp["j_bootstrap"], float)
+                 - 0.03 * jt - 0.002 * jt - jt)
+    assert np.median(resid_old) < 0.0
+
+
+def test_an_unknown_index_is_held_fixed_as_other_with_a_warning(tmp_path):
+    import warnings
+    dd0 = _driven_dd()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        c0 = _ids_from(tmp_path, dd0, "base.json").read()
+    dd = _driven_dd()
+    extra = lambda q: 0.004 * np.asarray(q["j_total"])      # noqa: E731
+    _add_source(dd, "custom_1", 901, extra)
+    with pytest.warns(UserWarning, match="not a known driven source"):
+        c = _ids_from(tmp_path, dd, "unknown.json").read()
+    cp = dd["core_profiles"]["profiles_1d"][2]
+    B0 = abs(float(dd["equilibrium"]["vacuum_toroidal_field"]["b0"][2]))
+    np.testing.assert_allclose(c.jB_fix_parts["other"] - c0.jB_fix_parts[
+        "other"], B0 * extra(cp), rtol=1e-12, atol=1e-9)
+    u = [d for d in c.provenance["driven_sources"] if d["index"] == 901]
+    assert u and u[0]["part"] == "other" and u[0]["unclassified"] is True
+    # the known ones are classified without a warning
+    assert {(d["index"], d["part"]) for d in c0.provenance["driven_sources"]} \
+        == {(2, "nbi"), (3, "rf"), (701, "other")}
+
+
+def test_an_entry_is_read_at_its_own_time_not_its_list_index(tmp_path):
+    """A model's entry that starts later than the IDS time base (one slice
+    fewer, each with its own time): the slice read is the one AT the
+    core_sources time, not the list index (which would be the NEXT time),
+    and at a time the entry does not cover it is not added (stamped).  An
+    entry with a different slice count and no times cannot be aligned and
+    is refused -- never its first slice in place of the missing one."""
+    import warnings
+    dd = _driven_dd()
+    t = list(dd["core_sources"]["time"])
+    saw = next(s for s in dd["core_sources"]["source"]
+               if s["identifier"]["index"] == 701)
+    for q, tq in zip(saw["profiles_1d"], t):
+        q["time"] = tq
+    for s in dd["core_sources"]["source"]:
+        for q, tq in zip(s["profiles_1d"], t):
+            q["time"] = tq
+    marks = [np.full(len(saw["profiles_1d"][0]["j_parallel"]), 1.0e3 * (k + 1))
+             for k in range(len(t))]
+    for q, m in zip(saw["profiles_1d"], marks):
+        q["j_parallel"] = m.tolist()
+    # the entry starts one slice late: drop its first slice
+    saw["profiles_1d"] = saw["profiles_1d"][1:]
+    isrc = len(t) - 1                    # the example's time is the last
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        c = _ids_from(tmp_path, dd, "late.json").read()
+    B0 = abs(float(dd["equilibrium"]["vacuum_toroidal_field"]["b0"][2]))
+    np.testing.assert_allclose(c.jB_fix_parts["other"], B0 * marks[isrc],
+                               rtol=1e-12)
+    d = [x for x in c.provenance["driven_sources"] if x["index"] == 701]
+    assert d[0]["slice"] == "matched by time"
+    # no per-slice time and a different count: refused
+    for q in saw["profiles_1d"]:
+        q.pop("time")
+    with pytest.raises(EngineInputRefused, match="cannot be aligned"):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            _ids_from(tmp_path, dd, "late_notime.json").read()
+
+
+def test_an_entry_without_a_slice_at_this_time_is_stamped(tmp_path):
+    from bouquet.adapters import _ids_driven_currents
+    n = 5
+    srcs = dict(time=[1.0, 2.0, 3.0], source=[dict(
+        identifier=dict(name="sawteeth", index=701),
+        profiles_1d=[dict(time=2.0, j_parallel=[1.0] * n),
+                     dict(time=3.0, j_parallel=[2.0] * n)])])
+    with pytest.warns(UserWarning, match="no profiles_1d slice"):
+        parts, used, ignored = _ids_driven_currents(srcs, 0, n, 1.0)
+    assert used == [] and np.all(parts["other"] == 0.0)
+    assert ignored[0]["index"] == 701
+    parts, used, ignored = _ids_driven_currents(srcs, 2, n, -1.0)
+    np.testing.assert_array_equal(parts["other"], -2.0)
+    assert ignored == []
+
+
 def test_a_malformed_driven_source_is_refused(tmp_path):
     dd = _example_dd()
     s = _add_source(dd, "ec", 3, lambda q: 0.01 * np.asarray(q["j_total"]))

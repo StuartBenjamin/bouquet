@@ -16,6 +16,22 @@
   Before, only a capped one did; any other failure printed "stats may be
   stale" and the draw went on (and could be archived) from a failed solve.
   Legacy draws unchanged.
+- **Engine IDS adapter: driven currents by an explicit IMAS identifier
+  classification.** It held EVERY `core_sources` entry except ohmic (7) and
+  bootstrap (13) as a fixed driven current, so a "total" entry, a combination
+  entry (100-107) or a bootstrap published as "neoclassical" (401) would have
+  been counted twice (the residual inductive current goes negative). Now:
+  driven primaries by index (nbi; ec/lh/ic; fusion, runaways, sawteeth);
+  aggregates and bootstrap-like entries ignored, stamped in
+  `provenance["ignored_sources"]` and warned about; an unknown index held
+  fixed under `other` with a warning. Also: an entry carrying its own
+  per-slice times is read AT the slice time, not at its list index -- a model
+  sawteeth entry that starts one slice after the IDS time base was read one
+  slice late (and at the last slice, from its FIRST slice). **This changes
+  engine IDS results on sources with such a sawteeth entry** (FUSE
+  `dd_sim.json`: the sawteeth current of the slice itself instead of the
+  next one's); sources whose entries are all nbi/ec/lh/ic on the full time
+  base are unchanged bit for bit. The legacy reader is unchanged.
 
 ## Unreleased — `engine_ids_inductive` (unified engine, IDS sources)
 
