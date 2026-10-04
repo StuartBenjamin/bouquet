@@ -18,6 +18,32 @@ bit, is ``tests/test_edge_pressure.py``.
 the same axis target (the helper returns the float), and a walrus is its
 value.
 
+WHAT THIS NORMALISER CANNOT SEE (it is deliberately not extended; each
+blind spot is covered by a BEHAVIOURAL test instead):
+
+* every ``edge_pressure=`` keyword and its VALUE, and every ``_edge`` /
+  ``_p_lcfs`` binding -- a site passing ``None`` (which resolves to the
+  defaults, "offset" since 2026-10-02) or another settings object compares
+  equal.  Covered by tests/test_edge_pressure_settings_reach.py (the
+  bindings and keywords on the source, and -- executed -- the value the
+  draw loop's redo and the legacy sigma=0 route actually receive);
+* the ``lcfs_kwargs(...)`` splat on ``save_eqdsk`` -- which ``lcfs_pressure``
+  a written g-file asks for.  Covered by
+  tests/test_edge_pressure_baseline_gfile.py (the save keyword of the
+  baseline and of every draw: its own ``p_sep``, or absent under "legacy");
+* the record writes (``store_edge_pressure_record``, ``bl.edge_pressure =``)
+  -- covered by tests/test_edge_pressure.py's archive-record tests;
+* ``eq_stats_iter = None`` (the archive stage's failed ``get_stats``) --
+  covered by tests/test_engine_draws_behaviour.py (the draw is archived with
+  l_i NaN and an edge record without frames);
+* whole ``if _eng ...`` blocks (removed by the engine-draw AST test's own
+  normaliser) -- the engine branches are covered numerically by the engine
+  tests;
+* callees, module constants and config DEFAULTS: a changed default (e.g. the
+  post-homotopy ceiling 4 -> 6) or a changed helper passes every AST test.
+  The helper at the pre-change settings is pinned bit for bit by
+  tests/test_edge_pressure.py; defaults by the config tests.
+
 Solver-free; no data.
 """
 import ast

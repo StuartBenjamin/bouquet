@@ -89,7 +89,12 @@ def test_two_scalar_li_is_the_q95_studys_state(parts):
     oft = str(parts["recon_2s"].get("oft_file", ""))
     print(f"\n[two_scalar_li] q95 {q95:.6f} (study {_STUDY['q95']}), q rms "
           f"{rms:.3f} % (study {_STUDY['q_rms_pct']}), OFT {oft}")
-    if _STUDY["build"] in oft:
-        assert abs(q95 - _STUDY["q95"]) <= _S["tol_q0"], q95
-        # the study quotes the rms to 3 decimals
-        assert abs(rms - _STUDY["q_rms_pct"]) <= 5e-4, rms
+    if _STUDY["build"] not in oft:
+        # the study's numbers belong to one OFT build: on another the
+        # comparison is NOT made -- said so (a skip), never passed silently
+        pytest.skip(f"the q95 / q-rms comparison with the study needs the "
+                    f"study's OFT build {_STUDY['build']!r}; this run used "
+                    f"{oft!r} (the identity asserts above did run)")
+    assert abs(q95 - _STUDY["q95"]) <= _S["tol_q0"], q95
+    # the study quotes the rms to 3 decimals
+    assert abs(rms - _STUDY["q_rms_pct"]) <= 5e-4, rms

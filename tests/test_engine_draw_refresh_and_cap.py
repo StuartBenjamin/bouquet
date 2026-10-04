@@ -396,7 +396,8 @@ def test_every_homotopy_solve_runs_under_the_cap(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("at", [1, 2])
-def test_a_capped_homotopy_solve_rejects_the_draw(tmp_path, monkeypatch, at):
+def test_a_capped_homotopy_stage_rolls_back_or_rejects(tmp_path, monkeypatch,
+                                                       at):
     # The owner's rule (2026-09-30): a capped homotopy STAGE is a failed
     # stage like any other.  CHANGED EXPECTED OUTCOME at at=2 (it asserted
     # the earlier "reject, never roll back" rule): pass 2 capped now ROLLS

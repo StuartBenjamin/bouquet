@@ -29,9 +29,34 @@ from test_jbs_loop_current_gate import _OFF_SCENARIOS, _scenario
 import _jbs_loop_pre_engine_kernel as _PRE
 
 
+#: The settings dict the scenarios produced when the hook was added, FROZEN
+#: (literal values; ``_GC``'s fields plus the kernel constants of the time):
+#: the pre-hook kernel is run with these, the current one with the live
+#: ``jbs_settings(...)`` -- so ``new[0] == pre[0]`` compares the live
+#: settings with the frozen ones instead of a value with itself.
+_FROZEN_BASE = {"enabled": True, "init": "anchor", "rtol_j": 0.001,
+                "rtol_Ip": 0.0001, "tol_li": 0.001, "tol_q0": 0.002,
+                "max_passes": 8, "relax": 0.7, "relax_current": 0.7,
+                "relax_halve_on": 3, "on_fail": "raise", "relax_floor": 0.25,
+                "required_consecutive": 2, "growth_abort_passes": 3,
+                "post_homotopy_passes": 4}
+
+
+def _frozen_settings(kw, gc_extra):
+    s = dict(_FROZEN_BASE)
+    names = {"jbs_max_passes": "max_passes", "jbs_loop_on_fail": "on_fail",
+             "jbs_relax_current": "relax_current"}
+    for k, v in kw.items():
+        s[names[k]] = v
+    if gc_extra.get("jbs_gate_current_residual"):
+        s["gate_current_residual"] = True
+    return s
+
+
 def _outcome(kernel, sc, gc_extra, pin=False):
     (j0, step, ev, kws), kw = _scenario(*sc)
-    s = jbs_settings(_GC(**kw, **gc_extra))
+    s = (_frozen_settings(kw, gc_extra) if kernel is _PRE.run_jbs_loop
+         else jbs_settings(_GC(**kw, **gc_extra)))
     kws = dict(kws)
     if pin:
         kws["q0_pin"] = AxisRowPin(1.0, 0.01, 2.0e5, label="t")

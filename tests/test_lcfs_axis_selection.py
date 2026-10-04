@@ -125,6 +125,11 @@ class TestAxisRule:
         # it is the separatrix loop, to the mesh
         from scipy.spatial import cKDTree
         d, _ = cKDTree(got).query(_true_boundary())
+        # PROVENANCE of 0.012 m (set with the test in 884f9c6 without a
+        # stated origin; recorded 2026-10-04, the number unchanged): "to the
+        # mesh" -- below one cell of _mesh()'s grid (dR = 19.6 mm,
+        # dZ = 14.5 mm), so the true separatrix is distinguished from any
+        # other level-set curve; measured 4.0-4.1 mm at both levels
         assert np.sqrt(np.mean(d ** 2)) < 0.012
         # and it goes all the way around: both sides, top and X-point
         assert got[:, 0].min() < R0 - 0.5 and got[:, 0].max() > R0 + 0.5
