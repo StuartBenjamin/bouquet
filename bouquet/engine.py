@@ -255,6 +255,7 @@ def validate_engine_settings(gc) -> None:
         raise ValueError("generation.engine_rows has 'mse' but "
                          "generation.mse_data is None")
     _mse_knobs_unread(gc, rows)
+    _legacy_knobs_unread(gc, vals)
     for name, want in (("jbs_self_consistent", True),
                        ("recalculate_j_BS", True),
                        ("single_profile_jphi", False)):
@@ -318,6 +319,107 @@ def _mse_knobs_unread(gc, rows):
         print("WARN: " + msg + " (workflow='custom': continuing)", flush=True)
         return
     raise ValueError(msg)
+
+
+#: Legacy-path settings the unified engine NEVER reads, each with what
+#: replaces it under the engine (or why nothing does).  A value other than
+#: the field's default is REFUSED under ``reconstruction_engine="unified"``
+#: (:func:`_legacy_knobs_unread`) -- it would otherwise be silently ignored.
+ENGINE_UNREAD_LEGACY_FIELDS = {
+    "closure_channel": "the engine's closure is engine_preset / engine_rows",
+    "jBS_baseline_mode": "the engine composes the inductive and the Redl "
+                         "bootstrap itself (engine_preset / engine_rows)",
+    "structured_preset": "engine_preset",
+    "structured_basis": "engine_preset (its basis)",
+    "structured_weights": "engine_preset (its weights)",
+    "structured_sigma_ind_up": "engine_preset (its inductive prior)",
+    "structured_li_target": "nothing: the engine's l_i row targets the "
+                            "SOURCE's own l_i (engine_rows 'l_i')",
+    "structured_li_sigma": "nothing: the IDS soft l_i row uses the preset's "
+                           "sigma (bouquet.adapters)",
+    "structured_li_kind": "nothing: the engine's l_i row is li_3 always",
+    "structured_ip_sigma": "nothing: the IDS soft Ip row uses the preset's "
+                           "sigma (bouquet.adapters)",
+    "structured_ip_sigma_frac": "nothing: the IDS soft Ip row uses the "
+                                "preset's sigma (bouquet.adapters)",
+    "structured_soft": "nothing: the rows are hard for a g-file and soft for "
+                       "an IDS source, by source",
+    "structured_li_max_corrector_steps": "engine_li_row_relaxation (the "
+                                         "engine iterates the l_i row inside "
+                                         "the loop)",
+    "anchor_pressure_to_equilibrium": "nothing: the engine's pressure is "
+                                      "kinetic + impurity + fast, with no "
+                                      "p_diff",
+    "imas_corrective_jphi": "engine_delivery_correction (the engine's "
+                            "remedy for the jphi-linterp delivery defect)",
+    "jbs_loop_q0_corrector": "engine_rows with 'q0' (engine_draw_q0_row "
+                             "keeps it in the draws)",
+    "floor_j_BS": "nothing: the engine never floors the bootstrap",
+    "swb_iterations": "nothing: the engine never runs SWB",
+    "accept_anchor_inband": "nothing: the engine draws have no legacy "
+                            "anchor in-band shortcut",
+    "diagnostic_plots": "nothing: the engine draws make no per-draw SWB "
+                        "diagnostic plots",
+}
+
+
+def _legacy_knobs_unread(gc, vals):
+    """Refuse a legacy-path setting the unified engine never reads
+    (:data:`ENGINE_UNREAD_LEGACY_FIELDS`) when it holds anything but its
+    default -- the rule :func:`_mse_knobs_unread` applies to the MSE knobs,
+    with the same ``workflow='custom'`` / ``allow_unsafe_workflow``
+    downgrade to a printed WARN.  Also ``homotopy_passes`` changed while
+    ``engine_draw_homotopy=False`` (no homotopy runs)."""
+    from dataclasses import MISSING
+    from .config import GenerationConfig
+    f = GenerationConfig.__dataclass_fields__
+    bad = []
+    for name, instead in ENGINE_UNREAD_LEGACY_FIELDS.items():
+        if name not in f or not hasattr(gc, name):
+            continue
+        fl = f[name]
+        d = (fl.default if fl.default is not MISSING else
+             fl.default_factory() if fl.default_factory is not MISSING
+             else MISSING)
+        if d is MISSING:
+            continue
+        v = getattr(gc, name)
+        same = (v is None) if d is None else _same_value(v, d)
+        if not same:
+            bad.append(f"{name}={v!r} (default {d!r}; under the engine: "
+                       f"{instead})")
+    if not vals.get("engine_draw_homotopy", True) and "homotopy_passes" in f:
+        d = f["homotopy_passes"].default_factory()
+        v = getattr(gc, "homotopy_passes", d)
+        if not _same_value(v, d):
+            bad.append(f"homotopy_passes={v!r} with engine_draw_homotopy="
+                       "False (no homotopy runs in an engine draw)")
+    if not bad:
+        return
+    msg = ("set with reconstruction_engine='unified', but the unified "
+           "engine never reads them -- they would otherwise be silently "
+           "ignored: " + "; ".join(bad))
+    if (str(getattr(gc, "workflow", "")) == "custom"
+            or bool(getattr(gc, "allow_unsafe_workflow", False))):
+        print("WARN: " + msg + " (workflow='custom': continuing)", flush=True)
+        return
+    raise ValueError(msg)
+
+
+def _same_value(v, d):
+    """``v == d`` for the scalar / sequence values a config holds (a
+    sequence compares element-wise as numbers; a bool never equals a
+    number)."""
+    if isinstance(v, (bool, np.bool_)) != isinstance(d, (bool, np.bool_)):
+        return False
+    try:
+        if isinstance(d, (list, tuple)) or isinstance(v, (list, tuple,
+                                                          np.ndarray)):
+            return bool(np.array_equal(np.asarray(v, dtype=float),
+                                       np.asarray(d, dtype=float)))
+        return bool(v == d)
+    except (TypeError, ValueError):
+        return False
 
 
 def engine_draw_maxits(gc):

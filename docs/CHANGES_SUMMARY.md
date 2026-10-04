@@ -33,6 +33,16 @@
   next one's); sources whose entries are all nbi/ec/lh/ic on the full time
   base are unchanged bit for bit. The legacy reader is unchanged.
 
+- **Engine: legacy settings it never reads are refused** (they were accepted
+  and silently ignored): `closure_channel`, `jBS_baseline_mode`, the
+  `structured_*` closure fields (except `structured_li_tol`),
+  `anchor_pressure_to_equilibrium`, `imas_corrective_jphi`,
+  `jbs_loop_q0_corrector`, `floor_j_BS`, `swb_iterations`,
+  `accept_anchor_inband`, `diagnostic_plots`, and `homotopy_passes` with
+  `engine_draw_homotopy=False` -- each message names the engine setting that
+  replaces it. Defaults and the factories' configs are unaffected. Legacy
+  path unchanged.
+
 ## Unreleased — `engine_ids_inductive` (unified engine, IDS sources)
 
 *The default is now `"residual"` (owner-approved; see "IDS inductive: the

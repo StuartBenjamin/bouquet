@@ -227,6 +227,40 @@ reproduces the stored request bit for bit (tested, and re-checked by every
 draw context before it draws); the state also carries the q0 row and target,
 so a draw can keep the q0 row as an option for sawtoothing discharges.
 
+## Settings the engine does not read: refused
+
+A setting that is accepted is honoured or refused, never silently ignored.
+Under `reconstruction_engine="unified"` each legacy-path setting below is
+REFUSED when it holds anything but its default (`engine.
+ENGINE_UNREAD_LEGACY_FIELDS`; `workflow='custom'` downgrades the refusal to
+a printed WARN, as for the MSE knobs), with what replaces it under the
+engine:
+
+| setting | under the engine |
+|---|---|
+| `closure_channel`, `jBS_baseline_mode` | the engine's closure: `engine_preset` / `engine_rows` |
+| `structured_preset`, `structured_basis`, `structured_weights`, `structured_sigma_ind_up` | `engine_preset` |
+| `structured_li_target` | nothing: the l_i row targets the source's own l_i |
+| `structured_li_sigma`, `structured_ip_sigma`, `structured_ip_sigma_frac` | nothing: the IDS soft rows use the preset's σ |
+| `structured_li_kind` | nothing: the l_i row is li_3 |
+| `structured_soft` | nothing: hard rows for a g-file, soft for an IDS source |
+| `structured_li_max_corrector_steps` | `engine_li_row_relaxation` |
+| `anchor_pressure_to_equilibrium` | nothing: no `p_diff` in the engine's pressure |
+| `imas_corrective_jphi` | `engine_delivery_correction` |
+| `jbs_loop_q0_corrector` | `engine_rows` with `"q0"` (`engine_draw_q0_row` for the draws) |
+| `floor_j_BS`, `swb_iterations`, `accept_anchor_inband`, `diagnostic_plots` | nothing: legacy draw / SWB mechanics |
+| `homotopy_passes` with `engine_draw_homotopy=False` | no homotopy runs |
+
+Already refused elsewhere: the MSE knobs without the `"mse"` row (and
+`structured_mse_steps` with it), `draw_solve_maxits`
+(`engine_draw_solve_maxits`), `jbs_self_consistent=False`,
+`recalculate_j_BS=False`, `single_profile_jphi`, `jbs_init != "anchor"`,
+and in the draws `jbs_delta_mode`, `PIN_JPHI`, `DIFF_BS`,
+`l_i_uncertainty > 0`. Two legacy draw settings have no engine meaning but
+are NOT refused, because neither of their values is the engine's and the
+factories set the non-default one: `isolate_edge_jBS` (the engine never
+isolates the edge bootstrap) and `perturb_jind_in_anchor`.
+
 ## Presets
 
 | `engine_preset` | basis / prior | rows admitted |
