@@ -130,9 +130,10 @@ convergence criterion or ceiling moved.
   its target; its own pressure is zero at the boundary, so with a non-zero
   separatrix pressure `p_sep` it inflates `P'` everywhere by
   `p_axis / (p_axis - p_sep)` and reports the `beta` / `W_MHD` of a
-  different profile. `"offset"` hands it `p_axis - p_sep` (the input's own
-  `P'`) and adds `p_sep` back wherever pressure, `beta` or `W_MHD` is
-  reported or delivered.
+  different profile. `"offset"` hands it `p_axis - p_sep` (the target the input's own
+  `P'` integrates to; the solver's remaining rescale is its discretisation of
+  that integral, not exactly 1) and adds `p_sep` back wherever pressure,
+  `beta` or `W_MHD` is reported or delivered.
 - **Measured basis** (real g-file and IDS cases, four arms each, pin on
   vs off × `"legacy"` vs `"offset"`): `"offset"` brought the full-frame
   `beta_N` / `W_MHD` closer to the input on 8 of 8 comparable g-file cases,
