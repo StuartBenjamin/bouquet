@@ -712,11 +712,15 @@ stores the record on `_baseline` and on every draw (`edge_pressure_json`).
 The headline `beta_N` / `beta_p` / `W_MHD` of a summary are the full-frame
 values under `"offset"` and the solver's own under `"legacy"`.
 
-**Delivery under `"offset"`.** A written g-file carries the FULL pressure:
-`PRES` is the solver's pressure plus that equilibrium's own `p_sep`, `PPRIME`
-is unchanged, so `PRES` still differentiates to `PPRIME` and equals the input
-pressure at the edge. The IMAS export is built from the delivered g-file and
-so carries the same pressure.
+**Delivery under `"offset"`.** Every g-file bouquet writes carries the FULL
+pressure -- the archive's `_baseline` and each draw (`generate()`), and the
+reconstruction's own (`Bouquet.save_baseline_eqdsk`): `PRES` is the solver's
+pressure plus that equilibrium's own `p_sep`, `PPRIME` is unchanged, so
+`PRES` still differentiates to `PPRIME` and equals the input pressure at the
+edge. The IMAS export is built from the delivered g-file and so carries the
+same pressure; nothing downstream adds `p_sep` to a written `PRES` again. A
+bare `mygs.save_eqdsk` bypasses this and writes the solver frame (`PRES`
+zero at the boundary).
 
 **Where the model stops.** A pressure that is `p_sep` just inside the
 boundary and zero just outside is not physical: the real separatrix pressure

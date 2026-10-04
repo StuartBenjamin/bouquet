@@ -528,8 +528,17 @@ How they meet the engine:
   own when nothing is added back). The reconstruction summary and the probe
   (`tests/probes/measure_engine.py`, `distance.pressure_frames`) compare
   each frame with the input's same-definition quantity.
-- **Delivery.** Under `"offset"` the baseline g-file and every draw's g-file
-  are written with that equilibrium's own `p_sep` as the boundary pressure.
+- **Delivery.** Under `"offset"` EVERY g-file bouquet writes carries the
+  full pressure: the archive's `_baseline` g-file and every draw's g-file
+  (`generate()`), and the reconstruction's own g-file written with
+  `Bouquet.save_baseline_eqdsk(path)` (the live state `prepare_baseline()`
+  left; refused once a later solve has moved it), each with that
+  equilibrium's own `p_sep` (`edge_pressure["p_sep_applied"]`) as the
+  boundary pressure; `PPRIME` is unchanged. The reconstruction's g-file and
+  the archive baseline's are the same save call, so for the same state they
+  carry the same `PRES`. A bare `mygs.save_eqdsk(...)` writes the SOLVER
+  frame (`PRES` zero at the boundary, lower by `p_sep` everywhere): do not
+  use it to deliver an equilibrium.
 
 Both settings change the physics when moved (and `separatrix_pressure`
 did, when its default changed); the measurements are in the change

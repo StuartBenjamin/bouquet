@@ -33,7 +33,11 @@ the behaviour before the setting)
     ``"offset"`` passes ``p_axis - p_sep`` as the target, so ``P'`` is the
     input's own, and ``p_sep`` is added back wherever pressure, ``beta`` or
     stored energy is REPORTED or DELIVERED (:func:`pressure_frames`, the
-    ``lcfs_pressure`` of a written g-file).  ``p_sep`` is the TOTAL pressure
+    ``lcfs_pressure`` of EVERY g-file bouquet writes: the archive's
+    ``_baseline`` and each draw in ``generate()``, and the reconstruction's
+    own through ``Bouquet.save_baseline_eqdsk`` /
+    :func:`save_full_pressure_eqdsk`; a bare ``mygs.save_eqdsk`` writes the
+    solver frame).  ``p_sep`` is the TOTAL pressure
     handed to the solver (thermal + impurity + fast, exactly the array the
     solve is built from) at its last node, :func:`separatrix_pressure_of`.
 
@@ -354,6 +358,42 @@ def lcfs_kwargs(p_sep) -> dict:
     the call is then exactly the one made before the setting existed."""
     p_sep = float(p_sep)
     return {} if p_sep == 0.0 else {"lcfs_pressure": p_sep}
+
+
+def delivered_p_sep(record) -> float:
+    """The separatrix pressure a written g-file of a delivered equilibrium
+    carries: ``p_sep_applied`` of its edge-pressure record (a
+    ``Baseline.edge_pressure``, an engine record's ``edge_pressure``, an
+    archived ``edge_pressure_json``) -- that equilibrium's own ``p_sep``
+    under ``"offset"``, exactly ``0.0`` under ``"legacy"``.  Refuses a
+    missing record rather than guess a frame."""
+    if not isinstance(record, dict) or record.get("p_sep_applied") is None:
+        raise ValueError(
+            "no edge-pressure record with 'p_sep_applied': the pressure "
+            "frame of a written g-file cannot be decided (got "
+            f"{record!r})")
+    p = float(record["p_sep_applied"])
+    if not np.isfinite(p):
+        raise ValueError(f"edge-pressure record: p_sep_applied = {p!r} is "
+                         "not finite")
+    return p
+
+
+def save_full_pressure_eqdsk(mygs, filename, p_sep, **kwargs):
+    """Write *mygs*'s current equilibrium as a g-file carrying the FULL
+    pressure: ``save_eqdsk(filename, **kwargs, **lcfs_kwargs(p_sep))``
+    through :func:`bouquet.utils.safe_save_eqdsk` (the solver state is
+    snapshotted and restored around the write).  ``PRES`` is the solver's
+    pressure plus *p_sep*; ``PPRIME`` is unchanged.  With ``p_sep = 0`` the
+    call is exactly a bare save.  A bare ``mygs.save_eqdsk`` writes the
+    SOLVER frame (``PRES`` zero at ``psi_N = 1``) instead.  Refuses an
+    explicit ``lcfs_pressure`` in *kwargs* (it would replace or double the
+    offset)."""
+    if "lcfs_pressure" in kwargs:
+        raise ValueError("save_full_pressure_eqdsk: pass the separatrix "
+                         "pressure as p_sep, not lcfs_pressure")
+    from .utils import safe_save_eqdsk
+    return safe_save_eqdsk(mygs, filename, **kwargs, **lcfs_kwargs(p_sep))
 
 
 def archive_record(edge=None, pressure=None, stats=None, p_sep_applied=None):
