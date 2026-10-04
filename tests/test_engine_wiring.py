@@ -163,3 +163,29 @@ def test_the_engine_needs_a_solver():
     b.config.generation.reconstruction_engine = "unified"
     with pytest.raises(ValueError, match="setup_solver"):
         b.prepare_baseline()
+
+
+def test_a_flagged_ids_engine_baseline_warns(toy_solver, monkeypatch):
+    """jbs_loop_on_fail="flag" with a loop that cannot converge: the IDS
+    engine baseline is delivered flagged closure_limited (ip_closure) AND
+    warned about -- as loudly as a flagged g-file baseline."""
+    import bouquet as bq
+    from bouquet.io.imas import read_imas_geometry
+    b = bq.Bouquet.from_imas(_OMAS, mesh=_MESH, time=2.3043, n_draws=1)
+    g = b.config.generation
+    g.reconstruction_engine = "unified"
+    g.engine_rows = ["Ip"]
+    g.jbs_loop_on_fail = "flag"
+    g.jbs_max_passes = 2
+    b.mygs = _FakeGS()
+
+    def _repoint():
+        b._boundary_RZ = read_imas_geometry(b.config.source)[1]
+
+    monkeypatch.setattr(b, "_repoint_imas_geometry", _repoint)
+    with contextlib.redirect_stdout(io.StringIO()):
+        with pytest.warns(RuntimeWarning, match="engine IDS baseline: NOT "
+                                                "converged"):
+            bl = b.prepare_baseline()
+    assert bl.ip_closure["jbs_converged"] is False
+    assert bl.ip_closure["closure_limited"] is True

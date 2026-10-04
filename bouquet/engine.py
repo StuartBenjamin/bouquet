@@ -1123,6 +1123,24 @@ class UnifiedEngine:
         self.solves["loop"] = int(self.b.n_solves) - self.solves["anchor"]
         converged = bool(res["converged"])
         last = res
+        if "mse" in self.rows and not converged:
+            # jbs_loop_on_fail="flag": the loop did not converge, so the MSE
+            # stage (which starts from a converged loop) does not run -- said
+            # loudly, never a silent omission; a REQUIRED MSE term refuses
+            from .utils import MSE_FLAG_PREFIX
+            why = ("the self-consistent loop did not converge "
+                   "(jbs_loop_on_fail='flag'), so the MSE stage, which starts "
+                   "from a converged loop, did not run")
+            if self.rows["mse"].get("required"):
+                from .adapters import EngineInputRefused
+                raise EngineInputRefused(
+                    f"{self.label}: structured_mse_required=True but {why}")
+            self.flags.append(MSE_FLAG_PREFIX + why + " -- the MSE term was "
+                              "NOT applied")
+            print(f"[{self.label}] WARNING closure-limited: "
+                  + self.flags[-1], flush=True)
+            phases.append(dict(name="mse", record=None, jacobian=dict(
+                applied=False, reason=why, n_solves=0)))
         if "mse" in self.rows and converged:
             res_m, fd = self._mse_stage(res)
             if res_m is None:              # too few chords on the mesh
@@ -2108,6 +2126,16 @@ def prepare_engine_baseline(bq):
     if bl.reconstruction_metrics is not None:
         bq._flag_nonconverged_recon_loop()
         bq._print_reconstruction_summary()
+    elif not res["converged"]:
+        # the IDS baseline records it on ip_closure / li_metrics (closure
+        # health); warned here as loudly as _flag_nonconverged_recon_loop
+        # does for a g-file baseline
+        import warnings
+        msg = ("engine IDS baseline: NOT converged (jbs_loop_on_fail="
+               "'flag') -- delivered flagged closure_limited: "
+               + _flag_reason(res, rec))
+        print("[engine] WARNING " + msg, flush=True)
+        warnings.warn(msg, RuntimeWarning, stacklevel=2)
     print(f"[engine] {ENGINE_VERSION}: {'converged' if res['converged'] else 'NOT converged (flagged)'}; "
           f"l_i(3)={bl.l_i_target:.6f}; solves {rec['solves']}", flush=True)
     return bl
