@@ -43,6 +43,19 @@
   replaces it. Defaults and the factories' configs are unaffected. Legacy
   path unchanged.
 
+- **Stored configs load as they were produced.** A legacy config written
+  while `engine_mse_jacobian="fd_broyden"` or `engine_ids_inductive="auto"`
+  was the default (to_dict writes every field) was refused by `from_dict`;
+  it now loads (the value has no effect on the legacy path; loaded as
+  today's default, with a warning). A stored unified config that predates a
+  field whose default changed is loaded with the value it ran with where
+  that is knowable (`engine_ids_inductive` -> `"auto"`;
+  `engine_draw_solve_maxits` -> the `draw_solve_maxits` the engine draws
+  read then; a loop config without `jbs_max_passes_post_homotopy` -> 2),
+  with a warning, and with today's default plus a loud warning naming the
+  field where it is not. Fixtures: the to_dict output at five commits of
+  the engine stack (`tests/data/stored_configs/`).
+
 ## Unreleased — `engine_ids_inductive` (unified engine, IDS sources)
 
 *The default is now `"residual"` (owner-approved; see "IDS inductive: the
