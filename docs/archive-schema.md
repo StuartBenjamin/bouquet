@@ -223,8 +223,9 @@ pressure + that equilibrium's `p_sep`).
     delivered draw: `l_i_3`, `l_i_1`, `beta_n`, `q0` at `q0_psi_N`,
     `q0_stats` at `q0_stats_psi_N`, `q95`, `Ip`, the delivery check,
     request − achieved, `flux_range`), `archived` (the same after the
-    homotopy stage),
-    `reference` (the reconstruction's, with its `flux_range`), `deltas`
+    homotopy stage, plus `split`: see the next item),
+    `reference` (the reconstruction's DELIVERED measurement -- every value,
+    its `flux_range` and the q-row radius included), `deltas`
     (against the reconstruction: `l_i_3`, `l_i_1`, `beta_n`, `q0`, `q95`,
     and the poloidal flux range `psi_b - psi_a` -- `flux_range` [Wb/rad]
     and `flux_range_rel`; `archived.deltas` the same for the archived
@@ -234,6 +235,18 @@ pressure + that equilibrium's `p_sep`).
     `in_spec`), `homotopy`, `post_homotopy`, and `cost` (solves, passes and
     wall time for the stages `anchor`, `loop`, `homotopy`, `post_homotopy`,
     `filters`, `archive`, and their `total`).
+  - **The current split of an engine draw group** (`j_phi`, `j_BS`,
+    `j_inductive`) is evaluated on the draw's own ARCHIVED (final,
+    post-homotopy) equilibrium: `j_phi` its achieved FSA current; `j_BS`
+    the draw's bootstrap model on that state, `s_bs (1 + d_bs) x scale x
+    Redl(final) x F<1/R>/<B^2>(final)`; the fixed beam / RF parts the
+    contract's `<j.B>` times the same final-state factor (recorded in
+    `archived.split.j_NBI` / `j_RF`); `j_inductive` the residual `j_phi -
+    j_BS - j_NBI - j_RF` (it carries the pressure-driven term) and NEVER
+    clipped -- a negative value is recorded in `archived.split`
+    (`n_negative_inductive`, `min_inductive`, `negative_inductive_psi_N`)
+    and printed, never altered or filtered. (Legacy draws keep their split:
+    the residual floored at zero with the sliver moved into `j_BS`.)
   - `passes_draw_band` (bool attr, engine draws only): the post-hoc band
     verdict. It is one of the filter flags ANDed into `selected`
     (`filtering._FILTER_FLAGS`), so `.filter()` selects what the until-N

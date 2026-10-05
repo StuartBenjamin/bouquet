@@ -343,7 +343,8 @@ def test_a_perturbed_draw_moves_li_and_beta_and_records_the_flux_range(
     # the flux range psi_b - psi_a against the reconstruction's (the toy's
     # flux range responds to the current shape)
     fr, fr0 = r["delivered"]["flux_range"], r["reference"]["flux_range"]
-    assert fr0 == pytest.approx(ctx.geom["dpsi_dpsiN"], rel=0, abs=0)
+    # the reference is the DELIVERED measurement's, not G*'s
+    assert fr0 == ED.flux_range(eng.delivered_meas)
     assert d["flux_range"] == fr - fr0 and d["flux_range"] != 0.0
     assert d["flux_range_rel"] == pytest.approx((fr - fr0) / fr0,
                                                 rel=1e-14)
@@ -878,6 +879,134 @@ def test_physical_draws_are_untouched(recon):
     out = _quiet(ED.run_draw, ctx, copy.deepcopy(b), ctx.zero_inputs())
     assert out["record"]["loop"]["converged"]
     assert "kinetics" not in "".join(out["record"].get("notices", []))
+
+
+def _spy_store(monkeypatch):
+    """Capture what store_equilibrium archives per draw (j_phi, j_BS,
+    j_inductive: positional arguments 4-6)."""
+    import bouquet.TokaMaker_interface as TI
+    stored = []
+    real = TI.store_equilibrium
+
+    def spy(header, count, full_path, psi_N, jphi, jbs, jind, *a, **k):
+        stored.append(dict(count=count, j_phi=np.array(jphi, dtype=float),
+                           j_BS=np.array(jbs, dtype=float),
+                           j_inductive=np.array(jind, dtype=float)))
+        return real(header, count, full_path, psi_N, jphi, jbs, jind,
+                    *a, **k)
+    monkeypatch.setattr(TI, "store_equilibrium", spy)
+    return stored
+
+
+def test_the_archived_split_is_on_the_archived_state_and_never_clipped(
+        tmp_path, monkeypatch):
+    """An engine draw archives j_BS and the fixed parts evaluated on its
+    ARCHIVED equilibrium and j_inductive as the exact residual against the
+    archived j_phi -- no clip, no sliver moved into j_BS; the record says
+    so (archived.split), including the negative-inductive count."""
+    stored = _spy_store(monkeypatch)
+    diags, rej, h, G = _generate(tmp_path, monkeypatch, n=2)
+    assert len(diags) == 2 and rej == [] and len(stored) == 2
+    for d, st in zip(diags, stored):
+        sp = d["engine"]["archived"]["split"]
+        jn, jr = np.asarray(sp["j_NBI"]), np.asarray(sp["j_RF"])
+        np.testing.assert_array_equal(
+            st["j_inductive"], st["j_phi"] - st["j_BS"] - jn - jr)
+        assert sp["n_negative_inductive"] == int(np.sum(
+            st["j_inductive"] < 0.0))
+        assert sp["min_inductive"] == float(np.min(st["j_inductive"]))
+        assert "never clipped" in sp["convention"]
+
+
+def test_a_negative_residual_inductive_is_recorded_not_clipped(
+        tmp_path, monkeypatch, capsys):
+    """Force the archived bootstrap above the archived current near the
+    edge: the residual inductive goes negative there and is ARCHIVED
+    negative (the legacy archival would floor it at zero and move the
+    sliver into j_BS); count, minimum and psi_N range are recorded and a
+    console note printed."""
+    stored = _spy_store(monkeypatch)
+    real = ED.GenerateEngineDraws.post_hoc
+
+    def post_hoc(self, *a, **k):
+        out = real(self, *a, **k)
+        sp = self._cur["final_split"]
+        bump = np.zeros_like(sp["j_BS"])
+        bump[-3:] = 1.0e9                       # far above any j_phi
+        sp["j_BS"] = sp["j_BS"] + bump
+        return out
+    monkeypatch.setattr(ED.GenerateEngineDraws, "post_hoc", post_hoc)
+    diags, rej, h, G = _generate(tmp_path, monkeypatch, n=1)
+    st, sp = stored[0], diags[0]["engine"]["archived"]["split"]
+    assert np.all(st["j_inductive"][-3:] < 0.0)
+    assert sp["n_negative_inductive"] >= 3
+    assert sp["min_inductive"] == float(np.min(st["j_inductive"])) < 0.0
+    lo, hi = sp["negative_inductive_psi_N"]
+    assert lo <= float(PSI[-3]) and hi == pytest.approx(float(PSI[-1]))
+    np.testing.assert_array_equal(
+        st["j_inductive"], st["j_phi"] - st["j_BS"]
+        - np.asarray(sp["j_NBI"]) - np.asarray(sp["j_RF"]))
+
+
+def test_the_post_homotopy_resplit_branch_uses_the_draws_own_fixed_parts(
+        tmp_path, monkeypatch):
+    """The post-homotopy check fails ONCE (a stand-in check), so the draw
+    re-solves at the tight coil stage and generate_bouquet re-derives its
+    split in the engine branch: j_inductive = j_phi - j_BS - the draw's own
+    solved fixed parts, unclipped (not the legacy decomposition at the
+    reconstruction's fixed parts) -- and the archival then re-splits on
+    the archived state."""
+    import bouquet.jbs_loop as JL
+    real_check = JL.check_delivered
+    state = dict(n=0)
+
+    def check(*a, **k):
+        out = real_check(*a, **k)
+        cur = getattr(G_box.get("G"), "_cur", None)
+        if cur is not None and cur["clock"].cur == "post_homotopy" \
+                and state["n"] == 0:
+            state["n"] += 1
+            out = dict(out, ok=False)
+        return out
+    G_box = {}
+    real_init = ED.GenerateEngineDraws.__init__
+
+    def init(self, *a, **k):
+        real_init(self, *a, **k)
+        G_box["G"] = self
+    monkeypatch.setattr(ED.GenerateEngineDraws, "__init__", init)
+    monkeypatch.setattr(JL, "check_delivered", check)
+    fixed_calls = []
+    real_fixed = ED.GenerateEngineDraws.solved_fixed
+
+    def solved_fixed(self):
+        out = real_fixed(self)
+        fixed_calls.append(np.array(out, dtype=float))
+        return out
+    monkeypatch.setattr(ED.GenerateEngineDraws, "solved_fixed", solved_fixed)
+    import bouquet.TokaMaker_interface as TI
+    legacy_calls = []
+    real_dec = TI._decompose_draw_currents
+
+    def dec(*a, **k):
+        legacy_calls.append(1)
+        return real_dec(*a, **k)
+    monkeypatch.setattr(TI, "_decompose_draw_currents", dec)
+    stored = _spy_store(monkeypatch)
+    diags, rej, h, G = _generate(tmp_path, monkeypatch, n=1)
+    assert state["n"] == 1 and rej == [] and len(diags) == 1
+    ph = diags[0]["engine"]["post_homotopy"]
+    assert ph["accepted_without_passes"] is False
+    assert len(fixed_calls) == 1                 # the engine re-split ran
+    assert legacy_calls == []                    # not the legacy one
+    dp = G._cur["draw"]["passes_post_homotopy"]
+    np.testing.assert_array_equal(fixed_calls[0],
+                                  dp.last["parts"]["driven"])
+    # archived on the archived state, the residual exact
+    st, sp = stored[0], diags[0]["engine"]["archived"]["split"]
+    np.testing.assert_array_equal(
+        st["j_inductive"], st["j_phi"] - st["j_BS"]
+        - np.asarray(sp["j_NBI"]) - np.asarray(sp["j_RF"]))
 
 
 def test_generate_records_the_quantity_and_psi_n(tmp_path, monkeypatch,

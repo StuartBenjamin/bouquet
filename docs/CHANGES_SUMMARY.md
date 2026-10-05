@@ -70,6 +70,29 @@ in force is approved.
   -- `generate()` itself and the legacy path are unchanged (the legacy check
   calls `set_coil_bounds` only to swap a bound stash a previous `generate()`
   left, and leaves no stash of its own; its twins were bitwise).
+- **Engine draws: the archived current split is evaluated on the draw's own
+  archived (final) state, and the inductive is never clipped**
+  (owner-approved, engine only, 2026-10-05). Before, an engine draw's
+  archived `j_BS` was the bootstrap composed on the geometry of the PREVIOUS
+  solve, its fixed beam/RF parts were the RECONSTRUCTION's (at its
+  `F<1/R>/<B^2>`), and `j_inductive` was clipped at zero twice (post-homotopy
+  re-split and archival) with the sliver moved into `j_BS`. Now: `j_phi` the
+  archived state's achieved FSA current (as before); `j_BS` = `s_bs (1 +
+  d_bs) x scale x Redl` of the archived state times its `F<1/R>/<B^2>`; the
+  fixed parts the contract's `<j.B>` times the same factor; `j_inductive` the
+  residual, never clipped -- a negative value is RECORDED
+  (`engine.archived.split`: `n_negative_inductive`, `min_inductive`,
+  `negative_inductive_psi_N`, plus a console note), not altered and not
+  filtered. The post-homotopy re-split uses the draw's own solved fixed
+  parts, unclipped. The draws' reference flux range (and q-row radius) is
+  the DELIVERED measurement's, not the last loop pass's geometry `G*`, so a
+  zero-perturbation draw's flux-range delta measures only its own
+  reproduction. **What moves:** archived `j_BS` / `j_inductive` of engine
+  draws (on the 16 stored synthetic draws: no clip sliver was ever active;
+  fixed-part conversion <= 0.012 % of peak; j_BS within the final
+  post-homotopy r_j, 5e-5 ... 1.8e-4) and the engine σ=0 flux-range delta.
+  No solve, l_i, q, beta, coil or in-spec verdict changes. Legacy draws keep
+  their clips exactly as they are.
 - **Legacy IMAS reader: the sawtooth gate reads the sawteeth entry at the
   slice TIME** (the engine IDS adapter's rule since its own fix). The gate
   input `Baseline.sawtooth` (`present` / `j_par_max_abs` / `active`, archived

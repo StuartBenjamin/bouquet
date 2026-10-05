@@ -7473,10 +7473,18 @@ def generate_bouquet(
                                 # re-derive the archived split from the
                                 # re-solved draw
                                 _jphi_new = np.asarray(_ph_jphi, dtype=float)
-                                _ji, _jb, _je = _decompose_draw_currents(
-                                    _jphi_new, _ph_spk, _ph_full,
-                                    _jctx.get('isolate_edge_jBS', True),
-                                    j_NBI, j_RF)
+                                if _eng is None:
+                                    _ji, _jb, _je = _decompose_draw_currents(
+                                        _jphi_new, _ph_spk, _ph_full,
+                                        _jctx.get('isolate_edge_jBS', True),
+                                        j_NBI, j_RF)
+                                else:
+                                    # the engine draw's own fixed parts, no
+                                    # clip (archival re-splits on the
+                                    # archived state)
+                                    _jb, _je = _ph_full, None
+                                    _ji = (_jphi_new - _ph_full
+                                           - _eng.solved_fixed())
                                 diagnostics['j_inductive'] = _ji
                                 diagnostics['j_BS'] = _jb
                                 diagnostics['j_BS_edge'] = _je
@@ -7905,6 +7913,12 @@ def generate_bouquet(
                 _dr_jphi_store = jphi_perturb
                 _dr_jBS_store = diagnostics["j_BS"]
                 _dr_jind_store = diagnostics["j_inductive"]
+        if _eng is not None:
+            # engine draw: j_BS and the fixed parts on the ARCHIVED
+            # equilibrium, the inductive the residual against the archived
+            # j_phi -- replaces the split above (legacy fixed parts, clip)
+            _dr_jBS_store, _dr_jind_store = _eng.archived_split(
+                diagnostics, _dr_jphi_store)
 
         store_equilibrium(
             header, count, full_path,

@@ -299,7 +299,11 @@ class EngineDrawContext:
         self.sigma_p = float(pp @ self.dPq_star) / nn if nn > 0.0 else 0.0
         if not np.isfinite(self.sigma_p):
             self.sigma_p = 0.0
-        # ---- the reconstruction's delivered measurements (the reference)
+        # ---- the reconstruction's delivered measurements (the reference):
+        # EVERY reference quantity from the one delivered measurement, the
+        # flux range and the q-row radius included (not from G*, the last
+        # loop pass's geometry), so a zero-perturbation draw's deltas measure
+        # only its own reproduction of the delivered state
         m = eng.delivered_meas
         stats = m.get("stats") or {}
         from .engine import _full_frame
@@ -307,11 +311,12 @@ class EngineDrawContext:
         from .physics import SOLVER_Q0_PSI_N
         self.ref = dict(
             l_i=float(m["li"]), l_i_1=_f(m.get("li_1")),
-            q_row=float(m["q_row"]), q_row_psi_N=float(psi_q[0]),
+            q_row=float(m["q_row"]),
+            q_row_psi_N=float(m["geom"]["psi_q"][0]),
             q0_stats=_f(stats.get("q_0")),
             q0_stats_psi_N=float(SOLVER_Q0_PSI_N),
             q95=_f(stats.get("q_95")), beta_n=_f(full.get("beta_n")),
-            Ip=_f(m.get("Ip")), flux_range=_f(g.get("dpsi_dpsiN")))
+            Ip=_f(m.get("Ip")), flux_range=flux_range(m))
         if m.get("pressure_frames") is not None:
             self.ref["pressure_frames"] = _frames(m)
         # ---- the kinetic-grid base of the sampler
@@ -1489,6 +1494,43 @@ class GenerateEngineDraws:
             clock.start("homotopy")
         return rec, jb_tor, jb_tor, jphi
 
+    def solved_fixed(self):
+        """``kappa x <j.B>_fix`` on the geometry the draw's last solved
+        request was composed on (the loop's, or the post-homotopy passes')."""
+        d = self._cur["draw"]
+        dp = d.get("passes_post_homotopy") or d["passes"]
+        return np.asarray(dp.last["parts"]["driven"], dtype=float)
+
+    def archived_split(self, diagnostics, j_phi):
+        """``(j_BS, j_inductive)`` of the archived draw against its archived
+        *j_phi*: the bootstrap and fixed parts of :meth:`post_hoc` (the
+        archived equilibrium's), the inductive the residual -- NEVER
+        clipped; a negative inductive is recorded, not altered."""
+        sp = self._cur["final_split"]
+        j_phi = np.asarray(j_phi, dtype=float)
+        j_ind = j_phi - sp["j_BS"] - sp["j_NBI"] - sp["j_RF"]
+        neg = j_ind < 0.0
+        diagnostics["engine"]["archived"]["split"] = dict(
+            convention=("j_phi: the archived equilibrium's achieved FSA "
+                        "current; j_BS: s_bs (1 + d_bs) scale Redl and "
+                        "j_NBI/j_RF: the fixed <j.B>, both times "
+                        "F<1/R>/<B^2> of the archived equilibrium; "
+                        "j_inductive: the residual (carries the pressure-"
+                        "driven term), never clipped"),
+            j_NBI=sp["j_NBI"].tolist(), j_RF=sp["j_RF"].tolist(),
+            n_negative_inductive=int(np.sum(neg)),
+            min_inductive=float(np.min(j_ind)),
+            negative_inductive_psi_N=(
+                None if not np.any(neg) else
+                [float(self.ctx.psi[neg].min()),
+                 float(self.ctx.psi[neg].max())]))
+        if np.any(neg):
+            print(f"  [engine draw split] NOTE: the residual inductive is "
+                  f"negative on {int(np.sum(neg))} nodes (min "
+                  f"{float(np.min(j_ind)):.3e} A/m^2); recorded, not "
+                  "clipped", flush=True)
+        return np.asarray(sp["j_BS"], dtype=float).copy(), j_ind
+
     def mark(self, stage):
         if self._cur is not None:
             self._cur["clock"].start(stage)
@@ -1528,6 +1570,21 @@ class GenerateEngineDraws:
                   "loop's"))
         if fin.get("pressure_frames") is not None:
             rec["archived"]["pressure_frames"] = _frames(fin)
+        # the archived split ON the archived equilibrium: the draw's
+        # bootstrap model (x* held: s_bs (1 + d_bs) x scale x Redl) and its
+        # fixed parts, both converted with THIS state's F<1/R>/<B^2>; the
+        # residual against the archived j_phi is :meth:`archived_split`'s
+        from .engine import conversion_factor
+        kap = conversion_factor(fin["geom"])
+        dpl = cur["draw"].get("passes_post_homotopy") or cur["draw"]["passes"]
+        fx = self.ctx.c.jB_fix_parts
+        cur["final_split"] = dict(
+            j_BS=(1.0 + float(dpl.last["amp"].get("d_bs", 0.0)))
+            * self.ctx.s_bs * kap * float(cur["draw"]["inputs"].scale)
+            * np.asarray(fin["redl"], dtype=float),
+            j_NBI=kap * np.asarray(fx["nbi"], dtype=float),
+            j_RF=kap * (np.asarray(fx["rf"], dtype=float)
+                        + np.asarray(fx.get("other", 0.0), dtype=float)))
         rec["archived"]["deltas"] = dict(
             l_i_3=float(fin["li"]) - float(self.ctx.ref["l_i"]),
             l_i_1=(None if (rec["archived"]["l_i_1"] is None
