@@ -86,6 +86,47 @@ SAWTOOTH_SOURCE_INDEX = 701
 # if/when internal EC/IC/LH summation is wanted.
 
 
+#: Absolute tolerance [s] for matching a core_sources entry's own
+#: profiles_1d time to the core_sources slice time (the engine IDS adapter's
+#: ``IDS_SOURCE_TIME_TOL``).
+SOURCE_TIME_TOL = 1e-6
+
+
+def _source_slice_at(s, isrc, t_slice, n_time):
+    """``(profile, how)``: a ``core_sources`` entry's ``profiles_1d`` at the
+    slice *isrc* (time *t_slice*), or ``(None, why)`` when the entry has no
+    slice at that time.  An entry carrying its own per-slice times is matched
+    BY TIME (a model's entry may start later than the IDS time base, so the
+    list index is not the slice); one without them must have exactly the
+    IDS's number of slices, or it cannot be aligned and is refused
+    (``ValueError``) -- never its first slice taken in place of a missing one.
+    The rule of ``bouquet.adapters._ids_source_slice``."""
+    pr = s.get("profiles_1d", [])
+    idn = s.get("identifier", {}) or {}
+    if not pr:
+        return None, "no profiles_1d"
+    times = [q.get("time") for q in pr]
+    if t_slice is not None and all(t is not None for t in times):
+        tt = np.asarray(times, dtype=float)
+        k = int(np.argmin(np.abs(tt - t_slice)))
+        if abs(float(tt[k]) - float(t_slice)) > SOURCE_TIME_TOL:
+            return None, (f"no profiles_1d slice at t = {t_slice:.6g} s "
+                          f"(its own times span {tt.min():.6g}-"
+                          f"{tt.max():.6g} s)")
+        return pr[k], "matched by time"
+    if n_time is not None and len(pr) != n_time:
+        raise ValueError(
+            f"IMAS reader: core_sources {idn.get('name')!r} (index "
+            f"{idn.get('index')}) has {len(pr)} profiles_1d slices for "
+            f"{n_time} core_sources times and no per-slice time: it cannot be "
+            "aligned with the slice read")
+    if isrc >= len(pr):
+        raise ValueError(
+            f"IMAS reader: core_sources {idn.get('name')!r} (index "
+            f"{idn.get('index')}) has no profiles_1d slice {isrc}")
+    return pr[isrc], "by index"
+
+
 def _nearest_index(time_array, t: Optional[float], what: str) -> int:
     """Index of the slice nearest ``t`` (seconds) in ``time_array``."""
     ta = np.asarray(time_array, dtype=float)
@@ -844,17 +885,29 @@ def read_imas_baseline(
     # --- sawtooth model presence/amplitude at this slice (gate input only) ----
     # Read here because the dd (100s of MB) is not retained past this function.
     # "active" means the source EXISTS and carries a non-zero j_parallel at this
-    # time index: a declared-but-idle sawtooth source (all zeros before onset)
-    # must NOT admit a ramp slice to the q0 pin.
+    # SLICE TIME: a declared-but-idle sawtooth source (all zeros before onset)
+    # must NOT admit a ramp slice to the q0 pin.  The entry is read at the
+    # core_sources slice TIME, not at the list index (owner-approved
+    # 2026-10-05, the rule of the engine IDS adapter): a model's sawteeth
+    # entry may start later than the IDS time base -- it was then read one
+    # slice late, and at the last slice from its FIRST slice.
     sawtooth = {"source_index": SAWTOOTH_SOURCE_INDEX, "present": False,
                 "j_par_max_abs": 0.0, "active": False, "q0_dd": None}
+    _src_tb = src_ids.get("time")
+    _src_nt = None if not _src_tb else len(_src_tb)
+    _src_t = (None if not _src_tb
+              else float(np.asarray(_src_tb, dtype=float)[isrc]))
     for s in src_ids.get("source", []):
         if s.get("identifier", {}).get("index") == SAWTOOTH_SOURCE_INDEX:
             sawtooth["present"] = True
             pr = s.get("profiles_1d", [])
             if pr:
-                jsaw = np.asarray(pr[isrc if len(pr) > isrc else 0]
-                                  .get("j_parallel", []), dtype=float)
+                q_saw, how = _source_slice_at(s, isrc, _src_t, _src_nt)
+                sawtooth["slice"] = how
+                if q_saw is None:
+                    # no slice of the entry at this time: not active here
+                    continue
+                jsaw = np.asarray(q_saw.get("j_parallel", []), dtype=float)
                 if jsaw.size and np.any(np.isfinite(jsaw)):
                     sawtooth["j_par_max_abs"] = max(
                         sawtooth["j_par_max_abs"],

@@ -108,7 +108,10 @@ class Baseline:
     # recorded for comparison only: the closure's reference is TokaMaker's q0
     # for the source total re-solved on the anchor, not the dd's own estimator
     # (issue #20 -- never compare two estimators of the same name).
-    # Keys: source_index, present, j_par_max_abs, active, q0_dd.
+    # Keys: source_index, present, j_par_max_abs, active, q0_dd, and -- when
+    # the dd has a sawteeth entry with profiles -- slice (how it was read at
+    # this slice: "matched by time", "by index", or why it has no slice at
+    # this time, in which case it is not active here).
     sawtooth: Optional[dict] = None
 
     # Current orientation of the SOURCE, and what the reader did about it.

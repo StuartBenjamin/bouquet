@@ -737,13 +737,20 @@ def test_an_entry_is_read_at_its_own_time_not_its_list_index(tmp_path):
                                rtol=1e-12)
     d = [x for x in c.provenance["driven_sources"] if x["index"] == 701]
     assert d[0]["slice"] == "matched by time"
-    # no per-slice time and a different count: refused
+    # no per-slice time and a different count: refused.  Since the legacy
+    # reader reads its sawtooth gate by the same rule (2026-10-05), the
+    # reader -- which runs first -- refuses such a sawteeth entry before the
+    # adapter sees it; the adapter's own refusal is checked directly.
+    from bouquet.adapters import _ids_source_slice
     for q in saw["profiles_1d"]:
         q.pop("time")
-    with pytest.raises(EngineInputRefused, match="cannot be aligned"):
+    with pytest.raises(ValueError, match="IMAS reader: .*cannot be aligned"):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             _ids_from(tmp_path, dd, "late_notime.json").read()
+    with pytest.raises(EngineInputRefused, match="IDS adapter: .*cannot be "
+                                                 "aligned"):
+        _ids_source_slice(saw, isrc, float(t[isrc]), len(t))
 
 
 def test_an_entry_without_a_slice_at_this_time_is_stamped(tmp_path):

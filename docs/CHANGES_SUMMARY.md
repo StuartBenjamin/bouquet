@@ -11,6 +11,25 @@
   where such a re-solve failed (those draws are now rejected attempts, never
   archived or counted toward until-N); runs in which every rollback re-solve
   converged are unchanged.
+- **Legacy IMAS reader: the sawtooth gate reads the sawteeth entry at the
+  slice TIME** (the engine IDS adapter's rule since its own fix). The gate
+  input `Baseline.sawtooth` (`present` / `j_par_max_abs` / `active`, archived
+  as `li_metrics["sawtooth"]`) read the `core_sources` sawteeth entry (701)
+  at its LIST index: an entry that starts one slice after the IDS time base
+  (as a model's sawteeth entry can) was read one slice late at every slice,
+  and at the last slice from its FIRST slice. Now an entry carrying per-slice
+  times is matched by time; at a time it does not cover it is present but
+  NOT active; an entry with no per-slice time and a different slice count is
+  refused (`ValueError`, "cannot be aligned") instead of read at slice 0. A
+  new key `slice` records how it was read. **What moves for existing users:**
+  only dds with such a late-starting (or misaligned) sawteeth entry -- the
+  `sawtooth_bootstrap` gate's `active` flag and `j_par_max_abs` at each
+  slice (a slice before the entry starts is no longer admitted as
+  sawtoothing; the last slice now reads its own amplitude), and through
+  `Baseline.sawtooth` the engine's q0-row admission on the same sources.
+  Dds whose sawteeth entry is on the full time base, or that have none (the
+  shipped example), read the same values as before. The NBI read just above
+  it keeps its list-index rule (not part of this change).
 
 ## Unreleased — review fixes to the unified engine (2026-10-04)
 
