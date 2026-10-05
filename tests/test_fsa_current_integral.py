@@ -20,11 +20,11 @@ The same run pins the three properties the implementation depends on:
     clips the grid and asserts against the collapse;
   * ``dV/dPsi`` is per DIMENSIONAL psi (``int dV/dPsi dpsi`` recovers the
     volume to -0.25 %; the ``dpsi_N`` reading is out by +291 %);
-  * ``compute_flux_integral`` is NOT ``int_plasma f dA``.  It covers the whole
-    limiter region with the profile pinned at its LCFS value outside the
-    plasma, so ``FI(1) = 2.8385 m^2`` against a true plasma cross-section of
-    ``1.7901 m^2``.  That is where 7dc254b's "+12.9 % convention bias" came
-    from, and it is why the fix is a measure rather than a calibration.
+  * ``compute_flux_integral`` is ``int_plasma f dA``: ``FI(1)`` is the plasma
+    cross-section.  Before OFT 9dea192 it covered the whole limiter region
+    with the profile pinned at its LCFS value outside the plasma
+    (``FI(1) = 2.8385 m^2`` against ``1.7901 m^2``), which is where 7dc254b's
+    "+12.9 % convention bias" came from.
 
 Runs on the synthetic D3D-like example (no proprietary data).
 """
@@ -318,16 +318,15 @@ def test_get_q_collapses_silently_on_an_unclipped_grid(measured):
 
 @pytest.mark.solver
 @solver_only
-def test_compute_flux_integral_is_not_the_plasma_area(measured):
-    """Documents defect 3 of ``_AnchorIpRenorm``: the mesh flux integral covers
-    the limiter region, not the plasma, so it is not an I_p measure for a
-    profile with a finite edge value."""
+def test_compute_flux_integral_is_the_plasma_area(measured):
+    """The mesh flux integral covers the plasma only (OFT 9dea192); before it,
+    FI(1) was the limiter-region area, 1.59x the plasma's (defect 3 of
+    ``_AnchorIpRenorm``).  Fails against an OFT build without the fix."""
     fi_one = float(measured["flux_integral_of_one"])
     area = float(measured["live"]["plasma_area"])
-    assert fi_one / area > 1.4, (
-        f"compute_flux_integral(1) = {fi_one:.5f} m^2 is no longer much larger "
-        f"than the plasma cross-section {area:.5f} m^2 -- if OFT changed the "
-        f"interpolator's off-plasma behaviour, revisit the measure's rationale")
+    assert abs(fi_one / area - 1.0) <= 1e-2, (
+        f"compute_flux_integral(1) = {fi_one:.5f} m^2 vs plasma cross-section "
+        f"{area:.5f} m^2 -- is this OFT build older than 9dea192?")
 
 
 if __name__ == "__main__":

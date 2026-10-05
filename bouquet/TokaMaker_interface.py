@@ -360,9 +360,9 @@ def _renormalize_target_to_Ip(mygs, psi_N, target_jphi, Ip_target, psi_pad,
     uniformly-scaled target is exactly what ``jphi-linterp`` hands back.
 
     The measure is the physical FSA current integral on the LIVE geometry
-    (self-validated to 0.01-0.04 % on real cases, #35) -- never the
-    limiter-area ``flux_integral``, which reads the same target +10..+44 %
-    high.  It is AFFINE, ``Ip[J] = int(w*J) + c`` (the ``P'`` term lands in
+    (self-validated to 0.01-0.04 % on real cases, #35) -- never
+    ``flux_integral``, which read the same target +10..+44 % high before OFT
+    9dea192 (limiter area) and still reads a jphi array as an area density.  It is AFFINE, ``Ip[J] = int(w*J) + c`` (the ``P'`` term lands in
     ``c``, -3.3 % of Ip on the golden), so the scale is solved exactly,
     ``s = (Ip_target - c) / int(w*J)`` -- a plain ratio ``Ip_target/Ip[J]``
     would miss by ``(1-s)*c``, measured -0.19..-0.26 % of Ip.
@@ -1277,14 +1277,15 @@ class _AnchorIpRenorm:
     hiding inside that +12.92 %, and 7dc254b attributed all of it to the
     profile convention.  Measured on the D3D-like anchor:
 
-    * ``compute_flux_integral`` is NOT :math:`\int_{\rm plasma} f\,dA`.  It
-      integrates over the whole ``reg == 1`` limiter region, with the flux
+    * ``compute_flux_integral`` was NOT :math:`\int_{\rm plasma} f\,dA` before
+      OFT 9dea192 (which fixed it; FI(1) is now the plasma area).  It
+      integrated over the whole ``reg == 1`` limiter region, with the flux
       function evaluated at its LCFS value everywhere outside the plasma
       (``gs_prof_interp_apply`` CASE(4) returns 0 -- the LCFS end of the
       internal flux coordinate -- off the plasma, and ``gs_flux_int`` then
       reads the profile there).  ``FI(1) = 2.83853`` is the LIMITER area, not
       the plasma area, which is ``1.79005``; 7dc254b's note that ``FI(1) ==``
-      plasma area is wrong.  For the archived total the excess area is charged
+      plasma area was wrong then.  For the archived total the excess area was charged
       at the edge value, ``1.36e5 A/m^2 * 1.05 m^2 = +1.43e5 A``, i.e. +11.9 %
       of :math:`I_p` -- essentially the whole bias.
     * the residual ~1 % is the profile convention, and it is not the one
@@ -3416,7 +3417,7 @@ def perturb_kinetic_equilibrium(
             matched_j_inductive * final_scale_j0 + spike_profile + j_fixed_eff
         )
         # Issue #29 (second site): the inductive amplitude above was rooted on
-        # the limiter-area flux integral (#15), so the assembled target does
+        # compute_flux_integral of a jphi array (#15), so the assembled target does
         # not carry Ip_target in the physical measure either.  Same uniform
         # renormalisation as the reconstruction site -- the solver will scale
         # the input to Ip regardless; make the target the profile it can

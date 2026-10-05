@@ -2434,10 +2434,9 @@ class Bouquet:
                 # bouquet's arrays are handed to set_profiles as), evaluated on a
                 # copy_eq() SNAPSHOT of the converged first-pass geometry so no
                 # later solve can move it. NOT TokaMaker.compute_flux_integral:
-                # that integrates the whole reg==1 limiter region with the flux
-                # function held at its LCFS value outside the plasma, charging the
-                # scrape-off area at f(psi_N=1) (+11.9% of Ip on the D3D-like
-                # anchor; see the utils.py module note). And NOT the cylindrical
+                # it reads its input as an area density, and before OFT 9dea192
+                # it also charged the scrape-off area at f(psi_N=1) (+11.9% of Ip
+                # on the D3D-like anchor; see the utils.py module note). And NOT the cylindrical
                 # l_i proxy (1/<R> for <1/R>; +7.75% on the FUSE validation
                 # case). Both are still
                 # evaluated and RECORDED below so the biases stay visible.
