@@ -1046,6 +1046,15 @@ class GenerationConfig:
     swb_saw_tol: float = 1.0e-4
     swb_saw_ramp: float = 0.01
     swb_saw_rule: int = 1
+    # imas_baseline="swb": flatten near-axis structure the mesh does not resolve
+    # (bouquet.axis_subgrid).  Inside the cut the source total j_phi becomes an
+    # axis-regular quadratic in Phi_N (C1, enclosed current kept); the change goes
+    # into j_sawteeth / j_other (FUSE's 701 carries the structure).  None = off;
+    # a float = the cut in rho_tor; "auto" = the surface enclosing
+    # swb_saw_axis_flatten_cells mesh cells, pushed out to the next extremum of
+    # j_phi, and nothing when j_phi has no extremum inside it.  Saw on or off.
+    swb_saw_axis_flatten: Optional[Union[float, str]] = None
+    swb_saw_axis_flatten_cells: float = 20.0
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single
@@ -1130,6 +1139,14 @@ class GenerationConfig:
             raise ValueError(f"swb_saw_q={self.swb_saw_q!r}: must be > 0 (None = off)")
         if self.swb_saw_rule not in (1, 2, 3, 4):
             raise ValueError(f"swb_saw_rule={self.swb_saw_rule!r} not in (1, 2, 3, 4)")
+        f = self.swb_saw_axis_flatten
+        if f is not None and f != "auto" and not (
+                isinstance(f, (int, float)) and not isinstance(f, bool) and 0.0 < f < 0.5):
+            raise ValueError(f"swb_saw_axis_flatten={f!r}: None, 'auto' or a rho_tor "
+                             "cut in (0, 0.5)")
+        if not float(self.swb_saw_axis_flatten_cells) > 0.0:
+            raise ValueError(f"swb_saw_axis_flatten_cells="
+                             f"{self.swb_saw_axis_flatten_cells!r} must be > 0")
         validate_bootstrap_kwargs(
             self.bootstrap_kwargs,
             self._RESERVED | self._SAW_RESERVED
@@ -1222,6 +1239,10 @@ def swb_config_problems(config):
         p.append("this OpenFUSIONToolkit's solve_with_bootstrap lacks x/jphi_fixed/p_fixed")
     if gc.swb_saw_q is not None and "jphi_saw" not in _swb_params():
         p.append("swb_saw_q: this OpenFUSIONToolkit's solve_with_bootstrap lacks jphi_saw")
+    if gc.swb_saw_axis_flatten is not None and getattr(
+            config.source, "sawteeth_in_ohmic", False):
+        p.append("swb_saw_axis_flatten with ImasSource.sawteeth_in_ohmic: no sawteeth "
+                 "share to carry the change")
     return p
 
 

@@ -705,6 +705,8 @@ class Bouquet:
                 raise ValueError('imas_baseline="swb" refuses: ' + "; ".join(_p))
         elif self.config.generation.swb_saw_q is not None:
             raise ValueError('swb_saw_q needs imas_baseline="swb"')
+        elif self.config.generation.swb_saw_axis_flatten is not None:
+            raise ValueError('swb_saw_axis_flatten needs imas_baseline="swb"')
         self.baseline = resolve_baseline(self.config, self.mygs)
 
         # IMAS path: read_imas_baseline does no GS solve, so establish a converged
@@ -2994,6 +2996,33 @@ class Bouquet:
         bl.swb_seed_profile, bl.swb_jphi_fixed, bl.swb_jphi_saw = \
             coords.swb_source_seed(psi_N, j_ind, j_fix, j_st)
 
+    def _swb_axis_flatten(self):
+        """``GenerationConfig.swb_saw_axis_flatten``: flatten the source's near-axis
+        sub-grid current into its sawteeth share (:mod:`bouquet.axis_subgrid`)
+        before the SWB split.  Returns the ``ip_closure`` record, or None (off)."""
+        from . import axis_subgrid as AS
+        gc, bl = self.config.generation, self.baseline
+        spec = getattr(gc, "swb_saw_axis_flatten", None)
+        if spec is None:
+            return None
+        mygs, bnd = getattr(self, "mygs", None), getattr(self, "_boundary_RZ", None)
+        rho_res = None
+        if getattr(mygs, "r", None) is not None and bnd is not None:
+            rho_res = AS.mesh_axis_rho(mygs.r, mygs.lc, bnd,
+                                       n_cells=float(gc.swb_saw_axis_flatten_cells))
+        elif spec == "auto":
+            raise RuntimeError('swb_saw_axis_flatten="auto" needs the mesh and LCFS')
+        rec = AS.flatten_baseline_saw(bl, spec, rho_res=rho_res)
+        cut = rec["saw_axis_rho_cut"]
+        print(f"[imas swb] axis flatten ({spec}): rho_res "
+              f"{'-' if rho_res is None else f'{rho_res:.4f}'}, "
+              + ("nothing to flatten" if cut is None else
+                 f"cut rho {cut:.4f} ({rec['saw_axis_cut_over_res'] or 0:.2f}x), "
+                 f"{rec['saw_axis_n_extrema']} extrema, moved "
+                 f"{rec['saw_axis_moved_frac']:.2e} of the current (enclosed change "
+                 f"{rec['saw_axis_enclosed_change']:+.1e})"))
+        return rec
+
     def _swb_saw_kwargs(self):
         """``solve_with_bootstrap`` sawtooth-reset arguments; empty when
         ``swb_saw_q`` is None."""
@@ -3097,6 +3126,7 @@ class Bouquet:
         psi_N = np.asarray(bl.psi_N, dtype=float)
         if not np.array_equal(coords.swb_grid(psi_N), psi_N):
             raise RuntimeError('imas_baseline="swb" needs SWB on the run grid')
+        flat_rec = self._swb_axis_flatten()
         self._swb_source_split(psi_N)
         j_phi_src = np.asarray(bl.j_phi, dtype=float).copy()
         kin = self._swb_baseline_kinetics()
@@ -3137,6 +3167,8 @@ class Bouquet:
             coil_B_minus_A_worst=_worst,
             closure_limited=not (0.5 <= st_b["alpha"] <= 2.0),
             fuse_total_peak=float(np.max(np.abs(j_phi_src))))
+        if flat_rec:
+            bl.ip_closure.update(flat_rec)
         if bl.j_saw is not None:
             bl.ip_closure.update(saw_q_s=float(self.config.generation.swb_saw_q),
                                  saw_rho_m=st_b["saw_rho_m"],
@@ -3935,6 +3967,10 @@ class Bouquet:
                 "swb_saw_q": gc.swb_saw_q,
                 "swb_saw_rho_m": _ic.get("saw_rho_m"),
                 "swb_saw_n_dips": _ic.get("saw_n_dips"),
+                "swb_saw_axis_rho_cut": _ic.get("saw_axis_rho_cut"),
+                "swb_saw_axis_moved_frac": _ic.get("saw_axis_moved_frac"),
+                "swb_saw_axis_rho_res": _ic.get("saw_axis_rho_res"),
+                "swb_saw_axis_cut_over_res": _ic.get("saw_axis_cut_over_res"),
                 "swb_j_saw": bl.j_saw,
                 "swb_jphi_saw": bl.swb_jphi_saw})
         # Outside the capture: failed solves are caught by the draw path, so
