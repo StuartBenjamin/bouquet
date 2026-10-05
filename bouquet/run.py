@@ -344,6 +344,8 @@ class Bouquet:
         mesh_pts, mesh_lc, mesh_reg, coil_dict, cond_dict = load_gs_mesh(sc.mesh_path)
         mygs.setup_mesh(mesh_pts, mesh_lc, mesh_reg)
         mygs.setup_regions(cond_dict=cond_dict, coil_dict=coil_dict)
+        # the FE elements (mygs.r / lc become the order-refined plotting mesh)
+        self._mesh_cells = (mesh_pts, mesh_lc)
 
         # F0 and reference LCFS boundary come from the g-file (reconstruction)
         # or the IDS vacuum_toroidal_field + boundary outline (IMAS).
@@ -3005,10 +3007,10 @@ class Bouquet:
         spec = getattr(gc, "swb_saw_axis_flatten", None)
         if spec is None:
             return None
-        mygs, bnd = getattr(self, "mygs", None), getattr(self, "_boundary_RZ", None)
+        cells, bnd = getattr(self, "_mesh_cells", None), getattr(self, "_boundary_RZ", None)
         rho_res = None
-        if getattr(mygs, "r", None) is not None and bnd is not None:
-            rho_res = AS.mesh_axis_rho(mygs.r, mygs.lc, bnd,
+        if cells is not None and bnd is not None:
+            rho_res = AS.mesh_axis_rho(*cells, bnd,
                                        n_cells=float(gc.swb_saw_axis_flatten_cells))
         elif spec == "auto":
             raise RuntimeError('swb_saw_axis_flatten="auto" needs the mesh and LCFS')

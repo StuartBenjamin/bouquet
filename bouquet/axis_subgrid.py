@@ -83,7 +83,8 @@ def mesh_axis_rho(r, lc, boundary_RZ, n_cells=N_CELLS, core=0.3):
     ``sqrt(n_cells * a_cell / A_lcfs)``: ``a_cell`` the median area of the
     cells whose centroid lies inside the LCFS polygon ``boundary_RZ`` shrunk
     by ``core`` about its centroid (the core resolution), ``A_lcfs`` the
-    polygon's area.  Phi_N ~ enclosed area to O(epsilon).
+    polygon's area.  Phi_N ~ enclosed area to O(epsilon).  ``r, lc`` are the FE
+    elements as loaded, not TokaMaker's order-refined ``mygs.r / lc``.
     """
     from matplotlib.path import Path
     r = np.asarray(r, dtype=float)[:, :2]

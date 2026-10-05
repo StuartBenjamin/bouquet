@@ -266,7 +266,7 @@ class TestPreparePath:
         ns = _wiggly_run(swb_saw_q=1.025, swb_saw_axis_flatten="auto",
                          swb_saw_axis_flatten_cells=40.0)
         r, lc, a_cell = _square_mesh()
-        ns.mygs.r, ns.mygs.lc = r, lc
+        ns._mesh_cells = (r, lc)
         th = np.linspace(0.0, 2 * np.pi, 200, endpoint=False)
         ns._boundary_RZ = np.c_[0.3 * np.cos(th), 0.45 * np.sin(th)]
         ns._swb_imas_baseline()
