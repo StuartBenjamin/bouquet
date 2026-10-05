@@ -56,7 +56,27 @@ in force is approved.
   `Baseline.sawtooth` the engine's q0-row admission on the same sources.
   Dds whose sawteeth entry is on the full time base, or that have none (the
   shipped example), read the same values as before. The NBI read just above
-  it keeps its list-index rule (not part of this change).
+  it was fixed the same way afterwards (next item).
+- **Legacy IMAS reader: each NBI entry is read at the slice TIME** (the same
+  defect, the same rule as the sawteeth entry above; owner-approved
+  2026-10-05). The beam current `Baseline.j_NBI` summed the `core_sources`
+  NBI entries (identifier 2) at their LIST index (`pr[isrc]`, or `pr[0]` past
+  the end of a short entry). Now an entry carrying per-slice times is matched
+  by time to the core_sources slice time; at a time it does not cover it
+  carries no current at that slice (a `UserWarning` says so); an entry with
+  no per-slice time and a different slice count is refused (`ValueError`,
+  "cannot be aligned"). **What moves for existing users:** only dds whose
+  NBI entry's own slice times are not the core_sources time base -- an entry
+  that starts late (before its start: no beam current instead of the next
+  slice's; afterwards its own slice instead of one late; past a short
+  entry's end no longer its first slice) or one written on another grid
+  (e.g. the core_profiles times where those differ from core_sources': now
+  matched, or warned and zero where nothing matches). There `j_NBI` changes,
+  and with it the legacy path's fixed beam current, the inductive residual
+  and every draw built on them. An NBI entry with no per-slice time and a
+  different slice count is now refused. Dds whose NBI entries are on the full
+  core_sources time base, with or without per-slice times (the shipped
+  example), read the same values as before, bit for bit.
 - **Engine: `isolate_edge_jBS` and `perturb_jind_in_anchor` are refused
   under `reconstruction_engine="unified"`** when not at their defaults (the
   rule and message of the other unread legacy settings); the engine never

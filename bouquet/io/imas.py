@@ -870,15 +870,34 @@ def read_imas_baseline(
     j_BS = to_toroidal(j_boot)
 
     # --- NBI: sum beam-source parallel currents, then convert ---
+    # Each beam entry is read at the core_sources slice TIME, not at its list
+    # index (owner-approved 2026-10-05, the sawteeth entry's rule below and
+    # the engine IDS adapter's): an entry carrying its own per-slice times is
+    # matched by time -- one that starts later than the IDS time base was
+    # read one slice late, and a slice past its end from its FIRST slice; at
+    # a time the entry does not cover it carries no current at this slice
+    # (warned); one without per-slice times must have the IDS's slice count,
+    # or it cannot be aligned and is refused.
     src_ids = dd.get("core_sources", {})
     isrc = _nearest_index(src_ids["time"], T, "core_sources") if src_ids.get("time") else ic
+    _src_tb = src_ids.get("time")
+    _src_nt = None if not _src_tb else len(_src_tb)
+    _src_t = (None if not _src_tb
+              else float(np.asarray(_src_tb, dtype=float)[isrc]))
     jnbi_par = np.zeros(n)
     for s in src_ids.get("source", []):
         if s.get("identifier", {}).get("index") == NBI_SOURCE_INDEX:
             pr = s.get("profiles_1d", [])
             if pr:
-                idx = isrc if len(pr) > isrc else 0
-                jnbi_par = jnbi_par + np.asarray(pr[idx]["j_parallel"], dtype=float)
+                q_nbi, how = _source_slice_at(s, isrc, _src_t, _src_nt)
+                if q_nbi is None:
+                    import warnings
+                    warnings.warn(
+                        "IMAS reader: core_sources NBI entry "
+                        f"{(s.get('identifier') or {}).get('name')!r} has "
+                        f"{how}: it carries no current at this slice")
+                    continue
+                jnbi_par = jnbi_par + np.asarray(q_nbi["j_parallel"], dtype=float)
     j_NBI = to_toroidal(cur_sign * jnbi_par)
     j_RF = np.zeros(n)   # never computed internally; user-supplied only
 
@@ -893,10 +912,6 @@ def read_imas_baseline(
     # slice late, and at the last slice from its FIRST slice.
     sawtooth = {"source_index": SAWTOOTH_SOURCE_INDEX, "present": False,
                 "j_par_max_abs": 0.0, "active": False, "q0_dd": None}
-    _src_tb = src_ids.get("time")
-    _src_nt = None if not _src_tb else len(_src_tb)
-    _src_t = (None if not _src_tb
-              else float(np.asarray(_src_tb, dtype=float)[isrc]))
     for s in src_ids.get("source", []):
         if s.get("identifier", {}).get("index") == SAWTOOTH_SOURCE_INDEX:
             sawtooth["present"] = True
