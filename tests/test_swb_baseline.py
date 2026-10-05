@@ -205,3 +205,78 @@ def test_stamp_group_attrs(tmp_path):
         assert [n.decode() for n in b["coil_reg_target_names"]] == ["F1A", "F6A"]
         assert list(b["coil_reg_target_values"]) == [2.0, -1.0]
         assert hf["scan/k/3"].attrs["swb_alpha"] == 0.99
+
+
+@pytest.mark.parametrize("taper, saw", [(False, False), (True, False), (True, True)])
+def test_edge_taper_keeps_the_channel_split(monkeypatch, swb_oft, taper, saw):
+    """taper_edge_jBS tapers SWB's fixed current too: the baseline channels must
+    follow, so j_phi = j_inductive + j_BS + j_NBI + j_RF + j_other holds (with the
+    saw: j_other - j_sawteeth + j_saw)."""
+    x = coords.swb_grid(np.linspace(0.0, 1.0, 33))
+    j_ind, j_bs = 1e6 * (1 - x ** 2) + 2e4, 5e4 * x ** 4
+    j_nbi, j_rf, j_oth = 2e5 * (1 - x) + 1e3, 4e4 * np.exp(-((x - .3) / .1) ** 2), 3e5 * (x < .3)
+    j_st = 1e5 * (1 - x) ** 2 if saw else None     # sawteeth share of j_other
+    if saw:
+        j_oth = j_oth + j_st
+    if saw:
+        monkeypatch.setattr(coords, "_swb_params",
+                            lambda: frozenset({"x", "jphi_fixed", "p_fixed", "jphi_saw"}))
+    fac = np.clip((1.0 - x) / 0.05, 0.0, 1.0) if taper else np.ones_like(x)
+    bl = types.SimpleNamespace(psi_N=x, j_inductive=j_ind, j_BS=j_bs, j_NBI=j_nbi, j_RF=j_rf,
+                               j_other=j_oth, j_sawteeth=j_st,
+                               j_phi=j_ind + j_bs + j_nbi + j_rf + j_oth, li_metrics={})
+    gen = types.SimpleNamespace(bootstrap_kwargs={}, swb_saw_q=1.1 if saw else None,
+                                swb_edge_taper_psi0=0.999 if taper else None)
+    dj_saw = 1e4 * np.sin(np.pi * x / 0.4) * (x < 0.4)
+
+    def solve(kin, seed, coil_reg_target=None):
+        jf = np.asarray(bl.swb_jphi_fixed) * fac
+        ji = 1.02 * np.asarray(seed) * fac
+        res = dict(j_inductive=ji, isolated_j_BS=j_bs * fac, j_fixed=jf,
+                   total_j_phi=ji + j_bs * fac + jf)
+        if saw:
+            res["j_saw"] = np.asarray(bl.swb_jphi_saw) * fac + dj_saw
+            res["total_j_phi"] = res["total_j_phi"] + res["j_saw"]
+        return res
+
+    def state(res, seed, psi_pad=1e-3):
+        st = dict(alpha=1.02, coils={"F1A": 1.0}, lcfs=None, li_3=0.9, Ip=1e6,
+                  j_inductive=res["j_inductive"], j_BS=res["isolated_j_BS"],
+                  j_phi=res["total_j_phi"], j_fixed=res["j_fixed"])
+        if saw:
+            st.update(j_saw=res["j_saw"], saw_rho_m=0.4, saw_n_dips=1)
+        return st
+    ns = types.SimpleNamespace(baseline=bl, config=types.SimpleNamespace(generation=gen),
+                               _swb_baseline_kinetics=lambda: {}, _swb_solve=solve,
+                               _swb_state=state, _finish_imas_baseline=lambda its: None)
+    ns._swb_source_split = lambda psi_N: Bouquet._swb_source_split(ns, psi_N)
+    Bouquet._swb_imas_baseline(ns)
+    total = bl.j_inductive + bl.j_BS + bl.j_NBI + bl.j_RF + bl.j_other
+    if saw:
+        total = total - bl.j_sawteeth + bl.j_saw
+        assert np.allclose(bl.j_sawteeth, j_st * fac, rtol=1e-12, atol=1e-6)
+    assert np.max(np.abs(total - bl.j_phi)) <= 1e-9 * np.max(np.abs(bl.j_phi))
+    assert np.allclose(bl.swb_jphi_fixed + (j_st if saw else 0.0), j_nbi + j_rf + j_oth,
+                       rtol=1e-12, atol=1e-6)  # draws: untapered
+    assert np.allclose(bl.j_NBI, j_nbi * fac, rtol=1e-12, atol=1e-6)
+    assert np.array_equal(bl.j_other[fac == 1.0], j_oth[fac == 1.0])   # untapered: untouched
+
+
+def test_edge_taper_is_the_swb_default(swb_oft):
+    from bouquet.config import swb_bootstrap_kwargs
+    gc = _cfg().generation
+    assert gc.swb_edge_taper_psi0 == 0.999
+    gc.bootstrap_kwargs = {"diagnose_bs": True}
+    assert swb_bootstrap_kwargs(gc) == {"diagnose_bs": True, "taper_edge_jBS": True,
+                                        "taper_edge_psi0": 0.999}
+    assert gc.bootstrap_kwargs == {"diagnose_bs": True}          # not mutated
+    gc.swb_edge_taper_psi0 = None
+    assert swb_bootstrap_kwargs(gc) == {"diagnose_bs": True}
+
+
+@pytest.mark.parametrize("gen, word", [
+    (dict(bootstrap_kwargs={"taper_edge_jBS": True}), "swb_edge_taper_psi0 instead"),
+    (dict(swb_edge_taper_psi0=1.0), "must be in (0, 1)"),
+])
+def test_edge_taper_refusals(swb_oft, gen, word):
+    assert any(word in m for m in swb_config_problems(_cfg(**gen)))

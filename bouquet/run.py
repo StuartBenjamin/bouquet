@@ -44,6 +44,9 @@ from . import coords
 SWB_IP_TOL = 5e-3
 #: solve_with_bootstrap outputs of the sawtooth reset (GenerationConfig.swb_saw_q).
 _SWB_SAW_KEYS = ("j_saw", "saw_rho_m", "saw_n_dips")
+# swb draw-loop maxits cap: converged rt66 draws took <= 44 its; a stuck one (a 2-cycle just above
+# nl_tol) ran all 800 for ~27 min. Past it, DrawSolveGuard's loose-tol rescue applies as off swb.
+SWB_DRAW_MAXITS = 100
 
 
 class Bouquet:
@@ -3019,6 +3022,7 @@ class Bouquet:
         import numpy as np
         from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
         from .TokaMaker_interface import strong_coil_reg
+        from .config import swb_bootstrap_kwargs
         bl, mygs, gc = self.baseline, self.mygs, self.config.generation
         psi_N = np.asarray(bl.psi_N, dtype=float)
         self._reset_solver_state()
@@ -3037,7 +3041,7 @@ class Bouquet:
             jphi_fixed=bl.swb_jphi_fixed, p_fixed=kin["p_fixed"],
             **saw_kw,
             **coords.swb_grid_kwargs(psi_N, getattr(bl, "coord", coords.PSI)),
-            **gc.bootstrap_kwargs)
+            **swb_bootstrap_kwargs(gc))
         if not saw_kw:      # saw off: no saw outputs, whatever the toolkit returns
             res = {k: v for k, v in res.items() if k not in _SWB_SAW_KEYS}
         # SWB can return (GS residual converged) on a wrong equilibrium once alpha
@@ -3066,7 +3070,9 @@ class Bouquet:
             Ip=float(mygs.get_globals()[0]),
             j_inductive=j_ind,
             j_BS=np.asarray(res["isolated_j_BS"], dtype=float),
-            j_phi=np.asarray(res["total_j_phi"], dtype=float))
+            j_phi=np.asarray(res["total_j_phi"], dtype=float),
+            j_fixed=(None if res.get("j_fixed") is None
+                     else np.asarray(res["j_fixed"], dtype=float)))
         if res.get("j_saw") is not None:
             st.update(j_saw=np.asarray(res["j_saw"], dtype=float),
                       saw_rho_m=float(res["saw_rho_m"]),
@@ -3106,6 +3112,17 @@ class Bouquet:
         bl.j_BS = st_b["j_BS"]
         bl.j_phi = st_b["j_phi"]
         bl.j_saw = st_b.get("j_saw")
+        # taper_edge_jBS also tapers the fixed current: carry the same factor onto the
+        # channels so j_phi = j_inductive + j_BS + j_NBI + j_RF + j_other still holds
+        jf_in = np.asarray(bl.swb_jphi_fixed, dtype=float)
+        if (self.config.generation.swb_edge_taper_psi0 is not None
+                and st_b["j_fixed"] is not None):
+            f = np.where(np.abs(jf_in) > 0.0,
+                         st_b["j_fixed"] / np.where(jf_in != 0.0, jf_in, 1.0), 1.0)
+            f = np.where(np.abs(f - 1.0) > 1e-9, f, 1.0)   # untapered nodes stay bit-identical
+            for name in ("j_NBI", "j_RF", "j_other", "j_sawteeth"):
+                if getattr(bl, name, None) is not None:
+                    setattr(bl, name, f * np.asarray(getattr(bl, name), dtype=float))
         bl.j_BS_smoothed = smooth_jbs_transition(st_b["j_BS"])   # diagnostic only
         bl.ohm_scale, bl.bs_scale = st_b["alpha"], 1.0
         bl.bs_scale_profile = None
@@ -3782,10 +3799,11 @@ class Bouquet:
         verbose = bool(getattr(self.config, "verbose", False))
         # Draw-loop maxits cap + failed-solve record (DrawSolveGuard).
         with capture_native_output(enabled=not verbose) as _cap, \
-                DrawSolveGuard(self.mygs, None if _swb else gc.draw_solve_maxits,
-                               retry_urf=() if _swb else gc.draw_solve_retry_urf,
-                               loose_tol=None if _swb else gc.draw_solve_loose_tol
-                               ) as _solve_guard:
+                DrawSolveGuard(self.mygs,
+                               max(SWB_DRAW_MAXITS, gc.draw_solve_maxits or 0) if _swb
+                               else gc.draw_solve_maxits,
+                               retry_urf=gc.draw_solve_retry_urf,
+                               loose_tol=gc.draw_solve_loose_tol) as _solve_guard:
             self.diagnostics = generate_bouquet(
                 self.mygs, np.asarray(bl.psi_N, dtype=float), n_equils, header,
                 np.asarray(bl.j_phi, dtype=float),
