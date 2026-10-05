@@ -255,6 +255,22 @@ def replay(tmp_path_factory):
     _gen_golden = load_config(_GOLDEN, scan_key=0).generation
     run.config.generation.jbs_self_consistent = bool(
         _gen_golden.jbs_self_consistent)
+    # ... and on the pressure frame the golden was GENERATED with (its own
+    # stored config; a fixture that predates the setting back-fills
+    # "legacy"): the reconstruction through the copied config field, and
+    # every functional generate_bouquet call of _run below through the
+    # resolved settings -- without them those calls would take
+    # EdgePressure()'s default, not the golden's.  A test change only:
+    # like-for-like replay, no bar moves (owner-approved 2026-10-05).
+    from bouquet.edge_pressure import resolve_edge_pressure
+    run.config.generation.separatrix_pressure = str(
+        _gen_golden.separatrix_pressure)
+    _edge_golden = resolve_edge_pressure(_gen_golden)
+    assert resolve_edge_pressure(run.config.generation) == _edge_golden, (
+        "the replay's reconstruction would not run on the golden's edge-"
+        f"pressure settings: {resolve_edge_pressure(run.config.generation)}"
+        f" vs the golden's {_edge_golden}")
+    print(f"[replay] edge pressure (the golden's own): {_edge_golden}")
     _jbs_draw = jbs_settings(_gen_golden, draw=True)
     _jbs_draw = _jbs_draw if _jbs_draw["enabled"] else None
     run.reconstruct()
@@ -342,6 +358,7 @@ def replay(tmp_path_factory):
             inspec_F_max=0.02, inspec_VSC_max=0.02, p_thresh=0.05,
             save_truncate_eq=True, jphi_baseline=True, seed=12345,
             pin_jphi=pin_jphi, jbs_loop=_jbs_draw,
+            edge_pressure=_edge_golden,
             **model,
         )
         with h5py.File(header + ".h5", "r") as hf:
