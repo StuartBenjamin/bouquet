@@ -1032,7 +1032,9 @@ class GenerationConfig:
     # onto OFT's saw_dq / saw_tol (freeze on relative j_saw change) /
     # saw_ramp (q deficit the reset weight ramps over; 0 = hard trigger) /
     # saw_rule (dip that sets the reset: 1 outermost, 2 innermost,
-    # 3 outermost deeper than saw_ramp).  saw_relax goes via bootstrap_kwargs.
+    # 3 outermost deeper than saw_ramp, 4 depth-weighted blend of all dips,
+    # continuous).  saw_relax goes via bootstrap_kwargs.  OFT resets saw_q_s
+    # to 0 on any solve that does not pass it, so saw off passes nothing.
     swb_saw_q: Optional[float] = None
     swb_saw_dq: float = 0.03
     swb_saw_tol: float = 1.0e-4
@@ -1120,8 +1122,8 @@ class GenerationConfig:
                 f"imas_baseline={self.imas_baseline!r} not in ('closure', 'swb')")
         if self.swb_saw_q is not None and not float(self.swb_saw_q) > 0.0:
             raise ValueError(f"swb_saw_q={self.swb_saw_q!r}: must be > 0 (None = off)")
-        if self.swb_saw_rule not in (1, 2, 3):
-            raise ValueError(f"swb_saw_rule={self.swb_saw_rule!r} not in (1, 2, 3)")
+        if self.swb_saw_rule not in (1, 2, 3, 4):
+            raise ValueError(f"swb_saw_rule={self.swb_saw_rule!r} not in (1, 2, 3, 4)")
         validate_bootstrap_kwargs(
             self.bootstrap_kwargs,
             self._RESERVED | self._SAW_RESERVED

@@ -46,10 +46,14 @@ class TestConfig:
             == (0.03, 1e-4, 0.01, 1)
 
     @pytest.mark.parametrize("kw", [dict(swb_saw_q=0.0), dict(swb_saw_q=-1.0),
-                                    dict(swb_saw_rule=4)])
+                                    dict(swb_saw_rule=0), dict(swb_saw_rule=5)])
     def test_bad_values_refused(self, kw):
         with pytest.raises(ValueError, match=next(iter(kw))):
             GenerationConfig(imas_baseline="swb", **kw)
+
+    @pytest.mark.parametrize("rule", [1, 2, 3, 4])
+    def test_rules_accepted(self, rule):
+        assert GenerationConfig(imas_baseline="swb", swb_saw_rule=rule).swb_saw_rule == rule
 
     @pytest.mark.parametrize("key", sorted(SAW_ARGS))
     def test_saw_kwargs_reserved(self, key):
