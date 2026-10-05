@@ -1025,6 +1025,12 @@ class GenerationConfig:
     # B within 0.23 % / 0.4 mm of A; 1e4 (generate_bouquet's jphi-linterp value)
     # sends SWB to a wrong equilibrium (Ip +7 %, LCFS 50 mm).
     swb_coil_reg_weight: float = 1.0e3
+    # imas_baseline="swb": taper j_phi (inductive, bootstrap and fixed) to 0 from this psi_N
+    # to the LCFS in every SWB solve (OFT taper_edge_jBS); None: off. Finite current at the
+    # LCFS next to a near-degenerate second null leaves the free-boundary Picard on a
+    # 2-cycle (DIII-D 170113 t=3.124: 4.5 % of peak at the LCFS, maxits); 0.999 converges
+    # it and moves alpha / li_3 by < 5e-4.
+    swb_edge_taper_psi0: Optional[float] = 0.999
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single
@@ -1180,6 +1186,11 @@ def swb_config_problems(config):
         p.append(f"nthreads={sc.nthreads} (sigma=0 exactness needs 1)")
     if gc.bootstrap_kwargs.get("use_python_solve"):
         p.append("bootstrap_kwargs use_python_solve (needs the Fortran SWB)")
+    if {"taper_edge_jBS", "taper_edge_psi0"} & set(gc.bootstrap_kwargs):
+        p.append("bootstrap_kwargs taper_edge_*: set swb_edge_taper_psi0 instead")
+    t = gc.swb_edge_taper_psi0
+    if t is not None and not 0.0 < float(t) < 1.0:
+        p.append(f"swb_edge_taper_psi0={t!r} must be in (0, 1) or None")
     for env in ("DIFF_BS", "PIN_JPHI"):
         if os.environ.get(env, "0") == "1":
             p.append(f"{env}=1")
@@ -1187,6 +1198,15 @@ def swb_config_problems(config):
     if not _swb_grid_arg() or not {"jphi_fixed", "p_fixed"} <= _swb_params():
         p.append("this OpenFUSIONToolkit's solve_with_bootstrap lacks x/jphi_fixed/p_fixed")
     return p
+
+
+def swb_bootstrap_kwargs(gc):
+    """``bootstrap_kwargs`` for an ``imas_baseline="swb"`` solve: the user's, plus the
+    edge taper from ``swb_edge_taper_psi0``."""
+    kw = dict(gc.bootstrap_kwargs)
+    if gc.swb_edge_taper_psi0 is not None:
+        kw.update(taper_edge_jBS=True, taper_edge_psi0=float(gc.swb_edge_taper_psi0))
+    return kw
 
 
 def validate_bootstrap_kwargs(bootstrap_kwargs, reserved, known=None):

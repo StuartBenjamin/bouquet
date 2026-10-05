@@ -218,7 +218,7 @@ def test_edge_taper_keeps_the_channel_split(monkeypatch, swb_oft, taper):
     bl = types.SimpleNamespace(psi_N=x, j_inductive=j_ind, j_BS=j_bs, j_NBI=j_nbi, j_RF=j_rf,
                                j_other=j_oth, j_phi=j_ind + j_bs + j_nbi + j_rf + j_oth,
                                li_metrics={})
-    gen = types.SimpleNamespace(bootstrap_kwargs={"taper_edge_jBS": True} if taper else {})
+    gen = types.SimpleNamespace(bootstrap_kwargs={}, swb_edge_taper_psi0=0.999 if taper else None)
 
     def solve(kin, seed, coil_reg_target=None):
         jf = np.asarray(bl.swb_jphi_fixed) * fac
@@ -239,3 +239,23 @@ def test_edge_taper_keeps_the_channel_split(monkeypatch, swb_oft, taper):
     assert np.allclose(bl.swb_jphi_fixed, j_nbi + j_rf + j_oth, rtol=1e-12, atol=1e-6)  # draws: untapered
     assert np.allclose(bl.j_NBI, j_nbi * fac, rtol=1e-12, atol=1e-6)
     assert np.array_equal(bl.j_other[fac == 1.0], j_oth[fac == 1.0])   # untapered: untouched
+
+
+def test_edge_taper_is_the_swb_default(swb_oft):
+    from bouquet.config import swb_bootstrap_kwargs
+    gc = _cfg().generation
+    assert gc.swb_edge_taper_psi0 == 0.999
+    gc.bootstrap_kwargs = {"diagnose_bs": True}
+    assert swb_bootstrap_kwargs(gc) == {"diagnose_bs": True, "taper_edge_jBS": True,
+                                        "taper_edge_psi0": 0.999}
+    assert gc.bootstrap_kwargs == {"diagnose_bs": True}          # not mutated
+    gc.swb_edge_taper_psi0 = None
+    assert swb_bootstrap_kwargs(gc) == {"diagnose_bs": True}
+
+
+@pytest.mark.parametrize("gen, word", [
+    (dict(bootstrap_kwargs={"taper_edge_jBS": True}), "swb_edge_taper_psi0 instead"),
+    (dict(swb_edge_taper_psi0=1.0), "must be in (0, 1)"),
+])
+def test_edge_taper_refusals(swb_oft, gen, word):
+    assert any(word in m for m in swb_config_problems(_cfg(**gen)))

@@ -2987,6 +2987,7 @@ class Bouquet:
         import numpy as np
         from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
         from .TokaMaker_interface import strong_coil_reg
+        from .config import swb_bootstrap_kwargs
         bl, mygs, gc = self.baseline, self.mygs, self.config.generation
         psi_N = np.asarray(bl.psi_N, dtype=float)
         self._reset_solver_state()
@@ -3003,7 +3004,7 @@ class Bouquet:
             diagnostic_plots=False, verbose=False,
             jphi_fixed=bl.swb_jphi_fixed, p_fixed=kin["p_fixed"],
             **coords.swb_grid_kwargs(psi_N, getattr(bl, "coord", coords.PSI)),
-            **gc.bootstrap_kwargs)
+            **swb_bootstrap_kwargs(gc))
         # SWB can return (GS residual converged) on a wrong equilibrium once alpha
         # has frozen and the shape keeps moving: refuse it rather than archive it.
         ip = abs(float(mygs.get_globals()[0]))
@@ -3069,7 +3070,7 @@ class Bouquet:
         # taper_edge_jBS also tapers the fixed current: carry the same factor onto the
         # channels so j_phi = j_inductive + j_BS + j_NBI + j_RF + j_other still holds
         jf_in = np.asarray(bl.swb_jphi_fixed, dtype=float)
-        if (self.config.generation.bootstrap_kwargs.get("taper_edge_jBS")
+        if (self.config.generation.swb_edge_taper_psi0 is not None
                 and st_b["j_fixed"] is not None):
             f = np.where(np.abs(jf_in) > 0.0,
                          st_b["j_fixed"] / np.where(jf_in != 0.0, jf_in, 1.0), 1.0)
