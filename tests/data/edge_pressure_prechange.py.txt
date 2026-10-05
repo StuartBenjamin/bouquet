@@ -13,6 +13,11 @@ axis target or a solve):
     residual survive a failed solve (``None``) instead of raising TypeError;
   - ``_forward_solve_imas_baseline``: the ``source_current_sign_origin``
     stamp in the ip_closure record and in the metrics record.
+RE-BASED a second time (2026-10-05), by the hunks of one further defect fix of
+the LEGACY code: ``reconstruct_equilibrium``'s l_i secant, after a FAILED
+last solve, hands on the inductive factor of the last good state it restores
+(and restores that state's profile) instead of the failed factor.  It changes
+only runs in which a secant solve failed.
 The comparison this file serves is unchanged: the current functions with the
 helper written back inline must still equal it exactly.
 """
@@ -2743,11 +2748,16 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         ind_0, li_0 = 1.0, eq_stats_0['l_i']
         _save_psi()
         _update_bracket(ind_0, li_0)
+        # the (ind_factor, l_i) of the state _last_good_psi holds: a failed
+        # solve restores that psi, so it is also the inductive factor the
+        # restored state was solved with
+        _good = (ind_0, li_0)
 
         ind_1 = 1.05
         li_1_sec = _solve_and_get_li(ind_1)
         if li_1_sec is not None:
             _update_bracket(ind_1, li_1_sec)
+            _good = (ind_1, li_1_sec)
 
         print(f"[li match] target={li_target:.6f}  [estimator: li(3)/'iter']")
         print(f"[li match] iter 0: ind_factor={ind_0:.6f}  li={li_0:.6f}  err={li_0 - li_target:.6f}")
@@ -2809,11 +2819,15 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                     ind_new = ind_clamped
 
             # -- evaluate ---------------------------------------------------
-            ind_0, li_0 = ind_1, li_1_sec if li_1_sec is not None else li_0
+            # the secant's previous point is the last GOOD evaluation: a
+            # failed ind_1 has no l_i of its own and is never paired with
+            # another point's l_i
+            ind_0, li_0 = _good
             ind_1 = ind_new
             li_1_sec = _solve_and_get_li(ind_1)
             if li_1_sec is not None:
                 _update_bracket(ind_1, li_1_sec)
+                _good = (ind_1, li_1_sec)
 
             li_disp = f"{li_1_sec:.6f}" if li_1_sec is not None else "FAILED"
             err_disp = (f"{li_1_sec - li_target:.6f}"
@@ -2824,8 +2838,19 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
             print(f"[li match] WARNING: did not converge within "
                   f"{max_li_iters} iterations")
 
-        # Ensure the final state is from a converged solve
+        # Ensure the final state is from a converged solve.  The last solve
+        # failed: the solver goes back to the last good psi AND to the
+        # profile that psi was solved with, and the inductive factor handed
+        # on is that state's -- never the failed one, whose l_i was never
+        # achieved.
         if li_1_sec is None:
+            ind_1, li_1_sec = _good
+            print(f"[li match] last secant solve FAILED: restoring the last "
+                  f"good state ind_factor={ind_1:.6f}  li={li_1_sec:.6f}")
+            mygs.set_profiles(ffp_prof={
+                "type": "jphi-linterp",
+                "y": ind_1 * j_inductive_fit + j_BS_isolated,
+                "x": eqdsk.psi_N}, pp_prof=pp_prof)
             _restore_psi()
 
         _eq_stats_final = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)
