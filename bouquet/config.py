@@ -484,6 +484,9 @@ class UncertaintyConfig:
     aux_length_scales: dict = field(default_factory=dict)  # {name: GPR length} (default 0.4)
 
 
+#: GenerationConfig.swb_saw_rule -> OFT boot_ops saw_rule.
+SWB_SAW_RULES = {"fuse": 1, "local": 2}
+
 # ---------------------------------------------------------------------------
 # Generation + filtering
 # ---------------------------------------------------------------------------
@@ -1037,15 +1040,16 @@ class GenerationConfig:
     # inside the mixing radius (q_base = swb_saw_q + swb_saw_dq).  The rest map
     # onto OFT's saw_dq / saw_tol (freeze on relative j_saw change) /
     # saw_ramp (q deficit the reset weight ramps over; 0 = hard trigger) /
-    # saw_rule (dip that sets the reset: 1 outermost, 2 innermost,
-    # 3 outermost deeper than saw_ramp, 4 depth-weighted blend of all dips,
-    # continuous).  saw_relax goes via bootstrap_kwargs.  OFT resets saw_q_s
+    # swb_saw_rule -> OFT saw_rule: "local" (2) raises q only in each dip below
+    # swb_saw_q, a shoulder either side, q0 and the rest kept; "fuse" (1) resets
+    # from the axis to the mixing radius (FUSE's saw_crash!).  saw_relax goes via
+    # bootstrap_kwargs.  OFT resets saw_q_s
     # to 0 on any solve that does not pass it, so saw off passes nothing.
     swb_saw_q: Optional[float] = None
     swb_saw_dq: float = 0.03
     swb_saw_tol: float = 1.0e-4
     swb_saw_ramp: float = 0.01
-    swb_saw_rule: int = 1
+    swb_saw_rule: str = "local"
     # imas_baseline="swb": flatten near-axis structure the mesh does not resolve
     # (bouquet.axis_subgrid).  Inside the cut the source total j_phi becomes an
     # axis-regular quadratic in Phi_N (C1, enclosed current kept); the change goes
@@ -1137,8 +1141,8 @@ class GenerationConfig:
                 f"imas_baseline={self.imas_baseline!r} not in ('closure', 'swb')")
         if self.swb_saw_q is not None and not float(self.swb_saw_q) > 0.0:
             raise ValueError(f"swb_saw_q={self.swb_saw_q!r}: must be > 0 (None = off)")
-        if self.swb_saw_rule not in (1, 2, 3, 4):
-            raise ValueError(f"swb_saw_rule={self.swb_saw_rule!r} not in (1, 2, 3, 4)")
+        if self.swb_saw_rule not in SWB_SAW_RULES:
+            raise ValueError(f"swb_saw_rule={self.swb_saw_rule!r} not in {tuple(SWB_SAW_RULES)}")
         f = self.swb_saw_axis_flatten
         if f is not None and f != "auto" and not (
                 isinstance(f, (int, float)) and not isinstance(f, bool) and 0.0 < f < 0.5):

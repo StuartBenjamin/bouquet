@@ -3029,6 +3029,7 @@ class Bouquet:
         """``solve_with_bootstrap`` sawtooth-reset arguments; empty when
         ``swb_saw_q`` is None."""
         import numpy as np
+        from .config import SWB_SAW_RULES
         gc, bl = self.config.generation, self.baseline
         if gc.swb_saw_q is None:
             return {}
@@ -3038,7 +3039,7 @@ class Bouquet:
         return dict(jphi_saw=np.asarray(bl.swb_jphi_saw, dtype=float),
                     saw_q_s=float(gc.swb_saw_q), saw_dq=float(gc.swb_saw_dq),
                     saw_tol=float(gc.swb_saw_tol), saw_ramp=float(gc.swb_saw_ramp),
-                    saw_rule=int(gc.swb_saw_rule))
+                    saw_rule=SWB_SAW_RULES[gc.swb_saw_rule])
 
     def _swb_solve(self, kin, j_seed, coil_reg_target=None):
         """The swb recipe: reset ``mygs`` -> coil reg -> ``init_psi`` from the

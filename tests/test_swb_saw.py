@@ -43,15 +43,15 @@ class TestConfig:
         gc = GenerationConfig()
         assert gc.swb_saw_q is None
         assert (gc.swb_saw_dq, gc.swb_saw_tol, gc.swb_saw_ramp, gc.swb_saw_rule) \
-            == (0.03, 1e-4, 0.01, 1)
+            == (0.03, 1e-4, 0.01, "local")
 
     @pytest.mark.parametrize("kw", [dict(swb_saw_q=0.0), dict(swb_saw_q=-1.0),
-                                    dict(swb_saw_rule=0), dict(swb_saw_rule=5)])
+                                    dict(swb_saw_rule=1), dict(swb_saw_rule="outer")])
     def test_bad_values_refused(self, kw):
         with pytest.raises(ValueError, match=next(iter(kw))):
             GenerationConfig(imas_baseline="swb", **kw)
 
-    @pytest.mark.parametrize("rule", [1, 2, 3, 4])
+    @pytest.mark.parametrize("rule", ["fuse", "local"])
     def test_rules_accepted(self, rule):
         assert GenerationConfig(imas_baseline="swb", swb_saw_rule=rule).swb_saw_rule == rule
 
@@ -72,9 +72,9 @@ class TestConfig:
         assert any("jphi_saw" in m for m in swb_config_problems(_cfg(swb_saw_q=1.025)))
 
     def test_roundtrip(self):
-        cfg = _cfg(swb_saw_q=1.025, swb_saw_rule=2)
+        cfg = _cfg(swb_saw_q=1.025, swb_saw_rule="fuse")
         g2 = BouquetConfig.from_json(cfg.to_json()).generation
-        assert (g2.swb_saw_q, g2.swb_saw_rule) == (1.025, 2)
+        assert (g2.swb_saw_q, g2.swb_saw_rule) == (1.025, "fuse")
 
     def test_closure_path_refuses_saw(self):
         ns = types.SimpleNamespace(
@@ -217,12 +217,12 @@ class TestMockedSWB:
 
     def test_kwargs_on(self, fake_swb):
         ns = _run(swb_saw_q=1.025, swb_saw_dq=0.04, swb_saw_tol=2e-4,
-                  swb_saw_ramp=0.0, swb_saw_rule=3)
+                  swb_saw_ramp=0.0, swb_saw_rule="fuse")
         ns._swb_imas_baseline()
         bl = ns.baseline
         for kw in fake_swb:
             assert {k: kw[k] for k in SAW_ARGS - {"jphi_saw"}} == dict(
-                saw_q_s=1.025, saw_dq=0.04, saw_tol=2e-4, saw_ramp=0.0, saw_rule=3)
+                saw_q_s=1.025, saw_dq=0.04, saw_tol=2e-4, saw_ramp=0.0, saw_rule=1)
             assert np.array_equal(kw["jphi_saw"], bl.swb_jphi_saw)
             assert kw["jphi_fixed"] is bl.swb_jphi_fixed
         np.testing.assert_array_equal(bl.swb_jphi_saw, bl.j_sawteeth)
