@@ -524,9 +524,11 @@ a lost plasma, ...) rejects the draw too, with its own code
 `engine_draw_solve_maxits=None` alike: the state such a failure leaves
 behind is not a converged solve, so an engine draw never goes on from it
 (recorded on `GenerateEngineDraws.rollback_failures`: stage, what triggered
-the rollback -- `saturation` or `failed stage` --, the error). The legacy
-draws keep their pre-existing behaviour there (a printed warning, the draw
-continues).
+the rollback -- `saturation` or `failed stage` --, the error). Legacy
+draws follow the same rule since the owner-approved change of 2026-10-05:
+any failed rollback re-solve (capped by `draw_solve_maxits` or not) rejects
+a legacy draw with `homotopy_rollback_failed` (before, they printed "stats
+may be stale" and went on).
 
 Every capped solve is recorded on `GenerateEngineDraws.cap_events` and
 `Bouquet.engine_draw_cap_events` (draw, stage, `iterations` = the cap,

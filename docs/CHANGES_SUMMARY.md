@@ -1,5 +1,17 @@
 # Bouquet — change summaries
 
+## Unreleased — owner-approved decisions (2026-10-05)
+
+- **Legacy draws: a failed homotopy rollback re-solve rejects the draw**
+  (`homotopy_rollback_failed`, the engine draws' code), whatever the cause
+  and whether or not `draw_solve_maxits` is set. Before, a legacy draw
+  printed "rollback re-solve failed; stats may be stale" and went on from the
+  failed solve -- the post-homotopy check measured that state and the draw
+  could be archived, in spec or not. **This changes legacy yields** in runs
+  where such a re-solve failed (those draws are now rejected attempts, never
+  archived or counted toward until-N); runs in which every rollback re-solve
+  converged are unchanged.
+
 ## Unreleased — review fixes to the unified engine (2026-10-04)
 
 - **Legacy g-file reconstruction (DEFAULT path): a failed last l_i-secant

@@ -134,6 +134,17 @@ DRAW_REJECTION_REASONS = {
                            "(the archived total at the draw's pressure) "
                            "failed; the draw's bootstrap would otherwise be "
                            "evaluated on a stale equilibrium",
+    # both paths (engine draws since 2026-10-04, legacy draws since the
+    # owner-approved 2026-10-05 change)
+    "homotopy_rollback_failed": "a draw's homotopy rollback re-solve "
+                                "(back at the last good stage, after a "
+                                "failed or saturated tighter stage) "
+                                "failed: the state left behind is not a "
+                                "converged solve, so the draw is never "
+                                "archived.  Engine draws: any reason other "
+                                "than the cap (the capped one is "
+                                "homotopy_maxits); legacy draws: any "
+                                "failure, capped or not",
     # engine draws (bouquet.engine_draws) only
     "kinetics_nonphysical": "an engine draw's DRAWN kinetics are outside "
                             "the physical domain of the bootstrap model "
@@ -153,13 +164,6 @@ DRAW_REJECTION_REASONS = {
                        "earlier good stage to roll back to (a capped later "
                        "stage rolls back, as any failed stage), or its "
                        "rollback re-solve stopped at the cap",
-    "homotopy_rollback_failed": "an engine draw's homotopy rollback "
-                                "re-solve (back at the last good stage, "
-                                "after a failed or saturated tighter stage) "
-                                "failed for any reason other than the cap "
-                                "(the capped one is homotopy_maxits): the "
-                                "state left behind is not a converged "
-                                "solve, so the draw is never archived",
     "post_homotopy_maxits": "an engine draw's post-homotopy j_BS pass "
                             "solve stopped at engine_draw_solve_maxits "
                             "without converging",
@@ -7291,6 +7295,22 @@ def generate_bouquet(
                                                     _rb_exc)
                                                 _eng.announce_rollback_failed(
                                                     _rb_exc, "saturation")
+                                        else:
+                                            # a legacy draw never goes on
+                                            # from a failed re-solve either
+                                            # (owner-approved 2026-10-05)
+                                            _post_align_failed = True
+                                            _post_align_reason = (
+                                                "homotopy_rollback_failed",
+                                                "homotopy rollback",
+                                                _rb_exc)
+                                            print(f"  [homotopy] rollback "
+                                                  f"re-solve (after a "
+                                                  f"saturation) FAILED "
+                                                  f"({_rb_exc}) -> draw "
+                                                  f"REJECTED (homotopy_"
+                                                  f"rollback_failed)",
+                                                  flush=True)
                                         print(f"  [homotopy] WARN: "
                                               f"rollback re-solve failed "
                                               f"({_rb_exc}); stats may "
@@ -7392,6 +7412,20 @@ def generate_bouquet(
                                                 "homotopy rollback", _rb_exc)
                                             _eng.announce_rollback_failed(
                                                 _rb_exc, "failed stage")
+                                    else:
+                                        # a legacy draw never goes on from a
+                                        # failed re-solve either
+                                        # (owner-approved 2026-10-05)
+                                        _post_align_failed = True
+                                        _post_align_reason = (
+                                            "homotopy_rollback_failed",
+                                            "homotopy rollback", _rb_exc)
+                                        print(f"  [homotopy] rollback "
+                                              f"re-solve (after a failed "
+                                              f"stage) FAILED ({_rb_exc}) "
+                                              f"-> draw REJECTED "
+                                              f"(homotopy_rollback_failed)",
+                                              flush=True)
                                     print(f"  [homotopy] WARN: rollback "
                                           f"re-solve failed ({_rb_exc}); "
                                           f"stats may be stale")
