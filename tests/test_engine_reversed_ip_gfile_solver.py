@@ -1,9 +1,9 @@
 """The unified engine on a reversed-Ip / reversed-B_t g-file -- LIVE SOLVER
 half (``pytest -m solver``; NOT run in the fast suite or in CI).
 
-STATUS: written 2026-10-04 and NOT YET RUN -- it is meant for the cluster's
-solver runner.  The bars below for the Ip-reversed mirrors are PROVISIONAL
-(see ``_IP_MIRROR_REL``) and are for the owner to confirm on the first run.
+STATUS: written 2026-10-04, first run 2026-10-05 (7 passed); the bar for the
+Ip-reversed mirrors (``_IP_MIRROR_REL``) is stated below with its measured
+provenance (owner-confirmed 2026-10-05).
 
 The synthetic example g-file is mirrored into all four (Ip, B_t)
 orientations in its own COCOS (``test_engine_reversed_ip_gfile.mirror_raw``)
@@ -41,9 +41,16 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 import test_engine_reversed_ip_gfile as F  # noqa: E402
 
-#: PROVISIONAL bar for the Ip-reversed mirrors (owner to confirm on the
-#: first run): their INPUTS differ by <= 1e-5 relative (contour tracing of
-#: the negated psi_RZ); the delivered arrays are allowed 10x that.
+#: Stated bar for the Ip-reversed mirrors (owner-confirmed 2026-10-05):
+#: their INPUTS differ by <= 1e-5 relative (contour tracing of the negated
+#: psi_RZ); the delivered arrays are allowed 10x that.
+#: Provenance -- measured on the first run (2026-10-05, bouquet ee69a60, the
+#: fixed OpenFUSIONToolkit build at fork commit 7da4f18, one thread), as
+#: max|delta| / max|reference| per array against the unmirrored file, worst
+#: over the two Ip mirrors (Ip and Ip+B_t, identical): j_BS 5.34e-5,
+#: j_phi 1.97e-5, j_inductive 7.35e-6, j_NBI / j_RF 0; l_i 1.3e-7 relative.
+#: The B_t mirror is bitwise (asserted separately).  Margin on the worst
+#: array (j_BS): 1e-4 / 5.34e-5 = 1.9x.
 _IP_MIRROR_REL = 1e-4
 
 _ARRAYS = ("j_phi", "j_inductive", "j_BS", "j_NBI", "j_RF")
