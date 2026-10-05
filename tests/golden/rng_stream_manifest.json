@@ -1,8 +1,8 @@
 {
   "channels": {
     "jphi": {
-      "max": 1536584.9200942193,
-      "min": 147257.92740345295,
+      "max": 1532046.0946966326,
+      "min": 135315.18308941333,
       "n": 257,
       "sample_indices": [
         0,
@@ -12,17 +12,17 @@
         256
       ],
       "sample_values": [
-        1536584.9200942193,
-        1302693.9699579976,
-        787409.356562171,
-        451889.78440106654,
-        147257.92740345295
+        1532046.0946966326,
+        1300993.4849576226,
+        786523.5152760425,
+        451128.6807882767,
+        156855.21207500997
       ],
-      "sha256": "ad96e87e9511ac5388932860578ea17f4f3bf0b43e2b876dc2f72c3b86fec4fb"
+      "sha256": "959d2e58d870b20232c57ac89498d4f92a513215948b873be4ff2000f05760e1"
     },
     "ne": {
       "max": 5.425099337283019e+19,
-      "min": 6.981469218489191e+18,
+      "min": 6.981469216256863e+18,
       "n": 514,
       "sample_indices": [
         0,
@@ -33,16 +33,16 @@
       ],
       "sample_values": [
         5.425099337283019e+19,
-        4.713584752823148e+19,
-        3.9805378147914146e+19,
-        3.3771496372270436e+19,
-        6.981469218489191e+18
+        4.713584752783059e+19,
+        3.980537814542508e+19,
+        3.3771496368691278e+19,
+        6.981469216256863e+18
       ],
-      "sha256": "477f910a1d81a23ae54eb58f7e3d6823508c1f3298a3d26a6af21ef8dd19eeb0"
+      "sha256": "48d8c861dda527d3bf3bf0ecfb2a90a77857d77291832e827225a805bab2e5a6"
     },
     "ni": {
       "max": 4.380515957418279e+19,
-      "min": 6.319167676514081e+18,
+      "min": 6.319167675453283e+18,
       "n": 514,
       "sample_indices": [
         0,
@@ -53,16 +53,16 @@
       ],
       "sample_values": [
         4.380515957418279e+19,
-        3.852623686565575e+19,
-        3.262313252009932e+19,
-        2.881252533135626e+19,
-        6.319167676514081e+18
+        3.852623686545657e+19,
+        3.262313251857087e+19,
+        2.881252532894437e+19,
+        6.319167675453283e+18
       ],
-      "sha256": "1717c0493e93f92c9edc08ae44beb430d73815923ba7ea5b8e20856d152c5787"
+      "sha256": "6025ec7e7ad1a299bc64e5092acbedcec5f5f19570841dc7f6c3148eb16c481a"
     },
     "te": {
       "max": 2501.2783753073077,
-      "min": 60.23464967883806,
+      "min": 60.234649752058885,
       "n": 514,
       "sample_indices": [
         0,
@@ -73,16 +73,16 @@
       ],
       "sample_values": [
         2501.2783753073077,
-        2131.1916634251083,
-        1733.117318125653,
-        1258.4700074974614,
-        60.23464967883806
+        2131.1916634666172,
+        1733.1173183730925,
+        1258.470008148865,
+        60.234649752058885
       ],
-      "sha256": "2bfd8a69b04f6bbddc693127bc3b4b3ee83c9ec16478a97eb1dce8279b56938a"
+      "sha256": "f10b3d04516b1c35adc942a933f5a2cb952d723736c2f77df485543516053055"
     },
     "ti": {
       "max": 5117.217473306134,
-      "min": 259.9767038899016,
+      "min": 259.9767044991978,
       "n": 514,
       "sample_indices": [
         0,
@@ -93,12 +93,12 @@
       ],
       "sample_values": [
         5117.217473306134,
-        3263.4943249605053,
-        2083.2423509724017,
-        1515.7015292623912,
-        259.9767038899016
+        3263.49432501806,
+        2083.2423514046163,
+        1515.7015303425264,
+        259.9767044991978
       ],
-      "sha256": "b409f28d4a6977c3bac017e037d3a61eac5fb59d6840b961fd01e81811ed6f03"
+      "sha256": "5b4088c62e56b04600233fd01fe5f3d1d3db64dcaa9f05c27ddd340b846d57a1"
     }
   },
   "grids": {
@@ -106,19 +106,19 @@
     "psi_N_kinetic": 514
   },
   "pinned_on": {
-    "blas": "accelerate-unknown",
-    "machine": "arm64",
-    "numpy": "2.4.2",
-    "platform": "Darwin"
+    "blas": "blas-3.9.0",
+    "machine": "x86_64",
+    "numpy": "2.4.6",
+    "platform": "Linux"
   },
   "seed": 20260804,
   "source_fixture": "D3Dlike_Hmode_golden_slim.h5",
   "source_provenance": {
-    "prov_bouquet_branch": "feat/jbs-self-consistent-loop",
-    "prov_bouquet_commit": "1332caf1c69c457d502f9f74a2b77b377b62fa71",
+    "prov_bouquet_branch": "engine/integration-2",
+    "prov_bouquet_commit": "41e9682f720892b9c7496a883d1284de12c93c04",
     "prov_bouquet_dirty": false,
     "prov_bouquet_version": "1.3.1",
-    "prov_created": "2026-09-28T18:21:33",
+    "prov_created": "2026-10-05T18:24:03",
     "prov_generator": "make_golden_fixture.py",
     "prov_generator_args_eqdsk": "all",
     "prov_generator_args_jphi_archival": "input",
@@ -130,12 +130,12 @@
     "prov_numerics_platform": "Linux",
     "prov_oft_available": true,
     "prov_oft_bootstrap_second_order_stencils": true,
-    "prov_oft_branch": "fix/bootstrap-pchip-derivatives",
-    "prov_oft_build_id": "20260919_abbfc6f",
-    "prov_oft_commit": "abbfc6f08d459067712d7dbba17c27d16437195b",
+    "prov_oft_branch": "fix/jphi-update-ravgs-and-nonfinite-abort",
+    "prov_oft_build_id": "20260929_7da4f18",
+    "prov_oft_commit": "7da4f187ea1b1eaee63738c54e82bb1565589933",
     "prov_oft_get_q_named_ravgs": true,
     "prov_oft_has_get_fsa": true,
-    "prov_oft_library_sha256": "f4a320a6ebeb1eb0e58e0d9b3a63c7927950b6022de87a49334a073a7a65950c",
+    "prov_oft_library_sha256": "7885fedc1e62f34a2113015ace5b37fc8a03ef7cd6912adc190eed45329f34fe",
     "prov_oft_sources_sha256": "927165ae5025c525245af4f1243bc2e649f19d394001d2f01c8aff7e459f9c1f",
     "prov_oft_version": "26.6",
     "prov_schema": 1

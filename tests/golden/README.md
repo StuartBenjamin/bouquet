@@ -156,6 +156,42 @@ input current; the four kinetic hashes are unchanged.
 `test_the_fixture_archives_the_input_current` asserts the archival stamp in the
 fixture, its provenance and the manifest.
 
+## Regenerated on the fixed OFT build at today's defaults (2026-10-05, owner-approved)
+
+An owner-approved change of an acceptance BASELINE (no bar changed). From: the
+fixture above (OFT `fix/bootstrap-pchip-derivatives` build `20260919_abbfc6f`,
+the jphi_update `<1/R>` row shift unfixed; stored config with
+`separatrix_pressure` back-filled `"legacy"`, post-homotopy ceiling 4). To:
+the same recipe (`regenerate_golden_run.py`, the same stored config, seed
+12345, 20 draws, one thread) with only the defaults that changed since moved to
+today's -- `separatrix_pressure="offset"` (`edge_pprime_pin=True`),
+`jbs_max_passes_post_homotopy=6` -- on the fixed OFT line
+`fix/jphi-update-ravgs-and-nonfinite-abort` (commit 7da4f18, build
+`20260929_7da4f18`); bouquet commit and OFT build/branch/commit are stamped in
+the fixture and both manifests.
+
+* Archived / in spec: 17 / 10 -> **20 / 12** (draws 1, 2 and 17 now archived;
+  draw 8 now in spec).
+* Per draw (old -> new): l_i(1) mostly ~ -0.3 %, l_i(3) ~ -0.25 %; draw 3
+  l_i(3) +2.4 % (homotopy pass 1 -> 2); draw 19 l_i(3) +10 % (0.6257 -> 0.6886),
+  out of spec both times.
+* `test_systematics` against it, bars unchanged: 3 passed. Mode 1
+  `[replay mode1] max coil drift = 0.0190% (limit 0.3)` (1.357 % against the
+  previous fixture: its separatrix part is gone with the like-for-like replay
+  settings), `baseline RMS = 0.4193 mm (limit 0.8)`; mode 2 draw 0 0.445 mm;
+  mode 3 draw 0 `boundary RMS replay=0.992 golden=2.166 mm li(3) replay=0.6275
+  golden=0.6259 li(1) replay=0.8172 golden=0.8175`, draw 3 `boundary RMS
+  replay=0.818 golden=1.324 mm li(3) replay=0.6379 golden=0.6372 li(1)
+  replay=0.8313 golden=0.8296`.
+* The regeneration was made twice (two code states of the engine line that
+  differ only off the legacy draw path); the second reproduced the first's
+  in-spec flags and l_i(1) / l_i(3) on every draw exactly (largest relative
+  difference 0). `rng_stream_manifest.json`: all five stream hashes moved --
+  `jphi` because it is drawn from the new `_baseline/j_phi` (sampled values
+  move by <= 0.3 % except the edge sample), the four kinetic streams because
+  the baseline kinetic envelopes the stream is drawn from differ in their last
+  digits (e.g. the n_e minimum 6.981469218e18 -> 6.981469216e18).
+
 ## `test_systematics` against the refreshed fixture
 
 **Against the input-current rebuild (bc85d46): all three modes pass** on the
