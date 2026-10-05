@@ -1025,6 +1025,19 @@ class GenerationConfig:
     # B within 0.23 % / 0.4 mm of A; 1e4 (generate_bouquet's jphi-linterp value)
     # sends SWB to a wrong equilibrium (Ip +7 %, LCFS 50 mm).
     swb_coil_reg_weight: float = 1.0e3
+    # imas_baseline="swb" sawtooth q reset inside SWB (OFT saw_q_s; None = off).
+    # The sawteeth source (Baseline.j_sawteeth) leaves jphi_fixed and is SWB's
+    # jphi_saw input; SWB adds the reset current that flattens q to ~swb_saw_q
+    # inside the mixing radius (q_base = swb_saw_q + swb_saw_dq).  The rest map
+    # onto OFT's saw_dq / saw_tol (freeze on relative j_saw change) /
+    # saw_ramp (q deficit the reset weight ramps over; 0 = hard trigger) /
+    # saw_rule (dip that sets the reset: 1 outermost, 2 innermost,
+    # 3 outermost deeper than saw_ramp).  saw_relax goes via bootstrap_kwargs.
+    swb_saw_q: Optional[float] = None
+    swb_saw_dq: float = 0.03
+    swb_saw_tol: float = 1.0e-4
+    swb_saw_ramp: float = 0.01
+    swb_saw_rule: int = 1
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single
@@ -1063,6 +1076,9 @@ class GenerationConfig:
         "isolate_edge_jBS verbose diagnostic_plots x psi_N coord "
         "ffp_prof ne_prof te_prof ni_prof ti_prof".split()
     )
+    #: Set from the ``swb_saw_*`` fields, never from ``bootstrap_kwargs``.
+    _SAW_RESERVED = frozenset(
+        "jphi_saw saw_q_s saw_dq saw_tol saw_ramp saw_rule".split())
 
     def __post_init__(self):
         """Validate ``bootstrap_kwargs``, then resolve ``structured_preset``
@@ -1102,9 +1118,14 @@ class GenerationConfig:
         if self.imas_baseline not in ("closure", "swb"):
             raise ValueError(
                 f"imas_baseline={self.imas_baseline!r} not in ('closure', 'swb')")
+        if self.swb_saw_q is not None and not float(self.swb_saw_q) > 0.0:
+            raise ValueError(f"swb_saw_q={self.swb_saw_q!r}: must be > 0 (None = off)")
+        if self.swb_saw_rule not in (1, 2, 3):
+            raise ValueError(f"swb_saw_rule={self.swb_saw_rule!r} not in (1, 2, 3)")
         validate_bootstrap_kwargs(
             self.bootstrap_kwargs,
-            self._RESERVED | ({"jphi_fixed"} if self.swb_seed == "source" else set())
+            self._RESERVED | self._SAW_RESERVED
+            | ({"jphi_fixed"} if self.swb_seed == "source" else set())
             | ({"p_fixed"} if self.imas_baseline == "swb" else set()))
         resolve_structured_preset(self, stacklevel=4)
 
@@ -1186,6 +1207,8 @@ def swb_config_problems(config):
     from .coords import _swb_grid_arg, _swb_params
     if not _swb_grid_arg() or not {"jphi_fixed", "p_fixed"} <= _swb_params():
         p.append("this OpenFUSIONToolkit's solve_with_bootstrap lacks x/jphi_fixed/p_fixed")
+    if gc.swb_saw_q is not None and "jphi_saw" not in _swb_params():
+        p.append("swb_saw_q: this OpenFUSIONToolkit's solve_with_bootstrap lacks jphi_saw")
     return p
 
 

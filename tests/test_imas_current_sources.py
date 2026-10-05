@@ -153,6 +153,24 @@ class TestChannels:
         np.testing.assert_array_equal(ohmic.j_phi, fixed.j_phi)
         assert ohmic.fuse_currents["channels"]["sawteeth"] == "j_inductive"
 
+    def test_j_sawteeth_is_the_sawteeth_share_of_j_other(self, tmp_path):
+        dd = _dd()
+        path = _write(tmp_path, dd)
+        bl = _read(path)
+        saw = _tor(dd, _par(dd, 701))
+        np.testing.assert_allclose(bl.j_sawteeth, saw, rtol=1e-12, atol=1e-9)
+        np.testing.assert_allclose(bl.j_other - bl.j_sawteeth, _tor(dd, _par(dd, 6)),
+                                   rtol=1e-12, atol=1e-9)
+        # moved to the inductive part: no longer in j_other, so zero
+        assert not np.any(_read(path, sawteeth_in_ohmic=True).j_sawteeth)
+
+    def test_j_sawteeth_zero_without_a_sawteeth_source(self, tmp_path):
+        dd = _dd()
+        dd["core_sources"]["source"] = [s for s in dd["core_sources"]["source"]
+                                        if s["identifier"]["index"] != 701]
+        bl = _read(_write(tmp_path, dd))
+        assert bl.j_sawteeth.shape == bl.j_other.shape and not np.any(bl.j_sawteeth)
+
 
 class TestSourceTimes:
     def test_a_short_source_is_taken_on_its_own_time_array(self, tmp_path):

@@ -1288,6 +1288,11 @@ def read_imas_baseline(
     j_NBI = to_jphi(_chan_par["j_NBI"])
     j_RF = to_jphi(_chan_par["j_RF"])
     j_other = to_jphi(_chan_par["j_other"])
+    # The sawteeth share of j_other (GenerationConfig.swb_saw_q: SWB's jphi_saw
+    # input); zeros when absent or moved to the inductive part.
+    _saw = fuse_currents["sources"].get("sawteeth")
+    j_sawteeth = (to_jphi(_saw) if _saw is not None and not sawteeth_in_ohmic
+                  else np.zeros(n))
     # What no source accounts for: j_total - (ohmic + bootstrap + sources).
     # It rides in the inductive residual; recorded so its size is visible.
     _S = fuse_currents["sources"]
@@ -1490,6 +1495,7 @@ def read_imas_baseline(
             j_RF = _override(fixed.j_RF, _fx, x_run)
         if getattr(fixed, "j_other", None) is not None:
             j_other = _override(fixed.j_other, _fx, x_run)
+            j_sawteeth = np.zeros_like(j_other)   # no longer a known part of it
 
     # The deferred factor-of-3 warning: the convention was undeterminable AND the
     # fast pressure it scales is non-zero AND it came from the dd (a user-supplied
@@ -1617,6 +1623,7 @@ def read_imas_baseline(
         j_NBI=j_NBI,
         j_RF=j_RF,
         j_other=j_other,
+        j_sawteeth=j_sawteeth,
         p_fast=p_fast,
         z_fast=(z_fast if np.any(z_fast) else None),
         z2_fast=(z2_fast if np.any(z_fast) else None),

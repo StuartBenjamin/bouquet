@@ -42,6 +42,8 @@ from . import coords
 #: imas_baseline="swb": largest |Ip/Ip_target - 1| a solve may land at
 #: (converged SWB: ~1e-3; a frozen-alpha drift: several %).
 SWB_IP_TOL = 5e-3
+#: solve_with_bootstrap outputs of the sawtooth reset (GenerationConfig.swb_saw_q).
+_SWB_SAW_KEYS = ("j_saw", "saw_rho_m", "saw_n_dips")
 
 
 class Bouquet:
@@ -698,6 +700,8 @@ class Bouquet:
             _p = swb_config_problems(self.config)
             if _p:
                 raise ValueError('imas_baseline="swb" refuses: ' + "; ".join(_p))
+        elif self.config.generation.swb_saw_q is not None:
+            raise ValueError('swb_saw_q needs imas_baseline="swb"')
         self.baseline = resolve_baseline(self.config, self.mygs)
 
         # IMAS path: read_imas_baseline does no GS solve, so establish a converged
@@ -748,7 +752,7 @@ class Bouquet:
         }
         bl.j_inductive = j_phi.copy()
         bl.j_BS = np.zeros_like(j_phi)
-        for name in ("j_NBI", "j_RF", "j_other"):
+        for name in ("j_NBI", "j_RF", "j_other", "j_sawteeth"):
             if getattr(bl, name, None) is not None:
                 setattr(bl, name, np.zeros_like(j_phi))
         gc.recalculate_j_BS = False          # already forced in prepare_baseline
@@ -2333,12 +2337,9 @@ class Bouquet:
         # swb_seed="source": SWB inputs from the source split as read (before
         # any closure touches bl), shared by the baseline split, the draws and
         # the sigma=0 check.
-        bl.swb_seed_profile = bl.swb_jphi_fixed = None
+        bl.swb_seed_profile = bl.swb_jphi_fixed = bl.swb_jphi_saw = None
         if self.config.generation.swb_seed == "source":
-            _ji = np.asarray(bl.j_inductive, dtype=float)
-            bl.swb_seed_profile, bl.swb_jphi_fixed = coords.swb_source_seed(
-                psi_N, _ji,
-                np.asarray(bl.j_phi, dtype=float) - _ji - np.asarray(bl.j_BS, dtype=float))
+            self._swb_source_split(psi_N)
         if self.config.generation.recalculate_j_BS:
             from .TokaMaker_interface import smooth_jbs_transition
             from .sampling import calc_cylindrical_li_proxy
@@ -2972,6 +2973,39 @@ class Bouquet:
                         None if zf is None else k2e(np.asarray(zf, dtype=float)),
                         getattr(bl, "Z_imp", None)))
 
+    def _swb_source_split(self, psi_N):
+        """Set ``bl.swb_seed_profile`` / ``swb_jphi_fixed`` from the source
+        split as read; with ``swb_saw_q`` also ``swb_jphi_saw`` (=
+        ``bl.j_sawteeth``), which ``swb_jphi_fixed`` then excludes."""
+        import numpy as np
+        bl = self.baseline
+        j_ind = np.asarray(bl.j_inductive, dtype=float)
+        j_fix = np.asarray(bl.j_phi, dtype=float) - j_ind - np.asarray(bl.j_BS, dtype=float)
+        bl.swb_jphi_saw = None
+        if self.config.generation.swb_saw_q is None:
+            bl.swb_seed_profile, bl.swb_jphi_fixed = coords.swb_source_seed(
+                psi_N, j_ind, j_fix)
+            return
+        j_st = getattr(bl, "j_sawteeth", None)
+        j_st = np.zeros_like(j_fix) if j_st is None else np.asarray(j_st, dtype=float)
+        bl.swb_seed_profile, bl.swb_jphi_fixed, bl.swb_jphi_saw = \
+            coords.swb_source_seed(psi_N, j_ind, j_fix, j_st)
+
+    def _swb_saw_kwargs(self):
+        """``solve_with_bootstrap`` sawtooth-reset arguments; empty when
+        ``swb_saw_q`` is None."""
+        import numpy as np
+        gc, bl = self.config.generation, self.baseline
+        if gc.swb_saw_q is None:
+            return {}
+        if getattr(bl, "swb_jphi_saw", None) is None:
+            raise RuntimeError("swb_saw_q: no jphi_saw input (baseline not "
+                               "prepared by _swb_imas_baseline)")
+        return dict(jphi_saw=np.asarray(bl.swb_jphi_saw, dtype=float),
+                    saw_q_s=float(gc.swb_saw_q), saw_dq=float(gc.swb_saw_dq),
+                    saw_tol=float(gc.swb_saw_tol), saw_ramp=float(gc.swb_saw_ramp),
+                    saw_rule=int(gc.swb_saw_rule))
+
     def _swb_solve(self, kin, j_seed, coil_reg_target=None):
         """The swb recipe: reset ``mygs`` -> coil reg -> ``init_psi`` from the
         slice LCFS -> one ``solve_with_bootstrap``.
@@ -2979,7 +3013,8 @@ class Bouquet:
         ``coil_reg_target`` None keeps the setup coil reg (solve A); a
         ``{coil: A-t}`` dict installs the strong reg toward it (solve B, the
         sigma=0 check and every draw). ``kin``: ``ne te ni ti Zeff p_fixed`` on
-        ``psi_N``. Returns the SWB result dict.
+        ``psi_N``. Returns the SWB result dict (its ``j_saw`` / ``saw_rho_m``
+        / ``saw_n_dips`` only when ``swb_saw_q`` is set).
         """
         import numpy as np
         from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
@@ -2993,14 +3028,18 @@ class Bouquet:
                 mygs, coil_reg_target, gc.swb_coil_reg_weight, 1.0))
         mygs.init_psi(*_shape_from_boundary(self._boundary_RZ))
         self._seed_coil_init(mygs)
+        saw_kw = self._swb_saw_kwargs()
         res = solve_with_bootstrap(
             mygs, kin["ne"], kin["te"], kin["ni"], kin["ti"], kin["Zeff"],
             float(bl.Ip_target), np.asarray(j_seed, dtype=float),
             scale_jBS=1.0, isolate_edge_jBS=bool(gc.isolate_edge_jBS),
             diagnostic_plots=False, verbose=False,
             jphi_fixed=bl.swb_jphi_fixed, p_fixed=kin["p_fixed"],
+            **saw_kw,
             **coords.swb_grid_kwargs(psi_N, getattr(bl, "coord", coords.PSI)),
             **gc.bootstrap_kwargs)
+        if not saw_kw:      # saw off: no saw outputs, whatever the toolkit returns
+            res = {k: v for k, v in res.items() if k not in _SWB_SAW_KEYS}
         # SWB can return (GS residual converged) on a wrong equilibrium once alpha
         # has frozen and the shape keeps moving: refuse it rather than archive it.
         ip = abs(float(mygs.get_globals()[0]))
@@ -3011,14 +3050,15 @@ class Bouquet:
         return res
 
     def _swb_state(self, res, j_seed, psi_pad=1e-3):
-        """Record of one swb solve on ``mygs``: alpha, coils, LCFS, li, Ip."""
+        """Record of one swb solve on ``mygs``: alpha, coils, LCFS, li, Ip
+        (and j_saw, saw_rho_m, saw_n_dips with the sawtooth reset on)."""
         import numpy as np
         from .utils import safe_trace_surf
         mygs = self.mygs
         j_ind = np.asarray(res["j_inductive"], dtype=float)
         j_seed = np.asarray(j_seed, dtype=float)
         coils, _ = mygs.get_coil_currents()
-        return dict(
+        st = dict(
             alpha=float(np.dot(j_ind, j_seed) / np.dot(j_seed, j_seed)),
             coils={k: float(v) for k, v in coils.items()},
             lcfs=safe_trace_surf(mygs, 1.0 - psi_pad),
@@ -3027,6 +3067,11 @@ class Bouquet:
             j_inductive=j_ind,
             j_BS=np.asarray(res["isolated_j_BS"], dtype=float),
             j_phi=np.asarray(res["total_j_phi"], dtype=float))
+        if res.get("j_saw") is not None:
+            st.update(j_saw=np.asarray(res["j_saw"], dtype=float),
+                      saw_rho_m=float(res["saw_rho_m"]),
+                      saw_n_dips=int(res["saw_n_dips"]))
+        return st
 
     def _swb_imas_baseline(self):
         """``imas_baseline="swb"``: the baseline is SWB's own equilibrium.
@@ -3035,7 +3080,9 @@ class Bouquet:
         A's coils) is the baseline, so that a draw rebuilt with the same reg
         reproduces it at sigma=0. The Fortran rescales the source inductive
         current alone (alpha) to Ip, holds NBI + RF + other fixed and re-solves
-        the Redl bootstrap; the recorded split is SWB's raw output.
+        the Redl bootstrap; the recorded split is SWB's raw output.  With
+        ``swb_saw_q`` the sawteeth source is SWB's jphi_saw instead of part of
+        jphi_fixed, and ``bl.j_saw`` (input + q reset) replaces it in j_phi.
         """
         import numpy as np
         from .TokaMaker_interface import smooth_jbs_transition
@@ -3044,10 +3091,7 @@ class Bouquet:
         psi_N = np.asarray(bl.psi_N, dtype=float)
         if not np.array_equal(coords.swb_grid(psi_N), psi_N):
             raise RuntimeError('imas_baseline="swb" needs SWB on the run grid')
-        j_src = np.asarray(bl.j_inductive, dtype=float)
-        bl.swb_seed_profile, bl.swb_jphi_fixed = coords.swb_source_seed(
-            psi_N, j_src,
-            np.asarray(bl.j_phi, dtype=float) - j_src - np.asarray(bl.j_BS, dtype=float))
+        self._swb_source_split(psi_N)
         j_phi_src = np.asarray(bl.j_phi, dtype=float).copy()
         kin = self._swb_baseline_kinetics()
 
@@ -3061,6 +3105,7 @@ class Bouquet:
         bl.j_inductive = st_b["j_inductive"]
         bl.j_BS = st_b["j_BS"]
         bl.j_phi = st_b["j_phi"]
+        bl.j_saw = st_b.get("j_saw")
         bl.j_BS_smoothed = smooth_jbs_transition(st_b["j_BS"])   # diagnostic only
         bl.ohm_scale, bl.bs_scale = st_b["alpha"], 1.0
         bl.bs_scale_profile = None
@@ -3075,10 +3120,21 @@ class Bouquet:
             coil_B_minus_A_worst=_worst,
             closure_limited=not (0.5 <= st_b["alpha"] <= 2.0),
             fuse_total_peak=float(np.max(np.abs(j_phi_src))))
+        if bl.j_saw is not None:
+            bl.ip_closure.update(saw_q_s=float(self.config.generation.swb_saw_q),
+                                 saw_rho_m=st_b["saw_rho_m"],
+                                 saw_n_dips=st_b["saw_n_dips"],
+                                 saw_rho_m_solve_A=st_a.get("saw_rho_m"))
         print(f"[imas swb] solve A: alpha={st_a['alpha']:.5f} li_3={st_a['li_3']:.4f}; "
               f"solve B (strong reg toward A's coils): alpha={st_b['alpha']:.5f} "
               f"li_3={st_b['li_3']:.4f}; max coil B-A {bl.ip_closure['coil_B_minus_A_max']:+.1f} "
               f"A-t ({_worst})")
+        if bl.j_saw is not None:
+            print(f"[imas swb] saw reset q_s={bl.ip_closure['saw_q_s']}: rho_m "
+                  f"{st_a['saw_rho_m']:.4f} (A) {st_b['saw_rho_m']:.4f} (B), "
+                  f"n_dips {st_b['saw_n_dips']}, j_saw peak "
+                  f"{np.max(np.abs(bl.j_saw))/1e6:.4f} MA/m^2 (input "
+                  f"{np.max(np.abs(bl.swb_jphi_saw))/1e6:.4f})")
         self._finish_imas_baseline(-1)
         bl.li_metrics.update(imas_baseline="swb", jBS_baseline_mode="swb",
                              forward_solve_nl_its=None)
@@ -3132,8 +3188,16 @@ class Bouquet:
         ax[2].plot(pe, np.asarray(bl.j_inductive) / 1e6, "-", color="tab:orange",
                    label=r"$j_{ind}$")
         ax[2].plot(pe, np.asarray(bl.j_BS) / 1e6, "-", color="tab:green", label=r"$j_{BS}$")
-        for nm, arr in (("j_NBI", bl.j_NBI), ("j_RF", bl.j_RF),
-                        ("j_other", getattr(bl, "j_other", None))):
+        _fixed = (("j_NBI", bl.j_NBI), ("j_RF", bl.j_RF),
+                  ("j_other", getattr(bl, "j_other", None)))
+        if getattr(bl, "j_saw", None) is not None:
+            # swb_saw_q: j_saw replaces j_other's sawteeth share in j_phi
+            _jst = getattr(bl, "j_sawteeth", None)
+            _jo = np.asarray(bl.j_other if bl.j_other is not None else 0.0, dtype=float)
+            _fixed = _fixed[:2] + (
+                ("j_other - j_sawteeth", _jo - (0.0 if _jst is None else np.asarray(_jst))),
+                ("j_saw", bl.j_saw))
+        for nm, arr in _fixed:
             if arr is not None and np.any(np.asarray(arr)):
                 ax[2].plot(pe, np.asarray(arr) / 1e6, "--", lw=1, label=nm)
         ax[2].set_ylabel(r"$j$ [MA/m$^2$]"); ax[2].set_xlabel(xl)
@@ -3389,7 +3453,7 @@ class Bouquet:
             bl.swb_seed_profile)
         psi_N = np.asarray(bl.psi_N, dtype=float)
         dev = {k: float(np.max(np.abs(st[k] - ref[k])))
-               for k in ("j_inductive", "j_BS", "j_phi")}
+               for k in ("j_inductive", "j_BS", "j_phi", "j_saw") if k in ref}
         dev["alpha"] = abs(st["alpha"] - ref["alpha"])
         dev["li_3"] = abs(st["li_3"] - ref["li_3"])
         dev["coils"] = max((abs(st["coils"][k] - ref["coils"].get(k, np.nan))
@@ -3398,6 +3462,8 @@ class Bouquet:
         dev["lcfs"] = (float(np.max(np.abs(np.asarray(la) - np.asarray(lb))))
                        if la is not None and lb is not None
                        and np.shape(la) == np.shape(lb) else float("nan"))
+        if "saw_rho_m" in ref:
+            dev["saw_rho_m"] = abs(st["saw_rho_m"] - ref["saw_rho_m"])
         passed = all(v == 0.0 for v in dev.values())
         d_bs = np.abs(st["j_BS"] - ref["j_BS"])
         iw = int(np.argmax(d_bs))
@@ -3846,7 +3912,13 @@ class Bouquet:
                 "swb_alpha": float(bl.ohm_scale),
                 "swb_alpha_solve_A": _ic.get("alpha_solve_A"),
                 "swb_li_3_solve_A": _ic.get("li_3_solve_A"),
-                "coil_reg_target": bl.coil_reg_target})
+                "coil_reg_target": bl.coil_reg_target,
+                # sawtooth reset (None, so not written, when swb_saw_q is off)
+                "swb_saw_q": gc.swb_saw_q,
+                "swb_saw_rho_m": _ic.get("saw_rho_m"),
+                "swb_saw_n_dips": _ic.get("saw_n_dips"),
+                "swb_j_saw": bl.j_saw,
+                "swb_jphi_saw": bl.swb_jphi_saw})
         # Outside the capture: failed solves are caught by the draw path, so
         # this line is their only trace in a quiet run's log.
         self.solve_failures = list(_solve_guard.records)

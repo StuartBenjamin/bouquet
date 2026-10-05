@@ -76,6 +76,10 @@ class Baseline:
     # Other fixed driven current [A/m^2]: fusion-driven, sawteeth (unless
     # ImasSource.sawteeth_in_ohmic) and unlisted core_sources indices.
     j_other: Optional["np.ndarray"] = None
+    # The sawteeth share of j_other [A/m^2] (core_sources 701; IMAS path only).
+    # With GenerationConfig.swb_saw_q it is SWB's jphi_saw input, and
+    # j_phi = j_inductive + j_BS + j_NBI + j_RF + (j_other - j_sawteeth) + j_saw.
+    j_sawteeth: Optional["np.ndarray"] = None
     p_fast: Optional["np.ndarray"] = None   # fast/beam pressure
 
     # How p_fast was reduced from the source's anisotropic fields, and how that
@@ -104,6 +108,12 @@ class Baseline:
     # check.  None => generic seed.
     swb_seed_profile: Optional["np.ndarray"] = None
     swb_jphi_fixed: Optional["np.ndarray"] = None
+    # swb_saw_q set: SWB's jphi_saw input (j_sawteeth on SWB's grid), which
+    # swb_jphi_fixed then excludes.  None => saw off.
+    swb_jphi_saw: Optional["np.ndarray"] = None
+    # swb_saw_q set: solve B's j_saw output (jphi_saw + the q reset current),
+    # in place of j_sawteeth in j_phi.  None => saw off.
+    j_saw: Optional["np.ndarray"] = None
     # imas_baseline="swb": solve A's coil currents {name: A-t}, the target of the
     # strong reg of solve B, the sigma=0 check and every draw.
     coil_reg_target: Optional[dict] = None
