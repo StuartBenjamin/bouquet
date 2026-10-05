@@ -482,20 +482,15 @@ def pchip_derivative(x, y, x_eval=None, strict=False):
 #  Flux-surface-averaged plasma-current integral
 # =====================================================================
 #
-# ``TokaMaker.compute_flux_integral`` is NOT ``int_plasma f dA``.  Measured on
-# the synthetic D3D-like example (see ``tests/test_fsa_current_integral.py``):
-#
-#   * it integrates over the whole ``reg == 1`` (limiter) region, and the
-#     flux-function interpolator returns the profile's EDGE value everywhere
-#     outside the LCFS (``gs_prof_interp_apply`` CASE(4) returns 0 -- the LCFS
-#     end of the internal psi coordinate -- off the plasma, and ``gs_flux_int``
-#     then evaluates the profile there).  ``compute_flux_integral(1.0)`` is
-#     therefore 2.83853 m^2, the LIMITER-region area, against a true plasma
-#     cross-section of 1.79005 m^2;
-#   * so for a profile with a finite edge value the excess area is charged at
-#     ``f(psi_N=1)``.  On the archived total that is
-#     ``1.36e5 A/m^2 * 1.05 m^2 = 1.43e5 A``, i.e. +11.9 % of I_p -- almost the
-#     whole of the +12.9 % "representation bias" 7dc254b calibrated away.
+# ``TokaMaker.compute_flux_integral`` is ``int_plasma f dA`` only since OFT
+# 9dea192 (bootstrap_in_fortran_backend).  Before it, ``gs_flux_int`` covered
+# the whole ``reg == 1`` (limiter) region with the profile held at its LCFS
+# value outside the plasma: ``FI(1) = 2.83853 m^2`` against a plasma
+# cross-section of 1.79005 m^2 on the D3D-like example, +11.9 % of I_p on the
+# archived total -- most of the +12.9 % "representation bias" 7dc254b
+# calibrated away.  Even now it integrates its input as an area density, so a
+# TokaMaker jphi array needs eq. A5 (``physics.jphi_tokamaker_to_jtor_imas``)
+# first (docs/current-conventions.md, A9c).
 #
 # The measure below never uses the mesh integral.  It is the textbook
 # axisymmetric current integral,
