@@ -1,5 +1,32 @@
 # Bouquet — change summaries
 
+## Decisions on record (owner, 2026-10-05) -- no value changes
+
+Approvals given on 2026-10-05 for settings that were already in force but had
+no recorded approval. Nothing below changes a value; it records that the value
+in force is approved.
+
+- **Draw-loop pass ceiling `jbs_max_passes_draw` 6 -> 12: approved.** A pass
+  LIMIT, not a tolerance (convergence is still every active criterion on two
+  consecutive passes). Measured need: in the passes-to-convergence study (six
+  12-draw batches, 72 draw attempts, run with the ceiling raised to 30 for
+  diagnosis only) the draw loops needed 4-10 passes -- 4: 3, 5: 12, 6: 21,
+  7: 11, 8: 13, 9: 9, 10: 3 attempts -- so 25 of 72 needed more than the old
+  ceiling of 6, and 12 was never reached; on the synthetic g-file example the
+  standard draw's l_i-match coupling contracts at about 0.38 per pass and
+  needs 7-8 passes.
+- **The bootstrap loop's noise-floor acceptance factor
+  (`utils.NOISE_FLOOR_FACTOR = 2.0`) and its relaxation halve-on rule
+  (`jbs_relax_halve_on = 3`: omega halved only after r_j grows on 3
+  consecutive passes, floor 0.25): kept as implemented.**
+- **The MSE closure's defaults: kept as implemented** --
+  `structured_mse_fd_step = 0.02`, `structured_mse_steps = 1`,
+  `structured_mse_sigma_sys = 0.0`, `structured_mse_min_chords = 4`, and the
+  MSE convergence tolerance of 0.1 sigma per chord
+  (`jbs_loop.MSE_CHORD_OFFSET_TOL_SIGMA`).
+- **The engine draws' l_i band (`l_i_tolerance = 0.05`, +/-5 % relative to
+  the delivered reconstruction's l_i, applied post hoc): confirmed.**
+
 ## Unreleased — owner-approved decisions (2026-10-05)
 
 - **Legacy draws: a failed homotopy rollback re-solve rejects the draw**
