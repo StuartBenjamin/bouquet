@@ -9455,21 +9455,21 @@
    "src": "qty.j_tor_parallel",
    "dst": "fn.physics.parallel_to_toroidal",
    "kind": "data",
-   "desc": "ratio method: c(psi)=j_tor/j_total",
+   "desc": "j_phi = A5(j_tor) on the paired slice's gm1/gm5/gm8/gm9 (or from profiles_2d)",
    "subsystem": "IMAS/OMAS reader"
   },
   {
    "src": "qty.j_tor_parallel",
    "dst": "qty.j_phi",
    "kind": "data",
-   "desc": "j_phi = j_tor (copy of authoritative total)",
+   "desc": "authoritative total, converted to TokaMaker jphi (A5)",
    "subsystem": "IMAS/OMAS reader"
   },
   {
    "src": "qty.j_total_parallel",
    "dst": "fn.physics.parallel_to_toroidal",
    "kind": "data",
-   "desc": "ratio method: c(psi)=j_tor/j_total",
+   "desc": "pairs the equilibrium slice (A6 reproduces j_tor); closure check",
    "subsystem": "IMAS/OMAS reader"
   },
   {

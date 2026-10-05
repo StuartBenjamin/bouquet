@@ -78,7 +78,8 @@ assumption catalogue):
 * **Current conventions** (`docs/current-conventions.md`): bouquet arrays are
   TokaMaker `jphi = ⟨j_φ⟩`; IMAS `j_tor = ⟨j_φ/R⟩/⟨1/R⟩` and its parallel
   currents are `⟨J·B⟩/B0`. The reader converts exactly with the FUSE
-  equilibrium's own `gm1/gm5/gm8/gm9/f/dpressure_dpsi`: the total via (A5),
+  equilibrium's own `gm1/gm5/gm8/gm9/f/dpressure_dpsi` (averages a producer
+  omits are traced from `profiles_2d.psi`): the total via (A5),
   each component's field-aligned part `F⟨1/R⟩⟨J·B⟩/⟨B²⟩`, with the pressure
   term `p′(⟨R⟩ − F²⟨1/R⟩/⟨B²⟩)` assigned to the bootstrap (as IMAS.jl does).
   `solve_with_bootstrap` output is already TokaMaker `jphi`.

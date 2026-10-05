@@ -388,6 +388,84 @@ def _override(arr, src_psi, dst_psi):
 #: equilibrium.profiles_1d fields the current conversions need (IMAS.jl names).
 _FUSE_GEOM_FIELDS = ("rho_tor_norm", "f", "gm1", "gm5", "gm8", "gm9",
                      "dpressure_dpsi")
+#: of which recoverable from profiles_2d / other profiles_1d fields.
+_DERIVABLE_GEOM_FIELDS = ("rho_tor_norm", "gm1", "gm5", "gm8", "gm9",
+                          "dpressure_dpsi")
+
+
+def _fsa_from_profiles_2d(ts, nlevels=257):
+    """gm1, gm5, gm8, gm9 of an equilibrium slice on its profiles_1d psi, by
+    flux-surface tracing of the rectangular ``profiles_2d.psi`` (COCOS 11).
+
+    For producers that omit the averages; FUSE writes them.  Against FUSE's own
+    (rt50, 65x65 psi): median 1e-4, <3e-3 inside psi_N 0.95, ~2 % at the
+    separatrix; the converted currents agree to 2e-4 of their peak.
+    """
+    from .geqdsk import GEQDSKEquilibrium
+    p1 = ts["profiles_1d"]
+    p2 = next((p for p in ts.get("profiles_2d") or []
+               if (p.get("grid_type") or {}).get("index") == 1 and p.get("psi")),
+              None)
+    if p2 is None:
+        raise ValueError("no rectangular profiles_2d.psi to compute them from")
+    if not p1.get("f"):
+        raise ValueError("profiles_1d.f is needed to compute <B^2>")
+    R = np.asarray(p2["grid"]["dim1"], dtype=float)
+    Z = np.asarray(p2["grid"]["dim2"], dtype=float)
+    for name, x in (("dim1", R), ("dim2", Z)):
+        if not np.allclose(np.diff(x), x[1] - x[0], rtol=1e-6, atol=0):
+            raise ValueError(f"profiles_2d grid {name} is not uniform")
+    psi = np.asarray(p1["psi"], dtype=float)
+    pn = (psi - psi[0]) / (psi[-1] - psi[0])
+    pn_u = np.linspace(0.0, 1.0, R.size)
+
+    def on_u(key):                      # geqdsk 1-D profiles: uniform psi_N, NW
+        v = p1.get(key)
+        return np.interp(pn_u, pn, np.asarray(v, dtype=float)) if v else np.zeros(R.size)
+
+    ax = ts["global_quantities"]["magnetic_axis"]
+    ob = (ts.get("boundary") or {}).get("outline") or {}
+    rb = np.asarray(ob.get("r", []), dtype=float)
+    zb = np.asarray(ob.get("z", []), dtype=float)
+    raw = dict(NW=R.size, NH=Z.size, RLEFT=R[0], RDIM=R[-1] - R[0],
+               ZMID=0.5 * (Z[0] + Z[-1]), ZDIM=Z[-1] - Z[0],
+               SIMAG=psi[0], SIBRY=psi[-1], RMAXIS=float(ax["r"]), ZMAXIS=float(ax["z"]),
+               FPOL=on_u("f"), PRES=on_u("pressure"), PPRIME=on_u("dpressure_dpsi"),
+               FFPRIM=on_u("f_df_dpsi"), QPSI=on_u("q"),
+               PSIRZ=np.asarray(p2["psi"], dtype=float).T,      # [R][Z] -> [Z][R]
+               RBBBS=rb, ZBBBS=zb, RLIM=rb, ZLIM=zb,
+               CURRENT=0.0, RCENTR=float(ax["r"]), BCENTR=0.0)
+    avg = GEQDSKEquilibrium.from_raw(raw, cocos=11, nlevels=nlevels).averages
+    pn_l = np.linspace(0.0, 1.0, nlevels)
+    return {gm: np.interp(pn, pn_l, avg[key]) for gm, key in
+            (("gm1", "1/R**2"), ("gm5", "Btot**2"), ("gm8", "R"), ("gm9", "1/R"))}
+
+
+def _derive_geom_fields(ts, missing):
+    """``missing`` derivable profiles_1d fields of an equilibrium slice:
+    rho_tor_norm from phi (or q), dpressure_dpsi from pressure, gm's from
+    profiles_2d (:func:`_fsa_from_profiles_2d`)."""
+    from scipy.interpolate import CubicSpline
+    p1 = ts["profiles_1d"]
+    psi = np.asarray(p1["psi"], dtype=float)
+    out = {}
+    if "rho_tor_norm" in missing:
+        if p1.get("phi"):
+            phi = np.asarray(p1["phi"], dtype=float)
+        elif p1.get("q"):
+            phi = CubicSpline(psi, np.asarray(p1["q"], dtype=float)).antiderivative()(psi)
+            phi = phi - phi[0]
+        else:
+            raise ValueError("rho_tor_norm needs profiles_1d phi or q")
+        out["rho_tor_norm"] = np.sqrt(np.abs(phi / phi[-1]))
+    if "dpressure_dpsi" in missing:
+        if not p1.get("pressure"):
+            raise ValueError("dpressure_dpsi needs profiles_1d pressure")
+        out["dpressure_dpsi"] = CubicSpline(
+            psi, np.asarray(p1["pressure"], dtype=float)).derivative()(psi)
+    if any(g in missing for g in ("gm1", "gm5", "gm8", "gm9")):
+        out.update(_fsa_from_profiles_2d(ts))
+    return out
 
 
 def _slice_b0(eq, k):
@@ -420,16 +498,26 @@ def _fuse_current_geometry(eq, k, rho=None):
     onto ``rho`` exactly as IMAS.jl ``JparB_2_JtoR`` does (:func:`_imasjl_cubic`).
 
     COCOS 11: p' = -2*pi*dpressure_dpsi; ``B0`` is the slice's signed b0, so
-    ``geom`` takes IMAS <J.B>/B0 directly.
+    ``geom`` takes IMAS <J.B>/B0 directly.  Fields a producer omitted are
+    derived (:func:`_derive_geom_fields`).
     """
-    p1 = eq["time_slice"][k]["profiles_1d"]
+    ts = eq["time_slice"][k]
+    p1 = ts["profiles_1d"]
     missing = [f for f in _FUSE_GEOM_FIELDS if not p1.get(f)]
+    get = {f: np.asarray(p1[f], dtype=float)
+           for f in _FUSE_GEOM_FIELDS if f not in missing}
     if missing:
-        raise ValueError(
-            f"equilibrium.time_slice[{k}].profiles_1d lacks {missing}: the "
-            "IMAS -> TokaMaker current conversion needs the flux-surface "
-            "averages FUSE writes (gm1=<1/R^2>, gm5=<B^2>, gm8=<R>, gm9=<1/R>)")
-    get = {f: np.asarray(p1[f], dtype=float) for f in _FUSE_GEOM_FIELDS}
+        try:
+            if not set(missing) <= set(_DERIVABLE_GEOM_FIELDS):
+                raise ValueError("f is not derivable")
+            get.update(_derive_geom_fields(ts, missing))
+        except (ValueError, KeyError, TypeError, IndexError) as exc:
+            raise ValueError(
+                f"equilibrium.time_slice[{k}].profiles_1d lacks {missing} "
+                f"({exc}): the IMAS -> TokaMaker current conversion needs f and "
+                "the flux-surface averages gm1=<1/R^2>, gm5=<B^2>, gm8=<R>, "
+                "gm9=<1/R> (FUSE writes them), or a rectangular profiles_2d.psi "
+                "with magnetic_axis to compute them from") from exc
     if rho is None:
         at = get
     else:
@@ -449,22 +537,6 @@ def _jtor_from_jpar(j_par, geom):
     return jphi_tokamaker_to_jtor_imas(
         jpar_to_jphi_tokamaker(j_par, geom)
         + jphi_tokamaker_pressure_term(geom), geom)
-
-
-def _legacy_jtor_ratio(j_total, j_tor):
-    """Per-surface j_tor/j_total (zero crossings filled from neighbours): the
-    pre-exact treatment, kept only for dds without equilibrium FSA geometry."""
-    j_total = np.asarray(j_total, dtype=float)
-    j_tor = np.asarray(j_tor, dtype=float)
-    good = np.abs(j_total) > 1e-12 * np.nanmax(np.abs(j_total))
-    if not np.any(good):
-        raise ValueError("j_total is ~0 everywhere; cannot form j_tor/j_total")
-    c = np.ones_like(j_total)
-    c[good] = j_tor[good] / j_total[good]
-    if not np.all(good):
-        idx = np.arange(c.size)
-        c[~good] = np.interp(idx[~good], idx[good], c[good])
-    return c
 
 
 def _paired_current_geometry(eq, cp, t_cp, j_total=None, j_tor=None):
@@ -933,30 +1005,13 @@ def read_imas_baseline(
     j_boot = np.asarray(cp["j_bootstrap"], dtype=float)  # <J.B>/B0 (inductive = residual)
 
     # Exact conversions to TokaMaker jphi on the geometry FUSE used for this
-    # core_profiles slice (see _paired_current_geometry).  A dd without the
-    # equilibrium flux-surface averages (synthetic/non-FUSE) gets the legacy,
-    # INEXACT treatment, loudly.
-    try:
-        cur_geom, cur_meta = _paired_current_geometry(
-            eq, cp, float(cp_ids["time"][ic]), j_total, j_tor)
-    except ValueError as exc:
-        cur_geom, cur_meta = None, None
-        import warnings
-        warnings.warn(
-            f"{exc}. IMAS currents taken WITHOUT exact conversion: j_tor used "
-            "as TokaMaker jphi and components scaled by j_tor/j_total (the "
-            "pressure term is not separated) -- several % off at the edge.")
-    if cur_geom is not None:
-        p_term = jphi_tokamaker_pressure_term(cur_geom)   # p'G -> bootstrap
+    # core_profiles slice (see _paired_current_geometry).
+    cur_geom, cur_meta = _paired_current_geometry(
+        eq, cp, float(cp_ids["time"][ic]), j_total, j_tor)
+    p_term = jphi_tokamaker_pressure_term(cur_geom)       # p'G -> bootstrap
 
-        def to_jphi(j_par):
-            return jpar_to_jphi_tokamaker(j_par, cur_geom)
-    else:
-        p_term = 0.0
-        _c = _legacy_jtor_ratio(j_total, j_tor)
-
-        def to_jphi(j_par):
-            return np.asarray(j_par, dtype=float) * _c
+    def to_jphi(j_par):
+        return jpar_to_jphi_tokamaker(j_par, cur_geom)
     j_BS = to_jphi(j_boot) + p_term
 
     # --- NBI: sum beam-source parallel currents, then convert ---
@@ -1158,20 +1213,18 @@ def read_imas_baseline(
 
     # Authoritative total (IMAS j_tor -> TokaMaker jphi, A5); inductive absorbs
     # the residual so the decomposition sums exactly.
-    j_phi = (j_tor.copy() if cur_geom is None
-             else jtor_imas_to_jphi_tokamaker(j_tor, cur_geom))
+    j_phi = jtor_imas_to_jphi_tokamaker(j_tor, cur_geom)
     j_inductive = j_phi - j_BS - j_NBI - j_RF
-    if cur_geom is not None:
-        _pk = float(np.max(np.abs(j_phi)))
-        _closure = float(np.max(np.abs(to_jphi(j_total) + p_term - j_phi))) / _pk
-        _dconv = (j_phi - j_tor) / _pk
-        print(f"  [imas] currents -> TokaMaker jphi on equilibrium t="
-              f"{cur_meta['time']:.4f} s (core_profiles t="
-              f"{cur_meta['t_core_profiles']:.4f} s; j_tor reproduced to "
-              f"{cur_meta['jtor_mismatch']:.1e}); j_total closure "
-              f"{_closure:.1e} of peak; jphi - j_tor: axis {_dconv[0]:+.2%}, "
-              f"max {_dconv[np.argmax(np.abs(_dconv))]:+.2%} of peak")
-    if cur_geom is not None and not cur_meta["jtor_mismatch"] <= 1e-3:
+    _pk = float(np.max(np.abs(j_phi)))
+    _closure = float(np.max(np.abs(to_jphi(j_total) + p_term - j_phi))) / _pk
+    _dconv = (j_phi - j_tor) / _pk
+    print(f"  [imas] currents -> TokaMaker jphi on equilibrium t="
+          f"{cur_meta['time']:.4f} s (core_profiles t="
+          f"{cur_meta['t_core_profiles']:.4f} s; j_tor reproduced to "
+          f"{cur_meta['jtor_mismatch']:.1e}); j_total closure "
+          f"{_closure:.1e} of peak; jphi - j_tor: axis {_dconv[0]:+.2%}, "
+          f"max {_dconv[np.argmax(np.abs(_dconv))]:+.2%} of peak")
+    if not cur_meta["jtor_mismatch"] <= 1e-3:
         import warnings
         warnings.warn(
             f"core_profiles.j_tor is not reproduced from j_total by any "
@@ -1240,11 +1293,9 @@ def read_imas_baseline(
     jphi_diff = None
     if anchor_jtor_to_equilibrium:
         # IMAS j_tor -> TokaMaker jphi on the slice's own grid (exact), then
-        # onto psi_N (unconverted, like j_phi, on a dd without the geometry).
-        eq_jphi = np.asarray(eqp1["j_tor"], dtype=float)
-        if cur_geom is not None:
-            eq_jphi = jtor_imas_to_jphi_tokamaker(
-                eq_jphi, _fuse_current_geometry(eq, ie))
+        # onto psi_N.
+        eq_jphi = jtor_imas_to_jphi_tokamaker(
+            np.asarray(eqp1["j_tor"], dtype=float), _fuse_current_geometry(eq, ie))
         eq_jtor = np.interp(psi_N, psiN_eq[_o], eq_jphi[_o])
         jphi_diff = eq_jtor - j_phi
 

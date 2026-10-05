@@ -20,6 +20,7 @@ import pytest
 from bouquet.config import ImasSource
 from bouquet.io.imas import (NI_FAST_GATE_PSI_N, NI_FAST_RTOL,
                              _subtract_fast_ni, read_imas_baseline)
+from _imas_geometry import eq_geometry, jtor_from_jtotal
 
 
 # ---------------------------------------------------------------------------
@@ -164,10 +165,12 @@ def _dd(ni_total, ne, nc, fast_frac=0.2, with_fast_density=True):
     ni_th = ni_total - ni_fast
     ti = 2.5e3 * (1.0 - 0.9 * psi ** 2) + 50.0
     te = ti.copy()
-    j_tor = 6.0e5 * (1.0 - psi ** 2)
+    j_total = 6.0e5 * (1.0 - psi ** 2)
     p_fast = 3.0e3 * (1.0 - psi ** 2)
     EC = 1.602176634e-19
     p_eq = EC * (ne * te + ni_th * ti + nc * ti) + p_fast
+    geo = eq_geometry(psi, p_eq)
+    j_tor = jtor_from_jtotal(j_total, geo, -2.0)
 
     d_ion = {"density_thermal": ni_th.tolist(), "temperature": ti.tolist(),
              "label": "D", "element": [{"z_n": 1.0, "a": 2.0}],
@@ -185,16 +188,17 @@ def _dd(ni_total, ne, nc, fast_frac=0.2, with_fast_density=True):
                 "boundary": {"outline": {"r": [1.2, 2.2, 1.7],
                                          "z": [0.0, 0.0, 0.8]}},
                 "profiles_1d": {"psi": psi.tolist(), "pressure": p_eq.tolist(),
-                                "j_tor": j_tor.tolist()},
+                                "j_tor": j_tor.tolist(), **geo},
             }],
         },
         "core_profiles": {
             "time": [1.0],
             "profiles_1d": [{
-                "grid": {"psi": psi.tolist()},
-                "j_tor": j_tor.tolist(), "j_total": j_tor.tolist(),
-                "j_ohmic": (0.9 * j_tor).tolist(),
-                "j_bootstrap": (0.1 * j_tor).tolist(),
+                "grid": {"psi": psi.tolist(),
+                         "rho_tor_norm": geo["rho_tor_norm"]},
+                "j_tor": j_tor.tolist(), "j_total": j_total.tolist(),
+                "j_ohmic": (0.9 * j_total).tolist(),
+                "j_bootstrap": (0.1 * j_total).tolist(),
                 "electrons": {"density_thermal": ne.tolist(),
                               "temperature": te.tolist()},
                 "ion": [d_ion,

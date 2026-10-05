@@ -4,11 +4,10 @@ Synthetic FUSE-shaped dd: two equilibrium slices, core_profiles.j_tor built
 from j_total with the EARLIER slice's geometry (A6, as FUSE does on a
 time-dependent run), a bootstrap and a beam source.  Checks the slice pairing,
 the exact conversions (docs/current-conventions.md A5-A7), that the components
-sum to j_phi, the jphi_diff anchor, and the loud fallback for a dd without the
-equilibrium flux-surface averages.
+sum to j_phi, the jphi_diff anchor, and the averages a non-FUSE dd omits being
+traced from profiles_2d (else an error).
 """
 import json
-import warnings
 
 import numpy as np
 import pytest
@@ -73,9 +72,7 @@ def _dd(with_geometry=True):
                        "global_quantities": {"ip": 1.3e6, "li_3": 0.9}})
     sp = lambda n_, t_, z: {"density_thermal": n_.tolist(), "temperature": t_.tolist(),
                             "element": [{"z_n": z}]}
-    grid = {"psi": _PSI.tolist()}
-    if with_geometry:
-        grid["rho_tor_norm"] = x.tolist()
+    grid = {"psi": _PSI.tolist(), "rho_tor_norm": x.tolist()}
     return {
         "equilibrium": {"time": [0.98, 1.0],
                         "vacuum_toroidal_field": {"r0": 1.69, "b0": _B0},
@@ -135,16 +132,75 @@ def test_jphi_diff_uses_the_anchor_slice_own_geometry(tmp_path):
     assert np.allclose(bl.jphi_diff, eq_jphi - bl.j_phi, rtol=1e-12, atol=1e-6)
 
 
-def test_dd_without_geometry_falls_back_loudly(tmp_path):
-    dd, raw = _dd(with_geometry=False)
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        bl = _read(tmp_path, dd)
-    assert any("WITHOUT exact conversion" in str(x.message) for x in w)
-    c = raw["j_tor"] / raw["j_total"]                         # legacy treatment
-    assert np.allclose(bl.j_phi, raw["j_tor"])
-    assert np.allclose(bl.j_BS, raw["j_bs"] * c)
-    assert np.allclose(bl.j_inductive + bl.j_BS + bl.j_NBI + bl.j_RF, bl.j_phi)
+def test_dd_without_geometry_or_profiles_2d_raises(tmp_path):
+    dd, _ = _dd(with_geometry=False)
+    with pytest.raises(ValueError, match="profiles_2d"):
+        _read(tmp_path, dd)
+
+
+# Concentric circular surfaces, psi ~ r^2: weight dl/Bp ~ R dtheta, so
+# <1/R> = 1/R0, <R> = R0 + r^2/(2R0), <1/R^2> = 1/(R0 sqrt(R0^2 - r^2)),
+# <B^2> = (F^2 + c^2 r^2)<1/R^2> with Bp = c r/R (COCOS 11), c = dpsi/(pi a^2).
+_R0, _A, _F = 1.7, 0.6, -3.4
+_SQRT_PSIN = np.sqrt((_PSI - _PSI[0]) / (_PSI[-1] - _PSI[0]))   # r/a; rho_tor_norm at constant q
+
+
+def _circular_slice(n2=65):
+    R = np.linspace(0.9, 2.5, n2)
+    Z = np.linspace(-0.8, 0.8, n2)
+    RR, ZZ = np.meshgrid(R, Z, indexing="ij")
+    dpsi = _PSI[-1] - _PSI[0]
+    th = np.linspace(0, 2 * np.pi, 201)[:-1]
+    r = _A * _SQRT_PSIN
+    c = dpsi / (np.pi * _A**2)
+    inv_R2 = 1 / (_R0 * np.sqrt(_R0**2 - r**2))
+    exact = {"gm9": np.full(_N, 1 / _R0), "gm8": _R0 + r**2 / (2 * _R0),
+             "gm1": inv_R2, "gm5": (_F**2 + c**2 * r**2) * inv_R2}
+    ts = {"profiles_1d": {"psi": _PSI.tolist(), "f": [_F] * _N,
+                          "q": [2.0] * _N},       # constant q: rho = sqrt(psi_N)
+          "profiles_2d": [{"grid_type": {"index": 1},
+                           "grid": {"dim1": R.tolist(), "dim2": Z.tolist()},
+                           "psi": (_PSI[0] + dpsi * ((RR - _R0)**2 + ZZ**2)
+                                   / _A**2).tolist()}],
+          "global_quantities": {"magnetic_axis": {"r": _R0, "z": 0.0}},
+          "boundary": {"outline": {"r": (_R0 + _A * np.cos(th)).tolist(),
+                                   "z": (_A * np.sin(th)).tolist()}}}
+    return ts, exact
+
+
+def test_averages_from_profiles_2d_match_the_analytic_circle():
+    from bouquet.io.imas import _fsa_from_profiles_2d
+    ts, exact = _circular_slice()
+    got = _fsa_from_profiles_2d(ts)
+    for k, v in exact.items():
+        np.testing.assert_allclose(got[k], v, rtol=1e-4, err_msg=k)
+
+
+def test_reader_computes_missing_averages_from_profiles_2d(tmp_path):
+    from scipy.interpolate import CubicSpline
+    ts, exact = _circular_slice()
+    dd, raw = _dd()
+    for s in dd["equilibrium"]["time_slice"]:          # the FUSE-complete dd
+        p1 = s["profiles_1d"]
+        p1.update({k: v.tolist() for k, v in exact.items()},
+                  f=[_F] * _N, rho_tor_norm=_SQRT_PSIN.tolist(),
+                  dpressure_dpsi=CubicSpline(_PSI, p1["pressure"]).derivative()(_PSI).tolist())
+    dd["core_profiles"]["profiles_1d"][0]["grid"]["rho_tor_norm"] = _SQRT_PSIN.tolist()
+    g = _geom(dd["equilibrium"]["time_slice"][0]["profiles_1d"], _B0[0])
+    dd["core_profiles"]["profiles_1d"][0]["j_tor"] = jphi_tokamaker_to_jtor_imas(
+        jpar_to_jphi_tokamaker(raw["j_total"], g) + jphi_tokamaker_pressure_term(g),
+        g).tolist()
+    ref = _read(tmp_path, dd)
+    for s in dd["equilibrium"]["time_slice"]:          # what a non-FUSE dd has
+        for k in ("gm1", "gm5", "gm8", "gm9", "rho_tor_norm", "dpressure_dpsi"):
+            s["profiles_1d"].pop(k)
+        s["profiles_1d"]["q"] = ts["profiles_1d"]["q"]
+        s.update({k: ts[k] for k in ("profiles_2d", "boundary")})
+        s["global_quantities"].update(ts["global_quantities"])
+    bl = _read(tmp_path, dd)
+    pk = np.max(np.abs(ref.j_phi))
+    for name in ("j_phi", "j_BS", "j_NBI", "j_inductive", "jphi_diff"):
+        assert np.max(np.abs(getattr(bl, name) - getattr(ref, name))) < 2e-4 * pk, name
 
 
 def test_pairing_prefers_the_slice_that_reproduces_j_tor(tmp_path, capsys):
