@@ -42,6 +42,9 @@ from . import coords
 #: imas_baseline="swb": largest |Ip/Ip_target - 1| a solve may land at
 #: (converged SWB: ~1e-3; a frozen-alpha drift: several %).
 SWB_IP_TOL = 5e-3
+# swb draw-loop maxits cap: converged rt66 draws took <= 44 its; a stuck one (a 2-cycle just above
+# nl_tol) ran all 800 for ~27 min. Past it, DrawSolveGuard's loose-tol rescue applies as off swb.
+SWB_DRAW_MAXITS = 100
 
 
 class Bouquet:
@@ -3070,6 +3073,7 @@ class Bouquet:
                 and st_b["j_fixed"] is not None):
             f = np.where(np.abs(jf_in) > 0.0,
                          st_b["j_fixed"] / np.where(jf_in != 0.0, jf_in, 1.0), 1.0)
+            f = np.where(np.abs(f - 1.0) > 1e-9, f, 1.0)   # untapered nodes stay bit-identical
             for name in ("j_NBI", "j_RF", "j_other"):
                 if getattr(bl, name, None) is not None:
                     setattr(bl, name, f * np.asarray(getattr(bl, name), dtype=float))
@@ -3728,10 +3732,11 @@ class Bouquet:
         verbose = bool(getattr(self.config, "verbose", False))
         # Draw-loop maxits cap + failed-solve record (DrawSolveGuard).
         with capture_native_output(enabled=not verbose) as _cap, \
-                DrawSolveGuard(self.mygs, None if _swb else gc.draw_solve_maxits,
-                               retry_urf=() if _swb else gc.draw_solve_retry_urf,
-                               loose_tol=None if _swb else gc.draw_solve_loose_tol
-                               ) as _solve_guard:
+                DrawSolveGuard(self.mygs,
+                               max(SWB_DRAW_MAXITS, gc.draw_solve_maxits or 0) if _swb
+                               else gc.draw_solve_maxits,
+                               retry_urf=gc.draw_solve_retry_urf,
+                               loose_tol=gc.draw_solve_loose_tol) as _solve_guard:
             self.diagnostics = generate_bouquet(
                 self.mygs, np.asarray(bl.psi_N, dtype=float), n_equils, header,
                 np.asarray(bl.j_phi, dtype=float),

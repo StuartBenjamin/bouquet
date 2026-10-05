@@ -238,3 +238,4 @@ def test_edge_taper_keeps_the_channel_split(monkeypatch, swb_oft, taper):
     assert np.max(np.abs(total - bl.j_phi)) <= 1e-9 * np.max(np.abs(bl.j_phi))
     assert np.allclose(bl.swb_jphi_fixed, j_nbi + j_rf + j_oth, rtol=1e-12, atol=1e-6)  # draws: untapered
     assert np.allclose(bl.j_NBI, j_nbi * fac, rtol=1e-12, atol=1e-6)
+    assert np.array_equal(bl.j_other[fac == 1.0], j_oth[fac == 1.0])   # untapered: untouched
