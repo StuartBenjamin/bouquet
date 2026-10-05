@@ -15,7 +15,9 @@ h5py = pytest.importorskip("h5py")
 
 from bouquet.config import ImasSource
 from bouquet.io.imas import read_imas_baseline, write_imas_draw
-from bouquet.physics import toroidal_to_parallel
+from bouquet.io.imas import _fuse_current_geometry
+from bouquet.physics import (jphi_tokamaker_pressure_term, jphi_tokamaker_to_jpar,
+                             jphi_tokamaker_to_jtor_imas, jtor_imas_to_jphi_tokamaker)
 from test_ni_fast_subtraction import N, _dd
 from test_imas_export import (_B0, _EQ_FSA, _GEQ, _J_BS, _J_IND, _J_PHI,
                               _PEQ, _PF, _make_archive, _make_template)
@@ -40,9 +42,10 @@ def _write_dd(tmp_path, rho=RHO, rho_eq=RHO_EQ, eq_q=True):
         cp["grid"]["rho_tor_norm"] = np.asarray(rho).tolist()
     # equilibrium on its own grid, with its own rho_tor_norm
     eqp = dd["equilibrium"]["time_slice"][0]["profiles_1d"]
-    for k in ("pressure", "j_tor"):
+    for k in ("pressure", "j_tor", "f", "gm1", "gm5", "gm8", "gm9", "dpressure_dpsi"):
         eqp[k] = np.interp(PSI_EQ, PSI, eqp[k]).tolist()
     eqp["psi"] = PSI_EQ.tolist()
+    eqp.pop("rho_tor_norm", None)
     if rho_eq is not None:
         eqp["rho_tor_norm"] = np.asarray(rho_eq).tolist()
     eqp.pop("q", None)
@@ -72,7 +75,10 @@ class TestReadPhi:
         bp, bf = _read(ddp, "psi_n"), _read(ddp, "phi_n")
         phi_eq = _norm(RHO_EQ ** 2)
         exp_p = np.interp(bf.psi_N, phi_eq, eqp["pressure"])
-        exp_j = np.interp(bf.psi_N, phi_eq, eqp["j_tor"])
+        eq_jphi = jtor_imas_to_jphi_tokamaker(            # on the slice's own geometry
+            np.asarray(eqp["j_tor"]),
+            _fuse_current_geometry(json.load(open(ddp))["equilibrium"], 0))
+        exp_j = np.interp(bf.psi_N, phi_eq, eq_jphi)
         np.testing.assert_allclose(bf.p_equilibrium, exp_p, rtol=1e-12)
         np.testing.assert_allclose(bf.jphi_diff + bf.j_phi, exp_j, rtol=1e-12)
         # psi_n keeps the psi_N placement, which differs here
@@ -95,7 +101,11 @@ class TestReadPhi:
         ddp, _ = _write_dd(tmp_path, **kw)
         with pytest.raises(ValueError, match="rho_tor_norm"):
             _read(ddp, "phi_n")
-        _read(ddp, "psi_n")                  # psi_n never looks at rho
+        if which == "eq" and bad == "missing":   # nor q: the current conversion
+            with pytest.raises(ValueError, match="rho_tor_norm"):   # interpolates in rho
+                _read(ddp, "psi_n")
+        else:
+            _read(ddp, "psi_n")              # psi_n placement never looks at rho
 
     def test_an_equilibrium_without_rho_is_placed_by_its_q(self, tmp_path):
         from bouquet.coords import phi_n_from_q
@@ -145,7 +155,7 @@ class TestWriteDrawPhi:
             g.create_dataset("aux_zeff", data=self.zeff)
             if coord == "phi_n":
                 hf.require_group("scan/0/_baseline").attrs["profile_coord"] = "phi_n"
-        tmpl = str(tmp_path / "tmpl.json"); psi = _make_template(tmpl)
+        tmpl = str(tmp_path / "tmpl.json"); psi, _ = _make_template(tmpl)
         psiN_t = _norm(psi)
         rho = psiN_t ** 0.4
         t = json.load(open(tmpl))
@@ -173,14 +183,24 @@ class TestWriteDrawPhi:
         np.testing.assert_allclose(ion["temperature"],
                                    np.interp(x, pk, s["T_i"] * np.linspace(1, .1, 20)), rtol=1e-12)
         np.testing.assert_allclose(cp["zeff"], np.interp(x, pk, self.zeff), rtol=1e-12)
-        np.testing.assert_allclose(cp["j_tor"], np.interp(x, _PEQ, _J_PHI), rtol=1e-12)
 
     def _geom(self, psiN):
         return {"F": np.interp(psiN, _PF, _EQ_FSA["F"]),
                 "avg_inv_R": np.interp(psiN, _PF, _EQ_FSA["avg_inv_R"]),
                 "avg_B2": np.interp(psiN, _PF, _EQ_FSA["avg_B2"]),
                 "avg_inv_R2": np.interp(psiN, _PF, _EQ_FSA["avg_inv_R2"]),
+                "avg_R": np.interp(psiN, _PF, _EQ_FSA["avg_R"]),
+                "pprime": np.interp(psiN, _PF, _EQ_FSA["pprime"]),
                 "B0": _B0}
+
+    def _check_currents(self, cp, x, geom):
+        pt = jphi_tokamaker_pressure_term(geom)
+        at = lambda j: np.interp(x, _PEQ, j)            # noqa: E731
+        np.testing.assert_allclose(cp["j_tor"], jphi_tokamaker_to_jtor_imas(at(_J_PHI), geom),
+                                   rtol=1e-10)
+        for k, j, p in (("j_total", _J_PHI, pt), ("j_ohmic", _J_IND, 0.0),
+                        ("j_bootstrap", _J_BS, pt)):
+            np.testing.assert_allclose(cp[k], jphi_tokamaker_to_jpar(at(j) - p, geom), rtol=1e-10)
 
     def test_a_phi_archive_lands_on_rho2_and_uses_the_draw_psi(self, tmp_path):
         cp, _, psiN_t, rho = self._setup(tmp_path, "phi_n")
@@ -189,10 +209,7 @@ class TestWriteDrawPhi:
         geq = self._geq()
         psiN_d = np.interp(x, _norm(np.asarray(geq.rhovn) ** 2), geq.psi_N)
         assert np.max(np.abs(psiN_d - psiN_t)) > 1e-3   # the maps differ
-        geom = self._geom(psiN_d)
-        for k, j in (("j_total", _J_PHI), ("j_ohmic", _J_IND), ("j_bootstrap", _J_BS)):
-            np.testing.assert_allclose(
-                cp[k], toroidal_to_parallel(np.interp(x, _PEQ, j), geom=geom), rtol=1e-10)
+        self._check_currents(cp, x, self._geom(psiN_d))
         np.testing.assert_allclose(
             cp["grid"]["psi"],
             geq.psi_axis + psiN_d * (geq.psi_boundary - geq.psi_axis), rtol=1e-12)
@@ -202,7 +219,4 @@ class TestWriteDrawPhi:
         cp, psi, psiN_t, _ = self._setup(tmp_path, "psi_n")
         self._check_channels(cp, psiN_t)
         np.testing.assert_array_equal(cp["grid"]["psi"], psi)
-        np.testing.assert_allclose(
-            cp["j_total"],
-            toroidal_to_parallel(np.interp(psiN_t, _PEQ, _J_PHI),
-                                 geom=self._geom(psiN_t)), rtol=1e-10)
+        self._check_currents(cp, psiN_t, self._geom(psiN_t))

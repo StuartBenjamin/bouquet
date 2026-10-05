@@ -1,21 +1,36 @@
 """Physics reductions shared by the baseline resolvers.
 
-Two conversions are needed to bring heterogeneous inputs into bouquet's internal
-conventions:
-
   * :func:`isotropize_fast_pressure` -- collapse an anisotropic (gyrotropic)
     fast-ion pressure to a single scalar, since TokaMaker solves a scalar-pressure
     Grad-Shafranov equation.
 
-  * :func:`parallel_to_toroidal` -- convert a flux-surface-averaged *parallel*
-    current density <j.B>/B0 (the IMAS / neoclassical convention for j_ohmic,
-    j_bootstrap, and the driven currents) to the *toroidal* current density
-    <j_phi/R>/<1/R>. bouquet stores every current component as toroidal j_phi.
+  * Current-density conventions (derivation: ``docs/current-conventions.md``).
+    With j_phi = R p' + FF'/(mu0 R) (TokaMaker sign, psi per radian) and FSA <.>:
+
+      - TokaMaker ``jphi``  J_TM   = <j_phi>          = <R> p' + <1/R> FF'/mu0
+      - IMAS ``j_tor``      J_IMAS = <j_phi/R>/<1/R>  = (p' + <1/R^2> FF'/mu0)/<1/R>
+
+    Every bouquet current array (j_phi, j_inductive, j_BS, j_NBI, j_RF, ...) is
+    TokaMaker ``jphi`` -- what ``set_profiles`` / ``jphi-linterp`` consume and
+    what ``solve_with_bootstrap`` returns.  IMAS/FUSE/FRESCO ``j_tor`` is J_IMAS;
+    IMAS ``j_total`` / ``j_bootstrap`` / ``j_ohmic`` / source ``j_parallel`` are
+    <J.B>/B0.  Exact conversions:
+
+      (A5) J_TM <-> J_IMAS        :func:`jtor_imas_to_jphi_tokamaker`,
+                                  :func:`jphi_tokamaker_to_jtor_imas`
+      (A7) J_TM = F<1/R><J.B>/<B^2> + p' G,   G = <R> - F^2 <1/R>/<B^2>
+                                  :func:`jpar_to_jphi_tokamaker` (first term),
+                                  :func:`jphi_tokamaker_pressure_term` (p' G),
+                                  :func:`jphi_tokamaker_to_jpar` (inverse of
+                                  the first term)
+
+    For a split <J.B> = sum_k <J.B>_k each component converts with the
+    field-aligned term alone; the single pressure term p'G (diamagnetic +
+    Pfirsch-Schlueter) is assigned to the bootstrap, as IMAS.jl does with
+    ``includes_bootstrap=true``.
 """
 
 from __future__ import annotations
-
-from typing import Optional
 
 import numpy as np
 
@@ -134,176 +149,72 @@ def isotropize_fast_pressure(p_perp, p_par, method: str):
     )
 
 
-def parallel_to_toroidal(
-    j_parallel,
-    *,
-    j_parallel_total=None,
-    j_tor_total=None,
-    geom: Optional[dict] = None,
-):
-    """Convert FSA parallel current density <j.B>/B0 to toroidal <j_phi/R>/<1/R>.
+#: ``geom`` keys of the current-convention helpers (per-surface arrays):
+#: ``F`` = R B_phi [T m], ``avg_R`` = <R> [m], ``avg_inv_R`` = <1/R> [1/m],
+#: ``avg_inv_R2`` = <1/R^2> [1/m^2], ``avg_B2`` = <B^2> [T^2], ``pprime`` =
+#: dp/dpsi in the sign/normalisation of the J being converted (TokaMaker psi
+#: per radian; on IMAS COCOS-11 data use -2*pi*dpressure_dpsi), and optional
+#: scalar ``B0``: when present the parallel side is the IMAS <J.B>/B0
+#: (multiplied by B0 on input, divided on output); absent = raw <J.B>.
+CURRENT_GEOM_KEYS = ("F", "avg_R", "avg_inv_R", "avg_inv_R2", "avg_B2", "pprime")
 
-    bouquet stores all current components (inductive/ohmic, bootstrap, NBI, RF)
-    as toroidal j_phi. IMAS/neoclassical outputs are parallel; this applies the
-    per-flux-surface geometric conversion. The correction is typically modest but
-    grows toward the edge / at low aspect ratio.
 
-    This is needed in TWO places, not just on IMAS input:
-      * IMAS-input bootstrap/ohmic/driven currents (use the *ratio* method).
-      * bouquet's OWN recomputed bootstrap -- TokaMaker ``solve_with_bootstrap``
-        returns a *parallel* j_BS, which must be converted here before it
-        replaces the baseline j_BS (when ``recalculate_j_BS`` is True). Use the
-        *analytic* method with the TokaMaker equilibrium's FSA metrics.
+def _geom(geom, *keys):
+    """Float arrays for ``keys`` from ``geom``; ValueError naming any missing."""
+    missing = [k for k in keys if geom is None or geom.get(k) is None]
+    if missing:
+        raise ValueError(f"geom is missing {missing} (current-convention "
+                         f"helpers take {list(CURRENT_GEOM_KEYS)} + optional 'B0')")
+    return [np.asarray(geom[k], dtype=float) for k in keys]
 
-    Two methods:
 
-    * **ratio** (preferred, used for FUSE input) -- when the source provides both
-      the total parallel current and the total toroidal current (FUSE
-      ``core_profiles`` carries ``j_total`` *and* ``j_tor``), form the per-surface
-      factor ``c(psi) = j_tor_total / j_parallel_total`` and apply it to the
-      component. Exact to the geometric mapping shared by field-aligned
-      components; self-consistent with the source equilibrium.
+def jpar_to_jphi_tokamaker(j_dot_B, geom):
+    """Field-aligned TokaMaker ``jphi`` of a parallel current: F<1/R><J.B>/<B^2>.
 
-    * **analytic** -- compute from equilibrium FSA metrics in ``geom`` when
-      totals are unavailable (the reconstruction path, and bouquet's own
-      per-draw ``solve_with_bootstrap`` output). Models the component as
-      field-aligned, ``j = lambda(psi) B`` with ``lambda = <j.B>/<B^2>``
-      (the standard treatment of the neoclassical banana-plateau /
-      driven currents; the Pfirsch-Schlueter return current, which has
-      ``<j_PS.B> = 0``, is by construction not part of the component), so
-
-          j_tor = <j_phi/R>/<1/R> = lambda * F * <1/R^2> / <1/R>
-                = <j.B> * F * <1/R^2> / (<B^2> <1/R>)
-                = <j.B> / (F <1/R>) * [<B_phi^2>/<B^2>]
-
-      using ``<B_phi^2> = F^2 <1/R^2>`` (exact, since ``B_phi = F/R``).
-      ``geom`` keys:
-
-        ``F``          flux function ``R*B_phi`` [T m]
-        ``avg_inv_R``  ``<1/R>`` [1/m]
-        ``avg_B2``     ``<B^2>`` [T^2]
-        ``avg_inv_R2`` ``<1/R^2>`` [1/m^2], OPTIONAL -- when absent the
-                       bracket ``<B_phi^2>/<B^2>`` is taken as 1,
-                       neglecting ``<B_p^2>/<B^2> ~ (eps/q)^2`` (sub-1%%
-                       at a DIII-D edge); the retained ``1/(F<1/R>)``
-                       projection carries the O(eps^2) geometry.
-        ``B0``         normalisation of the input, OPTIONAL (default 1):
-                       pass the IMAS ``vacuum_toroidal_field`` B0 when
-                       ``j_parallel`` is the IMAS convention ``<j.B>/B0``;
-                       leave at 1 when passing raw ``<j.B>`` [T A/m^2].
-
-    Pass either (``j_parallel_total``, ``j_tor_total``) for the ratio method or
-    ``geom`` for the analytic method.
+    First term of (A7), ``docs/current-conventions.md``.  ``j_dot_B`` is raw
+    <J.B> [T A/m^2], or IMAS <J.B>/B0 when ``geom['B0']`` is set.  Excludes
+    the pressure term (:func:`jphi_tokamaker_pressure_term`).
     """
-    j_parallel = np.asarray(j_parallel, dtype=float)
-
-    if j_parallel_total is not None and j_tor_total is not None:
-        j_parallel_total = np.asarray(j_parallel_total, dtype=float)
-        j_tor_total = np.asarray(j_tor_total, dtype=float)
-        # Per-surface geometric factor c(psi) = j_tor_total / j_parallel_total,
-        # shared by all field-aligned components. Guard the on-axis / low-current
-        # surfaces where the total parallel current passes through zero: there the
-        # ratio is ill-defined, so fall back to the nearest well-defined factor.
-        eps = 1e-12 * np.nanmax(np.abs(j_parallel_total)) if j_parallel_total.size else 0.0
-        good = np.abs(j_parallel_total) > eps
-        if not np.any(good):
-            raise ValueError("j_parallel_total is ~0 everywhere; cannot form ratio")
-        c = np.ones_like(j_parallel_total)
-        c[good] = j_tor_total[good] / j_parallel_total[good]
-        if not np.all(good):
-            # nearest-neighbour fill for the masked (near-zero) surfaces
-            idx = np.arange(c.size)
-            c[~good] = np.interp(idx[~good], idx[good], c[good])
-        return j_parallel * c
-
-    if geom is not None:
-        try:
-            F = np.asarray(geom["F"], dtype=float)
-            avg_inv_R = np.asarray(geom["avg_inv_R"], dtype=float)
-            avg_B2 = np.asarray(geom["avg_B2"], dtype=float)
-        except KeyError as missing:
-            raise ValueError(
-                f"geom is missing required key {missing} "
-                "(need 'F', 'avg_inv_R', 'avg_B2'; optional 'avg_inv_R2', 'B0')"
-            ) from None
-        j_dot_B = j_parallel * float(geom.get("B0", 1.0))
-        # field-aligned component: j_tor = <j.B> F <1/R^2> / (<B^2> <1/R>);
-        # F^2 <1/R^2> == <B_phi^2>, ~= <B^2> when <1/R^2> is unavailable
-        # (neglects <B_p^2>/<B^2> ~ (eps/q)^2).
-        if "avg_inv_R2" in geom and geom["avg_inv_R2"] is not None:
-            bphi2_over_B2 = F**2 * np.asarray(geom["avg_inv_R2"], dtype=float) / avg_B2
-        else:
-            bphi2_over_B2 = 1.0
-        return j_dot_B * bphi2_over_B2 / (F * avg_inv_R)
-
-    raise ValueError(
-        "provide either (j_parallel_total, j_tor_total) for the ratio method "
-        "or geom for the analytic method"
-    )
+    F, inv_R, B2 = _geom(geom, "F", "avg_inv_R", "avg_B2")
+    jB = np.asarray(j_dot_B, dtype=float) * float(geom.get("B0", 1.0))
+    return F * inv_R * jB / B2
 
 
-def toroidal_to_parallel(j_tor, *, geom: dict):
-    """Inverse of :func:`parallel_to_toroidal` (analytic method).
+def jphi_tokamaker_pressure_term(geom):
+    """Pressure-driven TokaMaker ``jphi``: p'(<R> - F^2<1/R>/<B^2>) (A7)."""
+    F, R, inv_R, B2, pp = _geom(geom, "F", "avg_R", "avg_inv_R", "avg_B2",
+                                "pprime")
+    return pp * (R - F * F * inv_R / B2)
 
-    Convert bouquet's toroidal current density ``<j_phi/R>/<1/R>`` back to the
-    IMAS flux-surface-averaged parallel current ``<j.B>/B0``. This is the
-    write-back direction: bouquet stores every current component (ohmic,
-    bootstrap, driven) as toroidal ``j_phi``; IMAS ``core_profiles.j_ohmic /
-    j_bootstrap / j_total`` are parallel ``<j.B>/B0`` (EUROfusion/IMAS
-    convention, with ``j_phi == <J^phi>/<1/R>``). Uses the draw's OWN
-    flux-surface-averaged (FSA) geometry, so it is exact per surface -- unlike
-    the interim baseline-ratio reconstruction it replaces.
 
-    Physics (verified against Wesson 4th ed. sec 4.4 -- FSA
-    ``<A> = oint (A/B_p) dl / oint dl/B_p``, and the field-aligned /
-    Pfirsch-Schlueter decomposition with ``<j_PS.B> = 0``). For a field-aligned
-    component ``j = lambda(psi) B`` with ``lambda = <j.B>/<B^2>`` and
-    ``B_phi = F/R``:
+def jphi_tokamaker_to_jpar(jphi, geom):
+    """Inverse of :func:`jpar_to_jphi_tokamaker`: <J.B> = jphi <B^2>/(F<1/R>).
 
-        j_tor = <j_phi/R>/<1/R> = <j.B> F <1/R^2> / (<B^2> <1/R>)
-
-    so the inverse is
-
-        <j.B> = j_tor <B^2> <1/R> / (F <1/R^2>)
-              = j_tor F <1/R> [<B^2>/<B_phi^2>]      (<B_phi^2> = F^2 <1/R^2>)
-
-    and the IMAS parallel current is ``<j.B>/B0``.
-
-    ``geom`` keys (all per-surface arrays unless noted):
-
-        ``F``          flux function ``R*B_phi`` [T m]
-        ``avg_inv_R``  ``<1/R>`` [1/m]
-        ``avg_B2``     ``<B^2>`` [T^2]
-        ``avg_inv_R2`` ``<1/R^2>`` [1/m^2], OPTIONAL -- when absent the exact
-                       ``<B_phi^2> = F^2 <1/R^2>`` is unavailable and the
-                       bracket ``<B^2>/<B_phi^2>`` is taken as 1, neglecting
-                       ``<B_p^2>/<B^2> ~ (eps/q)^2`` (~<1%% at a DIII-D edge).
-                       Provide it (from the captured live equilibrium) for a
-                       machine-exact conversion.
-        ``B0``         output normalisation (default 1): pass the IMAS
-                       ``vacuum_toroidal_field`` B0 to return ``<j.B>/B0``;
-                       leave at 1 to return raw ``<j.B>`` [T A/m^2].
-
-    Round-trips with :func:`parallel_to_toroidal` (analytic) to machine
-    precision when the same ``geom`` (including ``avg_inv_R2``) is used.
+    ``jphi`` must be the field-aligned part only (subtract
+    :func:`jphi_tokamaker_pressure_term` from a total or a bootstrap first).
+    Returns raw <J.B>, or IMAS <J.B>/B0 when ``geom['B0']`` is set.
     """
-    j_tor = np.asarray(j_tor, dtype=float)
-    try:
-        F = np.asarray(geom["F"], dtype=float)
-        avg_inv_R = np.asarray(geom["avg_inv_R"], dtype=float)
-        avg_B2 = np.asarray(geom["avg_B2"], dtype=float)
-    except KeyError as missing:
-        raise ValueError(
-            f"geom is missing required key {missing} "
-            "(need 'F', 'avg_inv_R', 'avg_B2'; optional 'avg_inv_R2', 'B0')"
-        ) from None
-    if "avg_inv_R2" in geom and geom["avg_inv_R2"] is not None:
-        # <B^2>/<B_phi^2>, exact (B_phi = F/R -> <B_phi^2> = F^2 <1/R^2>)
-        B2_over_Bphi2 = avg_B2 / (F**2 * np.asarray(geom["avg_inv_R2"], dtype=float))
-    else:
-        B2_over_Bphi2 = 1.0
-    j_dot_B = j_tor * F * avg_inv_R * B2_over_Bphi2       # raw <j.B> [T A/m^2]
-    return j_dot_B / float(geom.get("B0", 1.0))           # IMAS <j.B>/B0
+    F, inv_R, B2 = _geom(geom, "F", "avg_inv_R", "avg_B2")
+    jB = np.asarray(jphi, dtype=float) * B2 / (F * inv_R)
+    return jB / float(geom.get("B0", 1.0))
+
+
+def jtor_imas_to_jphi_tokamaker(j_tor, geom):
+    """IMAS ``j_tor`` -> TokaMaker ``jphi`` (A5):
+    J_TM = <R>p' + <1/R>(J_IMAS<1/R> - p')/<1/R^2>."""
+    R, inv_R, inv_R2, pp = _geom(geom, "avg_R", "avg_inv_R", "avg_inv_R2",
+                                 "pprime")
+    J = np.asarray(j_tor, dtype=float)
+    return R * pp + inv_R * (J * inv_R - pp) / inv_R2
+
+
+def jphi_tokamaker_to_jtor_imas(jphi, geom):
+    """TokaMaker ``jphi`` -> IMAS ``j_tor`` (A5, inverse):
+    J_IMAS = [p' + <1/R^2>(J_TM - <R>p')/<1/R>]/<1/R>."""
+    R, inv_R, inv_R2, pp = _geom(geom, "avg_R", "avg_inv_R", "avg_inv_R2",
+                                 "pprime")
+    J = np.asarray(jphi, dtype=float)
+    return (pp + inv_R2 * (J - R * pp) / inv_R) / inv_R
 
 
 def _fsa_over_contour(R, Z, Bp, field):
@@ -390,9 +301,8 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
 
     Called at generate time on the converged ``mygs`` (right where the eqdsk is
     saved) so a perturbed draw's OWN flux-surface geometry travels with it into
-    the archive, enabling an **exact** per-draw toroidal->parallel conversion at
-    IDS write-back (:func:`toroidal_to_parallel`) instead of the interim
-    baseline-ratio reconstruction.
+    the archive, enabling the **exact** per-draw TokaMaker-jphi -> IMAS
+    conversions at IDS write-back (module docstring; ``io.imas.write_imas_draw``).
 
     Returns a dict of 1-D arrays on a uniform ``psi_N`` grid of ``npsi`` points
     (default 257 to match the archived eqdsk; do not go below ~129 -- the edge
@@ -400,6 +310,9 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
 
         ``psi_N``       normalised poloidal flux, [npsi]
         ``F``           R*B_phi flux function [T m]           (get_profiles)
+        ``pprime``      p' [Pa/Wb], signed so ``jphi_eq`` > 0   (get_profiles)
+        ``jphi_eq``     own TokaMaker jphi <R>p' + <1/R>FF'/mu0  [A/m^2]
+        ``avg_R``       <R> [m]                               (get_q)
         ``avg_inv_R``   <1/R> [1/m]                           (sauter_fc)
         ``avg_inv_R2``  <1/R^2> [1/m^2]                       (exact quadrature)
         ``avg_B2``      <B^2> [T^2]                           (sauter_fc)
@@ -410,9 +323,8 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
 
     ``exact_inv_R2`` (default True) computes ``<1/R^2>`` -- which TokaMaker does
     not expose -- by flux-surface quadrature over traced contours
-    (:func:`_capture_exact_inv_R2`), making :func:`toroidal_to_parallel`
-    machine-exact instead of relying on ``<B_phi^2> ~= <B^2>`` (the
-    ``<B_p^2>/<B^2> ~ (eps/q)^2 ~<1%%`` bracket). By default it is traced on the
+    (:func:`_capture_exact_inv_R2`); the IMAS ``j_tor`` conversion (A5) needs
+    it, so a capture without it cannot be exported exactly. By default it is traced on the
     FULL ``npsi`` grid -- same resolution as every other metric, most accurate
     at the edge where the surfaces bunch up and the bootstrap peaks; the trace
     is cheap (a few ms/surface, ~2 s at npsi=257). ``inv_R2_npsi`` (default
@@ -420,11 +332,10 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
     spline it onto ``psi_N`` -- only worth it for very large bouquets. The
     quadrature is **self-validated** each call: its independently-recomputed
     ``<1/R>`` must agree with ``sauter_fc`` to ``inv_R2_check_rtol`` (default
-    2%), else ``avg_inv_R2`` is dropped (with a warning) and the conversion
-    falls back to the ``<1%`` bracket -- never silently wrong.
+    2%), else ``avg_inv_R2`` is dropped (with a warning) -- never silently
+    wrong.
 
-    Set ``exact_inv_R2=False`` to skip the ``<1/R^2>`` surface traces entirely
-    (bracket fallback) if the capture cost is ever material.
+    Set ``exact_inv_R2=False`` to skip the ``<1/R^2>`` surface traces entirely.
 
     Pure extraction (no re-solve); ``mygs`` is passed in so this module stays
     OFT-import-free / headless-safe.
@@ -432,8 +343,8 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
     import warnings
     psi_hat = np.linspace(psi_pad, 1.0 - psi_pad, int(npsi))
 
-    # F(psi) = R*B_phi from the G-S source profiles
-    _, F, _Fp, _P, _Pp = mygs.get_profiles(psi=psi_hat)
+    # F(psi) = R*B_phi and p' from the G-S source profiles
+    _, F, Fp, _P, Pp = mygs.get_profiles(psi=psi_hat)
 
     # <1/R>, <B^2>, f_c from the Sauter flux-surface coefficients. OFT actually
     # returns (psi_hat, f_c, r_avgs, [<|B|>,<|B|^2>]) -- a leading psi grid the
@@ -457,9 +368,21 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
     _, q, geo_q, *_rest = mygs.get_q(psi=psi_hat, compute_geo=True)
     dV_dpsi = q_ravg(geo_q, "dV/dPsi")
 
+    # get_profiles' p' sign follows the case's flux convention: sign it so the
+    # equilibrium's own TokaMaker jphi is positive, like bouquet's arrays (the
+    # same rule as utils.eq_jphi_profile's pprime_sign).
+    F = np.asarray(F, dtype=float)
+    avg_R = np.asarray(q_ravg(geo_q, "<R>"), dtype=float)
+    jphi_eq = (avg_R * np.asarray(Pp, dtype=float) + np.asarray(avg_inv_R, float)
+               * F * np.asarray(Fp, dtype=float) / (4.0e-7 * np.pi))
+    sign = 1.0 if float(np.sum(jphi_eq)) >= 0.0 else -1.0
+
     out = {
         "psi_N": psi_hat,
-        "F": np.asarray(F, dtype=float),
+        "F": F,
+        "pprime": sign * np.asarray(Pp, dtype=float),
+        "jphi_eq": sign * jphi_eq,
+        "avg_R": avg_R,
         "avg_inv_R": np.asarray(avg_inv_R, dtype=float),
         "avg_B2": np.asarray(avg_B2, dtype=float),
         "q": np.asarray(q, dtype=float),
@@ -515,9 +438,8 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
                     grid, inv_R2_g, k=3)(psi_hat)
         except Exception as exc:                    # pragma: no cover - live-only
             warnings.warn(
-                f"exact <1/R^2> capture failed ({exc}); IDS export will use the "
-                "<B_phi^2>~=<B^2> bracket (~<1% at the edge). Set "
-                "exact_inv_R2=False to silence.")
+                f"exact <1/R^2> capture failed ({exc}); this draw cannot be "
+                "IDS-exported exactly. Set exact_inv_R2=False to silence.")
     return out
 
 

@@ -466,16 +466,16 @@ geometry (`eq_fsa`).
 
 ### IDS current-split fidelity
 
-The toroidal current `j_tor` in the IDS is always exact. The *parallel* split
-IMAS stores (`j_total` / `j_ohmic` / `j_bootstrap` = ⟨**j**·**B**⟩/B₀) needs a
-flux-surface geometry factor to convert from bouquet's toroidal components, and
-`fidelity` picks where that factor comes from:
+bouquet's currents are TokaMaker `jphi`; the IDS `j_tor` (IMAS convention) and
+the parallel split (`j_total` / `j_ohmic` / `j_bootstrap` = ⟨**j**·**B**⟩/B₀)
+are converted with flux-surface geometry ([current-conventions.md](current-conventions.md)),
+and `fidelity` picks where that geometry comes from:
 
-| `fidelity` | Parallel split uses | When |
+| `fidelity` | Geometry | When |
 |---|---|---|
-| `"exact"` | the draw's **own** captured `eq_fsa` geometry (`toroidal_to_parallel`) | draws deviate from the baseline; the split must track each perturbed equilibrium |
-| `"reconstruct"` | the baseline template ratio `c = j_tor/j_total` | exact only when a draw's flux geometry matches the baseline's |
-| `"auto"` *(default)* | exact when the `eq_fsa` block is present, else reconstruct | — |
+| `"exact"` | the draw's **own** captured `eq_fsa` geometry (needs `avg_R`, `avg_inv_R2`, `pprime`) | draws deviate from the baseline; the split must track each perturbed equilibrium |
+| `"reconstruct"` | the template's baseline equilibrium (`gm1/gm5/gm8/gm9/f/dpressure_dpsi`) | exact only when a draw's flux geometry matches the baseline's |
+| `"auto"` *(default)* | exact when a complete `eq_fsa` block is present, else reconstruct | — |
 
 `eq_fsa` is captured at generate time from the live TokaMaker object
 (`GenerationConfig.capture_live_eq`, on by default), so a freshly generated

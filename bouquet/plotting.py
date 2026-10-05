@@ -3639,8 +3639,8 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
     scan_key : int/str or None
         Scan group; defaults to the first scan in the file.
     source : str or None
-        Raw input to overlay. IMAS ``dd_sim.json`` -> raw FUSE j_tor /
-        j_bootstrap / j_ohmic (toroidal). g-file -> its direct j_phi used as
+        Raw input to overlay. IMAS ``dd_sim.json`` -> FUSE j_tor /
+        j_bootstrap / j_ohmic as TokaMaker jphi. g-file -> its direct j_phi used as
         the input reference in all three panels (no FUSE component split).
     source_kind : {'auto','imas','geqdsk'}
     selection : {'all','selected'}
@@ -3689,8 +3689,12 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
             kind = "imas" if (str(source).endswith(".json") or "dd_sim" in str(source)) else "geqdsk"
         try:
             if kind == "imas":
-                from .physics import parallel_to_toroidal
-                cp = json.load(open(source))["core_profiles"]
+                from .physics import (jpar_to_jphi_tokamaker,
+                                      jphi_tokamaker_pressure_term,
+                                      jtor_imas_to_jphi_tokamaker)
+                from .io.imas import _paired_current_geometry
+                dd = json.load(open(source))
+                cp = dd["core_profiles"]
                 ic = int(np.argmin(np.abs(np.asarray(cp["time"], float) - float(int(sk)) / 1000.0)))
                 c = cp["profiles_1d"][ic]
                 if phi:
@@ -3698,9 +3702,13 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
                 else:
                     p = np.asarray(c["grid"]["psi"], float); pN = (p - p[0]) / (p[-1] - p[0])
                 jtot = np.asarray(c["j_total"], float); jtor = np.asarray(c["j_tor"], float)
-                tt = lambda jp: parallel_to_toroidal(jp, j_parallel_total=jtot, j_tor_total=jtor)
-                F = dict(total=np.interp(psi, pN, jtor),
-                         jBS=np.interp(psi, pN, tt(np.asarray(c["j_bootstrap"], float))),
+                # TokaMaker jphi, exactly as read_imas_baseline converts them
+                geo, _ = _paired_current_geometry(dd["equilibrium"], c,
+                                                  float(cp["time"][ic]), jtot, jtor)
+                tt = lambda jp: jpar_to_jphi_tokamaker(jp, geo)
+                F = dict(total=np.interp(psi, pN, jtor_imas_to_jphi_tokamaker(jtor, geo)),
+                         jBS=np.interp(psi, pN, tt(np.asarray(c["j_bootstrap"], float))
+                                       + jphi_tokamaker_pressure_term(geo)),
                          jind=np.interp(psi, pN, tt(np.asarray(c["j_ohmic"], float))))
                 fixed = F["total"] - F["jBS"] - F["jind"]; Flabel = "FUSE"
             else:

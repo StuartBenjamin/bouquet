@@ -81,12 +81,14 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
   flux-surface averages captured directly from the live TokaMaker object at
   generate time (`GenerationConfig.capture_live_eq`, on by default), on a
   ψ_N grid of `capture_npsi` points (ψ_N whatever the `profile_coord`). Keys and units are `EQ_FSA_GROUP` /
-  `EQ_FSA_UNITS` in `schema.py`: `F` (T m), `avg_inv_R` (⟨1/R⟩, m⁻¹),
-  `avg_inv_R2` (⟨1/R²⟩, m⁻²), `avg_B2` (⟨B²⟩, T²), `q`, `dV_dpsi`
-  (m³ Wb⁻¹), `f_trap`, `B_avg` (⟨B⟩, T). `⟨1/R²⟩` is computed by exact
-  FSA quadrature (`capture_exact_inv_R2`, default) with a fast path for
-  `sauter_fc`'s native value when present. This is what enables the exact
-  parallel↔toroidal current split in the IMAS/OMAS exporter
+  `EQ_FSA_UNITS` in `schema.py`: `F` (T m), `avg_R` (⟨R⟩, m), `avg_inv_R`
+  (⟨1/R⟩, m⁻¹), `avg_inv_R2` (⟨1/R²⟩, m⁻²), `avg_B2` (⟨B²⟩, T²), `pprime`
+  (p′, Pa Wb⁻¹, signed so `jphi_eq` > 0), `jphi_eq` (the equilibrium's own
+  TokaMaker jphi, A m⁻²), `q`, `dV_dpsi` (m³ Wb⁻¹), `f_trap`, `B_avg`
+  (⟨B⟩, T); `avg_R`/`pprime`/`jphi_eq` are absent from older archives.
+  `⟨1/R²⟩` comes from `get_q` when the toolkit exposes it, else exact FSA
+  quadrature (`capture_exact_inv_R2`, default). This is what enables the exact
+  TokaMaker-jphi → IMAS current conversion in the IMAS/OMAS exporter
   (`write_imas_draw(..., fidelity="exact")`); read it back with
   `bq.load_eq_fsa`.
 

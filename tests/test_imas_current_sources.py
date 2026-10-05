@@ -12,7 +12,9 @@ import pytest
 
 from bouquet.config import ImasSource
 from bouquet.io.imas import read_fuse_currents, read_imas_baseline
-from bouquet.physics import parallel_to_toroidal
+from bouquet.physics import jpar_to_jphi_tokamaker
+
+from _imas_geometry import current_geom, eq_geometry, jtor_from_jtotal
 
 N = 33
 EC = 1.602176634e-19
@@ -32,12 +34,13 @@ def _dd(saw_times=(1.0, 1.1), saw_of_t=None, extra=()):
     psi = np.linspace(0.0, 1.0, N)
     rho = np.sqrt(psi)
     shape = 1.0 - psi ** 2
-    j_tor = 6.0e5 * shape
-    j_total = 1.05 * j_tor                  # parallel != toroidal, as in a real dd
+    j_total = 6.3e5 * shape
     ne = 5e19 * (1 - 0.8 * psi ** 2) + 1e18
     ti = 2.5e3 * (1.0 - 0.9 * psi ** 2) + 50.0
     ni, nc = 0.9 * ne, (0.1 * ne) / 6.0
     p_eq = EC * (ne * ti + ni * ti + nc * ti)
+    geo = eq_geometry(psi, p_eq)                         # rho_tor_norm = sqrt(psi_N)
+    j_tor = jtor_from_jtotal(j_total, geo, -2.0)
     cs_t = [0.9, 1.0, 1.1]
     bump = lambda c, w: np.exp(-((psi - c) / w) ** 2)   # noqa: E731
     if saw_of_t is None:
@@ -65,7 +68,7 @@ def _dd(saw_times=(1.0, 1.1), saw_of_t=None, extra=()):
                 "global_quantities": {"ip": 1.0e6, "li_1": 1.0, "li_3": 0.9},
                 "boundary": {"outline": {"r": [1.2, 2.2, 1.7], "z": [0.0, 0.0, 0.8]}},
                 "profiles_1d": {"psi": psi.tolist(), "pressure": p_eq.tolist(),
-                                "j_tor": j_tor.tolist()},
+                                "j_tor": j_tor.tolist(), **geo},
             }],
         },
         "core_profiles": {
@@ -101,10 +104,8 @@ def _read(path, **kw):
 
 
 def _tor(dd, j_par):
-    cp = dd["core_profiles"]["profiles_1d"][0]
-    return parallel_to_toroidal(np.asarray(j_par, float),
-                                j_parallel_total=np.asarray(cp["j_total"], float),
-                                j_tor_total=np.asarray(cp["j_tor"], float))
+    p1 = dd["equilibrium"]["time_slice"][0]["profiles_1d"]
+    return jpar_to_jphi_tokamaker(np.asarray(j_par, float), current_geom(p1, -2.0))
 
 
 def _par(dd, index, t=1.0):
