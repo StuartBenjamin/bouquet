@@ -72,6 +72,46 @@ a file or a directory searched recursively → walk-up) — kinetic data is
 typically too large to keep in an analysis repo, so a notebook names the file
 without naming the machine. All raise with the full list of locations tried.
 
+### Solver build requirement
+
+The self-consistent bootstrap loop and the unified reconstruction engine
+(`generation.reconstruction_engine="unified"`, opt-in) were validated on an
+OpenFUSIONToolkit build carrying two fixes on top of upstream, developed on the
+branch `fix/jphi-update-ravgs-and-nonfinite-abort` of the OpenFUSIONToolkit fork
+at `github.com/d-burg/OpenFUSIONToolkit`; they are not yet part of an upstream
+release:
+
+- **jphi-update flux-surface average:** the `<1/R>` average used when a
+  `j_phi` profile is handed to the solver was read one radial node off; the
+  fix uses each surface's own value.
+- **Non-finite abort:** a Grad-Shafranov solve that produces a NaN/Inf now
+  stops at once with an error, instead of iterating to the iteration cap.
+
+On an upstream build bouquet runs, but does not detect the difference (it only
+records the OFT version and git hash in every archive). Measured on the
+repository's synthetic examples with the live-solver tests (`pytest -m solver`)
+on both builds: every l_i and q value the tests record agreed within 0.12 %
+(l_i(3) of the engine on the g-file example: +0.001 %; q0 and q95: ±0.09 %),
+and the pass/fail verdicts were the same apart from one test that compares with
+numbers measured on one specific build. A solve that goes non-finite runs to the
+iteration cap on an upstream build (one zero-perturbation check took 5.7×
+longer). Run `verify_sigma0_consistency()` on a new machine or OFT build.
+
+**Results change by default with this release** (default
+`reconstruction_engine="legacy"` path included):
+
+- the bootstrap is iterated to self-consistency
+  (`generation.jbs_self_consistent=True`); `False` restores the frozen
+  bootstrap;
+- a non-zero separatrix pressure p_sep is kept: the solver is handed the
+  axis target p_axis - p_sep (its own pressure is zero at the boundary), and
+  p_sep is added back wherever pressure, beta or W_MHD is reported or written
+  (`generation.separatrix_pressure="offset"`); `"legacy"` restores the
+  previous behaviour (the full axis pressure as the target).
+
+A configuration stored by an earlier version (an archive's config) loads with
+the settings it was produced with, with a warning.
+
 ## Quickstart
 
 ### Reconstruction source — g-file + kinetic profiles
