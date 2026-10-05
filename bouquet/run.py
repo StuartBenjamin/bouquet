@@ -709,6 +709,8 @@ class Bouquet:
             raise ValueError('swb_saw_q needs imas_baseline="swb"')
         elif self.config.generation.swb_saw_axis_flatten is not None:
             raise ValueError('swb_saw_axis_flatten needs imas_baseline="swb"')
+        elif self.config.generation.swb_axis_pack is not None:
+            raise ValueError('swb_axis_pack needs imas_baseline="swb"')
         self.baseline = resolve_baseline(self.config, self.mygs)
 
         # IMAS path: read_imas_baseline does no GS solve, so establish a converged
@@ -3025,6 +3027,26 @@ class Bouquet:
                  f"{rec['saw_axis_enclosed_change']:+.1e})"))
         return rec
 
+    def _swb_axis_pack_record(self, psi_N):
+        """``GenerationConfig.swb_axis_pack``: the packed grid's record for
+        ``ip_closure`` (printed), or None when off."""
+        import numpy as np
+        gc = self.config.generation
+        if getattr(gc, "swb_axis_pack", None) is None:
+            return None
+        x_swb, idx = coords.axis_pack_grid(psi_N, gc.swb_axis_pack, gc.swb_axis_pack_rho)
+        r = np.sqrt(np.clip(x_swb, 0.0, None))
+        r_run = np.sqrt(np.clip(np.asarray(psi_N, dtype=float), 0.0, None))
+        rec = dict(swb_axis_pack=float(gc.swb_axis_pack),
+                   swb_axis_pack_rho=float(gc.swb_axis_pack_rho),
+                   swb_axis_pack_added=int(x_swb.size - np.size(psi_N)),
+                   swb_axis_pack_dr1=float(r[1] - r[0]))
+        print(f"[imas swb] axis pack: +{rec['swb_axis_pack_added']} nodes (rho spacing "
+              f"<= {gc.swb_axis_pack} on axis, relaxing from rho {gc.swb_axis_pack_rho}), "
+              f"{x_swb.size} SWB nodes, first off-axis rho {rec['swb_axis_pack_dr1']:.4f} "
+              f"(run grid {r_run[1] - r_run[0]:.4f})")
+        return rec
+
     def _swb_saw_kwargs(self):
         """``solve_with_bootstrap`` sawtooth-reset arguments; empty when
         ``swb_saw_q`` is None."""
@@ -3048,10 +3070,13 @@ class Bouquet:
         ``coil_reg_target`` None keeps the setup coil reg (solve A); a
         ``{coil: A-t}`` dict installs the strong reg toward it (solve B, the
         sigma=0 check and every draw). ``kin``: ``ne te ni ti Zeff p_fixed`` on
-        ``psi_N``. Returns the SWB result dict (its ``j_saw`` / ``saw_rho_m``
+        ``psi_N``.  With ``swb_axis_pack`` SWB runs on the packed grid and the
+        result is read back at the run nodes (packed arrays under
+        ``"swb_packed"``). Returns the SWB result dict (its ``j_saw`` / ``saw_rho_m``
         / ``saw_n_dips`` only when ``swb_saw_q`` is set).
         """
         import numpy as np
+        from functools import partial
         from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
         from .TokaMaker_interface import strong_coil_reg
         from .config import swb_bootstrap_kwargs
@@ -3065,17 +3090,32 @@ class Bouquet:
         mygs.init_psi(*_shape_from_boundary(self._boundary_RZ))
         self._seed_coil_init(mygs)
         saw_kw = self._swb_saw_kwargs()
+        j_seed, jphi_fixed = np.asarray(j_seed, dtype=float), bl.swb_jphi_fixed
+        x_swb, idx = coords.axis_pack_grid(psi_N, getattr(gc, "swb_axis_pack", None),
+                                           getattr(gc, "swb_axis_pack_rho", 0.15))
+        if idx is not None:     # swb_axis_pack: inputs onto the packed grid
+            up = partial(coords.to_swb, psi_N, x_swb)
+            kin = {k: up(v) for k, v in kin.items()}
+            j_seed, jphi_fixed = up(j_seed), up(jphi_fixed)
+            if "jphi_saw" in saw_kw:
+                saw_kw["jphi_saw"] = up(saw_kw["jphi_saw"])
         res = solve_with_bootstrap(
             mygs, kin["ne"], kin["te"], kin["ni"], kin["ti"], kin["Zeff"],
-            float(bl.Ip_target), np.asarray(j_seed, dtype=float),
+            float(bl.Ip_target), j_seed,
             scale_jBS=1.0, isolate_edge_jBS=bool(gc.isolate_edge_jBS),
             diagnostic_plots=False, verbose=False,
-            jphi_fixed=bl.swb_jphi_fixed, p_fixed=kin["p_fixed"],
+            jphi_fixed=jphi_fixed, p_fixed=kin["p_fixed"],
             **saw_kw,
-            **coords.swb_grid_kwargs(psi_N, getattr(bl, "coord", coords.PSI)),
+            **coords.swb_grid_kwargs(x_swb, getattr(bl, "coord", coords.PSI)),
             **swb_bootstrap_kwargs(gc))
+        if idx is not None:     # outputs at the run nodes; packed ones kept
+            res = coords.from_swb(res, idx, x_swb.size)
+            res["swb_packed"]["x"] = x_swb
         if not saw_kw:      # saw off: no saw outputs, whatever the toolkit returns
             res = {k: v for k, v in res.items() if k not in _SWB_SAW_KEYS}
+            if "swb_packed" in res:
+                res["swb_packed"] = {k: v for k, v in res["swb_packed"].items()
+                                     if k not in _SWB_SAW_KEYS}
         # SWB can return (GS residual converged) on a wrong equilibrium once alpha
         # has frozen and the shape keeps moving: refuse it rather than archive it.
         ip = abs(float(mygs.get_globals()[0]))
@@ -3105,6 +3145,8 @@ class Bouquet:
             j_phi=np.asarray(res["total_j_phi"], dtype=float),
             j_fixed=(None if res.get("j_fixed") is None
                      else np.asarray(res["j_fixed"], dtype=float)))
+        if res.get("swb_packed") is not None:
+            st["swb_packed"] = res["swb_packed"]
         if res.get("j_saw") is not None:
             st.update(j_saw=np.asarray(res["j_saw"], dtype=float),
                       saw_rho_m=float(res["saw_rho_m"]),
@@ -3130,6 +3172,7 @@ class Bouquet:
         if not np.array_equal(coords.swb_grid(psi_N), psi_N):
             raise RuntimeError('imas_baseline="swb" needs SWB on the run grid')
         flat_rec = self._swb_axis_flatten()
+        pack_rec = self._swb_axis_pack_record(psi_N)
         self._swb_source_split(psi_N)
         j_phi_src = np.asarray(bl.j_phi, dtype=float).copy()
         kin = self._swb_baseline_kinetics()
@@ -3172,6 +3215,8 @@ class Bouquet:
             fuse_total_peak=float(np.max(np.abs(j_phi_src))))
         if flat_rec:
             bl.ip_closure.update(flat_rec)
+        if pack_rec:
+            bl.ip_closure.update(pack_rec)
         if bl.j_saw is not None:
             bl.ip_closure.update(saw_q_s=float(self.config.generation.swb_saw_q),
                                  saw_rho_m=st_b["saw_rho_m"],
@@ -3974,6 +4019,9 @@ class Bouquet:
                 "swb_saw_axis_moved_frac": _ic.get("saw_axis_moved_frac"),
                 "swb_saw_axis_rho_res": _ic.get("saw_axis_rho_res"),
                 "swb_saw_axis_cut_over_res": _ic.get("saw_axis_cut_over_res"),
+                "swb_axis_pack": _ic.get("swb_axis_pack"),
+                "swb_axis_pack_rho": _ic.get("swb_axis_pack_rho"),
+                "swb_axis_pack_added": _ic.get("swb_axis_pack_added"),
                 "swb_j_saw": bl.j_saw,
                 "swb_jphi_saw": bl.swb_jphi_saw})
         # Outside the capture: failed solves are caught by the draw path, so

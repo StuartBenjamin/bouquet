@@ -204,6 +204,70 @@ def swb_grid_kwargs(x, coord=PSI):
     return kw
 
 
+#: Largest outward growth of the packed spacing from one node to the next.
+AXIS_PACK_GROWTH = 2.0
+
+
+def axis_pack_grid(x, h0=None, rho_pack=0.15):
+    """``(x_swb, idx)``: the run grid ``x`` with nodes inserted near the axis
+    (``GenerationConfig.swb_axis_pack``) and the positions of ``x`` in it.
+
+    Radius r = sqrt(x): ρ_tor in a Φ_N run, ≈ ρ_tor in a ψ_N one.  Outward from
+    the axis each run interval is split evenly in r to a spacing at most
+    min(h0 / cos²(π r_i / (2 rho_pack)), AXIS_PACK_GROWTH x the previous one)
+    (r_i its inner end): ``h0`` on the axis, the cap lifting at ``rho_pack``;
+    the growth limit carries the packing past ``rho_pack`` until the run
+    grid's own spacing is reached.  Every node of ``x`` is kept
+    (``x_swb[idx] == x``).  Off (``h0`` None) or nothing inserted: ``(x, None)``.
+    """
+    x = np.asarray(x, dtype=float)
+    if h0 is None:
+        return x, None
+    r = np.sqrt(np.clip(x, 0.0, None))
+    dr = np.diff(r)
+    m = np.zeros(dr.size, dtype=int)
+    s_prev = np.inf
+    for i in range(dr.size):
+        cap = (float(h0) / np.cos(0.5 * np.pi * r[i] / rho_pack) ** 2
+               if r[i] < rho_pack else np.inf)
+        t = min(cap, AXIS_PACK_GROWTH * s_prev)
+        m[i] = max(int(np.ceil(dr[i] / t - 1e-9)) - 1, 0) if np.isfinite(t) else 0
+        if m[i] == 0 and r[i] >= rho_pack:
+            break
+        s_prev = dr[i] / (m[i] + 1)
+    if not m.any():
+        return x, None
+    out = [x[:1]]
+    for i in range(dr.size):
+        if m[i]:
+            t = np.arange(1, m[i] + 1) / (m[i] + 1.0)
+            out.append((r[i] + t * dr[i]) ** 2)
+        out.append(x[i + 1:i + 2])
+    return np.concatenate(out), np.concatenate([[0], np.cumsum(m + 1)])
+
+
+def to_swb(x, x_swb, y):
+    """Run-grid array ``y`` on the packed grid ``x_swb`` (linear, as OFT's
+    linterp reads it); scalars and None pass through."""
+    if y is None or np.ndim(y) == 0:
+        return y
+    return np.interp(x_swb, x, np.asarray(y, dtype=float))
+
+
+def from_swb(res, idx, n_swb):
+    """An SWB result dict back on the run grid: each length-``n_swb`` array at
+    ``idx``.  The packed arrays are kept under ``"swb_packed"``."""
+    out, packed = {}, {}
+    for k, v in res.items():
+        if not isinstance(v, (str, dict)) and np.ndim(v) == 1 and len(v) == n_swb:
+            packed[k] = np.asarray(v)
+            out[k] = packed[k][idx]
+        else:
+            out[k] = v
+    out["swb_packed"] = packed
+    return out
+
+
 def swb_seed(x, psi=None):
     """Inductive seed ``(1 - s^1.5)^1.5`` (OFT's ``create_power_flux_fun(n,
     1.5, 1.5)``) at the nodes of :func:`swb_grid`, with ``s`` their ψ_N.

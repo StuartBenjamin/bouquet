@@ -1059,6 +1059,13 @@ class GenerationConfig:
     # j_phi, and nothing when j_phi has no extremum inside it.  Saw on or off.
     swb_saw_axis_flatten: Optional[Union[float, str]] = None
     swb_saw_axis_flatten_cells: float = 20.0
+    # imas_baseline="swb": extra SWB nodes near the axis (coords.axis_pack_grid).
+    # Every SWB solve (baseline, sigma=0, draws) runs on the run grid plus nodes
+    # spaced at most swb_axis_pack in rho = sqrt(x) on the axis, relaxing to the
+    # run grid's own spacing from swb_axis_pack_rho; inputs are linearly
+    # interpolated there and outputs read back at the run nodes.  None = off.
+    swb_axis_pack: Optional[float] = None
+    swb_axis_pack_rho: float = 0.15
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single
@@ -1148,6 +1155,12 @@ class GenerationConfig:
                 isinstance(f, (int, float)) and not isinstance(f, bool) and 0.0 < f < 0.5):
             raise ValueError(f"swb_saw_axis_flatten={f!r}: None, 'auto' or a rho_tor "
                              "cut in (0, 0.5)")
+        h = self.swb_axis_pack
+        if h is not None and not (isinstance(h, (int, float)) and not isinstance(h, bool)
+                                  and 1e-4 <= h <= 0.05):
+            raise ValueError(f"swb_axis_pack={h!r}: None or a rho spacing in [1e-4, 0.05]")
+        if not 0.0 < float(self.swb_axis_pack_rho) <= 0.5:
+            raise ValueError(f"swb_axis_pack_rho={self.swb_axis_pack_rho!r} must be in (0, 0.5]")
         if not float(self.swb_saw_axis_flatten_cells) > 0.0:
             raise ValueError(f"swb_saw_axis_flatten_cells="
                              f"{self.swb_saw_axis_flatten_cells!r} must be > 0")
@@ -1243,6 +1256,11 @@ def swb_config_problems(config):
         p.append("this OpenFUSIONToolkit's solve_with_bootstrap lacks x/jphi_fixed/p_fixed")
     if gc.swb_saw_q is not None and "jphi_saw" not in _swb_params():
         p.append("swb_saw_q: this OpenFUSIONToolkit's solve_with_bootstrap lacks jphi_saw")
+    if gc.swb_axis_pack is not None and _swb_grid_arg() != "x":
+        p.append("swb_axis_pack: this OpenFUSIONToolkit's solve_with_bootstrap lacks x")
+    if gc.swb_axis_pack is not None and gc.swb_axis_pack_rho <= gc.swb_axis_pack:
+        p.append(f"swb_axis_pack_rho={gc.swb_axis_pack_rho!r} must exceed "
+                 f"swb_axis_pack={gc.swb_axis_pack!r}")
     if gc.swb_saw_axis_flatten is not None and getattr(
             config.source, "sawteeth_in_ohmic", False):
         p.append("swb_saw_axis_flatten with ImasSource.sawteeth_in_ohmic: no sawteeth "

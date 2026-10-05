@@ -251,6 +251,7 @@ def test_edge_taper_keeps_the_channel_split(monkeypatch, swb_oft, taper, saw):
                                _swb_state=state, _finish_imas_baseline=lambda its: None)
     ns._swb_source_split = lambda psi_N: Bouquet._swb_source_split(ns, psi_N)
     ns._swb_axis_flatten = lambda: Bouquet._swb_axis_flatten(ns)
+    ns._swb_axis_pack_record = lambda psi_N: Bouquet._swb_axis_pack_record(ns, psi_N)
     Bouquet._swb_imas_baseline(ns)
     total = bl.j_inductive + bl.j_BS + bl.j_NBI + bl.j_RF + bl.j_other
     if saw:

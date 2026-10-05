@@ -173,7 +173,8 @@ def fake_swb(monkeypatch, saw_oft):
     return calls
 
 
-_METHODS = ("_swb_source_split", "_swb_axis_flatten", "_swb_saw_kwargs", "_swb_solve", "_swb_state",
+_METHODS = ("_swb_source_split", "_swb_axis_flatten", "_swb_axis_pack_record",
+            "_swb_saw_kwargs", "_swb_solve", "_swb_state",
             "_swb_imas_baseline", "_verify_sigma0_swb")
 
 
