@@ -109,8 +109,9 @@ class DrawView:
             import h5py
             with h5py.File(self._ar.path, "r") as hf:
                 a = hf[self._gp].attrs
+                # scalars as Python values; profiles (e.g. swb_j_saw) stay arrays
                 self._attrs_cache = {
-                    k: (a[k].item() if hasattr(a[k], "item") else a[k]) for k in a}
+                    k: (a[k].item() if getattr(a[k], "size", 0) == 1 else a[k]) for k in a}
         return dict(self._attrs_cache)
 
     @property
