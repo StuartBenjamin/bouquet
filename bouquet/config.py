@@ -1171,9 +1171,9 @@ def swb_config_problems(config):
             p.append(f"{name}=True")
     if not gc.recalculate_j_BS:
         p.append("recalculate_j_BS=False (SWB re-solves j_BS by construction)")
-    if str(gc.closure_channel) not in ("bootstrap", "ohmic"):
-        p.append(f"closure_channel={gc.closure_channel!r}: SWB's alpha (ohmic "
-                 "channel) is the closure; there is nothing to combine it with")
+    if str(gc.closure_channel) != "bootstrap":
+        p.append(f"closure_channel={gc.closure_channel!r} is never read: SWB's alpha "
+                 "(ohmic channel) is the closure; leave it at 'bootstrap'")
     if gc.coil_drift_hard_factor is not None:
         p.append("coil_drift_hard_factor: drift is measured, not bounded")
     if int(sc.nthreads) != 1:

@@ -57,6 +57,7 @@ class TestConfig:
         (dict(jbs_delta_mode=True), "jbs_delta_mode"),
         (dict(anchor_pressure_to_equilibrium=True), "anchor_pressure_to_equilibrium"),
         (dict(closure_channel="sawtooth_bootstrap"), "closure_channel"),
+        (dict(closure_channel="ohmic"), "closure_channel"),
         (dict(coil_drift_hard_factor=20.0), "coil_drift_hard_factor"),
     ])
     def test_refused_by_name(self, swb_oft, kw, word):
