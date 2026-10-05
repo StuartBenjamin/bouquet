@@ -3026,7 +3026,9 @@ class Bouquet:
             Ip=float(mygs.get_globals()[0]),
             j_inductive=j_ind,
             j_BS=np.asarray(res["isolated_j_BS"], dtype=float),
-            j_phi=np.asarray(res["total_j_phi"], dtype=float))
+            j_phi=np.asarray(res["total_j_phi"], dtype=float),
+            j_fixed=(None if res.get("j_fixed") is None
+                     else np.asarray(res["j_fixed"], dtype=float)))
 
     def _swb_imas_baseline(self):
         """``imas_baseline="swb"``: the baseline is SWB's own equilibrium.
@@ -3061,6 +3063,16 @@ class Bouquet:
         bl.j_inductive = st_b["j_inductive"]
         bl.j_BS = st_b["j_BS"]
         bl.j_phi = st_b["j_phi"]
+        # taper_edge_jBS also tapers the fixed current: carry the same factor onto the
+        # channels so j_phi = j_inductive + j_BS + j_NBI + j_RF + j_other still holds
+        jf_in = np.asarray(bl.swb_jphi_fixed, dtype=float)
+        if (self.config.generation.bootstrap_kwargs.get("taper_edge_jBS")
+                and st_b["j_fixed"] is not None):
+            f = np.where(np.abs(jf_in) > 0.0,
+                         st_b["j_fixed"] / np.where(jf_in != 0.0, jf_in, 1.0), 1.0)
+            for name in ("j_NBI", "j_RF", "j_other"):
+                if getattr(bl, name, None) is not None:
+                    setattr(bl, name, f * np.asarray(getattr(bl, name), dtype=float))
         bl.j_BS_smoothed = smooth_jbs_transition(st_b["j_BS"])   # diagnostic only
         bl.ohm_scale, bl.bs_scale = st_b["alpha"], 1.0
         bl.bs_scale_profile = None
