@@ -7,6 +7,10 @@
 # source-orientation reader work, not by an engine hook.  The comparison this
 # file serves is unchanged: the current functions minus the gated engine
 # branches must still equal it exactly.
+# RE-BASED a second time (2026-10-05), by the two hunks of one defect fix of the
+# LEGACY code: ``generate_bouquet`` rejects a draw whose homotopy rollback
+# re-solve FAILED (reason code homotopy_rollback_failed) instead of going on
+# from the failed solve.  It changes only runs in which such a re-solve failed.
 
 # ==== TokaMaker_interface.generate_bouquet ====
 def generate_bouquet(
@@ -2233,6 +2237,21 @@ def generate_bouquet(
                                             _build_bounds(_lg_dF, _lg_dVSC))
                                         mygs.solve()
                                     except Exception as _rb_exc:
+                                        # a legacy draw never goes on from a
+                                        # failed re-solve (owner-approved
+                                        # 2026-10-05)
+                                        _post_align_failed = True
+                                        _post_align_reason = (
+                                            "homotopy_rollback_failed",
+                                            "homotopy rollback",
+                                            _rb_exc)
+                                        print(f"  [homotopy] rollback "
+                                              f"re-solve (after a "
+                                              f"saturation) FAILED "
+                                              f"({_rb_exc}) -> draw "
+                                              f"REJECTED (homotopy_"
+                                              f"rollback_failed)",
+                                              flush=True)
                                         print(f"  [homotopy] WARN: "
                                               f"rollback re-solve failed "
                                               f"({_rb_exc}); stats may "
@@ -2299,6 +2318,19 @@ def generate_bouquet(
                                         _build_bounds(_lg_dF, _lg_dVSC))
                                     mygs.solve()
                                 except Exception as _rb_exc:
+                                    # a legacy draw never goes on from a
+                                    # failed re-solve (owner-approved
+                                    # 2026-10-05)
+                                    _post_align_failed = True
+                                    _post_align_reason = (
+                                        "homotopy_rollback_failed",
+                                        "homotopy rollback", _rb_exc)
+                                    print(f"  [homotopy] rollback "
+                                          f"re-solve (after a failed "
+                                          f"stage) FAILED ({_rb_exc}) "
+                                          f"-> draw REJECTED "
+                                          f"(homotopy_rollback_failed)",
+                                          flush=True)
                                     print(f"  [homotopy] WARN: rollback "
                                           f"re-solve failed ({_rb_exc}); "
                                           f"stats may be stale")
