@@ -120,8 +120,11 @@ from .config import (
 from .baseline import Baseline, resolve_baseline, resolve_uncertainty
 from .physics import (
     isotropize_fast_pressure,
-    parallel_to_toroidal,
-    toroidal_to_parallel,
+    jpar_to_jphi_tokamaker,
+    jphi_tokamaker_pressure_term,
+    jphi_tokamaker_to_jpar,
+    jtor_imas_to_jphi_tokamaker,
+    jphi_tokamaker_to_jtor_imas,
     fast_pressure_residual,
     infer_fast_pressure,
     radial_field_from_impurity_force_balance,
@@ -180,7 +183,9 @@ __all__ = [
     "draw_jphi_total", "draw_jphi_components", "draw_jphi_profiles",
     "draw_flux_function",
     # ---- physics helpers ----
-    "isotropize_fast_pressure", "parallel_to_toroidal", "toroidal_to_parallel",
+    "isotropize_fast_pressure", "jpar_to_jphi_tokamaker",
+    "jphi_tokamaker_pressure_term", "jphi_tokamaker_to_jpar",
+    "jtor_imas_to_jphi_tokamaker", "jphi_tokamaker_to_jtor_imas",
     "fast_pressure_residual", "infer_fast_pressure",
     "radial_field_from_impurity_force_balance", "radial_field_from_cer",
     "Hmode_profiles",

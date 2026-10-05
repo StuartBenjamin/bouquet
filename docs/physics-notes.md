@@ -88,8 +88,9 @@ is what keeps it from silently regressing.
 ## Bootstrap current treatment
 
 The per-draw bootstrap comes from TokaMaker's Sauter/Redl
-`solve_with_bootstrap`, whose parallel output is converted to toroidal with the
-flux-surface geometry factor `c = 1/(⟨R⟩⟨1/R⟩)` (`bouquet.physics.parallel_to_toroidal`).
+`solve_with_bootstrap`, whose output is already TokaMaker `jphi` (field-aligned
+part plus the pressure term p′G; see [current-conventions.md](current-conventions.md))
+and is used as is.
 
 Two composition modes:
 

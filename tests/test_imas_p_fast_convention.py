@@ -438,6 +438,10 @@ class TestReadImasBaselineEndToEnd:
             # dilution correction, not about the pressure convention under test.
             warnings.filterwarnings(
                 "always", message=".*fast-ion PRESSURE but no density_fast.*")
+            # Likewise its equilibrium carries no gm1/gm5/gm8/gm9, which the
+            # current conversion reports on its own account.
+            warnings.filterwarnings(
+                "always", message=".*WITHOUT exact conversion.*")
             bl = read_imas_baseline(ImasSource(ids_path=path, time=2.3043))
         assert bl.p_fast_meta["rule"] == "trace"
         assert bl.p_fast_meta["basis"] == "explicit-stamp"

@@ -502,7 +502,7 @@ class GenerationConfig:
     l_i_tolerance: float = 0.05            # l_i acceptance band (fraction of target)
     constrain_sawteeth: bool = False
     # When True, recompute bootstrap each draw via TokaMaker solve_with_bootstrap
-    # and convert its parallel output to toroidal (see physics.parallel_to_toroidal),
+    # (whose output is already TokaMaker jphi; physics module docstring),
     # overriding the baseline/FUSE j_BS. When False, keep the baseline j_BS.
     recalculate_j_BS: bool = True
     # Treat j_phi as ONE profile: no inductive/bootstrap decomposition anywhere.
@@ -952,9 +952,9 @@ class GenerationConfig:
 
     # Live-equilibrium capture for exact IMAS/OMAS export. When True (default),
     # each draw's converged TokaMaker flux-surface-average metrics are snapshot
-    # into the archive (scan/<key>/<draw>/eq_fsa/), so IDS write-back does an
-    # exact per-draw toroidal->parallel current conversion instead of the
-    # interim baseline-ratio reconstruction. Cheap; set False to skip.
+    # into the archive (scan/<key>/<draw>/eq_fsa/), so IDS write-back converts
+    # currents exactly per draw instead of with the template (baseline)
+    # geometry. Cheap; set False to skip.
     capture_live_eq: bool = True
     # FSA grid for the captured block (matches the 257^2 eqdsk; >=129).
     capture_npsi: int = 257

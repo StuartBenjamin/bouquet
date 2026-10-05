@@ -3471,8 +3471,8 @@ def store_equilibrium(
         # ---- Live-equilibrium FSA block (optional subgroup) --------------
         # Captured from the converged TokaMaker equilibrium at the same state
         # the eqdsk was saved from, so this draw's own flux geometry enables
-        # an exact toroidal<->parallel conversion at IMAS export
-        # (physics.capture_equilibrium_fsa -> physics.toroidal_to_parallel).
+        # exact current conversions at IMAS export
+        # (physics.capture_equilibrium_fsa -> io.imas.write_imas_draw).
         if eq_fsa:
             from .schema import EQ_FSA_GROUP, EQ_FSA_UNITS
             fsa_grp = grp.create_group(EQ_FSA_GROUP)
@@ -3491,10 +3491,10 @@ def load_eq_fsa(header, count, scan_key=None):
 
     Returns a dict of 1-D arrays (``psi_N``, ``F``, ``avg_inv_R``,
     ``avg_inv_R2`` (present only when the exact quadrature succeeded),
-    ``avg_B2``, ``q``, ``dV_dpsi``, ``f_trap``, ``B_avg``) -- the geometry
-    :func:`bouquet.physics.toroidal_to_parallel` needs for an exact IMAS
-    write-back. ``None`` for archives written without live capture (fall back
-    to the baseline-ratio reconstruction).
+    ``avg_B2``, ``q``, ``dV_dpsi``, ``f_trap``, ``B_avg``; newer archives also
+    ``avg_R``, ``pprime``, ``jphi_eq``) -- the geometry the exact IMAS
+    write-back needs (:func:`bouquet.io.imas.write_imas_draw`). ``None`` for
+    archives written without live capture.
     """
     from .schema import EQ_FSA_GROUP
     h5path = _resolve_h5(header)

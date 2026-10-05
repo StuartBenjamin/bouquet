@@ -25,10 +25,10 @@ class Baseline:
     reconstruction source *produces* the split, the IMAS source *reads* it
     pre-separated.
 
-    CURRENT CONVENTION: every current component here is a flux-surface-averaged
-    *toroidal* current density j_phi [A/m^2]. IMAS/neoclassical inputs are
-    parallel (<j.B>/B0) and are converted on read via
-    :func:`bouquet.physics.parallel_to_toroidal`, so downstream code never mixes
+    CURRENT CONVENTION: every current component here is TokaMaker ``jphi`` =
+    <j_phi> [A/m^2] (``docs/current-conventions.md``). IMAS inputs (``j_tor``
+    and parallel <j.B>/B0) are converted exactly on read
+    (:mod:`bouquet.physics` docstring), so downstream code never mixes
     conventions.
     """
 

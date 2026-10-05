@@ -1025,41 +1025,6 @@ def _ket_stage_diag(mygs, tag, extra=""):
         print(f"  [STAGE-DIAG {tag}] failed: {_e}", flush=True)
 
 
-def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad):
-    """Convert ``solve_with_bootstrap``'s j_BS output to toroidal convention.
-
-    SWB computes the Redl/Sauter bootstrap as the FSA *parallel* current
-    ``<j_BS.B>`` and projects it to A/m^2 by a zeroth-order division by the
-    toroidal field at the average radius (``j_BS_neo * R_avg/F``, with its own
-    ``# to-do: project j_BS_parallel to j_phi more accurately?``). Every other
-    current profile in bouquet is the FSA toroidal density
-    ``j_tor = <j_phi/R>/<1/R>`` (what TokaMaker's jphi-linterp / flux_integral
-    consume), so mixing the two conventions misallocates the j_BS / j_inductive
-    split, mostly in the pedestal where the spike lives.
-
-    This undoes SWB's crude factor to recover ``<j_BS.B>`` and applies the
-    field-aligned projection (see :func:`bouquet.physics.parallel_to_toroidal`,
-    analytic method). The net factor is ``1/(<R><1/R>)`` (<= 1 by
-    Cauchy-Schwarz, ~ 1 - eps^2 at the edge), evaluated on the same
-    ``mygs``/grid the SWB call just used -- call this IMMEDIATELY after
-    ``solve_with_bootstrap``, before any further mygs solve.
-    """
-    from .physics import parallel_to_toroidal
-
-    j_bs_swb = np.asarray(j_bs_swb, dtype=float)
-    npsi = len(j_bs_swb)
-    _, F, _, _, _ = mygs.get_profiles(npsi=npsi, psi_pad=psi_pad)
-    # <R>, <1/R> from get_q -- the SAME quantities SWB used for its R_avg/F
-    # projection, so the undo is exact; <B^2> from sauter_fc.
-    _, _, ravgs, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
-    _, _, _, modb_avgs = mygs.sauter_fc(npsi=npsi, psi_pad=psi_pad)
-    j_dot_B = j_bs_swb * F / q_ravg(ravgs, "<R>")   # undo SWB's R_avg/F projection
-    return parallel_to_toroidal(
-        j_dot_B,
-        geom={"F": F, "avg_inv_R": q_ravg(ravgs, "<1/R>"), "avg_B2": modb_avgs[1]},
-    )
-
-
 #: Default R2 Ip measure.  ``exact`` (the physical FSA current integral) as
 #: of 2026-08-04, per the package author: with ``ratio`` the sigma=0
 #: invariant is true by construction, whereas ``exact`` makes |s-1| a
@@ -1604,8 +1569,8 @@ def smooth_jbs_transition(j_BS):
     riding on an inductive fit made against the smoothed split -- a 1-2
     grid-point axis divot in every draw target (-9% j_phi(0), q0 +12%
     wholesale at sigma=0). This helper is the single shared treatment:
-    apply it immediately after EVERY ``_swb_jbs_to_toroidal`` conversion
-    so recon and draws stay sigma=0-consistent.
+    apply it to EVERY SWB bootstrap profile as soon as it is taken, so recon
+    and draws stay sigma=0-consistent.
 
     Detection + window + weights are bit-identical to the original recon
     inline block: find the leading flat shelf (values equal to j_BS[0]
@@ -2321,14 +2286,13 @@ def perturb_kinetic_equilibrium(
         finally:
             if _stashed_bounds is not None:
                 mygs.set_coil_bounds(_stashed_bounds)
-        # Convert SWB's parallel-projected j_BS to toroidal convention on the
-        # SWB-landed equilibrium -- BEFORE the snapshot restore below changes
-        # mygs. The cached recon spike was converted (and axis-smoothed) the
-        # same way at cache time, so the delta is consistently toroidal.
-        _spike_perturbed = smooth_jbs_transition(_swb_jbs_to_toroidal(
-            mygs, _results_diff["isolated_j_BS"], psi_pad))
-        _full_j_BS_tor = smooth_jbs_transition(_swb_jbs_to_toroidal(
-            mygs, _results_diff["j_BS"], psi_pad))
+        # SWB's j_BS is already TokaMaker jphi (physics module docstring);
+        # take it BEFORE the snapshot restore below. The cached recon spike
+        # was axis-smoothed the same way at cache time.
+        _spike_perturbed = smooth_jbs_transition(
+            np.asarray(_results_diff["isolated_j_BS"], dtype=float))
+        _full_j_BS_tor = smooth_jbs_transition(
+            np.asarray(_results_diff["j_BS"], dtype=float))
         delta_spike = _spike_perturbed - spike_profile_recon_cached
         _delta_rms = float(np.sqrt(np.mean(delta_spike**2)))
         _delta_max = float(np.max(np.abs(delta_spike)))
@@ -2654,9 +2618,8 @@ def perturb_kinetic_equilibrium(
         # unchanged so j_BS recompute ≈ recon's stored j_BS, and
         # combined with input_jinductive the total j_phi recovers
         # recon's exactly -> l_i = recon's l_i, bnd_RMS ≈ 0.
-        # Convert SWB's parallel-projected bootstrap (<j.B> R_avg/F) to
-        # bouquet's toroidal convention <j_phi/R>/<1/R>, evaluated on the
-        # SWB-landed equilibrium (no solves between the call and here).
+        # SWB's j_BS is already TokaMaker jphi = <j_phi> (field-aligned part
+        # plus the p'G pressure term), bouquet's own convention: no conversion.
         _use_spike_delta = (spike_delta_ref is not None
                             and spike_delta_baseline is not None)
         if _use_spike_delta:
@@ -2668,9 +2631,8 @@ def perturb_kinetic_equilibrium(
             # the difference, while the per-draw Sauter response passes
             # through unfiltered.  At sigma=0 the spike equals the baseline
             # split exactly.
-            _spike_raw = _swb_jbs_to_toroidal(
-                mygs, results["isolated_j_BS"], psi_pad)
-            _full_raw = _swb_jbs_to_toroidal(mygs, results["j_BS"], psi_pad)
+            _spike_raw = np.asarray(results["isolated_j_BS"], dtype=float)
+            _full_raw = np.asarray(results["j_BS"], dtype=float)
             _delta_bl = np.asarray(spike_delta_baseline, dtype=float)
             _delta_ref = np.asarray(spike_delta_ref, dtype=float)
             spike_profile = _delta_bl + (_spike_raw - _delta_ref)
@@ -2684,9 +2646,9 @@ def perturb_kinetic_equilibrium(
             # divot vs the recon baseline (hollow core, q0 shifted +12%
             # wholesale at sigma=0).
             full_j_BS = smooth_jbs_transition(
-                _swb_jbs_to_toroidal(mygs, results["j_BS"], psi_pad))
+                np.asarray(results["j_BS"], dtype=float))
             spike_profile = smooth_jbs_transition(
-                _swb_jbs_to_toroidal(mygs, results["isolated_j_BS"], psi_pad))
+                np.asarray(results["isolated_j_BS"], dtype=float))
 
         # Floor the SWB bootstrap at 0 (drop unphysical negative excursions)
         # before it enters j_phi. Then, in Case-B "diff" mode, add the fixed
@@ -4834,13 +4796,12 @@ def generate_bouquet(
                     diagnostic_plots=False, verbose=False,
                     **kwargs,
                 )
-                # Toroidal conversion on the cache-time SWB equilibrium, so
-                # the per-draw delta (also converted) is convention-consistent.
+                # SWB j_BS is TokaMaker jphi already (no conversion).
                 # RAW profile for delta mode (artifacts cancel in the delta);
                 # smoothed version for DIFF_BS (whose per-draw spikes are also
                 # smoothed).
-                _delta_spike0_raw = _swb_jbs_to_toroidal(
-                    mygs, _cache_results["isolated_j_BS"], psi_pad)
+                _delta_spike0_raw = np.asarray(
+                    _cache_results["isolated_j_BS"], dtype=float)
                 _diff_spike_recon = smooth_jbs_transition(_delta_spike0_raw)
                 # Snapshot AFTER the SWB call -- this is the state from
                 # which we'll re-launch SWB on perturbed kinetics each
@@ -5839,10 +5800,10 @@ def generate_bouquet(
         diagnostics['diverted'] = _draw_div
 
         # Live-equilibrium FSA block at the same (post-save) state, so this
-        # draw's own flux geometry travels into the archive for an exact
-        # toroidal<->parallel current conversion at IMAS export. Defensive:
-        # a capture failure never sinks a draw -- IMAS export just falls back
-        # to the baseline-ratio reconstruction for it.
+        # draw's own flux geometry travels into the archive for exact
+        # current conversions at IMAS export. Defensive: a capture failure
+        # never sinks a draw -- IMAS export just falls back to the template
+        # (baseline) geometry for it.
         diagnostics['eq_fsa'] = None
         if capture_live_eq:
             try:
@@ -5853,7 +5814,7 @@ def generate_bouquet(
             except Exception as _fsa_exc:
                 print(f"  WARN: live-equilibrium FSA capture failed "
                       f"({_fsa_exc}); IMAS export for this draw will use the "
-                      f"baseline-ratio reconstruction")
+                      f"template (baseline) geometry")
 
         # Guard get_stats: a degenerate draw (Ip->0 / collapsed plasma, e.g.
         # after Sauter "corrector convergence failed") makes OFT's l_i
@@ -6380,15 +6341,13 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         **kwargs
     )
 
-    # Convert SWB's parallel-projected bootstrap to the toroidal convention
-    # shared by eqdsk_jtor and the fitted inductive profile, so the
-    # j_BS / j_inductive split is done in a single convention.
-    # Smooth the fragile near-axis / shelf-transition zone IMMEDIATELY after
-    # conversion (shared helper, also applied to every per-draw spike) so the
+    # SWB's bootstrap is already TokaMaker jphi, the convention of
+    # eqdsk_jtor and the fitted inductive profile (no conversion needed).
+    # Smooth the fragile near-axis / shelf-transition zone IMMEDIATELY
+    # (shared helper, also applied to every per-draw spike) so the
     # inductive fit below sees the artifact-free profile rather than the raw
     # collapsed axis point.
-    j_BS_isolated_raw = _swb_jbs_to_toroidal(mygs, results['isolated_j_BS'],
-                                             psi_pad)
+    j_BS_isolated_raw = np.asarray(results['isolated_j_BS'], dtype=float)
     j_BS_isolated = smooth_jbs_transition(j_BS_isolated_raw)
 
     # ---- 2b. Classify the j_phi profile ----

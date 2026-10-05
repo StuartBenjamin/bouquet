@@ -2261,8 +2261,7 @@ class Bouquet:
         _q0_state = None
         _structured_state = None
         if self.config.generation.recalculate_j_BS:
-            from .TokaMaker_interface import (_swb_jbs_to_toroidal,
-                                              smooth_jbs_transition)
+            from .TokaMaker_interface import smooth_jbs_transition
             from .sampling import calc_cylindrical_li_proxy
             from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
             from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
@@ -2341,7 +2340,7 @@ class Bouquet:
             # Same axis-transition smoothing every per-draw spike receives, so
             # the sigma=0 draw reproduces this baseline split exactly.
             j_BS_swb = smooth_jbs_transition(
-                _swb_jbs_to_toroidal(mygs, swb["isolated_j_BS"], psi_pad))
+                np.asarray(swb["isolated_j_BS"], dtype=float))
             if gc.floor_j_BS:
                 j_BS_swb = np.clip(j_BS_swb, 0.0, None)
             ratio = j_BS_swb.max() / max(j_BS_src.max(), 1.0)
@@ -2915,7 +2914,7 @@ class Bouquet:
 
         Replays the per-draw pre-SWB sequence -- state-anchor solve at
         the baseline j_phi/pressure, ``solve_with_bootstrap`` on the baseline
-        kinetics, toroidal conversion, axis-transition smoothing -- and
+        kinetics, axis-transition smoothing -- and
         compares the resulting bootstrap spike to ``baseline.j_BS``.  Any
         systematic deviation found here is inherited by EVERY draw as a
         j_phi target bias: the 2026-07 hollow-core/q0-offset bug was exactly
@@ -2959,8 +2958,7 @@ class Bouquet:
         """
         import numpy as np
         from scipy.interpolate import interp1d
-        from .TokaMaker_interface import (_swb_jbs_to_toroidal,
-                                          smooth_jbs_transition)
+        from .TokaMaker_interface import smooth_jbs_transition
         from .utils import pchip_derivative
         from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
         from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
@@ -3063,7 +3061,7 @@ class Bouquet:
             isolate_edge_jBS=bool(gc.isolate_edge_jBS),
             **gc.bootstrap_kwargs)
         spike0 = smooth_jbs_transition(
-            _swb_jbs_to_toroidal(mygs, res["isolated_j_BS"], psi_pad))
+            np.asarray(res["isolated_j_BS"], dtype=float))
         if gc.floor_j_BS:
             spike0 = np.clip(spike0, 0.0, None)
 
@@ -3802,7 +3800,7 @@ class Bouquet:
         """Write one perturbed IMAS/OMAS IDS per ``selection`` draw to
         ``out_dir`` (IMAS source only). Thin wrapper over
         :func:`export_imas_drawset`; ``fidelity`` picks the exact
-        (captured-geometry) or baseline-ratio current split."""
+        (captured-geometry) or template-geometry current conversion."""
         from .config import ImasSource
         from .io.imas import export_imas_drawset
         if not isinstance(self.config.source, ImasSource):
