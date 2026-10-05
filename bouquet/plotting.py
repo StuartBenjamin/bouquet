@@ -1629,6 +1629,19 @@ def _imas_input_profiles(source):
     return psiN, np.asarray(p1["pressure"], float), q, jt
 
 
+def _recon_fixed_channels(bl):
+    """The fixed currents in ``bl.j_phi``: j_NBI, j_RF, j_other; with the swb saw
+    on (``bl.j_saw``) j_other's sawteeth share is replaced by j_saw."""
+    j_other = getattr(bl, "j_other", None)
+    j_saw = getattr(bl, "j_saw", None)
+    if j_saw is not None:
+        j_st = getattr(bl, "j_sawteeth", None)
+        j_other = (np.asarray(0.0 if j_other is None else j_other, float)
+                   - np.asarray(0.0 if j_st is None else j_st, float)
+                   + np.asarray(j_saw, float))
+    return (getattr(bl, "j_NBI", None), getattr(bl, "j_RF", None), j_other)
+
+
 def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
     r"""Compare the reconstructed / forward-solved baseline against the RAW
     INPUT -- pressure, :math:`j_\phi`, q, and the separatrix (with the green→red
@@ -1784,8 +1797,7 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
             _d = np.asarray(bl.jBS_diff, float)
             _jBS_eff = _jBS_eff + _to_jx(_d, _kin_x if _d.shape == _kin_x.shape else _blx)
         _j_ind_eff = j_sol - _jBS_eff
-        for _fx in (getattr(bl, "j_NBI", None), getattr(bl, "j_RF", None),
-                    getattr(bl, "j_other", None)):
+        for _fx in _recon_fixed_channels(bl):
             if _fx is not None:
                 _fx = np.asarray(_fx, float)
                 _j_ind_eff = _j_ind_eff - _to_jx(

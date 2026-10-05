@@ -32,23 +32,24 @@ def flatten_axis_subgrid(s, j, s_cut):
 
     ``s`` rising from 0 (rho_tor^2 of the nodes).  The cut snaps to the first
     node at or past ``s_cut`` (``s_used``); that node and everything outside it
-    are unchanged.  The quadratic matches ``j`` and ``dj/ds`` (3-point,
-    exact for a quadratic) there and keeps ``∫_0^s_used j ds`` (trapezoid on the nodes,
-    so exactly).  A quadratic in ``s`` comes back unchanged.
+    are unchanged.  The quadratic matches ``j`` and ``dj/ds`` there (one-sided
+    3-point from the cut outward, so nothing inside it; exact for a quadratic)
+    and keeps ``∫_0^s_used j ds`` (trapezoid on the nodes, so exactly).  A
+    quadratic in ``s`` comes back unchanged.
     """
     s = np.asarray(s, dtype=float)
     j = np.asarray(j, dtype=float)
     if s.ndim != 1 or s.size != j.size or abs(s[0]) > 1e-12 or np.any(np.diff(s) <= 0):
         raise ValueError("flatten_axis_subgrid: s must rise from 0, same size as j")
     k = int(np.searchsorted(s, float(s_cut) - 1e-12 * s[-1]))
-    if k < 2 or k >= s.size - 1:
+    if k < 2 or k >= s.size - 2:
         raise ValueError(f"flatten_axis_subgrid: s_cut={s_cut!r} leaves no inner "
-                         f"nodes or no outer neighbour")
+                         f"nodes or not two outer neighbours")
     sk = s[:k + 1]
     w = _trapz_weights(sk)
-    h1, h2 = s[k] - s[k - 1], s[k + 1] - s[k]
-    dj = (-h2 / (h1 * (h1 + h2)) * j[k - 1] + (h2 - h1) / (h1 * h2) * j[k]
-          + h1 / (h2 * (h1 + h2)) * j[k + 1])
+    h1, h2 = s[k + 1] - s[k], s[k + 2] - s[k + 1]
+    dj = (-(2.0 * h1 + h2) / (h1 * (h1 + h2)) * j[k] + (h1 + h2) / (h1 * h2) * j[k + 1]
+          - h1 / (h2 * (h1 + h2)) * j[k + 2])
     A = np.array([[1.0, s[k], s[k] ** 2],
                   [0.0, 1.0, 2.0 * s[k]],
                   [w.sum(), w @ sk, w @ sk ** 2]])
@@ -127,8 +128,11 @@ def run_grid_rho(bl):
         return np.sqrt(np.clip(x, 0.0, None))
     fc = getattr(bl, "fuse_currents", None) or {}
     if "psi_norm" in fc and "rho_tor_norm" in fc:
-        return np.interp(x, np.asarray(fc["psi_norm"], float),
-                         np.asarray(fc["rho_tor_norm"], float))
+        rho = np.interp(x, np.asarray(fc["psi_norm"], float),
+                        np.asarray(fc["rho_tor_norm"], float))
+        if x[0] == 0.0:
+            rho[0] = 0.0        # the axis, whatever the source's first node
+        return rho
     return None
 
 
@@ -174,6 +178,9 @@ def flatten_baseline_saw(bl, spec, rho_res=None):
             return rec
     else:
         s_cut = float(spec) ** 2
+    if s_cut - 1e-12 * s[-1] <= s[1]:
+        raise ValueError(f"swb_saw_axis_flatten: cut rho {np.sqrt(s_cut):.4g} must lie "
+                         f"beyond the second run node (rho {np.sqrt(s[1]):.4g})")
     rec["saw_axis_n_extrema"] = int(axis_extrema(s, j_phi, s_cut).size)
     j_flat, s_used = flatten_axis_subgrid(s, j_phi, s_cut)
     delta = j_flat - j_phi

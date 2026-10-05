@@ -3728,7 +3728,8 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
     exactly as the baseline's solve B did. All sigmas zero: the baseline
     inputs are passed through unchanged (no rng), so the draw is solve B.
     Returns the :func:`perturb_kinetic_equilibrium` tuple; with the sawtooth
-    reset on, the diagnostics carry ``j_saw``, ``saw_rho_m`` and ``saw_n_dips``.
+    reset on, the diagnostics carry ``j_saw``, ``saw_rho_m``, ``saw_rho_out``,
+    ``saw_n_dips`` (and ``saw_map_warn`` from the recipe's jphi_saw check).
     """
     rng = make_rng(rng)
     psi_kin = psi_N_kinetic if psi_N_kinetic is not None else psi_N
@@ -3807,6 +3808,10 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
         diagnostics.update(j_saw=np.asarray(res["j_saw"], dtype=float),
                            saw_rho_m=float(res["saw_rho_m"]),
                            saw_n_dips=int(res["saw_n_dips"]))
+        if res.get("saw_rho_out") is not None:
+            diagnostics["saw_rho_out"] = float(res["saw_rho_out"])
+        if res.get("saw_map_warn") is not None:
+            diagnostics["saw_map_warn"] = bool(res["saw_map_warn"])
     return (ne_p, te_p, ni_p, ti_p, np.zeros_like(psi_N),
             np.asarray(res["total_j_phi"], dtype=float), diagnostics)
 
@@ -6635,7 +6640,9 @@ def generate_bouquet(
                 "swb_jind_resamples": diagnostics.get("jind_resamples"),
                 "swb_j_saw": diagnostics.get("j_saw"),
                 "swb_saw_rho_m": diagnostics.get("saw_rho_m"),
-                "swb_saw_n_dips": diagnostics.get("saw_n_dips")})
+                "swb_saw_rho_out": diagnostics.get("saw_rho_out"),
+                "swb_saw_n_dips": diagnostics.get("saw_n_dips"),
+                "swb_saw_map_warn": diagnostics.get("saw_map_warn")})
 
         # Clean up on-disk eqdsk after archiving
         try:

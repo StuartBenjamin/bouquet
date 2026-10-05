@@ -1148,6 +1148,11 @@ class GenerationConfig:
                 f"imas_baseline={self.imas_baseline!r} not in ('closure', 'swb')")
         if self.swb_saw_q is not None and not float(self.swb_saw_q) > 0.0:
             raise ValueError(f"swb_saw_q={self.swb_saw_q!r}: must be > 0 (None = off)")
+        for name in ("swb_saw_dq", "swb_saw_tol"):
+            if not float(getattr(self, name)) > 0.0:
+                raise ValueError(f"{name}={getattr(self, name)!r} must be > 0")
+        if not float(self.swb_saw_ramp) >= 0.0:
+            raise ValueError(f"swb_saw_ramp={self.swb_saw_ramp!r} must be >= 0")
         if self.swb_saw_rule not in SWB_SAW_RULES:
             raise ValueError(f"swb_saw_rule={self.swb_saw_rule!r} not in {tuple(SWB_SAW_RULES)}")
         f = self.swb_saw_axis_flatten

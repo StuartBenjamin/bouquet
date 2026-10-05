@@ -46,7 +46,9 @@ class TestConfig:
             == (0.03, 1e-4, 0.01, "local")
 
     @pytest.mark.parametrize("kw", [dict(swb_saw_q=0.0), dict(swb_saw_q=-1.0),
-                                    dict(swb_saw_rule=1), dict(swb_saw_rule="outer")])
+                                    dict(swb_saw_rule=1), dict(swb_saw_rule="outer"),
+                                    dict(swb_saw_dq=0.0), dict(swb_saw_dq=-0.03),
+                                    dict(swb_saw_tol=0.0), dict(swb_saw_ramp=-0.01)])
     def test_bad_values_refused(self, kw):
         with pytest.raises(ValueError, match=next(iter(kw))):
             GenerationConfig(imas_baseline="swb", **kw)
@@ -159,7 +161,7 @@ def fake_swb(monkeypatch, saw_oft):
         return {"j_inductive": j_ind, "isolated_j_BS": j_bs,
                 "total_j_phi": j_ind + j_bs + kw["jphi_fixed"] + j_saw,
                 "j_saw": j_saw, "saw_rho_m": 0.31 if on else 0.0,
-                "saw_n_dips": 1 if on else 0}
+                "saw_rho_out": 0.18 if on else 0.0, "saw_n_dips": 1 if on else 0}
 
     mod = types.ModuleType("OpenFUSIONToolkit.TokaMaker.bootstrap")
     mod.solve_with_bootstrap = swb
@@ -214,7 +216,7 @@ class TestMockedSWB:
         bl = ns.baseline
         assert bl.j_saw is None and bl.swb_jphi_saw is None
         assert not any(k.startswith("saw_") for k in bl.ip_closure)
-        assert "j_saw" not in bl.swb_baseline              # stripped though returned
+        assert not (set(run_mod._SWB_SAW_KEYS) & set(bl.swb_baseline))  # stripped though returned
 
     def test_kwargs_on(self, fake_swb):
         ns = _run(swb_saw_q=1.025, swb_saw_dq=0.04, swb_saw_tol=2e-4,
@@ -228,6 +230,8 @@ class TestMockedSWB:
             assert kw["jphi_fixed"] is bl.swb_jphi_fixed
         np.testing.assert_array_equal(bl.swb_jphi_saw, bl.j_sawteeth)
         assert bl.ip_closure["saw_rho_m"] == 0.31 and bl.ip_closure["saw_n_dips"] == 1
+        assert bl.ip_closure["saw_rho_out"] == 0.18 == bl.swb_baseline["saw_rho_out"]
+        assert bl.ip_closure["saw_map_warn"] is False      # a reset: nothing to check
 
     @pytest.mark.parametrize("saw_q", [None, 1.025])
     def test_accounting(self, fake_swb, saw_q):
@@ -256,6 +260,7 @@ class TestMockedSWB:
         assert out["passed"]
         assert ("j_saw" in out["swb_dev"]) == (saw_q is not None)
         assert ("saw_rho_m" in out["swb_dev"]) == (saw_q is not None)
+        assert ("saw_rho_out" in out["swb_dev"]) == (saw_q is not None)
         # the check repeats solve B: strong reg toward A's coils, same saw args
         assert set(fake_swb[-1]) == set(fake_swb[1])
 
@@ -275,10 +280,13 @@ def _draw(res_extra):
 
 
 def test_swb_draw_records_j_saw():
-    d = _draw({"j_saw": np.ones(17), "saw_rho_m": 0.3, "saw_n_dips": 2})
+    d = _draw({"j_saw": np.ones(17), "saw_rho_m": 0.3, "saw_rho_out": 0.2,
+               "saw_n_dips": 2, "saw_map_warn": False})
     assert np.array_equal(d["j_saw"], np.ones(17))
-    assert (d["saw_rho_m"], d["saw_n_dips"]) == (0.3, 2)
-    assert not ({"j_saw", "saw_rho_m", "saw_n_dips"} & set(_draw({})))
+    assert (d["saw_rho_m"], d["saw_rho_out"], d["saw_n_dips"]) == (0.3, 0.2, 2)
+    assert d["saw_map_warn"] is False
+    assert not ({"j_saw", "saw_rho_m", "saw_rho_out", "saw_n_dips", "saw_map_warn"}
+                & set(_draw({})))
 
 
 def test_saw_names_are_real_toolkit_arguments():
@@ -288,3 +296,112 @@ def test_saw_names_are_real_toolkit_arguments():
     if known is None or "jphi_saw" not in known:
         pytest.skip("needs an OpenFUSIONToolkit with jphi_saw")
     assert GenerationConfig._SAW_RESERVED <= known and "saw_relax" in known
+
+
+# ---- review fixes: phi_n, taper identity, sigma=0 mismatch, jphi_saw map check ----
+def _swap_swb(fn):
+    """Replace the fake toolkit's solve_with_bootstrap (installed by fake_swb)."""
+    sys.modules["OpenFUSIONToolkit.TokaMaker.bootstrap"].solve_with_bootstrap = fn
+
+
+@pytest.mark.parametrize("pack", [None, 0.02])
+def test_phi_n_saw_and_fixed_share_grid(fake_swb, pack):
+    ns = _run(swb_saw_q=1.025, swb_axis_pack=pack, swb_axis_pack_rho=0.3)
+    bl = ns.baseline
+    bl.coord = "phi_n"
+    ns._swb_imas_baseline()
+    xs = coords.axis_pack_grid(bl.psi_N, pack, 0.3)[0]
+    for kw in fake_swb:
+        assert kw["coord"] == "phi_n" and np.array_equal(kw["x"], xs)
+        assert kw["jphi_saw"].shape == kw["jphi_fixed"].shape == xs.shape
+        np.testing.assert_array_equal(kw["jphi_saw"], coords.to_swb(bl.psi_N, xs, bl.swb_jphi_saw)
+                                      if pack else bl.swb_jphi_saw)
+    np.testing.assert_array_equal(bl.swb_jphi_saw, bl.j_sawteeth)
+
+
+def _taper(x, x0=0.9):
+    return np.where(x > x0, np.cos(0.5 * np.pi * (x - x0) / (1.0 - x0)) ** 2, 1.0)
+
+
+def test_flatten_saw_taper_identity(fake_swb):
+    """OFT tapers every channel at the edge: j_fixed and j_saw come back tapered."""
+    def swb(mygs, ne, te, ni, ti, zeff, ip, inductive_jphi, **kw):
+        fake_swb.append(kw)
+        x = kw["x"]
+        f = _taper(x)
+        j_ind = f * 1.0123 * np.asarray(inductive_jphi)
+        j_bs = f * 1e5 * (1.0 - x) ** 2
+        j_fix = f * kw["jphi_fixed"]
+        j_saw = f * kw["jphi_saw"] + _dj(x)
+        return {"j_inductive": j_ind, "isolated_j_BS": j_bs, "j_fixed": j_fix,
+                "total_j_phi": j_ind + j_bs + j_fix + j_saw, "j_saw": j_saw,
+                "saw_rho_m": 0.31, "saw_rho_out": 0.18, "saw_n_dips": 1}
+    _swap_swb(swb)
+    from test_axis_subgrid import _wiggly_run
+    ns = _wiggly_run(swb_saw_q=1.025, swb_saw_axis_flatten=0.45)
+    bl = ns.baseline
+    j_src_peak = float(np.max(np.abs(bl.j_phi)))
+    ns._swb_imas_baseline()
+    assert bl.ip_closure["saw_axis_rho_cut"] >= 0.45
+    assert bl.ip_closure["fuse_total_peak"] == j_src_peak      # the source, before the flatten
+    f = _taper(bl.psi_N)
+    assert np.any(f < 1.0)
+    np.testing.assert_allclose(bl.j_saw, f * bl.swb_jphi_saw + _dj(bl.psi_N), rtol=1e-14)
+    pk = np.max(np.abs(bl.j_phi))
+    np.testing.assert_allclose(
+        bl.j_inductive + bl.j_BS + bl.j_NBI + bl.j_RF + (bl.j_other - bl.j_sawteeth)
+        + bl.j_saw, bl.j_phi, rtol=0, atol=1e-12 * pk)
+
+
+@pytest.mark.parametrize("key", ["j_saw", "saw_rho_m", "saw_rho_out"])
+def test_sigma0_fails_on_saw_mismatch(fake_swb, key):
+    swb0 = sys.modules["OpenFUSIONToolkit.TokaMaker.bootstrap"].solve_with_bootstrap
+
+    def swb(*a, **kw):
+        res = swb0(*a, **kw)
+        if len(fake_swb) > 2:                   # the sigma=0 repeat of solve B
+            res[key] = res[key] + (1.0 if key == "j_saw" else 1e-3)
+        return res
+    _swap_swb(swb)
+    ns = _run(swb_saw_q=1.025)
+    ns._swb_imas_baseline()
+    out = ns._verify_sigma0_swb()
+    assert not out["passed"] and out["swb_dev"][key] > 0.0
+    assert all(v == 0.0 for k, v in out["swb_dev"].items() if k != key)
+
+
+@pytest.mark.parametrize("scale", [1.0, 2.0])
+def test_no_reset_jphi_saw_map_check(fake_swb, capsys, scale):
+    """saw_n_dips 0: j_saw must be jphi_saw; a mis-mapped one warns, never raises."""
+    def swb(mygs, ne, te, ni, ti, zeff, ip, inductive_jphi, **kw):
+        fake_swb.append(kw)
+        x = kw["x"]
+        j_ind = 1.0123 * np.asarray(inductive_jphi)
+        j_bs = 1e5 * (1.0 - x) ** 2
+        j_saw = scale * kw["jphi_saw"]
+        return {"j_inductive": j_ind, "isolated_j_BS": j_bs,
+                "total_j_phi": j_ind + j_bs + kw["jphi_fixed"] + j_saw, "j_saw": j_saw,
+                "saw_rho_m": 0.0, "saw_rho_out": 0.0, "saw_n_dips": 0}
+    _swap_swb(swb)
+    ns = _run(swb_saw_q=1.025)
+    ns._swb_imas_baseline()
+    ic = ns.baseline.ip_closure
+    assert ic["saw_map_warn"] is (scale != 1.0)
+    assert (ic["saw_map_dev"] > run_mod.SWB_SAW_MAP_TOL) is (scale != 1.0)
+    assert ("mis-map jphi_saw" in capsys.readouterr().out) is (scale != 1.0)
+
+
+def test_saw_map_check_taper():
+    x = np.linspace(0.0, 1.0, 33)
+    f = _taper(x)
+    jsaw_in = 3e4 * (1.0 - 0.5 * x)               # finite at the edge: the taper shows
+    jf_in = 2e4 + 0 * x
+    jf_in[-1] = 0.0                              # factor unknown on the last node
+    res = {"j_saw": f * jsaw_in, "j_fixed": f * jf_in, "saw_n_dips": 0,
+           "total_j_phi": 1e6 * (1.0 - x ** 2) + 1e5}
+    dev, warn = run_mod._swb_saw_map_check(res, jsaw_in, jf_in)
+    assert dev < 1e-14 and not warn
+    assert run_mod._swb_saw_map_check(res, jsaw_in)[1]          # taper ignored: trips
+    res["j_saw"] = jsaw_in
+    assert run_mod._swb_saw_map_check(res, jsaw_in, jf_in)[1]
+    assert run_mod._swb_saw_map_check(dict(res, saw_n_dips=2), jsaw_in, jf_in) == (None, False)

@@ -47,11 +47,27 @@ class TestFlatten:
         c2, c1, c0 = np.polyfit(S[:k], out[:k], 2)
         assert np.allclose(np.polyval([c2, c1, c0], S[:k]), out[:k], rtol=1e-10)
         assert np.isclose(np.polyval([c2, c1, c0], S[k]), j[k], rtol=1e-10)   # C0
-        dj = np.gradient(j, S, edge_order=2)[k]
+        # one-sided from the cut outward: nothing inside the cut enters
+        h1, h2 = S[k + 1] - S[k], S[k + 2] - S[k + 1]
+        dj = (-(2 * h1 + h2) / (h1 * (h1 + h2)) * j[k] + (h1 + h2) / (h1 * h2) * j[k + 1]
+              - h1 / (h2 * (h1 + h2)) * j[k + 2])
         assert np.isclose(2 * c2 * S[k] + c1, dj, rtol=1e-8)                 # C1
         # a polynomial in s = rho^2 is even in rho: no extremum left inside but the axis
         assert AS.axis_extrema(S, out, S[k]).size <= 1
         assert AS.axis_extrema(S, j, S[k]).size >= 3
+
+    def test_slope_ignores_structure_inside_the_cut(self):
+        """A bump on the node just inside the cut must not set the matching slope."""
+        s = np.linspace(0.0, 1.0, 129)
+        j = 1e6 * (1.0 - s)
+        k = 6
+        j[k - 1] += 2e5
+        out, s_used = AS.flatten_axis_subgrid(s, j, s[k])
+        assert s_used == s[k] and np.array_equal(out[k:], j[k:])
+        c2, c1, _ = np.polyfit(s[:k + 1], np.r_[out[:k], j[k]], 2)
+        assert np.isclose(2 * c2 * s[k] + c1, -1e6, rtol=1e-9)           # the true slope
+        assert np.all(np.diff(out) < 0.0)                                 # monotone, not hollow
+        assert abs(_trapz(s, out) - _trapz(s, j)) <= 1e-13 * _trapz(s, np.abs(j))
 
     def test_quadratic_is_a_fixed_point(self):
         j = 1.7e6 - 2e6 * S + 5e5 * S ** 2
@@ -177,6 +193,20 @@ class TestBaseline:
         rec = AS.flatten_baseline_saw(bl, 0.09)
         assert rec["saw_axis_flatten_skipped"] and np.array_equal(bl.j_phi, j0)
 
+    def test_psi_run_axis_is_rho_zero(self):
+        bl = _bl("psi_n")
+        bl.fuse_currents = {"psi_norm": bl.psi_N, "rho_tor_norm": np.r_[0.004, RHO[1:]]}
+        rho = AS.run_grid_rho(bl)
+        assert rho[0] == 0.0 and np.array_equal(rho[1:], RHO[1:])
+
+    @pytest.mark.parametrize("coord", ["phi_n", "psi_n"])
+    def test_cut_inside_second_node_refused(self, coord):
+        bl = _bl(coord)
+        with pytest.raises(ValueError, match="beyond the second run node"):
+            AS.flatten_baseline_saw(bl, 0.5 * RHO[1])
+        with pytest.raises(ValueError, match="beyond the second run node"):
+            AS.flatten_baseline_saw(bl, RHO[1])
+
     def test_psi_run_needs_a_rho_map(self):
         bl = _bl("psi_n")
         del bl.fuse_currents
@@ -276,3 +306,18 @@ class TestPreparePath:
         assert ic["saw_axis_rho_cut"] is not None
         assert ic["saw_axis_rho_cut"] >= ic["saw_axis_rho_res"]
         assert ic["saw_axis_cut_over_res"] >= 1.0 and not ic["saw_axis_warn_wide"]
+
+
+def test_recon_fixed_channels_with_saw():
+    """plot_input_vs_recon's recon j_ind: j_saw replaces j_other's sawteeth share."""
+    from bouquet.plotting import _recon_fixed_channels
+    bl = _bl()
+    j_saw = bl.j_sawteeth + 3e4 * np.exp(-(RHO / 0.2) ** 2)
+    nbi, rf, other = _recon_fixed_channels(bl)                     # saw off
+    assert nbi is bl.j_NBI and rf is bl.j_RF and other is bl.j_other
+    bl.j_saw = j_saw
+    bl.j_phi = bl.j_phi - bl.j_sawteeth + j_saw
+    nbi, rf, other = _recon_fixed_channels(bl)
+    np.testing.assert_allclose(other, bl.j_other - bl.j_sawteeth + j_saw, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(bl.j_phi - bl.j_BS - (nbi + rf + other), bl.j_inductive,
+                               rtol=0, atol=1e-9)

@@ -43,10 +43,50 @@ from . import coords
 #: (converged SWB: ~1e-3; a frozen-alpha drift: several %).
 SWB_IP_TOL = 5e-3
 #: solve_with_bootstrap outputs of the sawtooth reset (GenerationConfig.swb_saw_q).
-_SWB_SAW_KEYS = ("j_saw", "saw_rho_m", "saw_n_dips")
+_SWB_SAW_KEYS = ("j_saw", "saw_rho_m", "saw_rho_out", "saw_n_dips")
+#: swb_saw_q: with no reset (saw_n_dips 0) warn when max|j_saw - jphi_saw| exceeds
+#: this fraction of max|j_phi| (an OFT mis-mapping jphi_saw; also frozen-saw reporting).
+SWB_SAW_MAP_TOL = 1e-3
 # swb draw-loop maxits cap: converged rt66 draws took <= 44 its; a stuck one (a 2-cycle just above
 # nl_tol) ran all 800 for ~27 min. Past it, DrawSolveGuard's loose-tol rescue applies as off swb.
 SWB_DRAW_MAXITS = 100
+
+
+def _swb_taper_factor(j_fixed_out, jf_in):
+    """OFT's edge-taper factor ``j_fixed / jphi_fixed``: 1 where the input is 0
+    or the node is untapered (bit-identical there)."""
+    import numpy as np
+    jf_in = np.asarray(jf_in, dtype=float)
+    f = np.where(np.abs(jf_in) > 0.0,
+                 np.asarray(j_fixed_out, dtype=float) / np.where(jf_in != 0.0, jf_in, 1.0), 1.0)
+    return np.where(np.abs(f - 1.0) > 1e-9, f, 1.0)
+
+
+def _swb_saw_map_check(res, jphi_saw, jf_in=None):
+    """``(dev_frac, warn)``: max|j_saw - f jphi_saw| / max|j_phi| of a solve that
+    reports no reset (``saw_n_dips`` 0; else ``(None, False)``).  ``f`` the edge
+    taper (from ``res["j_fixed"]`` / ``jf_in``), compared only inside the first
+    tapered node and where ``f`` is known."""
+    import numpy as np
+    if res.get("j_saw") is None or int(res.get("saw_n_dips") or 0) != 0:
+        return None, False
+    j_saw = np.asarray(res["j_saw"], dtype=float)
+    ref = np.asarray(jphi_saw, dtype=float)
+    ok = np.ones(j_saw.size, dtype=bool)
+    if jf_in is not None and res.get("j_fixed") is not None:
+        f = _swb_taper_factor(res["j_fixed"], jf_in)
+        ref = f * ref
+        tap = np.flatnonzero(f != 1.0)
+        ok = (np.arange(j_saw.size) < (tap[0] if tap.size else j_saw.size)) \
+            | (np.asarray(jf_in, dtype=float) != 0.0)
+    peak = float(np.max(np.abs(np.asarray(res["total_j_phi"], dtype=float)))) or 1.0
+    dev = float(np.max(np.abs(j_saw - ref)[ok], initial=0.0)) / peak
+    warn = dev > SWB_SAW_MAP_TOL
+    if warn:
+        print(f"WARN: swb_saw_q: no reset (saw_n_dips 0) but max|j_saw - jphi_saw| = "
+              f"{dev:.2e} of max|j_phi| (> {SWB_SAW_MAP_TOL:g}): this toolkit may mis-map "
+              "jphi_saw (or report a frozen saw)")
+    return dev, warn
 
 
 class Bouquet:
@@ -3111,6 +3151,10 @@ class Bouquet:
         if idx is not None:     # outputs at the run nodes; packed ones kept
             res = coords.from_swb(res, idx, x_swb.size)
             res["swb_packed"]["x"] = x_swb
+        if saw_kw:
+            res["saw_map_dev"], res["saw_map_warn"] = _swb_saw_map_check(
+                res, bl.swb_jphi_saw,
+                bl.swb_jphi_fixed if gc.swb_edge_taper_psi0 is not None else None)
         if not saw_kw:      # saw off: no saw outputs, whatever the toolkit returns
             res = {k: v for k, v in res.items() if k not in _SWB_SAW_KEYS}
             if "swb_packed" in res:
@@ -3127,7 +3171,8 @@ class Bouquet:
 
     def _swb_state(self, res, j_seed, psi_pad=1e-3):
         """Record of one swb solve on ``mygs``: alpha, coils, LCFS, li, Ip
-        (and j_saw, saw_rho_m, saw_n_dips with the sawtooth reset on)."""
+        (and j_saw, saw_rho_m, saw_rho_out, saw_n_dips and the jphi_saw map
+        check with the sawtooth reset on)."""
         import numpy as np
         from .utils import safe_trace_surf
         mygs = self.mygs
@@ -3150,7 +3195,11 @@ class Bouquet:
         if res.get("j_saw") is not None:
             st.update(j_saw=np.asarray(res["j_saw"], dtype=float),
                       saw_rho_m=float(res["saw_rho_m"]),
-                      saw_n_dips=int(res["saw_n_dips"]))
+                      saw_n_dips=int(res["saw_n_dips"]),
+                      saw_map_dev=res.get("saw_map_dev"),
+                      saw_map_warn=bool(res.get("saw_map_warn", False)))
+            if res.get("saw_rho_out") is not None:
+                st["saw_rho_out"] = float(res["saw_rho_out"])
         return st
 
     def _swb_imas_baseline(self):
@@ -3171,10 +3220,10 @@ class Bouquet:
         psi_N = np.asarray(bl.psi_N, dtype=float)
         if not np.array_equal(coords.swb_grid(psi_N), psi_N):
             raise RuntimeError('imas_baseline="swb" needs SWB on the run grid')
+        j_phi_src = np.asarray(bl.j_phi, dtype=float).copy()     # before the flatten
         flat_rec = self._swb_axis_flatten()
         pack_rec = self._swb_axis_pack_record(psi_N)
         self._swb_source_split(psi_N)
-        j_phi_src = np.asarray(bl.j_phi, dtype=float).copy()
         kin = self._swb_baseline_kinetics()
 
         st_a = self._swb_state(self._swb_solve(kin, bl.swb_seed_profile),
@@ -3193,9 +3242,7 @@ class Bouquet:
         jf_in = np.asarray(bl.swb_jphi_fixed, dtype=float)
         if (self.config.generation.swb_edge_taper_psi0 is not None
                 and st_b["j_fixed"] is not None):
-            f = np.where(np.abs(jf_in) > 0.0,
-                         st_b["j_fixed"] / np.where(jf_in != 0.0, jf_in, 1.0), 1.0)
-            f = np.where(np.abs(f - 1.0) > 1e-9, f, 1.0)   # untapered nodes stay bit-identical
+            f = _swb_taper_factor(st_b["j_fixed"], jf_in)
             for name in ("j_NBI", "j_RF", "j_other", "j_sawteeth"):
                 if getattr(bl, name, None) is not None:
                     setattr(bl, name, f * np.asarray(getattr(bl, name), dtype=float))
@@ -3220,8 +3267,12 @@ class Bouquet:
         if bl.j_saw is not None:
             bl.ip_closure.update(saw_q_s=float(self.config.generation.swb_saw_q),
                                  saw_rho_m=st_b["saw_rho_m"],
+                                 saw_rho_out=st_b.get("saw_rho_out"),
                                  saw_n_dips=st_b["saw_n_dips"],
-                                 saw_rho_m_solve_A=st_a.get("saw_rho_m"))
+                                 saw_rho_m_solve_A=st_a.get("saw_rho_m"),
+                                 saw_map_dev=st_b.get("saw_map_dev"),
+                                 saw_map_warn=bool(st_a.get("saw_map_warn")
+                                                   or st_b.get("saw_map_warn")))
         print(f"[imas swb] solve A: alpha={st_a['alpha']:.5f} li_3={st_a['li_3']:.4f}; "
               f"solve B (strong reg toward A's coils): alpha={st_b['alpha']:.5f} "
               f"li_3={st_b['li_3']:.4f}; max coil B-A {bl.ip_closure['coil_B_minus_A_max']:+.1f} "
@@ -3559,8 +3610,9 @@ class Bouquet:
         dev["lcfs"] = (float(np.max(np.abs(np.asarray(la) - np.asarray(lb))))
                        if la is not None and lb is not None
                        and np.shape(la) == np.shape(lb) else float("nan"))
-        if "saw_rho_m" in ref:
-            dev["saw_rho_m"] = abs(st["saw_rho_m"] - ref["saw_rho_m"])
+        for k in ("saw_rho_m", "saw_rho_out"):
+            if k in ref:
+                dev[k] = abs(st.get(k, np.nan) - ref[k])
         passed = all(v == 0.0 for v in dev.values())
         d_bs = np.abs(st["j_BS"] - ref["j_BS"])
         iw = int(np.argmax(d_bs))
@@ -4014,11 +4066,17 @@ class Bouquet:
                 # sawtooth reset (None, so not written, when swb_saw_q is off)
                 "swb_saw_q": gc.swb_saw_q,
                 "swb_saw_rho_m": _ic.get("saw_rho_m"),
+                "swb_saw_rho_out": _ic.get("saw_rho_out"),
                 "swb_saw_n_dips": _ic.get("saw_n_dips"),
+                "swb_saw_map_warn": _ic.get("saw_map_warn"),
                 "swb_saw_axis_rho_cut": _ic.get("saw_axis_rho_cut"),
                 "swb_saw_axis_moved_frac": _ic.get("saw_axis_moved_frac"),
                 "swb_saw_axis_rho_res": _ic.get("saw_axis_rho_res"),
                 "swb_saw_axis_cut_over_res": _ic.get("saw_axis_cut_over_res"),
+                "swb_saw_axis_n_extrema": _ic.get("saw_axis_n_extrema"),
+                "swb_saw_axis_warn_wide": _ic.get("saw_axis_warn_wide"),
+                "swb_saw_axis_warn_moved": _ic.get("saw_axis_warn_moved"),
+                "swb_saw_axis_flatten_skipped": _ic.get("saw_axis_flatten_skipped"),
                 "swb_axis_pack": _ic.get("swb_axis_pack"),
                 "swb_axis_pack_rho": _ic.get("swb_axis_pack_rho"),
                 "swb_axis_pack_added": _ic.get("swb_axis_pack_added"),
