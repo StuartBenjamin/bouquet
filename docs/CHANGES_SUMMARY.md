@@ -26,6 +26,16 @@ in force is approved.
   (`jbs_loop.MSE_CHORD_OFFSET_TOL_SIGMA`).
 - **The engine draws' l_i band (`l_i_tolerance = 0.05`, +/-5 % relative to
   the delivered reconstruction's l_i, applied post hoc): confirmed.**
+- **Stored unified configurations carrying the factory values of
+  `isolate_edge_jBS` / `perturb_jind_in_anchor`: accepted as implemented**
+  (6e052d0, `config.STORED_UNIFIED_UNREAD_FIELDS`). A stored `"unified"`
+  configuration carrying a non-default value of either field (what the
+  factories set for the legacy path until 2026-10-05) loads with that field
+  at its default and a warning, because the engine never read either field
+  -- the defaults are what that run actually ran. A live configuration
+  switched to `"unified"` with non-default values is still refused; only the
+  stored-configuration load path relaxes to defaults-plus-warning, so
+  archives written before the refusal stay loadable.
 
 ## Unreleased — owner-approved decisions (2026-10-05)
 
