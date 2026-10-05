@@ -55,6 +55,10 @@ class TestArchiveGolden:
         d = sc[c]
         assert d.attrs["swb_j_saw"].shape == (257,) and isinstance(d.li1, float)
         assert sc.spread(selection="all")["l_i(1)"]["n"] == len(sc.all)
+        import json
+        doc = json.loads(json.dumps(d.profiles_doc()))          # profiles JSON export
+        assert len(doc["profiles"]["swb_j_saw"]) == 257 and "swb_j_saw" not in doc["scalars"]
+        assert "profiles" in d.extract(str(tmp_path / "x"), formats=("profiles",))
 
     def test_equilibrium_parse(self):
         sc = bq.BouquetArchive(_GOLDEN)["0"]
