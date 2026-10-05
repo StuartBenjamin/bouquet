@@ -250,16 +250,32 @@ engine:
 | `jbs_loop_q0_corrector` | `engine_rows` with `"q0"` (`engine_draw_q0_row` for the draws) |
 | `floor_j_BS`, `swb_iterations`, `accept_anchor_inband`, `diagnostic_plots` | nothing: legacy draw / SWB mechanics |
 | `homotopy_passes` with `engine_draw_homotopy=False` | no homotopy runs |
+| `isolate_edge_jBS` (default `True`) | nothing: the engine never isolates the edge bootstrap (Redl on the whole profile) |
+| `perturb_jind_in_anchor` (default `False`) | nothing: one engine draw route replaces Fix C and the standard l_i loop |
 
 Already refused elsewhere: the MSE knobs without the `"mse"` row (and
 `structured_mse_steps` with it), `draw_solve_maxits`
 (`engine_draw_solve_maxits`), `jbs_self_consistent=False`,
 `recalculate_j_BS=False`, `single_profile_jphi`, `jbs_init != "anchor"`,
 and in the draws `jbs_delta_mode`, `PIN_JPHI`, `DIFF_BS`,
-`l_i_uncertainty > 0`. Two legacy draw settings have no engine meaning but
-are NOT refused, because neither of their values is the engine's and the
-factories set the non-default one: `isolate_edge_jBS` (the engine never
-isolates the edge bootstrap) and `perturb_jind_in_anchor`.
+`l_i_uncertainty > 0`.
+
+`isolate_edge_jBS` and `perturb_jind_in_anchor` joined the refused set on
+2026-10-05 (owner-approved). The factories set them for the LEGACY path
+(`from_geqdsk`: `isolate_edge_jBS=False`; `from_imas`: also
+`perturb_jind_in_anchor=True`), so build a unified configuration with the
+factory keyword, which leaves both at their defaults:
+
+```python
+bq = Bouquet.from_geqdsk(gfile, profiles=pfile, mesh=mesh,
+                         reconstruction_engine="unified")
+bq = Bouquet.from_imas(dd, mesh=mesh, time=t, reconstruction_engine="unified")
+```
+
+A legacy factory configuration switched to `"unified"` afterwards is refused,
+naming both fields. A stored unified configuration that carries them (written
+before 2026-10-05) loads at the defaults with a warning -- the engine never
+read them, so the stored run is unchanged.
 
 ## Presets
 

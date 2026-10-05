@@ -782,18 +782,20 @@ def child(part, outdir, draws=None, seed=None):
                                    + traceback.format_exc()[-3000:])
 
     try:
+        _engine = "legacy" if legacy else "unified"
         if src == "recon":
             b = bq.Bouquet.from_geqdsk(_GEQ, profiles=_PF, mesh=_MESH,
                                        nthreads=1, n_draws=1,
-                                       header=os.path.join(outdir, part))
+                                       header=os.path.join(outdir, part),
+                                       reconstruction_engine=_engine)
             psi_pad = float(b.config.source.psi_pad)
         else:
             b = bq.Bouquet.from_imas(_OMAS, mesh=_MESH, time=_TIME,
                                      n_draws=1, nthreads=1,
-                                     header=os.path.join(outdir, part))
+                                     header=os.path.join(outdir, part),
+                                     reconstruction_engine=_engine)
             psi_pad = 1e-3
         g = b.config.generation
-        g.reconstruction_engine = "legacy" if legacy else "unified"
         for k, v in extra.items():
             setattr(g, k, v)
         if src == "recon" and _psep_add() != 0.0:

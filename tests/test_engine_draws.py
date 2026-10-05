@@ -654,9 +654,8 @@ def _bq(tmp_path, n=2):
         os.path.join(_EX, "D3Dlike_Hmode_baseline.geqdsk"),
         profiles=os.path.join(_EX, "D3Dlike_Hmode_baseline.peqdsk"),
         mesh=os.path.join(_EX, "DIIID_mesh.h5"), n_draws=n,
-        header=str(tmp_path / "bq"))
+        header=str(tmp_path / "bq"), reconstruction_engine="unified")
     g = b.config.generation
-    g.reconstruction_engine = "unified"
     g.engine_rows = ["Ip"]
     g.seed = 12345
     return b

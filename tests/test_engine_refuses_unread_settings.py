@@ -4,8 +4,11 @@ before, ``structured_li_target=0.90``, ``closure_channel="structured"``,
 ``anchor_pressure_to_equilibrium=True``, ``jbs_loop_q0_corrector=True`` ...
 were accepted and silently ignored.  Each refusal names the engine setting
 that replaces it (or says nothing does).  Defaults, and the factories'
-configs, are accepted; ``workflow='custom'`` downgrades to a printed WARN,
-as for the MSE knobs.
+configs built with ``reconstruction_engine="unified"``, are accepted;
+``workflow='custom'`` downgrades to a printed WARN, as for the MSE knobs.
+``isolate_edge_jBS`` / ``perturb_jind_in_anchor`` joined the refused set on
+2026-10-05 (owner-approved); the factories no longer set them for a unified
+configuration.
 
 Solver-free.
 """
@@ -31,7 +34,10 @@ _SET = dict(
     structured_li_max_corrector_steps=3,
     anchor_pressure_to_equilibrium=True, imas_corrective_jphi=True,
     jbs_loop_q0_corrector=True, floor_j_BS=True, swb_iterations=2,
-    accept_anchor_inband=True, diagnostic_plots=True)
+    accept_anchor_inband=True, diagnostic_plots=True,
+    # owner-approved 2026-10-05: refused too (the factories no longer set
+    # them for a unified configuration)
+    isolate_edge_jBS=False, perturb_jind_in_anchor=True)
 
 
 def test_every_unread_field_has_a_case():
@@ -81,22 +87,58 @@ def test_workflow_custom_downgrades_to_a_printed_warning():
         in buf.getvalue()
 
 
-@pytest.mark.parametrize("factory", ["imas", "gfile"])
-def test_the_factories_configs_are_accepted_under_the_engine(factory):
+def _factory(factory, **kw):
     import bouquet as bq
     ex = os.path.join(os.path.dirname(__file__), os.pardir, "examples",
                       "D3D-like")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         if factory == "imas":
-            b = bq.Bouquet.from_imas(
+            return bq.Bouquet.from_imas(
                 os.path.join(ex, "D3Dlike_baseline_omas.json"),
                 mesh=os.path.join(ex, "DIIID_mesh.h5"), time=2.3043,
-                n_draws=1)
-        else:
-            b = bq.Bouquet.from_geqdsk(
-                os.path.join(ex, "D3Dlike_Hmode_baseline.geqdsk"),
-                profiles=os.path.join(ex, "D3Dlike_Hmode_baseline.peqdsk"),
-                mesh=os.path.join(ex, "DIIID_mesh.h5"), n_draws=1)
+                n_draws=1, **kw)
+        return bq.Bouquet.from_geqdsk(
+            os.path.join(ex, "D3Dlike_Hmode_baseline.geqdsk"),
+            profiles=os.path.join(ex, "D3Dlike_Hmode_baseline.peqdsk"),
+            mesh=os.path.join(ex, "DIIID_mesh.h5"), n_draws=1, **kw)
+
+
+@pytest.mark.parametrize("factory", ["imas", "gfile"])
+def test_the_factories_build_a_unified_config_the_engine_accepts(factory):
+    """``reconstruction_engine="unified"`` at construction: the factory
+    leaves the legacy-path workflow settings at their defaults, and the
+    engine accepts the config."""
+    b = _factory(factory, reconstruction_engine="unified")
+    g = b.config.generation
+    assert g.reconstruction_engine == "unified"
+    assert g.isolate_edge_jBS is True
+    assert g.perturb_jind_in_anchor is False
+    validate_engine_settings(g)
+
+
+@pytest.mark.parametrize("factory", ["imas", "gfile"])
+def test_the_factories_legacy_configs_are_unchanged(factory):
+    """Without the keyword (or with "legacy") the factories set exactly
+    what they did before: the legacy-path workflow settings."""
+    for kw in ({}, dict(reconstruction_engine="legacy")):
+        g = _factory(factory, **kw).config.generation
+        assert g.reconstruction_engine == "legacy"
+        assert g.isolate_edge_jBS is False
+        assert g.perturb_jind_in_anchor is (factory == "imas")
+        validate_engine_settings(g)
+
+
+@pytest.mark.parametrize("factory", ["imas", "gfile"])
+def test_switching_a_legacy_factory_config_to_the_engine_is_refused(factory):
+    """A legacy factory config switched to "unified" afterwards carries the
+    legacy-path values the engine never reads: refused, naming each field
+    and how to build a unified config instead."""
+    b = _factory(factory)
     b.config.generation.reconstruction_engine = "unified"
-    validate_engine_settings(b.config.generation)
+    with pytest.raises(ValueError) as ei:
+        validate_engine_settings(b.config.generation)
+    msg = str(ei.value)
+    assert "isolate_edge_jBS=False" in msg and "never reads" in msg
+    assert "reconstruction_engine='unified'" in msg
+    assert ("perturb_jind_in_anchor=True" in msg) is (factory == "imas")

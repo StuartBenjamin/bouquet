@@ -65,12 +65,13 @@ def main():
     header = os.path.join(a.outdir, f"frame_{tag}")
     if a.source == "recon":
         b = bq.Bouquet.from_geqdsk(_GEQ, profiles=_PF, mesh=_MESH,
-                                   nthreads=1, n_draws=1, header=header)
+                                   nthreads=1, n_draws=1, header=header,
+                                   reconstruction_engine=a.engine)
     else:
         b = bq.Bouquet.from_imas(_OMAS, mesh=_MESH, time=_TIME, n_draws=1,
-                                 nthreads=1, header=header)
+                                 nthreads=1, header=header,
+                                 reconstruction_engine=a.engine)
     g = b.config.generation
-    g.reconstruction_engine = a.engine
     g.separatrix_pressure = a.sep
     b.setup_solver()
     bl = b.prepare_baseline()

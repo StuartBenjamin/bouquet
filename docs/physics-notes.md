@@ -599,7 +599,9 @@ needed 7 passes -- one more than the draw default.
 
 ## The unified reconstruction engine (`reconstruction_engine`, default off)
 
-`GenerationConfig.reconstruction_engine="unified"` (default `"legacy"`)
+`GenerationConfig.reconstruction_engine="unified"` (default `"legacy"`; with
+the factories, `Bouquet.from_geqdsk/from_imas(..., reconstruction_engine=
+"unified")`, which leave the legacy-path workflow settings at their defaults)
 replaces the g-file reconstruction and the IMAS baseline with ONE loop for
 both inputs ([engine.md](engine.md)). Every current component is stored as a
 parallel current `<j.B>`: the g-file's from identity (I0) on its own surfaces

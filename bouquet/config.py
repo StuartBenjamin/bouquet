@@ -1901,6 +1901,12 @@ FIELD_PRE_INTRODUCTION = {
 }
 
 
+#: Legacy-path fields the factories set whatever the engine until
+#: 2026-10-05, which the unified engine never read and now refuses when not
+#: at their defaults (:data:`bouquet.engine.ENGINE_UNREAD_LEGACY_FIELDS`).
+STORED_UNIFIED_UNREAD_FIELDS = ("isolate_edge_jBS", "perturb_jind_in_anchor")
+
+
 def _stored_config_compat(gend: dict) -> None:
     """Load a stored ``generation`` dict as it was produced (in place).
 
@@ -1917,7 +1923,12 @@ def _stored_config_compat(gend: dict) -> None:
     not, today's default is used with a LOUD warning naming the field.
     ``engine_draw_solve_maxits`` missing: before it existed the engine draws
     were capped by ``draw_solve_maxits``, so that value moves over (and
-    ``draw_solve_maxits``, which the engine now refuses, is cleared)."""
+    ``draw_solve_maxits``, which the engine now refuses, is cleared).
+
+    (c) A stored ``"unified"`` config carrying a non-default
+    :data:`STORED_UNIFIED_UNREAD_FIELDS` value (a factory set it for the
+    legacy path; the engine never read it) is loaded at the default, with a
+    warning."""
     import warnings
     from .engine import ENGINE_FIELD_DEFAULTS
     eng = gend.get("reconstruction_engine", "legacy")
@@ -1948,6 +1959,23 @@ def _stored_config_compat(gend: dict) -> None:
         gend["jbs_max_passes_post_homotopy"] = val
     if eng != "unified":
         return
+    # (c) the factories set isolate_edge_jBS / perturb_jind_in_anchor for
+    # the legacy path whatever the engine until 2026-10-05; the engine never
+    # read either, and refuses a non-default value since: a stored unified
+    # config carrying one is loaded at the default (the run it recorded is
+    # the same), with a warning
+    for name in STORED_UNIFIED_UNREAD_FIELDS:
+        if name not in gend:
+            continue
+        d = _field_default(name)
+        if gend[name] != d:
+            warnings.warn(
+                f"stored unified config: generation.{name}={gend[name]!r} "
+                "(set by a factory for the legacy path) was never read by "
+                f"the unified engine; it is loaded as its default {d!r}, "
+                "which the engine now requires -- the stored run is "
+                "unchanged", UserWarning, stacklevel=3)
+            gend[name] = d
     if "engine_draw_solve_maxits" not in gend:
         cap = gend.get("draw_solve_maxits")
         warnings.warn(

@@ -127,3 +127,25 @@ def test_a_live_config_is_still_strict():
     with pytest.raises(ValueError, match="no effect"):
         validate_engine_settings(GenerationConfig(
             engine_mse_jacobian="fd_broyden"))
+
+
+@pytest.mark.parametrize("name, val", [("isolate_edge_jBS", False),
+                                       ("perturb_jind_in_anchor", True)])
+def test_a_stored_unified_factory_config_loads_at_the_default(name, val):
+    """Until 2026-10-05 the factories set these legacy-path fields whatever
+    the engine; the engine never read them and now refuses a non-default
+    value.  A stored unified config carrying one loads at the default (the
+    run it recorded is the same), with a warning -- never refused, never
+    silently changed."""
+    d = _stored(SHAS[-1], "unified")
+    d["generation"][name] = val
+    g, msgs = _load(d)
+    assert g.reconstruction_engine == "unified"
+    assert getattr(g, name) == getattr(GenerationConfig(), name)
+    assert any(name in m and "never read by the unified engine" in m
+               for m in msgs)
+    # under "legacy" the same stored value is kept (it is read there)
+    dl = _stored(SHAS[-1], "legacy")
+    dl["generation"][name] = val
+    gl, _ = _load(dl)
+    assert getattr(gl, name) == val

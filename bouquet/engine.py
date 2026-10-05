@@ -360,6 +360,21 @@ ENGINE_UNREAD_LEGACY_FIELDS = {
                             "anchor in-band shortcut",
     "diagnostic_plots": "nothing: the engine draws make no per-draw SWB "
                         "diagnostic plots",
+    # owner-approved 2026-10-05: refused like the rest (the factories no
+    # longer set them for a unified configuration --
+    # Bouquet.from_geqdsk / from_imas(..., reconstruction_engine="unified"))
+    "isolate_edge_jBS": "nothing: the engine never isolates the edge "
+                        "bootstrap (its bootstrap is Redl on the whole "
+                        "profile); the factories set False for the legacy "
+                        "path only -- build with Bouquet.from_geqdsk / "
+                        "from_imas(..., reconstruction_engine='unified'), "
+                        "or set it back to its default",
+    "perturb_jind_in_anchor": "nothing: one engine draw route for both "
+                              "input types replaces Fix C and the standard "
+                              "l_i loop; from_imas sets True for the legacy "
+                              "path only -- build with Bouquet.from_imas("
+                              "..., reconstruction_engine='unified'), or "
+                              "set it back to its default",
 }
 
 

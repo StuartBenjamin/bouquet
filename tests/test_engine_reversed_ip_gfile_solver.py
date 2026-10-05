@@ -79,8 +79,8 @@ def child(geqdsk, out):
     try:
         b = bq.Bouquet.from_geqdsk(geqdsk, profiles=F._PF, mesh=F._MESH,
                                    nthreads=1, n_draws=1,
-                                   header=os.path.splitext(out)[0])
-        b.config.generation.reconstruction_engine = "unified"
+                                   header=os.path.splitext(out)[0],
+                                   reconstruction_engine="unified")
         b.setup_solver()
         bl = b.prepare_baseline()
         e = bl.engine

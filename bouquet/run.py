@@ -92,7 +92,8 @@ class Bouquet:
     @classmethod
     def from_geqdsk(cls, geqdsk_path, *, profiles, mesh,
                     n_draws=20, header="bouquet", cocos=1, time=None,
-                    impurity_Z=6.0, **solver_kwargs) -> "Bouquet":
+                    impurity_Z=6.0, reconstruction_engine=None,
+                    **solver_kwargs) -> "Bouquet":
         """Minimal constructor for the reconstruction path (g-file + profiles).
 
         ``profiles`` is an IDA ``.cdf`` or a p-file (auto-detected).
@@ -102,18 +103,30 @@ class Bouquet:
         Extra keyword args go to :class:`SolverConfig` (e.g. ``order``,
         ``nthreads``). Reach into ``bq.uncertainty`` / ``bq.generation``
         afterwards for the advanced knobs.
+
+        ``reconstruction_engine`` (``None``: the :class:`GenerationConfig`
+        default, ``"legacy"``) selects the reconstruction engine at
+        construction.  With ``"unified"`` the legacy-path workflow settings
+        below are NOT set: the unified engine never reads them and refuses
+        them when changed from their defaults.
         """
         from .config import (BouquetConfig, SolverConfig, ReconstructionSource,
                              GenerationConfig)
+        gkw = ({} if reconstruction_engine is None
+               else dict(reconstruction_engine=reconstruction_engine))
         cfg = BouquetConfig(
             source=ReconstructionSource(geqdsk_path=geqdsk_path,
                                         profiles_path=profiles,
                                         cocos=cocos, time=time,
                                         impurity_Z=impurity_Z),
             solver=SolverConfig(mesh_path=mesh, **solver_kwargs),
-            generation=GenerationConfig(n_equils=n_draws),
+            generation=GenerationConfig(n_equils=n_draws, **gkw),
             output_header=header,
         )
+        if cfg.generation.reconstruction_engine == "unified":
+            # the legacy-path workflow settings below have no engine meaning
+            # (refused there when not at their defaults)
+            return cls(cfg)
         # geqdsk validated default workflow: the standard flagship l_i loop
         # (Fix C / perturb_jind_in_anchor drops draws on stiff geqdsks).
         cfg.generation.perturb_jind_in_anchor = False
@@ -129,6 +142,7 @@ class Bouquet:
                   n_draws=20, header="bouquet",
                   ida_path=None, LCFS_geqdsk=None, impurity_Z=6.0,
                   kinetic_source=None, anchor_pressure_to_equilibrium=False,
+                  reconstruction_engine=None,
                   **solver_kwargs) -> "Bouquet":
         """Minimal constructor for the IMAS/OMAS path (no reconstruction).
 
@@ -144,24 +158,38 @@ class Bouquet:
         boundary outline as the isoflux target, for when you have a better
         separatrix for the slice than the dd carries (typically a magnetics-only
         reconstruction). Omit it to use the source's own boundary.
+
+        ``reconstruction_engine`` (``None``: the :class:`GenerationConfig`
+        default, ``"legacy"``) selects the reconstruction engine at
+        construction.  With ``"unified"`` the legacy-path workflow settings
+        below (diff+C, the full-profile decomposition) are NOT set: the
+        unified engine never reads them and refuses them when changed from
+        their defaults.
         """
         from .config import (BouquetConfig, SolverConfig, ImasSource,
                              GenerationConfig)
         if kinetic_source is None:
             kinetic_source = "ida_hybrid" if ida_path else "fuse"
+        gkw = ({} if reconstruction_engine is None
+               else dict(reconstruction_engine=reconstruction_engine))
         cfg = BouquetConfig(
             source=ImasSource(ids_path=ids_path, time=time, ida_path=ida_path,
                               impurity_Z=impurity_Z, LCFS_geqdsk=LCFS_geqdsk),
             solver=SolverConfig(mesh_path=mesh, **solver_kwargs),
             generation=GenerationConfig(n_equils=n_draws,
                                         kinetic_source=kinetic_source,
-                                        anchor_pressure_to_equilibrium=anchor_pressure_to_equilibrium),
+                                        anchor_pressure_to_equilibrium=anchor_pressure_to_equilibrium,
+                                        **gkw),
             output_header=header,
         )
         # IDA-hybrid: source the kinetic sigma envelopes from the same IDA .cdf
         # (resolve_uncertainty fires its IDA branch whenever unc.ida_path is set).
         if ida_path:
             cfg.uncertainty.ida_path = ida_path
+        if cfg.generation.reconstruction_engine == "unified":
+            # the legacy-path workflow settings below have no engine meaning
+            # (refused there when not at their defaults)
+            return cls(cfg)
         # IMAS validated default workflow: diff+C (anchor bootstrap to the source
         # via the fixed FUSE_jBS-SWB diff, and perturb j_ind in the recon-anchor
         # to avoid the find_optimal_scale/corrector homogenization).

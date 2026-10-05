@@ -262,9 +262,8 @@ def test_an_engine_prepare_baseline_arms_the_writer_with_its_own_p_sep(
     monkeypatch.setattr(be, "_lcfs_deviation_mm",
                         lambda mygs, pts: (2.5, 7.0))
     b = bq.Bouquet.from_geqdsk(TW._GEQ, profiles=TW._PF, mesh=TW._MESH,
-                               n_draws=1)
+                               n_draws=1, reconstruction_engine="unified")
     g = b.config.generation
-    g.reconstruction_engine = "unified"
     g.engine_rows = ["Ip"]
     g.separatrix_pressure = sep
 

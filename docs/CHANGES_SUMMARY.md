@@ -30,6 +30,17 @@
   Dds whose sawteeth entry is on the full time base, or that have none (the
   shipped example), read the same values as before. The NBI read just above
   it keeps its list-index rule (not part of this change).
+- **Engine: `isolate_edge_jBS` and `perturb_jind_in_anchor` are refused
+  under `reconstruction_engine="unified"`** when not at their defaults (the
+  rule and message of the other unread legacy settings); the engine never
+  read either. `Bouquet.from_geqdsk` / `from_imas` take a new keyword,
+  `reconstruction_engine` (default `None` = the config default, `"legacy"`):
+  with `"unified"` they no longer set these legacy-path workflow values. **A
+  legacy factory configuration switched to `"unified"` afterwards is now
+  refused** (build it with the keyword instead, or reset both fields); the
+  message says so. Stored unified configurations carrying the factory values
+  load at the defaults with a warning (the stored run is unchanged). Legacy
+  configurations, and what the factories set for them, are unchanged.
 
 ## Unreleased — review fixes to the unified engine (2026-10-04)
 
