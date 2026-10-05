@@ -436,8 +436,8 @@ class UncertaintyConfig:
     #                 that dilution's direct measurement, hence the order.
     #   "carbon"   -- require the carbon-propagated tier; loud fallback.
     #   "measured" -- require the VB-measured envelope; loud fallback.
-    #   "scalar"   -- always the flat zeff_scalar_sigma fraction (pre-1.3.2
-    #                 behaviour).
+    #   "scalar"   -- always the flat zeff_scalar_sigma fraction (the only
+    #                 behaviour before 1.4.0).
     # Only the reconstruction/IDA path is eligible for the measured tiers,
     # and only when the sigma .cdf IS the source's own profiles file: on the
     # IMAS/ida_hybrid path the Z_eff baseline is FUSE's, and pairing a FUSE
@@ -602,11 +602,21 @@ class GenerationConfig:
     #   "rescale" : keep FUSE ohmic; rescale SWB by a single factor so l_i
     #               matches the source (fully self-consistent bootstrap).
     #   "ohmic"   : HYBRID. SWB bootstrap (from the kinetic source, e.g. IDA)
-    #               and FUSE NBI/RF taken as-is; Ip closed by rescaling FUSE
-    #               j_ohmic only (factor recorded as Baseline.ohm_scale). The
-    #               jphi_diff equilibrium anchor is NOT applied. Use when the
-    #               kinetic source has a materially different pedestal than
-    #               FUSE -- "diff" would erase that current change.
+    #               and FUSE NBI/RF taken as-is; Ip closed on the channel
+    #               named by ``closure_channel`` (default "bootstrap": rescale
+    #               j_BS, factor recorded as Baseline.bs_scale; the
+    #               deprecated "ohmic" channel rescales FUSE j_ohmic instead,
+    #               Baseline.ohm_scale; "sawtooth_bootstrap" and "structured"
+    #               are documented on ``closure_channel``). The jphi_diff
+    #               equilibrium anchor is NOT applied. Use when the kinetic
+    #               source has a materially different pedestal than FUSE --
+    #               "diff" would erase that current change.  BASELINE-ONLY
+    #               for now: generate() refuses this mode unless
+    #               workflow="custom" (the draw-path sigma=0 reproduction of
+    #               an ohmic-closed baseline is unverified).
+    #   ``closure_channel`` is read ONLY in this mode (and only with
+    #   recalculate_j_BS=True); on "diff"/"rescale" a non-default channel is
+    #   refused rather than silently ignored.
     jBS_baseline_mode: str = "diff"
     #: Which channel absorbs the Ip closure in jBS_baseline_mode="ohmic":
     #: "bootstrap" (default) keeps j_inductive exactly as the source diffused it
@@ -1354,7 +1364,17 @@ def resolve_structured_preset(gc, warn: bool = True, stacklevel: int = 3):
 class FilterConfig:
     """Postprocessing selection of the machine-realizable subset."""
 
-    rms_max_mm: float = 5.0
+    #: LCFS boundary-deviation cut [mm rms] applied by ``Bouquet.filter()`` and
+    #: by the until-N in-loop verdict (the same number, by construction).
+    #: ``None`` (default) resolves to the DEVICE's calibrated cut
+    #: (:attr:`bouquet.devices.DeviceSpec.boundary_rms_max_mm`; 8.5 mm on
+    #: DIII-D from its boundary-UQ study) or, with no device calibration, to
+    #: the generic 5.0 mm (:data:`bouquet.devices.GENERIC_BOUNDARY_RMS_MM`).
+    #: An explicit number always wins. The resolved value and its source are
+    #: printed once and stamped on the archive (``boundary_rms_max_mm`` /
+    #: ``boundary_cut_source``), so a band built later can say which cut
+    #: defined its population.
+    rms_max_mm: Optional[float] = None
     # Coil filter used by Bouquet.filter():
     #   "chi2"   -> measurement-referenced chi2/nu <= chi2_max, with the per-coil
     #               sigma resolved from `coil_sigma` below (default: the device's

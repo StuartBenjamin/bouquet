@@ -159,7 +159,7 @@ b.generation.seed = 1234
 | `uncertainty.ida_path` | `None` | IDA `.cdf` supplying measured sigma envelopes instead of the scalars. **Wins over the scalars above** — see the precedence note below |
 | `uncertainty.log_sigma_sources` | `True` | Log which source each kinetic sigma actually resolved from |
 | `generation.n_equils` | `20` | Draws to attempt |
-| `generation.n_inspec_target` | `None` | Set it to draw **until N draws pass the filters** instead of exactly `n_equils` — `n_equils` becomes the initial allocation. The stopping rule uses the same predicate `filter()` applies — including the configured coil filter (`filtering.coil_filter`, chi2 by default) with the same per-coil sigma, DAQ era and acceptance thresholds — so the count it stops on is the count marked `selected`. Serial only |
+| `generation.n_inspec_target` | `None` | Set it to draw **until N draws pass the filters** instead of exactly `n_equils` — `n_equils` becomes the initial allocation. The stopping rule uses the same predicate `filter()` applies — including the configured coil filter (`filtering.coil_filter`, chi2 by default) with the same per-coil sigma, DAQ era and acceptance thresholds — so the count it stops on is the count marked `selected`. On the parallel launchers the workers pool their count through a shared ledger and stop cooperatively once the run's one target is met |
 | `generation.max_total_draws` | `None` | Attempt cap for the above (default `5 × n_inspec_target`, never below `n_equils`; an explicit value is a hard ceiling even below `n_equils`). Reaching it warns and returns what was achieved |
 | `generation.seed` | `None` | The run's one seed. Set it and the ensemble is **bitwise** reproducible |
 | `generation.l_i_tolerance` | `0.05` | l_i acceptance band, as a fraction of target |
@@ -174,7 +174,7 @@ b.generation.seed = 1234
 | `filtering.coil_daq_era` | `None` | Acquisition era setting the σ **floor**; never guessed from a name or path |
 | `device` | `None` | Device name for the tolerance model (`bouquet.devices`); detected from the mesh coil names when they match exactly |
 | `filtering.inspec_F_max` / `inspec_VSC_max` | `0.02` | Coil-drift spec for the `in_spec` flag, and the band `coil_filter="legacy"` applies |
-| `filtering.rms_max_mm` | `5.0` | Boundary-RMS acceptance threshold |
+| `filtering.rms_max_mm` | `None` | Boundary-RMS acceptance threshold [mm]. `None` resolves to the device's calibrated cut (8.5 mm on DIII-D, from its boundary-UQ study) or the generic 5.0 mm; an explicit number always wins. The resolved value and its source are stamped on the archive |
 | `solver.nthreads` | `1` | Recommended to keep at 1; parallelise across time slices or discharges instead (`run_slices` / `parallel_generate`) |
 
 Every tolerance is a **fraction**, never a percentage. The full table, and the

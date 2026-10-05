@@ -20,6 +20,19 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
 │                                      per-scan copies below are authoritative)
 └── scan/<scan_key>/                   one group per scan point / time slice
     ├── config_json                    this slice's exact config
+    │   attrs: [coil_filter]           'chi2' | 'legacy' -- which coil filter wrote
+    │          [coil_sigma_model]      passes_coil_filter last (chi2: the sigma model JSON)
+    │          [boundary_rms_max_mm, boundary_max_max_mm, boundary_cut_source]
+    │                                  the LCFS cut filter_boundaries applied and where it
+    │                                  came from ('explicit' | 'device:<name>' | 'generic')
+    │          [n_requested, n_requested_source, generation_mode, n_attempted,
+    │           n_stored, attempt_outcomes_json, bouquet_version]
+    │                                  generation provenance (1.4+): requested vs attempted
+    │                                  vs stored; per-attempt outcome (stored |
+    │                                  solve_failed | post_align_failed); the version that
+    │                                  GENERATED the draws (read_generation_provenance())
+    │          [parallel_manifest_json] process-parallel runs: per-worker record
+    │          [refused_reason]        a slice refused before any draw (write_refused_scan)
     ├── _baseline/                     written once per scan point
     │   ├── eqdsk, [pfile]             raw byte-perfect g-file / p-file
     │   ├── psi_N, psi_N_kinetic         run grids, in the `profile_coord` coordinate
@@ -30,7 +43,11 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │   ├── [aux_<name>, sigma_aux_<name>]   switchboard channels
     │   ├── [recon_lcfs_ref]           10k-pt LCFS reference (boundary metric)
     │   ├── [x_points], [coil_currents, coil_names]
-    │   └── attrs: Ip_target, l_i_target, source_kind, profile_coord, [diverted]
+    │   └── attrs: Ip_target, l_i_target, l_i_scale, source_kind, profile_coord, [diverted],
+    │              [li_metrics_json, closure_limited]   baseline provenance (1.4+):
+    │              Baseline.li_metrics as JSON, incl. the ip_closure health
+    │              record on hybrid baselines; load_baseline_profiles() decodes
+    │              it to li_metrics / ip_closure / closure_limited
     └── <count>/                       one group per accepted draw
         │                              (integer; gaps = rejected draws)
         ├── eqdsk, [pfile]             raw bytes, fixed names
@@ -49,6 +66,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
                    max_VSC_drift_pct, in_spec, inspec_*, l_i_target_used, [jbs_delta_active],
                    [diverted], [passes_coil_filter, passes_boundary_filter,
                    selected]           ← filter flags, written post-hoc
+                   [boundary_rms_mm, boundary_max_mm]  ← the draw's LCFS metric,
+                                       written when filter_boundaries applies a cut
 ```
 
 ## Conventions

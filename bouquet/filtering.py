@@ -23,6 +23,7 @@ Typical workflow
 >>> export_filtered("run.h5", "run_selected.h5")
 """
 import os
+import warnings
 
 import numpy as np
 import h5py
@@ -436,7 +437,8 @@ def read_filter_flags(h5path_or_header, scan_key=None):
                 for k in (*_FILTER_FLAGS, "selected"):
                     if k in a:
                         rec[k] = bool(a[k])
-                for k in ("max_F_drift_pct", "max_VSC_drift_pct", "in_spec"):
+                for k in ("max_F_drift_pct", "max_VSC_drift_pct", "in_spec",
+                          "boundary_rms_mm", "boundary_max_mm"):
                     if k in a:
                         rec[k] = (float(a[k]) if k != "in_spec"
                                   else bool(a[k]))
@@ -732,6 +734,12 @@ def filter_coil_currents(h5path_or_header, scan_key=None,
     apply : bool
         When True (default) write ``passes_coil_filter`` + refresh
         ``selected`` in the H5.  When False, compute + plot only.
+        NOTE: with ``apply=True`` this REPLACES whatever coil verdict is
+        already stored -- including the chi2 verdict that
+        :meth:`bouquet.run.Bouquet.filter` writes by default -- and warns
+        when it does.  To read the stored verdict use
+        :func:`read_filter_flags`; to re-cut hypothetically use
+        ``apply=False``.
     plot : bool
         When True (default) return a distribution figure.
 
@@ -768,6 +776,30 @@ def filter_coil_currents(h5path_or_header, scan_key=None,
                         "F_max_pct": fthr, "VSC_max_pct": vthr,
                         "passes": passed}
         if apply:
+            # Refuse to overwrite a chi2 verdict SILENTLY.  Since the chi2
+            # test became the default coil filter, the documented
+            # "run.filter(); filter_coil_currents(HEADER, ...)" sequence
+            # replaced the chi2 selection with this legacy band on every
+            # notebook that used it (default apply=True), and nothing said
+            # so.  The overwrite still happens when asked for -- this is a
+            # legitimate re-cut -- but it is announced, and the scan-level
+            # provenance attr is relabelled so the archive stays honest.
+            _bkey = _scan_key(sv)
+            _gp = f"scan/{_bkey}" if _bkey is not None else "/"
+            with h5py.File(h5path, "a") as hf:
+                if _gp in hf:
+                    _prev = hf[_gp].attrs.get("coil_filter", None)
+                    _prev = (_prev.decode() if isinstance(_prev, bytes)
+                             else _prev)
+                    if _prev == "chi2":
+                        warnings.warn(
+                            "filter_coil_currents(apply=True): overwriting the "
+                            "chi2 coil-filter verdict on this scan with the "
+                            "legacy +/-% band. If you only wanted the counts, "
+                            "read them back with read_filter_flags() or pass "
+                            "apply=False; the archive's coil_filter attr is now "
+                            "'legacy'.", stacklevel=2)
+                    hf[_gp].attrs["coil_filter"] = "legacy"
             _write_filter_result(h5path, sv, results, "passes_coil_filter")
         n_pass = sum(results.values())
         summary[sv] = {"n_total": len(results), "n_pass": n_pass,
@@ -779,7 +811,7 @@ def filter_coil_currents(h5path_or_header, scan_key=None,
 
 def filter_boundaries(h5path_or_header, scan_key=None,
                        rms_max_mm=None, max_max_mm=None,
-                       apply=True, plot=True):
+                       apply=True, plot=True, cut_source="explicit"):
     """LCFS boundary-deviation filter.
 
     Computes each draw's RMS and max LCFS deviation from the recon
@@ -790,6 +822,13 @@ def filter_boundaries(h5path_or_header, scan_key=None,
     actually cut; a draw passes when it satisfies every supplied bound.
 
     Returns ``(summary, fig)`` analogous to :func:`filter_coil_currents`.
+
+    With ``apply=True`` and a cut, the cut itself is recorded on the scan
+    group (``boundary_rms_max_mm`` / ``boundary_max_max_mm`` /
+    ``boundary_cut_source``, the last being *cut_source*: ``"explicit"``,
+    ``"device:<name>"`` or ``"generic"``) and each draw's metric on the draw
+    (``boundary_rms_mm`` / ``boundary_max_mm``), so the population a later
+    statistic is built on is readable from the archive alone.
     """
     h5path = _resolve(h5path_or_header)
     cutting = (rms_max_mm is not None) or (max_max_mm is not None)
@@ -811,6 +850,23 @@ def filter_boundaries(h5path_or_header, scan_key=None,
             draws[i] = {"rms_mm": rms, "max_mm": mx, "passes": passed}
         if apply and cutting:
             _write_filter_result(h5path, sv, results, "passes_boundary_filter")
+            _bkey = _scan_key(sv)
+            _gp = f"scan/{_bkey}" if _bkey is not None else "/"
+            with h5py.File(h5path, "a") as hf:
+                if _gp in hf:
+                    a = hf[_gp].attrs
+                    for _name, _val in (("boundary_rms_max_mm", rms_max_mm),
+                                        ("boundary_max_max_mm", max_max_mm)):
+                        if _val is None:
+                            a.pop(_name, None)
+                        else:
+                            a[_name] = float(_val)
+                    a["boundary_cut_source"] = str(cut_source)
+                for i, rms, mx in rows:
+                    gp = _group_path(sv, i)
+                    if gp in hf:
+                        hf[gp].attrs["boundary_rms_mm"] = float(rms)
+                        hf[gp].attrs["boundary_max_mm"] = float(mx)
         n_pass = sum(results.values())
         summary[sv] = {"n_total": len(results),
                        "n_pass": n_pass if cutting else len(results),

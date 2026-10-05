@@ -3,6 +3,7 @@ HDF5 archive helpers and eqdsk I/O utilities for perturbed equilibria.
 """
 
 import contextlib
+import json
 import os
 import sys
 import tempfile
@@ -3334,6 +3335,91 @@ def write_provenance(h5path_or_header, config=None, scan_key=None):
                 grp.create_dataset("config_json", data=cj)
 
 
+GENERATION_PROVENANCE_KEYS = ("n_requested", "n_requested_source",
+                              "generation_mode", "n_attempted", "n_stored",
+                              "attempt_outcomes_json", "bouquet_version")
+
+
+def stamp_generation_provenance(h5path_or_header, scan_key=None, **attrs):
+    """Record how a scan's draws came to be, on the scan group.
+
+    Written by ``generate_bouquet`` at the end of its draw loop: ``n_requested``
+    (``n_equils``, or the until-N target) with ``n_requested_source``,
+    ``generation_mode`` (``"fixed"`` / ``"until_n"``), ``n_attempted`` (loop
+    iterations actually run), ``n_stored``, ``attempt_outcomes_json``
+    (attempt index -> ``"stored"`` / ``"solve_failed"`` /
+    ``"post_align_failed"`` / ...) and the ``bouquet_version`` that generated
+    the draws (the file-level version attr is rewritten on every provenance
+    write, this one is not). Draws that fail leave no draw group, so without
+    this record the archive cannot say how many were attempted.
+    """
+    h5path = _resolve_h5(h5path_or_header)
+    bkey = _scan_key(scan_key)
+    gp = f"scan/{bkey}" if bkey is not None else "/"
+    with h5py.File(h5path, "a") as hf:
+        grp = hf.require_group(gp) if gp != "/" else hf
+        for k, v in attrs.items():
+            if v is None:
+                grp.attrs.pop(k, None)
+            elif isinstance(v, (dict, list, tuple)):
+                grp.attrs[k] = json.dumps(v, default=_json_default_for_h5)
+            else:
+                grp.attrs[k] = v
+
+
+def read_generation_provenance(h5path_or_header, scan_key=None):
+    """The record written by :func:`stamp_generation_provenance`, decoded.
+
+    Every key in :data:`GENERATION_PROVENANCE_KEYS` is present; a value the
+    archive does not carry is ``None`` (older archives), never inferred --
+    in particular ``n_attempted`` is never guessed from index gaps.
+    """
+    h5path = _resolve_h5(h5path_or_header)
+    bkey = _scan_key(scan_key)
+    gp = f"scan/{bkey}" if bkey is not None else "/"
+    out = {k: None for k in GENERATION_PROVENANCE_KEYS}
+    with h5py.File(h5path, "r") as hf:
+        if gp not in hf:
+            return out
+        a = hf[gp].attrs
+        for k in GENERATION_PROVENANCE_KEYS:
+            if k not in a:
+                continue
+            v = a[k]
+            if isinstance(v, bytes):
+                v = v.decode()
+            if k.endswith("_json"):
+                try:
+                    v = json.loads(str(v))
+                except (ValueError, TypeError):
+                    v = None
+            elif isinstance(v, np.generic):
+                v = v.item()
+            out[k] = v
+    return out
+
+
+def write_refused_scan(h5path_or_header, scan_key, reason):
+    """Record a slice that was REFUSED before any draw (closure refusal, no
+    reference, ...) as an empty ``scan/<key>`` carrying ``refused_reason``.
+
+    A series reader then returns ``status="refused"`` for that key instead of
+    a silent gap. Refuses to overwrite a scan that already holds draws.
+    """
+    from . import __version__
+    h5path = os.path.abspath(f"{h5path_or_header}.h5") \
+        if not str(h5path_or_header).endswith(".h5") else str(h5path_or_header)
+    bkey = _scan_key(scan_key)
+    if bkey is None:
+        raise ValueError("write_refused_scan needs a scan_key (hierarchical layout)")
+    with h5py.File(h5path, "a") as hf:
+        grp = hf.require_group(f"scan/{bkey}")
+        if any(str(k).lstrip("-").isdigit() for k in grp.keys()):
+            raise ValueError(f"scan/{bkey} already holds draws; not marking it refused")
+        grp.attrs["refused_reason"] = str(reason)
+        grp.attrs["bouquet_version"] = str(__version__)
+
+
 def load_config(h5path_or_header, scan_key=None):
     """Reconstruct the :class:`~bouquet.BouquetConfig` stored in an archive.
 
@@ -3797,6 +3883,18 @@ def load_equilibrium(header, count, scan_key=None, eqdsk_out_dir=None):
 # ====================================================================
 #  Baseline (input) profile storage
 # ====================================================================
+def _json_default_for_h5(o):
+    """``json.dumps(default=...)`` for archive metadata: numpy -> native,
+    tuples/sets -> lists, everything else -> ``str`` (never dropped)."""
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    if isinstance(o, np.generic):
+        return o.item()
+    if isinstance(o, (tuple, set, frozenset)):
+        return list(o)
+    return str(o)
+
+
 def store_baseline_profiles(
     header,
     psi_N,
@@ -3833,6 +3931,7 @@ def store_baseline_profiles(
     j_inductive=None,
     source_kind=None,
     profile_coord="psi_n",
+    baseline_meta=None,
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -3849,6 +3948,16 @@ def store_baseline_profiles(
         from perturbed equilibria.
     pfile_bytes : bytes or None
         Raw baseline p-file content.
+    baseline_meta : dict or None
+        Baseline provenance (``Baseline.li_metrics``): the l_i comparison,
+        forward-solve residuals, ``jBS_baseline_mode``, the closure scales
+        and, on a hybrid (ohmic-mode) baseline, the full ``ip_closure``
+        health record including ``closure_limited`` and its reasons.
+        Archived as the JSON attr ``li_metrics_json``;
+        :func:`load_baseline_profiles` decodes it back to ``li_metrics``
+        and lifts ``ip_closure`` / ``closure_limited`` to top level.
+        Values that are not JSON-native (numpy scalars/arrays, tuples) are
+        converted; anything else is stringified rather than dropped.
 
     This data is written once per scan-point and is required by the
     plotting GUI to be fully self-contained.
@@ -3922,6 +4031,16 @@ def store_baseline_profiles(
         # Coordinate of the psi_N / psi_N_kinetic grids (bouquet.coords);
         # absent on older archives, which are all "psi_n".
         grp.attrs["profile_coord"] = str(profile_coord)
+        # Baseline provenance / closure health (see the docstring).  The
+        # record is small (scalars, short profiles of the multiplier
+        # min/max, reason strings), so one JSON attr is the right shape.
+        if baseline_meta:
+            grp.attrs["li_metrics_json"] = json.dumps(
+                baseline_meta, default=_json_default_for_h5)
+            _icl = baseline_meta.get("ip_closure") if isinstance(
+                baseline_meta, dict) else None
+            if isinstance(_icl, dict) and "closure_limited" in _icl:
+                grp.attrs["closure_limited"] = bool(_icl["closure_limited"])
 
         if eqdsk_bytes is not None:
             grp.create_dataset("eqdsk", data=np.void(eqdsk_bytes))
@@ -4090,6 +4209,22 @@ def load_baseline_profiles(h5path_or_header, scan_key=None):
         for attr in grp.attrs:
             result[attr] = grp.attrs[attr]
 
+    # Decode the baseline provenance record (written by store_baseline_profiles
+    # from Baseline.li_metrics) and lift the closure verdict to top level so a
+    # reader can join closure_limited per slice without knowing the layout.
+    _raw = result.get("li_metrics_json")
+    if _raw is not None:
+        try:
+            _meta = json.loads(_raw.decode() if isinstance(_raw, bytes)
+                               else str(_raw))
+        except (ValueError, TypeError):
+            _meta = None
+        if isinstance(_meta, dict):
+            result["li_metrics"] = _meta
+            if isinstance(_meta.get("ip_closure"), dict):
+                result["ip_closure"] = _meta["ip_closure"]
+            if "closure_limited" in _meta:
+                result["closure_limited"] = bool(_meta["closure_limited"])
     return result
 
 

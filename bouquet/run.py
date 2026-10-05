@@ -2306,6 +2306,30 @@ class Bouquet:
         # runs AFTER the common tail's forward solve; None everywhere else.
         _q0_state = None
         _structured_state = None
+        # Same refusal as _validate_workflow, here for baseline-only callers
+        # (prepare_baseline() without generate()): a non-default
+        # closure_channel outside the ohmic hybrid split is never read.
+        # Same downgrade too: workflow='custom' / allow_unsafe_workflow turn
+        # it into a printed WARN, so validation and the baseline solve agree.
+        _gc0 = self.config.generation
+        _chan0 = str(getattr(_gc0, "closure_channel", "bootstrap"))
+        if _chan0 != "bootstrap" and (
+                str(_gc0.jBS_baseline_mode) != "ohmic"
+                or not bool(_gc0.recalculate_j_BS)):
+            _msg0 = (
+                f"closure_channel={_chan0!r} is only read when "
+                "jBS_baseline_mode='ohmic' and recalculate_j_BS=True "
+                f"(have jBS_baseline_mode={str(_gc0.jBS_baseline_mode)!r}, "
+                f"recalculate_j_BS={bool(_gc0.recalculate_j_BS)}); "
+                "it would otherwise be silently ignored. Set "
+                "jBS_baseline_mode='ohmic' or leave closure_channel at "
+                "'bootstrap'.")
+            if (str(getattr(_gc0, "workflow", "")) == "custom"
+                    or bool(getattr(_gc0, "allow_unsafe_workflow", False))):
+                print("WARN: " + _msg0 + " (workflow='custom': continuing; "
+                      "the channel is NOT applied)")
+            else:
+                raise ValueError(_msg0)
         # swb_seed="source": SWB inputs from the source split as read (before
         # any closure touches bl), shared by the baseline split, the draws and
         # the sigma=0 check.
@@ -3432,6 +3456,32 @@ class Bouquet:
         if float(getattr(uc, "jphi_scalar_sigma", 0.0)) <= 0.0:
             problems.append("jphi_scalar_sigma<=0 freezes j_inductive "
                             "perturbation (violates the all-profiles rule)")
+        # closure_channel is consumed ONLY by the IMAS hybrid baseline
+        # (jBS_baseline_mode="ohmic" with recalculate_j_BS=True).  Anywhere
+        # else it used to be resolved (the structured preset even printed
+        # "applied by default"), then never read -- so the caller believed a
+        # closure ran that did not.  Refuse instead of ignoring.
+        _chan = str(getattr(gc, "closure_channel", "bootstrap"))
+        if _chan != "bootstrap":
+            _is_imas = isinstance(self.config.source, ImasSource)
+            if not _is_imas:
+                problems.append(
+                    f"closure_channel={_chan!r} is only read on the IMAS "
+                    "path with jBS_baseline_mode='ohmic' (the hybrid "
+                    "baseline); a g-file source has no FUSE j_inductive to "
+                    "close on, so the channel would be silently ignored")
+            elif str(gc.jBS_baseline_mode) != "ohmic":
+                problems.append(
+                    f"closure_channel={_chan!r} is only read when "
+                    f"jBS_baseline_mode='ohmic' (it is "
+                    f"{str(gc.jBS_baseline_mode)!r}), so it would be "
+                    "silently ignored; set jBS_baseline_mode='ohmic' or "
+                    "leave closure_channel at 'bootstrap'")
+            elif not bool(gc.recalculate_j_BS):
+                problems.append(
+                    f"closure_channel={_chan!r} needs recalculate_j_BS=True "
+                    "(the closure runs inside the SWB bootstrap split); with "
+                    "recalculate_j_BS=False it would be silently ignored")
         if isinstance(self.config.source, ReconstructionSource):
             # perturb_jind_in_anchor (route R2) is no longer a hard error on
             # the geqdsk path -- see the method docstring.  It is still not
@@ -3534,7 +3584,8 @@ class Bouquet:
         else:
             raise ValueError(msg)
 
-    def generate(self, n: Optional[int] = None, progress_callback=None) -> list:
+    def generate(self, n: Optional[int] = None, progress_callback=None,
+                 on_inspec=None, stop_check=None) -> list:
         """Generate the perturbed bouquet and archive to ``{header}.h5``.
 
         Auto-feeds the baseline (j_phi, j_inductive, l_i_target, Ip_target) and
@@ -3715,7 +3766,7 @@ class Bouquet:
                 # does not disable the target.
                 n_inspec_target=gc.n_inspec_target,
                 max_total_draws=gc.max_total_draws,
-                inspec_rms_max_mm=fc.rms_max_mm,
+                inspec_rms_max_mm=self._boundary_cut()[0],
                 # ...including the COIL criterion: same filter, same sigma,
                 # same acceptance numbers and -- via _coil_daq_era() -- the
                 # same era floor .filter() will resolve. A loop still counting
@@ -3754,11 +3805,21 @@ class Bouquet:
                 ni_from_zeff=env.get("ni_from_zeff", True),
                 zeff_dne=env.get("zeff_dne"),
                 progress_callback=progress_callback,
+                # shared until-N hooks (bouquet.parallel); None on the serial path
+                on_inspec=on_inspec,
+                stop_check=stop_check,
                 # Provenance marker stored on the baseline for robust path
                 # detection in plotting (independent of the aux switchboard).
                 source_kind=("imas"
                              if type(self.config.source).__name__ == "ImasSource"
                              else "geqdsk"),
+                # Baseline provenance for readers: the li_metrics dict (l_i
+                # comparison, forward-solve residuals, jBS_baseline_mode,
+                # scales) and -- on a closed hybrid baseline -- the full
+                # ip_closure health record with its closure_limited verdict.
+                # Downstream bands need that flag per slice; before this it
+                # lived only on the in-memory Baseline object.
+                baseline_meta=getattr(bl, "li_metrics", None),
                 # BOTH paths: archive the ACHIEVED FSA j_phi of each converged
                 # solve (baseline + draws) so the stored 1-D current always
                 # matches the stored eqdsk in the same group. On the IMAS path
@@ -3801,8 +3862,24 @@ class Bouquet:
             from .filtering import until_n_delivered
             _tgt = int(gc.n_inspec_target)
             _got = until_n_delivered(self.diagnostics)
-            _tries = len(self.diagnostics or [])
-            if _got < _tgt:
+            # attempts, not stored draws: failed draws leave no group, so the
+            # count comes from the generation-provenance stamp
+            from .utils import read_generation_provenance
+            _tries = read_generation_provenance(header, scan_key=gc.scan_key).get(
+                "n_attempted") or len(self.diagnostics or [])
+            _shared_done = False
+            if stop_check is not None:
+                try:
+                    _shared_done = bool(stop_check())
+                except Exception:
+                    _shared_done = False
+            if _shared_done:
+                # This worker's LOCAL target was not the run's target: the
+                # pooled count crossed the shared target, which is the only
+                # verdict that matters here.
+                print(f"[until-N] shared target reached: this worker "
+                      f"delivered {_got} in-spec draws in {_tries} attempts.")
+            elif _got < _tgt:
                 import warnings as _w
                 _msg = (f"until-N did not reach its target: {_got}/{_tgt} "
                         f"in-spec draws after {_tries} attempts (cap "
@@ -3842,7 +3919,7 @@ class Bouquet:
         """Per-draw l_i / LCFS-deviation / anchor-displacement traces for this run."""
         from .plotting import plot_traces as _f
         kwargs.setdefault("li_band", self.config.generation.l_i_tolerance)
-        kwargs.setdefault("rms_max_mm", self.config.filtering.rms_max_mm)
+        kwargs.setdefault("rms_max_mm", self._boundary_cut(quiet=True)[0])
         return _f(f"{self.config.output_header}.h5",
                   scan_key=self.config.generation.scan_key, **kwargs)
 
@@ -3855,7 +3932,7 @@ class Bouquet:
     def plot_spec_summary(self, **kwargs):
         """In-spec fraction summary (coil + boundary) for this run."""
         from .plotting import plot_spec_summary as _f
-        kwargs.setdefault("rms_max_mm", self.config.filtering.rms_max_mm)
+        kwargs.setdefault("rms_max_mm", self._boundary_cut(quiet=True)[0])
         return _f(self.config.output_header,
                   scan_key=self.config.generation.scan_key, **kwargs)
 
@@ -3890,10 +3967,14 @@ class Bouquet:
 
         header = self.config.output_header
         fc = self.config.filtering
-        rms = fc.rms_max_mm if rms_max_mm is None else rms_max_mm
+        rms = fc.rms_max_mm if rms_max_mm is None else rms_max_mm   # explicit wins
 
         sk = self.config.generation.scan_key
         coil_filter_used = fc.coil_filter
+        # the boundary cut: explicit, else the device's calibrated value, else
+        # generic -- the SAME resolution the until-N loop used (identity)
+        rms, rms_source = ((rms, "explicit") if rms_max_mm is not None
+                           else self._boundary_cut())
         if fc.coil_filter == "chi2":
             from .coil_spec import CoilSigmaUnavailable
             # the era sets the sigma floor, i.e. an acceptance criterion -- say
@@ -3937,6 +4018,7 @@ class Bouquet:
             )
         bnd_summary, bnd_fig = filter_boundaries(
             header, scan_key=sk, rms_max_mm=rms, apply=True, plot=plot,
+            cut_source=rms_source,
         )
         # one scan key -> each summary is a single {counts, draws} dict
         self._selection = {"coil": coil_summary, "boundary": bnd_summary,
@@ -3945,6 +4027,60 @@ class Bouquet:
             self._selection["figures"] = (coil_fig, bnd_fig)
         self._print_generation_summary(coil_summary, bnd_summary)
         return self._selection
+
+    def _boundary_cut(self, quiet=False):
+        """``(rms_max_mm, source)`` -- the LCFS boundary cut this run applies.
+
+        ``filtering.rms_max_mm`` when set (``"explicit"``); otherwise the
+        device's calibrated value (``"device:<name>"``, e.g. 8.5 mm on DIII-D
+        from its boundary-UQ study) with the device taken from
+        ``config.device`` or detected from the mesh's coil names; otherwise
+        the generic 5.0 mm (``"generic"``). Used by :meth:`generate`'s
+        until-N verdict and by :meth:`filter`, so the two agree by
+        construction. Printed once per resolution unless *quiet*.
+        """
+        from .devices import resolve_device, boundary_cut_for
+        fc = self.config.filtering
+        if fc.rms_max_mm is not None:
+            val, src, spec = float(fc.rms_max_mm), "explicit", None
+            return self._announce_boundary_cut(val, src, spec, quiet)
+        names = None
+        try:
+            if self.mygs is not None and getattr(self.mygs, "coil_sets", None):
+                names = list(self.mygs.coil_sets)
+        except Exception:
+            names = None
+        if names is None:
+            # no live solver (e.g. a filter-only session): the archive's
+            # baseline carries the coil names the chi2 filter reads too
+            try:
+                import h5py
+                from .utils import _read_coil_names, _scan_key
+                bkey = _scan_key(self.config.generation.scan_key)
+                bl = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
+                with h5py.File(f"{self.config.output_header}.h5", "r") as hf:
+                    if bl in hf:
+                        names = _read_coil_names(hf[bl]) or None
+            except OSError:
+                names = None
+        spec = resolve_device(self.config.device, names)
+        val, src = boundary_cut_for(spec)
+        return self._announce_boundary_cut(val, src, spec, quiet)
+
+    def _announce_boundary_cut(self, val, src, spec, quiet):
+        """One announcement per resolved ``(value, source)``, every source alike."""
+        if not quiet and getattr(self, "_boundary_cut_announced", None) != (val, src):
+            self._boundary_cut_announced = (val, src)
+            if src == "explicit":
+                print(f"[boundary cut] LCFS rms <= {val:g} mm (explicit "
+                      "filtering.rms_max_mm)")
+            elif src == "generic":
+                print(f"[boundary cut] LCFS rms <= {val:g} mm (generic: no device "
+                      "calibration; set config.device or filtering.rms_max_mm)")
+            else:
+                print(f"[boundary cut] LCFS rms <= {val:g} mm ({src} calibration: "
+                      f"{spec.boundary_provenance}; filtering.rms_max_mm overrides)")
+        return val, src
 
     def _coil_daq_era(self):
         """Acquisition era label for the era-dependent coil tolerance floor, or None.

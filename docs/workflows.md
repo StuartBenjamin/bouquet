@@ -13,6 +13,7 @@ controls it. See [`../README.md`](../README.md) for the short version and
 - [until-N in-spec draws](#until-n-in-spec-draws)
 - [Workflow presets and the guard](#workflow-presets-and-the-guard)
 - [Reading an archive back](#reading-an-archive-back)
+- [Error bars from an archive](#error-bars-from-an-archive)
 - [Exporting draws](#exporting-draws)
 - [Timeseries sweeps](#timeseries-sweeps)
 - [Process-parallel generation](#process-parallel-generation)
@@ -386,9 +387,22 @@ Points worth knowing:
 - **Hitting `max_total_draws` is a failure, not an answer.** It warns
   (`RuntimeWarning`) and says how far it got. The fix is more attempts, or a
   deliberate decision about the thresholds — not a quietly short bouquet.
-- **Serial only.** `parallel_generate`, `run_shard` and `emit_slurm_script` all
-  reject a config carrying `n_inspec_target`: shards cannot see each other's
-  yield, so N workers each chasing the target would deliver N×target draws.
+- **Both launchers honour it, through a shared ledger.** `parallel_generate`
+  and the SLURM array pool their in-spec count (a `Manager` counter on the
+  laptop, an append-only `{header}_inspec.ledger` file on the cluster); every
+  worker checks the pooled count at the top of each attempt and stops once the
+  run's ONE target is met. The stop is cooperative, at the attempt boundary,
+  so a draw in flight is finished, never killed: up to one extra in-spec draw
+  per worker can land after the threshold and is kept. `max_total_draws` is
+  split across workers, so a zero-yield configuration still terminates. The
+  merged archive carries a manifest (`parallel_manifest_json`) with each
+  worker's attempt count -- the replay key, since *which* draws exist in a
+  shared-stop run depends on worker timing even though each draw is bitwise
+  reproducible. A bare `run_shard` without a ledger refuses the target.
+- **The merged archive is filtered.** `parallel_generate(apply_filters=True)`
+  (the default) and the SLURM merge job run the configured filters on the
+  merged archive, exactly as a serial `run.filter()`; the parallel path used to
+  leave only the in-loop legacy band on it.
 - **The RNG stream is untouched when the feature is off.** The `jBS_scales`
   block draw is unchanged for the first `n_equils` draws and only extends past
   it when until-N actually runs on, so `n_inspec_target=None` runs are bitwise
@@ -443,6 +457,37 @@ Pre-v2 archives (written before 2026-07) are detected by the missing
 `schema_version` attr: `BouquetArchive` opens them with a warning and
 `load_equilibrium` raises a clear error. Regenerate them with the current
 package.
+
+## Error bars from an archive
+
+One recipe for every across-draw band (`bouquet.stats`): the population is the
+draws the stamped filters mark `selected` (an unfiltered archive raises unless
+`require_filter=False`), then per quantity status `"ok"`, `regular` and a finite
+value; the statistic is the median with p16/p84 (`np.percentile`,
+`method="linear"`), min and max. The baseline is overlaid, never the centre.
+
+```python
+ar = bq.BouquetArchive("run.h5"); key = ar.scan_keys[0]
+sc = bq.draw_scalars(ar, key)             # q0, q95, rho(q=2/1), rho(q=3/1), l_i, beta_N, <P>
+def my_dprime(view):                      # user code; bouquet never sees the external code
+    res = run_my_code(view.eqdsk_bytes)   # same accessor on draws and on the baseline
+    return {"dp21": {"value": res.dp21, "status": res.status, "regular": res.has_q2}}
+band = bq.draw_band(ar, key, my_dprime, evaluator_meta={"code": "...", "grid": "..."})
+r = band["dp21"]; print(r.median, r.p16, r.p84, r.n_used, r.n_stored, r.n_requested, r.below_floor)
+t = bq.draw_bands([(ar, k) for k in ar.scan_keys], my_dprime)
+bq.plot_band(t, "dp21"); t.to_csv("dp21_bands.csv")
+```
+
+`evaluate` may also be a mapping `{draw: result}` (baseline under
+`"_baseline"`) to ingest results computed elsewhere. Every record carries the
+counts at each stage (`n_requested` … `n_used`), every dropped draw with its
+reason (`not_selected`, `user:<reason>`, `status:<code>`, `irregular:<label>`,
+`non_finite`), and a `provenance` block (filters, thresholds, versions,
+limitations). Below `min_n=15` a record is flagged `below_floor` (shown hollow);
+below `hard_min=5` p16/p84 are NaN. If half or fewer of the ok draws are regular
+the record is `gated` (`show=False`); there is no magnitude cut. Fields an older
+archive does not record come back `None` or `"unrecorded"`. `ScanView.spread()`
+remains the quick-look mean/std summary.
 
 ## Exporting draws
 
