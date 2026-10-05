@@ -55,4 +55,5 @@ class TestWiring:
 
     def test_every_closure_site_records_the_profile(self):
         src = inspect.getsource(Bouquet)
-        assert src.count("bl.bs_scale_profile = ") == 3
+        # three closure sites + the imas_baseline="swb" baseline (None)
+        assert src.count("bl.bs_scale_profile = ") == 4

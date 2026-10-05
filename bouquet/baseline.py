@@ -104,6 +104,15 @@ class Baseline:
     # check.  None => generic seed.
     swb_seed_profile: Optional["np.ndarray"] = None
     swb_jphi_fixed: Optional["np.ndarray"] = None
+    # imas_baseline="swb": solve A's coil currents {name: A-t}, the target of the
+    # strong reg of solve B, the sigma=0 check and every draw.
+    coil_reg_target: Optional[dict] = None
+    # imas_baseline="swb": solve B's record (alpha, coils, lcfs, li_3, Ip, split),
+    # the reference the sigma=0 check compares against.
+    swb_baseline: Optional[dict] = None
+    # imas_baseline="swb": smooth_jbs_transition(j_BS), diagnostic only (the
+    # equilibrium was solved with the raw j_BS).
+    j_BS_smoothed: Optional["np.ndarray"] = None
     # 'ohmic' mode only: factor applied to FUSE j_inductive so the hybrid
     # (s*j_ohm + SWB_jBS + j_fixed) integrates to Ip_target. 1.0 otherwise.
     ohm_scale: float = 1.0

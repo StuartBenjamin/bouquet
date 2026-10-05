@@ -212,8 +212,10 @@ def test_generate_bouquet_threads_the_guard_through_the_draw_loop():
 def test_bouquet_generate_enters_the_guard_with_the_config():
     from bouquet.run import Bouquet
     src = inspect.getsource(Bouquet.generate)
-    assert "DrawSolveGuard(self.mygs, gc.draw_solve_maxits," in src
-    assert "retry_urf=gc.draw_solve_retry_urf" in src
-    assert "loose_tol=gc.draw_solve_loose_tol" in src
+    # imas_baseline="swb" keeps the baseline's maxits (a sigma=0 draw IS solve B)
+    assert "DrawSolveGuard(self.mygs, None if _swb else gc.draw_solve_maxits," in src
+    # swb: no retry / loose acceptance -- a draw is solve B or it fails
+    assert "retry_urf=() if _swb else gc.draw_solve_retry_urf" in src
+    assert "loose_tol=None if _swb else gc.draw_solve_loose_tol" in src
     assert "solve_guard=_solve_guard" in src
     assert "print(_solve_guard.summary())" in src

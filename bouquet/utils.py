@@ -3121,6 +3121,27 @@ def _group_path(scan_key, count):
     return str(int(count))
 
 
+def stamp_group_attrs(header, scan_key, count, attrs):
+    """Set ``attrs`` on one archived draw group, or on ``_baseline`` when
+    ``count`` is None. A dict value ``{name: x}`` is stored as two attrs,
+    ``<key>_names`` and ``<key>_values``; None values are skipped.
+    """
+    import numpy as np
+    bkey = _scan_key(scan_key)
+    path = (_group_path(scan_key, count) if count is not None
+            else (f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"))
+    with h5py.File(f"{header}.h5", "a") as hf:
+        grp = hf[path]
+        for k, v in attrs.items():
+            if v is None:
+                continue
+            if isinstance(v, dict):
+                grp.attrs[f"{k}_names"] = np.array(list(v), dtype="S")
+                grp.attrs[f"{k}_values"] = np.array(list(v.values()), dtype=float)
+            else:
+                grp.attrs[k] = v
+
+
 # ====================================================================
 #  Database lifecycle
 # ====================================================================

@@ -39,6 +39,10 @@ if TYPE_CHECKING:
 from .utils import _shape_from_boundary  # noqa: F401  (compatibility re-export)
 from . import coords
 
+#: imas_baseline="swb": largest |Ip/Ip_target - 1| a solve may land at
+#: (converged SWB: ~1e-3; a frozen-alpha drift: several %).
+SWB_IP_TOL = 5e-3
+
 
 class Bouquet:
     """Stateful driver: solver -> baseline -> generate -> filter -> export."""
@@ -656,6 +660,7 @@ class Bouquet:
             iso_pts = boundary_RZ
             iso_w = np.ones(len(iso_pts)) * 500.0
         self.mygs.set_isoflux(iso_pts, weights=iso_w)
+        self._iso = (iso_pts, iso_w)      # re-applied by _swb_solve's reset
         if sc.F0 is None and getattr(self, "_F0", None) and \
                 abs(F0_slice - self._F0) > 1e-3 * abs(self._F0):
             warnings.warn(
@@ -688,6 +693,11 @@ class Bouquet:
             self.config.generation.recalculate_j_BS = False
 
         self._check_coord()
+        if self.config.generation.imas_baseline == "swb":
+            from .config import swb_config_problems
+            _p = swb_config_problems(self.config)
+            if _p:
+                raise ValueError('imas_baseline="swb" refuses: ' + "; ".join(_p))
         self.baseline = resolve_baseline(self.config, self.mygs)
 
         # IMAS path: read_imas_baseline does no GS solve, so establish a converged
@@ -698,7 +708,10 @@ class Bouquet:
             # re-point the solver to THIS slice's boundary first, so a
             # multi-slice sweep treats each time as its own equilibrium
             self._repoint_imas_geometry()
-            self._forward_solve_imas_baseline()
+            if self.config.generation.imas_baseline == "swb":
+                self._swb_imas_baseline()
+            else:
+                self._forward_solve_imas_baseline()
 
         # single_profile_jphi: collapse the decomposition so the archive matches
         # what the draws actually perturb (the total). Done AFTER the baseline
@@ -2841,6 +2854,16 @@ class Bouquet:
                 if _nl_corr is not None:
                     nl_its = _nl_corr
 
+        self._finish_imas_baseline(nl_its, psi_pad)
+
+    def _finish_imas_baseline(self, nl_its, psi_pad=1e-3):
+        """Common tail of the IMAS baselines: check Ip on ``mygs``'s converged
+        state, record TokaMaker li_1/li_3 and the closure metrics in
+        ``li_metrics``, and set ``l_i_target`` (li_3, 'iter')."""
+        import numpy as np
+
+        bl = self.baseline
+        mygs = self.mygs
         # Convergence sanity: the solve completed (it raises otherwise), so
         # verify it landed on the requested current before trusting its l_i.
         Ip_achieved = float(mygs.get_globals()[0])
@@ -2896,6 +2919,145 @@ class Bouquet:
             f"TokaMaker li_1={tok_li1:.4f} li_3={tok_li3:.4f} | "
             f"IDS li_1={metrics.get('ids_li_1')} li_3={metrics.get('ids_li_3')}"
         )
+
+    # ── imas_baseline="swb" ----------------------------------------------
+    def _zeff_eq(self):
+        """Baseline Z_eff on ``psi_N``, clipped at 1 (the generate() input)."""
+        import numpy as np
+        from .utils import pchip_interp
+        bl = self.baseline
+        return np.clip(pchip_interp(bl.psi_N_kinetic, bl.Zeff,
+                                    np.asarray(bl.psi_N, dtype=float)), 1.0, None)
+
+    def _swb_baseline_kinetics(self):
+        """SWB kinetic inputs on ``psi_N`` from the baseline, built exactly as
+        a sigma=0 :func:`~bouquet.TokaMaker_interface.swb_draw` builds them."""
+        import numpy as np
+        from .utils import pchip_interp
+        from .TokaMaker_interface import swb_fixed_pressure
+        bl = self.baseline
+        psi_N = np.asarray(bl.psi_N, dtype=float)
+        pk = np.asarray(bl.psi_N_kinetic, dtype=float)
+        k2e = lambda a: pchip_interp(pk, a, psi_N)
+        ne, te, ni, ti = k2e(bl.ne), k2e(bl.te), k2e(bl.ni), k2e(bl.ti)
+        zf = getattr(bl, "z_fast", None)
+        return dict(ne=ne, te=te, ni=ni, ti=ti, Zeff=self._zeff_eq(),
+                    p_fixed=swb_fixed_pressure(
+                        ne, ni, ti,
+                        None if bl.p_fast is None else k2e(np.asarray(bl.p_fast, dtype=float)),
+                        None if zf is None else k2e(np.asarray(zf, dtype=float)),
+                        getattr(bl, "Z_imp", None)))
+
+    def _swb_solve(self, kin, j_seed, coil_reg_target=None):
+        """The swb recipe: reset ``mygs`` -> coil reg -> ``init_psi`` from the
+        slice LCFS -> one ``solve_with_bootstrap``.
+
+        ``coil_reg_target`` None keeps the setup coil reg (solve A); a
+        ``{coil: A-t}`` dict installs the strong reg toward it (solve B, the
+        sigma=0 check and every draw). ``kin``: ``ne te ni ti Zeff p_fixed`` on
+        ``psi_N``. Returns the SWB result dict.
+        """
+        import numpy as np
+        from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
+        from .TokaMaker_interface import strong_coil_reg
+        bl, mygs, gc = self.baseline, self.mygs, self.config.generation
+        psi_N = np.asarray(bl.psi_N, dtype=float)
+        self._reset_solver_state()
+        mygs.set_isoflux(self._iso[0], weights=self._iso[1])
+        if coil_reg_target is not None:
+            mygs.set_coil_reg(reg_terms=strong_coil_reg(
+                mygs, coil_reg_target, gc.swb_coil_reg_weight, 1.0))
+        mygs.init_psi(*_shape_from_boundary(self._boundary_RZ))
+        self._seed_coil_init(mygs)
+        res = solve_with_bootstrap(
+            mygs, kin["ne"], kin["te"], kin["ni"], kin["ti"], kin["Zeff"],
+            float(bl.Ip_target), np.asarray(j_seed, dtype=float),
+            scale_jBS=1.0, isolate_edge_jBS=bool(gc.isolate_edge_jBS),
+            diagnostic_plots=False, verbose=False,
+            jphi_fixed=bl.swb_jphi_fixed, p_fixed=kin["p_fixed"],
+            **coords.swb_grid_kwargs(psi_N, getattr(bl, "coord", coords.PSI)),
+            **gc.bootstrap_kwargs)
+        # SWB can return (GS residual converged) on a wrong equilibrium once alpha
+        # has frozen and the shape keeps moving: refuse it rather than archive it.
+        ip = abs(float(mygs.get_globals()[0]))
+        err = ip / abs(float(bl.Ip_target)) - 1.0
+        if abs(err) > SWB_IP_TOL:
+            raise RuntimeError(f"swb solve landed Ip {ip/1e6:.4f} MA, {100*err:+.2f}% "
+                               f"off target (tol {100*SWB_IP_TOL:.1f}%)")
+        return res
+
+    def _swb_state(self, res, j_seed, psi_pad=1e-3):
+        """Record of one swb solve on ``mygs``: alpha, coils, LCFS, li, Ip."""
+        import numpy as np
+        from .utils import safe_trace_surf
+        mygs = self.mygs
+        j_ind = np.asarray(res["j_inductive"], dtype=float)
+        j_seed = np.asarray(j_seed, dtype=float)
+        coils, _ = mygs.get_coil_currents()
+        return dict(
+            alpha=float(np.dot(j_ind, j_seed) / np.dot(j_seed, j_seed)),
+            coils={k: float(v) for k, v in coils.items()},
+            lcfs=safe_trace_surf(mygs, 1.0 - psi_pad),
+            li_3=float(mygs.get_stats(lcfs_pad=psi_pad, li_normalization="iter")["l_i"]),
+            Ip=float(mygs.get_globals()[0]),
+            j_inductive=j_ind,
+            j_BS=np.asarray(res["isolated_j_BS"], dtype=float),
+            j_phi=np.asarray(res["total_j_phi"], dtype=float))
+
+    def _swb_imas_baseline(self):
+        """``imas_baseline="swb"``: the baseline is SWB's own equilibrium.
+
+        Solve A (setup coil reg) finds the coils; solve B (strong reg toward
+        A's coils) is the baseline, so that a draw rebuilt with the same reg
+        reproduces it at sigma=0. The Fortran rescales the source inductive
+        current alone (alpha) to Ip, holds NBI + RF + other fixed and re-solves
+        the Redl bootstrap; the recorded split is SWB's raw output.
+        """
+        import numpy as np
+        from .TokaMaker_interface import smooth_jbs_transition
+
+        bl = self.baseline
+        psi_N = np.asarray(bl.psi_N, dtype=float)
+        if not np.array_equal(coords.swb_grid(psi_N), psi_N):
+            raise RuntimeError('imas_baseline="swb" needs SWB on the run grid')
+        j_src = np.asarray(bl.j_inductive, dtype=float)
+        bl.swb_seed_profile, bl.swb_jphi_fixed = coords.swb_source_seed(
+            psi_N, j_src,
+            np.asarray(bl.j_phi, dtype=float) - j_src - np.asarray(bl.j_BS, dtype=float))
+        j_phi_src = np.asarray(bl.j_phi, dtype=float).copy()
+        kin = self._swb_baseline_kinetics()
+
+        st_a = self._swb_state(self._swb_solve(kin, bl.swb_seed_profile),
+                               bl.swb_seed_profile)
+        res = self._swb_solve(kin, bl.swb_seed_profile, coil_reg_target=st_a["coils"])
+        st_b = self._swb_state(res, bl.swb_seed_profile)
+
+        bl.coil_reg_target = st_a["coils"]
+        bl.swb_baseline = st_b                 # what the sigma=0 check repeats
+        bl.j_inductive = st_b["j_inductive"]
+        bl.j_BS = st_b["j_BS"]
+        bl.j_phi = st_b["j_phi"]
+        bl.j_BS_smoothed = smooth_jbs_transition(st_b["j_BS"])   # diagnostic only
+        bl.ohm_scale, bl.bs_scale = st_b["alpha"], 1.0
+        bl.bs_scale_profile = None
+        bl.jBS_diff = bl.jphi_diff = None
+        _dc = {k: st_b["coils"][k] - st_a["coils"].get(k, 0.0) for k in st_b["coils"]}
+        _worst = max(_dc, key=lambda k: abs(_dc[k])) if _dc else None
+        bl.ip_closure = dict(
+            closure_channel="swb_internal",
+            ohm_scale=st_b["alpha"], bs_scale=1.0,
+            alpha_solve_A=st_a["alpha"], li_3_solve_A=st_a["li_3"],
+            coil_B_minus_A_max=(float(_dc[_worst]) if _worst else 0.0),
+            coil_B_minus_A_worst=_worst,
+            closure_limited=not (0.5 <= st_b["alpha"] <= 2.0),
+            fuse_total_peak=float(np.max(np.abs(j_phi_src))))
+        print(f"[imas swb] solve A: alpha={st_a['alpha']:.5f} li_3={st_a['li_3']:.4f}; "
+              f"solve B (strong reg toward A's coils): alpha={st_b['alpha']:.5f} "
+              f"li_3={st_b['li_3']:.4f}; max coil B-A {bl.ip_closure['coil_B_minus_A_max']:+.1f} "
+              f"A-t ({_worst})")
+        self._finish_imas_baseline(-1)
+        bl.li_metrics.update(imas_baseline="swb", jBS_baseline_mode="swb",
+                             forward_solve_nl_its=None)
 
     def plot_baseline(self):
         """Diagnostic figure for the resolved baseline -- the gate before
@@ -3033,6 +3195,9 @@ class Bouquet:
         (run coordinate ``coord``; ``psi_worst`` is the same value, kept for
         back-compat), and ``passed``.
         """
+        if (self.config.generation.imas_baseline == "swb"
+                and self.baseline is not None and self.mygs is not None):
+            return self._verify_sigma0_swb()
         import numpy as np
         from scipy.interpolate import interp1d
         from .TokaMaker_interface import smooth_jbs_transition
@@ -3185,6 +3350,43 @@ class Bouquet:
               f"tol {100*tol_frac:.1f}%{_fl})")
         return out
 
+    def _verify_sigma0_swb(self):
+        """``imas_baseline="swb"`` sigma=0 check: repeat solve B (same inputs,
+        same strong reg toward solve A's coils) and require the identical
+        equilibrium -- split, alpha, li_3, coils and LCFS -- to the bit
+        (``nthreads=1``). Leaves ``mygs`` on the repeated solve B.
+        """
+        import numpy as np
+        bl = self.baseline
+        ref = bl.swb_baseline
+        st = self._swb_state(
+            self._swb_solve(self._swb_baseline_kinetics(), bl.swb_seed_profile,
+                            coil_reg_target=bl.coil_reg_target),
+            bl.swb_seed_profile)
+        psi_N = np.asarray(bl.psi_N, dtype=float)
+        dev = {k: float(np.max(np.abs(st[k] - ref[k])))
+               for k in ("j_inductive", "j_BS", "j_phi")}
+        dev["alpha"] = abs(st["alpha"] - ref["alpha"])
+        dev["li_3"] = abs(st["li_3"] - ref["li_3"])
+        dev["coils"] = max((abs(st["coils"][k] - ref["coils"].get(k, np.nan))
+                            for k in st["coils"]), default=0.0)
+        la, lb = st["lcfs"], ref["lcfs"]
+        dev["lcfs"] = (float(np.max(np.abs(np.asarray(la) - np.asarray(lb))))
+                       if la is not None and lb is not None
+                       and np.shape(la) == np.shape(lb) else float("nan"))
+        passed = all(v == 0.0 for v in dev.values())
+        d_bs = np.abs(st["j_BS"] - ref["j_BS"])
+        iw = int(np.argmax(d_bs))
+        peak = float(np.max(np.abs(ref["j_BS"])))
+        print(f"[sigma0-check swb] {'PASS' if passed else 'FAIL'} (exact repeat of "
+              f"solve B): " + ", ".join(f"{k} {v:.3g}" for k, v in dev.items()))
+        return dict(spike0=st["j_BS"], max_dev=float(d_bs[iw]),
+                    rms_dev=float(np.sqrt(np.mean(d_bs ** 2))),
+                    max_dev_frac=float(d_bs[iw]) / peak if peak else 0.0,
+                    psi_worst=float(psi_N[iw]), x_worst=float(psi_N[iw]),
+                    coord=getattr(bl, "coord", coords.PSI), passed=passed,
+                    swb_dev=dev)
+
     # ── stage 3: perturbed bouquet --------------------------------------
     def _validate_workflow(self) -> None:
         """Hard guard enforcing the validated per-path workflow at generate().
@@ -3242,6 +3444,11 @@ class Bouquet:
                       "exhaust its resamples on a stiff g-file; the standard "
                       "l_i loop (perturb_jind_in_anchor=False) remains the "
                       "default for ensembles.")
+        elif gc.imas_baseline == "swb":
+            # one SWB solve per draw: no anchor route, no bouquet Ip closure
+            from .config import swb_config_problems
+            problems += [f'imas_baseline="swb": {m}'
+                         for m in swb_config_problems(self.config)]
         elif isinstance(self.config.source, ImasSource):
             if not gc.perturb_jind_in_anchor:
                 problems.append("IMAS path without Fix C "
@@ -3428,14 +3635,40 @@ class Bouquet:
         _bs_mult = self._bootstrap_multiplier()
         _jbs_range = (None if gc.jBS_scale_range is None
                       else tuple(gc.jBS_scale_range))
+        # imas_baseline="swb": each draw is solve B with resampled inputs (see
+        # _swb_solve); SWB runs at scale_jBS=1 and the GS solver keeps the
+        # baseline's maxits, so a sigma=0 draw IS solve B.
+        _swb = gc.imas_baseline == "swb"
+        _swb_kw = {}
+        if _swb:
+            from functools import partial
+            if bl.coil_reg_target is None or bl.swb_baseline is None:
+                raise ValueError('imas_baseline="swb": the baseline was not prepared '
+                                 'by _swb_imas_baseline (no solve A coils)')
+            # generate_bouquet reads its drift / LCFS / warm-start references off
+            # mygs at entry: put mygs back on solve B (deterministic re-run).
+            self._swb_solve(self._swb_baseline_kinetics(), bl.swb_seed_profile,
+                            coil_reg_target=bl.coil_reg_target)
+            if _jbs_range is not None:
+                print(f"[swb] jBS_scale_range={_jbs_range} ignored: SWB re-solves "
+                      "j_BS at scale 1 in every draw")
+            _jbs_range = _bs_mult = None
+            _swb_kw = dict(
+                swb_recipe=partial(self._swb_solve,
+                                   coil_reg_target=bl.coil_reg_target),
+                swb_jind_seed=np.asarray(bl.swb_seed_profile, dtype=float),
+                # sigma_jphi is on the solved inductive (alpha * seed)
+                swb_sigma_jind=np.asarray(env["sigma_jphi"], dtype=float)
+                / float(bl.ohm_scale))
 
         from .utils import capture_native_output
         verbose = bool(getattr(self.config, "verbose", False))
         # Draw-loop maxits cap + failed-solve record (DrawSolveGuard).
         with capture_native_output(enabled=not verbose) as _cap, \
-                DrawSolveGuard(self.mygs, gc.draw_solve_maxits,
-                               retry_urf=gc.draw_solve_retry_urf,
-                               loose_tol=gc.draw_solve_loose_tol) as _solve_guard:
+                DrawSolveGuard(self.mygs, None if _swb else gc.draw_solve_maxits,
+                               retry_urf=() if _swb else gc.draw_solve_retry_urf,
+                               loose_tol=None if _swb else gc.draw_solve_loose_tol
+                               ) as _solve_guard:
             self.diagnostics = generate_bouquet(
                 self.mygs, np.asarray(bl.psi_N, dtype=float), n_equils, header,
                 np.asarray(bl.j_phi, dtype=float),
@@ -3533,16 +3766,26 @@ class Bouquet:
                 # target; on the geqdsk path the per-draw corrective iteration
                 # bounds the target-vs-achieved gap to its tolerance (~2-3%
                 # core RMS) -- storing the achieved output removes even that.
-                store_achieved_jphi=True,
+                store_achieved_jphi=not _swb,     # swb: SWB's own split
                 solve_guard=_solve_guard,
                 coord=getattr(bl, "coord", coords.PSI),
                 window_coord=gc.window_coord,
                 seed_coord=gc.seed_coord,
                 swb_seed_profile=getattr(bl, "swb_seed_profile", None),
                 swb_jphi_fixed=getattr(bl, "swb_jphi_fixed", None),
+                **_swb_kw,
                 **gc.bootstrap_kwargs,
             )
         self.generation_log = _cap["text"] or None
+        if _swb:
+            from .utils import stamp_group_attrs
+            _ic = bl.ip_closure or {}
+            stamp_group_attrs(header, gc.scan_key, None, {
+                "imas_baseline": "swb",
+                "swb_alpha": float(bl.ohm_scale),
+                "swb_alpha_solve_A": _ic.get("alpha_solve_A"),
+                "swb_li_3_solve_A": _ic.get("li_3_solve_A"),
+                "coil_reg_target": bl.coil_reg_target})
         # Outside the capture: failed solves are caught by the draw path, so
         # this line is their only trace in a quiet run's log.
         self.solve_failures = list(_solve_guard.records)

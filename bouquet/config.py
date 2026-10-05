@@ -1002,6 +1002,19 @@ class GenerationConfig:
     # and no fixed current (bouquet_unified behaviour).  Paths without a source
     # current split (g-file) always use "generic".
     swb_seed: str = "source"
+    # IMAS baseline + draws: "closure" (anchor solve, SWB for j_BS only, Ip
+    # closed by bouquet, jphi-linterp hybrid solve) or "swb": the baseline is
+    # solve_with_bootstrap itself (solve A at the setup coil reg, then solve B
+    # with the strong reg toward A's coils; B is the baseline), and every draw
+    # is solve B with resampled kinetics and a GPR-redrawn inductive seed.  SWB
+    # rescales the inductive part alone to Ip (no bouquet closure); drifts are
+    # measured against B, not enforced.  See run.Bouquet._swb_imas_baseline.
+    imas_baseline: str = "closure"
+    # imas_baseline="swb": weight of solve B's (and every draw's) coil reg toward
+    # solve A's coils; #VSC is held toward 0 at 1.0. On DIII-D rt50 1.562, 1e3 keeps
+    # B within 0.23 % / 0.4 mm of A; 1e4 (generate_bouquet's jphi-linterp value)
+    # sends SWB to a wrong equilibrium (Ip +7 %, LCFS 50 mm).
+    swb_coil_reg_weight: float = 1.0e3
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single
@@ -1076,9 +1089,13 @@ class GenerationConfig:
         check_native("seed_coord", self.seed_coord)
         if self.swb_seed not in ("source", "generic"):
             raise ValueError(f"swb_seed={self.swb_seed!r} not in ('source', 'generic')")
+        if self.imas_baseline not in ("closure", "swb"):
+            raise ValueError(
+                f"imas_baseline={self.imas_baseline!r} not in ('closure', 'swb')")
         validate_bootstrap_kwargs(
             self.bootstrap_kwargs,
-            self._RESERVED | ({"jphi_fixed"} if self.swb_seed == "source" else set()))
+            self._RESERVED | ({"jphi_fixed"} if self.swb_seed == "source" else set())
+            | ({"p_fixed"} if self.imas_baseline == "swb" else set()))
         resolve_structured_preset(self, stacklevel=4)
 
 
@@ -1121,6 +1138,45 @@ def _bootstrap_kwarg_names():
         # guess.  A wrong key then surfaces where it used to, at the call.
         _BOOTSTRAP_KWARG_NAMES = None
     return _BOOTSTRAP_KWARG_NAMES
+
+
+def swb_config_problems(config):
+    """Settings ``imas_baseline="swb"`` cannot honour, as messages (empty: OK).
+
+    The Fortran SWB's inductive scale alpha IS the Ip closure, so every
+    bouquet closure / anchor / delta mode is refused rather than combined.
+    """
+    import os
+    gc, sc = config.generation, config.solver
+    p = []
+    if not isinstance(config.source, ImasSource):
+        p.append("needs an ImasSource")
+    if gc.kinetic_source != "ida_hybrid":
+        p.append(f"kinetic_source={gc.kinetic_source!r} (only 'ida_hybrid' for now)")
+    if gc.swb_seed != "source":
+        p.append("swb_seed must be 'source' (the source split is the SWB input)")
+    for name in ("single_profile_jphi", "imas_corrective_jphi", "jbs_delta_mode",
+                 "anchor_pressure_to_equilibrium"):
+        if getattr(gc, name, False):
+            p.append(f"{name}=True")
+    if not gc.recalculate_j_BS:
+        p.append("recalculate_j_BS=False (SWB re-solves j_BS by construction)")
+    if str(gc.closure_channel) not in ("bootstrap", "ohmic"):
+        p.append(f"closure_channel={gc.closure_channel!r}: SWB's alpha (ohmic "
+                 "channel) is the closure; there is nothing to combine it with")
+    if gc.coil_drift_hard_factor is not None:
+        p.append("coil_drift_hard_factor: drift is measured, not bounded")
+    if int(sc.nthreads) != 1:
+        p.append(f"nthreads={sc.nthreads} (sigma=0 exactness needs 1)")
+    if gc.bootstrap_kwargs.get("use_python_solve"):
+        p.append("bootstrap_kwargs use_python_solve (needs the Fortran SWB)")
+    for env in ("DIFF_BS", "PIN_JPHI"):
+        if os.environ.get(env, "0") == "1":
+            p.append(f"{env}=1")
+    from .coords import _swb_grid_arg, _swb_params
+    if not _swb_grid_arg() or not {"jphi_fixed", "p_fixed"} <= _swb_params():
+        p.append("this OpenFUSIONToolkit's solve_with_bootstrap lacks x/jphi_fixed/p_fixed")
+    return p
 
 
 def validate_bootstrap_kwargs(bootstrap_kwargs, reserved, known=None):
