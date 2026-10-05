@@ -970,6 +970,44 @@ def test_the_sigma0_check_runs_the_generate_route(tmp_path,
     assert getattr(b, "_sigma0_route", None) is None
 
 
+def test_the_sigma0_check_puts_all_solver_state_back(tmp_path,
+                                                    toy_bouquet_solver,
+                                                    monkeypatch):
+    """The check enters the one-way coil-bound mode BEFORE its first solve
+    (``bouquet.solver_state``), and afterwards the solver object carries
+    exactly what it carried before: no coil-regularisation stash left by the
+    route's generate(), the settings and the equilibrium object put back."""
+    b = _bq(tmp_path)
+    b.setup_solver()
+    _quiet(b.prepare_baseline)
+    fake = b.mygs
+    events = []
+    real_bounds, real_solve = type(fake).set_coil_bounds, type(fake).solve
+
+    def set_coil_bounds(self, bnd):
+        events.append(("bounds", bnd))
+        return real_bounds(self, bnd)
+
+    def solve(self, *a, **k):
+        events.append(("solve",))
+        return real_solve(self, *a, **k)
+
+    monkeypatch.setattr(type(fake), "set_coil_bounds", set_coil_bounds)
+    monkeypatch.setattr(type(fake), "solve", solve)
+    assert not hasattr(fake, "_strong_coil_reg")
+    maxits0 = fake.settings.maxits
+    eq0 = fake.copy_eq()
+    v = _quiet(b.verify_sigma0_consistency)
+    assert v["passed"]
+    assert events[0] == ("bounds", None)          # entered before any solve
+    assert ("solve",) in events
+    assert events[-1] == ("bounds", None)         # the recorded bounds back
+    assert not hasattr(fake, "_strong_coil_reg")  # generate()'s stash gone
+    assert fake.settings.maxits == maxits0
+    import pickle
+    assert pickle.dumps(fake.copy_eq()) == pickle.dumps(eq0)
+
+
 def test_a_rejected_sigma0_draw_fails_the_check(tmp_path,
                                                 toy_bouquet_solver,
                                                 monkeypatch):

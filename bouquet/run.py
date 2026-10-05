@@ -6242,19 +6242,28 @@ class Bouquet:
 
         ``passed`` needs every stage.  The top-level ``r_j`` / ``r_I`` /
         ``dl_i`` / ``dq0`` / ``dq95`` are the ARCHIVED state's (what a draw
-        delivers); the identity and loop fields are the loop stage's.  The
-        solver state, the isoflux targets and every attribute
-        :meth:`generate` sets are put back afterwards."""
+        delivers); the identity and loop fields are the loop stage's.
+
+        The solver state is put back afterwards -- ALL of it
+        (:class:`bouquet.solver_state.SolverState`: the equilibrium object
+        with psi, coil currents, coil regularisation, targets, profiles and
+        the isoflux / saddle constraints; the settings; the VSC gains; the
+        coil bounds on record; the coil-regularisation stashes generate()
+        leaves on the solver object) -- and so is every attribute
+        :meth:`generate` sets on this object.  The one-way coil-bound mode
+        every generate() enters is entered BEFORE the check (the guard's
+        capture), so a second check, and the generate() after it, start
+        from bit for bit the state the first one did."""
         import os
         import tempfile
         from .jbs_loop import jsonable
+        from .solver_state import SolverState
         gc = self.config.generation
         mygs = self.mygs
-        bl = self.baseline
-        snap = mygs.copy_eq() if hasattr(mygs, "copy_eq") else None
+        _guard = SolverState.capture(mygs)
         keep_attrs = ("diagnostics", "generation_log", "draw_rejections",
                       "solve_failures", "engine_draw_cap_events",
-                      "_resolved_uncertainty")
+                      "_resolved_uncertainty", "_sigma0_route")
         saved = {k: self.__dict__[k] for k in keep_attrs
                  if k in self.__dict__}
         saved_cfg = dict(header=self.config.output_header,
@@ -6288,11 +6297,9 @@ class Bouquet:
                     self.__dict__[k] = saved[k]
                 else:
                     self.__dict__.pop(k, None)
-            if snap is not None:
-                mygs.replace_eq(source_eq=snap)
-            if bl.recon is not None and "isoflux_pts" in bl.recon:
-                mygs.set_isoflux(bl.recon["isoflux_pts"],
-                                 weights=bl.recon["weights"])
+            # every piece of solver state the route touched (the isoflux
+            # targets included: they are in the equilibrium object)
+            _guard.restore()
         G = probe.get("draws")
         s = G.ctx.loop if G is not None else {}
         out["tolerances"] = dict(rtol_j=s.get("rtol_j"),

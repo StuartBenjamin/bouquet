@@ -48,6 +48,28 @@ in force is approved.
   where such a re-solve failed (those draws are now rejected attempts, never
   archived or counted toward until-N); runs in which every rollback re-solve
   converged are unchanged.
+- **Engine sigma=0 check: it puts ALL solver state back, and a second check
+  is bit-identical to the first** (owner-approved fix of the restore,
+  2026-10-05). `verify_sigma0_consistency` under `"unified"` restored psi
+  and the isoflux only; the first call then differed from every later one
+  (3.8e-7 in the inductive amplitude on the synthetic g-file example, Δl_i
+  9e-6 -- 30-100x inside every tolerance, but not bitwise). Cause, measured:
+  OpenFUSIONToolkit's coil solve switches from the normal equations to
+  bounded least squares on the first `set_coil_bounds` call and never
+  switches back (`set_coil_bounds(None)` installs +/-1e98 and stays bounded);
+  the route's `generate()` makes that call (the homotopy's bounds), so only
+  the first check ran unbounded. It also left the strong coil-regularisation
+  stash (`_strong_coil_reg`) on the solver object. Now one helper,
+  `bouquet.solver_state.SolverState`, captures and restores the equilibrium
+  object (psi, coils, coil regularisation, targets, profiles, constraints),
+  the settings, VSC gains, Vcoils, the recorded coil bounds and bouquet's
+  stashes, and enters the one-way bounded mode at capture (re-installing the
+  bounds on record -- none: +/-1e98, which never binds). **What moves:** the
+  check's own numbers, once, to what the second call already gave (the
+  first call now runs in the mode every later solve runs in); nothing else
+  -- `generate()` itself and the legacy path are unchanged (the legacy check
+  calls `set_coil_bounds` only to swap a bound stash a previous `generate()`
+  left, and leaves no stash of its own; its twins were bitwise).
 - **Legacy IMAS reader: the sawtooth gate reads the sawteeth entry at the
   slice TIME** (the engine IDS adapter's rule since its own fix). The gate
   input `Baseline.sawtooth` (`present` / `j_par_max_abs` / `active`, archived
