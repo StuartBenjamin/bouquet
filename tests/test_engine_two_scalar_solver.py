@@ -17,6 +17,16 @@ Ip + l_i both hard):
   recorded in the probe JSON and printed, not asserted (the build is an
   input: the fixed build moved the structured engine's q95 by +0.004).
 
+Both parts run at the STUDY'S OWN SETTINGS (:data:`_STUDY_SETTINGS`): the
+values in force at the study's commit wherever the defaults have moved
+since and the reconstruction reads them -- ``separatrix_pressure="legacy"``
+(the pre-setting pressure frame; the default became ``"offset"`` on
+2026-10-02) with ``edge_pprime_pin=True`` -- so "it is the study's state"
+stays a like-for-like claim (owner-approved 2026-10-05).  The other defaults
+changed since (``engine_mse_jacobian``, ``engine_ids_inductive``,
+``engine_li_row_relaxation`` = 1.0, the draw-only fields) are not read by a
+g-file reconstruction without MSE rows, or equal the study's behaviour.
+
 Every solver call runs in a subprocess of ``tests/probes/measure_engine.py``.
 Synthetic inputs only.
 """
@@ -44,12 +54,25 @@ _S = dict(tol_li=1e-3, tol_q0=2e-3)
 #: OpenFUSIONToolkit abbfc6f, single-threaded): q95 and the q-profile rms
 #: [%] over psi_N 0.05-0.95 against the g-file qpsi
 _STUDY = dict(build="abbfc6f", q95=4.595594, q_rms_pct=0.235)
+#: the settings those numbers were measured under, where today's defaults
+#: differ and the g-file reconstruction reads them (see the docstring)
+_STUDY_SETTINGS = dict(separatrix_pressure="legacy", edge_pprime_pin=True)
 
 
 @pytest.fixture(scope="module")
 def parts(tmp_path_factory):
+    import json
     work = str(tmp_path_factory.mktemp("engine_2s"))
-    return {p: ME.run_part(p, work) for p in ("recon_2s", "recon_2s_patched")}
+    old = os.environ.get("BQ_ENGINE_PROBE_GC")
+    os.environ["BQ_ENGINE_PROBE_GC"] = json.dumps(_STUDY_SETTINGS)
+    try:
+        return {p: ME.run_part(p, work)
+                for p in ("recon_2s", "recon_2s_patched")}
+    finally:
+        if old is None:
+            os.environ.pop("BQ_ENGINE_PROBE_GC", None)
+        else:
+            os.environ["BQ_ENGINE_PROBE_GC"] = old
 
 
 def _need(d, stage):
@@ -87,6 +110,12 @@ def test_two_scalar_li_is_the_q95_studys_state(parts):
     assert abs(a["q95"]["engine"] - p["q95"]["engine"]) <= _S["tol_q0"]
     q95, rms = a["q95"]["engine"], a["q_profile_rel_pct"]["rms"]
     oft = str(parts["recon_2s"].get("oft_file", ""))
+    # the pinned settings reached the solve (the probe records its config)
+    for part in ("recon_2s", "recon_2s_patched"):
+        sp = (_need(parts[part], "build")["engine_record"]["settings"]
+              .get("edge_pressure") or {})
+        for k, v in _STUDY_SETTINGS.items():
+            assert sp.get(k) == v, (part, k, sp)
     print(f"\n[two_scalar_li] q95 {q95:.6f} (study {_STUDY['q95']}), q rms "
           f"{rms:.3f} % (study {_STUDY['q_rms_pct']}), OFT {oft}")
     if _STUDY["build"] not in oft:
