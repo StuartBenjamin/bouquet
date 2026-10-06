@@ -21,6 +21,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
 │                                      per-scan copies below are authoritative)
 └── scan/<scan_key>/                   one group per scan point / time slice
     ├── config_json                    this slice's exact config
+    │   attrs: [coil_filter]           'chi2' | 'legacy' -- which coil filter wrote
+    │          [coil_sigma_model]      passes_coil_filter last (chi2: the sigma model JSON)
     ├── _baseline/                     written once per scan point
     │   ├── eqdsk, [pfile]             raw byte-perfect g-file / p-file
     │   ├── psi_N, psi_N_kinetic
@@ -38,9 +40,13 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │   │                              unified engine: engine_mse_*)
     │   ├── [engine_json]              the engine record as a string DATASET
     │   │                              when too large for an attribute
-    │   └── attrs: Ip_target, l_i_target, source_kind, [diverted],
+    │   └── attrs: Ip_target, l_i_target, l_i_scale, source_kind, [diverted],
     │              [source_current_sign, source_b0_sign,
     │               source_current_sign_origin, current_frame]
+    │              [li_metrics_json, closure_limited]   baseline provenance (1.4+):
+    │              Baseline.li_metrics as JSON, incl. the ip_closure health
+    │              record on hybrid baselines; load_baseline_profiles() decodes
+    │              it to li_metrics / ip_closure / closure_limited
     │              [jbs_converged, jbs_n_passes, jbs_loop_json]
     │                                  ← the baseline's jbs_loop block (v3)
     │              [delivered_state_json]

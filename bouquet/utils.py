@@ -3,6 +3,7 @@ HDF5 archive helpers and eqdsk I/O utilities for perturbed equilibria.
 """
 
 import contextlib
+import json
 import os
 import sys
 import tempfile
@@ -4507,6 +4508,18 @@ def _read_mse_record(sub):
     return out
 
 
+def _json_default_for_h5(o):
+    """``json.dumps(default=...)`` for archive metadata: numpy -> native,
+    tuples/sets -> lists, everything else -> ``str`` (never dropped)."""
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    if isinstance(o, np.generic):
+        return o.item()
+    if isinstance(o, (tuple, set, frozenset)):
+        return list(o)
+    return str(o)
+
+
 def store_baseline_profiles(
     header,
     psi_N,
@@ -4540,6 +4553,7 @@ def store_baseline_profiles(
     j_inductive=None,
     source_kind=None,
     mse_record=None,
+    baseline_meta=None,
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -4563,6 +4577,16 @@ def store_baseline_profiles(
         64 kB -- so the archive holds any number of chords.  Strings (the
         exclusion reasons) are stored as a variable-length string dataset.
         ``None`` writes nothing.
+    baseline_meta : dict or None
+        Baseline provenance (``Baseline.li_metrics``): the l_i comparison,
+        forward-solve residuals, ``jBS_baseline_mode``, the closure scales
+        and, on a hybrid (ohmic-mode) baseline, the full ``ip_closure``
+        health record including ``closure_limited`` and its reasons.
+        Archived as the JSON attr ``li_metrics_json``;
+        :func:`load_baseline_profiles` decodes it back to ``li_metrics``
+        and lifts ``ip_closure`` / ``closure_limited`` to top level.
+        Values that are not JSON-native (numpy scalars/arrays, tuples) are
+        converted; anything else is stringified rather than dropped.
 
     This data is written once per scan-point and is required by the
     plotting GUI to be fully self-contained.
@@ -4628,6 +4652,16 @@ def store_baseline_profiles(
             grp.attrs["source_kind"] = str(source_kind)
         if mse_record:
             _write_mse_record(grp, mse_record)
+        # Baseline provenance / closure health (see the docstring).  The
+        # record is small (scalars, short profiles of the multiplier
+        # min/max, reason strings), so one JSON attr is the right shape.
+        if baseline_meta:
+            grp.attrs["li_metrics_json"] = json.dumps(
+                baseline_meta, default=_json_default_for_h5)
+            _icl = baseline_meta.get("ip_closure") if isinstance(
+                baseline_meta, dict) else None
+            if isinstance(_icl, dict) and "closure_limited" in _icl:
+                grp.attrs["closure_limited"] = bool(_icl["closure_limited"])
 
         if eqdsk_bytes is not None:
             grp.create_dataset("eqdsk", data=np.void(eqdsk_bytes))
@@ -4801,6 +4835,22 @@ def load_baseline_profiles(h5path_or_header, scan_key=None):
         for attr in grp.attrs:
             result[attr] = grp.attrs[attr]
 
+    # Decode the baseline provenance record (written by store_baseline_profiles
+    # from Baseline.li_metrics) and lift the closure verdict to top level so a
+    # reader can join closure_limited per slice without knowing the layout.
+    _raw = result.get("li_metrics_json")
+    if _raw is not None:
+        try:
+            _meta = json.loads(_raw.decode() if isinstance(_raw, bytes)
+                               else str(_raw))
+        except (ValueError, TypeError):
+            _meta = None
+        if isinstance(_meta, dict):
+            result["li_metrics"] = _meta
+            if isinstance(_meta.get("ip_closure"), dict):
+                result["ip_closure"] = _meta["ip_closure"]
+            if "closure_limited" in _meta:
+                result["closure_limited"] = bool(_meta["closure_limited"])
     return result
 
 

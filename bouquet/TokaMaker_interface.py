@@ -5116,6 +5116,19 @@ def generate_bouquet(
     # GenerationConfig.edge_pprime_pin / separatrix_pressure).  None: the
     # defaults, bit for bit the behaviour before the settings existed.
     edge_pressure=None,
+    # Baseline provenance dict (Baseline.li_metrics, which carries the
+    # ip_closure health record on hybrid baselines); archived as JSON on the
+    # _baseline group so closure_limited travels with the slice.  Appended
+    # LAST: the options above are positional-capable in existing callers.
+    baseline_meta=None,
+    # Shared until-N (process-parallel): ``on_inspec()`` is called once per
+    # draw that passes the in-loop filters; ``stop_check()`` is consulted at
+    # the top of every attempt and a truthy return ends the loop.  Together
+    # they let N workers chase ONE ``n_inspec_target`` through a shared
+    # ledger (bouquet.parallel) instead of N*target.  Both None: serial rule.
+    # Appended after baseline_meta for the same positional-compatibility reason.
+    on_inspec=None,
+    stop_check=None,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -6268,6 +6281,7 @@ def generate_bouquet(
         # structured closure + MSE only (None otherwise): per-chord arrays as
         # datasets, kept out of the size-capped ip_closure attribute
         mse_record=baseline_mse_record,
+        baseline_meta=baseline_meta,
     )
 
     # ---- the ONE reconstruction state (self-consistent loop) ------------
@@ -6636,6 +6650,7 @@ def generate_bouquet(
                   f"{_until_n}-ish draws rather than {n_equils}. n_equils is "
                   f"the initial allocation, not a minimum.")
     _n_inspec_seen = 0          # draws stored that pass BOTH filters
+    _stopped_by_shared = False  # ended by stop_check() (shared until-N)
     _inspec_hit_target = False
 
     pbar = (
@@ -6646,6 +6661,29 @@ def generate_bouquet(
     eq_iter = pbar if pbar is not None else range(_max_attempts)
 
     for count in eq_iter:
+        if _until_n is not None and stop_check is not None:
+            # Shared until-N: another worker may have carried the pooled
+            # count over the target since our last attempt.  Checked at the
+            # attempt boundary only, so a draw in flight is never abandoned
+            # and every archived draw is complete.
+            try:
+                _shared_hit = bool(stop_check())
+            except Exception as _sexc:
+                # A ledger outage must not degrade N workers into N
+                # independent targets (an N-times oversize archive that
+                # looks complete): fail this worker loudly instead.
+                raise RuntimeError(
+                    "shared until-N: the yield ledger is unreadable "
+                    f"({type(_sexc).__name__}: {_sexc}); the pooled stop "
+                    "cannot be honoured, so this worker stops rather than "
+                    "falling back to a local target") from _sexc
+            if _shared_hit:
+                _stopped_by_shared = True
+                _inspec_hit_target = True
+                print(f"\n[until-N] shared target reached across workers "
+                      f"(local {_n_inspec_seen} in-spec in {count} attempts). "
+                      "Stopping.")
+                break
         if progress_callback is not None:
             # one tick per draw attempt -- fed to a parent aggregate bar in the
             # process-parallel path (worker tqdm/stderr is suppressed there).
@@ -8035,6 +8073,17 @@ def generate_bouquet(
             diagnostics['until_n_reasons'] = list(_reasons)
             if _ok:
                 _n_inspec_seen += 1
+                if on_inspec is not None:
+                    try:
+                        on_inspec()
+                    except Exception as _lexc:
+                        # same rule: an unrecorded in-spec draw would make
+                        # every other worker overshoot; fail, do not undercount
+                        raise RuntimeError(
+                            "shared until-N: recording an in-spec draw on the "
+                            f"yield ledger failed ({type(_lexc).__name__}: "
+                            f"{_lexc}); the pooled count would undercount, so "
+                            "this worker stops") from _lexc
             _why = "in-spec" if _ok else "OUT (" + ", ".join(_reasons) + ")"
             if _coil_kind == "chi2":
                 _coil_num = (f"coil chi2/nu={_coil_info['chi2_nu']:.2f} "
@@ -8065,7 +8114,7 @@ def generate_bouquet(
     # The cap is a backstop, not an acceptance criterion: hitting it means the
     # requested ensemble was NOT delivered, so say so loudly rather than
     # returning a short bouquet that looks like a completed run.
-    if _until_n is not None and not _inspec_hit_target:
+    if _until_n is not None and not _inspec_hit_target and not _stopped_by_shared:
         _msg = (f"until-N did not reach its target: {_n_inspec_seen}/"
                 f"{_until_n} in-spec draws after the full attempt cap of "
                 f"{_max_attempts}. The archive holds every attempt; either "
