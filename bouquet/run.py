@@ -37,8 +37,40 @@ if TYPE_CHECKING:
 # already imports from TokaMaker_interface).  Re-exported here because the
 # original home is the documented one and callers import it from this module.
 from .utils import _shape_from_boundary  # noqa: F401  (compatibility re-export)
-from .edge_pressure import (resolve_edge_pressure, solver_pax,
+from .edge_pressure import (NegativeSeparatrixPressure,
+                            resolve_edge_pressure, solver_pax,
                             solver_pp_profile, solver_pprime)
+
+
+def _baseline_negative_psep_named(fn):
+    """``prepare_baseline``: a :class:`~bouquet.edge_pressure.
+    NegativeSeparatrixPressure` raised while the BASELINE is built (the
+    g-file reconstruction, the IMAS forward solve or the unified engine) is
+    re-raised naming the object refused and why (disclosed 2026-10-06: the
+    refusal of c709aae reaches the baseline on the default legacy path, not
+    only the draws)."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(self, *a, **k):
+        try:
+            return fn(self, *a, **k)
+        except NegativeSeparatrixPressure as exc:
+            src = type(getattr(self.config, "source", None)).__name__
+            eng = getattr(self.config.generation, "reconstruction_engine",
+                          "legacy")
+            raise NegativeSeparatrixPressure(
+                f"prepare_baseline REFUSED THE BASELINE (source "
+                f"{src}, reconstruction_engine={eng!r}): the input's own "
+                "pressure at the separatrix (psi_N = 1, as the solver is "
+                "handed it: thermal + impurity + fast) is negative, which "
+                "is unphysical input; under separatrix_pressure='offset' "
+                "(the default) it would raise the axis-pressure target and "
+                "write a negative boundary PRES.  Correct the input's edge "
+                "profiles, or set generation.separatrix_pressure='legacy' "
+                "(which never reads the edge value) to build it as before "
+                f"2026-10-04.  [{exc}]") from exc
+    return wrapper
 
 
 def _zero_perturbation_env(env):
@@ -754,6 +786,7 @@ class Bouquet:
             )
 
     # ── stage 2: baseline (reconstruction OR imas) ----------------------
+    @_baseline_negative_psep_named
     def prepare_baseline(self) -> "Baseline":
         """Resolve the baseline from ``config.source`` and cache it.
 

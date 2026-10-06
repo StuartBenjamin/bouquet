@@ -215,6 +215,15 @@ def separatrix_pressure_of(pressure) -> float:
     return float(np.asarray(pressure, dtype=float)[-1])
 
 
+class NegativeSeparatrixPressure(ValueError):
+    """``separatrix_pressure="offset"`` met a NEGATIVE pressure at
+    ``psi_N = 1``: unphysical input, refused (owner rule: failures are
+    loud).  Reaches the BASELINE as well as the draws: ``prepare_baseline``
+    re-raises it naming the baseline (the input's own pressure at the
+    separatrix is negative); a legacy draw is rejected as ``perturb_failed``
+    carrying this message."""
+
+
 def applied_offset(pressure, edge=None) -> float:
     """The pressure removed from the axis target and added back at
     reporting / delivery: ``p_sep`` under ``"offset"``, exactly ``0.0``
@@ -230,9 +239,13 @@ def applied_offset(pressure, edge=None) -> float:
         # a negative separatrix pressure is not physical (e.g. a legacy
         # draw's perturbed edge n_e or T_e below zero): offsetting by it
         # would RAISE the axis target and write a negative boundary PRES
-        raise ValueError("separatrix_pressure='offset': the pressure at "
-                         f"psi_N = 1 is negative ({p_sep!r} Pa); a negative "
-                         "separatrix pressure is not physical")
+        raise NegativeSeparatrixPressure(
+            "separatrix_pressure='offset': the pressure at psi_N = 1 is "
+            f"negative ({p_sep!r} Pa); a negative separatrix pressure is not "
+            "physical input, so the equilibrium it belongs to is REFUSED -- "
+            "the baseline in prepare_baseline() (the input's own pressure), "
+            "or a draw (a legacy draw is rejected as perturb_failed).  "
+            "separatrix_pressure='legacy' never reads the edge value")
     return p_sep
 
 

@@ -686,3 +686,58 @@ def test_changing_the_edge_settings_after_the_baseline_is_refused(
 
 
 toy_bouquet_solver = TD.toy_bouquet_solver
+
+
+def test_a_negative_separatrix_pressure_refuses_the_legacy_baseline(
+        tmp_path, monkeypatch):
+    """Disclosed 2026-10-06 (finding 4 of the second-pass review): the
+    negative-p_sep refusal of c709aae reaches the BASELINE on the default
+    legacy path, not only the draws.  Kept (owner rule: failures loud; a
+    negative p_sep is unphysical input) and NAMED: the error says the
+    baseline was refused, why, and how to build it as before.  Legacy IMAS
+    baseline whose solve pressure at psi_N = 1 is made negative (the
+    reader's baseline with a negative pressure offset); the refusal comes
+    before any solve (a stand-in solver)."""
+    import bouquet as bq
+    import bouquet.baseline as B
+    from _engine_fake_gs import FakeTokaMaker
+    _ex = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       os.pardir, "examples", "D3D-like")
+    b = bq.Bouquet.from_imas(
+        os.path.join(_ex, "D3Dlike_baseline_omas.json"),
+        mesh=os.path.join(_ex, "DIIID_mesh.h5"), time=2.3043, n_draws=1,
+        header=str(tmp_path / "bq"))
+    assert b.config.generation.reconstruction_engine == "legacy"
+    assert b.config.generation.separatrix_pressure == "offset"
+    real = B.resolve_baseline
+
+    def resolve(config, mygs):
+        bl = real(config, mygs)
+        p_edge = 1.602176634e-19 * (bl.ne[-1] * bl.te[-1]
+                                    + bl.ni[-1] * bl.ti[-1])
+        # p_sep -> about -(edge pressure); the axis stays far above zero
+        bl.p_diff = np.full(np.asarray(bl.psi_N_kinetic).size,
+                            -3.0 * float(p_edge) - 100.0)
+        return bl
+    monkeypatch.setattr(B, "resolve_baseline", resolve)
+    solves = []
+
+    class _Fake(FakeTokaMaker):
+        psi_bounds = (-1.0, 0.0)            # no toy state behind it
+
+        def solve(self, *a, **k):
+            solves.append(1)
+            raise AssertionError("the refusal comes before any solve")
+    b.mygs = _Fake(None)
+    with pytest.raises(EP.NegativeSeparatrixPressure) as ei:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            b.prepare_baseline()
+    msg = str(ei.value)
+    assert msg.startswith("prepare_baseline REFUSED THE BASELINE (source "
+                          "ImasSource, reconstruction_engine='legacy')")
+    assert "pressure at the separatrix" in msg and "unphysical" in msg
+    assert "separatrix_pressure='legacy'" in msg
+    assert "is negative" in msg and "Pa)" in msg
+    assert isinstance(ei.value, ValueError)
+    assert solves == [] and b.baseline is None

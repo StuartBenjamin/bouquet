@@ -92,6 +92,29 @@ test bar.
   slice will now refuse at those early slices on the engine path. That
   needs an owner check on real data, offline from this package.
 
+- **Disclosed: a negative separatrix pressure also refuses the BASELINE.**
+  c709aae refuses a negative pressure at psi_N = 1 under
+  `separatrix_pressure="offset"`. Its commit message and this summary named
+  only the legacy draws (rejected as `perturb_failed`), but the refusal is
+  in the shared `edge_pressure.applied_offset`. It therefore also stops
+  `prepare_baseline()` when the input's own pressure at the separatrix is
+  negative, for example a fit that dips below zero at the edge. That
+  applies on the default legacy path (the g-file reconstruction and the
+  IMAS forward solve) and on the unified engine. Before c709aae such an
+  input ran, with a RAISED axis-pressure target and a negative boundary
+  PRES. **Kept by the owner's rule:** failures are loud, and a negative
+  p_sep is unphysical input. The refusal is now named:
+  - the error is `edge_pressure.NegativeSeparatrixPressure`, a
+    `ValueError`;
+  - `prepare_baseline` re-raises it as "prepare_baseline REFUSED THE
+    BASELINE (source ..., reconstruction_engine=...)", saying why and how
+    to proceed: correct the edge profiles, or set
+    `generation.separatrix_pressure="legacy"`, which never reads the edge
+    value, to build it as before 2026-10-04.
+
+  Test: `test_a_negative_separatrix_pressure_refuses_the_legacy_baseline`
+  (a legacy IMAS baseline; refused before any solve).
+
 ## Unreleased — owner-approved decision (2026-10-06)
 
 - **One coil solver for the whole run: OpenFUSIONToolkit's bounded coil
