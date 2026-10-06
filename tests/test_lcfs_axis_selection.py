@@ -232,6 +232,89 @@ class TestTheDrawFilterDoesNotUseIt:
             pytest.skip(f"{name} is not on this line")
         src = p.read_text()
         for word in ("select_closed_lcfs", "_lcfs_deviation_mm",
-                     "magnetic_axis_of", "boundary_rms_mm",
-                     "boundary_max_dev_mm"):
+                     "magnetic_axis_of", "boundary_max_dev_mm"):
             assert word not in src, f"{name} reads {word}"
+        # ``boundary_rms_mm`` is ALSO the name of the per-draw HDF5 attr that
+        # filter_boundaries writes from its OWN trace (main, #63) and the band
+        # provenance reads back. That attr is not the reconstruction-quality
+        # record's key, so it is exempt -- as an HDF5 attribute key only;
+        # every other code use of the name (a dict/record key, an attribute,
+        # a variable, a keyword) still fails.
+        bad = _non_attr_uses(src, "boundary_rms_mm")
+        assert not bad, f"{name} reads boundary_rms_mm outside HDF5 attrs: lines {bad}"
+
+    def test_the_attr_exemption_still_catches_record_reads(self):
+        """The exemption above is narrow: it admits HDF5 attribute keys and
+        nothing else."""
+        w = "boundary_rms_mm"
+        for code in ('x = q.get("boundary_rms_mm")',
+                     'x = q["boundary_rms_mm"]',
+                     'x = rec.boundary_rms_mm',
+                     'f(boundary_rms_mm=1.0)',
+                     'boundary_rms_mm = 1.0',
+                     'ok = "boundary_rms_mm" in q'):
+            assert _non_attr_uses(code, w), code
+        for code in ('hf[gp].attrs["boundary_rms_mm"] = 1.0',
+                     'a = hf[gp].attrs\nx = a["boundary_rms_mm"]',
+                     'a = hf[gp].attrs\nok = "boundary_rms_mm" in a',
+                     'a = hf[gp].attrs\nfor k in ("x", "boundary_rms_mm"):\n'
+                     '    if k in a:\n        y = a[k]',
+                     '"""docstring naming boundary_rms_mm"""',
+                     'x = {"draw_boundary_rms_mm": 1}'):
+            assert not _non_attr_uses(code, w), code
+
+
+def _non_attr_uses(src, word):
+    """Line numbers where *word* is used as code other than as an HDF5
+    attribute key (``<x>.attrs[word]``, ``word in <x>.attrs``, or a tuple of
+    keys a ``for`` loop tests against / indexes ``<x>.attrs`` with), where a
+    name bound to ``<expr>.attrs`` counts as ``<x>.attrs``. Docstrings,
+    comments and longer names that merely contain *word* are not uses."""
+    import ast
+    tree = ast.parse(src)
+    attrs_names = {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                   and isinstance(n.value, ast.Attribute)
+                   and n.value.attr == "attrs"
+                   for t in n.targets if isinstance(t, ast.Name)}
+
+    def is_attrs(n):
+        return ((isinstance(n, ast.Attribute) and n.attr == "attrs")
+                or (isinstance(n, ast.Name) and n.id in attrs_names))
+
+    parent = {}
+    for n in ast.walk(tree):
+        for c in ast.iter_child_nodes(n):
+            parent[c] = n
+
+    def loop_tests_attrs(for_node):
+        if not isinstance(for_node.target, ast.Name):
+            return False
+        k = for_node.target.id
+        for n in ast.walk(for_node):
+            if (isinstance(n, ast.Compare) and isinstance(n.left, ast.Name)
+                    and n.left.id == k and len(n.ops) == 1
+                    and isinstance(n.ops[0], ast.In)
+                    and is_attrs(n.comparators[0])):
+                return True
+        return False
+
+    bad = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Constant) and n.value == word:
+            p = parent.get(n)
+            ok = ((isinstance(p, ast.Subscript) and p.slice is n
+                   and is_attrs(p.value))
+                  or (isinstance(p, ast.Compare) and p.left is n
+                      and len(p.ops) == 1 and isinstance(p.ops[0], ast.In)
+                      and is_attrs(p.comparators[0]))
+                  or (isinstance(p, ast.Tuple)
+                      and isinstance(parent.get(p), ast.For)
+                      and parent[p].iter is p and loop_tests_attrs(parent[p])))
+            if not ok:
+                bad.append(n.lineno)
+        elif ((isinstance(n, ast.Attribute) and n.attr == word)
+              or (isinstance(n, ast.Name) and n.id == word)
+              or (isinstance(n, ast.keyword) and n.arg == word)
+              or (isinstance(n, ast.arg) and n.arg == word)):
+            bad.append(getattr(n, "lineno", -1))
+    return sorted(bad)
