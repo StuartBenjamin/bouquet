@@ -125,8 +125,9 @@ test bar.
     `F<1/R>/<B^2>` and Redl, so a 1 % error in either fails.
   - `test_after_a_failure_the_next_secant_step_uses_two_good_points`: a
     behavioural test of the l_i secant's pairing after a failed solve.
-  The pass was re-run on this tree: the review's 27 mutants plus 8 new
-  ones are all killed.
+  The pass was re-run on this tree. 24 of the review's 27 mutants still
+  apply; the other 3 targeted code that later commits replaced, and they
+  are re-expressed among 8 new mutants. All 32 are killed.
 - **What a written g-file contains, parsed back.**
   `test_a_written_gfile_parses_back_to_the_delivered_frame` (solver-free)
   checks:
