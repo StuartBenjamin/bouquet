@@ -822,6 +822,167 @@ def test_a_two_microsecond_offset_entry_is_read_at_its_nearest_slice():
         _ids_driven_currents(one, 0, n, 1.0, tb)        # 0.1 s away
 
 
+# ---------------------------------------------------------------------------
+#  refinement of the half-step rule (2026-10-06): an entry carrying no
+#  current on its own slices BRACKETING the slice time is off there, not
+#  missing -- it contributes zero and is stamped (provenance "off_sources"),
+#  never refused; one carrying current there is still refused
+# ---------------------------------------------------------------------------
+def _saw_srcs(own_times, own_j, n, base=(1.0, 2.0, 3.0)):
+    return dict(time=list(base), source=[dict(
+        identifier=dict(name="sawteeth", index=701),
+        profiles_1d=[dict(time=t, j_parallel=[float(j)] * n)
+                     for t, j in zip(own_times, own_j)])])
+
+
+def test_an_entry_starting_a_step_late_and_idle_there_is_off_not_refused():
+    """The measured case's geometry: the entry's own grid starts one step
+    after the slice time and its first own slice carries no current -- it
+    is off at that time: zero contribution, an "off" stamp naming the
+    bracketing slice, nothing ignored, no warning, no refusal."""
+    import warnings
+    from bouquet.adapters import _ids_driven_currents
+    n = 5
+    srcs = _saw_srcs([2.0, 3.0], [0.0, 2.0], n)
+    off = []
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        parts, used, ignored = _ids_driven_currents(srcs, 0, n, 1.0, off=off)
+    assert all(np.all(parts[k] == 0.0) for k in parts)
+    assert used == [] and ignored == []
+    assert [(d["name"], d["index"]) for d in off] == [("sawteeth", 701)]
+    assert off[0]["reason"].startswith("off near the slice: no current on "
+                                       "its bracketing slices at 2 s")
+    # without a collecting list the result is the same (zero, no refusal)
+    parts, used, ignored = _ids_driven_currents(srcs, 0, n, 1.0)
+    assert used == [] and ignored == [] and np.all(parts["other"] == 0.0)
+    # where the entry matches, its current is held as before
+    off = []
+    parts, used, _ = _ids_driven_currents(srcs, 2, n, 1.0, off=off)
+    np.testing.assert_array_equal(parts["other"], 2.0)
+    assert off == [] and used[0]["slice"] == "matched by time"
+
+
+def test_an_entry_starting_a_step_late_with_current_there_is_refused():
+    """Same geometry, but the entry's first own slice carries current: it
+    is still REFUSED, naming the entry and the window."""
+    from bouquet.adapters import _ids_driven_currents
+    n = 5
+    srcs = _saw_srcs([2.0, 3.0], [1.0, 0.0], n)
+    off = []
+    with pytest.raises(EngineInputRefused,
+                       match=r"IDS adapter: core_sources 'sawteeth' \(index "
+                             r"701\) carries a non-zero j_parallel but has no "
+                             r"profiles_1d slice within half a time-step of "
+                             r"t = 1 s \(nearest own time 2 s, \|dt\| = 1 s > "
+                             r"0\.5 s.*bracketing.*Refusing"):
+        _ids_driven_currents(srcs, 0, n, 1.0, off=off)
+    assert off == []
+    # an unknown index in the same position: refused alike
+    srcs["source"][0]["identifier"] = dict(name="custom_1", index=901)
+    with pytest.raises(EngineInputRefused, match="'custom_1'.*Refusing"):
+        _ids_driven_currents(srcs, 0, n, 1.0)
+
+
+def test_the_bracketing_slices_of_a_time_inside_a_coarse_own_grid():
+    """A slice time INSIDE the entry's range, between two own slices of a
+    coarser grid: both bracketing slices are judged.  Both zero -> off;
+    either non-zero -> carries current (refused by the caller).  Through
+    the adapter an interior time always lies within half its own interval
+    of one end, so it is matched; this checks the helper the adapter and
+    the reader share, and the entry-level verdict, directly."""
+    from bouquet.io.imas import _entry_bracketing_slices, _entry_off_near
+    times = [0.0, 1.0, 3.0, 4.0]
+    assert _entry_bracketing_slices(times, 2.2) == [1, 2]
+    assert _entry_bracketing_slices(times, 1.0) == [1]       # on a node
+    assert _entry_bracketing_slices(times, -0.5) == [0]      # before range
+    assert _entry_bracketing_slices(times, 4.5) == [3]       # past range
+    assert _entry_bracketing_slices([3.0, 0.0, 1.0], 2.0) == [0, 2]
+    n = 3
+
+    def ent(js):
+        return dict(identifier=dict(name="ec", index=3), profiles_1d=[
+            dict(time=t, j_parallel=[float(j)] * n)
+            for t, j in zip(times, js)])
+    why = _entry_off_near(ent([5.0, 0.0, 0.0, 5.0]), 2.2)
+    assert why is not None and "bracketing slices at 1, 3 s" in why
+    assert _entry_off_near(ent([0.0, 5.0, 0.0, 0.0]), 2.2) is None
+    assert _entry_off_near(ent([0.0, 0.0, 5.0, 0.0]), 2.2) is None
+    # an absent j_parallel counts as no current; no per-slice time: no
+    # verdict (an entry matched by index is not judged here)
+    e = ent([0.0, 0.0, 0.0, 0.0])
+    e["profiles_1d"][1].pop("j_parallel")
+    assert _entry_off_near(e, 2.2) is not None
+    e["profiles_1d"][0].pop("time")
+    assert _entry_off_near(e, 2.2) is None
+
+
+def test_an_entry_with_current_only_far_from_the_slice_is_off_not_refused():
+    """The measured real-file case: the entry's current is identically zero
+    near the slice and non-zero only far in the future (or the past) on its
+    own grid.  Before the refinement the whole-history scan refused it; it
+    is off at that time."""
+    from bouquet.adapters import _ids_driven_currents
+    n = 4
+    future = _saw_srcs([2.0, 3.0, 4.0, 5.0, 6.0], [0, 0, 0, 0, 7.0], n)
+    off = []
+    parts, used, ignored = _ids_driven_currents(future, 0, n, 1.0, off=off)
+    assert used == [] and ignored == [] and np.all(parts["other"] == 0.0)
+    assert len(off) == 1 and "at 2 s" in off[0]["reason"]
+    past = _saw_srcs([1.0, 2.0, 3.0, 4.0], [7.0, 0, 0, 0], n,
+                     base=(5.0, 6.0, 7.0))
+    off = []
+    parts, used, ignored = _ids_driven_currents(past, 0, n, 1.0, off=off)
+    assert used == [] and ignored == [] and np.all(parts["other"] == 0.0)
+    assert len(off) == 1 and "at 4 s" in off[0]["reason"]
+    # an aggregate entry in the same position keeps its old stamp
+    future["source"][0]["identifier"] = dict(name="total", index=1)
+    off = []
+    with pytest.warns(UserWarning, match="NOT added"):
+        _, used, ignored = _ids_driven_currents(future, 0, n, 1.0, off=off)
+    assert off == [] and used == [] and ignored[0]["index"] == 1
+
+
+def test_an_idle_late_entry_is_stamped_off_in_the_contract(tmp_path):
+    """End to end on the example dd: a sawteeth entry whose own grid starts
+    one step after the slice time, idle on its first own slice.  The
+    contract is the one without it, bit for bit, nothing is warned, and
+    provenance["off_sources"] names it."""
+    import copy
+    import warnings
+    dd0 = _example_dd()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        c0 = _ids_from(tmp_path, dd0, "base.json").read()
+    dd = _example_dd()
+    t = [float(x) for x in dd["core_sources"]["time"]]
+    assert _TIME == t[-1]
+    step = t[-1] - t[-2]
+    s = _add_source(dd, "sawteeth", 701,
+                    lambda q: 0.002 * np.asarray(q["j_total"]))
+    s["profiles_1d"] = copy.deepcopy(s["profiles_1d"][:2])
+    s["profiles_1d"][0]["time"] = t[-1] + step
+    s["profiles_1d"][1]["time"] = t[-1] + 2.0 * step
+    s["profiles_1d"][0]["j_parallel"] = [0.0] * len(
+        s["profiles_1d"][0]["j_parallel"])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        c = _ids_from(tmp_path, dd, "off.json").read()
+    np.testing.assert_array_equal(c.jB_fix, c0.jB_fix)
+    np.testing.assert_array_equal(c.jB_ind, c0.jB_ind)
+    assert c.provenance["ignored_sources"] == []
+    assert [(d["name"], d["index"]) for d in c.provenance["off_sources"]] \
+        == [("sawteeth", 701)]
+    assert c0.provenance["off_sources"] == []
+    # carrying current on that first own slice: refused
+    s["profiles_1d"][0]["j_parallel"] = [1.0e3] * len(
+        s["profiles_1d"][0]["j_parallel"])
+    with pytest.raises(EngineInputRefused, match="'sawteeth'.*Refusing"):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            _ids_from(tmp_path, dd, "on.json").read()
+
+
 def test_a_malformed_driven_source_is_refused(tmp_path):
     dd = _example_dd()
     s = _add_source(dd, "ec", 3, lambda q: 0.01 * np.asarray(q["j_total"]))

@@ -74,6 +74,16 @@ test bar.
     time, the nearest own time, |dt| and the half-step.
 
   An entry carrying no non-zero current has nothing to drop and is skipped.
+  Refinement (2026-10-06): "carries current" is judged on the entry's own
+  slices BRACKETING the slice time (its nearest own slice on each side; only
+  the nearest end slice when the time lies outside its range,
+  `io.imas._entry_bracketing_slices`), not on its whole history. An entry
+  with no current there is OFF at that time, not missing: it contributes
+  zero, is not warned about, and the adapter stamps it in
+  `provenance["off_sources"]` (a model's sawteeth entry whose grid starts a
+  step after the IDS time base, idle for its first slices, was refused at
+  the first two times). An entry carrying current on a bracketing slice is
+  still refused.
   An aggregate or bootstrap-like entry is never added, so it is still only
   stamped in `provenance["ignored_sources"]`. The legacy reader's sawteeth
   entry feeds a gate flag, not a current: it uses the same window and is
@@ -340,7 +350,7 @@ test bar.
   and its beam entries (807fd93) at the slice time too. Since 2026-10-06
   both the reader and this adapter match an entry to its nearest own slice
   within half a local time-step and REFUSE a driven entry outside that
-  window; see "second-pass review fixes (2026-10-06)" above.)
+  window that carries current on its own slices bracketing the time; see "second-pass review fixes (2026-10-06)" above.)
 
 - **Engine: legacy settings it never reads are refused** (they were accepted
   and silently ignored): `closure_channel`, `jBS_baseline_mode`, the
