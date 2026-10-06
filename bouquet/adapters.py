@@ -577,31 +577,28 @@ IDS_AGGREGATE_SOURCE_INDICES = (1, 100, 101, 102, 103, 104, 105, 106, 107,
 #: where a source may publish its bootstrap.  Ignored like an aggregate
 #: (stamped and warned when non-zero).
 IDS_BOOTSTRAP_LIKE_SOURCE_INDICES = (401,)
-#: Absolute tolerance [s] for matching an entry's own profiles_1d time to the
-#: core_sources slice time.
-IDS_SOURCE_TIME_TOL = 1e-6
-
-
-def _ids_source_slice(s, isrc, t_slice, n_time):
+def _ids_source_slice(s, isrc, t_slice, n_time, base_times=None):
     """``(profile, how)``: the entry's ``profiles_1d`` at the core_sources
     slice *isrc* (time *t_slice*), or ``(None, why)`` when the entry has no
-    slice at that time.  An entry carrying its own per-slice times is
-    matched BY TIME (a model's entry may start later than the IDS time base,
-    so the list index is not the slice); one without them must have exactly
-    the IDS's number of slices, or it cannot be aligned and is refused --
-    never the first slice taken in place of a missing one."""
+    slice within HALF a local time-step of that time (the window of
+    :func:`bouquet.io.imas._entry_time_window`, owner-approved 2026-10-06;
+    *base_times* is the core_profiles time base, whose step is used for a
+    single-time entry).  An entry carrying its own per-slice times is
+    matched BY TIME to its nearest own slice (a model's entry may start
+    later than the IDS time base, so the list index is not the slice); one
+    without them must have exactly the IDS's number of slices, or it cannot
+    be aligned and is refused -- never the first slice taken in place of a
+    missing one.  The caller refuses a driven entry with no slice."""
+    from .io.imas import _entry_time_why, _entry_time_window
     pr = s.get("profiles_1d", [])
     idn = s.get("identifier", {}) or {}
     if not pr:
         return None, "no profiles_1d"
     times = [q.get("time") for q in pr]
     if t_slice is not None and all(t is not None for t in times):
-        tt = np.asarray(times, dtype=float)
-        k = int(np.argmin(np.abs(tt - t_slice)))
-        if abs(float(tt[k]) - float(t_slice)) > IDS_SOURCE_TIME_TOL:
-            return None, (f"no profiles_1d slice at t = {t_slice:.6g} s "
-                          f"(its own times span {tt.min():.6g}-"
-                          f"{tt.max():.6g} s)")
+        k, dt, half = _entry_time_window(times, t_slice, base_times)
+        if dt > half:
+            return None, _entry_time_why(t_slice, times, k, dt, half)
         return pr[k], "matched by time"
     if n_time is not None and len(pr) != n_time:
         raise EngineInputRefused(
@@ -616,15 +613,19 @@ def _ids_source_slice(s, isrc, t_slice, n_time):
     return pr[isrc], "by index"
 
 
-def _ids_driven_currents(srcs, isrc, n, sgn):
+def _ids_driven_currents(srcs, isrc, n, sgn, base_times=None):
     """The driven ``j_parallel`` of the ``core_sources`` slice *isrc*, by
     the explicit identifier classification above, split into ``nbi`` /
     ``rf`` / ``other`` (positive frame).  Returns ``(parts, used, ignored)``:
     the contributing entries, and every entry with a non-zero
-    ``j_parallel`` that was NOT added (aggregate, bootstrap-like, or with no
-    slice at this time) with its reason.  An UNKNOWN index carrying a
-    non-zero ``j_parallel`` is held fixed under "other" with a warning (its
-    nature cannot be told from the enumeration)."""
+    ``j_parallel`` that was NOT added (aggregate or bootstrap-like) with its
+    reason.  An UNKNOWN index carrying a non-zero ``j_parallel`` is held
+    fixed under "other" with a warning (its nature cannot be told from the
+    enumeration).  A DRIVEN (or unknown) entry carrying a non-zero
+    ``j_parallel`` with no slice within half a local time-step of the slice
+    time is REFUSED (:class:`EngineInputRefused`; owner-approved 2026-10-06
+    -- before, it was dropped to zero and stamped); an aggregate or
+    bootstrap-like one, never added, is stamped as before."""
     import warnings
     parts = {k: np.zeros(n) for k in ("nbi", "rf", "other")}
     used, ignored = [], []
@@ -636,13 +637,20 @@ def _ids_driven_currents(srcs, isrc, n, sgn):
         idx = idn.get("index")
         if idx in (IDS_OHMIC_SOURCE_INDEX, IDS_BOOTSTRAP_SOURCE_INDEX):
             continue
-        q, how = _ids_source_slice(s, isrc, t_slice, n_time)
+        q, how = _ids_source_slice(s, isrc, t_slice, n_time, base_times)
         if q is None:
             if any(qq.get("j_parallel") is not None
                    and np.any(np.asarray(qq["j_parallel"], float) != 0.0)
                    for qq in s.get("profiles_1d", [])):
-                ignored.append(dict(name=idn.get("name"), index=idx,
-                                    reason=how))
+                if idx in IDS_AGGREGATE_SOURCE_INDICES or \
+                        idx in IDS_BOOTSTRAP_LIKE_SOURCE_INDICES:
+                    # never added anyway: stamped, as at a matched time
+                    ignored.append(dict(name=idn.get("name"), index=idx,
+                                        reason=how))
+                    continue
+                from .io.imas import _entry_time_refusal
+                raise EngineInputRefused(_entry_time_refusal(
+                    "IDS adapter", idn, how))
             continue
         if q.get("j_parallel") is None:
             continue
@@ -845,7 +853,7 @@ class IdsAdapter:
         isrc = (_nearest_index(srcs["time"], T, "core_sources")
                 if srcs.get("time") else ic)
         fix_parts, driven_used, driven_ignored = _ids_driven_currents(
-            srcs, isrc, n, sgn)
+            srcs, isrc, n, sgn, cps.get("time"))
         nbi = fix_parts["nbi"]
         driven = fix_parts["nbi"] + fix_parts["rf"] + fix_parts["other"]
         # The inductive current is the parallel residual j_total -

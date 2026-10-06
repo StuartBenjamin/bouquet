@@ -37,6 +37,61 @@ in force is approved.
   stored-configuration load path relaxes to defaults-plus-warning, so
   archives written before the refusal stay loadable.
 
+## Unreleased — second-pass review fixes (2026-10-06)
+
+Fixes for the second adversarial review of the engine fix commits
+(d874822..f36b03a). Nothing here changes a default value, a tolerance or a
+test bar.
+
+- **Stored unified configurations load again when they carry any
+  engine-unread legacy field.** 3779b51 made the engine refuse 20 legacy-path
+  fields it never reads (`closure_channel`, `structured_li_target`, ...); a
+  stored `"unified"` configuration written before then with one of them at a
+  non-default value could no longer be loaded. The stored-load rule that
+  6e052d0 gave `isolate_edge_jBS` / `perturb_jind_in_anchor` now covers all
+  22 fields of `engine.ENGINE_UNREAD_LEGACY_FIELDS`, plus `homotopy_passes`
+  stored with `engine_draw_homotopy=False`. On `BouquetConfig.from_dict`
+  only, such a value is loaded as the field's default with a warning naming
+  it. The engine ignored the value, so the default is what the stored run
+  used. A NEW configuration with a non-default value is still refused.
+- **Beam and driven-current entries: matched by nearest time within half a
+  step, otherwise refused** (owner-recorded 2026-10-06: the owner approved
+  the stricter failure mode; the window value is to be confirmed). Since
+  807fd93 / 1ff7ccc a `core_sources` entry with its own per-slice times was
+  matched to the slice time within an absolute 1e-6 s. A beam entry a few
+  microseconds off the time base was dropped to ZERO with a warning (legacy
+  reader) or a provenance stamp (engine adapter): its current moved silently
+  into the inductive residual and into every draw. The rule now, in both the
+  legacy reader (`io.imas._source_slice_at`) and the engine adapter
+  (`adapters._ids_source_slice`), sharing `io.imas._entry_time_window`:
+  - match the entry to the NEAREST of its own times;
+  - accept the match within HALF the local time-step of the entry's own
+    grid (the interval the slice time lies in, or the end interval past
+    either end). A single-time entry uses the core_profiles grid's local
+    step. With no step on either grid the window is float precision;
+  - otherwise REFUSE: `ValueError` from the reader, `EngineInputRefused`
+    from the adapter. The error names the entry and its index, the slice
+    time, the nearest own time, |dt| and the half-step.
+
+  An entry carrying no non-zero current has nothing to drop and is skipped.
+  An aggregate or bootstrap-like entry is never added, so it is still only
+  stamped in `provenance["ignored_sources"]`. The legacy reader's sawteeth
+  entry feeds a gate flag, not a current: it uses the same window and is
+  recorded "not active" when there is no match, not refused.
+  **What changes:**
+  - an entry inside the time span of its own grid is always matched now:
+    the review's 2 µs case reads the beam bit-identically to the on-grid
+    read, where it was zero before;
+  - a slice time more than half a step outside the entry's span (for
+    example a model's entry that starts later than the IDS time base, read
+    at an earlier slice) is refused where it was zeroed before.
+  The shipped example reads bit-identically: its beam entry has no
+  per-slice times and is read by index.
+  **Not measured:** the effect on the real-data FUSE testbeds. A FUSE
+  source whose sawteeth or beam entry starts after the first time-base
+  slice will now refuse at those early slices on the engine path. That
+  needs an owner check on real data, offline from this package.
+
 ## Unreleased — owner-approved decision (2026-10-06)
 
 - **One coil solver for the whole run: OpenFUSIONToolkit's bounded coil

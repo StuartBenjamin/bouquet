@@ -5,10 +5,16 @@ Owner-approved fix (2026-10-05), the rule of the sawteeth entry next to it
 adapter: a ``core_sources`` beam entry (identifier 2) is read at the
 core_sources slice TIME, not at its list index.  An entry that starts one
 slice after the IDS time base was read one slice late, and past its last
-slice from its FIRST slice; at a time it does not cover it now carries no
-current (warned).  An entry with no per-slice time and a different slice
-count cannot be aligned and is refused -- never its first slice in place of
-the missing one.
+slice from its FIRST slice.  An entry with no per-slice time and a different
+slice count cannot be aligned and is refused -- never its first slice in
+place of the missing one.
+
+The time match (owner-approved 2026-10-06, replacing the 1e-6 s absolute
+match, under which a beam entry a few microseconds off the time base was
+dropped to ZERO with a warning): each entry is matched to its NEAREST own
+slice and accepted within HALF its local time-step (the core_profiles step
+for a single-time entry; float precision when neither grid has a step);
+otherwise the read is REFUSED -- a beam is never silently zeroed.
 
 The slice read is visible in ``Baseline.j_NBI``: the beam entry's
 j_parallel at core_sources time t_k is the constant 1e3*(k+1) A/m^2, and the
@@ -91,15 +97,126 @@ def test_a_middle_slice_is_not_read_one_slice_late(tmp_path):
     np.testing.assert_array_equal(got, _reference(tmp_path, t, 1))
 
 
-def test_a_slice_before_the_entry_starts_carries_no_beam_current(tmp_path):
-    """At the first time the late entry has no slice: no NBI current there,
-    and a warning says so (the list-index rule read the NEXT time's)."""
+def test_a_slice_before_the_entry_starts_is_refused(tmp_path):
+    """At the first time the late entry's nearest own slice (t_1) is more
+    than half its local time-step away: REFUSED, naming the entry and the
+    times (it was zeroed with a warning before 2026-10-06; the list-index
+    rule read the NEXT time's)."""
     dd, t = _dd_with_tagged_nbi(drop_first=True)
-    msgs = []
-    got = np.asarray(_read(tmp_path, dd, t[0], "first.json", msgs).j_NBI)
-    assert np.all(got == 0.0)
-    assert any("NBI entry" in m and "no profiles_1d slice at t =" in m
-               and "carries no current at this slice" in m for m in msgs)
+    with pytest.raises(ValueError, match=r"IMAS reader: core_sources "
+                       r"'nbi_synthetic' \(index 2\) carries a non-zero "
+                       r"j_parallel but has no profiles_1d slice within half "
+                       r"a time-step of t = 2\.1 s.*Refusing"):
+        _read(tmp_path, dd, t[0], "first.json")
+
+
+def _shifted(dd, shift):
+    nbi = next(s for s in dd["core_sources"]["source"]
+               if s["identifier"]["index"] == 2)
+    for q in nbi["profiles_1d"]:
+        q["time"] = q["time"] + shift
+    return dd
+
+
+def test_a_two_microsecond_offset_reads_the_nearest_slice_not_zero(
+        tmp_path):
+    """The 2026-10-06 review's case: the entry's own times 2 us off the
+    core_sources base.  Under the 1e-6 s match the beam was ZERO (one
+    warning); under the half-step rule each slice reads its nearest own
+    slice, bit-identical to the on-grid read, and nothing is warned."""
+    for k in range(3):
+        dd, t = _dd_with_tagged_nbi()
+        msgs = []
+        got = np.asarray(_read(tmp_path, _shifted(dd, 2e-6), t[k],
+                               f"us{k}.json", msgs).j_NBI)
+        np.testing.assert_array_equal(got, _reference(tmp_path, t, k))
+        assert np.max(np.abs(got)) > 0.0
+        assert not any("NBI" in m for m in msgs)
+
+
+def test_a_two_microsecond_offset_with_no_time_step_is_refused(tmp_path):
+    """With no step on either grid (a single-time IDS and a single-time beam
+    entry) the window is float precision: a 2 us offset is REFUSED -- never
+    a zero beam."""
+    dd, t = _dd_with_tagged_nbi()
+    k = 1
+    for blk in ("core_sources", "core_profiles", "equilibrium"):
+        dd[blk]["time"] = [t[k]]
+    dd["core_profiles"]["profiles_1d"] = [dd["core_profiles"]["profiles_1d"][k]]
+    dd["equilibrium"]["time_slice"] = [dd["equilibrium"]["time_slice"][k]]
+    for blk in ("vacuum_toroidal_field",):
+        vt = dd["equilibrium"].get(blk)
+        if vt and "b0" in vt:
+            vt["b0"] = [vt["b0"][k]]
+    for src in dd["core_sources"]["source"]:
+        src["profiles_1d"] = [src["profiles_1d"][k]]
+    # on the time: read
+    got = np.asarray(_read(tmp_path, copy.deepcopy(dd), t[k],
+                           "one.json").j_NBI)
+    np.testing.assert_array_equal(got, _reference(tmp_path, t, k))
+    with pytest.raises(ValueError, match="within half a time-step.*Refusing"):
+        _read(tmp_path, _shifted(dd, 2e-6), t[k], "one_us.json")
+
+
+def test_an_entry_exactly_on_a_slice_time_matches(tmp_path):
+    dd, t = _dd_with_tagged_nbi()
+    for k, tk in enumerate(t):
+        got = np.asarray(_read(tmp_path, copy.deepcopy(dd), tk,
+                               f"on{k}.json").j_NBI)
+        np.testing.assert_array_equal(got, _reference(tmp_path, t, k))
+        assert np.max(np.abs(got)) > 0.0
+
+
+def test_a_coarser_entry_grid_matches_its_nearest_slice(tmp_path):
+    """An entry on a coarser grid (its own times t_0 and t_2 only): the
+    middle slice t_1 reads the entry's NEAREST own slice -- within half the
+    entry's local step -- and the end slices their own."""
+    dd, t = _dd_with_tagged_nbi()
+    nbi = next(s for s in dd["core_sources"]["source"]
+               if s["identifier"]["index"] == 2)
+    nbi["profiles_1d"] = [nbi["profiles_1d"][0], nbi["profiles_1d"][2]]
+    near = 0 if abs(t[1] - t[0]) <= abs(t[2] - t[1]) else 2
+    got = np.asarray(_read(tmp_path, dd, t[1], "coarse.json").j_NBI)
+    # the slice-t_1 conversion of the entry's nearest own slice's current
+    want = _dd_with_tagged_nbi()[0]
+    nb2 = next(s for s in want["core_sources"]["source"]
+               if s["identifier"]["index"] == 2)
+    nb2["profiles_1d"][1]["j_parallel"] = nb2["profiles_1d"][near][
+        "j_parallel"]
+    ref = np.asarray(_read(tmp_path, want, t[1], "coarse_ref.json").j_NBI)
+    np.testing.assert_array_equal(got, ref)
+    for k in (0, 2):
+        got = np.asarray(_read(tmp_path, copy.deepcopy(dd), t[k],
+                               f"coarse{k}.json").j_NBI)
+        np.testing.assert_array_equal(got, _reference(tmp_path, t, k))
+
+
+def test_past_the_end_by_more_than_half_a_step_is_refused(tmp_path):
+    """The entry stops one slice early: at the last time its nearest own
+    slice is a full step away -- refused (never read from another time)."""
+    dd, t = _dd_with_tagged_nbi()
+    nbi = next(s for s in dd["core_sources"]["source"]
+               if s["identifier"]["index"] == 2)
+    nbi["profiles_1d"] = nbi["profiles_1d"][:-1]
+    with pytest.raises(ValueError, match="within half a time-step.*Refusing"):
+        _read(tmp_path, dd, t[-1], "early_end.json")
+    # the window edge: the entry's two own times (step 0.1 s) shifted so
+    # the last slice time is 0.049 s (inside half a step) or 0.051 s
+    # (outside) past its last own time
+    for off, ok in ((0.049, True), (0.051, False)):
+        dd, t = _dd_with_tagged_nbi()
+        nbi = next(s for s in dd["core_sources"]["source"]
+                   if s["identifier"]["index"] == 2)
+        nbi["profiles_1d"] = nbi["profiles_1d"][:-1]
+        last = t[-1] - off
+        nbi["profiles_1d"][0]["time"] = last - 0.1
+        nbi["profiles_1d"][1]["time"] = last
+        if ok:
+            got = np.asarray(_read(tmp_path, dd, t[-1], "in.json").j_NBI)
+            assert np.max(np.abs(got)) > 0.0
+        else:
+            with pytest.raises(ValueError, match="within half a time-step"):
+                _read(tmp_path, dd, t[-1], "out.json")
 
 
 def test_an_nbi_entry_that_cannot_be_aligned_is_refused(tmp_path):

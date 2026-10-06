@@ -85,7 +85,11 @@ def test_a_slice_before_the_entry_starts_is_not_active(tmp_path):
     sw = bl.sawtooth
     assert sw["present"] is True
     assert sw["active"] is False and sw["j_par_max_abs"] == 0.0
-    assert sw["slice"].startswith("no profiles_1d slice at t =")
+    # 2026-10-06: the entry's nearest own slice (t_1) is more than half its
+    # local time-step away -- recorded (a gate flag, not a current: not
+    # refused, unlike a beam entry)
+    assert sw["slice"].startswith("no profiles_1d slice within half a "
+                                  "time-step of t =")
 
 
 def test_an_entry_that_cannot_be_aligned_is_refused(tmp_path):

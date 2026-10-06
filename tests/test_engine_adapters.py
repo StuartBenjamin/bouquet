@@ -753,20 +753,73 @@ def test_an_entry_is_read_at_its_own_time_not_its_list_index(tmp_path):
         _ids_source_slice(saw, isrc, float(t[isrc]), len(t))
 
 
-def test_an_entry_without_a_slice_at_this_time_is_stamped(tmp_path):
+def test_a_driven_entry_without_a_slice_at_this_time_is_refused(tmp_path):
+    """A driven entry whose nearest own slice is more than half its local
+    time-step from the slice time is REFUSED (owner-approved 2026-10-06; it
+    was dropped to zero and stamped under the 1e-6 s match).  An aggregate
+    entry in the same position is never added anyway: stamped, not
+    refused.  An all-zero driven entry has nothing to drop: skipped."""
     from bouquet.adapters import _ids_driven_currents
     n = 5
     srcs = dict(time=[1.0, 2.0, 3.0], source=[dict(
         identifier=dict(name="sawteeth", index=701),
         profiles_1d=[dict(time=2.0, j_parallel=[1.0] * n),
                      dict(time=3.0, j_parallel=[2.0] * n)])])
-    with pytest.warns(UserWarning, match="no profiles_1d slice"):
-        parts, used, ignored = _ids_driven_currents(srcs, 0, n, 1.0)
-    assert used == [] and np.all(parts["other"] == 0.0)
-    assert ignored[0]["index"] == 701
+    with pytest.raises(EngineInputRefused,
+                       match=r"IDS adapter: core_sources 'sawteeth' \(index "
+                             r"701\) carries a non-zero j_parallel but has no "
+                             r"profiles_1d slice within half a time-step of "
+                             r"t = 1 s.*Refusing"):
+        _ids_driven_currents(srcs, 0, n, 1.0)
     parts, used, ignored = _ids_driven_currents(srcs, 2, n, -1.0)
     np.testing.assert_array_equal(parts["other"], -2.0)
     assert ignored == []
+    # nearest own slice within half a step: matched, not dropped
+    parts, used, ignored = _ids_driven_currents(
+        dict(srcs, time=[1.6, 2.0, 3.0]), 0, n, 1.0)
+    np.testing.assert_array_equal(parts["other"], 1.0)
+    assert used[0]["slice"] == "matched by time"
+    # an aggregate entry out of window: stamped, never added, not refused
+    agg = dict(time=[1.0, 2.0, 3.0], source=[dict(
+        identifier=dict(name="total", index=1),
+        profiles_1d=[dict(time=2.0, j_parallel=[1.0] * n),
+                     dict(time=3.0, j_parallel=[2.0] * n)])])
+    with pytest.warns(UserWarning, match="NOT added"):
+        parts, used, ignored = _ids_driven_currents(agg, 0, n, 1.0)
+    assert used == [] and ignored[0]["index"] == 1
+    assert ignored[0]["reason"].startswith("no profiles_1d slice within half")
+    # an all-zero driven entry out of window: nothing to drop
+    zero = dict(time=[1.0, 2.0, 3.0], source=[dict(
+        identifier=dict(name="nbi", index=2),
+        profiles_1d=[dict(time=2.0, j_parallel=[0.0] * n),
+                     dict(time=3.0, j_parallel=[0.0] * n)])])
+    parts, used, ignored = _ids_driven_currents(zero, 0, n, 1.0)
+    assert used == [] and ignored == [] and np.all(parts["nbi"] == 0.0)
+
+
+def test_a_two_microsecond_offset_entry_is_read_at_its_nearest_slice():
+    """The 2026-10-06 review's case on the engine path: own times 2 us off
+    the base -- each slice reads its nearest own slice (it was dropped to
+    zero and stamped under the 1e-6 s match)."""
+    from bouquet.adapters import _ids_driven_currents
+    n = 4
+    tb = [2.1, 2.2, 2.3043]
+    srcs = dict(time=tb, source=[dict(
+        identifier=dict(name="nbi", index=2),
+        profiles_1d=[dict(time=tk + 2e-6, j_parallel=[1.0e3 * (k + 1)] * n)
+                     for k, tk in enumerate(tb)])])
+    for k in range(3):
+        parts, used, ignored = _ids_driven_currents(srcs, k, n, 1.0, tb)
+        np.testing.assert_array_equal(parts["nbi"], 1.0e3 * (k + 1))
+        assert ignored == [] and used[0]["slice"] == "matched by time"
+    # a single-time entry uses the core_profiles step (0.1 s here)
+    one = dict(time=tb, source=[dict(
+        identifier=dict(name="nbi", index=2),
+        profiles_1d=[dict(time=2.2 + 2e-6, j_parallel=[5.0] * n)])])
+    parts, _, _ = _ids_driven_currents(one, 1, n, 1.0, tb)
+    np.testing.assert_array_equal(parts["nbi"], 5.0)
+    with pytest.raises(EngineInputRefused, match="within half a time-step"):
+        _ids_driven_currents(one, 0, n, 1.0, tb)        # 0.1 s away
 
 
 def test_a_malformed_driven_source_is_refused(tmp_path):
