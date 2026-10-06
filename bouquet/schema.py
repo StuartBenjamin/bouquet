@@ -52,6 +52,8 @@ PROFILE_UNITS = {
 # Fixed in-group dataset names for the opaque byte blobs (F11).
 EQDSK_DS = "eqdsk"
 PFILE_DS = "pfile"
+# OFT/TokaMaker i-file (inverse R,Z(psi,theta) for GPEC eq_type ldp_i); optional.
+IFILE_DS = "ifile"
 COIL_VALUES_DS = "coil_currents"
 COIL_NAMES_DS = "coil_names"
 

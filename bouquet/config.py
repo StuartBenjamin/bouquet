@@ -1095,6 +1095,11 @@ class GenerationConfig:
     # <B_phi^2>~=<B^2> bracket (~<1%). Adds ~65 surface traces/draw; set False
     # to skip that cost (self-validated + graceful fallback either way).
     capture_exact_inv_R2: bool = True
+    # Also archive an OFT i-file (save_ifile: R,Z on flux surfaces, F, p, q, FF', p')
+    # for GPEC eq_type='ldp_i' next to the eqdsk; needs an OFT with GPECf_interface.
+    write_ifile: bool = False
+    ifile_npsi: int = 129
+    ifile_ntheta: int = 257
 
     #: Arguments the call sites set themselves; ``bootstrap_kwargs`` may not
     #: shadow them (duplicate keyword, or a silent override of a per-draw
