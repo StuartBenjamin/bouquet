@@ -247,8 +247,47 @@ class _LegacyMock:
         raise _Stop()
 
 
+@pytest.fixture()
+def _legacy_oft_names(monkeypatch):
+    """The legacy perturb_kinetic_equilibrium is frozen code
+    (tests/test_edge_pressure_legacy_ast.py) that imports OpenFUSIONToolkit's
+    bootstrap names at its top, although the mock stops it at its first
+    solve, before any of them is called.  Where OpenFUSIONToolkit is not
+    installed (the fast CI suite) stub exactly those names in, each raising
+    if called, so this stays a real comparison of the two streams on every
+    run of the suite rather than one that skips or errors."""
+    import sys
+    import types
+    try:
+        import OpenFUSIONToolkit.TokaMaker.bootstrap  # noqa: F401
+        import OpenFUSIONToolkit.TokaMaker.util  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    def _never(name):
+        def f(*a, **k):
+            raise AssertionError(f"the sampler comparison reached {name}")
+        return f
+    pkg = types.ModuleType("OpenFUSIONToolkit")
+    sub = types.ModuleType("OpenFUSIONToolkit.TokaMaker")
+    util = types.ModuleType("OpenFUSIONToolkit.TokaMaker.util")
+    bs = types.ModuleType("OpenFUSIONToolkit.TokaMaker.bootstrap")
+    for n in ("get_jphi_from_GS", "create_power_flux_fun"):
+        setattr(util, n, _never(n))
+    for n in ("solve_with_bootstrap", "find_optimal_scale"):
+        setattr(bs, n, _never(n))
+    sub.util, sub.bootstrap, pkg.TokaMaker = util, bs, sub
+    for name, mod in (("OpenFUSIONToolkit", pkg),
+                      ("OpenFUSIONToolkit.TokaMaker", sub),
+                      ("OpenFUSIONToolkit.TokaMaker.util", util),
+                      ("OpenFUSIONToolkit.TokaMaker.bootstrap", bs)):
+        monkeypatch.setitem(sys.modules, name, mod)
+
+
 @pytest.mark.parametrize("zeff_primary", [False, True])
-def test_the_sampler_draws_the_legacy_kinetic_stream(recon, zeff_primary):
+def test_the_sampler_draws_the_legacy_kinetic_stream(recon, zeff_primary,
+                                                     _legacy_oft_names):
     from bouquet.jbs_loop import jbs_settings
     from bouquet.sampling import make_rng
     from bouquet.TokaMaker_interface import perturb_kinetic_equilibrium
@@ -1164,6 +1203,62 @@ def test_the_sigma0_check_runs_the_generate_route(tmp_path,
     assert (os.path.getmtime(h5) if os.path.exists(h5) else None) == mtime
     assert b.config.generation.n_inspec_target is None
     assert getattr(b, "_sigma0_route", None) is None
+
+
+class _BlockOFT:
+    """A meta-path finder refusing every ``OpenFUSIONToolkit*`` import -- the
+    fast CI job's condition (OpenFUSIONToolkit not installed), reproduced
+    in-process on a machine that has it."""
+
+    def find_spec(self, name, path=None, target=None):
+        if name == "OpenFUSIONToolkit" or name.startswith(
+                "OpenFUSIONToolkit."):
+            raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+        return None
+
+
+@pytest.fixture()
+def _without_oft(monkeypatch):
+    import sys
+    for name in [m for m in sys.modules if m == "OpenFUSIONToolkit"
+                 or m.startswith("OpenFUSIONToolkit.")]:
+        monkeypatch.delitem(sys.modules, name)
+    monkeypatch.setattr(sys, "meta_path", [_BlockOFT()] + sys.meta_path)
+    with pytest.raises(ImportError):
+        import OpenFUSIONToolkit  # noqa: F401
+    with pytest.raises(ImportError):
+        from OpenFUSIONToolkit.TokaMaker.bootstrap import \
+            solve_with_bootstrap  # noqa: F401
+
+
+def test_the_engine_sigma0_check_runs_without_openfusiontoolkit(
+        tmp_path, toy_bouquet_solver, _without_oft):
+    """CI: the fast suite runs without OpenFUSIONToolkit.  The engine
+    route's sigma=0 check (generate() on the toy solver) must not import it:
+    ``verify_sigma0_consistency`` takes OpenFUSIONToolkit only on the legacy
+    route, the one that calls ``solve_with_bootstrap``.  Likewise
+    ``evaluate_jBS``'s input refusals (the domain
+    ``engine_draws.check_draw_kinetics`` mirrors) come before its
+    OpenFUSIONToolkit import."""
+    from bouquet.physics import JBSEvaluationError, evaluate_jBS
+    b = _bq(tmp_path)
+    b.setup_solver()
+    _quiet(b.prepare_baseline)
+    v = _quiet(b.verify_sigma0_consistency)
+    assert v["route"] == "generate()" and v["passed"]
+    n = 9
+    psi = np.linspace(0.0, 1.0, n)
+    ne = np.full(n, 3e19)
+    ne[4] = 0.0
+    with pytest.raises(JBSEvaluationError) as ei:
+        evaluate_jBS(None, psi, ne, np.full(n, 1e3), np.full(n, 2.5e19),
+                     np.full(n, 1.2e3), np.full(n, 1.8), psi_pad=1e-3)
+    assert ei.value.quantity == "ne"
+    # past the input checks the evaluation does need OpenFUSIONToolkit
+    with pytest.raises(ImportError):
+        evaluate_jBS(None, psi, np.full(n, 3e19), np.full(n, 1e3),
+                     np.full(n, 2.5e19), np.full(n, 1.2e3), np.full(n, 1.8),
+                     psi_pad=1e-3)
 
 
 def test_the_sigma0_check_puts_all_solver_state_back(tmp_path,
