@@ -140,6 +140,11 @@ def test_channel_without_recalculate_jbs_is_refused():
     cfg = _cfg("imas")
     cfg.generation.jBS_baseline_mode = "ohmic"
     cfg.generation.recalculate_j_BS = False
+    # recalculate_j_BS=False is only a valid setting with the self-consistent
+    # bootstrap loop off (the loop's own guard refuses the pair outright,
+    # before the workflow problems are collected); the subject here is the
+    # closure_channel refusal, so construct an otherwise-valid config.
+    cfg.generation.jbs_self_consistent = False
     cfg.generation.closure_channel = "structured"
     with pytest.raises(ValueError, match="recalculate_j_BS=True"):
         Bouquet(cfg)._validate_workflow()
