@@ -36,7 +36,6 @@ task); its numbers are owed on the next solver-suite run.  Synthetic inputs
 only; one thread.
 """
 import os
-import subprocess
 import sys
 
 import _harness
@@ -47,7 +46,6 @@ import numpy as np
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_PROBE = os.path.join(_HERE, "probes", "probe_baseline_gfile_frame.py")
 sys.path.insert(0, os.path.join(_HERE, "probes"))
 import measure_engine as ME  # noqa: E402
 
@@ -69,29 +67,12 @@ def _parse_tol(a):
 
 @pytest.fixture(scope="module")
 def written(tmp_path_factory):
-    import json
+    from probe_baseline_gfile_frame import run_probe
     out = {}
     for eng, sep in ARMS:
         work = str(tmp_path_factory.mktemp(f"gfile_{eng}_{sep}"))
-        proc = subprocess.run(
-            [sys.executable, _PROBE, work, "--source", "recon",
-             "--engine", eng, "--sep", sep],
-            env=_harness.subprocess_env(OMP_NUM_THREADS="1",
-                                        MKL_NUM_THREADS="1",
-                                        OPENBLAS_NUM_THREADS="1",
-                                        MPLBACKEND="Agg"),
-            capture_output=True, text=True)
-        tag = f"recon_{eng}_{sep}"
-        js = os.path.join(work, f"baseline_gfile_frame_{tag}.json")
-        rec = None
-        if os.path.exists(js):
-            with open(js) as fh:
-                rec = json.load(fh)
-        out[(eng, sep)] = dict(
-            rc=proc.returncode, rec=rec,
-            log=proc.stdout[-3000:] + "\n" + proc.stderr[-3000:],
-            files={k: os.path.join(work, f"frame_{tag}_{k}.geqdsk")
-                   for k in ("recon", "bare")})
+        rc, rec, log, files = run_probe(work, "recon", eng, sep)
+        out[(eng, sep)] = dict(rc=rc, rec=rec, log=log, files=files)
     return out
 
 
