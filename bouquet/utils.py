@@ -245,11 +245,21 @@ def safe_save_eqdsk(mygs, filename, **kwargs):
     **kwargs
         Passed through to `mygs.save_eqdsk(...)`.
     '''
+    return _snapshot_save(mygs, mygs.save_eqdsk, filename, **kwargs)
+
+
+def safe_save_ifile(mygs, filename, **kwargs):
+    r'''Snapshot/restore-wrapped `mygs.save_ifile` (it traces surfaces like
+    save_eqdsk; see :func:`safe_save_eqdsk`).'''
+    return _snapshot_save(mygs, mygs.save_ifile, filename, **kwargs)
+
+
+def _snapshot_save(mygs, save, filename, **kwargs):
     if not hasattr(mygs, 'copy_eq') or not hasattr(mygs, 'replace_eq'):
-        return mygs.save_eqdsk(filename, **kwargs)
+        return save(filename, **kwargs)
     saved = mygs.copy_eq()
     try:
-        return mygs.save_eqdsk(filename, **kwargs)
+        return save(filename, **kwargs)
     finally:
         mygs.replace_eq(source_eq=saved)
 
@@ -3529,6 +3539,7 @@ def store_equilibrium(
     aux=None,
     eq_fsa=None,
     profile_coord=None,
+    ifile_filepath=None,
 ):
     """
     Write one perturbed equilibrium into the HDF5 database.
@@ -3558,6 +3569,8 @@ def store_equilibrium(
         1-D isolated edge bootstrap current [A m^-2].
     pfile_bytes : bytes or None
         Raw p-file content to store alongside the g-file bytes.
+    ifile_filepath : str or None
+        OFT i-file (``save_ifile``) to store as the ``ifile`` blob.
     Zeff : array_like or None
         1-D effective charge profile (dimensionless).
     coil_currents : dict or None
@@ -3587,8 +3600,11 @@ def store_equilibrium(
 
         # ---- raw eqdsk (opaque binary -- bit-perfect; schema-v2 fixed
         # name, the group path carries the coordinates) --------------------
-        from .schema import EQDSK_DS
+        from .schema import EQDSK_DS, IFILE_DS
         grp.create_dataset(EQDSK_DS, data=np.void(eqdsk_bytes))
+        if ifile_filepath is not None:
+            with open(ifile_filepath, "rb") as fh:
+                grp.create_dataset(IFILE_DS, data=np.void(fh.read()))
 
         # ---- 1-D profiles -----------------------------------------------
         write_profile(grp, "psi_N", psi_N)
@@ -3932,6 +3948,7 @@ def store_baseline_profiles(
     source_kind=None,
     profile_coord="psi_n",
     baseline_meta=None,
+    ifile_bytes=None,
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -3948,6 +3965,8 @@ def store_baseline_profiles(
         from perturbed equilibria.
     pfile_bytes : bytes or None
         Raw baseline p-file content.
+    ifile_bytes : bytes or None
+        Raw baseline OFT i-file content (``write_ifile`` runs).
     baseline_meta : dict or None
         Baseline provenance (``Baseline.li_metrics``): the l_i comparison,
         forward-solve residuals, ``jBS_baseline_mode``, the closure scales
@@ -4044,6 +4063,8 @@ def store_baseline_profiles(
 
         if eqdsk_bytes is not None:
             grp.create_dataset("eqdsk", data=np.void(eqdsk_bytes))
+        if ifile_bytes is not None:
+            grp.create_dataset("ifile", data=np.void(ifile_bytes))
         if pfile_bytes is not None:
             grp.create_dataset("pfile", data=np.void(pfile_bytes))
 

@@ -40,7 +40,7 @@ from typing import Optional
 
 import numpy as np
 
-from .schema import EQDSK_DS, PFILE_DS, find_bytes_dataset
+from .schema import EQDSK_DS, IFILE_DS, PFILE_DS, find_bytes_dataset
 from .utils import (
     _resolve_h5, _scan_key, _group_path, profile_coord,
     discover_scan_keys, list_equilibrium_indices, load_baseline_profiles,
@@ -50,7 +50,7 @@ from .filtering import select_indices, _FILTER_FLAGS
 
 
 # Datasets that are not perturbed-profile arrays (excluded from DrawView.profiles).
-_NON_PROFILE = {"config_json", EQDSK_DS, PFILE_DS}
+_NON_PROFILE = {"config_json", EQDSK_DS, PFILE_DS, IFILE_DS}
 
 # Attr keys surfaced by DrawView.flags (same record shape as read_filter_flags).
 _FLAG_ATTRS = (*_FILTER_FLAGS, "selected")
@@ -173,6 +173,11 @@ class DrawView:
     @property
     def eqdsk_bytes(self) -> Optional[bytes]:
         return self._read_bytes(".eqdsk")[".eqdsk"]
+
+    @property
+    def ifile_bytes(self) -> Optional[bytes]:
+        """OFT i-file bytes (``write_ifile=True`` runs), else ``None``."""
+        return self._read_bytes(".ifile")[".ifile"]
 
     @property
     def pfile_bytes(self) -> Optional[bytes]:

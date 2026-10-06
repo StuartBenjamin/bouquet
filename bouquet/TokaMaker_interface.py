@@ -47,6 +47,7 @@ from .utils import (
     pchip_derivative,
     pchip_interp,
     safe_save_eqdsk,
+    safe_save_ifile,
     safe_trace_surf,
     select_closed_lcfs,
     store_equilibrium,
@@ -4016,6 +4017,9 @@ def generate_bouquet(
     capture_live_eq=True,
     capture_npsi=257,
     capture_exact_inv_R2=True,
+    write_ifile=False,
+    ifile_npsi=129,
+    ifile_ntheta=257,
     # Archive the ACHIEVED FSA j_phi of each converged solve (baseline + every
     # draw) instead of the prescribed target profile. Set on the IMAS path,
     # where the single-pass jphi-linterp solve lands a few % off its anchor, so
@@ -4318,6 +4322,7 @@ def generate_bouquet(
     _baseline_psi = None
     _baseline_coils = None
     _recon_Ip = None
+    baseline_ifile_bytes = None  # set with the warmstart baseline.eqdsk re-save
 
     # Sawtooth check.  We use mygs.get_q on the current (recon) state
     # rather than re-solving here -- a fresh forward solve at
@@ -4876,6 +4881,15 @@ def generate_bouquet(
                 # converged eqdsk + Ip into the H5 _baseline group.
                 baseline_eqdsk_bytes = _new_eqdsk_bytes
                 initial_Ip_target = _new_eq_Ip
+                if write_ifile:
+                    _tmp_ifile_path = _tmp_eqdsk_path + '.ifile'
+                    safe_save_ifile(mygs, _tmp_ifile_path,
+                                    npsi=int(ifile_npsi),
+                                    ntheta=int(ifile_ntheta),
+                                    lcfs_pad=psi_pad)
+                    with open(_tmp_ifile_path, 'rb') as _if:
+                        baseline_ifile_bytes = _if.read()
+                    os.unlink(_tmp_ifile_path)
                 if abs(_new_eq_Ip - _old_initial_Ip) > 1.0:
                     _shift_pct = (
                         100.0 * (_new_eq_Ip - _old_initial_Ip)
@@ -5111,6 +5125,7 @@ def generate_bouquet(
         z2_fast=z2_fast,
         Z_imp=Z_imp,
         eqdsk_bytes=baseline_eqdsk_bytes,
+        ifile_bytes=baseline_ifile_bytes,
         pfile_bytes=stored_pfile_bytes,
         psi_N_kinetic=psi_N_kinetic,
         coil_currents=_bl_coil_dict,
@@ -6302,6 +6317,18 @@ def generate_bouquet(
                 pbar.update(1)
             continue
 
+        # Optional OFT i-file for GPEC eq_type='ldp_i', from the same state.
+        ifile_path = None
+        if write_ifile:
+            ifile_path = os.path.abspath(f"{header}_count={count}.ifile")
+            try:
+                safe_save_ifile(mygs, ifile_path, npsi=int(ifile_npsi),
+                                ntheta=int(ifile_ntheta), lcfs_pad=psi_pad)
+            except Exception as _ifile_exc:
+                print(f"  WARN: save_ifile failed ({_ifile_exc}); "
+                      f"draw stored without an i-file")
+                ifile_path = None
+
         # Capture a high-resolution LCFS trace at the SAME mygs state
         # we just saved the eqdsk from.  The eqdsk's RBBBS/ZBBBS is only
         # ~100 pts (save_eqdsk samples coarsely), so comparing it
@@ -6632,6 +6659,7 @@ def generate_bouquet(
             eq_fsa=diagnostics.get('eq_fsa'),
             jbs_delta_active=(diagnostics['jbs_delta_active']
                               if jbs_delta_mode else None),
+            ifile_filepath=ifile_path,
         )
         if swb_recipe is not None:
             from .utils import stamp_group_attrs
@@ -6644,12 +6672,15 @@ def generate_bouquet(
                 "swb_saw_n_dips": diagnostics.get("saw_n_dips"),
                 "swb_saw_map_warn": diagnostics.get("saw_map_warn")})
 
-        # Clean up on-disk eqdsk after archiving
-        try:
-            os.remove(full_path)
-            print(f"  Deleted temporary file: {full_path}")
-        except OSError as exc:
-            print(f"  WARNING: could not delete {full_path}: {exc}")
+        # Clean up on-disk eqdsk (and i-file) after archiving
+        for _path in (full_path, ifile_path):
+            if _path is None:
+                continue
+            try:
+                os.remove(_path)
+                print(f"  Deleted temporary file: {_path}")
+            except OSError as exc:
+                print(f"  WARNING: could not delete {_path}: {exc}")
 
         all_diagnostics.append(diagnostics)
         _attempt_outcomes[int(count)] = "stored"
