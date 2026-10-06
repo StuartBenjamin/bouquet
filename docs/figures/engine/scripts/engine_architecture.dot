@@ -1,0 +1,20 @@
+digraph engine {
+  graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.35, ranksep=0.35, bgcolor="white"];
+  node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=10, color="#000000", fillcolor="#FFFFFF"];
+  edge  [fontname="Helvetica", fontsize=9, color="#000000"];
+  gf  [label="g-file adapter\n<j.B>_in - Redl(anchor), smoothed\nrows: Ip (exact), l_i(3) hard, (q0)", fillcolor="#56B4E933"];
+  ids [label="IDS adapter\n|B0|(j_tot - j_BS - sum driven)  [default 'residual']\ndriven held fixed; rows: Ip, l_i soft, (q0), (MSE)", fillcolor="#56B4E933"];
+  anchor [label="anchor E_0: source's own current, one 2-pass solve\n(seeds geometry + first Redl bootstrap;\ncoil solve in the bounded mode from solver setup on)"];
+  comp [label="compose on latest solved geometry G_k  (identity I2)\nJ = F<1/R>/<B^2> [s_ind<j.B>_ind + s_bs<j.B>_BS + <j.B>_fix] + p'(<R> - F^2<1/R>/<B^2>)", fillcolor="#E69F0033"];
+  clos [label="closure (0 solves): rows + discrepancies, prior / preset\n(structured | bootstrap_scalar | sawtooth_two_scalar | two_scalar_li)"];
+  solve [label="relax (beta = 0.7) -> ONE Grad-Shafranov solve\n(edge pressure: P' pinned, axis target p_axis - p_sep ['offset'])", fillcolor="#D55E0033"];
+  meas [label="measure on the solved state: Redl <j.B>, l_i, Ip, q0, tan(gamma)"];
+  upd [label="update lambda_BS (omega = 0.7), row discrepancies,\nMSE Jacobian (fd_chord: fixed FD; offset refreshed)"];
+  crit [label="criteria on 2 consecutive passes\n(r_j 1e-3, r_Ip 1e-4, |dl_i| 1e-3, |dq0| 2e-3; ceiling 8)", shape=diamond, style="filled", fillcolor="#FFFFFF"];
+  deliv [label="delivery solve (two passes) + checks on every row\n= THE reconstruction (Baseline + Baseline.engine record)", fillcolor="#009E7333"];
+  draws [label="engine draws: x* held, Ip amplitude, one bootstrap loop\nfrom the reconstruction state; homotopy, solve cap 100;\nsigma = 0 draw reproduces the reconstruction", fillcolor="#CC79A733"];
+  gf -> anchor; ids -> anchor; anchor -> comp; comp -> clos -> solve -> meas -> upd -> crit;
+  crit -> comp [label="  not met: next pass"];
+  crit -> deliv [label="met"];
+  deliv -> draws [label="generate()"];
+}
