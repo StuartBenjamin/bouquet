@@ -93,7 +93,8 @@ repository's synthetic examples with the live-solver tests (`pytest -m solver`)
 on both builds: every l_i and q value the tests record agreed within 0.12 %
 (l_i(3) of the engine on the g-file example: +0.001 %; q0 and q95: ±0.09 %),
 and the pass/fail verdicts were the same apart from one test that compares with
-numbers measured on one specific build. A solve that goes non-finite runs to the
+numbers measured on one specific build. (Measured before the canonical coil-solve
+mode below; that mode moves the same quantities by at most 5e-4 relative.) A solve that goes non-finite runs to the
 iteration cap on an upstream build (one zero-perturbation check took 5.7×
 longer). Run `verify_sigma0_consistency()` on a new machine or OFT build.
 
@@ -107,10 +108,36 @@ longer). Run `verify_sigma0_consistency()` on a new machine or OFT build.
   axis target p_axis - p_sep (its own pressure is zero at the boundary), and
   p_sep is added back wherever pressure, beta or W_MHD is reported or written
   (`generation.separatrix_pressure="offset"`); `"legacy"` restores the
-  previous behaviour (the full axis pressure as the target).
+  previous behaviour (the full axis pressure as the target);
+- one coil solve for the whole run: the solver's bounded coil mode is entered
+  once, at `setup_solver`, so the reconstruction, the sigma=0 check and every
+  draw use the same coil least-squares solve whatever order they run in.
+  Measured on the synthetic examples, this moves reconstructions by at most
+  5e-7 relative (l_i, q0) and archived draws by at most 5e-4 relative. Yields
+  and in-spec flags are unchanged. It is not switchable: it removes a
+  call-order dependence;
+- the draws' loop may take up to 12 passes (`jbs_max_passes_draw`, was 6),
+  and up to 6 after the homotopy (`jbs_max_passes_post_homotopy`);
+- a draw whose homotopy rollback re-solve fails is now REJECTED
+  (`homotopy_rollback_failed`) instead of continuing from a stale state.
+  This applies on both paths, so legacy yields can change;
+- the IMAS reader reads each beam (NBI) and sawteeth entry at the slice
+  TIME, matched to the entry's nearest own slice. A beam entry with no own
+  slice within half a time-step of the slice time is REFUSED, never read at
+  another time or dropped to zero;
+- a negative pressure at the separatrix is refused under `"offset"`, for the
+  baseline (`prepare_baseline`) as well as the draws. Setting
+  `separatrix_pressure="legacy"` builds such an input as before.
 
 A configuration stored by an earlier version (an archive's config) loads with
-the settings it was produced with, with a warning.
+a warning naming every field it changes:
+
+- a field the configuration predates gets the value it was produced with,
+  where that is knowable; otherwise today's default, with a LOUD warning;
+- a legacy-path field that the unified engine never read loads at its
+  default, because the default is what that run used.
+
+See `docs/CHANGES_SUMMARY.md` for every change and how to restore each.
 
 ## Quickstart
 

@@ -115,6 +115,41 @@ test bar.
   Test: `test_a_negative_separatrix_pressure_refuses_the_legacy_baseline`
   (a legacy IMAS baseline; refused before any solve).
 
+- **Tests that pin claims which had none.** A mutation pass over the fix
+  commits found three claims that no test could fail.
+  - `test_an_archived_stage_miss_fails_the_sigma0_check`: a loop stage
+    that passes but an archived state that misses must fail the sigma=0
+    check.
+  - `test_the_archived_split_uses_the_archived_states_kappa_and_redl`:
+    the archived bootstrap and fixed parts are on the archived state's
+    `F<1/R>/<B^2>` and Redl, so a 1 % error in either fails.
+  - `test_after_a_failure_the_next_secant_step_uses_two_good_points`: a
+    behavioural test of the l_i secant's pairing after a failed solve.
+  The pass was re-run on this tree: the review's 27 mutants plus 8 new
+  ones are all killed.
+- **What a written g-file contains, parsed back.**
+  `test_a_written_gfile_parses_back_to_the_delivered_frame` (solver-free)
+  checks:
+  - edge `PRES` is the delivered p_sep under `"offset"` and 0 under
+    `"legacy"`;
+  - `PPRIME`, q, F and the boundary are unchanged within the format's
+    precision.
+
+  Its live-solver twin, `tests/test_gfile_written_contents_solver.py`
+  (`-m solver`, 8 tests), runs the existing probe and checks that `PRES`
+  minus a bare save of the same state is p_sep at every point. The bare
+  edge is the solver's pressure on the truncated last surface, 4.8 Pa on
+  the example, not zero. The twin has not been run yet: it is owed on the
+  next solver-suite run. The solver suite grows from 158 to 166 tests.
+- **Not changed, recorded** (the review's partial-close notes):
+  - a negative residual inductive current on an IDS source is RECORDED
+    (`residual_negative_nodes`), not refused, by the owner's rule;
+  - an unknown `core_sources` identifier index is held fixed as a driven
+    current under "other", with a warning.
+  - `test_get_q_collapses_silently_on_an_unclipped_grid` now skips by its
+    documented build-dependent rule (see below). It is on the pending list
+    for retirement and is not retired here.
+
 ## Unreleased — owner-approved decision (2026-10-06)
 
 - **One coil solver for the whole run: OpenFUSIONToolkit's bounded coil
@@ -299,7 +334,12 @@ test bar.
   engine IDS results on sources with such a sawteeth entry** (FUSE
   `dd_sim.json`: the sawteeth current of the slice itself instead of the
   next one's); sources whose entries are all nbi/ec/lh/ic on the full time
-  base are unchanged bit for bit. The legacy reader is unchanged.
+  base are unchanged bit for bit. (When this entry was written the legacy
+  reader was unchanged. Since then it reads its sawteeth entry (d381951)
+  and its beam entries (807fd93) at the slice time too. Since 2026-10-06
+  both the reader and this adapter match an entry to its nearest own slice
+  within half a local time-step and REFUSE a driven entry outside that
+  window; see "second-pass review fixes (2026-10-06)" above.)
 
 - **Engine: legacy settings it never reads are refused** (they were accepted
   and silently ignored): `closure_channel`, `jBS_baseline_mode`, the
@@ -320,8 +360,12 @@ test bar.
   bootstrap scale 1.0 (into a temporary archive) and judges both the loop
   stage and the archived state at the unchanged loop tolerances
   (`stages`); a rejected zero-perturbation draw fails. On the stand-in the
-  numbers are unchanged (no coils to move); live-solver numbers have not
-  been measured yet.
+  numbers are unchanged (no coils to move). On the live solver (rounds 2
+  and 3 of the 2026-10-05 fix work, synthetic examples) the generate()
+  route PASSES on every path and source; the worst residual-to-tolerance
+  ratio is 0.30. After the canonical coil-solve mode (2026-10-06) it still
+  passes, with a worst ratio of 0.31. The archived-stage gate is pinned by
+  `test_an_archived_stage_miss_fails_the_sigma0_check` (2026-10-06).
 - **Engine: an MSE row skipped by a non-converged loop is flagged or
   refused.** Under `jbs_loop_on_fail="flag"` a loop that did not converge
   delivered with no MSE stage and no word about it; now an `MSE: ... NOT
