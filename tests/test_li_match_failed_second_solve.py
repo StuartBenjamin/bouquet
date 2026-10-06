@@ -287,3 +287,29 @@ def test_after_a_failure_the_secant_pairs_good_points_only(fail):
     ind, li = _run_state(_current(), gs, 20)
     assert gs.state == ind and li == gs.li(ind)
     assert abs(li - 0.86) < 1e-4
+
+
+class _LinearStateGS(_StateGS):
+    """l_i exactly LINEAR in the solved state: a secant through any two
+    good (factor, l_i) pairs lands on the target in one step."""
+
+    @staticmethod
+    def li(s):
+        return 0.80 + 0.50 * (s - 1.0)
+
+
+def test_after_a_failure_the_next_secant_step_uses_two_good_points():
+    """Behavioural pin of "the secant pairs good points" (the 2026-10-06
+    review's mutant S1, which put back the old pairing and survived every
+    behavioural test).  With l_i linear in the factor: 1.05 is good; the
+    secant proposes 1.12, whose solve FAILS; the retreat goes halfway toward
+    the last good point (1.085, good); the next secant runs through the two
+    GOOD evaluations (1.05 and 1.085) and lands on the target exactly, at
+    1.12.  The old pairing used the failed factor 1.12 with 1.05's l_i as
+    its previous point, a wrong-signed slope that steps back to 1.05."""
+    gs = _LinearStateGS(fail={2})
+    ind, li = _run_state(_current(), gs, 20)
+    np.testing.assert_allclose(gs.solves, [1.05, 1.12, 1.085, 1.12],
+                               rtol=0.0, atol=1e-12)
+    assert ind == pytest.approx(1.12, abs=1e-12)
+    assert abs(li - 0.86) < 1e-12 and gs.state == ind

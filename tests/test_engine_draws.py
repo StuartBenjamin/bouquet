@@ -922,6 +922,69 @@ def test_the_archived_split_is_on_the_archived_state_and_never_clipped(
         assert "never clipped" in sp["convention"]
 
 
+def _final_measures(monkeypatch, geom_scale=None):
+    """Capture every FINAL measurement of the toy backend (the archived
+    state's); with *geom_scale* = {field: factor}, the archived state's
+    geometry is that of a state whose flux-surface averages moved (the toy's
+    geometry does not depend on its state, so the archived and the
+    reconstruction's conversion factors would otherwise coincide)."""
+    fins = []
+    real = T.ToyGS.measure
+
+    def measure(self, *a, **k):
+        out = real(self, *a, **k)
+        if k.get("final"):
+            if geom_scale:
+                g = dict(out["geom"])
+                for name, f in geom_scale.items():
+                    g[name] = f * np.asarray(g[name], dtype=float)
+                out = dict(out, geom=g)
+            fins.append(out)
+        return out
+    monkeypatch.setattr(T.ToyGS, "measure", measure)
+    return fins
+
+
+def test_the_archived_split_uses_the_archived_states_kappa_and_redl(
+        tmp_path, monkeypatch):
+    """The archived split's bootstrap is the draw's bootstrap model ON the
+    archived equilibrium: (1 + d_bs) x s_bs x scale x Redl(archived state),
+    converted with the ARCHIVED state's F<1/R>/<B^2>; the fixed parts are
+    converted with that same factor.  Pins the claim of 41e9682 that the
+    2026-10-06 review found untested (mutants D2: the reconstruction's
+    kappa; D4: the bootstrap off by 1 %): the archived state's <B^2> is moved
+    by 3 % so the two conversion factors differ, and the archived j_BS,
+    j_NBI and j_RF are compared with the definition at 1e-12."""
+    from bouquet.engine import conversion_factor
+    stored = _spy_store(monkeypatch)
+    fins = _final_measures(monkeypatch, geom_scale={"B2": 1.03})
+    diags, rej, h, G = _generate(tmp_path, monkeypatch, n=1)
+    assert len(diags) == 1 and rej == [] and len(stored) == 1
+    fin, st = fins[-1], stored[0]
+    cur = G._cur
+    kap = conversion_factor(fin["geom"])
+    kap_recon = conversion_factor(G.ctx.geom)
+    # the test discriminates: the two factors differ by ~3 %
+    assert np.min(np.abs(kap / kap_recon - 1.0)) > 0.02
+    dpl = cur["draw"].get("passes_post_homotopy") or cur["draw"]["passes"]
+    amp = (1.0 + float(dpl.last["amp"].get("d_bs", 0.0))) * G.ctx.s_bs         * float(cur["draw"]["inputs"].scale)
+    want_bs = amp * kap * np.asarray(fin["redl"], dtype=float)
+    np.testing.assert_allclose(st["j_BS"], want_bs, rtol=1e-12, atol=0.0)
+    fx = G.ctx.c.jB_fix_parts
+    sp = diags[0]["engine"]["archived"]["split"]
+    np.testing.assert_allclose(sp["j_NBI"], kap * np.asarray(fx["nbi"]),
+                               rtol=1e-12, atol=0.0)
+    np.testing.assert_allclose(
+        sp["j_RF"], kap * (np.asarray(fx["rf"])
+                           + np.asarray(fx.get("other", 0.0))),
+        rtol=1e-12, atol=0.0)
+    # and a 1 % error in either input is far outside that
+    assert np.max(np.abs(1.01 * want_bs - st["j_BS"])) \
+        > 1e-3 * np.max(np.abs(want_bs))
+    assert np.max(np.abs(amp * kap_recon * np.asarray(fin["redl"])
+                         - st["j_BS"])) > 1e-2 * np.max(np.abs(want_bs))
+
+
 def test_a_negative_residual_inductive_is_recorded_not_clipped(
         tmp_path, monkeypatch, capsys):
     """Force the archived bootstrap above the archived current near the
@@ -1186,3 +1249,38 @@ def test_a_rejected_sigma0_draw_fails_the_check(tmp_path,
     ctx = ED.context_from_run(b._engine_run, b.config.generation,
                               b.baseline)
     assert _quiet(ED.verify_zero_perturbation, ctx, b.mygs.toy)["passed"]
+
+
+@pytest.mark.parametrize("what", ["bootstrap", "l_i"])
+def test_an_archived_stage_miss_fails_the_sigma0_check(tmp_path,
+                                                       toy_bouquet_solver,
+                                                       monkeypatch, what):
+    """The archived-stage gate of the sigma=0 check (ac74b62; the 2026-10-06
+    review's mutant Z3 deleted it with every test green): the LOOP stage
+    passes and the draw is not rejected, but the state the draw ARCHIVES
+    misses the reconstruction -- its bootstrap 1 % off lambda_BS* (r_j
+    1e-3), or its l_i off by twice tol_li -- so the check FAILS."""
+    b = _bq(tmp_path)
+    b.setup_solver()
+    _quiet(b.prepare_baseline)
+    real = ED.zero_perturbation_archived_verdict
+
+    def verdict(ctx, jbs_carried, fin):
+        if what == "bootstrap":
+            jbs_carried = 1.01 * np.asarray(jbs_carried, dtype=float)
+        else:
+            fin = dict(fin, li=float(fin["li"]) + 2.0 * ctx.loop["tol_li"])
+        return real(ctx, jbs_carried, fin)
+    monkeypatch.setattr(ED, "zero_perturbation_archived_verdict", verdict)
+    v = _quiet(b.verify_sigma0_consistency)
+    assert "rejection" not in v
+    assert v["stages"]["loop"]["passed"] is True
+    assert v["stages"]["archived"]["passed"] is False
+    assert v["passed"] is False
+    if what == "bootstrap":
+        assert v["r_j"] > v["tolerances"]["rtol_j"]
+    else:
+        assert abs(v["dl_i"]) > v["tolerances"]["tol_li"]
+    # the control: unmodified, the same check passes
+    monkeypatch.setattr(ED, "zero_perturbation_archived_verdict", real)
+    assert _quiet(b.verify_sigma0_consistency)["passed"] is True
