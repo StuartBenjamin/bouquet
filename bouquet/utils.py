@@ -3293,6 +3293,116 @@ def write_provenance(h5path_or_header, config=None, scan_key=None):
                 grp.create_dataset("config_json", data=cj)
 
 
+GENERATION_PROVENANCE_KEYS = ("n_requested", "n_requested_source",
+                              "generation_mode", "n_attempted", "n_stored",
+                              "attempt_outcomes_json", "bouquet_version",
+                              "inspec_rms_max_mm", "inspec_max_max_mm",
+                              "inspec_cut_source", "merge_partial_json")
+
+
+def stamp_generation_provenance(h5path_or_header, scan_key=None, **attrs):
+    """Record how a scan's draws came to be, on the scan group.
+
+    Written by ``generate_bouquet`` at the end of its draw loop: ``n_requested``
+    (``n_equils``, or the until-N target) with ``n_requested_source``,
+    ``generation_mode`` (``"fixed"`` / ``"until_n"``), ``n_attempted`` (loop
+    iterations actually run), ``n_stored``, ``attempt_outcomes_json``
+    (attempt index -> ``"stored"`` / ``"solve_failed"`` /
+    ``"post_align_failed"`` / ...) and the ``bouquet_version`` that generated
+    the draws (the file-level version attr is rewritten on every provenance
+    write, this one is not). Draws that fail leave no draw group, so without
+    this record the archive cannot say how many were attempted.
+
+    An until-N run also records the LCFS bound its in-spec count was taken
+    against: ``inspec_rms_max_mm`` / ``inspec_max_max_mm`` (the numbers the
+    loop applied; absent = no bound) and ``inspec_cut_source`` (``"explicit"``
+    / ``"device:<name>"`` / ``"generic"`` / ``"disabled"``, from
+    ``Bouquet.generate``). A fixed-N run records none of the three. A value
+    of None removes the attr.
+    """
+    h5path = _resolve_h5(h5path_or_header)
+    bkey = _scan_key(scan_key)
+    gp = f"scan/{bkey}" if bkey is not None else "/"
+    with h5py.File(h5path, "a") as hf:
+        grp = hf.require_group(gp) if gp != "/" else hf
+        for k, v in attrs.items():
+            if v is None:
+                grp.attrs.pop(k, None)
+            elif isinstance(v, (dict, list, tuple)):
+                grp.attrs[k] = json.dumps(v, default=_json_default_for_h5)
+            else:
+                grp.attrs[k] = v
+
+
+def read_generation_provenance(h5path_or_header, scan_key=None):
+    """The record written by :func:`stamp_generation_provenance`, decoded.
+
+    Every key in :data:`GENERATION_PROVENANCE_KEYS` is present; a value the
+    archive does not carry is ``None`` (older archives), never inferred --
+    in particular ``n_attempted`` is never guessed from index gaps.
+    """
+    h5path = _resolve_h5(h5path_or_header)
+    bkey = _scan_key(scan_key)
+    gp = f"scan/{bkey}" if bkey is not None else "/"
+    out = {k: None for k in GENERATION_PROVENANCE_KEYS}
+    with h5py.File(h5path, "r") as hf:
+        if gp not in hf:
+            return out
+        a = hf[gp].attrs
+        for k in GENERATION_PROVENANCE_KEYS:
+            if k not in a:
+                continue
+            v = a[k]
+            if isinstance(v, bytes):
+                v = v.decode()
+            if k.endswith("_json"):
+                try:
+                    v = json.loads(str(v))
+                except (ValueError, TypeError):
+                    v = None
+            elif isinstance(v, np.generic):
+                v = v.item()
+            out[k] = v
+    return out
+
+
+def _supersede_refusal(scan_grp):
+    """A baseline or draw is being written into *scan_grp*: a refusal recorded
+    there earlier no longer describes the slice. It is moved to
+    ``refused_reason_superseded`` (kept for the record) so readers see the
+    draws, not a stale ``status="refused"``."""
+    if "refused_reason" in scan_grp.attrs:
+        scan_grp.attrs["refused_reason_superseded"] = scan_grp.attrs["refused_reason"]
+        del scan_grp.attrs["refused_reason"]
+
+
+def write_refused_scan(h5path_or_header, scan_key, reason):
+    """Record a slice that was REFUSED before any draw (closure refusal, no
+    reference, ...) as an empty ``scan/<key>`` carrying ``refused_reason``.
+
+    A series reader then returns ``status="refused"`` for that key instead of
+    a silent gap. Refuses to overwrite a scan that already holds draws.
+    ``Bouquet.run()`` / ``Bouquet.run_slices()`` call it when
+    ``prepare_baseline`` raises; a later baseline or draw written into the
+    same scan supersedes the refusal (``refused_reason_superseded``).
+    """
+    from . import __version__
+    h5path = os.path.abspath(f"{h5path_or_header}.h5") \
+        if not str(h5path_or_header).endswith(".h5") else str(h5path_or_header)
+    bkey = _scan_key(scan_key)
+    if bkey is None:
+        raise ValueError("write_refused_scan needs a scan_key (hierarchical layout)")
+    # the refusal may be the first thing a run writes: stamp the schema like
+    # every other archive entry point, so readers do not take it for pre-v2
+    initialize_equilibrium_database(h5path[:-3])
+    with h5py.File(h5path, "a") as hf:
+        grp = hf.require_group(f"scan/{bkey}")
+        if any(str(k).lstrip("-").isdigit() for k in grp.keys()):
+            raise ValueError(f"scan/{bkey} already holds draws; not marking it refused")
+        grp.attrs["refused_reason"] = str(reason)
+        grp.attrs["bouquet_version"] = str(__version__)
+
+
 def load_config(h5path_or_header, scan_key=None):
     """Reconstruct the :class:`~bouquet.BouquetConfig` stored in an archive.
 
@@ -3449,6 +3559,7 @@ def store_equilibrium(
             del hf[grp_path]
 
         grp = hf.create_group(grp_path)
+        _supersede_refusal(grp.parent)
 
         # ---- raw eqdsk (opaque binary -- bit-perfect; schema-v2 fixed
         # name, the group path carries the coordinates) --------------------
@@ -3807,6 +3918,7 @@ def store_baseline_profiles(
             del hf[grp_path]
 
         grp = hf.create_group(grp_path)
+        _supersede_refusal(grp.parent)
 
         write_profile(grp, "psi_N", psi_N)
         write_profile(grp, "n_e", ne)
