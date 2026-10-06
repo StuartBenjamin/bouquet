@@ -230,6 +230,14 @@ class Baseline:
     # back).
     edge_pressure: Optional[dict] = None
 
+    # The coil least-squares mode the solver ran this baseline in
+    # (bouquet.solver_state.coil_solve_mode): "bounded" -- OpenFUSIONToolkit's
+    # bounded (BVLS) coil solve, entered once at Bouquet.setup_solver before
+    # the reconstruction, so the draws use the same coil solver -- or
+    # "unknown" for a solver bouquet did not set up.  Set by
+    # Bouquet.prepare_baseline on both paths.
+    coil_solve_mode: Optional[str] = None
+
     def __repr__(self):
         # concise summary -- the default dataclass repr dumps every numpy array,
         # which floods a notebook when `reconstruct()`/`prepare_baseline()` is the

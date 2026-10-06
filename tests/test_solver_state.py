@@ -1,6 +1,8 @@
 """``bouquet.solver_state``: every piece of solver state a guarded call
-changes is put back, and the one-way coil-bound mode is entered before the
-capture (so two guarded calls start from bit for bit the same state).
+changes is put back, and the one-way coil-bound mode is entered ONCE, at
+solver setup (:func:`enter_bounded_coil_mode`, from ``Bouquet.setup_solver``),
+so two guarded calls -- and the reconstruction before them -- start from bit
+for bit the same coil-solve mode.
 
 The stand-in below models WHERE TokaMaker keeps its state (the equilibrium
 object that ``copy_eq`` / ``replace_eq`` move; the device -- coil bounds with
@@ -19,7 +21,9 @@ import json
 
 import pytest
 
-from bouquet.solver_state import (BOUQUET_SOLVER_ATTRS, SolverState,
+from bouquet.solver_state import (BOUQUET_SOLVER_ATTRS, COIL_SOLVE_BOUNDED,
+                                  SolverState, coil_solve_mode,
+                                  enter_bounded_coil_mode,
                                   preserved_solver_state)
 
 
@@ -112,6 +116,14 @@ class ObservableSolver:
         return hashlib.sha1(blob.encode()).hexdigest()
 
 
+def _set_up():
+    """A stand-in as ``Bouquet.setup_solver`` leaves it: the bounded coil
+    mode entered."""
+    m = ObservableSolver()
+    enter_bounded_coil_mode(m)
+    return m
+
+
 def _generate_like(m):
     """What a generate() does to the solver: solves from the state it is
     handed (the result), then leaves its own regularisation, targets,
@@ -135,7 +147,7 @@ def _generate_like(m):
 
 
 def test_a_guarded_call_puts_every_piece_back():
-    m = ObservableSolver()
+    m = _set_up()
     st = SolverState.capture(m)
     captured = m.state()
     _generate_like(m)
@@ -144,16 +156,36 @@ def test_a_guarded_call_puts_every_piece_back():
     assert m.state() == captured
 
 
-def test_the_capture_enters_the_one_way_bounded_mode_without_a_constraint():
+def test_setup_enters_the_one_way_bounded_mode_once_without_a_constraint():
     m = ObservableSolver()
-    assert m.bounds is None
-    SolverState.capture(m)
+    assert m.bounds is None and coil_solve_mode(m) == "unknown"
+    assert enter_bounded_coil_mode(m) == COIL_SOLVE_BOUNDED
     assert m.bounds is not None
     assert all(v == (-m.BIG, m.BIG) for v in m.bounds.values())
+    assert coil_solve_mode(m) == COIL_SOLVE_BOUNDED
+    n = len(m.log)
+    enter_bounded_coil_mode(m)                    # idempotent: no call
+    assert len(m.log) == n
+
+
+def test_the_capture_does_not_touch_the_coil_bounds():
+    """The mode is entered at setup, not per guarded call."""
+    m = _set_up()
+    n = len(m.log)
+    SolverState.capture(m)
+    assert len(m.log) == n
+
+
+def test_the_mode_marker_survives_a_restore():
+    """The mode is one-way, so no restore may drop its record."""
+    m = _set_up()
+    with preserved_solver_state(m):
+        _generate_like(m)
+    assert coil_solve_mode(m) == COIL_SOLVE_BOUNDED
 
 
 def test_recorded_hard_bounds_are_reinstalled_as_recorded():
-    m = ObservableSolver()
+    m = _set_up()
     m._coil_drift_bounds = {"F1A": [0.5, 1.5]}
     m.set_coil_bounds(m._coil_drift_bounds)
     with preserved_solver_state(m):
@@ -167,10 +199,11 @@ def test_recorded_hard_bounds_are_reinstalled_as_recorded():
 
 def test_two_guarded_calls_are_bit_identical():
     """The engine sigma=0 check's contract: a second check starts from the
-    state the first did.  Without the bounded mode entered at capture the
-    first call is the odd one out (it alone solves unbounded) -- that is
-    the leak the live solver showed (3.8e-7 in a_ind)."""
-    m = ObservableSolver()
+    state the first did.  With the bounded mode entered at setup every call
+    is identical; on a solver that skipped it the first call is the odd one
+    out (it alone solves unbounded) -- that is the leak the live solver
+    showed (3.8e-7 in a_ind), and why setup enters the mode."""
+    m = _set_up()
     runs = []
     for _ in range(3):
         with preserved_solver_state(m):
@@ -180,7 +213,7 @@ def test_two_guarded_calls_are_bit_identical():
     m = ObservableSolver()
     runs = []
     for _ in range(3):
-        with preserved_solver_state(m, enter_bounded_mode=False):
+        with preserved_solver_state(m):
             runs.append(_generate_like(m))
     assert runs[0] != runs[1] and runs[1] == runs[2]
 
@@ -201,7 +234,7 @@ def test_an_equilibrium_only_restore_leaves_the_rest_behind():
 
 
 def test_an_exception_inside_the_guard_still_restores():
-    m = ObservableSolver()
+    m = _set_up()
     with pytest.raises(RuntimeError):
         with preserved_solver_state(m):
             captured = m.state()
@@ -211,10 +244,81 @@ def test_an_exception_inside_the_guard_still_restores():
 
 
 def test_an_absent_stash_stays_absent_and_a_present_one_is_put_back():
-    m = ObservableSolver()
+    m = _set_up()
     m._weak_coil_reg = [("F1A", 0.0, 1.0)]
     with preserved_solver_state(m):
         _generate_like(m)
         m._weak_coil_reg = "changed"
     assert not hasattr(m, "_strong_coil_reg")
     assert m._weak_coil_reg == [("F1A", 0.0, 1.0)]
+
+
+def test_setup_solver_enters_the_bounded_mode_once_before_any_solve(
+        monkeypatch, tmp_path):
+    """The real ``Bouquet.setup_solver`` (OpenFUSIONToolkit replaced by a
+    recording stand-in): the coil solve is put in the bounded mode ONCE,
+    after the VSC and the coil regularisation are installed (the bounds
+    array is sized by the virtual coils) and before the clean-equilibrium
+    snapshot and any solve, with no constraint (``None`` = +/-1e98); a second
+    ``setup_solver`` is a no-op."""
+    import os
+    import sys
+    import types
+
+    import bouquet as bq
+
+    calls = []
+
+    class _S:
+        maxits = 0
+        pm = True
+
+    class RecordingTokaMaker:
+        def __init__(self, env):
+            self.settings = _S()
+            self.coil_sets = {"F1A": {"id": 0, "net_turns": 1.0},
+                              "F2A": {"id": 1, "net_turns": 1.0}}
+
+        def __getattr__(self, name):
+            if name.startswith("_"):
+                raise AttributeError(name)
+
+            def _rec(*a, **k):
+                calls.append(name if name != "set_coil_bounds"
+                             else ("set_coil_bounds", a[0] if a else None))
+                if name == "coil_reg_term":
+                    return (a, k)
+                if name == "copy_eq":
+                    return {}
+            return _rec
+
+    oft = types.ModuleType("OpenFUSIONToolkit")
+    oft.OFT_env = lambda nthreads=1: object()
+    tm = types.ModuleType("OpenFUSIONToolkit.TokaMaker")
+    tm.TokaMaker = RecordingTokaMaker
+    me = types.ModuleType("OpenFUSIONToolkit.TokaMaker.meshing")
+    me.load_gs_mesh = lambda path: (None, None, None, {}, {})
+    monkeypatch.setitem(sys.modules, "OpenFUSIONToolkit", oft)
+    monkeypatch.setitem(sys.modules, "OpenFUSIONToolkit.TokaMaker", tm)
+    monkeypatch.setitem(sys.modules, "OpenFUSIONToolkit.TokaMaker.meshing",
+                        me)
+    ex = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir,
+                      "examples", "D3D-like")
+    b = bq.Bouquet.from_geqdsk(
+        os.path.join(ex, "D3Dlike_Hmode_baseline.geqdsk"),
+        profiles=os.path.join(ex, "D3Dlike_Hmode_baseline.peqdsk"),
+        mesh=os.path.join(ex, "DIIID_mesh.h5"), n_draws=1,
+        header=str(tmp_path / "bq"))
+    b.setup_solver()
+    names = [c if isinstance(c, str) else c[0] for c in calls]
+    assert calls.count(("set_coil_bounds", None)) == 1
+    assert names.count("set_coil_bounds") == 1
+    i = names.index("set_coil_bounds")
+    assert names.index("set_coil_vsc") < i
+    assert names.index("set_coil_reg") < i
+    assert i < names.index("copy_eq")
+    assert "solve" not in names
+    assert coil_solve_mode(b.mygs) == COIL_SOLVE_BOUNDED
+    n = len(calls)
+    b.setup_solver()
+    assert len(calls) == n

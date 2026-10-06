@@ -641,7 +641,11 @@ def toy_bouquet_solver(monkeypatch):
                         lambda mygs, c, **kw: mygs.toy)
 
     def _setup(self):
+        # what the real setup_solver does to the coil solve
+        # (tests/test_solver_state.py runs the real one on a stand-in)
+        from bouquet.solver_state import enter_bounded_coil_mode
         self.mygs = FakeTokaMaker(None)
+        enter_bounded_coil_mode(self.mygs)
         return self
 
     import bouquet.run as br
@@ -1102,16 +1106,20 @@ def test_the_sigma0_check_runs_the_generate_route(tmp_path,
 def test_the_sigma0_check_puts_all_solver_state_back(tmp_path,
                                                     toy_bouquet_solver,
                                                     monkeypatch):
-    """The check enters the one-way coil-bound mode BEFORE its first solve
-    (``bouquet.solver_state``), and afterwards the solver object carries
-    exactly what it carried before: no coil-regularisation stash left by the
-    route's generate(), the settings and the equilibrium object put back."""
+    """The one-way coil-bound mode is entered ONCE, at ``setup_solver``
+    (``bouquet.solver_state.enter_bounded_coil_mode``), BEFORE the
+    reconstruction's first solve -- so the reconstruction, the check and the
+    draws run one coil solve -- and recorded on the Baseline and the engine
+    record.  The check itself makes no entry; afterwards the solver object
+    carries exactly what it carried before: no coil-regularisation stash
+    left by the route's generate(), the settings and the equilibrium object
+    put back, the recorded bounds re-installed."""
+    from bouquet.solver_state import COIL_SOLVE_BOUNDED, coil_solve_mode
     b = _bq(tmp_path)
-    b.setup_solver()
-    _quiet(b.prepare_baseline)
-    fake = b.mygs
     events = []
-    real_bounds, real_solve = type(fake).set_coil_bounds, type(fake).solve
+    import _engine_fake_gs as _fg
+    real_bounds = _fg.FakeTokaMaker.set_coil_bounds
+    real_solve = _fg.FakeTokaMaker.solve
 
     def set_coil_bounds(self, bnd):
         events.append(("bounds", bnd))
@@ -1121,16 +1129,26 @@ def test_the_sigma0_check_puts_all_solver_state_back(tmp_path,
         events.append(("solve",))
         return real_solve(self, *a, **k)
 
-    monkeypatch.setattr(type(fake), "set_coil_bounds", set_coil_bounds)
-    monkeypatch.setattr(type(fake), "solve", solve)
+    monkeypatch.setattr(_fg.FakeTokaMaker, "set_coil_bounds",
+                        set_coil_bounds)
+    monkeypatch.setattr(_fg.FakeTokaMaker, "solve", solve)
+    b.setup_solver()
+    fake = b.mygs
+    assert events == [("bounds", None)]           # entered at setup
+    assert coil_solve_mode(fake) == COIL_SOLVE_BOUNDED
+    _quiet(b.prepare_baseline)
+    assert ("bounds", None) not in events[1:]     # ... and only there
+    assert b.baseline.coil_solve_mode == COIL_SOLVE_BOUNDED
+    assert b.baseline.engine["coil_solve_mode"] == COIL_SOLVE_BOUNDED
+    del events[:]
     assert not hasattr(fake, "_strong_coil_reg")
     maxits0 = fake.settings.maxits
     eq0 = fake.copy_eq()
     v = _quiet(b.verify_sigma0_consistency)
     assert v["passed"]
-    assert events[0] == ("bounds", None)          # entered before any solve
-    assert ("solve",) in events
+    assert events[0] == ("solve",)                # no entry in the check
     assert events[-1] == ("bounds", None)         # the recorded bounds back
+    assert coil_solve_mode(fake) == COIL_SOLVE_BOUNDED
     assert not hasattr(fake, "_strong_coil_reg")  # generate()'s stash gone
     assert fake.settings.maxits == maxits0
     import pickle

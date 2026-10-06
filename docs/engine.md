@@ -130,6 +130,16 @@ receives.
 The kernel is `run_jbs_loop` with `step` = 1–5; the engine's rows enter
 through its `extra` hook and the existing `AxisRowPin`.
 
+Every GS solve -- the anchor, each pass, the delivery, the σ=0 check and
+every draw -- uses one coil solve: OpenFUSIONToolkit's bounded (BVLS) coil
+least squares, entered once at `Bouquet.setup_solver`
+(`bouquet.solver_state.enter_bounded_coil_mode`; ±1e98, never binding) and
+recorded as `coil_solve_mode` on the Baseline and in the engine record. The
+mode is one-way and every `generate()` enters it, so entering it before the
+reconstruction is what keeps the reconstruction and its draws on the same
+coil solver whatever the call order (the unbounded and bounded solves agree
+to round-off per solve, not bit for bit).
+
 ### Rows and their update
 
 | row | model in the closure (on `G_k`) | measurement on `E_k+1` | update |

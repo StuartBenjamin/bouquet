@@ -6086,10 +6086,12 @@ def generate_bouquet(
                     stage="draw j_BS loop under the hard coil bounds "
                           f"(+/-{_hard * 100:.1f}%)")
         else:
-            # Don't call set_coil_bounds at all when no hard bounds are
-            # requested -- even set_coil_bounds(None) (which uses ±1e98)
-            # may put the underlying QP into bounded-mode and subtly
-            # change the iteration path.
+            # No hard bounds requested: install none.  (Bouquet.setup_solver
+            # already put the coil solve in OpenFUSIONToolkit's one-way
+            # bounded mode, at +/-1e98, before the reconstruction --
+            # bouquet.solver_state.enter_bounded_coil_mode -- so the draws
+            # and the reconstruction share one coil solver; a solver object
+            # built outside setup_solver may still be unbounded here.)
             if hasattr(mygs, '_coil_drift_bounds'):
                 delattr(mygs, '_coil_drift_bounds')
 

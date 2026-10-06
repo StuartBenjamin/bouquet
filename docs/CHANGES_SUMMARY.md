@@ -37,6 +37,37 @@ in force is approved.
   stored-configuration load path relaxes to defaults-plus-warning, so
   archives written before the refusal stay loadable.
 
+## Unreleased — owner-approved decision (2026-10-06)
+
+- **One coil solver for the whole run: OpenFUSIONToolkit's bounded coil
+  mode is entered ONCE, at solver setup, on both paths** (owner-approved
+  2026-10-06; consistency between the reconstruction and the draws).
+  OpenFUSIONToolkit solves the coil least-squares problem by the normal
+  equations until `set_coil_bounds` is first called and by bounded least
+  squares (BVLS) from then on, for the life of the solver object; every
+  `generate()` makes that call (its homotopy). So a process's reconstruction
+  and its first `generate()`'s baseline re-solve ran unbounded and every
+  later solve bounded: results depended on call order (the first engine
+  sigma=0 check differed from the second by 3.8e-7 in the inductive
+  amplitude until the check entered the mode itself, below). Now
+  `Bouquet.setup_solver` calls `bouquet.solver_state.enter_bounded_coil_mode`
+  (the one place: after the VSC and the coil regularisation, before any
+  solve), installing +/-1e98, which never binds. The reconstruction, the
+  sigma=0 check and every draw run the same coil solve;
+  `Baseline.coil_solve_mode` (both paths) and the engine record's
+  `coil_solve_mode` say `"bounded"`. The sigma=0 check's own entry is
+  removed -- a no-op on a solver set up this way; its restore still
+  re-installs the recorded bounds. **What moves:** everything computed in
+  the old unbounded mode -- the reconstruction and the first `generate()` of
+  a process -- at the round-off-carried level (first-call results are no
+  longer bit-identical to before). Measured on the synthetic examples (fixed
+  build, one thread, old -> canonical): reconstruction l_i(3) and q0 by
+  2e-8 to 5e-7 relative (l_i(3): g-file engine -2.0e-7, legacy +3.1e-7;
+  IDS engine +4.8e-7, legacy +2.0e-8), q95 by 2e-6 to 1.3e-5, coil currents by at most 2.1e-5 relative; every sigma=0 check
+  (both paths, both sources) still passes, its residuals moving within the
+  same decade (largest ratio to a tolerance 0.31, IDS engine r_I). No
+  tolerance, bar or default changed.
+
 ## Unreleased — owner-approved decisions (2026-10-05)
 
 - **Legacy draws: a failed homotopy rollback re-solve rejects the draw**
@@ -64,7 +95,8 @@ in force is approved.
   object (psi, coils, coil regularisation, targets, profiles, constraints),
   the settings, VSC gains, Vcoils, the recorded coil bounds and bouquet's
   stashes, and enters the one-way bounded mode at capture (re-installing the
-  bounds on record -- none: +/-1e98, which never binds). **What moves:** the
+  bounds on record -- none: +/-1e98, which never binds; since 2026-10-06 the
+  mode is entered at solver setup instead, above). **What moves:** the
   check's own numbers, once, to what the second call already gave (the
   first call now runs in the mode every later solve runs in); nothing else
   -- `generate()` itself and the legacy path are unchanged (the legacy check

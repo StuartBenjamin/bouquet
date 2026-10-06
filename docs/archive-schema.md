@@ -207,7 +207,9 @@ pressure + that equilibrium's `p_sep`).
     `engine_draws.read_draw_engine(header, count, scan_key)`.
   - The baseline record is the reconstruction (contract, settings,
     convergence constants and their origins, per-pass log, delivery checks,
-    the state, solves) plus, once `generate()` ran, a `draws` block (the
+    the state, solves, and `coil_solve_mode`: `"bounded"` -- the solver's
+    coil least-squares mode, entered once at `Bouquet.setup_solver`, see
+    `bouquet.solver_state`; absent in records written before 2026-10-06) plus, once `generate()` ran, a `draws` block (the
     draws' loop settings, `rng_stream`, `q0_row`, `homotopy`,
     `l_i_tolerance`, the Ip-row target `Ip_target_A` in the exact measure,
     and the `reference` values every draw is compared with). Its per-chord

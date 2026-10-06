@@ -418,6 +418,15 @@ class Bouquet:
         # the WEAK exploratory reg the draw path swaps in for the SWB phase.
         self._apply_coil_reg(mygs)
 
+        # The coil solve: OpenFUSIONToolkit's bounded (BVLS) mode, entered
+        # ONCE, here, before the reconstruction's first solve, on every path
+        # -- so the reconstruction, the sigma=0 check and every draw use one
+        # coil solver whatever order they run in (the mode is one-way and
+        # every generate() enters it; see bouquet.solver_state).  Installs
+        # +/-1e98, which never binds.
+        from .solver_state import enter_bounded_coil_mode
+        enter_bounded_coil_mode(mygs)
+
         self.mygs = mygs
         self._myOFT = myOFT          # keep the env alive
         self._eqdsk_ref = eqdsk_ref
@@ -763,6 +772,7 @@ class Bouquet:
                    "legacy") == "unified":
             from .engine import prepare_engine_baseline
             _bl = prepare_engine_baseline(self)
+            self._record_coil_solve_mode(_bl)
             self._report_sigma_exceeds_profile(_bl)
             self._remember_baseline_state()
             return _bl
@@ -847,9 +857,24 @@ class Bouquet:
         # solver chatter was captured to baseline.reconstruction_log).
         if self.baseline.reconstruction_metrics is not None:
             self._print_reconstruction_summary()
+        self._record_coil_solve_mode(self.baseline)
         self._report_sigma_exceeds_profile(self.baseline)
         self._remember_baseline_state()
         return self.baseline
+
+    def _record_coil_solve_mode(self, bl) -> None:
+        """Record the coil-solve mode the solver ran the reconstruction in --
+        ``"bounded"`` (entered at :meth:`setup_solver`,
+        :func:`bouquet.solver_state.enter_bounded_coil_mode`), else
+        ``"unknown"`` -- on *bl* (``Baseline.coil_solve_mode``, both paths)
+        and, under the unified engine, in its record (``Baseline.engine[
+        "coil_solve_mode"]``, archived with it)."""
+        from .solver_state import coil_solve_mode
+        if bl is None or self.mygs is None:
+            return
+        bl.coil_solve_mode = coil_solve_mode(self.mygs)
+        if isinstance(getattr(bl, "engine", None), dict):
+            bl.engine["coil_solve_mode"] = bl.coil_solve_mode
 
     def _remember_baseline_state(self) -> None:
         """Fingerprint the solver state :meth:`prepare_baseline` leaves (a
@@ -6251,9 +6276,11 @@ class Bouquet:
         coil bounds on record; the coil-regularisation stashes generate()
         leaves on the solver object) -- and so is every attribute
         :meth:`generate` sets on this object.  The one-way coil-bound mode
-        every generate() enters is entered BEFORE the check (the guard's
-        capture), so a second check, and the generate() after it, start
-        from bit for bit the state the first one did."""
+        every generate() enters was entered once at :meth:`setup_solver`
+        (:func:`bouquet.solver_state.enter_bounded_coil_mode`), before the
+        reconstruction, so the check, a second check and the generate()
+        after it start from bit for bit the same state and run the same
+        coil solve the reconstruction did."""
         import os
         import tempfile
         from .jbs_loop import jsonable

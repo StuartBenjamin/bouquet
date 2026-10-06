@@ -16,21 +16,26 @@ cover all of them:
   stashes and the hard-bound stash ``generate_bouquet`` and
   ``Bouquet._apply_coil_reg`` leave there, which later draw-path code reads.
 
-**The coil-bound mode is one-way.**  Until ``set_coil_bounds`` is first
-called, OpenFUSIONToolkit solves the coil least-squares problem by the normal
-equations; from the first call on (``set_coil_bounds(None)`` included, which
-installs +/-1e98) it solves it by bounded least squares (BVLS), and no call
-returns it to the unbounded solve.  The two agree to round-off per solve but
-not bit for bit, and a converged Picard iteration carries the difference
-(measured on the synthetic g-file example: 3.8e-7 in the inductive amplitude
-of the engine's zero-perturbation draw).  Every ``generate()`` enters the
-bounded mode (its homotopy installs and then releases bounds), so a restore
-cannot undo it; :meth:`SolverState.capture` therefore ENTERS it first --
-re-installing the bounds bouquet has on record (``_coil_drift_bounds``, or
-none: +/-1e98) -- so the state captured is already in the mode the guarded
-code will leave, and the restore puts back exactly what was captured.  That
-installs no constraint: +/-1e98 never binds, and a recorded hard bound is
-re-installed as recorded.
+**The coil-bound mode is one-way, and bouquet enters it ONCE, at solver
+setup.**  Until ``set_coil_bounds`` is first called, OpenFUSIONToolkit solves
+the coil least-squares problem by the normal equations; from the first call
+on (``set_coil_bounds(None)`` included, which installs +/-1e98) it solves it
+by bounded least squares (BVLS), and no call returns it to the unbounded
+solve.  The two agree to round-off per solve but not bit for bit, and a
+converged Picard iteration carries the difference (measured on the synthetic
+g-file example: 3.8e-7 in the inductive amplitude of the engine's
+zero-perturbation draw).  Every ``generate()`` enters the bounded mode (its
+homotopy installs and then releases bounds), so if the solver started
+unbounded, the reconstruction, the first draw batch and every later solve
+would not all use the same coil solver, and results would depend on call
+order.  :func:`enter_bounded_coil_mode` therefore enters it once, from
+:meth:`bouquet.run.Bouquet.setup_solver` (the one place), before the
+reconstruction's first solve, on every path: the reconstruction, the
+sigma=0 check and every draw run the same coil solve.  It installs no
+constraint (+/-1e98 never binds), and :func:`coil_solve_mode` reports the
+mode (recorded on the Baseline and in the engine record).  A capture
+(:class:`SolverState`) no longer has to enter it; the restore still puts
+the bounds on record back.
 
 Not covered (no bouquet code changes them): the isoflux gradient-weight limit
 (bouquet always uses the default), the mesh, the coil and conductor
@@ -45,6 +50,48 @@ from contextlib import contextmanager
 #: by later draw-path code); restored as they were (absent stays absent).
 BOUQUET_SOLVER_ATTRS = ("_strong_coil_reg", "_weak_coil_reg",
                         "_coil_drift_bounds")
+
+#: The attribute :func:`enter_bounded_coil_mode` sets on the solver object.
+#: Deliberately NOT in :data:`BOUQUET_SOLVER_ATTRS`: the mode it records is
+#: one-way, so no restore may remove it.
+COIL_SOLVE_MODE_ATTR = "_bouquet_coil_solve_mode"
+
+#: The mode :func:`enter_bounded_coil_mode` puts the solver in.
+COIL_SOLVE_BOUNDED = "bounded"
+
+
+def enter_bounded_coil_mode(mygs):
+    """Put *mygs*'s coil least-squares solve in OpenFUSIONToolkit's bounded
+    (BVLS) mode, once, and record it; return the mode.
+
+    Called from ONE place, :meth:`bouquet.run.Bouquet.setup_solver`, after
+    the coil set, the VSC and the coil regularisation are installed and
+    before any solve -- so the reconstruction, the sigma=0 check and every
+    draw run the same coil solver whatever order they are called in (see
+    the module docstring for why the mode matters).  The bounds installed
+    are the ones bouquet has on record (``_coil_drift_bounds``; at setup
+    there are none, so +/-1e98, which never binds): entering the mode adds
+    no constraint.  Idempotent: a solver already recorded as bounded is
+    left alone.  A solver object without ``set_coil_bounds`` (a test
+    stand-in) is left alone and reported by :func:`coil_solve_mode` as
+    ``"unknown"``."""
+    if getattr(mygs, COIL_SOLVE_MODE_ATTR, None) == COIL_SOLVE_BOUNDED:
+        return COIL_SOLVE_BOUNDED
+    if not hasattr(mygs, "set_coil_bounds"):
+        return coil_solve_mode(mygs)
+    mygs.set_coil_bounds(copy.deepcopy(getattr(mygs, "_coil_drift_bounds",
+                                               None)))
+    setattr(mygs, COIL_SOLVE_MODE_ATTR, COIL_SOLVE_BOUNDED)
+    return COIL_SOLVE_BOUNDED
+
+
+def coil_solve_mode(mygs):
+    """``"bounded"`` once :func:`enter_bounded_coil_mode` has run on *mygs*,
+    else ``"unknown"`` (OpenFUSIONToolkit does not report the mode: a solver
+    bouquet did not set up may be in either)."""
+    if getattr(mygs, COIL_SOLVE_MODE_ATTR, None) == COIL_SOLVE_BOUNDED:
+        return COIL_SOLVE_BOUNDED
+    return "unknown"
 
 
 def _settings_values(mygs):
@@ -81,18 +128,17 @@ class SolverState:
         self.attrs = {}
         self.vsc = None
         self.vcoils = None
+        self.mode = None
 
     @classmethod
-    def capture(cls, mygs, enter_bounded_mode=True):
-        """Capture *mygs*'s state.  With *enter_bounded_mode* (default) the
-        one-way coil-bound mode is entered first, re-installing the bounds
-        bouquet has on record (see the module docstring)."""
+    def capture(cls, mygs):
+        """Capture *mygs*'s state.  The coil-bound mode is not touched: a
+        solver set up by :meth:`bouquet.run.Bouquet.setup_solver` is already
+        in the bounded mode (:func:`enter_bounded_coil_mode`), which is what
+        makes a capture and its restore the same state."""
         self = cls(mygs)
-        rec = getattr(mygs, "_coil_drift_bounds", None)
-        self.bounds = copy.deepcopy(rec)
-        self.enter_bounded_mode = bool(enter_bounded_mode)
-        if self.enter_bounded_mode and hasattr(mygs, "set_coil_bounds"):
-            mygs.set_coil_bounds(copy.deepcopy(rec))
+        self.bounds = copy.deepcopy(getattr(mygs, "_coil_drift_bounds", None))
+        self.mode = coil_solve_mode(mygs)
         if hasattr(mygs, "copy_eq") and hasattr(mygs, "replace_eq"):
             self.eq = mygs.copy_eq()
         self.settings = _settings_values(mygs)
@@ -124,7 +170,12 @@ class SolverState:
         if (getattr(mygs, "_vcoils", None) != self.vcoils
                 and hasattr(mygs, "set_vcoils")):
             mygs.set_vcoils(copy.deepcopy(self.vcoils or {}))
-        if self.enter_bounded_mode and hasattr(mygs, "set_coil_bounds"):
+        # the coil bounds on record.  Only in the bounded mode: on a solver
+        # that was not (one bouquet did not set up, with no bounds on
+        # record) the call would itself switch the mode -- and the mode
+        # cannot be restored anyway (it is one-way)
+        if ((self.mode == COIL_SOLVE_BOUNDED or self.bounds is not None)
+                and hasattr(mygs, "set_coil_bounds")):
             mygs.set_coil_bounds(copy.deepcopy(self.bounds))
         d = getattr(mygs, "__dict__", None)
         if d is not None:
@@ -136,11 +187,11 @@ class SolverState:
 
 
 @contextmanager
-def preserved_solver_state(mygs, enter_bounded_mode=True):
+def preserved_solver_state(mygs):
     """``with preserved_solver_state(mygs): ...`` -- :meth:`SolverState.
     capture` on entry, :meth:`SolverState.restore` on exit (also on an
     exception)."""
-    st = SolverState.capture(mygs, enter_bounded_mode=enter_bounded_mode)
+    st = SolverState.capture(mygs)
     try:
         yield st
     finally:
