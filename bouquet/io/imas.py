@@ -1694,6 +1694,34 @@ def _eq_fsa_geom_on(eq_fsa, psiN_t, B0):
     return geom
 
 
+def _slice_in_time(node, t, n=0, i=0):
+    """Cut an IDS tree in place to the samples nearest ``t`` [s].
+
+    An array of structures whose elements carry a scalar ``time`` keeps the
+    element nearest ``t`` on those times (a core_sources source can hold fewer
+    slices than its IDS).  Any other list as long as the innermost enclosing
+    ``time`` array -- the IDS's, or a signal's own -- keeps that array's entry
+    nearest ``t``, as does the ``time`` array itself.
+    """
+    if isinstance(node, list):
+        for v in node:
+            if isinstance(v, (dict, list)):
+                _slice_in_time(v, t, n, i)
+        return
+    if isinstance(node.get("time"), list):
+        n = len(node["time"])
+        i = _nearest_index(node["time"], t, "time") if n else 0
+    for k, v in node.items():
+        if v and isinstance(v, list) and all(
+                isinstance(e, dict) and isinstance(e.get("time"), (int, float))
+                for e in v):
+            node[k] = [v[_nearest_index([e["time"] for e in v], t, k)]]
+        elif isinstance(v, list) and len(v) == n > 1:
+            node[k] = [v[i]]
+        elif isinstance(v, (dict, list)):
+            _slice_in_time(v, t, n, i)
+
+
 def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
                     scan_key=None, time=None, fidelity="auto"):
     """Reconstruct a perturbed IMAS/OMAS IDS for one draw from the bouquet HDF5.
@@ -1701,7 +1729,9 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     Maps the draw's archived eqdsk to the ``equilibrium`` IDS
     (``profiles_1d`` / ``profiles_2d`` / ``global_quantities`` / ``boundary`` --
     lossless to the eqdsk grid, machine-precision GS) and the draw's ``.h5``
-    kinetics/currents to ``core_profiles``.
+    kinetics/currents to ``core_profiles``.  The written IDS holds only that
+    time slice: every time series in the template is cut to its sample
+    nearest ``time`` (:func:`_slice_in_time`), keeping the template's structure.
 
     bouquet's arrays are TokaMaker ``jphi``; they are written as IMAS
     ``j_tor`` (A5) and the parallel split ``j_total`` / ``j_bootstrap``
@@ -1761,6 +1791,9 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     ie = _nearest_index(eq_ids["time"], time, "equilibrium")
     cp_ids = out["core_profiles"]
     ic = _nearest_index(cp_ids["time"], time, "core_profiles")
+    # Only the exported slice is written: every time series is cut to it.
+    _slice_in_time(out, eq_ids["time"][ie] if time is None else time)
+    ie = ic = 0
 
     h5 = _resolve_h5(h5path_or_header)
     if scan_key is None:
