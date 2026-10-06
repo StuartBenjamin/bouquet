@@ -67,6 +67,20 @@ in force is approved.
   (both paths, both sources) still passes, its residuals moving within the
   same decade (largest ratio to a tolerance 0.31, IDS engine r_I). No
   tolerance, bar or default changed.
+  The draws inherit the moved reconstruction and stop at the loop's own
+  tolerances, so they move further, but within those tolerances: on the
+  four seeded 12-draw engine batches of the synthetic examples (inductive
+  sigma 0.10 and 0.05) the yields, every in-spec flag and every loop,
+  homotopy and post-homotopy pass count are unchanged, and the archived
+  l_i(3), l_i(1), beta_N, q0 and q95 move by at most 5e-4 relative. The
+  golden replay stays inside its bars without regeneration (mode-1 coil
+  drift 0.0190 -> 0.0191 %, boundary RMS 0.419 -> 0.421 mm). One solver
+  test's documented build-dependent skip now fires:
+  `test_get_q_collapses_silently_on_an_unclipped_grid` asks whether the
+  solved state reproduces the axis collapse of an unclipped surface grid,
+  and on the canonical state it does not (257/257 surfaces traced); the
+  clipping it guards stays, and its guard is still covered without a
+  solver.
 
 ## Unreleased — owner-approved decisions (2026-10-05)
 
