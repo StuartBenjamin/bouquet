@@ -1904,7 +1904,20 @@ FIELD_PRE_INTRODUCTION = {
 #: Legacy-path fields the factories set whatever the engine until
 #: 2026-10-05, which the unified engine never read and now refuses when not
 #: at their defaults (:data:`bouquet.engine.ENGINE_UNREAD_LEGACY_FIELDS`).
+#: Kept for reference; the stored-load rule (c) of
+#: :func:`_stored_config_compat` now covers EVERY entry of
+#: ``ENGINE_UNREAD_LEGACY_FIELDS`` (2026-10-06), of which these are two.
 STORED_UNIFIED_UNREAD_FIELDS = ("isolate_edge_jBS", "perturb_jind_in_anchor")
+
+
+def _stored_unified_unread_fields():
+    """Every legacy-path field the unified engine never reads (and refuses
+    when set on a NEW config): :data:`bouquet.engine.
+    ENGINE_UNREAD_LEGACY_FIELDS`, in its order.  A stored unified config
+    carrying one at a non-default value loads at the default (rule (c) of
+    :func:`_stored_config_compat`)."""
+    from .engine import ENGINE_UNREAD_LEGACY_FIELDS
+    return tuple(ENGINE_UNREAD_LEGACY_FIELDS)
 
 
 def _stored_config_compat(gend: dict) -> None:
@@ -1925,10 +1938,16 @@ def _stored_config_compat(gend: dict) -> None:
     were capped by ``draw_solve_maxits``, so that value moves over (and
     ``draw_solve_maxits``, which the engine now refuses, is cleared).
 
-    (c) A stored ``"unified"`` config carrying a non-default
-    :data:`STORED_UNIFIED_UNREAD_FIELDS` value (a factory set it for the
-    legacy path; the engine never read it) is loaded at the default, with a
-    warning."""
+    (c) A stored ``"unified"`` config carrying a non-default value of ANY
+    legacy-path field the engine never reads
+    (:data:`bouquet.engine.ENGINE_UNREAD_LEGACY_FIELDS`, 22 fields; or
+    ``homotopy_passes`` with ``engine_draw_homotopy=False``) is loaded at
+    the default, with a warning naming the field: the engine ignored the
+    value, so the default reproduces what the stored config actually ran.
+    Refused since 2026-10-04 (3779b51) for a NEW config; until 2026-10-06
+    only ``isolate_edge_jBS`` / ``perturb_jind_in_anchor`` had this
+    stored-load rule (6e052d0), and a stored config carrying one of the
+    other 20 could not be loaded."""
     import warnings
     from .engine import ENGINE_FIELD_DEFAULTS
     eng = gend.get("reconstruction_engine", "legacy")
@@ -1959,23 +1978,40 @@ def _stored_config_compat(gend: dict) -> None:
         gend["jbs_max_passes_post_homotopy"] = val
     if eng != "unified":
         return
-    # (c) the factories set isolate_edge_jBS / perturb_jind_in_anchor for
-    # the legacy path whatever the engine until 2026-10-05; the engine never
-    # read either, and refuses a non-default value since: a stored unified
-    # config carrying one is loaded at the default (the run it recorded is
-    # the same), with a warning
-    for name in STORED_UNIFIED_UNREAD_FIELDS:
+    # (c) every legacy-path field the engine never reads: the engine
+    # ignored a stored non-default value (the factories set
+    # isolate_edge_jBS / perturb_jind_in_anchor for the legacy path
+    # whatever the engine until 2026-10-05; the other 20 were accepted and
+    # ignored until 3779b51), and refuses one on a NEW config since -- a
+    # stored unified config carrying one is loaded at the default (the run
+    # it recorded is the same), with a warning
+    from .engine import _same_value
+    for name in _stored_unified_unread_fields():
         if name not in gend:
             continue
         d = _field_default(name)
-        if gend[name] != d:
+        same = (gend[name] is None) if d is None else \
+            _same_value(gend[name], d)
+        if not same:
             warnings.warn(
                 f"stored unified config: generation.{name}={gend[name]!r} "
-                "(set by a factory for the legacy path) was never read by "
-                f"the unified engine; it is loaded as its default {d!r}, "
-                "which the engine now requires -- the stored run is "
-                "unchanged", UserWarning, stacklevel=3)
+                "(a legacy-path setting) was never read by the unified "
+                f"engine; it is loaded as its default {d!r}, which the "
+                "engine now requires -- the stored run is unchanged",
+                UserWarning, stacklevel=3)
             gend[name] = d
+    if gend.get("engine_draw_homotopy") is False and \
+            "homotopy_passes" in gend:
+        d = _field_default("homotopy_passes")
+        if not _same_value(gend["homotopy_passes"], d):
+            warnings.warn(
+                "stored unified config: generation.homotopy_passes="
+                f"{gend['homotopy_passes']!r} with engine_draw_homotopy="
+                "False was never read by the unified engine (no homotopy "
+                f"runs in an engine draw); it is loaded as its default "
+                f"{d!r}, which the engine now requires -- the stored run "
+                "is unchanged", UserWarning, stacklevel=3)
+            gend["homotopy_passes"] = d
     if "engine_draw_solve_maxits" not in gend:
         cap = gend.get("draw_solve_maxits")
         warnings.warn(

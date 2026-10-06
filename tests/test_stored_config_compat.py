@@ -149,3 +149,78 @@ def test_a_stored_unified_factory_config_loads_at_the_default(name, val):
     dl["generation"][name] = val
     gl, _ = _load(dl)
     assert getattr(gl, name) == val
+
+
+#: one non-default value per legacy-path field the engine never reads (the
+#: same values ``test_engine_refuses_unread_settings`` refuses on a NEW
+#: config)
+_UNREAD_SET = dict(
+    closure_channel="structured", jBS_baseline_mode="ohmic",
+    structured_preset="li_soft_onesided", structured_basis="gaussian",
+    structured_weights="flat", structured_sigma_ind_up=0.5,
+    structured_li_target=0.90, structured_li_sigma=0.05,
+    structured_li_kind="li_3", structured_ip_sigma=1e4,
+    structured_ip_sigma_frac=0.005, structured_soft=True,
+    structured_li_max_corrector_steps=3,
+    anchor_pressure_to_equilibrium=True, imas_corrective_jphi=True,
+    jbs_loop_q0_corrector=True, floor_j_BS=True, swb_iterations=2,
+    accept_anchor_inband=True, diagnostic_plots=True,
+    isolate_edge_jBS=False, perturb_jind_in_anchor=True)
+
+
+def test_every_unread_field_has_a_stored_load_case():
+    from bouquet.engine import ENGINE_UNREAD_LEGACY_FIELDS
+    assert set(_UNREAD_SET) == set(ENGINE_UNREAD_LEGACY_FIELDS)
+
+
+@pytest.mark.parametrize("name", sorted(_UNREAD_SET))
+def test_a_stored_unified_config_with_any_unread_field_loads_at_default(
+        name):
+    """Finding 1 of the 2026-10-06 review: 3779b51 refused 20 legacy-path
+    fields under the engine, and a stored unified config carrying one at a
+    non-default value (accepted and IGNORED by the engine when it was
+    written) became unloadable.  It loads at the default -- what the run
+    actually used -- with a warning naming the field; a NEW config with the
+    same value is still refused."""
+    d = _stored(SHAS[-1], "unified")
+    d["generation"][name] = _UNREAD_SET[name]
+    g, msgs = _load(d)
+    assert g.reconstruction_engine == "unified"
+    assert getattr(g, name) == getattr(GenerationConfig(), name)
+    assert any(f"generation.{name}=" in m
+               and "never read by the unified engine" in m for m in msgs)
+    # every other field is as stored
+    for k, v in _stored(SHAS[-1], "unified")["generation"].items():
+        if k == name or isinstance(v, list):
+            continue
+        assert getattr(g, k) == v, k
+    # a NEW unified config with the same value is still refused
+    from bouquet.engine import validate_engine_settings
+    gn = GenerationConfig(reconstruction_engine="unified")
+    setattr(gn, name, _UNREAD_SET[name])
+    with pytest.raises(ValueError, match="never reads"):
+        validate_engine_settings(gn)
+
+
+def test_a_stored_unified_config_with_unread_homotopy_passes_loads():
+    """The same rule for ``homotopy_passes`` stored with
+    ``engine_draw_homotopy=False`` (no homotopy ran, the value was ignored)."""
+    d = _stored(SHAS[-1], "unified")
+    d["generation"]["engine_draw_homotopy"] = False
+    d["generation"]["homotopy_passes"] = [[0.05, 0.1]]
+    g, msgs = _load(d)
+    assert g.engine_draw_homotopy is False
+    assert [tuple(p) for p in g.homotopy_passes] == \
+        [tuple(p) for p in GenerationConfig().homotopy_passes]
+    assert any("homotopy_passes" in m and "never read" in m for m in msgs)
+    # with engine_draw_homotopy=True the stored passes are read: kept
+    d = _stored(SHAS[-1], "unified")
+    d["generation"]["homotopy_passes"] = [[0.05, 0.1]]
+    g, _ = _load(d)
+    assert [list(p) for p in g.homotopy_passes] == [[0.05, 0.1]]
+    from bouquet.engine import validate_engine_settings
+    gn = GenerationConfig(reconstruction_engine="unified")
+    gn.engine_draw_homotopy = False
+    gn.homotopy_passes = [(0.05, 0.1)]
+    with pytest.raises(ValueError, match="homotopy_passes"):
+        validate_engine_settings(gn)
