@@ -166,10 +166,19 @@ def fig_draws(rows, sg="0.05"):
          f"subset, with the reconstruction. 'In spec' = generate()'s flag: coil drift within "
          f"+/-2 % AND l_i within the engine's +/-5 % band. Yield at 0.05: {ytxt('0.05')}. "
          f"Same batch at the UncertaintyConfig default 0.10: {ytxt('0.10')}.")
-    # ---- cost
+
+
+def fig_cost(sg="0.05"):
+    """Solves per archived draw by stage (needs only the batches' meta files)."""
+    srcs = [s for s in ("recon", "imas") if load(f"draws_{s}_{sg}_meta.json")]
+    if not srcs:
+        print("no draw meta")
+        return
     fig, ax = plt.subplots(1, len(srcs), figsize=(6.5 * len(srcs), 3.9), squeeze=False)
     stages = [("loop", W["blue"]), ("homotopy", W["orange"]),
               ("post_homotopy", W["verm"]), ("filters", W["green"])]
+    stage_label = {"loop": "bootstrap-loop solves", "homotopy": "homotopy solves",
+                   "post_homotopy": "post-homotopy solves", "filters": "filter solves"}
     cost = {}
     for i, s in enumerate(srcs):
         m = load(f"draws_{s}_{sg}_meta.json")
@@ -179,7 +188,7 @@ def fig_draws(rows, sg="0.05"):
         for st, c in stages:
             v = np.array([((r.get("cost") or {}).get(st) or {}).get("solves") or 0
                           for r in rws], float)
-            a.bar(np.arange(len(rws)), v, bottom=bottom, color=c, label=f"{st} solves")
+            a.bar(np.arange(len(rws)), v, bottom=bottom, color=c, label=stage_label[st])
             bottom += v
         ph = [((r.get("cost") or {}).get("post_homotopy") or {}).get("passes") or 0
               for r in rws]
@@ -190,7 +199,7 @@ def fig_draws(rows, sg="0.05"):
         a.set_ylim(0, 1.75 * max(bottom.max() if bottom.size else 1, 1))
         a2.set_ylabel("post-homotopy passes [-]")
         a2.grid(False)
-        a.set(xlabel="archived draw index", ylabel="GS solves per draw [-]",
+        a.set(xlabel="archived draw index", ylabel="Grad-Shafranov solves per draw [-]",
               title=f"({'ab'[i]}) {SRC[s]}: solves by stage")
         h1, l1 = a.get_legend_handles_labels()
         h2, l2 = a2.get_legend_handles_labels()
@@ -215,24 +224,18 @@ def fig_sigma0():
             d = load(f"sigma0_{s}_{e}.json")
             if d and "record" in d:
                 recs[(s, e)] = d
-    if not recs:
+    stored = load("figure_numbers.json") if not recs else None
+    if not recs and not (stored and "engine_sigma0_true_route" in stored):
         print("no sigma0 data")
         return
-    fig, ax = plt.subplots(1, 2, figsize=(12.5, 4.2))
-    labels, vals, cols = [], [], []
+    if not recs:
+        # re-plot from the numbers a previous run stored (figure_numbers.json):
+        # the same values, so the same bars
+        return _plot_sigma0(stored["engine_sigma0_true_route"])
     summ = {}
     for (s, e), d in recs.items():
         r = d["record"]
         if e == "unified":
-            t = r["tolerances"]
-            for stg in ("loop", "archived"):
-                z = (r.get("stages") or {}).get(stg) or {}
-                if "r_j" not in z:
-                    continue
-                labels.append(f"{SRC[s]} engine\n{stg}")
-                vals.append([abs(z["r_j"]) / t["rtol_j"], abs(z["r_I"]) / t["rtol_Ip"],
-                             abs(z["dl_i"]) / t["tol_li"]])
-                cols.append(W["blue"] if stg == "loop" else W["sky"])
             summ[f"{s}_engine"] = dict(passed=r.get("passed"), amplitude=r.get("amplitude"),
                                        r_j=r.get("r_j"), r_I=r.get("r_I"), dl_i=r.get("dl_i"),
                                        dq0=r.get("dq0"), dq95=r.get("dq95"),
@@ -243,25 +246,46 @@ def fig_sigma0():
         else:
             dr = r.get("draw_route") or {}
             routes = dr.get("routes") or {}
-            t0 = dr.get("tolerances") or {}
-            tol = dict(rtol_j=t0.get("rtol_j", t0.get("jbs_rtol_j", 1e-3)),
-                       rtol_Ip=t0.get("rtol_Ip", t0.get("jbs_rtol_Ip", 1e-4)),
-                       tol_li=t0.get("tol_li", t0.get("jbs_tol_li", 1e-3)))
-            for rn, z in routes.items():
-                if not isinstance(z, dict) or "r_j" not in z:
-                    continue
-                dli = z.get("dl_i_vs_l_i_target")
-                labels.append(f"{SRC[s]} legacy\n{rn}")
-                vals.append([abs(z["r_j"]) / tol["rtol_j"], abs(z["r_I"]) / tol["rtol_Ip"],
-                             abs(dli or 0.0) / tol["tol_li"]])
-                cols.append(W["verm"])
             summ[f"{s}_legacy"] = dict(passed=r.get("passed"),
                                        routes={k: {q: v.get(q) for q in (
                                            "r_j", "r_I", "dl_i_vs_l_i_target",
                                            "passed_draw_route")}
                                                for k, v in routes.items()
                                                if isinstance(v, dict)})
-    names = ["r_j / rtol_j", "r_I / rtol_Ip", "|dl_i| / tol_li"]
+    return _plot_sigma0(summ)
+
+
+#: the loop's own tolerances (GenerationConfig defaults: jbs_rtol_j,
+#: jbs_rtol_Ip, jbs_tol_li), the bars every stage is judged at
+_TOL = dict(rtol_j=1e-3, rtol_Ip=1e-4, tol_li=1e-3)
+_ROUTE = {"standard": "standard", "ip_renorm": "Ip renorm."}
+
+
+def _plot_sigma0(summ):
+    """Panels (a) residual over tolerance per route and stage, (b) the engine's
+    archived-state change, from the summary of the checks (plain-language labels)."""
+    t = _TOL
+    labels, vals = [], []
+    for k, v in summ.items():
+        s = k.split("_")[0]
+        if k.endswith("_engine"):
+            lp = v.get("loop") or {}
+            for stg, z in (("loop", lp), ("archived", v)):
+                if z.get("r_j") is None:
+                    continue
+                labels.append(f"{SRC[s]}\nengine\n{stg}")
+                vals.append([abs(z["r_j"]) / t["rtol_j"], abs(z["r_I"]) / t["rtol_Ip"],
+                             abs(z["dl_i"]) / t["tol_li"]])
+        else:
+            for rn, z in (v.get("routes") or {}).items():
+                if z.get("r_j") is None:
+                    continue
+                labels.append(f"{SRC[s]}\nlegacy\n{_ROUTE.get(rn, rn)}")
+                vals.append([abs(z["r_j"]) / t["rtol_j"], abs(z["r_I"]) / t["rtol_Ip"],
+                             abs(z.get("dl_i_vs_l_i_target") or 0.0) / t["tol_li"]])
+    fig, ax = plt.subplots(1, 2, figsize=(12.5, 4.4))
+    names = ["bootstrap profile residual", "bootstrap current residual",
+             r"|$\Delta l_i$|"]
     n = len(labels)
     wdt = 0.8 / 3
     for j in range(3):
@@ -272,22 +296,24 @@ def fig_sigma0():
     ax[0].set_ylim(1e-4, 10)
     ax[0].set_xticks(range(n))
     ax[0].set_xticklabels(labels, fontsize=7)
-    ax[0].set(ylabel="residual / tolerance [-]",
-              title="(a) sigma = 0 through the true draw route, every route and stage")
+    ax[0].set(ylabel="residual / its tolerance [-]",
+              title="(a) zero-perturbation draw: every route and stage")
     ax[0].legend(fontsize=7, ncol=2)
     a = ax[1]
     eng = [(k, v) for k, v in summ.items() if k.endswith("_engine")]
     for i, (k, v) in enumerate(eng):
-        for j, (q, c) in enumerate((("dq0", W["sky"]), ("dq95", W["orange"]),
-                                    ("flux_range_rel", W["pink"]))):
+        for j, (q, c, ql) in enumerate((("dq0", W["sky"], r"|$\Delta q_0$|"),
+                                        ("dq95", W["orange"], r"|$\Delta q_{95}$|"),
+                                        ("flux_range_rel", W["pink"],
+                                         "|relative change of the flux range|"))):
             x = v.get(q)
             a.bar(i + (j - 1) * 0.25, abs(x) if x is not None else 0.0, 0.25, color=c,
-                  label=q if i == 0 else None)
+                  label=ql if i == 0 else None)
     a.set_yscale("log")
     a.set_xticks(range(len(eng)))
-    a.set_xticklabels([k.replace("_", " ") for k, _ in eng])
+    a.set_xticklabels([f"{SRC[k.split('_')[0]]}, engine" for k, _ in eng])
     a.set(ylabel="absolute / relative change [-]",
-          title="(b) engine archived state: q0, q95, flux range vs reconstruction")
+          title="(b) engine, archived state against the reconstruction")
     a.legend(fontsize=7)
     NUM["engine_sigma0_true_route"] = summ
     worst = max(max(v) for v in vals)
@@ -379,7 +405,7 @@ def fig_revip():
 
 
 rows = yields()
-for f in (lambda: fig_draws(rows), fig_sigma0, fig_revip):
+for f in (lambda: fig_draws(rows), fig_cost, fig_sigma0, fig_revip):
     try:
         f()
     except Exception:

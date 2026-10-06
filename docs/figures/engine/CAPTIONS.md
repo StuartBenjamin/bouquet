@@ -9,8 +9,9 @@ No experimental data. PNG at 130 dpi. Provenance is stated per figure:
 
 ## Diagrams
 
-**`pr_stack_overview.png`** — Diagram, no data: the pull-request stack
-(thirteen slices on top of `main`) and the independent PRs that land first.
+**`engine_review_chapters.png`** — Diagram, no data: the twelve review
+chapters of the unified-engine pull request, in commit order, landing on
+`main` as one merge commit.
 
 **`engine_architecture.png`** — Diagram, no data: one pass of the unified
 reconstruction engine as implemented, from the two input adapters through
@@ -62,7 +63,7 @@ inductive-shape σ of 0.05: median and 16–84 % bands of the archived draws
 and of the in-spec subset (coil drift within ±2 % and l_i within the
 engine's ±5 % band), with the reconstruction. Yield at σ = 0.05: g-file 12 archived of 12 attempts, 2 in spec; IDS 11 of 12, 6 in spec (at the default σ = 0.10: g-file 9 of 12, 2 in spec; IDS 7 of 12, 2 in spec; every rejection a capped first homotopy stage).
 
-**`engine_draw_cost.png`** — Synthetic examples, real solver. GS solves per
+**`engine_draw_cost.png`** — Synthetic examples, real solver. Grad-Shafranov solves per
 archived engine draw by stage (bars) and the post-homotopy passes against
 the ceiling of 6 (diamonds), for the σ = 0.05 batches. Median wall time per archived draw 115 s (g-file) and 97 s (IDS); at most 4 post-homotopy passes.
 
@@ -129,7 +130,7 @@ machine with room for them; only small JSON is read by the plotting scripts.
 
 * Diagrams: `dot -Tsvg scripts/<name>.dot -o <name>.svg && rsvg-convert -z
   1.8056 -b white <name>.svg -o <name>.png` for `engine_architecture` and
-  `pr_stack_overview`.
+  `engine_review_chapters`.
 * Solver-free: `PYTHONPATH=.:tests python
   docs/figures/engine/scripts/make_solver_free_figures.py . <out>` (loop
   kernel, IDS inductive split, edge-pressure bookkeeping; it also writes three

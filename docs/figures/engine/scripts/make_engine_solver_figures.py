@@ -386,29 +386,34 @@ def fig_sigma0_legacy(_unused=None):
     for i, (lab, f0, dr) in enumerate(blocks):
         a = ax[0, i]
         names, vals, tols = [], [], []
+        qname = {"r_j": "bootstrap\nprofile", "r_I": "bootstrap\ncurrent",
+                 "dl": "$|\\Delta l_i|$"}
+        rname = {"standard": "standard\nroute", "ip_renorm": "Ip renorm.\nroute"}
         for k, t in (("r_j_vs_baseline", "r_j"), ("r_I_vs_baseline", "r_I"),
                      ("dl_i_vs_baseline", "dl")):
             if f0.get(k) is not None:
-                names.append(f"recon check\n{k.split('_vs')[0]}")
+                names.append(f"check vs\nbaseline:\n{qname[t]}")
                 vals.append(abs(float(f0[k])))
                 tols.append(tol[t])
         for route, rr in (dr.get("routes") or {}).items():
             for k, t in (("r_j", "r_j"), ("r_I", "r_I"), ("dl_i_vs_delivered", "dl")):
                 if rr.get(k) is not None:
-                    names.append(f"{route}\n{k}")
+                    names.append(f"{rname.get(route, route)}:\n{qname[t]}")
                     vals.append(abs(float(rr[k])))
                     tols.append(tol[t])
         x = np.arange(len(vals))
-        a.bar(x, np.maximum(vals, 1e-16), color=[W["blue"] if n.startswith("recon") else W["verm"]
+        a.bar(x, np.maximum(vals, 1e-16), color=[W["blue"] if n.startswith("check") else W["verm"]
                                                  for n in names])
         for xi, t in zip(x, tols):
             a.plot([xi - 0.4, xi + 0.4], [t, t], "k--", lw=1.2)
         a.set_yscale("log")
         a.set_xticks(x)
         a.set_xticklabels(names, fontsize=6.5, rotation=0)
-        a.set(ylabel="|sigma=0 draw - reconstruction| [-]",
-              title=f"({'ab'[i]}) {lab}, legacy path, loop ON "
-                    f"(passed={f0.get('passed')}, draw route passed={dr.get('passed_draw_route')})")
+        _yn = {True: "yes", False: "NO", None: "n/a"}
+        a.set(ylabel="|zero-perturbation draw - reconstruction| [-]",
+              title=f"({'ab'[i]}) {lab}, legacy path, bootstrap loop on\n"
+                    f"(check passed: {_yn.get(f0.get('passed'))}; draw routes passed: "
+                    f"{_yn.get(dr.get('passed_draw_route'))})")
         summ[lab] = dict(recon_check=f0, draw_route=dr)
     SUMMARY["sigma0_draw_route_vs_reconstruction"] = summ
     save(fig, "sigma0_draw_route_vs_reconstruction",
