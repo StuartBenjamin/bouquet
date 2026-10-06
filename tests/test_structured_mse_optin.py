@@ -35,6 +35,12 @@ from scipy.integrate import cumulative_trapezoid, trapezoid
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _GOLDEN = os.path.join(_HERE, "golden", "structured_closure_pre_mse.json")
 _RTOL = 1e-10
+#: Absolute floor for the float comparison (owner-approved 2026-10-06):
+#: a residual that is zero in effect (1e-15) rounds differently per BLAS
+#: (the golden was recorded on one platform; CI runs on another), and a
+#: relative tolerance alone cannot accept that.  Real changes of these
+#: records are many orders larger.
+_ATOL = 1e-12
 
 # Keys the self-consistent-loop lineage added to the NON-MSE closure records
 # (the soft solver's noise-floor stop test and its logged single retry,
@@ -278,7 +284,7 @@ def _compare(exp, got, path, errs):
         ev, es = _vals(exp)
         gv, gs = _vals(got)
         if es != gs or len(ev) != len(gv) or not np.allclose(
-                gv, ev, rtol=_RTOL, atol=0.0, equal_nan=True):
+                gv, ev, rtol=_RTOL, atol=_ATOL, equal_nan=True):
             errs.append(f"{path}: {gv} != {ev}"[:300])
         return
     if isinstance(exp, dict) and "__seq__" in exp:
