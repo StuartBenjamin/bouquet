@@ -47,11 +47,11 @@ from .utils import (
     pchip_derivative,
     pchip_interp,
     safe_save_eqdsk,
-    safe_save_ifile,
     safe_trace_surf,
     select_closed_lcfs,
     store_equilibrium,
     store_baseline_profiles,
+    try_save_ifile,
     _scan_key,
     _shape_from_boundary,
     read_eqdsk_from_bytes,
@@ -4881,15 +4881,13 @@ def generate_bouquet(
                 # converged eqdsk + Ip into the H5 _baseline group.
                 baseline_eqdsk_bytes = _new_eqdsk_bytes
                 initial_Ip_target = _new_eq_Ip
-                if write_ifile:
-                    _tmp_ifile_path = _tmp_eqdsk_path + '.ifile'
-                    safe_save_ifile(mygs, _tmp_ifile_path,
-                                    npsi=int(ifile_npsi),
-                                    ntheta=int(ifile_ntheta),
-                                    lcfs_pad=psi_pad)
-                    with open(_tmp_ifile_path, 'rb') as _if:
+                if write_ifile and try_save_ifile(
+                        mygs, _tmp_eqdsk_path + '.ifile',
+                        npsi=int(ifile_npsi), ntheta=int(ifile_ntheta),
+                        lcfs_pad=psi_pad):
+                    with open(_tmp_eqdsk_path + '.ifile', 'rb') as _if:
                         baseline_ifile_bytes = _if.read()
-                    os.unlink(_tmp_ifile_path)
+                    os.unlink(_tmp_eqdsk_path + '.ifile')
                 if abs(_new_eq_Ip - _old_initial_Ip) > 1.0:
                     _shift_pct = (
                         100.0 * (_new_eq_Ip - _old_initial_Ip)
@@ -6320,14 +6318,10 @@ def generate_bouquet(
         # Optional OFT i-file for GPEC eq_type='ldp_i', from the same state.
         ifile_path = None
         if write_ifile:
-            ifile_path = os.path.abspath(f"{header}_count={count}.ifile")
-            try:
-                safe_save_ifile(mygs, ifile_path, npsi=int(ifile_npsi),
-                                ntheta=int(ifile_ntheta), lcfs_pad=psi_pad)
-            except Exception as _ifile_exc:
-                print(f"  WARN: save_ifile failed ({_ifile_exc}); "
-                      f"draw stored without an i-file")
-                ifile_path = None
+            ifile_path = try_save_ifile(
+                mygs, os.path.abspath(f"{header}_count={count}.ifile"),
+                npsi=int(ifile_npsi), ntheta=int(ifile_ntheta),
+                lcfs_pad=psi_pad)
 
         # Capture a high-resolution LCFS trace at the SAME mygs state
         # we just saved the eqdsk from.  The eqdsk's RBBBS/ZBBBS is only

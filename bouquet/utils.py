@@ -254,6 +254,19 @@ def safe_save_ifile(mygs, filename, **kwargs):
     return _snapshot_save(mygs, mygs.save_ifile, filename, **kwargs)
 
 
+def try_save_ifile(mygs, filename, **kwargs):
+    r'''`safe_save_ifile`, returning `filename`; on failure warn, remove any partial
+    file and return None (the i-file is optional; the run continues without it).'''
+    try:
+        safe_save_ifile(mygs, filename, **kwargs)
+        return filename
+    except Exception as exc:
+        print(f"  WARN: save_ifile failed ({exc}); stored without an i-file")
+        if os.path.exists(filename):
+            os.remove(filename)
+        return None
+
+
 def _snapshot_save(mygs, save, filename, **kwargs):
     if not hasattr(mygs, 'copy_eq') or not hasattr(mygs, 'replace_eq'):
         return save(filename, **kwargs)

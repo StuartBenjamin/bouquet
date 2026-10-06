@@ -61,3 +61,16 @@ def test_safe_save_ifile_restores_equilibrium():
     safe_save_ifile(FakeGS(), "x.ifile", npsi=129, ntheta=257, lcfs_pad=1e-3)
     assert calls == ["copy", ("save", "x.ifile", {"npsi": 129, "ntheta": 257, "lcfs_pad": 1e-3}),
                      ("restore", "snapshot")]
+
+
+def test_try_save_ifile_failure_is_soft(tmp_path):
+    from bouquet.utils import try_save_ifile
+    path = str(tmp_path / "x.ifile")
+
+    class FailingGS:
+        def save_ifile(self, filename, **kw):
+            open(filename, "wb").close()
+            raise RuntimeError("trace failed")
+
+    assert try_save_ifile(FailingGS(), path) is None
+    assert not os.path.exists(path)
