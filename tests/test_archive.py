@@ -342,3 +342,77 @@ class TestBootstrapModelLabel:
             assert not any("SWB baseline" in lb for lb in labels), labels
         finally:
             plt.close(fig)
+
+
+class TestBootstrapModelFileOpens:
+    """``ScanView.bootstrap_model`` on an archive whose baseline carries no
+    ``jbs_loop`` block falls back to the draws: it reads every draw's block
+    within ONE file open, so the label costs a constant number of opens
+    whatever the ensemble size (it opened the file once per draw)."""
+
+    _REC = {"converged": True, "n_passes": 3}
+
+    @staticmethod
+    def _store(path, recs):
+        from bouquet.utils import (store_equilibrium, store_baseline_profiles,
+                                   initialize_equilibrium_database)
+        stem = os.path.splitext(path)[0]
+        initialize_equilibrium_database(stem)
+        psi = np.linspace(0, 1, 9)
+        one = np.ones(9)
+        eq_path = stem + "_in.eqdsk"
+        with open(eq_path, "wb") as fh:
+            fh.write(b"GEQDSK-BYTES")
+        store_baseline_profiles(
+            stem, psi, one, one, one, one, one, one,
+            one, one, one, one, one, 1e6, 1.0, scan_key="7",
+            eqdsk_bytes=b"GEQDSK-BYTES")
+        for c, rec in enumerate(recs):
+            store_equilibrium(
+                stem, c, eq_path, psi, one, one, one,
+                one, one, one, one, one, 1.0, 0.8, scan_key="7",
+                jbs_loop=rec)
+        return stem + ".h5"
+
+    @staticmethod
+    def _opens(monkeypatch, path):
+        """(label, number of h5py.File opens the label cost)."""
+        n = [0]
+        real = h5py.File
+
+        class Counting(real):
+            def __init__(self, *a, **k):
+                n[0] += 1
+                super().__init__(*a, **k)
+
+        sc = bq.BouquetArchive(path)["7"]
+        monkeypatch.setattr(h5py, "File", Counting)
+        try:
+            label = sc.bootstrap_model
+        finally:
+            monkeypatch.setattr(h5py, "File", real)
+        return label, n[0]
+
+    def test_the_label_costs_the_same_opens_for_any_draw_count(
+            self, tmp_path, monkeypatch):
+        few = self._store(str(tmp_path / "few.h5"), [None] * 2)
+        many = self._store(str(tmp_path / "many.h5"), [None] * 12)
+        lab_few, n_few = self._opens(monkeypatch, few)
+        lab_many, n_many = self._opens(monkeypatch, many)
+        assert lab_few == lab_many == "frozen SWB bootstrap (legacy)"
+        assert n_few == n_many, (n_few, n_many)
+
+    @pytest.mark.parametrize("where", [0, 5, 11])
+    def test_one_loop_draw_anywhere_still_labels_self_consistent(
+            self, tmp_path, monkeypatch, where):
+        recs = [None] * 12
+        recs[where] = self._REC
+        path = self._store(str(tmp_path / f"one{where}.h5"), recs)
+        label, _ = self._opens(monkeypatch, path)
+        assert label == "self-consistent Redl bootstrap"
+        sc = bq.BouquetArchive(path)["7"]
+        assert sc.baseline_jbs_loop is None
+        # the same value the per-draw views give
+        assert label == ("self-consistent Redl bootstrap"
+                         if any(d.jbs_loop is not None for d in sc.all)
+                         else "frozen SWB bootstrap (legacy)")

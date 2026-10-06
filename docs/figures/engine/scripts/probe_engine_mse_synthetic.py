@@ -42,10 +42,28 @@ FACTOR, SIGMA, N = 1.03, 0.004, 8
 
 
 def _bouquet(header):
+    """The engine configuration, selected IN the factory call: ``from_imas``
+    then leaves its legacy-path workflow settings (``isolate_edge_jBS``,
+    ``perturb_jind_in_anchor``, ``jBS_baseline_mode``) at their defaults.
+    Building the legacy configuration and flipping the engine afterwards is
+    refused by the engine's settings validation (those fields are never read
+    by the engine and are refused when not at their defaults)."""
     import bouquet as bq
-    b = bq.Bouquet.from_imas(_OMAS, mesh=_MESH, time=_TIME, n_draws=1,
-                             nthreads=1, header=header)
-    b.config.generation.reconstruction_engine = "unified"
+    return bq.Bouquet.from_imas(_OMAS, mesh=_MESH, time=_TIME, n_draws=1,
+                                nthreads=1, header=header,
+                                reconstruction_engine="unified")
+
+
+def _configure_fit(b, c, jac):
+    """The ``--step fit`` settings: the MSE row on the chords ``c`` (the
+    ``--step chords`` output) with Jacobian scheme ``jac``."""
+    g = b.config.generation
+    g.engine_rows = ["Ip", "l_i", "mse"]
+    g.engine_mse_jacobian = jac
+    g.mse_data = dict(R=c["R"], Z=c["Z"], tgamma=c["tg_data"],
+                      sigma=c["sigma"], weight=[1.0] * N, A1=[1.0] * N,
+                      A2=[1.0] * N, A3=[0.0] * N, A4=[0.0] * N,
+                      er_corrected=True)
     return b
 
 
@@ -110,14 +128,8 @@ def main():
         return
     with open(cpath) as fh:
         c = json.load(fh)
-    b = _bouquet(os.path.join(a.outdir, f"mse_{a.jac}"))
-    g = b.config.generation
-    g.engine_rows = ["Ip", "l_i", "mse"]
-    g.engine_mse_jacobian = a.jac
-    g.mse_data = dict(R=c["R"], Z=c["Z"], tgamma=c["tg_data"],
-                      sigma=c["sigma"], weight=[1.0] * N, A1=[1.0] * N,
-                      A2=[1.0] * N, A3=[0.0] * N, A4=[0.0] * N,
-                      er_corrected=True)
+    b = _configure_fit(_bouquet(os.path.join(a.outdir, f"mse_{a.jac}")),
+                       c, a.jac)
     b.setup_solver()
     t0 = time.perf_counter()
     out = dict(jac=a.jac)
