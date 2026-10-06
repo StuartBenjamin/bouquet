@@ -18,6 +18,9 @@ the LEGACY code: ``reconstruct_equilibrium``'s l_i secant, after a FAILED
 last solve, hands on the inductive factor of the last good state it restores
 (and restores that state's profile) instead of the failed factor.  It changes
 only runs in which a secant solve failed.
+RE-BASED a third time (2026-10-06) by main's own hunk (#61 closure-channel refusal
+in _forward_solve_imas_baseline) when main was merged into the engine line: a
+change of the LEGACY code made on main, not an engine hook.
 The comparison this file serves is unchanged: the current functions with the
 helper written back inline must still equal it exactly.
 """
@@ -3513,6 +3516,30 @@ def _forward_solve_imas_baseline(self):
     # solved from (recorded by the loop's pass solve), for the ONE-state
     # storage at the end of this method.  None on the legacy path.
     _delivery = None
+    # Same refusal as _validate_workflow, here for baseline-only callers
+    # (prepare_baseline() without generate()): a non-default
+    # closure_channel outside the ohmic hybrid split is never read.
+    # Same downgrade too: workflow='custom' / allow_unsafe_workflow turn
+    # it into a printed WARN, so validation and the baseline solve agree.
+    _gc0 = self.config.generation
+    _chan0 = str(getattr(_gc0, "closure_channel", "bootstrap"))
+    if _chan0 != "bootstrap" and (
+            str(_gc0.jBS_baseline_mode) != "ohmic"
+            or not bool(_gc0.recalculate_j_BS)):
+        _msg0 = (
+            f"closure_channel={_chan0!r} is only read when "
+            "jBS_baseline_mode='ohmic' and recalculate_j_BS=True "
+            f"(have jBS_baseline_mode={str(_gc0.jBS_baseline_mode)!r}, "
+            f"recalculate_j_BS={bool(_gc0.recalculate_j_BS)}); "
+            "it would otherwise be silently ignored. Set "
+            "jBS_baseline_mode='ohmic' or leave closure_channel at "
+            "'bootstrap'.")
+        if (str(getattr(_gc0, "workflow", "")) == "custom"
+                or bool(getattr(_gc0, "allow_unsafe_workflow", False))):
+            print("WARN: " + _msg0 + " (workflow='custom': continuing; "
+                  "the channel is NOT applied)")
+        else:
+            raise ValueError(_msg0)
     if self.config.generation.recalculate_j_BS:
         from .TokaMaker_interface import (_swb_jbs_to_toroidal,
                                           smooth_jbs_transition)
