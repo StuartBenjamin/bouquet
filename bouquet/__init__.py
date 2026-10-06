@@ -112,6 +112,11 @@ from .config import (
     UncertaintyConfig,
     GenerationConfig,
     FilterConfig,
+    CaseSpec,
+    ParallelSource,
+    GeqdskProfilePairs,
+    IdaTimeslices,
+    ImasTimeslices,
 )
 from .baseline import Baseline, resolve_baseline, resolve_uncertainty
 from .physics import (
@@ -130,7 +135,8 @@ from .io.imas import (read_imas_baseline, read_imas_geometry,
 from .run import Bouquet
 from .archive import BouquetArchive, ScanView, DrawView
 from .parallel import (parallel_generate, run_shard, merge_archives,
-                       emit_slurm_script)
+                       emit_slurm_script,
+                       parallel_cases, run_case, merge_cases)
 
 # Curated public surface.  Everything imported above remains importable
 # (``bq.store_equilibrium`` etc. still work for advanced users), but ``import
@@ -144,6 +150,9 @@ __all__ = [
     "BouquetConfig", "SolverConfig", "ReconstructionSource", "ImasSource",
     "FixedComponentsConfig", "UncertaintyConfig", "GenerationConfig",
     "FilterConfig",
+    # ---- case-parallel sweeps: many bouquets from one config ----
+    "CaseSpec", "ParallelSource", "GeqdskProfilePairs", "IdaTimeslices",
+    "ImasTimeslices",
     "Baseline", "resolve_baseline", "resolve_uncertainty",
     # ---- I/O: sources and IMAS write-back ----
     "GEQDSKEquilibrium", "read_geqdsk", "find_lcfs_xpoints", "PFile", "read_pfile",
@@ -188,5 +197,7 @@ __all__ = [
     # ---- advanced: functional (pre-class) API ----
     "generate_bouquet", "perturb_kinetic_equilibrium", "reconstruct_equilibrium",
     # ---- process-parallel generation ----
+    # tier 1 (draws of one bouquet) / tier 2 (a queue of whole bouquets)
     "parallel_generate", "run_shard", "merge_archives", "emit_slurm_script",
+    "parallel_cases", "run_case", "merge_cases",
 ]

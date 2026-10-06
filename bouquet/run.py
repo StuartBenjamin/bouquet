@@ -45,6 +45,7 @@ class Bouquet:
     def __init__(self, config: "BouquetConfig"):
         self.config = config
         self.mygs = None                          # set by setup_solver()
+        self._mesh_path = None                    # mesh baked into mygs there
         self.baseline: Optional["Baseline"] = None
         self._resolved_uncertainty = None         # resolved sigma profiles + length scales
         self.diagnostics: Optional[list] = None   # generate() per-draw output
@@ -258,6 +259,9 @@ class Bouquet:
         ``time`` raises. To run several reconstructions, build a fresh
         :class:`Bouquet` per g-file. ``header`` may still be set on either path
         to redirect the output archive.
+
+        Re-points within ONE source; to swap the source itself (a different
+        g-file, a different shot) use :meth:`set_case`.
         """
         if time is not None:
             if not hasattr(self.config.source, "time"):
@@ -265,8 +269,51 @@ class Bouquet:
                     f"{type(self.config.source).__name__} has no time axis to "
                     "sweep; build a separate Bouquet per source")
             self.config.source.time = time
+        return self.set_case(header=header)
+
+    def set_case(self, case=None, *, source=None, header=None,
+                 scan_key=None) -> "Bouquet":
+        """Re-point at a whole new case, reusing the existing solver.
+
+        The generalisation of :meth:`set_slice` used by the **case-parallel**
+        tier (:func:`bouquet.parallel.parallel_cases`): where ``set_slice``
+        moves along one source's time axis, this swaps ``config.source``
+        outright -- a different g-file, IDA slice or shot -- so one worker
+        process can run an unbounded queue of independent bouquets on a single
+        ``OFT_env`` (which is a per-process singleton and cannot be rebuilt).
+
+        Pass a :class:`~bouquet.config.CaseSpec` (the usual path, produced by a
+        :class:`~bouquet.config.ParallelSource`), or the pieces by keyword.
+        Everything not passed is left alone. Clearing the cached baseline and
+        uncertainty forces a re-solve, and the next :meth:`prepare_baseline`
+        re-points the solver at the new equilibrium
+        (:meth:`_point_solver_at_eq`, which resets coil reg / drift bounds /
+        constraints first), so each case is fully independent of the last.
+
+        The solver's MESH is not per-case: it is baked into ``mygs`` by
+        :meth:`setup_solver`. Changing ``solver.mesh_path`` after the solver is
+        up raises here rather than silently running the new case on the old
+        mesh -- build a separate pool run per mesh.
+        """
+        if case is not None:
+            if source is not None or header is not None or scan_key is not None:
+                raise TypeError(
+                    "pass either a CaseSpec or source/header/scan_key keywords, "
+                    "not both")
+            source, header, scan_key = case.source, case.header, case.scan_key
+        if self.mygs is not None and self._mesh_path is not None:
+            if self.config.solver.mesh_path != self._mesh_path:
+                raise ValueError(
+                    f"solver.mesh_path changed to "
+                    f"{self.config.solver.mesh_path!r} after setup_solver() "
+                    f"built mygs on {self._mesh_path!r}. The mesh is baked into "
+                    "the solver; run one pool/Bouquet per mesh.")
+        if source is not None:
+            self.config.source = source
         if header is not None:
             self.config.output_header = header
+        if scan_key is not None:
+            self.config.generation.scan_key = scan_key
         self.baseline = None
         self._resolved_uncertainty = None
         self.diagnostics = None
@@ -311,6 +358,9 @@ class Bouquet:
 
         self.mygs = mygs
         self._myOFT = myOFT          # keep the env alive
+        # Remember which mesh is baked in, so set_case can refuse a later
+        # solver.mesh_path change instead of running a case on the wrong mesh.
+        self._mesh_path = sc.mesh_path
         # per-equilibrium state, filled by _point_solver_at_eq
         self._eqdsk_ref = None
         self._boundary_RZ = None     # LCFS shape for IMAS forward-solve init

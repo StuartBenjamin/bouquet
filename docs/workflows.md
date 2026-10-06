@@ -310,6 +310,18 @@ axis — build one `Bouquet` per g-file instead.
 
 ## Process-parallel generation
 
+There are two independent axes to parallelise on, and they are alternatives,
+not layers:
+
+| | splits | use when | entry point |
+|---|---|---|---|
+| **draws** | one bouquet's `n_equils` draws across workers | you have ONE case and want it finished sooner | `bq.parallel_generate` |
+| **cases** | a queue of whole, independent bouquets | you have at least as many cases as cores | `bq.parallel_cases` |
+
+Never nest them — each claims the whole machine.
+
+### Tier 1: draws of one bouquet
+
 Draws are embarrassingly parallel, and `OFT_env` is a per-process singleton —
 so parallelism is across **processes**, one single-threaded TokaMaker per
 physical core (`nthreads=1` is the validated regime: bit-reproducible
@@ -340,3 +352,88 @@ stamps the run-level config provenance. Worker seeds derive from
 `SeedSequence(seed, worker_id, scan_key)`, so timeseries slices swept with one
 seed are decorrelated. Parallel draws are statistically equivalent to — but not
 bit-identical with — a serial run of the same seed.
+
+### Tier 2: many bouquets at once
+
+One complete bouquet per g-file/p-file pair, per IDA time slice, per shot. Each
+worker stands up its solver **once** and then swaps case after case onto it
+(`Bouquet.set_case`), so the setup cost is paid per worker rather than per case.
+Nothing is shared between cases, so no cross-worker baseline agreement is needed
+and one failed case cannot take down the sweep — its traceback comes back as
+data, in the returned `errors` dict and in `errors.pkl`.
+
+A sweep is **one config plus one parallel source**. The config carries
+everything common (solver, uncertainty envelope, sampling knobs); the parallel
+source expands the raw inputs into the atomic cases, each supplying its own
+baseline source:
+
+```python
+src = bq.IdaTimeslices(              # 1 .cdf -> N cases, one per time slice
+    header="my_sweep",
+    inputs=[("IDA_194123.cdf", ["g194123.02000", "g194123.02500", ...]),
+            ("IDA_194124.cdf", [...])],
+)
+# or, for the IMAS path -- one IDS, many times (only ImasSource.time moves):
+src = bq.ImasTimeslices(header="my_sweep", ids_path="dd_sim.json",
+                        times=[3.163, 3.263, 3.363],
+                        ida_path="IDA_154080_.cdf",
+                        LCFS_geqdsk="g154080.03260")   # or one g-file per time
+# or, for already-atomic inputs:
+src = bq.GeqdskProfilePairs(header="my_sweep",
+                            pairs=[(geqdsk, pfile), ...])
+
+if __name__ == "__main__":           # required: workers are spawned
+    summary = bq.parallel_cases(src, cfg, "work_dir")
+```
+
+A hand-built `list[CaseSpec]` works anywhere a parallel source does — the three
+classes cover the common input layouts, they are not a protocol.
+
+`IdaTimeslices` reads each file's time axis, checks you supplied exactly one
+g-file per slice, and labels each case with `scan_key` = time in ms and
+`group` = the input file. `ImasTimeslices` labels the same way but puts the
+whole sweep in one group, since one IDS is one shot: N times in, one archive
+out. **The grouping is what shapes the output**: cases from
+one `.cdf` are merged into one archive, its slices stored as `scan/<time_ms>/`
+groups — the layout `bq.plot_bouquet_timeseries` reads.
+
+```
+work_dir/
+  worker_0/ worker_1/ ...          per-worker scratch (private cwd, local mesh copy)
+  worker_0.log ...                 per-worker output (fd-level, captures OFT chatter)
+  cases/my_sweep_IDA_194123_idx0.h5 ...   one archive per case, written as it finishes
+  my_sweep_IDA_194123.h5           merged: scan/2000, scan/2500, ...
+  my_sweep_IDA_194124.h5           merged: scan/4000, ...
+  map_object.pkl                   idx -> CaseSpec (completion order ≠ submission order)
+  errors.pkl                       {idx: traceback} for any failed case
+```
+
+Pass `group_by=None` for a single combined archive instead, `merge=False` to
+keep only the per-case files, or `cleanup=True` to delete them once merged.
+Worker and thread counts come from `_get_num_cpus`, which respects the affinity
+mask and the `SLURM_CPUS_PER_TASK` / `PBS_NUM_PPN` / `LSB_DJOB_NUMPROC` /
+`NSLOTS` allocation, so a run inside a batch job uses the CPUs it was given.
+Workers are verified to have initialised before any case is dispatched: a bad
+mesh or a missing OFT fails the run in seconds with every worker's traceback,
+rather than hanging.
+
+#### Per-case setup the config cannot express
+
+Some per-case setup depends on the case and cannot be written into a `CaseSpec`.
+`parallel_cases` takes two optional hooks, `f(bouquet, case) -> None`, run on the
+worker either side of the baseline solve:
+
+| hook | runs | for |
+|---|---|---|
+| `before_baseline` | after `set_case`, before `prepare_baseline` | per-case **solver** targets — an X-point pin read from *this* slice's g-file, which `prepare_baseline` applies |
+| `after_baseline` | after `prepare_baseline`, before `generate` | anything that must live on *this* slice's `baseline.psi_N_kinetic` grid — notably `uncertainty.aux_baselines` / `aux_sigmas`, the measured E_r / omega_tor switchboard |
+
+Workers are spawned, so a hook is pickled by reference and **must be a
+module-level function** — a lambda, closure, or bound method will not pickle.
+`parallel_cases` checks this before standing up the pool, so a bad hook is a
+`TypeError` at the call site rather than an opaque initialiser failure. Take
+everything a hook needs from `case.source`, not from module globals. A hook that
+raises fails only its own case, like any other per-case error.
+
+Worked examples: `examples/D3D-like/parallel_pfile_example.py` and
+`parallel_IDA_example.py`.

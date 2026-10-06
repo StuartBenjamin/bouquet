@@ -145,6 +145,299 @@ BaselineSource = Union[ReconstructionSource, ImasSource]
 
 
 # ---------------------------------------------------------------------------
+# Parallel sources -- generators of baseline sources, one per atomic case
+# ---------------------------------------------------------------------------
+# A BouquetConfig describes ONE bouquet: one baseline source -> one archive.
+# A *parallel source* describes MANY of them: it takes the raw user inputs
+# (g-file/p-file pairs, IDA .cdf files, ...) and expands them into the flat list
+# of atomic :class:`CaseSpec` runs that ``bouquet.parallel.parallel_cases``
+# distributes across worker processes.  Everything a case needs beyond its own
+# source -- solver, uncertainty envelope, generation knobs -- comes from the
+# single run-level BouquetConfig the pool is given, so a sweep is
+# "one config + one parallel source", not N hand-built configs.
+#
+# The expansion is where a non-atomic input becomes atomic: one IDA .cdf holds
+# many time slices, and each slice is an independent bouquet.  ``CaseSpec.group``
+# remembers which raw input a case came from, which is what lets the optional
+# merge step reassemble the sweep along the INPUT structure -- one final archive
+# per .cdf, its slices stored as ``scan/<key>/`` groups inside.
+@dataclass
+class CaseSpec:
+    """One atomic run in a case-parallel sweep.
+
+    Parameters
+    ----------
+    source : ReconstructionSource or ImasSource
+        The baseline source for this case; swapped onto the worker's standing
+        :class:`~bouquet.run.Bouquet` via ``set_case``.
+    header : str
+        Output header for this case (``{header}.h5``).  The pool makes it
+        unique and worker-local before the run; the merge renames by *group*.
+    scan_key : float, int, or str
+        This case's key within its group's merged archive (``scan/<key>/``).
+        Must be unique inside a group -- e.g. the time slice in ms.
+    group : str, optional
+        Label of the raw input this case was expanded from.  Cases sharing a
+        group are merged into one archive.  Defaults to the header's basename,
+        i.e. every case is its own group.
+    """
+
+    source: BaselineSource
+    header: str
+    scan_key: Union[float, int, str] = 0
+    group: Optional[str] = None
+
+    def __post_init__(self):
+        if not self.header:
+            raise ValueError("CaseSpec.header must be a non-empty string")
+        if self.group is None:
+            import os
+            self.group = os.path.basename(str(self.header))
+
+    def to_dict(self) -> dict:
+        """JSON-round-trippable snapshot (see :meth:`BouquetConfig.to_dict`)."""
+        d = _encode(self)
+        d["source"] = _encode_source(self.source)
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "CaseSpec":
+        """Rebuild a :class:`CaseSpec` from :meth:`to_dict` output."""
+        d = _decode(d)
+        return cls(source=_decode_source(d["source"]), header=d["header"],
+                   scan_key=d.get("scan_key", 0), group=d.get("group"))
+
+
+@dataclass
+class ParallelSource:
+    """Base class: expands raw inputs into a flat list of :class:`CaseSpec`.
+
+    Subclasses implement :meth:`expand`.  ``header`` is the run-level output
+    stem every case name is derived from; ``source_kwargs`` is forwarded
+    verbatim to each per-case baseline source, so anything the source dataclass
+    accepts (``cocos``, ``impurity_Z``, ``psi_pad``, ``n_k``, ...) is settable
+    once for the whole sweep.
+
+    A hand-built ``list[CaseSpec]`` is equally valid input to
+    :func:`~bouquet.parallel.parallel_cases` -- these classes are a convenience
+    for the two common input layouts, not a protocol anything is locked into.
+    """
+
+    header: str
+    source_kwargs: dict = field(default_factory=dict)
+
+    def expand(self) -> "list[CaseSpec]":
+        """Return the flat list of atomic cases, in a deterministic order."""
+        raise NotImplementedError
+
+    def __len__(self):
+        return len(self.expand())
+
+    def to_dict(self) -> dict:
+        """JSON-round-trippable snapshot, tagged with the subclass name."""
+        d = _encode(self)
+        d["parallel_source_type"] = type(self).__name__
+        return d
+
+    @staticmethod
+    def from_dict(d: dict) -> "ParallelSource":
+        """Rebuild the tagged subclass written by :meth:`to_dict`."""
+        d = _decode(d)
+        name = d.pop("parallel_source_type", None)
+        registry = {c.__name__: c for c in (GeqdskProfilePairs,
+                                    IdaTimeslices, ImasTimeslices)}
+        if name not in registry:
+            raise ValueError(
+                f"unknown parallel_source_type {name!r}; expected one of "
+                f"{sorted(registry)}")
+        return _build(registry[name], d)
+
+
+@dataclass
+class GeqdskProfilePairs(ParallelSource):
+    """One case per ``(geqdsk, profiles)`` pair -- already atomic, no recast.
+
+    ``pairs`` is a list of ``(geqdsk_path, profiles_path)`` tuples; the profile
+    file may be a p-file or a single-slice IDA ``.cdf``
+    (:class:`ReconstructionSource` dispatches on the extension).  Each pair is
+    its own group, so the optional merge leaves one archive per pair.
+    """
+
+    pairs: list = field(default_factory=list)
+
+    def expand(self) -> "list[CaseSpec]":
+        import os
+        cases = []
+        for geqdsk_path, profiles_path in self.pairs:
+            stem = os.path.splitext(os.path.basename(str(geqdsk_path)))[0]
+            cases.append(CaseSpec(
+                source=ReconstructionSource(
+                    geqdsk_path=str(geqdsk_path),
+                    profiles_path=str(profiles_path),
+                    **self.source_kwargs),
+                header=f"{self.header}_{stem}",
+                scan_key=stem,
+                group=stem,
+            ))
+        return cases
+
+
+@dataclass
+class IdaTimeslices(ParallelSource):
+    """One case per time slice of each IDA ``.cdf`` -- the non-atomic recast.
+
+    ``inputs`` is a list of ``(cdf_path, geqdsk_paths)`` tuples, where
+    ``geqdsk_paths`` holds exactly one g-file per time slice in that ``.cdf``,
+    in time order.  Each ``.cdf`` becomes one group, so the optional merge
+    produces one archive per input file with the slices stored under
+    ``scan/<time_ms>/`` -- the layout
+    :func:`~bouquet.plotting.plot_bouquet_timeseries` expects.
+
+    Slice times are read from the file's ``time`` dataset (milliseconds, per
+    the operational DIII-D layout) and handed to the source in seconds.
+    """
+
+    inputs: list = field(default_factory=list)
+
+    def expand(self) -> "list[CaseSpec]":
+        # h5py imported here, not at module scope: config.py must stay
+        # import-light (it is pulled in by every entry point).
+        import os
+        import h5py
+
+        cases = []
+        for cdf_path, geqdsk_paths in self.inputs:
+            cdf_path = str(cdf_path)
+            geqdsk_paths = list(geqdsk_paths)
+            with h5py.File(cdf_path, "r") as f:
+                n_times = f["n_e"].shape[0]
+                times_ms = f["time"][:].ravel() if "time" in f else None
+            if len(geqdsk_paths) != n_times:
+                raise ValueError(
+                    f"geqdsk_paths has {len(geqdsk_paths)} entries but "
+                    f"'{cdf_path}' contains {n_times} timeslice(s). "
+                    "Provide exactly one geqdsk path per timeslice.")
+            if times_ms is not None and len(times_ms) != n_times:
+                raise ValueError(
+                    f"'{cdf_path}' has {len(times_ms)} time value(s) but "
+                    f"{n_times} profile slice(s); the file is inconsistent.")
+            stem = os.path.splitext(os.path.basename(cdf_path))[0]
+            for t in range(n_times):
+                # scan_key in ms (matching Bouquet.run_slices' labelling), and
+                # ReconstructionSource.time in seconds (what read_ida expects).
+                if times_ms is not None:
+                    key = int(round(float(times_ms[t])))
+                    time_s = float(times_ms[t]) / 1e3
+                else:                      # no time axis: fall back to the index
+                    key, time_s = t, None
+                cases.append(CaseSpec(
+                    source=ReconstructionSource(
+                        geqdsk_path=str(geqdsk_paths[t]),
+                        profiles_path=cdf_path,
+                        time=time_s,
+                        **self.source_kwargs),
+                    header=f"{self.header}_{stem}",
+                    scan_key=key,
+                    group=stem,
+                ))
+        return cases
+
+
+@dataclass
+class ImasTimeslices(ParallelSource):
+    """One case per time slice of a FUSE IMAS/OMAS IDS -- a TIME sweep.
+
+    The IDA-hybrid IMAS workflow (``dd_sim.json`` + an IDA ``.cdf`` + a
+    magnetics-only g-file for the separatrix) run at many times at once: the
+    three input files are fixed for the shot and only ``ImasSource.time``
+    varies, so one bouquet per requested time is a pure case-level fan-out.
+    The whole sweep is one group, so the merge writes ONE archive holding
+    every slice under ``scan/<time_ms>/`` -- the layout
+    :func:`~bouquet.plotting.plot_bouquet_timeseries` expects.
+
+    Times are given in SECONDS (as ``ImasSource.time`` and ``read_ida`` take
+    them) and labelled in MILLISECONDS in the archive, matching the ``3.263 s
+    -> scan/3263/`` convention of the single-slice templates.  The driver
+    selects the nearest available IDS and IDA slice to each requested time, so
+    the times need not land exactly on the files' own axes.
+
+    Parameters
+    ----------
+    ids_path : str
+        The FUSE IMAS/OMAS IDS, shared by every case.
+    times : list of float
+        Requested time slices [s].  One case each.
+    ida_path : str, optional
+        IDA ``.cdf`` for IDA-hybrid kinetics and the measured per-psi sigma
+        envelopes.  Set ``generation.kinetic_source = "ida_hybrid"`` and
+        ``uncertainty.ida_path`` on the run-level config to match (
+        :meth:`~bouquet.run.Bouquet.from_imas` does both for you).
+    LCFS_geqdsk : str or list of str, optional
+        Magnetics-only g-file whose LCFS becomes the isoflux target.  One path
+        shared by every slice, or a list with exactly one per entry in *times*
+        (the usual case -- the separatrix moves).
+    group : str, optional
+        Merge group for every case.  Defaults to the IDS filename stem, i.e.
+        one archive for the sweep.
+    """
+
+    ids_path: str = ""
+    times: list = field(default_factory=list)
+    ida_path: Optional[str] = None
+    LCFS_geqdsk: Union[str, list, None] = None
+    group: Optional[str] = None
+
+    def expand(self) -> "list[CaseSpec]":
+        import os
+
+        if not self.ids_path:
+            raise ValueError("ImasTimeslices.ids_path must be set")
+        times = [float(t) for t in self.times]
+        if not times:
+            raise ValueError("ImasTimeslices.times is empty -- nothing to run")
+
+        # One g-file for the whole sweep, or one per slice. Anything else is a
+        # silent mis-pairing of separatrix to time, so reject it here.
+        if self.LCFS_geqdsk is None or isinstance(self.LCFS_geqdsk, str):
+            gfiles = [self.LCFS_geqdsk] * len(times)
+        else:
+            gfiles = [str(g) for g in self.LCFS_geqdsk]
+            if len(gfiles) != len(times):
+                raise ValueError(
+                    f"LCFS_geqdsk has {len(gfiles)} entries but times has "
+                    f"{len(times)}. Provide one g-file per time slice, or a "
+                    "single path shared by all of them.")
+
+        stem = os.path.splitext(os.path.basename(str(self.ids_path)))[0]
+        group = self.group or stem
+
+        cases, seen = [], {}
+        for t, gfile in zip(times, gfiles):
+            # ms label, matching Bouquet.run_slices and the single-slice
+            # templates. Two times that round to the same ms would overwrite
+            # each other in the merged archive, so catch it at expansion.
+            key = int(round(t * 1e3))
+            if key in seen:
+                raise ValueError(
+                    f"times {seen[key]} s and {t} s both label as scan_key "
+                    f"{key} ms; slices closer than 1 ms cannot be told apart "
+                    "in the merged archive.")
+            seen[key] = t
+            cases.append(CaseSpec(
+                source=ImasSource(
+                    ids_path=str(self.ids_path),
+                    time=t,
+                    ida_path=str(self.ida_path) if self.ida_path else None,
+                    LCFS_geqdsk=gfile,
+                    **self.source_kwargs),
+                header=f"{self.header}_{stem}",
+                scan_key=key,
+                group=group,
+            ))
+        return cases
+
+
+# ---------------------------------------------------------------------------
 # Fixed additive components (NEVER perturbed by GPR draws)
 # ---------------------------------------------------------------------------
 @dataclass
@@ -580,21 +873,15 @@ class BouquetConfig:
         (``"reconstruction"`` | ``"imas"``). Reverse with :meth:`from_dict`.
         """
         d = _encode(self)
-        d["source"]["source_type"] = (
-            "reconstruction" if isinstance(self.source, ReconstructionSource) else "imas")
+        d["source"] = _encode_source(self.source)
         return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "BouquetConfig":
         """Rebuild a :class:`BouquetConfig` from :meth:`to_dict` output."""
         d = _decode(d)
-        srcd = dict(d["source"])
-        stype = srcd.pop("source_type", None)
-        if stype is None:                       # infer if the discriminator is absent
-            stype = "reconstruction" if "geqdsk_path" in srcd else "imas"
-        SrcCls = ReconstructionSource if stype == "reconstruction" else ImasSource
         return cls(
-            source=_build(SrcCls, srcd),
+            source=_decode_source(d["source"]),
             solver=_build(SolverConfig, d["solver"]),
             output_header=d["output_header"],
             uncertainty=_build(UncertaintyConfig, d.get("uncertainty", {})),
@@ -652,3 +939,30 @@ def _build(cls, d):
     """Instantiate dataclass ``cls`` from decoded dict ``d`` (unknown keys dropped)."""
     names = {f.name for f in _dc.fields(cls)}
     return cls(**{k: v for k, v in d.items() if k in names})
+
+
+def _encode_source(src) -> dict:
+    """Encode a baseline source, stamping the ``source_type`` discriminator.
+
+    Shared by :meth:`BouquetConfig.to_dict` and :meth:`CaseSpec.to_dict` -- both
+    ship a baseline source across a process boundary and must tag which of the
+    union members it is.
+    """
+    d = _encode(src)
+    d["source_type"] = (
+        "reconstruction" if isinstance(src, ReconstructionSource) else "imas")
+    return d
+
+
+def _decode_source(d) -> BaselineSource:
+    """Rebuild the baseline source written by :func:`_encode_source`.
+
+    Takes an already-:func:`_decode`\\ d dict.  Infers the type from the
+    presence of ``geqdsk_path`` when the discriminator is absent (configs
+    written before it was stamped).
+    """
+    d = dict(d)
+    stype = d.pop("source_type", None)
+    if stype is None:
+        stype = "reconstruction" if "geqdsk_path" in d else "imas"
+    return _build(ReconstructionSource if stype == "reconstruction" else ImasSource, d)

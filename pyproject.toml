@@ -14,6 +14,9 @@ dependencies = [
     "scipy",
     "matplotlib",
     "h5py",
+    # hard-caps OMP/BLAS threads inside a pool worker for libraries that
+    # ignore the OMP_NUM_THREADS-style env vars (bouquet.parallel.run_case)
+    "threadpoolctl",
     # tokamaker here if it becomes pip-installable
 ]
 

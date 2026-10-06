@@ -135,7 +135,10 @@ cfg = bq.load_config("my_run")       # the exact BouquetConfig that made it
 `b.describe()` prints the current configuration showing only the non-default
 knobs. Sweeps: `b.run_slices(times=[...])` puts one time slice per `scan_key`
 in a single archive; `bq.parallel_generate(cfg, backend="laptop"|"slurm")`
-fans draws out across processes.
+fans one bouquet's draws out across processes, and
+`bq.parallel_cases(src, cfg, work_dir)` runs a whole queue of independent
+bouquets at once — one per g-file/p-file pair, IDA time slice, or IMAS time —
+merging the results back into one archive per input.
 
 ## Key configuration
 

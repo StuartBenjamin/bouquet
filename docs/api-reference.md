@@ -53,6 +53,10 @@ Layout spec: [archive-schema.md](archive-schema.md). Code source of truth:
 | `run_shard()` | The per-worker serial pipeline on one shard |
 | `merge_archives()` | Concatenate shards, verifying every shard hit the same baseline |
 | `emit_slurm_script()` | Write the SLURM job-array + submit scripts |
+| `parallel_cases()` | Run MANY independent bouquets across a persistent pool (one per case) |
+| `run_case()` | One case on a worker's standing solver |
+| `merge_cases()` | Merge per-case archives into one archive per input group |
+| `GeqdskProfilePairs` / `IdaTimeslices` / `ImasTimeslices` | Parallel sources: expand raw inputs into `CaseSpec` cases |
 
 ## I/O
 
