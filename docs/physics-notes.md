@@ -12,6 +12,7 @@ covers the guarantees a user should know about and the knobs that change them.
 - [Bootstrap current treatment](#bootstrap-current-treatment)
 - [Differential bootstrap (`jbs_delta_mode`)](#differential-bootstrap-jbs_delta_mode)
 - [Self-consistent bootstrap (`jbs_self_consistent`)](#self-consistent-bootstrap-jbs_self_consistent)
+- [The unified reconstruction engine (`reconstruction_engine`, default off)](#the-unified-reconstruction-engine-reconstruction_engine-default-off)
 - [Kinetics regridding](#kinetics-regridding)
 - [Edge-profile classification](#edge-profile-classification)
 - [Hybrid kinetics on the IMAS path](#hybrid-kinetics-on-the-imas-path)
@@ -590,6 +591,28 @@ on the synthetic D3D-like IMAS example the loop converged in 2 passes
 preset with the axis row -- its one-sided prior makes the closure map
 non-smooth, which costs relaxation), and a Fix-C draw at 5 % kinetic / j_φ σ
 needed 7 passes -- one more than the draw default.
+
+## The unified reconstruction engine (`reconstruction_engine`, default off)
+
+`GenerationConfig.reconstruction_engine="unified"` (default `"legacy"`)
+replaces the g-file reconstruction and the IMAS baseline with ONE loop for
+both inputs ([engine.md](engine.md)). Every current component is stored as a
+parallel current `<j.B>`: the g-file's from identity (I0) on its own surfaces
+(minus Redl on the anchor, smoothed with the existing inductive basis, no
+amplitude search), the IDS's as `|B0|` times its `<j.B>/B0` fields. Each pass
+composes the solver's `<j_phi>` on the latest SOLVED geometry with the
+field-aligned conversion `<j.B> F<1/R>/<B^2>` plus the pressure-driven term
+`p'(<R> - F^2<1/R>/<B^2>)` recomputed from that pass's own `p'` (identity
+I2) -- so the Redl bootstrap enters in the solver-consistent convention, not
+the legacy `<j.B>/(F<1/R>)` (about 6 % high at the peak), and a pressure change
+is never booked as inductive current. The structured closure then meets the
+rows (Ip; l_i hard at 1e-3 for a g-file, soft σ 0.04 for an IDS; optional q0
+at like radii; optional E_r-corrected MSE chords), each carrying the
+discrepancy measured on the previous solved equilibrium, and ONE GS solve is
+taken per pass. Convergence uses only the existing tolerances (plus the
+closure-half current gate as a standing criterion); the delivery solve is
+checked on every row and is the reconstruction. Stage 2 builds the baseline
+only: the draws refuse an engine baseline until they run on the engine.
 
 ## Kinetics regridding
 

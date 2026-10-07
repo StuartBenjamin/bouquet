@@ -1,5 +1,48 @@
 # Bouquet — change summaries
 
+## Unreleased — unified engine (default off)
+
+*Opt-in; with the default `reconstruction_engine="legacy"` nothing changes
+(the legacy paths are untouched; the loop kernel's new hook is proven
+bit-identical when absent).*
+
+- **`GenerationConfig.reconstruction_engine`** (`"legacy"` | `"unified"`,
+  default `"legacy"`) with `engine_preset` (`"structured"` |
+  `"bootstrap_scalar"` | `"sawtooth_two_scalar"`), `engine_rows` (`"Ip"`,
+  `"l_i"`, `"q0"`, `"mse"`), `engine_delivery_correction` (default `False`)
+  and `engine_mse_jacobian` (`"fd_broyden"` | `"fd_chord"`). Validated by
+  name; engine options set under `"legacy"` are refused. Stored configs
+  without the field load as `"legacy"`.
+- **`bouquet/engine.py`**: one reconstruction loop for g-file and IDS inputs
+  on the existing kernel -- parallel components composed on the latest
+  solved geometry (identity I2: field-aligned conversion + the
+  pressure-driven term from each pass's own p'), the structured closure with
+  row discrepancies (scalar presets as restricted bases), one GS solve per
+  pass, the MSE Jacobian by finite differences once at convergence then
+  Broyden (or held), a checked two-pass delivery solve whose state a draw
+  will inherit. Every convergence constant is an existing one
+  (`engine.convergence_table`).
+- **`bouquet/adapters.py`**: the source-adapter contract and the g-file / IDS
+  adapters (the only place, with the exporters, where a current convention is
+  converted). Raw-E_r MSE is refused.
+- `Bouquet.prepare_baseline()` dispatches to the engine when selected, for
+  both inputs, and returns the usual `Baseline` plus `Baseline.engine` (the
+  full record: contract, settings, convergence constants with their origins,
+  per-pass log, delivery checks, state, solve counts). `generate()` and
+  `verify_sigma0_consistency()` refuse an engine baseline until the draws
+  run on the engine (Stage 3).
+- `run_jbs_loop(..., extra=None)`: an opt-in hook for criteria the kernel
+  does not own; absent, the kernel is bit-identical (frozen-copy test).
+- Archive: `engine.store_baseline_engine` / `load_baseline_engine` write /
+  read an ADDED `_baseline@engine_json` attribute (schema stays v3; wired
+  into `generate()` with the draws in Stage 3).
+- Tests: a toy Grad-Shafranov stand-in (`tests/_engine_toy.py`) drives the
+  engine through Ip + l_i, + q0, + MSE, the presets, the delivery
+  correction and the failure modes; the adapters run on the synthetic
+  examples; identity (I2) is checked on the golden fixture's stored
+  geometry; solver tests (`tests/test_engine_solver.py`, `-m solver`) and the
+  probe `tests/probes/measure_engine.py` write the distance-to-input table.
+
 ## Unreleased, intended for the release after 1.4.0 — self-consistent bootstrap current (default ON)
 
 *Everything about the self-consistent bootstrap loop sits under this heading,
