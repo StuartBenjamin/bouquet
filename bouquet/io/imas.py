@@ -113,8 +113,11 @@ def _entry_time_window(times, t_slice, base_times=None):
     The rule (owner-approved 2026-10-06, replacing the 1e-6 s absolute
     match of 2026-10-05; the half-step value is recorded, to be confirmed):
     nearest own slice, accepted within half a local step, otherwise the
-    caller REFUSES -- a driven current is never dropped to zero and never
-    read at another time."""
+    caller REFUSES a driven entry carrying current near that time -- a
+    driven current is never dropped to zero and never read at another time.
+    Refinement (2026-10-06): an entry carrying no current on the slices
+    BRACKETING the time (:func:`_entry_bracketing_slices`) is OFF there,
+    not missing -- it contributes zero and is stamped, not refused."""
     tt = np.asarray(times, dtype=float)
     t_slice = float(t_slice)
     k = int(np.argmin(np.abs(tt - t_slice)))
@@ -137,6 +140,58 @@ def _entry_time_window(times, t_slice, base_times=None):
     return k, dt, half
 
 
+def _entry_bracketing_slices(times, t_slice):
+    """Indices of a core_sources entry's own slices that BRACKET the slice
+    time *t_slice* on the entry's OWN time grid *times*: its nearest own
+    slice at or before t_slice and its nearest own slice at or after it
+    (every slice sharing that time, should the grid repeat one).  When
+    t_slice lies outside the entry's time range only the nearest END slice
+    exists, and only it is returned.
+
+    Used when no own slice lies within half a local step of t_slice
+    (:func:`_entry_time_window`): an entry whose ``j_parallel`` is absent or
+    identically zero on every bracketing slice is OFF at that time (a model
+    source idle there, e.g. one whose grid starts a step after the IDS time
+    base), not a missing input -- it contributes zero.  If any bracketing
+    slice carries current the caller still refuses (refinement of the
+    half-step rule, 2026-10-06)."""
+    tt = np.asarray(times, dtype=float)
+    t_slice = float(t_slice)
+    out = []
+    below = tt <= t_slice
+    if np.any(below):
+        out.extend(np.flatnonzero(tt == tt[below].max()).tolist())
+    above = tt >= t_slice
+    if np.any(above):
+        out.extend(np.flatnonzero(tt == tt[above].min()).tolist())
+    return sorted(set(int(k) for k in out))
+
+
+def _carries_current(q):
+    """Whether one ``profiles_1d`` slice carries a non-zero (or non-finite)
+    ``j_parallel``."""
+    jp = q.get("j_parallel")
+    return jp is not None and bool(np.any(np.asarray(jp, float) != 0.0))
+
+
+def _entry_off_near(s, t_slice):
+    """``None`` when the core_sources entry *s* carries current on a slice
+    bracketing *t_slice* (or cannot be judged: no per-slice times), else
+    the provenance reason it is OFF near that time
+    (:func:`_entry_bracketing_slices`)."""
+    pr = s.get("profiles_1d", [])
+    times = [q.get("time") for q in pr]
+    if t_slice is None or not pr or any(t is None for t in times):
+        return None
+    br = _entry_bracketing_slices(times, t_slice)
+    if any(_carries_current(pr[k]) for k in br):
+        return None
+    at = ", ".join(f"{float(times[k]):.9g}" for k in br)
+    return (f"off near the slice: no current on its bracketing slices at "
+            f"{at} s (t = {float(t_slice):.9g} s; no own slice within half "
+            "a time-step) -- a source idle at this time, contributing zero")
+
+
 def _entry_time_why(t_slice, times, k, dt, half):
     """Why an entry has no slice within half a step of *t_slice*."""
     tt = np.asarray(times, dtype=float)
@@ -150,7 +205,8 @@ def _entry_time_refusal(who, idn, why):
     """The refusal text for a driven entry with no slice at this time."""
     return (f"{who}: core_sources {idn.get('name')!r} (index "
             f"{idn.get('index')}) carries a non-zero j_parallel but has "
-            f"{why}.  Refusing rather than reading its current at another "
+            f"{why}, and carries current on its own slices bracketing that "
+            "time.  Refusing rather than reading its current at another "
             "time or dropping it to zero (the half-step match rule, "
             "owner-approved 2026-10-06)")
 
@@ -984,7 +1040,9 @@ def read_imas_baseline(
     # time-step (the core_profiles step for a single-time entry); otherwise
     # the read is REFUSED (owner-approved 2026-10-06: before, a 1e-6 s
     # absolute match dropped the beam to zero with a warning on any larger
-    # mismatch).  One without per-slice times must have the IDS's slice
+    # mismatch) -- unless the entry carries no current on its own slices
+    # bracketing the time: then it is off there, not missing (refinement of
+    # 2026-10-06).  One without per-slice times must have the IDS's slice
     # count, or it cannot be aligned and is refused.
     src_ids = dd.get("core_sources", {})
     isrc = _nearest_index(src_ids["time"], T, "core_sources") if src_ids.get("time") else ic
@@ -1000,12 +1058,15 @@ def read_imas_baseline(
                 q_nbi, how = _source_slice_at(s, isrc, _src_t, _src_nt,
                                               cp_ids.get("time"))
                 if q_nbi is None:
-                    if any(qq.get("j_parallel") is not None and np.any(
-                            np.asarray(qq["j_parallel"], float) != 0.0)
-                           for qq in pr):
+                    # refused only if it carries current on the own slices
+                    # bracketing this time; an entry idle there (or all
+                    # zero) is off at this time: nothing to drop
+                    # (refinement of 2026-10-06)
+                    if any(_carries_current(qq) for qq in pr) and \
+                            _entry_off_near(s, _src_t) is None:
                         raise ValueError(_entry_time_refusal(
                             "IMAS reader", s.get("identifier") or {}, how))
-                    continue          # an all-zero entry: nothing to drop
+                    continue
                 jnbi_par = jnbi_par + np.asarray(q_nbi["j_parallel"], dtype=float)
     j_NBI = to_toroidal(cur_sign * jnbi_par)
     j_RF = np.zeros(n)   # never computed internally; user-supplied only

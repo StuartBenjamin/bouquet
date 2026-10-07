@@ -6165,15 +6165,23 @@ class Bouquet:
         from .TokaMaker_interface import (_swb_jbs_to_toroidal,
                                           smooth_jbs_transition)
         from .utils import pchip_derivative
-        from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
-        from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
+        _eng = _engine_gate(self.config)
+        if _eng is None:
+            # OpenFUSIONToolkit only on the legacy route, the one that calls
+            # solve_with_bootstrap: the engine route's sigma=0 draw runs on
+            # the engine's own solver (a toy / recorder in the fast suite,
+            # which runs without OpenFUSIONToolkit installed).  Gated on
+            # ``_eng`` like every engine branch, so the legacy path is still
+            # the frozen code (tests/test_engine_draws_legacy_ast.py).
+            from OpenFUSIONToolkit.TokaMaker.bootstrap import \
+                solve_with_bootstrap
+            from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
 
         if self.baseline is None or self.mygs is None:
             raise ValueError("call setup_solver() + prepare_baseline() / "
                              "reconstruct() before verify_sigma0_consistency()")
         self._refuse_unified_engine_draws("verify_sigma0_consistency()")
         _edge = resolve_edge_pressure(self.config.generation)
-        _eng = _engine_gate(self.config)
         if _eng is not None:
             # the engine draw at zero perturbation (bouquet.engine_draws)
             return self._verify_sigma0_engine()

@@ -21,9 +21,23 @@ mean ~ max), ``max|PPRIME_recon - PPRIME_archive|`` (the re-solve
 difference only), and the draw's edge ``PRES`` against its own ``p_sep``.
 Writes ``OUTDIR/baseline_gfile_frame_<source>_<engine>_<sep>.json``.
 
-Expected under ``--sep offset``: the recon and archive edge ``PRES`` both
-equal ``p_sep_applied`` and their difference is re-solve noise, not a
-constant; the bare save's edge is 0.  Under ``--sep legacy``: all edges 0.
+What the output means.  The bare save is the solver frame: it ends on the
+last (``lcfs_pad``-truncated) flux surface, so its edge ``PRES`` is the
+solver's pressure there -- a few Pa on this example (4.8 Pa at d874822),
+NOT zero.  Under ``--sep offset`` the reconstruction's file is the bare
+file plus the delivered ``p_sep`` at every point, so its edge is
+``p_sep_applied + PRES_bare_edge`` (not exactly ``p_sep_applied``) and
+``pres_recon_minus_bare_mean`` is ``p_sep_applied`` to the file's float32
+precision.  The archive's ``_baseline`` file is written by the same save
+call from a RE-SOLVED state: its edge is ``p_sep_applied`` plus that
+state's own truncated-surface pressure, and the recon - archive ``PRES``
+difference is re-solve noise (mean well below max), not a constant offset.
+Under ``--sep legacy``: ``p_sep_applied`` is 0, every file's edge is the
+bare truncated-surface value of its own state (the reconstruction's equals
+the bare file's), not zero.  The draw's edge reads the same way against
+its own pressure frame (``p_sep_own`` is the last point of the draw's
+stored ``pressure`` profile).  The written-contents assertions on these
+files live in ``tests/test_gfile_written_contents_solver.py``.
 Single-threaded, no network, synthetic data only.
 """
 from __future__ import annotations

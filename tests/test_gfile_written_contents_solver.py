@@ -23,16 +23,18 @@ repository's reader (``bouquet.io.geqdsk._read_geqdsk``) and asserts:
   (4.8 Pa at d874822 on this example, SOLVER_RESULTS figure 10), so the edge
   is compared as ``PRES_edge = p_sep + PRES_bare_edge``;
 * ``PPRIME``, ``QPSI``, ``FPOL``, ``FFPRIM`` and the boundary of the two
-  files agree within the format's precision (the offset reaches ``PRES``
-  alone) -- the q, F and boundary of the same solver state through two
+  files agree within the file's precision (one float32 ulp, see
+  ``_parse_tol``; the offset reaches ``PRES`` alone) -- the q, F and boundary of the same solver state through two
   saves;
 (That the archive's ``_baseline`` g-file is written by the same save call
 as the reconstruction's is pinned solver-free in
 ``tests/test_edge_pressure_baseline_gfile.py``; the archive is a re-solved
 state, so its ``PRES`` is not compared point by point here.)
 
-NOT run when this test was written (2026-10-06: no solver runs in that
-task); its numbers are owed on the next solver-suite run.  Synthetic inputs
+First solver run 2026-10-06 (cluster, one thread): the two offset arms
+failed the original ten-digit bound by up to 3.0e-3 Pa, exactly the
+single-precision quantisation above; the bound was corrected to the file's
+precision (owner-approved 2026-10-06), nothing in the solver changed.  Synthetic inputs
 only; one thread.
 """
 import os
@@ -61,8 +63,15 @@ ARMS = [("legacy", "offset"), ("legacy", "legacy"),
 
 
 def _parse_tol(a):
-    """The g-file's own precision: 16.9E fields, ten significant digits."""
-    return 1e-9 * max(1.0, float(np.max(np.abs(np.asarray(a, dtype=float)))))
+    """The g-file's REAL precision: one float32 ulp at the field's largest
+    magnitude.  OFT's writer (``gs_save_eqdsk``) casts every field to single
+    precision before the ``5e16.9`` write, so a value is carried to seven
+    significant digits, not the ten the format prints (measured on the
+    2026-10-06 solver run: the PRES difference of two saves was quantised at
+    2^-8 Pa for pressures in 32768-65536 Pa, i.e. the two saves round the
+    offset and bare frames to float32 independently)."""
+    m = max(1.0, float(np.max(np.abs(np.asarray(a, dtype=float)))))
+    return float(np.spacing(np.float32(m)))
 
 
 @pytest.fixture(scope="module")

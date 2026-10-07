@@ -748,8 +748,6 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         smoothing), ``I_BS`` (signed FSA integral of ``j_BS_tor`` [A]),
         ``version``.
     """
-    import OpenFUSIONToolkit.TokaMaker.bootstrap as _oft_bs
-
     psi_N = np.asarray(psi_N, dtype=float)
     n = psi_N.size
     if psi_N.ndim != 1 or n < 3:
@@ -790,6 +788,11 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         _first_bad(~(_a > 0.0), psi_N, _a, _nm,
                    f"strictly positive [{_unit}] on every node")
     _first_bad(~(zeff >= 1.0), psi_N, zeff, "zeff", ">= 1 on every node")
+    # OpenFUSIONToolkit only after the input checks: the refusals above are
+    # the evaluation's own input domain and hold without OFT importable
+    # (bouquet.engine_draws.check_draw_kinetics mirrors them; the fast CI
+    # suite runs without OFT).
+    import OpenFUSIONToolkit.TokaMaker.bootstrap as _oft_bs
 
     # ---- geometry on the caller's surfaces (distinct clipped values only) ---
     psi_eval = np.clip(psi_N, psi_pad, 1.0 - psi_pad)

@@ -110,6 +110,25 @@ def test_a_slice_before_the_entry_starts_is_refused(tmp_path):
         _read(tmp_path, dd, t[0], "first.json")
 
 
+
+def test_a_late_beam_entry_idle_before_it_starts_is_off_not_refused(
+        tmp_path):
+    """Refinement of 2026-10-06: the late entry carrying NO current on its
+    first own slice (the one bracketing t_0) is off at t_0, not missing --
+    the beam reads zero there, nothing is refused; the next times read
+    their own slices as before."""
+    dd, t = _dd_with_tagged_nbi(drop_first=True)
+    nbi = next(s for s in dd["core_sources"]["source"]
+               if s["identifier"]["index"] == 2)
+    nbi["profiles_1d"][0]["j_parallel"] = [0.0] * len(
+        nbi["profiles_1d"][0]["j_parallel"])
+    got = np.asarray(_read(tmp_path, copy.deepcopy(dd), t[0],
+                           "idle.json").j_NBI)
+    assert np.all(got == 0.0)
+    got = np.asarray(_read(tmp_path, copy.deepcopy(dd), t[-1],
+                           "idle_last.json").j_NBI)
+    np.testing.assert_array_equal(got, _reference(tmp_path, t, len(t) - 1))
+
 def _shifted(dd, shift):
     nbi = next(s for s in dd["core_sources"]["source"]
                if s["identifier"]["index"] == 2)

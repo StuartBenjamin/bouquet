@@ -588,7 +588,10 @@ def _ids_source_slice(s, isrc, t_slice, n_time, base_times=None):
     later than the IDS time base, so the list index is not the slice); one
     without them must have exactly the IDS's number of slices, or it cannot
     be aligned and is refused -- never the first slice taken in place of a
-    missing one.  The caller refuses a driven entry with no slice."""
+    missing one.  The caller refuses a driven entry with no slice that
+    carries current on its own slices bracketing the time; one carrying
+    none there is off at that time, not missing (refinement of
+    2026-10-06)."""
     from .io.imas import _entry_time_why, _entry_time_window
     pr = s.get("profiles_1d", [])
     idn = s.get("identifier", {}) or {}
@@ -613,7 +616,7 @@ def _ids_source_slice(s, isrc, t_slice, n_time, base_times=None):
     return pr[isrc], "by index"
 
 
-def _ids_driven_currents(srcs, isrc, n, sgn, base_times=None):
+def _ids_driven_currents(srcs, isrc, n, sgn, base_times=None, off=None):
     """The driven ``j_parallel`` of the ``core_sources`` slice *isrc*, by
     the explicit identifier classification above, split into ``nbi`` /
     ``rf`` / ``other`` (positive frame).  Returns ``(parts, used, ignored)``:
@@ -625,7 +628,17 @@ def _ids_driven_currents(srcs, isrc, n, sgn, base_times=None):
     ``j_parallel`` with no slice within half a local time-step of the slice
     time is REFUSED (:class:`EngineInputRefused`; owner-approved 2026-10-06
     -- before, it was dropped to zero and stamped); an aggregate or
-    bootstrap-like one, never added, is stamped as before."""
+    bootstrap-like one, never added, is stamped as before.
+
+    Refinement (2026-10-06): "carries current" is judged on the entry's own
+    slices BRACKETING the slice time
+    (:func:`bouquet.io.imas._entry_bracketing_slices`), not its whole time
+    history.  A driven (or unknown) entry with no slice in the window and
+    no current on its bracketing slices is OFF at that time, not missing:
+    it contributes zero, is not warned about, and its record (name, index,
+    reason) is appended to the list *off* when one is given (provenance
+    "off_sources").  An entry identically zero over its whole history is
+    skipped silently, as before."""
     import warnings
     parts = {k: np.zeros(n) for k in ("nbi", "rf", "other")}
     used, ignored = [], []
@@ -639,16 +652,23 @@ def _ids_driven_currents(srcs, isrc, n, sgn, base_times=None):
             continue
         q, how = _ids_source_slice(s, isrc, t_slice, n_time, base_times)
         if q is None:
-            if any(qq.get("j_parallel") is not None
-                   and np.any(np.asarray(qq["j_parallel"], float) != 0.0)
-                   for qq in s.get("profiles_1d", [])):
+            from .io.imas import (_carries_current, _entry_off_near,
+                                  _entry_time_refusal)
+            if any(_carries_current(qq) for qq in s.get("profiles_1d", [])):
                 if idx in IDS_AGGREGATE_SOURCE_INDICES or \
                         idx in IDS_BOOTSTRAP_LIKE_SOURCE_INDICES:
                     # never added anyway: stamped, as at a matched time
                     ignored.append(dict(name=idn.get("name"), index=idx,
                                         reason=how))
                     continue
-                from .io.imas import _entry_time_refusal
+                why_off = _entry_off_near(s, t_slice)
+                if why_off is not None:
+                    # idle on its slices bracketing this time: off here,
+                    # not missing -- contributes zero, stamped
+                    if off is not None:
+                        off.append(dict(name=idn.get("name"), index=idx,
+                                        reason=why_off))
+                    continue
                 raise EngineInputRefused(_entry_time_refusal(
                     "IDS adapter", idn, how))
             continue
@@ -848,12 +868,15 @@ class IdsAdapter:
         # reader's j_NBI before its toroidal conversion; ec/lh/ic -> "rf";
         # fusion, runaways, sawteeth -> "other"; an unknown index -> "other"
         # with a warning), all held fixed; aggregates and bootstrap-like
-        # entries are never added (stamped in provenance["ignored_sources"])
+        # entries are never added (stamped in provenance["ignored_sources"]);
+        # a driven entry with no slice near the time and no current on its
+        # bracketing slices is off there (provenance["off_sources"])
         srcs = dd.get("core_sources", {})
         isrc = (_nearest_index(srcs["time"], T, "core_sources")
                 if srcs.get("time") else ic)
+        driven_off = []
         fix_parts, driven_used, driven_ignored = _ids_driven_currents(
-            srcs, isrc, n, sgn, cps.get("time"))
+            srcs, isrc, n, sgn, cps.get("time"), off=driven_off)
         nbi = fix_parts["nbi"]
         driven = fix_parts["nbi"] + fix_parts["rf"] + fix_parts["other"]
         # The inductive current is the parallel residual j_total -
@@ -1041,6 +1064,7 @@ class IdsAdapter:
                        "other"),
                 driven_sources=list(driven_used),
                 ignored_sources=list(driven_ignored),
+                off_sources=list(driven_off),
                 pressure=("e (ne Te + ni Ti) + impurity + fast (no p_diff)"),
                 electron_charge="physics.ELEMENTARY_CHARGE",
                 kinetics_sigma=("resolved from the Baseline by "

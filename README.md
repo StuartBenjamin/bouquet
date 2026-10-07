@@ -124,7 +124,9 @@ longer). Run `verify_sigma0_consistency()` on a new machine or OFT build.
 - the IMAS reader reads each beam (NBI) and sawteeth entry at the slice
   TIME, matched to the entry's nearest own slice. A beam entry with no own
   slice within half a time-step of the slice time is REFUSED, never read at
-  another time or dropped to zero;
+  another time or dropped to zero -- unless it carries no current on its own
+  slices bracketing that time, in which case it is off there, not missing,
+  and contributes zero;
 - a negative pressure at the separatrix is refused under `"offset"`, for the
   baseline (`prepare_baseline`) as well as the draws. Setting
   `separatrix_pressure="legacy"` builds such an input as before.

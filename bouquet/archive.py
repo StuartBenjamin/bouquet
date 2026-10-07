@@ -398,7 +398,21 @@ class ScanView:
         from .schema import bootstrap_label
         if self.baseline_jbs_loop is not None:
             return bootstrap_label(True)
-        return bootstrap_label(any(d.jbs_loop is not None for d in self.all))
+        return bootstrap_label(self._any_draw_jbs_loop())
+
+    def _any_draw_jbs_loop(self) -> bool:
+        """``True`` when any stored draw carries a ``jbs_loop`` block (the
+        value ``any(d.jbs_loop is not None for d in self.all)`` gives),
+        read within ONE file open: the per-draw views open the file once
+        per draw, so a scan-level label on a large legacy ensemble cost
+        O(N) opens."""
+        import h5py
+        from .schema import read_jbs_loop
+        idx = select_indices(self._ar.path, scan_key=self.scan_key,
+                             selection="all")
+        with h5py.File(self._ar.path, "r") as hf:
+            return any(read_jbs_loop(hf[_group_path(self.scan_key, i)])
+                       is not None for i in idx)
 
     def baseline_view(self) -> BaselineView:
         """The baseline behind the :class:`DrawView` accessors (bytes, parse)."""
