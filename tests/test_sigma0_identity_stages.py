@@ -255,7 +255,8 @@ _TE = 3.0e3 * (1.0 - 0.9 * _X ** 1.5) + 50.0
 _NI = 0.9 * _NE
 _TI = 0.9 * _TE
 _ZEFF = 1.6 * np.ones(_N)
-_EC = 1.6022e-19
+# the draws' eV -> J factor under the self-consistent loop
+from bouquet.physics import ELEMENTARY_CHARGE as _EC  # noqa: E402
 
 
 def _kin_redl(eq):

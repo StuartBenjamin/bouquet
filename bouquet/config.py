@@ -715,8 +715,9 @@ class GenerationConfig:
     #: pair (that is how the tests prove it CONTAINS close_ip / close_ip_q0),
     #: and it works on its own: with ``structured_weights`` left at ``None``
     #: the default prior is derived for the basis ACTUALLY given, so a basis
-    #: whose length is not the default 4 gets a uniform (no-prior) ladder,
-    #: named as such in the record.  The physics prior below is a ladder over
+    #: whose length is not the default 4 gets a uniform ladder (no prior
+    #: without ``mse_data``; a sigma = 1 prior with it -- see
+    #: ``structured_weights``), named as such in the record.  The physics prior below is a ladder over
     #: the DEFAULT basis's radii and has no meaning on any other basis.
     #: Peak-normalised, so a coefficient reads as "how far the multiplier moves
     #: from 1 near this radius"; the basis need not be orthogonal, since with at
@@ -745,6 +746,15 @@ class GenerationConfig:
     #: result the prior -- not the data -- is holding up.  ``numpy.inf`` hard-pins
     #: a coefficient to 0.  These are a PRIOR, not a tolerance: they change
     #: which exactly-Ip-closing profile is chosen, never what "closed" means.
+    #:
+    #: **Scale.**  Without ``mse_data`` only the RATIOS of the weights matter
+    #: (the hard closure is invariant under ``W -> c W``).  With ``mse_data``
+    #: they are ABSOLUTE: ``W = sigma^-2`` in peak-normalised coefficient units
+    #: trades against the chords' chi^2, so multiplying every weight by 100
+    #: tightens the prior tenfold in sigma and moves the answer, and the
+    #: uniform ladder is a sigma = 1 prior, not "no prior".  Write the weights
+    #: as the widths you mean when MSE is on; the ladder in force is recorded
+    #: as ``structured_mse_prior_sigma_*``.
     structured_weights: Optional[dict] = None
     #: closure_channel="structured": the SECOND global measurement.  Ip is one
     #: number against 2K coefficients and is blind to radial redistribution --
@@ -864,14 +874,32 @@ class GenerationConfig:
     #: weight, folded into ``sigma_eff = sigma/sqrt(weight)``), ``A1``..``A4``,
     #: optionally ``A5`` + ``Er`` (the E_r term is then carried by the forward
     #: model) or ``er_corrected=True`` (``tgamma`` already E_r-corrected
-    #: upstream; the forward model then carries no E_r term).  ``None`` (the
+    #: upstream; the forward model then carries no E_r term), and the REQUIRED
+    #: scalars ``ip_sign`` / ``bt_sign`` (+1 or -1: the directions of Ip and
+    #: B_t in the A-coefficients' right-handed (R, phi, Z) frame -- the field
+    #: orientation is a stated convention, never fitted; see
+    #: ``bouquet.mse``).  With neither ``Er`` nor ``er_corrected=True`` the
+    #: model takes E_R = 0, which in a rotating plasma BIASES the fit: to
+    #: first order it reads B_Z + (A5/A1) E_R as B_Z at every chord, a
+    #: systematic (not random) shift of the fitted current profile's shape
+    #: that the closure absorbs into s_ind/s_bs -- warned and recorded
+    #: (``structured_mse_er_neglected``, ``structured_mse_er_terms``).  A6
+    #: (E_Z) is never used; a non-zero A7 (the denominator E_R coefficient)
+    #: with an applied E_r is refused.  ``None`` (the
     #: default) adds nothing and leaves the structured closure exactly as it
     #: was.  When given, ``chi2_MSE = sum_k ((tan_gamma_pred - tgamma) /
     #: sigma_eff)^2`` joins the structured objective; tan(gamma) is linearised
     #: in the coefficients by finite differences on SOLVED equilibria (one GS
     #: solve per free coefficient) and the closure re-solved
     #: ``structured_mse_steps`` time(s) -- see
-    #: ``utils.structured_mse_outer``.  Ignored by every other channel.
+    #: ``utils.structured_mse_outer``.  With MSE on, the structured trust
+    #: weights are an ABSOLUTE ``sigma^-2`` prior (see ``structured_weights``:
+    #: their overall scale now matters, and a uniform ladder is sigma = 1).
+    #: On any configuration that never runs the structured closure (another
+    #: channel, a g-file source, jBS_baseline_mode != "ohmic",
+    #: recalculate_j_BS off) a supplied block -- or any non-default
+    #: ``structured_mse_*`` knob -- is REFUSED at prepare_baseline() rather
+    #: than silently ignored; ``workflow='custom'`` downgrades that to a WARN.
     mse_data: Optional[dict] = None
     #: closure_channel="structured": REFUSE (raise) when ``mse_data`` is absent
     #: or unusable (fewer than ``structured_mse_min_chords`` weighted finite
@@ -879,7 +907,9 @@ class GenerationConfig:
     #: MSE-constrained closure cannot be delivered.  Default False keeps the
     #: channel's previous behaviour: no block -> no MSE term; a block that is
     #: unusable -> no MSE term, WARNED and recorded (``structured_mse_status``)
-    #: -- never silently.  Setting it with any other closure channel is refused.
+    #: -- never silently.  Setting it on a configuration that never runs the
+    #: structured closure is refused, and ``workflow='custom'`` does NOT
+    #: downgrade that (a required constraint cannot be waived).
     structured_mse_required: bool = False
     #: closure_channel="structured" + ``mse_data``: forward-difference step of
     #: the tan(gamma) Jacobian, in coefficient units.  A numerical-
@@ -1007,6 +1037,14 @@ class GenerationConfig:
     # config validation (BouquetConfig) then emits a DeprecationWarning for
     # any value other than the default.
     swb_iterations: int = 3
+    # GS iteration cap for generate()'s draw loop (TokaMaker_interface.
+    # DrawSolveGuard).  None (default) keeps the solver's own setup cap, so
+    # nothing changes unless it is set; a solve that hits a cap still fails
+    # the draw exactly as before (no re-solve at another tolerance).  Every
+    # draw solve that raises is recorded either way: per draw in
+    # diagnostics['solve_failures'], on Bouquet.solve_failures, and in one
+    # printed "[draw-solves]" line.
+    draw_solve_maxits: Optional[int] = None
     # --- self-consistent bootstrap loop (bouquet.jbs_loop) -------------------
     # True (default): j_BS is re-evaluated (physics.evaluate_jBS: Redl on the
     # caller's own psi_N grid and the CURRENT equilibrium's geometry) inside a
@@ -1188,6 +1226,85 @@ class GenerationConfig:
         DEFAULT preset only when the channel is already ``"structured"``.
         """
         resolve_structured_preset(self, stacklevel=4)
+        validate_structured_mse_settings(self)
+        _m = self.draw_solve_maxits
+        import numbers
+        if _m is not None and (isinstance(_m, bool) or not isinstance(
+                _m, numbers.Integral) or _m < 1):
+            raise ValueError(f"draw_solve_maxits={_m!r} must be an integer "
+                             ">= 1, or None for the solver's own cap")
+
+
+def validate_structured_mse_settings(gc) -> None:
+    """Refuse invalid MSE settings at CONFIG time, before any GS solve.
+
+    Called from :meth:`GenerationConfig.__post_init__` and again at the
+    structured closure's entry (so a field changed after construction is
+    caught too).  Raises a plain ``ValueError`` -- deliberately NOT
+    :class:`bouquet.mse.MSEDataUnusable`, which the non-required path turns
+    into a per-slice "not applied" -- because a bad setting is the caller's
+    configuration error, not a property of one slice's data:
+
+    * ``structured_mse_steps`` an integer >= 1;
+    * ``structured_mse_fd_step`` a finite number > 0;
+    * ``structured_mse_sigma_sys`` a finite number >= 0;
+    * ``structured_mse_min_chords`` an integer >= 1;
+    * ``structured_mse_required`` a bool;
+    * ``mse_data`` ``None`` or a dict with no key outside the schema of
+      :mod:`bouquet.mse` (the values are judged per slice, where a block that
+      is unusable is refused or recorded as not applied);
+    * ``mse_data`` together with ``imas_corrective_jphi=True``: the MSE
+      Jacobian's finite-difference probes are plain solves, while the
+      predictor it is differenced against is solve + corrective iteration,
+      so every column would carry that difference divided by the step.
+    """
+    import math
+    import numbers
+
+    def _int_ge1(name):
+        v = getattr(gc, name, None)
+        if isinstance(v, bool) or not isinstance(v, numbers.Integral) \
+                or int(v) < 1:
+            raise ValueError(f"generation.{name} must be an integer >= 1, "
+                             f"got {v!r}")
+
+    def _real(name, lo, strict):
+        v = getattr(gc, name, None)
+        ok = (not isinstance(v, bool) and isinstance(v, numbers.Real)
+              and math.isfinite(float(v))
+              and (float(v) > lo if strict else float(v) >= lo))
+        if not ok:
+            raise ValueError(f"generation.{name} must be a finite number "
+                             f"{'>' if strict else '>='} {lo:g}, got {v!r}")
+
+    _int_ge1("structured_mse_steps")
+    _int_ge1("structured_mse_min_chords")
+    _real("structured_mse_fd_step", 0.0, strict=True)
+    _real("structured_mse_sigma_sys", 0.0, strict=False)
+    req = getattr(gc, "structured_mse_required", False)
+    if not isinstance(req, bool):
+        raise ValueError("generation.structured_mse_required must be a bool, "
+                         f"got {req!r}")
+    md = getattr(gc, "mse_data", None)
+    if md is None:
+        return
+    if not isinstance(md, dict):
+        raise ValueError("generation.mse_data must be None or a dict in the "
+                         f"schema of bouquet.mse, got {type(md).__name__}")
+    from .mse import (MSE_OPTIONAL_KEYS, MSE_ORIENTATION_KEYS,
+                      MSE_REQUIRED_KEYS, mse_block_unknown_keys)
+    unknown = mse_block_unknown_keys(md)
+    if unknown:
+        raise ValueError(
+            "generation.mse_data carries unknown key(s) " + ", ".join(unknown)
+            + " -- refused rather than ignored (known: "
+            + ", ".join(MSE_REQUIRED_KEYS + MSE_ORIENTATION_KEYS
+                        + MSE_OPTIONAL_KEYS) + ")")
+    if bool(getattr(gc, "imas_corrective_jphi", False)):
+        raise ValueError(
+            "generation.mse_data with imas_corrective_jphi=True is refused: "
+            "the MSE Jacobian differences plain solves against a predictor "
+            "solved WITH the corrective iteration, which biases every column")
 
 
 def resolve_structured_preset(gc, warn: bool = True, stacklevel: int = 3):

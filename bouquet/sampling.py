@@ -31,12 +31,16 @@ from scipy.spatial.distance import cdist
 from scipy import integrate
 from scipy.stats import norm
 
-from .physics import q_ravg
+from .physics import ELEMENTARY_CHARGE_LEGACY, q_ravg
 from typing import Optional
 
 
 # ── physical constant used for pressure ────────────────────────────
-EC = 1.6022e-19  # [J/eV]
+#: [J/eV] Kept for back-compatibility of ``from bouquet.sampling import EC``:
+#: it is the FROZEN LEGACY value (``physics.ELEMENTARY_CHARGE_LEGACY``).  New
+#: code takes ``physics.ELEMENTARY_CHARGE`` or, where the legacy path must
+#: stay bit for bit, ``physics.thermal_pressure_charge(jbs_loop)``.
+EC = ELEMENTARY_CHARGE_LEGACY
 
 # ── default iteration caps (safety valves) ─────────────────────────
 _MAX_PRESSURE_ITER = int(1e5)

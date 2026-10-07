@@ -66,9 +66,7 @@ from ..physics import (effective_impurity_charge, impurity_pressure,
                        impurity_charge_with_fast_ions,
                        isotropize_fast_pressure, main_ion_density_from_zeff,
                        parallel_to_toroidal)
-
-# Elementary charge [C]: thermal pressure p = e * sum_s(n_s * T_s).
-_EC = 1.602176634e-19
+from ..physics import ELEMENTARY_CHARGE as _EC  # p = e * sum_s(n_s * T_s)
 
 if TYPE_CHECKING:
     from ..config import ImasSource, FixedComponentsConfig

@@ -251,6 +251,52 @@ legacy corrector already takes its step.
   peak, 1.4–1.5 % of I_BS), not the "sub-1 %" the docstrings claimed, and the
   IDS export (exact `⟨1/R²⟩`) round-trips `⟨j·B⟩` high by that fraction.
 
+### Engine base: loud refusals and consistency fixes (Stage 0)
+
+- **The inductive-amplitude fallback is loud.** When `fit_inductive_profile`
+  cannot bracket the cylindrical l_i-proxy root it still falls back to 1.0
+  (bracket unchanged), but now prints the reason, the bracket and the
+  residuals at its ends and records them in the reconstruction metrics
+  (`ind_scale_fallback`, `ind_scale_fallback_n`,
+  `ind_scale_fallback_records`). Outputs are bit-identical otherwise.
+- **A failed draw state-anchor solve rejects the draw.** Under the
+  self-consistent loop the anchor solve's failure was swallowed and the draw
+  continued on whatever equilibrium the solver held; it now raises
+  `DrawAnchorSolveFailed` and the draw is rejected, printed and recorded
+  with the new reason code `anchor_solve_failed`. The frozen legacy draw
+  route (loop off) is unchanged.
+- **One electron-charge constant** (`physics.ELEMENTARY_CHARGE =
+  1.602176634e-19`), read by every pressure site. **Deliberate consistency
+  fix:** under the self-consistent loop the draws' (and the g-file
+  reconstruction's) thermal pressure moves from 1.6022e-19 to it, i.e. by
+  −1.46e-5 relative (−1.3e-5 of the total with fast-ion and impurity
+  pressure), which removes the σ=0 draw's pressure offset against the
+  modelling-source forward solve. No fast-test number moved beyond rounding
+  (the toy-solver draws are bit-identical apart from the pressure itself).
+  The frozen legacy path keeps its value as `ELEMENTARY_CHARGE_LEGACY`
+  (selected by `physics.thermal_pressure_charge`), bit for bit;
+  `sampling.EC` remains as that legacy value for back-compatibility.
+- **q0 at like radii.** The solver's reported q0 (`get_stats()['q_0']`) is q
+  at ψ_N = 0.02 (`physics.SOLVER_Q0_PSI_N`), not on axis. The g-file
+  reconstruction metrics now read the g-file's q at that radius (`q0_efit`,
+  `q0_err_pct`), keep its axis value and the old solver-vs-axis error as
+  `q0_efit_axis` / `q0_err_pct_vs_axis`, and record `q0_psi_N`; the
+  delivered states, the σ=0 check's reference and the baseline re-solve
+  record carry `q0_psi_N`; the sawtooth-gate messages name the ψ_N they read.
+  No q0 target, gate, tolerance or verdict changed (the verdict never read
+  q0); the IMAS q0 closure was already like-for-like at `psi_q[0]`.
+- **The legacy path stays bit for bit** under all of the above: its pressure
+  factor is the historical 1.6022e-19 exactly, the amplitude fit is
+  bit-identical to its frozen copy, the anchor rejection is loop-only and
+  the q0 changes are labels (`tests/test_legacy_path_stage0_bitwise.py`, a
+  fast form of the out-of-tree legacy A/B probe).
+- **Optional draw-loop iteration cap** (`draw_solve_maxits`, default `None` =
+  the solver's own cap, so nothing changes unless it is set), with a record
+  of every draw solve that raises (`diagnostics['solve_failures']`,
+  `Bouquet.solve_failures`, one `[draw-solves]` line). Ported from the
+  collaborator's pull request with the same field name; its re-solve of a
+  capped solve at a looser tolerance is NOT ported (not approved).
+
 ## Unreleased — MSE pitch angles on the structured closure (opt-in)
 
 `closure_channel="structured"` accepts measured MSE pitch angles
@@ -261,12 +307,34 @@ the forward model is linearised by forward differences on solved equilibria
 (`utils.structured_mse_jacobian`, one GS solve per free coefficient) and the
 closure re-solved (`utils.structured_mse_outer`); the q0/l_i corrector keeps
 the term in every re-solve it takes. Recorded per slice: chords used, E_r
-treatment, field orientation, chi² before/after/delivered, per-chord residuals,
+treatment, the field orientation (stated by the block's `ip_sign`/`bt_sign` and mapped onto the equilibrium's own directions — never chosen by fit; a better-fitting alternative is flagged), chi² before/after/delivered, per-chord residuals,
 the linearisation residual and the achieved objective, which the linear step
-cannot raise — if it does, the slice is flagged closure-limited.
+cannot raise — if it does, the slice is flagged closure-limited. The q0/l_i
+corrector may re-solve after the MSE stage, so the verdict is also taken on
+the **delivered** equilibrium: its per-chord residuals (in sigma) are
+recorded, and the slice is flagged when the delivered chi² — or, where
+comparable, the delivered objective — is worse than the pre-MSE closure's
+(reporting only; no iteration count or tolerance changed). `n_extra_solves`
+counts the MSE stage's solves; after an applied MSE stage the corrector's
+entry readbacks are recorded as `*_mse_stage`, and `*_predictor` keeps the
+predictor's values.
+Without `Er` or `er_corrected=True` the model takes E_R = 0, which biases the
+fit in a rotating plasma (to first order B_Z is read as B_Z + (A5/A1)E_R —
+a systematic reshaping of the fitted current profile); this is warned and
+recorded. The forward model is the standard A1..A7 form with E_Z = 0 and no
+denominator E_R term (a block applying E_r with non-zero A7 is refused).
 `structured_mse_required=True` refuses instead of running without the
 constraint. **Nothing changes without `mse_data`**: every default is inert and
 no tolerance or acceptance criterion moved.
+
+Under the self-consistent bootstrap loop the MSE chord stage gets the same
+review fixes as the stage above: an off-mesh chord is excluded with its reason
+(fewer than `structured_mse_min_chords` left refuses) and a chord lost on a
+later read is a refusal; the orientation is the stated one, audited and
+flagged, never fitted; every GS solve it spends (restore re-solve included) is
+counted into `n_extra_solves`; per-chord arrays and the Jacobian go to
+`Baseline.mse_record`; and the delivered-equilibrium chi² judgement runs on the
+state it delivers.
 
 ## Unreleased — reversed-current IMAS sources (hotfix)
 
