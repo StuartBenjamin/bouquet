@@ -521,6 +521,246 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
     return out
 
 
+#: Version tag of :func:`evaluate_jBS`, recorded with every loop record so an
+#: archive states which evaluator produced its bootstrap.
+EVALUATE_JBS_VERSION = "evaluate_jBS/1 (Redl 2021 jboot1, NRL/Zavg lnLambda, Koh nu_i*, psi_N-native)"
+
+#: Positional layout of ``sauter_fc``'s geometry block on OFT builds that
+#: return it as a ``(3, n)`` array (builds after OpenFUSIONToolkit#313 return
+#: a dict with these keys instead).
+_SAUTER_RAVG_INDEX = {"<R>": 0, "<1/R>": 1, "<a>": 2}
+#: ... and of its ``[<|B|>, <|B|^2>]`` block.
+_SAUTER_MODB_INDEX = {"<|B|>": 0, "<|B|^2>": 1}
+
+#: Elementary charge [C] -- the eV -> J factor of the Redl drive, the same
+#: constant OFT's ``solve_with_bootstrap`` uses.
+_EC = 1.602176634e-19
+
+
+def _sauter_avg(block, which, index):
+    """Read one flux-surface average off a ``sauter_fc`` output block, dict or
+    positional array (both OFT layouts are in production)."""
+    if isinstance(block, dict):
+        return np.asarray(block[which], dtype=float)
+    return np.asarray(block, dtype=float)[index[which]]
+
+
+def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
+                 isolate_edge=False, smooth_axis=True):
+    r"""Redl bootstrap current on the CURRENT equilibrium, on the caller's grid.
+
+    A faithful port of the inner physics of OpenFUSIONToolkit's
+    ``solve_with_bootstrap`` (SWB) -- NRL electron / ``Zavg`` ion Coulomb
+    logarithms, Koh multi-species ion collisionality, the electron
+    collisionality, ``redl_bootstrap(formula_form='jboot1',
+    use_sign_q=True)`` -- evaluated ONCE on whatever equilibrium ``mygs``
+    holds.  No Grad-Shafranov solve happens inside: the self-consistent loop
+    (:mod:`bouquet.jbs_loop`) owns the solves, this function only reads.
+
+    It differs from SWB's inner evaluation in exactly three ways, each of
+    which is the reason it exists:
+
+    1. **Geometry on the caller's grid.**  ``F``, ``f_T = 1 - f_c``,
+       ``eps = <a>/<R>``, ``q`` and ``<R>`` are sampled at
+       ``psi_eval = clip(psi_N, psi_pad, 1 - psi_pad)`` -- the caller's own
+       surfaces -- not on a uniform grid of the same length.
+    2. **Gradients on the true grid.**  ``d/dpsi = numpy.gradient(y, psi_N,
+       edge_order=2) / (psi_bounds[1] - psi_bounds[0])`` with the CURRENT
+       equilibrium's flux range; a non-uniform ``psi_N`` (e.g. a grid uniform
+       in rho_tor) is differentiated as what it is.
+    3. **Direct toroidal conversion.**  Redl returns the FSA parallel
+       ``<j_BS.B>``; it is converted with
+       :func:`parallel_to_toroidal` (analytic, field-aligned; ``F``, ``<1/R>``
+       and ``<B^2>`` from the SAME surfaces), never through SWB's
+       ``R_avg/F`` projection and its undo.
+
+    **Grids whose first intervals are finer than ``psi_pad``.**  A grid such
+    as ``[0, 1.7e-4, 6.9e-4, 1.6e-3, ...]`` puts several surfaces inside
+    ``psi_pad``, where the flux-surface tracer cannot resolve geometry.
+    ``psi_pad`` is NOT changed and no surface is merged: every point keeps its
+    own profile values and its own gradient on the true grid, and only the
+    GEOMETRY lookup of the points inside the pad is taken at ``psi_pad`` (the
+    innermost surface the tracer resolves).  Geometry is evaluated once per
+    distinct clipped value and mapped back, so the solver is never handed a
+    repeated surface.  The same holds at the separatrix side.
+
+    Parameters
+    ----------
+    mygs : TokaMaker or TokaMaker_equilibrium
+        Anything exposing ``get_profiles(psi=)``, ``sauter_fc(psi=)`` (a
+        ``copy_eq()`` snapshot names it ``calc_sauter_fc``), ``get_q(psi=)``
+        and ``psi_bounds`` -- a live solver or a snapshot.  Only these primitives are used, so the
+        function runs on every OFT build bouquet supports (they exist with
+        and without the ``psi_N=`` argument of ``solve_with_bootstrap``).
+    psi_N : array_like
+        Strictly increasing normalised flux grid in [0, 1] the kinetic
+        profiles live on.
+    ne, te, ni, ti : array_like
+        Densities [m^-3] and temperatures [eV] on ``psi_N``.
+    zeff : array_like or float
+        Effective charge on ``psi_N`` (a scalar is broadcast).
+    psi_pad : float
+        Geometry clip at the axis and the separatrix (SWB's own default).
+    isolate_edge : bool
+        Return the isolated edge spike (OFT ``analyze_bootstrap_edge_spike``
+        ``masked_spike``, applied in SWB's own projection so the shelf/mask
+        detection is identical) instead of the full profile.
+    smooth_axis : bool
+        Apply :func:`bouquet.TokaMaker_interface.smooth_jbs_transition` (the
+        shared innermost-surface repair every SWB-derived profile receives).
+        ``False`` returns the raw profile (the delta-composition mode needs it).
+
+    Returns
+    -------
+    (j_BS_tor, diag)
+        ``j_BS_tor`` -- toroidal FSA current density ``<j_phi/R>/<1/R>``
+        [A/m^2] on ``psi_N`` (isolated/smoothed as requested).  ``diag`` --
+        ``psi_eval``, ``f_T``, ``nu_e_star``, ``nu_i_star``, ``q``, ``eps``,
+        ``R_avg``, ``F``, ``avg_inv_R``, ``avg_B2``, ``dpsi`` (signed flux
+        range), ``j_dot_B`` (Redl ``<j.B>``), ``j_tor_full_raw`` (full
+        profile, unsmoothed), ``j_tor_raw`` (selected profile before
+        smoothing), ``I_BS`` (signed FSA integral of ``j_BS_tor`` [A]),
+        ``version``.
+    """
+    import OpenFUSIONToolkit.TokaMaker.bootstrap as _oft_bs
+
+    psi_N = np.asarray(psi_N, dtype=float)
+    n = psi_N.size
+    if psi_N.ndim != 1 or n < 3:
+        raise ValueError("evaluate_jBS: psi_N must be 1-D with >= 3 points")
+    if not np.all(np.isfinite(psi_N)):
+        raise ValueError("evaluate_jBS: psi_N contains non-finite values")
+    if np.any(np.diff(psi_N) <= 0.0):
+        raise ValueError("evaluate_jBS: psi_N must be strictly increasing")
+    if psi_N[0] < 0.0 or psi_N[-1] > 1.0:
+        raise ValueError(
+            f"evaluate_jBS: psi_N must lie in [0, 1] (got {psi_N[0]}, "
+            f"{psi_N[-1]})")
+    psi_pad = float(psi_pad)
+    if not (0.0 < psi_pad < 0.5):
+        raise ValueError(f"evaluate_jBS: psi_pad must be in (0, 0.5), got "
+                         f"{psi_pad!r}")
+
+    def _prof(a, name):
+        a = np.asarray(a, dtype=float)
+        if a.ndim == 0:
+            a = np.full(n, float(a))
+        if a.shape != (n,):
+            raise ValueError(f"evaluate_jBS: {name} has shape {a.shape}, "
+                             f"expected ({n},) to match psi_N")
+        if not np.all(np.isfinite(a)):
+            raise ValueError(f"evaluate_jBS: {name} contains non-finite "
+                             "values")
+        return a
+
+    ne = _prof(ne, "ne")
+    te = _prof(te, "te")
+    ni = _prof(ni, "ni")
+    ti = _prof(ti, "ti")
+    zeff = _prof(zeff, "zeff")
+
+    # ---- geometry on the caller's surfaces (distinct clipped values only) ---
+    psi_eval = np.clip(psi_N, psi_pad, 1.0 - psi_pad)
+    psi_u, inv = np.unique(psi_eval, return_inverse=True)
+    psi_u = np.ascontiguousarray(psi_u, dtype=float)
+    _, F_u, _, _, _ = mygs.get_profiles(psi=psi_u.copy())
+    # a live TokaMaker exposes sauter_fc; a copy_eq() snapshot
+    # (TokaMaker_equilibrium) exposes the same routine as calc_sauter_fc
+    _sfc = getattr(mygs, "sauter_fc", None)
+    if _sfc is None:
+        _sfc = getattr(mygs, "calc_sauter_fc")
+    fc_u, r_sau, modb = _sfc(psi=psi_u.copy())[-3:]
+    _, q_u, ravgs_q, *_rest = mygs.get_q(psi=psi_u.copy())
+    F = np.asarray(F_u, dtype=float)[inv]
+    f_T = (1.0 - np.asarray(fc_u, dtype=float))[inv]
+    eps = (_sauter_avg(r_sau, "<a>", _SAUTER_RAVG_INDEX)
+           / _sauter_avg(r_sau, "<R>", _SAUTER_RAVG_INDEX))[inv]
+    avg_inv_R = _sauter_avg(r_sau, "<1/R>", _SAUTER_RAVG_INDEX)[inv]
+    avg_B2 = _sauter_avg(modb, "<|B|^2>", _SAUTER_MODB_INDEX)[inv]
+    q = np.asarray(q_u, dtype=float)[inv]
+    R_avg = np.asarray(q_ravg(ravgs_q, "<R>"), dtype=float)[inv]
+    inv_R_q = np.asarray(q_ravg(ravgs_q, "<1/R>"), dtype=float)[inv]
+    dV_dpsi = np.abs(np.asarray(q_ravg(ravgs_q, "dV/dPsi"), dtype=float))[inv]
+
+    # ---- gradients on the TRUE grid, current flux range ---------------------
+    bounds = np.asarray(mygs.psi_bounds, dtype=float)
+    psi_range = float(bounds[1] - bounds[0])
+    if psi_range == 0.0 or not np.isfinite(psi_range):
+        raise ValueError(f"evaluate_jBS: degenerate psi_bounds {bounds}")
+
+    def _d(y):
+        return np.gradient(y, psi_N, edge_order=2) / psi_range
+
+    dn_e = _d(ne)
+    dT_e = _d(te)
+    dn_i = _d(ni)
+    dT_i = _d(ti)
+
+    # ---- collisionality (verbatim SWB physics) ------------------------------
+    ln_le, ln_lii = _oft_bs.calculate_ln_lambda(
+        te, ti, ne, ni, zeff,
+        electron_lnLambda_model="NRL", ion_lnLambda_model="Zavg")
+    Zdom = 1.0                         # deuterium main ion
+    Zavg = ne / ni
+    Zion = (Zdom ** 2 * Zavg * zeff) ** 0.25
+    nu_i_star = (4.90e-18 * np.abs(q) * R_avg * ni
+                 * Zion ** 4 * ln_lii / (ti ** 2 * eps ** 1.5))
+    nu_e_star = (6.921e-18 * np.abs(q) * R_avg * ne
+                 * zeff * ln_le / (te ** 2 * eps ** 1.5))
+
+    j_dot_B, _coeffs = _oft_bs.redl_bootstrap(
+        psi_N=psi_N, Te=te, Ti=ti, ne=ne, ni=ni,
+        pe=_EC * (ne * te), pi=_EC * (ni * ti),
+        Zeff=zeff, R=R_avg, q=q, eps=eps, fT=f_T, I_psi=F,
+        dT_e_dpsi=dT_e, dT_i_dpsi=dT_i,
+        dn_e_dpsi=dn_e, dn_i_dpsi=dn_i,
+        ln_lambda_e=ln_le, ln_lambda_ii=ln_lii,
+        nu_e_star_override=nu_e_star, nu_i_star_override=nu_i_star,
+        use_legacy_L34=False, use_sign_q=True, formula_form="jboot1")
+    j_dot_B = np.nan_to_num(np.asarray(j_dot_B, dtype=float), nan=0.0)
+
+    geom = {"F": F, "avg_inv_R": avg_inv_R, "avg_B2": avg_B2}
+    j_tor_full = np.nan_to_num(parallel_to_toroidal(j_dot_B, geom=geom),
+                               nan=0.0)
+
+    if isolate_edge:
+        # SWB isolates the spike on its OWN projection <j.B> R_avg/F (the
+        # shelf/mask detection is value-dependent), and bouquet then converts
+        # the masked spike by the per-surface factor.  Same order here.
+        swb_proj = j_dot_B * (R_avg / F)
+        res = _oft_bs.analyze_bootstrap_edge_spike(psi_N, swb_proj)
+        masked = np.asarray(res["masked_spike"], dtype=float)
+        j_tor_sel = np.nan_to_num(parallel_to_toroidal(
+            masked * F / R_avg, geom=geom), nan=0.0)
+    else:
+        j_tor_sel = j_tor_full
+
+    if smooth_axis:
+        from .TokaMaker_interface import smooth_jbs_transition
+        j_out = smooth_jbs_transition(j_tor_sel)
+    else:
+        j_out = np.asarray(j_tor_sel, dtype=float).copy()
+
+    # FSA current of the delivered profile ('fsa' measure: V'/2pi <1/R>).
+    w_fsa = dV_dpsi / (2.0 * np.pi) * inv_R_q * abs(psi_range)
+    from scipy.integrate import trapezoid as _trap
+    I_BS = float(_trap(w_fsa * j_out, psi_N))
+
+    diag = dict(
+        psi_eval=psi_eval, psi_pad=psi_pad,
+        n_geometry_surfaces=int(psi_u.size),
+        f_T=f_T, nu_e_star=nu_e_star, nu_i_star=nu_i_star, q=q, eps=eps,
+        R_avg=R_avg, F=F, avg_inv_R=avg_inv_R, avg_B2=avg_B2,
+        ln_lambda_e=np.asarray(ln_le, dtype=float),
+        ln_lambda_ii=np.asarray(ln_lii, dtype=float),
+        dpsi=psi_range, j_dot_B=j_dot_B,
+        j_tor_full_raw=j_tor_full, j_tor_raw=np.asarray(j_tor_sel, float),
+        I_BS=I_BS, isolate_edge=bool(isolate_edge),
+        smooth_axis=bool(smooth_axis), version=EVALUATE_JBS_VERSION,
+    )
+    return j_out, diag
+
+
 def effective_impurity_charge(ne, ni, zeff, min_dilution=1e-3):
     """Effective single-impurity charge Z_imp from a baseline (ne, ni, Zeff).
 

@@ -2010,7 +2010,8 @@ def _li_record(li_model, li_anchor, li_target, li_grad, x, Ip_pinned=None):
 SIGN_ITER_MAX = 8
 
 
-def _one_sided_sign_iterate(solve_for, K, who, max_iter=SIGN_ITER_MAX):
+def _one_sided_sign_iterate(solve_for, K, who, max_iter=SIGN_ITER_MAX,
+                            start_pattern=None):
     r"""Solve an asymmetric-Tikhonov structured closure by SIGN ITERATION.
 
     The one-sided prior (see :func:`close_ip_structured`) penalises an
@@ -2056,7 +2057,9 @@ def _one_sided_sign_iterate(solve_for, K, who, max_iter=SIGN_ITER_MAX):
     *solve_for* takes a length-*K* boolean pattern (True = "this coefficient
     is on the up side") and returns a tuple whose FIRST entry is the full
     ``(2K,)`` coefficient vector.  The iteration starts from the all-down
-    pattern, costs zero GS solves (each step is the same linear algebra the
+    pattern (or *start_pattern*: the closure's logged retry from a previous
+    solution's coefficients starts from THEIR sign pattern), costs zero GS
+    solves (each step is the same linear algebra the
     symmetric channel does once), and is capped at *max_iter*.  ``a_k == 0``
     counts as DOWN, which is the only convention that leaves the symmetric
     case (``sigma_up == sigma_down``) settling on the first solve.
@@ -2069,7 +2072,11 @@ def _one_sided_sign_iterate(solve_for, K, who, max_iter=SIGN_ITER_MAX):
     which is a finding to report.
     """
     _fmt = lambda p: "".join("+" if v else "-" for v in p)
-    pattern = (False,) * int(K)
+    pattern = ((False,) * int(K) if start_pattern is None
+               else tuple(bool(v) for v in start_pattern))
+    if len(pattern) != int(K):
+        raise ValueError(f"{who}: start_pattern has {len(pattern)} entries, "
+                         f"expected {int(K)}")
     seen = [pattern]
     for it in range(1, int(max_iter) + 1):
         out = solve_for(pattern)
@@ -2920,6 +2927,52 @@ def _sigma_ladder(spec, K, K_default, who, name):
     return s
 
 
+#: Factor on the rounding-noise estimate of the soft closure's objective
+#: (``eps * sum_i (2 |r_i| m_i + r_i^2)``, see
+#: :func:`close_ip_structured_soft`): the acceptance test compares TWO noisy
+#: evaluations (F and F_new), so a decrease is resolvable only above twice the
+#: noise of one.
+NOISE_FLOOR_FACTOR = 2.0
+
+#: The refusal :func:`soft_closure_with_retry` retries (and no other).
+_LEVENBERG_REFUSAL = "Levenberg damping could not find a descent step"
+
+
+def soft_closure_with_retry(solve, x_prev=None, who="structured closure"):
+    """``solve(x0)`` with ONE logged retry from *x_prev* after a no-descent
+    refusal.
+
+    *solve* is ``lambda x0: close_ip_structured_soft(..., x0=x0)``.  The first
+    call starts at ``s == 1`` (``x0=None``) exactly as every caller always
+    did.  If -- and only if -- it raises the Levenberg "could not find a
+    descent step" refusal and *x_prev* (the previous pass's coefficients) is
+    given, it is called ONCE more from *x_prev*.  A second refusal is a real
+    refusal and is raised, carrying both messages.  Any other error is raised
+    at once.  The returned dict gains ``closure_retry`` (0/1) and, after a
+    retry, ``closure_retry_first_error``.
+    """
+    try:
+        out = solve(None)
+        out["closure_retry"] = 0
+        out["closure_retry_first_error"] = None
+        return out
+    except RuntimeError as e:
+        if x_prev is None or _LEVENBERG_REFUSAL not in str(e):
+            raise
+        first = str(e)
+    print(f"[{who}] closure refused ({first[:160]}); ONE retry from the "
+          "previous pass's coefficients (closure_retry=1)", flush=True)
+    try:
+        out = solve(np.asarray(x_prev, dtype=float))
+    except RuntimeError as e2:
+        raise RuntimeError(
+            f"{e2} [after one retry from the previous pass's coefficients; "
+            f"first refusal: {first[:300]}]") from e2
+    out["closure_retry"] = 1
+    out["closure_retry_first_error"] = first[:300]
+    return out
+
+
 def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                              Ip_sigma, j_ind, j_bs, j_fix,
                              basis=None, sigma_ind=None, sigma_bs=None,
@@ -2927,7 +2980,7 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                              li_geom=None, axis=None, axis_sigma=None,
                              scale_bounds=(0.2, 5.0), rtol=1e-10,
                              max_iter=100, cond_rtol=1e-6,
-                             sigma_ind_up=None, mse_lin=None):
+                             sigma_ind_up=None, mse_lin=None, x0=None):
     r"""The POSTERIOR-MODE structured closure: Ip and l_i as measurements.
 
     :func:`close_ip_structured` treats Ip (and the axis current, and l_i) as
@@ -3017,6 +3070,39 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
     on *x*;
     a run that hits *max_iter* without either is a ``RuntimeError``, never a
     quietly-returned half-solution.
+
+    **When no damped step can be verified downhill** (all Levenberg tries
+    fail the ``F (1 + 1e-14)`` test) the iterate is accepted only when it is
+    stationary to within what the objective can resolve, and refused
+    otherwise:
+
+    * ``stop_reason="gradient_floor"`` -- the scaled gradient is below
+      ``rtol * max|J| * max(sqrt F, 1)`` (the historical test, unchanged);
+    * ``stop_reason="noise_floor"`` -- the gradient is at the floor the
+      objective's ROUNDING NOISE implies AND every Levenberg try's predicted
+      decrease (and the undamped Gauss-Newton step's) is below that noise.
+      The noise is estimated from the rows themselves:
+      ``noise_F = NOISE_FLOOR_FACTOR * eps * sum_i (2 |r_i| m_i + F/n)``
+      with ``m_i`` the sum of the magnitudes of the terms row ``i`` is
+      computed from, in its own sigma units (e.g. ``(|Ip0| + sum|row_j x_j|
+      + |Ip_t|) / sigma_Ip`` for the Ip row: an MA-scale difference over a
+      kA-scale sigma is where the noise comes from); the gradient floor it
+      implies is ``||J||_2 sqrt(noise_F)`` -- a larger gradient could not
+      hide its Gauss-Newton decrease (``>= |g|^2 / ||J||_2^2``) in the
+      noise.  Such an iterate is within rounding of the minimiser: a further
+      decrease exists only below the resolution of F, far below the
+      ``rtol`` relative-change test that ends every ordinary run.  The
+      gradient, the predicted decrease and the noise estimate are recorded
+      (``gn_stop``);
+    * otherwise ``RuntimeError`` ("Levenberg damping could not find a
+      descent step") -- unchanged.
+
+    ``x0`` (optional, full ``(2K,)`` coefficients) starts Gauss-Newton there
+    instead of at ``s == 1`` (projected onto the hard-constraint manifold),
+    and the one-sided sign iteration from ``x0``'s sign pattern: the logged
+    single retry the self-consistent bootstrap loop takes from the previous
+    pass's coefficients after a refusal (:func:`soft_closure_with_retry`).
+    It changes the path, never the minimiser of a convex problem.
 
     **MSE pitch angles (optional).**  ``mse_lin`` (the linear model of
     :func:`structured_mse_linear_model`) appends one residual per chord,
@@ -3180,6 +3266,18 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
         x[free] = xf
         return x
 
+    # the start of Gauss-Newton: s == 1 (z = 0), or the caller's x0 projected
+    # onto the hard-constraint manifold (the logged retry's start)
+    z_start = np.zeros(N.shape[1], dtype=float)
+    if x0 is not None:
+        _x0 = np.asarray(x0, dtype=float).ravel()
+        if _x0.shape != (2 * K,) or not np.all(np.isfinite(_x0)):
+            raise ValueError("close_ip_structured_soft: x0 must be a finite "
+                             f"({2 * K},) coefficient vector, got shape "
+                             f"{_x0.shape}")
+        z_start = N.T @ (_x0[free] - x_p)
+    gn_stops = []
+
     def _gauss_newton(sig_f):
         """One posterior-mode solve for ONE fixed inductive prior ladder.
 
@@ -3217,20 +3315,67 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
             Jx = np.asarray(J, dtype=float).reshape(r.size, n)
             return r, Jx @ N
 
+        def _row_magnitudes(z):
+            """Per residual row (same order as ``_resid_jac``): the sum of the
+            magnitudes of the terms the row is computed from, in the row's own
+            sigma units -- ``eps`` times it bounds the row's rounding error."""
+            xf = x_p + N @ z
+            mxf = np.abs(x_p) + np.abs(N) @ np.abs(z)
+            x = _full(xf)
+            m = []
+            for i in np.nonzero(prior_active)[0]:
+                m.append(mxf[i] / sig_f[i])
+            if Ip_sigma is not None:
+                m.append((abs(Ip0) + float(np.abs(ip_row) @ np.abs(x))
+                          + abs(float(Ip_target_signed))) / float(Ip_sigma))
+            if axis_row is not None and axis_sigma is not None:
+                m.append((abs(axis0) + float(np.abs(axis_row) @ np.abs(x))
+                          + abs(j_ref0)) / float(axis_sigma))
+            if li_model is not None:
+                a_, b_ = x[:K], x[K:]
+                mS = (abs(li_model["S0"]) + float(np.abs(li_model["S_ind"])
+                                                  @ np.abs(a_))
+                      + float(np.abs(li_model["S_bs"]) @ np.abs(b_)))
+                mI = (abs(li_model["Ip0"]) + float(np.abs(li_model["Ip_ind"])
+                                                   @ np.abs(a_))
+                      + float(np.abs(li_model["Ip_bs"]) @ np.abs(b_)))
+                S_ = float(li_model["S0"] + li_model["S_ind"] @ a_
+                           + li_model["S_bs"] @ b_)
+                I_ = float(li_model["Ip0"] + li_model["Ip_ind"] @ a_
+                           + li_model["Ip_bs"] @ b_)
+                li_x, _ipx = structured_li_of(li_model, x)
+                rel = (mS / max(abs(S_), 1e-300) + 2.0 * mI
+                       / max(abs(I_), 1e-300) + 3.0)
+                m.append((abs(li_x) * rel + abs(float(li_target)))
+                         / float(li_sigma))
+            if mse_M is not None:
+                m.extend(np.abs(mse_M) @ np.abs(x) + np.abs(mse_m))
+            return np.asarray(m, dtype=float)
+
+        def _noise_of_F(z, r, F):
+            m = _row_magnitudes(z)
+            if m.shape != r.shape:          # defensive: never guess
+                return None
+            return float(NOISE_FLOOR_FACTOR * np.finfo(float).eps
+                         * (float(np.sum(2.0 * np.abs(r) * m)) + F))
+
         # ---- Gauss-Newton with a Levenberg damping fallback ---------------------
         nz = N.shape[1]
-        z = np.zeros(nz, dtype=float)
+        z = np.array(z_start, dtype=float, copy=True)
         r, J = _resid_jac(z)
         F = float(r @ r)
         lam = 0.0
         n_iter = 0
         converged = nz == 0            # nothing free to fit: the hard rows decide
+        gstop = dict(stop_reason=("no free coefficient: the hard rows decide"
+                                  if converged else None))
         for n_iter in range(1, int(max_iter) + 1):
             if converged:
                 n_iter -= 1
                 break
             step = None
             trial_lam = lam
+            pred_trials = []
             for _ in range(16):
                 if trial_lam <= 0.0:
                     Ja, ra = J, -r
@@ -3241,6 +3386,8 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                 if not np.all(np.isfinite(d)):
                     trial_lam = max(10.0 * trial_lam, 1.0e-8)
                     continue
+                _Jd = J @ d
+                pred_trials.append(-float(2.0 * (r @ _Jd) + _Jd @ _Jd))
                 r_new, J_new = _resid_jac(z + d)
                 F_new = float(r_new @ r_new)
                 # a hair of slack so a step that is downhill in exact arithmetic
@@ -3265,11 +3412,40 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                     * max(float(np.sqrt(F)), 1.0)
                 if gnorm <= floor:
                     converged = True
+                    gstop = dict(stop_reason="gradient_floor", gradient=gnorm,
+                                 gradient_floor=floor)
+                    break
+                # Noise-aware test: is the iterate stationary to within what
+                # the objective can RESOLVE?  (see the docstring)
+                noise = _noise_of_F(z, r, F)
+                _dgn = np.linalg.lstsq(J, -r, rcond=None)[0]
+                _Jd = J @ _dgn
+                pred_gn = (-float(2.0 * (r @ _Jd) + _Jd @ _Jd)
+                           if np.all(np.isfinite(_dgn)) else float("inf"))
+                pred_max = max([pred_gn] + pred_trials)
+                g2 = float(np.linalg.norm(J.T @ r))
+                sJ = float(np.linalg.norm(J, 2)) if J.size else 0.0
+                gfloor_noise = (None if noise is None
+                                else sJ * float(np.sqrt(noise)))
+                if (noise is not None and np.isfinite(pred_max)
+                        and pred_max <= noise and g2 <= gfloor_noise):
+                    converged = True
+                    gstop = dict(stop_reason="noise_floor", gradient=gnorm,
+                                 gradient_l2=g2, gradient_floor=floor,
+                                 gradient_floor_noise=gfloor_noise,
+                                 predicted_decrease=pred_max,
+                                 predicted_decrease_gn=pred_gn,
+                                 noise_F=noise, objective=F,
+                                 n_trials=len(pred_trials),
+                                 noise_factor=float(NOISE_FLOOR_FACTOR))
                     break
                 raise RuntimeError(
                     "close_ip_structured_soft: Levenberg damping could not find a "
                     f"descent step at objective {F:.6e} (scaled gradient "
-                    f"{gnorm:.3e} > floor {floor:.3e}) -- the measurement rows and "
+                    f"{gnorm:.3e} > floor {floor:.3e}; predicted decrease "
+                    f"{pred_max:.3e} vs rounding noise of the objective "
+                    + ("n/a" if noise is None else f"{noise:.3e}")
+                    + ") -- the measurement rows and "
                     "the prior are inconsistent on this basis")
             d, r, J, F_new = step
             lam = 0.0 if trial_lam == 0.0 else max(trial_lam / 10.0, 1.0e-12)
@@ -3280,17 +3456,19 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
             F, F_prev = F_new, F
             if dF <= float(rtol) * max(F, 1.0e-300) or stepped:
                 converged = True
+                gstop = dict(stop_reason=("step" if stepped else
+                                          "objective_change"))
                 break
         if not converged:
             raise RuntimeError(
                 f"close_ip_structured_soft: Gauss-Newton did not converge in "
                 f"{max_iter} iterations (objective {F:.6e}); refusing to return a "
                 "half-solved posterior mode")
-
-        return z, F, n_iter, lam
+        gn_stops.append(dict(gstop))
+        return z, F, n_iter, lam, gstop
 
     if sig_ind_up is None:
-        z, F, n_iter, lam = _gauss_newton(sig_f)
+        z, F, n_iter, lam, gstop = _gauss_newton(sig_f)
         sig_f_used = sig_f
         sign_pattern, n_sign_iter = None, 0
     else:
@@ -3298,12 +3476,14 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
             s_now = np.concatenate(
                 [np.where(np.asarray(pat, dtype=bool), sig_ind_up, sig_ind),
                  sig_bs])[free]
-            z_n, F_n, ni_n, lam_n = _gauss_newton(s_now)
-            return (_full(x_p + N @ z_n), z_n, F_n, ni_n, lam_n, s_now)
+            z_n, F_n, ni_n, lam_n, gs_n = _gauss_newton(s_now)
+            return (_full(x_p + N @ z_n), z_n, F_n, ni_n, lam_n, s_now, gs_n)
 
+        _start = (None if x0 is None else
+                  tuple(bool(v) for v in (np.asarray(x0, float)[:K] > 0.0)))
         _out, sign_pattern, n_sign_iter = _one_sided_sign_iterate(
-            _solve_for, K, "close_ip_structured_soft")
-        _x, z, F, n_iter, lam, sig_f_used = _out
+            _solve_for, K, "close_ip_structured_soft", start_pattern=_start)
+        _x, z, F, n_iter, lam, sig_f_used, gstop = _out
 
     x = _full(x_p + N @ z)
     a, b = x[:K], x[K:]
@@ -3404,6 +3584,11 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
         kkt_singular_values=None, kkt_cond=None,
         constraint_singular_values=None, constraint_cond=None,
         solver="soft-GaussNewton",
+        gn_stop=dict(gstop),
+        gn_stop_reason=gstop.get("stop_reason"),
+        n_noise_floor_accepts=int(sum(
+            1 for g in gn_stops if g.get("stop_reason") == "noise_floor")),
+        started_from_x0=bool(x0 is not None),
         **li_rec,
         **_mse_record(mse_lin, x, float(F)),
     )
@@ -3881,6 +4066,7 @@ def store_equilibrium(
     diverted=None,
     aux=None,
     eq_fsa=None,
+    jbs_loop=None,
 ):
     """
     Write one perturbed equilibrium into the HDF5 database.
@@ -3914,6 +4100,12 @@ def store_equilibrium(
         1-D effective charge profile (dimensionless).
     coil_currents : dict or None
         Coil currents {name: current_A} from TokaMaker.
+    jbs_loop : dict or None
+        The draw's self-consistent bootstrap record
+        (``GenerationConfig.jbs_self_consistent``): written as the group
+        attrs ``jbs_converged`` / ``jbs_n_passes`` and the full record as
+        JSON in ``jbs_loop_json``.  ``None`` (the legacy path) writes nothing,
+        so a legacy archive is unchanged.
     """
     db_path = os.path.abspath(f"{header}.h5")
     if not os.path.isfile(db_path):
@@ -4077,6 +4269,37 @@ def store_equilibrium(
                 _u = EQ_FSA_UNITS.get(_name)
                 if _u:
                     ds.attrs["units"] = _u
+
+        # ---- self-consistent bootstrap record (optional) ------------------
+        if jbs_loop is not None:
+            import json as _json
+            from .jbs_loop import jsonable as _jsonable
+            _rec = _jsonable(jbs_loop)
+            grp.attrs["jbs_converged"] = bool(_rec.get("converged", False))
+            grp.attrs["jbs_n_passes"] = int(_rec.get("n_passes_total", 0)
+                                            or 0)
+            grp.attrs["jbs_loop_json"] = _json.dumps(_rec)
+
+
+def load_jbs_loop(header, count, scan_key=None):
+    """The self-consistent bootstrap record of one draw, or ``None``.
+
+    Reads the ``jbs_loop_json`` attr :func:`store_equilibrium` writes when
+    ``GenerationConfig.jbs_self_consistent`` was on; legacy draws carry none.
+    """
+    import json as _json
+    db_path = os.path.abspath(f"{header}.h5") if not str(header).endswith(
+        ".h5") else os.path.abspath(str(header))
+    with h5py.File(db_path, "r") as hf:
+        grp_path = _group_path(scan_key, count)
+        if grp_path not in hf:
+            raise KeyError(f"{grp_path} not in {db_path}")
+        raw = hf[grp_path].attrs.get("jbs_loop_json")
+    if raw is None:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode()
+    return _json.loads(raw)
 
 
 def load_eq_fsa(header, count, scan_key=None):

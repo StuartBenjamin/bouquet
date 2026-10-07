@@ -921,6 +921,11 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     # the user asked for it; the curated summary is printed by Bouquet.reconstruct.
     from .utils import capture_native_output
     verbose = bool(getattr(config, "verbose", False))
+    # Self-consistent bootstrap (GenerationConfig.jbs_self_consistent): the
+    # loop wraps fit + l_i match + corrective; None -> the legacy SWB path.
+    from .jbs_loop import jbs_settings as _jbs_settings
+    _jbs = _jbs_settings(config.generation)
+    _jbs_kw = {"jbs_loop": _jbs} if _jbs["enabled"] else {}
     with capture_native_output(enabled=not verbose) as _cap:
         result = reconstruct_equilibrium(
             mygs, eqdsk,
@@ -935,6 +940,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             p_fast=p_fast_eq,
             Z_imp=Z_imp_recon,
             l_i_tolerance=float(config.generation.l_i_tolerance),
+            **_jbs_kw,
         )
         # get_stats traces the q-profile and can emit gs_get_qprof warnings, so
         # keep these inside the capture too.
@@ -998,6 +1004,10 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         recon_metrics = _reconstruction_metrics(
             mygs, eqdsk, result, source, l_i_target,
             l_i_realized_post_corrective=l_i_realized_post_corrective)
+        if result.get("jbs_loop") is not None:
+            from .jbs_loop import jsonable as _jsonable
+            recon_metrics = dict(recon_metrics or {})
+            recon_metrics["jbs_loop"] = _jsonable(result["jbs_loop"])
 
     j_phi = np.asarray(result["j_phi_fit"], dtype=float)
     j_BS = np.asarray(result["j_BS_used"], dtype=float)

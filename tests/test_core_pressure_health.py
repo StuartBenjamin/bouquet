@@ -474,6 +474,30 @@ def _region(body, start_pred, stop_pred):
     return body[i0:i1]
 
 
+def _composition_body(func):
+    """The statement list holding the pressure composition: the function's
+    own body, or -- where the reconstruction composes it per l_i-match pass
+    -- the body of its nested ``_fit_match``."""
+    body = _function_body(func)
+    for node in ast.walk(ast.Module(body=body, type_ignores=[])):
+        if isinstance(node, ast.FunctionDef) and node.name == "_fit_match":
+            return node.body
+    return body
+
+
+def _composition_names():
+    """Module-level names the composition region reads (present only on
+    builds that have them), and the reconstruction's own arguments it uses."""
+    import bouquet.TokaMaker_interface as _ti
+    ns = {k: getattr(_ti, k) for k in ("thermal_pressure_charge",
+                                       "solver_pprime")
+          if hasattr(_ti, k)}
+    if hasattr(_ti, "resolve_edge_pressure"):
+        ns["_edge"] = _ti.resolve_edge_pressure(None)
+    ns["jbs_loop"] = None
+    return ns
+
+
 def _assigns(name):
     def pred(s):
         return (isinstance(s, ast.Assign) and len(s.targets) == 1
@@ -503,7 +527,7 @@ def _kinetics(psi_N):
 def test_reconstruction_pressure_composition_is_bit_identical():
     from bouquet.TokaMaker_interface import reconstruct_equilibrium
     from bouquet.utils import pchip_derivative
-    body = _function_body(reconstruct_equilibrium)
+    body = _composition_body(reconstruct_equilibrium)
     region = _region(body, _assigns("pres_tmp"), _assigns("ffp_prof"))
     psi_N = np.linspace(0.0, 1.0, 129)
     ne, te, ni, ti = _kinetics(psi_N)
@@ -516,7 +540,8 @@ def test_reconstruction_pressure_composition_is_bit_identical():
               "ne": ne.copy(), "te": te.copy(), "ni": ni.copy(),
               "ti": ti.copy(), "p_fast": p_fast.copy(), "Z_imp": 6.0,
               "eqdsk": SimpleNamespace(psi_N=psi_N.copy()),
-              "mygs": SimpleNamespace(psi_bounds=(-0.4, 0.15))}
+              "mygs": SimpleNamespace(psi_bounds=(-0.4, 0.15)),
+              **_composition_names()}
         removed = _run(region, ns, strip)
         if strip:
             assert removed >= 3, "the _pc statements were not found"

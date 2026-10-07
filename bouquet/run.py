@@ -689,6 +689,11 @@ class Bouquet:
         from .baseline import resolve_baseline
         from .config import ImasSource
 
+        # the self-consistent bootstrap loop runs in the baseline too, so its
+        # workflow refusals fire here (before single_profile_jphi rewrites
+        # recalculate_j_BS below), not only at generate()
+        self._check_jbs_loop_workflow(self.config.generation)
+
         # single_profile_jphi: drop the per-draw Sauter recompute BEFORE the
         # baseline work, so the IMAS forward solve does not spend a bootstrap
         # call either. The total j_phi is anchored to the source either way, so
@@ -843,7 +848,7 @@ class Bouquet:
     def _close_ip_q0_predictor(gc, bl, eq_snap, geom, probe, psi_N,
                                j_ind, j_BS_swb, j_fixed, FUSE_tot,
                                sgn, Ip_t, c_signed, ip_ind, ip_bs, ip_fix,
-                               close_ip):
+                               close_ip, q0_ref=None):
         """Solve-free (s_ohm, s_bs) for ``closure_channel="sawtooth_bootstrap"``.
 
         ``c_signed`` is the P'-term constant ALREADY paired with the data's
@@ -913,6 +918,14 @@ class Bouquet:
         ``q0_tol`` is not a numerical nicety -- it is the band inside which
         this linearisation is trustworthy, and a slice whose residual exceeds
         it needs the corrector's MEASURED ``dq0/ds_ohm``, not a wider band.
+
+        **Self-consistent bootstrap loop** (``jbs_self_consistent=True``): the
+        predictor is re-run every pass on that pass's geometry.  ``q0_ref``
+        (a dict with ``q0_target``, ``q0_anchor``, ``j_achieved0``,
+        ``j_requested0``) then carries the reference computed ONCE on the
+        original anchor -- a data-derived target, held fixed, and so is the
+        axis-current row derived from it.  ``None`` (the default) is the
+        historical behaviour, line for line.
         """
         import numpy as np
 
@@ -925,16 +938,25 @@ class Bouquet:
         # tracer onto the magnetic axis there (fsa_current_geometry docstring).
         _ax = lambda j: float(np.interp(psi_q[0], psi_geom,
                                         np.asarray(j, dtype=float)))
-        q0_anchor = float(np.asarray(eq_snap.get_q(psi=psi_q.copy())[1],
-                                     dtype=float)[0])
-        # ACHIEVED: the anchor's GS-reconstructed own profile (round-trips to
-        # its achieved Ip).  REQUESTED: the source total that was handed in.
-        # Their ratio IS TokaMaker's Ip renormalisation of the anchor.
-        j_achieved0 = float(np.asarray(probe, dtype=float)[0])
-        j_requested0 = _ax(FUSE_tot)
-        # The algebra lives in utils.unrenormalise_q0 so the tests exercise
-        # the SHIPPED formula, not a re-derivation (same rule as close_ip).
-        q0_target = unrenormalise_q0(q0_anchor, j_achieved0, j_requested0)
+        if q0_ref is None:
+            q0_anchor = float(np.asarray(eq_snap.get_q(psi=psi_q.copy())[1],
+                                         dtype=float)[0])
+            # ACHIEVED: the anchor's GS-reconstructed own profile (round-trips
+            # to its achieved Ip).  REQUESTED: the source total that was
+            # handed in.  Their ratio IS TokaMaker's Ip renormalisation of the
+            # anchor.
+            j_achieved0 = float(np.asarray(probe, dtype=float)[0])
+            j_requested0 = _ax(FUSE_tot)
+            # The algebra lives in utils.unrenormalise_q0 so the tests
+            # exercise the SHIPPED formula, not a re-derivation (same rule as
+            # close_ip).
+            q0_target = unrenormalise_q0(q0_anchor, j_achieved0, j_requested0)
+        else:
+            # held reference from the ORIGINAL anchor (j_BS loop pass)
+            q0_anchor = float(q0_ref["q0_anchor"])
+            j_achieved0 = float(q0_ref["j_achieved0"])
+            j_requested0 = float(q0_ref["j_requested0"])
+            q0_target = float(q0_ref["q0_target"])
         j_renorm_ratio = j_achieved0 / j_requested0
         j_ref0 = j_requested0
         j_ind0, j_bs0, j_fix0 = _ax(j_ind), _ax(j_BS_swb), _ax(j_fixed)
@@ -1045,7 +1067,8 @@ class Bouquet:
                                        j_ind, j_BS_swb, j_fixed, FUSE_tot,
                                        sgn, Ip_t, w_lin, c_signed,
                                        ip_ind, ip_bs, ip_fix,
-                                       psi_pad=1e-3, pprime_sign=1.0):
+                                       psi_pad=1e-3, pprime_sign=1.0,
+                                       q0_ref=None, x_retry=None):
         """Solve-free multiplier PROFILES for ``closure_channel="structured"``.
 
         Returns ``(s_ind, s_bs, ohm_eff, bs_eff, extra, state)``.  ``s_ind`` and
@@ -1075,12 +1098,23 @@ class Bouquet:
         channel: the scalar channels fall back because a scalar has nothing
         else to do, while here the trust weights still say where the deficit
         belongs.  The rejection is printed and recorded either way.
+
+        ``q0_ref``: the self-consistent bootstrap loop's held anchor
+        reference, exactly as in :meth:`_close_ip_q0_predictor`; ``None`` is
+        the historical behaviour.
+
+        ``x_retry`` (loop passes only): the previous pass's coefficients.  If
+        the SOFT closure refuses with the Levenberg no-descent error, it is
+        retried ONCE from them (:func:`bouquet.utils.soft_closure_with_retry`,
+        recorded as ``structured_closure_retry``); a second refusal is a real
+        refusal.  ``None`` (every non-loop caller) never retries.
         """
         import numpy as np
 
         from .config import resolve_structured_preset
         from .utils import (close_ip_structured, close_ip_structured_soft,
                             li_closure_geometry, sigma_from_weights,
+                            soft_closure_with_retry,
                             structured_basis_eval, unrenormalise_q0,
                             q0_gate_admits)
 
@@ -1114,11 +1148,18 @@ class Bouquet:
         psi_geom = np.asarray(geom["psi_N"], dtype=float)
         _ax = lambda j: float(np.interp(psi_q[0], psi_geom,
                                         np.asarray(j, dtype=float)))
-        q0_anchor = float(np.asarray(eq_snap.get_q(psi=psi_q.copy())[1],
-                                     dtype=float)[0])
-        j_achieved0 = float(np.asarray(probe, dtype=float)[0])
-        j_requested0 = _ax(FUSE_tot)
-        q0_target = unrenormalise_q0(q0_anchor, j_achieved0, j_requested0)
+        if q0_ref is None:
+            q0_anchor = float(np.asarray(eq_snap.get_q(psi=psi_q.copy())[1],
+                                         dtype=float)[0])
+            j_achieved0 = float(np.asarray(probe, dtype=float)[0])
+            j_requested0 = _ax(FUSE_tot)
+            q0_target = unrenormalise_q0(q0_anchor, j_achieved0, j_requested0)
+        else:
+            # held reference from the ORIGINAL anchor (j_BS loop pass)
+            q0_anchor = float(q0_ref["q0_anchor"])
+            j_achieved0 = float(q0_ref["j_achieved0"])
+            j_requested0 = float(q0_ref["j_requested0"])
+            q0_target = float(q0_ref["q0_target"])
         j_ref0 = j_requested0
         j_ind0, j_bs0, j_fix0 = _ax(j_ind), _ax(j_BS_swb), _ax(j_fixed)
 
@@ -1187,16 +1228,20 @@ class Bouquet:
         if soft:
             _K = structured_basis_eval(basis_spec, psi_geom).shape[0]
             _sig = sigma_from_weights(wspec, _K)
-            out = close_ip_structured_soft(
-                psi_geom, w_lin, c_signed, sgn * Ip_t,
-                (None if ip_sigma is None else float(ip_sigma)),
-                j_ind, j_BS_swb, j_fixed,
-                basis=basis_spec, sigma_ind=_sig["ind"], sigma_bs=_sig["bs"],
-                sigma_ind_up=sig_ind_up,
-                li_target=li_target,
-                li_sigma=(None if li_sigma is None else float(li_sigma)),
-                li_kind=li_kind, li_geom=li_geom,
-                axis=axis, axis_sigma=None)   # the q0 pin stays HARD
+            out = soft_closure_with_retry(
+                lambda _x0: close_ip_structured_soft(
+                    psi_geom, w_lin, c_signed, sgn * Ip_t,
+                    (None if ip_sigma is None else float(ip_sigma)),
+                    j_ind, j_BS_swb, j_fixed,
+                    basis=basis_spec, sigma_ind=_sig["ind"],
+                    sigma_bs=_sig["bs"],
+                    sigma_ind_up=sig_ind_up,
+                    li_target=li_target,
+                    li_sigma=(None if li_sigma is None else float(li_sigma)),
+                    li_kind=li_kind, li_geom=li_geom,
+                    axis=axis, axis_sigma=None,   # the q0 pin stays HARD
+                    x0=_x0),
+                x_prev=x_retry, who="imas SWB-split:ohmic structured")
         else:
             out = close_ip_structured(
                 psi_geom, w_lin, c_signed, sgn * Ip_t,
@@ -1340,6 +1385,15 @@ class Bouquet:
             structured_objective=out.get("objective"),
             structured_prior_chi2=out.get("prior_chi2"),
             structured_gn_iterations=out.get("n_iter"),
+            # how the soft solve stopped (noise_floor = accepted at the
+            # objective's rounding-noise floor, see close_ip_structured_soft)
+            # and whether the loop's single logged retry was needed
+            structured_gn_stop_reason=out.get("gn_stop_reason"),
+            structured_gn_stop=out.get("gn_stop"),
+            structured_n_noise_floor_accepts=out.get("n_noise_floor_accepts"),
+            structured_closure_retry=out.get("closure_retry"),
+            structured_closure_retry_first_error=out.get(
+                "closure_retry_first_error"),
         )
         if li_target is not None:
             print("[imas SWB-split:ohmic structured] l_i row "
@@ -1735,6 +1789,15 @@ class Bouquet:
             structured_objective=out.get("objective"),
             structured_prior_chi2=out.get("prior_chi2"),
             structured_gn_iterations=out.get("n_iter"),
+            # how the soft solve stopped (noise_floor = accepted at the
+            # objective's rounding-noise floor, see close_ip_structured_soft)
+            # and whether the loop's single logged retry was needed
+            structured_gn_stop_reason=out.get("gn_stop_reason"),
+            structured_gn_stop=out.get("gn_stop"),
+            structured_n_noise_floor_accepts=out.get("n_noise_floor_accepts"),
+            structured_closure_retry=out.get("closure_retry"),
+            structured_closure_retry_first_error=out.get(
+                "closure_retry_first_error"),
         )
         # Ip bookkeeping (soft: a new posterior) and the health record, from
         # the DELIVERED scales -- same function, same thresholds.
@@ -1773,6 +1836,522 @@ class Bouquet:
               f"sigma); objective {R['objective_before']:.4g} -> "
               f"{R['objective_after']:.4g}; {mse_er_terms(ch)}", flush=True)
         return last["nl"]
+
+    @staticmethod
+    def _structured_mse_jbs_stage(state, bl, mygs, solve_jphi, jbs0, refresh,
+                                  evaluate, measure, weights, settings, Ip,
+                                  gate_q0=False, field_at=None):
+        """The MSE term under the self-consistent bootstrap loop.
+
+        Runs after the j_BS loop has converged WITHOUT the MSE term (``state``
+        is the structured closure state of that converged pass and ``mygs``
+        holds its equilibrium, solved with bootstrap ``jbs0``):
+
+        1. the forward-difference Jacobian of tan(gamma) ONCE at that state,
+           with j_BS held fixed during the differences (an approximation of
+           the loop map's true Jacobian, recorded as such);
+        2. chord steps -- closure with the linearised MSE term on the CURRENT
+           geometry and bootstrap -> GS solve -> ``evaluate`` (+relaxation) ->
+           refresh the linearisation offset and the closure state -- until
+           the j_BS residuals hold on two consecutive steps AND the synthetic
+           tan(gamma) moved by less than
+           ``jbs_loop.MSE_CHORD_OFFSET_TOL_SIGMA`` sigma on every chord
+           (at most ``jbs_max_passes`` steps: every chord step is also a
+           pass of the bootstrap loop, so the loop's own ceiling applies);
+        3. the Jacobian recomputed ONCE at the converged state and one final
+           step taken, because a stale Jacobian biases the stationary point of
+           a chord iteration, not only its rate; the Jacobian change and the
+           objective change are recorded.
+
+        ``refresh(jbs, k)`` re-runs the structured predictor on the current
+        mygs geometry with bootstrap ``jbs`` and returns the new state;
+        ``evaluate(eq)`` is the Redl bootstrap on ``eq``; ``measure(eq)``
+        returns ``{li, q0}``; ``weights(eq)`` returns ``(w, x)`` for the
+        residual norm.  Returns ``(nl_its, final_state, record)``.  A refusal
+        (closure out of bounds, failed solve, unusable field) raises when
+        ``structured_mse_required`` and otherwise re-solves the pre-MSE hybrid
+        and flags the slice, exactly like the frozen-bootstrap stage.
+        """
+        import numpy as np
+
+        from .mse import (mse_chi2, mse_er_terms, mse_field_at,
+                          mse_sign_convention, mse_tan_gamma)
+        from .utils import (MSE_FLAG_PREFIX, close_ip_structured,
+                            close_ip_structured_soft, closure_health,
+                            soft_closure_with_retry,
+                            structured_basis_eval, structured_mse_jacobian,
+                            structured_mse_linear_model,
+                            structured_objective_no_mse)
+        from .jbs_loop import (MSE_CHORD_OFFSET_TOL_SIGMA, JBSNotConverged,
+                               profile_residuals, JBS_RELAX_FLOOR,
+                               JBS_REQUIRED_CONSECUTIVE,
+                               JBS_GROWTH_ABORT_PASSES)
+
+        ch = state["mse"]
+        required = bool(state.get("mse_required", False))
+        soft = bool(state.get("soft"))
+        if field_at is None:
+            field_at = lambda: mse_field_at(mygs, ch["R"], ch["Z"])
+        psi_g = np.asarray(state["psi_geom"], dtype=float)
+        Phi = structured_basis_eval(state["basis"], psi_g)
+        K = Phi.shape[0]
+        sig = np.asarray(ch["sigma_eff"], dtype=float)
+        fd_step = float(state.get("mse_fd_step", 0.02))
+        free = state["free"]
+        n_free = int(np.count_nonzero(free))
+        last = {"nl": None}
+
+        def _hybrid(st, jbs, x):
+            x = np.asarray(x, dtype=float)
+            return ((1.0 + x[:K] @ Phi) * np.asarray(st["j_ind"], float)
+                    + (1.0 + x[K:] @ Phi) * np.asarray(jbs, float)
+                    + np.asarray(st["j_fixed"], float))
+
+        def _solve(j):
+            last["nl"] = solve_jphi(np.asarray(j, dtype=float))
+
+        def _resolve(st, lin, x_retry=None):
+            if soft:
+                # every chord step is a pass of the bootstrap loop: ONE logged
+                # retry from the previous step's coefficients after a
+                # no-descent refusal (soft_closure_with_retry)
+                _o = soft_closure_with_retry(
+                    lambda _x0: close_ip_structured_soft(
+                        st["psi_geom"], st["w_lin"], st["c_signed"],
+                        st["Ip_signed"],
+                        (None if st.get("ip_sigma") is None
+                         else float(st["ip_sigma"])),
+                        st["j_ind"], st["j_BS_swb"], st["j_fixed"],
+                        basis=st["basis"], sigma_ind=st["sigma_ind"],
+                        sigma_bs=st["sigma_bs"],
+                        sigma_ind_up=st.get("sigma_ind_up"),
+                        li_target=st.get("li_target"),
+                        li_sigma=(None if st.get("li_sigma") is None
+                                  else float(st["li_sigma"])),
+                        li_kind=str(st.get("li_kind", "li_1")),
+                        li_geom=st.get("li_geom"),
+                        axis=(None if st.get("axis") is None
+                              else dict(st["axis"])),
+                        axis_sigma=None, mse_lin=lin, x0=_x0),
+                    x_prev=x_retry, who="jbs-loop MSE chord")
+                srec["closure_retry"].append(int(_o.get("closure_retry", 0)))
+                srec["closure_stop_reason"].append(_o.get("gn_stop_reason"))
+                return _o
+            return close_ip_structured(
+                st["psi_geom"], st["w_lin"], st["c_signed"], st["Ip_signed"],
+                st["j_ind"], st["j_BS_swb"], st["j_fixed"],
+                basis=st["basis"], weights=st["weights"],
+                axis=(None if st.get("axis") is None else dict(st["axis"])),
+                li_target=st.get("li_target"),
+                li_kind=str(st.get("li_kind", "li_1")),
+                li_geom=st.get("li_geom"),
+                sigma_ind_up=st.get("sigma_ind_up"), mse_lin=lin)
+
+        def _x_of(out):
+            return np.concatenate([np.asarray(out["a"], dtype=float),
+                                   np.asarray(out["b"], dtype=float)])
+
+        srec = dict(stage=("structured MSE chord iteration with j_BS "
+                           "re-evaluated after every solve"),
+                    chord_max_steps=int(settings["max_passes"]),
+                    chord_offset_tol_sigma=float(MSE_CHORD_OFFSET_TOL_SIGMA),
+                    jacobian_note=("forward differences with j_BS held "
+                                   "fixed: an approximation of the loop "
+                                   "map's Jacobian"),
+                    r_j=[], r_I=[], dl_i=[], dq0=[], I_BS=[], omega=[],
+                    offset_change_max_sigma=[], pass_ok=[], n_passes=0,
+                    converged=False, stop_reason=None,
+                    relax_halve_on=int(settings.get("relax_halve_on", 1)),
+                    relax_current=None,
+                    current_relaxation=(
+                        "not applied in the chord steps: each step solves "
+                        "the closure's own current, on which the MSE "
+                        "linearisation is centred"),
+                    closure_retry=[], closure_stop_reason=[])
+        rec = {}
+        prev = getattr(bl, "ip_closure", None) or {}
+        try:
+            meas_prev = dict(measure(mygs.copy_eq()))
+            B0 = field_at()
+            sp, st_sign, table = mse_sign_convention(B0, ch)
+            tg_pred = mse_tan_gamma(B0, ch, sp, st_sign)
+            rec.update(structured_mse_sign_convention=dict(pol=sp,
+                                                           tor=st_sign),
+                       structured_mse_sign_table=dict(table))
+            x_pred = np.asarray(state["x_pred"], dtype=float)
+            F_pred = float(state["F_pred"])
+            chi2_0, z0 = mse_chi2(tg_pred, ch)
+            F_before = F_pred + chi2_0
+            jbs = np.asarray(jbs0, dtype=float)
+            cur = state
+
+            def _tg_at(st, jb):
+                def _f(x):
+                    _solve(_hybrid(st, jb, x))
+                    return mse_tan_gamma(field_at(), ch, sp, st_sign)
+                return _f
+
+            J1 = structured_mse_jacobian(_tg_at(cur, jbs), x_pred, tg_pred,
+                                         free, step=fd_step)
+            x_lin, tg_lin = x_pred, tg_pred
+            omega = float(settings["relax"])
+            halve_on = int(settings.get("relax_halve_on", 1))
+            grow_streak = 0
+            omega_cur = None
+            streak = 0
+            grow = 0
+            rj_prev = None
+            steps = []
+            out = None
+            converged = False
+            n_step = 0
+            n_chord = int(settings["max_passes"])
+            for s in range(n_chord):
+                n_step = s + 1
+                lin = structured_mse_linear_model(x_lin, tg_lin, J1, ch)
+                out = _resolve(cur, lin, x_retry=x_lin)
+                x_new = _x_of(out)
+                _solve(_hybrid(cur, jbs, x_new))
+                snap = mygs.copy_eq()
+                tg_new = np.asarray(mse_tan_gamma(field_at(), ch, sp,
+                                                  st_sign), dtype=float)
+                if not np.all(np.isfinite(tg_new)):
+                    raise RuntimeError("the solve of the MSE-constrained "
+                                       "closure returned an unusable "
+                                       "tan(gamma)")
+                J = np.asarray(evaluate(snap), dtype=float)
+                w, xg = weights(snap)
+                r = profile_residuals(J, jbs, w, xg, Ip)
+                m = dict(measure(snap))
+                dl_i = (None if (m.get("li") is None
+                                 or meas_prev.get("li") is None)
+                        else abs(float(m["li"]) - float(meas_prev["li"])))
+                dq0 = (None if (m.get("q0") is None
+                                or meas_prev.get("q0") is None)
+                       else abs(float(m["q0"]) - float(meas_prev["q0"])))
+                off = float(np.max(np.abs(tg_new - tg_lin) / sig))
+                ok = (r["r_j"] <= settings["rtol_j"]
+                      and r["r_I"] <= settings["rtol_Ip"]
+                      and dl_i is not None and dl_i <= settings["tol_li"]
+                      and (not gate_q0 or (dq0 is not None
+                                           and dq0 <= settings["tol_q0"])))
+                ok = bool(ok)
+                chi2_new, _z = mse_chi2(tg_new, ch)
+                lres = (tg_new - (tg_lin + J1 @ (x_new - x_lin))) / sig
+                steps.append(dict(
+                    chi2_model=float(out["mse_chi2_model"]),
+                    chi2_achieved=float(chi2_new),
+                    objective_model=float(out["mse_objective_model"]),
+                    objective_achieved=float(
+                        structured_objective_no_mse(out) + chi2_new),
+                    linearisation_residual_max_sigma=float(
+                        np.max(np.abs(lres))),
+                    linearisation_residual_rms_sigma=float(
+                        np.sqrt(np.mean(lres ** 2))),
+                    coeff_step_max=float(np.max(np.abs(x_new - x_lin))),
+                    offset_change_max_sigma=off,
+                    r_j=r["r_j"], r_I=r["r_I"], dl_i=dl_i, dq0=dq0,
+                    jbs_ok=ok))
+                srec["r_j"].append(r["r_j"])
+                srec["r_I"].append(r["r_I"])
+                srec["dl_i"].append(dl_i)
+                srec["dq0"].append(dq0)
+                srec["I_BS"].append(r["I_BS"])
+                srec["omega"].append(omega_cur)
+                srec["offset_change_max_sigma"].append(off)
+                srec["pass_ok"].append(ok)
+                srec["n_passes"] = n_step
+                print(f"  [jbs-loop MSE chord {n_step}] r_j={r['r_j']:.3e} "
+                      f"r_I={r['r_I']:.3e}"
+                      + ("" if dl_i is None else f" dl_i={dl_i:.2e}")
+                      + ("" if dq0 is None else f" dq0={dq0:.2e}")
+                      + f" tan(gamma) moved {off:.3f} sigma; chi2 "
+                      f"{chi2_new:.3f}", flush=True)
+                streak = streak + 1 if ok else 0
+                if streak >= JBS_REQUIRED_CONSECUTIVE \
+                        and off <= MSE_CHORD_OFFSET_TOL_SIGMA:
+                    converged = True
+                    break
+                if rj_prev is not None and r["r_j"] > rj_prev:
+                    if omega_cur is not None and \
+                            omega_cur <= JBS_RELAX_FLOOR + 1e-15:
+                        grow += 1
+                    else:
+                        grow = 0
+                    # halve only on SUSTAINED growth, exactly as the kernel
+                    # (jbs_relax_halve_on consecutive growing steps)
+                    grow_streak += 1
+                    if grow_streak >= halve_on:
+                        omega = max(0.5 * omega, JBS_RELAX_FLOOR)
+                        grow_streak = 0
+                else:
+                    grow = 0
+                    grow_streak = 0
+                rj_prev = r["r_j"]
+                if grow >= JBS_GROWTH_ABORT_PASSES:
+                    srec["stop_reason"] = ("r_j grew at the relaxation "
+                                           "floor")
+                    break
+                if s == n_chord - 1:
+                    break
+                jbs = (1.0 - omega) * jbs + omega * J
+                omega_cur = omega
+                cur = refresh(jbs, s)
+                x_lin, tg_lin = x_new, tg_new
+                meas_prev = m
+
+            if not converged:
+                srec["stop_reason"] = srec["stop_reason"] or (
+                    f"no convergence within {n_chord} chord "
+                    "steps (j_BS residuals on two consecutive steps and "
+                    "tan(gamma) offset change)")
+            else:
+                # ---- one Jacobian refresh at the converged state + a final
+                # step (the stale-J stationary-point bias) -----------------
+                jbs_next = (1.0 - omega) * jbs + omega * J
+                cur_next = refresh(jbs_next, n_step)   # geometry of E_new
+                J2 = structured_mse_jacobian(_tg_at(cur, jbs), x_new,
+                                             tg_new, free, step=fd_step)
+                dJ = float(np.linalg.norm(J2 - J1)
+                           / max(np.linalg.norm(J1), 1e-300))
+                obj_conv = steps[-1]["objective_achieved"]
+                lin2 = structured_mse_linear_model(x_new, tg_new, J2, ch)
+                out = _resolve(cur_next, lin2, x_retry=x_new)
+                x_f = _x_of(out)
+                _solve(_hybrid(cur_next, jbs_next, x_f))
+                snap = mygs.copy_eq()
+                tg_f = np.asarray(mse_tan_gamma(field_at(), ch, sp, st_sign),
+                                  dtype=float)
+                if not np.all(np.isfinite(tg_f)):
+                    raise RuntimeError("the final MSE step returned an "
+                                       "unusable tan(gamma)")
+                J = np.asarray(evaluate(snap), dtype=float)
+                w, xg = weights(snap)
+                r = profile_residuals(J, jbs_next, w, xg, Ip)
+                mf = dict(measure(snap))
+                dl_i = (None if (mf.get("li") is None or m.get("li") is None)
+                        else abs(float(mf["li"]) - float(m["li"])))
+                dq0 = (None if (mf.get("q0") is None or m.get("q0") is None)
+                       else abs(float(mf["q0"]) - float(m["q0"])))
+                okf = bool(r["r_j"] <= settings["rtol_j"]
+                           and r["r_I"] <= settings["rtol_Ip"]
+                           and dl_i is not None
+                           and dl_i <= settings["tol_li"]
+                           and (not gate_q0 or (dq0 is not None and
+                                                dq0 <= settings["tol_q0"])))
+                chi2_f, _zf = mse_chi2(tg_f, ch)
+                lres = (tg_f - (tg_new + J2 @ (x_f - x_new))) / sig
+                steps.append(dict(
+                    final_jacobian_refresh=True,
+                    chi2_model=float(out["mse_chi2_model"]),
+                    chi2_achieved=float(chi2_f),
+                    objective_model=float(out["mse_objective_model"]),
+                    objective_achieved=float(
+                        structured_objective_no_mse(out) + chi2_f),
+                    linearisation_residual_max_sigma=float(
+                        np.max(np.abs(lres))),
+                    linearisation_residual_rms_sigma=float(
+                        np.sqrt(np.mean(lres ** 2))),
+                    coeff_step_max=float(np.max(np.abs(x_f - x_new))),
+                    offset_change_max_sigma=float(
+                        np.max(np.abs(tg_f - tg_new) / sig)),
+                    r_j=r["r_j"], r_I=r["r_I"], dl_i=dl_i, dq0=dq0,
+                    jbs_ok=okf))
+                for _k, _v in (("r_j", r["r_j"]), ("r_I", r["r_I"]),
+                               ("dl_i", dl_i), ("dq0", dq0),
+                               ("I_BS", r["I_BS"]), ("omega", omega),
+                               ("offset_change_max_sigma",
+                                steps[-1]["offset_change_max_sigma"]),
+                               ("pass_ok", okf)):
+                    srec[_k].append(_v)
+                srec["n_passes"] = n_step + 1
+                srec.update(jacobian_refresh_rel_change=dJ,
+                            objective_at_convergence=float(obj_conv),
+                            objective_after_final_step=float(
+                                steps[-1]["objective_achieved"]),
+                            objective_change_final_step=float(
+                                steps[-1]["objective_achieved"] - obj_conv))
+                print(f"  [jbs-loop MSE final] Jacobian refreshed "
+                      f"(|dJ|/|J| = {dJ:.3e}); r_j={r['r_j']:.3e} "
+                      f"r_I={r['r_I']:.3e}; objective {obj_conv:.4g} -> "
+                      f"{steps[-1]['objective_achieved']:.4g}", flush=True)
+                if not okf:
+                    converged = False
+                    srec["stop_reason"] = ("the final step after the "
+                                           "Jacobian refresh left the j_BS "
+                                           "residuals outside tolerance")
+                else:
+                    srec["stop_reason"] = (
+                        "j_BS residuals on two consecutive chord steps, "
+                        "tan(gamma) offset converged, final Jacobian "
+                        "refresh step inside tolerance")
+                cur, jbs, J1, x_new, tg_new = cur_next, jbs_next, J2, x_f, tg_f
+            srec["converged"] = bool(converged)
+            srec["final"] = dict(r_j=srec["r_j"][-1] if srec["r_j"] else None,
+                                 r_I=srec["r_I"][-1] if srec["r_I"] else None,
+                                 dl_i=srec["dl_i"][-1] if srec["dl_i"]
+                                 else None,
+                                 dq0=srec["dq0"][-1] if srec["dq0"] else None)
+            srec["n_fd_solves"] = n_free * (2 if converged else 1)
+        except (RuntimeError, ValueError, FloatingPointError) as e:
+            if required:
+                raise RuntimeError(
+                    "closure_channel='structured': the MSE-constrained "
+                    f"closure could not be delivered ({e}) and "
+                    "structured_mse_required=True -- refusing to fall back "
+                    "to the closure without MSE") from e
+            _solve(bl.j_phi)
+            why = (MSE_FLAG_PREFIX + "stage refused, predictor kept "
+                   f"({str(e)[:160]})")
+            reasons = list(prev.get("closure_limited_reasons", ()) or ())
+            if why not in reasons:
+                reasons.append(why)
+            rec.update(structured_mse_status="refused, not applied: "
+                                             + str(e)[:300],
+                       closure_limited=True,
+                       closure_limited_reasons=tuple(reasons))
+            if getattr(bl, "ip_closure", None) is not None:
+                bl.ip_closure.update(rec)
+            print("[imas SWB-split:ohmic structured] WARNING closure-limited: "
+                  + why, flush=True)
+            srec.update(converged=True, stop_reason=(
+                "MSE stage refused (not required): the pre-MSE loop result "
+                "is delivered"), refused=str(e)[:300])
+            return last["nl"], state, srec
+
+        # ---- deliver the last solve ----------------------------------------
+        s_ind = np.asarray(out["s_ind"], dtype=float)
+        s_bs = np.asarray(out["s_bs"], dtype=float)
+        bl.ohm_scale = float(out["ohm_scale_eff"])
+        bl.bs_scale = float(out["bs_scale_eff"])
+        bl.j_inductive = s_ind * np.asarray(cur["j_ind"], dtype=float)
+        # the bootstrap the delivered equilibrium was SOLVED with
+        _jbs_del = np.asarray(cur["j_BS_swb"], dtype=float)
+        bl.j_BS = s_bs * _jbs_del
+        bl.j_phi = bl.j_inductive + bl.j_BS + np.asarray(cur["j_fixed"],
+                                                         dtype=float)
+        cur["mse_lin"] = structured_mse_linear_model(x_new, tg_new, J1, ch)
+        cur["mse_sign"] = (sp, st_sign)
+        cur["mse_applied"] = True
+        chi2_f, z_f = mse_chi2(tg_new, ch)
+        _fl = lambda v: [float(x) for x in np.ravel(v)]
+        _at = lambda s: {f"{r:.2f}": float(np.interp(r, psi_g, s))
+                         for r in (0.0, 0.2, 0.4, 0.6, 0.8, 0.95, 1.0)}
+        F_after = steps[-1]["objective_achieved"]
+        flags = []
+        if not (np.isfinite(F_after) and F_after <= F_before):
+            flags.append(MSE_FLAG_PREFIX
+                         + f"achieved objective rose {F_before:.6g} -> "
+                           f"{F_after:.6g} (linearisation residual max "
+                           f"{steps[-1]['linearisation_residual_max_sigma']:.3g}"
+                           " sigma): the linear tan(gamma) model failed on "
+                           "this slice")
+        n_solves = int(srec["n_fd_solves"]) + int(srec["n_passes"])
+        rec.update(
+            structured_mse_status="applied",
+            structured_mse_jbs_loop=True,
+            structured_mse_n_solves=n_solves,
+            structured_mse_n_fd_solves=int(srec["n_fd_solves"]),
+            structured_mse_chi2_before=float(chi2_0),
+            structured_mse_chi2_after=float(chi2_f),
+            structured_mse_chi2_model_after=float(steps[-1]["chi2_model"]),
+            structured_mse_chi2_red_before=float(chi2_0) / int(ch["n_active"]),
+            structured_mse_chi2_red_after=float(chi2_f) / int(ch["n_active"]),
+            structured_mse_residual_sigma_before=_fl(z0),
+            structured_mse_residual_sigma_after=_fl(z_f),
+            structured_mse_tgamma_pred_before=_fl(tg_pred),
+            structured_mse_tgamma_pred_after=_fl(tg_new),
+            structured_mse_objective_before=float(F_before),
+            structured_mse_objective_after_model=float(
+                steps[-1]["objective_model"]),
+            structured_mse_objective_after=float(F_after),
+            structured_mse_linearisation_residual_max_sigma=float(
+                steps[-1]["linearisation_residual_max_sigma"]),
+            structured_mse_linearisation_residual_rms_sigma=float(
+                steps[-1]["linearisation_residual_rms_sigma"]),
+            structured_mse_step_log=[dict(s) for s in steps],
+            structured_mse_jacobian=[_fl(row) for row in J1],
+            structured_mse_er_terms=mse_er_terms(ch),
+            ohm_scale=float(bl.ohm_scale), bs_scale=float(bl.bs_scale),
+            structured_coeffs_a=_fl(out["a"]),
+            structured_coeffs_b=_fl(out["b"]),
+            structured_s_ind_min=float(s_ind.min()),
+            structured_s_ind_max=float(s_ind.max()),
+            structured_s_bs_min=float(s_bs.min()),
+            structured_s_bs_max=float(s_bs.max()),
+            structured_s_ind_profile=_fl(s_ind),
+            structured_s_bs_profile=_fl(s_bs),
+            structured_s_ind_at=_at(s_ind),
+            structured_s_bs_at=_at(s_bs),
+            structured_sign_pattern=(
+                None if out.get("sign_pattern") is None else
+                "".join("+" if v else "-" for v in out["sign_pattern"])),
+            structured_n_sign_iter=int(out.get("n_sign_iter", 0) or 0),
+            structured_structure_ind=float(out["structure_ind"]),
+            structured_structure_bs=float(out["structure_bs"]),
+            structured_ip_residual=float(out["ip_residual"]),
+            structured_ip_residual_pct=float(out["ip_residual_pct"]),
+            structured_ip_posterior=abs(float(out["Ip_hybrid"])),
+            structured_axis_residual=(None if out.get("axis_residual") is None
+                                      else float(out["axis_residual"])),
+            structured_constraints=list(out["constraints"]),
+            structured_li_predicted=out.get("li_predicted"),
+            structured_li_predictor_residual=out.get("li_predictor_residual"),
+            structured_residual_sigma_Ip_model=out.get("residual_sigma_Ip"),
+            structured_residual_sigma_li_model=out.get("residual_sigma_li"),
+            structured_objective=out.get("objective"),
+            structured_prior_chi2=out.get("prior_chi2"),
+            structured_gn_iterations=out.get("n_iter"),
+            # how the soft solve stopped (noise_floor = accepted at the
+            # objective's rounding-noise floor, see close_ip_structured_soft)
+            # and whether the loop's single logged retry was needed
+            structured_gn_stop_reason=out.get("gn_stop_reason"),
+            structured_gn_stop=out.get("gn_stop"),
+            structured_n_noise_floor_accepts=out.get("n_noise_floor_accepts"),
+            structured_closure_retry=out.get("closure_retry"),
+            structured_closure_retry_first_error=out.get(
+                "closure_retry_first_error"),
+        )
+        z_ip = None
+        if soft and cur.get("ip_sigma"):
+            _ip_meas = abs(float(cur["Ip_signed"]))
+            _ip_post = abs(float(out["Ip_hybrid"]))
+            z_ip = (_ip_post - _ip_meas) / float(cur["ip_sigma"])
+            rec.update(structured_ip_measured_residual_pct=(
+                100.0 * (_ip_post - _ip_meas) / _ip_meas),
+                structured_residual_sigma_Ip=z_ip)
+        health = closure_health(bl.ohm_scale, bl.bs_scale, cur["Ip_signed"],
+                                cur["c_signed"], cur["ip_ind"],
+                                cur["ip_bs"], cur["ip_fix"],
+                                soft_ip_residual_sigma=z_ip)
+        _prev_now = getattr(bl, "ip_closure", None) or {}
+        reasons = list(health["closure_limited_reasons"])
+        for why in flags:
+            if why not in reasons:
+                reasons.append(why)
+            print("[imas SWB-split:ohmic structured] WARNING closure-limited: "
+                  + why, flush=True)
+        for k, v in health.items():
+            rec[k] = v
+        rec["closure_limited_reasons"] = tuple(reasons)
+        rec["closure_limited"] = bool(reasons)
+        if getattr(bl, "ip_closure", None) is not None:
+            bl.ip_closure.update(rec)
+        print("[imas SWB-split:ohmic structured] MSE (j_BS loop): "
+              f"{int(ch['n_active'])} chords, orientation (pol {sp:+.0f}, "
+              f"tor {st_sign:+.0f}), {n_solves} solves "
+              f"({srec['n_fd_solves']} finite-difference + "
+              f"{srec['n_passes']} chord/final steps); chi2 "
+              f"{chi2_0:.2f} -> {chi2_f:.2f}; objective {F_before:.4g} -> "
+              f"{F_after:.4g}; {mse_er_terms(ch)}", flush=True)
+        if not srec["converged"]:
+            msg = ("self-consistent j_BS loop [MSE chord stage] did not "
+                   f"converge: {srec['stop_reason']}")
+            srec["fail_message"] = msg
+            print("  [jbs-loop] " + msg, flush=True)
+            if settings.get("on_fail", "raise") == "raise":
+                raise JBSNotConverged(msg, srec)
+        return last["nl"], cur, srec
 
     @staticmethod
     def _structured_mse_delivered(state, bl, mygs, field_at=None):
@@ -1830,7 +2409,8 @@ class Bouquet:
 
     @staticmethod
     def _close_ip_structured_corrector(state, bl, mygs, solve_jphi,
-                                       ip_of=None, roundtrip_gate=None):
+                                       ip_of=None, roundtrip_gate=None,
+                                       record_only=False):
         """Correct q0 and/or l_i after the structured solve, at most 2 solves.
 
         Same contract and (by default) the same cost ceiling as
@@ -1935,6 +2515,13 @@ class Bouquet:
         keeps the predictor when its step would leave the scale bounds.
         Returns the new ``nl_its`` when a corrector solve was taken, else
         ``None``.
+
+        ``record_only=True`` (the self-consistent bootstrap loop, which
+        subsumes the corrector STEPS: every pass re-solves the predictor on
+        refreshed geometry): take no step, but read back and record every
+        residual and run every acceptance flag exactly as above, on the
+        delivered equilibrium.  ``structured_li_tol`` / ``q0_tol`` are the
+        same bars.
         """
         import numpy as np
 
@@ -2035,10 +2622,10 @@ class Bouquet:
         if li_unreadable:
             reasons.append("l_i is not finite: no residual and no corrector "
                            "step")
-        want_q0 = bool(gated and not q0_unreadable
+        want_q0 = bool(gated and not q0_unreadable and not record_only
                        and abs(res) > state["q0_tol"])
         want_li = bool(li_target is not None and not li_unreadable
-                       and abs(li_res) > li_tol)
+                       and not record_only and abs(li_res) > li_tol)
         if want_q0 and not q0_usable:
             reasons.append("q0 reference unusable for a step")
             want_q0 = False
@@ -2411,7 +2998,7 @@ class Bouquet:
 
     @staticmethod
     def _close_ip_q0_corrector(state, bl, mygs, solve_jphi, ip_of=None,
-                               roundtrip_gate=None):
+                               roundtrip_gate=None, record_only=False):
         """At most ONE Newton step on q0 after the closed-hybrid solve.
 
         Returns the new ``nl_its`` when a corrector solve was taken, else
@@ -2443,6 +3030,12 @@ class Bouquet:
         flagged -- the same shape as the other two refusal branches, and the
         same relative floor (``1e-6 * Ip_t``) :func:`~bouquet.utils.close_ip`
         uses for the component it divides by.
+
+        ``record_only=True`` (the self-consistent bootstrap loop, which
+        subsumes the Newton step -- every pass re-solves the predictor on
+        refreshed geometry with the axis row moved by the measured q0): no
+        step is taken, the residual is read back on the delivered equilibrium
+        and flagged against the unchanged ``q0_tol``.
         """
         import numpy as np
 
@@ -2480,6 +3073,14 @@ class Bouquet:
                   f"q0_target={q0_target:.4f} (residual {res:+.4f}, tol "
                   f"{state['q0_tol']:g}) -- predictor accepted, no extra solve",
                   flush=True)
+        elif record_only:
+            rec.update(n_extra_solves=0, q0_solved=q0_tok, q0_residual=res,
+                       sawtooth_verdict="j_BS loop delivered (Newton step "
+                                        "subsumed by the loop)")
+            print(f"[imas SWB-split:ohmic q0] solved q0={q0_tok:.4f} vs "
+                  f"q0_target={q0_target:.4f} (residual {res:+.4f}, tol "
+                  f"{state['q0_tol']:g}) -- the j_BS loop subsumes the "
+                  "corrector; recorded, not stepped", flush=True)
         elif abs(state["ip_bs"]) < 1e-6 * state["Ip_t"]:
             # The Newton step moves along the Ip-closed manifold
             # s_bs(s_ohm) = (sgn*Ip - c - s_ohm*lin(ohm) - lin(fix))/lin(bs),
@@ -2766,22 +3367,22 @@ class Bouquet:
             # profile on that landed geometry read +31% of Ip on an ohmic-ramp
             # slice (vs +0.8% on the anchor) and collapsed the closure. Every Ip
             # integral in the ohmic branch is taken on this snapshot.
-            _anchor = None
-            if str(gc.jBS_baseline_mode) == "ohmic":
-                # Validate the channel BEFORE solve_with_bootstrap: the
-                # run-time dispatch would otherwise burn the full SWB
-                # iteration sequence and only then refuse a typo.
-                from .utils import warn_deprecated_channel
-                warn_deprecated_channel(getattr(gc, "closure_channel",
-                                                "bootstrap"))
-                if str(getattr(gc, "closure_channel", "bootstrap")) \
-                        not in ("bootstrap", "ohmic", "sawtooth_bootstrap",
-                                "structured"):
-                    raise ValueError(
-                        f"unknown closure_channel "
-                        f"{gc.closure_channel!r} "
-                        "(expected 'ohmic', 'bootstrap', "
-                        "'sawtooth_bootstrap' or 'structured')")
+            # Self-consistent bootstrap loop settings (validated).  OFF
+            # (the default) runs the historical frozen-SWB block below
+            # unchanged; ON runs _imas_jbs_loop instead.
+            from .jbs_loop import jbs_settings as _jbs_settings
+            _jbs = _jbs_settings(gc)
+            _loop_on = bool(_jbs["enabled"])
+
+            def _closure_geometry(_src_label):
+                """FSA closure geometry of the equilibrium mygs holds NOW.
+
+                ``{eq: copy_eq() snapshot, geom, inv_r2_src, Ip_anchor}`` --
+                the anchor (called once before any bootstrap work, as it
+                always was) and, with ``jbs_self_consistent``, every loop
+                pass's current iterate.  <1/R^2> falls back to the traced
+                contour quadrature on OFT builds whose get_q lacks it.
+                """
                 from .utils import fsa_current_geometry as _fcg
                 from .physics import capture_equilibrium_fsa as _cef
                 _anchor = {"eq": mygs.copy_eq()}
@@ -2815,45 +3416,26 @@ class Bouquet:
                     _anchor["geom"]["inv_R2"] = np.interp(
                         np.asarray(_anchor["geom"]["psi_q"], float),
                         np.asarray(_cap["psi_N"], float), np.asarray(_cap["avg_inv_R2"], float))
-                    _anchor["inv_r2_src"] = "capture_equilibrium_fsa contour quadrature (anchor, pre-SWB)"
+                    _anchor["inv_r2_src"] = "capture_equilibrium_fsa contour quadrature (" + _src_label + ")"
                 _anchor["Ip_anchor"] = abs(float(mygs.get_stats(lcfs_pad=psi_pad)["Ip"]))
-            swb_seed = create_power_flux_fun(psi_N.size, 1.5, 1.5)["y"]
-            swb = solve_with_bootstrap(
-                mygs, ne, te, ni, ti, Zeff, bl.Ip_target, swb_seed,
-                scale_jBS=1.0, isolate_edge_jBS=iso,
-                diagnostic_plots=False, verbose=False,
-            )
-            # Same axis-transition smoothing every per-draw spike receives, so
-            # the sigma=0 draw reproduces this baseline split exactly.
-            j_BS_swb = smooth_jbs_transition(
-                _swb_jbs_to_toroidal(mygs, swb["isolated_j_BS"], psi_pad))
-            if gc.floor_j_BS:
-                j_BS_swb = np.clip(j_BS_swb, 0.0, None)
-            ratio = j_BS_swb.max() / max(j_BS_src.max(), 1.0)
+                return _anchor
 
-            if mode == "diff":
-                bl.jBS_diff = j_BS_src - j_BS_swb        # added to baseline + draws
-                bl.j_BS = j_BS_swb
-                bl.j_phi = FUSE_tot                      # total anchored to FUSE
-                bl.bs_scale = 1.0
-                print(f"[imas SWB-split:diff] FUSE total preserved; "
-                      f"diff min/max={bl.jBS_diff.min():.2e}/{bl.jBS_diff.max():.2e}; "
-                      f"SWB/FUSE jBS peak={ratio:.3f}")
-            elif mode == "rescale":
-                tgt = calc_cylindrical_li_proxy(mygs, FUSE_tot, psi_pad)
-                _f = lambda s: calc_cylindrical_li_proxy(
-                    mygs, j_ind + s * j_BS_swb + j_fixed, psi_pad) - tgt
-                try:
-                    scale = float(brentq(_f, 0.2, 4.0, xtol=1e-4))
-                except Exception:
-                    scale = 1.0
-                bl.jBS_diff = None
-                bl.bs_scale = scale
-                bl.j_BS = scale * j_BS_swb
-                bl.j_phi = j_ind + bl.j_BS + j_fixed
-                print(f"[imas SWB-split:rescale] scale={scale:.3f}; FUSE ohmic kept; "
-                      f"SWB/FUSE jBS peak={ratio:.3f}")
-            elif mode == "ohmic":
+            def _ohmic_close(_anchor, j_BS_swb, ratio, _pass=None):
+                """The 'ohmic'-mode Ip closure on ONE geometry + bootstrap.
+
+                ``_anchor`` is a :func:`_closure_geometry` context (the
+                frozen pre-SWB anchor on the legacy path; the current
+                iterate on every pass of the self-consistent loop),
+                ``j_BS_swb`` the base bootstrap profile the channel scales,
+                ``ratio`` its peak over the source bootstrap's (recorded).
+                ``_pass`` (loop only) carries the held q0 reference.  Sets ``bl.j_*`` / ``bl.ip_closure`` exactly
+                as the inline block it was lifted from did and returns
+                ``(q0_state, structured_state, closure_ctx)``.
+                """
+                _q0_state = None
+                _structured_state = None
+                _pq0 = None if _pass is None else _pass.get("q0_ref")
+                _pxr = None if _pass is None else _pass.get("x_retry")
                 # Hybrid: FUSE ohmic + SWB bootstrap on the (IDA) kinetics +
                 # FUSE fixed (NBI/RF), with Ip closed by rescaling j_ohmic ONLY.
                 # Rationale: 'diff' pins the total to FUSE (erasing the pedestal
@@ -3061,7 +3643,7 @@ class Bouquet:
                             gc, bl, _eq_snap, _geom, _probe, psi_N,
                             j_ind, j_BS_swb, j_fixed, FUSE_tot,
                             sgn, Ip_t, _c_signed, ip_ind, ip_bs, ip_fix,
-                            close_ip)
+                            close_ip, q0_ref=_pq0)
                 elif _chan == "structured":
                     _s_ind, _s_bs, ohm_scale, bs_scale, _q0_extra, \
                         _structured_state = self._close_ip_structured_predictor(
@@ -3069,7 +3651,8 @@ class Bouquet:
                             j_ind, j_BS_swb, j_fixed, FUSE_tot,
                             sgn, Ip_t, _w_lin, _c_signed,
                             ip_ind, ip_bs, ip_fix,
-                            psi_pad=psi_pad, pprime_sign=_pps)
+                            psi_pad=psi_pad, pprime_sign=_pps,
+                            q0_ref=_pq0, x_retry=_pxr)
                 else:
                     ohm_scale, bs_scale = close_ip(
                         _chan, _Ip_signed, _c_signed, ip_ind, ip_bs, ip_fix)
@@ -3232,85 +3815,584 @@ class Bouquet:
                 # generate() would otherwise fold it into every draw and the
                 # archived baseline while the forward solve below omits it.
                 bl.jphi_diff = None
+                return _q0_state, _structured_state, dict(
+                    ip_signed=_ip_signed, Ip_t=Ip_t,
+                    ip_roundtrip_gate=ip_roundtrip_gate)
+
+            _anchor = None
+            if str(gc.jBS_baseline_mode) == "ohmic":
+                # Validate the channel BEFORE solve_with_bootstrap: the
+                # run-time dispatch would otherwise burn the full SWB
+                # iteration sequence and only then refuse a typo.
+                from .utils import warn_deprecated_channel
+                warn_deprecated_channel(getattr(gc, "closure_channel",
+                                                "bootstrap"))
+                if str(getattr(gc, "closure_channel", "bootstrap")) \
+                        not in ("bootstrap", "ohmic", "sawtooth_bootstrap",
+                                "structured"):
+                    raise ValueError(
+                        f"unknown closure_channel "
+                        f"{gc.closure_channel!r} "
+                        "(expected 'ohmic', 'bootstrap', "
+                        "'sawtooth_bootstrap' or 'structured')")
+                _anchor = _closure_geometry("anchor, pre-SWB")
+            def _imas_jbs_loop():
+                """The IMAS baseline with ``jbs_self_consistent=True``.
+
+                Every ``jBS_baseline_mode`` and closure channel; returns the
+                ``nl_its`` of the delivered solve.  See
+                :mod:`bouquet.jbs_loop` for the kernel and
+                docs/physics-notes.md for the method.
+                """
+                from .physics import evaluate_jBS
+                from .jbs_loop import (flag_reason, jsonable,
+                                       residual_weights, run_jbs_loop,
+                                       oft_build_info)
+                from .utils import li_achieved, ip_roundtrip_gate as _gate_fn
+                from .physics import EVALUATE_JBS_VERSION
+
+                Ip_abs = abs(float(bl.Ip_target))
+                _init = str(_jbs["init"])
+                _corr_on = bool(getattr(gc, "imas_corrective_jphi", False))
+
+                def _redl(eq):
+                    j, d = evaluate_jBS(eq, psi_N, ne, te, ni, ti, Zeff,
+                                        psi_pad=psi_pad, isolate_edge=iso,
+                                        smooth_axis=True)
+                    if gc.floor_j_BS:
+                        j = np.clip(j, 0.0, None)
+                    return j, d
+
+                def _pass_solve(j_phi):
+                    """One loop solve: the SAME 2-pass solve_jphi the tail
+                    uses, plus the opt-in corrective iteration when it is on,
+                    so the delivered equilibrium is always the last pass."""
+                    j_phi = np.asarray(j_phi, dtype=float)
+                    nl = solve_jphi(j_phi)
+                    if _corr_on:
+                        from .TokaMaker_interface import \
+                            _corrective_jphi_iteration
+                        _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
+                        _pp_y = pchip_derivative(psi_N, p_total) / _pr
+                        _pp_y[-1] = 0.0
+                        _corrective_jphi_iteration(
+                            mygs, psi_N, j_phi,
+                            {"type": "linterp", "y": _pp_y, "x": psi_N},
+                            abs(bl.Ip_target), float(p_total[0]), 1e-3,
+                            min_iters=2, max_iters=8, rtol=0.02,
+                            verbose=True, damping=0.5, protect_state=True)
+                    return nl
+
+                def _li3(eq):
+                    return float(li_achieved(eq, li_kind="li_3",
+                                             psi_pad=psi_pad)[0])
+
+                def _swb_legacy():
+                    """jbs_init="swb": the legacy SWB result as the initial
+                    guess (A/B only), with mygs put back on the anchor."""
+                    import inspect
+                    _snap_a = mygs.copy_eq()
+                    _kw = dict(scale_jBS=1.0, isolate_edge_jBS=iso,
+                               diagnostic_plots=False, verbose=False)
+                    _passed = False
+                    _why = None
+                    if "psi_N" in inspect.signature(
+                            solve_with_bootstrap).parameters:
+                        try:
+                            _swb = solve_with_bootstrap(
+                                mygs, ne, te, ni, ti, Zeff, bl.Ip_target,
+                                create_power_flux_fun(psi_N.size, 1.5,
+                                                      1.5)["y"],
+                                psi_N=np.asarray(psi_N, dtype=float), **_kw)
+                            _passed = True
+                        except ValueError as _e:
+                            _why = f"SWB refused psi_N=: {_e}"
+                            mygs.replace_eq(source_eq=_snap_a)
+                    else:
+                        _why = "this OFT build's solve_with_bootstrap has " \
+                               "no psi_N argument"
+                    if not _passed:
+                        _swb = solve_with_bootstrap(
+                            mygs, ne, te, ni, ti, Zeff, bl.Ip_target,
+                            create_power_flux_fun(psi_N.size, 1.5, 1.5)["y"],
+                            **_kw)
+                    _j = smooth_jbs_transition(_swb_jbs_to_toroidal(
+                        mygs, _swb["isolated_j_BS"], psi_pad))
+                    if gc.floor_j_BS:
+                        _j = np.clip(_j, 0.0, None)
+                    mygs.replace_eq(source_eq=_snap_a)
+                    print("[imas jbs-loop] init: legacy solve_with_bootstrap "
+                          + ("with psi_N=" if _passed else
+                             f"WITHOUT psi_N= ({_why})")
+                          + "; the fixed point does not depend on the init",
+                          flush=True)
+                    return _j, dict(swb_psi_N_passed=bool(_passed),
+                                    swb_psi_N_reason=_why)
+
+                def _finish(rec, nl):
+                    rec = jsonable(rec)
+                    metrics = dict(bl.li_metrics or {})
+                    metrics["jbs_loop"] = rec
+                    bl.li_metrics = metrics
+                    if getattr(bl, "ip_closure", None) is not None:
+                        bl.ip_closure["jbs_loop"] = rec
+                        bl.ip_closure["jbs_converged"] = bool(
+                            rec.get("converged", False))
+                        if not rec.get("converged", False):
+                            _r = list(bl.ip_closure.get(
+                                "closure_limited_reasons", ()) or ())
+                            _why = flag_reason(rec)
+                            if _why not in _r:
+                                _r.append(_why)
+                            bl.ip_closure["closure_limited_reasons"] = \
+                                tuple(_r)
+                            bl.ip_closure["closure_limited"] = True
+                    return nl
+
+                # ================= diff: baseline pinned, draws iterate =====
+                if mode == "diff":
+                    _jphi_solve = np.asarray(FUSE_tot, dtype=float)
+                    if getattr(bl, "jphi_diff", None) is not None:
+                        _jphi_solve = _jphi_solve + k2e(bl.jphi_diff)
+                    nl = _pass_solve(_jphi_solve)
+                    # The offset is taken on the DELIVERED baseline geometry
+                    # (the equilibrium every sigma=0 draw converges back to),
+                    # so a sigma=0 draw reproduces the source j_BS exactly.
+                    _snap = mygs.copy_eq()
+                    j_red, d_red = _redl(_snap)
+                    bl.jBS_diff = j_BS_src - j_red
+                    bl.j_BS = j_red
+                    bl.j_phi = FUSE_tot
+                    bl.bs_scale = 1.0
+                    _ratio = j_red.max() / max(j_BS_src.max(), 1.0)
+                    print(f"[imas jbs-loop:diff] source total preserved; "
+                          f"jBS_diff = source j_BS - evaluate_jBS(delivered "
+                          f"baseline) min/max={bl.jBS_diff.min():.2e}/"
+                          f"{bl.jBS_diff.max():.2e}; Redl/source jBS peak="
+                          f"{_ratio:.3f}; the draws iterate", flush=True)
+                    rec = dict(
+                        enabled=True, label="imas baseline diff",
+                        init=_init, grid="psi_N native (source grid)",
+                        n_passes=0, converged=True, jbs_converged=True,
+                        stop_reason=("diff mode: the baseline total is "
+                                     "pinned to the source, so the baseline "
+                                     "needs no loop; every draw iterates"),
+                        jBS_diff_definition=(
+                            "source j_BS - evaluate_jBS(delivered baseline "
+                            "equilibrium, source kinetics): a pure model "
+                            "offset on the baseline geometry, frozen in "
+                            "psi_N labels"),
+                        I_BS=[float(d_red["I_BS"])],
+                        redl_over_source_jBS_peak=float(_ratio),
+                        evaluate_jBS_version=EVALUATE_JBS_VERSION,
+                        oft_build=oft_build_info(),
+                        tolerances=None, wall_s=0.0)
+                    return _finish(rec, nl)
+
+                # ================= E_0 and the initial guess ================
+                _snap0 = mygs.copy_eq()
+                _swb_info = None
+                if _init == "swb":
+                    j0, _swb_info = _swb_legacy()
+                else:
+                    j0, _d0 = _redl(_snap0)
+
+                # ================= rescale ==================================
+                if mode == "rescale":
+                    st = {}
+
+                    def _step(jbs, k, relax=None):
+                        tgt = calc_cylindrical_li_proxy(mygs, FUSE_tot,
+                                                        psi_pad)
+                        _f = lambda s: calc_cylindrical_li_proxy(
+                            mygs, j_ind + s * jbs + j_fixed, psi_pad) - tgt
+                        try:
+                            scale = float(brentq(_f, 0.2, 4.0, xtol=1e-4))
+                            _sc_ok = True
+                        except Exception:
+                            scale = 1.0
+                            _sc_ok = False
+                        bl.jBS_diff = None
+                        bl.bs_scale = scale
+                        bl.j_BS = scale * np.asarray(jbs, dtype=float)
+                        bl.j_phi = j_ind + bl.j_BS + j_fixed
+                        _js = np.asarray(bl.j_phi, dtype=float)
+                        if getattr(bl, "jphi_diff", None) is not None:
+                            _js = _js + k2e(bl.jphi_diff)
+                        st["nl"] = _pass_solve(_js if relax is None
+                                               else relax(_js))
+                        snap = mygs.copy_eq()
+                        w, x, _wk = residual_weights(snap, psi_N, psi_pad)
+                        st.setdefault("scales", []).append(float(scale))
+                        st.setdefault("scale_bracketed", []).append(_sc_ok)
+                        print(f"[imas jbs-loop:rescale] pass {k + 1}: "
+                              f"scale={scale:.4f}", flush=True)
+                        return dict(w=w, x=x, li=_li3(snap), snap=snap)
+
+                    res = run_jbs_loop(
+                        j0, _step, lambda m: _redl(m["snap"])[0], _jbs,
+                        Ip=Ip_abs, meas0=dict(li=_li3(_snap0)),
+                        gate_li=True, gate_q0=False,
+                        label="imas baseline rescale", init=_init)
+                    rec = dict(res["record"])
+                    rec.update(rescale_scales=st.get("scales"),
+                               rescale_bracketed=st.get("scale_bracketed"),
+                               J_final_minus_used_max=float(np.max(np.abs(
+                                   res["J_final"] - res["jbs_used"]))))
+                    if _swb_info:
+                        rec.update(_swb_info)
+                    return _finish(rec, st["nl"])
+
+                # ================= ohmic (every closure channel) ============
+                if mode != "ohmic":
+                    raise ValueError(f"unknown jBS_baseline_mode {mode!r} "
+                                     "(expected 'diff', 'rescale' or "
+                                     "'ohmic')")
+                from .utils import (eq_jphi_profile, unrenormalise_q0,
+                                    q0_gate_admits)
+                _chan = str(getattr(gc, "closure_channel", "bootstrap"))
+                # ---- the q0 reference: ONCE, on the ORIGINAL anchor --------
+                # (a data-derived target, exactly what the predictor computes
+                # on its first call; handed to every pass so it never moves)
+                _geom_a = _anchor["geom"]
+                _psi_q = np.ascontiguousarray(
+                    np.asarray(_geom_a["psi_q"], dtype=float))
+                _psi_g = np.asarray(_geom_a["psi_N"], dtype=float)
+                _probe_a = eq_jphi_profile(_geom_a, "jphi-linterp",
+                                           eq=_anchor["eq"])
+                _q0_anchor = float(np.asarray(_anchor["eq"].get_q(
+                    psi=_psi_q.copy())[1], dtype=float)[0])
+                _j_ach0 = float(np.asarray(_probe_a, dtype=float)[0])
+                _j_req0 = float(np.interp(_psi_q[0], _psi_g,
+                                          np.asarray(FUSE_tot, dtype=float)))
+                _q0_target = unrenormalise_q0(_q0_anchor, _j_ach0, _j_req0)
+                q0_ref = dict(q0_target=_q0_target, q0_anchor=_q0_anchor,
+                              j_achieved0=_j_ach0, j_requested0=_j_req0)
+                _saw = dict(getattr(bl, "sawtooth", None) or {})
+                _gated, _ = q0_gate_admits(
+                    bool(_saw.get("active")), _saw.get("q0_dd"), _q0_target,
+                    float(getattr(gc, "q0_gate", 1.1)))
+                axis_active = bool(_gated and _chan in ("sawtooth_bootstrap",
+                                                        "structured"))
+                _li_target = getattr(gc, "structured_li_target", None)
+                _li_kind = (str(getattr(gc, "structured_li_kind", "li_1"))
+                            if (_chan == "structured"
+                                and _li_target is not None) else "li_3")
+
+                def _q0_of(eq):
+                    return float(np.asarray(eq.get_q(psi=_psi_q.copy())[1],
+                                            dtype=float)[0])
+
+                def _li_of(eq):
+                    return float(li_achieved(eq, li_kind=_li_kind,
+                                             psi_pad=psi_pad)[0])
+
+                st = dict(ctx=_anchor, pass_log=[],
+                          q0s=None, ss=None, oc=None, nl=None, pass0=None)
+
+                def _step(jbs, k, relax=None):
+                    jbs = np.asarray(jbs, dtype=float)
+                    _ratio = jbs.max() / max(j_BS_src.max(), 1.0)
+                    q0s, ss, oc = _ohmic_close(
+                        st["ctx"], jbs, _ratio,
+                        _pass=dict(q0_ref=q0_ref, k=k,
+                                   x_retry=st.get("x_prev")))
+                    _icl0 = bl.ip_closure or {}
+                    if _icl0.get("structured_coeffs_a") is not None:
+                        st["x_prev"] = np.concatenate([
+                            np.asarray(_icl0["structured_coeffs_a"], float),
+                            np.asarray(_icl0["structured_coeffs_b"], float)])
+                    # the pass solves the closure's current relaxed against
+                    # the previous pass's solved current (jbs_relax_current);
+                    # bl.j_phi stays the closure's own assembly
+                    st["nl"] = _pass_solve(bl.j_phi if relax is None
+                                           else relax(bl.j_phi))
+                    snap = mygs.copy_eq()
+                    ctx_new = _closure_geometry(
+                        f"j_BS loop pass {k + 1}")
+                    g = ctx_new["geom"]
+                    w = (g["dV_dpsi"] / (2.0 * np.pi) * g["dpsi_dpsiN"]
+                         * g["inv_R2"] / g["inv_R"])
+                    meas = dict(w=w, x=np.asarray(g["psi_N"], dtype=float),
+                                li=_li_of(snap), snap=snap,
+                                q0=(_q0_of(snap) if axis_active else None))
+                    _icl = bl.ip_closure or {}
+                    st["pass_log"].append(dict(
+                        k=k, ohm_scale=float(bl.ohm_scale),
+                        bs_scale=float(bl.bs_scale),
+                        j_ref0_used=_icl.get("j_ref0_used"),
+                        fsa_roundtrip_err_pct=_icl.get(
+                            "fsa_roundtrip_err_pct"),
+                        closure_limited=bool(_icl.get("closure_limited",
+                                                      False)),
+                        closure_stop_reason=_icl.get(
+                            "structured_gn_stop_reason"),
+                        closure_noise_floor_accepts=_icl.get(
+                            "structured_n_noise_floor_accepts"),
+                        closure_gn_stop=_icl.get("structured_gn_stop"),
+                        closure_retry=_icl.get("structured_closure_retry"),
+                        closure_retry_first_error=_icl.get(
+                            "structured_closure_retry_first_error")))
+                    if k == 0:
+                        # the "predictor" readbacks the corrector bookkeeping
+                        # reports: the first pass, measured the corrector's
+                        # own way
+                        p0 = dict(q0=(_q0_of(snap) if (ss or q0s) else None))
+                        if ss is not None and ss.get("li_target") is not None:
+                            p0["li"] = float(li_achieved(
+                                snap, li_kind=ss["li_kind"], psi_pad=psi_pad,
+                                perimeter=float(ss["li_geom"]["perimeter"]))[0])
+                        st["pass0"] = p0
+                    st.update(ctx=ctx_new, q0s=q0s, ss=ss, oc=oc)
+                    return meas
+
+                _meas0 = dict(li=_li_of(_snap0),
+                              q0=(_q0_of(_snap0) if axis_active else None))
+                res = run_jbs_loop(
+                    j0, _step, lambda m: _redl(m["snap"])[0], _jbs,
+                    Ip=Ip_abs, meas0=_meas0, gate_li=True,
+                    gate_q0=axis_active,
+                    label=f"imas baseline ohmic/{_chan}", init=_init)
+                rec = dict(res["record"])
+                rec.update(closure_channel=_chan, axis_row_active=axis_active,
+                           axis_row=("held at the source's requested axis "
+                                     "current (a data-derived target, section "
+                                     "2.4); q0 checked against q0_tol on the "
+                                     "delivered equilibrium") if axis_active
+                           else None,
+                           li_kind_measured=_li_kind,
+                           q0_reference=dict(q0_ref),
+                           pass_closure_log=st["pass_log"],
+                           J_final_minus_used_max=float(np.max(np.abs(
+                               res["J_final"] - res["jbs_used"]))),
+                           correctors=("subsumed by the loop: every pass "
+                                       "re-solves the predictor on refreshed "
+                                       "geometry, no row rescaling; readback "
+                                       "+ acceptance flags (structured_li_tol,"
+                                       " q0_tol) on the delivered "
+                                       "equilibrium"))
+                if _swb_info:
+                    rec.update(_swb_info)
+                q0s, ss, oc = st["q0s"], st["ss"], st["oc"]
+                nl = st["nl"]
+                _ip_signed_f = oc["ip_signed"]
+                _Ip_t_f = oc["Ip_t"]
+                def _refresh_structured(jbs, k):
+                    """The structured predictor re-run on the CURRENT mygs
+                    geometry with bootstrap *jbs* (the MSE chord stage's
+                    per-step refresh); returns the new state."""
+                    jbs = np.asarray(jbs, dtype=float)
+                    ctx_new = _closure_geometry(f"MSE chord step {k + 1}")
+                    q0s_, ss_, oc_ = _ohmic_close(
+                        ctx_new, jbs, jbs.max() / max(j_BS_src.max(), 1.0),
+                        _pass=dict(q0_ref=q0_ref, k=k,
+                                   x_retry=st.get("x_prev")))
+                    _icl1 = bl.ip_closure or {}
+                    st.setdefault("refresh_log", []).append(dict(
+                        k=k, closure_stop_reason=_icl1.get(
+                            "structured_gn_stop_reason"),
+                        closure_noise_floor_accepts=_icl1.get(
+                            "structured_n_noise_floor_accepts"),
+                        closure_retry=_icl1.get("structured_closure_retry")))
+                    if _icl1.get("structured_coeffs_a") is not None:
+                        st["x_prev"] = np.concatenate([
+                            np.asarray(_icl1["structured_coeffs_a"], float),
+                            np.asarray(_icl1["structured_coeffs_b"], float)])
+                    st.update(ctx=ctx_new, q0s=q0s_, ss=ss_, oc=oc_)
+                    return ss_
+
+                # ---- MSE pitch angles: converge j_BS without MSE (done),
+                # Jacobian once, chord steps with j_BS re-evaluated, one final
+                # Jacobian refresh (docs/physics-notes.md) ------------------
+                if ss is not None and ss.get("mse") is not None:
+                    _nl_m, ss, _mse_rec = self._structured_mse_jbs_stage(
+                        ss, bl, mygs, solve_jphi=_pass_solve,
+                        jbs0=res["jbs_used"],
+                        refresh=lambda jbs, k: _refresh_structured(jbs, k),
+                        evaluate=lambda eq: _redl(eq)[0],
+                        measure=lambda eq: dict(
+                            li=_li_of(eq),
+                            q0=(_q0_of(eq) if axis_active else None)),
+                        weights=lambda eq: residual_weights(
+                            eq, psi_N, psi_pad)[:2],
+                        settings=_jbs, Ip=Ip_abs, gate_q0=axis_active)
+                    if _nl_m is not None:
+                        nl = _nl_m
+                    _mse_rec["refresh_closure_log"] = st.get("refresh_log", [])
+                    rec["mse_stage"] = _mse_rec
+                    if not _mse_rec.get("converged", False):
+                        rec["converged"] = False
+                        rec["jbs_converged"] = False
+                        rec["stop_reason"] = ("MSE chord stage: "
+                                              + str(_mse_rec.get(
+                                                  "stop_reason")))
+                        rec["final"] = _mse_rec.get("final", rec.get("final"))
+                    _ip_signed_f = st["oc"]["ip_signed"]
+                    _Ip_t_f = st["oc"]["Ip_t"]
+                # ---- the correctors: readback + acceptance, no step --------
+                if q0s is not None:
+                    self._close_ip_q0_corrector(
+                        q0s, bl, mygs, solve_jphi, ip_of=_ip_signed_f,
+                        roundtrip_gate=lambda _ipc: _gate_fn(
+                            _ipc, _Ip_t_f)["err_pct"],
+                        record_only=True)
+                if ss is not None:
+                    self._close_ip_structured_corrector(
+                        ss, bl, mygs, solve_jphi, ip_of=_ip_signed_f,
+                        roundtrip_gate=self._structured_roundtrip_gate(
+                            _Ip_t_f),
+                        record_only=True)
+                    if ss.get("mse_applied"):
+                        self._structured_mse_delivered(ss, bl, mygs)
+                if (q0s is not None or ss is not None) \
+                        and bl.ip_closure is not None:
+                    _p0 = st.get("pass0") or {}
+                    _upd = dict(n_extra_solves=int(rec.get("n_passes", 1)) - 1,
+                                sawtooth_verdict=(
+                                    f"j_BS loop: predictor re-solved on "
+                                    f"refreshed geometry for "
+                                    f"{rec.get('n_passes')} pass(es) "
+                                    "(corrector steps subsumed)"))
+                    if _p0.get("q0") is not None and (
+                            ss is not None and ss.get("gated")
+                            or q0s is not None):
+                        _upd.update(q0_solved_predictor=_p0["q0"],
+                                    q0_predictor_residual=(
+                                        _p0["q0"] - _q0_target))
+                    if _p0.get("li") is not None and ss is not None:
+                        _lt = float(ss["li_target"])
+                        _upd.update(
+                            structured_li_solved_predictor=_p0["li"],
+                            structured_li_achieved_predictor=_p0["li"],
+                            structured_li_residual_predictor=_p0["li"] - _lt)
+                    bl.ip_closure.update(_upd)
+                return _finish(rec, nl)
+
+
+            if _loop_on:
+                nl_its = _imas_jbs_loop()
             else:
-                raise ValueError(f"unknown jBS_baseline_mode {mode!r} "
-                                 "(expected 'diff', 'rescale' or 'ohmic')")
-            # Solve the resulting total so coils + li_1 reflect this equilibrium.
-            # Anchor to equilibrium.j_tor (add the fixed jphi_diff) so the baseline
-            # l_i/coils reflect the same total the draws use (== equilibrium.j_tor),
-            # not the core_profiles total. The diff-mode component split above stays
-            # on core_profiles.j_tor; jphi_diff is the fixed equilibrium offset.
-            _jphi_solve = np.asarray(bl.j_phi, dtype=float)
-            # jphi_diff re-anchors the total to FUSE's equilibrium.j_tor; in
-            # 'ohmic' mode the whole point is NOT to anchor to FUSE, so skip it
-            # (its magnitude is recorded in bl.ip_closure for the reader).
-            if getattr(bl, "jphi_diff", None) is not None and mode != "ohmic":
-                _jphi_solve = _jphi_solve + k2e(bl.jphi_diff)
-            nl_its = solve_jphi(_jphi_solve)
+                swb_seed = create_power_flux_fun(psi_N.size, 1.5, 1.5)["y"]
+                swb = solve_with_bootstrap(
+                    mygs, ne, te, ni, ti, Zeff, bl.Ip_target, swb_seed,
+                    scale_jBS=1.0, isolate_edge_jBS=iso,
+                    diagnostic_plots=False, verbose=False,
+                )
+                # Same axis-transition smoothing every per-draw spike receives, so
+                # the sigma=0 draw reproduces this baseline split exactly.
+                j_BS_swb = smooth_jbs_transition(
+                    _swb_jbs_to_toroidal(mygs, swb["isolated_j_BS"], psi_pad))
+                if gc.floor_j_BS:
+                    j_BS_swb = np.clip(j_BS_swb, 0.0, None)
+                ratio = j_BS_swb.max() / max(j_BS_src.max(), 1.0)
 
-            # Corrective iteration (opt-in): the single jphi-linterp solve
-            # imposes the request with pre-solve geometry, so the ACHIEVED FSA
-            # j_phi lands a few % off the anchor once psi converges (-> l_i /
-            # q(psi_N) biased vs the equilibrium IDS). Reuse the recon path's
-            # Newton corrector to drive the output onto the anchor target.
-            if getattr(self.config.generation, "imas_corrective_jphi", False):
-                from .TokaMaker_interface import _corrective_jphi_iteration
-                _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-                _pp_y = pchip_derivative(psi_N, p_total) / _pr
-                _pp_y[-1] = 0.0
-                _pp_prof = {"type": "linterp", "y": _pp_y, "x": psi_N}
-                _, _n_corr, _corr_hist = _corrective_jphi_iteration(
-                    mygs, psi_N, _jphi_solve, _pp_prof,
-                    abs(bl.Ip_target), float(p_total[0]), 1e-3,
-                    min_iters=2, max_iters=8, rtol=0.02, verbose=True,
-                    damping=0.5, protect_state=True)
-                print(f"[imas corrective-jphi] converged in {_n_corr} iteration(s)")
+                if mode == "diff":
+                    bl.jBS_diff = j_BS_src - j_BS_swb        # added to baseline + draws
+                    bl.j_BS = j_BS_swb
+                    bl.j_phi = FUSE_tot                      # total anchored to FUSE
+                    bl.bs_scale = 1.0
+                    print(f"[imas SWB-split:diff] FUSE total preserved; "
+                          f"diff min/max={bl.jBS_diff.min():.2e}/{bl.jBS_diff.max():.2e}; "
+                          f"SWB/FUSE jBS peak={ratio:.3f}")
+                elif mode == "rescale":
+                    tgt = calc_cylindrical_li_proxy(mygs, FUSE_tot, psi_pad)
+                    _f = lambda s: calc_cylindrical_li_proxy(
+                        mygs, j_ind + s * j_BS_swb + j_fixed, psi_pad) - tgt
+                    try:
+                        scale = float(brentq(_f, 0.2, 4.0, xtol=1e-4))
+                    except Exception:
+                        scale = 1.0
+                    bl.jBS_diff = None
+                    bl.bs_scale = scale
+                    bl.j_BS = scale * j_BS_swb
+                    bl.j_phi = j_ind + bl.j_BS + j_fixed
+                    print(f"[imas SWB-split:rescale] scale={scale:.3f}; FUSE ohmic kept; "
+                          f"SWB/FUSE jBS peak={ratio:.3f}")
+                elif mode == "ohmic":
+                    _q0_state, _structured_state, _oc = _ohmic_close(
+                        _anchor, j_BS_swb, ratio)
+                    _ip_signed = _oc["ip_signed"]
+                    Ip_t = _oc["Ip_t"]
+                    ip_roundtrip_gate = _oc["ip_roundtrip_gate"]
+                else:
+                    raise ValueError(f"unknown jBS_baseline_mode {mode!r} "
+                                     "(expected 'diff', 'rescale' or 'ohmic')")
+                # Solve the resulting total so coils + li_1 reflect this equilibrium.
+                # Anchor to equilibrium.j_tor (add the fixed jphi_diff) so the baseline
+                # l_i/coils reflect the same total the draws use (== equilibrium.j_tor),
+                # not the core_profiles total. The diff-mode component split above stays
+                # on core_profiles.j_tor; jphi_diff is the fixed equilibrium offset.
+                _jphi_solve = np.asarray(bl.j_phi, dtype=float)
+                # jphi_diff re-anchors the total to FUSE's equilibrium.j_tor; in
+                # 'ohmic' mode the whole point is NOT to anchor to FUSE, so skip it
+                # (its magnitude is recorded in bl.ip_closure for the reader).
+                if getattr(bl, "jphi_diff", None) is not None and mode != "ohmic":
+                    _jphi_solve = _jphi_solve + k2e(bl.jphi_diff)
+                nl_its = solve_jphi(_jphi_solve)
 
-            # ---- q0 corrector (closure_channel="sawtooth_bootstrap") --------
-            # The predictor above is FIRST ORDER (q0 ~ 1/j_phi(0) at the frozen
-            # anchor geometry).  The closed-hybrid solve that just ran is the
-            # first time the real q0 is knowable, and it costs nothing extra to
-            # read it.  If the predictor already landed inside q0_tol we are
-            # done at ZERO extra solves; otherwise ONE analytic Newton step
-            # along the Ip-closed manifold and whatever that gives is accepted
-            # and recorded.  Deliberately no loop: this channel exists to cost
-            # about what "bootstrap" costs, and a residual that is reported is
-            # worth more than a residual that is iterated away invisibly.
-            if _q0_state is not None:
-                # The same NAMED gate the predictor stage used, re-run on
-                # what the corrector delivers.  This channel is always HARD in
-                # Ip, so there is no posterior and the reference is Ip_target.
-                _nl_corr = self._close_ip_q0_corrector(
-                    _q0_state, bl, mygs, solve_jphi, ip_of=_ip_signed,
-                    roundtrip_gate=lambda _ipc: ip_roundtrip_gate(
-                        _ipc, Ip_t)["err_pct"])
-                if _nl_corr is not None:
-                    nl_its = _nl_corr    # the state l_i/coils are read from
-            # Same contract for closure_channel="structured" (present whenever
-            # there is something to correct: the sawtooth gate admitted an axis
-            # row, or an l_i target was given, or both -- and BOTH corrections
-            # then share the one extra solve).  This channel can be SOFT in Ip,
-            # so the gate keeps its posterior/sigma_Ip pass-through and only
-            # the measurement is bound here.
-            if _structured_state is not None:
-                # MSE pitch angles (only when a usable mse_data block was
-                # given): linearise tan(gamma) on solved equilibria and
-                # re-solve the closure with chi2_MSE in its objective, BEFORE
-                # the q0/l_i corrector, which then keeps the MSE term in every
-                # re-solve it takes.
-                if _structured_state.get("mse") is not None:
-                    _nl_mse = self._close_ip_structured_mse_stage(
-                        _structured_state, bl, mygs, solve_jphi)
-                    if _nl_mse is not None:
-                        nl_its = _nl_mse
-                _nl_corr = self._close_ip_structured_corrector(
-                    _structured_state, bl, mygs, solve_jphi,
-                    ip_of=_ip_signed,
-                    roundtrip_gate=self._structured_roundtrip_gate(Ip_t))
-                if _nl_corr is not None:
-                    nl_its = _nl_corr
-                if _structured_state.get("mse_applied"):
-                    self._structured_mse_delivered(_structured_state, bl, mygs)
+                # Corrective iteration (opt-in): the single jphi-linterp solve
+                # imposes the request with pre-solve geometry, so the ACHIEVED FSA
+                # j_phi lands a few % off the anchor once psi converges (-> l_i /
+                # q(psi_N) biased vs the equilibrium IDS). Reuse the recon path's
+                # Newton corrector to drive the output onto the anchor target.
+                if getattr(self.config.generation, "imas_corrective_jphi", False):
+                    from .TokaMaker_interface import _corrective_jphi_iteration
+                    _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
+                    _pp_y = pchip_derivative(psi_N, p_total) / _pr
+                    _pp_y[-1] = 0.0
+                    _pp_prof = {"type": "linterp", "y": _pp_y, "x": psi_N}
+                    _, _n_corr, _corr_hist = _corrective_jphi_iteration(
+                        mygs, psi_N, _jphi_solve, _pp_prof,
+                        abs(bl.Ip_target), float(p_total[0]), 1e-3,
+                        min_iters=2, max_iters=8, rtol=0.02, verbose=True,
+                        damping=0.5, protect_state=True)
+                    print(f"[imas corrective-jphi] converged in {_n_corr} iteration(s)")
+
+                # ---- q0 corrector (closure_channel="sawtooth_bootstrap") --------
+                # The predictor above is FIRST ORDER (q0 ~ 1/j_phi(0) at the frozen
+                # anchor geometry).  The closed-hybrid solve that just ran is the
+                # first time the real q0 is knowable, and it costs nothing extra to
+                # read it.  If the predictor already landed inside q0_tol we are
+                # done at ZERO extra solves; otherwise ONE analytic Newton step
+                # along the Ip-closed manifold and whatever that gives is accepted
+                # and recorded.  Deliberately no loop: this channel exists to cost
+                # about what "bootstrap" costs, and a residual that is reported is
+                # worth more than a residual that is iterated away invisibly.
+                if _q0_state is not None:
+                    # The same NAMED gate the predictor stage used, re-run on
+                    # what the corrector delivers.  This channel is always HARD in
+                    # Ip, so there is no posterior and the reference is Ip_target.
+                    _nl_corr = self._close_ip_q0_corrector(
+                        _q0_state, bl, mygs, solve_jphi, ip_of=_ip_signed,
+                        roundtrip_gate=lambda _ipc: ip_roundtrip_gate(
+                            _ipc, Ip_t)["err_pct"])
+                    if _nl_corr is not None:
+                        nl_its = _nl_corr    # the state l_i/coils are read from
+                # Same contract for closure_channel="structured" (present whenever
+                # there is something to correct: the sawtooth gate admitted an axis
+                # row, or an l_i target was given, or both -- and BOTH corrections
+                # then share the one extra solve).  This channel can be SOFT in Ip,
+                # so the gate keeps its posterior/sigma_Ip pass-through and only
+                # the measurement is bound here.
+                if _structured_state is not None:
+                    # MSE pitch angles (only when a usable mse_data block was
+                    # given): linearise tan(gamma) on solved equilibria and
+                    # re-solve the closure with chi2_MSE in its objective, BEFORE
+                    # the q0/l_i corrector, which then keeps the MSE term in every
+                    # re-solve it takes.
+                    if _structured_state.get("mse") is not None:
+                        _nl_mse = self._close_ip_structured_mse_stage(
+                            _structured_state, bl, mygs, solve_jphi)
+                        if _nl_mse is not None:
+                            nl_its = _nl_mse
+                    _nl_corr = self._close_ip_structured_corrector(
+                        _structured_state, bl, mygs, solve_jphi,
+                        ip_of=_ip_signed,
+                        roundtrip_gate=self._structured_roundtrip_gate(Ip_t))
+                    if _nl_corr is not None:
+                        nl_its = _nl_corr
+                    if _structured_state.get("mse_applied"):
+                        self._structured_mse_delivered(_structured_state, bl, mygs)
 
         # Convergence sanity: the solve completed (it raises otherwise), so
         # verify it landed on the requested current before trusting its l_i.
@@ -3479,6 +4561,17 @@ class Bouquet:
         starts converge to the same equilibrium here; only the starting
         point of the iteration differs.
 
+        **With ``jbs_self_consistent=True``** the invariant is the loop's own:
+        the sigma=0 draw bootstrap loop (the per-draw composition, started from
+        the state anchor above, with the baseline's inductive held as the
+        standard draw anchor holds it) must converge, and converge to the
+        BASELINE -- its bootstrap within the loop's ``jbs_rtol_j`` /
+        ``jbs_rtol_Ip`` of ``baseline.j_BS`` (+ ``jBS_diff``) and its l_i
+        within ``jbs_tol_li`` of the baseline's.  (Route R2's inductive Ip
+        renormalisation is a separate sigma=0 invariant with its own budget,
+        tested in ``tests/test_seeded_reproducibility.py``.)
+        ``tol_frac``/``swb_iterations`` are then unused (no SWB is called).
+
         Costs one SWB call (~1 min). Call after ``reconstruct()`` /
         ``prepare_baseline()`` and before ``generate()``; leaves ``mygs``
         re-anchored on the baseline equilibrium.
@@ -3601,6 +4694,13 @@ class Bouquet:
                 mygs.replace_eq(source_eq=_snap)
             raise
 
+        from .jbs_loop import jbs_settings as _jbs_settings
+        _jbs = _jbs_settings(gc, draw=True)
+        if _jbs["enabled"]:
+            return self._verify_sigma0_jbs_loop(
+                _jbs, pp, ffp, pressure, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
+                psi_N, psi_pad)
+
         seed = create_power_flux_fun(len(psi_N), 1.5, 1.5)["y"]
         res = solve_with_bootstrap(
             mygs, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
@@ -3651,6 +4751,174 @@ class Bouquet:
               f"tol {100*tol_frac:.1f}%{_fl})")
         return out
 
+    def _verify_sigma0_jbs_loop(self, settings, pp, ffp, pressure, ne_eq,
+                                te_eq, ni_eq, ti_eq, Zeff_eq, psi_N, psi_pad):
+        """``verify_sigma0_consistency`` under the self-consistent loop.
+
+        ``mygs`` holds the state anchor (baseline j_phi at the baseline
+        pressure).  Runs the sigma=0 draw loop and compares what it converges
+        to with the baseline; see the caller's docstring.
+        """
+        import numpy as np
+        from .jbs_loop import (profile_residuals, residual_weights,
+                               run_jbs_loop, jsonable)
+        from .TokaMaker_interface import _draw_jbs_composer
+
+        bl = self.baseline
+        mygs = self.mygs
+        gc = self.config.generation
+        Ip = float(bl.Ip_target)
+        jdiff = (None if getattr(bl, "jBS_diff", None) is None
+                 else np.asarray(bl.jBS_diff, dtype=float))
+        compose = _draw_jbs_composer(
+            psi_N, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq, psi_pad,
+            bool(gc.isolate_edge_jBS), float(getattr(bl, "bs_scale", 1.0)),
+            bool(gc.floor_j_BS), jdiff, None, None)
+        j_ind = np.asarray(bl.j_inductive, dtype=float)
+        j_fix = np.asarray(bl.j_phi, dtype=float) - j_ind - np.asarray(
+            bl.j_BS, dtype=float)
+        if jdiff is not None:
+            j_fix = j_fix - jdiff
+        if getattr(bl, "jphi_diff", None) is not None:
+            # same kinetic -> equilibrium regrid the baseline solve applies
+            from .utils import pchip_interp
+            j_fix = j_fix + pchip_interp(
+                np.asarray(bl.psi_N_kinetic, dtype=float),
+                np.asarray(bl.jphi_diff, dtype=float), psi_N)
+        ref = np.asarray(bl.j_BS, dtype=float) + (0.0 if jdiff is None
+                                                  else jdiff)
+
+        # The baseline equilibrium was delivered by the reconstruction's
+        # corrective iteration on the geqdsk path (and a sigma=0 standard
+        # draw ends on the same corrective iteration), so there the sigma=0
+        # equilibrium is solved the same way -- same renormalisation, same
+        # knobs (rtol=0.05, 2..8 iterations, protect_state) as the
+        # reconstruction's step 7.  A single jphi-linterp solve of the
+        # ACHIEVED profile does not land on the equilibrium it was achieved
+        # by, and the invariant would then measure that, not the loop.
+        _recon_path = (str(getattr(bl, "provenance", "")) == "reconstruction")
+
+        def _solve(j):
+            from .utils import pchip_derivative
+            _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
+            _pp = {"type": "linterp",
+                   "y": pchip_derivative(psi_N, pressure) / _pr, "x": psi_N}
+            _pp["y"][-1] = 0.0
+            mygs.set_targets(Ip=Ip, pax=float(pressure[0]))
+            mygs.set_profiles(pp_prof=_pp, ffp_prof={
+                "type": "jphi-linterp", "y": np.asarray(j, float),
+                "x": psi_N})
+            mygs.solve()
+            if _recon_path:
+                from .TokaMaker_interface import (
+                    _corrective_jphi_iteration, _renormalize_target_to_Ip)
+                _t, _f = _renormalize_target_to_Ip(
+                    mygs, psi_N, np.asarray(j, float), abs(Ip), psi_pad,
+                    label="jphi_corr/sigma0")
+                _corrective_jphi_iteration(
+                    mygs, psi_N, _t, _pp, abs(Ip), float(pressure[0]),
+                    psi_pad, min_iters=2, max_iters=8, rtol=0.05,
+                    verbose=False, protect_state=True)
+
+        def _step(spk, k, relax=None):
+            # the baseline's own inductive, held (TokaMaker renormalises the
+            # total to Ip exactly as the baseline solve did): the Ip
+            # renormalisation of route R2 / Fix C is its own sigma=0
+            # invariant (|s-1|*f_ind, tests/test_seeded_reproducibility.py)
+            # and is not re-tested here
+            _j = j_ind + spk + j_fix
+            _solve(_j if relax is None else relax(_j))
+            _snap = mygs.copy_eq()
+            _w, _x, _k = residual_weights(_snap, psi_N, psi_pad)
+            return dict(w=_w, x=_x, snap=_snap,
+                        li=float(mygs.get_stats(li_normalization="iter",
+                                                lcfs_pad=psi_pad)["l_i"]))
+
+        spike0, _full0, _d0 = compose(mygs.copy_eq())
+        li0 = float(mygs.get_stats(li_normalization="iter",
+                                   lcfs_pad=psi_pad)["l_i"])
+        res = run_jbs_loop(spike0, _step,
+                           lambda m: compose(m["snap"])[0], settings,
+                           Ip=abs(Ip), meas0=dict(li=li0), gate_li=True,
+                           label="sigma=0 check", raise_on_fail=False)
+        w, x, _k = residual_weights(mygs.copy_eq(), psi_N, psi_pad)
+        cmp_ = profile_residuals(res["jbs_used"], ref, w, x, abs(Ip))
+        li_s0 = float(mygs.get_stats(li_normalization="iter",
+                                     lcfs_pad=psi_pad)["l_i"])
+        # The reference is the l_i of the BASELINE EQUILIBRIUM.  On the IMAS
+        # path that is l_i_target (read off the delivered solve); on the
+        # geqdsk path l_i_target is the step-6 MATCHED value by design
+        # (issue #25) and the delivered equilibrium carries the recorded
+        # post-corrective l_i instead -- the one a sigma=0 re-solve must
+        # reproduce.
+        li_ref = float(bl.l_i_target)
+        li_ref_name = "l_i_target"
+        _rc = getattr(bl, "recon", None) or {}
+        if _recon_path and _rc.get("li_realized_post_corrective") is not None:
+            li_ref = float(_rc["li_realized_post_corrective"])
+            li_ref_name = "reconstruction li_realized_post_corrective"
+        dli = abs(li_s0 - li_ref)
+        dev = np.asarray(res["jbs_used"], dtype=float) - ref
+        peak = float(np.max(np.abs(ref))) or 1.0
+        passed = bool(res["converged"]
+                      and cmp_["r_j"] <= settings["rtol_j"]
+                      and cmp_["r_I"] <= settings["rtol_Ip"]
+                      and dli <= settings["tol_li"])
+        out = dict(spike0=np.asarray(res["jbs_used"], dtype=float),
+                   max_dev=float(np.max(np.abs(dev))),
+                   rms_dev=float(np.sqrt(np.mean(dev ** 2))),
+                   max_dev_frac=float(np.max(np.abs(dev)) / peak),
+                   psi_worst=float(psi_N[int(np.argmax(np.abs(dev)))]),
+                   passed=passed, invariant="jbs-loop",
+                   loop_converged=bool(res["converged"]),
+                   r_j_vs_baseline=float(cmp_["r_j"]),
+                   r_I_vs_baseline=float(cmp_["r_I"]),
+                   li_sigma0=li_s0, li_baseline=li_ref,
+                   li_baseline_reference=li_ref_name,
+                   dl_i_vs_baseline=float(dli),
+                   record=jsonable(res["record"]))
+        # leave mygs re-anchored on the baseline equilibrium
+        mygs.set_targets(Ip=Ip, pax=float(pressure[0]))
+        mygs.set_profiles(pp_prof=pp, ffp_prof=ffp)
+        try:
+            mygs.solve()
+        except (ValueError, RuntimeError):
+            pass
+        print(f"[sigma0-check jbs-loop] {'PASS' if passed else 'FAIL'}: "
+              f"loop {'converged' if res['converged'] else 'NOT converged'} "
+              f"in {res['record']['n_passes']} pass(es); vs baseline "
+              f"r_j={cmp_['r_j']:.3e} (tol {settings['rtol_j']:.0e}), "
+              f"r_I={cmp_['r_I']:.3e} (tol {settings['rtol_Ip']:.0e}), "
+              f"|dl_i|={dli:.2e} (tol {settings['tol_li']:.0e})")
+        return out
+
+    @staticmethod
+    def _check_jbs_loop_workflow(gc) -> None:
+        """Refuse a self-consistent bootstrap loop with nothing to iterate.
+
+        Raised outright -- not a workflow-lock problem the ``"custom"`` escape
+        hatch could downgrade -- because the combination has no meaning:
+        ``single_profile_jphi`` has no bootstrap component, and
+        ``recalculate_j_BS=False`` turns off exactly the re-evaluation the
+        loop is.  Called from :meth:`prepare_baseline` (the baseline loops
+        without ``generate()``) and from :meth:`_validate_workflow`.
+        """
+        from .jbs_loop import validate_jbs_settings
+        validate_jbs_settings(gc)
+        if not bool(getattr(gc, "jbs_self_consistent", False)):
+            return
+        if bool(getattr(gc, "single_profile_jphi", False)):
+            raise ValueError(
+                "jbs_self_consistent=True with single_profile_jphi=True: "
+                "there is no bootstrap component to iterate (j_phi is one "
+                "profile).  Turn one of them off.")
+        if not bool(getattr(gc, "recalculate_j_BS", True)):
+            raise ValueError(
+                "jbs_self_consistent=True with recalculate_j_BS=False: the "
+                "loop re-evaluates the bootstrap on every equilibrium, which "
+                "is exactly what recalculate_j_BS=False turns off.  Turn one "
+                "of them off.")
+
     # ── stage 3: perturbed bouquet --------------------------------------
     def _validate_workflow(self) -> None:
         """Hard guard enforcing the validated per-path workflow at generate().
@@ -3696,6 +4964,7 @@ class Bouquet:
         if float(getattr(uc, "jphi_scalar_sigma", 0.0)) <= 0.0:
             problems.append("jphi_scalar_sigma<=0 freezes j_inductive "
                             "perturbation (violates the all-profiles rule)")
+        self._check_jbs_loop_workflow(gc)
         # closure_channel is consumed ONLY by the IMAS hybrid baseline
         # (jBS_baseline_mode="ohmic" with recalculate_j_BS=True).  Anywhere
         # else it used to be resolved (the structured preset even printed
@@ -3927,6 +5196,8 @@ class Bouquet:
         _cut_mm, _cut_source = self._boundary_cut()
 
         from .utils import capture_native_output
+        from .jbs_loop import jbs_settings as _jbs_settings
+        _jbs_draw = _jbs_settings(gc, draw=True)
         verbose = bool(getattr(self.config, "verbose", False))
         with capture_native_output(enabled=not verbose) as _cap:
             self.diagnostics = generate_bouquet(
@@ -4030,6 +5301,9 @@ class Bouquet:
                 # bounds the target-vs-achieved gap to its tolerance (~2-3%
                 # core RMS) -- storing the achieved output removes even that.
                 store_achieved_jphi=True,
+                # Self-consistent bootstrap: the per-draw loop settings (None
+                # -> the legacy frozen-SWB draws, bit for bit).
+                jbs_loop=(_jbs_draw if _jbs_draw["enabled"] else None),
             )
         self.generation_log = _cap["text"] or None
 

@@ -216,7 +216,15 @@ as an enormous sigma.
 | `anchor_pressure_to_equilibrium` | `False` | IMAS path: add the fixed `p_diff = equilibrium.pressure − p_reconstructed` offset |
 | `imas_corrective_jphi` | `False` | Opt-in corrective j_phi iteration on the IMAS baseline solve (still being validated) |
 | `floor_j_BS` | `False` | Clip negative bootstrap excursions; only needed with `isolate_edge_jBS=False` on sources that carry an inner negative lobe |
-| `swb_iterations` | `3` | `solve_with_bootstrap` self-consistency iterations per draw |
+| `swb_iterations` | `3` | **Legacy** (flag-off path and `jbs_init="swb"` only): `solve_with_bootstrap`'s fixed Picard pass count per draw. The IMAS baseline's own SWB call never read it (OFT's default 3) |
+| `jbs_self_consistent` | `False` | Iterate the bootstrap to self-consistency with the delivered equilibrium (Redl on the caller's own ψ_N grid, re-evaluated after every solve) in the baseline, every closure channel, the MSE stage, every draw and the reconstruction -- see [physics-notes.md](physics-notes.md#self-consistent-bootstrap-jbs_self_consistent). `False` = the legacy frozen-SWB bootstrap, bit for bit |
+| `jbs_init` | `"anchor"` | The loop's initial guess: Redl on the anchor equilibrium, or `"swb"` (legacy result; A/B only). The fixed point does not depend on it |
+| `jbs_rtol_j` / `jbs_rtol_Ip` | `1e-3` / `1e-4` | Loop convergence: current-weighted L2 residual of the j_BS profile, and its current integral over I_p |
+| `jbs_tol_li` / `jbs_tol_q0` | `1e-3` / `2e-3` | Loop convergence: pass-to-pass change of the solved l_i, and of q0 where an axis row is active |
+| `jbs_max_passes` / `jbs_max_passes_draw` | `8` / `6` | Pass ceilings (baseline / reconstruction; per draw, plus up to 2 after the coil homotopy). Convergence = every active criterion on **two consecutive** passes |
+| `jbs_relax` / `jbs_relax_halve_on` | `0.7` / `3` | Under-relaxation ω of the bootstrap; halved (floor 0.25) only when `r_j` grows on `jbs_relax_halve_on` consecutive passes (`1` = on every growth); three growing passes at the floor abort |
+| `jbs_relax_current` | `0.7` | Under-relaxation β of the SOLVED current (`(1−β)` previous solved + `β` closure), damping the closure ↔ geometry oscillation; path only, gap recorded per pass. `1` = off |
+| `jbs_loop_on_fail` | `"raise"` | Non-convergence: raise `JBSNotConverged` (with the residual history), or `"flag"` the slice closure-limited and keep the last iterate. A non-converged draw is always a failed draw |
 | `coil_drift` | `0.01` | Soft coil-drift target |
 | `coil_drift_hard_factor` | `None` | Optional hard inequality bounds at `± factor·coil_drift` in every solve |
 | `homotopy_passes` | `[(0.05, 0.10), (0.02, 0.05), (0.01, 0.01)]` | Progressive `(F_tol, VSC_tol)` schedule — see [coil-constraints.md](coil-constraints.md) |

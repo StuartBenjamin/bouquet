@@ -452,6 +452,19 @@ It can be less accurate for:
 - Non-Maxwellian distributions
 - Very steep edge pedestals
 
+**Implementation note.** bouquet evaluates the bootstrap with the Redl et al.
+(2021) fit (OFT's `redl_bootstrap`, `formula_form='jboot1'`), the successor of
+the Sauter fit with the same inputs. Legacy path (default): once per baseline
+and per draw through OFT's `solve_with_bootstrap` on its own auxiliary
+equilibrium, then frozen. With `GenerationConfig.jbs_self_consistent=True`:
+`physics.evaluate_jBS` on the delivered equilibrium and the caller's own ψ_N
+grid, iterated to self-consistency with the closure and the GS solve
+(`bouquet/jbs_loop.py`); see
+[physics-notes.md](docs/physics-notes.md#self-consistent-bootstrap-jbs_self_consistent).
+
+**Assumption (both paths):** the kinetic profiles are held at their ψ_N labels
+while the current redistributes; the Redl drive is main-ion + electron only.
+
 ### 5.2 Inductive Current
 
 The inductive current `j_ind` is defined as the residual:
