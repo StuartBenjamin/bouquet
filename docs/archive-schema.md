@@ -1,7 +1,8 @@
-# The bouquet HDF5 archive — schema v2
+# The bouquet HDF5 archive — schema v3
 
 Authoritative description of the on-disk layout written by bouquet ≥ 1.0.0
-(schema v2 first shipped in the 1.0.0 release).
+(schema v2 first shipped in the 1.0.0 release; v3 adds the self-consistent
+bootstrap record — see [v2 → v3](#v2--v3-the-self-consistent-bootstrap-record)).
 The single source of truth in code is [`bouquet/schema.py`](../bouquet/schema.py)
 (`SCHEMA_VERSION`, `PROFILE_UNITS`, fixed dataset names, `write_profile` /
 `find_bytes_dataset`); this document mirrors it for human readers. Prefer
@@ -13,7 +14,7 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
 ## Layout
 
 ```
-{header}.h5                            file attrs: schema_version (=2),
+{header}.h5                            file attrs: schema_version (=3),
 │                                      bouquet_version, created, updated
 ├── config_json                        JSON dump of the run BouquetConfig
 │                                      (root copy = most recent write; the
@@ -65,6 +66,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │              core_pressure_hollow record; load_baseline_profiles()
     │              decodes it to li_metrics / ip_closure / closure_limited /
     │              core_pressure_hollow (each only when present)
+    │              [jbs_converged, jbs_n_passes, jbs_loop_json]
+    │                                  ← the baseline's jbs_loop block (v3)
     └── <count>/                       one group per accepted draw
         │                              (integer; gaps = rejected draws)
         ├── eqdsk, [pfile]             raw bytes, fixed names
@@ -84,7 +87,7 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
                    [diverted], [passes_coil_filter, passes_boundary_filter,
                    selected]           ← filter flags, written post-hoc
                    [jbs_converged, jbs_n_passes, jbs_loop_json]
-                                       ← self-consistent bootstrap only
+                                       ← the draw's jbs_loop block (v3)
                    [boundary_rms_mm, boundary_max_mm]  ← the draw's LCFS metric,
                                        written when filter_boundaries applies a cut
 ```
@@ -135,13 +138,45 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
   (`write_imas_draw(..., fidelity="exact")`); read it back with
   `bq.load_eq_fsa`.
 
-- **Self-consistent bootstrap record.** With
-  `GenerationConfig.jbs_self_consistent=True` every draw carries
-  `jbs_converged` (bool), `jbs_n_passes` (int, all loops of the draw) and the
-  full loop record as JSON in `jbs_loop_json` (residual histories, relaxation,
-  tolerances, the post-homotopy check); read it with
-  `bouquet.utils.load_jbs_loop(header, count, scan_key)`. Legacy runs write
-  none of these, so the schema version is unchanged.
+- **Self-consistent bootstrap record (`jbs_loop` block, schema v3).** When
+  the bootstrap came from the self-consistent loop
+  (`GenerationConfig.jbs_self_consistent`, **the default**) every draw group
+  carries `jbs_converged` (bool), `jbs_n_passes` (int, all loops of the draw)
+  and the full loop record as JSON in `jbs_loop_json` (residual histories,
+  relaxation factors, tolerances, the post-homotopy check, the evaluator
+  version, the OFT build, and `init_source` -- what each loop started from,
+  per loop under `loops` and for the draw's first loop at the top level); the `_baseline` group carries the same three
+  attrs for the baseline's own loop (`jbs_n_passes` = its pass count). Names
+  in `schema.JBS_LOOP_ATTRS`; write/read with `schema.write_jbs_loop` /
+  `schema.read_jbs_loop`, or read with
+  `bouquet.utils.load_jbs_loop(header, count, scan_key)` (`count="_baseline"`
+  for the baseline), `DrawView.jbs_loop` / `DrawView.jbs_converged`,
+  `ScanView.baseline_jbs_loop` and `ScanView.bootstrap_model`. A group
+  **without** the block carries a frozen (`solve_with_bootstrap`) bootstrap.
+
+## v2 → v3: the self-consistent bootstrap record
+
+Schema v3 (this release) is **additive**: it adds the `jbs_loop` block above
+and changes no v2 dataset, attr, name, unit or meaning.
+
+- **No migration.** A v2 archive reads as a v3 archive whose bootstrap is
+  frozen everywhere (no `jbs_loop` block); every v3 reader accepts it
+  unchanged, and every v2 reader ignores the new attrs. Do not gate readers on
+  `schema_version == 2`.
+- **Which bootstrap is in an archive** is decided by the block, never by the
+  version number: a v3 archive written with `jbs_self_consistent=False`
+  carries no block either (it is the frozen path, bit for bit), and appending
+  to a v2 file with a current bouquet restamps `schema_version` to 3 while its
+  old draws keep reading as frozen. `ScanView.bootstrap_model` gives the label
+  ("self-consistent Redl bootstrap" / "frozen SWB bootstrap (legacy)").
+- **Replaying an old archive's config.** A `config_json` written before the
+  loop existed has no `jbs_self_consistent` field; `load_config` /
+  `BouquetConfig.from_dict` rebuild it with `jbs_self_consistent=False` (and
+  warn), the behaviour it was produced with.
+- **Comparisons across the change.** The self-consistent bootstrap moves the
+  bootstrap/inductive split (and with it l_i, q0 and the per-draw responses);
+  compare a v2/frozen archive with a v3 loop archive as two bootstrap models,
+  not as a regression.
 
 ## Legacy (pre-v2) archives
 

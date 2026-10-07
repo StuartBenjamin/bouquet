@@ -65,7 +65,7 @@ class TestProvenance:
         cfg = _full_recon_cfg(header=hdr)
         bq.write_provenance(hdr, config=cfg, scan_key=4400)
         with h5py.File(hdr + ".h5", "r") as hf:
-            assert hf.attrs["schema_version"] == 2
+            assert hf.attrs["schema_version"] == bq.schema.SCHEMA_VERSION == 3
             assert hf.attrs["bouquet_version"] == bq.__version__
             assert "created" in hf.attrs and "updated" in hf.attrs
             assert "config_json" in hf

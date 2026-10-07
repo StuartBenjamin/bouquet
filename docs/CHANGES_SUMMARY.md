@@ -1,6 +1,54 @@
 # Bouquet — change summaries
 
-## Unreleased — self-consistent bootstrap current (opt-in, default OFF)
+## Unreleased — self-consistent bootstrap current (default ON)
+
+**This changes results.** `GenerationConfig.jbs_self_consistent` now defaults
+to `True`: every run re-evaluates the bootstrap on the delivered equilibrium
+and iterates it to self-consistency. The bootstrap/inductive split moves, and
+with it l_i, q0 and every per-draw bootstrap response. (The golden regression
+fixture is still the frozen-bootstrap run; its loop-on refresh is pending --
+see `tests/golden/README.md`.) To reproduce a run
+made before this release, set `jbs_self_consistent=False` -- the legacy frozen
+bootstrap, bit for bit (guarded by a solver test that tripwires the loop
+kernel and the Redl evaluator on that path). Also:
+
+- A stored config without the field (an old archive's `config_json`) loads
+  with `jbs_self_consistent=False` and a warning -- it replays the bootstrap
+  model it was produced with.
+- `single_profile_jphi=True` and `recalculate_j_BS=False` have no bootstrap to
+  iterate and are refused unless `jbs_self_consistent=False` is set.
+- **Archive schema v3** (additive): the `jbs_loop` block (`jbs_converged`,
+  `jbs_n_passes`, `jbs_loop_json`) on every loop draw and now also on
+  `_baseline`; `DrawView.jbs_loop`, `ScanView.baseline_jbs_loop` /
+  `bootstrap_model`. No migration: a v2 archive reads as frozen everywhere
+  ([archive-schema.md](archive-schema.md#v2--v3-the-self-consistent-bootstrap-record)).
+- Plots label the bootstrap "self-consistent Redl bootstrap" or "frozen SWB
+  bootstrap (legacy)" from what the archive records.
+
+What the loop is (unchanged from its opt-in introduction below): the joint
+relaxation of the bootstrap (ω = 0.7) and of the solved current (β = 0.7), ω
+halved only on sustained growth, convergence = every active residual on two
+consecutive passes (`r_j ≤ 1e-3`, `r_I ≤ 1e-4 I_p`, `Δl_i ≤ 1e-3`,
+`Δq0 ≤ 2e-3`), hard failure by default or a flagged slice with
+`jbs_loop_on_fail="flag"`, and the soft closure's noise-aware stop test with
+one logged retry. Pass ceilings (limits, not tolerances): 8 for the baseline /
+reconstruction, 12 for each loop of a draw (`jbs_max_passes_draw`, was 6) and
+4 post-homotopy passes (`jbs_max_passes_post_homotopy`, now a config field;
+was a hard-coded 2). The draw ceilings were raised when the golden refresh
+showed the standard draw's l_i-match coupling needing 7–8 passes (it contracts
+at ≈0.38/pass from r_j ≈ 2e-2…1.2e-1) and a post-homotopy stage whose first
+pass misses needing 3 under the two-consecutive rule; no tolerance moved.
+
+Where a draw's loop starts (recorded per loop as `init_source`): Redl at the
+draw's state anchor on the draw's OWN perturbed kinetics for its first loop,
+warm from its previous converged bootstrap for later ones -- never the
+unperturbed baseline bootstrap. The large first residual of an l_i-match
+candidate's loop is geometric (the candidate's new inductive shape moves q and
+the flux range; Redl with the same kinetics on that geometry differs by a few
+to ~10 % in I_BS), not a kinetic mismatch. A fast and a solver test run the
+same draw loop from the baseline bootstrap and reach the same fixed point.
+
+### Opt-in introduction (earlier on this branch)
 
 `GenerationConfig.jbs_self_consistent=True` replaces the once-computed, frozen
 `solve_with_bootstrap` bootstrap with a Redl bootstrap re-evaluated on the
@@ -22,9 +70,10 @@ Records: `li_metrics["jbs_loop"]`, `ip_closure["jbs_loop"]`,
 `jbs_rtol_j`, `jbs_rtol_Ip`, `jbs_tol_li`, `jbs_tol_q0`, `jbs_max_passes`,
 `jbs_max_passes_draw`, `jbs_relax`, `jbs_relax_halve_on`, `jbs_relax_current`,
 `jbs_loop_on_fail`; `swb_iterations` is
-now documented as legacy. **With the flag off nothing changes**: no existing
-tolerance, default or acceptance criterion moved, and the legacy code path is
-the historical one. See [physics-notes.md](physics-notes.md#self-consistent-bootstrap-jbs_self_consistent).
+now documented as legacy. With the flag off the legacy code path is the
+historical one; no existing tolerance or solver acceptance criterion moved
+(the soft closure's noise-floor acceptance, below, applies only where it
+previously refused). See [physics-notes.md](physics-notes.md#self-consistent-bootstrap-jbs_self_consistent).
 
 Follow-up (loop iteration path and closure stop test): the loop relaxes the
 solved current as well as the bootstrap (`jbs_relax_current = 0.7`) and halves

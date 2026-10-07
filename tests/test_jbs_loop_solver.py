@@ -24,6 +24,10 @@ maps -- are in ``test_jbs_loop.py``; (d) and (e) also run live below):
 (f) the sigma=0 draw loop reproduces the baseline under the loop (IMAS diff
     mode and the reconstruction path), and a sigma=0 route-R2 draw converges;
 (g) diff mode at sigma=0 reproduces the source j_BS exactly.
+(7f) a perturbed draw's anchor loop reaches the same fixed point from its own
+    start (Redl at the anchor on the draw's own kinetics) and from the
+    unperturbed baseline bootstrap (the counterfactual), and the per-draw
+    block records the start.
 
 Plus: the loop in every IMAS baseline mode/closure channel converges and
 records its block; the structured closure's correctors are subsumed with their
@@ -114,6 +118,7 @@ def _imas_probe(outdir, part):
     # ---- legacy baseline (flag OFF): the evaluator on its equilibrium ------
     if part != "core":
         return _imas_probe_loop(outdir, part, b, g, out)
+    g.jbs_self_consistent = False            # the legacy path, explicitly
     bl = b.prepare_baseline()
     mygs = b.mygs
     psi = np.asarray(bl.psi_N, dtype=float)
@@ -358,8 +363,185 @@ def _recon_probe(outdir):
         li=float(b.mygs.get_stats(lcfs_pad=psi_pad,
                                   li_normalization="iter")["l_i"]),
         l_i_target=float(bl.l_i_target),
-        ctx_private="_jbs_ctx" in d)
+        ctx_private="_jbs_ctx" in d,
+        init_source=d["jbs_loop"].get("init_source"),
+        loops=d["jbs_loop"].get("loops"))
+
+    # ---- a perturbed draw's anchor loop from two starts (plan 7f) --------
+    # The draw's own start (Redl at its state anchor on its OWN perturbed
+    # kinetics) and the counterfactual (the unperturbed baseline bootstrap),
+    # through the same composition and the same step the standard draw's
+    # anchor loop uses (inductive held, bootstrap swapped, jphi-linterp solve
+    # of the beta-relaxed total).  Deterministic kinetic perturbation.
+    from bouquet.jbs_loop import run_jbs_loop
+    from bouquet.TokaMaker_interface import _draw_jbs_composer
+    from bouquet.utils import pchip_derivative
+    ne_d = k2e(bl.ne) * 0.95
+    te_d = k2e(bl.te) * 1.08
+    ni_d = k2e(bl.ni) * 0.95
+    ti_d = k2e(bl.ti) * 1.04
+    pres_d = 1.6022e-19 * (ne_d * te_d + ni_d * ti_d)
+    j_ind = np.asarray(bl.j_inductive, dtype=float)
+    j_phi_bl = np.asarray(bl.j_phi, dtype=float)
+    j_fix = j_phi_bl - j_ind - np.asarray(bl.j_BS, dtype=float)
+    compose = _draw_jbs_composer(
+        psi_N, ne_d, te_d, ni_d, ti_d, Zeff_eq, psi_pad,
+        bool(g.isolate_edge_jBS), float(getattr(bl, "bs_scale", 1.0)),
+        bool(g.floor_j_BS), None, None, None)
+    Ip = float(bl.Ip_target)
+    mygs = b.mygs
+
+    def _solve(j):
+        _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
+        _pp = {"type": "linterp",
+               "y": pchip_derivative(psi_N, pres_d) / _pr, "x": psi_N}
+        _pp["y"][-1] = 0.0
+        mygs.set_targets(Ip=Ip, pax=float(pres_d[0]))
+        mygs.set_profiles(pp_prof=_pp, ffp_prof={
+            "type": "jphi-linterp", "y": np.asarray(j, float), "x": psi_N})
+        mygs.solve()
+
+    def _meas():
+        _snap = mygs.copy_eq()
+        _w, _x, _k = residual_weights(_snap, psi_N, psi_pad)
+        return dict(w=_w, x=_x, snap=_snap, li=float(mygs.get_stats(
+            li_normalization="iter", lcfs_pad=psi_pad)["l_i"]))
+
+    def _step(spk, k, relax=None):
+        _j = j_ind + spk + j_fix
+        _solve(_j if relax is None else relax(_j))
+        return _meas()
+
+    out["draw_init"] = {}
+    for tag in ("baseline_jBS", "own_kinetics"):
+        _solve(j_phi_bl)                   # the draw's state anchor
+        li0 = _meas()["li"]
+        jbs0 = (np.asarray(bl.j_BS, dtype=float) if tag == "baseline_jBS"
+                else compose(mygs.copy_eq())[0])
+        r = run_jbs_loop(jbs0, _step, lambda m: compose(m["snap"])[0],
+                         jbs_settings(g, draw=True), Ip=abs(Ip),
+                         meas0=dict(li=li0), gate_li=True,
+                         label=f"draw init {tag}", init_source=tag,
+                         raise_on_fail=False)
+        out["draw_init"][tag] = dict(
+            converged=bool(r["converged"]),
+            n_passes=int(r["record"]["n_passes"]),
+            r_j=r["record"]["r_j"], init_source=r["record"]["init_source"],
+            j_BS=np.asarray(r["jbs_used"], float).tolist(),
+            li=float(_meas()["li"]))
     with open(os.path.join(outdir, "recon.json"), "w") as fh:
+        json.dump(out, fh)
+
+
+# ---------------------------------------------------------------------------
+#  probe 3: the legacy flag (jbs_self_consistent=False)
+# ---------------------------------------------------------------------------
+def _legacy_probe(outdir, part):
+    """``jbs_self_consistent=False`` -- the flag that keeps the frozen-SWB
+    bootstrap now that the loop is the default -- must take the legacy path
+    everywhere: the loop kernel and the Redl evaluator are never entered,
+    ``solve_with_bootstrap`` is, and nothing loop-shaped is recorded or
+    archived.  The evaluator and the kernel are replaced by tripwires, so an
+    accidental call fails the probe at the call site rather than being
+    averaged into a number.  (The bit-level half of the A/B -- flag OFF
+    equals the pre-loop tree array for array -- needs the pre-loop tree and is
+    run out of tree on each change of the legacy path; the tripwires are what
+    can live here.)  ``part``: "recon" (the geqdsk path) or "imas" -- two
+    interpreters, because ``OFT_env`` is a per-process singleton."""
+    import h5py
+    import numpy as np
+    import bouquet as bq
+    import bouquet.jbs_loop as L
+    import bouquet.physics as P
+    import OpenFUSIONToolkit.TokaMaker.bootstrap as B
+
+    _harness.assert_bouquet_is_repo_local()
+    calls = {"evaluate_jBS": 0, "run_jbs_loop": 0, "solve_with_bootstrap": 0}
+
+    def _tripwire(name):
+        def _f(*a, **k):
+            calls[name] += 1
+            raise AssertionError(f"{name} entered with "
+                                 "jbs_self_consistent=False")
+        return _f
+
+    P.evaluate_jBS = _tripwire("evaluate_jBS")
+    L.run_jbs_loop = _tripwire("run_jbs_loop")
+    _swb = B.solve_with_bootstrap
+
+    def _count_swb(*a, **k):
+        calls["solve_with_bootstrap"] += 1
+        return _swb(*a, **k)
+
+    B.solve_with_bootstrap = _count_swb
+
+    def _archived_jbs_attrs(h5):
+        found = []
+        with h5py.File(h5, "r") as hf:
+            def _v(name, obj):
+                if isinstance(obj, h5py.Group):
+                    found.extend(f"{name}:{k}" for k in obj.attrs
+                                 if k.startswith("jbs_"))
+            hf.visititems(_v)
+        return found
+
+    out = {}
+    if part == "imas":
+        return _legacy_probe_imas(outdir, calls, _archived_jbs_attrs, out)
+    # ---- the reconstruction path: recon, sigma=0 check, one draw ----------
+    b = bq.Bouquet.from_geqdsk(_GEQ, profiles=_PF, mesh=_MESH, nthreads=1,
+                               header=os.path.join(outdir, "leg_rec"),
+                               n_draws=1)
+    b.config.generation.seed = 12345
+    b.config.generation.jbs_self_consistent = False
+    b.setup_solver()
+    bl = b.prepare_baseline()
+    n0 = calls["solve_with_bootstrap"]
+    s0 = b.verify_sigma0_consistency()
+    b.generate()
+    out["recon"] = dict(
+        swb_recon=n0, swb_total=calls["solve_with_bootstrap"],
+        metrics_has_loop="jbs_loop" in (bl.reconstruction_metrics or {}),
+        sigma0_has_loop=("record" in s0) or ("loop_converged" in s0),
+        archived=_archived_jbs_attrs(b.config.output_header + ".h5"))
+    out["calls"] = dict(calls)
+    with open(os.path.join(outdir, "legacy_recon.json"), "w") as fh:
+        json.dump(out, fh)
+
+
+def _legacy_probe_imas(outdir, calls, _archived_jbs_attrs, out):
+    import bouquet as bq
+    # ---- the IMAS path: the default diff baseline + one draw, and the ohmic
+    # structured closure (the channels the loop rewires most) ---------------
+    bi = bq.Bouquet.from_imas(_OMAS, mesh=_MESH, time=_TIME, n_draws=1,
+                              header=os.path.join(outdir, "leg_imas"),
+                              nthreads=1)
+    gi = bi.config.generation
+    gi.seed = 12345
+    gi.jbs_self_consistent = False
+    bi.setup_solver()
+    n1 = calls["solve_with_bootstrap"]
+    bli = bi.prepare_baseline()
+    n2 = calls["solve_with_bootstrap"]
+    bi.generate()
+    diff_rec = dict(li_has_loop="jbs_loop" in (bli.li_metrics or {}),
+                    ip_has_loop="jbs_loop" in (bli.ip_closure or {}),
+                    swb_baseline=n2 - n1,
+                    archived=_archived_jbs_attrs(
+                        bi.config.output_header + ".h5"))
+    gi.jBS_baseline_mode = "ohmic"
+    gi.closure_channel = "structured"
+    gi.structured_li_target = None
+    n3 = calls["solve_with_bootstrap"]
+    bls = bi.prepare_baseline()
+    out["imas"] = dict(
+        diff=diff_rec,
+        structured=dict(
+            li_has_loop="jbs_loop" in (bls.li_metrics or {}),
+            ip_has_loop="jbs_loop" in (bls.ip_closure or {}),
+            swb_baseline=calls["solve_with_bootstrap"] - n3))
+    out["calls"] = dict(calls)
+    with open(os.path.join(outdir, "legacy_imas.json"), "w") as fh:
         json.dump(out, fh)
 
 
@@ -395,6 +577,14 @@ def imas_structured(tmp_path_factory):
 @pytest.fixture(scope="module")
 def recon(tmp_path_factory):
     return _run_probe(tmp_path_factory, "recon", "recon.json")
+
+
+@pytest.fixture(scope="module")
+def legacy(tmp_path_factory):
+    r = _run_probe(tmp_path_factory, "legacy_recon", "legacy_recon.json")
+    i = _run_probe(tmp_path_factory, "legacy_imas", "legacy_imas.json")
+    calls = {k: r["calls"][k] + i["calls"][k] for k in r["calls"]}
+    return dict(recon=r["recon"], imas=i["imas"], calls=calls)
 
 
 _S = dict(rtol_j=1e-3, rtol_Ip=1e-4, tol_li=1e-3, tol_q0=2e-3)
@@ -565,6 +755,53 @@ def test_f_sigma0_route_r2_draw_converges_near_the_baseline(recon):
     # the private rebuild context travels on the diagnostics until
     # generate_bouquet pops it before archiving
     assert d["ctx_private"]
+    # the draw's first loop started from Redl at its anchor on its own
+    # kinetics, and the per-draw block says so
+    assert d["init_source"].startswith(
+        "evaluate_jBS on the draw's state-anchor equilibrium"), d
+    assert d["loops"] and d["loops"][0]["init_source"] == d["init_source"]
+
+
+@pytest.mark.solver
+@solver_only
+def test_draw_fixed_point_does_not_depend_on_its_start(recon):
+    """Plan 7f: a draw's loop starts from Redl at its anchor on its OWN
+    perturbed kinetics.  Initialisation only: the same draw loop started from
+    the unperturbed baseline bootstrap (the counterfactual) converges to the
+    same fixed point; the own-kinetics start begins closer to it."""
+    a = recon["draw_init"]["baseline_jBS"]
+    b = recon["draw_init"]["own_kinetics"]
+    assert a["converged"] and b["converged"], (a["r_j"], b["r_j"])
+    assert a["init_source"] == "baseline_jBS"
+    assert b["init_source"] == "own_kinetics"
+    # the same bar as the baseline's init-independence test (d)
+    assert _rj(a["j_BS"], b["j_BS"]) <= 5 * _S["rtol_j"]
+    assert abs(a["li"] - b["li"]) <= 2 * _S["tol_li"]
+    assert b["r_j"][0] < a["r_j"][0]
+
+
+# ---------------------------------------------------------------------------
+#  the legacy flag
+# ---------------------------------------------------------------------------
+@pytest.mark.solver
+@solver_only
+def test_the_legacy_flag_never_enters_the_loop(legacy):
+    """A/B guard of the default flip: ``jbs_self_consistent=False`` runs the
+    frozen-SWB bootstrap in the reconstruction, the sigma=0 check, the draws,
+    the IMAS diff baseline and the structured closure, and neither the loop
+    kernel nor the Redl evaluator is ever called."""
+    c = legacy["calls"]
+    assert c["evaluate_jBS"] == 0 and c["run_jbs_loop"] == 0, c
+    r = legacy["recon"]
+    assert r["swb_recon"] >= 1, r               # the recon's own SWB call
+    assert r["swb_total"] > r["swb_recon"], r   # + the sigma=0 check / draw
+    assert not r["metrics_has_loop"] and not r["sigma0_has_loop"], r
+    assert r["archived"] == [], r["archived"]
+    d, st = legacy["imas"]["diff"], legacy["imas"]["structured"]
+    assert d["swb_baseline"] >= 1 and st["swb_baseline"] >= 1, legacy["imas"]
+    for blk in (d, st):
+        assert not blk["li_has_loop"] and not blk["ip_has_loop"], blk
+    assert d["archived"] == [], d["archived"]
 
 
 if __name__ == "__main__":
@@ -575,5 +812,7 @@ if __name__ == "__main__":
         _imas_probe(outdir, which[len("imas_"):])
     elif which == "recon":
         _recon_probe(outdir)
+    elif which.startswith("legacy_"):
+        _legacy_probe(outdir, which[len("legacy_"):])
     else:
         raise SystemExit(f"unknown probe {which!r}")

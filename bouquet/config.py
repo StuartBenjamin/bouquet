@@ -1003,19 +1003,24 @@ class GenerationConfig:
     # the bootstrap comes from the self-consistent loop and this is unused.
     swb_iterations: int = 3
     # --- self-consistent bootstrap loop (bouquet.jbs_loop) -------------------
-    # False (default): the bootstrap is computed once (solve_with_bootstrap on
-    # its own auxiliary equilibrium) and then only rescaled -- the historical
-    # behaviour, byte-identical to every run made before these fields existed.
-    # True: j_BS is re-evaluated (physics.evaluate_jBS: Redl on the caller's
-    # own psi_N grid and the CURRENT equilibrium's geometry) inside a relaxed
-    # outer loop closure <-> GS solve <-> Redl, in every path that builds a
-    # j_phi containing a bootstrap (the IMAS baseline in every
+    # True (default): j_BS is re-evaluated (physics.evaluate_jBS: Redl on the
+    # caller's own psi_N grid and the CURRENT equilibrium's geometry) inside a
+    # relaxed outer loop closure <-> GS solve <-> Redl, in every path that
+    # builds a j_phi containing a bootstrap (the IMAS baseline in every
     # jBS_baseline_mode and closure channel incl. the structured/MSE closures,
     # every draw incl. Fix C and the standard l_i loop, the sigma=0 check and
     # the geqdsk reconstruction), until the residuals below hold on TWO
     # CONSECUTIVE passes.  See docs/physics-notes.md, "Self-consistent
     # bootstrap".
-    jbs_self_consistent: bool = False
+    # False: the LEGACY frozen bootstrap -- computed once
+    # (solve_with_bootstrap on its own auxiliary equilibrium) and then only
+    # rescaled; byte-identical to every run made before these fields existed.
+    # Required with single_profile_jphi=True or recalculate_j_BS=False (no
+    # bootstrap to iterate; the combination is refused, never silently
+    # downgraded).  A stored config that predates the field (an old archive's
+    # config_json) loads with False -- the behaviour it was produced with; see
+    # BouquetConfig.from_dict.
+    jbs_self_consistent: bool = True
     # Initial guess of the loop: "anchor" = evaluate_jBS on the anchor
     # equilibrium (the source's own total current and full pressure); "swb" =
     # the legacy solve_with_bootstrap result (A/B only).  The fixed point does
@@ -1032,11 +1037,17 @@ class GenerationConfig:
     jbs_rtol_Ip: float = 1.0e-4
     jbs_tol_li: float = 1.0e-3
     jbs_tol_q0: float = 2.0e-3
-    # Pass ceilings: baseline / reconstruction, and per draw (a draw gets up to
-    # jbs_loop.JBS_POST_HOMOTOPY_PASSES further passes at the tight coil stage
-    # after the post-perturb homotopy).
+    # Pass ceilings (limits, not tolerances: convergence is still every active
+    # criterion on two consecutive passes).  jbs_max_passes: the baseline /
+    # reconstruction loop.  jbs_max_passes_draw: EACH loop of a draw (its
+    # anchor loop, every l_i-match candidate's Gauss-Seidel coupling, every
+    # Fix C resample).  jbs_max_passes_post_homotopy: the passes a draw may
+    # take at the tight coil stage when Redl on the post-homotopy equilibrium
+    # misses its bootstrap (the check itself is not a pass; with the
+    # two-consecutive rule a stage whose first pass misses needs >= 3).
     jbs_max_passes: int = 8
-    jbs_max_passes_draw: int = 6
+    jbs_max_passes_draw: int = 12
+    jbs_max_passes_post_homotopy: int = 4
     # Under-relaxation omega of the bootstrap: j_BS <- (1-omega) j_BS + omega
     # Redl.  Held fixed, and halved (floor jbs_loop.JBS_RELAX_FLOOR = 0.25)
     # only on SUSTAINED growth of r_j: growth on jbs_relax_halve_on
@@ -1483,12 +1494,28 @@ class BouquetConfig:
         if stype is None:                       # infer if the discriminator is absent
             stype = "reconstruction" if "geqdsk_path" in srcd else "imas"
         SrcCls = ReconstructionSource if stype == "reconstruction" else ImasSource
+        gend = dict(d.get("generation", {}))
+        if "jbs_self_consistent" not in gend:
+            # A stored config written before the self-consistent bootstrap
+            # existed was produced by the frozen-bootstrap path: rebuild it on
+            # that path (the default flipped to True afterwards), so replaying
+            # an old archive's config_json reproduces what it recorded.
+            # to_dict() always writes the field, so a current config never
+            # takes this branch.
+            import warnings
+            warnings.warn(
+                "config has no generation.jbs_self_consistent (it predates "
+                "the self-consistent bootstrap loop): loading it with "
+                "jbs_self_consistent=False, the frozen-bootstrap behaviour it "
+                "was produced with.  Set the field explicitly to run the "
+                "loop.", UserWarning, stacklevel=2)
+            gend["jbs_self_consistent"] = False
         return cls(
             source=_build(SrcCls, srcd),
             solver=_build(SolverConfig, d["solver"]),
             output_header=d["output_header"],
             uncertainty=_build(UncertaintyConfig, d.get("uncertainty", {})),
-            generation=_build(GenerationConfig, d.get("generation", {})),
+            generation=_build(GenerationConfig, gend),
             filtering=_build(FilterConfig, d.get("filtering", {})),
             fixed_components=_build(FixedComponentsConfig, d.get("fixed_components", {})),
             verbose=bool(d.get("verbose", False)),

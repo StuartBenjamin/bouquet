@@ -82,8 +82,11 @@ JBS_RELAX_FLOOR = 0.25
 JBS_REQUIRED_CONSECUTIVE = 2
 #: Growing-``r_j`` passes AT the relaxation floor that abort the loop.
 JBS_GROWTH_ABORT_PASSES = 3
-#: Extra passes a draw may take at the tight coil stage after the homotopy.
-JBS_POST_HOMOTOPY_PASSES = 2
+#: Default of ``GenerationConfig.jbs_max_passes_post_homotopy``: the passes
+#: a draw may take at the tight coil stage after the post-perturb homotopy
+#: (a ceiling, not a tolerance: the two-consecutive-pass rule applies there
+#: too, so a post-homotopy stage whose first pass misses needs at least 3).
+JBS_POST_HOMOTOPY_PASSES = 4
 #: (The MSE chord stage and the geqdsk post-corrective stage are passes of
 #: the baseline loop and take ``jbs_max_passes`` as their ceiling.)
 #: MSE chord iteration: the linearisation point has stopped moving when the
@@ -151,7 +154,9 @@ def validate_jbs_settings(gc) -> None:
         if not (np.isfinite(fv) and fv > 0.0):
             raise ValueError(f"generation.{name} must be a positive finite "
                              f"number, got {v!r}")
-    for name, default in (("jbs_max_passes", 8), ("jbs_max_passes_draw", 6)):
+    for name, default in (("jbs_max_passes", 8), ("jbs_max_passes_draw", 12),
+                          ("jbs_max_passes_post_homotopy",
+                           JBS_POST_HOMOTOPY_PASSES)):
         v = _get(name, default)
         if isinstance(v, bool) or not isinstance(v, (int, np.integer)):
             raise ValueError(f"generation.{name} must be an integer, got "
@@ -191,7 +196,8 @@ def validate_jbs_settings(gc) -> None:
 def jbs_settings(gc, *, draw: bool = False) -> dict:
     """The loop settings of a :class:`GenerationConfig`, validated.
 
-    ``draw=True`` selects ``jbs_max_passes_draw`` as the pass ceiling.
+    ``draw=True`` selects ``jbs_max_passes_draw`` as the pass ceiling;
+    ``post_homotopy_passes`` is ``jbs_max_passes_post_homotopy`` either way.
     ``enabled`` is ``False`` for a config without the fields (an old archive's
     provenance), so every caller can gate on it.
     """
@@ -203,7 +209,7 @@ def jbs_settings(gc, *, draw: bool = False) -> dict:
         rtol_Ip=float(getattr(gc, "jbs_rtol_Ip", 1e-4)),
         tol_li=float(getattr(gc, "jbs_tol_li", 1e-3)),
         tol_q0=float(getattr(gc, "jbs_tol_q0", 2e-3)),
-        max_passes=int(getattr(gc, "jbs_max_passes_draw", 6) if draw
+        max_passes=int(getattr(gc, "jbs_max_passes_draw", 12) if draw
                        else getattr(gc, "jbs_max_passes", 8)),
         relax=float(getattr(gc, "jbs_relax", 0.7)),
         relax_current=float(getattr(gc, "jbs_relax_current", 0.7)),
@@ -212,7 +218,8 @@ def jbs_settings(gc, *, draw: bool = False) -> dict:
         relax_floor=float(JBS_RELAX_FLOOR),
         required_consecutive=int(JBS_REQUIRED_CONSECUTIVE),
         growth_abort_passes=int(JBS_GROWTH_ABORT_PASSES),
-        post_homotopy_passes=int(JBS_POST_HOMOTOPY_PASSES),
+        post_homotopy_passes=int(getattr(gc, "jbs_max_passes_post_homotopy",
+                                         JBS_POST_HOMOTOPY_PASSES)),
     )
 
 
@@ -226,7 +233,9 @@ def tolerances_record(settings: dict) -> dict:
                 relax_floor=settings["relax_floor"],
                 relax_halve_on=int(settings.get("relax_halve_on", 1)),
                 relax_current=float(settings.get("relax_current", 1.0)),
-                growth_abort_passes=settings["growth_abort_passes"])
+                growth_abort_passes=settings["growth_abort_passes"],
+                post_homotopy_passes=int(settings.get(
+                    "post_homotopy_passes", JBS_POST_HOMOTOPY_PASSES)))
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +419,7 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
                  Ip: float, meas0: Optional[dict] = None,
                  gate_li: bool = True, gate_q0: bool = False,
                  label: str = "", init: Optional[str] = None,
+                 init_source: Optional[str] = None,
                  grid: str = "psi_N native",
                  on_pass: Optional[Callable] = None,
                  max_passes: Optional[int] = None,
@@ -451,6 +461,14 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         relaxation the next iterate is built with; ``None`` when no further
         pass follows), so a caller's own per-pass update can be relaxed by the
         same factor.
+    init : str or None
+        The ``jbs_init`` setting recorded as ``record["init"]`` (default: the
+        settings' own).
+    init_source : str or None
+        What ``jbs0`` actually is, in words, recorded as
+        ``record["init_source"]`` (e.g. a draw's "evaluate_jBS on the draw's
+        anchor equilibrium with the draw's own perturbed kinetics").  Record
+        only: the fixed point does not depend on the initial iterate.
     max_passes : int or None
         Override of ``settings["max_passes"]`` (the post-homotopy stage).
     raise_on_fail : bool or None
@@ -479,6 +497,7 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
     rec = dict(
         enabled=True, label=str(label),
         init=str(init if init is not None else settings.get("init", "anchor")),
+        init_source=(None if init_source is None else str(init_source)),
         grid=str(grid),
         tolerances=tolerances_record(dict(settings, max_passes=K)),
         criteria=dict(r_j=True, r_I=True, dl_i=bool(gate_li),

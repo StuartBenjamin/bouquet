@@ -1708,6 +1708,31 @@ def _draw_jbs_composer(psi_N, ne, te, ni, ti, zeff, psi_pad, isolate_edge,
                             delta_baseline)
 
 
+# What a draw's loop starts from (recorded per loop as ``init_source``).
+# Every draw loop starts from Redl on the draw's OWN perturbed kinetics: the
+# first at the draw's state anchor, later ones warm from the previous loop of
+# the same draw.  The unperturbed baseline bootstrap is never a draw's start.
+JBS_DRAW_INIT_WARM = ("warm start: this draw's previous converged bootstrap "
+                      "(Redl on the draw's own perturbed kinetics)")
+JBS_DRAW_INIT_POST_HOMOTOPY = (
+    "relaxed: (1 - omega) x the bootstrap the draw carries + omega x Redl on "
+    "the delivered post-homotopy equilibrium (the draw's own perturbed "
+    "kinetics)")
+
+
+def _draw_anchor_init_source(compose):
+    """``init_source`` of a draw's first loop: Redl at the draw's anchor."""
+    txt = ("evaluate_jBS on the draw's state-anchor equilibrium (the archived "
+           "total current at the draw's full pressure) with the draw's own "
+           "perturbed kinetics (ne, Te, ni, Ti, Zeff)")
+    if compose.use_delta:
+        txt += ("; delta composition: baseline j_BS + (that Redl - the "
+                "sigma=0 Redl reference)")
+    elif compose.jBS_diff is not None:
+        txt += "; + jBS_diff"
+    return txt
+
+
 class _GSReject(Exception):
     """A standard-path candidate rejected inside the Gauss-Seidel j_BS loop
     (q0 < 1 with ``constrain_sawteeth``) -- the l_i loop moves on."""
@@ -1794,16 +1819,30 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
 
     Evaluates Redl on the delivered equilibrium; if it still matches the
     bootstrap the draw carries (loop tolerances) the draw is accepted as is.
-    Otherwise up to ``JBS_POST_HOMOTOPY_PASSES`` further passes are taken AT
+    Otherwise up to ``settings["post_homotopy_passes"]``
+    (``GenerationConfig.jbs_max_passes_post_homotopy``) further passes are
+    taken AT
     THE CURRENT (tight) coil stage, rebuilding the draw's j_phi with the
-    relaxed bootstrap exactly as its loop did (Fix C: inductive Ip
-    renormalisation on the current iterate; standard: the delivered inductive
-    held).  Raises :class:`~bouquet.jbs_loop.JBSNotConverged` when that fails:
+    relaxed bootstrap exactly as its loop did.  Fix C: the candidate's
+    inductive Ip renormalisation on the current iterate, one jphi-linterp
+    solve of that request (the solved current relaxed with ``beta``).
+    Standard: the delivered inductive held, and the new total reached the way
+    the standard draw reaches every target -- Ip renormalisation of the
+    target and the corrective j_phi iteration (same knobs as the draw) --
+    because the standard draw's stored ``j_phi`` is the ACHIEVED current of
+    its corrective iteration, not the solver input that achieved it: handing
+    the achieved profile back to a single jphi-linterp solve asks for a
+    different equilibrium (measured: that solve exhausts ``maxits`` at the
+    tight coil stage).  Like the standard draw's l_i coupling, these passes
+    re-run a multi-solve fit, so ``beta`` is not applied (the record says
+    so).  Raises :class:`~bouquet.jbs_loop.JBSNotConverged` when that fails:
     the draw is then a failed draw.  Returns ``(record, spike_used, full,
-    j_phi_request)``.
+    j_phi)`` with ``j_phi`` the re-solved draw's current (the achieved
+    current on the standard path).
     """
     from .jbs_loop import (check_delivered, residual_weights, run_jbs_loop,
                            JBS_POST_HOMOTOPY_PASSES, jsonable)
+    n_ph = int(settings.get("post_homotopy_passes", JBS_POST_HOMOTOPY_PASSES))
     compose = ctx["compose"]
     spike_used = np.asarray(ctx["spike_used"], dtype=float)
     snap = mygs.copy_eq()
@@ -1815,7 +1854,7 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
     print(f"  [jbs-loop post-homotopy] r_j={chk['r_j']:.3e} "
           f"r_I={chk['r_I']:.3e} -> "
           + ("inside tolerance, draw kept" if chk["ok"] else
-             f"outside tolerance, up to {JBS_POST_HOMOTOPY_PASSES} passes at "
+             f"outside tolerance, up to {n_ph} passes at "
              "the tight coil stage"), flush=True)
     if chk["ok"]:
         return rec, spike_used, full, ctx.get("j_phi_request")
@@ -1825,20 +1864,19 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
     state = {}
 
     def _step(spk, k, relax=None):
-        if ctx["kind"] == "fixc":
-            _aip = None
-            if ctx.get("r2_mode", "exact") != "legacy":
-                try:
-                    _aip = _AnchorIpRenorm(mygs, psi_N, ctx["input_j_phi"],
-                                           Ip_target, psi_pad,
-                                           mode=ctx["r2_mode"])
-                except Exception:
-                    _aip = None
-            s = _r2_ip_scale(_aip, mygs, ctx["cand"],
-                             spk + ctx["j_fixed_eff"], psi_N, Ip_target)
-            jphi = s * ctx["cand"] + spk + ctx["j_fixed_eff"]
-        else:
-            jphi = ctx["j_ind_used"] + spk + ctx["j_fixed_eff"]
+        """Fix C draw: the candidate's inductive Ip renormalisation on the
+        current iterate, one jphi-linterp solve (beta-relaxed)."""
+        _aip = None
+        if ctx.get("r2_mode", "exact") != "legacy":
+            try:
+                _aip = _AnchorIpRenorm(mygs, psi_N, ctx["input_j_phi"],
+                                       Ip_target, psi_pad,
+                                       mode=ctx["r2_mode"])
+            except Exception:
+                _aip = None
+        s = _r2_ip_scale(_aip, mygs, ctx["cand"],
+                         spk + ctx["j_fixed_eff"], psi_N, Ip_target)
+        jphi = s * ctx["cand"] + spk + ctx["j_fixed_eff"]
         _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
         _pp = {"type": "linterp",
                "y": pchip_derivative(psi_N, pres_tmp) / _pr, "x": psi_N}
@@ -1855,6 +1893,28 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
         return dict(w=_w, x=_x, snap=_s, li=float(mygs.get_stats(
             li_normalization='iter', lcfs_pad=psi_pad)['l_i']))
 
+    def _step_standard(spk, k):
+        """Standard draw: hold the delivered inductive, swap the bootstrap,
+        and reach the new total with the draw's own target renormalisation
+        + corrective iteration (see the docstring)."""
+        target = (np.asarray(ctx["j_ind_used"], float) + np.asarray(spk, float)
+                  + np.asarray(ctx["j_fixed_eff"], float))
+        _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
+        _pp = {"type": "linterp",
+               "y": pchip_derivative(psi_N, pres_tmp) / _pr, "x": psi_N}
+        _pp["y"][-1] = 0.0
+        target, _f = _renormalize_target_to_Ip(mygs, psi_N, target, Ip_target,
+                                               psi_pad, label="jphi_corr/draw")
+        out, _n, _h = _corrective_jphi_iteration(
+            mygs, psi_N, target, _pp, Ip_target, pres_tmp[0], psi_pad,
+            min_iters=2, max_iters=int(os.environ.get('CORR_MAX_ITERS', '8')),
+            rtol=0.05, verbose=False)
+        state["jphi"] = np.asarray(out, dtype=float)
+        _s = mygs.copy_eq()
+        _w, _x, _kk = residual_weights(_s, psi_N, psi_pad)
+        return dict(w=_w, x=_x, snap=_s, li=float(mygs.get_stats(
+            li_normalization='iter', lcfs_pad=psi_pad)['l_i']))
+
     def _eval(meas):
         _sp, _fu, _dd = compose(meas["snap"])
         state["full"] = _fu
@@ -1862,11 +1922,15 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target):
 
     li0 = float(mygs.get_stats(li_normalization='iter',
                                lcfs_pad=psi_pad)['l_i'])
-    res = run_jbs_loop(jbs0, _step, _eval, settings, Ip=Ip_target,
+    rec["solve"] = ("jphi-linterp request (Fix C)" if ctx["kind"] == "fixc"
+                    else "Ip-renormalised target + corrective iteration "
+                         "(standard; beta not applied)")
+    res = run_jbs_loop(jbs0, _step if ctx["kind"] == "fixc" else
+                       _step_standard, _eval, settings, Ip=Ip_target,
                        meas0=dict(li=li0), gate_li=True, gate_q0=False,
                        label="draw post-homotopy",
-                       max_passes=int(JBS_POST_HOMOTOPY_PASSES),
-                       raise_on_fail=True)
+                       init_source=JBS_DRAW_INIT_POST_HOMOTOPY,
+                       max_passes=n_ph, raise_on_fail=True)
     rec["passes"] = res["record"]
     return rec, res["jbs_used"], state.get("full", full), state.get("jphi")
 
@@ -2666,7 +2730,7 @@ def perturb_kinetic_equilibrium(
                     _candA = _c
                     break
 
-            def _fixc_loop(cand, spike0, li_prev):
+            def _fixc_loop(cand, spike0, li_prev, init_source):
                 _fs = {}
 
                 def _step(spk, k, relax=None):
@@ -2691,10 +2755,14 @@ def perturb_kinetic_equilibrium(
                 _r = run_jbs_loop(spike0, _step, _jl_eval, jbs_loop,
                                   Ip=_jl_Ip, meas0=dict(li=li_prev),
                                   gate_li=True, gate_q0=False,
-                                  label="draw Fix C", raise_on_fail=True)
+                                  label="draw Fix C",
+                                  init_source=init_source,
+                                  raise_on_fail=True)
                 return _r, _fs
 
-            _jl_res, _jl_fs = _fixc_loop(_candA, spike_profile, _li_E0)
+            _jl_res, _jl_fs = _fixc_loop(
+                _candA, spike_profile, _li_E0,
+                _draw_anchor_init_source(_compose))
             spike_profile = _jl_res["jbs_used"]
             full_j_BS = _jl_state["full"]
             new_jphi = _jl_fs["new_jphi"]
@@ -2726,7 +2794,8 @@ def perturb_kinetic_equilibrium(
                         break
                 try:
                     _jl_res, _jl_fs = _fixc_loop(
-                        _c, spike_profile, float(eq_stats['l_i']))
+                        _c, spike_profile, float(eq_stats['l_i']),
+                        JBS_DRAW_INIT_WARM)
                 except Exception as _rs_exc:
                     _count_masked_anchor_failure("band_resample", _rs_exc)
                     continue
@@ -2768,6 +2837,8 @@ def perturb_kinetic_equilibrium(
                                    jbs_loop, Ip=_jl_Ip,
                                    meas0=dict(li=_li_E0), gate_li=True,
                                    gate_q0=False, label="draw anchor",
+                                   init_source=_draw_anchor_init_source(
+                                       _compose),
                                    raise_on_fail=True)
             spike_profile = _jl_res["jbs_used"]
             full_j_BS = _jl_state["full"]
@@ -3702,7 +3773,8 @@ def perturb_kinetic_equilibrium(
                 _gsr = run_jbs_loop(
                     spike_profile, _gs_step, _jl_eval, jbs_loop,
                     Ip=_jl_Ip, meas0=None, gate_li=True, gate_q0=False,
-                    label=f"draw l_i iter {li_iter}", raise_on_fail=True)
+                    label=f"draw l_i iter {li_iter}",
+                    init_source=JBS_DRAW_INIT_WARM, raise_on_fail=True)
             except _GSReject:
                 print("Skipping this equilibrium, q_0 < 1.0 (j_BS loop "
                       "pass)")
@@ -3909,6 +3981,14 @@ def perturb_kinetic_equilibrium(
             kind=_jbs_draw_ctx["kind"], n_loops=len(_recs),
             n_passes_total=int(sum(int(r.get("n_passes", 0))
                                    for r in _recs)),
+            # what the draw's loops started from (the first: Redl at the
+            # draw's anchor on its own perturbed kinetics; later ones warm)
+            init_source=(_recs[0].get("init_source") if _recs else None),
+            loops=[dict(label=r.get("label"),
+                        init_source=r.get("init_source"),
+                        n_passes=int(r.get("n_passes", 0)),
+                        converged=bool(r.get("converged")))
+                   for r in _recs],
             final=_recs[-1] if _recs else None))
         # private: what the post-homotopy check needs to rebuild this draw
         # (popped by generate_bouquet before archiving)

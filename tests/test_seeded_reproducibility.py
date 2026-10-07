@@ -421,6 +421,12 @@ def _run_r2_probe(outdir):
 
     b = bq.Bouquet.from_geqdsk(_GEQ, profiles=_PF, mesh=_MESH, nthreads=1,
                                header=os.path.join(outdir, "r2"), n_draws=1)
+    # The draws below are the LEGACY route-R2 draw (perturb_kinetic_equilibrium
+    # without jbs_loop: SWB bootstrap, one Ip measure per call), so the
+    # baseline must be the legacy (frozen-SWB) baseline too -- the sigma=0
+    # identity is SWB-on-SWB.  The same invariant under the self-consistent
+    # loop is test_jbs_loop_solver::test_f_sigma0_route_r2_draw_converges_...
+    b.config.generation.jbs_self_consistent = False
     b.setup_solver()
     bl = b.prepare_baseline()
     gc = b.config.generation

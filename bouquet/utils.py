@@ -4270,36 +4270,53 @@ def store_equilibrium(
                 if _u:
                     ds.attrs["units"] = _u
 
-        # ---- self-consistent bootstrap record (optional) ------------------
-        if jbs_loop is not None:
-            import json as _json
-            from .jbs_loop import jsonable as _jsonable
-            _rec = _jsonable(jbs_loop)
-            grp.attrs["jbs_converged"] = bool(_rec.get("converged", False))
-            grp.attrs["jbs_n_passes"] = int(_rec.get("n_passes_total", 0)
-                                            or 0)
-            grp.attrs["jbs_loop_json"] = _json.dumps(_rec)
+        # ---- self-consistent bootstrap record (schema v3 jbs_loop block;
+        # None -- the frozen bootstrap -- writes nothing) -------------------
+        from .schema import write_jbs_loop
+        write_jbs_loop(grp, jbs_loop)
 
 
 def load_jbs_loop(header, count, scan_key=None):
     """The self-consistent bootstrap record of one draw, or ``None``.
 
-    Reads the ``jbs_loop_json`` attr :func:`store_equilibrium` writes when
-    ``GenerationConfig.jbs_self_consistent`` was on; legacy draws carry none.
+    Reads the schema-v3 ``jbs_loop`` block (:data:`bouquet.schema.
+    JBS_LOOP_ATTRS`) :func:`store_equilibrium` writes when the draw's
+    bootstrap came from the loop; frozen-bootstrap draws (v2 archives,
+    ``jbs_self_consistent=False``) carry none.  ``count="_baseline"`` reads
+    the baseline's record (see :func:`store_baseline_jbs_loop`).
     """
-    import json as _json
-    db_path = os.path.abspath(f"{header}.h5") if not str(header).endswith(
-        ".h5") else os.path.abspath(str(header))
+    from .schema import read_jbs_loop
+    db_path = _resolve_h5(header)
     with h5py.File(db_path, "r") as hf:
-        grp_path = _group_path(scan_key, count)
+        grp_path = (_baseline_group_path(scan_key) if count == "_baseline"
+                    else _group_path(scan_key, count))
         if grp_path not in hf:
             raise KeyError(f"{grp_path} not in {db_path}")
-        raw = hf[grp_path].attrs.get("jbs_loop_json")
-    if raw is None:
-        return None
-    if isinstance(raw, bytes):
-        raw = raw.decode()
-    return _json.loads(raw)
+        return read_jbs_loop(hf[grp_path])
+
+
+def _baseline_group_path(scan_key=None):
+    bkey = _scan_key(scan_key)
+    return f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
+
+
+def store_baseline_jbs_loop(header, record, scan_key=None):
+    """Write the baseline's self-consistent bootstrap record (schema-v3
+    ``jbs_loop`` block) onto the archive's ``_baseline`` group.
+
+    ``record`` is the baseline's loop record (``li_metrics["jbs_loop"]`` on
+    the IMAS path, ``reconstruction_metrics["jbs_loop"]`` on the geqdsk
+    path); ``None`` (a frozen baseline) writes nothing.  No-op when the
+    archive has no ``_baseline`` group yet.
+    """
+    if record is None:
+        return
+    from .schema import write_jbs_loop
+    db_path = _resolve_h5(header)
+    with h5py.File(db_path, "a") as hf:
+        gp = _baseline_group_path(scan_key)
+        if gp in hf:
+            write_jbs_loop(hf[gp], record)
 
 
 def load_eq_fsa(header, count, scan_key=None):

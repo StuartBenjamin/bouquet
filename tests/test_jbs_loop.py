@@ -48,7 +48,8 @@ class _GC:
         self.jbs_tol_li = 1e-3
         self.jbs_tol_q0 = 2e-3
         self.jbs_max_passes = 8
-        self.jbs_max_passes_draw = 6
+        self.jbs_max_passes_draw = 12
+        self.jbs_max_passes_post_homotopy = 4
         self.jbs_relax = 0.7
         self.jbs_loop_on_fail = "raise"
         for k, v in kw.items():
@@ -85,16 +86,21 @@ def _affine_problem(contraction, fixed_scale=1.0):
 # ---------------------------------------------------------------------------
 #  settings
 # ---------------------------------------------------------------------------
-def test_defaults_are_the_approved_values_and_off():
+def test_defaults_are_the_approved_values_and_on():
     from bouquet.config import GenerationConfig
     g = GenerationConfig()
-    assert g.jbs_self_consistent is False
+    assert g.jbs_self_consistent is True
     s = jbs_settings(g)
-    assert s["enabled"] is False
+    assert s["enabled"] is True
     assert (s["rtol_j"], s["rtol_Ip"], s["tol_li"], s["tol_q0"]) == \
         (1e-3, 1e-4, 1e-3, 2e-3)
+    # ceilings: 8 baseline, 12 per draw loop, 4 post-homotopy (limits; the
+    # two-consecutive rule and every tolerance above are unchanged)
     assert s["max_passes"] == 8 and jbs_settings(g, draw=True)[
-        "max_passes"] == 6
+        "max_passes"] == 12
+    assert g.jbs_max_passes_post_homotopy == 4
+    assert s["post_homotopy_passes"] == 4
+    assert jbs_settings(g, draw=True)["post_homotopy_passes"] == 4
     assert s["relax"] == 0.7 and s["relax_floor"] == 0.25
     assert s["on_fail"] == "raise" and s["init"] == "anchor"
     assert s["required_consecutive"] == 2
@@ -107,6 +113,8 @@ def test_defaults_are_the_approved_values_and_off():
     ("jbs_init", "sbw"), ("jbs_loop_on_fail", "ignore"),
     ("jbs_rtol_j", 0.0), ("jbs_rtol_Ip", -1e-4), ("jbs_tol_li", float("nan")),
     ("jbs_tol_q0", "x"), ("jbs_max_passes", 1), ("jbs_max_passes_draw", 2.5),
+    ("jbs_max_passes_post_homotopy", 1), ("jbs_max_passes_post_homotopy", 2.5),
+    ("jbs_max_passes_post_homotopy", True),
     ("jbs_relax", 0.1), ("jbs_relax", 1.5), ("jbs_self_consistent", "yes"),
     ("jbs_relax_current", 0.0), ("jbs_relax_current", 1.2),
     ("jbs_relax_current", "x"), ("jbs_relax_halve_on", 0),
@@ -141,6 +149,8 @@ def test_config_round_trips_the_loop_fields():
 
 
 def test_an_old_config_without_the_fields_loads_with_the_loop_off():
+    """A stored config that predates the loop was produced by the frozen
+    path; replaying it must not silently switch the bootstrap model."""
     from bouquet.config import (BouquetConfig, GenerationConfig,
                                 ImasSource, SolverConfig)
     d = BouquetConfig(source=ImasSource(ids_path="x.json"),
@@ -149,7 +159,53 @@ def test_an_old_config_without_the_fields_loads_with_the_loop_off():
     for k in list(d["generation"]):
         if k.startswith("jbs_") and k != "jbs_delta_mode":
             del d["generation"][k]
-    assert BouquetConfig.from_dict(d).generation.jbs_self_consistent is False
+    with pytest.warns(UserWarning, match="predates the self-consistent"):
+        g = BouquetConfig.from_dict(d).generation
+    assert g.jbs_self_consistent is False
+    # the other loop fields take their (inert) defaults
+    assert g.jbs_max_passes == 8 and g.jbs_relax == 0.7
+
+
+def test_a_current_config_round_trips_the_default_on_without_a_warning():
+    import warnings
+    from bouquet.config import (BouquetConfig, GenerationConfig,
+                                ImasSource, SolverConfig)
+    d = BouquetConfig(source=ImasSource(ids_path="x.json"),
+                      solver=SolverConfig(mesh_path="m.h5"), output_header="t",
+                      generation=GenerationConfig()).to_dict()
+    assert d["generation"]["jbs_self_consistent"] is True
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        back = BouquetConfig.from_dict(d)
+    assert back.generation.jbs_self_consistent is True
+
+
+def test_legacy_flag_round_trips():
+    from bouquet.config import (BouquetConfig, GenerationConfig,
+                                ImasSource, SolverConfig)
+    cfg = BouquetConfig(source=ImasSource(ids_path="x.json"),
+                        solver=SolverConfig(mesh_path="m.h5"), output_header="t",
+                        generation=GenerationConfig(jbs_self_consistent=False))
+    assert BouquetConfig.from_json(cfg.to_json()).generation\
+        .jbs_self_consistent is False
+
+
+@pytest.mark.parametrize("kw, match", [
+    (dict(single_profile_jphi=True), "single_profile_jphi"),
+    (dict(recalculate_j_BS=False), "recalculate_j_BS"),
+])
+def test_modes_without_a_bootstrap_to_iterate_are_refused_under_the_default(
+        kw, match):
+    """With the loop ON by default, a mode that has no bootstrap to iterate
+    is refused with the fix in the message -- never silently downgraded --
+    and runs once the legacy flag is set."""
+    from bouquet.config import GenerationConfig
+    from bouquet.run import Bouquet
+    with pytest.raises(ValueError, match=match) as ei:
+        Bouquet._check_jbs_loop_workflow(GenerationConfig(**kw))
+    assert "jbs_self_consistent=False" in str(ei.value)
+    Bouquet._check_jbs_loop_workflow(
+        GenerationConfig(jbs_self_consistent=False, **kw))
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +290,92 @@ def test_d_two_initial_guesses_reach_the_same_fixed_point():
     d = profile_residuals(a["jbs_used"], b["jbs_used"], _W, _X, _IP)
     assert d["r_j"] <= 2 * s["rtol_j"]
     assert b["record"]["init"] == "swb"
+
+
+def _draw_problem(a_draw, a_base=1.0, eps=0.6, dL_p=0.01):
+    """A perturbation draw in miniature.  The Redl bootstrap scales with the
+    kinetics ``a`` and follows the geometry ``L`` (an l_i-like scalar) of the
+    equilibrium it is evaluated on; ``L`` follows the solved total current
+    and the pressure (the draw's pressure shifts it by ``dL_p``).  The
+    baseline is self-consistent at ``a_base``.  The draw's state anchor is
+    the BASELINE total (baseline inductive + baseline bootstrap) at the
+    draw's pressure, exactly as in ``perturb_kinetic_equilibrium``.  Linear,
+    so the fixed point is known in closed form.  Returns the two initial
+    iterates: the unperturbed baseline bootstrap (the counterfactual) and the
+    one a draw uses (Redl at the anchor on the draw's own kinetics)."""
+    x = _X
+    j_ind = 8e5 * (1 - x) ** 1.5 + 8e4
+    Jshape = _shape()
+    Lref, L0, mu = 1.0, 0.2, 1.0
+    I = lambda j: float(np.trapezoid(_W * x * j, x)) / _IP  # noqa: E731
+    Ij, IS = I(j_ind), I(Jshape)
+
+    def redl(a, L):
+        return a * Jshape * (1.0 + eps * (L - Lref))
+
+    def fixed_L(a, dp):
+        return ((L0 + dp + mu * Ij + mu * a * IS * (1.0 - eps * Lref))
+                / (1.0 - mu * a * IS * eps))
+
+    j_base = redl(a_base, fixed_L(a_base, 0.0))    # self-consistent baseline
+    geom = lambda j: L0 + dL_p + mu * I(j)          # noqa: E731 (draw pressure)
+    L_anchor = geom(j_ind + j_base)                 # the draw's state anchor
+    st = dict(L=L_anchor)
+
+    def step(jbs, k, relax=None):
+        jc = j_ind + np.asarray(jbs, dtype=float)
+        js = jc if relax is None else relax(jc)
+        st["L"] = geom(js)
+        return dict(w=_W, x=x, li=st["L"])
+
+    def evaluate(meas):
+        return redl(a_draw, st["L"])
+
+    Lstar = fixed_L(a_draw, dL_p)
+    return dict(step=step, evaluate=evaluate, st=st, L_anchor=L_anchor,
+                old_init=j_base, new_init=redl(a_draw, L_anchor),
+                Lstar=Lstar, Jstar=redl(a_draw, Lstar))
+
+
+def test_draw_init_from_own_kinetics_and_from_the_baseline_reach_one_fixed_point():
+    """Item 7f of the plan: a draw's loop starts from Redl at its anchor on
+    its OWN perturbed kinetics.  That is initialisation only: started from the
+    unperturbed baseline bootstrap instead (the counterfactual), the same draw
+    reaches the same fixed point, the closed-form one, to the loop's own
+    tolerances.  The own-kinetics start begins much closer to it, and the
+    record says which start was used."""
+    s = jbs_settings(_GC(), draw=True)
+    outs = {}
+    for tag in ("old", "new"):
+        p = _draw_problem(a_draw=1.06)
+        src = ("baseline j_BS (counterfactual)" if tag == "old" else
+               "evaluate_jBS at the draw's anchor, draw's own kinetics")
+        o = run_jbs_loop(p[f"{tag}_init"], p["step"], p["evaluate"], s,
+                         Ip=_IP, meas0=dict(li=p["L_anchor"]), gate_li=True,
+                         init_source=src)
+        assert o["converged"], (tag, o["record"]["r_j"])
+        assert o["record"]["init_source"] == src
+        # on the closed-form fixed point, to the loop's own tolerances
+        assert abs(p["st"]["L"] - p["Lstar"]) <= s["tol_li"]
+        assert profile_residuals(p["Jstar"], o["jbs_used"], _W, _X,
+                                 _IP)["r_j"] <= s["rtol_j"]
+        outs[tag] = o
+    a, b = outs["old"], outs["new"]
+    assert profile_residuals(a["jbs_used"], b["jbs_used"], _W, _X,
+                             _IP)["r_j"] <= s["rtol_j"]
+    # the old start carries the kinetic perturbation as residual, the new
+    # one only the anchor -> first-solve geometry step
+    assert b["record"]["r_j"][0] < 0.5 * a["record"]["r_j"][0]
+    assert b["record"]["n_passes"] <= a["record"]["n_passes"]
+
+
+def test_the_init_source_defaults_to_unrecorded():
+    s = jbs_settings(_GC())
+    Jstar, step, ev = _affine_problem(0.3)
+    o = run_jbs_loop(0.5 * Jstar, step, ev, s, Ip=_IP, meas0=dict(li=0.0),
+                     max_passes=2, raise_on_fail=False)
+    assert "init_source" in o["record"] and o["record"]["init_source"] is None
+    assert o["record"]["tolerances"]["post_homotopy_passes"] == 4
 
 
 def test_e_non_convergence_raises_with_the_history():
@@ -700,3 +842,104 @@ def test_draw_composer_reproduces_the_legacy_composition_rules():
     comp_f = _draw_jbs_composer(x, *k, 1e-3, False, 1.0, True, -1e9 + 0 * x,
                                 None, None)
     assert np.all(comp_f(_MockEq())[0] < 0)   # diff added AFTER the floor
+
+
+# ---------------------------------------------------------------------------
+#  the post-homotopy check of a draw (mocked solver)
+# ---------------------------------------------------------------------------
+class _PHEq:
+    """Just enough of a TokaMaker for _post_homotopy_jbs."""
+
+    def __init__(self):
+        self.psi_bounds = (-0.15, 0.12)
+        self.solves = 0
+        self.ffp = []
+
+    def copy_eq(self):
+        return object()
+
+    def get_stats(self, **kw):
+        return {"l_i": 0.65}
+
+    def set_targets(self, **kw):
+        pass
+
+    def set_profiles(self, pp_prof=None, ffp_prof=None):
+        self.ffp.append(np.asarray(ffp_prof["y"], float).copy())
+
+    def solve(self):
+        self.solves += 1
+
+
+def _ph_setup(monkeypatch, kind):
+    import bouquet.jbs_loop as L
+    import bouquet.TokaMaker_interface as TI
+    x = np.linspace(0.0, 1.0, 65)
+    Jstar = _shape(x)
+    calls = {"corr": [], "renorm": 0}
+    monkeypatch.setattr(L, "residual_weights",
+                        lambda eq, psi_N, psi_pad=1e-3: (np.ones_like(x), x,
+                                                         "test"))
+
+    def _renorm(mygs, psi_N, target, Ip, pad, label=""):
+        calls["renorm"] += 1
+        return np.asarray(target, float), 1.0
+
+    def _corr(mygs, psi_N, target, pp, Ip, pax, pad, **kw):
+        calls["corr"].append((np.asarray(target, float).copy(), kw))
+        return np.asarray(target, float) * 0.999, 3, [1.0]
+
+    monkeypatch.setattr(TI, "_renormalize_target_to_Ip", _renorm)
+    monkeypatch.setattr(TI, "_corrective_jphi_iteration", _corr)
+    monkeypatch.setattr(TI, "_r2_ip_scale", lambda *a, **k: 1.0)
+    j_ind = 2.0e6 * (1.0 - x) ** 2
+    ctx = dict(kind=kind, compose=lambda snap: (Jstar.copy(), Jstar.copy(),
+                                                None),
+               spike_used=1.0015 * Jstar, cand=j_ind.copy(),
+               j_ind_used=j_ind.copy(), j_fixed_eff=np.zeros_like(x),
+               pres_tmp=1e4 * (1.0 - x ** 2) + 10.0, input_j_phi=j_ind + Jstar,
+               r2_mode="legacy", j_phi_request=j_ind + Jstar,
+               isolate_edge_jBS=False)
+    s = jbs_settings(_GC(), draw=True)
+    return TI, x, Jstar, ctx, calls, s
+
+
+def test_post_homotopy_standard_draw_reaches_the_total_by_corrective_iteration(
+        monkeypatch):
+    """A standard draw's stored j_phi is the ACHIEVED current of its
+    corrective iteration; the post-homotopy passes must reach the new total
+    the same way (target renormalised to Ip + corrective iteration), never by
+    handing that achieved profile back to one jphi-linterp solve."""
+    TI, x, Jstar, ctx, calls, s = _ph_setup(monkeypatch, "standard")
+    eq = _PHEq()
+    rec, spk, full, jphi = TI._post_homotopy_jbs(eq, ctx, s, x, 1e-3, _IP)
+    assert not rec["accepted_without_passes"]
+    assert eq.solves == 0, "a bare jphi-linterp solve was issued"
+    assert calls["corr"] and calls["renorm"] == len(calls["corr"])
+    omega = s["relax"]
+    jbs0 = (1 - omega) * ctx["spike_used"] + omega * Jstar
+    t0, kw0 = calls["corr"][0]
+    np.testing.assert_allclose(t0, ctx["j_ind_used"] + jbs0, rtol=1e-12)
+    assert kw0["min_iters"] == 2 and kw0["rtol"] == 0.05
+    # the delivered current is the corrective iteration's output
+    np.testing.assert_allclose(jphi, calls["corr"][-1][0] * 0.999)
+    assert "corrective" in rec["solve"] and "beta not applied" in rec["solve"]
+    assert rec["passes"]["converged"]
+
+
+def test_post_homotopy_fixc_draw_is_one_relaxed_request_solve(monkeypatch):
+    TI, x, Jstar, ctx, calls, s = _ph_setup(monkeypatch, "fixc")
+    eq = _PHEq()
+    rec, spk, full, jphi = TI._post_homotopy_jbs(eq, ctx, s, x, 1e-3, _IP)
+    assert eq.solves >= 1 and not calls["corr"]
+    assert "Fix C" in rec["solve"]
+    assert rec["passes"]["converged"]
+
+
+def test_post_homotopy_inside_tolerance_keeps_the_draw(monkeypatch):
+    TI, x, Jstar, ctx, calls, s = _ph_setup(monkeypatch, "standard")
+    ctx["spike_used"] = Jstar.copy()
+    eq = _PHEq()
+    rec, spk, full, jphi = TI._post_homotopy_jbs(eq, ctx, s, x, 1e-3, _IP)
+    assert rec["accepted_without_passes"] and eq.solves == 0
+    assert not calls["corr"]

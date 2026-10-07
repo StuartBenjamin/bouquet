@@ -74,8 +74,10 @@ b.generate()
 ```
 
 It returns `spike0`, `max_dev`, `rms_dev`, `max_dev_frac`, `psi_worst`, and
-`passed`, and costs one bootstrap solve (~1 min). With
-`jbs_self_consistent=True` it checks the loop's own invariant instead -- see
+`passed`, and costs one bootstrap solve (~1 min). That is the **legacy**
+(`jbs_self_consistent=False`) check; by default (the self-consistent loop) it
+checks the loop's own invariant instead and returns the loop record with
+`loop_converged` and the residuals against the baseline -- see
 [the self-consistent bootstrap](#self-consistent-bootstrap-jbs_self_consistent). Call it after
 `reconstruct()` / `prepare_baseline()` and before `generate()`; it leaves the
 solver re-anchored on the baseline equilibrium.
@@ -135,12 +137,30 @@ probe rather than an independent check.
 
 ## Self-consistent bootstrap (`jbs_self_consistent`)
 
-Opt-in (`GenerationConfig.jbs_self_consistent=True`; **default `False`**, which
-is the historical behaviour bit for bit).
+**On by default** (`GenerationConfig.jbs_self_consistent=True`): the bootstrap
+is re-evaluated on the delivered equilibrium inside a relaxed outer loop
+(closure ↔ GS solve ↔ Redl) that runs to a convergence test, in every path
+that builds a j_phi containing a bootstrap. `jbs_self_consistent=False` is the
+**legacy frozen bootstrap**, bit for bit the historical code path (kept for
+A/B comparisons and for reproducing archives made before the loop existed).
+Two consequences of the default:
+
+- `single_profile_jphi=True` and `recalculate_j_BS=False` have no bootstrap to
+  iterate; they are refused unless `jbs_self_consistent=False` is set (never
+  silently downgraded -- the error says so).
+- A stored config that predates the field (an old archive's `config_json`)
+  loads with `jbs_self_consistent=False` and a warning, i.e. it replays the
+  bootstrap model it was produced with; a current config always carries the
+  field.
+
+The archive says which model a group carries: the schema-v3 `jbs_loop` block
+(below) is present exactly where the loop ran; plots label the bootstrap
+"self-consistent Redl bootstrap" or "frozen SWB bootstrap (legacy)"
+accordingly.
 
 ### What the legacy path does, and why it is not enough
 
-With the flag off, the bootstrap is computed **once** per baseline and per draw
+With the legacy flag, the bootstrap is computed **once** per baseline and per draw
 by OFT's `solve_with_bootstrap` (SWB) and then frozen: the closures, the
 correctors, the MSE stage and the draws only *rescale* it. Two properties of
 that single call matter:
@@ -212,9 +232,32 @@ Residuals, **all logged every pass**:
 between the bootstrap an equilibrium was solved with and the Redl bootstrap of
 that equilibrium. That is `1/ω` times the relaxed step `‖jBS_k+1 − jBS_k‖`, so
 the criterion is never looser than a step-size test. Converged means **every
-active criterion on two consecutive passes**. Ceilings: `jbs_max_passes = 8`
-(baseline / reconstruction), `jbs_max_passes_draw = 6` per draw, plus up to
-`jbs_loop.JBS_POST_HOMOTOPY_PASSES = 2` after a draw's coil homotopy.
+active criterion on two consecutive passes**. Ceilings (limits, not
+tolerances): `jbs_max_passes = 8` (baseline / reconstruction),
+`jbs_max_passes_draw = 12` for each loop of a draw (its anchor loop, each
+l_i-match candidate's coupling, each Fix C resample), and
+`jbs_max_passes_post_homotopy = 4` passes after a draw's coil homotopy when
+Redl on the delivered equilibrium misses (with the two-consecutive rule a
+stage whose first pass misses needs at least 3). The draw ceilings were
+raised from 6 / 2 once the golden case showed the standard draw's l_i-match
+coupling contracting at ≈0.38/pass from r_j ≈ 2e-2…1.2e-1 (7–8 passes) --
+a limit change; no tolerance moved.
+
+**Where a draw's loop starts.** Every draw's first loop starts from
+`evaluate_jBS` on the draw's **state anchor** (the archived total current at
+the draw's full pressure) with the draw's **own perturbed kinetics**
+(n_e, T_e, n_i, T_i, Z_eff; in delta mode composed as baseline + (that Redl −
+the σ=0 Redl reference); `jBS_diff` added in diff mode) -- never from the
+unperturbed baseline bootstrap. Later loops of the same draw (the next
+l_i-match candidate, a Fix C resample) start warm from the draw's previous
+converged bootstrap; the post-homotopy stage starts from the relaxed blend of
+the bootstrap the draw carries and Redl on the delivered equilibrium. Each loop
+record says which (`init_source`), and the per-draw block repeats the first
+one. The start changes the path only (a test runs the same draw loop from the
+baseline bootstrap and from the anchor Redl and gets the same fixed point).
+The large first residual of an l_i-match candidate's loop is geometric: the
+candidate's new inductive shape moves q and the flux range, and Redl with the
+**same** kinetics on that geometry differs by a few to ~10 % in I_BS.
 Relaxation, on two quantities, both of the **path** only (at the fixed point
 both blends are the identity):
 
@@ -319,14 +362,28 @@ is passed when the OFT build accepts it and the grid allows it, and the record
 says whether it was). The fixed point does not depend on the initial guess.
 
 The loop is refused with `single_profile_jphi=True` (no bootstrap component)
-and with `recalculate_j_BS=False`.
+and with `recalculate_j_BS=False`; set `jbs_self_consistent=False` for either.
+
+**Closure stop test inside the loop.** Each pass re-solves the closure on
+the new geometry, so the structured soft closure is called several times per
+slice; its acceptance was extended (a flagged change of the solver's
+acceptance criterion, applied only where it previously refused) to accept an
+iterate stationary to within the objective's rounding noise
+(`stop_reason="noise_floor"`, recorded with the gradient, predicted decrease
+and noise estimate), and a refusal inside the loop is retried once from the
+previous pass's coefficients (`closure_retry=1`, logged) -- see the soft
+closure under [the structured closure](#the-structured-closure-and-its-l_i-constraint). Every result the
+soft solver returned before is bit-identical.
 
 ### What is recorded
 
 `li_metrics["jbs_loop"]` (and `ip_closure["jbs_loop"]` in ohmic mode;
-`reconstruction_metrics["jbs_loop"]` on the geqdsk path; per draw, the archive
-attrs `jbs_converged`, `jbs_n_passes`, `jbs_loop_json` -- read with
-`bouquet.utils.load_jbs_loop`): `enabled, init, grid, n_passes, converged,
+`reconstruction_metrics["jbs_loop"]` on the geqdsk path; in the archive, the
+schema-v3 `jbs_loop` block -- attrs `jbs_converged`, `jbs_n_passes`,
+`jbs_loop_json` -- on every loop draw and on `_baseline`, read with
+`bouquet.utils.load_jbs_loop`, `DrawView.jbs_loop` or
+`ScanView.baseline_jbs_loop`; see
+[archive-schema.md](archive-schema.md#v2--v3-the-self-consistent-bootstrap-record)): `enabled, init, grid, n_passes, converged,
 stop_reason, tolerances, omega[], r_j[], r_I[], dl_i[], dq0[], I_BS[],
 jBS_peak_psiN[], jBS_peak[], wall_s, evaluate_jBS_version, oft_build` (path +
 git hash), plus `jBS_diff_definition` in diff mode, the per-pass closure log

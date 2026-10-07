@@ -4840,7 +4840,11 @@ class Bouquet:
         res = run_jbs_loop(spike0, _step,
                            lambda m: compose(m["snap"])[0], settings,
                            Ip=abs(Ip), meas0=dict(li=li0), gate_li=True,
-                           label="sigma=0 check", raise_on_fail=False)
+                           label="sigma=0 check",
+                           init_source=("evaluate_jBS on the state anchor "
+                                        "with the baseline (sigma=0) "
+                                        "kinetics"),
+                           raise_on_fail=False)
         w, x, _k = residual_weights(mygs.copy_eq(), psi_N, psi_pad)
         cmp_ = profile_residuals(res["jbs_used"], ref, w, x, abs(Ip))
         li_s0 = float(mygs.get_stats(li_normalization="iter",
@@ -4909,15 +4913,19 @@ class Bouquet:
             return
         if bool(getattr(gc, "single_profile_jphi", False)):
             raise ValueError(
-                "jbs_self_consistent=True with single_profile_jphi=True: "
-                "there is no bootstrap component to iterate (j_phi is one "
-                "profile).  Turn one of them off.")
+                "jbs_self_consistent=True (the default) with "
+                "single_profile_jphi=True: there is no bootstrap component "
+                "to iterate (j_phi is one profile).  Set "
+                "generation.jbs_self_consistent=False for a single-profile "
+                "run.")
         if not bool(getattr(gc, "recalculate_j_BS", True)):
             raise ValueError(
-                "jbs_self_consistent=True with recalculate_j_BS=False: the "
-                "loop re-evaluates the bootstrap on every equilibrium, which "
-                "is exactly what recalculate_j_BS=False turns off.  Turn one "
-                "of them off.")
+                "jbs_self_consistent=True (the default) with "
+                "recalculate_j_BS=False: the loop re-evaluates the bootstrap "
+                "on every equilibrium, which is exactly what "
+                "recalculate_j_BS=False turns off.  Set "
+                "generation.jbs_self_consistent=False to keep the baseline "
+                "bootstrap frozen in the draws.")
 
     # ── stage 3: perturbed bouquet --------------------------------------
     def _validate_workflow(self) -> None:
@@ -5364,6 +5372,12 @@ class Bouquet:
                 print(f"[until-N] target met: {_got}/{_tgt} in-spec draws "
                       f"in {_tries} attempts.")
 
+        # The baseline's self-consistent bootstrap record (schema v3 jbs_loop
+        # block on _baseline; a frozen baseline carries none).
+        from .utils import store_baseline_jbs_loop
+        store_baseline_jbs_loop(header, self._baseline_jbs_record(),
+                                scan_key=gc.scan_key)
+
         # Stamp provenance (schema/version/timestamp + full config JSON) onto the
         # archive so the run is self-describing and load_config() can round-trip it.
         from .utils import write_provenance
@@ -5381,6 +5395,19 @@ class Bouquet:
                                             None))
 
         return self.diagnostics
+
+    def _baseline_jbs_record(self):
+        """The baseline's self-consistent bootstrap loop record, or ``None``
+        (a frozen baseline): ``li_metrics["jbs_loop"]`` on the IMAS path,
+        ``reconstruction_metrics["jbs_loop"]`` on the geqdsk path."""
+        bl = getattr(self, "baseline", None)
+        if bl is None:
+            return None
+        for attr in ("li_metrics", "reconstruction_metrics"):
+            rec = (getattr(bl, attr, None) or {}).get("jbs_loop")
+            if rec is not None:
+                return rec
+        return None
 
     def plot_bouquet(self, mode: str = "all", selection: str = "all",
                      layout: str = "stack", pub_style: bool = False):

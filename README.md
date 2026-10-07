@@ -12,7 +12,8 @@ OpenFUSIONToolkit/TokaMaker.
 bouquet generates families ("bouquets") of perturbed equilibria from a baseline
 kinetic equilibrium: correlated Gaussian-process perturbations of n_e, T_e,
 T_i, Z_eff-consistent densities and j_phi drawn within measured uncertainties,
-per-draw Sauter bootstrap recomputation, l_i band conditioning against
+a per-draw bootstrap iterated to self-consistency with each solved
+equilibrium (Redl), l_i band conditioning against
 magnetics, a Grad–Shafranov solve per sample, and coil/boundary in-spec
 filtering — all archived to one self-describing, provenance-stamped HDF5
 database.
@@ -24,8 +25,10 @@ database.
   the separated currents, kinetic profiles, and fast-ion pressure.
 - **Perturb, condition, solve.** Kinetic profiles are sampled from a GP
   posterior with spatially varying correlation lengths; densities follow from
-  quasi-neutrality with the drawn Z_eff; the bootstrap is recomputed per draw
-  and the inductive current is scaled to hold l_i in band.
+  quasi-neutrality with the drawn Z_eff; the bootstrap is re-evaluated on each
+  draw's own equilibrium until it is self-consistent (`jbs_self_consistent`,
+  on by default; `False` keeps the legacy frozen bootstrap) and the inductive
+  current is scaled to hold l_i in band.
 - **Coil-realizable by construction.** Each GS solve runs under a progressive
   coil-bound homotopy, and every draw is tagged `in_spec` against
   engineering-motivated coil-drift and boundary-RMS thresholds.
@@ -126,7 +129,7 @@ cfg = bq.load_config("my_run")       # the exact BouquetConfig that made it
 |---|---|---|
 | Solver | `setup_solver()` | Stand up TokaMaker from `SolverConfig`. Idempotent |
 | Baseline | `prepare()` — or `reconstruct()` on the g-file path | Resolve the baseline; `reconstruct()` also prints the reconstruction-fidelity summary |
-| Guard (optional) | `verify_sigma0_consistency()` | One bootstrap solve confirming the *draw* pipeline reproduces the *baseline* j_BS split at σ=0 — recommended on a new machine or OFT build, before spending draw compute |
+| Guard (optional) | `verify_sigma0_consistency()` | Confirms the *draw* pipeline reproduces the *baseline* j_BS split at σ=0 (with the default self-consistent bootstrap: the σ=0 draw loop converges back to the baseline) — recommended on a new machine or OFT build, before spending draw compute |
 | Draws | `generate()` | Sample, condition, solve, archive to `{header}.h5` |
 | Selection | `filter()` | Coil-drift + boundary-RMS filters, written as non-destructive flags |
 | Export | `export()` / `export_bundle()` / `export_ids()` | Pruned HDF5, per-draw g-file/p-file/profiles-JSON bundle, or one IMAS/OMAS IDS per draw |
