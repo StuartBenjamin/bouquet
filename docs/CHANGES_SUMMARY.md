@@ -127,6 +127,45 @@
   The exported `j_ohmic` / `j_total` change by `-P/kappa` (as above); `j_tor`
   and `j_bootstrap` do not.
 
+### IMAS time matching: the core_sources slice is windowed, dt recorded, OFF before an entry's record (owner decision 2026-10-06)
+
+- **The core_sources slice itself.** It was `_nearest_index(core_sources.time,
+  T)` with no window: a single-time core_sources was index 0 whatever the
+  time (the synthetic example reduced to its 2.1 s core_sources slice read
+  its 2.1 s beam at 2.3043 s, with no trace). Now (both readers,
+  `io.imas.core_sources_slice`): the core_sources time nearest the
+  core_profiles slice READ, within half the local core_profiles step of it
+  (a single-time core_profiles uses the core_sources step; two single-time
+  bases, float precision), else refused naming both times.
+- **Entries.** The match stays half the entry's OWN local step, and the
+  matched own slice must ALSO lie within half the local core_profiles step
+  of the core_profiles slice time: a coarse own grid read between its
+  samples is refused (it read the nearest sample, e.g. 0.1 s away, before).
+- **OFF before an entry's record.** A driven entry whose own record starts
+  AFTER the slice time (and whose first own slice carries current; an idle
+  one is off by the bracketing rule, as before) is OFF there: zero, stamped
+  `off_before_record` with its first own time, announced once per source
+  file and entry (print + `UserWarning`). It was refused. Past its LAST own
+  time an entry carrying current there is still refused. Never interpolated
+  (the review's "interpolate inside the range" is rejected).
+- **Recorded.** `Baseline.source_time_match` (archived in the baseline's
+  `li_metrics`) and the engine's `provenance["source_time_match"]`: both
+  slice times, dt (core_sources minus core_profiles), the window and its
+  basis, and per entry its matched own time, dt (own minus core_profiles),
+  both windows, the bracketing own times, first / last own time and status
+  (`matched`, `off_before_record`, `off_idle`, `zero`). `driven_sources`
+  entries carry `matched_time` and `dt`.
+- **Tests whose expectation moved (declared):** the entries starting a step
+  late WITH current (adapter and reader) and a single-time entry 0.1 s or
+  2 us after the slice are now `off_before_record` (were refused; the
+  refusal is now checked past the entry's end); the coarse-grid NBI entry
+  read between its samples is refused (was read).
+  `tests/test_imas_time_rule.py` is new.
+- **Note for the owner.** With two single-time bases the window is float
+  precision, so an entry stored a few microseconds AFTER the slice is now
+  off before its record (zero, announced) where it was refused; a few
+  microseconds before it is still refused.
+
 ## Decisions on record (owner, 2026-10-05) -- no value changes
 
 Approvals given on 2026-10-05 for settings that were already in force but had

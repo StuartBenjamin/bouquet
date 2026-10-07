@@ -5940,6 +5940,11 @@ class Bouquet:
                 _sw["q0_target"] = _icl["q0_target"]
                 _sw["q0_anchor"] = _icl.get("q0_anchor")
             metrics["sawtooth"] = _sw
+        # how the core_sources slice and its beam / sawteeth entries were
+        # matched in time (owner decision 2026-10-06): archived with the
+        # baseline's metrics so every slice of a sweep carries its dt
+        if getattr(bl, "source_time_match", None):
+            metrics["source_time_match"] = bl.source_time_match
         bl.li_metrics = metrics
         # Target TokaMaker li_3 ('iter').  The IMAS path is not itself affected
         # by the geqdsk estimator mismatch (both sides come from TokaMaker),

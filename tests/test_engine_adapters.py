@@ -758,19 +758,30 @@ def test_a_driven_entry_without_a_slice_at_this_time_is_refused(tmp_path):
     time-step from the slice time is REFUSED (owner-approved 2026-10-06; it
     was dropped to zero and stamped under the 1e-6 s match).  An aggregate
     entry in the same position is never added anyway: stamped, not
-    refused.  An all-zero driven entry has nothing to drop: skipped."""
+    refused.  An all-zero driven entry has nothing to drop: skipped.
+    (Owner decision 2026-10-06: a slice BEFORE the entry's first own time is
+    OFF -- off_before_record, tests/test_imas_time_rule.py -- so the refusal
+    is checked past the entry's end, where it is unchanged.)"""
     from bouquet.adapters import _ids_driven_currents
     n = 5
     srcs = dict(time=[1.0, 2.0, 3.0], source=[dict(
         identifier=dict(name="sawteeth", index=701),
         profiles_1d=[dict(time=2.0, j_parallel=[1.0] * n),
                      dict(time=3.0, j_parallel=[2.0] * n)])])
+    late = dict(srcs, time=[2.0, 3.0, 4.0])
     with pytest.raises(EngineInputRefused,
                        match=r"IDS adapter: core_sources 'sawteeth' \(index "
                              r"701\) carries a non-zero j_parallel but has no "
                              r"profiles_1d slice within half a time-step of "
-                             r"t = 1 s.*Refusing"):
-        _ids_driven_currents(srcs, 0, n, 1.0)
+                             r"t = 4 s.*Refusing"):
+        _ids_driven_currents(late, 2, n, 1.0)
+    off = []
+    with pytest.warns(UserWarning, match="off_before_record"):
+        parts, used, ignored = _ids_driven_currents(srcs, 0, n, 1.0, off=off,
+                                                    announce_key="t-refused")
+    assert used == [] and np.all(parts["other"] == 0.0)
+    assert off == [dict(name="sawteeth", index=701,
+                        reason="off_before_record", first_own_time=2.0)]
     parts, used, ignored = _ids_driven_currents(srcs, 2, n, -1.0)
     np.testing.assert_array_equal(parts["other"], -2.0)
     assert ignored == []
@@ -819,7 +830,15 @@ def test_a_two_microsecond_offset_entry_is_read_at_its_nearest_slice():
     parts, _, _ = _ids_driven_currents(one, 1, n, 1.0, tb)
     np.testing.assert_array_equal(parts["nbi"], 5.0)
     with pytest.raises(EngineInputRefused, match="within half a time-step"):
-        _ids_driven_currents(one, 0, n, 1.0, tb)        # 0.1 s away
+        _ids_driven_currents(one, 2, n, 1.0, tb)        # 0.1 s past its end
+    # 0.1 s BEFORE its only own time: off_before_record (owner decision
+    # 2026-10-06; it was refused), announced
+    off = []
+    with pytest.warns(UserWarning, match="off_before_record"):
+        parts, used, _ = _ids_driven_currents(one, 0, n, 1.0, tb, off=off,
+                                              announce_key="t-2us")
+    assert used == [] and np.all(parts["nbi"] == 0.0)
+    assert off[0]["reason"] == "off_before_record"
 
 
 # ---------------------------------------------------------------------------
@@ -863,25 +882,37 @@ def test_an_entry_starting_a_step_late_and_idle_there_is_off_not_refused():
     assert off == [] and used[0]["slice"] == "matched by time"
 
 
-def test_an_entry_starting_a_step_late_with_current_there_is_refused():
-    """Same geometry, but the entry's first own slice carries current: it
-    is still REFUSED, naming the entry and the window."""
+def test_an_entry_starting_a_step_late_with_current_there_is_off_before_record():
+    """Same geometry, but the entry's first own slice carries current.
+    Owner decision 2026-10-06: the entry has no record before its first own
+    time, so it is OFF at the earlier slice -- zero, stamped
+    off_before_record with that first own time, announced (it was
+    REFUSED).  The mirror case -- the slice a step past the entry's LAST
+    own time, which carries current -- is still REFUSED, naming the entry
+    and the window; an unknown index alike."""
     from bouquet.adapters import _ids_driven_currents
     n = 5
     srcs = _saw_srcs([2.0, 3.0], [1.0, 0.0], n)
     off = []
+    with pytest.warns(UserWarning, match=r"'sawteeth' \(index 701\) has no "
+                                         r"record before its first own time "
+                                         r"2 s"):
+        parts, used, ignored = _ids_driven_currents(
+            srcs, 0, n, 1.0, off=off, announce_key="t-late-current")
+    assert used == [] and ignored == [] and np.all(parts["other"] == 0.0)
+    assert off == [dict(name="sawteeth", index=701,
+                        reason="off_before_record", first_own_time=2.0)]
+    past = _saw_srcs([0.0, 1.0], [0.0, 1.0], n, base=(1.0, 2.0, 3.0))
     with pytest.raises(EngineInputRefused,
                        match=r"IDS adapter: core_sources 'sawteeth' \(index "
                              r"701\) carries a non-zero j_parallel but has no "
                              r"profiles_1d slice within half a time-step of "
-                             r"t = 1 s \(nearest own time 2 s, \|dt\| = 1 s > "
+                             r"t = 2 s \(nearest own time 1 s, \|dt\| = 1 s > "
                              r"0\.5 s.*bracketing.*Refusing"):
-        _ids_driven_currents(srcs, 0, n, 1.0, off=off)
-    assert off == []
-    # an unknown index in the same position: refused alike
-    srcs["source"][0]["identifier"] = dict(name="custom_1", index=901)
+        _ids_driven_currents(past, 1, n, 1.0)
+    past["source"][0]["identifier"] = dict(name="custom_1", index=901)
     with pytest.raises(EngineInputRefused, match="'custom_1'.*Refusing"):
-        _ids_driven_currents(srcs, 0, n, 1.0)
+        _ids_driven_currents(past, 1, n, 1.0)
 
 
 def test_the_bracketing_slices_of_a_time_inside_a_coarse_own_grid():
@@ -974,13 +1005,18 @@ def test_an_idle_late_entry_is_stamped_off_in_the_contract(tmp_path):
     assert [(d["name"], d["index"]) for d in c.provenance["off_sources"]] \
         == [("sawteeth", 701)]
     assert c0.provenance["off_sources"] == []
-    # carrying current on that first own slice: refused
+    # carrying current on that first own slice: OFF before its record
+    # (owner decision 2026-10-06; it was refused) -- the same contract,
+    # stamped off_before_record with its first own time
     s["profiles_1d"][0]["j_parallel"] = [1.0e3] * len(
         s["profiles_1d"][0]["j_parallel"])
-    with pytest.raises(EngineInputRefused, match="'sawteeth'.*Refusing"):
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            _ids_from(tmp_path, dd, "on.json").read()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        c2 = _ids_from(tmp_path, dd, "on.json").read()
+    np.testing.assert_array_equal(c2.jB_fix, c0.jB_fix)
+    assert c2.provenance["off_sources"] == [dict(
+        name="sawteeth", index=701, reason="off_before_record",
+        first_own_time=t[-1] + step)]
 
 
 def test_a_malformed_driven_source_is_refused(tmp_path):

@@ -211,26 +211,149 @@ def _entry_time_refusal(who, idn, why):
             "owner-approved 2026-10-06)")
 
 
-def _source_slice_at(s, isrc, t_slice, n_time, base_times=None):
+def _half_local_step(times, t_at, toward):
+    """HALF the local step of the time grid *times* at its node nearest
+    *t_at*, on the side of *toward* (:func:`_local_step`), or ``None`` for a
+    grid of fewer than two distinct times."""
+    if times is None:
+        return None
+    grid = np.unique(np.asarray(times, dtype=float))
+    if grid.size < 2:
+        return None
+    k = int(np.argmin(np.abs(grid - float(t_at))))
+    return 0.5 * _local_step(grid, k, float(toward))
+
+
+#: The time rule of the core_sources reads (owner decision 2026-10-06),
+#: stamped on every record.
+SOURCE_TIME_RULE = (
+    "core_sources slice: nearest the core_profiles slice read, within half "
+    "the local core_profiles time-step, else refused; entry: nearest own "
+    "slice within half its own local step AND within half the local "
+    "core_profiles step of the core_profiles slice time (never "
+    "interpolated); before the entry's first own time: off "
+    "(off_before_record); past its last own time: refused when that slice "
+    "carries current; idle on its bracketing own slices: off")
+
+
+def _cp_window(cp_times, src_times, t_cp, toward):
+    """``(half, basis)``: the core_profiles window at the core_profiles
+    slice time *t_cp* -- half its local step on the side of *toward*; a
+    single-time core_profiles uses the core_sources' own local step, and
+    two single-time bases float precision (a few ulp)."""
+    h = _half_local_step(cp_times, t_cp, toward)
+    if h is not None:
+        return h, "half the local core_profiles time-step"
+    h = _half_local_step(src_times, t_cp, toward)
+    if h is not None:
+        return h, ("half the local core_sources time-step (core_profiles "
+                   "has a single time)")
+    return (4.0 * float(np.spacing(max(abs(float(t_cp)), abs(float(toward))))),
+            "float precision (single-time core_profiles and core_sources)")
+
+
+def core_sources_slice(src_ids, cp_times, ic, T=None, who="IMAS reader"):
+    """``(isrc, t_src, record)``: the core_sources slice read with the
+    core_profiles slice *ic* (owner decision 2026-10-06).
+
+    The slice is the core_sources time NEAREST the core_profiles slice
+    actually read (``cp_times[ic]``), and it must lie within HALF the local
+    core_profiles time-step of it (:func:`_cp_window`), else ``ValueError``
+    naming both times -- a single-time core_sources is no longer read at
+    any requested time.  A core_sources with no time base is read by index
+    (``ic``), as before.  The record carries both times, ``dt`` (core_sources
+    minus core_profiles), the window and its basis, and the rule."""
+    tb = src_ids.get("time")
+    cpt = (None if cp_times is None or not len(cp_times)
+           else np.asarray(cp_times, dtype=float))
+    t_cp = None if cpt is None else float(cpt[min(ic, cpt.size - 1)])
+    if not tb:
+        return ic, None, dict(core_profiles_time=t_cp,
+                              core_sources_time=None, dt=None, window=None,
+                              rule="by index: core_sources carries no time "
+                                   "base")
+    tt = np.asarray(tb, dtype=float)
+    if t_cp is None:
+        isrc = _nearest_index(tt, T, "core_sources")
+        return isrc, float(tt[isrc]), dict(
+            core_profiles_time=None, core_sources_time=float(tt[isrc]),
+            dt=None, window=None,
+            rule="nearest the requested time (core_profiles has no time "
+                 "base)")
+    isrc = int(np.argmin(np.abs(tt - t_cp)))
+    t_src = float(tt[isrc])
+    dt = t_src - t_cp
+    half, basis = _cp_window(cpt, tt, t_cp, t_src)
+    rec = dict(core_profiles_time=t_cp, core_sources_time=t_src, dt=dt,
+               window=half, window_basis=basis, rule=SOURCE_TIME_RULE)
+    if abs(dt) > half:
+        raise ValueError(
+            f"{who}: the core_sources slice nearest the core_profiles slice "
+            f"read (t = {t_cp:.9g} s) is at t = {t_src:.9g} s: |dt| = "
+            f"{abs(dt):.3g} s > {half:.3g} s, {basis} (core_sources times "
+            f"span {tt.min():.9g}-{tt.max():.9g} s).  Refusing rather than "
+            "reading the driven currents at another time (owner decision "
+            "2026-10-06)")
+    return isrc, t_src, rec
+
+
+def _source_slice_at(s, isrc, t_slice, n_time, base_times=None, *,
+                     t_cp=None, cp_half=None, rec=None):
     """``(profile, how)``: a ``core_sources`` entry's ``profiles_1d`` at the
     slice *isrc* (time *t_slice*), or ``(None, why)`` when the entry has no
     slice within half a local time-step of that time
     (:func:`_entry_time_window`; the CALLER decides: a beam entry is
-    refused).  An entry carrying its own per-slice times is matched BY TIME
-    to its nearest slice (a model's entry may start later than the IDS time
-    base, so the list index is not the slice); one without them must have
-    exactly the IDS's number of slices, or it cannot be aligned and is
-    refused (``ValueError``) -- never its first slice taken in place of a
-    missing one.  The rule of ``bouquet.adapters._ids_source_slice``."""
+    refused unless it is off -- :func:`_entry_off_before_record`,
+    :func:`_entry_off_near`).  An entry carrying its own per-slice times is
+    matched BY TIME to its nearest slice (a model's entry may start later
+    than the IDS time base, so the list index is not the slice); one without
+    them must have exactly the IDS's number of slices, or it cannot be
+    aligned and is refused (``ValueError``) -- never its first slice taken
+    in place of a missing one.  The rule of
+    ``bouquet.adapters._ids_source_slice``.
+
+    Owner decision 2026-10-06: the matched own slice must ALSO lie within
+    *cp_half* (half the local core_profiles step) of the core_profiles
+    slice time *t_cp* (default: *t_slice*), so a coarse own grid or a
+    constant offset cannot pass on the entry's own step alone.  *rec*, a
+    dict, receives the match: matched own time, ``dt`` (own minus
+    core_profiles time), both windows, the bracketing own times, the
+    entry's first / last own time and the status."""
     pr = s.get("profiles_1d", [])
     idn = s.get("identifier", {}) or {}
+    if rec is None:
+        rec = {}
+    rec.update(name=idn.get("name"), index=idn.get("index"))
     if not pr:
+        rec.update(status="no_profiles")
         return None, "no profiles_1d"
     times = [q.get("time") for q in pr]
     if t_slice is not None and all(t is not None for t in times):
+        tt = np.asarray(times, dtype=float)
+        t_ref = float(t_slice if t_cp is None else t_cp)
         k, dt, half = _entry_time_window(times, t_slice, base_times)
+        br = _entry_bracketing_slices(times, t_slice)
+        rec.update(own_time_nearest=float(tt[k]),
+                   dt=float(tt[k]) - t_ref, window_own=float(half),
+                   window_core_profiles=(None if cp_half is None
+                                         else float(cp_half)),
+                   bracketing_own_times=[float(tt[j]) for j in br],
+                   first_own_time=float(tt.min()),
+                   last_own_time=float(tt.max()))
         if dt > half:
+            rec.update(status="unmatched")
             return None, _entry_time_why(t_slice, times, k, dt, half)
+        if cp_half is not None and abs(float(tt[k]) - t_ref) > cp_half:
+            rec.update(status="unmatched")
+            return None, (
+                f"no profiles_1d slice within half the local core_profiles "
+                f"time-step of t = {t_ref:.9g} s (nearest own time "
+                f"{float(tt[k]):.9g} s, |dt| = "
+                f"{abs(float(tt[k]) - t_ref):.3g} s > {cp_half:.3g} s, half "
+                f"the local core_profiles step; within its own half-step "
+                f"{half:.3g} s; its own times span {tt.min():.9g}-"
+                f"{tt.max():.9g} s)")
+        rec.update(status="matched", matched_time=float(tt[k]))
         return pr[k], "matched by time"
     if n_time is not None and len(pr) != n_time:
         raise ValueError(
@@ -242,7 +365,43 @@ def _source_slice_at(s, isrc, t_slice, n_time, base_times=None):
         raise ValueError(
             f"IMAS reader: core_sources {idn.get('name')!r} (index "
             f"{idn.get('index')}) has no profiles_1d slice {isrc}")
+    rec.update(status="matched", matched_time=t_slice, dt=(
+        None if (t_slice is None or t_cp is None) else
+        float(t_slice) - float(t_cp)), rule_entry="by index")
     return pr[isrc], "by index"
+
+
+def _entry_off_before_record(s, t_slice):
+    """The entry's FIRST own time when the slice time *t_slice* lies before
+    it (the entry has no record before its first own sample: it is OFF at
+    that time -- owner decision 2026-10-06), else ``None``.  Judged only on
+    an entry carrying per-slice times."""
+    pr = s.get("profiles_1d", [])
+    times = [q.get("time") for q in pr]
+    if t_slice is None or not pr or any(t is None for t in times):
+        return None
+    first = float(np.min(np.asarray(times, dtype=float)))
+    return first if float(t_slice) < first else None
+
+
+_OFF_BEFORE_ANNOUNCED = set()
+
+
+def _announce_off_before(who, idn, first, t_slice, key=None):
+    """Print and warn ONCE per run (per source file and entry) that a driven
+    entry is off before its first own time."""
+    import warnings
+    tag = (key, idn.get("name"), idn.get("index"), float(first))
+    if tag in _OFF_BEFORE_ANNOUNCED:
+        return
+    _OFF_BEFORE_ANNOUNCED.add(tag)
+    msg = (f"{who}: core_sources {idn.get('name')!r} (index "
+           f"{idn.get('index')}) has no record before its first own time "
+           f"{float(first):.9g} s: it is OFF (zero) at t = "
+           f"{float(t_slice):.9g} s and at every earlier slice, stamped "
+           "off_before_record (owner decision 2026-10-06)")
+    print(f"[imas] NOTE {msg}", flush=True)
+    warnings.warn(msg, UserWarning, stacklevel=3)
 
 
 def _nearest_index(time_array, t: Optional[float], what: str) -> int:
@@ -1044,29 +1203,57 @@ def read_imas_baseline(
     # bracketing the time: then it is off there, not missing (refinement of
     # 2026-10-06).  One without per-slice times must have the IDS's slice
     # count, or it cannot be aligned and is refused.
+    # Owner decision 2026-10-06: the core_sources slice is the one nearest
+    # the core_profiles slice READ and must lie within half the local
+    # core_profiles step of it (core_sources_slice; a single-time
+    # core_sources is no longer read at any time); an entry's matched own
+    # slice must also lie within that half-step of the core_profiles time;
+    # an entry whose own record starts AFTER the slice time is OFF there
+    # (off_before_record, announced once); dt and the bracketing own times
+    # are recorded (Baseline.source_time_match).
     src_ids = dd.get("core_sources", {})
-    isrc = _nearest_index(src_ids["time"], T, "core_sources") if src_ids.get("time") else ic
+    isrc, _src_t, _slice_rec = core_sources_slice(
+        src_ids, cp_ids.get("time"), ic, T, who="IMAS reader")
     _src_tb = src_ids.get("time")
     _src_nt = None if not _src_tb else len(_src_tb)
-    _src_t = (None if not _src_tb
-              else float(np.asarray(_src_tb, dtype=float)[isrc]))
+    _t_cp = _slice_rec["core_profiles_time"]
+    _cp_half = (None if (_t_cp is None or _src_t is None) else
+                _cp_window(cp_ids.get("time"), _src_tb, _t_cp, _src_t)[0])
+    source_time_match = dict(core_sources=_slice_rec, entries=[])
     jnbi_par = np.zeros(n)
     for s in src_ids.get("source", []):
         if s.get("identifier", {}).get("index") == NBI_SOURCE_INDEX:
             pr = s.get("profiles_1d", [])
             if pr:
+                _erec = {}
+                source_time_match["entries"].append(_erec)
                 q_nbi, how = _source_slice_at(s, isrc, _src_t, _src_nt,
-                                              cp_ids.get("time"))
+                                              cp_ids.get("time"), t_cp=_t_cp,
+                                              cp_half=_cp_half, rec=_erec)
                 if q_nbi is None:
-                    # refused only if it carries current on the own slices
-                    # bracketing this time; an entry idle there (or all
-                    # zero) is off at this time: nothing to drop
-                    # (refinement of 2026-10-06)
-                    if any(_carries_current(qq) for qq in pr) and \
-                            _entry_off_near(s, _src_t) is None:
-                        raise ValueError(_entry_time_refusal(
-                            "IMAS reader", s.get("identifier") or {}, how))
-                    continue
+                    _erec["reason"] = how
+                    if not any(_carries_current(qq) for qq in pr):
+                        _erec["status"] = "zero"
+                        continue
+                    # idle on the own slices bracketing this time: off
+                    # here, nothing to drop (refinement of 2026-10-06)
+                    if _entry_off_near(s, _src_t) is not None:
+                        _erec["status"] = "off_idle"
+                        continue
+                    # before its first own time (which carries current):
+                    # OFF (owner decision 2026-10-06), stamped and
+                    # announced once
+                    _first = _entry_off_before_record(s, _src_t)
+                    if _first is not None:
+                        _erec.update(status="off_before_record",
+                                     first_own_time=_first)
+                        _announce_off_before("IMAS reader",
+                                             s.get("identifier") or {},
+                                             _first, _src_t,
+                                             key=str(source.ids_path))
+                        continue
+                    raise ValueError(_entry_time_refusal(
+                        "IMAS reader", s.get("identifier") or {}, how))
                 jnbi_par = jnbi_par + np.asarray(q_nbi["j_parallel"], dtype=float)
     j_NBI = to_toroidal(cur_sign * jnbi_par)
     j_RF = np.zeros(n)   # never computed internally; user-supplied only
@@ -1087,10 +1274,14 @@ def read_imas_baseline(
             sawtooth["present"] = True
             pr = s.get("profiles_1d", [])
             if pr:
+                _erec = {}
+                source_time_match["entries"].append(_erec)
                 q_saw, how = _source_slice_at(s, isrc, _src_t, _src_nt,
-                                              cp_ids.get("time"))
+                                              cp_ids.get("time"), t_cp=_t_cp,
+                                              cp_half=_cp_half, rec=_erec)
                 sawtooth["slice"] = how
                 if q_saw is None:
+                    _erec["reason"] = how
                     # no slice of the entry within half a step of this
                     # time: not active here (a gate FLAG, not a current --
                     # recorded in sawtooth["slice"], not refused)
@@ -1341,6 +1532,7 @@ def read_imas_baseline(
         source_current_sign=cur_sign,
         source_current_sign_origin=cur_origin,
         source_b0_sign=b0_sign,
+        source_time_match=source_time_match,
     )
 
 

@@ -136,11 +136,18 @@ The following hold on both engines:
   (`homotopy_rollback_failed`) instead of continuing from a stale state.
   This applies on both paths, so legacy yields can change;
 - the IMAS reader reads each beam (NBI) and sawteeth entry at the slice
-  TIME, matched to the entry's nearest own slice. A beam entry with no own
-  slice within half a time-step of the slice time is REFUSED, never read at
-  another time or dropped to zero -- unless it carries no current on its own
-  slices bracketing that time, in which case it is off there, not missing,
-  and contributes zero;
+  TIME, never interpolated. The `core_sources` slice is the one nearest the
+  `core_profiles` slice read and must lie within half the local
+  `core_profiles` time-step of it, else the read is REFUSED naming both
+  times. Each entry is matched to its nearest own slice, accepted within
+  half its own local step AND within half the local `core_profiles` step.
+  A beam entry with no such slice is REFUSED, never read at another time or
+  dropped to zero -- unless it carries no current on its own slices
+  bracketing that time (off there, zero), or the slice comes BEFORE its
+  first own time (off before its record: zero, stamped `off_before_record`,
+  announced once). Every match is recorded with its dt
+  (`Baseline.source_time_match`; the engine's
+  `provenance["source_time_match"]`);
 - a negative pressure at the separatrix is refused under `"offset"`, for the
   baseline (`prepare_baseline`) as well as the draws. Setting
   `separatrix_pressure="legacy"` builds such an input as before.

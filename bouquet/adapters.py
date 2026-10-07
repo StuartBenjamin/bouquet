@@ -744,46 +744,33 @@ IDS_AGGREGATE_SOURCE_INDICES = (1, 100, 101, 102, 103, 104, 105, 106, 107,
 #: where a source may publish its bootstrap.  Ignored like an aggregate
 #: (stamped and warned when non-zero).
 IDS_BOOTSTRAP_LIKE_SOURCE_INDICES = (401,)
-def _ids_source_slice(s, isrc, t_slice, n_time, base_times=None):
+def _ids_source_slice(s, isrc, t_slice, n_time, base_times=None, *,
+                      t_cp=None, cp_half=None, rec=None):
     """``(profile, how)``: the entry's ``profiles_1d`` at the core_sources
     slice *isrc* (time *t_slice*), or ``(None, why)`` when the entry has no
-    slice within HALF a local time-step of that time (the window of
-    :func:`bouquet.io.imas._entry_time_window`, owner-approved 2026-10-06;
-    *base_times* is the core_profiles time base, whose step is used for a
-    single-time entry).  An entry carrying its own per-slice times is
-    matched BY TIME to its nearest own slice (a model's entry may start
-    later than the IDS time base, so the list index is not the slice); one
-    without them must have exactly the IDS's number of slices, or it cannot
-    be aligned and is refused -- never the first slice taken in place of a
-    missing one.  The caller refuses a driven entry with no slice that
-    carries current on its own slices bracketing the time; one carrying
-    none there is off at that time, not missing (refinement of
-    2026-10-06)."""
-    from .io.imas import _entry_time_why, _entry_time_window
-    pr = s.get("profiles_1d", [])
-    idn = s.get("identifier", {}) or {}
-    if not pr:
-        return None, "no profiles_1d"
-    times = [q.get("time") for q in pr]
-    if t_slice is not None and all(t is not None for t in times):
-        k, dt, half = _entry_time_window(times, t_slice, base_times)
-        if dt > half:
-            return None, _entry_time_why(t_slice, times, k, dt, half)
-        return pr[k], "matched by time"
-    if n_time is not None and len(pr) != n_time:
+    slice within HALF a local time-step of that time -- the rule of
+    :func:`bouquet.io.imas._source_slice_at`, which this calls (one rule
+    for both paths): the entry's own half-step (*base_times*, the
+    core_profiles time base, for a single-time entry) AND, owner decision
+    2026-10-06, within *cp_half* (half the local core_profiles step) of the
+    core_profiles slice time *t_cp*.  An entry carrying its own per-slice
+    times is matched BY TIME to its nearest own slice; one without them
+    must have exactly the IDS's number of slices, or it cannot be aligned
+    and is refused -- never the first slice taken in place of a missing
+    one.  *rec* receives the match record (dt, windows, bracketing own
+    times, status)."""
+    from .io.imas import _source_slice_at
+    try:
+        return _source_slice_at(s, isrc, t_slice, n_time, base_times,
+                                t_cp=t_cp, cp_half=cp_half, rec=rec)
+    except ValueError as exc:
         raise EngineInputRefused(
-            f"IDS adapter: core_sources {idn.get('name')!r} (index "
-            f"{idn.get('index')}) has {len(pr)} profiles_1d slices for "
-            f"{n_time} core_sources times and no per-slice time: it cannot be "
-            "aligned with the slice read")
-    if isrc >= len(pr):
-        raise EngineInputRefused(
-            f"IDS adapter: core_sources {idn.get('name')!r} (index "
-            f"{idn.get('index')}) has no profiles_1d slice {isrc}")
-    return pr[isrc], "by index"
+            str(exc).replace("IMAS reader:", "IDS adapter:", 1)) from None
 
 
-def _ids_driven_currents(srcs, isrc, n, sgn, base_times=None, off=None):
+def _ids_driven_currents(srcs, isrc, n, sgn, base_times=None, off=None, *,
+                         t_cp=None, cp_half=None, matches=None,
+                         announce_key=None):
     """The driven ``j_parallel`` of the ``core_sources`` slice *isrc*, by
     the explicit identifier classification above, split into ``nbi`` /
     ``rf`` / ``other`` (positive frame).  Returns ``(parts, used, ignored)``:
@@ -805,26 +792,50 @@ def _ids_driven_currents(srcs, isrc, n, sgn, base_times=None, off=None):
     it contributes zero, is not warned about, and its record (name, index,
     reason) is appended to the list *off* when one is given (provenance
     "off_sources").  An entry identically zero over its whole history is
-    skipped silently, as before."""
+    skipped silently, as before.
+
+    Owner decision 2026-10-06: the matched own slice must also lie within
+    *cp_half* (half the local core_profiles step) of the core_profiles
+    slice time *t_cp* (default: the core_sources slice time; with no
+    *cp_half* given, half the local step of *base_times* there, when it
+    has one); a driven (or unknown) entry whose own record begins AFTER
+    the slice time is OFF there -- zero, appended to *off* with
+    ``reason="off_before_record"`` and its ``first_own_time``, and
+    announced (print + warning) once per *announce_key* and entry; past its
+    last own time it is still refused when that slice carries current.
+    *matches*, a list, receives every entry's match record (dt, windows,
+    bracketing own times, status)."""
     import warnings
+    from .io.imas import (_announce_off_before, _entry_off_before_record,
+                          _half_local_step)
     parts = {k: np.zeros(n) for k in ("nbi", "rf", "other")}
     used, ignored = [], []
     tb = srcs.get("time")
     n_time = None if not tb else len(tb)
     t_slice = (None if not tb else float(np.asarray(tb, dtype=float)[isrc]))
+    if t_cp is None:
+        t_cp = t_slice
+    if cp_half is None and t_cp is not None and t_slice is not None:
+        cp_half = _half_local_step(base_times, t_cp, t_slice)
     for s in srcs.get("source", []):
         idn = s.get("identifier", {}) or {}
         idx = idn.get("index")
         if idx in (IDS_OHMIC_SOURCE_INDEX, IDS_BOOTSTRAP_SOURCE_INDEX):
             continue
-        q, how = _ids_source_slice(s, isrc, t_slice, n_time, base_times)
+        erec = {}
+        if matches is not None:
+            matches.append(erec)
+        q, how = _ids_source_slice(s, isrc, t_slice, n_time, base_times,
+                                   t_cp=t_cp, cp_half=cp_half, rec=erec)
         if q is None:
             from .io.imas import (_carries_current, _entry_off_near,
                                   _entry_time_refusal)
+            erec["reason"] = how
             if any(_carries_current(qq) for qq in s.get("profiles_1d", [])):
                 if idx in IDS_AGGREGATE_SOURCE_INDICES or \
                         idx in IDS_BOOTSTRAP_LIKE_SOURCE_INDICES:
                     # never added anyway: stamped, as at a matched time
+                    erec["status"] = "ignored"
                     ignored.append(dict(name=idn.get("name"), index=idx,
                                         reason=how))
                     continue
@@ -832,12 +843,28 @@ def _ids_driven_currents(srcs, isrc, n, sgn, base_times=None, off=None):
                 if why_off is not None:
                     # idle on its slices bracketing this time: off here,
                     # not missing -- contributes zero, stamped
+                    erec["status"] = "off_idle"
                     if off is not None:
                         off.append(dict(name=idn.get("name"), index=idx,
                                         reason=why_off))
                     continue
+                first = _entry_off_before_record(s, t_slice)
+                if first is not None:
+                    # no record before its first own time (which carries
+                    # current): OFF here (owner decision 2026-10-06),
+                    # stamped and announced once
+                    erec.update(status="off_before_record",
+                                first_own_time=first)
+                    if off is not None:
+                        off.append(dict(name=idn.get("name"), index=idx,
+                                        reason="off_before_record",
+                                        first_own_time=first))
+                    _announce_off_before("IDS adapter", idn, first, t_slice,
+                                         key=announce_key)
+                    continue
                 raise EngineInputRefused(_entry_time_refusal(
                     "IDS adapter", idn, how))
+            erec["status"] = "zero"
             continue
         if q.get("j_parallel") is None:
             continue
@@ -861,7 +888,8 @@ def _ids_driven_currents(srcs, isrc, n, sgn, base_times=None, off=None):
                                 j_parallel_max_abs=float(np.max(np.abs(jp)))))
             continue
         kind = IDS_DRIVEN_SOURCE_PARTS.get(idx)
-        rec = dict(name=idn.get("name"), index=idx, slice=how)
+        rec = dict(name=idn.get("name"), index=idx, slice=how,
+                   matched_time=erec.get("matched_time"), dt=erec.get("dt"))
         if kind is None:
             kind = "other"
             rec["unclassified"] = True
@@ -1038,12 +1066,28 @@ class IdsAdapter:
         # entries are never added (stamped in provenance["ignored_sources"]);
         # a driven entry with no slice near the time and no current on its
         # bracketing slices is off there (provenance["off_sources"])
+        # the core_sources slice: nearest the core_profiles slice read and
+        # within half its local step, else refused; entries matched within
+        # that half-step too; an entry starting after the slice is off
+        # (owner decision 2026-10-06; io.imas.core_sources_slice -- the
+        # reader's rule)
+        from .io.imas import _cp_window, core_sources_slice
         srcs = dd.get("core_sources", {})
-        isrc = (_nearest_index(srcs["time"], T, "core_sources")
-                if srcs.get("time") else ic)
+        try:
+            isrc, t_src, slice_rec = core_sources_slice(
+                srcs, cps.get("time"), ic, T, who="IDS adapter")
+        except ValueError as exc:
+            raise EngineInputRefused(str(exc)) from None
+        t_cp = slice_rec["core_profiles_time"]
+        cp_half = (None if (t_cp is None or t_src is None) else
+                   _cp_window(cps.get("time"), srcs.get("time"), t_cp,
+                              t_src)[0])
         driven_off = []
+        entry_matches = []
         fix_parts, driven_used, driven_ignored = _ids_driven_currents(
-            srcs, isrc, n, sgn, cps.get("time"), off=driven_off)
+            srcs, isrc, n, sgn, cps.get("time"), off=driven_off,
+            t_cp=t_cp, cp_half=cp_half, matches=entry_matches,
+            announce_key=str(src.ids_path))
         nbi = fix_parts["nbi"]
         driven = fix_parts["nbi"] + fix_parts["rf"] + fix_parts["other"]
         # The inductive current is the parallel residual j_total -
@@ -1243,6 +1287,8 @@ class IdsAdapter:
                 driven_sources=list(driven_used),
                 ignored_sources=list(driven_ignored),
                 off_sources=list(driven_off),
+                source_time_match=dict(core_sources=slice_rec,
+                                       entries=entry_matches),
                 pressure=("e (ne Te + ni Ti) + impurity + fast (no p_diff)"),
                 electron_charge="physics.ELEMENTARY_CHARGE",
                 kinetics_sigma=("resolved from the Baseline by "

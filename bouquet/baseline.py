@@ -255,6 +255,14 @@ class Baseline:
     # Bouquet.prepare_baseline on both paths.
     coil_solve_mode: Optional[str] = None
 
+    # IMAS sources: how the core_sources slice and each beam / sawteeth entry
+    # were matched to the core_profiles slice read (owner decision
+    # 2026-10-06, io.imas.core_sources_slice / _source_slice_at): both
+    # times, dt, the windows and their basis, the bracketing own times, and
+    # each entry's status ("matched", "off_before_record" with its first own
+    # time, "off_idle", "zero").  None on the g-file paths.
+    source_time_match: Optional[dict] = None
+
     def __repr__(self):
         # concise summary -- the default dataclass repr dumps every numpy array,
         # which floods a notebook when `reconstruct()`/`prepare_baseline()` is the
