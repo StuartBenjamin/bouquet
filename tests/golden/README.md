@@ -189,7 +189,7 @@ False -> True). No bar changed.
   replay) reads it; `tests/test_legacy_golden.py` checks what it is.
 * `rng_stream_manifest.json`: re-pinned from the new baseline (the `jphi`
   stream's edge sample moves most, 1.57e5 -> 7.10e4 A/m^2).
-* **Validated at `b0f6a1e` on the owner's cluster** (aggregate; see
+* **Validated at `1a15685` on the owner's cluster** (aggregate; see
   [docs/validation-provenance.md](../../docs/validation-provenance.md)):
   fast suite 2897 passed; solver suite 165 passed, 2 failed, 1 skipped --
   the two failures are the q0-pinned structured loop test, which needs about
@@ -204,10 +204,10 @@ False -> True). No bar changed.
   equilibrium; legacy 20 archived / 12 in spec, draws 458 s per
   equilibrium.
 * **The bouquet stamp reads dirty.** The fixture and both manifests stamp
-  bouquet commit `7bd48fb` with `dirty: true`: the generator edits it ran
+  bouquet commit `8285201 (the branch was re-ordered after generation: the stamp inside the fixture and its manifests reads `7bd48fb`, the pre-reorder name of the commit whose tree is now `8285201`; the trees are identical)` with `dirty: true`: the generator edits it ran
   with (`--reconstruction-engine`, `--legacy-json`) were not yet committed
   when the run was made, and were committed together with the fixture in
-  `b0f6a1e`. The fixture is regenerable from `b0f6a1e`'s tree. (`d36fe60`
+  `1a15685`. The fixture is regenerable from `1a15685`'s tree. (`3d974e6`
   later changes how the generator's engine switch records
   `isolate_edge_jBS` -- that field now defaults to `None` and is resolved
   per engine -- not what runs: it still records and applies False -> True.)

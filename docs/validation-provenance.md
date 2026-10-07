@@ -29,7 +29,7 @@ fixture blob enters history.
 | 9. Approved default changes (offset, IDS residual inductive, `fd_chord`) | `92c8cba` | `a95617c` … `d874822` | 7 | frozen-copy snapshots retired |
 | 10. Review-fix rounds 2–3; canonical coil-solve mode; figures | `83a0f88` | `4ee1869` … `c651bb1` | 41 | golden regeneration moved to ch 12 |
 | 11. Post-merge fixes | `4fc2b79` | `e7d7b5c` … `1cc541d` | 4 | |
-| 12. Golden fixture (final blob) and golden-consuming tests | `ea230a6` | `3c26048` … `2116923` | 16 | collects `tests/golden/**` from every range; intermediate fixture regenerations not replayed |
+| 12. Golden fixture (final blob) and golden-consuming tests | `1a15685` | `3c26048` … `2116923` | 16 | collects `tests/golden/**` from every range; intermediate fixture regenerations not replayed |
 
 The full list for each chapter, and its merge resolution, is in the chapter
 commit's message (`git log origin/main..HEAD`).
@@ -41,27 +41,27 @@ each its own commit with its tests and the fast-suite line in the message:
 
 | commit | change |
 |---|---|
-| `52c7867` | one `<j.B>` -> `<j_phi>` conversion in the package (declared physics change) |
-| `5eff2b3` | the unified engine becomes the default (`reconstruction_engine="unified"`) |
-| `28c7a53` | hygiene and provenance: no discharge numbers, OFT build digests, anchor doc |
-| `b40cb40` | CHANGES_SUMMARY / README: what reproduces legacy, what moves by default |
-| `c30d4e5` | σ=0: draws solve under the reconstruction's coil regularisation; the gate widened |
-| `01c2059` | bootstrap loop: `r_j` / `r_I` measured against the bootstrap the pass solved |
-| `47b1fab` | closure health: the ±50 % bootstrap prior flagged on every path |
-| `4e46194` | IDS l_i row: the source `li_3`'s normalisation radius resolved |
-| `c4b6394` | IDS export: no pressure-driven current in any parallel field; round trip |
-| `b6a9045` | IMAS time matching: windowed core_sources slice, dt recorded, OFF before an entry's record |
-| `d3b1063` | `run_slices`: `on_refusal="record"` is the default |
-| `3dde58f` | stored-config replay is loud |
-| `911cafa` | engine MSE: the chord Jacobian re-taken at convergence and recorded |
-| `6b79398` | engine MSE: restore-and-flag on stage failure; chord chi^2/N flags |
-| `0d5c348` | the solver's `P'` rescale recorded; docs catch-up; growth abort documented inert |
-| `9f4c223` | engine MSE: a failed stage keeps the Jacobian record it took |
-| `a77a3f0` | tests: two toy kernel tests take their own pass ceilings under the solved-state residual |
-| `50a91fd` | IMAS time match: a 10 µs floor when neither time base has a local step |
-| `7bd48fb` | `mse_chi2n_flag = 10.0` and `MSE_JACOBIAN_MAX_REFRESHES = 3` marked owner-approved |
-| `b0f6a1e` | golden fixtures regenerated on the unified-engine default; slim legacy JSON golden |
-| `d36fe60` | engine-dependent defaults resolve at `prepare_baseline()`, not at construction |
+| `9f6abed` | one `<j.B>` -> `<j_phi>` conversion in the package (declared physics change) |
+| `4eaba56` | the unified engine becomes the default (`reconstruction_engine="unified"`) |
+| `2c8c2c2` | hygiene and provenance: no discharge numbers, OFT build digests, anchor doc |
+| `0a0cf2a` | CHANGES_SUMMARY / README: what reproduces legacy, what moves by default |
+| `eee55bf` | σ=0: draws solve under the reconstruction's coil regularisation; the gate widened |
+| `a769882` | bootstrap loop: `r_j` / `r_I` measured against the bootstrap the pass solved |
+| `2671a49` | closure health: the ±50 % bootstrap prior flagged on every path |
+| `fe2f967` | IDS l_i row: the source `li_3`'s normalisation radius resolved |
+| `f3cebe1` | IDS export: no pressure-driven current in any parallel field; round trip |
+| `ce10dec` | IMAS time matching: windowed core_sources slice, dt recorded, OFF before an entry's record |
+| `6098a23` | `run_slices`: `on_refusal="record"` is the default |
+| `2375b18` | stored-config replay is loud |
+| `51279b1` | engine MSE: the chord Jacobian re-taken at convergence and recorded |
+| `a7231f7` | engine MSE: restore-and-flag on stage failure; chord chi^2/N flags |
+| `4d555e2` | the solver's `P'` rescale recorded; docs catch-up; growth abort documented inert |
+| `b8abd83` | engine MSE: a failed stage keeps the Jacobian record it took |
+| `9edbdc6` | tests: two toy kernel tests take their own pass ceilings under the solved-state residual |
+| `f3d6799` | IMAS time match: a 10 µs floor when neither time base has a local step |
+| `8285201` | `mse_chi2n_flag = 10.0` and `MSE_JACOBIAN_MAX_REFRESHES = 3` marked owner-approved |
+| `1a15685` | golden fixtures regenerated on the unified-engine default; slim legacy JSON golden |
+| `3d974e6` | engine-dependent defaults resolve at `prepare_baseline()`, not at construction |
 
 ## Where the validation numbers were measured
 
@@ -72,12 +72,12 @@ each its own commit with its tests and the fast-suite line in the message:
   10) and at `bab3902` (the canonical coil-solve mode, in the same range).
   Numbers quoted from that validation refer to those commits.
 - **The rebuild's re-validation** was run on the owner's cluster at
-  `b0f6a1e` (the tip of this branch before `d36fe60`): the fast and solver
+  `1a15685` (the tip of this branch before `3d974e6`): the fast and solver
   suites, the golden fixtures, and the re-run of the single slices, the time
   series and the legacy comparison against the original validation. Its
   aggregate results are recorded in [CHANGES_SUMMARY.md](CHANGES_SUMMARY.md)
   (the first Unreleased entry) and in
-  [`tests/golden/README.md`](../tests/golden/README.md). `d36fe60` changes
+  [`tests/golden/README.md`](../tests/golden/README.md). `3d974e6` changes
   nothing a factory configuration that names its engine at construction,
   or a stored configuration, runs with, so those numbers stand for it.
 - The private cases are not part of the repository; only aggregate numbers

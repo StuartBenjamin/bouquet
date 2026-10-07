@@ -150,7 +150,7 @@ def test_ip_li_and_mse_converge(soft, scheme):
                       mse=dict(chords=ch, er_terms="toy"))
     # MSE is REQUIRED here (a ceiling miss must raise, not fall back to the
     # no-MSE state), and the toy's pass ceiling is 12 for this test only:
-    # with r_j measured against the bootstrap actually solved (01c2059) the
+    # with r_j measured against the bootstrap actually solved (a769882) the
     # fd_broyden arm needs 12 passes.  Product ceilings are unchanged
     # (owner-approved 2026-10-07, test-local).
     eng, res, rec, b = _run(ad, T.ToyGS(chords=ch),

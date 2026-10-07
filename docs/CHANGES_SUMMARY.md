@@ -108,18 +108,18 @@ map to the original history on the archival tag
   "offset"` the stored g-files' `PRES` is the solver's pressure + `p_sep`
   (zero at the boundary before). See archive-schema.md.
 
-### Validation of this branch (the owner's cluster, at `b0f6a1e`)
+### Validation of this branch (the owner's cluster, at `1a15685`)
 
 Aggregate numbers only; where each was measured:
 [validation-provenance.md](validation-provenance.md).
 
-- **Fast suite:** 2897 passed at `b0f6a1e` (2919 with the tests `d36fe60`
+- **Fast suite:** 2897 passed at `1a15685` (2919 with the tests `3d974e6`
   adds), no failures.
 - **Solver suite** (every solver-marked file, one thread, OFT build
   `20260929_7da4f18`): **165 passed, 2 failed, 1 skipped.** Both failures
   are the q0-pinned structured variant of the bootstrap-loop q0-pin test
   (and the comparison that needs its residual): under the solved-state
-  residual (`01c2059`) that loop needs about one pass more than the default
+  residual (`a769882`) that loop needs about one pass more than the default
   reconstruction ceiling of 8 (pass 8 meets every criterion, pass 7 misses
   `r_I` by 17 %, so the two-consecutive rule is not met). The pass ceiling
   is the owner's decision, pending; nothing was changed. The skip is a q95
@@ -134,20 +134,20 @@ Aggregate numbers only; where each was measured:
   30-slice time series of the owner's private cases, engine default): all
   converged; quantities agree to 1e-7 -- 2e-4 relative (the series' largest,
   a boundary rms, 3e-4). The deltas are explained by two declared changes:
-  the IMAS time rule (`b6a9045`) aligned the driven-current reads with the
+  the IMAS time rule (`ce10dec`) aligned the driven-current reads with the
   kinetic-profile slice, moving the beam (NBI) input by 8--21 % on four
-  slices; the solved-state residual (`01c2059`) added one loop pass on
+  slices; the solved-state residual (`a769882`) added one loop pass on
   three. Kinetic inputs are identical.
-- **Legacy path:** moved only by the one current conversion (`52c7867`;
+- **Legacy path:** moved only by the one current conversion (`9f6abed`;
   bootstrap peak -5 to -7 %), and is now within 0.8 % of the engine on
   I_BS/I_p on 10 of 11 slices (3.9--7.3 % apart before). A first legacy
   arm built with the factory and switched to `"legacy"` afterwards was not
-  the validated legacy configuration; that trap is fixed (`d36fe60`,
+  the validated legacy configuration; that trap is fixed (`3d974e6`,
   engine-dependent defaults resolve at `prepare_baseline()`), and the arm
   above was built with the engine named at construction.
 - **σ=0:** 11/11 pass the widened gate; the check now takes 50--56 s
   (was 15--18 s) because the σ=0 draw runs the full draw route
-  (`c30d4e5`).
+  (`eee55bf`).
 - **Wall time, engine reconstruction:** 53--113 s on 8 slices, 125--136 s
   on 3 (as before); the time series 52--59 s.
 - **Network:** zero network attempts in every re-validation run.

@@ -214,7 +214,7 @@ def test_the_gated_residual_is_computed_directly_and_matches_the_estimate():
     """On a blended pass the direct ``||jc_k - js_k-1|| / ||jc_k||`` equals
     ``gap / (1 - beta)``; both are recorded with their ratio."""
     # pass ceiling 9 for this toy only: with r_j measured against the
-    # bootstrap actually solved (01c2059) the blended toy needs one more
+    # bootstrap actually solved (a769882) the blended toy needs one more
     # pass.  Product ceilings unchanged (owner-approved 2026-10-07).
     o, st, ev, Lstar, Jstar, s = _run_two_state(-0.55, 0.7, 9, True)
     rec = o["record"]
