@@ -563,11 +563,17 @@ class GenerationConfig:
     # computed in the same pre-draw anchor context).  False (default) keeps the
     # shared-smoothing treatment (smooth_jbs_transition on every spike).
     jbs_delta_mode: bool = False
-    # Bootstrap profile mode in solve_with_bootstrap. True (default) isolates the
-    # edge spike, yielding a clean positive bootstrap; False uses the full SWB
-    # profile, which for FUSE equilibria carries an unphysical inner negative
-    # lobe (must then be floored, leaving kinks -- see baseline_jphi_caseA plots).
-    isolate_edge_jBS: bool = True
+    # Bootstrap profile mode in solve_with_bootstrap (legacy paths). True
+    # isolates the edge spike, yielding a clean positive bootstrap; False uses
+    # the full SWB profile, which for FUSE equilibria carries an unphysical
+    # inner negative lobe (must then be floored, leaving kinks -- see
+    # baseline_jphi_caseA plots).  None (default): resolved per engine at
+    # prepare_baseline() (bouquet.engine.ENGINE_DEPENDENT_DEFAULTS): False
+    # under reconstruction_engine="legacy" (the validated full-profile
+    # decomposition, both input types), True under "unified" (which never
+    # reads it).  An explicit value is kept; one contradicting the engine's
+    # validated value warns (and is refused under "unified").
+    isolate_edge_jBS: Optional[bool] = None
     # How the SWB bootstrap is reconciled with the FUSE baseline on the IMAS
     # path (see run._forward_solve_imas_baseline):
     #   "diff"    : keep FUSE total; add fixed correction diff = FUSE_jBS - SWB
@@ -969,7 +975,13 @@ class GenerationConfig:
     # NOT a good geqdsk default. FUSE runs opt in explicitly. (Only the PIN_JPHI /
     # DIFF_BS-at-sigma=0 diagnostic modes actually freeze j_ind -- those are the
     # backend-test exceptions to the rule.)
-    perturb_jind_in_anchor: bool = False
+    # None (default): resolved per engine at prepare_baseline()
+    # (bouquet.engine.ENGINE_DEPENDENT_DEFAULTS): under
+    # reconstruction_engine="legacy" False for a g-file source and True for
+    # an IDS source (diff+C), under "unified" False (never read).  An
+    # explicit value is kept; one contradicting the engine's validated value
+    # warns (and is refused under "unified").
+    perturb_jind_in_anchor: Optional[bool] = None
     # Escape hatch for the per-path workflow guard (run._validate_workflow):
     # from_imas/from_geqdsk auto-apply their validated workflow (IMAS=diff+C,
     # geqdsk=standard l_i loop) and generate() raises on a known-bad combo
@@ -1023,7 +1035,7 @@ class GenerationConfig:
     # Floor the SWB bootstrap at 0 (drop unphysical negative excursions) before
     # it enters j_phi, in both the baseline and every draw. Default False: only
     # needed for the isolate_edge_jBS=False full-profile mode (which carries an
-    # inner negative lobe). With the default isolate_edge_jBS=True the spike is
+    # inner negative lobe). With isolate_edge_jBS=True the spike is
     # already ~clean, so flooring is redundant -- and it REGRESSED a stiff
     # high-l_i case (clipping its isolate-edge spike drove yield to 0).
     floor_j_BS: bool = False
@@ -2053,6 +2065,8 @@ _LOOP_PRE_INTRODUCTION = ("jbs_max_passes_post_homotopy", "jbs_relax_current",
 #: Legacy-path fields the factories set whatever the engine until
 #: 2026-10-05, which the unified engine never read and now refuses when not
 #: at their defaults (:data:`bouquet.engine.ENGINE_UNREAD_LEGACY_FIELDS`).
+#: Since 2026-10-07 both default to ``None`` and are resolved per engine at
+#: ``prepare_baseline()`` (:data:`bouquet.engine.ENGINE_DEPENDENT_DEFAULTS`).
 #: Kept for reference; the stored-load rule (c) of
 #: :func:`_stored_config_compat` now covers EVERY entry of
 #: ``ENGINE_UNREAD_LEGACY_FIELDS`` (2026-10-06), of which these are two.
@@ -2165,13 +2179,20 @@ def _stored_config_compat(gend: dict) -> None:
     # ignored until 3779b51), and refuses one on a NEW config since -- a
     # stored unified config carrying one is loaded at the default (the run
     # it recorded is the same), with a warning
-    from .engine import _same_value
+    from .engine import (ENGINE_DEPENDENT_DEFAULTS, _same_value,
+                         engine_validated_value)
     for name in _stored_unified_unread_fields():
         if name not in gend:
             continue
         d = _field_default(name)
-        same = (gend[name] is None) if d is None else \
-            _same_value(gend[name], d)
+        if name in ENGINE_DEPENDENT_DEFAULTS:
+            # stored before 2026-10-07 as the engine's value (then the
+            # dataclass default), or unset since: loaded unchanged
+            d = engine_validated_value(name, "unified", "reconstruction")
+            same = gend[name] is None or _same_value(gend[name], d)
+        else:
+            same = (gend[name] is None) if d is None else \
+                _same_value(gend[name], d)
         if not same:
             warnings.warn(
                 f"stored unified config: generation.{name}={gend[name]!r} "

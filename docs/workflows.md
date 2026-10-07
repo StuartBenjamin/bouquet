@@ -196,7 +196,7 @@ as an enormous sigma.
 | `single_profile_jphi` | `False` | Legacy path: perturb the TOTAL `j_phi` as one profile (no inductive / bootstrap split; no per-draw Sauter call). `jphi_scalar_sigma` then applies to the total, a larger absolute perturbation -- re-tune it. Needs `jbs_self_consistent=False` (refused otherwise); the unified engine refuses it |
 | `jBS_scale_range` | `(0.99, 1.01)` | Legacy draws: the per-draw multiplicative spread of the bootstrap (uniform in the range; default `None` -> `(0.99, 1.01)` on 2026-06-04) |
 | `jbs_delta_mode` | `False` | Opt-in differential bootstrap composition — see [physics-notes.md](physics-notes.md#differential-bootstrap-jbs_delta_mode) |
-| `isolate_edge_jBS` | `True` (dataclass) | Legacy path only. With `reconstruction_engine="legacy"` both `from_geqdsk` and `from_imas` set this **`False`**: the unified forward decomposition (pure-ohmic `j_inductive`, full bootstrap in `j_BS`) closes exactly and yields better. Flip to `True` only for dedicated edge-spike studies. Under the default `"unified"` the factories leave it at `True`, and the engine refuses `False` |
+| `isolate_edge_jBS` | `None` | Legacy path only. `None` is resolved per engine at `prepare_baseline()`: **`False`** under `reconstruction_engine="legacy"` (both input types; the unified forward decomposition -- pure-ohmic `j_inductive`, full bootstrap in `j_BS` -- closes exactly and yields better), `True` under `"unified"` (never read; the engine refuses `False`). Set `True` explicitly only for dedicated edge-spike studies (kept, with a warning). Recorded in the archive ([engine.md](engine.md)) |
 | `jBS_baseline_mode` | `"diff"` | IMAS path: how the SWB bootstrap is reconciled with the source (`"diff"` / `"rescale"`) |
 | `closure_channel` | `"bootstrap"` | IMAS `jBS_baseline_mode="ohmic"` path: which component absorbs the Ip closure. `"bootstrap"` / `"ohmic"` (deprecated bracket) rescale one component by a scalar; `"sawtooth_bootstrap"` adds a q0 pin where sawteeth justify it; `"structured"` replaces the scalars with minimal-norm radial multiplier **profiles** `s_ind(ψ)`, `s_bs(ψ)` — see [physics-notes.md](physics-notes.md#the-structured-closure-and-its-l_i-constraint) |
 | `structured_preset` | `None` → **`"li_soft_onesided"` on the `"structured"` channel** | A **named one-switch configuration**, resolved at construction (and again at the closure's entry point, for a channel set afterwards). `None` = no preference: with `closure_channel="structured"` that now resolves to the validated preset `"li_soft_onesided"` — σ_bs `(0.50, 0.30, 0.15, 0.10)`, σ_ind,down `(0.10, 0.40, 0.40, 0.40)`, σ_ind,up `(0.10, 0.10, 0.10, 0.40)`, `structured_soft=True`, `structured_ip_sigma_frac=0.005`, σ_li `0.04` **only** when `structured_li_target` is set; the raw shipped fields it replaces are the configuration that study superseded. **`"none"` is the opt-out**: it declines the default and reproduces those raw fields exactly. Explicit settings win unless they equal the field's own default, which a dataclass cannot distinguish from unset (a `UserWarning` names every field the preset filled and says `BY DEFAULT` when it was not named); an unknown name is refused; it does **not** change `closure_channel`, which stays `"bootstrap"`. The default steps aside for an explicit `structured_basis`, and does not fill `structured_ip_sigma_frac` next to an explicit `structured_ip_sigma`. The σ values are **relative-unit priors from one device and one `j_ind` source**, not device constants — elsewhere, a starting point to check against the recorded closure-health flags. Recorded as `structured_preset` / `structured_preset_source` (`default` vs `explicit`) — see [physics-notes.md](physics-notes.md#recommended-configuration) |
@@ -419,17 +419,19 @@ Points worth knowing:
 
 ## Workflow presets and the guard
 
-These presets are the LEGACY paths' (`reconstruction_engine="legacy"`). Under
-the default unified engine the factories set none of these flags (the engine
+These presets are the LEGACY paths' (`reconstruction_engine="legacy"`). The
+factories set none of these flags: `isolate_edge_jBS` and
+`perturb_jind_in_anchor` default to `None` and `prepare_baseline()` resolves
+them for the engine configured when it runs, so the engine may be named at
+construction or set afterwards with the same result (the unified engine
 reads none of them and refuses them when changed). With
-`reconstruction_engine="legacy"`, `from_geqdsk` and `from_imas` each
-auto-apply the flag combination validated for their path, and `generate()`
-raises on a known-bad combination:
+`reconstruction_engine="legacy"` each input type gets the flag combination
+validated for its path, and `generate()` raises on a known-bad combination:
 
-| Preset | Applied by | What it sets |
+| Preset | Input | What it resolves to |
 |---|---|---|
-| `geqdsk-standard` | `from_geqdsk` | Standard flagship l_i loop (`perturb_jind_in_anchor=False`), unified decomposition (`isolate_edge_jBS=False`) |
-| `imas-diff-c` | `from_imas` | Bootstrap anchored to the source via the fixed diff (`jBS_baseline_mode="diff"`), inductive perturbed in the recon-anchor (`perturb_jind_in_anchor=True`), unified decomposition |
+| `geqdsk-standard` | g-file | Standard flagship l_i loop (`perturb_jind_in_anchor=False`), unified decomposition (`isolate_edge_jBS=False`) |
+| `imas-diff-c` | IDS | Bootstrap anchored to the source via the fixed diff (`jBS_baseline_mode="diff"`, the default), inductive perturbed in the recon-anchor (`perturb_jind_in_anchor=True`), unified decomposition |
 | `auto` *(default)* | — | Resolve per source type at `generate()` |
 | `custom` | you | Leave the flags as set and downgrade the guard to a warning. For deliberate backend experiments only |
 

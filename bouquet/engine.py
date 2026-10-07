@@ -421,22 +421,119 @@ ENGINE_UNREAD_LEGACY_FIELDS = {
                             "anchor in-band shortcut",
     "diagnostic_plots": "nothing: the engine draws make no per-draw SWB "
                         "diagnostic plots",
-    # owner-approved 2026-10-05: refused like the rest (the factories set
-    # them for a LEGACY configuration only -- Bouquet.from_geqdsk /
-    # from_imas(..., reconstruction_engine="legacy"))
+    # owner-approved 2026-10-05: refused like the rest.  Both are
+    # ENGINE_DEPENDENT_DEFAULTS (default None, resolved per engine at
+    # prepare_baseline()): None or the engine's own value is accepted
     "isolate_edge_jBS": "nothing: the engine never isolates the edge "
                         "bootstrap (its bootstrap is Redl on the whole "
-                        "profile); the factories set False for the legacy "
-                        "path only (reconstruction_engine='legacy') -- "
-                        "build with Bouquet.from_geqdsk / from_imas "
-                        "without it, or set it back to its default",
+                        "profile); leave it unset (None: resolved per "
+                        "engine at prepare_baseline(), False under "
+                        "reconstruction_engine='legacy')",
     "perturb_jind_in_anchor": "nothing: one engine draw route for both "
                               "input types replaces Fix C and the standard "
-                              "l_i loop; from_imas sets True for the legacy "
-                              "path only (reconstruction_engine='legacy') "
-                              "-- build with Bouquet.from_imas without it, "
-                              "or set it back to its default",
+                              "l_i loop; leave it unset (None: resolved per "
+                              "engine at prepare_baseline(), True for an "
+                              "IDS source under "
+                              "reconstruction_engine='legacy')",
 }
+
+
+#: Legacy-path fields whose VALIDATED value depends on the reconstruction
+#: engine (and, on the legacy engine, on the input type): field ->
+#: {engine: value, or {source kind: value}}.  ``GenerationConfig`` holds
+#: ``None`` for them by default ("resolve per engine"); the factories set
+#: none of them, and :func:`resolve_engine_defaults` fills them ONCE, at
+#: ``Bouquet.prepare_baseline()`` -- so the engine named when the run starts
+#: decides, whatever it was when the configuration was built (until
+#: 2026-10-07 the factories applied the values at construction, and a
+#: configuration switched to ``"legacy"`` afterwards ran the engine's).
+#: The legacy values are the ones the legacy workflow was validated with
+#: (``from_geqdsk``: the full-profile decomposition and the standard l_i
+#: loop; ``from_imas``: diff+C); the unified values are the fields' former
+#: dataclass defaults, which the engine never reads.
+ENGINE_DEPENDENT_DEFAULTS = {
+    "isolate_edge_jBS": {"unified": True,
+                         "legacy": {"reconstruction": False, "imas": False}},
+    "perturb_jind_in_anchor": {"unified": False,
+                               "legacy": {"reconstruction": False,
+                                          "imas": True}},
+}
+
+
+def _source_kind(source) -> str:
+    """``"imas"`` for an :class:`~bouquet.config.ImasSource`, else
+    ``"reconstruction"``."""
+    from .config import ImasSource
+    return "imas" if isinstance(source, ImasSource) else "reconstruction"
+
+
+def engine_validated_value(name, engine, source_kind):
+    """The value of :data:`ENGINE_DEPENDENT_DEFAULTS` field *name* the
+    *engine* (``"legacy"`` / ``"unified"``) was validated with, for an input
+    of *source_kind* (``"reconstruction"`` / ``"imas"``)."""
+    v = ENGINE_DEPENDENT_DEFAULTS[name][engine]
+    return v[source_kind] if isinstance(v, dict) else v
+
+
+def resolve_engine_defaults(config, *, stacklevel=2) -> dict:
+    """Fill every :data:`ENGINE_DEPENDENT_DEFAULTS` field of
+    ``config.generation`` that is unset (``None``) with the value the
+    configured engine was validated with, IN PLACE, and return the record
+    ``{field: {"value": v, "origin": ...}}``.
+
+    ``origin`` is ``"resolved from engine=<engine>"`` for a filled field and
+    ``"explicit"`` for one the caller set.  An explicit value that
+    contradicts the engine's validated value is KEPT -- never overridden --
+    with a warning naming the field (the record then also carries
+    ``"engine_validated"``); under ``"unified"`` such a value is refused
+    besides (:func:`validate_engine_settings`, since the engine never reads
+    it).  A field this function filled earlier for another engine or input
+    type (the configuration was switched after a previous
+    ``prepare_baseline()``) is re-resolved, not taken for an explicit
+    value.  Idempotent otherwise.  Called by ``Bouquet.prepare_baseline()``
+    (where the record goes on the baseline and into the archive), and
+    defensively by ``generate()`` / ``verify_sigma0_consistency()``."""
+    import warnings
+    gc = config.generation
+    eng = str(getattr(gc, "reconstruction_engine", "legacy"))
+    if eng not in ENGINE_CHOICES:
+        validate_engine_settings(gc)          # refuses, by name
+    kind = _source_kind(config.source)
+    mine = dict(getattr(gc, "_engine_resolved", None) or {})
+    rec = {}
+    for name in ENGINE_DEPENDENT_DEFAULTS:
+        want = engine_validated_value(name, eng, kind)
+        v = getattr(gc, name, None)
+        prev = mine.get(name)
+        if prev is not None and v is not None and _same_value(v, prev[2]) \
+                and (prev[0], prev[1]) != (eng, kind):
+            v = None                          # ours, for another engine
+        if v is None:
+            setattr(gc, name, want)
+            mine[name] = (eng, kind, want)
+            rec[name] = {"value": want,
+                         "origin": f"resolved from engine={eng}"}
+            continue
+        if prev is not None and _same_value(v, prev[2]) \
+                and (prev[0], prev[1]) == (eng, kind):
+            rec[name] = {"value": v, "origin": f"resolved from engine={eng}"}
+            continue
+        mine.pop(name, None)
+        rec[name] = {"value": v, "origin": "explicit"}
+        if not _same_value(v, want):
+            rec[name]["engine_validated"] = want
+            warnings.warn(
+                f"generation.{name}={v!r} was set explicitly, but "
+                f"reconstruction_engine={eng!r} was validated with "
+                f"{name}={want!r} (for a {kind} source): the explicit value "
+                "is KEPT and this run uses a configuration that engine was "
+                f"not validated with.  Leave {name} unset (None) to have it "
+                "resolved per engine.", UserWarning, stacklevel=stacklevel)
+            print(f"WARN: generation.{name}={v!r} (explicit) contradicts "
+                  f"reconstruction_engine={eng!r}'s validated "
+                  f"{name}={want!r}; kept", flush=True)
+    gc._engine_resolved = mine
+    return rec
 
 
 def _legacy_knobs_unread(gc, vals):
@@ -460,7 +557,12 @@ def _legacy_knobs_unread(gc, vals):
         if d is MISSING:
             continue
         v = getattr(gc, name)
-        same = (v is None) if d is None else _same_value(v, d)
+        if name in ENGINE_DEPENDENT_DEFAULTS:
+            # unset, or the value the engine resolves it to
+            d = engine_validated_value(name, "unified", "reconstruction")
+            same = v is None or _same_value(v, d)
+        else:
+            same = (v is None) if d is None else _same_value(v, d)
         if not same:
             bad.append(f"{name}={v!r} (default {d!r}; under the engine: "
                        f"{instead})")

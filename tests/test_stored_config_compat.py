@@ -141,7 +141,9 @@ def test_a_stored_unified_factory_config_loads_at_the_default(name, val):
     d["generation"][name] = val
     g, msgs = _load(d)
     assert g.reconstruction_engine == "unified"
-    assert getattr(g, name) == getattr(GenerationConfig(), name)
+    from bouquet.engine import engine_validated_value
+    assert getattr(g, name) == engine_validated_value(name, "unified",
+                                                      "reconstruction")
     assert any(name in m and "never read by the unified engine" in m
                for m in msgs)
     # under "legacy" the same stored value is kept (it is read there)
@@ -186,7 +188,14 @@ def test_a_stored_unified_config_with_any_unread_field_loads_at_default(
     d["generation"][name] = _UNREAD_SET[name]
     g, msgs = _load(d)
     assert g.reconstruction_engine == "unified"
-    assert getattr(g, name) == getattr(GenerationConfig(), name)
+    from bouquet.engine import (ENGINE_DEPENDENT_DEFAULTS,
+                                engine_validated_value)
+    # an engine-dependent field (default None since 2026-10-07) loads at
+    # the engine's own value -- what the stored run used
+    assert getattr(g, name) == (
+        engine_validated_value(name, "unified", "reconstruction")
+        if name in ENGINE_DEPENDENT_DEFAULTS
+        else getattr(GenerationConfig(), name))
     assert any(f"generation.{name}=" in m
                and "never read by the unified engine" in m for m in msgs)
     # every other field is as stored

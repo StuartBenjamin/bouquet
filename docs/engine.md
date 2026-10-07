@@ -399,8 +399,8 @@ instruction, because the frozen bootstrap exists on the legacy paths only.
 | `jbs_loop_q0_corrector` | `engine_rows` with `"q0"` (`engine_draw_q0_row` for the draws) |
 | `floor_j_BS`, `swb_iterations`, `accept_anchor_inband`, `diagnostic_plots` | nothing: legacy draw / SWB mechanics |
 | `homotopy_passes` with `engine_draw_homotopy=False` | no homotopy runs |
-| `isolate_edge_jBS` (default `True`) | nothing: the engine never isolates the edge bootstrap (Redl on the whole profile) |
-| `perturb_jind_in_anchor` (default `False`) | nothing: one engine draw route replaces Fix C and the standard l_i loop |
+| `isolate_edge_jBS` (default `None`: resolved per engine; `True` under the engine) | nothing: the engine never isolates the edge bootstrap (Redl on the whole profile) |
+| `perturb_jind_in_anchor` (default `None`: resolved per engine; `False` under the engine) | nothing: one engine draw route replaces Fix C and the standard l_i loop |
 
 Already refused elsewhere: the MSE knobs without the `"mse"` row (and
 `structured_mse_steps` with it), `draw_solve_maxits`
@@ -410,21 +410,45 @@ and in the draws `jbs_delta_mode`, `PIN_JPHI`, `DIFF_BS`,
 `l_i_uncertainty > 0`.
 
 `isolate_edge_jBS` and `perturb_jind_in_anchor` joined the refused set on
-2026-10-05 (owner-approved). The factories set them for the LEGACY path
-(`from_geqdsk`: `isolate_edge_jBS=False`; `from_imas`: also
-`perturb_jind_in_anchor=True`), so build a unified configuration with the
-factory keyword, which leaves both at their defaults:
+2026-10-05 (owner-approved). Their validated values depend on the engine,
+so since 2026-10-07 both default to `None` ("resolve per engine",
+`engine.ENGINE_DEPENDENT_DEFAULTS`) and the factories set neither.
+`prepare_baseline()` resolves them once, for the engine configured when it
+runs:
+
+| setting | `"legacy"`, g-file | `"legacy"`, IDS | `"unified"` |
+|---|---|---|---|
+| `isolate_edge_jBS` | `False` | `False` | `True` (not read) |
+| `perturb_jind_in_anchor` | `False` | `True` (diff+C) | `False` (not read) |
+
+So it no longer matters whether the engine is named at construction or set
+afterwards: these three give the same legacy run.
 
 ```python
-bq = Bouquet.from_geqdsk(gfile, profiles=pfile, mesh=mesh,
-                         reconstruction_engine="unified")
-bq = Bouquet.from_imas(dd, mesh=mesh, time=t, reconstruction_engine="unified")
+bq = Bouquet.from_imas(dd, mesh=mesh, time=t, reconstruction_engine="legacy")
+
+bq = Bouquet.from_imas(dd, mesh=mesh, time=t)
+bq.generation.reconstruction_engine = "legacy"
+
+cfg.generation.reconstruction_engine = "legacy"      # a hand-built config
 ```
 
-A legacy factory configuration switched to `"unified"` afterwards is refused,
-naming both fields. A stored unified configuration that carries them (written
-before 2026-10-05) loads at the defaults with a warning -- the engine never
-read them, so the stored run is unchanged.
+(Until 2026-10-07 the factories applied the values at construction, and a
+factory configuration switched to `"legacy"` afterwards ran the legacy
+paths on the engine's values: an isolated-edge bootstrap with a flat core,
+I_BS/I_p off by tens of percent.) The resolution is recorded on the
+baseline (`Baseline.engine_resolved_defaults`, also in the engine record)
+and in the archive (`_baseline` attr `engine_resolved_defaults_json`,
+`utils.load_engine_resolved_defaults`): each field's value and its origin,
+`"resolved from engine=<engine>"` or `"explicit"`. An explicit value is
+always kept; one that contradicts the configured engine's validated value
+warns, naming the field (and under the engine is refused besides, as
+above). A configuration that has been through `prepare_baseline()` and is
+then switched to the other engine is re-resolved, not taken for explicit
+values. A stored configuration carries both fields explicitly and loads
+unchanged; a stored unified configuration that carries a legacy value
+(written before 2026-10-05) loads at the engine's value with a warning --
+the engine never read it, so the stored run is unchanged.
 
 ## Presets
 

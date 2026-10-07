@@ -4171,6 +4171,41 @@ def stamp_coil_solve_mode(h5path_or_header, scan_key=None, mode=None):
             hf[gp].attrs["coil_solve_mode"] = str(mode)
 
 
+def stamp_engine_resolved_defaults(h5path_or_header, scan_key=None,
+                                   record=None):
+    """Record how the engine-dependent settings were resolved
+    (``Baseline.engine_resolved_defaults``, from
+    :func:`bouquet.engine.resolve_engine_defaults`: field -> ``{"value",
+    "origin"}``, ``origin`` ``"resolved from engine=<x>"`` or
+    ``"explicit"``) as the JSON attr ``engine_resolved_defaults_json`` of
+    the ``_baseline`` group.  No-op without a record or a ``_baseline``
+    group."""
+    if not record:
+        return
+    import json
+    path = _resolve_h5(h5path_or_header)
+    gp = _baseline_group_path(scan_key)
+    with h5py.File(path, "a") as hf:
+        if gp in hf:
+            hf[gp].attrs["engine_resolved_defaults_json"] = json.dumps(
+                record, sort_keys=True)
+
+
+def load_engine_resolved_defaults(h5path_or_header, scan_key=None):
+    """The record :func:`stamp_engine_resolved_defaults` wrote, or ``None``
+    for an archive that predates it (before 2026-10-07)."""
+    import json
+    path = _resolve_h5(h5path_or_header)
+    gp = _baseline_group_path(scan_key)
+    with h5py.File(path, "r") as hf:
+        if gp not in hf:
+            return None
+        v = hf[gp].attrs.get("engine_resolved_defaults_json")
+    if v is None:
+        return None
+    return json.loads(v.decode() if isinstance(v, bytes) else str(v))
+
+
 def load_coil_solve_mode(h5path_or_header, scan_key=None):
     """``(mode, where)``: the coil-solve mode an archive's run was in -- the
     ``_baseline`` attr :func:`stamp_coil_solve_mode` writes, else the

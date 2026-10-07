@@ -188,6 +188,13 @@ bootstrap is ~6.4-6.8 % lower at the pedestal), neither of which is
 switchable; a stored configuration that predates these fields gets them on
 load. Legacy-only settings on a unified configuration are refused, not
 ignored, and the error says to set `reconstruction_engine="legacy"`.
+The engine can be named at construction (`from_geqdsk` / `from_imas(...,
+reconstruction_engine="legacy")`) or set afterwards
+(`bq.generation.reconstruction_engine = "legacy"`): the order no longer
+matters, because the settings whose validated value depends on the engine
+(`isolate_edge_jBS`, `perturb_jind_in_anchor`) are left unset by the
+factories and resolved when `prepare_baseline()` runs, and the archive
+records how ([engine.md](docs/engine.md)).
 
 ## Quickstart
 

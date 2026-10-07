@@ -89,6 +89,11 @@
   the post-homotopy 6; reachable within the draw ceiling 12 (and from pass 6
   with `jbs_relax_halve_on = 1`). No value changed;
   `tests/test_jbs_growth_abort_reach.py` pins it.
+- **Engine-dependent defaults resolve at `prepare_baseline()` (fix).**
+  `isolate_edge_jBS` / `perturb_jind_in_anchor` default to `None` and are
+  resolved for the engine configured when the run starts, so setting
+  `reconstruction_engine` after construction runs that engine's validated
+  values; the resolution is archived (below).
 - **What an archive field MEANS changed on the default path** (names and
   units did not). An earlier entry called schema v3 "additive"; it is
   additive in its names only. On an engine archive `j_inductive` / `j_BS`
@@ -105,8 +110,8 @@
   `"unified"`: `Bouquet.from_geqdsk` / `from_imas` (and any config built
   without the field) reconstruct with the unified engine and run the draws on
   it ([engine.md](engine.md)). The factories set none of the legacy-path
-  workflow flags under the engine (`isolate_edge_jBS`,
-  `perturb_jind_in_anchor`, `jBS_baseline_mode`, ...). Reconstructions,
+  workflow flags (`isolate_edge_jBS`, `perturb_jind_in_anchor`; see the
+  engine-dependent defaults below). Reconstructions,
   draws, yields and every recorded quantity follow the engine's definitions
   (composition identity, rows, delivery check; see engine.md).
 - **Runtime** (from the engine PR's validation, the shipped synthetic cases):
@@ -122,10 +127,33 @@
   legacy paths back. `workflow="custom"` still downgrades the
   unread-field refusals to a printed WARN.
 - **How to get legacy back:** `reconstruction_engine="legacy"` -- in the
-  factory call (`Bouquet.from_geqdsk(..., reconstruction_engine="legacy")`,
-  which then applies the validated legacy workflow flags as before), or in
-  `GenerationConfig(...)`. Its results are those of the legacy path of this
+  factory call (`Bouquet.from_geqdsk(..., reconstruction_engine="legacy")`),
+  in `GenerationConfig(...)`, or set on the configuration afterwards; the
+  validated legacy workflow flags are applied at `prepare_baseline()`
+  either way (below). Its results are those of the legacy path of this
   release, which includes the conversion change below.
+- **Engine-dependent defaults resolve when the run starts (fix,
+  2026-10-07).** `isolate_edge_jBS` and `perturb_jind_in_anchor` were
+  validated with different values on the two engines (legacy:
+  `isolate_edge_jBS=False`, and `perturb_jind_in_anchor=True` for an IDS
+  source; unified: `True` / `False`, never read). The factories applied
+  them at construction, so a factory configuration switched to `"legacy"`
+  afterwards ran the legacy paths on the engine's values (an isolated-edge
+  bootstrap with a flat core, I_BS/I_p off by tens of percent), silently.
+  Both fields now default to `None` (`engine.ENGINE_DEPENDENT_DEFAULTS`),
+  the factories set neither, and `prepare_baseline()` resolves them once for
+  the engine configured then; the order no longer matters. The resolution
+  is recorded (`Baseline.engine_resolved_defaults`, the engine record, the
+  archive's `_baseline` attr `engine_resolved_defaults_json`): value and
+  origin, `"resolved from engine=<x>"` or `"explicit"`. An explicit value is
+  kept; one contradicting the engine's validated value warns naming the
+  field (and is refused under the engine, as before). Stored configurations
+  carry both fields explicitly and load unchanged. A hand-built
+  `GenerationConfig(reconstruction_engine="legacy")` without the fields now
+  runs `isolate_edge_jBS=False` (it ran the dataclass default `True`, the
+  edge-spike mode); set `True` explicitly for an edge-spike study. Tests:
+  `tests/test_engine_resolved_defaults.py`; the factory tests now expect
+  `None` at construction.
 - **Stored configurations.** A stored config (dict / JSON / an archive's
   `config_json`) that LACKS the field predates the engine (2026-09-29) and
   loads as `"legacy"` with a warning, so it replays the paths it was produced

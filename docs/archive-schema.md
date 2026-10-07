@@ -69,6 +69,11 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │              [coil_solve_mode]   the run's coil-solve mode ("bounded"
     │              since 2026-10-06; utils.load_coil_solve_mode, read back
     │              and checked by load_config),
+    │              [engine_resolved_defaults_json]   how the engine-dependent
+    │              settings (isolate_edge_jBS, perturb_jind_in_anchor) were
+    │              resolved: field -> {value, origin "resolved from
+    │              engine=<x>" | "explicit"[, engine_validated]} (since
+    │              2026-10-07; utils.load_engine_resolved_defaults),
     │              [li_metrics_json, closure_limited]   baseline provenance (absent
     │              from older archives):
     │              Baseline.li_metrics as JSON, incl. the ip_closure health

@@ -125,6 +125,9 @@ class Bouquet:
         # prepare_baseline(): a half-built baseline from a FAILED build, for
         # debugging only -- never used by generate()
         self._failed_baseline = None
+        # prepare_baseline(): how the engine-dependent settings were resolved
+        # (bouquet.engine.resolve_engine_defaults)
+        self._engine_resolved_defaults: Optional[dict] = None
         self._selection = None                    # filter() result
 
     # ── constructors ----------------------------------------------------
@@ -145,11 +148,14 @@ class Bouquet:
 
         ``reconstruction_engine`` (``None``: the :class:`GenerationConfig`
         default, ``"unified"`` since 2026-10-06) selects the reconstruction
-        engine at construction.  Under the unified engine the legacy-path
-        workflow settings below are NOT set: the engine never reads them and
-        refuses them when changed from their defaults.  Pass
-        ``reconstruction_engine="legacy"`` for the legacy reconstruction and
-        draws (the validated legacy workflow settings are then applied).
+        engine; ``"legacy"`` runs the legacy reconstruction and draws.  It
+        may equally be set afterwards (``bq.generation.
+        reconstruction_engine = "legacy"``): the engine-dependent workflow
+        settings (``isolate_edge_jBS``, ``perturb_jind_in_anchor``;
+        :data:`bouquet.engine.ENGINE_DEPENDENT_DEFAULTS`) are left unset
+        here and resolved to the validated values of the engine configured
+        when :meth:`prepare_baseline` runs (legacy g-file: the full-profile
+        decomposition and the standard l_i loop).
         """
         from .config import (BouquetConfig, SolverConfig, ReconstructionSource,
                              GenerationConfig)
@@ -164,18 +170,10 @@ class Bouquet:
             generation=GenerationConfig(n_equils=n_draws, **gkw),
             output_header=header,
         )
-        if cfg.generation.reconstruction_engine == "unified":
-            # the legacy-path workflow settings below have no engine meaning
-            # (refused there when not at their defaults)
-            return cls(cfg)
-        # geqdsk validated default workflow: the standard flagship l_i loop
-        # (Fix C / perturb_jind_in_anchor drops draws on stiff geqdsks).
-        cfg.generation.perturb_jind_in_anchor = False
-        # Unified forward decomposition (matches the IMAS path): j_inductive is
-        # pure ohmic and j_BS carries the full recon-anchored bootstrap. Closes
-        # exactly, is non-negative, and yields better than the isolated-edge-spike
-        # split. Flip to True only for dedicated edge-spike studies.
-        cfg.generation.isolate_edge_jBS = False
+        # the engine-dependent workflow settings are resolved at
+        # prepare_baseline(), for the engine configured THEN (legacy g-file:
+        # the standard flagship l_i loop, perturb_jind_in_anchor=False, and
+        # the full-profile decomposition, isolate_edge_jBS=False)
         return cls(cfg)
 
     @classmethod
@@ -202,13 +200,14 @@ class Bouquet:
 
         ``reconstruction_engine`` (``None``: the :class:`GenerationConfig`
         default, ``"unified"`` since 2026-10-06) selects the reconstruction
-        engine at construction.  Under the unified engine the legacy-path
-        workflow settings below (diff+C, the full-profile decomposition) are
-        NOT set: the engine never reads them and refuses them when changed
-        from their defaults.  Pass ``reconstruction_engine="legacy"`` for the
-        legacy IMAS baseline and draws (those settings are then applied).
-        ``anchor_pressure_to_equilibrium=True`` is a legacy-path setting
-        (refused under the engine).
+        engine; ``"legacy"`` runs the legacy IMAS baseline and draws.  It
+        may equally be set afterwards: the engine-dependent workflow
+        settings (``isolate_edge_jBS``, ``perturb_jind_in_anchor``;
+        :data:`bouquet.engine.ENGINE_DEPENDENT_DEFAULTS`) are left unset
+        here and resolved to the validated values of the engine configured
+        when :meth:`prepare_baseline` runs (legacy IDS: diff+C and the
+        full-profile decomposition).  ``anchor_pressure_to_equilibrium=True``
+        is a legacy-path setting (refused under the engine).
         """
         from .config import (BouquetConfig, SolverConfig, ImasSource,
                              GenerationConfig)
@@ -230,21 +229,16 @@ class Bouquet:
         # (resolve_uncertainty fires its IDA branch whenever unc.ida_path is set).
         if ida_path:
             cfg.uncertainty.ida_path = ida_path
-        if cfg.generation.reconstruction_engine == "unified":
-            # the legacy-path workflow settings below have no engine meaning
-            # (refused there when not at their defaults)
-            return cls(cfg)
-        # IMAS validated default workflow: diff+C (anchor bootstrap to the source
-        # via the fixed FUSE_jBS-SWB diff, and perturb j_ind in the recon-anchor
-        # to avoid the find_optimal_scale/corrector homogenization).
-        cfg.generation.jBS_baseline_mode = "diff"
-        cfg.generation.perturb_jind_in_anchor = True
-        # FUSE/IMAS sources carry a FULL Sauter bootstrap (core hump + edge), not
-        # an isolated edge spike, so the edge-spike isolation + shelf-blend
-        # decomposition (a DIII-D g-file construct) does not apply: it mislabels a
-        # redundant j_BS,edge and mangles the per-draw j_inductive. Use the full
-        # profile; the draws then store the clean residual j_phi - j_BS - j_NBI.
-        cfg.generation.isolate_edge_jBS = False
+        # The engine-dependent workflow settings are resolved at
+        # prepare_baseline(), for the engine configured THEN.  Legacy IDS:
+        # diff+C (jBS_baseline_mode="diff", the dataclass default: anchor
+        # the bootstrap to the source via the fixed FUSE_jBS-SWB diff;
+        # perturb_jind_in_anchor=True: perturb j_ind in the recon-anchor to
+        # avoid the find_optimal_scale/corrector homogenization) and the
+        # full-profile decomposition (isolate_edge_jBS=False: FUSE/IMAS
+        # sources carry a FULL Sauter bootstrap, so the edge-spike isolation
+        # would mislabel a redundant j_BS,edge and mangle the per-draw
+        # j_inductive).
         return cls(cfg)
 
     # ── ergonomic config accessors (so `bq.uncertainty.ne_scalar_sigma = ...`,
@@ -823,14 +817,21 @@ class Bouquet:
         from .baseline import resolve_baseline
         from .config import ImasSource
 
+        # The engine-dependent settings (isolate_edge_jBS,
+        # perturb_jind_in_anchor) are resolved HERE, once, for the engine
+        # configured now -- whatever it was when the config was built -- and
+        # the resolution goes on the baseline and into the archive.
+        self._resolve_engine_defaults()
+
         # GenerationConfig.reconstruction_engine="unified": the ONE
         # reconstruction engine (bouquet.engine) builds the baseline for
-        # either input type.  The default "legacy" never enters it, and
-        # everything below is the legacy path, unchanged.
+        # either input type.  "legacy" never enters it, and everything below
+        # is the legacy path, unchanged.
         if getattr(self.config.generation, "reconstruction_engine",
                    "legacy") == "unified":
             from .engine import prepare_engine_baseline
             _bl = prepare_engine_baseline(self)
+            self._record_engine_resolved_defaults(_bl)
             self._record_coil_solve_mode(_bl)
             self._report_sigma_exceeds_profile(_bl)
             self._remember_baseline_state()
@@ -916,10 +917,46 @@ class Bouquet:
         # solver chatter was captured to baseline.reconstruction_log).
         if self.baseline.reconstruction_metrics is not None:
             self._print_reconstruction_summary()
+        self._record_engine_resolved_defaults(self.baseline)
         self._record_coil_solve_mode(self.baseline)
         self._report_sigma_exceeds_profile(self.baseline)
         self._remember_baseline_state()
         return self.baseline
+
+    def _resolve_engine_defaults(self) -> dict:
+        """Resolve the engine-dependent settings of the configuration
+        (:func:`bouquet.engine.resolve_engine_defaults`) in place, keep the
+        record for the baseline (``Bouquet._engine_resolved_defaults``) and
+        return it."""
+        from .engine import resolve_engine_defaults
+        rec = resolve_engine_defaults(self.config, stacklevel=4)
+        self._engine_resolved_defaults = rec
+        return rec
+
+    def _ensure_engine_defaults_resolved(self) -> None:
+        """Defensive: an engine-dependent setting still unset (``None``)
+        here -- a baseline not built by :meth:`prepare_baseline`, or a field
+        reset afterwards -- is resolved now, as :meth:`prepare_baseline`
+        would have, never read as ``None``."""
+        from .engine import ENGINE_DEPENDENT_DEFAULTS
+        gc = self.config.generation
+        if any(getattr(gc, n, None) is None for n in ENGINE_DEPENDENT_DEFAULTS):
+            self._resolve_engine_defaults()
+            self._record_engine_resolved_defaults(self.baseline)
+
+    def _record_engine_resolved_defaults(self, bl) -> None:
+        """Put the resolution record of the engine-dependent settings
+        (:meth:`_resolve_engine_defaults`) on *bl*
+        (``Baseline.engine_resolved_defaults``, archived as the
+        ``_baseline`` attr ``engine_resolved_defaults_json``) and, under the
+        unified engine, in its record."""
+        rec = getattr(self, "_engine_resolved_defaults", None)
+        if rec is None or not hasattr(bl, "engine_resolved_defaults"):
+            return                    # no record, or not a Baseline
+        bl.engine_resolved_defaults = {k: dict(v) for k, v in rec.items()}
+        if isinstance(getattr(bl, "engine", None), dict):
+            bl.engine["engine_resolved_defaults"] = {
+                k: dict(v) for k, v in rec.items()}
 
     def _record_coil_solve_mode(self, bl) -> None:
         """Record the coil-solve mode the solver ran the reconstruction in --
@@ -6213,6 +6250,7 @@ class Bouquet:
         if self.baseline is None or self.mygs is None:
             raise ValueError("call setup_solver() + prepare_baseline() / "
                              "reconstruct() before verify_sigma0_consistency()")
+        self._ensure_engine_defaults_resolved()
         self._refuse_unified_engine_draws("verify_sigma0_consistency()")
         _edge = resolve_edge_pressure(self.config.generation)
         if _eng is not None:
@@ -7354,6 +7392,7 @@ class Bouquet:
             raise ValueError("call prepare_baseline() before generate()")
         if self.mygs is None:
             raise ValueError("call setup_solver() before generate()")
+        self._ensure_engine_defaults_resolved()
         self._refuse_unified_engine_draws("generate()")
 
         self._validate_workflow()
@@ -7706,6 +7745,11 @@ class Bouquet:
         # another mode or before the record)
         stamp_coil_solve_mode(header, scan_key=gc.scan_key,
                               mode=getattr(bl, "coil_solve_mode", None))
+        # how the engine-dependent settings were resolved (both paths)
+        from .utils import stamp_engine_resolved_defaults
+        stamp_engine_resolved_defaults(
+            header, scan_key=gc.scan_key,
+            record=getattr(bl, "engine_resolved_defaults", None))
         # IMAS path: the source's current orientation (what the reader
         # multiplied every dd current by to reach bouquet's positive frame).
         from .config import ImasSource

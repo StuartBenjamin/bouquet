@@ -255,6 +255,14 @@ class Baseline:
     # Bouquet.prepare_baseline on both paths.
     coil_solve_mode: Optional[str] = None
 
+    # How the engine-dependent generation settings were resolved for this
+    # baseline (bouquet.engine.resolve_engine_defaults, at
+    # Bouquet.prepare_baseline): field -> {"value", "origin"}, origin
+    # "resolved from engine=<x>" or "explicit" (+ "engine_validated" when an
+    # explicit value contradicts the engine's).  Archived as the _baseline
+    # attr engine_resolved_defaults_json.
+    engine_resolved_defaults: Optional[dict] = None
+
     # IMAS sources: how the core_sources slice and each beam / sawteeth entry
     # were matched to the core_profiles slice read (owner decision
     # 2026-10-06, io.imas.core_sources_slice / _source_slice_at): both

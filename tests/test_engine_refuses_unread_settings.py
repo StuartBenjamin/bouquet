@@ -7,8 +7,10 @@ that replaces it (or says nothing does).  Defaults, and the factories'
 configs built with ``reconstruction_engine="unified"``, are accepted;
 ``workflow='custom'`` downgrades to a printed WARN, as for the MSE knobs.
 ``isolate_edge_jBS`` / ``perturb_jind_in_anchor`` joined the refused set on
-2026-10-05 (owner-approved); the factories no longer set them for a unified
-configuration.
+2026-10-05 (owner-approved); since 2026-10-07 the factories set neither
+(both default to ``None`` and are resolved per engine at
+``prepare_baseline()``, tests/test_engine_resolved_defaults.py), so the
+engine accepts ``None`` or its own value.
 
 Solver-free.
 """
@@ -110,13 +112,13 @@ def _factory(factory, **kw):
 @pytest.mark.parametrize("factory", ["imas", "gfile"])
 def test_the_factories_build_a_unified_config_the_engine_accepts(factory):
     """``reconstruction_engine="unified"`` at construction: the factory
-    leaves the legacy-path workflow settings at their defaults, and the
-    engine accepts the config."""
+    leaves the engine-dependent settings unset (``None``), and the engine
+    accepts the config."""
     b = _factory(factory, reconstruction_engine="unified")
     g = b.config.generation
     assert g.reconstruction_engine == "unified"
-    assert g.isolate_edge_jBS is True
-    assert g.perturb_jind_in_anchor is False
+    assert g.isolate_edge_jBS is None
+    assert g.perturb_jind_in_anchor is None
     validate_engine_settings(g)
 
 
@@ -126,33 +128,49 @@ def test_the_factories_default_to_the_engine(factory):
     since 2026-10-06), exactly as with reconstruction_engine="unified"."""
     g = _factory(factory).config.generation
     assert g.reconstruction_engine == "unified"
-    assert g.isolate_edge_jBS is True
-    assert g.perturb_jind_in_anchor is False
+    assert g.isolate_edge_jBS is None
+    assert g.perturb_jind_in_anchor is None
     validate_engine_settings(g)
 
 
 @pytest.mark.parametrize("factory", ["imas", "gfile"])
-def test_the_factories_legacy_configs_are_unchanged(factory):
-    """With reconstruction_engine="legacy" the factories set exactly what
-    they did before: the legacy-path workflow settings."""
-    for kw in (dict(reconstruction_engine="legacy"),):
-        g = _factory(factory, **kw).config.generation
-        assert g.reconstruction_engine == "legacy"
-        assert g.isolate_edge_jBS is False
-        assert g.perturb_jind_in_anchor is (factory == "imas")
-        validate_engine_settings(g)
+def test_the_factories_legacy_configs_leave_the_engine_settings_unset(
+        factory):
+    """With reconstruction_engine="legacy" the factories set nothing
+    engine-dependent either: the legacy-path values are resolved at
+    prepare_baseline() (tests/test_engine_resolved_defaults.py)."""
+    g = _factory(factory, reconstruction_engine="legacy").config.generation
+    assert g.reconstruction_engine == "legacy"
+    assert g.isolate_edge_jBS is None
+    assert g.perturb_jind_in_anchor is None
+    validate_engine_settings(g)
 
 
 @pytest.mark.parametrize("factory", ["imas", "gfile"])
-def test_switching_a_legacy_factory_config_to_the_engine_is_refused(factory):
-    """A legacy factory config switched to "unified" afterwards carries the
-    legacy-path values the engine never reads: refused, naming each field
-    and how to build a unified config instead."""
+def test_switching_a_legacy_factory_config_to_the_engine_is_accepted(
+        factory):
+    """A legacy factory config switched to "unified" afterwards carries no
+    legacy-path value (the factory set none): accepted.  An explicit
+    legacy value set on it is still refused, naming the field."""
     b = _factory(factory, reconstruction_engine="legacy")
     b.config.generation.reconstruction_engine = "unified"
+    validate_engine_settings(b.config.generation)
+    b.config.generation.isolate_edge_jBS = False
     with pytest.raises(ValueError) as ei:
         validate_engine_settings(b.config.generation)
     msg = str(ei.value)
     assert "isolate_edge_jBS=False" in msg and "never reads" in msg
     assert "reconstruction_engine='unified'" in msg
-    assert ("perturb_jind_in_anchor=True" in msg) is (factory == "imas")
+
+
+@pytest.mark.parametrize("name", ["isolate_edge_jBS",
+                                  "perturb_jind_in_anchor"])
+def test_the_engines_own_value_of_an_engine_dependent_field_is_accepted(
+        name):
+    """``None`` and the value the engine resolves the field to are both
+    accepted under "unified" (a config stored before 2026-10-07 carries
+    the latter explicitly)."""
+    from bouquet.engine import engine_validated_value
+    validate_engine_settings(_unified(**{name: None}))
+    validate_engine_settings(_unified(**{name: engine_validated_value(
+        name, "unified", "reconstruction")}))

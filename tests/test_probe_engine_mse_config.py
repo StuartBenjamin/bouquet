@@ -7,7 +7,9 @@ The factory had already set legacy-path fields the engine never reads
 (``isolate_edge_jBS=False``, ``perturb_jind_in_anchor=True``,
 ``jBS_baseline_mode="diff"``), so the engine's settings validation refused
 every MSE measurement before reconstruction.  The probe now selects the
-engine in the factory call.
+engine in the factory call.  Since 2026-10-07 the factories set no
+engine-dependent field (resolved at ``prepare_baseline()``), so the old
+construction is accepted too.
 
 Solver-free: the configuration is built and validated, nothing is solved.
 """
@@ -54,9 +56,13 @@ def test_the_fit_step_configuration_passes_validation(probe, tmp_path, jac):
     engine_settings(g)                                # must not raise
 
 
-def test_the_old_construction_is_refused(probe, tmp_path):
+def test_the_old_construction_is_now_accepted(probe, tmp_path):
     """The construction the probe used: the legacy configuration with the
-    engine flipped afterwards -- refused, which is why it changed."""
+    engine flipped afterwards.  It was refused (the factory had set the
+    legacy values); since 2026-10-07 the factory sets no engine-dependent
+    field, so it is accepted -- the order no longer matters
+    (tests/test_engine_resolved_defaults.py).  An explicit legacy value is
+    still refused."""
     import bouquet as bq
     from bouquet.engine import engine_settings
     b = bq.Bouquet.from_imas(probe._OMAS, mesh=probe._MESH, time=probe._TIME,
@@ -64,6 +70,8 @@ def test_the_old_construction_is_refused(probe, tmp_path):
                              header=str(tmp_path / "old"),
                              reconstruction_engine="legacy")
     b.config.generation.reconstruction_engine = "unified"
+    engine_settings(b.config.generation)              # must not raise
+    b.config.generation.isolate_edge_jBS = False
     with pytest.raises(ValueError, match="isolate_edge_jBS"):
         engine_settings(b.config.generation)
 
