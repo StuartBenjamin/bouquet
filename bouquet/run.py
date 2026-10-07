@@ -8278,12 +8278,13 @@ class Bouquet:
         self.export()
         return self
 
-    def _record_refusal(self, exc):
+    def _record_refusal(self, exc, time=None):
         """Write the slice as REFUSED (``write_refused_scan``) after
         ``prepare_baseline`` raised, so a series reader reports it as
-        ``status="refused"`` rather than a gap. Returns the recorded reason,
-        or None when nothing could be recorded (flat layout, or the scan
-        already holds draws -- then the earlier draws stand)."""
+        ``status="refused"`` rather than a gap; *time* (the slice time [s])
+        is stamped with it.  Returns the recorded reason, or None when
+        nothing could be recorded (flat layout, or the scan already holds
+        draws -- then the earlier draws stand)."""
         import warnings
         from .utils import write_refused_scan
         sk = self.config.generation.scan_key
@@ -8291,7 +8292,8 @@ class Bouquet:
         if sk is None:
             return None
         try:
-            write_refused_scan(self.config.output_header, sk, reason)
+            write_refused_scan(self.config.output_header, sk, reason,
+                               time=time)
         except ValueError as e:               # already holds draws
             warnings.warn(f"slice {sk!r} not marked refused: {e}", UserWarning,
                           stacklevel=3)
@@ -8300,7 +8302,7 @@ class Bouquet:
         return reason
 
     def run_slices(self, times, scan_keys=None, header=None, export=False,
-                   on_refusal="raise") -> dict:
+                   on_refusal="record") -> dict:
         """Sweep an IMAS time series into ONE archive, one ``scan_key`` per slice.
 
         Wraps the ``set_slice -> prepare_baseline -> generate -> filter`` loop
@@ -8314,13 +8316,17 @@ class Bouquet:
         ``time``); build one :class:`Bouquet` per g-file instead.
 
         A slice whose ``prepare_baseline`` raises (a closure refusal, a
-        failed gate, ...) is written to the archive as REFUSED
-        (:func:`~bouquet.utils.write_refused_scan`, with the exception as the
-        reason), so a later :func:`~bouquet.draw_bands` reports it as
-        ``status="refused"`` instead of a gap. ``on_refusal="raise"``
-        (default) then re-raises, as before; ``"record"`` records it in the
-        summary (``refused=<reason>``, no draws) and carries on with the next
-        slice.
+        failed gate, a time-matching refusal, ...) is written to the archive
+        as REFUSED (:func:`~bouquet.utils.write_refused_scan`, with the
+        exception as the reason and the slice time as ``refused_time``), so
+        a later :func:`~bouquet.draw_bands` reports it as
+        ``status="refused"`` instead of a gap.  ``on_refusal="record"``
+        (the default since 2026-10-06; owner decision -- one refused
+        baseline ended a whole series) records it in the summary
+        (``refused=<reason>``, no draws) and carries on with the next
+        slice; after the last slice the count and the reasons are printed
+        and warned once.  ``"raise"`` re-raises at the first refusal, the
+        behaviour before.
         """
         if on_refusal not in ("raise", "record"):
             raise ValueError("on_refusal must be 'raise' or 'record', got "
@@ -8340,7 +8346,7 @@ class Bouquet:
             try:
                 self.prepare_baseline()
             except Exception as exc:
-                reason = self._record_refusal(exc)
+                reason = self._record_refusal(exc, time=t)
                 if on_refusal == "raise":
                     raise
                 self.baseline = None
@@ -8358,6 +8364,16 @@ class Bouquet:
                 l_i=float(getattr(bl, "l_i_target", float("nan"))),
                 Ip=float(getattr(bl, "Ip_target", float("nan"))),
             )
+        refused = {k: r for k, r in results.items() if "refused" in r}
+        if refused:
+            import warnings
+            lines = [f"  scan {k!r} (t = {r['time']:.9g} s): {r['refused']}"
+                     for k, r in refused.items()]
+            msg = (f"run_slices: {len(refused)} of {len(results)} slices "
+                   "REFUSED (recorded in the archive as refused_reason / "
+                   "refused_time; no draws):\n" + "\n".join(lines))
+            print(f"[run_slices] {msg}", flush=True)
+            warnings.warn(msg, UserWarning, stacklevel=2)
         if export:
             self.export()
         return results

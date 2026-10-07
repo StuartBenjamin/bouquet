@@ -166,6 +166,18 @@
   off before its record (zero, announced) where it was refused; a few
   microseconds before it is still refused.
 
+### `run_slices(on_refusal=...)` default `"raise"` -> `"record"` (owner decision 2026-10-06)
+
+One refused baseline (a closure refusal, a negative separatrix pressure, a
+time-matching refusal) ended a whole series. Now the refused slice is
+recorded -- the summary carries `refused=<reason>` and its `time`, the
+archive `scan/<key>` carries `refused_reason` and `refused_time` (moved to
+`refused_time_superseded` when a later run writes the slice) -- and the sweep
+continues; after the last slice the count and the reasons are printed and
+warned once. `on_refusal="raise"` keeps the old behaviour. Not covered (as
+before): a refusal raised inside `generate()` (e.g. an engine-draw context
+refusal) still ends the sweep unrecorded.
+
 ## Decisions on record (owner, 2026-10-05) -- no value changes
 
 Approvals given on 2026-10-05 for settings that were already in force but had

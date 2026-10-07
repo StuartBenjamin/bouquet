@@ -4232,11 +4232,15 @@ def _supersede_refusal(scan_grp):
     if "refused_reason" in scan_grp.attrs:
         scan_grp.attrs["refused_reason_superseded"] = scan_grp.attrs["refused_reason"]
         del scan_grp.attrs["refused_reason"]
+    if "refused_time" in scan_grp.attrs:
+        scan_grp.attrs["refused_time_superseded"] = scan_grp.attrs["refused_time"]
+        del scan_grp.attrs["refused_time"]
 
 
-def write_refused_scan(h5path_or_header, scan_key, reason):
+def write_refused_scan(h5path_or_header, scan_key, reason, time=None):
     """Record a slice that was REFUSED before any draw (closure refusal, no
-    reference, ...) as an empty ``scan/<key>`` carrying ``refused_reason``.
+    reference, ...) as an empty ``scan/<key>`` carrying ``refused_reason``
+    (and ``refused_time`` [s], the slice time, when *time* is given).
 
     A series reader then returns ``status="refused"`` for that key instead of
     a silent gap. Refuses to overwrite a scan that already holds draws.
@@ -4258,6 +4262,8 @@ def write_refused_scan(h5path_or_header, scan_key, reason):
         if any(str(k).lstrip("-").isdigit() for k in grp.keys()):
             raise ValueError(f"scan/{bkey} already holds draws; not marking it refused")
         grp.attrs["refused_reason"] = str(reason)
+        if time is not None:
+            grp.attrs["refused_time"] = float(time)
         grp.attrs["bouquet_version"] = str(__version__)
 
 
