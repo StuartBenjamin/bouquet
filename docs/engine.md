@@ -83,6 +83,27 @@ the toy and a TokaMaker stand-in over it), `tests/test_one_conversion.py`
 | rows | Ip (exact); l_i(3) = the reader's `li(2)` key, **hard**, absolute tolerance 1e-3; q0 (optional) | Ip (soft, σ = 0.5 % of Ip); li_3 (soft, σ = 0.04); q0 (optional); MSE chords (optional) |
 | signs | positive frame: `sign(Ip)`, `|F|`; a file whose `<j_phi>` disagrees in sign with its Ip is refused (wrong COCOS) | `source_current_sign`, `|B0|`; `b0_sign` recorded |
 
+**The IDS li_3 target's radius (`GenerationConfig.imas_li3_radius`, default
+`"auto"`, 2026-10-06).** The data dictionary gives `li_3` no normalisation
+radius: IMAS.jl (and so FUSE) writes it with the boundary's geometric radius
+`R_geo = (R_out + R_in)/2`, the measurement (`utils.li_achieved`) normalises
+by the magnetic axis -- a few per cent apart on a shifted axis.
+`adapters.resolve_li3_radius`: `"auto"` recomputes `li_3 = 2 ∫B_p² dV /
+((μ0 Ip)² R)` from the source's own flux-surface averages (`profiles_1d`
+`gm2`, `dpsi_drho_tor`, `dvolume_dpsi`; COCOS 11) with each radius and takes
+the one reproducing the stored value within `adapters.LI3_RADIUS_MATCH_TOL`
+(0.5 %); neither is REFUSED, naming both (never rescaled silently); a source
+without those averages (the shipped example) keeps the stored value
+unrescaled, as before the setting, printed and recorded `"undetermined"`.
+`"geometric"` / `"axis"` state it. The row's target is the stored li_3 times
+`R_src / R_axis` (the source's axis); the choice, both ratios and the factor
+are recorded on the row (`radius_*`), in the contract's provenance
+(`li3_radius`) and in `Baseline.li_metrics["li3_radius"]`. A non-default value
+is refused with a g-file source; a stored IMAS unified config without the
+field loads as `"axis"`, what it ran with. On the shipped example the
+TokaMaker and IDS li_3 agree within 0.1 %; no bias is assumed for a file --
+it is measured.
+
 The IDS σ values are the `li_soft_onesided` preset's
 (`utils.STRUCTURED_PRESETS`); the g-file l_i tolerance is the legacy step-5 /
 re-match secant's (`_rematch_li_request`'s `li_tol` default, read from its

@@ -531,6 +531,173 @@ class GFileAdapter:
 #: tolerance below.  "auto": ``j_ohmic`` unless the split misses by more
 #: than that tolerance, then the residual with a warning.
 IDS_INDUCTIVE_CHOICES = ("auto", "j_ohmic", "residual")
+
+#: ``GenerationConfig.imas_li3_radius`` values (the IDS l_i row target's
+#: normalisation radius; :func:`resolve_li3_radius`).
+IMAS_LI3_RADIUS_CHOICES = ("auto", "geometric", "axis")
+#: ``"auto"``: the relative agreement within which li_3 recomputed from the
+#: source's own equilibrium with a radius must reproduce the stored li_3
+#: for that radius to be taken (0.5 %, the owner's number of 2026-10-06).
+LI3_RADIUS_MATCH_TOL = 0.005
+
+_MU0_LI = 4.0e-7 * np.pi
+
+
+class Li3RadiusRefused(EngineInputRefused):
+    """The stored li_3 matches neither normalisation radius."""
+
+
+def _li3_geometry(ts):
+    """``(R_axis, R_geo, R_geo_source, Bp2v, Ip, missing)`` of one IDS
+    equilibrium time slice *ts* (a dict): the magnetic axis, the geometric
+    radius ``(R_out + R_in)/2`` of the boundary (``profiles_1d`` r_outboard
+    / r_inboard at the last surface, else ``boundary.geometric_axis.r``,
+    else the outline's extremes), and ``int B_p^2 dV`` from the source's own
+    flux-surface averages (COCOS 11: ``B_p = |grad psi| / (2 pi R)``, so
+    ``<B_p^2> = (dpsi/drho_tor)^2 gm2 / (2 pi)^2`` with ``gm2 =
+    <|grad rho_tor|^2 / R^2>``, integrated with ``dvolume_dpsi`` -- or the
+    gradient of ``volume`` -- over psi).  ``missing`` names what could not
+    be read (``None`` entries then)."""
+    gq = ts.get("global_quantities", {}) or {}
+    p1 = ts.get("profiles_1d", {}) or {}
+    bd = ts.get("boundary", {}) or {}
+    missing = []
+
+    def _arr(name):
+        v = p1.get(name)
+        if v is None:
+            return None
+        a = np.asarray(v, dtype=float)
+        return a if (a.ndim == 1 and a.size >= 2
+                     and np.all(np.isfinite(a))) else None
+
+    R_axis = None
+    ma = gq.get("magnetic_axis") or {}
+    if ma.get("r") is not None and np.isfinite(float(ma["r"])):
+        R_axis = float(ma["r"])
+    else:
+        missing.append("global_quantities.magnetic_axis.r")
+    R_geo, geo_src = None, None
+    ro, ri = _arr("r_outboard"), _arr("r_inboard")
+    if ro is not None and ri is not None:
+        R_geo = 0.5 * (float(ro[-1]) + float(ri[-1]))
+        geo_src = "profiles_1d r_outboard/r_inboard at the last surface"
+    elif (bd.get("geometric_axis") or {}).get("r") is not None:
+        R_geo = float(bd["geometric_axis"]["r"])
+        geo_src = "boundary.geometric_axis.r"
+    elif (bd.get("outline") or {}).get("r") is not None:
+        r = np.asarray(bd["outline"]["r"], dtype=float)
+        R_geo = 0.5 * (float(np.max(r)) + float(np.min(r)))
+        geo_src = "boundary.outline (max R + min R) / 2"
+    else:
+        missing.append("a boundary radius (profiles_1d r_outboard/"
+                       "r_inboard, boundary.geometric_axis, outline)")
+    psi = _arr("psi")
+    gm2, dpdr = _arr("gm2"), _arr("dpsi_drho_tor")
+    dv = _arr("dvolume_dpsi")
+    if dv is None and psi is not None and _arr("volume") is not None:
+        dv = np.gradient(_arr("volume"), psi)
+    Bp2v = None
+    if psi is None or gm2 is None or dpdr is None or dv is None:
+        missing.extend("profiles_1d " + n for n, a in (
+            ("psi", psi), ("gm2", gm2), ("dpsi_drho_tor", dpdr),
+            ("dvolume_dpsi (or volume)", dv)) if a is None)
+    else:
+        from scipy.integrate import trapezoid
+        bp2 = dpdr ** 2 * gm2 / (2.0 * np.pi) ** 2
+        Bp2v = abs(float(trapezoid(bp2 * dv, psi)))
+    Ip = gq.get("ip")
+    Ip = None if Ip is None else abs(float(Ip))
+    if not Ip:
+        missing.append("global_quantities.ip")
+        Ip = None
+    return R_axis, R_geo, geo_src, Bp2v, Ip, missing
+
+
+def resolve_li3_radius(ts, setting="auto", tol=LI3_RADIUS_MATCH_TOL):
+    """The normalisation radius of the source's stored li_3 and the factor
+    that puts it at the measurement's radius (the magnetic axis).
+
+    Returns a record: ``setting``, ``choice`` (``"axis"`` /
+    ``"geometric"``), ``status`` (``"matched"`` -- auto found it;
+    ``"stated"`` -- the setting named it; ``"undetermined"`` -- auto could
+    not recompute li_3 from this source, the target is used UNRESCALED, as
+    before the setting existed, printed and recorded), the stored
+    ``li3_source``, the recomputed ``li3_axis`` / ``li3_geometric`` and the
+    ratios ``stored / recomputed`` (``None`` when not computable), the
+    radii, ``factor = R_src / R_axis`` and the rescaled ``target``.
+    ``"auto"`` with NEITHER ratio within *tol* of 1 is REFUSED
+    (:class:`Li3RadiusRefused`) naming both -- never silently rescaled;
+    ``"geometric"`` without both radii is refused."""
+    if setting not in IMAS_LI3_RADIUS_CHOICES:
+        raise ValueError(f"imas_li3_radius must be one of "
+                         f"{IMAS_LI3_RADIUS_CHOICES}, got {setting!r}")
+    gq = ts.get("global_quantities", {}) or {}
+    li_src = gq.get("li_3")
+    li_src = None if li_src is None else float(li_src)
+    R_axis, R_geo, geo_src, Bp2v, Ip, missing = _li3_geometry(ts)
+    rec = dict(setting=str(setting), li3_source=li_src, R_axis=R_axis,
+               R_geo=R_geo, R_geo_source=geo_src, Bp2v=Bp2v,
+               match_tol=float(tol), missing=list(missing),
+               li3_axis=None, li3_geometric=None, ratio_axis=None,
+               ratio_geometric=None,
+               definition=("li_3(R) = 2 int B_p^2 dV / ((mu0 Ip)^2 R) from "
+                           "the source's own flux-surface averages; ratio = "
+                           "stored / recomputed; the measurement "
+                           "(utils.li_achieved) normalises by R_axis"))
+    if Bp2v is not None and Ip:
+        for name, R in (("axis", R_axis), ("geometric", R_geo)):
+            if R:
+                li = 2.0 * Bp2v / ((_MU0_LI * Ip) ** 2 * R)
+                rec["li3_" + name] = float(li)
+                if li_src is not None and li > 0.0:
+                    rec["ratio_" + name] = float(li_src / li)
+
+    def _done(choice, status):
+        R_src = R_axis if choice == "axis" else R_geo
+        fac = (1.0 if choice == "axis" else float(R_src) / float(R_axis))
+        rec.update(choice=choice, status=status, R_source=R_src,
+                   factor=float(fac),
+                   target=(None if li_src is None else li_src * fac))
+        return rec
+
+    if setting == "axis":
+        return _done("axis", "stated")
+    if setting == "geometric":
+        if R_geo is None or R_axis is None:
+            raise Li3RadiusRefused(
+                "IDS adapter: imas_li3_radius='geometric' needs both the "
+                "boundary's geometric radius and the magnetic axis to "
+                "rescale li_3 to the measurement's radius; missing: "
+                + "; ".join(missing))
+        return _done("geometric", "stated")
+    if li_src is None:
+        return _done("axis", "no li_3 in the source (no l_i row)")
+    ra, rg = rec["ratio_axis"], rec["ratio_geometric"]
+    if ra is None or rg is None:
+        msg = ("IDS adapter: imas_li3_radius='auto' cannot tell the radius "
+               "the source's li_3 was normalised with (li_3 cannot be "
+               "recomputed from this source: missing " + "; ".join(missing)
+               + "); the l_i row's target is the stored li_3 UNRESCALED, as "
+               "before the setting existed -- state imas_li3_radius="
+               "'axis' or 'geometric' if known")
+        # printed and recorded (status "undetermined"), not raised as a
+        # warning: nothing changes against the code before the setting
+        print("[engine] NOTE " + msg, flush=True)
+        return _done("axis", "undetermined")
+    ok = {n: abs(r - 1.0) for n, r in (("axis", ra), ("geometric", rg))
+          if abs(r - 1.0) <= tol}
+    if not ok:
+        raise Li3RadiusRefused(
+            "IDS adapter: the source's li_3 = %.6g matches neither "
+            "normalisation radius within %.2g %%: recomputed from its own "
+            "equilibrium, li_3(R_axis = %.4f m) = %.6g (stored/recomputed "
+            "%.5f) and li_3(R_geo = %.4f m, %s) = %.6g (stored/recomputed "
+            "%.5f); state imas_li3_radius='axis' or 'geometric' if the "
+            "convention is known -- the target is never rescaled silently"
+            % (li_src, 100.0 * tol, R_axis, rec["li3_axis"], ra, R_geo,
+               geo_src, rec["li3_geometric"], rg))
+    return _done(min(ok, key=ok.get), "matched")
 #: The default of :class:`IdsAdapter` and of
 #: ``GenerationConfig.engine_ids_inductive``.  Evidence (validation, all
 #: slices of two IDS source families): on self-consistent sources residual
@@ -991,7 +1158,13 @@ class IdsAdapter:
             ne_th = ne if zf is None else np.maximum(ne - k2e(zf), 0.0)
             p_imp = impurity_pressure(ne_th, ni, ti, bl.Z_imp)
         preset = STRUCTURED_PRESETS["li_soft_onesided"]
-        li3 = gq.get("li_3")
+        # the row's target at the MEASUREMENT's radius (R_axis): the stored
+        # li_3's own radius resolved (GenerationConfig.imas_li3_radius) and
+        # the factor R_src / R_axis applied and recorded
+        li3_radius = resolve_li3_radius(
+            eq["time_slice"][ie],
+            str(getattr(gc, "imas_li3_radius", "auto")))
+        li3 = (None if gq.get("li_3") is None else li3_radius["target"])
         eqp1 = eq["time_slice"][ie]["profiles_1d"]
         psi_eq = np.asarray(eqp1["psi"], dtype=float)
         psiN_eq = (psi_eq - psi_eq[0]) / (psi_eq[-1] - psi_eq[0])
@@ -1016,7 +1189,12 @@ class IdsAdapter:
                 sigma=float(preset["structured_li_sigma"]),
                 sigma_origin=("utils.STRUCTURED_PRESETS['li_soft_onesided']"
                               "['structured_li_sigma']"),
-                source="equilibrium global_quantities.li_3")),
+                source=("equilibrium global_quantities.li_3 x R_src / "
+                        "R_axis (imas_li3_radius)"),
+                li3_source=li3_radius["li3_source"],
+                radius_choice=li3_radius["choice"],
+                radius_status=li3_radius["status"],
+                radius_factor=li3_radius["factor"])),
             q0=(None if q_t is None else dict(
                 target=q_t, psi=q_psi, admitted=bool(adm), gate_basis=basis,
                 q0_source_axis=saw.get("q0_dd"),
@@ -1071,6 +1249,7 @@ class IdsAdapter:
                                 "baseline.resolve_uncertainty (unchanged)"),
                 anchor=("one solve of the source j_tor (the legacy first "
                         "solve); it only seeds geometry and Redl"),
+                li3_radius=dict(li3_radius),
                 B0=float(B0)),
         )
         validate_contract(c)

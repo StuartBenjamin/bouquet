@@ -1244,6 +1244,24 @@ class GenerationConfig:
     # whichever is used.  A non-default value is refused with a g-file
     # source (it would have no effect there).
     engine_ids_inductive: str = "residual"
+    # The normalisation radius of the IDS l_i row's TARGET (the source's
+    # equilibrium global_quantities.li_3).  The IMAS data dictionary gives
+    # li_3 no normalisation radius: IMAS.jl (and so FUSE) writes it with the
+    # geometric radius R_geo = (R_out + R_in)/2 of the boundary, TokaMaker's
+    # measurement (utils.li_achieved) uses the magnetic axis R_axis.
+    # "auto" (default): recompute li_3 from the source's own equilibrium
+    # (profiles_1d gm2, dpsi_drho_tor, dvolume_dpsi; the axis; r_outboard /
+    # r_inboard) with each radius and take the one reproducing the stored
+    # value within adapters.LI3_RADIUS_MATCH_TOL (0.5 %); neither -> REFUSED,
+    # naming both; a source that cannot be recomputed -> the target is used
+    # unrescaled (as before the setting), printed, recorded "undetermined".
+    # A stored IMAS unified config without the field loads as "axis" (what
+    # it ran with), with a warning.
+    # "geometric" / "axis": stated.  The target is rescaled to the
+    # measurement's radius by R_src / R_axis; choice, ratios and factor are
+    # recorded (contract rows/provenance, Baseline.li_metrics).  Refused
+    # non-default with a g-file source (no effect there).
+    imas_li3_radius: str = "auto"
     # --- the draws on the engine (Stage 3; bouquet.engine_draws) ------------
     # A draw holds the reconstruction's coefficients x* and closes ONLY the
     # Ip row (a scalar amplitude on the inductive, in the exact measure).
@@ -1870,6 +1888,22 @@ class BouquetConfig:
                 "from_imas.", UserWarning, stacklevel=2)
             gend["reconstruction_engine"] = "legacy"
         _stored_config_compat(gend)
+        if (SrcCls is ImasSource
+                and gend.get("reconstruction_engine") == "unified"
+                and "imas_li3_radius" not in gend):
+            # An IMAS unified config stored before the li_3-radius setting
+            # (2026-10-06) ran its l_i row on the source's li_3 UNRESCALED
+            # -- what "axis" does -- so it is loaded that way and replays
+            # what it recorded.  (A g-file config is not concerned: the
+            # setting has no effect there and must stay at its default.)
+            import warnings
+            warnings.warn(
+                "stored IMAS unified config has no generation."
+                "imas_li3_radius (it predates the setting): loading it with "
+                "'axis' -- the l_i row's target was the source's li_3 "
+                "unrescaled -- so it reproduces what it recorded; today's "
+                "default is 'auto'", UserWarning, stacklevel=2)
+            gend["imas_li3_radius"] = "axis"
         return cls(
             source=_build(SrcCls, srcd),
             solver=_build(SolverConfig, d["solver"]),

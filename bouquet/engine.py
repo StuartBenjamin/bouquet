@@ -78,6 +78,9 @@ ENGINE_FIELD_DEFAULTS = {
     # the IDS adapter's inductive choice (adapters.IDS_INDUCTIVE_CHOICES;
     # "residual" by definition, owner decision 2026-10-02)
     "engine_ids_inductive": "residual",
+    # the IDS l_i row target's normalisation radius
+    # (adapters.IMAS_LI3_RADIUS_CHOICES; see GenerationConfig)
+    "imas_li3_radius": "auto",
     # the draws on the engine (bouquet.engine_draws, docs/engine.md "Draws")
     "engine_draw_q0_row": False,
     "engine_draw_homotopy": True,
@@ -260,6 +263,11 @@ def validate_engine_settings(gc) -> None:
     if not isinstance(ii, str) or ii not in IDS_INDUCTIVE_CHOICES:
         raise ValueError(f"generation.engine_ids_inductive must be one of "
                          f"{IDS_INDUCTIVE_CHOICES}, got {ii!r}")
+    from .adapters import IMAS_LI3_RADIUS_CHOICES
+    lr = vals["imas_li3_radius"]
+    if not isinstance(lr, str) or lr not in IMAS_LI3_RADIUS_CHOICES:
+        raise ValueError(f"generation.imas_li3_radius must be one of "
+                         f"{IMAS_LI3_RADIUS_CHOICES}, got {lr!r}")
     mj = vals["engine_mse_jacobian"]
     if mj not in ENGINE_MSE_JACOBIANS:
         raise ValueError(f"generation.engine_mse_jacobian must be one of "
@@ -496,6 +504,8 @@ def engine_settings(gc) -> dict:
         ids_inductive=str(getattr(
             gc, "engine_ids_inductive",
             ENGINE_FIELD_DEFAULTS["engine_ids_inductive"])),
+        li3_radius=str(getattr(gc, "imas_li3_radius",
+                               ENGINE_FIELD_DEFAULTS["imas_li3_radius"])),
         draw_q0_row=bool(getattr(gc, "engine_draw_q0_row", False)),
         draw_homotopy=bool(getattr(gc, "engine_draw_homotopy", True)),
         draw_bootstrap_refresh=bool(getattr(
@@ -2041,6 +2051,7 @@ def _ids_baseline(bq, eng, res, rec, bl_src):
     lim = dict(bl_src.li_metrics or {})
     lim.update(tokamaker_li_3=float(m["li"]),
                tokamaker_li_1=m.get("li_1"), engine=True,
+               li3_radius=c.provenance.get("li3_radius"),
                bootstrap_prior=dict(
                    bs_scale=ch["bs_scale"],
                    halfwidth=ch["closure_limited_thresholds"][
@@ -2177,6 +2188,13 @@ def prepare_engine_baseline(bq):
             "with a g-file source: it configures the IDS adapter only and "
             "would have no effect; leave it at its default "
             f"{ENGINE_FIELD_DEFAULTS['engine_ids_inductive']!r}")
+    if (isinstance(src, ReconstructionSource)
+            and s["li3_radius"] != ENGINE_FIELD_DEFAULTS["imas_li3_radius"]):
+        raise ValueError(
+            f"generation.imas_li3_radius={s['li3_radius']!r} set with a "
+            "g-file source: it configures the IDS l_i row only and would "
+            "have no effect; leave it at its default "
+            f"{ENGINE_FIELD_DEFAULTS['imas_li3_radius']!r}")
     bq.baseline = None
     bq._failed_baseline = None
     bq._engine_run = None
