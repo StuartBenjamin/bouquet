@@ -343,7 +343,8 @@ def test_a_perturbed_draw_moves_li_and_beta_and_records_the_flux_range(
     # the flux range psi_b - psi_a against the reconstruction's (the toy's
     # flux range responds to the current shape)
     fr, fr0 = r["delivered"]["flux_range"], r["reference"]["flux_range"]
-    assert fr0 == pytest.approx(ctx.geom["dpsi_dpsiN"], rel=0, abs=0)
+    # the reference is the DELIVERED measurement's, not G*'s
+    assert fr0 == ED.flux_range(eng.delivered_meas)
     assert d["flux_range"] == fr - fr0 and d["flux_range"] != 0.0
     assert d["flux_range_rel"] == pytest.approx((fr - fr0) / fr0,
                                                 rel=1e-14)
@@ -640,7 +641,11 @@ def toy_bouquet_solver(monkeypatch):
                         lambda mygs, c, **kw: mygs.toy)
 
     def _setup(self):
+        # what the real setup_solver does to the coil solve
+        # (tests/test_solver_state.py runs the real one on a stand-in)
+        from bouquet.solver_state import enter_bounded_coil_mode
         self.mygs = FakeTokaMaker(None)
+        enter_bounded_coil_mode(self.mygs)
         return self
 
     import bouquet.run as br
@@ -654,9 +659,8 @@ def _bq(tmp_path, n=2):
         os.path.join(_EX, "D3Dlike_Hmode_baseline.geqdsk"),
         profiles=os.path.join(_EX, "D3Dlike_Hmode_baseline.peqdsk"),
         mesh=os.path.join(_EX, "DIIID_mesh.h5"), n_draws=n,
-        header=str(tmp_path / "bq"))
+        header=str(tmp_path / "bq"), reconstruction_engine="unified")
     g = b.config.generation
-    g.reconstruction_engine = "unified"
     g.engine_rows = ["Ip"]
     g.seed = 12345
     return b
@@ -881,6 +885,197 @@ def test_physical_draws_are_untouched(recon):
     assert "kinetics" not in "".join(out["record"].get("notices", []))
 
 
+def _spy_store(monkeypatch):
+    """Capture what store_equilibrium archives per draw (j_phi, j_BS,
+    j_inductive: positional arguments 4-6)."""
+    import bouquet.TokaMaker_interface as TI
+    stored = []
+    real = TI.store_equilibrium
+
+    def spy(header, count, full_path, psi_N, jphi, jbs, jind, *a, **k):
+        stored.append(dict(count=count, j_phi=np.array(jphi, dtype=float),
+                           j_BS=np.array(jbs, dtype=float),
+                           j_inductive=np.array(jind, dtype=float)))
+        return real(header, count, full_path, psi_N, jphi, jbs, jind,
+                    *a, **k)
+    monkeypatch.setattr(TI, "store_equilibrium", spy)
+    return stored
+
+
+def test_the_archived_split_is_on_the_archived_state_and_never_clipped(
+        tmp_path, monkeypatch):
+    """An engine draw archives j_BS and the fixed parts evaluated on its
+    ARCHIVED equilibrium and j_inductive as the exact residual against the
+    archived j_phi -- no clip, no sliver moved into j_BS; the record says
+    so (archived.split), including the negative-inductive count."""
+    stored = _spy_store(monkeypatch)
+    diags, rej, h, G = _generate(tmp_path, monkeypatch, n=2)
+    assert len(diags) == 2 and rej == [] and len(stored) == 2
+    for d, st in zip(diags, stored):
+        sp = d["engine"]["archived"]["split"]
+        jn, jr = np.asarray(sp["j_NBI"]), np.asarray(sp["j_RF"])
+        np.testing.assert_array_equal(
+            st["j_inductive"], st["j_phi"] - st["j_BS"] - jn - jr)
+        assert sp["n_negative_inductive"] == int(np.sum(
+            st["j_inductive"] < 0.0))
+        assert sp["min_inductive"] == float(np.min(st["j_inductive"]))
+        assert "never clipped" in sp["convention"]
+
+
+def _final_measures(monkeypatch, geom_scale=None):
+    """Capture every FINAL measurement of the toy backend (the archived
+    state's); with *geom_scale* = {field: factor}, the archived state's
+    geometry is that of a state whose flux-surface averages moved (the toy's
+    geometry does not depend on its state, so the archived and the
+    reconstruction's conversion factors would otherwise coincide)."""
+    fins = []
+    real = T.ToyGS.measure
+
+    def measure(self, *a, **k):
+        out = real(self, *a, **k)
+        if k.get("final"):
+            if geom_scale:
+                g = dict(out["geom"])
+                for name, f in geom_scale.items():
+                    g[name] = f * np.asarray(g[name], dtype=float)
+                out = dict(out, geom=g)
+            fins.append(out)
+        return out
+    monkeypatch.setattr(T.ToyGS, "measure", measure)
+    return fins
+
+
+def test_the_archived_split_uses_the_archived_states_kappa_and_redl(
+        tmp_path, monkeypatch):
+    """The archived split's bootstrap is the draw's bootstrap model ON the
+    archived equilibrium: (1 + d_bs) x s_bs x scale x Redl(archived state),
+    converted with the ARCHIVED state's F<1/R>/<B^2>; the fixed parts are
+    converted with that same factor.  Pins the claim of 41e9682 that the
+    2026-10-06 review found untested (mutants D2: the reconstruction's
+    kappa; D4: the bootstrap off by 1 %): the archived state's <B^2> is moved
+    by 3 % so the two conversion factors differ, and the archived j_BS,
+    j_NBI and j_RF are compared with the definition at 1e-12."""
+    from bouquet.engine import conversion_factor
+    stored = _spy_store(monkeypatch)
+    fins = _final_measures(monkeypatch, geom_scale={"B2": 1.03})
+    diags, rej, h, G = _generate(tmp_path, monkeypatch, n=1)
+    assert len(diags) == 1 and rej == [] and len(stored) == 1
+    fin, st = fins[-1], stored[0]
+    cur = G._cur
+    kap = conversion_factor(fin["geom"])
+    kap_recon = conversion_factor(G.ctx.geom)
+    # the test discriminates: the two factors differ by ~3 %
+    assert np.min(np.abs(kap / kap_recon - 1.0)) > 0.02
+    dpl = cur["draw"].get("passes_post_homotopy") or cur["draw"]["passes"]
+    amp = (1.0 + float(dpl.last["amp"].get("d_bs", 0.0))) * G.ctx.s_bs         * float(cur["draw"]["inputs"].scale)
+    want_bs = amp * kap * np.asarray(fin["redl"], dtype=float)
+    np.testing.assert_allclose(st["j_BS"], want_bs, rtol=1e-12, atol=0.0)
+    fx = G.ctx.c.jB_fix_parts
+    sp = diags[0]["engine"]["archived"]["split"]
+    np.testing.assert_allclose(sp["j_NBI"], kap * np.asarray(fx["nbi"]),
+                               rtol=1e-12, atol=0.0)
+    np.testing.assert_allclose(
+        sp["j_RF"], kap * (np.asarray(fx["rf"])
+                           + np.asarray(fx.get("other", 0.0))),
+        rtol=1e-12, atol=0.0)
+    # and a 1 % error in either input is far outside that
+    assert np.max(np.abs(1.01 * want_bs - st["j_BS"])) \
+        > 1e-3 * np.max(np.abs(want_bs))
+    assert np.max(np.abs(amp * kap_recon * np.asarray(fin["redl"])
+                         - st["j_BS"])) > 1e-2 * np.max(np.abs(want_bs))
+
+
+def test_a_negative_residual_inductive_is_recorded_not_clipped(
+        tmp_path, monkeypatch, capsys):
+    """Force the archived bootstrap above the archived current near the
+    edge: the residual inductive goes negative there and is ARCHIVED
+    negative (the legacy archival would floor it at zero and move the
+    sliver into j_BS); count, minimum and psi_N range are recorded and a
+    console note printed."""
+    stored = _spy_store(monkeypatch)
+    real = ED.GenerateEngineDraws.post_hoc
+
+    def post_hoc(self, *a, **k):
+        out = real(self, *a, **k)
+        sp = self._cur["final_split"]
+        bump = np.zeros_like(sp["j_BS"])
+        bump[-3:] = 1.0e9                       # far above any j_phi
+        sp["j_BS"] = sp["j_BS"] + bump
+        return out
+    monkeypatch.setattr(ED.GenerateEngineDraws, "post_hoc", post_hoc)
+    diags, rej, h, G = _generate(tmp_path, monkeypatch, n=1)
+    st, sp = stored[0], diags[0]["engine"]["archived"]["split"]
+    assert np.all(st["j_inductive"][-3:] < 0.0)
+    assert sp["n_negative_inductive"] >= 3
+    assert sp["min_inductive"] == float(np.min(st["j_inductive"])) < 0.0
+    lo, hi = sp["negative_inductive_psi_N"]
+    assert lo <= float(PSI[-3]) and hi == pytest.approx(float(PSI[-1]))
+    np.testing.assert_array_equal(
+        st["j_inductive"], st["j_phi"] - st["j_BS"]
+        - np.asarray(sp["j_NBI"]) - np.asarray(sp["j_RF"]))
+
+
+def test_the_post_homotopy_resplit_branch_uses_the_draws_own_fixed_parts(
+        tmp_path, monkeypatch):
+    """The post-homotopy check fails ONCE (a stand-in check), so the draw
+    re-solves at the tight coil stage and generate_bouquet re-derives its
+    split in the engine branch: j_inductive = j_phi - j_BS - the draw's own
+    solved fixed parts, unclipped (not the legacy decomposition at the
+    reconstruction's fixed parts) -- and the archival then re-splits on
+    the archived state."""
+    import bouquet.jbs_loop as JL
+    real_check = JL.check_delivered
+    state = dict(n=0)
+
+    def check(*a, **k):
+        out = real_check(*a, **k)
+        cur = getattr(G_box.get("G"), "_cur", None)
+        if cur is not None and cur["clock"].cur == "post_homotopy" \
+                and state["n"] == 0:
+            state["n"] += 1
+            out = dict(out, ok=False)
+        return out
+    G_box = {}
+    real_init = ED.GenerateEngineDraws.__init__
+
+    def init(self, *a, **k):
+        real_init(self, *a, **k)
+        G_box["G"] = self
+    monkeypatch.setattr(ED.GenerateEngineDraws, "__init__", init)
+    monkeypatch.setattr(JL, "check_delivered", check)
+    fixed_calls = []
+    real_fixed = ED.GenerateEngineDraws.solved_fixed
+
+    def solved_fixed(self):
+        out = real_fixed(self)
+        fixed_calls.append(np.array(out, dtype=float))
+        return out
+    monkeypatch.setattr(ED.GenerateEngineDraws, "solved_fixed", solved_fixed)
+    import bouquet.TokaMaker_interface as TI
+    legacy_calls = []
+    real_dec = TI._decompose_draw_currents
+
+    def dec(*a, **k):
+        legacy_calls.append(1)
+        return real_dec(*a, **k)
+    monkeypatch.setattr(TI, "_decompose_draw_currents", dec)
+    stored = _spy_store(monkeypatch)
+    diags, rej, h, G = _generate(tmp_path, monkeypatch, n=1)
+    assert state["n"] == 1 and rej == [] and len(diags) == 1
+    ph = diags[0]["engine"]["post_homotopy"]
+    assert ph["accepted_without_passes"] is False
+    assert len(fixed_calls) == 1                 # the engine re-split ran
+    assert legacy_calls == []                    # not the legacy one
+    dp = G._cur["draw"]["passes_post_homotopy"]
+    np.testing.assert_array_equal(fixed_calls[0],
+                                  dp.last["parts"]["driven"])
+    # archived on the archived state, the residual exact
+    st, sp = stored[0], diags[0]["engine"]["archived"]["split"]
+    np.testing.assert_array_equal(
+        st["j_inductive"], st["j_phi"] - st["j_BS"]
+        - np.asarray(sp["j_NBI"]) - np.asarray(sp["j_RF"]))
+
+
 def test_generate_records_the_quantity_and_psi_n(tmp_path, monkeypatch,
                                                  capsys):
     """Through generate_bouquet: the attempt whose drawn T_i is negative is
@@ -916,3 +1111,176 @@ def test_generate_records_the_quantity_and_psi_n(tmp_path, monkeypatch,
         np.testing.assert_array_equal(mine["j_BS"], theirs["j_BS"])
         assert mine["engine"]["delivered"]["l_i_3"] \
             == theirs["engine"]["delivered"]["l_i_3"]
+
+
+# ---------------------------------------------------------------------------
+#  verify_sigma0_consistency under the engine runs the generate() route
+# ---------------------------------------------------------------------------
+def test_the_sigma0_check_runs_the_generate_route(tmp_path,
+                                                  toy_bouquet_solver,
+                                                  monkeypatch):
+    """The check is ONE draw through generate() (generate_bouquet with the
+    engine draw, the homotopy and the post-homotopy stage), every
+    perturbation zero and scale 1.0, archived into a temporary file; both
+    stages are reported and both decide ``passed``; the configured archive,
+    the config and the attributes generate() sets are untouched."""
+    import bouquet.TokaMaker_interface as TI
+    b = _bq(tmp_path)
+    b.setup_solver()
+    _quiet(b.prepare_baseline)
+    calls = []
+    real = TI.generate_bouquet
+
+    def spy(mygs, psi_N, n_equils, header, *a, **k):
+        calls.append(dict(n=n_equils, header=header,
+                          scale=k.get("jBS_scale_range"),
+                          engine=k.get("engine_draw")))
+        return real(mygs, psi_N, n_equils, header, *a, **k)
+
+    monkeypatch.setattr(TI, "generate_bouquet", spy)
+    h5 = b.config.output_header + ".h5"
+    mtime = os.path.getmtime(h5) if os.path.exists(h5) else None
+    b.draw_rejections = ["sentinel"]
+    v = _quiet(b.verify_sigma0_consistency)
+    assert len(calls) == 1 and calls[0]["n"] == 1
+    assert calls[0]["scale"] == (1.0, 1.0)
+    assert calls[0]["header"] != b.config.output_header
+    G = calls[0]["engine"]
+    assert G is not None and G.homotopy is True
+    assert all(np.all(np.asarray(G.unc[k]) == 0.0) for k in
+               ("sigma_ne", "sigma_te", "sigma_ni", "sigma_ti",
+                "sigma_jphi"))
+    assert v["route"] == "generate()" and v["passed"]
+    st = v["stages"]
+    assert st["loop"]["passed"] and st["loop"]["request_bit_identical"]
+    assert st["archived"]["passed"]
+    assert v["r_j"] == st["archived"]["r_j"]
+    assert v["dl_i"] == st["archived"]["dl_i"]
+    assert st["archived_coils"]["homotopy_pass"] is not None
+    # the record is the archived draw's (homotopy and post-hoc included)
+    assert "post_hoc" in v["record"]
+    # nothing of the user's run was touched
+    assert b.draw_rejections == ["sentinel"]
+    assert (os.path.getmtime(h5) if os.path.exists(h5) else None) == mtime
+    assert b.config.generation.n_inspec_target is None
+    assert getattr(b, "_sigma0_route", None) is None
+
+
+def test_the_sigma0_check_puts_all_solver_state_back(tmp_path,
+                                                    toy_bouquet_solver,
+                                                    monkeypatch):
+    """The one-way coil-bound mode is entered ONCE, at ``setup_solver``
+    (``bouquet.solver_state.enter_bounded_coil_mode``), BEFORE the
+    reconstruction's first solve -- so the reconstruction, the check and the
+    draws run one coil solve -- and recorded on the Baseline and the engine
+    record.  The check itself makes no entry; afterwards the solver object
+    carries exactly what it carried before: no coil-regularisation stash
+    left by the route's generate(), the settings and the equilibrium object
+    put back, the recorded bounds re-installed."""
+    from bouquet.solver_state import COIL_SOLVE_BOUNDED, coil_solve_mode
+    b = _bq(tmp_path)
+    events = []
+    import _engine_fake_gs as _fg
+    real_bounds = _fg.FakeTokaMaker.set_coil_bounds
+    real_solve = _fg.FakeTokaMaker.solve
+
+    def set_coil_bounds(self, bnd):
+        events.append(("bounds", bnd))
+        return real_bounds(self, bnd)
+
+    def solve(self, *a, **k):
+        events.append(("solve",))
+        return real_solve(self, *a, **k)
+
+    monkeypatch.setattr(_fg.FakeTokaMaker, "set_coil_bounds",
+                        set_coil_bounds)
+    monkeypatch.setattr(_fg.FakeTokaMaker, "solve", solve)
+    b.setup_solver()
+    fake = b.mygs
+    assert events == [("bounds", None)]           # entered at setup
+    assert coil_solve_mode(fake) == COIL_SOLVE_BOUNDED
+    _quiet(b.prepare_baseline)
+    assert ("bounds", None) not in events[1:]     # ... and only there
+    assert b.baseline.coil_solve_mode == COIL_SOLVE_BOUNDED
+    assert b.baseline.engine["coil_solve_mode"] == COIL_SOLVE_BOUNDED
+    del events[:]
+    assert not hasattr(fake, "_strong_coil_reg")
+    maxits0 = fake.settings.maxits
+    eq0 = fake.copy_eq()
+    v = _quiet(b.verify_sigma0_consistency)
+    assert v["passed"]
+    assert events[0] == ("solve",)                # no entry in the check
+    assert events[-1] == ("bounds", None)         # the recorded bounds back
+    assert coil_solve_mode(fake) == COIL_SOLVE_BOUNDED
+    assert not hasattr(fake, "_strong_coil_reg")  # generate()'s stash gone
+    assert fake.settings.maxits == maxits0
+    import pickle
+    assert pickle.dumps(fake.copy_eq()) == pickle.dumps(eq0)
+
+
+def test_a_rejected_sigma0_draw_fails_the_check(tmp_path,
+                                                toy_bouquet_solver,
+                                                monkeypatch):
+    """The route's homotopy fails at its first stage: the zero-perturbation
+    draw is rejected, so the check FAILS with the rejection -- the old
+    loop-only check could not see it."""
+    b = _bq(tmp_path)
+    b.setup_solver()
+    _quiet(b.prepare_baseline)
+    fake = b.mygs
+    real = type(fake).solve
+
+    def solve(self, *a, **k):
+        G = getattr(b, "_sigma0_route", None) or {}
+        G = G.get("draws")
+        if G is not None and G._cur is not None and \
+                G._cur["clock"].cur == "homotopy":
+            raise ValueError("Error in solve: Non-finite value (NaN/Inf) "
+                             "in solution")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(type(fake), "solve", solve)
+    v = _quiet(b.verify_sigma0_consistency)
+    assert v["passed"] is False
+    assert v["rejection"]["reason"] == "homotopy_infeasible"
+    assert v["stages"]["loop"]["passed"] is True   # the loop alone passes
+    assert v["stages"]["archived"] is None
+    # the loop-only function (kept) cannot see it
+    ctx = ED.context_from_run(b._engine_run, b.config.generation,
+                              b.baseline)
+    assert _quiet(ED.verify_zero_perturbation, ctx, b.mygs.toy)["passed"]
+
+
+@pytest.mark.parametrize("what", ["bootstrap", "l_i"])
+def test_an_archived_stage_miss_fails_the_sigma0_check(tmp_path,
+                                                       toy_bouquet_solver,
+                                                       monkeypatch, what):
+    """The archived-stage gate of the sigma=0 check (ac74b62; the 2026-10-06
+    review's mutant Z3 deleted it with every test green): the LOOP stage
+    passes and the draw is not rejected, but the state the draw ARCHIVES
+    misses the reconstruction -- its bootstrap 1 % off lambda_BS* (r_j
+    1e-3), or its l_i off by twice tol_li -- so the check FAILS."""
+    b = _bq(tmp_path)
+    b.setup_solver()
+    _quiet(b.prepare_baseline)
+    real = ED.zero_perturbation_archived_verdict
+
+    def verdict(ctx, jbs_carried, fin):
+        if what == "bootstrap":
+            jbs_carried = 1.01 * np.asarray(jbs_carried, dtype=float)
+        else:
+            fin = dict(fin, li=float(fin["li"]) + 2.0 * ctx.loop["tol_li"])
+        return real(ctx, jbs_carried, fin)
+    monkeypatch.setattr(ED, "zero_perturbation_archived_verdict", verdict)
+    v = _quiet(b.verify_sigma0_consistency)
+    assert "rejection" not in v
+    assert v["stages"]["loop"]["passed"] is True
+    assert v["stages"]["archived"]["passed"] is False
+    assert v["passed"] is False
+    if what == "bootstrap":
+        assert v["r_j"] > v["tolerances"]["rtol_j"]
+    else:
+        assert abs(v["dl_i"]) > v["tolerances"]["tol_li"]
+    # the control: unmodified, the same check passes
+    monkeypatch.setattr(ED, "zero_perturbation_archived_verdict", real)
+    assert _quiet(b.verify_sigma0_consistency)["passed"] is True

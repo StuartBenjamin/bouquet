@@ -396,7 +396,8 @@ def test_every_homotopy_solve_runs_under_the_cap(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("at", [1, 2])
-def test_a_capped_homotopy_solve_rejects_the_draw(tmp_path, monkeypatch, at):
+def test_a_capped_homotopy_stage_rolls_back_or_rejects(tmp_path, monkeypatch,
+                                                       at):
     # The owner's rule (2026-09-30): a capped homotopy STAGE is a failed
     # stage like any other.  CHANGED EXPECTED OUTCOME at at=2 (it asserted
     # the earlier "reject, never roll back" rule): pass 2 capped now ROLLS
@@ -581,3 +582,69 @@ def test_the_refresh_with_the_q0_row():
             <= s["tol_q0"]
         assert abs(r1["delivered"]["q0"] - ctx.q0_target) \
             <= eng.s["q0_tol"]
+
+
+# ---------------------------------------------------------------------------
+#  a failed rollback re-solve (any cause) rejects an engine draw
+# ---------------------------------------------------------------------------
+_NAN_ERROR = "Error in solve: Non-finite value (NaN/Inf) in solution"
+
+
+@pytest.mark.parametrize("maxits", [40, None])
+def test_a_failed_rollback_resolve_rejects_the_draw(tmp_path, monkeypatch,
+                                                     maxits):
+    """Pass 2 fails, the rollback re-solve fails for a reason other than the
+    cap: the draw is REJECTED with its own code -- with a cap set and with
+    ``engine_draw_solve_maxits=None`` (where nothing is ever a capped
+    solve).  Before, the draw went on from the failed re-solve ("stats may
+    be stale") and was archived."""
+    diags, rej, G, fake, seen = _generate_capped(
+        tmp_path / str(maxits), monkeypatch, maxits=maxits,
+        fail={2: _NAN_ERROR, 3: _NAN_ERROR})
+    assert diags == []
+    assert [r["reason"] for r in rej] == ["homotopy_rollback_failed"]
+    assert "Non-finite" in rej[0]["message"]
+    assert len(seen) == 3                       # pass 1, pass 2, rollback
+    assert G.cap_events == []                   # not a capped solve
+    assert [(e["stage"], e["after"], e["outcome"])
+            for e in G.rollback_failures] \
+        == [("homotopy_rollback", "failed stage", "rejected")]
+    from bouquet.TokaMaker_interface import DRAW_REJECTION_REASONS
+    assert "homotopy_rollback_failed" in DRAW_REJECTION_REASONS
+
+
+@pytest.mark.parametrize("maxits", [40, None])
+def test_a_failed_rollback_after_saturation_rejects_the_draw(
+        tmp_path, monkeypatch, maxits):
+    """The saturation rollback: pass 2 ends with a coil ON its bound
+    (treated as infeasible), the rollback re-solve fails -> rejected."""
+    from _engine_fake_gs import FakeTokaMaker
+    box = dict(n_h=0)
+
+    class _Counting(dict):
+        """The harness asks ``n in fail`` once per homotopy solve: that is
+        the homotopy solve counter."""
+
+        def __contains__(self, n):
+            box["n_h"] = n
+            return dict.__contains__(self, n)
+
+    real = FakeTokaMaker.get_coil_currents
+
+    def get_coil_currents(self):
+        c, x = real(self)
+        if box["n_h"] == 2:                     # pass 2: F1A on its 1 % bound
+            c = dict(c)
+            c["F1A"] = c["F1A"] * 1.01
+        return c, x
+
+    monkeypatch.setattr(FakeTokaMaker, "get_coil_currents",
+                        get_coil_currents)
+    diags, rej, G, fake, seen = _generate_capped(
+        tmp_path / f"sat{maxits}", monkeypatch, maxits=maxits,
+        fail=_Counting({3: _NAN_ERROR}))
+    assert diags == []
+    assert [r["reason"] for r in rej] == ["homotopy_rollback_failed"]
+    assert [(e["after"], e["outcome"]) for e in G.rollback_failures] \
+        == [("saturation", "rejected")]
+    assert len(seen) == 3                       # pass 1, pass 2, rollback

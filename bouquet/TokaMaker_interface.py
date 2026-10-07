@@ -135,6 +135,17 @@ DRAW_REJECTION_REASONS = {
                            "(the archived total at the draw's pressure) "
                            "failed; the draw's bootstrap would otherwise be "
                            "evaluated on a stale equilibrium",
+    # both paths (engine draws since 2026-10-04, legacy draws since the
+    # owner-approved 2026-10-05 change)
+    "homotopy_rollback_failed": "a draw's homotopy rollback re-solve "
+                                "(back at the last good stage, after a "
+                                "failed or saturated tighter stage) "
+                                "failed: the state left behind is not a "
+                                "converged solve, so the draw is never "
+                                "archived.  Engine draws: any reason other "
+                                "than the cap (the capped one is "
+                                "homotopy_maxits); legacy draws: any "
+                                "failure, capped or not",
     # engine draws (bouquet.engine_draws) only
     "kinetics_nonphysical": "an engine draw's DRAWN kinetics are outside "
                             "the physical domain of the bootstrap model "
@@ -6089,10 +6100,12 @@ def generate_bouquet(
                     stage="draw j_BS loop under the hard coil bounds "
                           f"(+/-{_hard * 100:.1f}%)")
         else:
-            # Don't call set_coil_bounds at all when no hard bounds are
-            # requested -- even set_coil_bounds(None) (which uses ±1e98)
-            # may put the underlying QP into bounded-mode and subtly
-            # change the iteration path.
+            # No hard bounds requested: install none.  (Bouquet.setup_solver
+            # already put the coil solve in OpenFUSIONToolkit's one-way
+            # bounded mode, at +/-1e98, before the reconstruction --
+            # bouquet.solver_state.enter_bounded_coil_mode -- so the draws
+            # and the reconstruction share one coil solver; a solver object
+            # built outside setup_solver may still be unbounded here.)
             if hasattr(mygs, '_coil_drift_bounds'):
                 delattr(mygs, '_coil_drift_bounds')
 
@@ -7314,6 +7327,32 @@ def generate_bouquet(
                                                     stage="homotopy_rollback",
                                                     seconds=_eng
                                                     .last_homotopy_solve_seconds())
+                                            else:
+                                                # an engine draw never goes
+                                                # on from a failed re-solve
+                                                _post_align_failed = True
+                                                _post_align_reason = (
+                                                    "homotopy_rollback_failed",
+                                                    "homotopy rollback",
+                                                    _rb_exc)
+                                                _eng.announce_rollback_failed(
+                                                    _rb_exc, "saturation")
+                                        else:
+                                            # a legacy draw never goes on
+                                            # from a failed re-solve either
+                                            # (owner-approved 2026-10-05)
+                                            _post_align_failed = True
+                                            _post_align_reason = (
+                                                "homotopy_rollback_failed",
+                                                "homotopy rollback",
+                                                _rb_exc)
+                                            print(f"  [homotopy] rollback "
+                                                  f"re-solve (after a "
+                                                  f"saturation) FAILED "
+                                                  f"({_rb_exc}) -> draw "
+                                                  f"REJECTED (homotopy_"
+                                                  f"rollback_failed)",
+                                                  flush=True)
                                         print(f"  [homotopy] WARN: "
                                               f"rollback re-solve failed "
                                               f"({_rb_exc}); stats may "
@@ -7406,6 +7445,29 @@ def generate_bouquet(
                                                 stage="homotopy_rollback",
                                                 seconds=_eng
                                                 .last_homotopy_solve_seconds())
+                                        else:
+                                            # an engine draw never goes on
+                                            # from a failed re-solve
+                                            _post_align_failed = True
+                                            _post_align_reason = (
+                                                "homotopy_rollback_failed",
+                                                "homotopy rollback", _rb_exc)
+                                            _eng.announce_rollback_failed(
+                                                _rb_exc, "failed stage")
+                                    else:
+                                        # a legacy draw never goes on from a
+                                        # failed re-solve either
+                                        # (owner-approved 2026-10-05)
+                                        _post_align_failed = True
+                                        _post_align_reason = (
+                                            "homotopy_rollback_failed",
+                                            "homotopy rollback", _rb_exc)
+                                        print(f"  [homotopy] rollback "
+                                              f"re-solve (after a failed "
+                                              f"stage) FAILED ({_rb_exc}) "
+                                              f"-> draw REJECTED "
+                                              f"(homotopy_rollback_failed)",
+                                              flush=True)
                                     print(f"  [homotopy] WARN: rollback "
                                           f"re-solve failed ({_rb_exc}); "
                                           f"stats may be stale")
@@ -7453,10 +7515,18 @@ def generate_bouquet(
                                 # re-derive the archived split from the
                                 # re-solved draw
                                 _jphi_new = np.asarray(_ph_jphi, dtype=float)
-                                _ji, _jb, _je = _decompose_draw_currents(
-                                    _jphi_new, _ph_spk, _ph_full,
-                                    _jctx.get('isolate_edge_jBS', True),
-                                    j_NBI, j_RF)
+                                if _eng is None:
+                                    _ji, _jb, _je = _decompose_draw_currents(
+                                        _jphi_new, _ph_spk, _ph_full,
+                                        _jctx.get('isolate_edge_jBS', True),
+                                        j_NBI, j_RF)
+                                else:
+                                    # the engine draw's own fixed parts, no
+                                    # clip (archival re-splits on the
+                                    # archived state)
+                                    _jb, _je = _ph_full, None
+                                    _ji = (_jphi_new - _ph_full
+                                           - _eng.solved_fixed())
                                 diagnostics['j_inductive'] = _ji
                                 diagnostics['j_BS'] = _jb
                                 diagnostics['j_BS_edge'] = _je
@@ -7887,6 +7957,12 @@ def generate_bouquet(
                 _dr_jphi_store = jphi_perturb
                 _dr_jBS_store = diagnostics["j_BS"]
                 _dr_jind_store = diagnostics["j_inductive"]
+        if _eng is not None:
+            # engine draw: j_BS and the fixed parts on the ARCHIVED
+            # equilibrium, the inductive the residual against the archived
+            # j_phi -- replaces the split above (legacy fixed parts, clip)
+            _dr_jBS_store, _dr_jind_store = _eng.archived_split(
+                diagnostics, _dr_jphi_store)
 
         store_equilibrium(
             header, count, full_path,
@@ -8530,11 +8606,16 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         ind_0, li_0 = 1.0, eq_stats_0['l_i']
         _save_psi()
         _update_bracket(ind_0, li_0)
+        # the (ind_factor, l_i) of the state _last_good_psi holds: a failed
+        # solve restores that psi, so it is also the inductive factor the
+        # restored state was solved with
+        _good = (ind_0, li_0)
 
         ind_1 = 1.05
         li_1_sec = _solve_and_get_li(ind_1)
         if li_1_sec is not None:
             _update_bracket(ind_1, li_1_sec)
+            _good = (ind_1, li_1_sec)
 
         print(f"[li match] target={li_target:.6f}  [estimator: li(3)/'iter']")
         print(f"[li match] iter 0: ind_factor={ind_0:.6f}  li={li_0:.6f}  err={li_0 - li_target:.6f}")
@@ -8598,11 +8679,15 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                     ind_new = ind_clamped
 
             # -- evaluate ---------------------------------------------------
-            ind_0, li_0 = ind_1, li_1_sec if li_1_sec is not None else li_0
+            # the secant's previous point is the last GOOD evaluation: a
+            # failed ind_1 has no l_i of its own and is never paired with
+            # another point's l_i
+            ind_0, li_0 = _good
             ind_1 = ind_new
             li_1_sec = _solve_and_get_li(ind_1)
             if li_1_sec is not None:
                 _update_bracket(ind_1, li_1_sec)
+                _good = (ind_1, li_1_sec)
 
             li_disp = f"{li_1_sec:.6f}" if li_1_sec is not None else "FAILED"
             err_disp = (f"{li_1_sec - li_target:.6f}"
@@ -8613,8 +8698,19 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
             print(f"[li match] WARNING: did not converge within "
                   f"{max_li_iters} iterations")
 
-        # Ensure the final state is from a converged solve
+        # Ensure the final state is from a converged solve.  The last solve
+        # failed: the solver goes back to the last good psi AND to the
+        # profile that psi was solved with, and the inductive factor handed
+        # on is that state's -- never the failed one, whose l_i was never
+        # achieved.
         if li_1_sec is None:
+            ind_1, li_1_sec = _good
+            print(f"[li match] last secant solve FAILED: restoring the last "
+                  f"good state ind_factor={ind_1:.6f}  li={li_1_sec:.6f}")
+            mygs.set_profiles(ffp_prof={
+                "type": "jphi-linterp",
+                "y": ind_1 * j_inductive_fit + j_BS_isolated,
+                "x": eqdsk.psi_N}, pp_prof=pp_prof)
             _restore_psi()
 
         _eq_stats_final = mygs.get_stats(li_normalization='iter', lcfs_pad=psi_pad)

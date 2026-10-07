@@ -46,6 +46,35 @@ from measure_engine import (_GEQ, _MESH, _OMAS, _PF, _TIME,  # noqa: E402
                             oft_importable)
 
 
+def run_probe(outdir, source="recon", engine="unified", sep="offset",
+              timeout=None):
+    """Run this probe in its own interpreter (``OFT_env`` is a per-process
+    singleton); return ``(returncode, json_or_None, log_tail, files)`` with
+    ``files`` the written g-files by kind (``recon``, ``bare``,
+    ``archive``).  Used by ``tests/test_gfile_written_contents_solver.py``."""
+    import json
+    import subprocess
+    os.makedirs(outdir, exist_ok=True)
+    proc = subprocess.run(
+        [sys.executable, os.path.abspath(__file__), outdir,
+         "--source", source, "--engine", engine, "--sep", sep],
+        env=_harness.subprocess_env(OMP_NUM_THREADS="1",
+                                    MKL_NUM_THREADS="1",
+                                    OPENBLAS_NUM_THREADS="1",
+                                    MPLBACKEND="Agg"),
+        capture_output=True, text=True, timeout=timeout)
+    tag = f"{source}_{engine}_{sep}"
+    js = os.path.join(outdir, f"baseline_gfile_frame_{tag}.json")
+    rec = None
+    if os.path.exists(js):
+        with open(js) as fh:
+            rec = json.load(fh)
+    files = {k: os.path.join(outdir, f"frame_{tag}_{k}.geqdsk")
+             for k in ("recon", "bare", "archive")}
+    return (proc.returncode, rec,
+            proc.stdout[-3000:] + "\n" + proc.stderr[-3000:], files)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("outdir")
@@ -55,6 +84,7 @@ def main():
     ap.add_argument("--sep", choices=("offset", "legacy"), default="offset")
     a = ap.parse_args()
     os.makedirs(a.outdir, exist_ok=True)
+    _harness.assert_bouquet_is_repo_local()
     if not oft_importable():
         raise SystemExit("OpenFUSIONToolkit is not importable")
     import h5py
@@ -65,12 +95,13 @@ def main():
     header = os.path.join(a.outdir, f"frame_{tag}")
     if a.source == "recon":
         b = bq.Bouquet.from_geqdsk(_GEQ, profiles=_PF, mesh=_MESH,
-                                   nthreads=1, n_draws=1, header=header)
+                                   nthreads=1, n_draws=1, header=header,
+                                   reconstruction_engine=a.engine)
     else:
         b = bq.Bouquet.from_imas(_OMAS, mesh=_MESH, time=_TIME, n_draws=1,
-                                 nthreads=1, header=header)
+                                 nthreads=1, header=header,
+                                 reconstruction_engine=a.engine)
     g = b.config.generation
-    g.reconstruction_engine = a.engine
     g.separatrix_pressure = a.sep
     b.setup_solver()
     bl = b.prepare_baseline()

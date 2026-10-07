@@ -20,9 +20,28 @@ state.  ``Bouquet.save_baseline_eqdsk`` (through
 * the writer refuses a missing record and a solver state that a later solve
   has moved; ``prepare_baseline`` arms it on the engine path.
 
-The stand-in solver writes the repository's synthetic g-file with its
-``PRES`` shifted to the solver frame (zero at ``psi_N = 1``) plus the
-requested ``lcfs_pressure`` -- what TokaMaker's ``save_eqdsk`` documents.
+WHAT THIS FILE CAN AND CANNOT TEST.  The stand-in solver writes the
+repository's synthetic g-file with its ``PRES`` shifted to the solver frame
+plus the requested ``lcfs_pressure`` -- i.e. the stand-in itself implements
+the solver's ``save_eqdsk(lcfs_pressure=)`` contract.  A ``PRES`` /
+``PPRIME`` read back from its files would therefore test the STAND-IN, not
+bouquet.  So the assertions here are on what BOUQUET decides and computes:
+the keyword arguments of every ``save_eqdsk`` call (above all the
+``lcfs_pressure`` value: the baseline's ``p_sep_applied``, each draw's own
+``p_sep``, or absent under "legacy"), that the reconstruction's save is the
+SAME call as the archive baseline's (same bytes for the same state), the
+records, and the refusals.  What the solver then writes -- the edge ``PRES``
+of a real g-file, ``PPRIME`` untouched -- is checked by the solver-marked
+twin ``tests/test_gfile_written_contents_solver.py`` (which runs the probe
+``tests/probes/probe_baseline_gfile_frame.py`` and parses its files; the
+probe itself was run on the fixed build at d874822, five arms).
+
+``test_a_written_gfile_parses_back_to_the_delivered_frame`` (2026-10-06,
+finding 6 of the second-pass review) parses the WRITTEN files back with the
+repository's reader: the stand-in's solver state is the synthetic g-file in
+the solver frame (zero edge pressure), so that test pins bouquet's half --
+the offset handed, the parse of every field, the offset reaching ``PRES``
+alone -- and its twin pins the solver's half.
 Solver-free; synthetic inputs only.
 """
 import contextlib
@@ -159,24 +178,16 @@ def test_the_reconstruction_gfile_is_the_archive_baselines_pressure_frame(
     # same state, same frame: the same bytes
     assert recon_bytes == arch_bytes
 
-    g_rec = _read_geqdsk(recon_path)
-    g_arc = _read_geqdsk(_bytes_to(tmp_path / "arch.geqdsk", arch_bytes))
-    g_ref = _read_geqdsk(EXAMPLE_GEQDSK)
-    np.testing.assert_array_equal(g_rec["PRES"], g_arc["PRES"])
-    # P' untouched by the offset (a constant has no derivative)
-    np.testing.assert_array_equal(g_rec["PPRIME"], g_ref["PPRIME"])
-    np.testing.assert_array_equal(g_arc["PPRIME"], g_ref["PPRIME"])
-    edge = float(g_rec["PRES"][-1])
-    want = p_sep if sep == "offset" else 0.0
-    # the written value is the 10-significant-digit g-file field
-    assert edge == pytest.approx(want, rel=1e-9, abs=1e-12)
-
-    # each draw's g-file carries ITS OWN p_sep (offset) or nothing (legacy)
-    for i, (raw, pd) in enumerate(zip(draw_bytes, p_draw)):
-        g = _read_geqdsk(_bytes_to(tmp_path / f"d{i}.geqdsk", raw))
-        np.testing.assert_array_equal(g["PPRIME"], g_ref["PPRIME"])
-        assert float(g["PRES"][-1]) == pytest.approx(
-            pd if sep == "offset" else 0.0, rel=1e-9, abs=1e-12)
+    # each draw's save asks for ITS OWN p_sep -- the edge value of the
+    # pressure the draw archived -- (offset) or for nothing (legacy).  (What
+    # the solver then writes into PRES is the live probe's to check.)
+    draw_saves = fake.saves[2:]
+    assert len(draw_saves) == 3 and len(draw_bytes) == 3
+    for kw, pd in zip(draw_saves, p_draw):
+        if sep == "offset":
+            assert kw["lcfs_pressure"] == pd
+        else:
+            assert "lcfs_pressure" not in kw
     if sep == "offset":
         assert len({p_sep, *p_draw}) == 4
 
@@ -190,12 +201,6 @@ def test_the_reconstruction_gfile_is_the_archive_baselines_pressure_frame(
     if fr is not None:
         assert fr["full"]["P_ax"] - fr["solver"]["P_ax"] == pytest.approx(
             arc["p_sep_applied"], rel=0, abs=1e-9 * max(1.0, p_sep))
-
-
-def _bytes_to(path, raw):
-    with open(str(path), "wb") as fh:
-        fh.write(raw)
-    return str(path)
 
 
 def test_the_writer_asks_for_the_record_offset_and_nothing_else():
@@ -265,9 +270,8 @@ def test_an_engine_prepare_baseline_arms_the_writer_with_its_own_p_sep(
     monkeypatch.setattr(be, "_lcfs_deviation_mm",
                         lambda mygs, pts: (2.5, 7.0))
     b = bq.Bouquet.from_geqdsk(TW._GEQ, profiles=TW._PF, mesh=TW._MESH,
-                               n_draws=1)
+                               n_draws=1, reconstruction_engine="unified")
     g = b.config.generation
-    g.reconstruction_engine = "unified"
     g.engine_rows = ["Ip"]
     g.separatrix_pressure = sep
 
@@ -293,5 +297,55 @@ def test_an_engine_prepare_baseline_arms_the_writer_with_its_own_p_sep(
         nr=257, nz=257, truncate_eq=True,
         lcfs_pad=float(b.config.source.psi_pad),
         **({"lcfs_pressure": p_sep} if sep == "offset" else {}))]
-    assert float(_read_geqdsk(path)["PRES"][-1]) == pytest.approx(
-        want, rel=1e-9, abs=1e-12)
+
+
+def _parse_tol(a):
+    """The g-file's own precision: 16.9E fields, ten significant digits."""
+    return 1e-9 * max(1.0, float(np.max(np.abs(np.asarray(a, dtype=float)))))
+
+
+def test_a_written_gfile_parses_back_to_the_delivered_frame(tmp_path):
+    """What a written g-file CONTAINS, parsed back with the repository's
+    reader (``bouquet.io.geqdsk._read_geqdsk``, the parser ``read_geqdsk``
+    builds on): the reconstruction's g-file written by
+    ``Bouquet.save_baseline_eqdsk`` under "offset" and under "legacy" from
+    the same stand-in state (the synthetic g-file in the solver frame, edge
+    pressure zero).  Under "offset" the edge ``PRES`` is the DELIVERED p_sep
+    (the record's ``p_sep_applied``) and ``PRES`` is the state's plus p_sep
+    everywhere; under "legacy" the edge is zero and ``PRES`` is the state's.
+    ``PPRIME``, ``QPSI``, ``FPOL`` and the boundary are the state's, within
+    the format's precision, in both."""
+    state = _read_geqdsk(EXAMPLE_GEQDSK)
+    p_state = np.asarray(state["PRES"], dtype=float)
+    p_state = p_state - p_state[-1]                  # the solver frame
+    got, rec_p = {}, {}
+    for sep in SEPS:
+        eng, res, rec, toy = TD._recon(separatrix_pressure=sep)
+        fake = FrameFake(toy)
+        b = _bouquet(fake, rec["edge_pressure"])
+        path = str(tmp_path / f"recon_{sep}.geqdsk")
+        _q(b.save_baseline_eqdsk, path)
+        got[sep] = _read_geqdsk(path)
+        rec_p[sep] = EP.delivered_p_sep(rec["edge_pressure"])
+    p_sep = rec_p["offset"]
+    assert p_sep > 0.0 and rec_p["legacy"] == 0.0
+    off, leg = got["offset"], got["legacy"]
+    tol = _parse_tol(p_state + p_sep)
+    # PRES: the delivered p_sep at the edge (offset), zero (legacy)
+    assert abs(float(off["PRES"][-1]) - p_sep) <= tol
+    assert abs(float(leg["PRES"][-1])) <= tol
+    np.testing.assert_allclose(off["PRES"], p_state + p_sep, rtol=0,
+                               atol=tol)
+    np.testing.assert_allclose(leg["PRES"], p_state, rtol=0, atol=tol)
+    np.testing.assert_allclose(np.asarray(off["PRES"]) - leg["PRES"],
+                               p_sep, rtol=0, atol=2 * tol)
+    # everything else is the state's, untouched by the offset
+    for name in ("PPRIME", "QPSI", "FPOL", "FFPRIM", "RBBBS", "ZBBBS"):
+        for g in (off, leg):
+            np.testing.assert_allclose(
+                g[name], state[name], rtol=0, atol=_parse_tol(state[name]),
+                err_msg=name)
+    for name in ("SIMAG", "SIBRY", "CURRENT", "BCENTR", "RMAXIS"):
+        for g in (off, leg):
+            assert float(g[name]) == pytest.approx(
+                float(state[name]), rel=1e-9, abs=0.0), name

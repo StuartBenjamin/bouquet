@@ -86,6 +86,109 @@ SAWTOOTH_SOURCE_INDEX = 701
 # if/when internal EC/IC/LH summation is wanted.
 
 
+def _local_step(grid, k, toward):
+    """The local time-step of the sorted, distinct *grid* at node *k*, on
+    the side of the time *toward* (the interval it lies in; at an end of the
+    grid, the end interval).  ``None`` for a grid of fewer than two times."""
+    if grid.size < 2:
+        return None
+    if toward >= grid[k]:
+        return float(grid[k + 1] - grid[k] if k + 1 < grid.size
+                     else grid[k] - grid[k - 1])
+    return float(grid[k] - grid[k - 1] if k > 0 else grid[1] - grid[0])
+
+
+def _entry_time_window(times, t_slice, base_times=None):
+    """``(k, dt, half_step)`` for matching a core_sources entry to the slice
+    time *t_slice* by its OWN per-slice *times*: *k* is the entry's slice
+    NEAREST t_slice, ``dt`` its distance, and ``half_step`` the acceptance
+    window -- HALF the local time-step of the entry's own time grid (the
+    interval t_slice lies in, or the end interval past either end).  An
+    entry with a single time uses the local step of *base_times* (the
+    core_profiles time base) at the node nearest t_slice, on the entry's
+    side.  When neither grid has a step (a single-time entry on a
+    single-time base) the window is float precision: the times must agree
+    to a few ulp.
+
+    The rule (owner-approved 2026-10-06, replacing the 1e-6 s absolute
+    match of 2026-10-05; the half-step value is recorded, to be confirmed):
+    nearest own slice, accepted within half a local step, otherwise the
+    caller REFUSES -- a driven current is never dropped to zero and never
+    read at another time."""
+    tt = np.asarray(times, dtype=float)
+    t_slice = float(t_slice)
+    k = int(np.argmin(np.abs(tt - t_slice)))
+    dt = abs(float(tt[k]) - t_slice)
+    grid = np.unique(tt)
+    if grid.size >= 2:
+        kg = int(np.argmin(np.abs(grid - tt[k])))
+        step = _local_step(grid, kg, t_slice)
+    else:
+        step = None
+        if base_times is not None:
+            bg = np.unique(np.asarray(base_times, dtype=float))
+            if bg.size >= 2:
+                kb = int(np.argmin(np.abs(bg - t_slice)))
+                step = _local_step(bg, kb, float(tt[k]))
+    if step is None:
+        half = 4.0 * float(np.spacing(max(abs(float(tt[k])), abs(t_slice))))
+    else:
+        half = 0.5 * step
+    return k, dt, half
+
+
+def _entry_time_why(t_slice, times, k, dt, half):
+    """Why an entry has no slice within half a step of *t_slice*."""
+    tt = np.asarray(times, dtype=float)
+    return (f"no profiles_1d slice within half a time-step of t = "
+            f"{t_slice:.9g} s (nearest own time {float(tt[k]):.9g} s, "
+            f"|dt| = {dt:.3g} s > {half:.3g} s, half its local time-step; "
+            f"its own times span {tt.min():.9g}-{tt.max():.9g} s)")
+
+
+def _entry_time_refusal(who, idn, why):
+    """The refusal text for a driven entry with no slice at this time."""
+    return (f"{who}: core_sources {idn.get('name')!r} (index "
+            f"{idn.get('index')}) carries a non-zero j_parallel but has "
+            f"{why}.  Refusing rather than reading its current at another "
+            "time or dropping it to zero (the half-step match rule, "
+            "owner-approved 2026-10-06)")
+
+
+def _source_slice_at(s, isrc, t_slice, n_time, base_times=None):
+    """``(profile, how)``: a ``core_sources`` entry's ``profiles_1d`` at the
+    slice *isrc* (time *t_slice*), or ``(None, why)`` when the entry has no
+    slice within half a local time-step of that time
+    (:func:`_entry_time_window`; the CALLER decides: a beam entry is
+    refused).  An entry carrying its own per-slice times is matched BY TIME
+    to its nearest slice (a model's entry may start later than the IDS time
+    base, so the list index is not the slice); one without them must have
+    exactly the IDS's number of slices, or it cannot be aligned and is
+    refused (``ValueError``) -- never its first slice taken in place of a
+    missing one.  The rule of ``bouquet.adapters._ids_source_slice``."""
+    pr = s.get("profiles_1d", [])
+    idn = s.get("identifier", {}) or {}
+    if not pr:
+        return None, "no profiles_1d"
+    times = [q.get("time") for q in pr]
+    if t_slice is not None and all(t is not None for t in times):
+        k, dt, half = _entry_time_window(times, t_slice, base_times)
+        if dt > half:
+            return None, _entry_time_why(t_slice, times, k, dt, half)
+        return pr[k], "matched by time"
+    if n_time is not None and len(pr) != n_time:
+        raise ValueError(
+            f"IMAS reader: core_sources {idn.get('name')!r} (index "
+            f"{idn.get('index')}) has {len(pr)} profiles_1d slices for "
+            f"{n_time} core_sources times and no per-slice time: it cannot be "
+            "aligned with the slice read")
+    if isrc >= len(pr):
+        raise ValueError(
+            f"IMAS reader: core_sources {idn.get('name')!r} (index "
+            f"{idn.get('index')}) has no profiles_1d slice {isrc}")
+    return pr[isrc], "by index"
+
+
 def _nearest_index(time_array, t: Optional[float], what: str) -> int:
     """Index of the slice nearest ``t`` (seconds) in ``time_array``."""
     ta = np.asarray(time_array, dtype=float)
@@ -872,23 +975,50 @@ def read_imas_baseline(
     j_BS = to_toroidal(j_boot)
 
     # --- NBI: sum beam-source parallel currents, then convert ---
+    # Each beam entry is read at the core_sources slice TIME, not at its list
+    # index (owner-approved 2026-10-05, the sawteeth entry's rule below and
+    # the engine IDS adapter's): an entry carrying its own per-slice times is
+    # matched to its NEAREST own slice -- one that starts later than the IDS
+    # time base was read one slice late, and a slice past its end from its
+    # FIRST slice.  The match is accepted within HALF the entry's local
+    # time-step (the core_profiles step for a single-time entry); otherwise
+    # the read is REFUSED (owner-approved 2026-10-06: before, a 1e-6 s
+    # absolute match dropped the beam to zero with a warning on any larger
+    # mismatch).  One without per-slice times must have the IDS's slice
+    # count, or it cannot be aligned and is refused.
     src_ids = dd.get("core_sources", {})
     isrc = _nearest_index(src_ids["time"], T, "core_sources") if src_ids.get("time") else ic
+    _src_tb = src_ids.get("time")
+    _src_nt = None if not _src_tb else len(_src_tb)
+    _src_t = (None if not _src_tb
+              else float(np.asarray(_src_tb, dtype=float)[isrc]))
     jnbi_par = np.zeros(n)
     for s in src_ids.get("source", []):
         if s.get("identifier", {}).get("index") == NBI_SOURCE_INDEX:
             pr = s.get("profiles_1d", [])
             if pr:
-                idx = isrc if len(pr) > isrc else 0
-                jnbi_par = jnbi_par + np.asarray(pr[idx]["j_parallel"], dtype=float)
+                q_nbi, how = _source_slice_at(s, isrc, _src_t, _src_nt,
+                                              cp_ids.get("time"))
+                if q_nbi is None:
+                    if any(qq.get("j_parallel") is not None and np.any(
+                            np.asarray(qq["j_parallel"], float) != 0.0)
+                           for qq in pr):
+                        raise ValueError(_entry_time_refusal(
+                            "IMAS reader", s.get("identifier") or {}, how))
+                    continue          # an all-zero entry: nothing to drop
+                jnbi_par = jnbi_par + np.asarray(q_nbi["j_parallel"], dtype=float)
     j_NBI = to_toroidal(cur_sign * jnbi_par)
     j_RF = np.zeros(n)   # never computed internally; user-supplied only
 
     # --- sawtooth model presence/amplitude at this slice (gate input only) ----
     # Read here because the dd (100s of MB) is not retained past this function.
     # "active" means the source EXISTS and carries a non-zero j_parallel at this
-    # time index: a declared-but-idle sawtooth source (all zeros before onset)
-    # must NOT admit a ramp slice to the q0 pin.
+    # SLICE TIME: a declared-but-idle sawtooth source (all zeros before onset)
+    # must NOT admit a ramp slice to the q0 pin.  The entry is read at the
+    # core_sources slice TIME, not at the list index (owner-approved
+    # 2026-10-05, the rule of the engine IDS adapter): a model's sawteeth
+    # entry may start later than the IDS time base -- it was then read one
+    # slice late, and at the last slice from its FIRST slice.
     sawtooth = {"source_index": SAWTOOTH_SOURCE_INDEX, "present": False,
                 "j_par_max_abs": 0.0, "active": False, "q0_dd": None}
     for s in src_ids.get("source", []):
@@ -896,8 +1026,15 @@ def read_imas_baseline(
             sawtooth["present"] = True
             pr = s.get("profiles_1d", [])
             if pr:
-                jsaw = np.asarray(pr[isrc if len(pr) > isrc else 0]
-                                  .get("j_parallel", []), dtype=float)
+                q_saw, how = _source_slice_at(s, isrc, _src_t, _src_nt,
+                                              cp_ids.get("time"))
+                sawtooth["slice"] = how
+                if q_saw is None:
+                    # no slice of the entry within half a step of this
+                    # time: not active here (a gate FLAG, not a current --
+                    # recorded in sawtooth["slice"], not refused)
+                    continue
+                jsaw = np.asarray(q_saw.get("j_parallel", []), dtype=float)
                 if jsaw.size and np.any(np.isfinite(jsaw)):
                     sawtooth["j_par_max_abs"] = max(
                         sawtooth["j_par_max_abs"],

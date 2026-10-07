@@ -299,7 +299,11 @@ class EngineDrawContext:
         self.sigma_p = float(pp @ self.dPq_star) / nn if nn > 0.0 else 0.0
         if not np.isfinite(self.sigma_p):
             self.sigma_p = 0.0
-        # ---- the reconstruction's delivered measurements (the reference)
+        # ---- the reconstruction's delivered measurements (the reference):
+        # EVERY reference quantity from the one delivered measurement, the
+        # flux range and the q-row radius included (not from G*, the last
+        # loop pass's geometry), so a zero-perturbation draw's deltas measure
+        # only its own reproduction of the delivered state
         m = eng.delivered_meas
         stats = m.get("stats") or {}
         from .engine import _full_frame
@@ -307,11 +311,12 @@ class EngineDrawContext:
         from .physics import SOLVER_Q0_PSI_N
         self.ref = dict(
             l_i=float(m["li"]), l_i_1=_f(m.get("li_1")),
-            q_row=float(m["q_row"]), q_row_psi_N=float(psi_q[0]),
+            q_row=float(m["q_row"]),
+            q_row_psi_N=float(m["geom"]["psi_q"][0]),
             q0_stats=_f(stats.get("q_0")),
             q0_stats_psi_N=float(SOLVER_Q0_PSI_N),
             q95=_f(stats.get("q_95")), beta_n=_f(full.get("beta_n")),
-            Ip=_f(m.get("Ip")), flux_range=_f(g.get("dpsi_dpsiN")))
+            Ip=_f(m.get("Ip")), flux_range=flux_range(m))
         if m.get("pressure_frames") is not None:
             self.ref["pressure_frames"] = _frames(m)
         # ---- the kinetic-grid base of the sampler
@@ -1209,6 +1214,13 @@ class GenerateEngineDraws:
         #: cap: the solver stops there), ``seconds``, ``outcome``
         #: (``"rolled_back"`` / ``"rejected"``), ``error``
         self.cap_events = []
+        #: every homotopy rollback re-solve that failed for another reason
+        #: than the cap (the draw is rejected, ``homotopy_rollback_failed``)
+        self.rollback_failures = []
+        #: set to a dict by ``Bouquet.verify_sigma0_consistency``'s route
+        #: (one zero-perturbation draw through ``generate()``): the loop
+        #: stage's and the archived state's verdicts are written into it
+        self.sigma0_probe = None
 
     # ---- the pressure the baseline re-solve and every draw use --------
     def solve_pressure(self, psi_N=None):
@@ -1316,6 +1328,26 @@ class GenerateEngineDraws:
         print(f"  [engine draw] {where}: the GS solve stopped at "
               f"engine_draw_solve_maxits={self.maxits}{sec} without "
               f"converging -> {what}", flush=True)
+        return ev
+
+    def announce_rollback_failed(self, exc, after):
+        """Print and record a homotopy rollback re-solve that failed for a
+        reason other than the cap: the draw is REJECTED
+        (``homotopy_rollback_failed``) -- an engine draw never goes on from a
+        failed solve, whatever its cause and whether or not a cap is set.
+        *after*: what triggered the rollback (``"saturation"`` /
+        ``"failed stage"``)."""
+        ev = dict(draw=(None if self._cur is None else self._cur["count"]),
+                  where="homotopy rollback re-solve",
+                  stage="homotopy_rollback", after=str(after),
+                  outcome="rejected",
+                  error=f"{type(exc).__name__}: {str(exc).strip()[:300]}")
+        if getattr(self, "rollback_failures", None) is None:
+            self.rollback_failures = []
+        self.rollback_failures.append(ev)
+        print(f"  [engine draw] homotopy rollback re-solve (after a "
+              f"{after}) FAILED ({ev['error']}) -> draw REJECTED "
+              f"(homotopy_rollback_failed)", flush=True)
         return ev
 
     def cap_solver(self, mygs):
@@ -1426,6 +1458,11 @@ class GenerateEngineDraws:
                        clock=clock, bnd_diag=bnd_diag)
         clock.start("homotopy")
         self._cur["draw"] = out
+        if getattr(self, "sigma0_probe", None) is not None:
+            # the zero-perturbation route: the loop stage, measured here
+            # before the homotopy moves anything
+            self.sigma0_probe["loop"] = zero_perturbation_loop_verdict(ctx,
+                                                                       out)
         sp = out["split"]
         jfix = sp["j_NBI"] + sp["j_RF"]
         rec = out["record"]
@@ -1456,6 +1493,43 @@ class GenerateEngineDraws:
         finally:
             clock.start("homotopy")
         return rec, jb_tor, jb_tor, jphi
+
+    def solved_fixed(self):
+        """``kappa x <j.B>_fix`` on the geometry the draw's last solved
+        request was composed on (the loop's, or the post-homotopy passes')."""
+        d = self._cur["draw"]
+        dp = d.get("passes_post_homotopy") or d["passes"]
+        return np.asarray(dp.last["parts"]["driven"], dtype=float)
+
+    def archived_split(self, diagnostics, j_phi):
+        """``(j_BS, j_inductive)`` of the archived draw against its archived
+        *j_phi*: the bootstrap and fixed parts of :meth:`post_hoc` (the
+        archived equilibrium's), the inductive the residual -- NEVER
+        clipped; a negative inductive is recorded, not altered."""
+        sp = self._cur["final_split"]
+        j_phi = np.asarray(j_phi, dtype=float)
+        j_ind = j_phi - sp["j_BS"] - sp["j_NBI"] - sp["j_RF"]
+        neg = j_ind < 0.0
+        diagnostics["engine"]["archived"]["split"] = dict(
+            convention=("j_phi: the archived equilibrium's achieved FSA "
+                        "current; j_BS: s_bs (1 + d_bs) scale Redl and "
+                        "j_NBI/j_RF: the fixed <j.B>, both times "
+                        "F<1/R>/<B^2> of the archived equilibrium; "
+                        "j_inductive: the residual (carries the pressure-"
+                        "driven term), never clipped"),
+            j_NBI=sp["j_NBI"].tolist(), j_RF=sp["j_RF"].tolist(),
+            n_negative_inductive=int(np.sum(neg)),
+            min_inductive=float(np.min(j_ind)),
+            negative_inductive_psi_N=(
+                None if not np.any(neg) else
+                [float(self.ctx.psi[neg].min()),
+                 float(self.ctx.psi[neg].max())]))
+        if np.any(neg):
+            print(f"  [engine draw split] NOTE: the residual inductive is "
+                  f"negative on {int(np.sum(neg))} nodes (min "
+                  f"{float(np.min(j_ind)):.3e} A/m^2); recorded, not "
+                  "clipped", flush=True)
+        return np.asarray(sp["j_BS"], dtype=float).copy(), j_ind
 
     def mark(self, stage):
         if self._cur is not None:
@@ -1496,6 +1570,21 @@ class GenerateEngineDraws:
                   "loop's"))
         if fin.get("pressure_frames") is not None:
             rec["archived"]["pressure_frames"] = _frames(fin)
+        # the archived split ON the archived equilibrium: the draw's
+        # bootstrap model (x* held: s_bs (1 + d_bs) x scale x Redl) and its
+        # fixed parts, both converted with THIS state's F<1/R>/<B^2>; the
+        # residual against the archived j_phi is :meth:`archived_split`'s
+        from .engine import conversion_factor
+        kap = conversion_factor(fin["geom"])
+        dpl = cur["draw"].get("passes_post_homotopy") or cur["draw"]["passes"]
+        fx = self.ctx.c.jB_fix_parts
+        cur["final_split"] = dict(
+            j_BS=(1.0 + float(dpl.last["amp"].get("d_bs", 0.0)))
+            * self.ctx.s_bs * kap * float(cur["draw"]["inputs"].scale)
+            * np.asarray(fin["redl"], dtype=float),
+            j_NBI=kap * np.asarray(fx["nbi"], dtype=float),
+            j_RF=kap * (np.asarray(fx["rf"], dtype=float)
+                        + np.asarray(fx.get("other", 0.0), dtype=float)))
         rec["archived"]["deltas"] = dict(
             l_i_3=float(fin["li"]) - float(self.ctx.ref["l_i"]),
             l_i_1=(None if (rec["archived"]["l_i_1"] is None
@@ -1504,6 +1593,9 @@ class GenerateEngineDraws:
             **flux_range_change(rec["archived"]["flux_range"],
                                 self.ctx.ref["flux_range"]))
         rec["post_hoc"] = v
+        if getattr(self, "sigma0_probe", None) is not None:
+            self.sigma0_probe["archived"] = zero_perturbation_archived_verdict(
+                self.ctx, cur["draw"]["jbs_used"], fin)
         _jl = diagnostics.get("jbs_loop") or {}
         if _jl.get("post_homotopy") is not None:
             rec["post_homotopy"] = _jl["post_homotopy"]
@@ -1663,33 +1755,23 @@ def context_from_run(run, gc, bl):
 # ---------------------------------------------------------------------------
 #  verify_sigma0_consistency under the engine
 # ---------------------------------------------------------------------------
-def verify_zero_perturbation(ctx, backend, *, label="sigma=0 engine draw"):
-    """The engine draw at zero perturbation (bootstrap scale 1.0) from the
-    backend's current state: the request identity, and the delivered draw
-    against the reconstruction -- ``r_j`` / ``r_I`` of the draw's bootstrap
-    against ``lambda_BS*`` (the draw's final parallel weights), ``dl_i``,
-    ``dq0`` (at the row radius and at the solver's q0 radius), ``dq95``.
-    ``passed``: the request is bit-identical, the loop converged,
-    ``r_j <= rtol_j``, ``r_I <= rtol_Ip`` and ``|dl_i| <= tol_li`` -- the
-    draw-route rule of the legacy check, at the unchanged loop
-    tolerances."""
-    from .jbs_loop import JBSNotConverged, jsonable, profile_residuals
+def _zero_perturbation_tolerances(ctx):
     s = ctx.loop
-    out = dict(invariant="engine-draw", tolerances=dict(
-        rtol_j=s["rtol_j"], rtol_Ip=s["rtol_Ip"], tol_li=s["tol_li"]),
-        criterion=("pass-1 request bit-identical to the stored request, "
-                   "loop converged, r_j <= rtol_j, r_I <= rtol_Ip, "
-                   "|l_i(draw) - l_i*| <= tol_li; q0/q95 reported"))
-    try:
-        d = run_draw(ctx, backend, ctx.zero_inputs(), label=label)
-    except JBSNotConverged as e:
-        out.update(passed=False, loop_converged=False,
-                   error=f"{type(e).__name__}: {str(e)[:300]}",
-                   record=jsonable(getattr(e, "record", None)))
-        return out
+    return dict(rtol_j=s["rtol_j"], rtol_Ip=s["rtol_Ip"], tol_li=s["tol_li"])
+
+
+def zero_perturbation_loop_verdict(ctx, d):
+    """The zero-perturbation verdict of a draw's LOOP stage (the delivered
+    loop state of :func:`run_draw` output *d*, before any homotopy): the
+    request identity, convergence, ``r_j`` / ``r_I`` of the draw's bootstrap
+    against ``lambda_BS*`` (the draw's final parallel weights), ``dl_i``,
+    ``dq0`` (row radius and the solver's q0 radius), ``dq95``; ``passed`` at
+    the loop tolerances."""
+    from .jbs_loop import profile_residuals
+    from .engine import conversion_factor
+    s = ctx.loop
     rec = d["record"]
     meas = d["passes"].last
-    from .engine import conversion_factor
     w = meas["geom"]["w_lin"] * conversion_factor(meas["geom"])
     cmp_ = profile_residuals(d["jbs_used"], ctx.lam, w, ctx.psi,
                              float(ctx.c.Ip))
@@ -1699,7 +1781,7 @@ def verify_zero_perturbation(ctx, backend, *, label="sigma=0 engine draw"):
     ok = bool(ident["pass1_request_bit_identical"] and conv
               and cmp_["r_j"] <= s["rtol_j"] and cmp_["r_I"] <= s["rtol_Ip"]
               and abs(dl["l_i_3"]) <= s["tol_li"])
-    out.update(
+    return dict(
         passed=ok, request_bit_identical=ident["pass1_request_bit_identical"],
         request_max_abs_diff=ident["pass1_request_max_abs_diff"],
         loop_converged=conv, n_passes=int(rec["loop"]["n_passes"]),
@@ -1711,12 +1793,72 @@ def verify_zero_perturbation(ctx, backend, *, label="sigma=0 engine draw"):
                    else rec["delivered"]["q0_stats"] - ctx.ref["q0_stats"]),
         dq0_stats_psi_N=float(ctx.ref["q0_stats_psi_N"]),
         dq95=dl["q95"], amplitude=rec["amplitude"]["final"].get("a_ind"),
-        solves=rec["solves"], record=rec)
-    print(f"[sigma0-check engine] {'PASS' if ok else 'FAIL'}: request "
-          f"{'bit-identical' if ident['pass1_request_bit_identical'] else 'DIFFERS'}"
-          f"; loop {'converged' if conv else 'NOT converged'} in "
-          f"{out['n_passes']} pass(es); r_j={cmp_['r_j']:.3e} (tol "
-          f"{s['rtol_j']:.0e}) r_I={cmp_['r_I']:.3e} (tol {s['rtol_Ip']:.0e})"
-          f" |dl_i|={abs(dl['l_i_3']):.2e} (tol {s['tol_li']:.0e}); dq0="
-          f"{dl['q0']:+.2e} (psi_N {ctx.ref['q_row_psi_N']:g})", flush=True)
+        solves=rec["solves"])
+
+
+def zero_perturbation_archived_verdict(ctx, jbs_carried, fin):
+    """The zero-perturbation verdict of a draw's ARCHIVED state (after the
+    homotopy and the post-homotopy passes): *fin* is the backend's final
+    measurement of that state, *jbs_carried* the bootstrap the draw carries
+    there.  ``r_j`` / ``r_I`` of that bootstrap against ``lambda_BS*`` on the
+    archived geometry, ``dl_i``, ``dq0`` at the row radius, ``dq95``, the
+    flux-range change; ``passed`` at the same loop tolerances."""
+    from .jbs_loop import profile_residuals
+    from .engine import complete_geometry, conversion_factor
+    s = ctx.loop
+    g = complete_geometry(fin["geom"])
+    w = g["w_lin"] * conversion_factor(g)
+    cmp_ = profile_residuals(np.asarray(jbs_carried, dtype=float), ctx.lam,
+                             w, ctx.psi, float(ctx.c.Ip))
+    dli = float(fin["li"]) - float(ctx.ref["l_i"])
+    stats = fin.get("stats") or {}
+    q95 = _f(stats.get("q_95"))
+    out = dict(
+        r_j=float(cmp_["r_j"]), r_I=float(cmp_["r_I"]), dl_i=dli,
+        dq0=float(fin["q_row"]) - float(ctx.ref["q_row"]),
+        dq0_psi_N=float(ctx.ref["q_row_psi_N"]),
+        dq95=(None if (q95 is None or ctx.ref.get("q95") is None)
+              else float(q95) - float(ctx.ref["q95"])),
+        **flux_range_change(flux_range(fin), ctx.ref["flux_range"]))
+    out["passed"] = bool(out["r_j"] <= s["rtol_j"]
+                         and out["r_I"] <= s["rtol_Ip"]
+                         and abs(dli) <= s["tol_li"])
+    return out
+
+
+def verify_zero_perturbation(ctx, backend, *, label="sigma=0 engine draw"):
+    """The engine LOOP at zero perturbation (bootstrap scale 1.0) from the
+    backend's current state -- the loop stage of a draw only, NOT the route
+    ``generate()`` runs (no warm start, coil regularisation swap, isoflux
+    re-point, homotopy or post-homotopy stage; ``Bouquet.
+    verify_sigma0_consistency`` runs that route).  The request identity and
+    the delivered loop state against the reconstruction
+    (:func:`zero_perturbation_loop_verdict`); ``passed``: the request is
+    bit-identical, the loop converged, ``r_j <= rtol_j``, ``r_I <=
+    rtol_Ip`` and ``|dl_i| <= tol_li`` -- the unchanged loop tolerances."""
+    from .jbs_loop import JBSNotConverged, jsonable
+    s = ctx.loop
+    out = dict(invariant="engine-draw",
+               tolerances=_zero_perturbation_tolerances(ctx),
+               criterion=("pass-1 request bit-identical to the stored "
+                          "request, loop converged, r_j <= rtol_j, r_I <= "
+                          "rtol_Ip, |l_i(draw) - l_i*| <= tol_li; q0/q95 "
+                          "reported"))
+    try:
+        d = run_draw(ctx, backend, ctx.zero_inputs(), label=label)
+    except JBSNotConverged as e:
+        out.update(passed=False, loop_converged=False,
+                   error=f"{type(e).__name__}: {str(e)[:300]}",
+                   record=jsonable(getattr(e, "record", None)))
+        return out
+    v = zero_perturbation_loop_verdict(ctx, d)
+    out.update(v, record=d["record"])
+    ok = v["passed"]
+    print(f"[sigma0-check engine loop] {'PASS' if ok else 'FAIL'}: request "
+          f"{'bit-identical' if v['request_bit_identical'] else 'DIFFERS'}"
+          f"; loop {'converged' if v['loop_converged'] else 'NOT converged'}"
+          f" in {v['n_passes']} pass(es); r_j={v['r_j']:.3e} (tol "
+          f"{s['rtol_j']:.0e}) r_I={v['r_I']:.3e} (tol {s['rtol_Ip']:.0e})"
+          f" |dl_i|={abs(v['dl_i']):.2e} (tol {s['tol_li']:.0e}); dq0="
+          f"{v['dq0']:+.2e} (psi_N {ctx.ref['q_row_psi_N']:g})", flush=True)
     return out

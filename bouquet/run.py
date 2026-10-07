@@ -37,8 +37,56 @@ if TYPE_CHECKING:
 # already imports from TokaMaker_interface).  Re-exported here because the
 # original home is the documented one and callers import it from this module.
 from .utils import _shape_from_boundary  # noqa: F401  (compatibility re-export)
-from .edge_pressure import (resolve_edge_pressure, solver_pax,
+from .edge_pressure import (NegativeSeparatrixPressure,
+                            resolve_edge_pressure, solver_pax,
                             solver_pp_profile, solver_pprime)
+
+
+def _baseline_negative_psep_named(fn):
+    """``prepare_baseline``: a :class:`~bouquet.edge_pressure.
+    NegativeSeparatrixPressure` raised while the BASELINE is built (the
+    g-file reconstruction, the IMAS forward solve or the unified engine) is
+    re-raised naming the object refused and why (disclosed 2026-10-06: the
+    refusal of c709aae reaches the baseline on the default legacy path, not
+    only the draws)."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(self, *a, **k):
+        try:
+            return fn(self, *a, **k)
+        except NegativeSeparatrixPressure as exc:
+            src = type(getattr(self.config, "source", None)).__name__
+            eng = getattr(self.config.generation, "reconstruction_engine",
+                          "legacy")
+            raise NegativeSeparatrixPressure(
+                f"prepare_baseline REFUSED THE BASELINE (source "
+                f"{src}, reconstruction_engine={eng!r}): the input's own "
+                "pressure at the separatrix (psi_N = 1, as the solver is "
+                "handed it: thermal + impurity + fast) is negative, which "
+                "is unphysical input; under separatrix_pressure='offset' "
+                "(the default) it would raise the axis-pressure target and "
+                "write a negative boundary PRES.  Correct the input's edge "
+                "profiles, or set generation.separatrix_pressure='legacy' "
+                "(which never reads the edge value) to build it as before "
+                f"2026-10-04.  [{exc}]") from exc
+    return wrapper
+
+
+def _zero_perturbation_env(env):
+    """The uncertainty envelope of ``generate()`` with every sigma zero (the
+    shapes, length scales and baselines kept): the zero-perturbation draw
+    of ``verify_sigma0_consistency``'s engine route."""
+    import numpy as np
+    out = dict(env)
+    for k in ("sigma_ne", "sigma_te", "sigma_ni", "sigma_ti", "sigma_jphi"):
+        if out.get(k) is not None:
+            out[k] = np.zeros_like(np.asarray(out[k], dtype=float))
+    if out.get("aux_sigmas"):
+        out["aux_sigmas"] = {
+            c: np.zeros_like(np.asarray(v, dtype=float))
+            for c, v in out["aux_sigmas"].items()}
+    return out
 
 
 def _engine_gate(config):
@@ -76,7 +124,8 @@ class Bouquet:
     @classmethod
     def from_geqdsk(cls, geqdsk_path, *, profiles, mesh,
                     n_draws=20, header="bouquet", cocos=1, time=None,
-                    impurity_Z=6.0, **solver_kwargs) -> "Bouquet":
+                    impurity_Z=6.0, reconstruction_engine=None,
+                    **solver_kwargs) -> "Bouquet":
         """Minimal constructor for the reconstruction path (g-file + profiles).
 
         ``profiles`` is an IDA ``.cdf`` or a p-file (auto-detected).
@@ -86,18 +135,30 @@ class Bouquet:
         Extra keyword args go to :class:`SolverConfig` (e.g. ``order``,
         ``nthreads``). Reach into ``bq.uncertainty`` / ``bq.generation``
         afterwards for the advanced knobs.
+
+        ``reconstruction_engine`` (``None``: the :class:`GenerationConfig`
+        default, ``"legacy"``) selects the reconstruction engine at
+        construction.  With ``"unified"`` the legacy-path workflow settings
+        below are NOT set: the unified engine never reads them and refuses
+        them when changed from their defaults.
         """
         from .config import (BouquetConfig, SolverConfig, ReconstructionSource,
                              GenerationConfig)
+        gkw = ({} if reconstruction_engine is None
+               else dict(reconstruction_engine=reconstruction_engine))
         cfg = BouquetConfig(
             source=ReconstructionSource(geqdsk_path=geqdsk_path,
                                         profiles_path=profiles,
                                         cocos=cocos, time=time,
                                         impurity_Z=impurity_Z),
             solver=SolverConfig(mesh_path=mesh, **solver_kwargs),
-            generation=GenerationConfig(n_equils=n_draws),
+            generation=GenerationConfig(n_equils=n_draws, **gkw),
             output_header=header,
         )
+        if cfg.generation.reconstruction_engine == "unified":
+            # the legacy-path workflow settings below have no engine meaning
+            # (refused there when not at their defaults)
+            return cls(cfg)
         # geqdsk validated default workflow: the standard flagship l_i loop
         # (Fix C / perturb_jind_in_anchor drops draws on stiff geqdsks).
         cfg.generation.perturb_jind_in_anchor = False
@@ -113,6 +174,7 @@ class Bouquet:
                   n_draws=20, header="bouquet",
                   ida_path=None, LCFS_geqdsk=None, impurity_Z=6.0,
                   kinetic_source=None, anchor_pressure_to_equilibrium=False,
+                  reconstruction_engine=None,
                   **solver_kwargs) -> "Bouquet":
         """Minimal constructor for the IMAS/OMAS path (no reconstruction).
 
@@ -128,24 +190,38 @@ class Bouquet:
         boundary outline as the isoflux target, for when you have a better
         separatrix for the slice than the dd carries (typically a magnetics-only
         reconstruction). Omit it to use the source's own boundary.
+
+        ``reconstruction_engine`` (``None``: the :class:`GenerationConfig`
+        default, ``"legacy"``) selects the reconstruction engine at
+        construction.  With ``"unified"`` the legacy-path workflow settings
+        below (diff+C, the full-profile decomposition) are NOT set: the
+        unified engine never reads them and refuses them when changed from
+        their defaults.
         """
         from .config import (BouquetConfig, SolverConfig, ImasSource,
                              GenerationConfig)
         if kinetic_source is None:
             kinetic_source = "ida_hybrid" if ida_path else "fuse"
+        gkw = ({} if reconstruction_engine is None
+               else dict(reconstruction_engine=reconstruction_engine))
         cfg = BouquetConfig(
             source=ImasSource(ids_path=ids_path, time=time, ida_path=ida_path,
                               impurity_Z=impurity_Z, LCFS_geqdsk=LCFS_geqdsk),
             solver=SolverConfig(mesh_path=mesh, **solver_kwargs),
             generation=GenerationConfig(n_equils=n_draws,
                                         kinetic_source=kinetic_source,
-                                        anchor_pressure_to_equilibrium=anchor_pressure_to_equilibrium),
+                                        anchor_pressure_to_equilibrium=anchor_pressure_to_equilibrium,
+                                        **gkw),
             output_header=header,
         )
         # IDA-hybrid: source the kinetic sigma envelopes from the same IDA .cdf
         # (resolve_uncertainty fires its IDA branch whenever unc.ida_path is set).
         if ida_path:
             cfg.uncertainty.ida_path = ida_path
+        if cfg.generation.reconstruction_engine == "unified":
+            # the legacy-path workflow settings below have no engine meaning
+            # (refused there when not at their defaults)
+            return cls(cfg)
         # IMAS validated default workflow: diff+C (anchor bootstrap to the source
         # via the fixed FUSE_jBS-SWB diff, and perturb j_ind in the recon-anchor
         # to avoid the find_optimal_scale/corrector homogenization).
@@ -373,6 +449,15 @@ class Bouquet:
         # the historical pull toward zero + small VSC freedom.  Also publishes
         # the WEAK exploratory reg the draw path swaps in for the SWB phase.
         self._apply_coil_reg(mygs)
+
+        # The coil solve: OpenFUSIONToolkit's bounded (BVLS) mode, entered
+        # ONCE, here, before the reconstruction's first solve, on every path
+        # -- so the reconstruction, the sigma=0 check and every draw use one
+        # coil solver whatever order they run in (the mode is one-way and
+        # every generate() enters it; see bouquet.solver_state).  Installs
+        # +/-1e98, which never binds.
+        from .solver_state import enter_bounded_coil_mode
+        enter_bounded_coil_mode(mygs)
 
         self.mygs = mygs
         self._myOFT = myOFT          # keep the env alive
@@ -701,6 +786,7 @@ class Bouquet:
             )
 
     # ── stage 2: baseline (reconstruction OR imas) ----------------------
+    @_baseline_negative_psep_named
     def prepare_baseline(self) -> "Baseline":
         """Resolve the baseline from ``config.source`` and cache it.
 
@@ -719,6 +805,7 @@ class Bouquet:
                    "legacy") == "unified":
             from .engine import prepare_engine_baseline
             _bl = prepare_engine_baseline(self)
+            self._record_coil_solve_mode(_bl)
             self._report_sigma_exceeds_profile(_bl)
             self._remember_baseline_state()
             return _bl
@@ -803,9 +890,24 @@ class Bouquet:
         # solver chatter was captured to baseline.reconstruction_log).
         if self.baseline.reconstruction_metrics is not None:
             self._print_reconstruction_summary()
+        self._record_coil_solve_mode(self.baseline)
         self._report_sigma_exceeds_profile(self.baseline)
         self._remember_baseline_state()
         return self.baseline
+
+    def _record_coil_solve_mode(self, bl) -> None:
+        """Record the coil-solve mode the solver ran the reconstruction in --
+        ``"bounded"`` (entered at :meth:`setup_solver`,
+        :func:`bouquet.solver_state.enter_bounded_coil_mode`), else
+        ``"unknown"`` -- on *bl* (``Baseline.coil_solve_mode``, both paths)
+        and, under the unified engine, in its record (``Baseline.engine[
+        "coil_solve_mode"]``, archived with it)."""
+        from .solver_state import coil_solve_mode
+        if bl is None or self.mygs is None:
+            return
+        bl.coil_solve_mode = coil_solve_mode(self.mygs)
+        if isinstance(getattr(bl, "engine", None), dict):
+            bl.engine["coil_solve_mode"] = bl.coil_solve_mode
 
     def _remember_baseline_state(self) -> None:
         """Fingerprint the solver state :meth:`prepare_baseline` leaves (a
@@ -6234,41 +6336,140 @@ class Bouquet:
 
     def _verify_sigma0_engine(self):
         """``verify_sigma0_consistency`` under ``reconstruction_engine=
-        "unified"``: the engine draw (:func:`bouquet.engine_draws.
-        verify_zero_perturbation`) at zero perturbation and bootstrap scale
-        1.0, from the state this method was called on (restored after).
-        ``passed``: the first request is BIT-IDENTICAL to the stored request,
-        the draw's loop converged, and its bootstrap is within ``jbs_rtol_j``
-        / ``jbs_rtol_Ip`` of the reconstruction's with ``|l_i - l_i*| <=
-        jbs_tol_li`` -- the draw-route rule of the legacy check, at the
-        unchanged loop tolerances; ``dq0`` (at its labelled radius) and
-        ``dq95`` are reported beside them."""
-        from .engine import engine_draw_maxits
-        from .engine_draws import (context_from_run, tokamaker_backend,
-                                   verify_zero_perturbation)
-        run = self._engine_run
+        "unified"``: ONE draw through the very route ``generate()`` runs --
+        :meth:`generate` itself, ``n=1``, every perturbation zero and the
+        bootstrap scale 1.0, archived into a temporary file (the
+        configuration's own archive is never touched): generate_bouquet's
+        baseline re-solve and warm start, its strong coil regularisation and
+        the weak one swapped in for the loop, the isoflux re-pointed to the
+        draw's own boundary, the homotopy and the post-homotopy stage, under
+        ``engine_draw_solve_maxits``.  Judged on that route at the unchanged
+        loop tolerances, stage by stage:
+
+        * ``stages["loop"]`` -- the draw's delivered loop state (before the
+          homotopy): the first request BIT-IDENTICAL to the stored request,
+          the loop converged, its bootstrap within ``jbs_rtol_j`` /
+          ``jbs_rtol_Ip`` of ``lambda_BS*``, ``|dl_i| <= jbs_tol_li``;
+        * ``stages["archived"]`` -- the state the draw ARCHIVES (after the
+          homotopy and the post-homotopy passes): the bootstrap it carries
+          within ``jbs_rtol_j`` / ``jbs_rtol_Ip`` of ``lambda_BS*`` on that
+          geometry and ``|dl_i| <= jbs_tol_li``; the coil drift, the
+          homotopy stage and the flux-range change reported;
+        * a draw that is REJECTED fails (``rejection``).
+
+        ``passed`` needs every stage.  The top-level ``r_j`` / ``r_I`` /
+        ``dl_i`` / ``dq0`` / ``dq95`` are the ARCHIVED state's (what a draw
+        delivers); the identity and loop fields are the loop stage's.
+
+        The solver state is put back afterwards -- ALL of it
+        (:class:`bouquet.solver_state.SolverState`: the equilibrium object
+        with psi, coil currents, coil regularisation, targets, profiles and
+        the isoflux / saddle constraints; the settings; the VSC gains; the
+        coil bounds on record; the coil-regularisation stashes generate()
+        leaves on the solver object) -- and so is every attribute
+        :meth:`generate` sets on this object.  The one-way coil-bound mode
+        every generate() enters was entered once at :meth:`setup_solver`
+        (:func:`bouquet.solver_state.enter_bounded_coil_mode`), before the
+        reconstruction, so the check, a second check and the generate()
+        after it start from bit for bit the same state and run the same
+        coil solve the reconstruction did."""
+        import os
+        import tempfile
+        from .jbs_loop import jsonable
+        from .solver_state import SolverState
         gc = self.config.generation
-        ctx = context_from_run(run, gc, self.baseline)
-        from types import SimpleNamespace
-        c = ctx.c
-        b = tokamaker_backend(
-            self.mygs, SimpleNamespace(psi_N=c.psi_N, pressure=c.pressure,
-                                       Ip=c.Ip, kinetics=c.kinetics),
-            psi_pad=run["psi_pad"], q_psi=run.get("q_psi"),
-            maxits=engine_draw_maxits(gc), edge_pressure=ctx.edge)
-        snap = (self.mygs.copy_eq() if hasattr(self.mygs, "copy_eq")
-                else None)
+        mygs = self.mygs
+        _guard = SolverState.capture(mygs)
+        keep_attrs = ("diagnostics", "generation_log", "draw_rejections",
+                      "solve_failures", "engine_draw_cap_events",
+                      "_resolved_uncertainty", "_sigma0_route")
+        saved = {k: self.__dict__[k] for k in keep_attrs
+                 if k in self.__dict__}
+        saved_cfg = dict(header=self.config.output_header,
+                         target=gc.n_inspec_target, cap=gc.max_total_draws)
+        probe = {}
+        out = dict(invariant="engine-draw", route="generate()",
+                   criterion=(
+                       "the generate() draw route with every perturbation "
+                       "zero: loop stage -- pass-1 request bit-identical, "
+                       "loop converged, r_j <= rtol_j, r_I <= rtol_Ip, "
+                       "|dl_i| <= tol_li; archived state (after the homotopy "
+                       "and the post-homotopy stage) -- r_j <= rtol_j, r_I "
+                       "<= rtol_Ip, |dl_i| <= tol_li; not rejected"))
         try:
-            out = verify_zero_perturbation(ctx, b)
+            with tempfile.TemporaryDirectory(prefix="bq_sigma0_") as td:
+                self.config.output_header = os.path.join(td, "sigma0_route")
+                gc.n_inspec_target = None
+                gc.max_total_draws = None
+                self._sigma0_route = probe
+                try:
+                    diags = self.generate(n=1)
+                finally:
+                    self._sigma0_route = None
+                rej = list(getattr(self, "draw_rejections", []) or [])
         finally:
-            if snap is not None:
-                self.mygs.replace_eq(source_eq=snap)
+            self.config.output_header = saved_cfg["header"]
+            gc.n_inspec_target = saved_cfg["target"]
+            gc.max_total_draws = saved_cfg["cap"]
+            for k in keep_attrs:
+                if k in saved:
+                    self.__dict__[k] = saved[k]
+                else:
+                    self.__dict__.pop(k, None)
+            # every piece of solver state the route touched (the isoflux
+            # targets included: they are in the equilibrium object)
+            _guard.restore()
+        G = probe.get("draws")
+        s = G.ctx.loop if G is not None else {}
+        out["tolerances"] = dict(rtol_j=s.get("rtol_j"),
+                                 rtol_Ip=s.get("rtol_Ip"),
+                                 tol_li=s.get("tol_li"))
+        loop, arch = probe.get("loop"), probe.get("archived")
+        d0 = diags[0] if diags else None
+        out["stages"] = dict(loop=loop, archived=arch)
+        if rej:
+            out["rejection"] = jsonable(rej[0])
+        if d0 is not None:
+            out["stages"]["archived_coils"] = dict(
+                homotopy_pass=d0.get("homotopy_pass"),
+                max_F_drift_pct=d0.get("max_F_drift_pct"),
+                max_VSC_drift_pct=d0.get("max_VSC_drift_pct"))
+        out["record"] = (d0 or {}).get("engine")
+        if loop is not None:
+            for k in ("request_bit_identical", "request_max_abs_diff",
+                      "loop_converged", "n_passes", "dq0_stats",
+                      "dq0_stats_psi_N", "amplitude", "solves"):
+                out[k] = loop.get(k)
+        if arch is not None:
+            for k in ("r_j", "r_I", "dl_i", "dq0", "dq0_psi_N", "dq95",
+                      "flux_range", "flux_range_rel"):
+                out[k] = arch.get(k)
+        ok = bool(not rej and d0 is not None and loop is not None
+                  and arch is not None and loop["passed"]
+                  and arch["passed"])
+        out["passed"] = ok
         out["passed_reason"] = (
-            "the engine draw at zero perturbation reproduces the "
-            "reconstruction (request bit-identical; loop tolerances)"
-            if out["passed"] else
-            "the engine draw at zero perturbation misses the reconstruction "
-            "(see the record)")
+            "the generate() draw route at zero perturbation reproduces the "
+            "reconstruction at both stages (loop tolerances)" if ok else
+            "the generate() draw route at zero perturbation misses the "
+            "reconstruction (see stages / rejection)")
+
+        def _f(v, fmt):
+            return "n/a" if v is None else format(v, fmt)
+        print(f"[sigma0-check engine route] {'PASS' if ok else 'FAIL'}: "
+              + (f"REJECTED ({rej[0].get('reason')}); " if rej else "")
+              + ("" if loop is None else
+                 f"loop: request {'bit-identical' if loop['request_bit_identical'] else 'DIFFERS'}, "
+                 f"{'converged' if loop['loop_converged'] else 'NOT converged'}, "
+                 f"r_j={loop['r_j']:.2e} r_I={loop['r_I']:.2e} "
+                 f"dl_i={loop['dl_i']:+.2e}; ")
+              + ("" if arch is None else
+                 f"archived: r_j={arch['r_j']:.2e} r_I={arch['r_I']:.2e} "
+                 f"dl_i={arch['dl_i']:+.2e} dq0={arch['dq0']:+.2e} "
+                 f"dq95={_f(arch['dq95'], '+.2e')} "
+                 f"dflux_rel={_f(arch['flux_range_rel'], '+.2e')}")
+              + f" (tol r_j {s.get('rtol_j')}, r_I {s.get('rtol_Ip')}, "
+                f"l_i {s.get('tol_li')})", flush=True)
         return out
 
     def _verify_sigma0_jbs_loop(self, settings, pp, ffp, pressure, ne_eq,
@@ -6739,6 +6940,31 @@ class Bouquet:
                 "bootstrap frozen in the draws.")
 
     # ── stage 3: perturbed bouquet --------------------------------------
+    def _check_edge_pressure_unchanged(self, gc) -> None:
+        """Refuse draws whose edge-pressure settings (``edge_pprime_pin``,
+        ``separatrix_pressure``) differ from the ones the baseline was
+        reconstructed with: the legacy draws read the CONFIG's at generate()
+        (their pressures would then be in another frame than the baseline
+        they perturb), the engine draws the reconstruction's (the changed
+        setting would be silently ignored).  A baseline that predates the
+        record is not checked."""
+        from .edge_pressure import resolve_edge_pressure
+        rec = getattr(self.baseline, "edge_pressure", None) or {}
+        if "separatrix_pressure" not in rec:
+            return
+        now = resolve_edge_pressure(gc).record()
+        diff = [k for k in ("edge_pprime_pin", "separatrix_pressure")
+                if k in rec and rec[k] != now[k]]
+        if diff:
+            raise ValueError(
+                "generation." + ", ".join(f"{k}={now[k]!r}" for k in diff)
+                + " differs from the baseline's ("
+                + ", ".join(f"{k}={rec[k]!r}" for k in diff)
+                + ", the settings prepare_baseline() reconstructed it with): "
+                "the draws would mix pressure frames (legacy) or ignore the "
+                "change (engine). Re-run prepare_baseline() with the new "
+                "settings, or restore them.")
+
     def _validate_workflow(self) -> None:
         """Hard guard enforcing the validated per-path workflow at generate().
 
@@ -6996,7 +7222,15 @@ class Bouquet:
         _eng = _engine_gate(self.config)
         if _eng is not None:
             from .engine_draws import build_generate_context
+            _s0 = getattr(self, "_sigma0_route", None)
+            if _s0 is not None:
+                # verify_sigma0_consistency's route: this very draw route
+                # with every perturbation zero (and bootstrap scale 1.0)
+                env = _zero_perturbation_env(env)
             _eng = build_generate_context(self, env)
+            if _s0 is not None:
+                _eng.sigma0_probe = _s0
+                _s0["draws"] = _eng
 
         header = self.config.output_header
         initialize_equilibrium_database(header)
@@ -7040,6 +7274,8 @@ class Bouquet:
             _jbs_range = (None if gc.jBS_scale_range is None
                           else (float(gc.jBS_scale_range[0]),
                                 float(gc.jBS_scale_range[1])))
+            if getattr(self, "_sigma0_route", None) is not None:
+                _jbs_range = (1.0, 1.0)
 
         # The LCFS boundary cut, resolved ONCE and OUTSIDE the output capture:
         # the announcement must reach the user (inside the capture it went to
@@ -7342,6 +7578,8 @@ class Bouquet:
                 "conversion and pressure-term bookkeeping; Stage 3 draws run "
                 "on the engine).  Set reconstruction_engine='unified' or "
                 "rebuild the baseline with 'legacy'.")
+        # the edge-pressure settings the baseline was reconstructed with
+        self._check_edge_pressure_unchanged(self.config.generation)
 
     def _baseline_jbs_record(self):
         """The baseline's self-consistent bootstrap loop record, or ``None``

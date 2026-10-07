@@ -100,7 +100,10 @@ class Baseline:
     # recorded for comparison only: the closure's reference is TokaMaker's q0
     # for the source total re-solved on the anchor, not the dd's own estimator
     # (issue #20 -- never compare two estimators of the same name).
-    # Keys: source_index, present, j_par_max_abs, active, q0_dd.
+    # Keys: source_index, present, j_par_max_abs, active, q0_dd, and -- when
+    # the dd has a sawteeth entry with profiles -- slice (how it was read at
+    # this slice: "matched by time", "by index", or why it has no slice at
+    # this time, in which case it is not active here).
     sawtooth: Optional[dict] = None
 
     # Case-B ("diff") fixed bootstrap correction profile [A/m^2] = FUSE_jBS - SWB,
@@ -242,6 +245,14 @@ class Baseline:
     # solver's own pressure, zero at the boundary; full: with p_sep added
     # back).
     edge_pressure: Optional[dict] = None
+
+    # The coil least-squares mode the solver ran this baseline in
+    # (bouquet.solver_state.coil_solve_mode): "bounded" -- OpenFUSIONToolkit's
+    # bounded (BVLS) coil solve, entered once at Bouquet.setup_solver before
+    # the reconstruction, so the draws use the same coil solver -- or
+    # "unknown" for a solver bouquet did not set up.  Set by
+    # Bouquet.prepare_baseline on both paths.
+    coil_solve_mode: Optional[str] = None
 
     def __repr__(self):
         # concise summary -- the default dataclass repr dumps every numpy array,

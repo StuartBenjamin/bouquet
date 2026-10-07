@@ -848,12 +848,184 @@ def test_sigma0_r2_exact_measure_leaves_the_bootstrap_alone_loop_on(
 
 
 # ---------------------------------------------------------------------------
+#  the same six zero-perturbation claims on the UNIFIED ENGINE path
+# ---------------------------------------------------------------------------
+# Owner decision (2026-09-29, confirmed 2026-10-05): the six claims are not
+# legacy-only.  Above they run on the legacy reconstruction path (frozen SWB
+# and loop ON); here the same six run on reconstruction_engine="unified",
+# through the engine's own zero-perturbation draw -- the generate() route
+# that Bouquet.verify_sigma0_consistency runs under the engine (warm start,
+# coil regularisation, homotopy, post-homotopy stage), twice.  Same bars,
+# none loosened.  What each claim reads on the engine:
+#   * "s" is the draw's inductive amplitude a_ind (= 1 + d_ind; x* held, so
+#     a zero-perturbation draw should need none), and f_ind the inductive
+#     share of Ip of the draw's j_inductive in the reconstruction's own
+#     weights (the delivered state the check starts from) -- the Ip-space
+#     product |a_ind - 1| * f_ind is the R2 bar's quantity;
+#   * j_BS is the draw's (archived-state) bootstrap against the
+#     reconstruction's Baseline.j_BS, max deviation over peak (_JBS_FRAC);
+#   * l_i is the archived state's l_i(3) against l_i_target (_LI_REL);
+#   * "leaves the bootstrap alone" is the loop-ON twin's form: the archived
+#     bootstrap within jbs_rtol_j (current-weighted) of the reconstruction's
+#     lambda_BS* on the archived geometry (the check's archived-stage r_j).
+def _run_sigma0_probe_engine(outdir):
+    """The engine's zero-perturbation draw (generate() route), twice, on the
+    unified engine's g-file reconstruction.  Every number lands in
+    ``<outdir>/r2engine.npz``."""
+    import numpy as np
+    import bouquet as bq
+    from bouquet.jbs_loop import _trap, residual_weights
+
+    b = bq.Bouquet.from_geqdsk(_GEQ, profiles=_PF, mesh=_MESH, nthreads=1,
+                               header=os.path.join(outdir, "r2engine"),
+                               n_draws=1, reconstruction_engine="unified")
+    b.setup_solver()
+    bl = b.prepare_baseline()
+    psi_N = np.asarray(bl.psi_N, dtype=float)
+    psi_pad = float(getattr(b.config.source, "psi_pad", 1e-3))
+    Ip = float(bl.Ip_target)
+    # the reconstruction's own weights: the delivered state the check
+    # starts from (and restores afterwards)
+    w, _x, _k = residual_weights(b.mygs.copy_eq(), psi_N, psi_pad)
+    w = np.asarray(w, dtype=float)
+    seen = []
+    _generate = b.generate
+
+    def _capture(*a, **k):
+        d = _generate(*a, **k)
+        seen.append(d)
+        return d
+
+    b.generate = _capture                   # the check calls self.generate
+    runs = []
+    for _ in range(2):
+        rec = b.verify_sigma0_consistency()
+        d0 = (seen[-1] or [None])[0] if seen else None
+        if d0 is None:
+            raise RuntimeError("the engine's zero-perturbation draw was not "
+                               f"archived: {rec.get('rejection')}")
+        jind = np.asarray(d0["j_inductive"], dtype=float)
+        runs.append(dict(
+            passed=bool(rec["passed"]), a_ind=float(rec["amplitude"]),
+            f_ind=_trap(w * jind, psi_N) / Ip,
+            dl_i=float(rec["dl_i"]), r_j=float(rec["r_j"]),
+            r_I=float(rec["r_I"]),
+            jbs=np.asarray(d0["j_BS"], dtype=float), jind=jind))
+    r1, r2 = runs
+    np.savez(
+        os.path.join(outdir, "r2engine.npz"),
+        passed=np.array([r1["passed"], r2["passed"]]),
+        s_exact=np.array([r1["a_ind"], r2["a_ind"]]),
+        f_ind_exact=np.array([r1["f_ind"], r2["f_ind"]]),
+        li_exact=np.array([float(bl.l_i_target) + r1["dl_i"],
+                           float(bl.l_i_target) + r2["dl_i"]]),
+        dl_i=np.array([r1["dl_i"], r2["dl_i"]]),
+        r_j_archived=np.array([r1["r_j"], r2["r_j"]]),
+        r_I_archived=np.array([r1["r_I"], r2["r_I"]]),
+        jbs_exact1=r1["jbs"], jbs_exact2=r2["jbs"],
+        jind_exact1=r1["jind"], jind_exact2=r2["jind"],
+        psi_N=psi_N, Ip=np.array([Ip]),
+        jbs_baseline=np.asarray(bl.j_BS, dtype=float),
+        l_i_target=np.array([float(bl.l_i_target)]),
+    )
+
+
+@pytest.fixture(scope="module")
+def sigma0_anchor_engine(tmp_path_factory):
+    """The engine zero-perturbation probe, in its own interpreter (see
+    sigma0_anchor)."""
+    work = tmp_path_factory.mktemp("r2engine")
+    proc = subprocess.run(
+        [sys.executable, os.path.abspath(__file__), "r2engine", str(work)],
+        env=_harness.subprocess_env(OMP_NUM_THREADS="1", MPLBACKEND="Agg"),
+        capture_output=True, text=True)
+    if proc.returncode != 0:
+        pytest.fail(f"engine sigma=0 probe failed (rc={proc.returncode}):\n"
+                    f"{proc.stderr[-4000:]}")
+    return np.load(str(work / "r2engine.npz"))
+
+
+def test_sigma0_reproduces_the_baseline_jbs_unified(sigma0_anchor_engine):
+    """Engine twin of test_sigma0_r2_reproduces_the_baseline_jbs: the same
+    bar (_JBS_FRAC, max deviation over peak); the check's own verdict is
+    recorded beside it."""
+    d = sigma0_anchor_engine
+    jbs_bl = np.asarray(d["jbs_baseline"], dtype=float)
+    peak = float(np.max(np.abs(jbs_bl)))
+    dev = float(np.max(np.abs(
+        np.asarray(d["jbs_exact1"], dtype=float) - jbs_bl)))
+    print(f"[sigma0 unified] j_BS max dev {100 * dev / peak:.4f} % of peak; "
+          f"check passed={bool(d['passed'][0])}")
+    assert dev / peak <= _JBS_FRAC, (
+        f"engine sigma=0 j_BS is {100 * dev / peak:.3f}% of peak from the "
+        f"baseline split (bar {100 * _JBS_FRAC:.1f}%)")
+
+
+def test_sigma0_lands_in_its_own_budget_unified(sigma0_anchor_engine):
+    """Engine twin: the same Ip-space bar on |a_ind - 1| * f_ind."""
+    d = sigma0_anchor_engine
+    s = float(d["s_exact"][0])
+    f_ind = float(d["f_ind_exact"][0])
+    assert np.isfinite(f_ind) and f_ind > 0.0, f_ind
+    resid = abs(s - 1.0) * f_ind
+    print(f"[sigma0 unified] a_ind={s:.9f} f_ind={f_ind:.4f} "
+          f"resid={resid:.3e}")
+    assert resid <= _S_FIND_ATOL_EXACT, (
+        f"engine sigma=0 Ip-space residual {resid:.3e} (bar "
+        f"{_S_FIND_ATOL_EXACT:.2e}); a_ind={s:.9f}, f_ind={f_ind:.4f}")
+
+
+def test_sigma0_reports_a_plausible_inductive_share_unified(
+        sigma0_anchor_engine):
+    """Engine twin of the denominator guard (same window)."""
+    f_ind = float(sigma0_anchor_engine["f_ind_exact"][0])
+    assert 0.2 <= f_ind <= 1.2, f_ind
+    assert (float(sigma0_anchor_engine["f_ind_exact"][1])
+            == pytest.approx(f_ind, rel=0, abs=0))
+
+
+def test_sigma0_still_recovers_the_recon_li_unified(sigma0_anchor_engine):
+    """Engine twin: the same 0.5 % bar on the archived state's l_i(3)
+    against l_i_target (the delivered reconstruction's l_i)."""
+    target = float(sigma0_anchor_engine["l_i_target"][0])
+    got = float(sigma0_anchor_engine["li_exact"][0])
+    print(f"[sigma0 unified] l_i {got:.6f} vs {target:.6f} "
+          f"({100 * (got / target - 1):+.4f} %)")
+    assert abs(got - target) / target <= _LI_REL, (
+        f"engine sigma=0 l_i = {got:.6f} vs {target:.6f} "
+        f"({100 * (got / target - 1):+.4f}%, bar {100 * _LI_REL:.1f}%)")
+
+
+def test_sigma0_is_bit_reproducible_unified(sigma0_anchor_engine):
+    """Engine twin: two identical zero-perturbation checks agree to the
+    bit."""
+    d = sigma0_anchor_engine
+    assert float(d["s_exact"][0]) == float(d["s_exact"][1])
+    assert float(d["li_exact"][0]) == float(d["li_exact"][1])
+    np.testing.assert_array_equal(d["jbs_exact1"], d["jbs_exact2"])
+    np.testing.assert_array_equal(d["jind_exact1"], d["jind_exact2"])
+
+
+def test_sigma0_leaves_the_bootstrap_alone_unified(sigma0_anchor_engine):
+    """Engine twin of the loop-ON form: the archived bootstrap within
+    jbs_rtol_j (current-weighted) of the reconstruction's."""
+    r_j = float(sigma0_anchor_engine["r_j_archived"][0])
+    print(f"[sigma0 unified] archived r_j={r_j:.3e} r_I="
+          f"{float(sigma0_anchor_engine['r_I_archived'][0]):.3e}")
+    assert r_j <= 1e-3, (
+        f"the engine sigma=0 draw moved the bootstrap off the "
+        f"reconstruction's: r_j={r_j:.3e} (jbs_rtol_j 1e-3)")
+
+
+# ---------------------------------------------------------------------------
 #  subprocess entry point for the twin ensembles
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     # Every solver call in this module runs here, in a fresh interpreter:
     #   python tests/test_seeded_reproducibility.py ensemble <header>
     #   python tests/test_seeded_reproducibility.py r2       <outdir>
+    #   python tests/test_seeded_reproducibility.py r2loop   <outdir>
+    #   python tests/test_seeded_reproducibility.py r2engine <outdir>
     # OFT_env is a per-process singleton, so keeping the pytest process free
     # of solvers is what lets this module coexist with test_systematics.py in
     # one `pytest -m solver` run -- and, for the twins, it is also the only
@@ -872,5 +1044,7 @@ if __name__ == "__main__":
         _run_r2_probe(_ARG)
     elif _WHAT == "r2loop":
         _run_r2_probe_loop(_ARG)
+    elif _WHAT == "r2engine":
+        _run_sigma0_probe_engine(_ARG)
     else:
         raise SystemExit(f"unknown subcommand {_WHAT!r}")

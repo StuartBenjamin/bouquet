@@ -1,5 +1,400 @@
 # Bouquet — change summaries
 
+## Decisions on record (owner, 2026-10-05) -- no value changes
+
+Approvals given on 2026-10-05 for settings that were already in force but had
+no recorded approval. Nothing below changes a value; it records that the value
+in force is approved.
+
+- **Draw-loop pass ceiling `jbs_max_passes_draw` 6 -> 12: approved.** A pass
+  LIMIT, not a tolerance (convergence is still every active criterion on two
+  consecutive passes). Measured need: in the passes-to-convergence study (six
+  12-draw batches, 72 draw attempts, run with the ceiling raised to 30 for
+  diagnosis only) the draw loops needed 4-10 passes -- 4: 3, 5: 12, 6: 21,
+  7: 11, 8: 13, 9: 9, 10: 3 attempts -- so 25 of 72 needed more than the old
+  ceiling of 6, and 12 was never reached; on the synthetic g-file example the
+  standard draw's l_i-match coupling contracts at about 0.38 per pass and
+  needs 7-8 passes.
+- **The bootstrap loop's noise-floor acceptance factor
+  (`utils.NOISE_FLOOR_FACTOR = 2.0`) and its relaxation halve-on rule
+  (`jbs_relax_halve_on = 3`: omega halved only after r_j grows on 3
+  consecutive passes, floor 0.25): kept as implemented.**
+- **The MSE closure's defaults: kept as implemented** --
+  `structured_mse_fd_step = 0.02`, `structured_mse_steps = 1`,
+  `structured_mse_sigma_sys = 0.0`, `structured_mse_min_chords = 4`, and the
+  MSE convergence tolerance of 0.1 sigma per chord
+  (`jbs_loop.MSE_CHORD_OFFSET_TOL_SIGMA`).
+- **The engine draws' l_i band (`l_i_tolerance = 0.05`, +/-5 % relative to
+  the delivered reconstruction's l_i, applied post hoc): confirmed.**
+- **Stored unified configurations carrying the factory values of
+  `isolate_edge_jBS` / `perturb_jind_in_anchor`: accepted as implemented**
+  (6e052d0, `config.STORED_UNIFIED_UNREAD_FIELDS`). A stored `"unified"`
+  configuration carrying a non-default value of either field (what the
+  factories set for the legacy path until 2026-10-05) loads with that field
+  at its default and a warning, because the engine never read either field
+  -- the defaults are what that run actually ran. A live configuration
+  switched to `"unified"` with non-default values is still refused; only the
+  stored-configuration load path relaxes to defaults-plus-warning, so
+  archives written before the refusal stay loadable.
+
+## Unreleased — second-pass review fixes (2026-10-06)
+
+Fixes for the second adversarial review of the engine fix commits
+(d874822..f36b03a). Nothing here changes a default value, a tolerance or a
+test bar.
+
+- **Stored unified configurations load again when they carry any
+  engine-unread legacy field.** 3779b51 made the engine refuse 20 legacy-path
+  fields it never reads (`closure_channel`, `structured_li_target`, ...); a
+  stored `"unified"` configuration written before then with one of them at a
+  non-default value could no longer be loaded. The stored-load rule that
+  6e052d0 gave `isolate_edge_jBS` / `perturb_jind_in_anchor` now covers all
+  22 fields of `engine.ENGINE_UNREAD_LEGACY_FIELDS`, plus `homotopy_passes`
+  stored with `engine_draw_homotopy=False`. On `BouquetConfig.from_dict`
+  only, such a value is loaded as the field's default with a warning naming
+  it. The engine ignored the value, so the default is what the stored run
+  used. A NEW configuration with a non-default value is still refused.
+- **Beam and driven-current entries: matched by nearest time within half a
+  step, otherwise refused** (owner-recorded 2026-10-06: the owner approved
+  the stricter failure mode; the window value is to be confirmed). Since
+  807fd93 / 1ff7ccc a `core_sources` entry with its own per-slice times was
+  matched to the slice time within an absolute 1e-6 s. A beam entry a few
+  microseconds off the time base was dropped to ZERO with a warning (legacy
+  reader) or a provenance stamp (engine adapter): its current moved silently
+  into the inductive residual and into every draw. The rule now, in both the
+  legacy reader (`io.imas._source_slice_at`) and the engine adapter
+  (`adapters._ids_source_slice`), sharing `io.imas._entry_time_window`:
+  - match the entry to the NEAREST of its own times;
+  - accept the match within HALF the local time-step of the entry's own
+    grid (the interval the slice time lies in, or the end interval past
+    either end). A single-time entry uses the core_profiles grid's local
+    step. With no step on either grid the window is float precision;
+  - otherwise REFUSE: `ValueError` from the reader, `EngineInputRefused`
+    from the adapter. The error names the entry and its index, the slice
+    time, the nearest own time, |dt| and the half-step.
+
+  An entry carrying no non-zero current has nothing to drop and is skipped.
+  An aggregate or bootstrap-like entry is never added, so it is still only
+  stamped in `provenance["ignored_sources"]`. The legacy reader's sawteeth
+  entry feeds a gate flag, not a current: it uses the same window and is
+  recorded "not active" when there is no match, not refused.
+  **What changes:**
+  - an entry inside the time span of its own grid is always matched now:
+    the review's 2 µs case reads the beam bit-identically to the on-grid
+    read, where it was zero before;
+  - a slice time more than half a step outside the entry's span (for
+    example a model's entry that starts later than the IDS time base, read
+    at an earlier slice) is refused where it was zeroed before.
+  The shipped example reads bit-identically: its beam entry has no
+  per-slice times and is read by index.
+  **Not measured:** the effect on the real-data FUSE testbeds. A FUSE
+  source whose sawteeth or beam entry starts after the first time-base
+  slice will now refuse at those early slices on the engine path. That
+  needs an owner check on real data, offline from this package.
+
+- **Disclosed: a negative separatrix pressure also refuses the BASELINE.**
+  c709aae refuses a negative pressure at psi_N = 1 under
+  `separatrix_pressure="offset"`. Its commit message and this summary named
+  only the legacy draws (rejected as `perturb_failed`), but the refusal is
+  in the shared `edge_pressure.applied_offset`. It therefore also stops
+  `prepare_baseline()` when the input's own pressure at the separatrix is
+  negative, for example a fit that dips below zero at the edge. That
+  applies on the default legacy path (the g-file reconstruction and the
+  IMAS forward solve) and on the unified engine. Before c709aae such an
+  input ran, with a RAISED axis-pressure target and a negative boundary
+  PRES. **Kept by the owner's rule:** failures are loud, and a negative
+  p_sep is unphysical input. The refusal is now named:
+  - the error is `edge_pressure.NegativeSeparatrixPressure`, a
+    `ValueError`;
+  - `prepare_baseline` re-raises it as "prepare_baseline REFUSED THE
+    BASELINE (source ..., reconstruction_engine=...)", saying why and how
+    to proceed: correct the edge profiles, or set
+    `generation.separatrix_pressure="legacy"`, which never reads the edge
+    value, to build it as before 2026-10-04.
+
+  Test: `test_a_negative_separatrix_pressure_refuses_the_legacy_baseline`
+  (a legacy IMAS baseline; refused before any solve).
+
+- **Tests that pin claims which had none.** A mutation pass over the fix
+  commits found three claims that no test could fail.
+  - `test_an_archived_stage_miss_fails_the_sigma0_check`: a loop stage
+    that passes but an archived state that misses must fail the sigma=0
+    check.
+  - `test_the_archived_split_uses_the_archived_states_kappa_and_redl`:
+    the archived bootstrap and fixed parts are on the archived state's
+    `F<1/R>/<B^2>` and Redl, so a 1 % error in either fails.
+  - `test_after_a_failure_the_next_secant_step_uses_two_good_points`: a
+    behavioural test of the l_i secant's pairing after a failed solve.
+  The pass was re-run on this tree. 24 of the review's 27 mutants still
+  apply; the other 3 targeted code that later commits replaced, and they
+  are re-expressed among 8 new mutants. All 32 are killed.
+- **What a written g-file contains, parsed back.**
+  `test_a_written_gfile_parses_back_to_the_delivered_frame` (solver-free)
+  checks:
+  - edge `PRES` is the delivered p_sep under `"offset"` and 0 under
+    `"legacy"`;
+  - `PPRIME`, q, F and the boundary are unchanged within the format's
+    precision.
+
+  Its live-solver twin, `tests/test_gfile_written_contents_solver.py`
+  (`-m solver`, 8 tests), runs the existing probe and checks that `PRES`
+  minus a bare save of the same state is p_sep at every point. The bare
+  edge is the solver's pressure on the truncated last surface, 4.8 Pa on
+  the example, not zero. The twin has not been run yet: it is owed on the
+  next solver-suite run. The solver suite grows from 158 to 166 tests.
+- **Not changed, recorded** (the review's partial-close notes):
+  - a negative residual inductive current on an IDS source is RECORDED
+    (`residual_negative_nodes`), not refused, by the owner's rule;
+  - an unknown `core_sources` identifier index is held fixed as a driven
+    current under "other", with a warning.
+  - `test_get_q_collapses_silently_on_an_unclipped_grid` now skips by its
+    documented build-dependent rule (see below). It is on the pending list
+    for retirement and is not retired here.
+
+## Unreleased — owner-approved decision (2026-10-06)
+
+- **One coil solver for the whole run: OpenFUSIONToolkit's bounded coil
+  mode is entered ONCE, at solver setup, on both paths** (owner-approved
+  2026-10-06; consistency between the reconstruction and the draws).
+  OpenFUSIONToolkit solves the coil least-squares problem by the normal
+  equations until `set_coil_bounds` is first called and by bounded least
+  squares (BVLS) from then on, for the life of the solver object; every
+  `generate()` makes that call (its homotopy). So a process's reconstruction
+  and its first `generate()`'s baseline re-solve ran unbounded and every
+  later solve bounded: results depended on call order (the first engine
+  sigma=0 check differed from the second by 3.8e-7 in the inductive
+  amplitude until the check entered the mode itself, below). Now
+  `Bouquet.setup_solver` calls `bouquet.solver_state.enter_bounded_coil_mode`
+  (the one place: after the VSC and the coil regularisation, before any
+  solve), installing +/-1e98, which never binds. The reconstruction, the
+  sigma=0 check and every draw run the same coil solve;
+  `Baseline.coil_solve_mode` (both paths) and the engine record's
+  `coil_solve_mode` say `"bounded"`. The sigma=0 check's own entry is
+  removed -- a no-op on a solver set up this way; its restore still
+  re-installs the recorded bounds. **What moves:** everything computed in
+  the old unbounded mode -- the reconstruction and the first `generate()` of
+  a process -- at the round-off-carried level (first-call results are no
+  longer bit-identical to before). Measured on the synthetic examples (fixed
+  build, one thread, old -> canonical): reconstruction l_i(3) and q0 by
+  2e-8 to 5e-7 relative (l_i(3): g-file engine -2.0e-7, legacy +3.1e-7;
+  IDS engine +4.8e-7, legacy +2.0e-8), q95 by 2e-6 to 1.3e-5, coil currents by at most 2.1e-5 relative; every sigma=0 check
+  (both paths, both sources) still passes, its residuals moving within the
+  same decade (largest ratio to a tolerance 0.31, IDS engine r_I). No
+  tolerance, bar or default changed.
+  The draws inherit the moved reconstruction and stop at the loop's own
+  tolerances, so they move further, but within those tolerances: on the
+  four seeded 12-draw engine batches of the synthetic examples (inductive
+  sigma 0.10 and 0.05) the yields, every in-spec flag and every loop,
+  homotopy and post-homotopy pass count are unchanged, and the archived
+  l_i(3), l_i(1), beta_N, q0 and q95 move by at most 5e-4 relative. The
+  golden replay stays inside its bars without regeneration (mode-1 coil
+  drift 0.0190 -> 0.0191 %, boundary RMS 0.419 -> 0.421 mm). One solver
+  test's documented build-dependent skip now fires:
+  `test_get_q_collapses_silently_on_an_unclipped_grid` asks whether the
+  solved state reproduces the axis collapse of an unclipped surface grid,
+  and on the canonical state it does not (257/257 surfaces traced); the
+  clipping it guards stays, and its guard is still covered without a
+  solver.
+
+## Unreleased — owner-approved decisions (2026-10-05)
+
+- **Legacy draws: a failed homotopy rollback re-solve rejects the draw**
+  (`homotopy_rollback_failed`, the engine draws' code), whatever the cause
+  and whether or not `draw_solve_maxits` is set. Before, a legacy draw
+  printed "rollback re-solve failed; stats may be stale" and went on from the
+  failed solve -- the post-homotopy check measured that state and the draw
+  could be archived, in spec or not. **This changes legacy yields** in runs
+  where such a re-solve failed (those draws are now rejected attempts, never
+  archived or counted toward until-N); runs in which every rollback re-solve
+  converged are unchanged.
+- **Engine sigma=0 check: it puts ALL solver state back, and a second check
+  is bit-identical to the first** (owner-approved fix of the restore,
+  2026-10-05). `verify_sigma0_consistency` under `"unified"` restored psi
+  and the isoflux only; the first call then differed from every later one
+  (3.8e-7 in the inductive amplitude on the synthetic g-file example, Δl_i
+  9e-6 -- 30-100x inside every tolerance, but not bitwise). Cause, measured:
+  OpenFUSIONToolkit's coil solve switches from the normal equations to
+  bounded least squares on the first `set_coil_bounds` call and never
+  switches back (`set_coil_bounds(None)` installs +/-1e98 and stays bounded);
+  the route's `generate()` makes that call (the homotopy's bounds), so only
+  the first check ran unbounded. It also left the strong coil-regularisation
+  stash (`_strong_coil_reg`) on the solver object. Now one helper,
+  `bouquet.solver_state.SolverState`, captures and restores the equilibrium
+  object (psi, coils, coil regularisation, targets, profiles, constraints),
+  the settings, VSC gains, Vcoils, the recorded coil bounds and bouquet's
+  stashes, and enters the one-way bounded mode at capture (re-installing the
+  bounds on record -- none: +/-1e98, which never binds; since 2026-10-06 the
+  mode is entered at solver setup instead, above). **What moves:** the
+  check's own numbers, once, to what the second call already gave (the
+  first call now runs in the mode every later solve runs in); nothing else
+  -- `generate()` itself and the legacy path are unchanged (the legacy check
+  calls `set_coil_bounds` only to swap a bound stash a previous `generate()`
+  left, and leaves no stash of its own; its twins were bitwise).
+- **Engine draws: the archived current split is evaluated on the draw's own
+  archived (final) state, and the inductive is never clipped**
+  (owner-approved, engine only, 2026-10-05). Before, an engine draw's
+  archived `j_BS` was the bootstrap composed on the geometry of the PREVIOUS
+  solve, its fixed beam/RF parts were the RECONSTRUCTION's (at its
+  `F<1/R>/<B^2>`), and `j_inductive` was clipped at zero twice (post-homotopy
+  re-split and archival) with the sliver moved into `j_BS`. Now: `j_phi` the
+  archived state's achieved FSA current (as before); `j_BS` = `s_bs (1 +
+  d_bs) x scale x Redl` of the archived state times its `F<1/R>/<B^2>`; the
+  fixed parts the contract's `<j.B>` times the same factor; `j_inductive` the
+  residual, never clipped -- a negative value is RECORDED
+  (`engine.archived.split`: `n_negative_inductive`, `min_inductive`,
+  `negative_inductive_psi_N`, plus a console note), not altered and not
+  filtered. The post-homotopy re-split uses the draw's own solved fixed
+  parts, unclipped. The draws' reference flux range (and q-row radius) is
+  the DELIVERED measurement's, not the last loop pass's geometry `G*`, so a
+  zero-perturbation draw's flux-range delta measures only its own
+  reproduction. **What moves:** archived `j_BS` / `j_inductive` of engine
+  draws (on the 16 stored synthetic draws: no clip sliver was ever active;
+  fixed-part conversion <= 0.012 % of peak; j_BS within the final
+  post-homotopy r_j, 5e-5 ... 1.8e-4) and the engine σ=0 flux-range delta.
+  No solve, l_i, q, beta, coil or in-spec verdict changes. Legacy draws keep
+  their clips exactly as they are.
+- **Legacy IMAS reader: the sawtooth gate reads the sawteeth entry at the
+  slice TIME** (the engine IDS adapter's rule since its own fix). The gate
+  input `Baseline.sawtooth` (`present` / `j_par_max_abs` / `active`, archived
+  as `li_metrics["sawtooth"]`) read the `core_sources` sawteeth entry (701)
+  at its LIST index: an entry that starts one slice after the IDS time base
+  (as a model's sawteeth entry can) was read one slice late at every slice,
+  and at the last slice from its FIRST slice. Now an entry carrying per-slice
+  times is matched by time; at a time it does not cover it is present but
+  NOT active; an entry with no per-slice time and a different slice count is
+  refused (`ValueError`, "cannot be aligned") instead of read at slice 0. A
+  new key `slice` records how it was read. **What moves for existing users:**
+  only dds with such a late-starting (or misaligned) sawteeth entry -- the
+  `sawtooth_bootstrap` gate's `active` flag and `j_par_max_abs` at each
+  slice (a slice before the entry starts is no longer admitted as
+  sawtoothing; the last slice now reads its own amplitude), and through
+  `Baseline.sawtooth` the engine's q0-row admission on the same sources.
+  Dds whose sawteeth entry is on the full time base, or that have none (the
+  shipped example), read the same values as before. The NBI read just above
+  it was fixed the same way afterwards (next item).
+- **Legacy IMAS reader: each NBI entry is read at the slice TIME** (the same
+  defect, the same rule as the sawteeth entry above; owner-approved
+  2026-10-05). The beam current `Baseline.j_NBI` summed the `core_sources`
+  NBI entries (identifier 2) at their LIST index (`pr[isrc]`, or `pr[0]` past
+  the end of a short entry). Now an entry carrying per-slice times is matched
+  by time to the core_sources slice time; at a time it does not cover it
+  carries no current at that slice (a `UserWarning` says so); an entry with
+  no per-slice time and a different slice count is refused (`ValueError`,
+  "cannot be aligned"). **What moves for existing users:** only dds whose
+  NBI entry's own slice times are not the core_sources time base -- an entry
+  that starts late (before its start: no beam current instead of the next
+  slice's; afterwards its own slice instead of one late; past a short
+  entry's end no longer its first slice) or one written on another grid
+  (e.g. the core_profiles times where those differ from core_sources': now
+  matched, or warned and zero where nothing matches). There `j_NBI` changes,
+  and with it the legacy path's fixed beam current, the inductive residual
+  and every draw built on them. An NBI entry with no per-slice time and a
+  different slice count is now refused. Dds whose NBI entries are on the full
+  core_sources time base, with or without per-slice times (the shipped
+  example), read the same values as before, bit for bit.
+- **Engine: `isolate_edge_jBS` and `perturb_jind_in_anchor` are refused
+  under `reconstruction_engine="unified"`** when not at their defaults (the
+  rule and message of the other unread legacy settings); the engine never
+  read either. `Bouquet.from_geqdsk` / `from_imas` take a new keyword,
+  `reconstruction_engine` (default `None` = the config default, `"legacy"`):
+  with `"unified"` they no longer set these legacy-path workflow values. **A
+  legacy factory configuration switched to `"unified"` afterwards is now
+  refused** (build it with the keyword instead, or reset both fields); the
+  message says so. Stored unified configurations carrying the factory values
+  load at the defaults with a warning (the stored run is unchanged). Legacy
+  configurations, and what the factories set for them, are unchanged.
+
+## Unreleased — review fixes to the unified engine (2026-10-04)
+
+- **Legacy g-file reconstruction (DEFAULT path): a failed last l_i-secant
+  solve hands on the restored state's inductive factor.** When the secant's
+  last solve failed, psi was restored to the last good state but the FAILED
+  `ind_factor` was handed on (as the inductive profile the corrective
+  iteration starts from). It is now the factor of the state actually held,
+  with that state's profile restored too, and the secant's previous point is
+  always a good evaluation. Runs whose secant solves all converge are
+  unchanged (tested against the frozen copy); runs with a failed last secant
+  solve change.
+- **Engine draws: a failed homotopy rollback re-solve rejects the draw**
+  (`homotopy_rollback_failed`), whatever the cause and with or without a cap.
+  Before, only a capped one did; any other failure printed "stats may be
+  stale" and the draw went on (and could be archived) from a failed solve.
+  Legacy draws unchanged.
+- **Engine IDS adapter: driven currents by an explicit IMAS identifier
+  classification.** It held EVERY `core_sources` entry except ohmic (7) and
+  bootstrap (13) as a fixed driven current, so a "total" entry, a combination
+  entry (100-107) or a bootstrap published as "neoclassical" (401) would have
+  been counted twice (the residual inductive current goes negative). Now:
+  driven primaries by index (nbi; ec/lh/ic; fusion, runaways, sawteeth);
+  aggregates and bootstrap-like entries ignored, stamped in
+  `provenance["ignored_sources"]` and warned about; an unknown index held
+  fixed under `other` with a warning. Also: an entry carrying its own
+  per-slice times is read AT the slice time, not at its list index -- a model
+  sawteeth entry that starts one slice after the IDS time base was read one
+  slice late (and at the last slice, from its FIRST slice). **This changes
+  engine IDS results on sources with such a sawteeth entry** (FUSE
+  `dd_sim.json`: the sawteeth current of the slice itself instead of the
+  next one's); sources whose entries are all nbi/ec/lh/ic on the full time
+  base are unchanged bit for bit. (When this entry was written the legacy
+  reader was unchanged. Since then it reads its sawteeth entry (d381951)
+  and its beam entries (807fd93) at the slice time too. Since 2026-10-06
+  both the reader and this adapter match an entry to its nearest own slice
+  within half a local time-step and REFUSE a driven entry outside that
+  window; see "second-pass review fixes (2026-10-06)" above.)
+
+- **Engine: legacy settings it never reads are refused** (they were accepted
+  and silently ignored): `closure_channel`, `jBS_baseline_mode`, the
+  `structured_*` closure fields (except `structured_li_tol`),
+  `anchor_pressure_to_equilibrium`, `imas_corrective_jphi`,
+  `jbs_loop_q0_corrector`, `floor_j_BS`, `swb_iterations`,
+  `accept_anchor_inband`, `diagnostic_plots`, and `homotopy_passes` with
+  `engine_draw_homotopy=False` -- each message names the engine setting that
+  replaces it. Defaults and the factories' configs are unaffected. Legacy
+  path unchanged.
+
+- **Engine: `verify_sigma0_consistency()` runs the draw's own route.** It
+  ran only the engine loop (`engine_draws.verify_zero_perturbation`) from
+  whatever state the solver held -- not the warm start, coil
+  regularisation, isoflux re-point, homotopy and post-homotopy stage a
+  `generate()` draw runs -- while the docs said it ran "exactly this draw".
+  It now calls `generate(n=1)` itself with every perturbation zero and the
+  bootstrap scale 1.0 (into a temporary archive) and judges both the loop
+  stage and the archived state at the unchanged loop tolerances
+  (`stages`); a rejected zero-perturbation draw fails. On the stand-in the
+  numbers are unchanged (no coils to move). On the live solver (rounds 2
+  and 3 of the 2026-10-05 fix work, synthetic examples) the generate()
+  route PASSES on every path and source; the worst residual-to-tolerance
+  ratio is 0.30. After the canonical coil-solve mode (2026-10-06) it still
+  passes, with a worst ratio of 0.31. The archived-stage gate is pinned by
+  `test_an_archived_stage_miss_fails_the_sigma0_check` (2026-10-06).
+- **Engine: an MSE row skipped by a non-converged loop is flagged or
+  refused.** Under `jbs_loop_on_fail="flag"` a loop that did not converge
+  delivered with no MSE stage and no word about it; now an `MSE: ... NOT
+  applied` flag and phase record, and `structured_mse_required=True`
+  refuses. A flagged engine IDS baseline is also warned about (as a g-file
+  one already was).
+- **Edge pressure: loud where it was silent.** A negative separatrix
+  pressure is refused under `"offset"` (it raised the axis target and wrote a
+  negative boundary PRES -- reachable by a legacy draw whose perturbed edge
+  n_e or T_e goes below zero: such a draw is now rejected instead of
+  archived); `plot_input_vs_recon` shows the solved pressure in the reported
+  (full) frame; a failed full-frame computation warns that beta / W_MHD stay
+  in the solver frame; changing `separatrix_pressure` / `edge_pprime_pin`
+  after `prepare_baseline()` is refused at `generate()` /
+  `verify_sigma0_consistency()`.
+- **Stored configs load as they were produced.** A legacy config written
+  while `engine_mse_jacobian="fd_broyden"` or `engine_ids_inductive="auto"`
+  was the default (to_dict writes every field) was refused by `from_dict`;
+  it now loads (the value has no effect on the legacy path; loaded as
+  today's default, with a warning). A stored unified config that predates a
+  field whose default changed is loaded with the value it ran with where
+  that is knowable (`engine_ids_inductive` -> `"auto"`;
+  `engine_draw_solve_maxits` -> the `draw_solve_maxits` the engine draws
+  read then; a loop config without `jbs_max_passes_post_homotopy` -> 2),
+  with a warning, and with today's default plus a loud warning naming the
+  field where it is not. Fixtures: the to_dict output at five commits of
+  the engine stack (`tests/data/stored_configs/`).
+
 ## Unreleased — `engine_ids_inductive` (unified engine, IDS sources)
 
 *The default is now `"residual"` (owner-approved; see "IDS inductive: the
@@ -48,9 +443,10 @@ convergence criterion or ceiling moved.
   its target; its own pressure is zero at the boundary, so with a non-zero
   separatrix pressure `p_sep` it inflates `P'` everywhere by
   `p_axis / (p_axis - p_sep)` and reports the `beta` / `W_MHD` of a
-  different profile. `"offset"` hands it `p_axis - p_sep` (the input's own
-  `P'`) and adds `p_sep` back wherever pressure, `beta` or `W_MHD` is
-  reported or delivered.
+  different profile. `"offset"` hands it `p_axis - p_sep` (the target the input's own
+  `P'` integrates to; the solver's remaining rescale is its discretisation of
+  that integral, not exactly 1) and adds `p_sep` back wherever pressure,
+  `beta` or `W_MHD` is reported or delivered.
 - **Measured basis** (real g-file and IDS cases, four arms each, pin on
   vs off × `"legacy"` vs `"offset"`): `"offset"` brought the full-frame
   `beta_N` / `W_MHD` closer to the input on 8 of 8 comparable g-file cases,

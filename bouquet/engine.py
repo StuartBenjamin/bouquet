@@ -255,6 +255,7 @@ def validate_engine_settings(gc) -> None:
         raise ValueError("generation.engine_rows has 'mse' but "
                          "generation.mse_data is None")
     _mse_knobs_unread(gc, rows)
+    _legacy_knobs_unread(gc, vals)
     for name, want in (("jbs_self_consistent", True),
                        ("recalculate_j_BS", True),
                        ("single_profile_jphi", False)):
@@ -318,6 +319,122 @@ def _mse_knobs_unread(gc, rows):
         print("WARN: " + msg + " (workflow='custom': continuing)", flush=True)
         return
     raise ValueError(msg)
+
+
+#: Legacy-path settings the unified engine NEVER reads, each with what
+#: replaces it under the engine (or why nothing does).  A value other than
+#: the field's default is REFUSED under ``reconstruction_engine="unified"``
+#: (:func:`_legacy_knobs_unread`) -- it would otherwise be silently ignored.
+ENGINE_UNREAD_LEGACY_FIELDS = {
+    "closure_channel": "the engine's closure is engine_preset / engine_rows",
+    "jBS_baseline_mode": "the engine composes the inductive and the Redl "
+                         "bootstrap itself (engine_preset / engine_rows)",
+    "structured_preset": "engine_preset",
+    "structured_basis": "engine_preset (its basis)",
+    "structured_weights": "engine_preset (its weights)",
+    "structured_sigma_ind_up": "engine_preset (its inductive prior)",
+    "structured_li_target": "nothing: the engine's l_i row targets the "
+                            "SOURCE's own l_i (engine_rows 'l_i')",
+    "structured_li_sigma": "nothing: the IDS soft l_i row uses the preset's "
+                           "sigma (bouquet.adapters)",
+    "structured_li_kind": "nothing: the engine's l_i row is li_3 always",
+    "structured_ip_sigma": "nothing: the IDS soft Ip row uses the preset's "
+                           "sigma (bouquet.adapters)",
+    "structured_ip_sigma_frac": "nothing: the IDS soft Ip row uses the "
+                                "preset's sigma (bouquet.adapters)",
+    "structured_soft": "nothing: the rows are hard for a g-file and soft for "
+                       "an IDS source, by source",
+    "structured_li_max_corrector_steps": "engine_li_row_relaxation (the "
+                                         "engine iterates the l_i row inside "
+                                         "the loop)",
+    "anchor_pressure_to_equilibrium": "nothing: the engine's pressure is "
+                                      "kinetic + impurity + fast, with no "
+                                      "p_diff",
+    "imas_corrective_jphi": "engine_delivery_correction (the engine's "
+                            "remedy for the jphi-linterp delivery defect)",
+    "jbs_loop_q0_corrector": "engine_rows with 'q0' (engine_draw_q0_row "
+                             "keeps it in the draws)",
+    "floor_j_BS": "nothing: the engine never floors the bootstrap",
+    "swb_iterations": "nothing: the engine never runs SWB",
+    "accept_anchor_inband": "nothing: the engine draws have no legacy "
+                            "anchor in-band shortcut",
+    "diagnostic_plots": "nothing: the engine draws make no per-draw SWB "
+                        "diagnostic plots",
+    # owner-approved 2026-10-05: refused like the rest (the factories no
+    # longer set them for a unified configuration --
+    # Bouquet.from_geqdsk / from_imas(..., reconstruction_engine="unified"))
+    "isolate_edge_jBS": "nothing: the engine never isolates the edge "
+                        "bootstrap (its bootstrap is Redl on the whole "
+                        "profile); the factories set False for the legacy "
+                        "path only -- build with Bouquet.from_geqdsk / "
+                        "from_imas(..., reconstruction_engine='unified'), "
+                        "or set it back to its default",
+    "perturb_jind_in_anchor": "nothing: one engine draw route for both "
+                              "input types replaces Fix C and the standard "
+                              "l_i loop; from_imas sets True for the legacy "
+                              "path only -- build with Bouquet.from_imas("
+                              "..., reconstruction_engine='unified'), or "
+                              "set it back to its default",
+}
+
+
+def _legacy_knobs_unread(gc, vals):
+    """Refuse a legacy-path setting the unified engine never reads
+    (:data:`ENGINE_UNREAD_LEGACY_FIELDS`) when it holds anything but its
+    default -- the rule :func:`_mse_knobs_unread` applies to the MSE knobs,
+    with the same ``workflow='custom'`` / ``allow_unsafe_workflow``
+    downgrade to a printed WARN.  Also ``homotopy_passes`` changed while
+    ``engine_draw_homotopy=False`` (no homotopy runs)."""
+    from dataclasses import MISSING
+    from .config import GenerationConfig
+    f = GenerationConfig.__dataclass_fields__
+    bad = []
+    for name, instead in ENGINE_UNREAD_LEGACY_FIELDS.items():
+        if name not in f or not hasattr(gc, name):
+            continue
+        fl = f[name]
+        d = (fl.default if fl.default is not MISSING else
+             fl.default_factory() if fl.default_factory is not MISSING
+             else MISSING)
+        if d is MISSING:
+            continue
+        v = getattr(gc, name)
+        same = (v is None) if d is None else _same_value(v, d)
+        if not same:
+            bad.append(f"{name}={v!r} (default {d!r}; under the engine: "
+                       f"{instead})")
+    if not vals.get("engine_draw_homotopy", True) and "homotopy_passes" in f:
+        d = f["homotopy_passes"].default_factory()
+        v = getattr(gc, "homotopy_passes", d)
+        if not _same_value(v, d):
+            bad.append(f"homotopy_passes={v!r} with engine_draw_homotopy="
+                       "False (no homotopy runs in an engine draw)")
+    if not bad:
+        return
+    msg = ("set with reconstruction_engine='unified', but the unified "
+           "engine never reads them -- they would otherwise be silently "
+           "ignored: " + "; ".join(bad))
+    if (str(getattr(gc, "workflow", "")) == "custom"
+            or bool(getattr(gc, "allow_unsafe_workflow", False))):
+        print("WARN: " + msg + " (workflow='custom': continuing)", flush=True)
+        return
+    raise ValueError(msg)
+
+
+def _same_value(v, d):
+    """``v == d`` for the scalar / sequence values a config holds (a
+    sequence compares element-wise as numbers; a bool never equals a
+    number)."""
+    if isinstance(v, (bool, np.bool_)) != isinstance(d, (bool, np.bool_)):
+        return False
+    try:
+        if isinstance(d, (list, tuple)) or isinstance(v, (list, tuple,
+                                                          np.ndarray)):
+            return bool(np.array_equal(np.asarray(v, dtype=float),
+                                       np.asarray(d, dtype=float)))
+        return bool(v == d)
+    except (TypeError, ValueError):
+        return False
 
 
 def engine_draw_maxits(gc):
@@ -1021,6 +1138,24 @@ class UnifiedEngine:
         self.solves["loop"] = int(self.b.n_solves) - self.solves["anchor"]
         converged = bool(res["converged"])
         last = res
+        if "mse" in self.rows and not converged:
+            # jbs_loop_on_fail="flag": the loop did not converge, so the MSE
+            # stage (which starts from a converged loop) does not run -- said
+            # loudly, never a silent omission; a REQUIRED MSE term refuses
+            from .utils import MSE_FLAG_PREFIX
+            why = ("the self-consistent loop did not converge "
+                   "(jbs_loop_on_fail='flag'), so the MSE stage, which starts "
+                   "from a converged loop, did not run")
+            if self.rows["mse"].get("required"):
+                from .adapters import EngineInputRefused
+                raise EngineInputRefused(
+                    f"{self.label}: structured_mse_required=True but {why}")
+            self.flags.append(MSE_FLAG_PREFIX + why + " -- the MSE term was "
+                              "NOT applied")
+            print(f"[{self.label}] WARNING closure-limited: "
+                  + self.flags[-1], flush=True)
+            phases.append(dict(name="mse", record=None, jacobian=dict(
+                applied=False, reason=why, n_solves=0)))
         if "mse" in self.rows and converged:
             res_m, fd = self._mse_stage(res)
             if res_m is None:              # too few chords on the mesh
@@ -2006,6 +2141,16 @@ def prepare_engine_baseline(bq):
     if bl.reconstruction_metrics is not None:
         bq._flag_nonconverged_recon_loop()
         bq._print_reconstruction_summary()
+    elif not res["converged"]:
+        # the IDS baseline records it on ip_closure / li_metrics (closure
+        # health); warned here as loudly as _flag_nonconverged_recon_loop
+        # does for a g-file baseline
+        import warnings
+        msg = ("engine IDS baseline: NOT converged (jbs_loop_on_fail="
+               "'flag') -- delivered flagged closure_limited: "
+               + _flag_reason(res, rec))
+        print("[engine] WARNING " + msg, flush=True)
+        warnings.warn(msg, RuntimeWarning, stacklevel=2)
     print(f"[engine] {ENGINE_VERSION}: {'converged' if res['converged'] else 'NOT converged (flagged)'}; "
           f"l_i(3)={bl.l_i_target:.6f}; solves {rec['solves']}", flush=True)
     return bl

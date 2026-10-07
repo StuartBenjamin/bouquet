@@ -600,7 +600,9 @@ needed 7 passes -- one more than the draw default.
 
 ## The unified reconstruction engine (`reconstruction_engine`, default off)
 
-`GenerationConfig.reconstruction_engine="unified"` (default `"legacy"`)
+`GenerationConfig.reconstruction_engine="unified"` (default `"legacy"`; with
+the factories, `Bouquet.from_geqdsk/from_imas(..., reconstruction_engine=
+"unified")`, which leave the legacy-path workflow settings at their defaults)
 replaces the g-file reconstruction and the IMAS baseline with ONE loop for
 both inputs ([engine.md](engine.md)). Every current component is stored as a
 parallel current `<j.B>`: the g-file's from identity (I0) on its own surfaces
@@ -657,10 +659,14 @@ zero at the boundary, so it reaches the full axis target only by inflating
 `P'` everywhere by `p_axis / (p_axis - p_sep)`. The equilibrium is then that
 of the pressure `p_axis (p - p_sep) / (p_axis - p_sep)`: too steep by that
 factor, and its `beta` and `W_MHD` are neither the input's full-pressure
-values nor its `p - p_sep` values. `"offset"` hands the solver the input's
-own `P'` (factor 1), which is a PHYSICS change relative to `"legacy"`: `P'`,
-the pressure-driven current and the Shafranov shift move by the factor
-`(p_axis - p_sep) / p_axis`.
+values nor its `p - p_sep` values. `"offset"` hands the solver the axis
+target `p_axis - p_sep` that the input's own `P'` integrates to, so the
+solver's rescaling of `P'` to meet its target is reduced to the
+discretisation of that integral (not exactly 1: estimated 1.017 at 129
+nodes and 1.005 at 257 on a smooth synthetic profile) instead of
+`p_axis / (p_axis - p_sep)`. That is a PHYSICS change relative to
+`"legacy"`: `P'`, the pressure-driven current and the Shafranov shift move
+by about the factor `(p_axis - p_sep) / p_axis`.
 
 **Why `"offset"` is the default (owner-approved change, 2026-10-02).** On
 real g-file and IDS cases (pin on), `"offset"` brought the full-frame

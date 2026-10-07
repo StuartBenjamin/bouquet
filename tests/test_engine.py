@@ -625,3 +625,29 @@ def test_the_mse_jacobian_defaults_to_the_fixed_finite_difference():
     assert GenerationConfig(reconstruction_engine="unified",
                             engine_mse_jacobian="fd_broyden"
                             ).engine_mse_jacobian == "fd_broyden"
+
+
+def test_an_mse_row_skipped_by_a_non_converged_loop_is_flagged_or_refused():
+    """Under jbs_loop_on_fail="flag" a loop that does not converge used to
+    deliver with NO MSE stage and no word about it (review finding 9): now
+    the MSE term is flagged NOT applied, with its own phase record, and a
+    REQUIRED MSE term refuses."""
+    from bouquet.adapters import EngineInputRefused
+    md, ch = _mse_data()
+    ad = T.ToyAdapter(li_target=LI0 * 1.01,
+                      mse=dict(chords=ch, er_terms="toy"))
+    eng, res, rec, b = _run(ad, T.ToyGS(chords=ch),
+                            engine_rows=["Ip", "l_i", "mse"], mse_data=md,
+                            jbs_loop_on_fail="flag", jbs_max_passes=2)
+    assert res["loop_converged"] is False and res["converged"] is False
+    ph = [p for p in rec["phases"] if p["name"] == "mse"]
+    assert len(ph) == 1 and ph[0]["jacobian"]["applied"] is False
+    assert "did not converge" in ph[0]["jacobian"]["reason"]
+    assert any("MSE" in f and "NOT applied" in f for f in rec["flags"])
+    assert "mse" not in rec["delivered"]["checks"]
+    ad = T.ToyAdapter(li_target=LI0 * 1.01,
+                      mse=dict(chords=ch, er_terms="toy", required=True))
+    with pytest.raises(EngineInputRefused, match="structured_mse_required"):
+        _run(ad, T.ToyGS(chords=ch), engine_rows=["Ip", "l_i", "mse"],
+             mse_data=md, structured_mse_required=True,
+             jbs_loop_on_fail="flag", jbs_max_passes=2)

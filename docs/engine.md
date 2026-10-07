@@ -67,7 +67,7 @@ the toy and a TokaMaker stand-in over it), `tests/test_engine_draws_legacy_ast.p
 | kinetics n_e, T_e, n_i, T_i, Z_eff | p-file / IDA, PCHIP onto the g-file ψ_N (as the legacy reconstruction) | core_profiles (or the IDA hybrid), as `read_imas_baseline` resolves them |
 | pressure | thermal + impurity + fast (fixed) | thermal + impurity + fast, **no `p_diff`** |
 | inductive (parallel) | `<j.B>_in = F p' + F'<B^2>/mu0` on the g-file's own traced surfaces (identity I0), minus Redl `<j.B>` on the anchor, minus the fixed parts; smoothed with a verbatim copy of `fit_inductive_profile`'s basis (spline + PCHIP, zero edge anchor, ≥ 0), **no amplitude search** | **the parallel residual by definition** (owner decision, 2026-10-02): `|B0| (j_total − j_bootstrap − Σ driven)` (IMAS `<j.B>/B0`), every driven entry the one held fixed below. The source's `j_ohmic` is a **cross-check**, not a choice: it is compared with the residual and the net (fraction of the total current) and rms (fraction of rms `j_total`) differences are stamped in `provenance["inductive_consistency"]` (action `"residual_by_definition"`; `"unchecked"` when the source has no `j_ohmic`), with no threshold and no warning. A source without `j_total` or `j_bootstrap` is refused (`inductive="j_ohmic"` uses its `j_ohmic` explicitly; there is no silent fallback). Evidence: on self-consistent sources the residual and `j_ohmic` are indistinguishable (`|Δl_i| ≤ 1.8e-3`); on sources whose own split is locally inconsistent the residual is closer to the source's `<j_phi>`. Explicit options (`IdsAdapter(inductive=...)`, passed by the engine from `GenerationConfig.engine_ids_inductive`, default `"residual"`): `"j_ohmic"` takes the source's, warning when the net mismatch exceeds `IdsAdapter(inductive_tol=0.02)` (2 % of the total current, owner-set); `"auto"` takes `j_ohmic` unless it is absent or misses by more than that tolerance, then the residual with a warning. Nothing in the source is altered |
-| fixed driven (parallel) | user `j_NBI` / `j_RF` (toroidal inputs), converted with the anchor's `F<1/R>/<B^2>` | **every** core_sources entry carrying a `j_parallel` that is neither ohmic (7) nor bootstrap (13), × `|B0|`, held fixed, by part: beams → `nbi`, ec / lh / ic → `rf`, anything else (e.g. a model's sawteeth entry) → `other` (`provenance["driven_sources"]` lists them; a user override is converted as on the left). The delivered split reports `other` inside `j_RF` |
+| fixed driven (parallel) | user `j_NBI` / `j_RF` (toroidal inputs), converted with the anchor's `F<1/R>/<B^2>` | the **driven** core_sources entries by their IMAS identifier (the data dictionary's `core_sources.source[:].identifier` enumeration; `adapters.IDS_DRIVEN_SOURCE_PARTS`), × `|B0|`, held fixed, by part: nbi (2) → `nbi`; ec / lh / ic (3, 4, 5) → `rf`; fusion (6), runaways (501), a model's sawteeth entry (701) → `other`. **Never added**: ohmic (7) and bootstrap (13) (the core_profiles `j_ohmic` / `j_bootstrap` stand for them), AGGREGATES -- total (1), auxiliary (100), the combinations 101-107, radiation (200), 202, 203 -- which would double-count their constituents, and a bootstrap-like `neoclassical` (401); each such entry carrying a non-zero `j_parallel` is listed in `provenance["ignored_sources"]` with its reason and warned about. An unknown index carrying a non-zero `j_parallel` is held fixed under `other` WITH a warning (`unclassified` in its `driven_sources` entry). An entry carrying its own per-slice `time` is read at the core_sources slice time (a model's entry may start later than the IDS time base), not at the list index; one with a different slice count and no times is refused. `provenance["driven_sources"]` lists what was added; a user override is converted as on the left. The delivered split reports `other` inside `j_RF` |
 | boundary | g-file LCFS | equilibrium boundary outline |
 | rows | Ip (exact); l_i(3) = the reader's `li(2)` key, **hard**, absolute tolerance 1e-3; q0 (optional) | Ip (soft, σ = 0.5 % of Ip); li_3 (soft, σ = 0.04); q0 (optional); MSE chords (optional) |
 | signs | positive frame: `sign(Ip)`, `|F|`; a file whose `<j_phi>` disagrees in sign with its Ip is refused (wrong COCOS) | `source_current_sign`, `|B0|`; `b0_sign` recorded |
@@ -129,6 +129,16 @@ receives.
 
 The kernel is `run_jbs_loop` with `step` = 1–5; the engine's rows enter
 through its `extra` hook and the existing `AxisRowPin`.
+
+Every GS solve -- the anchor, each pass, the delivery, the σ=0 check and
+every draw -- uses one coil solve: OpenFUSIONToolkit's bounded (BVLS) coil
+least squares, entered once at `Bouquet.setup_solver`
+(`bouquet.solver_state.enter_bounded_coil_mode`; ±1e98, never binding) and
+recorded as `coil_solve_mode` on the Baseline and in the engine record. The
+mode is one-way and every `generate()` enters it, so entering it before the
+reconstruction is what keeps the reconstruction and its draws on the same
+coil solver whatever the call order (the unbounded and bounded solves agree
+to round-off per solve, not bit for bit).
 
 ### Rows and their update
 
@@ -226,6 +236,56 @@ stored components, `x*` and `lambda_BS*` (+ the delivery correction)
 reproduces the stored request bit for bit (tested, and re-checked by every
 draw context before it draws); the state also carries the q0 row and target,
 so a draw can keep the q0 row as an option for sawtoothing discharges.
+
+## Settings the engine does not read: refused
+
+A setting that is accepted is honoured or refused, never silently ignored.
+Under `reconstruction_engine="unified"` each legacy-path setting below is
+REFUSED when it holds anything but its default (`engine.
+ENGINE_UNREAD_LEGACY_FIELDS`; `workflow='custom'` downgrades the refusal to
+a printed WARN, as for the MSE knobs), with what replaces it under the
+engine:
+
+| setting | under the engine |
+|---|---|
+| `closure_channel`, `jBS_baseline_mode` | the engine's closure: `engine_preset` / `engine_rows` |
+| `structured_preset`, `structured_basis`, `structured_weights`, `structured_sigma_ind_up` | `engine_preset` |
+| `structured_li_target` | nothing: the l_i row targets the source's own l_i |
+| `structured_li_sigma`, `structured_ip_sigma`, `structured_ip_sigma_frac` | nothing: the IDS soft rows use the preset's σ |
+| `structured_li_kind` | nothing: the l_i row is li_3 |
+| `structured_soft` | nothing: hard rows for a g-file, soft for an IDS source |
+| `structured_li_max_corrector_steps` | `engine_li_row_relaxation` |
+| `anchor_pressure_to_equilibrium` | nothing: no `p_diff` in the engine's pressure |
+| `imas_corrective_jphi` | `engine_delivery_correction` |
+| `jbs_loop_q0_corrector` | `engine_rows` with `"q0"` (`engine_draw_q0_row` for the draws) |
+| `floor_j_BS`, `swb_iterations`, `accept_anchor_inband`, `diagnostic_plots` | nothing: legacy draw / SWB mechanics |
+| `homotopy_passes` with `engine_draw_homotopy=False` | no homotopy runs |
+| `isolate_edge_jBS` (default `True`) | nothing: the engine never isolates the edge bootstrap (Redl on the whole profile) |
+| `perturb_jind_in_anchor` (default `False`) | nothing: one engine draw route replaces Fix C and the standard l_i loop |
+
+Already refused elsewhere: the MSE knobs without the `"mse"` row (and
+`structured_mse_steps` with it), `draw_solve_maxits`
+(`engine_draw_solve_maxits`), `jbs_self_consistent=False`,
+`recalculate_j_BS=False`, `single_profile_jphi`, `jbs_init != "anchor"`,
+and in the draws `jbs_delta_mode`, `PIN_JPHI`, `DIFF_BS`,
+`l_i_uncertainty > 0`.
+
+`isolate_edge_jBS` and `perturb_jind_in_anchor` joined the refused set on
+2026-10-05 (owner-approved). The factories set them for the LEGACY path
+(`from_geqdsk`: `isolate_edge_jBS=False`; `from_imas`: also
+`perturb_jind_in_anchor=True`), so build a unified configuration with the
+factory keyword, which leaves both at their defaults:
+
+```python
+bq = Bouquet.from_geqdsk(gfile, profiles=pfile, mesh=mesh,
+                         reconstruction_engine="unified")
+bq = Bouquet.from_imas(dd, mesh=mesh, time=t, reconstruction_engine="unified")
+```
+
+A legacy factory configuration switched to `"unified"` afterwards is refused,
+naming both fields. A stored unified configuration that carries them (written
+before 2026-10-05) loads at the defaults with a warning -- the engine never
+read them, so the stored run is unchanged.
 
 ## Presets
 
@@ -356,10 +416,28 @@ of it from the warm state reproduces the reconstruction, the loop's pass-1
 residuals are the reconstruction's delivered ones, and the draw delivers the
 reconstruction to the loop tolerances. With the current gate standing (it is
 measured one pass late) the loop takes `JBS_REQUIRED_CONSECUTIVE + 1 = 3`
-passes. `verify_sigma0_consistency()` under the engine runs exactly this
-draw and gates `passed` on the draw-route rule at the unchanged tolerances
-(request identical, loop converged, `r_j`, `r_I` against `lambda_BS*`,
-`|dl_i| <= jbs_tol_li`), reporting `dq0` at its labelled radius and `dq95`.
+passes.
+
+`verify_sigma0_consistency()` under the engine runs ONE draw through the
+route `generate()` runs -- it calls `generate(n=1)` itself, with every
+perturbation zero and the bootstrap scale 1.0, archiving into a temporary
+file (the configured archive is never touched): generate_bouquet's baseline
+re-solve and warm start, its strong coil regularisation and the weak one
+swapped in for the loop, the isoflux re-pointed to the draw's own boundary,
+the homotopy and the post-homotopy stage, under `engine_draw_solve_maxits`.
+(Until 2026-10-04 it ran only the loop, `engine_draws.
+verify_zero_perturbation`, from whatever state the solver held, under
+whatever regularisation was installed -- not the draw's route; that
+function is kept, documented as the loop stage only.) `passed` needs both
+stages at the unchanged loop tolerances: the LOOP stage (`stages["loop"]`:
+request bit-identical, loop converged, `r_j`, `r_I` against `lambda_BS*`,
+`|dl_i| <= jbs_tol_li`) and the ARCHIVED state after the homotopy and the
+post-homotopy stage (`stages["archived"]`: the bootstrap the draw carries
+there against `lambda_BS*` on its geometry, `|dl_i| <= jbs_tol_li`; `dq0`,
+`dq95`, the flux-range change and the coil drift reported); a rejected draw
+fails. The top-level `r_j` / `r_I` / `dl_i` / `dq0` / `dq95` are the
+archived state's. The solver state, the isoflux targets and every
+attribute `generate()` sets are restored afterwards.
 
 **Post-hoc filters, not matching.** A draw matches no l_i, q0 or MSE row;
 l_i and beta_N drift and are recorded. The l_i band
@@ -465,6 +543,18 @@ saturation anyway). A solve that stops at the cap (the solver's own
 | the rollback re-solve | the draw is rejected | `homotopy_maxits` |
 | a post-homotopy pass | the draw is rejected | `post_homotopy_maxits` |
 | a loop solve | the draw is rejected with the loop's code | `anchor_solve_failed` (pass 1) / `perturb_failed` |
+
+A rollback re-solve that fails for ANY other reason (a non-finite abort,
+a lost plasma, ...) rejects the draw too, with its own code
+`homotopy_rollback_failed` -- with a cap set or with
+`engine_draw_solve_maxits=None` alike: the state such a failure leaves
+behind is not a converged solve, so an engine draw never goes on from it
+(recorded on `GenerateEngineDraws.rollback_failures`: stage, what triggered
+the rollback -- `saturation` or `failed stage` --, the error). Legacy
+draws follow the same rule since the owner-approved change of 2026-10-05:
+any failed rollback re-solve (capped by `draw_solve_maxits` or not) rejects
+a legacy draw with `homotopy_rollback_failed` (before, they printed "stats
+may be stale" and went on).
 
 Every capped solve is recorded on `GenerateEngineDraws.cap_events` and
 `Bouquet.engine_draw_cap_events` (draw, stage, `iterations` = the cap,

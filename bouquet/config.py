@@ -1845,6 +1845,7 @@ class BouquetConfig:
                 "or set cfg.generation.separatrix_pressure = 'offset' after "
                 "loading.", UserWarning, stacklevel=2)
             gend["separatrix_pressure"] = "legacy"
+        _stored_config_compat(gend)
         return cls(
             source=_build(SrcCls, srcd),
             solver=_build(SolverConfig, d["solver"]),
@@ -1905,6 +1906,198 @@ def _decode(v):
 #: have no effect on the current code), never mistaken for a typo.
 _RETIRED_GENERATION_KEYS = ("coil_drift_threshold_A", "lock_coils",
                             "lock_coils_weight")
+
+
+#: Every earlier DEFAULT of an engine-only field, with the dates it was the
+#: default.  to_dict() writes every field, so a config stored while one of
+#: these was the default carries it explicitly; under
+#: ``reconstruction_engine="legacy"`` an engine field has no effect, so
+#: :func:`_stored_config_compat` loads such a value as today's default
+#: instead of refusing the config (validate_engine_settings refuses a
+#: non-default engine field under "legacy").
+ENGINE_FIELD_HISTORICAL_DEFAULTS = {
+    "engine_mse_jacobian": (("fd_broyden", "2026-09-29", "2026-10-02"),),
+    "engine_ids_inductive": (("auto", "2026-10-02", "2026-10-02"),),
+}
+
+#: GenerationConfig fields whose DEFAULT changed after they were introduced:
+#: field -> (value a stored config that PREDATES the field ran with, or
+#: ``None`` when that is not knowable from the config alone; what it was).
+#: Only consulted for a stored ``reconstruction_engine="unified"`` config
+#: (and, for ``jbs_max_passes_post_homotopy``, any config that ran the
+#: self-consistent loop); ``jbs_self_consistent`` and
+#: ``separatrix_pressure`` have their own back-fills above.
+FIELD_PRE_INTRODUCTION = {
+    # introduced 2026-10-02 at "auto" -- the IDS adapter's own default
+    # before the setting existed -- then "residual" (owner decision)
+    "engine_ids_inductive": (
+        "auto", "the IDS adapter's inductive default before the setting "
+                "existed (2026-10-02)"),
+    # introduced with reconstruction_engine itself (2026-09-29): a unified
+    # config without it was not written by to_dict()
+    "engine_mse_jacobian": (None, "a unified config without it was not "
+                                  "written by to_dict()"),
+    # the post-homotopy pass ceiling was the constant 2 before the field
+    # (introduced 2026-09-27 at 4, then 6 on 2026-10-01)
+    "jbs_max_passes_post_homotopy": (
+        2, "jbs_loop.JBS_POST_HOMOTOPY_PASSES before the field "
+           "(2026-09-25 to 2026-09-27)"),
+    # older changed defaults (2026-06): not knowable from the config alone
+    "l_i_tolerance": (None, "default 0.01 -> 0.05 on 2026-06-04"),
+    "jBS_scale_range": (None, "default None -> (0.99, 1.01) on 2026-06-04"),
+    "homotopy_passes": (None, "default None -> three passes on 2026-06-04"),
+    "floor_j_BS": (None, "default True -> False on 2026-06-24"),
+    "jbs_max_passes_draw": (None, "default 6 -> 12 on 2026-09-27"),
+}
+
+
+#: Legacy-path fields the factories set whatever the engine until
+#: 2026-10-05, which the unified engine never read and now refuses when not
+#: at their defaults (:data:`bouquet.engine.ENGINE_UNREAD_LEGACY_FIELDS`).
+#: Kept for reference; the stored-load rule (c) of
+#: :func:`_stored_config_compat` now covers EVERY entry of
+#: ``ENGINE_UNREAD_LEGACY_FIELDS`` (2026-10-06), of which these are two.
+STORED_UNIFIED_UNREAD_FIELDS = ("isolate_edge_jBS", "perturb_jind_in_anchor")
+
+
+def _stored_unified_unread_fields():
+    """Every legacy-path field the unified engine never reads (and refuses
+    when set on a NEW config): :data:`bouquet.engine.
+    ENGINE_UNREAD_LEGACY_FIELDS`, in its order.  A stored unified config
+    carrying one at a non-default value loads at the default (rule (c) of
+    :func:`_stored_config_compat`)."""
+    from .engine import ENGINE_UNREAD_LEGACY_FIELDS
+    return tuple(ENGINE_UNREAD_LEGACY_FIELDS)
+
+
+def _stored_config_compat(gend: dict) -> None:
+    """Load a stored ``generation`` dict as it was produced (in place).
+
+    (a) Under ``reconstruction_engine="legacy"`` (or absent) an engine field
+    holding one of its HISTORICAL defaults
+    (:data:`ENGINE_FIELD_HISTORICAL_DEFAULTS`) -- the value to_dict() wrote
+    while it was the default -- is loaded as today's default, with a
+    warning: it had no effect on that path, and refusing it would make the
+    config unloadable.
+
+    (b) A stored ``"unified"`` config that LACKS a field whose default has
+    changed since (:data:`FIELD_PRE_INTRODUCTION`) is loaded with the value
+    it was produced with where that is knowable, with a warning; where it is
+    not, today's default is used with a LOUD warning naming the field.
+    ``engine_draw_solve_maxits`` missing: before it existed the engine draws
+    were capped by ``draw_solve_maxits``, so that value moves over (and
+    ``draw_solve_maxits``, which the engine now refuses, is cleared).
+
+    (c) A stored ``"unified"`` config carrying a non-default value of ANY
+    legacy-path field the engine never reads
+    (:data:`bouquet.engine.ENGINE_UNREAD_LEGACY_FIELDS`, 22 fields; or
+    ``homotopy_passes`` with ``engine_draw_homotopy=False``) is loaded at
+    the default, with a warning naming the field: the engine ignored the
+    value, so the default reproduces what the stored config actually ran.
+    Refused since 2026-10-04 (3779b51) for a NEW config; until 2026-10-06
+    only ``isolate_edge_jBS`` / ``perturb_jind_in_anchor`` had this
+    stored-load rule (6e052d0), and a stored config carrying one of the
+    other 20 could not be loaded."""
+    import warnings
+    from .engine import ENGINE_FIELD_DEFAULTS
+    eng = gend.get("reconstruction_engine", "legacy")
+    if eng == "legacy":
+        for name, hist in ENGINE_FIELD_HISTORICAL_DEFAULTS.items():
+            if name not in gend:
+                continue
+            for val, since, until in hist:
+                if gend[name] == val:
+                    warnings.warn(
+                        f"stored config: generation.{name}={val!r} was its "
+                        f"default from {since} to {until}; it has no effect "
+                        "with reconstruction_engine='legacy' and is loaded "
+                        "as today's default "
+                        f"{ENGINE_FIELD_DEFAULTS[name]!r}", UserWarning,
+                        stacklevel=3)
+                    gend[name] = ENGINE_FIELD_DEFAULTS[name]
+                    break
+    if gend.get("jbs_self_consistent") and \
+            "jbs_max_passes_post_homotopy" not in gend:
+        val, why = FIELD_PRE_INTRODUCTION["jbs_max_passes_post_homotopy"]
+        warnings.warn(
+            "stored config has no generation.jbs_max_passes_post_homotopy "
+            f"(it predates the field): loading it with {val}, {why}, so it "
+            "reproduces what it recorded; today's default is "
+            f"{_field_default('jbs_max_passes_post_homotopy')!r}",
+            UserWarning, stacklevel=3)
+        gend["jbs_max_passes_post_homotopy"] = val
+    if eng != "unified":
+        return
+    # (c) every legacy-path field the engine never reads: the engine
+    # ignored a stored non-default value (the factories set
+    # isolate_edge_jBS / perturb_jind_in_anchor for the legacy path
+    # whatever the engine until 2026-10-05; the other 20 were accepted and
+    # ignored until 3779b51), and refuses one on a NEW config since -- a
+    # stored unified config carrying one is loaded at the default (the run
+    # it recorded is the same), with a warning
+    from .engine import _same_value
+    for name in _stored_unified_unread_fields():
+        if name not in gend:
+            continue
+        d = _field_default(name)
+        same = (gend[name] is None) if d is None else \
+            _same_value(gend[name], d)
+        if not same:
+            warnings.warn(
+                f"stored unified config: generation.{name}={gend[name]!r} "
+                "(a legacy-path setting) was never read by the unified "
+                f"engine; it is loaded as its default {d!r}, which the "
+                "engine now requires -- the stored run is unchanged",
+                UserWarning, stacklevel=3)
+            gend[name] = d
+    if gend.get("engine_draw_homotopy") is False and \
+            "homotopy_passes" in gend:
+        d = _field_default("homotopy_passes")
+        if not _same_value(gend["homotopy_passes"], d):
+            warnings.warn(
+                "stored unified config: generation.homotopy_passes="
+                f"{gend['homotopy_passes']!r} with engine_draw_homotopy="
+                "False was never read by the unified engine (no homotopy "
+                f"runs in an engine draw); it is loaded as its default "
+                f"{d!r}, which the engine now requires -- the stored run "
+                "is unchanged", UserWarning, stacklevel=3)
+            gend["homotopy_passes"] = d
+    if "engine_draw_solve_maxits" not in gend:
+        cap = gend.get("draw_solve_maxits")
+        warnings.warn(
+            "stored unified config has no generation.engine_draw_solve_maxits "
+            "(it predates the field, 2026-09-30): the engine draws were then "
+            f"capped by draw_solve_maxits={cap!r}, so it is loaded as "
+            f"engine_draw_solve_maxits={cap!r} (draw_solve_maxits cleared: "
+            "the engine refuses it now); today's default is "
+            f"{ENGINE_FIELD_DEFAULTS['engine_draw_solve_maxits']}",
+            UserWarning, stacklevel=3)
+        gend["engine_draw_solve_maxits"] = cap
+        gend["draw_solve_maxits"] = None
+    for name, (val, why) in FIELD_PRE_INTRODUCTION.items():
+        if name in gend or name == "jbs_max_passes_post_homotopy":
+            continue
+        if val is not None:
+            warnings.warn(
+                f"stored unified config has no generation.{name} (it "
+                f"predates the field): loading it with {val!r}, {why}, so it "
+                "reproduces what it recorded; today's default is "
+                f"{_field_default(name)!r}", UserWarning, stacklevel=3)
+            gend[name] = val
+        else:
+            warnings.warn(
+                f"STORED UNIFIED CONFIG LACKS generation.{name}, whose "
+                f"default has changed ({why}): the value it was produced "
+                "with is NOT knowable from the config, so today's default "
+                f"{_field_default(name)!r} is used -- results may differ "
+                f"from the stored run; set generation.{name} explicitly",
+                UserWarning, stacklevel=3)
+
+
+def _field_default(name):
+    f = GenerationConfig.__dataclass_fields__[name]
+    return (f.default if f.default is not _dc.MISSING
+            else f.default_factory())
 
 
 def _checked_generation_keys(gend: dict) -> dict:
