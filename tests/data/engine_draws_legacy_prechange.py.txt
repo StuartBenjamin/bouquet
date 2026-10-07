@@ -20,6 +20,9 @@
 # provenance in generate_bouquet and Bouquet.generate), when main at 83e6273
 # was merged into the engine line: again changes of the LEGACY code made on
 # main, every added line verified present in main's source.
+# RE-BASED a fifth time (2026-10-07) by main's #67 review hunk to
+# Bouquet.generate (the orientation stamp dispatches with isinstance), when
+# main at 7b49949 was merged into the engine line (int/engine+main).
 
 # ==== TokaMaker_interface.generate_bouquet ====
 def generate_bouquet(
@@ -3482,7 +3485,8 @@ def generate(self, n: Optional[int] = None, progress_callback=None,
     write_provenance(header, config=self.config, scan_key=gc.scan_key)
     # IMAS path: the source's current orientation (what the reader
     # multiplied every dd current by to reach bouquet's positive frame).
-    if type(self.config.source).__name__ == "ImasSource":
+    from .config import ImasSource
+    if isinstance(self.config.source, ImasSource):
         from .utils import stamp_source_orientation
         stamp_source_orientation(
             header, scan_key=gc.scan_key,
