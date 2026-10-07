@@ -8473,11 +8473,16 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         # eV -> J: exact under the self-consistent loop, the frozen legacy
         # value otherwise -- the SAME factor the draws use (see above)
         pres_tmp = thermal_pressure_charge(jbs_loop) * (ne * te + ni * ti)
+        # Per-component copies for the report-only core-pressure hollowness
+        # record; the composition arithmetic is untouched (so bit-identical).
+        _p_comp = {"electron_thermal": thermal_pressure_charge(jbs_loop) * ne * te,
+                   "ion_thermal": thermal_pressure_charge(jbs_loop) * ni * ti}
 
         # Fixed fast-ion pressure -- constant across draws, never perturbed.
         # Supplied already on the equilibrium grid (eqdsk.psi_N) by the caller,
         # which applies the same kin->eq PCHIP the draws use.
         if p_fast is not None:
+            _p_comp["fast"] = np.asarray(p_fast, dtype=float)
             pres_tmp = pres_tmp + np.asarray(p_fast, dtype=float)
 
         # Impurity (carbon) thermal pressure: one-Zeff single-impurity model on the
@@ -8485,6 +8490,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         # e*(ne*Te + ni*Ti) omits this.
         if Z_imp:
             from .physics import impurity_pressure
+            _p_comp["impurity"] = impurity_pressure(ne, ni, ti, Z_imp)
             pres_tmp = pres_tmp + impurity_pressure(ne, ni, ti, Z_imp)
 
         # NOTE: p_diff is deliberately NOT plumbed here.  It is defined as
@@ -8771,6 +8777,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
             j_ind_li=j_ind_li,
             pp_prof=pp_prof,
             pres_tmp=pres_tmp,
+            pres_components=_p_comp,
             pprime_tmp=pprime_tmp,
             final_li=final_li,
             li_target=li_target,
@@ -8824,6 +8831,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     j_ind_li = _fm["j_ind_li"]
     pp_prof = _fm["pp_prof"]
     pres_tmp = _fm["pres_tmp"]
+    _p_comp = _fm["pres_components"]
     pprime_tmp = _fm["pprime_tmp"]
     final_li = _fm["final_li"]
     li_target = _fm["li_target"]
@@ -9045,6 +9053,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
             j_ind_li = _fm["j_ind_li"]
             pp_prof = _fm["pp_prof"]
             pres_tmp = _fm["pres_tmp"]
+            _p_comp = _fm["pres_components"]
             pprime_tmp = _fm["pprime_tmp"]
             final_li = _fm["final_li"]
             li_target = _fm["li_target"]
@@ -9192,8 +9201,22 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
           f"bnd_rms={_bnd_rms_mm:.2f} mm, bnd_max={_bnd_max_mm:.2f} mm")
 
     # FF' from the converged TokaMaker equilibrium
-    _, F_prof, Fp_prof, _, _ = mygs.get_profiles(psi=eqdsk.psi_N)
+    _, F_prof, Fp_prof, _p_ach, _ = mygs.get_profiles(psi=eqdsk.psi_N)
     ffprime_tokamaker = F_prof * Fp_prof
+
+    # ---- core-pressure hollowness health record (report-only) ------------
+    # Describes the core shape of the INPUT pressure this reconstruction
+    # solved with (total, and thermal species only) and of the ACHIEVED
+    # pressure read off the same get_profiles call the FF' above uses.
+    # Nothing reads it back; a failure here is recorded, never raised.
+    try:
+        from .physics import core_pressure_hollow_record
+        quality["core_pressure_hollow"] = core_pressure_hollow_record(
+            eqdsk.psi_N, pres_tmp, input_components=_p_comp,
+            achieved_total=_p_ach)
+    except Exception as _cph_exc:   # pragma: no cover - defensive
+        quality["core_pressure_hollow"] = {
+            "unavailable": f"health record failed: {_cph_exc}"}
 
     _recon_out = {
         'ne': ne.copy(),

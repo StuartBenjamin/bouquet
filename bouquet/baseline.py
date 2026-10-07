@@ -114,28 +114,6 @@ class Baseline:
     # this time, in which case it is not active here).
     sawtooth: Optional[dict] = None
 
-    # Current orientation of the SOURCE, and what the reader did about it.
-    # bouquet works in one positive-current frame: every anchor is solved to
-    # |Ip| with F0 = |R*B|, so every bootstrap it recomputes is positive.  The
-    # IMAS reader multiplies every current profile it reads by
-    # ``source_current_sign`` (= sign of the dd's equilibrium ip, +1.0 for
-    # ip >= 0, unless ``ImasSource.current_orientation`` names the factor
-    # explicitly) so all currents on this Baseline are in that frame -- see
-    # :func:`bouquet.io.imas.read_imas_baseline`.  +1.0 on the reconstruction
-    # path, whose split is produced by a TokaMaker fit in the same frame.
-    # ``source_current_sign_origin`` says where the factor came from (IMAS
-    # path: "auto: sign(equilibrium ip)" or "override: ImasSource.
-    # current_orientation"; None elsewhere).
-    # ``source_b0_sign`` is the sign of the source's vacuum B0 (IMAS path;
-    # None elsewhere, and None for a zero or unreadable b0) -- recorded only:
-    # nothing in the reader flips on it, and F0 = |r0*b0| was already
-    # orientation-free.  Together they are what a consumer needs to map a
-    # delivered (positive-frame) equilibrium back onto the experiment's
-    # orientation.
-    source_current_sign: float = 1.0
-    source_current_sign_origin: Optional[str] = None
-    source_b0_sign: Optional[float] = None
-
     # Case-B ("diff") fixed bootstrap correction profile [A/m^2] = FUSE_jBS - SWB,
     # added to the baseline AND every draw's j_phi so the total anchors to the
     # FUSE bootstrap while the SWB delta tracks per-draw kinetics. None => not in
@@ -214,6 +192,44 @@ class Baseline:
     # full captured solver chatter from the reconstruction (when verbose=False),
     # kept available for debugging without cluttering the notebook output.
     reconstruction_log: Optional[str] = None
+
+    # Appended LAST on purpose: Baseline is a public, positionally
+    # constructible dataclass, so a new field must not shift the slots of
+    # the pre-existing ones (aux, reconstruction_metrics, ...).
+    # Core-pressure hollowness health record (see
+    # physics.core_pressure_hollow_record): how far the core pressure rises
+    # above its innermost-node value, and over what radial extent, measured on
+    # the INPUT pressure (total, and thermal species only) and on the ACHIEVED
+    # pressure of the converged equilibrium.  Descriptive and report-only:
+    # nothing reads it back, so no profile, solve, filter decision, in-spec or
+    # until-N count depends on it.  Also carried inside ``li_metrics`` so it
+    # reaches the archive.  None when the source path did not evaluate it.
+    core_pressure_hollow: Optional[dict] = None
+
+    # Appended AFTER every pre-existing field on purpose (Baseline is a
+    # public, positionally constructible dataclass; a new field must not
+    # shift the slots of the older ones).
+    # Current orientation of the SOURCE, and what the reader did about it.
+    # bouquet works in one positive-current frame: every anchor is solved to
+    # |Ip| with F0 = |R*B|, so every bootstrap it recomputes is positive.  The
+    # IMAS reader multiplies every current profile it reads by
+    # ``source_current_sign`` (= sign of the dd's equilibrium ip, +1.0 for
+    # ip >= 0, unless ``ImasSource.current_orientation`` names the factor
+    # explicitly) so all currents on this Baseline are in that frame -- see
+    # :func:`bouquet.io.imas.read_imas_baseline`.  +1.0 on the reconstruction
+    # path, whose split is produced by a TokaMaker fit in the same frame.
+    # ``source_current_sign_origin`` says where the factor came from (IMAS
+    # path: "auto: sign(equilibrium ip)" or "override: ImasSource.
+    # current_orientation"; None elsewhere).
+    # ``source_b0_sign`` is the sign of the source's vacuum B0 (IMAS path;
+    # None elsewhere, and None for a zero or unreadable b0) -- recorded only:
+    # nothing in the reader flips on it, and F0 = |r0*b0| was already
+    # orientation-free.  Together they are what a consumer needs to map a
+    # delivered (positive-frame) equilibrium back onto the experiment's
+    # orientation.
+    source_current_sign: float = 1.0
+    source_current_sign_origin: Optional[str] = None
+    source_b0_sign: Optional[float] = None
 
     # the unified reconstruction engine's full record
     # (GenerationConfig.reconstruction_engine="unified" only; None on the
@@ -1176,6 +1192,10 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     # Unchanged contract: the returned field is on the KINETIC grid.
     p_fast = p_fast_kin
 
+    # Report-only core-pressure hollowness record built inside the
+    # reconstruction (see physics.core_pressure_hollow_record).
+    _cph_recon = (result.get("quality") or {}).get("core_pressure_hollow")
+
     return Baseline(
         psi_N=psi_N,
         j_phi=j_phi,
@@ -1217,6 +1237,13 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         jphi_request_offset=_request_offset,
         delivered_state=_delivered,
         edge_pressure=(recon_metrics or {}).get("edge_pressure"),
+        # Lifted out of the reconstruction's own quality block so both source
+        # paths expose the record under one name, and carried in li_metrics so
+        # store_baseline_profiles archives it (report-only; see
+        # physics.core_pressure_hollow_record).
+        core_pressure_hollow=_cph_recon,
+        li_metrics=({"core_pressure_hollow": _cph_recon}
+                    if _cph_recon else None),
     )
 
 

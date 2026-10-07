@@ -65,12 +65,14 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │   │                              when too large for an attribute
     │   └── attrs: Ip_target, l_i_target, l_i_scale, source_kind, [diverted],
     │              [source_current_sign, source_b0_sign,
-    │               source_current_sign_origin, current_frame]
+    │               source_current_sign_origin, current_frame],
     │              [li_metrics_json, closure_limited]   baseline provenance (absent
     │              from older archives):
     │              Baseline.li_metrics as JSON, incl. the ip_closure health
-    │              record on hybrid baselines; load_baseline_profiles() decodes
-    │              it to li_metrics / ip_closure / closure_limited
+    │              record on hybrid baselines and the report-only
+    │              core_pressure_hollow record; load_baseline_profiles()
+    │              decodes it to li_metrics / ip_closure / closure_limited /
+    │              core_pressure_hollow (each only when present)
     │              [jbs_converged, jbs_n_passes, jbs_loop_json]
     │                                  ← the baseline's jbs_loop block (v3)
     │              [delivered_state_json]
