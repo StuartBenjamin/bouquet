@@ -73,7 +73,9 @@
   `R_src/R_axis` and the factor recorded; a stored IMAS unified config
   loads as `"axis"`.
 - **Engine MSE: Jacobian refresh, no-MSE fallback, chord chi^2/N** (below;
-  `mse_chi2n_flag = 10.0`, owner decision pending).
+  `mse_chi2n_flag = 10.0`, owner-approved 2026-10-07, flag only;
+  `MSE_JACOBIAN_MAX_REFRESHES = 3`, owner-approved 2026-10-07,
+  non-converged only).
 - **`p_scale` recorded (new record).** The solver's uniform `P'` rescale
   (OFT `p_scale` = `pax / P(psi_axis)`; ~1.02-1.03 on a pedestal with the
   edge pin, the size of the separatrix correction) is recorded on every
@@ -283,8 +285,9 @@ refusal) still ends the sweep unrecorded.
   Gauss-Newton step with it is judged by the stage's own criterion
   (`MSE_CHORD_OFFSET_TOL_SIGMA`, 0.1 sigma_eff, unchanged); above it the loop
   continues with the refreshed Jacobian (same pass ceiling), at most
-  `engine.MSE_JACOBIAN_MAX_REFRESHES = 3` refreshes (a NEW cost ceiling, for
-  the owner's review; it can only make a stage non-converged). Recorded:
+  `engine.MSE_JACOBIAN_MAX_REFRESHES = 3` refreshes (a NEW cost ceiling,
+  owner-approved 2026-10-07: non-converged only -- it can only make a stage
+  non-converged). Recorded:
   `jacobian_refresh_rel_change`, `refresh_step_norm`, the old-J step and the
   predicted tan(gamma) moves (MSE phase `jacobian["refresh"]`). Within the
   criterion the delivery is the one before; on the toys the step is < 0.01
@@ -313,7 +316,7 @@ refusal) still ends the sweep unrecorded.
   (`checks["mse"]`, `Baseline.engine["mse"]`); `mse_worse_than_without`
   when the delivered chi^2 exceeds the no-MSE one; `mse_chi2_per_chord_high`
   when chi^2/N exceeds the NEW `GenerationConfig.mse_chi2n_flag` (default
-  10.0 -- **owner decision pending**; refused non-default under
+  10.0 -- owner-approved 2026-10-07, flag only; refused non-default under
   `"legacy"`). Under `jbs_loop_on_fail="flag"` a non-converged MSE fit is
   delivered with `mse_converged=False` and the same records.
 - **Tests.** `tests/test_engine_mse_refresh.py`,

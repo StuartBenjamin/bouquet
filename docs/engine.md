@@ -284,7 +284,7 @@ stage's own criterion (`MSE_CHORD_OFFSET_TOL_SIGMA`, 0.1 σ_eff on every
 chord) the stage is converged and the delivery is unchanged; above it the
 loop CONTINUES from the refresh's base state with the refreshed Jacobian
 (same pass ceiling), and the Jacobian is re-taken again at its convergence,
-at most `engine.MSE_JACOBIAN_MAX_REFRESHES` (3, a cost ceiling) times -- a
+at most `engine.MSE_JACOBIAN_MAX_REFRESHES` (3, a cost ceiling, owner-approved 2026-10-07: non-converged only) times -- a
 stage whose fresh-Jacobian step never settles is NOT converged (raised, or
 flagged under `jbs_loop_on_fail="flag"`). Recorded per refresh in the MSE
 phase's `jacobian["refresh"]["rounds"]`: `jacobian_refresh_rel_change`
@@ -323,7 +323,7 @@ EFIT q profile): `checks["mse"]` and `engine_record()["mse"]` carry χ², N,
 base solve, same chords), and two FLAGS (flag only, never acceptance; each a
 closure-limited reason): `mse_worse_than_without` (delivered χ² above the
 pre-MSE χ²) and `mse_chi2_per_chord_high` (χ²/N above
-`GenerationConfig.mse_chi2n_flag`, default 10.0 -- owner decision pending).
+`GenerationConfig.mse_chi2n_flag`, default 10.0 -- owner-approved 2026-10-07, flag only).
 Under `jbs_loop_on_fail="flag"` a non-converged fit is delivered with
 `mse_converged=False` and the same records.
 

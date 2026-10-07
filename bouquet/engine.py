@@ -73,8 +73,9 @@ ENGINE_MSE_JACOBIANS = ("fd_broyden", "fd_chord")
 #: exceeds the stage's criterion.  A COST ceiling (each refresh is 1 + n_free
 #: solves, each continuation a loop under the same pass ceiling), not a
 #: tolerance: it can only turn a converged stage into a non-converged one,
-#: never the reverse.  Introduced 2026-10-07 with the refresh; recorded in
-#: :func:`convergence_table` for review.
+#: never the reverse.  Introduced 2026-10-07 with the refresh; 3 is
+#: owner-approved 2026-10-07 (non-converged only: it can only mark a stage
+#: not converged); recorded in :func:`convergence_table`.
 MSE_JACOBIAN_MAX_REFRESHES = 3
 #: The engine fields of :class:`~bouquet.config.GenerationConfig` and their
 #: defaults (refused when changed with ``reconstruction_engine="legacy"``).
@@ -100,8 +101,8 @@ ENGINE_FIELD_DEFAULTS = {
     # value, 2026-09-30: 100; see docs/engine.md "The solve cap")
     "engine_draw_solve_maxits": 100,
     # the delivered MSE fit's chord chi^2 / N above which it is FLAGGED
-    # (mse_chi2_per_chord_high; never acceptance).  10.0: owner decision
-    # pending (see GenerationConfig.mse_chi2n_flag)
+    # (mse_chi2_per_chord_high; never acceptance).  10.0: owner-approved
+    # 2026-10-07, flag only (see GenerationConfig.mse_chi2n_flag)
     "mse_chi2n_flag": 10.0,
 }
 
@@ -1408,8 +1409,8 @@ class UnifiedEngine:
         * ``mse_worse_than_without`` -- delivered chi^2 above the pre-MSE
           chi^2;
         * ``mse_chi2_per_chord_high`` -- chi^2 / N above
-          ``GenerationConfig.mse_chi2n_flag`` (default 10.0: OWNER DECISION
-          PENDING; a flag threshold, never an acceptance criterion).
+          ``GenerationConfig.mse_chi2n_flag`` (default 10.0: owner-approved
+          2026-10-07, flag only; never an acceptance criterion).
 
         Under ``jbs_loop_on_fail="flag"`` a non-converged MSE iterate is
         delivered carrying ``mse_converged=False`` and the same records."""
@@ -1460,7 +1461,7 @@ class UnifiedEngine:
                 MSE_FLAG_PREFIX + f"mse_chi2_per_chord_high: delivered "
                 f"chi2/N = {c2 / n:.4g} ({n} chords) is above "
                 f"mse_chi2n_flag = {thr:g} (a FLAG, never acceptance; "
-                "threshold: owner decision pending) -- check the time "
+                "threshold owner-approved 2026-10-07) -- check the time "
                 "slice, the calibration, the sigmas and the E_r correction")
             print(f"[{self.label}] WARNING closure-limited: "
                   + self.flags[-1], flush=True)

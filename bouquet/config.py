@@ -1221,8 +1221,8 @@ class GenerationConfig:
     # E_r-corrected chords with the stage's own weights) above which the fit
     # is FLAGGED "mse_chi2_per_chord_high" (closure-limited reason, warning,
     # engine record "mse").  A FLAG ONLY, never an acceptance criterion: the
-    # fit is delivered either way.  10.0 is an OWNER DECISION PENDING
-    # (introduced 2026-10-07 with the review's chi^2 / N record); the
+    # fit is delivered either way.  10.0 is owner-approved 2026-10-07 (flag
+    # only; introduced 2026-10-07 with the review's chi^2 / N record); the
     # delivered chi^2 above the no-MSE reconstruction's is flagged
     # separately ("mse_worse_than_without") whatever this value.  A finite
     # number > 0; refused non-default under reconstruction_engine="legacy".

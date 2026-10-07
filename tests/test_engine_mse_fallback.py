@@ -12,7 +12,7 @@ delivered fit.
   chords with the stage's own weights and the chi^2 of the reconstruction
   without MSE, flagging ``mse_worse_than_without`` and
   ``mse_chi2_per_chord_high`` (``GenerationConfig.mse_chi2n_flag``, default
-  10.0, owner decision pending; a flag only); under
+  10.0, owner-approved 2026-10-07; a flag only); under
   ``jbs_loop_on_fail="flag"`` a non-converged fit carries
   ``mse_converged=False`` and the same records.
 
