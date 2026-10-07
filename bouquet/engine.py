@@ -23,8 +23,10 @@ ONE loop reconstructs the baseline for both input types (docs/engine.md):
 * the solved current is relaxed (``CurrentRelaxer``), ONE Grad-Shafranov
   solve is taken, and everything is measured on the new equilibrium: Redl,
   l_i, Ip and the uniform factor, q0, tan(gamma), request minus achieved;
-* the bootstrap iterate, the discrepancies (and, optionally, the MSE Broyden
-  Jacobian and the delivery correction) are updated.
+* the bootstrap iterate, the discrepancies (and, optionally, the MSE
+  linearisation -- its offset every pass, its Jacobian Broyden-updated under
+  ``engine_mse_jacobian="fd_broyden"``, re-taken by finite differences at
+  convergence -- and the delivery correction) are updated.
 
 The iteration is today's kernel, :func:`bouquet.jbs_loop.run_jbs_loop`, with
 ``step`` = compose + closure + relax + solve + measure; the engine adds its
@@ -65,6 +67,15 @@ ENGINE_PRESETS = ("structured", "structured_uniform", "bootstrap_scalar",
 ENGINE_ROWS = ("Ip", "l_i", "q0", "mse")
 #: ``GenerationConfig.engine_mse_jacobian`` values.
 ENGINE_MSE_JACOBIANS = ("fd_broyden", "fd_chord")
+#: How many times the MSE stage re-takes its chord Jacobian at a converged
+#: MSE loop (:meth:`UnifiedEngine._refresh_jacobian`) before it declares the
+#: fit NOT converged because the fresh-Jacobian Gauss-Newton step still
+#: exceeds the stage's criterion.  A COST ceiling (each refresh is 1 + n_free
+#: solves, each continuation a loop under the same pass ceiling), not a
+#: tolerance: it can only turn a converged stage into a non-converged one,
+#: never the reverse.  Introduced 2026-10-07 with the refresh; recorded in
+#: :func:`convergence_table` for review.
+MSE_JACOBIAN_MAX_REFRESHES = 3
 #: The engine fields of :class:`~bouquet.config.GenerationConfig` and their
 #: defaults (refused when changed with ``reconstruction_engine="legacy"``).
 ENGINE_FIELD_DEFAULTS = {
@@ -89,6 +100,20 @@ ENGINE_FIELD_DEFAULTS = {
     # value, 2026-09-30: 100; see docs/engine.md "The solve cap")
     "engine_draw_solve_maxits": 100,
 }
+
+
+def mse_scheme_text(scheme) -> str:
+    """What the MSE stage does with its Jacobian, in words, for the scheme
+    actually in use (``engine_mse_jacobian``)."""
+    return ("finite differences once at the no-MSE convergence, then "
+            "Broyden updates every pass" if scheme == "fd_broyden" else
+            "finite differences once at the no-MSE convergence, held fixed "
+            "(chord method; the offset is refreshed from every solve)") + (
+        "; re-taken by the same finite differences at each MSE loop's "
+        "convergence, the loop continuing with it while its Gauss-Newton "
+        "step exceeds the stage's criterion")
+
+
 #: Rows each preset admits (``Ip`` is mandatory for every preset).
 PRESET_ROWS = {
     "structured": frozenset(("Ip", "l_i", "q0", "mse")),
@@ -537,6 +562,11 @@ def convergence_table(settings: dict, contract=None) -> list:
          settings["structured_li_tol"], "GenerationConfig.structured_li_tol"),
         ("MSE tan(gamma) change [sigma_eff]", settings["mse_tol_sigma"],
          "jbs_loop.MSE_CHORD_OFFSET_TOL_SIGMA"),
+        ("MSE fresh-Jacobian step, tan(gamma) move [sigma_eff]",
+         settings["mse_tol_sigma"],
+         "jbs_loop.MSE_CHORD_OFFSET_TOL_SIGMA (the same criterion)"),
+        ("MSE Jacobian refreshes (cost ceiling)", MSE_JACOBIAN_MAX_REFRESHES,
+         "engine.MSE_JACOBIAN_MAX_REFRESHES"),
         ("closure-half current residual", lp["rtol_j"],
          "GenerationConfig.jbs_rtol_j (jbs_loop current gate, standing)"),
         ("consecutive passes", lp["required_consecutive"],
@@ -1212,24 +1242,33 @@ class UnifiedEngine:
 
     def _mse_stage(self, res):
         """FD Jacobian at convergence (1 base + one solve per free
-        coefficient), then the loop again with the chords as rows and the
-        Jacobian Broyden-updated every pass (decision 14)."""
-        from .jbs_loop import run_jbs_loop
+        coefficient), then the loop again with the chords as rows: the
+        Jacobian held fixed (``engine_mse_jacobian="fd_chord"``, the
+        default) or Broyden-updated every pass (``"fd_broyden"``), the
+        linearisation offset refreshed from every solve either way.
+
+        At the loop's convergence the Jacobian is RE-TAKEN once by the same
+        finite differences (:meth:`_refresh_jacobian`) and the Gauss-Newton
+        step the closure takes with it is formed: a chord iteration with a
+        stale Jacobian stops at ``J0^T W r + grad(prior) = 0``, not at the
+        chi^2 minimum.  If that step would move tan(gamma) by more than the
+        stage's own criterion (``MSE_CHORD_OFFSET_TOL_SIGMA`` sigma_eff on
+        some chord), the loop CONTINUES with the refreshed Jacobian (same
+        pass ceiling) and the Jacobian is re-taken again at its convergence,
+        at most :data:`MSE_JACOBIAN_MAX_REFRESHES` times; the stage is
+        converged only when the fresh-Jacobian step is within the criterion
+        (a stricter definition of converged, never a looser one)."""
+        from .jbs_loop import JBSNotConverged, run_jbs_loop
         from .mse import (MSE_ORIENTATION_DCHI2, MSE_REASON_OFF_MESH,
                           mse_equilibrium_orientation, mse_exclude,
                           mse_orientation, mse_orientation_check)
-        from .utils import MSE_FLAG_PREFIX, structured_mse_jacobian
+        from .utils import MSE_FLAG_PREFIX
         st, s = self.state, self.s
         n0 = int(self.b.n_solves)
         lam = np.asarray(res["jbs_used"], dtype=float)
         g_last = self._geom_of_last_closure
         x0 = np.asarray(st.x, dtype=float)
-        dlt = st.delivery_correction
-        base = self.close(g_last, lam, x=x0)["jc"] + (0.0 if dlt is None
-                                                       else dlt)
-        self.b.solve(base, n_passes=1)
-        m0 = self.b.measure(want_chords=True)
-        snap = self.b.snapshot()
+        m0, snap = self._mse_base_solve(g_last, lam, x0)
         ch = self.rows["mse"]["chords"]
         # ---- chords OFF the solver mesh: excluded at this first read, with
         # their reason (the loop's chord stage does the same); fewer than
@@ -1281,22 +1320,12 @@ class UnifiedEngine:
                   + self.flags[-1], flush=True)
         table = chk["table"]
         tg0 = self._tg(dict(m0, B_chords=B0, chords_found=None))
-        free = np.concatenate([self.sigma_ind > 0, self.sigma_bs > 0])
-
-        def _tg_of(x):
-            self.b.restore(snap)
-            r = self.close(g_last, lam, x=x)["jc"] + (0.0 if dlt is None
-                                                      else dlt)
-            self.b.solve(r, n_passes=1)
-            return self._tg(self.b.measure(want_chords=True))
-
-        J = structured_mse_jacobian(_tg_of, x0, tg0, free,
-                                    step=s["mse_fd_step"])
+        J = self._mse_fd(g_last, lam, x0, tg0, snap)
         self.b.restore(snap)
         st.mse_J, st.mse_x0, st.mse_tg0 = J, x0, tg0
         st.geom = complete_geometry(m0["geom"])
         fd = dict(n_solves=int(self.b.n_solves) - n0,
-                  n_free=int(np.count_nonzero(free)),
+                  n_free=int(np.count_nonzero(self._mse_free())),
                   fd_step=float(s["mse_fd_step"]),
                   applied=True, excluded_off_mesh=excl,
                   orientation=dict(
@@ -1311,33 +1340,204 @@ class UnifiedEngine:
                       delta_chi2=float(chk["delta_chi2"]),
                       disagrees=bool(chk["disagrees"]), note=chk["note"]),
                   sign_table={k: float(v) for k, v in table.items()},
-                  scheme=("finite differences once at convergence, then "
-                          "Broyden updates every pass"
-                          if s["mse_jacobian"] == "fd_broyden" else
-                          "finite differences once at convergence, held "
-                          "fixed (chord method; the offset is refreshed "
-                          "from every solve)"),
+                  scheme=mse_scheme_text(s["mse_jacobian"]),
                   J_initial=J.tolist(), tg_base=tg0.tolist())
         self._mse_phase = dict(tg_prev=tg0, n_broyden=0)
         self._phase_name = "mse"
-        loop = dict(s["loop"])
+        meas0 = dict(li=m0["li"], q0=(m0["q_row"] if self.pin else None))
+        n1 = int(self.b.n_solves)
+        n_ref = 0
+        rounds = []
+        lp = s["loop"]
+        while True:
+            out = self._mse_loop(lam, meas0, label=self.label + " +MSE"
+                                 + ("" if not rounds else
+                                    f" (refreshed J {len(rounds)})"),
+                                 init_source=(
+                                     "the converged loop's bootstrap iterate"
+                                     if not rounds else
+                                     "the previous MSE loop's bootstrap "
+                                     "iterate (refreshed Jacobian)"))
+            if not out["converged"]:
+                break
+            nr = int(self.b.n_solves)
+            rf = self._refresh_jacobian(out)
+            n_ref += int(self.b.n_solves) - nr
+            rounds.append(rf["record"])
+            if rf["ok"]:
+                break
+            if len(rounds) >= MSE_JACOBIAN_MAX_REFRESHES:
+                why = (f"the Gauss-Newton step with the refreshed Jacobian "
+                       f"still moves tan(gamma) by "
+                       f"{rf['record']['refresh_step_dtg_max_sigma']:.3g} "
+                       f"sigma_eff (> {s['mse_tol_sigma']:g}) after "
+                       f"{len(rounds)} refresh(es) "
+                       f"(MSE_JACOBIAN_MAX_REFRESHES = "
+                       f"{MSE_JACOBIAN_MAX_REFRESHES}): the fit is not at "
+                       "the fresh-Jacobian stationary point")
+                rec = dict(out["record"])
+                rec.update(converged=False, stop_reason=why,
+                           fail_message=f"{self.label} +MSE: {why}")
+                out = dict(out, converged=False, record=rec)
+                print(f"  [engine] {self.label} +MSE: NOT converged: {why}",
+                      flush=True)
+                if lp.get("on_fail", "raise") == "raise":
+                    raise JBSNotConverged(rec["fail_message"], rec)
+                break
+            # continue with the refreshed Jacobian, from its base solve
+            # (state installed by _refresh_jacobian)
+            lam = np.asarray(out["jbs_used"], dtype=float)
+            meas0 = rf["meas0"]
+            rounds[-1]["previous_loop_record"] = out["record"]
+        fd["n_broyden_updates"] = int(self._mse_phase["n_broyden"])
+        fd["n_pass_solves"] = int(self.b.n_solves) - n1 - n_ref
+        fd["refresh"] = dict(
+            rule=("at each MSE loop's convergence the Jacobian is re-taken "
+                  "by the same finite differences around the last closure's "
+                  "coefficients; the closure's Gauss-Newton step with it "
+                  "must move tan(gamma) by <= mse_tol_sigma sigma_eff on "
+                  "every chord (else the loop continues with it)"),
+            max_refreshes=int(MSE_JACOBIAN_MAX_REFRESHES),
+            rounds=rounds, n_solves=n_ref,
+            fresh_J_stationary=bool(rounds and rounds[-1]["ok"]))
+        if rounds:
+            fd["jacobian_refresh_rel_change"] = rounds[-1][
+                "jacobian_refresh_rel_change"]
+            fd["refresh_step_norm"] = rounds[-1]["refresh_step_norm"]
+            fd["refresh_step_dtg_max_sigma"] = rounds[-1][
+                "refresh_step_dtg_max_sigma"]
+        self.solves["mse_fd"] = fd["n_solves"]
+        self.solves["mse_passes"] = fd["n_pass_solves"]
+        self.solves["mse_refresh"] = n_ref
+        return out, fd
+
+    def _mse_free(self):
+        return np.concatenate([self.sigma_ind > 0, self.sigma_bs > 0])
+
+    def _mse_base_solve(self, g, lam, x):
+        """Solve the composition of coefficients *x* on geometry *g* with
+        bootstrap *lam* (plus the delivery correction), unrelaxed; return
+        its chord measurement and a snapshot of it (one solve)."""
+        dlt = self.state.delivery_correction
+        base = self.close(g, lam, x=x)["jc"] + (0.0 if dlt is None else dlt)
+        self.b.solve(base, n_passes=1)
+        m = self.b.measure(want_chords=True)
+        return m, self.b.snapshot()
+
+    def _mse_fd(self, g, lam, x, tg, snap):
+        """``d tan(gamma) / d x`` by forward differences around the base
+        state *snap* (coefficients *x*, tan(gamma) *tg*): one solve per free
+        coefficient, each from the base state
+        (:func:`bouquet.utils.structured_mse_jacobian`)."""
+        from .utils import structured_mse_jacobian
+        dlt = self.state.delivery_correction
+
+        def _tg_of(xp):
+            self.b.restore(snap)
+            r = self.close(g, lam, x=xp)["jc"] + (0.0 if dlt is None
+                                                  else dlt)
+            self.b.solve(r, n_passes=1)
+            return self._tg(self.b.measure(want_chords=True))
+
+        return structured_mse_jacobian(_tg_of, x, tg, self._mse_free(),
+                                       step=self.s["mse_fd_step"])
+
+    def _mse_loop(self, lam, meas0, *, label, init_source):
+        from .jbs_loop import run_jbs_loop
         li = self.rows.get("l_i")
         rows_x = EngineRows(self, li_tol=(None if li is None
                                           else li["criterion_tol"]),
-                            mse_tol=s["mse_tol_sigma"])
-        meas0 = dict(li=m0["li"], q0=(m0["q_row"] if self.pin else None))
-        n1 = int(self.b.n_solves)
-        out = run_jbs_loop(
-            lam, self.step, lambda m: m["redl"], loop,
+                            mse_tol=self.s["mse_tol_sigma"])
+        return run_jbs_loop(
+            lam, self.step, lambda m: m["redl"], dict(self.s["loop"]),
             Ip=float(self.rows["Ip"]["target"]), meas0=meas0, gate_li=True,
-            gate_q0=bool(self.pin), label=self.label + " +MSE",
-            init_source="the converged loop's bootstrap iterate",
+            gate_q0=bool(self.pin), label=label, init_source=init_source,
             on_pass=self.on_pass, q0_pin=self.pin, extra=rows_x)
-        fd["n_broyden_updates"] = int(self._mse_phase["n_broyden"])
-        fd["n_pass_solves"] = int(self.b.n_solves) - n1
-        self.solves["mse_fd"] = fd["n_solves"]
-        self.solves["mse_passes"] = fd["n_pass_solves"]
-        return out, fd
+
+    def _refresh_jacobian(self, out):
+        """Re-take the chord Jacobian at a converged MSE loop and judge the
+        Gauss-Newton step it implies.
+
+        Base: the last pass's closure coefficients ``x_b`` composed on the
+        geometry that pass composed on, with its bootstrap iterate, solved
+        unrelaxed (one solve; tan(gamma) ``tg_b``); then the same forward
+        differences as the stage's first Jacobian (one solve per free
+        coefficient).  With the linear model re-centred on ``(x_b, tg_b)``
+        the closure (zero solves, every other row as the last pass had it)
+        is run once with the Jacobian in use and once with the refreshed
+        one; the refreshed step ``x_new - x_b`` is converted to the
+        tan(gamma) move it predicts, ``max |J_new (x_new - x_b)| /
+        sigma_eff``, and compared with the stage's own criterion
+        ``mse_tol_sigma`` (the coefficients have no tolerance of their
+        own).  Recorded: ``jacobian_refresh_rel_change`` = ``|J_new -
+        J_old|_F / |J_old|_F``, ``refresh_step_norm`` = ``max |x_new -
+        x_b|``, the old-Jacobian step for comparison and the relative change
+        of the step.
+
+        ``ok``: the backend is put back at the converged pass's state and
+        the stage's state is untouched (the delivery composes exactly what
+        it did before).  Not ``ok``: the refreshed Jacobian and the base
+        state become the linearisation the loop continues from."""
+        from .utils import structured_mse_linear_model
+        st, s = self.state, self.s
+        ch = self.rows["mse"]["chords"]
+        sig = np.asarray(ch["sigma_eff"], dtype=float)
+        p = self._pending
+        g = p["cl_geom"]
+        lam = np.asarray(out["jbs_used"], dtype=float)
+        x_b = np.asarray(st.x, dtype=float)
+        J_old = np.asarray(st.mse_J, dtype=float).copy()
+        n0 = int(self.b.n_solves)
+        conv = self.b.snapshot()
+        m_b, snap_b = self._mse_base_solve(g, lam, x_b)
+        tg_b = self._tg(m_b)
+        J_new = self._mse_fd(g, lam, x_b, tg_b, snap_b)
+        lin_old = structured_mse_linear_model(x_b, tg_b, J_old, ch,
+                                              who=self.label + " MSE refresh")
+        lin_new = structured_mse_linear_model(x_b, tg_b, J_new, ch,
+                                              who=self.label + " MSE refresh")
+        x_old = np.asarray(self.close(g, lam, mse_lin=lin_old,
+                                      x_prev=x_b)["x"], dtype=float)
+        x_new = np.asarray(self.close(g, lam, mse_lin=lin_new,
+                                      x_prev=x_b)["x"], dtype=float)
+        d_new, d_old = x_new - x_b, x_old - x_b
+        dtg_new = float(np.max(np.abs(J_new @ d_new) / sig))
+        dtg_old = float(np.max(np.abs(J_old @ d_old) / sig))
+        nJ = float(np.linalg.norm(J_old))
+        nd = max(float(np.linalg.norm(d_new)), float(np.linalg.norm(d_old)))
+        ok = bool(np.isfinite(dtg_new) and dtg_new <= s["mse_tol_sigma"])
+        rec = dict(
+            n_solves=int(self.b.n_solves) - n0,
+            jacobian_refresh_rel_change=float(
+                np.linalg.norm(J_new - J_old) / max(nJ, 1e-300)),
+            refresh_step_norm=float(np.max(np.abs(d_new))),
+            refresh_step_norm_old_J=float(np.max(np.abs(d_old))),
+            refresh_step_rel_change=(float(np.linalg.norm(d_new - d_old)
+                                           / nd) if nd > 0.0 else 0.0),
+            refresh_step_dtg_max_sigma=dtg_new,
+            old_J_step_dtg_max_sigma=dtg_old,
+            tol_sigma=float(s["mse_tol_sigma"]), ok=ok,
+            base_dtg_vs_last_pass_max_sigma=float(np.max(np.abs(
+                tg_b - np.asarray(p["tg"], dtype=float)) / sig)),
+            continued=not ok)
+        print(f"  [engine] {self.label} +MSE: Jacobian refreshed at "
+              f"convergence: |dJ|/|J| = "
+              f"{rec['jacobian_refresh_rel_change']:.3e}, fresh-J step "
+              f"moves tan(gamma) by {dtg_new:.3e} sigma (tol "
+              f"{s['mse_tol_sigma']:g})"
+              + (" -- within the criterion" if ok else
+                 " -- CONTINUING with the refreshed Jacobian"), flush=True)
+        out_d = dict(ok=ok, record=rec)
+        if ok:
+            self.b.restore(conv)
+            return out_d
+        self.b.restore(snap_b)
+        st.mse_J, st.mse_x0, st.mse_tg0 = J_new, x_b, tg_b
+        st.geom = complete_geometry(m_b["geom"])
+        self._mse_phase["tg_prev"] = tg_b
+        out_d["meas0"] = dict(li=m_b["li"],
+                              q0=(m_b["q_row"] if self.pin else None))
+        return out_d
 
     @property
     def _geom_of_last_closure(self):
@@ -1796,7 +1996,8 @@ def engine_record(eng, res, wall_s=None) -> dict:
         row_update=("l_i: d_k = (1-omega) d_k-1 + omega [l_i(E_k+1) - "
                     "l_i_model(solved current; G_k+1)], closure target "
                     "T - d; q0: jbs_loop.AxisRowPin; MSE: offset refreshed "
-                    "from each solve, Jacobian Broyden-updated"
+                    "from each solve, Jacobian: "
+                    + mse_scheme_text(eng.s["mse_jacobian"])
                     + ("" if eng.s.get("li_row_relaxation", 1.0) == 1.0 else
                        f"; the l_i step is under-relaxed: omega -> "
                        f"{eng.s['li_row_relaxation']:g} omega "

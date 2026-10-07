@@ -193,9 +193,10 @@ to round-off per solve, not bit for bit).
 | Ip | `Ip_fsa_weights` affine exact measure | the solver imposes Ip; `c` recorded | — |
 | l_i | `structured_li_model` (li_3) | `li_achieved` | `d_k = (1−rω) d_k−1 + rω [l_i(E_k+1) − l_i_model(js_k; G_k+1)]`, `r = engine_li_row_relaxation` (default 1); the closure's target is `T − d` |
 | q0 | the axis-current row | q at the row radius | `AxisRowPin`: `j_ref0 ← j0_solved · q0 / q0_target` |
-| MSE | `tan γ ≈ tg0 + J (x − x0)` | `mse_tan_gamma` of the solved field (`mse_field_at` -> `(B, found)`) | offset refreshed from every solve; `J` by finite differences once at convergence, then Broyden (`"fd_broyden"`) or held (`"fd_chord"`) |
+| MSE | `tan γ ≈ tg0 + J (x − x0)` | `mse_tan_gamma` of the solved field (`mse_field_at` -> `(B, found)`) | offset refreshed from every solve; `J` by finite differences once at convergence, then Broyden (`"fd_broyden"`) or held (`"fd_chord"`); re-taken at the MSE loop's convergence (below) |
 
-MSE, as the loop's own chord stage: at the first read (the finite-difference
+MSE is a second run of the loop after the no-MSE loop has converged (not a
+row of the first one), with the chords as an added criterion: at the first read (the finite-difference
 base) chords OFF the solver mesh are excluded with their reason; fewer than
 `structured_mse_min_chords` left leaves the MSE term NOT applied and the
 slice flagged (refused with `structured_mse_required=True`); a chord missing
@@ -271,6 +272,29 @@ the bootstrap it carries into the post-homotopy stage are the solved one.
 
 The MSE stage runs the loop again after the Jacobian, with its own ceiling
 `jbs_max_passes` (as the legacy chord stage).
+
+**Jacobian refresh at convergence (2026-10-07).** A chord iteration with a
+Jacobian taken once stops where `J0ᵀ W r + ∇prior = 0`, not at the χ²
+minimum. At each MSE loop's convergence the engine therefore re-takes the
+Jacobian by the same finite differences (1 base solve of the last closure's
+coefficients + one per free coefficient), runs the closure once with the old
+and once with the refreshed Jacobian (zero solves) and converts the
+refreshed Gauss–Newton step to the tan γ move it predicts. Within the
+stage's own criterion (`MSE_CHORD_OFFSET_TOL_SIGMA`, 0.1 σ_eff on every
+chord) the stage is converged and the delivery is unchanged; above it the
+loop CONTINUES from the refresh's base state with the refreshed Jacobian
+(same pass ceiling), and the Jacobian is re-taken again at its convergence,
+at most `engine.MSE_JACOBIAN_MAX_REFRESHES` (3, a cost ceiling) times -- a
+stage whose fresh-Jacobian step never settles is NOT converged (raised, or
+flagged under `jbs_loop_on_fail="flag"`). Recorded per refresh in the MSE
+phase's `jacobian["refresh"]["rounds"]`: `jacobian_refresh_rel_change`
+(`|J_new − J_old|_F/|J_old|_F`), `refresh_step_norm` (max |Δx| of the
+refreshed step), the old-Jacobian step, their relative change and the
+predicted tan γ moves; the solves are `solves["mse_refresh"]`. On the fast
+suite's toy the Jacobian moves 17–19 % between the no-MSE state and the fit
+and the refreshed step stays below 0.01 σ (data the profile family fits);
+on a toy whose pitch angles respond non-linearly to the current the first
+refreshed step is 0.3 σ and one continuation brings it to 0.003 σ.
 
 ### Failure
 
@@ -748,7 +772,9 @@ summary.
 
 Measured on the toy: Ip + l_i converges in 5–7 passes (the toy's flux range
 responds to l_i with the measured log-gain of 2); anchor 2 + passes + delivery
-2 solves. The MSE stage adds 1 + 8 finite-difference solves and 4–8 passes.
+2 solves. The MSE stage adds 1 + 8 finite-difference solves and 4–8 passes,
+plus 1 + 8 solves per Jacobian refresh at its convergence (one when the
+refreshed step is within the criterion).
 A draw: 3-5 loop passes of one solve each (see [Draws](#draws)). The live
 numbers are written by the solver probe.
 
