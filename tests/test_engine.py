@@ -148,9 +148,15 @@ def test_ip_li_and_mse_converge(soft, scheme):
     md, ch = _mse_data()
     ad = T.ToyAdapter(soft=soft, li_target=LI0 * 1.01,
                       mse=dict(chords=ch, er_terms="toy"))
+    # MSE is REQUIRED here (a ceiling miss must raise, not fall back to the
+    # no-MSE state), and the toy's pass ceiling is 12 for this test only:
+    # with r_j measured against the bootstrap actually solved (01c2059) the
+    # fd_broyden arm needs 12 passes.  Product ceilings are unchanged
+    # (owner-approved 2026-10-07, test-local).
     eng, res, rec, b = _run(ad, T.ToyGS(chords=ch),
                             engine_rows=["Ip", "l_i", "mse"], mse_data=md,
-                            engine_mse_jacobian=scheme)
+                            engine_mse_jacobian=scheme,
+                            structured_mse_required=True, jbs_max_passes=12)
     assert res["converged"]
     fd = rec["phases"][1]["jacobian"]
     # the Jacobian: one base solve + one per free coefficient (2K = 8)
