@@ -437,14 +437,20 @@ def test_no_decision_code_reads_the_record():
 
 def _is_pc_stmt(node):
     def _pc(t):
-        return ((isinstance(t, ast.Name) and t.id == "_pc")
+        return ((isinstance(t, ast.Name) and t.id in _PC_NAMES)
                 or (isinstance(t, ast.Subscript)
-                    and isinstance(t.value, ast.Name) and t.value.id == "_pc"))
+                    and isinstance(t.value, ast.Name)
+                    and t.value.id in _PC_NAMES))
     if isinstance(node, ast.Assign):
         return all(_pc(t) for t in node.targets)
     if isinstance(node, ast.AugAssign):
         return _pc(node.target)
     return False
+
+
+#: the per-component dict: ``_pc`` (main), ``_p_comp`` in the g-file
+#: reconstruction (the unified engine's ``_pc`` there is another record)
+_PC_NAMES = ("_pc", "_p_comp")
 
 
 class _StripPc(ast.NodeTransformer):
@@ -503,7 +509,12 @@ def _kinetics(psi_N):
 def test_reconstruction_pressure_composition_is_bit_identical():
     from bouquet.TokaMaker_interface import reconstruct_equilibrium
     from bouquet.utils import pchip_derivative
-    body = _function_body(reconstruct_equilibrium)
+    from bouquet.edge_pressure import solver_pprime
+    from bouquet.physics import thermal_pressure_charge
+    # the composition sits in the nested forward model, _fit_match
+    body = next(n for n in ast.walk(ast.Module(
+        body=_function_body(reconstruct_equilibrium), type_ignores=[]))
+        if isinstance(n, ast.FunctionDef) and n.name == "_fit_match").body
     region = _region(body, _assigns("pres_tmp"), _assigns("ffp_prof"))
     psi_N = np.linspace(0.0, 1.0, 129)
     ne, te, ni, ti = _kinetics(psi_N)
@@ -516,14 +527,17 @@ def test_reconstruction_pressure_composition_is_bit_identical():
               "ne": ne.copy(), "te": te.copy(), "ni": ni.copy(),
               "ti": ti.copy(), "p_fast": p_fast.copy(), "Z_imp": 6.0,
               "eqdsk": SimpleNamespace(psi_N=psi_N.copy()),
-              "mygs": SimpleNamespace(psi_bounds=(-0.4, 0.15))}
+              "mygs": SimpleNamespace(psi_bounds=(-0.4, 0.15)),
+              "thermal_pressure_charge": thermal_pressure_charge,
+              "jbs_loop": None, "solver_pprime": solver_pprime,
+              "_edge": None}
         removed = _run(region, ns, strip)
         if strip:
             assert removed >= 3, "the _pc statements were not found"
-            assert "_pc" not in ns
+            assert "_p_comp" not in ns
         else:
-            assert set(ns["_pc"]) == {"electron_thermal", "ion_thermal",
-                                      "fast", "impurity"}
+            assert set(ns["_p_comp"]) == {"electron_thermal", "ion_thermal",
+                                          "fast", "impurity"}
         results[strip] = (ns["pres_tmp"].tobytes(),
                           ns["pprime_tmp"].tobytes(),
                           ns["pp_prof"]["y"].tobytes(),
@@ -587,7 +601,7 @@ def test_a_failing_record_cannot_escape_either_call_site(monkeypatch):
 
     ns = {"__name__": "bouquet.TokaMaker_interface", "__package__": "bouquet",
           "np": np, "eqdsk": SimpleNamespace(psi_N=psi_N), "pres_tmp": p,
-          "_pc": {}, "_p_ach": p, "quality": {}}
+          "_pc": {}, "_p_comp": {}, "_p_ach": p, "quality": {}}
     _run([_health_try(reconstruct_equilibrium)], ns, strip=False)
     assert "synthetic failure" in \
         ns["quality"]["core_pressure_hollow"]["unavailable"]
@@ -618,10 +632,11 @@ _BASELINE_FIELDS_BEFORE_HOLLOW_RECORD = (
     "psi_N", "j_phi", "j_inductive", "j_BS", "psi_N_kinetic", "ne", "te",
     "ni", "ti", "Zeff", "Ip_target", "l_i_target", "provenance", "l_i_scale",
     "j_NBI", "j_RF", "p_fast", "p_fast_meta", "bs_scale", "ohm_scale",
-    "ip_closure", "sawtooth", "jBS_diff", "p_equilibrium", "p_diff", "Z_imp",
-    "z_fast", "jphi_diff", "eqdsk_bytes", "pfile_bytes", "recon",
+    "ip_closure", "mse_record", "sawtooth", "jBS_diff", "p_equilibrium",
+    "p_diff", "Z_imp", "z_fast", "jphi_diff", "jphi_request_offset",
+    "delivered_state", "eqdsk_bytes", "pfile_bytes", "recon",
     "li_metrics", "aux", "reconstruction_metrics", "reconstruction_log",
-)
+)   # mse_record, jphi_request_offset, delivered_state: the unified engine's
 
 
 def test_baseline_positional_slots_unchanged_by_hollow_record():

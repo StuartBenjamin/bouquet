@@ -108,7 +108,9 @@ def test_the_reconstruction_and_generate_pressures_are_loop_gated():
     import inspect
 
     import bouquet.TokaMaker_interface as TI
-    for fn, n in ((TI.reconstruct_equilibrium, 2),
+    # reconstruct_equilibrium: the composition and its two per-component
+    # copies for the core-pressure hollowness record (#65)
+    for fn, n in ((TI.reconstruct_equilibrium, 4),
                   (TI.perturb_kinetic_equilibrium, 1),
                   (TI.generate_bouquet, 1)):
         src = inspect.getsource(fn)
