@@ -1217,6 +1217,16 @@ class GenerationConfig:
     # slower, agreed within |dl_i| <= 5e-4 and sat 3-5 % from a fresh
     # Jacobian against 16.5 %.
     engine_mse_jacobian: str = "fd_chord"
+    # The chord chi^2 / N of a delivered MSE fit (unified engine; the raw
+    # E_r-corrected chords with the stage's own weights) above which the fit
+    # is FLAGGED "mse_chi2_per_chord_high" (closure-limited reason, warning,
+    # engine record "mse").  A FLAG ONLY, never an acceptance criterion: the
+    # fit is delivered either way.  10.0 is an OWNER DECISION PENDING
+    # (introduced 2026-10-07 with the review's chi^2 / N record); the
+    # delivered chi^2 above the no-MSE reconstruction's is flagged
+    # separately ("mse_worse_than_without") whatever this value.  A finite
+    # number > 0; refused non-default under reconstruction_engine="legacy".
+    mse_chi2n_flag: float = 10.0
     # Under-relaxation r of the l_i row's discrepancy update between passes
     # (the reconstruction only; draws carry no l_i row):
     #   d_k = (1 - r w) d_k-1 + r w [l_i(E_k+1) - l_i_model(js_k; G_k+1)],

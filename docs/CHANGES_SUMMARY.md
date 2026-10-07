@@ -203,6 +203,55 @@ refusal) still ends the sweep unrecorded.
   runs bounded; measured <= 5e-7 relative on reconstructions and <= 5e-4 on
   archived draws.
 
+### Engine MSE: the Jacobian re-taken at convergence; the no-MSE fallback; chord chi^2/N (2026-10-07 review, item 6)
+
+- **Jacobian refresh (changes the delivered MSE fit).** The engine's MSE stage
+  took the chord Jacobian once at the no-MSE convergence and refreshed only
+  the offset, so it stopped at `J0^T W r + grad(prior) = 0`, not at the chi^2
+  minimum (the legacy chord stage re-takes it). Now, at each MSE loop's
+  convergence, the Jacobian is re-taken by the same finite differences
+  (1 + n_free solves, `solves["mse_refresh"]`) and the closure's
+  Gauss-Newton step with it is judged by the stage's own criterion
+  (`MSE_CHORD_OFFSET_TOL_SIGMA`, 0.1 sigma_eff, unchanged); above it the loop
+  continues with the refreshed Jacobian (same pass ceiling), at most
+  `engine.MSE_JACOBIAN_MAX_REFRESHES = 3` refreshes (a NEW cost ceiling, for
+  the owner's review; it can only make a stage non-converged). Recorded:
+  `jacobian_refresh_rel_change`, `refresh_step_norm`, the old-J step and the
+  predicted tan(gamma) moves (MSE phase `jacobian["refresh"]`). Within the
+  criterion the delivery is the one before; on the toys the step is < 0.01
+  sigma (17-19 % Jacobian change), and 0.3 sigma -> 0.003 sigma after one
+  continuation on a toy with a non-linear pitch-angle response. The record
+  now names the Jacobian method in use (it said "Broyden" on `fd_chord`).
+- **No-MSE fallback (fix).** A failure inside the MSE stage (or in the
+  delivery of its fit) set `bq.baseline = None` and re-raised even with
+  `structured_mse_required=False`, discarding a converged reconstruction.
+  Now the converged reconstruction without MSE is restored
+  (`solver_state.SolverState` + the engine state), re-delivered and
+  re-checked, and flagged `mse_stage_failed` with the exception text
+  (closure-limited reason, print, `RuntimeWarning`,
+  `Baseline.engine["mse"]["failure"]`). `structured_mse_required=True` still
+  raises.
+- **Chord chi^2 records and two flags (flag only, never acceptance).**
+  Against the raw E_r-corrected chords with the stage's own weights:
+  delivered chi^2, N, chi^2/N and the no-MSE reconstruction's chi^2
+  (`checks["mse"]`, `Baseline.engine["mse"]`); `mse_worse_than_without`
+  when the delivered chi^2 exceeds the no-MSE one; `mse_chi2_per_chord_high`
+  when chi^2/N exceeds the NEW `GenerationConfig.mse_chi2n_flag` (default
+  10.0 -- **owner decision pending**; refused non-default under
+  `"legacy"`). Under `jbs_loop_on_fail="flag"` a non-converged MSE fit is
+  delivered with `mse_converged=False` and the same records.
+- **Tests.** `tests/test_engine_mse_refresh.py`,
+  `tests/test_engine_mse_fallback.py` (mutants: no continuation leaves the
+  fresh-J step above the criterion; the code before the fallback raises and
+  leaves no baseline). Expectation moved (declared):
+  `test_engine.py::test_a_stated_orientation_the_data_contradict_is_kept_and_flagged`
+  -- the closure refusal that test provokes is now a failed MSE stage, so it
+  falls back (stated orientation still kept and flagged, on
+  `engine["mse"]["orientation_stated"]`). The deliberately failing
+  `test_ip_li_and_mse_converge[fd_broyden-True]` (owner decision pending)
+  now fails at its record assertions: its MSE loop's non-convergence falls
+  back to the no-MSE state instead of raising.
+
 ## Decisions on record (owner, 2026-10-05) -- no value changes
 
 Approvals given on 2026-10-05 for settings that were already in force but had

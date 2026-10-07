@@ -99,6 +99,10 @@ ENGINE_FIELD_DEFAULTS = {
     # the GS iteration cap on every solve inside an engine draw (the owner's
     # value, 2026-09-30: 100; see docs/engine.md "The solve cap")
     "engine_draw_solve_maxits": 100,
+    # the delivered MSE fit's chord chi^2 / N above which it is FLAGGED
+    # (mse_chi2_per_chord_high; never acceptance).  10.0: owner decision
+    # pending (see GenerationConfig.mse_chi2n_flag)
+    "mse_chi2n_flag": 10.0,
 }
 
 
@@ -174,7 +178,7 @@ def _is_default(name, v):
             return tuple(v) == tuple(d)
         except TypeError:
             return False
-    if name == "engine_li_row_relaxation":
+    if name in ("engine_li_row_relaxation", "mse_chi2n_flag"):
         # a number equal to 1 (1 or 1.0) is the default; a bool is not
         import numbers
         return (isinstance(v, numbers.Real)
@@ -293,6 +297,13 @@ def validate_engine_settings(gc) -> None:
     if not isinstance(lr, str) or lr not in IMAS_LI3_RADIUS_CHOICES:
         raise ValueError(f"generation.imas_li3_radius must be one of "
                          f"{IMAS_LI3_RADIUS_CHOICES}, got {lr!r}")
+    cf = vals["mse_chi2n_flag"]
+    if (isinstance(cf, (bool, np.bool_)) or not isinstance(cf, numbers.Real)
+            or not np.isfinite(float(cf)) or not float(cf) > 0.0):
+        raise ValueError(f"generation.mse_chi2n_flag={cf!r} must be a "
+                         "finite number > 0 (the chi^2 / N above which a "
+                         "delivered MSE fit is FLAGGED; a flag, never "
+                         "acceptance)")
     mj = vals["engine_mse_jacobian"]
     if mj not in ENGINE_MSE_JACOBIANS:
         raise ValueError(f"generation.engine_mse_jacobian must be one of "
@@ -542,6 +553,8 @@ def engine_settings(gc) -> dict:
         structured_li_tol=float(gc.structured_li_tol),
         mse_fd_step=float(gc.structured_mse_fd_step),
         mse_tol_sigma=float(MSE_CHORD_OFFSET_TOL_SIGMA),
+        mse_chi2n_flag=float(getattr(gc, "mse_chi2n_flag",
+                                     ENGINE_FIELD_DEFAULTS["mse_chi2n_flag"])),
     )
 
 
@@ -826,6 +839,13 @@ class UnifiedEngine:
             self.state.delivery_correction = np.zeros_like(self.psi)
         self._mse_phase = None
         self._phase_name = "loop"
+        #: chi^2 of the reconstruction WITHOUT MSE at the stage's chords
+        #: (the FD base state), once the stage has read them
+        self._mse_pre = None
+        #: the MSE outcome recorded as ``engine_record()["mse"]``
+        self.mse_summary = dict(requested=("mse" in settings["rows"]),
+                                applied=False, mse_converged=None,
+                                stage_failed=False, failure=None, flags=[])
         self._d_first = True
         self.pin = None
         if "q0" in self.rows:
@@ -1214,9 +1234,25 @@ class UnifiedEngine:
                   + self.flags[-1], flush=True)
             phases.append(dict(name="mse", record=None, jacobian=dict(
                 applied=False, reason=why, n_solves=0)))
+            self.mse_summary.update(applied=False, mse_converged=False,
+                                    not_applied_reason=why)
+        mse_applied = False
+        saved = None
         if "mse" in self.rows and converged:
-            res_m, fd = self._mse_stage(res)
-            if res_m is None:              # too few chords on the mesh
+            # the converged reconstruction WITHOUT MSE, kept so that a
+            # failure inside the MSE stage (structured_mse_required=False)
+            # delivers it instead of nothing (see _mse_stage_failed)
+            saved = self._save_no_mse_state()
+            try:
+                res_m, fd = self._mse_stage(res)
+            except Exception as exc:
+                if self.rows["mse"].get("required"):
+                    raise
+                self._mse_stage_failed(saved, exc, phases, where="stage")
+                res_m, fd = None, None
+            if fd is None:
+                pass                       # failed: restored above
+            elif res_m is None:            # too few chords on the mesh
                 phases.append(dict(name="mse", record=None, jacobian=fd))
                 self._mse_phase = None
                 self.solves["mse_fd"] = fd["n_solves"]
@@ -1225,20 +1261,201 @@ class UnifiedEngine:
                                    jacobian=fd))
                 converged = bool(res_m["converged"])
                 last = res_m
-        st.lambda_bs = np.asarray(last["jbs_used"], dtype=float)
-        # the fixed pressure every pass solved with (a draw perturbs it)
-        st.extras["pressure"] = np.asarray(self.c.pressure, dtype=float)
-        st.extras["Ip"] = float(self.c.Ip)
-        if self.pin is not None:
-            st.q0_row = float(self.pin.row)
+                mse_applied = True
+        self._finish_state(last)
         n_before = int(self.b.n_solves)
-        delivered = self._deliver(last, converged)
+        try:
+            delivered = self._deliver(last, converged)
+        except Exception as exc:
+            # the delivery of the MSE fit is part of the MSE stage: a
+            # failure there (structured_mse_required=False) also falls back
+            # to the reconstruction without MSE, re-delivered and re-checked
+            if not mse_applied or self.rows["mse"].get("required"):
+                raise
+            self._mse_stage_failed(saved, exc, phases, where="delivery")
+            last, converged, mse_applied = res, bool(res["converged"]), False
+            self._finish_state(last)
+            n_before = int(self.b.n_solves)
+            delivered = self._deliver(last, converged)
+        if mse_applied:
+            self._mse_fit_record(delivered, converged)
         self.solves["delivery"] = int(self.b.n_solves) - n_before
         self.solves["total"] = int(self.b.n_solves)
         return dict(converged=bool(converged and delivered["ok"]),
                     loop_converged=converged, phases=phases,
                     delivered=delivered, state=st,
                     wall_s=float(time.perf_counter() - t0))
+
+    def _finish_state(self, last):
+        """The state the delivery composes: the bootstrap iterate of the
+        stage delivered (*last*), the fixed pressure and Ip, the q0 row."""
+        st = self.state
+        st.lambda_bs = np.asarray(last["jbs_used"], dtype=float)
+        # the fixed pressure every pass solved with (a draw perturbs it)
+        st.extras["pressure"] = np.asarray(self.c.pressure, dtype=float)
+        st.extras["Ip"] = float(self.c.Ip)
+        if self.pin is not None:
+            st.q0_row = float(self.pin.row)
+
+    # ---- the MSE fallback: the converged reconstruction without MSE --------
+    def _capture_backend(self):
+        """The backend's full state: :class:`bouquet.solver_state.
+        SolverState` (equilibrium, settings, coil bounds, stashes) for a
+        TokaMaker backend, else the backend's own ``snapshot()``."""
+        mygs = getattr(self.b, "mygs", None)
+        if mygs is not None and hasattr(mygs, "copy_eq"):
+            from .solver_state import SolverState
+            return ("solver_state", SolverState.capture(mygs))
+        return ("snapshot", self.b.snapshot())
+
+    def _restore_backend(self, cap):
+        kind, obj = cap
+        if kind == "solver_state":
+            obj.restore()
+        else:
+            self.b.restore(obj)
+
+    def _save_no_mse_state(self):
+        """Everything the no-MSE delivery reads, as the converged loop left
+        it: the backend (its equilibrium is the loop's last solved one), the
+        engine state, the last pass, the q0 pin, the chord set and the
+        solve count."""
+        import copy
+        return dict(backend=self._capture_backend(),
+                    state=copy.deepcopy(self.state),
+                    pending=copy.deepcopy(self._pending),
+                    pin=copy.deepcopy(self.pin),
+                    d_first=self._d_first,
+                    rows_mse=self.rows["mse"],
+                    chords=getattr(self.b, "chords", None),
+                    n_solves=int(self.b.n_solves))
+
+    def _mse_stage_failed(self, saved, exc, phases, *, where):
+        """``structured_mse_required=False`` and the MSE stage (or the
+        delivery of its fit) raised: restore the converged reconstruction
+        without MSE (:meth:`_save_no_mse_state`), flag ``mse_stage_failed``
+        with the exception text, warn loudly.  The caller then delivers the
+        restored state through the ordinary delivery, whose solve and checks
+        re-verify it.  Never silent and never a retry of the MSE fit."""
+        import copy
+        import warnings
+        from .utils import MSE_FLAG_PREFIX
+        n_spent = int(self.b.n_solves) - int(saved["n_solves"])
+        self._restore_backend(saved["backend"])
+        # in place: the caller (run) and the record hold this object
+        from dataclasses import fields as _fields
+        _st = copy.deepcopy(saved["state"])
+        for _f in _fields(_st):
+            setattr(self.state, _f.name, getattr(_st, _f.name))
+        self._pending = copy.deepcopy(saved["pending"])
+        self.pin = copy.deepcopy(saved["pin"])
+        self._d_first = saved["d_first"]
+        self.rows["mse"] = saved["rows_mse"]
+        if hasattr(self.b, "chords"):
+            self.b.chords = saved["chords"]
+        self._mse_phase = None
+        self._phase_name = "loop"
+        txt = f"{type(exc).__name__}: {exc}"
+        self.mse_summary.update(
+            applied=False, mse_converged=False, stage_failed=True,
+            failure=dict(where=str(where), type=type(exc).__name__,
+                         message=str(exc), n_solves_spent=n_spent))
+        if "mse_stage_failed" not in self.mse_summary["flags"]:
+            self.mse_summary["flags"].append("mse_stage_failed")
+        self.flags.append(
+            MSE_FLAG_PREFIX + "mse_stage_failed: the MSE "
+            + ("stage" if where == "stage" else "fit's delivery")
+            + f" raised ({txt}); structured_mse_required=False, so the "
+            "converged reconstruction WITHOUT MSE was restored, re-solved, "
+            "re-checked and delivered -- the MSE term was NOT applied")
+        # every solve since the snapshot (the stage's, the failed
+        # delivery's) is counted once, under "mse_failed"
+        for _k in ("mse_fd", "mse_passes", "mse_refresh"):
+            self.solves.pop(_k, None)
+        self.solves["mse_failed"] = (int(self.solves.get("mse_failed", 0))
+                                     + n_spent)
+        msg = f"[{self.label}] WARNING closure-limited: " + self.flags[-1]
+        print(msg, flush=True)
+        warnings.warn(msg, RuntimeWarning, stacklevel=3)
+        rec = getattr(exc, "record", None)
+        for ph in phases:
+            if ph.get("name") == "mse":
+                ph["superseded_by_fallback"] = True
+        phases.append(dict(name="mse", record=(rec if isinstance(rec, dict)
+                                               else None),
+                           jacobian=dict(applied=False, failed=True,
+                                         where=str(where), reason=txt,
+                                         n_solves=n_spent)))
+
+    def _mse_fit_record(self, delivered, converged):
+        """The chord chi^2 of the DELIVERED MSE fit against the raw
+        (E_r-corrected) chords with the stage's own weights, beside the
+        reconstruction's without MSE (the FD base state), and the two FLAGS
+        (flag only, never acceptance):
+
+        * ``mse_worse_than_without`` -- delivered chi^2 above the pre-MSE
+          chi^2;
+        * ``mse_chi2_per_chord_high`` -- chi^2 / N above
+          ``GenerationConfig.mse_chi2n_flag`` (default 10.0: OWNER DECISION
+          PENDING; a flag threshold, never an acceptance criterion).
+
+        Under ``jbs_loop_on_fail="flag"`` a non-converged MSE iterate is
+        delivered carrying ``mse_converged=False`` and the same records."""
+        from .utils import MSE_FLAG_PREFIX
+        chk = delivered["checks"].get("mse")
+        sm = self.mse_summary
+        sm["applied"] = True
+        sm["mse_converged"] = bool(converged and chk is not None
+                                   and chk.get("ok", False))
+        if chk is None:
+            return
+        n = int(self.rows["mse"]["chords"]["n_active"])
+        c2 = float(chk["chi2"])
+        thr = float(self.s["mse_chi2n_flag"])
+        pre = self._mse_pre or {}
+        c2p = pre.get("chi2")
+        worse = bool(c2p is not None and not (np.isfinite(c2)
+                                              and c2 <= float(c2p)))
+        high = bool(not np.isfinite(c2) or c2 / n > thr)
+        chk.update(n_chords=n, chi2_per_chord=c2 / n,
+                   chi2_pre_mse=c2p,
+                   chi2_per_chord_pre_mse=(None if c2p is None
+                                           else float(c2p) / n),
+                   worse_than_without=worse,
+                   chi2n_flag=thr, chi2_per_chord_high=high,
+                   chi2_basis=("raw E_r-corrected chords of the stage, "
+                               "weights folded into sigma_eff "
+                               "(bouquet.mse.mse_chi2)"),
+                   mse_converged=sm["mse_converged"])
+        sm.update(chi2=c2, n_chords=n, chi2_per_chord=c2 / n,
+                  chi2_pre_mse=c2p, chi2_per_chord_pre_mse=chk[
+                      "chi2_per_chord_pre_mse"],
+                  worse_than_without=worse, chi2n_flag=thr,
+                  chi2_per_chord_high=high)
+        if worse:
+            sm["flags"].append("mse_worse_than_without")
+            self.flags.append(
+                MSE_FLAG_PREFIX + f"mse_worse_than_without: delivered chi2 "
+                f"{c2:.6g} ({n} chords) is above the chi2 {float(c2p):.6g} "
+                "of the reconstruction without MSE: the delivered "
+                "equilibrium fits the chords worse than the one without "
+                "them")
+            print(f"[{self.label}] WARNING closure-limited: "
+                  + self.flags[-1], flush=True)
+        if high:
+            sm["flags"].append("mse_chi2_per_chord_high")
+            self.flags.append(
+                MSE_FLAG_PREFIX + f"mse_chi2_per_chord_high: delivered "
+                f"chi2/N = {c2 / n:.4g} ({n} chords) is above "
+                f"mse_chi2n_flag = {thr:g} (a FLAG, never acceptance; "
+                "threshold: owner decision pending) -- check the time "
+                "slice, the calibration, the sigmas and the E_r correction")
+            print(f"[{self.label}] WARNING closure-limited: "
+                  + self.flags[-1], flush=True)
+        if not sm["mse_converged"]:
+            print(f"[{self.label}] WARNING: the delivered MSE fit is NOT "
+                  "converged (mse_converged=False; jbs_loop_on_fail="
+                  "'flag')", flush=True)
 
     def _mse_stage(self, res):
         """FD Jacobian at convergence (1 base + one solve per free
@@ -1260,7 +1477,7 @@ class UnifiedEngine:
         (a stricter definition of converged, never a looser one)."""
         from .jbs_loop import JBSNotConverged, run_jbs_loop
         from .mse import (MSE_ORIENTATION_DCHI2, MSE_REASON_OFF_MESH,
-                          mse_equilibrium_orientation, mse_exclude,
+                          mse_chi2, mse_equilibrium_orientation, mse_exclude,
                           mse_orientation, mse_orientation_check)
         from .utils import MSE_FLAG_PREFIX
         st, s = self.state, self.s
@@ -1297,6 +1514,8 @@ class UnifiedEngine:
                     raise EngineInputRefused(f"{self.label}: {why}")
                 self.flags.append(MSE_FLAG_PREFIX + why + " -- the MSE term "
                                   "was NOT applied")
+                self.mse_summary.update(applied=False, mse_converged=False,
+                                        not_applied_reason=why)
                 self.b.restore(snap)
                 return None, dict(applied=False, reason=why,
                                   n_solves=int(self.b.n_solves) - n0,
@@ -1308,6 +1527,7 @@ class UnifiedEngine:
         sp, stt = mse_orientation(ch, eq_or)
         chk = mse_orientation_check(B0, ch, sp, stt)
         st.mse_sign = (float(sp), float(stt))
+        self.mse_summary["orientation_stated"] = [float(sp), float(stt)]
         if chk["disagrees"]:
             self.flags.append(
                 MSE_FLAG_PREFIX + "the data disagree with the stated field "
@@ -1320,6 +1540,12 @@ class UnifiedEngine:
                   + self.flags[-1], flush=True)
         table = chk["table"]
         tg0 = self._tg(dict(m0, B_chords=B0, chords_found=None))
+        # the chord chi^2 of the reconstruction WITHOUT MSE (this base solve
+        # IS its last closure, solved unrelaxed), against the same chords
+        c2_pre, _z = mse_chi2(tg0, ch)
+        self._mse_pre = dict(chi2=float(c2_pre), n_chords=int(ch["n_active"]),
+                             chi2_per_chord=float(c2_pre)
+                             / int(ch["n_active"]))
         J = self._mse_fd(g_last, lam, x0, tg0, snap)
         self.b.restore(snap)
         st.mse_J, st.mse_x0, st.mse_tg0 = J, x0, tg0
@@ -1341,7 +1567,8 @@ class UnifiedEngine:
                       disagrees=bool(chk["disagrees"]), note=chk["note"]),
                   sign_table={k: float(v) for k, v in table.items()},
                   scheme=mse_scheme_text(s["mse_jacobian"]),
-                  J_initial=J.tolist(), tg_base=tg0.tolist())
+                  J_initial=J.tolist(), tg_base=tg0.tolist(),
+                  chi2_pre_mse=float(c2_pre))
         self._mse_phase = dict(tg_prev=tg0, n_broyden=0)
         self._phase_name = "mse"
         meas0 = dict(li=m0["li"], q0=(m0["q_row"] if self.pin else None))
@@ -2005,6 +2232,7 @@ def engine_record(eng, res, wall_s=None) -> dict:
                        f"d = 0 takes {eng.s['li_row_relaxation']:g})")),
         notices=list(eng.notices),
         flags=list(eng.flags),
+        mse=dict(eng.mse_summary),
         converged=bool(res["converged"]),
         loop_converged=bool(res["loop_converged"]),
         phases=res["phases"], passes=eng.passes,
@@ -2099,10 +2327,24 @@ def _delivered_state(eng, res, rec, path):
              "reproduces it")), R - A / cfac
 
 
+def delivered_loop_record(rec) -> dict:
+    """The loop record of the stage whose iterate was DELIVERED: the last
+    phase that has one, skipping an MSE phase that was not applied (too few
+    chords on the mesh: no record) or that FAILED and fell back to the
+    reconstruction without MSE (``jacobian["failed"]``)."""
+    for ph in reversed(rec["phases"]):
+        jac = ph.get("jacobian") or {}
+        if ph.get("record") is None or jac.get("failed") \
+                or ph.get("superseded_by_fallback"):
+            continue
+        return ph["record"]
+    raise ValueError("engine record: no delivered loop record")
+
+
 def _flag_reason(res, rec):
     from .jbs_loop import flag_reason
     if not res["loop_converged"]:
-        return flag_reason(rec["phases"][-1]["record"])
+        return flag_reason(delivered_loop_record(rec))
     return ("unified engine: the delivered equilibrium fails "
             + "; ".join(rec["delivered"]["misses"]))
 
@@ -2183,7 +2425,7 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
                                           m["li"]),
                                       edge_pressure=eng.s.get(
                                           "edge_pressure"))
-    loop_rec = dict(rec["phases"][-1]["record"])
+    loop_rec = dict(delivered_loop_record(rec))
     loop_rec["converged"] = bool(res["converged"])
     if not res["converged"]:
         loop_rec["stop_reason"] = _flag_reason(res, rec)
@@ -2240,7 +2482,7 @@ def _ids_baseline(bq, eng, res, rec, bl_src):
     ch = engine_closure_health(eng, "engine IDS reconstruction")
     icl = dict(ch)
     icl.update(engine=True, closure=_closure_record(cl),
-               jbs_loop=rec["phases"][-1]["record"],
+               jbs_loop=delivered_loop_record(rec),
                jbs_converged=bool(res["converged"]))
     extra = list(rec.get("flags", ()))
     if not res["converged"]:

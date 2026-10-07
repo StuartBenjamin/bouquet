@@ -241,8 +241,11 @@ def test_too_few_on_mesh_chords_flag_or_refuse():
 def test_a_stated_orientation_the_data_contradict_is_kept_and_flagged():
     """The block states B_t reversed against the toy's own frame: the audit
     flags it (delta chi2 > 1) and the STATED orientation is kept -- the
-    closure is then asked to fit data it cannot, which may refuse loudly;
-    either way the flag and the kept orientation are on the engine."""
+    closure is then asked to fit data it cannot, which may refuse loudly
+    (with structured_mse_required=False that refusal is a failed MSE stage:
+    the reconstruction without MSE is restored and delivered, flagged
+    mse_stage_failed); either way the flag and the kept orientation are on
+    the engine."""
     md, ch = _mse_data(bt_sign=-1.0)
     ad = T.ToyAdapter(li_target=LI0 * 1.01,
                       mse=dict(chords=ch, er_terms="toy"))
@@ -259,7 +262,15 @@ def test_a_stated_orientation_the_data_contradict_is_kept_and_flagged():
         _quiet(eng.run)
     except EngineClosureRefused as e:
         assert "closure refused" in str(e)
-    assert eng.state.mse_sign == (1.0, -1.0)            # stated, KEPT
+    sm = eng.mse_summary
+    assert sm["orientation_stated"] == [1.0, -1.0]      # stated, KEPT
+    if sm["stage_failed"]:
+        # the refusal fell back: the no-MSE state (no MSE orientation)
+        assert "closure refused" in sm["failure"]["message"]
+        assert eng.state.mse_sign is None
+        assert any("mse_stage_failed" in f for f in eng.flags)
+    else:
+        assert eng.state.mse_sign == (1.0, -1.0)
     assert any("disagree with the stated field orientation" in f
                and "KEPT" in f for f in eng.flags)
 

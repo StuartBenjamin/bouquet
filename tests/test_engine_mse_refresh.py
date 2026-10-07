@@ -142,6 +142,7 @@ def test_the_jacobian_refresh_is_recorded_and_the_record_names_the_method():
     assert "held fixed" in fd["scheme"] and "Broyden" not in fd["scheme"]
     assert "Broyden" not in rec["row_update"]
     assert "held fixed" in rec["row_update"]
+    assert rec["mse"]["applied"] and rec["mse"]["mse_converged"]
 
 
 def test_the_broyden_scheme_is_named_where_it_is_used():
@@ -207,14 +208,26 @@ def test_mutant_without_the_continuation_stops_off_the_fresh_J_point(
 
 def test_a_fresh_J_step_that_never_settles_is_not_converged(monkeypatch):
     """A cap of refreshes reached with the fresh step still above the
-    criterion: NOT converged -- raised under on_fail='raise', delivered
-    flagged under 'flag'."""
+    criterion: NOT converged -- raised under on_fail='raise' when MSE is
+    required (a failed stage otherwise: the no-MSE fallback), delivered
+    flagged (mse_converged=False) under 'flag'."""
     import bouquet.engine as be
     monkeypatch.setattr(be, "MSE_JACOBIAN_MAX_REFRESHES", 1)
     md, ch = _nonlinear_case()
     with pytest.raises(JBSNotConverged, match="fresh-Jacobian"):
-        _run(NonlinearToy(chords=ch), md=md, ch=ch)
+        _run(NonlinearToy(chords=ch), md=md, ch=ch, required=True)
+    # not required: the failed stage falls back to the reconstruction
+    # without MSE (tests/test_engine_mse_fallback.py)
+    eng, res, rec = _run(NonlinearToy(chords=ch), md=md, ch=ch)
+    assert rec["mse"]["stage_failed"] and res["converged"]
+    assert "fresh-Jacobian" in rec["mse"]["failure"]["message"]
     eng, res, rec = _run(NonlinearToy(chords=ch), md=md, ch=ch,
                          jbs_loop_on_fail="flag")
     assert not res["converged"]
     assert "fresh-Jacobian" in _mse_phase(rec)["record"]["stop_reason"]
+    # the delivered non-converged fit carries mse_converged=False and the
+    # chi2 records (tests/test_engine_mse_fallback.py)
+    assert rec["mse"]["applied"] and rec["mse"]["mse_converged"] is False
+    for k in ("chi2_per_chord", "chi2_per_chord_pre_mse",
+              "worse_than_without", "chi2_per_chord_high"):
+        assert k in rec["mse"]

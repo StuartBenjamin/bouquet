@@ -296,6 +296,29 @@ and the refreshed step stays below 0.01 σ (data the profile family fits);
 on a toy whose pitch angles respond non-linearly to the current the first
 refreshed step is 0.3 σ and one continuation brings it to 0.003 σ.
 
+**When the MSE stage fails (2026-10-07).** With `structured_mse_required=
+False` (the default) ANY exception inside the stage (a failed solve in the
+finite differences or a pass, a closure refusal, a non-converged MSE loop
+under `jbs_loop_on_fail="raise"`, a failed refresh) or in the delivery of its
+fit restores the converged reconstruction WITHOUT MSE (backend state through
+`solver_state.SolverState`, the engine state, the last pass, the q0 pin, the
+chord set), delivers it through the ordinary delivery (whose solve and
+checks re-verify it; on the toy it is the run without the `"mse"` row bit
+for bit) and flags `mse_stage_failed` with the exception text (closure-
+limited reason, printed, `RuntimeWarning`; `engine_record()["mse"]["failure"]`).
+With `structured_mse_required=True` it raises, as before.
+
+**The delivered fit's chord χ² (2026-10-07).** Against the raw E_r-corrected
+chords of the stage with its own weights (`mse.mse_chi2`; never against an
+EFIT q profile): `checks["mse"]` and `engine_record()["mse"]` carry χ², N,
+χ²/N and the χ² of the reconstruction without MSE (the finite-difference
+base solve, same chords), and two FLAGS (flag only, never acceptance; each a
+closure-limited reason): `mse_worse_than_without` (delivered χ² above the
+pre-MSE χ²) and `mse_chi2_per_chord_high` (χ²/N above
+`GenerationConfig.mse_chi2n_flag`, default 10.0 -- owner decision pending).
+Under `jbs_loop_on_fail="flag"` a non-converged fit is delivered with
+`mse_converged=False` and the same records.
+
 ### Failure
 
 Exactly the loop's: `JBSNotConverged` raises (or, with
@@ -303,7 +326,10 @@ Exactly the loop's: `JBSNotConverged` raises (or, with
 `closure_limited`); `JBSNonFinite` raises at once whatever the policy; a
 closure refusal raises `EngineClosureRefused` with its reason; a failed GS
 solve raises `EngineSolveError`. A failed build leaves no baseline
-(`Bouquet._failed_baseline` keeps the half-built one).
+(`Bouquet._failed_baseline` keeps the half-built one). The one exception is
+a failure inside the MSE stage with `structured_mse_required=False`: the
+reconstruction without MSE is delivered, flagged `mse_stage_failed` (see
+the MSE stage above).
 
 ### Delivery
 
