@@ -1,12 +1,18 @@
 """The pressure handed to the solver: one helper, two settings
 (``bouquet.edge_pressure``).
 
-* DEFAULTS ARE TODAY'S ARRAYS, BIT FOR BIT (frozen-copy pattern): the
-  helper's ``P'`` node values, its ``pp_prof`` dict and its axis target
-  equal the inline statements every site carried before the helper existed
-  (frozen below, verbatim), on uniform and non-uniform grids; the engine
-  backend hands the solver exactly those; the engine draw's first-pass
-  pressure-term shift is unchanged.  (That every legacy solve path is the
+* THE PRE-CHANGE SETTINGS ARE THE OLD ARRAYS, BIT FOR BIT (frozen-copy
+  pattern): at ``edge_pprime_pin=True, separatrix_pressure="legacy"``
+  (``EP.PRE_CHANGE_EDGE_PRESSURE``) the helper's ``P'`` node values, its
+  ``pp_prof`` dict and its axis target equal the inline statements every
+  site carried before the helper existed (frozen below, verbatim), on
+  uniform and non-uniform grids; the engine backend hands the solver exactly
+  those; the engine draw's first-pass pressure-term shift is unchanged.
+* THE DEFAULT IS ``"offset"`` (owner-approved physics change, 2026-10-02):
+  the defaults are NOT the pre-change settings; they differ from them in
+  the axis target only (``p_axis - p_sep``), never in a ``P'`` node, and
+  coincide with them when ``p_sep = 0``.  A stored config that predates the
+  setting loads as ``"legacy"``.  (That every legacy solve path is the
   frozen pre-change code with the helper written back inline is
   ``tests/test_edge_pressure_legacy_ast.py`` and
   ``tests/test_engine_draws_legacy_ast.py``.)
@@ -80,12 +86,21 @@ def _profiles():
     return out
 
 
+#: every way of handing the helper the PRE-CHANGE settings (pin on,
+#: "legacy"); since 2026-10-02 these are not the defaults
+def _pre_change_edges():
+    return (EP.EdgePressure.pre_change(), EP.EdgePressure(True, "legacy"),
+            GenerationConfig(separatrix_pressure="legacy"),
+            dict(EP.PRE_CHANGE_EDGE_PRESSURE),
+            dict(separatrix_pressure="legacy"))
+
+
 @pytest.mark.parametrize("case", range(len(_profiles())))
 @pytest.mark.parametrize("psi_range", [0.2731, -0.2731, 1.0])
-def test_the_defaults_are_the_inline_statements_bit_for_bit(case, psi_range):
+def test_the_pre_change_settings_are_the_inline_statements_bit_for_bit(
+        case, psi_range):
     x, p = _profiles()[case]
-    for edge in (None, EP.EdgePressure(), GenerationConfig(),
-                 dict(EP.EDGE_PRESSURE_DEFAULTS)):
+    for edge in _pre_change_edges():
         y = EP.solver_pprime(x, p, psi_range, edge)
         ref = _frozen_pp_array(x, p, psi_range)
         assert y.dtype == ref.dtype and np.array_equal(y, ref)
@@ -99,24 +114,87 @@ def test_the_defaults_are_the_inline_statements_bit_for_bit(case, psi_range):
         assert EP.solver_pressure(p, edge) is p
         assert EP.applied_offset(p, edge) == 0.0
     # the same through the settings object's methods
-    e = EP.EdgePressure()
+    e = EP.EdgePressure.pre_change()
     assert np.array_equal(e.pprime(x, p, psi_range),
                           _frozen_pp_array(x, p, psi_range))
     assert e.pax(p) == _frozen_pax(p) and e.p_offset(p) == 0.0
-    assert e.is_default and not e.offset
+    assert e.is_pre_change and not e.offset and not e.is_default
 
 
 # ---------------------------------------------------------------------------
 #  the settings
 # ---------------------------------------------------------------------------
-def test_the_settings_default_to_todays_behaviour():
+def test_the_defaults_are_pin_on_and_offset_not_the_pre_change_settings():
     g = GenerationConfig()
-    assert g.edge_pprime_pin is True and g.separatrix_pressure == "legacy"
+    assert g.edge_pprime_pin is True and g.separatrix_pressure == "offset"
     assert EP.EDGE_PRESSURE_DEFAULTS == dict(edge_pprime_pin=True,
-                                             separatrix_pressure="legacy")
+                                             separatrix_pressure="offset")
+    assert EP.PRE_CHANGE_EDGE_PRESSURE == dict(edge_pprime_pin=True,
+                                               separatrix_pressure="legacy")
     assert EP.resolve_edge_pressure(g) == EP.EdgePressure()
-    assert EP.resolve_edge_pressure(None).record() == \
-        EP.EDGE_PRESSURE_DEFAULTS
+    for d in (EP.resolve_edge_pressure(None), EP.EdgePressure(),
+              EP.resolve_edge_pressure(g), EP.resolve_edge_pressure({})):
+        assert d.record() == EP.EDGE_PRESSURE_DEFAULTS
+        assert d.is_default and d.offset and not d.is_pre_change
+    pc = EP.EdgePressure.pre_change()
+    assert pc.record() == EP.PRE_CHANGE_EDGE_PRESSURE
+    assert pc.is_pre_change and not pc.is_default and not pc.offset
+    assert EP.resolve_edge_pressure(
+        GenerationConfig(separatrix_pressure="legacy")) == pc
+
+
+@pytest.mark.parametrize("case", range(len(_profiles())))
+def test_the_default_is_offset_on_the_arrays(case):
+    """At the defaults the axis target is ``p_axis - p_sep`` and ``p_sep``
+    is added back; no ``P'`` node differs from the pre-change settings', and
+    with ``p_sep = 0`` neither does the axis target."""
+    x, p = _profiles()[case]
+    pc = EP.EdgePressure.pre_change()
+    p_sep = float(p[-1])
+    for edge in (None, EP.EdgePressure(), GenerationConfig(),
+                 dict(EP.EDGE_PRESSURE_DEFAULTS)):
+        assert np.array_equal(EP.solver_pprime(x, p, 0.2731, edge),
+                              EP.solver_pprime(x, p, 0.2731, pc))
+        assert EP.solver_pax(p, edge) == float(p[0]) - p_sep
+        assert EP.applied_offset(p, edge) == p_sep
+        assert np.array_equal(EP.solver_pressure(p, edge), p - p_sep)
+        assert EP.describe(edge, p)["separatrix_pressure"] == "offset"
+        if p_sep == 0.0:
+            assert EP.solver_pax(p, edge) == EP.solver_pax(p, pc)
+            assert EP.lcfs_kwargs(EP.applied_offset(p, edge)) == {}
+        else:
+            assert EP.solver_pax(p, edge) != EP.solver_pax(p, pc)
+            assert EP.lcfs_kwargs(EP.applied_offset(p, edge)) == \
+                {"lcfs_pressure": p_sep}
+    # the profile set exercises both
+    assert any(q[-1] == 0.0 for _x, q in _profiles())
+    assert any(q[-1] > 0.0 for _x, q in _profiles())
+
+
+def test_a_stored_config_without_the_setting_loads_as_legacy():
+    """A config written before the setting existed was produced with the
+    full axis pressure as the target: it reloads with ``"legacy"`` (and says
+    so), so replaying it reproduces what it recorded; a current config
+    carries the field and keeps it."""
+    import bouquet as bq
+    from bouquet.config import BouquetConfig
+    ex = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "examples", "D3D-like")
+    b = bq.Bouquet.from_geqdsk(
+        os.path.join(ex, "D3Dlike_Hmode_baseline.geqdsk"),
+        profiles=os.path.join(ex, "D3Dlike_Hmode_baseline.peqdsk"),
+        mesh=os.path.join(ex, "DIIID_mesh.h5"), n_draws=1)
+    d = b.config.to_dict()
+    assert d["generation"]["separatrix_pressure"] == "offset"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert BouquetConfig.from_dict(d).generation.separatrix_pressure \
+            == "offset"
+    del d["generation"]["separatrix_pressure"]
+    with pytest.warns(UserWarning, match="separatrix_pressure='legacy'"):
+        back = BouquetConfig.from_dict(d)
+    assert back.generation.separatrix_pressure == "legacy"
+    assert EP.resolve_edge_pressure(back.generation).is_pre_change
 
 
 @pytest.mark.parametrize("bad", [dict(edge_pprime_pin=1),
@@ -194,8 +272,15 @@ def test_the_engine_settings_and_record_carry_the_settings():
     assert ep["p_axis"] == float(p[0])
     assert ep["pax_target"] == float(p[0]) - float(p[-1])
     assert rec["settings"]["edge_pressure"] == s["edge_pressure"]
-    # the defaults: recorded too, nothing applied
+    # the defaults (offset, pin on): recorded and applied
     eng, res, rec, b = TD._recon()
+    ep = rec["edge_pressure"]
+    p = np.asarray(eng.c.pressure, float)
+    assert ep["separatrix_pressure"] == "offset" and ep["edge_pprime_pin"]
+    assert ep["p_sep"] == float(p[-1]) == ep["p_sep_applied"] > 0.0
+    assert ep["pax_target"] == float(p[0]) - float(p[-1])
+    # the pre-change settings: recorded too, nothing applied
+    eng, res, rec, b = TD._recon(separatrix_pressure="legacy")
     ep = rec["edge_pressure"]
     assert ep["p_sep"] == float(np.asarray(eng.c.pressure)[-1]) > 0.0
     assert ep["p_sep_applied"] == 0.0
@@ -213,8 +298,14 @@ def test_pin_off_keeps_the_profiles_own_last_derivative(case):
     raw = pchip_derivative(x, p) / 0.3
     assert np.array_equal(off, raw)
     assert np.array_equal(on[:-1], off[:-1]) and on[-1] == 0.0
-    # the axis target does not depend on the pin
-    assert EP.solver_pax(p, dict(edge_pprime_pin=False)) == float(p[0])
+    # the axis target does not depend on the pin (either separatrix setting)
+    assert EP.solver_pax(p, dict(edge_pprime_pin=False,
+                                 separatrix_pressure="legacy")) == float(p[0])
+    for sep in ("legacy", "offset"):
+        assert EP.solver_pax(p, dict(edge_pprime_pin=False,
+                                     separatrix_pressure=sep)) == \
+            EP.solver_pax(p, dict(edge_pprime_pin=True,
+                                  separatrix_pressure=sep))
 
 
 @pytest.mark.parametrize("case", range(len(_profiles())))
@@ -249,8 +340,10 @@ def test_offset_refuses_a_target_that_is_not_positive():
     p[-1] = np.nan
     with pytest.raises(ValueError, match="not finite"):
         EP.solver_pax(p, off)
-    # legacy never looks at the edge value
-    assert EP.solver_pax(p, None) == 1.0e3
+    # legacy never looks at the edge value; the default (offset) does
+    assert EP.solver_pax(p, dict(separatrix_pressure="legacy")) == 1.0e3
+    with pytest.raises(ValueError, match="not finite"):
+        EP.solver_pax(p, None)
 
 
 # ---------------------------------------------------------------------------
@@ -347,8 +440,11 @@ def _backend(edge):
     return TokaMakerBackend(gs, c, edge_pressure=edge), gs, x, p
 
 
-@pytest.mark.parametrize("edge", [None, dict(EP.EDGE_PRESSURE_DEFAULTS)])
-def test_the_engine_backend_hands_the_solver_todays_arrays(edge):
+@pytest.mark.parametrize("edge", [EP.EdgePressure.pre_change(),
+                                  dict(EP.PRE_CHANGE_EDGE_PRESSURE),
+                                  dict(separatrix_pressure="legacy")])
+def test_the_engine_backend_at_the_pre_change_settings_hands_the_old_arrays(
+        edge):
     b, gs, x, p = _backend(edge)
     req = 1.0e6 * (1.0 - x ** 2)
     b.solve(req, n_passes=2)
@@ -395,10 +491,15 @@ def _q(fn, *a, **k):
         return fn(*a, **k)
 
 
-def test_the_draws_first_pass_pressure_shift_is_unchanged():
-    eng, res, rec, b = TD._recon()
+@pytest.mark.parametrize("sep", ["legacy", "offset"])
+def test_the_draws_first_pass_pressure_shift_is_unchanged(sep):
+    """At the pre-change settings and at the defaults ("offset" changes the
+    axis target only, never a ``P'``)."""
+    eng, res, rec, b = TD._recon(separatrix_pressure=sep)
     ctx = TD._ctx(eng, res)
-    assert ctx.edge == EP.EdgePressure()
+    assert ctx.edge == EP.EdgePressure(True, sep)
+    assert ctx.edge == (EP.EdgePressure.pre_change() if sep == "legacy"
+                        else EP.EdgePressure())
     p = np.asarray(eng.c.pressure, float)
     # exactly G* at zero perturbation
     g0 = ctx.geom_for_pressure(p)
@@ -519,7 +620,9 @@ def test_the_archive_record_reports_both_frames():
     assert r["frames"]["full"]["W_MHD"] == pytest.approx(
         st["W_MHD"] + 1.5 * float(p[-1]) * st["vol"])
     assert r["frames"]["solver"]["W_MHD"] == st["W_MHD"]
-    r = EP.archive_record(None, p, stats=st)
+    # the default is "offset": the same as the explicit setting
+    assert EP.archive_record(None, p, stats=st) == r
+    r = EP.archive_record(EP.EdgePressure.pre_change(), p, stats=st)
     assert r["p_sep_applied"] == 0.0
     assert r["frames"]["full"] == r["frames"]["solver"]
     # stats without a volume: recorded, not raised

@@ -22,7 +22,8 @@ boundary starting at ZERO, then rescales ``P'`` so the axis value equals
     to 0.115 MA/m^2 with the ``FF'`` term changing sign there, and ``q95``
     rises by 0.002; ``l_i``, the core and the iteration counts do not move.
 
-``separatrix_pressure`` (default ``"legacy"``: the behaviour before the setting)
+``separatrix_pressure`` (default ``"offset"`` since 2026-10-02; ``"legacy"`` is
+the behaviour before the setting)
     ``"legacy"`` passes the FULL axis pressure as the target.  When the
     input pressure is not zero at ``psi_N = 1`` (``p_sep``), the solver's
     pressure -- which is zero there by construction -- reaches that target
@@ -32,7 +33,11 @@ boundary starting at ZERO, then rescales ``P'`` so the axis value equals
     ``"offset"`` passes ``p_axis - p_sep`` as the target, so ``P'`` is the
     input's own, and ``p_sep`` is added back wherever pressure, ``beta`` or
     stored energy is REPORTED or DELIVERED (:func:`pressure_frames`, the
-    ``lcfs_pressure`` of a written g-file).  ``p_sep`` is the TOTAL pressure
+    ``lcfs_pressure`` of EVERY g-file bouquet writes: the archive's
+    ``_baseline`` and each draw in ``generate()``, and the reconstruction's
+    own through ``Bouquet.save_baseline_eqdsk`` /
+    :func:`save_full_pressure_eqdsk`; a bare ``mygs.save_eqdsk`` writes the
+    solver frame).  ``p_sep`` is the TOTAL pressure
     handed to the solver (thermal + impurity + fast, exactly the array the
     solve is built from) at its last node, :func:`separatrix_pressure_of`.
 
@@ -44,9 +49,19 @@ equation, so the equilibrium inside the boundary is the one the input's
 ``P'`` asks for; the constant ``p_sep`` is bookkeeping for readers of the
 pressure, not a force.
 
-With both settings at their defaults every array this module returns is
-bit for bit what the scattered ``pp["y"][-1] = 0.0`` / ``pax = p[0]`` sites
-returned before it existed.
+The DEFAULT and the PRE-CHANGE settings are two different things.  The
+pre-change settings (:data:`PRE_CHANGE_EDGE_PRESSURE`: pin on, ``"legacy"``)
+are the behaviour of the scattered ``pp["y"][-1] = 0.0`` / ``pax = p[0]``
+sites before this module existed: at them every array this module returns
+is bit for bit what those sites returned (the frozen-copy tests).  The
+defaults (:data:`EDGE_PRESSURE_DEFAULTS`: pin on, ``"offset"``) differ from
+them in the separatrix setting only -- an owner-approved PHYSICS change of
+2026-10-02: on real g-file and IDS cases ``"offset"`` brought the full-frame
+``beta_N`` / ``W_MHD`` closer to the input on every comparable g-file case
+(by 1.4-8 points) and by ~0.5 points on IDS slices, converged on every case,
+at the same cost, with ``l_i``, ``q`` and the current distances unchanged.
+With ``p_sep = 0`` the two hand the solver the same arrays;
+``separatrix_pressure="legacy"`` restores the pre-change numbers.
 """
 from __future__ import annotations
 
@@ -56,9 +71,15 @@ import numpy as np
 
 #: ``GenerationConfig.separatrix_pressure`` values.
 SEPARATRIX_PRESSURE_CHOICES = ("legacy", "offset")
-#: The two settings and their defaults (today's behaviour).
+#: The two settings BEFORE they existed: what every inline site did.  The
+#: frozen-copy tests prove the legacy paths bit for bit at THESE settings.
+PRE_CHANGE_EDGE_PRESSURE = {"edge_pprime_pin": True,
+                            "separatrix_pressure": "legacy"}
+#: The two settings' defaults.  ``separatrix_pressure`` moved from
+#: ``"legacy"`` to ``"offset"`` on 2026-10-02 (owner-approved physics change;
+#: see the module docstring); ``edge_pprime_pin`` is the pre-change value.
 EDGE_PRESSURE_DEFAULTS = {"edge_pprime_pin": True,
-                          "separatrix_pressure": "legacy"}
+                          "separatrix_pressure": "offset"}
 #: What the two frames of :func:`pressure_frames` are.
 FRAME_NOTE = (
     "solver frame: the solver's own pressure (zero at psi_N = 1), what the "
@@ -83,9 +104,11 @@ def validate_edge_pressure_settings(edge_pprime_pin, separatrix_pressure):
 
 @dataclass(frozen=True)
 class EdgePressure:
-    """The two settings, validated (see the module docstring)."""
+    """The two settings, validated (see the module docstring).  The field
+    defaults are :data:`EDGE_PRESSURE_DEFAULTS`; :meth:`pre_change` gives
+    :data:`PRE_CHANGE_EDGE_PRESSURE`."""
     edge_pprime_pin: bool = True
-    separatrix_pressure: str = "legacy"
+    separatrix_pressure: str = "offset"
 
     def __post_init__(self):
         validate_edge_pressure_settings(self.edge_pprime_pin,
@@ -96,9 +119,22 @@ class EdgePressure:
         """``separatrix_pressure == "offset"``."""
         return self.separatrix_pressure == "offset"
 
+    @classmethod
+    def pre_change(cls) -> "EdgePressure":
+        """The settings before they existed (:data:`PRE_CHANGE_EDGE_PRESSURE`:
+        pin on, ``"legacy"``) -- NOT the defaults."""
+        return cls(**PRE_CHANGE_EDGE_PRESSURE)
+
     @property
     def is_default(self) -> bool:
-        return bool(self.edge_pprime_pin) and not self.offset
+        """The settings are :data:`EDGE_PRESSURE_DEFAULTS`."""
+        return self.record() == EDGE_PRESSURE_DEFAULTS
+
+    @property
+    def is_pre_change(self) -> bool:
+        """The settings are :data:`PRE_CHANGE_EDGE_PRESSURE` (pin on,
+        ``"legacy"``): every array is the pre-change code's, bit for bit."""
+        return self.record() == PRE_CHANGE_EDGE_PRESSURE
 
     def record(self) -> dict:
         """The settings as a JSON-able dict."""
@@ -322,6 +358,42 @@ def lcfs_kwargs(p_sep) -> dict:
     the call is then exactly the one made before the setting existed."""
     p_sep = float(p_sep)
     return {} if p_sep == 0.0 else {"lcfs_pressure": p_sep}
+
+
+def delivered_p_sep(record) -> float:
+    """The separatrix pressure a written g-file of a delivered equilibrium
+    carries: ``p_sep_applied`` of its edge-pressure record (a
+    ``Baseline.edge_pressure``, an engine record's ``edge_pressure``, an
+    archived ``edge_pressure_json``) -- that equilibrium's own ``p_sep``
+    under ``"offset"``, exactly ``0.0`` under ``"legacy"``.  Refuses a
+    missing record rather than guess a frame."""
+    if not isinstance(record, dict) or record.get("p_sep_applied") is None:
+        raise ValueError(
+            "no edge-pressure record with 'p_sep_applied': the pressure "
+            "frame of a written g-file cannot be decided (got "
+            f"{record!r})")
+    p = float(record["p_sep_applied"])
+    if not np.isfinite(p):
+        raise ValueError(f"edge-pressure record: p_sep_applied = {p!r} is "
+                         "not finite")
+    return p
+
+
+def save_full_pressure_eqdsk(mygs, filename, p_sep, **kwargs):
+    """Write *mygs*'s current equilibrium as a g-file carrying the FULL
+    pressure: ``save_eqdsk(filename, **kwargs, **lcfs_kwargs(p_sep))``
+    through :func:`bouquet.utils.safe_save_eqdsk` (the solver state is
+    snapshotted and restored around the write).  ``PRES`` is the solver's
+    pressure plus *p_sep*; ``PPRIME`` is unchanged.  With ``p_sep = 0`` the
+    call is exactly a bare save.  A bare ``mygs.save_eqdsk`` writes the
+    SOLVER frame (``PRES`` zero at ``psi_N = 1``) instead.  Refuses an
+    explicit ``lcfs_pressure`` in *kwargs* (it would replace or double the
+    offset)."""
+    if "lcfs_pressure" in kwargs:
+        raise ValueError("save_full_pressure_eqdsk: pass the separatrix "
+                         "pressure as p_sep, not lcfs_pressure")
+    from .utils import safe_save_eqdsk
+    return safe_save_eqdsk(mygs, filename, **kwargs, **lcfs_kwargs(p_sep))
 
 
 def archive_record(edge=None, pressure=None, stats=None, p_sep_applied=None):

@@ -10,8 +10,11 @@ and the synthetic OMAS file; no solver):
   read with the wrong COCOS is refused;
 * the g-file inductive is smoothed with EXACTLY the legacy
   ``fit_inductive_profile`` basis, without its amplitude search;
-* the IDS inductive is ``|B0| j_ohmic`` in the positive frame, the rows are
-  the source's own (Ip soft, ``li_3`` soft, q0 at the measurement radius);
+* the IDS inductive is, by definition (the default), the parallel residual
+  ``|B0| (j_total - j_bootstrap - sum(driven))`` in the positive frame, with
+  the source's ``j_ohmic`` a stamped cross-check ("auto" / "j_ohmic" use it
+  explicitly); the rows are the source's own (Ip soft, ``li_3`` soft, q0 at
+  the measurement radius);
 * a raw-E_r MSE request is refused, E_r-corrected chords are accepted;
 * identity (I2) on STORED geometry of the synthetic golden fixture (read-only
   h5py): the draw's own g-file composes back exactly, and the conversion
@@ -25,7 +28,8 @@ import os
 import numpy as np
 import pytest
 
-from bouquet.adapters import (EngineInputRefused, GFileAdapter, IdsAdapter,
+from bouquet.adapters import (IDS_INDUCTIVE_DEFAULT, EngineInputRefused,
+                              GFileAdapter, IdsAdapter,
                               gfile_parallel_current, inductive_basis,
                               mse_rows, validate_contract)
 from bouquet.engine import compose, conversion_factor
@@ -189,9 +193,13 @@ def test_the_ids_adapter_reads_the_contract(ids):
         dd = json.load(fh)
     cp = dd["core_profiles"]["profiles_1d"][2]
     B0 = abs(float(dd["equilibrium"]["vacuum_toroidal_field"]["b0"][2]))
-    np.testing.assert_allclose(c.jB_ind, B0 * np.asarray(cp["j_ohmic"]),
-                               rtol=1e-15)
-    assert "j_ohmic" in c.provenance["inductive"]
+    # the default inductive is the parallel residual, by definition
+    assert ad.inductive == IDS_INDUCTIVE_DEFAULT == "residual"
+    np.testing.assert_allclose(
+        c.jB_ind, B0 * (np.asarray(cp["j_total"])
+                        - np.asarray(cp["j_bootstrap"]) - c.jB_fix / B0),
+        rtol=1e-12)
+    assert c.provenance["inductive"].startswith("residual")
     assert c.rows["Ip"]["hard"] is False
     assert c.rows["Ip"]["sigma"] == pytest.approx(0.005 * bl.Ip_target)
     li = c.rows["l_i"]
@@ -207,6 +215,8 @@ def test_the_ids_adapter_reads_the_contract(ids):
 
 
 def test_the_ids_residual_inductive(ids):
+    """Explicit "residual" is the default contract bit for bit; explicit
+    "j_ohmic" takes the source's j_ohmic exactly."""
     import json
     ad, c, bl = ids
     ad2 = IdsAdapter(ad.source, ad.config, bl, inductive="residual")
@@ -219,6 +229,12 @@ def test_the_ids_residual_inductive(ids):
         c2.jB_ind, B0 * (np.asarray(cp["j_total"])
                          - np.asarray(cp["j_bootstrap"]) - nbi), rtol=1e-12)
     assert c2.provenance["inductive"].startswith("residual")
+    np.testing.assert_array_equal(c2.jB_ind, c.jB_ind)
+    assert c2.provenance["inductive"] == c.provenance["inductive"]
+    c3 = IdsAdapter(ad.source, ad.config, bl, inductive="j_ohmic").read()
+    np.testing.assert_allclose(c3.jB_ind, B0 * np.asarray(cp["j_ohmic"]),
+                               rtol=1e-15)
+    assert c3.provenance["inductive"].startswith("j_ohmic")
 
 
 def test_the_ids_adapter_refuses_without_b0(ids, tmp_path):
@@ -456,3 +472,292 @@ def test_identity_I2_on_the_golden_fixtures_stored_geometry():
     kap_t = np.abs(fsa["F"]) * fsa["avg_inv_R"] / fsa["avg_B2"]
     m = (fsa["psi_N"] >= 0.01) & (fsa["psi_N"] <= 0.99)
     assert float(np.max(np.abs(kap_g[m] / kap_t[m] - 1.0))) <= 1.3e-3
+
+
+# ---------------------------------------------------------------------------
+#  the IDS source's current split: every driven entry held fixed, and
+#  j_ohmic checked against the parallel residual (owner-set 2 % tolerance)
+# ---------------------------------------------------------------------------
+def _ids_from(tmp_path, dd, name, **kw):
+    """Adapter + contract of a modified copy of the example dd."""
+    import warnings
+    from bouquet.baseline import resolve_baseline
+    from bouquet.config import (BouquetConfig, GenerationConfig, ImasSource,
+                                SolverConfig)
+    p = _write_dd(tmp_path, dd, name)
+    cfg = BouquetConfig(
+        source=ImasSource(ids_path=str(p), time=_TIME),
+        solver=SolverConfig(mesh_path=_MESH), output_header="t",
+        generation=GenerationConfig(reconstruction_engine="unified"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        bl = resolve_baseline(cfg, None)
+    return IdsAdapter(cfg.source, cfg, bl, **kw)
+
+
+def _add_source(dd, name, index, j_parallel_of):
+    """Append a core_sources entry shaped like the beam one, with
+    ``j_parallel = j_parallel_of(profiles_1d entry)`` at every time."""
+    import copy
+    base = next(s for s in dd["core_sources"]["source"]
+                if s["identifier"]["index"] == 2)
+    s = copy.deepcopy(base)
+    s["identifier"] = dict(name=name, index=index)
+    for i, q in enumerate(s["profiles_1d"]):
+        q["j_parallel"] = [float(v) for v in
+                           j_parallel_of(dd["core_profiles"]["profiles_1d"][i])]
+    dd["core_sources"]["source"].append(s)
+    return s
+
+
+def test_the_ids_split_is_checked_and_stamped_on_a_consistent_source(ids):
+    """The default (residual by definition) stamps the j_ohmic cross-check
+    with no threshold; explicit "auto" on the same consistent source keeps
+    j_ohmic, with the same numbers stamped."""
+    ad, c, bl = ids
+    k = c.provenance["inductive_consistency"]
+    assert k["checked"] is True and k["action"] == "residual_by_definition"
+    assert k["tol"] is None and abs(k["net_frac"]) <= 0.02
+    assert np.isfinite(k["rms_frac"])
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ca = IdsAdapter(ad.source, ad.config, bl, inductive="auto").read()
+    ka = ca.provenance["inductive_consistency"]
+    assert ka["action"] == "kept_j_ohmic" and ka["tol"] == 0.02
+    assert (ka["net_frac"], ka["rms_frac"]) == (k["net_frac"], k["rms_frac"])
+    assert ca.provenance["inductive"].startswith("j_ohmic")
+    assert sorted(c.jB_fix_parts) == ["nbi", "other", "rf"]
+    np.testing.assert_array_equal(c.jB_fix_parts["rf"], 0.0)
+    np.testing.assert_array_equal(c.jB_fix_parts["other"], 0.0)
+    np.testing.assert_array_equal(
+        c.jB_fix, c.jB_fix_parts["nbi"] + c.jB_fix_parts["rf"]
+        + c.jB_fix_parts["other"])
+    assert [d["part"] for d in c.provenance["driven_sources"]] == ["nbi"]
+
+
+def test_an_inconsistent_split_falls_back_to_the_residual_loudly(tmp_path):
+    """j_ohmic scaled by 1.06 with j_total untouched: the split misses by
+    ~5 % of the total current, above the 2 % tolerance.  Explicit "auto"
+    takes the residual and says so; inductive="j_ohmic" keeps j_ohmic and
+    says so; "auto" with a looser tolerance keeps j_ohmic silently.  The
+    source is never altered: the stamped numbers are the same in all
+    three."""
+    dd = _example_dd()
+    for q in dd["core_profiles"]["profiles_1d"]:
+        q["j_ohmic"] = [1.06 * float(v) for v in q["j_ohmic"]]
+    cp = dd["core_profiles"]["profiles_1d"][2]
+    B0 = abs(float(dd["equilibrium"]["vacuum_toroidal_field"]["b0"][2]))
+    with pytest.warns(UserWarning, match="does not add up"):
+        c = _ids_from(tmp_path, dd, "ohm_off.json", inductive="auto").read()
+    k = c.provenance["inductive_consistency"]
+    assert k["action"] == "fallback_to_residual" and k["net_frac"] > 0.02
+    assert c.provenance["inductive"].startswith("residual")
+    np.testing.assert_allclose(
+        c.jB_ind, B0 * (np.asarray(cp["j_total"])
+                        - np.asarray(cp["j_bootstrap"]) - c.jB_fix / B0),
+        rtol=1e-12)
+    with pytest.warns(UserWarning, match="kept although"):
+        c2 = _ids_from(tmp_path, dd, "ohm_off.json",
+                       inductive="j_ohmic").read()
+    assert c2.provenance["inductive_consistency"]["action"] == \
+        "kept_j_ohmic_over_tol"
+    np.testing.assert_allclose(c2.jB_ind, B0 * np.asarray(cp["j_ohmic"]),
+                               rtol=1e-15)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        c3 = _ids_from(tmp_path, dd, "ohm_off.json", inductive="auto",
+                       inductive_tol=0.10).read()
+    assert c3.provenance["inductive_consistency"]["action"] == "kept_j_ohmic"
+    np.testing.assert_allclose(c3.jB_ind, c2.jB_ind, rtol=0.0)
+    for cc in (c2, c3):
+        assert cc.provenance["inductive_consistency"]["net_frac"] == \
+            k["net_frac"]
+
+
+def test_every_driven_source_entry_is_held_fixed_and_in_the_residual(
+        tmp_path):
+    """An ec entry (rf), a model's sawteeth entry (other), plus ohmic and
+    bootstrap entries that must be IGNORED: the fixed current is the sum
+    of the driven ones by part, the residual subtracts them all, and a
+    source whose j_ohmic accounts for them stays consistent."""
+    dd = _example_dd()
+    ec = lambda q: 0.03 * np.asarray(q["j_total"])          # noqa: E731
+    saw = lambda q: 0.002 * np.asarray(q["j_total"])        # noqa: E731
+    _add_source(dd, "ec", 3, ec)
+    _add_source(dd, "sawteeth", 701, saw)
+    _add_source(dd, "ohmic", 7, lambda q: np.asarray(q["j_ohmic"]))
+    _add_source(dd, "bootstrap", 13, lambda q: np.asarray(q["j_bootstrap"]))
+    for q in dd["core_profiles"]["profiles_1d"]:
+        q["j_ohmic"] = [float(v) for v in
+                        np.asarray(q["j_ohmic"]) - ec(q) - saw(q)]
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        c = _ids_from(tmp_path, dd, "driven.json", inductive="auto").read()
+    cp = dd["core_profiles"]["profiles_1d"][2]
+    B0 = abs(float(dd["equilibrium"]["vacuum_toroidal_field"]["b0"][2]))
+    np.testing.assert_allclose(c.jB_fix_parts["rf"], B0 * ec(cp), rtol=1e-12)
+    np.testing.assert_allclose(c.jB_fix_parts["other"], B0 * saw(cp),
+                               rtol=1e-12)
+    np.testing.assert_allclose(
+        c.jB_fix, c.jB_fix_parts["nbi"] + B0 * (ec(cp) + saw(cp)),
+        rtol=1e-12)
+    used = {(d["name"], d["part"]) for d in c.provenance["driven_sources"]}
+    assert used == {("nbi_synthetic", "nbi"), ("ec", "rf"),
+                    ("sawteeth", "other")}
+    k = c.provenance["inductive_consistency"]
+    assert k["action"] == "kept_j_ohmic" and abs(k["net_frac"]) <= 0.02
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        c2 = _ids_from(tmp_path, dd, "driven.json").read()     # the default
+    k2 = c2.provenance["inductive_consistency"]
+    assert k2["action"] == "residual_by_definition"
+    assert k2["net_frac"] == k["net_frac"]
+    np.testing.assert_array_equal(c2.jB_fix, c.jB_fix)
+    np.testing.assert_allclose(
+        c2.jB_ind, B0 * (np.asarray(cp["j_total"])
+                         - np.asarray(cp["j_bootstrap"])) - c.jB_fix,
+        rtol=1e-12)
+
+
+def test_a_malformed_driven_source_is_refused(tmp_path):
+    dd = _example_dd()
+    s = _add_source(dd, "ec", 3, lambda q: 0.01 * np.asarray(q["j_total"]))
+    s["profiles_1d"][2]["j_parallel"][5] = float("nan")
+    with pytest.raises(EngineInputRefused, match="j_parallel is malformed"):
+        _ids_from(tmp_path, dd, "bad_ec.json").read()
+
+
+def test_the_inductive_tolerance_is_validated(ids):
+    ad, c, bl = ids
+    for bad in (-0.01, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="inductive_tol"):
+            IdsAdapter(ad.source, ad.config, bl, inductive_tol=bad)
+
+
+# ---------------------------------------------------------------------------
+#  the default: the parallel residual by definition (owner decision
+#  2026-10-02); j_ohmic a stamped cross-check
+# ---------------------------------------------------------------------------
+def test_the_default_is_the_residual_everywhere():
+    import inspect
+    from bouquet.config import GenerationConfig
+    from bouquet.engine import ENGINE_FIELD_DEFAULTS
+    assert IDS_INDUCTIVE_DEFAULT == "residual"
+    assert inspect.signature(IdsAdapter).parameters["inductive"].default \
+        == IDS_INDUCTIVE_DEFAULT
+    assert GenerationConfig().engine_ids_inductive == IDS_INDUCTIVE_DEFAULT
+    assert ENGINE_FIELD_DEFAULTS["engine_ids_inductive"] == \
+        IDS_INDUCTIVE_DEFAULT
+
+
+def test_residual_stamps_the_j_ohmic_check_without_warning(tmp_path, ids):
+    """Under the default, the j_ohmic-vs-residual numbers are computed and
+    stamped on a consistent source AND on one whose j_ohmic is scaled by
+    1.06 (~5 % net miss), with no warning either way; the inductive is the
+    residual, the same in both (j_total, j_bootstrap and the driven parts
+    are untouched)."""
+    import warnings
+    _ad, c_ok, _bl = ids
+    dd = _example_dd()
+    for q in dd["core_profiles"]["profiles_1d"]:
+        q["j_ohmic"] = [1.06 * float(v) for v in q["j_ohmic"]]
+    cp = dd["core_profiles"]["profiles_1d"][2]
+    B0 = abs(float(dd["equilibrium"]["vacuum_toroidal_field"]["b0"][2]))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        c_ok2 = _ids_from(tmp_path, _example_dd(), "ok.json").read()
+        c_off = _ids_from(tmp_path, dd, "ohm_off.json").read()
+    k_ok = c_ok2.provenance["inductive_consistency"]
+    k_off = c_off.provenance["inductive_consistency"]
+    for k in (k_ok, k_off):
+        assert k["checked"] is True
+        assert k["action"] == "residual_by_definition"
+        assert k["tol"] is None
+        assert np.isfinite(k["net_frac"]) and np.isfinite(k["rms_frac"])
+    assert abs(k_ok["net_frac"]) <= 0.02
+    assert k_off["net_frac"] > 0.02 and k_off["rms_frac"] > k_ok["rms_frac"]
+    assert k_ok == c_ok.provenance["inductive_consistency"]
+    for cc in (c_ok2, c_off):
+        assert cc.provenance["inductive"].startswith("residual")
+    np.testing.assert_allclose(
+        c_off.jB_ind, B0 * (np.asarray(cp["j_total"])
+                            - np.asarray(cp["j_bootstrap"])) - c_off.jB_fix,
+        rtol=1e-12)
+    np.testing.assert_array_equal(c_off.jB_ind, c_ok2.jB_ind)
+    np.testing.assert_array_equal(c_ok2.jB_ind, c_ok.jB_ind)
+
+
+def _adapter_on_full_baseline(ids, tmp_path, dd, name, **kw):
+    """The adapter reading a modified dd with the baseline of the full
+    example (the reader itself needs every core_profiles current; only the
+    adapter's own re-read is under test)."""
+    from bouquet.config import ImasSource
+    ad, _c, bl = ids
+    src = ImasSource(ids_path=str(_write_dd(tmp_path, dd, name)), time=_TIME)
+    return IdsAdapter(src, ad.config, bl, **kw)
+
+
+def test_residual_without_j_ohmic_is_stamped_unchecked(tmp_path, ids):
+    import warnings
+    dd = _example_dd()
+    for q in dd["core_profiles"]["profiles_1d"]:
+        del q["j_ohmic"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        c = _adapter_on_full_baseline(ids, tmp_path, dd, "no_ohm.json").read()
+    k = c.provenance["inductive_consistency"]
+    assert k["checked"] is False and k["action"] == "unchecked"
+    assert k["net_frac"] is None and k["rms_frac"] is None
+    assert c.provenance["inductive"].startswith("residual")
+
+
+@pytest.mark.parametrize("drop", ["j_total", "j_bootstrap"])
+def test_residual_refuses_a_source_without_the_residual_and_names_j_ohmic(
+        tmp_path, ids, drop):
+    """No j_total (or j_bootstrap): the default refuses and names
+    inductive='j_ohmic' as the explicit way -- it never falls back to
+    j_ohmic silently; explicit "j_ohmic" then reads the source's."""
+    dd = _example_dd()
+    for q in dd["core_profiles"]["profiles_1d"]:
+        del q[drop]
+    cp = dd["core_profiles"]["profiles_1d"][2]
+    B0 = abs(float(dd["equilibrium"]["vacuum_toroidal_field"]["b0"][2]))
+    ad = _adapter_on_full_baseline(ids, tmp_path, dd, f"no_{drop}.json")
+    with pytest.raises(EngineInputRefused) as ei:
+        ad.read()
+    msg = str(ei.value)
+    assert drop in msg and "inductive='j_ohmic'" in msg
+    assert "by definition" in msg
+    c = _adapter_on_full_baseline(ids, tmp_path, dd, f"no_{drop}.json",
+                                  inductive="j_ohmic").read()
+    np.testing.assert_allclose(c.jB_ind, B0 * np.asarray(cp["j_ohmic"]),
+                               rtol=1e-15)
+    assert c.provenance["inductive_consistency"]["action"] == "unchecked"
+
+
+def test_explicit_auto_and_j_ohmic_keep_their_semantics_on_a_split_miss(
+        tmp_path):
+    """The 1.06-scaled source: explicit "auto" falls back to the residual
+    with its warning; explicit "j_ohmic" forces the source's j_ohmic with
+    its warning -- unchanged by the default change."""
+    dd = _example_dd()
+    for q in dd["core_profiles"]["profiles_1d"]:
+        q["j_ohmic"] = [1.06 * float(v) for v in q["j_ohmic"]]
+    cp = dd["core_profiles"]["profiles_1d"][2]
+    B0 = abs(float(dd["equilibrium"]["vacuum_toroidal_field"]["b0"][2]))
+    with pytest.warns(UserWarning, match="does not add up"):
+        ca = _ids_from(tmp_path, dd, "ohm_off.json", inductive="auto").read()
+    assert ca.provenance["inductive_consistency"]["action"] == \
+        "fallback_to_residual"
+    assert ca.provenance["inductive"].startswith("residual")
+    with pytest.warns(UserWarning, match="kept although"):
+        cj = _ids_from(tmp_path, dd, "ohm_off.json",
+                       inductive="j_ohmic").read()
+    assert cj.provenance["inductive_consistency"]["action"] == \
+        "kept_j_ohmic_over_tol"
+    assert cj.provenance["inductive"].startswith("j_ohmic")
+    np.testing.assert_allclose(cj.jB_ind, B0 * np.asarray(cp["j_ohmic"]),
+                               rtol=1e-15)

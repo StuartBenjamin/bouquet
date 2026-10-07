@@ -70,7 +70,13 @@ ENGINE_FIELD_DEFAULTS = {
     "engine_preset": "structured",
     "engine_rows": ("Ip", "l_i"),
     "engine_delivery_correction": False,
-    "engine_mse_jacobian": "fd_broyden",
+    "engine_mse_jacobian": "fd_chord",
+    # under-relaxation of the l_i row's discrepancy update (1.0: the update
+    # before the setting existed; see UnifiedEngine.on_pass)
+    "engine_li_row_relaxation": 1.0,
+    # the IDS adapter's inductive choice (adapters.IDS_INDUCTIVE_CHOICES;
+    # "residual" by definition, owner decision 2026-10-02)
+    "engine_ids_inductive": "residual",
     # the draws on the engine (bouquet.engine_draws, docs/engine.md "Draws")
     "engine_draw_q0_row": False,
     "engine_draw_homotopy": True,
@@ -139,6 +145,11 @@ def _is_default(name, v):
             return tuple(v) == tuple(d)
         except TypeError:
             return False
+    if name == "engine_li_row_relaxation":
+        # a number equal to 1 (1 or 1.0) is the default; a bool is not
+        import numbers
+        return (isinstance(v, numbers.Real)
+                and not isinstance(v, (bool, np.bool_)) and v == d)
     return (type(v) is type(d)) and v == d
 
 
@@ -225,6 +236,17 @@ def validate_engine_settings(gc) -> None:
                          "reconstruction's q0 row in the draws, but "
                          "engine_rows has no 'q0' (there is no row, target "
                          "or radius to keep)")
+    rr = vals["engine_li_row_relaxation"]
+    if (isinstance(rr, (bool, np.bool_)) or not isinstance(rr, numbers.Real)
+            or not np.isfinite(float(rr)) or not 0.0 < float(rr) <= 1.0):
+        raise ValueError(f"generation.engine_li_row_relaxation={rr!r} must "
+                         "be a number with 0 < r <= 1 (an under-relaxation "
+                         "of the l_i row's update; 1.0 is the default)")
+    from .adapters import IDS_INDUCTIVE_CHOICES
+    ii = vals["engine_ids_inductive"]
+    if not isinstance(ii, str) or ii not in IDS_INDUCTIVE_CHOICES:
+        raise ValueError(f"generation.engine_ids_inductive must be one of "
+                         f"{IDS_INDUCTIVE_CHOICES}, got {ii!r}")
     mj = vals["engine_mse_jacobian"]
     if mj not in ENGINE_MSE_JACOBIANS:
         raise ValueError(f"generation.engine_mse_jacobian must be one of "
@@ -334,6 +356,12 @@ def engine_settings(gc) -> dict:
         rows=tuple(gc.engine_rows),
         delivery_correction=bool(gc.engine_delivery_correction),
         mse_jacobian=str(gc.engine_mse_jacobian),
+        li_row_relaxation=float(getattr(
+            gc, "engine_li_row_relaxation",
+            ENGINE_FIELD_DEFAULTS["engine_li_row_relaxation"])),
+        ids_inductive=str(getattr(
+            gc, "engine_ids_inductive",
+            ENGINE_FIELD_DEFAULTS["engine_ids_inductive"])),
         draw_q0_row=bool(getattr(gc, "engine_draw_q0_row", False)),
         draw_homotopy=bool(getattr(gc, "engine_draw_homotopy", True)),
         draw_bootstrap_refresh=bool(getattr(
@@ -941,8 +969,18 @@ class UnifiedEngine:
         st = self.state
         if "l_i" in self.rows:
             raw = float(p["m"]["li"]) - float(p["li_model_solved_new_geom"])
-            st.li_discrepancy = (raw if self._d_first else
-                                 (1.0 - om) * st.li_discrepancy + om * raw)
+            r = float(self.s.get("li_row_relaxation", 1.0))
+            if r == 1.0:
+                # the update before engine_li_row_relaxation existed
+                st.li_discrepancy = (raw if self._d_first else
+                                     (1.0 - om) * st.li_discrepancy
+                                     + om * raw)
+            else:
+                # under-relaxed: the step toward the measured discrepancy is
+                # scaled by r (the first update moves d from 0 with w = 1);
+                # same fixed point, per-pass gain times r
+                w = r * (1.0 if self._d_first else float(om))
+                st.li_discrepancy = ((1.0 - w) * st.li_discrepancy + w * raw)
             self._d_first = False
             self.passes[-1]["li_discrepancy_next"] = st.li_discrepancy
         if st.delivery_correction is not None:
@@ -1312,7 +1350,8 @@ class TokaMakerBackend:
         self.n_solves = 0
         self.p = np.asarray(contract.pressure, dtype=float)
         #: the two edge-pressure settings (bouquet.edge_pressure); None:
-        #: the defaults, bit for bit the behaviour before they existed
+        #: the defaults (separatrix_pressure="offset"); the pre-change
+        #: settings (EdgePressure.pre_change()) are the old arrays bit for bit
         self.edge = resolve_edge_pressure(edge_pressure)
         self.kin = None
         if maxits is not None and (isinstance(maxits, bool) or int(maxits)
@@ -1583,6 +1622,8 @@ def engine_record(eng, res, wall_s=None) -> dict:
                       prior=eng.prior_name,
                       delivery_correction=eng.s["delivery_correction"],
                       mse_jacobian=eng.s["mse_jacobian"],
+                      li_row_relaxation=eng.s.get("li_row_relaxation", 1.0),
+                      ids_inductive=eng.s.get("ids_inductive", "auto"),
                       edge_pressure=eng.s.get("edge_pressure"),
                       loop=eng.s["loop"]),
         convergence=convergence_table(eng.s),
@@ -1592,7 +1633,12 @@ def engine_record(eng, res, wall_s=None) -> dict:
         row_update=("l_i: d_k = (1-omega) d_k-1 + omega [l_i(E_k+1) - "
                     "l_i_model(solved current; G_k+1)], closure target "
                     "T - d; q0: jbs_loop.AxisRowPin; MSE: offset refreshed "
-                    "from each solve, Jacobian Broyden-updated"),
+                    "from each solve, Jacobian Broyden-updated"
+                    + ("" if eng.s.get("li_row_relaxation", 1.0) == 1.0 else
+                       f"; the l_i step is under-relaxed: omega -> "
+                       f"{eng.s['li_row_relaxation']:g} omega "
+                       "(engine_li_row_relaxation; the first update from "
+                       f"d = 0 takes {eng.s['li_row_relaxation']:g})")),
         notices=list(eng.notices),
         flags=list(eng.flags),
         converged=bool(res["converged"]),
@@ -1612,6 +1658,7 @@ ENGINE_SPLIT_CONVENTION = (
     "unified engine: jphi-linterp REQUEST of the delivery solve (one "
     "jphi-linterp solve of j_phi reproduces the delivered equilibrium); "
     "j_BS = s_bs F<1/R>/<B^2> <j.B>_BS*, j_NBI/j_RF = F<1/R>/<B^2> <j.B>_fix "
+    "(j_RF: the rf part plus any other driven source entry) "
     "on the delivery composition's geometry; j_inductive the residual "
     "(it carries s_ind F<1/R>/<B^2> <j.B>_ind, the pressure-driven term "
     "p'(<R> - F^2<1/R>/<B^2>) and any delivery correction)")
@@ -1653,7 +1700,11 @@ def _split(eng, res):
     R = np.asarray(st.request, dtype=float)
     j_BS = np.asarray(out["s_bs"], float) * kap * np.asarray(st.lambda_bs)
     j_NBI = kap * np.asarray(c.jB_fix_parts["nbi"], float)
-    j_RF = kap * np.asarray(c.jB_fix_parts["rf"], float)
+    # j_RF carries the RF part AND any other driven core_sources entry (the
+    # IDS adapter's "other" part; absent on the g-file path), so the split
+    # sums exactly to the request
+    j_RF = kap * (np.asarray(c.jB_fix_parts["rf"], float)
+                  + np.asarray(c.jB_fix_parts.get("other", 0.0), float))
     return R, R - j_BS - j_NBI - j_RF, j_BS, j_NBI, j_RF
 
 
@@ -1883,6 +1934,14 @@ def prepare_engine_baseline(bq):
         raise ValueError("the unified engine needs a live TokaMaker solver; "
                          "call setup_solver() before prepare_baseline()")
     s = engine_settings(gc)
+    if (isinstance(src, ReconstructionSource)
+            and s["ids_inductive"] != ENGINE_FIELD_DEFAULTS[
+                "engine_ids_inductive"]):
+        raise ValueError(
+            f"generation.engine_ids_inductive={s['ids_inductive']!r} set "
+            "with a g-file source: it configures the IDS adapter only and "
+            "would have no effect; leave it at its default "
+            f"{ENGINE_FIELD_DEFAULTS['engine_ids_inductive']!r}")
     bq.baseline = None
     bq._failed_baseline = None
     bq._engine_run = None
@@ -1904,7 +1963,8 @@ def prepare_engine_baseline(bq):
             elif isinstance(src, ImasSource):
                 from .baseline import resolve_baseline
                 bl_src = resolve_baseline(cfg, mygs)
-                ad = IdsAdapter(src, cfg, bl_src)
+                ad = IdsAdapter(src, cfg, bl_src,
+                                inductive=s["ids_inductive"])
                 c0 = ad.read()
                 psi_pad = ad.psi_pad
                 bq._repoint_imas_geometry()

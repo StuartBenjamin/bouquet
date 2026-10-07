@@ -1,17 +1,102 @@
 # Bouquet — change summaries
 
+## Unreleased — `engine_ids_inductive` (unified engine, IDS sources)
+
+*The default is now `"residual"` (owner-approved; see "IDS inductive: the
+parallel residual by definition" in the unified-engine section below). As
+introduced, the setting defaulted to `"auto"`, as described here.*
+
+New `GenerationConfig.engine_ids_inductive` (default then `"auto"`): passes the
+IDS adapter's inductive choice (`IdsAdapter(inductive=...)`) through the
+unified engine. `"auto"` is the adapter's own default (the source's
+`j_ohmic`, or the parallel residual `j_total − j_bootstrap − Σ driven` when
+`j_ohmic` is absent or fails the adapter's consistency check);
+`"j_ohmic"` and `"residual"` force one or the other. At the default the
+contract is the one before the setting existed (tested). No tolerance,
+criterion, ceiling or target moves; the consistency numbers are stamped in
+`provenance["inductive_consistency"]` whichever choice is used. Validated by
+name, refused when set with `reconstruction_engine="legacy"` and with a
+g-file source (no effect there). Recorded in the engine record
+(`settings.ids_inductive`).
+
+## Unreleased — `engine_li_row_relaxation` (unified engine; default unchanged)
+
+New `GenerationConfig.engine_li_row_relaxation` (default `1.0`): an
+under-relaxation `r` (0 < r <= 1) of the unified engine's l_i-row
+discrepancy update between reconstruction passes,
+`d_k = (1 − rω) d_k−1 + rω [measured − model]` (the first update, from
+`d = 0`, takes `r`). At the default the update is the one before the setting
+existed, bit for bit (tested). It is a solver-side remedy for a row whose
+per-pass gain exceeds the stability limit of 2 (a growing period-2
+oscillation of the l_i row was measured on a high-bootstrap-fraction case
+under the two-scalar preset, gain 2.07 at ω = 0.7); `r = 0.5` halves that
+gain. It changes the path only: no tolerance, convergence criterion, pass
+ceiling or target moves. Validated by name (refused outside `0 < r <= 1`,
+and when set with `reconstruction_engine="legacy"`). Recorded in the engine
+record (`settings.li_row_relaxation`). Draws carry no l_i row and are not
+affected; nor are the q0 row and the MSE chords.
+
+## Unreleased — approved change of a physics default: `separatrix_pressure` `"legacy"` → `"offset"`
+
+**This is a change of a physics default, approved by the package owner on
+2026-10-02.** `GenerationConfig.separatrix_pressure` (below, "The pressure
+handed to the solver") now defaults to `"offset"`; `edge_pprime_pin` stays
+`True`. Both engines and every legacy path follow it. No tolerance,
+convergence criterion or ceiling moved.
+
+- **Why.** Under `"legacy"` the solver is handed the full axis pressure as
+  its target; its own pressure is zero at the boundary, so with a non-zero
+  separatrix pressure `p_sep` it inflates `P'` everywhere by
+  `p_axis / (p_axis - p_sep)` and reports the `beta` / `W_MHD` of a
+  different profile. `"offset"` hands it `p_axis - p_sep` (the input's own
+  `P'`) and adds `p_sep` back wherever pressure, `beta` or `W_MHD` is
+  reported or delivered.
+- **Measured basis** (real g-file and IDS cases, four arms each, pin on
+  vs off × `"legacy"` vs `"offset"`): `"offset"` brought the full-frame
+  `beta_N` / `W_MHD` closer to the input on 8 of 8 comparable g-file cases,
+  by 1.4-8.0 points (median 3.5), and by about 0.5 points on the IDS slices;
+  every pin-on `"offset"` arm converged (and the separatrix setting never
+  changed whether a case converged, pin on or off); `l_i`, `q` and the current distances to the
+  input did not move (l_i to 1e-3, current distances to 0.1 point); passes,
+  solves, GS iterations and wall time identical. Solver-frame gaps grow
+  (median 1.4 points on g-files) because under `"legacy"` the inflated `P'`
+  was compensating a deficit in that frame. The large gaps where the input
+  pressures themselves disagree are not closed by either setting.
+- **What changes for existing users** when the solve pressure is not zero
+  at `psi_N = 1`: `P'` in the solve is scaled by `(p_axis - p_sep) / p_axis`
+  (with it the pressure-driven current and the Shafranov shift, slightly);
+  the reported pressure, `beta_N` / `beta_p` / `W_MHD` (headline values are
+  the full-frame ones) and the delivered g-files' `PRES` move toward the
+  input's full-pressure values. With `p_sep = 0` nothing changes.
+- **To get the old numbers:** `separatrix_pressure="legacy"`. At the
+  pre-change settings (`edge_pprime_pin=True, separatrix_pressure="legacy"`,
+  `edge_pressure.PRE_CHANGE_EDGE_PRESSURE`) every path is bit for bit what
+  it was; the frozen-copy tests now prove that at those settings explicitly
+  (`EDGE_PRESSURE_DEFAULTS` is the new default, a separate constant). A
+  stored config that predates the setting (an old archive's `config_json`)
+  reloads with `"legacy"`, with a warning, so it replays what it recorded.
+- **Also:** the legacy non-loop routes' note that the solver's
+  `solve_with_bootstrap` helper is not reached by the settings is now
+  printed whenever the settings are not the pre-change ones, so it appears
+  at the default.
+
 ## Unreleased — unified engine (default off)
 
 *Opt-in; with the default `reconstruction_engine="legacy"` nothing changes
 (the legacy paths are untouched; the loop kernel's new hook is proven
-bit-identical when absent).*
+bit-identical when absent) -- except the separatrix-pressure default above,
+which applies to every path.*
 
 - **`GenerationConfig.reconstruction_engine`** (`"legacy"` | `"unified"`,
   default `"legacy"`) with `engine_preset` (`"structured"` |
   `"structured_uniform"` | `"bootstrap_scalar"` | `"sawtooth_two_scalar"` |
   `"two_scalar_li"`), `engine_rows` (`"Ip"`,
   `"l_i"`, `"q0"`, `"mse"`), `engine_delivery_correction` (default `False`)
-  and `engine_mse_jacobian` (`"fd_broyden"` | `"fd_chord"`). Validated by
+  and `engine_mse_jacobian` (`"fd_chord"` | `"fd_broyden"`; default `"fd_chord"`
+  since 2026-10-02, owner-approved: the fixed finite-difference Jacobian
+  converged every MSE validation case where Broyden's rank-one update, fed a
+  second pass whose tan γ change was mostly the relaxing bootstrap and
+  geometry, cost 4-5 extra passes and two pass-ceiling failures). Validated by
   name; engine options set under `"legacy"` are refused. Stored configs
   without the field load as `"legacy"`.
 - **`bouquet/engine.py`**: one reconstruction loop for g-file and IDS inputs
@@ -26,6 +111,20 @@ bit-identical when absent).*
 - **`bouquet/adapters.py`**: the source-adapter contract and the g-file / IDS
   adapters (the only place, with the exporters, where a current convention is
   converted). Raw-E_r MSE is refused.
+- **IDS inductive: the parallel residual by definition (owner-approved
+  default change, 2026-10-02).** `IdsAdapter(inductive=...)` and
+  `GenerationConfig.engine_ids_inductive` default to `"residual"`: the
+  inductive current is `j_total − j_bootstrap − Σ driven`; the source's
+  `j_ohmic` becomes a cross-check, compared and stamped in
+  `provenance["inductive_consistency"]` (action `"residual_by_definition"`)
+  with no threshold and no warning. A source without `j_total` /
+  `j_bootstrap` is refused (`"j_ohmic"` uses its `j_ohmic` explicitly).
+  Evidence: on self-consistent sources the two are indistinguishable
+  (`|Δl_i| ≤ 1.8e-3`); where a source's own split is locally inconsistent the
+  residual is closer to its `<j_phi>`. `"auto"` and `"j_ohmic"` remain as
+  explicit options with their semantics unchanged. No tolerance, criterion,
+  ceiling or target moved. The IDS inductive changes on every source whose
+  `j_ohmic` does not equal the residual exactly.
 - `Bouquet.prepare_baseline()` dispatches to the engine when selected, for
   both inputs, and returns the usual `Baseline` plus `Baseline.engine` (the
   full record: contract, settings, convergence constants with their origins,
@@ -117,15 +216,17 @@ bit-identical when absent).*
   `utils.STRUCTURED_WEIGHTS_UNIFORM` (the design's prior-sensitivity run).
   Neither adds a number. Solver test `tests/test_engine_two_scalar_solver.py`.
 - **The pressure handed to the solver: one helper, two settings (both
-  default to the behaviour before they existed; PHYSICS changes when
-  moved).** `bouquet/edge_pressure.py` now builds every `P'` profile and
+  defaulted to the behaviour before they existed when introduced;
+  `separatrix_pressure` has since moved to `"offset"`, see the approved
+  change above; PHYSICS changes when moved).** `bouquet/edge_pressure.py` now builds every `P'` profile and
   axis-pressure target, replacing the inline `pp["y"][-1] = 0.0` /
   `pax = p[0]` statements of the legacy reconstruction and draws, the
   modelling-source forward solve, the zero-perturbation checks, the engine
-  backend and the engine draws. With the defaults every array is bit for bit
-  what it was (frozen-copy tests: each solve path, as an AST, against its
-  pre-change code with the helper written back inline; the helper's defaults
-  against the inline statements). Applies to BOTH engines.
+  backend and the engine draws. At the pre-change settings (pin on,
+  `"legacy"`) every array is bit for bit what it was (frozen-copy tests:
+  each solve path, as an AST, against its pre-change code with the helper
+  written back inline; the helper at those settings against the inline
+  statements). Applies to BOTH engines.
   - `GenerationConfig.edge_pprime_pin` (default `True`). `False` keeps the
     profile's own `P'` at `psi_N = 1` instead of zeroing the last node.
     **Physics change when off:** the pressure-driven current is no longer
@@ -135,7 +236,8 @@ bit-identical when absent).*
     `<j_phi>` at the last node 0.076 -> 0.115 MA/m^2, the `FF'` term there
     changes sign, `q95` +0.002, `l_i` and the core unchanged; no extra
     passes, solves or GS iterations.
-  - `GenerationConfig.separatrix_pressure` (default `"legacy"`).
+  - `GenerationConfig.separatrix_pressure` (introduced with default
+    `"legacy"`; default `"offset"` since 2026-10-02).
     `"offset"` passes `p_axis - p_sep` as the solver's axis target (`p_sep`:
     the solve pressure at `psi_N = 1`, thermal + impurity + fast; each draw
     its own) and adds `p_sep` back wherever pressure, beta or `W_MHD` is
@@ -164,7 +266,8 @@ bit-identical when absent).*
     layer, which a vacuum-outside free-boundary model cannot represent
     ([physics-notes.md](physics-notes.md#the-pressure-handed-to-the-solver-separatrix-pressure-and-the-edge-p-pin)).
   - **Not reached:** the solver's own `solve_with_bootstrap` helper (legacy
-    non-loop routes; a printed note says so when a setting is moved).
+    non-loop routes; a printed note says so whenever the settings are not
+    the pre-change ones, the default included).
   - Probe: `tests/probes/measure_engine.py` reports beta / `W_MHD` both ways
     (`distance.pressure_frames`), an `edge` stage, an opt-in per-solve
     iteration log, part `recon_legacy`, and checks of the delivered g-files.

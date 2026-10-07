@@ -12,6 +12,7 @@ Docstrings in the source are authoritative; this page is a map.
 | `Bouquet.describe()` | Print the configuration, non-default knobs only |
 | `Bouquet.verify_sigma0_consistency()` | σ=0 regression guard on the draw-pipeline bootstrap split (one solve) |
 | `Bouquet.run_slices()` | Multi-slice IMAS sweep into one archive, one `scan_key` per slice; a refused slice is recorded as such (`on_refusal="raise"` default / `"record"` to continue) |
+| `Bouquet.save_baseline_eqdsk(path)` | Write the reconstruction's own equilibrium (the live state `prepare_baseline()` left; refused after a later solve) as a g-file in the same pressure frame as the archive's: `PRES` carries the baseline's `p_sep` under `separatrix_pressure="offset"`. A bare `mygs.save_eqdsk` writes the solver frame (`PRES` zero at the boundary) |
 | `Bouquet.export_bundle()` / `Bouquet.export_ids()` | Per-draw file bundle (geqdsk / pfile / profiles JSON), or one IMAS/OMAS IDS per draw (`fidelity="exact"` uses the captured `eq_fsa` geometry) |
 | `Bouquet.selected_indices()` / `Bouquet.output_spread()` | Post-generation introspection |
 | `Bouquet.plot_baseline()` / `.plot_bouquet()` / `.plot_traces()` / `.plot_coil_currents()` / `.plot_spec_summary()` | Bound plotting |

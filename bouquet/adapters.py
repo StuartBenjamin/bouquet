@@ -29,10 +29,11 @@ Two adapters:
     :func:`bouquet.engine.gfile_li_row_tol`; optional q0 (the g-file's own q
     at the measurement radius).
 ``IdsAdapter``
-    ``j_ohmic`` (or, when the source carries none, the parallel residual
-    ``j_total - j_bootstrap - sum(driven)``), both IMAS ``<j.B>/B0``; the
-    beam-source ``j_parallel`` held fixed.  Rows: Ip (soft, the preset's
-    ``sigma_Ip``); ``li_3`` (soft, the preset's ``sigma_li``); optional q0
+    the parallel residual ``j_total - j_bootstrap - sum(driven)`` BY
+    DEFINITION (IMAS ``<j.B>/B0``), the source's ``j_ohmic`` a stamped
+    cross-check (``inductive="j_ohmic"`` / ``"auto"`` use it explicitly);
+    every driven ``core_sources`` ``j_parallel`` held fixed.  Rows: Ip
+    (soft, the preset's ``sigma_Ip``); ``li_3`` (soft, the preset's ``sigma_li``); optional q0
     (the source's own q at the measurement radius, when the sawtooth gate
     admits it); optional MSE chords (E_r-corrected data only).
 
@@ -522,8 +523,83 @@ class GFileAdapter:
 # ---------------------------------------------------------------------------
 #  IDS
 # ---------------------------------------------------------------------------
-#: How the IDS adapter forms the inductive component.
+#: How the IDS adapter forms the inductive component.  "residual" (the
+#: default, owner decision 2026-10-02): the parallel residual
+#: ``j_total - j_bootstrap - sum(driven)`` BY DEFINITION, with the source's
+#: ``j_ohmic`` compared against it and stamped as a cross-check (no
+#: threshold, no warning).  "j_ohmic": the source's, warning above the
+#: tolerance below.  "auto": ``j_ohmic`` unless the split misses by more
+#: than that tolerance, then the residual with a warning.
 IDS_INDUCTIVE_CHOICES = ("auto", "j_ohmic", "residual")
+#: The default of :class:`IdsAdapter` and of
+#: ``GenerationConfig.engine_ids_inductive``.  Evidence (validation, all
+#: slices of two IDS source families): on self-consistent sources residual
+#: and ``j_ohmic`` are indistinguishable (|dl_i| <= 1.8e-3); where the
+#: source's own split is locally inconsistent the residual is closer to the
+#: source's <j_phi>.
+IDS_INDUCTIVE_DEFAULT = "residual"
+#: Net mismatch ``j_ohmic - (j_total - j_bootstrap - sum(driven))`` as a
+#: fraction of the total current above which ``inductive="auto"`` takes the
+#: residual instead of ``j_ohmic`` and ``inductive="j_ohmic"`` warns (the
+#: number is stamped either way; it plays no role under "residual").
+#: Owner-set 2026-10-02: a source whose current split is self-consistent
+#: agrees to <= 0.8 %; the one seen inconsistent (a slice on a sawtooth
+#: step of the source's own model) missed by 7 %.
+IDS_INDUCTIVE_MISMATCH_TOL = 0.02
+#: IMAS ``core_sources`` identifier indices.  Every source carrying a
+#: ``j_parallel`` that is neither ohmic nor bootstrap is a DRIVEN current
+#: and is held fixed: beams under "nbi", ec / lh / ic under "rf", anything
+#: else (e.g. a model's sawtooth redistribution entry) under "other".
+IDS_OHMIC_SOURCE_INDEX = 7
+IDS_BOOTSTRAP_SOURCE_INDEX = 13
+IDS_RF_SOURCE_INDICES = (3, 4, 5)       # ec, lh, ic
+
+
+def _ids_driven_currents(srcs, isrc, n, sgn):
+    """Sum the ``j_parallel`` of every driven ``core_sources`` entry at
+    index *isrc*, split into ``nbi`` / ``rf`` / ``other`` (positive frame),
+    plus the list of the entries that contributed."""
+    from .io.imas import NBI_SOURCE_INDEX
+    parts = {k: np.zeros(n) for k in ("nbi", "rf", "other")}
+    used = []
+    for s in srcs.get("source", []):
+        idn = s.get("identifier", {}) or {}
+        idx = idn.get("index")
+        if idx in (IDS_OHMIC_SOURCE_INDEX, IDS_BOOTSTRAP_SOURCE_INDEX):
+            continue
+        pr = s.get("profiles_1d", [])
+        if not pr:
+            continue
+        q = pr[isrc if len(pr) > isrc else 0]
+        if q.get("j_parallel") is None:
+            continue
+        jp = np.asarray(q["j_parallel"], dtype=float)
+        if jp.shape != (n,) or not np.all(np.isfinite(jp)):
+            raise EngineInputRefused(
+                f"IDS adapter: core_sources {idn.get('name')!r} (index "
+                f"{idx}) j_parallel is malformed or not finite")
+        if not np.any(jp != 0.0):
+            continue
+        kind = ("nbi" if idx == NBI_SOURCE_INDEX else
+                "rf" if idx in IDS_RF_SOURCE_INDICES else "other")
+        parts[kind] = parts[kind] + sgn * jp
+        used.append(dict(name=idn.get("name"), index=idx, part=kind))
+    return parts, used
+
+
+def _ids_inductive_mismatch(j_ohm, residual, j_tot, rho):
+    """``j_ohmic`` against the parallel residual: the NET difference as a
+    fraction of the total current (flux-area proxy ``int j rho drho`` on the
+    toroidal-flux radius, so no equilibrium geometry is needed at read
+    time) and the rms of the difference over the rms of ``j_total``."""
+    _trapz = getattr(np, "trapezoid", None) or np.trapz
+    d = j_ohm - residual
+    tot = _trapz(j_tot * rho, rho)
+    net = (_trapz(d * rho, rho) / tot) if tot != 0.0 else float("nan")
+    rms_t = float(np.sqrt(np.mean(j_tot ** 2)))
+    rms = (float(np.sqrt(np.mean(d ** 2))) / rms_t if rms_t > 0.0
+           else float("nan"))
+    return float(net), float(rms)
 
 
 def _ids_b0(dd, ie, ic):
@@ -555,22 +631,27 @@ class IdsAdapter:
 
     kind = "ids"
 
-    def __init__(self, source, config, baseline, *, inductive="auto",
-                 psi_pad=1e-3):
+    def __init__(self, source, config, baseline, *,
+                 inductive=IDS_INDUCTIVE_DEFAULT,
+                 psi_pad=1e-3, inductive_tol=IDS_INDUCTIVE_MISMATCH_TOL):
         if inductive not in IDS_INDUCTIVE_CHOICES:
             raise ValueError(f"IdsAdapter: inductive must be one of "
                              f"{IDS_INDUCTIVE_CHOICES}, got {inductive!r}")
+        if not (np.isfinite(inductive_tol) and inductive_tol >= 0.0):
+            raise ValueError("IdsAdapter: inductive_tol must be a finite "
+                             f"non-negative fraction, got {inductive_tol!r}")
         self.source = source
         self.config = config
         self.bl = baseline
         self.inductive = inductive
+        self.inductive_tol = float(inductive_tol)
         self.psi_pad = float(psi_pad)
         self._c = None
 
     def read(self) -> EngineContract:
         import json
-        from .io.imas import (NBI_SOURCE_INDEX, _nearest_index,
-                              read_imas_geometry, source_current_sign)
+        from .io.imas import (_nearest_index, read_imas_geometry,
+                              source_current_sign)
         from .physics import ELEMENTARY_CHARGE as _EC, impurity_pressure
         from .utils import STRUCTURED_PRESETS, pchip_interp, q0_gate_admits
         src, cfg, bl = self.source, self.config, self.bl
@@ -652,35 +733,101 @@ class IdsAdapter:
         j_ohm = _cur("j_ohmic")
         j_boot = _cur("j_bootstrap")
         j_tot = _cur("j_total")
-        # beam-source parallel currents (the reader's j_NBI, before its
-        # toroidal conversion)
+        # driven parallel currents: EVERY core_sources entry with a
+        # j_parallel that is neither ohmic nor bootstrap (beams -> "nbi",
+        # the reader's j_NBI before its toroidal conversion; ec/lh/ic ->
+        # "rf"; anything else -> "other"), all held fixed
         srcs = dd.get("core_sources", {})
         isrc = (_nearest_index(srcs["time"], T, "core_sources")
                 if srcs.get("time") else ic)
-        nbi = np.zeros(n)
-        for s in srcs.get("source", []):
-            if s.get("identifier", {}).get("index") == NBI_SOURCE_INDEX:
-                pr = s.get("profiles_1d", [])
-                if pr:
-                    idx = isrc if len(pr) > isrc else 0
-                    nbi = nbi + np.asarray(pr[idx]["j_parallel"], dtype=float)
-        nbi = sgn * nbi
+        fix_parts, driven_used = _ids_driven_currents(srcs, isrc, n, sgn)
+        nbi = fix_parts["nbi"]
+        driven = fix_parts["nbi"] + fix_parts["rf"] + fix_parts["other"]
+        # The inductive current is the parallel residual j_total -
+        # j_bootstrap - driven BY DEFINITION ("residual", the default); the
+        # source's j_ohmic is compared against it and the numbers stamped,
+        # a cross-check with no threshold.  The explicit "auto" / "j_ohmic"
+        # use j_ohmic and keep the tolerance: a net mismatch above
+        # inductive_tol (fraction of the total current) means the source's
+        # components are not mutually consistent at this slice (seen: one
+        # slice on a sawtooth step of the source's model, where j_ohmic sat
+        # 8 points off its neighbours while j_bootstrap did not); "auto" then
+        # takes the residual, loudly.  Nothing in the source is altered, and
+        # the numbers are stamped whichever inductive is used.
+        has_ohm = j_ohm is not None and np.any(j_ohm != 0.0)
+        can_resid = j_tot is not None and j_boot is not None
+        residual = (j_tot - j_boot - driven) if can_resid else None
+        consistency = dict(checked=bool(has_ohm and can_resid),
+                           tol=(None if self.inductive == "residual"
+                                else self.inductive_tol),
+                           net_frac=None, rms_frac=None, action="unchecked")
+        if consistency["checked"]:
+            _rho = cp["grid"].get("rho_tor_norm")
+            rho = (np.asarray(_rho, dtype=float) if _rho is not None
+                   else np.sqrt(psi_N))
+            if rho.shape != (n,) or not np.all(np.isfinite(rho)):
+                rho = np.sqrt(psi_N)
+            net, rms = _ids_inductive_mismatch(j_ohm, residual, j_tot, rho)
+            consistency.update(net_frac=net, rms_frac=rms)
         mode = self.inductive
+        if mode == "residual" and not can_resid:
+            missing = [k for k, a in (("j_total", j_tot),
+                                      ("j_bootstrap", j_boot)) if a is None]
+            raise EngineInputRefused(
+                "IDS adapter: inductive='residual' (the default: the "
+                "inductive current is j_total - j_bootstrap - driven by "
+                "definition) but the source carries no "
+                + " / ".join(missing) + "; "
+                + ("it does carry j_ohmic: set inductive='j_ohmic' "
+                   "(GenerationConfig.engine_ids_inductive='j_ohmic') to use "
+                   "the source's j_ohmic explicitly" if has_ohm else
+                   "it carries no j_ohmic either (inductive='j_ohmic' would "
+                   "need one), so no inductive current can be formed"))
         if mode == "auto":
-            mode = ("j_ohmic" if (j_ohm is not None and np.any(j_ohm != 0.0))
-                    else "residual")
+            mode = "j_ohmic" if has_ohm else "residual"
+            if (consistency["checked"] and np.isfinite(consistency["net_frac"])
+                    and abs(consistency["net_frac"]) > self.inductive_tol):
+                mode = "residual"
+                consistency["action"] = "fallback_to_residual"
+                import warnings
+                warnings.warn(
+                    "IDS adapter: the source's current split does not add "
+                    f"up at this slice: j_ohmic differs from j_total - "
+                    f"j_bootstrap - driven by {100 * consistency['net_frac']:+.2f} "
+                    f"% of the total current (rms {100 * consistency['rms_frac']:.2f} "
+                    f"% of j_total), above the {100 * self.inductive_tol:.1f} % "
+                    "tolerance; using the residual as the inductive current "
+                    "(inductive='j_ohmic' forces the source's j_ohmic).",
+                    UserWarning, stacklevel=2)
         if mode == "j_ohmic":
-            if j_ohm is None or not np.any(j_ohm != 0.0):
+            if not has_ohm:
                 raise EngineInputRefused("IDS adapter: inductive='j_ohmic' "
                                          "but the source carries no j_ohmic")
             ind = j_ohm
+            if consistency["action"] == "unchecked" and consistency["checked"]:
+                consistency["action"] = (
+                    "kept_j_ohmic" if abs(consistency["net_frac"])
+                    <= self.inductive_tol else "kept_j_ohmic_over_tol")
+                if consistency["action"] == "kept_j_ohmic_over_tol":
+                    import warnings
+                    warnings.warn(
+                        "IDS adapter: inductive='j_ohmic' kept although the "
+                        "source's current split misses by "
+                        f"{100 * consistency['net_frac']:+.2f} % of the total "
+                        f"current (tolerance {100 * self.inductive_tol:.1f} %)",
+                        UserWarning, stacklevel=2)
         else:
-            if j_tot is None or j_boot is None:
+            if not can_resid:
                 raise EngineInputRefused(
                     "IDS adapter: the source carries no j_ohmic and no "
                     "j_total / j_bootstrap to form the parallel residual; "
                     "refusing (no inductive current can be formed)")
-            ind = j_tot - j_boot - nbi
+            ind = residual
+            if (self.inductive == "residual"
+                    and consistency["action"] == "unchecked"
+                    and consistency["checked"]):
+                # the cross-check: stamped, no threshold, no warning
+                consistency["action"] = "residual_by_definition"
         # user-supplied driven currents are defined in the positive-Ip frame
         # (co-current positive) on both source paths, exactly as the reader
         # takes them: they are NOT multiplied by the source's factor (only
@@ -752,8 +899,8 @@ class IdsAdapter:
             pressure=p_th + p_imp + p_fast,
             pressure_parts=dict(thermal=p_th, impurity=p_imp, fast=p_fast,
                                 Z_imp=getattr(bl, "Z_imp", None)),
-            jB_ind=B0 * ind, jB_fix=B0 * nbi,
-            jB_fix_parts=dict(nbi=B0 * nbi, rf=np.zeros(n)),
+            jB_ind=B0 * ind, jB_fix=B0 * driven,
+            jB_fix_parts={k: B0 * v for k, v in fix_parts.items()},
             boundary=np.asarray(boundary, dtype=float),
             Ip=float(bl.Ip_target), rows=rows,
             signs=dict(current_sign=float(sgn),
@@ -768,11 +915,15 @@ class IdsAdapter:
             provenance=dict(
                 inductive=(f"{mode}: " + ("core_profiles j_ohmic"
                                           if mode == "j_ohmic" else
-                                          "j_total - j_bootstrap - NBI "
-                                          "j_parallel")
+                                          "j_total - j_bootstrap - driven "
+                                          "core_sources j_parallel")
                            + f" (IMAS <j.B>/B0) x |B0| = {B0:.6g} T "
                              f"(from {b0_from})"),
-                fixed="core_sources NBI j_parallel x |B0|, held fixed",
+                inductive_consistency=dict(consistency),
+                fixed=("core_sources j_parallel of every driven entry (not "
+                       "ohmic, not bootstrap) x |B0|, held fixed; parts nbi "
+                       "/ rf (ec, lh, ic) / other"),
+                driven_sources=list(driven_used),
                 pressure=("e (ne Te + ni Ti) + impurity + fast (no p_diff)"),
                 electron_charge="physics.ELEMENTARY_CHARGE",
                 kinetics_sigma=("resolved from the Baseline by "
@@ -798,7 +949,7 @@ class IdsAdapter:
             for k, v in self._user_fix_tor.items():
                 parts[k] = np.asarray(v, float) / kap
             c.jB_fix_parts = parts
-            c.jB_fix = parts["nbi"] + parts["rf"]
+            c.jB_fix = sum(np.asarray(v, float) for v in parts.values())
             c.provenance["fixed"] = ("FixedComponentsConfig toroidal parts "
                                      "converted with the anchor's "
                                      "F<1/R>/<B^2>")

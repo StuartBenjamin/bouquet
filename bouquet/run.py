@@ -720,6 +720,7 @@ class Bouquet:
             from .engine import prepare_engine_baseline
             _bl = prepare_engine_baseline(self)
             self._report_sigma_exceeds_profile(_bl)
+            self._remember_baseline_state()
             return _bl
 
         # the self-consistent bootstrap loop runs in the baseline too, so its
@@ -728,9 +729,11 @@ class Bouquet:
         self._check_jbs_loop_workflow(self.config.generation)
 
         # the two edge-pressure settings do not reach the solver's own
-        # bootstrap helper, which the non-loop routes call: say so, once
+        # bootstrap helper, which the non-loop routes call (it keeps the
+        # pre-change P' and axis target): say so, once, whenever the
+        # settings are not the pre-change ones -- the default included
         _edge = resolve_edge_pressure(self.config.generation)
-        if not _edge.is_default and not bool(getattr(
+        if not _edge.is_pre_change and not bool(getattr(
                 self.config.generation, "jbs_self_consistent", False)):
             print("[edge-pressure] NOTE: edge_pprime_pin="
                   f"{_edge.edge_pprime_pin}, separatrix_pressure="
@@ -801,7 +804,67 @@ class Bouquet:
         if self.baseline.reconstruction_metrics is not None:
             self._print_reconstruction_summary()
         self._report_sigma_exceeds_profile(self.baseline)
+        self._remember_baseline_state()
         return self.baseline
+
+    def _remember_baseline_state(self) -> None:
+        """Fingerprint the solver state :meth:`prepare_baseline` leaves (a
+        copy of ``mygs.get_psi(False)``), so :meth:`save_baseline_eqdsk` can
+        refuse once a later solve has moved it.  ``None`` when it cannot be
+        read."""
+        import numpy as np
+        self._baseline_psi = None
+        try:
+            if self.mygs is not None:
+                self._baseline_psi = np.array(self.mygs.get_psi(False),
+                                              dtype=float, copy=True)
+        except Exception:
+            self._baseline_psi = None
+
+    def save_baseline_eqdsk(self, filename, *, nr=257, nz=257,
+                            truncate_eq=True, lcfs_pad=None):
+        """Write the RECONSTRUCTION's own equilibrium -- the live solver
+        state :meth:`prepare_baseline` left -- as a g-file carrying the FULL
+        pressure, as every g-file bouquet writes does.
+
+        ``PRES`` is the solver's pressure (zero at ``psi_N = 1``) plus this
+        baseline's own separatrix pressure, ``Baseline.edge_pressure[
+        "p_sep_applied"]`` (:func:`bouquet.edge_pressure.delivered_p_sep`:
+        ``p_sep`` under ``separatrix_pressure="offset"``, 0 under
+        ``"legacy"``, where the call is exactly a bare ``save_eqdsk``);
+        ``PPRIME`` is unchanged.  The grid, padding (``lcfs_pad`` defaults
+        to ``source.psi_pad``) and truncation are those of the archive's
+        ``_baseline`` g-file written by :meth:`generate`, so the two carry
+        the same pressure frame.  A bare ``mygs.save_eqdsk`` writes the
+        solver frame and does NOT.
+
+        Refuses without a baseline, and once the solver no longer holds the
+        state :meth:`prepare_baseline` left (:meth:`generate` or any later
+        solve moves it; the archive's ``_baseline`` g-file is then the
+        delivered one).  Returns *filename*."""
+        import numpy as np
+        from .edge_pressure import delivered_p_sep, save_full_pressure_eqdsk
+        if self.baseline is None or self.mygs is None:
+            raise RuntimeError("save_baseline_eqdsk: no baseline on a live "
+                               "solver; call prepare_baseline() first")
+        p_sep = delivered_p_sep(getattr(self.baseline, "edge_pressure", None))
+        snap = getattr(self, "_baseline_psi", None)
+        try:
+            now = np.asarray(self.mygs.get_psi(False), dtype=float)
+        except Exception:
+            now = None
+        if (snap is None or now is None or now.shape != snap.shape
+                or not np.array_equal(now, snap)):
+            raise RuntimeError(
+                "save_baseline_eqdsk: the solver no longer holds the state "
+                "prepare_baseline() left (a later solve -- generate(), a "
+                "sigma0 check -- moved it); call prepare_baseline() again, "
+                "or use the archive's _baseline g-file")
+        if lcfs_pad is None:
+            lcfs_pad = float(getattr(self.config.source, "psi_pad", 1e-3))
+        save_full_pressure_eqdsk(self.mygs, filename, p_sep, nr=nr, nz=nz,
+                                 truncate_eq=truncate_eq, lcfs_pad=lcfs_pad)
+        return filename
 
     def _report_sigma_exceeds_profile(self, bl) -> None:
         """One line at baseline time when an input kinetic sigma exceeds the

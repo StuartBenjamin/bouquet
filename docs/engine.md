@@ -31,7 +31,7 @@ the toy and a TokaMaker stand-in over it), `tests/test_engine_draws_legacy_ast.p
 
 ```
  g-file adapter                         IDS adapter
- <j.B>_in - Redl(anchor), smoothed      |B0| j_ohmic, beam j_parallel fixed
+ <j.B>_in - Redl(anchor), smoothed      |B0| (j_tot - j_BS - driven), driven fixed
  rows: Ip, l_i(3) hard, (q0)            rows: Ip, li_3 soft, (q0), (MSE)
             \                               /
              v                             v
@@ -66,8 +66,8 @@ the toy and a TokaMaker stand-in over it), `tests/test_engine_draws_legacy_ast.p
 |---|---|---|
 | kinetics n_e, T_e, n_i, T_i, Z_eff | p-file / IDA, PCHIP onto the g-file ψ_N (as the legacy reconstruction) | core_profiles (or the IDA hybrid), as `read_imas_baseline` resolves them |
 | pressure | thermal + impurity + fast (fixed) | thermal + impurity + fast, **no `p_diff`** |
-| inductive (parallel) | `<j.B>_in = F p' + F'<B^2>/mu0` on the g-file's own traced surfaces (identity I0), minus Redl `<j.B>` on the anchor, minus the fixed parts; smoothed with a verbatim copy of `fit_inductive_profile`'s basis (spline + PCHIP, zero edge anchor, ≥ 0), **no amplitude search** | `|B0| j_ohmic` (IMAS `<j.B>/B0`); when the source has none, the parallel residual `j_total − j_bootstrap − Σ driven`; refused when neither exists |
-| fixed driven (parallel) | user `j_NBI` / `j_RF` (toroidal inputs), converted with the anchor's `F<1/R>/<B^2>` | core_sources beam `j_parallel` × `|B0|`, held fixed (a user override is converted as on the left) |
+| inductive (parallel) | `<j.B>_in = F p' + F'<B^2>/mu0` on the g-file's own traced surfaces (identity I0), minus Redl `<j.B>` on the anchor, minus the fixed parts; smoothed with a verbatim copy of `fit_inductive_profile`'s basis (spline + PCHIP, zero edge anchor, ≥ 0), **no amplitude search** | **the parallel residual by definition** (owner decision, 2026-10-02): `|B0| (j_total − j_bootstrap − Σ driven)` (IMAS `<j.B>/B0`), every driven entry the one held fixed below. The source's `j_ohmic` is a **cross-check**, not a choice: it is compared with the residual and the net (fraction of the total current) and rms (fraction of rms `j_total`) differences are stamped in `provenance["inductive_consistency"]` (action `"residual_by_definition"`; `"unchecked"` when the source has no `j_ohmic`), with no threshold and no warning. A source without `j_total` or `j_bootstrap` is refused (`inductive="j_ohmic"` uses its `j_ohmic` explicitly; there is no silent fallback). Evidence: on self-consistent sources the residual and `j_ohmic` are indistinguishable (`|Δl_i| ≤ 1.8e-3`); on sources whose own split is locally inconsistent the residual is closer to the source's `<j_phi>`. Explicit options (`IdsAdapter(inductive=...)`, passed by the engine from `GenerationConfig.engine_ids_inductive`, default `"residual"`): `"j_ohmic"` takes the source's, warning when the net mismatch exceeds `IdsAdapter(inductive_tol=0.02)` (2 % of the total current, owner-set); `"auto"` takes `j_ohmic` unless it is absent or misses by more than that tolerance, then the residual with a warning. Nothing in the source is altered |
+| fixed driven (parallel) | user `j_NBI` / `j_RF` (toroidal inputs), converted with the anchor's `F<1/R>/<B^2>` | **every** core_sources entry carrying a `j_parallel` that is neither ohmic (7) nor bootstrap (13), × `|B0|`, held fixed, by part: beams → `nbi`, ec / lh / ic → `rf`, anything else (e.g. a model's sawteeth entry) → `other` (`provenance["driven_sources"]` lists them; a user override is converted as on the left). The delivered split reports `other` inside `j_RF` |
 | boundary | g-file LCFS | equilibrium boundary outline |
 | rows | Ip (exact); l_i(3) = the reader's `li(2)` key, **hard**, absolute tolerance 1e-3; q0 (optional) | Ip (soft, σ = 0.5 % of Ip); li_3 (soft, σ = 0.04); q0 (optional); MSE chords (optional) |
 | signs | positive frame: `sign(Ip)`, `|F|`; a file whose `<j_phi>` disagrees in sign with its Ip is refused (wrong COCOS) | `source_current_sign`, `|B0|`; `b0_sign` recorded |
@@ -135,7 +135,7 @@ through its `extra` hook and the existing `AxisRowPin`.
 | row | model in the closure (on `G_k`) | measurement on `E_k+1` | update |
 |---|---|---|---|
 | Ip | `Ip_fsa_weights` affine exact measure | the solver imposes Ip; `c` recorded | — |
-| l_i | `structured_li_model` (li_3) | `li_achieved` | `d_k = (1−ω) d_k−1 + ω [l_i(E_k+1) − l_i_model(js_k; G_k+1)]`; the closure's target is `T − d` |
+| l_i | `structured_li_model` (li_3) | `li_achieved` | `d_k = (1−rω) d_k−1 + rω [l_i(E_k+1) − l_i_model(js_k; G_k+1)]`, `r = engine_li_row_relaxation` (default 1); the closure's target is `T − d` |
 | q0 | the axis-current row | q at the row radius | `AxisRowPin`: `j_ref0 ← j0_solved · q0 / q0_target` |
 | MSE | `tan γ ≈ tg0 + J (x − x0)` | `mse_tan_gamma` of the solved field (`mse_field_at` -> `(B, found)`) | offset refreshed from every solve; `J` by finite differences once at convergence, then Broyden (`"fd_broyden"`) or held (`"fd_chord"`) |
 
@@ -161,6 +161,18 @@ the delivered l_i is on the target. On a **soft** row the fit weighs
 `(l_i − T)/σ` (the `LiRowPin` soft semantics). The l_i discrepancy is taken
 against the model of the current that was actually SOLVED, evaluated on the
 NEW geometry -- see "Deviations" below.
+
+**Under-relaxing the l_i row (`engine_li_row_relaxation`, default 1.0).**
+The update above moves `d` toward the measured discrepancy by `rω` per pass
+(the first update, from `d = 0`, by `r`). Linearised, the row error obeys
+`e_k+1 = (1 − G) e_k` with `G = rω·c·(1 + s)` (`c`: the fraction of the row
+error the update measures on the new geometry; `1 + s`: how far the delivered
+l_i moves per unit move of the model's target), so a row whose `G` exceeds 2
+oscillates with a growing period-2 amplitude. `r < 1` scales `G` by `r`. It
+changes the path only: the fixed point (`d` = the measured discrepancy), the
+targets, and every tolerance, criterion and ceiling are unchanged, and
+`r = 1` is the update before the setting existed, bit for bit. Reconstruction
+only; the q0 row (`AxisRowPin`) and the MSE chords are not affected.
 
 The MSE linearisation point is the coefficient vector whose current was
 solved: with the current relaxed it is the same β-blend of the closure's
@@ -465,15 +477,31 @@ archived draw's `homotopy.cap_events`, and summarised in one printed
 The backend builds every `P'` profile and axis target through one helper
 (`bouquet/edge_pressure.py`; the physics is in
 [physics-notes.md](physics-notes.md#the-pressure-handed-to-the-solver-separatrix-pressure-and-the-edge-p-pin)).
-Two `GenerationConfig` settings, shared with the legacy paths and both
-defaulting to the behaviour before they existed:
+Two `GenerationConfig` settings, shared with the legacy paths:
 
-- `edge_pprime_pin` (default `True`): the last `P'` node is zeroed. `False`
-  keeps the profile's own derivative at `psi_N = 1`.
-- `separatrix_pressure` (default `"legacy"`): the axis target is the full
-  axis pressure; with a non-zero `p_sep` the solver inflates `P'` by
-  `p_axis / (p_axis - p_sep)`. `"offset"` passes `p_axis - p_sep` and adds
-  `p_sep` back at reporting and delivery.
+- `edge_pprime_pin` (default `True`, the behaviour before the setting): the
+  last `P'` node is zeroed. `False` keeps the profile's own derivative at
+  `psi_N = 1`.
+- `separatrix_pressure` (default `"offset"` since 2026-10-02; `"legacy"` is
+  the behaviour before the setting): `"offset"` passes `p_axis - p_sep` as
+  the axis target and adds `p_sep` back at reporting and delivery.
+  `"legacy"` passes the full axis pressure; with a non-zero `p_sep` the
+  solver then inflates `P'` by `p_axis / (p_axis - p_sep)`.
+
+**The default changed (owner-approved physics change, 2026-10-02).**
+`separatrix_pressure` moved from `"legacy"` to `"offset"`. On real g-file
+and IDS cases (both engines' paths, pin on), `"offset"` brought the
+full-frame `beta_N` and `W_MHD` closer to the input on every comparable
+g-file case, by 1.4-8 points (median 3.5), and by about 0.5 points on IDS
+slices; every case converged, with the same passes, solves and wall time,
+and `l_i`, `q` and the current distances unchanged. What it changes for an
+existing run whose solve pressure is not zero at `psi_N = 1`: `P'` in the
+solve is scaled by `(p_axis - p_sep) / p_axis`; the reported pressure,
+`beta` and `W_MHD` (and the delivered g-files' `PRES`) move toward the
+input's full-pressure values. With `p_sep = 0` nothing changes. Set
+`separatrix_pressure="legacy"` to reproduce the pre-change numbers (bit for
+bit, proven by the frozen-copy tests); a stored config that predates the
+setting reloads with `"legacy"` and says so.
 
 How they meet the engine:
 
@@ -500,11 +528,21 @@ How they meet the engine:
   own when nothing is added back). The reconstruction summary and the probe
   (`tests/probes/measure_engine.py`, `distance.pressure_frames`) compare
   each frame with the input's same-definition quantity.
-- **Delivery.** Under `"offset"` the baseline g-file and every draw's g-file
-  are written with that equilibrium's own `p_sep` as the boundary pressure.
+- **Delivery.** Under `"offset"` EVERY g-file bouquet writes carries the
+  full pressure: the archive's `_baseline` g-file and every draw's g-file
+  (`generate()`), and the reconstruction's own g-file written with
+  `Bouquet.save_baseline_eqdsk(path)` (the live state `prepare_baseline()`
+  left; refused once a later solve has moved it), each with that
+  equilibrium's own `p_sep` (`edge_pressure["p_sep_applied"]`) as the
+  boundary pressure; `PPRIME` is unchanged. The reconstruction's g-file and
+  the archive baseline's are the same save call, so for the same state they
+  carry the same `PRES`. A bare `mygs.save_eqdsk(...)` writes the SOLVER
+  frame (`PRES` zero at the boundary, lower by `p_sep` everywhere): do not
+  use it to deliver an equilibrium.
 
-Both settings change the physics when moved off their defaults; the
-measurement is in the change summary.
+Both settings change the physics when moved (and `separatrix_pressure`
+did, when its default changed); the measurements are in the change
+summary.
 
 ## Cost
 

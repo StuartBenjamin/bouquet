@@ -1199,12 +1199,46 @@ class GenerationConfig:
     # per pass, part of the state a draw inherits).  Default off; the default
     # is to be decided after the solver's jphi-linterp defect is fixed.
     engine_delivery_correction: bool = False
-    # How the MSE Jacobian is formed: "fd_broyden" (finite differences once
-    # at convergence, then Broyden updates every pass; the design note's
-    # recommendation) or "fd_chord" (the same finite differences, held
-    # fixed -- the legacy chord stage's treatment).  Either way the
-    # linearisation offset is refreshed from every solve.
-    engine_mse_jacobian: str = "fd_broyden"
+    # How the MSE Jacobian is formed: "fd_chord" (finite differences once
+    # at convergence, held fixed -- the legacy chord stage's treatment) or
+    # "fd_broyden" (the same finite differences, then Broyden updates every
+    # pass; the design note's recommendation).  Either way the linearisation
+    # offset is refreshed from every solve.  Default "fd_broyden" ->
+    # "fd_chord" 2026-10-02 (owner-approved): on the second MSE pass the
+    # coefficients barely move while tan-gamma still changes with the
+    # relaxing bootstrap and geometry, so the rank-one update shifted the
+    # Jacobian by 17-32 % and the loop spent 4-5 passes recovering; the
+    # fixed Jacobian converged every MSE case (Broyden 8 of 10), was never
+    # slower, agreed within |dl_i| <= 5e-4 and sat 3-5 % from a fresh
+    # Jacobian against 16.5 %.
+    engine_mse_jacobian: str = "fd_chord"
+    # Under-relaxation r of the l_i row's discrepancy update between passes
+    # (the reconstruction only; draws carry no l_i row):
+    #   d_k = (1 - r w) d_k-1 + r w [l_i(E_k+1) - l_i_model(js_k; G_k+1)],
+    # w the loop's bootstrap omega (the first update, from d = 0, takes
+    # w = 1).  0 < r <= 1.  1.0 (default) is the update before the setting
+    # existed, bit for bit.  r < 1 shrinks the row's per-pass gain by r: a
+    # solver-side remedy for a row that overshoots (a period-2 oscillation);
+    # it changes the PATH only -- no tolerance, criterion, ceiling or target
+    # moves, and the fixed point (d = the measured discrepancy) is the same.
+    # The q0 row (AxisRowPin) and the MSE chords (Broyden) are not affected.
+    engine_li_row_relaxation: float = 1.0
+    # How the IDS adapter forms the inductive current (IDS sources only;
+    # bouquet.adapters.IdsAdapter's ``inductive``).  "residual" (default,
+    # owner decision 2026-10-02): the inductive current IS the parallel
+    # residual j_total - j_bootstrap - sum(driven) by definition; the
+    # source's j_ohmic is a cross-check, compared and stamped (no threshold,
+    # no warning); a source without j_total / j_bootstrap is refused.
+    # Evidence: on self-consistent sources residual and j_ohmic are
+    # indistinguishable (|dl_i| <= 1.8e-3); on locally inconsistent ones the
+    # residual is closer to the source's own <j_phi>.  Explicit options:
+    # "j_ohmic" (the source's, warning when it misses the residual by more
+    # than the adapter's 2 % tolerance) and "auto" (j_ohmic, or the residual
+    # with a warning when j_ohmic is absent or misses by more than 2 %).
+    # The consistency numbers are stamped in the contract's provenance
+    # whichever is used.  A non-default value is refused with a g-file
+    # source (it would have no effect there).
+    engine_ids_inductive: str = "residual"
     # --- the draws on the engine (Stage 3; bouquet.engine_draws) ------------
     # A draw holds the reconstruction's coefficients x* and closes ONLY the
     # Ip row (a scalar amplitude on the inductive, in the exact measure).
@@ -1259,8 +1293,11 @@ class GenerationConfig:
     # p_axis - p_sep and adds p_sep back wherever pressure, beta or W_MHD is
     # reported or delivered (records carry both frames; written g-files
     # carry the full pressure).  A PHYSICS change when p_sep != 0: P' moves
-    # by the factor (p_axis - p_sep)/p_axis.
-    separatrix_pressure: str = "legacy"
+    # by the factor (p_axis - p_sep)/p_axis.  Default "legacy" -> "offset"
+    # 2026-10-02 (owner-approved physics change: on real cases it narrowed the
+    # full-frame beta_N / W_MHD gap to the input, l_i / q / cost unchanged);
+    # "legacy" restores the pre-change numbers.
+    separatrix_pressure: str = "offset"
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single
@@ -1790,6 +1827,24 @@ class BouquetConfig:
                 "the dict/JSON, or set cfg.generation.jbs_self_consistent = "
                 "True after loading.", UserWarning, stacklevel=2)
             gend["jbs_self_consistent"] = False
+        if "separatrix_pressure" not in gend:
+            # The same for the separatrix-pressure setting, whose default
+            # moved "legacy" -> "offset" (2026-10-02): a stored config that
+            # predates the setting was produced with the full axis pressure
+            # as the solver's target, so it is rebuilt with "legacy" and
+            # replays what it recorded.  to_dict() always writes the field.
+            import warnings
+            warnings.warn(
+                "config has no generation.separatrix_pressure (it predates "
+                "the setting): loading it with separatrix_pressure='legacy', "
+                "the behaviour it was produced with, so it reproduces its old "
+                "results.  The current default is 'offset' (p_sep removed "
+                "from the solver's axis target and added back in every "
+                "reported pressure, beta and W_MHD); to use it, add "
+                '"separatrix_pressure": "offset" to the "generation" section '
+                "or set cfg.generation.separatrix_pressure = 'offset' after "
+                "loading.", UserWarning, stacklevel=2)
+            gend["separatrix_pressure"] = "legacy"
         return cls(
             source=_build(SrcCls, srcd),
             solver=_build(SolverConfig, d["solver"]),
