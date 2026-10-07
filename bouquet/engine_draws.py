@@ -863,7 +863,8 @@ def run_draw(ctx, backend, inputs, *, label=None, coil_guard=None,
     state only to its own convergence (measured on the g-file example:
     the refresh step r_j = 1.9e-5, against jbs_rtol_j = 1e-3).
 
-    Returns a dict: ``record`` (the JSON-safe draw record), ``jbs_used``,
+    Returns a dict: ``record`` (the JSON-safe draw record), ``jbs_used``
+    (the bootstrap the delivered solve carries: the loop's ``jbs_solved``),
     ``passes`` (the :class:`_DrawPasses` of the loop, the post-homotopy stage
     continues it), ``inputs``.  Raises what the loop raises
     (:class:`~bouquet.jbs_loop.JBSNotConverged` /
@@ -943,7 +944,11 @@ def _finish(ctx, backend, inputs, dp, res, m_fin, pin, label):
     from .engine import conversion_factor
     from .jbs_loop import check_delivered, jsonable
     last = dp.last
-    jbs_used = np.asarray(res["jbs_used"], dtype=float)
+    # the bootstrap the delivered (last, relaxed) solve CARRIES -- what the
+    # loop's r_j was measured against (jbs_loop "Residuals"); the iterate
+    # when the last pass did not blend
+    jbs_used = np.asarray(res.get("jbs_solved", res["jbs_used"]),
+                          dtype=float)
     meas = res["meas_final"]
     chk = check_delivered(res["J_final"], jbs_used, meas["w"], meas["x"],
                           float(ctx.c.Ip), ctx.loop)
@@ -1090,7 +1095,8 @@ def post_homotopy(ctx, backend, draw, settings, *, coil_guard=None,
     last = dp.last
     j_bs = np.asarray(last["parts"]["bs"], dtype=float) * (
         1.0 + float(last["amp"].get("d_bs", 0.0)))
-    draw["jbs_used"] = np.asarray(res["jbs_used"], dtype=float)
+    draw["jbs_used"] = np.asarray(res.get("jbs_solved", res["jbs_used"]),
+                                  dtype=float)
     draw["passes_post_homotopy"] = dp
     return rec, draw["jbs_used"], j_bs, np.asarray(last["jint"], dtype=float)
 

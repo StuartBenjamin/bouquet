@@ -69,6 +69,12 @@ _PRE_KEYS = sorted([
     "wall_s"])
 _PRE_FINAL = sorted(["I_BS", "current_gap", "current_residual_unrelaxed",
                      "dl_i", "dq0", "r_I", "r_j"])
+#: what a loop that relaxes the current at beta < 1 adds since 2026-10-06
+#: (r_j / r_I measured against the bootstrap the pass SOLVED; the iterate
+#: residual kept beside it) -- the two-state reference runs at beta = 0.7
+_SOLVED_KEYS = ["I_BS_used_iterate", "bootstrap_blended",
+                "r_I_iterate", "r_j_iterate", "residual_definition"]
+_SOLVED_FINAL = ["r_I_iterate", "r_j_iterate"]
 
 
 def _ref_affine(**kw):
@@ -100,8 +106,11 @@ def test_flag_off_is_the_kernel_without_the_pin(run):
     assert np.array_equal(a["J_final"], b["J_final"])
     r = a["record"]
     # no key of the pin leaks into a pin-less record
-    assert sorted(r.keys()) == _PRE_KEYS
-    assert sorted(r["final"].keys()) == _PRE_FINAL
+    relaxed = run is _ref_two_state
+    assert sorted(r.keys()) == sorted(_PRE_KEYS
+                                      + (_SOLVED_KEYS if relaxed else []))
+    assert sorted(r["final"].keys()) == sorted(
+        _PRE_FINAL + (_SOLVED_FINAL if relaxed else []))
     assert sorted(r["criteria"]) == ["dl_i", "dq0", "r_I", "r_j"]
     assert "q0-q0_target" not in flag_reason(r)
 
@@ -122,14 +131,20 @@ def test_flag_off_reproduces_the_pre_change_kernel_numbers():
         6.562500098894475e-09], rtol=1e-9, atol=0)
     o = _ref_two_state()
     r = o["record"]
-    assert (r["n_passes"], r["converged"]) == (8, True)
-    np.testing.assert_allclose(r["r_j"], [
+    # beta = 0.7: since 2026-10-06 r_j is measured against the bootstrap
+    # the pass SOLVED.  The PATH is unchanged -- the residual against the
+    # iterate (the pre-pin kernel's r_j, frozen below) is recorded as
+    # r_j_iterate and is the same on the passes both take -- but the
+    # solved state needs one more pass to meet the tolerances (it met them
+    # on the iterate at pass 8 only).
+    assert (r["n_passes"], r["converged"]) == (9, True)
+    np.testing.assert_allclose(r["r_j_iterate"][:8], [
         0.36894014841400047, 0.15704589064415098, 0.043629647034653746,
         0.013611487326422986, 0.0041066677460088455, 0.0012506097201954445,
         0.0003798751853432873, 0.00011547028381639267], rtol=1e-12, atol=0)
-    np.testing.assert_allclose(r["li"][-1], 0.6209078828084782, rtol=1e-12)
-    np.testing.assert_allclose(float(np.sum(o["jbs_used"])),
-                               6738732.27363126, rtol=1e-12)
+    np.testing.assert_allclose(r["li"][7], 0.6209078828084782, rtol=1e-12)
+    assert r["r_j"][-1] <= 1e-3 and r["r_j"][-2] <= 1e-3
+    assert r["r_j"][7] > r["r_j_iterate"][7]       # the solved state lags
 
 
 # ---------------------------------------------------------------------------

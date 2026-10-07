@@ -8,6 +8,14 @@ kernel body is frozen: the helpers it calls are imported from the live module
 (the hook commit changed none of them), so the comparison isolates exactly the
 code the hook touched.  The one change to the copied body is its relative
 ``from .physics import`` made absolute.  Do not edit.
+
+2026-10-06 (the ONE later edit, applied to keep the comparison isolating its
+flag): the kernel-wide change "r_j / r_I measured against the bootstrap the
+pass SOLVED" (``bouquet.jbs_loop``, docstring "Residuals") is applied here
+exactly as in the live kernel -- the blended-bootstrap ``jbs_solved``, the
+iterate residual kept as ``r_j_iterate`` / ``r_I_iterate`` on a loop that
+relaxes the current at beta < 1, the omega schedule on the iterate
+residual, ``jbs_solved`` returned.  Every other line is as frozen.
 """
 from __future__ import annotations
 
@@ -23,7 +31,8 @@ from bouquet.jbs_loop import (JBS_RELAX_FLOOR, JBS_REQUIRED_CONSECUTIVE,
                               _finite_or_none, _relative_difference,
                               _step_takes_relax, criteria_timeline,
                               oft_build_info, profile_residuals,
-                              tolerances_record)
+                              tolerances_record,
+                              RESIDUAL_SOLVED_DEFINITION)
 
 
 def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
@@ -145,6 +154,12 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
             "recorded only, NOT a convergence criterion"),
         relax_halve_on=int(halve_on), omega_halved_at_pass=[],
     )
+    track_solved = bool(takes_relax and beta < 1.0)
+    if track_solved:
+        rec.update(
+            residual_definition=RESIDUAL_SOLVED_DEFINITION,
+            r_j_iterate=[], r_I_iterate=[], I_BS_used_iterate=[],
+            bootstrap_blended=[])
     try:
         from bouquet.physics import EVALUATE_JBS_VERSION
         rec["evaluate_jBS_version"] = EVALUATE_JBS_VERSION
@@ -207,6 +222,8 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
     if not np.all(np.isfinite(jbs)):
         _nonfinite(-1, "the initial bootstrap guess jbs0", jbs,
                    (meas0 or {}).get("x"))
+    jbs_solved_base = None
+    jbs_solved = jbs
     prev = dict(meas0 or {})
     streak = 0
     growth_at_floor = 0
@@ -231,7 +248,15 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         if not np.all(np.isfinite(J)):
             rec["n_passes"] = k + 1
             _nonfinite(k, "the evaluated bootstrap J", J, meas.get("x"))
-        res = profile_residuals(J, jbs, meas["w"], meas["x"], Ip)
+        _relaxed_now = bool(relaxer is not None and relaxer.called)
+        _bs_blended = bool(_relaxed_now and relaxer.last_blended
+                           and jbs_solved_base is not None
+                           and jbs_solved_base.shape == jbs.shape)
+        jbs_solved = ((1.0 - beta) * jbs_solved_base + beta * jbs
+                      if _bs_blended else jbs)
+        res_it = profile_residuals(J, jbs, meas["w"], meas["x"], Ip)
+        res = (profile_residuals(J, jbs_solved, meas["w"], meas["x"], Ip)
+               if _bs_blended else res_it)
         li_new = _finite_or_none(meas.get("li"))
         q0_new = _finite_or_none(meas.get("q0"))
         li_old = _finite_or_none(prev.get("li"))
@@ -258,6 +283,8 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
             _gap, _bl = relaxer.gap(meas.get("w"), meas.get("x"))
             _unrel = relaxer.unrelaxed_residual(meas.get("w"), meas.get("x"))
             relaxer.commit()
+            if _relaxed_now:
+                jbs_solved_base = np.asarray(jbs_solved, dtype=float).copy()
         else:
             _gap, _bl, _unrel = None, False, None
         _cres = None
@@ -302,6 +329,11 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         rec["current_gap"].append(_gap)
         rec["current_blended"].append(bool(_bl))
         rec["current_residual_unrelaxed"].append(_unrel)
+        if track_solved:
+            rec["r_j_iterate"].append(res_it["r_j"])
+            rec["r_I_iterate"].append(res_it["r_I"])
+            rec["I_BS_used_iterate"].append(res_it["I_BS_used"])
+            rec["bootstrap_blended"].append(_bs_blended)
         rec["n_passes"] = k + 1
         entry = dict(k=k, ok=ok, dl_i=dl_i, dq0=dq0,
                      omega_used=omega_used_for_current, **res)
@@ -316,6 +348,9 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
               + f" I_BS={res['I_BS'] / 1e3:.2f} kA"
               + ("" if omega_used_for_current is None
                  else f" omega={omega_used_for_current:.3f}")
+              + ("" if not _bs_blended else
+                 f" (vs iterate r_j={res_it['r_j']:.3e} r_I="
+                 f"{res_it['r_I']:.3e}, record only)")
               + ("" if not _bl else f" |js-jc|/|jc|={_gap:.2e}")
               + ("" if (not _bl or _unrel is None or gate_cur)
                  else f" (unrelaxed {_unrel:.2e}, record only)")
@@ -365,7 +400,7 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         # ---- relaxation schedule: halve on SUSTAINED growth (halve_on
         # consecutive growing passes; 1 = every growth, the earlier
         # schedule), abort after n_abort growing passes at the floor --------
-        if r_j_prev is not None and res["r_j"] > r_j_prev:
+        if r_j_prev is not None and res_it["r_j"] > r_j_prev:
             if (omega_used_for_current is not None
                     and omega_used_for_current <= floor + 1e-15):
                 growth_at_floor += 1
@@ -381,7 +416,7 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         else:
             growth_at_floor = 0
             grow_streak = 0
-        r_j_prev = res["r_j"]
+        r_j_prev = res_it["r_j"]
         stop = (growth_at_floor >= n_abort) or (k == K - 1)
         if q0_pin is not None and not stop:
             # a further pass follows: move the axis row from the q0 this
@@ -418,6 +453,11 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         current_residual_unrelaxed=(rec["current_residual_unrelaxed"][-1]
                                     if rec["current_residual_unrelaxed"]
                                     else None))
+    if track_solved:
+        rec["final"]["r_j_iterate"] = (rec["r_j_iterate"][-1]
+                                       if rec["r_j_iterate"] else None)
+        rec["final"]["r_I_iterate"] = (rec["r_I_iterate"][-1]
+                                       if rec["r_I_iterate"] else None)
     if q0_pin is not None:
         rec["q0_pin"] = q0_pin.record()
         rec["final"]["q0_residual"] = rec["q0_pin"]["final_q0_residual"]
@@ -430,6 +470,7 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         rec["criteria_timeline"] = criteria_timeline(rec)
         rec["last_criterion_met"] = rec["criteria_timeline"]["last_met"]
     out = dict(jbs_used=np.asarray(jbs_used, dtype=float),
+               jbs_solved=np.asarray(jbs_solved, dtype=float),
                J_final=(None if J is None else np.asarray(J, dtype=float)),
                meas_final=meas, converged=bool(rec["converged"]), record=rec)
     if not rec["converged"]:

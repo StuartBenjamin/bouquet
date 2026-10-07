@@ -10,8 +10,10 @@ containing a bootstrap runs the same relaxed outer iteration::
         jc_k    = closure(E_k, jBS_k)       closure on E_k's geometry
         js_k    = (1 - beta) js_k-1 + beta jc_k     (k >= 1; js_0 = jc_0)
         E_k+1   = GS solve of js_k          (step(jBS_k) does both)
+        bs_k    = (1 - beta) bs_k-1 + beta jBS_k    the bootstrap js_k
+                                            carries (k >= 1; bs_0 = jBS_0)
         J       = evaluate(E_k+1)           Redl on the NEW equilibrium
-        r_k     = residuals(J, jBS_k, E_k+1, E_k)
+        r_k     = residuals(J, bs_k, E_k+1, E_k)
         jBS_k+1 = (1 - omega) jBS_k + omega J
         converged when every active criterion holds on two consecutive passes
 
@@ -58,13 +60,27 @@ policy and the record.
 Residuals (all logged every pass)
 ---------------------------------
 ``r_j``  current-weighted L2 residual of the profile,
-         ``||J - jBS_k||_w / ||J||_w`` with ``||f||_w^2 = int |w| f^2 dpsi_N``
+         ``||J - bs_k||_w / ||J||_w`` with ``||f||_w^2 = int |w| f^2 dpsi_N``
          and ``w`` the pass's own Ip weights (so the norm measures current, not
          raw density).  It is the UNRELAXED fixed-point residual -- the
-         distance between the bootstrap the equilibrium was solved with and the
-         Redl bootstrap of that equilibrium -- which is ``1/omega`` times the
-         relaxed step ``||jBS_k+1 - jBS_k||``, i.e. never looser than it.
-``r_I``  ``|int w (J - jBS_k) dpsi_N| / Ip``: the same residual as a fraction
+         distance between the bootstrap the equilibrium was SOLVED with,
+         ``bs_k``, and the Redl bootstrap of that equilibrium.  ``bs_k`` is
+         the iterate ``jBS_k`` itself unless the pass solved a relaxed
+         current (``beta < 1``, a blended pass): the solved current is then
+         ``(1 - beta) js_k-1 + beta jc_k`` and, the composition being affine
+         in the bootstrap, the bootstrap it carries is the same blend of the
+         iterates, ``(1 - beta) bs_k-1 + beta jBS_k``.  So a converged loop
+         delivers an equilibrium whose bootstrap is within the tolerances of
+         its own Redl evaluation.  The residual against the iterate,
+         ``||J - jBS_k||_w / ||J||_w`` (``1/omega`` times the relaxed step),
+         is recorded beside it as ``r_j_iterate`` / ``r_I_iterate`` on a
+         loop that relaxes the current -- a diagnostic, not a criterion.
+         (Until 2026-10-06 the iterate residual was the criterion: on a
+         blended pass it can read converged while the solved state is not --
+         a toy measured 2.4e-4 against 1.09e-3 for the solved one.)  The
+         ``omega`` schedule below follows the iterate residual (a path
+         heuristic).
+``r_I``  ``|int w (J - bs_k) dpsi_N| / Ip``: the same residual as a fraction
          of the plasma current, on the linear part of the closure's measure.
 ``dl_i`` ``|l_i(E_k+1) - l_i(E_k)|`` (only where the caller measures l_i).
 ``dq0``  ``|q0(E_k+1) - q0(E_k)|`` (only where an axis row / q0 target is
@@ -76,8 +92,10 @@ Residuals (all logged every pass)
          residual is only read back by the record-only corrector.
 
 The delivered equilibrium is the last solve; the bootstrap it was solved with
-is ``jBS_used``; ``J_final`` (Redl on that equilibrium) differs from it by at
-most the tolerances and is recorded alongside.
+is ``jbs_solved`` (``bs_K``; the iterate ``jbs_used`` when the last pass did
+not blend); ``J_final`` (Redl on that equilibrium) differs from it by at most
+the tolerances (on a converged loop) and is returned alongside.  ``jbs_used``
+is the iterate of the last pass.
 
 Failure is never silent: the library raises :class:`JBSNotConverged` carrying
 the full residual history; with ``jbs_loop_on_fail="flag"`` the last iterate is
@@ -568,20 +586,33 @@ class CurrentRelaxer:
         self._prev = None            # js of the previous (committed) pass
         self._last = None            # (jc, js) of the current pass
         self.n_calls = 0
+        #: whether the current pass's (last) call blended -- the kernel
+        #: blends its bootstrap iterate the same way to know the bootstrap
+        #: the pass actually SOLVED
+        self.last_blended = False
 
     def __call__(self, j_closure):
         jc = np.asarray(j_closure, dtype=float)
         if (self.beta >= 1.0 or self._prev is None
                 or self._prev.shape != jc.shape):
             js = jc.copy()
+            self.last_blended = False
         else:
             js = (1.0 - self.beta) * self._prev + self.beta * jc
+            self.last_blended = True
         self._last = (jc.copy(), js.copy())
         self.n_calls += 1
         return js
 
+    @property
+    def called(self) -> bool:
+        """Whether the step passed a current through the relaxer on the
+        current pass."""
+        return self._last is not None
+
     def begin_pass(self):
         self._last = None
+        self.last_blended = False
 
     def commit(self):
         """End of a pass: the current it solved becomes the blend base."""
@@ -781,6 +812,13 @@ class AxisRowPin:
 
 
 #: Definition string of the gated closure-half residual (recorded with it).
+RESIDUAL_SOLVED_DEFINITION = (
+    "r_j = ||J - bs_k||_w / ||J||_w and r_I = |int w (J - bs_k)| / Ip with "
+    "J Redl on the solved equilibrium and bs_k the bootstrap that "
+    "equilibrium was SOLVED with: the relaxer's blend of the iterates, "
+    "(1 - beta) bs_k-1 + beta jBS_k, on a blended pass, else the iterate "
+    "jBS_k; r_j_iterate / r_I_iterate (against jBS_k) recorded only")
+
 CURRENT_GATE_DEFINITION = (
     "||jc_k - js_{k-1}||_w / ||jc_k||_w, computed directly from the two "
     "arrays: js_{k-1} is the current pass k-1 SOLVED (the jphi input of its "
@@ -992,9 +1030,15 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
 
     Returns
     -------
-    dict with ``jbs_used`` (the bootstrap of the delivered solve), ``J_final``
-    (Redl on the delivered equilibrium), ``meas_final``, ``converged`` and
-    ``record`` (the logged block, JSON-safe).  On non-convergence raises
+    dict with ``jbs_used`` (the bootstrap ITERATE of the last pass),
+    ``jbs_solved`` (the bootstrap the delivered solve carries -- the
+    relaxer's blend of the iterates on a blended pass, else ``jbs_used``;
+    ``r_j`` / ``r_I`` are measured against it), ``J_final`` (Redl on the
+    delivered equilibrium), ``meas_final``, ``converged`` and ``record`` (the
+    logged block, JSON-safe; on a loop that relaxes the current at
+    ``beta < 1`` it adds ``r_j_iterate`` / ``r_I_iterate`` /
+    ``I_BS_used_iterate`` / ``bootstrap_blended`` per pass and
+    ``residual_definition``).  On non-convergence raises
     :class:`JBSNotConverged` unless the policy is ``"flag"``.
     """
     t0 = time.perf_counter()
@@ -1040,6 +1084,19 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
             "recorded only, NOT a convergence criterion"),
         relax_halve_on=int(halve_on), omega_halved_at_pass=[],
     )
+    # the solved-bootstrap residual (2026-10-06): with the current relaxed
+    # (beta < 1) a pass SOLVES the blend of its closure current with the
+    # previous solved one, so the bootstrap the equilibrium carries is the
+    # same blend of the iterates; r_j / r_I are measured against THAT, and
+    # the residual against the iterate is kept as a diagnostic.  Only a
+    # caller whose step takes the relaxer at beta < 1 can differ: every
+    # other record is key-for-key what it was.
+    track_solved = bool(takes_relax and beta < 1.0)
+    if track_solved:
+        rec.update(
+            residual_definition=RESIDUAL_SOLVED_DEFINITION,
+            r_j_iterate=[], r_I_iterate=[], I_BS_used_iterate=[],
+            bootstrap_blended=[])
     if extra is not None:
         rec["criteria"].update({str(_n): True for _n in extra.names})
     if start_refresh is not None:
@@ -1110,6 +1167,8 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
     if not np.all(np.isfinite(jbs)):
         _nonfinite(-1, "the initial bootstrap guess jbs0", jbs,
                    (meas0 or {}).get("x"))
+    jbs_solved_base = None            # bootstrap of the last relaxed solve
+    jbs_solved = jbs
     prev = dict(meas0 or {})
     streak = 0
     growth_at_floor = 0
@@ -1134,7 +1193,20 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         if not np.all(np.isfinite(J)):
             rec["n_passes"] = k + 1
             _nonfinite(k, "the evaluated bootstrap J", J, meas.get("x"))
-        res = profile_residuals(J, jbs, meas["w"], meas["x"], Ip)
+        # the bootstrap this pass SOLVED: the relaxer's blend applied to
+        # the iterates (the composition is affine in the bootstrap), the
+        # iterate itself when the pass did not blend
+        _relaxed_now = bool(relaxer is not None and relaxer.called)
+        _bs_blended = bool(_relaxed_now and relaxer.last_blended
+                           and jbs_solved_base is not None
+                           and jbs_solved_base.shape == jbs.shape)
+        jbs_solved = ((1.0 - beta) * jbs_solved_base + beta * jbs
+                      if _bs_blended else jbs)
+        res_it = profile_residuals(J, jbs, meas["w"], meas["x"], Ip)
+        # THE residual (gated, recorded as r_j / r_I): Redl on the solved
+        # state against the bootstrap that state was solved with
+        res = (profile_residuals(J, jbs_solved, meas["w"], meas["x"], Ip)
+               if _bs_blended else res_it)
         li_new = _finite_or_none(meas.get("li"))
         q0_new = _finite_or_none(meas.get("q0"))
         li_old = _finite_or_none(prev.get("li"))
@@ -1167,6 +1239,9 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
             _gap, _bl = relaxer.gap(meas.get("w"), meas.get("x"))
             _unrel = relaxer.unrelaxed_residual(meas.get("w"), meas.get("x"))
             relaxer.commit()
+            if _relaxed_now:
+                # the blend base of the next pass, as the relaxer's own
+                jbs_solved_base = np.asarray(jbs_solved, dtype=float).copy()
         else:
             _gap, _bl, _unrel = None, False, None
         _cres = None
@@ -1211,12 +1286,18 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         rec["current_gap"].append(_gap)
         rec["current_blended"].append(bool(_bl))
         rec["current_residual_unrelaxed"].append(_unrel)
+        if track_solved:
+            rec["r_j_iterate"].append(res_it["r_j"])
+            rec["r_I_iterate"].append(res_it["r_I"])
+            rec["I_BS_used_iterate"].append(res_it["I_BS_used"])
+            rec["bootstrap_blended"].append(_bs_blended)
         rec["n_passes"] = k + 1
         if (start_refresh is not None and k == 1
                 and rec["bootstrap_refresh"]["applied"]):
             # the refreshed iterate judged on the next solved state
             rec["bootstrap_refresh"].update(
-                r_j_after=float(res["r_j"]), r_I_after=float(res["r_I"]))
+                r_j_after=float(res_it["r_j"]),
+                r_I_after=float(res_it["r_I"]))
         entry = dict(k=k, ok=ok, dl_i=dl_i, dq0=dq0,
                      omega_used=omega_used_for_current, **res)
         print(f"  [jbs-loop{(' ' + label) if label else ''}] pass {k + 1}/{K}: "
@@ -1231,6 +1312,9 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
               + f" I_BS={res['I_BS'] / 1e3:.2f} kA"
               + ("" if omega_used_for_current is None
                  else f" omega={omega_used_for_current:.3f}")
+              + ("" if not _bs_blended else
+                 f" (vs iterate r_j={res_it['r_j']:.3e} r_I="
+                 f"{res_it['r_I']:.3e}, record only)")
               + ("" if not _bl else f" |js-jc|/|jc|={_gap:.2e}")
               + ("" if (not _bl or _unrel is None or gate_cur)
                  else f" (unrelaxed {_unrel:.2e}, record only)")
@@ -1282,7 +1366,9 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         # ---- relaxation schedule: halve on SUSTAINED growth (halve_on
         # consecutive growing passes; 1 = every growth, the earlier
         # schedule), abort after n_abort growing passes at the floor --------
-        if r_j_prev is not None and res["r_j"] > r_j_prev:
+        # (the schedule is a PATH heuristic: it follows the iterate
+        # residual, as before the solved residual was gated)
+        if r_j_prev is not None and res_it["r_j"] > r_j_prev:
             if (omega_used_for_current is not None
                     and omega_used_for_current <= floor + 1e-15):
                 growth_at_floor += 1
@@ -1298,7 +1384,7 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         else:
             growth_at_floor = 0
             grow_streak = 0
-        r_j_prev = res["r_j"]
+        r_j_prev = res_it["r_j"]
         stop = (growth_at_floor >= n_abort) or (k == K - 1)
         if q0_pin is not None and not stop:
             # a further pass follows: move the axis row from the q0 this
@@ -1331,10 +1417,10 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
             _vs_blend = profile_residuals(_new, _blend, meas["w"], meas["x"],
                                           Ip)
             rec["bootstrap_refresh"].update(
-                applied=True, r_j_before=float(res["r_j"]),
-                r_I_before=float(res["r_I"]),
-                I_BS_start=float(res["I_BS_used"]),
-                I_BS_evaluated=float(res["I_BS"]),
+                applied=True, r_j_before=float(res_it["r_j"]),
+                r_I_before=float(res_it["r_I"]),
+                I_BS_start=float(res_it["I_BS_used"]),
+                I_BS_evaluated=float(res_it["I_BS"]),
                 I_BS_refreshed=float(_step_rel["I_BS"]),
                 refresh_vs_start=dict(r_j=float(_step_rel["r_j"]),
                                       r_I=float(_step_rel["r_I"])),
@@ -1344,7 +1430,7 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
                 extra_solves=0)
             print(f"  [jbs-loop{(' ' + label) if label else ''}] bootstrap "
                   f"refreshed after pass 1 (restart, not a blend): I_BS "
-                  f"{res['I_BS_used'] / 1e3:.2f} -> "
+                  f"{res_it['I_BS_used'] / 1e3:.2f} -> "
                   f"{_step_rel['I_BS'] / 1e3:.2f} kA, step r_j="
                   f"{_step_rel['r_j']:.3e}; 0 extra solves", flush=True)
             jbs = _new
@@ -1369,6 +1455,11 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         current_residual_unrelaxed=(rec["current_residual_unrelaxed"][-1]
                                     if rec["current_residual_unrelaxed"]
                                     else None))
+    if track_solved:
+        rec["final"]["r_j_iterate"] = (rec["r_j_iterate"][-1]
+                                       if rec["r_j_iterate"] else None)
+        rec["final"]["r_I_iterate"] = (rec["r_I_iterate"][-1]
+                                       if rec["r_I_iterate"] else None)
     if q0_pin is not None:
         rec["q0_pin"] = q0_pin.record()
         rec["final"]["q0_residual"] = rec["q0_pin"]["final_q0_residual"]
@@ -1383,6 +1474,7 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         rec["criteria_timeline"] = criteria_timeline(rec)
         rec["last_criterion_met"] = rec["criteria_timeline"]["last_met"]
     out = dict(jbs_used=np.asarray(jbs_used, dtype=float),
+               jbs_solved=np.asarray(jbs_solved, dtype=float),
                J_final=(None if J is None else np.asarray(J, dtype=float)),
                meas_final=meas, converged=bool(rec["converged"]), record=rec)
     if not rec["converged"]:

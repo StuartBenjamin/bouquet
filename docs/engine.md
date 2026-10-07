@@ -233,6 +233,21 @@ coefficients (the composition is affine in them).
 | closure scale bounds | 0.2 < s < 5 | `close_ip_structured` default |
 | Ip round trip | 0.05 % | `utils.IP_ROUNDTRIP_TOL_PCT` |
 
+r_j and r_I are measured against the bootstrap the pass SOLVED (2026-10-06,
+`jbs_loop` "Residuals"): with the solved current relaxed (β < 1) a pass
+solves the β-blend of its closure current with the previous solved one, so
+the bootstrap that equilibrium carries is the same blend of the iterates,
+and "converged" means the solved state's bootstrap is within the tolerances
+of its own Redl evaluation. The residual against the iterate is recorded as
+`r_j_iterate` / `r_I_iterate` (record only; the ω schedule follows it, so
+the path is unchanged). Until then the iterate residual was the criterion,
+which on a blended pass can read converged while the solved state is not (a
+toy: 2.4e-4 reported, 1.09e-3 against the solved bootstrap); the stricter
+reading can take more passes within the same ceilings (on the fast suite's
+toys: the gated two-state toy 8 -> 9 passes, the soft fd_broyden MSE-stage
+toy 8 -> 12, beyond its ceiling of 8). The engine draw's delivery check and
+the bootstrap it carries into the post-homotopy stage are the solved one.
+
 The MSE stage runs the loop again after the Jacobian, with its own ceiling
 `jbs_max_passes` (as the legacy chord stage).
 
