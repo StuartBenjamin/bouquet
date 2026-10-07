@@ -5881,7 +5881,9 @@ class Bouquet:
             lcfs_pad=psi_pad, li_normalization="iter"))["l_i"])
         # the pressure handed to the solver and both frames of beta / W_MHD
         from .edge_pressure import archive_record as _edge_record
-        bl.edge_pressure = _edge_record(_edge, p_total, stats=_st3)
+        from .edge_pressure import solver_p_scale as _p_scale
+        bl.edge_pressure = _edge_record(_edge, p_total, stats=_st3,
+                                        p_scale=_p_scale(mygs))
 
         # ---- core-pressure hollowness health record (report-only) ----------
         # Describes the core shape of the INPUT pressure the solve above was

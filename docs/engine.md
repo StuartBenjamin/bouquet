@@ -251,7 +251,7 @@ coefficients (the composition is affine in them).
 | MSE tan γ change | 0.1 σ_eff | `jbs_loop.MSE_CHORD_OFFSET_TOL_SIGMA` |
 | closure-half current residual (standing, decision 9) | 1e-3 | `jbs_rtol_j`, the loop's current gate |
 | consecutive passes / ceiling | 2 / 8 | `JBS_REQUIRED_CONSECUTIVE` / `jbs_max_passes` |
-| ω floor / growth abort | 0.25 / 3 | `JBS_RELAX_FLOOR` / `JBS_GROWTH_ABORT_PASSES` |
+| ω floor / growth abort | 0.25 / 3 | `JBS_RELAX_FLOOR` / `JBS_GROWTH_ABORT_PASSES` (earliest abort pass 10 at the default relaxation: inert within the reconstruction / MSE ceiling 8 and the post-homotopy 6, reachable within the draw ceiling 12) |
 | closure scale bounds | 0.2 < s < 5 | `close_ip_structured` default |
 | Ip round trip | 0.05 % | `utils.IP_ROUNDTRIP_TOL_PCT` |
 

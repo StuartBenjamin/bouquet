@@ -2080,6 +2080,9 @@ class TokaMakerBackend:
             # both frames of beta / W_MHD: the solver's own (its pressure
             # is zero at the boundary) and with p_sep added back
             out["pressure_frames"] = pressure_frames(stats, self.p_sep())
+            # the solver's uniform P' rescale of this state (recorded)
+            from .edge_pressure import solver_p_scale
+            out["p_scale"] = solver_p_scale(mygs)
             out["li_1"] = float(li_achieved(eq, li_kind="li_1",
                                             psi_pad=pad)[0])
         return out
@@ -2187,13 +2190,16 @@ def reconstruct(adapter, backend, settings, *, label=""):
 def edge_pressure_record(eng) -> dict:
     """The engine record's ``edge_pressure`` block: the two settings, the
     contract pressure's ``p_sep`` / axis value / offset applied / axis
-    target (:func:`bouquet.edge_pressure.describe`) and both pressure
-    frames of the delivered equilibrium (``None`` for a backend that
-    reports none)."""
+    target (:func:`bouquet.edge_pressure.describe`), both pressure frames
+    of the delivered equilibrium (``None`` for a backend that reports none)
+    and the solver's uniform ``P'`` rescale of it, ``p_scale``
+    (:data:`bouquet.edge_pressure.P_SCALE_DEFINITION`; ``None`` for a
+    backend that reports none)."""
     from .edge_pressure import describe
     out = describe(eng.s.get("edge_pressure"), eng.c.pressure)
     m = getattr(eng, "delivered_meas", None) or {}
     out["frames"] = m.get("pressure_frames")
+    out["p_scale"] = m.get("p_scale")
     return out
 
 

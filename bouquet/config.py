@@ -1307,8 +1307,12 @@ class GenerationConfig:
     engine_draw_solve_maxits: Optional[int] = 100
     # --- the pressure handed to the GS solver (bouquet.edge_pressure) --------
     # Both settings act on EVERY solve of the package (legacy paths, the
-    # unified engine, the draws, the zero-perturbation checks) and both
-    # default to the behaviour before they existed.
+    # unified engine, the draws, the zero-perturbation checks).
+    # edge_pprime_pin defaults to the behaviour before it existed;
+    # separatrix_pressure does NOT (default "offset" since 2026-10-02, an
+    # owner-approved physics change; "legacy" is the behaviour before).  The
+    # solver's resulting uniform P' rescale is recorded as p_scale
+    # (edge_pressure.P_SCALE_DEFINITION) on every delivered state.
     # edge_pprime_pin: True sets the last node of P' (psi_N = 1) to zero, so
     # P' ramps to zero across the final grid interval; False keeps the
     # profile's own derivative there.  False moves the edge current between

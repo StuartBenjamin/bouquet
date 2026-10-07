@@ -967,6 +967,8 @@ def _finish(ctx, backend, inputs, dp, res, m_fin, pin, label):
     delivered["flux_range"] = flux_range(m_fin)
     if m_fin.get("pressure_frames") is not None:
         delivered["pressure_frames"] = _frames(m_fin)
+    # the solver's uniform P' rescale (edge_pressure.P_SCALE_DEFINITION)
+    delivered["p_scale"] = m_fin.get("p_scale")
     amp = last["amp"]
     dli = float(m_fin["li"]) - float(ctx.ref["l_i"])
     ident = dict(
@@ -1637,6 +1639,7 @@ class GenerateEngineDraws:
                   "loop's"))
         if fin.get("pressure_frames") is not None:
             rec["archived"]["pressure_frames"] = _frames(fin)
+        rec["archived"]["p_scale"] = fin.get("p_scale")
         # the archived split ON the archived equilibrium: the draw's
         # bootstrap model (x* held: s_bs (1 + d_bs) x scale x Redl) and its
         # fixed parts, both converted with THIS state's F<1/R>/<B^2>; the

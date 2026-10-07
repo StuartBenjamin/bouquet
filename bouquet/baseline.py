@@ -1374,8 +1374,9 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
     from .edge_pressure import (archive_record, input_pressure_frames,
                                 resolve_edge_pressure)
     _edge = resolve_edge_pressure(edge_pressure)
+    from .edge_pressure import solver_p_scale
     _edge_rec = archive_record(_edge, result.get("pres_tokamaker"),
-                               stats=stats)
+                               stats=stats, p_scale=solver_p_scale(mygs))
     _fr = _edge_rec.get("frames")
     if _fr is not None and _fr["p_sep"] != 0.0:
         betan_tok = float(_fr["full"].get("beta_n", float("nan")))

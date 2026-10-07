@@ -58,6 +58,7 @@ from .utils import (
 from .io.geqdsk import read_geqdsk
 from .edge_pressure import (
     archive_record as edge_pressure_archive_record,
+    solver_p_scale as edge_pressure_solver_p_scale,
     describe as describe_edge_pressure,
     lcfs_kwargs,
     resolve_edge_pressure,
@@ -6320,8 +6321,14 @@ def generate_bouquet(
                   f"({type(_bs_exc).__name__}: {_bs_exc})", flush=True)
 
     # the edge-pressure settings and the baseline's separatrix pressure
+    # (with the baseline's own P' rescale, as its reconstruction recorded
+    # it: the engine's edge_pressure block, or the legacy delivered state)
+    _ds_ep = (delivered_state or {}).get("edge_pressure") or {}
     store_edge_pressure_record(
-        header, edge_pressure_archive_record(_edge, pressure_solve),
+        header, edge_pressure_archive_record(
+            _edge, pressure_solve,
+            p_scale=(_ds_ep.get("p_scale") if isinstance(_ds_ep, dict)
+                     else None)),
         scan_key=scan_key)
 
     # ---- Purge stale draws for THIS scan value -------------------------
@@ -7781,12 +7788,15 @@ def generate_bouquet(
             li1 = eq_stats_std["l_i"]
             eq_stats_iter = mygs.get_stats(li_normalization="iter", lcfs_pad=psi_pad)
             li3 = eq_stats_iter["l_i"]
+            # the solver's uniform P' rescale of this draw's state
+            _p_scale_draw = edge_pressure_solver_p_scale(mygs)
         except Exception as _stats_exc:
             print(f"  WARN: per-draw get_stats failed ({_stats_exc}); "
                   f"degenerate equilibrium -> l_i=nan (draw filtered out, "
                   f"run continues)")
             li1 = float('nan'); li3 = float('nan')
             eq_stats_iter = None
+            _p_scale_draw = None
 
         # Pressure on the equilibrium grid (for storage and plotting).
         # Interpolate kinetic profiles onto psi_N if on a different grid.
@@ -8011,7 +8021,7 @@ def generate_bouquet(
         store_edge_pressure_record(
             header, edge_pressure_archive_record(
                 _edge, pressure_total_perturb, stats=eq_stats_iter,
-                p_sep_applied=_p_lcfs),
+                p_sep_applied=_p_lcfs, p_scale=_p_scale_draw),
             scan_key=scan_key, count=count)
 
         # Clean up on-disk eqdsk after archiving

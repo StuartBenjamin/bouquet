@@ -37,6 +37,66 @@
     stays held either way). The unified engine instead has the q0 and l_i
     rows inside its loop.
 
+### At a glance: the review fixes of 2026-10-06 / 07 (one line each; details below or in the commit)
+
+- **sigma=0 gate widened (fix).** The engine draws (the sigma=0 draw
+  included) now solve under the reconstruction's OWN coil regularisation
+  (they installed the legacy exploratory list, identical only with an empty
+  `SolverConfig.coil_reg`); `verify_sigma0_consistency` additionally gates
+  |dq0| at the q-row radius (`jbs_tol_q0`), the archived coil drift against
+  the hard coil bound and the LCFS rms against the in-spec boundary cut
+  (existing bounds; each recorded with its value and setting).
+- **Solved-residual criterion (stricter).** With the solved current relaxed
+  (`jbs_relax_current` 0.7) `r_j` / `r_I` are measured against the bootstrap
+  the pass SOLVED (the relaxer's blend), not the iterate; the iterate's are
+  recorded (`r_j_iterate`). Can take more passes within the same ceilings
+  (two fast tests that converged only on the iterate are left failing,
+  owner decision pending).
+- **IDS export from the stored `<j.B>` parts.** Engine draws archive a
+  `jB_parallel/` subgroup; the exporter writes it as it is, and subtracts
+  the pressure-driven term from older / legacy `j_inductive` (below).
+- **IMAS time rule.** The core_sources slice is windowed at half the
+  core_profiles step, dt and the bracketing pair recorded, and a driven
+  entry whose record starts after the slice is OFF there (zero, stamped
+  `off_before_record`, announced) instead of refused (below).
+- **`run_slices(on_refusal="record")` is the default** (was `"raise"`).
+- **Stored-config replay warns** on missing `jbs_relax_*` keys (loaded at
+  the pre-field 1.0 / 1), the loud entries fire for every stored config, and
+  `coil_solve_mode` is read back (below).
+- **±50 % bootstrap prior flagged on every path.** `|s_bs - 1| > 0.5` is
+  flagged `bootstrap_scale_out_of_prior` both ways (only `< 0.5` was), on
+  both engine paths (the g-file engine path never called `closure_health`)
+  and the legacy g-file path; printed and warned, never clamped.
+- **`imas_li3_radius` (new, IDS l_i row).** The source `li_3`'s
+  normalisation radius (`R_geo` from IMAS.jl / FUSE vs TokaMaker's
+  `R_axis`) is resolved (`"auto"`) or stated, the target rescaled by
+  `R_src/R_axis` and the factor recorded; a stored IMAS unified config
+  loads as `"axis"`.
+- **Engine MSE: Jacobian refresh, no-MSE fallback, chord chi^2/N** (below;
+  `mse_chi2n_flag = 10.0`, owner decision pending).
+- **`p_scale` recorded (new record).** The solver's uniform `P'` rescale
+  (OFT `p_scale` = `pax / P(psi_axis)`; ~1.02-1.03 on a pedestal with the
+  edge pin, the size of the separatrix correction) is recorded on every
+  delivered state: the engine record's and the legacy reconstruction's
+  `edge_pressure` blocks (so `delivered_state_json`), every
+  `edge_pressure_json` (baseline: from that record; each draw: its own
+  solved state) and the engine draw records (`delivered` / `archived`).
+- **Growth abort is inert at the reconstruction ceilings (documented).** At
+  the default relaxation the earliest `JBS_GROWTH_ABORT_PASSES` abort is
+  pass 10: never within `jbs_max_passes = 8` (reconstruction, MSE stage) or
+  the post-homotopy 6; reachable within the draw ceiling 12 (and from pass 6
+  with `jbs_relax_halve_on = 1`). No value changed;
+  `tests/test_jbs_growth_abort_reach.py` pins it.
+- **What an archive field MEANS changed on the default path** (names and
+  units did not). An earlier entry called schema v3 "additive"; it is
+  additive in its names only. On an engine archive `j_inductive` / `j_BS`
+  are the engine's UNFLOORED split (`j_inductive` the residual, may be
+  negative, carries the pressure-driven term; legacy floors it at zero and
+  moves the sliver into `j_BS`); `in_spec` is the coil verdict AND the
+  post-hoc band (legacy: coil only); and under `separatrix_pressure=
+  "offset"` the stored g-files' `PRES` is the solver's pressure + `p_sep`
+  (zero at the boundary before). See archive-schema.md.
+
 ### `reconstruction_engine` default `"legacy"` -> `"unified"`
 
 - **What moves.** `GenerationConfig.reconstruction_engine` now defaults to
@@ -997,7 +1057,9 @@ the default path (see that section). Also:
   to opt in (`"jbs_self_consistent": true` in the `generation` section).
 - `single_profile_jphi=True` and `recalculate_j_BS=False` have no bootstrap to
   iterate and are refused unless `jbs_self_consistent=False` is set.
-- **Archive schema v3** (additive): the `jbs_loop` block (`jbs_converged`,
+- **Archive schema v3** (additive in its NAMES; field meanings changed on
+  the default path later -- see the first entry's "At a glance"): the
+  `jbs_loop` block (`jbs_converged`,
   `jbs_n_passes`, `jbs_loop_json`) on every loop draw and now also on
   `_baseline`; `DrawView.jbs_loop`, `ScanView.baseline_jbs_loop` /
   `bootstrap_model`. No migration: a v2 archive reads as frozen everywhere

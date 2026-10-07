@@ -101,7 +101,9 @@ Failure is never silent: the library raises :class:`JBSNotConverged` carrying
 the full residual history; with ``jbs_loop_on_fail="flag"`` the last iterate is
 returned with ``converged=False`` and the caller records a closure-limited
 reason.  A residual that grows on ``JBS_GROWTH_ABORT_PASSES`` consecutive
-passes at the relaxation floor aborts early with the same error, and so does a
+passes at the relaxation floor aborts early with the same error (at the
+default relaxation settings no earlier than pass 10, so only within the draw
+ceiling of 12 -- see the constant), and so does a
 pass that can never count (a gated ``l_i``/``q0`` the step did not return, or
 an identically zero ``J`` against a non-zero iterate) -- at that pass, not at
 the ceiling.  A non-finite initial guess or evaluated ``J`` raises
@@ -125,6 +127,20 @@ JBS_RELAX_FLOOR = 0.25
 #: Consecutive passes that must meet every active criterion.
 JBS_REQUIRED_CONSECUTIVE = 2
 #: Growing-``r_j`` passes AT the relaxation floor that abort the loop.
+#:
+#: INERT at the default reconstruction ceilings (verified 2026-10-07, review
+#: B m5; value and ceilings unchanged).  Growth is first measurable on pass
+#: 2; with the defaults ``jbs_relax = 0.7`` and ``jbs_relax_halve_on = 3``
+#: omega is halved after three consecutive growing passes (0.7 -> 0.35 for
+#: pass 5, -> 0.25 = :data:`JBS_RELAX_FLOOR` for pass 8), so the earliest
+#: abort is at the end of pass 10.  It therefore never fires within
+#: ``jbs_max_passes = 8`` (the reconstruction, the engine's MSE stage, the
+#: legacy MSE chord stage) or ``jbs_max_passes_post_homotopy = 6``: a
+#: diverging loop there runs to its ceiling and fails (or is flagged) there
+#: -- the early stop the module docstring describes does not happen.  It CAN
+#: fire within ``jbs_max_passes_draw = 12`` (a draw's loop, from pass 10),
+#: and with ``jbs_relax_halve_on = 1`` (a replayed config stored 2026-09-25
+#: .. 27) from pass 6.
 JBS_GROWTH_ABORT_PASSES = 3
 #: Default of ``GenerationConfig.jbs_max_passes_post_homotopy``: the passes
 #: a draw may take at the tight coil stage after the post-perturb homotopy

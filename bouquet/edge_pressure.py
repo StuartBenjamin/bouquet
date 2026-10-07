@@ -416,15 +416,42 @@ def save_full_pressure_eqdsk(mygs, filename, p_sep, **kwargs):
     return safe_save_eqdsk(mygs, filename, **kwargs, **lcfs_kwargs(p_sep))
 
 
-def archive_record(edge=None, pressure=None, stats=None, p_sep_applied=None):
+#: What ``p_scale`` in an edge-pressure record is.
+P_SCALE_DEFINITION = (
+    "the solver's uniform P' rescale of the solved equilibrium "
+    "(OpenFUSIONToolkit TokaMaker p_scale = pax / P(psi_axis), P the "
+    "integral of the P' profile handed to the solver from the boundary): "
+    "1 when the handed P' integrates to the axis target; the edge P' pin "
+    "(edge_pprime_pin), the flux range the profile was built with and, "
+    "under separatrix_pressure='legacy', p_sep each move it off 1 (on a "
+    "pedestal ~1.02-1.03, the size of the separatrix correction); None "
+    "when the solver did not report it")
+
+
+def solver_p_scale(mygs):
+    """The solver's uniform ``P'`` rescale of its CURRENT equilibrium
+    (:data:`P_SCALE_DEFINITION`): OpenFUSIONToolkit's ``mygs.p_scale``, or
+    ``None`` for a solver object without it (a test stand-in) or a value
+    that is not a finite number.  A read only."""
+    try:
+        v = float(getattr(mygs, "p_scale"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return v if np.isfinite(v) else None
+
+
+def archive_record(edge=None, pressure=None, stats=None, p_sep_applied=None,
+                   p_scale=None):
     """The record stored under :data:`EDGE_PRESSURE_ATTR`.
 
     :func:`describe` of *pressure* (when given), ``p_sep_applied``
-    overridden by an explicit value (an engine draw reports its own), and
+    overridden by an explicit value (an engine draw reports its own),
     ``frames`` = :func:`pressure_frames` of *stats* (``None`` without
-    stats, or when they cannot be formed -- the reason is recorded)."""
+    stats, or when they cannot be formed -- the reason is recorded), and
+    ``p_scale`` (:data:`P_SCALE_DEFINITION`; ``None`` when not known)."""
     edge = resolve_edge_pressure(edge)
     out = describe(edge, pressure)
+    out["p_scale"] = None if p_scale is None else float(p_scale)
     if p_sep_applied is not None:
         out["p_sep_applied"] = float(p_sep_applied)
     out["frames"] = None

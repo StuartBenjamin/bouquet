@@ -85,7 +85,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │                                    with its "draws" settings block
     │              [edge_pressure_json] ← the edge-pressure record (added):
     │                                    edge_pprime_pin, separatrix_pressure,
-    │                                    p_sep, p_sep_applied, pax_target
+    │                                    p_sep, p_sep_applied, pax_target,
+    │                                    p_scale (added 2026-10-07)
     └── <count>/                       one group per accepted draw
         │                              (integer; gaps = rejected draws)
         ├── eqdsk, [pfile]             raw bytes, fixed names
@@ -117,14 +118,26 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
                                        ← engine draws only (added; see below)
                    [edge_pressure_json] ← the draw's edge-pressure record
                                        (added): its own p_sep, the offset
-                                       applied, and beta / W_MHD in both
-                                       pressure frames ("frames")
+                                       applied, beta / W_MHD in both
+                                       pressure frames ("frames") and its
+                                       p_scale (added 2026-10-07)
                    [boundary_rms_mm, boundary_max_mm]  ← the draw's LCFS metric,
                                        written when filter_boundaries applies a cut
 ```
 
 `edge_pressure_json` is read with `bouquet.edge_pressure.load_record(header,
-count=None, scan_key=None)` (`count=None`: the baseline's). See
+count=None, scan_key=None)` (`count=None`: the baseline's). `p_scale`
+(added 2026-10-07; absent in records written before, `null` when not known)
+is the solver's uniform `P'` rescale of that state,
+`bouquet.edge_pressure.P_SCALE_DEFINITION`: TokaMaker integrates the handed
+`P'` inward from the boundary from zero and rescales it uniformly so the axis
+value is `pax_target`; the edge `P'` pin, the flux range the profile was built
+with and (under `"legacy"`) `p_sep` move it off 1 -- about 1.02-1.03 on a
+pedestal, the size of the separatrix correction. A draw's is read on its own
+solved state; the baseline's is the one its reconstruction recorded (the
+engine record's `edge_pressure` block, also in `delivered_state_json`; the
+legacy reconstruction's `edge_pressure`). Engine draw records carry it too
+(`engine_json` `delivered.p_scale`, `archived.p_scale`). See
 [physics-notes.md](physics-notes.md#the-pressure-handed-to-the-solver-separatrix-pressure-and-the-edge-p-pin).
 Under `separatrix_pressure="offset"` (the default since 2026-10-02; archives
 written before then were made with `"legacy"`)
@@ -331,15 +344,30 @@ pressure + that equilibrium's `p_sep`).
     verdict. It is one of the filter flags ANDed into `selected`
     (`filtering._FILTER_FLAGS`), so `.filter()` selects what the until-N
     ledger counted; `in_spec` is the coil verdict AND this band.
-  - A reader that predates these fields misreads nothing: every field it
-    knows keeps its name, unit and meaning. (An older package that
-    RE-FILTERS an engine archive would not AND `passes_draw_band` into
-    `selected`; `in_spec` still carries the band.)
+  - **Fields whose MEANING differs on an engine archive** (names and units
+    unchanged; a reader that predates the engine reads them without error
+    but must not assume the legacy meaning): `j_inductive` / `j_BS` -- the
+    engine's split is NOT floored (`j_inductive` is the residual and may be
+    negative; it carries the pressure-driven term; legacy draws floor it at
+    zero and move the sliver into `j_BS`); `in_spec` -- on an engine draw
+    the coil verdict AND the post-hoc band (`passes_draw_band`), on a legacy
+    draw the coil verdict alone. (An older package that RE-FILTERS an engine
+    archive would not AND `passes_draw_band` into `selected`; `in_spec`
+    still carries the band.) Independently of the engine, under
+    `separatrix_pressure="offset"` (the default since 2026-10-02) the stored
+    `eqdsk` bytes carry `PRES` = the solver's pressure + `p_sep` (it was
+    zero at the boundary before).
 
 ## v2 → v3: the self-consistent bootstrap record
 
-Schema v3 (this release) is **additive**: it adds the `jbs_loop` block above
-and changes no v2 dataset, attr, name, unit or meaning.
+Schema v3 is **additive in its names**: it adds the `jbs_loop` block above
+and renames or removes no v2 dataset or attr. It is NOT free of changes of
+meaning on the default path of this release: the engine's unfloored
+`j_inductive` / `j_BS` split, `in_spec` = coil AND band on engine draws, and
+`PRES` + `p_sep` in the stored g-files under `separatrix_pressure="offset"`
+(see "The unified engine's records" above). The schema version does not
+encode these; the engine record (`engine_json`) and the edge-pressure record
+(`edge_pressure_json`) say which applies.
 
 - **No migration.** A v2 archive reads as a v3 archive whose bootstrap is
   frozen everywhere (no `jbs_loop` block); every v3 reader accepts it
