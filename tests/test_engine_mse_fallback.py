@@ -96,6 +96,74 @@ def test_a_failed_mse_stage_delivers_the_reconstruction_without_mse(where):
     assert "mse_fd" not in s and s["mse_failed"] >= 1
 
 
+def _ceiling_after_real_passes(monkeypatch):
+    """The MSE loop runs its real passes (Broyden updates included) and
+    then raises ``JBSNotConverged`` with its record, as a pass ceiling does
+    under ``jbs_loop_on_fail="raise"``: the route on which the failed
+    phase's Jacobian record used to lack ``n_free``."""
+    from bouquet.jbs_loop import JBSNotConverged
+    real = UnifiedEngine._mse_loop
+
+    def _loop(self, *a, **k):
+        out = real(self, *a, **k)
+        raise JBSNotConverged("injected: pass ceiling reached",
+                              dict(out["record"], converged=False))
+
+    monkeypatch.setattr(UnifiedEngine, "_mse_loop", _loop)
+
+
+@pytest.mark.parametrize("scheme", ["fd_broyden", "fd_chord"])
+def test_a_failed_mse_stage_keeps_the_jacobian_record_it_took(monkeypatch,
+                                                              scheme):
+    """A stage that fails in its passes, AFTER the FD Jacobian was taken,
+    keeps that Jacobian's record on its failed phase with every key a
+    delivered phase's carries (``n_free``, the FD's ``n_solves``, the
+    scheme, the Broyden updates, the refresh block) beside the failure; the
+    solves spent are ``n_solves_spent`` = ``solves["mse_failed"]``.  Before
+    the fix the record was ``{applied, failed, where, reason, n_solves}``
+    and reading ``n_free`` raised ``KeyError``."""
+    md, ch = _mse_data()
+    _ceiling_after_real_passes(monkeypatch)
+    eng, res, rec = _run(T.ToyGS(chords=ch), md=md, ch=ch,
+                         engine_mse_jacobian=scheme)
+    assert rec["mse"]["stage_failed"] and res["converged"]
+    assert "pass ceiling" in rec["mse"]["failure"]["message"]
+    ph = rec["phases"][1]
+    assert ph["name"] == "mse" and ph is rec["phases"][-1]
+    fd = ph["jacobian"]
+    # the Jacobian: one base solve + one per free coefficient (2K = 8)
+    assert fd["n_free"] == 8 and fd["n_solves"] == 1 + 8
+    assert fd["failed"] and not fd["applied"] and fd["jacobian_taken"]
+    assert fd["n_pass_solves"] >= 1
+    assert fd["n_solves_spent"] == rec["solves"]["mse_failed"] \
+        == fd["n_solves"] + fd["n_pass_solves"] + fd["refresh"]["n_solves"]
+    if scheme == "fd_broyden":
+        assert fd["n_broyden_updates"] >= 1
+    else:
+        assert fd["n_broyden_updates"] == 0
+    assert ("Broyden" in fd["scheme"]) == (scheme == "fd_broyden")
+    assert np.shape(fd["J_initial"]) == (int(ch["n_active"]), 8)
+    assert fd["refresh"]["rounds"] == [] and not fd["refresh"][
+        "fresh_J_stationary"]
+    # the record carried by the exception is the failed phase's record
+    assert ph["record"]["converged"] is False
+
+
+def test_a_stage_that_fails_before_its_jacobian_still_records_n_free():
+    """Inside the FD itself (no Jacobian taken): ``n_free`` and the solves
+    spent, ``jacobian_taken`` False."""
+    md, ch = _mse_data()
+    ref = _no_mse_reference(ch)
+    b = FailingToy(chords=ch)
+    b.fail_at = ref["solves"]["anchor"] + ref["solves"]["loop"] + 4
+    eng, res, rec = _run(b, md=md, ch=ch)
+    fd = rec["phases"][-1]["jacobian"]
+    assert fd["n_free"] == 8
+    assert fd["failed"] and not fd["jacobian_taken"]
+    assert fd["n_solves"] == fd["n_solves_spent"] \
+        == rec["solves"]["mse_failed"]
+
+
 def test_a_failed_mse_stage_with_mse_required_raises():
     md, ch = _mse_data()
     ref = _no_mse_reference(ch)

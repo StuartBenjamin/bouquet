@@ -306,7 +306,15 @@ chord set), delivers it through the ordinary delivery (whose solve and
 checks re-verify it; on the toy it is the run without the `"mse"` row bit
 for bit) and flags `mse_stage_failed` with the exception text (closure-
 limited reason, printed, `RuntimeWarning`; `engine_record()["mse"]["failure"]`).
-With `structured_mse_required=True` it raises, as before.
+With `structured_mse_required=True` it raises, as before. The failed phase
+(`phases[...]["jacobian"]`, `failed=True`) keeps the stage's Jacobian record
+as far as it got: when the finite-difference Jacobian was taken, every key a
+delivered MSE phase carries (`n_free`, the FD's `n_solves`, the scheme, the
+orientation, `J_initial`, the passes' `n_broyden_updates` / `n_pass_solves`
+and the refresh rounds), with `jacobian_taken=True`; otherwise `n_free` and
+`n_solves` (= the solves spent). `n_solves_spent` is always every solve
+since the snapshot (`solves["mse_failed"]`). Every MSE phase record (applied,
+not applied, failed) carries `n_free`.
 
 **The delivered fit's chord χ² (2026-10-07).** Against the raw E_r-corrected
 chords of the stage with its own weights (`mse.mse_chi2`; never against an

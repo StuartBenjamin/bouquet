@@ -291,6 +291,13 @@ refusal) still ends the sweep unrecorded.
   (closure-limited reason, print, `RuntimeWarning`,
   `Baseline.engine["mse"]["failure"]`). `structured_mse_required=True` still
   raises.
+  The failed phase keeps the Jacobian record the stage took (`n_free`, the
+  FD's `n_solves`, scheme, Broyden updates, refresh rounds;
+  `jacobian_taken`, `n_solves_spent`); it used to be reduced to
+  `{applied, failed, where, reason, n_solves}`, so a reader of `n_free` on
+  a stage that failed in its passes got `KeyError`
+  (`tests/test_engine_mse_fallback.py::
+  test_a_failed_mse_stage_keeps_the_jacobian_record_it_took`).
 - **Chord chi^2 records and two flags (flag only, never acceptance).**
   Against the raw E_r-corrected chords with the stage's own weights:
   delivered chi^2, N, chi^2/N and the no-MSE reconstruction's chi^2

@@ -842,6 +842,7 @@ class UnifiedEngine:
         #: chi^2 of the reconstruction WITHOUT MSE at the stage's chords
         #: (the FD base state), once the stage has read them
         self._mse_pre = None
+        self._mse_stage_fd = None    # the MSE stage's Jacobian record
         #: the MSE outcome recorded as ``engine_record()["mse"]``
         self.mse_summary = dict(requested=("mse" in settings["rows"]),
                                 applied=False, mse_converged=None,
@@ -1233,7 +1234,8 @@ class UnifiedEngine:
             print(f"[{self.label}] WARNING closure-limited: "
                   + self.flags[-1], flush=True)
             phases.append(dict(name="mse", record=None, jacobian=dict(
-                applied=False, reason=why, n_solves=0)))
+                applied=False, reason=why, n_solves=0,
+                n_free=int(np.count_nonzero(self._mse_free())))))
             self.mse_summary.update(applied=False, mse_converged=False,
                                     not_applied_reason=why)
         mse_applied = False
@@ -1381,11 +1383,21 @@ class UnifiedEngine:
         for ph in phases:
             if ph.get("name") == "mse":
                 ph["superseded_by_fallback"] = True
+        # the failed phase's Jacobian record: every key a delivered MSE
+        # phase's carries, as far as the stage got (n_free, the FD's
+        # n_solves, the scheme, orientation, J_initial, the passes' Broyden
+        # updates and refresh rounds) when the Jacobian was taken; n_free
+        # and n_solves (= the solves spent) when it was not.  n_solves_spent
+        # is always every solve since the snapshot (solves["mse_failed"]).
+        taken = self._mse_stage_fd
+        jac = dict(taken) if taken is not None else dict(
+            n_solves=n_spent,
+            n_free=int(np.count_nonzero(self._mse_free())))
+        jac.update(applied=False, failed=True, where=str(where), reason=txt,
+                   jacobian_taken=taken is not None,
+                   n_solves_spent=n_spent)
         phases.append(dict(name="mse", record=(rec if isinstance(rec, dict)
-                                               else None),
-                           jacobian=dict(applied=False, failed=True,
-                                         where=str(where), reason=txt,
-                                         n_solves=n_spent)))
+                                               else None), jacobian=jac))
 
     def _mse_fit_record(self, delivered, converged):
         """The chord chi^2 of the DELIVERED MSE fit against the raw
@@ -1481,6 +1493,10 @@ class UnifiedEngine:
                           mse_orientation, mse_orientation_check)
         from .utils import MSE_FLAG_PREFIX
         st, s = self.state, self.s
+        # the stage's Jacobian record as far as it got: a stage that fails
+        # after the Jacobian was taken keeps it on its failed phase
+        # (_mse_stage_failed), with the same keys as a delivered one
+        self._mse_stage_fd = None
         n0 = int(self.b.n_solves)
         lam = np.asarray(res["jbs_used"], dtype=float)
         g_last = self._geom_of_last_closure
@@ -1519,6 +1535,8 @@ class UnifiedEngine:
                 self.b.restore(snap)
                 return None, dict(applied=False, reason=why,
                                   n_solves=int(self.b.n_solves) - n0,
+                                  n_free=int(np.count_nonzero(
+                                      self._mse_free())),
                                   excluded_off_mesh=excl)
         # ---- orientation: STATED (the block's ip_sign/bt_sign against the
         # equilibrium's own directions, read off its field), never fitted;
@@ -1569,13 +1587,51 @@ class UnifiedEngine:
                   scheme=mse_scheme_text(s["mse_jacobian"]),
                   J_initial=J.tolist(), tg_base=tg0.tolist(),
                   chi2_pre_mse=float(c2_pre))
+        self._mse_stage_fd = fd
         self._mse_phase = dict(tg_prev=tg0, n_broyden=0)
         self._phase_name = "mse"
         meas0 = dict(li=m0["li"], q0=(m0["q_row"] if self.pin else None))
         n1 = int(self.b.n_solves)
-        n_ref = 0
-        rounds = []
+        rounds, cnt = [], dict(n_ref=0)
         lp = s["loop"]
+        try:
+            out = self._mse_passes(lam, meas0, rounds, lp, cnt)
+        finally:
+            # filled on success AND on a raise (a pass ceiling, a failed
+            # solve, the refresh cap): the failed phase records the passes'
+            # Broyden updates and refresh rounds as far as they got
+            fd["n_broyden_updates"] = int(self._mse_phase["n_broyden"])
+            n_ref = int(cnt["n_ref"])
+            fd["n_pass_solves"] = int(self.b.n_solves) - n1 - n_ref
+            fd["refresh"] = dict(
+                rule=("at each MSE loop's convergence the Jacobian is "
+                      "re-taken by the same finite differences around the "
+                      "last closure's coefficients; the closure's "
+                      "Gauss-Newton step with it must move tan(gamma) by <= "
+                      "mse_tol_sigma sigma_eff on every chord (else the loop "
+                      "continues with it)"),
+                max_refreshes=int(MSE_JACOBIAN_MAX_REFRESHES),
+                rounds=rounds, n_solves=n_ref,
+                fresh_J_stationary=bool(rounds and rounds[-1]["ok"]))
+            if rounds:
+                fd["jacobian_refresh_rel_change"] = rounds[-1][
+                    "jacobian_refresh_rel_change"]
+                fd["refresh_step_norm"] = rounds[-1]["refresh_step_norm"]
+                fd["refresh_step_dtg_max_sigma"] = rounds[-1][
+                    "refresh_step_dtg_max_sigma"]
+        self.solves["mse_fd"] = fd["n_solves"]
+        self.solves["mse_passes"] = fd["n_pass_solves"]
+        self.solves["mse_refresh"] = n_ref
+        return out, fd
+
+    def _mse_passes(self, lam, meas0, rounds, lp, cnt):
+        """The MSE loop, re-run with the refreshed Jacobian until the
+        fresh-Jacobian step is within the criterion (see :meth:`_mse_stage`);
+        appends each refresh's record to *rounds* and its solves to
+        ``cnt["n_ref"]`` (as it goes: a raise leaves both as far as they
+        got)."""
+        from .jbs_loop import JBSNotConverged
+        s = self.s
         while True:
             out = self._mse_loop(lam, meas0, label=self.label + " +MSE"
                                  + ("" if not rounds else
@@ -1589,7 +1645,7 @@ class UnifiedEngine:
                 break
             nr = int(self.b.n_solves)
             rf = self._refresh_jacobian(out)
-            n_ref += int(self.b.n_solves) - nr
+            cnt["n_ref"] += int(self.b.n_solves) - nr
             rounds.append(rf["record"])
             if rf["ok"]:
                 break
@@ -1616,27 +1672,7 @@ class UnifiedEngine:
             lam = np.asarray(out["jbs_used"], dtype=float)
             meas0 = rf["meas0"]
             rounds[-1]["previous_loop_record"] = out["record"]
-        fd["n_broyden_updates"] = int(self._mse_phase["n_broyden"])
-        fd["n_pass_solves"] = int(self.b.n_solves) - n1 - n_ref
-        fd["refresh"] = dict(
-            rule=("at each MSE loop's convergence the Jacobian is re-taken "
-                  "by the same finite differences around the last closure's "
-                  "coefficients; the closure's Gauss-Newton step with it "
-                  "must move tan(gamma) by <= mse_tol_sigma sigma_eff on "
-                  "every chord (else the loop continues with it)"),
-            max_refreshes=int(MSE_JACOBIAN_MAX_REFRESHES),
-            rounds=rounds, n_solves=n_ref,
-            fresh_J_stationary=bool(rounds and rounds[-1]["ok"]))
-        if rounds:
-            fd["jacobian_refresh_rel_change"] = rounds[-1][
-                "jacobian_refresh_rel_change"]
-            fd["refresh_step_norm"] = rounds[-1]["refresh_step_norm"]
-            fd["refresh_step_dtg_max_sigma"] = rounds[-1][
-                "refresh_step_dtg_max_sigma"]
-        self.solves["mse_fd"] = fd["n_solves"]
-        self.solves["mse_passes"] = fd["n_pass_solves"]
-        self.solves["mse_refresh"] = n_ref
-        return out, fd
+        return out
 
     def _mse_free(self):
         return np.concatenate([self.sigma_ind > 0, self.sigma_bs > 0])
