@@ -94,8 +94,22 @@ MSE rows accept **E_r-corrected** pitch angles only (`er_corrected=True`, no
 
 Pressures use `physics.ELEMENTARY_CHARGE`. The anchor E_0 is one (two-pass) solve of the source's own total current as
 the legacy path solves it (g-file: `|j_tor_averaged_direct|`; IDS: `j_tor`);
-it seeds the geometry and the first Redl bootstrap and does not enter the
-fixed point.
+it seeds the geometry and the first Redl bootstrap. **For a g-file the anchor
+also defines the fixed inductive, once:** a g-file carries only the total
+current, so the adapter (`GFileAdapter.finalize`) forms
+`jB_ind = smooth(<j.B>_in − Redl(E_0) − <j.B>_fix)` (the `fit_inductive_profile`
+basis, no amplitude search) from the Redl bootstrap ON THE ANCHOR, and that
+`jB_ind` is held fixed for the whole reconstruction (the closure then scales
+it, `s_ind`). Redl is re-evaluated on every pass's solved equilibrium
+thereafter; only the inductive's SHAPE remembers the anchor. So the g-file
+fixed point does depend on the anchor, through that one subtraction: it is
+the self-consistent state for the inductive the source's total current
+implies at the anchor's bootstrap, not for an inductive re-derived from the
+converged bootstrap (which would make the inductive a moving target of the
+loop it is meant to anchor). For an IDS source the inductive is the source's
+own (`j_total − j_bootstrap − Σ driven`, read once); beyond the seed, the
+anchor there only converts user-supplied toroidal fixed parts with its
+`F<1/R>/<B^2>` (as it does for a g-file's).
 
 ## Composition (identity I2)
 

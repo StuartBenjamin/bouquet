@@ -185,9 +185,13 @@ pressure + that equilibrium's `p_sep`).
   relaxation factors, the solved-vs-closure gap and the record-only
   unrelaxed closure residual `current_residual_unrelaxed`, tolerances, the
   post-homotopy check, the evaluator version, the OFT build as a path-free
-  identifier `oft_build = {version, git_hash, build_id}` (archives written by
-  earlier builds of this branch carry `oft_build.path`, the install
-  location, instead), and `init_source` -- what each loop started from,
+  identifier `oft_build = {version, git_hash, library_sha256,
+  sources_sha256, build_id}` -- `git_hash` is `None` outside a git checkout
+  (every installed build), so the SHA-256 of the loaded `liboftpy` and the
+  digest of the package's Python sources identify the build (added
+  2026-10-06; earlier records carry `{version, git_hash, build_id}`, and
+  archives written by earlier builds of this branch carry `oft_build.path`,
+  the install location, instead), and `init_source` -- what each loop started from,
   per loop under `loops` and for the draw's first loop at the top level); the `_baseline` group carries the same three
   attrs for the baseline's own loop (`jbs_n_passes` = its pass count). Names
   in `schema.JBS_LOOP_ATTRS`; write/read with `schema.write_jbs_loop` /

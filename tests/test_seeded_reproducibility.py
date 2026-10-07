@@ -535,7 +535,7 @@ def test_sigma0_r2_reproduces_the_baseline_jbs(sigma0_anchor):
 
     NOTE the norm: max deviation as a fraction of peak.  Issue #35 measured
     that this norm can read 0.04 % of peak while the INTEGRATED discrepancy
-    reaches 0.88 % of Ip on a real archive (201586) -- whether that is a
+    reaches 0.88 % of Ip on a real-discharge archive -- whether that is a
     state difference or a norm insensitivity is the open question split out
     of #35.  This bar is kept as-is until that is settled.
     """

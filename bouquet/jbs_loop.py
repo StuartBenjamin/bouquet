@@ -361,21 +361,84 @@ def _build_token(v):
     return t or None
 
 
+def _sha256_file(path, chunk=1 << 20):
+    """Hex SHA-256 of a file's bytes."""
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(chunk), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _sha256_tree(root, suffixes=(".py",)):
+    """Digest of a package's sources: sorted RELATIVE paths + contents (the
+    digest ``tests/golden/make_golden_fixture.py`` stamps as
+    ``sources_sha256``), so two installs of one revision in different
+    directories hash identically and no path enters the result."""
+    import hashlib
+    import os
+    h = hashlib.sha256()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+        for name in sorted(filenames):
+            if not name.endswith(suffixes):
+                continue
+            full = os.path.join(dirpath, name)
+            h.update(os.path.relpath(full, root).encode())
+            h.update(_sha256_file(full).encode())
+    return h.hexdigest()
+
+
+def _oft_library_path(pkg_dir):
+    """The compiled ``liboftpy`` the OpenFUSIONToolkit package loads (a
+    local path, used only to hash the file -- never recorded).
+
+    The library actually loaded when ``OpenFUSIONToolkit._interface`` is
+    imported (its ``ctypes`` handle's ``_name``); otherwise the package's own
+    search, in its order: ``liboftpy<.so|.dylib>`` beside the package
+    (``realpath`` of its directory), then ``../../bin`` from there.
+    """
+    import os
+    import sys
+    mod = sys.modules.get("OpenFUSIONToolkit._interface")
+    name = getattr(getattr(mod, "oftpy_lib", None), "_name", None)
+    if isinstance(name, str) and os.path.isfile(name):
+        return name
+    suffix = ".dylib" if sys.platform == "darwin" else ".so"
+    root = os.path.realpath(pkg_dir)
+    for base in (root, os.path.join(root, "..", "..", "bin")):
+        cand = os.path.join(base, "liboftpy" + suffix)
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
 def oft_build_info() -> dict:
-    """``{version, git_hash, build_id}`` of the imported OpenFUSIONToolkit
-    (cached).
+    """``{version, git_hash, library_sha256, sources_sha256, build_id}`` of
+    the imported OpenFUSIONToolkit (cached).
 
     ``version`` is the package's ``__version__``; ``git_hash`` the SHORT
     (12-character) commit id of the checkout the package lives in, when there
-    is one (an install tree without ``.git`` records ``None``); ``build_id``
-    the two together.  **No filesystem path is recorded** -- loop records are
-    written into archives and public fixtures, and the install location names
-    the machine and the user.  Every field is reduced to ``[A-Za-z0-9._+-]``,
-    so no directory component can survive.  Never raises.
+    is one (an install tree without ``.git`` -- every production install --
+    records ``None``); ``library_sha256`` the SHA-256 of the compiled
+    ``liboftpy`` the package loads (:func:`_oft_library_path`) and
+    ``sources_sha256`` the digest of the package's Python sources (sorted
+    relative paths + contents) -- the two fields
+    ``tests/golden/make_golden_fixture.py`` stamps, measured rather than
+    stated, so a fork build and an upstream build of the same version are
+    distinguishable from an archive alone; ``build_id`` all of it in one
+    string (the library digest shortened to 12 characters).  **No
+    filesystem path is recorded** -- loop records are written into archives
+    and public fixtures, and the install location names the machine and the
+    user.  Every field is reduced to ``[A-Za-z0-9._+-]``, so no directory
+    component can survive.  Never raises (a field that cannot be measured is
+    ``None``).
     """
     if "info" in _OFT_BUILD_CACHE:
         return dict(_OFT_BUILD_CACHE["info"])
-    info = {"version": None, "git_hash": None, "build_id": None}
+    info = {"version": None, "git_hash": None, "library_sha256": None,
+            "sources_sha256": None, "build_id": None}
     try:
         import os
         import subprocess
@@ -390,13 +453,25 @@ def oft_build_info() -> dict:
                 info["git_hash"] = _build_token(out.stdout.strip())
         except Exception:
             pass
+        try:
+            lib = _oft_library_path(pkg_dir)
+            if lib is not None:
+                info["library_sha256"] = _build_token(_sha256_file(lib))
+        except Exception:
+            pass
+        try:
+            info["sources_sha256"] = _build_token(_sha256_tree(pkg_dir))
+        except Exception:
+            pass
     except Exception:
         pass
     info["build_id"] = ("OpenFUSIONToolkit"
                         + ("" if info["version"] is None
                            else f" {info['version']}")
                         + ("" if info["git_hash"] is None
-                           else f" git {info['git_hash']}"))
+                           else f" git {info['git_hash']}")
+                        + ("" if info["library_sha256"] is None
+                           else f" lib {info['library_sha256'][:12]}"))
     _OFT_BUILD_CACHE["info"] = dict(info)
     return dict(info)
 

@@ -592,7 +592,9 @@ schema-v3 `jbs_loop` block -- attrs `jbs_converged`, `jbs_n_passes`,
 [archive-schema.md](archive-schema.md#v2--v3-the-self-consistent-bootstrap-record)): `enabled, init, grid, n_passes, converged,
 stop_reason, tolerances, omega[], r_j[], r_I[], dl_i[], dq0[], I_BS[],
 jBS_peak_psiN[], jBS_peak[], wall_s, evaluate_jBS_version, oft_build`
-(`version`, 12-character `git_hash`, `build_id`; no filesystem path -- records
+(`version`, 12-character `git_hash`, `library_sha256` of the loaded
+`liboftpy`, `sources_sha256` of the package's Python sources, `build_id`; no
+filesystem path -- records
 written by earlier builds of this branch carried the OFT package path there),
 `current_gap[]` and, next to it, `current_residual_unrelaxed[]` (record only,
 see above), plus `jBS_diff_definition` in diff mode, the per-pass closure log

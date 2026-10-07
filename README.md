@@ -88,7 +88,8 @@ release:
   stops at once with an error, instead of iterating to the iteration cap.
 
 On an upstream build bouquet runs, but does not detect the difference (it only
-records the OFT version and git hash in every archive). Measured on the
+records the OFT version, git hash and the SHA-256 of the loaded OFT library in
+every archive). Measured on the
 repository's synthetic examples with the live-solver tests (`pytest -m solver`)
 on both builds: every l_i and q value the tests record agreed within 0.12 %
 (l_i(3) of the engine on the g-file example: +0.001 %; q0 and q95: ±0.09 %),

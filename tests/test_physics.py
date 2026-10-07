@@ -544,8 +544,8 @@ class TestRadialField:
 
 class TestFloorInductiveSplit:
     """j_inductive >= 0 convention: negative pedestal residuals are floored and
-    absorbed into j_BS with the total exactly preserved (201586@4200 regression:
-    a negative GPR mean rejected all 500 candidate draws)."""
+    absorbed into j_BS with the total exactly preserved (a real-discharge
+    regression: a negative GPR mean rejected all 500 candidate draws)."""
 
     def test_floor_and_absorb(self):
         import numpy as np
