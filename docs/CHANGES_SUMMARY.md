@@ -196,7 +196,16 @@
   `io.imas.core_sources_slice`): the core_sources time nearest the
   core_profiles slice READ, within half the local core_profiles step of it
   (a single-time core_profiles uses the core_sources step; two single-time
-  bases, float precision), else refused naming both times.
+  bases, the 10 us floor below), else refused naming both times.
+- **Ten-microsecond floor with no time step (owner-approved 2026-10-07).**
+  When neither time base has a local step (a single-time entry on a
+  single-time core_profiles, or single-time core_sources and core_profiles)
+  the window is `io.imas.IMAS_SINGLE_TIME_WINDOW_S = 1e-5` s; it was a few
+  float ulp, so an entry 2 us after the slice was off before its record and
+  one 2 us before it was refused. Rounding-level mismatches of
+  millisecond-stored times are now matches with their dt recorded; the
+  off_before_record and refusal rules apply only beyond 10 us. With a local
+  step on either base nothing changes.
 - **Entries.** The match stays half the entry's OWN local step, and the
   matched own slice must ALSO lie within half the local core_profiles step
   of the core_profiles slice time: a coarse own grid read between its
@@ -387,7 +396,8 @@ test bar.
   - accept the match within HALF the local time-step of the entry's own
     grid (the interval the slice time lies in, or the end interval past
     either end). A single-time entry uses the core_profiles grid's local
-    step. With no step on either grid the window is float precision;
+    step. With no step on either grid the window was float precision
+    (10 us since 2026-10-07, `IMAS_SINGLE_TIME_WINDOW_S`);
   - otherwise REFUSE: `ValueError` from the reader, `EngineInputRefused`
     from the adapter. The error names the entry and its index, the slice
     time, the nearest own time, |dt| and the half-step.

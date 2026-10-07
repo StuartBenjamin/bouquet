@@ -144,6 +144,41 @@ def test_the_slice_helper_refuses_for_both_readers():
 # ---------------------------------------------------------------------------
 #  (2) the entry window is also bounded by the core_profiles step
 # ---------------------------------------------------------------------------
+def test_two_single_time_bases_use_the_ten_microsecond_floor():
+    """Owner-approved 2026-10-07: with no local step on either base the
+    window is IMAS_SINGLE_TIME_WINDOW_S = 10 us (it was a few float ulp),
+    for the core_sources slice (core_sources_slice) and for an entry
+    (_entry_time_window) alike -- shared by both readers.  With a step on
+    either base the half-step window is unchanged."""
+    from bouquet.io.imas import (IMAS_SINGLE_TIME_WINDOW_S, _entry_time_window,
+                                 core_sources_slice)
+    assert IMAS_SINGLE_TIME_WINDOW_S == 1e-5
+    # the core_sources slice 2 us either side of a single-time core_profiles
+    for d in (2e-6, -2e-6):
+        isrc, t_src, rec = core_sources_slice(dict(time=[2.2 + d]), [2.2], 0)
+        assert isrc == 0 and rec["dt"] == pytest.approx(d, rel=1e-6)
+        assert rec["window"] == IMAS_SINGLE_TIME_WINDOW_S
+        assert "IMAS_SINGLE_TIME_WINDOW_S" in rec["window_basis"]
+        assert "IMAS_SINGLE_TIME_WINDOW_S" in rec["rule"]
+    # 20 us: refused, as before
+    with pytest.raises(ValueError, match="the single-time floor"):
+        core_sources_slice(dict(time=[2.2 + 2e-5]), [2.2], 0)
+    # an entry: single-time own grid on a single-time base (or none)
+    for base in ([2.2], None):
+        k, dt, half = _entry_time_window([2.2 + 2e-6], 2.2, base)
+        assert (k, half) == (0, IMAS_SINGLE_TIME_WINDOW_S)
+        assert dt == pytest.approx(2e-6, rel=1e-6) and dt <= half
+        k, dt, half = _entry_time_window([2.2 + 2e-5], 2.2, base)
+        assert dt > half
+    # a step on either base: half that step, the floor plays no part
+    assert _entry_time_window([2.2], 2.2, [2.1, 2.2, 2.3])[2] == \
+        pytest.approx(0.05)
+    assert _entry_time_window([2.1, 2.2], 2.2, [2.2])[2] == \
+        pytest.approx(0.05)
+    assert core_sources_slice(dict(time=[2.2]), [2.1, 2.2], 1)[2][
+        "window"] == pytest.approx(0.05)
+
+
 def test_a_coarse_entry_grid_offset_is_refused_on_both_paths():
     """An entry on a grid ten times coarser than core_profiles, read
     between its own samples: within its own half-step, a full core_profiles

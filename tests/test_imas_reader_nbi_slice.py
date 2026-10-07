@@ -13,7 +13,9 @@ The time match (owner-approved 2026-10-06, replacing the 1e-6 s absolute
 match, under which a beam entry a few microseconds off the time base was
 dropped to ZERO with a warning): each entry is matched to its NEAREST own
 slice and accepted within HALF its local time-step (the core_profiles step
-for a single-time entry; float precision when neither grid has a step);
+for a single-time entry; 10 us -- ``IMAS_SINGLE_TIME_WINDOW_S``,
+owner-approved 2026-10-07, it was float precision -- when neither grid has
+a step);
 otherwise the read is REFUSED -- a beam is never silently zeroed.
 
 The slice read is visible in ``Baseline.j_NBI``: the beam entry's
@@ -157,12 +159,9 @@ def test_a_two_microsecond_offset_reads_the_nearest_slice_not_zero(
         assert not any("NBI" in m for m in msgs)
 
 
-def test_a_two_microsecond_offset_with_no_time_step_is_refused(tmp_path):
-    """With no step on either grid (a single-time IDS and a single-time beam
-    entry) the window is float precision: a 2 us offset is REFUSED -- never
-    a zero beam."""
-    dd, t = _dd_with_tagged_nbi()
-    k = 1
+def _single_time(dd, t, k):
+    """The tagged example reduced to its slice *k* on every time base (no
+    local step on either the core_profiles base or the beam entry)."""
     for blk in ("core_sources", "core_profiles", "equilibrium"):
         dd[blk]["time"] = [t[k]]
     dd["core_profiles"]["profiles_1d"] = [dd["core_profiles"]["profiles_1d"][k]]
@@ -173,22 +172,66 @@ def test_a_two_microsecond_offset_with_no_time_step_is_refused(tmp_path):
             vt["b0"] = [vt["b0"][k]]
     for src in dd["core_sources"]["source"]:
         src["profiles_1d"] = [src["profiles_1d"][k]]
-    # on the time: read
-    got = np.asarray(_read(tmp_path, copy.deepcopy(dd), t[k],
-                           "one.json").j_NBI)
-    np.testing.assert_array_equal(got, _reference(tmp_path, t, k))
-    # 2 us EARLY (the slice is past the entry's only, current-carrying,
-    # own time): refused
-    with pytest.raises(ValueError, match="within half a time-step.*Refusing"):
-        _read(tmp_path, _shifted(copy.deepcopy(dd), -2e-6), t[k],
-              "one_us.json")
-    # 2 us LATE (the slice precedes the entry's only own time): off before
-    # its record -- zero, stamped and announced (owner decision 2026-10-06;
-    # it was refused)
+    return dd
+
+
+def _nbi_match(bl):
+    return [x for x in bl.source_time_match["entries"]
+            if x["index"] == 2][0]
+
+
+@pytest.mark.parametrize("shift", [2e-6, -2e-6])
+def test_single_time_bases_match_within_the_ten_microsecond_floor(
+        tmp_path, shift):
+    """With no step on either grid (a single-time IDS and a single-time beam
+    entry) the window is IMAS_SINGLE_TIME_WINDOW_S = 10 us (owner-approved
+    2026-10-07; it was a few float ulp).  An entry 2 us AFTER the slice was
+    off before its record and one 2 us BEFORE it refused; both are now
+    MATCHED -- the beam read, bit-identical to the on-time read, its dt
+    recorded, nothing announced."""
+    from bouquet.io.imas import IMAS_SINGLE_TIME_WINDOW_S
+    assert IMAS_SINGLE_TIME_WINDOW_S == 1e-5
+    dd, t = _dd_with_tagged_nbi()
+    k = 1
+    dd = _single_time(dd, t, k)
+    # on the time: read, dt = 0
+    bl = _read(tmp_path, copy.deepcopy(dd), t[k], "one.json")
+    np.testing.assert_array_equal(np.asarray(bl.j_NBI),
+                                  _reference(tmp_path, t, k))
+    assert _nbi_match(bl)["dt"] == 0.0
     msgs = []
-    bl = _read(tmp_path, _shifted(dd, 2e-6), t[k], "one_us_late.json", msgs)
+    bl = _read(tmp_path, _shifted(dd, shift), t[k], "one_us.json", msgs)
+    got = np.asarray(bl.j_NBI)
+    np.testing.assert_array_equal(got, _reference(tmp_path, t, k))
+    assert np.max(np.abs(got)) > 0.0
+    e = _nbi_match(bl)
+    assert e["status"] == "matched"
+    assert e["status"] != "off_before_record"
+    assert e["matched_time"] == t[k] + shift
+    assert e["dt"] == pytest.approx(shift, rel=1e-6)
+    assert e["window_own"] == IMAS_SINGLE_TIME_WINDOW_S
+    assert not any("off_before_record" in m or "NBI" in m for m in msgs)
+
+
+def test_single_time_bases_beyond_the_floor_keep_the_record_rules(tmp_path):
+    """Beyond the 10 us floor the before-record / after-record rules apply
+    as before: an entry 20 us AFTER the slice (the slice precedes its only,
+    current-carrying, own time) is off before its record -- zero, stamped
+    and announced; one 20 us BEFORE it (the slice is past its only own
+    time) is REFUSED -- never a zero beam."""
+    dd, t = _dd_with_tagged_nbi()
+    k = 1
+    dd = _single_time(dd, t, k)
+    with pytest.raises(ValueError, match="within half a time-step.*Refusing"):
+        _read(tmp_path, _shifted(copy.deepcopy(dd), -2e-5), t[k],
+              "twenty_us_early.json")
+    msgs = []
+    bl = _read(tmp_path, _shifted(dd, 2e-5), t[k], "twenty_us_late.json",
+               msgs)
     assert np.all(np.asarray(bl.j_NBI) == 0.0)
-    assert bl.source_time_match["entries"][0]["status"] == "off_before_record"
+    e = _nbi_match(bl)
+    assert e["status"] == "off_before_record"
+    assert e["first_own_time"] == t[k] + 2e-5
     assert any("off_before_record" in m for m in msgs)
 
 

@@ -85,6 +85,17 @@ SAWTOOTH_SOURCE_INDEX = 701
 # FixedComponentsConfig.j_RF. See the "revisit RF" flag in the project notes
 # if/when internal EC/IC/LH summation is wanted.
 
+#: The time-match window [s] when NEITHER time base has a local step (a
+#: single-time core_sources entry on a single-time core_profiles base, or a
+#: single-time core_sources slice on a single-time core_profiles).
+#: Owner-approved 2026-10-07, replacing a window of a few float ulp:
+#: rounding-level mismatches of millisecond-stored times are MATCHES, with
+#: their dt recorded; the off_before_record (entry's own time after the
+#: slice) and refusal (entry's own time before the slice, carrying current)
+#: rules apply only beyond it.  When either base has a local step the
+#: half-step window is used and this floor plays no part.
+IMAS_SINGLE_TIME_WINDOW_S = 1e-5
+
 
 def _local_step(grid, k, toward):
     """The local time-step of the sorted, distinct *grid* at node *k*, on
@@ -107,8 +118,8 @@ def _entry_time_window(times, t_slice, base_times=None):
     entry with a single time uses the local step of *base_times* (the
     core_profiles time base) at the node nearest t_slice, on the entry's
     side.  When neither grid has a step (a single-time entry on a
-    single-time base) the window is float precision: the times must agree
-    to a few ulp.
+    single-time base) the window is :data:`IMAS_SINGLE_TIME_WINDOW_S`
+    (10 us, owner-approved 2026-10-07; it was a few float ulp).
 
     The rule (owner-approved 2026-10-06, replacing the 1e-6 s absolute
     match of 2026-10-05; the half-step value is recorded, to be confirmed):
@@ -134,7 +145,7 @@ def _entry_time_window(times, t_slice, base_times=None):
                 kb = int(np.argmin(np.abs(bg - t_slice)))
                 step = _local_step(bg, kb, float(tt[k]))
     if step is None:
-        half = 4.0 * float(np.spacing(max(abs(float(tt[k])), abs(t_slice))))
+        half = IMAS_SINGLE_TIME_WINDOW_S
     else:
         half = 0.5 * step
     return k, dt, half
@@ -233,14 +244,17 @@ SOURCE_TIME_RULE = (
     "core_profiles step of the core_profiles slice time (never "
     "interpolated); before the entry's first own time: off "
     "(off_before_record); past its last own time: refused when that slice "
-    "carries current; idle on its bracketing own slices: off")
+    "carries current; idle on its bracketing own slices: off; with no "
+    "local step on either time base the window is 1e-05 s "
+    "(IMAS_SINGLE_TIME_WINDOW_S)")
 
 
 def _cp_window(cp_times, src_times, t_cp, toward):
     """``(half, basis)``: the core_profiles window at the core_profiles
     slice time *t_cp* -- half its local step on the side of *toward*; a
     single-time core_profiles uses the core_sources' own local step, and
-    two single-time bases float precision (a few ulp)."""
+    two single-time bases :data:`IMAS_SINGLE_TIME_WINDOW_S` (10 us,
+    owner-approved 2026-10-07; it was a few float ulp)."""
     h = _half_local_step(cp_times, t_cp, toward)
     if h is not None:
         return h, "half the local core_profiles time-step"
@@ -248,8 +262,9 @@ def _cp_window(cp_times, src_times, t_cp, toward):
     if h is not None:
         return h, ("half the local core_sources time-step (core_profiles "
                    "has a single time)")
-    return (4.0 * float(np.spacing(max(abs(float(t_cp)), abs(float(toward))))),
-            "float precision (single-time core_profiles and core_sources)")
+    return (IMAS_SINGLE_TIME_WINDOW_S,
+            "the single-time floor IMAS_SINGLE_TIME_WINDOW_S (single-time "
+            "core_profiles and core_sources)")
 
 
 def core_sources_slice(src_ids, cp_times, ic, T=None, who="IMAS reader"):

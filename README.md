@@ -140,8 +140,11 @@ The following hold on both engines:
   `core_profiles` slice read and must lie within half the local
   `core_profiles` time-step of it, else the read is REFUSED naming both
   times. Each entry is matched to its nearest own slice, accepted within
-  half its own local step AND within half the local `core_profiles` step.
-  A beam entry with no such slice is REFUSED, never read at another time or
+  half its own local step AND within half the local `core_profiles` step;
+  when neither time base has a local step (single-time bases) the window is
+  10 us (`IMAS_SINGLE_TIME_WINDOW_S`, owner-approved 2026-10-07), so a
+  rounding-level mismatch of millisecond-stored times is a match with its
+  dt recorded. A beam entry with no such slice is REFUSED, never read at another time or
   dropped to zero -- unless it carries no current on its own slices
   bracketing that time (off there, zero), or the slice comes BEFORE its
   first own time (off before its record: zero, stamped `off_before_record`,
