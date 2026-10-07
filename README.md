@@ -105,8 +105,9 @@ longer). Run `verify_sigma0_consistency()` on a new machine or OFT build.
   (`generation.reconstruction_engine="unified"`, was `"legacy"`): one
   reconstruction loop for g-file and IDS inputs, which also runs the draws
   ([docs/engine.md](docs/engine.md)). `reconstruction_engine="legacy"`
-  restores the legacy reconstruction and draws; a configuration stored
-  before the engine existed replays as `"legacy"`. Legacy-only settings are refused under the engine, with that
+  restores the legacy reconstruction and draws (see "Legacy or unified?"
+  below); a configuration stored before the engine existed replays as
+  `"legacy"`. Legacy-only settings are refused under the engine, with that
   instruction;
 - one `<j.B>` -> `<j_phi>` conversion in the package, `F<1/R>/<B^2>` (the
   engine's): the legacy bootstrap at the pedestal drops by ~6.4-6.8 % on the
@@ -153,6 +154,25 @@ a warning naming every field it changes:
   default, because the default is what that run used.
 
 See `docs/CHANGES_SUMMARY.md` for every change and how to restore each.
+
+### Legacy or unified?
+
+Use the **unified engine** (the default) for new work: one reconstruction
+loop and one draw route for g-file and IDS inputs, every convergence row
+checked on the delivered equilibrium, and several times faster than the
+legacy path with the bootstrap loop on (reconstructions 38–76 s vs
+150–660 s, draws 60–144 s vs 405–1407 s on the shipped synthetic cases).
+Choose `reconstruction_engine="legacy"` only to reproduce or compare with an
+earlier run, or for a legacy-only feature (the closure channels and
+structured-preset settings, `jbs_self_consistent=False`, SWB mechanics, the
+`diff+C` IMAS workflow). A pre-release run is reproduced by setting
+`reconstruction_engine="legacy"`, `jbs_self_consistent=False` and
+`separatrix_pressure="legacy"` together, up to the canonical coil-solve mode
+(<= 5e-4 relative on draws) and the one current conversion (the frozen
+bootstrap is ~6.4-6.8 % lower at the pedestal), neither of which is
+switchable; a stored configuration that predates these fields gets them on
+load. Legacy-only settings on a unified configuration are refused, not
+ignored, and the error says to set `reconstruction_engine="legacy"`.
 
 ## Quickstart
 

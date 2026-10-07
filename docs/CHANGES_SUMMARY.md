@@ -4,6 +4,39 @@
 
 **Both change results by default.**
 
+### Reproducing a run made before this release; what moves on the default path
+
+- **Recipe.** `reconstruction_engine="legacy"` (the legacy reconstruction and
+  draws) + `jbs_self_consistent=False` (the frozen SWB bootstrap) +
+  `separatrix_pressure="legacy"` (the full axis pressure as the solver's
+  target). A stored config that predates these fields gets all three on
+  load. Two moves remain that are NOT switchable: the canonical coil-solve
+  mode (one bounded coil solve entered at `setup_solver`; measured <= 5e-7
+  relative on reconstructions and <= 5e-4 on archived draws, yields and
+  in-spec flags unchanged) and the one current conversion below (the frozen
+  bootstrap's `_swb_jbs_to_toroidal` is now kappa: -6.4 to -6.8 % at the
+  pedestal of the synthetic example). `jbs_self_consistent=False` on its own
+  is NOT "bit for bit legacy" (an earlier entry said so; corrected).
+- **On the default path (loop on, engine or legacy), not opt-in:**
+  - the structured soft closure's **noise-floor acceptance** is on (every
+    loop closure call passes `accept_noise_floor=True`); a rounding-level
+    effect -- an iterate stationary within the objective's rounding noise is
+    accepted instead of raising;
+  - the **exact elementary charge** (`physics.ELEMENTARY_CHARGE`,
+    1.602176634e-19, -1.46e-5 relative to the 1.6022e-19 the frozen path
+    keeps) in the thermal pressure of the reconstruction and the draws;
+  - the **g-file anchor's axis-pressure target is the FULL pressure**
+    (thermal + fast + impurity), the draws' convention; the frozen path
+    inherits SWB's thermal-only target;
+  - under the loop the legacy **IMAS q0 corrector and the structured-l_i
+    corrector record and flag instead of correcting**: the loop re-solves
+    with the axis row and the l_i row held at their targets, and the
+    residuals a corrector step would have reduced are measured and flagged
+    against `q0_tol` / `structured_li_tol`, not corrected
+    (`jbs_loop_q0_corrector=True` makes the q0 pin act per pass; the l_i row
+    stays held either way). The unified engine instead has the q0 and l_i
+    rows inside its loop.
+
 ### `reconstruction_engine` default `"legacy"` -> `"unified"`
 
 - **What moves.** `GenerationConfig.reconstruction_engine` now defaults to
@@ -798,14 +831,18 @@ and iterates it to self-consistency. The bootstrap/inductive split moves, and
 with it l_i, q0 and every per-draw bootstrap response. The golden regression
 fixture has been regenerated with the loop on and input-current archival
 (17 of 20 draws archived, 10 in spec; `tests/golden/README.md`, "The
-self-consistent-bootstrap refresh"). To reproduce a run made before this
-release, set `jbs_self_consistent=False` -- the legacy frozen bootstrap, bit
-for bit (guarded by a solver test that tripwires the loop kernel and the
-Redl evaluator on that path). That holds because the one solver criterion the
-loop changed, the structured soft closure's noise-floor acceptance (below),
-is opt-in -- `close_ip_structured_soft(..., accept_noise_floor=True)`, passed
-only by the loop's closure calls -- and the frozen path's calls keep the
-default `False`, the historical strict solver. Also:
+self-consistent-bootstrap refresh"). `jbs_self_consistent=False` alone does
+NOT reproduce a run made before this release (corrected 2026-10-06; this
+paragraph used to say it was the legacy frozen bootstrap "bit for bit"). The
+reproduction recipe is in "Reproducing a run made before this release" at the
+top of this file: loop off AND `separatrix_pressure="legacy"` AND
+`reconstruction_engine="legacy"`, with two residual moves that are not
+switchable (the canonical coil-solve mode, the one current conversion). The
+noise-floor acceptance of the structured soft closure (below) is passed only
+by the loop's closure calls (`close_ip_structured_soft(...,
+accept_noise_floor=True)`); the frozen path's calls keep the historical strict
+solver -- but since the loop is the DEFAULT, the noise-floor acceptance is on
+the default path (see that section). Also:
 
 - A stored config without the field (an old archive's `config_json`, or any
   dict/JSON without it) loads with `jbs_self_consistent=False` and a warning
@@ -1000,10 +1037,14 @@ legacy corrector already takes its step.
 
 ### Review fixes (2026-09-29)
 
-- **Noise-floor acceptance is opt-in** (`accept_noise_floor`, default
-  `False` = the historical strict solver, raising exactly where and with
-  exactly the message it did before the loop). It had been applied to every
-  caller, the frozen path included. A non-finite or non-positive noise
+- **Noise-floor acceptance is opt-in at the function** (`accept_noise_floor`,
+  default `False` = the historical strict solver, raising exactly where and
+  with exactly the message it did before the loop) -- and ON on the default
+  path, because every closure call of the self-consistent loop (the default)
+  passes `True`; only the frozen path keeps the strict solver. Its effect is
+  rounding-level (it accepts an iterate stationary within the objective's
+  rounding noise instead of raising). It had been applied to every caller,
+  the frozen path included. A non-finite or non-positive noise
   estimate now accepts nothing; every acceptance is printed as well as
   recorded. `NOISE_FLOOR_FACTOR` (2) and every tolerance are unchanged.
 - **`evaluate_jBS` never returns a silently zeroed bootstrap.** Non-physical

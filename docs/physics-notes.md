@@ -149,14 +149,18 @@ probe rather than an independent check.
 is re-evaluated on the delivered equilibrium inside a relaxed outer loop
 (closure ↔ GS solve ↔ Redl) that runs to a convergence test, in every path
 that builds a j_phi containing a bootstrap. `jbs_self_consistent=False` is the
-**legacy frozen bootstrap**, the historical code path (kept for A/B comparisons
-and for reproducing archives made before the loop existed). It is that path
-bit for bit because the one solver change the loop needed -- the structured
-soft closure's noise-floor acceptance, below -- is **opt-in**:
-`utils.close_ip_structured_soft(..., accept_noise_floor=True)` is passed only
-by the loop's closure calls, and every frozen-path call keeps the default
-(`False`), the historical strict solver, which refuses exactly where and with
-exactly the message it always did.
+**legacy frozen bootstrap** (with `reconstruction_engine="legacy"`; the
+unified engine is the loop and refuses it), kept for A/B comparisons and for
+reproducing archives made before the loop existed. It is NOT by itself the
+pre-release code path bit for bit: reproduction also needs
+`reconstruction_engine="legacy"` and `separatrix_pressure="legacy"`, and two
+moves are not switchable -- the canonical coil-solve mode (<= 5e-4 relative on
+draws) and the one current conversion (the frozen bootstrap is ~6.4-6.8 %
+lower at the pedestal on the synthetic example). The structured soft
+closure's noise-floor acceptance, below, is passed only by the loop's closure
+calls (`utils.close_ip_structured_soft(..., accept_noise_floor=True)`); every
+frozen-path call keeps the historical strict solver. Since the loop is the
+default, that acceptance is on the DEFAULT path (a rounding-level effect).
 Two consequences of the default:
 
 - `single_profile_jphi=True` and `recalculate_j_BS=False` have no bootstrap to
