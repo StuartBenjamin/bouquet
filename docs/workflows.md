@@ -545,9 +545,19 @@ flux-surface geometry factor to convert from bouquet's toroidal components, and
 
 | `fidelity` | Parallel split uses | When |
 |---|---|---|
-| `"exact"` | the draw's **own** captured `eq_fsa` geometry (`toroidal_to_parallel`) | draws deviate from the baseline; the split must track each perturbed equilibrium |
+| `"exact"` | an engine draw's stored `<j.B>` parts (`jB_parallel/`, no conversion); otherwise the draw's **own** captured `eq_fsa` geometry (`toroidal_to_parallel`) | draws deviate from the baseline; the split must track each perturbed equilibrium |
 | `"reconstruct"` | the baseline template ratio `c = j_tor/j_total` | exact only when a draw's flux geometry matches the baseline's |
-| `"auto"` *(default)* | exact when the `eq_fsa` block is present, else reconstruct | — |
+| `"auto"` *(default)* | stored parts, else exact when the `eq_fsa` block is present, else reconstruct | — |
+
+No exported parallel current carries the pressure-driven term
+`P = p'(<R> - F^2<1/R>/<B^2>)` (its `<j.B>` is zero; a reader recovers it from
+the pressure): `j_ohmic` is the field-aligned inductive only and `j_total =
+j_ohmic + j_bootstrap + driven`. The archived toroidal `j_inductive` is the
+residual `j_phi - j_BS - fixed` and carries `P`; when the draw has no stored
+`<j.B>` parts the exporter subtracts `P` (from the archived eqdsk's own flux
+surfaces) before converting. Export -> `IdsAdapter.read` returns the archived
+`<j.B>` parts and `<j_phi>` (2026-10-06; before, `P/kappa` sat inside the
+exported `j_ohmic` / `j_total` and a re-read counted it twice).
 
 `eq_fsa` is captured at generate time from the live TokaMaker object
 (`GenerationConfig.capture_live_eq`, on by default), so a freshly generated

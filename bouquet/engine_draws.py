@@ -1559,6 +1559,23 @@ class GenerateEngineDraws:
         sp = self._cur["final_split"]
         j_phi = np.asarray(j_phi, dtype=float)
         j_ind = j_phi - sp["j_BS"] - sp["j_NBI"] - sp["j_RF"]
+        # the PARALLEL parts of the archived split (schema: the draw's
+        # ``jB_parallel/`` subgroup; docs/archive-schema.md): the bootstrap
+        # and fixed <j.B> the toroidal parts were converted from, and the
+        # field-aligned inductive <j.B> = (j_inductive - P) / kappa, P the
+        # pressure-driven p'(<R> - F^2<1/R>/<B^2>) of the archived state --
+        # so j_phi = kappa (jB_inductive + jB_BS + jB_NBI + jB_RF) + P
+        # exactly, and an IDS export carries no pressure-driven current in
+        # any parallel field (io.imas.write_imas_draw)
+        kap = np.asarray(sp["kappa"], dtype=float)
+        P = np.asarray(sp["j_pressure"], dtype=float)
+        self._cur["parallel"] = dict(
+            psi_N=np.asarray(self.ctx.psi, dtype=float).copy(),
+            jB_inductive=(j_ind - P) / kap,
+            jB_BS=np.asarray(sp["jB_BS"], dtype=float).copy(),
+            jB_NBI=np.asarray(sp["jB_NBI"], dtype=float).copy(),
+            jB_RF=np.asarray(sp["jB_RF"], dtype=float).copy(),
+            kappa=kap.copy(), j_pressure=P.copy())
         neg = j_ind < 0.0
         diagnostics["engine"]["archived"]["split"] = dict(
             convention=("j_phi: the archived equilibrium's achieved FSA "
@@ -1624,17 +1641,24 @@ class GenerateEngineDraws:
         # bootstrap model (x* held: s_bs (1 + d_bs) x scale x Redl) and its
         # fixed parts, both converted with THIS state's F<1/R>/<B^2>; the
         # residual against the archived j_phi is :meth:`archived_split`'s
-        from .engine import conversion_factor
+        from .engine import conversion_factor, pressure_term
         kap = conversion_factor(fin["geom"])
         dpl = cur["draw"].get("passes_post_homotopy") or cur["draw"]["passes"]
         fx = self.ctx.c.jB_fix_parts
+        _amp = 1.0 + float(dpl.last["amp"].get("d_bs", 0.0))
+        _scale = float(cur["draw"]["inputs"].scale)
+        jB_BS = (_amp * self.ctx.s_bs * _scale
+                 * np.asarray(fin["redl"], dtype=float))
+        jB_NBI = np.asarray(fx["nbi"], dtype=float)
+        jB_RF = (np.asarray(fx["rf"], dtype=float)
+                 + np.asarray(fx.get("other", 0.0), dtype=float))
         cur["final_split"] = dict(
-            j_BS=(1.0 + float(dpl.last["amp"].get("d_bs", 0.0)))
-            * self.ctx.s_bs * kap * float(cur["draw"]["inputs"].scale)
-            * np.asarray(fin["redl"], dtype=float),
-            j_NBI=kap * np.asarray(fx["nbi"], dtype=float),
-            j_RF=kap * (np.asarray(fx["rf"], dtype=float)
-                        + np.asarray(fx.get("other", 0.0), dtype=float)))
+            j_BS=(_amp * self.ctx.s_bs * kap * _scale
+                  * np.asarray(fin["redl"], dtype=float)),
+            j_NBI=kap * jB_NBI, j_RF=kap * jB_RF,
+            jB_BS=jB_BS, jB_NBI=jB_NBI * np.ones_like(kap),
+            jB_RF=jB_RF * np.ones_like(kap), kappa=kap,
+            j_pressure=pressure_term(fin["geom"]))
         rec["archived"]["deltas"] = dict(
             l_i_3=float(fin["li"]) - float(self.ctx.ref["l_i"]),
             l_i_1=(None if (rec["archived"]["l_i_1"] is None
@@ -1687,7 +1711,8 @@ class GenerateEngineDraws:
                   "drift of the loop's delivered draw"))
         rec["cost"] = clock.record()
         _write_draw_block(header, count, scan_key, rec,
-                          diagnostics.get(DRAW_BAND_FLAG))
+                          diagnostics.get(DRAW_BAND_FLAG),
+                          parallel=cur.get("parallel"))
         clock.start("filters")
 
     def until_n(self, ok, reasons, diagnostics, header=None, count=None,
@@ -1705,7 +1730,8 @@ class GenerateEngineDraws:
             rec = diagnostics.get("engine")
             if rec is not None:
                 rec["cost"] = cur["clock"].record()
-                _write_draw_block(header, count, scan_key, rec, band)
+                _write_draw_block(header, count, scan_key, rec, band,
+                                  parallel=cur.get("parallel"))
         return bool(ok and (band is None or band)), reasons
 
     def store_baseline(self, header, scan_key, baseline):
@@ -1742,9 +1768,10 @@ def _jbs_block(loop_rec):
         final=loop_rec))
 
 
-def _write_draw_block(header, count, scan_key, record, band):
+def _write_draw_block(header, count, scan_key, record, band, parallel=None):
     import h5py
     from .engine import write_engine_json
+    from .schema import write_jB_parallel
     from .utils import _group_path, _resolve_h5
     with h5py.File(_resolve_h5(header), "a") as hf:
         gp = _group_path(scan_key, count)
@@ -1754,6 +1781,8 @@ def _write_draw_block(header, count, scan_key, record, band):
         write_engine_json(grp, record)
         if band is not None:
             grp.attrs[DRAW_BAND_FLAG] = bool(band)
+        if parallel is not None:
+            write_jB_parallel(grp, parallel)
 
 
 def read_draw_engine(header, count, scan_key=None):

@@ -97,6 +97,11 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
         │   ├── psi_N                  (subgroup; see below)
         │   ├── F, avg_inv_R, avg_inv_R2, avg_B2
         │   └── q, dV_dpsi, f_trap, B_avg
+        ├── [jB_parallel/]             engine draws (added 2026-10-06): the
+        │   ├── psi_N                  <j.B> parts of the archived split
+        │   ├── jB_inductive, jB_BS    (see "The current split of an
+        │   ├── jB_NBI, jB_RF          engine draw group" below)
+        │   └── kappa, j_pressure
         ├── [engine_json]              engine draw record as a string DATASET
         │                              when too large for an attribute
         └── attrs: l_i(1), l_i(3), count, homotopy_*, max_F_drift_pct,
@@ -298,6 +303,27 @@ pressure + that equilibrium's `p_sep`).
     (`n_negative_inductive`, `min_inductive`, `negative_inductive_psi_N`)
     and printed, never altered or filtered. (Legacy draws keep their split:
     the residual floored at zero with the sliver moved into `j_BS`.)
+  - **`jB_parallel/`** (engine draws, added 2026-10-06; keys and units
+    `JB_PARALLEL_GROUP` / `JB_PARALLEL_UNITS` in `schema.py`, read with
+    `bouquet.schema.read_jB_parallel(group)`): the PARALLEL parts the
+    toroidal split above was converted from, raw `<j.B>` [T A m⁻²] in the
+    positive frame on the subgroup's `psi_N` (the draw's grid) --
+    `jB_BS` (the bootstrap model on the archived state), `jB_NBI`,
+    `jB_RF` (rf + other driven), and `jB_inductive` the FIELD-ALIGNED
+    inductive only, `(j_inductive - j_pressure) / kappa`; with `kappa =
+    F<1/R>/<B^2>` and `j_pressure = p'(<R> - F^2<1/R>/<B^2>)` [A m⁻²] of
+    the archived state, `j_phi = kappa (jB_inductive + jB_BS + jB_NBI +
+    jB_RF) + j_pressure` to round-off. The toroidal `j_inductive` (the
+    residual) CARRIES `j_pressure`; the parallel one does not. The IDS
+    exporter (`write_imas_draw`) writes these parts as they are, so no
+    exported parallel current (`j_ohmic`, `j_bootstrap`, `j_total`)
+    carries the pressure-driven term and export -> `IdsAdapter.read`
+    returns the archived `<j.B>` parts and `<j_phi>`. For draws without
+    the subgroup (every legacy draw; engine draws archived before
+    2026-10-06) the exporter subtracts `j_pressure` computed from the
+    archived eqdsk's own flux surfaces (`io.imas.archived_pressure_term`,
+    COCOS 7) from `j_inductive` before converting with the `eq_fsa`
+    geometry.
   - `passes_draw_band` (bool attr, engine draws only): the post-hoc band
     verdict. It is one of the filter flags ANDed into `selected`
     (`filtering._FILTER_FLAGS`), so `.filter()` selects what the until-N

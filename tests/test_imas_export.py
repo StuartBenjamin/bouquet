@@ -37,6 +37,14 @@ _EQ_FSA = {
 _B0 = 2.0
 
 
+def _P_on(psiN_t):
+    """The pressure-driven p'(<R> - F^2<1/R>/<B^2>) of the archived eqdsk on
+    the template grid -- what the exporter subtracts from j_inductive."""
+    from bouquet.io.imas import archived_pressure_term
+    with open(_GEQ, "rb") as fh:
+        return archived_pressure_term(fh.read(), psiN_t)
+
+
 def _make_archive(path, with_fsa=True):
     with h5py.File(path, "w") as hf:
         g = hf.require_group("scan/0/0")
@@ -99,8 +107,15 @@ class TestExactImasExport:
             "avg_B2": np.interp(psiN_t, _PF, _EQ_FSA["avg_B2"]),
             "B0": _B0,
         }
-        exp_jtot = toroidal_to_parallel(np.interp(psiN_t, _PEQ, _J_PHI), geom=geom)
-        exp_johm = toroidal_to_parallel(np.interp(psiN_t, _PEQ, _J_IND), geom=geom)
+        # the archived j_inductive carries the pressure-driven term P (the
+        # residual j_phi - j_BS - fixed): subtracted before converting, so
+        # no exported parallel current carries it (2026-10-06); j_total =
+        # j_ohmic + j_bootstrap + driven = (j_phi - P) / kappa
+        P = _P_on(psiN_t)
+        exp_jtot = toroidal_to_parallel(np.interp(psiN_t, _PEQ, _J_PHI) - P,
+                                        geom=geom)
+        exp_johm = toroidal_to_parallel(np.interp(psiN_t, _PEQ, _J_IND) - P,
+                                        geom=geom)
         exp_jbs = toroidal_to_parallel(np.interp(psiN_t, _PEQ, _J_BS), geom=geom)
         assert np.allclose(cp["j_total"], exp_jtot, rtol=1e-10)
         assert np.allclose(cp["j_ohmic"], exp_johm, rtol=1e-10)
@@ -152,9 +167,11 @@ class TestReconstructFidelityValues:
         psiN_t = (psi - psi[0]) / (psi[-1] - psi[0])
         c = 4e5 / 5e5                     # the template's j_tor / j_total
         jt = np.interp(psiN_t, _PEQ, _J_PHI)
+        P = _P_on(psiN_t)                 # subtracted (no P in any parallel)
         assert np.allclose(cp["j_tor"], jt, rtol=1e-12)
-        assert np.allclose(cp["j_total"], jt / c, rtol=1e-12)
-        assert np.allclose(cp["j_ohmic"], np.interp(psiN_t, _PEQ, _J_IND) / c,
+        assert np.allclose(cp["j_total"], (jt - P) / c, rtol=1e-12)
+        assert np.allclose(cp["j_ohmic"],
+                           (np.interp(psiN_t, _PEQ, _J_IND) - P) / c,
                            rtol=1e-12)
         assert np.allclose(cp["j_bootstrap"], np.interp(psiN_t, _PEQ, _J_BS) / c,
                            rtol=1e-12)

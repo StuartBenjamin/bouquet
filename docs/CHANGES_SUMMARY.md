@@ -105,6 +105,28 @@
   `j_bootstrap` / `j_ohmic` / `j_total` now invert exactly what bouquet
   converts in with.
 
+### IDS export: no pressure-driven current in any parallel field (fix)
+
+- **What was wrong (pre-dates the engine).** `write_imas_draw` converted the
+  archived toroidal `j_inductive` -- the residual `j_phi - j_BS - fixed`,
+  which carries the pressure-driven term `P = p'(<R> - F^2<1/R>/<B^2>)`
+  (engine draws by construction; legacy draws freeze it there) -- to
+  `<j.B>/B0` as it was, so `P/kappa` sat inside the exported `j_ohmic` and
+  `j_total`; the engine's `IdsAdapter` re-adds `P` from the pressure, so a
+  re-read counted it twice (+0.3 / +3.9 / +8.6 / +10.4 / +17.7 % of `j_phi`
+  at psi_N 0.5 / 0.9 / 0.95 / 0.97 / 0.99 on the synthetic example).
+- **Now.** Engine draws archive their `<j.B>` parts (`jB_parallel/`, schema:
+  `jB_inductive` the field-aligned inductive only, `jB_BS`, `jB_NBI`,
+  `jB_RF`, with `kappa` and `j_pressure`); the exporter writes them as they
+  are. Draws without them (legacy; engine archives before this change) have
+  `P` -- from the archived eqdsk's own flux surfaces,
+  `io.imas.archived_pressure_term` -- subtracted from `j_inductive` before
+  the conversion. `j_total = j_ohmic + j_bootstrap + driven`. Export ->
+  `IdsAdapter.read` returns the archived parts and `<j_phi>` to 1e-9
+  (`tests/test_imas_export_roundtrip.py`, engine and legacy archives).
+  The exported `j_ohmic` / `j_total` change by `-P/kappa` (as above); `j_tor`
+  and `j_bootstrap` do not.
+
 ## Decisions on record (owner, 2026-10-05) -- no value changes
 
 Approvals given on 2026-10-05 for settings that were already in force but had

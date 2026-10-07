@@ -962,6 +962,46 @@ def test_the_archived_split_is_on_the_archived_state_and_never_clipped(
         assert "never clipped" in sp["convention"]
 
 
+def test_the_archive_carries_the_parallel_parts_of_the_split(
+        tmp_path, monkeypatch):
+    """Every engine draw group carries ``jB_parallel/`` (schema): the
+    <j.B> parts of its archived split, with j_phi = kappa (jB_inductive +
+    jB_BS + jB_NBI + jB_RF) + j_pressure to round-off, jB_BS = j_BS /
+    kappa and jB_inductive = (j_inductive - j_pressure) / kappa -- the
+    field-aligned inductive only (the IDS exporter writes these, so no
+    exported parallel current carries the pressure-driven term).  The
+    archived state's <B^2> is moved by 3 % so kappa(archived) differs from
+    the reconstruction's."""
+    import h5py
+    from bouquet.engine import conversion_factor, pressure_term
+    from bouquet.schema import read_jB_parallel
+    from bouquet.utils import _group_path, _resolve_h5
+    stored = _spy_store(monkeypatch)
+    fins = _final_measures(monkeypatch, geom_scale={"B2": 1.03})
+    diags, rej, h, G = _generate(tmp_path, monkeypatch, n=1)
+    assert len(diags) == 1 and rej == [] and len(stored) == 1
+    fin, st = fins[-1], stored[0]
+    with h5py.File(_resolve_h5(h), "r") as hf:
+        par = read_jB_parallel(hf[_group_path(None, st["count"])])
+    assert par is not None
+    kap = conversion_factor(fin["geom"])
+    P = pressure_term(fin["geom"])
+    assert np.max(np.abs(P)) > 0.0
+    np.testing.assert_allclose(par["kappa"], kap, rtol=1e-15, atol=0.0)
+    np.testing.assert_allclose(par["j_pressure"], P, rtol=1e-15, atol=0.0)
+    np.testing.assert_allclose(par["jB_BS"] * kap, st["j_BS"], rtol=1e-12,
+                               atol=0.0)
+    np.testing.assert_allclose(
+        par["jB_inductive"], (st["j_inductive"] - P) / kap, rtol=1e-12,
+        atol=0.0)
+    comp = kap * (par["jB_inductive"] + par["jB_BS"] + par["jB_NBI"]
+                  + par["jB_RF"]) + P
+    np.testing.assert_allclose(comp, st["j_phi"], rtol=1e-12,
+                               atol=1e-12 * np.max(np.abs(st["j_phi"])))
+    fx = G.ctx.c.jB_fix_parts
+    np.testing.assert_array_equal(par["jB_NBI"], np.asarray(fx["nbi"]))
+
+
 def _final_measures(monkeypatch, geom_scale=None):
     """Capture every FINAL measurement of the toy backend (the archived
     state's); with *geom_scale* = {field: factor}, the archived state's

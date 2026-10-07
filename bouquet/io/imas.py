@@ -1396,6 +1396,44 @@ def _eq_fsa_geom_on(eq_fsa, psiN_t, B0):
     return {"F": F, "avg_inv_R": avg_inv_R, "avg_B2": avg_B2, "B0": float(B0)}
 
 
+#: COCOS of the eqdsk bytes bouquet archives per draw (TokaMaker's
+#: ``save_eqdsk``): psi decreasing outward for Ip > 0, per radian.
+ARCHIVE_EQDSK_COCOS = 7
+
+_P_TERM_CACHE = {}
+
+
+def archived_pressure_term(eqdsk_bytes, psi_N):
+    """The pressure-driven ``<j_phi>`` part ``p'(<R> - F^2<1/R>/<B^2>)``
+    (:func:`bouquet.engine.pressure_term`) of an ARCHIVED draw eqdsk, in the
+    archive's positive frame, interpolated onto *psi_N*.
+
+    ``p'``, ``F``, ``<R>``, ``<1/R>``, ``<B^2>`` come from the eqdsk's own
+    traced flux surfaces read as :data:`ARCHIVE_EQDSK_COCOS`
+    (:func:`bouquet.adapters.gfile_parallel_current`, which refuses an
+    eqdsk whose ``<j_phi>`` does not carry its own Ip's sign).  This is the
+    term an archived toroidal ``j_inductive`` carries when it is the
+    residual ``j_phi - j_BS - fixed`` (every legacy draw, and engine draws
+    archived before the ``jB_parallel/`` subgroup); the IDS exporter
+    subtracts it before converting the inductive to ``<j.B>``.  Cached per
+    eqdsk content (the trace takes ~2 s)."""
+    import hashlib
+    from ..adapters import gfile_parallel_current
+    from ..engine import pressure_term
+    from .geqdsk import GEQDSKEquilibrium
+    raw = bytes(eqdsk_bytes)
+    key = hashlib.sha256(raw).hexdigest()
+    hit = _P_TERM_CACHE.get(key)
+    if hit is None:
+        geq = GEQDSKEquilibrium.from_bytes(raw, cocos=ARCHIVE_EQDSK_COCOS)
+        _jB, parts = gfile_parallel_current(geq)
+        hit = (np.asarray(geq.psi_N, dtype=float), pressure_term(parts))
+        if len(_P_TERM_CACHE) > 64:
+            _P_TERM_CACHE.clear()
+        _P_TERM_CACHE[key] = hit
+    return np.interp(np.asarray(psi_N, dtype=float), hit[0], hit[1])
+
+
 def _signed_b0(out, ie, ic):
     """The template's own vacuum B0 (signed), equilibrium first; None if absent
     or zero.  The writer keeps ``vacuum_toroidal_field`` as it is, so this is
@@ -1533,18 +1571,39 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     kinetics/currents to ``core_profiles``. ``j_tor`` is exact.
 
     The parallel split (``j_total`` / ``j_ohmic`` / ``j_bootstrap`` =
-    IMAS ``<j.B>/B0``) fidelity is set by ``fidelity``:
+    IMAS ``<j.B>/B0``) carries NO pressure-driven current: the term
+    ``P = p'(<R> - F^2<1/R>/<B^2>)`` has ``<j.B> = 0`` and a reader
+    recovers it from the pressure (the engine's
+    :class:`~bouquet.adapters.IdsAdapter` composes ``<j_phi> = kappa <j.B>
+    + P``).  ``j_ohmic`` is the field-aligned inductive only,
+    ``j_bootstrap`` the bootstrap, and ``j_total = j_ohmic + j_bootstrap +
+    driven`` (the driven parts, beams / RF, are the archive's ``j_phi -
+    j_inductive - j_BS``; the template's ``core_sources`` are kept as they
+    are).  So export -> ``IdsAdapter.read`` returns the archived ``<j.B>``
+    parts and the archived ``<j_phi>`` (tests/test_imas_export_roundtrip.py).
+    Before 2026-10-06 the archived toroidal ``j_inductive`` -- the residual
+    ``j_phi - j_BS - fixed``, which carries ``P`` -- was converted as it
+    was, so ``P / kappa`` sat inside the exported ``j_ohmic`` / ``j_total``
+    and a re-read counted it twice.  The source of the split is set by
+    ``fidelity``:
 
-      * ``"exact"``       -- convert each toroidal component with the draw's OWN
-        captured flux-surface geometry (``eq_fsa`` block, from
+      * engine draws archived with the ``jB_parallel/`` subgroup (schema;
+        the ``<j.B>`` parts the toroidal split was converted from) are
+        written from it directly under ``"auto"`` and ``"exact"`` -- no
+        conversion;
+      * ``"exact"``       -- otherwise convert with the draw's OWN captured
+        flux-surface geometry (``eq_fsa`` block, from
         ``capture_live_eq=True`` at generate time) via
-        :func:`bouquet.physics.toroidal_to_parallel`. Raises if the block is
-        absent.
+        :func:`bouquet.physics.toroidal_to_parallel` (``kappa =
+        F<1/R>/<B^2>``), after subtracting ``P`` -- from the archived
+        eqdsk's own surfaces, :func:`archived_pressure_term` -- from the
+        archived ``j_inductive``.  Raises if the block is absent.
       * ``"reconstruct"`` -- the interim baseline ratio ``c = j_tor/j_total``
-        from the template (exact only when the draw's flux geometry matches the
-        baseline's).
-      * ``"auto"`` (default) -- exact when the ``eq_fsa`` block is present,
-        else reconstruct.
+        from the template in place of ``kappa``, with the same ``P``
+        subtraction (approximate: exact only when the draw's flux geometry
+        matches the baseline's).
+      * ``"auto"`` (default) -- stored parts when present, else exact when
+        the ``eq_fsa`` block is present, else reconstruct.
 
     Parameters
     ----------
@@ -1619,11 +1678,15 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
         zeff = np.asarray(g["aux_zeff"][()]) if "aux_zeff" in g else None
         li1 = float(g.attrs.get("l_i(1)", np.nan))
         li3 = float(g.attrs.get("l_i(3)", np.nan))
-        from ..schema import find_bytes_dataset, EQ_FSA_GROUP
+        from ..schema import (find_bytes_dataset, EQ_FSA_GROUP,
+                              read_jB_parallel)
         eqk = find_bytes_dataset(g)
         if eqk is None:
             raise KeyError(f"draw {draw_index} has no archived eqdsk")
-        geq = read_eqdsk_from_bytes(bytes(g[eqk][()]), read_geqdsk)
+        eq_bytes = bytes(g[eqk][()])
+        geq = read_eqdsk_from_bytes(eq_bytes, read_geqdsk)
+        # the engine draw's stored PARALLEL parts (schema jB_parallel/)
+        jB_par = read_jB_parallel(g)
         # optional captured live-equilibrium FSA block (exact conversion)
         eq_fsa = None
         if EQ_FSA_GROUP in g:
@@ -1704,48 +1767,77 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     jt_t = to_t(j_tor, peq)
     cp["j_tor"] = (s_I * jt_t).tolist()
 
-    # Parallel split (j_total / j_ohmic / j_bootstrap = IMAS <j.B>/B0). Two
-    # fidelities (`fidelity` arg): EXACT uses the draw's own captured
-    # flux-surface geometry (eq_fsa) via physics.toroidal_to_parallel;
-    # RECONSTRUCT falls back to the interim baseline ratio c=j_tor/j_total from
-    # the template (exact only when the draw's flux geometry matches baseline).
+    # Parallel split (j_total / j_ohmic / j_bootstrap = IMAS <j.B>/B0).
+    # NO exported parallel current carries the pressure-driven term
+    # P = p'(<R> - F^2<1/R>/<B^2>) (its <j.B> is zero; a reader recovers it
+    # from the pressure -- the engine's IdsAdapter composes
+    # <j_phi> = kappa <j.B> + P): j_ohmic is the field-aligned inductive
+    # only, j_bootstrap the bootstrap, and j_total = j_ohmic + j_bootstrap
+    # + the driven parts.  Sources, in order:
+    #   STORED  -- an engine draw's jB_parallel/ subgroup (the <j.B> parts
+    #              the archived toroidal split was converted from), written
+    #              as they are (/ |B0|): no conversion at all;
+    #   EXACT   -- the draw's captured eq_fsa geometry: kappa = F<1/R>/<B^2>
+    #              (physics.toroidal_to_parallel), with P (archived eqdsk,
+    #              archived_pressure_term) subtracted from the archived
+    #              toroidal j_inductive -- which carries it, being the
+    #              residual j_phi - j_BS - fixed (legacy draws; engine draws
+    #              archived before jB_parallel/) -- before converting;
+    #   RECONSTRUCT -- the template's ratio c = j_tor/j_total in place of
+    #              kappa, the same P subtraction (approximate: exact only
+    #              when the draw's flux geometry matches the baseline's).
+    # The driven parts of a toroidal archive are j_phi - j_inductive - j_BS.
     if base_jtot is not None:
-        use_exact = False
-        if fidelity in ("auto", "exact") and eq_fsa is not None:
-            geom = _eq_fsa_geom_on(eq_fsa, psiN_t, _imas_b0(out, ie, ic))
-            if geom is not None:
-                from ..physics import toroidal_to_parallel
-                cp["j_total"] = (s_I * toroidal_to_parallel(
-                    jt_t, geom=geom)).tolist()
-                cp["j_ohmic"] = (s_I * toroidal_to_parallel(
-                    to_t(j_ind, peq), geom=geom)).tolist()
-                cp["j_bootstrap"] = (s_I * toroidal_to_parallel(
-                    to_t(j_bs, peq), geom=geom)).tolist()
-                use_exact = True
-        if fidelity == "exact" and not use_exact:
-            raise ValueError(
-                f"fidelity='exact' requested but draw {draw_index} has no "
-                "captured eq_fsa block (generate with capture_live_eq=True). "
-                "Use fidelity='auto' to fall back to the baseline-ratio "
-                "reconstruction.")
-        if not use_exact:                      # baseline-ratio reconstruction
-            if base_jtor is None:
+        B0_exp = _imas_b0(out, ie, ic)
+        parts_t = None                       # positive frame, <j.B>/B0
+        if fidelity in ("auto", "exact") and jB_par is not None:
+            src = np.asarray(jB_par.get("psi_N", peq), dtype=float)
+
+            def _pt(name):
+                return np.interp(psiN_t, src, jB_par[name]) / B0_exp
+            parts_t = dict(ohmic=_pt("jB_inductive"),
+                           bootstrap=_pt("jB_BS"),
+                           driven=_pt("jB_NBI") + _pt("jB_RF"))
+        else:
+            P_t = archived_pressure_term(eq_bytes, psiN_t)
+            jt_ind = to_t(j_ind, peq)
+            jt_bs = to_t(j_bs, peq)
+            jt_drv = jt_t - jt_ind - jt_bs
+            if fidelity in ("auto", "exact") and eq_fsa is not None:
+                geom = _eq_fsa_geom_on(eq_fsa, psiN_t, B0_exp)
+                if geom is not None:
+                    from ..physics import toroidal_to_parallel
+                    parts_t = dict(
+                        ohmic=toroidal_to_parallel(jt_ind - P_t, geom=geom),
+                        bootstrap=toroidal_to_parallel(jt_bs, geom=geom),
+                        driven=toroidal_to_parallel(jt_drv, geom=geom))
+            if fidelity == "exact" and parts_t is None:
                 raise ValueError(
-                    "fidelity='reconstruct' needs the template's own "
-                    "core_profiles j_tor to form the ratio c = j_tor/j_total; "
-                    "the template has none. Use an archive with a captured "
-                    "eq_fsa block (fidelity='exact').")
-            eps = 1e-9 * np.nanmax(np.abs(base_jtot)) if base_jtot.size else 0.0
-            good = np.abs(base_jtot) > eps
-            c = np.ones_like(base_jtot)
-            c[good] = base_jtor[good] / base_jtot[good]
-            if not np.all(good):
-                idx = np.arange(c.size)
-                c[~good] = np.interp(idx[~good], idx[good], c[good])
-            with np.errstate(divide="ignore", invalid="ignore"):
-                cp["j_total"] = (s_I * (jt_t / c)).tolist()
-                cp["j_ohmic"] = (s_I * (to_t(j_ind, peq) / c)).tolist()
-                cp["j_bootstrap"] = (s_I * (to_t(j_bs, peq) / c)).tolist()
+                    f"fidelity='exact' requested but draw {draw_index} has no "
+                    "captured eq_fsa block (generate with capture_live_eq=True). "
+                    "Use fidelity='auto' to fall back to the baseline-ratio "
+                    "reconstruction.")
+            if parts_t is None:                # baseline-ratio reconstruction
+                if base_jtor is None:
+                    raise ValueError(
+                        "fidelity='reconstruct' needs the template's own "
+                        "core_profiles j_tor to form the ratio c = j_tor/j_total; "
+                        "the template has none. Use an archive with a captured "
+                        "eq_fsa block (fidelity='exact').")
+                eps = 1e-9 * np.nanmax(np.abs(base_jtot)) if base_jtot.size else 0.0
+                good = np.abs(base_jtot) > eps
+                c = np.ones_like(base_jtot)
+                c[good] = base_jtor[good] / base_jtot[good]
+                if not np.all(good):
+                    idx = np.arange(c.size)
+                    c[~good] = np.interp(idx[~good], idx[good], c[good])
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    parts_t = dict(ohmic=(jt_ind - P_t) / c,
+                                   bootstrap=jt_bs / c, driven=jt_drv / c)
+        cp["j_ohmic"] = (s_I * parts_t["ohmic"]).tolist()
+        cp["j_bootstrap"] = (s_I * parts_t["bootstrap"]).tolist()
+        cp["j_total"] = (s_I * (parts_t["ohmic"] + parts_t["bootstrap"]
+                                + parts_t["driven"])).tolist()
 
     with open(out_path, "w") as fh:
         json.dump(out, fh)

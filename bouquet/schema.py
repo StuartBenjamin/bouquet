@@ -141,6 +141,59 @@ EQ_FSA_UNITS = {
 }
 
 
+# The PARALLEL current parts of an engine draw (optional per-draw subgroup,
+# written by the unified engine's draws since 2026-10-06): the field-aligned
+# <j.B> components the archived toroidal split was converted from, on the
+# subgroup's own psi_N (the draw's grid), positive (co-Ip) frame, raw <j.B>
+# (NOT IMAS <j.B>/B0).  Identity, exact to round-off on that grid:
+#   j_phi = kappa (jB_inductive + jB_BS + jB_NBI + jB_RF) + j_pressure
+# with kappa = F<1/R>/<B^2> (physics.field_aligned_conversion) and
+# j_pressure = p'(<R> - F^2<1/R>/<B^2>) of the archived state.  jB_inductive
+# is the field-aligned inductive ONLY (the archived toroidal j_inductive
+# minus j_pressure, over kappa).  The IDS exporter writes these, so no
+# exported parallel current carries the pressure-driven term.
+JB_PARALLEL_GROUP = "jB_parallel"
+JB_PARALLEL_UNITS = {
+    "psi_N": "",
+    "jB_inductive": "T A m^-2",
+    "jB_BS": "T A m^-2",
+    "jB_NBI": "T A m^-2",
+    "jB_RF": "T A m^-2",       # rf (ec/lh/ic) + other driven
+    "kappa": "T^-1",           # F<1/R>/<B^2>
+    "j_pressure": "A m^-2",    # toroidal, p'(<R> - F^2<1/R>/<B^2>)
+}
+
+
+def write_jB_parallel(grp, parts):
+    """Write the ``jB_parallel/`` subgroup (see :data:`JB_PARALLEL_GROUP`)
+    into the draw group *grp*, replacing any earlier one."""
+    import numpy as np
+    if JB_PARALLEL_GROUP in grp:
+        del grp[JB_PARALLEL_GROUP]
+    sub = grp.create_group(JB_PARALLEL_GROUP)
+    for name, unit in JB_PARALLEL_UNITS.items():
+        if parts.get(name) is None:
+            raise ValueError(f"write_jB_parallel: missing {name!r}")
+        ds = sub.create_dataset(name, data=np.asarray(parts[name],
+                                                      dtype=np.float64))
+        if unit:
+            ds.attrs["units"] = unit
+    sub.attrs["identity"] = ("j_phi = kappa (jB_inductive + jB_BS + jB_NBI "
+                             "+ jB_RF) + j_pressure")
+    return sub
+
+
+def read_jB_parallel(grp):
+    """The ``jB_parallel/`` subgroup of a draw group as a dict of float
+    arrays, or ``None`` (a legacy draw, or an engine draw archived before
+    2026-10-06)."""
+    import numpy as np
+    if JB_PARALLEL_GROUP not in grp:
+        return None
+    sub = grp[JB_PARALLEL_GROUP]
+    return {k: np.asarray(sub[k][()], dtype=float) for k in sub}
+
+
 def is_binary_profile_source(data: bytes) -> bool:
     """True if profile-source bytes are a binary container (an IDA ``.cdf`` --
     netCDF4/HDF5 or classic netCDF3), not an Osborne text p-file.
