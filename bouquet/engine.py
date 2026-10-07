@@ -531,10 +531,11 @@ def convergence_table(settings: dict, contract=None) -> list:
 # ---------------------------------------------------------------------------
 def conversion_factor(geom) -> np.ndarray:
     """``F<1/R>/<B^2>``: the field-aligned ``<j.B>`` -> ``<j_phi>`` factor
-    (conversion (c) of the verification report)."""
-    F = np.asarray(geom["F"], dtype=float)
-    return F * np.asarray(geom["inv_R"], dtype=float) \
-        / np.asarray(geom["B2"], dtype=float)
+    (conversion (c) of the verification report) on an engine geometry
+    (keys ``F``, ``inv_R``, ``B2``) -- the package's ONE conversion,
+    :func:`bouquet.physics.field_aligned_conversion`."""
+    from .physics import field_aligned_conversion
+    return field_aligned_conversion(geom["F"], geom["inv_R"], geom["B2"])
 
 
 def pressure_term(geom) -> np.ndarray:

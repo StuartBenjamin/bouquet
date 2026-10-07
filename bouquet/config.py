@@ -513,7 +513,8 @@ class GenerationConfig:
     l_i_tolerance: float = 0.05            # l_i acceptance band (fraction of target)
     constrain_sawteeth: bool = False
     # When True, recompute bootstrap each draw via TokaMaker solve_with_bootstrap
-    # and convert its parallel output to toroidal (see physics.parallel_to_toroidal),
+    # and convert its parallel output to toroidal <j_phi> with the one
+    # field-aligned factor F<1/R>/<B^2> (physics.field_aligned_conversion),
     # overriding the baseline/FUSE j_BS. When False, keep the baseline j_BS.
     recalculate_j_BS: bool = True
     # Treat j_phi as ONE profile: no inductive/bootstrap decomposition anywhere.
@@ -1322,11 +1323,12 @@ class GenerationConfig:
     capture_live_eq: bool = True
     # FSA grid for the captured block (matches the 257^2 eqdsk; >=129).
     capture_npsi: int = 257
-    # Compute exact <1/R^2> by flux-surface quadrature (TokaMaker does not
-    # expose it) so the conversion is machine-exact rather than using the
-    # <B_phi^2>~=<B^2> bracket (1-2% on a D3D-like plasma, 1.4% at the
-    # bootstrap peak; physics.parallel_to_toroidal). Adds ~65 surface traces/draw; set False
-    # to skip that cost (self-validated + graceful fallback either way).
+    # Record <1/R^2> in the captured block (from get_q when the OFT build
+    # exposes it, else by flux-surface quadrature).  Archived geometry only:
+    # since 2026-10-06 the IDS export's conversion is the one field-aligned
+    # factor F<1/R>/<B^2> (physics.field_aligned_conversion), which does not
+    # read it.  The quadrature adds ~65 surface traces/draw; set False to skip
+    # that cost (self-validated + graceful fallback either way).
     capture_exact_inv_R2: bool = True
 
     def __post_init__(self):

@@ -10,7 +10,10 @@ conventions:
   * :func:`parallel_to_toroidal` -- convert a flux-surface-averaged *parallel*
     current density <j.B>/B0 (the IMAS / neoclassical convention for j_ohmic,
     j_bootstrap, and the driven currents) to the *toroidal* current density
-    <j_phi/R>/<1/R>. bouquet stores every current component as toroidal j_phi.
+    bouquet stores and the solver consumes: the plain flux-surface average
+    <j_phi> (TokaMaker's ``jphi-linterp``).  The field-aligned conversion is
+    ONE factor in the whole package, :func:`field_aligned_conversion`
+    (``kappa = F<1/R>/<B^2>``), shared with the unified engine.
 """
 
 from __future__ import annotations
@@ -173,6 +176,56 @@ def isotropize_fast_pressure(p_perp, p_par, method: str):
     )
 
 
+def field_aligned_conversion(F, avg_inv_R, avg_B2):
+    """``kappa = F <1/R> / <B^2>``: THE ``<j.B>`` -> ``<j_phi>`` factor.
+
+    For a field-aligned current component ``j = lambda(psi) B`` (``lambda =
+    <j.B>/<B^2>``; the neoclassical banana-plateau bootstrap and the driven
+    currents -- the Pfirsch-Schlueter return current has ``<j_PS.B> = 0`` and
+    is not part of the component) with ``B_phi = F/R``::
+
+        <j_phi> = lambda F <1/R> = <j.B> F <1/R> / <B^2> = kappa <j.B>
+
+    ``<j_phi>`` is the plain flux-surface average the solver consumes
+    (OpenFUSIONToolkit's ``jphi-linterp`` ``jphi_update``), and with the
+    pressure-driven part the composition identity of the unified engine
+
+        <j_phi> = kappa <j.B>  +  p' (<R> - F^2 <1/R> / <B^2>)
+
+    is exact.  Every conversion in bouquet -- :func:`parallel_to_toroidal`,
+    :func:`toroidal_to_parallel` (its exact inverse), :func:`evaluate_jBS`,
+    ``TokaMaker_interface._swb_jbs_to_toroidal`` and
+    :func:`bouquet.engine.conversion_factor` -- is this one factor
+    (2026-10-06; see :func:`parallel_to_toroidal` for what moved).
+    """
+    return (np.asarray(F, dtype=float) * np.asarray(avg_inv_R, dtype=float)
+            / np.asarray(avg_B2, dtype=float))
+
+
+_INV_R2_REFUSED = (
+    "geom carries 'avg_inv_R2': bouquet's <j.B> <-> <j_phi> conversion is "
+    "the one field-aligned factor kappa = F<1/R>/<B^2> "
+    "(physics.field_aligned_conversion) since 2026-10-06; the former "
+    "<1/R^2> branch (the IMAS <j_phi/R>/<1/R> convention, "
+    "<j.B>F<1/R^2>/(<B^2><1/R>)) is gone.  Drop 'avg_inv_R2' from geom "
+    "(or set it to None).")
+
+
+def _analytic_geom(geom):
+    try:
+        F = np.asarray(geom["F"], dtype=float)
+        avg_inv_R = np.asarray(geom["avg_inv_R"], dtype=float)
+        avg_B2 = np.asarray(geom["avg_B2"], dtype=float)
+    except KeyError as missing:
+        raise ValueError(
+            f"geom is missing required key {missing} "
+            "(need 'F', 'avg_inv_R', 'avg_B2'; optional 'B0')"
+        ) from None
+    if geom.get("avg_inv_R2") is not None:
+        raise ValueError(_INV_R2_REFUSED)
+    return F, avg_inv_R, avg_B2
+
+
 def parallel_to_toroidal(
     j_parallel,
     *,
@@ -180,19 +233,12 @@ def parallel_to_toroidal(
     j_tor_total=None,
     geom: Optional[dict] = None,
 ):
-    """Convert FSA parallel current density <j.B>/B0 to toroidal <j_phi/R>/<1/R>.
+    """Convert FSA parallel current density ``<j.B>/B0`` to toroidal ``<j_phi>``.
 
     bouquet stores all current components (inductive/ohmic, bootstrap, NBI, RF)
-    as toroidal j_phi. IMAS/neoclassical outputs are parallel; this applies the
-    per-flux-surface geometric conversion. The correction is typically modest but
-    grows toward the edge / at low aspect ratio.
-
-    This is needed in TWO places, not just on IMAS input:
-      * IMAS-input bootstrap/ohmic/driven currents (use the *ratio* method).
-      * bouquet's OWN recomputed bootstrap -- TokaMaker ``solve_with_bootstrap``
-        returns a *parallel* j_BS, which must be converted here before it
-        replaces the baseline j_BS (when ``recalculate_j_BS`` is True). Use the
-        *analytic* method with the TokaMaker equilibrium's FSA metrics.
+    as the toroidal current the solver consumes, the plain flux-surface
+    average ``<j_phi>``.  IMAS/neoclassical outputs are parallel; this applies
+    the per-flux-surface geometric conversion.
 
     Two methods:
 
@@ -200,43 +246,36 @@ def parallel_to_toroidal(
       the total parallel current and the total toroidal current (FUSE
       ``core_profiles`` carries ``j_total`` *and* ``j_tor``), form the per-surface
       factor ``c(psi) = j_tor_total / j_parallel_total`` and apply it to the
-      component. Exact to the geometric mapping shared by field-aligned
-      components; self-consistent with the source equilibrium.
+      component. Self-consistent with the source equilibrium.
 
-    * **analytic** -- compute from equilibrium FSA metrics in ``geom`` when
-      totals are unavailable (the reconstruction path, and bouquet's own
-      per-draw ``solve_with_bootstrap`` output). Models the component as
-      field-aligned, ``j = lambda(psi) B`` with ``lambda = <j.B>/<B^2>``
-      (the standard treatment of the neoclassical banana-plateau /
-      driven currents; the Pfirsch-Schlueter return current, which has
-      ``<j_PS.B> = 0``, is by construction not part of the component), so
+    * **analytic** -- the field-aligned factor of
+      :func:`field_aligned_conversion`, from equilibrium FSA metrics in
+      ``geom`` (the reconstruction path, bouquet's own Redl bootstrap)::
 
-          j_tor = <j_phi/R>/<1/R> = lambda * F * <1/R^2> / <1/R>
-                = <j.B> * F * <1/R^2> / (<B^2> <1/R>)
-                = <j.B> / (F <1/R>) * [<B_phi^2>/<B^2>]
+          <j_phi> = kappa <j.B>,   kappa = F <1/R> / <B^2>
 
-      using ``<B_phi^2> = F^2 <1/R^2>`` (exact, since ``B_phi = F/R``).
-      ``geom`` keys:
+      ``geom`` keys: ``F`` (``R B_phi`` [T m]), ``avg_inv_R`` (``<1/R>``
+      [1/m]), ``avg_B2`` (``<B^2>`` [T^2]) and, optionally, ``B0`` (the
+      normalisation of the input: pass the IMAS ``vacuum_toroidal_field`` B0
+      when ``j_parallel`` is ``<j.B>/B0``; default 1 = raw ``<j.B>``
+      [T A/m^2]).  A ``geom`` carrying ``avg_inv_R2`` is REFUSED (the former
+      ``<1/R^2>`` branch is gone; see below).
 
-        ``F``          flux function ``R*B_phi`` [T m]
-        ``avg_inv_R``  ``<1/R>`` [1/m]
-        ``avg_B2``     ``<B^2>`` [T^2]
-        ``avg_inv_R2`` ``<1/R^2>`` [1/m^2], OPTIONAL -- when absent the
-                       bracket ``<B_phi^2>/<B^2>`` is taken as 1,
-                       neglecting ``<B_p^2>/<B^2> ~ (eps/q)^2`` and so
-                       OVERESTIMATING j_tor by that fraction -- NOT
-                       sub-1%%.  Measured on the synthetic D3D-like
-                       golden case (17 draws): 6e-5 at psi_N = 0.001,
-                       0.6%% at 0.1, 1.4%% at 0.3, 1.8-2.1%% at
-                       mid-radius (its maximum), 1.4%% at the bootstrap
-                       peak (psi_N ~ 0.96), 1.0%% at 0.999; 1.4-1.5%% of
-                       the bootstrap current integral.  The
-                       retained ``1/(F<1/R>)`` projection carries the
-                       O(eps^2) geometry.
-        ``B0``         normalisation of the input, OPTIONAL (default 1):
-                       pass the IMAS ``vacuum_toroidal_field`` B0 when
-                       ``j_parallel`` is the IMAS convention ``<j.B>/B0``;
-                       leave at 1 when passing raw ``<j.B>`` [T A/m^2].
+    **Declared default physics change (2026-10-06, owner-approved).**  Until
+    then the package held three conventions: the legacy bootstrap sites
+    (:func:`evaluate_jBS`, ``TokaMaker_interface._swb_jbs_to_toroidal``)
+    called this function without ``<1/R^2>`` -> ``<j.B>/(F<1/R>)``; the IDS
+    exporter passed ``<1/R^2>`` -> ``<j.B>F<1/R^2>/(<B^2><1/R>)`` (the IMAS
+    ``<j_phi/R>/<1/R>`` convention); the unified engine used kappa.  The
+    legacy factor exceeds kappa by
+
+        <B^2>/(F^2 <1/R>^2) = [<B^2>/<B_phi^2>] x [<1/R^2>/<1/R>^2]
+
+    (``<B_phi^2> = F^2 <1/R^2>``): the bracket (the poloidal-field content,
+    ~1.4 %) times the Jensen ratio (~5.2 %) -- +6.8 % at psi_N ~ 0.97 on the
+    synthetic D3D-like example (+1.0 % at 0.1, +4.3 % at 0.5, +6.4 % at
+    0.9; measured 2026-10-06).  The legacy bootstrap at the pedestal therefore drops by that
+    fraction; the engine path is unchanged (it already used kappa).
 
     Pass either (``j_parallel_total``, ``j_tor_total``) for the ratio method or
     ``geom`` for the analytic method.
@@ -263,25 +302,9 @@ def parallel_to_toroidal(
         return j_parallel * c
 
     if geom is not None:
-        try:
-            F = np.asarray(geom["F"], dtype=float)
-            avg_inv_R = np.asarray(geom["avg_inv_R"], dtype=float)
-            avg_B2 = np.asarray(geom["avg_B2"], dtype=float)
-        except KeyError as missing:
-            raise ValueError(
-                f"geom is missing required key {missing} "
-                "(need 'F', 'avg_inv_R', 'avg_B2'; optional 'avg_inv_R2', 'B0')"
-            ) from None
+        F, avg_inv_R, avg_B2 = _analytic_geom(geom)
         j_dot_B = j_parallel * float(geom.get("B0", 1.0))
-        # field-aligned component: j_tor = <j.B> F <1/R^2> / (<B^2> <1/R>);
-        # F^2 <1/R^2> == <B_phi^2>, ~= <B^2> when <1/R^2> is unavailable
-        # (neglects <B_p^2>/<B^2> ~ (eps/q)^2: 1-2% on a D3D-like
-        # plasma, see the docstring -- not sub-1%).
-        if "avg_inv_R2" in geom and geom["avg_inv_R2"] is not None:
-            bphi2_over_B2 = F**2 * np.asarray(geom["avg_inv_R2"], dtype=float) / avg_B2
-        else:
-            bphi2_over_B2 = 1.0
-        return j_dot_B * bphi2_over_B2 / (F * avg_inv_R)
+        return j_dot_B * field_aligned_conversion(F, avg_inv_R, avg_B2)
 
     raise ValueError(
         "provide either (j_parallel_total, j_tor_total) for the ratio method "
@@ -290,68 +313,29 @@ def parallel_to_toroidal(
 
 
 def toroidal_to_parallel(j_tor, *, geom: dict):
-    """Inverse of :func:`parallel_to_toroidal` (analytic method).
+    """The exact inverse of :func:`parallel_to_toroidal` (analytic method).
 
-    Convert bouquet's toroidal current density ``<j_phi/R>/<1/R>`` back to the
-    IMAS flux-surface-averaged parallel current ``<j.B>/B0``. This is the
-    write-back direction: bouquet stores every current component (ohmic,
-    bootstrap, driven) as toroidal ``j_phi``; IMAS ``core_profiles.j_ohmic /
-    j_bootstrap / j_total`` are parallel ``<j.B>/B0`` (EUROfusion/IMAS
-    convention, with ``j_phi == <J^phi>/<1/R>``). Uses the draw's OWN
-    flux-surface-averaged (FSA) geometry, so it is exact per surface -- unlike
-    the interim baseline-ratio reconstruction it replaces.
+    Convert bouquet's toroidal current density ``<j_phi>`` back to the IMAS
+    flux-surface-averaged parallel current ``<j.B>/B0`` (the write-back
+    direction: IMAS ``core_profiles.j_ohmic / j_bootstrap / j_total`` are
+    parallel)::
 
-    Physics (verified against Wesson 4th ed. sec 4.4 -- FSA
-    ``<A> = oint (A/B_p) dl / oint dl/B_p``, and the field-aligned /
-    Pfirsch-Schlueter decomposition with ``<j_PS.B> = 0``). For a field-aligned
-    component ``j = lambda(psi) B`` with ``lambda = <j.B>/<B^2>`` and
-    ``B_phi = F/R``:
+        <j.B> = <j_phi> / kappa,   kappa = F <1/R> / <B^2>
 
-        j_tor = <j_phi/R>/<1/R> = <j.B> F <1/R^2> / (<B^2> <1/R>)
+    (:func:`field_aligned_conversion`), so a component converted in by
+    :func:`parallel_to_toroidal` round-trips to machine precision on the same
+    ``geom``.  Uses the draw's OWN flux-surface geometry when given it.
 
-    so the inverse is
-
-        <j.B> = j_tor <B^2> <1/R> / (F <1/R^2>)
-              = j_tor F <1/R> [<B^2>/<B_phi^2>]      (<B_phi^2> = F^2 <1/R^2>)
-
-    and the IMAS parallel current is ``<j.B>/B0``.
-
-    ``geom`` keys (all per-surface arrays unless noted):
-
-        ``F``          flux function ``R*B_phi`` [T m]
-        ``avg_inv_R``  ``<1/R>`` [1/m]
-        ``avg_B2``     ``<B^2>`` [T^2]
-        ``avg_inv_R2`` ``<1/R^2>`` [1/m^2], OPTIONAL -- when absent the exact
-                       ``<B_phi^2> = F^2 <1/R^2>`` is unavailable and the
-                       bracket ``<B^2>/<B_phi^2>`` is taken as 1, neglecting
-                       ``<B_p^2>/<B^2> ~ (eps/q)^2`` -- 1.0-2.1%% across a
-                       D3D-like plasma (see :func:`parallel_to_toroidal`),
-                       not sub-1%%.
-                       Provide it (from the captured live equilibrium) for a
-                       machine-exact conversion.
-        ``B0``         output normalisation (default 1): pass the IMAS
-                       ``vacuum_toroidal_field`` B0 to return ``<j.B>/B0``;
-                       leave at 1 to return raw ``<j.B>`` [T A/m^2].
-
-    Round-trips with :func:`parallel_to_toroidal` (analytic) to machine
-    precision when the same ``geom`` (including ``avg_inv_R2``) is used.
+    ``geom`` keys: ``F``, ``avg_inv_R``, ``avg_B2`` and optionally ``B0``
+    (output normalisation: pass the IMAS ``vacuum_toroidal_field`` B0 to
+    return ``<j.B>/B0``; default 1 = raw ``<j.B>`` [T A/m^2]).  A ``geom``
+    carrying ``avg_inv_R2`` is REFUSED: the former ``<1/R^2>`` branch (the
+    inverse of the IMAS ``<j_phi/R>/<1/R>`` convention) is gone since
+    2026-10-06 -- see :func:`parallel_to_toroidal`.
     """
     j_tor = np.asarray(j_tor, dtype=float)
-    try:
-        F = np.asarray(geom["F"], dtype=float)
-        avg_inv_R = np.asarray(geom["avg_inv_R"], dtype=float)
-        avg_B2 = np.asarray(geom["avg_B2"], dtype=float)
-    except KeyError as missing:
-        raise ValueError(
-            f"geom is missing required key {missing} "
-            "(need 'F', 'avg_inv_R', 'avg_B2'; optional 'avg_inv_R2', 'B0')"
-        ) from None
-    if "avg_inv_R2" in geom and geom["avg_inv_R2"] is not None:
-        # <B^2>/<B_phi^2>, exact (B_phi = F/R -> <B_phi^2> = F^2 <1/R^2>)
-        B2_over_Bphi2 = avg_B2 / (F**2 * np.asarray(geom["avg_inv_R2"], dtype=float))
-    else:
-        B2_over_Bphi2 = 1.0
-    j_dot_B = j_tor * F * avg_inv_R * B2_over_Bphi2       # raw <j.B> [T A/m^2]
+    F, avg_inv_R, avg_B2 = _analytic_geom(geom)
+    j_dot_B = j_tor / field_aligned_conversion(F, avg_inv_R, avg_B2)
     return j_dot_B / float(geom.get("B0", 1.0))           # IMAS <j.B>/B0
 
 
@@ -439,9 +423,9 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
 
     Called at generate time on the converged ``mygs`` (right where the eqdsk is
     saved) so a perturbed draw's OWN flux-surface geometry travels with it into
-    the archive, enabling an **exact** per-draw toroidal->parallel conversion at
-    IDS write-back (:func:`toroidal_to_parallel`) instead of the interim
-    baseline-ratio reconstruction.
+    the archive, enabling a per-draw toroidal->parallel conversion at IDS
+    write-back (:func:`toroidal_to_parallel`, from ``F``, ``<1/R>`` and
+    ``<B^2>``) instead of the interim baseline-ratio reconstruction.
 
     Returns a dict of 1-D arrays on a uniform ``psi_N`` grid of ``npsi`` points
     (default 257 to match the archived eqdsk; do not go below ~129 -- the edge
@@ -457,12 +441,14 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
         ``f_trap``      trapped fraction f_c                  (sauter_fc)
         ``B_avg``       <|B|> [T]                             (sauter_fc)
 
-    ``exact_inv_R2`` (default True) computes ``<1/R^2>`` -- which TokaMaker does
-    not expose -- by flux-surface quadrature over traced contours
-    (:func:`_capture_exact_inv_R2`), making :func:`toroidal_to_parallel`
-    machine-exact instead of relying on ``<B_phi^2> ~= <B^2>`` (the
-    ``<B_p^2>/<B^2> ~ (eps/q)^2`` bracket: 1.0-2.1%% across a D3D-like
-    plasma, 1.4%% at the bootstrap peak -- see :func:`parallel_to_toroidal`). By default it is traced on the
+    ``exact_inv_R2`` (default True) also records ``<1/R^2>`` (exposed by
+    current OFT builds' ``get_q``; otherwise by flux-surface quadrature over
+    traced contours, :func:`_capture_exact_inv_R2`) -- archived geometry for
+    the Ip / l_i measures and for diagnostics (``<B_phi^2> = F^2<1/R^2>``).
+    It does NOT enter the current conversion since 2026-10-06: that is the
+    one field-aligned factor ``F<1/R>/<B^2>``
+    (:func:`field_aligned_conversion`), and a ``geom`` carrying
+    ``avg_inv_R2`` is refused by :func:`toroidal_to_parallel`. By default it is traced on the
     FULL ``npsi`` grid -- same resolution as every other metric, most accurate
     at the edge where the surfaces bunch up and the bootstrap peaks; the trace
     is cheap (a few ms/surface, ~2 s at npsi=257). ``inv_R2_npsi`` (default
@@ -470,11 +456,11 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
     spline it onto ``psi_N`` -- only worth it for very large bouquets. The
     quadrature is **self-validated** each call: its independently-recomputed
     ``<1/R>`` must agree with ``sauter_fc`` to ``inv_R2_check_rtol`` (default
-    2%), else ``avg_inv_R2`` is dropped (with a warning) and the conversion
-    falls back to the 1-2 %% bracket -- never silently wrong.
+    2%), else ``avg_inv_R2`` is dropped (with a warning) -- never silently
+    wrong.
 
     Set ``exact_inv_R2=False`` to skip the ``<1/R^2>`` surface traces entirely
-    (bracket fallback) if the capture cost is ever material.
+    if the capture cost is ever material.
 
     Pure extraction (no re-solve); ``mygs`` is passed in so this module stays
     OFT-import-free / headless-safe.
@@ -565,15 +551,19 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
                     grid, inv_R2_g, k=3)(psi_hat)
         except Exception as exc:                    # pragma: no cover - live-only
             warnings.warn(
-                f"exact <1/R^2> capture failed ({exc}); IDS export will use the "
-                "<B_phi^2>~=<B^2> bracket (1-2% on a D3D-like plasma). Set "
-                "exact_inv_R2=False to silence.")
+                f"exact <1/R^2> capture failed ({exc}); the archived eq_fsa "
+                "block carries no avg_inv_R2 (the IDS export's conversion "
+                "does not use it). Set exact_inv_R2=False to silence.")
     return out
 
 
 #: Version tag of :func:`evaluate_jBS`, recorded with every loop record so an
 #: archive states which evaluator produced its bootstrap.
-EVALUATE_JBS_VERSION = "evaluate_jBS/1 (Redl 2021 jboot1, NRL/Zavg lnLambda, Koh nu_i*, psi_N-native)"
+#: ``/2`` (2026-10-06): the toroidal output is ``kappa <j.B>``, ``kappa =
+#: F<1/R>/<B^2>`` (was ``<j.B>/(F<1/R>)`` in ``/1``).
+EVALUATE_JBS_VERSION = ("evaluate_jBS/2 (Redl 2021 jboot1, NRL/Zavg lnLambda, "
+                        "Koh nu_i*, psi_N-native, kappa = F<1/R>/<B^2> "
+                        "toroidal conversion)")
 
 #: Positional layout of ``sauter_fc``'s geometry block on OFT builds that
 #: return it as a ``(3, n)`` array (builds after OpenFUSIONToolkit#313 return
@@ -654,24 +644,31 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
        equilibrium's flux range; a non-uniform ``psi_N`` (e.g. a grid uniform
        in rho_tor) is differentiated as what it is.
     3. **Direct toroidal conversion.**  Redl returns the FSA parallel
-       ``<j_BS.B>``; it is converted with
-       :func:`parallel_to_toroidal` (analytic, field-aligned; ``F``, ``<1/R>``
-       and ``<B^2>`` from the SAME surfaces), never through SWB's
-       ``R_avg/F`` projection and its undo.  **The conversion is the legacy
-       one:** no ``<1/R^2>`` is passed, so the bracket
-       ``<B_phi^2>/<B^2>`` is taken as 1 and the net factor is
-       ``<j.B>/(F <1/R>)`` -- exactly what the frozen path's
-       ``_swb_jbs_to_toroidal`` applies to SWB's output (there with
-       ``get_q``'s ``<1/R>``, here with ``sauter_fc``'s: the same flux-surface
-       average from two traces of the same surfaces).  The neglected
-       ``<B_p^2>/<B^2>`` makes the toroidal bootstrap ~1.4 % larger at its
-       peak than the exact field-aligned value (1.0-2.1 % across the plasma,
-       1.4-1.5 % of I_BS, synthetic D3D-like case), and it is what the IDS
-       export's :func:`toroidal_to_parallel` -- which DOES use the exact
-       ``<1/R^2>`` -- does not undo: ``<j.B>`` round-trips high by the same
-       fraction.  Kept deliberately (switching paths causes no jump);
-       whether to pass ``<1/R^2>`` here is an owner decision -- it would move
-       every loop result by that ~1.5 %.
+       ``<j_BS.B>``; it is converted with the package's ONE field-aligned
+       factor (:func:`parallel_to_toroidal` ->
+       :func:`field_aligned_conversion`; ``F``, ``<1/R>`` and ``<B^2>`` from
+       the SAME surfaces), never through SWB's ``R_avg/F`` projection and its
+       undo::
+
+           <j_phi> = kappa <j.B>,   kappa = F <1/R> / <B^2>
+
+       -- the plain flux-surface average the solver consumes
+       (OpenFUSIONToolkit's ``jphi-linterp``), so with the pressure-driven
+       part the identity ``<j_phi> = kappa <j.B> + p' (<R> - F^2<1/R>/<B^2>)``
+       is exact; the unified engine composes with the same factor
+       (:func:`bouquet.engine.conversion_factor`).
+       **Declared default physics change (2026-10-06, owner-approved):**
+       until then this conversion was ``<j.B>/(F<1/R>)`` (the IMAS
+       ``<j_phi/R>/<1/R>`` form with its bracket ``<B_phi^2>/<B^2>`` taken
+       as 1).  That factor exceeds kappa by
+       ``<B^2>/(F^2<1/R>^2)``, the product of two terms:
+       the bracket ``<B^2>/<B_phi^2>`` (the poloidal-field content, ~1.5 %
+       at psi_N ~ 0.97 on the synthetic D3D-like example) and the Jensen
+       ratio ``<1/R^2>/<1/R>^2`` (~5 % there) -- +6.8 % in all at the
+       pedestal (+1.0 % at psi_N 0.1, +4.3 % at 0.5).  The legacy bootstrap
+       (this function's toroidal output, and the frozen path's
+       ``_swb_jbs_to_toroidal``) drops by that fraction; the engine, which
+       reads only ``diag["j_dot_B"]``, is unchanged.
 
     **Refusals, never a silent zero.**  The Redl expressions are undefined
     for non-physical input and on a surface the tracer failed on; the
@@ -739,8 +736,9 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     Returns
     -------
     (j_BS_tor, diag)
-        ``j_BS_tor`` -- toroidal FSA current density ``<j_phi/R>/<1/R>``
-        [A/m^2] on ``psi_N`` (isolated/smoothed as requested).  ``diag`` --
+        ``j_BS_tor`` -- toroidal FSA current density ``<j_phi>`` =
+        ``kappa <j.B>`` [A/m^2] on ``psi_N`` (isolated/smoothed as
+        requested).  ``diag`` --
         ``psi_eval``, ``f_T``, ``nu_e_star``, ``nu_i_star``, ``q``, ``eps``,
         ``R_avg``, ``F``, ``avg_inv_R``, ``avg_B2``, ``dpsi`` (signed flux
         range), ``j_dot_B`` (Redl ``<j.B>``), ``j_tor_full_raw`` (full

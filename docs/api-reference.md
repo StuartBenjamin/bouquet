@@ -82,7 +82,7 @@ Details: [io-and-plotting.md](io-and-plotting.md).
 
 | Function | Description |
 |---|---|
-| `parallel_to_toroidal()` / `toroidal_to_parallel()` | Current-convention conversion, both directions, FSA-geometry aware |
+| `parallel_to_toroidal()` / `toroidal_to_parallel()` | Current-convention conversion `⟨j_φ⟩ = κ⟨j·B⟩`, `κ = F⟨1/R⟩/⟨B²⟩` (`field_aligned_conversion`), and its exact inverse; or the source's own `j_tor/j_total` ratio |
 | `isotropize_fast_pressure()` | Anisotropic fast-pressure reduction for the isotropic GS solve (`method` is **required** — the two dd conventions differ by 3×) |
 | `detect_p_fast_convention()` / `resolve_p_fast_reduction()` | Which fast-pressure storage convention a dd was written in, and the reduction rule that follows (`bouquet.io.imas`) |
 | `fast_pressure_residual()` / `infer_fast_pressure()` | Fast-ion pressure accounting |

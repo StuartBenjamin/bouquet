@@ -97,7 +97,6 @@ class TestExactImasExport:
             "F": np.interp(psiN_t, _PF, _EQ_FSA["F"]),
             "avg_inv_R": np.interp(psiN_t, _PF, _EQ_FSA["avg_inv_R"]),
             "avg_B2": np.interp(psiN_t, _PF, _EQ_FSA["avg_B2"]),
-            "avg_inv_R2": np.interp(psiN_t, _PF, _EQ_FSA["avg_inv_R2"]),
             "B0": _B0,
         }
         exp_jtot = toroidal_to_parallel(np.interp(psiN_t, _PEQ, _J_PHI), geom=geom)

@@ -1359,8 +1359,10 @@ def read_imas_baseline(
 #  still come from the archived 257^2 eqdsk (lossless to that grid,
 #  machine-precision GS) rather than the live FE fields -- a direct OFT ODS
 #  export would upgrade this; (2) exact <1/R^2> is computed by flux-surface
-#  quadrature since TokaMaker does not yet expose it
-#  (OpenFUSIONToolkit/OpenFUSIONToolkit#312) -- when it does, read it directly.
+#  quadrature on OFT builds whose get_q does not expose it; since 2026-10-06
+#  it is archived geometry only -- the conversion is the one field-aligned
+#  factor kappa = F<1/R>/<B^2> (physics.field_aligned_conversion), the exact
+#  inverse of what bouquet converts in with, and does not read <1/R^2>.
 # ===========================================================================
 def _imas_b0(out, ie, ic):
     """Reference vacuum field B0 for the IMAS <j.B>/B0 normalisation.
@@ -1388,11 +1390,10 @@ def _eq_fsa_geom_on(eq_fsa, psiN_t, B0):
         avg_B2 = np.interp(psiN_t, src, np.asarray(eq_fsa["avg_B2"], dtype=float))
     except (KeyError, TypeError):
         return None
-    geom = {"F": F, "avg_inv_R": avg_inv_R, "avg_B2": avg_B2, "B0": float(B0)}
-    if eq_fsa.get("avg_inv_R2") is not None:     # exact bracket when captured
-        geom["avg_inv_R2"] = np.interp(
-            psiN_t, src, np.asarray(eq_fsa["avg_inv_R2"], dtype=float))
-    return geom
+    # the one field-aligned conversion kappa = F<1/R>/<B^2> (2026-10-06):
+    # the captured <1/R^2> no longer enters it (toroidal_to_parallel refuses
+    # a geom carrying it)
+    return {"F": F, "avg_inv_R": avg_inv_R, "avg_B2": avg_B2, "B0": float(B0)}
 
 
 def _signed_b0(out, ie, ic):

@@ -1720,17 +1720,22 @@ def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad):
     ``<j_BS.B>`` and projects it to A/m^2 by a zeroth-order division by the
     toroidal field at the average radius (``j_BS_neo * R_avg/F``, with its own
     ``# to-do: project j_BS_parallel to j_phi more accurately?``). Every other
-    current profile in bouquet is the FSA toroidal density
-    ``j_tor = <j_phi/R>/<1/R>`` (what TokaMaker's jphi-linterp / flux_integral
-    consume), so mixing the two conventions misallocates the j_BS / j_inductive
-    split, mostly in the pedestal where the spike lives.
+    current profile in bouquet is the plain FSA toroidal density ``<j_phi>``
+    (what TokaMaker's jphi-linterp / flux_integral consume), so mixing the two
+    conventions misallocates the j_BS / j_inductive split, mostly in the
+    pedestal where the spike lives.
 
     This undoes SWB's crude factor to recover ``<j_BS.B>`` and applies the
-    field-aligned projection (see :func:`bouquet.physics.parallel_to_toroidal`,
-    analytic method). The net factor is ``1/(<R><1/R>)`` (<= 1 by
-    Cauchy-Schwarz, ~ 1 - eps^2 at the edge), evaluated on the same
+    package's one field-aligned conversion ``kappa = F<1/R>/<B^2>``
+    (:func:`bouquet.physics.field_aligned_conversion`, via
+    :func:`bouquet.physics.parallel_to_toroidal`).  The net factor on SWB's
+    output is ``F^2 <1/R> / (<R> <B^2>)``, evaluated on the same
     ``mygs``/grid the SWB call just used -- call this IMMEDIATELY after
-    ``solve_with_bootstrap``, before any further mygs solve.
+    ``solve_with_bootstrap``, before any further mygs solve.  (Until
+    2026-10-06 the conversion was ``<j.B>/(F<1/R>)``, net ``1/(<R><1/R>)``:
+    higher than kappa by ``<B^2>/<B_phi^2>`` x ``<1/R^2>/<1/R>^2``, ~6.8 %
+    at the pedestal of the synthetic D3D-like example -- a declared,
+    owner-approved default physics change.)
     """
     from .physics import parallel_to_toroidal
 

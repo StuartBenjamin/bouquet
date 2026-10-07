@@ -242,7 +242,7 @@ as an enormous sigma.
 | `allow_incomplete_pressure` | `False` | IMAS path: bypass the fail-fast pressure-accounting check |
 | `capture_live_eq` | `True` | Snapshot each draw's converged flux-surface averages into `eq_fsa/` — what makes `fidelity="exact"` IDS export possible |
 | `capture_npsi` | `257` | FSA grid for that block |
-| `capture_exact_inv_R2` | `True` | Compute ⟨1/R²⟩ by exact quadrature rather than the ⟨B_φ²⟩≈⟨B²⟩ bracket |
+| `capture_exact_inv_R2` | `True` | Record ⟨1/R²⟩ in the draw's `eq_fsa` block (read from `get_q`, else by flux-surface quadrature). Archived geometry only: since 2026-10-06 the current conversion is the one field-aligned factor `F⟨1/R⟩/⟨B²⟩`, which does not read it |
 | `diagnostic_plots` | `False` | Per-draw diagnostic figures |
 
 ### `FilterConfig` (`b.filtering`)

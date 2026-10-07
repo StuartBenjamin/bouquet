@@ -26,7 +26,8 @@ class Baseline:
     pre-separated.
 
     CURRENT CONVENTION: every current component here is a flux-surface-averaged
-    *toroidal* current density j_phi [A/m^2]. IMAS/neoclassical inputs are
+    *toroidal* current density <j_phi> [A/m^2] (the plain FSA the solver's
+    jphi-linterp consumes). IMAS/neoclassical inputs are
     parallel (<j.B>/B0) and are converted on read via
     :func:`bouquet.physics.parallel_to_toroidal`, so downstream code never mixes
     conventions.

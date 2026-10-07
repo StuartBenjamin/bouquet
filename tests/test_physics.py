@@ -5,7 +5,9 @@ per-draw bootstrap recompute:
 
   * isotropize_fast_pressure -- anisotropic fast pressure -> scalar GS pressure
   * parallel_to_toroidal     -- FSA parallel current <j.B> -> toroidal
-                                <j_phi/R>/<1/R>, ratio + analytic methods
+                                <j_phi> = kappa <j.B>, kappa = F<1/R>/<B^2>
+                                (2026-10-06; was <j_phi/R>/<1/R>), ratio +
+                                analytic methods
 """
 
 import numpy as np
@@ -52,14 +54,17 @@ def _fsa_metrics_circular(R0=1.7, a=0.55, F=3.4, Bp0=0.35, npol=20000):
 class TestFSAQuadratureBenchmark:
     def test_forward_matches_independent_fsa_quadrature(self):
         # For a field-aligned current j = lambda*B: the code's formula output
-        # must equal <j_phi/R>/<1/R> computed by DIRECT FSA quadrature (a fully
-        # independent path from the closed-form formula).
+        # must equal the plain FSA <j_phi> (what the solver's jphi-linterp
+        # consumes) computed by DIRECT FSA quadrature (a fully independent
+        # path from the closed-form kappa = F<1/R>/<B^2>).  Since 2026-10-06
+        # (the one-conversion change; was <j_phi/R>/<1/R>).
         geom, f = _fsa_metrics_circular()
+        g = {k: geom[k] for k in ("F", "avg_inv_R", "avg_B2")}
         lam = 4.2e5                                  # lambda = <j.B>/<B^2>
         jdotB = lam * geom["avg_B2"]                 # <j.B> on the surface
-        # independent direct path: j_phi = lambda*Bphi, then FSA of j_phi/R
-        j_tor_direct = f["fsa"]((lam * f["Bphi"]) / f["R"]) / geom["avg_inv_R"]
-        j_tor_formula = parallel_to_toroidal(np.array([jdotB]), geom=geom)[0]
+        # independent direct path: j_phi = lambda*Bphi, then FSA of j_phi
+        j_tor_direct = f["fsa"](lam * f["Bphi"])
+        j_tor_formula = parallel_to_toroidal(np.array([jdotB]), geom=g)[0]
         assert np.isclose(j_tor_formula, j_tor_direct, rtol=1e-10)
 
     def test_bphi2_identity(self):
@@ -71,9 +76,10 @@ class TestFSAQuadratureBenchmark:
 
     def test_finite_aspect_ratio_correction_is_real(self):
         # sanity: at eps~0.32 the geometric factor departs from the cylinder
-        # limit by a non-trivial amount (so the test isn't vacuous)
+        # limit 1/(F<1/R>) by a non-trivial amount (so the test isn't
+        # vacuous): kappa F<1/R> = F^2<1/R>^2/<B^2> < 1
         geom, _ = _fsa_metrics_circular()
-        cyl = geom["F"] * geom["avg_inv_R2"] / (geom["avg_B2"] * geom["avg_inv_R"])
+        cyl = geom["F"] ** 2 * geom["avg_inv_R"] ** 2 / geom["avg_B2"]
         assert not np.isclose(cyl, 1.0, atol=1e-3)   # genuine O(eps^2)+Bp effect
 
 
@@ -82,8 +88,9 @@ class TestFSAQuadratureBenchmark:
 # ---------------------------------------------------------------------------
 class TestToroidalToParallel:
     def test_round_trip_exact(self):
-        # forward(inverse) == identity to machine precision with full geom
+        # forward(inverse) == identity to machine precision
         geom, _ = _fsa_metrics_circular()
+        geom = {k: geom[k] for k in ("F", "avg_inv_R", "avg_B2")}
         jdotB = np.array([9.1e5, 4.0e5, -1.5e5])
         j_tor = parallel_to_toroidal(jdotB, geom=geom)
         back = toroidal_to_parallel(j_tor, geom=geom)
@@ -92,20 +99,21 @@ class TestToroidalToParallel:
     def test_round_trip_with_b0(self):
         # IMAS input/output normalised by B0 must also round-trip
         geom, _ = _fsa_metrics_circular()
+        geom = {k: geom[k] for k in ("F", "avg_inv_R", "avg_B2")}
         B0 = 2.0
         j_par_imas = np.array([1.0e6, 3.0e5])
         j_tor = parallel_to_toroidal(j_par_imas, geom={**geom, "B0": B0})
         back = toroidal_to_parallel(j_tor, geom={**geom, "B0": B0})
         assert np.allclose(back, j_par_imas, rtol=1e-11)
 
-    def test_bracket_one_fallback_round_trips(self):
-        # without <1/R^2> both directions use bracket=1, so they still invert
-        # each other exactly (self-consistent, just not machine-exact physics)
+    def test_inv_R2_geometry_is_refused_both_ways(self):
+        # the former <1/R^2> branch is gone (2026-10-06): a geom carrying it
+        # is refused by name rather than silently converted another way
         geom, _ = _fsa_metrics_circular()
-        g = {"F": geom["F"], "avg_inv_R": geom["avg_inv_R"], "avg_B2": geom["avg_B2"]}
-        jdotB = np.array([7.7e5])
-        back = toroidal_to_parallel(parallel_to_toroidal(jdotB, geom=g), geom=g)
-        assert np.allclose(back, jdotB, rtol=1e-11)
+        with pytest.raises(ValueError, match="avg_inv_R2"):
+            parallel_to_toroidal(np.array([7.7e5]), geom=geom)
+        with pytest.raises(ValueError, match="avg_inv_R2"):
+            toroidal_to_parallel(np.array([7.7e5]), geom=geom)
 
     def test_missing_key_raises(self):
         with pytest.raises(ValueError, match="missing required key"):
@@ -303,7 +311,6 @@ class TestParallelToToroidalAnalytic:
             "F": np.full(3, F),
             "avg_inv_R": np.full(3, 1.0 / R0),
             "avg_B2": np.full(3, B0**2),
-            "avg_inv_R2": np.full(3, 1.0 / R0**2),
         }
         out = parallel_to_toroidal(j_par * B0, geom=geom)  # raw <j.B>
         assert np.allclose(out, j_par)
@@ -313,16 +320,16 @@ class TestParallelToToroidalAnalytic:
         R0, B0 = 1.7, 2.0
         geom = {
             "F": R0 * B0, "avg_inv_R": 1.0 / R0,
-            "avg_B2": B0**2, "avg_inv_R2": 1.0 / R0**2,
+            "avg_B2": B0**2,
         }
         j_par_imas = np.array([1.0e6])
         raw = parallel_to_toroidal(j_par_imas * B0, geom=dict(geom))
         viaB0 = parallel_to_toroidal(j_par_imas, geom={**geom, "B0": B0})
         assert np.allclose(raw, viaB0)
 
-    def test_exact_formula_on_shaped_surface(self):
-        # j_tor = <j.B> F <1/R^2> / (<B^2> <1/R>) reproduced exactly when
-        # <1/R^2> is supplied
+    def test_kappa_formula_on_shaped_surface(self):
+        # <j_phi> = <j.B> F <1/R> / <B^2> reproduced exactly (the one
+        # field-aligned conversion, 2026-10-06)
         R0, eps, F = 1.7, 0.36, 3.4
         th = np.linspace(0, 2 * np.pi, 4000, endpoint=False)
         Rs = R0 * (1 + eps * np.cos(th))
@@ -330,13 +337,13 @@ class TestParallelToToroidalAnalytic:
         B2 = F**2 * inv_R2 * 1.008  # ~0.8% poloidal-field content
         jB = 1.0e6
         out = parallel_to_toroidal(
-            np.array([jB]),
-            geom={"F": F, "avg_inv_R": inv_R, "avg_B2": B2, "avg_inv_R2": inv_R2},
-        )
-        assert np.isclose(out[0], jB * F * inv_R2 / (B2 * inv_R), rtol=1e-12)
+            np.array([jB]), geom={"F": F, "avg_inv_R": inv_R, "avg_B2": B2})
+        assert np.isclose(out[0], jB * F * inv_R / B2, rtol=1e-12)
 
-    def test_missing_inv_R2_error_is_order_Bp_over_B_squared(self):
-        # dropping <1/R^2> must only cost the <B_p^2>/<B^2> bracket (<~1%)
+    def test_former_legacy_factor_exceeds_kappa_by_bracket_times_jensen(self):
+        # what the 2026-10-06 change moved: the former legacy factor
+        # 1/(F<1/R>) over kappa is <B^2>/(F^2<1/R>^2) = [<B^2>/<B_phi^2>]
+        # [<1/R^2>/<1/R>^2] -- the bracket AND the Jensen term
         R0, eps, F = 1.7, 0.36, 3.4
         th = np.linspace(0, 2 * np.pi, 4000, endpoint=False)
         Rs = R0 * (1 + eps * np.cos(th))
@@ -344,12 +351,11 @@ class TestParallelToToroidalAnalytic:
         bp_frac = 0.008  # <B_p^2>/<B_phi^2>
         B2 = F**2 * inv_R2 * (1 + bp_frac)
         jB = np.array([1.0e6])
-        geom = {"F": F, "avg_inv_R": inv_R, "avg_B2": B2}
-        exact = parallel_to_toroidal(jB, geom={**geom, "avg_inv_R2": inv_R2})
-        approx = parallel_to_toroidal(jB, geom=geom)
-        rel = abs(approx[0] - exact[0]) / abs(exact[0])
-        assert rel < 0.01
-        assert np.isclose(rel, bp_frac, rtol=0.05)
+        new = parallel_to_toroidal(
+            jB, geom={"F": F, "avg_inv_R": inv_R, "avg_B2": B2})
+        old = jB / (F * inv_R)
+        assert np.isclose(old[0] / new[0],
+                          (1 + bp_frac) * inv_R2 / inv_R ** 2, rtol=1e-12)
 
     def test_cocos_sign_safety(self):
         # flipping the signs of F and <j.B> together (opposite-helicity COCOS)

@@ -101,7 +101,10 @@ is what keeps it from silently regressing.
 
 The per-draw bootstrap comes from TokaMaker's Sauter/Redl
 `solve_with_bootstrap`, whose parallel output is converted to toroidal with the
-flux-surface geometry factor `c = 1/(⟨R⟩⟨1/R⟩)` (`bouquet.physics.parallel_to_toroidal`).
+package's one field-aligned factor `κ = F⟨1/R⟩/⟨B²⟩`
+(`bouquet.physics.field_aligned_conversion`, via `parallel_to_toroidal`; on
+SWB's `⟨R⟩/F`-projected output the net factor is `F²⟨1/R⟩/(⟨R⟩⟨B²⟩)`). See
+"The evaluator" below for the 2026-10-06 change of this conversion.
 
 Two composition modes:
 
@@ -209,20 +212,33 @@ differences, each the point of the helper:
    **caller's** surfaces, `clip(ψ_N, psi_pad, 1 − psi_pad)`;
 2. gradients are taken on the **true** grid, `numpy.gradient(y, ψ_N,
    edge_order=2)`, divided by the **current** flux range;
-3. Redl's `⟨j·B⟩` is converted to the toroidal FSA density directly with
-   `parallel_to_toroidal` (analytic, field-aligned; `F`, `⟨1/R⟩`, `⟨B²⟩` of the
-   same surfaces) -- not through SWB's `⟨R⟩/F` projection and its undo on a
-   uniform grid. The conversion is the **legacy one**: `⟨1/R²⟩` is not passed,
-   so the bracket `⟨B_φ²⟩/⟨B²⟩` is taken as 1 and `j_tor = ⟨j·B⟩/(F⟨1/R⟩)`,
-   exactly what the frozen path's `_swb_jbs_to_toroidal` applies (switching
-   paths causes no jump). The neglected `⟨B_p²⟩/⟨B²⟩` is **not** sub-1 %:
-   measured on the synthetic D3D-like golden draws it is 0.6 % at ψ_N = 0.1,
-   1.8–2.1 % at mid-radius, 1.4 % at the bootstrap peak (ψ_N ≈ 0.96) and
-   1.0 % at 0.999 -- 1.4–1.5 % of I_BS, by which the toroidal bootstrap is
-   high. The IDS export (`toroidal_to_parallel`, exact `⟨1/R²⟩`) does not undo
-   it, so `⟨j·B⟩` round-trips high by the same fraction. Passing `⟨1/R²⟩`
-   here would move every loop result by ~1.5 % and is left as an owner
-   decision.
+3. Redl's `⟨j·B⟩` is converted to the toroidal FSA density directly -- not
+   through SWB's `⟨R⟩/F` projection and its undo on a uniform grid -- with the
+   package's **one** field-aligned conversion (`physics.field_aligned_conversion`,
+   the unified engine's `engine.conversion_factor`; `F`, `⟨1/R⟩`, `⟨B²⟩` of the
+   same surfaces):
+
+   ```
+   ⟨j_φ⟩ = κ ⟨j·B⟩,   κ = F⟨1/R⟩/⟨B²⟩
+   ```
+
+   For a field-aligned component `j = λB` (`λ = ⟨j·B⟩/⟨B²⟩`, `B_φ = F/R`),
+   `⟨j_φ⟩ = λF⟨1/R⟩` exactly, and `⟨j_φ⟩` -- the plain flux-surface average --
+   is what OFT's `jphi-linterp` consumes, so with the pressure-driven part the
+   composition identity `⟨j_φ⟩ = κ⟨j·B⟩ + p′(⟨R⟩ − F²⟨1/R⟩/⟨B²⟩)` is exact.
+   `toroidal_to_parallel` (the IDS export) is its exact inverse, and the frozen
+   path's `_swb_jbs_to_toroidal` uses the same factor.
+
+   **Declared default physics change (2026-10-06, owner-approved).** Until then
+   the legacy sites converted with `⟨j·B⟩/(F⟨1/R⟩)` (`⟨1/R²⟩` not passed) and
+   the IDS export with `⟨j·B⟩F⟨1/R²⟩/(⟨B²⟩⟨1/R⟩)`. The legacy factor exceeds κ
+   by `⟨B²⟩/(F²⟨1/R⟩²)` = the bracket `⟨B²⟩/⟨B_φ²⟩` (the poloidal-field
+   content: ≈ 1.5 % at ψ_N ≈ 0.97 on the synthetic D3D-like example) × the
+   Jensen ratio `⟨1/R²⟩/⟨1/R⟩²` (≈ 5 % there) -- **+6.8 %** at the pedestal
+   (+1.0 % at ψ_N 0.1, +4.3 % at 0.5, +6.4 % at 0.9). The legacy bootstrap
+   drops by that fraction; the unified engine, which already used κ, is
+   unchanged (`tests/test_one_conversion.py`). (The bracket alone, ~1.4 % at
+   the peak, is what this page used to quote; the Jensen term was missed.)
 
 **Refusals, never a silent zero.** The historical evaluation mapped every NaN
 of the Redl expressions to `j_BS = 0` at that node. `evaluate_jBS` now raises
