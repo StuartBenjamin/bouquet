@@ -25,7 +25,16 @@ Covered here (synthetic fixtures only, no device data):
 * **genuine refusals stand**: the same injection far from the minimiser, and a
   Jacobian inconsistent with the residual, still raise;
 * **the logged single retry** (:func:`bouquet.utils.soft_closure_with_retry`)
-  and the ``x0`` start it uses.
+  and the ``x0`` start it uses;
+* **the acceptance is opt-in** (``accept_noise_floor=True``, passed by the
+  self-consistent bootstrap loop's callers only).  The default is the
+  historical strict solver: it refuses exactly where, and with exactly the
+  message, it always did, and returns bit-identical results everywhere else;
+  a non-finite or non-positive noise estimate accepts nothing; every
+  acceptance is printed as well as recorded.
+
+The mechanism tests below call the solver with ``accept_noise_floor=True``
+(:func:`_call`'s default) because that is the mode they test.
 """
 import _harness
 
@@ -77,6 +86,9 @@ def _call(f_li, f_ip, s_ip, **kw):
     m, (psi, w, c, ji, jb, jf, lin, Ip_s, lg) = _model()
     sig = sigma_from_weights(STRUCTURED_WEIGHTS_PHYSICS, 4)
     li0 = structured_li_of(m)[0]
+    kw.setdefault("accept_noise_floor", True)
+    if kw["accept_noise_floor"] is None:        # the solver's own default
+        del kw["accept_noise_floor"]
     return close_ip_structured_soft(
         psi, w, c, Ip_s * f_ip, s_ip * abs(Ip_s), ji, jb, jf,
         sigma_ind=sig["ind"], sigma_bs=sig["bs"],
@@ -254,3 +266,87 @@ def test_no_retry_without_previous_coefficients_or_for_other_errors():
     assert n["c"] == 1
     ok = soft_closure_with_retry(lambda x0: dict(), x_prev=np.zeros(8))
     assert ok["closure_retry"] == 0 and ok["closure_retry_first_error"] is None
+
+
+# ---------------------------------------------------------------------------
+#  opt-in: the default is the historical strict solver
+# ---------------------------------------------------------------------------
+#: The historical refusal message, verbatim (base solver): no noise estimate.
+_HISTORICAL_REFUSAL = (
+    r"^close_ip_structured_soft: Levenberg damping could not find a descent "
+    r"step at objective \S+ \(scaled gradient \S+ > floor \S+\) -- the "
+    r"measurement rows and the prior are inconsistent on this basis$")
+
+
+def _deterministic_false_alarm(monkeypatch):
+    """The injected false alarm of the test above: ``(params, x0)``."""
+    params = (1.03, 0.97, 0.005)
+    out0, xs = _minimiser(params)
+    v = np.linspace(-1.0, 1.0, xs.size)
+    x0 = xs + 3e-10 * v / np.max(np.abs(v))
+    st, arm = _inject_uphill(monkeypatch, 1e-12)
+    arm(out0["residual_sigma_li"], out0["objective"], 0.04)
+    return params, x0
+
+
+@pytest.mark.parametrize("flag", [None, False])
+def test_the_default_refuses_the_false_alarm_with_the_historical_message(
+        monkeypatch, flag):
+    """``accept_noise_floor`` omitted (None here) or False: the strict
+    solver.  The iterate the opt-in mode accepts is REFUSED, with the
+    historical message verbatim (no noise estimate is even formed)."""
+    params, x0 = _deterministic_false_alarm(monkeypatch)
+    with pytest.raises(RuntimeError, match=_HISTORICAL_REFUSAL):
+        _call(*params, sigma_ind_up=None, x0=x0, accept_noise_floor=flag)
+
+
+def test_opt_in_accepts_and_prints_the_same_false_alarm(monkeypatch, capsys):
+    params, x0 = _deterministic_false_alarm(monkeypatch)
+    out = _call(*params, sigma_ind_up=None, x0=x0, accept_noise_floor=True)
+    assert out["gn_stop_reason"] == "noise_floor"
+    assert out["n_noise_floor_accepts"] == 1
+    printed = capsys.readouterr().out
+    assert "NOISE-FLOOR ACCEPTANCE" in printed
+    assert "historical gradient test refused" in printed
+
+
+@pytest.mark.parametrize("factor", [float("inf"), float("nan"), 0.0, -1.0])
+def test_a_non_finite_or_non_positive_noise_estimate_accepts_nothing(
+        monkeypatch, factor):
+    """The finiteness guard: an estimate that is inf (which would otherwise
+    accept ANY stalled iterate), NaN, zero or negative is not an estimate.
+    The refusal stands even with the opt-in; the guard only ever makes
+    acceptance stricter."""
+    params, x0 = _deterministic_false_alarm(monkeypatch)
+    monkeypatch.setattr(BU, "NOISE_FLOOR_FACTOR", factor)
+    with pytest.raises(RuntimeError, match="Levenberg damping could not find"
+                                           ".*rounding noise of the "
+                                           "objective n/a"):
+        _call(*params, sigma_ind_up=None, x0=x0, accept_noise_floor=True)
+
+
+@pytest.mark.parametrize("params", _FALSE_ALARM_SETS
+                         + [(1.02, 0.99, 0.005), (1.03, 0.97, 0.005)])
+@pytest.mark.parametrize("up", [None, _UP])
+def test_the_strict_default_is_the_opt_in_minus_the_noise_floor(params, up):
+    """Whatever this platform's rounding does on a parameter set, the two
+    modes differ ONLY where the opt-in accepted at the noise floor: there the
+    default raises the historical refusal; everywhere else the returned
+    closures are bit-identical."""
+    try:
+        opt = _call(*params, sigma_ind_up=up, accept_noise_floor=True)
+    except RuntimeError as e:
+        with pytest.raises(RuntimeError, match="Levenberg|converge|reaches"):
+            _call(*params, sigma_ind_up=up, accept_noise_floor=None)
+        assert "Levenberg" not in str(e) or "predicted decrease" in str(e)
+        return
+    if opt["n_noise_floor_accepts"] > 0:
+        with pytest.raises(RuntimeError, match=_HISTORICAL_REFUSAL):
+            _call(*params, sigma_ind_up=up, accept_noise_floor=None)
+        return
+    strict = _call(*params, sigma_ind_up=up, accept_noise_floor=None)
+    for k in ("a", "b", "s_ind", "s_bs"):
+        np.testing.assert_array_equal(strict[k], opt[k])
+    assert strict["objective"] == opt["objective"]
+    assert strict["gn_stop_reason"] == opt["gn_stop_reason"]
+    assert strict["n_noise_floor_accepts"] == 0

@@ -184,9 +184,16 @@ def parallel_to_toroidal(
         ``avg_B2``     ``<B^2>`` [T^2]
         ``avg_inv_R2`` ``<1/R^2>`` [1/m^2], OPTIONAL -- when absent the
                        bracket ``<B_phi^2>/<B^2>`` is taken as 1,
-                       neglecting ``<B_p^2>/<B^2> ~ (eps/q)^2`` (sub-1%%
-                       at a DIII-D edge); the retained ``1/(F<1/R>)``
-                       projection carries the O(eps^2) geometry.
+                       neglecting ``<B_p^2>/<B^2> ~ (eps/q)^2`` and so
+                       OVERESTIMATING j_tor by that fraction -- NOT
+                       sub-1%%.  Measured on the synthetic D3D-like
+                       golden case (17 draws): 6e-5 at psi_N = 0.001,
+                       0.6%% at 0.1, 1.4%% at 0.3, 1.8-2.1%% at
+                       mid-radius (its maximum), 1.4%% at the bootstrap
+                       peak (psi_N ~ 0.96), 1.0%% at 0.999; 1.4-1.5%% of
+                       the bootstrap current integral.  The
+                       retained ``1/(F<1/R>)`` projection carries the
+                       O(eps^2) geometry.
         ``B0``         normalisation of the input, OPTIONAL (default 1):
                        pass the IMAS ``vacuum_toroidal_field`` B0 when
                        ``j_parallel`` is the IMAS convention ``<j.B>/B0``;
@@ -229,7 +236,8 @@ def parallel_to_toroidal(
         j_dot_B = j_parallel * float(geom.get("B0", 1.0))
         # field-aligned component: j_tor = <j.B> F <1/R^2> / (<B^2> <1/R>);
         # F^2 <1/R^2> == <B_phi^2>, ~= <B^2> when <1/R^2> is unavailable
-        # (neglects <B_p^2>/<B^2> ~ (eps/q)^2).
+        # (neglects <B_p^2>/<B^2> ~ (eps/q)^2: 1-2% on a D3D-like
+        # plasma, see the docstring -- not sub-1%).
         if "avg_inv_R2" in geom and geom["avg_inv_R2"] is not None:
             bphi2_over_B2 = F**2 * np.asarray(geom["avg_inv_R2"], dtype=float) / avg_B2
         else:
@@ -277,7 +285,9 @@ def toroidal_to_parallel(j_tor, *, geom: dict):
         ``avg_inv_R2`` ``<1/R^2>`` [1/m^2], OPTIONAL -- when absent the exact
                        ``<B_phi^2> = F^2 <1/R^2>`` is unavailable and the
                        bracket ``<B^2>/<B_phi^2>`` is taken as 1, neglecting
-                       ``<B_p^2>/<B^2> ~ (eps/q)^2`` (~<1%% at a DIII-D edge).
+                       ``<B_p^2>/<B^2> ~ (eps/q)^2`` -- 1.0-2.1%% across a
+                       D3D-like plasma (see :func:`parallel_to_toroidal`),
+                       not sub-1%%.
                        Provide it (from the captured live equilibrium) for a
                        machine-exact conversion.
         ``B0``         output normalisation (default 1): pass the IMAS
@@ -412,7 +422,8 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
     not expose -- by flux-surface quadrature over traced contours
     (:func:`_capture_exact_inv_R2`), making :func:`toroidal_to_parallel`
     machine-exact instead of relying on ``<B_phi^2> ~= <B^2>`` (the
-    ``<B_p^2>/<B^2> ~ (eps/q)^2 ~<1%%`` bracket). By default it is traced on the
+    ``<B_p^2>/<B^2> ~ (eps/q)^2`` bracket: 1.0-2.1%% across a D3D-like
+    plasma, 1.4%% at the bootstrap peak -- see :func:`parallel_to_toroidal`). By default it is traced on the
     FULL ``npsi`` grid -- same resolution as every other metric, most accurate
     at the edge where the surfaces bunch up and the bootstrap peaks; the trace
     is cheap (a few ms/surface, ~2 s at npsi=257). ``inv_R2_npsi`` (default
@@ -421,7 +432,7 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
     quadrature is **self-validated** each call: its independently-recomputed
     ``<1/R>`` must agree with ``sauter_fc`` to ``inv_R2_check_rtol`` (default
     2%), else ``avg_inv_R2`` is dropped (with a warning) and the conversion
-    falls back to the ``<1%`` bracket -- never silently wrong.
+    falls back to the 1-2 %% bracket -- never silently wrong.
 
     Set ``exact_inv_R2=False`` to skip the ``<1/R^2>`` surface traces entirely
     (bracket fallback) if the capture cost is ever material.
@@ -516,7 +527,7 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
         except Exception as exc:                    # pragma: no cover - live-only
             warnings.warn(
                 f"exact <1/R^2> capture failed ({exc}); IDS export will use the "
-                "<B_phi^2>~=<B^2> bracket (~<1% at the edge). Set "
+                "<B_phi^2>~=<B^2> bracket (1-2% on a D3D-like plasma). Set "
                 "exact_inv_R2=False to silence.")
     return out
 
@@ -535,6 +546,41 @@ _SAUTER_MODB_INDEX = {"<|B|>": 0, "<|B|^2>": 1}
 #: Elementary charge [C] -- the eV -> J factor of the Redl drive, the same
 #: constant OFT's ``solve_with_bootstrap`` uses.
 _EC = 1.602176634e-19
+
+
+class JBSEvaluationError(ValueError):
+    """:func:`evaluate_jBS` refused an input or a flux-surface geometry on
+    which the Redl bootstrap is undefined.
+
+    Raised instead of returning ``j_BS = 0`` there.  ``quantity`` names what
+    is wrong, ``psi_N`` / ``index`` the first grid node where it is, and
+    ``n_bad`` how many nodes are affected.  A ``ValueError``, so callers that
+    already treat a malformed evaluator input as a ``ValueError`` see it.
+    """
+
+    def __init__(self, message, *, quantity=None, psi_N=None, index=None,
+                 n_bad=None):
+        super().__init__(message)
+        self.quantity = quantity
+        self.psi_N = psi_N
+        self.index = index
+        self.n_bad = n_bad
+
+
+def _first_bad(bad, psi_N, arr, quantity, rule, what="input"):
+    """Raise :class:`JBSEvaluationError` at the first True of *bad*."""
+    bad = np.asarray(bad, dtype=bool)
+    if not np.any(bad):
+        return
+    i = int(np.argmax(bad))
+    raise JBSEvaluationError(
+        f"evaluate_jBS: {what} {quantity} must be {rule}; got "
+        f"{float(np.asarray(arr, dtype=float)[i])!r} at psi_N="
+        f"{float(psi_N[i]):.6g} (grid index {i}; {int(bad.sum())} of "
+        f"{bad.size} node(s) affected).  The Redl bootstrap is undefined "
+        "there -- refusing to return a silently zeroed j_BS.",
+        quantity=quantity, psi_N=float(psi_N[i]), index=i,
+        n_bad=int(bad.sum()))
 
 
 def _sauter_avg(block, which, index):
@@ -572,7 +618,48 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
        ``<j_BS.B>``; it is converted with
        :func:`parallel_to_toroidal` (analytic, field-aligned; ``F``, ``<1/R>``
        and ``<B^2>`` from the SAME surfaces), never through SWB's
-       ``R_avg/F`` projection and its undo.
+       ``R_avg/F`` projection and its undo.  **The conversion is the legacy
+       one:** no ``<1/R^2>`` is passed, so the bracket
+       ``<B_phi^2>/<B^2>`` is taken as 1 and the net factor is
+       ``<j.B>/(F <1/R>)`` -- exactly what the frozen path's
+       ``_swb_jbs_to_toroidal`` applies to SWB's output (there with
+       ``get_q``'s ``<1/R>``, here with ``sauter_fc``'s: the same flux-surface
+       average from two traces of the same surfaces).  The neglected
+       ``<B_p^2>/<B^2>`` makes the toroidal bootstrap ~1.4 % larger at its
+       peak than the exact field-aligned value (1.0-2.1 % across the plasma,
+       1.4-1.5 % of I_BS, synthetic D3D-like case), and it is what the IDS
+       export's :func:`toroidal_to_parallel` -- which DOES use the exact
+       ``<1/R^2>`` -- does not undo: ``<j.B>`` round-trips high by the same
+       fraction.  Kept deliberately (switching paths causes no jump);
+       whether to pass ``<1/R^2>`` here is an owner decision -- it would move
+       every loop result by that ~1.5 %.
+
+    **Refusals, never a silent zero.**  The Redl expressions are undefined
+    for non-physical input and on a surface the tracer failed on; the
+    historical code mapped the resulting NaN to ``j_BS = 0`` at that node
+    (and a non-positive temperature also corrupts the neighbours' gradients).
+    Instead :class:`JBSEvaluationError` (a ``ValueError``) is raised, naming
+    the quantity and the first ``psi_N`` where it happens, for
+
+    * inputs: ``ne``, ``ni``, ``te``, ``ti`` not strictly positive, or
+      ``zeff < 1``, at ANY node (including the axis and the separatrix);
+    * geometry, at ANY node: a non-finite average, a non-positive ``<R>``,
+      ``<1/R>``, ``<a>``, ``<B^2>`` or ``dV/dpsi``, ``F = 0``, ``q = 0``, or a
+      trapped fraction ``f_T >= 1`` -- the signature of the all-zero row a
+      failed flux-surface trace returns; and ``f_T <= 0`` on any surface
+      other than the clipped axis surface;
+    * a non-finite Redl ``<j.B>`` or toroidal ``j_BS`` at any node that is
+      not an END node (below).
+
+    **End nodes.**  Nodes whose geometry is the CLIPPED axis or separatrix
+    surface -- ``psi_N <= psi_pad`` or ``psi_N >= 1 - psi_pad``, identified by
+    coordinate, not by the value computed there -- are where the geometry is
+    singular by construction (``f_T, eps -> 0`` at the axis, the separatrix
+    limit at the edge).  There, and only there, the historical treatment is
+    kept exactly: a non-finite value is mapped by ``numpy.nan_to_num(...,
+    nan=0.0)``.  How many values that touched is recorded in
+    ``diag["n_nonfinite_zeroed_at_ends"]``.  For every accepted input the
+    returned profile is bit-identical to the pre-refusal evaluator.
 
     **Grids whose first intervals are finer than ``psi_pad``.**  A grid such
     as ``[0, 1.7e-4, 6.9e-4, 1.6e-3, ...]`` puts several surfaces inside
@@ -658,6 +745,12 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     ni = _prof(ni, "ni")
     ti = _prof(ti, "ti")
     zeff = _prof(zeff, "zeff")
+    # the physical domain of the Redl inputs, at EVERY node
+    for _nm, _a, _unit in (("ne", ne, "m^-3"), ("ni", ni, "m^-3"),
+                           ("te", te, "eV"), ("ti", ti, "eV")):
+        _first_bad(~(_a > 0.0), psi_N, _a, _nm,
+                   f"strictly positive [{_unit}] on every node")
+    _first_bad(~(zeff >= 1.0), psi_N, zeff, "zeff", ">= 1 on every node")
 
     # ---- geometry on the caller's surfaces (distinct clipped values only) ---
     psi_eval = np.clip(psi_N, psi_pad, 1.0 - psi_pad)
@@ -673,14 +766,49 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     _, q_u, ravgs_q, *_rest = mygs.get_q(psi=psi_u.copy())
     F = np.asarray(F_u, dtype=float)[inv]
     f_T = (1.0 - np.asarray(fc_u, dtype=float))[inv]
-    eps = (_sauter_avg(r_sau, "<a>", _SAUTER_RAVG_INDEX)
-           / _sauter_avg(r_sau, "<R>", _SAUTER_RAVG_INDEX))[inv]
+    # (a failed trace's zero row makes this 0/0; it is refused just below)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        eps = (_sauter_avg(r_sau, "<a>", _SAUTER_RAVG_INDEX)
+               / _sauter_avg(r_sau, "<R>", _SAUTER_RAVG_INDEX))[inv]
     avg_inv_R = _sauter_avg(r_sau, "<1/R>", _SAUTER_RAVG_INDEX)[inv]
     avg_B2 = _sauter_avg(modb, "<|B|^2>", _SAUTER_MODB_INDEX)[inv]
     q = np.asarray(q_u, dtype=float)[inv]
     R_avg = np.asarray(q_ravg(ravgs_q, "<R>"), dtype=float)[inv]
     inv_R_q = np.asarray(q_ravg(ravgs_q, "<1/R>"), dtype=float)[inv]
     dV_dpsi = np.abs(np.asarray(q_ravg(ravgs_q, "dV/dPsi"), dtype=float))[inv]
+
+    # ---- geometry validity, at EVERY node (a failed trace is a zero row) ---
+    # END nodes: geometry sampled on the clipped axis / separatrix surface,
+    # identified by COORDINATE (psi_eval at the clip), never by the value
+    end = (psi_eval <= psi_pad) | (psi_eval >= 1.0 - psi_pad)
+    axis_end = psi_eval <= psi_pad
+    _a_sau = _sauter_avg(r_sau, "<a>", _SAUTER_RAVG_INDEX)[inv]
+    _R_sau = _sauter_avg(r_sau, "<R>", _SAUTER_RAVG_INDEX)[inv]
+    with np.errstate(invalid="ignore"):
+        for _nm, _a in (("F", F), ("f_T = 1 - f_c", f_T), ("<a>", _a_sau),
+                        ("<R> (sauter_fc)", _R_sau),
+                        ("<1/R> (sauter_fc)", avg_inv_R), ("<B^2>", avg_B2),
+                        ("q", q), ("<R> (get_q)", R_avg),
+                        ("<1/R> (get_q)", inv_R_q), ("dV/dpsi", dV_dpsi)):
+            _first_bad(~np.isfinite(_a), psi_N, _a, _nm, "finite",
+                       what="flux-surface average")
+        for _nm, _a in (("<a>", _a_sau), ("<R> (sauter_fc)", _R_sau),
+                        ("<1/R> (sauter_fc)", avg_inv_R), ("<B^2>", avg_B2),
+                        ("<R> (get_q)", R_avg), ("<1/R> (get_q)", inv_R_q),
+                        ("dV/dpsi", dV_dpsi)):
+            _first_bad(~(_a > 0.0), psi_N, _a, _nm,
+                       "positive (zero is the row a failed flux-surface "
+                       "trace returns)", what="flux-surface average")
+        _first_bad(F == 0.0, psi_N, F, "F", "non-zero (failed trace?)",
+                   what="flux function")
+        _first_bad(q == 0.0, psi_N, q, "q", "non-zero (failed trace?)",
+                   what="safety factor")
+        _first_bad(~(f_T < 1.0), psi_N, f_T, "f_T = 1 - f_c",
+                   "< 1 (f_c = 0 is the row a failed trace returns)",
+                   what="trapped fraction")
+        _first_bad(~(f_T > 0.0) & ~axis_end, psi_N, f_T, "f_T = 1 - f_c",
+                   "> 0 away from the clipped axis surface",
+                   what="trapped fraction")
 
     # ---- gradients on the TRUE grid, current flux range ---------------------
     bounds = np.asarray(mygs.psi_bounds, dtype=float)
@@ -717,11 +845,24 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         ln_lambda_e=ln_le, ln_lambda_ii=ln_lii,
         nu_e_star_override=nu_e_star, nu_i_star_override=nu_i_star,
         use_legacy_L34=False, use_sign_q=True, formula_form="jboot1")
-    j_dot_B = np.nan_to_num(np.asarray(j_dot_B, dtype=float), nan=0.0)
+    n_zeroed = [0]
+
+    def _ends_only(y, what):
+        """The historical ``nan_to_num(y, nan=0.0)`` at END nodes only; a
+        non-finite value anywhere else is refused."""
+        y = np.asarray(y, dtype=float)
+        bad = ~np.isfinite(y)
+        _first_bad(bad & ~end, psi_N, y, what,
+                   "finite away from the clipped axis/separatrix nodes",
+                   what="Redl result")
+        n_zeroed[0] += int(np.count_nonzero(bad & end))
+        return np.nan_to_num(y, nan=0.0)
+
+    j_dot_B = _ends_only(j_dot_B, "<j_BS.B>")
 
     geom = {"F": F, "avg_inv_R": avg_inv_R, "avg_B2": avg_B2}
-    j_tor_full = np.nan_to_num(parallel_to_toroidal(j_dot_B, geom=geom),
-                               nan=0.0)
+    j_tor_full = _ends_only(parallel_to_toroidal(j_dot_B, geom=geom),
+                            "toroidal j_BS")
 
     if isolate_edge:
         # SWB isolates the spike on its OWN projection <j.B> R_avg/F (the
@@ -730,8 +871,8 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         swb_proj = j_dot_B * (R_avg / F)
         res = _oft_bs.analyze_bootstrap_edge_spike(psi_N, swb_proj)
         masked = np.asarray(res["masked_spike"], dtype=float)
-        j_tor_sel = np.nan_to_num(parallel_to_toroidal(
-            masked * F / R_avg, geom=geom), nan=0.0)
+        j_tor_sel = _ends_only(parallel_to_toroidal(
+            masked * F / R_avg, geom=geom), "isolated toroidal j_BS")
     else:
         j_tor_sel = j_tor_full
 
@@ -756,6 +897,7 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         dpsi=psi_range, j_dot_B=j_dot_B,
         j_tor_full_raw=j_tor_full, j_tor_raw=np.asarray(j_tor_sel, float),
         I_BS=I_BS, isolate_edge=bool(isolate_edge),
+        n_nonfinite_zeroed_at_ends=int(n_zeroed[0]),
         smooth_axis=bool(smooth_axis), version=EVALUATE_JBS_VERSION,
     )
     return j_out, diag

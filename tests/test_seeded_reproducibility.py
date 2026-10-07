@@ -654,6 +654,200 @@ def test_legacy_mode_still_shows_the_defect(sigma0_anchor):
 
 
 # ---------------------------------------------------------------------------
+#  the same six zero-perturbation claims WITH the self-consistent loop on
+# ---------------------------------------------------------------------------
+# The six tests above run the LEGACY route-R2 draw on the legacy baseline
+# (SWB-on-SWB).  The loop is the default, so the same claims are made again
+# here on the loop's own reconstruction and the loop's own draw
+# (``jbs_loop=jbs_settings(gc, draw=True)``) -- same bars, none loosened, and
+# the legacy versions above are kept as they are.  Under the loop the
+# reconstruction stores its split as the Ip-normalised request of its one
+# delivered state, so the exact-measure scale is expected at 1 to rounding.
+def _run_r2_probe_loop(outdir):
+    """sigma=0 route-R2 draws with the self-consistent loop ON, on the loop's
+    reconstruction.  'exact' twice (bit reproducibility) and 'fsa' once (a
+    diagnostic).  Every number lands in ``<outdir>/r2loop.npz``."""
+    import numpy as np
+    import bouquet as bq
+    from bouquet import perturb_kinetic_equilibrium
+    from bouquet.jbs_loop import jbs_settings, residual_weights
+    from bouquet.utils import pchip_interp
+
+    b = bq.Bouquet.from_geqdsk(_GEQ, profiles=_PF, mesh=_MESH, nthreads=1,
+                               header=os.path.join(outdir, "r2loop"),
+                               n_draws=1)
+    gc = b.config.generation
+    assert gc.jbs_self_consistent, "the loop is the default"
+    b.setup_solver()
+    bl = b.prepare_baseline()
+    psi_N = np.asarray(bl.psi_N, dtype=float)
+    psi_kin = np.asarray(bl.psi_N_kinetic, dtype=float)
+    psi_pad = float(getattr(b.config.source, "psi_pad", 1e-3))
+    EC = 1.6022e-19
+
+    def _k2e(a):
+        return pchip_interp(psi_kin, np.asarray(a, dtype=float), psi_N)
+
+    pressure = EC * (_k2e(bl.ne) * _k2e(bl.te) + _k2e(bl.ni) * _k2e(bl.ti))
+    Zeff_eq = np.clip(_k2e(bl.Zeff), 1.0, None)
+    zk, zj = np.zeros_like(psi_kin), np.zeros_like(psi_N)
+    snapshot = b.mygs.copy_eq()
+    settings = jbs_settings(gc, draw=True)
+
+    def _once(mode):
+        os.environ["BOUQUET_R2_IP_MODE"] = mode
+        b.mygs.replace_eq(source_eq=snapshot)
+        out = perturb_kinetic_equilibrium(
+            b.mygs, psi_N, pressure,
+            bl.ne, bl.te, bl.ni, bl.ti, np.asarray(bl.j_phi, dtype=float),
+            zk, zk, zk, zk, zj,                     # sigma = 0 everywhere
+            0.5, 0.4, 0.25,
+            float(bl.Ip_target), float(bl.l_i_target), Zeff_eq, len(psi_N),
+            input_jinductive=np.asarray(bl.j_inductive, dtype=float),
+            l_i_tolerance=gc.l_i_tolerance, psi_pad=psi_pad,
+            constrain_sawteeth=False, recalculate_j_BS=True,
+            isolate_edge_jBS=gc.isolate_edge_jBS, floor_j_BS=gc.floor_j_BS,
+            scale_jBS=float(getattr(bl, "bs_scale", 1.0)),
+            perturb_jind_in_anchor=True, accept_anchor_inband=False,
+            psi_N_kinetic=psi_kin, p_thresh=0.05, rng=_SEED,
+            jbs_loop=settings,
+            jphi_request_offset=getattr(bl, "jphi_request_offset", None),
+        )
+        d = out[6]
+        _f = d.get("r2_f_ind")
+        w, _x, _k = residual_weights(b.mygs.copy_eq(), psi_N, psi_pad)
+        return (float(d["r2_ip_scale"]),
+                float("nan") if _f is None else float(_f),
+                float(b.mygs.get_stats(lcfs_pad=psi_pad,
+                                       li_normalization="iter")["l_i"]),
+                np.asarray(d["j_BS"], dtype=float),
+                np.asarray(d["j_inductive"], dtype=float),
+                np.asarray(w, dtype=float),
+                bool((d.get("jbs_loop") or {}).get("converged", False)))
+
+    try:
+        s_ex1, f_ex1, li_ex1, jbs_ex1, jind_ex1, w_ex1, c_ex1 = \
+            _once("exact")
+        s_ex2, f_ex2, li_ex2, jbs_ex2, jind_ex2, _w2, c_ex2 = _once("exact")
+        s_fsa, f_fsa, li_fsa, jbs_fsa, _j, _w3, c_fsa = _once("fsa")
+    finally:
+        os.environ.pop("BOUQUET_R2_IP_MODE", None)
+    np.savez(
+        os.path.join(outdir, "r2loop.npz"),
+        s_exact=np.array([s_ex1, s_ex2]), li_exact=np.array([li_ex1, li_ex2]),
+        f_ind_exact=np.array([f_ex1, f_ex2]),
+        jbs_exact1=jbs_ex1, jbs_exact2=jbs_ex2,
+        jind_exact1=jind_ex1, jind_exact2=jind_ex2, w_exact1=w_ex1,
+        converged_exact=np.array([c_ex1, c_ex2]),
+        s_fsa=np.array([s_fsa]), li_fsa=np.array([li_fsa]),
+        f_ind_fsa=np.array([f_fsa]), jbs_fsa=jbs_fsa,
+        converged_fsa=np.array([c_fsa]),
+        psi_N=psi_N, Ip=np.array([float(bl.Ip_target)]),
+        jbs_baseline=np.asarray(bl.j_BS, dtype=float),
+        l_i_target=np.array([float(bl.l_i_target)]),
+    )
+
+
+@pytest.fixture(scope="module")
+def sigma0_anchor_loop(tmp_path_factory):
+    """The loop-ON R2 probe, in its own interpreter (see sigma0_anchor)."""
+    work = tmp_path_factory.mktemp("r2loop")
+    proc = subprocess.run(
+        [sys.executable, os.path.abspath(__file__), "r2loop", str(work)],
+        env=_harness.subprocess_env(OMP_NUM_THREADS="1", MPLBACKEND="Agg"),
+        capture_output=True, text=True)
+    if proc.returncode != 0:
+        pytest.fail(f"loop-ON R2 probe failed (rc={proc.returncode}):\n"
+                    f"{proc.stderr[-4000:]}")
+    return np.load(str(work / "r2loop.npz"))
+
+
+def test_sigma0_r2_reproduces_the_baseline_jbs_loop_on(sigma0_anchor_loop):
+    """Loop-ON twin of test_sigma0_r2_reproduces_the_baseline_jbs: the same
+    bar (max deviation as a fraction of peak, _JBS_FRAC), on the loop's
+    reconstruction and the loop's draw."""
+    d = sigma0_anchor_loop
+    assert bool(d["converged_exact"][0]), "the sigma=0 draw loop did not converge"
+    jbs_bl = np.asarray(d["jbs_baseline"], dtype=float)
+    peak = float(np.max(np.abs(jbs_bl)))
+    dev = float(np.max(np.abs(
+        np.asarray(d["jbs_exact1"], dtype=float) - jbs_bl)))
+    assert dev / peak <= _JBS_FRAC, (
+        f"loop-ON sigma=0 j_BS is {100 * dev / peak:.3f}% of peak from the "
+        f"baseline split (bar {100 * _JBS_FRAC:.1f}%)")
+
+
+def test_sigma0_r2_exact_measure_lands_in_its_own_budget_loop_on(
+        sigma0_anchor_loop):
+    """Loop-ON twin: the same Ip-space bar ``|s-1| * f_ind <=
+    _S_FIND_ATOL_EXACT``.  With the loop the stored split is the request of
+    the delivered state normalised in THIS measure, so ``s`` is expected at 1
+    to rounding -- the bar is the unchanged one either way."""
+    d = sigma0_anchor_loop
+    s = float(d["s_exact"][0])
+    f_ind = float(d["f_ind_exact"][0])
+    assert np.isfinite(f_ind) and f_ind > 0.0, f_ind
+    resid = abs(s - 1.0) * f_ind
+    assert resid <= _S_FIND_ATOL_EXACT, (
+        f"loop-ON exact-mode sigma=0 Ip-space residual {resid:.3e} (bar "
+        f"{_S_FIND_ATOL_EXACT:.2e}); s={s:.9f}, f_ind={f_ind:.4f}")
+
+
+def test_sigma0_r2_exact_measure_reports_a_plausible_inductive_share_loop_on(
+        sigma0_anchor_loop):
+    """Loop-ON twin of the denominator guard (same window)."""
+    f_ind = float(sigma0_anchor_loop["f_ind_exact"][0])
+    assert 0.2 <= f_ind <= 1.2, f_ind
+    assert (float(sigma0_anchor_loop["f_ind_exact"][1])
+            == pytest.approx(f_ind, rel=0, abs=0))
+
+
+def test_sigma0_r2_exact_measure_still_recovers_the_recon_li_loop_on(
+        sigma0_anchor_loop):
+    """Loop-ON twin: the same 0.5 % bar on l_i(3) against l_i_target (which,
+    with the loop, IS the delivered reconstruction's l_i)."""
+    target = float(sigma0_anchor_loop["l_i_target"][0])
+    got = float(sigma0_anchor_loop["li_exact"][0])
+    assert abs(got - target) / target <= _LI_REL, (
+        f"loop-ON sigma=0 l_i = {got:.6f} vs {target:.6f} "
+        f"({100 * (got / target - 1):+.4f}%, bar {100 * _LI_REL:.1f}%)")
+
+
+def test_sigma0_r2_exact_measure_is_bit_reproducible_loop_on(
+        sigma0_anchor_loop):
+    """Loop-ON twin: two identical exact-mode calls agree to the bit."""
+    d = sigma0_anchor_loop
+    assert float(d["s_exact"][0]) == float(d["s_exact"][1])
+    assert float(d["li_exact"][0]) == float(d["li_exact"][1])
+    np.testing.assert_array_equal(d["jbs_exact1"], d["jbs_exact2"])
+    np.testing.assert_array_equal(d["jind_exact1"], d["jind_exact2"])
+
+
+def test_sigma0_r2_exact_measure_leaves_the_bootstrap_alone_loop_on(
+        sigma0_anchor_loop):
+    """Loop-ON twin of "the Ip measure must not move j_BS".
+
+    The legacy claim is bitwise exact-vs-fsa because the legacy bootstrap is
+    computed BEFORE the amplitude root and never sees it.  Under the loop the
+    bootstrap is Redl on the draw's own equilibrium, which the measure moves
+    through ``s`` -- so the bitwise exact-vs-fsa form does not carry over
+    (the fsa difference is recorded as a diagnostic, bar-less).  The claim
+    the loop CAN make, and makes here: in the measure the reconstruction was
+    normalised in, the unperturbed draw leaves the bootstrap at the
+    reconstruction's, at the loop's own profile tolerance
+    (``jbs_rtol_j``, current-weighted)."""
+    from bouquet.jbs_loop import profile_residuals
+    d = sigma0_anchor_loop
+    c = profile_residuals(np.asarray(d["jbs_exact1"], float),
+                          np.asarray(d["jbs_baseline"], float),
+                          np.asarray(d["w_exact1"], float),
+                          np.asarray(d["psi_N"], float), float(d["Ip"][0]))
+    assert c["r_j"] <= 1e-3, (
+        f"the exact-measure sigma=0 draw moved the bootstrap off the "
+        f"reconstruction's: r_j={c['r_j']:.3e} (jbs_rtol_j 1e-3)")
+
+
+# ---------------------------------------------------------------------------
 #  subprocess entry point for the twin ensembles
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
@@ -676,5 +870,7 @@ if __name__ == "__main__":
         _generate_one_ensemble(_ARG)
     elif _WHAT == "r2":
         _run_r2_probe(_ARG)
+    elif _WHAT == "r2loop":
+        _run_r2_probe_loop(_ARG)
     else:
         raise SystemExit(f"unknown subcommand {_WHAT!r}")

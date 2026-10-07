@@ -30,8 +30,24 @@ Two relaxations, both of the PATH only (at the fixed point ``js = jc`` and
   oscillating two-state mode (l_i swings back by a fraction g < 0 per pass)
   that ``omega`` does not act on; ``beta ~ 1/(1 - g)`` damps it.  A step opts
   in by accepting a ``relax`` keyword (:class:`CurrentRelaxer`); the record
-  carries ``beta`` and the per-pass gap ``||js - jc|| / ||jc||`` (recorded,
-  never gated).
+  carries ``beta``, the per-pass gap ``||js - jc|| / ||jc||`` and, next to
+  it, the UNRELAXED closure-half residual ``||jc_k - js_k-1|| / ||jc_k||``
+  (``= gap / (1 - beta)`` on a blended pass; the gap understates it by
+  ``1 - beta``).  By default both are recorded only, never gated.
+
+Opt-in current gate (``GenerationConfig.jbs_gate_current_residual``, default
+False; under evaluation).  With it ON a pass also has to satisfy
+``current_residual = ||jc_k - js_k-1||_w / ||jc_k||_w <= rtol_j`` -- computed
+directly from the two arrays: the current the previous pass SOLVED against
+the current this pass's closure composes on the equilibrium that solve
+produced -- on the same two consecutive passes as every other criterion.
+It is measured one pass late (pass 1 cannot count).  A step without the
+relaxer reports its solved current as ``meas["j_solved"]``; a step that
+reports neither stops the loop at once.  It adds a criterion and changes no
+tolerance or ceiling; with it OFF the kernel is bit-identical to the one
+before it existed.  It bounds the closure-half RESIDUAL (the delivered
+current's consistency with its own closure), not the distance to the fixed
+point on a slow monotone mode.
 
 ``step`` and ``evaluate`` are supplied by the caller (the IMAS baseline, the
 structured / MSE closures, a perturbation draw, the geqdsk reconstruction);
@@ -53,6 +69,11 @@ Residuals (all logged every pass)
 ``dl_i`` ``|l_i(E_k+1) - l_i(E_k)|`` (only where the caller measures l_i).
 ``dq0``  ``|q0(E_k+1) - q0(E_k)|`` (only where an axis row / q0 target is
          active).
+``q0 - q0_target``  the TRUE q0 residual, an ADDED criterion
+         (``|.| <= q0_tol``) only with ``jbs_loop_q0_corrector=True`` on an
+         axis-row channel, where the axis row is moved once per pass from the
+         measured q0 (:class:`AxisRowPin`); by default the row is held and the
+         residual is only read back by the record-only corrector.
 
 The delivered equilibrium is the last solve; the bootstrap it was solved with
 is ``jBS_used``; ``J_final`` (Redl on that equilibrium) differs from it by at
@@ -62,7 +83,12 @@ Failure is never silent: the library raises :class:`JBSNotConverged` carrying
 the full residual history; with ``jbs_loop_on_fail="flag"`` the last iterate is
 returned with ``converged=False`` and the caller records a closure-limited
 reason.  A residual that grows on ``JBS_GROWTH_ABORT_PASSES`` consecutive
-passes at the relaxation floor aborts early with the same error.
+passes at the relaxation floor aborts early with the same error, and so does a
+pass that can never count (a gated ``l_i``/``q0`` the step did not return, or
+an identically zero ``J`` against a non-zero iterate) -- at that pass, not at
+the ceiling.  A non-finite initial guess or evaluated ``J`` raises
+:class:`JBSNonFinite` at once, whatever the policy, before it can reach the
+next solve.
 
 Nothing here touches an existing solver tolerance: the GS solver's own
 ``nl_tol``/``maxits``, the closure tolerances and the correctors' acceptance
@@ -117,6 +143,26 @@ class JBSNotConverged(RuntimeError):
         self.history = self.record
 
 
+class JBSNonFinite(JBSNotConverged):
+    """The loop was handed, or evaluated, a non-finite bootstrap.
+
+    Raised at once -- before the value can be blended into the next iterate
+    and handed to a GS solve -- and REGARDLESS of the ``"flag"`` policy: a
+    non-finite iterate is not a result that can be flagged and kept.
+    ``pass_number`` is 0 for the initial guess, ``index`` / ``psi_N`` locate
+    the first non-finite node (``psi_N`` is ``None`` when the grid is not
+    known yet).  A subclass of :class:`JBSNotConverged`, so every caller that
+    treats a failed loop as a failed slice or draw does so here too.
+    """
+
+    def __init__(self, message, record=None, *, pass_number=None,
+                 index=None, psi_N=None):
+        super().__init__(message, record)
+        self.pass_number = pass_number
+        self.index = index
+        self.psi_N = psi_N
+
+
 # ---------------------------------------------------------------------------
 #  settings
 # ---------------------------------------------------------------------------
@@ -135,6 +181,14 @@ def validate_jbs_settings(gc) -> None:
     if not isinstance(on, (bool, np.bool_)):
         raise ValueError(f"generation.jbs_self_consistent must be a bool, got "
                          f"{on!r}")
+    pin = _get("jbs_loop_q0_corrector", False)
+    if not isinstance(pin, (bool, np.bool_)):
+        raise ValueError(f"generation.jbs_loop_q0_corrector must be a bool, "
+                         f"got {pin!r}")
+    gate = _get("jbs_gate_current_residual", False)
+    if not isinstance(gate, (bool, np.bool_)):
+        raise ValueError(f"generation.jbs_gate_current_residual must be a "
+                         f"bool, got {gate!r}")
     init = _get("jbs_init", "anchor")
     if init not in _INIT_CHOICES:
         raise ValueError(f"generation.jbs_init must be one of {_INIT_CHOICES},"
@@ -146,6 +200,10 @@ def validate_jbs_settings(gc) -> None:
     for name, default in (("jbs_rtol_j", 1e-3), ("jbs_rtol_Ip", 1e-4),
                           ("jbs_tol_li", 1e-3), ("jbs_tol_q0", 2e-3)):
         v = _get(name, default)
+        if isinstance(v, (bool, np.bool_)):
+            # float(True) == 1.0 would pass as a (useless) tolerance
+            raise ValueError(f"generation.{name} must be a positive number, "
+                             f"not a bool (got {v!r})")
         try:
             fv = float(v)
         except (TypeError, ValueError):
@@ -158,7 +216,8 @@ def validate_jbs_settings(gc) -> None:
                           ("jbs_max_passes_post_homotopy",
                            JBS_POST_HOMOTOPY_PASSES)):
         v = _get(name, default)
-        if isinstance(v, bool) or not isinstance(v, (int, np.integer)):
+        if isinstance(v, (bool, np.bool_)) \
+                or not isinstance(v, (int, np.integer)):
             raise ValueError(f"generation.{name} must be an integer, got "
                              f"{v!r}")
         if int(v) < JBS_REQUIRED_CONSECUTIVE:
@@ -166,6 +225,9 @@ def validate_jbs_settings(gc) -> None:
                 f"generation.{name}={int(v)} cannot converge: convergence "
                 f"needs {JBS_REQUIRED_CONSECUTIVE} consecutive passing passes")
     w = _get("jbs_relax", 0.7)
+    if isinstance(w, (bool, np.bool_)):
+        raise ValueError(f"generation.jbs_relax must be a number in "
+                         f"[{JBS_RELAX_FLOOR}, 1], not a bool (got {w!r})")
     try:
         fw = float(w)
     except (TypeError, ValueError):
@@ -181,16 +243,48 @@ def validate_jbs_settings(gc) -> None:
     except (TypeError, ValueError):
         raise ValueError(f"generation.jbs_relax_current must be a number in "
                          f"(0, 1], got {b!r}") from None
-    if isinstance(b, bool) or not (np.isfinite(fb) and 0.0 < fb <= 1.0):
+    if isinstance(b, (bool, np.bool_)) or not (np.isfinite(fb)
+                                                and 0.0 < fb <= 1.0):
         raise ValueError(f"generation.jbs_relax_current must lie in (0, 1] "
                          f"(1 = no relaxation of the solved current), got "
                          f"{b!r}")
     h = _get("jbs_relax_halve_on", 3)
-    if isinstance(h, bool) or not isinstance(h, (int, np.integer)) \
-            or int(h) < 1:
+    if isinstance(h, (bool, np.bool_)) \
+            or not isinstance(h, (int, np.integer)) or int(h) < 1:
         raise ValueError(f"generation.jbs_relax_halve_on must be an integer "
                          f">= 1 (consecutive growing passes that halve "
                          f"omega; 1 = halve on every growth), got {h!r}")
+
+
+#: ``GenerationConfig.swb_iterations`` default: the legacy
+#: ``solve_with_bootstrap`` Picard pass count.
+SWB_ITERATIONS_DEFAULT = 3
+
+
+def deprecated_jbs_settings_warning(gc, stacklevel: int = 2) -> Optional[str]:
+    """Warn (``DeprecationWarning``) about settings the loop IGNORES.
+
+    ``swb_iterations`` is the legacy frozen path's Picard pass count.  With
+    ``jbs_self_consistent=True`` it is not used (the loop has its own
+    convergence test); a value other than the default is therefore a setting
+    the user expects to act and that silently would not.  Returns the message
+    (``None`` when nothing is ignored).
+    """
+    import warnings
+    if not bool(getattr(gc, "jbs_self_consistent", False)):
+        return None
+    v = getattr(gc, "swb_iterations", SWB_ITERATIONS_DEFAULT)
+    if v == SWB_ITERATIONS_DEFAULT and not isinstance(v, bool):
+        return None
+    msg = (f"generation.swb_iterations={v!r} is IGNORED under the "
+           "self-consistent bootstrap loop (jbs_self_consistent=True): the "
+           "loop iterates to its own convergence test (jbs_rtol_j, "
+           "jbs_rtol_Ip, jbs_tol_li, jbs_tol_q0) within jbs_max_passes / "
+           "jbs_max_passes_draw.  swb_iterations is deprecated and honoured "
+           "only with jbs_self_consistent=False (the legacy frozen-bootstrap "
+           "path).")
+    warnings.warn(msg, DeprecationWarning, stacklevel=stacklevel + 1)
+    return msg
 
 
 def jbs_settings(gc, *, draw: bool = False) -> dict:
@@ -202,7 +296,7 @@ def jbs_settings(gc, *, draw: bool = False) -> dict:
     provenance), so every caller can gate on it.
     """
     validate_jbs_settings(gc)
-    return dict(
+    out = dict(
         enabled=bool(getattr(gc, "jbs_self_consistent", False)),
         init=str(getattr(gc, "jbs_init", "anchor")),
         rtol_j=float(getattr(gc, "jbs_rtol_j", 1e-3)),
@@ -221,6 +315,11 @@ def jbs_settings(gc, *, draw: bool = False) -> dict:
         post_homotopy_passes=int(getattr(gc, "jbs_max_passes_post_homotopy",
                                          JBS_POST_HOMOTOPY_PASSES)),
     )
+    if bool(getattr(gc, "jbs_gate_current_residual", False)):
+        # only present when ON, so the default settings dict (and every
+        # record built from it) is exactly what it was before the flag
+        out["gate_current_residual"] = True
+    return out
 
 
 def tolerances_record(settings: dict) -> dict:
@@ -244,33 +343,59 @@ def tolerances_record(settings: dict) -> dict:
 _OFT_BUILD_CACHE = {}
 
 
-def oft_build_info() -> dict:
-    """``{path, git_hash}`` of the imported OpenFUSIONToolkit (cached).
+#: Characters a recorded build identifier may contain: no directory
+#: separator, no "~", nothing that could carry a filesystem location.
+_BUILD_ID_SAFE = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                           "0123456789._+-")
 
-    The git hash is read from the checkout the package lives in when there is
-    one; an install tree without ``.git`` records ``None``.  Never raises.
+
+def _build_token(v):
+    """*v* reduced to the characters of :data:`_BUILD_ID_SAFE` (``None`` when
+    nothing is left): a version string or a commit id, never a path."""
+    if v is None:
+        return None
+    t = "".join(c for c in str(v).strip() if c in _BUILD_ID_SAFE)
+    return t or None
+
+
+def oft_build_info() -> dict:
+    """``{version, git_hash, build_id}`` of the imported OpenFUSIONToolkit
+    (cached).
+
+    ``version`` is the package's ``__version__``; ``git_hash`` the SHORT
+    (12-character) commit id of the checkout the package lives in, when there
+    is one (an install tree without ``.git`` records ``None``); ``build_id``
+    the two together.  **No filesystem path is recorded** -- loop records are
+    written into archives and public fixtures, and the install location names
+    the machine and the user.  Every field is reduced to ``[A-Za-z0-9._+-]``,
+    so no directory component can survive.  Never raises.
     """
     if "info" in _OFT_BUILD_CACHE:
         return dict(_OFT_BUILD_CACHE["info"])
-    info = {"path": None, "git_hash": None}
+    info = {"version": None, "git_hash": None, "build_id": None}
     try:
         import os
         import subprocess
         import OpenFUSIONToolkit as _oft
-        path = os.path.dirname(os.path.abspath(_oft.__file__))
-        info["path"] = path
+        info["version"] = _build_token(getattr(_oft, "__version__", None))
+        pkg_dir = os.path.dirname(os.path.abspath(_oft.__file__))
         try:
             out = subprocess.run(
-                ["git", "-C", path, "rev-parse", "HEAD"],
+                ["git", "-C", pkg_dir, "rev-parse", "--short=12", "HEAD"],
                 capture_output=True, text=True, timeout=5)
             if out.returncode == 0 and out.stdout.strip():
-                info["git_hash"] = out.stdout.strip()
+                info["git_hash"] = _build_token(out.stdout.strip())
         except Exception:
             pass
     except Exception:
         pass
+    info["build_id"] = ("OpenFUSIONToolkit"
+                        + ("" if info["version"] is None
+                           else f" {info['version']}")
+                        + ("" if info["git_hash"] is None
+                           else f" git {info['git_hash']}"))
     _OFT_BUILD_CACHE["info"] = dict(info)
-    return info
+    return dict(info)
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +510,33 @@ class CurrentRelaxer:
         if self._last is not None:
             self._prev = self._last[1].copy()
 
+    def unrelaxed_residual(self, w=None, x=None):
+        """``||jc_k - js_{k-1}|| / ||jc_k||`` for the pass just taken, or
+        ``None`` on a pass without a previous solved current.
+
+        The UNRELAXED residual of the closure half of the fixed point: the
+        distance between the current the closure asks for on this pass's
+        geometry and the current the previous pass solved.  For a blended
+        pass it equals ``gap / (1 - beta)`` exactly (the recorded ``gap`` is
+        scaled down by ``1 - beta``); unlike that quotient it is also defined
+        at ``beta = 1``.  RECORD ONLY -- never gated.  Current-weighted with
+        the pass's ``w``/``x`` when the shapes match, plain L2 otherwise.
+        """
+        if self._last is None or self._prev is None:
+            return None
+        jc = self._last[0]
+        if self._prev.shape != jc.shape:
+            return None
+        d = jc - self._prev
+        if (w is not None and x is not None
+                and np.shape(w) == jc.shape == np.shape(x)):
+            n = weighted_norm(jc, w, x)
+            dn = weighted_norm(d, w, x)
+        else:
+            n = float(np.linalg.norm(jc))
+            dn = float(np.linalg.norm(d))
+        return (dn / n) if n > 0.0 else (0.0 if dn == 0.0 else float("inf"))
+
     def gap(self, w=None, x=None):
         """``(rel, blended)`` for the pass just taken: ``||js - jc|| / ||jc||``
         (current-weighted with the pass's ``w``/``x`` when the shapes match,
@@ -402,6 +554,238 @@ class CurrentRelaxer:
         n = float(np.linalg.norm(jc))
         return ((float(np.linalg.norm(d)) / n) if n > 0.0 else
                 (0.0 if not blended else float("inf"))), blended
+
+
+# ---------------------------------------------------------------------------
+#  the q0 pin acting under the loop (jbs_loop_q0_corrector)
+# ---------------------------------------------------------------------------
+#: The update rule of :class:`AxisRowPin`, as recorded.
+AXIS_ROW_UPDATE_RULE = (
+    "j_ref0(k+1) = j0_solved(k) * q0(E_k+1) / q0_target: the legacy "
+    "structured corrector's row update j_ref0' = j_ref0 * q0_solved/q0_target "
+    "(q0 ~ 1/j_phi(0); the scalar corrector's Newton step is its first-order "
+    "expansion), applied once per pass from the q0 MEASURED on that pass's "
+    "solved equilibrium, with j0_solved the axis value of the current the "
+    "pass actually SOLVED (= the row when the solved current is not "
+    "relaxed, beta = 1)")
+
+
+class AxisRowPin:
+    """The on-axis safety-factor pin ACTING under the self-consistent loop.
+
+    ``GenerationConfig.jbs_loop_q0_corrector=True`` on a channel whose axis
+    row is active (``closure_channel="sawtooth_bootstrap"``, or
+    ``"structured"`` with the sawtooth gate admitting the axis row).  The
+    closure of every pass imposes the axis-current row :attr:`row`; after the
+    pass is solved, the q0 measured on the NEW equilibrium moves the row for
+    the next pass (:data:`AXIS_ROW_UPDATE_RULE`)::
+
+        j_ref0(k+1) = j0_solved(k) * q0(E_k+1) / q0_target
+
+    ``j0_solved`` is the axis value of the current the pass SOLVED: with the
+    solved current relaxed (``jbs_relax_current = beta``) the equilibrium sees
+    ``(1 - beta) js_k-1(0) + beta j_ref0(k)``, not the row, and ``q0 ~ 1/j0``
+    is a statement about the current that was solved.  With ``beta = 1`` it
+    IS the row and the rule is the legacy structured corrector's own.  At the
+    joint fixed point the row stops moving exactly when ``q0 = q0_target``, so
+    the relaxation (like ``omega`` and ``beta``) changes the path, not the
+    answer.
+
+    :meth:`within_tol` is the convergence criterion the kernel ADDS for these
+    channels, ``|q0 - q0_target| <= q0_tol``, next to (never instead of) the
+    ``jbs_tol_q0`` step criterion.  ``q0_tol`` is the channel's own unchanged
+    acceptance band.  Nothing here relaxes a criterion: a joint iteration that
+    does not reach it fails exactly as the loop fails.
+    """
+
+    def __init__(self, q0_target, q0_tol, row0, *, label: str = ""):
+        t = _finite_or_none(q0_target)
+        tol = _finite_or_none(q0_tol)
+        r0 = _finite_or_none(row0)
+        if t is None or t == 0.0:
+            raise ValueError(f"AxisRowPin[{label}]: q0_target must be a finite"
+                             f" non-zero number, got {q0_target!r}")
+        if tol is None or tol <= 0.0:
+            raise ValueError(f"AxisRowPin[{label}]: q0_tol must be a positive"
+                             f" finite number, got {q0_tol!r}")
+        if r0 is None or r0 == 0.0:
+            raise ValueError(f"AxisRowPin[{label}]: the initial axis row must "
+                             f"be a finite non-zero current, got {row0!r}")
+        self.label = str(label)
+        self.q0_target = t
+        self.q0_tol = tol
+        self.row0 = r0
+        self.row = r0                 # the row the NEXT closure imposes
+        self.n_updates = 0
+        self._pending = None          # (q0, j0_solved) of the last observation
+        self.log = dict(stage=[], axis_row=[], axis_current_solved=[], q0=[],
+                        q0_residual=[], q0_residual_over_tol=[],
+                        axis_row_next=[])
+
+    def residual(self, q0):
+        """``q0 - q0_target`` (``None`` when *q0* is not finite)."""
+        q = _finite_or_none(q0)
+        return None if q is None else q - self.q0_target
+
+    def within_tol(self, q0) -> bool:
+        """``|q0 - q0_target| <= q0_tol`` (False for a non-finite q0)."""
+        r = self.residual(q0)
+        return bool(r is not None and abs(r) <= self.q0_tol)
+
+    def observe(self, q0, axis_current_solved, *, stage: str = "loop"):
+        """Record one solved pass: the row it closed with, the axis current it
+        solved, the measured q0 and its residual.  The row is NOT moved here
+        (see :meth:`advance`)."""
+        r = self.residual(q0)
+        self.log["stage"].append(str(stage))
+        self.log["axis_row"].append(float(self.row))
+        self.log["axis_current_solved"].append(
+            _finite_or_none(axis_current_solved))
+        self.log["q0"].append(_finite_or_none(q0))
+        self.log["q0_residual"].append(r)
+        self.log["q0_residual_over_tol"].append(
+            None if r is None else float(abs(r) / self.q0_tol))
+        self.log["axis_row_next"].append(None)
+        self._pending = (_finite_or_none(q0),
+                         _finite_or_none(axis_current_solved))
+        return r
+
+    def advance(self):
+        """Move the row from the last observation (a further pass follows).
+
+        Returns the new row, or ``None`` (row kept) when the observation
+        cannot define a step (non-finite q0 or axis current, or a new row that
+        is not a finite current of the initial row's sign) -- the residual
+        criterion then keeps failing on its own, so a kept row is never a
+        silent success."""
+        if self._pending is None:
+            return None
+        q0, j0 = self._pending
+        self._pending = None
+        if q0 is None or j0 is None:
+            return None
+        new = j0 * q0 / self.q0_target
+        if not (np.isfinite(new) and new != 0.0
+                and np.sign(new) == np.sign(self.row0)):
+            return None
+        self.row = float(new)
+        self.n_updates += 1
+        self.log["axis_row_next"][-1] = float(new)
+        return float(new)
+
+    def snapshot(self):
+        """State a caller can hand back to :meth:`restore` (the MSE stage's
+        refusal restores the pre-MSE row)."""
+        return (self.row, self.n_updates)
+
+    def restore(self, snap):
+        self.row, self.n_updates = float(snap[0]), int(snap[1])
+        self._pending = None
+
+    def record(self) -> dict:
+        """The JSON-safe block the loop record carries
+        (``record["q0_pin"]``)."""
+        last = (self.log["q0_residual"][-1] if self.log["q0_residual"]
+                else None)
+        return dict(
+            mode="acting: per-pass axis-row update (jbs_loop_q0_corrector)",
+            update_rule=AXIS_ROW_UPDATE_RULE,
+            criterion=("|q0 - q0_target| <= q0_tol on the pass's solved "
+                       "equilibrium, ADDED to the jbs_tol_q0 step criterion"),
+            q0_target=float(self.q0_target), q0_tol=float(self.q0_tol),
+            axis_row_initial=float(self.row0),
+            axis_row_final=float(self.row),
+            n_row_updates=int(self.n_updates),
+            final_q0_residual=last,
+            final_q0_residual_over_tol=(None if last is None
+                                        else float(abs(last) / self.q0_tol)),
+            **{k: list(v) for k, v in self.log.items()})
+
+
+#: Definition string of the gated closure-half residual (recorded with it).
+CURRENT_GATE_DEFINITION = (
+    "||jc_k - js_{k-1}||_w / ||jc_k||_w, computed directly from the two "
+    "arrays: js_{k-1} is the current pass k-1 SOLVED (the jphi input of its "
+    "solve) and jc_k is the current pass k's closure COMPOSED on the "
+    "equilibrium that solve produced, with the bootstrap evaluated on it "
+    "(relaxed by omega).  It is the closure-half residual of pass k-1's "
+    "solve, measured one pass later (the closure on a solve's geometry is "
+    "only composed by the next pass).  Steps without the relaxer report "
+    "their solved current as meas['j_solved'] (beta not applied, so "
+    "jc_k = js_k).  Pass 1 has no previous solved current and cannot count.  "
+    "Norm and tolerance: the loop's current-weighted L2 norm and jbs_rtol_j.")
+
+
+def criteria_timeline(record: dict) -> dict:
+    """For every ACTIVE criterion of a loop record, the 1-based pass from
+    which it held without a break through the last pass (``None`` when it
+    does not hold on the last pass), and which criterion was the LAST to be
+    met (the latest such pass among the GATED criteria; a list, ties
+    included; ``None`` unless every gated criterion holds on the last pass).
+
+    Works on any record, gate on or off: the closure-half residual is read
+    from ``current_residual`` (gate on) or else from the record-only
+    ``current_residual_unrelaxed``, and is listed in ``gated`` only when the
+    record's criteria say it was a criterion.  Pure bookkeeping.
+    """
+    tol = dict(record.get("tolerances") or {})
+    crit = dict(record.get("criteria") or {})
+    n = int(record.get("n_passes") or 0)
+
+    def _le(v, t):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return False
+        return bool(np.isfinite(f) and f <= float(t))
+
+    series = {}
+    for name, key, tkey in (("r_j", "r_j", "rtol_j"),
+                            ("r_I", "r_I", "rtol_Ip"),
+                            ("dl_i", "dl_i", "tol_li"),
+                            ("dq0", "dq0", "tol_q0")):
+        if crit.get(name) and tkey in tol:
+            series[name] = [_le(v, tol[tkey]) for v in record.get(key, [])]
+    cur = record.get("current_residual")
+    if cur is None:
+        cur = record.get("current_residual_unrelaxed")
+    gated_cur = bool(crit.get("current_residual"))
+    if cur is not None and "rtol_j" in tol and (
+            gated_cur or any(v is not None for v in cur)):
+        series["current_residual"] = [_le(v, tol["rtol_j"]) for v in cur]
+    since = {}
+    for name, oks in series.items():
+        oks = list(oks)[:n]
+        if not oks or not oks[-1]:
+            since[name] = None
+            continue
+        i = len(oks) - 1
+        while i > 0 and oks[i - 1]:
+            i -= 1
+        since[name] = i + 1
+    gated = sorted(k for k in series if k != "current_residual" or gated_cur)
+    last = None
+    if gated and all(since[k] is not None for k in gated):
+        m = max(since[k] for k in gated)
+        last = sorted(k for k in gated if since[k] == m)
+    return dict(met_since_pass=since, last_met=last, gated=gated)
+
+
+def _relative_difference(a, b, w=None, x=None):
+    """``||a - b|| / ||a||`` -- current-weighted with ``w``/``x`` when the
+    shapes match (the loop's norm), plain L2 otherwise; ``None`` on a shape
+    mismatch."""
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    if a.shape != b.shape:
+        return None
+    d = a - b
+    if (w is not None and x is not None
+            and np.shape(w) == a.shape == np.shape(x)):
+        n, dn = weighted_norm(a, w, x), weighted_norm(d, w, x)
+    else:
+        n, dn = float(np.linalg.norm(a)), float(np.linalg.norm(d))
+    return (dn / n) if n > 0.0 else (0.0 if dn == 0.0 else float("inf"))
 
 
 def _step_takes_relax(step) -> bool:
@@ -423,7 +807,8 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
                  grid: str = "psi_N native",
                  on_pass: Optional[Callable] = None,
                  max_passes: Optional[int] = None,
-                 raise_on_fail: Optional[bool] = None) -> dict:
+                 raise_on_fail: Optional[bool] = None,
+                 q0_pin: Optional[AxisRowPin] = None) -> dict:
     """Iterate closure <-> GS <-> Redl to the fixed point.
 
     Parameters
@@ -473,6 +858,15 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         Override of ``settings["max_passes"]`` (the post-homotopy stage).
     raise_on_fail : bool or None
         Override of the ``settings["on_fail"]`` policy.
+    q0_pin : :class:`AxisRowPin` or None
+        ``jbs_loop_q0_corrector=True`` on an axis-row channel: the step
+        closes with ``q0_pin.row`` and returns ``q0`` and
+        ``axis_current_solved`` (the axis value of the current it solved);
+        the kernel records both, ADDS ``|q0 - q0_target| <= q0_tol`` to the
+        pass criteria (next to ``dq0``, which ``gate_q0`` keeps) and moves the
+        row once per pass when a further pass follows.  ``None`` (default):
+        the kernel is exactly the one without the pin -- same criteria, same
+        record keys.
 
     Returns
     -------
@@ -501,7 +895,8 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         grid=str(grid),
         tolerances=tolerances_record(dict(settings, max_passes=K)),
         criteria=dict(r_j=True, r_I=True, dl_i=bool(gate_li),
-                      dq0=bool(gate_q0)),
+                      dq0=bool(gate_q0),
+                      **({} if q0_pin is None else dict(q0_residual=True))),
         n_passes=0, converged=False, stop_reason=None,
         omega=[], r_j=[], r_I=[], dl_i=[], dq0=[], I_BS=[], I_BS_used=[],
         jBS_peak=[], jBS_peak_psiN=[], li=[], q0=[], pass_ok=[],
@@ -513,6 +908,14 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
             if takes_relax else
             "not applied: this caller's step does not take the relaxer"),
         current_gap=[], current_blended=[],
+        # RECORD ONLY, never gated: the unrelaxed residual of the closure
+        # half, ||jc_k - js_{k-1}|| / ||jc_k|| (= current_gap / (1 - beta)
+        # on a blended pass).  current_gap understates it by (1 - beta).
+        current_residual_unrelaxed=[],
+        current_residual_unrelaxed_definition=(
+            "||jc_k - js_{k-1}||_w / ||jc_k||_w = current_gap / (1 - beta) "
+            "on a blended pass: the unrelaxed closure-half residual; "
+            "recorded only, NOT a convergence criterion"),
         relax_halve_on=int(halve_on), omega_halved_at_pass=[],
     )
     try:
@@ -521,8 +924,62 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
     except Exception:
         rec["evaluate_jBS_version"] = None
     rec["oft_build"] = oft_build_info()
+    # ---- opt-in gate on the closure-half residual (jbs_gate_current_residual)
+    # Everything below is added ONLY when the gate is on, so a default record
+    # is key-for-key and value-for-value what it was before the flag existed.
+    gate_cur = bool(settings.get("gate_current_residual", False))
+    if gate_cur:
+        rec["criteria"]["current_residual"] = True
+        rec["current_gate"] = dict(
+            active=True, tolerance=float(settings["rtol_j"]),
+            tolerance_setting="jbs_rtol_j",
+            source=("the pass's CurrentRelaxer (jc_k and js_k-1)"
+                    if takes_relax else
+                    "the step's meas['j_solved'] (beta not applied)"),
+            definition=CURRENT_GATE_DEFINITION)
+        rec["current_residual"] = []
+        rec["current_residual_estimate"] = []
+        rec["current_residual_estimate_definition"] = (
+            "current_gap / (1 - beta) on a blended pass (None otherwise): "
+            "the estimate the direct current_residual is checked against")
+        rec["current_residual_direct_over_estimate"] = []
+        rec["current_residual_ok"] = []
+        rec["current_residual_unrelaxed_definition"] = (
+            "||jc_k - js_{k-1}||_w / ||jc_k||_w = current_gap / (1 - beta) "
+            "on a blended pass: the unrelaxed closure-half residual; with "
+            "jbs_gate_current_residual=True the same quantity is GATED as "
+            "current_residual")
+    _js_prev_step = None                # j_solved of the previous pass
+
+    def _nonfinite(k, what, arr, grid):
+        """Raise :class:`JBSNonFinite` at the first non-finite node of
+        *arr* (pass ``k + 1``; ``k = -1`` is the initial guess)."""
+        bad = ~np.isfinite(arr)
+        i = int(np.argmax(bad))
+        psi = None
+        if grid is not None and np.shape(grid) == np.shape(arr):
+            psi = float(np.asarray(grid, dtype=float)[i])
+        where = (f"index {i}" + ("" if psi is None else f", psi_N={psi:.6g}")
+                 + f"; {int(bad.sum())} of {bad.size} node(s)")
+        when = "before pass 1" if k < 0 else f"on pass {k + 1}/{K}"
+        msg = (f"self-consistent j_BS loop"
+               f"{(' [' + label + ']') if label else ''}: {what} is "
+               f"non-finite {when} ({where}) -- refusing to blend it into "
+               "the next iterate or hand it to a GS solve")
+        rec["stop_reason"] = msg
+        rec["wall_s"] = float(time.perf_counter() - t0)
+        rec["jbs_converged"] = False
+        rec["fail_message"] = msg
+        if q0_pin is not None:
+            rec["q0_pin"] = q0_pin.record()
+        print("  [jbs-loop] " + msg, flush=True)
+        raise JBSNonFinite(msg, rec, pass_number=max(k + 1, 0), index=i,
+                           psi_N=psi)
 
     jbs = np.asarray(jbs0, dtype=float).copy()
+    if not np.all(np.isfinite(jbs)):
+        _nonfinite(-1, "the initial bootstrap guess jbs0", jbs,
+                   (meas0 or {}).get("x"))
     prev = dict(meas0 or {})
     streak = 0
     growth_at_floor = 0
@@ -544,6 +1001,9 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         if J.shape != jbs.shape:
             raise ValueError(f"run_jbs_loop[{label}]: evaluate returned shape "
                              f"{J.shape}, the iterate has {jbs.shape}")
+        if not np.all(np.isfinite(J)):
+            rec["n_passes"] = k + 1
+            _nonfinite(k, "the evaluated bootstrap J", J, meas.get("x"))
         res = profile_residuals(J, jbs, meas["w"], meas["x"], Ip)
         li_new = _finite_or_none(meas.get("li"))
         q0_new = _finite_or_none(meas.get("q0"))
@@ -560,7 +1020,45 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
             ok = ok and (dl_i is not None and dl_i <= settings["tol_li"])
         if gate_q0:
             ok = ok and (dq0 is not None and dq0 <= settings["tol_q0"])
+        q0_res = None
+        if q0_pin is not None:
+            # the TRUE residual against the target, not only the step:
+            # an added condition, never a replacement
+            q0_res = q0_pin.observe(q0_new, meas.get("axis_current_solved"))
+            ok = ok and q0_pin.within_tol(q0_new)
         ok = bool(ok)
+        if relaxer is not None:
+            _gap, _bl = relaxer.gap(meas.get("w"), meas.get("x"))
+            _unrel = relaxer.unrelaxed_residual(meas.get("w"), meas.get("x"))
+            relaxer.commit()
+        else:
+            _gap, _bl, _unrel = None, False, None
+        _cres = None
+        if gate_cur:
+            if relaxer is not None:
+                _cres = _unrel
+                _est = ((_gap / (1.0 - beta)) if (_bl and _gap is not None
+                                                  and beta < 1.0) else None)
+            else:
+                _js_now = meas.get("j_solved")
+                if _js_now is not None:
+                    _js_now = np.asarray(_js_now, dtype=float).copy()
+                    if _js_prev_step is not None:
+                        _cres = _relative_difference(
+                            _js_now, _js_prev_step, meas.get("w"),
+                            meas.get("x"))
+                _js_prev_step = _js_now
+                _est = None
+            _ratio = (float(_cres / _est) if (_cres is not None
+                                              and _est is not None
+                                              and _est > 0.0) else None)
+            _cok = bool(_cres is not None and np.isfinite(_cres)
+                        and _cres <= settings["rtol_j"])
+            ok = bool(ok and _cok)
+            rec["current_residual"].append(_cres)
+            rec["current_residual_estimate"].append(_est)
+            rec["current_residual_direct_over_estimate"].append(_ratio)
+            rec["current_residual_ok"].append(_cok)
         rec["omega"].append(None if omega_used_for_current is None
                             else float(omega_used_for_current))
         rec["r_j"].append(res["r_j"])
@@ -574,13 +1072,9 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         rec["li"].append(li_new)
         rec["q0"].append(q0_new)
         rec["pass_ok"].append(ok)
-        if relaxer is not None:
-            _gap, _bl = relaxer.gap(meas.get("w"), meas.get("x"))
-            relaxer.commit()
-        else:
-            _gap, _bl = None, False
         rec["current_gap"].append(_gap)
         rec["current_blended"].append(bool(_bl))
+        rec["current_residual_unrelaxed"].append(_unrel)
         rec["n_passes"] = k + 1
         entry = dict(k=k, ok=ok, dl_i=dl_i, dq0=dq0,
                      omega_used=omega_used_for_current, **res)
@@ -589,11 +1083,50 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
               f"r_I={res['r_I']:.3e} (tol {settings['rtol_Ip']:.0e})"
               + ("" if dl_i is None else f" dl_i={dl_i:.2e}")
               + ("" if dq0 is None else f" dq0={dq0:.2e}")
+              + ("" if q0_pin is None else
+                 (" q0-q0_target=n/a" if q0_res is None else
+                  f" q0-q0_target={q0_res:+.2e} (q0_tol {q0_pin.q0_tol:g})"))
               + f" I_BS={res['I_BS'] / 1e3:.2f} kA"
               + ("" if omega_used_for_current is None
                  else f" omega={omega_used_for_current:.3f}")
               + ("" if not _bl else f" |js-jc|/|jc|={_gap:.2e}")
+              + ("" if (not _bl or _unrel is None or gate_cur)
+                 else f" (unrelaxed {_unrel:.2e}, record only)")
+              + ("" if not gate_cur else
+                 (" cur_res=n/a (gated)" if _cres is None else
+                  f" cur_res={_cres:.2e} (gated, tol "
+                  f"{settings['rtol_j']:.0e})"))
               + (" ok" if ok else ""), flush=True)
+        # ---- a pass that can never count: stop now, not at the ceiling ----
+        _never = None
+        if gate_li and li_new is None:
+            _never = ("the step returned no finite l_i although l_i is a "
+                      "convergence criterion here (gate_li=True)")
+        elif gate_q0 and q0_new is None:
+            _never = ("the step returned no finite q0 although q0 is a "
+                      "convergence criterion here (gate_q0=True)")
+        elif q0_pin is not None and q0_new is None:
+            _never = ("the step returned no finite q0 although the q0 pin "
+                      "|q0 - q0_target| <= q0_tol is a convergence "
+                      "criterion here (jbs_loop_q0_corrector)")
+        elif (not np.any(J != 0.0)) and np.any(jbs != 0.0):
+            _never = ("the evaluated bootstrap J is identically zero while "
+                      "the iterate is not (r_j is infinite)")
+        elif gate_cur and _cres is None and (
+                k >= 1 or (relaxer is None
+                           and meas.get("j_solved") is None)):
+            _never = ("the closure-half current residual cannot be "
+                      "evaluated on this step although it is a convergence "
+                      "criterion here (jbs_gate_current_residual=True): "
+                      + ("the step did not pass its current through the "
+                         "relaxer" if relaxer is not None else
+                         "the step takes no relaxer and returned no "
+                         "meas['j_solved']"))
+        if _never is not None:
+            rec["stop_reason"] = (f"pass {k + 1}/{K}: {_never} -- "
+                                  "convergence is impossible, stopped at once "
+                                  "instead of running to the pass ceiling")
+            break
         streak = streak + 1 if ok else 0
         if streak >= need:
             rec["converged"] = True
@@ -623,6 +1156,10 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
             grow_streak = 0
         r_j_prev = res["r_j"]
         stop = (growth_at_floor >= n_abort) or (k == K - 1)
+        if q0_pin is not None and not stop:
+            # a further pass follows: move the axis row from the q0 this
+            # pass measured (once per pass; never after the last one)
+            q0_pin.advance()
         if on_pass is not None:
             # omega_next: the relaxation the NEXT iterate is built with (the
             # caller relaxes any per-pass update of its own -- e.g. a moved
@@ -650,7 +1187,21 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         dl_i=rec["dl_i"][-1] if rec["dl_i"] else None,
         dq0=rec["dq0"][-1] if rec["dq0"] else None,
         I_BS=rec["I_BS"][-1] if rec["I_BS"] else None,
-        current_gap=rec["current_gap"][-1] if rec["current_gap"] else None)
+        current_gap=rec["current_gap"][-1] if rec["current_gap"] else None,
+        current_residual_unrelaxed=(rec["current_residual_unrelaxed"][-1]
+                                    if rec["current_residual_unrelaxed"]
+                                    else None))
+    if q0_pin is not None:
+        rec["q0_pin"] = q0_pin.record()
+        rec["final"]["q0_residual"] = rec["q0_pin"]["final_q0_residual"]
+        rec["final"]["q0_residual_over_tol"] = \
+            rec["q0_pin"]["final_q0_residual_over_tol"]
+    if gate_cur:
+        rec["final"]["current_residual"] = (rec["current_residual"][-1]
+                                            if rec["current_residual"]
+                                            else None)
+        rec["criteria_timeline"] = criteria_timeline(rec)
+        rec["last_criterion_met"] = rec["criteria_timeline"]["last_met"]
     out = dict(jbs_used=np.asarray(jbs_used, dtype=float),
                J_final=(None if J is None else np.asarray(J, dtype=float)),
                meas_final=meas, converged=bool(rec["converged"]), record=rec)
@@ -659,7 +1210,12 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
                f" did not converge: {rec['stop_reason']}; residual history "
                f"r_j={_fmt_hist(rec['r_j'])} r_I={_fmt_hist(rec['r_I'])}"
                + ("" if not gate_li else f" dl_i={_fmt_hist(rec['dl_i'])}")
-               + ("" if not gate_q0 else f" dq0={_fmt_hist(rec['dq0'])}"))
+               + ("" if not gate_q0 else f" dq0={_fmt_hist(rec['dq0'])}")
+               + ("" if q0_pin is None else
+                  f" q0-q0_target={_fmt_hist(rec['q0_pin']['q0_residual'])}"
+                  f" (q0_tol {q0_pin.q0_tol:g})")
+               + ("" if not gate_cur else
+                  f" current_residual={_fmt_hist(rec['current_residual'])}"))
         rec["fail_message"] = msg
         print("  [jbs-loop] " + msg, flush=True)
         if raise_on_fail:
@@ -673,11 +1229,18 @@ def _fmt_hist(vals):
 
 
 def flag_reason(record: dict) -> str:
-    """The closure_limited reason a ``"flag"``-mode caller records."""
+    """The closure_limited reason a ``"flag"``-mode caller records (with the
+    final q0 residual against ``q0_tol`` when the q0 pin acted)."""
+    _pin = record.get("q0_pin")
+    _q0 = ""
+    if isinstance(_pin, dict):
+        _q0 = (", q0-q0_target="
+               + _fmt_one(_pin.get("final_q0_residual"))
+               + " (q0_tol " + _fmt_one(_pin.get("q0_tol")) + ")")
     return (JBS_FLAG_PREFIX + "did not converge ("
             + str(record.get("stop_reason")) + "; final r_j="
             + _fmt_one((record.get("final") or {}).get("r_j")) + ", r_I="
-            + _fmt_one((record.get("final") or {}).get("r_I")) + ")")
+            + _fmt_one((record.get("final") or {}).get("r_I")) + _q0 + ")")
 
 
 def _fmt_one(v):

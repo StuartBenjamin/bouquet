@@ -68,6 +68,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │              core_pressure_hollow (each only when present)
     │              [jbs_converged, jbs_n_passes, jbs_loop_json]
     │                                  ← the baseline's jbs_loop block (v3)
+    │              [delivered_state_json]
+    │                                  ← the ONE reconstruction state (loop)
     └── <count>/                       one group per accepted draw
         │                              (integer; gaps = rejected draws)
         ├── eqdsk, [pfile]             raw bytes, fixed names
@@ -143,8 +145,12 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
   (`GenerationConfig.jbs_self_consistent`, **the default**) every draw group
   carries `jbs_converged` (bool), `jbs_n_passes` (int, all loops of the draw)
   and the full loop record as JSON in `jbs_loop_json` (residual histories,
-  relaxation factors, tolerances, the post-homotopy check, the evaluator
-  version, the OFT build, and `init_source` -- what each loop started from,
+  relaxation factors, the solved-vs-closure gap and the record-only
+  unrelaxed closure residual `current_residual_unrelaxed`, tolerances, the
+  post-homotopy check, the evaluator version, the OFT build as a path-free
+  identifier `oft_build = {version, git_hash, build_id}` (archives written by
+  earlier builds of this branch carry `oft_build.path`, the install
+  location, instead), and `init_source` -- what each loop started from,
   per loop under `loops` and for the draw's first loop at the top level); the `_baseline` group carries the same three
   attrs for the baseline's own loop (`jbs_n_passes` = its pass count). Names
   in `schema.JBS_LOOP_ATTRS`; write/read with `schema.write_jbs_loop` /
@@ -153,6 +159,37 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
   for the baseline), `DrawView.jbs_loop` / `DrawView.jbs_converged`,
   `ScanView.baseline_jbs_loop` and `ScanView.bootstrap_model`. A group
   **without** the block carries a frozen (`solve_with_bootstrap`) bootstrap.
+
+- **The one reconstruction state (`_baseline@delivered_state_json`, loop
+  only).** The design rule: the input (g-file or modelling-source IDS), the
+  bouquet reconstruction (as close to the input as it can be while physically
+  valid and carrying a Redl bootstrap -- allowed to differ from the input),
+  and the draws (perturbations of the reconstruction; at zero perturbation
+  they reproduce it). With the loop on, the reconstruction is ONE
+  equilibrium, and `_baseline` records it and says whether the run's
+  baseline re-solve -- the saved `eqdsk` above and every draw's warm start --
+  is it. JSON keys (`utils.DELIVERED_STATE_ATTR`, written by
+  `utils.store_baseline_state`): `convention` (what the in-memory split is,
+  below), `path`, `l_i` (= `l_i_target`, l_i(3)/'iter'), `q0`, `q95`
+  (`get_stats` on the delivered state), `Ip_target`,
+  `request_normalisation` / `achieved_normalisation` (the uniform factors
+  that put the stored request / the achieved current at `Ip_target` in the
+  'exact' FSA current measure), `n_floored_inductive`,
+  `n_floored_target_inductive` (points where a zero-perturbation draw cannot
+  reproduce the state), on the g-file path `li_corrective_state`,
+  `li_step6_matched` and `li_input`, `how`, then `l_i_target`,
+  `baseline_resolve` (`l_i`, `q0`, `q95`, `Ip` of the run's baseline re-solve
+  and their differences from the recorded values) and
+  `archived_j_phi_rel_l2_vs_delivered` (the archived `j_phi` against the
+  delivered state's achieved current). Absent with
+  `jbs_self_consistent=False` (legacy archives are unchanged bit for bit).
+  With the loop on, `_baseline/j_phi` is the delivered state's ACHIEVED FSA
+  current (as before: `store_achieved_jphi`), `j_BS` the draws' σ=0
+  bootstrap composition on it (+ `jBS_diff`) and `j_inductive` their
+  residual; the in-memory `Baseline` split the draws consume is the
+  Ip-normalised jphi-linterp REQUEST of the same state (one solve of it is
+  the state), with `Baseline.jphi_request_offset` = request − achieved
+  (not archived).
 
 ## v2 → v3: the self-consistent bootstrap record
 
@@ -165,7 +202,10 @@ and changes no v2 dataset, attr, name, unit or meaning.
   `schema_version == 2`.
 - **Which bootstrap is in an archive** is decided by the block, never by the
   version number: a v3 archive written with `jbs_self_consistent=False`
-  carries no block either (it is the frozen path, bit for bit), and appending
+  carries no block either (it is the frozen path, bit for bit: the one solver
+  change the loop needed, the soft closure's noise-floor acceptance, is
+  opt-in via `close_ip_structured_soft(accept_noise_floor=True)` and passed by
+  the loop's closure calls only), and appending
   to a v2 file with a current bouquet restamps `schema_version` to 3 while its
   old draws keep reading as frozen. `ScanView.bootstrap_model` gives the label
   ("self-consistent Redl bootstrap" / "frozen SWB bootstrap (legacy)").

@@ -79,12 +79,11 @@ solver_only = pytest.mark.skipif(
 #: The structured closure (soft preset, gated axis row) needed exactly the
 #: approved default pass ceiling (8) on this synthetic case on the development
 #: build -- its one-sided prior makes the closure map non-smooth, so an early
-#: residual growth halves omega toward the floor.  The integration tests of
-#: that channel below are about the WIRING (records, subsumed correctors, the
-#: MSE composition), not about the default ceiling, so they run with this
-#: explicit test ceiling rather than depend on a pass count that another OFT
-#: build may miss by one.  The default is NOT changed by this.
-_STRUCTURED_TEST_PASSES = 12
+#: residual growth halves omega toward the floor.  Its integration tests below
+#: run at the SHIPPED default ceiling (``GenerationConfig.jbs_max_passes``),
+#: not at a raised test-only ceiling: a build on which that channel misses
+#: the default by a pass is a finding about the default, and must show up
+#: here as a failure rather than be absorbed by the test.
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +213,7 @@ def _imas_probe(outdir, part):
         "passed", "loop_converged", "r_j_vs_baseline", "r_I_vs_baseline",
         "dl_i_vs_baseline", "invariant")}
     out["f_imas"]["n_passes"] = int(s0["record"]["n_passes"])
+    out["f_imas_draw_route"] = s0.get("draw_route")
     with open(os.path.join(outdir, "imas_core.json"), "w") as fh:
         json.dump(out, fh)
 
@@ -281,7 +281,9 @@ def _imas_probe_loop(outdir, part, b, g, out):
 def _imas_probe_structured(outdir, b, g, out, _run):
     import numpy as np
     g.jBS_baseline_mode = "ohmic"
-    g.jbs_max_passes = _STRUCTURED_TEST_PASSES
+    from bouquet.config import GenerationConfig
+    # the shipped default ceiling (see the note at the top of the module)
+    assert g.jbs_max_passes == GenerationConfig().jbs_max_passes
     _run("structured", closure_channel="structured",
          structured_li_target=None)
     # ---- the MSE composition: synthetic chords off the delivered field ----
@@ -329,6 +331,7 @@ def _recon_probe(outdir):
     out["f_recon"] = {k: s0[k] for k in (
         "passed", "loop_converged", "r_j_vs_baseline", "r_I_vs_baseline",
         "dl_i_vs_baseline")}
+    out["f_recon_draw_route"] = s0.get("draw_route")
 
     # a sigma=0 route-R2 (Fix C) draw with the loop
     psi_N = np.asarray(bl.psi_N, dtype=float)
@@ -360,9 +363,13 @@ def _recon_probe(outdir):
         n_passes=int(d["jbs_loop"]["n_passes_total"]),
         r2_scale=float(d["r2_ip_scale"]), r2_f_ind=d.get("r2_f_ind"),
         r_j_vs_baseline=float(cmp_["r_j"]),
+        r_I_vs_baseline=float(cmp_["r_I"]),
         li=float(b.mygs.get_stats(lcfs_pad=psi_pad,
                                   li_normalization="iter")["l_i"]),
         l_i_target=float(bl.l_i_target),
+        li_realized_post_corrective=(
+            None if (bl.recon or {}).get("li_realized_post_corrective")
+            is None else float(bl.recon["li_realized_post_corrective"])),
         ctx_private="_jbs_ctx" in d,
         init_source=d["jbs_loop"].get("init_source"),
         loops=d["jbs_loop"].get("loops"))
@@ -429,6 +436,36 @@ def _recon_probe(outdir):
             r_j=r["record"]["r_j"], init_source=r["record"]["init_source"],
             j_BS=np.asarray(r["jbs_used"], float).tolist(),
             li=float(_meas()["li"]))
+
+    # ---- B1: the post-homotopy re-solves go through the saturation guard --
+    # The sigma=0 route-R2 draw's own rebuild context, its bootstrap nudged
+    # 2 % off Redl so the stage must re-solve.  The guard's reference coils
+    # sit 2 % below the coils mygs holds, against a 1 % bound: the FIRST
+    # real re-solve must trip it (CoilSaturated), exactly as the homotopy's
+    # own guard treats a pass on its bound.  The wide-bound control shows the
+    # guard is called on every pass and passes a solve with headroom.
+    from bouquet.TokaMaker_interface import (CoilSaturated,
+                                             _make_coil_saturation_guard,
+                                             _post_homotopy_jbs)
+    from bouquet.jbs_loop import JBSNotConverged
+    ctx = dict(d["_jbs_ctx"])
+    ctx["spike_used"] = 1.02 * np.asarray(ctx["spike_used"], dtype=float)
+    out["b1"] = {}
+    for tag, lim in (("saturating", 0.01), ("headroom", 10.0)):
+        _solve(j_phi_bl)
+        cur, _ = mygs.get_coil_currents()
+        base = {n: float(v) / 1.02 for n, v in cur.items()}
+        guard = _make_coil_saturation_guard(mygs, base, ("F9A", "F9B"),
+                                            lim, lim, stage=f"probe {tag}")
+        try:
+            _post_homotopy_jbs(mygs, ctx, jbs_settings(g, draw=True), psi_N,
+                               psi_pad, float(bl.Ip_target), coil_guard=guard)
+            outcome = "kept"
+        except CoilSaturated:
+            outcome = "CoilSaturated"
+        except JBSNotConverged:
+            outcome = "JBSNotConverged"
+        out["b1"][tag] = dict(outcome=outcome, checks=list(guard.log))
     with open(os.path.join(outdir, "recon.json"), "w") as fh:
         json.dump(out, fh)
 
@@ -752,6 +789,12 @@ def test_f_sigma0_route_r2_draw_converges_near_the_baseline(recon):
     # (|s-1|*f_ind <= 3.86e-3, tests/test_seeded_reproducibility.py) with the
     # loop's bootstrap in place of the frozen SWB spike
     assert abs(d["r2_scale"] - 1.0) * float(d["r2_f_ind"]) <= 3.86e-3, d
+    # ...and, at the loop's OWN tolerances, the unperturbed draw reproduces
+    # the baseline: its bootstrap (r_j) and its l_i against the target the
+    # draws are banded on.  No bar is widened for the draw route: a failure
+    # here is a finding about the draw route (review M1), not a test to tune.
+    assert d["r_j_vs_baseline"] <= _S["rtol_j"], d
+    assert abs(d["li"] - d["l_i_target"]) <= _S["tol_li"], d
     # the private rebuild context travels on the diagnostics until
     # generate_bouquet pops it before archiving
     assert d["ctx_private"]
@@ -760,6 +803,30 @@ def test_f_sigma0_route_r2_draw_converges_near_the_baseline(recon):
     assert d["init_source"].startswith(
         "evaluate_jBS on the draw's state-anchor equilibrium"), d
     assert d["loops"] and d["loops"][0]["init_source"] == d["init_source"]
+
+
+@pytest.mark.solver
+@solver_only
+@pytest.mark.parametrize("fix, key", [("imas", "f_imas_draw_route"),
+                                      ("recon", "f_recon_draw_route")])
+def test_sigma0_check_reports_the_draw_route_beside_its_verdict(request, fix,
+                                                               key):
+    """The sigma=0 check carries the draw's own route at zero perturbation
+    as a SEPARATE block.  RE-SCOPED BY THE OWNER'S DECISION (the
+    zero-perturbation identity of the draws): its verdict used to gate
+    nothing; it now decides the check's ``passed`` (asserted by the tests
+    above and in tests/test_sigma0_identity_solver.py).  Only the presence
+    and completeness of the measurement is asserted here."""
+    blk = request.getfixturevalue(fix)[key]
+    assert blk is not None and blk["routes"], blk
+    assert "passed_draw_route" in blk
+    assert blk["gates"].startswith("verify_sigma0_consistency's `passed`")
+    for route, rr in blk["routes"].items():
+        assert rr.get("error") is None, (route, rr)
+        for k in ("loop_converged", "passes_used", "r_j", "r_I", "li_draw",
+                  "dl_i_vs_l_i_target", "dl_i_vs_delivered",
+                  "passed_draw_route"):
+            assert k in rr, (route, k)
 
 
 @pytest.mark.solver
@@ -778,6 +845,23 @@ def test_draw_fixed_point_does_not_depend_on_its_start(recon):
     assert _rj(a["j_BS"], b["j_BS"]) <= 5 * _S["rtol_j"]
     assert abs(a["li"] - b["li"]) <= 2 * _S["tol_li"]
     assert b["r_j"][0] < a["r_j"][0]
+
+
+@pytest.mark.solver
+@solver_only
+def test_b1_post_homotopy_resolves_are_guarded_against_coil_saturation(
+        recon):
+    """B1 on the live solver: a post-homotopy re-solve that ends with the coils
+    beyond 0.99 x the bound rejects the draw after its FIRST re-solve; with
+    headroom every pass is checked and none is saturated."""
+    b1 = recon["b1"]
+    sat = b1["saturating"]
+    assert sat["outcome"] == "CoilSaturated", sat
+    assert len(sat["checks"]) == 1 and sat["checks"][0]["saturated"], sat
+    assert sat["checks"][0]["label"].startswith("post-homotopy pass 1"), sat
+    ok = b1["headroom"]
+    assert ok["outcome"] != "CoilSaturated", ok
+    assert ok["checks"] and not any(c["saturated"] for c in ok["checks"]), ok
 
 
 # ---------------------------------------------------------------------------

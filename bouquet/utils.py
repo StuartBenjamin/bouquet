@@ -21,8 +21,9 @@ from .schema import write_profile
 #: == the g-file reader's ``li["li(2)"]`` key (whose name is historical and
 #: misleading -- it is not Jackson's li(2)).
 #:
-#: This is the ONLY estimator bouquet and TokaMaker agree on (0.17% across the
-#: DIII-D 169510 beta-scan g-files); the li(1)/EFIT pair differs by +3.3%
+#: This is the ONLY estimator bouquet and TokaMaker agree on (0.17% across a
+#: 16-equilibrium beta-scan set of reconstruction g-files); the li(1)/EFIT
+#: pair differs by +3.3%
 #: because TokaMaker projects the padded surface onto the true separatrix
 #: before summing perimeter.  Targeting one and measuring the other is
 #: issue #20.  Written into every archive's ``_baseline`` group as
@@ -2942,7 +2943,10 @@ def soft_closure_with_retry(solve, x_prev=None, who="structured closure"):
     """``solve(x0)`` with ONE logged retry from *x_prev* after a no-descent
     refusal.
 
-    *solve* is ``lambda x0: close_ip_structured_soft(..., x0=x0)``.  The first
+    *solve* is ``lambda x0: close_ip_structured_soft(..., x0=x0)``; whether
+    that solve may accept at the objective's noise floor is the lambda's own
+    ``accept_noise_floor`` argument (the loop's callers pass ``True``), not
+    something this wrapper decides.  The first
     call starts at ``s == 1`` (``x0=None``) exactly as every caller always
     did.  If -- and only if -- it raises the Levenberg "could not find a
     descent step" refusal and *x_prev* (the previous pass's coefficients) is
@@ -2980,7 +2984,8 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                              li_geom=None, axis=None, axis_sigma=None,
                              scale_bounds=(0.2, 5.0), rtol=1e-10,
                              max_iter=100, cond_rtol=1e-6,
-                             sigma_ind_up=None, mse_lin=None, x0=None):
+                             sigma_ind_up=None, mse_lin=None, x0=None,
+                             accept_noise_floor=False):
     r"""The POSTERIOR-MODE structured closure: Ip and l_i as measurements.
 
     :func:`close_ip_structured` treats Ip (and the axis current, and l_i) as
@@ -3078,7 +3083,11 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
 
     * ``stop_reason="gradient_floor"`` -- the scaled gradient is below
       ``rtol * max|J| * max(sqrt F, 1)`` (the historical test, unchanged);
-    * ``stop_reason="noise_floor"`` -- the gradient is at the floor the
+    * ONLY with ``accept_noise_floor=True`` (the self-consistent bootstrap
+      loop's callers pass it; the default ``False`` is the historical,
+      strict behaviour -- no noise estimate is formed, and the refusal below
+      is raised exactly where, and with exactly the message, it always was):
+      ``stop_reason="noise_floor"`` -- the gradient is at the floor the
       objective's ROUNDING NOISE implies AND every Levenberg try's predicted
       decrease (and the undamped Gauss-Newton step's) is below that noise.
       The noise is estimated from the rows themselves:
@@ -3093,9 +3102,19 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
       decrease exists only below the resolution of F, far below the
       ``rtol`` relative-change test that ends every ordinary run.  The
       gradient, the predicted decrease and the noise estimate are recorded
-      (``gn_stop``);
+      (``gn_stop``, ``n_noise_floor_accepts``) AND printed.  A noise
+      estimate that is not finite or not positive accepts nothing (the
+      refusal stands);
     * otherwise ``RuntimeError`` ("Levenberg damping could not find a
       descent step") -- unchanged.
+
+    **This is an acceptance-criterion change** relative to the historical
+    solver: every ``noise_floor`` return is a case the historical test
+    REFUSED.  It was approved for the self-consistent bootstrap loop only,
+    which is why it is opt-in: with ``accept_noise_floor=False`` (the
+    default, and what every frozen-bootstrap / ``jbs_self_consistent=False``
+    caller must pass) the solver returns and refuses exactly what it did
+    before the loop existed.
 
     ``x0`` (optional, full ``(2K,)`` coefficients) starts Gauss-Newton there
     instead of at ``s == 1`` (projected onto the hard-constraint manifold),
@@ -3353,11 +3372,20 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
             return np.asarray(m, dtype=float)
 
         def _noise_of_F(z, r, F):
+            """The objective's rounding-noise estimate, or ``None`` when it
+            cannot be trusted: a shape mismatch, or a value that is not
+            finite and positive (an infinite estimate would accept anything,
+            a zero or negative one is meaningless).  ``None`` accepts
+            nothing, so this guard can only make acceptance stricter."""
             m = _row_magnitudes(z)
             if m.shape != r.shape:          # defensive: never guess
                 return None
-            return float(NOISE_FLOOR_FACTOR * np.finfo(float).eps
-                         * (float(np.sum(2.0 * np.abs(r) * m)) + F))
+            with np.errstate(over="ignore", invalid="ignore"):
+                noise = float(NOISE_FLOOR_FACTOR * np.finfo(float).eps
+                              * (float(np.sum(2.0 * np.abs(r) * m)) + F))
+            if not (np.isfinite(noise) and noise > 0.0):
+                return None
+            return noise
 
         # ---- Gauss-Newton with a Levenberg damping fallback ---------------------
         nz = N.shape[1]
@@ -3415,8 +3443,18 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                     gstop = dict(stop_reason="gradient_floor", gradient=gnorm,
                                  gradient_floor=floor)
                     break
-                # Noise-aware test: is the iterate stationary to within what
-                # the objective can RESOLVE?  (see the docstring)
+                if not accept_noise_floor:
+                    # the historical refusal, verbatim (strict path: the
+                    # frozen-bootstrap / jbs_self_consistent=False callers)
+                    raise RuntimeError(
+                        "close_ip_structured_soft: Levenberg damping could not "
+                        f"find a descent step at objective {F:.6e} (scaled "
+                        f"gradient {gnorm:.3e} > floor {floor:.3e}) -- the "
+                        "measurement rows and the prior are inconsistent on "
+                        "this basis")
+                # Noise-aware test (opt-in, the self-consistent bootstrap
+                # loop only): is the iterate stationary to within what the
+                # objective can RESOLVE?  (see the docstring)
                 noise = _noise_of_F(z, r, F)
                 _dgn = np.linalg.lstsq(J, -r, rcond=None)[0]
                 _Jd = J @ _dgn
@@ -3428,6 +3466,8 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                 gfloor_noise = (None if noise is None
                                 else sJ * float(np.sqrt(noise)))
                 if (noise is not None and np.isfinite(pred_max)
+                        and gfloor_noise is not None
+                        and np.isfinite(gfloor_noise)
                         and pred_max <= noise and g2 <= gfloor_noise):
                     converged = True
                     gstop = dict(stop_reason="noise_floor", gradient=gnorm,
@@ -3438,6 +3478,16 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                                  noise_F=noise, objective=F,
                                  n_trials=len(pred_trials),
                                  noise_factor=float(NOISE_FLOOR_FACTOR))
+                    # an acceptance the historical test refused: never
+                    # silent (recorded in gn_stop AND printed)
+                    print("[close_ip_structured_soft] NOISE-FLOOR "
+                          "ACCEPTANCE (the historical gradient test "
+                          f"refused): objective {F:.6e}, scaled gradient "
+                          f"{gnorm:.3e} > floor {floor:.3e}; predicted "
+                          f"decrease {pred_max:.3e} <= rounding noise "
+                          f"{noise:.3e} (factor {NOISE_FLOOR_FACTOR:g}), "
+                          f"|J^T r|_2 {g2:.3e} <= {gfloor_noise:.3e}",
+                          flush=True)
                     break
                 raise RuntimeError(
                     "close_ip_structured_soft: Levenberg damping could not find a "
@@ -4317,6 +4367,31 @@ def store_baseline_jbs_loop(header, record, scan_key=None):
         gp = _baseline_group_path(scan_key)
         if gp in hf:
             write_jbs_loop(hf[gp], record)
+
+
+#: ``_baseline`` attribute carrying the ONE reconstruction state record
+#: (self-consistent loop only; JSON).  See docs/archive-schema.md.
+DELIVERED_STATE_ATTR = "delivered_state_json"
+
+
+def store_baseline_state(header, record, scan_key=None):
+    """Write the reconstruction's delivered-state record (self-consistent
+    loop) onto the archive's ``_baseline`` group as the JSON attribute
+    :data:`DELIVERED_STATE_ATTR`: the recorded l_i / q0 / q95 of the one
+    reconstruction state, the request normalisation, and what the run's
+    baseline re-solve (the saved baseline g-file) carries beside them.
+    ``None`` writes nothing; no-op without a ``_baseline`` group.
+    """
+    if record is None:
+        return
+    import json
+    from .jbs_loop import jsonable
+    db_path = _resolve_h5(header)
+    with h5py.File(db_path, "a") as hf:
+        gp = _baseline_group_path(scan_key)
+        if gp in hf:
+            hf[gp].attrs[DELIVERED_STATE_ATTR] = json.dumps(
+                jsonable(record), allow_nan=True)
 
 
 def load_eq_fsa(header, count, scan_key=None):

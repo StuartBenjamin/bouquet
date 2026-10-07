@@ -3,7 +3,12 @@
 *Draft pull-request description for `feat/jbs-self-consistent-loop`. The PR is
 not opened yet; this file is the text it will carry. Stacked on
 `feat/structured-mse-term` (the structured closure's MSE term), which it
-includes.*
+includes. The branch also carries the reversed-Ip current-sign commits
+(the IMAS reader brings a `ip < 0` source into bouquet's positive-current
+frame, records the orientation, and the matching tests and docs;
+`docs/CHANGES_SUMMARY.md`, "reversed-current IMAS sources"), cherry-picked
+from their own branch; they are not part of the loop and are described
+there, not here.*
 
 ## Summary
 
@@ -52,16 +57,33 @@ Two defects of the frozen bootstrap motivate it:
   geqdsk reconstruction. In diff mode `jBS_diff` becomes a pure model offset on
   the delivered baseline geometry, so a σ=0 draw still reproduces the source
   bootstrap exactly.
-- **Structured soft closure stop test** — called once per loop pass, it now
-  accepts an iterate stationary to within the objective's rounding noise
-  (`stop_reason="noise_floor"`, recorded) instead of refusing it; inside the
-  loop a refusal is retried once from the previous pass's coefficients
-  (logged). This extends the solver's acceptance only where it previously
-  refused; every result it returned before is bit-identical.
+- **Structured soft closure: a changed acceptance criterion, loop only.**
+  The soft closure is called once per loop pass. *Old criterion:* when no
+  Levenberg-damped step can be verified downhill, accept the iterate iff its
+  scaled gradient is below `rtol·max|J|·max(√F, 1)`; otherwise refuse.
+  *New criterion (with the loop on):* the same, **plus** accept an iterate
+  stationary to within the objective's rounding noise
+  (`stop_reason="noise_floor"`: every trial's predicted decrease below the
+  noise estimate `NOISE_FLOOR_FACTOR · ε · Σ(2|r_i|m_i + r_i²)`, factor 2, and
+  the gradient below the floor that noise implies). So it **accepts points
+  the old test refused** -- only those; every result the old test returned is
+  unchanged. It is opt-in: `close_ip_structured_soft(...,
+  accept_noise_floor=True)`, passed only by the loop's closure calls; the
+  default (`False`, every frozen-path call) is the historical strict solver.
+  Every acceptance is recorded (`gn_stop`, `n_noise_floor_accepts`) and
+  printed; a non-finite or non-positive noise estimate accepts nothing.
+  Inside the loop a refusal is retried once from the previous pass's
+  coefficients (logged).
 - **Default ON** (`GenerationConfig.jbs_self_consistent=True`).
-  `jbs_self_consistent=False` is the legacy frozen path, bit for bit. A stored
-  config that predates the field loads with the loop off (and warns), so an
-  old archive's `config_json` replays the model it was produced with.
+  `jbs_self_consistent=False` is the legacy frozen path, bit for bit -- which
+  requires the noise-floor acceptance above to stay opt-in: the frozen path's
+  closure calls leave `accept_noise_floor` at its default `False`. A stored
+  config (dict or JSON) without the field loads with the loop off and a
+  warning that says how to opt in, so an old archive's `config_json` replays
+  the model it was produced with; an unknown (misspelt) `generation` key is
+  refused, naming the nearest valid key, so a typo cannot land there.
+  `swb_iterations` is ignored under the loop and a non-default value raises a
+  `DeprecationWarning`.
   `single_profile_jphi=True` / `recalculate_j_BS=False` (no bootstrap to
   iterate) are refused unless the legacy flag is set.
 - **Archive schema v3** (additive): the `jbs_loop` block
@@ -81,8 +103,26 @@ Two defects of the frozen bootstrap motivate it:
   Ip renormalisation + corrective iteration instead of handing the achieved
   current back to one jphi-linterp solve (which exhausted `maxits`).
 
-No existing solver tolerance (`nl_tol`, `maxits`, `structured_li_tol`,
+No existing solver tolerance VALUE (`nl_tol`, `maxits`, `structured_li_tol`,
 `q0_tol`, the soft solver's `rtol`/`max_iter`, …) and no test bar changed.
+**One acceptance criterion did change:** the structured soft closure's
+noise-floor acceptance above (approved for the loop; opt-in, so the legacy
+path keeps the old criterion).
+
+**Review fixes on top of the loop (2026-09-29).** `evaluate_jBS` refuses
+(`physics.JBSEvaluationError`, naming the quantity and ψ_N) non-physical
+input and a failed-trace geometry row instead of returning a silently zeroed
+bootstrap there, keeping the historical treatment only at the clipped axis /
+separatrix nodes; bit-identical for every accepted input. The kernel raises
+`JBSNonFinite` at once on a non-finite initial guess or Redl evaluation, and
+stops at the first pass that can never count (a gated l_i / q0 not returned,
+J ≡ 0 against a non-zero iterate). Every loop record also carries the
+unrelaxed closure-half residual `current_residual_unrelaxed`
+(`= current_gap / (1 − β)`; record only, not gated -- whether to gate it is
+an open decision). The OFT build is recorded as `{version, git_hash,
+build_id}`, never an install path. The `⟨B_φ²⟩/⟨B²⟩` bracket the evaluator
+drops is the legacy convention; its size is documented (1.0–2.1 % across a
+D3D-like plasma, 1.4 % at the bootstrap peak), not changed.
 
 ## Evidence
 
@@ -93,6 +133,12 @@ No existing solver tolerance (`nl_tol`, `maxits`, `structured_li_tol`,
   array, attr and archived dataset identical (276 / 156 / 177 compared items
   respectively); the only
   differences are the new closure stop-test bookkeeping keys (additive).
+  None of those cases hit a soft-closure refusal, so this A/B could not show
+  the noise-floor acceptance reaching the legacy path (it did, at the time);
+  with the acceptance now opt-in, a fast test shows the default solver
+  refusing exactly where, and with exactly the message, the pre-loop solver
+  did (and a scratch comparison against the pre-loop function agreed on 850
+  of 850 synthetic cases: 794 bit-identical returns, 56 identical refusals).
   In-tree, a solver test tripwires the loop kernel and the Redl evaluator on
   the legacy flag and asserts neither is entered while `solve_with_bootstrap`
   is.
@@ -239,8 +285,9 @@ build identity is stamped into the fixture and manifest):
   rejected at the post-homotopy stage (known limitation below);
 - every archived draw's loops converged: anchor loops 3–6 passes, l_i-match
   candidate loops 4–9 (mostly 7–8; 1–5 candidates per draw), post-homotopy
-  0 (accepted as delivered, 3 draws) or 2–4 passes; no loop reached its
-  ceiling;
+  0 (accepted as delivered, 3 draws) or 2–4 passes. One loop used its whole
+  allowance: draw 4's post-homotopy stage took all 4 of its 4 passes and
+  converged on the last one allowed; no other loop reached its ceiling;
 - recorded physics: baseline l_i target 0.65384 → 0.65386, baseline
   I_BS/I_p 0.2285 → 0.2380; draw l_i(1) mostly 1–10 % lower and I_BS/I_p
   higher (the draws are different realisations of the same seed, since the
@@ -282,7 +329,14 @@ status quo.
 
 ## Tests
 
-Against the input-current fixture:
+**Status as recorded at commit 5fd9713** (the fixture itself was built at
+1332caf; hashes are pre-rebase). It is NOT claimed for anything later: the
+branch has since gained the cherry-picked reversed-Ip commits, a solver-test
+commit (the bitwise record comparison skips wall-clock timings) and the
+2026-09-29 review fixes, and the solver suites below were not rerun on them.
+At the review-fix commits only the fast suite was run (laptop, no solver).
+
+Against the input-current fixture, at 5fd9713:
 
 - fast suite (no solver): 1166 passed on the laptop, including the new
   `test_the_fixture_archives_the_input_current`;
@@ -311,7 +365,8 @@ not read the fixture and were not rerun: fsa 6 passed / 1 skipped
 (build-aware collapse demonstration), harness 1, loop solver 19 (incl. the
 legacy-flag tripwire test), l_i closure 10, seeded reproducibility 12.
 
-No test status blocks the PR.
+At 5fd9713 no test status blocked the PR; that statement is not made for
+the later commits until the solver suites are rerun on them.
 
 ## Reviewer notes
 

@@ -1,20 +1,30 @@
 # Bouquet — change summaries
 
-## Unreleased — self-consistent bootstrap current (default ON)
+## Unreleased, intended for the release after 1.4.0 — self-consistent bootstrap current (default ON)
+
+*Everything about the self-consistent bootstrap loop sits under this heading,
+so it can become its own release after 1.4.0. The version string is still
+1.3.1 and is not bumped here.*
 
 **This changes results.** `GenerationConfig.jbs_self_consistent` now defaults
 to `True`: every run re-evaluates the bootstrap on the delivered equilibrium
 and iterates it to self-consistency. The bootstrap/inductive split moves, and
-with it l_i, q0 and every per-draw bootstrap response. (The golden regression
-fixture is still the frozen-bootstrap run; its loop-on refresh is pending --
-see `tests/golden/README.md`.) To reproduce a run
-made before this release, set `jbs_self_consistent=False` -- the legacy frozen
-bootstrap, bit for bit (guarded by a solver test that tripwires the loop
-kernel and the Redl evaluator on that path). Also:
+with it l_i, q0 and every per-draw bootstrap response. The golden regression
+fixture has been regenerated with the loop on and input-current archival
+(17 of 20 draws archived, 10 in spec; `tests/golden/README.md`, "The
+self-consistent-bootstrap refresh"). To reproduce a run made before this
+release, set `jbs_self_consistent=False` -- the legacy frozen bootstrap, bit
+for bit (guarded by a solver test that tripwires the loop kernel and the
+Redl evaluator on that path). That holds because the one solver criterion the
+loop changed, the structured soft closure's noise-floor acceptance (below),
+is opt-in -- `close_ip_structured_soft(..., accept_noise_floor=True)`, passed
+only by the loop's closure calls -- and the frozen path's calls keep the
+default `False`, the historical strict solver. Also:
 
-- A stored config without the field (an old archive's `config_json`) loads
-  with `jbs_self_consistent=False` and a warning -- it replays the bootstrap
-  model it was produced with.
+- A stored config without the field (an old archive's `config_json`, or any
+  dict/JSON without it) loads with `jbs_self_consistent=False` and a warning
+  -- it replays the bootstrap model it was produced with; the warning says how
+  to opt in (`"jbs_self_consistent": true` in the `generation` section).
 - `single_profile_jphi=True` and `recalculate_j_BS=False` have no bootstrap to
   iterate and are refused unless `jbs_self_consistent=False` is set.
 - **Archive schema v3** (additive): the `jbs_loop` block (`jbs_converged`,
@@ -48,6 +58,80 @@ the flux range; Redl with the same kinetics on that geometry differs by a few
 to ~10 % in I_BS), not a kinetic mismatch. A fast and a solver test run the
 same draw loop from the baseline bootstrap and reach the same fixed point.
 
+### One reconstruction state; an unperturbed draw reproduces it
+
+**The rule.** There are three levels: the INPUT (a g-file, or a
+modelling-source IDS); the bouquet RECONSTRUCTION, as close to the input as it
+can be while physically valid and carrying a Redl bootstrap -- allowed to
+differ from the input, since most inputs carry no Redl/Sauter bootstrap; and
+the DRAWS, perturbations of the reconstruction. With the loop on, the
+reconstruction is ONE equilibrium -- the saved baseline g-file, `l_i_target`
+and every recorded l_i / q0 / q95, the archived baseline profiles, the centre
+of the draws' l_i band and the reference of the zero-perturbation check -- and
+a draw with every perturbation at zero reproduces it (its equilibrium, current
+profile, bootstrap, l_i, q0, q95) at the loop's existing tolerances. Nothing
+here applies with `jbs_self_consistent=False`: the legacy path is unchanged
+bit for bit (`tests/probes/legacy_bitwise_ab.py` runs the out-of-tree A/B).
+
+**What changed in the reconstruction.**
+- g-file path: before, the baseline carried three states (the step-6
+  l_i-matched value 0.653864 that `l_i_target` came from, the post-corrective
+  state 0.656455, and the saved g-file, a single re-solve of the stored
+  achieved current, 0.653866). Now every loop pass ends on the corrective
+  iteration's landed REQUEST re-matched in l_i (the step-5 secant on the
+  inductive amplitude of that request); that state is delivered, measured,
+  saved and archived, and keeps the designed l_i match to the input.
+  Alternative, not taken (the owner's choice to make): deliver the
+  post-corrective state and give up the l_i match (band centre +2.59e-3 in
+  l_i, q95 reference moves ≈0.024, about one ensemble σ).
+- Both paths: the stored split is the delivered state's jphi-linterp request,
+  normalised to I_p in the 'exact' FSA current measure on it (on the
+  modelling-source example the source total read 0.965 I_p there; the
+  solver had made the rest up uniformly), `j_BS` (+ `jBS_diff`) the draws'
+  σ=0 bootstrap composition on it, the fixed parts as read, `j_inductive` the
+  residual. In diff mode `j_BS + jBS_diff` is still the source bootstrap.
+  New: `Baseline.delivered_state`, `Baseline.jphi_request_offset`, the
+  archive attr `_baseline@delivered_state_json`
+  ([archive-schema.md](archive-schema.md)).
+
+**What changed in the draws (loop on).** Every stage is the identity at zero
+perturbation: the state anchor carries `jphi_diff`; route R2's scale reads 1;
+the standard route perturbs the achieved-convention inductive
+(`j_inductive - jphi_request_offset`), roots its amplitude in the exact
+measure on the live geometry instead of the limiter-area flux integral, and
+starts every corrective iteration from `target + jphi_request_offset`; the
+delta-mode reference anchor carries `jphi_diff`. **This moves draws with
+non-zero perturbation** (their reference moved): modelling-source R2 draws
+lose the 1.046–1.049 inductive over-scaling (expected at the band centre:
+l_i −0.9 %, q0 +0.9 %, q95 +0.3 %, from the diagnosis' s = 1 replay);
+g-file draws are centred on the re-matched state (its l_i within the
+secant's 1e-3 of the input's, as the old `l_i_target` was; its q0/q95 are
+expected of the order of the old single-solve baseline g-file's, which sat
++0.024 in q95 above the post-corrective state -- not yet measured);
+standard-route draws get a different amplitude root (the limiter measure read
+10–44 % high; `find_optimal_scale` compensated partly, j0 scale 1.153 on the
+g-file example, 1.035 on the modelling-source one) and a warm corrective
+start; the j_φ GPR envelope (`jphi_scalar_sigma·|j_phi|`) follows the
+normalised request (+3.6 % in amplitude on the modelling-source example,
+edge-shape changes of order 1 % on the g-file one).
+
+**`verify_sigma0_consistency` (loop on).** `passed` now REQUIRES the draw's own
+route -- every route the configuration can use (both on the g-file path; R2
+on the modelling-source path unless `workflow="custom"`) -- to reproduce the
+reconstruction state at `jbs_rtol_j` / `jbs_rtol_Ip` / `jbs_tol_li`, with q0,
+q95 and the total-current profile reported beside them; `draw_route=False`
+leaves it False (unverified). The loop "solved the baseline's way" is kept as
+`passed_baseline_way` and no longer decides `passed`; it now solves the way
+the reconstruction's final state is solved (one jphi-linterp solve per pass).
+Two existing test assertions that pinned the old scoping ("the draw route
+gates nothing"; `passed` is the baseline-way conjunction) were re-scoped by
+this decision, their checks kept on the renamed result. New tests: the
+stage-wise identity on a toy solver (`tests/test_sigma0_identity_stages.py`),
+live probes on both examples and both routes
+(`tests/test_sigma0_identity_solver.py`), and loop-ON twins of the six
+zero-perturbation tests in `tests/test_seeded_reproducibility.py` (the legacy
+ones are kept).
+
 ### Opt-in introduction (earlier on this branch)
 
 `GenerationConfig.jbs_self_consistent=True` replaces the once-computed, frozen
@@ -59,7 +143,8 @@ true grid, direct toroidal conversion; bit-identical to SWB's first pass on a
 uniform grid), `bouquet/jbs_loop.py` (residuals, two-consecutive-pass
 convergence, relaxation, `JBSNotConverged` / `"flag"`), and the loop in the
 IMAS baseline (every `jBS_baseline_mode` and closure channel; the correctors'
-steps subsumed, their bookkeeping and acceptance flags kept), the structured
+steps not taken, their bookkeeping and acceptance flags kept -- for q0 that
+leaves a residual only recorded, see `jbs_loop_q0_corrector` below), the structured
 closure's MSE stage (Jacobian once, chord steps with j_BS re-evaluated, one
 final Jacobian refresh), every draw (Fix C and the standard l_i loop, a
 post-homotopy check), the σ=0 check and the geqdsk reconstruction. In diff mode
@@ -68,24 +153,103 @@ Records: `li_metrics["jbs_loop"]`, `ip_closure["jbs_loop"]`,
 `reconstruction_metrics["jbs_loop"]`, per-draw archive attrs `jbs_converged` /
 `jbs_n_passes` / `jbs_loop_json`. Config: `jbs_self_consistent`, `jbs_init`,
 `jbs_rtol_j`, `jbs_rtol_Ip`, `jbs_tol_li`, `jbs_tol_q0`, `jbs_max_passes`,
-`jbs_max_passes_draw`, `jbs_relax`, `jbs_relax_halve_on`, `jbs_relax_current`,
-`jbs_loop_on_fail`; `swb_iterations` is
-now documented as legacy. With the flag off the legacy code path is the
-historical one; no existing tolerance or solver acceptance criterion moved
-(the soft closure's noise-floor acceptance, below, applies only where it
-previously refused). See [physics-notes.md](physics-notes.md#self-consistent-bootstrap-jbs_self_consistent).
+`jbs_max_passes_draw`, `jbs_max_passes_post_homotopy`, `jbs_relax`,
+`jbs_relax_halve_on`, `jbs_relax_current`, `jbs_loop_on_fail`;
+`swb_iterations` is now documented as legacy. With the flag off the legacy
+code path is the historical one. No existing tolerance value moved; one
+acceptance criterion did (the soft closure's noise-floor acceptance, below,
+loop only). See [physics-notes.md](physics-notes.md#self-consistent-bootstrap-jbs_self_consistent).
 
 Follow-up (loop iteration path and closure stop test): the loop relaxes the
 solved current as well as the bootstrap (`jbs_relax_current = 0.7`) and halves
 ω only on sustained growth (`jbs_relax_halve_on = 3`) — path only, the fixed
 point is unchanged (tested against the closed-form fixed point of a two-state
-model). `close_ip_structured_soft` accepts an iterate that is stationary to
-within the objective's rounding noise (`stop_reason="noise_floor"`, recorded
-with the gradient, predicted decrease and noise estimate) instead of refusing
-it — **a change of the solver's acceptance criterion, applied only where it
-previously refused** (every result it returned before is bit-identical) — and
-takes an optional start `x0`; inside the loop a refused soft closure is retried
-once from the previous pass's coefficients (`closure_retry`, logged).
+model). **The structured soft closure's acceptance criterion changed, for
+the loop only.** Old: when no damped step descends, accept iff the scaled
+gradient is below `rtol·max|J|·max(√F, 1)`, else refuse. New, with
+`accept_noise_floor=True`: also accept an iterate stationary to within the
+objective's rounding noise (`stop_reason="noise_floor"`, recorded with the
+gradient, predicted decrease and noise estimate, and printed). It accepts
+points the old test refused, and only those (every result the old test
+returned is unchanged). The loop's closure calls pass the flag; the default,
+and every frozen-path call, is the old criterion. `close_ip_structured_soft`
+also takes an optional start `x0`; inside the loop a refused soft closure is
+retried once from the previous pass's coefficients (`closure_retry`, logged).
+
+### The q0 pin under the loop: `jbs_loop_q0_corrector` (opt-in, default off)
+
+With the loop on, the two channels that pin the on-axis safety factor
+(`closure_channel="sawtooth_bootstrap"`, and `"structured"` when the sawtooth
+gate admits the axis row) re-solve their predictor every pass with the axis
+row HELD at the anchor's requested axis current; the corrector only records
+the q0 residual on the delivered equilibrium and flags it against `q0_tol`.
+The legacy path's Newton corrector step, which removes that residual, does not
+act under the loop. That remains the default, bit for bit.
+
+`GenerationConfig.jbs_loop_q0_corrector=True` makes the pin act inside the
+loop. Once per pass, the axis row is moved from the q0 measured on that pass's
+solved equilibrium: `j_ref0 ← j0_solved · q0 / q0_target`. This is the legacy
+structured corrector's update, applied per pass, with `j0_solved` the axis
+value of the current actually solved (the β-relaxed blend). Convergence then
+also requires `|q0 − q0_target| ≤ q0_tol` on two consecutive passes, beside
+the `jbs_tol_q0` step criterion. This adds a condition and relaxes nothing:
+`q0_tol` (0.01), every loop tolerance and every pass ceiling are unchanged.
+The MSE chord stage keeps the pin acting (every chord step is a pass). A
+joint iteration that does not converge within the ceiling fails exactly as
+the loop fails (raise, or flag under `jbs_loop_on_fail="flag"`), with the q0
+residuals in the message and in the record. The delivered equilibrium is
+checked against `q0_tol` once more, so a delivered state outside it is never
+marked converged.
+
+Records:
+- `jbs_loop["q0_pin"]`, per pass: the axis row, the solved axis current,
+  q0, the residual, the residual / `q0_tol`, and the next row.
+- `ip_closure`: `q0_pin_acted`, `q0_pin_n_row_updates`, the initial and final
+  axis row, `q0_residual_over_tol`, and `q0_pin_delivered_within_tol`.
+
+The run-time NOTICE says which mode is in force. The l_i row is not covered:
+it stays held at its target, because its log-gain update is a separate
+design. With `jbs_self_consistent=False` the flag has no effect, because the
+legacy corrector already takes its step.
+
+### Review fixes (2026-09-29)
+
+- **Noise-floor acceptance is opt-in** (`accept_noise_floor`, default
+  `False` = the historical strict solver, raising exactly where and with
+  exactly the message it did before the loop). It had been applied to every
+  caller, the frozen path included. A non-finite or non-positive noise
+  estimate now accepts nothing; every acceptance is printed as well as
+  recorded. `NOISE_FLOOR_FACTOR` (2) and every tolerance are unchanged.
+- **`evaluate_jBS` never returns a silently zeroed bootstrap.** Non-physical
+  input (`n_e`, `n_i`, `T_e`, `T_i` not strictly positive, `Z_eff < 1`) and a
+  failed-trace geometry row raise `physics.JBSEvaluationError` (a
+  `ValueError`) naming the quantity and ψ_N; the historical `nan_to_num`
+  survives only at the clipped axis / separatrix nodes (counted in
+  `diag["n_nonfinite_zeroed_at_ends"]`). Bit-identical for every accepted
+  input. A draw whose kinetics are refused is a failed draw.
+- **The loop kernel checks finiteness.** A non-finite initial guess or Redl
+  evaluation raises `jbs_loop.JBSNonFinite` (a `JBSNotConverged`) at once,
+  with the pass and ψ_N, whatever the `"flag"` policy; a pass that can never
+  count (a gated l_i / q0 not returned, J ≡ 0 against a non-zero iterate)
+  stops the loop at that pass instead of at the ceiling.
+- **Record only:** every pass records the unrelaxed closure-half residual
+  `current_residual_unrelaxed = ‖jc_k − js_k−1‖_w / ‖jc_k‖_w`
+  (= `current_gap / (1 − β)`); the convergence gate is unchanged.
+- **No filesystem path in records.** `oft_build` is now `{version, git_hash,
+  build_id}` (was the OFT install path). The golden fixture's path guard also
+  catches `/usr`, `/Volumes`, any absolute path at a token boundary, `~`,
+  `../` and Windows paths, including inside string arrays.
+- **Config validation.** `swb_iterations` set with the loop on raises a
+  `DeprecationWarning` (ignored under the loop, honoured only with
+  `jbs_self_consistent=False`); bools are refused as tolerances, relaxation
+  factors and ceilings; an unknown `generation` key in `from_dict` /
+  `from_json` is refused with the nearest valid key (retired fields are
+  dropped with a warning).
+- **Documented, not changed:** the evaluator's toroidal conversion drops the
+  `⟨B_φ²⟩/⟨B²⟩` bracket, exactly as the legacy path does. The neglected
+  `⟨B_p²⟩/⟨B²⟩` is 1.0–2.1 % across a D3D-like plasma (1.4 % at the bootstrap
+  peak, 1.4–1.5 % of I_BS), not the "sub-1 %" the docstrings claimed, and the
+  IDS export (exact `⟨1/R²⟩`) round-trips `⟨j·B⟩` high by that fraction.
 
 ## Unreleased — MSE pitch angles on the structured closure (opt-in)
 

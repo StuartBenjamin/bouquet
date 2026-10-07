@@ -202,6 +202,25 @@ class Baseline:
     source_current_sign_origin: Optional[str] = None
     source_b0_sign: Optional[float] = None
 
+    # ---- the ONE reconstruction state (jbs_self_consistent=True only) -------
+    # With the self-consistent loop on, the current split above (j_phi,
+    # j_inductive, j_BS, jBS_diff, the fixed parts) is the jphi-linterp
+    # REQUEST of the reconstruction's final equilibrium F, in the form every
+    # draw consumes it: one jphi-linterp solve of j_phi (+ jphi_diff) is F;
+    # it is normalised to Ip_target in the 'exact' FSA current measure on F;
+    # j_BS (+ jBS_diff) is the draws' own sigma=0 bootstrap composition on F;
+    # j_inductive is the residual.  ``jphi_request_offset`` is that request
+    # minus F's ACHIEVED current (in the corrective iteration's form, also
+    # Ip-normalised): the standard draw route targets achieved currents, so
+    # it perturbs ``j_inductive - jphi_request_offset`` and starts its
+    # corrective iteration from target + offset -- F's own request at zero
+    # perturbation.  ``delivered_state`` records F: l_i (== l_i_target), q0,
+    # q95, the normalisation factors, F's achieved FSA current
+    # (``j_phi_achieved``) and how the state was reached.  Both None with the
+    # loop off (the legacy split, bit for bit).
+    jphi_request_offset: Optional["np.ndarray"] = None
+    delivered_state: Optional[dict] = None
+
     def __repr__(self):
         # concise summary -- the default dataclass repr dumps every numpy array,
         # which floods a notebook when `reconstruct()`/`prepare_baseline()` is the
@@ -1014,16 +1033,40 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
 
     j_NBI = _resolve_fixed(fc.j_NBI, fc.psi_N, psi_N)
     j_RF = _resolve_fixed(fc.j_RF, fc.psi_N, psi_N)
-    j_inductive = j_phi - j_BS - j_NBI - j_RF   # == j_inductive_fit when NBI=RF=0
-    # Physical component convention: the inductive current is >= 0. On shots
-    # with a strong pedestal the achieved total can dip BELOW the full-Sauter
-    # bootstrap there, leaving a small negative residual (~1% of the core) --
-    # which, fed to the GPR sampler as its mean, makes essentially every draw
-    # go negative and be rejected (observed on a strong-pedestal case:
-    # 0/500 candidates survived).
-    # Floor the inductive at zero and absorb the deficit into j_BS so the
-    # split still sums exactly to j_phi.
-    j_inductive, j_BS = floor_inductive_split(j_inductive, j_BS, psi_N)
+    _request_offset = None
+    _delivered = None
+    if _jbs["enabled"] and result.get("request_jphi") is not None:
+        # The self-consistent loop: store the ONE reconstruction state in
+        # the form the draws consume it (see Baseline.jphi_request_offset).
+        _log2 = None
+        with capture_native_output(enabled=not verbose) as _cap2:
+            j_phi, j_inductive, j_BS, _request_offset, _delivered = \
+                _deliver_reconstruction_state(
+                    mygs, config, source, result, psi_N, ne_eq, te_eq, ni_eq,
+                    ti_eq, Zeff_eq, Ip_target, l_i_target, j_NBI, j_RF,
+                    recon_metrics)
+        _log2 = _cap2["text"] or None
+        if _log2:
+            _cap["text"] = (_cap["text"] or "") + _log2
+        if _delivered["n_floored_inductive"]:
+            # visible (outside the capture): a floored point is one where a
+            # zero-perturbation draw cannot reproduce the reconstruction
+            print(f"  [delivered state] {_delivered['n_floored_inductive']} "
+                  "point(s) of the request inductive were floored at zero: "
+                  "a zero-perturbation draw cannot reproduce the "
+                  "reconstruction there (it composes the Redl bootstrap, not "
+                  "the floored remainder)", flush=True)
+    else:
+        j_inductive = j_phi - j_BS - j_NBI - j_RF   # == j_inductive_fit when NBI=RF=0
+        # Physical component convention: the inductive current is >= 0. On shots
+        # with a strong pedestal the achieved total can dip BELOW the full-Sauter
+        # bootstrap there, leaving a small negative residual (~1% of the core) --
+        # which, fed to the GPR sampler as its mean, makes essentially every draw
+        # go negative and be rejected (observed on a strong-pedestal case:
+        # 0/500 candidates survived).
+        # Floor the inductive at zero and absorb the deficit into j_BS so the
+        # split still sums exactly to j_phi.
+        j_inductive, j_BS = floor_inductive_split(j_inductive, j_BS, psi_N)
 
     # Resolved above (before the reconstruction, which now consumes it).
     # Unchanged contract: the returned field is on the KINETIC grid.
@@ -1078,7 +1121,69 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         core_pressure_hollow=_cph_recon,
         li_metrics=({"core_pressure_hollow": _cph_recon}
                     if _cph_recon else None),
+        jphi_request_offset=_request_offset,
+        delivered_state=_delivered,
     )
+
+
+def _deliver_reconstruction_state(mygs, config, source, result, psi_N, ne_eq,
+                                  te_eq, ni_eq, ti_eq, Zeff_eq, Ip_target,
+                                  l_i_target, j_NBI, j_RF, recon_metrics):
+    """The reconstruction path's ONE state, stored in the draws' form
+    (``jbs_self_consistent=True`` only).
+
+    ``mygs`` holds the reconstruction's final equilibrium F (the l_i
+    re-matched state; ``result["request_jphi"]`` is the jphi-linterp input one
+    solve of which is F).  The bootstrap is the draws' own sigma=0 composition
+    on F (:func:`~bouquet.TokaMaker_interface._draw_jbs_composer` with the
+    generation's ``isolate_edge_jBS`` / ``floor_j_BS``, scale 1 -- this
+    path's ``bs_scale``), the request is normalised to ``Ip_target`` in the
+    'exact' measure on F, and the inductive is the residual, floored at zero
+    by the usual convention (``floor_inductive_split``; a floored point is
+    one where a zero-perturbation draw cannot reproduce F, and is counted).
+    Returns ``(j_phi, j_inductive, j_BS, request_offset, delivered_state)``.
+    """
+    import numpy as np
+    from .TokaMaker_interface import (DELIVERED_SPLIT_CONVENTION,
+                                      _achieved_jphi_fsa,
+                                      _deliver_request_split,
+                                      _draw_jbs_composer, _request_offset)
+    gc = config.generation
+    psi_pad = float(source.psi_pad)
+    comp = _draw_jbs_composer(psi_N, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
+                              psi_pad, bool(gc.isolate_edge_jBS), 1.0,
+                              bool(gc.floor_j_BS), None, None, None)
+    j_bs0 = np.asarray(comp(mygs.copy_eq())[0], dtype=float)
+    fixed = np.asarray(j_NBI, dtype=float) + np.asarray(j_RF, dtype=float)
+    dv = _deliver_request_split(mygs, psi_N, psi_pad, Ip_target,
+                                result["request_jphi"], j_bs0, fixed,
+                                label="recon delivered state")
+    j_ind, j_BS = floor_inductive_split(dv["j_inductive"], j_bs0, psi_N)
+    n_floored = int(np.sum(np.asarray(dv["j_inductive"]) < 0.0))
+    j_phi = j_ind + j_BS + fixed          # == dv["request"] (floor: sum kept)
+    offset, n_fl_t = _request_offset(j_ind, dv["achieved"], j_bs0, fixed)
+    m = recon_metrics or {}
+    state = dict(
+        convention=DELIVERED_SPLIT_CONVENTION,
+        path="reconstruction",
+        l_i=float(l_i_target), l_i_scale="iter(li3)",
+        q0=float(m.get("q0", float("nan"))),
+        q95=float(m.get("q95", float("nan"))),
+        Ip_target=float(Ip_target),
+        request_normalisation=float(dv["kappa"]),
+        achieved_normalisation=float(dv["kappa_achieved"]),
+        n_floored_inductive=n_floored,
+        n_floored_target_inductive=n_fl_t,
+        li_corrective_state=result.get("li_corrective_state"),
+        li_step6_matched=result.get("li_step6_matched"),
+        li_input=float((result.get("eqdsk_li") or {}).get(
+            "li(2)", float("nan"))),
+        j_phi_achieved=_achieved_jphi_fsa(mygs, psi_N, psi_pad,
+                                          sign_ref=j_phi),
+        how=("step-7 corrective iteration, then the l_i re-match of its "
+             "landed request (every loop pass ends there); one jphi-linterp "
+             "solve of j_phi reproduces it"))
+    return j_phi, j_ind, j_BS, offset, state
 
 
 def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,

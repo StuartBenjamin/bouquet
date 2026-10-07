@@ -917,6 +917,9 @@ class GenerationConfig:
     #: solved q0 lands further than this from q0_ref, ONE analytic Newton step
     #: along the Ip-closed manifold is taken and its result accepted whatever it
     #: gives.  There is no iteration loop -- the cost ceiling is the point.
+    #: Under the self-consistent loop the same band is the acceptance flag on
+    #: the delivered equilibrium and, with jbs_loop_q0_corrector=True, also a
+    #: convergence criterion of the loop (the value itself is unchanged).
     q0_tol: float = 0.01
     # Fix B: when the recon-anchor's equilibrium l_i is already within the band,
     # accept the anchor and skip find_optimal_scale + the corrective iteration
@@ -993,14 +996,16 @@ class GenerationConfig:
     # already ~clean, so flooring is redundant -- and it REGRESSED a stiff
     # high-l_i case (clipping its isolate-edge spike drove yield to 0).
     floor_j_BS: bool = False
-    # LEGACY (the frozen-bootstrap path, jbs_self_consistent=False, and the
-    # jbs_init="swb" A/B init only).  solve_with_bootstrap's fixed Picard pass
+    # DEPRECATED; LEGACY only (the frozen-bootstrap path,
+    # jbs_self_consistent=False).  solve_with_bootstrap's fixed Picard pass
     # count per draw (default 3; there is no convergence test inside it);
     # lowering to 2 trades a little accuracy for speed on large bouquets.
     # NOTE: the IMAS baseline's own SWB call never passed this and always ran
     # OFT's own default (iterations=3); only the draws, the delta-mode cache
     # and verify_sigma0_consistency read it.  With jbs_self_consistent=True
-    # the bootstrap comes from the self-consistent loop and this is unused.
+    # the bootstrap comes from the self-consistent loop and this is IGNORED:
+    # config validation (BouquetConfig) then emits a DeprecationWarning for
+    # any value other than the default.
     swb_iterations: int = 3
     # --- self-consistent bootstrap loop (bouquet.jbs_loop) -------------------
     # True (default): j_BS is re-evaluated (physics.evaluate_jBS: Redl on the
@@ -1073,12 +1078,55 @@ class GenerationConfig:
     # re-run multi-solve fits, nor in the MSE chord steps, whose
     # linearisation is centred on the closure's own current.
     jbs_relax_current: float = 0.7
+    # OPT-IN, under evaluation (default False = the loop exactly as without
+    # this field).  True ADDS one convergence criterion, on the same two
+    # consecutive passes as the others: the closure-half residual
+    # ||jc_k - js_k-1||_w / ||jc_k||_w -- the current the previous pass
+    # SOLVED against the current this pass's closure composes on the
+    # equilibrium that solve produced (with the bootstrap evaluated on it),
+    # computed directly from the two arrays -- must be <= jbs_rtol_j (same
+    # current-weighted norm, same tolerance; nothing is relaxed and the pass
+    # ceilings are unchanged).  It is measured one pass late, so pass 1 cannot
+    # count.  Steps that do not take the relaxer report their solved current
+    # (meas["j_solved"]); a step that reports neither stops the loop at once
+    # under the failure policy.  It bounds the RESIDUAL (the delivered
+    # current's consistency), not the distance to the fixed point on a slow
+    # monotone mode.  Not applied by the MSE chord stage or the post-homotopy
+    # / post-corrective acceptance checks, which have their own tests.
+    jbs_gate_current_residual: bool = False
     # Non-convergence: "raise" (default) -> jbs_loop.JBSNotConverged carrying
     # the residual history; "flag" -> keep the last iterate, record
     # jbs_converged=False plus a closure_limited reason (drivers then exclude
     # the slice from verdicts).  A draw whose loop does not converge is a
     # FAILED draw in either mode.
     jbs_loop_on_fail: str = "raise"
+    # The on-axis safety-factor pin under the loop (closure_channel=
+    # "sawtooth_bootstrap", or "structured" with the sawtooth gate admitting
+    # the axis row; the IMAS baseline in jBS_baseline_mode="ohmic").
+    # False (default): record-only, bit for bit the behaviour before the
+    # field existed -- every pass closes with the axis row held at the
+    # anchor's requested axis current, no Newton step is taken, and the q0
+    # residual |q0 - q0_target| on the delivered equilibrium is only recorded
+    # and flagged against q0_tol.  True: the pin ACTS inside the loop -- the
+    # axis row is moved once per pass from the q0 MEASURED on that pass's
+    # solved equilibrium (j_ref0 <- j0_solved * q0 / q0_target, the legacy
+    # structured corrector's update applied per pass; jbs_loop.AxisRowPin),
+    # and convergence ADDITIONALLY requires |q0 - q0_target| <= q0_tol (the
+    # unchanged q0_tol) on two consecutive passes, next to the jbs_tol_q0
+    # step criterion and the bootstrap criteria; the MSE chord stage keeps
+    # the pin acting.  So the delivered equilibrium -- the last one solved,
+    # whose bootstrap was the last evaluated -- meets the loop criteria AND
+    # the q0 target.  A joint iteration that does not converge within the
+    # unchanged pass ceiling fails exactly as the loop fails (raise, or flag
+    # with jbs_loop_on_fail="flag"), with the q0 residuals in the record.
+    # Records: ip_closure["jbs_loop"]["q0_pin"] (per pass: axis row, solved
+    # axis current, q0, residual, residual / q0_tol, next row) and, in
+    # ip_closure, q0_pin_acted / q0_pin_n_row_updates / q0_residual_over_tol.
+    # The l_i row is NOT covered (it stays held at its target either way).
+    # No effect with jbs_self_consistent=False (the legacy path's own
+    # corrector already takes its Newton step) or on a channel/slice without
+    # an axis row.
+    jbs_loop_q0_corrector: bool = False
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single
@@ -1105,7 +1153,8 @@ class GenerationConfig:
     capture_npsi: int = 257
     # Compute exact <1/R^2> by flux-surface quadrature (TokaMaker does not
     # expose it) so the conversion is machine-exact rather than using the
-    # <B_phi^2>~=<B^2> bracket (~<1%). Adds ~65 surface traces/draw; set False
+    # <B_phi^2>~=<B^2> bracket (1-2% on a D3D-like plasma, 1.4% at the
+    # bootstrap peak; physics.parallel_to_toroidal). Adds ~65 surface traces/draw; set False
     # to skip that cost (self-validated + graceful fallback either way).
     capture_exact_inv_R2: bool = True
 
@@ -1468,8 +1517,11 @@ class BouquetConfig:
                 "'imas-diff-c', or 'custom'")
         # the self-consistent bootstrap loop's settings (values only; the
         # workflow-level refusals live in Bouquet._validate_workflow)
-        from .jbs_loop import validate_jbs_settings
+        from .jbs_loop import (deprecated_jbs_settings_warning,
+                               validate_jbs_settings)
         validate_jbs_settings(self.generation)
+        # settings the loop ignores (swb_iterations): loud, not silent
+        deprecated_jbs_settings_warning(self.generation, stacklevel=3)
 
     # ── serialization (h5 provenance, per-shot templating, SLURM bundles) ──
     def to_dict(self) -> dict:
@@ -1494,21 +1546,26 @@ class BouquetConfig:
         if stype is None:                       # infer if the discriminator is absent
             stype = "reconstruction" if "geqdsk_path" in srcd else "imas"
         SrcCls = ReconstructionSource if stype == "reconstruction" else ImasSource
-        gend = dict(d.get("generation", {}))
+        gend = _checked_generation_keys(dict(d.get("generation", {})))
         if "jbs_self_consistent" not in gend:
             # A stored config written before the self-consistent bootstrap
             # existed was produced by the frozen-bootstrap path: rebuild it on
             # that path (the default flipped to True afterwards), so replaying
             # an old archive's config_json reproduces what it recorded.
             # to_dict() always writes the field, so a current config never
-            # takes this branch.
+            # takes this branch.  (A misspelt field no longer lands here: an
+            # unknown generation key is refused above.)
             import warnings
             warnings.warn(
                 "config has no generation.jbs_self_consistent (it predates "
                 "the self-consistent bootstrap loop): loading it with "
-                "jbs_self_consistent=False, the frozen-bootstrap behaviour it "
-                "was produced with.  Set the field explicitly to run the "
-                "loop.", UserWarning, stacklevel=2)
+                "jbs_self_consistent=False, the LEGACY frozen-bootstrap "
+                "behaviour it was produced with, so it reproduces its old "
+                "results.  To run the self-consistent bootstrap loop "
+                "instead, opt in explicitly: add "
+                '"jbs_self_consistent": true to the "generation" section of '
+                "the dict/JSON, or set cfg.generation.jbs_self_consistent = "
+                "True after loading.", UserWarning, stacklevel=2)
             gend["jbs_self_consistent"] = False
         return cls(
             source=_build(SrcCls, srcd),
@@ -1563,6 +1620,50 @@ def _decode(v):
     if isinstance(v, list):
         return [_decode(x) for x in v]
     return v
+
+
+#: GenerationConfig fields that existed once and were removed.  An old
+#: stored config may still carry them; they are dropped WITH a warning (they
+#: have no effect on the current code), never mistaken for a typo.
+_RETIRED_GENERATION_KEYS = ("coil_drift_threshold_A", "lock_coils",
+                            "lock_coils_weight")
+
+
+def _checked_generation_keys(gend: dict) -> dict:
+    """Refuse an unknown ``generation`` key in a config dict.
+
+    A misspelt field (``jbs_self_consistant``) used to be dropped silently by
+    :func:`_build`, leaving the default in force -- for the loop switch, with
+    a warning that wrongly said the config predates the loop.  Every key must
+    now be a :class:`GenerationConfig` field (``init=False`` recorded fields
+    included) or one of :data:`_RETIRED_GENERATION_KEYS` (dropped, with a
+    warning).  The refusal names the key and the nearest valid one.
+    """
+    import difflib
+    import warnings
+    names = {f.name for f in _dc.fields(GenerationConfig)}
+    retired = [k for k in gend if k in _RETIRED_GENERATION_KEYS]
+    unknown = sorted(k for k in gend
+                     if k not in names and k not in _RETIRED_GENERATION_KEYS)
+    if unknown:
+        parts = []
+        for k in unknown:
+            near = difflib.get_close_matches(str(k), sorted(names), n=1,
+                                             cutoff=0.0)
+            parts.append(f"{k!r} (nearest valid key: {near[0]!r})" if near
+                         else repr(k))
+        raise ValueError(
+            "config generation section has unknown key(s): "
+            + ", ".join(parts) + ".  Refusing to drop them silently (a "
+            "misspelt field would leave its default in force); fix the "
+            "spelling or remove the key.")
+    if retired:
+        warnings.warn(
+            "config generation section carries retired field(s) "
+            f"{retired}: they no longer exist and are ignored.",
+            UserWarning, stacklevel=3)
+        gend = {k: v for k, v in gend.items() if k not in retired}
+    return gend
 
 
 def _build(cls, d):
