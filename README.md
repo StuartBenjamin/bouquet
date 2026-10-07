@@ -156,9 +156,14 @@ A configuration stored by an earlier version (an archive's config) loads with
 a warning naming every field it changes:
 
 - a field the configuration predates gets the value it was produced with,
-  where that is knowable; otherwise today's default, with a LOUD warning;
+  where that is knowable (a loop configuration without
+  `jbs_relax_current` / `jbs_relax_halve_on` loads with 1.0 / 1, what it
+  ran); otherwise today's default, with a LOUD warning -- on every stored
+  configuration, legacy or unified;
 - a legacy-path field that the unified engine never read loads at its
-  default, because the default is what that run used.
+  default, because the default is what that run used;
+- `load_config` reads back the coil-solve mode the stored run was in and
+  warns when it predates the canonical (bounded) mode.
 
 See `docs/CHANGES_SUMMARY.md` for every change and how to restore each.
 

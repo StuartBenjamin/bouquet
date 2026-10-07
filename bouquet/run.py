@@ -7697,8 +7697,13 @@ class Bouquet:
 
         # Stamp provenance (schema/version/timestamp + full config JSON) onto the
         # archive so the run is self-describing and load_config() can round-trip it.
-        from .utils import write_provenance
+        from .utils import stamp_coil_solve_mode, write_provenance
         write_provenance(header, config=self.config, scan_key=gc.scan_key)
+        # the coil-solve mode the run's solver was in (both paths; read
+        # back by load_config, which warns on a replay of a run made in
+        # another mode or before the record)
+        stamp_coil_solve_mode(header, scan_key=gc.scan_key,
+                              mode=getattr(bl, "coil_solve_mode", None))
         # IMAS path: the source's current orientation (what the reader
         # multiplied every dd current by to reach bouquet's positive frame).
         from .config import ImasSource

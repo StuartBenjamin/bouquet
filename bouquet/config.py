@@ -1981,10 +1981,14 @@ ENGINE_FIELD_HISTORICAL_DEFAULTS = {
 #: GenerationConfig fields whose DEFAULT changed after they were introduced:
 #: field -> (value a stored config that PREDATES the field ran with, or
 #: ``None`` when that is not knowable from the config alone; what it was).
-#: Only consulted for a stored ``reconstruction_engine="unified"`` config
-#: (and, for ``jbs_max_passes_post_homotopy``, any config that ran the
-#: self-consistent loop); ``jbs_self_consistent``, ``separatrix_pressure``
-#: and ``reconstruction_engine`` itself (default ``"legacy"`` -> ``"unified"``
+#: Consulted for EVERY stored config (2026-10-06; before, only for a stored
+#: ``reconstruction_engine="unified"`` config, so the loud entries never
+#: fired for a config bouquet itself stored): the engine-only entries
+#: (:data:`_ENGINE_ONLY_PRE_INTRODUCTION`) for unified configs only, the
+#: loop's own (:data:`_LOOP_PRE_INTRODUCTION`) for any config that ran the
+#: self-consistent loop, the rest for every config.
+#: ``jbs_self_consistent``, ``separatrix_pressure`` and
+#: ``reconstruction_engine`` itself (default ``"legacy"`` -> ``"unified"``
 #: on 2026-10-06; a config without it predates the engine and loads as
 #: ``"legacy"``) have their own back-fills in :meth:`BouquetConfig.from_dict`.
 FIELD_PRE_INTRODUCTION = {
@@ -2002,6 +2006,15 @@ FIELD_PRE_INTRODUCTION = {
     "jbs_max_passes_post_homotopy": (
         2, "jbs_loop.JBS_POST_HOMOTOPY_PASSES before the field "
            "(2026-09-25 to 2026-09-27)"),
+    # the loop's relaxation before the two fields (introduced 2026-09-27 at
+    # 0.7 / 3): no relaxation of the solved current, and omega halved on
+    # EVERY growth of r_j (jbs_loop tolerances_record's pre-field values)
+    "jbs_relax_current": (
+        1.0, "no relaxation of the solved current before the field "
+             "(2026-09-25 to 2026-09-27)"),
+    "jbs_relax_halve_on": (
+        1, "omega halved on every growth of r_j before the field "
+           "(2026-09-25 to 2026-09-27)"),
     # older changed defaults (2026-06): not knowable from the config alone
     "l_i_tolerance": (None, "default 0.01 -> 0.05 on 2026-06-04"),
     "jBS_scale_range": (None, "default None -> (0.99, 1.01) on 2026-06-04"),
@@ -2009,6 +2022,18 @@ FIELD_PRE_INTRODUCTION = {
     "floor_j_BS": (None, "default True -> False on 2026-06-24"),
     "jbs_max_passes_draw": (None, "default 6 -> 12 on 2026-09-27"),
 }
+
+
+#: :data:`FIELD_PRE_INTRODUCTION` entries that only exist on the unified
+#: engine (a legacy config must keep them at their defaults --
+#: ``validate_engine_settings`` refuses otherwise).
+_ENGINE_ONLY_PRE_INTRODUCTION = ("engine_ids_inductive", "engine_mse_jacobian")
+
+#: :data:`FIELD_PRE_INTRODUCTION` entries of the self-consistent loop: back-
+#: filled only for a config that ran the loop (``jbs_self_consistent``); on
+#: one that did not they had no effect.
+_LOOP_PRE_INTRODUCTION = ("jbs_max_passes_post_homotopy", "jbs_relax_current",
+                          "jbs_relax_halve_on", "jbs_max_passes_draw")
 
 
 #: Legacy-path fields the factories set whatever the engine until
@@ -2086,6 +2111,37 @@ def _stored_config_compat(gend: dict) -> None:
             f"{_field_default('jbs_max_passes_post_homotopy')!r}",
             UserWarning, stacklevel=3)
         gend["jbs_max_passes_post_homotopy"] = val
+    _relax = [n for n in ("jbs_relax_current", "jbs_relax_halve_on")
+              if n not in gend]
+    if gend.get("jbs_self_consistent") and _relax:
+        # a loop config stored 2026-09-25..27 ran with no current
+        # relaxation and omega halved on every growth (1.0 / 1), not
+        # today's 0.7 / 3: loaded with what it ran, ONE warning
+        parts = []
+        for n in _relax:
+            val, why = FIELD_PRE_INTRODUCTION[n]
+            gend[n] = val
+            parts.append(f"{n}={val!r} ({why}; today's default "
+                         f"{_field_default(n)!r})")
+        warnings.warn(
+            "stored loop config has no generation."
+            + " / generation.".join(_relax)
+            + " (it predates the field"
+            + ("s" if len(_relax) > 1 else "") + "): loading it with "
+            + "; ".join(parts) + " -- the values it ran with, so it "
+            "reproduces what it recorded", UserWarning, stacklevel=3)
+    # the remaining pre-introduction entries, for EVERY stored config (the
+    # engine-only ones below, under "unified"): before 2026-10-06 this loop
+    # ran for unified configs only, so the loud entries never fired for a
+    # config bouquet itself stored
+    _pre_introduction_backfill(
+        gend, [n for n in FIELD_PRE_INTRODUCTION
+               if n not in _ENGINE_ONLY_PRE_INTRODUCTION
+               and n not in ("jbs_max_passes_post_homotopy",
+                             "jbs_relax_current", "jbs_relax_halve_on")
+               and (n not in _LOOP_PRE_INTRODUCTION
+                    or gend.get("jbs_self_consistent") or eng == "unified")],
+        "unified" if eng == "unified" else "")
     if eng != "unified":
         return
     # (c) every legacy-path field the engine never reads: the engine
@@ -2134,24 +2190,37 @@ def _stored_config_compat(gend: dict) -> None:
             UserWarning, stacklevel=3)
         gend["engine_draw_solve_maxits"] = cap
         gend["draw_solve_maxits"] = None
-    for name, (val, why) in FIELD_PRE_INTRODUCTION.items():
-        if name in gend or name == "jbs_max_passes_post_homotopy":
+    _pre_introduction_backfill(gend, list(_ENGINE_ONLY_PRE_INTRODUCTION),
+                               "unified")
+
+
+def _pre_introduction_backfill(gend, names, kind):
+    """Back-fill each of *names* (:data:`FIELD_PRE_INTRODUCTION` entries)
+    that the stored generation dict *gend* lacks: with the value it ran
+    with where that is knowable (a warning), else today's default with a
+    LOUD warning naming the field.  *kind* ("unified" or "") only words the
+    message."""
+    import warnings
+    what = "stored unified config" if kind == "unified" else "stored config"
+    for name in names:
+        if name in gend:
             continue
+        val, why = FIELD_PRE_INTRODUCTION[name]
         if val is not None:
             warnings.warn(
-                f"stored unified config has no generation.{name} (it "
+                f"{what} has no generation.{name} (it "
                 f"predates the field): loading it with {val!r}, {why}, so it "
                 "reproduces what it recorded; today's default is "
-                f"{_field_default(name)!r}", UserWarning, stacklevel=3)
+                f"{_field_default(name)!r}", UserWarning, stacklevel=4)
             gend[name] = val
         else:
             warnings.warn(
-                f"STORED UNIFIED CONFIG LACKS generation.{name}, whose "
+                f"{what.upper()} LACKS generation.{name}, whose "
                 f"default has changed ({why}): the value it was produced "
                 "with is NOT knowable from the config, so today's default "
                 f"{_field_default(name)!r} is used -- results may differ "
                 f"from the stored run; set generation.{name} explicitly",
-                UserWarning, stacklevel=3)
+                UserWarning, stacklevel=4)
 
 
 def _field_default(name):

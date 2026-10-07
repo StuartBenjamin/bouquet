@@ -66,6 +66,9 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │   └── attrs: Ip_target, l_i_target, l_i_scale, source_kind, [diverted],
     │              [source_current_sign, source_b0_sign,
     │               source_current_sign_origin, current_frame],
+    │              [coil_solve_mode]   the run's coil-solve mode ("bounded"
+    │              since 2026-10-06; utils.load_coil_solve_mode, read back
+    │              and checked by load_config),
     │              [li_metrics_json, closure_limited]   baseline provenance (absent
     │              from older archives):
     │              Baseline.li_metrics as JSON, incl. the ip_closure health

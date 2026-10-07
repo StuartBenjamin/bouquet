@@ -4151,6 +4151,72 @@ def stamp_source_orientation(h5path_or_header, scan_key=None,
         grp.attrs["current_frame"] = CURRENT_FRAME
 
 
+#: The coil-solve mode every solve of a run is in since 2026-10-06
+#: (bouquet.solver_state.enter_bounded_coil_mode at Bouquet.setup_solver).
+CANONICAL_COIL_SOLVE_MODE = "bounded"
+
+
+def stamp_coil_solve_mode(h5path_or_header, scan_key=None, mode=None):
+    """Record the coil-solve mode the run's solver was in
+    (``Baseline.coil_solve_mode``) as the ``coil_solve_mode`` attr of the
+    ``_baseline`` group (both paths; an engine archive also carries it in
+    the baseline's engine record).  No-op without a mode or a
+    ``_baseline`` group."""
+    if mode is None:
+        return
+    path = _resolve_h5(h5path_or_header)
+    gp = _baseline_group_path(scan_key)
+    with h5py.File(path, "a") as hf:
+        if gp in hf:
+            hf[gp].attrs["coil_solve_mode"] = str(mode)
+
+
+def load_coil_solve_mode(h5path_or_header, scan_key=None):
+    """``(mode, where)``: the coil-solve mode an archive's run was in -- the
+    ``_baseline`` attr :func:`stamp_coil_solve_mode` writes, else the
+    baseline engine record's ``coil_solve_mode`` -- or ``(None, None)``
+    for an archive that predates the record (before 2026-10-06)."""
+    path = _resolve_h5(h5path_or_header)
+    gp = _baseline_group_path(scan_key)
+    with h5py.File(path, "r") as hf:
+        if gp not in hf:
+            return None, None
+        grp = hf[gp]
+        v = grp.attrs.get("coil_solve_mode")
+        if v is not None:
+            return (v.decode() if isinstance(v, bytes) else str(v)), \
+                "_baseline attr coil_solve_mode"
+        from .engine import read_engine_json
+        rec = read_engine_json(grp)
+    if rec and rec.get("coil_solve_mode") is not None:
+        return str(rec["coil_solve_mode"]), "baseline engine record"
+    return None, None
+
+
+def _warn_replayed_coil_solve_mode(path, scan_key):
+    """Warn when a stored run's coil-solve mode is not the canonical one
+    (or not recorded: the archive predates the record)."""
+    import warnings
+    try:
+        mode, where = load_coil_solve_mode(path, scan_key)
+    except (OSError, KeyError, ValueError):
+        return
+    if mode == CANONICAL_COIL_SOLVE_MODE:
+        return
+    state = ("records no coil_solve_mode: it predates the canonical "
+             "coil-solve mode" if mode is None else
+             f"records coil_solve_mode={mode!r} ({where}), not the "
+             "canonical one")
+    warnings.warn(
+        f"stored run {os.path.basename(str(path))!r}"
+        + ("" if scan_key is None else f" (scan {scan_key!r})")
+        + f" {state} (one bounded coil solve entered at setup_solver, "
+        "2026-10-06; not switchable): replaying this config runs every solve "
+        "bounded -- results may differ from the stored run (measured <= 5e-7 "
+        "relative on reconstructions and <= 5e-4 on archived draws; yields "
+        "and in-spec flags unchanged)", UserWarning, stacklevel=3)
+
+
 GENERATION_PROVENANCE_KEYS = ("n_requested", "n_requested_source",
                               "generation_mode", "n_attempted", "n_stored",
                               "attempt_outcomes_json", "bouquet_version",
@@ -4305,7 +4371,15 @@ def load_config(h5path_or_header, scan_key=None):
                 f"per-scan configs present: {scan_cfgs or 'none'}). Only files "
                 "written by a provenance-aware Bouquet carry a config.")
         raw = node[()]
-    return BouquetConfig.from_json(raw.decode() if isinstance(raw, bytes) else str(raw))
+        _sk = (bkey if bkey is not None else
+               (scan_cfgs[0] if len(scan_cfgs) == 1 else None))
+    cfg = BouquetConfig.from_json(raw.decode() if isinstance(raw, bytes)
+                                  else str(raw))
+    # the coil-solve mode the stored run was in, read back: a replay runs
+    # the canonical (bounded) mode, so an archive without the record (or
+    # with another mode) is said to differ (2026-10-06)
+    _warn_replayed_coil_solve_mode(path, _sk)
+    return cfg
 
 
 # ====================================================================

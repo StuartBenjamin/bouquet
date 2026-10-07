@@ -426,14 +426,19 @@ def test_a_series_config_stored_by_run_slices_loads_unchanged(tmp_path,
     config each slice stores loads back unchanged (and without a warning),
     the refused slices in between notwithstanding."""
     import warnings
-    from bouquet.utils import load_config, write_provenance
+    from bouquet.utils import (load_config, stamp_coil_solve_mode,
+                               write_provenance)
     b = _slice_bouquet(tmp_path, monkeypatch, refuse_at={2.0})
     gen = b.generate
 
     def gen_and_stamp(*a, **k):
+        # what Bouquet.generate stamps: the config and the coil-solve mode
         gen()
         write_provenance(b.config.output_header, config=b.config,
                          scan_key=b.config.generation.scan_key)
+        stamp_coil_solve_mode(b.config.output_header,
+                              scan_key=b.config.generation.scan_key,
+                              mode="bounded")
     monkeypatch.setattr(b, "generate", gen_and_stamp)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")

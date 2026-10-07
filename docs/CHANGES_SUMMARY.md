@@ -178,6 +178,31 @@ warned once. `on_refusal="raise"` keeps the old behaviour. Not covered (as
 before): a refusal raised inside `generate()` (e.g. an engine-draw context
 refusal) still ends the sweep unrecorded.
 
+### Stored-config replay is loud (2026-10-06 review, D3)
+
+- **`jbs_relax_current` / `jbs_relax_halve_on`.** A loop config stored
+  2026-09-25..27 lacks both (introduced 2026-09-27 at 0.7 / 3); it ran with
+  no current relaxation and omega halved on every growth, and loaded
+  SILENTLY at 0.7 / 3. Now a config that ran the loop and lacks either loads
+  with 1.0 / 1 (`FIELD_PRE_INTRODUCTION`) and ONE warning naming the fields;
+  with the loop off they had no effect and are not back-filled.
+- **The loud entries fire for every stored config.** `FIELD_PRE_INTRODUCTION`
+  was consulted for stored unified configs only, so its loud entries
+  (`l_i_tolerance`, `jBS_scale_range`, `homotopy_passes`, `floor_j_BS`,
+  `jbs_max_passes_draw`) never fired for a config bouquet itself stored
+  (all legacy before the engine). Now: for every stored config; the
+  engine-only entries (`engine_ids_inductive`, `engine_mse_jacobian`) for
+  unified ones; the loop's own (`jbs_max_passes_draw`, the relax fields,
+  `jbs_max_passes_post_homotopy`) for a config that ran the loop (or a
+  unified one).
+- **`coil_solve_mode` is read back.** `generate()` stamps it on `_baseline`
+  (both paths; `utils.stamp_coil_solve_mode`; the engine record already
+  carried it); `load_config` reads it (`utils.load_coil_solve_mode`: the
+  attr, else the baseline engine record) and warns when the stored run
+  records none (it predates the canonical mode) or another one -- a replay
+  runs bounded; measured <= 5e-7 relative on reconstructions and <= 5e-4 on
+  archived draws.
+
 ## Decisions on record (owner, 2026-10-05) -- no value changes
 
 Approvals given on 2026-10-05 for settings that were already in force but had
