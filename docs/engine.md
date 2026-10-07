@@ -250,8 +250,8 @@ coefficients (the composition is affine in them).
 | l_i, IDS hard row / soft-row discrepancy | 0.005 | `GenerationConfig.structured_li_tol` |
 | MSE tan γ change | 0.1 σ_eff | `jbs_loop.MSE_CHORD_OFFSET_TOL_SIGMA` |
 | closure-half current residual (standing, decision 9) | 1e-3 | `jbs_rtol_j`, the loop's current gate |
-| consecutive passes / ceiling | 2 / 8 | `JBS_REQUIRED_CONSECUTIVE` / `jbs_max_passes` |
-| ω floor / growth abort | 0.25 / 3 | `JBS_RELAX_FLOOR` / `JBS_GROWTH_ABORT_PASSES` (earliest abort pass 10 at the default relaxation: inert within the reconstruction / MSE ceiling 8 and the post-homotopy 6, reachable within the draw ceiling 12) |
+| consecutive passes / ceiling | 2 / 12 | `JBS_REQUIRED_CONSECUTIVE` / `jbs_max_passes` (12 since 2026-10-07, was 8) |
+| ω floor / growth abort | 0.25 / 3 | `JBS_RELAX_FLOOR` / `JBS_GROWTH_ABORT_PASSES` (earliest abort pass 10 at the default relaxation: inert within the post-homotopy ceiling 6, reachable within the reconstruction / MSE and draw ceilings of 12) |
 | closure scale bounds | 0.2 < s < 5 | `close_ip_structured` default |
 | Ip round trip | 0.05 % | `utils.IP_ROUNDTRIP_TOL_PCT` |
 
@@ -267,7 +267,7 @@ which on a blended pass can read converged while the solved state is not (a
 toy: 2.4e-4 reported, 1.09e-3 against the solved bootstrap); the stricter
 reading can take more passes within the same ceilings (on the fast suite's
 toys: the gated two-state toy 8 -> 9 passes, the soft fd_broyden MSE-stage
-toy 8 -> 12, beyond its ceiling of 8). The engine draw's delivery check and
+toy 8 -> 12, beyond the 8-pass ceiling that was then the default; the reconstruction ceiling is 12 since 2026-10-07). The engine draw's delivery check and
 the bootstrap it carries into the post-homotopy stage are the solved one.
 
 The MSE stage runs the loop again after the Jacobian, with its own ceiling

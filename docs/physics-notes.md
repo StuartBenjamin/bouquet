@@ -296,7 +296,7 @@ between the bootstrap an equilibrium was solved with and the Redl bootstrap of
 that equilibrium. That is `1/ω` times the relaxed step `‖jBS_k+1 − jBS_k‖`, so
 the criterion is never looser than a step-size test. Converged means **every
 active criterion on two consecutive passes**. Ceilings (limits, not
-tolerances): `jbs_max_passes = 8` (baseline / reconstruction),
+tolerances): `jbs_max_passes = 12` (baseline / reconstruction; 8 before 2026-10-07),
 `jbs_max_passes_draw = 12` for each loop of a draw (its anchor loop, each
 l_i-match candidate's coupling, each Fix C resample), and
 `jbs_max_passes_post_homotopy = 6` passes after a draw's coil homotopy when

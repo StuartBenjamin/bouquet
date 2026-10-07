@@ -134,11 +134,12 @@ JBS_REQUIRED_CONSECUTIVE = 2
 #: omega is halved after three consecutive growing passes (0.7 -> 0.35 for
 #: pass 5, -> 0.25 = :data:`JBS_RELAX_FLOOR` for pass 8), so the earliest
 #: abort is at the end of pass 10.  It therefore never fires within
-#: ``jbs_max_passes = 8`` (the reconstruction, the engine's MSE stage, the
-#: legacy MSE chord stage) or ``jbs_max_passes_post_homotopy = 6``: a
-#: diverging loop there runs to its ceiling and fails (or is flagged) there
-#: -- the early stop the module docstring describes does not happen.  It CAN
-#: fire within ``jbs_max_passes_draw = 12`` (a draw's loop, from pass 10),
+#: ``jbs_max_passes_post_homotopy = 6`` (a diverging loop there runs to its
+#: ceiling and fails, or is flagged, there -- the early stop the module
+#: docstring describes does not happen), nor did it within the 8-pass
+#: reconstruction ceiling that was the default before 2026-10-07.  It CAN
+#: fire within ``jbs_max_passes = 12`` (the reconstruction, the engine's MSE
+#: stage) and ``jbs_max_passes_draw = 12`` (a draw's loop), from pass 10,
 #: and with ``jbs_relax_halve_on = 1`` (a replayed config stored 2026-09-25
 #: .. 27) from pass 6.
 JBS_GROWTH_ABORT_PASSES = 3

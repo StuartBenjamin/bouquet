@@ -1107,7 +1107,14 @@ class GenerationConfig:
     # on the next pass; 6 is the measured need plus one pass.  No tolerance
     # and no criterion moved; the stage does not exist with
     # jbs_self_consistent=False, so that path is untouched.
-    jbs_max_passes: int = 8
+    # The reconstruction ceiling is 12 (was 8): owner-approved 2026-10-07 on
+    # measurement.  With r_j / r_I measured against the bootstrap the pass
+    # actually solved (not the iterate) a healthy q0-pinned loop needed nine
+    # passes (pass 8 met every criterion, pass 7 missed r_I by 17 %, so the
+    # two-consecutive rule needed one more).  A ceiling is a limit, not a
+    # tolerance: a run that converges in fewer passes is unchanged; one that
+    # needs more now gets them instead of failing.  Matches the draw ceiling.
+    jbs_max_passes: int = 12
     jbs_max_passes_draw: int = 12
     jbs_max_passes_post_homotopy: int = 6
     # Under-relaxation omega of the bootstrap: j_BS <- (1-omega) j_BS + omega

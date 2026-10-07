@@ -98,7 +98,7 @@ def test_defaults_are_the_approved_values_and_on():
     # two-consecutive rule and every tolerance above are unchanged).  The
     # post-homotopy ceiling was 4: an owner-approved change of a pass
     # ceiling on its measured need (5) plus one pass.
-    assert s["max_passes"] == 8 and jbs_settings(g, draw=True)[
+    assert s["max_passes"] == 12 and jbs_settings(g, draw=True)[
         "max_passes"] == 12
     assert g.jbs_max_passes_post_homotopy == 6
     assert s["post_homotopy_passes"] == 6
@@ -169,7 +169,7 @@ def test_an_old_config_without_the_fields_loads_with_the_loop_off():
         g = BouquetConfig.from_dict(d).generation
     assert g.jbs_self_consistent is False
     # the other loop fields take their (inert) defaults
-    assert g.jbs_max_passes == 8 and g.jbs_relax == 0.7
+    assert g.jbs_max_passes == 12 and g.jbs_relax == 0.7
 
 
 def test_a_current_config_round_trips_the_default_on_without_a_warning():

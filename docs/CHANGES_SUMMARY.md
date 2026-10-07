@@ -87,11 +87,16 @@ map to the original history on the archival tag
   `edge_pressure` blocks (so `delivered_state_json`), every
   `edge_pressure_json` (baseline: from that record; each draw: its own
   solved state) and the engine draw records (`delivered` / `archived`).
-- **Growth abort is inert at the reconstruction ceilings (documented).** At
-  the default relaxation the earliest `JBS_GROWTH_ABORT_PASSES` abort is
-  pass 10: never within `jbs_max_passes = 8` (reconstruction, MSE stage) or
-  the post-homotopy 6; reachable within the draw ceiling 12 (and from pass 6
-  with `jbs_relax_halve_on = 1`). No value changed;
+- **Reconstruction pass ceiling 8 → 12 (owner-approved 2026-10-07).** Under
+  the solved-state residual a healthy q0-pinned structured loop needed nine
+  passes (pass 8 met every criterion, pass 7 missed `r_I` by 17 %); the
+  reconstruction ceiling now matches the draw ceiling. A ceiling is a limit,
+  not a tolerance: runs that converge sooner are unchanged.
+- **Growth abort (documented).** At the default relaxation the earliest
+  `JBS_GROWTH_ABORT_PASSES` abort is pass 10: never within the post-homotopy
+  ceiling 6 (nor within the former 8-pass reconstruction ceiling); reachable
+  within the reconstruction and draw ceilings of 12 (and from pass 6 with
+  `jbs_relax_halve_on = 1`). No value changed;
   `tests/test_jbs_growth_abort_reach.py` pins it.
 - **Engine-dependent defaults resolve at `prepare_baseline()` (fix).**
   `isolate_edge_jBS` / `perturb_jind_in_anchor` default to `None` and are
@@ -119,10 +124,10 @@ Aggregate numbers only; where each was measured:
   `20260929_7da4f18`): **165 passed, 2 failed, 1 skipped.** Both failures
   are the q0-pinned structured variant of the bootstrap-loop q0-pin test
   (and the comparison that needs its residual): under the solved-state
-  residual (`a769882`) that loop needs about one pass more than the default
+  residual (`a769882`) that loop needs about one pass more than the former
   reconstruction ceiling of 8 (pass 8 meets every criterion, pass 7 misses
-  `r_I` by 17 %, so the two-consecutive rule is not met). The pass ceiling
-  is the owner's decision, pending; nothing was changed. The skip is a q95
+  `r_I` by 17 %, so the two-consecutive rule is not met). Resolved by the
+  ceiling change 8 → 12 above (owner-approved 2026-10-07); re-run at the tip. The skip is a q95
   comparison that needs a specific older OFT build (its identity asserts
   ran).
 - **Golden fixture** (synthetic g-file example, 20 draws, seed fixed):

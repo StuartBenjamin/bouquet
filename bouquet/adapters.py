@@ -537,7 +537,8 @@ IDS_INDUCTIVE_CHOICES = ("auto", "j_ohmic", "residual")
 IMAS_LI3_RADIUS_CHOICES = ("auto", "geometric", "axis")
 #: ``"auto"``: the relative agreement within which li_3 recomputed from the
 #: source's own equilibrium with a radius must reproduce the stored li_3
-#: for that radius to be taken (0.5 %, the owner's number of 2026-10-06).
+#: for that radius to be taken (0.5 %; the two candidate radii differ by
+#: ~3 % on these plasmas; owner-approved 2026-10-07).
 LI3_RADIUS_MATCH_TOL = 0.005
 
 _MU0_LI = 4.0e-7 * np.pi

@@ -554,7 +554,7 @@ def test_the_convergence_table_quotes_every_constant_from_its_home():
     assert t["MSE tan(gamma) change [sigma_eff]"]["value"] \
         == MSE_CHORD_OFFSET_TOL_SIGMA
     assert t["consecutive passes"]["value"] == JBS_REQUIRED_CONSECUTIVE
-    assert t["pass ceiling"]["value"] == 8
+    assert t["pass ceiling"]["value"] == 12    # 12 since 2026-10-07 (was 8)
     assert t["omega floor"]["value"] == JBS_RELAX_FLOOR
     assert t["closure scale bounds"]["value"] == [0.2, 5.0]
     assert t["Ip round trip [%]"]["value"] == IP_ROUNDTRIP_TOL_PCT

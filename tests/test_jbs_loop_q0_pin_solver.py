@@ -67,11 +67,11 @@ def _probe(outdir):
         g.jbs_loop_q0_corrector = bool(pin_on)
         if case == "sawtooth":
             g.closure_channel = "sawtooth_bootstrap"
-            g.jbs_max_passes = 8                     # the default ceiling
+            g.jbs_max_passes = 12                    # the default ceiling (12 since 2026-10-07)
         else:
             g.closure_channel = "structured"
             g.structured_li_target = None
-            g.jbs_max_passes = 8                     # the default ceiling
+            g.jbs_max_passes = 12                    # the default ceiling (12 since 2026-10-07)
         tag = f"{case}_{'on' if pin_on else 'off'}"
         try:
             blx = b.prepare_baseline()
