@@ -1896,6 +1896,39 @@ def _flag_reason(res, rec):
             + "; ".join(rec["delivered"]["misses"]))
 
 
+def engine_closure_health(eng, where):
+    """:func:`bouquet.utils.closure_health` of the engine's DELIVERED
+    closure, on either input type: the raw-component Ip mismatch, the
+    bootstrap scale against its +/-50 % prior (``|s_bs - 1| > 0.5`` ->
+    :data:`~bouquet.utils.BOOTSTRAP_PRIOR_FLAG`, printed and warned; a
+    closure failure, never clamped) and, on a soft Ip row, the Ip residual.
+    The scale judged is the closure's EFFECTIVE bootstrap scale
+    (``bs_scale_eff``: the Ip-weighted mean of ``s_bs(psi)`` on a
+    structured preset, the scalar itself otherwise) -- recorded as
+    ``bs_scale_basis`` with the profile's range ``s_bs_range``."""
+    from .utils import BS_SCALE_PRIOR_HALFWIDTH, closure_health
+    cl = eng.delivered_closure
+    out = cl["out"]
+    ch = closure_health(
+        out["ohm_scale_eff"], out["bs_scale_eff"], cl["Ip_signed"],
+        cl["c_signed"], out["Ip_lin_ind"], out["Ip_lin_bs"],
+        out["Ip_lin_fix"],
+        soft_ip_residual_sigma=out.get("residual_sigma_Ip"), where=where)
+    sb = out.get("s_bs")
+    ch["bs_scale"] = float(out["bs_scale_eff"])
+    ch["bs_scale_basis"] = (
+        "bs_scale_eff: the closure's effective bootstrap scale (the "
+        "Ip-weighted mean of s_bs(psi) on a structured preset; the scalar "
+        "itself otherwise)")
+    ch["s_bs_range"] = (None if sb is None else
+                        [float(np.min(sb)), float(np.max(sb))])
+    ch["closure_limited_thresholds"] = dict(
+        ch["closure_limited_thresholds"],
+        bs_prior_halfwidth=float(BS_SCALE_PRIOR_HALFWIDTH),
+        bs_scale_max=1.0 + float(BS_SCALE_PRIOR_HALFWIDTH))
+    return ch
+
+
 def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
     from .baseline import Baseline, _reconstruction_metrics
     mygs, src, c = bq.mygs, bq.config.source, eng.c
@@ -1953,6 +1986,20 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
         metrics["closure_limited_reasons"] = tuple(
             list(metrics.get("closure_limited_reasons", ()) or ())
             + list(rec["flags"]))
+    # the closure's health on the delivered closure, recorded as the IDS
+    # path records it on ip_closure.  Only the +/-50 % bootstrap prior is
+    # folded into the baseline's closure_limited here: the raw-component
+    # Ip mismatch and the soft-Ip residual are recorded (with
+    # closure_health's own verdict) but were never a g-file flag, and
+    # making them one is not this change
+    from .utils import BOOTSTRAP_PRIOR_FLAG, merge_closure_flags
+    ch = engine_closure_health(eng, "engine g-file reconstruction")
+    ch["folded_into_baseline_flags"] = [
+        r for r in ch["closure_limited_reasons"]
+        if str(r).startswith(BOOTSTRAP_PRIOR_FLAG)]
+    metrics["closure_health"] = ch
+    merge_closure_flags(metrics, dict(
+        closure_limited_reasons=ch["folded_into_baseline_flags"]))
     with open(src.geqdsk_path, "rb") as fh:
         eqdsk_bytes = fh.read()
     kn = c.kinetics_native
@@ -1972,7 +2019,6 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
 
 def _ids_baseline(bq, eng, res, rec, bl_src):
     import copy
-    from .utils import closure_health
     c = eng.c
     bl = copy.copy(bl_src)
     R, j_ind, j_BS, j_NBI, j_RF = _split(eng, res)
@@ -1980,11 +2026,7 @@ def _ids_baseline(bq, eng, res, rec, bl_src):
     out = eng.delivered_closure["out"]
     cl = eng.delivered_closure
     m = eng.delivered_meas
-    ch = closure_health(
-        out["ohm_scale_eff"], out["bs_scale_eff"], cl["Ip_signed"],
-        cl["c_signed"], out["Ip_lin_ind"], out["Ip_lin_bs"],
-        out["Ip_lin_fix"],
-        soft_ip_residual_sigma=out.get("residual_sigma_Ip"))
+    ch = engine_closure_health(eng, "engine IDS reconstruction")
     icl = dict(ch)
     icl.update(engine=True, closure=_closure_record(cl),
                jbs_loop=rec["phases"][-1]["record"],
@@ -1998,7 +2040,14 @@ def _ids_baseline(bq, eng, res, rec, bl_src):
             list(icl.get("closure_limited_reasons", ())) + extra)
     lim = dict(bl_src.li_metrics or {})
     lim.update(tokamaker_li_3=float(m["li"]),
-               tokamaker_li_1=m.get("li_1"), engine=True)
+               tokamaker_li_1=m.get("li_1"), engine=True,
+               bootstrap_prior=dict(
+                   bs_scale=ch["bs_scale"],
+                   halfwidth=ch["closure_limited_thresholds"][
+                       "bs_prior_halfwidth"],
+                   out_of_prior=any(
+                       str(r).startswith("bootstrap_scale_out_of_prior")
+                       for r in ch["closure_limited_reasons"])))
     bl.j_phi, bl.j_inductive, bl.j_BS = R, j_ind, j_BS
     bl.j_NBI, bl.j_RF = j_NBI, j_RF
     bl.jBS_diff, bl.jphi_diff, bl.p_diff = None, None, None

@@ -271,6 +271,18 @@ pass. A miss raises `JBSNotConverged` (or flags). That solve, its request,
 its geometry snapshot, `x*`, `lambda_BS*` and the discrepancies are the
 reconstruction: `EngineState`, recorded in `Baseline.engine["state"]`.
 
+**Closure health.** `engine.engine_closure_health` evaluates
+`utils.closure_health` on the delivered closure on BOTH input types
+(2026-10-06; the g-file path never called it): the effective bootstrap scale
+`bs_scale_eff` against the ±50 % bootstrap prior -- `|s_bs - 1| > 0.5` is
+flagged `bootstrap_scale_out_of_prior`, printed and warned loudly, never
+clamped (a closure failure, not a finding) -- with the `s_bs(ψ)` range
+recorded beside it. IDS: on `ip_closure` (every reason folded into
+`closure_limited`, as before) and `li_metrics["bootstrap_prior"]`; g-file:
+`reconstruction_metrics["closure_health"]`, of which only the prior flag is
+folded into the baseline's `closure_limited` (the raw-component Ip mismatch
+is recorded, not a g-file flag).
+
 **What a draw inherits.** Composing on the stored geometry snapshot with the
 stored components, `x*` and `lambda_BS*` (+ the delivery correction)
 reproduces the stored request bit for bit (tested, and re-checked by every

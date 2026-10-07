@@ -1148,6 +1148,16 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             from .jbs_loop import jsonable as _jsonable
             recon_metrics = dict(recon_metrics or {})
             recon_metrics["jbs_loop"] = _jsonable(result["jbs_loop"])
+        # the +/-50 % bootstrap prior on the legacy g-file path: the inductive
+        # fit's bootstrap scale (1.0 unless rescale_j_BS) -- flagged when
+        # |s_bs - 1| > 0.5 (a closure failure, never clamped), recorded
+        from .utils import bootstrap_prior_record, merge_closure_flags
+        recon_metrics = dict(recon_metrics or {})
+        recon_metrics["closure_health"] = bootstrap_prior_record(
+            float(result.get("bs_scale_fit", 1.0)),
+            "fit_inductive_profile's bootstrap scale (rescale_j_BS; 1.0 "
+            "otherwise)", "g-file reconstruction")
+        merge_closure_flags(recon_metrics, recon_metrics["closure_health"])
 
     j_phi = np.asarray(result["j_phi_fit"], dtype=float)
     j_BS = np.asarray(result["j_BS_used"], dtype=float)

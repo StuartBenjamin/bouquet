@@ -8790,6 +8790,9 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
             Ip_tokamaker=Ip_tokamaker,
             Ip_desired=Ip_desired,
             ind_1=ind_1,
+            # the fit's bootstrap scale (1.0 unless rescale_j_BS): judged
+            # against the +/-50 % prior by the baseline (closure_health)
+            bs_scale=float(bs_scale_opt),
         )
 
 
@@ -8843,6 +8846,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     Ip_tokamaker = _fm["Ip_tokamaker"]
     Ip_desired = _fm["Ip_desired"]
     ind_1 = _fm["ind_1"]
+    bs_scale_fit = float(_fm.get("bs_scale", 1.0))
 
     # ---- 7. Mode-dependent corrective iteration ----
     #
@@ -9064,6 +9068,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
             Ip_tokamaker = _fm["Ip_tokamaker"]
             Ip_desired = _fm["Ip_desired"]
             ind_1 = _fm["ind_1"]
+            bs_scale_fit = float(_fm.get("bs_scale", 1.0))
             j_phi_output_corr = _pc_state["out"]
             j_BS_isolated_corr = _pc_state["jbc"]
             _li_post_corr = float(mygs.get_stats(
@@ -9245,6 +9250,9 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         'ffprime': ffprime_tokamaker.copy(),
         'ind_factor_final': ind_1,
         'bs_factor_final': 1.0,
+        # the inductive fit's bootstrap scale (fit_inductive_profile; 1.0
+        # unless rescale_j_BS) -- already inside j_BS_used
+        'bs_scale_fit': float(bs_scale_fit),
         'Ip_tokamaker': Ip_tokamaker,
         'eqdsk_jtor': eqdsk_jtor.copy(),
         'eqdsk_psi_N': eqdsk.psi_N.copy(),

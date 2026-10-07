@@ -1206,10 +1206,79 @@ def ip_roundtrip_gate(ip_closed, Ip_measured, posterior=None, sigma_Ip=None,
 SOFT_IP_FLAG_PREFIX = "soft Ip beyond 1 sigma_Ip"
 
 
+#: Half-width of the bootstrap-model prior: the closure's bootstrap scale is
+#: expected within ``1 +/- 0.5`` (the +/-50 % j_BS uncertainty prior).  A
+#: scale outside it is a CLOSURE FAILURE -- the closure paid for I_p / l_i
+#: by rescaling the bootstrap beyond what the bootstrap model's uncertainty
+#: allows -- not a finding about the bootstrap.  Flagged, never clamped.
+BS_SCALE_PRIOR_HALFWIDTH = 0.5
+#: The reason prefix :func:`closure_health` flags such a scale with.
+BOOTSTRAP_PRIOR_FLAG = "bootstrap_scale_out_of_prior"
+
+
+def bootstrap_prior_reason(bs_scale, halfwidth=BS_SCALE_PRIOR_HALFWIDTH):
+    """The ``closure_limited`` reason for a bootstrap scale outside the
+    +/-50 % prior (``|s_bs - 1| > halfwidth``), or ``None`` inside it.  A
+    non-finite scale is not judged here (:func:`closure_health` flags it as
+    unreadable)."""
+    try:
+        sb = float(bs_scale)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(sb) or abs(sb - 1.0) <= float(halfwidth):
+        return None
+    return (f"{BOOTSTRAP_PRIOR_FLAG}: bs_scale {sb:.3f} outside "
+            f"1 +/- {float(halfwidth):g} (the +/-50 % bootstrap prior) -- a "
+            "closure failure, not a finding")
+
+
+def warn_bootstrap_prior(reason, where):
+    """Print (and warn) a :data:`BOOTSTRAP_PRIOR_FLAG` reason LOUDLY."""
+    import warnings
+    msg = f"{where}: {reason}"
+    print(f"[closure-health] WARNING {msg}", flush=True)
+    warnings.warn(msg, RuntimeWarning, stacklevel=3)
+
+
+def bootstrap_prior_record(bs_scale, basis, where):
+    """A closure-health block for a path that has a bootstrap scale but no
+    Ip closure to judge (the legacy g-file reconstruction): the scale
+    against the +/-50 % prior (:func:`bootstrap_prior_reason`), flagged
+    loudly (:func:`warn_bootstrap_prior`) when outside, never clamped."""
+    bs = float(bs_scale)
+    reason = bootstrap_prior_reason(bs)
+    if reason is not None:
+        warn_bootstrap_prior(reason, where)
+    return dict(
+        bs_scale=bs, bs_scale_basis=str(basis),
+        closure_limited=reason is not None,
+        closure_limited_reasons=(() if reason is None else (reason,)),
+        closure_limited_thresholds=dict(
+            bs_prior_halfwidth=float(BS_SCALE_PRIOR_HALFWIDTH),
+            bs_scale_min=1.0 - float(BS_SCALE_PRIOR_HALFWIDTH),
+            bs_scale_max=1.0 + float(BS_SCALE_PRIOR_HALFWIDTH)))
+
+
+def merge_closure_flags(metrics, health):
+    """Fold a :func:`closure_health` record's flags into a reconstruction
+    metrics dict (``closure_limited`` / ``closure_limited_reasons``, the
+    convention :meth:`bouquet.run.Bouquet._flag_nonconverged_recon_loop`
+    uses), without repeating a reason already there.  Returns *metrics*."""
+    reasons = list(metrics.get("closure_limited_reasons", ()) or ())
+    for r in health.get("closure_limited_reasons", ()) or ():
+        if r not in reasons:
+            reasons.append(r)
+    if reasons:
+        metrics["closure_limited"] = True
+        metrics["closure_limited_reasons"] = tuple(reasons)
+    return metrics
+
+
 def closure_health(ohm_scale, bs_scale, Ip_target_signed, c_affine,
                    ip_ind, ip_bs, ip_fix,
-                   mismatch_max_pct=10.0, bs_scale_min=0.5,
-                   soft_ip_residual_sigma=None):
+                   mismatch_max_pct=10.0,
+                   bs_prior_halfwidth=BS_SCALE_PRIOR_HALFWIDTH,
+                   soft_ip_residual_sigma=None, where=None):
     """Per-slice closure-health record for every ohmic-mode channel.
 
     ``Ip_target_signed`` and ``c_affine`` must carry the SAME
@@ -1223,7 +1292,10 @@ def closure_health(ohm_scale, bs_scale, Ip_target_signed, c_affine,
     components miss Ip, the unscaled and closed bootstrap fractions, and flag
     the slice **closure-limited** when the reconciliation asked of one scale
     is large: raw mismatch beyond ``mismatch_max_pct`` of Ip, or the bootstrap
-    scaled below ``bs_scale_min``.  A refusal (scale outside (0.2, 5), or a
+    scaled outside its +/-50 % prior, ``|bs_scale - 1| >
+    bs_prior_halfwidth`` (reason :data:`BOOTSTRAP_PRIOR_FLAG`, printed and
+    warned loudly; until 2026-10-06 only ``bs_scale < 0.5`` was flagged and
+    a scale above 1.5 passed silently).  A refusal (scale outside (0.2, 5), or a
     singular q0 system) is closure-limited by construction and raises before
     this is reached.  Downstream consumers (Delta' pipelines) should treat
     closure-limited slices as unvalidated regardless of channel -- that is
@@ -1264,8 +1336,10 @@ def closure_health(ohm_scale, bs_scale, Ip_target_signed, c_affine,
     if abs(mismatch_pct) > float(mismatch_max_pct):
         reasons.append(f"raw components miss Ip by {mismatch_pct:+.1f}% "
                        f"(> {float(mismatch_max_pct):g}%)")
-    if float(bs_scale) < float(bs_scale_min):
-        reasons.append(f"bs_scale {float(bs_scale):.3f} < {float(bs_scale_min):g}")
+    _prior = bootstrap_prior_reason(bs_scale, bs_prior_halfwidth)
+    if _prior is not None:
+        reasons.append(_prior)
+        warn_bootstrap_prior(_prior, where or "closure_health")
     if (soft_ip_residual_sigma is not None
             and np.isfinite(float(soft_ip_residual_sigma))
             and abs(float(soft_ip_residual_sigma)) > 1.0):
@@ -1277,8 +1351,12 @@ def closure_health(ohm_scale, bs_scale, Ip_target_signed, c_affine,
         f_BS_closed=float(f_bs_closed),
         closure_limited=bool(reasons),
         closure_limited_reasons=tuple(reasons),
-        closure_limited_thresholds=dict(mismatch_max_pct=float(mismatch_max_pct),
-                                        bs_scale_min=float(bs_scale_min)),
+        # the record's keys are unchanged (bs_scale_min = 1 - halfwidth);
+        # the prior is symmetric, its upper edge 1 + halfwidth (the reason
+        # says so; the engine's and the legacy g-file's blocks record it)
+        closure_limited_thresholds=dict(
+            mismatch_max_pct=float(mismatch_max_pct),
+            bs_scale_min=1.0 - float(bs_prior_halfwidth)),
     )
 
 

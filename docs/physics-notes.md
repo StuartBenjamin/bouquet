@@ -1318,7 +1318,7 @@ unvalidated.
 | reason | what it means |
 |---|---|
 | `raw components miss Ip by …% (> …%)` | the *unscaled* components are far from I_p, so the closure is being asked for a large reconciliation however it distributes it |
-| `bs_scale … < …` | the closure paid for I_p by scaling the bootstrap down past `bs_scale_min` |
+| `bootstrap_scale_out_of_prior: bs_scale … outside 1 +/- 0.5 …` | the closure's bootstrap scale left the ±50 % bootstrap prior (`utils.BS_SCALE_PRIOR_HALFWIDTH`), either way: a **closure failure, not a finding**. Printed and warned loudly, never clamped. Evaluated on every path since 2026-10-06 -- the legacy IMAS channels, both engine paths (the effective scale `bs_scale_eff`, the `s_bs(ψ)` range recorded beside it; the g-file engine path records it in `reconstruction_metrics["closure_health"]`, the IDS path in `ip_closure` and `li_metrics["bootstrap_prior"]`) and the legacy g-file path (the inductive fit's scale, 1.0 unless `rescale_j_BS`). Until then only `bs_scale < 0.5` was flagged, and only on the IMAS paths |
 | `soft Ip beyond 1 sigma_Ip (z_Ip = …)` | soft channel only: the **delivered** hybrid's I_p sits more than 1 σ_Ip from the measurement. A small offset is the channel working; past 1 σ it is worth seeing. The corrector *replaces* this flag rather than stacking a stale one |
 | `l_i misses its hard row by … (> tol …) after … corrector solve(s)` | hard channel only: the corrected l_i is still outside `structured_li_tol`. Before this existed, `closure_health` did not look at l_i at all |
 
