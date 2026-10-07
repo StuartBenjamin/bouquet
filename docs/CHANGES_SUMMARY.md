@@ -127,7 +127,8 @@ Aggregate numbers only; where each was measured:
   residual (`a769882`) that loop needs about one pass more than the former
   reconstruction ceiling of 8 (pass 8 meets every criterion, pass 7 misses
   `r_I` by 17 %, so the two-consecutive rule is not met). Resolved by the
-  ceiling change 8 → 12 above (owner-approved 2026-10-07); re-run at the tip. The skip is a q95
+  ceiling change 8 → 12 above (owner-approved 2026-10-07); the suite re-run at
+  the tip gives 167 passed, 1 skipped (build-dependent), 0 failed. The skip is a q95
   comparison that needs a specific older OFT build (its identity asserts
   ran).
 - **Golden fixture** (synthetic g-file example, 20 draws, seed fixed):
