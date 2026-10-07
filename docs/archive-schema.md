@@ -56,6 +56,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │   ├── [recon_lcfs_ref]           10k-pt LCFS reference (boundary metric)
     │   ├── [x_points], [coil_currents, coil_names]
     │   └── attrs: Ip_target, l_i_target, l_i_scale, source_kind, [diverted],
+    │              [source_current_sign, source_b0_sign,
+    │               source_current_sign_origin, current_frame],
     │              [li_metrics_json, closure_limited]   baseline provenance (absent
     │              from older archives):
     │              Baseline.li_metrics as JSON, incl. the ip_closure health
@@ -106,6 +108,18 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
   at file creation; `config_json` is added by `write_provenance` (called from
   `Bouquet.generate`, `run_shard`, and `merge_archives`). Recover the exact
   run configuration with `bq.load_config(path, scan_key=...)`.
+- **Current orientation.** Every archived current and eqdsk is in bouquet's
+  positive-current frame (TokaMaker native: `Ip > 0`, `F0 > 0`). IMAS-path
+  archives record the source's own orientation on `_baseline`:
+  `source_current_sign` (the factor the reader multiplied every source current
+  by; `-1.0` for a reversed-current source), `source_current_sign_origin`
+  (whether that factor was `sign(ip)` or set by
+  `ImasSource.current_orientation`), `source_b0_sign` (the source's
+  vacuum-field sign; absent when `b0` is zero or unreadable) and
+  `current_frame` (a plain statement of the frame).
+  Absent on g-file-path archives and on IMAS archives written before the
+  reader's normalisation. See
+  [physics-notes](physics-notes.md#current-and-field-orientation).
 - **Live-equilibrium FSA (`eq_fsa/`).** Optional per-draw subgroup of
   flux-surface averages captured directly from the live TokaMaker object at
   generate time (`GenerationConfig.capture_live_eq`, on by default), on the

@@ -85,7 +85,11 @@ class SolverConfig:
     #   {"coils": {name: coeff}, "target": float, "weight": float}
     # Empty (default) => every coil pulled toward ZERO at unit weight, the
     # historical behaviour. Populate to pin coils to measured currents; see
-    # bouquet.coil_targets.coil_reg_from_measured. Applied by
+    # bouquet.coil_targets.coil_reg_from_measured. Targets are in the SOLVE
+    # (positive-Ip) frame: measured_from_pf_active multiplies the measured
+    # circuit currents by the source's orientation factor and records it on
+    # each term ("source_current_sign"); a term whose recorded factor disagrees
+    # with the IMAS baseline's source_current_sign is refused. Applied by
     # Bouquet._apply_coil_reg at BOTH setup_solver and _reset_solver_state --
     # the reset runs immediately before the IMAS baseline solve, so anything
     # installed only at setup is discarded.
@@ -227,6 +231,26 @@ class ImasSource:
     # fits the boundary to the external magnetics without kinetic assumptions.
     # One g-file per slice; the driver picks the nearest time.
     LCFS_geqdsk: Optional[str] = None
+    # Current orientation of this dd: the factor that brings EVERY current
+    # profile it carries (core_profiles j_*, core_sources j_parallel,
+    # equilibrium j_tor) into bouquet's positive-Ip frame.
+    #   "auto" (default) -> sign(equilibrium ip) at the slice of the currents,
+    #       and the read is REFUSED (ValueError) when the area-weighted
+    #       integral of core_profiles.j_tor, or of the equilibrium j_tor that
+    #       is used, disagrees with that sign -- a dd whose current profiles
+    #       and plasma current were written in different orientations (e.g. an
+    #       IDS conversion that mixed COCOS between IDSs).
+    #   +1 / -1 -> use this factor instead of sign(ip).  For a user who KNOWS
+    #       the file's current convention.  The normalised currents must still
+    #       integrate positive; a factor that leaves them negative is refused
+    #       the same way.  (A dd whose equilibrium and core_profiles currents
+    #       disagree with EACH OTHER has no single factor: set
+    #       GenerationConfig.anchor_jtor_to_equilibrium=False so the
+    #       equilibrium j_tor is not used, or fix the file.)
+    # The factor used and where it came from are recorded on the Baseline
+    # (source_current_sign / source_current_sign_origin), in li_metrics and
+    # ip_closure, and on the archive's _baseline attrs.
+    current_orientation: Union[str, float] = "auto"
 
 
 BaselineSource = Union[ReconstructionSource, ImasSource]
@@ -261,11 +285,20 @@ class FixedComponentsConfig:
 
     All arrays are on ``psi_N`` (kinetic grid), SI units, toroidal current
     convention for j_*. ``None`` -> zeros.
+
+    Current orientation: ``j_NBI`` / ``j_RF`` are given in bouquet's
+    POSITIVE-Ip frame -- co-current drive is positive, counter-current drive
+    negative -- whatever the orientation of the source.  They are used exactly
+    as given on both source paths: the IMAS reader does NOT multiply them by
+    the dd's orientation factor (``Baseline.source_current_sign``) the way it
+    multiplies the dd's own currents, and the reconstruction path never
+    re-signs them either.  So for a reversed-Ip discharge a co-current beam is
+    still a POSITIVE array here.
     """
 
     p_fast: Optional["np.ndarray"] = None   # fast/beam pressure
-    j_NBI: Optional["np.ndarray"] = None    # beam-driven TOROIDAL current density [A/m^2]
-    j_RF: Optional["np.ndarray"] = None     # RF-driven TOROIDAL current density [A/m^2]
+    j_NBI: Optional["np.ndarray"] = None    # beam-driven TOROIDAL current density [A/m^2], co-Ip > 0
+    j_RF: Optional["np.ndarray"] = None     # RF-driven TOROIDAL current density [A/m^2], co-Ip > 0
     psi_N: Optional["np.ndarray"] = None    # grid for the above (if arrays given)
 
     # How to collapse anisotropic fast-ion pressure (p_perp, p_par) to the scalar
@@ -1240,6 +1273,9 @@ class BouquetConfig:
         elif isinstance(src, ImasSource):
             if not src.ids_path:
                 raise ValueError("ImasSource requires ids_path")
+            # fail here, not after the dd (100s of MB) has been read
+            from .io.imas import parse_current_orientation
+            parse_current_orientation(src.current_orientation)
         else:
             raise TypeError(
                 "source must be a ReconstructionSource or ImasSource, got "

@@ -1,5 +1,63 @@
 # Bouquet — change summaries
 
+## Unreleased — reversed-current IMAS sources (hotfix)
+
+**A dd with `ip < 0` is now read into bouquet's positive-current frame.** Before
+this, `read_imas_baseline` kept the dd's (negative) current profiles while every
+bootstrap bouquet recomputes on its positive-current anchor is positive, so on
+a reversed-current source the bootstrap was added **against** Ip — in the
+legacy `solve_with_bootstrap` path, in the draws, and (on builds that have it)
+in the self-consistent loop. The Ip closure, the q0 target (negative),
+`fuse_total_err_pct` (off by 2c) and `swb_over_fuse_jBS_peak` were all wrong for
+such a source.
+
+- **Changes results only for sources with `ip < 0`.** For `ip ≥ 0` the reader
+  multiplies by exactly `+1.0`; baselines, closures, draws and archives are
+  bit-identical to before (verified bitwise A/B against the pre-fix build: the
+  synthetic IMAS example's forward-solved baseline under four closure paths,
+  and a seeded g-file run of the golden-fixture example including its draws). **Any bouquet result built on a reversed-current dd before
+  this change is invalid and must be regenerated.**
+- New records: `Baseline.source_current_sign` / `source_current_sign_origin`
+  / `source_b0_sign`, the same keys in `li_metrics`,
+  `ip_closure.source_current_sign` / `source_current_sign_origin`, and
+  `_baseline` attrs `source_current_sign` / `source_current_sign_origin` /
+  `source_b0_sign` / `current_frame` on IMAS archives.
+- **A dd whose current profiles disagree in sign with its own `ip` is now
+  refused** (`ValueError` naming each quantity and its sign) instead of being
+  warned about and closed in a mixed frame. The test is on the net,
+  area-weighted toroidal current of `core_profiles.j_tor` and of the
+  equilibrium `j_tor` the anchor uses. New
+  `ImasSource.current_orientation` (`"auto"` default, `+1`, `-1`) names the
+  factor explicitly for a file whose convention the user knows.
+- **Measured coil-current targets are in the solve frame.**
+  `coil_targets.measured_from_pf_active` multiplies the `pf_active` circuit
+  currents by the source's orientation factor (new `current_orientation`
+  argument, `"auto"` default) and returns a `MeasuredCoilCurrents` dict that
+  records it; `coil_reg_from_measured` stamps each term with
+  `"source_current_sign"`, and `_apply_coil_reg` refuses a term whose factor
+  disagrees with the IMAS baseline's. Unchanged for `ip > 0`.
+- A user-supplied `FixedComponentsConfig.j_NBI` / `j_RF` is defined in
+  bouquet's positive-Ip frame (co-current positive) and used as given on both
+  source paths; the IMAS reader does not multiply it by `sign(ip)`.
+- **The IMAS export is written in the source's frame.** `write_imas_draw`
+  used to write positive-frame `ip`, ψ, P′, FF′, `f`, q and currents into a
+  template that keeps source-frame `core_sources`, `pf_active` and `b0`, so a
+  re-read of a reversed-source export was off by 2|j_NBI| in `j_inductive`. It
+  now restores the source orientation (archive `source_current_sign`, template
+  `b0` and q-sign convention) on every field it writes, and refuses a template
+  whose orientation contradicts the archive. For `ip > 0` sources only `f`
+  changes, taking `b0`'s sign.
+- Delivered g-files are unchanged in convention (`CURRENT > 0`, `BCENTR > 0`,
+  so always `Ip·Bt > 0`, TokaMaker's COCOS 7, for every source); they do not
+  carry the experiment's orientation or its field-line helicity, which matters
+  for 3D-field (error-field / coil-coupling / NTV) work. Restoring the source
+  orientation flips P′ and FF′ with ψ. See
+  [physics-notes](physics-notes.md#current-and-field-orientation).
+- g-file-path plot overlays (`plot_input_vs_recon`, the reconstruction
+  diagnostic's FF′, `plot_jphi`'s geqdsk total) are now drawn in the solve's
+  positive frame (`× sign(CURRENT)`); `plot_input_vs_recon` reads the g-file in
+  the source's declared COCOS.
+
 ## Unreleased — a report-only core-pressure hollowness record
 
 Every baseline now records `core_pressure_hollow`, which describes whether and

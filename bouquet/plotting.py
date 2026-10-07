@@ -503,7 +503,8 @@ def plot_tokamaker_comparison(mygs, all_results, plot_idx=None):
 
         # --- (2,0) FF' comparison ---
         ax_ffp = axes[2, 0]
-        ax_ffp.plot(psi_N, eqdsk_ref.ffprim, 'k-', lw=_LW, label=r"geqdsk $FF'$")
+        ax_ffp.plot(psi_N, _gfile_input_ffprim(eqdsk_ref), 'k-', lw=_LW,
+                    label=r"geqdsk $FF'$")
         ax_ffp.plot(psi_N, r['ffprime'], color=_C2, ls='--', lw=_LW, label=r"TokaMaker $FF'$")
         ax_ffp.set_xlabel(r'$\psi_N$'); ax_ffp.set_ylabel(r"$FF'$ [T$^2$ m$^2$ Wb$^{-1}$]")
         ax_ffp.set_title(r"$FF'(\psi)$ comparison"); ax_ffp.legend(fontsize=8); ax_ffp.grid(ls=':')
@@ -1548,11 +1549,60 @@ def _resolve_x_coord(psi_N, x_coord, eq=None, psi_pf=None):
         raise ValueError(f"x_coord must be 'psi_N' or 'rho', got {x_coord!r}")
 
 
+def _gfile_current_sign(eq):
+    """``+1.0`` / ``-1.0``: the factor that puts a g-file's Ip-odd raw
+    quantities (``j_tor``, ``FF'``, ``P'``) in bouquet's positive-Ip frame.
+
+    The reconstruction itself fits ``abs(Ip)`` and ``abs(<j_tor>)``, so a
+    reversed-Ip g-file's raw ``<j_tor>`` / ``FF'`` would otherwise be drawn
+    upside down against the solve.  Same rule as the IMAS reader
+    (:func:`bouquet.io.imas.source_current_sign`): ``sign(CURRENT)``, ``+1``
+    for zero / non-finite.  Unlike ``abs()`` it keeps a genuine local sign
+    change (a counter-current edge) visible.
+    """
+    from .io.imas import source_current_sign
+    return source_current_sign(getattr(eq, "Ip", 1.0))
+
+
+def _gfile_input_jtor(eq):
+    """The g-file's direct flux-surface-averaged ``<j_tor>`` in the solve's
+    positive-Ip frame (what :func:`plot_input_vs_recon` overlays)."""
+    return _gfile_current_sign(eq) * np.asarray(eq.j_tor_averaged_direct, float)
+
+
+def _gfile_input_ffprim(eq):
+    """The g-file's ``FF'`` in the solve's positive-Ip frame (the
+    reconstruction diagnostic's FF' overlay).  FF' is odd in Ip and even in
+    B0, so ``sign(Ip)`` alone maps every orientation onto the solve's."""
+    return _gfile_current_sign(eq) * np.asarray(eq.ffprim, float)
+
+
+def _imas_current_sign(dd, time, current_orientation="auto"):
+    """The factor :func:`bouquet.io.imas.read_imas_baseline` brings this dd's
+    currents into bouquet's positive-current frame with, for overlaying raw dd
+    currents on solved / archived ones: an explicit
+    ``ImasSource.current_orientation`` (``+1`` / ``-1``) as given, else (for
+    ``"auto"``) ``sign(equilibrium ip)`` at the reader's own slice
+    (:func:`bouquet.io.imas.orientation_slice_index`); ``+1`` when the dd
+    carries no equilibrium ip."""
+    from .io.imas import (orientation_ip, parse_current_orientation,
+                          source_current_sign)
+    orient = parse_current_orientation(current_orientation)
+    if orient != "auto":
+        return float(orient)
+    ip = orientation_ip(dd, None if time is None else float(time))
+    return 1.0 if ip is None else source_current_sign(ip)
+
+
 def _imas_input_profiles(source):
-    r"""Raw input ``(psi_N, pressure[Pa], q)`` from the IDS ``equilibrium``
-    profiles_1d at ``source.time`` -- the values the IMAS forward solve starts
-    from (for the input-vs-solved comparison). ``q`` is ``None`` when the IDS
-    does not store it (some FUSE/OMAS exports omit equilibrium q)."""
+    r"""Raw input ``(psi_N, pressure[Pa], q, j_tor)`` from the IDS
+    ``equilibrium`` profiles_1d at ``source.time`` -- the values the IMAS
+    forward solve starts from (for the input-vs-solved comparison). ``q`` is
+    ``None`` when the IDS does not store it (some FUSE/OMAS exports omit
+    equilibrium q). ``j_tor`` (None when absent) is multiplied by the reader's
+    orientation factor -- ``source.current_orientation`` when set to ``+1`` /
+    ``-1``, else ``sign(equilibrium ip)`` -- so it is in the frame of the solved
+    profile it is overlaid on."""
     import json
     d = json.load(open(source.ids_path))
     eq = d["equilibrium"]
@@ -1563,7 +1613,12 @@ def _imas_input_profiles(source):
     psi = np.asarray(p1["psi"], float)
     psiN = (psi - psi[0]) / (psi[-1] - psi[0]) if psi[-1] != psi[0] else psi
     q = np.asarray(p1["q"], float) if "q" in p1 else None
-    jt = np.asarray(p1["j_tor"], float) if "j_tor" in p1 else None
+    # j_tor in bouquet's positive-current frame -- the frame the solved
+    # profile it is overlaid on lives in: the factor read_imas_baseline
+    # applied (the configured current_orientation, or sign(ip) for "auto");
+    # identity for ip >= 0 under "auto".
+    s = _imas_current_sign(d, tt, getattr(source, "current_orientation", "auto"))
+    jt = s * np.asarray(p1["j_tor"], float) if "j_tor" in p1 else None
     return psiN, np.asarray(p1["pressure"], float), q, jt
 
 
@@ -1654,11 +1709,17 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
 
     # ---- raw input side ----------------------------------------------------
     if not is_imas:
-        eq = read_geqdsk(run.config.source.geqdsk_path)
+        # read in the source's DECLARED COCOS (the reconstruction's own
+        # setting): <j_tor> from the GS relation carries -sigma_Bp, so a
+        # g-file read in the wrong COCOS draws its current upside down
+        eq = read_geqdsk(run.config.source.geqdsk_path,
+                         cocos=int(getattr(run.config.source, "cocos", 1)))
         in_x = np.asarray(eq.psi_N, float)
         in_p = np.asarray(eq.pres, float)
         in_q = np.asarray(eq.q_profile, float)
-        in_jx = in_x; in_j = np.asarray(eq.j_tor_averaged_direct, float)
+        # positive-Ip frame, like the solve it is overlaid on (the fit used
+        # abs(<j_tor>)); identity for a g-file with CURRENT >= 0
+        in_jx = in_x; in_j = _gfile_input_jtor(eq)
         in_bR = np.asarray(eq.boundary_R, float)
         in_bZ = np.asarray(eq.boundary_Z, float)
         in_lbl = "input g-file"
@@ -3577,8 +3638,12 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
         Scan group; defaults to the first scan in the file.
     source : str or None
         Raw input to overlay. IMAS ``dd_sim.json`` -> raw FUSE j_tor /
-        j_bootstrap / j_ohmic (toroidal). g-file -> its direct j_phi used as
-        the input reference in all three panels (no FUSE component split).
+        j_bootstrap / j_ohmic (toroidal), multiplied by the orientation
+        factor the archive's read applied (its stamped
+        ``source_current_sign``, else the archived
+        ``ImasSource.current_orientation``, else ``sign(equilibrium ip)``).
+        g-file -> its direct j_phi used as the input reference in all three
+        panels (no FUSE component split).
     source_kind : {'auto','imas','geqdsk'}
     selection : {'all','selected'}
     save : str or None
@@ -3597,6 +3662,23 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
         base_total = np.asarray(g["_baseline/j_phi"][:], float)
         base_jBS = (np.asarray(g["_baseline/j_BS"][:], float)
                     if "j_BS" in g["_baseline"] else None)
+        # the orientation factor the archive's IMAS read applied, for the raw
+        # source overlay below: the stamped _baseline attr, else the archived
+        # config's ImasSource.current_orientation (scan copy, else root)
+        _bl_attrs = g["_baseline"].attrs
+        _stamped_cs = (float(_bl_attrs["source_current_sign"])
+                       if "source_current_sign" in _bl_attrs else None)
+        _cfg_orient = None
+        _cfg_node = (g["config_json"] if "config_json" in g
+                     else hf["config_json"] if "config_json" in hf else None)
+        if _cfg_node is not None:
+            try:
+                _raw = _cfg_node[()]
+                _raw = _raw.decode() if isinstance(_raw, bytes) else str(_raw)
+                _cfg_orient = (json.loads(_raw).get("source") or {}).get(
+                    "current_orientation")
+            except (ValueError, TypeError, AttributeError):
+                _cfg_orient = None
         ids = [k for k in g if k.isdigit()]
         # IMAS / full-bootstrap archives (isolate_edge_jBS=False) store no edge
         # spike -- fall back to the full j_BS, so j_ind = total - j_BS - fixed
@@ -3626,15 +3708,37 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
         try:
             if kind == "imas":
                 from .physics import parallel_to_toroidal
-                cp = json.load(open(source))["core_profiles"]
+                from .io.imas import parse_current_orientation
+                _dd = json.load(open(source))
+                cp = _dd["core_profiles"]
                 ic = int(np.argmin(np.abs(np.asarray(cp["time"], float) - float(int(sk)) / 1000.0)))
                 c = cp["profiles_1d"][ic]
+                # the raw source currents in bouquet's positive-current frame
+                # (the frame the archived baseline and draws are in), with the
+                # factor the archive's read applied, taken in this order:
+                #   1. the stamped _baseline attr source_current_sign
+                #      (stamp_source_orientation; authoritative),
+                #   2. the archived config's ImasSource.current_orientation,
+                #      when it is an explicit +1 / -1,
+                #   3. sign(equilibrium ip) of this dd (the "auto" rule; the
+                #      only option for an archive older than both records).
+                # Identity for ip >= 0 under "auto".
+                if _stamped_cs is not None:
+                    _cs = _stamped_cs
+                else:
+                    try:
+                        _o = parse_current_orientation(
+                            "auto" if _cfg_orient is None else _cfg_orient)
+                    except ValueError:
+                        _o = "auto"
+                    _cs = _imas_current_sign(_dd, float(int(sk)) / 1000.0, _o)
+                del _dd
                 p = np.asarray(c["grid"]["psi"], float); pN = (p - p[0]) / (p[-1] - p[0])
-                jtot = np.asarray(c["j_total"], float); jtor = np.asarray(c["j_tor"], float)
+                jtot = _cs * np.asarray(c["j_total"], float); jtor = _cs * np.asarray(c["j_tor"], float)
                 tt = lambda jp: parallel_to_toroidal(jp, j_parallel_total=jtot, j_tor_total=jtor)
                 F = dict(total=np.interp(psi, pN, jtor),
-                         jBS=np.interp(psi, pN, tt(np.asarray(c["j_bootstrap"], float))),
-                         jind=np.interp(psi, pN, tt(np.asarray(c["j_ohmic"], float))))
+                         jBS=np.interp(psi, pN, tt(_cs * np.asarray(c["j_bootstrap"], float))),
+                         jind=np.interp(psi, pN, tt(_cs * np.asarray(c["j_ohmic"], float))))
                 fixed = F["total"] - F["jBS"] - F["jind"]; Flabel = "FUSE"
             else:
                 from .io.geqdsk import read_geqdsk
@@ -3642,7 +3746,9 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
                 jg = getattr(eq, "j_tor_averaged", None)
                 if jg is None:
                     jg = getattr(eq, "j_tor_averaged_direct", None)
-                jg = np.asarray(jg, float).ravel()
+                # positive-Ip frame, like the archived baseline and draws
+                # (identity for a g-file with CURRENT >= 0)
+                jg = _gfile_current_sign(eq) * np.asarray(jg, float).ravel()
                 F = dict(total=np.interp(psi, np.asarray(eq.psi_N, float).ravel(), jg),
                          jBS=None, jind=None); Flabel = "geqdsk"
         except Exception as e:

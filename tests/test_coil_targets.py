@@ -500,3 +500,199 @@ class TestCoilInit:
         f = {x.name: x for x in dataclasses.fields(SolverConfig)}
         assert "coil_init" in f
         assert SolverConfig(mesh_path="x").coil_init is None
+
+
+class TestCoilTargetsAreInTheSolveFrame:
+    """A reversed-Ip discharge is solved as its positive-Ip mirror image, whose
+    equilibrium coil currents are the lab ones with the sign reversed.  The
+    measured targets must be brought into that frame -- by the same factor the
+    IMAS reader applies to the plasma currents, applied exactly once."""
+
+    class _GS:
+        def __init__(self, sets):
+            self.coil_sets = sets
+            self.installed = None
+
+        def coil_reg_term(self, coils, target=0.0, weight=1.0):
+            return {"coils": dict(coils), "target": target, "weight": weight}
+
+        def set_coil_reg(self, reg_terms=None): self.installed = list(reg_terms)
+
+    SHIPPED = {"F1A": {"net_turns": 1.0}, "F6A": {"net_turns": 1.0},
+               "ECOILA": {"net_turns": 61.0}}
+
+    @staticmethod
+    def _dd(ip=1.2e6):
+        return {
+            "equilibrium": {"time": [1.0, 2.0, 3.0], "time_slice": [
+                {"global_quantities": {"ip": ip}} for _ in range(3)]},
+            "pf_active": {"coil": [
+                {"name": "F1A", "current": {"time": [1.0, 2.0, 3.0],
+                                            "data": [10.0, 20.0, 30.0],
+                                            "data_error_upper": [7.0] * 3}},
+                {"name": "F6A", "current": {"time": [1.0, 2.0, 3.0],
+                                            "data": [-5.0, -6.0, -7.0],
+                                            "data_error_upper": [7.0] * 3}},
+                {"name": "ECOILA", "current": {"time": [1.0, 2.0, 3.0],
+                                               "data": [-1.0e3, -2.0e3, -3.0e3],
+                                               "data_error_upper": [69.0] * 3}},
+            ]},
+        }
+
+    @staticmethod
+    def _write(tmp_path, dd, name):
+        p = tmp_path / name
+        p.write_text(json.dumps(dd))
+        return str(p)
+
+    def _install(self, spec, bl_sign=None, provenance="imas"):
+        from bouquet.run import Bouquet
+        gs = self._GS(dict(self.SHIPPED))
+        obj = Bouquet.__new__(Bouquet)
+        obj.config = type("C", (), {"solver": type("S", (), {"coil_reg": spec})()})()
+        obj.baseline = (None if bl_sign is None else type(
+            "B", (), {"provenance": provenance, "source_current_sign": bl_sign,
+                      "source_current_sign_origin": "auto: sign(equilibrium ip)"})())
+        Bouquet._apply_coil_reg(obj, gs)
+        return gs.installed
+
+    def test_mirrored_source_gives_identical_solve_frame_targets(self, tmp_path):
+        """tests/_mirror_dd mirrors ip AND every pf_active coil current, as a
+        genuinely reversed discharge carries them."""
+        import _mirror_dd as mdd
+        from bouquet.coil_targets import measured_from_pf_active
+
+        dd = self._dd()
+        installed, stamps = [], []
+        for s_ip, s_b0 in mdd.ORIENTATIONS:
+            p = self._write(tmp_path, mdd.mirror_dd(dd, s_ip, s_b0), "m.json")
+            meas = measured_from_pf_active(p, 2.0)
+            assert meas.current_sign == s_ip
+            spec = coil_reg_from_measured(meas, sigma={"F1A": 7 * 58.0,
+                                                       "F6A": 7 * 55.0,
+                                                       "ECOILA": 69.0}, **D3D)
+            stamps.append({t["source_current_sign"] for t in spec})
+            installed.append(self._install(spec, bl_sign=s_ip))
+        # the solve-frame targets (and the whole installed reg) are identical
+        for got in installed[1:]:
+            assert got == installed[0]
+        by = {list(t["coils"])[0]: t for t in installed[0]}
+        assert by["F1A"]["target"] == 20.0 * 58.0
+        assert by["F6A"]["target"] == -6.0 * 55.0
+        assert by["ECOILA"]["target"] == -2.0e3
+        assert stamps == [{1.0}, {1.0}, {-1.0}, {-1.0}]
+
+    def test_positive_source_values_are_the_stored_ones(self, tmp_path):
+        from bouquet.coil_targets import MeasuredCoilCurrents, measured_from_pf_active
+
+        meas = measured_from_pf_active(self._write(tmp_path, self._dd(), "d.json"), 2.0)
+        assert isinstance(meas, MeasuredCoilCurrents) and isinstance(meas, dict)
+        assert dict(meas) == {"F1A": 20.0, "F6A": -6.0, "ECOILA": -2.0e3}
+        assert meas.current_sign == 1.0
+        assert meas.current_sign_origin == "auto: sign(equilibrium ip)"
+
+    def test_the_factor_is_applied_once(self, tmp_path):
+        """measured_from_pf_active applies it; coil_reg_from_measured records
+        it and does not apply it again; _apply_coil_reg installs as built."""
+        from bouquet.coil_targets import measured_from_pf_active
+
+        p = self._write(tmp_path, self._dd(ip=-1.2e6), "rev.json")
+        meas = measured_from_pf_active(p, 2.0)
+        assert dict(meas) == {"F1A": -20.0, "F6A": 6.0, "ECOILA": 2.0e3}
+        spec = coil_reg_from_measured(meas, **D3D)
+        by = _by_coil(spec)
+        assert by["F1A"]["target"] == -20.0 * 58.0     # not flipped back
+        assert by["F1A"]["source_current_sign"] == -1.0
+        inst = {list(t["coils"])[0]: t for t in self._install(spec, bl_sign=-1.0)}
+        assert inst["F1A"]["target"] == -20.0 * 58.0
+
+    def test_explicit_orientation_and_mismatch_is_refused(self, tmp_path):
+        from bouquet.coil_targets import measured_from_pf_active
+
+        p = self._write(tmp_path, self._dd(ip=-1.2e6), "rev.json")
+        meas = measured_from_pf_active(p, 2.0, current_orientation=+1)
+        assert meas.current_sign == 1.0
+        assert meas.current_sign_origin == "override: current_orientation"
+        assert meas["F1A"] == 20.0
+        spec = coil_reg_from_measured(meas, **D3D)
+        # the baseline was read with -1: pinning with +1 is the mirror field
+        with pytest.raises(ValueError, match="mirror-image"):
+            self._install(spec, bl_sign=-1.0)
+        # consistent: installed
+        self._install(spec, bl_sign=1.0)
+        with pytest.raises(ValueError, match="current_orientation"):
+            measured_from_pf_active(p, 2.0, current_orientation=0)
+
+    def test_unchecked_when_there_is_nothing_to_check_against(self, tmp_path):
+        """No baseline yet (setup_solver), a reconstruction baseline, or a
+        term that claims no orientation (a plain dict, a hand-built term)."""
+        from bouquet.coil_targets import measured_from_pf_active
+
+        p = self._write(tmp_path, self._dd(ip=-1.2e6), "rev.json")
+        spec = coil_reg_from_measured(measured_from_pf_active(p, 2.0), **D3D)
+        self._install(spec, bl_sign=None)
+        self._install(spec, bl_sign=1.0, provenance="reconstruction")
+        plain = coil_reg_from_measured({"F1A": 20.0}, **D3D)
+        assert "source_current_sign" not in plain[0]
+        self._install(plain, bl_sign=-1.0)
+
+    def test_a_dd_without_equilibrium_ip_warns_and_keeps_the_stored_sign(
+            self, tmp_path):
+        from bouquet.coil_targets import measured_from_pf_active
+
+        dd = self._dd()
+        del dd["equilibrium"]
+        with pytest.warns(UserWarning, match="cannot be oriented"):
+            meas = measured_from_pf_active(self._write(tmp_path, dd, "d.json"), 2.0)
+        assert meas.current_sign == 1.0 and meas["F1A"] == 20.0
+        assert "no equilibrium ip" in meas.current_sign_origin
+
+    def test_default_factor_matches_the_reader_with_asynchronous_time_bases(
+            self, tmp_path):
+        """Copilot review on #67: the reader reads the orientation at the
+        equilibrium slice nearest the SELECTED core_profiles slice, not the
+        one nearest the requested time.  With asynchronous IDS time bases the
+        two differ; measured_from_pf_active must take the reader's slice, or
+        targets built with all defaults are refused against the baseline.
+
+        Here t = 1.4 s selects core_profiles at 1.0 s, whose nearest
+        equilibrium slice (1.0 s) has ip < 0, while the equilibrium slice
+        nearest 1.4 s (1.45 s) has ip > 0.
+        """
+        import copy
+        import warnings
+        from test_imas_p_fast_convention import _minimal_dd
+        from bouquet.coil_targets import measured_from_pf_active
+        from bouquet.config import ImasSource
+        from bouquet.io.imas import read_imas_baseline
+
+        dd = _minimal_dd()
+        cp = dd["core_profiles"]["profiles_1d"][0]
+        for k in ("j_tor", "j_total", "j_ohmic", "j_bootstrap"):
+            cp[k] = [-v for v in cp[k]]                 # a reversed discharge
+        ts0 = dd["equilibrium"]["time_slice"][0]
+        ts0["profiles_1d"]["j_tor"] = [-v for v in ts0["profiles_1d"]["j_tor"]]
+        ts0["global_quantities"]["ip"] = -1.0e6
+        ts1 = copy.deepcopy(ts0)
+        ts1["time"] = 1.45
+        ts1["global_quantities"]["ip"] = +1.0e6
+        dd["equilibrium"]["time"] = [1.0, 1.45]
+        dd["equilibrium"]["time_slice"] = [ts0, ts1]
+        dd["equilibrium"]["vacuum_toroidal_field"]["b0"] = [-2.0, -2.0]
+        dd["core_profiles"]["time"] = [1.0, 3.0]
+        dd["core_profiles"]["profiles_1d"].append(copy.deepcopy(cp))
+        dd["pf_active"] = {"coil": [{"name": "F1A", "current": {
+            "time": [1.0, 1.45], "data": [-20.0, -20.0]}}]}
+        p = self._write(tmp_path, dd, "async.json")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            bl = read_imas_baseline(ImasSource(ids_path=p, time=1.4),
+                                    p_fast_reduction="trace")
+        meas = measured_from_pf_active(p, 1.4)
+        assert bl.source_current_sign == -1.0
+        assert meas.current_sign == bl.source_current_sign
+        assert meas["F1A"] == 20.0
+        # all-default targets pass the baseline orientation check
+        spec = coil_reg_from_measured(meas, **D3D)
+        self._install(spec, bl_sign=bl.source_current_sign)

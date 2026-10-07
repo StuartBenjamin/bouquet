@@ -248,7 +248,11 @@ as an enormous sigma.
 ### `FixedComponentsConfig` (`b.fixed_components`)
 
 `p_fast`, `j_NBI`, `j_RF` on their own `psi_N` grid — additive components that
-are never perturbed. `p_fast_reduction` (default `"auto"`) selects the
+are never perturbed. `j_NBI` / `j_RF` are given in bouquet's **positive-Ip
+frame** — co-current drive positive — on both source paths and for either
+orientation of the source; unlike the dd's own currents they are *not*
+multiplied by `sign(ip)` on the IMAS path (see
+[physics-notes](physics-notes.md#current-and-field-orientation)). `p_fast_reduction` (default `"auto"`) selects the
 anisotropic fast-pressure reduction applied before the isotropic GS solve.
 
 > **`p_fast_reduction` — a factor-of-3 convention, chosen from dd provenance.**
@@ -491,6 +495,16 @@ bq.BouquetArchive("my_run.h5")["0"].extract("bundle/", formats=("geqdsk", "pfile
 
 b.export_ids("ids/", fidelity="exact")            # IMAS/OMAS source only
 ```
+
+Exported g-files, profiles and archive currents are in bouquet's
+positive-current frame (g-file `CURRENT > 0`, `BCENTR > 0`), whatever the
+source's orientation; the source's own signs are on the archive
+(`source_current_sign`, `source_b0_sign` on `_baseline`) for a consumer that
+needs to restore them. The **IMAS export** (`export_ids`) is the exception: it
+restores the source's orientation on every field it writes, so the exported
+dd is self-consistent with the template fields it keeps (`core_sources`,
+`pf_active`, `b0`) — see
+[physics-notes](physics-notes.md#current-and-field-orientation).
 
 The profiles JSON is source-agnostic and carries everything needed to rebuild
 the state elsewhere: the perturbed profiles and their units, scalar diagnostics

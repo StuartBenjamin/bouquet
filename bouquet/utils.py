@@ -848,6 +848,13 @@ def closure_sign_convention(ip_ind, ip_bs, ip_fix, c_affine, Ip_abs):
     Returns ``(sgn, Ip_target_signed, c_signed)``.  For the ordinary
     positive convention ``sgn`` is ``+1`` and both values pass through
     unchanged.
+
+    On the IMAS path the reader has already brought every source current
+    into the anchor's positive frame (``Baseline.source_current_sign``), so
+    ``sgn`` is ``+1`` for any dd whose currents agree with its own ``ip``.
+    This pairing does NOT re-sign a recomputed bootstrap and never did: it is
+    kept as a guard for callers that hand in their own components, and a
+    ``-1`` on reader output is reported by the caller as a mixed-frame input.
     """
     _lin_total = float(ip_ind) + float(ip_bs) + float(ip_fix)
     if not np.isfinite(_lin_total):
@@ -3291,6 +3298,42 @@ def write_provenance(h5path_or_header, config=None, scan_key=None):
                 if "config_json" in grp:
                     del grp["config_json"]
                 grp.create_dataset("config_json", data=cj)
+
+
+#: What a delivered (archived / exported) equilibrium's current orientation is,
+#: stamped next to ``source_current_sign`` so the archive states its own frame.
+CURRENT_FRAME = ("positive-Ip: every solve is to |Ip| with F0 = |R*B| "
+                 "(TokaMaker native); the source's own orientation is "
+                 "source_current_sign (Ip) and source_b0_sign (B0)")
+
+
+def stamp_source_orientation(h5path_or_header, scan_key=None,
+                             current_sign=1.0, b0_sign=None,
+                             current_sign_origin=None):
+    """Record the source's current orientation on the ``_baseline`` group.
+
+    Writes ``source_current_sign`` (the factor the IMAS reader multiplied every
+    source current by: ``-1.0`` for a reversed-current source, else ``+1.0``),
+    ``source_b0_sign`` (when known), ``source_current_sign_origin`` (when
+    known: whether the factor was ``sign(equilibrium ip)`` or set by
+    ``ImasSource.current_orientation``) and ``current_frame`` (a plain
+    statement of the frame every archived current and eqdsk is in).  Additive attrs
+    only: no dataset and no existing attr is touched.  Called by
+    ``Bouquet.generate`` on the IMAS path; a no-op when the group is absent.
+    """
+    path = _resolve_h5(h5path_or_header)
+    bkey = _scan_key(scan_key)
+    grp_path = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
+    with h5py.File(path, "a") as hf:
+        if grp_path not in hf:
+            return
+        grp = hf[grp_path]
+        grp.attrs["source_current_sign"] = float(current_sign)
+        if b0_sign is not None:
+            grp.attrs["source_b0_sign"] = float(b0_sign)
+        if current_sign_origin is not None:
+            grp.attrs["source_current_sign_origin"] = str(current_sign_origin)
+        grp.attrs["current_frame"] = CURRENT_FRAME
 
 
 GENERATION_PROVENANCE_KEYS = ("n_requested", "n_requested_source",

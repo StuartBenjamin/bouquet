@@ -26,6 +26,30 @@ the authoritative toroidal ``j_tor`` and the inductive component is taken as the
 residual ``j_phi - j_BS - j_NBI - j_RF`` so the decomposition sums exactly and Ip
 is preserved.
 
+Current orientation: bouquet works in ONE positive-current frame.  The
+TokaMaker anchor is always solved to ``|Ip|`` with ``F0 = |r0*b0|`` (see
+:func:`read_imas_geometry`), so every bootstrap bouquet recomputes on it (the
+legacy ``solve_with_bootstrap`` path and the self-consistent loop alike) comes
+out positive.  A dd written for a reversed-current discharge (``ip < 0`` in its
+own COCOS) carries NEGATIVE current profiles, and combining those with a
+positive recomputed bootstrap adds the bootstrap AGAINST the inductive current.
+:func:`read_imas_baseline` therefore multiplies EVERY current profile it reads
+-- ``j_total``, ``j_tor``, ``j_ohmic``, ``j_bootstrap``, the beam
+``j_parallel`` and the equilibrium ``j_tor`` behind ``jphi_diff`` -- by
+``sign(equilibrium ip)``, and records the factor as
+:attr:`~bouquet.baseline.Baseline.source_current_sign`.  For ``ip > 0`` the
+factor is ``+1.0`` and the read is bit-identical to what it was.  Everything
+that is not a current (kinetics, pressure, rotation, E_r, the dd's own q) is
+read unchanged, and so is a user-supplied ``FixedComponentsConfig.j_NBI`` /
+``j_RF``: those are defined in bouquet's positive-Ip frame (co-current
+positive) on both source paths.  A dd whose net (area-weighted) ``core_profiles.j_tor`` -- or
+the equilibrium ``j_tor`` the jphi anchor uses -- disagrees in sign with that
+factor is REFUSED (ValueError): its currents and its ip were written in
+different orientations and no single factor puts it in one frame.
+``ImasSource.current_orientation = +1 / -1`` names the factor explicitly for
+a user who knows the file's convention (default ``"auto"``); the factor's
+origin is recorded as ``Baseline.source_current_sign_origin``.
+
 Note: ``j_BS`` read here is the FUSE bootstrap baseline, but it is *overridden*
 when ``GenerationConfig.recalculate_j_BS`` is True -- bouquet then recomputes
 bootstrap per draw via TokaMaker ``solve_with_bootstrap`` (whose output is also
@@ -75,6 +99,51 @@ def _nearest_index(time_array, t: Optional[float], what: str) -> int:
             f"Range [s]: [{ta.min():.4f}, {ta.max():.4f}]"
         )
     return int(np.argmin(np.abs(ta - t)))
+
+
+def orientation_slice_index(dd: dict, t: Optional[float]) -> int:
+    """Index of the ``equilibrium`` slice a dd's current orientation is read at.
+
+    That is the equilibrium slice nearest the TIME of the ``core_profiles``
+    slice nearest ``t`` -- the slice the currents are read from -- so the sign
+    belongs to those currents even when the two IDSs have different time bases
+    (with a common time base, as in FUSE output, it is simply the equilibrium
+    slice nearest ``t``).  A dd without a ``core_profiles`` time base falls back
+    to the equilibrium slice nearest ``t``.
+
+    The one selection rule shared by :func:`read_imas_baseline` and
+    :func:`bouquet.coil_targets.measured_from_pf_active`, so the factor the
+    reader applies to the plasma currents and the one applied to the measured
+    coil currents cannot drift apart.
+    """
+    eq = dd["equilibrium"]
+    cp_t = np.atleast_1d(np.asarray(
+        (dd.get("core_profiles") or {}).get("time", []), dtype=float))
+    if cp_t.size:
+        ic = _nearest_index(cp_t, t, "core_profiles")
+        t = float(cp_t[min(ic, cp_t.size - 1)])
+    return _nearest_index(eq["time"], t, "equilibrium")
+
+
+def orientation_ip(dd: dict, t: Optional[float]) -> Optional[float]:
+    """Signed ``equilibrium`` ip at :func:`orientation_slice_index`, or None.
+
+    None when the dd carries no equilibrium ip there (no ``equilibrium``, no
+    time slices, no ``global_quantities.ip``) or the slice cannot be chosen
+    (several slices and ``t`` None).  ``sign`` of it is the ``"auto"``
+    orientation factor (:func:`source_current_sign`).
+    """
+    eq = dd.get("equilibrium") or {}
+    ts = eq.get("time_slice") or []
+    if not ts:
+        return None
+    if "time" not in eq:
+        eq = dict(eq, time=[0.0 if t is None else float(t)])
+    try:
+        i = orientation_slice_index(dict(dd, equilibrium=eq), t)
+        return float(ts[min(i, len(ts) - 1)]["global_quantities"]["ip"])
+    except (KeyError, TypeError, ValueError, IndexError):
+        return None
 
 
 # ===========================================================================
@@ -377,6 +446,156 @@ def _override(arr, src_psi, dst_psi):
     return np.interp(dst_psi, np.asarray(src_psi, dtype=float), arr)
 
 
+def source_current_sign(ip) -> float:
+    """``+1.0`` / ``-1.0``: the factor that brings a dd's currents into bouquet's frame.
+
+    bouquet solves every anchor to ``|Ip|`` with ``F0 = |r0*b0|``, i.e. in a
+    positive-current frame, whatever orientation the source was written in.
+    A source with ``ip < 0`` (a reversed-current discharge in the dd's own
+    COCOS) has every current profile multiplied by ``-1`` on read; ``ip >= 0``
+    (and a zero or non-finite ``ip``, which carries no orientation) returns
+    ``+1.0`` and leaves the read untouched.
+    """
+    ip = float(ip)
+    return -1.0 if (np.isfinite(ip) and ip < 0.0) else 1.0
+
+
+#: Where the reader's current-orientation factor came from (recorded on the
+#: Baseline as ``source_current_sign_origin``, in li_metrics / ip_closure and
+#: on the archive's ``_baseline`` attrs).
+ORIENTATION_ORIGIN_AUTO = "auto: sign(equilibrium ip)"
+ORIENTATION_ORIGIN_OVERRIDE = "override: ImasSource.current_orientation"
+
+
+def parse_current_orientation(setting, what="ImasSource.current_orientation"):
+    """Validate ``ImasSource.current_orientation``: ``"auto"``, ``+1.0`` or ``-1.0``.
+
+    (Also the ``current_orientation`` of
+    :func:`bouquet.coil_targets.measured_from_pf_active`; *what* names the
+    setting in the error message.)
+
+    Accepts ``"auto"`` (any case), the numbers ``1`` / ``-1`` (int or float)
+    and their string spellings (``"+1"``, ``"-1"``).  Anything else -- ``0``,
+    ``True``, ``2``, ``"reversed"`` -- raises :class:`ValueError`: the setting
+    names a sign, and a value that is not one is a typo, not a request.
+    """
+    v = None
+    if isinstance(setting, str):
+        s = setting.strip().lower()
+        if s == "auto":
+            return "auto"
+        try:
+            v = float(s)
+        except ValueError:
+            v = None
+    elif not isinstance(setting, bool):
+        try:
+            v = float(setting)
+        except (TypeError, ValueError):
+            v = None
+    if v not in (1.0, -1.0):
+        raise ValueError(
+            f"{what} must be 'auto' (default: "
+            "sign(equilibrium ip), refusing a dd whose current profiles "
+            "disagree with it), +1 or -1 (the factor that brings this dd's "
+            f"currents into bouquet's positive-Ip frame); got {setting!r}")
+    return v
+
+
+def _area_measure(x_psiN, own=None, eq_p1=None, psiN_eq=None):
+    """``(x, label)``: the best available cumulative-area coordinate on a grid.
+
+    ``integral(j dx)`` over the returned ``x`` is the plasma current (or a
+    positive multiple of it), so its SIGN is the sign of the net toroidal
+    current -- which an unweighted ``integral(j dpsi_N)`` only approximates
+    when ``j`` changes sign.  In order of preference:
+
+      1. the grid's own ``area`` [m^2] (IMAS ``core_profiles.grid.area`` /
+         ``equilibrium.profiles_1d.area``) -- exact;
+      2. the equilibrium ``profiles_1d.area`` interpolated in psi_N -- exact
+         up to interpolation;
+      3. ``rho_tor_norm**2`` -- a proxy: the toroidal flux enclosed is ~ B0
+         times the enclosed area, exact for a uniform toroidal field;
+      4. ``psi_N`` -- no geometry at all (the previous heuristic).
+
+    Every candidate is monotone in the enclosed area, so a single-signed
+    profile -- the only kind a whole-profile orientation mismatch produces --
+    integrates to the same sign under all four; they can differ only for a
+    profile with a genuine sign reversal of comparable weight, and the label
+    is quoted in any refusal so the user can judge that case.
+    """
+    n = np.asarray(x_psiN).size
+
+    def _ok(a):
+        if a is None:
+            return None
+        try:
+            a = np.asarray(a, dtype=float)
+        except (TypeError, ValueError):
+            return None
+        return a if (a.shape == (n,) and np.all(np.isfinite(a))
+                     and np.ptp(a) > 0.0) else None
+
+    own = own or {}
+    a = _ok(own.get("area"))
+    if a is not None:
+        return a, "area-weighted (own grid area)"
+    if eq_p1 is not None and psiN_eq is not None and "area" in eq_p1:
+        try:
+            ae = np.asarray(eq_p1["area"], dtype=float)
+            o = np.argsort(psiN_eq)
+            a = _ok(np.interp(x_psiN, np.asarray(psiN_eq)[o], ae[o]))
+        except (TypeError, ValueError):
+            a = None
+        if a is not None:
+            return a, "area-weighted (equilibrium profiles_1d.area)"
+    r = _ok(own.get("rho_tor_norm"))
+    if r is not None:
+        return r ** 2, "rho_tor_norm^2-weighted (area proxy; no area on file)"
+    return np.asarray(x_psiN, dtype=float), "psi_N-weighted (no geometry on file)"
+
+
+def _net_current(j, x):
+    """``integral(j dx)`` with ``x`` taken in ascending order (storage order,
+    axis-first or boundary-first, must not flip the sign)."""
+    from scipy.integrate import trapezoid
+    j = np.asarray(j, dtype=float)
+    x = np.asarray(x, dtype=float)
+    o = np.argsort(x, kind="stable")
+    return float(trapezoid(j[o], x[o]))
+
+
+def _refuse_mixed_orientation(bad, ip, cur_sign, origin):
+    """Raise for currents that disagree in sign with the chosen orientation.
+
+    ``bad`` lists ``(quantity, raw_net, weighting)``: the quantity's net
+    toroidal current AS STORED in the dd (before the factor) and how it was
+    weighted.
+    """
+    lines = [f"  - {q}: net {v:+.4g} (sign {'+' if v > 0 else '-'}; {w})"
+             for q, v, w in bad]
+    if origin == ORIENTATION_ORIGIN_AUTO:
+        how = (f"the factor is sign(equilibrium ip) = {cur_sign:+.0f} "
+               "(ImasSource.current_orientation='auto')")
+    else:
+        how = (f"the factor is {cur_sign:+.0f}, set by "
+               "ImasSource.current_orientation")
+    raise ValueError(
+        "IMAS current orientation: the dd's current profiles disagree in sign "
+        f"with its plasma current. equilibrium ip = {float(ip):+.6g} A (sign "
+        f"{'+' if float(ip) >= 0 else '-'}); {how}, but after multiplying by "
+        "it these would integrate AGAINST the positive-Ip frame bouquet "
+        "solves in:\n" + "\n".join(lines) + "\n"
+        "Closing Ip on this would add the recomputed (positive) bootstrap "
+        "against the inductive current. Typical cause: the IDSs were written "
+        "in different COCOS/orientations. If you know this file's current "
+        "convention, set ImasSource.current_orientation to the factor that "
+        "makes its currents co-Ip (+1 keeps them as stored, -1 reverses "
+        "them); if only the equilibrium j_tor disagrees, "
+        "GenerationConfig.anchor_jtor_to_equilibrium=False stops it being "
+        "used. Otherwise fix the file.")
+
+
 def read_imas_geometry(source: "ImasSource"):
     """Return ``(F0, boundary_RZ)`` from a FUSE IDS for TokaMaker setup.
 
@@ -603,14 +822,51 @@ def read_imas_baseline(
     ic = _nearest_index(cp_ids["time"], T, "core_profiles")
     cp = cp_ids["profiles_1d"][ic]
 
+    # --- current orientation ---------------------------------------------
+    # bouquet's frame is positive-current (the anchor is solved to |Ip| with
+    # F0 = |r0*b0|).  Every CURRENT profile read below is multiplied by this
+    # factor so a reversed-current dd (ip < 0) lands in that frame instead of
+    # being combined, with its own negative sign, with a bootstrap recomputed
+    # on the positive anchor.  +1.0 (bit-identical read) for ip >= 0.
+    # The sign is read at the equilibrium slice nearest the core_profiles
+    # slice the currents come from (orientation_slice_index; the two IDSs
+    # choose their slices independently; with a common time base, as in FUSE
+    # output, this is the slice ``ie`` above).  ImasSource.current_orientation = +1/-1 replaces
+    # it; either way the currents are checked against it further down.
+    ie_s = orientation_slice_index(dd, T)
+    ip_signed = float(eq["time_slice"][ie_s]["global_quantities"].get(
+        "ip", gq["ip"]))
+    _orient = parse_current_orientation(
+        getattr(source, "current_orientation", "auto"))
+    if _orient == "auto":
+        cur_sign = source_current_sign(ip_signed)
+        cur_origin = ORIENTATION_ORIGIN_AUTO
+    else:
+        cur_sign = float(_orient)
+        cur_origin = ORIENTATION_ORIGIN_OVERRIDE
+    # B0 orientation (recorded only), same slice.  A zero or unreadable b0
+    # carries no orientation: None, not +1.
+    _vtf = eq.get("vacuum_toroidal_field") or {}
+    _b0 = _vtf.get("b0")
+    try:
+        _b0v = float(_b0[ie_s] if isinstance(_b0, list) else _b0)
+        b0_sign = ((-1.0 if _b0v < 0.0 else 1.0)
+                   if (np.isfinite(_b0v) and _b0v != 0.0) else None)
+    except (TypeError, ValueError, IndexError):
+        b0_sign = None
+
     psi = np.asarray(cp["grid"]["psi"], dtype=float)
     psi_N = (psi - psi[0]) / (psi[-1] - psi[0])   # 0 (axis) -> 1 (boundary)
     n = psi_N.size
 
-    j_total = np.asarray(cp["j_total"], dtype=float)   # total parallel
-    j_tor = np.asarray(cp["j_tor"], dtype=float)       # total toroidal (authoritative)
-    j_ohmic = np.asarray(cp["j_ohmic"], dtype=float)   # parallel (unused: inductive = residual)
-    j_boot = np.asarray(cp["j_bootstrap"], dtype=float)  # parallel
+    # Currents in bouquet's positive-current frame (cur_sign, above).  The
+    # parallel->toroidal ratio j_tor/j_total is sign-invariant, so flipping the
+    # inputs here is exactly (bitwise) the same as flipping every derived
+    # toroidal component afterwards.
+    j_total = cur_sign * np.asarray(cp["j_total"], dtype=float)   # total parallel
+    j_tor = cur_sign * np.asarray(cp["j_tor"], dtype=float)       # total toroidal (authoritative)
+    j_ohmic = cur_sign * np.asarray(cp["j_ohmic"], dtype=float)   # parallel (unused: inductive = residual)
+    j_boot = cur_sign * np.asarray(cp["j_bootstrap"], dtype=float)  # parallel
 
     def to_toroidal(j_par):
         return parallel_to_toroidal(j_par, j_parallel_total=j_total, j_tor_total=j_tor)
@@ -627,7 +883,7 @@ def read_imas_baseline(
             if pr:
                 idx = isrc if len(pr) > isrc else 0
                 jnbi_par = jnbi_par + np.asarray(pr[idx]["j_parallel"], dtype=float)
-    j_NBI = to_toroidal(jnbi_par)
+    j_NBI = to_toroidal(cur_sign * jnbi_par)
     j_RF = np.zeros(n)   # never computed internally; user-supplied only
 
     # --- sawtooth model presence/amplitude at this slice (gate input only) ----
@@ -738,6 +994,11 @@ def read_imas_baseline(
             p_fast_meta = {**p_fast_meta, "rule": None, "basis": "user-override",
                            "evidence": "FixedComponentsConfig.p_fast supplied; the "
                                        "dd fast-pressure fields were not read"}
+        # A user-supplied fixed current is defined in bouquet's positive-Ip
+        # frame (co-current positive) -- the frame the g-file path has always
+        # taken it in (baseline._resolve_fixed) -- so it is NOT multiplied by
+        # the dd's orientation factor: the same array means the same physics
+        # on both source paths and for either orientation of the source.
         if fixed.j_NBI is not None:
             j_NBI = _override(fixed.j_NBI, fixed.psi_N, psi_N)
         if fixed.j_RF is not None:
@@ -755,6 +1016,21 @@ def read_imas_baseline(
     # decomposition sums exactly and Ip is preserved.
     j_phi = j_tor.copy()
     j_inductive = j_phi - j_BS - j_NBI - j_RF
+    if cur_sign < 0.0:
+        _why = (f"source ip = {ip_signed / 1e6:+.4f} MA < 0 (reversed current "
+                "in the dd's own COCOS)" if cur_origin == ORIENTATION_ORIGIN_AUTO
+                else "ImasSource.current_orientation = -1 (override; source ip "
+                     f"= {ip_signed / 1e6:+.4f} MA)")
+        print(f"[imas] {_why}: every dd current profile "
+              "(j_total, j_tor, j_ohmic, j_bootstrap, NBI j_parallel, "
+              "equilibrium j_tor) multiplied by -1 "
+              "into bouquet's positive-current frame (Baseline."
+              "source_current_sign = -1); user-supplied FixedComponentsConfig "
+              "j_NBI/j_RF are already co-Ip positive and are not", flush=True)
+    elif cur_origin == ORIENTATION_ORIGIN_OVERRIDE and ip_signed < 0.0:
+        print(f"[imas] ImasSource.current_orientation = +1 (override): dd "
+              f"currents kept as stored although source ip = "
+              f"{ip_signed / 1e6:+.4f} MA < 0", flush=True)
 
     # --- pressure anchor ("diff" approach) + completeness validation ----------
     # The authoritative dd equilibrium pressure (GS-consistent total, incl.
@@ -808,9 +1084,36 @@ def read_imas_baseline(
     # the same Ip), so it redistributes rather than adds net current.
     jphi_diff = None
     if anchor_jtor_to_equilibrium:
-        eq_jtor = np.interp(psi_N, psiN_eq[_o],
-                            np.asarray(eqp1["j_tor"], dtype=float)[_o])
+        eq_jtor = cur_sign * np.interp(psi_N, psiN_eq[_o],
+                                       np.asarray(eqp1["j_tor"], dtype=float)[_o])
         jphi_diff = eq_jtor - j_phi
+
+    # --- orientation consistency: REFUSE a mixed-sign source ---------------
+    # Every toroidal current bouquet USES must carry, after the factor, the
+    # sign of the positive frame: core_profiles.j_tor (the authoritative total
+    # j_phi) always, and the equilibrium j_tor when the jphi anchor uses it.
+    # The test is on the NET current -- the area-weighted integral (see
+    # _area_measure for the weighting actually available on the file and its
+    # fallbacks), taken on each quantity's own grid -- so a profile with a
+    # genuine local sign reversal (a current hole, a counter-current edge) is
+    # not refused as long as its net current is co-Ip.  A dd with no area on
+    # file falls back to a monotone proxy for it; every proxy classifies a
+    # single-signed profile -- the only kind a frame mismatch produces --
+    # exactly as the true area weighting does.  The factor is +-1, so the
+    # check is done on the stored arrays: sign(raw) * cur_sign < 0.
+    _checks = []
+    _x, _w = _area_measure(psi_N, own=cp.get("grid"), eq_p1=eqp1,
+                           psiN_eq=psiN_eq)
+    _checks.append(("core_profiles.j_tor",
+                    _net_current(np.asarray(cp["j_tor"], dtype=float), _x), _w))
+    if anchor_jtor_to_equilibrium:
+        _xe, _we = _area_measure(psiN_eq, own=eqp1)
+        _checks.append(("equilibrium.profiles_1d.j_tor",
+                        _net_current(np.asarray(eqp1["j_tor"], dtype=float),
+                                     _xe), _we))
+    _bad = [c for c in _checks if cur_sign * c[1] < 0.0]
+    if _bad:
+        _refuse_mixed_orientation(_bad, ip_signed, cur_sign, cur_origin)
 
     return Baseline(
         psi_N=psi_N,
@@ -839,6 +1142,9 @@ def read_imas_baseline(
         aux=aux,
         p_fast_meta=p_fast_meta,
         sawtooth=sawtooth,
+        source_current_sign=cur_sign,
+        source_current_sign_origin=cur_origin,
+        source_b0_sign=b0_sign,
     )
 
 
@@ -893,9 +1199,136 @@ def _eq_fsa_geom_on(eq_fsa, psiN_t, B0):
     return geom
 
 
+def _signed_b0(out, ie, ic):
+    """The template's own vacuum B0 (signed), equilibrium first; None if absent
+    or zero.  The writer keeps ``vacuum_toroidal_field`` as it is, so this is
+    the field orientation the exported F must agree with."""
+    for ids_name, it in (("equilibrium", ie), ("core_profiles", ic)):
+        vtf = out.get(ids_name, {}).get("vacuum_toroidal_field")
+        if vtf and vtf.get("b0") is not None:
+            b0 = np.atleast_1d(np.asarray(vtf["b0"], dtype=float))
+            if b0.size:
+                v = float(b0[min(it, b0.size - 1)])
+                if np.isfinite(v) and v != 0.0:
+                    return v
+    return None
+
+
+def _export_orientation(out, ie, ic, stamp):
+    """``(s_I, s_B, s_q)``: the SOURCE orientation an export is restored to.
+
+    bouquet's archive is in the positive-Ip frame (eqdsk ``CURRENT > 0``,
+    ``F > 0``, q > 0; every current co-Ip positive).  The template is the
+    source dd, in the source's own frame, and the writer keeps its fields that
+    it does not overwrite (``core_sources``, ``pf_active``,
+    ``vacuum_toroidal_field``, rotation, ...).  So every quantity the writer
+    DOES overwrite is taken back to that frame:
+
+      * ``s_I`` -- the Ip orientation: the archive's ``source_current_sign``
+        (the factor the reader applied; it is its own inverse), or, for an
+        archive with no stamp, ``sign(template ip)`` -- what the reader's
+        ``"auto"`` rule gives;
+      * ``s_B`` -- the sign of the template's own b0 (``+1`` if it has none);
+      * ``s_q`` -- the template's own q sign convention (sign of its
+        equilibrium q at this slice) where it carries q, else ``s_I * s_B``
+        (IMAS COCOS 11 / 17, where q carries sign(Ip*B0)).
+
+    Refuses a template whose ip or b0 sign contradicts the archive's stamp
+    (with the reader's ``"auto"`` rule): that template is not the source this
+    archive was generated from.  ``stamp`` is the ``_baseline`` attrs dict
+    (possibly empty).
+    """
+    ts = out["equilibrium"]["time_slice"][ie]
+    tpl_ip = ts.get("global_quantities", {}).get("ip")
+    try:
+        tpl_ip = float(tpl_ip)
+        tpl_s = (source_current_sign(tpl_ip)
+                 if np.isfinite(tpl_ip) and tpl_ip != 0.0 else None)
+    except (TypeError, ValueError):
+        tpl_s = None
+    b0 = _signed_b0(out, ie, ic)
+    s_B = 1.0 if b0 is None else (-1.0 if b0 < 0.0 else 1.0)
+
+    if "source_current_sign" in stamp:
+        s_I = float(stamp["source_current_sign"])
+        origin = stamp.get("source_current_sign_origin")
+        if isinstance(origin, bytes):
+            origin = origin.decode()
+        auto = origin in (None, ORIENTATION_ORIGIN_AUTO)
+        if auto and tpl_s is not None and tpl_s != s_I:
+            raise ValueError(
+                "write_imas_draw: the archive was generated from a source with "
+                f"source_current_sign = {s_I:+.0f} (sign of its ip), but this "
+                f"template's ip = {tpl_ip:+.6g} A has the opposite sign. It is "
+                "not the source dd this archive was built from; pass that dd as "
+                "the template.")
+        sb_stamp = stamp.get("source_b0_sign")
+        if sb_stamp is not None and b0 is not None and float(sb_stamp) != s_B:
+            raise ValueError(
+                "write_imas_draw: the archive was generated from a source with "
+                f"source_b0_sign = {float(sb_stamp):+.0f}, but this template's "
+                f"b0 = {b0:+.6g} T has the opposite sign. It is not the source "
+                "dd this archive was built from; pass that dd as the template.")
+    else:
+        s_I = 1.0 if tpl_s is None else tpl_s
+        if s_I < 0.0:
+            import warnings
+            warnings.warn(
+                "write_imas_draw: the archive carries no current-orientation "
+                "stamp (_baseline source_current_sign) and the template has "
+                "ip < 0. Assuming the archive is in bouquet's positive-Ip frame "
+                "and restoring the template's orientation (x -1). An IMAS "
+                "archive generated from a reversed-Ip source before the reader "
+                "normalised currents is NOT in that frame (and is invalid: "
+                "regenerate it).", stacklevel=3)
+
+    s_q = None
+    q_tpl = (ts.get("profiles_1d") or {}).get("q")
+    if q_tpl is not None:
+        try:
+            qa = np.asarray(q_tpl, dtype=float)
+            qm = float(np.nanmedian(qa)) if qa.size else float("nan")
+            if np.isfinite(qm) and qm != 0.0:
+                s_q = -1.0 if qm < 0.0 else 1.0
+        except (TypeError, ValueError):
+            s_q = None
+    if s_q is None:
+        s_q = s_I * s_B
+    return float(s_I), float(s_B), float(s_q)
+
+
 def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
                     scan_key=None, time=None, fidelity="auto"):
     """Reconstruct a perturbed IMAS/OMAS IDS for one draw from the bouquet HDF5.
+
+    Orientation: the exported file is in the SOURCE's frame throughout.  The
+    archive is in bouquet's positive-Ip frame; the template (the source dd)
+    is in the source's own, and the fields the writer keeps from it --
+    ``core_sources`` (the beam ``j_parallel`` / ``current_parallel_inside``),
+    ``pf_active`` coil currents, ``vacuum_toroidal_field.b0``,
+    ``core_profiles.global_quantities``, rotation / ``E_r``, the
+    ``core_profiles`` psi grid -- stay as they are.  Every quantity the writer
+    overwrites is taken back to the source orientation to match them (see
+    :func:`_export_orientation` for how ``s_I``, ``s_B``, ``s_q`` are found):
+
+      * ``s_I`` (Ip): ``global_quantities`` ``ip`` / ``psi_axis`` /
+        ``psi_boundary``, ``profiles_1d`` ``psi`` / ``dpressure_dpsi`` /
+        ``f_df_dpsi``, ``profiles_2d`` ``psi``, and ``core_profiles`` ``j_tor``
+        / ``j_total`` / ``j_ohmic`` / ``j_bootstrap``;
+      * ``s_B`` (B0): ``profiles_1d.f``;
+      * ``s_q``: ``profiles_1d.q``, ``q_axis``, ``q_95``;
+      * even (unchanged): pressure, kinetics, l_i, betas, axis, boundary.
+
+    So re-reading an export with :func:`read_imas_baseline` gives the same
+    currents as re-reading the export of the un-mirrored source.  For a
+    source with ``ip > 0`` and ``b0 > 0`` every factor is ``+1`` and the
+    output is unchanged; for ``ip > 0``, ``b0 < 0`` the only change is that
+    ``f`` (and, when the template carries no q, q) now takes b0's sign.
+    Not addressed here (pre-existing): the equilibrium psi / P' / FF' are the
+    TokaMaker eqdsk's COCOS-7 values (psi decreasing outward for Ip > 0),
+    written into the template without a COCOS conversion; and the
+    equilibrium ``profiles_1d`` written carries no ``j_tor``, so re-reading an
+    export needs ``anchor_jtor_to_equilibrium=False``.
 
     Maps the draw's archived eqdsk to the ``equilibrium`` IDS
     (``profiles_1d`` / ``profiles_2d`` / ``global_quantities`` / ``boundary`` --
@@ -976,6 +1409,9 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     with h5py.File(h5, "r") as hf:
         if gp not in hf:
             raise KeyError(f"draw {draw_index} (scan {scan_key}) not in {h5}")
+        _bgp = (f"scan/{scan_key}/_baseline" if scan_key is not None
+                else "_baseline")
+        stamp = dict(hf[_bgp].attrs) if _bgp in hf else {}
         g = hf[gp]
         ne = np.asarray(g["n_e"][()]); te = np.asarray(g["T_e"][()])
         ni = np.asarray(g["n_i"][()]); ti = np.asarray(g["T_i"][()])
@@ -997,30 +1433,33 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
             eq_fsa = {k: np.asarray(g[EQ_FSA_GROUP][k][()], dtype=float)
                       for k in g[EQ_FSA_GROUP]}
 
+    # --- source orientation to restore (see the docstring) -----------------
+    s_I, s_B, s_q = _export_orientation(out, ie, ic, stamp)
+
     # --- equilibrium IDS from the eqdsk (lossless to the eqdsk grid) ---------
     ts = eq_ids["time_slice"][ie]
     psi1d = geq.psi_axis + geq.psi_N * (geq.psi_boundary - geq.psi_axis)
     q95 = float(np.interp(0.95, geq.psi_N, geq.qpsi))
     ts["profiles_1d"] = {
-        "psi": psi1d.tolist(),
-        "q": geq.qpsi.tolist(),
+        "psi": (s_I * psi1d).tolist(),
+        "q": (s_q * np.asarray(geq.qpsi, dtype=float)).tolist(),
         "pressure": geq.pres.tolist(),
-        "f": geq.fpol.tolist(),
-        "dpressure_dpsi": geq.pprime.tolist(),
-        "f_df_dpsi": geq.ffprim.tolist(),
+        "f": (s_B * np.asarray(geq.fpol, dtype=float)).tolist(),
+        "dpressure_dpsi": (s_I * np.asarray(geq.pprime, dtype=float)).tolist(),
+        "f_df_dpsi": (s_I * np.asarray(geq.ffprim, dtype=float)).tolist(),
     }
     ts["profiles_2d"] = [{
         "grid_type": {"name": "rectangular", "index": 1},
         "grid": {"dim1": geq.R_grid.tolist(), "dim2": geq.Z_grid.tolist()},
         # psi_RZ is indexed [R][Z], matching IMAS dim1=R, dim2=Z
-        "psi": geq.psi_RZ.tolist(),
+        "psi": (s_I * np.asarray(geq.psi_RZ, dtype=float)).tolist(),
     }]
     gq = dict(ts.get("global_quantities", {}))
     gq.update(
-        ip=float(geq.Ip), psi_axis=float(geq.psi_axis),
-        psi_boundary=float(geq.psi_boundary),
+        ip=s_I * float(geq.Ip), psi_axis=s_I * float(geq.psi_axis),
+        psi_boundary=s_I * float(geq.psi_boundary),
         magnetic_axis={"r": float(geq.R_mag), "z": float(geq.Z_mag)},
-        q_axis=float(geq.qpsi[0]), q_95=q95,
+        q_axis=s_q * float(geq.qpsi[0]), q_95=s_q * q95,
         li_3=li3 if np.isfinite(li3) else geq.li.get("li(3)"),
         beta_normal=geq.betas.get("beta_n"), beta_pol=geq.betas.get("beta_p"),
         beta_tor=geq.betas.get("beta_t"),
@@ -1049,24 +1488,42 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     if zeff is not None:
         cp["zeff"] = to_t(zeff, pkin).tolist()
 
-    # j_tor is exact (bouquet stores toroidal current directly).
+    # The template's own toroidal/parallel totals, captured BEFORE j_tor is
+    # overwritten below: the reconstruct fidelity's ratio c = j_tor/j_total
+    # is the TEMPLATE's (baseline) geometry factor.  Reading cp["j_tor"] after
+    # the overwrite made c = draw j_tor / template j_total, i.e. the exported
+    # j_total came out as the template's verbatim and j_ohmic / j_bootstrap
+    # were scaled by template j_total / draw j_tor.
+    base_jtot = (np.asarray(cp["j_total"], dtype=float)
+                 if "j_total" in cp else None)
+    base_jtor = (np.asarray(cp["j_tor"], dtype=float)
+                 if "j_tor" in cp else None)
+
+    # j_tor is exact (bouquet stores toroidal current directly).  Every
+    # current below is computed in the archive's positive frame and written
+    # times s_I (the source's Ip orientation); the parallel conversion is
+    # sign-invariant (the template ratio c is even in s_I, and the exact path
+    # uses |B0|), so this is the source-frame current.
     jt_t = to_t(j_tor, peq)
-    cp["j_tor"] = jt_t.tolist()
+    cp["j_tor"] = (s_I * jt_t).tolist()
 
     # Parallel split (j_total / j_ohmic / j_bootstrap = IMAS <j.B>/B0). Two
     # fidelities (`fidelity` arg): EXACT uses the draw's own captured
     # flux-surface geometry (eq_fsa) via physics.toroidal_to_parallel;
     # RECONSTRUCT falls back to the interim baseline ratio c=j_tor/j_total from
     # the template (exact only when the draw's flux geometry matches baseline).
-    if "j_total" in cp and "j_tor" in cp:
+    if base_jtot is not None:
         use_exact = False
         if fidelity in ("auto", "exact") and eq_fsa is not None:
             geom = _eq_fsa_geom_on(eq_fsa, psiN_t, _imas_b0(out, ie, ic))
             if geom is not None:
                 from ..physics import toroidal_to_parallel
-                cp["j_total"] = toroidal_to_parallel(jt_t, geom=geom).tolist()
-                cp["j_ohmic"] = toroidal_to_parallel(to_t(j_ind, peq), geom=geom).tolist()
-                cp["j_bootstrap"] = toroidal_to_parallel(to_t(j_bs, peq), geom=geom).tolist()
+                cp["j_total"] = (s_I * toroidal_to_parallel(
+                    jt_t, geom=geom)).tolist()
+                cp["j_ohmic"] = (s_I * toroidal_to_parallel(
+                    to_t(j_ind, peq), geom=geom)).tolist()
+                cp["j_bootstrap"] = (s_I * toroidal_to_parallel(
+                    to_t(j_bs, peq), geom=geom)).tolist()
                 use_exact = True
         if fidelity == "exact" and not use_exact:
             raise ValueError(
@@ -1075,8 +1532,12 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
                 "Use fidelity='auto' to fall back to the baseline-ratio "
                 "reconstruction.")
         if not use_exact:                      # baseline-ratio reconstruction
-            base_jtot = np.asarray(cp["j_total"], dtype=float)
-            base_jtor = np.asarray(cp["j_tor"], dtype=float)
+            if base_jtor is None:
+                raise ValueError(
+                    "fidelity='reconstruct' needs the template's own "
+                    "core_profiles j_tor to form the ratio c = j_tor/j_total; "
+                    "the template has none. Use an archive with a captured "
+                    "eq_fsa block (fidelity='exact').")
             eps = 1e-9 * np.nanmax(np.abs(base_jtot)) if base_jtot.size else 0.0
             good = np.abs(base_jtot) > eps
             c = np.ones_like(base_jtot)
@@ -1085,9 +1546,9 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
                 idx = np.arange(c.size)
                 c[~good] = np.interp(idx[~good], idx[good], c[good])
             with np.errstate(divide="ignore", invalid="ignore"):
-                cp["j_total"] = (jt_t / c).tolist()
-                cp["j_ohmic"] = (to_t(j_ind, peq) / c).tolist()
-                cp["j_bootstrap"] = (to_t(j_bs, peq) / c).tolist()
+                cp["j_total"] = (s_I * (jt_t / c)).tolist()
+                cp["j_ohmic"] = (s_I * (to_t(j_ind, peq) / c)).tolist()
+                cp["j_bootstrap"] = (s_I * (to_t(j_bs, peq) / c)).tolist()
 
     with open(out_path, "w") as fh:
         json.dump(out, fh)

@@ -395,6 +395,7 @@ class Bouquet:
         """
         spec = list(getattr(self.config.solver, "coil_reg", None) or [])
         if spec:
+            self._check_coil_reg_orientation(spec)
             # Drop terms naming coils this MESH does not model. A measurement
             # source is not mesh-specific: DIII-D pf_active carries all 24
             # circuits while the shipped D3D mesh models 20 coil sets (no
@@ -460,6 +461,50 @@ class Bouquet:
                 del mygs._weak_coil_reg
         mygs.set_coil_reg(reg_terms=reg_terms)
         return reg_terms
+
+    def _check_coil_reg_orientation(self, spec):
+        """Refuse coil targets oriented differently from the IMAS baseline.
+
+        :func:`coil_targets.measured_from_pf_active` brings measured coil
+        currents into the positive-Ip solve frame by the same factor the IMAS
+        reader applies to the plasma currents, and
+        :func:`coil_targets.coil_reg_from_measured` records that factor on each
+        term as ``"source_current_sign"``.  Nothing here re-signs a target --
+        the factor is applied exactly once, at the read.  But when the IMAS
+        baseline was read with a DIFFERENT factor (an explicit
+        ``ImasSource.current_orientation`` that the coil read did not share, or
+        targets taken from another file), the coils would be pinned toward the
+        mirror-image field at the configured weight.  That is refused.
+
+        Checked only once an IMAS baseline exists (``prepare_baseline`` resets
+        the solver, and re-applies the reg, immediately before the baseline
+        solve); a term with no recorded factor claims nothing and is not
+        checked.  The reconstruction path solves in the same positive frame but
+        records no source factor (``source_current_sign`` is +1.0 there by
+        definition), so it is not checked either.
+        """
+        bl = getattr(self, "baseline", None)
+        if bl is None or getattr(bl, "provenance", None) != "imas":
+            return
+        want = float(getattr(bl, "source_current_sign", 1.0))
+        bad = sorted({c for t in spec if t.get("source_current_sign") is not None
+                      and float(t["source_current_sign"]) != want
+                      for c in t["coils"]})
+        if bad:
+            got = sorted({float(t["source_current_sign"]) for t in spec
+                          if t.get("source_current_sign") is not None
+                          and float(t["source_current_sign"]) != want})
+            raise ValueError(
+                "coil_reg: coil target(s) %s were brought into the solve frame "
+                "with orientation factor %s, but the IMAS baseline's currents "
+                "were read with source_current_sign = %+.0f (%s). Pinning the "
+                "coils with the other factor drives them toward the mirror-"
+                "image vertical and shaping field. Rebuild the targets with "
+                "measured_from_pf_active(..., current_orientation=%+.0f) so "
+                "both use the same factor."
+                % (", ".join(bad), ", ".join("%+.0f" % g for g in got), want,
+                   getattr(bl, "source_current_sign_origin", None) or "?",
+                   want))
 
     @staticmethod
     def _mesh_net_turns(mygs, name):
@@ -2553,6 +2598,21 @@ class Bouquet:
                 # the same unpaired c.
                 sgn, _Ip_signed, _c_signed = closure_sign_convention(
                     ip_ind, ip_bs, ip_fix, _c_affine, Ip_t)
+                # The IMAS reader already brought every source current into
+                # the anchor's positive frame (Baseline.source_current_sign),
+                # so sgn is +1 on any dd whose currents agree with its own ip.
+                # -1 here means the components disagree with the frame they
+                # were normalised to -- report it rather than let the pairing
+                # above quietly re-sign a mixed-frame closure.
+                if sgn < 0.0:
+                    print("[imas SWB-split:ohmic] WARNING: the linear component "
+                          "total is NEGATIVE after the reader's current-"
+                          "orientation normalisation (source_current_sign="
+                          f"{float(getattr(bl, 'source_current_sign', 1.0)):+.0f}): "
+                          f"ohm={ip_ind / 1e6:+.4f} jBS={ip_bs / 1e6:+.4f} "
+                          f"fixed={ip_fix / 1e6:+.4f} MA -- the source's "
+                          "current profiles disagree with its plasma current",
+                          flush=True)
                 # Which channel absorbs the Ip closure -- "bootstrap"
                 # (default): keep j_ohmic exactly as FUSE diffused it,
                 #   lin(ohm) + s_BS * lin(bs) + lin(fix) + c = Ip_target;
@@ -2683,6 +2743,12 @@ class Bouquet:
                     # The data's current-direction convention, and the affine
                     # constant as it was actually paired with the target.
                     current_direction_sign=float(sgn),
+                    # What the reader multiplied the source currents by to
+                    # bring them into this (positive) frame; -1 = reversed-Ip
+                    # source.  current_direction_sign above is read AFTER it.
+                    source_current_sign=float(getattr(bl, "source_current_sign", 1.0)),
+                    source_current_sign_origin=getattr(
+                        bl, "source_current_sign_origin", None),
                     affine_pprime_term_c_signed=float(_c_signed),
                     fsa_roundtrip_Ip=_ip_roundtrip,
                     fsa_roundtrip_err_pct=_rt_err,
@@ -2860,7 +2926,11 @@ class Bouquet:
                        forward_solve_ip_err_pct=ip_err_pct,
                        jBS_baseline_mode=str(self.config.generation.jBS_baseline_mode),
                        bs_scale=float(getattr(bl, "bs_scale", 1.0)),
-                       ohm_scale=float(getattr(bl, "ohm_scale", 1.0)))
+                       ohm_scale=float(getattr(bl, "ohm_scale", 1.0)),
+                       source_current_sign=float(getattr(bl, "source_current_sign", 1.0)),
+                       source_current_sign_origin=getattr(
+                           bl, "source_current_sign_origin", None),
+                       source_b0_sign=getattr(bl, "source_b0_sign", None))
         if getattr(bl, "ip_closure", None):
             metrics["ip_closure"] = dict(bl.ip_closure)
             metrics["closure_limited"] = bool(
@@ -3595,6 +3665,17 @@ class Bouquet:
         # archive so the run is self-describing and load_config() can round-trip it.
         from .utils import write_provenance
         write_provenance(header, config=self.config, scan_key=gc.scan_key)
+        # IMAS path: the source's current orientation (what the reader
+        # multiplied every dd current by to reach bouquet's positive frame).
+        from .config import ImasSource
+        if isinstance(self.config.source, ImasSource):
+            from .utils import stamp_source_orientation
+            stamp_source_orientation(
+                header, scan_key=gc.scan_key,
+                current_sign=float(getattr(bl, "source_current_sign", 1.0)),
+                b0_sign=getattr(bl, "source_b0_sign", None),
+                current_sign_origin=getattr(bl, "source_current_sign_origin",
+                                            None))
 
         return self.diagnostics
 
