@@ -1,7 +1,9 @@
-"""Backend systematics *replay* regression test.
+"""Backend systematics *replay* regression test -- the LEGACY path.
 
 Instead of re-running the (slow) reconstruction + GPR sampling, this test
-**replays the pre-drawn golden draws** through the perturbation->solve->
+**replays the pre-drawn golden draws** of the slim LEGACY golden
+(``tests/golden/D3Dlike_Hmode_legacy_golden.json``: the golden recipe run with
+``reconstruction_engine="legacy"``) through the legacy perturbation->solve->
 ``solve_with_bootstrap``->coil-homotopy pipeline and checks the outputs.  It
 loads the pre-reconstructed jphi-linterp baseline (re-solved once from the
 golden baseline j_phi -- *not* a full ``reconstruct_equilibrium``) and then,
@@ -18,10 +20,20 @@ Three modes (decompose pressure- vs current-systematics):
             bootstrap model the golden's own stored config names (the
             self-consistent loop, or the legacy frozen bootstrap).
 
+Every step here is the legacy pipeline (``reconstruction_engine="legacy"``
+reconstruction, the functional ``generate_bouquet`` draw path), so the
+reference is the legacy golden, not the h5 fixture, which since 2026-10 is a
+unified-engine run.  The JSON keeps the reconstruction's LCFS reference as a
+uniform 1-in-8 subsample of its trace (the reference side of every boundary
+RMS below; the other side is always a full trace) and each replayed draw's
+own RMS to that subsample, measured by the generator on the draw's full
+trace; see ``make_golden_fixture.LEGACY_LCFS_STRIDE``.
+
 Reconstruction itself is covered by a separate test (future).  Needs OFT + the
 D3D-like mesh/baseline; runs by default when available, marked ``solver``
 (deselect with ``pytest -m "not solver"``).
 """
+import json
 import os
 
 import numpy as np
@@ -38,7 +50,7 @@ _EXAMPLE = os.path.abspath(os.path.join(_HERE, "..", "examples", "D3D-like"))
 _GEQ = os.path.join(_EXAMPLE, "D3Dlike_Hmode_baseline.geqdsk")
 _PF = os.path.join(_EXAMPLE, "D3Dlike_Hmode_baseline.peqdsk")
 _MESH = os.path.join(_EXAMPLE, "DIIID_mesh.h5")
-_GOLDEN = os.path.join(_HERE, "golden", "D3Dlike_Hmode_golden_slim.h5")
+_GOLDEN = os.path.join(_HERE, "golden", "D3Dlike_Hmode_legacy_golden.json")
 
 _files_ok = all(os.path.isfile(p) for p in (_GEQ, _PF, _MESH, _GOLDEN))
 
@@ -64,7 +76,7 @@ pytestmark = [
     pytest.mark.skipif(
         not (_files_ok and _oft_importable()),
         reason="solver replay test needs OFT + the D3D-like mesh/baseline + "
-               "golden fixture; skipped when unavailable"),
+               "legacy golden; skipped when unavailable"),
 ]
 
 # Replay a fixed, representative subset of in-spec golden draws.  Each replayed
@@ -84,60 +96,75 @@ _MODE3_LI_REL = 0.03
 _MODE3_IP_REL = 0.01
 
 
-def _load_golden(sv="0"):
+def _legacy_golden():
+    with open(_GOLDEN) as fh:
+        return json.load(fh)
+
+
+def _golden_generation():
+    """The legacy golden's own stored generation config."""
+    from bouquet.config import BouquetConfig
+    return BouquetConfig.from_json(_legacy_golden()["config_json"]).generation
+
+
+def _load_golden():
     """Pull baseline + a subset of draws (profiles, targets, references)."""
-    with h5py.File(_GOLDEN, "r") as hf:
-        g = hf[f"scan/{sv}"]
-        bl = g["_baseline"]
-        base = dict(
-            psi_N=np.asarray(bl["psi_N"][()]),
-            psi_N_kin=np.asarray(bl["psi_N_kinetic"][()]),
-            ne=np.asarray(bl["n_e"][()]),
-            te=np.asarray(bl["T_e"][()]),
-            ni=np.asarray(bl["n_i"][()]),
-            ti=np.asarray(bl["T_i"][()]),
-            jphi=np.asarray(bl["j_phi"][()]),
-            pressure=np.asarray(bl["pressure"][()]),
-            recon_lcfs=np.asarray(bl["recon_lcfs_ref"][()]),
-            Ip_target=float(bl.attrs["Ip_target"]),
-            l_i_target=float(bl.attrs["l_i_target"]),
+    doc = _legacy_golden()
+    bl = doc["baseline"]
+    pr = bl["profiles"]
+    base = dict(
+        psi_N=np.asarray(pr["psi_N"], dtype=float),
+        psi_N_kin=np.asarray(pr["psi_N_kinetic"], dtype=float),
+        ne=np.asarray(pr["n_e"], dtype=float),
+        te=np.asarray(pr["T_e"], dtype=float),
+        ni=np.asarray(pr["n_i"], dtype=float),
+        ti=np.asarray(pr["T_i"], dtype=float),
+        jphi=np.asarray(pr["j_phi"], dtype=float),
+        pressure=np.asarray(pr["pressure"], dtype=float),
+        # the uniform subsample of the reconstruction's LCFS trace
+        recon_lcfs=np.asarray(bl["recon_lcfs_ref"]["points"], dtype=float),
+        Ip_target=float(bl["attrs"]["Ip_target"]),
+        l_i_target=float(bl["attrs"]["l_i_target"]),
+    )
+    # the generator kept the first _N_REPLAY in-spec draws (the deliverable
+    # draws), as this test always replayed
+    idxs = sorted(int(k) for k in doc["replay_draws"])[:_N_REPLAY]
+    assert len(idxs) == _N_REPLAY, (
+        f"the legacy golden carries {len(idxs)} replay draws, not "
+        f"{_N_REPLAY}")
+    draws = {}
+    for i in idxs:
+        gi = doc["replay_draws"][str(i)]
+        p = gi["profiles"]
+        draws[i] = dict(
+            ne=np.asarray(p["n_e"], dtype=float),
+            te=np.asarray(p["T_e"], dtype=float),
+            ni=np.asarray(p["n_i"], dtype=float),
+            ti=np.asarray(p["T_i"], dtype=float),
+            jphi=np.asarray(p["j_phi"], dtype=float),
+            jind=np.asarray(p["j_inductive"], dtype=float),
+            # the draw's boundary RMS to the subsampled reconstruction LCFS,
+            # measured by the generator on the draw's full trace
+            bnd_rms_mm=float(gi["bnd_rms_to_recon_mm"]),
+            li1=float(gi["l_i(1)"]),
+            # The golden archive stores BOTH estimators per draw. Since
+            # issue #20 the draw path targets and measures li(3)/'iter',
+            # so that is the number mode 3 must be handed as its target --
+            # the same golden draw, read on the estimator the code now
+            # uses. Nothing about the golden equilibrium changed.
+            li3=float(gi["l_i(3)"]),
+            Ip=float(gi["Ip_eqdsk"] if gi.get("Ip_eqdsk") is not None
+                     else np.nan),
+            # The Z_eff this draw's bootstrap was evaluated with: with the
+            # zeff aux channel active the generator draws Z_eff per draw
+            # and archives it (kinetic grid); None for an archive that
+            # has no such channel.
+            zeff=(np.asarray(p["aux_zeff"], dtype=float) if "aux_zeff" in p
+                  else None),
+            count=int(gi.get("count", i)),
+            coils=dict(zip(gi["coil_names"], gi["coil_currents"])),
         )
-        all_idxs = sorted(int(k) for k in g if k.lstrip("-").isdigit())
-        in_spec = [i for i in all_idxs
-                   if bool(g[str(i)].attrs.get("in_spec"))]
-        idxs = (in_spec or all_idxs)[:_N_REPLAY]   # replay the deliverable draws
-        draws = {}
-        for i in idxs:
-            gi = g[str(i)]
-            names = _read_coil_names(gi)
-            draws[i] = dict(
-                ne=np.asarray(gi["n_e"][()]),
-                te=np.asarray(gi["T_e"][()]),
-                ni=np.asarray(gi["n_i"][()]),
-                ti=np.asarray(gi["T_i"][()]),
-                jphi=np.asarray(gi["j_phi"][()]),
-                jind=np.asarray(gi["j_inductive"][()]),
-                pert_lcfs=np.asarray(gi["perturbed_lcfs_ref"][()]),
-                li1=float(gi.attrs["l_i(1)"]),
-                # The golden archive stores BOTH estimators per draw. Since
-                # issue #20 the draw path targets and measures li(3)/'iter',
-                # so that is the number mode 3 must be handed as its target --
-                # the same golden draw, read on the estimator the code now
-                # uses. Nothing about the golden equilibrium changed.
-                li3=float(gi.attrs["l_i(3)"]),
-                Ip=float(gi.attrs.get("Ip", np.nan)),
-                # The Z_eff this draw's bootstrap was evaluated with: with the
-                # zeff aux channel active the generator draws Z_eff per draw
-                # and archives it (kinetic grid); None for an archive that
-                # has no such channel.
-                zeff=(np.asarray(gi["aux_zeff"][()]) if "aux_zeff" in gi
-                      else None),
-                count=int(gi.attrs.get("count", i)),
-                coils=dict(zip(names,
-                               np.asarray(gi["coil_currents"][()]))),
-            )
-        base["coils"] = dict(zip(_read_coil_names(bl),
-                                 np.asarray(bl["coil_currents"][()])))
+    base["coils"] = dict(zip(bl["coil_names"], bl["coil_currents"]))
     return base, draws
 
 
@@ -252,8 +279,7 @@ def replay(tmp_path_factory):
     # baseline under frozen draws, or the reverse) would replay a pipeline
     # that never produced the fixture.
     from bouquet.jbs_loop import jbs_settings
-    from bouquet.utils import load_config
-    _gen_golden = load_config(_GOLDEN, scan_key=0).generation
+    _gen_golden = _golden_generation()
     run.config.generation.jbs_self_consistent = bool(
         _gen_golden.jbs_self_consistent)
     # ... and on the pressure frame the golden was GENERATED with (its own
@@ -444,7 +470,7 @@ def test_mode3_production_reproduces_golden(replay):
     a SOLVER-build difference far more often than a bouquet one.
     """
     base = replay["base"]
-    prov = _harness.golden_provenance_banner(_GOLDEN)
+    prov = _harness.legacy_golden_provenance_banner(_GOLDEN)
     n_checked = 0
     for i, d in replay["draws"].items():
         r = replay["mode3"][i]
@@ -452,7 +478,7 @@ def test_mode3_production_reproduces_golden(replay):
             continue
         n_checked += 1
         rms_replay = _bnd_rms_mm(base["recon_lcfs"], r["pert_lcfs"])
-        rms_golden = _bnd_rms_mm(base["recon_lcfs"], d["pert_lcfs"])
+        rms_golden = d["bnd_rms_mm"]
         print(f"[replay mode3] draw {i}: boundary RMS replay={rms_replay:.3f} "
               f"golden={rms_golden:.3f} mm  li(3) replay={r['li3']:.4f} "
               f"golden={d['li3']:.4f}  li(1) replay={r['li1']:.4f} "

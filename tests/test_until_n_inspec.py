@@ -258,7 +258,9 @@ def test_the_identity_holds_on_the_real_golden_archive(tmp_path):
                 float(d.attrs["inspec_F_max"]) * 100.0,
                 float(d.attrs["inspec_VSC_max"]) * 100.0,
                 rms_max_mm=rms_max_mm)
-            if ok:
+            # the engine's until-N verdict also ANDs its post-hoc draw band
+            # (engine_draws: ``until_n``); a legacy draw carries no band
+            if ok and bool(d.attrs.get("passes_draw_band", True)):
                 inloop.add(k)
 
     assert inloop == post, f"in-loop {sorted(inloop)} != selected {sorted(post)}"

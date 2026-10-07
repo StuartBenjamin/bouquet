@@ -159,3 +159,28 @@ def golden_provenance_banner(h5path):
                 "staleness diagnosable.")
     body = "\n".join(f"  {k} = {prov[k]}" for k in sorted(prov))
     return f"{head}\n{body}"
+
+
+def legacy_golden_provenance_banner(json_path):
+    """:func:`golden_provenance_banner` for the slim LEGACY golden JSON
+    (``tests/golden/make_golden_fixture.py --legacy-json``), which carries
+    the same provenance block as the h5 fixture's manifest."""
+    import json
+    head = f"legacy golden provenance ({os.path.basename(json_path)}):"
+    try:
+        with open(json_path) as fh:
+            prov = json.load(fh).get("provenance") or {}
+    except Exception as exc:                        # pragma: no cover
+        return f"{head}\n  unreadable: {exc}"
+    flat = {}
+
+    def _walk(node, path):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                _walk(v, f"{path}_{k}" if path else str(k))
+        elif node is not None:
+            flat[path] = node
+    _walk(prov, "")
+    if not flat:
+        return f"{head}\n  NONE STAMPED"
+    return head + "\n" + "\n".join(f"  {k} = {flat[k]}" for k in sorted(flat))
