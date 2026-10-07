@@ -100,6 +100,13 @@ def _engine_gate(config):
             == "unified" else None)
 
 
+def _terms(mygs, triples):
+    """The solver's coil-regularisation terms of ``(coils, target, weight)``
+    triples (:meth:`Bouquet._apply_coil_reg`)."""
+    return [mygs.coil_reg_term(dict(c), target=float(tg), weight=float(w))
+            for c, tg, w in triples]
+
+
 class Bouquet:
     """Stateful driver: solver -> baseline -> generate -> filter -> export."""
 
@@ -498,6 +505,10 @@ class Bouquet:
         and cost up to half a millimetre of boundary RMS for no measured gain.
         With ``coil_reg`` empty nothing is published and the draw path builds
         its historical toward-zero weak reg, so that case is bit-identical.
+        (That swap is the LEGACY draw path's.  The engine draws install the
+        reconstruction's own list instead: ``mygs._recon_coil_reg`` -- the
+        terms installed here -- with its JSON record
+        ``mygs._recon_coil_reg_record``, both published on every call.)
 
         Called from BOTH :meth:`setup_solver` and :meth:`_reset_solver_state`.
         That matters: ``_repoint_imas_geometry`` resets the solver immediately
@@ -546,31 +557,41 @@ class Bouquet:
                 weight 1.0 into the exploration would clamp the vertical-stability
                 channel the exploration needs).  Coils no term names keep the
                 zero target they have always had -- there is no measured target
-                for them to be held at.
+                for them to be held at.  Returns ``(coils, target, weight)``
+                triples; :func:`_terms` builds the solver's terms from them.
                 """
-                out = [mygs.coil_reg_term(
-                           dict(t["coils"]), target=float(t.get("target", 0.0)),
-                           weight=1.0 if exploratory else float(t.get("weight", 1.0)))
+                out = [(dict(t["coils"]), float(t.get("target", 0.0)),
+                        1.0 if exploratory else float(t.get("weight", 1.0)))
                        for t in spec
                        if not (exploratory and set(t["coils"]) == {"#VSC"})]
-                out += [mygs.coil_reg_term({n: 1.0}, target=0.0, weight=1.0)
+                out += [({n: 1.0}, 0.0, 1.0)
                         for n in mygs.coil_sets if n not in named]
                 if exploratory or "#VSC" not in named:
-                    out.append(
-                        mygs.coil_reg_term({"#VSC": 1.0}, target=0.0, weight=1e-2))
+                    out.append(({"#VSC": 1.0}, 0.0, 1e-2))
                 return out
 
-            reg_terms = _build(False)
-            mygs._weak_coil_reg = _build(True)
+            triples = _build(False)
+            mygs._weak_coil_reg = _terms(mygs, _build(True))
+            source = "configured"
         else:
-            reg_terms = [mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.0)
-                         for name in mygs.coil_sets]
-            reg_terms.append(
-                mygs.coil_reg_term({"#VSC": 1.0}, target=0.0, weight=1e-2))
+            triples = [({name: 1.0}, 0.0, 1.0) for name in mygs.coil_sets]
+            triples.append(({"#VSC": 1.0}, 0.0, 1e-2))
+            source = "default"
             # no measured targets -> nothing to publish, and an earlier slice's
             # stash must not survive into a run that has none
             if hasattr(mygs, "_weak_coil_reg"):
                 del mygs._weak_coil_reg
+        reg_terms = _terms(mygs, triples)
+        # THE term list the reconstruction solves under (the engine
+        # reconstruction records it on Bouquet._engine_run and every engine
+        # draw installs exactly it, the sigma=0 draw included): the solver
+        # terms, and the same terms as plain data for the records
+        mygs._recon_coil_reg = reg_terms
+        mygs._recon_coil_reg_record = dict(
+            source=source,
+            terms=[dict(coils={str(k): float(v) for k, v in c.items()},
+                        target=float(tg), weight=float(w))
+                   for c, tg, w in triples])
         mygs.set_coil_reg(reg_terms=reg_terms)
         return reg_terms
 
@@ -6354,20 +6375,30 @@ class Bouquet:
         bootstrap scale 1.0, archived into a temporary file (the
         configuration's own archive is never touched): generate_bouquet's
         baseline re-solve and warm start, its strong coil regularisation and
-        the weak one swapped in for the loop, the isoflux re-pointed to the
-        draw's own boundary, the homotopy and the post-homotopy stage, under
+        the RECONSTRUCTION's own one installed for the loop (the term list
+        it solved under, ``_engine_run["coil_reg"]``; recorded as
+        ``coil_reg``), the isoflux re-pointed to the draw's own boundary,
+        the homotopy and the post-homotopy stage, under
         ``engine_draw_solve_maxits``.  Judged on that route at the unchanged
-        loop tolerances, stage by stage:
+        tolerances, stage by stage, every gated quantity recorded with its
+        value and bound (``gates``):
 
         * ``stages["loop"]`` -- the draw's delivered loop state (before the
           homotopy): the first request BIT-IDENTICAL to the stored request,
           the loop converged, its bootstrap within ``jbs_rtol_j`` /
-          ``jbs_rtol_Ip`` of ``lambda_BS*``, ``|dl_i| <= jbs_tol_li``;
+          ``jbs_rtol_Ip`` of ``lambda_BS*``, ``|dl_i| <= jbs_tol_li``,
+          ``|dq0| <= jbs_tol_q0`` at the q-row radius;
         * ``stages["archived"]`` -- the state the draw ARCHIVES (after the
           homotopy and the post-homotopy passes): the bootstrap it carries
           within ``jbs_rtol_j`` / ``jbs_rtol_Ip`` of ``lambda_BS*`` on that
-          geometry and ``|dl_i| <= jbs_tol_li``; the coil drift, the
+          geometry, ``|dl_i| <= jbs_tol_li``, ``|dq0| <= jbs_tol_q0``; the
           homotopy stage and the flux-range change reported;
+        * ``stages["archived_geometry"]`` -- the archived coil currents and
+          LCFS against the reconstruction's, read from the temporary
+          archive (:meth:`_sigma0_archived_geometry`): the max F-coil and
+          VSC-coil drift within the hard coil bound the route rejects at
+          and the LCFS rms deviation within the in-spec boundary cut
+          (:meth:`_sigma0_geometry_gates`);
         * a draw that is REJECTED fails (``rejection``).
 
         ``passed`` needs every stage.  The top-level ``r_j`` / ``r_I`` /
@@ -6404,11 +6435,15 @@ class Bouquet:
         out = dict(invariant="engine-draw", route="generate()",
                    criterion=(
                        "the generate() draw route with every perturbation "
-                       "zero: loop stage -- pass-1 request bit-identical, "
-                       "loop converged, r_j <= rtol_j, r_I <= rtol_Ip, "
-                       "|dl_i| <= tol_li; archived state (after the homotopy "
-                       "and the post-homotopy stage) -- r_j <= rtol_j, r_I "
-                       "<= rtol_Ip, |dl_i| <= tol_li; not rejected"))
+                       "zero, its loop under the reconstruction's own coil "
+                       "regularisation: loop stage -- pass-1 request "
+                       "bit-identical, loop converged, r_j <= rtol_j, r_I "
+                       "<= rtol_Ip, |dl_i| <= tol_li, |dq0| <= tol_q0; "
+                       "archived state (after the homotopy and the "
+                       "post-homotopy stage) -- r_j <= rtol_j, r_I <= "
+                       "rtol_Ip, |dl_i| <= tol_li, |dq0| <= tol_q0; its "
+                       "coil drift within the hard coil bound and its LCFS "
+                       "rms within the in-spec boundary cut; not rejected"))
         try:
             with tempfile.TemporaryDirectory(prefix="bq_sigma0_") as td:
                 self.config.output_header = os.path.join(td, "sigma0_route")
@@ -6420,6 +6455,12 @@ class Bouquet:
                 finally:
                     self._sigma0_route = None
                 rej = list(getattr(self, "draw_rejections", []) or [])
+                # the archived draw's coils and LCFS against the
+                # reconstruction's, read from the temporary archive by the
+                # same contours and currents the filters use
+                geo = (None if (rej or not diags) else
+                       self._sigma0_archived_geometry(
+                           self.config.output_header, gc.scan_key))
         finally:
             self.config.output_header = saved_cfg["header"]
             gc.n_inspec_target = saved_cfg["target"]
@@ -6436,7 +6477,8 @@ class Bouquet:
         s = G.ctx.loop if G is not None else {}
         out["tolerances"] = dict(rtol_j=s.get("rtol_j"),
                                  rtol_Ip=s.get("rtol_Ip"),
-                                 tol_li=s.get("tol_li"))
+                                 tol_li=s.get("tol_li"),
+                                 tol_q0=s.get("tol_q0"))
         loop, arch = probe.get("loop"), probe.get("archived")
         d0 = diags[0] if diags else None
         out["stages"] = dict(loop=loop, archived=arch)
@@ -6448,6 +6490,9 @@ class Bouquet:
                 max_F_drift_pct=d0.get("max_F_drift_pct"),
                 max_VSC_drift_pct=d0.get("max_VSC_drift_pct"))
         out["record"] = (d0 or {}).get("engine")
+        # the coil regularisation the draw's loop solved under (the
+        # reconstruction's own term list)
+        out["coil_reg"] = (out["record"] or {}).get("coil_reg")
         if loop is not None:
             for k in ("request_bit_identical", "request_max_abs_diff",
                       "loop_converged", "n_passes", "dq0_stats",
@@ -6457,9 +6502,22 @@ class Bouquet:
             for k in ("r_j", "r_I", "dl_i", "dq0", "dq0_psi_N", "dq95",
                       "flux_range", "flux_range_rel"):
                 out[k] = arch.get(k)
+        # the archived state's coils and boundary against the
+        # reconstruction's: GATED (each with its value and bound)
+        geo_gates = (None if geo is None else
+                     self._sigma0_geometry_gates(geo))
+        out["stages"]["archived_geometry"] = (
+            None if geo is None else dict(geo, gates=geo_gates))
+        # every gated quantity of every stage, with its bound
+        out["gates"] = dict(
+            loop=(None if loop is None else loop.get("gates")),
+            archived=(None if arch is None else arch.get("gates")),
+            archived_geometry=geo_gates)
+        from .engine_draws import _gates_pass
         ok = bool(not rej and d0 is not None and loop is not None
                   and arch is not None and loop["passed"]
-                  and arch["passed"])
+                  and arch["passed"] and geo_gates is not None
+                  and _gates_pass(geo_gates))
         out["passed"] = ok
         out["passed_reason"] = (
             "the generate() draw route at zero perturbation reproduces the "
@@ -6481,9 +6539,104 @@ class Bouquet:
                  f"dl_i={arch['dl_i']:+.2e} dq0={arch['dq0']:+.2e} "
                  f"dq95={_f(arch['dq95'], '+.2e')} "
                  f"dflux_rel={_f(arch['flux_range_rel'], '+.2e')}")
+              + ("" if geo_gates is None else
+                 "; coils/LCFS: " + ", ".join(
+                     f"{k}={_f(g['value'], '.3g')} (bound "
+                     f"{_f(g['bound'], 'g')}"
+                     f"{'' if g['passed'] is not False else ' MISSED'})"
+                     for k, g in geo_gates.items()))
               + f" (tol r_j {s.get('rtol_j')}, r_I {s.get('rtol_Ip')}, "
-                f"l_i {s.get('tol_li')})", flush=True)
+                f"l_i {s.get('tol_li')}, q0 {s.get('tol_q0')})", flush=True)
         return out
+
+    def _sigma0_archived_geometry(self, header, scan_key):
+        """The zero-perturbation draw's archived coil currents and LCFS
+        against the reconstruction's, from the archive *header*: per-coil
+        drift [%] (:func:`bouquet.TokaMaker_interface._coil_drift_pct`, the
+        homotopy's own measure) of draw 0's ``coil_currents`` against
+        ``_baseline/coil_currents`` (the reconstruction's state at
+        ``generate()`` entry), the max non-VSC F-coil and max VSC-coil drift
+        (:func:`~bouquet.TokaMaker_interface._coil_max_drifts`), and the
+        LCFS deviation [mm] of draw 0's ``perturbed_lcfs_ref`` from the
+        reconstruction's ``recon_lcfs_ref`` (:func:`bouquet.filtering.
+        _boundary_devs`, the boundary filter's own metric).  Unreadable
+        pieces are ``None`` (the gate then fails)."""
+        import h5py
+        import numpy as np
+        from .filtering import _baseline_boundary, _boundary_devs
+        from .TokaMaker_interface import _coil_drift_pct, _coil_max_drifts
+        from .utils import _group_path, _read_coil_names, _resolve_h5
+        out = dict(coil_drift_pct=None, max_F_drift_pct=None,
+                   max_VSC_drift_pct=None, boundary_rms_mm=None,
+                   boundary_max_mm=None,
+                   vsc_coils=list(getattr(self.config.solver, "coil_vsc",
+                                          None) or ()),
+                   reference=("coils: the archived _baseline coil_currents "
+                              "(the reconstruction's state at generate() "
+                              "entry); LCFS: _baseline/recon_lcfs_ref"))
+        with h5py.File(_resolve_h5(header), "r") as hf:
+            gp = _group_path(scan_key, 0)
+            if gp not in hf:
+                return out
+            grp = hf[gp]
+            rms, mx = _boundary_devs(_baseline_boundary(hf, scan_key), grp)
+            out["boundary_rms_mm"] = (float(rms) if np.isfinite(rms)
+                                      else None)
+            out["boundary_max_mm"] = (float(mx) if np.isfinite(mx)
+                                      else None)
+            bpath = gp.rsplit("/", 1)[0] + "/_baseline" if "/" in gp \
+                else "_baseline"
+            bl = hf.get(bpath)
+            if ("coil_currents" in grp and bl is not None
+                    and "coil_currents" in bl):
+                cur = dict(zip(_read_coil_names(grp),
+                               np.asarray(grp["coil_currents"], float)))
+                base = dict(zip(_read_coil_names(bl),
+                                np.asarray(bl["coil_currents"], float)))
+                base = {k: float(v) for k, v in base.items() if k in cur}
+                if base:
+                    d = _coil_drift_pct(cur, base)
+                    vsc = tuple(c for c in out["vsc_coils"] if c in base)
+                    mf, mv = _coil_max_drifts(d, vsc)
+                    out.update(coil_drift_pct={k: float(v)
+                                               for k, v in d.items()},
+                               max_F_drift_pct=float(mf),
+                               max_VSC_drift_pct=float(mv))
+        return out
+
+    def _sigma0_geometry_gates(self, geo):
+        """The zero-perturbation gates on the archived coils and LCFS:
+        the max F-coil and VSC-coil drift against the HARD coil bound the
+        draw route rejects at -- ``coil_drift_hard_factor x coil_drift``
+        when hard bounds are configured, else the tightest homotopy stage
+        (``homotopy_passes[-1]``, the hard bounds its saturation test
+        works against), else (``engine_draw_homotopy=False``)
+        ``coil_drift`` -- and the LCFS rms deviation against the boundary
+        cut the in-spec filter applies (:meth:`_boundary_cut`; not gated
+        when the cut is disabled, recorded so)."""
+        from .engine_draws import sigma0_gate
+        gc = self.config.generation
+        hf = getattr(gc, "coil_drift_hard_factor", None)
+        if hf is not None:
+            bF = bV = 100.0 * float(hf) * float(gc.coil_drift)
+            how = "coil_drift_hard_factor x coil_drift"
+        elif bool(getattr(gc, "engine_draw_homotopy", True)) and \
+                gc.homotopy_passes:
+            bF, bV = (100.0 * float(v) for v in gc.homotopy_passes[-1])
+            how = "homotopy_passes[-1] (the tightest homotopy stage)"
+        else:
+            bF = bV = 100.0 * float(gc.coil_drift)
+            how = "coil_drift"
+        cut, cut_src = self._boundary_cut(quiet=True)
+        return dict(
+            coil_F_drift_pct=sigma0_gate(geo["max_F_drift_pct"], bF,
+                                         setting=how),
+            coil_VSC_drift_pct=sigma0_gate(geo["max_VSC_drift_pct"], bV,
+                                           setting=how),
+            boundary_rms_mm=sigma0_gate(
+                geo["boundary_rms_mm"], cut,
+                setting=f"filtering.rms_max_mm ({cut_src})",
+                absolute=False))
 
     def _verify_sigma0_jbs_loop(self, settings, pp, ffp, pressure, ne_eq,
                                 te_eq, ni_eq, ti_eq, Zeff_eq, psi_N, psi_pad,

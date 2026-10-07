@@ -2066,6 +2066,39 @@ def mse_out(bl) -> dict:
     return moved
 
 
+def reconstruction_coil_reg(mygs) -> dict:
+    """The coil regularisation installed on *mygs* now -- the one the
+    engine reconstruction about to run solves under: ``terms`` (the solver's
+    term objects, ``None`` when not known) and ``record`` (JSON-safe:
+    ``source`` and, when known, the ``terms`` as ``coils`` / ``target`` /
+    ``weight``).
+
+    * ``"strong (left installed by generate())"`` -- a previous
+      ``generate()`` left its strong regularisation installed
+      (``_strong_coil_reg``; ``Bouquet._reset_solver_state`` clears it);
+    * ``"configured"`` / ``"default"`` -- what :meth:`bouquet.run.Bouquet.
+      _apply_coil_reg` installed (``SolverConfig.coil_reg``'s terms at
+      their configured weights, or the toward-zero default);
+    * ``"unknown"`` -- a solver object ``setup_solver`` did not prepare
+      (a test stand-in): nothing is on record.
+
+    A draw is the reconstruction's closure perturbed in its inputs, not
+    re-regularised: :meth:`bouquet.engine_draws.GenerateEngineDraws.draw`
+    installs exactly ``terms`` for every draw, the zero-perturbation draw
+    included."""
+    strong = getattr(mygs, "_strong_coil_reg", None)
+    if strong is not None:
+        return dict(terms=list(strong), record=dict(
+            source="strong (left installed by generate())", terms=None))
+    terms = getattr(mygs, "_recon_coil_reg", None)
+    rec = getattr(mygs, "_recon_coil_reg_record", None)
+    if terms is None or rec is None:
+        return dict(terms=None, record=dict(source="unknown", terms=None))
+    return dict(terms=list(terms), record=dict(
+        source=str(rec["source"]),
+        terms=[dict(t) for t in rec["terms"]]))
+
+
 def prepare_engine_baseline(bq):
     """``Bouquet.prepare_baseline()`` under ``reconstruction_engine=
     "unified"``, for both input types.
@@ -2136,8 +2169,12 @@ def prepare_engine_baseline(bq):
                 # the reconstruction runs under the solver's own cap
                 # (engine_draw_solve_maxits caps the DRAWS only)
                 maxits=None)
+            # the coil regularisation this reconstruction solves under
+            # (recorded; every draw installs exactly it)
+            coil_reg = reconstruction_coil_reg(mygs)
             eng, res, rec = reconstruct(ad, backend, s,
                                         label=f"engine {c0.kind}")
+            rec["coil_reg"] = dict(coil_reg["record"])
             if c0.kind == "gfile":
                 bl = _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w)
             else:
@@ -2155,7 +2192,7 @@ def prepare_engine_baseline(bq):
     # contract, state, basis and delivered measurement, in this session
     bq._engine_run = dict(engine=eng, result=res, psi_pad=float(psi_pad),
                           q_psi=getattr(backend, "q_psi", None),
-                          baseline=bl)
+                          baseline=bl, coil_reg=coil_reg)
     if bl.reconstruction_metrics is not None:
         bq._flag_nonconverged_recon_loop()
         bq._print_reconstruction_summary()

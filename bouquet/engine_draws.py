@@ -1195,8 +1195,14 @@ class GenerateEngineDraws:
 
     def __init__(self, ctx, *, unc, psi_pad, q_psi=None, maxits=None,
                  homotopy=True, l_i_tolerance=0.05, p_thresh=0.05,
-                 max_proxy_draws=500):
+                 max_proxy_draws=500, coil_reg=None):
         self.ctx = ctx
+        #: the coil regularisation the reconstruction solved under
+        #: (:func:`bouquet.engine.reconstruction_coil_reg`: ``terms`` and
+        #: ``record``); every draw installs exactly ``terms``.  ``None`` or
+        #: ``terms=None`` (a solver ``setup_solver`` did not prepare): the
+        #: historical exploratory regularisation, recorded as such
+        self.coil_reg = coil_reg
         self.unc = dict(unc)
         self.psi_pad = float(psi_pad)
         self.q_psi = q_psi
@@ -1418,6 +1424,55 @@ class GenerateEngineDraws:
         mygs.settings.maxits = cur
         mygs.update_settings()
 
+    # ---- the coil regularisation of a draw's loop ------------------------
+    def install_coil_reg(self, mygs):
+        """Install the coil regularisation a draw's loop solves under and
+        return its record (``source``, ``n_terms``, ``installed``).
+
+        The reconstruction's own term list (:attr:`coil_reg`, recorded by
+        :func:`bouquet.engine.prepare_engine_baseline`): the same terms,
+        targets and weights -- configured measured-coil targets at their
+        configured weights, the #VSC term as configured -- so the
+        zero-perturbation draw solves the stored request under the
+        regularisation the reconstruction solved it under.  Only when that
+        list is not known (a solver object ``setup_solver`` did not
+        prepare) and ``generate_bouquet`` installed its strong one, the
+        historical exploratory list (``_weak_coil_reg``, else every coil
+        toward zero at weight 1 and the VSC at 1e-2), recorded as such.
+        A failed install is printed and recorded (``installed=False``)."""
+        reg = self.coil_reg or {}
+        terms = reg.get("terms")
+        recd = dict((reg.get("record") or {}))
+        if terms is not None:
+            out = dict(source="reconstruction ("
+                       + str(recd.get("source", "?")) + ")",
+                       n_terms=len(terms), installed=False)
+        elif getattr(mygs, "_strong_coil_reg", None) is not None:
+            terms = getattr(mygs, "_weak_coil_reg", None)
+            if terms is None:
+                terms = [mygs.coil_reg_term({_n: 1.0}, target=0.0,
+                                            weight=1.0)
+                         for _n in mygs.coil_sets]
+                terms.append(mygs.coil_reg_term({"#VSC": 1.0}, target=0.0,
+                                                weight=1e-2))
+            out = dict(source=("historical exploratory (the "
+                               "reconstruction's regularisation is not on "
+                               "record)"),
+                       n_terms=len(terms), installed=False)
+        else:
+            return dict(source="none installed (the reconstruction's "
+                               "regularisation is not on record)",
+                        n_terms=None, installed=False)
+        try:
+            mygs.set_coil_reg(reg_terms=list(terms))
+            out["installed"] = True
+        except Exception as _e:
+            out["error"] = f"{type(_e).__name__}: {str(_e)[:200]}"
+            print(f"  [engine draw] coil-regularisation install failed "
+                  f"({_e}); the loop runs under the regularisation already "
+                  "installed", flush=True)
+        return out
+
     # ---- one draw ---------------------------------------------------------
     def draw(self, mygs, rng, scale, count, *, coil_guard=None,
              bnd_diag=None, solve_guard=None):
@@ -1430,23 +1485,11 @@ class GenerateEngineDraws:
                        else (lambda: int(solve_guard.n_solves)))
         clock.guarded = solve_guard is not None
         self._cur = dict(count=int(count), clock=clock, backend=b)
-        # the weak exploratory coil regularisation for the loop, as the
-        # legacy self-consistent draw installs it (generate_bouquet puts the
+        # the loop solves under the RECONSTRUCTION's own coil
+        # regularisation: a draw is the reconstruction's closure perturbed
+        # in its inputs, not re-regularised (generate_bouquet puts its
         # strong one back after the draw)
-        _stashed_reg = getattr(mygs, "_strong_coil_reg", None)
-        if _stashed_reg is not None:
-            try:
-                _weak = getattr(mygs, "_weak_coil_reg", None)
-                if _weak is None:
-                    _weak = [mygs.coil_reg_term({_n: 1.0}, target=0.0,
-                                                weight=1.0)
-                             for _n in mygs.coil_sets]
-                    _weak.append(mygs.coil_reg_term({"#VSC": 1.0},
-                                                    target=0.0, weight=1e-2))
-                mygs.set_coil_reg(reg_terms=_weak)
-            except Exception as _e:
-                print(f"  [engine draw hygiene] weak-reg install failed "
-                      f"({_e}); the loop runs under the strong reg")
+        self._cur["coil_reg"] = self.install_coil_reg(mygs)
         inputs = sample_draw_inputs(
             ctx, rng, self.unc, b.flux_integral, scale=float(scale),
             p_thresh=self.p_thresh, max_proxy_draws=self.max_proxy_draws)
@@ -1466,6 +1509,7 @@ class GenerateEngineDraws:
         sp = out["split"]
         jfix = sp["j_NBI"] + sp["j_RF"]
         rec = out["record"]
+        rec["coil_reg"] = dict(self._cur["coil_reg"])
         diag = dict(
             j0_scales=[], Ip_scales=[],
             iteration_l_is=[rec["delivered"]["l_i_3"]],
@@ -1737,7 +1781,8 @@ def build_generate_context(bq, env):
         ctx, unc=unc, psi_pad=run["psi_pad"], q_psi=run.get("q_psi"),
         maxits=engine_draw_maxits(gc),
         homotopy=bool(getattr(gc, "engine_draw_homotopy", True)),
-        l_i_tolerance=float(gc.l_i_tolerance))
+        l_i_tolerance=float(gc.l_i_tolerance),
+        coil_reg=run.get("coil_reg"))
 
 
 def context_from_run(run, gc, bl):
@@ -1757,7 +1802,32 @@ def context_from_run(run, gc, bl):
 # ---------------------------------------------------------------------------
 def _zero_perturbation_tolerances(ctx):
     s = ctx.loop
-    return dict(rtol_j=s["rtol_j"], rtol_Ip=s["rtol_Ip"], tol_li=s["tol_li"])
+    return dict(rtol_j=s["rtol_j"], rtol_Ip=s["rtol_Ip"], tol_li=s["tol_li"],
+                tol_q0=s["tol_q0"])
+
+
+def sigma0_gate(value, bound, *, setting, absolute=True):
+    """One gated quantity of the zero-perturbation check: ``value``, its
+    ``bound`` and the ``setting`` the bound comes from; ``passed`` is
+    ``|value| <= bound`` (``value <= bound`` with ``absolute=False``).  A
+    missing or non-finite value FAILS (an unmeasured quantity is not
+    reproduced); a ``None`` bound is recorded as not gated (``passed``
+    ``None``) -- the caller decides whether that is allowed."""
+    v = _f(value)
+    b = None if bound is None else float(bound)
+    if b is None:
+        ok = None
+    elif v is None:
+        ok = False
+    else:
+        ok = bool((abs(v) if absolute else v) <= b)
+    return dict(value=v, bound=b, setting=str(setting), passed=ok)
+
+
+def _gates_pass(gates):
+    """Every gate of a stage passed (a ``None`` verdict -- not gated --
+    does not count against it)."""
+    return all(g["passed"] is not False for g in gates.values())
 
 
 def zero_perturbation_loop_verdict(ctx, d):
@@ -1765,8 +1835,11 @@ def zero_perturbation_loop_verdict(ctx, d):
     loop state of :func:`run_draw` output *d*, before any homotopy): the
     request identity, convergence, ``r_j`` / ``r_I`` of the draw's bootstrap
     against ``lambda_BS*`` (the draw's final parallel weights), ``dl_i``,
-    ``dq0`` (row radius and the solver's q0 radius), ``dq95``; ``passed`` at
-    the loop tolerances."""
+    ``dq0`` (row radius and the solver's q0 radius), ``dq95``; ``passed``:
+    the request bit-identical, the loop converged and every entry of
+    ``gates`` -- ``r_j <= jbs_rtol_j``, ``r_I <= jbs_rtol_Ip``, ``|dl_i| <=
+    jbs_tol_li``, ``|dq0| <= jbs_tol_q0`` (at the row radius), each recorded
+    with its value and bound -- the unchanged loop tolerances."""
     from .jbs_loop import profile_residuals
     from .engine import conversion_factor
     s = ctx.loop
@@ -1778,11 +1851,18 @@ def zero_perturbation_loop_verdict(ctx, d):
     dl = rec["deltas"]
     conv = bool(rec["loop"]["converged"])
     ident = rec["identity"]
+    gates = dict(
+        r_j=sigma0_gate(cmp_["r_j"], s["rtol_j"], setting="jbs_rtol_j",
+                        absolute=False),
+        r_I=sigma0_gate(cmp_["r_I"], s["rtol_Ip"], setting="jbs_rtol_Ip",
+                        absolute=False),
+        dl_i=sigma0_gate(dl["l_i_3"], s["tol_li"], setting="jbs_tol_li"),
+        dq0=sigma0_gate(dl["q0"], s["tol_q0"], setting="jbs_tol_q0"))
     ok = bool(ident["pass1_request_bit_identical"] and conv
-              and cmp_["r_j"] <= s["rtol_j"] and cmp_["r_I"] <= s["rtol_Ip"]
-              and abs(dl["l_i_3"]) <= s["tol_li"])
+              and _gates_pass(gates))
     return dict(
-        passed=ok, request_bit_identical=ident["pass1_request_bit_identical"],
+        passed=ok, gates=gates,
+        request_bit_identical=ident["pass1_request_bit_identical"],
         request_max_abs_diff=ident["pass1_request_max_abs_diff"],
         loop_converged=conv, n_passes=int(rec["loop"]["n_passes"]),
         r_j=float(cmp_["r_j"]), r_I=float(cmp_["r_I"]),
@@ -1802,7 +1882,11 @@ def zero_perturbation_archived_verdict(ctx, jbs_carried, fin):
     measurement of that state, *jbs_carried* the bootstrap the draw carries
     there.  ``r_j`` / ``r_I`` of that bootstrap against ``lambda_BS*`` on the
     archived geometry, ``dl_i``, ``dq0`` at the row radius, ``dq95``, the
-    flux-range change; ``passed`` at the same loop tolerances."""
+    flux-range change; ``passed``: every entry of ``gates`` (``r_j``,
+    ``r_I``, ``|dl_i|``, ``|dq0|`` at the same loop tolerances, each with
+    its value and bound).  The coil and boundary deltas of the archived
+    state are gated by ``Bouquet.verify_sigma0_consistency`` (they need the
+    archive)."""
     from .jbs_loop import profile_residuals
     from .engine import complete_geometry, conversion_factor
     s = ctx.loop
@@ -1820,9 +1904,14 @@ def zero_perturbation_archived_verdict(ctx, jbs_carried, fin):
         dq95=(None if (q95 is None or ctx.ref.get("q95") is None)
               else float(q95) - float(ctx.ref["q95"])),
         **flux_range_change(flux_range(fin), ctx.ref["flux_range"]))
-    out["passed"] = bool(out["r_j"] <= s["rtol_j"]
-                         and out["r_I"] <= s["rtol_Ip"]
-                         and abs(dli) <= s["tol_li"])
+    out["gates"] = dict(
+        r_j=sigma0_gate(out["r_j"], s["rtol_j"], setting="jbs_rtol_j",
+                        absolute=False),
+        r_I=sigma0_gate(out["r_I"], s["rtol_Ip"], setting="jbs_rtol_Ip",
+                        absolute=False),
+        dl_i=sigma0_gate(dli, s["tol_li"], setting="jbs_tol_li"),
+        dq0=sigma0_gate(out["dq0"], s["tol_q0"], setting="jbs_tol_q0"))
+    out["passed"] = _gates_pass(out["gates"])
     return out
 
 
@@ -1835,14 +1924,16 @@ def verify_zero_perturbation(ctx, backend, *, label="sigma=0 engine draw"):
     the delivered loop state against the reconstruction
     (:func:`zero_perturbation_loop_verdict`); ``passed``: the request is
     bit-identical, the loop converged, ``r_j <= rtol_j``, ``r_I <=
-    rtol_Ip`` and ``|dl_i| <= tol_li`` -- the unchanged loop tolerances."""
+    rtol_Ip``, ``|dl_i| <= tol_li`` and ``|dq0| <= tol_q0`` -- the
+    unchanged loop tolerances."""
     from .jbs_loop import JBSNotConverged, jsonable
     s = ctx.loop
     out = dict(invariant="engine-draw",
                tolerances=_zero_perturbation_tolerances(ctx),
                criterion=("pass-1 request bit-identical to the stored "
                           "request, loop converged, r_j <= rtol_j, r_I <= "
-                          "rtol_Ip, |l_i(draw) - l_i*| <= tol_li; q0/q95 "
+                          "rtol_Ip, |l_i(draw) - l_i*| <= tol_li, "
+                          "|q0(draw) - q0*| <= tol_q0 (row radius); q95 "
                           "reported"))
     try:
         d = run_draw(ctx, backend, ctx.zero_inputs(), label=label)
@@ -1859,6 +1950,7 @@ def verify_zero_perturbation(ctx, backend, *, label="sigma=0 engine draw"):
           f"; loop {'converged' if v['loop_converged'] else 'NOT converged'}"
           f" in {v['n_passes']} pass(es); r_j={v['r_j']:.3e} (tol "
           f"{s['rtol_j']:.0e}) r_I={v['r_I']:.3e} (tol {s['rtol_Ip']:.0e})"
-          f" |dl_i|={abs(v['dl_i']):.2e} (tol {s['tol_li']:.0e}); dq0="
-          f"{v['dq0']:+.2e} (psi_N {ctx.ref['q_row_psi_N']:g})", flush=True)
+          f" |dl_i|={abs(v['dl_i']):.2e} (tol {s['tol_li']:.0e}) dq0="
+          f"{v['dq0']:+.2e} (tol {s['tol_q0']:.0e}, psi_N "
+          f"{ctx.ref['q_row_psi_N']:g})", flush=True)
     return out

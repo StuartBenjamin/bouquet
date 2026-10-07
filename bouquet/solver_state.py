@@ -13,8 +13,9 @@ cover all of them:
   nl_tol, urf, ...);
 * **Python attributes bouquet publishes on the solver object**
   (:data:`BOUQUET_SOLVER_ATTRS`): the strong / weak coil-regularisation
-  stashes and the hard-bound stash ``generate_bouquet`` and
-  ``Bouquet._apply_coil_reg`` leave there, which later draw-path code reads.
+  stashes, the reconstruction's own term list (and its record) and the
+  hard-bound stash ``generate_bouquet`` and ``Bouquet._apply_coil_reg`` leave
+  there, which later draw-path code reads.
 
 **The coil-bound mode is one-way, and bouquet enters it ONCE, at solver
 setup.**  Until ``set_coil_bounds`` is first called, OpenFUSIONToolkit solves
@@ -49,7 +50,8 @@ from contextlib import contextmanager
 #: Python attributes bouquet publishes on the TokaMaker object (stashes read
 #: by later draw-path code); restored as they were (absent stays absent).
 BOUQUET_SOLVER_ATTRS = ("_strong_coil_reg", "_weak_coil_reg",
-                        "_coil_drift_bounds")
+                        "_coil_drift_bounds", "_recon_coil_reg",
+                        "_recon_coil_reg_record")
 
 #: The attribute :func:`enter_bounded_coil_mode` sets on the solver object.
 #: Deliberately NOT in :data:`BOUQUET_SOLVER_ATTRS`: the mode it records is

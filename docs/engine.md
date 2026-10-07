@@ -376,9 +376,29 @@ the distance-to-input table (`tests/probes/measure_engine.py`, part
 `GenerateEngineDraws` from the live reconstruction and hands it to
 `generate_bouquet(engine_draw=...)`, whose per-draw loop then calls it in
 place of the legacy `perturb_kinetic_equilibrium` (everything else --
-the warm start, the coil regularisation, the homotopy, the archive, the
-until-N ledger -- is the same code). The parallel launchers need nothing
-new: every worker runs `prepare_baseline()` + `generate()`.
+the warm start, the strong coil regularisation of the post-loop phase, the
+homotopy, the archive, the until-N ledger -- is the same code). The parallel
+launchers need nothing new: every worker runs `prepare_baseline()` +
+`generate()`.
+
+**The loop solves under the reconstruction's own coil regularisation.** The
+reconstruction records the term list it solved under
+(`Bouquet._engine_run["coil_reg"]`, `engine.reconstruction_coil_reg`: the
+terms `Bouquet._apply_coil_reg` installed -- `SolverConfig.coil_reg`'s
+measured-coil targets at their CONFIGURED weights and its `#VSC` term as
+configured, or the toward-zero default -- and their JSON record, also on
+the baseline's engine record as `coil_reg`), and every draw installs exactly
+that list for its loop (`GenerateEngineDraws.install_coil_reg`; recorded per
+draw as `coil_reg`), the zero-perturbation draw included: a draw is the
+reconstruction's closure perturbed in its inputs, not re-regularised.
+`generate_bouquet` puts its strong regularisation back after the loop, as
+before. (Until 2026-10-06 the loop ran under the legacy exploratory list --
+every configured weight replaced by 1.0, a configured `#VSC` term replaced
+by a 1e-2 pull toward zero -- identical to the reconstruction's only when
+`coil_reg` is empty, as on every example; with measured targets the two
+solves differed ~100x in weight.) Only on a solver object `setup_solver`
+did not prepare (nothing on record) does the draw fall back to that
+historical list, and its record says so.
 
 ```
  reconstruction state: G*, x*, lambda_BS*, (Delta*), request R*
@@ -455,22 +475,31 @@ passes.
 route `generate()` runs -- it calls `generate(n=1)` itself, with every
 perturbation zero and the bootstrap scale 1.0, archiving into a temporary
 file (the configured archive is never touched): generate_bouquet's baseline
-re-solve and warm start, its strong coil regularisation and the weak one
-swapped in for the loop, the isoflux re-pointed to the draw's own boundary,
-the homotopy and the post-homotopy stage, under `engine_draw_solve_maxits`.
-(Until 2026-10-04 it ran only the loop, `engine_draws.
-verify_zero_perturbation`, from whatever state the solver held, under
-whatever regularisation was installed -- not the draw's route; that
-function is kept, documented as the loop stage only.) `passed` needs both
-stages at the unchanged loop tolerances: the LOOP stage (`stages["loop"]`:
-request bit-identical, loop converged, `r_j`, `r_I` against `lambda_BS*`,
-`|dl_i| <= jbs_tol_li`) and the ARCHIVED state after the homotopy and the
-post-homotopy stage (`stages["archived"]`: the bootstrap the draw carries
-there against `lambda_BS*` on its geometry, `|dl_i| <= jbs_tol_li`; `dq0`,
-`dq95`, the flux-range change and the coil drift reported); a rejected draw
-fails. The top-level `r_j` / `r_I` / `dl_i` / `dq0` / `dq95` are the
-archived state's. The solver state, the isoflux targets and every
-attribute `generate()` sets are restored afterwards.
+re-solve and warm start, its strong coil regularisation and the
+reconstruction's own one installed for the loop (above), the isoflux
+re-pointed to the draw's own boundary, the homotopy and the post-homotopy
+stage, under `engine_draw_solve_maxits`. (Until 2026-10-04 it ran only the
+loop, `engine_draws.verify_zero_perturbation`, from whatever state the
+solver held, under whatever regularisation was installed -- not the draw's
+route; that function is kept, documented as the loop stage only.) `passed`
+needs every gate of every stage; each gated quantity is recorded with its
+value, its bound and the setting the bound comes from (`gates`, per stage):
+
+| stage | gated | bound |
+|---|---|---|
+| LOOP (`stages["loop"]`) | request bit-identical, loop converged; `r_j`, `r_I` of the draw's bootstrap against `lambda_BS*`; `|dl_i|`; `|dq0|` at the q-row radius | `jbs_rtol_j`, `jbs_rtol_Ip`, `jbs_tol_li`, `jbs_tol_q0` |
+| ARCHIVED (`stages["archived"]`, after the homotopy and the post-homotopy stage) | `r_j`, `r_I` of the bootstrap the draw carries there against `lambda_BS*` on its geometry; `|dl_i|`; `|dq0|` at the q-row radius | the same |
+| ARCHIVED GEOMETRY (`stages["archived_geometry"]`, read from the temporary archive) | max F-coil and max VSC-coil drift [%] of the archived coil currents against the reconstruction's (`_baseline/coil_currents`; the homotopy's own per-coil measure); LCFS rms deviation [mm] of the archived boundary from the reconstruction's (`recon_lcfs_ref`; the boundary filter's own metric) | the HARD coil bound the route rejects at -- `coil_drift_hard_factor x coil_drift` when configured, else the tightest homotopy stage `homotopy_passes[-1]`, else (`engine_draw_homotopy=False`) `coil_drift` -- and the in-spec boundary cut (`filtering.rms_max_mm` as resolved by `_boundary_cut`; recorded as not gated when the cut is `"off"`) |
+
+`dq95`, the flux-range change, the boundary max deviation and the homotopy
+drifts are reported; a rejected draw fails; an unreadable gated quantity
+fails. (Until 2026-10-06 `passed` gated r_j, r_I and |dl_i| only; q0, the
+coils and the boundary were reported.) No tolerance is new: every bound is
+the loop's, the homotopy's or the in-spec filter's own number. The
+top-level `r_j` / `r_I` / `dl_i` / `dq0` / `dq95` are the archived state's;
+`coil_reg` is the regularisation record of the draw's loop. The solver
+state, the isoflux targets and every attribute `generate()` sets are
+restored afterwards.
 
 **Post-hoc filters, not matching.** A draw matches no l_i, q0 or MSE row;
 l_i and beta_N drift and are recorded. The l_i band

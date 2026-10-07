@@ -247,7 +247,12 @@ pressure + that equilibrium's `p_sep`).
     convergence constants and their origins, per-pass log, delivery checks,
     the state, solves, and `coil_solve_mode`: `"bounded"` -- the solver's
     coil least-squares mode, entered once at `Bouquet.setup_solver`, see
-    `bouquet.solver_state`; absent in records written before 2026-10-06) plus, once `generate()` ran, a `draws` block (the
+    `bouquet.solver_state`; absent in records written before 2026-10-06),
+    `coil_reg` (the coil regularisation the reconstruction solved under:
+    `source` -- `"configured"`, `"default"`, `"strong (left installed by
+    generate())"` or `"unknown"` -- and its `terms` as `coils` / `target` /
+    `weight`; every engine draw's loop installs exactly that list; absent
+    before 2026-10-06) plus, once `generate()` ran, a `draws` block (the
     draws' loop settings, `rng_stream`, `q0_row`, `homotopy`,
     `l_i_tolerance`, the Ip-row target `Ip_target_A` in the exact measure,
     and the `reference` values every draw is compared with). Its per-chord
@@ -256,6 +261,12 @@ pressure + that equilibrium's `p_sep`).
     `"mse_record[<key>]"` in their place.
   - The per-draw record (`engine_draws`, version `unified-engine-draw/1`):
     `identity` (whether the first request was the stored one, bit for bit),
+    `coil_reg` (the coil regularisation the draw's loop solved under:
+    `source` -- `"reconstruction (configured)"` / `"reconstruction
+    (default)"`, the reconstruction's own term list, recorded on the
+    baseline's engine record as `coil_reg` with its terms; or a historical
+    fallback named as such -- `n_terms`, `installed`; absent before
+    2026-10-06),
     `inputs` (bootstrap scale, pressure-match iterations, inductive tries),
     `rng_stream`, `amplitude` (per pass: `a_ind`, `a_bs` with the q0 row,
     the Ip increment and the Ip in the exact measure against its target),
