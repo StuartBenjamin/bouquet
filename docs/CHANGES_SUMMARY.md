@@ -8,7 +8,8 @@ bit-identical when absent).*
 
 - **`GenerationConfig.reconstruction_engine`** (`"legacy"` | `"unified"`,
   default `"legacy"`) with `engine_preset` (`"structured"` |
-  `"bootstrap_scalar"` | `"sawtooth_two_scalar"`), `engine_rows` (`"Ip"`,
+  `"structured_uniform"` | `"bootstrap_scalar"` | `"sawtooth_two_scalar"` |
+  `"two_scalar_li"`), `engine_rows` (`"Ip"`,
   `"l_i"`, `"q0"`, `"mse"`), `engine_delivery_correction` (default `False`)
   and `engine_mse_jacobian` (`"fd_broyden"` | `"fd_chord"`). Validated by
   name; engine options set under `"legacy"` are refused. Stored configs
@@ -28,9 +29,8 @@ bit-identical when absent).*
 - `Bouquet.prepare_baseline()` dispatches to the engine when selected, for
   both inputs, and returns the usual `Baseline` plus `Baseline.engine` (the
   full record: contract, settings, convergence constants with their origins,
-  per-pass log, delivery checks, state, solve counts). `generate()` and
-  `verify_sigma0_consistency()` refuse an engine baseline until the draws
-  run on the engine (Stage 3).
+  per-pass log, delivery checks, state, solve counts). (Stage 2 refused
+  engine baselines in `generate()`; Stage 3 below runs their draws.)
 - `run_jbs_loop(..., extra=None)`: an opt-in hook for criteria the kernel
   does not own; absent, the kernel is bit-identical (frozen-copy test).
 - Archive: `engine.store_baseline_engine` / `load_baseline_engine` write /
@@ -42,6 +42,83 @@ bit-identical when absent).*
   examples; identity (I2) is checked on the golden fixture's stored
   geometry; solver tests (`tests/test_engine_solver.py`, `-m solver`) and the
   probe `tests/probes/measure_engine.py` write the distance-to-input table.
+- **The draws on the engine (Stage 3, `bouquet/engine_draws.py`).** With
+  `reconstruction_engine="unified"`, `generate()` and
+  `verify_sigma0_consistency()` run on the engine: a draw starts from the
+  reconstruction's delivered state, perturbs the kinetics (the legacy
+  pressure-matched stream), the parallel inductive (today's toroidal
+  `sigma_jphi` / `j_ls`) and the bootstrap scale, holds `x*` and closes
+  only the Ip row -- a scalar amplitude on the inductive in the exact
+  measure, zero extra solves (optionally the q0 row too,
+  `engine_draw_q0_row`, default off) -- and runs ONE bootstrap loop (draw
+  ceiling, current gate standing), then the coil homotopy
+  (`engine_draw_homotopy`, default on) and the existing post-homotopy check
+  with its saturation guard. The first request of a zero-perturbation draw
+  is the stored request bit for bit, by construction. l_i and beta_N drift
+  and are recorded, with the change of the poloidal flux range
+  `psi_b - psi_a` against the reconstruction (the per-part linear l_i
+  attribution of an earlier version was removed: its model holds the flux
+  range fixed, so its remainder was the geometry's response); the
+  l_i band (`l_i_tolerance`) and `constrain_sawteeth` are post-hoc filters
+  (out-of-band draws archived with `in_spec=False`, not counted by until-N,
+  not `selected`). Cost is recorded per draw by stage. `draw_solve_maxits`
+  now caps every engine solve. Archive: ADDED `engine_json` on draws and a
+  `draws` block on the baseline record, `passes_draw_band` (a filter flag),
+  engine MSE arrays as `structured_mse/engine_mse_*` datasets (schema stays
+  v3). New rejection codes `jbs_non_finite`, `engine_closure_refused`
+  (engine draws only). The legacy draw path is unchanged: every hook is a
+  gated block, and the functions minus those blocks are the frozen code
+  (`tests/test_engine_draws_legacy_ast.py`). Solver tests add the
+  zero-perturbation draw on both examples and a seeded 6-draw batch
+  (`measure_engine.py --draws 6 --seed 12345`).
+- **Engine draws: bootstrap refresh and the homotopy solve cap (both
+  default to the behaviour before them).**
+  `GenerationConfig.engine_draw_bootstrap_refresh` (default `False`): after
+  a draw's first loop solve the anchor's kinetic Redl increment is
+  re-evaluated on that solved geometry and the loop restarts from it
+  (`run_jbs_loop(start_refresh=...)`, a kernel hook that is a no-op when
+  `None`) -- the path only, zero extra solves, no criterion or tolerance
+  changed, the zero-perturbation request still bit-identical and the
+  refreshed bootstrap `lambda_BS*` up to the re-solve's reproduction of
+  the stored equilibrium (rounding on the toy, r_j 1.9e-5 on the live
+  g-file example); recorded as
+  `loop.bootstrap_refresh`. `draw_solve_maxits` (default `None`) now also
+  governs every homotopy solve of an engine draw (installed for the stage
+  when the solver does not already carry it), and a capped homotopy or
+  post-homotopy solve that does not converge rejects the draw with the new
+  codes `homotopy_maxits` / `post_homotopy_maxits` (never rolled back and
+  archived); with `None` nothing is re-classified. The legacy draw path is
+  unchanged (the new hooks are gated blocks; the frozen-code AST test
+  passes). The solver probe takes `BQ_ENGINE_PROBE_GC` to run the solver
+  tests with a draw setting on.
+- **Engine draws: the solve cap defaults to 100, with rollback for a capped
+  homotopy stage (owner's decision, 2026-09-30).** New
+  `GenerationConfig.engine_draw_solve_maxits` (default `100`; `None` = the
+  solver's own cap) caps every GS solve inside an engine draw (loop,
+  homotopy stages, rollback re-solve, post-homotopy passes) and the
+  zero-perturbation draw; the reconstruction runs under the solver's own
+  cap. **Changed rule:** a capped homotopy STAGE is now a failed stage like
+  any other -- it rolls back to the last good stage, and the draw is
+  rejected (`homotopy_maxits`) only when there is none (it was rejected
+  outright before); a capped rollback re-solve, post-homotopy pass or loop
+  solve still rejects with its code. Every capped solve is recorded (stage,
+  iterations, seconds, outcome) on `Bouquet.engine_draw_cap_events` and the
+  draw's `homotopy.cap_events`. `draw_solve_maxits` is refused under the
+  engine; the legacy draws are unchanged (`draw_solve_maxits` default
+  `None`; frozen-code AST test passes). The fast test that asserted the old
+  rule at homotopy pass 2 now asserts the rollback.
+- **Engine presets `two_scalar_li` and `structured_uniform` (not defaults).**
+  `two_scalar_li`: one scalar on the inductive, one on the bootstrap
+  (constant basis), rows Ip + l_i -- a 2 × 2 system on the g-file's hard
+  rows, the legacy secant's l_i family and the q95 attribution study's
+  "2-scalar" state as a named preset; soft IDS rows go to the soft solver
+  with the constant basis's σ = 1 as the documented uniform prior.
+  `structured_uniform`: the shipped basis under
+  `utils.STRUCTURED_WEIGHTS_UNIFORM` (the design's prior-sensitivity run).
+  Neither adds a number. Solver test `tests/test_engine_two_scalar_solver.py`.
+- **Probe fix:** `tests/probes/measure_engine.py::_distance_ids` takes the
+  slice time from the source (it used the synthetic example's constant for
+  every dd); the table records the slice it used.
 
 ## Unreleased, intended for the release after 1.4.0 — self-consistent bootstrap current (default ON)
 

@@ -39,6 +39,17 @@ if TYPE_CHECKING:
 from .utils import _shape_from_boundary  # noqa: F401  (compatibility re-export)
 
 
+def _engine_gate(config):
+    """``True`` when the draws run on the unified engine
+    (``reconstruction_engine="unified"``), else ``None`` -- the gate every
+    engine branch of the draw path tests (``if _eng is not None``), so the
+    legacy path is exactly the code without those branches (pinned by
+    ``tests/test_engine_draws_legacy_ast.py``)."""
+    gc = getattr(config, "generation", None)
+    return (True if getattr(gc, "reconstruction_engine", "legacy")
+            == "unified" else None)
+
+
 class Bouquet:
     """Stateful driver: solver -> baseline -> generate -> filter -> export."""
 
@@ -5920,6 +5931,10 @@ class Bouquet:
             raise ValueError("call setup_solver() + prepare_baseline() / "
                              "reconstruct() before verify_sigma0_consistency()")
         self._refuse_unified_engine_draws("verify_sigma0_consistency()")
+        _eng = _engine_gate(self.config)
+        if _eng is not None:
+            # the engine draw at zero perturbation (bouquet.engine_draws)
+            return self._verify_sigma0_engine()
         if self.config.generation.single_profile_jphi:
             # No inductive/bootstrap split exists, so there is nothing for the
             # sigma=0 draw to reproduce. Report a pass rather than spending a
@@ -6078,6 +6093,45 @@ class Bouquet:
               f"{out['max_dev']/1e6:.4f} MA/m² ({100*out['max_dev_frac']:.2f}% "
               f"of peak, worst at psi_N={out['psi_worst']:.3f}; "
               f"tol {100*tol_frac:.1f}%{_fl})")
+        return out
+
+    def _verify_sigma0_engine(self):
+        """``verify_sigma0_consistency`` under ``reconstruction_engine=
+        "unified"``: the engine draw (:func:`bouquet.engine_draws.
+        verify_zero_perturbation`) at zero perturbation and bootstrap scale
+        1.0, from the state this method was called on (restored after).
+        ``passed``: the first request is BIT-IDENTICAL to the stored request,
+        the draw's loop converged, and its bootstrap is within ``jbs_rtol_j``
+        / ``jbs_rtol_Ip`` of the reconstruction's with ``|l_i - l_i*| <=
+        jbs_tol_li`` -- the draw-route rule of the legacy check, at the
+        unchanged loop tolerances; ``dq0`` (at its labelled radius) and
+        ``dq95`` are reported beside them."""
+        from .engine import engine_draw_maxits
+        from .engine_draws import (context_from_run, tokamaker_backend,
+                                   verify_zero_perturbation)
+        run = self._engine_run
+        gc = self.config.generation
+        ctx = context_from_run(run, gc, self.baseline)
+        from types import SimpleNamespace
+        c = ctx.c
+        b = tokamaker_backend(
+            self.mygs, SimpleNamespace(psi_N=c.psi_N, pressure=c.pressure,
+                                       Ip=c.Ip, kinetics=c.kinetics),
+            psi_pad=run["psi_pad"], q_psi=run.get("q_psi"),
+            maxits=engine_draw_maxits(gc))
+        snap = (self.mygs.copy_eq() if hasattr(self.mygs, "copy_eq")
+                else None)
+        try:
+            out = verify_zero_perturbation(ctx, b)
+        finally:
+            if snap is not None:
+                self.mygs.replace_eq(source_eq=snap)
+        out["passed_reason"] = (
+            "the engine draw at zero perturbation reproduces the "
+            "reconstruction (request bit-identical; loop tolerances)"
+            if out["passed"] else
+            "the engine draw at zero perturbation misses the reconstruction "
+            "(see the record)")
         return out
 
     def _verify_sigma0_jbs_loop(self, settings, pp, ffp, pressure, ne_eq,
@@ -6594,6 +6648,24 @@ class Bouquet:
             problems.append("jphi_scalar_sigma<=0 freezes j_inductive "
                             "perturbation (violates the all-profiles rule)")
         self._check_jbs_loop_workflow(gc)
+        _eng = _engine_gate(self.config)
+        if _eng is not None:
+            # unified engine: ONE draw route (x* held, the Ip amplitude) for
+            # both input types replaces Fix C and the standard l_i loop, so
+            # their per-path route rules do not apply
+            if gc.perturb_jind_in_anchor:
+                print("NOTE: reconstruction_engine='unified' -- "
+                      "perturb_jind_in_anchor (a legacy route choice) is not "
+                      "read; every draw runs on the engine")
+            if not problems:
+                return
+            msg = ("bouquet workflow guard: " + "; ".join(problems)
+                   + ". Set config.generation.workflow='custom' to override "
+                   "(backend tests / experiments only).")
+            if custom:
+                print("WARN: " + msg)
+                return
+            raise ValueError(msg)
         # closure_channel is consumed ONLY by the IMAS hybrid baseline
         # (jBS_baseline_mode="ohmic" with recalculate_j_BS=True).  Anywhere
         # else it used to be resolved (the structured preset even printed
@@ -6783,6 +6855,12 @@ class Bouquet:
 
         env = resolve_uncertainty(self.config, bl)
         self._resolved_uncertainty = env
+        # reconstruction_engine="unified": the draws run on the engine, from
+        # the live reconstruction of this session (bouquet.engine_draws)
+        _eng = _engine_gate(self.config)
+        if _eng is not None:
+            from .engine_draws import build_generate_context
+            _eng = build_generate_context(self, env)
 
         header = self.config.output_header
         initialize_equilibrium_database(header)
@@ -6818,6 +6896,14 @@ class Bouquet:
         _bs = float(getattr(bl, "bs_scale", 1.0))
         _jbs_range = (None if gc.jBS_scale_range is None
                       else (gc.jBS_scale_range[0] * _bs, gc.jBS_scale_range[1] * _bs))
+        if _eng is not None:
+            # engine draws: the scale multiplies the Redl bootstrap ON TOP
+            # of s_bs(x*) (which already carries the reconstruction's
+            # bootstrap scaling), so the configured range is used as is --
+            # 1.0 is the reconstruction's value
+            _jbs_range = (None if gc.jBS_scale_range is None
+                          else (float(gc.jBS_scale_range[0]),
+                                float(gc.jBS_scale_range[1])))
 
         # The LCFS boundary cut, resolved ONCE and OUTSIDE the output capture:
         # the announcement must reach the user (inside the capture it went to
@@ -6828,6 +6914,10 @@ class Bouquet:
         from .utils import capture_native_output
         from .jbs_loop import jbs_settings as _jbs_settings
         _jbs_draw = _jbs_settings(gc, draw=True)
+        if _eng is not None:
+            # the engine draw's loop settings (the draw ceiling, the current
+            # gate standing, the post-homotopy ceiling)
+            _jbs_draw = dict(_eng.loop_settings)
         verbose = bool(getattr(self.config, "verbose", False))
         _rejections = []
         from .TokaMaker_interface import DrawSolveGuard
@@ -6948,6 +7038,7 @@ class Bouquet:
                 # the per-chord MSE arrays, archived as datasets
                 baseline_mse_record=getattr(bl, "mse_record", None),
                 solve_guard=_solve_guard,
+                engine_draw=_eng,
             )
         self.generation_log = _cap["text"] or None
         self.draw_rejections = list(_rejections)
@@ -6968,12 +7059,30 @@ class Bouquet:
         _loop_codes = ("jbs_not_converged", "coil_saturation_jbs_loop",
                        "jbs_post_homotopy", "coil_saturation_post_homotopy",
                        "jbs_post_homotopy_error", "anchor_solve_failed")
+        if _eng is not None:
+            _loop_codes = _loop_codes + ("jbs_non_finite",
+                                         "engine_closure_refused")
         _n_loop = sum(1 for r in self.draw_rejections
                       if r.get("reason") in _loop_codes)
         if _n_loop:
             print(f"[generate] {_n_loop} of them rejected by the "
                   "self-consistent j_BS loop stage or its coil-saturation "
                   "guard; per-attempt records: Bouquet.draw_rejections")
+        if _eng is not None:
+            # every engine-draw solve that stopped at engine_draw_solve_maxits
+            # (stage, iterations, seconds, rolled back or rejected), outside
+            # the capture
+            self.engine_draw_cap_events = [dict(e) for e in _eng.cap_events]
+            if _eng.cap_events:
+                from collections import Counter as _Ctr
+                _by = _Ctr((e["stage"], e["outcome"])
+                           for e in _eng.cap_events)
+                print(f"[generate] {len(_eng.cap_events)} engine-draw GS "
+                      f"solve(s) stopped at engine_draw_solve_maxits="
+                      f"{_eng.maxits}: " + ", ".join(
+                          f"{st} {oc} x{n}" for (st, oc), n in
+                          sorted(_by.items()))
+                      + "; per-solve records: Bouquet.engine_draw_cap_events")
 
         # The cut the until-N loop counted against, next to the counts it
         # produced (generation provenance). Only an until-N loop applies a cut
@@ -7037,6 +7146,10 @@ class Bouquet:
         from .utils import store_baseline_jbs_loop
         store_baseline_jbs_loop(header, self._baseline_jbs_record(),
                                 scan_key=gc.scan_key)
+        if _eng is not None:
+            # the reconstruction's engine record (+ the draws' settings) on
+            # _baseline: the per-draw engine blocks' reference
+            _eng.store_baseline(header, gc.scan_key, bl)
 
         # Stamp provenance (schema/version/timestamp + full config JSON) onto the
         # archive so the run is self-describing and load_config() can round-trip it.
@@ -7057,28 +7170,41 @@ class Bouquet:
         return self.diagnostics
 
     def _refuse_unified_engine_draws(self, what):
-        """Refuse draws on a baseline built by the unified engine (Stage 2).
+        """Refuse draws that would not reproduce their baseline.
 
-        The legacy draw routes compose the bootstrap with the legacy
-        toroidal conversion (``<j.B>/(F<1/R>)``) and keep the pressure-driven
-        term frozen in the inductive, while an engine baseline stores the
-        solver-consistent ``<j.B> F<1/R>/<B^2>`` composition -- a legacy draw
-        would therefore NOT reproduce the reconstruction at zero
-        perturbation.  The draws move onto the engine in Stage 3; until then
-        this refuses rather than producing an inconsistent ensemble.
+        The draws run on the unified engine (Stage 3, bouquet.engine_draws)
+        when the baseline was built by it in THIS session.  Refused -- the
+        mismatched cases, where either route would be inconsistent at zero
+        perturbation (the legacy routes compose the bootstrap with the
+        legacy toroidal conversion and keep the pressure-driven term frozen
+        in the inductive):
+
+        * ``reconstruction_engine="unified"`` with a baseline the engine did
+          not build (or whose live state is not in this session);
+        * ``reconstruction_engine="legacy"`` with an engine-built baseline.
         """
-        if getattr(self.config.generation, "reconstruction_engine",
-                   "legacy") == "unified" or getattr(
-                       getattr(self, "baseline", None), "engine",
-                       None) is not None:
+        unified = getattr(self.config.generation, "reconstruction_engine",
+                          "legacy") == "unified"
+        bl = getattr(self, "baseline", None)
+        eng_bl = getattr(bl, "engine", None) is not None
+        run = getattr(self, "_engine_run", None)
+        live = bool(run and run.get("baseline") is bl and bl is not None)
+        if unified and not (eng_bl and live):
+            raise NotImplementedError(
+                f"{what}: reconstruction_engine='unified' draws (Stage 3) "
+                "run from the unified engine's reconstruction built by "
+                "prepare_baseline() in this session; this baseline was not "
+                "(or its live state is gone) -- call prepare_baseline() with "
+                "the unified engine first")
+        if not unified and eng_bl:
             raise NotImplementedError(
                 f"{what}: the baseline was built by the unified "
-                "reconstruction engine (reconstruction_engine='unified'); "
-                "draws on the engine are not implemented yet (Stage 3), and "
-                "the legacy draw routes would not reproduce this "
+                "reconstruction engine but reconstruction_engine is now "
+                "'legacy'; the legacy draw routes would not reproduce this "
                 "reconstruction at zero perturbation (different bootstrap "
-                "conversion and pressure-term bookkeeping).  Use "
-                "reconstruction_engine='legacy' to generate a bouquet.")
+                "conversion and pressure-term bookkeeping; Stage 3 draws run "
+                "on the engine).  Set reconstruction_engine='unified' or "
+                "rebuild the baseline with 'legacy'.")
 
     def _baseline_jbs_record(self):
         """The baseline's self-consistent bootstrap loop record, or ``None``
