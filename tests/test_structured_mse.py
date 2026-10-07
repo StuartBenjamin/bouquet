@@ -1,0 +1,737 @@
+"""closure_channel="structured" with MSE pitch angles as a third measurement.
+
+No solver and no machine data anywhere.  The "equilibrium" is an analytic
+large-aspect-ratio cylinder: a current profile j(psi_N) on psi_N = (r/a)^2 is
+renormalised to the target Ip (as the real forward solve renormalises the
+shape it is handed), its enclosed current gives B_theta = mu0 I(r) / (2 pi r),
+and B_phi = B0 R0 / R.  tan(gamma) at outboard-midplane chords is then a
+smooth NONLINEAR function of the structured coefficients -- nonlinear through
+the Ip renormalisation, the 1/r and the denominator -- which is what the
+finite-difference linearisation has to cope with.
+
+What is proved here:
+
+* the data block (``bouquet.mse``): validation, the fit-weight fold, the
+  E_r double-count refusal, the forward formula and the orientation choice;
+* the solvers: with an MSE linear model they return the EXACT minimiser of
+  prior + chi2 under their constraints (checked against an independent
+  closed-form KKT solve), Ip stays exact on the hard channel, the one-sided
+  prior still settles, a vanishing MSE weight recovers the no-MSE answer, and
+  ``mse_lin=None`` changes nothing;
+* the linearisation: the forward-difference Jacobian is first-order accurate
+  (error halves with the step) against a central-difference reference, the
+  outer loop's recorded linearisation residual is the true one, a LINEAR
+  forward model is solved exactly, and on the nonlinear cylinder the achieved
+  objective and chi2 both fall;
+* the run.py stage end to end on a stubbed solver: records, solve count,
+  refusal and fallback behaviour, the required flag, and a JSON-serialisable
+  ip_closure record.
+"""
+import json
+import types
+import warnings
+
+import numpy as np
+import pytest
+from scipy.integrate import cumulative_trapezoid, trapezoid
+
+from bouquet.config import GenerationConfig
+from bouquet.mse import (MSEDataUnusable, mse_chi2, mse_chords, mse_field_at,
+                         mse_sign_convention, mse_tan_gamma)
+from bouquet.utils import (MSE_FLAG_PREFIX, Ip_fsa_weights,
+                           close_ip_structured, close_ip_structured_soft,
+                           structured_basis_eval, structured_mse_jacobian,
+                           structured_mse_linear_model, structured_mse_outer,
+                           structured_objective_no_mse,
+                           STRUCTURED_WEIGHTS_PHYSICS)
+
+_N = 201
+_MU0 = 4.0e-7 * np.pi
+R0, AMINOR, B0 = 1.7, 0.6, 2.0
+
+
+# ---------------------------------------------------------------------------
+#  fixtures: the same closable hybrid the structured-closure tests use
+# ---------------------------------------------------------------------------
+def _geom():
+    psi = np.linspace(0.01, 0.99, _N)
+    r = AMINOR * np.sqrt(psi)
+    R_avg = R0 + 0.1 * r ** 2 / AMINOR
+    inv_R = (1.0 / R0) * (1.0 + 0.05 * (r / AMINOR) ** 2)
+    inv_R2 = inv_R ** 2 * (1.0 + 0.02 * (r / AMINOR) ** 2)
+    dV_dpsi = 4.0 * np.pi ** 2 * R0 * r * (AMINOR / (2.0 * np.sqrt(psi)))
+    pprime = -8.0e3 * (1.0 - psi)
+    return {"psi_N": psi, "psi_q": psi, "R_avg": R_avg, "inv_R": inv_R,
+            "inv_R2": inv_R2, "dV_dpsi": dV_dpsi, "dpsi_dpsiN": 0.9,
+            "pprime": pprime}
+
+
+def _parts():
+    g = _geom()
+    w, c = Ip_fsa_weights(g, convention="jphi-linterp")
+    psi = g["psi_N"]
+    j_ind = 8.0e5 * (1.0 - psi) ** 1.5
+    j_bs = 3.0e5 * np.exp(-((psi - 0.9) / 0.06) ** 2) + 2.0e4 * (1.0 - psi)
+    j_fix = 1.0e5 * (1.0 - psi) ** 3
+    lin = lambda j: float(trapezoid(w * np.asarray(j, float), psi))
+    Ip_s = 1.04 * (lin(j_ind) + lin(j_bs) + lin(j_fix) + c)
+    return psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s
+
+
+class _Cylinder:
+    """The analytic stand-in for a free-boundary solve (see module doc)."""
+
+    def __init__(self, psi, Ip):
+        self.psi = np.asarray(psi, float)
+        self.Ip = float(Ip)
+        self.I = None
+        self.n_solves = 0
+
+    def solve(self, j):
+        I = np.pi * AMINOR ** 2 * cumulative_trapezoid(
+            np.asarray(j, float), self.psi, initial=0.0)
+        # the core below psi[0] carries the axis value of j
+        I = I + np.pi * AMINOR ** 2 * float(j[0]) * self.psi[0]
+        self.I = I * (self.Ip / I[-1])          # Ip imposed, as a solve does
+        self.n_solves += 1
+        return 7
+
+    def field(self, R, Z):
+        R = np.asarray(R, float)
+        r = np.abs(R - R0)
+        pn = (r / AMINOR) ** 2
+        I_r = np.interp(pn, self.psi, self.I)
+        Bth = _MU0 * I_r / (2.0 * np.pi * r)
+        return np.column_stack([np.zeros_like(R), B0 * R0 / R, Bth])
+
+
+class _Eval:
+    def __init__(self, cyl):
+        self.cyl = cyl
+
+    def eval(self, pt):
+        return self.cyl.field(np.array([pt[0]]), np.array([pt[1]]))[0]
+
+
+class _FakeGS:
+    """``get_field_eval`` only: what ``mse_field_at`` reads."""
+
+    def __init__(self, cyl):
+        self.cyl = cyl
+
+    def get_field_eval(self, name):
+        assert name == "B"
+        return _Eval(self.cyl)
+
+    def copy_eq(self):
+        return _Snap()
+
+
+def _chord_geometry(n=12):
+    r = AMINOR * np.sqrt(np.linspace(0.06, 0.9, n))
+    return R0 + r, np.zeros(n)
+
+
+def _hybrid(x, Phi, j_ind, j_bs, j_fix):
+    K = Phi.shape[0]
+    return (1.0 + x[:K] @ Phi) * j_ind + (1.0 + x[K:] @ Phi) * j_bs + j_fix
+
+
+def _mse_block(tg, R, Z, sigma=3.0e-3, weight=None, **kw):
+    n = len(tg)
+    md = dict(R=list(R), Z=list(Z), tgamma=list(tg),
+              sigma=[sigma] * n,
+              weight=([1.0] * n if weight is None else list(weight)),
+              A1=[1.0] * n, A2=[1.0] * n, A3=[0.1] * n, A4=[0.05] * n)
+    md.update(kw)
+    return md
+
+
+def _synthetic_world(x_true=None, K=4):
+    """(parts, cyl, Phi, chords) with data generated at x_true."""
+    psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+    Phi = structured_basis_eval(None, psi)
+    if x_true is None:
+        x_true = np.array([0.0, -0.12, -0.05, 0.0, 0.0, 0.0, 0.08, 0.0])
+    cyl = _Cylinder(psi, Ip_s)
+    cyl.solve(_hybrid(x_true, Phi, j_ind, j_bs, j_fix))
+    R, Z = _chord_geometry()
+    B = cyl.field(R, Z)
+    ch0 = mse_chords(_mse_block(np.zeros(R.size), R, Z))
+    tg_true = mse_tan_gamma(B, ch0)
+    ch = mse_chords(_mse_block(tg_true, R, Z))
+    return (psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s), cyl, Phi, ch
+
+
+# ---------------------------------------------------------------------------
+class TestDataBlock:
+    def test_weight_is_folded_into_sigma_once(self):
+        R, Z = _chord_geometry(6)
+        md = _mse_block([0.1] * 6, R, Z, sigma=0.01,
+                        weight=[1.0, 4.0, 0.25, 1.0, 1.0, 1.0])
+        ch = mse_chords(md)
+        np.testing.assert_allclose(ch["sigma_eff"][:3], [0.01, 0.005, 0.02])
+
+    def test_inactive_chords_are_dropped_and_indexed(self):
+        R, Z = _chord_geometry(8)
+        tg = [0.1] * 8
+        tg[2] = float("nan")
+        md = _mse_block(tg, R, Z, weight=[1, 1, 1, 0, 1, 1, -1, 1])
+        ch = mse_chords(md)
+        assert ch["n_total"] == 8 and ch["n_active"] == 5
+        assert list(ch["index"]) == [0, 1, 4, 5, 7]
+
+    def test_sigma_sys_adds_in_quadrature_and_defaults_to_zero(self):
+        R, Z = _chord_geometry(5)
+        md = _mse_block([0.1] * 5, R, Z, sigma=0.003)
+        np.testing.assert_allclose(mse_chords(md)["sigma_eff"], 0.003)
+        np.testing.assert_allclose(mse_chords(md, sigma_sys=0.004)["sigma_eff"],
+                                   0.005)
+
+    @pytest.mark.parametrize("mut, match", [
+        (lambda md: md.pop("A2"), "lacks A2"),
+        (lambda md: md.update(R=md["R"][:-1]), "differ in length"),
+        (lambda md: md.update(weight=[0.0] * 6), "only 0 of 6"),
+        (lambda md: md.update(Er=[1e4] * 6, A5=[1e-6] * 6,
+                              er_corrected=True), "count E_r twice"),
+    ])
+    def test_refusals(self, mut, match):
+        R, Z = _chord_geometry(6)
+        md = _mse_block([0.1] * 6, R, Z)
+        mut(md)
+        with pytest.raises(MSEDataUnusable, match=match):
+            mse_chords(md)
+
+    def test_none_is_unusable(self):
+        with pytest.raises(MSEDataUnusable, match="no MSE data block"):
+            mse_chords(None)
+
+    def test_min_chords(self):
+        R, Z = _chord_geometry(4)
+        mse_chords(_mse_block([0.1] * 4, R, Z))
+        with pytest.raises(MSEDataUnusable, match="at least 5"):
+            mse_chords(_mse_block([0.1] * 4, R, Z), min_chords=5)
+
+
+class TestForwardModel:
+    def test_formula_including_the_er_term(self):
+        R, Z = _chord_geometry(4)
+        md = _mse_block([0.0] * 4, R, Z, A5=[2e-6] * 4, Er=[3e4] * 4)
+        ch = mse_chords(md)
+        assert ch["er_applied"] and not ch["er_corrected"]
+        B = np.array([[0.01, 2.0, 0.3]] * 4)
+        exp = (1.0 * 0.3 + 2e-6 * 3e4) / (1.0 * 2.0 + 0.1 * 0.01 + 0.05 * 0.3)
+        np.testing.assert_allclose(mse_tan_gamma(B, ch), exp, rtol=1e-14)
+        # orientation: poloidal components flip together, toroidal alone
+        exp2 = (-0.3 + 2e-6 * 3e4) / (-2.0 - 0.001 - 0.015)
+        np.testing.assert_allclose(mse_tan_gamma(B, ch, -1.0, -1.0), exp2,
+                                   rtol=1e-14)
+
+    def test_orientation_is_recovered(self):
+        _parts_, cyl, Phi, ch = _synthetic_world()
+        B = cyl.field(ch["R"], ch["Z"])
+        # data in the opposite toroidal-field convention
+        md = _mse_block(list(mse_tan_gamma(B, ch, 1.0, -1.0)), ch["R"],
+                        ch["Z"])
+        chf = mse_chords(md)
+        sp, st, table = mse_sign_convention(B, chf)
+        assert (sp, st) == (1.0, -1.0)
+        assert table["(+1,-1)"] < 1e-20 < table["(+1,+1)"]
+
+    def test_field_read_through_the_equilibrium_interface(self):
+        _parts_, cyl, Phi, ch = _synthetic_world()
+        np.testing.assert_allclose(mse_field_at(_FakeGS(cyl), ch["R"], ch["Z"]),
+                                   cyl.field(ch["R"], ch["Z"]), rtol=1e-15)
+
+
+# ---------------------------------------------------------------------------
+def _random_lin(K=4, n=10, seed=3, scale=1.0):
+    rng = np.random.default_rng(seed)
+    R, Z = _chord_geometry(n)
+    ch = mse_chords(_mse_block(list(0.3 + 0.01 * rng.standard_normal(n)),
+                               R, Z, sigma=3e-3))
+    J = 0.05 * scale * rng.standard_normal((n, 2 * K))
+    tg0 = 0.3 + 0.01 * rng.standard_normal(n)
+    x0 = 0.01 * rng.standard_normal(2 * K)
+    return structured_mse_linear_model(x0, tg0, J, ch), ch
+
+
+def _kkt_reference(W, M, m, C=None, d=None):
+    """argmin x'Wx + ||Mx - m||^2 (s.t. Cx = d), by the textbook KKT system."""
+    H = 2.0 * (np.diag(W) + M.T @ M)
+    g = 2.0 * M.T @ m
+    if C is None:
+        return np.linalg.solve(H, g)
+    C = np.atleast_2d(C)
+    k = C.shape[0]
+    Kmat = np.block([[H, C.T], [C, np.zeros((k, k))]])
+    return np.linalg.solve(Kmat, np.concatenate([g, np.atleast_1d(d)]))[:H.shape[0]]
+
+
+def _Mm(lin):
+    sig = lin["sigma_eff"]
+    M = lin["J"] / sig[:, None]
+    m = (lin["tgamma"] - lin["tg0"] + lin["J"] @ lin["x0"]) / sig
+    return M, m
+
+
+class TestSolversWithMSE:
+    def test_hard_is_the_exact_constrained_minimiser_and_keeps_ip(self):
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        mlin, _ch = _random_lin()
+        out = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+                                  mse_lin=mlin)
+        W = np.concatenate([STRUCTURED_WEIGHTS_PHYSICS["ind"],
+                            STRUCTURED_WEIGHTS_PHYSICS["bs"]])
+        M, m = _Mm(mlin)
+        C = np.concatenate([out["A_row"], out["B_row"]])
+        x_ref = _kkt_reference(W, M, m, C, out["deficit"])
+        x = np.concatenate([out["a"], out["b"]])
+        np.testing.assert_allclose(x, x_ref, rtol=1e-8, atol=1e-12)
+        assert abs(out["ip_residual"]) < 1e-9 * abs(Ip_s)
+        z = M @ x - m
+        assert out["mse_chi2_model"] == pytest.approx(float(z @ z), rel=1e-12)
+        assert out["mse_objective_model"] == pytest.approx(
+            float(W @ x ** 2 + z @ z), rel=1e-12)
+        assert out["constraints"][-1].startswith("MSE tan(gamma)")
+
+    def test_mse_moves_the_answer_and_lowers_the_model_chi2(self):
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        mlin, _ch = _random_lin()
+        base = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix)
+        out = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+                                  mse_lin=mlin)
+        M, m = _Mm(mlin)
+        xb = np.concatenate([base["a"], base["b"]])
+        zb = M @ xb - m
+        assert out["mse_chi2_model"] < float(zb @ zb)
+        # and the full objective is below the no-MSE answer's
+        assert out["mse_objective_model"] < (
+            structured_objective_no_mse(base) + float(zb @ zb))
+
+    def test_soft_quadratic_case_matches_closed_form(self):
+        # soft Ip (linear row), no l_i: the whole objective is quadratic
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        mlin, _ch = _random_lin()
+        sig_ind = np.array([0.1, 0.4, 0.4, 0.4])
+        sig_bs = np.array([0.5, 0.3, 0.15, 0.1])
+        sIp = 0.005 * abs(Ip_s)
+        out = close_ip_structured_soft(psi, w, c, Ip_s, sIp, j_ind, j_bs,
+                                       j_fix, sigma_ind=sig_ind,
+                                       sigma_bs=sig_bs, mse_lin=mlin)
+        W = 1.0 / np.concatenate([sig_ind, sig_bs]) ** 2
+        M, m = _Mm(mlin)
+        p = np.concatenate([out["A_row"], out["B_row"]]) / sIp
+        M2 = np.vstack([M, p])
+        m2 = np.concatenate([m, [out["deficit"] / sIp]])
+        x_ref = _kkt_reference(W, M2, m2)
+        x = np.concatenate([out["a"], out["b"]])
+        np.testing.assert_allclose(x, x_ref, rtol=1e-7, atol=1e-10)
+        assert out["objective"] == pytest.approx(out["mse_objective_model"])
+        assert structured_objective_no_mse(out) == pytest.approx(
+            out["objective"] - out["mse_chi2_model"])
+
+    def test_hard_and_soft_agree_when_given_the_same_statement(self):
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        mlin, _ch = _random_lin()
+        h = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+                                mse_lin=mlin)
+        sig = 1.0 / np.sqrt(np.concatenate([STRUCTURED_WEIGHTS_PHYSICS["ind"],
+                                            STRUCTURED_WEIGHTS_PHYSICS["bs"]]))
+        s = close_ip_structured_soft(psi, w, c, Ip_s, None, j_ind, j_bs,
+                                     j_fix, sigma_ind=sig[:4],
+                                     sigma_bs=sig[4:], mse_lin=mlin)
+        np.testing.assert_allclose(np.r_[s["a"], s["b"]], np.r_[h["a"], h["b"]],
+                                   rtol=1e-7, atol=1e-10)
+
+    def test_one_sided_prior_settles_on_its_exact_pattern(self):
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        mlin, _ch = _random_lin(seed=11, scale=3.0)
+        up = [0.1, 0.1, 0.1, 0.4]
+        out = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+                                  sigma_ind_up=up, mse_lin=mlin)
+        a = np.asarray(out["a"])
+        W_ind = np.where(a > 0.0, 1.0 / np.asarray(up) ** 2,
+                         np.asarray(STRUCTURED_WEIGHTS_PHYSICS["ind"]))
+        W = np.concatenate([W_ind, STRUCTURED_WEIGHTS_PHYSICS["bs"]])
+        M, m = _Mm(mlin)
+        C = np.concatenate([out["A_row"], out["B_row"]])
+        x_ref = _kkt_reference(W, M, m, C, out["deficit"])
+        np.testing.assert_allclose(np.r_[a, out["b"]], x_ref, rtol=1e-8,
+                                   atol=1e-12)
+        # the settled pattern is self-consistent
+        assert tuple(bool(v) for v in (x_ref[:4] > 0)) == out["sign_pattern"]
+
+    def test_vanishing_mse_weight_recovers_the_no_mse_answer(self):
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        mlin, _ch = _random_lin()
+        mlin = dict(mlin, sigma_eff=mlin["sigma_eff"] * 1e9)
+        for fn, args in ((close_ip_structured, ()),):
+            a = fn(psi, w, c, Ip_s, j_ind, j_bs, j_fix)
+            b = fn(psi, w, c, Ip_s, j_ind, j_bs, j_fix, mse_lin=mlin)
+            np.testing.assert_allclose(np.r_[b["a"], b["b"]],
+                                       np.r_[a["a"], a["b"]],
+                                       rtol=1e-9, atol=1e-13)
+
+    def test_absent_block_changes_nothing(self):
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        for fn, extra in ((close_ip_structured, {}),
+                          (close_ip_structured_soft, None)):
+            if extra is None:
+                a = fn(psi, w, c, Ip_s, 0.005 * Ip_s, j_ind, j_bs, j_fix)
+                b = fn(psi, w, c, Ip_s, 0.005 * Ip_s, j_ind, j_bs, j_fix,
+                       mse_lin=None)
+            else:
+                a = fn(psi, w, c, Ip_s, j_ind, j_bs, j_fix)
+                b = fn(psi, w, c, Ip_s, j_ind, j_bs, j_fix, mse_lin=None)
+            assert set(a) == set(b)
+            assert not any(k.startswith("mse_") for k in a)
+            for k in a:
+                if isinstance(a[k], np.ndarray):
+                    np.testing.assert_array_equal(a[k], b[k])
+                else:
+                    assert a[k] == b[k] or (a[k] != a[k] and b[k] != b[k])
+
+    def test_jacobian_width_must_match_the_basis(self):
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        mlin, _ch = _random_lin(K=3)
+        with pytest.raises(ValueError, match="columns"):
+            close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+                                mse_lin=mlin)
+
+
+# ---------------------------------------------------------------------------
+class TestLinearisation:
+    def _tan_gamma_of(self, parts, cyl, Phi, ch):
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = parts
+
+        def f(x):
+            cyl.solve(_hybrid(np.asarray(x, float), Phi, j_ind, j_bs, j_fix))
+            return mse_tan_gamma(cyl.field(ch["R"], ch["Z"]), ch)
+        return f
+
+    def test_forward_difference_jacobian_is_first_order(self):
+        parts, cyl, Phi, ch = _synthetic_world()
+        f = self._tan_gamma_of(parts, cyl, Phi, ch)
+        x0 = np.zeros(8)
+        tg0 = f(x0)
+        free = np.ones(8, bool)
+        # central-difference reference at a tiny step
+        Jref = np.column_stack([(f(x0 + 1e-5 * e) - f(x0 - 1e-5 * e)) / 2e-5
+                                for e in np.eye(8)])
+        errs = []
+        for h in (0.04, 0.02, 0.01):
+            J = structured_mse_jacobian(f, x0, tg0, free, step=h)
+            errs.append(np.max(np.abs(J - Jref)) / np.max(np.abs(Jref)))
+        assert errs[0] < 0.05
+        # first order: halving the step halves the error
+        assert errs[1] / errs[0] == pytest.approx(0.5, abs=0.1)
+        assert errs[2] / errs[1] == pytest.approx(0.5, abs=0.1)
+
+    def test_pinned_columns_cost_nothing_and_stay_zero(self):
+        parts, cyl, Phi, ch = _synthetic_world()
+        f = self._tan_gamma_of(parts, cyl, Phi, ch)
+        x0 = np.zeros(8)
+        tg0 = f(x0)
+        free = np.array([True, True, False, True, False, True, True, True])
+        n0 = cyl.n_solves
+        J = structured_mse_jacobian(f, x0, tg0, free)
+        assert cyl.n_solves - n0 == 6
+        assert np.all(J[:, ~free] == 0.0)
+
+    def test_linear_forward_model_is_solved_exactly(self):
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        rng = np.random.default_rng(5)
+        R, Z = _chord_geometry(10)
+        G = 0.05 * rng.standard_normal((10, 8))
+        t0 = 0.3 + 0.01 * rng.standard_normal(10)
+        ch = mse_chords(_mse_block(list(t0 + G @ (0.05 * rng.standard_normal(8))),
+                                   R, Z))
+        f = lambda x: t0 + G @ np.asarray(x, float)
+        resolve = lambda l: close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs,
+                                                j_fix, mse_lin=l)
+        pred = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix)
+        xp = np.r_[pred["a"], pred["b"]]
+        res = structured_mse_outer(xp, structured_objective_no_mse(pred),
+                                   f(xp), f, resolve, ch, np.ones(8, bool))
+        st = res["record"]["steps"][-1]
+        assert st["linearisation_residual_max_sigma"] < 1e-9
+        direct = close_ip_structured(
+            psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+            mse_lin=structured_mse_linear_model(np.zeros(8), t0, G, ch))
+        np.testing.assert_allclose(res["x"], np.r_[direct["a"], direct["b"]],
+                                   rtol=1e-6, atol=1e-10)
+        assert not res["flags"]
+
+    @pytest.mark.parametrize("soft", [False, True])
+    def test_objective_and_chi2_fall_on_the_nonlinear_cylinder(self, soft):
+        parts, cyl, Phi, ch = _synthetic_world()
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = parts
+        f = self._tan_gamma_of(parts, cyl, Phi, ch)
+        if soft:
+            kw = dict(sigma_ind=[0.1, 0.4, 0.4, 0.4],
+                      sigma_bs=[0.5, 0.3, 0.15, 0.1])
+            solve = lambda l=None: close_ip_structured_soft(
+                psi, w, c, Ip_s, 0.005 * Ip_s, j_ind, j_bs, j_fix,
+                mse_lin=l, **kw)
+        else:
+            solve = lambda l=None: close_ip_structured(
+                psi, w, c, Ip_s, j_ind, j_bs, j_fix, mse_lin=l)
+        pred = solve()
+        xp = np.r_[pred["a"], pred["b"]]
+        tgp = f(xp)
+        res = structured_mse_outer(xp, structured_objective_no_mse(pred),
+                                   tgp, f, solve, ch, np.ones(8, bool),
+                                   n_steps=2)
+        rec = res["record"]
+        assert rec["chi2_after"] < 0.5 * rec["chi2_before"]
+        assert rec["objective_after"] < rec["objective_before"]
+        # each chord-method step is non-increasing in the achieved objective
+        o = [rec["objective_before"]] + [s["objective_achieved"]
+                                         for s in rec["steps"]]
+        assert all(b <= a * (1 + 1e-12) for a, b in zip(o, o[1:]))
+        # the recorded linearisation residual is the TRUE one
+        s1 = rec["steps"][0]
+        assert s1["linearisation_residual_max_sigma"] > 0.0
+        assert rec["n_solves"] == 8 + 2
+        assert not res["flags"]
+
+    def test_recorded_linearisation_residual_is_recomputable(self):
+        parts, cyl, Phi, ch = _synthetic_world()
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = parts
+        f = self._tan_gamma_of(parts, cyl, Phi, ch)
+        solve = lambda l=None: close_ip_structured(
+            psi, w, c, Ip_s, j_ind, j_bs, j_fix, mse_lin=l)
+        pred = solve()
+        xp = np.r_[pred["a"], pred["b"]]
+        tgp = f(xp)
+        res = structured_mse_outer(xp, structured_objective_no_mse(pred), tgp,
+                                   f, solve, ch, np.ones(8, bool))
+        J = res["record"]["jacobian"]
+        lres = (f(res["x"]) - (tgp + J @ (res["x"] - xp))) / ch["sigma_eff"]
+        assert res["record"]["steps"][0]["linearisation_residual_max_sigma"] \
+            == pytest.approx(float(np.max(np.abs(lres))), rel=1e-10)
+
+    def test_a_failing_linearisation_is_flagged_not_hidden(self):
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        R, Z = _chord_geometry(8)
+        solve = lambda l=None: close_ip_structured(
+            psi, w, c, Ip_s, j_ind, j_bs, j_fix, mse_lin=l)
+        pred = solve()
+        xp = np.r_[pred["a"], pred["b"]]
+        g = np.full(8, 0.5)
+        # a forward model whose curvature the linear step cannot see: the
+        # step aimed at the data (s = +0.01) lands at 0.41, ten times further
+        # from it than where it started
+        def f(x):
+            sx = g @ (np.asarray(x, float) - xp)
+            return np.full(8, 0.3 + sx + 1000.0 * sx ** 2)
+        ch = mse_chords(_mse_block([0.31] * 8, R, Z, sigma=1e-4))
+        res = structured_mse_outer(xp, structured_objective_no_mse(pred),
+                                   f(xp), f, solve, ch, np.ones(8, bool),
+                                   fd_step=1e-7)
+        assert res["record"]["objective_after"] > res["record"]["objective_before"]
+        assert res["flags"] and res["flags"][0].startswith(MSE_FLAG_PREFIX)
+
+
+# ---------------------------------------------------------------------------
+#  the run.py stage, end to end on the analytic cylinder
+# ---------------------------------------------------------------------------
+class _Snap:
+    def get_q(self, psi=None, compute_geo=False):
+        return (np.asarray(psi, float), np.full(np.size(psi), 1.2), None, None)
+
+
+def _run_stage(gc, tamper=None):
+    """predictor -> (common-tail solve) -> MSE stage -> corrector -> delivered."""
+    from bouquet.run import Bouquet
+
+    parts, cyl, Phi, ch = _synthetic_world()
+    psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = parts
+    gc.mse_data = _mse_block(list(ch["tgamma"]), ch["R"], ch["Z"])
+    if tamper is not None:
+        tamper(gc)
+    geom = dict(psi_N=psi, psi_q=psi)
+    probe = j_ind + j_bs + j_fix
+    bl = types.SimpleNamespace(sawtooth=None, ip_closure=None)
+    s_ind, s_bs, ohm, bs, extra, state = \
+        Bouquet._close_ip_structured_predictor(
+            gc, bl, _Snap(), geom, probe, psi, j_ind, j_bs, j_fix, probe,
+            1.0, abs(Ip_s), w, c, lin(j_ind), lin(j_bs), lin(j_fix))
+    bl.j_inductive, bl.j_BS = s_ind * j_ind, s_bs * j_bs
+    bl.j_phi = bl.j_inductive + bl.j_BS + j_fix
+    bl.ohm_scale, bl.bs_scale = ohm, bs
+    bl.ip_closure = dict(closure_limited=False, closure_limited_reasons=(),
+                         **extra)
+    cyl.solve(bl.j_phi)                           # the common-tail solve
+    gs = _FakeGS(cyl)
+    n0 = cyl.n_solves
+    if state is not None and state.get("mse") is not None:
+        Bouquet._close_ip_structured_mse_stage(state, bl, gs, cyl.solve)
+    n_stage = cyl.n_solves - n0
+    if state is not None:
+        Bouquet._close_ip_structured_corrector(
+            state, bl, gs, cyl.solve,
+            ip_of=lambda j: float(lin(j) + c),
+            roundtrip_gate=Bouquet._structured_roundtrip_gate(abs(Ip_s)))
+        if state.get("mse_applied"):
+            Bouquet._structured_mse_delivered(state, bl, gs)
+    return bl, state, n_stage, cyl, ch
+
+
+class TestRunStage:
+    def test_default_preset_end_to_end(self):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic")
+        bl, state, n_stage, cyl, ch = _run_stage(gc)
+        rec = bl.ip_closure
+        assert rec["structured_mse"] and rec["structured_mse_status"] == "applied"
+        assert rec["structured_mse_n_chords"] == ch["n_active"]
+        assert rec["structured_mse_n_solves"] == n_stage == 8 + 1
+        assert rec["structured_mse_chi2_after"] < 0.5 * rec[
+            "structured_mse_chi2_before"]
+        assert rec["structured_mse_objective_after"] < rec[
+            "structured_mse_objective_before"]
+        assert rec["structured_mse_chi2_delivered"] == pytest.approx(
+            rec["structured_mse_chi2_after"], rel=1e-12)
+        assert len(rec["structured_mse_residual_sigma_after"]) == ch["n_active"]
+        assert rec["structured_mse_er_applied"] is False
+        assert rec["structured_mse_sign_convention"] == dict(pol=1.0, tor=1.0)
+        # bl carries the delivered closure, and ip_closure describes it
+        np.testing.assert_allclose(
+            rec["structured_s_ind_profile"],
+            bl.j_inductive / state["j_ind"], rtol=1e-12)
+        assert state["mse_lin"] is not None
+        json.dumps(rec)                              # serialisable as is
+        assert not rec["closure_limited"], rec["closure_limited_reasons"]
+
+    def test_no_block_means_no_mse_anything(self):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic")
+        bl, state, n_stage, cyl, ch = _run_stage(
+            gc, tamper=lambda g: setattr(g, "mse_data", None))
+        assert state is None and n_stage == 0
+        assert not any(k.startswith("structured_mse") for k in bl.ip_closure)
+
+    def test_required_and_absent_raises(self):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic",
+                              structured_mse_required=True)
+        with pytest.raises(MSEDataUnusable, match="structured_mse_required"):
+            _run_stage(gc, tamper=lambda g: setattr(g, "mse_data", None))
+
+    def test_required_and_unusable_raises(self):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic",
+                              structured_mse_required=True)
+
+        def _few(g):
+            g.mse_data["weight"] = [0.0] * (len(g.mse_data["weight"]) - 3) \
+                + [1.0] * 3
+        with pytest.raises(MSEDataUnusable, match="only 3 of"):
+            _run_stage(gc, tamper=_few)
+
+    def test_unusable_not_required_is_warned_and_recorded(self):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic")
+
+        def _bad(g):
+            g.mse_data.pop("A1")
+        with pytest.warns(UserWarning, match="UNUSABLE"):
+            bl, state, n_stage, cyl, ch = _run_stage(gc, tamper=_bad)
+        rec = bl.ip_closure
+        assert rec["structured_mse"] is False
+        assert rec["structured_mse_status"].startswith("unusable")
+        assert n_stage == 0
+
+    def _refusing(self, g):
+        # a measurement no in-bounds closure can reach, at a tiny sigma
+        g.mse_data["tgamma"] = [3.0 * t for t in g.mse_data["tgamma"]]
+        g.mse_data["sigma"] = [1e-7] * len(g.mse_data["sigma"])
+
+    def test_refused_stage_not_required_keeps_predictor_and_flags(self):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic")
+        bl, state, n_stage, cyl, ch = _run_stage(gc, tamper=self._refusing)
+        rec = bl.ip_closure
+        assert rec["structured_mse_status"].startswith("refused")
+        assert rec["closure_limited"]
+        assert any(r.startswith(MSE_FLAG_PREFIX)
+                   for r in rec["closure_limited_reasons"])
+        assert "scale bounds" in rec["structured_mse_status"] \
+            or "outside" in rec["structured_mse_status"]
+        # 8 finite-difference probes, then the predictor's hybrid re-solved so
+        # mygs holds the equilibrium bl describes
+        assert n_stage == 8 + 1
+        I_kept = cyl.I.copy()
+        cyl.solve(bl.j_phi)
+        np.testing.assert_allclose(cyl.I, I_kept, rtol=1e-14)
+        assert not state.get("mse_applied")
+        assert "structured_mse_chi2_after" not in rec
+
+    def test_refused_stage_required_raises(self):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic",
+                              structured_mse_required=True)
+        with pytest.raises(RuntimeError, match="refusing to fall back"):
+            _run_stage(gc, tamper=self._refusing)
+
+    def test_hard_channel_with_mse(self):
+        gc = GenerationConfig(closure_channel="structured",
+                              jBS_baseline_mode="ohmic",
+                              structured_preset="none")
+        bl, state, n_stage, cyl, ch = _run_stage(gc)
+        rec = bl.ip_closure
+        assert rec["structured_solver"] == "hard-KKT"
+        assert rec["structured_mse_status"] == "applied"
+        assert abs(rec["structured_ip_residual"]) < 1e-6
+        assert rec["structured_mse_chi2_after"] < rec["structured_mse_chi2_before"]
+
+
+class TestRequiredReachability:
+    def _cfg(self, **kw):
+        from bouquet.config import ImasSource
+        gc = GenerationConfig(**kw)
+        return types.SimpleNamespace(source=ImasSource(ids_path="x.json"),
+                                     generation=gc)
+
+    def test_required_on_another_channel_is_refused(self):
+        from bouquet.run import Bouquet
+        cfg = self._cfg(structured_mse_required=True,
+                        closure_channel="bootstrap", jBS_baseline_mode="ohmic")
+        with pytest.raises(ValueError, match="will not run"):
+            Bouquet._check_structured_mse_reachable(cfg)
+
+    def test_required_on_the_structured_path_passes(self):
+        from bouquet.run import Bouquet
+        cfg = self._cfg(structured_mse_required=True,
+                        closure_channel="structured",
+                        jBS_baseline_mode="ohmic", recalculate_j_BS=True)
+        Bouquet._check_structured_mse_reachable(cfg)
+
+    def test_not_required_is_never_checked(self):
+        from bouquet.run import Bouquet
+        Bouquet._check_structured_mse_reachable(types.SimpleNamespace(
+            source=None, generation=GenerationConfig()))
+
+
+class TestConfig:
+    def test_defaults_add_nothing(self):
+        gc = GenerationConfig()
+        assert gc.mse_data is None and gc.structured_mse_required is False
+        assert gc.structured_mse_sigma_sys == 0.0
+        assert gc.structured_mse_steps == 1
+        assert gc.structured_mse_min_chords == 4
+
+    def test_block_roundtrips_through_the_config_json(self):
+        from bouquet.config import BouquetConfig
+        R, Z = _chord_geometry(5)
+        gc = GenerationConfig(closure_channel="structured",
+                              mse_data=_mse_block([0.1] * 5, R, Z,
+                                                  er_corrected=True),
+                              structured_mse_required=True)
+        d = json.loads(json.dumps({"g": __import__("bouquet.config", fromlist=[
+            "_encode"])._encode(gc)}))["g"]
+        assert d["mse_data"]["er_corrected"] is True
+        assert d["structured_mse_required"] is True
+        assert BouquetConfig  # imported: the dataclass field is serialised

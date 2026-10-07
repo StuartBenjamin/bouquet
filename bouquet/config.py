@@ -858,6 +858,48 @@ class GenerationConfig:
     #: campaign that motivated the gain law it would fire on ~18 % of hard
     #: slices, i.e. ~+0.18 solves/slice.
     structured_li_max_corrector_steps: int = 1
+    #: closure_channel="structured": measured MSE pitch angles, as a THIRD
+    #: measurement.  A plain dict in the schema of :mod:`bouquet.mse` --
+    #: per-chord ``R``, ``Z``, ``tgamma``, ``sigma``, ``weight`` (the fit
+    #: weight, folded into ``sigma_eff = sigma/sqrt(weight)``), ``A1``..``A4``,
+    #: optionally ``A5`` + ``Er`` (the E_r term is then carried by the forward
+    #: model) or ``er_corrected=True`` (``tgamma`` already E_r-corrected
+    #: upstream; the forward model then carries no E_r term).  ``None`` (the
+    #: default) adds nothing and leaves the structured closure exactly as it
+    #: was.  When given, ``chi2_MSE = sum_k ((tan_gamma_pred - tgamma) /
+    #: sigma_eff)^2`` joins the structured objective; tan(gamma) is linearised
+    #: in the coefficients by finite differences on SOLVED equilibria (one GS
+    #: solve per free coefficient) and the closure re-solved
+    #: ``structured_mse_steps`` time(s) -- see
+    #: ``utils.structured_mse_outer``.  Ignored by every other channel.
+    mse_data: Optional[dict] = None
+    #: closure_channel="structured": REFUSE (raise) when ``mse_data`` is absent
+    #: or unusable (fewer than ``structured_mse_min_chords`` weighted finite
+    #: chords, a malformed block, a double-counted E_r), or when the
+    #: MSE-constrained closure cannot be delivered.  Default False keeps the
+    #: channel's previous behaviour: no block -> no MSE term; a block that is
+    #: unusable -> no MSE term, WARNED and recorded (``structured_mse_status``)
+    #: -- never silently.  Setting it with any other closure channel is refused.
+    structured_mse_required: bool = False
+    #: closure_channel="structured" + ``mse_data``: forward-difference step of
+    #: the tan(gamma) Jacobian, in coefficient units.  A numerical-
+    #: differentiation step, not a tolerance; the linearisation residual it
+    #: leaves is measured and recorded on every slice.
+    structured_mse_fd_step: float = 0.02
+    #: closure_channel="structured" + ``mse_data``: chord-method steps (closure
+    #: re-solve + equilibrium solve) after the Jacobian.  1 = one re-solve;
+    #: 2 refreshes the linearisation offset from the first step's solve and
+    #: re-solves once more (same Jacobian).  Cost only -- no acceptance moves.
+    structured_mse_steps: int = 1
+    #: closure_channel="structured" + ``mse_data``: an OPTIONAL systematic
+    #: uncertainty on tan(gamma), added in quadrature to every chord's
+    #: ``sigma_eff``.  Default 0.0 (the stated uncertainties are used as
+    #: they are); it is a statement about the data, recorded with the result.
+    structured_mse_sigma_sys: float = 0.0
+    #: closure_channel="structured" + ``mse_data``: the fewest usable chords
+    #: the block must carry (``bouquet.mse.MSE_MIN_CHORDS``, the same floor
+    #: the scalar MSE arbiter refuses below).
+    structured_mse_min_chords: int = 4
     #: closure_channel="sawtooth_bootstrap" gate: the q0 pin is only well-founded
     #: where sawteeth justify it.  Admitted when the source's sawtooth model is
     #: active at the slice (core_sources identifier index 701 carrying non-zero
