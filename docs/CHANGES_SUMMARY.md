@@ -116,11 +116,96 @@ bit-identical when absent).*
   `structured_uniform`: the shipped basis under
   `utils.STRUCTURED_WEIGHTS_UNIFORM` (the design's prior-sensitivity run).
   Neither adds a number. Solver test `tests/test_engine_two_scalar_solver.py`.
+- **The pressure handed to the solver: one helper, two settings (both
+  default to the behaviour before they existed; PHYSICS changes when
+  moved).** `bouquet/edge_pressure.py` now builds every `P'` profile and
+  axis-pressure target, replacing the inline `pp["y"][-1] = 0.0` /
+  `pax = p[0]` statements of the legacy reconstruction and draws, the
+  modelling-source forward solve, the zero-perturbation checks, the engine
+  backend and the engine draws. With the defaults every array is bit for bit
+  what it was (frozen-copy tests: each solve path, as an AST, against its
+  pre-change code with the helper written back inline; the helper's defaults
+  against the inline statements). Applies to BOTH engines.
+  - `GenerationConfig.edge_pprime_pin` (default `True`). `False` keeps the
+    profile's own `P'` at `psi_N = 1` instead of zeroing the last node.
+    **Physics change when off:** the pressure-driven current is no longer
+    forced to zero at the boundary and the edge current moves between the
+    `P'` and `FF'` terms. Measured on the synthetic g-file example (unified
+    engine): pressure-driven current at the boundary 0.006 -> 0.018 MA/m^2,
+    `<j_phi>` at the last node 0.076 -> 0.115 MA/m^2, the `FF'` term there
+    changes sign, `q95` +0.002, `l_i` and the core unchanged; no extra
+    passes, solves or GS iterations.
+  - `GenerationConfig.separatrix_pressure` (default `"legacy"`).
+    `"offset"` passes `p_axis - p_sep` as the solver's axis target (`p_sep`:
+    the solve pressure at `psi_N = 1`, thermal + impurity + fast; each draw
+    its own) and adds `p_sep` back wherever pressure, beta or `W_MHD` is
+    reported or delivered. **Physics change when on and `p_sep != 0`:** `P'`
+    moves by the factor `(p_axis - p_sep) / p_axis` -- under `"legacy"` the
+    solver inflates `P'` by the inverse to reach the full axis pressure with
+    a pressure that is zero at the boundary. Measured on a constructed
+    variant of the synthetic g-file example with `p_sep` = 5.4 % of the axis
+    pressure: `"legacy"` solves `P'` x 1.058 and reports `beta_N` / `W_MHD`
+    4.8 % / 5.2 % above the input's `p - p_edge` values and 7.7 % / 7.3 %
+    below its full-pressure values; `"offset"` solves `P'` x 1.002 and
+    reports -0.8 % / -0.4 % (solver frame) and +0.9 % / +1.2 % (full frame).
+  - **Reporting:** `Baseline.edge_pressure`, the engine record's
+    `edge_pressure` block, `reconstruction_metrics["pressure_like_for_like"]`
+    and every draw record carry `p_sep` and beta / `W_MHD` in two frames --
+    the solver's (from `p - p_sep`) and the full one (`W_MHD + 1.5 p_sep V`,
+    each beta times `(int p dV + p_sep V) / int p dV`, `V` and `int p dV`
+    the solved equilibrium's own) -- each compared with the input's
+    same-definition quantity. Archived as `edge_pressure_json` on
+    `_baseline` and on every draw.
+  - **Delivery:** under `"offset"` written g-files (and the IMAS export built
+    from them) carry the full pressure: `PRES` + that equilibrium's `p_sep`,
+    `PPRIME` unchanged.
+  - **Where the model stops:** a pressure jump at the boundary is not
+    physical; the real separatrix pressure continues into the scrape-off
+    layer, which a vacuum-outside free-boundary model cannot represent
+    ([physics-notes.md](physics-notes.md#the-pressure-handed-to-the-solver-separatrix-pressure-and-the-edge-p-pin)).
+  - **Not reached:** the solver's own `solve_with_bootstrap` helper (legacy
+    non-loop routes; a printed note says so when a setting is moved).
+  - Probe: `tests/probes/measure_engine.py` reports beta / `W_MHD` both ways
+    (`distance.pressure_frames`), an `edge` stage, an opt-in per-solve
+    iteration log, part `recon_legacy`, and checks of the delivered g-files.
+    Solver tests: `tests/test_edge_pressure_solver.py`.
 - **Probe fix:** `tests/probes/measure_engine.py::_distance_ids` takes the
   slice time from the source (it used the synthetic example's constant for
   every dd); the table records the slice it used.
 
 ## Unreleased, intended for the release after 1.4.0 — self-consistent bootstrap current (default ON)
+
+### Approved change of a pass ceiling: `jbs_max_passes_post_homotopy` 4 → 6
+
+**This is a change of a default pass ceiling, approved by the package owner
+on 2026-10-01.** It is the only ceiling that changed: the reconstruction
+ceiling stays 8 (`jbs_max_passes`) and the draw-loop ceiling stays 12
+(`jbs_max_passes_draw`). No tolerance, no convergence criterion and not the
+two-consecutive-pass rule moved; "converged" means what it meant.
+
+- What it is: the number of further bootstrap passes a draw may take at the
+  tight coil stage after its coil homotopy, when Redl on the post-homotopy
+  equilibrium misses the bootstrap the draw carries. A draw that is not back
+  inside the loop tolerances within the ceiling is rejected
+  (`jbs_post_homotopy`).
+- Measured basis ("bouquet unified engine: measurement fixes and the
+  passes-to-convergence study", 2026-10-01): with the ceiling raised for
+  measurement only, no draw of 72 needed more than **5** post-homotopy
+  passes; the 10 draws that needed 5 are exactly the ones a ceiling of 4
+  rejects, and all 8 of them that could be compared attempt for attempt with
+  a run at the ceiling of 4 converged on the next pass and were archived.
+  The new default is the measured need plus one pass of margin.
+- Consequence: draws that were rejected as `jbs_post_homotopy` one pass
+  short of convergence are now archived (each costs one or two more solves);
+  a draw that does not converge still fails, two passes later.
+- What does not change: with `jbs_self_consistent=False` (the frozen legacy
+  path) the post-homotopy stage does not exist and nothing reads the field,
+  so that path is bit-identical. A configuration that sets the field keeps
+  its value.
+- Results obtained with the loop on and the old default can differ in which
+  draws are archived (never in an archived draw that needed 4 passes or
+  fewer). The stored reference run of the test suite was produced at the
+  ceiling of 4 and has not been regenerated here.
 
 *Everything about the self-consistent bootstrap loop sits under this heading,
 so it can become its own release after 1.4.0. The version string is still
@@ -163,8 +248,8 @@ consecutive passes (`r_j ≤ 1e-3`, `r_I ≤ 1e-4 I_p`, `Δl_i ≤ 1e-3`,
 `jbs_loop_on_fail="flag"`, and the soft closure's noise-aware stop test with
 one logged retry. Pass ceilings (limits, not tolerances): 8 for the baseline /
 reconstruction, 12 for each loop of a draw (`jbs_max_passes_draw`, was 6) and
-4 post-homotopy passes (`jbs_max_passes_post_homotopy`, now a config field;
-was a hard-coded 2). The draw ceilings were raised when the golden refresh
+6 post-homotopy passes (`jbs_max_passes_post_homotopy`, a config field; was a
+hard-coded 2, then 4 -- see "Approved change of a pass ceiling" below). The draw ceilings were raised when the golden refresh
 showed the standard draw's l_i-match coupling needing 7–8 passes (it contracts
 at ≈0.38/pass from r_j ≈ 2e-2…1.2e-1) and a post-homotopy stage whose first
 pass misses needing 3 under the two-consecutive rule; no tolerance moved.

@@ -37,6 +37,8 @@ if TYPE_CHECKING:
 # already imports from TokaMaker_interface).  Re-exported here because the
 # original home is the documented one and callers import it from this module.
 from .utils import _shape_from_boundary  # noqa: F401  (compatibility re-export)
+from .edge_pressure import (resolve_edge_pressure, solver_pax,
+                            solver_pp_profile, solver_pprime)
 
 
 def _engine_gate(config):
@@ -716,12 +718,27 @@ class Bouquet:
         if getattr(self.config.generation, "reconstruction_engine",
                    "legacy") == "unified":
             from .engine import prepare_engine_baseline
-            return prepare_engine_baseline(self)
+            _bl = prepare_engine_baseline(self)
+            self._report_sigma_exceeds_profile(_bl)
+            return _bl
 
         # the self-consistent bootstrap loop runs in the baseline too, so its
         # workflow refusals fire here (before single_profile_jphi rewrites
         # recalculate_j_BS below), not only at generate()
         self._check_jbs_loop_workflow(self.config.generation)
+
+        # the two edge-pressure settings do not reach the solver's own
+        # bootstrap helper, which the non-loop routes call: say so, once
+        _edge = resolve_edge_pressure(self.config.generation)
+        if not _edge.is_default and not bool(getattr(
+                self.config.generation, "jbs_self_consistent", False)):
+            print("[edge-pressure] NOTE: edge_pprime_pin="
+                  f"{_edge.edge_pprime_pin}, separatrix_pressure="
+                  f"{_edge.separatrix_pressure!r} act on every solve bouquet "
+                  "sets up; the solver's solve_with_bootstrap helper (used "
+                  "by the legacy non-loop routes for their intermediate "
+                  "bootstrap evaluation) builds its own P' and axis target "
+                  "and is NOT affected", flush=True)
 
         # single_profile_jphi: drop the per-draw Sauter recompute BEFORE the
         # baseline work, so the IMAS forward solve does not spend a bootstrap
@@ -783,7 +800,35 @@ class Bouquet:
         # solver chatter was captured to baseline.reconstruction_log).
         if self.baseline.reconstruction_metrics is not None:
             self._print_reconstruction_summary()
+        self._report_sigma_exceeds_profile(self.baseline)
         return self.baseline
+
+    def _report_sigma_exceeds_profile(self, bl) -> None:
+        """One line at baseline time when an input kinetic sigma exceeds the
+        profile it perturbs over a stated fraction of the radius
+        (:func:`bouquet.baseline.sigma_exceeds_profile`).  REPORT ONLY: the
+        envelope is resolved as :meth:`generate` will resolve it (quietly;
+        its own log lines are printed there), nothing is stored, clipped or
+        changed, and a resolution that cannot be made yet is not an error
+        here."""
+        import contextlib
+        import io
+        import warnings
+        self.sigma_exceeds_profile = []
+        try:
+            from .baseline import (resolve_uncertainty,
+                                   sigma_exceeds_profile_line)
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                env = resolve_uncertainty(self.config, bl)
+            recs = list(env.get("sigma_exceeds_profile") or [])
+        except Exception:
+            return
+        self.sigma_exceeds_profile = recs
+        if recs:
+            print("[baseline] " + sigma_exceeds_profile_line(recs),
+                  flush=True)
 
     def _flag_nonconverged_recon_loop(self) -> None:
         """Mark a geqdsk baseline whose self-consistent j_BS loop did not
@@ -933,6 +978,25 @@ class Bouquet:
         line("delta", m['delta'], m['delta_efit'], m['delta_err_pct'])
         line("j_sep(.99)", m['j_sep_MA'], m['j_sep_efit_MA'], m['j_sep_err_pct'], "MA/m²")
         line("W_MHD", m['W_MHD_MJ'], m['W_MHD_efit_MJ'], m['W_MHD_err_pct'], "MJ")
+        # the separatrix pressure: both frames, each against the input's
+        # same-definition quantity (printed only when one is non-zero)
+        _ep = m.get("edge_pressure") or {}
+        _lk = m.get("pressure_like_for_like") or {}
+        if _lk and (_ep.get("p_sep") or _lk.get("p_edge_input")):
+            print(f"  {'p_sep':<12} {_ep.get('p_sep', float('nan')):.4g} Pa "
+                  f"(input edge {_lk.get('p_edge_input', float('nan')):.4g} "
+                  f"Pa; separatrix_pressure="
+                  f"{_ep.get('separatrix_pressure')!r}, added back "
+                  f"{_ep.get('p_sep_applied', 0.0):.4g} Pa; edge_pprime_pin="
+                  f"{_ep.get('edge_pprime_pin')})")
+            for _k, _nm in (("solver", "p - p_sep"), ("full", "full p")):
+                _f = _lk["frames"][_k]
+                print(f"  {'  ' + _nm:<12} beta_N {_f['beta_n']['tokamaker']:.3f} "
+                      f"(input {_f['beta_n']['input']:.3f}, "
+                      f"{_f['beta_n']['err_pct']:+.2f}%)   W_MHD "
+                      f"{_f['W_MHD_MJ']['tokamaker']:.4f} MJ (input "
+                      f"{_f['W_MHD_MJ']['input']:.4f}, "
+                      f"{_f['W_MHD_MJ']['err_pct']:+.2f}%)")
         print(f"  {'boundary':<12} RMS {m['boundary_rms_mm']:.2f} mm   "
               f"max {m['boundary_max_mm']:.2f} mm   axis off {m['axis_offset_mm']:.2f} mm")
         print(f"  {'jphi resid':<12} core RMS {m['jphi_core_rms_MA']:.3f}   "
@@ -4196,6 +4260,8 @@ class Bouquet:
         R0, Z0, a, kappa, delta = _shape_from_boundary(self._boundary_RZ)
         mygs.init_psi(R0, Z0, a, kappa, delta)
         self._seed_coil_init(mygs)
+        # the pressure handed to the solver (bouquet.edge_pressure)
+        _edge = resolve_edge_pressure(self.config.generation)
 
         # kinetic profiles + total pressure on the equilibrium grid (IMAS shares
         # psi_N between the kinetic and current grids).
@@ -4231,9 +4297,8 @@ class Bouquet:
             nl_its = -1
             for _pass in range(2):   # 2nd pass refines the jphi-linterp flux scaling
                 psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-                pp_y = pchip_derivative(psi_N, p_total) / psi_range
-                pp_y[-1] = 0.0
-                mygs.set_targets(Ip=bl.Ip_target, pax=float(p_total[0]))
+                pp_y = solver_pprime(psi_N, p_total, psi_range, _edge)
+                mygs.set_targets(Ip=bl.Ip_target, pax=solver_pax(p_total, _edge))
                 mygs.set_profiles(
                     pp_prof={"type": "linterp", "y": pp_y, "x": psi_N}, ffp_prof=ffp,
                 )
@@ -4857,12 +4922,12 @@ class Bouquet:
                         from .TokaMaker_interface import \
                             _corrective_jphi_iteration
                         _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-                        _pp_y = pchip_derivative(psi_N, p_total) / _pr
-                        _pp_y[-1] = 0.0
+                        _pp_y = solver_pprime(psi_N, p_total, _pr, _edge)
                         _cr = _corrective_jphi_iteration(
                             mygs, psi_N, j_phi,
                             {"type": "linterp", "y": _pp_y, "x": psi_N},
-                            abs(bl.Ip_target), float(p_total[0]), 1e-3,
+                            abs(bl.Ip_target), solver_pax(p_total, _edge),
+                            1e-3,
                             min_iters=2, max_iters=8, rtol=0.02,
                             verbose=True, damping=0.5, protect_state=True,
                             return_request=True)
@@ -5553,12 +5618,11 @@ class Bouquet:
                 if getattr(self.config.generation, "imas_corrective_jphi", False):
                     from .TokaMaker_interface import _corrective_jphi_iteration
                     _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-                    _pp_y = pchip_derivative(psi_N, p_total) / _pr
-                    _pp_y[-1] = 0.0
+                    _pp_y = solver_pprime(psi_N, p_total, _pr, _edge)
                     _pp_prof = {"type": "linterp", "y": _pp_y, "x": psi_N}
                     _, _n_corr, _corr_hist = _corrective_jphi_iteration(
                         mygs, psi_N, _jphi_solve, _pp_prof,
-                        abs(bl.Ip_target), float(p_total[0]), 1e-3,
+                        abs(bl.Ip_target), solver_pax(p_total, _edge), 1e-3,
                         min_iters=2, max_iters=8, rtol=0.02, verbose=True,
                         damping=0.5, protect_state=True)
                     print(f"[imas corrective-jphi] converged in {_n_corr} iteration(s)")
@@ -5622,7 +5686,11 @@ class Bouquet:
             )
 
         tok_li1 = float(mygs.get_stats(lcfs_pad=psi_pad, li_normalization="std")["l_i"])
-        tok_li3 = float(mygs.get_stats(lcfs_pad=psi_pad, li_normalization="iter")["l_i"])
+        tok_li3 = float((_st3 := mygs.get_stats(
+            lcfs_pad=psi_pad, li_normalization="iter"))["l_i"])
+        # the pressure handed to the solver and both frames of beta / W_MHD
+        from .edge_pressure import archive_record as _edge_record
+        bl.edge_pressure = _edge_record(_edge, p_total, stats=_st3)
 
         # ---- core-pressure hollowness health record (report-only) ----------
         # Describes the core shape of the INPUT pressure the solve above was
@@ -5635,6 +5703,13 @@ class Bouquet:
             _p_ach, _ach_reason = None, None
             try:
                 _p_ach = mygs.get_profiles(psi=psi_N)[3]
+                # the solver's pressure is zero at psi_N = 1; under
+                # separatrix_pressure="offset" p_sep is added back
+                # (bouquet.edge_pressure) so the achieved pressure is in the
+                # same full frame as the input p_total
+                from .edge_pressure import applied_offset as _applied_offset
+                _p_ach = (np.asarray(_p_ach, dtype=float)
+                          + _applied_offset(p_total, _edge))
             except Exception as exc:    # pragma: no cover - live-solver only
                 _ach_reason = f"get_profiles failed: {exc}"
             _cph = core_pressure_hollow_record(
@@ -5767,6 +5842,7 @@ class Bouquet:
             q0_psi_N=float(SOLVER_Q0_PSI_N),
             q95=float(_st.get("q_95", float("nan"))),
             Ip_target=float(bl.Ip_target),
+            edge_pressure=getattr(bl, "edge_pressure", None),
             request_normalisation=float(dv["kappa"]),
             achieved_normalisation=float(dv["kappa_achieved"]),
             n_negative_inductive=int(dv["n_negative_inductive"]),
@@ -5931,6 +6007,7 @@ class Bouquet:
             raise ValueError("call setup_solver() + prepare_baseline() / "
                              "reconstruct() before verify_sigma0_consistency()")
         self._refuse_unified_engine_draws("verify_sigma0_consistency()")
+        _edge = resolve_edge_pressure(self.config.generation)
         _eng = _engine_gate(self.config)
         if _eng is not None:
             # the engine draw at zero perturbation (bouquet.engine_draws)
@@ -5982,11 +6059,8 @@ class Bouquet:
             pressure = pressure + np.asarray(bl.p_diff, dtype=float)
 
         # state-anchor solve at the baseline j_phi (mirrors the per-draw flow)
-        pp = {"type": "linterp",
-              "y": pchip_derivative(psi_N, pressure) /
-                   (mygs.psi_bounds[1] - mygs.psi_bounds[0]),
-              "x": psi_N}
-        pp["y"][-1] = 0.0
+        pp = solver_pp_profile(
+            psi_N, pressure, (mygs.psi_bounds[1] - mygs.psi_bounds[0]), _edge)
         ffp = {"type": "jphi-linterp",
                "y": np.asarray(bl.j_phi, dtype=float).copy(), "x": psi_N}
         if (bool(getattr(gc, "jbs_self_consistent", False))
@@ -6027,7 +6101,7 @@ class Bouquet:
             _R0, _Z0, _a, _kappa, _delta = _shape_from_boundary(
                 self._boundary_RZ)
             mygs.init_psi(_R0, _Z0, _a, _kappa, _delta)
-        mygs.set_targets(Ip=float(bl.Ip_target), pax=float(pressure[0]))
+        mygs.set_targets(Ip=float(bl.Ip_target), pax=solver_pax(pressure, _edge))
         mygs.set_profiles(pp_prof=pp, ffp_prof=ffp)
         try:
             mygs.solve()
@@ -6079,7 +6153,7 @@ class Bouquet:
                                     if floored.any() else 0.0),
                    passed=bool(np.max(np.abs(dev_eval)) <= tol_frac * peak))
         # leave mygs re-anchored on the baseline equilibrium, not SWB's state
-        mygs.set_targets(Ip=float(bl.Ip_target), pax=float(pressure[0]))
+        mygs.set_targets(Ip=float(bl.Ip_target), pax=solver_pax(pressure, _edge))
         mygs.set_profiles(pp_prof=pp, ffp_prof=ffp)
         try:
             mygs.solve()
@@ -6118,7 +6192,7 @@ class Bouquet:
             self.mygs, SimpleNamespace(psi_N=c.psi_N, pressure=c.pressure,
                                        Ip=c.Ip, kinetics=c.kinetics),
             psi_pad=run["psi_pad"], q_psi=run.get("q_psi"),
-            maxits=engine_draw_maxits(gc))
+            maxits=engine_draw_maxits(gc), edge_pressure=ctx.edge)
         snap = (self.mygs.copy_eq() if hasattr(self.mygs, "copy_eq")
                 else None)
         try:
@@ -6165,6 +6239,7 @@ class Bouquet:
         bl = self.baseline
         mygs = self.mygs
         gc = self.config.generation
+        _edge = resolve_edge_pressure(gc)
         Ip = float(bl.Ip_target)
         jdiff = (None if getattr(bl, "jBS_diff", None) is None
                  else np.asarray(bl.jBS_diff, dtype=float))
@@ -6193,10 +6268,8 @@ class Bouquet:
         def _solve(j):
             from .utils import pchip_derivative
             _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-            _pp = {"type": "linterp",
-                   "y": pchip_derivative(psi_N, pressure) / _pr, "x": psi_N}
-            _pp["y"][-1] = 0.0
-            mygs.set_targets(Ip=Ip, pax=float(pressure[0]))
+            _pp = solver_pp_profile(psi_N, pressure, _pr, _edge)
+            mygs.set_targets(Ip=Ip, pax=solver_pax(pressure, _edge))
             mygs.set_profiles(pp_prof=_pp, ffp_prof={
                 "type": "jphi-linterp", "y": np.asarray(j, float),
                 "x": psi_N})
@@ -6271,7 +6344,7 @@ class Bouquet:
                    reference=reference,
                    record=jsonable(res["record"]))
         # leave mygs re-anchored on the baseline equilibrium
-        mygs.set_targets(Ip=Ip, pax=float(pressure[0]))
+        mygs.set_targets(Ip=Ip, pax=solver_pax(pressure, _edge))
         mygs.set_profiles(pp_prof=pp, ffp_prof=ffp)
         try:
             mygs.solve()
@@ -6365,6 +6438,7 @@ class Bouquet:
 
         bl = self.baseline
         mygs = self.mygs
+        _edge = resolve_edge_pressure(self.config.generation)
         gc = self.config.generation
         from .physics import ELEMENTARY_CHARGE as EC
         Ip = float(bl.Ip_target)
@@ -6431,13 +6505,11 @@ class Bouquet:
             from .utils import pchip_derivative
             _restore()
             _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-            _pp = {"type": "linterp",
-                   "y": pchip_derivative(psi_N, pressure) / _pr, "x": psi_N}
-            _pp["y"][-1] = 0.0
+            _pp = solver_pp_profile(psi_N, pressure, _pr, _edge)
             _yc = np.asarray(bl.j_phi, dtype=float).copy()
             if getattr(bl, "jphi_diff", None) is not None:
                 _yc = _yc + np.asarray(bl.jphi_diff, dtype=float)
-            mygs.set_targets(Ip=Ip, pax=float(pressure[0]))
+            mygs.set_targets(Ip=Ip, pax=solver_pax(pressure, _edge))
             mygs.set_profiles(pp_prof=_pp, ffp_prof={
                 "type": "jphi-linterp", "y": _yc, "x": psi_N})
             try:
@@ -6472,6 +6544,7 @@ class Bouquet:
                     accept_anchor_inband=gc.accept_anchor_inband,
                     perturb_jind_in_anchor=(route == "ip_renorm"),
                     scale_jBS=scale0, swb_iterations=gc.swb_iterations,
+                    edge_pressure=_edge,
                     diagnostic_plots=False, psi_N_kinetic=psi_kin,
                     p_fast=bl.p_fast, z_fast=getattr(bl, "z_fast", None),
                     j_NBI=bl.j_NBI, j_RF=bl.j_RF, aux_sigmas=aux_zero,
@@ -6949,6 +7022,7 @@ class Bouquet:
                 accept_anchor_inband=gc.accept_anchor_inband,
                 perturb_jind_in_anchor=gc.perturb_jind_in_anchor,
                 jBS_scale_range=_jbs_range,
+                edge_pressure=resolve_edge_pressure(gc),
                 jbs_delta_mode=gc.jbs_delta_mode,
                 swb_iterations=gc.swb_iterations,
                 diagnostic_plots=gc.diagnostic_plots,

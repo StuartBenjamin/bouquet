@@ -51,37 +51,124 @@ class OpenLCFSContourWarning(UserWarning):
 _LCFS_CLOSURE_RTOL = 1e-3
 
 
-def select_closed_lcfs(segs, context=""):
-    r"""Pick the longest **closed** contour segment from *segs*.
+def _encloses(poly, pt):
+    """Whether the closed polyline *poly* (first vertex repeated or not)
+    encloses the point *pt*: even-odd ray crossing, exact for a simple
+    polygon (a level-set curve does not cross itself)."""
+    x, y = float(pt[0]), float(pt[1])
+    px, py = poly[:, 0], poly[:, 1]
+    qx, qy = np.roll(px, -1), np.roll(py, -1)
+    straddle = (py > y) != (qy > y)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        xc = px + (y - py) * (qx - px) / (qy - py)
+    return bool(np.count_nonzero(straddle & (xc > x)) % 2)
 
-    On a diverted equilibrium the :math:`\psi = \psi_\mathrm{LCFS}` level set
-    contains the open separatrix branch running down to the divertor as well
-    as the closed LCFS.  The open branch spans the full vessel height, so it
-    frequently carries *more* points than the closed boundary -- and a plain
-    ``max(segs, key=len)`` then silently returns the wrong curve.  Measured on
-    a diverted lower-single-null case, that mis-selection reported a boundary
-    RMS of 891.86 mm (open branch, n=1070) where the true closed-LCFS value is
-    2.06 mm (n=969), which flipped the acceptance verdict PASS -> CHECK.  A
-    second case selected the closed branch only because it happened to be
-    longer, so the defect is general rather than case-specific (issue #33).
 
-    Closedness is tested directly -- first vertex coincident with last, within
-    :data:`_LCFS_CLOSURE_RTOL` of the segment's own bounding-box diagonal --
-    rather than inferred from length.
+def _enclosed_area(poly):
+    """|area| enclosed by the closed polyline *poly* (shoelace)."""
+    x, y = poly[:, 0], poly[:, 1]
+    return 0.5 * abs(float(np.dot(x, np.roll(y, -1))
+                           - np.dot(y, np.roll(x, -1))))
+
+
+def _turn_about(seg, pt):
+    """The part of the OPEN polyline *seg* that goes once around *pt*,
+    closed where the curve comes nearest to itself.
+
+    A level-set curve at the X-point flux value can come out of a linear
+    contouring as ONE open segment: divertor leg -> around the plasma ->
+    other leg.  The plasma boundary is then the stretch between the two
+    passes of the X-point, which are an element apart; anywhere else two
+    points of the curve that have the axis between them are a plasma width
+    apart.  So: of all vertex pairs ``(i, j)`` whose stretch ``seg[i..j]``,
+    closed by the straight chord ``j -> i``, winds once around *pt* (the
+    winding number of that polygon is ``round((theta_j - theta_i) / 2 pi)``
+    with ``theta`` the unwrapped polar angle about *pt*, since the chord
+    turns by less than ``pi``), the pair with the SHORTEST chord.
+
+    Returns ``(loop, gap)`` -- *loop* closed (first vertex repeated), *gap*
+    the chord length -- or ``None`` when no stretch of the segment goes
+    around *pt*.
+    """
+    d = seg - np.asarray(pt, dtype=float)[None, :]
+    if not np.all(np.hypot(d[:, 0], d[:, 1]) > 0.0):
+        return None
+    th = np.unwrap(np.arctan2(d[:, 1], d[:, 0]))
+    if np.ptp(th) <= np.pi:
+        return None
+    turn = np.abs(th[None, :] - th[:, None])
+    once = np.triu((turn > np.pi) & (turn < 3.0 * np.pi), k=1)
+    if not once.any():
+        return None
+    chord = np.hypot(seg[None, :, 0] - seg[:, None, 0],
+                     seg[None, :, 1] - seg[:, None, 1])
+    chord[~once] = np.inf
+    i, j = np.unravel_index(int(np.argmin(chord)), chord.shape)
+    loop = np.vstack([seg[i:j + 1], seg[i:i + 1]])
+    return loop, float(chord[i, j])
+
+
+def select_closed_lcfs(segs, context="", axis=None):
+    r"""Pick the plasma boundary among the contour segments *segs* of the
+    :math:`\psi = \psi_\mathrm{LCFS}` level set.
+
+    On a diverted equilibrium that level set contains more than the plasma
+    boundary: the open separatrix branches running to the divertor, and
+    possibly CLOSED loops elsewhere on the mesh (around a coil, in the
+    private-flux region).  Two selection rules, by what the caller knows:
+
+    **With** *axis* (the magnetic axis ``(R, Z)``; what every solver-side
+    caller passes).  The plasma boundary is, by definition, the first curve
+    of the level set met going outward from the magnetic axis: the INNERMOST
+    curve that goes once around the axis.  So the candidates are
+
+    * every closed segment that encloses *axis* (a loop around a coil does
+      not, whatever its length), and
+    * for every open segment, the stretch of it that goes once around
+      *axis*, closed at the curve's nearest approach to itself
+      (:func:`_turn_about`: a linear contouring at the X-point value can
+      join the boundary and both divertor legs into a single open curve;
+      the boundary is the stretch between its two passes of the X-point),
+
+    and the one enclosing the smallest area is returned (two curves of one
+    level set do not cross, so "smallest area" is "innermost").  Nothing is
+    decided on length.  If no curve goes around the axis there is no
+    boundary to return: ``None``, with an :class:`OpenLCFSContourWarning`
+    -- never a far loop.  Measured on diverted reconstructions where the
+    boundary came out joined to its legs, the longest-closed rule below
+    returned a loop some 2 m from the plasma (boundary "RMS" 1.8-2.0 m where
+    the boundary's own curve is millimetres from its target).
+
+    **Without** *axis* (``None``, the historical call): the longest **closed**
+    segment.  The open branch spans the full vessel height, so it frequently
+    carries *more* points than the closed boundary -- and a plain
+    ``max(segs, key=len)`` then silently returns the wrong curve.  Measured
+    on a diverted lower-single-null case, that mis-selection reported a
+    boundary RMS of 891.86 mm (open branch, n=1070) where the true
+    closed-LCFS value is 2.06 mm (n=969), which flipped the acceptance
+    verdict PASS -> CHECK (issue #33).  Closedness is tested directly --
+    first vertex coincident with last, within :data:`_LCFS_CLOSURE_RTOL` of
+    the segment's own bounding-box diagonal -- rather than inferred from
+    length.  This rule cannot tell the boundary from another closed loop and
+    is kept only for a caller that has no axis.
 
     Parameters
     ----------
     segs : sequence of ndarray, shape (N, 2)
         Candidate contour segments, as returned by matplotlib ``allsegs``.
     context : str, optional
-        Caller label, used only in the fallback warning message.
+        Caller label, used only in the warning messages.
+    axis : (float, float), optional
+        ``(R, Z)`` of the magnetic axis.
 
     Returns
     -------
     ndarray, shape (N, 2) or None
-        The longest closed segment; the longest segment overall (with an
-        :class:`OpenLCFSContourWarning`) if none closes; ``None`` when no
-        candidate survives -- either *segs* was empty, or every entry had
+        With *axis*: the innermost curve around the axis (closed, first
+        vertex repeated), or ``None`` (with a warning) when there is none.
+        Without: the longest closed segment; the longest segment overall
+        (with an :class:`OpenLCFSContourWarning`) if none closes.  ``None``
+        also when no candidate survives -- *segs* empty, or every entry had
         4 or fewer vertices and was discarded as degenerate.  Callers must
         treat ``None`` as "no usable contour" and fall back accordingly.
     """
@@ -89,13 +176,39 @@ def select_closed_lcfs(segs, context=""):
     if not segs:
         return None
 
-    closed = []
+    closed, opened = [], []
     for s in segs:
         span = np.ptp(s, axis=0)
         diag = float(np.hypot(*span))
         gap = float(np.hypot(*(s[0] - s[-1])))
         if diag > 0.0 and gap <= _LCFS_CLOSURE_RTOL * diag:
             closed.append(s)
+        else:
+            opened.append(s)
+
+    if axis is not None:
+        axis = np.asarray(axis, dtype=float).reshape(2)
+        if not np.all(np.isfinite(axis)):
+            raise ValueError(f"select_closed_lcfs: axis={axis!r} is not a "
+                             "finite (R, Z)")
+        around = [s for s in closed if _encloses(s, axis)]
+        for s in opened:
+            turn = _turn_about(s, axis)
+            if turn is not None and _encloses(turn[0], axis):
+                around.append(turn[0])
+        if around:
+            return min(around, key=_enclosed_area)
+        warnings.warn(
+            f"no contour at the LCFS flux level goes around the magnetic "
+            f"axis{' in ' + context if context else ''} "
+            f"({len(closed)} closed, {len(opened)} open segment(s), none "
+            f"enclosing R={axis[0]:.4g}, Z={axis[1]:.4g}): no boundary "
+            f"metric is derived (a curve elsewhere on the mesh is not the "
+            f"plasma boundary).",
+            OpenLCFSContourWarning,
+            stacklevel=2,
+        )
+        return None
 
     if closed:
         return max(closed, key=len)
@@ -109,6 +222,22 @@ def select_closed_lcfs(segs, context=""):
         stacklevel=2,
     )
     return max(segs, key=len)
+
+
+def magnetic_axis_of(mygs):
+    """``(R, Z)`` of the solver's magnetic axis for
+    :func:`select_closed_lcfs`, or ``None`` when the object carries none
+    (a test double) or reports the solver's "no O-point" value (R <= 0)."""
+    o = getattr(mygs, "o_point", None)
+    if o is None:
+        return None
+    try:
+        o = np.asarray(o, dtype=float).reshape(-1)
+    except (TypeError, ValueError):
+        return None
+    if o.size != 2 or not np.all(np.isfinite(o)) or not o[0] > 0.0:
+        return None
+    return float(o[0]), float(o[1])
 
 
 class DerivativeSanityWarning(UserWarning):

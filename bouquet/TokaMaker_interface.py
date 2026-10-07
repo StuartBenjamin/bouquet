@@ -56,6 +56,17 @@ from .utils import (
     read_eqdsk_from_bytes,
 )
 from .io.geqdsk import read_geqdsk
+from .edge_pressure import (
+    archive_record as edge_pressure_archive_record,
+    describe as describe_edge_pressure,
+    lcfs_kwargs,
+    resolve_edge_pressure,
+    store_record as store_edge_pressure_record,
+    solver_pax,
+    solver_pp_profile,
+    solver_pprime,
+    solver_pressure,
+)
 from .physics import SOLVER_Q0_PSI_N, q_ravg, thermal_pressure_charge
 
 # ---- Masked anchor-solve failure counter (issue #24) ------------------------
@@ -125,6 +136,14 @@ DRAW_REJECTION_REASONS = {
                            "failed; the draw's bootstrap would otherwise be "
                            "evaluated on a stale equilibrium",
     # engine draws (bouquet.engine_draws) only
+    "kinetics_nonphysical": "an engine draw's DRAWN kinetics are outside "
+                            "the physical domain of the bootstrap model "
+                            "(n_e, n_i, T_e or T_i not strictly positive, "
+                            "Z_eff < 1, or a non-finite value, at any "
+                            "node) -- found BEFORE any solve; the record's "
+                            "info names the quantity, the value and psi_N. "
+                            "No solve failed: typically an input sigma "
+                            "that exceeds the profile it perturbs",
     "jbs_non_finite": "an engine draw's loop evaluated a non-finite "
                       "bootstrap (jbs_loop.JBSNonFinite, raised at once)",
     "engine_closure_refused": "an engine draw's Ip amplitude (or Ip + q0 "
@@ -679,6 +698,46 @@ def _corrective_output_jphi(mygs, psi_N, psi_pad):
     return np.asarray(get_jphi_from_GS(
         f * fp, pp, q_ravg(ravgs, "<R>"), q_ravg(ravgs, "<1/R>")),
         dtype=float)
+
+
+def corrective_output_grid(n, psi_pad):
+    """The ``psi_N`` of the ``n`` samples :func:`_corrective_output_jphi`
+    (and the corrective iteration's own measurement) returns: the solver's
+    uniform sampling ``linspace(psi_pad, 1 - psi_pad, n)`` -- NOT the
+    ``psi_N`` grid handed in, whose LENGTH alone is used."""
+    return np.linspace(float(psi_pad), 1.0 - float(psi_pad), int(n))
+
+
+def register_corrective_output(achieved, psi_N, psi_pad):
+    """*achieved* (the samples of :func:`_corrective_output_jphi`, on
+    :func:`corrective_output_grid`) linearly interpolated onto *psi_N*, so
+    it can be compared, point for point, with a profile that lives on
+    *psi_N*.
+
+    The index-for-index comparison is exact only when *psi_N* IS the
+    uniform sampling.  A reconstruction grid ``linspace(0, 1, n)`` differs
+    from it by at most ``psi_pad`` (at the two ends); a non-uniform grid (an
+    IDS ``core_profiles`` grid, dense near the axis) differs by up to tens
+    of per cent of the minor radius, and the index-for-index difference
+    then compares the current at one radius with a target at another.
+    Outside ``[psi_pad, 1 - psi_pad]`` the end sample is held (the solver
+    does not sample there).  Numpy only: usable on a stored profile.
+    """
+    A = np.asarray(achieved, dtype=float)
+    return np.interp(np.asarray(psi_N, dtype=float),
+                     corrective_output_grid(A.size, psi_pad), A)
+
+
+def index_registration_error(profile, psi_N, psi_pad):
+    """What the index-for-index comparison of :func:`_corrective_output_jphi`
+    adds on its own: for a state whose achieved current IS *profile* (on
+    *psi_N*), the difference ``sampled-on-the-uniform-grid - profile`` taken
+    index for index.  Zero for a comparison on one grid.  Report only."""
+    psi_N = np.asarray(psi_N, dtype=float)
+    prof = np.asarray(profile, dtype=float)
+    sampled = np.interp(corrective_output_grid(psi_N.size, psi_pad), psi_N,
+                        prof)
+    return sampled - prof
 
 
 def _rematch_li_request(mygs, psi_N, j_ind_request, j_bs, pp_prof,
@@ -2358,7 +2417,8 @@ class _GSReject(Exception):
 def _std_candidate_solve(mygs, psi_N, pres_tmp, cand, spike, j_fixed_eff,
                          Ip_target, psi_pad, npsi, constrain_sawteeth,
                          find_optimal_scale, ip_mode=None,
-                         request_offset=None, input_j_phi=None):
+                         request_offset=None, input_j_phi=None,
+                         edge_pressure=None):
     """Steps 5b-5e of the standard l_i loop for ONE candidate and bootstrap.
 
     The self-consistent loop re-runs them for the SAME GPR candidate whenever
@@ -2371,6 +2431,7 @@ def _std_candidate_solve(mygs, psi_N, pres_tmp, cand, spike, j_fixed_eff,
     constraint rejects the candidate.
     """
     from scipy.optimize import root_scalar
+    _edge = resolve_edge_pressure(edge_pressure)
     _aip = None
     if ip_mode is not None and ip_mode != 'legacy':
         try:
@@ -2392,27 +2453,27 @@ def _std_candidate_solve(mygs, psi_N, pres_tmp, cand, spike, j_fixed_eff,
         a = _root.root
     matched = a * cand + spike + j_fixed_eff
     psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-    pprime = pchip_derivative(psi_N, pres_tmp) / psi_range
-    pprime[-1] = 0.0
+    pprime = solver_pprime(psi_N, pres_tmp, psi_range, _edge)
     pp_prof = {"type": "linterp", "y": pprime, "x": psi_N}
     ffp_prof = {"type": "jphi-linterp", "y": matched, "x": psi_N}
     matched_j_ind = a * cand
     final_scale_j0, _ = find_optimal_scale(
-        mygs, psi_N, pres_tmp, ffp_prof, pp_prof, matched_j_ind, Ip_target,
+        mygs, psi_N, solver_pressure(pres_tmp, _edge), ffp_prof, pp_prof,
+        matched_j_ind, Ip_target,
         psi_pad, spike_prof=spike + j_fixed_eff, diagnostic_plots=False,
         verbose=False)
     if constrain_sawteeth:
         _, q_pre, _, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
         if q_pre[0] < 1.0:
             return None
-    pprime = pchip_derivative(psi_N, pres_tmp) / psi_range
-    pprime[-1] = 0.0
+    pprime = solver_pprime(psi_N, pres_tmp, psi_range, _edge)
     pp_prof = {"type": "linterp", "y": pprime, "x": psi_N}
     target = matched_j_ind * final_scale_j0 + spike + j_fixed_eff
     target, _f = _renormalize_target_to_Ip(mygs, psi_N, target, Ip_target,
                                            psi_pad, label="jphi_corr/draw")
     output_jphi, n_corr, hist = _corrective_jphi_iteration(
-        mygs, psi_N, target, pp_prof, Ip_target, pres_tmp[0], psi_pad,
+        mygs, psi_N, target, pp_prof, Ip_target,
+        solver_pax(pres_tmp, _edge), psi_pad,
         min_iters=2, max_iters=int(os.environ.get('CORR_MAX_ITERS', '8')),
         rtol=0.05, verbose=False,
         **({} if request_offset is None else {
@@ -2520,6 +2581,7 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target,
     omega = float(settings["relax"])
     jbs0 = (1.0 - omega) * spike_used + omega * J
     pres_tmp = ctx["pres_tmp"]
+    _edge = resolve_edge_pressure(ctx.get("edge_pressure"))
     state = {}
 
     def _step(spk, k, relax=None):
@@ -2537,10 +2599,8 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target,
                          spk + ctx["j_fixed_eff"], psi_N, Ip_target)
         jphi = s * ctx["cand"] + spk + ctx["j_fixed_eff"]
         _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-        _pp = {"type": "linterp",
-               "y": pchip_derivative(psi_N, pres_tmp) / _pr, "x": psi_N}
-        _pp["y"][-1] = 0.0
-        mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
+        _pp = solver_pp_profile(psi_N, pres_tmp, _pr, _edge)
+        mygs.set_targets(Ip=Ip_target, pax=solver_pax(pres_tmp, _edge))
         _js = np.asarray(jphi, float) if relax is None else relax(jphi)
         mygs.set_profiles(pp_prof=_pp, ffp_prof={
             "type": "jphi-linterp", "y": np.asarray(_js, float),
@@ -2561,14 +2621,13 @@ def _post_homotopy_jbs(mygs, ctx, settings, psi_N, psi_pad, Ip_target,
         target = (np.asarray(ctx["j_ind_used"], float) + np.asarray(spk, float)
                   + np.asarray(ctx["j_fixed_eff"], float))
         _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-        _pp = {"type": "linterp",
-               "y": pchip_derivative(psi_N, pres_tmp) / _pr, "x": psi_N}
-        _pp["y"][-1] = 0.0
+        _pp = solver_pp_profile(psi_N, pres_tmp, _pr, _edge)
         target, _f = _renormalize_target_to_Ip(mygs, psi_N, target, Ip_target,
                                                psi_pad, label="jphi_corr/draw")
         _off = ctx.get("request_offset")
         out, _n, _h = _corrective_jphi_iteration(
-            mygs, psi_N, target, _pp, Ip_target, pres_tmp[0], psi_pad,
+            mygs, psi_N, target, _pp, Ip_target,
+            solver_pax(pres_tmp, _edge), psi_pad,
             min_iters=2, max_iters=int(os.environ.get('CORR_MAX_ITERS', '8')),
             rtol=0.05, verbose=False,
             # the draw's own start rule (target + the reconstruction's
@@ -2690,6 +2749,10 @@ def perturb_kinetic_equilibrium(
     # point) cancel exactly and the per-draw Sauter response is unfiltered.
     spike_delta_ref=None,
     spike_delta_baseline=None,
+    # The two edge-pressure settings (bouquet.edge_pressure): every P' and
+    # axis target of this draw is built by that module's helper.  None: the
+    # defaults (edge pin on, full axis pressure), bit for bit.
+    edge_pressure=None,
     proxy_bias_warmstart=None,
     pin_jphi=False,
     Z_imp=None,
@@ -2857,6 +2920,7 @@ def perturb_kinetic_equilibrium(
         (``ne_perturb`` etc.) are on the ``psi_N_kinetic`` grid.
     """
 
+    _edge = resolve_edge_pressure(edge_pressure)
     # ----------------------------------------------------------------
     #  1.  Lazy OFT imports (deferred so GPR-only use works without OFT)
     # ----------------------------------------------------------------
@@ -3069,7 +3133,7 @@ def perturb_kinetic_equilibrium(
         if "zeff" in aux_out:                 # active -> drives the bootstrap
             Zeff = np.clip(_kin_to_eq(aux_out["zeff"]), 1.0, None)
 
-    mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
+    mygs.set_targets(Ip=Ip_target, pax=solver_pax(pres_tmp, _edge))
 
     # ----------------------------------------------------------------
     #  3b. Optional diagnostic plots for kinetic profiles
@@ -3227,14 +3291,11 @@ def perturb_kinetic_equilibrium(
         # and could be cleaned up, but leaving it preserves symmetry
         # with the other branches.
         _psi_range_pin = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-        _pp_pin = {"type": "linterp",
-                   "y": pchip_derivative(psi_N, pres_tmp) / _psi_range_pin,
-                   "x": psi_N}
-        _pp_pin["y"][-1] = 0.0
+        _pp_pin = solver_pp_profile(psi_N, pres_tmp, _psi_range_pin, _edge)
         _ffp_pin = {"type": "jphi-linterp",
                     "y": input_j_phi.copy(),
                     "x": psi_N}
-        mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
+        mygs.set_targets(Ip=Ip_target, pax=solver_pax(pres_tmp, _edge))
         _probe("PIN_JPHI: after set_targets(Ip,pax)")
         mygs.set_profiles(pp_prof=_pp_pin, ffp_prof=_ffp_pin)
         _probe("PIN_JPHI: after set_profiles(pp,ffp)")
@@ -3322,12 +3383,9 @@ def perturb_kinetic_equilibrium(
         # identical output.
         new_jphi_diff = input_j_phi + delta_spike
         _psi_range_diff = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-        _pp_diff = {"type": "linterp",
-                    "y": pchip_derivative(psi_N, pres_tmp) / _psi_range_diff,
-                    "x": psi_N}
-        _pp_diff["y"][-1] = 0.0
+        _pp_diff = solver_pp_profile(psi_N, pres_tmp, _psi_range_diff, _edge)
         _ffp_diff = {"type": "jphi-linterp", "y": new_jphi_diff, "x": psi_N}
-        mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
+        mygs.set_targets(Ip=Ip_target, pax=solver_pax(pres_tmp, _edge))
         mygs.set_profiles(pp_prof=_pp_diff, ffp_prof=_ffp_diff)
         try:
             mygs.solve()
@@ -3379,15 +3437,12 @@ def perturb_kinetic_equilibrium(
         # WITH the fixed total-current anchor jphi_diff, which every solve of
         # this draw carries (j_fixed_eff), so at zero perturbation the anchor
         # IS the reconstruction's own solve (its stored request)
-        _pre_pp = {"type": "linterp",
-                   "y": pchip_derivative(psi_N, pres_tmp) /
-                        (mygs.psi_bounds[1] - mygs.psi_bounds[0]),
-                   "x": psi_N}
-        _pre_pp["y"][-1] = 0.0
+        _pre_pp = solver_pp_profile(
+            psi_N, pres_tmp, (mygs.psi_bounds[1] - mygs.psi_bounds[0]), _edge)
         _anchor_total = input_j_phi.copy()
         if jphi_diff is not None:
             _anchor_total = _anchor_total + np.asarray(jphi_diff, dtype=float)
-        mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
+        mygs.set_targets(Ip=Ip_target, pax=solver_pax(pres_tmp, _edge))
         mygs.set_profiles(pp_prof=_pre_pp,
                           ffp_prof={"type": "jphi-linterp",
                                     "y": _anchor_total, "x": psi_N})
@@ -3427,10 +3482,8 @@ def perturb_kinetic_equilibrium(
 
         def _jl_solve(j_phi_req):
             _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-            _pp = {"type": "linterp",
-                   "y": pchip_derivative(psi_N, pres_tmp) / _pr, "x": psi_N}
-            _pp["y"][-1] = 0.0
-            mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
+            _pp = solver_pp_profile(psi_N, pres_tmp, _pr, _edge)
+            mygs.set_targets(Ip=Ip_target, pax=solver_pax(pres_tmp, _edge))
             mygs.set_profiles(pp_prof=_pp,
                               ffp_prof={"type": "jphi-linterp",
                                         "y": np.asarray(j_phi_req, float),
@@ -3713,7 +3766,7 @@ def perturb_kinetic_equilibrium(
         # Anchor at pres_tmp -- the full solve pressure (thermal + p_fast +
         # impurity + p_diff) that every OTHER solve site in this function
         # uses (the draw solve, PIN_JPHI, and the diff path all set
-        # pax=pres_tmp[0]).  This was the one site still on the thermal-only
+        # pax=solver_pax(pres_tmp, _edge)).  This was the one site still on the thermal-only
         # `pressure` argument, which made the anchor a genuinely different
         # equilibrium from the reconstruction that produced input_j_phi
         # (issue #35 Defect 1): on a 27 kPa-p_fast case the missing pressure
@@ -3727,15 +3780,12 @@ def perturb_kinetic_equilibrium(
         # the anchor now tracks the draw it anchors, per maintainer decision
         # (2026-08-18): at sigma=0 this equals the baseline full pressure
         # bitwise; at sigma>0 it is the state the draw actually solves.
-        _pre_pp = {"type": "linterp",
-                    "y": pchip_derivative(psi_N, pres_tmp) /
-                         (mygs.psi_bounds[1] - mygs.psi_bounds[0]),
-                    "x": psi_N}
-        _pre_pp["y"][-1] = 0.0
+        _pre_pp = solver_pp_profile(
+            psi_N, pres_tmp, (mygs.psi_bounds[1] - mygs.psi_bounds[0]), _edge)
         _pre_ffp = {"type": "jphi-linterp",
                      "y": input_j_phi.copy(),
                      "x": psi_N}
-        mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
+        mygs.set_targets(Ip=Ip_target, pax=solver_pax(pres_tmp, _edge))
         mygs.set_profiles(pp_prof=_pre_pp, ffp_prof=_pre_ffp)
         try:
             mygs.solve()
@@ -4018,14 +4068,12 @@ def perturb_kinetic_equilibrium(
                       + _fmt_s_and_find(_sA, _r2_f_ind_used, _r2_mode) + ")")
             new_jphi = _anchor_jind + spike_profile + j_fixed_eff
         _psi_range_anchor = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-        _pp_anchor = {"type": "linterp",
-                      "y": pchip_derivative(psi_N, pres_tmp) / _psi_range_anchor,
-                      "x": psi_N}
-        _pp_anchor["y"][-1] = 0.0
+        _pp_anchor = solver_pp_profile(
+            psi_N, pres_tmp, _psi_range_anchor, _edge)
         _ffp_anchor = {"type": "jphi-linterp", "y": new_jphi, "x": psi_N}
 
         _probe("entry to recon-anchor block")
-        mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
+        mygs.set_targets(Ip=Ip_target, pax=solver_pax(pres_tmp, _edge))
         _probe("after set_targets(Ip,pax)")
         mygs.set_profiles(pp_prof=_pp_anchor, ffp_prof=_ffp_anchor)
         _probe("after set_profiles(pp,ffp)")
@@ -4087,7 +4135,7 @@ def perturb_kinetic_equilibrium(
                 new_jphi = _sA * _c + spike_profile + j_fixed_eff
                 _r2_scale_used = float(_sA)
                 _r2_f_ind_used = _r2_f_ind(_anchor_ip, _c)
-                mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
+                mygs.set_targets(Ip=Ip_target, pax=solver_pax(pres_tmp, _edge))
                 mygs.set_profiles(pp_prof=_pp_anchor,
                                   ffp_prof={"type": "jphi-linterp", "y": new_jphi, "x": psi_N})
                 try:
@@ -4438,8 +4486,7 @@ def perturb_kinetic_equilibrium(
 
         # ---- 5b. Set up GS profiles --------------------------------
         psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-        pprime_tmp = pchip_derivative(psi_N, pres_tmp) / psi_range
-        pprime_tmp[-1] = 0.0
+        pprime_tmp = solver_pprime(psi_N, pres_tmp, psi_range, _edge)
 
         pp_prof = {"type": "linterp", "y": pprime_tmp, "x": psi_N}
         ffp_prof = {
@@ -4453,7 +4500,7 @@ def perturb_kinetic_equilibrium(
         # ---- 5c. Find optimal scale factors -------------------------
         t_scale = time.perf_counter()
         final_scale_j0, final_jphi = find_optimal_scale(
-            mygs, psi_N, pres_tmp, ffp_prof, pp_prof,
+            mygs, psi_N, solver_pressure(pres_tmp, _edge), ffp_prof, pp_prof,
             matched_j_inductive, Ip_target, psi_pad,
             spike_prof=spike_profile + j_fixed_eff,
             diagnostic_plots=False, verbose=False,
@@ -4506,8 +4553,7 @@ def perturb_kinetic_equilibrium(
         # be removed.  At σ=0 the SWB-vs-recon bootstrap mismatch leaves
         # a ~5-13 mm structural floor in boundary RMS; that's the
         # honest cost of having per-draw Sauter response.
-        pprime_tmp = pchip_derivative(psi_N, pres_tmp) / psi_range
-        pprime_tmp[-1] = 0.0
+        pprime_tmp = solver_pprime(psi_N, pres_tmp, psi_range, _edge)
         pp_prof = {"type": "linterp", "y": pprime_tmp, "x": psi_N}
 
         target_jphi_perturb = (
@@ -4526,7 +4572,7 @@ def perturb_kinetic_equilibrium(
 
         output_jphi, _n_corr, _corr_hist = _corrective_jphi_iteration(
             mygs, psi_N, target_jphi_perturb, pp_prof,
-            Ip_target, pres_tmp[0], psi_pad,
+            Ip_target, solver_pax(pres_tmp, _edge), psi_pad,
             min_iters=2,
             # Corrective-iteration cap (default 8; observed to converge ~5).
             # Env CORR_MAX_ITERS lets us trim for speed (4 saves ~1 solve).
@@ -4559,7 +4605,7 @@ def perturb_kinetic_equilibrium(
                         j_fixed_eff, Ip_target, psi_pad, npsi,
                         constrain_sawteeth, find_optimal_scale,
                         ip_mode=_r2_mode, request_offset=_req_off,
-                        input_j_phi=input_j_phi)
+                        input_j_phi=input_j_phi, edge_pressure=_edge)
                     if _redo is None:
                         raise _GSReject()
                     _gs.update(_redo)
@@ -4759,6 +4805,9 @@ def perturb_kinetic_equilibrium(
         # would just draw a redundant/mislabelled curve. Drop it there.
         "j_BS_edge": spike_profile if isolate_edge_jBS else None,
         "proxy_bias_observed": proxy_bias_observed,
+        # the pressure this draw's solves were handed (bouquet.edge_pressure):
+        # the settings, its own p_sep, the offset applied and the axis target
+        "edge_pressure": describe_edge_pressure(_edge, pres_tmp),
         # Route-R2 inductive Ip-renormalisation scale (None off R2).  The
         # golden invariant: at sigma=0 the archived split is reproduced, so
         # this must be 1.000.  See _AnchorIpRenorm.
@@ -4805,6 +4854,7 @@ def perturb_kinetic_equilibrium(
             j_ind_used=(np.asarray(output_jphi, dtype=float)
                         - _jbs_spike_used - _jfe),
             j_fixed_eff=_jfe, pres_tmp=np.asarray(pres_tmp, dtype=float),
+            edge_pressure=_edge,
             input_j_phi=np.asarray(input_j_phi, dtype=float),
             r2_mode=_r2_ip_mode(), j_phi_request=np.asarray(output_jphi,
                                                             dtype=float),
@@ -5052,6 +5102,10 @@ def generate_bouquet(
     # GenerateEngineDraws built by Bouquet.generate from the live
     # reconstruction.  None: the legacy draw routes, bit for bit.
     engine_draw=None,
+    # The two edge-pressure settings (bouquet.edge_pressure;
+    # GenerationConfig.edge_pprime_pin / separatrix_pressure).  None: the
+    # defaults, bit for bit the behaviour before the settings existed.
+    edge_pressure=None,
     # Baseline provenance dict (Baseline.li_metrics, which carries the
     # ip_closure health record on hybrid baselines); archived as JSON on the
     # _baseline group so closure_limited travels with the slice.  Appended
@@ -5261,6 +5315,7 @@ def generate_bouquet(
         print(f"[jbs-loop] NOTICE: {_byp_msg}", flush=True)
         warnings.warn(_byp_msg, RuntimeWarning, stacklevel=2)
 
+    _edge = resolve_edge_pressure(edge_pressure)
     # ---- rejected draw attempts: one record each, a summary at the end ----
     _rejections = rejection_log if rejection_log is not None else []
     _masked_at_start = dict(ANCHOR_MASKED_FAILURES)
@@ -5347,6 +5402,8 @@ def generate_bouquet(
         # the engine's own solve pressure (the contract's: thermal +
         # impurity + fast), the one its reconstruction and every draw solve
         pressure_solve = _eng.solve_pressure(psi_N)
+        # ... and the reconstruction's own edge-pressure settings
+        _edge = _eng.ctx.edge
 
     npsi = len(psi_N)
 
@@ -5439,10 +5496,8 @@ def generate_bouquet(
         _n_bl_masked0 = ANCHOR_MASKED_FAILURES["jphi_baseline"]
         if jphi_baseline:
             _psi_range_b = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-            _pp_b = {"type": "linterp",
-                     "y": pchip_derivative(psi_N, pressure_solve) / _psi_range_b,
-                     "x": psi_N}
-            _pp_b["y"][-1] = 0.0
+            _pp_b = solver_pp_profile(
+                psi_N, pressure_solve, _psi_range_b, _edge)
             # Anchor the baseline reference equilibrium (this solve is re-saved as
             # baseline.eqdsk, the profile GPEC reads) to equilibrium.j_tor by
             # adding the fixed jphi_diff, matching every draw's total at sigma=0.
@@ -5514,7 +5569,7 @@ def generate_bouquet(
                 print(f"  [jphi-baseline] WARN: could not trace an LCFS to "
                       f"re-initialise psi from ({_why}); solving warm (the "
                       f"converged-on-entry stall of issue #24 is possible here)")
-            mygs.set_targets(Ip=initial_Ip_target, pax=float(pressure_solve[0]))
+            mygs.set_targets(Ip=initial_Ip_target, pax=solver_pax(pressure_solve, _edge))
             mygs.set_profiles(pp_prof=_pp_b, ffp_prof=_ffp_b)
             try:
                 mygs.solve()
@@ -5947,7 +6002,10 @@ def generate_bouquet(
                     _tmp_eqdsk_path,
                     nr=257, nz=257,
                     truncate_eq=save_truncate_eq,
-                    lcfs_pad=psi_pad)
+                    lcfs_pad=psi_pad,
+                    # the delivered baseline g-file carries the FULL pressure
+                    # (bouquet.edge_pressure; {} unless p_sep is added back)
+                    **lcfs_kwargs(_edge.p_offset(pressure_solve)))
                 with open(_tmp_eqdsk_path, 'rb') as _ef:
                     _new_eqdsk_bytes = _ef.read()
                 _new_eq_obj = read_eqdsk_from_bytes(
@@ -6243,6 +6301,11 @@ def generate_bouquet(
             print(f"  [delivered state] _baseline record not written "
                   f"({type(_bs_exc).__name__}: {_bs_exc})", flush=True)
 
+    # the edge-pressure settings and the baseline's separatrix pressure
+    store_edge_pressure_record(
+        header, edge_pressure_archive_record(_edge, pressure_solve),
+        scan_key=scan_key)
+
     # ---- Purge stale draws for THIS scan value -------------------------
     # The database is opened append-mode (multi-scan runs accumulate scan
     # values across calls), so draws from a previous run of the SAME header
@@ -6322,11 +6385,9 @@ def generate_bouquet(
             # BASELINE cache, so the baseline assembly is the consistent
             # choice here (the per-draw anchor tracks pres_tmp instead).
             try:
-                _cache_pp = {"type": "linterp",
-                             "y": pchip_derivative(psi_N, pressure_solve) /
-                                  (mygs.psi_bounds[1] - mygs.psi_bounds[0]),
-                             "x": psi_N}
-                _cache_pp["y"][-1] = 0.0
+                _cache_pp = solver_pp_profile(
+                    psi_N, pressure_solve,
+                    (mygs.psi_bounds[1] - mygs.psi_bounds[0]), _edge)
                 _cache_y = input_j_phi.copy()
                 if (jbs_loop and jbs_loop.get("enabled")
                         and not _diff_bs_env and jphi_diff is not None):
@@ -6337,7 +6398,7 @@ def generate_bouquet(
                 _cache_ffp = {"type": "jphi-linterp",
                               "y": _cache_y, "x": psi_N}
                 mygs.set_targets(Ip=initial_Ip_target,
-                                 pax=float(pressure_solve[0]))
+                                 pax=solver_pax(pressure_solve, _edge))
                 mygs.set_profiles(pp_prof=_cache_pp, ffp_prof=_cache_ffp)
                 mygs.solve()
                 print(f"  [DIFF_BS] state-anchor solve OK; entering SWB")
@@ -6827,6 +6888,7 @@ def generate_bouquet(
                     recon_eq_snapshot=_diff_recon_eq_snap,
                     spike_profile_recon_cached=_diff_spike_recon,
                     spike_delta_ref=(_delta_spike0_raw if jbs_delta_mode else None),
+                    edge_pressure=_edge,
                     spike_delta_baseline=(np.asarray(baseline_j_BS, dtype=float)
                                           if (jbs_delta_mode
                                               and _delta_spike0_raw is not None
@@ -6871,8 +6933,9 @@ def generate_bouquet(
                 _reject(count, _draw_rejection_reason(e, "perturb"),
                         "perturb", exc=e, message=_err_short)
             else:
-                _reject(count, _eng.rejection_reason(e, "perturb"),
-                        "perturb", exc=e, message=_err_short)
+                _eng.annotate_rejection(
+                    _reject(count, _eng.rejection_reason(e, "perturb"),
+                            "perturb", exc=e, message=_err_short), e)
             _skl = os.environ.get('BQ_SKIPLOG')
             if _skl:
                 with open(_skl, 'a') as _skf:
@@ -7564,12 +7627,20 @@ def generate_bouquet(
         # mygs.get_globals()[0] by ~0.5-0.8% between this draw and the
         # next draw's warmstart capture (the empirical save_eqdsk
         # Ip-mutation pathology).
+        # the separatrix pressure this draw's solves removed from the axis
+        # target (its OWN p_sep; 0 unless separatrix_pressure='offset'): the
+        # delivered g-file carries the full pressure
+        _p_lcfs = float((diagnostics.get('edge_pressure') or {}).get(
+            'p_sep_applied', 0.0))
+        if _eng is not None:
+            _p_lcfs = float(_eng.lcfs_pressure())
         safe_save_eqdsk(
             mygs,
             eqdsk_filename,
             nr=257, nz=257,
             truncate_eq=save_truncate_eq,
             lcfs_pad=psi_pad,
+            **lcfs_kwargs(_p_lcfs),
         )
 
         # Capture a high-resolution LCFS trace at the SAME mygs state
@@ -7640,6 +7711,7 @@ def generate_bouquet(
                   f"degenerate equilibrium -> l_i=nan (draw filtered out, "
                   f"run continues)")
             li1 = float('nan'); li3 = float('nan')
+            eq_stats_iter = None
 
         # Pressure on the equilibrium grid (for storage and plotting).
         # Interpolate kinetic profiles onto psi_N if on a different grid.
@@ -7854,6 +7926,12 @@ def generate_bouquet(
         if _eng is not None:
             # the draw's engine block + its post-hoc band flag
             _eng.store_draw(header, count, scan_key, diagnostics)
+        # the draw's edge-pressure record: its p_sep and both pressure frames
+        store_edge_pressure_record(
+            header, edge_pressure_archive_record(
+                _edge, pressure_total_perturb, stats=eq_stats_iter,
+                p_sep_applied=_p_lcfs),
+            scan_key=scan_key, count=count)
 
         # Clean up on-disk eqdsk after archiving
         try:
@@ -8018,7 +8096,8 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                             shelf_psi_N,initialize_psi=True,
                             isolate_edge_jBS=False,
                             p_fast=None, Z_imp=None,
-                            l_i_tolerance=0.01, jbs_loop=None):
+                            l_i_tolerance=0.01, jbs_loop=None,
+                            edge_pressure=None):
     r"""Reconstruct a single Grad-Shafranov equilibrium from a geqdsk
     reference and kinetic profiles, matching the EFIT :math:`l_i(1)`.
 
@@ -8152,6 +8231,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
     from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
 
+    _edge = resolve_edge_pressure(edge_pressure)
     if initialize_psi:
         # Estimate shape parameters from geqdsk LCFS geometry
         geo = eqdsk.geometry
@@ -8180,10 +8260,10 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         if Z_imp:
             from .physics import impurity_pressure as _imp_p
             _p0 = _p0 + _imp_p(ne, ni, ti, Z_imp)
-        _pp0 = pchip_derivative(eqdsk.psi_N, _p0) / (mygs.psi_bounds[1]
-                                                     - mygs.psi_bounds[0])
-        _pp0[-1] = 0.0
-        mygs.set_targets(Ip=abs(eqdsk.Ip), pax=float(_p0[0]))
+        _pp0 = solver_pprime(
+            eqdsk.psi_N, _p0, (mygs.psi_bounds[1] - mygs.psi_bounds[0]),
+            _edge)
+        mygs.set_targets(Ip=abs(eqdsk.Ip), pax=solver_pax(_p0, _edge))
         mygs.set_profiles(
             ffp_prof={"type": "jphi-linterp", "y": eqdsk_jtor.copy(),
                       "x": eqdsk.psi_N},
@@ -8343,8 +8423,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         # reconstruction's input would be circular.  It is applied downstream, to
         # the baseline anchor and to every draw, where that definition holds.
         psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-        pprime_tmp = pchip_derivative(eqdsk.psi_N, pres_tmp) / psi_range
-        pprime_tmp[-1] = 0.0
+        pprime_tmp = solver_pprime(eqdsk.psi_N, pres_tmp, psi_range, _edge)
 
         pp_prof = {"type": "linterp", "y": pprime_tmp, "x": eqdsk.psi_N}
         ffp_prof = {
@@ -8459,11 +8538,15 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
 
         print(f"[li match] target={li_target:.6f}  [estimator: li(3)/'iter']")
         print(f"[li match] iter 0: ind_factor={ind_0:.6f}  li={li_0:.6f}  err={li_0 - li_target:.6f}")
-        print(f"[li match] iter 1: ind_factor={ind_1:.6f}  li={li_1_sec:.6f}  err={li_1_sec - li_target:.6f}")
+        # the second evaluation's solve may fail (None): reported, and the
+        # loop below takes its failed-solve branch
+        print(f"[li match] iter 1: ind_factor={ind_1:.6f}  "
+              + (f"li={li_1_sec:.6f}  err={li_1_sec - li_target:.6f}"
+                 if li_1_sec is not None else "li=FAILED  err=N/A"))
 
         for li_iter in range(2, max_li_iters):
             err_0 = li_0 - li_target
-            err_1 = li_1_sec - li_target
+            err_1 = (li_1_sec - li_target) if li_1_sec is not None else None
 
             if li_1_sec is not None and abs(err_1) < li_tol:
                 print(f"[li match] converged at iter {li_iter}: "
@@ -8715,7 +8798,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     # self-consistent loop's l_i re-match (7c) starts from it
     j_phi_output_corr, _n_corr, _corr_hist, _R_E = _corrective_jphi_iteration(
         mygs, eqdsk.psi_N, corr_target, pp_prof,
-        Ip_final_target, pres_tmp[0], psi_pad,
+        Ip_final_target, solver_pax(pres_tmp, _edge), psi_pad,
         min_iters=2, max_iters=8, rtol=0.05, verbose=True,
         protect_state=True, return_request=True,
     )
@@ -8789,7 +8872,8 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
             _rm = _rematch_li_request(
                 mygs, eqdsk.psi_N,
                 np.asarray(_R_E, dtype=float) - j_BS_isolated_corr,
-                j_BS_isolated_corr, pp_prof, abs(eqdsk.Ip), pres_tmp[0],
+                j_BS_isolated_corr, pp_prof, abs(eqdsk.Ip),
+                solver_pax(pres_tmp, _edge),
                 li_target, psi_pad, label="recon l_i re-match")
             _R_F = _rm["request"]
         _snap_pc = mygs.copy_eq()
@@ -8820,7 +8904,8 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                     label="jphi_corr/recon")
                 _out, _nc, _hc, _req = _corrective_jphi_iteration(
                     mygs, eqdsk.psi_N, _ct, _f["pp_prof"],
-                    abs(eqdsk.Ip), _f["pres_tmp"][0], psi_pad,
+                    abs(eqdsk.Ip), solver_pax(_f["pres_tmp"], _edge),
+                    psi_pad,
                     min_iters=2, max_iters=8, rtol=0.05, verbose=True,
                     protect_state=True, return_request=True)
                 _liE_k = float(mygs.get_stats(
@@ -8832,7 +8917,8 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                     _rm_k = _rematch_li_request(
                         mygs, eqdsk.psi_N,
                         np.asarray(_req, dtype=float) - _jbc, _jbc,
-                        _f["pp_prof"], abs(eqdsk.Ip), _f["pres_tmp"][0],
+                        _f["pp_prof"], abs(eqdsk.Ip),
+                        solver_pax(_f["pres_tmp"], _edge),
                         _f["li_target"], psi_pad,
                         label="recon l_i re-match")
                     _RF_k = _rm_k["request"]
@@ -8963,7 +9049,12 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     # verdict flips on a number that is off by two orders of magnitude
     # (issue #33).  Shared with plotting._lcfs_from_psi so the two cannot
     # drift apart.
-    _lcfs_pts = select_closed_lcfs(_segs, context="reconstruction metrics")
+    # ... and, of the curves at that level, the one that goes around the
+    # magnetic axis: another CLOSED loop of the level set (around a coil, in
+    # the private flux) is not the boundary, however long.
+    from .utils import magnetic_axis_of as _magnetic_axis_of
+    _lcfs_pts = select_closed_lcfs(_segs, context="reconstruction metrics",
+                                   axis=_magnetic_axis_of(mygs))
     if _lcfs_pts is not None:
         _tree = _cKDTree_q(_lcfs_pts)
         _devs, _ = _tree.query(isoflux_pts)
@@ -9018,8 +9109,14 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     # ---- core-pressure hollowness health record (report-only) ------------
     # Describes the core shape of the INPUT pressure this reconstruction
     # solved with (total, and thermal species only) and of the ACHIEVED
-    # pressure read off the same get_profiles call the FF' above uses.
+    # pressure read off the same get_profiles call the FF' above uses.  The
+    # solver's pressure is zero at psi_N = 1: under
+    # separatrix_pressure="offset" p_sep is added back (bouquet.edge_pressure)
+    # so the achieved pressure is in the input's full frame.
     # Nothing reads it back; a failure here is recorded, never raised.
+    from .edge_pressure import applied_offset as _applied_offset
+    _p_ach = (np.asarray(_p_ach, dtype=float)
+              + _applied_offset(pres_tmp, _edge))
     _pc = _fm["pres_components"]
     try:
         from .physics import core_pressure_hollow_record

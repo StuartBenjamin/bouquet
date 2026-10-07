@@ -13,6 +13,7 @@ covers the guarantees a user should know about and the knobs that change them.
 - [Differential bootstrap (`jbs_delta_mode`)](#differential-bootstrap-jbs_delta_mode)
 - [Self-consistent bootstrap (`jbs_self_consistent`)](#self-consistent-bootstrap-jbs_self_consistent)
 - [The unified reconstruction engine (`reconstruction_engine`, default off)](#the-unified-reconstruction-engine-reconstruction_engine-default-off)
+- [The pressure handed to the solver: separatrix pressure and the edge P′ pin](#the-pressure-handed-to-the-solver-separatrix-pressure-and-the-edge-p-pin)
 - [Kinetics regridding](#kinetics-regridding)
 - [Edge-profile classification](#edge-profile-classification)
 - [Hybrid kinetics on the IMAS path](#hybrid-kinetics-on-the-imas-path)
@@ -278,12 +279,17 @@ active criterion on two consecutive passes**. Ceilings (limits, not
 tolerances): `jbs_max_passes = 8` (baseline / reconstruction),
 `jbs_max_passes_draw = 12` for each loop of a draw (its anchor loop, each
 l_i-match candidate's coupling, each Fix C resample), and
-`jbs_max_passes_post_homotopy = 4` passes after a draw's coil homotopy when
+`jbs_max_passes_post_homotopy = 6` passes after a draw's coil homotopy when
 Redl on the delivered equilibrium misses (with the two-consecutive rule a
 stage whose first pass misses needs at least 3). The draw ceilings were
 raised from 6 / 2 once the golden case showed the standard draw's l_i-match
 coupling contracting at ≈0.38/pass from r_j ≈ 2e-2…1.2e-1 (7–8 passes) --
-a limit change; no tolerance moved.
+a limit change; no tolerance moved. The post-homotopy ceiling was then
+raised from 4 to 6, an owner-approved change of a pass ceiling: in the
+passes-to-convergence study no draw needed more than 5 post-homotopy
+passes, and every draw a ceiling of 4 had rejected converged on its next
+pass; 6 is that measured need plus one pass. Again a limit change; no
+tolerance and no criterion moved.
 
 **Where a draw's loop starts.** Every draw's first loop starts from
 `evaluate_jBS` on the draw's **state anchor** (the archived total current at
@@ -613,6 +619,103 @@ taken per pass. Convergence uses only the existing tolerances (plus the
 closure-half current gate as a standing criterion); the delivery solve is
 checked on every row and is the reconstruction. Stage 2 builds the baseline
 only: the draws refuse an engine baseline until they run on the engine.
+
+## The pressure handed to the solver: separatrix pressure and the edge P′ pin
+
+Every Grad-Shafranov solve in the package hands the solver two things about
+the pressure: a `P'` profile on `psi_N` and an axis-pressure target. One
+module builds both (`bouquet/edge_pressure.py`), for every path -- the legacy
+reconstruction and draws, the modelling-source forward solve, the
+zero-perturbation checks, the unified engine and its draws.
+
+**The convention of the solver.** The solver builds the pressure by
+integrating `P'` inward from the plasma boundary starting at ZERO, then
+rescales `P'` so that the axis value equals the target. Its `P'` is a
+piecewise-linear function of `psi_N` that is zero outside the plasma and may
+take any value at `psi_N = 1` (`P'` then jumps to zero across the boundary).
+So a non-zero `P'` at the boundary is representable; a non-zero pressure
+there is not, and need not be: only `P'` enters the Grad-Shafranov equation.
+
+Two settings follow, both on `GenerationConfig`, both defaulting to the
+behaviour before they existed (bit for bit, proven by frozen-copy tests):
+
+| setting | default | other value |
+|---|---|---|
+| `edge_pprime_pin` | `True`: the last node of `P'` (`psi_N = 1`) is set to zero, so `P'` ramps linearly to zero across the final grid interval | `False`: the last node keeps the profile's own derivative |
+| `separatrix_pressure` | `"legacy"`: the axis target is the full axis pressure `p_axis` | `"offset"`: the axis target is `p_axis - p_sep`, and `p_sep` is added back wherever pressure, beta or stored energy is reported or delivered |
+
+`p_sep` is the pressure handed to the solver at its last node -- the TOTAL
+solve pressure (thermal + impurity + fast, and the pressure anchor where a
+path uses one), defined once in `edge_pressure.separatrix_pressure_of`. Each
+draw uses its own, from its own perturbed pressure.
+
+**What `"legacy"` does when `p_sep` is not zero.** The solver's pressure is
+zero at the boundary, so it reaches the full axis target only by inflating
+`P'` everywhere by `p_axis / (p_axis - p_sep)`. The equilibrium is then that
+of the pressure `p_axis (p - p_sep) / (p_axis - p_sep)`: too steep by that
+factor, and its `beta` and `W_MHD` are neither the input's full-pressure
+values nor its `p - p_sep` values. `"offset"` hands the solver the input's
+own `P'` (factor 1), which is a PHYSICS change relative to `"legacy"`: `P'`,
+the pressure-driven current and the Shafranov shift move by the factor
+`(p_axis - p_sep) / p_axis`.
+
+**What the edge pin does.** With the pin on, the pressure gradient is
+truncated in the last grid interval, and the pressure-driven part of the
+current, `P' (<R> - F^2 <1/R> / <B^2>)`, is forced to zero at the boundary.
+With it off the profile keeps its pedestal gradient to the separatrix. For
+the same requested `<j_phi>` this changes how the edge current is split
+between the `P'` and `FF'` terms in the last interval (`FF'` carries less,
+and can change sign there), the pressure-driven current at the boundary, and
+with them the edge current and `q95`. It is a PHYSICS change when turned off.
+
+**Reporting under `"offset"`: two frames, compared like for like.**
+
+- *solver frame* -- the solver's own statistics, built from `p - p_sep`: what
+  the equilibrium responds to. Compare with an input's `p - p_edge`
+  quantities (a magnetics-only input usually has zero edge pressure already).
+- *full frame* -- with `p_sep` added back: what a kinetic input reports.
+  With `V` the plasma volume and `int p dV` of the solved equilibrium (both
+  the solver's own numbers: `vol` and `W_MHD / 1.5`),
+
+  ```
+  W_MHD(full)  = W_MHD(solver) + 1.5 p_sep V
+  beta_X(full) = beta_X(solver) * (int p dV + p_sep V) / int p dV      X = p, t, N
+  P_ax(full)   = P_ax(solver) + p_sep
+  ```
+
+  (every beta of the solver is `2 mu0 <p> / B_ref^2` with the same reference
+  field, so the constant adds `2 mu0 p_sep / B_ref^2`). With nothing added
+  back the two frames ARE the solver's numbers.
+
+`Baseline.edge_pressure`, the engine record (`edge_pressure`), the
+reconstruction summary (`pressure_like_for_like`: each frame against the
+input's same-definition quantity, a g-file's edge pressure read from its own
+`PRES`) and every draw record carry `p_sep` and both frames; the archive
+stores the record on `_baseline` and on every draw (`edge_pressure_json`).
+The headline `beta_N` / `beta_p` / `W_MHD` of a summary are the full-frame
+values under `"offset"` and the solver's own under `"legacy"`.
+
+**Delivery under `"offset"`.** A written g-file carries the FULL pressure:
+`PRES` is the solver's pressure plus that equilibrium's own `p_sep`, `PPRIME`
+is unchanged, so `PRES` still differentiates to `PPRIME` and equals the input
+pressure at the edge. The IMAS export is built from the delivered g-file and
+so carries the same pressure.
+
+**Where the model stops.** A pressure that is `p_sep` just inside the
+boundary and zero just outside is not physical: the real separatrix pressure
+continues into the scrape-off layer, which a vacuum-outside free-boundary
+equilibrium cannot represent. The constant `p_sep` exerts no force in the
+model -- the equilibrium inside the boundary is the one the input's `P'` asks
+for -- and is bookkeeping for readers of the pressure. The same holds for the
+`P'` jump at the boundary with the pin off: it is the truncation of a
+gradient that in reality continues outward.
+
+**Not covered.** The solver's own bootstrap helper (`solve_with_bootstrap`,
+used by the legacy non-loop routes for their intermediate bootstrap
+evaluation) builds its own `P'` and axis target inside the solver package
+and is not reached by either setting; the states a run delivers are solved
+by bouquet's own calls, which are. The g-file READER's edge extrapolation of
+`PPRIME` / `FFPRIM` is a separate, unchanged option.
 
 ## Kinetics regridding
 

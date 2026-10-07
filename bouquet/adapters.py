@@ -584,16 +584,51 @@ class IdsAdapter:
         cps = dd["core_profiles"]
         ic = _nearest_index(cps["time"], T, "core_profiles")
         cp = cps["profiles_1d"][ic]
-        sgn = source_current_sign(gq["ip"])
+        # ONE normalisation: the factor the READER applied to this source's
+        # currents (Baseline.source_current_sign -- sign(ip) at the slice the
+        # currents come from, or ImasSource.current_orientation when the
+        # source needs it stated; the reader has already refused a source
+        # whose currents disagree with it).  The adapter re-reads the dd's
+        # parallel currents and must put them in the SAME frame, so it takes
+        # that factor rather than deriving a second one from ip.  A baseline
+        # that carries none (not produced by the reader) falls back to
+        # sign(ip), the reader's own "auto" rule.
+        _sgn_bl = getattr(bl, "source_current_sign", None)
+        if _sgn_bl is None:
+            sgn = source_current_sign(gq["ip"])
+            sgn_origin = "auto: sign(equilibrium ip) (no reader record)"
+        else:
+            sgn = float(_sgn_bl)
+            if sgn not in (1.0, -1.0):
+                raise EngineInputRefused(
+                    "IDS adapter: the baseline's source_current_sign is "
+                    f"{_sgn_bl!r}, not +1 or -1")
+            sgn_origin = str(getattr(bl, "source_current_sign_origin", None)
+                             or "the reader's normalisation "
+                                "(Baseline.source_current_sign)")
         B0, b0_from = _ids_b0(dd, ie, ic)
         # IMAS is COCOS 11: (R, phi, Z) right-handed, so the dd's own ip and
-        # b0 signs ARE the orientation in the A-coefficients' frame
+        # b0 signs ARE the orientation in the A-coefficients' frame.  That
+        # statement needs the source to be self-consistent: when the current
+        # factor the reader applied differs from sign(ip) (an
+        # ImasSource.current_orientation override on a source whose currents
+        # and ip are stored in different orientations) the source states the
+        # direction of Ip twice and the two disagree, so the adapter states
+        # NONE -- an MSE row then needs the block's own ip_sign (mse_rows
+        # refuses a sign nobody states; it is never guessed).
         _b0s = getattr(bl, "source_b0_sign", None)
+        _ip_dd = float(source_current_sign(gq["ip"]))
+        _ip_ok = (_ip_dd == float(sgn))
         self.orientation = dict(
-            ip_sign=float(sgn),
+            ip_sign=(float(sgn) if _ip_ok else None),
             bt_sign=(None if _b0s is None else float(_b0s)),
             basis=("IDS equilibrium global_quantities.ip and "
-                   "vacuum_toroidal_field.b0 signs (COCOS 11)"))
+                   "vacuum_toroidal_field.b0 signs (COCOS 11)" if _ip_ok
+                   else "vacuum_toroidal_field.b0 sign (COCOS 11); the Ip "
+                        f"direction is NOT stated: the source's ip sign is "
+                        f"{_ip_dd:+.0f} but its currents were read with the "
+                        f"factor {float(sgn):+.0f} ({sgn_origin})"),
+            current_sign_origin=sgn_origin)
         psi = np.asarray(cp["grid"]["psi"], dtype=float)
         psi_N = (psi - psi[0]) / (psi[-1] - psi[0])
         if not np.allclose(psi_N, np.asarray(bl.psi_N, float), rtol=0.0,
@@ -646,14 +681,18 @@ class IdsAdapter:
                     "j_total / j_bootstrap to form the parallel residual; "
                     "refusing (no inductive current can be formed)")
             ind = j_tot - j_boot - nbi
+        # user-supplied driven currents are defined in the positive-Ip frame
+        # (co-current positive) on both source paths, exactly as the reader
+        # takes them: they are NOT multiplied by the source's factor (only
+        # the dd's own currents are)
         fc = cfg.fixed_components
         user_fix = {}
         if fc.j_NBI is not None:
-            user_fix["nbi"] = sgn * np.interp(psi_N, fc.psi_N, fc.j_NBI) \
-                if fc.psi_N is not None else sgn * np.asarray(fc.j_NBI, float)
+            user_fix["nbi"] = np.interp(psi_N, fc.psi_N, fc.j_NBI) \
+                if fc.psi_N is not None else np.asarray(fc.j_NBI, float)
         if fc.j_RF is not None:
-            user_fix["rf"] = sgn * np.interp(psi_N, fc.psi_N, fc.j_RF) \
-                if fc.psi_N is not None else sgn * np.asarray(fc.j_RF, float)
+            user_fix["rf"] = np.interp(psi_N, fc.psi_N, fc.j_RF) \
+                if fc.psi_N is not None else np.asarray(fc.j_RF, float)
         self._user_fix_tor = user_fix
         # kinetics + pressure exactly as the reader resolved them (thermal +
         # impurity + fast; NO p_diff -- the engine does not anchor pressure)
@@ -718,6 +757,7 @@ class IdsAdapter:
             boundary=np.asarray(boundary, dtype=float),
             Ip=float(bl.Ip_target), rows=rows,
             signs=dict(current_sign=float(sgn),
+                       current_sign_origin=sgn_origin,
                        b0_sign=getattr(bl, "source_b0_sign", None),
                        ip_sign_RphiZ=self.orientation["ip_sign"],
                        bt_sign_RphiZ=self.orientation["bt_sign"],

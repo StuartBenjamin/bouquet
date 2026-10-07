@@ -130,6 +130,94 @@ class EngineDrawInputs:
     sampler: dict = field(default_factory=dict)
 
 
+class DrawKineticsNonPhysical(ValueError):
+    """The DRAWN kinetics of an engine draw are outside the physical domain
+    of the bootstrap model -- found before any solve.
+
+    The draw is REJECTED with reason code ``"kinetics_nonphysical"``
+    (:data:`~bouquet.TokaMaker_interface.DRAW_REJECTION_REASONS`); ``info``
+    (JSON-safe) goes into the rejection record: the first offending
+    ``quantity`` (in the order the bootstrap evaluation checks them), its
+    ``value`` and ``psi_N`` there, ``n_bad`` of ``n_nodes``, the ``rule``
+    broken, and ``all`` -- every offending quantity with its own first
+    ``psi_N``, worst ``value`` and node count.
+    """
+
+    def __init__(self, message, info):
+        super().__init__(message)
+        self.info = dict(info)
+
+
+#: the physical domain of the Redl inputs, in the order
+#: :func:`bouquet.physics.evaluate_jBS` checks them: (name, unit, rule,
+#: ``bad(array)``)
+_KINETIC_DOMAIN = (
+    ("ne", "m^-3", "strictly positive", lambda a: ~(a > 0.0)),
+    ("ni", "m^-3", "strictly positive", lambda a: ~(a > 0.0)),
+    ("te", "eV", "strictly positive", lambda a: ~(a > 0.0)),
+    ("ti", "eV", "strictly positive", lambda a: ~(a > 0.0)),
+    ("zeff", "", ">= 1", lambda a: ~(a >= 1.0)),
+)
+
+
+def check_draw_kinetics(kinetics, psi_N, label="engine draw"):
+    """Refuse non-physical DRAWN kinetics before anything is solved.
+
+    Exactly the input domain :func:`bouquet.physics.evaluate_jBS` enforces
+    on the same arrays (every node finite; ``ne, ni, te, ti > 0``;
+    ``zeff >= 1``), so the draws rejected are the ones that evaluation
+    refused at the draw's first bootstrap evaluation -- which was reported
+    as ``anchor_solve_failed`` although no solve had run.  Nothing is
+    clipped or redrawn; the sampler is untouched.  Raises
+    :class:`DrawKineticsNonPhysical`; returns ``None`` otherwise.
+    """
+    psi = np.asarray(psi_N, dtype=float)
+    found = []
+    for name, unit, rule, _bad in _KINETIC_DOMAIN:
+        a = np.asarray(kinetics[name], dtype=float)
+        if a.ndim == 0:
+            a = np.full(psi.shape, float(a))
+        if a.shape != psi.shape:
+            return                  # a malformed input is the evaluator's
+        nonfinite = ~np.isfinite(a)
+        if nonfinite.any():
+            i = int(np.argmax(nonfinite))
+            found.append(dict(quantity=name, rule="finite", unit=unit,
+                              psi_N=float(psi[i]), index=i, value=None,
+                              n_bad=int(nonfinite.sum()), kind="non_finite"))
+    if not found:
+        for name, unit, rule, bad_of in _KINETIC_DOMAIN:
+            a = np.asarray(kinetics[name], dtype=float)
+            if a.ndim == 0:
+                a = np.full(psi.shape, float(a))
+            bad = bad_of(a)
+            if bad.any():
+                i = int(np.argmax(bad))
+                found.append(dict(
+                    quantity=name, rule=rule, unit=unit,
+                    psi_N=float(psi[i]), index=i, value=float(a[i]),
+                    worst=float(np.min(a[bad])), n_bad=int(bad.sum()),
+                    psi_N_range=[float(psi[bad][0]), float(psi[bad][-1])],
+                    kind="domain"))
+    if not found:
+        return
+    f = found[0]
+    val = "a non-finite value" if f["value"] is None else (
+        f"{f['value']:.6g}" + (f" {f['unit']}" if f["unit"] else ""))
+    others = "" if len(found) == 1 else (
+        "; also " + ", ".join(x["quantity"] for x in found[1:]))
+    raise DrawKineticsNonPhysical(
+        f"{label}: drawn {f['quantity']} must be {f['rule']} on every "
+        f"node; got {val} at psi_N={f['psi_N']:.6g} ({f['n_bad']} of "
+        f"{psi.size} node(s)){others}.  No solve was run: the drawn "
+        "kinetics are non-physical (an input sigma larger than the profile "
+        "it perturbs draws through zero).",
+        dict(quantity=f["quantity"], psi_N=f["psi_N"], value=f["value"],
+             rule=f["rule"], unit=f["unit"], index=f["index"],
+             n_bad=f["n_bad"], n_nodes=int(psi.size), all=found,
+             detected="before any solve (the draw's inputs)"))
+
+
 def _pchip(x, y, xn):
     from .utils import pchip_interp
     return pchip_interp(np.asarray(x, float), np.asarray(y, float),
@@ -153,11 +241,15 @@ class EngineDrawContext:
     def __init__(self, eng, res, *, loop, native, q0_row=False,
                  label="engine draw", bootstrap_refresh=False):
         from .engine import _lin, complete_geometry  # noqa: F401
-        from .utils import (closure_sign_convention, pchip_derivative,
-                            structured_basis_eval)
+        from .edge_pressure import pressure_gradient, resolve_edge_pressure
+        from .utils import closure_sign_convention, structured_basis_eval
         st = res["state"]
         self.eng = eng
         self.c = eng.c
+        #: the reconstruction's edge-pressure settings (bouquet.
+        #: edge_pressure): every draw solve and report uses the same
+        self.edge = resolve_edge_pressure(
+            (getattr(eng, "s", None) or {}).get("edge_pressure"))
         self.psi = np.asarray(eng.psi, dtype=float)
         self.label = str(label)
         self.loop = dict(loop)
@@ -200,7 +292,7 @@ class EngineDrawContext:
         # ---- the pressure term's p' on G* for a draw's pressure (pass 1)
         psi_q = np.asarray(g["psi_q"], dtype=float)
         self._psi_q = psi_q
-        self.dPq_star = np.interp(psi_q, self.psi, pchip_derivative(
+        self.dPq_star = np.interp(psi_q, self.psi, pressure_gradient(
             self.psi, np.asarray(self.c.pressure, dtype=float)))
         pp = np.asarray(g["pprime"], dtype=float)
         nn = float(self.dPq_star @ self.dPq_star)
@@ -210,14 +302,18 @@ class EngineDrawContext:
         # ---- the reconstruction's delivered measurements (the reference)
         m = eng.delivered_meas
         stats = m.get("stats") or {}
+        from .engine import _full_frame
+        full = _full_frame(m)
         from .physics import SOLVER_Q0_PSI_N
         self.ref = dict(
             l_i=float(m["li"]), l_i_1=_f(m.get("li_1")),
             q_row=float(m["q_row"]), q_row_psi_N=float(psi_q[0]),
             q0_stats=_f(stats.get("q_0")),
             q0_stats_psi_N=float(SOLVER_Q0_PSI_N),
-            q95=_f(stats.get("q_95")), beta_n=_f(stats.get("beta_n")),
+            q95=_f(stats.get("q_95")), beta_n=_f(full.get("beta_n")),
             Ip=_f(m.get("Ip")), flux_range=_f(g.get("dpsi_dpsiN")))
+        if m.get("pressure_frames") is not None:
+            self.ref["pressure_frames"] = _frames(m)
         # ---- the kinetic-grid base of the sampler
         nat = dict(native)
         self.native = {k: np.asarray(v, dtype=float)
@@ -263,8 +359,8 @@ class EngineDrawContext:
         row grid, ``sigma_p`` the least-squares factor between the solver's
         ``p'`` on ``G*`` and ``d p / d psi_N``.  Exactly ``G*`` at zero
         perturbation."""
-        from .utils import pchip_derivative
-        dPq = np.interp(self._psi_q, self.psi, pchip_derivative(
+        from .edge_pressure import pressure_gradient
+        dPq = np.interp(self._psi_q, self.psi, pressure_gradient(
             self.psi, np.asarray(pressure, dtype=float)))
         g = dict(self.geom)
         g["pprime"] = np.asarray(self.geom["pprime"], dtype=float) \
@@ -339,6 +435,18 @@ def flux_range_change(fr, fr_ref):
         return dict(flux_range=None, flux_range_rel=None)
     return dict(flux_range=float(fr - fr_ref),
                 flux_range_rel=float((fr - fr_ref) / fr_ref))
+
+
+def _frames(meas):
+    """The JSON-able pressure-frames block of a final measurement
+    (:func:`bouquet.edge_pressure.pressure_frames`: ``p_sep``, the volume,
+    and beta / W_MHD in the solver's frame and with ``p_sep`` added
+    back)."""
+    pf = meas["pressure_frames"]
+    return dict(p_sep=float(pf["p_sep"]), volume=float(pf["volume"]),
+                factor=float(pf["factor"]),
+                solver={k: float(v) for k, v in pf["solver"].items()},
+                full={k: float(v) for k, v in pf["full"].items()})
 
 
 def _f(v):
@@ -756,9 +864,13 @@ def run_draw(ctx, backend, inputs, *, label=None, coil_guard=None,
     (:class:`~bouquet.jbs_loop.JBSNotConverged` /
     :class:`~bouquet.jbs_loop.JBSNonFinite`, a closure refusal, a failed
     first solve as :class:`~bouquet.TokaMaker_interface.
-    DrawAnchorSolveFailed`) -- the draw is then rejected."""
+    DrawAnchorSolveFailed`), or :class:`DrawKineticsNonPhysical` before
+    anything is solved -- the draw is then rejected."""
     from .jbs_loop import AxisRowPin, jsonable, run_jbs_loop
     label = str(label or ctx.label)
+    # non-physical DRAWN kinetics reject the draw here, before any solve and
+    # before the first bootstrap evaluation (its own reason code)
+    check_draw_kinetics(inputs.kinetics, ctx.psi, label)
     clock = (clock if clock is not None
              else _Clock(lambda: int(backend.n_solves)))
     backend.set_inputs(pressure=inputs.pressure, kinetics=inputs.kinetics)
@@ -831,9 +943,10 @@ def _finish(ctx, backend, inputs, dp, res, m_fin, pin, label):
     chk = check_delivered(res["J_final"], jbs_used, meas["w"], meas["x"],
                           float(ctx.c.Ip), ctx.loop)
     stats = m_fin.get("stats") or {}
+    from .engine import _full_frame
     delivered = dict(
         l_i_3=float(m_fin["li"]), l_i_1=_f(m_fin.get("li_1")),
-        beta_n=_f(stats.get("beta_n")),
+        beta_n=_f(_full_frame(m_fin).get("beta_n")),
         q0=float(m_fin["q_row"]), q0_psi_N=float(ctx.ref["q_row_psi_N"]),
         q0_stats=_f(stats.get("q_0")),
         q0_stats_psi_N=float(ctx.ref["q0_stats_psi_N"]),
@@ -842,6 +955,8 @@ def _finish(ctx, backend, inputs, dp, res, m_fin, pin, label):
                             ok=bool(chk["ok"])),
         request_minus_achieved=dp.passes[-1]["delivery"])
     delivered["flux_range"] = flux_range(m_fin)
+    if m_fin.get("pressure_frames") is not None:
+        delivered["pressure_frames"] = _frames(m_fin)
     amp = last["amp"]
     dli = float(m_fin["li"]) - float(ctx.ref["l_i"])
     ident = dict(
@@ -1034,13 +1149,16 @@ def solve_hit_iteration_cap(exc) -> bool:
 
 def engine_rejection_reason(exc, stage):
     """The :data:`~bouquet.TokaMaker_interface.DRAW_REJECTION_REASONS` code
-    of an engine draw rejected by *exc*: a non-finite bootstrap/current is
+    of an engine draw rejected by *exc*: non-physical drawn kinetics are
+    ``kinetics_nonphysical``, a non-finite bootstrap/current is
     ``jbs_non_finite``, a closure refusal ``engine_closure_refused``, every
     other case the legacy mapping (:func:`~bouquet.TokaMaker_interface.
     _draw_rejection_reason`)."""
     from .engine import EngineClosureRefused
     from .jbs_loop import JBSNonFinite
     from .TokaMaker_interface import _draw_rejection_reason
+    if isinstance(exc, DrawKineticsNonPhysical):
+        return "kinetics_nonphysical"
     if isinstance(exc, JBSNonFinite):
         return "jbs_non_finite"
     if isinstance(exc, EngineClosureRefused):
@@ -1051,12 +1169,15 @@ def engine_rejection_reason(exc, stage):
 # ---------------------------------------------------------------------------
 #  generate(): the hook generate_bouquet calls
 # ---------------------------------------------------------------------------
-def tokamaker_backend(mygs, contract, *, psi_pad, q_psi, maxits):
+def tokamaker_backend(mygs, contract, *, psi_pad, q_psi, maxits,
+                      edge_pressure=None):
     """The draw's backend on a live solver (monkeypatched by the fast
-    tests)."""
+    tests).  ``edge_pressure``: the reconstruction's settings
+    (:mod:`bouquet.edge_pressure`)."""
     from .engine import TokaMakerBackend
     return TokaMakerBackend(mygs, contract, psi_pad=psi_pad, li_kind="li_3",
-                            q_psi=q_psi, maxits=maxits)
+                            q_psi=q_psi, maxits=maxits,
+                            edge_pressure=edge_pressure)
 
 
 class GenerateEngineDraws:
@@ -1095,7 +1216,17 @@ class GenerateEngineDraws:
         dc = SimpleNamespace(psi_N=c.psi_N, pressure=c.pressure, Ip=c.Ip,
                              kinetics=c.kinetics)
         return tokamaker_backend(mygs, dc, psi_pad=self.psi_pad,
-                                 q_psi=self.q_psi, maxits=self.maxits)
+                                 q_psi=self.q_psi, maxits=self.maxits,
+                                 edge_pressure=self.ctx.edge)
+
+    def lcfs_pressure(self):
+        """The separatrix pressure a written g-file of the CURRENT draw
+        carries (its own ``p_sep`` under ``separatrix_pressure="offset"``,
+        0 under ``"legacy"``)."""
+        cur = self._cur
+        if cur is None or cur.get("draw") is None:
+            return self.ctx.edge.p_offset(self.ctx.c.pressure)
+        return self.ctx.edge.p_offset(cur["draw"]["inputs"].pressure)
 
     def validate(self, *, pin_jphi, jbs_delta_mode, l_i_uncertainty,
                  recalculate_j_BS, jbs_loop):
@@ -1135,6 +1266,14 @@ class GenerateEngineDraws:
             self.announce_cap("loop", exc, stage="loop",
                               seconds=self._backend_seconds())
         return code
+
+    def annotate_rejection(self, record, exc):
+        """Add what the rejection knows to its record (in place; returns
+        it): for non-physical drawn kinetics, ``info`` = the offending
+        quantity, its value and psi_N (:class:`DrawKineticsNonPhysical`)."""
+        if isinstance(exc, DrawKineticsNonPhysical):
+            record["info"] = dict(exc.info)
+        return record
 
     def _backend_seconds(self):
         b = None if self._cur is None else self._cur.get("backend")
@@ -1341,14 +1480,18 @@ class GenerateEngineDraws:
         v["coil_in_spec"] = bool(in_spec)
         v["in_spec"] = bool(in_spec and v["in_band"])
         stats = fin.get("stats") or {}
+        from .engine import _full_frame
         rec = diagnostics["engine"]
         rec["archived"] = dict(
             l_i_3=float(fin["li"]), l_i_1=_f(fin.get("li_1")),
-            beta_n=_f(stats.get("beta_n")), q0=float(fin["q_row"]),
+            beta_n=_f(_full_frame(fin).get("beta_n")),
+            q0=float(fin["q_row"]),
             q0_psi_N=float(self.ctx.ref["q_row_psi_N"]),
             q95=_f(stats.get("q_95")), flux_range=flux_range(fin),
             note=("the archived (post-homotopy) state; 'delivered' is the "
                   "loop's"))
+        if fin.get("pressure_frames") is not None:
+            rec["archived"]["pressure_frames"] = _frames(fin)
         rec["archived"]["deltas"] = dict(
             l_i_3=float(fin["li"]) - float(self.ctx.ref["l_i"]),
             l_i_1=(None if (rec["archived"]["l_i_1"] is None

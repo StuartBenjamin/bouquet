@@ -112,7 +112,10 @@ JBS_GROWTH_ABORT_PASSES = 3
 #: a draw may take at the tight coil stage after the post-perturb homotopy
 #: (a ceiling, not a tolerance: the two-consecutive-pass rule applies there
 #: too, so a post-homotopy stage whose first pass misses needs at least 3).
-JBS_POST_HOMOTOPY_PASSES = 4
+#: 6 since the owner-approved change of this ceiling from 4 (measured need
+#: 5, one pass of margin; see docs/CHANGES_SUMMARY.md).  Only reached with
+#: the self-consistent loop on.
+JBS_POST_HOMOTOPY_PASSES = 6
 #: (The MSE chord stage and the geqdsk post-corrective stage are passes of
 #: the baseline loop and take ``jbs_max_passes`` as their ceiling.)
 #: MSE chord iteration: the linearisation point has stopped moving when the

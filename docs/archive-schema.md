@@ -80,6 +80,9 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │              [engine_json]      ← the unified engine's record (added;
     │                                    reconstruction_engine="unified"),
     │                                    with its "draws" settings block
+    │              [edge_pressure_json] ← the edge-pressure record (added):
+    │                                    edge_pprime_pin, separatrix_pressure,
+    │                                    p_sep, p_sep_applied, pax_target
     └── <count>/                       one group per accepted draw
         │                              (integer; gaps = rejected draws)
         ├── eqdsk, [pfile]             raw bytes, fixed names
@@ -104,9 +107,19 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
                                        ← the draw's jbs_loop block (v3)
                    [engine_json, passes_draw_band]
                                        ← engine draws only (added; see below)
+                   [edge_pressure_json] ← the draw's edge-pressure record
+                                       (added): its own p_sep, the offset
+                                       applied, and beta / W_MHD in both
+                                       pressure frames ("frames")
                    [boundary_rms_mm, boundary_max_mm]  ← the draw's LCFS metric,
                                        written when filter_boundaries applies a cut
 ```
+
+`edge_pressure_json` is read with `bouquet.edge_pressure.load_record(header,
+count=None, scan_key=None)` (`count=None`: the baseline's). See
+[physics-notes.md](physics-notes.md#the-pressure-handed-to-the-solver-separatrix-pressure-and-the-edge-p-pin).
+Under `separatrix_pressure="offset"` the stored `eqdsk` bytes carry the full
+pressure (`PRES` = the solver's pressure + that equilibrium's `p_sep`).
 
 ## Conventions
 
