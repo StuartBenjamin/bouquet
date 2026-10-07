@@ -75,7 +75,7 @@ without naming the machine. All raise with the full list of locations tried.
 ### Solver build requirement
 
 The self-consistent bootstrap loop and the unified reconstruction engine
-(`generation.reconstruction_engine="unified"`, opt-in) were validated on an
+(`generation.reconstruction_engine="unified"`, the default) were validated on an
 OpenFUSIONToolkit build carrying two fixes on top of upstream, developed on the
 branch `fix/jphi-update-ravgs-and-nonfinite-abort` of the OpenFUSIONToolkit fork
 at `github.com/d-burg/OpenFUSIONToolkit`; they are not yet part of an upstream
@@ -98,12 +98,24 @@ mode below; that mode moves the same quantities by at most 5e-4 relative.) A sol
 iteration cap on an upstream build (one zero-perturbation check took 5.7×
 longer). Run `verify_sigma0_consistency()` on a new machine or OFT build.
 
-**Results change by default with this release** (default
-`reconstruction_engine="legacy"` path included):
+**Results change by default with this release:**
+
+- the **unified reconstruction engine is the default**
+  (`generation.reconstruction_engine="unified"`, was `"legacy"`): one
+  reconstruction loop for g-file and IDS inputs, which also runs the draws
+  ([docs/engine.md](docs/engine.md)). `reconstruction_engine="legacy"`
+  restores the legacy reconstruction and draws; a configuration stored
+  before the engine existed replays as `"legacy"`. Legacy-only settings are refused under the engine, with that
+  instruction;
+- one `<j.B>` -> `<j_phi>` conversion in the package, `F<1/R>/<B^2>` (the
+  engine's): the legacy bootstrap at the pedestal drops by ~6.4-6.8 % on the
+  synthetic example (it used `<j.B>/(F<1/R>)`); not switchable;
+
+The following hold on both engines:
 
 - the bootstrap is iterated to self-consistency
   (`generation.jbs_self_consistent=True`); `False` restores the frozen
-  bootstrap;
+  bootstrap (legacy engine only: the unified engine IS the loop);
 - a non-zero separatrix pressure p_sep is kept: the solver is handed the
   axis target p_axis - p_sep (its own pressure is zero at the boundary), and
   p_sep is added back wherever pressure, beta or W_MHD is reported or written
@@ -153,6 +165,7 @@ b = bq.Bouquet.from_geqdsk(
     profiles="baseline.peqdsk",      # p-file or IDA .cdf (auto-detected)
     mesh=bq.find_mesh(),
     n_draws=20, header="my_run",
+    # reconstruction_engine="legacy",  # the legacy paths (default: "unified")
 )
 
 b.reconstruct()                      # GS reconstruction + fidelity summary

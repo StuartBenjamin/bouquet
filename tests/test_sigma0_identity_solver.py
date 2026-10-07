@@ -124,12 +124,14 @@ def _probe(outdir, which):
         if which == "recon":
             b = bq.Bouquet.from_geqdsk(_GEQ, profiles=_PF, mesh=_MESH,
                                        nthreads=1, n_draws=1,
-                                       header=os.path.join(outdir, "rec"))
+                                       header=os.path.join(outdir, "rec"),
+                                       reconstruction_engine="legacy")
             psi_pad = float(b.config.source.psi_pad)
         else:
             b = bq.Bouquet.from_imas(_OMAS, mesh=_MESH, time=_TIME,
                                      n_draws=1, nthreads=1,
-                                     header=os.path.join(outdir, "imas"))
+                                     header=os.path.join(outdir, "imas"),
+                                     reconstruction_engine="legacy")
             psi_pad = 1e-3
         g = b.config.generation
         g.seed = 12345

@@ -241,7 +241,8 @@ def replay(tmp_path_factory):
     _work = str(tmp_path_factory.mktemp("replay_recon"))
     run = bq.Bouquet.from_geqdsk(
         _GEQ, profiles=_PF, mesh=_MESH, n_draws=1,
-        header=os.path.join(_work, "replay_recon"))
+        header=os.path.join(_work, "replay_recon"),
+        reconstruction_engine="legacy")
     # Replay on the bootstrap model the golden was GENERATED with (its own
     # stored config): the self-consistent loop for a fixture made with it,
     # the frozen SWB bootstrap for one made before it existed (such a config

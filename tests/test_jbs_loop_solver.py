@@ -108,7 +108,8 @@ def _imas_probe(outdir, part):
     _harness.assert_bouquet_is_repo_local()
     out = {}
     b = bq.Bouquet.from_imas(_OMAS, mesh=_MESH, time=_TIME, n_draws=1,
-                             header=os.path.join(outdir, "imas"), nthreads=1)
+                             header=os.path.join(outdir, "imas"), nthreads=1,
+                             reconstruction_engine="legacy")
     b.setup_solver()
     g = b.config.generation
     src = resolve_baseline(b.config, None)
@@ -320,7 +321,8 @@ def _recon_probe(outdir):
     _harness.assert_bouquet_is_repo_local()
     out = {}
     b = bq.Bouquet.from_geqdsk(_GEQ, profiles=_PF, mesh=_MESH, nthreads=1,
-                               header=os.path.join(outdir, "rec"), n_draws=1)
+                               header=os.path.join(outdir, "rec"), n_draws=1,
+                               reconstruction_engine="legacy")
     g = b.config.generation
     g.jbs_self_consistent = True
     b.setup_solver()
@@ -534,7 +536,7 @@ def _legacy_probe(outdir, part):
     # ---- the reconstruction path: recon, sigma=0 check, one draw ----------
     b = bq.Bouquet.from_geqdsk(_GEQ, profiles=_PF, mesh=_MESH, nthreads=1,
                                header=os.path.join(outdir, "leg_rec"),
-                               n_draws=1)
+                               n_draws=1, reconstruction_engine="legacy")
     b.config.generation.seed = 12345
     b.config.generation.jbs_self_consistent = False
     b.setup_solver()
@@ -558,7 +560,7 @@ def _legacy_probe_imas(outdir, calls, _archived_jbs_attrs, out):
     # structured closure (the channels the loop rewires most) ---------------
     bi = bq.Bouquet.from_imas(_OMAS, mesh=_MESH, time=_TIME, n_draws=1,
                               header=os.path.join(outdir, "leg_imas"),
-                              nthreads=1)
+                              nthreads=1, reconstruction_engine="legacy")
     gi = bi.config.generation
     gi.seed = 12345
     gi.jbs_self_consistent = False

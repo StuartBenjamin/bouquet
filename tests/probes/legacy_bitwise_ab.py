@@ -57,7 +57,7 @@ def _child(tree, outdir, tag, part):
 def _child_rec(bq, np, res, geq, pf, mesh, outdir, tag):
     b = bq.Bouquet.from_geqdsk(geq, profiles=pf, mesh=mesh, nthreads=1,
                                header=os.path.join(outdir, f"{tag}_rec"),
-                               n_draws=2)
+                               n_draws=2, reconstruction_engine="legacy")
     b.config.generation.jbs_self_consistent = False
     b.config.generation.seed = 20260929
     b.setup_solver()
@@ -74,7 +74,8 @@ def _child_rec(bq, np, res, geq, pf, mesh, outdir, tag):
 def _child_imas(bq, np, res, omas, mesh, outdir, tag):
     bi = bq.Bouquet.from_imas(omas, mesh=mesh, time=2.3043, n_draws=1,
                               nthreads=1,
-                              header=os.path.join(outdir, f"{tag}_imas"))
+                              header=os.path.join(outdir, f"{tag}_imas"),
+                              reconstruction_engine="legacy")
     bi.config.generation.jbs_self_consistent = False
     bi.config.generation.seed = 20260929
     bi.setup_solver()

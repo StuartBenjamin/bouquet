@@ -137,10 +137,12 @@ class Bouquet:
         afterwards for the advanced knobs.
 
         ``reconstruction_engine`` (``None``: the :class:`GenerationConfig`
-        default, ``"legacy"``) selects the reconstruction engine at
-        construction.  With ``"unified"`` the legacy-path workflow settings
-        below are NOT set: the unified engine never reads them and refuses
-        them when changed from their defaults.
+        default, ``"unified"`` since 2026-10-06) selects the reconstruction
+        engine at construction.  Under the unified engine the legacy-path
+        workflow settings below are NOT set: the engine never reads them and
+        refuses them when changed from their defaults.  Pass
+        ``reconstruction_engine="legacy"`` for the legacy reconstruction and
+        draws (the validated legacy workflow settings are then applied).
         """
         from .config import (BouquetConfig, SolverConfig, ReconstructionSource,
                              GenerationConfig)
@@ -192,11 +194,14 @@ class Bouquet:
         reconstruction). Omit it to use the source's own boundary.
 
         ``reconstruction_engine`` (``None``: the :class:`GenerationConfig`
-        default, ``"legacy"``) selects the reconstruction engine at
-        construction.  With ``"unified"`` the legacy-path workflow settings
-        below (diff+C, the full-profile decomposition) are NOT set: the
-        unified engine never reads them and refuses them when changed from
-        their defaults.
+        default, ``"unified"`` since 2026-10-06) selects the reconstruction
+        engine at construction.  Under the unified engine the legacy-path
+        workflow settings below (diff+C, the full-profile decomposition) are
+        NOT set: the engine never reads them and refuses them when changed
+        from their defaults.  Pass ``reconstruction_engine="legacy"`` for the
+        legacy IMAS baseline and draws (those settings are then applied).
+        ``anchor_pressure_to_equilibrium=True`` is a legacy-path setting
+        (refused under the engine).
         """
         from .config import (BouquetConfig, SolverConfig, ImasSource,
                              GenerationConfig)

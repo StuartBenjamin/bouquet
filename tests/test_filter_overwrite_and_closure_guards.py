@@ -103,7 +103,7 @@ def test_apply_true_without_a_prior_chi2_verdict_is_silent(tmp_path):
 # ---------------------------------------------------------------------------
 
 def _cfg(source_kind):
-    from bouquet.config import (BouquetConfig, ImasSource,
+    from bouquet.config import (BouquetConfig, GenerationConfig, ImasSource,
                                 ReconstructionSource, SolverConfig)
     if source_kind == "imas":
         src = ImasSource(ids_path="unused.json")
@@ -111,7 +111,9 @@ def _cfg(source_kind):
         src = ReconstructionSource(geqdsk_path="unused.geqdsk",
                                    profiles_path="unused.cdf")
     cfg = BouquetConfig(source=src, solver=SolverConfig(mesh_path="unused.h5"),
-                        output_header="t")
+                        output_header="t",
+                        generation=GenerationConfig(
+                            reconstruction_engine="legacy"))
     if source_kind == "imas":
         cfg.generation.perturb_jind_in_anchor = True   # the IMAS workflow lock
     return cfg

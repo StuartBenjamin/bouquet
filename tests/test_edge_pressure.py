@@ -691,9 +691,9 @@ toy_bouquet_solver = TD.toy_bouquet_solver
 def test_a_negative_separatrix_pressure_refuses_the_legacy_baseline(
         tmp_path, monkeypatch):
     """Disclosed 2026-10-06 (finding 4 of the second-pass review): the
-    negative-p_sep refusal of c709aae reaches the BASELINE on the default
-    legacy path, not only the draws.  Kept (owner rule: failures loud; a
-    negative p_sep is unphysical input) and NAMED: the error says the
+    negative-p_sep refusal of c709aae reaches the BASELINE on the legacy
+    path (the default until 2026-10-06), not only the draws.  Kept (owner
+    rule: failures loud; a negative p_sep is unphysical input) and NAMED: the error says the
     baseline was refused, why, and how to build it as before.  Legacy IMAS
     baseline whose solve pressure at psi_N = 1 is made negative (the
     reader's baseline with a negative pressure offset); the refusal comes
@@ -706,7 +706,7 @@ def test_a_negative_separatrix_pressure_refuses_the_legacy_baseline(
     b = bq.Bouquet.from_imas(
         os.path.join(_ex, "D3Dlike_baseline_omas.json"),
         mesh=os.path.join(_ex, "DIIID_mesh.h5"), time=2.3043, n_draws=1,
-        header=str(tmp_path / "bq"))
+        header=str(tmp_path / "bq"), reconstruction_engine="legacy")
     assert b.config.generation.reconstruction_engine == "legacy"
     assert b.config.generation.separatrix_pressure == "offset"
     real = B.resolve_baseline

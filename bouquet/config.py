@@ -1173,17 +1173,21 @@ class GenerationConfig:
     # an axis row.
     jbs_loop_q0_corrector: bool = False
     # --- the unified reconstruction engine (bouquet.engine; docs/engine.md) --
-    # "legacy" (default): prepare_baseline() runs the existing
-    # reconstruction / IMAS baseline paths, bit for bit.  "unified": ONE
+    # "unified" (the DEFAULT since 2026-10-06, owner decision): ONE
     # reconstruction loop for both input types -- parallel current
     # components composed on the latest solved geometry, the structured
     # closure with rows + discrepancies, one GS solve per pass, the delivery
-    # solve checked on every row.  A stored config without the field loads
-    # as "legacy".  The engine_* fields below configure "unified" only and
-    # are REFUSED when changed with "legacy" (they would do nothing).
-    # The engine builds the baseline AND runs the draws (generate(),
-    # verify_sigma0_consistency(); bouquet.engine_draws, docs/engine.md).
-    reconstruction_engine: str = "legacy"
+    # solve checked on every row.  The engine builds the baseline AND runs
+    # the draws (generate(), verify_sigma0_consistency();
+    # bouquet.engine_draws, docs/engine.md).  "legacy" (opt-in; the default
+    # until 2026-10-06): prepare_baseline() runs the existing
+    # reconstruction / IMAS baseline paths and the legacy draws.  A stored
+    # config without the field (it predates the engine) loads as "legacy",
+    # with a warning (BouquetConfig.from_dict).  The engine_* fields below
+    # configure "unified" only and are REFUSED when changed with "legacy"
+    # (they would do nothing); the legacy-path fields the engine never reads
+    # are refused under "unified" (bouquet.engine.ENGINE_UNREAD_LEGACY_FIELDS).
+    reconstruction_engine: str = "unified"
     # "structured" (4-Gaussian basis, li_soft_onesided priors; the default),
     # "structured_uniform" (the same basis and rows under the documented
     # uniform ladder utils.STRUCTURED_WEIGHTS_UNIFORM: the prior-sensitivity
@@ -1847,6 +1851,24 @@ class BouquetConfig:
                 "or set cfg.generation.separatrix_pressure = 'offset' after "
                 "loading.", UserWarning, stacklevel=2)
             gend["separatrix_pressure"] = "legacy"
+        if "reconstruction_engine" not in gend:
+            # The same for the reconstruction engine, whose default moved
+            # "legacy" -> "unified" (2026-10-06): a stored config that
+            # predates the field (introduced 2026-09-29 at "legacy") was
+            # produced by the legacy paths, so it is rebuilt on them and
+            # replays what it recorded.  to_dict() always writes the field.
+            import warnings
+            warnings.warn(
+                "config has no generation.reconstruction_engine (it predates "
+                "the unified engine): loading it with "
+                "reconstruction_engine='legacy', the reconstruction and draw "
+                "paths it was produced with, so it reproduces its old "
+                "results.  The current default is 'unified'; to use it, add "
+                '"reconstruction_engine": "unified" to the "generation" '
+                "section (legacy-only settings must then be at their "
+                "defaults) or rebuild the config with Bouquet.from_geqdsk / "
+                "from_imas.", UserWarning, stacklevel=2)
+            gend["reconstruction_engine"] = "legacy"
         _stored_config_compat(gend)
         return cls(
             source=_build(SrcCls, srcd),
@@ -1927,8 +1949,10 @@ ENGINE_FIELD_HISTORICAL_DEFAULTS = {
 #: ``None`` when that is not knowable from the config alone; what it was).
 #: Only consulted for a stored ``reconstruction_engine="unified"`` config
 #: (and, for ``jbs_max_passes_post_homotopy``, any config that ran the
-#: self-consistent loop); ``jbs_self_consistent`` and
-#: ``separatrix_pressure`` have their own back-fills above.
+#: self-consistent loop); ``jbs_self_consistent``, ``separatrix_pressure``
+#: and ``reconstruction_engine`` itself (default ``"legacy"`` -> ``"unified"``
+#: on 2026-10-06; a config without it predates the engine and loads as
+#: ``"legacy"``) have their own back-fills in :meth:`BouquetConfig.from_dict`.
 FIELD_PRE_INTRODUCTION = {
     # introduced 2026-10-02 at "auto" -- the IDS adapter's own default
     # before the setting existed -- then "residual" (owner decision)

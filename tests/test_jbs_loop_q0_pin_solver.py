@@ -53,7 +53,8 @@ def _probe(outdir):
 
     _harness.assert_bouquet_is_repo_local()
     b = bq.Bouquet.from_imas(_OMAS, mesh=_MESH, time=_TIME, n_draws=1,
-                             header=os.path.join(outdir, "imas"), nthreads=1)
+                             header=os.path.join(outdir, "imas"), nthreads=1,
+                             reconstruction_engine="legacy")
     b.setup_solver()
     g = b.config.generation
     g.jbs_self_consistent = True

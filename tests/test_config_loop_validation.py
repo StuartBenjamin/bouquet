@@ -27,6 +27,9 @@ from test_jbs_loop import _GC
 
 
 def _cfg(**gen):
+    # the legacy paths' validation (swb_iterations is a legacy-path setting
+    # the unified engine refuses outright)
+    gen.setdefault("reconstruction_engine", "legacy")
     return BouquetConfig(source=ImasSource(ids_path="x.json"),
                          solver=SolverConfig(mesh_path="m.h5"),
                          output_header="t",

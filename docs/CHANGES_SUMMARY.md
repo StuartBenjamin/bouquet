@@ -1,5 +1,77 @@
 # Bouquet — change summaries
 
+## Unreleased — the unified engine becomes the default; one current conversion (owner decisions, 2026-10-06)
+
+**Both change results by default.**
+
+### `reconstruction_engine` default `"legacy"` -> `"unified"`
+
+- **What moves.** `GenerationConfig.reconstruction_engine` now defaults to
+  `"unified"`: `Bouquet.from_geqdsk` / `from_imas` (and any config built
+  without the field) reconstruct with the unified engine and run the draws on
+  it ([engine.md](engine.md)). The factories set none of the legacy-path
+  workflow flags under the engine (`isolate_edge_jBS`,
+  `perturb_jind_in_anchor`, `jBS_baseline_mode`, ...). Reconstructions,
+  draws, yields and every recorded quantity follow the engine's definitions
+  (composition identity, rows, delivery check; see engine.md).
+- **Runtime** (from the engine PR's validation, the shipped synthetic cases):
+  engine reconstructions 38–76 s and draws 60–144 s, against 150–660 s and
+  405–1407 s on the legacy path with the bootstrap loop on (the legacy loop
+  is the cost; with the loop off the legacy path is faster but frozen).
+- **Legacy-only settings are refused under the engine** (the 22 fields of
+  `engine.ENGINE_UNREAD_LEGACY_FIELDS`, `homotopy_passes` with
+  `engine_draw_homotopy=False`, `draw_solve_maxits`, the MSE knobs the engine
+  does not read, and the engine's requirements `jbs_self_consistent=True`,
+  `recalculate_j_BS=True`, `single_profile_jphi=False`,
+  `jbs_init="anchor"`). Every such refusal now ends with how to get the
+  legacy paths back. `workflow="custom"` still downgrades the
+  unread-field refusals to a printed WARN.
+- **How to get legacy back:** `reconstruction_engine="legacy"` -- in the
+  factory call (`Bouquet.from_geqdsk(..., reconstruction_engine="legacy")`,
+  which then applies the validated legacy workflow flags as before), or in
+  `GenerationConfig(...)`. Its results are those of the legacy path of this
+  release, which includes the conversion change below.
+- **Stored configurations.** A stored config (dict / JSON / an archive's
+  `config_json`) that LACKS the field predates the engine (2026-09-29) and
+  loads as `"legacy"` with a warning, so it replays the paths it was produced
+  with (`BouquetConfig.from_dict`; tested on the five stored fixtures and an
+  archive's own config). A stored config that carries the field keeps it.
+- **Tests.** Tests of legacy behaviour now construct
+  `reconstruction_engine="legacy"` explicitly (construction only; no
+  expectation moved). Tests of DEFAULT behaviour now exercise the engine;
+  converted expectations: the default is `"unified"`
+  (`test_engine.py::test_the_engine_is_the_default_and_old_configs_load_as_legacy`)
+  and the factories without the keyword build the engine's configuration
+  (`test_engine_refuses_unread_settings.py::test_the_factories_default_to_the_engine`).
+- **Owed:** the example notebooks are not re-executed here (their stored
+  outputs are legacy-path runs); the golden fixtures are regenerated on the
+  engine default separately (with a slim legacy golden).
+
+### One `<j.B>` -> `<j_phi>` conversion in the package (declared physics change)
+
+- **What moves.** Every field-aligned conversion is now
+  `kappa = F<1/R>/<B^2>` (`physics.field_aligned_conversion`; the engine's
+  `engine.conversion_factor` calls it): `<j_phi> = kappa <j.B>`, the plain
+  flux-surface average OFT's `jphi-linterp` consumes, so
+  `<j_phi> = kappa<j.B> + p'(<R> - F^2<1/R>/<B^2>)` is exact. The legacy
+  bootstrap (`evaluate_jBS`, `_swb_jbs_to_toroidal`) used `<j.B>/(F<1/R>)`;
+  the IDS export (`toroidal_to_parallel`) used the `<1/R^2>` form
+  `<j.B>F<1/R^2>/(<B^2><1/R>)`. `parallel_to_toroidal` / `toroidal_to_parallel`
+  keep their names and are now kappa and its exact inverse; a `geom` carrying
+  `avg_inv_R2` is refused by name. `EVALUATE_JBS_VERSION` is `evaluate_jBS/2`.
+- **Size.** The old legacy factor exceeds kappa by
+  `[<B^2>/<B_phi^2>] x [<1/R^2>/<1/R>^2]` -- the bracket (~1.5 %) times the
+  Jensen ratio (~5 %), +6.8 % at psi_N ~ 0.97 on the synthetic example
+  (+1.0 % at 0.1, +4.3 % at 0.5, +6.4 % at 0.9). (The docstrings had quoted
+  the bracket alone, "1.4 %".) Measured on the synthetic g-file example,
+  legacy engine with the loop on: bootstrap peak 563.7 -> 527.8 kA/m^2
+  (-6.4 %), I_BS/I_p 0.247 -> 0.236; l_i and Ip still meet their targets.
+  The unified engine is unchanged by construction: its reconstruction of the
+  same example is bit-identical before and after.
+- **Not switchable** (one conversion is the point). The IDS export's
+  `j_bootstrap` / `j_ohmic` / `j_total` now invert exactly what bouquet
+  converts in with.
+
 ## Decisions on record (owner, 2026-10-05) -- no value changes
 
 Approvals given on 2026-10-05 for settings that were already in force but had
@@ -486,9 +558,9 @@ convergence criterion or ceiling moved.
   printed whenever the settings are not the pre-change ones, so it appears
   at the default.
 
-## Unreleased — unified engine (default off)
+## Unreleased — unified engine (introduced opt-in; the default since 2026-10-06, see the first entry)
 
-*Opt-in; with the default `reconstruction_engine="legacy"` nothing changes
+*Introduced opt-in; with `reconstruction_engine="legacy"` nothing changes
 (the legacy paths are untouched; the loop kernel's new hook is proven
 bit-identical when absent) -- except the separatrix-pressure default above,
 which applies to every path.*

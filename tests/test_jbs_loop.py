@@ -144,6 +144,7 @@ def test_config_round_trips_the_loop_fields():
     cfg = BouquetConfig(source=ImasSource(ids_path="x.json"),
                         solver=SolverConfig(mesh_path="m.h5"), output_header="t",
                         generation=GenerationConfig(
+                            reconstruction_engine="legacy",
                             jbs_self_consistent=True, jbs_init="swb",
                             jbs_loop_on_fail="flag", jbs_max_passes=5))
     back = BouquetConfig.from_dict(cfg.to_dict())
@@ -159,7 +160,8 @@ def test_an_old_config_without_the_fields_loads_with_the_loop_off():
                                 ImasSource, SolverConfig)
     d = BouquetConfig(source=ImasSource(ids_path="x.json"),
                       solver=SolverConfig(mesh_path="m.h5"), output_header="t",
-                      generation=GenerationConfig()).to_dict()
+                      generation=GenerationConfig(
+                          reconstruction_engine="legacy")).to_dict()
     for k in list(d["generation"]):
         if k.startswith("jbs_") and k != "jbs_delta_mode":
             del d["generation"][k]
@@ -189,7 +191,9 @@ def test_legacy_flag_round_trips():
                                 ImasSource, SolverConfig)
     cfg = BouquetConfig(source=ImasSource(ids_path="x.json"),
                         solver=SolverConfig(mesh_path="m.h5"), output_header="t",
-                        generation=GenerationConfig(jbs_self_consistent=False))
+                        generation=GenerationConfig(
+                            reconstruction_engine="legacy",
+                            jbs_self_consistent=False))
     assert BouquetConfig.from_json(cfg.to_json()).generation\
         .jbs_self_consistent is False
 

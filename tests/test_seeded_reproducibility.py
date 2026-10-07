@@ -269,7 +269,8 @@ def _generate_one_ensemble(header):
     from bouquet.utils import initialize_equilibrium_database, pchip_interp
 
     b = bq.Bouquet.from_geqdsk(_GEQ, profiles=_PF, mesh=_MESH, nthreads=1,
-                               header=header, n_draws=_N_DRAWS)
+                               header=header, n_draws=_N_DRAWS,
+                               reconstruction_engine="legacy")
     b.setup_solver()
     bl = b.prepare_baseline()
     gc, fc = b.config.generation, b.config.filtering
@@ -420,7 +421,8 @@ def _run_r2_probe(outdir):
     from bouquet.utils import pchip_interp
 
     b = bq.Bouquet.from_geqdsk(_GEQ, profiles=_PF, mesh=_MESH, nthreads=1,
-                               header=os.path.join(outdir, "r2"), n_draws=1)
+                               header=os.path.join(outdir, "r2"), n_draws=1,
+                               reconstruction_engine="legacy")
     # The draws below are the LEGACY route-R2 draw (perturb_kinetic_equilibrium
     # without jbs_loop: SWB bootstrap, one Ip measure per call), so the
     # baseline must be the legacy (frozen-SWB) baseline too -- the sigma=0
@@ -675,7 +677,7 @@ def _run_r2_probe_loop(outdir):
 
     b = bq.Bouquet.from_geqdsk(_GEQ, profiles=_PF, mesh=_MESH, nthreads=1,
                                header=os.path.join(outdir, "r2loop"),
-                               n_draws=1)
+                               n_draws=1, reconstruction_engine="legacy")
     gc = b.config.generation
     assert gc.jbs_self_consistent, "the loop is the default"
     b.setup_solver()

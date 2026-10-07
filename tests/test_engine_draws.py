@@ -435,10 +435,11 @@ def test_the_q0_row_needs_the_reconstructions_q0_row(recon):
         validate_engine_settings(GenerationConfig(
             reconstruction_engine="unified", engine_draw_q0_row=True))
     with pytest.raises(ValueError, match="no effect"):
-        validate_engine_settings(GenerationConfig(engine_draw_q0_row=True))
+        validate_engine_settings(GenerationConfig(
+            reconstruction_engine="legacy", engine_draw_q0_row=True))
     with pytest.raises(ValueError, match="no effect"):
         validate_engine_settings(GenerationConfig(
-            engine_draw_homotopy=False))
+            reconstruction_engine="legacy", engine_draw_homotopy=False))
     with pytest.raises(ValueError, match="bool"):
         validate_engine_settings(GenerationConfig(
             reconstruction_engine="unified", engine_draw_homotopy=1))

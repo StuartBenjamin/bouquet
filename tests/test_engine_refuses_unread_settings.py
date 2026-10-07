@@ -64,8 +64,11 @@ def test_a_set_unread_field_is_refused_naming_its_replacement(name):
     msg = str(ei.value)
     assert f"{name}=" in msg and "never reads" in msg
     assert ENGINE_UNREAD_LEGACY_FIELDS[name] in msg
+    # ... and says how to get the legacy paths back (the engine is the
+    # default since 2026-10-06)
+    assert 'reconstruction_engine="legacy"' in msg
     # the same value under the legacy path is fine (it is read there)
-    gl = GenerationConfig()
+    gl = GenerationConfig(reconstruction_engine="legacy")
     setattr(gl, name, _SET[name])
     validate_engine_settings(gl)
 
@@ -118,10 +121,21 @@ def test_the_factories_build_a_unified_config_the_engine_accepts(factory):
 
 
 @pytest.mark.parametrize("factory", ["imas", "gfile"])
+def test_the_factories_default_to_the_engine(factory):
+    """Without the keyword the factories build the DEFAULT engine (unified
+    since 2026-10-06), exactly as with reconstruction_engine="unified"."""
+    g = _factory(factory).config.generation
+    assert g.reconstruction_engine == "unified"
+    assert g.isolate_edge_jBS is True
+    assert g.perturb_jind_in_anchor is False
+    validate_engine_settings(g)
+
+
+@pytest.mark.parametrize("factory", ["imas", "gfile"])
 def test_the_factories_legacy_configs_are_unchanged(factory):
-    """Without the keyword (or with "legacy") the factories set exactly
-    what they did before: the legacy-path workflow settings."""
-    for kw in ({}, dict(reconstruction_engine="legacy")):
+    """With reconstruction_engine="legacy" the factories set exactly what
+    they did before: the legacy-path workflow settings."""
+    for kw in (dict(reconstruction_engine="legacy"),):
         g = _factory(factory, **kw).config.generation
         assert g.reconstruction_engine == "legacy"
         assert g.isolate_edge_jBS is False
@@ -134,7 +148,7 @@ def test_switching_a_legacy_factory_config_to_the_engine_is_refused(factory):
     """A legacy factory config switched to "unified" afterwards carries the
     legacy-path values the engine never reads: refused, naming each field
     and how to build a unified config instead."""
-    b = _factory(factory)
+    b = _factory(factory, reconstruction_engine="legacy")
     b.config.generation.reconstruction_engine = "unified"
     with pytest.raises(ValueError) as ei:
         validate_engine_settings(b.config.generation)

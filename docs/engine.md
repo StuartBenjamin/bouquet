@@ -2,9 +2,19 @@
 
 One reconstruction loop for both input types -- a g-file (+ p-file / IDA
 profiles) and a modelling source (IMAS / OMAS IDS) -- behind
-`GenerationConfig.reconstruction_engine`. **Default `"legacy"`**: the existing
-reconstruction and IMAS baseline paths, bit for bit; nothing in this page
-runs unless `"unified"` is set.
+`GenerationConfig.reconstruction_engine`. **Default `"unified"` since
+2026-10-06** (owner decision; it was `"legacy"`): this page describes what
+`Bouquet.prepare_baseline()`, `generate()` and `verify_sigma0_consistency()`
+run unless a configuration says `reconstruction_engine="legacy"` -- the
+existing g-file reconstruction / IMAS baseline paths and the legacy draws,
+still available by name (`Bouquet.from_geqdsk` / `from_imas(...,
+reconstruction_engine="legacy")`). A stored configuration that predates the
+field (written before 2026-09-29) loads as `"legacy"`, with a warning. The
+legacy-path settings the engine never reads are refused under `"unified"`
+(see [Settings the engine does not read](#settings-the-engine-does-not-read-refused)), and the refusal
+says how to get the legacy paths back. Runtime on the shipped synthetic
+cases: engine reconstructions 38–76 s and draws 60–144 s, against 150–660 s
+and 405–1407 s on the legacy path with the bootstrap loop on.
 
 **Status (Stage 3).** The engine builds the baseline (`Bouquet.prepare_baseline()`
 returns the same `Baseline` the rest of the package consumes, plus
@@ -12,10 +22,11 @@ returns the same `Baseline` the rest of the package consumes, plus
 `verify_sigma0_consistency()` run on the engine when it built the baseline in
 the same session ([Draws](#draws) below). A mismatched pair -- `"unified"`
 with a baseline the engine did not build, or `"legacy"` with an engine
-baseline -- is refused: the legacy draw routes compose the bootstrap with a
-different conversion and keep the pressure-driven term frozen in the
-inductive, so they would not reproduce an engine reconstruction at zero
-perturbation (and vice versa).
+baseline -- is refused: the legacy draw routes keep the pressure-driven term
+frozen in the inductive (and close the current differently), so they would
+not reproduce an engine reconstruction at zero perturbation (and vice versa).
+(Since 2026-10-06 both use the same `<j.B>` -> `<j_phi>` conversion,
+`physics.field_aligned_conversion`.)
 
 Code: `bouquet/engine.py` (the engine, the TokaMaker backend, the wiring),
 `bouquet/engine_draws.py` (the draws), `bouquet/adapters.py` (the source
@@ -23,8 +34,8 @@ adapters), the kernel `bouquet.jbs_loop.run_jbs_loop` (unchanged except an
 opt-in hook for added criteria). Tests: `tests/test_engine.py` (a toy
 Grad-Shafranov stand-in), `tests/test_engine_adapters.py`,
 `tests/test_engine_wiring.py`, `tests/test_engine_draws.py` (the draws, on
-the toy and a TokaMaker stand-in over it), `tests/test_engine_draws_legacy_ast.py`
-(the legacy draw path is the frozen code), `tests/test_engine_solver.py`
+the toy and a TokaMaker stand-in over it), `tests/test_one_conversion.py`
+(the one `<j.B>` -> `<j_phi>` conversion), `tests/test_engine_solver.py`
 (`-m solver`), probe `tests/probes/measure_engine.py`.
 
 ## The picture
@@ -244,7 +255,15 @@ Under `reconstruction_engine="unified"` each legacy-path setting below is
 REFUSED when it holds anything but its default (`engine.
 ENGINE_UNREAD_LEGACY_FIELDS`; `workflow='custom'` downgrades the refusal to
 a printed WARN, as for the MSE knobs), with what replaces it under the
-engine:
+engine. Since the engine is the default (2026-10-06), a configuration written
+for the legacy paths reaches these refusals unless it names its engine; every
+refusal ends by saying so: set `reconstruction_engine="legacy"` (or build with
+`Bouquet.from_geqdsk` / `from_imas(..., reconstruction_engine="legacy")`) to
+run the legacy reconstruction and draws instead. The same holds for the
+engine's requirements (`jbs_self_consistent=True`, `recalculate_j_BS=True`,
+`single_profile_jphi=False`, `jbs_init="anchor"`, no `draw_solve_maxits`):
+`jbs_self_consistent=False` on a default configuration is refused with that
+instruction, because the frozen bootstrap exists on the legacy paths only.
 
 | setting | under the engine |
 |---|---|

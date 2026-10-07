@@ -1,5 +1,6 @@
 """The unified reconstruction engine (``GenerationConfig.reconstruction_engine
-= "unified"``; default ``"legacy"``, which never enters this module).
+= "unified"``, the default since 2026-10-06; ``"legacy"``, opt-in, never
+enters this module).
 
 ONE loop reconstructs the baseline for both input types (docs/engine.md):
 
@@ -153,6 +154,17 @@ def _is_default(name, v):
     return (type(v) is type(d)) and v == d
 
 
+#: The way back to the legacy paths, appended to every refusal of a setting
+#: the unified engine cannot honour (the engine is the default since
+#: 2026-10-06, so a config written for the legacy paths reaches these
+#: refusals unless it says which engine it wants).
+LEGACY_ENGINE_HINT = (
+    "  To run the LEGACY reconstruction and draws instead (the default "
+    "until 2026-10-06), set generation.reconstruction_engine=\"legacy\" "
+    "(or build with Bouquet.from_geqdsk / from_imas(..., "
+    "reconstruction_engine=\"legacy\")).")
+
+
 def validate_engine_settings(gc) -> None:
     """Refuse malformed or ineffective engine settings, by name.
 
@@ -221,7 +233,8 @@ def validate_engine_settings(gc) -> None:
             "reconstruction_engine='unified': it caps the LEGACY draws and "
             "the engine never reads it (it would be silently ignored); the "
             "engine draws' cap is generation.engine_draw_solve_maxits "
-            f"(default {ENGINE_FIELD_DEFAULTS['engine_draw_solve_maxits']})")
+            f"(default {ENGINE_FIELD_DEFAULTS['engine_draw_solve_maxits']})."
+            + LEGACY_ENGINE_HINT)
     dc = vals["engine_delivery_correction"]
     if not isinstance(dc, (bool, np.bool_)):
         raise ValueError(f"generation.engine_delivery_correction must be a "
@@ -262,11 +275,13 @@ def validate_engine_settings(gc) -> None:
         if bool(getattr(gc, name, want)) != want:
             raise ValueError(
                 f"reconstruction_engine='unified' needs generation.{name}="
-                f"{want}: the engine is the self-consistent bootstrap loop")
+                f"{want}: the engine is the self-consistent bootstrap loop."
+                + LEGACY_ENGINE_HINT)
     if str(getattr(gc, "jbs_init", "anchor")) != "anchor":
         raise ValueError("reconstruction_engine='unified' starts from the "
                          "anchor (generation.jbs_init='anchor'); the legacy "
-                         "'swb' initial guess is not available")
+                         "'swb' initial guess is not available."
+                         + LEGACY_ENGINE_HINT)
 
 
 #: MSE knobs the unified engine reads, with the defaults that mean "unset"
@@ -311,9 +326,10 @@ def _mse_knobs_unread(gc, rows):
         raise ValueError(
             "structured_mse_required=True, but the unified engine will not "
             f"apply the MSE term: {why}.  Refusing rather than ignoring a "
-            "required constraint.")
+            "required constraint." + LEGACY_ENGINE_HINT)
     msg = (", ".join(unread) + " set, but the unified engine never reads "
-           f"it: {why} -- it would otherwise be silently ignored")
+           f"it: {why} -- it would otherwise be silently ignored."
+           + LEGACY_ENGINE_HINT)
     if (str(getattr(gc, "workflow", "")) == "custom"
             or bool(getattr(gc, "allow_unsafe_workflow", False))):
         print("WARN: " + msg + " (workflow='custom': continuing)", flush=True)
@@ -360,21 +376,21 @@ ENGINE_UNREAD_LEGACY_FIELDS = {
                             "anchor in-band shortcut",
     "diagnostic_plots": "nothing: the engine draws make no per-draw SWB "
                         "diagnostic plots",
-    # owner-approved 2026-10-05: refused like the rest (the factories no
-    # longer set them for a unified configuration --
-    # Bouquet.from_geqdsk / from_imas(..., reconstruction_engine="unified"))
+    # owner-approved 2026-10-05: refused like the rest (the factories set
+    # them for a LEGACY configuration only -- Bouquet.from_geqdsk /
+    # from_imas(..., reconstruction_engine="legacy"))
     "isolate_edge_jBS": "nothing: the engine never isolates the edge "
                         "bootstrap (its bootstrap is Redl on the whole "
                         "profile); the factories set False for the legacy "
-                        "path only -- build with Bouquet.from_geqdsk / "
-                        "from_imas(..., reconstruction_engine='unified'), "
-                        "or set it back to its default",
+                        "path only (reconstruction_engine='legacy') -- "
+                        "build with Bouquet.from_geqdsk / from_imas "
+                        "without it, or set it back to its default",
     "perturb_jind_in_anchor": "nothing: one engine draw route for both "
                               "input types replaces Fix C and the standard "
                               "l_i loop; from_imas sets True for the legacy "
-                              "path only -- build with Bouquet.from_imas("
-                              "..., reconstruction_engine='unified'), or "
-                              "set it back to its default",
+                              "path only (reconstruction_engine='legacy') "
+                              "-- build with Bouquet.from_imas without it, "
+                              "or set it back to its default",
 }
 
 
@@ -411,9 +427,10 @@ def _legacy_knobs_unread(gc, vals):
                        "False (no homotopy runs in an engine draw)")
     if not bad:
         return
-    msg = ("set with reconstruction_engine='unified', but the unified "
-           "engine never reads them -- they would otherwise be silently "
-           "ignored: " + "; ".join(bad))
+    msg = ("set with reconstruction_engine='unified' (the default since "
+           "2026-10-06), but the unified engine never reads them -- they "
+           "would otherwise be silently ignored: " + "; ".join(bad) + "."
+           + LEGACY_ENGINE_HINT)
     if (str(getattr(gc, "workflow", "")) == "custom"
             or bool(getattr(gc, "allow_unsafe_workflow", False))):
         print("WARN: " + msg + " (workflow='custom': continuing)", flush=True)

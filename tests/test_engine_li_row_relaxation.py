@@ -89,10 +89,12 @@ def test_values_in_range_are_accepted(ok):
 def test_a_set_value_with_the_legacy_engine_is_refused():
     with pytest.raises(ValueError, match="no effect"):
         validate_engine_settings(GenerationConfig(
-            engine_li_row_relaxation=0.5))
+            reconstruction_engine="legacy", engine_li_row_relaxation=0.5))
     # the default (as 1.0 or 1) is not a change
-    validate_engine_settings(GenerationConfig(engine_li_row_relaxation=1.0))
-    validate_engine_settings(GenerationConfig(engine_li_row_relaxation=1))
+    validate_engine_settings(GenerationConfig(
+        reconstruction_engine="legacy", engine_li_row_relaxation=1.0))
+    validate_engine_settings(GenerationConfig(
+        reconstruction_engine="legacy", engine_li_row_relaxation=1))
 
 
 # ---------------------------------------------------------------------------

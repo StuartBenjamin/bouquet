@@ -53,7 +53,8 @@ def _probe(outdir):
     from bouquet.mse import mse_equilibrium_orientation, mse_field_at
 
     b = bq.Bouquet.from_geqdsk(_GEQ, profiles=_PF, mesh=_MESH, nthreads=1,
-                               header=os.path.join(outdir, "mse"), n_draws=1)
+                               header=os.path.join(outdir, "mse"), n_draws=1,
+                               reconstruction_engine="legacy")
     b.setup_solver()
     b.prepare_baseline()
     mygs = b.mygs

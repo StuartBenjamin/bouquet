@@ -17,8 +17,9 @@ the geometry, q ~ 1/j(axis), pitch angles from the enclosed current).  On it:
 * unreachable targets and non-finite bootstraps fail loudly; the flag policy
   flags;
 * the stored state reproduces the delivered request bit for bit;
-* the config field defaults to "legacy", old configs load as "legacy", and
-  the engine options are validated by name;
+* the config field defaults to "unified" (since 2026-10-06), configs that
+  predate the field load as "legacy", and the engine options are validated
+  by name;
 * with "legacy" prepare_baseline() never enters the engine, and the draws
   refuse an engine baseline (Stage 3).
 
@@ -447,16 +448,20 @@ def _cfg(**gen):
                          generation=GenerationConfig(**gen))
 
 
-def test_the_engine_defaults_to_legacy_and_old_configs_load_as_legacy():
+def test_the_engine_is_the_default_and_old_configs_load_as_legacy():
+    """The default flipped "legacy" -> "unified" on 2026-10-06 (owner
+    decision); a stored config without the field predates the engine and
+    loads as "legacy", with a warning that says how to opt in."""
     from bouquet.config import BouquetConfig
     c = _cfg()
-    assert c.generation.reconstruction_engine == "legacy"
-    d = c.to_dict()
+    assert c.generation.reconstruction_engine == "unified"
+    d = _cfg(reconstruction_engine="legacy").to_dict()
     for k in ("reconstruction_engine", "engine_preset", "engine_rows",
               "engine_delivery_correction", "engine_mse_jacobian"):
         del d["generation"][k]
-    assert BouquetConfig.from_dict(d).generation.reconstruction_engine \
-        == "legacy"
+    with pytest.warns(UserWarning, match="predates the unified engine"):
+        g = BouquetConfig.from_dict(d).generation
+    assert g.reconstruction_engine == "legacy"
 
 
 def test_unified_settings_round_trip():
@@ -474,8 +479,10 @@ def test_unified_settings_round_trip():
 
 @pytest.mark.parametrize("gen, match", [
     (dict(reconstruction_engine="new"), "reconstruction_engine"),
-    (dict(engine_preset="bootstrap_scalar"), "no effect"),
-    (dict(engine_delivery_correction=True), "no effect"),
+    (dict(reconstruction_engine="legacy", engine_preset="bootstrap_scalar"),
+     "no effect"),
+    (dict(reconstruction_engine="legacy", engine_delivery_correction=True),
+     "no effect"),
     (dict(reconstruction_engine="unified", engine_preset="x"),
      "engine_preset"),
     (dict(reconstruction_engine="unified", engine_rows=["l_i"]), "'Ip'"),
@@ -556,7 +563,7 @@ def test_legacy_prepare_baseline_never_enters_the_engine(monkeypatch):
 
     monkeypatch.setattr(be, "prepare_engine_baseline", _no_engine)
     monkeypatch.setattr(bb, "resolve_baseline", _legacy)
-    bq = Bouquet(_cfg())
+    bq = Bouquet(_cfg(reconstruction_engine="legacy"))
     with pytest.raises(_Sentinel):
         bq.prepare_baseline()
 
@@ -586,7 +593,7 @@ def test_the_draws_refuse_an_engine_baseline():
     with pytest.raises(NotImplementedError, match="Stage 3"):
         bq._refuse_unified_engine_draws("verify_sigma0_consistency()")
     # a legacy config with a legacy baseline is not refused
-    bq2 = Bouquet(_cfg())
+    bq2 = Bouquet(_cfg(reconstruction_engine="legacy"))
     bq2._refuse_unified_engine_draws("generate()")
 
 

@@ -79,6 +79,7 @@ def test_the_refresh_is_off_by_default_and_validated(recon):
             engine_draw_bootstrap_refresh=1))
     with pytest.raises(ValueError, match="no effect"):
         validate_engine_settings(GenerationConfig(
+            reconstruction_engine="legacy",
             engine_draw_bootstrap_refresh=True))
     eng, res, rec, b = recon
     assert TD._ctx(eng, res).bootstrap_refresh is False
@@ -490,7 +491,7 @@ def test_a_capped_stage_then_a_capped_rollback_rejects(tmp_path,
 def test_the_engine_cap_setting_default_and_refusals():
     from bouquet.engine import (ENGINE_FIELD_DEFAULTS, engine_draw_maxits,
                                 validate_engine_settings)
-    g = GenerationConfig()
+    g = GenerationConfig(reconstruction_engine="legacy")
     # the legacy draws' cap is unchanged; the engine's defaults to 100
     assert g.draw_solve_maxits is None
     assert g.engine_draw_solve_maxits == 100
@@ -500,7 +501,7 @@ def test_the_engine_cap_setting_default_and_refusals():
     # changed under legacy: refused (it would do nothing)
     with pytest.raises(ValueError, match="no effect"):
         validate_engine_settings(GenerationConfig(
-            engine_draw_solve_maxits=50))
+            reconstruction_engine="legacy", engine_draw_solve_maxits=50))
     u = GenerationConfig(reconstruction_engine="unified")
     validate_engine_settings(u)
     for bad in (0, -3, 2.5, True):

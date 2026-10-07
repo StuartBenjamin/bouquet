@@ -61,7 +61,8 @@ def test_the_old_construction_is_refused(probe, tmp_path):
     from bouquet.engine import engine_settings
     b = bq.Bouquet.from_imas(probe._OMAS, mesh=probe._MESH, time=probe._TIME,
                              n_draws=1, nthreads=1,
-                             header=str(tmp_path / "old"))
+                             header=str(tmp_path / "old"),
+                             reconstruction_engine="legacy")
     b.config.generation.reconstruction_engine = "unified"
     with pytest.raises(ValueError, match="isolate_edge_jBS"):
         engine_settings(b.config.generation)

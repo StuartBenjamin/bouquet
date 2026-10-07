@@ -126,7 +126,7 @@ def test_a_live_config_is_still_strict():
     from bouquet.engine import validate_engine_settings
     with pytest.raises(ValueError, match="no effect"):
         validate_engine_settings(GenerationConfig(
-            engine_mse_jacobian="fd_broyden"))
+            reconstruction_engine="legacy", engine_mse_jacobian="fd_broyden"))
 
 
 @pytest.mark.parametrize("name, val", [("isolate_edge_jBS", False),
@@ -224,3 +224,67 @@ def test_a_stored_unified_config_with_unread_homotopy_passes_loads():
     gn.homotopy_passes = [(0.05, 0.1)]
     with pytest.raises(ValueError, match="homotopy_passes"):
         validate_engine_settings(gn)
+
+
+# ---------------------------------------------------------------------------
+#  the default flip (2026-10-06): a config that PREDATES the engine field
+# ---------------------------------------------------------------------------
+_ENGINE_ERA_KEYS = ("reconstruction_engine",)
+
+
+def _predating_the_engine(gen):
+    """A stored generation dict as written before the engine existed
+    (2026-09-29): no reconstruction_engine and no engine_* field."""
+    return {k: v for k, v in gen.items()
+            if k not in _ENGINE_ERA_KEYS and not k.startswith("engine_")}
+
+
+@pytest.mark.parametrize("sha", SHAS)
+def test_a_stored_config_without_the_engine_field_replays_as_legacy(sha):
+    """The default is "unified" since 2026-10-06; a stored config that
+    predates the field was produced by the legacy paths and must keep
+    replaying on them, with a warning that says how to opt in."""
+    d = _stored(sha, "legacy")
+    d = dict(d, generation=_predating_the_engine(d["generation"]))
+    g, msgs = _load(d)
+    assert g.reconstruction_engine == "legacy"
+    assert any("predates the unified engine" in m
+               and "reconstruction_engine='legacy'" in m for m in msgs)
+    # every legacy-path setting it ran with is as stored
+    for k, v in d["generation"].items():
+        if k in ("jbs_max_passes_post_homotopy",):
+            continue
+        got = getattr(g, k)
+        if isinstance(v, (list, tuple)) or isinstance(got, (list, tuple)):
+            continue
+        assert got == v or (v is None and got is None), k
+
+
+def test_an_archived_config_without_the_engine_field_replays_as_legacy():
+    """The same through an archive's own stored config_json (the golden
+    fixture's, with the field removed as an archive written before
+    2026-09-29 has it)."""
+    h5py = pytest.importorskip("h5py")
+    path = os.path.join(_HERE, "golden", "D3Dlike_Hmode_golden_slim.h5")
+    with h5py.File(path, "r") as hf:
+        raw = hf["scan/0/config_json"][()]
+    d = json.loads(raw.decode() if isinstance(raw, bytes) else str(raw))
+    d["generation"] = _predating_the_engine(d["generation"])
+    g, msgs = _load(d)
+    assert g.reconstruction_engine == "legacy"
+    assert any("predates the unified engine" in m for m in msgs)
+
+
+def test_a_new_config_defaults_to_the_engine_and_round_trips_it():
+    """... while a config built today is "unified" and to_dict() writes the
+    field, so it reloads as "unified" with no engine warning."""
+    from bouquet.config import ImasSource, SolverConfig
+    c = BouquetConfig(source=ImasSource(ids_path="x.json"),
+                      solver=SolverConfig(mesh_path="m.h5"),
+                      output_header="t")
+    assert c.generation.reconstruction_engine == "unified"
+    d = c.to_dict()
+    assert d["generation"]["reconstruction_engine"] == "unified"
+    g, msgs = _load(d)
+    assert g.reconstruction_engine == "unified"
+    assert not [m for m in msgs if "reconstruction_engine" in m]

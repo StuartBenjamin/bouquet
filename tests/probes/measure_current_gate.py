@@ -259,12 +259,12 @@ def _child(part, gate, outdir, n_draws, seed):
     if part == "recon":
         b = bq.Bouquet.from_geqdsk(_GEQ, profiles=_PF, mesh=_MESH, nthreads=1,
                                    header=os.path.join(work, "rec"),
-                                   n_draws=1)
+                                   n_draws=1, reconstruction_engine="legacy")
         src = b.config.source
     else:
         b = bq.Bouquet.from_imas(_OMAS, mesh=_MESH, time=_TIME, n_draws=1,
                                  header=os.path.join(work, "imas"),
-                                 nthreads=1)
+                                 nthreads=1, reconstruction_engine="legacy")
         src = b.config.source
     g = b.config.generation
     g.jbs_self_consistent = True

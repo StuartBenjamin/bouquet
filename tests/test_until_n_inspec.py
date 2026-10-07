@@ -47,6 +47,8 @@ def _circle(n=360, r=1.0, cx=1.7, cz=0.0):
 
 
 def _mini_config(**gen):
+    # the legacy draws' until-N loop (generate_bouquet is the recorder here)
+    gen.setdefault("reconstruction_engine", "legacy")
     return BouquetConfig(
         source=ReconstructionSource(geqdsk_path="g.geqdsk",
                                     profiles_path="p.peqdsk"),
