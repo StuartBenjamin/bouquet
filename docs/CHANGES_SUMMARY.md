@@ -4,6 +4,10 @@
 
 **Both change results by default.**
 
+Where each number below was measured, and how this branch's chapter commits
+map to the original history on the archival tag
+`archive/engine-unified-2116923`: [validation-provenance.md](validation-provenance.md).
+
 ### Reproducing a run made before this release; what moves on the default path
 
 - **Recipe.** `reconstruction_engine="legacy"` (the legacy reconstruction and

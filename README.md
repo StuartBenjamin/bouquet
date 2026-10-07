@@ -98,6 +98,8 @@ numbers measured on one specific build. (Measured before the canonical coil-solv
 mode below; that mode moves the same quantities by at most 5e-4 relative.) A solve that goes non-finite runs to the
 iteration cap on an upstream build (one zero-perturbation check took 5.7×
 longer). Run `verify_sigma0_consistency()` on a new machine or OFT build.
+Which commits and which build the quoted validation numbers were measured on
+is in [docs/validation-provenance.md](docs/validation-provenance.md).
 
 **Results change by default with this release:**
 
