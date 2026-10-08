@@ -14,7 +14,7 @@ relaxes away from the dd's. ψ_N surfaces move in real space with it and
 ψ_N-pinned kinetics move with them; Φ_N-pinned kinetics stay close to the
 source's placement (OFT tests/physics/tokamaker_torflux_motivation.py).
 
-Usage (one dd, e.g. DIII-D 174956 FUSE dd_sim.json, put in ./data/):
+Usage (one dd, e.g. DIII-D shot A FUSE dd_sim.json, put in ./data/):
     python torflux_imas_effect.py [--dd data/dd_sim.json] [--time 2.0]
         [--gfile G] [--out out] [--zip]
 Needs OFT with toroidal-flux support (OFT_PYTHONPATH), ~16 GB RAM, ~5 min.
@@ -47,7 +47,7 @@ def _bouquet(a, coord):
         LCFS_geqdsk=a.gfile, saddle_targets=a.saddle, saddle_weights=[300.0])
     run.source.coord = coord
     g = run.generation
-    # The operational 174956 setup: FUSE ohmic + SWB bootstrap (ohmic split).
+    # The operational shot A setup: FUSE ohmic + SWB bootstrap (ohmic split).
     g.seed, g.isolate_edge_jBS, g.jBS_baseline_mode = 42, False, "ohmic"
     g.closure_channel, g.structured_preset = "structured", "li_soft_onesided"
     g.perturb_jind_in_anchor, g.workflow = True, "custom"

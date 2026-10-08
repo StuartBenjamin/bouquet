@@ -2,7 +2,7 @@
 
 read_ida derives ni from its resolved Z_eff (ni = ne (Z - Zeff)/(Z - 1)), so
 drawing the two apart handed each draw a Z_eff its own densities contradict
-(median 0.65 in the core on shot 174956).  The draw now derives ni from the
+(median 0.65 in the core on shot A).  The draw now derives ni from the
 drawn (ne, Zeff); IDAProfiles.zeff_dne carries the CER route's ne dependence
 so the derived ni keeps the reader's sigma_ni.
 """

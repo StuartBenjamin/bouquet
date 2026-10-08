@@ -24,7 +24,7 @@ Options:
 - `--out`: output directory.
 - `--replot`: redraw the figures from an existing `--out` without solving again.
 
-The defaults match the operational DIII-D 174956 @ 2.0 s setup: FUSE ohmic current plus the SWB bootstrap (`jBS_baseline_mode="ohmic"`), with the structured `li_soft_onesided` closure.
+The defaults match the operational DIII-D shot A @ 2.0 s setup: FUSE ohmic current plus the SWB bootstrap (`jBS_baseline_mode="ohmic"`), with the structured `li_soft_onesided` closure.
 
 Outputs in `<out>/`:
 - `fig1_forward_solve.png`: the σ=0 solve held on ψ_N and on Φ_N — achieved j_φ, q, and the bootstrap it used, against the dd.
@@ -32,7 +32,7 @@ Outputs in `<out>/`:
 - `summary.md` / `summary.json`: the numbers.
 - `psi_n/`, `phi_n/`: each worker's `result.json` and solver log.
 
-## What it shows (174956 @ 2.0 s, dd boundary; g-file boundary in brackets)
+## What it shows (shot A @ 2.0 s, dd boundary; g-file boundary in brackets)
 
 | run | l_i(3) | q95 | SWB/FUSE pedestal j_BS |
 |---|---|---|---|
