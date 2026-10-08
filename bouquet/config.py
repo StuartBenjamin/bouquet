@@ -1476,6 +1476,11 @@ class GenerationConfig:
     # the template geometry).  The quadrature adds ~65 surface traces/draw;
     # set False to skip that cost.
     capture_exact_inv_R2: bool = True
+    # Also archive an OFT i-file (save_ifile: R,Z on flux surfaces, F, p, q, FF', p')
+    # for GPEC eq_type='ldp_i' next to the eqdsk; needs an OFT with GPECf_interface.
+    write_ifile: bool = False
+    ifile_npsi: int = 129
+    ifile_ntheta: int = 257
 
     #: Set from the ``swb_saw_*`` fields, never from ``bootstrap_kwargs``.
     _SAW_RESERVED = frozenset(

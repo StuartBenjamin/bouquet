@@ -50,6 +50,7 @@ from .utils import (
     select_closed_lcfs,
     store_equilibrium,
     store_baseline_profiles,
+    try_save_ifile,
     store_baseline_state,
     _scan_key,
     _shape_from_boundary,
@@ -5147,6 +5148,9 @@ def generate_bouquet(
     capture_live_eq=True,
     capture_npsi=257,
     capture_exact_inv_R2=True,
+    write_ifile=False,
+    ifile_npsi=129,
+    ifile_ntheta=257,
     # Archive the ACHIEVED FSA j_phi of each converged solve (baseline + every
     # draw) instead of the prescribed target profile. Set on the IMAS path,
     # where the single-pass jphi-linterp solve lands a few % off its anchor, so
@@ -5525,6 +5529,7 @@ def generate_bouquet(
     _baseline_psi = None
     _baseline_coils = None
     _recon_Ip = None
+    baseline_ifile_bytes = None  # set with the warmstart baseline.eqdsk re-save
     # self-consistent loop: l_i / q0 / q95 of the jphi-linterp baseline
     # re-solve below (None when it is not run)
     _J_state = None
@@ -6108,6 +6113,13 @@ def generate_bouquet(
                 # converged eqdsk + Ip into the H5 _baseline group.
                 baseline_eqdsk_bytes = _new_eqdsk_bytes
                 initial_Ip_target = _new_eq_Ip
+                if write_ifile and try_save_ifile(
+                        mygs, _tmp_eqdsk_path + '.ifile',
+                        npsi=int(ifile_npsi), ntheta=int(ifile_ntheta),
+                        lcfs_pad=psi_pad):
+                    with open(_tmp_eqdsk_path + '.ifile', 'rb') as _if:
+                        baseline_ifile_bytes = _if.read()
+                    os.unlink(_tmp_eqdsk_path + '.ifile')
                 if abs(_new_eq_Ip - _old_initial_Ip) > 1.0:
                     _shift_pct = (
                         100.0 * (_new_eq_Ip - _old_initial_Ip)
@@ -6352,6 +6364,7 @@ def generate_bouquet(
         z2_fast=z2_fast,
         Z_imp=Z_imp,
         eqdsk_bytes=baseline_eqdsk_bytes,
+        ifile_bytes=baseline_ifile_bytes,
         pfile_bytes=stored_pfile_bytes,
         psi_N_kinetic=psi_N_kinetic,
         coil_currents=_bl_coil_dict,
@@ -7758,6 +7771,14 @@ def generate_bouquet(
                 pbar.update(1)
             continue
 
+        # Optional OFT i-file for GPEC eq_type='ldp_i', from the same state.
+        ifile_path = None
+        if write_ifile:
+            ifile_path = try_save_ifile(
+                mygs, os.path.abspath(f"{header}_count={count}.ifile"),
+                npsi=int(ifile_npsi), ntheta=int(ifile_ntheta),
+                lcfs_pad=psi_pad)
+
         # Capture a high-resolution LCFS trace at the SAME mygs state
         # we just saved the eqdsk from.  The eqdsk's RBBBS/ZBBBS is only
         # ~100 pts (save_eqdsk samples coarsely), so comparing it
@@ -8092,6 +8113,7 @@ def generate_bouquet(
             jbs_delta_active=(diagnostics['jbs_delta_active']
                               if jbs_delta_mode else None),
             profile_coord=coord,
+            ifile_filepath=ifile_path,
         )
         # the method's own per-draw record (engine block, swb attrs)
         _m.store_draw(header, count, scan_key, diagnostics)
@@ -8102,12 +8124,15 @@ def generate_bouquet(
                 p_sep_applied=_p_lcfs, p_scale=_p_scale_draw),
             scan_key=scan_key, count=count)
 
-        # Clean up on-disk eqdsk after archiving
-        try:
-            os.remove(full_path)
-            print(f"  Deleted temporary file: {full_path}")
-        except OSError as exc:
-            print(f"  WARNING: could not delete {full_path}: {exc}")
+        # Clean up on-disk eqdsk (and i-file) after archiving
+        for _path in (full_path, ifile_path):
+            if _path is None:
+                continue
+            try:
+                os.remove(_path)
+                print(f"  Deleted temporary file: {_path}")
+            except OSError as exc:
+                print(f"  WARNING: could not delete {_path}: {exc}")
 
         all_diagnostics.append(diagnostics)
         _attempt_outcomes[int(count)] = "stored"
