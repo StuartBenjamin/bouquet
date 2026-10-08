@@ -237,7 +237,7 @@ def swb_seed(x, psi=None):
 
 
 def swb_source_seed(x, j_ind, j_fixed, j_saw=None):
-    """Source-consistent SWB inputs (the swb method):
+    """Source-consistent SWB inputs (``GenerationConfig.swb_seed="source"``):
     the source's inductive current as ``inductive_jphi`` (SWB rescales it to
     Ip) and its non-inductive, non-bootstrap current as ``jphi_fixed`` (held
     as given), both toroidal, resampled onto :func:`swb_grid`.  SWB then
@@ -248,8 +248,8 @@ def swb_source_seed(x, j_ind, j_fixed, j_saw=None):
     """
     if "jphi_fixed" not in _swb_params():
         raise RuntimeError(
-            "the swb method needs an OpenFUSIONToolkit whose "
-            "solve_with_bootstrap takes jphi_fixed.")
+            "swb_seed='source' needs an OpenFUSIONToolkit whose "
+            "solve_with_bootstrap takes jphi_fixed; set swb_seed='generic'.")
     x = np.asarray(x, dtype=float)
     g = swb_grid(x)
     seed = np.interp(g, x, np.asarray(j_ind, dtype=float))

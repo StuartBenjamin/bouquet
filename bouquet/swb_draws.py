@@ -216,11 +216,11 @@ class SwbDraws(DrawMethod):
             "swb_saw_map_warn": diagnostics.get("saw_map_warn")})
 
     # ---- Bouquet.generate -------------------------------------------------
-    def scale_settings(self, jbs_range):
+    def scale_settings(self, jbs_range, bs_mult):
         if jbs_range is not None:
             print(f"[swb] jBS_scale_range={jbs_range} ignored: SWB re-solves "
                   "j_BS at scale 1 in every draw")
-        return None
+        return None, None
 
     def solve_maxits(self, maxits):
         return max(SWB_DRAW_MAXITS, maxits or 0)

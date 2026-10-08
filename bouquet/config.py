@@ -282,7 +282,7 @@ class FixedComponentsConfig:
     These are summed into the baseline *and* every perturbed equilibrium,
     untouched by the GPR perturbation::
 
-        j_phi_total = j_inductive + j_BS + j_NBI + j_RF
+        j_phi_total = j_inductive + j_BS + j_NBI + j_RF + j_other
         p_total     = p_thermal(perturbed) + p_fast
 
     Any component may simply be handed in as a 1-D array over ``psi_N`` -- this is
@@ -296,8 +296,10 @@ class FixedComponentsConfig:
         Either way an explicit array here wins (e.g. from TRANSP/ONETWO).
       * ``j_NBI`` -- :class:`ImasSource` sums beam-source ``j_parallel``;
         :class:`ReconstructionSource` defaults to zero. Explicit array wins.
-      * ``j_RF`` -- **never computed internally** (RF is the least-common input).
-        Always zeros unless the user supplies an array here.
+      * ``j_RF`` -- :class:`ImasSource` sums EC/LH/IC ``j_parallel``;
+        :class:`ReconstructionSource` defaults to zero. Explicit array wins.
+      * ``j_other`` -- :class:`ImasSource` sums fusion, runaways, sawteeth and
+        unknown-index ``j_parallel``; zero elsewhere. Explicit array wins.
 
     All arrays are on ``psi_N`` (kinetic grid, in the run coordinate --
     Φ_N in a ``coord="phi_n"`` run, unless ``coord="psi_n"``), SI units,
@@ -316,6 +318,7 @@ class FixedComponentsConfig:
     p_fast: Optional["np.ndarray"] = None   # fast/beam pressure
     j_NBI: Optional["np.ndarray"] = None    # beam-driven TOROIDAL current density [A/m^2], co-Ip > 0
     j_RF: Optional["np.ndarray"] = None     # RF-driven TOROIDAL current density [A/m^2], co-Ip > 0
+    j_other: Optional["np.ndarray"] = None  # other fixed driven TOROIDAL current [A/m^2]
     psi_N: Optional["np.ndarray"] = None    # grid for the above (if arrays given)
     # Coordinate of ``psi_N``: "run" (the run's), or "psi_n" (mapped to the
     # run coordinate through the source equilibrium's psi_N -> Phi_N map).
@@ -1086,6 +1089,11 @@ class GenerationConfig:
     # diagnostics['solve_failures'], on Bouquet.solve_failures, and in one
     # printed "[draw-solves]" line.
     draw_solve_maxits: Optional[int] = None
+    # SWB inputs on the IMAS path (baseline split, draws, sigma=0 check):
+    # "source" seeds SWB with the source's j_inductive and holds the rest of
+    # its current (NBI + RF + other) fixed via jphi_fixed; "generic" uses the
+    # (1 - s^1.5)^1.5 seed and no fixed current.  g-file paths: "generic".
+    swb_seed: str = "source"
     # The solve method, one of SOLVE_METHODS: "legacy", "swb"
     # (solve_with_bootstrap is the baseline and every draw; IMAS sources) or
     # "engine" (the unified engine).  None: derived from imas_baseline /
@@ -1482,6 +1490,8 @@ class GenerationConfig:
         switches the channel on -- ``structured_preset=None`` resolves to the
         DEFAULT preset only when the channel is already ``"structured"``.
         """
+        if self.swb_seed not in ("source", "generic"):
+            raise ValueError(f"swb_seed={self.swb_seed!r} not in ('source', 'generic')")
         if self.imas_baseline not in ("closure", "swb"):
             raise ValueError(
                 f"imas_baseline={self.imas_baseline!r} not in ('closure', 'swb')")
@@ -1498,7 +1508,8 @@ class GenerationConfig:
         validate_bootstrap_kwargs(
             self.bootstrap_kwargs,
             _BOOTSTRAP_RESERVED | self._SAW_RESERVED
-            | ({"jphi_fixed", "p_fixed"} if self.imas_baseline == "swb" else set()))
+            | ({"jphi_fixed"} if self.swb_seed == "source" else set())
+            | ({"p_fixed"} if self.imas_baseline == "swb" else set()))
         resolve_structured_preset(self, stacklevel=4)
         validate_structured_mse_settings(self)
         from .edge_pressure import validate_edge_pressure_settings
@@ -1673,6 +1684,8 @@ def swb_config_problems(config):
         p.append("needs an ImasSource")
     if gc.kinetic_source != "ida_hybrid":
         p.append(f"kinetic_source={gc.kinetic_source!r} (only 'ida_hybrid' for now)")
+    if gc.swb_seed != "source":
+        p.append("swb_seed must be 'source' (the source split is the SWB input)")
     for name in ("single_profile_jphi", "imas_corrective_jphi", "jbs_delta_mode",
                  "anchor_pressure_to_equilibrium"):
         if getattr(gc, name, False):
