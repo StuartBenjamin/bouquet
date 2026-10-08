@@ -156,6 +156,45 @@ class TestExactImasExport:
         # the pressure term really is in play (non-vacuous)
         assert np.max(np.abs(_P(psiN_t))) > 1e3
 
+    def test_writes_only_the_exported_slice(self, tmp_path):
+        # a multi-slice template: every time series is cut to the sample
+        # nearest `time`, on its own time base; static data is kept
+        arc = str(tmp_path / "run.h5"); _make_archive(arc, with_fsa=True)
+        tmpl = str(tmp_path / "tmpl.json"); psi, template = _make_template(tmpl)
+        times = [0.5, 1.0, 1.5]
+        for ids, aos in (("equilibrium", "time_slice"), ("core_profiles", "profiles_1d")):
+            d = template[ids]
+            d["time"] = times
+            d["vacuum_toroidal_field"]["b0"] = [-3.0, -_B0, -1.0]
+            d[aos] = [dict(json.loads(json.dumps(d[aos][0])), time=t) for t in times]
+        template["core_profiles"]["global_quantities"] = {"ip": [1.0, 2.0, 3.0]}
+        template["core_sources"] = {        # one slice fewer than its IDS
+            "time": times, "source": [{"profiles_1d": [{"time": 1.0}, {"time": 1.5}]}]}
+        template["pf_active"] = {"coil": [{"current": {
+            "time": [0.0, 0.9, 1.2, 2.0], "data": [0.0, 1.0, 2.0, 3.0]}}]}
+        template["wall"] = {"description_2d": [{"limiter": {"r": [1.0, 2.0, 3.0]}}]}
+        with open(tmpl, "w") as fh:
+            json.dump(template, fh)
+        out = str(tmp_path / "draw.json")
+        write_imas_draw(arc, 0, tmpl, out, scan_key=0, time=1.1, fidelity="exact")
+
+        dd = json.load(open(out))
+        for ids, aos in (("equilibrium", "time_slice"), ("core_profiles", "profiles_1d")):
+            assert dd[ids]["time"] == [1.0]
+            assert dd[ids]["vacuum_toroidal_field"]["b0"] == [-_B0]
+            assert [s["time"] for s in dd[ids][aos]] == [1.0]
+        assert dd["core_profiles"]["global_quantities"]["ip"] == [2.0]
+        assert dd["core_sources"]["time"] == [1.0]
+        assert dd["core_sources"]["source"][0]["profiles_1d"] == [{"time": 1.0}]
+        assert dd["pf_active"]["coil"][0]["current"] == {"time": [1.2], "data": [2.0]}
+        assert dd["wall"] == template["wall"]
+        # the draw is written onto the kept slice
+        psiN_t = (psi - psi[0]) / (psi[-1] - psi[0])
+        geom = {k: np.interp(psiN_t, _PF, _EQ_FSA[k]) for k in _EQ_FSA if k != "psi_N"}
+        geom["B0"] = _B0
+        _check_currents(dd["core_profiles"]["profiles_1d"][0], psiN_t, geom)
+        assert "profiles_2d" in dd["equilibrium"]["time_slice"][0]
+
     def test_an_inductive_split_engine_archive_writes_the_same_ids(self, tmp_path):
         """engine_split_pressure="inductive": p'G sits in the archived
         j_inductive, not j_BS; the writer takes it off j_inductive (the
