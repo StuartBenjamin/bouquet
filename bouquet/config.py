@@ -1087,13 +1087,18 @@ class GenerationConfig:
     # edge-taper keys (taper on by default).  Replaces swb_iterations.
     bootstrap_kwargs: dict = field(default_factory=dict)
     # GS iteration cap for generate()'s draw loop (TokaMaker_interface.
-    # DrawSolveGuard).  None (default) keeps the solver's own setup cap, so
-    # nothing changes unless it is set; a solve that hits a cap still fails
-    # the draw exactly as before (no re-solve at another tolerance).  Every
-    # draw solve that raises is recorded either way: per draw in
-    # diagnostics['solve_failures'], on Bouquet.solve_failures, and in one
-    # printed "[draw-solves]" line.
-    draw_solve_maxits: Optional[int] = None
+    # DrawSolveGuard).  Draw solves converge in <= ~25 iterations; a failing
+    # one sits in a limit cycle and burns the whole cap.  None keeps the
+    # solver's setup cap (800).  Every draw solve that raises is recorded: per
+    # draw in diagnostics['solve_failures'], on Bouquet.solve_failures, and in
+    # one printed "[draw-solves]" line.
+    draw_solve_maxits: Optional[int] = 50
+    # A draw solve that hits that cap is retried from where it stopped at each
+    # of these GS under-relaxation factors, then accepted at
+    # nl_tol = draw_solve_loose_tol (None, the default, skips; 2e-5 rescues
+    # the cycle); recorded as recovered_by.
+    draw_solve_retry_urf: tuple = ()
+    draw_solve_loose_tol: Optional[float] = None
     # SWB inputs on the IMAS path (baseline split, draws, sigma=0 check):
     # "source" seeds SWB with the source's j_inductive and holds the rest of
     # its current (NBI + RF + other) fixed via jphi_fixed; "generic" uses the

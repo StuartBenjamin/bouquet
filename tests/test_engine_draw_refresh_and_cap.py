@@ -492,8 +492,8 @@ def test_the_engine_cap_setting_default_and_refusals():
     from bouquet.engine import (ENGINE_FIELD_DEFAULTS, engine_draw_maxits,
                                 validate_engine_settings)
     g = GenerationConfig(reconstruction_engine="legacy")
-    # the legacy draws' cap is unchanged; the engine's defaults to 100
-    assert g.draw_solve_maxits is None
+    # the legacy draws' cap (bouquet_unified's 50); the engine's defaults to 100
+    assert g.draw_solve_maxits == 50
     assert g.engine_draw_solve_maxits == 100
     assert ENGINE_FIELD_DEFAULTS["engine_draw_solve_maxits"] == 100
     validate_engine_settings(g)                 # legacy + defaults: fine

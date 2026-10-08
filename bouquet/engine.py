@@ -311,7 +311,10 @@ def validate_engine_settings(gc) -> None:
         raise ValueError(f"generation.engine_draw_solve_maxits={mx!r} must "
                          "be an integer >= 1, or None for the solver's own "
                          "cap")
-    if getattr(gc, "draw_solve_maxits", None) is not None:
+    from .config import GenerationConfig
+    # the legacy default, or None (the engine line's stored configs)
+    if getattr(gc, "draw_solve_maxits", None) not in (
+            None, GenerationConfig.draw_solve_maxits):
         raise ValueError(
             f"generation.draw_solve_maxits={gc.draw_solve_maxits!r} set with "
             "reconstruction_engine='unified': it caps the LEGACY draws and "

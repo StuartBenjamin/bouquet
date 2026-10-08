@@ -1753,9 +1753,15 @@ class GenerateEngineDraws(DrawMethod):
     def loop_codes(self, codes):
         return tuple(codes) + ("jbs_non_finite", "engine_closure_refused")
 
-    # the legacy draws' solve cap is not the engine's: its solves are capped
-    # by engine_draw_solve_maxits (cap_solver) alone
+    # the legacy draws' solve cap and its rescue are not the engine's: its
+    # solves are capped by engine_draw_solve_maxits (cap_solver) alone
     def solve_maxits(self, maxits):
+        return None
+
+    def solve_retry_urf(self, retry_urf):
+        return ()
+
+    def solve_loose_tol(self, loose_tol):
         return None
 
     def summarize(self, bq):

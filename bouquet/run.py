@@ -7601,11 +7601,13 @@ class Bouquet(SwbBaseline):
         _jbs_draw = _m.loop_settings_for(_jbs_settings(gc, draw=True))
         verbose = bool(getattr(self.config, "verbose", False))
         _rejections = []
-        # the draw-loop GS iteration cap and the failed-solve record
-        # (DrawSolveGuard)
+        # the draw-loop GS iteration cap, its recovery and the failed-solve
+        # record (DrawSolveGuard)
         with capture_native_output(enabled=not verbose) as _cap, \
                 DrawSolveGuard(self.mygs,
-                               _m.solve_maxits(gc.draw_solve_maxits)) as _solve_guard:
+                               _m.solve_maxits(gc.draw_solve_maxits),
+                               retry_urf=_m.solve_retry_urf(gc.draw_solve_retry_urf),
+                               loose_tol=_m.solve_loose_tol(gc.draw_solve_loose_tol)) as _solve_guard:
             self.diagnostics = generate_bouquet(
                 self.mygs, np.asarray(bl.psi_N, dtype=float), n_equils, header,
                 np.asarray(bl.j_phi, dtype=float),
