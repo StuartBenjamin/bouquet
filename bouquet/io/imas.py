@@ -63,6 +63,9 @@ already TokaMaker ``jphi``.
 
 from __future__ import annotations
 
+import functools
+import json
+import os
 from typing import Optional, TYPE_CHECKING
 
 import numpy as np
@@ -82,6 +85,20 @@ from ..physics import ELEMENTARY_CHARGE as _EC  # p = e * sum_s(n_s * T_s)
 if TYPE_CHECKING:
     from ..config import ImasSource, FixedComponentsConfig
     from ..baseline import Baseline
+
+
+@functools.lru_cache(maxsize=2)
+def _cached_dd(ids_path: str, _mtime_ns: int, _size: int) -> dict:
+    """Parsed ``dd_sim.json`` (up to ~1 GB), cached per (path, mtime, size):
+    a slice sweep reads one file once.  Shared: callers must not mutate it."""
+    with open(ids_path, "rb") as fh:
+        return json.loads(fh.read())
+
+
+def _load_dd(ids_path: str) -> dict:
+    """``dd_sim.json`` at ``ids_path``, via :func:`_cached_dd`."""
+    st = os.stat(ids_path)
+    return _cached_dd(ids_path, st.st_mtime_ns, st.st_size)
 
 # Core-source identifier index for neutral-beam current drive.
 NBI_SOURCE_INDEX = 2          # neutral beam injection -> summed into j_NBI
@@ -1194,10 +1211,7 @@ def read_imas_geometry(source: "ImasSource"):
     :meth:`Bouquet.setup_solver` when the source is an :class:`ImasSource`
     (replacing the g-file that the reconstruction path reads F0/boundary from).
     """
-    import json
-
-    with open(source.ids_path) as fh:
-        dd = json.load(fh)
+    dd = _load_dd(source.ids_path)
     eq = dd["equilibrium"]
     ie = _nearest_index(eq["time"], source.time, "equilibrium")
     vtf = eq["vacuum_toroidal_field"]
@@ -1564,12 +1578,9 @@ def read_imas_baseline(
     unknown indices in ``j_other`` (its sawteeth share also in ``j_sawteeth``).
     Aggregate and bootstrap-like entries are never added.
     """
-    import json
     from ..baseline import Baseline
 
-    with open(source.ids_path, "rb") as fh:
-        raw_bytes = fh.read()
-    dd = json.loads(raw_bytes)
+    dd = _load_dd(source.ids_path)
     T = source.time
 
     # Which fast-pressure convention this dd was written in (factor of 3).
