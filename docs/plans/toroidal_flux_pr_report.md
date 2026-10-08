@@ -2,7 +2,7 @@
 
 **Branch:** `toroidal_flux_mapping` → base `kwargs_for_bootstrap_fortran_backend_v2` (c0c3337)
 **Companion OFT branch:** `profiles_on_toroidal_normalised_flux` (33a4d90); needed only for `coord="phi_n"`
-**Attachment:** `torflux_imas_results.zip`, the output of `examples/torflux_imas/torflux_imas_effect.py` on DIII-D 174956 @ 2.0 s
+**Attachment:** `torflux_imas_results.zip`, the output of `examples/torflux_imas/torflux_imas_effect.py` on DIII-D shot A @ 2.0 s
 
 ## Summary
 
@@ -56,7 +56,7 @@ The motivation is that FUSE, IMAS, IDA and transport codes hold profiles fixed i
 
 - **`psi_n` runs:** the calls sent to OFT are unchanged in form, and existing configs and archives load unchanged (`profile_coord` defaults to `"psi_n"`).
 - **One intended numerical change in ψ_N runs (IMAS path only):** SWB now receives the real non-uniform core_profiles grid. Readbacks are sampled at the nodes instead of on OFT's uniform grid. Before, the arrays were placed at ψ_N = i/(n−1), which is ≈ ρ on a FUSE grid.
-  - On 174956 (g-file boundary) this moves the σ=0 l_i(3) from 0.789 to 0.722.
+  - On shot A (g-file boundary) this moves the σ=0 l_i(3) from 0.789 to 0.722.
   - g-file runs, whose grid is uniform, move only by the end-point padding.
 - **OFT versions:** OFT `main` works for `psi_n`. `phi_n` needs the companion OFT branch. On an older toolkit, `phi_n` is refused before any solve rather than silently solved on ψ_N.
 
