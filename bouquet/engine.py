@@ -105,7 +105,13 @@ ENGINE_FIELD_DEFAULTS = {
     # (mse_chi2_per_chord_high; never acceptance).  10.0: owner-approved
     # 2026-10-07, flag only (see GenerationConfig.mse_chi2n_flag)
     "mse_chi2n_flag": 10.0,
+    # where the archived split puts p'G (ENGINE_SPLIT_PRESSURE_CHOICES)
+    "engine_split_pressure": "bootstrap",
 }
+#: ``GenerationConfig.engine_split_pressure`` values: the archived component
+#: that carries the pressure-driven current (``"inductive"``: the original
+#: engine's split).
+ENGINE_SPLIT_PRESSURE_CHOICES = ("bootstrap", "inductive")
 
 
 def mse_scheme_text(scheme) -> str:
@@ -260,6 +266,10 @@ def validate_engine_settings(gc) -> None:
                 "reconstruction_engine='unified' or leave them at their "
                 "defaults")
         return
+    if vals["engine_split_pressure"] not in ENGINE_SPLIT_PRESSURE_CHOICES:
+        raise ValueError(f"generation.engine_split_pressure must be one of "
+                         f"{ENGINE_SPLIT_PRESSURE_CHOICES}, got "
+                         f"{vals['engine_split_pressure']!r}")
     preset = vals["engine_preset"]
     if preset not in ENGINE_PRESETS:
         raise ValueError(f"generation.engine_preset must be one of "
@@ -707,6 +717,8 @@ def engine_settings(gc) -> dict:
         draw_solve_maxits=engine_draw_maxits(gc),
         edge_pressure=resolve_edge_pressure(gc).record(),
         edge_taper=engine_edge_taper(gc),
+        split_pressure=str(getattr(gc, "engine_split_pressure",
+                                   ENGINE_FIELD_DEFAULTS["engine_split_pressure"])),
         loop=loop,
         q0_tol=float(gc.q0_tol),
         structured_li_tol=float(gc.structured_li_tol),
@@ -2375,10 +2387,11 @@ def read_engine_json(grp):
     return json.loads(str(raw))
 
 
-def store_baseline_engine(header, record, scan_key=None):
+def store_baseline_engine(header, record, scan_key=None, attrs=None):
     """Write the engine record onto the archive's ``_baseline`` group
     (:func:`write_engine_json`: the JSON attribute :data:`ENGINE_ATTR`, or a
-    dataset of that name when the record is too large for an attribute).
+    dataset of that name when the record is too large for an attribute),
+    and ``attrs`` as plain attributes beside it.
     ``None`` writes nothing; no-op without a ``_baseline`` group (the same
     contract as :func:`bouquet.utils.store_baseline_state`)."""
     if record is None:
@@ -2390,6 +2403,8 @@ def store_baseline_engine(header, record, scan_key=None):
         gp = _baseline_group_path(scan_key)
         if gp in hf:
             write_engine_json(hf[gp], record)
+            for k, v in (attrs or {}).items():
+                hf[gp].attrs[k] = v
 
 
 def load_baseline_engine(header, scan_key=None):
@@ -2463,6 +2478,7 @@ def engine_record(eng, res, wall_s=None) -> dict:
                       ids_inductive=eng.s.get("ids_inductive", "auto"),
                       edge_pressure=eng.s.get("edge_pressure"),
                       edge_taper=eng.s.get("edge_taper"),
+                      split_pressure=eng.s.get("split_pressure"),
                       loop=eng.s["loop"]),
         convergence=convergence_table(eng.s),
         composition=("J = F<1/R>/<B^2> [s_ind <j.B>_ind + s_bs <j.B>_BS + "
@@ -2494,14 +2510,32 @@ def engine_record(eng, res, wall_s=None) -> dict:
 # ---------------------------------------------------------------------------
 #: What the stored current split IS on an engine baseline
 #: (``Baseline.delivered_state["convention"]``).
-ENGINE_SPLIT_CONVENTION = (
+_SPLIT_CONVENTION = (
     "unified engine: jphi-linterp REQUEST of the delivery solve (one "
     "jphi-linterp solve of j_phi reproduces the delivered equilibrium); "
-    "j_BS = s_bs F<1/R>/<B^2> <j.B>_BS*, j_NBI/j_RF = F<1/R>/<B^2> <j.B>_fix "
-    "(j_RF: the rf part plus any other driven source entry) "
-    "on the delivery composition's geometry; j_inductive the residual "
-    "(it carries s_ind F<1/R>/<B^2> <j.B>_ind, the pressure-driven term "
-    "p'(<R> - F^2<1/R>/<B^2>) and any delivery correction)")
+    "j_BS = s_bs F<1/R>/<B^2> <j.B>_BS*{bs}, j_NBI/j_RF = F<1/R>/<B^2> "
+    "<j.B>_fix (j_RF: the rf part plus any other driven source entry) on the "
+    "delivery composition's geometry, all times its edge taper; j_inductive "
+    "the residual (it carries s_ind F<1/R>/<B^2> <j.B>_ind{ind} and any "
+    "delivery correction)")
+ENGINE_SPLIT_CONVENTIONS = {
+    "bootstrap": _SPLIT_CONVENTION.format(
+        bs=" + p'(<R> - F^2<1/R>/<B^2>) (the pressure-driven term on the "
+           "bootstrap, as IMAS j_bootstrap)", ind=""),
+    "inductive": _SPLIT_CONVENTION.format(
+        bs="", ind=", the pressure-driven term p'(<R> - F^2<1/R>/<B^2>)"),
+}
+
+
+def split_pressure_term(geom, split_pressure="bootstrap"):
+    """What the archived j_BS adds for the pressure-driven current: p'G times
+    the geometry's edge taper under ``"bootstrap"``, 0 under ``"inductive"``
+    (it then stays in the inductive residual)."""
+    if split_pressure == "inductive":
+        return 0.0
+    P = pressure_term(geom)
+    w = geom.get("edge_taper")
+    return P if w is None else P * np.asarray(w, dtype=float)
 
 
 def _lcfs_deviation_mm(mygs, pts):
@@ -2538,7 +2572,11 @@ def _split(eng, res):
     kap = composed_factor(g)
     out = eng.delivered_closure["out"]
     R = np.asarray(st.request, dtype=float)
-    j_BS = np.asarray(out["s_bs"], float) * kap * np.asarray(st.lambda_bs)
+    # the bootstrap carries the pressure-driven p'G (docs/current-
+    # conventions.md, A7), as the IMAS reader's and evaluate_jBS's do --
+    # unless engine_split_pressure="inductive" (the original split)
+    j_BS = (np.asarray(out["s_bs"], float) * kap * np.asarray(st.lambda_bs)
+            + split_pressure_term(g, eng.s.get("split_pressure", "bootstrap")))
     j_NBI = kap * np.asarray(c.jB_fix_parts["nbi"], float)
     # j_RF carries the RF part AND any other driven core_sources entry (the
     # IDS adapter's "other" part; absent on the g-file path), so the split
@@ -2556,7 +2594,8 @@ def _delivered_state(eng, res, rec, path):
     cfac = float(rec["delivered"]["delivery"]["c"])
     R = np.asarray(res["state"].request, dtype=float)
     return dict(
-        convention=ENGINE_SPLIT_CONVENTION, path=path,
+        convention=ENGINE_SPLIT_CONVENTIONS[
+            eng.s.get("split_pressure", "bootstrap")], path=path,
         l_i=float(m["li"]), l_i_scale="iter(li3)",
         q0=float(stats.get("q_0", float("nan"))),
         # get_stats' q0 is q at psi_N = SOLVER_Q0_PSI_N, not on axis; the

@@ -24,9 +24,9 @@ Field mapping (verified against a D3D FUSE run)::
 Currents are converted exactly to TokaMaker ``jphi`` = <j_phi> (bouquet's
 convention; :mod:`bouquet.physics` docstring, ``docs/current-conventions.md``)
 with the geometry of the equilibrium slice FUSE paired with the core_profiles
-slice: the total from IMAS ``j_tor`` (A5), the bootstrap and each driven
-source as their field-aligned parts (A7).  The inductive component is the
-residual ``j_phi - j_BS - j_NBI - j_RF`` (it carries the pressure term p'G),
+slice: the total from IMAS ``j_tor`` (A5), the bootstrap as its field-aligned
+part plus the pressure term p'G (A7), each driven source as its field-aligned
+part.  The inductive component is the residual ``j_phi - j_BS - j_NBI - j_RF``
 so the decomposition sums exactly.  Fast pressure is isotropized (see
 :func:`bouquet.physics.isotropize_fast_pressure`).
 
@@ -1647,11 +1647,11 @@ def read_imas_baseline(
 
     # Exact conversions to TokaMaker jphi on the geometry FUSE used for this
     # core_profiles slice (see _paired_current_geometry).
-    p_term = jphi_tokamaker_pressure_term(cur_geom)       # p'G (in the residual)
+    p_term = jphi_tokamaker_pressure_term(cur_geom)       # p'G -> bootstrap
 
     def to_jphi(j_par):
         return jpar_to_jphi_tokamaker(j_par, cur_geom)
-    j_BS = to_jphi(j_boot)
+    j_BS = to_jphi(j_boot) + p_term
 
     # --- NBI: sum beam-source parallel currents, then convert ---
     # Each beam entry is read at the core_sources slice TIME, not at its list
@@ -2192,11 +2192,10 @@ def archived_pressure_term(eqdsk_bytes, psi_N):
     ``p'``, ``F``, ``<R>``, ``<1/R>``, ``<B^2>`` come from the eqdsk's own
     traced flux surfaces read as :data:`ARCHIVE_EQDSK_COCOS`
     (:func:`bouquet.adapters.gfile_parallel_current`, which refuses an
-    eqdsk whose ``<j_phi>`` does not carry its own Ip's sign).  This is the
-    term an archived toroidal ``j_inductive`` carries when it is the
-    residual ``j_phi - j_BS - fixed`` (every legacy draw, and engine draws
-    archived before the ``jB_parallel/`` subgroup); the IDS exporter
-    subtracts it before converting the inductive to ``<j.B>``.  Cached per
+    eqdsk whose ``<j_phi>`` does not carry its own Ip's sign).  The archived
+    ``j_BS`` carries this term (``j_inductive`` does for an engine archive
+    split with ``engine_split_pressure="inductive"``); the IDS exporter
+    subtracts it before converting to ``<j.B>``.  Cached per
     eqdsk content (the trace takes ~2 s)."""
     import hashlib
     from ..adapters import gfile_parallel_current
@@ -2357,7 +2356,8 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     docstring).  No exported parallel current carries the pressure-driven
     ``p'G`` (its ``<j.B>`` is zero): an engine draw's stored ``<j.B>`` parts
     (``jB_parallel/``) are written as they are; otherwise ``p'G`` comes off
-    the archived ``j_inductive``, which carries it.
+    the archived component that carries it (``j_BS``, except an engine
+    archive written with ``engine_split_pressure="inductive"``).
     ``j_total = j_ohmic + j_bootstrap + driven``, and ``j_non_inductive``
     (when in the template) is ``j_total - j_ohmic``.  The geometry is set by
     ``fidelity``:
@@ -2581,12 +2581,14 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
                         for k in ("jB_inductive", "jB_BS", "jB_NBI"))
         drv = drv + to_t(np.asarray(jB_par["jB_RF"], dtype=float), src) / b0
     else:
+        # p'G of the archived eqdsk: what a reader of this IDS recovers
+        p_term = archived_pressure_term(eq_bytes, psiN_fsa)
+        _sp = stamp.get("engine_split_pressure", b"bootstrap")
+        _sp = _sp.decode() if isinstance(_sp, bytes) else str(_sp)
+        p_bs, p_ind = (0.0, p_term) if _sp == "inductive" else (p_term, 0.0)
         jt_ind, jt_bs = to_t(j_ind, peq), to_t(j_bs, peq)
-        # p'G of the archived eqdsk (what a reader of this IDS recovers)
-        # comes off j_inductive, which carries it
-        ohm = jphi_tokamaker_to_jpar(
-            jt_ind - archived_pressure_term(eq_bytes, psiN_fsa), geom)
-        bs = jphi_tokamaker_to_jpar(jt_bs, geom)
+        ohm = jphi_tokamaker_to_jpar(jt_ind - p_ind, geom)
+        bs = jphi_tokamaker_to_jpar(jt_bs - p_bs, geom)
         drv = jphi_tokamaker_to_jpar(jphi_t - jt_ind - jt_bs, geom)
     cp["j_ohmic"] = (s_I * ohm).tolist()
     cp["j_bootstrap"] = (s_I * bs).tolist()

@@ -98,7 +98,7 @@ def test_reader_converts_exactly_on_the_paired_slice(tmp_path, capsys):
     g = current_geom(dd["equilibrium"]["time_slice"][0]["profiles_1d"], _B0[0])
     pt = jphi_tokamaker_pressure_term(g)
     assert np.allclose(bl.j_phi, jtor_imas_to_jphi_tokamaker(raw["j_tor"], g), rtol=1e-12)
-    assert np.allclose(bl.j_BS, jpar_to_jphi_tokamaker(raw["j_bs"], g), rtol=1e-12)
+    assert np.allclose(bl.j_BS, jpar_to_jphi_tokamaker(raw["j_bs"], g) + pt, rtol=1e-12)
     assert np.allclose(bl.j_NBI, jpar_to_jphi_tokamaker(raw["j_nbi"], g), rtol=1e-12)
     # the total's own parallel current closes on j_phi (j_tor came from it)
     assert np.allclose(jpar_to_jphi_tokamaker(raw["j_total"], g) + pt, bl.j_phi,
@@ -112,11 +112,10 @@ def test_reader_components_sum_to_j_phi(tmp_path):
     bl = _read(tmp_path, dd)
     total = bl.j_inductive + bl.j_BS + bl.j_NBI + bl.j_RF
     assert np.allclose(total, bl.j_phi, rtol=0, atol=1e-9 * np.max(np.abs(bl.j_phi)))
-    # the inductive residual is the ohmic <J.B>'s field-aligned image plus p'G
+    # the inductive residual is the ohmic <J.B>'s field-aligned image
     g = current_geom(dd["equilibrium"]["time_slice"][0]["profiles_1d"], _B0[0])
     j_ohm = np.asarray(dd["core_profiles"]["profiles_1d"][0]["j_ohmic"])
-    assert np.allclose(bl.j_inductive, jpar_to_jphi_tokamaker(j_ohm, g)
-                       + jphi_tokamaker_pressure_term(g), rtol=1e-10)
+    assert np.allclose(bl.j_inductive, jpar_to_jphi_tokamaker(j_ohm, g), rtol=1e-10)
 
 
 def test_jphi_diff_uses_the_anchor_slice_own_geometry(tmp_path):

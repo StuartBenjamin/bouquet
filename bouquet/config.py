@@ -545,8 +545,7 @@ class GenerationConfig:
     l_i_tolerance: float = 0.05            # l_i acceptance band (fraction of target)
     constrain_sawteeth: bool = False
     # When True, recompute bootstrap each draw via TokaMaker solve_with_bootstrap
-    # and convert its parallel output to toroidal <j_phi> with the one
-    # field-aligned factor F<1/R>/<B^2> (physics.field_aligned_conversion),
+    # (whose output is already TokaMaker jphi; physics module docstring),
     # overriding the baseline/FUSE j_BS. When False, keep the baseline j_BS.
     recalculate_j_BS: bool = True
     # Treat j_phi as ONE profile: no inductive/bootstrap decomposition anywhere.
@@ -1349,6 +1348,12 @@ class GenerationConfig:
     # is untouched.  The engine refuses draw_solve_maxits (the legacy draws'
     # cap); the legacy path never reads this field.
     engine_draw_solve_maxits: Optional[int] = 100
+    # Where the engine's archived split puts the pressure-driven current
+    # p'(<R> - F^2<1/R>/<B^2>): "bootstrap" (default; as IMAS j_bootstrap, the
+    # reader and evaluate_jBS) or "inductive" (left in the residual
+    # j_inductive).  The solve request is the same either way; only the
+    # archived j_BS / j_inductive split differs.
+    engine_split_pressure: str = "bootstrap"
     # --- the pressure handed to the GS solver (bouquet.edge_pressure) --------
     # Both settings act on EVERY solve of the package (legacy paths, the
     # unified engine, the draws, the zero-perturbation checks).
@@ -2145,6 +2150,11 @@ FIELD_PRE_INTRODUCTION = {
     # config without it was not written by to_dict()
     "engine_mse_jacobian": (None, "a unified config without it was not "
                                   "written by to_dict()"),
+    # introduced 2026-10-07 at "bootstrap"; the engine split p'G into the
+    # inductive residual before
+    "engine_split_pressure": (
+        "inductive", "the engine's split before the field (p'G in the "
+                     "inductive residual)"),
     # the post-homotopy pass ceiling was the constant 2 before the field
     # (introduced 2026-09-27 at 4, then 6 on 2026-10-01)
     "jbs_max_passes_post_homotopy": (
@@ -2171,7 +2181,8 @@ FIELD_PRE_INTRODUCTION = {
 #: :data:`FIELD_PRE_INTRODUCTION` entries that only exist on the unified
 #: engine (a legacy config must keep them at their defaults --
 #: ``validate_engine_settings`` refuses otherwise).
-_ENGINE_ONLY_PRE_INTRODUCTION = ("engine_ids_inductive", "engine_mse_jacobian")
+_ENGINE_ONLY_PRE_INTRODUCTION = ("engine_ids_inductive", "engine_mse_jacobian",
+                                 "engine_split_pressure")
 
 #: :data:`FIELD_PRE_INTRODUCTION` entries of the self-consistent loop: back-
 #: filled only for a config that ran the loop (``jbs_self_consistent``); on

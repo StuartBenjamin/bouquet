@@ -1163,6 +1163,9 @@ class GenerateEngineDraws:
         self.p_thresh = float(p_thresh)
         self.max_proxy_draws = int(max_proxy_draws)
         self.loop_settings = dict(ctx.loop)
+        #: which archived component carries p'G (engine_split_pressure)
+        self.split_pressure = str(
+            getattr(ctx.eng, "s", {}).get("split_pressure", "bootstrap"))
         self._cur = None
         self._cap_saved = None
         self._timer = None
@@ -1509,16 +1512,18 @@ class GenerateEngineDraws:
         # the PARALLEL parts of the archived split (schema: the draw's
         # ``jB_parallel/`` subgroup; docs/archive-schema.md): the bootstrap
         # and fixed <j.B> the toroidal parts were converted from, and the
-        # field-aligned inductive <j.B> = (j_inductive - P) / kappa, P the
-        # pressure-driven p'(<R> - F^2<1/R>/<B^2>) of the archived state --
-        # so j_phi = kappa (jB_inductive + jB_BS + jB_NBI + jB_RF) + P
-        # exactly, and an IDS export carries no pressure-driven current in
-        # any parallel field (io.imas.write_imas_draw)
+        # field-aligned inductive <j.B> = (j_inductive - P_ind) / kappa, P_ind
+        # the part of the pressure-driven p'(<R> - F^2<1/R>/<B^2>) the split
+        # leaves in the inductive (all of it under split_pressure="inductive",
+        # none under "bootstrap") -- so j_phi = kappa (jB_inductive + jB_BS +
+        # jB_NBI + jB_RF) + P exactly, and an IDS export carries no
+        # pressure-driven current in any parallel field
+        # (io.imas.write_imas_draw)
         kap = np.asarray(sp["kappa"], dtype=float)
         P = np.asarray(sp["j_pressure"], dtype=float)
         self._cur["parallel"] = dict(
             psi_N=np.asarray(self.ctx.psi, dtype=float).copy(),
-            jB_inductive=(j_ind - P) / kap,
+            jB_inductive=(j_ind - P + sp["j_pressure_bs"]) / kap,
             jB_BS=np.asarray(sp["jB_BS"], dtype=float).copy(),
             jB_NBI=np.asarray(sp["jB_NBI"], dtype=float).copy(),
             jB_RF=np.asarray(sp["jB_RF"], dtype=float).copy(),
@@ -1526,11 +1531,15 @@ class GenerateEngineDraws:
         neg = j_ind < 0.0
         diagnostics["engine"]["archived"]["split"] = dict(
             convention=("j_phi: the archived equilibrium's achieved FSA "
-                        "current; j_BS: s_bs (1 + d_bs) scale Redl and "
-                        "j_NBI/j_RF: the fixed <j.B>, both times "
-                        "F<1/R>/<B^2> of the archived equilibrium; "
-                        "j_inductive: the residual (carries the pressure-"
-                        "driven term), never clipped"),
+                        "current; j_BS: s_bs (1 + d_bs) scale Redl times "
+                        "F<1/R>/<B^2>"
+                        + (" plus the pressure-driven p'G" if
+                           self.split_pressure == "bootstrap" else "")
+                        + ", and j_NBI/j_RF: the fixed <j.B> times "
+                        "F<1/R>/<B^2>, of the archived equilibrium; "
+                        "j_inductive: the residual, never clipped"
+                        + (" (it carries p'G)" if self.split_pressure
+                           == "inductive" else "")),
             j_NBI=sp["j_NBI"].tolist(), j_RF=sp["j_RF"].tolist(),
             n_negative_inductive=int(np.sum(neg)),
             min_inductive=float(np.min(j_ind)),
@@ -1543,6 +1552,10 @@ class GenerateEngineDraws:
                   f"negative on {int(np.sum(neg))} nodes (min "
                   f"{float(np.min(j_ind)):.3e} A/m^2); recorded, not "
                   "clipped", flush=True)
+        # the draw's returned diagnostics carry the archived split too (with
+        # p'G on j_BS under "bootstrap", as the baseline's)
+        diagnostics["j_BS"] = np.asarray(sp["j_BS"], dtype=float).copy()
+        diagnostics["j_inductive"] = j_ind.copy()
         return np.asarray(sp["j_BS"], dtype=float).copy(), j_ind
 
     def mark(self, stage):
@@ -1589,9 +1602,10 @@ class GenerateEngineDraws:
         # bootstrap model (x* held: s_bs (1 + d_bs) x scale x Redl) and its
         # fixed parts, both converted with THIS state's F<1/R>/<B^2>; the
         # residual against the archived j_phi is :meth:`archived_split`'s
-        from .engine import composed_factor, pressure_term
+        from .engine import composed_factor, pressure_term, split_pressure_term
         kap = composed_factor(fin["geom"])
         _w = fin["geom"].get("edge_taper")
+        P_bs = split_pressure_term(fin["geom"], self.split_pressure)
         dpl = cur["draw"].get("passes_post_homotopy") or cur["draw"]["passes"]
         fx = self.ctx.c.jB_fix_parts
         _amp = 1.0 + float(dpl.last["amp"].get("d_bs", 0.0))
@@ -1603,12 +1617,13 @@ class GenerateEngineDraws:
                  + np.asarray(fx.get("other", 0.0), dtype=float))
         cur["final_split"] = dict(
             j_BS=(_amp * self.ctx.s_bs * kap * _scale
-                  * np.asarray(fin["redl"], dtype=float)),
+                  * np.asarray(fin["redl"], dtype=float)) + P_bs,
             j_NBI=kap * jB_NBI, j_RF=kap * jB_RF,
             jB_BS=jB_BS, jB_NBI=jB_NBI * np.ones_like(kap),
             jB_RF=jB_RF * np.ones_like(kap), kappa=kap,
             j_pressure=pressure_term(fin["geom"])
-            * (1.0 if _w is None else np.asarray(_w, dtype=float)))
+            * (1.0 if _w is None else np.asarray(_w, dtype=float)),
+            j_pressure_bs=P_bs)
         rec["archived"]["deltas"] = dict(
             l_i_3=float(fin["li"]) - float(self.ctx.ref["l_i"]),
             l_i_1=(None if (rec["archived"]["l_i_1"] is None
@@ -1700,7 +1715,10 @@ class GenerateEngineDraws:
             ip_row=("the Ip the delivered composition carries in the exact "
                     "measure on G*"), Ip_target_A=self.ctx.Ip_star,
             reference=self.ctx.ref)
-        store_baseline_engine(header, rec, scan_key=scan_key)
+        # engine_split_pressure is read by the IMAS writer: which component
+        # carries p'G
+        store_baseline_engine(header, rec, scan_key=scan_key, attrs={
+            "engine_split_pressure": self.split_pressure})
 
 
 def _jbs_block(loop_rec):

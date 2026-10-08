@@ -617,8 +617,9 @@ and `fidelity` picks where that geometry comes from:
 No exported parallel current carries the pressure-driven term
 `P = p'(<R> - F^2<1/R>/<B^2>)` (its `<j.B>` is zero; a reader recovers it from
 the pressure): `j_ohmic` is the field-aligned inductive only and `j_total =
-j_ohmic + j_bootstrap + driven`. The archived toroidal `j_inductive` is the
-residual `j_phi - j_BS - fixed` and carries `P`; when the draw has no stored
+j_ohmic + j_bootstrap + driven`. The archived toroidal `j_BS` carries `P`
+(FUSE's convention; `j_inductive` does for an engine archive written with
+`engine_split_pressure="inductive"`); when the draw has no stored
 `<j.B>` parts the exporter subtracts `P` (from the archived eqdsk's own flux
 surfaces) before converting. Export -> `IdsAdapter.read` returns the archived
 `<j.B>` parts and `<j_phi>` (2026-10-06; before, `P/kappa` sat inside the

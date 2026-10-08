@@ -127,9 +127,9 @@ def _check_currents(cp, psiN_t, geom, a5=None):
     pt = _P(psiN_t)
     assert np.allclose(cp["j_tor"], jphi_tokamaker_to_jtor_imas(jphi, a5), rtol=1e-12)
     assert np.allclose(cp["j_total"], jphi_tokamaker_to_jpar(jphi - pt, geom), rtol=1e-12)
-    assert np.allclose(cp["j_ohmic"], jphi_tokamaker_to_jpar(j_ind - pt, geom),
+    assert np.allclose(cp["j_ohmic"], jphi_tokamaker_to_jpar(j_ind, geom), rtol=1e-12)
+    assert np.allclose(cp["j_bootstrap"], jphi_tokamaker_to_jpar(j_bs - pt, geom),
                        rtol=1e-12, atol=1e-9)
-    assert np.allclose(cp["j_bootstrap"], jphi_tokamaker_to_jpar(j_bs, geom), rtol=1e-12)
     assert np.allclose(cp["j_non_inductive"],
                        np.asarray(cp["j_total"]) - np.asarray(cp["j_ohmic"]))
     # reading the IDS back recovers bouquet's jphi (the reader's direction)
@@ -137,7 +137,7 @@ def _check_currents(cp, psiN_t, geom, a5=None):
     assert np.allclose(back_total, jphi, rtol=1e-12)
     back_par = jpar_to_jphi_tokamaker(np.asarray(cp["j_total"]), geom) + pt
     assert np.allclose(back_par, jphi, rtol=1e-12)
-    back_bs = jpar_to_jphi_tokamaker(np.asarray(cp["j_bootstrap"]), geom)
+    back_bs = jpar_to_jphi_tokamaker(np.asarray(cp["j_bootstrap"]), geom) + pt
     assert np.allclose(back_bs, j_bs, rtol=1e-10, atol=1e-6)
 
 
@@ -155,6 +155,37 @@ class TestExactImasExport:
         _check_currents(cp, psiN_t, geom)
         # the pressure term really is in play (non-vacuous)
         assert np.max(np.abs(_P(psiN_t))) > 1e3
+
+    def test_an_inductive_split_engine_archive_writes_the_same_ids(self, tmp_path):
+        """engine_split_pressure="inductive": p'G sits in the archived
+        j_inductive, not j_BS; the writer takes it off j_inductive (the
+        total is the default split's)."""
+        arc = str(tmp_path / "run.h5"); _make_archive(arc, with_fsa=True)
+        tmpl = str(tmp_path / "tmpl.json"); psi, _ = _make_template(tmpl)
+        psiN_t = (psi - psi[0]) / (psi[-1] - psi[0])
+        out_b = str(tmp_path / "b.json")
+        write_imas_draw(arc, 0, tmpl, out_b, scan_key=0, fidelity="exact")
+        # the same draw archived with p'G moved to the inductive (on _PEQ)
+        pt_eq = _P(_PEQ)
+        arc_i = str(tmp_path / "run_i.h5"); _make_archive(arc_i, with_fsa=True)
+        with h5py.File(arc_i, "a") as hf:
+            g = hf["scan/0/0"]
+            del g["j_BS"], g["j_inductive"]
+            g.create_dataset("j_BS", data=_J_BS - pt_eq)
+            g.create_dataset("j_inductive", data=_J_IND + pt_eq)
+            hf.require_group("scan/0/_baseline").attrs[
+                "engine_split_pressure"] = "inductive"
+        out_i = str(tmp_path / "i.json")
+        write_imas_draw(arc_i, 0, tmpl, out_i, scan_key=0, fidelity="exact")
+        cb = json.load(open(out_b))["core_profiles"]["profiles_1d"][0]
+        ci = json.load(open(out_i))["core_profiles"]["profiles_1d"][0]
+        for k in ("j_tor", "j_total"):
+            np.testing.assert_allclose(ci[k], cb[k], rtol=1e-12,
+                                       atol=1e-12 * np.max(np.abs(cb[k])))
+        # p'G (of the archived eqdsk, on the template nodes) came off j_inductive
+        np.testing.assert_allclose(ci["j_ohmic"], jphi_tokamaker_to_jpar(
+            np.interp(psiN_t, _PEQ, _J_IND + pt_eq) - _P(psiN_t),
+            _fsa_geom_on(psiN_t)), rtol=1e-12, atol=1e-9)
 
     def test_exact_without_capture_raises(self, tmp_path):
         arc = str(tmp_path / "run.h5"); _make_archive(arc, with_fsa=False)

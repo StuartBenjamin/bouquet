@@ -96,8 +96,12 @@ def test_every_stored_unified_config_loads_with_what_it_ran_with(sha):
     assert g.bootstrap_kwargs.get("taper_edge_jBS") is False
     taper = [m for m in msgs if "predates the engine edge taper" in m]
     assert len(taper) == 1
+    # ... and with p'G in the inductive residual, the split it ran with
+    assert g.engine_split_pressure == "inductive"
+    split = [m for m in msgs if "engine_split_pressure" in m]
+    assert len(split) == 1
     if sha == "d874822":
-        assert msgs == taper                  # otherwise a current config: silent
+        assert sorted(msgs) == sorted(taper + split)   # else a current config: silent
 
 
 def test_a_unified_config_drops_a_non_default_swb_iterations():

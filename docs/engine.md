@@ -155,6 +155,16 @@ evaluator's surfaces (`sauter_fc`), `<R>`, `<1/R>`, `<1/R^2>`, `V'`, `p'` from
 innermost-surface repair (`smooth_jbs_transition`) every SWB-derived profile
 receives.
 
+**Where the archived split puts the pressure-driven term**
+(`GenerationConfig.engine_split_pressure`).  The request above is the same
+either way; only the stored `j_BS` / `j_inductive` differ.  `"bootstrap"`
+(default) adds `p'(<R> - F^2<1/R>/<B^2>)` to `j_BS`, as IMAS `j_bootstrap`,
+the IMAS reader and `evaluate_jBS` do; `"inductive"` leaves it in the
+inductive residual.  The engine stamps the choice on the archive's `_baseline`
+(`engine_split_pressure`) and `write_imas_draw` removes `p'G` from whichever
+component carries it, so the exported IDS is the same.  A stored unified
+config without the field loads as `"inductive"`, as it ran.
+
 **Toroidal-flux runs (`coord="phi_n"`).** The contract's grid is the run grid
 (Φ_N). The backend tags every solve with it and samples each measurement's
 geometry at the nodes' ψ_N on that solve's own toroidal-flux map, so
@@ -162,6 +172,10 @@ geometry at the nodes' ψ_N on that solve's own toroidal-flux map, so
 The structured basis stays on the run grid (`close_ip_structured(...,
 basis_x=)`). In a ψ_N run all of this is the identity, bit for bit. See
 docs/workflows.md for the source side.
+
+`bootstrap_kwargs={"taper_edge_jBS": False}` together with
+`engine_split_pressure="inductive"` gives the untapered split with `p'G` in
+`j_inductive`.
 
 **Edge taper (ON by default).** As `solve_with_bootstrap(taper_edge_jBS=True)`
 does for the swb method, every term above is multiplied by OFT's edge taper
