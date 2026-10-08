@@ -774,8 +774,9 @@ def resolve_uncertainty(config, baseline) -> dict:
         ida = (_shared[1] if _shared is not None
                and _same_path(_shared[0], ida_path) else None)
         if ida is None:
+            _t = getattr(src, "ida_time", None)
             ida = read_ida(
-                ida_path, time=getattr(src, "time", None),
+                ida_path, time=getattr(src, "time", None) if _t is None else _t,
                 sigma_mode=unc.sigma_mode, sigma_method=unc.sigma_method,
                 ni_source=getattr(src, "ni_source", "all"),
                 # the carbon tier's Z(Z-1) propagation is quadratically

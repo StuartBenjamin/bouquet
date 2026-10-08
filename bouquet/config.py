@@ -222,6 +222,11 @@ class ImasSource:
 
     ids_path: str                      # IMAS/OMAS file (FUSE output)
     time: Optional[float] = None       # time slice [s]; None -> single/first slice
+    # IDA-lite slice [s] for ida_hybrid; None -> `time`. `time` then picks only the dd slices
+    # (equilibrium, core_profiles, core_sources). FUSE (replay_first) computed dd j_bootstrap(t)
+    # on ONE IDA slice, recorded in ida_provenance.json "replay_pairing"; pass that slice here
+    # and the macro step t as `time` to keep IDA kinetics and FUSE currents consistent.
+    ida_time: Optional[float] = None
     # --- IDA-hybrid kinetics (GenerationConfig.kinetic_source = "ida_hybrid") ---
     # When set, the baseline ne/Te/Ti/ni/Z_eff/omega_tor come from this IDA
     # .cdf (externally fit, smoother across time than FUSE's per-slice fits),
@@ -1050,10 +1055,10 @@ class GenerationConfig:
     anchor_jtor_to_equilibrium: bool = True
     # Source of the baseline kinetic profiles on the IMAS path:
     #   "fuse"       -> FUSE core_profiles ne/Te/Ti (default; original behaviour)
-    #   "ida_hybrid" -> ne/Te/Ti/ni/Z_eff/omega_tor from ImasSource.ida_path
-    #                   (resampled onto the FUSE grid; Z_eff is IDA's unless
-    #                   ImasSource.zeff_from_fuse); currents/equilibrium/p_fast/
-    #                   anchors stay FUSE.
+    #   "ida_hybrid" -> ne/Te/Ti/ni/Z_eff/omega_tor from ImasSource.ida_path at
+    #                   ImasSource.ida_time (resampled onto the FUSE grid; Z_eff is
+    #                   IDA's unless ImasSource.zeff_from_fuse); currents/equilibrium/
+    #                   p_fast/anchors stay FUSE, at ImasSource.time.
     kinetic_source: str = "fuse"
     # Anchor the solve thermal pressure to equilibrium.pressure via the fixed
     # p_diff = equilibrium.pressure - p_reconstructed offset. With FUSE kinetics

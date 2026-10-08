@@ -168,7 +168,7 @@ class Bouquet(SwbBaseline):
         return cls(cfg)
 
     @classmethod
-    def from_imas(cls, ids_path, *, mesh, time=None,
+    def from_imas(cls, ids_path, *, mesh, time=None, ida_time=None,
                   n_draws=20, header="bouquet",
                   ida_path=None, LCFS_geqdsk=None, impurity_Z=6.0,
                   ni_source="all", zeff_from_fuse=False,
@@ -187,6 +187,13 @@ class Bouquet(SwbBaseline):
         baseline ni and its propagated sigma; ``zeff_from_fuse=True`` keeps the
         FUSE Z_eff instead of IDA's. ``kinetic_source`` defaults to
         ``"ida_hybrid"`` when an ``ida_path`` is given, else ``"fuse"``.
+
+        ``ida_time`` picks the IDA slice (default ``time``); ``time`` then picks
+        only the dd slices.  With FUSE_JBS_ORDER=replay_first, a row
+        ``(time, ida_time)`` of ``ida_provenance.json["replay_pairing"]`` means
+        the dd j_bootstrap(time) was computed on IDA(ida_time);
+        ``aux['pairing_consistent']`` records that check when the table sits
+        beside ``ids_path``.
 
         ``LCFS_geqdsk`` is OPTIONAL: a g-file whose LCFS replaces the source
         boundary outline as the isoflux target, for when you have a better
@@ -215,7 +222,7 @@ class Bouquet(SwbBaseline):
         if solve_method is not None:
             gkw["solve_method"] = solve_method
         cfg = BouquetConfig(
-            source=ImasSource(ids_path=ids_path, time=time, ida_path=ida_path,
+            source=ImasSource(ids_path=ids_path, time=time, ida_time=ida_time, ida_path=ida_path,
                               impurity_Z=impurity_Z, ni_source=ni_source,
                               zeff_from_fuse=zeff_from_fuse,
                               LCFS_geqdsk=LCFS_geqdsk),
@@ -345,7 +352,7 @@ class Bouquet(SwbBaseline):
         # still write to the old header.
         self.config.output_header = value
 
-    def set_slice(self, *, time=None, header=None) -> "Bouquet":
+    def set_slice(self, *, time=None, ida_time=None, header=None) -> "Bouquet":
         """Re-point to a new time slice, reusing the existing solver.
 
         The multi-slice mechanism for the **IMAS path**, where one IDS holds
@@ -370,6 +377,9 @@ class Bouquet(SwbBaseline):
                     f"{type(self.config.source).__name__} has no time axis to "
                     "sweep; build a separate Bouquet per source")
             self.config.source.time = time
+            # a stale IDA slice must not ride along to a new dd slice
+            if hasattr(self.config.source, "ida_time"):
+                self.config.source.ida_time = ida_time
         if header is not None:
             self.config.output_header = header
         self.baseline = None
