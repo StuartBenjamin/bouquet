@@ -21,6 +21,7 @@ and a documented home for every knob -- a typo fails immediately in
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass, field
 from typing import Any, Optional, Union, TYPE_CHECKING
 
@@ -1045,17 +1046,10 @@ class GenerationConfig:
     # already ~clean, so flooring is redundant -- and it REGRESSED a stiff
     # high-l_i case (clipping its isolate-edge spike drove yield to 0).
     floor_j_BS: bool = False
-    # DEPRECATED; LEGACY only (the frozen-bootstrap path,
-    # jbs_self_consistent=False).  solve_with_bootstrap's fixed Picard pass
-    # count per draw (default 3; there is no convergence test inside it);
-    # lowering to 2 trades a little accuracy for speed on large bouquets.
-    # NOTE: the IMAS baseline's own SWB call never passed this and always ran
-    # OFT's own default (iterations=3); only the draws, the delta-mode cache
-    # and verify_sigma0_consistency read it.  With jbs_self_consistent=True
-    # the bootstrap comes from the self-consistent loop and this is IGNORED:
-    # config validation (BouquetConfig) then emits a DeprecationWarning for
-    # any value other than the default.
-    swb_iterations: int = 3
+    # Keyword options forwarded to every solve_with_bootstrap call (keys
+    # validated in __post_init__).  The unified engine reads only the
+    # edge-taper keys (taper on by default).  Replaces swb_iterations.
+    bootstrap_kwargs: dict = field(default_factory=dict)
     # GS iteration cap for generate()'s draw loop (TokaMaker_interface.
     # DrawSolveGuard).  None (default) keeps the solver's own setup cap, so
     # nothing changes unless it is set; a solve that hits a cap still fails
@@ -1393,7 +1387,8 @@ class GenerationConfig:
     capture_exact_inv_R2: bool = True
 
     def __post_init__(self):
-        """Resolve ``structured_preset`` into the individual structured fields.
+        """Validate ``bootstrap_kwargs``, then resolve ``structured_preset``
+        into the individual structured fields.
 
         Thin wrapper over :func:`resolve_structured_preset`, which carries the
         rules (and is called again at the closure's own entry point, where it
@@ -1421,6 +1416,7 @@ class GenerationConfig:
         switches the channel on -- ``structured_preset=None`` resolves to the
         DEFAULT preset only when the channel is already ``"structured"``.
         """
+        validate_bootstrap_kwargs(self.bootstrap_kwargs)
         resolve_structured_preset(self, stacklevel=4)
         validate_structured_mse_settings(self)
         from .edge_pressure import validate_edge_pressure_settings
@@ -1504,6 +1500,85 @@ def validate_structured_mse_settings(gc) -> None:
             "generation.mse_data with imas_corrective_jphi=True is refused: "
             "the MSE Jacobian differences plain solves against a predictor "
             "solved WITH the corrective iteration, which biases every column")
+
+
+#: Arguments the call sites set themselves; ``bootstrap_kwargs`` may not
+#: shadow them (duplicate keyword, or a silent override of a per-draw value).
+_BOOTSTRAP_RESERVED = frozenset(
+    "mygs ne Te ni Ti Zeff Ip_target inductive_jphi scale_jBS "
+    "isolate_edge_jBS verbose diagnostic_plots psi_pad psi_N "
+    "ffp_prof ne_prof te_prof ni_prof ti_prof".split()
+)
+
+
+@functools.lru_cache(maxsize=None)
+def _bootstrap_kwarg_names():
+    """Every keyword ``bootstrap_kwargs`` can reach, introspected from the
+    toolkit's bootstrap entry points.  ``None`` when OpenFUSIONToolkit is not
+    importable, which skips the unknown-key check.  Cached per process.
+    """
+    try:
+        import inspect
+
+        from OpenFUSIONToolkit.TokaMaker._core import TokaMaker
+        from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
+
+        # Only the entry points this toolkit has: on one without the
+        # internal solve, the accepted set is solve_with_bootstrap's own
+        # arguments, which is what it accepts there.
+        names = set()
+        for fn in (solve_with_bootstrap,
+                   getattr(TokaMaker, "solve_bootstrap", None),
+                   getattr(TokaMaker, "set_boot_ops", None)):
+            if fn is None:
+                continue
+            names |= {prm.name for prm in inspect.signature(fn).parameters.values()
+                      if prm.kind in (prm.POSITIONAL_OR_KEYWORD, prm.KEYWORD_ONLY)}
+        return frozenset(names) - {"self"}
+    except Exception:
+        # No OFT (unit tests, a docs build): cannot introspect, so do not
+        # guess; a wrong key then surfaces at the call.
+        return None
+
+
+def validate_bootstrap_kwargs(bootstrap_kwargs, reserved=_BOOTSTRAP_RESERVED,
+                              known=None):
+    """Refuse a ``bootstrap_kwargs`` key that would not survive the call chain.
+
+    Validated at config time: the call sites end in ``**kwargs``, so a wrong
+    key would otherwise fail every draw inside the draw loop's ``except``.
+
+    Parameters
+    ----------
+    bootstrap_kwargs : dict
+        The keys to check.
+    reserved : set of str
+        Names the call sites pass themselves.
+    known : set of str, optional
+        The accepted keyword names; defaults to :func:`_bootstrap_kwarg_names`
+        (``None`` from it skips the unknown-key check).  Passed explicitly by
+        the tests, which run without OpenFUSIONToolkit.
+    """
+    keys = set(bootstrap_kwargs)
+
+    bad = sorted(reserved & keys)
+    if bad:
+        raise ValueError(
+            f"bootstrap_kwargs may not set {bad}: passed explicitly at call sites.")
+
+    if "swb_iterations" in keys:
+        raise ValueError(
+            "bootstrap_kwargs: 'swb_iterations' is now 'iterations'.")
+
+    if known is None:
+        known = _bootstrap_kwarg_names()
+    if known is None:
+        return
+    unknown = sorted(keys - set(known))
+    if unknown:
+        raise ValueError(
+            f"bootstrap_kwargs has no such solve_with_bootstrap option(s): "
+            f"{unknown}. Accepted: {sorted(set(known) - set(reserved))}.")
 
 
 def resolve_structured_preset(gc, warn: bool = True, stacklevel: int = 3):
@@ -1843,7 +1918,7 @@ class BouquetConfig:
         # engine_* fields changed under the legacy engine are refused too)
         from .engine import validate_engine_settings
         validate_engine_settings(self.generation)
-        # settings the loop ignores (swb_iterations): loud, not silent
+        # bootstrap_kwargs the loop's Redl does not read: loud, not silent
         deprecated_jbs_settings_warning(self.generation, stacklevel=3)
 
     # ── serialization (h5 provenance, per-shot templating, SLURM bundles) ──
@@ -2116,7 +2191,7 @@ def _stored_config_compat(gend: dict) -> None:
 
     (c) A stored ``"unified"`` config carrying a non-default value of ANY
     legacy-path field the engine never reads
-    (:data:`bouquet.engine.ENGINE_UNREAD_LEGACY_FIELDS`, 22 fields; or
+    (:data:`bouquet.engine.ENGINE_UNREAD_LEGACY_FIELDS`, 21 fields; or
     ``homotopy_passes`` with ``engine_draw_homotopy=False``) is loaded at
     the default, with a warning naming the field: the engine ignored the
     value, so the default reproduces what the stored config actually ran.
@@ -2290,6 +2365,41 @@ def _checked_generation_keys(gend: dict) -> dict:
     import difflib
     import warnings
     names = {f.name for f in _dc.fields(GenerationConfig)}
+    if "swb_iterations" in gend:
+        # retired for bootstrap_kwargs; every stored config carries it (to_dict
+        # writes all fields), so the default is dropped silently and any
+        # other value is carried over as bootstrap_kwargs["iterations"] --
+        # except under the unified engine, which never read it (dropped)
+        from .jbs_loop import SWB_ITERATIONS_DEFAULT
+        gend = dict(gend)
+        v = gend.pop("swb_iterations")
+        unified = gend.get("reconstruction_engine") == "unified"
+        if v not in (None, SWB_ITERATIONS_DEFAULT) and unified:
+            warnings.warn(
+                f"stored unified config: generation.swb_iterations={v!r} "
+                "(a retired legacy-path setting) was never read by the "
+                "unified engine; it is dropped -- the stored run is "
+                "unchanged", UserWarning, stacklevel=3)
+        elif v not in (None, SWB_ITERATIONS_DEFAULT):
+            bk = dict(gend.get("bootstrap_kwargs") or {})
+            bk.setdefault("iterations", int(v))
+            gend["bootstrap_kwargs"] = bk
+            warnings.warn(
+                f"config generation.swb_iterations={v!r} (retired) loaded as "
+                f"bootstrap_kwargs={{'iterations': {bk['iterations']}}}.",
+                UserWarning, stacklevel=3)
+        if unified:
+            # written before the engine edge taper existed: it ran
+            # untapered, so load it that way rather than at the new default
+            bk = dict(gend.get("bootstrap_kwargs") or {})
+            if "taper_edge_jBS" not in bk:
+                bk["taper_edge_jBS"] = False
+                gend["bootstrap_kwargs"] = bk
+                warnings.warn(
+                    "unified-engine config predates the engine edge taper "
+                    "(it carries swb_iterations): loaded with "
+                    "bootstrap_kwargs['taper_edge_jBS']=False, as it ran.",
+                    UserWarning, stacklevel=3)
     retired = [k for k in gend if k in _RETIRED_GENERATION_KEYS]
     unknown = sorted(k for k in gend
                      if k not in names and k not in _RETIRED_GENERATION_KEYS)

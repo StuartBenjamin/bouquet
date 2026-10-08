@@ -46,6 +46,10 @@ from bouquet import engine_draws as ED
 from bouquet.config import GenerationConfig
 from bouquet.utils import pchip_derivative
 
+def _taper(pin):
+    """The engine refuses its edge taper with the pin off: taper off there."""
+    return {} if pin else dict(bootstrap_kwargs={"taper_edge_jBS": False})
+
 COMBOS = [(True, "legacy"), (True, "offset"), (False, "legacy"),
           (False, "offset")]
 
@@ -240,6 +244,7 @@ def test_the_whole_config_validates_and_round_trips_the_settings(tmp_path):
         mesh=os.path.join(ex, "DIIID_mesh.h5"), n_draws=1)
     g = b.config.generation
     g.edge_pprime_pin, g.separatrix_pressure = False, "offset"
+    g.bootstrap_kwargs = {"taper_edge_jBS": False}   # the taper needs the pin
     d = b.config.to_dict()
     assert d["generation"]["edge_pprime_pin"] is False
     assert d["generation"]["separatrix_pressure"] == "offset"
@@ -259,11 +264,12 @@ def test_the_whole_config_validates_and_round_trips_the_settings(tmp_path):
 def test_the_engine_settings_and_record_carry_the_settings():
     s = T.settings()
     assert s["edge_pressure"] == EP.EDGE_PRESSURE_DEFAULTS
-    s = T.settings(edge_pprime_pin=False, separatrix_pressure="offset")
+    s = T.settings(edge_pprime_pin=False, separatrix_pressure="offset",
+                   **_taper(False))
     assert s["edge_pressure"] == dict(edge_pprime_pin=False,
                                       separatrix_pressure="offset")
     eng, res, rec, b = TD._recon(edge_pprime_pin=False,
-                                 separatrix_pressure="offset")
+                                 separatrix_pressure="offset", **_taper(False))
     ep = rec["edge_pressure"]
     p = np.asarray(eng.c.pressure, float)
     assert ep["edge_pprime_pin"] is False
@@ -534,7 +540,7 @@ def test_the_draws_first_pass_pressure_shift_is_unchanged(sep):
 def test_the_zero_perturbation_identity_holds_under_every_combination(
         pin, sep):
     eng, res, rec, b = TD._recon(edge_pprime_pin=pin,
-                                 separatrix_pressure=sep)
+                                 separatrix_pressure=sep, **_taper(pin))
     ctx = TD._ctx(eng, res)
     assert ctx.edge == EP.EdgePressure(pin, sep)
     out = _q(ED.run_draw, ctx, b, ctx.zero_inputs())
@@ -558,7 +564,7 @@ def _generate(tmp_path, monkeypatch, pin, sep, n=3):
     from bouquet.utils import initialize_equilibrium_database
     os.makedirs(str(tmp_path), exist_ok=True)
     eng, res, rec, b = TD._recon(edge_pprime_pin=pin,
-                                 separatrix_pressure=sep)
+                                 separatrix_pressure=sep, **_taper(pin))
     ctx = TD._ctx(eng, res)
     unc = TD._unc(ctx)
     G = ED.GenerateEngineDraws(ctx, unc=unc, psi_pad=T.PAD)

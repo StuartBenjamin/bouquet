@@ -57,8 +57,11 @@ _S = dict(rtol_j=1e-3, rtol_Ip=1e-4, tol_li=1e-3)
 def _run(part, work, pin, sep, **kw):
     old = {k: os.environ.get(k) for k in ("BQ_ENGINE_PROBE_GC",
                                           "BQ_ENGINE_PROBE_PSEP_ADD")}
+    # taper off: these test the edge-pressure settings; with the SWB edge
+    # taper on, edge_pprime_pin=False does not converge on this example
     os.environ["BQ_ENGINE_PROBE_GC"] = json.dumps(dict(
-        edge_pprime_pin=pin, separatrix_pressure=sep))
+        edge_pprime_pin=pin, separatrix_pressure=sep,
+        bootstrap_kwargs={"taper_edge_jBS": False}))
     os.environ["BQ_ENGINE_PROBE_PSEP_ADD"] = repr(PSEP_ADD)
     try:
         return ME.run_part(part, work, **kw)
