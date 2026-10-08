@@ -107,7 +107,7 @@ DRAW_SOLVE_MAXITS = 50
 #: it stopped in: re-solve at each of these under-relaxation factors (OFT's
 #: default is 0.2), then accept at :data:`DRAW_SOLVE_LOOSE_TOL`.  The cycle
 #: parks the residual at ~9e-6 whatever the urf (0.1 and 0.3 each failed 3/3
-#: anchor solves on 174956 t=1.191), so no urf retry by default: the loose
+#: anchor solves on shot A t=1.191), so no urf retry by default: the loose
 #: re-solve converges in a few iterations, and only if the residual really is
 #: that small.  The two cycle states are the same equilibrium far below any
 #: draw's perturbation.
