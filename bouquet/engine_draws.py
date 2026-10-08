@@ -251,7 +251,10 @@ class EngineDrawContext:
         #: edge_pressure): every draw solve and report uses the same
         self.edge = resolve_edge_pressure(
             (getattr(eng, "s", None) or {}).get("edge_pressure"))
+        #: the run grid (psi_N, or Phi_N); integrals and interpolations use
+        #: each geometry's own psi_N (geom["psi_N"]), the basis this grid
         self.psi = np.asarray(eng.psi, dtype=float)
+        self.coord = str(getattr(getattr(eng, "b", None), "coord", "psi_n"))
         self.label = str(label)
         self.loop = dict(loop)
         #: engine_draw_bootstrap_refresh: restart the loop's bootstrap after
@@ -293,8 +296,9 @@ class EngineDrawContext:
         # ---- the pressure term's p' on G* for a draw's pressure (pass 1)
         psi_q = np.asarray(g["psi_q"], dtype=float)
         self._psi_q = psi_q
-        self.dPq_star = np.interp(psi_q, self.psi, pressure_gradient(
-            self.psi, np.asarray(self.c.pressure, dtype=float)))
+        _gp = np.asarray(g["psi_N"], dtype=float)
+        self.dPq_star = np.interp(psi_q, _gp, pressure_gradient(
+            _gp, np.asarray(self.c.pressure, dtype=float)))
         pp = np.asarray(g["pprime"], dtype=float)
         nn = float(self.dPq_star @ self.dPq_star)
         self.sigma_p = float(pp @ self.dPq_star) / nn if nn > 0.0 else 0.0
@@ -347,7 +351,7 @@ class EngineDrawContext:
                     "active q0 row (not requested, or the sawtooth gate "
                     "rejected it)")
             self.q0_target = float(st.q0_target)
-            self.row0 = float(np.interp(float(psi_q[0]), self.psi, J))
+            self.row0 = float(np.interp(float(psi_q[0]), _gp, J))
 
     # ---- composition -----------------------------------------------------
     def compose(self, geom, jB_ind, jB_bs):
@@ -370,8 +374,9 @@ class EngineDrawContext:
         ``p'`` on ``G*`` and ``d p / d psi_N``.  Exactly ``G*`` at zero
         perturbation."""
         from .edge_pressure import pressure_gradient
-        dPq = np.interp(self._psi_q, self.psi, pressure_gradient(
-            self.psi, np.asarray(pressure, dtype=float)))
+        _gp = np.asarray(self.geom["psi_N"], dtype=float)
+        dPq = np.interp(self._psi_q, _gp, pressure_gradient(
+            _gp, np.asarray(pressure, dtype=float)))
         g = dict(self.geom)
         g["pprime"] = np.asarray(self.geom["pprime"], dtype=float) \
             + self.sigma_p * (dPq - self.dPq_star)
@@ -638,11 +643,12 @@ class _DrawPasses:
             amp.update(d_ind=float(d_ind), a_ind=float(1.0 + d_ind))
         else:
             psi0 = float(geom["psi_q"][0])
+            gx = np.asarray(geom["psi_N"], dtype=float)
             A = np.array([[li_, lb_],
-                          [float(np.interp(psi0, ctx.psi, p["ind"])),
-                           float(np.interp(psi0, ctx.psi, p["bs"]))]])
+                          [float(np.interp(psi0, gx, p["ind"])),
+                           float(np.interp(psi0, gx, p["bs"]))]])
             rhs = np.array([dIp, float(self.pin.row)
-                            - float(np.interp(psi0, ctx.psi, J0))])
+                            - float(np.interp(psi0, gx, J0))])
             try:
                 dd = np.linalg.solve(A, rhs)
             except np.linalg.LinAlgError as e:
@@ -702,12 +708,12 @@ class _DrawPasses:
             q_row=float(m["q_row"]), Ip=_f(m.get("Ip")), delivery=dstat,
             n_solves=int(self.b.n_solves)))
         self.geom = g1
-        meas = dict(w=g1["w_lin"] * conversion_factor(g1), x=ctx.psi,
+        meas = dict(w=g1["w_lin"] * conversion_factor(g1), x=g1["psi_N"],
                     li=m["li"], redl=m["redl"])
         if self.pin is not None:
             meas["q0"] = m["q_row"]
             meas["axis_current_solved"] = float(np.interp(
-                float(g1["psi_q"][0]), ctx.psi, jint))
+                float(g1["psi_q"][0]), g1["psi_N"], jint))
         return meas
 
     def on_pass(self, k, meas, J, entry):
@@ -990,7 +996,8 @@ def post_homotopy(ctx, backend, draw, settings, *, coil_guard=None,
     g = complete_geometry(m["geom"])
     w = g["w_lin"] * conversion_factor(g)
     J = scale * np.asarray(m["redl"], dtype=float)
-    chk = check_delivered(J, jbs_used, w, ctx.psi, float(ctx.c.Ip), settings)
+    chk = check_delivered(J, jbs_used, w, g["psi_N"], float(ctx.c.Ip),
+                          settings)
     rec = dict(check=jsonable(dict(chk)),
                accepted_without_passes=bool(chk["ok"]),
                solve="engine draw step (x* held, Ip amplitude), one "
@@ -1121,7 +1128,7 @@ def engine_rejection_reason(exc, stage):
 #  generate(): the hook generate_bouquet calls
 # ---------------------------------------------------------------------------
 def tokamaker_backend(mygs, contract, *, psi_pad, q_psi, maxits,
-                      edge_pressure=None, edge_taper=None):
+                      edge_pressure=None, edge_taper=None, coord="psi_n"):
     """The draw's backend on a live solver (monkeypatched by the fast
     tests).  ``edge_pressure`` / ``edge_taper``: the reconstruction's
     settings (:mod:`bouquet.edge_pressure`, :func:`bouquet.engine.
@@ -1130,7 +1137,7 @@ def tokamaker_backend(mygs, contract, *, psi_pad, q_psi, maxits,
     return TokaMakerBackend(mygs, contract, psi_pad=psi_pad, li_kind="li_3",
                             q_psi=q_psi, maxits=maxits,
                             edge_pressure=edge_pressure,
-                            edge_taper=edge_taper)
+                            edge_taper=edge_taper, coord=coord)
 
 
 class GenerateEngineDraws:
@@ -1184,7 +1191,8 @@ class GenerateEngineDraws:
         return tokamaker_backend(mygs, dc, psi_pad=self.psi_pad,
                                  q_psi=self.q_psi, maxits=self.maxits,
                                  edge_pressure=self.ctx.edge,
-                                 edge_taper=self.ctx.eng.s.get("edge_taper"))
+                                 edge_taper=self.ctx.eng.s.get("edge_taper"),
+                                 coord=self.ctx.coord)
 
     def lcfs_pressure(self):
         """The separatrix pressure a written g-file of the CURRENT draw
@@ -1826,8 +1834,8 @@ def zero_perturbation_loop_verdict(ctx, d):
     rec = d["record"]
     meas = d["passes"].last
     w = meas["geom"]["w_lin"] * conversion_factor(meas["geom"])
-    cmp_ = profile_residuals(d["jbs_used"], ctx.lam, w, ctx.psi,
-                             float(ctx.c.Ip))
+    cmp_ = profile_residuals(d["jbs_used"], ctx.lam, w,
+                             meas["geom"]["psi_N"], float(ctx.c.Ip))
     dl = rec["deltas"]
     conv = bool(rec["loop"]["converged"])
     ident = rec["identity"]
@@ -1873,7 +1881,7 @@ def zero_perturbation_archived_verdict(ctx, jbs_carried, fin):
     g = complete_geometry(fin["geom"])
     w = g["w_lin"] * conversion_factor(g)
     cmp_ = profile_residuals(np.asarray(jbs_carried, dtype=float), ctx.lam,
-                             w, ctx.psi, float(ctx.c.Ip))
+                             w, g["psi_N"], float(ctx.c.Ip))
     dli = float(fin["li"]) - float(ctx.ref["l_i"])
     stats = fin.get("stats") or {}
     q95 = _f(stats.get("q_95"))

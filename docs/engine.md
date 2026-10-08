@@ -155,6 +155,14 @@ evaluator's surfaces (`sauter_fc`), `<R>`, `<1/R>`, `<1/R^2>`, `V'`, `p'` from
 innermost-surface repair (`smooth_jbs_transition`) every SWB-derived profile
 receives.
 
+**Toroidal-flux runs (`coord="phi_n"`).** The contract's grid is the run grid
+(Φ_N). The backend tags every solve with it and samples each measurement's
+geometry at the nodes' ψ_N on that solve's own toroidal-flux map, so
+`geom["psi_N"]` is ψ_N and every integral, interpolation and residual uses it.
+The structured basis stays on the run grid (`close_ip_structured(...,
+basis_x=)`). In a ψ_N run all of this is the identity, bit for bit. See
+docs/workflows.md for the source side.
+
 **Edge taper (ON by default).** As `solve_with_bootstrap(taper_edge_jBS=True)`
 does for the swb method, every term above is multiplied by OFT's edge taper
 (`physics.edge_taper_weight`, a port of `apply_edge_taper`): 1 below

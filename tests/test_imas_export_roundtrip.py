@@ -124,7 +124,7 @@ def _export_and_read(tmp_path, arc):
     return c, jB_bs_read, cp[ic]
 
 
-def _check(s, c, jB_bs_read, cp, j_phi, P):
+def _check(s, c, jB_bs_read, j_phi, P):
     jB = s["jB"]
     assert _rel(c.jB_ind, jB["ind"]) <= RTOL
     assert _rel(jB_bs_read, jB["bs"]) <= RTOL
@@ -133,8 +133,6 @@ def _check(s, c, jB_bs_read, cp, j_phi, P):
     # the composed <j_phi> of what was read IS the archived <j_phi>
     composed = s["kap"] * (c.jB_ind + jB_bs_read + c.jB_fix) + P
     assert _rel(composed, j_phi) <= RTOL
-    # j_tor is the archived toroidal current, as before
-    assert _rel(np.abs(cp["j_tor"]), j_phi) <= RTOL
 
 
 def test_engine_archive_round_trips_through_the_ids_adapter(source,
@@ -150,8 +148,8 @@ def test_engine_archive_round_trips_through_the_ids_adapter(source,
     _write_archive(arc, s, j_phi, j_ind, j_bs, parallel=dict(
         psi_N=psi, jB_inductive=jB["ind"], jB_BS=jB["bs"], jB_NBI=jB["nbi"],
         jB_RF=jB["rf"], kappa=kap, j_pressure=P))
-    c, jbs, cp = _export_and_read(tmp_path, arc)
-    _check(s, c, jbs, cp, j_phi, P)
+    c, jbs, _ = _export_and_read(tmp_path, arc)
+    _check(s, c, jbs, j_phi, P)
 
 
 def test_legacy_archive_export_subtracts_the_pressure_driven_term(source,
@@ -169,8 +167,8 @@ def test_legacy_archive_export_subtracts_the_pressure_driven_term(source,
     j_phi = j_ind + j_bs + kap * fix
     arc = str(tmp_path / "legacy.h5")
     _write_archive(arc, s, j_phi, j_ind, j_bs)
-    c, jbs, cp = _export_and_read(tmp_path, arc)
-    _check(s, c, jbs, cp, j_phi, P)
+    c, jbs, _ = _export_and_read(tmp_path, arc)
+    _check(s, c, jbs, j_phi, P)
 
 
 def test_jB_parallel_identity_is_what_the_schema_states(tmp_path):

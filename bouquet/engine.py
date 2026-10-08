@@ -52,6 +52,7 @@ from typing import Optional
 
 import numpy as np
 
+from . import coords
 from .edge_pressure import (pressure_frames, resolve_edge_pressure,
                             solver_pax, solver_pp_profile)
 
@@ -1031,7 +1032,7 @@ class UnifiedEngine:
             # closed pass solves)
             from .jbs_loop import AxisRowPin
             q = self.rows["q0"]
-            j0a = float(np.interp(float(g0["psi_q"][0]), self.psi,
+            j0a = float(np.interp(float(g0["psi_q"][0]), g0["psi_N"],
                                   anchor["achieved"]))
             row0 = j0a * float(anchor["q_row"]) / float(q["target"])
             self.pin = AxisRowPin(q["target"], self.s["q0_tol"], row0,
@@ -1155,7 +1156,11 @@ class UnifiedEngine:
                             closure_sign_convention, ip_roundtrip_gate,
                             soft_closure_with_retry, structured_basis_eval)
         c = self.c
-        psi = self.psi
+        # integrals and interpolations over the geometry's psi_N; the basis
+        # on the run grid (identical in a psi_N run)
+        psi = np.asarray(geom["psi_N"], dtype=float)
+        _bx = (None if getattr(self.b, "coord", "psi_n") == "psi_n"
+               else self.psi)
         _, parts = compose(geom, c.jB_ind, lam_bs, c.jB_fix)
         j_ind, j_bs = parts["ind"], parts["bs"]
         j_fix = parts["fix"] + parts["pressure"]
@@ -1175,7 +1180,7 @@ class UnifiedEngine:
         li = self.rows.get("l_i")
         if li is not None:
             li_t = float(li["target"]) - float(self.state.li_discrepancy)
-        Phi = structured_basis_eval(self.basis, psi)
+        Phi = structured_basis_eval(self.basis, self.psi)
         K = Phi.shape[0]
         if x is not None:
             x = np.asarray(x, dtype=float)
@@ -1200,7 +1205,7 @@ class UnifiedEngine:
                         li_geom=(geom["li_geom"] if li else None),
                         axis=axis, axis_sigma=None,
                         sigma_ind_up=self.sigma_up, mse_lin=mse_lin, x0=x0,
-                        accept_noise_floor=True)
+                        accept_noise_floor=True, basis_x=_bx)
                 out = soft_closure_with_retry(_solve, x_prev=x_prev,
                                               who=self.label + " closure")
             else:
@@ -1209,7 +1214,7 @@ class UnifiedEngine:
                     j_fix, basis=self.basis, weights=self.weights, axis=axis,
                     li_target=li_t, li_kind=(li["kind"] if li else "li_1"),
                     li_geom=(geom["li_geom"] if li else None),
-                    sigma_ind_up=self.sigma_up, mse_lin=mse_lin)
+                    sigma_ind_up=self.sigma_up, mse_lin=mse_lin, basis_x=_bx)
             xs = np.concatenate([np.asarray(out["a"], float),
                                  np.asarray(out["b"], float)])
             jc = out["s_ind"] * j_ind + out["s_bs"] * j_bs + j_fix
@@ -1295,12 +1300,12 @@ class UnifiedEngine:
             p["mse_dtg_max_sigma"] = float(np.max(np.abs(tg - prev) / self.rows[
                 "mse"]["chords"]["sigma_eff"]))
         self._pending = p
-        meas = dict(w=g1["w_lin"] * conversion_factor(g1), x=self.psi,
+        meas = dict(w=g1["w_lin"] * conversion_factor(g1), x=g1["psi_N"],
                     li=m["li"], redl=m["redl"],
                     q0=(m["q_row"] if "q0" in self.rows else None))
         if "q0" in self.rows:
             meas["axis_current_solved"] = float(np.interp(
-                float(g1["psi_q"][0]), self.psi, jint))
+                float(g1["psi_q"][0]), g1["psi_N"], jint))
         # the next pass composes on this pass's solved geometry
         st.geom = g1
         st.x = cl["x"]
@@ -1999,7 +2004,7 @@ class UnifiedEngine:
                            final=True)
         g1 = complete_geometry(m["geom"])
         w = g1["w_lin"] * conversion_factor(g1)
-        chk = check_delivered(m["redl"], lam, w, self.psi,
+        chk = check_delivered(m["redl"], lam, w, g1["psi_N"],
                               float(self.rows["Ip"]["target"]), lp)
         checks = dict(loop=dict(r_j=chk["r_j"], r_I=chk["r_I"],
                                 ok=bool(chk["ok"])))
@@ -2013,7 +2018,7 @@ class UnifiedEngine:
             misses.append(f"|dl_i| vs the last pass {dli:.2e} "
                           f"(tol {lp['tol_li']:g})")
         from .jbs_loop import _relative_difference
-        cur = _relative_difference(cl["jc"], prev["jint"], w, self.psi)
+        cur = _relative_difference(cl["jc"], prev["jint"], w, g1["psi_N"])
         checks["current_residual"] = dict(value=cur, tol=lp["rtol_j"],
                                           ok=bool(cur is not None
                                                   and cur <= lp["rtol_j"]))
@@ -2139,17 +2144,23 @@ class TokaMakerBackend:
 
     def __init__(self, mygs, contract, *, psi_pad=1e-3, li_kind="li_3",
                  q_psi=None, chords=None, maxits=None, edge_pressure=None,
-                 edge_taper=None):
+                 edge_taper=None, coord="psi_n"):
         self.mygs = mygs
         self.c = contract
+        #: the run grid (psi_N, or Phi_N with coord="phi_n"); every solve
+        #: tags its profiles with coord and every measurement samples the
+        #: geometry at the nodes' psi_N on that solve's own map
         self.psi = np.asarray(contract.psi_N, dtype=float)
+        self.coord = coords.check_coord(coord)
         #: the SWB edge taper's factor on psi (engine_edge_taper(); None:
-        #: off), carried on every measured geometry so compose() applies it
+        #: off), carried on every measured geometry so compose() applies it;
+        #: in a Phi_N run it is re-evaluated on each geometry's psi_N
         self.edge_taper = None
+        self._taper = None
         if edge_taper and edge_taper.get("on"):
             from .physics import edge_taper_weight
-            self.edge_taper = edge_taper_weight(
-                self.psi, edge_taper["psi0"], edge_taper["shape"])
+            self._taper = (float(edge_taper["psi0"]), int(edge_taper["shape"]))
+            self.edge_taper = edge_taper_weight(self.psi, *self._taper)
         self.psi_pad = float(psi_pad)
         self.li_kind = str(li_kind)
         self.q_psi = (float(np.clip(self.psi[0], psi_pad, 1 - psi_pad))
@@ -2184,8 +2195,10 @@ class TokaMakerBackend:
     def flux_integral(self, psi_N, profile):
         """The solver's flux-surface integral of *profile* on the current
         equilibrium (the draw sampler's pressure match)."""
-        return self.mygs.flux_integral(np.asarray(psi_N, dtype=float),
-                                       np.asarray(profile, dtype=float))
+        return self.mygs.flux_integral(
+            np.asarray(coords.psi_at(self.mygs, np.asarray(psi_N, dtype=float),
+                                     self.coord), dtype=float),
+            np.asarray(profile, dtype=float))
 
     def redl(self, kinetics=None):
         """Redl ``<j.B>`` on the CURRENT equilibrium with *kinetics*
@@ -2197,7 +2210,7 @@ class TokaMakerBackend:
         _j, d = evaluate_jBS(self.mygs.copy_eq(), self.psi, kin["ne"],
                              kin["te"], kin["ni"], kin["ti"], kin["zeff"],
                              psi_pad=self.psi_pad, isolate_edge=False,
-                             smooth_axis=False)
+                             smooth_axis=False, coord=self.coord)
         return smooth_jbs_transition(np.asarray(d["j_dot_B"], dtype=float))
 
     def p_sep(self) -> float:
@@ -2212,7 +2225,7 @@ class TokaMakerBackend:
         if not np.all(np.isfinite(req)):
             raise EngineSolveError("engine: refusing to hand a non-finite "
                                    "request to the GS solver")
-        ffp = {"type": "jphi-linterp", "y": req, "x": self.psi}
+        ffp = coords.oft_prof("jphi-linterp", self.psi, req, self.coord)
         saved = None
         if self.maxits is not None:
             saved = int(mygs.settings.maxits)
@@ -2227,7 +2240,8 @@ class TokaMakerBackend:
                 mygs.set_targets(Ip=float(self.c.Ip),
                                  pax=solver_pax(self.p, self.edge))
                 mygs.set_profiles(pp_prof=solver_pp_profile(
-                    self.psi, self.p, psi_range, self.edge), ffp_prof=ffp)
+                    self.psi, self.p, psi_range, self.edge,
+                    coord=self.coord), ffp_prof=ffp)
                 _t0 = time.perf_counter()
                 try:
                     mygs.solve()
@@ -2258,20 +2272,28 @@ class TokaMakerBackend:
                             li_achieved, li_closure_geometry)
         mygs, kin, pad = self.mygs, self._kinetics(), self.psi_pad
         eq = mygs.copy_eq()
-        geom = fsa_current_geometry(eq, self.psi, psi_pad=pad,
-                                    want_pprime=True)
+        # the nodes' psi_N on THIS solve's map (the nodes themselves in a
+        # psi_N run): every integral and interpolation of this measurement
+        # uses geom["psi_N"]
+        geom = fsa_current_geometry(
+            eq, np.asarray(coords.psi_at(eq, self.psi, self.coord), float),
+            psi_pad=pad, want_pprime=True)
         if geom["inv_R2"] is None:
             raise EngineSolveError("engine: this OFT build's get_q returns no "
                                    "<1/R^2>; the jphi-linterp Ip measure "
                                    "cannot be formed")
         _j, d = evaluate_jBS(eq, self.psi, kin["ne"], kin["te"], kin["ni"],
                              kin["ti"], kin["zeff"], psi_pad=pad,
-                             isolate_edge=False, smooth_axis=False)
+                             isolate_edge=False, smooth_axis=False,
+                             coord=self.coord)
         redl = smooth_jbs_transition(np.asarray(d["j_dot_B"], dtype=float))
         geom["F"] = np.asarray(d["F"], dtype=float)
         geom["B2"] = np.asarray(d["avg_B2"], dtype=float)
         geom["li_geom"] = li_closure_geometry(eq, geom, psi_pad=pad)
         geom["edge_taper"] = self.edge_taper
+        if self._taper is not None and self.coord != coords.PSI:
+            from .physics import edge_taper_weight
+            geom["edge_taper"] = edge_taper_weight(geom["psi_N"], *self._taper)
         li = float(li_achieved(eq, li_kind=self.li_kind, psi_pad=pad)[0])
         # q on the geometry's own surfaces (the legacy _q0_of reads index 0
         # of the same call), at the row radius
@@ -2683,7 +2705,10 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
         eqdsk_bytes = fh.read()
     kn = c.kinetics_native
     return Baseline(
-        psi_N=psi, j_phi=R, j_inductive=j_ind, j_BS=j_BS,
+        # the run grid (the g-file's psi_N, or its Phi_N in a toroidal-flux
+        # run); recon keeps the g-file's own psi_N
+        psi_N=np.asarray(c.psi_N, dtype=float), coord=ad.coord,
+        j_phi=R, j_inductive=j_ind, j_BS=j_BS,
         psi_N_kinetic=np.asarray(kn["psi_N"], float), ne=kn["ne"],
         te=kn["te"], ni=kn["ni"], ti=kn["ti"], Zeff=kn["Zeff"],
         Ip_target=float(c.Ip), l_i_target=float(m["li"]),
@@ -2903,6 +2928,7 @@ def prepare_engine_baseline(bq):
                 chords=(None if mse is None else mse["chords"]),
                 edge_pressure=s["edge_pressure"],
                 edge_taper=s["edge_taper"],
+                coord=getattr(ad, "coord", "psi_n"),
                 # the reconstruction runs under the solver's own cap
                 # (engine_draw_solve_maxits caps the DRAWS only)
                 maxits=None)

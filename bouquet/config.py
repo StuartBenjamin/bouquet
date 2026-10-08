@@ -199,7 +199,15 @@ class ReconstructionSource:
     psi_bridge: float = 0.99          # Hermite edge-bridge location
     rescale_j_BS: bool = False
     shelf_psi_N: float = 0.0
+    # Radial coordinate of the run (bouquet.coords): "psi_n", "phi_n" (profiles,
+    # envelopes and solver inputs on normalised toroidal flux, mapped at read
+    # with the g-file's own q), or "rho_tor" (read as phi_n = rho_tor**2).
+    coord: str = "psi_n"
     # guess_jinductive is derived from the g-file j_phi when None
+
+    def __post_init__(self):
+        from .coords import run_coord
+        run_coord(self.coord)
 
 
 @dataclass
@@ -252,6 +260,13 @@ class ImasSource:
     # (source_current_sign / source_current_sign_origin), in li_metrics and
     # ip_closure, and on the archive's _baseline attrs.
     current_orientation: Union[str, float] = "auto"
+    # Radial coordinate of the run (bouquet.coords): "psi_n", "phi_n" (the
+    # dd's core_profiles grid.rho_tor_norm**2), or "rho_tor" (same run).
+    coord: str = "psi_n"
+
+    def __post_init__(self):
+        from .coords import run_coord
+        run_coord(self.coord)
 
 
 BaselineSource = Union[ReconstructionSource, ImasSource]
@@ -284,8 +299,9 @@ class FixedComponentsConfig:
       * ``j_RF`` -- **never computed internally** (RF is the least-common input).
         Always zeros unless the user supplies an array here.
 
-    All arrays are on ``psi_N`` (kinetic grid), SI units, toroidal current
-    convention for j_*. ``None`` -> zeros.
+    All arrays are on ``psi_N`` (kinetic grid, in the run coordinate --
+    Φ_N in a ``coord="phi_n"`` run, unless ``coord="psi_n"``), SI units,
+    toroidal current convention for j_*. ``None`` -> zeros.
 
     Current orientation: ``j_NBI`` / ``j_RF`` are given in bouquet's
     POSITIVE-Ip frame -- co-current drive is positive, counter-current drive
@@ -301,6 +317,9 @@ class FixedComponentsConfig:
     j_NBI: Optional["np.ndarray"] = None    # beam-driven TOROIDAL current density [A/m^2], co-Ip > 0
     j_RF: Optional["np.ndarray"] = None     # RF-driven TOROIDAL current density [A/m^2], co-Ip > 0
     psi_N: Optional["np.ndarray"] = None    # grid for the above (if arrays given)
+    # Coordinate of ``psi_N``: "run" (the run's), or "psi_n" (mapped to the
+    # run coordinate through the source equilibrium's psi_N -> Phi_N map).
+    coord: str = "run"
 
     # How to collapse anisotropic fast-ion pressure (p_perp, p_par) to the scalar
     # p_fast that a scalar-pressure GS solver needs. See
@@ -322,6 +341,12 @@ class FixedComponentsConfig:
     #              is applied silently. The rule used and the grounds for it are
     #              recorded on Baseline.p_fast_meta.
     p_fast_reduction: str = "auto"
+
+    def __post_init__(self):
+        from .coords import INPUT_COORDS
+        if self.coord not in INPUT_COORDS:
+            raise ValueError(f"fixed_components.coord must be one of "
+                             f"{INPUT_COORDS}, got {self.coord!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -1372,18 +1397,17 @@ class GenerationConfig:
 
     # Live-equilibrium capture for exact IMAS/OMAS export. When True (default),
     # each draw's converged TokaMaker flux-surface-average metrics are snapshot
-    # into the archive (scan/<key>/<draw>/eq_fsa/), so IDS write-back does an
-    # exact per-draw toroidal->parallel current conversion instead of the
-    # interim baseline-ratio reconstruction. Cheap; set False to skip.
+    # into the archive (scan/<key>/<draw>/eq_fsa/), so IDS write-back converts
+    # currents exactly per draw instead of with the template (baseline)
+    # geometry. Cheap; set False to skip.
     capture_live_eq: bool = True
     # FSA grid for the captured block (matches the 257^2 eqdsk; >=129).
     capture_npsi: int = 257
     # Record <1/R^2> in the captured block (from get_q when the OFT build
-    # exposes it, else by flux-surface quadrature).  Archived geometry only:
-    # since 2026-10-06 the IDS export's conversion is the one field-aligned
-    # factor F<1/R>/<B^2> (physics.field_aligned_conversion), which does not
-    # read it.  The quadrature adds ~65 surface traces/draw; set False to skip
-    # that cost (self-validated + graceful fallback either way).
+    # exposes it, else by flux-surface quadrature): the exact IMAS j_tor
+    # conversion (A5) at IDS export needs it (a draw without it exports with
+    # the template geometry).  The quadrature adds ~65 surface traces/draw;
+    # set False to skip that cost.
     capture_exact_inv_R2: bool = True
 
     def __post_init__(self):
@@ -1506,7 +1530,7 @@ def validate_structured_mse_settings(gc) -> None:
 #: shadow them (duplicate keyword, or a silent override of a per-draw value).
 _BOOTSTRAP_RESERVED = frozenset(
     "mygs ne Te ni Ti Zeff Ip_target inductive_jphi scale_jBS "
-    "isolate_edge_jBS verbose diagnostic_plots psi_pad psi_N "
+    "isolate_edge_jBS verbose diagnostic_plots psi_pad psi_N x coord "
     "ffp_prof ne_prof te_prof ni_prof ti_prof".split()
 )
 
@@ -1847,6 +1871,12 @@ class BouquetConfig:
                 f"{type(src).__name__}"
             )
 
+        from .coords import PHI, run_coord
+        if (run_coord(src.coord) == PHI
+                and self.generation.bootstrap_kwargs.get("use_python_solve")):
+            raise ValueError("coord='phi_n' needs the internal bootstrap "
+                             "solve: drop use_python_solve from bootstrap_kwargs")
+
         if self.fixed_components.p_fast_reduction not in (
                 "auto", "trace", "mean", "perp", "sum"):
             raise ValueError(
@@ -2077,7 +2107,7 @@ def _decode(v):
 #: stored config may still carry them; they are dropped WITH a warning (they
 #: have no effect on the current code), never mistaken for a typo.
 _RETIRED_GENERATION_KEYS = ("coil_drift_threshold_A", "lock_coils",
-                            "lock_coils_weight")
+                            "lock_coils_weight", "window_coord", "seed_coord")
 
 
 #: Every earlier DEFAULT of an engine-only field, with the dates it was the
