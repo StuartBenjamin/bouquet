@@ -5,7 +5,7 @@ closure's ``bs_scale`` or the structured ``s_bs(psi)``.  The draws (and the
 sigma=0 check) used to pass ``m`` INTO SWB as ``scale_jBS`` instead; OFT
 applies that inside SWB's self-consistent iteration, so the sigma=0 draw
 missed ``bl.j_BS`` by 8.9 % of peak at the pedestal at ``bs_scale`` 0.77 (shot
-174956 t = 2.0 s), and the structured profile never reached the draws at all.
+shot A t = 2.0 s), and the structured profile never reached the draws at all.
 """
 import inspect
 import types
