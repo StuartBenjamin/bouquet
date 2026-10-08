@@ -409,6 +409,8 @@ class Bouquet(SwbBaseline):
         mesh_pts, mesh_lc, mesh_reg, coil_dict, cond_dict = load_gs_mesh(sc.mesh_path)
         mygs.setup_mesh(mesh_pts, mesh_lc, mesh_reg)
         mygs.setup_regions(cond_dict=cond_dict, coil_dict=coil_dict)
+        # the FE elements (mygs.r / lc become the order-refined plotting mesh)
+        self._mesh_cells = (mesh_pts, mesh_lc)
 
         # F0 and reference LCFS boundary come from the g-file (reconstruction)
         # or the IDS vacuum_toroidal_field + boundary outline (IMAS).
@@ -882,6 +884,10 @@ class Bouquet(SwbBaseline):
                 raise ValueError('imas_baseline="swb" refuses: ' + "; ".join(_p))
         elif self.config.generation.swb_saw_q is not None:
             raise ValueError('swb_saw_q needs imas_baseline="swb"')
+        elif self.config.generation.swb_saw_axis_flatten is not None:
+            raise ValueError('swb_saw_axis_flatten needs imas_baseline="swb"')
+        elif self.config.generation.swb_axis_pack is not None:
+            raise ValueError('swb_axis_pack needs imas_baseline="swb"')
 
         # A baseline is usable only once EVERY stage below has completed.  A
         # failure part-way (a JBSNotConverged or GS failure on pass k of the

@@ -1123,6 +1123,22 @@ class GenerationConfig:
     swb_saw_tol: float = 1.0e-4
     swb_saw_ramp: float = 0.01
     swb_saw_rule: str = "local"
+    # imas_baseline="swb": flatten near-axis structure the mesh does not resolve
+    # (bouquet.axis_subgrid).  Inside the cut the source total j_phi becomes an
+    # axis-regular quadratic in Phi_N (C1, enclosed current kept); the change goes
+    # into j_sawteeth / j_other (FUSE's 701 carries the structure).  None = off;
+    # a float = the cut in rho_tor; "auto" = the surface enclosing
+    # swb_saw_axis_flatten_cells mesh cells, pushed out to the next extremum of
+    # j_phi, and nothing when j_phi has no extremum inside it.  Saw on or off.
+    swb_saw_axis_flatten: Optional[Union[float, str]] = None
+    swb_saw_axis_flatten_cells: float = 20.0
+    # imas_baseline="swb": extra SWB nodes near the axis (coords.axis_pack_grid).
+    # Every SWB solve (baseline, sigma=0, draws) runs on the run grid plus nodes
+    # spaced at most swb_axis_pack in rho = sqrt(x) on the axis, relaxing to the
+    # run grid's own spacing from swb_axis_pack_rho; inputs are linearly
+    # interpolated there and outputs read back at the run nodes.  None = off.
+    swb_axis_pack: Optional[float] = None
+    swb_axis_pack_rho: float = 0.15
     # --- self-consistent bootstrap loop (bouquet.jbs_loop) -------------------
     # True (default): j_BS is re-evaluated (physics.evaluate_jBS: Redl on the
     # caller's own psi_N grid and the CURRENT equilibrium's geometry) inside a
@@ -1504,6 +1520,20 @@ class GenerationConfig:
             raise ValueError(f"swb_saw_ramp={self.swb_saw_ramp!r} must be >= 0")
         if self.swb_saw_rule not in SWB_SAW_RULES:
             raise ValueError(f"swb_saw_rule={self.swb_saw_rule!r} not in {tuple(SWB_SAW_RULES)}")
+        f = self.swb_saw_axis_flatten
+        if f is not None and f != "auto" and not (
+                isinstance(f, (int, float)) and not isinstance(f, bool) and 0.0 < f < 0.5):
+            raise ValueError(f"swb_saw_axis_flatten={f!r}: None, 'auto' or a rho_tor "
+                             "cut in (0, 0.5)")
+        h = self.swb_axis_pack
+        if h is not None and not (isinstance(h, (int, float)) and not isinstance(h, bool)
+                                  and 1e-4 <= h <= 0.05):
+            raise ValueError(f"swb_axis_pack={h!r}: None or a rho spacing in [1e-4, 0.05]")
+        if not 0.0 < float(self.swb_axis_pack_rho) <= 0.5:
+            raise ValueError(f"swb_axis_pack_rho={self.swb_axis_pack_rho!r} must be in (0, 0.5]")
+        if not float(self.swb_saw_axis_flatten_cells) > 0.0:
+            raise ValueError(f"swb_saw_axis_flatten_cells="
+                             f"{self.swb_saw_axis_flatten_cells!r} must be > 0")
         resolve_solve_method(self)
         validate_bootstrap_kwargs(
             self.bootstrap_kwargs,
@@ -1721,6 +1751,11 @@ def swb_config_problems(config):
         p.append("this OpenFUSIONToolkit's solve_with_bootstrap lacks x/jphi_fixed/p_fixed")
     if gc.swb_saw_q is not None and "jphi_saw" not in _swb_params():
         p.append("swb_saw_q: this OpenFUSIONToolkit's solve_with_bootstrap lacks jphi_saw")
+    if gc.swb_axis_pack is not None and _swb_grid_arg() != "x":
+        p.append("swb_axis_pack: this OpenFUSIONToolkit's solve_with_bootstrap lacks x")
+    if gc.swb_axis_pack is not None and gc.swb_axis_pack_rho <= gc.swb_axis_pack:
+        p.append(f"swb_axis_pack_rho={gc.swb_axis_pack_rho!r} must exceed "
+                 f"swb_axis_pack={gc.swb_axis_pack!r}")
     return p
 
 

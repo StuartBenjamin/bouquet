@@ -105,6 +105,52 @@ class SwbBaseline:
         bl.swb_seed_profile, bl.swb_jphi_fixed, bl.swb_jphi_saw = \
             coords.swb_source_seed(psi_N, j_ind, j_fix, j_st)
 
+    def _swb_axis_flatten(self):
+        """``GenerationConfig.swb_saw_axis_flatten``: flatten the source's near-axis
+        sub-grid current into its sawteeth share (:mod:`bouquet.axis_subgrid`)
+        before the SWB split.  Returns the ``ip_closure`` record, or None (off)."""
+        from . import axis_subgrid as AS
+        gc, bl = self.config.generation, self.baseline
+        spec = gc.swb_saw_axis_flatten
+        if spec is None:
+            return None
+        cells, bnd = getattr(self, "_mesh_cells", None), getattr(self, "_boundary_RZ", None)
+        rho_res = None
+        if cells is not None and bnd is not None:
+            rho_res = AS.mesh_axis_rho(*cells, bnd,
+                                       n_cells=float(gc.swb_saw_axis_flatten_cells))
+        elif spec == "auto":
+            raise RuntimeError('swb_saw_axis_flatten="auto" needs the mesh and LCFS')
+        rec = AS.flatten_baseline_saw(bl, spec, rho_res=rho_res)
+        cut = rec["saw_axis_rho_cut"]
+        print(f"[imas swb] axis flatten ({spec}): rho_res "
+              f"{'-' if rho_res is None else f'{rho_res:.4f}'}, "
+              + ("nothing to flatten" if cut is None else
+                 f"cut rho {cut:.4f} ({rec['saw_axis_cut_over_res'] or 0:.2f}x), "
+                 f"{rec['saw_axis_n_extrema']} extrema, moved "
+                 f"{rec['saw_axis_moved_frac']:.2e} of the current (enclosed change "
+                 f"{rec['saw_axis_enclosed_change']:+.1e})"))
+        return rec
+
+    def _swb_axis_pack_record(self, psi_N):
+        """``GenerationConfig.swb_axis_pack``: the packed grid's record for
+        ``ip_closure`` (printed), or None when off."""
+        gc = self.config.generation
+        if gc.swb_axis_pack is None:
+            return None
+        x_swb, idx = coords.axis_pack_grid(psi_N, gc.swb_axis_pack, gc.swb_axis_pack_rho)
+        r = np.sqrt(np.clip(x_swb, 0.0, None))
+        r_run = np.sqrt(np.clip(np.asarray(psi_N, dtype=float), 0.0, None))
+        rec = dict(swb_axis_pack=float(gc.swb_axis_pack),
+                   swb_axis_pack_rho=float(gc.swb_axis_pack_rho),
+                   swb_axis_pack_added=int(x_swb.size - np.size(psi_N)),
+                   swb_axis_pack_dr1=float(r[1] - r[0]))
+        print(f"[imas swb] axis pack: +{rec['swb_axis_pack_added']} nodes (rho spacing "
+              f"<= {gc.swb_axis_pack} on axis, relaxing from rho {gc.swb_axis_pack_rho}), "
+              f"{x_swb.size} SWB nodes, first off-axis rho {rec['swb_axis_pack_dr1']:.4f} "
+              f"(run grid {r_run[1] - r_run[0]:.4f})")
+        return rec
+
     def _swb_saw_kwargs(self):
         """``solve_with_bootstrap`` sawtooth-reset arguments; empty when
         ``swb_saw_q`` is None."""
@@ -127,9 +173,12 @@ class SwbBaseline:
         ``coil_reg_target`` None keeps the setup coil reg (solve A); a
         ``{coil: A-t}`` dict installs the strong reg toward it (solve B, the
         sigma=0 check and every draw). ``kin``: ``ne te ni ti Zeff p_fixed`` on
-        ``psi_N``.  Returns the SWB result dict (its ``j_saw`` / ``saw_rho_m``
+        ``psi_N``.  With ``swb_axis_pack`` SWB runs on the packed grid and the
+        result is read back at the run nodes (packed arrays under
+        ``"swb_packed"``). Returns the SWB result dict (its ``j_saw`` / ``saw_rho_m``
         / ``saw_n_dips`` only when ``swb_saw_q`` is set).
         """
+        from functools import partial
         from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
         from .TokaMaker_interface import strong_coil_reg
         from .config import swb_bootstrap_kwargs
@@ -144,6 +193,13 @@ class SwbBaseline:
         self._seed_coil_init(mygs)
         saw_kw = self._swb_saw_kwargs()
         j_seed, jphi_fixed = np.asarray(j_seed, dtype=float), bl.swb_jphi_fixed
+        x_swb, idx = coords.axis_pack_grid(psi_N, gc.swb_axis_pack, gc.swb_axis_pack_rho)
+        if idx is not None:     # swb_axis_pack: inputs onto the packed grid
+            up = partial(coords.to_swb, psi_N, x_swb)
+            kin = {k: up(v) for k, v in kin.items()}
+            j_seed, jphi_fixed = up(j_seed), up(jphi_fixed)
+            if "jphi_saw" in saw_kw:
+                saw_kw["jphi_saw"] = up(saw_kw["jphi_saw"])
         res = solve_with_bootstrap(
             mygs, kin["ne"], kin["te"], kin["ni"], kin["ti"], kin["Zeff"],
             float(bl.Ip_target), j_seed,
@@ -151,14 +207,20 @@ class SwbBaseline:
             diagnostic_plots=False, verbose=False,
             jphi_fixed=jphi_fixed, p_fixed=kin["p_fixed"],
             **saw_kw,
-            **coords.swb_grid_kwargs(psi_N, getattr(bl, "coord", coords.PSI)),
+            **coords.swb_grid_kwargs(x_swb, getattr(bl, "coord", coords.PSI)),
             **swb_bootstrap_kwargs(gc))
+        if idx is not None:     # outputs at the run nodes; packed ones kept
+            res = coords.from_swb(res, idx, x_swb.size)
+            res["swb_packed"]["x"] = x_swb
         if saw_kw:
             res["saw_map_dev"], res["saw_map_warn"] = _swb_saw_map_check(
                 res, bl.swb_jphi_saw,
                 bl.swb_jphi_fixed if gc.swb_edge_taper_psi0 is not None else None)
         else:               # saw off: no saw outputs, whatever the toolkit returns
             res = {k: v for k, v in res.items() if k not in _SWB_SAW_KEYS}
+            if "swb_packed" in res:
+                res["swb_packed"] = {k: v for k, v in res["swb_packed"].items()
+                                     if k not in _SWB_SAW_KEYS}
         ip = abs(float(mygs.get_globals()[0]))
         err = ip / abs(float(bl.Ip_target)) - 1.0
         if abs(err) > SWB_IP_TOL:
@@ -186,6 +248,8 @@ class SwbBaseline:
             j_phi=np.asarray(res["total_j_phi"], dtype=float),
             j_fixed=(None if res.get("j_fixed") is None
                      else np.asarray(res["j_fixed"], dtype=float)))
+        if res.get("swb_packed") is not None:
+            st["swb_packed"] = res["swb_packed"]
         if res.get("j_saw") is not None:
             st.update(j_saw=np.asarray(res["j_saw"], dtype=float),
                       saw_rho_m=float(res["saw_rho_m"]),
@@ -211,7 +275,9 @@ class SwbBaseline:
         psi_N = np.asarray(bl.psi_N, dtype=float)
         if not np.array_equal(coords.swb_grid(psi_N), psi_N):
             raise RuntimeError('imas_baseline="swb" needs SWB on the run grid')
-        j_phi_src = np.asarray(bl.j_phi, dtype=float).copy()
+        j_phi_src = np.asarray(bl.j_phi, dtype=float).copy()     # before the flatten
+        flat_rec = self._swb_axis_flatten()
+        pack_rec = self._swb_axis_pack_record(psi_N)
         self._swb_source_split(psi_N)
         kin = self._swb_baseline_kinetics()
 
@@ -248,6 +314,10 @@ class SwbBaseline:
             coil_B_minus_A_worst=_worst,
             closure_limited=not (0.5 <= st_b["alpha"] <= 2.0),
             fuse_total_peak=float(np.max(np.abs(j_phi_src))))
+        if flat_rec:
+            bl.ip_closure.update(flat_rec)
+        if pack_rec:
+            bl.ip_closure.update(pack_rec)
         if bl.j_saw is not None:
             bl.ip_closure.update(saw_q_s=float(self.config.generation.swb_saw_q),
                                  saw_rho_m=st_b["saw_rho_m"],
@@ -345,6 +415,17 @@ def build_swb_context(bq, env):
         "swb_saw_rho_out": _ic.get("saw_rho_out"),
         "swb_saw_n_dips": _ic.get("saw_n_dips"),
         "swb_saw_map_warn": _ic.get("saw_map_warn"),
+        "swb_saw_axis_rho_cut": _ic.get("saw_axis_rho_cut"),
+        "swb_saw_axis_moved_frac": _ic.get("saw_axis_moved_frac"),
+        "swb_saw_axis_rho_res": _ic.get("saw_axis_rho_res"),
+        "swb_saw_axis_cut_over_res": _ic.get("saw_axis_cut_over_res"),
+        "swb_saw_axis_n_extrema": _ic.get("saw_axis_n_extrema"),
+        "swb_saw_axis_warn_wide": _ic.get("saw_axis_warn_wide"),
+        "swb_saw_axis_warn_moved": _ic.get("saw_axis_warn_moved"),
+        "swb_saw_axis_flatten_skipped": _ic.get("saw_axis_flatten_skipped"),
+        "swb_axis_pack": _ic.get("swb_axis_pack"),
+        "swb_axis_pack_rho": _ic.get("swb_axis_pack_rho"),
+        "swb_axis_pack_added": _ic.get("swb_axis_pack_added"),
         "swb_j_saw": bl.j_saw,
         "swb_jphi_saw": bl.swb_jphi_saw}
     return SwbDraws(

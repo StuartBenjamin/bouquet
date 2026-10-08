@@ -170,7 +170,8 @@ def fake_swb(monkeypatch, saw_oft):
     return calls
 
 
-_METHODS = ("_swb_source_split", "_swb_saw_kwargs", "_swb_solve", "_swb_state",
+_METHODS = ("_swb_source_split", "_swb_axis_flatten", "_swb_axis_pack_record",
+            "_swb_saw_kwargs", "_swb_solve", "_swb_state",
             "_swb_imas_baseline", "_verify_sigma0_swb")
 
 
@@ -298,15 +299,18 @@ def _swap_swb(fn):
     sys.modules["OpenFUSIONToolkit.TokaMaker.bootstrap"].solve_with_bootstrap = fn
 
 
-def test_phi_n_saw_and_fixed_share_grid(fake_swb):
-    ns = _run(swb_saw_q=1.025)
+@pytest.mark.parametrize("pack", [None, 0.02])
+def test_phi_n_saw_and_fixed_share_grid(fake_swb, pack):
+    ns = _run(swb_saw_q=1.025, swb_axis_pack=pack, swb_axis_pack_rho=0.3)
     bl = ns.baseline
     bl.coord = "phi_n"
     ns._swb_imas_baseline()
+    xs = coords.axis_pack_grid(bl.psi_N, pack, 0.3)[0]
     for kw in fake_swb:
-        assert kw["coord"] == "phi_n" and np.array_equal(kw["x"], bl.psi_N)
-        assert kw["jphi_saw"].shape == kw["jphi_fixed"].shape == bl.psi_N.shape
-        np.testing.assert_array_equal(kw["jphi_saw"], bl.swb_jphi_saw)
+        assert kw["coord"] == "phi_n" and np.array_equal(kw["x"], xs)
+        assert kw["jphi_saw"].shape == kw["jphi_fixed"].shape == xs.shape
+        np.testing.assert_array_equal(kw["jphi_saw"], coords.to_swb(bl.psi_N, xs, bl.swb_jphi_saw)
+                                      if pack else bl.swb_jphi_saw)
     np.testing.assert_array_equal(bl.swb_jphi_saw, bl.j_sawteeth)
 
 
@@ -314,7 +318,7 @@ def _taper(x, x0=0.9):
     return np.where(x > x0, np.cos(0.5 * np.pi * (x - x0) / (1.0 - x0)) ** 2, 1.0)
 
 
-def test_saw_taper_identity(fake_swb):
+def test_flatten_saw_taper_identity(fake_swb):
     """OFT tapers every channel at the edge: j_fixed and j_saw come back tapered."""
     def swb(mygs, ne, te, ni, ti, zeff, ip, inductive_jphi, **kw):
         fake_swb.append(kw)
@@ -328,9 +332,13 @@ def test_saw_taper_identity(fake_swb):
                 "total_j_phi": j_ind + j_bs + j_fix + j_saw, "j_saw": j_saw,
                 "saw_rho_m": 0.31, "saw_rho_out": 0.18, "saw_n_dips": 1}
     _swap_swb(swb)
-    ns = _run(swb_saw_q=1.025)
+    from test_axis_subgrid import _wiggly_run
+    ns = _wiggly_run(swb_saw_q=1.025, swb_saw_axis_flatten=0.45)
     bl = ns.baseline
+    j_src_peak = float(np.max(np.abs(bl.j_phi)))
     ns._swb_imas_baseline()
+    assert bl.ip_closure["saw_axis_rho_cut"] >= 0.45
+    assert bl.ip_closure["fuse_total_peak"] == j_src_peak      # the source, before the flatten
     f = _taper(bl.psi_N)
     assert np.any(f < 1.0)
     np.testing.assert_allclose(bl.j_saw, f * bl.swb_jphi_saw + _dj(bl.psi_N), rtol=1e-14)
