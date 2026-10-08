@@ -1,7 +1,7 @@
 """The reader reports when the dd's psi_N(rho) is not the LCFS g-file's.
 
 FUSE holds replayed profiles fixed in rho_tor_norm while it solves its own
-equilibrium.  On shot 174956 t=1.191 that moved rho=0.8 from psi_N 0.70 (EFIT)
+equilibrium.  On shot A t=1.191 that moved rho=0.8 from psi_N 0.70 (EFIT)
 to 0.77, and the IDA-vs-dd ni cross-check reported the shift as a 5.8 % ni
 mismatch.  The guard names the geometry instead.
 """

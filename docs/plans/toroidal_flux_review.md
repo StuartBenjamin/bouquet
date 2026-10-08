@@ -21,7 +21,7 @@ Verified correct: all profile dicts via `oft_prof`/`pp_prof`; all 6 SWB calls ca
 
 FF′/P′: g-file PPRIME/FFPRIM enter only via `j_tor_averaged_direct` (values on ψ nodes → relabelled by `rhovn²`, tag `phi_n_relabel`); pressure built on Φ_N nodes, P′ sent as dP/dΦ_N (tag `phi_n`). IMAS `dpressure_dpsi`/`f_df_dpsi` never read; p-file derivative columns unused.
 
-- **IO1** IMAS equilibrium `j_tor`/`pressure` placed onto core_profiles nodes by ψ_N (io/imas.py ~1067, ~1112). Real FUSE dd 174956: up to 1.8 % of peak j_tor (0.3 % pressure) vs placement by ρ_tor. Should use `equilibrium.profiles_1d.rho_tor_norm²` in phi_n.
+- **IO1** IMAS equilibrium `j_tor`/`pressure` placed onto core_profiles nodes by ψ_N (io/imas.py ~1067, ~1112). Real FUSE dd shot A: up to 1.8 % of peak j_tor (0.3 % pressure) vs placement by ρ_tor. Should use `equilibrium.profiles_1d.rho_tor_norm²` in phi_n.
   **Fix:** phi_n places `equilibrium.profiles_1d` pressure/j_tor by the equilibrium's own Φ_N: `rho_tor_norm²` (new `_phi_n_from_rho`, bouquet/io/imas.py:367, same placeholder/missing checks as core_profiles), else by its q (`phi_n_from_q`, imas.py:1080). psi_n unchanged.
 - **IO2** `write_imas_draw` (phi archive): exact fidelity samples eq_fsa at template ψ_N, not the draw's ψ_N of the Φ nodes (io/imas.py ~1392); `grid.psi` left as the template's.
   **Fix:** phi_n archives: the draw's ψ_N at the template Φ_N nodes from the draw eqdsk's `rhovn²` (imas.py:1379) addresses `eq_fsa` and is written to `grid.psi`; `rho_tor_norm` kept.
@@ -85,7 +85,7 @@ Real-dd probe: `.bouquet_wt/torflux_jobs/ddprobe/ddprobe.py`.
 - `tests/test_phi_solver.py` with OFT: 15 passed (1:44).
 - `tests/test_phi_solver_draws.py` with OFT: 11 passed. Full solver suite: 62 passed, 1 failed (`test_systematics::test_mode1_pinned_baseline_reproduces_baseline`, which also fails on the base branch).
 
-## IMAS Φ round trip: real FUSE dd, 174956 @ 2.0 s (2026-09-24)
+## IMAS Φ round trip: real FUSE dd, shot A @ 2.0 s (2026-09-24)
 
 Setup: σ=0 `prepare()` using the production config: g-file LCFS, structured `li_soft_onesided`, ohmic split. OFT is oftstage_swbx. Drivers and logs are in `.bouquet_wt/torflux_jobs/imas_rt/` (`imas_rt.py`, `swb_ab.py`).
 
