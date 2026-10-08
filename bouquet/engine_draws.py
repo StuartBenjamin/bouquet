@@ -55,6 +55,8 @@ from typing import Optional
 
 import numpy as np
 
+from .draw_methods import DrawMethod
+
 #: Version stamp of the engine draw (recorded with every draw).
 ENGINE_DRAW_VERSION = "unified-engine-draw/1"
 
@@ -1140,9 +1142,14 @@ def tokamaker_backend(mygs, contract, *, psi_pad, q_psi, maxits,
                             edge_taper=edge_taper, coord=coord)
 
 
-class GenerateEngineDraws:
-    """What ``generate_bouquet(engine_draw=...)`` runs per draw (built by
-    ``Bouquet.generate`` from the live reconstruction)."""
+class GenerateEngineDraws(DrawMethod):
+    """The unified engine's draw method (``solve_method="engine"``): what
+    ``generate_bouquet(draw_method=...)`` runs per draw, built by
+    ``Bouquet.generate`` from the live reconstruction.  Its hooks are the
+    :class:`~bouquet.draw_methods.DrawMethod` protocol
+    (docs/draw-methods.md)."""
+
+    name = "engine"
 
     def __init__(self, ctx, *, unc, psi_pad, q_psi=None, maxits=None,
                  homotopy=True, l_i_tolerance=0.05, p_thresh=0.05,
@@ -1159,6 +1166,8 @@ class GenerateEngineDraws:
         self.q_psi = q_psi
         self.maxits = maxits
         self.homotopy = bool(homotopy)
+        #: jBS_scale_range handed to the draws (set by Bouquet._draw_method)
+        self.scale_range = None
         self.l_i_tolerance = float(l_i_tolerance)
         self.p_thresh = float(p_thresh)
         self.max_proxy_draws = int(max_proxy_draws)
@@ -1183,8 +1192,14 @@ class GenerateEngineDraws:
         self.sigma0_probe = None
 
     # ---- the pressure the baseline re-solve and every draw use --------
-    def solve_pressure(self, psi_N=None):
+    def solve_pressure(self, psi_N=None, pressure_solve=None):
+        """The engine's own solve pressure (the contract's: thermal +
+        impurity + fast), the one its reconstruction and every draw solve."""
         return np.asarray(self.ctx.c.pressure, dtype=float).copy()
+
+    def edge(self, edge=None):
+        """The reconstruction's own edge-pressure settings."""
+        return self.ctx.edge
 
     def backend(self, mygs):
         from types import SimpleNamespace
@@ -1197,7 +1212,7 @@ class GenerateEngineDraws:
                                  edge_taper=self.ctx.eng.s.get("edge_taper"),
                                  coord=self.ctx.coord)
 
-    def lcfs_pressure(self):
+    def lcfs_pressure(self, p_lcfs=None):
         """The separatrix pressure a written g-file of the CURRENT draw
         carries (its own ``p_sep`` under ``separatrix_pressure="offset"``,
         0 under ``"legacy"``)."""
@@ -1227,6 +1242,10 @@ class GenerateEngineDraws:
                 "engine draws (reconstruction_engine='unified') refuse: "
                 + "; ".join(bad) + " -- legacy draw modes that would be "
                 "silently ignored")
+        print("[engine draws] every draw runs on the unified engine "
+              "(bouquet.engine_draws): x* held, the Ip row as an inductive "
+              "amplitude, one bootstrap loop from the reconstruction state",
+              flush=True)
 
     def rejection_reason(self, exc, stage):
         """The rejection code; with a cap set, a post-homotopy pass whose
@@ -1292,7 +1311,7 @@ class GenerateEngineDraws:
               f"converging -> {what}", flush=True)
         return ev
 
-    def announce_rollback_failed(self, exc, after):
+    def announce_rollback_failed(self, exc, after, legacy=None):
         """Print and record a homotopy rollback re-solve that failed for a
         reason other than the cap: the draw is REJECTED
         (``homotopy_rollback_failed``) -- an engine draw never goes on from a
@@ -1431,7 +1450,7 @@ class GenerateEngineDraws:
 
     # ---- one draw ---------------------------------------------------------
     def draw(self, mygs, rng, scale, count, *, coil_guard=None,
-             bnd_diag=None, solve_guard=None):
+             bnd_diag=None, solve_guard=None, inputs=None, legacy=None):
         """The legacy 7-tuple ``(ne, te, ni, ti, w_ExB, j_phi,
         diagnostics)`` of one engine draw (kinetic-grid profiles)."""
         ctx = self.ctx
@@ -1494,6 +1513,26 @@ class GenerateEngineDraws:
             clock.start("homotopy")
         return rec, jb_tor, jb_tor, jphi
 
+    def post_homotopy_jbs(self, settings, coil_guard=None, legacy=None):
+        """The post-homotopy bootstrap check: the engine draw's own passes."""
+        return self.post_homotopy(settings, coil_guard=coil_guard)
+
+    def post_homotopy_split(self, j_phi, spike, full, legacy=None):
+        """The re-solved draw's split: the engine draw's own fixed parts, no
+        clip (archival re-splits on the archived state)."""
+        return j_phi - full - self.solved_fixed(), full, None
+
+    def drift_without_homotopy(self, mygs, baseline_coils, coil_drift, *,
+                               ip_aligned, skip_hard):
+        """``engine_draw_homotopy=False``: the coil drift of the loop's own
+        delivered draw, judged at the spec (no homotopy stage)."""
+        if self.homotopy or not ip_aligned or skip_hard:
+            return None
+        out = self.measured_drifts(mygs, baseline_coils, coil_drift)
+        print("  [homotopy] SKIPPED (engine_draw_homotopy=False): coil drift "
+              "measured on the draw's delivered equilibrium", flush=True)
+        return out
+
     def solved_fixed(self):
         """``kappa x <j.B>_fix`` on the geometry the draw's last solved
         request was composed on (the loop's, or the post-homotopy passes')."""
@@ -1501,7 +1540,7 @@ class GenerateEngineDraws:
         dp = d.get("passes_post_homotopy") or d["passes"]
         return np.asarray(dp.last["parts"]["driven"], dtype=float)
 
-    def archived_split(self, diagnostics, j_phi):
+    def archived_split(self, diagnostics, j_phi, default=None):
         """``(j_BS, j_inductive)`` of the archived draw against its archived
         *j_phi*: the bootstrap and fixed parts of :meth:`post_hoc` (the
         archived equilibrium's), the inductive the residual -- NEVER
@@ -1645,7 +1684,7 @@ class GenerateEngineDraws:
         clock.start("archive")
         return v["in_spec"]
 
-    def stored_pressures(self):
+    def stored_pressures(self, thermal=None, total=None):
         inp = self._cur["draw"]["inputs"]
         return (np.asarray(inp.pressure_thermal, dtype=float).copy(),
                 np.asarray(inp.pressure, dtype=float).copy())
@@ -1698,6 +1737,61 @@ class GenerateEngineDraws:
                 _write_draw_block(header, count, scan_key, rec, band,
                                   parallel=cur.get("parallel"))
         return bool(ok and (band is None or band)), reasons
+
+    # ---- Bouquet.generate -------------------------------------------------
+    def draw_env(self, env):
+        return self.unc
+
+    def scale_settings(self, jbs_range):
+        return self.scale_range
+
+    def loop_settings_for(self, settings):
+        """The engine draw's loop settings (the draw ceiling, the current
+        gate standing, the post-homotopy ceiling)."""
+        return dict(self.loop_settings)
+
+    def loop_codes(self, codes):
+        return tuple(codes) + ("jbs_non_finite", "engine_closure_refused")
+
+    # the legacy draws' solve cap is not the engine's: its solves are capped
+    # by engine_draw_solve_maxits (cap_solver) alone
+    def solve_maxits(self, maxits):
+        return None
+
+    def summarize(self, bq):
+        """Every engine-draw solve that stopped at engine_draw_solve_maxits
+        (stage, iterations, seconds, rolled back or rejected)."""
+        bq.engine_draw_cap_events = [dict(e) for e in self.cap_events]
+        if self.cap_events:
+            from collections import Counter as _Ctr
+            _by = _Ctr((e["stage"], e["outcome"]) for e in self.cap_events)
+            print(f"[generate] {len(self.cap_events)} engine-draw GS "
+                  f"solve(s) stopped at engine_draw_solve_maxits="
+                  f"{self.maxits}: " + ", ".join(
+                      f"{st} {oc} x{n}" for (st, oc), n in
+                      sorted(_by.items()))
+                  + "; per-solve records: Bouquet.engine_draw_cap_events")
+
+    @classmethod
+    def verify_sigma0(cls, bq):
+        """The engine draw at zero perturbation (``Bouquet.
+        _verify_sigma0_engine``)."""
+        if bq.baseline is None or bq.mygs is None:
+            raise ValueError("call setup_solver() + prepare_baseline() / "
+                             "reconstruct() before verify_sigma0_consistency()")
+        bq._refuse_unified_engine_draws("verify_sigma0_consistency()")
+        return bq._verify_sigma0_engine()
+
+    @classmethod
+    def workflow_problems(cls, bq):
+        """ONE draw route (x* held, the Ip amplitude) for both input types
+        replaces Fix C and the standard l_i loop: their per-path route rules
+        do not apply."""
+        if bq.config.generation.perturb_jind_in_anchor:
+            print("NOTE: reconstruction_engine='unified' -- "
+                  "perturb_jind_in_anchor (a legacy route choice) is not "
+                  "read; every draw runs on the engine")
+        return []
 
     def store_baseline(self, header, scan_key, baseline):
         """The baseline's ``engine`` block (the reconstruction record, with

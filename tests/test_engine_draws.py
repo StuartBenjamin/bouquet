@@ -579,7 +579,7 @@ def _generate(tmp_path, monkeypatch, *, n=3, l_i_tolerance=0.05,
         jBS_scale_range=(0.99, 1.01), coil_drift=0.01,
         homotopy_passes=[(0.05, 0.1), (0.01, 0.01)], seed=seed,
         capture_live_eq=False, store_achieved_jphi=True,
-        jbs_loop=G.loop_settings, rejection_log=rej, engine_draw=G,
+        jbs_loop=G.loop_settings, rejection_log=rej, draw_method=G,
         coil_filter="legacy", n_inspec_target=n_inspec_target)
     return diags, rej, h, G
 
@@ -1221,7 +1221,7 @@ def test_the_sigma0_check_runs_the_generate_route(tmp_path,
     def spy(mygs, psi_N, n_equils, header, *a, **k):
         calls.append(dict(n=n_equils, header=header,
                           scale=k.get("jBS_scale_range"),
-                          engine=k.get("engine_draw")))
+                          engine=k.get("draw_method")))
         return real(mygs, psi_N, n_equils, header, *a, **k)
 
     monkeypatch.setattr(TI, "generate_bouquet", spy)

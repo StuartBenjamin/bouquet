@@ -16,6 +16,20 @@ says how to get the legacy paths back. Runtime on the shipped synthetic
 cases: engine reconstructions 38–76 s and draws 60–144 s, against 150–660 s
 and 405–1407 s on the legacy path with the bootstrap loop on.
 
+**Solve methods.** `GenerationConfig.solve_method` is the one switch:
+`"legacy"`, `"swb"` (OFT `solve_with_bootstrap` is the baseline and every
+draw; IMAS only) or `"engine"` (this page). It sets `imas_baseline` /
+`reconstruction_engine`, which remain as its older spellings; a
+contradicting pair is refused. `"swb"` and `"engine"` share the kinetic
+sampler (`bouquet.kinetic_sampler`), the edge taper (`swb_edge_taper_psi0`,
+default 0.999; `bootstrap_kwargs` overrides it for the engine), the P' edge
+pin and the separatrix-pressure offset (swb refuses `edge_pprime_pin=False`
+and `separatrix_pressure="legacy"`, which OFT's SWB cannot honour). Known
+asymmetry: the SWB sawtooth reset (`swb_saw_*`) has no engine counterpart.
+The three methods share one draw loop and differ only through a draw-method
+object (`bouquet.draw_methods`); docs/draw-methods.md has the hook-by-hook
+comparison and how the legacy path is kept bit for bit.
+
 **Status (Stage 3).** The engine builds the baseline (`Bouquet.prepare_baseline()`
 returns the same `Baseline` the rest of the package consumes, plus
 `Baseline.engine`, the full record) and runs the draws: `generate()` and
@@ -538,7 +552,7 @@ the distance-to-input table (`tests/probes/measure_engine.py`, part
 
 `bouquet/engine_draws.py`; `Bouquet.generate()` builds a
 `GenerateEngineDraws` from the live reconstruction and hands it to
-`generate_bouquet(engine_draw=...)`, whose per-draw loop then calls it in
+`generate_bouquet(draw_method=...)`, whose per-draw loop then calls it in
 place of the legacy `perturb_kinetic_equilibrium` (everything else --
 the warm start, the strong coil regularisation of the post-loop phase, the
 homotopy, the archive, the until-N ledger -- is the same code). The parallel

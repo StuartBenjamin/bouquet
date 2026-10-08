@@ -489,6 +489,9 @@ class UncertaintyConfig:
     aux_length_scales: dict = field(default_factory=dict)  # {name: GPR length} (default 0.4)
 
 
+#: GenerationConfig.swb_saw_rule -> OFT boot_ops saw_rule.
+SWB_SAW_RULES = {"fuse": 1, "local": 2}
+
 # ---------------------------------------------------------------------------
 # Generation + filtering
 # ---------------------------------------------------------------------------
@@ -1044,9 +1047,10 @@ class GenerationConfig:
     anchor_jtor_to_equilibrium: bool = True
     # Source of the baseline kinetic profiles on the IMAS path:
     #   "fuse"       -> FUSE core_profiles ne/Te/Ti (default; original behaviour)
-    #   "ida_hybrid" -> ne/Te/Ti/omega_tor from ImasSource.ida_path (resampled onto
-    #                   the FUSE psi_N grid); Z_eff/Z_imp/ni-dilution stay FUSE;
-    #                   currents/equilibrium/p_fast/anchors stay FUSE.
+    #   "ida_hybrid" -> ne/Te/Ti/ni/Z_eff/omega_tor from ImasSource.ida_path
+    #                   (resampled onto the FUSE grid; Z_eff is IDA's unless
+    #                   ImasSource.zeff_from_fuse); currents/equilibrium/p_fast/
+    #                   anchors stay FUSE.
     kinetic_source: str = "fuse"
     # Anchor the solve thermal pressure to equilibrium.pressure via the fixed
     # p_diff = equilibrium.pressure - p_reconstructed offset. With FUSE kinetics
@@ -1082,6 +1086,35 @@ class GenerationConfig:
     # diagnostics['solve_failures'], on Bouquet.solve_failures, and in one
     # printed "[draw-solves]" line.
     draw_solve_maxits: Optional[int] = None
+    # The solve method, one of SOLVE_METHODS: "legacy", "swb"
+    # (solve_with_bootstrap is the baseline and every draw; IMAS sources) or
+    # "engine" (the unified engine).  None: derived from imas_baseline /
+    # reconstruction_engine; set, it sets them (resolve_solve_method).
+    solve_method: Optional[str] = None
+    # IMAS baseline + draws: "closure" (legacy) or "swb": solve A at the setup
+    # coil reg, solve B with the strong reg toward A's coils is the baseline,
+    # and every draw is solve B with resampled kinetics and inductive seed
+    # (bouquet.swb).
+    imas_baseline: str = "closure"
+    # imas_baseline="swb": weight of solve B's (and every draw's) coil reg toward
+    # solve A's coils (#VSC toward 0 at 1.0); 1e4 can send SWB to a wrong
+    # equilibrium.
+    swb_coil_reg_weight: float = 1.0e3
+    # Taper j_phi to 0 from this psi_N to the LCFS in every SWB solve (OFT
+    # taper_edge_jBS; None: off): finite edge current next to a near-degenerate
+    # second null can leave the Picard on a 2-cycle.  Also the engine's taper
+    # default (engine.engine_edge_taper).
+    swb_edge_taper_psi0: Optional[float] = 0.999
+    # imas_baseline="swb" sawtooth q reset inside SWB (OFT saw_q_s; None = off):
+    # Baseline.j_sawteeth becomes SWB's jphi_saw input.  swb_saw_dq / _tol /
+    # _ramp map onto OFT's saw_dq / saw_tol / saw_ramp, swb_saw_rule onto
+    # saw_rule ("local": each dip below swb_saw_q; "fuse": axis to the mixing
+    # radius).  saw_relax goes via bootstrap_kwargs.
+    swb_saw_q: Optional[float] = None
+    swb_saw_dq: float = 0.03
+    swb_saw_tol: float = 1.0e-4
+    swb_saw_ramp: float = 0.01
+    swb_saw_rule: str = "local"
     # --- self-consistent bootstrap loop (bouquet.jbs_loop) -------------------
     # True (default): j_BS is re-evaluated (physics.evaluate_jBS: Redl on the
     # caller's own psi_N grid and the CURRENT equilibrium's geometry) inside a
@@ -1104,7 +1137,7 @@ class GenerationConfig:
     # Initial guess of the loop: "anchor" = evaluate_jBS on the anchor
     # equilibrium (the source's own total current and full pressure); "swb" =
     # the legacy solve_with_bootstrap result (A/B only).  The fixed point does
-    # not depend on it.
+    # not depend on it.  (Only a seed of the Redl loop: not solve_method="swb".)
     jbs_init: str = "anchor"
     # Convergence tolerances (all active ones must hold on two consecutive
     # passes):
@@ -1415,6 +1448,10 @@ class GenerationConfig:
     # set False to skip that cost.
     capture_exact_inv_R2: bool = True
 
+    #: Set from the ``swb_saw_*`` fields, never from ``bootstrap_kwargs``.
+    _SAW_RESERVED = frozenset(
+        "jphi_saw saw_q_s saw_dq saw_tol saw_ramp saw_rule".split())
+
     def __post_init__(self):
         """Validate ``bootstrap_kwargs``, then resolve ``structured_preset``
         into the individual structured fields.
@@ -1445,7 +1482,23 @@ class GenerationConfig:
         switches the channel on -- ``structured_preset=None`` resolves to the
         DEFAULT preset only when the channel is already ``"structured"``.
         """
-        validate_bootstrap_kwargs(self.bootstrap_kwargs)
+        if self.imas_baseline not in ("closure", "swb"):
+            raise ValueError(
+                f"imas_baseline={self.imas_baseline!r} not in ('closure', 'swb')")
+        if self.swb_saw_q is not None and not float(self.swb_saw_q) > 0.0:
+            raise ValueError(f"swb_saw_q={self.swb_saw_q!r}: must be > 0 (None = off)")
+        for name in ("swb_saw_dq", "swb_saw_tol"):
+            if not float(getattr(self, name)) > 0.0:
+                raise ValueError(f"{name}={getattr(self, name)!r} must be > 0")
+        if not float(self.swb_saw_ramp) >= 0.0:
+            raise ValueError(f"swb_saw_ramp={self.swb_saw_ramp!r} must be >= 0")
+        if self.swb_saw_rule not in SWB_SAW_RULES:
+            raise ValueError(f"swb_saw_rule={self.swb_saw_rule!r} not in {tuple(SWB_SAW_RULES)}")
+        resolve_solve_method(self)
+        validate_bootstrap_kwargs(
+            self.bootstrap_kwargs,
+            _BOOTSTRAP_RESERVED | self._SAW_RESERVED
+            | ({"jphi_fixed", "p_fixed"} if self.imas_baseline == "swb" else set()))
         resolve_structured_preset(self, stacklevel=4)
         validate_structured_mse_settings(self)
         from .edge_pressure import validate_edge_pressure_settings
@@ -1568,6 +1621,103 @@ def _bootstrap_kwarg_names():
         # No OFT (unit tests, a docs build): cannot introspect, so do not
         # guess; a wrong key then surfaces at the call.
         return None
+
+
+#: The internal solve methods (GenerationConfig.solve_method).
+SOLVE_METHODS = ("legacy", "swb", "engine")
+
+
+def resolve_solve_method(gc) -> str:
+    """The solve method of *gc*, with ``imas_baseline`` /
+    ``reconstruction_engine`` brought in line with it (in place).
+
+    ``solve_method=None`` is derived from those two older fields; an explicit
+    value sets them, and refuses a contradicting ``imas_baseline="swb"``.
+    Idempotent; called at construction and again by
+    :class:`bouquet.run.Bouquet` before it builds or draws (a config may have
+    been edited in between)."""
+    sm = getattr(gc, "solve_method", None)
+    swb = str(getattr(gc, "imas_baseline", "closure")) == "swb"
+    if sm is None and not swb:
+        eng = str(getattr(gc, "reconstruction_engine", "legacy")) == "unified"
+        return "engine" if eng else "legacy"
+    if sm is None:
+        sm = "swb"
+    elif sm not in SOLVE_METHODS:
+        raise ValueError(f"generation.solve_method={sm!r} must be one of "
+                         f"{SOLVE_METHODS}")
+    # an imas_baseline="swb" this function wrote itself follows a later
+    # solve_method (reconstruction_engine defaults to "unified": never a
+    # contradiction)
+    elif (swb and sm != "swb" and getattr(gc, "_solve_method_written", None)
+          != (gc.imas_baseline, gc.reconstruction_engine)):
+        raise ValueError(f"generation.solve_method={sm!r} contradicts "
+                         'imas_baseline="swb"; set solve_method alone')
+    gc.imas_baseline = "swb" if sm == "swb" else (
+        "closure" if gc.imas_baseline == "swb" else gc.imas_baseline)
+    gc.reconstruction_engine = "unified" if sm == "engine" else "legacy"
+    gc._solve_method_written = (gc.imas_baseline, gc.reconstruction_engine)
+    return sm
+
+
+def swb_config_problems(config):
+    """Settings ``imas_baseline="swb"`` cannot honour, as messages (empty: OK).
+
+    The Fortran SWB's inductive scale alpha IS the Ip closure, so every
+    bouquet closure / anchor / delta mode is refused rather than combined.
+    """
+    import os
+    gc, sc = config.generation, config.solver
+    p = []
+    if not isinstance(config.source, ImasSource):
+        p.append("needs an ImasSource")
+    if gc.kinetic_source != "ida_hybrid":
+        p.append(f"kinetic_source={gc.kinetic_source!r} (only 'ida_hybrid' for now)")
+    for name in ("single_profile_jphi", "imas_corrective_jphi", "jbs_delta_mode",
+                 "anchor_pressure_to_equilibrium"):
+        if getattr(gc, name, False):
+            p.append(f"{name}=True")
+    if not gc.recalculate_j_BS:
+        p.append("recalculate_j_BS=False (SWB re-solves j_BS by construction)")
+    if str(gc.closure_channel) != "bootstrap":
+        p.append(f"closure_channel={gc.closure_channel!r} is never read: SWB's alpha "
+                 "(ohmic channel) is the closure; leave it at 'bootstrap'")
+    if gc.coil_drift_hard_factor is not None:
+        p.append("coil_drift_hard_factor: drift is measured, not bounded")
+    if int(sc.nthreads) != 1:
+        p.append(f"nthreads={sc.nthreads} (sigma=0 exactness needs 1)")
+    if gc.bootstrap_kwargs.get("use_python_solve"):
+        p.append("bootstrap_kwargs use_python_solve (needs the Fortran SWB)")
+    # OFT solve_bootstrap pins P'(psi_N=1)=0 and targets pax=p[0]-p[-1]:
+    # the engine defaults; anything else would be silently ignored
+    if not getattr(gc, "edge_pprime_pin", True):
+        p.append("edge_pprime_pin=False (OFT's SWB always pins P' at the edge)")
+    if str(getattr(gc, "separatrix_pressure", "offset")) != "offset":
+        p.append(f"separatrix_pressure={gc.separatrix_pressure!r} (OFT's SWB "
+                 "always solves with pax = p_axis - p_sep)")
+    if {"taper_edge_jBS", "taper_edge_psi0"} & set(gc.bootstrap_kwargs):
+        p.append("bootstrap_kwargs taper_edge_*: set swb_edge_taper_psi0 instead")
+    t = gc.swb_edge_taper_psi0
+    if t is not None and not 0.0 < float(t) < 1.0:
+        p.append(f"swb_edge_taper_psi0={t!r} must be in (0, 1) or None")
+    for env in ("DIFF_BS", "PIN_JPHI"):
+        if os.environ.get(env, "0") == "1":
+            p.append(f"{env}=1")
+    from .coords import _swb_grid_arg, _swb_params
+    if not _swb_grid_arg() or not {"jphi_fixed", "p_fixed"} <= _swb_params():
+        p.append("this OpenFUSIONToolkit's solve_with_bootstrap lacks x/jphi_fixed/p_fixed")
+    if gc.swb_saw_q is not None and "jphi_saw" not in _swb_params():
+        p.append("swb_saw_q: this OpenFUSIONToolkit's solve_with_bootstrap lacks jphi_saw")
+    return p
+
+
+def swb_bootstrap_kwargs(gc):
+    """``bootstrap_kwargs`` for an ``imas_baseline="swb"`` solve: the user's, plus the
+    edge taper from ``swb_edge_taper_psi0``."""
+    kw = dict(gc.bootstrap_kwargs)
+    if gc.swb_edge_taper_psi0 is not None:
+        kw.update(taper_edge_jBS=True, taper_edge_psi0=float(gc.swb_edge_taper_psi0))
+    return kw
 
 
 def validate_bootstrap_kwargs(bootstrap_kwargs, reserved=_BOOTSTRAP_RESERVED,
@@ -2243,6 +2393,8 @@ def _stored_config_compat(gend: dict) -> None:
     import warnings
     from .engine import ENGINE_FIELD_DEFAULTS
     eng = gend.get("reconstruction_engine", "legacy")
+    if gend.get("solve_method") == "engine":
+        eng = "unified"
     if eng == "legacy":
         for name, hist in ENGINE_FIELD_HISTORICAL_DEFAULTS.items():
             if name not in gend:

@@ -516,6 +516,9 @@ def _legacy_probe(outdir, part):
     L.run_jbs_loop = _tripwire("run_jbs_loop")
     _swb = B.solve_with_bootstrap
 
+    import functools
+
+    @functools.wraps(_swb)        # keeps the signature bouquet inspects
     def _count_swb(*a, **k):
         calls["solve_with_bootstrap"] += 1
         return _swb(*a, **k)

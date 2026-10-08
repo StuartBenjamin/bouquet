@@ -140,9 +140,16 @@ ENGINE_BOOTSTRAP_KWARGS = frozenset(ENGINE_EDGE_TAPER_DEFAULT) | {
 
 def engine_edge_taper(gc) -> dict:
     """``dict(on, psi0, shape)``: the engine's edge taper from
-    ``bootstrap_kwargs`` (:data:`ENGINE_EDGE_TAPER_DEFAULT` where unset)."""
+    ``bootstrap_kwargs``; where unset, ``swb_edge_taper_psi0`` (the swb
+    method's taper knob, ``None`` = off) and then
+    :data:`ENGINE_EDGE_TAPER_DEFAULT` -- so both methods taper alike."""
     from .physics import EDGE_TAPER_SHAPES
     bk = dict(ENGINE_EDGE_TAPER_DEFAULT)
+    if hasattr(gc, "swb_edge_taper_psi0"):
+        t = gc.swb_edge_taper_psi0
+        bk.update(taper_edge_jBS=t is not None,
+                  taper_edge_psi0=(bk["taper_edge_psi0"] if t is None
+                                   else float(t)))
     bk.update({k: v for k, v in (getattr(gc, "bootstrap_kwargs", None)
                                  or {}).items() if k in bk})
     on, psi0, shape = (bk["taper_edge_jBS"], bk["taper_edge_psi0"],
