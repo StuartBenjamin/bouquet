@@ -545,8 +545,7 @@ class GenerationConfig:
     l_i_tolerance: float = 0.05            # l_i acceptance band (fraction of target)
     constrain_sawteeth: bool = False
     # When True, recompute bootstrap each draw via TokaMaker solve_with_bootstrap
-    # and convert its parallel output to toroidal <j_phi> with the one
-    # field-aligned factor F<1/R>/<B^2> (physics.field_aligned_conversion),
+    # (whose output is already TokaMaker jphi; physics module docstring),
     # overriding the baseline/FUSE j_BS. When False, keep the baseline j_BS.
     recalculate_j_BS: bool = True
     # Treat j_phi as ONE profile: no inductive/bootstrap decomposition anywhere.
@@ -2107,7 +2106,8 @@ def _decode(v):
 #: stored config may still carry them; they are dropped WITH a warning (they
 #: have no effect on the current code), never mistaken for a typo.
 _RETIRED_GENERATION_KEYS = ("coil_drift_threshold_A", "lock_coils",
-                            "lock_coils_weight", "window_coord", "seed_coord")
+                            "lock_coils_weight", "window_coord", "seed_coord",
+                            "engine_split_pressure")
 
 
 #: Every earlier DEFAULT of an engine-only field, with the dates it was the

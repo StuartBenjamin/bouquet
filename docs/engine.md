@@ -155,6 +155,10 @@ evaluator's surfaces (`sauter_fc`), `<R>`, `<1/R>`, `<1/R^2>`, `V'`, `p'` from
 innermost-surface repair (`smooth_jbs_transition`) every SWB-derived profile
 receives.
 
+**The archived split** puts the pressure-driven term
+`p'(<R> - F^2<1/R>/<B^2>)` on `j_BS`, as IMAS `j_bootstrap`, the IMAS reader
+and `evaluate_jBS` do; `j_inductive` is the residual.
+
 **Toroidal-flux runs (`coord="phi_n"`).** The contract's grid is the run grid
 (Φ_N). The backend tags every solve with it and samples each measurement's
 geometry at the nodes' ψ_N on that solve's own toroidal-flux map, so

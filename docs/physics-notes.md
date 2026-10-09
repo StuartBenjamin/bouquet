@@ -216,22 +216,12 @@ differences, each the point of the helper:
    **caller's** surfaces, `clip(ψ_N, psi_pad, 1 − psi_pad)`;
 2. gradients are taken on the **true** grid, `numpy.gradient(y, ψ_N,
    edge_order=2)`, divided by the **current** flux range;
-3. Redl's `⟨j·B⟩` is converted to the toroidal FSA density directly -- not
-   through SWB's `⟨R⟩/F` projection and its undo on a uniform grid -- with the
-   package's **one** field-aligned conversion (`physics.field_aligned_conversion`,
-   the unified engine's `engine.conversion_factor`; `F`, `⟨1/R⟩`, `⟨B²⟩` of the
-   same surfaces):
-
-   ```
-   ⟨j_φ⟩ = κ ⟨j·B⟩,   κ = F⟨1/R⟩/⟨B²⟩
-   ```
-
-   For a field-aligned component `j = λB` (`λ = ⟨j·B⟩/⟨B²⟩`, `B_φ = F/R`),
-   `⟨j_φ⟩ = λF⟨1/R⟩` exactly, and `⟨j_φ⟩` -- the plain flux-surface average --
-   is what OFT's `jphi-linterp` consumes, so with the pressure-driven part the
-   composition identity `⟨j_φ⟩ = κ⟨j·B⟩ + p′(⟨R⟩ − F²⟨1/R⟩/⟨B²⟩)` is exact.
-   `toroidal_to_parallel` (the IDS export) is its exact inverse, and the frozen
-   path's `_swb_jbs_to_toroidal` uses the same factor.
+3. Redl's `⟨j·B⟩` is converted to TokaMaker `jphi = ⟨j_φ⟩` exactly, by (A7) of
+   [current-conventions](current-conventions.md): the field-aligned
+   `F⟨1/R⟩⟨j·B⟩/⟨B²⟩` plus the pressure-driven `p′(⟨R⟩ − F²⟨1/R⟩/⟨B²⟩)`, all of
+   the same surfaces. The bootstrap component carries `p′G`, as IMAS
+   `j_bootstrap` and OFT's own SWB output do, and the IDS export inverts the
+   same relations.
 
    **Declared default physics change (2026-10-06, owner-approved).** Until then
    the legacy sites converted with `⟨j·B⟩/(F⟨1/R⟩)` (`⟨1/R²⟩` not passed) and
@@ -240,8 +230,8 @@ differences, each the point of the helper:
    content: ≈ 1.5 % at ψ_N ≈ 0.97 on the synthetic D3D-like example) × the
    Jensen ratio `⟨1/R²⟩/⟨1/R⟩²` (≈ 5 % there) -- **+6.8 %** at the pedestal
    (+1.0 % at ψ_N 0.1, +4.3 % at 0.5, +6.4 % at 0.9). The legacy bootstrap
-   drops by that fraction; the unified engine, which already used κ, is
-   unchanged (`tests/test_one_conversion.py`). (The bracket alone, ~1.4 % at
+   drops by that fraction (before `p′G` is added); the unified engine,
+   which already used κ, is unchanged (`tests/test_one_conversion.py`). (The bracket alone, ~1.4 % at
    the peak, is what this page used to quote; the Jensen term was missed.)
 
 **Refusals, never a silent zero.** The historical evaluation mapped every NaN

@@ -2497,11 +2497,20 @@ def engine_record(eng, res, wall_s=None) -> dict:
 ENGINE_SPLIT_CONVENTION = (
     "unified engine: jphi-linterp REQUEST of the delivery solve (one "
     "jphi-linterp solve of j_phi reproduces the delivered equilibrium); "
-    "j_BS = s_bs F<1/R>/<B^2> <j.B>_BS*, j_NBI/j_RF = F<1/R>/<B^2> <j.B>_fix "
-    "(j_RF: the rf part plus any other driven source entry) "
-    "on the delivery composition's geometry; j_inductive the residual "
-    "(it carries s_ind F<1/R>/<B^2> <j.B>_ind, the pressure-driven term "
-    "p'(<R> - F^2<1/R>/<B^2>) and any delivery correction)")
+    "j_BS = s_bs F<1/R>/<B^2> <j.B>_BS* + p'(<R> - F^2<1/R>/<B^2>) (the "
+    "pressure-driven term on the bootstrap, as IMAS j_bootstrap), "
+    "j_NBI/j_RF = F<1/R>/<B^2> <j.B>_fix (j_RF: the rf part plus any other "
+    "driven source entry) on the delivery composition's geometry, all times "
+    "its edge taper; j_inductive the residual (it carries s_ind "
+    "F<1/R>/<B^2> <j.B>_ind and any delivery correction)")
+
+
+def split_pressure_term(geom):
+    """The pressure-driven current the archived j_BS carries: p'G times the
+    geometry's edge taper."""
+    P = pressure_term(geom)
+    w = geom.get("edge_taper")
+    return P if w is None else P * np.asarray(w, dtype=float)
 
 
 def _lcfs_deviation_mm(mygs, pts):
@@ -2538,7 +2547,10 @@ def _split(eng, res):
     kap = composed_factor(g)
     out = eng.delivered_closure["out"]
     R = np.asarray(st.request, dtype=float)
-    j_BS = np.asarray(out["s_bs"], float) * kap * np.asarray(st.lambda_bs)
+    # the bootstrap carries the pressure-driven p'G (docs/current-
+    # conventions.md, A7), as the IMAS reader's and evaluate_jBS's do
+    j_BS = (np.asarray(out["s_bs"], float) * kap * np.asarray(st.lambda_bs)
+            + split_pressure_term(g))
     j_NBI = kap * np.asarray(c.jB_fix_parts["nbi"], float)
     # j_RF carries the RF part AND any other driven core_sources entry (the
     # IDS adapter's "other" part; absent on the g-file path), so the split

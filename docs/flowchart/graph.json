@@ -2288,7 +2288,7 @@
    "label": "jpar_to_jphi_tokamaker() / jtor_imas_to_jphi_tokamaker()",
    "file": "bouquet/physics.py",
    "line": 86,
-   "desc": "Exact IMAS -> TokaMaker jphi=<j_phi>: <j.B>/B0 -> F<1/R><J.B>/<B^2> (p'G in the inductive residual), j_tor via A5 (docs/current-conventions.md)",
+   "desc": "Exact IMAS -> TokaMaker jphi=<j_phi>: <j.B>/B0 -> F<1/R><J.B>/<B^2> (+ p'G on the bootstrap), j_tor via A5 (docs/current-conventions.md)",
    "subsystem": "IMAS/OMAS reader"
   },
   {
@@ -5224,7 +5224,7 @@
    "file": "bouquet/physics.py",
    "line": 194,
    "subsystem": "Archive, filtering & plotting",
-   "desc": "Exact TokaMaker jphi -> IMAS j_tor (A5) and <j.B>/B0 (A7 inverse, p'G removed from total/inductive) for the exported IDS"
+   "desc": "Exact TokaMaker jphi -> IMAS j_tor (A5) and <j.B>/B0 (A7 inverse, p'G removed from total/bootstrap) for the exported IDS"
   },
   {
    "id": "gate.ids_fidelity",
