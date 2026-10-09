@@ -12,7 +12,7 @@ covers the guarantees a user should know about and the knobs that change them.
 - [Bootstrap current treatment](#bootstrap-current-treatment)
 - [Differential bootstrap (`jbs_delta_mode`)](#differential-bootstrap-jbs_delta_mode)
 - [Self-consistent bootstrap (`jbs_self_consistent`)](#self-consistent-bootstrap-jbs_self_consistent)
-- [The unified reconstruction engine (`reconstruction_engine`, default off)](#the-unified-reconstruction-engine-reconstruction_engine-default-off)
+- [The unified reconstruction engine (`reconstruction_engine`, the default)](#the-unified-reconstruction-engine-reconstruction_engine-the-default)
 - [The pressure handed to the solver: separatrix pressure and the edge P′ pin](#the-pressure-handed-to-the-solver-separatrix-pressure-and-the-edge-p-pin)
 - [Kinetics regridding](#kinetics-regridding)
 - [Edge-profile classification](#edge-profile-classification)
@@ -620,13 +620,13 @@ preset with the axis row -- its one-sided prior makes the closure map
 non-smooth, which costs relaxation), and a Fix-C draw at 5 % kinetic / j_φ σ
 needed 7 passes -- one more than the draw default.
 
-## The unified reconstruction engine (`reconstruction_engine`, default off)
+## The unified reconstruction engine (`reconstruction_engine`, the default)
 
-`GenerationConfig.reconstruction_engine="unified"` (default `"legacy"`; with
-the factories, `Bouquet.from_geqdsk/from_imas(..., reconstruction_engine=
-"unified")`, which leave the legacy-path workflow settings at their defaults)
-replaces the g-file reconstruction and the IMAS baseline with ONE loop for
-both inputs ([engine.md](engine.md)). Every current component is stored as a
+`GenerationConfig.reconstruction_engine="unified"` (the default since
+2026-10-06; it was `"legacy"`, which -- set on the config or passed as
+`Bouquet.from_geqdsk/from_imas(..., reconstruction_engine="legacy")` --
+still selects the legacy paths by name) replaces the g-file reconstruction
+and the IMAS baseline with ONE loop for both inputs ([engine.md](engine.md)). Every current component is stored as a
 parallel current `<j.B>`: the g-file's from identity (I0) on its own surfaces
 (minus Redl on the anchor, smoothed with the existing inductive basis, no
 amplitude search), the IDS's as `|B0|` times its `<j.B>/B0` fields. Each pass
