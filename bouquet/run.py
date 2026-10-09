@@ -740,6 +740,8 @@ class Bouquet(SwbBaseline):
             raise RuntimeError("no baseline geometry on the solver: point_solver() (prepare_baseline) first")
         mygs = self.mygs
         mygs.replace_eq(source_eq=self._clean_eq)
+        if hasattr(mygs, "boot_reset"):       # solve_bootstrap keeps its inputs between calls
+            mygs.boot_reset()
         self._apply_coil_reg(mygs)
         if hasattr(mygs, "_coil_drift_bounds"):
             mygs.set_coil_bounds(None)        # widen: prior slice had bounds set

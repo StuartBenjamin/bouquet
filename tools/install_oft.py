@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build OpenFUSIONToolkit (OFT) at a branch or commit for bouquet.
 
-    python tools/install_oft.py --prefix ~/oft [--ref bouquet_dev] [--repo URL|PATH]
+    python tools/install_oft.py --prefix ~/oft [--ref PSFC_dev] [--repo URL|PATH]
                                 [--libs DIR] [--jobs N]
 
 Under --prefix: OpenFUSIONToolkit/ (clone), src_<sha>/ (worktree),
@@ -24,7 +24,7 @@ import subprocess
 import sys
 
 REPO = "https://github.com/StuartBenjamin/OpenFUSIONToolkit.git"
-REF = "bouquet_dev"
+REF = "PSFC_dev"
 LIBS_ARGS = "--build_umfpack=1 --build_arpack=1"
 DONE = ".install_oft_done"
 
