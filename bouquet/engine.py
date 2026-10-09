@@ -125,11 +125,10 @@ def mse_scheme_text(scheme) -> str:
 #: ``GenerationConfig.bootstrap_kwargs`` and overridden there.
 ENGINE_EDGE_TAPER_DEFAULT = {"taper_edge_jBS": False, "taper_edge_psi0": 0.999,
                              "taper_edge_shape": 2}
-#: The ``bootstrap_kwargs`` keys the engine honours (the edge taper; and
-#: ``use_sauter_eps`` at True, which evaluate_jBS always is).  Any other key
-#: configures solve_with_bootstrap, which the engine never runs: refused.
-ENGINE_BOOTSTRAP_KWARGS = frozenset(ENGINE_EDGE_TAPER_DEFAULT) | {
-    "use_sauter_eps"}
+#: The ``bootstrap_kwargs`` keys the engine honours (the edge taper).  Any
+#: other key configures solve_with_bootstrap, which the engine never runs:
+#: refused.
+ENGINE_BOOTSTRAP_KWARGS = frozenset(ENGINE_EDGE_TAPER_DEFAULT)
 
 
 def engine_edge_taper(gc) -> dict:
@@ -359,11 +358,6 @@ def validate_engine_settings(gc) -> None:
             "solve_with_bootstrap, which reconstruction_engine='unified' "
             "never runs (they would be silently ignored); the engine reads "
             f"only {sorted(ENGINE_BOOTSTRAP_KWARGS)}")
-    if not bool(bk.get("use_sauter_eps", True)):
-        raise ValueError(
-            "generation.bootstrap_kwargs['use_sauter_eps']=False: the "
-            "engine's Redl evaluation (physics.evaluate_jBS) always takes "
-            "eps from sauter_fc")
     if engine_edge_taper(gc)["on"] and not resolve_edge_pressure(
             gc).edge_pprime_pin:
         raise ValueError(

@@ -435,7 +435,7 @@ instruction, because the frozen bootstrap exists on the legacy paths only.
 | `imas_corrective_jphi` | `engine_delivery_correction` |
 | `jbs_loop_q0_corrector` | `engine_rows` with `"q0"` (`engine_draw_q0_row` for the draws) |
 | `floor_j_BS`, `accept_anchor_inband`, `diagnostic_plots` | nothing: legacy draw / SWB mechanics |
-| `bootstrap_kwargs` keys other than `taper_edge_jBS` / `taper_edge_psi0` / `taper_edge_shape` and `use_sauter_eps=True` | nothing: the engine never runs `solve_with_bootstrap` |
+| `bootstrap_kwargs` keys other than `taper_edge_jBS` / `taper_edge_psi0` / `taper_edge_shape` | nothing: the engine never runs `solve_with_bootstrap` |
 | `homotopy_passes` with `engine_draw_homotopy=False` | no homotopy runs |
 | `isolate_edge_jBS` (default `None`: resolved per engine; `True` under the engine) | nothing: the engine never isolates the edge bootstrap (Redl on the whole profile) |
 | `perturb_jind_in_anchor` (default `None`: resolved per engine; `False` under the engine) | nothing: one engine draw route replaces Fix C and the standard l_i loop |

@@ -149,6 +149,11 @@ class TestBootstrapKwargValidation:
         with pytest.raises(ValueError, match="iterations"):
             self._check({"swb_iterations": 2})
 
+    @pytest.mark.parametrize("value", [True, False])
+    def test_use_sauter_eps_is_not_a_setting(self, value):
+        with pytest.raises(ValueError, match="always True"):
+            self._check({"use_sauter_eps": value})
+
     def test_a_reserved_name_is_reported_as_reserved_not_as_unknown(self):
         with pytest.raises(ValueError, match="passed explicitly at call sites"):
             self._check({"scale_jBS": 1.0})

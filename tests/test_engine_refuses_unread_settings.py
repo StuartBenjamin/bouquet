@@ -179,11 +179,8 @@ def test_the_engines_own_value_of_an_engine_dependent_field_is_accepted(
 def test_swb_only_bootstrap_kwargs_are_refused_under_the_engine():
     with pytest.raises(ValueError, match="never runs"):
         validate_engine_settings(_unified(bootstrap_kwargs={"iterations": 2}))
-    with pytest.raises(ValueError, match="use_sauter_eps"):
-        validate_engine_settings(
-            _unified(bootstrap_kwargs={"use_sauter_eps": False}))
     validate_engine_settings(_unified(bootstrap_kwargs={
-        "use_sauter_eps": True, "taper_edge_psi0": 0.995}))
+        "taper_edge_psi0": 0.995}))
 
 
 def test_the_engine_edge_taper_is_off_by_default_and_overridable():

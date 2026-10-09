@@ -1938,6 +1938,11 @@ def validate_bootstrap_kwargs(bootstrap_kwargs, reserved=_BOOTSTRAP_RESERVED,
         raise ValueError(
             "bootstrap_kwargs: 'swb_iterations' is now 'iterations'.")
 
+    if "use_sauter_eps" in keys:
+        raise ValueError(
+            "bootstrap_kwargs: 'use_sauter_eps' is always True (the sauter_fc "
+            "eps, as bouquet's own Redl evaluation takes it).")
+
     if known is None:
         known = _bootstrap_kwarg_names()
     if known is None:
