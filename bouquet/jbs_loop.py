@@ -315,6 +315,8 @@ def deprecated_jbs_settings_warning(gc, stacklevel: int = 2) -> Optional[str]:
         return None
     if str(getattr(gc, "reconstruction_engine", "legacy")) != "legacy":
         return None
+    if str(getattr(gc, "imas_baseline", "")) == "swb":
+        return None     # every swb solve is solve_with_bootstrap
     bk = dict(getattr(gc, "bootstrap_kwargs", None) or {})
     if not bk:
         return None

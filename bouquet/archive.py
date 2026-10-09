@@ -112,8 +112,9 @@ class DrawView:
             import h5py
             with h5py.File(self._ar.path, "r") as hf:
                 a = hf[self._gp].attrs
+                # scalars as Python values; profiles (e.g. swb_j_saw) stay arrays
                 self._attrs_cache = {
-                    k: (a[k].item() if hasattr(a[k], "item") else a[k]) for k in a}
+                    k: (a[k].item() if getattr(a[k], "size", 0) == 1 else a[k]) for k in a}
         return dict(self._attrs_cache)
 
     @property
@@ -255,6 +256,9 @@ class DrawView:
         from .schema import PROFILE_UNITS, EQ_FSA_UNITS
         from .utils import load_eq_fsa
         prof = self.profiles
+        attrs = self.attrs
+        # profile attrs (swb_j_saw) go with the profiles; scalars stay JSON-safe
+        prof.update({k: attrs.pop(k) for k in [k for k, v in attrs.items() if isinstance(v, np.ndarray)]})
         doc = {
             "scan_key": _scan_key(self.scan_key),
             "count": self.count,
@@ -263,7 +267,7 @@ class DrawView:
                               or profile_coord(self._ar.path, self.scan_key)),
             "profiles": {k: np.asarray(v).tolist() for k, v in prof.items()},
             "units": {k: PROFILE_UNITS.get(k, "") for k in prof},
-            "scalars": self.attrs,          # li, Ip, drifts, in_spec, ... (JSON-safe)
+            "scalars": attrs,               # li, Ip, drifts, in_spec, ... (JSON-safe)
             "coil_currents_A": self.coil_currents(),
         }
         fsa = load_eq_fsa(self._ar.path, self.count, scan_key=self.scan_key)

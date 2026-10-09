@@ -15,7 +15,8 @@ through prepare(), the draws and the archive:
 
 Inputs: the D3D-like example dd (examples/D3D-like) with a beam density added to
 D, plus a synthetic IDA .cdf of the same plasma whose two ni routes agree.
-The solver runs in a subprocess (tests/_harness.py).  Marked ``solver``.
+The solver runs in a subprocess (tests/_harness.py), once per solve method
+(legacy, swb).  Marked ``solver``.
 """
 import json
 import os
@@ -110,7 +111,7 @@ def _write_inputs(work):
 # ---------------------------------------------------------------------------
 #  the probe (subprocess): everything that needs the solver
 # ---------------------------------------------------------------------------
-def _probe(work):
+def _probe(work, method):
     import warnings
     import bouquet as bq
     from bouquet.baseline import resolve_uncertainty
@@ -124,7 +125,7 @@ def _probe(work):
     header = os.path.join(work, "run")
     run = bq.Bouquet.from_imas(ddp, mesh=_MESH, time=_TIME, n_draws=_N_DRAWS,
                                header=header, ida_path=cdf, LCFS_geqdsk=_GEQ,
-                               impurity_Z=_Z, reconstruction_engine="legacy")
+                               impurity_Z=_Z, solve_method=method)
     run.config.generation.seed = _SEED
     run.prepare()
     rb = run.baseline
@@ -152,11 +153,11 @@ def _probe(work):
         json.dump(dict(out, h5=header + ".h5"), fh)
 
 
-@pytest.fixture(scope="module")
-def run(tmp_path_factory):
-    work = str(tmp_path_factory.mktemp("ida_hybrid"))
+@pytest.fixture(scope="module", params=["legacy", "swb"])
+def run(request, tmp_path_factory):
+    work = str(tmp_path_factory.mktemp(f"ida_hybrid_{request.param}"))
     proc = subprocess.run(
-        [sys.executable, os.path.abspath(__file__), work],
+        [sys.executable, os.path.abspath(__file__), work, request.param],
         env=_harness.subprocess_env(OMP_NUM_THREADS="1", MPLBACKEND="Agg"),
         capture_output=True, text=True)
     if proc.returncode != 0:
@@ -264,4 +265,4 @@ if __name__ == "__main__":
     _harness.ensure_repo_on_syspath()
     _harness.assert_bouquet_is_repo_local()
     _oft_importable()
-    _probe(sys.argv[1])
+    _probe(*sys.argv[1:3])

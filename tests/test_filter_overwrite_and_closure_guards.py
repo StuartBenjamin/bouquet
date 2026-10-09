@@ -192,7 +192,7 @@ def test_baseline_meta_is_the_last_generate_bouquet_parameter():
     import inspect
     from bouquet.TokaMaker_interface import generate_bouquet
     params = [n for n, p in inspect.signature(generate_bouquet).parameters.items()
-              if p.kind != p.VAR_KEYWORD]       # **kwargs: bootstrap_kwargs
+              if p.kind is not inspect.Parameter.VAR_KEYWORD]   # **kwargs is last by syntax
     # every parameter added since 1.3.1 sits after the positional-capable
     # options, in the order it was added
     assert params[-3:] == ["baseline_meta", "on_inspec", "stop_check"]

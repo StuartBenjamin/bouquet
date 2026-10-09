@@ -236,6 +236,33 @@ def swb_seed(x, psi=None):
     return np.power(1.0 - np.power(s, 1.5), 1.5)
 
 
+def swb_source_seed(x, j_ind, j_fixed, j_saw=None):
+    """Source-consistent SWB inputs (the swb method):
+    the source's inductive current as ``inductive_jphi`` (SWB rescales it to
+    Ip) and its non-inductive, non-bootstrap current as ``jphi_fixed`` (held
+    as given), both toroidal, resampled onto :func:`swb_grid`.  SWB then
+    solves only for the bootstrap.  Returns ``(seed, jphi_fixed)``.
+
+    ``j_saw`` (the sawteeth share of ``j_fixed``) moves that share to SWB's
+    ``jphi_saw`` input: returns ``(seed, jphi_fixed - j_saw_in, j_saw_in)``.
+    """
+    if "jphi_fixed" not in _swb_params():
+        raise RuntimeError(
+            "the swb method needs an OpenFUSIONToolkit whose "
+            "solve_with_bootstrap takes jphi_fixed.")
+    x = np.asarray(x, dtype=float)
+    g = swb_grid(x)
+    seed = np.interp(g, x, np.asarray(j_ind, dtype=float))
+    fixed = np.interp(g, x, np.asarray(j_fixed, dtype=float))
+    if j_saw is None:
+        return seed, fixed
+    if "jphi_saw" not in _swb_params():
+        raise RuntimeError("swb_saw_q needs an OpenFUSIONToolkit whose "
+                           "solve_with_bootstrap takes jphi_saw.")
+    saw = np.interp(g, x, np.asarray(j_saw, dtype=float))
+    return seed, fixed - saw, saw
+
+
 def check_backend(coord):
     """Raise unless the installed toolkit supports ``coord``.
 

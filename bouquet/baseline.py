@@ -282,6 +282,31 @@ class Baseline:
     # (psi_N, x) at the source's nodes: the io-time map from a psi_N-tabulated
     # input (an IDA sigma) to the run grid.  None in a psi_n run.
     psi_map: Optional[tuple] = None
+    # The swb method's fields (solve_method="swb"), appended so every earlier
+    # field keeps its positional slot.
+    # Other fixed driven current [A/m^2] (fusion, runaways, sawteeth, unknown
+    # core_sources indices); j_phi then also carries it.
+    j_other: Optional["np.ndarray"] = None
+    # The sawteeth share of j_other [A/m^2].  With GenerationConfig.swb_saw_q
+    # it is SWB's jphi_saw input, and
+    # j_phi = j_inductive + j_BS + j_NBI + j_RF + (j_other - j_sawteeth) + j_saw.
+    j_sawteeth: Optional["np.ndarray"] = None
+    # The SWB inputs of the baseline split (inductive seed, jphi_fixed) on
+    # SWB's grid, reused unchanged by the draws and the sigma=0 check.
+    swb_seed_profile: Optional["np.ndarray"] = None
+    swb_jphi_fixed: Optional["np.ndarray"] = None
+    # swb_saw_q set: SWB's jphi_saw input (j_sawteeth on SWB's grid), which
+    # swb_jphi_fixed then excludes.  None => saw off.
+    swb_jphi_saw: Optional["np.ndarray"] = None
+    # swb_saw_q set: solve B's j_saw output (jphi_saw + the q reset current),
+    # in place of j_sawteeth in j_phi.  None => saw off.
+    j_saw: Optional["np.ndarray"] = None
+    # imas_baseline="swb": solve A's coil currents {name: A-t}, the target of the
+    # strong reg of solve B, the sigma=0 check and every draw.
+    coil_reg_target: Optional[dict] = None
+    # imas_baseline="swb": solve B's record (alpha, coils, lcfs, li_3, Ip, split),
+    # the reference the sigma=0 check compares against.
+    swb_baseline: Optional[dict] = None
 
     def __repr__(self):
         # concise summary -- the default dataclass repr dumps every numpy array,
@@ -315,7 +340,7 @@ def resolve_baseline(config: "BouquetConfig", mygs=None) -> Baseline:
     Implemented as a free function so sources stay declarative (plain config)
     and the resolution logic lives in one place.
     """
-    from .config import ImasSource, ReconstructionSource
+    from .config import ImasSource, ReconstructionSource, resolve_solve_method
 
     source = config.source
 
@@ -329,6 +354,7 @@ def resolve_baseline(config: "BouquetConfig", mygs=None) -> Baseline:
             anchor_jtor_to_equilibrium=config.generation.anchor_jtor_to_equilibrium,
             kinetic_source=config.generation.kinetic_source,
             anchor_pressure_to_equilibrium=config.generation.anchor_pressure_to_equilibrium,
+            driven_sources=resolve_solve_method(config.generation) == "swb",
         )
 
     if isinstance(source, ReconstructionSource):
