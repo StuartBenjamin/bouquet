@@ -998,9 +998,12 @@ the input g-file, which is an l_i-versus-peakedness tradeoff intrinsic to
 matching both. Pinning the core has been tried and is unstable. See
 [architecture.md §16](../architecture.md#16-known-limitations-and-future-work).
 
-A separate known issue — the small constant boundary offset from `jphi-linterp`
-edge/separatrix handling that sets the ~0.5 mm σ=0 floor — is written up in
-[ISSUE_jphi_edge_reconstruction.md](ISSUE_jphi_edge_reconstruction.md).
+A separate known issue: in `jphi-linterp` mode the realized current near the
+separatrix overshoots the specified profile, which leaves a small constant
+boundary offset between the `jphi-linterp` equilibrium and the
+reconstruction's own LCFS. It is deterministic (identical across draws), the
+`jphi_baseline=True` reference absorbs most of it, and it sets the ~0.5 mm
+floor of the σ=0 boundary deviation.
 
 ---
 
