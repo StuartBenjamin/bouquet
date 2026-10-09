@@ -117,6 +117,11 @@ from .config import (
     UncertaintyConfig,
     GenerationConfig,
     FilterConfig,
+    CaseSpec,
+    ParallelSource,
+    GeqdskProfilePairs,
+    IdaTimeslices,
+    ImasTimeslices,
 )
 from .baseline import Baseline, resolve_baseline, resolve_uncertainty
 from .physics import (
@@ -147,7 +152,7 @@ from .archive import BouquetArchive, ScanView, DrawView, BaselineView
 from .stats import (draw_band, draw_bands, draw_scalars, BandRecord,
                     BandTable, plot_band)
 from .parallel import (parallel_generate, run_shard, merge_archives,
-                       emit_slurm_script)
+                       emit_slurm_script, parallel_cases, run_case, merge_cases)
 
 # Curated public surface.  Everything imported above remains importable
 # (``bq.store_equilibrium`` etc. still work for advanced users), but ``import
@@ -215,6 +220,8 @@ __all__ = [
     "new_uncertainty_profiles", "synthetic_ida_sigma",
     # ---- advanced: functional (pre-class) API ----
     "generate_bouquet", "perturb_kinetic_equilibrium", "reconstruct_equilibrium",
-    # ---- process-parallel generation ----
+    # ---- process-parallel: the draws of one bouquet, or many bouquets ----
     "parallel_generate", "run_shard", "merge_archives", "emit_slurm_script",
+    "CaseSpec", "ParallelSource", "GeqdskProfilePairs", "IdaTimeslices", "ImasTimeslices",
+    "parallel_cases", "run_case", "merge_cases",
 ]

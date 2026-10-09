@@ -278,6 +278,174 @@ BaselineSource = Union[ReconstructionSource, ImasSource]
 
 
 # ---------------------------------------------------------------------------
+# Many bouquets: cases (one baseline source each) and the sources that expand into them
+# ---------------------------------------------------------------------------
+# A BouquetConfig is one bouquet.  A sweep is one run-level BouquetConfig plus a list of CaseSpec, each
+# supplying its own baseline source; bouquet.parallel.parallel_cases and bouquet.units run them.
+# CaseSpec.group records which raw input a case came from, so the merge gives one archive per input
+# (e.g. one per IDA .cdf, its slices under scan/<key>/).
+@dataclass
+class CaseSpec:
+    """One bouquet of a sweep: its baseline ``source``, output ``header`` (``{header}.h5``), its
+    ``scan_key`` in the merged archive (unique within the group, e.g. the time in ms) and its merge
+    ``group`` (default: the header's basename, i.e. its own archive)."""
+
+    source: BaselineSource
+    header: str
+    scan_key: Union[float, int, str] = 0
+    group: Optional[str] = None
+
+    def __post_init__(self):
+        if not self.header:
+            raise ValueError("CaseSpec.header must be a non-empty string")
+        if self.group is None:
+            import os
+            self.group = os.path.basename(str(self.header))
+
+    def to_dict(self) -> dict:
+        d = _encode(self)
+        d["source"] = _encode_source(self.source)
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "CaseSpec":
+        d = _decode(d)
+        return cls(source=_decode_source(d["source"]), header=d["header"],
+                   scan_key=d.get("scan_key", 0), group=d.get("group"))
+
+
+@dataclass
+class ParallelSource:
+    """Expands raw inputs into a deterministic list of :class:`CaseSpec` (:meth:`expand`).  ``header``
+    is the stem of every case header; ``source_kwargs`` go to every case's source (``cocos``,
+    ``impurity_Z``, ``psi_pad``, ...).  A hand-built ``list[CaseSpec]`` works as well."""
+
+    header: str
+    source_kwargs: dict = field(default_factory=dict)
+
+    def expand(self) -> "list[CaseSpec]":
+        raise NotImplementedError
+
+    def __len__(self):
+        return len(self.expand())
+
+    def to_dict(self) -> dict:
+        d = _encode(self)
+        d["parallel_source_type"] = type(self).__name__
+        return d
+
+    @staticmethod
+    def from_dict(d: dict) -> "ParallelSource":
+        d = _decode(d)
+        name = d.pop("parallel_source_type", None)
+        registry = {c.__name__: c for c in (GeqdskProfilePairs, IdaTimeslices, ImasTimeslices)}
+        if name not in registry:
+            raise ValueError(f"unknown parallel_source_type {name!r}; expected one of {sorted(registry)}")
+        return _build(registry[name], d)
+
+
+@dataclass
+class GeqdskProfilePairs(ParallelSource):
+    """One case per ``(geqdsk, profiles)`` pair (p-file or single-slice IDA ``.cdf``); each pair is its
+    own group."""
+
+    pairs: list = field(default_factory=list)
+
+    def expand(self) -> "list[CaseSpec]":
+        import os
+        cases = []
+        for geqdsk_path, profiles_path in self.pairs:
+            stem = os.path.splitext(os.path.basename(str(geqdsk_path)))[0]
+            cases.append(CaseSpec(
+                source=ReconstructionSource(geqdsk_path=str(geqdsk_path), profiles_path=str(profiles_path),
+                                            **self.source_kwargs),
+                header=f"{self.header}_{stem}", scan_key=stem, group=stem))
+        return cases
+
+
+@dataclass
+class IdaTimeslices(ParallelSource):
+    """One case per time slice of each IDA ``.cdf``: ``inputs`` is ``[(cdf_path, [g-file per slice]),
+    ...]``.  Each ``.cdf`` is one group, its slices keyed by time in ms (the file's ``time`` dataset,
+    else the slice index)."""
+
+    inputs: list = field(default_factory=list)
+
+    def expand(self) -> "list[CaseSpec]":
+        import os
+
+        import h5py
+        cases = []
+        for cdf_path, geqdsk_paths in self.inputs:
+            cdf_path, geqdsk_paths = str(cdf_path), list(geqdsk_paths)
+            with h5py.File(cdf_path, "r") as f:
+                n_times = f["n_e"].shape[0]
+                times_ms = f["time"][:].ravel() if "time" in f else None
+            if len(geqdsk_paths) != n_times:
+                raise ValueError(f"geqdsk_paths has {len(geqdsk_paths)} entries but '{cdf_path}' has {n_times} "
+                                 "time slice(s): give one g-file per slice")
+            if times_ms is not None and len(times_ms) != n_times:
+                raise ValueError(f"'{cdf_path}' has {len(times_ms)} time value(s) but {n_times} profile "
+                                 "slice(s)")
+            stem = os.path.splitext(os.path.basename(cdf_path))[0]
+            for t in range(n_times):
+                key, time_s = ((int(round(float(times_ms[t]))), float(times_ms[t]) / 1e3)
+                               if times_ms is not None else (t, None))
+                cases.append(CaseSpec(
+                    source=ReconstructionSource(geqdsk_path=str(geqdsk_paths[t]), profiles_path=cdf_path,
+                                                time=time_s, **self.source_kwargs),
+                    header=f"{self.header}_{stem}", scan_key=key, group=stem))
+        return cases
+
+
+@dataclass
+class ImasTimeslices(ParallelSource):
+    """One case per time of one IDS (``times`` in s, keyed in ms): the IDA-hybrid IMAS workflow at many
+    times.  ``ida_path`` and ``LCFS_geqdsk`` (one path, or one per time) are shared inputs; the IDA slice
+    is the one nearest each time unless ``ida_times`` (one per time) pairs them explicitly.  One group
+    (default: the IDS file stem)."""
+
+    ids_path: str = ""
+    times: list = field(default_factory=list)
+    ida_path: Optional[str] = None
+    ida_times: Optional[list] = None
+    LCFS_geqdsk: Union[str, list, None] = None
+    group: Optional[str] = None
+
+    def expand(self) -> "list[CaseSpec]":
+        import os
+        if not self.ids_path:
+            raise ValueError("ImasTimeslices.ids_path must be set")
+        times = [float(t) for t in self.times]
+        if not times:
+            raise ValueError("ImasTimeslices.times is empty")
+
+        def _per_time(v, name):
+            if v is None or isinstance(v, str):
+                return [v] * len(times)
+            v = list(v)
+            if len(v) != len(times):
+                raise ValueError(f"{name} has {len(v)} entries but times has {len(times)}: give one per "
+                                 "time, or one shared value")
+            return v
+        gfiles = _per_time(self.LCFS_geqdsk, "LCFS_geqdsk")
+        ida_times = _per_time(self.ida_times, "ida_times")
+        stem = os.path.splitext(os.path.basename(str(self.ids_path)))[0]
+        cases, seen = [], {}
+        for t, gfile, t_ida in zip(times, gfiles, ida_times):
+            key = int(round(t * 1e3))
+            if key in seen:
+                raise ValueError(f"times {seen[key]} s and {t} s both key as {key} ms in the merged archive")
+            seen[key] = t
+            cases.append(CaseSpec(
+                source=ImasSource(ids_path=str(self.ids_path), time=t, ida_time=t_ida,
+                                  ida_path=str(self.ida_path) if self.ida_path else None,
+                                  LCFS_geqdsk=gfile, **self.source_kwargs),
+                header=f"{self.header}_{stem}", scan_key=key, group=self.group or stem))
+        return cases
+
+
+# ---------------------------------------------------------------------------
 # Fixed additive components (NEVER perturbed by GPR draws)
 # ---------------------------------------------------------------------------
 @dataclass
@@ -2137,19 +2305,14 @@ class BouquetConfig:
         (``"reconstruction"`` | ``"imas"``). Reverse with :meth:`from_dict`.
         """
         d = _encode(self)
-        d["source"]["source_type"] = (
-            "reconstruction" if isinstance(self.source, ReconstructionSource) else "imas")
+        d["source"] = _encode_source(self.source)
         return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "BouquetConfig":
         """Rebuild a :class:`BouquetConfig` from :meth:`to_dict` output."""
         d = _decode(d)
-        srcd = dict(d["source"])
-        stype = srcd.pop("source_type", None)
-        if stype is None:                       # infer if the discriminator is absent
-            stype = "reconstruction" if "geqdsk_path" in srcd else "imas"
-        SrcCls = ReconstructionSource if stype == "reconstruction" else ImasSource
+        source = _decode_source(d["source"])
         gend = _checked_generation_keys(dict(d.get("generation", {})))
         if "jbs_self_consistent" not in gend:
             # A stored config written before the self-consistent bootstrap
@@ -2208,7 +2371,7 @@ class BouquetConfig:
                 "from_imas.", UserWarning, stacklevel=2)
             gend["reconstruction_engine"] = "legacy"
         _stored_config_compat(gend)
-        if (SrcCls is ImasSource
+        if (isinstance(source, ImasSource)
                 and gend.get("reconstruction_engine") == "unified"
                 and "imas_li3_radius" not in gend):
             # An IMAS unified config stored before the li_3-radius setting
@@ -2225,7 +2388,7 @@ class BouquetConfig:
                 "default is 'auto'", UserWarning, stacklevel=2)
             gend["imas_li3_radius"] = "axis"
         return cls(
-            source=_build(SrcCls, srcd),
+            source=source,
             solver=_build(SolverConfig, d["solver"]),
             output_header=d["output_header"],
             uncertainty=_build(UncertaintyConfig, d.get("uncertainty", {})),
@@ -2619,6 +2782,22 @@ def _checked_generation_keys(gend: dict) -> dict:
             UserWarning, stacklevel=3)
         gend = {k: v for k, v in gend.items() if k not in retired}
     return gend
+
+
+def _encode_source(src) -> dict:
+    """A baseline source as a dict, with the ``source_type`` discriminator (``"reconstruction"`` |
+    ``"imas"``) that :func:`_decode_source` reads."""
+    d = _encode(src)
+    d["source_type"] = "reconstruction" if isinstance(src, ReconstructionSource) else "imas"
+    return d
+
+
+def _decode_source(d) -> "BaselineSource":
+    """Rebuild a :func:`_encode_source` dict (already :func:`_decode`-d); without the discriminator the
+    type is inferred from ``geqdsk_path``."""
+    d = dict(d)
+    stype = d.pop("source_type", None) or ("reconstruction" if "geqdsk_path" in d else "imas")
+    return _build(ReconstructionSource if stype == "reconstruction" else ImasSource, d)
 
 
 def _build(cls, d):

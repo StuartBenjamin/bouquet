@@ -20,6 +20,7 @@ Synthetic inputs only; no solver, no device data.
 """
 import numpy as np
 import pytest
+from _engine_fake_gs import point_without_solver
 
 import _engine_toy as T
 from bouquet.engine import UnifiedEngine
@@ -221,6 +222,7 @@ def test_prepare_baseline_keeps_the_no_mse_baseline_when_not_required(
     g.mse_data = _toy_md_for_gfile()
     g.structured_mse_required = required
     b.mygs = TW._FakeGS()
+    point_without_solver(monkeypatch)
     if required:
         with pytest.raises(RuntimeError, match="injected FD failure"):
             _quiet(b.prepare_baseline)

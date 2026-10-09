@@ -59,6 +59,9 @@ Layout spec: [archive-schema.md](archive-schema.md). Code source of truth:
 | Function | Description |
 |---|---|
 | `parallel_generate()` | Process-parallel driver (`backend="laptop"` pool or `"slurm"` job array) |
+| `parallel_cases()` / `run_case()` / `merge_cases()` | Many bouquets on one node: one standing solver per worker, cases swapped on (`Bouquet.set_case`), merged per input group |
+| `CaseSpec` / `GeqdskProfilePairs` / `IdaTimeslices` / `ImasTimeslices` | The cases of a sweep (one baseline source each) and the sources that expand into them |
+| `units.make_units()` / `units.units_from_cases()` / `units.add_units()` / `python -m bouquet.units work` | Many bouquets (one per baseline) on a shared-filesystem queue, across processes, nodes and jobs (`bouquet.workqueue`) |
 | `run_shard()` | The per-worker serial pipeline on one shard |
 | `merge_archives()` | Concatenate shards, verifying every shard hit the same baseline |
 | `emit_slurm_script()` | Write the SLURM job-array + submit scripts |

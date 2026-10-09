@@ -136,11 +136,10 @@ class SwbBaseline:
         bl, mygs, gc = self.baseline, self.mygs, self.config.generation
         psi_N = np.asarray(bl.psi_N, dtype=float)
         self._reset_solver_state()
-        mygs.set_isoflux(self._iso[0], weights=self._iso[1])
         if coil_reg_target is not None:
             mygs.set_coil_reg(reg_terms=strong_coil_reg(
                 mygs, coil_reg_target, gc.swb_coil_reg_weight, 1.0))
-        mygs.init_psi(*_shape_from_boundary(self._boundary_RZ))
+        mygs.init_psi(*_shape_from_boundary(self._geom.boundary_RZ))
         self._seed_coil_init(mygs)
         saw_kw = self._swb_saw_kwargs()
         j_seed, jphi_fixed = np.asarray(j_seed, dtype=float), bl.swb_jphi_fixed

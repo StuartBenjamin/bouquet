@@ -58,7 +58,7 @@ def configured(tmp_path, toy_bouquet_solver, monkeypatch):
         self.mygs.set_coil_reg = set_coil_reg
         self._apply_coil_reg(self.mygs)
         enter_bounded_coil_mode(self.mygs)
-        return self
+        return self._install_solver(self.mygs)
 
     monkeypatch.setattr(br.Bouquet, "setup_solver", _setup)
     b = TD._bq(tmp_path)

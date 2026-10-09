@@ -267,7 +267,8 @@ cfg = bq.load_config("my_run")       # the exact BouquetConfig that made it
 `b.describe()` prints the current configuration showing only the non-default
 knobs. Sweeps: `b.run_slices(times=[...])` puts one time slice per `scan_key`
 in a single archive; `bq.parallel_generate(cfg, backend="laptop"|"slurm")`
-fans draws out across processes.
+fans one bouquet's draws out across processes; `bq.parallel_cases(src, cfg, work_dir)` runs many
+bouquets on one node, and `bouquet.units` queues them across jobs (docs/workflows.md).
 
 ## Key configuration
 
@@ -307,7 +308,7 @@ b.generation.seed = 1234
 | `device` | `None` | Device name for the tolerance model (`bouquet.devices`); detected from the mesh coil names when they match exactly |
 | `filtering.inspec_F_max` / `inspec_VSC_max` | `0.02` | Coil-drift spec for the `in_spec` flag, and the band `coil_filter="legacy"` applies |
 | `filtering.rms_max_mm` | `"auto"` | Boundary-RMS acceptance threshold [mm]. `"auto"` resolves to the device's calibrated cut (8.5 mm on DIII-D, from its boundary-UQ study -- looser than the generic 5.0 mm) or the generic 5.0 mm; a number is an explicit cut and always wins; `"off"` disables the cut (`None` is the historical spelling of `"off"` and still means no cut). The resolved value and its source are printed and stamped on the archive |
-| `solver.nthreads` | `1` | Recommended to keep at 1; parallelise across time slices or discharges instead (`run_slices` / `parallel_generate`) |
+| `solver.nthreads` | `1` | Keep at 1 (the parallel paths require it); parallelise across draws or cases instead (`parallel_generate` / `parallel_cases` / `bouquet.units`) |
 
 Every tolerance is a **fraction**, never a percentage. The full table, and the
 IMAS/geqdsk workflow presets that `from_imas` / `from_geqdsk` auto-apply, are

@@ -2932,9 +2932,8 @@ def prepare_engine_baseline(bq):
                                 inductive=s["ids_inductive"])
                 c0 = ad.read()
                 psi_pad = ad.psi_pad
-                bq._repoint_imas_geometry()
                 R0, Z0, a, kappa, delta = _shape_from_boundary(
-                    bq._boundary_RZ)
+                    bq._geom.boundary_RZ)
                 mygs.init_psi(R0, Z0, a, kappa, delta)
                 bq._seed_coil_init(mygs)
             else:

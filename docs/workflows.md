@@ -17,6 +17,8 @@ controls it. See [`../README.md`](../README.md) for the short version and
 - [Exporting draws](#exporting-draws)
 - [Timeseries sweeps](#timeseries-sweeps)
 - [Process-parallel generation](#process-parallel-generation)
+- [Many bouquets on one node](#many-bouquets-on-one-node)
+- [Many bouquets on a cluster](#many-bouquets-on-a-cluster)
 
 ---
 
@@ -662,10 +664,22 @@ Parallel shards do not write refused records (a refused worker raises).
 
 ## Process-parallel generation
 
-Draws are embarrassingly parallel, and `OFT_env` is a per-process singleton —
-so parallelism is across **processes**, one single-threaded TokaMaker per
-physical core (`nthreads=1` is the validated regime: bit-reproducible
-baselines, no OpenMP l_i jitter, no DLSODE hangs).
+`OFT_env` is a per-process singleton, so parallelism is across **processes**, and every parallel path
+runs one thread per process: TokaMaker at `nthreads=1` (bit-reproducible baselines, no OpenMP l_i
+jitter, no DLSODE hangs) and every BLAS/OpenMP pool at 1 (`bouquet.threads`: the environment plus
+`threadpoolctl`; `HDF5_USE_FILE_LOCKING=FALSE` too, since shared inputs are only read).  A config or
+`threads_per_worker` asking for more is refused.
+
+| | splits | use when | entry point |
+|---|---|---|---|
+| **draws** | one bouquet's draws across workers | one case, finished sooner | `bq.parallel_generate` |
+| **cases, one node** | whole bouquets, one standing solver per worker | many cases | `bq.parallel_cases` |
+| **cases, many jobs** | whole bouquets on a shared-filesystem queue, a fresh process each | many cases, many nodes or jobs | `bouquet.units` |
+
+Never nest them.  One solver serves many baselines: `prepare_baseline` points it at each baseline's
+own F0, boundary and isoflux (`Bouquet.point_solver`), and every reset returns to that baseline's
+geometry; the mesh, solve method and thread count are fixed per solver (`Bouquet.set_case` refuses a
+change).
 
 ```python
 cfg = b.config                       # any BouquetConfig
@@ -692,3 +706,83 @@ stamps the run-level config provenance. Worker seeds derive from
 `SeedSequence(seed, worker_id, scan_key)`, so timeseries slices swept with one
 seed are decorrelated. Parallel draws are statistically equivalent to — but not
 bit-identical with — a serial run of the same seed.
+
+## Many bouquets on one node
+
+One complete bouquet per case (g-file/p-file pair, IDA time slice, IMAS time).  Each worker stands up its
+solver once, in its own directory (TokaMaker's scratch files) with its own copy of the mesh, and swaps
+case after case onto it (`Bouquet.set_case`).  A failed case returns its traceback (`errors`,
+`errors.pkl`) and the sweep goes on.  A sweep is one run-level config plus the cases:
+
+```python
+src = bq.ImasTimeslices(header="sweep", ids_path="dd_sim.json", times=[3.163, 3.263, 3.363],
+                        ida_path="IDA_154080.cdf", LCFS_geqdsk="g154080.03260")  # or one g-file per time
+src = bq.IdaTimeslices(header="sweep", inputs=[("IDA_194123.cdf", ["g194123.02000", ...])])
+src = bq.GeqdskProfilePairs(header="sweep", pairs=[(geqdsk, pfile), ...])
+
+if __name__ == "__main__":           # required: workers are spawned
+    summary = bq.parallel_cases(src, cfg, "work_dir")
+```
+
+A hand-built `list[CaseSpec]` works as well.  swb takes IDS sources only (`ImasTimeslices`); the engine
+and legacy take all three.  Cases are keyed `scan_key` = time in ms (or the g-file stem) and grouped by
+input (one `.cdf`, one IDS): the merge writes one archive per group, its cases under `scan/<key>/`, the
+layout `bq.plot_bouquet_timeseries` reads.
+
+```
+work_dir/
+  worker_0/ ...            per-worker cwd and mesh copy
+  worker_0.log ...         per-worker output (fd level, so OFT's too)
+  cases/sweep_<stem>_idx0.h5 ...   one archive per case
+  sweep_<group>.h5         merged
+  map_object.pkl           idx -> CaseSpec
+  errors.pkl               {idx: traceback}
+```
+
+`group_by=None` merges into one archive, `merge=False` keeps only the per-case files, `cleanup=True`
+deletes them once merged.  The worker count follows the affinity mask and the scheduler's CPU count
+(`SLURM_CPUS_PER_TASK`, `PBS_NUM_PPN`, `LSB_DJOB_NUMPROC`, `NSLOTS`); `use_logical_cpus=False` puts one
+worker per physical core.  Every worker must report ready before any case is dispatched, so a bad mesh or
+a missing OFT fails in seconds with each worker's traceback.  Each case record carries its F0 and the
+thread count of every loaded pool.
+
+Per-case setup a `CaseSpec` cannot express goes in two hooks, `f(bouquet, case)`, run on the worker:
+`before_baseline` (after `set_case`; e.g. solver targets from this slice's g-file) and `after_baseline`
+(after `prepare_baseline`; anything on this baseline's grid, e.g. `uncertainty.aux_baselines`).  Workers
+are spawned, so a hook must be a module-level function; a lambda or closure is refused before the pool
+starts.
+
+## Many bouquets on a cluster
+
+`parallel_generate` splits the draws of one bouquet. To run many bouquets (one per baseline: time
+slices, shots, variants) across processes, nodes and jobs, `bouquet.units` puts them on a
+shared-filesystem queue (`bouquet.workqueue`; `mkdir` claims, heartbeat leases, correct on NFSv4 and
+Lustre). Each unit runs in a fresh single-threaded process, in its worker's directory, on its worker's
+copy of the mesh.  `units.units_from_cases(cfg, src)` queues the same cases `parallel_cases` takes.
+
+```python
+from bouquet import units
+us = units.make_units(cfg, [{"source.time": t, "source.ida_time": t, "generation.scan_key": round(1e3 * t)}
+                            for t in times], ids=[f"{shot}_{round(1e3 * t)}" for t in times])
+units.add_units("queue", us)            # idempotent: ids already queued are skipped; add more any time
+```
+
+```bash
+python -m bouquet.units work --queue queue --out-dir out --workers 64   # one per node: srun --ntasks-per-node=1
+python -m bouquet.units status --queue queue                            # counts, failures grouped by signature
+python -m bouquet.units stop|drain|undrain|retry-failed --queue queue
+```
+
+- **Outputs.** `out/<id>.h5` (moved into place when complete), then `out/<id>.json`, the unit record
+  (`status` `done`/`failed`, `selected_counts`, `profile_coord`, `seed`, ...). Readers wait for the record.
+- **Seeds.** Each unit's `generation.seed` is derived from the config seed and the unit id: reproducible,
+  independent of which worker runs it, and different across units.
+- **Failures.** A unit that raises is retried once more (`MAX_FAILURES=2`), then gets a `failed` record;
+  `MAX_ATTEMPTS=4` bounds crashes and preemptions. A worker stops after 3 failures in a row; when workers
+  of 2 jobs break within an hour the queue writes `STOP`. Leases of dead workers (OOM, node loss,
+  preemption) expire after 300 s and are taken over. Policy overrides: `queue/config.json`.
+- **Jobs.** Single-node or multi-node, or both at once: every launcher claims from the same queue, and
+  units added mid-run are picked up. On Perlmutter prefer multi-node `regular` (or `preempt`) jobs sized
+  to the backlog; set `--workers` to min(cores, memory / peak RSS per unit) and `--margin`/`--min-left`
+  so no unit starts that cannot finish before the walltime.
+

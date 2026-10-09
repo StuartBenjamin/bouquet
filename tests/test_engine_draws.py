@@ -684,9 +684,9 @@ def toy_bouquet_solver(monkeypatch):
         # what the real setup_solver does to the coil solve
         # (tests/test_solver_state.py runs the real one on a stand-in)
         from bouquet.solver_state import enter_bounded_coil_mode
-        self.mygs = FakeTokaMaker(None)
-        enter_bounded_coil_mode(self.mygs)
-        return self
+        gs = FakeTokaMaker(None)
+        enter_bounded_coil_mode(gs)
+        return self._install_solver(gs)
 
     import bouquet.run as br
     monkeypatch.setattr(br.Bouquet, "setup_solver", _setup)

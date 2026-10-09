@@ -71,6 +71,7 @@ class TestConfig:
 
     def test_closure_path_refuses_saw(self):
         ns = types.SimpleNamespace(
+            mygs=None,
             config=types.SimpleNamespace(
                 source=types.SimpleNamespace(),
                 generation=GenerationConfig(swb_saw_q=1.025,
@@ -188,7 +189,7 @@ def _run(**gen):
         ti=1e3 + 0 * x, Zeff=1.5 + 0 * x, p_fast=None)
     gen.setdefault("imas_baseline", "swb")
     ns = types.SimpleNamespace(
-        baseline=bl, mygs=_GS(), _iso=(None, None), _boundary_RZ=None,
+        baseline=bl, mygs=_GS(), _geom=types.SimpleNamespace(boundary_RZ=None),
         config=types.SimpleNamespace(generation=GenerationConfig(**gen)),
         _reset_solver_state=lambda: None, _seed_coil_init=lambda m: None,
         _swb_baseline_kinetics=lambda: dict(
