@@ -550,9 +550,13 @@ def profile_residuals(J, jbs, w, x, Ip) -> dict:
                 jBS_peak_psiN=float(x[i_pk]) if J.size else float("nan"))
 
 
-def residual_weights(eq, psi_N, psi_pad=1e-3):
+def residual_weights(eq, psi_N, psi_pad=1e-3, coord="psi_n"):
     """``(w, x, kind)``: the per-surface Ip weights of equilibrium *eq* on
     ``psi_N``, for the residual norms.
+
+    ``psi_N`` is the run grid; in a Φ_N run (``coord="phi_n"``) it is mapped
+    to ψ_N on *eq*'s own toroidal-flux map, and ``x`` (the abscissa the
+    weights integrate over) is that ψ_N.
 
     The linear part of the closure's ``jphi-linterp`` measure,
     ``(V'/2pi) |dpsi/dpsi_N| <1/R^2>/<1/R>``, when ``get_q`` returns ``<1/R^2>``;
@@ -562,8 +566,10 @@ def residual_weights(eq, psi_N, psi_pad=1e-3):
     used to resolve.  ``kind`` names which one was used.  One ``get_q`` call,
     no trace.
     """
+    from . import coords
     from .utils import fsa_current_geometry
-    x = np.asarray(psi_N, dtype=float)
+    x = np.asarray(coords.psi_at(eq, np.asarray(psi_N, dtype=float), coord),
+                   dtype=float)
     g = fsa_current_geometry(eq, x, psi_pad=psi_pad, want_pprime=False)
     base = g["dV_dpsi"] / (2.0 * np.pi) * g["dpsi_dpsiN"]
     if g["inv_R2"] is not None:

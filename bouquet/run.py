@@ -40,6 +40,7 @@ from .utils import _shape_from_boundary  # noqa: F401  (compatibility re-export)
 from .edge_pressure import (NegativeSeparatrixPressure,
                             resolve_edge_pressure, solver_pax,
                             solver_pp_profile, solver_pprime)
+from . import coords
 
 
 def _baseline_negative_psep_named(fn):
@@ -870,6 +871,7 @@ class Bouquet:
         # collapsed) split differs.
         if self.config.generation.single_profile_jphi:
             self.config.generation.recalculate_j_BS = False
+        coords.check_run(self.config)
         self._check_structured_mse_reachable(self.config)
 
         # A baseline is usable only once EVERY stage below has completed.  A
@@ -4487,6 +4489,7 @@ class Bouquet:
         bl = self.baseline
         mygs = self.mygs
         psi_N = np.asarray(bl.psi_N, dtype=float)
+        coord = getattr(bl, "coord", coords.PSI)
         psi_pad = 1e-3
         from .physics import ELEMENTARY_CHARGE as EC
 
@@ -4527,14 +4530,14 @@ class Bouquet:
             p_total = p_total + k2e(bl.p_diff)
 
         def solve_jphi(j_phi):
-            ffp = {"type": "jphi-linterp", "y": np.asarray(j_phi, dtype=float), "x": psi_N}
+            ffp = coords.oft_prof("jphi-linterp", psi_N, np.asarray(j_phi, dtype=float), coord)
             nl_its = -1
             for _pass in range(2):   # 2nd pass refines the jphi-linterp flux scaling
                 psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
                 pp_y = solver_pprime(psi_N, p_total, psi_range, _edge)
                 mygs.set_targets(Ip=bl.Ip_target, pax=solver_pax(p_total, _edge))
                 mygs.set_profiles(
-                    pp_prof={"type": "linterp", "y": pp_y, "x": psi_N}, ffp_prof=ffp,
+                    pp_prof=coords.oft_prof("linterp", psi_N, pp_y, coord), ffp_prof=ffp,
                 )
                 try:
                     _, nl_its = mygs.solve(return_its=True)
@@ -4621,11 +4624,9 @@ class Bouquet:
             else:
                 raise ValueError(_msg0)
         if self.config.generation.recalculate_j_BS:
-            from .TokaMaker_interface import (_swb_jbs_to_toroidal,
-                                              smooth_jbs_transition)
+            from .TokaMaker_interface import smooth_jbs_transition
             from .sampling import calc_cylindrical_li_proxy
             from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
-            from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
             from scipy.optimize import brentq
 
             gc = self.config.generation
@@ -4662,7 +4663,10 @@ class Bouquet:
                 from .utils import fsa_current_geometry as _fcg
                 from .physics import capture_equilibrium_fsa as _cef
                 _anchor = {"eq": mygs.copy_eq()}
-                _anchor["geom"] = _fcg(_anchor["eq"], np.asarray(psi_N, dtype=float), psi_pad=psi_pad)
+                _anchor["geom"] = _fcg(
+                    _anchor["eq"],
+                    np.asarray(coords.psi_at(_anchor["eq"], psi_N, coord), dtype=float),
+                    psi_pad=psi_pad)
                 _anchor["inv_r2_src"] = "get_q ravgs dict"
                 if _anchor["geom"]["inv_R2"] is None:
                     # BQ_FSA_NPSI overrides the contour-quadrature resolution.
@@ -4738,10 +4742,8 @@ class Bouquet:
                 # bouquet's arrays are handed to set_profiles as), evaluated on a
                 # copy_eq() SNAPSHOT of the converged first-pass geometry so no
                 # later solve can move it. NOT TokaMaker.compute_flux_integral:
-                # that integrates the whole reg==1 limiter region with the flux
-                # function held at its LCFS value outside the plasma, charging the
-                # scrape-off area at f(psi_N=1) (+11.9% of Ip on the D3D-like
-                # anchor; see the utils.py module note). And NOT the cylindrical
+                # it reads its input as an area density (see the utils.py module
+                # note). And NOT the cylindrical
                 # l_i proxy (1/<R> for <1/R>; +7.75% on the FUSE validation
                 # case). Both are still
                 # evaluated and RECORDED below so the biases stay visible.
@@ -4750,8 +4752,8 @@ class Bouquet:
                                     closure_sign_convention)
                 from .sampling import get_li_proxy_geometry
                 from scipy import integrate as _integ
-                _psi_ip = np.asarray(psi_N, dtype=float)
                 _eq_snap = _anchor["eq"]          # frozen BEFORE solve_with_bootstrap
+                _psi_ip = np.asarray(coords.psi_at(_eq_snap, psi_N, coord), dtype=float)
                 _geom = _anchor["geom"]
                 _inv_r2_src = _anchor["inv_r2_src"]
                 _probe = eq_jphi_profile(_geom, "jphi-linterp", eq=_eq_snap)
@@ -4820,7 +4822,7 @@ class Bouquet:
                     convention="fsa", geom=_geom))   # documented ~+0.9% bias
                 _ip_oft = lambda j: float(_eq_snap.compute_flux_integral(
                     _psi_ip, np.asarray(j, dtype=float)))
-                _geo_cyl = get_li_proxy_geometry(_eq_snap, psi_N.size, psi_pad)
+                _geo_cyl = get_li_proxy_geometry(_eq_snap, psi_N.size, psi_pad, psi_N, coord)
                 _dA_cyl = np.asarray(_geo_cyl["dA"], dtype=float)
                 _ip_cyl = lambda j: float(_integ.trapezoid(np.asarray(j, float) * _dA_cyl))
                 Ip_t = abs(float(bl.Ip_target))
@@ -5140,7 +5142,7 @@ class Bouquet:
                 def _redl(eq):
                     j, d = evaluate_jBS(eq, psi_N, ne, te, ni, ti, Zeff,
                                         psi_pad=psi_pad, isolate_edge=iso,
-                                        smooth_axis=True)
+                                        smooth_axis=True, coord=coord)
                     if gc.floor_j_BS:
                         j = np.clip(j, 0.0, None)
                     return j, d
@@ -5159,12 +5161,12 @@ class Bouquet:
                         _pp_y = solver_pprime(psi_N, p_total, _pr, _edge)
                         _cr = _corrective_jphi_iteration(
                             mygs, psi_N, j_phi,
-                            {"type": "linterp", "y": _pp_y, "x": psi_N},
+                            coords.oft_prof("linterp", psi_N, _pp_y, coord),
                             abs(bl.Ip_target), solver_pax(p_total, _edge),
                             1e-3,
                             min_iters=2, max_iters=8, rtol=0.02,
                             verbose=True, damping=0.5, protect_state=True,
-                            return_request=True)
+                            return_request=True, coord=coord)
                         if _cr[3] is not None:
                             # the corrective iteration's landed state: the
                             # request one solve reproduces it from
@@ -5178,35 +5180,34 @@ class Bouquet:
                 def _swb_legacy():
                     """jbs_init="swb": the legacy SWB result as the initial
                     guess (A/B only), with mygs put back on the anchor."""
-                    import inspect
                     _snap_a = mygs.copy_eq()
                     _kw = dict(scale_jBS=1.0, isolate_edge_jBS=iso,
                                diagnostic_plots=False, verbose=False,
                                **gc.bootstrap_kwargs)
-                    _passed = False
-                    _why = None
-                    if "psi_N" in inspect.signature(
-                            solve_with_bootstrap).parameters:
-                        try:
-                            _swb = solve_with_bootstrap(
-                                mygs, ne, te, ni, ti, Zeff, bl.Ip_target,
-                                create_power_flux_fun(psi_N.size, 1.5,
-                                                      1.5)["y"],
-                                psi_N=np.asarray(psi_N, dtype=float), **_kw)
-                            _passed = True
-                        except ValueError as _e:
-                            _why = f"SWB refused psi_N=: {_e}"
-                            mygs.replace_eq(source_eq=_snap_a)
-                    else:
-                        _why = "this OFT build's solve_with_bootstrap has " \
-                               "no psi_N argument"
-                    if not _passed:
+                    _seed = coords.swb_seed(psi_N, coords.psi_at(
+                        mygs, psi_N, coord))
+                    _grid = coords.swb_grid_kwargs(psi_N, coord)
+                    _why = (None if _grid else "this OFT build's "
+                            "solve_with_bootstrap has no grid argument")
+                    try:
+                        _swb = solve_with_bootstrap(
+                            mygs, ne, te, ni, ti, Zeff, bl.Ip_target, _seed,
+                            **_grid, **_kw)
+                        _passed = bool(_grid)
+                    except ValueError as _e:
+                        if not _grid or coord != coords.PSI:
+                            raise
+                        _why = f"SWB refused its grid argument: {_e}"
+                        mygs.replace_eq(source_eq=_snap_a)
+                        _passed = False
                         _swb = solve_with_bootstrap(
                             mygs, ne, te, ni, ti, Zeff, bl.Ip_target,
-                            create_power_flux_fun(psi_N.size, 1.5, 1.5)["y"],
+                            coords.swb_seed(np.linspace(0.0, 1.0,
+                                                        psi_N.size)),
                             **_kw)
-                    _j = smooth_jbs_transition(_swb_jbs_to_toroidal(
-                        mygs, _swb["isolated_j_BS"], psi_pad))
+                    # SWB's j_BS is TokaMaker jphi already, on its grid
+                    _j = smooth_jbs_transition(np.asarray(
+                        _swb["isolated_j_BS"], dtype=float))
                     if gc.floor_j_BS:
                         _j = np.clip(_j, 0.0, None)
                     mygs.replace_eq(source_eq=_snap_a)
@@ -5291,10 +5292,13 @@ class Bouquet:
                     st = {}
 
                     def _step(jbs, k, relax=None):
+                        _lpx = ({} if coord == coords.PSI
+                                else dict(x=psi_N, coord=coord))
                         tgt = calc_cylindrical_li_proxy(mygs, FUSE_tot,
-                                                        psi_pad)
+                                                        psi_pad, **_lpx)
                         _f = lambda s: calc_cylindrical_li_proxy(
-                            mygs, j_ind + s * jbs + j_fixed, psi_pad) - tgt
+                            mygs, j_ind + s * jbs + j_fixed, psi_pad,
+                            **_lpx) - tgt
                         try:
                             scale = float(brentq(_f, 0.2, 4.0, xtol=1e-4))
                             _sc_ok = True
@@ -5324,7 +5328,8 @@ class Bouquet:
                         st["nl"] = _pass_solve(_js if relax is None
                                                else relax(_js))
                         snap = mygs.copy_eq()
-                        w, x, _wk = residual_weights(snap, psi_N, psi_pad)
+                        w, x, _wk = residual_weights(snap, psi_N, psi_pad,
+                                                     coord=coord)
                         st.setdefault("scales", []).append(float(scale))
                         st.setdefault("scale_bracketed", []).append(_sc_ok)
                         print(f"[imas jbs-loop:rescale] pass {k + 1}: "
@@ -5702,7 +5707,7 @@ class Bouquet:
                             li=_li_of(eq),
                             q0=(_q0_of(eq) if axis_active else None)),
                         weights=lambda eq: residual_weights(
-                            eq, psi_N, psi_pad)[:2],
+                            eq, psi_N, psi_pad, coord=coord)[:2],
                         settings=_jbs, Ip=Ip_abs, gate_q0=axis_active,
                         pre_mse=_pre_mse, q0_pin=_pin)
                     if _nl_m is not None:
@@ -5787,17 +5792,19 @@ class Bouquet:
             if _loop_on:
                 nl_its = _imas_jbs_loop()
             else:
-                swb_seed = create_power_flux_fun(psi_N.size, 1.5, 1.5)["y"]
+                swb_seed = coords.swb_seed(psi_N, coords.psi_at(
+                    mygs, psi_N, coord))
                 swb = solve_with_bootstrap(
                     mygs, ne, te, ni, ti, Zeff, bl.Ip_target, swb_seed,
                     scale_jBS=1.0, isolate_edge_jBS=iso,
                     diagnostic_plots=False, verbose=False,
+                    **coords.swb_grid_kwargs(psi_N, coord),
                     **gc.bootstrap_kwargs,
                 )
                 # Same axis-transition smoothing every per-draw spike receives, so
                 # the sigma=0 draw reproduces this baseline split exactly.
                 j_BS_swb = smooth_jbs_transition(
-                    _swb_jbs_to_toroidal(mygs, swb["isolated_j_BS"], psi_pad))
+                    np.asarray(swb["isolated_j_BS"], dtype=float))
                 if gc.floor_j_BS:
                     j_BS_swb = np.clip(j_BS_swb, 0.0, None)
                 ratio = j_BS_swb.max() / max(j_BS_src.max(), 1.0)
@@ -5811,9 +5818,11 @@ class Bouquet:
                           f"diff min/max={bl.jBS_diff.min():.2e}/{bl.jBS_diff.max():.2e}; "
                           f"SWB/FUSE jBS peak={ratio:.3f}")
                 elif mode == "rescale":
-                    tgt = calc_cylindrical_li_proxy(mygs, FUSE_tot, psi_pad)
+                    tgt = calc_cylindrical_li_proxy(mygs, FUSE_tot, psi_pad,
+                                                    psi_N, coord)
                     _f = lambda s: calc_cylindrical_li_proxy(
-                        mygs, j_ind + s * j_BS_swb + j_fixed, psi_pad) - tgt
+                        mygs, j_ind + s * j_BS_swb + j_fixed, psi_pad, psi_N,
+                        coord) - tgt
                     try:
                         scale = float(brentq(_f, 0.2, 4.0, xtol=1e-4))
                     except Exception:
@@ -5855,12 +5864,13 @@ class Bouquet:
                     from .TokaMaker_interface import _corrective_jphi_iteration
                     _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
                     _pp_y = solver_pprime(psi_N, p_total, _pr, _edge)
-                    _pp_prof = {"type": "linterp", "y": _pp_y, "x": psi_N}
+                    _pp_prof = coords.oft_prof("linterp", psi_N, _pp_y, coord)
                     _, _n_corr, _corr_hist = _corrective_jphi_iteration(
                         mygs, psi_N, _jphi_solve, _pp_prof,
                         abs(bl.Ip_target), solver_pax(p_total, _edge), 1e-3,
                         min_iters=2, max_iters=8, rtol=0.02, verbose=True,
-                        damping=0.5, protect_state=True)
+                        damping=0.5, protect_state=True,
+                        coord=coord)
                     print(f"[imas corrective-jphi] converged in {_n_corr} iteration(s)")
 
                 # ---- q0 corrector (closure_channel="sawtooth_bootstrap") --------
@@ -6046,6 +6056,7 @@ class Bouquet:
         mygs = self.mygs
         gc = self.config.generation
         psi_N = np.asarray(bl.psi_N, dtype=float)
+        coord = getattr(bl, "coord", coords.PSI)
         jdiff = (None if getattr(bl, "jBS_diff", None) is None
                  else np.asarray(bl.jBS_diff, dtype=float))
         if delivery["mode"] == "diff" and jdiff is not None:
@@ -6055,7 +6066,7 @@ class Bouquet:
             comp = _draw_jbs_composer(
                 psi_N, ne, te, ni, ti, Zeff, psi_pad,
                 bool(gc.isolate_edge_jBS), float(getattr(bl, "bs_scale", 1.0)),
-                bool(gc.floor_j_BS), jdiff, None, None)
+                bool(gc.floor_j_BS), jdiff, None, None, coord=coord)
             j_bs0 = np.asarray(comp(mygs.copy_eq())[0], dtype=float)
             bl.j_BS = j_bs0 - (0.0 if jdiff is None else jdiff)
         fixed = np.zeros_like(psi_N)
@@ -6066,7 +6077,7 @@ class Bouquet:
               else np.asarray(k2e(bl.jphi_diff), dtype=float))
         dv = _deliver_request_split(mygs, psi_N, psi_pad, bl.Ip_target,
                                     delivery["request"], j_bs0, fixed + jd,
-                                    label="imas delivered state")
+                                    label="imas delivered state", coord=coord)
         bl.j_inductive = np.asarray(dv["j_inductive"], dtype=float)
         # bl.j_phi excludes jphi_diff (generate adds it): j_phi + jphi_diff
         # is the normalised request
@@ -6092,7 +6103,7 @@ class Bouquet:
             n_floored_target_inductive=int(_n_fl_t),
             j_phi_achieved=_achieved_jphi_fsa(
                 mygs, psi_N, psi_pad,
-                sign_ref=np.asarray(dv["request"], dtype=float)),
+                sign_ref=np.asarray(dv["request"], dtype=float), coord=coord),
             how=("the forward solve's delivered equilibrium (diff: the "
                  "source total; rescale: the loop's last pass); one "
                  "jphi-linterp solve of j_phi + jphi_diff reproduces it"))
@@ -6121,13 +6132,14 @@ class Bouquet:
         from .physics import ELEMENTARY_CHARGE as EC
         pk = np.asarray(bl.psi_N_kinetic, dtype=float)
         pe = np.asarray(bl.psi_N, dtype=float)
+        xl = r"$\Phi_N$" if getattr(bl, "coord", "psi_n") == "phi_n" else r"$\psi_N$"
 
         fig, ax = plt.subplots(1, 3, figsize=(13, 3.8))
         # kinetic profiles (densities left axis, temperatures right axis)
         a = ax[0]
         a.plot(pk, np.asarray(bl.ne) / 1e19, "-", color="tab:blue", label=r"$n_e$")
         a.plot(pk, np.asarray(bl.ni) / 1e19, "--", color="tab:blue", label=r"$n_i$")
-        a.set_ylabel(r"$n$ [$10^{19}$ m$^{-3}$]"); a.set_xlabel(r"$\psi_N$")
+        a.set_ylabel(r"$n$ [$10^{19}$ m$^{-3}$]"); a.set_xlabel(xl)
         at = a.twinx()
         at.plot(pk, np.asarray(bl.te) / 1e3, "-", color="tab:red", label=r"$T_e$")
         at.plot(pk, np.asarray(bl.ti) / 1e3, "--", color="tab:red", label=r"$T_i$")
@@ -6142,7 +6154,7 @@ class Bouquet:
         if bl.p_fast is not None:
             ax[1].plot(pk, np.asarray(bl.p_fast) / 1e3, ":", color="tab:purple",
                        label="fast")
-        ax[1].set_ylabel("p [kPa]"); ax[1].set_xlabel(r"$\psi_N$")
+        ax[1].set_ylabel("p [kPa]"); ax[1].set_xlabel(xl)
         ax[1].set_title("pressure"); ax[1].legend(fontsize=8); ax[1].grid(alpha=0.3)
 
         # separated toroidal currents
@@ -6153,7 +6165,7 @@ class Bouquet:
         for nm, arr in (("j_NBI", bl.j_NBI), ("j_RF", bl.j_RF)):
             if arr is not None and np.any(np.asarray(arr)):
                 ax[2].plot(pe, np.asarray(arr) / 1e6, "--", lw=1, label=nm)
-        ax[2].set_ylabel(r"$j$ [MA/m$^2$]"); ax[2].set_xlabel(r"$\psi_N$")
+        ax[2].set_ylabel(r"$j$ [MA/m$^2$]"); ax[2].set_xlabel(xl)
         ax[2].set_title("separated currents"); ax[2].legend(fontsize=8); ax[2].grid(alpha=0.3)
 
         ttl = (f"Baseline  Ip={bl.Ip_target/1e6:.3f} MA  "
@@ -6168,7 +6180,7 @@ class Bouquet:
 
         Replays the per-draw pre-SWB sequence -- state-anchor solve at
         the baseline j_phi/pressure, ``solve_with_bootstrap`` on the baseline
-        kinetics, toroidal conversion, axis-transition smoothing -- and
+        kinetics, axis-transition smoothing -- and
         compares the resulting bootstrap spike to ``baseline.j_BS``.  Any
         systematic deviation found here is inherited by EVERY draw as a
         j_phi target bias: the 2026-07 hollow-core/q0-offset bug was exactly
@@ -6233,13 +6245,12 @@ class Bouquet:
         Returns
         -------
         dict with ``spike0`` (the sigma=0 draw-context j_BS), ``max_dev``,
-        ``rms_dev`` [A/m^2], ``max_dev_frac`` (of peak j_BS), ``psi_worst``,
-        and ``passed``.
+        ``rms_dev`` [A/m^2], ``max_dev_frac`` (of peak j_BS), ``psi_worst``
+        (in the run coordinate ``coord``), and ``passed``.
         """
         import numpy as np
         from scipy.interpolate import interp1d
-        from .TokaMaker_interface import (_swb_jbs_to_toroidal,
-                                          smooth_jbs_transition)
+        from .TokaMaker_interface import smooth_jbs_transition
         from .utils import pchip_derivative
         _eng = _engine_gate(self.config)
         if _eng is None:
@@ -6251,7 +6262,6 @@ class Bouquet:
             # the frozen code (tests/test_engine_draws_legacy_ast.py).
             from OpenFUSIONToolkit.TokaMaker.bootstrap import \
                 solve_with_bootstrap
-            from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
 
         if self.baseline is None or self.mygs is None:
             raise ValueError("call setup_solver() + prepare_baseline() / "
@@ -6270,6 +6280,7 @@ class Bouquet:
                   "one profile, so there is no j_BS split to verify")
             return {"spike0": None, "max_dev": 0.0, "rms_dev": 0.0,
                     "max_dev_frac": 0.0, "psi_worst": float("nan"),
+                    "coord": getattr(self.baseline, "coord", coords.PSI),
                     "passed": True, "skipped": "single_profile_jphi"}
         bl = self.baseline
         mygs = self.mygs
@@ -6285,6 +6296,7 @@ class Bouquet:
         # fall back to the pipeline default (matches the forward-solve sites).
         psi_pad = getattr(self.config.source, "psi_pad", 1e-3)
         psi_N = np.asarray(bl.psi_N, dtype=float)
+        coord = getattr(bl, "coord", coords.PSI)
         from .physics import ELEMENTARY_CHARGE as EC
 
         # kinetics + pressure on the equilibrium grid, mirroring
@@ -6310,9 +6322,9 @@ class Bouquet:
 
         # state-anchor solve at the baseline j_phi (mirrors the per-draw flow)
         pp = solver_pp_profile(
-            psi_N, pressure, (mygs.psi_bounds[1] - mygs.psi_bounds[0]), _edge)
-        ffp = {"type": "jphi-linterp",
-               "y": np.asarray(bl.j_phi, dtype=float).copy(), "x": psi_N}
+            psi_N, pressure, (mygs.psi_bounds[1] - mygs.psi_bounds[0]), _edge, coord=coord)
+        ffp = coords.oft_prof("jphi-linterp", psi_N,
+                              np.asarray(bl.j_phi, dtype=float).copy(), coord)
         if (bool(getattr(gc, "jbs_self_consistent", False))
                 and getattr(bl, "jphi_diff", None) is not None):
             # self-consistent loop: the anchor is the reconstruction's own
@@ -6369,15 +6381,16 @@ class Bouquet:
                 psi_N, psi_pad, entry_snap=_entry_snap,
                 draw_route=draw_route, draw_routes=draw_routes)
 
-        seed = create_power_flux_fun(len(psi_N), 1.5, 1.5)["y"]
+        seed = coords.swb_seed(psi_N, coords.psi_at(mygs, psi_N, coord))
         res = solve_with_bootstrap(
             mygs, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
             float(bl.Ip_target), seed,
             scale_jBS=float(getattr(bl, "bs_scale", 1.0)),
             isolate_edge_jBS=bool(gc.isolate_edge_jBS),
+            **coords.swb_grid_kwargs(psi_N, coord),
             diagnostic_plots=False, **gc.bootstrap_kwargs)
         spike0 = smooth_jbs_transition(
-            _swb_jbs_to_toroidal(mygs, res["isolated_j_BS"], psi_pad))
+            np.asarray(res["isolated_j_BS"], dtype=float))
         if gc.floor_j_BS:
             spike0 = np.clip(spike0, 0.0, None)
 
@@ -6397,7 +6410,7 @@ class Bouquet:
                    max_dev=float(np.max(np.abs(dev_eval))),
                    rms_dev=float(np.sqrt(np.mean(dev_eval ** 2))),
                    max_dev_frac=float(np.max(np.abs(dev_eval)) / peak),
-                   psi_worst=float(psi_N[iworst]),
+                   psi_worst=float(psi_N[iworst]), coord=coord,
                    n_floored=int(floored.sum()),
                    max_dev_floored=(float(np.max(np.abs(dev[floored])))
                                     if floored.any() else 0.0),
@@ -6415,7 +6428,8 @@ class Bouquet:
                if out["n_floored"] else "")
         print(f"[sigma0-check] {status}: max|spike0 - j_BS| = "
               f"{out['max_dev']/1e6:.4f} MA/m² ({100*out['max_dev_frac']:.2f}% "
-              f"of peak, worst at psi_N={out['psi_worst']:.3f}; "
+              f"of peak, worst at {'Phi_N' if coord == coords.PHI else 'psi_N'}"
+              f"={out['psi_worst']:.3f}; "
               f"tol {100*tol_frac:.1f}%{_fl})")
         return out
 
@@ -6721,13 +6735,14 @@ class Bouquet:
         mygs = self.mygs
         gc = self.config.generation
         _edge = resolve_edge_pressure(gc)
+        coord = getattr(bl, "coord", coords.PSI)
         Ip = float(bl.Ip_target)
         jdiff = (None if getattr(bl, "jBS_diff", None) is None
                  else np.asarray(bl.jBS_diff, dtype=float))
         compose = _draw_jbs_composer(
             psi_N, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq, psi_pad,
             bool(gc.isolate_edge_jBS), float(getattr(bl, "bs_scale", 1.0)),
-            bool(gc.floor_j_BS), jdiff, None, None)
+            bool(gc.floor_j_BS), jdiff, None, None, coord=coord)
         j_ind = np.asarray(bl.j_inductive, dtype=float)
         j_fix = np.asarray(bl.j_phi, dtype=float) - j_ind - np.asarray(
             bl.j_BS, dtype=float)
@@ -6749,11 +6764,10 @@ class Bouquet:
         def _solve(j):
             from .utils import pchip_derivative
             _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-            _pp = solver_pp_profile(psi_N, pressure, _pr, _edge)
+            _pp = solver_pp_profile(psi_N, pressure, _pr, _edge, coord=coord)
             mygs.set_targets(Ip=Ip, pax=solver_pax(pressure, _edge))
-            mygs.set_profiles(pp_prof=_pp, ffp_prof={
-                "type": "jphi-linterp", "y": np.asarray(j, float),
-                "x": psi_N})
+            mygs.set_profiles(pp_prof=_pp, ffp_prof=coords.oft_prof(
+                "jphi-linterp", psi_N, np.asarray(j, float), coord))
             mygs.solve()
 
         def _step(spk, k, relax=None):
@@ -6761,7 +6775,7 @@ class Bouquet:
             _j = j_ind + spk + j_fix
             _solve(_j if relax is None else relax(_j))
             _snap = mygs.copy_eq()
-            _w, _x, _k = residual_weights(_snap, psi_N, psi_pad)
+            _w, _x, _k = residual_weights(_snap, psi_N, psi_pad, coord=coord)
             return dict(w=_w, x=_x, snap=_snap,
                         li=float(mygs.get_stats(li_normalization="iter",
                                                 lcfs_pad=psi_pad)["l_i"]))
@@ -6795,7 +6809,7 @@ class Bouquet:
                                         "with the baseline (sigma=0) "
                                         "kinetics"),
                            raise_on_fail=False)
-        w, x, _k = residual_weights(mygs.copy_eq(), psi_N, psi_pad)
+        w, x, _k = residual_weights(mygs.copy_eq(), psi_N, psi_pad, coord=coord)
         cmp_ = profile_residuals(res["jbs_used"], ref, w, x, abs(Ip))
         li_s0 = float(mygs.get_stats(li_normalization="iter",
                                      lcfs_pad=psi_pad)["l_i"])
@@ -6921,6 +6935,7 @@ class Bouquet:
         mygs = self.mygs
         _edge = resolve_edge_pressure(self.config.generation)
         gc = self.config.generation
+        coord = getattr(bl, "coord", coords.PSI)
         from .physics import ELEMENTARY_CHARGE as EC
         Ip = float(bl.Ip_target)
         if routes is None:
@@ -6986,13 +7001,13 @@ class Bouquet:
             from .utils import pchip_derivative
             _restore()
             _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
-            _pp = solver_pp_profile(psi_N, pressure, _pr, _edge)
+            _pp = solver_pp_profile(psi_N, pressure, _pr, _edge, coord=coord)
             _yc = np.asarray(bl.j_phi, dtype=float).copy()
             if getattr(bl, "jphi_diff", None) is not None:
                 _yc = _yc + np.asarray(bl.jphi_diff, dtype=float)
             mygs.set_targets(Ip=Ip, pax=solver_pax(pressure, _edge))
-            mygs.set_profiles(pp_prof=_pp, ffp_prof={
-                "type": "jphi-linterp", "y": _yc, "x": psi_N})
+            mygs.set_profiles(pp_prof=_pp, ffp_prof=coords.oft_prof(
+                "jphi-linterp", psi_N, _yc, coord))
             try:
                 mygs.solve()
             except (ValueError, RuntimeError):
@@ -7000,7 +7015,7 @@ class Bouquet:
             _sel, _d = evaluate_jBS(mygs, psi_N, ne_eq, te_eq, ni_eq, ti_eq,
                                     Zeff_eq, psi_pad=psi_pad,
                                     isolate_edge=bool(gc.isolate_edge_jBS),
-                                    smooth_axis=False)
+                                    smooth_axis=False, coord=coord)
             dref = scale0 * np.asarray(_sel, dtype=float)
             dbase = np.asarray(ref, dtype=float)
             blk["delta_mode"] = True
@@ -7043,9 +7058,10 @@ class Bouquet:
                     Z_imp=getattr(bl, "Z_imp", None),
                     p_diff=getattr(bl, "p_diff", None),
                     jphi_diff=getattr(bl, "jphi_diff", None),
-                    jbs_loop=settings, jphi_request_offset=_off)[6]
+                    jbs_loop=settings, jphi_request_offset=_off,
+                    coord=coord)[6]
                 snap = mygs.copy_eq()
-                w, x, _k = residual_weights(snap, psi_N, psi_pad)
+                w, x, _k = residual_weights(snap, psi_N, psi_pad, coord=coord)
                 ctx = d.get("_jbs_ctx") or {}
                 if ctx.get("spike_used") is not None:
                     spk = np.asarray(ctx["spike_used"], dtype=float)
@@ -7071,7 +7087,7 @@ class Bouquet:
                 if _ja_ref is not None:
                     try:
                         _jd = _achieved_jphi_fsa(mygs, psi_N, psi_pad,
-                                                 sign_ref=_ja_ref)
+                                                 sign_ref=_ja_ref, coord=coord)
                         _c = profile_residuals(_jd, np.asarray(
                             _ja_ref, dtype=float), w, x, abs(Ip))
                         jphi_cmp = dict(r_j=float(_c["r_j"]),
@@ -7409,6 +7425,8 @@ class Bouquet:
         self._validate_workflow()
 
         bl = self.baseline
+        # A baseline set directly skips prepare's guard: re-check its coordinate.
+        coords.check_run(self.config, getattr(bl, "coord", coords.PSI))
         gc = self.config.generation
         fc = self.config.filtering
         n_equils = int(n if n is not None else gc.n_equils)
@@ -7640,6 +7658,7 @@ class Bouquet:
                 baseline_mse_record=getattr(bl, "mse_record", None),
                 solve_guard=_solve_guard,
                 engine_draw=_eng,
+                coord=getattr(bl, "coord", coords.PSI),
                 **gc.bootstrap_kwargs,
             )
         self.generation_log = _cap["text"] or None
@@ -8311,7 +8330,7 @@ class Bouquet:
         """Write one perturbed IMAS/OMAS IDS per ``selection`` draw to
         ``out_dir`` (IMAS source only). Thin wrapper over
         :func:`export_imas_drawset`; ``fidelity`` picks the exact
-        (captured-geometry) or baseline-ratio current split."""
+        (captured-geometry) or template-geometry current conversion."""
         from .config import ImasSource
         from .io.imas import export_imas_drawset
         if not isinstance(self.config.source, ImasSource):

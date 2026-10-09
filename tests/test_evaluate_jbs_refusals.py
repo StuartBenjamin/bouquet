@@ -393,8 +393,8 @@ def test_a_negative_trapped_fraction_inside_the_plasma_is_refused():
 #  the toroidal conversion is the package's one field-aligned factor
 # ---------------------------------------------------------------------------
 def test_the_toroidal_conversion_is_the_one_field_aligned_factor():
-    """Pins the convention the evaluator shares with the frozen path's
-    ``_swb_jbs_to_toroidal`` and the unified engine: ``<j_phi> = kappa
+    """Pins the convention the evaluator shares with the unified engine:
+    ``<j_phi> = kappa
     <j.B>``, ``kappa = F <1/R> / <B^2>``.  Until 2026-10-06 this pinned
     ``<j.B> / (F <1/R>)``; the owner-approved change (one conversion in the
     package) moved it -- by ``[<B^2>/<B_phi^2>] [<1/R^2>/<1/R>^2]``, ~6.8 %

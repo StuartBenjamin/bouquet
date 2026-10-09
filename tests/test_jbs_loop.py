@@ -886,7 +886,7 @@ def _ph_setup(monkeypatch, kind):
     Jstar = _shape(x)
     calls = {"corr": [], "renorm": 0}
     monkeypatch.setattr(L, "residual_weights",
-                        lambda eq, psi_N, psi_pad=1e-3: (np.ones_like(x), x,
+                        lambda eq, psi_N, psi_pad=1e-3, coord="psi_n": (np.ones_like(x), x,
                                                          "test"))
 
     def _renorm(mygs, psi_N, target, Ip, pad, label=""):
