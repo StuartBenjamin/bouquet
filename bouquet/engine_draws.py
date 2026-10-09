@@ -1492,7 +1492,7 @@ class GenerateEngineDraws(DrawMethod):
             jbs_loop=_jbs_block(rec["loop"]),
             engine=rec,
             _jbs_ctx=dict(kind="engine", engine=self,
-                          isolate_edge_jBS=False))
+                          isolate_edge_jbs=False))
         nat = inputs.kinetics_native
         return (nat["ne"], nat["te"], nat["ni"], nat["ti"],
                 np.zeros_like(ctx.psi), sp["j_phi"], diag)

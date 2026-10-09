@@ -196,7 +196,7 @@ The engine can be named at construction (`from_geqdsk` / `from_imas(...,
 reconstruction_engine="legacy")`) or set afterwards
 (`bq.generation.reconstruction_engine = "legacy"`): the order no longer
 matters, because the settings whose validated value depends on the engine
-(`isolate_edge_jBS`, `perturb_jind_in_anchor`) are left unset by the
+(`isolate_edge_jbs`, `perturb_jind_in_anchor`) are left unset by the
 factories and resolved when `prepare_baseline()` runs, and the archive
 records how ([engine.md](docs/engine.md)).
 

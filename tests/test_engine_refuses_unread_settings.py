@@ -6,7 +6,7 @@ were accepted and silently ignored.  Each refusal names the engine setting
 that replaces it (or says nothing does).  Defaults, and the factories'
 configs built with ``reconstruction_engine="unified"``, are accepted;
 ``workflow='custom'`` downgrades to a printed WARN, as for the MSE knobs.
-``isolate_edge_jBS`` / ``perturb_jind_in_anchor`` joined the refused set on
+``isolate_edge_jbs`` / ``perturb_jind_in_anchor`` joined the refused set on
 2026-10-05 (owner-approved); since 2026-10-07 the factories set neither
 (both default to ``None`` and are resolved per engine at
 ``prepare_baseline()``, tests/test_engine_resolved_defaults.py), so the
@@ -39,7 +39,7 @@ _SET = dict(
     accept_anchor_inband=True, diagnostic_plots=True,
     # owner-approved 2026-10-05: refused too (the factories no longer set
     # them for a unified configuration)
-    isolate_edge_jBS=False, perturb_jind_in_anchor=True)
+    isolate_edge_jbs=False, perturb_jind_in_anchor=True)
 
 
 def test_every_unread_field_has_a_case():
@@ -117,7 +117,7 @@ def test_the_factories_build_a_unified_config_the_engine_accepts(factory):
     b = _factory(factory, reconstruction_engine="unified")
     g = b.config.generation
     assert g.reconstruction_engine == "unified"
-    assert g.isolate_edge_jBS is None
+    assert g.isolate_edge_jbs is None
     assert g.perturb_jind_in_anchor is None
     validate_engine_settings(g)
 
@@ -128,7 +128,7 @@ def test_the_factories_default_to_the_engine(factory):
     since 2026-10-06), exactly as with reconstruction_engine="unified"."""
     g = _factory(factory).config.generation
     assert g.reconstruction_engine == "unified"
-    assert g.isolate_edge_jBS is None
+    assert g.isolate_edge_jbs is None
     assert g.perturb_jind_in_anchor is None
     validate_engine_settings(g)
 
@@ -141,7 +141,7 @@ def test_the_factories_legacy_configs_leave_the_engine_settings_unset(
     prepare_baseline() (tests/test_engine_resolved_defaults.py)."""
     g = _factory(factory, reconstruction_engine="legacy").config.generation
     assert g.reconstruction_engine == "legacy"
-    assert g.isolate_edge_jBS is None
+    assert g.isolate_edge_jbs is None
     assert g.perturb_jind_in_anchor is None
     validate_engine_settings(g)
 
@@ -155,15 +155,15 @@ def test_switching_a_legacy_factory_config_to_the_engine_is_accepted(
     b = _factory(factory, reconstruction_engine="legacy")
     b.config.generation.reconstruction_engine = "unified"
     validate_engine_settings(b.config.generation)
-    b.config.generation.isolate_edge_jBS = False
+    b.config.generation.isolate_edge_jbs = False
     with pytest.raises(ValueError) as ei:
         validate_engine_settings(b.config.generation)
     msg = str(ei.value)
-    assert "isolate_edge_jBS=False" in msg and "never reads" in msg
+    assert "isolate_edge_jbs=False" in msg and "never reads" in msg
     assert "reconstruction_engine='unified'" in msg
 
 
-@pytest.mark.parametrize("name", ["isolate_edge_jBS",
+@pytest.mark.parametrize("name", ["isolate_edge_jbs",
                                   "perturb_jind_in_anchor"])
 def test_the_engines_own_value_of_an_engine_dependent_field_is_accepted(
         name):
@@ -186,7 +186,7 @@ def test_swb_only_bootstrap_kwargs_are_refused_under_the_engine():
 def test_the_engine_edge_taper_is_off_by_default_and_overridable():
     assert engine_settings(_unified())["edge_taper"] == dict(
         on=False, psi0=0.999, shape=2)
-    on = engine_settings(_unified(bootstrap_kwargs={"taper_edge_jBS": True}))
+    on = engine_settings(_unified(bootstrap_kwargs={"taper_edge_jbs": True}))
     assert on["edge_taper"]["on"] is True
     with pytest.raises(ValueError, match="taper_edge_shape"):
         validate_engine_settings(

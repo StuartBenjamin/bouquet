@@ -199,7 +199,7 @@ def _imas_probe(outdir, part):
     bl = b.prepare_baseline()
     rec = bl.li_metrics["jbs_loop"]
     peak = float(np.max(np.abs(src_jbs)))
-    comp = _draw_jbs_composer(psi, *kin, 1e-3, bool(g.isolate_edge_jBS),
+    comp = _draw_jbs_composer(psi, *kin, 1e-3, bool(g.isolate_edge_jbs),
                               1.0, bool(g.floor_j_BS),
                               np.asarray(bl.jBS_diff, float), None, None)
     spike_on_base, _f, _d = comp(b.mygs.copy_eq())
@@ -358,7 +358,7 @@ def _recon_probe(outdir):
         len(psi_N), input_jinductive=np.asarray(bl.j_inductive, float),
         l_i_tolerance=g.l_i_tolerance, psi_pad=psi_pad,
         constrain_sawteeth=False, recalculate_j_BS=True,
-        isolate_edge_jBS=g.isolate_edge_jBS, floor_j_BS=g.floor_j_BS,
+        isolate_edge_jbs=g.isolate_edge_jbs, floor_j_BS=g.floor_j_BS,
         scale_jBS=float(getattr(bl, "bs_scale", 1.0)),
         perturb_jind_in_anchor=True, accept_anchor_inband=False,
         psi_N_kinetic=psi_kin, p_thresh=0.05, rng=12345,
@@ -403,7 +403,7 @@ def _recon_probe(outdir):
     j_fix = j_phi_bl - j_ind - np.asarray(bl.j_BS, dtype=float)
     compose = _draw_jbs_composer(
         psi_N, ne_d, te_d, ni_d, ti_d, Zeff_eq, psi_pad,
-        bool(g.isolate_edge_jBS), float(getattr(bl, "bs_scale", 1.0)),
+        bool(g.isolate_edge_jbs), float(getattr(bl, "bs_scale", 1.0)),
         bool(g.floor_j_BS), None, None, None)
     Ip = float(bl.Ip_target)
     mygs = b.mygs

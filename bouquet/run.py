@@ -144,7 +144,7 @@ class Bouquet(SwbBaseline):
         engine; ``"legacy"`` runs the legacy reconstruction and draws.  It
         may equally be set afterwards (``bq.generation.
         reconstruction_engine = "legacy"``): the engine-dependent workflow
-        settings (``isolate_edge_jBS``, ``perturb_jind_in_anchor``;
+        settings (``isolate_edge_jbs``, ``perturb_jind_in_anchor``;
         :data:`bouquet.engine.ENGINE_DEPENDENT_DEFAULTS`) are left unset
         here and resolved to the validated values of the engine configured
         when :meth:`prepare_baseline` runs (legacy g-file: the full-profile
@@ -166,7 +166,7 @@ class Bouquet(SwbBaseline):
         # the engine-dependent workflow settings are resolved at
         # prepare_baseline(), for the engine configured THEN (legacy g-file:
         # the standard flagship l_i loop, perturb_jind_in_anchor=False, and
-        # the full-profile decomposition, isolate_edge_jBS=False)
+        # the full-profile decomposition, isolate_edge_jbs=False)
         return cls(cfg)
 
     @classmethod
@@ -206,7 +206,7 @@ class Bouquet(SwbBaseline):
         default, ``"unified"`` since 2026-10-06) selects the reconstruction
         engine; ``"legacy"`` runs the legacy IMAS baseline and draws.  It
         may equally be set afterwards: the engine-dependent workflow
-        settings (``isolate_edge_jBS``, ``perturb_jind_in_anchor``;
+        settings (``isolate_edge_jbs``, ``perturb_jind_in_anchor``;
         :data:`bouquet.engine.ENGINE_DEPENDENT_DEFAULTS`) are left unset
         here and resolved to the validated values of the engine configured
         when :meth:`prepare_baseline` runs (legacy IDS: diff+C and the
@@ -245,7 +245,7 @@ class Bouquet(SwbBaseline):
         # the bootstrap to the source via the fixed FUSE_jBS-SWB diff;
         # perturb_jind_in_anchor=True: perturb j_ind in the recon-anchor to
         # avoid the find_optimal_scale/corrector homogenization) and the
-        # full-profile decomposition (isolate_edge_jBS=False: FUSE/IMAS
+        # full-profile decomposition (isolate_edge_jbs=False: FUSE/IMAS
         # sources carry a FULL Sauter bootstrap, so the edge-spike isolation
         # would mislabel a redundant j_BS,edge and mangle the per-draw
         # j_inductive).
@@ -772,7 +772,7 @@ class Bouquet(SwbBaseline):
         if self.mygs is not None:
             self.point_solver()
 
-        # The engine-dependent settings (isolate_edge_jBS,
+        # The engine-dependent settings (isolate_edge_jbs,
         # perturb_jind_in_anchor) are resolved HERE, once, for the engine
         # configured now -- whatever it was when the config was built -- and
         # the resolution goes on the baseline and into the archive.
@@ -4533,8 +4533,8 @@ class Bouquet(SwbBaseline):
         # sigma=0 draw reproduces ohmic + SWB exactly. The total l_i is whatever
         # this self-consistent (FUSE ohmic + OFT bootstrap) combination gives.
         #
-        # isolate_edge_jBS: FUSE work uses the FULL bootstrap profile (False), so
-        # the baseline and the draws (which read results["isolated_j_BS"] under
+        # isolate_edge_jbs: FUSE work uses the FULL bootstrap profile (False), so
+        # the baseline and the draws (which read results["jphi_bs_final"] under
         # the same flag) build j_phi from the same SWB current.
         # Two reconciliation modes (GenerationConfig.jBS_baseline_mode), both
         # keeping FUSE's actual ohmic current as the perturbable inductive:
@@ -4591,7 +4591,7 @@ class Bouquet(SwbBaseline):
             from scipy.optimize import brentq
 
             gc = self.config.generation
-            iso = bool(gc.isolate_edge_jBS); mode = str(gc.jBS_baseline_mode)
+            iso = bool(gc.isolate_edge_jbs); mode = str(gc.jBS_baseline_mode)
             j_ind = np.asarray(bl.j_inductive, dtype=float)   # FUSE ohmic (kept)
             j_BS_src = np.asarray(bl.j_BS, dtype=float)        # source bootstrap (FUSE)
             FUSE_tot = np.asarray(bl.j_phi, dtype=float)       # source total (j_tor)
@@ -5144,7 +5144,7 @@ class Bouquet(SwbBaseline):
                     """jbs_init="swb": the legacy SWB result as the initial
                     guess (A/B only), with mygs put back on the anchor."""
                     _snap_a = mygs.copy_eq()
-                    _kw = dict(scale_jBS=1.0, isolate_edge_jBS=iso,
+                    _kw = dict(scale_jbs=1.0, isolate_edge_jbs=iso,
                                diagnostic_plots=False, verbose=False,
                                **gc.bootstrap_kwargs)
                     _seed = coords.swb_seed(psi_N, coords.psi_at(
@@ -5170,7 +5170,7 @@ class Bouquet(SwbBaseline):
                             **_kw)
                     # SWB's j_BS is TokaMaker jphi already, on its grid
                     _j = smooth_jbs_transition(np.asarray(
-                        _swb["isolated_j_BS"], dtype=float))
+                        _swb["jphi_bs_final"], dtype=float))
                     if gc.floor_j_BS:
                         _j = np.clip(_j, 0.0, None)
                     mygs.replace_eq(source_eq=_snap_a)
@@ -5758,7 +5758,7 @@ class Bouquet(SwbBaseline):
                 swb_seed, swb_fix = self._swb_inputs(mygs, psi_N, coord)
                 swb = solve_with_bootstrap(
                     mygs, ne, te, ni, ti, Zeff, bl.Ip_target, swb_seed,
-                    scale_jBS=1.0, isolate_edge_jBS=iso,
+                    scale_jbs=1.0, isolate_edge_jbs=iso,
                     diagnostic_plots=False, verbose=False,
                     **swb_fix,
                     **coords.swb_grid_kwargs(psi_N, coord),
@@ -5767,7 +5767,7 @@ class Bouquet(SwbBaseline):
                 # Same axis-transition smoothing every per-draw spike receives, so
                 # the sigma=0 draw reproduces this baseline split exactly.
                 j_BS_swb = smooth_jbs_transition(
-                    np.asarray(swb["isolated_j_BS"], dtype=float))
+                    np.asarray(swb["jphi_bs_final"], dtype=float))
                 if gc.floor_j_BS:
                     j_BS_swb = np.clip(j_BS_swb, 0.0, None)
                 ratio = j_BS_swb.max() / max(j_BS_src.max(), 1.0)
@@ -6048,7 +6048,7 @@ class Bouquet(SwbBaseline):
         else:
             comp = _draw_jbs_composer(
                 psi_N, ne, te, ni, ti, Zeff, psi_pad,
-                bool(gc.isolate_edge_jBS), float(getattr(bl, "bs_scale", 1.0)),
+                bool(gc.isolate_edge_jbs), float(getattr(bl, "bs_scale", 1.0)),
                 bool(gc.floor_j_BS), jdiff, None, None, coord=coord)
             j_bs0 = np.asarray(comp(mygs.copy_eq())[0], dtype=float)
             bl.j_BS = j_bs0 - (0.0 if jdiff is None else jdiff)
@@ -6403,12 +6403,12 @@ class Bouquet(SwbBaseline):
         res = solve_with_bootstrap(
             mygs, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
             float(bl.Ip_target), seed,
-            scale_jBS=1.0,
-            isolate_edge_jBS=bool(gc.isolate_edge_jBS),
+            scale_jbs=1.0,
+            isolate_edge_jbs=bool(gc.isolate_edge_jbs),
             **coords.swb_grid_kwargs(psi_N, coord),
             diagnostic_plots=False, **swb_fix, **gc.bootstrap_kwargs)
         spike0 = (1.0 if _mult is None else _mult) * smooth_jbs_transition(
-            np.asarray(res["isolated_j_BS"], dtype=float))
+            np.asarray(res["jphi_bs_final"], dtype=float))
         if gc.floor_j_BS:
             spike0 = np.clip(spike0, 0.0, None)
 
@@ -6759,7 +6759,7 @@ class Bouquet(SwbBaseline):
                  else np.asarray(bl.jBS_diff, dtype=float))
         compose = _draw_jbs_composer(
             psi_N, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq, psi_pad,
-            bool(gc.isolate_edge_jBS), float(getattr(bl, "bs_scale", 1.0)),
+            bool(gc.isolate_edge_jbs), float(getattr(bl, "bs_scale", 1.0)),
             bool(gc.floor_j_BS), jdiff, None, None, coord=coord)
         j_ind = np.asarray(bl.j_inductive, dtype=float)
         j_fix = np.asarray(bl.j_phi, dtype=float) - j_ind - np.asarray(
@@ -7032,7 +7032,7 @@ class Bouquet(SwbBaseline):
                 pass                      # generate_bouquet tolerates it too
             _sel, _d = evaluate_jBS(mygs, psi_N, ne_eq, te_eq, ni_eq, ti_eq,
                                     Zeff_eq, psi_pad=psi_pad,
-                                    isolate_edge=bool(gc.isolate_edge_jBS),
+                                    isolate_edge=bool(gc.isolate_edge_jbs),
                                     smooth_axis=False, coord=coord)
             dref = scale0 * np.asarray(_sel, dtype=float)
             dbase = np.asarray(ref, dtype=float)
@@ -7053,7 +7053,7 @@ class Bouquet(SwbBaseline):
                     l_i_tolerance=gc.l_i_tolerance, psi_pad=psi_pad,
                     constrain_sawteeth=gc.constrain_sawteeth,
                     recalculate_j_BS=gc.recalculate_j_BS,
-                    isolate_edge_jBS=gc.isolate_edge_jBS,
+                    isolate_edge_jbs=gc.isolate_edge_jbs,
                     floor_j_BS=gc.floor_j_BS, jBS_diff=jdiff,
                     accept_anchor_inband=gc.accept_anchor_inband,
                     perturb_jind_in_anchor=(route == "ip_renorm"),
@@ -7551,7 +7551,7 @@ class Bouquet(SwbBaseline):
                 psi_pad=psi_pad,
                 constrain_sawteeth=gc.constrain_sawteeth,
                 recalculate_j_BS=gc.recalculate_j_BS,
-                isolate_edge_jBS=gc.isolate_edge_jBS,
+                isolate_edge_jbs=gc.isolate_edge_jbs,
                 floor_j_BS=gc.floor_j_BS,
                 jBS_diff=(None if bl.jBS_diff is None
                           else np.asarray(bl.jBS_diff, dtype=float)),

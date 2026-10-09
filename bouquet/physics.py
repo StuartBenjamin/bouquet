@@ -634,7 +634,7 @@ EDGE_TAPER_SHAPES = {1: "cos^2 (Hann)", 2: "quintic smoothstep",
 
 
 def edge_taper_weight(psi_N, psi0=0.999, shape=2):
-    """The factor SWB's edge taper (``taper_edge_jBS``) multiplies every
+    """The factor SWB's edge taper (``taper_edge_jbs``) multiplies every
     toroidal current component by: 1 for ``psi_N < psi0``, falling to 0 at
     ``psi_N = 1`` with *shape* (1 cos^2, 2 quintic smoothstep, 3 cubic).
     A port of OFT ``grad_shaf_bootstrap.F90:apply_edge_taper`` (standard
@@ -740,7 +740,7 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     which is the reason it exists:
 
     1. **Geometry on the caller's grid.**  ``F``, ``f_T = 1 - f_c``,
-       ``eps = (R_max - R_min)/(2<R>)``, ``q`` and ``<R>`` are sampled at
+       ``eps = (R_max - R_min)/(R_max + R_min)``, ``q`` and ``<R>`` are sampled at
        ``psi_eval = clip(psi_N, psi_pad, 1 - psi_pad)`` -- the caller's own
        surfaces -- not on a uniform grid of the same length.
     2. **Gradients on the true grid.**  ``d/dpsi = numpy.gradient(y, psi_N,
@@ -914,7 +914,7 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         _s = ()
     if len(_s) != 5:
         raise RuntimeError("evaluate_jBS needs sauter_fc(return_eps=True), the "
-                           "geometric eps = (R_max - R_min)/(2<R>); this "
+                           "geometric eps = (R_max - R_min)/(R_max + R_min); this "
                            "OpenFUSIONToolkit build does not provide it")
     fc_u, r_sau, modb, eps_u = _s[1:]
     _, q_u, ravgs_q, *_rest = mygs.get_q(psi=psi_u.copy())

@@ -13,7 +13,7 @@ each mirror's baseline is forward-solved -- the full ``prepare_baseline`` --
 under every closure path that recomputes a bootstrap:
 
   * ``diff``                -- the ``from_imas`` default (full-profile SWB);
-  * ``diff_floor_isolate``  -- ``floor_j_BS`` + ``isolate_edge_jBS``: the SWB
+  * ``diff_floor_isolate``  -- ``floor_j_BS`` + ``isolate_edge_jbs``: the SWB
     clip at >= 0 and the edge-spike isolation, the two places a wrongly signed
     bootstrap would be silently zeroed or mislabelled;
   * ``ohmic_bootstrap``     -- the hybrid closure (bootstrap channel);
@@ -67,7 +67,7 @@ _files_ok = all(os.path.isfile(p) for p in (mdd.EXAMPLE_DD, mdd.EXAMPLE_MESH))
 #: applied on top of the ``Bouquet.from_imas`` defaults.
 _BASE_CONFIGS = (
     ("diff", {}),
-    ("diff_floor_isolate", {"floor_j_BS": True, "isolate_edge_jBS": True}),
+    ("diff_floor_isolate", {"floor_j_BS": True, "isolate_edge_jbs": True}),
     ("ohmic_bootstrap", {"jBS_baseline_mode": "ohmic",
                          "closure_channel": "bootstrap"}),
     ("ohmic_structured", {"jBS_baseline_mode": "ohmic",

@@ -165,7 +165,7 @@ OFT `fix/jphi-update-ravgs-and-nonfinite-abort` 7da4f18, build
 `20260929_7da4f18`), run with `regenerate_golden_run.py
 --reconstruction-engine unified`, which sets the field and puts the
 legacy-only fields the engine never reads back to their defaults (printed and
-recorded in the run's `summary.json`; here only `isolate_edge_jBS`
+recorded in the run's `summary.json`; here only `isolate_edge_jbs`
 False -> True). No bar changed.
 
 * Unified engine: 20 attempts, **17 archived** (3 rejected:
@@ -209,7 +209,7 @@ False -> True). No bar changed.
   when the run was made, and were committed together with the fixture in
   `1a15685`. The fixture is regenerable from `1a15685`'s tree. (`3d974e6`
   later changes how the generator's engine switch records
-  `isolate_edge_jBS` -- that field now defaults to `None` and is resolved
+  `isolate_edge_jbs` -- that field now defaults to `None` and is resolved
   per engine -- not what runs: it still records and applies False -> True.)
 
 ## Regenerated on the fixed OFT build at today's defaults (2026-10-05, owner-approved)
@@ -494,7 +494,7 @@ empty), `fixed_components.p_fast_reduction` (`trace` vs `auto`, with no fast
 pressure in this case), and list-vs-tuple spellings of `jBS_scale_range` and
 `homotopy_passes`. None of these reaches the reconstruction. There is no
 difference in coil regularisation, bootstrap model, `recalculate_j_BS`,
-`isolate_edge_jBS` or `perturb_jind_in_anchor`. The loop records are
+`isolate_edge_jbs` or `perturb_jind_in_anchor`. The loop records are
 bit-identical:
 
 | reconstruction `jbs_loop` | fixture (refresh) | replay (test path) |
@@ -611,7 +611,7 @@ several ways, and none of them is new with the refresh except the first:
   archives as ACHIEVED currents (the per-draw half of the archival change);
 * it passes `Zeff ≡ 1`, where `generate()` passes the baseline Z_eff
   (1.76–1.92 here);
-* it leaves `isolate_edge_jBS` at the function default `True`, where
+* it leaves `isolate_edge_jbs` at the function default `True`, where
   `generate()` passes the geqdsk workflow's `False` (`from_geqdsk`), and it
   passes no `baseline_j_BS` and no `jBS_scale_range`.
 
@@ -664,7 +664,7 @@ and reproduces the golden draw (see above).
    input; plots and consumers keep the achieved current that matches the
    eqdsk. This is a schema addition.
 4. *Make the replay's `generate_bouquet` call match `generate()`'s.* Pass
-   the baseline Z_eff, `isolate_edge_jBS=False`, `baseline_j_BS` and
+   the baseline Z_eff, `isolate_edge_jbs=False`, `baseline_j_BS` and
    `jBS_scale_range` as the class API does, and Z_imp / p_fast / j_NBI /
    j_RF where set, instead of the function defaults. The simplest way is to
    derive the arguments from the reconstructed `Bouquet` rather than

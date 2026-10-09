@@ -783,7 +783,7 @@ class GenerationConfig:
     # decomposition, both input types), True under "unified" (which never
     # reads it).  An explicit value is kept; one contradicting the engine's
     # validated value warns (and is refused under "unified").
-    isolate_edge_jBS: Optional[bool] = None
+    isolate_edge_jbs: Optional[bool] = None
     # How the SWB bootstrap is reconciled with the FUSE baseline on the IMAS
     # path (see run._forward_solve_imas_baseline):
     #   "diff"    : keep FUSE total; add fixed correction diff = FUSE_jBS - SWB
@@ -1245,8 +1245,8 @@ class GenerationConfig:
     imas_corrective_jphi: bool = False
     # Floor the SWB bootstrap at 0 (drop unphysical negative excursions) before
     # it enters j_phi, in both the baseline and every draw. Default False: only
-    # needed for the isolate_edge_jBS=False full-profile mode (which carries an
-    # inner negative lobe). With isolate_edge_jBS=True the spike is
+    # needed for the isolate_edge_jbs=False full-profile mode (which carries an
+    # inner negative lobe). With isolate_edge_jbs=True the spike is
     # already ~clean, so flooring is redundant -- and it REGRESSED a stiff
     # high-l_i case (clipping its isolate-edge spike drove yield to 0).
     floor_j_BS: bool = False
@@ -1287,7 +1287,7 @@ class GenerationConfig:
     # equilibrium.
     swb_coil_reg_weight: float = 1.0e3
     # Taper j_phi to 0 from this psi_N to the LCFS in every SWB solve (OFT
-    # taper_edge_jBS; None: off): finite edge current next to a near-degenerate
+    # taper_edge_jbs; None: off): finite edge current next to a near-degenerate
     # second null can leave the Picard on a 2-cycle.
     swb_edge_taper_psi0: Optional[float] = 0.999
     # imas_baseline="swb" sawtooth q reset inside SWB (OFT saw_q_s; None = off):
@@ -1774,8 +1774,8 @@ def validate_structured_mse_settings(gc) -> None:
 #: Arguments the call sites set themselves; ``bootstrap_kwargs`` may not
 #: shadow them (duplicate keyword, or a silent override of a per-draw value).
 _BOOTSTRAP_RESERVED = frozenset(
-    "mygs ne Te ni Ti Zeff Ip_target inductive_jphi scale_jBS "
-    "isolate_edge_jBS verbose diagnostic_plots psi_pad psi_N x coord "
+    "mygs ne Te ni Ti Zeff Ip_target inductive_jphi scale_jbs "
+    "isolate_edge_jbs verbose diagnostic_plots psi_pad psi_N x coord "
     "ffp_prof ne_prof te_prof ni_prof ti_prof".split()
 )
 
@@ -1808,6 +1808,12 @@ def _bootstrap_kwarg_names():
         # No OFT (unit tests, a docs build): cannot introspect, so do not
         # guess; a wrong key then surfaces at the call.
         return None
+
+
+#: OFT bootstrap option names before OFT PSFC_dev's jbs spelling: a stored config
+#: (``generation`` field or ``bootstrap_kwargs`` key) loads under the new name.
+OFT_RENAMED_OPTIONS = {"isolate_edge_jBS": "isolate_edge_jbs", "scale_jBS": "scale_jbs",
+                       "taper_edge_jBS": "taper_edge_jbs", "djBS_tol": "djbs_tol"}
 
 
 #: The internal solve methods (GenerationConfig.solve_method).
@@ -1884,7 +1890,7 @@ def swb_config_problems(config):
     if str(getattr(gc, "separatrix_pressure", "offset")) != "offset":
         p.append(f"separatrix_pressure={gc.separatrix_pressure!r} (OFT's SWB "
                  "always solves with pax = p_axis - p_sep)")
-    if {"taper_edge_jBS", "taper_edge_psi0"} & set(gc.bootstrap_kwargs):
+    if {"taper_edge_jbs", "taper_edge_psi0"} & set(gc.bootstrap_kwargs):
         p.append("bootstrap_kwargs taper_edge_*: set swb_edge_taper_psi0 instead")
     t = gc.swb_edge_taper_psi0
     if t is not None and not 0.0 < float(t) < 1.0:
@@ -1905,7 +1911,7 @@ def swb_bootstrap_kwargs(gc):
     edge taper from ``swb_edge_taper_psi0``."""
     kw = dict(gc.bootstrap_kwargs)
     if gc.swb_edge_taper_psi0 is not None:
-        kw.update(taper_edge_jBS=True, taper_edge_psi0=float(gc.swb_edge_taper_psi0))
+        kw.update(taper_edge_jbs=True, taper_edge_psi0=float(gc.swb_edge_taper_psi0))
     return kw
 
 
@@ -1937,6 +1943,12 @@ def validate_bootstrap_kwargs(bootstrap_kwargs, reserved=_BOOTSTRAP_RESERVED,
     if "swb_iterations" in keys:
         raise ValueError(
             "bootstrap_kwargs: 'swb_iterations' is now 'iterations'.")
+
+    old = sorted(keys & set(OFT_RENAMED_OPTIONS))
+    if old:
+        raise ValueError(
+            "bootstrap_kwargs: OFT renamed "
+            + ", ".join(f"{k!r} to {OFT_RENAMED_OPTIONS[k]!r}" for k in old) + ".")
 
     if "use_sauter_eps" in keys:
         raise ValueError(
@@ -2533,7 +2545,7 @@ _LOOP_PRE_INTRODUCTION = ("jbs_max_passes_post_homotopy", "jbs_relax_current",
 #: Kept for reference; the stored-load rule (c) of
 #: :func:`_stored_config_compat` now covers EVERY entry of
 #: ``ENGINE_UNREAD_LEGACY_FIELDS`` (2026-10-06), of which these are two.
-STORED_UNIFIED_UNREAD_FIELDS = ("isolate_edge_jBS", "perturb_jind_in_anchor")
+STORED_UNIFIED_UNREAD_FIELDS = ("isolate_edge_jbs", "perturb_jind_in_anchor")
 
 
 def _stored_unified_unread_fields():
@@ -2571,7 +2583,7 @@ def _stored_config_compat(gend: dict) -> None:
     the default, with a warning naming the field: the engine ignored the
     value, so the default reproduces what the stored config actually ran.
     Refused since 2026-10-04 (3779b51) for a NEW config; until 2026-10-06
-    only ``isolate_edge_jBS`` / ``perturb_jind_in_anchor`` had this
+    only ``isolate_edge_jbs`` / ``perturb_jind_in_anchor`` had this
     stored-load rule (6e052d0), and a stored config carrying one of the
     other 20 could not be loaded."""
     import warnings
@@ -2639,7 +2651,7 @@ def _stored_config_compat(gend: dict) -> None:
         return
     # (c) every legacy-path field the engine never reads: the engine
     # ignored a stored non-default value (the factories set
-    # isolate_edge_jBS / perturb_jind_in_anchor for the legacy path
+    # isolate_edge_jbs / perturb_jind_in_anchor for the legacy path
     # whatever the engine until 2026-10-05; the other 20 were accepted and
     # ignored until 3779b51), and refuses one on a NEW config since -- a
     # stored unified config carrying one is loaded at the default (the run
@@ -2729,6 +2741,26 @@ def _field_default(name):
             else f.default_factory())
 
 
+def _renamed_oft_options(gend: dict) -> dict:
+    """``gend`` with :data:`OFT_RENAMED_OPTIONS` moved to their new names (a field and
+    ``bootstrap_kwargs`` keys); a spelling change only, so silent."""
+    bk = dict(gend.get("bootstrap_kwargs") or {})
+    moved = [k for k in OFT_RENAMED_OPTIONS if k in gend or k in bk]
+    if not moved:
+        return gend
+    gend = dict(gend)
+    for old, new in OFT_RENAMED_OPTIONS.items():
+        for d in (gend, bk):
+            if old in d:
+                if new in d and d[new] != d[old]:
+                    raise ValueError(f"config generation: both {old!r}={d[old]!r} and "
+                                     f"{new!r}={d[new]!r}")
+                d[new] = d.pop(old)
+    if "bootstrap_kwargs" in gend:
+        gend["bootstrap_kwargs"] = bk
+    return gend
+
+
 def _checked_generation_keys(gend: dict) -> dict:
     """Refuse an unknown ``generation`` key in a config dict.
 
@@ -2742,6 +2774,7 @@ def _checked_generation_keys(gend: dict) -> dict:
     import difflib
     import warnings
     names = {f.name for f in _dc.fields(GenerationConfig)}
+    gend = _renamed_oft_options(gend)
     if "swb_iterations" in gend:
         # retired for bootstrap_kwargs; every stored config carries it (to_dict
         # writes all fields), so the default is dropped silently and any

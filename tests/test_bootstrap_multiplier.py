@@ -42,19 +42,19 @@ class TestMultiplier:
 
 
 def _fake_swb(calls):
-    """SWB whose bootstrap feeds back on its own total, so ``scale_jBS``
+    """SWB whose bootstrap feeds back on its own total, so ``scale_jbs``
     enters nonlinearly, as in OFT's self-consistent iteration."""
-    def swb(mygs, ne, te, ni, ti, Zeff, Ip, seed, scale_jBS=1.0, x=None,
+    def swb(mygs, ne, te, ni, ti, Zeff, Ip, seed, scale_jbs=1.0, x=None,
             **kw):
-        calls.append(scale_jBS)
+        calls.append(scale_jbs)
         b = ((3.0e5 * np.exp(-0.5 * ((_X - 0.92) / 0.04) ** 2)
               + 6.0e4 * (1.0 - _X)) * (ne * te) / (ne[0] * te[0]))
         j = b.copy()
         for _ in range(200):
-            j = scale_jBS * b * (1.0 + 0.4 * np.trapezoid(j, _X)
+            j = scale_jbs * b * (1.0 + 0.4 * np.trapezoid(j, _X)
                                  / np.trapezoid(b, _X))
-        return {"j_BS": j, "isolated_j_BS": j, "j_inductive": seed,
-                "total_j_phi": seed + j, "scale_j0": 1.0, "scale_Ip": 1.0}
+        return {"jphi_bs_raw": j, "jphi_bs_final": j, "jphi_ind_final": seed,
+                "jphi_total": seed + j, "scale_j0": 1.0, "scale_Ip": 1.0}
     return swb
 
 
@@ -69,14 +69,14 @@ def test_the_sigma0_draw_reproduces_the_baseline_bootstrap(toy, monkeypatch,
                         "solve_with_bootstrap", swb)
     req, _jbs, _fx = _reconstruct(toy)
     bl_jbs = mult * smooth_jbs_transition(
-        swb(None, _NE, _TE, _NI, _TI, _ZEFF, _IP, _X)["j_BS"])
+        swb(None, _NE, _TE, _NI, _TI, _ZEFF, _IP, _X)["jphi_bs_raw"])
     z = np.zeros(_N)
     d = perturb_kinetic_equilibrium(
         toy, _X, _EC * (_NE * _TE + _NI * _TI), _NE, _TE, _NI, _TI,
         req, z, z, z, z, z, 0.5, 0.4, 0.25, _IP, _li(toy.achieved), _ZEFF,
         _N, input_jinductive=req - bl_jbs, l_i_tolerance=0.05, psi_pad=_PAD,
         constrain_sawteeth=False, recalculate_j_BS=True,
-        isolate_edge_jBS=False, scale_jBS=1.0, floor_j_BS=False,
+        isolate_edge_jbs=False, scale_jBS=1.0, floor_j_BS=False,
         jBS_scale_profile=mult, max_proxy_draws=5, p_thresh=0.05,
         rng=make_rng(7))[6]
     miss = np.max(np.abs(d["j_BS"] - bl_jbs)) / np.max(np.abs(bl_jbs))

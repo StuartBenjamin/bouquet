@@ -1418,7 +1418,7 @@ def _deliver_reconstruction_state(mygs, config, source, result, psi_N, ne_eq,
     re-matched state; ``result["request_jphi"]`` is the jphi-linterp input one
     solve of which is F).  The bootstrap is the draws' own sigma=0 composition
     on F (:func:`~bouquet.TokaMaker_interface._draw_jbs_composer` with the
-    generation's ``isolate_edge_jBS`` / ``floor_j_BS``, scale 1 -- this
+    generation's ``isolate_edge_jbs`` / ``floor_j_BS``, scale 1 -- this
     path's ``bs_scale``), the request is normalised to ``Ip_target`` in the
     'exact' measure on F, and the inductive is the residual, floored at zero
     by the usual convention (``floor_inductive_split``; a floored point is
@@ -1433,7 +1433,7 @@ def _deliver_reconstruction_state(mygs, config, source, result, psi_N, ne_eq,
     gc = config.generation
     psi_pad = float(source.psi_pad)
     comp = _draw_jbs_composer(psi_N, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
-                              psi_pad, bool(gc.isolate_edge_jBS), 1.0,
+                              psi_pad, bool(gc.isolate_edge_jbs), 1.0,
                               bool(gc.floor_j_BS), None, None, None,
                               coord=coord)
     j_bs0 = np.asarray(comp(mygs.copy_eq())[0], dtype=float)

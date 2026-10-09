@@ -119,6 +119,8 @@ PROFILE_UNITS = {
     "sigma_ti": "eV",
     "sigma_jphi": "A m^-2",
     "swb_j_saw": "A m^-2",
+    "swb_jphi_pd_raw": "A m^-2",
+    "swb_jphi_pd_final": "A m^-2",
     "coil_currents": "A",
 }
 

@@ -1057,7 +1057,7 @@ def classify_jphi_profile(psi_N, eqdsk_jphi, spike_profile,
     # Robust two-pass edge-peak detection (hardened 2026-07, user-approved).
     # The height reference used to be spike_profile[0] -- meaningful when the
     # profile was analyze_bootstrap_edge_spike's flat-shelf output
-    # (isolate_edge_jBS=True), but with the full-Sauter default it is the
+    # (isolate_edge_jbs=True), but with the full-Sauter default it is the
     # numerically fragile collapsed axis point, and on weak-pedestal shots
     # (weak-pedestal case: peak within ~2 permille of it) detection flipped on
     # run-to-run jitter.  Mirror analyze_bootstrap_edge_spike instead:
@@ -2634,7 +2634,7 @@ def _std_candidate_solve(mygs, psi_N, pres_tmp, cand, spike, j_fixed_eff,
     final_scale_j0, _ = find_optimal_scale(
         mygs, _psi, solver_pressure(pres_tmp, _edge), ffp_prof, pp_prof,
         matched_j_ind, Ip_target,
-        psi_pad, spike_prof=spike + j_fixed_eff, diagnostic_plots=False,
+        psi_pad, jphi_bs_final=spike + j_fixed_eff, diagnostic_plots=False,
         verbose=False)
     if constrain_sawteeth:
         _, q_pre, _, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
@@ -2659,7 +2659,7 @@ def _std_candidate_solve(mygs, psi_N, pres_tmp, cand, spike, j_fixed_eff,
                 hist=hist)
 
 
-def _decompose_draw_currents(output_jphi, spike, full, isolate_edge_jBS,
+def _decompose_draw_currents(output_jphi, spike, full, isolate_edge_jbs,
                              j_NBI=None, j_RF=None, j_other=None):
     """Section-6 split of a draw's j_phi into (j_inductive, j_BS, j_BS_edge),
     the SAME rules the draw applies at the end of perturb_kinetic_equilibrium
@@ -2673,7 +2673,7 @@ def _decompose_draw_currents(output_jphi, spike, full, isolate_edge_jBS,
         jfix = jfix + np.asarray(j_RF, dtype=float)
     if j_other is not None:
         jfix = jfix + np.asarray(j_other, dtype=float)
-    if isolate_edge_jBS:
+    if isolate_edge_jbs:
         j_ind = output_jphi - spike - jfix
         neg = j_ind < 0.0
         if np.any(neg):
@@ -2873,7 +2873,7 @@ def perturb_kinetic_equilibrium(
     psi_pad=1e-3,
     constrain_sawteeth=True,
     recalculate_j_BS=True,
-    isolate_edge_jBS=True,
+    isolate_edge_jbs=True,
     scale_jBS=1.0,
     floor_j_BS=True,
     jBS_diff=None,
@@ -3027,7 +3027,7 @@ def perturb_kinetic_equilibrium(
         Reject equilibria with :math:`q_0 < 1`.
     recalculate_j_BS : bool
         Recompute bootstrap current for perturbed profiles.
-    isolate_edge_jBS : bool
+    isolate_edge_jbs : bool
         Separate the edge bootstrap-current spike from the core
         contribution inside ``solve_with_bootstrap``.
     scale_jBS : float
@@ -3471,8 +3471,8 @@ def perturb_kinetic_equilibrium(
                 mygs,
                 ne_eq, te_eq, ni_eq, ti_eq,
                 Zeff, Ip_target, _swb_seed,
-                scale_jBS=scale_jBS,
-                isolate_edge_jBS=isolate_edge_jBS,
+                scale_jbs=scale_jBS,
+                isolate_edge_jbs=isolate_edge_jbs,
                 diagnostic_plots=False,
                 verbose=False,
                 **coords.swb_grid_kwargs(psi_N, coord),
@@ -3485,9 +3485,9 @@ def perturb_kinetic_equilibrium(
         # take it BEFORE the snapshot restore below. The cached recon spike
         # was axis-smoothed the same way at cache time.
         _spike_perturbed = smooth_jbs_transition(
-            np.asarray(_results_diff["isolated_j_BS"], dtype=float))
+            np.asarray(_results_diff["jphi_bs_final"], dtype=float))
         _full_j_BS_tor = smooth_jbs_transition(
-            np.asarray(_results_diff["j_BS"], dtype=float))
+            np.asarray(_results_diff["jphi_bs_raw"], dtype=float))
         delta_spike = _bs_mult * (_spike_perturbed - spike_profile_recon_cached)
         _delta_rms = float(np.sqrt(np.mean(delta_spike**2)))
         _delta_max = float(np.max(np.abs(delta_spike)))
@@ -3601,7 +3601,7 @@ def perturb_kinetic_equilibrium(
         _r2_mode = _r2_ip_mode()
         _compose = _draw_jbs_composer(
             psi_N, ne_eq, te_eq, ni_eq, ti_eq, Zeff, psi_pad,
-            isolate_edge_jBS, scale_jBS, floor_j_BS, jBS_diff,
+            isolate_edge_jbs, scale_jBS, floor_j_BS, jBS_diff,
             spike_delta_ref, spike_delta_baseline, coord=coord)
         _use_spike_delta = _compose.use_delta
         spike_profile, full_j_BS, _d_anchor = _compose(mygs)
@@ -3982,7 +3982,7 @@ def perturb_kinetic_equilibrium(
                     Ip_target=np.array([Ip_target]),
                     swb_seed=_swb_seed,
                     scale_jBS=np.array([scale_jBS]),
-                    isolate_edge_jBS=np.array([bool(isolate_edge_jBS)]),
+                    isolate_edge_jbs=np.array([bool(isolate_edge_jbs)]),
                 )
             except Exception as _diag_exc:
                 print(f"  [SWB-diag] pre-SWB capture failed: {_diag_exc}")
@@ -3993,8 +3993,8 @@ def perturb_kinetic_equilibrium(
                 mygs,
                 ne_eq, te_eq, ni_eq, ti_eq,
                 Zeff, Ip_target, _swb_seed,
-                scale_jBS=scale_jBS,
-                isolate_edge_jBS=isolate_edge_jBS,
+                scale_jbs=scale_jBS,
+                isolate_edge_jbs=isolate_edge_jbs,
                 diagnostic_plots=False,
                 verbose=_swb_debug(),
                 **coords.swb_grid_kwargs(psi_N, coord),
@@ -4013,9 +4013,9 @@ def perturb_kinetic_equilibrium(
                         Ip_target=np.array([Ip_target]),
                         swb_seed=_swb_seed,
                         scale_jBS=np.array([scale_jBS]),
-                        isolated_j_BS=results.get('isolated_j_BS'),
-                        j_inductive=results.get('j_inductive'),
-                        total_j_phi=results.get('total_j_phi'),
+                        isolated_j_BS=results.get("jphi_bs_final"),
+                        j_inductive=results.get("jphi_ind_final"),
+                        total_j_phi=results.get("jphi_total"),
                     )
                 except Exception as _dump_exc:
                     print(f"  [SWB-diag] success dump failed: {_dump_exc}")
@@ -4090,8 +4090,8 @@ def perturb_kinetic_equilibrium(
             # the difference, while the per-draw Sauter response passes
             # through unfiltered.  At sigma=0 the spike equals the baseline
             # split exactly.
-            _spike_raw = np.asarray(results["isolated_j_BS"], dtype=float)
-            _full_raw = np.asarray(results["j_BS"], dtype=float)
+            _spike_raw = np.asarray(results["jphi_bs_final"], dtype=float)
+            _full_raw = np.asarray(results["jphi_bs_raw"], dtype=float)
             _delta_bl = np.asarray(spike_delta_baseline, dtype=float)
             _delta_ref = np.asarray(spike_delta_ref, dtype=float)
             spike_profile = _delta_bl + _bs_mult * (_spike_raw - _delta_ref)
@@ -4105,9 +4105,9 @@ def perturb_kinetic_equilibrium(
             # divot vs the recon baseline (hollow core, q0 shifted +12%
             # wholesale at sigma=0).
             full_j_BS = _bs_mult * smooth_jbs_transition(
-                np.asarray(results["j_BS"], dtype=float))
+                np.asarray(results["jphi_bs_raw"], dtype=float))
             spike_profile = _bs_mult * smooth_jbs_transition(
-                np.asarray(results["isolated_j_BS"], dtype=float))
+                np.asarray(results["jphi_bs_final"], dtype=float))
 
         # Floor the SWB bootstrap at 0 (drop unphysical negative excursions)
         # before it enters j_phi. Then, in Case-B "diff" mode, add the fixed
@@ -4221,10 +4221,10 @@ def perturb_kinetic_equilibrium(
                 # Source seed: SWB's alpha * j_ind with bouquet's own spike
                 # and j_fixed, not SWB's raw (unconverted, unscaled) j_BS.
                 new_jphi = (np.interp(psi_N, coords.swb_grid(psi_N),
-                                      np.asarray(results["j_inductive"], dtype=float))
+                                      np.asarray(results["jphi_ind_final"], dtype=float))
                             + spike_profile + j_fixed_eff)
             else:
-                new_jphi = results["total_j_phi"]
+                new_jphi = results["jphi_total"]
             _ffp_fb = coords.oft_prof("jphi-linterp", psi_N, new_jphi, coord)
             mygs.set_profiles(pp_prof=_pp_anchor, ffp_prof=_ffp_fb)
             try:
@@ -4627,7 +4627,7 @@ def perturb_kinetic_equilibrium(
         final_scale_j0, final_jphi = find_optimal_scale(
             mygs, _psi, solver_pressure(pres_tmp, _edge), ffp_prof, pp_prof,
             matched_j_inductive, Ip_target, psi_pad,
-            spike_prof=spike_profile + j_fixed_eff,
+            jphi_bs_final=spike_profile + j_fixed_eff,
             diagnostic_plots=False, verbose=False,
         )
 
@@ -4851,16 +4851,16 @@ def perturb_kinetic_equilibrium(
     w_ExB = np.zeros_like(psi_N)
 
     # j_inductive decomposition. Two regimes:
-    #   isolate_edge_jBS=True  (DIII-D g-file edge-spike work): the bootstrap is
+    #   isolate_edge_jbs=True  (DIII-D g-file edge-spike work): the bootstrap is
     #     an isolated flat-shelf + edge spike, so j_inductive tapers to zero at
     #     the edge where the spike dominates -- the shelf-blend Hermite handles
     #     the C1 join and edge taper.
-    #   isolate_edge_jBS=False (FUSE/IMAS full bootstrap): spike_profile is NOT a
+    #   isolate_edge_jbs=False (FUSE/IMAS full bootstrap): spike_profile is NOT a
     #     flat-shelf spike (it is a full Sauter profile / its delta), so the
     #     shelf-blend mis-detects the shelf and mangles the core. Use the clean
     #     residual j_inductive = j_phi - j_BS - j_NBI - j_RF - j_other instead -- it sums
     #     exactly and mirrors read_imas_baseline's baseline decomposition.
-    if isolate_edge_jBS:
+    if isolate_edge_jbs:
         # Closing decomposition (option A), replacing the non-closing shelf-blend
         # Hermite: j_inductive = j_phi - j_BS,edge - j_fixed, so the stored
         # components sum exactly to j_phi (the old shelf-blend substituted a
@@ -4935,7 +4935,7 @@ def perturb_kinetic_equilibrium(
         # Only an isolated edge spike is a meaningful separate "j_BS,edge"; in
         # full-bootstrap mode spike_profile == j_BS (or its delta), so storing it
         # would just draw a redundant/mislabelled curve. Drop it there.
-        "j_BS_edge": spike_profile if isolate_edge_jBS else None,
+        "j_BS_edge": spike_profile if isolate_edge_jbs else None,
         "proxy_bias_observed": proxy_bias_observed,
         # the pressure this draw's solves were handed (bouquet.edge_pressure):
         # the settings, its own p_sep, the offset applied and the axis target
@@ -4990,7 +4990,7 @@ def perturb_kinetic_equilibrium(
             input_j_phi=np.asarray(input_j_phi, dtype=float),
             r2_mode=_r2_ip_mode(), j_phi_request=np.asarray(output_jphi,
                                                             dtype=float),
-            isolate_edge_jBS=bool(isolate_edge_jBS),
+            isolate_edge_jbs=bool(isolate_edge_jbs),
             request_offset=(None if (jphi_request_offset is None
                                      or not recalculate_j_BS)
                             else np.asarray(jphi_request_offset,
@@ -5128,7 +5128,7 @@ def generate_bouquet(
     psi_pad=1e-3,
     constrain_sawteeth=True,
     recalculate_j_BS=True,
-    isolate_edge_jBS=True,
+    isolate_edge_jbs=True,
     floor_j_BS=True,
     jBS_diff=None,
     jBS_scale_profile=None,
@@ -5349,7 +5349,7 @@ def generate_bouquet(
         Reject equilibria with :math:`q_0 < 1`.
     recalculate_j_BS : bool
         Recompute bootstrap current each iteration.
-    isolate_edge_jBS : bool
+    isolate_edge_jbs : bool
         Separate the edge bootstrap-current spike from the core
         contribution inside ``solve_with_bootstrap``.
     jBS_scale_range : list of two floats, or None
@@ -6600,7 +6600,7 @@ def generate_bouquet(
                     _scale_ref = sigma0_reference_scale(jBS_scale_range)
                     _ref_sel, _ref_d = _evaluate_jBS(
                         mygs, psi_N, ne_cache, te_cache, ni_cache, ti_cache,
-                        Zeff, psi_pad=psi_pad, isolate_edge=isolate_edge_jBS,
+                        Zeff, psi_pad=psi_pad, isolate_edge=isolate_edge_jbs,
                         smooth_axis=False, coord=coord)
                     _delta_spike0_raw = _scale_ref * np.asarray(_ref_sel,
                                                                 dtype=float)
@@ -6638,8 +6638,8 @@ def generate_bouquet(
                     _cache_results = _swb(
                         mygs, ne_cache, te_cache, ni_cache, ti_cache, Zeff,
                         initial_Ip_target, _swb_seed_cache,
-                        scale_jBS=_scale_ref,
-                        isolate_edge_jBS=isolate_edge_jBS,
+                        scale_jbs=_scale_ref,
+                        isolate_edge_jbs=isolate_edge_jbs,
                         diagnostic_plots=False, verbose=False,
                         **coords.swb_grid_kwargs(psi_N, coord),
                         **kwargs,
@@ -6649,7 +6649,7 @@ def generate_bouquet(
                     # smoothed version for DIFF_BS (whose per-draw spikes are also
                     # smoothed).
                     _delta_spike0_raw = np.asarray(
-                        _cache_results["isolated_j_BS"], dtype=float)
+                        _cache_results["jphi_bs_final"], dtype=float)
                     _diff_spike_recon = smooth_jbs_transition(_delta_spike0_raw)
                     # Snapshot AFTER the SWB call -- this is the state from
                     # which we'll re-launch SWB on perturbed kinetics each
@@ -7038,7 +7038,7 @@ def generate_bouquet(
                     aux_sigmas=aux_sigmas, aux_baselines=aux_baselines,
                     aux_length_scales=aux_length_scales,
                     ni_from_zeff=ni_from_zeff, zeff_dne=zeff_dne,
-                    isolate_edge_jBS=isolate_edge_jBS),
+                    isolate_edge_jbs=isolate_edge_jbs),
                 legacy=lambda: perturb_kinetic_equilibrium(
                     mygs,
                     psi_N,
@@ -7060,7 +7060,7 @@ def generate_bouquet(
                     psi_pad=psi_pad,
                     constrain_sawteeth=constrain_sawteeth,
                     recalculate_j_BS=recalculate_j_BS,
-                    isolate_edge_jBS=isolate_edge_jBS,
+                    isolate_edge_jbs=isolate_edge_jbs,
                     floor_j_BS=floor_j_BS,
                     jBS_diff=jBS_diff,
                     jBS_scale_profile=jBS_scale_profile,
@@ -7635,7 +7635,7 @@ def generate_bouquet(
                                     _jphi_new, _ph_spk, _ph_full,
                                     legacy=lambda: _decompose_draw_currents(
                                         _jphi_new, _ph_spk, _ph_full,
-                                        _jctx.get('isolate_edge_jBS', True),
+                                        _jctx.get('isolate_edge_jbs', True),
                                         j_NBI, j_RF, j_other))
                                 diagnostics['j_inductive'] = _ji
                                 diagnostics['j_BS'] = _jb
@@ -8346,7 +8346,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                             isoflux_pts, weights, psi_pad,
                             guess_jinductive,n_k,psi_bridge,rescale_j_BS,
                             shelf_psi_N,initialize_psi=True,
-                            isolate_edge_jBS=False,
+                            isolate_edge_jbs=False,
                             p_fast=None, Z_imp=None,
                             l_i_tolerance=0.01, jbs_loop=None,
                             edge_pressure=None, coord="psi_n", x=None,
@@ -8530,7 +8530,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         mygs.solve()
         j_BS_isolated, _d0 = _evaluate_jBS(
             mygs, _x, ne, te, ni, ti, Zeff, psi_pad=psi_pad,
-            isolate_edge=isolate_edge_jBS, smooth_axis=True, coord=coord)
+            isolate_edge=isolate_edge_jbs, smooth_axis=True, coord=coord)
         # classification / shelf locator read the RAW profile, as they always
         # have (see 2b)
         j_BS_isolated_raw = np.asarray(_d0["j_tor_raw"], dtype=float)
@@ -8539,17 +8539,17 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
               "solve_with_bootstrap", flush=True)
     else:
         # ---- 2. Bootstrap current ----
-        # isolate_edge_jBS=False keeps the FULL Sauter bootstrap (physical core hump
+        # isolate_edge_jbs=False keeps the FULL Sauter bootstrap (physical core hump
         # + edge spike) so the reconstructed j_BS/j_inductive split matches what the
-        # draws recompute via solve_with_bootstrap. isolate_edge_jBS=True instead
+        # draws recompute via solve_with_bootstrap. isolate_edge_jbs=True instead
         # isolates the edge spike and parks a flat shelf in the (g-file-degenerate)
         # core -- robust but non-physical, and 2x below the draws' Sauter hump, which
         # left the stored baseline ohmic inflated relative to every draw.
         results = solve_with_bootstrap(
             mygs, ne, te, ni, ti, Zeff,
             abs(eqdsk.Ip), guess_jinductive,
-            scale_jBS=1.0,
-            isolate_edge_jBS=isolate_edge_jBS,
+            scale_jbs=1.0,
+            isolate_edge_jbs=isolate_edge_jbs,
             diagnostic_plots=False,
             **coords.swb_grid_kwargs(_x, coord),
             **kwargs
@@ -8561,7 +8561,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         # (shared helper, also applied to every per-draw spike) so the
         # inductive fit below sees the artifact-free profile rather than the raw
         # collapsed axis point.
-        j_BS_isolated_raw = np.asarray(results['isolated_j_BS'], dtype=float)
+        j_BS_isolated_raw = np.asarray(results["jphi_bs_final"], dtype=float)
         j_BS_isolated = smooth_jbs_transition(j_BS_isolated_raw)
 
     # ---- 2b. Classify the j_phi profile ----
@@ -8989,7 +8989,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         def _jbs_eval(meas):
             return _evaluate_jBS(meas["snap"], _x, ne, te, ni, ti,
                                  Zeff, psi_pad=psi_pad,
-                                 isolate_edge=isolate_edge_jBS,
+                                 isolate_edge=isolate_edge_jbs,
                                  smooth_axis=True, coord=coord)[0]
 
         _li0 = float(mygs.get_stats(li_normalization='iter',

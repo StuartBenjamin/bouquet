@@ -53,7 +53,7 @@ def test_flat_shelf_preserved():
     j[:40] = 2.0e5                                            # exact flat shelf
     out = smooth_jbs_transition(j)
     # a flat shelf Gaussian-filters to itself: shelf values survive exactly
-    # (this is the isolate_edge_jBS+shelf recon configuration)
+    # (this is the isolate_edge_jbs+shelf recon configuration)
     np.testing.assert_allclose(out[:30], 2.0e5, rtol=1e-12)
 
 

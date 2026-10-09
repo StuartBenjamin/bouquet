@@ -101,12 +101,12 @@ class TestBootstrapKwargs:
     ``solve_with_bootstrap`` options bouquet does not set itself."""
 
     def test_backend_options_pass_validation(self):
-        gc = GenerationConfig(bootstrap_kwargs={"djBS_tol": 1e-5,
-                                                "taper_edge_jBS": True,
+        gc = GenerationConfig(bootstrap_kwargs={"djbs_tol": 1e-5,
+                                                "taper_edge_jbs": True,
                                                 "iterations": 2})
-        assert gc.bootstrap_kwargs["taper_edge_jBS"] is True
+        assert gc.bootstrap_kwargs["taper_edge_jbs"] is True
 
-    @pytest.mark.parametrize("key", ["scale_jBS", "isolate_edge_jBS", "verbose",
+    @pytest.mark.parametrize("key", ["scale_jbs", "isolate_edge_jbs", "verbose",
                                      "diagnostic_plots", "mygs", "Ip_target",
                                      "ffp_prof", "te_prof"])
     def test_an_argument_the_call_sites_set_is_refused(self, key):
@@ -119,9 +119,9 @@ class TestBootstrapKwargs:
     def test_it_survives_a_config_roundtrip(self):
         cfg = _full_recon_cfg()
         cfg.generation.reconstruction_engine = "legacy"     # an SWB option
-        cfg.generation.bootstrap_kwargs = {"djBS_tol": 1e-5}
+        cfg.generation.bootstrap_kwargs = {"djbs_tol": 1e-5}
         cfg2 = BouquetConfig.from_json(cfg.to_json())
-        assert cfg2.generation.bootstrap_kwargs == {"djBS_tol": 1e-5}
+        assert cfg2.generation.bootstrap_kwargs == {"djbs_tol": 1e-5}
 
 
 class TestBootstrapKwargValidation:
@@ -129,21 +129,21 @@ class TestBootstrapKwargValidation:
     key would otherwise fail every draw).  These run without
     OpenFUSIONToolkit, so they pass ``known`` explicitly."""
 
-    KNOWN = {"iterations", "djBS_tol", "taper_edge_jBS", "taper_edge_psi0",
-             "use_python_solve", "scale_jBS", "verbose"}
+    KNOWN = {"iterations", "djbs_tol", "taper_edge_jbs", "taper_edge_psi0",
+             "use_python_solve", "scale_jbs", "verbose"}
 
     def _check(self, d):
         validate_bootstrap_kwargs(d, known=self.KNOWN)
 
     def test_a_known_option_passes(self):
-        self._check({"djBS_tol": 1e-5, "taper_edge_jBS": True})
+        self._check({"djbs_tol": 1e-5, "taper_edge_jbs": True})
 
     def test_a_misspelled_option_is_refused_and_the_message_lists_the_real_ones(self):
         with pytest.raises(ValueError) as e:
-            self._check({"djBS_tolerance": 1e-5})
-        assert "djBS_tolerance" in str(e.value)
-        assert "djBS_tol" in str(e.value)          # the accepted spelling
-        assert "scale_jBS" not in str(e.value)     # reserved, not offered
+            self._check({"djbs_tolerance": 1e-5})
+        assert "djbs_tolerance" in str(e.value)
+        assert "djbs_tol" in str(e.value)          # the accepted spelling
+        assert "scale_jbs" not in str(e.value)     # reserved, not offered
 
     def test_the_old_swb_iterations_spelling_names_its_replacement(self):
         with pytest.raises(ValueError, match="iterations"):
@@ -154,9 +154,27 @@ class TestBootstrapKwargValidation:
         with pytest.raises(ValueError, match="always True"):
             self._check({"use_sauter_eps": value})
 
+    @pytest.mark.parametrize("old, new", [("djBS_tol", "djbs_tol"), ("taper_edge_jBS", "taper_edge_jbs")])
+    def test_an_old_oft_spelling_names_its_replacement(self, old, new):
+        with pytest.raises(ValueError, match=f"OFT renamed '{old}' to '{new}'"):
+            self._check({old: 1})
+
+    def test_a_stored_config_loads_the_old_oft_spellings_under_the_new_names(self):
+        cfg = _full_recon_cfg()
+        cfg.generation.reconstruction_engine = "legacy"
+        cfg.generation.isolate_edge_jbs = True
+        cfg.generation.bootstrap_kwargs = {"djbs_tol": 1e-5}
+        d = cfg.to_dict()
+        g = d["generation"]
+        g["isolate_edge_jBS"] = g.pop("isolate_edge_jbs")
+        g["bootstrap_kwargs"] = {"djBS_tol": 1e-5}
+        cfg2 = BouquetConfig.from_dict(d)
+        assert cfg2.generation.isolate_edge_jbs is True
+        assert cfg2.generation.bootstrap_kwargs == {"djbs_tol": 1e-5}
+
     def test_a_reserved_name_is_reported_as_reserved_not_as_unknown(self):
         with pytest.raises(ValueError, match="passed explicitly at call sites"):
-            self._check({"scale_jBS": 1.0})
+            self._check({"scale_jbs": 1.0})
 
     def test_without_the_toolkit_only_the_reserved_check_runs(self, monkeypatch):
         # known=None means "cannot introspect": do not guess at the accepted
@@ -173,9 +191,9 @@ class TestBootstrapKwargValidation:
     def test_every_reserved_name_is_a_real_argument(self):
         # A typo in _BOOTSTRAP_RESERVED would silently stop guarding it.
         # Some reserved names exist only on a toolkit with the internal
-        # bootstrap solve (djBS_tol is its marker).
+        # bootstrap solve (djbs_tol is its marker).
         known = _bootstrap_kwarg_names()
-        if known is None or "djBS_tol" not in known:
+        if known is None or "djbs_tol" not in known:
             pytest.skip("needs an OpenFUSIONToolkit with the internal "
                         "Fortran bootstrap solve")
         grid = {"x", "psi_N"}           # the grid keyword, new or old spelling

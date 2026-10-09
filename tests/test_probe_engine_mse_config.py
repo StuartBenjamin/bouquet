@@ -4,7 +4,7 @@
 ``run_solver_figure_measurements.sh``) used to build the IMAS factory's
 LEGACY configuration and set ``reconstruction_engine="unified"`` afterwards.
 The factory had already set legacy-path fields the engine never reads
-(``isolate_edge_jBS=False``, ``perturb_jind_in_anchor=True``,
+(``isolate_edge_jbs=False``, ``perturb_jind_in_anchor=True``,
 ``jBS_baseline_mode="diff"``), so the engine's settings validation refused
 every MSE measurement before reconstruction.  The probe now selects the
 engine in the factory call.  Since 2026-10-07 the factories set no
@@ -71,8 +71,8 @@ def test_the_old_construction_is_now_accepted(probe, tmp_path):
                              reconstruction_engine="legacy")
     b.config.generation.reconstruction_engine = "unified"
     engine_settings(b.config.generation)              # must not raise
-    b.config.generation.isolate_edge_jBS = False
-    with pytest.raises(ValueError, match="isolate_edge_jBS"):
+    b.config.generation.isolate_edge_jbs = False
+    with pytest.raises(ValueError, match="isolate_edge_jbs"):
         engine_settings(b.config.generation)
 
 

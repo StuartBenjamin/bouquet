@@ -180,7 +180,7 @@ def _load_golden():
 #: (impurity / fast pressure, diff anchors, NBI / RF current).  Per-draw
 #: quantities (Z_eff, the bootstrap scale) are the draw's own, below.
 _GENERATOR_MODEL_KWARGS = (
-    "baseline_j_BS", "isolate_edge_jBS", "floor_j_BS",
+    "baseline_j_BS", "isolate_edge_jbs", "floor_j_BS",
     "jBS_diff", "jbs_delta_mode", "accept_anchor_inband",
     "perturb_jind_in_anchor", "p_fast", "z_fast", "Z_imp", "p_diff",
     "jphi_diff", "j_NBI", "j_RF",
@@ -318,7 +318,7 @@ def replay(tmp_path_factory):
     # model and fixed components are the ones generate() passes, read off
     # generate()'s own call on this reconstruction -- not the function
     # defaults.  Before this, mode 3 solved with Z_eff = 1 (generate: the
-    # baseline / per-draw Z_eff, 1.76-1.92 here), isolate_edge_jBS=True
+    # baseline / per-draw Z_eff, 1.76-1.92 here), isolate_edge_jbs=True
     # (generate: the geqdsk workflow's False), floor_j_BS=True, and no
     # baseline_j_BS or bootstrap scale, i.e. a different bootstrap (I_BS
     # ~219-233 kA against the golden draw loops' ~295-312 kA).

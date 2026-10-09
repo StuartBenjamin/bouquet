@@ -107,7 +107,7 @@ def _ph_setup(monkeypatch, kind):
                j_ind_used=j_ind.copy(), j_fixed_eff=np.zeros_like(x),
                pres_tmp=1e4 * (1.0 - x ** 2) + 10.0, input_j_phi=j_ind + Jstar,
                r2_mode="legacy", j_phi_request=j_ind + Jstar,
-               isolate_edge_jBS=False)
+               isolate_edge_jbs=False)
     return TI, x, ctx, calls, jbs_settings(_GC(), draw=True)
 
 

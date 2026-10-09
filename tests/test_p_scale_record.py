@@ -113,7 +113,7 @@ def test_every_archived_draw_and_the_baseline_carry_p_scale(
         float(eng.c.Ip), ctx.ref["l_i"], eng.c.kinetics["zeff"],
         input_jinductive=0.5 * ctx.request,
         baseline_j_BS=0.1 * ctx.request, l_i_tolerance=0.05,
-        psi_pad=T.PAD, constrain_sawteeth=False, isolate_edge_jBS=False,
+        psi_pad=T.PAD, constrain_sawteeth=False, isolate_edge_jbs=False,
         jBS_scale_range=(0.99, 1.01), coil_drift=0.01,
         homotopy_passes=[(0.05, 0.1), (0.01, 0.01)], seed=12345,
         capture_live_eq=False, store_achieved_jphi=True,

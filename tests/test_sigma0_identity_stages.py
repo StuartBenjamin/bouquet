@@ -206,16 +206,16 @@ def toy(monkeypatch):
         boot = types.ModuleType("OpenFUSIONToolkit.TokaMaker.bootstrap")
 
         def _fos(mygs, psi_N, pressure, ffp_prof, pp_prof, j_inductive,
-                 Ip_target, psi_pad, spike_prof=None, tolerance=0.01,
+                 Ip_target, psi_pad, jphi_bs_final=None, tolerance=0.01,
                  max_iter=5, diagnostic_plots=False, verbose=True):
             psi_eval = np.clip(psi_N, psi_pad, 1.0 - psi_pad)
-            ffp_prof["y"] = j_inductive + spike_prof
+            ffp_prof["y"] = j_inductive + jphi_bs_final
             mygs.set_targets(Ip=Ip_target, pax=pressure[0])
             mygs.set_profiles(ffp_prof=ffp_prof, pp_prof=pp_prof)
             mygs.solve()
             _, f, fp, _, pp = mygs.get_profiles(psi=psi_eval)
             out0 = f[0] * fp[0]
-            inp0 = j_inductive[0] + spike_prof[0]
+            inp0 = j_inductive[0] + jphi_bs_final[0]
             if abs(inp0 - out0) / out0 < tolerance:
                 return 1.0, f * fp
             raise AssertionError("stub find_optimal_scale: scale != 1")
@@ -315,7 +315,7 @@ def _draw(mygs, route, input_j_phi, j_ind, l_i_target, settings,
         _IP, float(l_i_target), _ZEFF, _N,
         input_jinductive=np.asarray(j_ind, float), l_i_tolerance=0.05,
         psi_pad=_PAD, constrain_sawteeth=False, recalculate_j_BS=True,
-        isolate_edge_jBS=False, scale_jBS=1.0, floor_j_BS=False,
+        isolate_edge_jbs=False, scale_jBS=1.0, floor_j_BS=False,
         jBS_diff=None, perturb_jind_in_anchor=(route == "ip_renorm"),
         accept_anchor_inband=False, j_NBI=j_NBI, jphi_diff=jphi_diff,
         max_proxy_draws=5, p_thresh=0.05, rng=make_rng(7),

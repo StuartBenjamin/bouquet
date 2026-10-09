@@ -25,7 +25,7 @@ import warnings
 
 import pytest
 
-from bouquet.config import BouquetConfig, GenerationConfig
+from bouquet.config import OFT_RENAMED_OPTIONS, BouquetConfig, GenerationConfig
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _DIR = os.path.join(_HERE, "data", "stored_configs")
@@ -40,6 +40,17 @@ def _stored(sha, eng):
 #: stored keys translated on load (checked by their own tests): swb_iterations
 #: is retired for bootstrap_kwargs["iterations"]
 _TRANSLATED = ("swb_iterations", "bootstrap_kwargs")
+
+
+def _field(k):
+    """The field a stored key loads as (old OFT spellings under their new names)."""
+    return OFT_RENAMED_OPTIONS.get(k, k)
+
+
+def _set(gen, name, val):
+    """Store ``val`` for field ``name`` under the stored file's own spelling."""
+    old = next((o for o, n in OFT_RENAMED_OPTIONS.items() if n == name and o in gen), None)
+    gen[old or name] = val
 
 
 def _load(d):
@@ -68,7 +79,7 @@ def test_every_stored_legacy_config_loads(sha):
             continue
         if isinstance(v, list):
             continue
-        assert getattr(g, k) == v, k
+        assert getattr(g, _field(k)) == v, k
 
 
 @pytest.mark.parametrize("sha", SHAS)
@@ -80,7 +91,7 @@ def test_every_stored_unified_config_loads_with_what_it_ran_with(sha):
     # present engine fields: exactly as stored (incl. the old MSE default)
     for k, v in stored.items():
         if k.startswith("engine_") and not isinstance(v, list):
-            assert getattr(g, k) == v, k
+            assert getattr(g, _field(k)) == v, k
     if "engine_ids_inductive" not in stored:
         assert g.engine_ids_inductive == "auto"
         assert any("engine_ids_inductive" in m and "predates" in m
@@ -153,7 +164,7 @@ def test_a_live_config_is_still_strict():
             reconstruction_engine="legacy", engine_mse_jacobian="fd_broyden"))
 
 
-@pytest.mark.parametrize("name, val", [("isolate_edge_jBS", False),
+@pytest.mark.parametrize("name, val", [("isolate_edge_jbs", False),
                                        ("perturb_jind_in_anchor", True)])
 def test_a_stored_unified_factory_config_loads_at_the_default(name, val):
     """Until 2026-10-05 the factories set these legacy-path fields whatever
@@ -162,7 +173,7 @@ def test_a_stored_unified_factory_config_loads_at_the_default(name, val):
     run it recorded is the same), with a warning -- never refused, never
     silently changed."""
     d = _stored(SHAS[-1], "unified")
-    d["generation"][name] = val
+    _set(d["generation"], name, val)
     g, msgs = _load(d)
     assert g.reconstruction_engine == "unified"
     from bouquet.engine import engine_validated_value
@@ -172,7 +183,7 @@ def test_a_stored_unified_factory_config_loads_at_the_default(name, val):
                for m in msgs)
     # under "legacy" the same stored value is kept (it is read there)
     dl = _stored(SHAS[-1], "legacy")
-    dl["generation"][name] = val
+    _set(dl["generation"], name, val)
     gl, _ = _load(dl)
     assert getattr(gl, name) == val
 
@@ -191,7 +202,7 @@ _UNREAD_SET = dict(
     anchor_pressure_to_equilibrium=True, imas_corrective_jphi=True,
     jbs_loop_q0_corrector=True, floor_j_BS=True,
     accept_anchor_inband=True, diagnostic_plots=True,
-    isolate_edge_jBS=False, perturb_jind_in_anchor=True)
+    isolate_edge_jbs=False, perturb_jind_in_anchor=True)
 
 
 def test_every_unread_field_has_a_stored_load_case():
@@ -209,7 +220,7 @@ def test_a_stored_unified_config_with_any_unread_field_loads_at_default(
     actually used -- with a warning naming the field; a NEW config with the
     same value is still refused."""
     d = _stored(SHAS[-1], "unified")
-    d["generation"][name] = _UNREAD_SET[name]
+    _set(d["generation"], name, _UNREAD_SET[name])
     g, msgs = _load(d)
     assert g.reconstruction_engine == "unified"
     from bouquet.engine import (ENGINE_DEPENDENT_DEFAULTS,
@@ -224,9 +235,9 @@ def test_a_stored_unified_config_with_any_unread_field_loads_at_default(
                and "never read by the unified engine" in m for m in msgs)
     # every other field is as stored
     for k, v in _stored(SHAS[-1], "unified")["generation"].items():
-        if k == name or isinstance(v, list) or k in _TRANSLATED:
+        if _field(k) == name or isinstance(v, list) or k in _TRANSLATED:
             continue
-        assert getattr(g, k) == v, k
+        assert getattr(g, _field(k)) == v, k
     # a NEW unified config with the same value is still refused
     from bouquet.engine import validate_engine_settings
     gn = GenerationConfig(reconstruction_engine="unified")
@@ -287,7 +298,7 @@ def test_a_stored_config_without_the_engine_field_replays_as_legacy(sha):
     for k, v in d["generation"].items():
         if k in ("jbs_max_passes_post_homotopy",) + _TRANSLATED:
             continue
-        got = getattr(g, k)
+        got = getattr(g, _field(k))
         if isinstance(v, (list, tuple)) or isinstance(got, (list, tuple)):
             continue
         assert got == v or (v is None and got is None), k

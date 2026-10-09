@@ -116,11 +116,11 @@ Two composition modes:
 baseline j_BS — useful for isolating pressure-driven from current-driven
 responses, not for production.
 
-Both `from_geqdsk` and `from_imas` set `isolate_edge_jBS=False`, i.e. the
+Both `from_geqdsk` and `from_imas` set `isolate_edge_jbs=False`, i.e. the
 unified forward decomposition: `j_inductive` is pure ohmic and `j_BS` carries
 the full physical Sauter profile (core hump + edge spike). It closes exactly,
 is non-negative, and yields better than the older isolated-edge-spike split.
-Set `isolate_edge_jBS=True` only for dedicated edge-spike studies.
+Set `isolate_edge_jbs=True` only for dedicated edge-spike studies.
 
 ## Differential bootstrap (`jbs_delta_mode`)
 
@@ -212,7 +212,7 @@ collisionality, `redl_bootstrap(formula_form='jboot1', use_sign_q=True)`) run
 **once on the equilibrium it is handed -- no solve inside** -- with three
 differences, each the point of the helper:
 
-1. geometry (`F`, `f_T = 1 − f_c`, `ε = ⟨a⟩/⟨R⟩`, `q`, `⟨R⟩`) is sampled on the
+1. geometry (`F`, `f_T = 1 − f_c`, `ε = (R_max − R_min)/(R_max + R_min)` (OFT `sauter_fc`), `q`, `⟨R⟩`) is sampled on the
    **caller's** surfaces, `clip(ψ_N, psi_pad, 1 − psi_pad)`;
 2. gradients are taken on the **true** grid, `numpy.gradient(y, ψ_N,
    edge_order=2)`, divided by the **current** flux range;

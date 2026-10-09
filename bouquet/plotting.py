@@ -859,7 +859,7 @@ def draw_jphi_components(axes, psi_N, perturbed_data_list=None):
     r"""Draw the :math:`j_\phi` component decomposition on a (2,) axes array.
 
     ``axes[0]`` = the bootstrap variant ACTUALLY summed into :math:`j_\phi` --
-    the isolated edge spike when the run used ``isolate_edge_jBS=True`` (archives
+    the isolated edge spike when the run used ``isolate_edge_jbs=True`` (archives
     that carry ``j_BS,edge``), otherwise the full Sauter ``j_BS``. Only that one
     variant is drawn -- never both the isolated edge and the full Sauter
     bootstrap. ``axes[1]`` = :math:`j_{\rm inductive}`, computed the FAITHFUL way
@@ -888,7 +888,7 @@ def draw_jphi_components(axes, psi_N, perturbed_data_list=None):
 
     n_equils = len(perturbed_data_list)
     # Which bootstrap variant was applied to j_phi? The isolated edge spike if
-    # the run stored one (isolate_edge_jBS=True), else the full Sauter j_BS.
+    # the run stored one (isolate_edge_jbs=True), else the full Sauter j_BS.
     has_spike = "j_BS,edge" in perturbed_data_list[0]
     bs_key = "j_BS,edge" if has_spike else "j_BS"
     bs_label = r"$j_{\rm BS,edge}$" if has_spike else r"$j_{\rm BS}$"
@@ -3804,7 +3804,7 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
             except (ValueError, TypeError, AttributeError):
                 _cfg_orient = None
         ids = [k for k in g if k.isdigit()]
-        # IMAS / full-bootstrap archives (isolate_edge_jBS=False) store no edge
+        # IMAS / full-bootstrap archives (isolate_edge_jbs=False) store no edge
         # spike -- fall back to the full j_BS, so j_ind = total - j_BS - fixed
         # closes exactly there too.
         has_spike = bool(ids) and "j_BS,edge" in g[ids[0]]

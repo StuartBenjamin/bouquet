@@ -182,8 +182,8 @@ The structured basis stays on the run grid (`close_ip_structured(...,
 basis_x=)`). In a ψ_N run all of this is the identity, bit for bit. See
 docs/workflows.md for the source side.
 
-**Edge taper (off by default).** With `bootstrap_kwargs={"taper_edge_jBS":
-True}`, as `solve_with_bootstrap(taper_edge_jBS=True)` does for the swb
+**Edge taper (off by default).** With `bootstrap_kwargs={"taper_edge_jbs":
+True}`, as `solve_with_bootstrap(taper_edge_jbs=True)` does for the swb
 method, every term above is multiplied by OFT's edge taper
 (`physics.edge_taper_weight`, a port of `apply_edge_taper`): 1 below
 `taper_edge_psi0` (default 0.999), falling to 0 at the LCFS (`taper_edge_shape`
@@ -435,9 +435,9 @@ instruction, because the frozen bootstrap exists on the legacy paths only.
 | `imas_corrective_jphi` | `engine_delivery_correction` |
 | `jbs_loop_q0_corrector` | `engine_rows` with `"q0"` (`engine_draw_q0_row` for the draws) |
 | `floor_j_BS`, `accept_anchor_inband`, `diagnostic_plots` | nothing: legacy draw / SWB mechanics |
-| `bootstrap_kwargs` keys other than `taper_edge_jBS` / `taper_edge_psi0` / `taper_edge_shape` | nothing: the engine never runs `solve_with_bootstrap` |
+| `bootstrap_kwargs` keys other than `taper_edge_jbs` / `taper_edge_psi0` / `taper_edge_shape` | nothing: the engine never runs `solve_with_bootstrap` |
 | `homotopy_passes` with `engine_draw_homotopy=False` | no homotopy runs |
-| `isolate_edge_jBS` (default `None`: resolved per engine; `True` under the engine) | nothing: the engine never isolates the edge bootstrap (Redl on the whole profile) |
+| `isolate_edge_jbs` (default `None`: resolved per engine; `True` under the engine) | nothing: the engine never isolates the edge bootstrap (Redl on the whole profile) |
 | `perturb_jind_in_anchor` (default `None`: resolved per engine; `False` under the engine) | nothing: one engine draw route replaces Fix C and the standard l_i loop |
 
 Already refused elsewhere: the MSE knobs without the `"mse"` row (and
@@ -447,7 +447,7 @@ Already refused elsewhere: the MSE knobs without the `"mse"` row (and
 and in the draws `jbs_delta_mode`, `PIN_JPHI`, `DIFF_BS`,
 `l_i_uncertainty > 0`.
 
-`isolate_edge_jBS` and `perturb_jind_in_anchor` joined the refused set on
+`isolate_edge_jbs` and `perturb_jind_in_anchor` joined the refused set on
 2026-10-05 (owner-approved). Their validated values depend on the engine,
 so since 2026-10-07 both default to `None` ("resolve per engine",
 `engine.ENGINE_DEPENDENT_DEFAULTS`) and the factories set neither.
@@ -456,7 +456,7 @@ runs:
 
 | setting | `"legacy"`, g-file | `"legacy"`, IDS | `"unified"` |
 |---|---|---|---|
-| `isolate_edge_jBS` | `False` | `False` | `True` (not read) |
+| `isolate_edge_jbs` | `False` | `False` | `True` (not read) |
 | `perturb_jind_in_anchor` | `False` | `True` (diff+C) | `False` (not read) |
 
 So it no longer matters whether the engine is named at construction or set

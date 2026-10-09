@@ -71,7 +71,7 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │              since 2026-10-06; utils.load_coil_solve_mode, read back
     │              and checked by load_config),
     │              [engine_resolved_defaults_json]   how the engine-dependent
-    │              settings (isolate_edge_jBS, perturb_jind_in_anchor) were
+    │              settings (isolate_edge_jbs, perturb_jind_in_anchor) were
     │              resolved: field -> {value, origin "resolved from
     │              engine=<x>" | "explicit"[, engine_validated]} (since
     │              2026-10-07; utils.load_engine_resolved_defaults),
