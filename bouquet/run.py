@@ -5181,7 +5181,8 @@ class Bouquet:
                     import inspect
                     _snap_a = mygs.copy_eq()
                     _kw = dict(scale_jBS=1.0, isolate_edge_jBS=iso,
-                               diagnostic_plots=False, verbose=False)
+                               diagnostic_plots=False, verbose=False,
+                               **gc.bootstrap_kwargs)
                     _passed = False
                     _why = None
                     if "psi_N" in inspect.signature(
@@ -5791,6 +5792,7 @@ class Bouquet:
                     mygs, ne, te, ni, ti, Zeff, bl.Ip_target, swb_seed,
                     scale_jBS=1.0, isolate_edge_jBS=iso,
                     diagnostic_plots=False, verbose=False,
+                    **gc.bootstrap_kwargs,
                 )
                 # Same axis-transition smoothing every per-draw spike receives, so
                 # the sigma=0 draw reproduces this baseline split exactly.
@@ -6159,8 +6161,8 @@ class Bouquet:
         fig.suptitle(ttl, fontsize=11); fig.tight_layout()
         return fig, ax
 
-    def verify_sigma0_consistency(self, tol_frac=0.02, swb_iterations=3,
-                                  draw_route=True, draw_routes=None):
+    def verify_sigma0_consistency(self, tol_frac=0.02, draw_route=True,
+                                  draw_routes=None):
         """Regression guard: the draw pipeline must reproduce the baseline
         j_BS split when the kinetics are UNPERTURBED (sigma=0).
 
@@ -6207,8 +6209,8 @@ class Bouquet:
         baseline inductive held, one jphi-linterp solve per pass, as F itself
         is solved -- is kept beside it as ``passed_baseline_way`` (with its
         ``r_j_vs_baseline`` / ``r_I_vs_baseline`` / ``dl_i_vs_baseline``) and
-        no longer decides ``passed``.  ``tol_frac``/``swb_iterations`` are
-        then unused (no SWB is called).  Route R2's inductive Ip
+        no longer decides ``passed``.  ``tol_frac`` is then unused (no SWB
+        is called).  Route R2's inductive Ip
         renormalisation keeps its own σ=0 budget as well
         (``tests/test_seeded_reproducibility.py``).
 
@@ -6227,8 +6229,6 @@ class Bouquet:
         tol_frac : float
             Pass threshold on ``max|spike0 - j_BS|`` as a fraction of
             ``max(j_BS)`` (default 2%).
-        swb_iterations : int
-            Iterations for the SWB call (match GenerationConfig).
 
         Returns
         -------
@@ -6375,7 +6375,7 @@ class Bouquet:
             float(bl.Ip_target), seed,
             scale_jBS=float(getattr(bl, "bs_scale", 1.0)),
             isolate_edge_jBS=bool(gc.isolate_edge_jBS),
-            diagnostic_plots=False, iterations=swb_iterations)
+            diagnostic_plots=False, **gc.bootstrap_kwargs)
         spike0 = smooth_jbs_transition(
             _swb_jbs_to_toroidal(mygs, res["isolated_j_BS"], psi_pad))
         if gc.floor_j_BS:
@@ -7024,7 +7024,7 @@ class Bouquet:
                     floor_j_BS=gc.floor_j_BS, jBS_diff=jdiff,
                     accept_anchor_inband=gc.accept_anchor_inband,
                     perturb_jind_in_anchor=(route == "ip_renorm"),
-                    scale_jBS=scale0, swb_iterations=gc.swb_iterations,
+                    scale_jBS=scale0, **gc.bootstrap_kwargs,
                     edge_pressure=_edge,
                     diagnostic_plots=False, psi_N_kinetic=psi_kin,
                     p_fast=bl.p_fast, z_fast=getattr(bl, "z_fast", None),
@@ -7546,7 +7546,6 @@ class Bouquet:
                 jBS_scale_range=_jbs_range,
                 edge_pressure=resolve_edge_pressure(gc),
                 jbs_delta_mode=gc.jbs_delta_mode,
-                swb_iterations=gc.swb_iterations,
                 diagnostic_plots=gc.diagnostic_plots,
                 capture_live_eq=gc.capture_live_eq,
                 capture_npsi=gc.capture_npsi,
@@ -7641,6 +7640,7 @@ class Bouquet:
                 baseline_mse_record=getattr(bl, "mse_record", None),
                 solve_guard=_solve_guard,
                 engine_draw=_eng,
+                **gc.bootstrap_kwargs,
             )
         self.generation_log = _cap["text"] or None
         self.draw_rejections = list(_rejections)

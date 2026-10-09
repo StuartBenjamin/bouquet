@@ -1121,14 +1121,16 @@ def engine_rejection_reason(exc, stage):
 #  generate(): the hook generate_bouquet calls
 # ---------------------------------------------------------------------------
 def tokamaker_backend(mygs, contract, *, psi_pad, q_psi, maxits,
-                      edge_pressure=None):
+                      edge_pressure=None, edge_taper=None):
     """The draw's backend on a live solver (monkeypatched by the fast
-    tests).  ``edge_pressure``: the reconstruction's settings
-    (:mod:`bouquet.edge_pressure`)."""
+    tests).  ``edge_pressure`` / ``edge_taper``: the reconstruction's
+    settings (:mod:`bouquet.edge_pressure`, :func:`bouquet.engine.
+    engine_edge_taper`)."""
     from .engine import TokaMakerBackend
     return TokaMakerBackend(mygs, contract, psi_pad=psi_pad, li_kind="li_3",
                             q_psi=q_psi, maxits=maxits,
-                            edge_pressure=edge_pressure)
+                            edge_pressure=edge_pressure,
+                            edge_taper=edge_taper)
 
 
 class GenerateEngineDraws:
@@ -1181,7 +1183,8 @@ class GenerateEngineDraws:
                              kinetics=c.kinetics)
         return tokamaker_backend(mygs, dc, psi_pad=self.psi_pad,
                                  q_psi=self.q_psi, maxits=self.maxits,
-                                 edge_pressure=self.ctx.edge)
+                                 edge_pressure=self.ctx.edge,
+                                 edge_taper=self.ctx.eng.s.get("edge_taper"))
 
     def lcfs_pressure(self):
         """The separatrix pressure a written g-file of the CURRENT draw
@@ -1578,8 +1581,9 @@ class GenerateEngineDraws:
         # bootstrap model (x* held: s_bs (1 + d_bs) x scale x Redl) and its
         # fixed parts, both converted with THIS state's F<1/R>/<B^2>; the
         # residual against the archived j_phi is :meth:`archived_split`'s
-        from .engine import conversion_factor, pressure_term
-        kap = conversion_factor(fin["geom"])
+        from .engine import composed_factor, pressure_term
+        kap = composed_factor(fin["geom"])
+        _w = fin["geom"].get("edge_taper")
         dpl = cur["draw"].get("passes_post_homotopy") or cur["draw"]["passes"]
         fx = self.ctx.c.jB_fix_parts
         _amp = 1.0 + float(dpl.last["amp"].get("d_bs", 0.0))
@@ -1595,7 +1599,8 @@ class GenerateEngineDraws:
             j_NBI=kap * jB_NBI, j_RF=kap * jB_RF,
             jB_BS=jB_BS, jB_NBI=jB_NBI * np.ones_like(kap),
             jB_RF=jB_RF * np.ones_like(kap), kappa=kap,
-            j_pressure=pressure_term(fin["geom"]))
+            j_pressure=pressure_term(fin["geom"])
+            * (1.0 if _w is None else np.asarray(_w, dtype=float)))
         rec["archived"]["deltas"] = dict(
             l_i_3=float(fin["li"]) - float(self.ctx.ref["l_i"]),
             l_i_1=(None if (rec["archived"]["l_i_1"] is None

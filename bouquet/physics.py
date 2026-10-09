@@ -557,12 +557,45 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
     return out
 
 
+#: OpenFUSIONToolkit's ``taper_edge_shape`` codes (bootstrap ``boot_ops``)
+EDGE_TAPER_SHAPES = {1: "cos^2 (Hann)", 2: "quintic smoothstep",
+                     3: "cubic power"}
+
+
+def edge_taper_weight(psi_N, psi0=0.999, shape=2):
+    """The factor SWB's edge taper (``taper_edge_jBS``) multiplies every
+    toroidal current component by: 1 for ``psi_N < psi0``, falling to 0 at
+    ``psi_N = 1`` with *shape* (1 cos^2, 2 quintic smoothstep, 3 cubic).
+    A port of OFT ``grad_shaf_bootstrap.F90:apply_edge_taper`` (standard
+    convention); no taper when ``1 - psi0 < 1e-6``."""
+    psi = np.asarray(psi_N, dtype=float)
+    w = np.ones_like(psi)
+    psi0 = float(psi0)
+    span = 1.0 - psi0
+    if span < 1.0e-6:
+        return w
+    m = psi >= psi0
+    t = np.clip((psi[m] - psi0) / span, 0.0, 1.0)
+    shape = int(shape)
+    if shape == 1:
+        w[m] = np.cos(0.5 * np.pi * t) ** 2
+    elif shape == 2:
+        w[m] = 1.0 - t ** 3 * (6.0 * t ** 2 - 15.0 * t + 10.0)
+    elif shape == 3:
+        w[m] = (1.0 - t) ** 3
+    else:
+        raise ValueError(f"edge_taper_weight: unknown shape {shape!r} "
+                         f"(one of {sorted(EDGE_TAPER_SHAPES)})")
+    return w
+
+
 #: Version tag of :func:`evaluate_jBS`, recorded with every loop record so an
 #: archive states which evaluator produced its bootstrap.
 #: ``/2`` (2026-10-06): the toroidal output is ``kappa <j.B>``, ``kappa =
 #: F<1/R>/<B^2>`` (was ``<j.B>/(F<1/R>)`` in ``/1``).
 EVALUATE_JBS_VERSION = ("evaluate_jBS/2 (Redl 2021 jboot1, NRL/Zavg lnLambda, "
-                        "Koh nu_i*, psi_N-native, kappa = F<1/R>/<B^2> "
+                        "Koh nu_i*, geometric eps, psi_N-native, "
+                        "kappa = F<1/R>/<B^2> "
                         "toroidal conversion)")
 
 #: Positional layout of ``sauter_fc``'s geometry block on OFT builds that
@@ -636,7 +669,7 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     which is the reason it exists:
 
     1. **Geometry on the caller's grid.**  ``F``, ``f_T = 1 - f_c``,
-       ``eps = <a>/<R>``, ``q`` and ``<R>`` are sampled at
+       ``eps = (R_max - R_min)/(2<R>)``, ``q`` and ``<R>`` are sampled at
        ``psi_eval = clip(psi_N, psi_pad, 1 - psi_pad)`` -- the caller's own
        surfaces -- not on a uniform grid of the same length.
     2. **Gradients on the true grid.**  ``d/dpsi = numpy.gradient(y, psi_N,
@@ -802,14 +835,19 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     _sfc = getattr(mygs, "sauter_fc", None)
     if _sfc is None:
         _sfc = getattr(mygs, "calc_sauter_fc")
-    fc_u, r_sau, modb = _sfc(psi=psi_u.copy())[-3:]
+    try:   # the geometric eps, as OpenFUSIONToolkit's SWB takes it
+        _s = _sfc(psi=psi_u.copy(), return_eps=True)
+    except TypeError:
+        _s = ()
+    if len(_s) != 5:
+        raise RuntimeError("evaluate_jBS needs sauter_fc(return_eps=True), the "
+                           "geometric eps = (R_max - R_min)/(2<R>); this "
+                           "OpenFUSIONToolkit build does not provide it")
+    fc_u, r_sau, modb, eps_u = _s[1:]
     _, q_u, ravgs_q, *_rest = mygs.get_q(psi=psi_u.copy())
     F = np.asarray(F_u, dtype=float)[inv]
     f_T = (1.0 - np.asarray(fc_u, dtype=float))[inv]
-    # (a failed trace's zero row makes this 0/0; it is refused just below)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        eps = (_sauter_avg(r_sau, "<a>", _SAUTER_RAVG_INDEX)
-               / _sauter_avg(r_sau, "<R>", _SAUTER_RAVG_INDEX))[inv]
+    eps = np.asarray(eps_u, dtype=float)[inv]
     avg_inv_R = _sauter_avg(r_sau, "<1/R>", _SAUTER_RAVG_INDEX)[inv]
     avg_B2 = _sauter_avg(modb, "<|B|^2>", _SAUTER_MODB_INDEX)[inv]
     q = np.asarray(q_u, dtype=float)[inv]
@@ -825,14 +863,16 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     _a_sau = _sauter_avg(r_sau, "<a>", _SAUTER_RAVG_INDEX)[inv]
     _R_sau = _sauter_avg(r_sau, "<R>", _SAUTER_RAVG_INDEX)[inv]
     with np.errstate(invalid="ignore"):
-        for _nm, _a in (("F", F), ("f_T = 1 - f_c", f_T), ("<a>", _a_sau),
+        for _nm, _a in (("F", F), ("f_T = 1 - f_c", f_T), ("eps", eps),
+                        ("<a>", _a_sau),
                         ("<R> (sauter_fc)", _R_sau),
                         ("<1/R> (sauter_fc)", avg_inv_R), ("<B^2>", avg_B2),
                         ("q", q), ("<R> (get_q)", R_avg),
                         ("<1/R> (get_q)", inv_R_q), ("dV/dpsi", dV_dpsi)):
             _first_bad(~np.isfinite(_a), psi_N, _a, _nm, "finite",
                        what="flux-surface average")
-        for _nm, _a in (("<a>", _a_sau), ("<R> (sauter_fc)", _R_sau),
+        for _nm, _a in (("eps", eps), ("<a>", _a_sau),
+                        ("<R> (sauter_fc)", _R_sau),
                         ("<1/R> (sauter_fc)", avg_inv_R), ("<B^2>", avg_B2),
                         ("<R> (get_q)", R_avg), ("<1/R> (get_q)", inv_R_q),
                         ("dV/dpsi", dV_dpsi)):
