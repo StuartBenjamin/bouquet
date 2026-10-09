@@ -100,11 +100,9 @@ is what keeps it from silently regressing.
 ## Bootstrap current treatment
 
 The per-draw bootstrap comes from TokaMaker's Sauter/Redl
-`solve_with_bootstrap`, whose parallel output is converted to toroidal with the
-package's one field-aligned factor `κ = F⟨1/R⟩/⟨B²⟩`
-(`bouquet.physics.field_aligned_conversion`, via `parallel_to_toroidal`; on
-SWB's `⟨R⟩/F`-projected output the net factor is `F²⟨1/R⟩/(⟨R⟩⟨B²⟩)`). See
-"The evaluator" below for the 2026-10-06 change of this conversion.
+`solve_with_bootstrap`, whose output is already TokaMaker `jphi` (field-aligned
+part plus the pressure term p′G; see [current-conventions.md](current-conventions.md))
+and is used as is.
 
 Two composition modes:
 
@@ -999,6 +997,15 @@ A related, accepted artifact: a localized ~8–10% dip in core j_phi relative to
 the input g-file, which is an l_i-versus-peakedness tradeoff intrinsic to
 matching both. Pinning the core has been tried and is unstable. See
 [architecture.md §16](../architecture.md#16-known-limitations-and-future-work).
+
+**Known error, kept for legacy bit-identity: index-for-index ψ_N readbacks.** On a uniform ψ_N grid (every g-file run), the legacy path samples the solver at its own padded points, `linspace(psi_pad, 1 - psi_pad, n)`, and pairs those samples index for index with profiles on the nodes, `linspace(0, 1, n)`. Each pairing is misplaced by up to `psi_pad`, most of all at the edge.
+
+Sites:
+- the corrective iteration's measurement (`_corrective_output_jphi`, `coords.readback_kw`'s uniform branch);
+- the cylindrical l_i proxy (`calc_cylindrical_li_proxy`);
+- the self-consistent loop's delivered state (`_deliver_request_split`).
+
+This is wrong, and it is kept only so that legacy ψ_N results and their goldens stay bit-identical with main. On the D3D-like g-file it costs q95 −0.48% against the g-file's own q; with the readbacks moved to the nodes, the same run is −0.036% off, and l_i(3) moves from 0.65594 to 0.65397. The unified engine, swb, Φ_N runs and the archived achieved current all sample at, or interpolate onto, the nodes, and are not affected.
 
 A separate known issue — the small constant boundary offset from `jphi-linterp`
 edge/separatrix handling that sets the ~0.5 mm σ=0 floor — is written up in
