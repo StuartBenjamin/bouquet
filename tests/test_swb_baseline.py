@@ -223,7 +223,8 @@ def test_edge_taper_keeps_the_channel_split(monkeypatch, swb_oft, taper, saw):
                                j_other=j_oth, j_sawteeth=j_st,
                                j_phi=j_ind + j_bs + j_nbi + j_rf + j_oth, li_metrics={})
     gen = types.SimpleNamespace(bootstrap_kwargs={}, swb_saw_q=1.1 if saw else None,
-                                swb_edge_taper_psi0=0.999 if taper else None)
+                                swb_edge_taper_psi0=0.999 if taper else None,
+                                swb_saw_axis_flatten=None, swb_axis_pack=None)
     dj_saw = 1e4 * np.sin(np.pi * x / 0.4) * (x < 0.4)
 
     def solve(kin, seed, coil_reg_target=None):
@@ -250,6 +251,8 @@ def test_edge_taper_keeps_the_channel_split(monkeypatch, swb_oft, taper, saw):
                                _swb_solve=solve,
                                _swb_state=state, _finish_imas_baseline=lambda its, **k: None)
     ns._swb_source_split = lambda psi_N: Bouquet._swb_source_split(ns, psi_N)
+    ns._swb_axis_flatten = lambda: Bouquet._swb_axis_flatten(ns)
+    ns._swb_axis_pack_record = lambda psi_N: Bouquet._swb_axis_pack_record(ns, psi_N)
     Bouquet._swb_imas_baseline(ns)
     total = bl.j_inductive + bl.j_BS + bl.j_NBI + bl.j_RF + bl.j_other
     if saw:

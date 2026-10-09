@@ -72,7 +72,9 @@ def _bq_for_prepare(monkeypatch, resolve, fail_in=None):
     b.config = SimpleNamespace(
         source=SimpleNamespace(),
         generation=SimpleNamespace(single_profile_jphi=False,
-                                   imas_baseline="closure", swb_saw_q=None))
+                                   imas_baseline="closure", swb_saw_q=None,
+                                   swb_saw_axis_flatten=None,
+                                   swb_axis_pack=None))
     monkeypatch.setattr(b, "_check_jbs_loop_workflow", lambda gc: None)
     monkeypatch.setattr(b, "_check_structured_mse_reachable", lambda c: None)
     monkeypatch.setattr(B, "resolve_baseline", resolve)
