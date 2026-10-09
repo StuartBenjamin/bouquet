@@ -119,7 +119,8 @@ them with propagated uncertainty.
 currents (`j_ohmic` / `j_bootstrap`), kinetic profiles, fast-ion pressure, and
 rotation — and `read_imas_geometry()` pulls the boundary and vacuum `R·B_t` for
 a given slice. `write_imas_draw()` / `export_imas_drawset()` go the other way,
-reconstructing one or all perturbed IDS from an archive; `fidelity` selects
+reconstructing one or all perturbed IDS from an archive, each holding only
+the exported time slice of the template; `fidelity` selects
 where the parallel current split's geometry factor comes from (see
 [workflows.md](workflows.md#ids-current-split-fidelity)).
 
