@@ -164,7 +164,7 @@ def _probe_imas(work):
         wp = os.path.join(work, "draw.json")
         write_imas_draw(header + ".h5", d0.count, ddp, wp, scan_key=sk, time=_TIME)
         with open(wp) as fh:
-            cpw = json.load(fh)["core_profiles"]["profiles_1d"][ic]
+            cpw = json.load(fh)["core_profiles"]["profiles_1d"][0]
         x_t = (rho ** 2 - rho[0] ** 2) / (rho[-1] ** 2 - rho[0] ** 2)
         out["written_ne_on_rho2"] = bool(np.allclose(
             cpw["electrons"]["density_thermal"],
