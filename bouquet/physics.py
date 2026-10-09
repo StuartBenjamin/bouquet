@@ -663,11 +663,11 @@ def edge_taper_weight(psi_N, psi0=0.999, shape=2):
 #: Version tag of :func:`evaluate_jBS`, recorded with every loop record so an
 #: archive states which evaluator produced its bootstrap.
 #: ``/2`` (2026-10-06): the toroidal output is ``kappa <j.B>``, ``kappa =
-#: F<1/R>/<B^2>`` (was ``<j.B>/(F<1/R>)`` in ``/1``).
-EVALUATE_JBS_VERSION = ("evaluate_jBS/2 (Redl 2021 jboot1, NRL/Zavg lnLambda, "
+#: F<1/R>/<B^2>`` (was ``<j.B>/(F<1/R>)`` in ``/1``); ``/3``: plus ``p'G``.
+EVALUATE_JBS_VERSION = ("evaluate_jBS/3 (Redl 2021 jboot1, NRL/Zavg lnLambda, "
                         "Koh nu_i*, geometric eps, psi_N-native, "
                         "kappa = F<1/R>/<B^2> "
-                        "toroidal conversion)")
+                        "toroidal conversion plus p'G)")
 
 #: Positional layout of ``sauter_fc``'s geometry block on OFT builds that
 #: return it as a ``(3, n)`` array (builds after OpenFUSIONToolkit#313 return
@@ -749,30 +749,17 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
        in rho_tor) is differentiated as what it is.
     3. **Direct toroidal conversion.**  Redl returns the FSA parallel
        ``<j_BS.B>``; it is converted with the package's ONE field-aligned
-       factor (:func:`parallel_to_toroidal` ->
-       :func:`field_aligned_conversion`; ``F``, ``<1/R>`` and ``<B^2>`` from
-       the SAME surfaces), never through SWB's ``R_avg/F`` projection and its
-       undo::
+       factor (:func:`field_aligned_conversion`; ``F``, ``<1/R>`` and
+       ``<B^2>`` from the SAME surfaces), never through SWB's ``R_avg/F``
+       projection and its undo, and the pressure-driven part is added::
 
-           <j_phi> = kappa <j.B>,   kappa = F <1/R> / <B^2>
+           <j_phi> = kappa <j.B> + p' (<R> - F^2<1/R>/<B^2>),
+           kappa = F <1/R> / <B^2>
 
        -- the plain flux-surface average the solver consumes
-       (OpenFUSIONToolkit's ``jphi-linterp``), so with the pressure-driven
-       part the identity ``<j_phi> = kappa <j.B> + p' (<R> - F^2<1/R>/<B^2>)``
-       is exact; the unified engine composes with the same factor
-       (:func:`bouquet.engine.conversion_factor`).
-       **Declared default physics change (2026-10-06, owner-approved):**
-       until then this conversion was ``<j.B>/(F<1/R>)`` (the IMAS
-       ``<j_phi/R>/<1/R>`` form with its bracket ``<B_phi^2>/<B^2>`` taken
-       as 1).  That factor exceeds kappa by
-       ``<B^2>/(F^2<1/R>^2)``, the product of two terms:
-       the bracket ``<B^2>/<B_phi^2>`` (the poloidal-field content, ~1.5 %
-       at psi_N ~ 0.97 on the synthetic D3D-like example) and the Jensen
-       ratio ``<1/R^2>/<1/R>^2`` (~5 % there) -- +6.8 % in all at the
-       pedestal (+1.0 % at psi_N 0.1, +4.3 % at 0.5).  The legacy bootstrap
-       (this function's toroidal output, and the frozen path's
-       ``_swb_jbs_to_toroidal``) drops by that fraction; the engine, which
-       reads only ``diag["j_dot_B"]``, is unchanged.
+       (OpenFUSIONToolkit's ``jphi-linterp``).  ``p'G`` goes with the
+       bootstrap, as FUSE / IMAS.jl assign it (``includes_bootstrap=true``)
+       and as OpenFUSIONToolkit's SWB returns it.
 
     **Refusals, never a silent zero.**  The Redl expressions are undefined
     for non-physical input and on a surface the tracer failed on; the
@@ -915,7 +902,7 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     psi_eval = np.clip(psi_N, psi_pad, 1.0 - psi_pad)
     psi_u, inv = np.unique(psi_eval, return_inverse=True)
     psi_u = np.ascontiguousarray(psi_u, dtype=float)
-    _, F_u, _, _, _ = mygs.get_profiles(psi=psi_u.copy())
+    _, F_u, _, _, pp_u = mygs.get_profiles(psi=psi_u.copy())
     # a live TokaMaker exposes sauter_fc; a copy_eq() snapshot
     # (TokaMaker_equilibrium) exposes the same routine as calc_sauter_fc
     _sfc = getattr(mygs, "sauter_fc", None)
@@ -1026,8 +1013,11 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
 
     j_dot_B = _ends_only(j_dot_B, "<j_BS.B>")
 
-    geom = {"F": F, "avg_inv_R": avg_inv_R, "avg_B2": avg_B2}
-    j_tor_full = _ends_only(parallel_to_toroidal(j_dot_B, geom=geom),
+    # p'G goes with the bootstrap (FUSE's convention; OFT's SWB output)
+    geom = {"F": F, "avg_inv_R": avg_inv_R, "avg_B2": avg_B2,
+            "avg_R": R_avg, "pprime": np.asarray(pp_u, dtype=float)[inv]}
+    p_term = jphi_tokamaker_pressure_term(geom)
+    j_tor_full = _ends_only(parallel_to_toroidal(j_dot_B, geom=geom) + p_term,
                             "toroidal j_BS")
 
     if isolate_edge:
@@ -1038,7 +1028,7 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         res = _oft_bs.analyze_bootstrap_edge_spike(psi_N, swb_proj)
         masked = np.asarray(res["masked_spike"], dtype=float)
         j_tor_sel = _ends_only(parallel_to_toroidal(
-            masked * F / R_avg, geom=geom), "isolated toroidal j_BS")
+            masked * F / R_avg, geom=geom) + p_term, "isolated toroidal j_BS")
     else:
         j_tor_sel = j_tor_full
 
@@ -1058,6 +1048,7 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         n_geometry_surfaces=int(psi_u.size),
         f_T=f_T, nu_e_star=nu_e_star, nu_i_star=nu_i_star, q=q, eps=eps,
         R_avg=R_avg, F=F, avg_inv_R=avg_inv_R, avg_B2=avg_B2,
+        pprime=geom["pprime"], p_term=p_term,
         ln_lambda_e=np.asarray(ln_le, dtype=float),
         ln_lambda_ii=np.asarray(ln_lii, dtype=float),
         dpsi=psi_range, j_dot_B=j_dot_B,

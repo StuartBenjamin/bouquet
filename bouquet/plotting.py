@@ -3822,6 +3822,7 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
         try:
             if kind == "imas":
                 from .physics import (jpar_to_jphi_tokamaker,
+                                      jphi_tokamaker_pressure_term,
                                       jtor_imas_to_jphi_tokamaker)
                 from .io.imas import (current_frame, orientation_ip,
                                       parse_current_orientation)
@@ -3863,7 +3864,8 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
                 jtor = _m * np.asarray(c["j_tor"], float)
                 tt = lambda jp: _s * jpar_to_jphi_tokamaker(_m * jp, geo)
                 F = dict(total=np.interp(psi, pN, _s * jtor_imas_to_jphi_tokamaker(jtor, geo)),
-                         jBS=np.interp(psi, pN, tt(np.asarray(c["j_bootstrap"], float))),
+                         jBS=np.interp(psi, pN, tt(np.asarray(c["j_bootstrap"], float))
+                                       + _s * jphi_tokamaker_pressure_term(geo)),
                          jind=np.interp(psi, pN, tt(np.asarray(c["j_ohmic"], float))))
                 fixed = F["total"] - F["jBS"] - F["jind"]; Flabel = "FUSE"
             else:

@@ -342,6 +342,7 @@ class TestSignIsRecorded:
         equilibrium geometry), bit for bit."""
         from bouquet.io.imas import _paired_current_geometry
         from bouquet.physics import (jpar_to_jphi_tokamaker,
+                                     jphi_tokamaker_pressure_term,
                                      jtor_imas_to_jphi_tokamaker)
 
         dd = _example()
@@ -355,7 +356,8 @@ class TestSignIsRecorded:
         geom, _ = _paired_current_geometry(eq, cp, float(cps["time"][ic]),
                                            jtot, jtor)
         j_phi = jtor_imas_to_jphi_tokamaker(jtor, geom)
-        j_bs = jpar_to_jphi_tokamaker(np.asarray(cp["j_bootstrap"], float), geom)
+        j_bs = (jpar_to_jphi_tokamaker(np.asarray(cp["j_bootstrap"], float), geom)
+                + jphi_tokamaker_pressure_term(geom))
         jnbi_par = np.zeros_like(jtor)
         for s in dd["core_sources"]["source"]:
             if s["identifier"]["index"] == 2:

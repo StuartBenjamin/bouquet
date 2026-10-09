@@ -103,6 +103,14 @@ def test_a_unified_config_drops_a_non_default_swb_iterations():
     assert any("swb_iterations=2" in m and "dropped" in m for m in msgs)
 
 
+def test_a_config_with_the_retired_engine_split_pressure_loads():
+    d = _stored(SHAS[-1], "unified")
+    d["generation"]["engine_split_pressure"] = "inductive"
+    g, msgs = _load(d)
+    assert not hasattr(g, "engine_split_pressure")
+    assert len([m for m in msgs if "engine_split_pressure" in m]) == 1
+
+
 def test_a_unified_config_that_capped_its_draws_the_old_way():
     """Written before engine_draw_solve_maxits (the engine read
     draw_solve_maxits then): the cap moves over -- it was REFUSED before."""

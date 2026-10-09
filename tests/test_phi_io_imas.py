@@ -193,8 +193,8 @@ class TestWriteDrawPhi:
         at = lambda j: np.interp(x, _PEQ, j)            # noqa: E731
         np.testing.assert_allclose(cp["j_tor"], jphi_tokamaker_to_jtor_imas(at(_J_PHI), geom),
                                    rtol=1e-10)
-        for k, j, p in (("j_total", _J_PHI, pt), ("j_ohmic", _J_IND, pt),
-                        ("j_bootstrap", _J_BS, 0.0)):
+        for k, j, p in (("j_total", _J_PHI, pt), ("j_ohmic", _J_IND, 0.0),
+                        ("j_bootstrap", _J_BS, pt)):
             np.testing.assert_allclose(cp[k], jphi_tokamaker_to_jpar(at(j) - p, geom), rtol=1e-10)
 
     def test_a_phi_archive_lands_on_rho2_and_uses_the_draw_psi(self, tmp_path):

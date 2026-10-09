@@ -127,9 +127,9 @@ def _check_currents(cp, psiN_t, geom, a5=None):
     pt = _P(psiN_t)
     assert np.allclose(cp["j_tor"], jphi_tokamaker_to_jtor_imas(jphi, a5), rtol=1e-12)
     assert np.allclose(cp["j_total"], jphi_tokamaker_to_jpar(jphi - pt, geom), rtol=1e-12)
-    assert np.allclose(cp["j_ohmic"], jphi_tokamaker_to_jpar(j_ind - pt, geom),
+    assert np.allclose(cp["j_ohmic"], jphi_tokamaker_to_jpar(j_ind, geom), rtol=1e-12)
+    assert np.allclose(cp["j_bootstrap"], jphi_tokamaker_to_jpar(j_bs - pt, geom),
                        rtol=1e-12, atol=1e-9)
-    assert np.allclose(cp["j_bootstrap"], jphi_tokamaker_to_jpar(j_bs, geom), rtol=1e-12)
     assert np.allclose(cp["j_non_inductive"],
                        np.asarray(cp["j_total"]) - np.asarray(cp["j_ohmic"]))
     # reading the IDS back recovers bouquet's jphi (the reader's direction)
@@ -137,7 +137,7 @@ def _check_currents(cp, psiN_t, geom, a5=None):
     assert np.allclose(back_total, jphi, rtol=1e-12)
     back_par = jpar_to_jphi_tokamaker(np.asarray(cp["j_total"]), geom) + pt
     assert np.allclose(back_par, jphi, rtol=1e-12)
-    back_bs = jpar_to_jphi_tokamaker(np.asarray(cp["j_bootstrap"]), geom)
+    back_bs = jpar_to_jphi_tokamaker(np.asarray(cp["j_bootstrap"]), geom) + pt
     assert np.allclose(back_bs, j_bs, rtol=1e-10, atol=1e-6)
 
 

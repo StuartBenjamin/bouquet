@@ -339,11 +339,11 @@ pressure + that equilibrium's `p_sep`).
     positive frame on the subgroup's `psi_N` (the draw's grid) --
     `jB_BS` (the bootstrap model on the archived state), `jB_NBI`,
     `jB_RF` (rf + other driven), and `jB_inductive` the FIELD-ALIGNED
-    inductive only, `(j_inductive - j_pressure) / kappa`; with `kappa =
+    inductive only; with `kappa =
     F<1/R>/<B^2>` and `j_pressure = p'(<R> - F^2<1/R>/<B^2>)` [A m⁻²] of
     the archived state, `j_phi = kappa (jB_inductive + jB_BS + jB_NBI +
-    jB_RF) + j_pressure` to round-off. The toroidal `j_inductive` (the
-    residual) CARRIES `j_pressure`; the parallel one does not. The IDS
+    jB_RF) + j_pressure` to round-off. The toroidal `j_BS` CARRIES
+    `j_pressure`; no parallel part does. The IDS
     exporter (`write_imas_draw`) writes these parts as they are, so no
     exported parallel current (`j_ohmic`, `j_bootstrap`, `j_total`)
     carries the pressure-driven term and export -> `IdsAdapter.read`
@@ -351,8 +351,7 @@ pressure + that equilibrium's `p_sep`).
     the subgroup (every legacy draw; engine draws archived before
     2026-10-06) the exporter subtracts `j_pressure` computed from the
     archived eqdsk's own flux surfaces (`io.imas.archived_pressure_term`,
-    COCOS 7) from `j_inductive` before converting with the `eq_fsa`
-    geometry.
+    COCOS 7) from `j_BS` before converting with the `eq_fsa` geometry.
   - `passes_draw_band` (bool attr, engine draws only): the post-hoc band
     verdict. It is one of the filter flags ANDed into `selected`
     (`filtering._FILTER_FLAGS`), so `.filter()` selects what the until-N
