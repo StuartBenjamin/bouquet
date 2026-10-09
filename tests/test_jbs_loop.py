@@ -966,8 +966,11 @@ def test_the_post_homotopy_ceiling_is_not_read_with_the_loop_off():
     g = GenerationConfig(jbs_self_consistent=False)
     assert jbs_settings(g, draw=True)["enabled"] is False
     src = inspect.getsource(Bouquet.generate)
-    assert re.search(r'jbs_loop=\(_jbs_draw if _jbs_draw\["enabled"\] '
-                     r'else None\)', src)
+    assert re.search(r'jbs_loop=_m\.draw_jbs_loop\(_jbs_draw if '
+                     r'_jbs_draw\["enabled"\]\s+else None\)', src)
+    # the draw method hands it on (swb: never the loop)
+    from bouquet.draw_methods import DrawMethod
+    assert DrawMethod().draw_jbs_loop(None) is None
     gen = inspect.getsource(TI.generate_bouquet)
     calls = [m.start() for m in re.finditer(r"_post_homotopy_jbs\(", gen)]
     assert len(calls) == 1

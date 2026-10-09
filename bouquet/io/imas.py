@@ -1549,6 +1549,7 @@ def read_imas_baseline(
     anchor_jtor_to_equilibrium: bool = True,
     kinetic_source: str = "fuse",
     anchor_pressure_to_equilibrium: bool = False,
+    driven_sources: bool = False,
 ) -> "Baseline":
     """Read a FUSE ``dd_sim.json`` IDS and return a separated :class:`Baseline`.
 
@@ -1560,6 +1561,12 @@ def read_imas_baseline(
     determined.  An explicit ``"sum"`` / ``"trace"`` / ``"mean"`` / ``"perp"``
     always wins and is applied silently.  The rule that was used, and how it was
     chosen, are recorded on :attr:`Baseline.p_fast_meta`.
+
+    ``driven_sources`` (the swb method): every driven ``core_sources`` current
+    is held fixed, classified as the engine's IDS adapter does
+    (:func:`bouquet.adapters._ids_driven_currents`): EC/LH/IC in ``j_RF``,
+    fusion, runaways, sawteeth and unknown indices in ``j_other`` (its
+    sawteeth share also in ``j_sawteeth``).  Otherwise only the beams are.
     """
     import json
     from ..baseline import Baseline
@@ -1721,6 +1728,28 @@ def read_imas_baseline(
                 jnbi_par = jnbi_par + np.asarray(q_nbi["j_parallel"], dtype=float)
     j_NBI = s_ip * to_jphi(_m * jnbi_par)
     j_RF = np.zeros(n)   # never computed internally; user-supplied only
+    j_other = j_sawteeth = None
+    if driven_sources:
+        # every other driven entry by the engine IDS adapter's classification;
+        # the sawteeth entry by the gate's rule below (no slice within half a
+        # step: not active here, zero)
+        from ..adapters import _ids_driven_currents
+        _cpt = cp_ids.get("time")
+
+        def _is_saw(s):
+            return (s.get("identifier") or {}).get("index") == SAWTOOTH_SOURCE_INDEX
+        _parts = _ids_driven_currents(dict(src_ids, source=[
+            s for s in src_ids.get("source", []) if not _is_saw(s)]),
+            isrc, n, 1.0, _cpt)[0]
+        _saw = np.zeros(n)
+        for s in src_ids.get("source", []):
+            if _is_saw(s) and s.get("profiles_1d"):
+                q_saw, _ = _source_slice_at(s, isrc, _src_t, _src_nt, _cpt)
+                if q_saw is not None and q_saw.get("j_parallel") is not None:
+                    _saw = _saw + np.asarray(q_saw["j_parallel"], dtype=float)
+        j_RF = s_ip * to_jphi(_m * _parts["rf"])
+        j_other = s_ip * to_jphi(_m * (_parts["other"] + _saw))
+        j_sawteeth = s_ip * to_jphi(_m * _saw)
 
     # --- sawtooth model presence/amplitude at this slice (gate input only) ----
     # Read here because the dd (100s of MB) is not retained past this function.
@@ -1942,6 +1971,8 @@ def read_imas_baseline(
     j_phi = s_ip * j_phi_dd
     j_BS = s_ip * j_BS
     j_inductive = j_phi - j_BS - j_NBI - j_RF
+    if j_other is not None:
+        j_inductive = j_inductive - j_other
     print(f"  [imas] currents -> TokaMaker jphi on equilibrium t="
           f"{cur_meta['time']:.4f} s (core_profiles t="
           f"{cur_meta['t_core_profiles']:.4f} s; j_tor reproduced to "
@@ -2090,6 +2121,8 @@ def read_imas_baseline(
         provenance="imas",
         j_NBI=j_NBI,
         j_RF=j_RF,
+        j_other=j_other,
+        j_sawteeth=j_sawteeth,
         p_fast=p_fast,
         z_fast=(z_fast if np.any(z_fast) else None),
         z2_fast=(z2_fast if np.any(z_fast) else None),

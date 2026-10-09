@@ -36,7 +36,7 @@ _IDA = os.path.join(_DATA, "diiid_profs_synthetic.cdf")
 _GEQ = os.path.join(_DATA, "g_synthetic.geqdsk")
 _MESH = os.path.abspath(os.path.join(_HERE, "..", "examples", "D3D-like", "DIIID_mesh.h5"))
 _TIME = 1.013
-_METHODS = ("legacy",)
+_METHODS = ("legacy", "swb", "engine")
 _NODES = (0.1, 0.98)                      # IDA ψ_N range compared
 
 pytestmark = [

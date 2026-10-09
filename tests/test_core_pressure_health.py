@@ -625,12 +625,12 @@ def test_a_failing_record_cannot_escape_either_call_site(monkeypatch):
     ns = {"__name__": "bouquet.run", "__package__": "bouquet", "np": np,
           "psi_N": psi_N, "p_total": p, "_pc": {}, "mygs": _Gs(),
           "core_pressure_hollow_record": boom}
-    _run([_health_try(Bouquet._forward_solve_imas_baseline)], ns, strip=False)
+    _run([_health_try(Bouquet._finish_imas_baseline)], ns, strip=False)
     assert "synthetic failure" in ns["_cph"]["unavailable"]
 
     # and with the real record: a failing get_profiles is recorded, not raised
     ns["core_pressure_hollow_record"] = core_pressure_hollow_record
-    _run([_health_try(Bouquet._forward_solve_imas_baseline)], ns, strip=False)
+    _run([_health_try(Bouquet._finish_imas_baseline)], ns, strip=False)
     ach = ns["_cph"]["achieved"]["total"]
     assert ach["evaluated"] is False and "no equilibrium" in ach["reason"]
     assert ns["_cph"]["input"]["total"]["evaluated"] is True
