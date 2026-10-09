@@ -66,9 +66,7 @@ from ..physics import (effective_impurity_charge, impurity_pressure,
                        impurity_charge_with_fast_ions,
                        isotropize_fast_pressure, main_ion_density_from_zeff,
                        parallel_to_toroidal)
-
-# Elementary charge [C]: thermal pressure p = e * sum_s(n_s * T_s).
-_EC = 1.602176634e-19
+from ..physics import ELEMENTARY_CHARGE as _EC  # p = e * sum_s(n_s * T_s)
 
 if TYPE_CHECKING:
     from ..config import ImasSource, FixedComponentsConfig
@@ -86,6 +84,339 @@ SAWTOOTH_SOURCE_INDEX = 701
 # left as zeros and accepted as a user-supplied array via
 # FixedComponentsConfig.j_RF. See the "revisit RF" flag in the project notes
 # if/when internal EC/IC/LH summation is wanted.
+
+#: The time-match window [s] when NEITHER time base has a local step (a
+#: single-time core_sources entry on a single-time core_profiles base, or a
+#: single-time core_sources slice on a single-time core_profiles).
+#: Owner-approved 2026-10-07, replacing a window of a few float ulp:
+#: rounding-level mismatches of millisecond-stored times are MATCHES, with
+#: their dt recorded; the off_before_record (entry's own time after the
+#: slice) and refusal (entry's own time before the slice, carrying current)
+#: rules apply only beyond it.  When either base has a local step the
+#: half-step window is used and this floor plays no part.
+IMAS_SINGLE_TIME_WINDOW_S = 1e-5
+
+
+def _local_step(grid, k, toward):
+    """The local time-step of the sorted, distinct *grid* at node *k*, on
+    the side of the time *toward* (the interval it lies in; at an end of the
+    grid, the end interval).  ``None`` for a grid of fewer than two times."""
+    if grid.size < 2:
+        return None
+    if toward >= grid[k]:
+        return float(grid[k + 1] - grid[k] if k + 1 < grid.size
+                     else grid[k] - grid[k - 1])
+    return float(grid[k] - grid[k - 1] if k > 0 else grid[1] - grid[0])
+
+
+def _entry_time_window(times, t_slice, base_times=None):
+    """``(k, dt, half_step)`` for matching a core_sources entry to the slice
+    time *t_slice* by its OWN per-slice *times*: *k* is the entry's slice
+    NEAREST t_slice, ``dt`` its distance, and ``half_step`` the acceptance
+    window -- HALF the local time-step of the entry's own time grid (the
+    interval t_slice lies in, or the end interval past either end).  An
+    entry with a single time uses the local step of *base_times* (the
+    core_profiles time base) at the node nearest t_slice, on the entry's
+    side.  When neither grid has a step (a single-time entry on a
+    single-time base) the window is :data:`IMAS_SINGLE_TIME_WINDOW_S`
+    (10 us, owner-approved 2026-10-07; it was a few float ulp).
+
+    The rule (owner-approved 2026-10-06, replacing the 1e-6 s absolute
+    match of 2026-10-05; the half-step value is recorded, to be confirmed):
+    nearest own slice, accepted within half a local step, otherwise the
+    caller REFUSES a driven entry carrying current near that time -- a
+    driven current is never dropped to zero and never read at another time.
+    Refinement (2026-10-06): an entry carrying no current on the slices
+    BRACKETING the time (:func:`_entry_bracketing_slices`) is OFF there,
+    not missing -- it contributes zero and is stamped, not refused."""
+    tt = np.asarray(times, dtype=float)
+    t_slice = float(t_slice)
+    k = int(np.argmin(np.abs(tt - t_slice)))
+    dt = abs(float(tt[k]) - t_slice)
+    grid = np.unique(tt)
+    if grid.size >= 2:
+        kg = int(np.argmin(np.abs(grid - tt[k])))
+        step = _local_step(grid, kg, t_slice)
+    else:
+        step = None
+        if base_times is not None:
+            bg = np.unique(np.asarray(base_times, dtype=float))
+            if bg.size >= 2:
+                kb = int(np.argmin(np.abs(bg - t_slice)))
+                step = _local_step(bg, kb, float(tt[k]))
+    if step is None:
+        half = IMAS_SINGLE_TIME_WINDOW_S
+    else:
+        half = 0.5 * step
+    return k, dt, half
+
+
+def _entry_bracketing_slices(times, t_slice):
+    """Indices of a core_sources entry's own slices that BRACKET the slice
+    time *t_slice* on the entry's OWN time grid *times*: its nearest own
+    slice at or before t_slice and its nearest own slice at or after it
+    (every slice sharing that time, should the grid repeat one).  When
+    t_slice lies outside the entry's time range only the nearest END slice
+    exists, and only it is returned.
+
+    Used when no own slice lies within half a local step of t_slice
+    (:func:`_entry_time_window`): an entry whose ``j_parallel`` is absent or
+    identically zero on every bracketing slice is OFF at that time (a model
+    source idle there, e.g. one whose grid starts a step after the IDS time
+    base), not a missing input -- it contributes zero.  If any bracketing
+    slice carries current the caller still refuses (refinement of the
+    half-step rule, 2026-10-06)."""
+    tt = np.asarray(times, dtype=float)
+    t_slice = float(t_slice)
+    out = []
+    below = tt <= t_slice
+    if np.any(below):
+        out.extend(np.flatnonzero(tt == tt[below].max()).tolist())
+    above = tt >= t_slice
+    if np.any(above):
+        out.extend(np.flatnonzero(tt == tt[above].min()).tolist())
+    return sorted(set(int(k) for k in out))
+
+
+def _carries_current(q):
+    """Whether one ``profiles_1d`` slice carries a non-zero (or non-finite)
+    ``j_parallel``."""
+    jp = q.get("j_parallel")
+    return jp is not None and bool(np.any(np.asarray(jp, float) != 0.0))
+
+
+def _entry_off_near(s, t_slice):
+    """``None`` when the core_sources entry *s* carries current on a slice
+    bracketing *t_slice* (or cannot be judged: no per-slice times), else
+    the provenance reason it is OFF near that time
+    (:func:`_entry_bracketing_slices`)."""
+    pr = s.get("profiles_1d", [])
+    times = [q.get("time") for q in pr]
+    if t_slice is None or not pr or any(t is None for t in times):
+        return None
+    br = _entry_bracketing_slices(times, t_slice)
+    if any(_carries_current(pr[k]) for k in br):
+        return None
+    at = ", ".join(f"{float(times[k]):.9g}" for k in br)
+    return (f"off near the slice: no current on its bracketing slices at "
+            f"{at} s (t = {float(t_slice):.9g} s; no own slice within half "
+            "a time-step) -- a source idle at this time, contributing zero")
+
+
+def _entry_time_why(t_slice, times, k, dt, half):
+    """Why an entry has no slice within half a step of *t_slice*."""
+    tt = np.asarray(times, dtype=float)
+    return (f"no profiles_1d slice within half a time-step of t = "
+            f"{t_slice:.9g} s (nearest own time {float(tt[k]):.9g} s, "
+            f"|dt| = {dt:.3g} s > {half:.3g} s, half its local time-step; "
+            f"its own times span {tt.min():.9g}-{tt.max():.9g} s)")
+
+
+def _entry_time_refusal(who, idn, why):
+    """The refusal text for a driven entry with no slice at this time."""
+    return (f"{who}: core_sources {idn.get('name')!r} (index "
+            f"{idn.get('index')}) carries a non-zero j_parallel but has "
+            f"{why}, and carries current on its own slices bracketing that "
+            "time.  Refusing rather than reading its current at another "
+            "time or dropping it to zero (the half-step match rule, "
+            "owner-approved 2026-10-06)")
+
+
+def _half_local_step(times, t_at, toward):
+    """HALF the local step of the time grid *times* at its node nearest
+    *t_at*, on the side of *toward* (:func:`_local_step`), or ``None`` for a
+    grid of fewer than two distinct times."""
+    if times is None:
+        return None
+    grid = np.unique(np.asarray(times, dtype=float))
+    if grid.size < 2:
+        return None
+    k = int(np.argmin(np.abs(grid - float(t_at))))
+    return 0.5 * _local_step(grid, k, float(toward))
+
+
+#: The time rule of the core_sources reads (owner decision 2026-10-06),
+#: stamped on every record.
+SOURCE_TIME_RULE = (
+    "core_sources slice: nearest the core_profiles slice read, within half "
+    "the local core_profiles time-step, else refused; entry: nearest own "
+    "slice within half its own local step AND within half the local "
+    "core_profiles step of the core_profiles slice time (never "
+    "interpolated); before the entry's first own time: off "
+    "(off_before_record); past its last own time: refused when that slice "
+    "carries current; idle on its bracketing own slices: off; with no "
+    "local step on either time base the window is 1e-05 s "
+    "(IMAS_SINGLE_TIME_WINDOW_S)")
+
+
+def _cp_window(cp_times, src_times, t_cp, toward):
+    """``(half, basis)``: the core_profiles window at the core_profiles
+    slice time *t_cp* -- half its local step on the side of *toward*; a
+    single-time core_profiles uses the core_sources' own local step, and
+    two single-time bases :data:`IMAS_SINGLE_TIME_WINDOW_S` (10 us,
+    owner-approved 2026-10-07; it was a few float ulp)."""
+    h = _half_local_step(cp_times, t_cp, toward)
+    if h is not None:
+        return h, "half the local core_profiles time-step"
+    h = _half_local_step(src_times, t_cp, toward)
+    if h is not None:
+        return h, ("half the local core_sources time-step (core_profiles "
+                   "has a single time)")
+    return (IMAS_SINGLE_TIME_WINDOW_S,
+            "the single-time floor IMAS_SINGLE_TIME_WINDOW_S (single-time "
+            "core_profiles and core_sources)")
+
+
+def core_sources_slice(src_ids, cp_times, ic, T=None, who="IMAS reader"):
+    """``(isrc, t_src, record)``: the core_sources slice read with the
+    core_profiles slice *ic* (owner decision 2026-10-06).
+
+    The slice is the core_sources time NEAREST the core_profiles slice
+    actually read (``cp_times[ic]``), and it must lie within HALF the local
+    core_profiles time-step of it (:func:`_cp_window`), else ``ValueError``
+    naming both times -- a single-time core_sources is no longer read at
+    any requested time.  A core_sources with no time base is read by index
+    (``ic``), as before.  The record carries both times, ``dt`` (core_sources
+    minus core_profiles), the window and its basis, and the rule."""
+    tb = src_ids.get("time")
+    cpt = (None if cp_times is None or not len(cp_times)
+           else np.asarray(cp_times, dtype=float))
+    t_cp = None if cpt is None else float(cpt[min(ic, cpt.size - 1)])
+    if not tb:
+        return ic, None, dict(core_profiles_time=t_cp,
+                              core_sources_time=None, dt=None, window=None,
+                              rule="by index: core_sources carries no time "
+                                   "base")
+    tt = np.asarray(tb, dtype=float)
+    if t_cp is None:
+        isrc = _nearest_index(tt, T, "core_sources")
+        return isrc, float(tt[isrc]), dict(
+            core_profiles_time=None, core_sources_time=float(tt[isrc]),
+            dt=None, window=None,
+            rule="nearest the requested time (core_profiles has no time "
+                 "base)")
+    isrc = int(np.argmin(np.abs(tt - t_cp)))
+    t_src = float(tt[isrc])
+    dt = t_src - t_cp
+    half, basis = _cp_window(cpt, tt, t_cp, t_src)
+    rec = dict(core_profiles_time=t_cp, core_sources_time=t_src, dt=dt,
+               window=half, window_basis=basis, rule=SOURCE_TIME_RULE)
+    if abs(dt) > half:
+        raise ValueError(
+            f"{who}: the core_sources slice nearest the core_profiles slice "
+            f"read (t = {t_cp:.9g} s) is at t = {t_src:.9g} s: |dt| = "
+            f"{abs(dt):.3g} s > {half:.3g} s, {basis} (core_sources times "
+            f"span {tt.min():.9g}-{tt.max():.9g} s).  Refusing rather than "
+            "reading the driven currents at another time (owner decision "
+            "2026-10-06)")
+    return isrc, t_src, rec
+
+
+def _source_slice_at(s, isrc, t_slice, n_time, base_times=None, *,
+                     t_cp=None, cp_half=None, rec=None):
+    """``(profile, how)``: a ``core_sources`` entry's ``profiles_1d`` at the
+    slice *isrc* (time *t_slice*), or ``(None, why)`` when the entry has no
+    slice within half a local time-step of that time
+    (:func:`_entry_time_window`; the CALLER decides: a beam entry is
+    refused unless it is off -- :func:`_entry_off_before_record`,
+    :func:`_entry_off_near`).  An entry carrying its own per-slice times is
+    matched BY TIME to its nearest slice (a model's entry may start later
+    than the IDS time base, so the list index is not the slice); one without
+    them must have exactly the IDS's number of slices, or it cannot be
+    aligned and is refused (``ValueError``) -- never its first slice taken
+    in place of a missing one.  The rule of
+    ``bouquet.adapters._ids_source_slice``.
+
+    Owner decision 2026-10-06: the matched own slice must ALSO lie within
+    *cp_half* (half the local core_profiles step) of the core_profiles
+    slice time *t_cp* (default: *t_slice*), so a coarse own grid or a
+    constant offset cannot pass on the entry's own step alone.  *rec*, a
+    dict, receives the match: matched own time, ``dt`` (own minus
+    core_profiles time), both windows, the bracketing own times, the
+    entry's first / last own time and the status."""
+    pr = s.get("profiles_1d", [])
+    idn = s.get("identifier", {}) or {}
+    if rec is None:
+        rec = {}
+    rec.update(name=idn.get("name"), index=idn.get("index"))
+    if not pr:
+        rec.update(status="no_profiles")
+        return None, "no profiles_1d"
+    times = [q.get("time") for q in pr]
+    if t_slice is not None and all(t is not None for t in times):
+        tt = np.asarray(times, dtype=float)
+        t_ref = float(t_slice if t_cp is None else t_cp)
+        k, dt, half = _entry_time_window(times, t_slice, base_times)
+        br = _entry_bracketing_slices(times, t_slice)
+        rec.update(own_time_nearest=float(tt[k]),
+                   dt=float(tt[k]) - t_ref, window_own=float(half),
+                   window_core_profiles=(None if cp_half is None
+                                         else float(cp_half)),
+                   bracketing_own_times=[float(tt[j]) for j in br],
+                   first_own_time=float(tt.min()),
+                   last_own_time=float(tt.max()))
+        if dt > half:
+            rec.update(status="unmatched")
+            return None, _entry_time_why(t_slice, times, k, dt, half)
+        if cp_half is not None and abs(float(tt[k]) - t_ref) > cp_half:
+            rec.update(status="unmatched")
+            return None, (
+                f"no profiles_1d slice within half the local core_profiles "
+                f"time-step of t = {t_ref:.9g} s (nearest own time "
+                f"{float(tt[k]):.9g} s, |dt| = "
+                f"{abs(float(tt[k]) - t_ref):.3g} s > {cp_half:.3g} s, half "
+                f"the local core_profiles step; within its own half-step "
+                f"{half:.3g} s; its own times span {tt.min():.9g}-"
+                f"{tt.max():.9g} s)")
+        rec.update(status="matched", matched_time=float(tt[k]))
+        return pr[k], "matched by time"
+    if n_time is not None and len(pr) != n_time:
+        raise ValueError(
+            f"IMAS reader: core_sources {idn.get('name')!r} (index "
+            f"{idn.get('index')}) has {len(pr)} profiles_1d slices for "
+            f"{n_time} core_sources times and no per-slice time: it cannot be "
+            "aligned with the slice read")
+    if isrc >= len(pr):
+        raise ValueError(
+            f"IMAS reader: core_sources {idn.get('name')!r} (index "
+            f"{idn.get('index')}) has no profiles_1d slice {isrc}")
+    rec.update(status="matched", matched_time=t_slice, dt=(
+        None if (t_slice is None or t_cp is None) else
+        float(t_slice) - float(t_cp)), rule_entry="by index")
+    return pr[isrc], "by index"
+
+
+def _entry_off_before_record(s, t_slice):
+    """The entry's FIRST own time when the slice time *t_slice* lies before
+    it (the entry has no record before its first own sample: it is OFF at
+    that time -- owner decision 2026-10-06), else ``None``.  Judged only on
+    an entry carrying per-slice times."""
+    pr = s.get("profiles_1d", [])
+    times = [q.get("time") for q in pr]
+    if t_slice is None or not pr or any(t is None for t in times):
+        return None
+    first = float(np.min(np.asarray(times, dtype=float)))
+    return first if float(t_slice) < first else None
+
+
+_OFF_BEFORE_ANNOUNCED = set()
+
+
+def _announce_off_before(who, idn, first, t_slice, key=None):
+    """Print and warn ONCE per run (per source file and entry) that a driven
+    entry is off before its first own time."""
+    import warnings
+    tag = (key, idn.get("name"), idn.get("index"), float(first))
+    if tag in _OFF_BEFORE_ANNOUNCED:
+        return
+    _OFF_BEFORE_ANNOUNCED.add(tag)
+    msg = (f"{who}: core_sources {idn.get('name')!r} (index "
+           f"{idn.get('index')}) has no record before its first own time "
+           f"{float(first):.9g} s: it is OFF (zero) at t = "
+           f"{float(t_slice):.9g} s and at every earlier slice, stamped "
+           "off_before_record (owner decision 2026-10-06)")
+    print(f"[imas] NOTE {msg}", flush=True)
+    warnings.warn(msg, UserWarning, stacklevel=3)
 
 
 def _nearest_index(time_array, t: Optional[float], what: str) -> int:
@@ -874,23 +1205,83 @@ def read_imas_baseline(
     j_BS = to_toroidal(j_boot)
 
     # --- NBI: sum beam-source parallel currents, then convert ---
+    # Each beam entry is read at the core_sources slice TIME, not at its list
+    # index (owner-approved 2026-10-05, the sawteeth entry's rule below and
+    # the engine IDS adapter's): an entry carrying its own per-slice times is
+    # matched to its NEAREST own slice -- one that starts later than the IDS
+    # time base was read one slice late, and a slice past its end from its
+    # FIRST slice.  The match is accepted within HALF the entry's local
+    # time-step (the core_profiles step for a single-time entry); otherwise
+    # the read is REFUSED (owner-approved 2026-10-06: before, a 1e-6 s
+    # absolute match dropped the beam to zero with a warning on any larger
+    # mismatch) -- unless the entry carries no current on its own slices
+    # bracketing the time: then it is off there, not missing (refinement of
+    # 2026-10-06).  One without per-slice times must have the IDS's slice
+    # count, or it cannot be aligned and is refused.
+    # Owner decision 2026-10-06: the core_sources slice is the one nearest
+    # the core_profiles slice READ and must lie within half the local
+    # core_profiles step of it (core_sources_slice; a single-time
+    # core_sources is no longer read at any time); an entry's matched own
+    # slice must also lie within that half-step of the core_profiles time;
+    # an entry whose own record starts AFTER the slice time is OFF there
+    # (off_before_record, announced once); dt and the bracketing own times
+    # are recorded (Baseline.source_time_match).
     src_ids = dd.get("core_sources", {})
-    isrc = _nearest_index(src_ids["time"], T, "core_sources") if src_ids.get("time") else ic
+    isrc, _src_t, _slice_rec = core_sources_slice(
+        src_ids, cp_ids.get("time"), ic, T, who="IMAS reader")
+    _src_tb = src_ids.get("time")
+    _src_nt = None if not _src_tb else len(_src_tb)
+    _t_cp = _slice_rec["core_profiles_time"]
+    _cp_half = (None if (_t_cp is None or _src_t is None) else
+                _cp_window(cp_ids.get("time"), _src_tb, _t_cp, _src_t)[0])
+    source_time_match = dict(core_sources=_slice_rec, entries=[])
     jnbi_par = np.zeros(n)
     for s in src_ids.get("source", []):
         if s.get("identifier", {}).get("index") == NBI_SOURCE_INDEX:
             pr = s.get("profiles_1d", [])
             if pr:
-                idx = isrc if len(pr) > isrc else 0
-                jnbi_par = jnbi_par + np.asarray(pr[idx]["j_parallel"], dtype=float)
+                _erec = {}
+                source_time_match["entries"].append(_erec)
+                q_nbi, how = _source_slice_at(s, isrc, _src_t, _src_nt,
+                                              cp_ids.get("time"), t_cp=_t_cp,
+                                              cp_half=_cp_half, rec=_erec)
+                if q_nbi is None:
+                    _erec["reason"] = how
+                    if not any(_carries_current(qq) for qq in pr):
+                        _erec["status"] = "zero"
+                        continue
+                    # idle on the own slices bracketing this time: off
+                    # here, nothing to drop (refinement of 2026-10-06)
+                    if _entry_off_near(s, _src_t) is not None:
+                        _erec["status"] = "off_idle"
+                        continue
+                    # before its first own time (which carries current):
+                    # OFF (owner decision 2026-10-06), stamped and
+                    # announced once
+                    _first = _entry_off_before_record(s, _src_t)
+                    if _first is not None:
+                        _erec.update(status="off_before_record",
+                                     first_own_time=_first)
+                        _announce_off_before("IMAS reader",
+                                             s.get("identifier") or {},
+                                             _first, _src_t,
+                                             key=str(source.ids_path))
+                        continue
+                    raise ValueError(_entry_time_refusal(
+                        "IMAS reader", s.get("identifier") or {}, how))
+                jnbi_par = jnbi_par + np.asarray(q_nbi["j_parallel"], dtype=float)
     j_NBI = to_toroidal(cur_sign * jnbi_par)
     j_RF = np.zeros(n)   # never computed internally; user-supplied only
 
     # --- sawtooth model presence/amplitude at this slice (gate input only) ----
     # Read here because the dd (100s of MB) is not retained past this function.
     # "active" means the source EXISTS and carries a non-zero j_parallel at this
-    # time index: a declared-but-idle sawtooth source (all zeros before onset)
-    # must NOT admit a ramp slice to the q0 pin.
+    # SLICE TIME: a declared-but-idle sawtooth source (all zeros before onset)
+    # must NOT admit a ramp slice to the q0 pin.  The entry is read at the
+    # core_sources slice TIME, not at the list index (owner-approved
+    # 2026-10-05, the rule of the engine IDS adapter): a model's sawteeth
+    # entry may start later than the IDS time base -- it was then read one
+    # slice late, and at the last slice from its FIRST slice.
     sawtooth = {"source_index": SAWTOOTH_SOURCE_INDEX, "present": False,
                 "j_par_max_abs": 0.0, "active": False, "q0_dd": None}
     for s in src_ids.get("source", []):
@@ -898,8 +1289,19 @@ def read_imas_baseline(
             sawtooth["present"] = True
             pr = s.get("profiles_1d", [])
             if pr:
-                jsaw = np.asarray(pr[isrc if len(pr) > isrc else 0]
-                                  .get("j_parallel", []), dtype=float)
+                _erec = {}
+                source_time_match["entries"].append(_erec)
+                q_saw, how = _source_slice_at(s, isrc, _src_t, _src_nt,
+                                              cp_ids.get("time"), t_cp=_t_cp,
+                                              cp_half=_cp_half, rec=_erec)
+                sawtooth["slice"] = how
+                if q_saw is None:
+                    _erec["reason"] = how
+                    # no slice of the entry within half a step of this
+                    # time: not active here (a gate FLAG, not a current --
+                    # recorded in sawtooth["slice"], not refused)
+                    continue
+                jsaw = np.asarray(q_saw.get("j_parallel", []), dtype=float)
                 if jsaw.size and np.any(np.isfinite(jsaw)):
                     sawtooth["j_par_max_abs"] = max(
                         sawtooth["j_par_max_abs"],
@@ -1145,6 +1547,7 @@ def read_imas_baseline(
         source_current_sign=cur_sign,
         source_current_sign_origin=cur_origin,
         source_b0_sign=b0_sign,
+        source_time_match=source_time_match,
     )
 
 
@@ -1163,8 +1566,10 @@ def read_imas_baseline(
 #  still come from the archived 257^2 eqdsk (lossless to that grid,
 #  machine-precision GS) rather than the live FE fields -- a direct OFT ODS
 #  export would upgrade this; (2) exact <1/R^2> is computed by flux-surface
-#  quadrature since TokaMaker does not yet expose it
-#  (OpenFUSIONToolkit/OpenFUSIONToolkit#312) -- when it does, read it directly.
+#  quadrature on OFT builds whose get_q does not expose it; since 2026-10-06
+#  it is archived geometry only -- the conversion is the one field-aligned
+#  factor kappa = F<1/R>/<B^2> (physics.field_aligned_conversion), the exact
+#  inverse of what bouquet converts in with, and does not read <1/R^2>.
 # ===========================================================================
 def _imas_b0(out, ie, ic):
     """Reference vacuum field B0 for the IMAS <j.B>/B0 normalisation.
@@ -1192,11 +1597,48 @@ def _eq_fsa_geom_on(eq_fsa, psiN_t, B0):
         avg_B2 = np.interp(psiN_t, src, np.asarray(eq_fsa["avg_B2"], dtype=float))
     except (KeyError, TypeError):
         return None
-    geom = {"F": F, "avg_inv_R": avg_inv_R, "avg_B2": avg_B2, "B0": float(B0)}
-    if eq_fsa.get("avg_inv_R2") is not None:     # exact bracket when captured
-        geom["avg_inv_R2"] = np.interp(
-            psiN_t, src, np.asarray(eq_fsa["avg_inv_R2"], dtype=float))
-    return geom
+    # the one field-aligned conversion kappa = F<1/R>/<B^2> (2026-10-06):
+    # the captured <1/R^2> no longer enters it (toroidal_to_parallel refuses
+    # a geom carrying it)
+    return {"F": F, "avg_inv_R": avg_inv_R, "avg_B2": avg_B2, "B0": float(B0)}
+
+
+#: COCOS of the eqdsk bytes bouquet archives per draw (TokaMaker's
+#: ``save_eqdsk``): psi decreasing outward for Ip > 0, per radian.
+ARCHIVE_EQDSK_COCOS = 7
+
+_P_TERM_CACHE = {}
+
+
+def archived_pressure_term(eqdsk_bytes, psi_N):
+    """The pressure-driven ``<j_phi>`` part ``p'(<R> - F^2<1/R>/<B^2>)``
+    (:func:`bouquet.engine.pressure_term`) of an ARCHIVED draw eqdsk, in the
+    archive's positive frame, interpolated onto *psi_N*.
+
+    ``p'``, ``F``, ``<R>``, ``<1/R>``, ``<B^2>`` come from the eqdsk's own
+    traced flux surfaces read as :data:`ARCHIVE_EQDSK_COCOS`
+    (:func:`bouquet.adapters.gfile_parallel_current`, which refuses an
+    eqdsk whose ``<j_phi>`` does not carry its own Ip's sign).  This is the
+    term an archived toroidal ``j_inductive`` carries when it is the
+    residual ``j_phi - j_BS - fixed`` (every legacy draw, and engine draws
+    archived before the ``jB_parallel/`` subgroup); the IDS exporter
+    subtracts it before converting the inductive to ``<j.B>``.  Cached per
+    eqdsk content (the trace takes ~2 s)."""
+    import hashlib
+    from ..adapters import gfile_parallel_current
+    from ..engine import pressure_term
+    from .geqdsk import GEQDSKEquilibrium
+    raw = bytes(eqdsk_bytes)
+    key = hashlib.sha256(raw).hexdigest()
+    hit = _P_TERM_CACHE.get(key)
+    if hit is None:
+        geq = GEQDSKEquilibrium.from_bytes(raw, cocos=ARCHIVE_EQDSK_COCOS)
+        _jB, parts = gfile_parallel_current(geq)
+        hit = (np.asarray(geq.psi_N, dtype=float), pressure_term(parts))
+        if len(_P_TERM_CACHE) > 64:
+            _P_TERM_CACHE.clear()
+        _P_TERM_CACHE[key] = hit
+    return np.interp(np.asarray(psi_N, dtype=float), hit[0], hit[1])
 
 
 def _signed_b0(out, ie, ic):
@@ -1336,18 +1778,39 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     kinetics/currents to ``core_profiles``. ``j_tor`` is exact.
 
     The parallel split (``j_total`` / ``j_ohmic`` / ``j_bootstrap`` =
-    IMAS ``<j.B>/B0``) fidelity is set by ``fidelity``:
+    IMAS ``<j.B>/B0``) carries NO pressure-driven current: the term
+    ``P = p'(<R> - F^2<1/R>/<B^2>)`` has ``<j.B> = 0`` and a reader
+    recovers it from the pressure (the engine's
+    :class:`~bouquet.adapters.IdsAdapter` composes ``<j_phi> = kappa <j.B>
+    + P``).  ``j_ohmic`` is the field-aligned inductive only,
+    ``j_bootstrap`` the bootstrap, and ``j_total = j_ohmic + j_bootstrap +
+    driven`` (the driven parts, beams / RF, are the archive's ``j_phi -
+    j_inductive - j_BS``; the template's ``core_sources`` are kept as they
+    are).  So export -> ``IdsAdapter.read`` returns the archived ``<j.B>``
+    parts and the archived ``<j_phi>`` (tests/test_imas_export_roundtrip.py).
+    Before 2026-10-06 the archived toroidal ``j_inductive`` -- the residual
+    ``j_phi - j_BS - fixed``, which carries ``P`` -- was converted as it
+    was, so ``P / kappa`` sat inside the exported ``j_ohmic`` / ``j_total``
+    and a re-read counted it twice.  The source of the split is set by
+    ``fidelity``:
 
-      * ``"exact"``       -- convert each toroidal component with the draw's OWN
-        captured flux-surface geometry (``eq_fsa`` block, from
+      * engine draws archived with the ``jB_parallel/`` subgroup (schema;
+        the ``<j.B>`` parts the toroidal split was converted from) are
+        written from it directly under ``"auto"`` and ``"exact"`` -- no
+        conversion;
+      * ``"exact"``       -- otherwise convert with the draw's OWN captured
+        flux-surface geometry (``eq_fsa`` block, from
         ``capture_live_eq=True`` at generate time) via
-        :func:`bouquet.physics.toroidal_to_parallel`. Raises if the block is
-        absent.
+        :func:`bouquet.physics.toroidal_to_parallel` (``kappa =
+        F<1/R>/<B^2>``), after subtracting ``P`` -- from the archived
+        eqdsk's own surfaces, :func:`archived_pressure_term` -- from the
+        archived ``j_inductive``.  Raises if the block is absent.
       * ``"reconstruct"`` -- the interim baseline ratio ``c = j_tor/j_total``
-        from the template (exact only when the draw's flux geometry matches the
-        baseline's).
-      * ``"auto"`` (default) -- exact when the ``eq_fsa`` block is present,
-        else reconstruct.
+        from the template in place of ``kappa``, with the same ``P``
+        subtraction (approximate: exact only when the draw's flux geometry
+        matches the baseline's).
+      * ``"auto"`` (default) -- stored parts when present, else exact when
+        the ``eq_fsa`` block is present, else reconstruct.
 
     Parameters
     ----------
@@ -1422,11 +1885,15 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
         zeff = np.asarray(g["aux_zeff"][()]) if "aux_zeff" in g else None
         li1 = float(g.attrs.get("l_i(1)", np.nan))
         li3 = float(g.attrs.get("l_i(3)", np.nan))
-        from ..schema import find_bytes_dataset, EQ_FSA_GROUP
+        from ..schema import (find_bytes_dataset, EQ_FSA_GROUP,
+                              read_jB_parallel)
         eqk = find_bytes_dataset(g)
         if eqk is None:
             raise KeyError(f"draw {draw_index} has no archived eqdsk")
-        geq = read_eqdsk_from_bytes(bytes(g[eqk][()]), read_geqdsk)
+        eq_bytes = bytes(g[eqk][()])
+        geq = read_eqdsk_from_bytes(eq_bytes, read_geqdsk)
+        # the engine draw's stored PARALLEL parts (schema jB_parallel/)
+        jB_par = read_jB_parallel(g)
         # optional captured live-equilibrium FSA block (exact conversion)
         eq_fsa = None
         if EQ_FSA_GROUP in g:
@@ -1507,48 +1974,77 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     jt_t = to_t(j_tor, peq)
     cp["j_tor"] = (s_I * jt_t).tolist()
 
-    # Parallel split (j_total / j_ohmic / j_bootstrap = IMAS <j.B>/B0). Two
-    # fidelities (`fidelity` arg): EXACT uses the draw's own captured
-    # flux-surface geometry (eq_fsa) via physics.toroidal_to_parallel;
-    # RECONSTRUCT falls back to the interim baseline ratio c=j_tor/j_total from
-    # the template (exact only when the draw's flux geometry matches baseline).
+    # Parallel split (j_total / j_ohmic / j_bootstrap = IMAS <j.B>/B0).
+    # NO exported parallel current carries the pressure-driven term
+    # P = p'(<R> - F^2<1/R>/<B^2>) (its <j.B> is zero; a reader recovers it
+    # from the pressure -- the engine's IdsAdapter composes
+    # <j_phi> = kappa <j.B> + P): j_ohmic is the field-aligned inductive
+    # only, j_bootstrap the bootstrap, and j_total = j_ohmic + j_bootstrap
+    # + the driven parts.  Sources, in order:
+    #   STORED  -- an engine draw's jB_parallel/ subgroup (the <j.B> parts
+    #              the archived toroidal split was converted from), written
+    #              as they are (/ |B0|): no conversion at all;
+    #   EXACT   -- the draw's captured eq_fsa geometry: kappa = F<1/R>/<B^2>
+    #              (physics.toroidal_to_parallel), with P (archived eqdsk,
+    #              archived_pressure_term) subtracted from the archived
+    #              toroidal j_inductive -- which carries it, being the
+    #              residual j_phi - j_BS - fixed (legacy draws; engine draws
+    #              archived before jB_parallel/) -- before converting;
+    #   RECONSTRUCT -- the template's ratio c = j_tor/j_total in place of
+    #              kappa, the same P subtraction (approximate: exact only
+    #              when the draw's flux geometry matches the baseline's).
+    # The driven parts of a toroidal archive are j_phi - j_inductive - j_BS.
     if base_jtot is not None:
-        use_exact = False
-        if fidelity in ("auto", "exact") and eq_fsa is not None:
-            geom = _eq_fsa_geom_on(eq_fsa, psiN_t, _imas_b0(out, ie, ic))
-            if geom is not None:
-                from ..physics import toroidal_to_parallel
-                cp["j_total"] = (s_I * toroidal_to_parallel(
-                    jt_t, geom=geom)).tolist()
-                cp["j_ohmic"] = (s_I * toroidal_to_parallel(
-                    to_t(j_ind, peq), geom=geom)).tolist()
-                cp["j_bootstrap"] = (s_I * toroidal_to_parallel(
-                    to_t(j_bs, peq), geom=geom)).tolist()
-                use_exact = True
-        if fidelity == "exact" and not use_exact:
-            raise ValueError(
-                f"fidelity='exact' requested but draw {draw_index} has no "
-                "captured eq_fsa block (generate with capture_live_eq=True). "
-                "Use fidelity='auto' to fall back to the baseline-ratio "
-                "reconstruction.")
-        if not use_exact:                      # baseline-ratio reconstruction
-            if base_jtor is None:
+        B0_exp = _imas_b0(out, ie, ic)
+        parts_t = None                       # positive frame, <j.B>/B0
+        if fidelity in ("auto", "exact") and jB_par is not None:
+            src = np.asarray(jB_par.get("psi_N", peq), dtype=float)
+
+            def _pt(name):
+                return np.interp(psiN_t, src, jB_par[name]) / B0_exp
+            parts_t = dict(ohmic=_pt("jB_inductive"),
+                           bootstrap=_pt("jB_BS"),
+                           driven=_pt("jB_NBI") + _pt("jB_RF"))
+        else:
+            P_t = archived_pressure_term(eq_bytes, psiN_t)
+            jt_ind = to_t(j_ind, peq)
+            jt_bs = to_t(j_bs, peq)
+            jt_drv = jt_t - jt_ind - jt_bs
+            if fidelity in ("auto", "exact") and eq_fsa is not None:
+                geom = _eq_fsa_geom_on(eq_fsa, psiN_t, B0_exp)
+                if geom is not None:
+                    from ..physics import toroidal_to_parallel
+                    parts_t = dict(
+                        ohmic=toroidal_to_parallel(jt_ind - P_t, geom=geom),
+                        bootstrap=toroidal_to_parallel(jt_bs, geom=geom),
+                        driven=toroidal_to_parallel(jt_drv, geom=geom))
+            if fidelity == "exact" and parts_t is None:
                 raise ValueError(
-                    "fidelity='reconstruct' needs the template's own "
-                    "core_profiles j_tor to form the ratio c = j_tor/j_total; "
-                    "the template has none. Use an archive with a captured "
-                    "eq_fsa block (fidelity='exact').")
-            eps = 1e-9 * np.nanmax(np.abs(base_jtot)) if base_jtot.size else 0.0
-            good = np.abs(base_jtot) > eps
-            c = np.ones_like(base_jtot)
-            c[good] = base_jtor[good] / base_jtot[good]
-            if not np.all(good):
-                idx = np.arange(c.size)
-                c[~good] = np.interp(idx[~good], idx[good], c[good])
-            with np.errstate(divide="ignore", invalid="ignore"):
-                cp["j_total"] = (s_I * (jt_t / c)).tolist()
-                cp["j_ohmic"] = (s_I * (to_t(j_ind, peq) / c)).tolist()
-                cp["j_bootstrap"] = (s_I * (to_t(j_bs, peq) / c)).tolist()
+                    f"fidelity='exact' requested but draw {draw_index} has no "
+                    "captured eq_fsa block (generate with capture_live_eq=True). "
+                    "Use fidelity='auto' to fall back to the baseline-ratio "
+                    "reconstruction.")
+            if parts_t is None:                # baseline-ratio reconstruction
+                if base_jtor is None:
+                    raise ValueError(
+                        "fidelity='reconstruct' needs the template's own "
+                        "core_profiles j_tor to form the ratio c = j_tor/j_total; "
+                        "the template has none. Use an archive with a captured "
+                        "eq_fsa block (fidelity='exact').")
+                eps = 1e-9 * np.nanmax(np.abs(base_jtot)) if base_jtot.size else 0.0
+                good = np.abs(base_jtot) > eps
+                c = np.ones_like(base_jtot)
+                c[good] = base_jtor[good] / base_jtot[good]
+                if not np.all(good):
+                    idx = np.arange(c.size)
+                    c[~good] = np.interp(idx[~good], idx[good], c[good])
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    parts_t = dict(ohmic=(jt_ind - P_t) / c,
+                                   bootstrap=jt_bs / c, driven=jt_drv / c)
+        cp["j_ohmic"] = (s_I * parts_t["ohmic"]).tolist()
+        cp["j_bootstrap"] = (s_I * parts_t["bootstrap"]).tolist()
+        cp["j_total"] = (s_I * (parts_t["ohmic"] + parts_t["bootstrap"]
+                                + parts_t["driven"])).tolist()
 
     with open(out_path, "w") as fh:
         json.dump(out, fh)

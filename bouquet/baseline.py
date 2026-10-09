@@ -26,7 +26,8 @@ class Baseline:
     pre-separated.
 
     CURRENT CONVENTION: every current component here is a flux-surface-averaged
-    *toroidal* current density j_phi [A/m^2]. IMAS/neoclassical inputs are
+    *toroidal* current density <j_phi> [A/m^2] (the plain FSA the solver's
+    jphi-linterp consumes). IMAS/neoclassical inputs are
     parallel (<j.B>/B0) and are converted on read via
     :func:`bouquet.physics.parallel_to_toroidal`, so downstream code never mixes
     conventions.
@@ -92,7 +93,6 @@ class Baseline:
     # 'ohmic' mode bookkeeping: proxy-Ip of each component, the proxy's own
     # error on the FUSE total, and the jphi_diff anchor that was NOT applied.
     ip_closure: Optional[dict] = None
-
     # IMAS path only: the two slice-level facts closure_channel=
     # "sawtooth_bootstrap" gates on, read ONCE at load time because the reader
     # does not retain the (100s of MB) dd -- the source's sawtooth model
@@ -101,7 +101,10 @@ class Baseline:
     # recorded for comparison only: the closure's reference is TokaMaker's q0
     # for the source total re-solved on the anchor, not the dd's own estimator
     # (issue #20 -- never compare two estimators of the same name).
-    # Keys: source_index, present, j_par_max_abs, active, q0_dd.
+    # Keys: source_index, present, j_par_max_abs, active, q0_dd, and -- when
+    # the dd has a sawteeth entry with profiles -- slice (how it was read at
+    # this slice: "matched by time", "by index", or why it has no slice at
+    # this time, in which case it is not active here).
     sawtooth: Optional[dict] = None
 
     # Case-B ("diff") fixed bootstrap correction profile [A/m^2] = FUSE_jBS - SWB,
@@ -201,6 +204,72 @@ class Baseline:
     source_current_sign: float = 1.0
     source_current_sign_origin: Optional[str] = None
     source_b0_sign: Optional[float] = None
+
+    # closure_channel="structured" with mse_data only: the MSE term's
+    # PER-CHORD arrays (chords used, measured tan(gamma), sigma_eff, residuals
+    # in sigma before/after/delivered, predicted tan(gamma), the n x 2K
+    # Jacobian, excluded chords with reasons).  Kept out of ip_closure -- which
+    # is archived as one size-capped JSON attribute -- and archived as
+    # datasets under _baseline/structured_mse.  None otherwise.
+    mse_record: Optional[dict] = None
+
+    # ---- the ONE reconstruction state (jbs_self_consistent=True only) -------
+    # With the self-consistent loop on, the current split above (j_phi,
+    # j_inductive, j_BS, jBS_diff, the fixed parts) is the jphi-linterp
+    # REQUEST of the reconstruction's final equilibrium F, in the form every
+    # draw consumes it: one jphi-linterp solve of j_phi (+ jphi_diff) is F;
+    # it is normalised to Ip_target in the 'exact' FSA current measure on F;
+    # j_BS (+ jBS_diff) is the draws' own sigma=0 bootstrap composition on F;
+    # j_inductive is the residual.  ``jphi_request_offset`` is that request
+    # minus F's ACHIEVED current (in the corrective iteration's form, also
+    # Ip-normalised): the standard draw route targets achieved currents, so
+    # it perturbs ``j_inductive - jphi_request_offset`` and starts its
+    # corrective iteration from target + offset -- F's own request at zero
+    # perturbation.  ``delivered_state`` records F: l_i (== l_i_target), q0,
+    # q95, the normalisation factors, F's achieved FSA current
+    # (``j_phi_achieved``) and how the state was reached.  Both None with the
+    # loop off (the legacy split, bit for bit).
+    jphi_request_offset: Optional["np.ndarray"] = None
+    delivered_state: Optional[dict] = None
+
+    # the unified reconstruction engine's full record
+    # (GenerationConfig.reconstruction_engine="unified" only; None on the
+    # legacy paths): contract, settings, convergence constants and their
+    # origins, per-pass log, delivery checks, the state a draw inherits and
+    # the solve counts.  See bouquet.engine / docs/engine.md.
+    engine: Optional[dict] = None
+
+    # The pressure handed to the solver (bouquet.edge_pressure): the two
+    # settings (edge_pprime_pin, separatrix_pressure), p_sep (the solve
+    # pressure at psi_N = 1), the offset applied, the axis target, and both
+    # frames of beta / W_MHD of the delivered equilibrium (solver: the
+    # solver's own pressure, zero at the boundary; full: with p_sep added
+    # back).
+    edge_pressure: Optional[dict] = None
+
+    # The coil least-squares mode the solver ran this baseline in
+    # (bouquet.solver_state.coil_solve_mode): "bounded" -- OpenFUSIONToolkit's
+    # bounded (BVLS) coil solve, entered once at Bouquet.setup_solver before
+    # the reconstruction, so the draws use the same coil solver -- or
+    # "unknown" for a solver bouquet did not set up.  Set by
+    # Bouquet.prepare_baseline on both paths.
+    coil_solve_mode: Optional[str] = None
+
+    # How the engine-dependent generation settings were resolved for this
+    # baseline (bouquet.engine.resolve_engine_defaults, at
+    # Bouquet.prepare_baseline): field -> {"value", "origin"}, origin
+    # "resolved from engine=<x>" or "explicit" (+ "engine_validated" when an
+    # explicit value contradicts the engine's).  Archived as the _baseline
+    # attr engine_resolved_defaults_json.
+    engine_resolved_defaults: Optional[dict] = None
+
+    # IMAS sources: how the core_sources slice and each beam / sawteeth entry
+    # were matched to the core_profiles slice read (owner decision
+    # 2026-10-06, io.imas.core_sources_slice / _source_slice_at): both
+    # times, dt, the windows and their basis, the bracketing own times, and
+    # each entry's status ("matched", "off_before_record" with its first own
+    # time, "off_idle", "zero").  None on the g-file paths.
+    source_time_match: Optional[dict] = None
 
     def __repr__(self):
         # concise summary -- the default dataclass repr dumps every numpy array,
@@ -525,6 +594,77 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
 
 
 
+#: Fraction of the kinetic grid's psi_N extent over which an input sigma
+#: must exceed the profile it perturbs for :func:`sigma_exceeds_profile` to
+#: report the channel.  A report threshold only: nothing is clipped,
+#: nothing about the sampling changes.
+SIGMA_EXCEEDS_PROFILE_MIN_FRACTION = 0.05
+
+
+def sigma_exceeds_profile(psi_N, profiles, sigmas,
+                          min_fraction=SIGMA_EXCEEDS_PROFILE_MIN_FRACTION):
+    """Channels whose 1-sigma envelope exceeds the profile itself over at
+    least *min_fraction* of the radius (REPORT ONLY).
+
+    A Gaussian draw of a positive profile with ``sigma > value`` is negative
+    with probability > 16 % at that radius; such a draw is non-physical and
+    is rejected (``kinetics_nonphysical``), so a batch on such an input
+    yields little and its statistics say nothing about the solve.
+
+    *profiles* / *sigmas*: ``{"ne" | "te" | "ni" | "ti": array}`` on
+    *psi_N*.  The radial fraction is measured in ``psi_N`` (trapezoid
+    weights), not in node count, so a grid dense near the axis is not
+    over-counted.  Returns a list of ``dict(channel, fraction, psi_N_range,
+    max_ratio, max_ratio_psi_N, min_fraction)``, empty when nothing
+    qualifies.
+    """
+    import numpy as np
+    x = np.asarray(psi_N, dtype=float)
+    if x.ndim != 1 or x.size < 2:
+        return []
+    w = np.gradient(x)
+    w = np.abs(w) / float(np.sum(np.abs(w)))
+    out = []
+    for ch in ("ne", "te", "ni", "ti"):
+        if ch not in profiles or ch not in sigmas:
+            continue
+        v = np.abs(np.asarray(profiles[ch], dtype=float))
+        s = np.asarray(sigmas[ch], dtype=float)
+        if v.shape != x.shape or s.shape != x.shape:
+            continue
+        over = np.isfinite(s) & np.isfinite(v) & (s > v)
+        frac = float(np.sum(w[over]))
+        if not over.any() or frac < float(min_fraction):
+            continue
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where(v > 0.0, s / v, np.inf)
+        i = int(np.argmax(np.where(over, ratio, -np.inf)))
+        out.append(dict(channel=ch, fraction=frac,
+                        psi_N_range=[float(x[over][0]), float(x[over][-1])],
+                        max_ratio=(float(ratio[i]) if np.isfinite(ratio[i])
+                                   else None),
+                        max_ratio_psi_N=float(x[i]),
+                        min_fraction=float(min_fraction)))
+    return out
+
+
+def sigma_exceeds_profile_line(records) -> str:
+    """The one-line report of :func:`sigma_exceeds_profile` records."""
+    parts = []
+    for r in records:
+        mr = ("inf" if r["max_ratio"] is None else f"{r['max_ratio']:.2g}")
+        parts.append(
+            f"sigma_{r['channel']} > {r['channel']} over "
+            f"{100.0 * r['fraction']:.0f}% of psi_N "
+            f"({r['psi_N_range'][0]:.2f}-{r['psi_N_range'][1]:.2f}; max "
+            f"sigma/value {mr} at psi_N={r['max_ratio_psi_N']:.2f})")
+    return ("[sigma-check] WARNING: " + "; ".join(parts) + " -- Gaussian "
+            "draws go non-positive there and are rejected "
+            "(kinetics_nonphysical); expect a low yield.  Report only: "
+            "nothing is clipped and the sampling is unchanged (threshold: "
+            f"{100.0 * records[0]['min_fraction']:.0f}% of the radius).")
+
+
 def resolve_uncertainty(config, baseline) -> dict:
     """Resolve the perturbation envelope for :func:`generate_bouquet`.
 
@@ -630,6 +770,18 @@ def resolve_uncertainty(config, baseline) -> dict:
             out[f"sigma_{_ch}"] = float(_scalars[_ch]) * np.abs(
                 np.asarray(_baseprof[_ch], dtype=float))
             _won[_ch] = f"scalar {float(_scalars[_ch]):g} x |baseline|"
+
+    # REPORT ONLY: a kinetic sigma larger than its own profile over a stated
+    # fraction of the radius (draws through zero are rejected, never clipped)
+    try:
+        out["sigma_exceeds_profile"] = sigma_exceeds_profile(
+            psi_kin, _baseprof, {_c: out[f"sigma_{_c}"]
+                                 for _c in ("ne", "te", "ni", "ti")})
+    except Exception:           # a report must never fail the resolution
+        out["sigma_exceeds_profile"] = []
+    if out["sigma_exceeds_profile"]:
+        print("  " + sigma_exceeds_profile_line(out["sigma_exceeds_profile"]),
+              flush=True)
 
     out["sigma_jphi"] = unc.jphi_scalar_sigma * np.abs(np.asarray(baseline.j_phi, dtype=float))
     _won["jphi"] = f"scalar {float(unc.jphi_scalar_sigma):g} x |j_phi|"
@@ -921,6 +1073,13 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     # the user asked for it; the curated summary is printed by Bouquet.reconstruct.
     from .utils import capture_native_output
     verbose = bool(getattr(config, "verbose", False))
+    # Self-consistent bootstrap (GenerationConfig.jbs_self_consistent): the
+    # loop wraps fit + l_i match + corrective; None -> the legacy SWB path.
+    from .jbs_loop import jbs_settings as _jbs_settings
+    _jbs = _jbs_settings(config.generation)
+    _jbs_kw = {"jbs_loop": _jbs} if _jbs["enabled"] else {}
+    from .edge_pressure import resolve_edge_pressure
+    _edge = resolve_edge_pressure(config.generation)
     with capture_native_output(enabled=not verbose) as _cap:
         result = reconstruct_equilibrium(
             mygs, eqdsk,
@@ -935,6 +1094,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             p_fast=p_fast_eq,
             Z_imp=Z_imp_recon,
             l_i_tolerance=float(config.generation.l_i_tolerance),
+            edge_pressure=_edge,
+            **_jbs_kw,
         )
         # get_stats traces the q-profile and can emit gs_get_qprof warnings, so
         # keep these inside the capture too.
@@ -997,23 +1158,62 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             result["li_realized_post_corrective"])
         recon_metrics = _reconstruction_metrics(
             mygs, eqdsk, result, source, l_i_target,
-            l_i_realized_post_corrective=l_i_realized_post_corrective)
+            l_i_realized_post_corrective=l_i_realized_post_corrective,
+            edge_pressure=_edge)
+        if result.get("jbs_loop") is not None:
+            from .jbs_loop import jsonable as _jsonable
+            recon_metrics = dict(recon_metrics or {})
+            recon_metrics["jbs_loop"] = _jsonable(result["jbs_loop"])
+        # the +/-50 % bootstrap prior on the legacy g-file path: the inductive
+        # fit's bootstrap scale (1.0 unless rescale_j_BS) -- flagged when
+        # |s_bs - 1| > 0.5 (a closure failure, never clamped), recorded
+        from .utils import bootstrap_prior_record, merge_closure_flags
+        recon_metrics = dict(recon_metrics or {})
+        recon_metrics["closure_health"] = bootstrap_prior_record(
+            float(result.get("bs_scale_fit", 1.0)),
+            "fit_inductive_profile's bootstrap scale (rescale_j_BS; 1.0 "
+            "otherwise)", "g-file reconstruction")
+        merge_closure_flags(recon_metrics, recon_metrics["closure_health"])
 
     j_phi = np.asarray(result["j_phi_fit"], dtype=float)
     j_BS = np.asarray(result["j_BS_used"], dtype=float)
 
     j_NBI = _resolve_fixed(fc.j_NBI, fc.psi_N, psi_N)
     j_RF = _resolve_fixed(fc.j_RF, fc.psi_N, psi_N)
-    j_inductive = j_phi - j_BS - j_NBI - j_RF   # == j_inductive_fit when NBI=RF=0
-    # Physical component convention: the inductive current is >= 0. On shots
-    # with a strong pedestal the achieved total can dip BELOW the full-Sauter
-    # bootstrap there, leaving a small negative residual (~1% of the core) --
-    # which, fed to the GPR sampler as its mean, makes essentially every draw
-    # go negative and be rejected (observed on a strong-pedestal case:
-    # 0/500 candidates survived).
-    # Floor the inductive at zero and absorb the deficit into j_BS so the
-    # split still sums exactly to j_phi.
-    j_inductive, j_BS = floor_inductive_split(j_inductive, j_BS, psi_N)
+    _request_offset = None
+    _delivered = None
+    if _jbs["enabled"] and result.get("request_jphi") is not None:
+        # The self-consistent loop: store the ONE reconstruction state in
+        # the form the draws consume it (see Baseline.jphi_request_offset).
+        _log2 = None
+        with capture_native_output(enabled=not verbose) as _cap2:
+            j_phi, j_inductive, j_BS, _request_offset, _delivered = \
+                _deliver_reconstruction_state(
+                    mygs, config, source, result, psi_N, ne_eq, te_eq, ni_eq,
+                    ti_eq, Zeff_eq, Ip_target, l_i_target, j_NBI, j_RF,
+                    recon_metrics)
+        _log2 = _cap2["text"] or None
+        if _log2:
+            _cap["text"] = (_cap["text"] or "") + _log2
+        if _delivered["n_floored_inductive"]:
+            # visible (outside the capture): a floored point is one where a
+            # zero-perturbation draw cannot reproduce the reconstruction
+            print(f"  [delivered state] {_delivered['n_floored_inductive']} "
+                  "point(s) of the request inductive were floored at zero: "
+                  "a zero-perturbation draw cannot reproduce the "
+                  "reconstruction there (it composes the Redl bootstrap, not "
+                  "the floored remainder)", flush=True)
+    else:
+        j_inductive = j_phi - j_BS - j_NBI - j_RF   # == j_inductive_fit when NBI=RF=0
+        # Physical component convention: the inductive current is >= 0. On shots
+        # with a strong pedestal the achieved total can dip BELOW the full-Sauter
+        # bootstrap there, leaving a small negative residual (~1% of the core) --
+        # which, fed to the GPR sampler as its mean, makes essentially every draw
+        # go negative and be rejected (observed on a strong-pedestal case:
+        # 0/500 candidates survived).
+        # Floor the inductive at zero and absorb the deficit into j_BS so the
+        # split still sums exactly to j_phi.
+        j_inductive, j_BS = floor_inductive_split(j_inductive, j_BS, psi_N)
 
     # Resolved above (before the reconstruction, which now consumes it).
     # Unchanged contract: the returned field is on the KINETIC grid.
@@ -1068,11 +1268,78 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         core_pressure_hollow=_cph_recon,
         li_metrics=({"core_pressure_hollow": _cph_recon}
                     if _cph_recon else None),
+        jphi_request_offset=_request_offset,
+        delivered_state=_delivered,
+        edge_pressure=(recon_metrics or {}).get("edge_pressure"),
     )
 
 
+def _deliver_reconstruction_state(mygs, config, source, result, psi_N, ne_eq,
+                                  te_eq, ni_eq, ti_eq, Zeff_eq, Ip_target,
+                                  l_i_target, j_NBI, j_RF, recon_metrics):
+    """The reconstruction path's ONE state, stored in the draws' form
+    (``jbs_self_consistent=True`` only).
+
+    ``mygs`` holds the reconstruction's final equilibrium F (the l_i
+    re-matched state; ``result["request_jphi"]`` is the jphi-linterp input one
+    solve of which is F).  The bootstrap is the draws' own sigma=0 composition
+    on F (:func:`~bouquet.TokaMaker_interface._draw_jbs_composer` with the
+    generation's ``isolate_edge_jBS`` / ``floor_j_BS``, scale 1 -- this
+    path's ``bs_scale``), the request is normalised to ``Ip_target`` in the
+    'exact' measure on F, and the inductive is the residual, floored at zero
+    by the usual convention (``floor_inductive_split``; a floored point is
+    one where a zero-perturbation draw cannot reproduce F, and is counted).
+    Returns ``(j_phi, j_inductive, j_BS, request_offset, delivered_state)``.
+    """
+    import numpy as np
+    from .TokaMaker_interface import (DELIVERED_SPLIT_CONVENTION,
+                                      _achieved_jphi_fsa,
+                                      _deliver_request_split,
+                                      _draw_jbs_composer, _request_offset)
+    gc = config.generation
+    psi_pad = float(source.psi_pad)
+    comp = _draw_jbs_composer(psi_N, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
+                              psi_pad, bool(gc.isolate_edge_jBS), 1.0,
+                              bool(gc.floor_j_BS), None, None, None)
+    j_bs0 = np.asarray(comp(mygs.copy_eq())[0], dtype=float)
+    fixed = np.asarray(j_NBI, dtype=float) + np.asarray(j_RF, dtype=float)
+    dv = _deliver_request_split(mygs, psi_N, psi_pad, Ip_target,
+                                result["request_jphi"], j_bs0, fixed,
+                                label="recon delivered state")
+    j_ind, j_BS = floor_inductive_split(dv["j_inductive"], j_bs0, psi_N)
+    n_floored = int(np.sum(np.asarray(dv["j_inductive"]) < 0.0))
+    j_phi = j_ind + j_BS + fixed          # == dv["request"] (floor: sum kept)
+    offset, n_fl_t = _request_offset(j_ind, dv["achieved"], j_bs0, fixed)
+    from .physics import SOLVER_Q0_PSI_N
+    m = recon_metrics or {}
+    state = dict(
+        convention=DELIVERED_SPLIT_CONVENTION,
+        path="reconstruction",
+        l_i=float(l_i_target), l_i_scale="iter(li3)",
+        q0=float(m.get("q0", float("nan"))),
+        q0_psi_N=float(m.get("q0_psi_N", SOLVER_Q0_PSI_N)),
+        q95=float(m.get("q95", float("nan"))),
+        Ip_target=float(Ip_target),
+        edge_pressure=m.get("edge_pressure"),
+        request_normalisation=float(dv["kappa"]),
+        achieved_normalisation=float(dv["kappa_achieved"]),
+        n_floored_inductive=n_floored,
+        n_floored_target_inductive=n_fl_t,
+        li_corrective_state=result.get("li_corrective_state"),
+        li_step6_matched=result.get("li_step6_matched"),
+        li_input=float((result.get("eqdsk_li") or {}).get(
+            "li(2)", float("nan"))),
+        j_phi_achieved=_achieved_jphi_fsa(mygs, psi_N, psi_pad,
+                                          sign_ref=j_phi),
+        how=("step-7 corrective iteration, then the l_i re-match of its "
+             "landed request (every loop pass ends there); one jphi-linterp "
+             "solve of j_phi reproduces it"))
+    return j_phi, j_ind, j_BS, offset, state
+
+
 def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
-                            l_i_realized_post_corrective=None) -> dict:
+                            l_i_realized_post_corrective=None,
+                            edge_pressure=None) -> dict:
     """Curate a TokaMaker-vs-EFIT reconstruction-fidelity dict for the summary.
 
     Each global scalar that isn't ~0 by construction (Ip, l_i, q0/q95, beta,
@@ -1089,6 +1356,7 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
             return float("nan")
         return float(100.0 * (float(tok) - ref) / abs(ref))
 
+    from .physics import SOLVER_Q0_PSI_N as _Q0_PSI_N
     q = dict(result.get("quality") or {})
     # Global scalars other than l_i are normalization-independent; take them
     # from the 'iter' call so there is exactly one get_stats scale in play.
@@ -1106,6 +1374,22 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
     kappa_tok = float(stats.get("kappa", float("nan")))
     delta_tok = float(stats.get("delta", float("nan")))
     W_tok = float(stats.get("W_MHD", float("nan"))) / 1e6           # MJ
+    # Both pressure frames (bouquet.edge_pressure).  The solver's pressure is
+    # zero at the boundary; under separatrix_pressure="offset" the solve
+    # pressure's p_sep was removed from the axis target and is added back
+    # here, so the REPORTED beta / W_MHD are the full-pressure ones.  With
+    # nothing added back the two frames are the solver's own numbers.
+    from .edge_pressure import (archive_record, input_pressure_frames,
+                                resolve_edge_pressure)
+    _edge = resolve_edge_pressure(edge_pressure)
+    from .edge_pressure import solver_p_scale
+    _edge_rec = archive_record(_edge, result.get("pres_tokamaker"),
+                               stats=stats, p_scale=solver_p_scale(mygs))
+    _fr = _edge_rec.get("frames")
+    if _fr is not None and _fr["p_sep"] != 0.0:
+        betan_tok = float(_fr["full"].get("beta_n", float("nan")))
+        betap_tok = float(_fr["full"].get("beta_pol", float("nan"))) / 100.0
+        W_tok = float(_fr["full"]["W_MHD"]) / 1e6
     o_point = getattr(mygs, "o_point", [float("nan"), float("nan")])
     # separatrix current evaluated just inside the LCFS (psi_N=0.99), where the
     # edge current is better-defined than the near-singular psi_N=1 point.
@@ -1125,7 +1409,11 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
         efit["li1"] = float(eqdsk.li.get("li(1)_EFIT", float("nan")))
         qpsi = np.asarray(eqdsk.qpsi, dtype=float)
         psiN = np.asarray(eqdsk.psi_N, dtype=float)
-        efit["q0"] = float(qpsi[0])
+        # like for like: the solver's q0 (get_stats 'q_0') is q at psi_N =
+        # SOLVER_Q0_PSI_N, so the g-file is read at the SAME radius; its axis
+        # value (psi_N = 0) is kept under its own name
+        efit["q0"] = float(np.interp(_Q0_PSI_N, psiN, qpsi))
+        efit["q0_axis"] = float(qpsi[0])
         efit["q95"] = float(np.interp(0.95, psiN, qpsi))
         betas = eqdsk.betas
         efit["beta_n"] = float(betas.get("beta_n", float("nan")))
@@ -1143,6 +1431,35 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
         warnings.warn(f"EFIT reference metrics unavailable: {exc}")
 
     g = lambda k: float(efit.get(k, float("nan")))
+
+    # Like for like: the solver frame against the input's (p - p_edge)
+    # quantities, the full frame against the input's full-pressure ones.
+    _like = None
+    try:
+        _pres_in = np.asarray(eqdsk.pres, dtype=float)
+        _in = input_pressure_frames(
+            float(eqdsk.volume_integral(np.ones_like(_pres_in))[-1]),
+            float(eqdsk.volume_integral(_pres_in)[-1]), float(_pres_in[-1]),
+            betas=dict(beta_n=g("beta_n"), beta_p=g("beta_p")))
+        if _fr is not None:
+            def _row(tok, ref):
+                return dict(tokamaker=float(tok), input=float(ref),
+                            err_pct=pct(tok, ref))
+            _like = dict(p_edge_input=_in["p_sep"], frames={
+                _k: dict(
+                    beta_n=_row(_fr[_k].get("beta_n", float("nan")),
+                                _in[_k]["beta_n"]),
+                    beta_p=_row(_fr[_k].get("beta_pol", float("nan")) / 100.0,
+                                _in[_k]["beta_p"]),
+                    W_MHD_MJ=_row(_fr[_k]["W_MHD"] / 1e6,
+                                  _in[_k]["W_MHD"] / 1e6))
+                for _k in ("solver", "full")},
+                note=("solver: the solver's own pressure (zero at psi_N = 1) "
+                      "against the input's p - p_edge; full: with p_sep "
+                      "added back against the input's full pressure"))
+    except Exception as exc:
+        import warnings
+        warnings.warn(f"like-for-like pressure frames unavailable: {exc}")
 
     bnd_rms = float(q.get("boundary_rms_mm", float("nan")))
     bnd_max = float(q.get("boundary_max_dev_mm", float("nan")))
@@ -1216,7 +1533,14 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
         # sharply, an estimator moved -- investigate before trusting the run.
         "li1_cross": li1_tok, "li1_cross_efit": g("li1"),
         "li1_cross_err_pct": li1_cross_err,
-        "q0": q0_tok, "q0_efit": g("q0"), "q0_err_pct": pct(q0_tok, g("q0")),
+        # q0 at LIKE radii: TokaMaker's reported q0 and the g-file's q, both
+        # at psi_N = q0_psi_N (0.02, the solver's first traced surface).  The
+        # g-file's own axis value (psi_N = 0) and the solver-vs-axis error --
+        # what "q0_err_pct" used to report -- are kept under honest names.
+        "q0": q0_tok, "q0_psi_N": _Q0_PSI_N,
+        "q0_efit": g("q0"), "q0_err_pct": pct(q0_tok, g("q0")),
+        "q0_efit_axis": g("q0_axis"),
+        "q0_err_pct_vs_axis": pct(q0_tok, g("q0_axis")),
         "q95": q95_tok, "q95_efit": g("q95"), "q95_err_pct": pct(q95_tok, g("q95")),
         "beta_n": betan_tok, "beta_n_efit": g("beta_n"),
         "beta_n_err_pct": pct(betan_tok, g("beta_n")),
@@ -1230,9 +1554,19 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
         "j_sep_err_pct": pct(jsep_tok, g("j_sep")),
         "W_MHD_MJ": W_tok, "W_MHD_efit_MJ": g("W_MHD"),
         "W_MHD_err_pct": pct(W_tok, g("W_MHD")),
+        # the edge-pressure settings, p_sep, both frames of the delivered
+        # equilibrium, and the like-for-like comparison with the input
+        "edge_pressure": _edge_rec,
+        "pressure_like_for_like": _like,
         # zero-ideal residuals (absolute)
         "boundary_rms_mm": bnd_rms, "boundary_max_mm": bnd_max,
         "axis_offset_mm": axis_off_mm,
         "jphi_core_rms_MA": float(q.get("jphi_core_rms", float("nan"))) / 1e6,
         "jphi_edge_rms_MA": float(q.get("jphi_edge_rms", float("nan"))) / 1e6,
+        # fit_inductive_profile's l_i-proxy amplitude search fell back to 1.0
+        # (no bracket): recorded with reason and bracket, never silent
+        "ind_scale_fallback": bool(q.get("ind_scale_fallback", False)),
+        "ind_scale_fallback_n": int(q.get("ind_scale_fallback_n", 0) or 0),
+        "ind_scale_fallback_records": [
+            dict(r) for r in (q.get("ind_scale_fallback_records") or ())],
     }

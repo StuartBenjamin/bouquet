@@ -157,39 +157,14 @@ def _lcfs_from_psi(mygs, psi_arr, isoflux_fallback, psi_lcfs_val=None):
         plt.close(_fig_tmp)
     # Longest CLOSED segment: on a diverted equilibrium the open separatrix
     # branch to the divertor can be longer than the LCFS itself (issue #33).
-    _lcfs = select_closed_lcfs(_segs, context="_lcfs_from_psi")
+    # ... and the one that goes around the magnetic axis, when the solver
+    # reports one (another closed loop of the level set is not the boundary)
+    from .utils import magnetic_axis_of
+    _lcfs = select_closed_lcfs(_segs, context="_lcfs_from_psi",
+                               axis=magnetic_axis_of(mygs))
     if _lcfs is not None:
         return _lcfs
     return isoflux_fallback
-
-
-def _core_contours(mygs, ax, psi_raw, nlevels=9):
-    r"""Overplot core flux surface contours on *ax*.
-
-    Normalises *psi_raw* by its own min/max and draws *nlevels* contours
-    between :math:`\hat{\psi} = 0.1` and :math:`0.9`.
-
-    .. note::
-        Requires ``mygs`` to be set as a module-level (or notebook-level)
-        name before calling.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Target axes.
-    psi_raw : ndarray
-        Raw poloidal flux on the TokaMaker mesh.
-    nlevels : int
-        Number of contour levels.
-    """
-    _p_lo = psi_raw.min()
-    _p_hi = psi_raw.max()
-    if abs(_p_hi - _p_lo) < 1e-10:
-        return
-    _psi_n = (psi_raw - _p_lo) / (_p_hi - _p_lo)
-    ax.tricontour(mygs.r[:, 0], mygs.r[:, 1], mygs.lc, _psi_n,
-                  levels=np.linspace(0.1, 0.9, nlevels),
-                  colors='steelblue', linewidths=0.5, alpha=0.4)
 
 
 def _isoflux_deviation_plot(ax, fig, iso_pts, lcfs_pts, R_bnd, Z_bnd,
@@ -236,6 +211,30 @@ def _isoflux_deviation_plot(ax, fig, iso_pts, lcfs_pts, R_bnd, Z_bnd,
     rms_mm = np.sqrt((devs**2).mean()) * 1e3
     return devs, max_mm, rms_mm
 
+
+
+def _bootstrap_model_suffix(record_or_flag):
+    """``" (self-consistent Redl bootstrap)"`` / ``" (frozen SWB bootstrap
+    (legacy))"`` for a legend label.  ``record_or_flag``: a
+    ``jbs_self_consistent`` bool, a loop record (dict -> self-consistent) or
+    ``None`` (no record -> the frozen bootstrap)."""
+    from .schema import bootstrap_label
+    sc = (record_or_flag if isinstance(record_or_flag, (bool, np.bool_))
+          else record_or_flag is not None)
+    return f" ({bootstrap_label(sc)})"
+
+
+def _archive_bootstrap_self_consistent(scan_group) -> bool:
+    """Whether an archive scan group's bootstrap came from the
+    self-consistent loop: the schema-v3 ``jbs_loop`` block on ``_baseline`` or
+    on any draw.  v2 archives and ``jbs_self_consistent=False`` runs carry
+    none -> ``False`` (the frozen SWB bootstrap)."""
+    from .schema import JBS_LOOP_JSON_ATTR
+    if "_baseline" in scan_group and \
+            JBS_LOOP_JSON_ATTR in scan_group["_baseline"].attrs:
+        return True
+    return any(k.isdigit() and JBS_LOOP_JSON_ATTR in scan_group[k].attrs
+               for k in scan_group)
 
 def plot_tokamaker_comparison(mygs, all_results, plot_idx=None):
     """Compare TokaMaker reconstructions against source geqdsk files.
@@ -298,7 +297,8 @@ def plot_tokamaker_comparison(mygs, all_results, plot_idx=None):
             axes[0, 1].plot(psi_N, r['j_inductive_fit'] / 1e6, color=color, lw=_LW, ls='--',
                             label=f'{lbl} $j_{{\\rm ind}}$')
             axes[0, 1].plot(psi_N, r['j_BS_used'] / 1e6, color=color, lw=_LW, ls='-.',
-                            label=f'{lbl} $j_{{BS}}$')
+                            label=f'{lbl} $j_{{BS}}$'
+                            + _bootstrap_model_suffix(r.get('jbs_loop')))
 
             # (0,2) residuals
             res = (r['j_phi_fit'] - r['eqdsk_jtor']) / 1e6
@@ -451,7 +451,8 @@ def plot_tokamaker_comparison(mygs, all_results, plot_idx=None):
         ax.plot(psi_N, r['j_inductive_fit'] / 1e6, color=_C1, lw=_LW,
                 label=r'$j_\mathrm{inductive}$ (fit)')
         ax.plot(psi_N, r['j_BS_used'] / 1e6, color=_C3, lw=_LW, ls='-.',
-                label=f'$j_{{BS}}$ (\u00d7{r["bs_factor_final"]:.3f})')
+                label=f'$j_{{BS}}$ (\u00d7{r["bs_factor_final"]:.3f})'
+                + _bootstrap_model_suffix(r.get('jbs_loop')))
         ax.plot(psi_N, r['j_phi_fit'] / 1e6, color=_C2, ls='--', lw=_LW,
                 label=r'$j_\mathrm{ind} + j_{BS}$')
         ax.plot(psi_N, r['eqdsk_jtor'] / 1e6, 'k-', lw=_LW,
@@ -1083,28 +1084,6 @@ def _has_aux(h5path, scan_key=None):
         return False
 
 
-def _source_kind(h5path, scan_key=None):
-    r"""Return the stored provenance marker (``'imas'`` / ``'geqdsk'``) written
-    on the baseline group, or ``None`` for archives generated before it existed.
-
-    This is the robust path discriminator -- independent of the source-decoupled
-    aux switchboard, so it is not fooled by a geqdsk run that supplies
-    ``omega_tor`` / ``chi``. Plotting falls back to :func:`_has_aux` when the
-    marker is absent (older archives).
-    """
-    try:
-        from .utils import _scan_key
-        bkey = _scan_key(scan_key)
-        bl_path = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
-        with h5py.File(h5path, "r") as hf:
-            if bl_path in hf and "source_kind" in hf[bl_path].attrs:
-                v = hf[bl_path].attrs["source_kind"]
-                return v.decode() if isinstance(v, bytes) else str(v)
-        return None
-    except Exception:
-        return None
-
-
 def _lcfs_from_psigrid(eq):
     r"""Contour the LCFS from an eqdsk's 2-D :math:`\psi` grid (``psi_RZ``).
 
@@ -1622,6 +1601,17 @@ def _imas_input_profiles(source):
     return psiN, np.asarray(p1["pressure"], float), q, jt
 
 
+def _reported_pressure(bl, p_solver):
+    """The solver-frame pressure of a baseline's live solve (zero at
+    psi_N = 1) in the REPORTED frame: ``p_sep`` added back when the
+    reconstruction applied it (``Baseline.edge_pressure["p_sep_applied"]``,
+    ``separatrix_pressure="offset"``); unchanged otherwise (``"legacy"`` or a
+    baseline that predates the record)."""
+    psep = float(((getattr(bl, "edge_pressure", None) or {})
+                  .get("p_sep_applied")) or 0.0)
+    return np.asarray(p_solver, dtype=float) + psep
+
+
 def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
     r"""Compare the reconstructed / forward-solved baseline against the RAW
     INPUT -- pressure, :math:`j_\phi`, q, and the separatrix (with the green→red
@@ -1655,6 +1645,11 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
 
     # ---- reconstructed / solved side (live TokaMaker solve) ----------------
     psiN_p, _f, _fp, p_sol, _pp = mygs.get_profiles(npsi=npsi, psi_pad=psi_pad)
+    # the solver's pressure is zero at psi_N = 1; under
+    # separatrix_pressure="offset" the reported pressure adds p_sep back
+    # (bouquet.edge_pressure) -- so the input's full pressure is compared
+    # with the reconstruction's full pressure, not with the solver frame
+    p_sol = _reported_pressure(bl, p_sol)
     psiN_q, q_sol = mygs.get_q(npsi=npsi, psi_pad=psi_pad)[:2]
     psiN_q = np.asarray(psiN_q, float)
     if psiN_q.size and psiN_q.max() > 1.5:          # in case get_q returns psi, not psi_N
@@ -1702,7 +1697,9 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
 
     # Anchors (IMAS diff workflow): jphi_diff / jBS_diff are FIXED offsets on
     # the kinetic grid (bl.j_BS + jBS_diff is the effective/FUSE bootstrap in
-    # the solve; bl.j_BS itself is the raw SWB Sauter). Used below so the
+    # the solve; bl.j_BS itself is the model bootstrap -- the self-consistent
+    # Redl bootstrap by default, the frozen SWB one with
+    # jbs_self_consistent=False). Used below so the
     # component overlay reflects the bootstrap actually in the solve. Both are
     # None on the geqdsk path.
     _kin_x = np.asarray(getattr(bl, "psi_N_kinetic", bl.psi_N), float)
@@ -1787,7 +1784,10 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
         ax[0, 1].plot(j_sol_x, _j_ind_eff / 1e6, ls="--", c=C_SOL, lw=1.5,
                       alpha=0.45, label=r"recon $j_{ind}$", zorder=2)
         ax[0, 1].plot(j_sol_x, _jBS_eff / 1e6, ls="-.", c=C_SOL, lw=1.5,
-                      alpha=0.45, label=r"recon $j_{BS}$", zorder=2)
+                      alpha=0.45, label=r"recon $j_{BS}$"
+                      + _bootstrap_model_suffix(bool(getattr(
+                          run.config.generation, "jbs_self_consistent",
+                          False))), zorder=2)
         ax[0, 1].legend(fontsize=8, loc="best")
 
     # q panel: tame the edge divergence. q climbs steeply toward a diverted
@@ -3622,8 +3622,11 @@ def plot_boundary_point_traces(h5path_or_header, scan_key="all",
 def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
               selection="all", save=None):
     r"""Three-panel current decomposition: total / inductive / bootstrap,
-    overlaying the raw input (FUSE OMAS or geqdsk), the SWB-reconstructed
-    baseline, and the perturbed draws.
+    overlaying the raw input (FUSE OMAS or geqdsk), the reconstructed
+    baseline, and the perturbed draws.  The bootstrap is labelled with the
+    model the archive records: "self-consistent Redl bootstrap" (a schema-v3
+    ``jbs_loop`` block on the baseline or a draw -- the default) or "frozen
+    SWB bootstrap (legacy)" (v2 archives, ``jbs_self_consistent=False``).
 
     Uses the FAITHFUL components actually summed into TokaMaker --
     ``j_inductive = j_phi - j_BS,edge - j_fixed`` (which closes to the total
@@ -3689,6 +3692,8 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
                      spike=(np.asarray(g[f"{d}/{_bs_key}"][:], float)
                             if _bs_key in g[d] else np.zeros_like(psi)))
              for d in ids}
+        _bs_sc = _archive_bootstrap_self_consistent(g)
+    _bs_model = _bootstrap_model_suffix(_bs_sc)
 
     sel = None
     if selection == "selected":
@@ -3757,16 +3762,16 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
 
     if base_jBS is None and D:
         base_jBS = np.mean([D[d]["spike"] for d in D], axis=0)
-        base_jBS_label = r"SWB baseline $j_{BS}$ (ens.-mean)"
+        base_jBS_label = r"baseline $j_{BS}$ (ens.-mean)" + _bs_model
     else:
-        base_jBS_label = r"SWB baseline $j_{BS}$"
+        base_jBS_label = r"baseline $j_{BS}$" + _bs_model
 
     OR, FU = _GOLD, "tab:blue"   # gold draws (matches the other plots)
     keep = [d for d in ids if (sel is None or d in sel)]
     fig, ax = plt.subplots(1, 3, figsize=(13.0, 3.8))
     if F is not None:
         ax[0].plot(psi, F["total"] / 1e6, "--", color=FU, lw=1.6, label=rf"{Flabel} $j_\phi$")
-    ax[0].plot(psi, base_total / 1e6, "k-", lw=2.0, zorder=5, label=r"SWB baseline $j_\phi$")
+    ax[0].plot(psi, base_total / 1e6, "k-", lw=2.0, zorder=5, label=r"baseline $j_\phi$")
     for i, d in enumerate(keep):
         ax[0].plot(psi, D[d]["total"] / 1e6, "-", color=OR, lw=1.0, alpha=0.55,
                    label="perturbed" if i == 0 else None)
@@ -3795,8 +3800,9 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
     for i, d in enumerate(keep):
         ax[2].plot(psi, D[d]["spike"] / 1e6, "-", color=OR, lw=1.0, alpha=0.55,
                    label=r"perturbed $j_{BS}$" if i == 0 else None)
-    ax[2].set_title(r"$j_{BS}$  (%s)"
-                    % ("isolate-edge spike" if has_spike else "full bootstrap"))
+    ax[2].set_title(r"$j_{BS}$  (%s; %s)"
+                    % ("isolate-edge spike" if has_spike else "full bootstrap",
+                       _bs_model.strip()[1:-1]))
 
     for a in ax:
         a.axhline(0, color="gray", lw=0.5); a.set_xlim(0, 1); a.grid(alpha=0.3)

@@ -123,6 +123,7 @@ from .physics import (
     isotropize_fast_pressure,
     parallel_to_toroidal,
     toroidal_to_parallel,
+    field_aligned_conversion,
     fast_pressure_residual,
     infer_fast_pressure,
     core_pressure_health,
@@ -190,6 +191,7 @@ __all__ = [
     "draw_flux_function",
     # ---- physics helpers ----
     "isotropize_fast_pressure", "parallel_to_toroidal", "toroidal_to_parallel",
+    "field_aligned_conversion",
     "fast_pressure_residual", "infer_fast_pressure",
     "core_pressure_health", "core_pressure_hollow_record",
     "CorePressureHollowWarning",

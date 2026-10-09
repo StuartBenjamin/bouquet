@@ -4683,7 +4683,7 @@
    "label": "pressure profile",
    "file": "bouquet/TokaMaker_interface.py",
    "line": 4852,
-   "desc": "pres_tmp = 1.6022e-19 * (ne*te + ni*ti) [Pa]",
+   "desc": "pres_tmp = e * (ne*te + ni*ti) [Pa] (e = physics.thermal_pressure_charge: ELEMENTARY_CHARGE under the loop, frozen 1.6022e-19 on the legacy path)",
    "subsystem": "Shared quantities"
   },
   {
@@ -8335,7 +8335,7 @@
    "src": "input.kinetics",
    "dst": "qty.pressure",
    "kind": "data",
-   "desc": "Compute 1.6022e-19 * (ne*te + ni*ti)",
+   "desc": "Compute e * (ne*te + ni*ti) (e = physics.thermal_pressure_charge)",
    "subsystem": "GS reconstruction"
   },
   {
