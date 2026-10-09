@@ -19,16 +19,17 @@ Field mapping (verified against a D3D FUSE run)::
     core_profiles.profiles_1d[t].electrons.{density_thermal,temperature}
     core_profiles.profiles_1d[t].ion[*].{density_thermal,temperature,element[].z_n}
     core_profiles.profiles_1d[t].{electrons,ion[*]}.pressure_fast_{perpendicular,parallel}
-    core_sources.source[*].profiles_1d[t].j_parallel          -> beam-source j_NBI only
+    core_sources.source[*].profiles_1d[t].j_parallel          -> j_NBI (beam), j_RF (EC/LH/IC),
+                                                                 j_other (fusion, runaways, sawteeth)
 
 Currents are converted exactly to TokaMaker ``jphi`` = <j_phi> (bouquet's
 convention; :mod:`bouquet.physics` docstring, ``docs/current-conventions.md``)
 with the geometry of the equilibrium slice FUSE paired with the core_profiles
 slice: the total from IMAS ``j_tor`` (A5), the bootstrap as its field-aligned
 part plus the pressure term p'G (A7), each driven source as its field-aligned
-part.  The inductive component is the residual ``j_phi - j_BS - j_NBI - j_RF``
-so the decomposition sums exactly.  Fast pressure is isotropized (see
-:func:`bouquet.physics.isotropize_fast_pressure`).
+part.  The inductive component is the residual
+``j_phi - j_BS - j_NBI - j_RF - j_other`` so the decomposition sums exactly.
+Fast pressure is isotropized (see :func:`bouquet.physics.isotropize_fast_pressure`).
 
 Current orientation: bouquet works in ONE positive-current frame.  The
 TokaMaker anchor is always solved to ``|Ip|`` with ``F0 = |r0*b0|`` (see
@@ -85,15 +86,11 @@ if TYPE_CHECKING:
 # Core-source identifier index for neutral-beam current drive.
 NBI_SOURCE_INDEX = 2          # neutral beam injection -> summed into j_NBI
 # Core-source identifier index for the sawtooth model (IMAS core_sources
-# identifier enumeration).  NOT summed into any current here: it is read only as
-# a slice-level FLAG -- "is the source's sawtooth model doing anything at this
-# time?" -- for the closure_channel="sawtooth_bootstrap" gate, which pins q0
-# only where sawteeth make q0 ~ 1 a physical fact rather than a model artefact.
+# identifier enumeration).  Its current is held fixed in j_other (share also in
+# j_sawteeth), and it is read as a slice-level FLAG for the
+# closure_channel="sawtooth_bootstrap" gate, which pins q0 only where sawteeth
+# make q0 ~ 1 a physical fact rather than a model artefact.
 SAWTOOTH_SOURCE_INDEX = 701
-# NOTE: j_RF is NOT computed internally (RF is the least-common input). It is
-# left as zeros and accepted as a user-supplied array via
-# FixedComponentsConfig.j_RF. See the "revisit RF" flag in the project notes
-# if/when internal EC/IC/LH summation is wanted.
 
 #: The time-match window [s] when NEITHER time base has a local step (a
 #: single-time core_sources entry on a single-time core_profiles base, or a
@@ -1549,7 +1546,6 @@ def read_imas_baseline(
     anchor_jtor_to_equilibrium: bool = True,
     kinetic_source: str = "fuse",
     anchor_pressure_to_equilibrium: bool = False,
-    driven_sources: bool = False,
 ) -> "Baseline":
     """Read a FUSE ``dd_sim.json`` IDS and return a separated :class:`Baseline`.
 
@@ -1562,11 +1558,11 @@ def read_imas_baseline(
     always wins and is applied silently.  The rule that was used, and how it was
     chosen, are recorded on :attr:`Baseline.p_fast_meta`.
 
-    ``driven_sources`` (the swb method): every driven ``core_sources`` current
-    is held fixed, classified as the engine's IDS adapter does
-    (:func:`bouquet.adapters._ids_driven_currents`): EC/LH/IC in ``j_RF``,
-    fusion, runaways, sawteeth and unknown indices in ``j_other`` (its
-    sawteeth share also in ``j_sawteeth``).  Otherwise only the beams are.
+    Every driven ``core_sources`` current is held fixed, classified as the
+    engine's IDS adapter does (:func:`bouquet.adapters._ids_driven_currents`):
+    beams in ``j_NBI``, EC/LH/IC in ``j_RF``, fusion, runaways, sawteeth and
+    unknown indices in ``j_other`` (its sawteeth share also in ``j_sawteeth``).
+    Aggregate and bootstrap-like entries are never added.
     """
     import json
     from ..baseline import Baseline
@@ -1727,29 +1723,27 @@ def read_imas_baseline(
                         "IMAS reader", s.get("identifier") or {}, how))
                 jnbi_par = jnbi_par + np.asarray(q_nbi["j_parallel"], dtype=float)
     j_NBI = s_ip * to_jphi(_m * jnbi_par)
-    j_RF = np.zeros(n)   # never computed internally; user-supplied only
-    j_other = j_sawteeth = None
-    if driven_sources:
-        # every other driven entry by the engine IDS adapter's classification;
-        # the sawteeth entry by the gate's rule below (no slice within half a
-        # step: not active here, zero)
-        from ..adapters import _ids_driven_currents
-        _cpt = cp_ids.get("time")
+    # every other driven entry by the engine IDS adapter's classification
+    # (the beams are j_NBI above); the sawteeth entry by the gate's rule below (no slice within half a step:
+    # not active here, zero)
+    from ..adapters import _ids_driven_currents
+    _cpt = cp_ids.get("time")
 
-        def _is_saw(s):
-            return (s.get("identifier") or {}).get("index") == SAWTOOTH_SOURCE_INDEX
-        _parts = _ids_driven_currents(dict(src_ids, source=[
-            s for s in src_ids.get("source", []) if not _is_saw(s)]),
-            isrc, n, 1.0, _cpt)[0]
-        _saw = np.zeros(n)
-        for s in src_ids.get("source", []):
-            if _is_saw(s) and s.get("profiles_1d"):
-                q_saw, _ = _source_slice_at(s, isrc, _src_t, _src_nt, _cpt)
-                if q_saw is not None and q_saw.get("j_parallel") is not None:
-                    _saw = _saw + np.asarray(q_saw["j_parallel"], dtype=float)
-        j_RF = s_ip * to_jphi(_m * _parts["rf"])
-        j_other = s_ip * to_jphi(_m * (_parts["other"] + _saw))
-        j_sawteeth = s_ip * to_jphi(_m * _saw)
+    def _is_saw(s):
+        return (s.get("identifier") or {}).get("index") == SAWTOOTH_SOURCE_INDEX
+    _parts = _ids_driven_currents(dict(src_ids, source=[
+        s for s in src_ids.get("source", []) if not _is_saw(s) and
+        (s.get("identifier") or {}).get("index") != NBI_SOURCE_INDEX]),
+        isrc, n, 1.0, _cpt)[0]
+    _saw = np.zeros(n)
+    for s in src_ids.get("source", []):
+        if _is_saw(s) and s.get("profiles_1d"):
+            q_saw, _ = _source_slice_at(s, isrc, _src_t, _src_nt, _cpt)
+            if q_saw is not None and q_saw.get("j_parallel") is not None:
+                _saw = _saw + np.asarray(q_saw["j_parallel"], dtype=float)
+    j_RF = s_ip * to_jphi(_m * _parts["rf"])
+    j_other = s_ip * to_jphi(_m * (_parts["other"] + _saw))
+    j_sawteeth = s_ip * to_jphi(_m * _saw)
 
     # --- sawtooth model presence/amplitude at this slice (gate input only) ----
     # Read here because the dd (100s of MB) is not retained past this function.
@@ -1950,6 +1944,9 @@ def read_imas_baseline(
             j_NBI = _override(fixed.j_NBI, _fx, x_run)
         if fixed.j_RF is not None:
             j_RF = _override(fixed.j_RF, _fx, x_run)
+        if getattr(fixed, "j_other", None) is not None:
+            j_other = _override(fixed.j_other, _fx, x_run)
+            j_sawteeth = np.zeros_like(j_other)   # no longer a known part of it
 
     # The deferred factor-of-3 warning: the convention was undeterminable AND the
     # fast pressure it scales is non-zero AND it came from the dd (a user-supplied
@@ -1970,9 +1967,7 @@ def read_imas_baseline(
     _dconv = (j_phi_dd - j_tor) / _pk
     j_phi = s_ip * j_phi_dd
     j_BS = s_ip * j_BS
-    j_inductive = j_phi - j_BS - j_NBI - j_RF
-    if j_other is not None:
-        j_inductive = j_inductive - j_other
+    j_inductive = j_phi - j_BS - j_NBI - j_RF - j_other
     print(f"  [imas] currents -> TokaMaker jphi on equilibrium t="
           f"{cur_meta['time']:.4f} s (core_profiles t="
           f"{cur_meta['t_core_profiles']:.4f} s; j_tor reproduced to "

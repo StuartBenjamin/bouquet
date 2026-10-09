@@ -42,6 +42,7 @@ class TestConfig:
 
     @pytest.mark.parametrize("kw, word", [
         (dict(kinetic_source="fuse"), "kinetic_source"),
+        (dict(swb_seed="generic"), "swb_seed"),
         (dict(recalculate_j_BS=False), "recalculate_j_BS"),
         (dict(imas_corrective_jphi=True), "imas_corrective_jphi"),
         (dict(jbs_delta_mode=True), "jbs_delta_mode"),

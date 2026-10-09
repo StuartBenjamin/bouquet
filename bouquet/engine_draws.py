@@ -1730,8 +1730,8 @@ class GenerateEngineDraws(DrawMethod):
     def draw_env(self, env):
         return self.unc
 
-    def scale_settings(self, jbs_range):
-        return self.scale_range
+    def scale_settings(self, jbs_range, bs_mult):
+        return self.scale_range, bs_mult
 
     def loop_settings_for(self, settings):
         """The engine draw's loop settings (the draw ceiling, the current

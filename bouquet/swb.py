@@ -236,6 +236,7 @@ class SwbBaseline:
                 if getattr(bl, name, None) is not None:
                     setattr(bl, name, f * np.asarray(getattr(bl, name), dtype=float))
         bl.ohm_scale, bl.bs_scale = st_b["alpha"], 1.0
+        bl.bs_scale_profile = None
         bl.jBS_diff = bl.jphi_diff = None
         _dc = {k: st_b["coils"][k] - st_a["coils"].get(k, 0.0) for k in st_b["coils"]}
         _worst = max(_dc, key=lambda k: abs(_dc[k])) if _dc else None
