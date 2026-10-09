@@ -173,3 +173,60 @@ the fixture, its provenance and the manifest.
 
 The refresh history of earlier fixtures is in the messages of the commits
 that changed them (`git log -- tests/golden/`).
+
+## Test scope: what the tests around this fixture do not cover
+
+Stated so that a pass is not read as more than it is. None of these is a
+loosened bar; each narrows what a passing suite shows.
+
+* **The axis-collapse regression test is a build-dependent skip.**
+  `tests/test_fsa_current_integral.py::test_get_q_collapses_silently_on_an_unclipped_grid`
+  was a hard assertion (`unclipped <R> span < 1e-9`, absolute, over all
+  surfaces) and is now a measured skip: it asserts only on a build whose
+  unclipped grid collapses (at least 2 traced surfaces with a relative `<R>`
+  span <= 1e-9) and skips, with a reason, on every other build. It can
+  therefore skip with the defect present (a PARTIAL collapse that pins only
+  some surfaces, or a build that traces fewer than 2 surfaces). What runs on
+  every build instead: the unconditional invariant that the CLIPPED geometry
+  is real (`<R>` spans more than 10 % of its mean) and two solver-free tests
+  of the guard. The production guard in `utils.fsa_current_geometry` uses the
+  raw `<R>` span, zero (untraced) rows included, so an untraced row can hide
+  a collapse from it; `physics.evaluate_jBS` now refuses a zero (failed-trace)
+  row on its own surfaces.
+* **Six zero-perturbation tests run on the legacy path only.** The route-R2
+  sigma=0 tests of `tests/test_seeded_reproducibility.py`
+  (`test_sigma0_r2_reproduces_the_baseline_jbs`,
+  `test_sigma0_r2_exact_measure_lands_in_its_own_budget`,
+  `test_sigma0_r2_exact_measure_reports_a_plausible_inductive_share`,
+  `test_sigma0_r2_exact_measure_still_recovers_the_recon_li`,
+  `test_sigma0_r2_exact_measure_is_bit_reproducible`,
+  `test_sigma0_r2_exact_measure_leaves_the_bootstrap_alone`) build their
+  baseline with `jbs_self_consistent=False`: they test the legacy frozen-SWB
+  path, not the shipped default. The default path's counterpart,
+  `tests/test_jbs_loop_solver.py::test_f_sigma0_route_r2_draw_converges_near_the_baseline`,
+  checks only that the loop converges, the `|s-1|*f_ind <= 3.86e-3` budget
+  and the init-source bookkeeping -- not the other five properties.
+* **The structured solver tests and the shipped default both use a pass
+  ceiling of 12.** `tests/test_jbs_loop_solver.py` sets
+  `jbs_max_passes = _STRUCTURED_TEST_PASSES = 12`, which is now the default
+  (raised from 8 on 2026-10-07 with the owner's approval, after the synthetic
+  structured case needed exactly 8 passes on the development build). The
+  tests therefore show convergence within the default on this build only;
+  they do not show headroom on another build.
+
+## Known limitation: a standard draw's post-homotopy re-solve can diverge slowly
+
+In the loop-on regeneration of this example, two of twenty draws were
+rejected after their coil homotopy: Redl on the delivered equilibrium missed
+the bootstrap the draw carried by `r_j` of order 1e-3, the post-homotopy
+stage handed the renormalised target to the corrective `jphi-linterp`
+iteration, and that solve did not converge. Once the iterate loses its nested
+surfaces every nonlinear iteration's surface trace fails and the solver spends
+its whole iteration budget, roughly 20-60 min at one thread. The call runs
+without `protect_state`, so the loop then measures the broken state, the
+`fsa_current_geometry` guard refuses it, and the draw is rejected as
+OUT_OF_SPEC with a NaN coil drift. The outcome is always a loud rejection,
+never an accepted draw; nothing caps, retries or falls back. The cause (why
+these draws, and why the corrective iteration's first solve diverges from a
+target rescaled by less than 0.5 %) is not established; the full
+investigation is kept in the private validation record.
