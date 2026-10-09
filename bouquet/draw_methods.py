@@ -113,9 +113,9 @@ class DrawMethod:
         built with, zeroed on the sigma=0 route)."""
         return env
 
-    def scale_settings(self, jbs_range):
-        """The ``jBS_scale_range`` handed to the draws."""
-        return jbs_range
+    def scale_settings(self, jbs_range, bs_mult):
+        """``(jBS_scale_range, jBS_scale_profile)`` handed to the draws."""
+        return jbs_range, bs_mult
 
     def loop_settings_for(self, settings):
         return settings

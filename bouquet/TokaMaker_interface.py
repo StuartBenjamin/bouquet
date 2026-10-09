@@ -361,13 +361,12 @@ def sigma0_reference_scale(jBS_scale_range):
     1.0).  The reference follows whatever the draws are actually sampled
     from.
 
-    The range this receives is NOT the configured one: run.py MULTIPLIES
-    both endpoints of ``gc.jBS_scale_range`` by ``bl.bs_scale``, so the
-    midpoint returned here is ``bs_scale * mid(gc.jBS_scale_range)``.
-    That equals ``bl.bs_scale`` only for a configured range symmetric
-    about 1.0 (the default ``(0.99, 1.01)`` is); for an asymmetric
-    configured range it does not, which is what
-    ``test_asymmetric_range_uses_its_own_mean`` pins.
+    The range this receives is the configured ``gc.jBS_scale_range``:
+    run.py hands the baseline's ``bs_scale`` (or structured ``s_bs(psi)``)
+    over separately as ``jBS_scale_profile``, applied after SWB, so the
+    range is the per-draw jitter only and its midpoint is the reference.
+    For an asymmetric configured range that midpoint is not 1.0, which is
+    what ``test_asymmetric_range_uses_its_own_mean`` pins.
 
     Telescoping is exact only IN EXPECTATION, not per draw: the
     ``jBS_scales`` samples are drawn independently of the kinetic sigmas,
@@ -2601,7 +2600,7 @@ def _std_candidate_solve(mygs, psi_N, pres_tmp, cand, spike, j_fixed_eff,
 
 
 def _decompose_draw_currents(output_jphi, spike, full, isolate_edge_jBS,
-                             j_NBI=None, j_RF=None):
+                             j_NBI=None, j_RF=None, j_other=None):
     """Section-6 split of a draw's j_phi into (j_inductive, j_BS, j_BS_edge),
     the SAME rules the draw applies at the end of perturb_kinetic_equilibrium
     (used again when the post-homotopy j_BS check re-solves the draw)."""
@@ -2612,6 +2611,8 @@ def _decompose_draw_currents(output_jphi, spike, full, isolate_edge_jBS,
         jfix = jfix + np.asarray(j_NBI, dtype=float)
     if j_RF is not None:
         jfix = jfix + np.asarray(j_RF, dtype=float)
+    if j_other is not None:
+        jfix = jfix + np.asarray(j_other, dtype=float)
     if isolate_edge_jBS:
         j_ind = output_jphi - spike - jfix
         neg = j_ind < 0.0
@@ -2816,6 +2817,7 @@ def perturb_kinetic_equilibrium(
     scale_jBS=1.0,
     floor_j_BS=True,
     jBS_diff=None,
+    jBS_scale_profile=None,
     accept_anchor_inband=False,
     perturb_jind_in_anchor=False,
     diagnostic_plots=False,
@@ -2828,6 +2830,7 @@ def perturb_kinetic_equilibrium(
     zeff_includes_fast=False,
     j_NBI=None,
     j_RF=None,
+    j_other=None,
     aux_sigmas=None,
     aux_baselines=None,
     aux_length_scales=None,
@@ -2869,6 +2872,9 @@ def perturb_kinetic_equilibrium(
     # The cache's SWB seed, reused by DIFF_BS and delta composition so the
     # sigma=0 call is seeded exactly as the reference was.
     swb_seed_ref=None,
+    # Source-consistent inductive seed (GenerationConfig.swb_seed="source");
+    # None: the generic seed.
+    swb_seed_profile=None,
     # The two edge-pressure settings (bouquet.edge_pressure): every P' and
     # axis target of this draw is built by that module's helper.  None: the
     # defaults (edge pin on, full axis pressure), bit for bit.
@@ -2967,6 +2973,8 @@ def perturb_kinetic_equilibrium(
     scale_jBS : float
         Multiplicative scale factor applied to :math:`j_{\rm BS}` in
         ``solve_with_bootstrap``.  A value of 1.0 applies no scaling.
+    jBS_scale_profile : float, ndarray on ``psi_N``, or None
+        Multiplier applied to the SWB spike after SWB; see generate_bouquet.
     diagnostic_plots : bool
         Show diagnostic matplotlib figures (including inside
         ``solve_with_bootstrap`` and ``find_optimal_scale``).
@@ -3002,6 +3010,9 @@ def perturb_kinetic_equilibrium(
     coord : str
         Coordinate of ``psi_N`` and ``psi_N_kinetic``: ``"psi_n"`` or
         ``"phi_n"`` (see :mod:`bouquet.coords`).
+    swb_seed_profile : ndarray, optional
+        Inductive seed on SWB's grid, used in place of the generic one
+        (``Baseline.swb_seed_profile``).
     jbs_loop : dict or None
         :func:`bouquet.jbs_loop.jbs_settings` (``draw=True``) when
         ``GenerationConfig.jbs_self_consistent`` is on: the draw's bootstrap is
@@ -3097,7 +3108,16 @@ def perturb_kinetic_equilibrium(
         _jfix = _jfix + np.asarray(j_NBI, dtype=float)
     if j_RF is not None:
         _jfix = _jfix + np.asarray(j_RF, dtype=float)
+    if j_other is not None:
+        _jfix = _jfix + np.asarray(j_other, dtype=float)
     j_fixed_eff = _jfix if recalculate_j_BS else np.zeros_like(psi_N)
+    # The baseline's bootstrap multiplier (run.py: bs_scale, or the structured
+    # closure's s_bs(psi)), applied to the SWB spike AFTER SWB exactly as the
+    # baseline applied it to its SWB(scale 1) spike.  scale_jBS stays the
+    # per-draw jitter inside SWB.  OFT applies scale_jBS inside SWB's
+    # self-consistent iteration, so SWB(bs_scale) != bs_scale * SWB(1).
+    _bs_mult = (1.0 if jBS_scale_profile is None
+                else np.asarray(jBS_scale_profile, dtype=float))
     # Total-current anchor: fold jphi_diff (= equilibrium.j_tor - core_profiles
     # total) into the fixed additive so it rides under EVERY downstream new_jphi
     # build (recon-anchor / l_i-match / corrective; all use j_fixed_eff), exactly
@@ -3381,6 +3401,7 @@ def perturb_kinetic_equilibrium(
         print(f"  [DIFF_BS] restoring mygs to recon snapshot before SWB")
         mygs.replace_eq(source_eq=recon_eq_snapshot)
         _swb_seed = (swb_seed_ref if swb_seed_ref is not None else
+                     swb_seed_profile if swb_seed_profile is not None else
                      coords.swb_seed(psi_N, coords.psi_at(mygs, psi_N, coord)))
         _stashed_bounds = getattr(mygs, '_coil_drift_bounds', None)
         if _stashed_bounds is not None:
@@ -3407,7 +3428,7 @@ def perturb_kinetic_equilibrium(
             np.asarray(_results_diff["isolated_j_BS"], dtype=float))
         _full_j_BS_tor = smooth_jbs_transition(
             np.asarray(_results_diff["j_BS"], dtype=float))
-        delta_spike = _spike_perturbed - spike_profile_recon_cached
+        delta_spike = _bs_mult * (_spike_perturbed - spike_profile_recon_cached)
         _delta_rms = float(np.sqrt(np.mean(delta_spike**2)))
         _delta_max = float(np.max(np.abs(delta_spike)))
         print(f"  [DIFF_BS] delta_spike rms={_delta_rms:.3e} A/m² "
@@ -3420,7 +3441,7 @@ def perturb_kinetic_equilibrium(
         mygs.replace_eq(source_eq=recon_eq_snapshot)
         # Build new_jphi as input_j_phi (recon exact) + delta_spike
         spike_profile = delta_spike
-        full_j_BS = _full_j_BS_tor
+        full_j_BS = _bs_mult * _full_j_BS_tor
         # ---- DIFF_BS recon-anchor solve (mirrors regular SWB branch's
         # recon-anchor at line ~1067 but with new_jphi = input_j_phi +
         # delta_spike).  Without this explicit solve, mygs stays in the
@@ -3853,6 +3874,8 @@ def perturb_kinetic_equilibrium(
         if (swb_seed_ref is not None and spike_delta_ref is not None
                 and spike_delta_baseline is not None):
             _swb_seed = swb_seed_ref  # delta composition: the reference's seed
+        elif swb_seed_profile is not None:
+            _swb_seed = np.asarray(swb_seed_profile, dtype=float)
         else:
             _swb_seed = coords.swb_seed(psi_N, coords.psi_at(mygs, psi_N, coord))
 
@@ -4011,8 +4034,8 @@ def perturb_kinetic_equilibrium(
             _full_raw = np.asarray(results["j_BS"], dtype=float)
             _delta_bl = np.asarray(spike_delta_baseline, dtype=float)
             _delta_ref = np.asarray(spike_delta_ref, dtype=float)
-            spike_profile = _delta_bl + (_spike_raw - _delta_ref)
-            full_j_BS = _delta_bl + (_full_raw - _delta_ref)
+            spike_profile = _delta_bl + _bs_mult * (_spike_raw - _delta_ref)
+            full_j_BS = _delta_bl + _bs_mult * (_full_raw - _delta_ref)
             print(f"  [jBS-delta] spike = baseline + raw SWB delta "
                   f"(|delta| rms={np.sqrt(np.mean((_spike_raw - _delta_ref)**2))/1e3:.1f} kA/m²)")
         else:
@@ -4021,9 +4044,9 @@ def perturb_kinetic_equilibrium(
             # without it, every draw target carries a 1-2 grid-point axis
             # divot vs the recon baseline (hollow core, q0 shifted +12%
             # wholesale at sigma=0).
-            full_j_BS = smooth_jbs_transition(
+            full_j_BS = _bs_mult * smooth_jbs_transition(
                 np.asarray(results["j_BS"], dtype=float))
-            spike_profile = smooth_jbs_transition(
+            spike_profile = _bs_mult * smooth_jbs_transition(
                 np.asarray(results["isolated_j_BS"], dtype=float))
 
         # Floor the SWB bootstrap at 0 (drop unphysical negative excursions)
@@ -4134,7 +4157,14 @@ def perturb_kinetic_equilibrium(
             # so the rest of the loop has a workable baseline.
             print(f"  [recon-anchor] WARN: solve failed ({_anchor_exc}); "
                   f"falling back to SWB total_j_phi")
-            new_jphi = results["total_j_phi"]
+            if swb_seed_profile is not None and not (_pin_jphi or _diff_bs):
+                # Source seed: SWB's alpha * j_ind with bouquet's own spike
+                # and j_fixed, not SWB's raw (unconverted, unscaled) j_BS.
+                new_jphi = (np.interp(psi_N, coords.swb_grid(psi_N),
+                                      np.asarray(results["j_inductive"], dtype=float))
+                            + spike_profile + j_fixed_eff)
+            else:
+                new_jphi = results["total_j_phi"]
             _ffp_fb = coords.oft_prof("jphi-linterp", psi_N, new_jphi, coord)
             mygs.set_profiles(pp_prof=_pp_anchor, ffp_prof=_ffp_fb)
             try:
@@ -4768,7 +4798,7 @@ def perturb_kinetic_equilibrium(
     #   isolate_edge_jBS=False (FUSE/IMAS full bootstrap): spike_profile is NOT a
     #     flat-shelf spike (it is a full Sauter profile / its delta), so the
     #     shelf-blend mis-detects the shelf and mangles the core. Use the clean
-    #     residual j_inductive = j_phi - j_BS - j_NBI - j_RF instead -- it sums
+    #     residual j_inductive = j_phi - j_BS - j_NBI - j_RF - j_other instead -- it sums
     #     exactly and mirrors read_imas_baseline's baseline decomposition.
     if isolate_edge_jBS:
         # Closing decomposition (option A), replacing the non-closing shelf-blend
@@ -4782,6 +4812,8 @@ def perturb_kinetic_equilibrium(
             _jfix_iso = _jfix_iso + np.asarray(j_NBI, dtype=float)
         if j_RF is not None:
             _jfix_iso = _jfix_iso + np.asarray(j_RF, dtype=float)
+        if j_other is not None:
+            _jfix_iso = _jfix_iso + np.asarray(j_other, dtype=float)
         j_inductive_consistent = output_jphi - spike_profile - _jfix_iso
         # Where the edge spike locally exceeds the available current (near the
         # spike peak -- what the Hermite used to smooth), floor j_inductive at 0
@@ -4796,6 +4828,8 @@ def perturb_kinetic_equilibrium(
             _jfix_store = _jfix_store + np.asarray(j_NBI, dtype=float)
         if j_RF is not None:
             _jfix_store = _jfix_store + np.asarray(j_RF, dtype=float)
+        if j_other is not None:
+            _jfix_store = _jfix_store + np.asarray(j_other, dtype=float)
         # j_BS is the PHYSICAL bootstrap that was summed into the solve:
         # spike_profile == Sauter(perturbed kinetics) * scale_jBS + jBS_diff
         # (the recomputed Sauter on the per-draw kinetics, anchored by the kept
@@ -5037,6 +5071,7 @@ def generate_bouquet(
     isolate_edge_jBS=True,
     floor_j_BS=True,
     jBS_diff=None,
+    jBS_scale_profile=None,
     accept_anchor_inband=False,
     perturb_jind_in_anchor=False,
     jBS_scale_range=None,
@@ -5101,6 +5136,7 @@ def generate_bouquet(
     jphi_diff=None,
     j_NBI=None,
     j_RF=None,
+    j_other=None,
     aux_sigmas=None,
     aux_baselines=None,
     aux_length_scales=None,
@@ -5148,6 +5184,11 @@ def generate_bouquet(
     # GenerationConfig.edge_pprime_pin / separatrix_pressure).  None: the
     # defaults, bit for bit the behaviour before the settings existed.
     edge_pressure=None,
+    # swb_seed="source": the source-consistent inductive seed and the fixed
+    # (non-rescaled) current every SWB call is handed (Baseline.
+    # source_seed_profile / source_jphi_fixed).  None: the generic seed.
+    source_seed_profile=None,
+    source_jphi_fixed=None,
     # Baseline provenance dict (Baseline.li_metrics, which carries the
     # ip_closure health record on hybrid baselines); archived as JSON on the
     # _baseline group so closure_limited travels with the slice.  Appended
@@ -5254,6 +5295,12 @@ def generate_bouquet(
         ``[0.8, 1.2]`` draws from :math:`\mathcal{U}(0.8, 1.2)`.
         When ``None``, no additional scaling is applied
         (``scale_jBS = 1.0`` for every sample).
+    jBS_scale_profile : float, ndarray on ``psi_N``, or None
+        The baseline's own bootstrap multiplier (``Baseline.bs_scale`` or the
+        structured closure's ``s_bs(psi)``), applied to every draw's SWB
+        spike AFTER SWB, as the baseline applied it to its SWB(1) spike.
+        ``jBS_scale_range`` is then the per-draw jitter around it.  ``None``
+        multiplies by 1.
     diagnostic_plots : bool
         Show diagnostic matplotlib figures.
     scan_key : str, float, int, or None
@@ -5317,6 +5364,11 @@ def generate_bouquet(
         do vertical-mode control work without being heavily penalized.
     coord : str
         As in :func:`perturb_kinetic_equilibrium`.
+    source_seed_profile, source_jphi_fixed : ndarray, optional
+        Source-consistent SWB inputs on SWB's grid (``Baseline.
+        source_seed_profile`` / ``source_jphi_fixed``): the inductive seed,
+        and ``jphi_fixed``, of every SWB call (cache and draws).  None:
+        generic seed, no fixed current.
     draw_method : bouquet.draw_methods.DrawMethod, optional
         How each draw is made where the solve methods differ
         (docs/draw-methods.md); None: the legacy draws.
@@ -5392,6 +5444,8 @@ def generate_bouquet(
     rng = make_rng(seed)
     coords.check_coord(coord)
     jphi_baseline = _m.jphi_baseline(jphi_baseline)
+    if source_jphi_fixed is not None:
+        kwargs["jphi_fixed"] = np.asarray(source_jphi_fixed, dtype=float)  # every SWB call
     # The legacy global RNG is still seeded so that any third-party code in
     # the solve path that samples from np.random stays deterministic too.
     # bouquet's own draws no longer read it.
@@ -6264,6 +6318,8 @@ def generate_bouquet(
                     _fx = _fx + np.asarray(j_NBI, dtype=float)
                 if j_RF is not None:
                     _fx = _fx + np.asarray(j_RF, dtype=float)
+                if j_other is not None:
+                    _fx = _fx + np.asarray(j_other, dtype=float)
                 _bl_jind_store = (_bl_jphi_store
                                   - np.asarray(baseline_j_BS, dtype=float) - _fx)
                 if np.any(_bl_jind_store < 0.0):
@@ -6457,7 +6513,9 @@ def generate_bouquet(
                 print(f"  [DIFF_BS] state-anchor solve failed "
                       f"({_anch_exc}); SWB may inherit stale state")
             # Seeded on the anchor state; the draws reuse it (swb_seed_ref).
-            _swb_seed_cache = coords.swb_seed(psi_N, coords.psi_at(mygs, psi_N, coord))
+            _swb_seed_cache = (np.asarray(source_seed_profile, dtype=float)
+                               if source_seed_profile is not None else
+                               coords.swb_seed(psi_N, coords.psi_at(mygs, psi_N, coord)))
             if jbs_loop and jbs_loop.get("enabled") and not _diff_bs_env:
                 # Self-consistent bootstrap: the sigma=0 reference is
                 # evaluate_jBS on this same cache-time anchor (RAW, at the
@@ -6933,6 +6991,7 @@ def generate_bouquet(
                     isolate_edge_jBS=isolate_edge_jBS,
                     floor_j_BS=floor_j_BS,
                     jBS_diff=jBS_diff,
+                    jBS_scale_profile=jBS_scale_profile,
                     Z_imp=Z_imp,
                     p_diff=p_diff,
                     jphi_diff=jphi_diff,
@@ -6947,6 +7006,7 @@ def generate_bouquet(
                     zeff_includes_fast=zeff_includes_fast,
                     j_NBI=j_NBI,
                     j_RF=j_RF,
+                    j_other=j_other,
                     aux_sigmas=aux_sigmas,
                     aux_baselines=aux_baselines,
                     aux_length_scales=aux_length_scales,
@@ -6975,6 +7035,7 @@ def generate_bouquet(
                                          if (jbs_loop and jbs_loop.get("enabled"))
                                          else None),
                     swb_seed_ref=_swb_seed_cache,
+                    swb_seed_profile=source_seed_profile,
                     coord=coord,
                     **kwargs,
                 ))
@@ -7503,7 +7564,7 @@ def generate_bouquet(
                                     legacy=lambda: _decompose_draw_currents(
                                         _jphi_new, _ph_spk, _ph_full,
                                         _jctx.get('isolate_edge_jBS', True),
-                                        j_NBI, j_RF))
+                                        j_NBI, j_RF, j_other))
                                 diagnostics['j_inductive'] = _ji
                                 diagnostics['j_BS'] = _jb
                                 diagnostics['j_BS_edge'] = _je
@@ -7971,6 +8032,8 @@ def generate_bouquet(
                     _fx = _fx + np.asarray(j_NBI, dtype=float)
                 if j_RF is not None:
                     _fx = _fx + np.asarray(j_RF, dtype=float)
+                if j_other is not None:
+                    _fx = _fx + np.asarray(j_other, dtype=float)
                 _dr_jind_store = (_dr_jphi_store
                                   - np.asarray(diagnostics["j_BS"], dtype=float)
                                   - _fx)

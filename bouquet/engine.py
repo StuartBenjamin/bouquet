@@ -2767,6 +2767,9 @@ def _ids_baseline(bq, eng, res, rec, bl_src):
                        for r in ch["closure_limited_reasons"])))
     bl.j_phi, bl.j_inductive, bl.j_BS = R, j_ind, j_BS
     bl.j_NBI, bl.j_RF = j_NBI, j_RF
+    # the engine's j_RF carries every other driven entry (sawteeth included):
+    # the reader's j_other / j_sawteeth are not separate channels here
+    bl.j_other, bl.j_sawteeth = None, None
     bl.jBS_diff, bl.jphi_diff, bl.p_diff = None, None, None
     bl.bs_scale = float(out["bs_scale_eff"])
     bl.ohm_scale = float(out["ohm_scale_eff"])

@@ -35,7 +35,7 @@ class Baseline:
     # --- required fields (no defaults) ---------------------------------
     # current-density grid + separated currents
     psi_N: "np.ndarray"
-    j_phi: "np.ndarray"            # total [A/m^2] = j_inductive + j_BS + j_NBI + j_RF
+    j_phi: "np.ndarray"            # total [A/m^2] = j_inductive + j_BS + j_NBI + j_RF + j_other
     j_inductive: "np.ndarray"     # ohmic part [A/m^2]   (perturbed via l_i matching)
     j_BS: "np.ndarray"            # bootstrap part [A/m^2] (recomputed per draw)
 
@@ -282,17 +282,21 @@ class Baseline:
     # (psi_N, x) at the source's nodes: the io-time map from a psi_N-tabulated
     # input (an IDA sigma) to the run grid.  None in a psi_n run.
     psi_map: Optional[tuple] = None
-    # The swb method's fields (solve_method="swb"), appended so every earlier
-    # field keeps its positional slot.
-    # Other fixed driven current [A/m^2] (fusion, runaways, sawteeth, unknown
-    # core_sources indices); j_phi then also carries it.
+    # Fields appended so every earlier field keeps its positional slot.
+    # Other fixed driven current [A/m^2] (IMAS: fusion, runaways, sawteeth,
+    # unknown core_sources indices); j_phi carries it.
     j_other: Optional["np.ndarray"] = None
-    # The sawteeth share of j_other [A/m^2].  With GenerationConfig.swb_saw_q
-    # it is SWB's jphi_saw input, and
+    # The sawteeth share of j_other [A/m^2] (core_sources 701; IMAS path only).
+    # With GenerationConfig.swb_saw_q it is SWB's jphi_saw input, and
     # j_phi = j_inductive + j_BS + j_NBI + j_RF + (j_other - j_sawteeth) + j_saw.
     j_sawteeth: Optional["np.ndarray"] = None
-    # The SWB inputs of the baseline split (inductive seed, jphi_fixed) on
-    # SWB's grid, reused unchanged by the draws and the sigma=0 check.
+    # The structured closure's bootstrap multiplier PROFILE s_bs(psi) on psi_N
+    # (bl.j_BS = s_bs * SWB(scale 1)); None when the multiplier is the scalar
+    # bs_scale.  generate() hands it to the draws, which apply it after SWB.
+    bs_scale_profile: Optional["np.ndarray"] = None
+    # swb_seed="source": the SWB inputs of the baseline split (inductive seed,
+    # jphi_fixed) on SWB's grid, reused unchanged by the draws and the sigma=0
+    # check.  None => generic seed.
     swb_seed_profile: Optional["np.ndarray"] = None
     swb_jphi_fixed: Optional["np.ndarray"] = None
     # swb_saw_q set: SWB's jphi_saw input (j_sawteeth on SWB's grid), which
@@ -340,7 +344,7 @@ def resolve_baseline(config: "BouquetConfig", mygs=None) -> Baseline:
     Implemented as a free function so sources stay declarative (plain config)
     and the resolution logic lives in one place.
     """
-    from .config import ImasSource, ReconstructionSource, resolve_solve_method
+    from .config import ImasSource, ReconstructionSource
 
     source = config.source
 
@@ -354,7 +358,6 @@ def resolve_baseline(config: "BouquetConfig", mygs=None) -> Baseline:
             anchor_jtor_to_equilibrium=config.generation.anchor_jtor_to_equilibrium,
             kinetic_source=config.generation.kinetic_source,
             anchor_pressure_to_equilibrium=config.generation.anchor_pressure_to_equilibrium,
-            driven_sources=resolve_solve_method(config.generation) == "swb",
         )
 
     if isinstance(source, ReconstructionSource):
@@ -1303,6 +1306,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
 
     j_NBI = _resolve_fixed(fc.j_NBI, fc_x, x_run)
     j_RF = _resolve_fixed(fc.j_RF, fc_x, x_run)
+    j_other = _resolve_fixed(getattr(fc, "j_other", None), fc_x, x_run)
     _request_offset = None
     _delivered = None
     if _jbs["enabled"] and result.get("request_jphi") is not None:
@@ -1313,7 +1317,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             j_phi, j_inductive, j_BS, _request_offset, _delivered = \
                 _deliver_reconstruction_state(
                     mygs, config, source, result, x_run, ne_eq, te_eq, ni_eq,
-                    ti_eq, Zeff_eq, Ip_target, l_i_target, j_NBI, j_RF,
+                    ti_eq, Zeff_eq, Ip_target, l_i_target, j_NBI,
+                    j_RF + j_other,     # every fixed part (j_other: unified)
                     recon_metrics, coord=coord)
         _log2 = _cap2["text"] or None
         if _log2:
@@ -1327,7 +1332,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
                   "reconstruction there (it composes the Redl bootstrap, not "
                   "the floored remainder)", flush=True)
     else:
-        j_inductive = j_phi - j_BS - j_NBI - j_RF   # == j_inductive_fit when NBI=RF=0
+        j_inductive = j_phi - j_BS - j_NBI - j_RF - j_other   # == j_inductive_fit when all 0
         # Physical component convention: the inductive current is >= 0. On shots
         # with a strong pedestal the achieved total can dip BELOW the full-Sauter
         # bootstrap there, leaving a small negative residual (~1% of the core) --
@@ -1365,6 +1370,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         provenance="reconstruction",
         j_NBI=j_NBI,
         j_RF=j_RF,
+        j_other=j_other,
         p_fast=p_fast,
         # SAME source as the value handed to the reconstruction above, so the
         # two paths activate together or not at all.  The draws read
