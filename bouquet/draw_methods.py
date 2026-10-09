@@ -124,6 +124,14 @@ class DrawMethod:
         """The draw-loop GS iteration cap (DrawSolveGuard)."""
         return maxits
 
+    def solve_retry_urf(self, retry_urf):
+        """DrawSolveGuard's retry under-relaxation factors."""
+        return retry_urf
+
+    def solve_loose_tol(self, loose_tol):
+        """DrawSolveGuard's loose-tolerance rescue (None: off)."""
+        return loose_tol
+
     def achieved_jphi(self, store):
         """Whether each draw archives its achieved FSA j_phi."""
         return store
