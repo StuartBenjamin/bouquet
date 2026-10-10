@@ -6897,7 +6897,6 @@ def generate_bouquet(
               % ("DIFF_BS" if _diff_bs_env else "jBS-delta"))
         print("=" * 60)
         try:
-            from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap as _swb
             from scipy.interpolate import interp1d as _interp1d
             # Interpolate recon kinetic profiles to equilibrium grid if
             # caller is using a dual-grid (mirrors `_kin_to_eq` inside
@@ -7001,6 +7000,13 @@ def generate_bouquet(
                     # DIFF_BS=1 path) are the raw and smoothed forms of the SAME
                     # SWB call, so DIFF_BS's sigma=0 reference moves off 1.0 with
                     # this change too, for the same reason and by the same amount.
+                    # SWB is imported HERE, where it is used: the anchor solve
+                    # above is pure TokaMaker and the self-consistent branch
+                    # never calls SWB, so neither may depend on the bootstrap
+                    # module importing.  (Inside this try, so a failed import
+                    # still restores the coil bounds and reg below.)
+                    from OpenFUSIONToolkit.TokaMaker.bootstrap import (
+                        solve_with_bootstrap as _swb)
                     _scale_ref = sigma0_reference_scale(jBS_scale_range)
                     _cache_results = _swb(
                         mygs, ne_cache, te_cache, ni_cache, ti_cache, Zeff,
