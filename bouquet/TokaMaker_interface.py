@@ -43,6 +43,7 @@ from .utils import (
     capture_xpoints,
     eq_jphi_profile,
     fsa_current_geometry,
+    isoflux_length_weights,
     pchip_derivative,
     pchip_interp,
     safe_save_eqdsk,
@@ -5101,6 +5102,13 @@ def _extend_scale_block(scales, rng, scale_range, chunk):
                             size=int(chunk))])
 
 
+#: Legacy draws' iso-update: the isoflux constraint on the perturbed LCFS has the strength of
+#: this many evenly spaced points at weight 200 -- the field-line tracer's point count (~9000 on
+#: the D3D-like LCFS), so the draws keep the constraint they were tuned with whatever
+#: trace_surf's sampling (OFT's cut-cell trace returns 1000 points).
+ISO_UPDATE_REF_POINTS = 9000
+
+
 def generate_bouquet(
     mygs,
     psi_N,
@@ -7266,12 +7274,10 @@ def generate_bouquet(
                             # Try a slightly larger pad for the trace
                             _new_lcfs = mygs.trace_surf(1.0 - 1e-4)
                         if _new_lcfs is not None and len(_new_lcfs) >= 4:
-                            # Reuse the recon's isoflux weights pattern
-                            # (constant 200 across all points by default)
-                            _new_w = (np.ones(len(_new_lcfs))
-                                       * float(np.mean(np.abs(
-                                            mygs.psi_bounds[1] - mygs.psi_bounds[0]))) * 0
-                                       + 200.0)
+                            # weight 200 per point at ISO_UPDATE_REF_POINTS evenly
+                            # spaced points, spread per unit length of the new LCFS
+                            _new_w = isoflux_length_weights(
+                                _new_lcfs, 200.0, ISO_UPDATE_REF_POINTS)
                             mygs.set_isoflux(_new_lcfs, weights=_new_w)
                             _iso_updated = True
                             print(f"  [iso-update] new isoflux from perturbed LCFS "
