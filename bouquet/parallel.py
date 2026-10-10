@@ -74,6 +74,7 @@ __all__ = [
     "parallel_cases",
     "run_case",
     "run_case_on",
+    "case_seed",
     "merge_cases",
     "check_cases",
 ]
@@ -1041,18 +1042,14 @@ def _init_case_worker(worker_id_queue, master_working_dir, config_dict, init_sta
                       verbose=False):
     """Pool initialiser: one thread, own directory and log, own mesh copy, one ``setup_solver``.
 
-    Reports ``(worker_id, None)`` or ``(worker_id, traceback)`` to the parent's barrier, so a broken
-    initialiser fails the run at once instead of hanging ``imap_unordered``."""
+    Reports ``(worker_id, traceback)`` on failure, which the parent raises once the pool breaks."""
     import shutil
     import sys
     import traceback
     worker_id = -1
     try:
         pin_threads()
-        try:        # a pool replacement for a dead worker finds the queue empty: fail, do not block
-            worker_id = worker_id_queue.get(timeout=60)
-        except Exception:
-            raise RuntimeError("worker id queue empty: a pool replacement for a dead worker")
+        worker_id = worker_id_queue.get(timeout=60)     # 0..n-1: the executor never replaces a worker
         master_working_dir = os.path.abspath(master_working_dir)
         working_dir = os.path.join(master_working_dir, f"worker_{worker_id}")
         os.makedirs(working_dir, exist_ok=True)
@@ -1074,7 +1071,6 @@ def _init_case_worker(worker_id_queue, master_working_dir, config_dict, init_sta
         config.solver.mesh_path = local_mesh
         _worker_state.update(worker_id=worker_id, working_dir=working_dir, log_path=log_path,
                              bouquet=Bouquet(config).setup_solver(), hooks=dict(hooks or {}))
-        init_status_queue.put((worker_id, None))
     except Exception:
         tb = traceback.format_exc()
         print(f"[worker {worker_id}] init failed:\n{tb}", flush=True)
@@ -1085,13 +1081,21 @@ def _init_case_worker(worker_id_queue, master_working_dir, config_dict, init_sta
         raise
 
 
+def case_seed(seed, case) -> int:
+    """Seed of one case of a sweep, from the run seed and the case's ``group``/``scan_key``: independent
+    of the worker, the run order and the tier (:func:`parallel_cases`, ``units.units_from_cases``)."""
+    from .units import unit_seed
+    return unit_seed(seed, f"{case.group}/{case.scan_key}")
+
+
 def run_case(run_args):
-    """Pool task: one case on this worker's solver.  Never raises: a failed case returns its traceback,
-    so one bad slice cannot stop a sweep."""
+    """Pool task: one case on this worker's solver, at its own seed.  Never raises: a failed case returns
+    its traceback, so one bad slice cannot stop a sweep."""
     import traceback
-    idx, case, case_dir = run_args
+    idx, case, case_dir, seed = run_args
     header = os.path.join(case_dir, f"{os.path.basename(case.header)}_idx{idx}")
     try:
+        _worker_state["bouquet"].config.generation.seed = seed
         rec = run_case_on(_worker_state["bouquet"], case, header, _worker_state.get("hooks"))
         return idx, True, None, dict(rec, idx=idx, worker_id=_worker_state["worker_id"])
     except Exception:
@@ -1124,13 +1128,16 @@ def _picklable_hooks(**hooks) -> dict:
     return out
 
 
-def parallel_cases(source, config, master_working_dir, *, chunksize="automatic", use_logical_cpus=True,
-                   n_cpus_override=None, verbose=False, merge=True, group_by="group", cleanup=False,
-                   before_baseline=None, after_baseline=None):
+def parallel_cases(source, config, master_working_dir, *, use_logical_cpus=True, n_cpus_override=None,
+                   verbose=False, merge=True, group_by="group", cleanup=False, before_baseline=None,
+                   after_baseline=None):
     """Run many independent bouquets in parallel on one node, one single-threaded solver per worker.
 
     Call it under ``if __name__ == "__main__":`` in a script: workers are spawned (OFT's Fortran is not
-    fork-safe) and re-import the main module.
+    fork-safe) and re-import the main module.  Input paths may be relative to the launch directory.
+    Each case runs at :func:`case_seed` of ``config.generation.seed``.  A worker that dies (a crash or
+    an out-of-memory kill) ends the sweep: finished cases are kept and merged, the unfinished ones are
+    reported in ``errors``.
 
     Parameters
     ----------
@@ -1141,8 +1148,6 @@ def parallel_cases(source, config, master_working_dir, *, chunksize="automatic",
     master_working_dir : str
         Holds ``worker_N/`` (scratch, mesh copy), ``worker_N.log``, ``cases/*_idxN.h5``,
         ``map_object.pkl``, ``errors.pkl`` and the merged archives.
-    chunksize : int or "automatic"
-        Cases handed to a worker at a time (automatic: 1 unless the queue is far longer than the pool).
     use_logical_cpus : bool
         One worker per logical CPU (default) or per physical core.  Every worker is single-threaded.
     n_cpus_override : int, optional
@@ -1161,12 +1166,18 @@ def parallel_cases(source, config, master_working_dir, *, chunksize="automatic",
     dict
         ``n_runs, n_success, cases, results, errors, merged, map_object_path``.
     """
+    import dataclasses
     import multiprocessing
     import pickle
     import queue
-    import traceback
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from concurrent.futures.process import BrokenProcessPool
 
-    cases = list(source.expand() if hasattr(source, "expand") else source)
+    from .config import absolute_source, with_absolute_paths
+
+    config = with_absolute_paths(config)        # workers run in their own directories
+    cases = [dataclasses.replace(c, source=absolute_source(c.source))
+             for c in (source.expand() if hasattr(source, "expand") else source)]
     check_cases(cases, config)
     hooks = _picklable_hooks(before_baseline=before_baseline, after_baseline=after_baseline)
     master_working_dir = os.path.abspath(master_working_dir)
@@ -1178,9 +1189,7 @@ def parallel_cases(source, config, master_working_dir, *, chunksize="automatic",
 
     n_cpus = int(n_cpus_override) if n_cpus_override is not None else _get_num_cpus(use_logical_cpus)
     n_workers = max(1, min(n_cpus, n_runs))
-    if chunksize == "automatic":
-        chunksize = max(1, min(1000, n_runs // (10 * n_workers)))
-    print(f"[parallel_cases] {n_runs} case(s) on {n_workers} worker(s), chunksize {int(chunksize)}", flush=True)
+    print(f"[parallel_cases] {n_runs} case(s) on {n_workers} worker(s)", flush=True)
     map_object_path = os.path.join(master_working_dir, "map_object.pkl")
     with open(map_object_path, "wb") as fh:
         pickle.dump(_IndexMap(cases), fh)
@@ -1189,42 +1198,40 @@ def parallel_cases(source, config, master_working_dir, *, chunksize="automatic",
     init_status_queue, worker_id_queue = ctx.Queue(), ctx.Queue()
     for w in range(n_workers):
         worker_id_queue.put(w)
+    seed = config.generation.seed
     errors, results = {}, {}
     with worker_environment():
-        pool = ctx.Pool(processes=n_workers, initializer=_init_case_worker,
-                        initargs=(worker_id_queue, master_working_dir, _worker_config(config, cases[0]),
-                                  init_status_queue, hooks, bool(verbose)))
-        failed = []
-        for _ in range(n_workers):
-            try:
-                wid, tb = init_status_queue.get(timeout=300)
-            except queue.Empty:
-                wid, tb = -1, "worker initialisation timed out (> 300 s)"
-            if tb is not None:
-                failed.append((wid, tb))
-        if failed:
-            pool.terminate()
-            pool.join()
-            raise RuntimeError(f"{len(failed)} worker(s) failed to initialise:\n"
-                               + "\n".join(f"  worker {w}:\n{t}" for w, t in failed))
+        ex = ProcessPoolExecutor(n_workers, mp_context=ctx, initializer=_init_case_worker,
+                                 initargs=(worker_id_queue, master_working_dir, _worker_config(config, cases[0]),
+                                           init_status_queue, hooks, bool(verbose)))
         try:
-            with pool:
-                for idx, ok, tb, rec in pool.imap_unordered(
-                        run_case, [(i, c, case_dir) for i, c in enumerate(cases)], chunksize=int(chunksize)):
-                    c = cases[idx]
-                    if ok:
-                        results[idx] = rec
-                        print(f"[parallel_cases] case {idx} ({c.group}/{c.scan_key}) done: "
-                              f"{rec['n_sel']}/{rec['n_all']} in spec", flush=True)
-                    else:
-                        errors[idx] = tb
-                        print(f"[parallel_cases] case {idx} ({c.group}/{c.scan_key}) failed:\n{tb}", flush=True)
-        except KeyboardInterrupt:
-            pool.join()
-            raise
-        except Exception as exc:
-            pool.join()
-            raise RuntimeError(f"parallel_cases dispatch failed:\n{traceback.format_exc()}") from exc
+            futs = {ex.submit(run_case, (i, c, case_dir, case_seed(seed, c))): i for i, c in enumerate(cases)}
+            for fut in as_completed(futs):
+                idx, ok, tb, rec = fut.result()
+                c = cases[idx]
+                if ok:
+                    results[idx] = rec
+                    print(f"[parallel_cases] case {idx} ({c.group}/{c.scan_key}) done: "
+                          f"{rec['n_sel']}/{rec['n_all']} in spec", flush=True)
+                else:
+                    errors[idx] = tb
+                    print(f"[parallel_cases] case {idx} ({c.group}/{c.scan_key}) failed:\n{tb}", flush=True)
+        except BrokenProcessPool:
+            failed = []
+            while True:
+                try:
+                    failed.append(init_status_queue.get(timeout=1.0))
+                except queue.Empty:
+                    break
+            if failed:
+                raise RuntimeError(f"{len(failed)} worker(s) failed to initialise:\n"
+                                   + "\n".join(f"  worker {w}:\n{t}" for w, t in failed)) from None
+            lost = sorted(set(range(n_runs)) - set(results) - set(errors))
+            for i in lost:
+                errors[i] = "not finished: a worker process died (crash or out-of-memory kill) during the sweep"
+            print(f"[parallel_cases] a worker died; {len(lost)} case(s) not finished: {lost}", flush=True)
+        finally:
+            ex.shutdown(wait=True, cancel_futures=True)
 
     if errors:
         with open(os.path.join(master_working_dir, "errors.pkl"), "wb") as fh:

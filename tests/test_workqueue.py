@@ -144,6 +144,8 @@ def test_max_attempts(tmp_path):
         q.expire('claims', 'u000')                         # preempted
     assert q.next_unit(fq.Cursor(), 'x') is None
     assert q.outcome('u000')['reason'] == 'max_attempts'
+    q.reopen('u000')                                       # a fresh attempt budget, not an instant re-fail
+    assert q.next_unit(fq.Cursor(), 'y') == 'u000'
 
 
 def test_feeder_adds_units_mid_run(tmp_path):

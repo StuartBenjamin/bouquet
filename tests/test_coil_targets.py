@@ -696,3 +696,26 @@ class TestCoilTargetsAreInTheSolveFrame:
         # all-default targets pass the baseline orientation check
         spec = coil_reg_from_measured(meas, **D3D)
         self._install(spec, bl_sign=bl.source_current_sign)
+
+
+def test_prepare_baseline_checks_the_orientation_once_the_imas_baseline_is_read(monkeypatch):
+    """point_solver applies the coil reg before the baseline exists, so the check skips there;
+    prepare_baseline must run it once the IMAS baseline is read, before solving."""
+    from types import SimpleNamespace
+
+    import bouquet.baseline as baseline_mod
+    from bouquet.config import BouquetConfig, GenerationConfig, ImasSource, SolverConfig
+    from bouquet.run import Bouquet
+    term = {"coils": {"F1A": 1.0}, "target": 1.0, "weight": 1.0, "source_current_sign": 1.0}
+    b = Bouquet(BouquetConfig(source=ImasSource(ids_path="/d/dd.json", time=1.0),
+                              solver=SolverConfig(mesh_path="/d/m.h5", coil_reg=[term]), output_header="x",
+                              generation=GenerationConfig(reconstruction_engine="legacy",
+                                                          imas_baseline="closure")))
+    b.mygs = object()
+    monkeypatch.setattr(Bouquet, "point_solver", lambda self, geom=None: self)
+    monkeypatch.setattr(baseline_mod, "resolve_baseline",
+                        lambda config, mygs: SimpleNamespace(provenance="imas", source_current_sign=-1.0))
+    monkeypatch.setattr(Bouquet, "_forward_solve_imas_baseline",
+                        lambda self: pytest.fail("solved with the coils pinned toward the mirror field"))
+    with pytest.raises(ValueError, match="mirror"):
+        b.prepare_baseline()

@@ -1,6 +1,6 @@
 """Many bouquets: parallel sources, set_case, run_case, merge_cases, the worker count and the
-single-thread policy.  No OFT: the per-case body runs on a stub solver; the pool itself is in
-tests/test_parallel_cases_solver.py."""
+single-thread policy.  No OFT: the per-case body runs on a stub solver; the pool's startup failure
+runs for real (it fails before the solver); the rest of the pool is in tests/test_parallel_cases_solver.py."""
 
 import os
 import pickle
@@ -13,8 +13,9 @@ h5py = pytest.importorskip("h5py")
 import bouquet as bq
 from bouquet.config import (BouquetConfig, SolverConfig, ReconstructionSource,
                             ImasSource, CaseSpec, ParallelSource,
-                            GeqdskProfilePairs, IdaTimeslices, ImasTimeslices)
-from bouquet.parallel import (_get_num_cpus, _IndexMap, check_cases, merge_cases, run_case,
+                            GeqdskProfilePairs, IdaTimeslices, ImasTimeslices,
+                            absolute_source, with_absolute_paths)
+from bouquet.parallel import (_get_num_cpus, _IndexMap, case_seed, check_cases, merge_cases, run_case,
                               parallel_cases, parallel_generate, _worker_state)
 from bouquet.schema import SCHEMA_VERSION
 from bouquet.utils import initialize_equilibrium_database
@@ -279,6 +280,7 @@ class _StubBouquet:
         self.case = None
         self.baseline = type("BL", (), {"l_i_target": 1.25, "Ip_target": 1.1e6})()
         self._geom = type("G", (), {"F0": 1.7})()
+        self.config = type("C", (), {"generation": type("G", (), {"seed": 0})()})()
 
     def _step(self, name):
         self.calls.append(name)
@@ -329,7 +331,7 @@ class TestRunCase:
 
     def test_runs_the_stages_and_reports_the_case(self, stub_worker, tmp_path):
         stub = stub_worker()
-        idx, ok, err, out = run_case((7, self._case(), str(tmp_path)))
+        idx, ok, err, out = run_case((7, self._case(), str(tmp_path), 11))
 
         assert ok and err is None
         # no export(): the merge produces the deliverable, so a per-case
@@ -342,12 +344,13 @@ class TestRunCase:
         assert (out["idx"], out["group"], out["scan_key"]) == (7, "A", 2500)
         assert (out["n_all"], out["n_sel"]) == (3, 2)
         assert out["l_i_target"] == 1.25 and out["Ip_target"] == 1.1e6 and out["F0"] == 1.7
+        assert stub.config.generation.seed == 11        # the case's own seed, set before the case runs
         assert all(p["num_threads"] == 1 for p in out["threads"]) or out["threads"] == []
 
     def test_failure_comes_back_as_data_not_an_exception(self, stub_worker, tmp_path):
         # one bad slice must not take down a sweep of hundreds
         stub_worker(fail_at="generate")
-        idx, ok, err, out = run_case((3, self._case(), str(tmp_path)))
+        idx, ok, err, out = run_case((3, self._case(), str(tmp_path), 11))
         assert (idx, ok, out) == (3, False, None)
         assert "boom in generate" in err and "Traceback" in err
 
@@ -366,7 +369,7 @@ class TestRunCase:
 
         stub = stub_worker(hooks={"before_baseline": before,
                                   "after_baseline": after})
-        idx, ok, err, out = run_case((0, self._case(), str(tmp_path)))
+        idx, ok, err, out = run_case((0, self._case(), str(tmp_path), 11))
 
         assert ok, err
         assert stub.calls == ["set_case", "hook:before", "prepare_baseline",
@@ -378,13 +381,13 @@ class TestRunCase:
             raise RuntimeError("bad switchboard")
 
         stub_worker(hooks={"after_baseline": boom})
-        idx, ok, err, out = run_case((5, self._case(), str(tmp_path)))
+        idx, ok, err, out = run_case((5, self._case(), str(tmp_path), 11))
         assert (ok, out) == (False, None)
         assert "bad switchboard" in err
 
     def test_no_hooks_configured_is_the_default_path(self, stub_worker, tmp_path):
         stub = stub_worker()
-        _, ok, err, _ = run_case((0, self._case(), str(tmp_path)))
+        _, ok, err, _ = run_case((0, self._case(), str(tmp_path), 11))
         assert ok, err
         assert stub.calls == ["set_case", "prepare_baseline", "generate", "filter"]
 
@@ -413,6 +416,57 @@ class TestHookValidation:
         with pytest.raises(TypeError, match="before_baseline must be callable"):
             parallel_cases(self._cases(), self._cfg(), str(tmp_path),
                            n_cpus_override=1, before_baseline="not a function")
+
+
+class TestPoolStartup:
+    def test_a_worker_that_cannot_start_fails_the_run_with_its_traceback(self, tmp_path):
+        # the mesh copy fails before any solver: a real spawned pool, no OFT
+        cfg = BouquetConfig(source=ReconstructionSource(geqdsk_path="g", profiles_path="p"),
+                            solver=SolverConfig(mesh_path=str(tmp_path / "no_mesh.h5")), output_header="sweep")
+        cases = [CaseSpec(source=ReconstructionSource(geqdsk_path="g", profiles_path="p"),
+                          header="sweep", scan_key=k, group="A") for k in (1, 2, 3)]
+        with pytest.raises(RuntimeError, match=r"failed to initialise(.|\n)*no_mesh\.h5"):
+            parallel_cases(cases, cfg, str(tmp_path / "work"), n_cpus_override=2)
+
+
+class TestRelativePaths:
+    """Workers run in their own directories, so inputs are made absolute in the parent."""
+
+    def test_source_and_config_inputs_become_absolute(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        src = absolute_source(ImasSource(ids_path="dd.json", time=1.0, ida_path="ida.cdf", LCFS_geqdsk="g"))
+        assert (src.ids_path, src.ida_path, src.LCFS_geqdsk) == tuple(
+            str(tmp_path / f) for f in ("dd.json", "ida.cdf", "g"))
+        cfg = BouquetConfig(source=ReconstructionSource(geqdsk_path="g", profiles_path="p.cdf"),
+                            solver=SolverConfig(mesh_path="mesh.h5"), output_header="sweep")
+        out = with_absolute_paths(cfg)
+        assert (out.solver.mesh_path, out.source.geqdsk_path, out.source.profiles_path) == tuple(
+            str(tmp_path / f) for f in ("mesh.h5", "g", "p.cdf"))
+        assert cfg.solver.mesh_path == "mesh.h5"           # a copy: the caller's config is untouched
+
+    def test_unset_optional_inputs_stay_unset(self):
+        src = absolute_source(ImasSource(ids_path="/d/dd.json", time=1.0))
+        assert src.ida_path is None and src.LCFS_geqdsk is None
+
+
+class TestCaseSeed:
+    def _case(self, key, group="A"):
+        return CaseSpec(source=ReconstructionSource(geqdsk_path="g", profiles_path="p"),
+                        header="sweep", scan_key=key, group=group)
+
+    def test_each_case_gets_its_own_reproducible_seed(self):
+        seeds = {case_seed(7, self._case(k, g)) for k in (1, 2) for g in ("A", "B")}
+        assert len(seeds) == 4
+        assert case_seed(7, self._case(1)) == case_seed(7, self._case(1)) != case_seed(8, self._case(1))
+
+    def test_units_from_cases_gives_each_case_the_same_seed(self):
+        from bouquet import units
+        cfg = BouquetConfig(source=ReconstructionSource(geqdsk_path="g", profiles_path="p"),
+                            solver=SolverConfig(mesh_path="mesh.h5"), output_header="sweep")
+        cases = [self._case(1), self._case(2)]
+        us = units.units_from_cases(cfg, cases)
+        assert [u["config"]["generation"]["seed"] for u in us] == [case_seed(cfg.generation.seed, c)
+                                                                   for c in cases]
 
 
 # ---------------------------------------------------------------------------

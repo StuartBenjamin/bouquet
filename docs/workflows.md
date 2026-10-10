@@ -711,7 +711,9 @@ bit-identical with — a serial run of the same seed.
 One complete bouquet per case (g-file/p-file pair, IDA time slice, IMAS time).  Each worker stands up its
 solver once, in its own directory (TokaMaker's scratch files) with its own copy of the mesh, and swaps
 case after case onto it (`Bouquet.set_case`).  A failed case returns its traceback (`errors`,
-`errors.pkl`) and the sweep goes on.  A sweep is one run-level config plus the cases:
+`errors.pkl`) and the sweep goes on.  Each case runs at its own seed (`bouquet.parallel.case_seed`, from
+the run seed and the case's group and scan_key), the one `units.units_from_cases` gives it too.  Input
+paths may be relative to the launch directory.  A sweep is one run-level config plus the cases:
 
 ```python
 src = bq.ImasTimeslices(header="sweep", ids_path="dd_sim.json", times=[3.163, 3.263, 3.363],
@@ -741,9 +743,10 @@ work_dir/
 `group_by=None` merges into one archive, `merge=False` keeps only the per-case files, `cleanup=True`
 deletes them once merged.  The worker count follows the affinity mask and the scheduler's CPU count
 (`SLURM_CPUS_PER_TASK`, `PBS_NUM_PPN`, `LSB_DJOB_NUMPROC`, `NSLOTS`); `use_logical_cpus=False` puts one
-worker per physical core.  Every worker must report ready before any case is dispatched, so a bad mesh or
-a missing OFT fails in seconds with each worker's traceback.  Each case record carries its F0 and the
-thread count of every loaded pool.
+worker per physical core.  A worker that fails to start (a bad mesh, a missing OFT) fails the run with
+its traceback.  A worker that dies mid-sweep (a crash, an out-of-memory kill) ends the sweep: the finished
+cases are kept and merged, the unfinished ones listed in `errors`.  Each case record carries its F0 and
+the thread count of every loaded pool.
 
 Per-case setup a `CaseSpec` cannot express goes in two hooks, `f(bouquet, case)`, run on the worker:
 `before_baseline` (after `set_case`; e.g. solver targets from this slice's g-file) and `after_baseline`
@@ -769,13 +772,17 @@ units.add_units("queue", us)            # idempotent: ids already queued are ski
 ```bash
 python -m bouquet.units work --queue queue --out-dir out --workers 64   # one per node: srun --ntasks-per-node=1
 python -m bouquet.units status --queue queue                            # counts, failures grouped by signature
-python -m bouquet.units stop|drain|undrain|retry-failed --queue queue
+python -m bouquet.units stop|drain|undrain --queue queue
+python -m bouquet.units retry-failed --queue queue --out-dir out       # reopens failed units, removes their records
 ```
 
 - **Outputs.** `out/<id>.h5` (moved into place when complete), then `out/<id>.json`, the unit record
-  (`status` `done`/`failed`, `selected_counts`, `profile_coord`, `seed`, ...). Readers wait for the record.
-- **Seeds.** Each unit's `generation.seed` is derived from the config seed and the unit id: reproducible,
-  independent of which worker runs it, and different across units.
+  (`status` `done`/`failed`, `selected_counts`, `profile_coord`, `seed`, ...). Readers wait for the record:
+  a unit that raised gets it at once, a unit the queue failed (a crash or preemption on every attempt)
+  when `work` ends. Relative paths are fine: inputs are stored absolute, queue and output resolve from
+  where `work` starts.
+- **Seeds.** Each unit's `generation.seed` is derived from the config seed and the unit id (from the case,
+  for `units_from_cases`): reproducible, independent of which worker runs it, and different across units.
 - **Failures.** A unit that raises is retried once more (`MAX_FAILURES=2`), then gets a `failed` record;
   `MAX_ATTEMPTS=4` bounds crashes and preemptions. A worker stops after 3 failures in a row; when workers
   of 2 jobs break within an hour the queue writes `STOP`. Leases of dead workers (OOM, node loss,
