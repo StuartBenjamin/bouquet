@@ -282,9 +282,9 @@ class Queue:
             self.drop('claims', uid)
 
     def reopen(self, uid):
-        """Make a terminal unit claimable again (clears its done marker and failure records)."""
+        """Make a terminal unit claimable again, with a fresh attempt and failure budget."""
         for f in _ls(self.path('state', uid)):
-            if f.startswith('fail_'):
+            if f.startswith(('fail_', 'attempt_')):
                 os.remove(self.path('state', uid, f))
         try:
             os.remove(self.path('done', uid))

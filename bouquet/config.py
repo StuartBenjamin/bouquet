@@ -274,6 +274,28 @@ class ImasSource:
 
 BaselineSource = Union[ReconstructionSource, ImasSource]
 
+_SOURCE_FILES = ("geqdsk_path", "profiles_path", "ids_path", "ida_path", "LCFS_geqdsk")
+
+
+def absolute_source(src: "BaselineSource") -> "BaselineSource":
+    """``src`` with its input files as absolute paths: parallel workers run in their own directories."""
+    import dataclasses
+    import os
+    return dataclasses.replace(src, **{f: os.path.abspath(v) for f in _SOURCE_FILES
+                                       if isinstance(v := getattr(src, f, None), str) and v})
+
+
+def with_absolute_paths(config: "BouquetConfig") -> "BouquetConfig":
+    """A copy of ``config`` with its input files (mesh, source, uncertainty IDA file) as absolute paths."""
+    import copy
+    import os
+    cfg = copy.deepcopy(config)
+    cfg.solver.mesh_path = os.path.abspath(cfg.solver.mesh_path)
+    if cfg.uncertainty.ida_path:
+        cfg.uncertainty.ida_path = os.path.abspath(cfg.uncertainty.ida_path)
+    cfg.source = absolute_source(cfg.source)
+    return cfg
+
 
 # ---------------------------------------------------------------------------
 # Many bouquets: cases (one baseline source each) and the sources that expand into them

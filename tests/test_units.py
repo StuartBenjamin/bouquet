@@ -36,6 +36,34 @@ def test_make_units():
         units.make_units(cfg, [{"source.no_such_field": 1}], ["b"])
 
 
+def test_make_units_stores_absolute_inputs(tmp_path, monkeypatch):
+    # a unit runs in its worker's directory, not where it was made
+    monkeypatch.chdir(tmp_path)
+    cfg = BouquetConfig(source=ImasSource(ids_path="dd.json", time=1.0, LCFS_geqdsk="g"),
+                        solver=SolverConfig(mesh_path="mesh.h5"), output_header="x")
+    c = units.make_units(cfg, [{"generation.seed": 5}], ["a"])[0]["config"]
+    assert (c["solver"]["mesh_path"], c["source"]["ids_path"], c["source"]["LCFS_geqdsk"]) == tuple(
+        str(tmp_path / f) for f in ("mesh.h5", "dd.json", "g"))
+    assert c["generation"]["seed"] == 5                  # an explicit seed is kept, not re-derived
+
+
+def test_a_unit_the_queue_failed_gets_a_record_and_retry_reopens_it(tmp_path):
+    # crashed or preempted on every attempt: the queue fails it without running it to the end
+    q, out = str(tmp_path / "q"), str(tmp_path / "out")
+    units.add_units(q, units.make_units(_config(), [{}], ["u"]))
+    qq = wq.Queue(q)
+    for i in range(qq.MAX_ATTEMPTS):
+        assert qq.next_unit(wq.Cursor(), f"w{i}") == "u"
+        qq.expire("claims", "u")
+    assert qq.next_unit(wq.Cursor(), "x") is None
+    units.record_queue_failures(q, out)
+    rec = json.load(open(os.path.join(out, "u.json")))
+    assert rec["status"] == "failed" and rec["error"]["signature"] == "max_attempts"
+    units.main(["retry-failed", "--queue", q, "--out-dir", out])
+    assert not os.path.exists(os.path.join(out, "u.json"))
+    assert qq.next_unit(wq.Cursor(), "y") == "u"         # a fresh attempt budget
+
+
 def test_archive_counts(tmp_path):
     h5 = tmp_path / "a.h5"
     with h5py.File(h5, "w") as f:
@@ -93,6 +121,6 @@ def test_two_units_end_to_end(tmp_path):
         assert bq.BouquetArchive(os.path.join(out, rec["archive"])).scan_keys
     assert len(seeds) == 2
     # each worker ran its units in its own directory, on its own copy of the mesh
-    wdirs = [d for d in os.listdir(os.path.join(out, "_work")) if os.path.isfile(
-        os.path.join(out, "_work", d, os.path.basename(_MESH)))]
+    wdirs = [d for d in os.listdir(os.path.join(out, "_work")) if any(
+        f.endswith("_" + os.path.basename(_MESH)) for f in os.listdir(os.path.join(out, "_work", d)))]
     assert wdirs

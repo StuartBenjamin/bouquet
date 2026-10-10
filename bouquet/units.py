@@ -3,7 +3,8 @@
     python -m bouquet.units add    --queue Q units.json     # [{"id": ..., "config": BouquetConfig.to_dict()}]
     python -m bouquet.units work   --queue Q --out-dir D --workers N   # one launcher per node
     python -m bouquet.units status --queue Q
-    python -m bouquet.units stop|drain|undrain|retry-failed --queue Q
+    python -m bouquet.units stop|drain|undrain --queue Q
+    python -m bouquet.units retry-failed --queue Q --out-dir D [--signature S]
 
 A unit is one bouquet on one baseline (``bouquet.Bouquet(config)``). Workers (``workqueue``) claim units
 across processes, nodes and jobs; each unit runs in a fresh single-threaded process (:mod:`bouquet.threads`)
@@ -12,7 +13,9 @@ generate -> filter``. The archive is built in a scratch dir and moved to ``<out_
 record ``<out_dir>/<id>.json`` (status ``done`` or ``failed``) is written last, so a reader never sees a
 partial archive. :func:`make_units` builds units from one config and per-unit overrides (e.g. a time
 sweep), :func:`units_from_cases` from the cases :func:`bouquet.parallel.parallel_cases` takes (which runs
-them on one node instead). The seed of each unit is derived from the config seed and its id.
+them on one node instead). The seed of each unit is derived from the config seed and its id (from the
+case, :func:`bouquet.parallel.case_seed`, for :func:`units_from_cases`). Input paths may be relative to
+the directory units are made in; queue and output paths to the directory ``work`` starts in.
 """
 from __future__ import annotations
 
@@ -30,7 +33,8 @@ import traceback
 from . import workqueue as wq
 from .threads import worker_env
 
-__all__ = ["make_units", "units_from_cases", "add_units", "run_unit", "unit_seed", "archive_counts", "work"]
+__all__ = ["make_units", "units_from_cases", "add_units", "run_unit", "unit_seed", "archive_counts", "work",
+           "record_queue_failures"]
 
 
 def unit_seed(seed, uid):
@@ -52,18 +56,20 @@ def make_units(config, overrides, ids):
 
     ``overrides``: one dict per unit of dotted config fields, e.g.
     ``{"source.time": 2.4, "source.ida_time": 2.413, "source.LCFS_geqdsk": g, "generation.scan_key": 2413}``.
-    ``ids``: unit ids (``[a-zA-Z0-9_.-]``). Each unit's config is validated here (``BouquetConfig.from_dict``).
+    ``ids``: unit ids (``[a-zA-Z0-9_.-]``). A unit's seed is :func:`unit_seed` of the config seed unless its
+    overrides set ``generation.seed``. Each unit's config is validated here (``BouquetConfig.from_dict``)
+    and stored with absolute input paths.
     """
-    from .config import BouquetConfig
+    from .config import BouquetConfig, with_absolute_paths
     base = config.to_dict()
     units = []
     for uid, over in zip(ids, overrides, strict=True):
         d = copy.deepcopy(base)
         for k, v in over.items():
             _set(d, k, v)
-        d["generation"]["seed"] = unit_seed(d["generation"].get("seed", 0), uid)
-        BouquetConfig.from_dict(d)
-        units.append(dict(id=uid, config=d))
+        if "generation.seed" not in over:
+            d["generation"]["seed"] = unit_seed(d["generation"].get("seed", 0), uid)
+        units.append(dict(id=uid, config=with_absolute_paths(BouquetConfig.from_dict(d)).to_dict()))
     return units
 
 
@@ -74,13 +80,14 @@ def units_from_cases(config, cases, ids=None):
     import re
 
     from .config import _encode_source
-    from .parallel import check_cases
+    from .parallel import case_seed, check_cases
     cases = list(cases.expand() if hasattr(cases, "expand") else cases)
     check_cases(cases, config)
     if ids is None:
         ids = [re.sub(r"[^a-zA-Z0-9_.-]", "_", f"{i:04d}_{c.group}_{c.scan_key}") for i, c in enumerate(cases)]
     return [dict(u, group=c.group) for u, c in zip(make_units(config, [
-        {"source": _encode_source(c.source), "generation.scan_key": c.scan_key} for c in cases], ids), cases)]
+        {"source": _encode_source(c.source), "generation.scan_key": c.scan_key,
+         "generation.seed": case_seed(config.generation.seed, c)} for c in cases], ids), cases)]
 
 
 def add_units(queue, units):
@@ -156,7 +163,9 @@ class _Runner:
     """``make_run`` for :func:`workqueue.launch`: each unit as a ``run-unit`` child process."""
 
     def __init__(self, queue, out_dir, work_root, timeout, min_left, keep_work):
-        self.queue, self.out_dir, self.work_root = queue, out_dir, work_root
+        # absolute: each child runs in its worker's directory
+        self.queue, self.out_dir = os.path.abspath(queue), os.path.abspath(out_dir)
+        self.work_root = os.path.abspath(work_root) if work_root else None
         self.timeout, self.min_left, self.keep_work = timeout, min_left, keep_work
         self.deadline = wq.job_deadline(0.0)
         # the child runs in its worker's directory: it imports this bouquet through PYTHONPATH
@@ -172,8 +181,9 @@ class _Runner:
         meshes = {}
 
         def local_mesh(src):
-            if src not in meshes:
-                meshes[src] = os.path.join(wdir, os.path.basename(src))
+            if src not in meshes:       # named by its source path: two meshes may share a basename
+                tag = hashlib.sha256(os.path.abspath(src).encode()).hexdigest()[:8]
+                meshes[src] = os.path.join(wdir, f"{tag}_{os.path.basename(src)}")
                 shutil.copy2(src, meshes[src])
             return meshes[src]
 
@@ -200,11 +210,27 @@ class _Runner:
         return run
 
 
+def record_queue_failures(queue, out_dir):
+    """Write the ``failed`` record of every unit the queue failed without running it to the end (a crash,
+    preemption or timeout on every attempt), so a reader waiting for ``<out_dir>/<id>.json`` gets one."""
+    q = wq.Queue(queue)
+    for uid in q.done_ids():
+        o = q.outcome(uid) or {}
+        if o.get("status") == "failed" and \
+                (wq.read_json(os.path.join(out_dir, f"{uid}.json")) or {}).get("status") not in ("done", "failed"):
+            write_record(out_dir, uid, "failed", error=dict(signature=o.get("reason", "unknown"), message=None,
+                                                            log=os.path.join(out_dir, "logs", f"{uid}.log")))
+
+
 def work(queue, out_dir, workers, work_root=None, timeout=None, min_left=0.0, margin=300.0, idle_exit=600.0,
          keep_work=False):
-    """Run ``workers`` worker loops on this node until the queue is drained; returns their exit reasons."""
-    return wq.launch(queue, workers, _Runner(queue, out_dir, work_root, timeout, min_left, keep_work),
-                     deadline=wq.job_deadline(margin), idle_exit_s=idle_exit)
+    """Run ``workers`` worker loops on this node until the queue is drained, then write the records of
+    units the queue failed (:func:`record_queue_failures`); returns the workers' exit reasons."""
+    queue, out_dir = os.path.abspath(queue), os.path.abspath(out_dir)
+    reasons = wq.launch(queue, workers, _Runner(queue, out_dir, work_root, timeout, min_left, keep_work),
+                        deadline=wq.job_deadline(margin), idle_exit_s=idle_exit)
+    record_queue_failures(queue, out_dir)
+    return reasons
 
 
 def _cmd_run_unit(a):
@@ -235,6 +261,8 @@ def _cmd_retry_failed(a):
         o = q.outcome(uid) or {}
         if o.get("status") == "failed" and a.signature in json.dumps(o):
             q.reopen(uid)
+            if os.path.exists(rec := os.path.join(a.out_dir, f"{uid}.json")):
+                os.remove(rec)          # the stale failed record: readers would take it as final
             n += 1
     print(f"retry-failed: {n} unit(s) reopened")
 
@@ -276,7 +304,9 @@ def main(argv=None):
     for name in ("stop", "drain"):
         add(name, lambda a: wq.Queue(a.queue).set_flag(a.cmd.upper(), "user"))
     add("undrain", lambda a: os.remove(wq.Queue(a.queue).path("DRAIN")))
-    add("retry-failed", _cmd_retry_failed).add_argument("--signature", default="")
+    p = add("retry-failed", _cmd_retry_failed)
+    p.add_argument("--signature", default="")
+    p.add_argument("--out-dir", required=True, help="the reopened units' failed records are removed here")
     a = ap.parse_args(argv)
     a.fn(a)
 

@@ -590,9 +590,9 @@ class Bouquet(SwbBaseline):
         targets taken from another file), the coils would be pinned toward the
         mirror-image field at the configured weight.  That is refused.
 
-        Checked only once an IMAS baseline exists (``prepare_baseline`` resets
-        the solver, and re-applies the reg, immediately before the baseline
-        solve); a term with no recorded factor claims nothing and is not
+        Checked only once an IMAS baseline exists (``prepare_baseline`` calls
+        it right after reading the baseline, before the baseline solve; later
+        resets check again); a term with no recorded factor claims nothing and is not
         checked.  The reconstruction path solves in the same positive frame but
         records no source factor (``source_current_sign`` is +1.0 there by
         definition), so it is not checked either.
@@ -850,6 +850,10 @@ class Bouquet(SwbBaseline):
             # IDS-vs-TokaMaker li for sanity.
             if (isinstance(self.config.source, ImasSource)
                     and self.mygs is not None):
+                # point_solver ran before this baseline existed, so its coil
+                # reg skipped the orientation check: run it now
+                self._check_coil_reg_orientation(
+                    list(getattr(self.config.solver, "coil_reg", None) or []))
                 if self.config.generation.imas_baseline == "swb":
                     self._swb_imas_baseline()
                 else:

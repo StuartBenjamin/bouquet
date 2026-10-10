@@ -1,6 +1,7 @@
-"""``parallel_cases`` end to end (swb, synthetic IMAS slice): 3 cases on 2 workers equal the same cases
-run one per fresh process, bit for bit.  The inputs are read-only, so nothing writes beside them; each
-worker has its own directory and mesh copy; every case ran single-threaded."""
+"""``parallel_cases`` end to end (swb, synthetic IMAS slice): 3 cases on 2 workers, given relative input
+paths, equal the same cases run one per fresh process at their case seeds, bit for bit.  The inputs are
+read-only, so nothing writes beside them; each worker has its own directory and mesh copy; every case ran
+single-threaded.  A worker that dies mid-sweep ends it without hanging."""
 import gzip
 import os
 import shutil
@@ -58,14 +59,15 @@ def _sweep(inp, header):
 
 
 def _serial(inp, work, i):
-    """Case ``i`` alone, in this (fresh) process."""
+    """Case ``i`` alone, in this (fresh) process, at its case seed."""
     import warnings
-    from bouquet.parallel import run_case_on
+    from bouquet.parallel import case_seed, run_case_on
     from bouquet.run import Bouquet
     from bouquet.threads import pin_threads
     pin_threads()
     os.chdir(work)
     cfg, cases = _sweep(inp, os.path.join(work, "x"))
+    cfg.generation.seed = case_seed(cfg.generation.seed, cases[i])
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         run_case_on(Bouquet(cfg).setup_solver(), cases[i], os.path.join(work, f"serial{i}"))
@@ -78,20 +80,27 @@ def _draw(h5, key):
         return {k: np.asarray(g[k]) for k in g if isinstance(g[k], h5py.Dataset) and g[k].dtype.kind == "f"}
 
 
-def test_parallel_cases_equals_one_fresh_process_per_case(tmp_path):
+def _die(bouquet, case):
+    if case.scan_key == 2:
+        os._exit(1)                                      # as a segfault or an OOM kill would
+
+
+def test_parallel_cases_equals_one_fresh_process_per_case(tmp_path, monkeypatch):
     import bouquet as bq
     inp = _inputs(str(tmp_path / "inputs"))
     env = _harness.subprocess_env(MPLBACKEND="Agg")
     serial = [subprocess.Popen([sys.executable, os.path.abspath(__file__), str(tmp_path), str(i)], env=env,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for i in range(3)]
-    cfg, cases = _sweep(inp, str(tmp_path / "work" / "sweep"))
-    out = bq.parallel_cases(cases, cfg, str(tmp_path / "work"), n_cpus_override=2)
+    monkeypatch.chdir(tmp_path)                          # the sweep gets paths relative to here
+    cfg, cases = _sweep({k: os.path.relpath(v) for k, v in inp.items()}, str(tmp_path / "work" / "sweep"))
+    out = bq.parallel_cases(cases, cfg, "work", n_cpus_override=2)
     for p in serial:
         _, err = p.communicate()
         assert p.returncode == 0, err[-4000:]
     assert out["n_success"] == 3, out["errors"]
     for w in (0, 1):
         assert os.path.isfile(tmp_path / "work" / f"worker_{w}" / os.path.basename(_MESH))
+    assert out["cases"][0].source.ids_path == inp["dd"]
     for i, rec in out["results"].items():
         assert rec["threads"] and all(p["num_threads"] == 1 for p in rec["threads"])
         a, b = _draw(out["merged"]["g"], cases[i].scan_key), _draw(str(tmp_path / f"serial{i}.h5"),
@@ -99,6 +108,16 @@ def test_parallel_cases_equals_one_fresh_process_per_case(tmp_path):
         assert a.keys() == b.keys()
         for k in a:
             np.testing.assert_array_equal(a[k], b[k], err_msg=f"case {i}: {k}")
+
+
+def test_a_worker_death_ends_the_sweep_and_keeps_the_finished_cases(tmp_path):
+    import bouquet as bq
+    inp = _inputs(str(tmp_path / "inputs"))
+    cfg, cases = _sweep(inp, str(tmp_path / "work" / "sweep"))
+    out = bq.parallel_cases(cases, cfg, str(tmp_path / "work"), n_cpus_override=1, before_baseline=_die)
+    assert set(out["errors"]) >= {1} and all("worker process died" in out["errors"][i] for i in out["errors"])
+    assert set(out["results"]) | set(out["errors"]) == {0, 1, 2}
+    assert set(out["merged"]) == ({"g"} if out["results"] else set())
 
 
 if __name__ == "__main__":
