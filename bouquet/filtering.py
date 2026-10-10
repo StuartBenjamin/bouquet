@@ -66,30 +66,55 @@ _FILTER_FLAGS = ("passes_coil_filter", "passes_boundary_filter",
                  "passes_draw_band")
 
 
-def contour_distance(pts, contour):
+class _Polyline:
+    """A closed polyline's segments ``a[i] -> a[i+1]``, and a KD-tree of samples along them at most
+    ``s`` apart: the larger of the median and the mean segment length, so a few long segments among
+    dense points add few samples."""
+
+    def __init__(self, contour):
+        a = np.asarray(contour, dtype=float)
+        ab = np.roll(a, -1, axis=0) - a
+        seg_len = np.linalg.norm(ab, axis=1)
+        # rows ax, ay, abx, aby, 1/|ab|^2: one gather per row in distance()
+        self.segments = np.vstack([a.T, ab.T, 1.0 / np.maximum(seg_len ** 2, 1e-300)])
+        total = seg_len.sum()
+        self.s = max(np.median(seg_len[seg_len > 0]), total / len(a)) if total > 0 else 1.0
+        n_sub = np.maximum(np.ceil(seg_len / self.s).astype(int), 1)
+        self.owner = np.repeat(np.arange(len(a)), n_sub)    # the segment each sample lies on
+        frac = (np.arange(len(self.owner)) - np.repeat(np.cumsum(n_sub) - n_sub, n_sub) + 0.5) / n_sub[self.owner]
+        self.tree = _cKDTree(a[self.owner] + frac[:, None] * ab[self.owner])
+
+    def distance(self, p, j):
+        """Distance from points ``p`` (m, 2) to segments ``j`` (m,) or (m, k)."""
+        px, py = (p[:, c].reshape((-1,) + (1,) * (j.ndim - 1)) for c in (0, 1))
+        ax, ay, bx, by, inv = self.segments[:, j]
+        dx, dy = px - ax, py - ay
+        t = np.clip((dx * bx + dy * by) * inv, 0.0, 1.0)
+        return np.hypot(dx - t * bx, dy - t * by)
+
+
+def contour_distance(pts, contour, k=8):
     """Distance from each of ``pts`` to the closed polyline through ``contour``, exactly.
 
     Measured to the segments, not the vertices: OFT's cut-cell ``trace_surf`` spaces its points ~5 mm
-    apart, which a nearest-vertex distance would read as boundary deviation.  Candidate segments come
-    from samples at most ``s`` (the median segment length) apart along the polyline: the nearest segment,
-    at distance d, has a sample within d + s/2, and d is at most the nearest sample's distance."""
-    pts, a = np.asarray(pts, dtype=float), np.asarray(contour, dtype=float)
-    ab = np.roll(a, -1, axis=0) - a                         # segment i: a[i] -> a[i+1]
-    seg_len = np.linalg.norm(ab, axis=1)
-    s = np.median(seg_len[seg_len > 0]) if np.any(seg_len > 0) else 1.0
-    n_sub = np.maximum(np.ceil(seg_len / s).astype(int), 1)
-    seg = np.repeat(np.arange(len(a)), n_sub)               # the segment each sample lies on
-    starts = np.cumsum(n_sub) - n_sub
-    frac = (np.arange(len(seg)) - np.repeat(starts, n_sub) + 0.5) / n_sub[seg]
-    tree = _cKDTree(a[seg] + frac[:, None] * ab[seg])
-    r, _ = tree.query(pts)
-    near = tree.query_ball_point(pts, r + 0.5 * s)          # never empty: the nearest sample is in it
-    n_near = np.fromiter(map(len, near), dtype=int, count=len(pts))
-    i = np.repeat(np.arange(len(pts)), n_near)
-    j = seg[np.concatenate(near).astype(int)]
-    t = np.clip(((pts[i] - a[j]) * ab[j]).sum(1) / np.maximum(seg_len[j] ** 2, 1e-300), 0.0, 1.0)
-    d = np.linalg.norm(a[j] + t[:, None] * ab[j] - pts[i], axis=1)
-    return np.minimum.reduceat(d, np.cumsum(n_near) - n_near)
+    apart, which a nearest-vertex distance would read as boundary deviation.  Each point is measured to
+    the segments of its ``k`` nearest samples (:class:`_Polyline`, spacing ``s``).  Any other segment
+    has every sample at least the k-th sample's distance ``r_k`` away, so it is at least ``r_k - s/2``
+    away; the few points nearer than that bound are re-measured against every segment with a sample
+    within their distance + ``s/2``."""
+    pts = np.asarray(pts, dtype=float)
+    line = _Polyline(contour)
+    k = min(k, line.tree.n)
+    r, idx = line.tree.query(pts, k=k)
+    r, idx = np.reshape(r, (len(pts), k)), np.reshape(idx, (len(pts), k))
+    d = line.distance(pts, line.owner[idx]).min(axis=1)
+    unsure = np.flatnonzero(d > r[:, -1] - 0.5 * line.s) if k < line.tree.n else []
+    if len(unsure):
+        near = line.tree.query_ball_point(pts[unsure], d[unsure] + 0.5 * line.s)
+        n_near = np.fromiter(map(len, near), dtype=int, count=len(unsure))
+        dn = line.distance(pts[np.repeat(unsure, n_near)], line.owner[np.concatenate(near).astype(int)])
+        d[unsure] = np.minimum.reduceat(dn, np.cumsum(n_near) - n_near)
+    return d
 
 
 # --------------------------------------------------------------------------
