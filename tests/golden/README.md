@@ -128,7 +128,8 @@ draws, one thread), OFT `fix/jphi-update-ravgs-and-nonfinite-abort` 7da4f18
 (build `20260929_7da4f18`), run with `regenerate_golden_run.py
 --reconstruction-engine unified`. That switch puts the legacy-only fields the
 engine never reads back to their defaults (printed and recorded in the run's
-`summary.json`; here only `isolate_edge_jbs` False -> True). No bar changed.
+`summary.json`; here only `isolate_edge_jBS`, now `isolate_edge_jbs`, False ->
+True). No bar changed.
 
 * Unified engine: 20 attempts, **17 archived** (3 rejected:
   `homotopy_maxits`), **4 in spec** (draws 0, 9, 13, 17). An engine draw's
@@ -153,7 +154,7 @@ engine never reads back to their defaults (printed and recorded in the run's
   committed when the run was made, and were committed together with the
   fixture in `1a15685`; the fixture is regenerable from `1a15685`'s tree.
   (`3d974e6` later changes how the generator's engine switch records
-  `isolate_edge_jbs` -- that field now defaults to `None` and is resolved
+  `isolate_edge_jBS` -- that field now defaults to `None` and is resolved
   per engine -- not what runs: it still records and applies False -> True.)
 
 ## Why input-current archival: the mode-1 coil drift

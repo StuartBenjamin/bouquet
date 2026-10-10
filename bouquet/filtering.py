@@ -66,6 +66,32 @@ _FILTER_FLAGS = ("passes_coil_filter", "passes_boundary_filter",
                  "passes_draw_band")
 
 
+def contour_distance(pts, contour):
+    """Distance from each of ``pts`` to the closed polyline through ``contour``, exactly.
+
+    Measured to the segments, not the vertices: OFT's cut-cell ``trace_surf`` spaces its points ~5 mm
+    apart, which a nearest-vertex distance would read as boundary deviation.  Candidate segments come
+    from samples at most ``s`` (the median segment length) apart along the polyline: the nearest segment,
+    at distance d, has a sample within d + s/2, and d is at most the nearest sample's distance."""
+    pts, a = np.asarray(pts, dtype=float), np.asarray(contour, dtype=float)
+    ab = np.roll(a, -1, axis=0) - a                         # segment i: a[i] -> a[i+1]
+    seg_len = np.linalg.norm(ab, axis=1)
+    s = np.median(seg_len[seg_len > 0]) if np.any(seg_len > 0) else 1.0
+    n_sub = np.maximum(np.ceil(seg_len / s).astype(int), 1)
+    seg = np.repeat(np.arange(len(a)), n_sub)               # the segment each sample lies on
+    starts = np.cumsum(n_sub) - n_sub
+    frac = (np.arange(len(seg)) - np.repeat(starts, n_sub) + 0.5) / n_sub[seg]
+    tree = _cKDTree(a[seg] + frac[:, None] * ab[seg])
+    r, _ = tree.query(pts)
+    near = tree.query_ball_point(pts, r + 0.5 * s)          # never empty: the nearest sample is in it
+    n_near = np.fromiter(map(len, near), dtype=int, count=len(pts))
+    i = np.repeat(np.arange(len(pts)), n_near)
+    j = seg[np.concatenate(near).astype(int)]
+    t = np.clip(((pts[i] - a[j]) * ab[j]).sum(1) / np.maximum(seg_len[j] ** 2, 1e-300), 0.0, 1.0)
+    d = np.linalg.norm(a[j] + t[:, None] * ab[j] - pts[i], axis=1)
+    return np.minimum.reduceat(d, np.cumsum(n_near) - n_near)
+
+
 # --------------------------------------------------------------------------
 #  the selection predicate -- ONE definition, two call sites
 # --------------------------------------------------------------------------
@@ -80,24 +106,6 @@ _FILTER_FLAGS = ("passes_coil_filter", "passes_boundary_filter",
 #  BASELINE tree with the PERTURBED points, which is the opposite direction
 #  from boundary_deviation_mm below and gives a different max (and a
 #  slightly different RMS) on the same pair of contours.
-def contour_distance(pts, contour, k=4):
-    """Distance from each of ``pts`` to the closed polyline through ``contour``.
-
-    Measured to the segments next to each point's ``k`` nearest vertices, not to the
-    vertices: OFT's cut-cell ``trace_surf`` spaces its points ~5 mm apart, which a
-    nearest-vertex distance would read as boundary deviation."""
-    pts, c = np.asarray(pts, dtype=float), np.asarray(contour, dtype=float)
-    n = len(c)
-    _, idx = _cKDTree(c).query(pts, k=min(k, n))
-    seg = idx.reshape(len(pts), -1)
-    seg = np.concatenate([seg, (seg - 1) % n], axis=1)      # segment i: c[i] -> c[i+1]
-    a = c[seg]
-    ab = c[(seg + 1) % n] - a
-    t = np.clip(((pts[:, None] - a) * ab).sum(-1)
-                / np.maximum((ab ** 2).sum(-1), 1e-300), 0.0, 1.0)
-    return np.linalg.norm(a + t[..., None] * ab - pts[:, None], axis=-1).min(axis=1)
-
-
 def boundary_deviation_mm(baseline_boundary, perturbed_boundary):
     """``(rms_mm, max_mm)`` of a perturbed LCFS vs the baseline contour.
 

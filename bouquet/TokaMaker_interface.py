@@ -70,6 +70,7 @@ from .edge_pressure import (
     solver_pprime,
     solver_pressure,
 )
+from .config import refuse_renamed_oft_options
 from .physics import SOLVER_Q0_PSI_N, q_ravg, thermal_pressure_charge
 from . import coords
 
@@ -3116,6 +3117,7 @@ def perturb_kinetic_equilibrium(
         When ``psi_N_kinetic`` is provided, the kinetic profiles
         (``ne_perturb`` etc.) are on the ``psi_N_kinetic`` grid.
     """
+    refuse_renamed_oft_options(kwargs, "perturb_kinetic_equilibrium")
 
     _edge = resolve_edge_pressure(edge_pressure)
     # ----------------------------------------------------------------
@@ -5460,6 +5462,7 @@ def generate_bouquet(
     list[dict]
         Diagnostics from each equilibrium.
     """
+    refuse_renamed_oft_options(kwargs, "generate_bouquet")
     # ---- the draw method (bouquet.draw_methods; None: the legacy draws) ---
     from .draw_methods import DrawMethod
     _m = draw_method if draw_method is not None else DrawMethod()
@@ -8463,6 +8466,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         Result dictionary containing reconstructed profiles, fields,
         and comparison data keyed as documented inline.
     """
+    refuse_renamed_oft_options(kwargs, "reconstruct_equilibrium")
     # ---- 0. Validate the equilibrium-grid inputs (fail before the solve) ----
     # Checked ahead of the OpenFUSIONToolkit imports below so a caller-side
     # shape error surfaces immediately, without needing OFT present.

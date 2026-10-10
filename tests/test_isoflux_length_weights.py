@@ -26,3 +26,9 @@ def test_evenly_spaced_reference_points_get_the_plain_weight():
 def test_clustered_points_share_their_length():
     w = isoflux_length_weights(_ellipse(2000, 0.9), 200.0, 256)
     assert w.max() / w.min() > 3.0
+
+
+def test_a_zero_length_contour_is_refused_not_given_nan_weights():
+    import pytest
+    with pytest.raises(ValueError, match="zero length"):
+        isoflux_length_weights(np.ones((8, 2)), 200.0, 256)

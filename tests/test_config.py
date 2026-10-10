@@ -172,6 +172,29 @@ class TestBootstrapKwargValidation:
         assert cfg2.generation.isolate_edge_jbs is True
         assert cfg2.generation.bootstrap_kwargs == {"djbs_tol": 1e-5}
 
+    def test_a_stored_config_with_use_sauter_eps_on_loads_without_it(self):
+        # it was a setting before OFT took eps from sauter_fc; True is what now always runs
+        cfg = _full_recon_cfg()
+        cfg.generation.reconstruction_engine = "legacy"
+        d = cfg.to_dict()
+        d["generation"]["bootstrap_kwargs"] = {"use_sauter_eps": True, "djBS_tol": 1e-5}
+        assert BouquetConfig.from_dict(d).generation.bootstrap_kwargs == {"djbs_tol": 1e-5}
+        d["generation"]["bootstrap_kwargs"] = {"use_sauter_eps": False}
+        with pytest.raises(ValueError, match="always True"):
+            BouquetConfig.from_dict(d)
+
+    @pytest.mark.parametrize("fn", ["perturb_kinetic_equilibrium", "generate_bouquet", "reconstruct_equilibrium"])
+    def test_an_old_oft_spelling_passed_straight_to_the_solver_functions_is_refused(self, fn):
+        # these forward **kwargs to OFT, which would apply it alongside bouquet's own new-name value
+        import inspect
+
+        import bouquet.TokaMaker_interface as ti
+        f = getattr(ti, fn)
+        n = sum(p.default is p.empty and p.kind is p.POSITIONAL_OR_KEYWORD
+                for p in inspect.signature(f).parameters.values())
+        with pytest.raises(ValueError, match="OFT renamed 'isolate_edge_jBS' to 'isolate_edge_jbs'"):
+            f(*([None] * n), isolate_edge_jBS=False)
+
     def test_a_reserved_name_is_reported_as_reserved_not_as_unknown(self):
         with pytest.raises(ValueError, match="passed explicitly at call sites"):
             self._check({"scale_jbs": 1.0})

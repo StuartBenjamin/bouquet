@@ -1836,6 +1836,14 @@ OFT_RENAMED_OPTIONS = {"isolate_edge_jBS": "isolate_edge_jbs", "scale_jBS": "sca
                        "taper_edge_jBS": "taper_edge_jbs", "djBS_tol": "djbs_tol"}
 
 
+def refuse_renamed_oft_options(keys, where):
+    """Refuse OFT options under their old spelling (:data:`OFT_RENAMED_OPTIONS`), naming the new one."""
+    old = sorted(set(keys) & set(OFT_RENAMED_OPTIONS))
+    if old:
+        raise ValueError(f"{where}: OFT renamed "
+                         + ", ".join(f"{k!r} to {OFT_RENAMED_OPTIONS[k]!r}" for k in old) + ".")
+
+
 #: The internal solve methods (GenerationConfig.solve_method).
 SOLVE_METHODS = ("legacy", "swb", "engine")
 
@@ -1964,11 +1972,7 @@ def validate_bootstrap_kwargs(bootstrap_kwargs, reserved=_BOOTSTRAP_RESERVED,
         raise ValueError(
             "bootstrap_kwargs: 'swb_iterations' is now 'iterations'.")
 
-    old = sorted(keys & set(OFT_RENAMED_OPTIONS))
-    if old:
-        raise ValueError(
-            "bootstrap_kwargs: OFT renamed "
-            + ", ".join(f"{k!r} to {OFT_RENAMED_OPTIONS[k]!r}" for k in old) + ".")
+    refuse_renamed_oft_options(keys, "bootstrap_kwargs")
 
     if "use_sauter_eps" in keys:
         raise ValueError(
@@ -2763,12 +2767,15 @@ def _field_default(name):
 
 def _renamed_oft_options(gend: dict) -> dict:
     """``gend`` with :data:`OFT_RENAMED_OPTIONS` moved to their new names (a field and
-    ``bootstrap_kwargs`` keys); a spelling change only, so silent."""
+    ``bootstrap_kwargs`` keys), and ``bootstrap_kwargs`` ``use_sauter_eps=True`` dropped (now
+    always on); neither changes what runs, so silent."""
     bk = dict(gend.get("bootstrap_kwargs") or {})
     moved = [k for k in OFT_RENAMED_OPTIONS if k in gend or k in bk]
-    if not moved:
+    if not moved and bk.get("use_sauter_eps") is not True:
         return gend
     gend = dict(gend)
+    if bk.get("use_sauter_eps") is True:
+        del bk["use_sauter_eps"]
     for old, new in OFT_RENAMED_OPTIONS.items():
         for d in (gend, bk):
             if old in d:
