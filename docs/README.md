@@ -26,6 +26,7 @@ install it, and a working quickstart. These pages carry the depth.
 | [CHANGES_SUMMARY.md](CHANGES_SUMMARY.md) | Historical change summaries by development round |
 | [validation-provenance.md](validation-provenance.md) | The unified-engine branch's chapter commits against the archival tag's history, and where its validation numbers were measured |
 | [ISSUE_jphi_edge_reconstruction.md](ISSUE_jphi_edge_reconstruction.md) | Open issue: `jphi-linterp` edge/separatrix handling and the σ=0 boundary floor |
+| [known-failures.md](known-failures.md) | Tests marked as expected failures, why, and what removes the mark |
 | [proposals/](proposals/) | Design proposals |
 
 ## Examples
