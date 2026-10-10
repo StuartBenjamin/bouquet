@@ -17,6 +17,7 @@ import traceback
 import warnings
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from bouquet.TokaMaker_interface import (DRAW_SOLVE_LOOSE_TOL, DRAW_SOLVE_MAXITS,
@@ -346,11 +347,20 @@ def test_generate_keeps_the_setup_cap_for_the_baseline_and_sigma0_solves(
 
     gs = GS()
     monkeypatch.setattr(R, "_FakeGS", lambda: gs)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    # the sigma=0 reference is evaluate_jBS on the cache anchor; the mock
+    # solver has no flux-surface geometry, so give it a fixed bootstrap --
+    # the reference is then really built (no silent cache fallback)
+    import bouquet.physics as P
+    monkeypatch.setattr(P, "evaluate_jBS", lambda mygs, psi_N, *a, **k: (
+        1.0e5 * (1.0 - np.asarray(psi_N, float)), {"I_BS": 1.0e5}))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         with DrawSolveGuard(gs, 100, retry_urf=(0.1,), loose_tol=2e-5) as g:
-            R._run(tmp_path, monkeypatch, ["ok", "ok"], solve_guard=g,
-                   jbs_delta_mode=True)
+            _out, rej, _h = R._run(tmp_path, monkeypatch, ["ok", "ok"],
+                                   solve_guard=g, jbs_delta_mode=True)
+    assert not [w for w in caught if "cache setup failed" in str(w.message)]
+    # both draws ran every solve and reached the save the mock refuses
+    assert [r["reason"] for r in rej] == ["eqdsk_save_failed"] * 2, rej
     pre = {ln: m for m, ln in gs.log if ln in want}
     assert set(pre) == set(want), (gs.log, want)      # both solves ran ...
     assert set(pre.values()) == {800}                 # ... uncapped

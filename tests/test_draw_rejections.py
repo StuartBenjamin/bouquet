@@ -139,13 +139,20 @@ def _run(tmp_path, monkeypatch, outcomes, **kw):
     def _post_homotopy(mygs, ctx, settings, psi_N, psi_pad, Ip,
                        coil_guard=None):
         what = seq_ph.pop(0)
+        if what == "ok":
+            # an accepted draw: Redl on the delivered state is inside the
+            # loop tolerances, no passes (the real function's early return)
+            return (dict(check={}, accepted_without_passes=True),
+                    ctx.get("spike_used"), None, ctx.get("j_phi_request"))
         if what == "ph_sat":
             raise TI.CoilSaturated("coil saturation after post-homotopy "
                                    "pass 1", dict(stage="post-homotopy"))
         raise JBSNotConverged("self-consistent j_BS loop [draw "
                               "post-homotopy] did not converge", {})
 
-    seq_ph = [o for o in outcomes if o.startswith("ph")]
+    # the post-homotopy stage is reached by the draws the mock accepts
+    # ("ok") and by those it rejects there ("ph_*")
+    seq_ph = [o for o in outcomes if o == "ok" or o.startswith("ph")]
     monkeypatch.setattr(TI, "perturb_kinetic_equilibrium", _perturb)
     monkeypatch.setattr(TI, "_post_homotopy_jbs", _post_homotopy)
     rej = []

@@ -82,3 +82,8 @@ def test_the_sigma0_draw_reproduces_the_baseline_bootstrap(toy, monkeypatch,
     miss = np.max(np.abs(d["j_BS"] - bl_jbs)) / np.max(np.abs(bl_jbs))
     assert miss <= 1e-12, miss
     assert calls[1:] and all(s == 1.0 for s in calls[1:])
+    # ... and the sigma=0 request closes Ip by itself: the l_i stage's core
+    # rescale accepts its first trial (scale exactly 1) with the real
+    # find_optimal_scale too, not only under the stub that asserts it
+    assert d["j0_scales"] and all(v == 1.0 for v in d["j0_scales"]), d[
+        "j0_scales"]
