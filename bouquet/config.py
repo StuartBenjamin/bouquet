@@ -1307,7 +1307,7 @@ class GenerationConfig:
     # equilibrium.
     swb_coil_reg_weight: float = 1.0e3
     # Taper j_phi to 0 from this psi_N to the LCFS in every SWB solve (OFT
-    # taper_edge_jbs; None: off): finite edge current next to a near-degenerate
+    # taper_edge_jphi; None: off): finite edge current next to a near-degenerate
     # second null can leave the Picard on a 2-cycle.
     swb_edge_taper_psi0: Optional[float] = 0.999
     # imas_baseline="swb" sawtooth q reset inside SWB (OFT saw_q_s; None = off):
@@ -1830,10 +1830,12 @@ def _bootstrap_kwarg_names():
         return None
 
 
-#: OFT bootstrap option names before OFT PSFC_dev's jbs spelling: a stored config
-#: (``generation`` field or ``bootstrap_kwargs`` key) loads under the new name.
+#: OFT bootstrap option names before OFT PSFC_dev's spelling (the edge taper acts on all of
+#: j_phi, hence taper_edge_jphi): a stored config (``generation`` field or ``bootstrap_kwargs``
+#: key) loads under the new name.
 OFT_RENAMED_OPTIONS = {"isolate_edge_jBS": "isolate_edge_jbs", "scale_jBS": "scale_jbs",
-                       "taper_edge_jBS": "taper_edge_jbs", "djBS_tol": "djbs_tol"}
+                       "taper_edge_jBS": "taper_edge_jphi", "taper_edge_jbs": "taper_edge_jphi",
+                       "djBS_tol": "djbs_tol"}
 
 
 def refuse_renamed_oft_options(keys, where):
@@ -1918,7 +1920,7 @@ def swb_config_problems(config):
     if str(getattr(gc, "separatrix_pressure", "offset")) != "offset":
         p.append(f"separatrix_pressure={gc.separatrix_pressure!r} (OFT's SWB "
                  "always solves with pax = p_axis - p_sep)")
-    if {"taper_edge_jbs", "taper_edge_psi0"} & set(gc.bootstrap_kwargs):
+    if {"taper_edge_jphi", "taper_edge_psi0"} & set(gc.bootstrap_kwargs):
         p.append("bootstrap_kwargs taper_edge_*: set swb_edge_taper_psi0 instead")
     t = gc.swb_edge_taper_psi0
     if t is not None and not 0.0 < float(t) < 1.0:
@@ -1939,7 +1941,7 @@ def swb_bootstrap_kwargs(gc):
     edge taper from ``swb_edge_taper_psi0``."""
     kw = dict(gc.bootstrap_kwargs)
     if gc.swb_edge_taper_psi0 is not None:
-        kw.update(taper_edge_jbs=True, taper_edge_psi0=float(gc.swb_edge_taper_psi0))
+        kw.update(taper_edge_jphi=True, taper_edge_psi0=float(gc.swb_edge_taper_psi0))
     return kw
 
 

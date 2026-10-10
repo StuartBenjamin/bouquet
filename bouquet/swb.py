@@ -229,7 +229,7 @@ class SwbBaseline:
         bl.j_phi = st_b["j_phi"]
         bl.j_saw = st_b.get("j_saw")
         bl.jphi_pd_raw, bl.jphi_pd = (st_b.get(k) for k in PD_KEYS)
-        # taper_edge_jbs also tapers the fixed current: carry the same factor onto the
+        # taper_edge_jphi also tapers the fixed current: carry the same factor onto the
         # channels so j_phi = j_inductive + j_BS + j_NBI + j_RF + j_other still holds
         jf_in = np.asarray(bl.swb_jphi_fixed, dtype=float)
         if (self.config.generation.swb_edge_taper_psi0 is not None

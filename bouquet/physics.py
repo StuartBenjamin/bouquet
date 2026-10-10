@@ -634,7 +634,7 @@ EDGE_TAPER_SHAPES = {1: "cos^2 (Hann)", 2: "quintic smoothstep",
 
 
 def edge_taper_weight(psi_N, psi0=0.999, shape=2):
-    """The factor SWB's edge taper (``taper_edge_jbs``) multiplies every
+    """The factor SWB's edge taper (``taper_edge_jphi``) multiplies every
     toroidal current component by: 1 for ``psi_N < psi0``, falling to 0 at
     ``psi_N = 1`` with *shape* (1 cos^2, 2 quintic smoothstep, 3 cubic).
     A port of OFT ``grad_shaf_bootstrap.F90:apply_edge_taper`` (standard

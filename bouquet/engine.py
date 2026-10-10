@@ -123,7 +123,7 @@ def mse_scheme_text(scheme) -> str:
 #: The engine's SWB edge taper (OFT's ``taper_edge_*`` of
 #: ``solve_with_bootstrap``), off by default as in OFT; read from
 #: ``GenerationConfig.bootstrap_kwargs`` and overridden there.
-ENGINE_EDGE_TAPER_DEFAULT = {"taper_edge_jbs": False, "taper_edge_psi0": 0.999,
+ENGINE_EDGE_TAPER_DEFAULT = {"taper_edge_jphi": False, "taper_edge_psi0": 0.999,
                              "taper_edge_shape": 2}
 #: The ``bootstrap_kwargs`` keys the engine honours (the edge taper).  Any
 #: other key configures solve_with_bootstrap, which the engine never runs:
@@ -138,10 +138,10 @@ def engine_edge_taper(gc) -> dict:
     bk = dict(ENGINE_EDGE_TAPER_DEFAULT)
     bk.update({k: v for k, v in (getattr(gc, "bootstrap_kwargs", None)
                                  or {}).items() if k in bk})
-    on, psi0, shape = (bk["taper_edge_jbs"], bk["taper_edge_psi0"],
+    on, psi0, shape = (bk["taper_edge_jphi"], bk["taper_edge_psi0"],
                        bk["taper_edge_shape"])
     if not isinstance(on, (bool, np.bool_)):
-        raise ValueError(f"bootstrap_kwargs['taper_edge_jbs'] must be a "
+        raise ValueError(f"bootstrap_kwargs['taper_edge_jphi'] must be a "
                          f"bool, got {on!r}")
     if not (np.isfinite(float(psi0)) and 0.0 < float(psi0) < 1.0):
         raise ValueError(f"bootstrap_kwargs['taper_edge_psi0'] must be in "
@@ -361,11 +361,11 @@ def validate_engine_settings(gc) -> None:
     if engine_edge_taper(gc)["on"] and not resolve_edge_pressure(
             gc).edge_pprime_pin:
         raise ValueError(
-            "the engine's edge taper (bootstrap_kwargs['taper_edge_jbs']=True) "
+            "the engine's edge taper (bootstrap_kwargs['taper_edge_jphi']=True) "
             "refuses edge_pprime_pin=False: the taper takes the "
             "request to zero at the LCFS while the unpinned P' stays finite "
             "there, and the solve does not converge.  Either turn the taper "
-            "off (bootstrap_kwargs={'taper_edge_jbs': False}) or zero the "
+            "off (bootstrap_kwargs={'taper_edge_jphi': False}) or zero the "
             "edge pressure gradient (edge_pprime_pin=True)")
     for name, want in (("jbs_self_consistent", True),
                        ("recalculate_j_BS", True),

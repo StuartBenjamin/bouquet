@@ -52,7 +52,7 @@ class TestConfig:
         (dict(coil_drift_hard_factor=20.0), "coil_drift_hard_factor"),
         (dict(edge_pprime_pin=False), "edge_pprime_pin"),
         (dict(separatrix_pressure="legacy"), "separatrix_pressure"),
-        (dict(bootstrap_kwargs={"taper_edge_jbs": True}), "swb_edge_taper_psi0 instead"),
+        (dict(bootstrap_kwargs={"taper_edge_jphi": True}), "swb_edge_taper_psi0 instead"),
         (dict(swb_edge_taper_psi0=1.0), "must be in (0, 1)"),
     ])
     def test_refused_by_name(self, swb_oft, kw, word):
@@ -206,7 +206,7 @@ def test_stamp_group_attrs(tmp_path):
 
 @pytest.mark.parametrize("taper, saw", [(False, False), (True, False), (True, True)])
 def test_edge_taper_keeps_the_channel_split(monkeypatch, swb_oft, taper, saw):
-    """taper_edge_jbs tapers SWB's fixed current too: the baseline channels must
+    """taper_edge_jphi tapers SWB's fixed current too: the baseline channels must
     follow, so j_phi = j_inductive + j_BS + j_NBI + j_RF + j_other holds (with the
     saw: j_other - j_sawteeth + j_saw)."""
     x = coords.swb_grid(np.linspace(0.0, 1.0, 33))
@@ -267,7 +267,7 @@ def test_edge_taper_is_the_swb_default(swb_oft):
     gc = _cfg().generation
     assert gc.swb_edge_taper_psi0 == 0.999
     gc.bootstrap_kwargs = {"diagnose_bs": True}
-    assert swb_bootstrap_kwargs(gc) == {"diagnose_bs": True, "taper_edge_jbs": True,
+    assert swb_bootstrap_kwargs(gc) == {"diagnose_bs": True, "taper_edge_jphi": True,
                                         "taper_edge_psi0": 0.999}
     assert gc.bootstrap_kwargs == {"diagnose_bs": True}          # not mutated
     gc.swb_edge_taper_psi0 = None

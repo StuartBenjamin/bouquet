@@ -186,7 +186,7 @@ def test_swb_only_bootstrap_kwargs_are_refused_under_the_engine():
 def test_the_engine_edge_taper_is_off_by_default_and_overridable():
     assert engine_settings(_unified())["edge_taper"] == dict(
         on=False, psi0=0.999, shape=2)
-    on = engine_settings(_unified(bootstrap_kwargs={"taper_edge_jbs": True}))
+    on = engine_settings(_unified(bootstrap_kwargs={"taper_edge_jphi": True}))
     assert on["edge_taper"]["on"] is True
     with pytest.raises(ValueError, match="taper_edge_shape"):
         validate_engine_settings(

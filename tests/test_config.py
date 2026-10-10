@@ -102,9 +102,9 @@ class TestBootstrapKwargs:
 
     def test_backend_options_pass_validation(self):
         gc = GenerationConfig(bootstrap_kwargs={"djbs_tol": 1e-5,
-                                                "taper_edge_jbs": True,
+                                                "taper_edge_jphi": True,
                                                 "iterations": 2})
-        assert gc.bootstrap_kwargs["taper_edge_jbs"] is True
+        assert gc.bootstrap_kwargs["taper_edge_jphi"] is True
 
     @pytest.mark.parametrize("key", ["scale_jbs", "isolate_edge_jbs", "verbose",
                                      "diagnostic_plots", "mygs", "Ip_target",
@@ -129,14 +129,14 @@ class TestBootstrapKwargValidation:
     key would otherwise fail every draw).  These run without
     OpenFUSIONToolkit, so they pass ``known`` explicitly."""
 
-    KNOWN = {"iterations", "djbs_tol", "taper_edge_jbs", "taper_edge_psi0",
+    KNOWN = {"iterations", "djbs_tol", "taper_edge_jphi", "taper_edge_psi0",
              "use_python_solve", "scale_jbs", "verbose"}
 
     def _check(self, d):
         validate_bootstrap_kwargs(d, known=self.KNOWN)
 
     def test_a_known_option_passes(self):
-        self._check({"djbs_tol": 1e-5, "taper_edge_jbs": True})
+        self._check({"djbs_tol": 1e-5, "taper_edge_jphi": True})
 
     def test_a_misspelled_option_is_refused_and_the_message_lists_the_real_ones(self):
         with pytest.raises(ValueError) as e:
@@ -154,7 +154,8 @@ class TestBootstrapKwargValidation:
         with pytest.raises(ValueError, match="always True"):
             self._check({"use_sauter_eps": value})
 
-    @pytest.mark.parametrize("old, new", [("djBS_tol", "djbs_tol"), ("taper_edge_jBS", "taper_edge_jbs")])
+    @pytest.mark.parametrize("old, new", [("djBS_tol", "djbs_tol"), ("taper_edge_jBS", "taper_edge_jphi"),
+                                          ("taper_edge_jbs", "taper_edge_jphi")])
     def test_an_old_oft_spelling_names_its_replacement(self, old, new):
         with pytest.raises(ValueError, match=f"OFT renamed '{old}' to '{new}'"):
             self._check({old: 1})
