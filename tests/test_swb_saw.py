@@ -154,9 +154,9 @@ def fake_swb(monkeypatch, saw_oft):
         on = bool(kw.get("saw_q_s"))
         j_in = np.zeros_like(x) if kw.get("jphi_saw") is None else kw["jphi_saw"]
         j_saw = j_in + (_dj(x) if on else 0.0)
-        return {"jphi_ind_final": j_ind, "jphi_bs_final": j_bs,
+        return {"jphi_ind": j_ind, "jphi_bs": j_bs,
                 "jphi_total": j_ind + j_bs + kw["jphi_fixed"] + j_saw,
-                "jphi_saw_final": j_saw, "saw_rho_m": 0.31 if on else 0.0,
+                "jphi_saw": j_saw, "saw_rho_m": 0.31 if on else 0.0,
                 "saw_rho_out": 0.18 if on else 0.0, "saw_n_dips": 1 if on else 0}
 
     mod = types.ModuleType("OpenFUSIONToolkit.TokaMaker.bootstrap")
@@ -269,7 +269,7 @@ def _draw(res_extra):
 
     def recipe(kin, j_seed):
         j_ind = 1.01 * j_seed
-        return {"jphi_ind_final": j_ind, "jphi_bs_final": 0 * x,
+        return {"jphi_ind": j_ind, "jphi_bs": 0 * x,
                 "jphi_total": j_ind, **res_extra}
     return SD.swb_draw(None, x, None, prof, prof, prof, prof, None, None, None,
                        None, None, 0.5, 0.4, 0.25, 1.5 + 0 * x, seed, recipe,
@@ -277,7 +277,7 @@ def _draw(res_extra):
 
 
 def test_swb_draw_records_j_saw():
-    d = _draw({"jphi_saw_final": np.ones(17), "saw_rho_m": 0.3, "saw_rho_out": 0.2,
+    d = _draw({"jphi_saw": np.ones(17), "saw_rho_m": 0.3, "saw_rho_out": 0.2,
                "saw_n_dips": 2, "saw_map_warn": False})
     assert np.array_equal(d["j_saw"], np.ones(17))
     assert (d["saw_rho_m"], d["saw_rho_out"], d["saw_n_dips"]) == (0.3, 0.2, 2)
@@ -327,8 +327,8 @@ def test_saw_taper_identity(fake_swb):
         j_bs = f * 1e5 * (1.0 - x) ** 2
         j_fix = f * kw["jphi_fixed"]
         j_saw = f * kw["jphi_saw"] + _dj(x)
-        return {"jphi_ind_final": j_ind, "jphi_bs_final": j_bs, "jphi_fixed_final": j_fix,
-                "jphi_total": j_ind + j_bs + j_fix + j_saw, "jphi_saw_final": j_saw,
+        return {"jphi_ind": j_ind, "jphi_bs": j_bs, "jphi_fixed": j_fix,
+                "jphi_total": j_ind + j_bs + j_fix + j_saw, "jphi_saw": j_saw,
                 "saw_rho_m": 0.31, "saw_rho_out": 0.18, "saw_n_dips": 1}
     _swap_swb(swb)
     ns = _run(swb_saw_q=1.025)
@@ -343,7 +343,7 @@ def test_saw_taper_identity(fake_swb):
         + bl.j_saw, bl.j_phi, rtol=0, atol=1e-12 * pk)
 
 
-@pytest.mark.parametrize("res_key, key", [("jphi_saw_final", "j_saw"), ("saw_rho_m", "saw_rho_m"),
+@pytest.mark.parametrize("res_key, key", [("jphi_saw", "j_saw"), ("saw_rho_m", "saw_rho_m"),
                                           ("saw_rho_out", "saw_rho_out")])
 def test_sigma0_fails_on_saw_mismatch(fake_swb, res_key, key):
     swb0 = sys.modules["OpenFUSIONToolkit.TokaMaker.bootstrap"].solve_with_bootstrap
@@ -370,8 +370,8 @@ def test_no_reset_jphi_saw_map_check(fake_swb, capsys, scale):
         j_ind = 1.0123 * np.asarray(inductive_jphi)
         j_bs = 1e5 * (1.0 - x) ** 2
         j_saw = scale * kw["jphi_saw"]
-        return {"jphi_ind_final": j_ind, "jphi_bs_final": j_bs,
-                "jphi_total": j_ind + j_bs + kw["jphi_fixed"] + j_saw, "jphi_saw_final": j_saw,
+        return {"jphi_ind": j_ind, "jphi_bs": j_bs,
+                "jphi_total": j_ind + j_bs + kw["jphi_fixed"] + j_saw, "jphi_saw": j_saw,
                 "saw_rho_m": 0.0, "saw_rho_out": 0.0, "saw_n_dips": 0}
     _swap_swb(swb)
     ns = _run(swb_saw_q=1.025)
@@ -388,11 +388,11 @@ def test_saw_map_check_taper():
     jsaw_in = 3e4 * (1.0 - 0.5 * x)               # finite at the edge: the taper shows
     jf_in = 2e4 + 0 * x
     jf_in[-1] = 0.0                              # factor unknown on the last node
-    res = {"jphi_saw_final": f * jsaw_in, "jphi_fixed_final": f * jf_in, "saw_n_dips": 0,
+    res = {"jphi_saw": f * jsaw_in, "jphi_fixed": f * jf_in, "saw_n_dips": 0,
            "jphi_total": 1e6 * (1.0 - x ** 2) + 1e5}
     dev, warn = swb_mod._swb_saw_map_check(res, jsaw_in, jf_in)
     assert dev < 1e-14 and not warn
     assert swb_mod._swb_saw_map_check(res, jsaw_in)[1]          # taper ignored: trips
-    res["jphi_saw_final"] = jsaw_in
+    res["jphi_saw"] = jsaw_in
     assert swb_mod._swb_saw_map_check(res, jsaw_in, jf_in)[1]
     assert swb_mod._swb_saw_map_check(dict(res, saw_n_dips=2), jsaw_in, jf_in) == (None, False)

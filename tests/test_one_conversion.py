@@ -206,9 +206,9 @@ def test_evaluate_jBS_toroidal_output_is_kappa(fsa, fake_redl):
     _j, d = physics.evaluate_jBS(eq, psi, kin["ne"], kin["te"], kin["ni"],
                                  kin["ti"], kin["zeff"], smooth_axis=False)
     kap = _kappa_literal(d["F"], d["avg_inv_R"], d["avg_B2"])
-    np.testing.assert_array_equal(d["j_dot_B"], fake_redl["jB"])
-    np.testing.assert_array_equal(d["j_tor_full_raw"], d["j_dot_B"] * kap)
-    np.testing.assert_array_equal(_j, d["j_dot_B"] * kap)
+    np.testing.assert_array_equal(d["jdotB_bs"], fake_redl["jB"])
+    np.testing.assert_array_equal(d["j_tor_full_raw"], d["jdotB_bs"] * kap)
+    np.testing.assert_array_equal(_j, d["jdotB_bs"] * kap)
     assert "kappa" in d["version"]
 
 
@@ -251,7 +251,7 @@ def test_engine_request_is_rebuilt_bit_for_bit_from_the_literal_kappa():
 
 
 def test_engine_backend_consumes_the_parallel_redl_output(monkeypatch):
-    """The TokaMaker backend's bootstrap is ``evaluate_jBS``'s ``j_dot_B``
+    """The TokaMaker backend's bootstrap is ``evaluate_jBS``'s ``jdotB_bs``
     (with the shared axis repair); the toroidal output never reaches it."""
     import _engine_toy as T
     from bouquet.engine import TokaMakerBackend
@@ -260,7 +260,7 @@ def test_engine_backend_consumes_the_parallel_redl_output(monkeypatch):
     jB = _jdotB(np.asarray(c.psi_N, float))
 
     def fake_eval(*a, **k):
-        return np.full_like(jB, np.nan), dict(j_dot_B=jB.copy())
+        return np.full_like(jB, np.nan), dict(jdotB_bs=jB.copy())
 
     monkeypatch.setattr(physics, "evaluate_jBS", fake_eval)
 

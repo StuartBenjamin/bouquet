@@ -835,11 +835,12 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     -------
     (j_BS_tor, diag)
         ``j_BS_tor`` -- toroidal FSA current density ``<j_phi>`` =
-        ``kappa <j.B>`` [A/m^2] on ``psi_N`` (isolated/smoothed as
+        ``kappa <j.B> + p_term`` [A/m^2] on ``psi_N`` (isolated/smoothed as
         requested).  ``diag`` --
         ``psi_eval``, ``f_T``, ``nu_e_star``, ``nu_i_star``, ``q``, ``eps``,
-        ``R_avg``, ``F``, ``avg_inv_R``, ``avg_B2``, ``dpsi`` (signed flux
-        range), ``j_dot_B`` (Redl ``<j.B>``), ``j_tor_full_raw`` (full
+        ``R_avg``, ``F``, ``avg_inv_R``, ``avg_B2``, ``pprime``, ``p_term``
+        (pressure-driven ``p'(<R> - F^2<1/R>/<B^2>)``), ``dpsi`` (signed flux
+        range), ``jdotB_bs`` (Redl ``<j.B>``), ``j_tor_full_raw`` (full
         profile, unsmoothed), ``j_tor_raw`` (selected profile before
         smoothing), ``I_BS`` (signed FSA integral of ``j_BS_tor`` [A]),
         ``version``.
@@ -989,7 +990,7 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     nu_e_star = (6.921e-18 * np.abs(q) * R_avg * ne
                  * zeff * ln_le / (te ** 2 * eps ** 1.5))
 
-    j_dot_B, _coeffs = _oft_bs.redl_bootstrap(
+    jdotB_bs, _coeffs = _oft_bs.redl_bootstrap(
         psi_N=psi_N, Te=te, Ti=ti, ne=ne, ni=ni,
         pe=_EC * (ne * te), pi=_EC * (ni * ti),
         Zeff=zeff, R=R_avg, q=q, eps=eps, fT=f_T, I_psi=F,
@@ -1011,20 +1012,20 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         n_zeroed[0] += int(np.count_nonzero(bad & end))
         return np.nan_to_num(y, nan=0.0)
 
-    j_dot_B = _ends_only(j_dot_B, "<j_BS.B>")
+    jdotB_bs = _ends_only(jdotB_bs, "<j_BS.B>")
 
     # p'G goes with the bootstrap (FUSE's convention; OFT's SWB output)
     geom = {"F": F, "avg_inv_R": avg_inv_R, "avg_B2": avg_B2,
             "avg_R": R_avg, "pprime": np.asarray(pp_u, dtype=float)[inv]}
     p_term = jphi_tokamaker_pressure_term(geom)
-    j_tor_full = _ends_only(parallel_to_toroidal(j_dot_B, geom=geom) + p_term,
+    j_tor_full = _ends_only(parallel_to_toroidal(jdotB_bs, geom=geom) + p_term,
                             "toroidal j_BS")
 
     if isolate_edge:
         # SWB isolates the spike on its OWN projection <j.B> R_avg/F (the
         # shelf/mask detection is value-dependent), and bouquet then converts
         # the masked spike by the per-surface factor.  Same order here.
-        swb_proj = j_dot_B * (R_avg / F)
+        swb_proj = jdotB_bs * (R_avg / F)
         res = _oft_bs.analyze_bootstrap_edge_spike(psi_N, swb_proj)
         masked = np.asarray(res["masked_spike"], dtype=float)
         j_tor_sel = _ends_only(parallel_to_toroidal(
@@ -1051,7 +1052,7 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         pprime=geom["pprime"], p_term=p_term,
         ln_lambda_e=np.asarray(ln_le, dtype=float),
         ln_lambda_ii=np.asarray(ln_lii, dtype=float),
-        dpsi=psi_range, j_dot_B=j_dot_B,
+        dpsi=psi_range, jdotB_bs=jdotB_bs,
         j_tor_full_raw=j_tor_full, j_tor_raw=np.asarray(j_tor_sel, float),
         I_BS=I_BS, isolate_edge=bool(isolate_edge),
         n_nonfinite_zeroed_at_ends=int(n_zeroed[0]),

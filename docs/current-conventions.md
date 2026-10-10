@@ -89,7 +89,7 @@ discretisation) and the first iterate already carries the right current.
 
 ## Where these are used
 - TokaMaker `jphi_bs_update` / `calculate_bootstrap` (Fortran) and `solve_with_bootstrap(use_python_solve=True)`:
-  the bootstrap enters `jphi_total` by (A7) with p′G; `boot_profs['jdotb_bs_raw']` holds the Redl ⟨J·B⟩.
+  the bootstrap enters `jphi_total` by (A7) with p′G; `boot_profs['jdotB_bs_raw']` holds the Redl ⟨J·B⟩.
 - TokaMaker `jphi_update` / `jphi_bs_update` I_p normalisation: (A9c).
 - bouquet: currents are stored as J_TM; FUSE/IMAS currents are read and written through (A5)–(A7).
 

@@ -4534,7 +4534,7 @@ class Bouquet(SwbBaseline):
         # this self-consistent (FUSE ohmic + OFT bootstrap) combination gives.
         #
         # isolate_edge_jbs: FUSE work uses the FULL bootstrap profile (False), so
-        # the baseline and the draws (which read results["jphi_bs_final"] under
+        # the baseline and the draws (which read results["jphi_bs"] under
         # the same flag) build j_phi from the same SWB current.
         # Two reconciliation modes (GenerationConfig.jBS_baseline_mode), both
         # keeping FUSE's actual ohmic current as the perturbable inductive:
@@ -5170,7 +5170,7 @@ class Bouquet(SwbBaseline):
                             **_kw)
                     # SWB's j_BS is TokaMaker jphi already, on its grid
                     _j = smooth_jbs_transition(np.asarray(
-                        _swb["jphi_bs_final"], dtype=float))
+                        _swb["jphi_bs"], dtype=float))
                     if gc.floor_j_BS:
                         _j = np.clip(_j, 0.0, None)
                     mygs.replace_eq(source_eq=_snap_a)
@@ -5767,7 +5767,7 @@ class Bouquet(SwbBaseline):
                 # Same axis-transition smoothing every per-draw spike receives, so
                 # the sigma=0 draw reproduces this baseline split exactly.
                 j_BS_swb = smooth_jbs_transition(
-                    np.asarray(swb["jphi_bs_final"], dtype=float))
+                    np.asarray(swb["jphi_bs"], dtype=float))
                 if gc.floor_j_BS:
                     j_BS_swb = np.clip(j_BS_swb, 0.0, None)
                 ratio = j_BS_swb.max() / max(j_BS_src.max(), 1.0)
@@ -6408,7 +6408,7 @@ class Bouquet(SwbBaseline):
             **coords.swb_grid_kwargs(psi_N, coord),
             diagnostic_plots=False, **swb_fix, **gc.bootstrap_kwargs)
         spike0 = (1.0 if _mult is None else _mult) * smooth_jbs_transition(
-            np.asarray(res["jphi_bs_final"], dtype=float))
+            np.asarray(res["jphi_bs"], dtype=float))
         if gc.floor_j_BS:
             spike0 = np.clip(spike0, 0.0, None)
 

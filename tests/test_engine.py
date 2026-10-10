@@ -259,7 +259,7 @@ def test_a_stated_orientation_the_data_contradict_is_kept_and_flagged():
     b = T.ToyGS(chords=ch)
     b.solve(c.anchor_request, n_passes=2)
     a = b.measure()
-    c = ad.finalize(a["redl"], complete_geometry(a["geom"]))
+    c = ad.finalize(a["jdotB_bs"], complete_geometry(a["geom"]))
     eng = UnifiedEngine(c, b, T.settings(engine_rows=["Ip", "l_i", "mse"],
                                          mse_data=md,
                                          jbs_loop_on_fail="flag"),
@@ -330,7 +330,7 @@ def _consistent_inductive():
     b.solve(c.anchor_request, n_passes=2)
     a = b.measure()
     g = complete_geometry(a["geom"])
-    _, p = compose(g, c.jB_ind, a["redl"], c.jB_fix)
+    _, p = compose(g, c.jB_ind, a["jdotB_bs"], c.jB_fix)
     lin = lambda j: float(np.trapezoid(g["w_lin"] * j, g["psi_N"]))  # noqa
     f = (c.Ip - g["c_affine"] - lin(p["bs"]) - lin(p["fix"] + p["pressure"])
          ) / lin(p["ind"])

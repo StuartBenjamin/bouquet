@@ -13,17 +13,16 @@ from __future__ import annotations
 import numpy as np
 
 from . import coords
+from .schema import PD_KEYS
 from .utils import _shape_from_boundary
 
 #: imas_baseline="swb": largest |Ip/Ip_target - 1| a solve may land at.
 SWB_IP_TOL = 5e-3
 #: solve_with_bootstrap outputs of the sawtooth reset (GenerationConfig.swb_saw_q).
-_SWB_SAW_KEYS = ("jphi_saw_final", "saw_rho_m", "saw_rho_out", "saw_n_dips")
+_SWB_SAW_KEYS = ("jphi_saw", "saw_rho_m", "saw_rho_out", "saw_n_dips")
 #: swb_saw_q: with no reset (saw_n_dips 0) warn when max|j_saw - jphi_saw| exceeds
 #: this fraction of max|j_phi| (an OFT mis-mapping jphi_saw; also frozen-saw reporting).
 SWB_SAW_MAP_TOL = 1e-3
-#: The pressure-driven part of SWB's bootstrap, raw and as solved (archived per draw and baseline).
-SWB_PD_KEYS = ("jphi_pd_raw", "jphi_pd_final")
 
 
 def _swb_taper_factor(j_fixed_out, jf_in):
@@ -38,15 +37,15 @@ def _swb_taper_factor(j_fixed_out, jf_in):
 def _swb_saw_map_check(res, jphi_saw, jf_in=None):
     """``(dev_frac, warn)``: max|j_saw - f jphi_saw| / max|j_phi| of a solve that
     reports no reset (``saw_n_dips`` 0; else ``(None, False)``).  ``f`` the edge
-    taper (from ``res["jphi_fixed_final"]`` / ``jf_in``), compared only inside the first
+    taper (from ``res["jphi_fixed"]`` / ``jf_in``), compared only inside the first
     tapered node and where ``f`` is known."""
-    if res.get("jphi_saw_final") is None or int(res.get("saw_n_dips") or 0) != 0:
+    if res.get("jphi_saw") is None or int(res.get("saw_n_dips") or 0) != 0:
         return None, False
-    j_saw = np.asarray(res["jphi_saw_final"], dtype=float)
+    j_saw = np.asarray(res["jphi_saw"], dtype=float)
     ref = np.asarray(jphi_saw, dtype=float)
     ok = np.ones(j_saw.size, dtype=bool)
-    if jf_in is not None and res.get("jphi_fixed_final") is not None:
-        f = _swb_taper_factor(res["jphi_fixed_final"], jf_in)
+    if jf_in is not None and res.get("jphi_fixed") is not None:
+        f = _swb_taper_factor(res["jphi_fixed"], jf_in)
         ref = f * ref
         tap = np.flatnonzero(f != 1.0)
         ok = (np.arange(j_saw.size) < (tap[0] if tap.size else j_saw.size)) \
@@ -173,7 +172,7 @@ class SwbBaseline:
         check with the sawtooth reset on)."""
         from .utils import safe_trace_surf
         mygs = self.mygs
-        j_ind = np.asarray(res["jphi_ind_final"], dtype=float)
+        j_ind = np.asarray(res["jphi_ind"], dtype=float)
         j_seed = np.asarray(j_seed, dtype=float)
         coils, _ = mygs.get_coil_currents()
         st = dict(
@@ -183,14 +182,14 @@ class SwbBaseline:
             li_3=float(mygs.get_stats(lcfs_pad=psi_pad, li_normalization="iter")["l_i"]),
             Ip=float(mygs.get_globals()[0]),
             j_inductive=j_ind,
-            j_BS=np.asarray(res["jphi_bs_final"], dtype=float),
+            j_BS=np.asarray(res["jphi_bs"], dtype=float),
             j_phi=np.asarray(res["jphi_total"], dtype=float),
-            j_fixed=(None if res.get("jphi_fixed_final") is None
-                     else np.asarray(res["jphi_fixed_final"], dtype=float)))
-        st.update({k: np.asarray(res[k], dtype=float) for k in SWB_PD_KEYS
+            j_fixed=(None if res.get("jphi_fixed") is None
+                     else np.asarray(res["jphi_fixed"], dtype=float)))
+        st.update({k: np.asarray(res[k], dtype=float) for k in PD_KEYS
                    if res.get(k) is not None})
-        if res.get("jphi_saw_final") is not None:
-            st.update(j_saw=np.asarray(res["jphi_saw_final"], dtype=float),
+        if res.get("jphi_saw") is not None:
+            st.update(j_saw=np.asarray(res["jphi_saw"], dtype=float),
                       saw_rho_m=float(res["saw_rho_m"]),
                       saw_n_dips=int(res["saw_n_dips"]),
                       saw_map_dev=res.get("saw_map_dev"),
@@ -229,6 +228,7 @@ class SwbBaseline:
         bl.j_BS = st_b["j_BS"]
         bl.j_phi = st_b["j_phi"]
         bl.j_saw = st_b.get("j_saw")
+        bl.jphi_pd_raw, bl.jphi_pd = (st_b.get(k) for k in PD_KEYS)
         # taper_edge_jbs also tapers the fixed current: carry the same factor onto the
         # channels so j_phi = j_inductive + j_BS + j_NBI + j_RF + j_other still holds
         jf_in = np.asarray(bl.swb_jphi_fixed, dtype=float)
@@ -368,7 +368,7 @@ def build_swb_context(bq, env):
         "swb_saw_map_warn": _ic.get("saw_map_warn"),
         "swb_j_saw": bl.j_saw,
         "swb_jphi_saw": bl.swb_jphi_saw,
-        **{f"swb_{k}": bl.swb_baseline.get(k) for k in SWB_PD_KEYS}}
+        **{k: getattr(bl, k) for k in PD_KEYS}}
     return SwbDraws(
         partial(bq._swb_solve, coil_reg_target=bl.coil_reg_target),
         np.asarray(bl.swb_seed_profile, dtype=float),

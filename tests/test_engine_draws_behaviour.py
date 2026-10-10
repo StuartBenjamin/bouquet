@@ -142,7 +142,7 @@ def test_post_homotopy_runs_its_passes_when_the_homotopy_moved_the_draw(
     # the delivered state now passes the check it failed
     m = b.measure()
     g = complete_geometry(m["geom"])
-    chk = check_delivered(np.asarray(m["redl"], dtype=float), jbs,
+    chk = check_delivered(np.asarray(m["jdotB_bs"], dtype=float), jbs,
                           g["w_lin"] * conversion_factor(g), ctx.psi,
                           float(ctx.c.Ip), s)
     assert chk["ok"], chk

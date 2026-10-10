@@ -2635,7 +2635,7 @@ def _std_candidate_solve(mygs, psi_N, pres_tmp, cand, spike, j_fixed_eff,
     final_scale_j0, _ = find_optimal_scale(
         mygs, _psi, solver_pressure(pres_tmp, _edge), ffp_prof, pp_prof,
         matched_j_ind, Ip_target,
-        psi_pad, jphi_bs_final=spike + j_fixed_eff, diagnostic_plots=False,
+        psi_pad, jphi_bs=spike + j_fixed_eff, diagnostic_plots=False,
         verbose=False)
     if constrain_sawteeth:
         _, q_pre, _, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
@@ -3486,7 +3486,7 @@ def perturb_kinetic_equilibrium(
         # take it BEFORE the snapshot restore below. The cached recon spike
         # was axis-smoothed the same way at cache time.
         _spike_perturbed = smooth_jbs_transition(
-            np.asarray(_results_diff["jphi_bs_final"], dtype=float))
+            np.asarray(_results_diff["jphi_bs"], dtype=float))
         _full_j_BS_tor = smooth_jbs_transition(
             np.asarray(_results_diff["jphi_bs_raw"], dtype=float))
         delta_spike = _bs_mult * (_spike_perturbed - spike_profile_recon_cached)
@@ -4014,8 +4014,8 @@ def perturb_kinetic_equilibrium(
                         Ip_target=np.array([Ip_target]),
                         swb_seed=_swb_seed,
                         scale_jBS=np.array([scale_jBS]),
-                        isolated_j_BS=results.get("jphi_bs_final"),
-                        j_inductive=results.get("jphi_ind_final"),
+                        isolated_j_BS=results.get("jphi_bs"),
+                        j_inductive=results.get("jphi_ind"),
                         total_j_phi=results.get("jphi_total"),
                     )
                 except Exception as _dump_exc:
@@ -4091,7 +4091,7 @@ def perturb_kinetic_equilibrium(
             # the difference, while the per-draw Sauter response passes
             # through unfiltered.  At sigma=0 the spike equals the baseline
             # split exactly.
-            _spike_raw = np.asarray(results["jphi_bs_final"], dtype=float)
+            _spike_raw = np.asarray(results["jphi_bs"], dtype=float)
             _full_raw = np.asarray(results["jphi_bs_raw"], dtype=float)
             _delta_bl = np.asarray(spike_delta_baseline, dtype=float)
             _delta_ref = np.asarray(spike_delta_ref, dtype=float)
@@ -4108,7 +4108,7 @@ def perturb_kinetic_equilibrium(
             full_j_BS = _bs_mult * smooth_jbs_transition(
                 np.asarray(results["jphi_bs_raw"], dtype=float))
             spike_profile = _bs_mult * smooth_jbs_transition(
-                np.asarray(results["jphi_bs_final"], dtype=float))
+                np.asarray(results["jphi_bs"], dtype=float))
 
         # Floor the SWB bootstrap at 0 (drop unphysical negative excursions)
         # before it enters j_phi. Then, in Case-B "diff" mode, add the fixed
@@ -4222,7 +4222,7 @@ def perturb_kinetic_equilibrium(
                 # Source seed: SWB's alpha * j_ind with bouquet's own spike
                 # and j_fixed, not SWB's raw (unconverted, unscaled) j_BS.
                 new_jphi = (np.interp(psi_N, coords.swb_grid(psi_N),
-                                      np.asarray(results["jphi_ind_final"], dtype=float))
+                                      np.asarray(results["jphi_ind"], dtype=float))
                             + spike_profile + j_fixed_eff)
             else:
                 new_jphi = results["jphi_total"]
@@ -4628,7 +4628,7 @@ def perturb_kinetic_equilibrium(
         final_scale_j0, final_jphi = find_optimal_scale(
             mygs, _psi, solver_pressure(pres_tmp, _edge), ffp_prof, pp_prof,
             matched_j_inductive, Ip_target, psi_pad,
-            jphi_bs_final=spike_profile + j_fixed_eff,
+            jphi_bs=spike_profile + j_fixed_eff,
             diagnostic_plots=False, verbose=False,
         )
 
@@ -6657,7 +6657,7 @@ def generate_bouquet(
                     # smoothed version for DIFF_BS (whose per-draw spikes are also
                     # smoothed).
                     _delta_spike0_raw = np.asarray(
-                        _cache_results["jphi_bs_final"], dtype=float)
+                        _cache_results["jphi_bs"], dtype=float)
                     _diff_spike_recon = smooth_jbs_transition(_delta_spike0_raw)
                     # Snapshot AFTER the SWB call -- this is the state from
                     # which we'll re-launch SWB on perturbed kinetics each
@@ -8567,7 +8567,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         # (shared helper, also applied to every per-draw spike) so the
         # inductive fit below sees the artifact-free profile rather than the raw
         # collapsed axis point.
-        j_BS_isolated_raw = np.asarray(results["jphi_bs_final"], dtype=float)
+        j_BS_isolated_raw = np.asarray(results["jphi_bs"], dtype=float)
         j_BS_isolated = smooth_jbs_transition(j_BS_isolated_raw)
 
     # ---- 2b. Classify the j_phi profile ----

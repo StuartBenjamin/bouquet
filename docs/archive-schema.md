@@ -89,6 +89,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │              [engine_json]      ← the unified engine's record (added;
     │                                    reconstruction_engine="unified"),
     │                                    with its "draws" settings block
+    │              [jphi_pd_raw, jphi_pd] ← swb and engine baselines (added
+    │                                    2026-10-10): as on the draw groups
     │              [edge_pressure_json] ← the edge-pressure record (added):
     │                                    edge_pprime_pin, separatrix_pressure,
     │                                    p_sep, p_sep_applied, pax_target,
@@ -129,6 +131,12 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
                                        p_scale (added 2026-10-07)
                    [boundary_rms_mm, boundary_max_mm]  ← the draw's LCFS metric,
                                        written when filter_boundaries applies a cut
+                   [jphi_pd_raw, jphi_pd] ← swb and engine draws (added
+                                       2026-10-10): the pressure-driven part
+                                       p'(<R> - F^2<1/R>/<B^2>) of j_BS, as
+                                       evaluated and as added into j_BS (swb:
+                                       OFT's scale_jbs and taper; engine: the
+                                       edge taper) [A m^-2] (schema.PD_KEYS)
 ```
 
 `edge_pressure_json` is read with `bouquet.edge_pressure.load_record(header,

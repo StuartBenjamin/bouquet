@@ -13,7 +13,7 @@ import numpy as np
 from .draw_methods import DrawMethod
 from .physics import ELEMENTARY_CHARGE
 from .sampling import generate_perturbed_GPR, make_rng
-from .swb import SWB_PD_KEYS
+from .schema import PD_KEYS
 from .TokaMaker_interface import _MAX_PRESSURE_ITER, draw_kinetics
 from .utils import pchip_interp
 
@@ -114,8 +114,8 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
                    None if z_fast is None else _kin_to_eq(np.asarray(z_fast, dtype=float)),
                    Z_imp))
     res = swb_recipe(kin, j_seed)
-    j_ind = np.asarray(res["jphi_ind_final"], dtype=float)
-    j_bs = np.asarray(res["jphi_bs_final"], dtype=float)
+    j_ind = np.asarray(res["jphi_ind"], dtype=float)
+    j_bs = np.asarray(res["jphi_bs"], dtype=float)
     alpha = float(np.dot(j_ind, j_seed) / np.dot(j_seed, j_seed))
     print(f"  [swb-draw] alpha={alpha:.5f}"
           + ("" if j_seed is jind_seed else f" (j_ind GPR, {n_tries} tries)")
@@ -138,10 +138,10 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
             ELEMENTARY_CHARGE * (ne_eq[-1] * te_eq[-1] + ni_eq[-1] * ti_eq[-1])
             + kin["p_fixed"][-1])},
     }
-    diagnostics.update({k: np.asarray(res[k], dtype=float) for k in SWB_PD_KEYS
+    diagnostics.update({k: np.asarray(res[k], dtype=float) for k in PD_KEYS
                         if res.get(k) is not None})
-    if res.get("jphi_saw_final") is not None:      # swb_saw_q: the draw's own q reset
-        diagnostics.update(j_saw=np.asarray(res["jphi_saw_final"], dtype=float),
+    if res.get("jphi_saw") is not None:      # swb_saw_q: the draw's own q reset
+        diagnostics.update(j_saw=np.asarray(res["jphi_saw"], dtype=float),
                            saw_rho_m=float(res["saw_rho_m"]),
                            saw_n_dips=int(res["saw_n_dips"]))
         if res.get("saw_rho_out") is not None:
@@ -217,7 +217,7 @@ class SwbDraws(DrawMethod):
             "swb_saw_rho_out": diagnostics.get("saw_rho_out"),
             "swb_saw_n_dips": diagnostics.get("saw_n_dips"),
             "swb_saw_map_warn": diagnostics.get("saw_map_warn"),
-            **{f"swb_{k}": diagnostics.get(k) for k in SWB_PD_KEYS}})
+            **{k: diagnostics.get(k) for k in PD_KEYS}})
 
     # ---- Bouquet.generate -------------------------------------------------
     def scale_settings(self, jbs_range, bs_mult):

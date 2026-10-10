@@ -753,7 +753,7 @@ def test_geometry_is_sampled_on_the_callers_surfaces_without_repeats():
     assert d["psi_eval"][3] == psi[3]
     # ... but each keeps its own profile values and TRUE-grid gradient, so
     # their Redl drives stay distinct (no surface was merged)
-    assert len(np.unique(d["j_dot_B"][:3])) == 3
+    assert len(np.unique(d["jdotB_bs"][:3])) == 3
 
 
 def test_gradients_are_on_the_true_grid_and_the_current_flux_range():

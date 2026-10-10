@@ -93,6 +93,11 @@ def read_jbs_loop(grp):
         raw = raw.decode()
     return json.loads(str(raw))
 
+#: The pressure-driven part p'(<R> - F^2<1/R>/<B^2>) of j_BS (OFT's names): ``jphi_pd_raw``
+#: as evaluated, ``jphi_pd`` as added into j_BS (swb: OFT's scale_jbs and taper; engine: the
+#: edge taper). swb and engine archive both as attrs of every draw group and of ``_baseline``.
+PD_KEYS = ("jphi_pd_raw", "jphi_pd")
+
 # Bare dataset name -> unit string (empty = dimensionless).  ``psi_N`` /
 # ``psi_N_kinetic`` hold the run grid in the group's ``profile_coord``
 # ("psi_n" or "phi_n"; absent = "psi_n").
@@ -119,8 +124,8 @@ PROFILE_UNITS = {
     "sigma_ti": "eV",
     "sigma_jphi": "A m^-2",
     "swb_j_saw": "A m^-2",
-    "swb_jphi_pd_raw": "A m^-2",
-    "swb_jphi_pd_final": "A m^-2",
+    "jphi_pd_raw": "A m^-2",
+    "jphi_pd": "A m^-2",
     "coil_currents": "A",
 }
 

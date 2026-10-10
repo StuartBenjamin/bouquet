@@ -132,7 +132,7 @@ def _fake_recipe(log):
         log.append((kin, j_seed))
         j_ind = 1.04 * np.asarray(j_seed)
         j_bs = 1e5 * np.ones_like(j_ind)
-        return {"jphi_ind_final": j_ind, "jphi_bs_final": j_bs,
+        return {"jphi_ind": j_ind, "jphi_bs": j_bs,
                 "jphi_total": j_ind + j_bs}
     return recipe
 
@@ -229,19 +229,19 @@ def test_edge_taper_keeps_the_channel_split(monkeypatch, swb_oft, taper, saw):
     def solve(kin, seed, coil_reg_target=None):
         jf = np.asarray(bl.swb_jphi_fixed) * fac
         ji = 1.02 * np.asarray(seed) * fac
-        res = dict(jphi_ind_final=ji, jphi_bs_final=j_bs * fac, jphi_fixed_final=jf,
+        res = dict(jphi_ind=ji, jphi_bs=j_bs * fac, jphi_fixed=jf,
                    jphi_total=ji + j_bs * fac + jf)
         if saw:
-            res["jphi_saw_final"] = np.asarray(bl.swb_jphi_saw) * fac + dj_saw
-            res["jphi_total"] = res["jphi_total"] + res["jphi_saw_final"]
+            res["jphi_saw"] = np.asarray(bl.swb_jphi_saw) * fac + dj_saw
+            res["jphi_total"] = res["jphi_total"] + res["jphi_saw"]
         return res
 
     def state(res, seed, psi_pad=1e-3):
         st = dict(alpha=1.02, coils={"F1A": 1.0}, lcfs=None, li_3=0.9, Ip=1e6,
-                  j_inductive=res["jphi_ind_final"], j_BS=res["jphi_bs_final"],
-                  j_phi=res["jphi_total"], j_fixed=res["jphi_fixed_final"])
+                  j_inductive=res["jphi_ind"], j_BS=res["jphi_bs"],
+                  j_phi=res["jphi_total"], j_fixed=res["jphi_fixed"])
         if saw:
-            st.update(j_saw=res["jphi_saw_final"], saw_rho_m=0.4, saw_n_dips=1)
+            st.update(j_saw=res["jphi_saw"], saw_rho_m=0.4, saw_n_dips=1)
         return st
     ns = types.SimpleNamespace(baseline=bl, config=types.SimpleNamespace(generation=gen),
                                _swb_baseline_kinetics=lambda: {

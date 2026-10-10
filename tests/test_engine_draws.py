@@ -1001,6 +1001,26 @@ def test_the_archive_carries_the_parallel_parts_of_the_split(
     np.testing.assert_array_equal(par["jB_NBI"], np.asarray(fx["nbi"]))
 
 
+def test_engine_draws_archive_the_pressure_driven_part(tmp_path, monkeypatch):
+    """Engine draws archive ``jphi_pd_raw`` / ``jphi_pd`` (schema.PD_KEYS) as
+    group attrs, as swb's draws do: the archived state's p'G, as evaluated
+    and as added into j_BS (times the edge taper)."""
+    import h5py
+    from bouquet.engine import pressure_term, split_pressure_term
+    from bouquet.utils import _group_path, _resolve_h5
+    stored = _spy_store(monkeypatch)
+    fins = _final_measures(monkeypatch)
+    diags, rej, h, G = _generate(tmp_path, monkeypatch, n=1)
+    assert len(diags) == 1 and rej == [] and len(stored) == 1
+    g = fins[-1]["geom"]
+    assert np.max(np.abs(pressure_term(g))) > 0.0
+    with h5py.File(_resolve_h5(h), "r") as hf:
+        at = hf[_group_path(None, stored[0]["count"])].attrs
+        np.testing.assert_array_equal(at["jphi_pd_raw"], pressure_term(g))
+        np.testing.assert_array_equal(at["jphi_pd"], split_pressure_term(g))
+    np.testing.assert_array_equal(diags[0]["jphi_pd"], split_pressure_term(g))
+
+
 def _final_measures(monkeypatch, geom_scale=None):
     """Capture every FINAL measurement of the toy backend (the archived
     state's); with *geom_scale* = {field: factor}, the archived state's
@@ -1049,7 +1069,7 @@ def test_the_archived_split_uses_the_archived_states_kappa_and_redl(
     amp = (1.0 + float(dpl.last["amp"].get("d_bs", 0.0))) * G.ctx.s_bs         * float(cur["draw"]["inputs"].scale)
     # plus the pressure-driven p'G
     from bouquet.engine import split_pressure_term
-    want_bs = (amp * kap * np.asarray(fin["redl"], dtype=float)
+    want_bs = (amp * kap * np.asarray(fin["jdotB_bs"], dtype=float)
                + split_pressure_term(fin["geom"]))
     np.testing.assert_allclose(st["j_BS"], want_bs, rtol=1e-12, atol=0.0)
     fx = G.ctx.c.jB_fix_parts
@@ -1063,7 +1083,7 @@ def test_the_archived_split_uses_the_archived_states_kappa_and_redl(
     # and a 1 % error in either input is far outside that
     assert np.max(np.abs(1.01 * want_bs - st["j_BS"])) \
         > 1e-3 * np.max(np.abs(want_bs))
-    assert np.max(np.abs(amp * kap_recon * np.asarray(fin["redl"])
+    assert np.max(np.abs(amp * kap_recon * np.asarray(fin["jdotB_bs"])
                          + split_pressure_term(fin["geom"])
                          - st["j_BS"])) > 1e-2 * np.max(np.abs(want_bs))
 

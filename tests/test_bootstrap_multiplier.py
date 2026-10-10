@@ -53,7 +53,7 @@ def _fake_swb(calls):
         for _ in range(200):
             j = scale_jbs * b * (1.0 + 0.4 * np.trapezoid(j, _X)
                                  / np.trapezoid(b, _X))
-        return {"jphi_bs_raw": j, "jphi_bs_final": j, "jphi_ind_final": seed,
+        return {"jphi_bs_raw": j, "jphi_bs": j, "jphi_ind": seed,
                 "jphi_total": seed + j, "scale_j0": 1.0, "scale_Ip": 1.0}
     return swb
 

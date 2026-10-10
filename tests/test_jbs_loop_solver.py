@@ -154,12 +154,12 @@ def _imas_probe(outdir, part):
         finally:
             B.redl_bootstrap = orig
         out["a"] = dict(
-            bitwise=bool(np.array_equal(cap["j"], d_new["j_dot_B"])),
+            bitwise=bool(np.array_equal(cap["j"], d_new["jdotB_bs"])),
             inputs_bitwise={k: bool(np.array_equal(
                 np.asarray(cap["kw"][k]), d_new[m])) for k, m in
                 (("fT", "f_T"), ("q", "q"), ("eps", "eps"), ("R", "R_avg"),
                  ("I_psi", "F"))},
-            max_abs=float(np.max(np.abs(cap["j"] - d_new["j_dot_B"]))))
+            max_abs=float(np.max(np.abs(cap["j"] - d_new["jdotB_bs"]))))
     else:
         out["a"] = dict(skip="this OFT build's solve_with_bootstrap has no "
                              "psi_N argument, so its first pass cannot be "

@@ -1005,7 +1005,7 @@ class UnifiedEngine:
         self._prior()
         g0 = complete_geometry(anchor["geom"])
         self.state.geom = g0
-        self.state.lambda_bs = np.asarray(anchor["redl"], dtype=float).copy()
+        self.state.lambda_bs = np.asarray(anchor["jdotB_bs"], dtype=float).copy()
         self.anchor = anchor
         if self.s["delivery_correction"]:
             self.state.delivery_correction = np.zeros_like(self.psi)
@@ -1298,7 +1298,7 @@ class UnifiedEngine:
                 "mse"]["chords"]["sigma_eff"]))
         self._pending = p
         meas = dict(w=g1["w_lin"] * conversion_factor(g1), x=g1["psi_N"],
-                    li=m["li"], redl=m["redl"],
+                    li=m["li"], jdotB_bs=m["jdotB_bs"],
                     q0=(m["q_row"] if "q0" in self.rows else None))
         if "q0" in self.rows:
             meas["axis_current_solved"] = float(np.interp(
@@ -1383,7 +1383,7 @@ class UnifiedEngine:
         meas0 = dict(li=self.anchor["li"],
                      q0=(self.anchor["q_row"] if self.pin else None))
         res = run_jbs_loop(
-            st.lambda_bs, self.step, lambda m: m["redl"], s["loop"],
+            st.lambda_bs, self.step, lambda m: m["jdotB_bs"], s["loop"],
             Ip=float(self.rows["Ip"]["target"]), meas0=meas0, gate_li=True,
             gate_q0=bool(self.pin), label=self.label,
             init_source=("evaluate_jBS <j.B> on the anchor (the source's own "
@@ -1888,7 +1888,7 @@ class UnifiedEngine:
                                           else li["criterion_tol"]),
                             mse_tol=self.s["mse_tol_sigma"])
         return run_jbs_loop(
-            lam, self.step, lambda m: m["redl"], dict(self.s["loop"]),
+            lam, self.step, lambda m: m["jdotB_bs"], dict(self.s["loop"]),
             Ip=float(self.rows["Ip"]["target"]), meas0=meas0, gate_li=True,
             gate_q0=bool(self.pin), label=label, init_source=init_source,
             on_pass=self.on_pass, q0_pin=self.pin, extra=rows_x)
@@ -2001,7 +2001,7 @@ class UnifiedEngine:
                            final=True)
         g1 = complete_geometry(m["geom"])
         w = g1["w_lin"] * conversion_factor(g1)
-        chk = check_delivered(m["redl"], lam, w, g1["psi_N"],
+        chk = check_delivered(m["jdotB_bs"], lam, w, g1["psi_N"],
                               float(self.rows["Ip"]["target"]), lp)
         checks = dict(loop=dict(r_j=chk["r_j"], r_I=chk["r_I"],
                                 ok=bool(chk["ok"])))
@@ -2200,7 +2200,7 @@ class TokaMakerBackend:
     def redl(self, kinetics=None):
         """Redl ``<j.B>`` on the CURRENT equilibrium with *kinetics*
         (default: the backend's), with the shared innermost-surface repair --
-        exactly the ``redl`` :meth:`measure` returns, without the rest."""
+        exactly the ``jdotB_bs`` :meth:`measure` returns, without the rest."""
         from .physics import evaluate_jBS
         from .TokaMaker_interface import smooth_jbs_transition
         kin = self._kinetics() if kinetics is None else kinetics
@@ -2208,7 +2208,7 @@ class TokaMakerBackend:
                              kin["te"], kin["ni"], kin["ti"], kin["zeff"],
                              psi_pad=self.psi_pad, isolate_edge=False,
                              smooth_axis=False, coord=self.coord)
-        return smooth_jbs_transition(np.asarray(d["j_dot_B"], dtype=float))
+        return smooth_jbs_transition(np.asarray(d["jdotB_bs"], dtype=float))
 
     def p_sep(self) -> float:
         """The separatrix pressure added back at reporting / delivery for
@@ -2283,7 +2283,7 @@ class TokaMakerBackend:
                              kin["ti"], kin["zeff"], psi_pad=pad,
                              isolate_edge=False, smooth_axis=False,
                              coord=self.coord)
-        redl = smooth_jbs_transition(np.asarray(d["j_dot_B"], dtype=float))
+        jdotB_bs = smooth_jbs_transition(np.asarray(d["jdotB_bs"], dtype=float))
         geom["F"] = np.asarray(d["F"], dtype=float)
         geom["B2"] = np.asarray(d["avg_B2"], dtype=float)
         geom["li_geom"] = li_closure_geometry(eq, geom, psi_pad=pad)
@@ -2300,7 +2300,7 @@ class TokaMakerBackend:
         Ip = abs(float(eq.get_globals()[0]))
         achieved = np.asarray(eq_jphi_profile(geom, "jphi-linterp", eq=eq),
                               dtype=float)
-        out = dict(geom=geom, redl=redl, redl_I_BS=float(d["I_BS"]), li=li,
+        out = dict(geom=geom, jdotB_bs=jdotB_bs, redl_I_BS=float(d["I_BS"]), li=li,
                    q_row=q_row, Ip=Ip, achieved=achieved)
         if want_chords and self.chords is not None:
             from .mse import mse_field_at
@@ -2417,7 +2417,7 @@ def reconstruct(adapter, backend, settings, *, label=""):
     backend.solve(c0.anchor_request, n_passes=2)
     anchor = backend.measure(want_chords=False)
     ag = complete_geometry(anchor["geom"])
-    contract = adapter.finalize(anchor["redl"], ag)
+    contract = adapter.finalize(anchor["jdotB_bs"], ag)
     eng = UnifiedEngine(contract, backend, settings, anchor=anchor,
                         label=label)
     res = eng.run()
@@ -2535,6 +2535,12 @@ def _lcfs_deviation_mm(mygs, pts):
         return float("nan"), float("nan")
     d, _ = cKDTree(pts_l).query(np.asarray(pts, dtype=float))
     return float(np.sqrt(np.mean(d ** 2)) * 1e3), float(np.max(d) * 1e3)
+
+
+def _pd_parts(geom):
+    """The pressure-driven part of the split's j_BS (schema.PD_KEYS): p'G, and p'G
+    times the edge taper as :func:`_split` adds it."""
+    return dict(jphi_pd_raw=pressure_term(geom), jphi_pd=split_pressure_term(geom))
 
 
 def _split(eng, res):
@@ -2727,7 +2733,8 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
         aux={"zeff": np.asarray(kn["Zeff"], dtype=float)}, recon=recon,
         reconstruction_metrics=metrics, jphi_request_offset=offset,
         delivered_state=ds, engine=rec,
-        edge_pressure=rec.get("edge_pressure"))
+        edge_pressure=rec.get("edge_pressure"),
+        **_pd_parts(res["state"].geom))
 
 
 def _ids_baseline(bq, eng, res, rec, bl_src):
@@ -2764,6 +2771,7 @@ def _ids_baseline(bq, eng, res, rec, bl_src):
                        for r in ch["closure_limited_reasons"])))
     bl.j_phi, bl.j_inductive, bl.j_BS = R, j_ind, j_BS
     bl.j_NBI, bl.j_RF = j_NBI, j_RF
+    bl.jphi_pd_raw, bl.jphi_pd = _pd_parts(res["state"].geom).values()
     # the engine's j_RF carries every other driven entry (sawteeth included):
     # the reader's j_other / j_sawteeth are not separate channels here
     bl.j_other, bl.j_sawteeth = None, None

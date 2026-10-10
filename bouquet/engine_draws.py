@@ -711,7 +711,7 @@ class _DrawPasses:
             n_solves=int(self.b.n_solves)))
         self.geom = g1
         meas = dict(w=g1["w_lin"] * conversion_factor(g1), x=g1["psi_N"],
-                    li=m["li"], redl=m["redl"])
+                    li=m["li"], jdotB_bs=m["jdotB_bs"])
         if self.pin is not None:
             meas["q0"] = m["q_row"]
             meas["axis_current_solved"] = float(np.interp(
@@ -842,11 +842,11 @@ def run_draw(ctx, backend, inputs, *, label=None, coil_guard=None,
     if bootstrap_refresh:
         def start_refresh(J, meas):
             # the anchor's increment with Redl(draw kinetics) taken on the
-            # FIRST SOLVED geometry instead of G* (meas["redl"]: the loop's
+            # FIRST SOLVED geometry instead of G* (meas["jdotB_bs"]: the loop's
             # own pass-1 Redl, the draw's kinetics, solved at the draw's
             # pressure); exactly the anchor's form, so lambda_BS* at zero
             # perturbation up to the re-solve's reproduction of G*
-            return scale * (ctx.lam + (np.asarray(meas["redl"], dtype=float)
+            return scale * (ctx.lam + (np.asarray(meas["jdotB_bs"], dtype=float)
                                        - r_0))
     clock.start("loop")
     pin = None
@@ -858,7 +858,7 @@ def run_draw(ctx, backend, inputs, *, label=None, coil_guard=None,
                      delta=ctx.delta, coil_guard=coil_guard,
                      on_solve=lambda n: clock.add("loop", passes=1))
     res = run_jbs_loop(
-        jbs0, dp.step, lambda m: scale * np.asarray(m["redl"], dtype=float),
+        jbs0, dp.step, lambda m: scale * np.asarray(m["jdotB_bs"], dtype=float),
         ctx.loop, Ip=float(ctx.c.Ip),
         meas0=dict(li=ctx.ref["l_i"],
                    q0=(ctx.ref["q_row"] if pin is not None else None)),
@@ -997,7 +997,7 @@ def post_homotopy(ctx, backend, draw, settings, *, coil_guard=None,
     m = backend.measure()
     g = complete_geometry(m["geom"])
     w = g["w_lin"] * conversion_factor(g)
-    J = scale * np.asarray(m["redl"], dtype=float)
+    J = scale * np.asarray(m["jdotB_bs"], dtype=float)
     chk = check_delivered(J, jbs_used, w, g["psi_N"], float(ctx.c.Ip),
                           settings)
     rec = dict(check=jsonable(dict(chk)),
@@ -1029,7 +1029,7 @@ def post_homotopy(ctx, backend, draw, settings, *, coil_guard=None,
                                (lambda n: clock.add("post_homotopy",
                                                     passes=1))))
     res = run_jbs_loop(
-        jbs0, dp.step, lambda mm: scale * np.asarray(mm["redl"], dtype=float),
+        jbs0, dp.step, lambda mm: scale * np.asarray(mm["jdotB_bs"], dtype=float),
         settings, Ip=float(ctx.c.Ip), meas0=dict(
             li=m["li"], q0=(m["q_row"] if dp.pin is not None else None)),
         gate_li=True, gate_q0=dp.pin is not None, label=label,
@@ -1586,6 +1586,10 @@ class GenerateEngineDraws(DrawMethod):
         # p'G on j_BS, as the baseline's)
         diagnostics["j_BS"] = np.asarray(sp["j_BS"], dtype=float).copy()
         diagnostics["j_inductive"] = j_ind.copy()
+        # its pressure-driven part (schema.PD_KEYS), archived by store_draw as swb's is
+        if sp.get("j_pressure_raw") is not None:
+            diagnostics["jphi_pd_raw"] = np.asarray(sp["j_pressure_raw"], dtype=float).copy()
+        diagnostics["jphi_pd"] = P.copy()
         return np.asarray(sp["j_BS"], dtype=float).copy(), j_ind
 
     def mark(self, stage):
@@ -1632,7 +1636,7 @@ class GenerateEngineDraws(DrawMethod):
         # bootstrap model (x* held: s_bs (1 + d_bs) x scale x Redl) and its
         # fixed parts, both converted with THIS state's F<1/R>/<B^2>; the
         # residual against the archived j_phi is :meth:`archived_split`'s
-        from .engine import composed_factor, split_pressure_term
+        from .engine import composed_factor, pressure_term, split_pressure_term
         kap = composed_factor(fin["geom"])
         P = split_pressure_term(fin["geom"])
         dpl = cur["draw"].get("passes_post_homotopy") or cur["draw"]["passes"]
@@ -1640,17 +1644,17 @@ class GenerateEngineDraws(DrawMethod):
         _amp = 1.0 + float(dpl.last["amp"].get("d_bs", 0.0))
         _scale = float(cur["draw"]["inputs"].scale)
         jB_BS = (_amp * self.ctx.s_bs * _scale
-                 * np.asarray(fin["redl"], dtype=float))
+                 * np.asarray(fin["jdotB_bs"], dtype=float))
         jB_NBI = np.asarray(fx["nbi"], dtype=float)
         jB_RF = (np.asarray(fx["rf"], dtype=float)
                  + np.asarray(fx.get("other", 0.0), dtype=float))
         cur["final_split"] = dict(
             j_BS=(_amp * self.ctx.s_bs * kap * _scale
-                  * np.asarray(fin["redl"], dtype=float)) + P,
+                  * np.asarray(fin["jdotB_bs"], dtype=float)) + P,
             j_NBI=kap * jB_NBI, j_RF=kap * jB_RF,
             jB_BS=jB_BS, jB_NBI=jB_NBI * np.ones_like(kap),
             jB_RF=jB_RF * np.ones_like(kap), kappa=kap,
-            j_pressure=P)
+            j_pressure=P, j_pressure_raw=pressure_term(fin["geom"]))
         rec["archived"]["deltas"] = dict(
             l_i_3=float(fin["li"]) - float(self.ctx.ref["l_i"]),
             l_i_1=(None if (rec["archived"]["l_i_1"] is None
@@ -1704,7 +1708,8 @@ class GenerateEngineDraws(DrawMethod):
         rec["cost"] = clock.record()
         _write_draw_block(header, count, scan_key, rec,
                           diagnostics.get(DRAW_BAND_FLAG),
-                          parallel=cur.get("parallel"))
+                          parallel=cur.get("parallel"),
+                          attrs=_pd_attrs(diagnostics))
         clock.start("filters")
 
     def until_n(self, ok, reasons, diagnostics, header=None, count=None,
@@ -1723,7 +1728,8 @@ class GenerateEngineDraws(DrawMethod):
             if rec is not None:
                 rec["cost"] = cur["clock"].record()
                 _write_draw_block(header, count, scan_key, rec, band,
-                                  parallel=cur.get("parallel"))
+                                  parallel=cur.get("parallel"),
+                                  attrs=_pd_attrs(diagnostics))
         return bool(ok and (band is None or band)), reasons
 
     # ---- Bouquet.generate -------------------------------------------------
@@ -1791,6 +1797,11 @@ class GenerateEngineDraws(DrawMethod):
         """The baseline's ``engine`` block (the reconstruction record, with
         the draws' settings) on ``_baseline``."""
         from .engine import store_baseline_engine
+        from .schema import PD_KEYS
+        from .utils import stamp_group_attrs
+        pd = {k: getattr(baseline, k, None) for k in PD_KEYS}
+        if any(v is not None for v in pd.values()):
+            stamp_group_attrs(header, scan_key, None, pd)
         rec = dict(getattr(baseline, "engine", None) or {})
         if not rec:
             return
@@ -1821,7 +1832,14 @@ def _jbs_block(loop_rec):
         final=loop_rec))
 
 
-def _write_draw_block(header, count, scan_key, record, band, parallel=None):
+def _pd_attrs(diagnostics):
+    """The draw's pressure-driven part (schema.PD_KEYS) as group attrs, swb's names."""
+    from .schema import PD_KEYS
+    return {k: diagnostics.get(k) for k in PD_KEYS}
+
+
+def _write_draw_block(header, count, scan_key, record, band, parallel=None,
+                      attrs=None):
     import h5py
     from .engine import write_engine_json
     from .schema import write_jB_parallel
@@ -1836,6 +1854,9 @@ def _write_draw_block(header, count, scan_key, record, band, parallel=None):
             grp.attrs[DRAW_BAND_FLAG] = bool(band)
         if parallel is not None:
             write_jB_parallel(grp, parallel)
+        for k, v in (attrs or {}).items():
+            if v is not None:
+                grp.attrs[k] = v
 
 
 def read_draw_engine(header, count, scan_key=None):

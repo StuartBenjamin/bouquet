@@ -206,16 +206,16 @@ def toy(monkeypatch):
         boot = types.ModuleType("OpenFUSIONToolkit.TokaMaker.bootstrap")
 
         def _fos(mygs, psi_N, pressure, ffp_prof, pp_prof, j_inductive,
-                 Ip_target, psi_pad, jphi_bs_final=None, tolerance=0.01,
+                 Ip_target, psi_pad, jphi_bs=None, tolerance=0.01,
                  max_iter=5, diagnostic_plots=False, verbose=True):
             psi_eval = np.clip(psi_N, psi_pad, 1.0 - psi_pad)
-            ffp_prof["y"] = j_inductive + jphi_bs_final
+            ffp_prof["y"] = j_inductive + jphi_bs
             mygs.set_targets(Ip=Ip_target, pax=pressure[0])
             mygs.set_profiles(ffp_prof=ffp_prof, pp_prof=pp_prof)
             mygs.solve()
             _, f, fp, _, pp = mygs.get_profiles(psi=psi_eval)
             out0 = f[0] * fp[0]
-            inp0 = j_inductive[0] + jphi_bs_final[0]
+            inp0 = j_inductive[0] + jphi_bs[0]
             if abs(inp0 - out0) / out0 < tolerance:
                 return 1.0, f * fp
             raise AssertionError("stub find_optimal_scale: scale != 1")

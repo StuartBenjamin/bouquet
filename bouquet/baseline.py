@@ -305,6 +305,11 @@ class Baseline:
     # swb_saw_q set: solve B's j_saw output (jphi_saw + the q reset current),
     # in place of j_sawteeth in j_phi.  None => saw off.
     j_saw: Optional["np.ndarray"] = None
+    # swb / engine: the pressure-driven part of j_BS, p'(<R> - F^2<1/R>/<B^2>), as
+    # evaluated (jphi_pd_raw) and as added into j_BS (jphi_pd; schema.PD_KEYS).
+    # None => not recorded.
+    jphi_pd_raw: Optional["np.ndarray"] = None
+    jphi_pd: Optional["np.ndarray"] = None
     # imas_baseline="swb": solve A's coil currents {name: A-t}, the target of the
     # strong reg of solve B, the sigma=0 check and every draw.
     coil_reg_target: Optional[dict] = None

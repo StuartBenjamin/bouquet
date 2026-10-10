@@ -218,7 +218,7 @@ class ToyGS:
         st = self.state
         g = dict(st["geom"])
         g["li_geom"] = self.li_geom(g)
-        out = dict(geom=g, redl=self._redl_profile(st["dpsi"], self.kin),
+        out = dict(geom=g, jdotB_bs=self._redl_profile(st["dpsi"], self.kin),
                    li=st["li"],
                    q_row=self.q_at(st, float(g["psi_q"][0])), Ip=self.Ip,
                    achieved=st["A"].copy())

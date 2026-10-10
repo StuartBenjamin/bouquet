@@ -127,7 +127,7 @@ def _evaluate_jBS_reference(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     nu_e_star = (6.921e-18 * np.abs(q) * R_avg * ne
                  * zeff * ln_le / (te ** 2 * eps ** 1.5))
 
-    j_dot_B, _coeffs = _oft_bs.redl_bootstrap(
+    jdotB_bs, _coeffs = _oft_bs.redl_bootstrap(
         psi_N=psi_N, Te=te, Ti=ti, ne=ne, ni=ni,
         pe=_EC * (ne * te), pi=_EC * (ni * ti),
         Zeff=zeff, R=R_avg, q=q, eps=eps, fT=f_T, I_psi=F,
@@ -136,19 +136,19 @@ def _evaluate_jBS_reference(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         ln_lambda_e=ln_le, ln_lambda_ii=ln_lii,
         nu_e_star_override=nu_e_star, nu_i_star_override=nu_i_star,
         use_legacy_L34=False, use_sign_q=True, formula_form="jboot1")
-    j_dot_B = np.nan_to_num(np.asarray(j_dot_B, dtype=float), nan=0.0)
+    jdotB_bs = np.nan_to_num(np.asarray(jdotB_bs, dtype=float), nan=0.0)
 
     geom = {"F": F, "avg_inv_R": avg_inv_R, "avg_B2": avg_B2,
             "avg_R": R_avg, "pprime": np.asarray(pp_u, dtype=float)[inv]}
     p_term = jphi_tokamaker_pressure_term(geom)
-    j_tor_full = np.nan_to_num(jpar_to_jphi_tokamaker(j_dot_B, geom) + p_term,
+    j_tor_full = np.nan_to_num(jpar_to_jphi_tokamaker(jdotB_bs, geom) + p_term,
                                nan=0.0)
 
     if isolate_edge:
         # SWB isolates the spike on its OWN projection <j.B> R_avg/F (the
         # shelf/mask detection is value-dependent), and bouquet then converts
         # the masked spike by the per-surface factor.  Same order here.
-        swb_proj = j_dot_B * (R_avg / F)
+        swb_proj = jdotB_bs * (R_avg / F)
         res = _oft_bs.analyze_bootstrap_edge_spike(psi_N, swb_proj)
         masked = np.asarray(res["masked_spike"], dtype=float)
         j_tor_sel = np.nan_to_num(jpar_to_jphi_tokamaker(
@@ -174,7 +174,7 @@ def _evaluate_jBS_reference(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         R_avg=R_avg, F=F, avg_inv_R=avg_inv_R, avg_B2=avg_B2,
         ln_lambda_e=np.asarray(ln_le, dtype=float),
         ln_lambda_ii=np.asarray(ln_lii, dtype=float),
-        dpsi=psi_range, j_dot_B=j_dot_B,
+        dpsi=psi_range, jdotB_bs=jdotB_bs,
         j_tor_full_raw=j_tor_full, j_tor_raw=np.asarray(j_tor_sel, float),
         I_BS=I_BS, isolate_edge=bool(isolate_edge),
         smooth_axis=bool(smooth_axis), version=EVALUATE_JBS_VERSION,
@@ -202,7 +202,7 @@ def _grids():
 
 _DIAG_ARRAYS = ("psi_eval", "f_T", "nu_e_star", "nu_i_star", "q", "eps",
                 "R_avg", "F", "avg_inv_R", "avg_B2", "ln_lambda_e",
-                "ln_lambda_ii", "j_dot_B", "j_tor_full_raw", "j_tor_raw")
+                "ln_lambda_ii", "jdotB_bs", "j_tor_full_raw", "j_tor_raw")
 
 
 #: (grid, isolate_edge, smooth_axis, legacy layout).  isolate_edge=True runs
@@ -402,7 +402,7 @@ def test_the_toroidal_conversion_is_the_exact_one_with_the_pressure_term():
     reader and OFT's own SWB output carry it."""
     x = np.linspace(0.0, 1.0, 151)
     _j, d = evaluate_jBS(_MockEq(), x, *_kin(x), smooth_axis=False)
-    exp = (d["F"] * d["avg_inv_R"] * d["j_dot_B"] / d["avg_B2"]
+    exp = (d["F"] * d["avg_inv_R"] * d["jdotB_bs"] / d["avg_B2"]
            + d["pprime"] * (d["R_avg"] - d["F"] ** 2 * d["avg_inv_R"]
                             / d["avg_B2"]))
     np.testing.assert_allclose(d["j_tor_full_raw"], exp, rtol=1e-14, atol=0)
