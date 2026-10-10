@@ -90,7 +90,7 @@ _COIL_DRIFT_MAX_PCT = 0.3       # mode-1 (baseline kinetics) coil drift
 # Known mode-1 failure up to this drift: the golden predates OFT's exact per-node
 # <R>, <1/R> for jphi profiles, under which the pinned golden j_phi gives a
 # slightly different edge FF'.  The boundary holds; the lower coils trade
-# current (max 1.45 %: F4B +1.42 %, F5B -1.02 %).  Goes with a regenerated golden.
+# current (max 1.45 %: F4B +1.45 %, F5B -1.14 %).  Goes with a regenerated golden.
 _KNOWN_MODE1_COIL_DRIFT_PCT = 1.6
 _MODE2_BND_MAX_MM = 6.0         # mode-2 (draw pressure) bounded boundary shift
 _MODE2_MEAN_BIAS_MM = 2.0       # mode-2 signed-mean boundary bias (no systematic)
@@ -237,8 +237,16 @@ def _draw_jBS_scale(gen_golden, jBS_scale_range, count):
 
 
 def _bnd_rms_mm(ref, pts):
+    """RMS distance [mm] of the ``ref`` points from the closed polyline through ``pts``
+    (the segments next to each point's 4 nearest vertices), not from the nearest vertex:
+    OFT's cut-cell trace_surf spaces its points ~5 mm apart."""
     from scipy.spatial import cKDTree
-    d, _ = cKDTree(np.asarray(pts)).query(np.asarray(ref))
+    ref, c = np.asarray(ref, dtype=float), np.asarray(pts, dtype=float)
+    _, idx = cKDTree(c).query(ref, k=4)
+    seg = np.concatenate([idx, (idx - 1) % len(c)], axis=1)     # segment i: c[i] -> c[i+1]
+    a, ab = c[seg], c[(seg + 1) % len(c)] - c[seg]
+    t = np.clip(((ref[:, None] - a) * ab).sum(-1) / np.maximum((ab ** 2).sum(-1), 1e-300), 0.0, 1.0)
+    d = np.linalg.norm(a + t[..., None] * ab - ref[:, None], axis=-1).min(axis=1)
     return float(np.sqrt((d ** 2).mean()) * 1e3)
 
 
