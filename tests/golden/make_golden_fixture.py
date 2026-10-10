@@ -126,14 +126,10 @@ def _ip_from_eqdsk_bytes(raw):
 
 
 def _boundary_devs(bl_boundary, grp):
-    from scipy.spatial import cKDTree
+    from bouquet.filtering import boundary_deviation_mm
     if bl_boundary is None or "perturbed_lcfs_ref" not in grp:
         return (np.nan, np.nan)
-    pert = np.asarray(grp["perturbed_lcfs_ref"][()], dtype=float)
-    tree = cKDTree(pert)
-    devs, _ = tree.query(bl_boundary)
-    return (float(np.sqrt(np.mean(devs ** 2)) * 1e3),
-            float(np.max(devs) * 1e3))
+    return boundary_deviation_mm(bl_boundary, grp["perturbed_lcfs_ref"][()])
 
 
 def _select_subset(draws):

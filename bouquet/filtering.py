@@ -80,12 +80,30 @@ _FILTER_FLAGS = ("passes_coil_filter", "passes_boundary_filter",
 #  BASELINE tree with the PERTURBED points, which is the opposite direction
 #  from boundary_deviation_mm below and gives a different max (and a
 #  slightly different RMS) on the same pair of contours.
+def contour_distance(pts, contour, k=4):
+    """Distance from each of ``pts`` to the closed polyline through ``contour``.
+
+    Measured to the segments next to each point's ``k`` nearest vertices, not to the
+    vertices: OFT's cut-cell ``trace_surf`` spaces its points ~5 mm apart, which a
+    nearest-vertex distance would read as boundary deviation."""
+    pts, c = np.asarray(pts, dtype=float), np.asarray(contour, dtype=float)
+    n = len(c)
+    _, idx = _cKDTree(c).query(pts, k=min(k, n))
+    seg = idx.reshape(len(pts), -1)
+    seg = np.concatenate([seg, (seg - 1) % n], axis=1)      # segment i: c[i] -> c[i+1]
+    a = c[seg]
+    ab = c[(seg + 1) % n] - a
+    t = np.clip(((pts[:, None] - a) * ab).sum(-1)
+                / np.maximum((ab ** 2).sum(-1), 1e-300), 0.0, 1.0)
+    return np.linalg.norm(a + t[..., None] * ab - pts[:, None], axis=-1).min(axis=1)
+
+
 def boundary_deviation_mm(baseline_boundary, perturbed_boundary):
     """``(rms_mm, max_mm)`` of a perturbed LCFS vs the baseline contour.
 
-    Nearest-neighbour distance **from each baseline point to the perturbed
-    contour** -- the direction ``plot_traces`` and the boundary filter both
-    report. Returns ``(nan, nan)`` when either contour is missing or too
+    Distance **from each baseline point to the perturbed contour**
+    (:func:`contour_distance`) -- the direction ``plot_traces`` and the
+    boundary filter both report. Returns ``(nan, nan)`` when either contour is missing or too
     short to build a tree from (fewer than 2 points), which the callers
     treat as "no verdict" rather than as a pass.
     """
@@ -96,7 +114,7 @@ def boundary_deviation_mm(baseline_boundary, perturbed_boundary):
     if bl.ndim != 2 or pt.ndim != 2 or len(bl) < 2 or len(pt) < 2:
         return (np.nan, np.nan)
     try:
-        devs, _ = _cKDTree(pt).query(bl)
+        devs = contour_distance(bl, pt)
         return (float(np.sqrt(np.mean(devs ** 2)) * 1e3),
                 float(np.max(devs) * 1e3))
     except Exception:

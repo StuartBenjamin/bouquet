@@ -72,9 +72,9 @@ def test_direction_is_load_bearing_and_is_the_filter_s_direction():
     """Swapping the arguments must change the answer -- else the choice of
     direction is untested and a refactor could flip it unnoticed.
 
-    A dense baseline against a sparse perturbed contour: querying the sparse
-    tree with dense points hits the sampling gaps (large max), while the
-    reverse finds every sparse point close to some dense point (small max).
+    A dense baseline against a sparse perturbed contour (an octagon): the
+    dense points lie off the octagon's chords (large max), while every
+    octagon vertex lies on the dense circle (max ~0).
     """
     dense = _circle(n=720)
     sparse = _circle(n=8)
@@ -82,10 +82,10 @@ def test_direction_is_load_bearing_and_is_the_filter_s_direction():
     rev = boundary_deviation_mm(sparse, dense)
     assert fwd[1] > 10.0 * rev[1], (fwd, rev)
 
-    # ...and the filter direction is the one that builds the tree on the
-    # PERTURBED contour and queries it with the BASELINE points.
-    from scipy.spatial import cKDTree
-    devs, _ = cKDTree(sparse).query(dense)
+    # ...and the filter direction measures the BASELINE points against the
+    # PERTURBED contour.
+    from bouquet.filtering import contour_distance
+    devs = contour_distance(dense, sparse)
     assert fwd[0] == pytest.approx(float(np.sqrt(np.mean(devs ** 2)) * 1e3))
 
 
