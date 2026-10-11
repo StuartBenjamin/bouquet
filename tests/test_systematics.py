@@ -277,8 +277,10 @@ def _draw_jBS_scale(gen_golden, jBS_scale_range, count):
 
 
 def _bnd_rms_mm(ref, pts):
-    from scipy.spatial import cKDTree
-    d, _ = cKDTree(np.asarray(pts)).query(np.asarray(ref))
+    """RMS distance [mm] of the ``ref`` points to the polyline through ``pts``
+    (a cut-cell trace's ~5 mm spacing would read as deviation to its vertices)."""
+    from bouquet.filtering import contour_distance
+    d = contour_distance(np.asarray(ref), np.asarray(pts))
     return float(np.sqrt((d ** 2).mean()) * 1e3)
 
 

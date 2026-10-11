@@ -175,6 +175,11 @@ draws, one thread), OFT `fix/jphi-update-ravgs-and-nonfinite-abort` 7da4f18
 engine never reads back to their defaults (printed and recorded in the run's
 `summary.json`; here only `isolate_edge_jBS` False -> True). No bar changed.
 
+The manifest's boundary numbers (`bnd_rms_mm`, `bnd_max_mm`) are distances to
+the perturbed LCFS polyline (`filtering.contour_distance`), recomputed from the
+same slim h5: RMS −0.05…−0.12 mm and max up to −2.4 mm against the
+nearest-vertex values they replace. Nothing else changed.
+
 * Unified engine: 20 attempts, **16 archived** (4 rejected), **6 in spec** (draws 0, 7, 8, 9, 13, 17). An engine draw's
   `in_spec` is the coil verdict AND its post-hoc l_i band
   (`passes_draw_band`, one of `filtering._FILTER_FLAGS`): 5 of 17 pass the
