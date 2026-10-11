@@ -1709,8 +1709,15 @@ IDA_TIME_RULE = (
     "core_profiles step of the core_profiles slice read; else refused; dt "
     "recorded")
 
+#: ImasSource.ida_timing="ida_fuse": IDA_fuse's own pairing (the #73 timing
+#: before review), stamped on its records.
+IDA_FUSE_TIME_RULE = (
+    "IDA slice: nearest own slice to the requested time (ImasSource.ida_time, "
+    "else the dd slice time), at any distance (ida_timing='ida_fuse'); dt "
+    "recorded")
 
-def match_ida_slice(ida_times, t_req, *, what="IDA file"):
+
+def match_ida_slice(ida_times, t_req, *, what="IDA file", ida_fuse=False):
     """The IDA slice a SEPARATE IDA file (``UncertaintyConfig.ida_path``) is
     read at, by the IDA time rule of #73 (:data:`IDA_TIME_RULE`): the nearest
     own slice to *t_req* [s], never interpolated, accepted within half the
@@ -1719,12 +1726,14 @@ def match_ida_slice(ida_times, t_req, *, what="IDA file"):
     with), else REFUSED (``ValueError``).  Returns the match record
     (``rule``, requested / used time, ``dt``, the window and its basis, the
     number of slices).  *t_req* None: only a single-slice file is
-    accepted (its one slice, ``dt`` None)."""
+    accepted (its one slice, ``dt`` None).  *ida_fuse*
+    (``ImasSource.ida_timing="ida_fuse"``): :data:`IDA_FUSE_TIME_RULE`, the
+    nearest slice at any distance, never refused."""
     tt = np.asarray(ida_times, dtype=float).ravel()
     if tt.size == 0:
         raise ValueError(f"{what}: the IDA file has an empty time base")
-    rec = dict(rule=IDA_TIME_RULE, what=what, ida_time_requested=t_req,
-               ida_n_times=int(tt.size))
+    rec = dict(rule=IDA_FUSE_TIME_RULE if ida_fuse else IDA_TIME_RULE,
+               what=what, ida_time_requested=t_req, ida_n_times=int(tt.size))
     if t_req is None:
         if tt.size > 1:
             raise ValueError(
@@ -1747,7 +1756,7 @@ def match_ida_slice(ida_times, t_req, *, what="IDA file"):
         basis = "single-slice IDA file: the floor IMAS_SINGLE_TIME_WINDOW_S"
     rec.update(ida_time_used=t_used, dt=dt, half_window=float(half),
                window_basis=basis)
-    if abs(dt) > half:
+    if abs(dt) > half and not ida_fuse:
         span = (f"{tt.min():.9g}-{tt.max():.9g} s" if tt.size > 1
                 else f"{tt[0]:.9g} s")
         raise ValueError(
@@ -1760,7 +1769,8 @@ def match_ida_slice(ida_times, t_req, *, what="IDA file"):
 
 def _hybrid_timing(source, T, t_eq, t_cp, aux, tol=1e-6, *, cp_times=None,
                    ida_times=None):
-    """ida_hybrid: the IDA slice time to read, matched by :data:`IDA_TIME_RULE`.
+    """ida_hybrid: the IDA slice time to read, matched by :data:`IDA_TIME_RULE`
+    (``ImasSource.ida_timing="ida_fuse"``: :data:`IDA_FUSE_TIME_RULE`, never refused).
 
     Records the dd slice times on ``aux`` (``fuse_time_cp``,
     ``fuse_time_eq``) and the match on ``aux["ida_time_match"]`` (requested
@@ -1806,7 +1816,9 @@ def _hybrid_timing(source, T, t_eq, t_cp, aux, tol=1e-6, *, cp_times=None,
     else:
         half = IMAS_SINGLE_TIME_WINDOW_S
         basis = "single-slice IDA file: the floor IMAS_SINGLE_TIME_WINDOW_S"
-    rec = dict(rule=IDA_TIME_RULE, ida_time_configured=t_cfg,
+    window_rule = getattr(source, "ida_timing", "window") == "window"
+    rec = dict(rule=IDA_TIME_RULE if window_rule else IDA_FUSE_TIME_RULE,
+               ida_time_configured=t_cfg,
                ida_time_requested=t_req, ida_time_used=t_used, dt=dt,
                half_window=float(half), window_basis=basis,
                ida_n_times=int(tt.size), fuse_time_cp=t_cp, fuse_time_eq=t_eq,
@@ -1815,6 +1827,8 @@ def _hybrid_timing(source, T, t_eq, t_cp, aux, tol=1e-6, *, cp_times=None,
                pairing_consistent=None, replayed_ida_time=None,
                pairing_table=None)
     aux["ida_time_match"] = rec
+    if not window_rule:
+        return t_used
     span = f"{tt.min():.9g}-{tt.max():.9g} s" if tt.size > 1 else f"{tt[0]:.9g} s"
     if abs(dt) > half:
         raise ValueError(

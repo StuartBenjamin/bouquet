@@ -843,7 +843,8 @@ def resolve_uncertainty(config, baseline) -> dict:
             # kinetics were (the reconstruction loader's nearest slice); a
             # SEPARATE sigma file (UncertaintyConfig.ida_path) by the IDA
             # time rule of #73 -- half-step window, dt recorded, refused
-            # outside (review #73 B2/B6 residual)
+            # outside (review #73 B2/B6 residual); ida_timing="ida_fuse": the
+            # nearest slice, as for the kinetics
             _own = (src.profiles_path
                     if isinstance(src, ReconstructionSource) else
                     getattr(src, "ida_path", None))
@@ -852,7 +853,8 @@ def resolve_uncertainty(config, baseline) -> dict:
                 from .io.imas import match_ida_slice
                 _sig_match = match_ida_slice(
                     ida_time_base(ida_path), _t_req,
-                    what="uncertainty.ida_path")
+                    what="uncertainty.ida_path",
+                    ida_fuse=getattr(src, "ida_timing", "window") == "ida_fuse")
                 _t_req = _sig_match["ida_time_used"]
             ida = read_ida(
                 ida_path, time=_t_req,
