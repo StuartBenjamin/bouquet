@@ -23,7 +23,7 @@ h5py = pytest.importorskip("h5py")
 
 from bouquet.config import ImasSource
 from bouquet.io.imas import (IMAS_SINGLE_TIME_WINDOW_S, _check_replay_pairing,
-                             _hybrid_timing, read_imas_baseline)
+                             _hybrid_timing, match_ida_slice, read_imas_baseline)
 from _imas_geometry import eq_geometry, jtor_from_jtotal
 
 N = 33
@@ -85,6 +85,26 @@ def test_paired_with_the_dd_time_the_ida_slice_must_sit_in_the_dd_window():
                            cp_times=[0.99, 1.0, 1.01],
                            ida_times=[0.95, 1.025, 1.1])
     assert t == 1.025
+
+
+def test_ida_fuse_timing_takes_the_nearest_slice_at_any_distance():
+    """ida_timing="ida_fuse": the pairings the window rule refuses read the
+    nearest IDA slice, as before the review; the match is still recorded."""
+    aux = {}
+    t = _hybrid_timing(_src(time=1.0, ida_timing="ida_fuse"), 1.0, 1.0, 1.0, aux,
+                       cp_times=[0.99, 1.0, 1.01], ida_times=[0.95, 1.025, 1.1])
+    assert t == 1.025
+    assert aux["ida_time_match"]["rule"].endswith("at any distance (ida_timing='ida_fuse'); dt recorded")
+    t = _hybrid_timing(_src(time=1.04, ida_time=1.33, ida_timing="ida_fuse"), 1.04, 1.04,
+                       1.04, {}, cp_times=[1.0, 1.04], ida_times=[0.9, 1.0, 1.1, 1.2])
+    assert t == 1.2
+    # a separate sigma file (uncertainty.ida_path) follows it, recorded
+    rec = match_ida_slice([0.9, 1.0, 1.1, 1.2], 1.33, ida_fuse=True)
+    assert (rec["ida_time_used"], rec["rule"]) == (1.2, aux["ida_time_match"]["rule"])
+    with pytest.raises(ValueError, match="no IDA slice within"):
+        match_ida_slice([0.9, 1.0, 1.1, 1.2], 1.33)
+    with pytest.raises(ValueError, match="ida_timing"):
+        _src(ida_timing="nearest")
 
 
 def test_a_single_slice_ida_file_honours_ida_time_with_the_10us_floor():

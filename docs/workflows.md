@@ -353,7 +353,9 @@ requested time, never interpolated, accepted within half the IDA file's local
 time-step (a single-slice IDA file: half the dd step when paired with `time`,
 the 10 µs floor for an explicit `ida_time`); paired with `time` it must also
 sit within half the dd step of the core_profiles slice. Anything else is
-refused. The match — requested and used IDA time, `dt`, the window and its
+refused. `ImasSource.ida_timing="ida_fuse"` takes the nearest IDA slice at any
+distance instead, as IDA_fuse pairs its own dd and IDA slices (this applies to a
+separate `uncertainty.ida_path` too). The match — requested and used IDA time, `dt`, the window and its
 basis, the dd slice times, and the verdict of FUSE's `ida_provenance.json`
 replay pairing when that table names this run's IDA file and holds the dd
 slice — is archived in the baseline's `li_metrics["ida_time_match"]`.

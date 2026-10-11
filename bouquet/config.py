@@ -223,6 +223,10 @@ class ReconstructionSource:
         _check_ni_source(self.ni_source, "ReconstructionSource")
 
 
+#: ImasSource.ida_timing: the reviewed window rule, or IDA_fuse's own pairing.
+IDA_TIMINGS = ("window", "ida_fuse")
+
+
 def _check_ni_source(v, who):
     from .experimental import NI_SOURCES
     if v not in NI_SOURCES:
@@ -250,6 +254,10 @@ class ImasSource:
     # macro step t as `time` to keep IDA kinetics and FUSE currents consistent; for a
     # series, Bouquet.run_slices(ida_times=[...]).
     ida_time: Optional[float] = None
+    # "window" (default): the rule above.  "ida_fuse": the IDA file's nearest slice to
+    # ida_time (else `time`) at any distance, as IDA_fuse pairs its own dd slices with IDA
+    # slices (the #73 timing before review); the match is still recorded.
+    ida_timing: str = "window"
     # --- IDA-hybrid kinetics (GenerationConfig.kinetic_source = "ida_hybrid") ---
     # When set, the baseline ne/Te/Ti/ni/Z_eff/omega_tor come from this IDA
     # .cdf (externally fit, smoother across time than FUSE's per-slice fits),
@@ -334,6 +342,9 @@ class ImasSource:
             raise ValueError(f"hold_sawteeth={self.hold_sawteeth!r}: must be "
                              "True or False")
         _check_ni_source(self.ni_source, "ImasSource")
+        if self.ida_timing not in IDA_TIMINGS:
+            raise ValueError(f"ImasSource.ida_timing={self.ida_timing!r} must be one of "
+                             f"{IDA_TIMINGS}")
         for _n in ("zeff_fast_ions", "ni_subtract_fast"):
             if not isinstance(getattr(self, _n), bool):
                 raise ValueError(f"ImasSource.{_n}={getattr(self, _n)!r}: "
