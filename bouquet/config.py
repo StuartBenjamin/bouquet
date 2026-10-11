@@ -1803,6 +1803,12 @@ class GenerationConfig:
     homotopy_passes: list = field(
         default_factory=lambda: [(0.05, 0.10), (0.02, 0.05), (0.01, 0.01)]
     )
+    # Legacy draws' iso-update: the isoflux constraint on the perturbed LCFS has the strength
+    # of this many evenly spaced points at weight 200, spread per unit length of the traced
+    # LCFS (TokaMaker_interface.ISO_UPDATE_REF_POINTS, the field-line tracer's ~9000 points),
+    # whatever trace_surf's sampling.  None: weight 200 per traced point (before the cut-cell
+    # trace, whose 1000 points weakened the constraint ~9x).
+    iso_update_ref_points: Optional[int] = 9000
     diagnostic_plots: bool = False
 
     # Live-equilibrium capture for exact IMAS/OMAS export. When True (default),
@@ -1912,6 +1918,9 @@ class GenerationConfig:
         _t = self.swb_ip_tol
         if isinstance(_t, bool) or not (float(_t) > 0.0 and float(_t) < 1.0):
             raise ValueError(f"swb_ip_tol={_t!r} must be in (0, 1)")
+        _n = self.iso_update_ref_points
+        if _n is not None and (isinstance(_n, bool) or int(_n) != _n or _n < 1):
+            raise ValueError(f"iso_update_ref_points={_n!r} must be a positive integer or None")
         from .physics import check_eps_definition
         check_eps_definition(self.eps_definition)
         solve_method_of(self)      # refuses a contradiction; writes nothing

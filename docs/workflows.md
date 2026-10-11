@@ -338,6 +338,7 @@ as an enormous sigma.
 | `coil_drift` | `0.01` | Soft coil-drift target |
 | `coil_drift_hard_factor` | `None` | Optional hard inequality bounds at `± factor·coil_drift` in every solve |
 | `homotopy_passes` | `[(0.05, 0.10), (0.02, 0.05), (0.01, 0.01)]` | Progressive `(F_tol, VSC_tol)` schedule — see [coil-constraints.md](coil-constraints.md) |
+| `iso_update_ref_points` | `9000` | Legacy draws' iso-update: the isoflux constraint on the perturbed LCFS has the strength of this many evenly spaced points at weight 200, spread per unit length of the traced LCFS, so it does not depend on `trace_surf`'s sampling (the field-line tracer gives ~9000 points, OFT's cut-cell trace 1000). `None`: weight 200 per traced point, as before |
 | `workflow` | `"auto"` | Named preset; see below |
 | `allow_unsafe_workflow` | `False` | Deprecated alias for `workflow="custom"` |
 | `allow_incomplete_pressure` | `False` | IMAS path: bypass the fail-fast pressure-accounting check |
