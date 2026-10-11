@@ -6,7 +6,7 @@ and the synthetic OMAS file; no solver):
 * each adapter produces the contract (kinetics, fixed pressure, parallel
   components, boundary, rows, signs);
 * the g-file's ``<j.B>`` (identity I0 on the reader's own surfaces) composes
-  back to the g-file's own ``<j_phi>`` (identity I2) to rounding, and a file
+  back to the g-file's own ``<jphi_total>`` (identity I2) to rounding, and a file
   read with the wrong COCOS is refused;
 * the g-file inductive is smoothed with EXACTLY the legacy
   ``fit_inductive_profile`` basis, without its amplitude search;
@@ -175,7 +175,7 @@ def test_the_inductive_basis_is_the_legacy_basis_without_the_amplitude(
                                    1e-3, float(np.sum(resid)) * 0.9e-9,
                                    k=5, psi_bridge=0.99)
     assert fit["ind_scale"] != 1.0
-    np.testing.assert_allclose(fit["j_inductive_fit"] / fit["ind_scale"],
+    np.testing.assert_allclose(fit["jphi_ind_fit"] / fit["ind_scale"],
                                inductive_basis(psi, resid, k=5,
                                                psi_bridge=0.99),
                                rtol=1e-12, atol=0.0)
@@ -211,7 +211,7 @@ def test_the_ids_adapter_reads_the_contract(ids):
     assert c.signs["b0_sign"] == -1.0 and c.signs["current_sign"] == 1.0
     # pressure: thermal + impurity + fast, NO p_diff
     assert "no p_diff" in c.provenance["pressure"]
-    np.testing.assert_array_equal(c.anchor_request, bl.j_phi)
+    np.testing.assert_array_equal(c.anchor_request, bl.jphi_total)
 
 
 def test_the_ids_residual_inductive(ids):
@@ -417,7 +417,7 @@ def test_the_adapter_takes_the_readers_factor_not_a_second_one(tmp_path,
 
 def test_user_driven_currents_are_positive_frame_for_any_orientation(
         tmp_path):
-    """The same FixedComponentsConfig j_NBI / j_RF (co-current positive)
+    """The same FixedComponentsConfig jphi_nbi / jphi_rf (co-current positive)
     gives the same toroidal fixed parts whichever way the source is
     oriented -- as the reader takes them; only the dd's own currents are
     re-signed."""
@@ -431,7 +431,7 @@ def test_user_driven_currents_are_positive_frame_for_any_orientation(
         p = _write_dd(tmp_path, mdd.mirror_dd(_example_dd(), s_ip, s_b0),
                       f"dd_{mdd.tag(s_ip, s_b0)}.json")
         ad, c, bl = _ids_contract(p, fixed=FixedComponentsConfig(
-            psi_N=x, j_NBI=j_nbi, j_RF=j_rf))
+            psi_N=x, jphi_nbi=j_nbi, jphi_rf=j_rf))
         assert bl.source_current_sign == s_ip
         got[(s_ip, s_b0)] = ad._user_fix_tor
         np.testing.assert_array_equal(
@@ -440,7 +440,7 @@ def test_user_driven_currents_are_positive_frame_for_any_orientation(
             ad._user_fix_tor["rf"], np.interp(c.psi_N, x, j_rf))
         assert np.all(ad._user_fix_tor["nbi"] >= 0.0)
         # the reader resampled the same arrays, in the same frame
-        assert np.all(np.asarray(bl.j_NBI) >= 0.0)
+        assert np.all(np.asarray(bl.jphi_nbi) >= 0.0)
     for k in ("nbi", "rf"):
         np.testing.assert_array_equal(got[(1.0, 1.0)][k],
                                       got[(-1.0, 1.0)][k])

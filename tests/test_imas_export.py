@@ -53,25 +53,25 @@ def _fsa_geom_on(x):
 
 def _make_archive(path, with_fsa=True, legacy_fsa=False,
                   convention="pressure_in_bootstrap", j_ind=None, j_bs=None,
-                  j_pressure=None):
+                  jphi_pd=None):
     """``convention``: the draw's ``current_split_convention`` attr (None:
     no attr, an archive from before PR #64).  The default archive is the
-    PR #64 one (p'G inside j_BS) these checks were written for."""
+    PR #64 one (p'G inside jphi_bs) these checks were written for."""
     j_ind = _J_IND if j_ind is None else j_ind
     j_bs = _J_BS if j_bs is None else j_bs
     with h5py.File(path, "w") as hf:
         g = hf.require_group("scan/0/0")
         if convention is not None:
             g.attrs["current_split_convention"] = convention
-        if j_pressure is not None:
-            g.create_dataset("j_pressure", data=j_pressure)
+        if jphi_pd is not None:
+            g.create_dataset("jphi_pd", data=jphi_pd)
         g.create_dataset("psi_N", data=_PEQ)
         g.create_dataset("psi_N_kinetic", data=np.linspace(0, 1, 20))
         for k in ("n_e", "T_e", "n_i", "T_i"):
             g.create_dataset(k, data=np.linspace(1.0, 0.1, 20))
-        g.create_dataset("j_phi", data=_J_PHI)
-        g.create_dataset("j_inductive", data=j_ind)
-        g.create_dataset("j_BS", data=j_bs)
+        g.create_dataset("jphi_total", data=_J_PHI)
+        g.create_dataset("jphi_ind", data=j_ind)
+        g.create_dataset("jphi_bs", data=j_bs)
         with open(_GEQ, "rb") as fh:
             g.create_dataset("eqdsk", data=np.void(fh.read()))
         if with_fsa:
@@ -317,7 +317,7 @@ class TestSplitConventions:
         ind, _ = self._export(tmp_path, "ind", convention="pressure_in_inductive",
                               j_ind=_J_IND + P_eq, j_bs=bs_fa)
         sep, _ = self._export(tmp_path, "sep", convention="pressure_separate",
-                              j_bs=bs_fa, j_pressure=P_eq)
+                              j_bs=bs_fa, jphi_pd=P_eq)
         geom = _fsa_geom_on(x)
         Px = _P(x)
         for cp in (pre, ind, sep):
@@ -325,12 +325,12 @@ class TestSplitConventions:
         for cp in (pre, ind):        # sep subtracts the archived (coarser) P
             np.testing.assert_allclose(cp["j_total"], ref["j_total"], rtol=1e-12)
         # the eqdsk's own p'G (pre64 / inductive / bootstrap) on the export grid
-        for cp in (pre, ind):        # the eqdsk's p'G comes off j_inductive
+        for cp in (pre, ind):        # the eqdsk's p'G comes off jphi_ind
             np.testing.assert_allclose(cp["j_ohmic"], jphi_tokamaker_to_jpar(
                 np.interp(x, _PEQ, _J_IND + P_eq) - Px, geom), rtol=1e-12)
             np.testing.assert_allclose(cp["j_bootstrap"], jphi_tokamaker_to_jpar(
                 np.interp(x, _PEQ, bs_fa), geom), rtol=1e-12, atol=1e-9)
-        # separate: the archived j_pressure, not the eqdsk's, comes off
+        # separate: the archived jphi_pd, not the eqdsk's, comes off
         np.testing.assert_allclose(sep["j_ohmic"], jphi_tokamaker_to_jpar(
             np.interp(x, _PEQ, _J_IND), geom), rtol=1e-12)
         np.testing.assert_allclose(sep["j_bootstrap"], jphi_tokamaker_to_jpar(

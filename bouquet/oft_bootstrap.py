@@ -1,9 +1,9 @@
 """OpenFUSIONToolkit's bootstrap entry points under bouquet's names, on any toolkit build.
 
-OFT PSFC_dev renamed the bootstrap options (``scale_jBS`` -> ``scale_jbs``, ``taper_edge_jBS`` ->
-``taper_edge_jphi``, ...) and result keys (``total_j_phi`` -> ``jphi_total``, ``isolated_j_BS`` ->
-``jphi_bs``, ...).  bouquet keeps its names and translates at the call, to whichever spelling the
-installed toolkit has, so the same code runs on upstream OFT and on PSFC_dev.
+bouquet uses OFT PSFC_dev's names for the bootstrap options (``scale_jbs``, ``isolate_edge_jbs``,
+``taper_edge_jphi``, ...) and results (``jphi_total``, ``jphi_bs``, ...).  Older toolkits spell them
+``scale_jBS``, ``isolate_edge_jBS``, ``total_j_phi``, ``isolated_j_BS``, ...: options are translated at
+the call and results on return, so the same code runs on upstream OFT and on PSFC_dev.
 """
 from __future__ import annotations
 
@@ -12,24 +12,25 @@ import inspect
 __all__ = ["OPTION_NAMES", "RESULT_NAMES", "toolkit_options", "toolkit_name", "results",
            "solve_with_bootstrap", "find_optimal_scale"]
 
-#: bouquet's option name -> the spellings a toolkit may use instead, newest first.
+#: bouquet's option name -> the spellings a toolkit may use instead.
 OPTION_NAMES = {
-    "scale_jBS": ("scale_jbs",),
-    "isolate_edge_jBS": ("isolate_edge_jbs",),
-    "parameterize_jBS": ("parameterize_jbs",),
-    "djBS_tol": ("djbs_tol",),
-    "taper_edge_jBS": ("taper_edge_jphi", "taper_edge_jbs"),
+    "scale_jbs": ("scale_jBS",),
+    "isolate_edge_jbs": ("isolate_edge_jBS",),
+    "parameterize_jbs": ("parameterize_jBS",),
+    "djbs_tol": ("djBS_tol",),
+    "taper_edge_jphi": ("taper_edge_jbs", "taper_edge_jBS"),
     "spike_prof": ("jphi_bs",),                       # find_optimal_scale
 }
 
-#: bouquet's result key -> the toolkit key that replaced it.
+#: bouquet's result key -> the keys a toolkit may return it under instead (OFT PSFC_dev's own
+#: ``jphi_saw``, its sawtooth current out, is bouquet's ``jphi_saw_out``).
 RESULT_NAMES = {
-    "total_j_phi": "jphi_total",
-    "j_BS": "jphi_bs_raw",
-    "isolated_j_BS": "jphi_bs",
-    "j_inductive": "jphi_ind",
-    "j_fixed": "jphi_fixed",
-    "j_saw": "jphi_saw",
+    "jphi_total": ("total_j_phi",),
+    "jphi_bs_raw": ("j_BS",),
+    "jphi_bs": ("isolated_j_BS",),
+    "jphi_ind": ("j_inductive",),
+    "jphi_fixed": ("j_fixed",),
+    "jphi_saw_out": ("jphi_saw", "j_saw"),
 }
 
 _OPTIONS = {}
@@ -77,9 +78,11 @@ def results(res):
     """A ``solve_with_bootstrap`` result as a plain dict, with bouquet's keys (:data:`RESULT_NAMES`)
     beside the toolkit's, so nothing is lost when a renamed toolkit's result object is copied."""
     out = dict(res)
-    for old, new in RESULT_NAMES.items():
-        if old not in out and new in out:
-            out[old] = out[new]
+    for name, alts in RESULT_NAMES.items():
+        if name not in out:
+            alt = next((a for a in alts if a in out), None)
+            if alt is not None:
+                out[name] = out[alt]
     return out
 
 

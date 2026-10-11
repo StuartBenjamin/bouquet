@@ -40,7 +40,7 @@ class _Geo:
 
 def _raw():
     j = 2.0e5 * np.exp(-0.5 * ((X - 0.95) / 0.03) ** 2) + 5.0e4 * (1 - X)
-    return {"j_BS": j, "isolated_j_BS": j.copy(), "j_inductive": 1e6 * (1 - X)}
+    return {"jphi_bs_raw": j, "jphi_bs": j.copy(), "jphi_ind": 1e6 * (1 - X)}
 
 
 @pytest.fixture()
@@ -55,18 +55,18 @@ def test_the_upstream_projection_is_undone_and_converted_with_kappa(
                         lambda *a, **k: P.SWB_JBS_RAVG_OVER_F)
     g = _Geo()
     raw = _raw()
-    out = TI.swb_result_toroidal(g, raw, X, scale_jBS=0.8)
+    out = TI.swb_result_toroidal(g, raw, X, scale_jbs=0.8)
     _, F, _, _, _ = g.get_profiles(npsi=N)
     rav = g.get_q(npsi=N)[2]
     B2 = g.sauter_fc(npsi=N)[-1]["<|B|^2>"]
     # the 6116d5f net factor F^2 <1/R> / (<R> <B^2>), linear: scale-free
     net = F ** 2 * rav["<1/R>"] / (rav["<R>"] * B2)
-    np.testing.assert_allclose(out["j_BS"], net * raw["j_BS"], rtol=1e-13)
-    np.testing.assert_array_equal(out["swb_raw_j_BS"], raw["j_BS"])
-    np.testing.assert_array_equal(out["j_inductive"], raw["j_inductive"])
+    np.testing.assert_allclose(out["jphi_bs_raw"], net * raw["jphi_bs_raw"], rtol=1e-13)
+    np.testing.assert_array_equal(out["swb_raw_jphi_bs_raw"], raw["jphi_bs_raw"])
+    np.testing.assert_array_equal(out["jphi_ind"], raw["jphi_ind"])
     assert out["swb_conversion"] == P.swb_conversion_record(
         P.SWB_JBS_RAVG_OVER_F)
-    assert raw["j_BS"] is not out["j_BS"]          # input untouched
+    assert raw["jphi_bs_raw"] is not out["jphi_bs_raw"]          # input untouched
 
 
 @pytest.mark.parametrize("scale", [1.0, 0.7])
@@ -79,10 +79,10 @@ def test_a_tokamaker_jphi_toolkit_loses_p_g_at_unit_scale(uniform,
     assert np.max(np.abs(PG)) > 0.0
     raw = _raw()
     # this toolkit returns scale * (kappa<j.B> + p'G)
-    kjb = raw["j_BS"]
-    raw = dict(raw, j_BS=scale * (kjb + PG), isolated_j_BS=scale * (kjb + PG))
-    out = TI.swb_result_toroidal(g, raw, X, scale_jBS=scale)
-    np.testing.assert_allclose(out["j_BS"], scale * kjb, rtol=1e-12,
+    kjb = raw["jphi_bs_raw"]
+    raw = dict(raw, jphi_bs_raw=scale * (kjb + PG), jphi_bs=scale * (kjb + PG))
+    out = TI.swb_result_toroidal(g, raw, X, scale_jbs=scale)
+    np.testing.assert_allclose(out["jphi_bs_raw"], scale * kjb, rtol=1e-12,
                                atol=1e-9 * np.max(np.abs(kjb)))
 
 
@@ -95,20 +95,20 @@ def test_a_toolkit_reporting_its_p_g_apart_is_taken_as_it_splits(uniform, monkey
     and the legacy inductive carries the p'G."""
     monkeypatch.setattr(P, "swb_jbs_convention", lambda *a, **k: P.SWB_JBS_TOROIDAL)
     kjb, pg, taper = 1e5 * (1.0 - X), 2e4 * X, np.where(X > 0.9, 0.5, 1.0)
-    raw = {"j_BS": kjb, "isolated_j_BS": scale * taper * kjb, "jphi_pd_raw": pg,
-           "jphi_pd": taper * pg, "total_j_phi": np.ones(N), "j_inductive": np.ones(N)}
-    out = TI.swb_result_toroidal(None, raw, X, scale_jBS=scale, isolate_edge_jBS=isolate)
-    np.testing.assert_array_equal(out["j_BS"], kjb)
-    np.testing.assert_array_equal(out["isolated_j_BS"], scale * taper * kjb)
-    np.testing.assert_array_equal(out["j_inductive"], 1.0 + taper * pg)
+    raw = {"jphi_bs_raw": kjb, "jphi_bs": scale * taper * kjb, "jphi_pd_raw": pg,
+           "jphi_pd": taper * pg, "jphi_total": np.ones(N), "jphi_ind": np.ones(N)}
+    out = TI.swb_result_toroidal(None, raw, X, scale_jbs=scale, isolate_edge_jbs=isolate)
+    np.testing.assert_array_equal(out["jphi_bs_raw"], kjb)
+    np.testing.assert_array_equal(out["jphi_bs"], scale * taper * kjb)
+    np.testing.assert_array_equal(out["jphi_ind"], 1.0 + taper * pg)
 
 
 def test_an_isolated_spike_on_a_tokamaker_jphi_toolkit_is_refused(
         uniform, monkeypatch):
     monkeypatch.setattr(P, "swb_jbs_convention",
                         lambda *a, **k: P.SWB_JBS_TOROIDAL)
-    with pytest.raises(RuntimeError, match="isolate_edge_jBS"):
-        TI.swb_result_toroidal(_Geo(), _raw(), X, isolate_edge_jBS=True)
+    with pytest.raises(RuntimeError, match="isolate_edge_jbs"):
+        TI.swb_result_toroidal(_Geo(), _raw(), X, isolate_edge_jbs=True)
 
 
 def test_an_unknown_toolkit_is_refused_not_guessed(uniform, monkeypatch):
@@ -120,7 +120,7 @@ def test_an_unknown_toolkit_is_refused_not_guessed(uniform, monkeypatch):
 
 
 def test_the_archived_pressure_term_is_p_g_of_the_held_state():
-    """B.md item 3: the legacy archive's j_pressure is p'(<R> -
+    """B.md item 3: the legacy archive's jphi_pd is p'(<R> -
     F^2<1/R>/<B^2>) of the state the group archives, positive frame."""
     g = _Geo()
     got = TI.archived_pressure_term(g, X, 1e-3, "psi_n")

@@ -148,7 +148,7 @@ def synthetic_ida_sigma(psi_N, channel):
     Notes
     -----
     Used by the D3D-like example notebook and the backend golden tests as a
-    deterministic, non-proprietary uncertainty model.  The j_phi envelope is
+    deterministic, non-proprietary uncertainty model.  The jphi_total envelope is
     handled separately (flat 10 % fractional), as in the operational workflow.
     """
     key = _SIGMA_ALIASES.get(str(channel).strip().lower())

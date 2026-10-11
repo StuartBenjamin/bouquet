@@ -16,7 +16,7 @@ tested here is that identity and the ways it could quietly rot:
   * the THRESHOLDS.  The loop must read them from the same FilterConfig
     ``.filter()`` later cuts on.
   * the RNG STREAM.  With the feature off nothing may change, so the block
-    ``jBS_scales`` draw stays one ``size=n_equils`` call and the lazy
+    ``jbs_scales`` draw stays one ``size=n_equils`` call and the lazy
     extension is only reachable past that block.
 
 Solve-free throughout: the predicate takes raw numbers and contours, and the
@@ -380,10 +380,10 @@ def test_the_jbs_block_draw_is_untouched_when_the_feature_is_off():
     and the lazy extension reachable only past that block (``i >= len``)."""
     src = _gb_source()
     assert src.count("rng.uniform(lo, hi, size=n_equils)") == 1
-    assert "while i >= len(jBS_scales):" in src
+    assert "while i >= len(jbs_scales):" in src
     # the loop must go through the accessor, not index the array directly
-    assert "scale_jBS = _jBS_scale_for(count)" in src
-    assert "float(jBS_scales[count])" not in src
+    assert "scale_jbs = _jbs_scale_for(count)" in src
+    assert "float(jbs_scales[count])" not in src
 
 
 def test_a_boundary_bounded_target_refuses_to_run_without_a_reference():
@@ -1000,10 +1000,10 @@ def _solverless_bouquet(header, monkeypatch, recorder, *, coil_sets,
     b.mygs = SimpleNamespace(coil_sets=coil_sets)
     x = np.linspace(0.0, 1.0, 5)
     b.baseline = SimpleNamespace(
-        psi_N=x, psi_N_kinetic=x, Zeff=np.full(5, 1.5), j_phi=x, j_inductive=x,
-        j_BS=x, jBS_diff=None, ne=x, te=x, ni=x, ti=x, Ip_target=1.0e6,
+        psi_N=x, psi_N_kinetic=x, Zeff=np.full(5, 1.5), jphi_total=x, jphi_ind=x,
+        jphi_bs=x, jphi_bs_diff=None, ne=x, te=x, ni=x, ti=x, Ip_target=1.0e6,
         l_i_target=1.0, recon=None, pfile_bytes=None, eqdsk_bytes=None,
-        p_fast=None, j_NBI=None, j_RF=None)
+        p_fast=None, jphi_nbi=None, jphi_rf=None)
     return b
 
 
