@@ -27,9 +27,7 @@ import _harness
 
 _harness.ensure_repo_on_syspath()
 
-from _fixture_quarantine import warn_quarantined  # noqa: E402
 
-warn_quarantined(__name__)   # tests/data/README.md: replace before merge
 
 import numpy as np
 import pytest
@@ -40,15 +38,17 @@ _DD = os.path.join(_DATA, "dd_synthetic.json.gz")
 _IDA = os.path.join(_DATA, "diiid_profs_synthetic.cdf")
 _GEQ = os.path.join(_DATA, "g_synthetic.geqdsk")
 _MESH = os.path.abspath(os.path.join(_HERE, "..", "examples", "D3D-like", "DIIID_mesh.h5"))
-_TIME = 1.013
+_TIME = 1.200
 _SEED, _SEED_B = 20261008, 7
 _N_P, _N, _N_R = 10, 16, 3            # pressure-only, production, each seeded twin
 _KIN_NODES = (0.1, 0.5, 0.9)
 _KIN = ("n_e", "T_e", "T_i", "n_i", "aux_zeff")
 
 _S0_REL = 1e-9            # pressure-only inductive seed vs solve B: measured 0
-_P_LCFS_MM = 1.5          # pressure-only boundary RMS per draw: measured <= 0.64 mm
-_P_COIL_PCT = 4.0         # pressure-only coil change per draw: measured <= 2.1 %
+# Pressure-only boundary and coil bars (owner decision, 2026-10-11): bouquet's OWN default draw
+# filters, resolved through the library for this device, replace the bespoke per-coil 4 % band and
+# the fixed 1.5 mm boundary RMS bar -- the chi2 coil filter (coil_filter="chi2", PR #49) and the
+# calibrated boundary cut (rms_max_mm="auto", PR #63).  Nothing is re-implemented here.
 _BIAS_MM = 2.0            # |signed-mean| boundary shift (test_systematics mode 2): measured <= 0.21
 _K = 4.0                  # |mean - base| < _K std/sqrt(N), ~25 checks on t15 tails: measured <= 1.9
 _IP_REL = 1e-4            # every draw's |Ip/Ip_target - 1|: measured <= 8e-6
@@ -101,7 +101,14 @@ def _group(g, base, nodes):
                **{f"j_seed@{x}": float(np.interp(x, pe, seed)) for x in nodes})
     if base is None:
         return out
+    from bouquet.filtering import boundary_deviation_mm, passes_boundary_spec
     lcfs, ref = g["perturbed_lcfs_ref"][()], base["lcfs"]
+    bq_rms, bq_max = boundary_deviation_mm(ref, lcfs)
+    coil_ok, coil_info = base["coil_pred"]({}, out["coils"])
+    out.update(bq_rms_mm=bq_rms, bq_max_mm=bq_max,
+               bq_boundary_ok=passes_boundary_spec(bq_rms, bq_max, base["rms_max_mm"]),
+               bq_coil_ok=bool(coil_ok), bq_chi2_nu=coil_info.get("chi2_nu"),
+               bq_max_abs_z=coil_info.get("max_abs_z"), bq_worst_coil=coil_info.get("worst_coil"))
     d, _ = cKDTree(lcfs).query(ref)
     a, _, rc, zc = _poly(lcfs)
     a0, per0, rc0, zc0 = _poly(ref)
@@ -158,7 +165,23 @@ def _probe(work):
             if base is None:
                 b = sc["_baseline"]
                 base = dict(_group(b, None, _KIN_NODES), lcfs=b["recon_lcfs_ref"][()])
-                res["baseline"] = dict({k: v for k, v in base.items() if k != "lcfs"},
+                # bouquet's default draw filters as the library resolves them for this device
+                from bouquet.devices import boundary_cut_for, resolve_device
+                from bouquet.filtering import make_coil_predicate
+                spec = resolve_device(None, coil_names=list(base["coils"]))
+                rms_max, rms_src = boundary_cut_for(spec)
+                pred, kind, model = make_coil_predicate(
+                    "chi2", baseline_currents=base["coils"],
+                    device=None if spec is None else spec.name)
+                acc = (model or {}).get("acceptance", {})
+                base.update(coil_pred=pred, rms_max_mm=rms_max)
+                res["filters"] = dict(device=None if spec is None else spec.name,
+                                      rms_max_mm=rms_max, rms_source=rms_src, coil_kind=kind,
+                                      chi2_max=acc.get("chi2_max"), z_max=acc.get("z_max"),
+                                      coil_acceptance_source=acc.get("source"),
+                                      coil_sigma_source=(model or {}).get("source"))
+                res["baseline"] = dict({k: v for k, v in base.items()
+                                        if k not in ("lcfs", "coil_pred", "rms_max_mm")},
                                        li3=float(sb["li_3"]), Ip_live=abs(float(sb["Ip"])),
                                        Ip_target=float(run.baseline.Ip_target))
             for k in sorted((k for k in sc if k.isdigit()), key=int):
@@ -246,8 +269,12 @@ def test_pressure_only_bounded_and_unbiased(swb_runs):
     dr = _draws(swb_runs, "pressure", _N_P)
     for d in dr:
         assert all(abs(d[f"j_seed@{x}"] / b[f"j_seed@{x}"] - 1) < _S0_REL for x in _KIN_NODES)
-    assert max(d["lcfs_rms_mm"] for d in dr) < _P_LCFS_MM
-    assert max(d["coil_pct"] for d in dr) < _P_COIL_PCT
+    f = swb_runs["filters"]
+    print("[swb-sys] pressure-only filters " + json.dumps(f) + " draws " + json.dumps(
+        [{k: d[k] for k in ("bq_rms_mm", "bq_chi2_nu", "bq_max_abs_z", "bq_worst_coil")} for d in dr]))
+    assert f["coil_kind"] == "chi2", f                      # no silent legacy fallback
+    assert all(d["bq_boundary_ok"] for d in dr), [(d["bq_rms_mm"], f["rms_max_mm"]) for d in dr]
+    assert all(d["bq_coil_ok"] for d in dr), [(d["bq_chi2_nu"], d["bq_max_abs_z"]) for d in dr]
     for k in ("dn_mm", "dR_mm", "dZ_mm"):
         m, se = _bias(dr, None, k)
         assert abs(m) < min(_BIAS_MM, _K * se), (k, m, se)

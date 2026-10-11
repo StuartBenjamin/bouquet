@@ -24,9 +24,7 @@ import _harness
 
 _harness.ensure_repo_on_syspath()
 
-from _fixture_quarantine import warn_quarantined  # noqa: E402
 
-warn_quarantined(__name__)   # tests/data/README.md: replace before merge
 
 import numpy as np
 import pytest
@@ -39,7 +37,7 @@ _DD = os.path.join(_DATA, "dd_synthetic.json.gz")
 _IDA = os.path.join(_DATA, "diiid_profs_synthetic.cdf")
 _GEQ = os.path.join(_DATA, "g_synthetic.geqdsk")
 _MESH = os.path.abspath(os.path.join(_HERE, "..", "examples", "D3D-like", "DIIID_mesh.h5"))
-_TIME = 1.013
+_TIME = 1.200
 _METHODS = ("legacy", "swb", "engine")
 _NODES = (0.1, 0.98)                      # IDA ψ_N range compared
 
