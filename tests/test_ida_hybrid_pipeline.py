@@ -143,7 +143,8 @@ def _probe(work, method):
     out = {"sigma0_dev": float(s0["max_dev_frac"]), "sigma0_passed": bool(s0["passed"]),
            "ni_from_zeff": bool(env["ni_from_zeff"]),
            "zeff_dne_set": env.get("zeff_dne") is not None,
-           "Z_imp": float(rb.Z_imp), "zeff_includes_fast": bool(rb.zeff_includes_fast)}
+           "Z_imp": float(rb.Z_imp), "zeff_includes_fast": bool(rb.zeff_includes_fast),
+           "split_convention": getattr(rb, "current_split_convention", None)}
     arr = {"env_sigma_ni": env["sigma_ni"]}
     for f in ("ne", "te", "ni", "ti", "Zeff", "z_fast", "z2_fast", "p_fast"):
         arr[f"reader_{f}"] = getattr(bl_reader, f)
@@ -152,9 +153,8 @@ def _probe(work, method):
         arr[f"run_{f}"] = getattr(rb, f)
     if getattr(rb, "jBS_diff", None) is not None:
         arr["run_jBS_diff"] = rb.jBS_diff
-    # the third current bucket (p'G as its own j_pressure) and the held
-    # "other" channel: present on the swb Baseline, absent on legacy, where
-    # p'G still rides inside j_inductive in memory
+    # the third current bucket (p'G as its own j_pressure; legacy records it
+    # beside a j_inductive that carries it) and the held "other" channel
     for f in ("j_pressure", "j_other"):
         if getattr(rb, f, None) is not None:
             arr[f"run_{f}"] = getattr(rb, f)
@@ -202,12 +202,14 @@ class TestPrepared:
         np.testing.assert_array_equal(a[f"run_{f}"], a[f"reader_{f}"])
 
     def test_the_split_sums_to_j_phi(self, run):
-        _, a = run
+        from bouquet.schema import SPLIT_PRESSURE_SEPARATE
+        meta, a = run
         tot = a["run_j_inductive"] + a["run_j_BS"] + a["run_j_NBI"] + a["run_j_RF"]
-        tot = tot + a.get("run_jBS_diff", 0.0)
-        # swb keeps p'G as its own bucket (j_pressure) and holds j_other;
-        # legacy carries p'G inside j_inductive, so the keys are absent there
-        tot = tot + a.get("run_j_pressure", 0.0) + a.get("run_j_other", 0.0)
+        tot = tot + a.get("run_jBS_diff", 0.0) + a.get("run_j_other", 0.0)
+        # swb keeps p'G as its own bucket (j_pressure); legacy's in-memory
+        # j_inductive carries it, and its j_pressure is only the record
+        if meta["split_convention"] == SPLIT_PRESSURE_SEPARATE:
+            tot = tot + a["run_j_pressure"]
         np.testing.assert_allclose(tot, a["run_j_phi"], rtol=0,
                                    atol=1e-9 * np.max(np.abs(a["run_j_phi"])))
 
