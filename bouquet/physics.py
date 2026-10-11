@@ -860,9 +860,8 @@ def edge_taper_weight(psi_N, psi0=0.999, shape=2):
 #:   half-width over the dl/B_p-weighted flux-surface average ``<R>`` (the
 #:   form of the internal-solve toolkit's ``use_sauter_eps``; the default of
 #:   the unreleased ``evaluate_jBS/4`` draft); ``R_min``, ``R_max`` and
-#:   ``<R>`` all from ``get_fsa`` on every build (:func:`geometric_eps`; the
-#:   fork's ``sauter_fc(return_eps=True)`` value is only recorded beside it,
-#:   :func:`fork_eps_diagnostic`).  ``R`` in ``nu*``: ``<R>`` from
+#:   ``<R>`` all from ``get_fsa`` on every build (:func:`geometric_eps`).
+#:   ``R`` in ``nu*``: ``<R>`` from
 #:   ``get_q``, as that convention used it.
 #: * ``"a_over_R"``: ``eps = <a>/<R>`` (OFT ``sauter_fc``'s dl/B_p-weighted
 #:   mean distance from the axis over ``<R>``), the definition of
@@ -1019,7 +1018,7 @@ def _accepts_kw(fn, name):
 
 #: The relative bar of the CROSS-BUILD SANITY CHECK between the
 #: internal-solve toolkit's ``sauter_fc(return_eps=True)`` and bouquet's
-#: ``get_fsa`` value of ``(R_max - R_min)/(2<R>)``.  The two builds trace and
+#: ``get_fsa`` value of ``(R_max - R_min)/(R_max + R_min)``.  The two builds trace and
 #: average the surfaces differently (the fork's ``<R>`` comes from a cut-cell
 #: quadrature): they agree to ~1.4e-4 on the synthetic D3D-like case, never to
 #: rounding.  This is a DIAGNOSTIC bar (a gross disagreement means a broken
@@ -1082,7 +1081,8 @@ def eps_r_over_R_geo(mygs, psi_u):
 
 def fork_eps_diagnostic(mygs, psi_u, sauter_fn=None):
     """The internal-solve toolkit's ``sauter_fc(return_eps=True)`` epsilon
-    beside bouquet's ``get_fsa`` value of the same formula, or ``None`` on a
+    beside bouquet's ``get_fsa`` value of the same formula, ``(R_max -
+    R_min)/(R_max + R_min)`` (:func:`eps_r_over_R_geo`), or ``None`` on a
     build without the option (detected by signature, never by catching a
     TypeError).
 
@@ -1101,7 +1101,7 @@ def fork_eps_diagnostic(mygs, psi_u, sauter_fn=None):
     if len(out) != 5:
         return None
     e_fork = np.asarray(out[4], dtype=float)
-    e_fsa, _r = geometric_eps(mygs, psi_u)
+    e_fsa = eps_r_over_R_geo(mygs, psi_u)[0]       # the toolkit's (R_max - R_min)/(R_max + R_min)
     with np.errstate(divide="ignore", invalid="ignore"):
         rel = np.abs(e_fork / e_fsa - 1.0)
     mx = float(np.nanmax(rel)) if np.any(np.isfinite(rel)) else float("nan")
@@ -1349,8 +1349,8 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     fc_u, r_sau, modb = _sfc(psi=psi_u.copy())[-3:]
     # eps and the R of nu* for the definition (R_nu None: <R> of get_q)
     eps_u, R_nu_u, eps_route = redl_eps(mygs, psi_u, eps_definition, r_sau)
-    # the fork's own (R_max - R_min)/(2<R>), recorded beside ours where the
-    # build has it and get_fsa was traced anyway -- never used
+    # the toolkit's own sauter_fc(return_eps) eps, (R_max - R_min)/(R_max + R_min),
+    # recorded beside ours where the build has it and get_fsa was traced anyway -- never used
     eps_fork_diag = (None if eps_route != "get_fsa"
                      else fork_eps_diagnostic(mygs, psi_u, _sfc))
     _, q_u, ravgs_q, *_rest = mygs.get_q(psi=psi_u.copy())

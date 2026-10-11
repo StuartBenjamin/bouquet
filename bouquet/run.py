@@ -4706,7 +4706,7 @@ class Bouquet(SwbBaseline):
         if self.config.generation.recalculate_j_BS:
             from .TokaMaker_interface import smooth_jbs_transition
             from .sampling import calc_cylindrical_li_proxy
-            from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
+            from .oft_bootstrap import solve_with_bootstrap
             from scipy.optimize import brentq
 
             gc = self.config.generation
@@ -6559,8 +6559,7 @@ class Bouquet(SwbBaseline):
         from .utils import pchip_derivative
         # OpenFUSIONToolkit only on the legacy route, the one that calls
         # solve_with_bootstrap (the engine's check runs on its own solver)
-        from OpenFUSIONToolkit.TokaMaker.bootstrap import \
-            solve_with_bootstrap
+        from .oft_bootstrap import solve_with_bootstrap
 
         if self.baseline is None or self.mygs is None:
             raise ValueError("call setup_solver() + prepare_baseline() / "

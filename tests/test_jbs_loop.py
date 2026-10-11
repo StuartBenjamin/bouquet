@@ -695,7 +695,7 @@ class _MockEq:
     ``nu*`` radii (``R_geo``; ``<R>``) are all distinguishable.
     ``fork=False`` (default) is OpenFUSIONToolkit main: ``sauter_fc`` ignores
     ``return_eps`` and ``R_min``/``R_max`` come from ``get_fsa``;
-    ``fork=True`` also returns ``(R_max - R_min)/(2<R>)`` from
+    ``fork=True`` also returns ``(R_max - R_min)/(R_max + R_min)`` from
     ``sauter_fc(return_eps=True)`` (the fork's 5-tuple), off by
     ``FORK_EPS_OFFSET`` relative -- as the real fork's cut-cell ``<R>`` is
     (~1.4e-4) -- so a test sees that the evaluation never uses it.
@@ -735,7 +735,8 @@ class _MockEq:
         if self.legacy:
             rav = np.vstack([rav["<R>"], rav["<1/R>"], rav["<a>"]])
         if self.fork and kw.get("return_eps"):
-            return (psi, fc, rav, modb, self.HALF_WIDTH * r / R
+            R_geo = R * (1.0 + self.RGEO_SHIFT * psi)
+            return (psi, fc, rav, modb, self.HALF_WIDTH * r / R_geo
                     * (1.0 + self.FORK_EPS_OFFSET))
         return (psi, fc, rav, modb)
 

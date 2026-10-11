@@ -214,7 +214,7 @@ def test_a_signature_without_return_eps_is_never_called_with_it(
 
 def test_the_fork_value_is_recorded_beside_ours_as_a_cross_build_check(oft):
     """CROSS-BUILD SANITY CHECK (a diagnostic, not a physics bar): where the
-    build has ``sauter_fc(return_eps=True)``, its ``(R_max - R_min)/(2<R>)``
+    build has ``sauter_fc(return_eps=True)``, its ``(R_max - R_min)/(R_max + R_min)``
     is stamped beside the ``get_fsa`` value of the same formula, with their
     largest relative difference and the documented 1e-3 bar.  The real fork
     and ``get_fsa`` agree to ~1.4e-4 (cut-cell ``<R>``), never to rounding,
@@ -224,7 +224,7 @@ def test_the_fork_value_is_recorded_beside_ours_as_a_cross_build_check(oft):
     _j, d = evaluate_jBS(eq, X, *_kin(X))
     fd = d["eps_fork_diagnostic"]
     assert fd is not None and fd["sanity_rtol"] == EPS_ROUTE_SANITY_RTOL
-    np.testing.assert_allclose(fd["eps_get_fsa"], _eps_expected(eq, X, _HW),
+    np.testing.assert_allclose(fd["eps_get_fsa"], _eps_expected(eq, X, "r_over_R_geo"),
                                rtol=1e-13)
     np.testing.assert_allclose(fd["eps_sauter_fc_return_eps"],
                                fd["eps_get_fsa"], rtol=EPS_ROUTE_SANITY_RTOL)

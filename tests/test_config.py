@@ -188,8 +188,9 @@ class TestBootstrapKwargs:
             cfg2 = BouquetConfig.from_dict(d)
         assert cfg2.generation.bootstrap_kwargs == {"djBS_tol": 1e-5}
         assert cfg2.generation.bootstrap_convergence_override is True
+        from bouquet.oft_bootstrap import toolkit_name
         known = _bootstrap_kwarg_names()
-        if known is not None and "djBS_tol" not in known:
+        if known is not None and toolkit_name("djBS_tol", known) not in known:
             assert any("installed OpenFUSIONToolkit" in str(x.message)
                        for x in w)
             # a NEW config with it is still refused on this toolkit
@@ -282,7 +283,8 @@ class TestBootstrapKwargValidation:
         switch the capability check off for the whole process."""
         import builtins
         import bouquet.config as _cfg
-        monkeypatch.setattr(_cfg, "_BOOTSTRAP_NAMES_CACHE", {})
+        import bouquet.oft_bootstrap as _ob
+        monkeypatch.setattr(_ob, "_OPTIONS", {})
         real_import = builtins.__import__
 
         def _no_oft(name, *a, **k):
@@ -291,7 +293,7 @@ class TestBootstrapKwargValidation:
             return real_import(name, *a, **k)
         monkeypatch.setattr(builtins, "__import__", _no_oft)
         assert _cfg._bootstrap_kwarg_names() is None
-        assert _cfg._BOOTSTRAP_NAMES_CACHE == {}
+        assert _ob._OPTIONS == {}
 
     def test_the_introspected_name_set_is_cached(self):
         assert _bootstrap_kwarg_names() is _bootstrap_kwarg_names()
