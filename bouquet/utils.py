@@ -301,6 +301,20 @@ def capture_native_output(enabled=True):
 #  Internal helpers
 # ====================================================================
 
+def isoflux_length_weights(pts, weight, n_ref):
+    """Isoflux weights for a closed contour, per unit length: weight ``weight`` at the spacing
+    of ``n_ref`` evenly spaced points, so the constraint's strength (sum of squared weights;
+    TokaMaker scales each least-squares row by its weight) does not depend on how densely
+    ``trace_surf`` samples the contour (tracer ~9000 points, cut-cell 1000).  A contour of zero
+    length raises."""
+    pts = np.asarray(pts, dtype=float)
+    seg = np.linalg.norm(np.roll(pts, -1, axis=0) - pts, axis=1)
+    if not seg.sum() > 0:
+        raise ValueError("isoflux contour has zero length")
+    ds = 0.5 * (seg + np.roll(seg, 1))
+    return float(weight) * np.sqrt(n_ref * ds / seg.sum())
+
+
 def safe_trace_surf(mygs, psi):
     r'''Snapshot/restore-wrapped trace_surf.
 
