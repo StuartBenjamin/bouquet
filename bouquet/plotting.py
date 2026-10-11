@@ -935,9 +935,9 @@ def _draw_boundary_panels(ax_lcfs, ax_zoom, boundaries):
     ref_pts = np.column_stack([bR0, bZ0])
     dev_sum = np.zeros(len(ref_pts))
     n_dev = 0
+    from .filtering import contour_distance
     for bR, bZ in boundaries[1:]:
-        tree = _cKDTree(np.column_stack([bR, bZ]))
-        d, _ = tree.query(ref_pts)
+        d = contour_distance(ref_pts, np.column_stack([bR, bZ]))
         dev_sum += d
         n_dev += 1
     if n_dev == 0:

@@ -126,14 +126,10 @@ def _ip_from_eqdsk_bytes(raw):
 
 
 def _boundary_devs(bl_boundary, grp):
-    from scipy.spatial import cKDTree
+    from bouquet.filtering import boundary_deviation_mm
     if bl_boundary is None or "perturbed_lcfs_ref" not in grp:
         return (np.nan, np.nan)
-    pert = np.asarray(grp["perturbed_lcfs_ref"][()], dtype=float)
-    tree = cKDTree(pert)
-    devs, _ = tree.query(bl_boundary)
-    return (float(np.sqrt(np.mean(devs ** 2)) * 1e3),
-            float(np.max(devs) * 1e3))
+    return boundary_deviation_mm(bl_boundary, grp["perturbed_lcfs_ref"][()])
 
 
 def _select_subset(draws):
@@ -824,8 +820,8 @@ def build_legacy_json(source, out_dir=_HERE):
     import sys
     sys.path.insert(0, os.path.abspath(os.path.join(_HERE, "..", "..")))
     from bouquet.schema import read_jbs_loop, read_current_split_convention
+    from bouquet.filtering import contour_distance
     from bouquet.utils import _read_coil_names
-    from scipy.spatial import cKDTree
     out_path = os.path.join(out_dir, LEGACY_JSON_NAME)
     prov = fixture_provenance(source=source, eqdsk="none")
     with h5py.File(source, "r") as hf:
@@ -897,8 +893,8 @@ def build_legacy_json(source, out_dir=_HERE):
         for i in in_spec[:LEGACY_REPLAY_DRAWS]:
             gi = g[str(i)]
             pert = np.asarray(gi["perturbed_lcfs_ref"][()], dtype=float)
-            d_sub, _ = cKDTree(pert).query(tree_sub)
-            d_full, _ = cKDTree(pert).query(lcfs)
+            d_sub = contour_distance(tree_sub, pert)
+            d_full = contour_distance(lcfs, pert)
             replay[str(i)] = dict(
                 summary[str(i)],
                 coil_names=list(_read_coil_names(gi)),
