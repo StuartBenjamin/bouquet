@@ -124,3 +124,24 @@ def test_two_units_end_to_end(tmp_path):
     wdirs = [d for d in os.listdir(os.path.join(out, "_work")) if any(
         f.endswith("_" + os.path.basename(_MESH)) for f in os.listdir(os.path.join(out, "_work", d)))]
     assert wdirs
+
+
+def test_run_unit_releases_the_dd_cache_after_the_baseline(tmp_path, monkeypatch):
+    # one unit per process: nothing needs the parsed dd once the baseline is read
+    import bouquet.parallel as P
+    from bouquet.run import Bouquet
+    q = str(tmp_path / "q")
+    units.add_units(q, units.make_units(_config(), [{}], ["u"]))
+    seen = {}
+
+    def fake_run_case_on(bouquet, case, header, hooks=None):
+        seen["hooks"] = hooks
+        raise RuntimeError("stop")
+    monkeypatch.setattr(P, "run_case_on", fake_run_case_on)
+    monkeypatch.setattr(Bouquet, "setup_solver", lambda self: self)
+    # run_unit's process-wide setup (thread pins, OFT on sys.path) must not leak into this process
+    monkeypatch.setattr("bouquet.threads.pin_threads", lambda: None)
+    monkeypatch.setattr("bouquet.paths.add_oft_to_path", lambda: None)
+    with pytest.raises(RuntimeError, match="stop"):
+        units.run_unit(q, "u", str(tmp_path / "out"))
+    assert seen["hooks"] == {"after_baseline": P.release_dd_cache}

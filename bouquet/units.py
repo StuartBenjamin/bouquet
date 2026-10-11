@@ -125,7 +125,7 @@ def run_unit(queue, uid, out_dir, work_root=None, keep_work=False, mesh=None):
     a worker-local copy of the mesh to use.  Raises on failure (no record written)."""
     from . import __version__
     from .config import BouquetConfig, CaseSpec
-    from .parallel import check_cases, run_case_on
+    from .parallel import check_cases, release_dd_cache, run_case_on
     from .paths import add_oft_to_path
     from .run import Bouquet
     from .threads import pin_threads
@@ -142,7 +142,9 @@ def run_unit(queue, uid, out_dir, work_root=None, keep_work=False, mesh=None):
                     group=unit.get("group"))
     check_cases([case], cfg)
     t0 = time.time()
-    res = run_case_on(Bouquet(cfg).setup_solver(), case, case.header)
+    # one unit per process: nothing reuses the parsed dd after the baseline
+    res = run_case_on(Bouquet(cfg).setup_solver(), case, case.header,
+                      hooks={"after_baseline": release_dd_cache})
     counts, sel, coord = archive_counts(res["path"])
     os.makedirs(out_dir, exist_ok=True)
     tmp = os.path.join(out_dir, f"{uid}.h5.tmp.{socket.gethostname()}.{os.getpid()}")

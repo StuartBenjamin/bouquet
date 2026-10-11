@@ -1056,6 +1056,14 @@ def check_cases(cases, config):
             raise ValueError(f"solve_method='swb' takes IDS sources only; cases {bad} are not ImasSource")
 
 
+def release_dd_cache(bouquet, case):
+    """``after_baseline`` hook: release the parsed dd(s) the baseline read cached (``io.imas._cached_dd``,
+    up to two ~GB files).  For a sweep over different dd files on few workers; a slice sweep over one
+    dd would then re-parse it per case."""
+    from .io.imas import clear_dd_cache
+    clear_dd_cache()
+
+
 def run_case_on(bouquet, case, header, hooks=None) -> dict:
     """One case on a standing solver: ``set_case`` -> ``before_baseline`` -> ``prepare_baseline`` ->
     ``after_baseline`` -> ``generate`` -> ``filter``.  Not ``Bouquet.run()``: its export would write a
