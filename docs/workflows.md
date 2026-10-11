@@ -922,7 +922,9 @@ Per-case setup a `CaseSpec` cannot express goes in two hooks, `f(bouquet, case)`
 `before_baseline` (after `set_case`; e.g. solver targets from this slice's g-file) and `after_baseline`
 (after `prepare_baseline`; anything on this baseline's grid, e.g. `uncertainty.aux_baselines`).  Workers
 are spawned, so a hook must be a module-level function; a lambda or closure is refused before the pool
-starts.
+starts.  Each worker keeps up to two parsed dd files cached (#72); for a sweep over many dd files,
+`after_baseline=bouquet.parallel.release_dd_cache` releases them after each baseline (a slice sweep over
+one dd would then re-parse it per case).  `bouquet.units` releases them in every unit.
 
 ## Many bouquets on a cluster
 
