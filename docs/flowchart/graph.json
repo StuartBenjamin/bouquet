@@ -2441,7 +2441,7 @@
    "label": "point_solver()",
    "file": "bouquet/run.py",
    "line": 749,
-   "desc": "Point the solver at this baseline's geometry (F0, LCFS, isoflux, saddles; solver_geometry.case_geometry) and reset to it. First step of every prepare_baseline, so one solver serves many baselines.",
+   "desc": "Point the solver at this baseline's geometry (F0, LCFS, isoflux, saddles; solver_geometry.case_geometry) and reset to it. Run by every prepare_baseline (after its generation-settings checks), so one solver serves many baselines.",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
   {

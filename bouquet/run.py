@@ -817,8 +817,6 @@ class Bouquet(SwbBaseline):
         from .experimental import warn_experimental_features
         self._experimental_features = warn_experimental_features(
             self.config, stacklevel=3)
-        if self.mygs is not None:
-            self.point_solver()
 
         # The engine-dependent settings (isolate_edge_jBS,
         # perturb_jind_in_anchor) are resolved HERE, once, for the engine
@@ -829,6 +827,8 @@ class Bouquet(SwbBaseline):
         # reassignment check: validate again where the run is resolved
         # (after the engine-dependent values are resolved for THIS engine)
         self._revalidate_generation_settings()
+        if self.mygs is not None:      # settings checked first: pointing reads the source
+            self.point_solver()
 
         # GenerationConfig.reconstruction_engine="unified": the ONE
         # reconstruction engine (bouquet.engine) builds the baseline for
