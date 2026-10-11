@@ -2085,42 +2085,14 @@ BOOTSTRAP_CONVERGENCE_KWARGS = frozenset({"djBS_tol", "saw_relax"})
 _LOADING_STORED_CONFIG = contextvars.ContextVar(
     "bouquet_loading_stored_config", default=False)
 
-_BOOTSTRAP_NAMES_CACHE: dict = {}
-
-
 def _bootstrap_kwarg_names():
     """Every keyword the INSTALLED toolkit's bootstrap entry points accept
-    (introspected).  ``None`` when OpenFUSIONToolkit is not importable, which
-    skips the capability check (the allow-list still applies).  A successful
-    introspection is cached per process; a failed one is not, so a config
-    built before ``add_oft_to_path()`` does not switch the check off for the
-    whole process.
-    """
-    if "names" in _BOOTSTRAP_NAMES_CACHE:
-        return _BOOTSTRAP_NAMES_CACHE["names"]
-    try:
-        import inspect
-
-        from OpenFUSIONToolkit.TokaMaker._core import TokaMaker
-        from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
-
-        # Only the entry points this toolkit has: on one without the
-        # internal solve, the accepted set is solve_with_bootstrap's own
-        # arguments, which is what it accepts there.
-        names = set()
-        for fn in (solve_with_bootstrap,
-                   getattr(TokaMaker, "solve_bootstrap", None),
-                   getattr(TokaMaker, "set_boot_ops", None)):
-            if fn is None:
-                continue
-            names |= {prm.name for prm in inspect.signature(fn).parameters.values()
-                      if prm.kind in (prm.POSITIONAL_OR_KEYWORD, prm.KEYWORD_ONLY)}
-        _BOOTSTRAP_NAMES_CACHE["names"] = frozenset(names) - {"self"}
-        return _BOOTSTRAP_NAMES_CACHE["names"]
-    except Exception:
-        # No OFT (unit tests, a docs build): cannot introspect, so do not
-        # guess; a wrong key then surfaces at the call.
-        return None
+    (:func:`bouquet.oft_bootstrap.toolkit_options`).  ``None`` when
+    OpenFUSIONToolkit is not importable, which skips the capability check (the
+    allow-list still applies).  bouquet's option names are matched through
+    :func:`bouquet.oft_bootstrap.toolkit_name`."""
+    from .oft_bootstrap import toolkit_options
+    return toolkit_options()
 
 
 #: The internal solve methods (GenerationConfig.solve_method).
@@ -2304,7 +2276,8 @@ def swb_bootstrap_kwargs(gc, known=None):
     else:
         if known is None:
             known = _bootstrap_kwarg_names()
-        if known is not None and "taper_edge_jBS" in known:
+        from .oft_bootstrap import toolkit_name
+        if known is not None and toolkit_name("taper_edge_jBS", known) in known:
             kw["taper_edge_jBS"] = False
     return kw
 
@@ -2408,7 +2381,8 @@ def validate_bootstrap_kwargs(bootstrap_kwargs, reserved=_BOOTSTRAP_RESERVED,
         known = _bootstrap_kwarg_names()
     if known is None:
         return
-    missing = sorted(to_check - set(known))
+    from .oft_bootstrap import toolkit_name
+    missing = sorted(k for k in to_check if toolkit_name(k, known) not in known)
     if missing:
         msg = (f"bootstrap_kwargs {missing}: the installed OpenFUSIONToolkit's "
                "solve_with_bootstrap / set_boot_ops do not take "

@@ -3356,10 +3356,7 @@ def perturb_kinetic_equilibrium(
     from scipy.optimize import root_scalar
     from scipy.interpolate import interp1d
     from OpenFUSIONToolkit.TokaMaker.util import get_jphi_from_GS
-    from OpenFUSIONToolkit.TokaMaker.bootstrap import (
-        solve_with_bootstrap,
-        find_optimal_scale,
-    )
+    from .oft_bootstrap import find_optimal_scale, solve_with_bootstrap
 
     # ----------------------------------------------------------------
     #  2.  Validate inputs and set up dual grids
@@ -7020,8 +7017,7 @@ def generate_bouquet(
                     # never calls SWB, so neither may depend on the bootstrap
                     # module importing.  (Inside this try, so a failed import
                     # still restores the coil bounds and reg below.)
-                    from OpenFUSIONToolkit.TokaMaker.bootstrap import (
-                        solve_with_bootstrap as _swb)
+                    from .oft_bootstrap import solve_with_bootstrap as _swb
                     _scale_ref = sigma0_reference_scale(jBS_scale_range)
                     _cache_results = _swb(
                         mygs, ne_cache, te_cache, ni_cache, ti_cache, Zeff,
@@ -8950,7 +8946,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     # is no grid for it to mismatch, and a non-scalar would already fail loudly
     # in that coercion rather than broadcasting silently.
 
-    from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
+    from .oft_bootstrap import solve_with_bootstrap
 
     _recon_swb_conv = None      # set where SWB runs (stamped on the result)
     _edge = resolve_edge_pressure(edge_pressure)

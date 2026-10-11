@@ -151,7 +151,7 @@ class SwbBaseline:
         ``psi_N``.  Returns the SWB result dict (its ``j_saw`` / ``saw_rho_m``
         / ``saw_n_dips`` only when ``swb_saw_q`` is set).
         """
-        from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
+        from .oft_bootstrap import solve_with_bootstrap
         from .TokaMaker_interface import strong_coil_reg
         from .config import swb_bootstrap_kwargs
         bl, mygs, gc = self.baseline, self.mygs, self.config.generation
