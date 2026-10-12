@@ -94,7 +94,7 @@ together if the pairing moves.
 
 | dataset | shape | read |
 |---------|-------|------|
-| `time` | (1,) int or float, ms | slice selection (1013 now) |
+| `time` | (1,) int or float, ms | slice selection (1200 now) |
 | `psi_n` | (n,) | the fit grid; starts at 0, may extend past 1 (now 150 nodes to 1.2) |
 | `n_e`, `T_e`, `T_12C6`, `Zeff`, `n_12C6`, `omega_tor_12C6` | (1, n) | kinetics (T_12C6 is T_i) |
 | `n_e_err`, `T_e_err`, `T_12C6_err`, `Zeff_err`, `n_12C6_err` | (1, n) | sigma envelopes |
