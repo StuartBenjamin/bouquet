@@ -2507,27 +2507,30 @@ def swb_result_toroidal(mygs, results, psi_N, coord="psi_n", scale_jBS=1.0,
     projects the Redl ``<j.B>`` by ``R_avg/F`` (+7 % at psi_N 0.5, +12-13 %
     at the pedestal unconverted on the synthetic D3D-like example) -- undone
     and converted with kappa, bit for bit the 6116d5f conversion; a toolkit
-    returning TokaMaker jphi gets ``p'G`` taken off (the third bucket
-    ``j_pressure``, owner decision D2).  Call it IMMEDIATELY after the SWB
+    returning TokaMaker jphi gets ``p'G`` taken off and added to ``j_inductive``
+    (the legacy in-memory convention, owner decision D2).  Call it IMMEDIATELY after the SWB
     call, on the equilibrium the call left in ``mygs``.  ``scale_jBS``: the
-    scale SWB applied; on the TokaMaker-jphi toolkit the raw output is
-    ``scale (kappa<j.B> + p'G)``, so it is converted at scale 1 and scaled
-    back (the R_avg/F conversion is linear: applied directly).  SWB's own
-    arrays are kept as ``swb_raw_j_BS`` / ``swb_raw_isolated_j_BS`` and the
-    stamp (:func:`bouquet.physics.swb_conversion_record`) as
+    scale SWB applied; a TokaMaker-jphi toolkit that does not report p'G apart
+    returns ``scale (kappa<j.B> + p'G)``, so it is converted at scale 1 and
+    scaled back (the R_avg/F conversion is linear: applied directly); one that
+    does (:func:`bouquet.physics.swb_reported_split`) is taken as it splits.
+    SWB's own arrays are kept as ``swb_raw_j_BS`` / ``swb_raw_isolated_j_BS``
+    and the stamp (:func:`bouquet.physics.swb_conversion_record`) as
     ``swb_conversion``.  ``grid_passed``: whether the call was given its grid
     (default: whenever the toolkit takes one, as
     :func:`bouquet.coords.swb_grid_kwargs` passes it); False for a call made
     on OFT's own uniform grid."""
     from .physics import (SWB_JBS_TOROIDAL, _swb_jbs_to_toroidal,
-                          swb_conversion_record, swb_jbs_convention)
+                          swb_conversion_record, swb_jbs_convention,
+                          swb_reported_split)
     conv = swb_jbs_convention()
-    if conv == SWB_JBS_TOROIDAL and bool(isolate_edge_jBS):
+    reported = swb_reported_split(results) if conv == SWB_JBS_TOROIDAL else None
+    if conv == SWB_JBS_TOROIDAL and reported is None and bool(isolate_edge_jBS):
         raise RuntimeError(
             "isolate_edge_jBS with a toolkit whose solve_with_bootstrap "
-            "returns TokaMaker jphi (kappa<j.B> + p'G): where p'G sits in "
-            "its isolated spike is not defined, so the field-aligned "
-            "bootstrap cannot be recovered; use isolate_edge_jBS=False")
+            "returns TokaMaker jphi (kappa<j.B> + p'G) without reporting "
+            "p'G apart (jphi_pd): where p'G sits in its isolated spike is "
+            "not defined; use isolate_edge_jBS=False")
     x = np.asarray(psi_N, dtype=float)
     if grid_passed is None:
         grid_passed = bool(coords._swb_grid_arg())
@@ -2547,12 +2550,20 @@ def swb_result_toroidal(mygs, results, psi_N, coord="psi_n", scale_jBS=1.0,
 
     raw_iso = np.asarray(results["isolated_j_BS"], dtype=float)
     raw_bs = np.asarray(results.get("j_BS", raw_iso), dtype=float)
-    fa_bs = _conv(raw_bs)
-    fa_iso = fa_bs if np.array_equal(raw_iso, raw_bs) else _conv(raw_iso)
+    if reported is not None:            # the toolkit's own split: p'G apart, exact
+        fa_bs, fa_iso, p_g = reported
+    else:
+        fa_bs = _conv(raw_bs)
+        fa_iso = fa_bs if np.array_equal(raw_iso, raw_bs) else _conv(raw_iso)
+        p_g = raw_iso - fa_iso          # what came off (TokaMaker-jphi toolkits)
     out = dict(results)
     out.update(swb_raw_j_BS=raw_bs, swb_raw_isolated_j_BS=raw_iso,
                j_BS=fa_bs, isolated_j_BS=fa_iso,
-               swb_conversion=swb_conversion_record(conv))
+               swb_conversion=swb_conversion_record(conv, reported is not None))
+    if conv == SWB_JBS_TOROIDAL and "j_inductive" in results:
+        # p'G stays in the current: the legacy inductive carries it (D2's
+        # in-memory legacy convention)
+        out["j_inductive"] = np.asarray(results["j_inductive"], dtype=float) + p_g
     return out
 
 

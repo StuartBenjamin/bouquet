@@ -534,6 +534,19 @@ def swb_pressure_term(mygs, n, psi_pad=1e-3, psi=None):
     return sign * g["pp"] * (g["R"] - g["F"] ** 2 * g["inv_R"] / g["B2"])
 
 
+def swb_reported_split(res):
+    """``(j_BS, isolated_j_BS, j_pressure)`` as a toolkit that reports p'G apart from its bootstrap
+    returns them (OFT a9d0c32+: ``jphi_bs`` / ``jphi_bs_raw`` field-aligned, ``jphi_pd`` the p'G,
+    tapered, never scaled; ``jphi_total`` counts it): bouquet's own buckets (D2), also with the edge
+    spike isolated.  ``None`` when the result carries no ``jphi_pd`` (the caller then takes p'G off
+    the bootstrap itself)."""
+    if "jphi_pd" not in res:
+        return None
+    iso = np.asarray(res["isolated_j_BS"], dtype=float)
+    return (np.asarray(res.get("j_BS", iso), dtype=float), iso,
+            np.asarray(res["jphi_pd"], dtype=float))
+
+
 def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad, psi=None, convention=None):
     """``solve_with_bootstrap``'s ``j_BS`` (or ``isolated_j_BS``) as the
     field-aligned toroidal bootstrap ``kappa <j.B>`` bouquet stores
@@ -571,12 +584,14 @@ def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad, psi=None, convention=None):
                        "avg_B2": g["B2"]})
 
 
-def swb_conversion_record(convention=None) -> dict:
+def swb_conversion_record(convention=None, reported=False) -> dict:
     """The archive stamp of an SWB-derived bootstrap: the toolkit's output
-    convention and what :func:`_swb_jbs_to_toroidal` applied to it."""
+    convention and what was applied to it (:func:`_swb_jbs_to_toroidal`, or
+    nothing when the toolkit ``reported`` p'G apart, :func:`swb_reported_split`)."""
     conv = swb_jbs_convention() if convention is None else convention
     applied = {SWB_JBS_RAVG_OVER_F: "kappa F/<R> (undo R_avg/F, then kappa)",
-               SWB_JBS_TOROIDAL: "minus p'G (p'G is j_pressure)"}
+               SWB_JBS_TOROIDAL: ("none: the toolkit's split (jphi_bs, p'G = jphi_pd)"
+                                  if reported else "minus p'G")}
     return {"swb_jbs_convention": conv,
             "swb_jbs_conversion": applied[conv]}
 

@@ -86,6 +86,23 @@ def test_a_tokamaker_jphi_toolkit_loses_p_g_at_unit_scale(uniform,
                                atol=1e-9 * np.max(np.abs(kjb)))
 
 
+@pytest.mark.parametrize("isolate", [False, True])
+@pytest.mark.parametrize("scale", [1.0, 0.7])
+def test_a_toolkit_reporting_its_p_g_apart_is_taken_as_it_splits(uniform, monkeypatch, scale,
+                                                                isolate):
+    """A toolkit returning the field-aligned bootstrap and p'G apart (OFT a9d0c32+: jphi_pd,
+    tapered, never scaled): its bootstraps are kept, isolated ones too, with no geometry pass,
+    and the legacy inductive carries the p'G."""
+    monkeypatch.setattr(P, "swb_jbs_convention", lambda *a, **k: P.SWB_JBS_TOROIDAL)
+    kjb, pg, taper = 1e5 * (1.0 - X), 2e4 * X, np.where(X > 0.9, 0.5, 1.0)
+    raw = {"j_BS": kjb, "isolated_j_BS": scale * taper * kjb, "jphi_pd_raw": pg,
+           "jphi_pd": taper * pg, "total_j_phi": np.ones(N), "j_inductive": np.ones(N)}
+    out = TI.swb_result_toroidal(None, raw, X, scale_jBS=scale, isolate_edge_jBS=isolate)
+    np.testing.assert_array_equal(out["j_BS"], kjb)
+    np.testing.assert_array_equal(out["isolated_j_BS"], scale * taper * kjb)
+    np.testing.assert_array_equal(out["j_inductive"], 1.0 + taper * pg)
+
+
 def test_an_isolated_spike_on_a_tokamaker_jphi_toolkit_is_refused(
         uniform, monkeypatch):
     monkeypatch.setattr(P, "swb_jbs_convention",

@@ -37,8 +37,9 @@ settings (`swb_*`, including the Ip acceptance `swb_ip_tol`, default 5e-3,
 with a warning for any solve accepted above 1e-4) never reach the engine.
 swb's bootstrap is the toolkit's SWB output converted to the field-aligned
 `kappa <j.B>` for the installed toolkit's own output convention
-(`physics._swb_jbs_to_toroidal`); its pressure-driven `p'G` is the third
-bucket `j_pressure`, archived as such. Known asymmetry: the SWB sawtooth
+(`physics._swb_jbs_to_toroidal`), or taken as returned from a toolkit that
+reports `p'G` apart (`jphi_pd`, OFT PSFC_dev); the pressure-driven `p'G` is
+the third bucket `j_pressure`, archived as such. Known asymmetry: the SWB sawtooth
 reset (`swb_saw_*`) has no engine counterpart.
 The three methods share one draw loop and differ only through a draw-method
 object (`bouquet.draw_methods`); docs/draw-methods.md has the hook-by-hook

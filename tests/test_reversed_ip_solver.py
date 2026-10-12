@@ -101,15 +101,31 @@ def _oft_importable():
         return False
 
 
+def _isolate_refused():
+    """A toolkit whose solve_with_bootstrap returns TokaMaker jphi without
+    reporting p'G apart (no ``jphi_pd`` boot profile) refuses
+    ``isolate_edge_jBS`` at its SWB calls (where p'G sits in the isolated spike
+    is not defined)."""
+    try:
+        from OpenFUSIONToolkit.TokaMaker import _core
+        from bouquet.physics import SWB_JBS_TOROIDAL, swb_jbs_convention
+        return (swb_jbs_convention() == SWB_JBS_TOROIDAL
+                and "jphi_pd" not in getattr(_core, "_BOOT_PROF_NAMES", ()))
+    except Exception:
+        return False
+
+
 def _configs():
     """The closure paths, doubled with the bootstrap loop OFF/ON on builds that
-    carry ``GenerationConfig.jbs_self_consistent``."""
+    carry ``GenerationConfig.jbs_self_consistent`` (the loop-off isolate case
+    only where the toolkit takes it)."""
     from bouquet.config import GenerationConfig
     if not hasattr(GenerationConfig(), "jbs_self_consistent"):
         return list(_BASE_CONFIGS)
     out = []
     for name, ov in _BASE_CONFIGS:
-        out.append((name + "_legacy", dict(ov, jbs_self_consistent=False)))
+        if not (ov.get("isolate_edge_jBS") and _isolate_refused()):
+            out.append((name + "_legacy", dict(ov, jbs_self_consistent=False)))
         out.append((name + "_loop", dict(ov, jbs_self_consistent=True)))
     return out
 
