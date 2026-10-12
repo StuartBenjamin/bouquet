@@ -202,55 +202,63 @@ class SwbBaseline:
         _swb_jbs_to_toroidal`, for the installed toolkit's own output
         convention), ``j_pressure`` the pressure-driven ``p'G`` of the solved
         equilibrium (the third bucket, owner decision D2; tapered with the
-        edge taper when it is on), and ``j_inductive`` the rest, so
+        edge taper when it is on), and ``j_inductive`` the rest -- or, from a
+        toolkit that reports p'G apart (``jphi_pd``), its own split as
+        returned (:func:`bouquet.physics.swb_reported_split`) -- so
         ``total_j_phi = j_inductive + isolated_j_BS + j_pressure + fixed``
         exactly.  SWB's own arrays are kept as ``swb_raw_*``.  Evaluated on
         the equilibrium the SWB call left in ``mygs``, before anything else
         touches it."""
         from .physics import (SWB_JBS_TOROIDAL, _swb_jbs_to_toroidal,
-                              swb_edge_taper, swb_jbs_convention,
-                              swb_pressure_term)
+                              swb_conversion_record, swb_edge_taper,
+                              swb_jbs_convention, swb_pressure_term,
+                              swb_reported_split)
         gc = self.config.generation
         conv = swb_jbs_convention()
-        if conv == SWB_JBS_TOROIDAL and bool(gc.isolate_edge_jBS):
+        reported = swb_reported_split(res) if conv == SWB_JBS_TOROIDAL else None
+        if conv == SWB_JBS_TOROIDAL and reported is None and bool(gc.isolate_edge_jBS):
             raise RuntimeError(
                 "isolate_edge_jBS with a toolkit whose solve_with_bootstrap "
-                "returns TokaMaker jphi (kappa<j.B> + p'G): where p'G sits in "
-                "its isolated spike is not defined, so the field-aligned "
-                "bootstrap cannot be recovered; use isolate_edge_jBS=False")
+                "returns TokaMaker jphi (kappa<j.B> + p'G) without reporting "
+                "p'G apart (jphi_pd): where p'G sits in its isolated spike is "
+                "not defined; use isolate_edge_jBS=False")
         mygs = self.mygs
         x = np.asarray(psi_N, dtype=float)
         grid = (np.asarray(coords.psi_at(mygs, x, coord), dtype=float)
                 if coords._swb_grid_arg() else None)
-        P = swb_pressure_term(mygs, x.size, 1e-3, grid)
-        # the edge taper multiplies every toroidal component SWB returns,
-        # p'G included: the SAME weight tapers j_pressure and is taken off
-        # the bootstrap (review of #78, B3: an untapered p'G subtracted from
-        # the tapered output left j_BS short by (1-w)P, moved into
-        # j_inductive)
-        # (the call's own kwargs, swb_bootstrap_kwargs: psi0 from
-        # swb_edge_taper_psi0, a taper_edge_shape from bootstrap_kwargs)
-        w = None
-        if gc.swb_edge_taper_psi0 is not None:
-            w = swb_edge_taper(
-                dict(gc.bootstrap_kwargs, taper_edge_jBS=True,
-                     taper_edge_psi0=float(gc.swb_edge_taper_psi0)),
-                coords.swb_grid(x) if grid is None else grid)
-            P = P * w
         raw_iso = np.asarray(res["isolated_j_BS"], dtype=float)
         raw_bs = np.asarray(res.get("j_BS", raw_iso), dtype=float)
         raw_ind = np.asarray(res["j_inductive"], dtype=float)
-        fa_bs = _swb_jbs_to_toroidal(mygs, raw_bs, 1e-3, psi=grid,
-                                     convention=conv, taper=w)
-        fa_iso = (fa_bs if np.array_equal(raw_iso, raw_bs) else
-                  _swb_jbs_to_toroidal(mygs, raw_iso, 1e-3, psi=grid,
-                                       convention=conv, taper=w))
+        if reported is not None:        # the toolkit's own split is bouquet's
+            fa_bs, fa_iso, P = reported
+            j_ind = raw_ind
+        else:
+            P = swb_pressure_term(mygs, x.size, 1e-3, grid)
+            # the edge taper multiplies every toroidal component SWB returns,
+            # p'G included: the SAME weight tapers j_pressure and is taken off
+            # the bootstrap (review of #78, B3: an untapered p'G subtracted from
+            # the tapered output left j_BS short by (1-w)P, moved into
+            # j_inductive)
+            # (the call's own kwargs, swb_bootstrap_kwargs: psi0 from
+            # swb_edge_taper_psi0, a taper_edge_shape from bootstrap_kwargs)
+            w = None
+            if gc.swb_edge_taper_psi0 is not None:
+                w = swb_edge_taper(
+                    dict(gc.bootstrap_kwargs, taper_edge_jBS=True,
+                         taper_edge_psi0=float(gc.swb_edge_taper_psi0)),
+                    coords.swb_grid(x) if grid is None else grid)
+                P = P * w
+            fa_bs = _swb_jbs_to_toroidal(mygs, raw_bs, 1e-3, psi=grid,
+                                         convention=conv, taper=w)
+            fa_iso = (fa_bs if np.array_equal(raw_iso, raw_bs) else
+                      _swb_jbs_to_toroidal(mygs, raw_iso, 1e-3, psi=grid,
+                                           convention=conv, taper=w))
+            j_ind = raw_ind + (raw_iso - fa_iso - P)
         res = dict(res)
         res.update(swb_raw_j_BS=raw_bs, swb_raw_isolated_j_BS=raw_iso,
                    swb_raw_j_inductive=raw_ind, j_BS=fa_bs,
-                   isolated_j_BS=fa_iso, j_pressure=P,
-                   j_inductive=raw_ind + (raw_iso - fa_iso - P),
-                   swb_jbs_convention=conv)
+                   isolated_j_BS=fa_iso, j_pressure=P, j_inductive=j_ind,
+                   **swb_conversion_record(conv, reported is not None))
         return res
 
     def _swb_state(self, res, j_seed, psi_pad=1e-3):
@@ -460,10 +468,9 @@ def build_swb_context(bq, env):
     if bl.coil_reg_target is None or bl.swb_baseline is None:
         raise ValueError('imas_baseline="swb": the baseline was not prepared '
                          'by _swb_imas_baseline (no solve A coils)')
-    bq._swb_solve(bq._swb_baseline_kinetics(), bl.swb_seed_profile,
-                  coil_reg_target=bl.coil_reg_target)
+    res_b = bq._swb_solve(bq._swb_baseline_kinetics(), bl.swb_seed_profile,
+                          coil_reg_target=bl.coil_reg_target)
     _ic = bl.ip_closure or {}
-    from .physics import swb_conversion_record
     stamp = {
         "imas_baseline": "swb",
         # the swb-only acceptance and options this run used (D4, E6)
@@ -472,7 +479,7 @@ def build_swb_context(bq, env):
         "swb_ip_rel_err_solve_A": _ic.get("ip_rel_err_solve_A"),
         "swb_edge_taper_psi0": ("off" if gc.swb_edge_taper_psi0 is None
                                 else float(gc.swb_edge_taper_psi0)),
-        **swb_conversion_record(),
+        **{k: res_b[k] for k in ("swb_jbs_convention", "swb_jbs_conversion")},
         "swb_alpha": float(bl.ohm_scale),
         "swb_alpha_solve_A": _ic.get("alpha_solve_A"),
         "swb_li_3_solve_A": _ic.get("li_3_solve_A"),

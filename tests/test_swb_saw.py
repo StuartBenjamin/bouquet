@@ -499,6 +499,29 @@ def test_isolate_edge_is_refused_with_a_toroidal_swb(fake_swb):
         ns._swb_imas_baseline()
 
 
+def test_a_toolkit_reporting_p_g_apart_is_split_as_it_reports(fake_swb):
+    """OFT a9d0c32+: jphi_bs field-aligned, jphi_pd the p'G, jphi_total counts both. Its split is
+    bouquet's as returned (SWB's own inductive), the isolated spike included."""
+    def swb(mygs, ne, te, ni, ti, zeff, ip, inductive_jphi, **kw):
+        fake_swb.append(kw)
+        x = kw["x"]
+        j_ind = 1.0123 * np.asarray(inductive_jphi)
+        j_bs, pd = 1e5 * (1.0 - x) ** 2, 2e4 * x * (1.0 - x)
+        return {"j_inductive": j_ind, "isolated_j_BS": j_bs, "jphi_pd": pd,
+                "total_j_phi": j_ind + j_bs + pd + kw["jphi_fixed"]}
+    _swap_swb(swb)
+    ns = _run(isolate_edge_jBS=True)
+    ns._swb_imas_baseline()
+    bl = ns.baseline
+    x = bl.psi_N
+    np.testing.assert_array_equal(bl.j_BS, 1e5 * (1.0 - x) ** 2)
+    np.testing.assert_array_equal(bl.j_pressure, 2e4 * x * (1.0 - x))
+    np.testing.assert_array_equal(bl.j_inductive, 1.0123 * bl.swb_seed_profile)
+    np.testing.assert_allclose(
+        bl.j_inductive + bl.j_BS + bl.j_pressure + bl.j_NBI + bl.j_RF + bl.j_other, bl.j_phi,
+        rtol=0, atol=1e-12 * np.max(np.abs(bl.j_phi)))
+
+
 def test_a_negative_seed_redraw_refuses_the_draw():
     """Review PR69 B3: after SWB_JIND_MAX_RESAMPLES non-positive GPR redraws
     the draw is REFUSED (rejection code swb_jind_redraw_refused), never run

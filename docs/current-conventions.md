@@ -99,7 +99,8 @@ discretisation) and the first iterate already carries the right current.
   - the toolkit generation with `solve_with_bootstrap(x=...)` (the toroidal-flux / fixed-current
     branch, not yet upstream): the bootstrap enters `jphi_total` by (A7) with p′G (its Fortran
     `jphi_bs_update` / `calculate_bootstrap` keep the Redl ⟨J·B⟩ in `boot_profs['jdotb_bs_raw']`);
-    bouquet takes p′G off it;
+    bouquet takes p′G off it, unless the toolkit reports p′G apart (`jphi_pd`, OFT PSFC_dev), whose
+    split is taken as returned (`physics.swb_reported_split`);
   - any other build is refused rather than converted on a guess.
 - The same branch normalises I_p in `jphi_update` / `jphi_bs_update` with (A9c).
 - bouquet: currents are stored as J_TM, the bootstrap as κ⟨J·B⟩ and p′G as `j_pressure`; FUSE/IMAS

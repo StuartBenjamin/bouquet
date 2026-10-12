@@ -182,8 +182,13 @@ def _imas_probe(outdir, part):
     # bar holds on the fork too (the fork's own eps is not bouquet's -- a2)
     _swb_par = inspect.signature(B.solve_with_bootstrap).parameters
     _use_sauter = _swb_par.get("use_sauter_eps")
-    swb_eps = "a_over_R"
+    swb_eps, _R_key = "a_over_R", "R_avg"
     _swb_eps_kw = ({} if _use_sauter is None else {"use_sauter_eps": False})
+    from bouquet.oft_bootstrap import toolkit_options
+    if "taper_edge_jphi" in (toolkit_options() or ()):
+        # OFT PSFC_dev: its nu* takes R_geo, so its first pass is r/R_geo with
+        # R_geo in nu*, the evaluator's r_over_R_geo
+        swb_eps, _R_key, _swb_eps_kw = "r_over_R_geo", "R_nu_star", {"use_sauter_eps": True}
     out["a_eps_definition"] = swb_eps
     if "psi_N" in _swb_par:
         j_new, d_new = evaluate_jBS(mygs, psi, *kin, smooth_axis=False,
@@ -215,7 +220,7 @@ def _imas_probe(outdir, part):
             bitwise=bool(np.array_equal(cap["j"], d_new["j_dot_B"])),
             inputs_bitwise={k: bool(np.array_equal(
                 np.asarray(cap["kw"][k]), d_new[m])) for k, m in
-                (("fT", "f_T"), ("q", "q"), ("eps", "eps"), ("R", "R_avg"),
+                (("fT", "f_T"), ("q", "q"), ("eps", "eps"), ("R", _R_key),
                  ("I_psi", "F"))},
             max_abs=float(np.max(np.abs(cap["j"] - d_new["j_dot_B"]))))
     else:
