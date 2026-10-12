@@ -19,7 +19,7 @@ _MESH = os.path.abspath(os.path.join(_HERE, "..", "examples", "D3D-like", "DIIID
 
 
 def _config(ids_path=_DD):
-    return BouquetConfig(source=ImasSource(ids_path=ids_path, time=1.013), solver=SolverConfig(mesh_path=_MESH),
+    return BouquetConfig(source=ImasSource(ids_path=ids_path, time=1.2), solver=SolverConfig(mesh_path=_MESH),
                          output_header="x")
 
 
@@ -107,10 +107,10 @@ def test_two_units_end_to_end(tmp_path):
     with gzip.open(_DD, "rb") as fi, open(dd, "wb") as fo:
         shutil.copyfileobj(fi, fo)
     import bouquet as bq
-    run = bq.Bouquet.from_imas(dd, mesh=_MESH, time=1.013, n_draws=1, ida_path=_IDA, LCFS_geqdsk=_GEQ,
+    run = bq.Bouquet.from_imas(dd, mesh=_MESH, time=1.2, n_draws=1, ida_path=_IDA, LCFS_geqdsk=_GEQ,
                                impurity_Z=6.0, solve_method="swb")
     q, out = str(tmp_path / "q"), str(tmp_path / "out")
-    units.add_units(q, units.make_units(run.config, [{"generation.scan_key": 1013}] * 2, ["s_a", "s_b"]))
+    units.add_units(q, units.make_units(run.config, [{"generation.scan_key": 1200}] * 2, ["s_a", "s_b"]))
     units.work(q, out, workers=2, idle_exit=0)
     seeds = set()
     for uid in ("s_a", "s_b"):

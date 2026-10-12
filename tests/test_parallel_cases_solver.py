@@ -21,7 +21,7 @@ from test_phi_solver_draws import _oft_phi_ready
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _DATA = os.path.join(_HERE, "data")
 _MESH = os.path.abspath(os.path.join(_HERE, "..", "examples", "D3D-like", "DIIID_mesh.h5"))
-_TIME = 1.013
+_TIME = 1.2
 
 pytestmark = [
     pytest.mark.solver,
