@@ -218,6 +218,11 @@ nearest-vertex values they replace. Nothing else changed.
   `(R_max - R_min)/(2<R>)` default) are in the history of this file.
 * The legacy record `D3Dlike_Hmode_legacy_golden.json` was regenerated in
   the same session at the same commit and build (its stamp above).
+* **Regenerated 2026-10-12 on OFT PSFC_dev** (bouquet `fd709fa`, clean
+  tree; OFT `16f3ed1`, lib `a9e65b0d`, build id `install_psfc_merge`), the
+  build the swb path and the solver suite now name. Same recipe and seed.
+  Unified: 20 attempts, 17 archived, 6 in spec (35.9 min). Legacy record:
+  20 draws, 8 in spec, replay draws 0 and 3 (110 min).
 
 ## Why input-current archival: the mode-1 coil drift
 

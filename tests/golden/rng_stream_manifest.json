@@ -1,8 +1,8 @@
 {
   "channels": {
     "jphi": {
-      "max": 1526244.4104673315,
-      "min": 95182.55408610811,
+      "max": 1524556.9792210609,
+      "min": 95607.49649666576,
       "n": 257,
       "sample_indices": [
         0,
@@ -12,13 +12,13 @@
         256
       ],
       "sample_values": [
-        1526244.4104673315,
-        1305394.7673460585,
-        786870.2662939553,
-        443890.5201389524,
-        95182.55408610811
+        1524556.9792210609,
+        1303055.8923749805,
+        786742.9693915085,
+        445159.2395047397,
+        95607.49649666576
       ],
-      "sha256": "478075b8a7cb8aea7cd72b42a1c669d1f58892b70ba64a82d2e66e44acfd8ab0"
+      "sha256": "919b93708d161895560b7f39a561b91e400c5eb8e54ee4e354db0cd55f44911a"
     },
     "ne": {
       "max": 5.425099337283019e+19,
@@ -106,36 +106,38 @@
     "psi_N_kinetic": 514
   },
   "pinned_on": {
-    "blas": "blas-3.9.0",
+    "blas": "scipy-openblas-0.3.31.dev",
     "machine": "x86_64",
-    "numpy": "2.4.6",
+    "numpy": "2.4.2",
     "platform": "Linux"
   },
   "seed": 20260804,
   "source_fixture": "D3Dlike_Hmode_golden_slim.h5",
   "source_provenance": {
-    "prov_bouquet_branch": "int-67aba59",
-    "prov_bouquet_commit": "67aba59e1daa2afb467ee2a2f26423e034affd51",
+    "prov_bouquet_branch": "HEAD",
+    "prov_bouquet_commit": "fd709fa77a1f29460fc489b96f70ea59dd733394",
     "prov_bouquet_dirty": false,
     "prov_bouquet_version": "1.3.1",
-    "prov_created": "2026-10-09T18:25:31",
+    "prov_created": "2026-10-12T02:42:03",
     "prov_generator": "make_golden_fixture.py",
     "prov_generator_args_eqdsk": "all",
     "prov_generator_args_jphi_archival": "input",
     "prov_generator_args_rng_stream_seed": 20260804,
     "prov_generator_args_source_basename": "D3Dlike_Hmode_golden.h5",
-    "prov_numerics_blas": "blas-3.9.0",
+    "prov_numerics_blas": "scipy-openblas-0.3.31.dev",
     "prov_numerics_machine": "x86_64",
-    "prov_numerics_numpy": "2.4.6",
+    "prov_numerics_numpy": "2.4.2",
     "prov_numerics_platform": "Linux",
     "prov_oft_available": true,
     "prov_oft_bootstrap_second_order_stencils": true,
-    "prov_oft_build_id": "20260929_7da4f18",
+    "prov_oft_branch": "PSFC_dev",
+    "prov_oft_build_id": "install_psfc_merge",
+    "prov_oft_commit": "16f3ed1dc4d15b02d1c2b2c0b36cfec2a4608e2e",
     "prov_oft_get_q_named_ravgs": true,
     "prov_oft_has_get_fsa": true,
-    "prov_oft_library_sha256": "7885fedc1e62f34a2113015ace5b37fc8a03ef7cd6912adc190eed45329f34fe",
-    "prov_oft_sources_sha256": "927165ae5025c525245af4f1243bc2e649f19d394001d2f01c8aff7e459f9c1f",
-    "prov_oft_version": "26.6",
+    "prov_oft_library_sha256": "a9e65b0d02134caee537236dc1d547d959ed26514d9e47d2d1ec98bc20cee56a",
+    "prov_oft_sources_sha256": "b488690e255da78499f17e1a3e9b206fd23045391fad96141535b5514c6ec627",
+    "prov_oft_version": "26.9",
     "prov_schema": 1
   }
 }
