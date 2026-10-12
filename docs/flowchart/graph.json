@@ -2436,12 +2436,12 @@
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
   {
-   "id": "fn.run._repoint_imas_geometry",
+   "id": "fn.run.point_solver",
    "type": "transform",
-   "label": "_repoint_imas_geometry()",
+   "label": "point_solver()",
    "file": "bouquet/run.py",
-   "line": 398,
-   "desc": "Multi-slice IMAS: re-read THIS slice's boundary, re-point solver isoflux, reset coil reg/bounds. Called per slice via set_slice+prepare_baseline.",
+   "line": 749,
+   "desc": "Point the solver at this baseline's geometry (F0, LCFS, isoflux, saddles; solver_geometry.case_geometry) and reset to it. First step of every prepare_baseline, so one solver serves many baselines.",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
   {
@@ -2702,7 +2702,7 @@
    "label": "set_slice()",
    "file": "bouquet/run.py",
    "line": 249,
-   "desc": "Multi-slice IMAS: re-point time, clear baseline/uncertainty/diagnostics cache. Next prepare_baseline calls _repoint_imas_geometry for the new slice.",
+   "desc": "Multi-slice IMAS: re-point time, then set_case (clear the per-baseline state). Next prepare_baseline points the solver at the new slice.",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
   {
@@ -7099,10 +7099,10 @@
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
   {
-   "src": "fn.run._repoint_imas_geometry",
+   "src": "fn.run.point_solver",
    "dst": "qty.boundary_lcfs",
    "kind": "data",
-   "desc": "Re-reads LCFS boundary for THIS slice; updates isoflux constraint",
+   "desc": "Reads THIS baseline's LCFS boundary and F0; sets isoflux and F0",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
   {
@@ -7186,7 +7186,7 @@
    "src": "fn.run.prepare_baseline",
    "dst": "fn.run.run_slices",
    "kind": "control",
-   "desc": "run_slices() calls prepare_baseline() per slice (calls _repoint_imas_geometry)",
+   "desc": "run_slices() calls prepare_baseline() per slice (calls point_solver)",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
   {
@@ -7268,9 +7268,9 @@
   },
   {
    "src": "fn.run.set_slice",
-   "dst": "fn.run._repoint_imas_geometry",
+   "dst": "fn.run.point_solver",
    "kind": "control",
-   "desc": "set_slice() called before prepare_baseline; prepare_baseline calls _repoint_imas_geometry for IMAS",
+   "desc": "set_slice() called before prepare_baseline; prepare_baseline calls point_solver",
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
   {

@@ -48,11 +48,12 @@ class FakeTokaMaker:
         self.reg = None
 
     # ---- state ------------------------------------------------------------
-    def copy_eq(self):
-        return self.toy.snapshot()
+    def copy_eq(self):                 # None: the post-setup state, before any toy exists
+        return None if self.toy is None else self.toy.snapshot()
 
     def replace_eq(self, source_eq=None):
-        self.toy.restore(source_eq)
+        if source_eq is not None:
+            self.toy.restore(source_eq)
 
     @property
     def psi_bounds(self):
@@ -155,3 +156,15 @@ class FakeTokaMaker:
 
     def save_eqdsk(self, filename, **kw):
         shutil.copyfile(EXAMPLE_GEQDSK, filename)
+
+
+def point_without_solver(monkeypatch):
+    """For stand-in solvers that carry no geometry: ``Bouquet.point_solver`` records the baseline's
+    geometry and leaves the stand-in alone."""
+    from bouquet.run import Bouquet
+    from bouquet.solver_geometry import case_geometry
+
+    def _point(self, geom=None):
+        self._geom = geom if geom is not None else case_geometry(self.config.source, self.config.solver)
+        return self
+    monkeypatch.setattr(Bouquet, "point_solver", _point)

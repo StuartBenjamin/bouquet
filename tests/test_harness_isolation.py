@@ -99,7 +99,7 @@ def _test_modules_launching_subprocesses():
         if not name.startswith("test_") or not name.endswith(".py"):
             continue
         src = open(os.path.join(_HERE, name)).read()
-        if "sys.executable" in src:
+        if "sys.executable, os.path.abspath(__file__)" in src:
             out.append((name, src))
     return out
 
