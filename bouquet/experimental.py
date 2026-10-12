@@ -158,9 +158,11 @@ REGISTRY = {
                     "GenerationConfig.imas_baseline='swb'"],
         introduced="PR #64 / #69 / #70, 1.4.0",
         validation_todo=[
-            "a real-data arm on an OpenFUSIONToolkit build whose "
-            "solve_with_bootstrap takes x / jphi_fixed / p_fixed (every "
-            "real-data arm so far was refused at prepare_baseline)",
+            "real-data arms on an OpenFUSIONToolkit build whose "
+            "solve_with_bootstrap takes x / jphi_fixed / p_fixed, on dd's "
+            "from a current IDA_fuse (so far: 6 of 8 IDA-hybrid "
+            "reconstructions converged on the PR author's build; dd vintage "
+            "unrecorded)",
             "swb_ip_tol statistics: the distribution of each solve's "
             "|I_p/I_p,target - 1| (swb_ip_rel_err) over real draws, against "
             "the 5e-3 acceptance",
