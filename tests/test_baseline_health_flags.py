@@ -73,6 +73,7 @@ def _bq_for_prepare(monkeypatch, resolve, fail_in=None):
         source=SimpleNamespace(),
         generation=SimpleNamespace(single_profile_jphi=False,
                                    imas_baseline="closure", swb_saw_q=None))
+    monkeypatch.setattr(b, "point_solver", lambda geom=None: b)
     monkeypatch.setattr(b, "_check_jbs_loop_workflow", lambda gc: None)
     monkeypatch.setattr(b, "_check_structured_mse_reachable", lambda c: None)
     monkeypatch.setattr(B, "resolve_baseline", resolve)
