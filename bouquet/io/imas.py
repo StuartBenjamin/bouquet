@@ -2514,6 +2514,23 @@ def read_imas_baseline(
         aux["sigma_ni_ida"] = sigma_ni_ida
         aux["sigma_ti_ida"] = sigma_ti_ida
 
+    _pfast_in = bool(getattr(source, "include_pfast", True))
+    if _ida_ion_route and np.any(p_fast) and \
+            bool(getattr(source, "ni_subtract_fast", False)) != _pfast_in:
+        import warnings
+        warnings.warn(
+            f"ImasSource.ni_subtract_fast={not _pfast_in} with include_pfast={_pfast_in} on a "
+            "beam slice: the fast ions are "
+            + ("counted twice (in the IDA total n_i and in p_fast)" if _pfast_in
+               else "left out (subtracted from n_i, p_fast excluded)")
+            + "; set both True (fast ions in p_fast) or both False (inside n_i)",
+            UserWarning, stacklevel=2)
+    if not _pfast_in:
+        p_fast = np.zeros_like(p_fast)
+        p_fast_meta = {**p_fast_meta, "basis": "excluded",
+                       "evidence": "ImasSource.include_pfast=False: the dd fast pressure "
+                                   "is not added"}
+
     # --- user overrides for fixed additive components ---
     if fixed is not None:
         # fixed.psi_N given on psi_N ("psi_n") goes through the dd's own map

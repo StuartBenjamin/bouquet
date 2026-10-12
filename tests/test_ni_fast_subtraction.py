@@ -257,6 +257,19 @@ class TestEndToEnd:
         assert meta["mismatch"] > NI_FAST_RTOL
         np.testing.assert_allclose(bl.ni, ni_total - ni_fast, rtol=2e-6)
 
+    @pytest.mark.parametrize("subtract, include", [(True, False), (False, True)])
+    def test_mismatched_fast_ion_options_warn(self, tmp_path, subtract, include):
+        ddp, cdf, *_ = _build(tmp_path)
+        with pytest.warns(UserWarning, match="counted twice" if include else "left out"):
+            bl = _read(ddp, cdf, ni_subtract_fast=subtract, include_pfast=include)
+        assert bool(np.any(bl.p_fast)) is include
+        assert (bl.p_fast_meta["basis"] == "excluded") is not include
+
+    def test_matched_fast_ion_options_are_quiet(self, tmp_path, recwarn):
+        ddp, cdf, *_ = _build(tmp_path)
+        _read(ddp, cdf, ni_subtract_fast=False, include_pfast=False)
+        assert not [w for w in recwarn if "include_pfast" in str(w.message)]
+
     def test_zero_fast_fraction_is_the_raw_ida_read(self, tmp_path):
         ddp, cdf, *_ = _build(tmp_path, fast_frac=0.0)
         bl = _read(ddp, cdf)

@@ -334,6 +334,10 @@ class ImasSource:
     # with an experimental ni_source: subtract the dd's fast-ion density
     # equivalent from the IDA (total) n_i.  False (default): no subtraction.
     ni_subtract_fast: bool = False
+    # Add the dd's fast-ion pressure p_fast to the equilibrium pressure (default).  With
+    # an experimental ni_source on ida_hybrid, match it to ni_subtract_fast: the fast ions
+    # in p_fast (both True) or inside the IDA n_i (both False); the reader warns otherwise.
+    include_pfast: bool = True
 
     def __post_init__(self):
         from .coords import run_coord
@@ -345,7 +349,7 @@ class ImasSource:
         if self.ida_timing not in IDA_TIMINGS:
             raise ValueError(f"ImasSource.ida_timing={self.ida_timing!r} must be one of "
                              f"{IDA_TIMINGS}")
-        for _n in ("zeff_fast_ions", "ni_subtract_fast"):
+        for _n in ("zeff_fast_ions", "ni_subtract_fast", "include_pfast"):
             if not isinstance(getattr(self, _n), bool):
                 raise ValueError(f"ImasSource.{_n}={getattr(self, _n)!r}: "
                                  "must be True or False")
