@@ -513,7 +513,7 @@ Enabled by: `GenerationConfig.solve_method='swb'`; `GenerationConfig.imas_baseli
 
 Validation to do:
 
-- a real-data arm on an OpenFUSIONToolkit build whose solve_with_bootstrap takes x / jphi_fixed / p_fixed (every real-data arm so far was refused at prepare_baseline)
+- real-data arms on an OpenFUSIONToolkit build whose solve_with_bootstrap takes x / jphi_fixed / p_fixed, on dd's from a current IDA_fuse (so far: 6 of 8 IDA-hybrid reconstructions converged on the PR author's build; dd vintage unrecorded)
 - swb_ip_tol statistics: the distribution of each solve's |I_p/I_p,target - 1| (swb_ip_rel_err) over real draws, against the 5e-3 acceptance
 - taper off (swb_edge_taper_psi0=None) verified on real slices: the Picard 2-cycle the taper was added for does not occur, or is caught
 
