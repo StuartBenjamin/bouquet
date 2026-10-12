@@ -63,7 +63,7 @@ bootstrap its ε = (R_max − R_min)/(R_max + R_min) and the `R_geo` of its ν\*
 legacy positional layouts are still supported). An
 upstream build is enough for the default paths (the unified engine and the
 legacy loop). Only two opt-ins need a toolkit with the internal Fortran
-bootstrap solve (OpenFUSIONToolkit PR #271, or a fork carrying it):
+bootstrap solve ([`LCFS_grid_pack`](https://github.com/StuartBenjamin/OpenFUSIONToolkit/tree/LCFS_grid_pack) (open OpenFUSIONToolkit [PR #365](https://github.com/OpenFUSIONToolkit/OpenFUSIONToolkit/pull/365)), which carries it):
 `imas_baseline="swb"` / `solve_method="swb"`, and the `bootstrap_kwargs` keys
 that configure that solve on the legacy path (`use_python_solve`, `djBS_tol`,
 `taper_edge_*`, ...; refused by name on a toolkit without them). Where that
@@ -73,7 +73,8 @@ never uses it, so results do not depend on the build. OFT is installed separatel
 instructions; `tools/install_oft.py` builds upstream `main` by default, any
 other repository or branch only when named (`--repo`, `--ref`), reusing
 already built external libraries (`--libs`), and never repoints an existing
-clone's remote.
+clone's remote. The swb path and the solver suite run on `LCFS_grid_pack`:
+`python tools/install_oft.py --prefix ~/oft --repo https://github.com/StuartBenjamin/OpenFUSIONToolkit.git --ref LCFS_grid_pack`.
 Everything else — the GEQDSK/p-file/
 IDA/IMAS readers, COCOS conversion, archive reading, and all plotting — works
 without it. Python dependencies (`numpy`, `scipy`, `matplotlib`, `h5py`) are
