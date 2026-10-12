@@ -23,6 +23,7 @@ GS-solve compute), plus a thin :meth:`run` convenience for scripts/CI::
 
 from __future__ import annotations
 
+import copy
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -127,6 +128,16 @@ class Bouquet(SwbBaseline):
         # (bouquet.experimental.REGISTRY keys), warned there
         self._experimental_features: Optional[list] = None
         self._selection = None                    # filter() result
+        self._engine_run = None
+        self._geom = None                         # point_solver(): this baseline's solver geometry
+        # prepare_baseline(): how many baselines this solver has been pointed at (1 = fresh); a
+        # property of the SOLVER, so set_case does not clear it (_install_solver does)
+        self._solver_use = 0
+        # set_case(): what the device restore put back (None: no case swap yet)
+        self._device_restored: Optional[dict] = None
+        # every per-case attribute's constructor value, which set_case() restores (SOLVER_ATTRS excepted)
+        self._init_state = {k: copy.deepcopy(v) for k, v in vars(self).items()
+                            if k not in self.SOLVER_ATTRS}
 
     # ── constructors ----------------------------------------------------
     @classmethod
@@ -374,34 +385,22 @@ class Bouquet(SwbBaseline):
         # still write to the old header.
         self.config.output_header = value
 
+    #: Solver-level state, kept by :meth:`set_case`.  EVERY other instance attribute is per case: set_case
+    #: puts the constructor's value back and removes what prepare_baseline / generate / filter added
+    #: (records such as ``_swb_seed_record``, ``_draw_bootstrap_scaling_record``,
+    #: ``_experimental_features``, ``draw_rejections`` ...), so a new per-case record needs no list entry.
+    SOLVER_ATTRS = frozenset({"config", "mygs", "_myOFT", "_clean_eq", "_solver_key", "_solver_use",
+                              "_device_snapshot", "_init_state"})
+
     def set_slice(self, *, time=None, ida_time=_UNSET, header=None) -> "Bouquet":
-        """Re-point to a new time slice, reusing the existing solver.
+        """Point at another time slice of the same IDS, reusing the solver; see :meth:`set_case`.
+        Reconstruction sources have no time axis.
 
-        The multi-slice mechanism for the **IMAS path**, where one IDS holds
-        many time slices and the ``OFT_env`` singleton forbids standing up a
-        second solver: keep one :meth:`setup_solver`, then for each slice call
-        ``set_slice(time=t, header=...)`` and :meth:`run` (or generate). Clearing
-        the cached baseline/uncertainty forces a re-solve; the next
-        :meth:`prepare_baseline` then re-reads this slice's own LCFS boundary,
-        re-points the solver isoflux, and resets the coil reg/bounds + pristine
-        equilibrium (:meth:`_repoint_imas_geometry`), so each slice is a fully
-        independent bouquet.
-
-        Reconstruction sources are single-equilibrium (one g-file = one slice
-        with its own boundary), so there is no time axis to sweep -- passing
-        ``time`` raises. To run several reconstructions, build a fresh
-        :class:`Bouquet` per g-file. ``header`` may still be set on either path
-        to redirect the output archive.
-
-        ``ida_time`` (``ImasSource.ida_time``, ida_hybrid only) is applied
-        whenever it is passed, with or without ``time``; ``ida_time=None``
-        resets it (the IDA slice then follows ``time``).  Omitted, the
-        configured ``ida_time`` is KEPT -- a re-timed dd slice then stays
-        paired with the same IDA slice, which is announced with a warning
-        (pass ``ida_time=`` to re-pair it; :meth:`run_slices` takes
-        ``ida_times=`` per slice).  A source without ``ida_time`` raises
-        when one is passed.
-        """
+        ``ida_time`` (``ImasSource.ida_time``, ida_hybrid only) is applied whenever it is passed;
+        ``ida_time=None`` resets it (the IDA slice then follows ``time``).  Omitted, the configured
+        ``ida_time`` is kept: a re-timed dd slice stays paired with the same IDA slice, with a warning
+        (:meth:`run_slices` takes ``ida_times=`` per slice).  A source without ``ida_time`` raises when
+        one is passed."""
         if ida_time is not _UNSET and not hasattr(self.config.source,
                                                   "ida_time"):
             raise TypeError(
@@ -426,18 +425,89 @@ class Bouquet(SwbBaseline):
         if ida_time is not _UNSET:
             self.config.source.ida_time = (None if ida_time is None
                                            else float(ida_time))
+        return self.set_case(header=header)
+
+    def set_case(self, case=None, *, source=None, header=None, scan_key=None) -> "Bouquet":
+        """Point at a new baseline, reusing the solver: a :class:`~bouquet.config.CaseSpec`, or ``source`` /
+        ``header`` / ``scan_key``.  Clears the per-baseline state; the next :meth:`prepare_baseline` points
+        the solver at the new geometry (:meth:`point_solver`).  The mesh, solve method and thread count are
+        fixed once the solver is set up, so changing them raises."""
+        if case is not None:
+            if source is not None or header is not None or scan_key is not None:
+                raise TypeError("pass either a CaseSpec or source/header/scan_key keywords, not both")
+            source, header, scan_key = case.source, case.header, case.scan_key
+        if self.mygs is not None:
+            from .config import resolve_solve_method
+            now = (self.config.solver.mesh_path, resolve_solve_method(self.config.generation),
+                   self.config.solver.nthreads)
+            if now != self._solver_key:
+                raise ValueError(f"(mesh_path, solve_method, nthreads) changed from {self._solver_key} to "
+                                 f"{now} after setup_solver(); these are fixed per solver: use one per value")
+        if source is not None:
+            self.config.source = source
         if header is not None:
             self.config.output_header = header
-        self.baseline = None
-        self._resolved_uncertainty = None
-        self.diagnostics = None
-        self.solve_failures = None
-        self._selection = None
+        if scan_key is not None:
+            self.config.generation.scan_key = scan_key
+        self._reset_case_state()
+        if self.mygs is not None:
+            self._device_restored = self._restore_device()
         return self
+
+    def _reset_case_state(self) -> None:
+        """Every per-case attribute back to its constructor value; the ones prepare_baseline / generate /
+        filter created are removed (getattr(..., None) then reads None).  :data:`SOLVER_ATTRS` stay."""
+        init = getattr(self, "_init_state", {})
+        cls = type(self)
+        for k in list(vars(self)):
+            if k in self.SOLVER_ATTRS:
+                continue
+            if callable(getattr(cls, k, None)) or isinstance(getattr(cls, k, None), property):
+                continue            # an instance override of a method (a hook, a test stand-in), not state
+            if k in init:
+                setattr(self, k, copy.deepcopy(init[k]))
+            else:
+                delattr(self, k)
+
+    def _restore_device(self) -> dict:
+        """Put the solver DEVICE back as :meth:`_install_solver` left it (``replace_eq`` restores only the
+        equilibrium): the settings pushed with ``update_settings`` (a case that died inside a capped draw
+        solve leaves ``maxits=100``), an instance-level ``solve`` wrapper (the draw-solve timing / rescue
+        guard), the VSC gains and the Vcoils.  Only what differs is touched.  Returns what was restored
+        (stamped in the solver-geometry record as ``device_restored``)."""
+        from .solver_state import _settings_values, _vsc_facs
+        snap = getattr(self, "_device_snapshot", None)
+        mygs = self.mygs
+        out = dict(settings=[], solve_wrapper_removed=False, vsc=False, vcoils=False)
+        if snap is None:
+            return out
+        if snap["settings"] is not None:
+            s = mygs.settings
+            changed = sorted(k for k, v in snap["settings"].items() if getattr(s, k, None) != v)
+            for k in changed:
+                setattr(s, k, copy.deepcopy(snap["settings"][k]))
+            if changed and hasattr(mygs, "update_settings"):
+                mygs.update_settings()
+            out["settings"] = changed
+        d = getattr(mygs, "__dict__", {})
+        if "solve" in d and d["solve"] is not snap["solve"]:
+            if snap["solve"] is None:
+                del d["solve"]
+            else:
+                d["solve"] = snap["solve"]
+            out["solve_wrapper_removed"] = True
+        if snap["vsc"] is not None and _vsc_facs(mygs) != snap["vsc"] and hasattr(mygs, "set_coil_vsc"):
+            mygs.set_coil_vsc(copy.deepcopy(snap["vsc"]))
+            out["vsc"] = True
+        if getattr(mygs, "_vcoils", None) != snap["vcoils"] and hasattr(mygs, "set_vcoils"):
+            mygs.set_vcoils(copy.deepcopy(snap["vcoils"] or {}))
+            out["vcoils"] = True
+        return out
 
     # ── stage 1: solver -------------------------------------------------
     def setup_solver(self) -> "Bouquet":
-        """Read mesh, build regions, stand up ``mygs``, set isoflux + VSC + reg.
+        """Read mesh, build regions, stand up ``mygs``, set VSC + coil reg + coil mode, and point it at
+        this config's baseline (:meth:`point_solver`: F0, isoflux).
 
         Common to every baseline source -- perturbed draws are always solved
         with TokaMaker. Returns self for chaining. Idempotent: a no-op if
@@ -445,19 +515,13 @@ class Bouquet(SwbBaseline):
         solver across multiple baselines/time-slices (OFT_env is a per-process
         singleton, so re-creating it would raise).
         """
-        import numpy as np
-
         if self.mygs is not None:
             return self
         from OpenFUSIONToolkit import OFT_env
         from OpenFUSIONToolkit.TokaMaker import TokaMaker
         from OpenFUSIONToolkit.TokaMaker.meshing import load_gs_mesh
 
-        from .config import ReconstructionSource, ImasSource
-        from .io.geqdsk import read_geqdsk
-
         sc = self.config.solver
-        src = self.config.source
 
         myOFT = OFT_env(nthreads=sc.nthreads)
         mygs = TokaMaker(myOFT)
@@ -466,47 +530,11 @@ class Bouquet(SwbBaseline):
         mygs.setup_mesh(mesh_pts, mesh_lc, mesh_reg)
         mygs.setup_regions(cond_dict=cond_dict, coil_dict=coil_dict)
 
-        # F0 and reference LCFS boundary come from the g-file (reconstruction)
-        # or the IDS vacuum_toroidal_field + boundary outline (IMAS).
-        F0 = sc.F0
-        eqdsk_ref = None
-        boundary_RZ = None
-        if isinstance(src, ReconstructionSource):
-            eqdsk_ref = read_geqdsk(src.geqdsk_path, cocos=src.cocos)
-            if F0 is None:
-                F0 = abs(eqdsk_ref.R_center * eqdsk_ref.B_center)
-            boundary_RZ = np.column_stack(
-                [eqdsk_ref.boundary_R, eqdsk_ref.boundary_Z]
-            )
-        elif isinstance(src, ImasSource):
-            from .io.imas import read_imas_geometry
-            _imas_F0, boundary_RZ = read_imas_geometry(src)
-            if F0 is None:
-                F0 = _imas_F0
-        if F0 is None:
-            raise ValueError("F0 could not be determined; set SolverConfig.F0")
-
-        mygs.setup(order=sc.order, F0=F0)
+        mygs.setup(order=sc.order)        # F0 is per baseline: point_solver
         mygs.settings.maxits = 800
         mygs.settings.pm = False
         mygs.update_settings()
         mygs.set_coil_vsc(sc.coil_vsc)
-
-        # Isoflux: explicit config wins; otherwise the source's LCFS boundary
-        iso_pts, iso_w = sc.isoflux_pts, sc.isoflux_weights
-        if iso_pts is None and boundary_RZ is not None:
-            iso_pts = boundary_RZ
-            iso_w = np.ones(len(iso_pts)) * 500.0
-        if iso_pts is not None:
-            mygs.set_isoflux(iso_pts, weights=iso_w)
-
-        # Optional X-point pin: drive B_pol -> 0 at the configured saddle
-        # point(s). Opt-in via SolverConfig.saddle_targets (default None).
-        if sc.saddle_targets is not None:
-            _sad = np.asarray(sc.saddle_targets, dtype=np.float64).reshape(-1, 2)
-            _sw = (np.asarray(sc.saddle_weights, dtype=np.float64)
-                   if sc.saddle_weights is not None else None)
-            mygs.set_saddle_constraints(_sad, weights=_sw)
 
         # Coil regularisation: SolverConfig.coil_reg targets when given, else
         # the historical pull toward zero + small VSC freedom.  Also publishes
@@ -528,15 +556,24 @@ class Bouquet(SwbBaseline):
         else:
             keep_unbounded_coil_mode(mygs)
 
-        self.mygs = mygs
         self._myOFT = myOFT          # keep the env alive
-        self._eqdsk_ref = eqdsk_ref
-        self._boundary_RZ = boundary_RZ   # LCFS shape for IMAS forward-solve init
-        self._F0 = F0                     # vacuum R*Bt applied at setup (fixed)
-        # Snapshot the pristine post-setup equilibrium (zero coils, no plasma)
-        # for a full per-slice reset in a multi-slice sweep -- see
-        # _reset_solver_state. copy_eq/replace_eq need OFT PR #248+.
-        self._clean_eq = mygs.copy_eq() if hasattr(mygs, "copy_eq") else None
+        # ready to solve on this config's baseline; prepare_baseline points it again
+        return self._install_solver(mygs).point_solver()
+
+    def _install_solver(self, mygs) -> "Bouquet":
+        """Adopt a set-up solver: record what is fixed per solver, and snapshot the post-setup
+        equilibrium (zero coils, no plasma, no geometry) every baseline resets to."""
+        from .config import resolve_solve_method
+        sc = self.config.solver
+        from .solver_state import _settings_values, _vsc_facs
+        self.mygs = mygs
+        self._solver_use = 0
+        self._solver_key = (sc.mesh_path, resolve_solve_method(self.config.generation), sc.nthreads)
+        self._clean_eq = mygs.copy_eq()
+        # the device as set up, which every case swap restores (set_case -> _restore_device)
+        self._device_snapshot = dict(
+            settings=_settings_values(mygs), solve=getattr(mygs, "__dict__", {}).get("solve"),
+            vsc=_vsc_facs(mygs), vcoils=copy.deepcopy(getattr(mygs, "_vcoils", None)))
         return self
 
     def _apply_coil_reg(self, mygs):
@@ -568,10 +605,9 @@ class Bouquet(SwbBaseline):
         ``mygs._recon_coil_reg_record``, both published on every call.)
 
         Called from BOTH :meth:`setup_solver` and :meth:`_reset_solver_state`.
-        That matters: ``_repoint_imas_geometry`` resets the solver immediately
-        before the IMAS baseline solve, so targets installed only at setup were
-        silently discarded and the solve ran on the zero-target default. A
-        1e8-weight target moved its coil by 0.2 % for exactly that reason.
+        That matters: :meth:`point_solver` resets the solver before every
+        baseline, so targets installed only at setup would be silently
+        discarded and the solve would run on the zero-target default.
         """
         spec = list(getattr(self.config.solver, "coil_reg", None) or [])
         if spec:
@@ -666,9 +702,9 @@ class Bouquet(SwbBaseline):
         targets taken from another file), the coils would be pinned toward the
         mirror-image field at the configured weight.  That is refused.
 
-        Checked only once an IMAS baseline exists (``prepare_baseline`` resets
-        the solver, and re-applies the reg, immediately before the baseline
-        solve); a term with no recorded factor claims nothing and is not
+        Checked only once an IMAS baseline exists (``prepare_baseline`` calls
+        it right after reading the baseline, before the baseline solve; later
+        resets check again); a term with no recorded factor claims nothing and is not
         checked.  The reconstruction path solves in the same positive frame but
         records no source factor (``source_current_sign`` is +1.0 there by
         definition), so it is not checked either.
@@ -809,65 +845,27 @@ class Bouquet(SwbBaseline):
         return cur
 
     def _reset_solver_state(self):
-        """Restore the clean post-:meth:`setup_solver` coil state.
-
-        ``generate_bouquet`` installs a STRONG coil regularization (and, when
-        requested, hard drift bounds) that pull the coils toward *this run's*
-        baseline coils, leaves them active on ``mygs`` when it returns, and
-        leaves the coil currents at the last draw's drifted values. A
-        subsequent slice in a :meth:`set_slice` sweep must inherit none of that.
-        Restore the pristine post-setup equilibrium (zero coils) captured in
-        :meth:`setup_solver`, then re-apply the setup-time reg (the configured
-        targets, or the toward-zero default when there are none -- which also
-        refreshes the weak exploratory stash for THIS slice) and clear any
-        stashed drift bounds.
-        """
+        """Back to this baseline's clean solver state: the post-setup equilibrium (zero coils), the
+        configured coil reg (which also refreshes the weak exploratory stash), no drift bounds or strong
+        reg stash (``generate_bouquet`` leaves both), then this baseline's geometry (:meth:`point_solver`)."""
+        if self._geom is None:
+            raise RuntimeError("no baseline geometry on the solver: point_solver() (prepare_baseline) first")
         mygs = self.mygs
-        # full reset of the equilibrium + coil currents to the post-setup state
-        if getattr(self, "_clean_eq", None) is not None:
-            mygs.replace_eq(source_eq=self._clean_eq)
+        mygs.replace_eq(source_eq=self._clean_eq)
         self._apply_coil_reg(mygs)
         if hasattr(mygs, "_coil_drift_bounds"):
             mygs.set_coil_bounds(None)        # widen: prior slice had bounds set
             delattr(mygs, "_coil_drift_bounds")
         if hasattr(mygs, "_strong_coil_reg"):
             delattr(mygs, "_strong_coil_reg")
+        self._geom.apply(mygs)
 
-    def _repoint_imas_geometry(self):
-        """Re-read THIS slice's LCFS boundary and re-point the solver isoflux.
-
-        Each IMAS time slice is an *independent* equilibrium: its own boundary
-        outline drives the isoflux constraints and the forward-solve psi init,
-        so a multi-slice sweep (via :meth:`set_slice`) must not inherit the
-        first slice's shape. Also resets the coil reg/bounds
-        (:meth:`_reset_solver_state`) so the slice does not inherit the prior
-        slice's coil constraints. F0 = R*B_t is set by the slow TF coils and is
-        held fixed at :meth:`setup_solver` (changing it needs a fresh G-S
-        setup); a slice whose F0 differs materially is flagged -- a true B_t
-        ramp is out of scope for one solver. An explicit
-        ``SolverConfig.isoflux_pts`` still overrides the per-slice boundary.
-        """
-        import numpy as np
-        import warnings
-        from .io.imas import read_imas_geometry
-
-        sc = self.config.solver
+    def point_solver(self, geom=None) -> "Bouquet":
+        """Point the solver at a baseline's geometry (default: this config's source) and reset to it."""
+        from .solver_geometry import case_geometry
+        self._geom = geom if geom is not None else case_geometry(self.config.source, self.config.solver)
         self._reset_solver_state()
-        F0_slice, boundary_RZ = read_imas_geometry(self.config.source)
-        self._boundary_RZ = boundary_RZ
-        iso_pts, iso_w = sc.isoflux_pts, sc.isoflux_weights
-        if iso_pts is None:
-            iso_pts = boundary_RZ
-            iso_w = np.ones(len(iso_pts)) * 500.0
-        self.mygs.set_isoflux(iso_pts, weights=iso_w)
-        self._iso = (iso_pts, iso_w)      # re-applied by _swb_solve's reset
-        if sc.F0 is None and getattr(self, "_F0", None) and \
-                abs(F0_slice - self._F0) > 1e-3 * abs(self._F0):
-            warnings.warn(
-                f"IMAS slice F0={F0_slice:.4f} differs from the solver's "
-                f"F0={self._F0:.4f} (set at setup). B_t is held fixed across "
-                f"slices; a genuine B_t ramp needs a separate solver/process."
-            )
+        return self
 
     # ── stage 2: baseline (reconstruction OR imas) ----------------------
     @_baseline_negative_psep_named
@@ -897,6 +895,9 @@ class Bouquet(SwbBaseline):
         # reassignment check: validate again where the run is resolved
         # (after the engine-dependent values are resolved for THIS engine)
         self._revalidate_generation_settings()
+        if self.mygs is not None:      # settings checked first: pointing reads the source
+            self.point_solver()
+            self._solver_use = int(getattr(self, "_solver_use", 0)) + 1
 
         # GenerationConfig.reconstruction_engine="unified": the ONE
         # reconstruction engine (bouquet.engine) builds the baseline for
@@ -910,6 +911,7 @@ class Bouquet(SwbBaseline):
             self._record_experimental_features(_bl)
             self._record_coil_solve_mode(_bl)
             self._record_bootstrap_eps(_bl)
+            self._record_solver_geometry(_bl)
             self._report_sigma_exceeds_profile(_bl)
             self._remember_baseline_state()
             return _bl
@@ -972,9 +974,10 @@ class Bouquet(SwbBaseline):
             # IDS-vs-TokaMaker li for sanity.
             if (isinstance(self.config.source, ImasSource)
                     and self.mygs is not None):
-                # re-point the solver to THIS slice's boundary first, so a
-                # multi-slice sweep treats each time as its own equilibrium
-                self._repoint_imas_geometry()
+                # point_solver ran before this baseline existed, so its coil
+                # reg skipped the orientation check: run it now
+                self._check_coil_reg_orientation(
+                    list(getattr(self.config.solver, "coil_reg", None) or []))
                 if self.config.generation.imas_baseline == "swb":
                     self._swb_imas_baseline()
                 else:
@@ -1009,6 +1012,7 @@ class Bouquet(SwbBaseline):
         self._record_experimental_features(self.baseline)
         self._record_coil_solve_mode(self.baseline)
         self._record_bootstrap_eps(self.baseline)
+        self._record_solver_geometry(self.baseline)
         self._report_sigma_exceeds_profile(self.baseline)
         self._remember_baseline_state()
         return self.baseline
@@ -1084,6 +1088,38 @@ class Bouquet(SwbBaseline):
         bl.experimental_features = list(on)
         if isinstance(getattr(bl, "engine", None), dict):
             bl.engine["experimental_features"] = list(on)
+
+    def solver_geometry_record(self) -> Optional[dict]:
+        """The solver geometry this baseline's resets install
+        (:meth:`bouquet.solver_geometry.CaseGeometry.record`: ``solver_F0``,
+        ``F0_source``, ``F0_origin``, ``F0_rule``, isoflux and saddles), the
+        coil regularisation the reset applied (``coil_reg``: ``source``
+        ``"configured"``/``"default"`` and the terms) and ``solver_use``
+        (how many baselines this solver has been pointed at, 1 = fresh), or
+        ``None`` before :meth:`point_solver`."""
+        geom = getattr(self, "_geom", None)
+        if geom is None:
+            return None
+        rec = geom.record()
+        cr = getattr(self.mygs, "_recon_coil_reg_record", None)
+        rec["coil_reg"] = None if cr is None else {
+            "source": cr.get("source"), "n_terms": len(cr.get("terms") or ()),
+            "terms": list(cr.get("terms") or ())}
+        rec["solver_use"] = int(getattr(self, "_solver_use", 0))
+        rec["device_restored"] = getattr(self, "_device_restored", None)
+        return rec
+
+    def _record_solver_geometry(self, bl) -> None:
+        """Put :meth:`solver_geometry_record` on *bl*
+        (``Baseline.solver_geometry``, archived as the ``_baseline`` attr
+        ``solver_geometry_json``) and, under the unified engine, in its
+        record -- every path, every solve method."""
+        if bl is None or not hasattr(bl, "solver_geometry"):
+            return
+        rec = self.solver_geometry_record()
+        bl.solver_geometry = rec
+        if rec is not None and isinstance(getattr(bl, "engine", None), dict):
+            bl.engine["solver_geometry"] = dict(rec)
 
     def _record_bootstrap_eps(self, bl) -> None:
         """Record the Redl epsilon (``GenerationConfig.eps_definition``:
@@ -4633,7 +4669,7 @@ class Bouquet(SwbBaseline):
         from .physics import ELEMENTARY_CHARGE as EC
 
         # init psi from the LCFS shape parameters
-        R0, Z0, a, kappa, delta = _shape_from_boundary(self._boundary_RZ)
+        R0, Z0, a, kappa, delta = _shape_from_boundary(self._geom.boundary_RZ)
         mygs.init_psi(R0, Z0, a, kappa, delta)
         self._seed_coil_init(mygs)
         # the pressure handed to the solver (bouquet.edge_pressure)
@@ -6720,11 +6756,11 @@ class Bouquet(SwbBaseline):
         # the one it was handed.  Snapshot, restore on the way out, re-raise.
         _snap = None
         _can_snap = (hasattr(mygs, "copy_eq") and hasattr(mygs, "replace_eq"))
-        if getattr(self, "_boundary_RZ", None) is not None:
+        if self._geom is not None:
             if _can_snap:
                 _snap = mygs.copy_eq()
             _R0, _Z0, _a, _kappa, _delta = _shape_from_boundary(
-                self._boundary_RZ)
+                self._geom.boundary_RZ)
             mygs.init_psi(_R0, _Z0, _a, _kappa, _delta)
         mygs.set_targets(Ip=float(bl.Ip_target), pax=solver_pax(pressure, _edge))
         mygs.set_profiles(pp_prof=pp, ffp_prof=ffp)
@@ -8203,6 +8239,12 @@ class Bouquet(SwbBaseline):
             header, scan_key=gc.scan_key,
             features=(experimental_features_enabled(self.config)
                       if _xf is None else _xf))
+        # the solver geometry every reset of this baseline installed (F0 and
+        # its origin -- each baseline at its own F0 since #76 --, isoflux,
+        # saddles, the coil reg, solver_use): every path, every solve method
+        from .utils import stamp_solver_geometry
+        stamp_solver_geometry(header, scan_key=gc.scan_key,
+                              record=getattr(bl, "solver_geometry", None))
         # IMAS path: the source's current orientation (what the reader
         # multiplied every dd current by to reach bouquet's positive frame).
         from .config import ImasSource

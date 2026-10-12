@@ -4,7 +4,7 @@
 |------|------|---------|
 | `d3dlike.geqdsk`, `d3dlike_reference.npz` | synthetic (the D3D-like example) | g-file / reference tests |
 | `stored_configs/` | synthetic stored configs | stored-config compatibility tests |
-| `dd_synthetic.json.gz` | synthetic OMAS/IMAS dd: five equilibrium / core_profiles / core_sources slices (0.7, 1.1, 1.2, 1.4, 3.0 s) of one H-mode-like discharge, from a mid-ramp L-mode through the L-H transition and a hot-ion peak-pedestal phase to a steady flat-top; Ip 0.95 then 1.0 MA, B0 -2.0 T, lower single null | `test_swb_systematics_solver.py`, `test_phi_imas_solver.py` (both `-m solver`) |
+| `dd_synthetic.json.gz` | synthetic OMAS/IMAS dd: five equilibrium / core_profiles / core_sources slices (0.7, 1.1, 1.2, 1.4, 3.0 s) of one H-mode-like discharge, from a mid-ramp L-mode through the L-H transition and a hot-ion peak-pedestal phase to a steady flat-top; Ip 0.95 then 1.0 MA, B0 -2.0 T, lower single null | `test_swb_systematics_solver.py`, `test_phi_imas_solver.py`, `test_parallel_cases_solver.py`, `test_solver_reuse_solver.py` (`-m solver`), `test_units.py` |
 | `diiid_profs_synthetic.cdf` | IDA-layout fit paired with the dd's 1.2 s slice (synthetic flat sigmas) | same |
 | `g_synthetic.geqdsk` | the equilibrium that IDA fit belongs to (kinetic-EFIT-like: ohmic + Redl bootstrap current, no beam channel), 1.2 s | same |
 | `g_synthetic_lmode.geqdsk`, `ida_synthetic_lmode.cdf` | a second regime: sawtoothing L-mode (q0 0.8), upper single null, Ip 1.3 MA, B0 -2.0 T, with its IDA-layout fit | g-file + IDA workflows (reserved for the real-data ladder's synthetic rung) |

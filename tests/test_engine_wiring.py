@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 import _engine_toy as T
+from _engine_fake_gs import point_without_solver
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _EX = os.path.join(_HERE, os.pardir, "examples", "D3D-like")
@@ -56,6 +57,34 @@ class _FakeGS:
                     beta_pol=64.0, kappa=1.7, delta=0.3, W_MHD=5.9e5)
 
 
+class _ResettableFakeGS(_FakeGS):
+    """_FakeGS plus the surface the REAL reset uses (Bouquet._install_solver /
+    _reset_solver_state / CaseGeometry.apply), recording the reset steps."""
+
+    coil_sets = {"F1A": 0, "F2A": 1}
+
+    def copy_eq(self):
+        return "clean"
+
+    def replace_eq(self, source_eq=None):
+        self.calls.append(("replace_eq", source_eq))
+
+    def coil_reg_term(self, coffs, target=0.0, weight=1.0):
+        return (tuple(coffs), float(target), float(weight))
+
+    def set_coil_reg(self, reg_terms=None, **kw):
+        self.calls.append(("set_coil_reg",))
+
+    def set_coil_bounds(self, b):
+        self.calls.append(("set_coil_bounds",))
+
+    def set_profiles(self, **kw):
+        self.calls.append(("foffset", kw["foffset"]) if "foffset" in kw else ("set_profiles",))
+
+    def set_saddle_constraints(self, pts, weights=None):
+        self.calls.append(("set_saddle_constraints", len(pts)))
+
+
 @pytest.fixture
 def toy_solver(monkeypatch):
     import bouquet.engine as be
@@ -78,13 +107,14 @@ def _quiet(fn):
         return fn()
 
 
-def test_a_gfile_engine_baseline_is_a_complete_baseline(toy_solver):
+def test_a_gfile_engine_baseline_is_a_complete_baseline(toy_solver, monkeypatch):
     import bouquet as bq
     b = bq.Bouquet.from_geqdsk(_GEQ, profiles=_PF, mesh=_MESH, n_draws=1,
                                reconstruction_engine="unified")
     g = b.config.generation
     g.engine_rows = ["Ip"]
     b.mygs = _FakeGS()
+    point_without_solver(monkeypatch)
     bl = _quiet(b.prepare_baseline)
     assert b.baseline is bl and bl.provenance == "reconstruction"
     # the solver was set up as the legacy reconstruction does it
@@ -118,21 +148,23 @@ def test_a_gfile_engine_baseline_is_a_complete_baseline(toy_solver):
 def test_an_ids_engine_baseline_is_a_complete_baseline(toy_solver,
                                                        monkeypatch):
     import bouquet as bq
-    from bouquet.io.imas import read_imas_geometry
     b = bq.Bouquet.from_imas(_OMAS, mesh=_MESH, time=2.3043, n_draws=1,
                              reconstruction_engine="unified")
     g = b.config.generation
     g.engine_rows = ["Ip"]
-    b.mygs = _FakeGS()
-
-    def _repoint():
-        b._boundary_RZ = read_imas_geometry(b.config.source)[1]
-        b.mygs.calls.append(("repoint",))
-
-    monkeypatch.setattr(b, "_repoint_imas_geometry", _repoint)
+    b._install_solver(_ResettableFakeGS())        # the real point_solver / reset
     bl = _quiet(b.prepare_baseline)
     assert bl.provenance == "imas"
-    assert [c[0] for c in b.mygs.calls][:2] == ["repoint", "init_psi"]
+    # the solver was reset to the clean state and pointed at THIS slice's
+    # geometry (F0, LCFS isoflux) before the engine's init_psi
+    kinds = [c[0] for c in b.mygs.calls]
+    assert kinds[:5] == ["replace_eq", "set_coil_reg", "foffset", "set_isoflux",
+                         "init_psi"]
+    assert b.mygs.calls[0] == ("replace_eq", "clean")
+    from bouquet.io.imas import read_imas_geometry
+    F0, lcfs = read_imas_geometry(b.config.source)
+    assert b.mygs.calls[2] == ("foffset", F0)
+    assert b.mygs.calls[3][1:] == (len(lcfs), 500.0)
     # the legacy anchors are not carried into the engine's baseline
     assert bl.jBS_diff is None and bl.jphi_diff is None and bl.p_diff is None
     icl = bl.ip_closure
@@ -155,6 +187,7 @@ def test_a_failed_engine_build_leaves_no_baseline(toy_solver, monkeypatch):
                                reconstruction_engine="unified")
     b.config.generation.engine_rows = ["Ip"]
     b.mygs = _FakeGS()
+    point_without_solver(monkeypatch)
 
     def _boom(*a, **k):
         raise RuntimeError("synthetic failure")
@@ -178,7 +211,6 @@ def test_a_flagged_ids_engine_baseline_warns(toy_solver, monkeypatch):
     engine baseline is delivered flagged closure_limited (ip_closure) AND
     warned about -- as loudly as a flagged g-file baseline."""
     import bouquet as bq
-    from bouquet.io.imas import read_imas_geometry
     b = bq.Bouquet.from_imas(_OMAS, mesh=_MESH, time=2.3043, n_draws=1,
                              reconstruction_engine="unified")
     g = b.config.generation
@@ -186,11 +218,7 @@ def test_a_flagged_ids_engine_baseline_warns(toy_solver, monkeypatch):
     g.jbs_loop_on_fail = "flag"
     g.jbs_max_passes = 2
     b.mygs = _FakeGS()
-
-    def _repoint():
-        b._boundary_RZ = read_imas_geometry(b.config.source)[1]
-
-    monkeypatch.setattr(b, "_repoint_imas_geometry", _repoint)
+    point_without_solver(monkeypatch)
     with contextlib.redirect_stdout(io.StringIO()):
         with pytest.warns(RuntimeWarning, match="engine IDS baseline: NOT "
                                                 "converged"):
