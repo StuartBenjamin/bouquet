@@ -25,10 +25,11 @@ Field mapping (verified against a D3D FUSE run)::
 Currents are converted exactly to TokaMaker ``jphi`` = <j_phi> (bouquet's
 convention; :mod:`bouquet.physics` docstring, ``docs/current-conventions.md``)
 with the geometry of the equilibrium slice FUSE paired with the core_profiles
-slice: the total from IMAS ``j_tor`` (A5), the bootstrap as its field-aligned
-part plus the pressure term p'G (A7), each driven source as its field-aligned
-part.  The inductive component is the residual
-``j_phi - j_BS - j_NBI - j_RF - j_other`` so the decomposition sums exactly.
+slice: the total from IMAS ``j_tor`` (A5), the bootstrap and each driven source
+as their field-aligned parts (A7).  The pressure term p'G (A7) is recorded as
+``Baseline.j_pressure`` (owner decision D2; None on the ratio fallback); the inductive component is the
+residual ``j_phi - j_BS - j_NBI - j_RF - j_other`` (so it carries p'G in
+memory) and the decomposition sums exactly.
 Fast pressure is isotropized (see :func:`bouquet.physics.isotropize_fast_pressure`).
 
 Current orientation: bouquet works in ONE positive-current frame.  The
