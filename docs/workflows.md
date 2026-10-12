@@ -123,6 +123,7 @@ is a navigational summary of the defaults.
 | `ImasSource.ni_source` | `"standard"` | The same choice for `ida_hybrid`. `"standard"`: Z_eff stays the dd's and n_i = n_e,IDA(Z − Z_eff,dd)/(Z − 1). **EXPERIMENTAL** `"Zeff"` / `"CER"` / `"all"` (`ida_ion_route`): Z_eff and n_i from IDA |
 | `ImasSource.zeff_from_fuse` | `False` | `ida_hybrid` with an experimental `ni_source` only: `True` keeps the dd's Z_eff while n_e/T_e/T_i/n_i come from IDA. Under `"standard"` the Z_eff is the dd's anyway |
 | `ImasSource.ni_subtract_fast` | `False` | **EXPERIMENTAL** (`ida_ni_beam_subtraction`): `ida_hybrid` with an experimental `ni_source`: subtract the dd's fast-ion density equivalent from IDA's (total) n_i. Refused with `ni_source="standard"` |
+| `ImasSource.include_pfast` | `True` | Add the dd's fast-ion pressure `p_fast` to the equilibrium pressure (an explicit `FixedComponentsConfig.p_fast` still wins). With an experimental `ni_source` on `ida_hybrid`, match it to `ni_subtract_fast`: both `True` puts the fast ions in `p_fast`, both `False` leaves them inside the IDA n_i; on a beam slice the reader warns when they differ (fast ions counted twice, or left out) |
 | `ImasSource.zeff_fast_ions` | `False` | **EXPERIMENTAL** (`fuse_zeff_fast_ions`): classify the dd's stored Z_eff against the thermal-only and thermal+fast numerators (`io.imas._dd_zeff`) and give the bootstrap `Z_eff,th + z2_fast/n_e` where it counts the fast ions. `False`: the thermal-only Z_eff recomputed from the dd's thermal ion densities (as before PR #56). The decision is archived as `li_metrics["zeff_dd_provenance"]` |
 | `Baseline.z2_fast` | — (read) | Σ_s Z_s² n_s^fast on the kinetic grid, from the dd's fast-ion species (IMAS path); `None` without a fast population. Archived per draw with `z_fast` |
 | `Baseline.zeff_includes_fast` | — (read) | Whether the baseline Z_eff's numerator counts the fast ions. `False` by default; with `ImasSource.zeff_fast_ions=True` classified from the dd's stored `zeff` against both numerators (`io.imas._dd_zeff`; with no stored Z_eff and a beam, `True`), and `True` for a measured (IDA) Z_eff on the experimental `ida_hybrid` route. When `True`, the bootstrap sees `Z_eff,th + z2_fast/n_e` (since PR #56; see [physics-notes.md](physics-notes.md#kinetic-assumptions-z_eff-n_i-and-the-clips-pr-56)) and the draw window is `physics.zeff_bounds`' includes-fast one |
@@ -353,7 +354,9 @@ requested time, never interpolated, accepted within half the IDA file's local
 time-step (a single-slice IDA file: half the dd step when paired with `time`,
 the 10 µs floor for an explicit `ida_time`); paired with `time` it must also
 sit within half the dd step of the core_profiles slice. Anything else is
-refused. The match — requested and used IDA time, `dt`, the window and its
+refused. `ImasSource.ida_timing="ida_fuse"` takes the nearest IDA slice at any
+distance instead, as IDA_fuse pairs its own dd and IDA slices (this applies to a
+separate `uncertainty.ida_path` too). The match — requested and used IDA time, `dt`, the window and its
 basis, the dd slice times, and the verdict of FUSE's `ida_provenance.json`
 replay pairing when that table names this run's IDA file and holds the dd
 slice — is archived in the baseline's `li_metrics["ida_time_match"]`.
@@ -511,7 +514,7 @@ Enabled by: `GenerationConfig.solve_method='swb'`; `GenerationConfig.imas_baseli
 
 Validation to do:
 
-- a real-data arm on an OpenFUSIONToolkit build whose solve_with_bootstrap takes x / jphi_fixed / p_fixed (every real-data arm so far was refused at prepare_baseline)
+- real-data arms on an OpenFUSIONToolkit build whose solve_with_bootstrap takes x / jphi_fixed / p_fixed, on dd's from a current IDA_fuse (so far: 6 of 8 IDA-hybrid reconstructions converged on the PR author's build; dd vintage unrecorded)
 - swb_ip_tol statistics: the distribution of each solve's |I_p/I_p,target - 1| (swb_ip_rel_err) over real draws, against the 5e-3 acceptance
 - taper off (swb_edge_taper_psi0=None) verified on real slices: the Picard 2-cycle the taper was added for does not occur, or is caught
 
