@@ -2440,11 +2440,8 @@ def read_imas_baseline(
     # ida_hybrid with an EXPERIMENTAL ni_source: Z_eff / n_i from IDA
     _ida_ion_route = bool(use_ida and getattr(source, "ni_source", "standard")
                           != "standard")
-    if getattr(source, "ni_subtract_fast", False) and not _ida_ion_route:
-        raise ValueError(
-            "ImasSource.ni_subtract_fast=True needs kinetic_source='ida_hybrid' "
-            "with an ida_path and an experimental ni_source: there is no "
-            "IDA-derived n_i to subtract the beam density from")
+    # PSFC_dev: ni_subtract_fast is on by default and acts only on the IDA ion route
+    # (_ida_ion_route); elsewhere there is no IDA n_i to subtract from, and it is ignored.
     if getattr(source, "ida_time", None) is not None and not use_ida:
         # #73 review B6: outside ida_hybrid ida_time would move only the
         # IDA sigmas (resolve_uncertainty), not the kinetics -- refused
