@@ -268,7 +268,7 @@ class Queue:
 
     def record_failure(self, uid, worker, exc=None, signature=None, detail=''):
         sig = signature or (error_signature(exc) if exc is not None else 'unknown')
-        tb = ''.join(traceback.format_exception(exc))[-8000:] if isinstance(exc, BaseException) else detail
+        tb = ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-8000:] if isinstance(exc, BaseException) else detail
         self._record(uid, 'fail', dict(worker=worker, signature=sig, traceback=tb))
         return sig
 
