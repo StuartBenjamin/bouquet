@@ -1146,16 +1146,20 @@ class Bouquet(SwbBaseline):
             bl.engine["solver_geometry"] = dict(rec)
 
     def _record_bootstrap_eps(self, bl) -> None:
-        """Record the Redl epsilon (``GenerationConfig.eps_definition``:
-        name, formula, the R in ``nu*``, the ``evaluate_jBS`` version) on
-        *bl* (``Baseline.bootstrap_eps``, archived as the ``_baseline`` attr
+        """Record the Redl epsilon the run's bootstrap actually uses (name,
+        formula, the R in ``nu*``, the evaluator and its version) on *bl*
+        (``Baseline.bootstrap_eps``, archived as the ``_baseline`` attr
         ``bootstrap_eps_json``) and, under the unified engine, in its
-        record -- both paths, every solve method."""
-        from .engine import eps_record
+        record -- both paths, every solve method.  ``eps_definition`` on the
+        engine and the legacy loop; the toolkit's own on the swb and frozen
+        legacy routes, whose bootstrap is ``solve_with_bootstrap``
+        (:func:`bouquet.engine.bootstrap_eps_route_record`)."""
+        from .config import solve_method_of
+        from .engine import bootstrap_eps_route_record
         if bl is None or not hasattr(bl, "bootstrap_eps"):
             return
-        bl.bootstrap_eps = eps_record(getattr(self.config.generation,
-                                              "eps_definition", None))
+        gc = self.config.generation
+        bl.bootstrap_eps = bootstrap_eps_route_record(gc, solve_method_of(gc))
         if isinstance(getattr(bl, "engine", None), dict):
             bl.engine["bootstrap_eps"] = dict(bl.bootstrap_eps)
 

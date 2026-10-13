@@ -214,7 +214,9 @@ restores the index pairing.
   bootstrap, PR #64, never on main). The opt-ins' tags name their ε and ν\* R
   and say `OPT-IN`, so the three are distinguishable; every loop record
   carries its definition's tag, the baseline carries `bootstrap_eps`
-  (archived as the `_baseline` attr `bootstrap_eps_json`), and `diag` carries
+  (archived as the `_baseline` attr `bootstrap_eps_json`; on the swb and
+  frozen legacy routes it records the toolkit `solve_with_bootstrap`'s own
+  epsilon, not `eps_definition`, review of #78 B5), and `diag` carries
   `eps_definition`, `eps_route`, `nu_star_R`, `R_nu_star`. A stored config
   without the field replays with the new default (warned once); one that
   names a definition keeps it.

@@ -315,9 +315,12 @@ class Baseline:
     # REGISTRY keys, Bouquet.prepare_baseline); [] when none.  Archived as
     # the _baseline attr experimental_features_json on every solve method.
     experimental_features: Optional[list] = None
-    # The Redl epsilon every bootstrap evaluation of the run uses
-    # (GenerationConfig.eps_definition; bouquet.engine.eps_record):
-    # {"eps_definition", "eps_formula", "nu_star_R", "evaluate_jBS_version"}.
+    # The Redl epsilon the run's archived bootstrap uses, by route
+    # (bouquet.engine.bootstrap_eps_route_record): {"eps_definition",
+    # "eps_formula", "nu_star_R", "evaluate_jBS_version", "bootstrap",
+    # "route", ...} -- GenerationConfig.eps_definition on the engine and the
+    # legacy loop; the toolkit solve_with_bootstrap's own on the swb and
+    # frozen legacy routes (evaluate_jBS_version None there).
     # Set by Bouquet.prepare_baseline on every path; archived as the
     # _baseline attr bootstrap_eps_json (and in the engine record).
     bootstrap_eps: Optional[dict] = None

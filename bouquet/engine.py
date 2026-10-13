@@ -780,6 +780,85 @@ def eps_record(eps_definition) -> dict:
                 evaluate_jBS_version=evaluate_jbs_version(d))
 
 
+#: ``bootstrap`` of :func:`bootstrap_eps_route_record`: which evaluator
+#: produced the run's archived bootstrap.
+BOOTSTRAP_EVALUATOR_BOUQUET = "bouquet evaluate_jBS"
+BOOTSTRAP_EVALUATOR_SWB = "toolkit solve_with_bootstrap"
+
+
+def bootstrap_eps_route_record(gc, solve_method, swb_convention=None) -> dict:
+    """The Redl epsilon the run's archived bootstrap ACTUALLY used, by route
+    (review of #78, B5): ``Baseline.bootstrap_eps`` / ``bootstrap_eps_json``.
+
+    * the unified engine and the legacy self-consistent loop
+      (``jbs_self_consistent=True``) evaluate the bootstrap with bouquet's
+      ``evaluate_jBS`` at ``GenerationConfig.eps_definition``:
+      :func:`eps_record`, plus ``bootstrap`` = :data:`BOOTSTRAP_EVALUATOR_BOUQUET`;
+    * ``solve_method="swb"`` and the frozen legacy route
+      (``jbs_self_consistent=False``) take every bootstrap from the toolkit's
+      ``solve_with_bootstrap``, which forms its own epsilon and ``nu*``
+      and never reads ``eps_definition``.  Its definition depends on the
+      toolkit (*swb_convention*, :func:`bouquet.physics.swb_jbs_convention`,
+      detected when None): upstream OFT (``R_avg/F``) uses ``<a>/<R>`` with
+      ``<R>`` in ``nu*`` (``eps_definition="a_over_R"``, bit for bit); the
+      internal-solve toolkit (``kappa<j.B>+p'G``) uses the half-width over its
+      own ``<R>`` with ``bootstrap_kwargs['use_sauter_eps']=True``,
+      ``<a>/<R>`` with ``False``, and its own default when the key is unset
+      (recorded as such, ``eps_definition`` None).  ``evaluate_jBS_version``
+      is None (no ``evaluate_jBS`` produced it) and the configured
+      ``eps_definition`` is kept as ``eps_definition_configured``.
+    """
+    gc_eps = getattr(gc, "eps_definition", None)
+    if solve_method == "engine" or (
+            solve_method == "legacy"
+            and bool(getattr(gc, "jbs_self_consistent", True))):
+        rec = eps_record(gc_eps)
+        rec.update(bootstrap=BOOTSTRAP_EVALUATOR_BOUQUET,
+                   route=("unified engine" if solve_method == "engine"
+                          else "legacy self-consistent loop"))
+        return rec
+    from .physics import (EPS_DEFINITION_DEFAULT, EPS_DEFINITIONS, NU_STAR_R,
+                          SWB_JBS_RAVG_OVER_F, SWB_JBS_TOROIDAL,
+                          swb_jbs_convention)
+    conv = swb_convention
+    if conv is None:
+        try:
+            conv = swb_jbs_convention()
+        except Exception as exc:          # no toolkit / unidentified build
+            conv = f"unidentified ({type(exc).__name__})"
+    bk = dict(getattr(gc, "bootstrap_kwargs", None) or {})
+    if conv == SWB_JBS_RAVG_OVER_F:
+        d = "a_over_R"
+        formula, nu_r = EPS_DEFINITIONS[d], NU_STAR_R[d]
+        basis = "upstream solve_with_bootstrap (sauter_fc <a>/<R>)"
+    elif conv == SWB_JBS_TOROIDAL and "use_sauter_eps" in bk:
+        if bool(bk["use_sauter_eps"]):
+            d = "half_width_over_fsa_R"
+            formula = (EPS_DEFINITIONS[d]
+                       + " (the toolkit's own cut-cell <R>)")
+        else:
+            d = "a_over_R"
+            formula = EPS_DEFINITIONS[d]
+        nu_r = "the toolkit's own (solve_with_bootstrap)"
+        basis = (f"bootstrap_kwargs['use_sauter_eps']="
+                 f"{bool(bk['use_sauter_eps'])}")
+    else:
+        d = None
+        formula = "the toolkit's own default"
+        nu_r = "the toolkit's own (solve_with_bootstrap)"
+        basis = ("bootstrap_kwargs['use_sauter_eps'] unset: the toolkit's "
+                 "default" if conv == SWB_JBS_TOROIDAL
+                 else "toolkit convention not identified")
+    return dict(eps_definition=d, eps_formula=formula, nu_star_R=nu_r,
+                evaluate_jBS_version=None,
+                bootstrap=BOOTSTRAP_EVALUATOR_SWB,
+                route=("swb" if solve_method == "swb"
+                       else "legacy frozen (jbs_self_consistent=False)"),
+                swb_jbs_convention=conv, eps_basis=basis,
+                eps_definition_configured=(EPS_DEFINITION_DEFAULT
+                                           if gc_eps is None else gc_eps))
+
+
 def convergence_table(settings: dict, contract=None) -> list:
     """Every convergence constant the engine uses, with where it lives."""
     from .utils import IP_ROUNDTRIP_TOL_PCT

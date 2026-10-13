@@ -545,3 +545,53 @@ def test_the_archive_stamp_round_trips(tmp_path):
     rec = eps_record("half_width_over_fsa_R")
     stamp_bootstrap_eps(p, record=rec)
     assert load_bootstrap_eps(p) == rec
+
+
+def test_the_eps_stamp_names_the_evaluator_each_route_uses():
+    """Review of #78 (B5): bootstrap_eps_json stamped r_over_R_geo on every
+    run, also where every bootstrap comes from the toolkit's
+    solve_with_bootstrap (swb; frozen legacy), which never reads
+    eps_definition.  The stamp now names what each route used."""
+    from types import SimpleNamespace
+
+    from bouquet.engine import (BOOTSTRAP_EVALUATOR_BOUQUET,
+                                BOOTSTRAP_EVALUATOR_SWB,
+                                bootstrap_eps_route_record, eps_record)
+    from bouquet.physics import SWB_JBS_RAVG_OVER_F, SWB_JBS_TOROIDAL
+
+    def gc(**kw):
+        d = dict(eps_definition="r_over_R_geo", jbs_self_consistent=True,
+                 bootstrap_kwargs={})
+        d.update(kw)
+        return SimpleNamespace(**d)
+    # bouquet's evaluator: the configured definition
+    for sm, g in (("engine", gc()), ("legacy", gc()),
+                  ("engine", gc(eps_definition="a_over_R"))):
+        rec = bootstrap_eps_route_record(g, sm)
+        assert rec["bootstrap"] == BOOTSTRAP_EVALUATOR_BOUQUET
+        assert {k: rec[k] for k in eps_record(g.eps_definition)} == \
+            eps_record(g.eps_definition)
+    # the toolkit's SWB: never the configured r_over_R_geo
+    for sm, g in (("swb", gc()), ("legacy", gc(jbs_self_consistent=False))):
+        up = bootstrap_eps_route_record(g, sm, SWB_JBS_RAVG_OVER_F)
+        assert up["bootstrap"] == BOOTSTRAP_EVALUATOR_SWB
+        assert up["eps_definition"] == "a_over_R"
+        assert up["eps_formula"] == "<a>/<R>"
+        assert up["evaluate_jBS_version"] is None
+        assert up["eps_definition_configured"] == "r_over_R_geo"
+        # the internal-solve toolkit: what use_sauter_eps selects, or its
+        # own default (not claimed)
+        t = bootstrap_eps_route_record(g, sm, SWB_JBS_TOROIDAL)
+        assert t["eps_definition"] is None and "default" in t["eps_basis"]
+        g2 = gc(jbs_self_consistent=g.jbs_self_consistent,
+                bootstrap_kwargs={"use_sauter_eps": True})
+        t = bootstrap_eps_route_record(g2, sm, SWB_JBS_TOROIDAL)
+        assert t["eps_definition"] == "half_width_over_fsa_R"
+        g3 = gc(jbs_self_consistent=g.jbs_self_consistent,
+                bootstrap_kwargs={"use_sauter_eps": False})
+        assert bootstrap_eps_route_record(
+            g3, sm, SWB_JBS_TOROIDAL)["eps_definition"] == "a_over_R"
+    assert bootstrap_eps_route_record(gc(), "swb", SWB_JBS_TOROIDAL)[
+        "route"] == "swb"
+    import json
+    json.dumps(bootstrap_eps_route_record(gc(), "swb", SWB_JBS_RAVG_OVER_F))
