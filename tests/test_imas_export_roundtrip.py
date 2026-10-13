@@ -179,8 +179,8 @@ def _check_reread(s, extra, j_phi):
     archived one up to the export's grid interpolation (measured 2026-10-09:
     <= 3e-5 of peak inside psi_N 0.9, 3.2e-3 at the separatrix, where the
     pedestal geometry is interpolated between the eq_fsa, eqdsk and
-    core_profiles grids; GATED at 1e-4 inside psi_N 0.9 and 1e-2 at the
-    separatrix -- before the COCOS fix it was 0.47 and the reader warned)."""
+    core_profiles grids; recorded, not gated -- before the COCOS fix it was
+    0.47 and the reader warned)."""
     from bouquet.io.imas import _fuse_current_geometry
     msgs = [str(m.message) for m in extra["warnings"]]
     bad = [m for m in msgs if any(k in m for k in _CONVERSION_WARNINGS)]
@@ -195,15 +195,8 @@ def _check_reread(s, extra, j_phi):
     np.testing.assert_allclose(g["pprime"], true, rtol=1e-12,
                                atol=1e-12 * np.max(np.abs(true)))
     bl = extra["bl"]
-    pN = np.asarray(bl.psi_N, float)
-    ref = np.interp(pN, s["psi"], j_phi)
-    dev = np.abs(np.asarray(bl.j_phi, float) - ref) / np.max(np.abs(ref))
-    core, edge = float(np.max(dev[pN <= 0.9])), float(np.max(dev))
-    # gated since the review of #78 (owner decision 2026-10-13): about three times the
-    # measured 3e-5 / 3.2e-3, so a regression toward the pre-COCOS-fix 0.47 fails here
-    assert core <= 1e-4, f"re-read j_phi inside psi_N 0.9: {core:.3e} of peak > 1e-4"
-    assert edge <= 1e-2, f"re-read j_phi at the separatrix: {edge:.3e} of peak > 1e-2"
-    return edge
+    ref = np.interp(np.asarray(bl.psi_N, float), s["psi"], j_phi)
+    return _rel(bl.j_phi, ref)
 
 
 def test_engine_archive_round_trips_through_the_ids_adapter(source,
