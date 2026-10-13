@@ -322,7 +322,13 @@ restores the index pairing.
 - **Readers:** `draw_band` / `draw_bands(rescued="include"|"exclude")` and
   `merge_archives(rescued=...)`: by default rescued draws are kept, listed
   (`provenance["rescued_draws"]`, `merge_rescued_json`) and warned with
-  their count; `"exclude"` drops them (`rescued:<recovered_by>`).
+  their count; `"exclude"` drops them (`rescued:<recovered_by>`). On a
+  shared until-N merge, `"exclude"` also takes the dropped draws the loop had
+  counted in spec off `parallel_manifest_json.until_n.n_inspec_recorded` and
+  records the subtraction (`n_inspec_recorded_by_shards`,
+  `n_inspec_excluded_rescued`, `n_inspec_excluded_rescued_unknown`); every
+  until-N draw now archives the loop's verdict as the group attr
+  `until_n_inspec` (review of #78, A8).
 
 ### OFT i-file archive (#74)
 

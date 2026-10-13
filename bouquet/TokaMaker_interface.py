@@ -8691,6 +8691,12 @@ def generate_bouquet(
             # warning below lands in generation_log on the default quiet
             # path, which is not a place a failure signal may live alone.
             diagnostics['until_n_inspec'] = bool(_ok)
+            # ... and on the archived group: a merge that drops this draw
+            # (merge_archives(rescued="exclude")) takes it off the shard's
+            # recorded in-spec count (review of #78, A8)
+            from .schema import UNTIL_N_INSPEC_ATTR
+            stamp_group_attrs(header, scan_key, count,
+                              {UNTIL_N_INSPEC_ATTR: bool(_ok)})
             diagnostics['until_n_rms_mm'] = float(_rms_mm)
             diagnostics['until_n_max_mm'] = float(_max_mm)
             diagnostics['until_n_reasons'] = list(_reasons)

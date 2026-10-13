@@ -492,13 +492,19 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
     default (``"include"``, counted and warned); ``"exclude"`` leaves them
     out.  Either way, when any shard holds one, the scan group records
     ``merge_rescued_json`` (the policy, the count and each rescued draw's
-    shard, index and ``recovered_by``).
+    shard, index and ``recovered_by``).  On a shared until-N merge,
+    ``"exclude"`` takes the dropped draws the loop had counted in spec (their
+    ``until_n_inspec`` attr) off ``until_n.n_inspec_recorded`` and records
+    the subtraction (``n_inspec_recorded_by_shards``,
+    ``n_inspec_excluded_rescued``, ``..._unknown`` for draws without the
+    attr, warned).
     """
     if rescued not in ("include", "exclude"):
         raise ValueError(f"rescued must be 'include' or 'exclude', got "
                          f"{rescued!r}")
     import warnings
     import h5py
+    from .schema import UNTIL_N_INSPEC_ATTR
     from .utils import (initialize_equilibrium_database, _scan_key,
                         _group_path, group_coord)
 
@@ -600,6 +606,9 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
     offset = 0
     workers = []
     _resc = []                  # rescued draws met in the shards
+    # the in-loop until-N verdicts of the rescued draws a "exclude" merge
+    # drops (True / False; None: the shard did not archive one)
+    _excl_inspec = []
     n_unrecorded = 0            # shards with no worker record (draws still merged)
     with h5py.File(out_path, "a") as out:
         if bkey is not None and base_path not in out:
@@ -645,6 +654,9 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                             merged_as=(None if rescued == "exclude"
                                        else int(offset))))
                         if rescued == "exclude":
+                            _v = _ga.get(UNTIL_N_INSPEC_ATTR, None)
+                            _excl_inspec.append(None if _v is None
+                                                else bool(_v))
                             continue
                     dst = _group_path(scan_key, offset)
                     out.copy(parent[str(i)], dst)
@@ -680,13 +692,32 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                if missing_workers else None)
     if workers:
         shared = [w for w in workers if "shared_target" in w]
+        # rescued="exclude": the shards counted each in-spec rescued draw
+        # when the loop accepted it; the merge dropped it, so it comes off
+        # the recorded count, and the subtraction is recorded (review of
+        # #78, A8)
+        _n_shards_inspec = sum(int(w.get("n_inspec", 0)) for w in shared)
+        _n_ex_in = sum(1 for v in _excl_inspec if v is True)
+        _n_ex_unknown = sum(1 for v in _excl_inspec if v is None)
+        _excl_rec = ({} if not (shared and _excl_inspec) else dict(
+            n_inspec_recorded_by_shards=int(_n_shards_inspec),
+            n_inspec_excluded_rescued=int(_n_ex_in),
+            n_inspec_excluded_rescued_unknown=int(_n_ex_unknown)))
+        if shared and _n_ex_unknown:
+            warnings.warn(
+                f"merge_archives: {_n_ex_unknown} excluded rescued draw(s) "
+                "carry no in-loop until-N verdict (until_n_inspec attr; a "
+                "shard written before it was archived), so the merged "
+                "n_inspec_recorded may still count them -- recorded as "
+                "until_n.n_inspec_excluded_rescued_unknown", UserWarning,
+                stacklevel=2)
         manifest = dict(
             n_workers=len(workers), n_draws=int(offset), workers=workers,
             n_shards_without_record=int(n_unrecorded), partial=partial,
             until_n=(dict(target=shared[0]["shared_target"],
                           total_cap=shared[0].get("total_cap"),
-                          n_inspec_recorded=sum(int(w.get("n_inspec", 0))
-                                                for w in shared),
+                          n_inspec_recorded=int(_n_shards_inspec - _n_ex_in),
+                          **_excl_rec,
                           # the one boundary cut every shard counted against
                           # (only when the shards recorded it)
                           **({k: v for k, v in zip(_INLOOP_CUT_KEYS, next(iter(_distinct)))}
@@ -727,7 +758,10 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
             _u = manifest["until_n"]
             print(f"[until-N] merged {offset} draws from {len(workers)} "
                   f"workers; {_u['n_inspec_recorded']} in-spec recorded "
-                  f"against a shared target of {_u['target']}.")
+                  f"against a shared target of {_u['target']}"
+                  + (f" ({_u['n_inspec_excluded_rescued']} in-spec rescued "
+                     "draw(s) excluded by rescued='exclude')"
+                     if _u.get("n_inspec_excluded_rescued") else "") + ".")
 
     if partial and not workers:            # no worker records, still partial
         from .utils import stamp_generation_provenance

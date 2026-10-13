@@ -48,6 +48,10 @@ JBS_LOOP_JSON_ATTR = "jbs_loop_json"
 #: origin; PR #56).  Engine draws carry the
 #: same record in their engine block's ``inputs.kinetic_sampler``.
 KINETIC_SAMPLER_JSON_ATTR = "kinetic_sampler_json"
+#: Draw-group attr (until-N runs): the draw loop's own in-spec verdict, the
+#: one its ``on_inspec`` count (and a shard's ``n_inspec``) was taken on, so
+#: a merge that drops the draw can take it off the recorded count.
+UNTIL_N_INSPEC_ATTR = "until_n_inspec"
 JBS_LOOP_ATTRS = (JBS_CONVERGED_ATTR, JBS_N_PASSES_ATTR, JBS_LOOP_JSON_ATTR)
 #: Schema version that introduced the block (older archives never carry it).
 JBS_LOOP_SINCE_SCHEMA = 3

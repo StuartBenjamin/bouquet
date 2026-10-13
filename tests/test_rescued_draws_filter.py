@@ -134,3 +134,85 @@ def test_merge_without_rescued_draws_writes_nothing_new(tmp_path):
         assert "merge_rescued_json" not in hf["scan/0"].attrs
     with pytest.raises(ValueError, match="rescued must be"):
         merge_archives([s0], str(tmp_path / "m2"), scan_key=0, rescued="no")
+
+
+def _until_n_shard(path, worker, inspec, rescued):
+    """A shared until-N shard: draw i is in spec by the loop's verdict
+    (``until_n_inspec``) when i in *inspec*; the worker record counted them."""
+    with h5py.File(path, "w") as hf:
+        g = hf.create_group("scan/0/_baseline")
+        g.attrs["l_i_target"] = 0.9
+        g.attrs["Ip_target"] = 1.0e6
+        for i in range(3):
+            d = hf.create_group(f"scan/0/{i}")
+            d.attrs["count"] = i
+            d.attrs["solve_recovered"] = i in rescued
+            if i in rescued:
+                d.attrs["solve_recovered_by"] = "loose_tol=1e-5"
+            if inspec is not None:
+                d.attrs["until_n_inspec"] = i in inspec
+        hf["scan/0"].attrs["parallel_worker_json"] = json.dumps(
+            dict(worker_id=worker, n=3, n_attempts=3, seed=7 + worker,
+                 n_inspec=len(inspec or ()), shared_target=4, total_cap=10))
+    return str(path)
+
+
+def test_exclude_takes_the_dropped_inspec_draws_off_the_until_n_count(
+        tmp_path):
+    """Review of #78 (A8): the shards counted each in-spec rescued draw when
+    the loop accepted it; a rescued='exclude' merge drops the draw, so the
+    manifest's n_inspec_recorded must drop it too, and say so."""
+    from bouquet.parallel import merge_archives
+    # w0: in spec 0, 1 (1 rescued); w1: in spec 0, 2 (2 rescued), 1 rescued
+    # but out of spec -- 4 recorded by the shards, 2 of them excluded
+    s0 = _until_n_shard(tmp_path / "w0.h5", 0, inspec={0, 1}, rescued={1})
+    s1 = _until_n_shard(tmp_path / "w1.h5", 1, inspec={0, 2},
+                        rescued={1, 2})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        out, n = merge_archives([s0, s1], str(tmp_path / "m"), scan_key=0,
+                                rescued="exclude")
+    assert n == 3
+    with h5py.File(out, "r") as hf:
+        man = json.loads(hf["scan/0"].attrs["parallel_manifest_json"])
+    u = man["until_n"]
+    assert u["n_inspec_recorded_by_shards"] == 4
+    assert u["n_inspec_excluded_rescued"] == 2
+    assert u["n_inspec_excluded_rescued_unknown"] == 0
+    assert u["n_inspec_recorded"] == 2 and u["target"] == 4
+    # include: nothing is subtracted, nothing extra is recorded
+    s0 = _until_n_shard(tmp_path / "x0.h5", 0, inspec={0, 1}, rescued={1})
+    with pytest.warns(UserWarning, match="RESCUED"):
+        out, n = merge_archives([s0], str(tmp_path / "mi"), scan_key=0)
+    with h5py.File(out, "r") as hf:
+        u = json.loads(hf["scan/0"].attrs["parallel_manifest_json"])["until_n"]
+    assert u["n_inspec_recorded"] == 2
+    assert "n_inspec_excluded_rescued" not in u
+
+
+def test_exclude_without_the_loops_verdict_is_counted_unknown_and_warned(
+        tmp_path):
+    from bouquet.parallel import merge_archives
+    s0 = _until_n_shard(tmp_path / "w0.h5", 0, inspec=None, rescued={1})
+    with pytest.warns(UserWarning, match="no in-loop until-N verdict"):
+        out, n = merge_archives([s0], str(tmp_path / "m"), scan_key=0,
+                                rescued="exclude")
+    with h5py.File(out, "r") as hf:
+        u = json.loads(hf["scan/0"].attrs["parallel_manifest_json"])["until_n"]
+    assert u["n_inspec_excluded_rescued_unknown"] == 1
+    assert u["n_inspec_excluded_rescued"] == 0
+
+
+def test_the_draw_loop_archives_its_until_n_verdict():
+    """The verdict the loop counted is stamped on the archived group, where
+    merge_archives reads it back."""
+    import inspect
+
+    from bouquet.TokaMaker_interface import generate_bouquet
+    from bouquet.schema import UNTIL_N_INSPEC_ATTR
+    src = inspect.getsource(generate_bouquet)
+    i_ok = src.index("diagnostics['until_n_inspec'] = bool(_ok)")
+    i_st = src.index("{UNTIL_N_INSPEC_ATTR: bool(_ok)}")
+    i_cnt = src.index("_n_inspec_seen += 1")
+    assert i_ok < i_st < i_cnt
+    assert UNTIL_N_INSPEC_ATTR == "until_n_inspec"
