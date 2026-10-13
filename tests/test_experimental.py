@@ -57,7 +57,7 @@ def test_the_registered_features():
     assert list(X.REGISTRY) == [
         "ida_ion_route", "fuse_zeff_fast_ions", "ida_ni_beam_subtraction",
         "kinetic_sampler_clips", "swb_solve_method",
-        "bootstrap_convergence_override"]
+        "bootstrap_convergence_override", "ida_fuse_timing"]
     # the eps default (PR #60 E4/E7, r_over_R_geo) is a declared physics change,
     # not an experimental feature
     assert not [k for k in X.REGISTRY if "eps" in k]
@@ -131,6 +131,30 @@ def test_swb_and_the_convergence_override(tmp_path):
             reconstruction_engine="legacy",          # refused under the engine
             bootstrap_convergence_override=True))) == [
         "bootstrap_convergence_override"]
+
+
+def test_the_ida_fuse_timing_is_experimental(tmp_path):
+    """ImasSource.ida_timing="ida_fuse" removes the IDA time-window
+    acceptance (#79): registered, warned and stamped like every other
+    experimental route -- whenever an IDA file is in play."""
+    cdf = str(tmp_path / "i.cdf")
+    assert X.experimental_features_enabled(_imas(
+        tmp_path, ida_path=cdf, ida_timing="ida_fuse")) == ["ida_fuse_timing"]
+    # a separate uncertainty.ida_path is timed by it too
+    assert X.experimental_features_enabled(_imas(
+        tmp_path, unc=UncertaintyConfig(ida_path=cdf),
+        ida_timing="ida_fuse")) == ["ida_fuse_timing"]
+    # no IDA file: it times nothing; the default window rule is not flagged
+    assert X.experimental_features_enabled(_imas(
+        tmp_path, ida_timing="ida_fuse")) == []
+    assert X.experimental_features_enabled(_imas(
+        tmp_path, ida_path=cdf, ida_timing="window")) == []
+    r = X.REGISTRY["ida_fuse_timing"]
+    assert r["introduced"] == "#79, 1.4.0"
+    assert any("ida_timing='ida_fuse'" in e for e in r["enabled_by"])
+    with pytest.warns(X.ExperimentalFeatureWarning, match="ida_fuse_timing"):
+        X.warn_experimental_features(_imas(tmp_path, ida_path=cdf,
+                                           ida_timing="ida_fuse"))
 
 
 def test_ni_source_is_validated(tmp_path):

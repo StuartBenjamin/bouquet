@@ -109,8 +109,9 @@ nothing on these routes beyond the increment σ=0 fix (legacy draws with the
 Z_eff channel) and the other declared changes of this release.
 
 **Registry.** `bouquet.experimental.REGISTRY` lists every experimental feature
-(the four above, `solve_method="swb"` and `bootstrap_convergence_override`) with
-its validation TODO. `prepare_baseline()` warns once per enabled feature
+(the four above, `solve_method="swb"`, `bootstrap_convergence_override` and
+`ImasSource.ida_timing="ida_fuse"` -- `ida_fuse_timing`, which removes the IDA
+time-window acceptance, #79) with its validation TODO. `prepare_baseline()` warns once per enabled feature
 (`ExperimentalFeatureWarning`); the list is on `Baseline.experimental_features`,
 in the engine record, and on the archive's `_baseline` attr
 `experimental_features_json` on every solve method; `stats.draw_band` and the

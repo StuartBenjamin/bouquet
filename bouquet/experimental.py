@@ -41,7 +41,8 @@ __all__ = ["REGISTRY", "ExperimentalFeatureWarning",
            "docs_markdown", "DOCS_BEGIN", "DOCS_END",
            "STANDARD_NI_SOURCE", "IDA_ION_ROUTES", "NI_SOURCES",
            "ida_ion_route_on", "fuse_zeff_fast_ions_on",
-           "ida_ni_beam_subtraction_on", "kinetic_clips_on"]
+           "ida_ni_beam_subtraction_on", "kinetic_clips_on",
+           "ida_fuse_timing_on"]
 
 
 class ExperimentalFeatureWarning(UserWarning):
@@ -188,6 +189,31 @@ REGISTRY = {
             "load_config and shown with the archive summary",
         ],
         status="experimental"),
+    "ida_fuse_timing": dict(
+        description=(
+            "Read the IDA slice (ida_hybrid's ImasSource.ida_path, or a "
+            "separate uncertainty.ida_path) at the file's nearest own slice "
+            "to the requested time AT ANY DISTANCE, as IDA_fuse pairs its "
+            "own dd and IDA slices (io.imas.IDA_FUSE_TIME_RULE, the #73 "
+            "timing before review).  It removes the IDA time-window "
+            "acceptance: an IDA slice far from the dd slice is read without "
+            "a refusal (the match, dt included, is still archived in "
+            "li_metrics['ida_time_match']).  Default 'window': the nearest "
+            "slice within half the IDA file's local time-step, else refused "
+            "(io.imas.IDA_TIME_RULE)."),
+        enabled_by=["ImasSource.ida_timing='ida_fuse' with an ida_path or "
+                    "uncertainty.ida_path"],
+        introduced="#79, 1.4.0",
+        validation_todo=[
+            "on >= 5 real IDA_fuse runs: the |dt| distribution of the "
+            "slices it accepts beyond the window rule's half-step, and the "
+            "kinetic profiles of each against the in-window slice",
+            "I_BS, l_i(3), q0 and beta_N of a run timed by 'ida_fuse' "
+            "against the same slice timed by 'window', where both accept "
+            "it, and wherever 'window' refuses: show the accepted slice is "
+            "the one FUSE's replay pairing used (ida_provenance.json)",
+        ],
+        status="experimental"),
 }
 
 
@@ -242,6 +268,15 @@ def kinetic_clips_on(config) -> bool:
             or ida_ni_beam_subtraction_on(src))
 
 
+def ida_fuse_timing_on(source, uncertainty=None) -> bool:
+    """:data:`REGISTRY` ``"ida_fuse_timing"``: ``ImasSource.ida_timing=
+    "ida_fuse"`` with an IDA file in play (without one it times nothing)."""
+    from .config import ImasSource
+    return (isinstance(source, ImasSource)
+            and getattr(source, "ida_timing", "window") == "ida_fuse"
+            and _ida_in_play(source, uncertainty))
+
+
 def _swb_on(config) -> bool:
     gc = getattr(config, "generation", None)
     if gc is None:
@@ -263,6 +298,8 @@ _PREDICATES = {
     "bootstrap_convergence_override": lambda c: bool(getattr(
         getattr(c, "generation", None), "bootstrap_convergence_override",
         False)),
+    "ida_fuse_timing": lambda c: ida_fuse_timing_on(
+        getattr(c, "source", None), getattr(c, "uncertainty", None)),
 }
 assert set(_PREDICATES) == set(REGISTRY)
 

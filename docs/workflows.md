@@ -356,8 +356,9 @@ requested time, never interpolated, accepted within half the IDA file's local
 time-step (a single-slice IDA file: half the dd step when paired with `time`,
 the 10 µs floor for an explicit `ida_time`); paired with `time` it must also
 sit within half the dd step of the core_profiles slice. Anything else is
-refused. `ImasSource.ida_timing="ida_fuse"` takes the nearest IDA slice at any
-distance instead, as IDA_fuse pairs its own dd and IDA slices (this applies to a
+refused. **EXPERIMENTAL** (see [Experimental features](#experimental-features-and-their-validation-status),
+`ida_fuse_timing`): `ImasSource.ida_timing="ida_fuse"` takes the nearest IDA slice at any
+distance instead, without the window acceptance, as IDA_fuse pairs its own dd and IDA slices (this applies to a
 separate `uncertainty.ida_path` too). The match — requested and used IDA time, `dt`, the window and its
 basis, the dd slice times, and the verdict of FUSE's `ida_provenance.json`
 replay pairing when that table names this run's IDA file and holds the dd
@@ -530,6 +531,17 @@ Validation to do:
 
 - for each key, the converged j_BS, l_i and q0 against the toolkit's default criterion on >= 5 real slices; a value that changes a converged result beyond the default criterion's own residual is a loosened criterion and must be flagged
 - the effective values stamped per run are read back by load_config and shown with the archive summary
+
+#### `ida_fuse_timing` (experimental; introduced #79, 1.4.0)
+
+Read the IDA slice (ida_hybrid's ImasSource.ida_path, or a separate uncertainty.ida_path) at the file's nearest own slice to the requested time AT ANY DISTANCE, as IDA_fuse pairs its own dd and IDA slices (io.imas.IDA_FUSE_TIME_RULE, the #73 timing before review).  It removes the IDA time-window acceptance: an IDA slice far from the dd slice is read without a refusal (the match, dt included, is still archived in li_metrics['ida_time_match']).  Default 'window': the nearest slice within half the IDA file's local time-step, else refused (io.imas.IDA_TIME_RULE).
+
+Enabled by: `ImasSource.ida_timing='ida_fuse' with an ida_path or uncertainty.ida_path`
+
+Validation to do:
+
+- on >= 5 real IDA_fuse runs: the |dt| distribution of the slices it accepts beyond the window rule's half-step, and the kinetic profiles of each against the in-window slice
+- I_BS, l_i(3), q0 and beta_N of a run timed by 'ida_fuse' against the same slice timed by 'window', where both accept it, and wherever 'window' refuses: show the accepted slice is the one FUSE's replay pairing used (ida_provenance.json)
 
 <!-- experimental-registry:end -->
 
