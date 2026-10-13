@@ -1679,7 +1679,13 @@ def _subtract_fast_ni(psi_N, ni, ni_fuse_thermal, z_fast, z2_fast, impurity_Z):
         gate = dict(zip(NI_FAST_GATE_PSI_N, (np.abs(a - b) / np.abs(b)).tolist()))
         mismatch = float(max(gate.values()))
         agrees = mismatch <= NI_FAST_RTOL
+    n_floored = int(np.count_nonzero(ni - ni_fast < 0.0))   # the n_i >= 0 floor, counted (rule E3)
     ni_th = np.maximum(ni - ni_fast, 0.0)
+    if n_floored:
+        import warnings
+        warnings.warn(f"ni_subtract_fast: the thermal n_i floor at 0 binds on {n_floored} node(s): the IDA "
+                      "n_i is below the dd's fast-ion equivalent there (recorded as ni_fast_meta.n_floored)",
+                      UserWarning, stacklevel=2)
     if agrees is None:
         evidence = ("dd main-ion density vanishes at a check point; "
                     "cross-check skipped")
@@ -1694,7 +1700,7 @@ def _subtract_fast_ni(psi_N, ni, ni_fuse_thermal, z_fast, z2_fast, impurity_Z):
     return ni_th, {
         "applied": True, "agrees": agrees, "mismatch": mismatch, "gate": gate,
         "fast_fraction_peak": float(np.max(ni_fast / np.maximum(ni, 1e-30))),
-        "evidence": evidence}
+        "n_floored": n_floored, "evidence": evidence}
 
 
 #: The time rule of the ida_hybrid IDA slice (#73 review; the source-time
