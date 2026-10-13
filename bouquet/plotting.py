@@ -3827,8 +3827,9 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
                 jtor = _m * np.asarray(c["j_tor"], float)
                 tt = lambda jp: _s * jpar_to_jphi_tokamaker(_m * jp, geo)
                 F = dict(total=np.interp(psi, pN, _s * jtor_imas_to_jphi_tokamaker(jtor, geo)),
-                         jBS=np.interp(psi, pN, tt(np.asarray(c["j_bootstrap"], float))
-                                       + _s * jphi_tokamaker_pressure_term(geo)),
+                         # D2: the archive's j_BS is the field-aligned bootstrap alone; p'G is its own
+                         # bucket (j_pressure), left here in the "fixed" remainder
+                         jBS=np.interp(psi, pN, tt(np.asarray(c["j_bootstrap"], float))),
                          jind=np.interp(psi, pN, tt(np.asarray(c["j_ohmic"], float))))
                 fixed = F["total"] - F["jBS"] - F["jind"]; Flabel = "FUSE"
             else:
