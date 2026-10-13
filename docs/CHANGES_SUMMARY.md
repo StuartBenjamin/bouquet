@@ -157,8 +157,12 @@ restores the index pairing.
   archive writer (`generate_bouquet`, with the run's `baseline_split`) now
   takes it off and stores it as `j_pressure` with the same attr — per draw
   evaluated on the archived state (`TokaMaker_interface.
-  archived_pressure_term`), for the baseline the reader's `j_pressure`
-  (IMAS) or the baseline-converged state's (reconstruction). The archived
+  archived_pressure_term`), and for the baseline likewise on the
+  archived (baseline-converged) state, on the reconstruction AND the IMAS
+  path (review of #78, B2: the IMAS baseline first archived the dd
+  source's `p′G`, which the legacy forward solve does not hold, so a σ=0
+  draw split differently from its baseline; the dd's value stays in memory
+  as `Baseline.j_pressure_source`). The archived
   legacy `j_inductive` therefore moves by `−p′G`; `j_BS`, `j_phi` and every
   solve are unchanged. Where the solver cannot evaluate `p′G` the group
   keeps the old convention, with a warning. A direct `generate_bouquet`

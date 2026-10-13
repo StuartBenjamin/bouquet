@@ -2811,6 +2811,11 @@ def read_imas_baseline(
     # the third current bucket (owner decision D2), beside the solve split
     # (which carries it in j_inductive; li_metrics["imas_current_conversion"])
     bl.j_pressure = j_pressure
+    # the dd SOURCE's p'G (its geometry and pressure), kept under its own
+    # name: the legacy forward solve replaces the state, and the archive
+    # stores the solved state's own p'G (run._archive_baseline_split; review
+    # of #78, B2); engine and swb overwrite j_pressure with their state's
+    bl.j_pressure_source = j_pressure
     # the in-memory split keeps p'G in the residual j_inductive (the archive
     # writer takes it off: TokaMaker_interface.generate_bouquet)
     bl.current_split_convention = SPLIT_PRESSURE_IN_INDUCTIVE

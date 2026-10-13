@@ -92,6 +92,30 @@ def _zero_perturbation_env(env):
     return out
 
 
+def _archive_baseline_split(bl, method_name):
+    """The ``baseline_split`` ``generate()`` hands ``generate_bouquet``
+    (owner decision D2: ``p'G`` archived as its own ``j_pressure``).
+
+    The schema's ``j_pressure`` is the ``p'G`` of the ARCHIVED state.  The
+    engine and swb baselines carry their solved state's own
+    (``Baseline.j_pressure``).  A legacy baseline does not: the IMAS reader's
+    ``Baseline.j_pressure`` is the dd source's ``p'G`` (its geometry and
+    pressure), which the legacy forward solve then replaces with its own
+    state.  For the legacy method ``j_pressure`` is therefore None, so
+    ``generate_bouquet`` evaluates it on the archived baseline state
+    (``archived_pressure_term``), exactly as for every legacy draw and the
+    legacy g-file baseline; the dd's value stays on the in-memory baseline
+    as ``Baseline.j_pressure_source`` (review of #78, B2)."""
+    from .schema import SPLIT_PRESSURE_IN_INDUCTIVE
+    jp = None if method_name == "legacy" else getattr(bl, "j_pressure", None)
+    return dict(
+        j_pressure=jp,
+        inductive_includes_pressure=(
+            getattr(bl, "current_split_convention",
+                    SPLIT_PRESSURE_IN_INDUCTIVE)
+            == SPLIT_PRESSURE_IN_INDUCTIVE))
+
+
 def _terms(mygs, triples):
     """The solver's coil-regularisation terms of ``(coils, target, weight)``
     triples (:meth:`Bouquet._apply_coil_reg`)."""
@@ -7849,7 +7873,6 @@ class Bouquet(SwbBaseline):
         """
         import numpy as np
         from .baseline import resolve_uncertainty
-        from .schema import SPLIT_PRESSURE_IN_INDUCTIVE
         from .TokaMaker_interface import DrawSolveGuard, generate_bouquet
         from .utils import initialize_equilibrium_database
 
@@ -8102,13 +8125,10 @@ class Bouquet(SwbBaseline):
                 coord=getattr(bl, "coord", coords.PSI),
                 source_seed_profile=getattr(bl, "swb_seed_profile", None),
                 source_jphi_fixed=getattr(bl, "swb_jphi_fixed", None),
-                # owner decision D2: p'G archived as its own j_pressure
-                baseline_split=dict(
-                    j_pressure=getattr(bl, "j_pressure", None),
-                    inductive_includes_pressure=(
-                        getattr(bl, "current_split_convention",
-                                SPLIT_PRESSURE_IN_INDUCTIVE)
-                        == SPLIT_PRESSURE_IN_INDUCTIVE)),
+                # owner decision D2: p'G archived as its own j_pressure, the
+                # archived state's own (legacy: evaluated on it there)
+                baseline_split=_archive_baseline_split(
+                    bl, getattr(_m, "name", "legacy")),
                 bootstrap_kwargs=gc.bootstrap_kwargs,
             )
         self.generation_log = _cap["text"] or None
