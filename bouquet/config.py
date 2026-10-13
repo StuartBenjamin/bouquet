@@ -3041,6 +3041,22 @@ def _stored_unified_unread_fields():
     return tuple(ENGINE_UNREAD_LEGACY_FIELDS)
 
 
+
+def _stored_engine(gend) -> str:
+    """The engine a STORED generation dict ran with: ``solve_method`` decides
+    when it is set (``"engine"`` -> unified; ``"legacy"`` / ``"swb"`` ->
+    legacy, as :func:`_effective_solve_fields`), and only a dict without it
+    is judged by its ``reconstruction_engine`` field.  Before, a legacy or
+    swb run stored with ``reconstruction_engine`` at its default ``"unified"``
+    was loaded as a unified config: its legacy fields were reset and its
+    ``bootstrap_kwargs`` dropped (review of #78, finding A1)."""
+    sm = gend.get("solve_method")
+    if sm == "engine":
+        return "unified"
+    if sm in ("legacy", "swb"):
+        return "legacy"
+    return gend.get("reconstruction_engine", "legacy")
+
 def _stored_bootstrap_kwargs_compat(gend: dict) -> None:
     """Load a stored ``bootstrap_kwargs`` as it ran (in place).
 
@@ -3060,9 +3076,7 @@ def _stored_bootstrap_kwargs_compat(gend: dict) -> None:
     bk = gend.get("bootstrap_kwargs")
     if not isinstance(bk, dict) or not bk:
         return
-    eng = gend.get("reconstruction_engine", "legacy")
-    if gend.get("solve_method") == "engine":
-        eng = "unified"
+    eng = _stored_engine(gend)
     if eng == "unified":
         from .engine import ENGINE_BOOTSTRAP_KWARGS
         unread = sorted(set(bk) - set(ENGINE_BOOTSTRAP_KWARGS))
@@ -3116,9 +3130,7 @@ def _stored_config_compat(gend: dict) -> None:
     other 20 could not be loaded."""
     import warnings
     from .engine import ENGINE_FIELD_DEFAULTS
-    eng = gend.get("reconstruction_engine", "legacy")
-    if gend.get("solve_method") == "engine":
-        eng = "unified"
+    eng = _stored_engine(gend)
     if eng == "legacy":
         for name, hist in ENGINE_FIELD_HISTORICAL_DEFAULTS.items():
             if name not in gend:
