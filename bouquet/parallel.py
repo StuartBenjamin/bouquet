@@ -1122,12 +1122,12 @@ def _init_case_worker(worker_id_queue, master_working_dir, config_dict, init_sta
         from .config import BouquetConfig
         from .paths import add_oft_to_path
         from .run import Bouquet
-        add_oft_to_path()
         config = BouquetConfig.from_dict(config_dict)
         # one mesh file opened by many OFT processes at once has deadlocked a serial HDF5 build
         local_mesh = os.path.join(working_dir, os.path.basename(config.solver.mesh_path))
-        shutil.copy2(config.solver.mesh_path, local_mesh)
+        shutil.copy2(config.solver.mesh_path, local_mesh)   # before the toolkit import: a missing mesh is reported as such
         config.solver.mesh_path = local_mesh
+        add_oft_to_path()
         _worker_state.update(worker_id=worker_id, working_dir=working_dir, log_path=log_path,
                              bouquet=Bouquet(config).setup_solver(), hooks=dict(hooks or {}))
     except Exception:
