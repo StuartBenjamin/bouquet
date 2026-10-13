@@ -175,8 +175,7 @@ draws, one thread), OFT `fix/jphi-update-ravgs-and-nonfinite-abort` 7da4f18
 engine never reads back to their defaults (printed and recorded in the run's
 `summary.json`; here only `isolate_edge_jBS` False -> True). No bar changed.
 
-* Unified engine: 20 attempts, **17 archived** (3 rejected:
-  `homotopy_maxits`), **4 in spec** (draws 0, 9, 13, 17). An engine draw's
+* Unified engine: 20 attempts, **16 archived** (4 rejected), **6 in spec** (draws 0, 7, 8, 9, 13, 17). An engine draw's
   `in_spec` is the coil verdict AND its post-hoc l_i band
   (`passes_draw_band`, one of `filtering._FILTER_FLAGS`): 5 of 17 pass the
   coil rule, 11 of 17 the band. Wall time: reconstruction 66 s, draws
@@ -205,7 +204,7 @@ engine never reads back to their defaults (printed and recorded in the run's
   is `eps_definition = "r_over_R_geo"`, `eps = (R_max - R_min)/(R_max +
   R_min)` with `R_geo = (R_max + R_min)/2` also as the R of `nu*` (owner
   decision E7; version tag `evaluate_jBS/4`). Same recipe, same seed, same
-  yield (20 attempts, 17 archived, 4 in spec); reconstruction 62 s, draws
+  yield (20 attempts, 16 archived, 6 in spec); reconstruction 62 s, draws
   43.8 min. The fixture's stored config carries no `eps_definition`, so a
   replay takes the default (warned once at load); do not add the field to
   it. The earlier fixtures (2026-10-07 at bouquet `7bd48fb`/`8285201`/

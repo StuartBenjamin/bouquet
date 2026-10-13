@@ -270,8 +270,9 @@ restores the index pairing.
   `engine_resolved_defaults`): **100 for the legacy and swb draws** (was the
   solver's setup cap, 800, before #75), nothing under the unified engine
   (refused there with the standard unread-settings rule, as are the rescue
-  fields). `None` still means the setup cap; a stored config without the
-  field (before #66) or with `null` replays uncapped. `"auto"` rather than
+  fields). `None` still means the setup cap for the legacy draws (the swb draws
+  floor it at `SWB_DRAW_MAXITS` = 100); a stored config without the
+  field (before #66) or with `null` replays uncapped on the legacy draws. `"auto"` rather than
   `None` because `None` has meant the setup cap in every stored config.
   **Legacy numbers can move** where a draw solve needed 101–800 iterations:
   such a draw now fails its cap (it is rejected, not archived). The

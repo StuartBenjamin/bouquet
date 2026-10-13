@@ -534,6 +534,9 @@ def sigma0_reference_scale(jBS_scale_range):
     range is the per-draw jitter only and its midpoint is the reference.
     For an asymmetric configured range that midpoint is not 1.0, which is
     what ``test_asymmetric_range_uses_its_own_mean`` pins.
+    With the self-consistent bootstrap loop, run.py re-centres the range on
+    the baseline's ``bs_scale`` before handing it here (the draw record's
+    ``applied_as`` says so), so the reference is that re-centred midpoint.
 
     Telescoping is exact only IN EXPECTATION, not per draw: the
     ``jBS_scales`` samples are drawn independently of the kinetic sigmas,
