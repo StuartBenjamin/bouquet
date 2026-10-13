@@ -226,3 +226,31 @@ def test_clips_change_nothing_where_none_binds():
     assert not d1.clipped
     for k in ("ne", "te", "ni", "ti", "zeff"):
         np.testing.assert_array_equal(getattr(d0, k), getattr(d1, k))
+
+
+def test_the_record_carries_the_resolved_Z_imp_and_its_origin():
+    """Review of #78 (A2): the impurity charge the Z_eff channel used is
+    archived per draw with its origin -- "declared" when the caller passed
+    it (the engine IMAS draws pass Baseline.Z_imp, the thermal inversion),
+    "inverted" when the sampler inverted it from the baseline (ne, ni,
+    Z_eff); None without a Z_eff channel."""
+    import json
+    zb = 1.8
+    ni0 = main_ion_density_from_zeff(NE, np.full(PSI.size, zb), Z_IMP)
+    # declared: the caller's value, unchanged
+    b = _base(zeff=zb, ni=ni0, Z_imp=4.5)
+    rec = sample_kinetics(b, make_rng(1), _thermal, _thermal(b),
+                          p_thresh=0.5).record()
+    assert rec["Z_imp"] == 4.5 and rec["Z_imp_origin"] == "declared"
+    # inverted: from a quasineutral C6 baseline the inversion returns 6
+    b = _base(zeff=zb, ni=ni0)
+    rec = sample_kinetics(b, make_rng(1), _thermal, _thermal(b),
+                          p_thresh=0.5).record()
+    assert rec["Z_imp_origin"] == "inverted"
+    assert rec["Z_imp"] == pytest.approx(b.resolved_Z_imp(), rel=0.0)
+    assert rec["Z_imp"] == pytest.approx(Z_IMP, rel=1e-9)
+    assert json.loads(json.dumps(rec)) == rec
+    # no Z_eff channel: nothing resolved, nothing claimed
+    b = _base()
+    rec = sample_kinetics(b, make_rng(1), _thermal, _thermal(b)).record()
+    assert rec["Z_imp"] is None and rec["Z_imp_origin"] is None

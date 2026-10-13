@@ -37,7 +37,10 @@ ZEFF_DRAW_MIN = 1.0
 #: below ``ne - z_fast`` when ``Z_imp`` is declared.  Legacy draws with the
 #: Z_eff channel on therefore differ from ``/1`` (seed-for-seed); engine
 #: draws differ only where a clip binds.  Every clip that fires is counted
-#: per draw (:attr:`KineticDraw.clips`).
+#: per draw (:attr:`KineticDraw.clips`).  (Since 1.4.0 the engine IMAS
+#: draws declare ``Baseline.Z_imp``, the thermal inversion, instead of the
+#: inversion of the dd's Z_eff; the record names the Z_imp used and its
+#: origin.)
 #: ``/3`` (1.4.0): ``/2`` with the PR #56 clips (the floor at 1, the ``ni``
 #: floor and ceiling, the passive Z_eff aux clip) EXPERIMENTAL and opt-in
 #: (:attr:`KineticBase.clips`); by default a Z_eff draw is held in
@@ -172,6 +175,12 @@ class KineticDraw:
         CLIP_COUNTERS, 0))
     #: whether the experimental PR #56 clips were on (KineticBase.clips)
     clips_enabled: bool = False
+    #: the impurity charge the Z_eff channel used (None: no channel or no
+    #: dilution) and where it came from: ``"declared"`` (the caller's
+    #: ``KineticBase.Z_imp``, e.g. ``Baseline.Z_imp``) or ``"inverted"``
+    #: (the sampler inverted it from the baseline ne, ni and Z_eff)
+    Z_imp: Optional[float] = None
+    Z_imp_origin: Optional[str] = None
 
     @property
     def native(self) -> dict:
@@ -183,10 +192,14 @@ class KineticDraw:
         return any(int(v) > 0 for v in self.clips.values())
 
     def record(self) -> dict:
-        """JSON-safe per-draw stamp: the sampler version, the pressure match
-        and the clip counters (for the draw's archive record)."""
+        """JSON-safe per-draw stamp: the sampler version, the pressure match,
+        the clip counters and the resolved ``Z_imp`` with its origin (for the
+        draw's archive record)."""
         return dict(version=KINETIC_SAMPLER_VERSION,
                     clips_enabled=bool(self.clips_enabled),
+                    Z_imp=(None if self.Z_imp is None
+                           else float(self.Z_imp)),
+                    Z_imp_origin=self.Z_imp_origin,
                     zeff_primary=bool(self.zeff_primary),
                     iterations=int(self.iterations),
                     p_err_pct=float(self.p_err_pct),
@@ -339,6 +352,9 @@ def sample_kinetics(base: KineticBase, rng, thermal_integral: Callable,
     draw.p_err_pct = float(p_err)
     draw.clips = clips
     draw.clips_enabled = bool(b.clips)
+    draw.Z_imp = None if Z_imp is None else float(Z_imp)
+    draw.Z_imp_origin = (None if Z_imp is None
+                         else "declared" if b.Z_imp else "inverted")
     if draw.clipped:
         print("  [kinetic_sampler] clip(s) fired on this draw (nodes moved): "
               + ", ".join(f"{k}={v}" for k, v in clips.items() if v))

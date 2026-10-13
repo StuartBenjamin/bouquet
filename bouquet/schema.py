@@ -44,7 +44,8 @@ JBS_N_PASSES_ATTR = "jbs_n_passes"
 JBS_LOOP_JSON_ATTR = "jbs_loop_json"
 #: Draw-group attr (legacy and swb draws): the shared kinetic sampler's
 #: per-draw record as JSON (``bouquet.kinetic_sampler.KineticDraw.record``:
-#: version, pressure match, clip counters; PR #56).  Engine draws carry the
+#: version, pressure match, clip counters, the resolved ``Z_imp`` and its
+#: origin; PR #56).  Engine draws carry the
 #: same record in their engine block's ``inputs.kinetic_sampler``.
 KINETIC_SAMPLER_JSON_ATTR = "kinetic_sampler_json"
 JBS_LOOP_ATTRS = (JBS_CONVERGED_ATTR, JBS_N_PASSES_ATTR, JBS_LOOP_JSON_ATTR)

@@ -248,7 +248,18 @@ restores the index pairing.
 - **What moves:** legacy draws with the Z_eff channel on (the default
   channel) differ seed-for-seed from `/1`; each profile is now
   `base + (sample - mean) b0` (ULP-level differences on ne, Te, Ti). Engine
-  draws are unchanged except where one of the clips below binds.
+  draws on a g-file source are unchanged except where one of the clips below
+  binds. **Engine IMAS draws change (declared, review of #78 A2; owner
+  decision: keep it):** they now take `Z_imp` from the baseline's thermal
+  inversion (`Baseline.Z_imp`, the value the engine's pressure model uses)
+  instead of inverting the dd's stored Z_eff (`cp.zeff`). The n_i response to
+  a Z_eff deviation, `-dZ n_e/(Z_imp - 1)`, and the Z_eff window's upper edge
+  move with it: on the synthetic fixture the n_i response changes by up to a
+  factor 1.44 at the 1.2 s slice (Z_imp 8.18 inverted from `cp.zeff` against
+  6.0 from the thermal inversion; 0.7 s and 3.0 s within 1.5 %). Every draw's
+  `kinetic_sampler` record now carries the resolved `Z_imp` and its origin
+  (`Z_imp_origin`: `"declared"` from the baseline, `"inverted"` by the
+  sampler).
 - **Clips, unchanged in value, now counted per draw** (`KineticDraw.clips`,
   `KineticDraw.record()`; a log line names every clip that fires):
   `zeff_floor_1` (Z_eff lifted to 1 where `zeff_bounds` alone allowed less),
