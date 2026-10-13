@@ -26,7 +26,7 @@ class DrawMethod:
         """Refuse settings this method cannot run (before any solve)."""
 
     def jphi_baseline(self, jphi_baseline):
-        """Whether the baseline is re-solved from its j_phi first."""
+        """Whether the baseline is re-solved from its jphi_total first."""
         return jphi_baseline
 
     def solve_pressure(self, psi_N, pressure_solve):
@@ -39,7 +39,7 @@ class DrawMethod:
 
     def draw(self, mygs, rng, scale, count, *, coil_guard=None, bnd_diag=None,
              solve_guard=None, inputs=None, legacy=None):
-        """One draw: ``(ne, te, ni, ti, w_ExB, j_phi, diagnostics)``."""
+        """One draw: ``(ne, te, ni, ti, w_ExB, jphi_total, diagnostics)``."""
         return legacy()
 
     def rejection_reason(self, exc, stage):
@@ -76,11 +76,11 @@ class DrawMethod:
 
     def post_homotopy_jbs(self, *args, legacy=None, **kwargs):
         """The post-homotopy bootstrap check: ``(record, spike, full,
-        j_phi)``."""
+        jphi_total)``."""
         return legacy()
 
-    def post_homotopy_split(self, j_phi, spike, full, legacy=None):
-        """``(j_inductive, j_BS, j_BS_edge)`` of a re-solved draw."""
+    def post_homotopy_split(self, jphi_total, spike, full, legacy=None):
+        """``(jphi_ind, jphi_bs, jphi_bs_edge)`` of a re-solved draw."""
         return legacy()
 
     def post_hoc(self, mygs, diagnostics, in_spec, **kwargs):
@@ -94,8 +94,8 @@ class DrawMethod:
     def stored_pressures(self, thermal, total):
         return thermal, total
 
-    def archived_split(self, diagnostics, j_phi, default=None):
-        """``(j_BS, j_inductive)`` archived for the draw."""
+    def archived_split(self, diagnostics, jphi_total, default=None):
+        """``(jphi_bs, jphi_ind)`` archived for the draw."""
         return default
 
     def store_draw(self, header, count, scan_key, diagnostics):
@@ -114,7 +114,7 @@ class DrawMethod:
         return env
 
     def scale_settings(self, jbs_range, bs_mult):
-        """``(jBS_scale_range, jBS_scale_profile)`` handed to the draws."""
+        """``(jbs_scale_range, jbs_scale_profile)`` handed to the draws."""
         return jbs_range, bs_mult
 
     def loop_settings_for(self, settings):
@@ -133,7 +133,7 @@ class DrawMethod:
         return loose_tol
 
     def achieved_jphi(self, store):
-        """Whether each draw archives its achieved FSA j_phi."""
+        """Whether each draw archives its achieved FSA jphi_total."""
         return store
 
     def draw_jbs_loop(self, settings):
