@@ -30,10 +30,42 @@ def test_make_units():
     assert [u["id"] for u in us] == ["a_1000", "a_1100"]
     c = [BouquetConfig.from_dict(u["config"]) for u in us]
     assert (c[0].source.time, c[1].generation.scan_key) == (1.0, 1100)
-    assert c[0].generation.seed == units.unit_seed(cfg.generation.seed, "a_1000") != c[1].generation.seed
+    # the default seed (None) is OS entropy: one base drawn per make_units call, stamped on every unit
+    assert cfg.generation.seed is None
+    assert {u["seed_rule"] for u in us} == {"entropy"} and us[0]["seed_base"] == us[1]["seed_base"]
+    assert c[0].generation.seed == units.unit_seed(us[0]["seed_base"], "a_1000") != c[1].generation.seed
     json.dumps(us)
     with pytest.raises(KeyError):
         units.make_units(cfg, [{"source.no_such_field": 1}], ["b"])
+
+
+def test_unit_seeds_at_the_default_seed_differ_between_sweeps():
+    """Review of #78 (A5): seed=None used to hash to the fixed string "None_<uid>", so every sweep at the
+    default seed repeated the same draws.  Now each sweep draws one base from OS entropy and stamps it."""
+    cfg = _config()
+    over, ids = [{"generation.scan_key": 1000}, {"generation.scan_key": 1100}], ["a_1000", "a_1100"]
+    s1 = [u["config"]["generation"]["seed"] for u in units.make_units(cfg, over, ids)]
+    s2 = [u["config"]["generation"]["seed"] for u in units.make_units(cfg, over, ids)]
+    assert s1 != s2
+    # a configured seed is the base itself, reproducibly
+    cfg.generation.seed = 7
+    u1, u2 = units.make_units(cfg, over, ids), units.make_units(cfg, over, ids)
+    assert [u["config"]["generation"]["seed"] for u in u1] == [u["config"]["generation"]["seed"] for u in u2] \
+        == [units.unit_seed(7, i) for i in ids]
+    assert {(u["seed_base"], u["seed_rule"]) for u in u1} == {(7, "config")}
+    # an explicit per-unit seed is stamped as such
+    u = units.make_units(cfg, [{"generation.seed": 5}], ["b"])[0]
+    assert (u["seed_base"], u["seed_rule"]) == (None, "override")
+    assert units.sweep_seed_base(None)[1] == "entropy" and units.sweep_seed_base(3) == (3, "config")
+
+
+def test_write_seed_stamp(tmp_path):
+    h5 = str(tmp_path / "a.h5")
+    base = units.sweep_seed_base(None)[0]
+    units.write_seed_stamp(h5, dict(seed=12, seed_base=base, seed_rule="entropy"))
+    with h5py.File(h5, "r") as f:
+        assert f.attrs["seed_rule"] == "entropy" and int(f.attrs["seed_base"]) == base
+        assert int(f.attrs["seed"]) == 12
 
 
 def test_make_units_stores_absolute_inputs(tmp_path, monkeypatch):

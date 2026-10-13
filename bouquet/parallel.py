@@ -1194,7 +1194,9 @@ def parallel_cases(source, config, master_working_dir, *, use_logical_cpus=True,
 
     Call it under ``if __name__ == "__main__":`` in a script: workers are spawned (OFT's Fortran is not
     fork-safe) and re-import the main module.  Input paths may be relative to the launch directory.
-    Each case runs at :func:`case_seed` of ``config.generation.seed``.  A worker that dies (a crash or
+    Each case runs at :func:`case_seed` of the sweep's base seed: ``config.generation.seed``, or, when that
+    is None, one base drawn here from OS entropy (``units.sweep_seed_base``); each case record and the
+    merged archive carry ``seed_base`` and ``seed_rule`` ("config" / "entropy").  A worker that dies (a crash or
     an out-of-memory kill) ends the sweep: finished cases are kept and merged, the unfinished ones are
     reported in ``errors``.
 
@@ -1258,19 +1260,23 @@ def parallel_cases(source, config, master_working_dir, *, use_logical_cpus=True,
     init_status_queue, worker_id_queue = ctx.Queue(), ctx.Queue()
     for w in range(n_workers):
         worker_id_queue.put(w)
-    seed = config.generation.seed
+    # one base for the sweep, drawn here (seed=None: from OS entropy, so two default-seed sweeps differ)
+    from .units import sweep_seed_base
+    seed_base, seed_rule = sweep_seed_base(config.generation.seed)
     errors, results = {}, {}
     with worker_environment():
         ex = ProcessPoolExecutor(n_workers, mp_context=ctx, initializer=_init_case_worker,
                                  initargs=(worker_id_queue, master_working_dir, _worker_config(config, cases[0]),
                                            init_status_queue, hooks, bool(verbose)))
         try:
-            futs = {ex.submit(run_case, (i, c, case_dir, case_seed(seed, c))): i for i, c in enumerate(cases)}
+            futs = {ex.submit(run_case, (i, c, case_dir, case_seed(seed_base, c))): i
+                    for i, c in enumerate(cases)}
             for fut in as_completed(futs):
                 idx, ok, tb, rec = fut.result()
                 c = cases[idx]
                 if ok:
-                    results[idx] = rec
+                    results[idx] = dict(rec, seed=case_seed(seed_base, c), seed_base=seed_base,
+                                        seed_rule=seed_rule)
                     print(f"[parallel_cases] case {idx} ({c.group}/{c.scan_key}) done: "
                           f"{rec['n_sel']}/{rec['n_all']} in spec", flush=True)
                 else:
@@ -1312,6 +1318,29 @@ def _failure_reason(tb) -> str:
     """The last line of a traceback (the exception), for a refused scan's reason."""
     lines = [ln for ln in str(tb or "").strip().splitlines() if ln.strip()]
     return lines[-1].strip() if lines else "unknown error"
+
+
+def _seed_stamp(out_path, rows):
+    """How the merged cases were seeded, from their records (``parallel_cases`` stamps ``seed``,
+    ``seed_base`` and ``seed_rule`` on each): root attrs ``seed_rule`` / ``seed_base``
+    (:func:`bouquet.units.write_seed_stamp`) when every case shares them, and ``merge_case_seeds_json``
+    (per case: idx, scan_key, seed, seed_base, seed_rule).  Records without a stamp write nothing."""
+    import json
+    stamped = [r for r in rows if "seed_rule" in r]
+    if not stamped:
+        return
+    from .units import write_seed_stamp
+    import h5py
+    bases = {(str(r.get("seed_base")), r.get("seed_rule")) for r in stamped}
+    if len(bases) == 1 and len(stamped) == len(rows):
+        r0 = stamped[0]
+        write_seed_stamp(out_path, dict(seed_base=r0.get("seed_base"), seed_rule=r0.get("seed_rule")))
+    with h5py.File(out_path, "a") as dst:
+        dst.attrs["merge_case_seeds_json"] = json.dumps(
+            [dict(idx=r.get("idx"), scan_key=r.get("scan_key"), seed=r.get("seed"),
+                  seed_base=None if r.get("seed_base") is None else str(r["seed_base"]),
+                  seed_rule=r.get("seed_rule")) for r in sorted(stamped, key=lambda x: x.get("idx", 0))],
+            default=str)
 
 
 def merge_cases(results, out_header, *, group_by="group", cleanup=False, failed=None, overwrite=False):
@@ -1384,6 +1413,7 @@ def merge_cases(results, out_header, *, group_by="group", cleanup=False, failed=
                                f"parallel case {f['idx']} failed: {_failure_reason(f.get('error'))}")
         write_provenance(stem)
         n_expected = len(rows) + len(gfails)
+        _seed_stamp(out_path, rows)
         with h5py.File(out_path, "a") as dst:
             dst.attrs["merge_partial"] = bool(gfails)
             dst.attrs["merge_expected_cases"] = int(n_expected)

@@ -886,7 +886,11 @@ case after case onto it (`Bouquet.set_case`).  A failed case returns its traceba
 the archive as a PARTIAL merge (root attrs `merge_partial`, `merge_expected_cases`,
 `merge_failed_cases_json`, `merge_partial_json`).  An existing merged archive is not replaced unless
 `overwrite=True`.  Each case runs at its own seed (`bouquet.parallel.case_seed`, from
-the run seed and the case's group and scan_key), the one `units.units_from_cases` gives it too.  Input
+the sweep's base seed and the case's group and scan_key), the one `units.units_from_cases` gives it too.
+The base is the run seed; with the default `seed=None` one base is drawn from OS entropy when the sweep
+starts (`units.sweep_seed_base`), so two default-seed sweeps differ.  Each case record, unit record and
+merged archive carries `seed_base` and `seed_rule` (`"config"` or `"entropy"`; root attrs of the
+archive, plus `merge_case_seeds_json` per case).  Input
 paths may be relative to the launch directory.  A sweep is one run-level config plus the cases:
 
 ```python

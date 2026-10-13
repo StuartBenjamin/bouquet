@@ -2,6 +2,7 @@
 single-thread policy.  No OFT: the per-case body runs on a stub solver; the pool's startup failure
 runs for real (it fails before the solver); the rest of the pool is in tests/test_parallel_cases_solver.py."""
 
+import json
 import os
 import pickle
 
@@ -469,8 +470,30 @@ class TestCaseSeed:
                             solver=SolverConfig(mesh_path="mesh.h5"), output_header="sweep")
         cases = [self._case(1), self._case(2)]
         us = units.units_from_cases(cfg, cases)
-        assert [u["config"]["generation"]["seed"] for u in us] == [case_seed(cfg.generation.seed, c)
+        # the default seed (None): one entropy base for the sweep, stamped on every unit
+        assert cfg.generation.seed is None
+        assert {(u["seed_base"], u["seed_rule"]) for u in us} == {(us[0]["seed_base"], "entropy")}
+        assert [u["config"]["generation"]["seed"] for u in us] == [case_seed(us[0]["seed_base"], c)
                                                                    for c in cases]
+        # ... so two sweeps at the default seed are not identical (review of #78, A5)
+        assert [u["config"]["generation"]["seed"] for u in units.units_from_cases(cfg, cases)] != \
+            [u["config"]["generation"]["seed"] for u in us]
+        cfg.generation.seed = 7
+        us = units.units_from_cases(cfg, cases)
+        assert [u["config"]["generation"]["seed"] for u in us] == [case_seed(7, c) for c in cases]
+        assert {(u["seed_base"], u["seed_rule"]) for u in us} == {(7, "config")}
+
+    def test_parallel_cases_derives_case_seeds_from_one_stamped_base(self):
+        """parallel_cases draws the base once in the parent (sweep_seed_base: entropy for seed=None) and
+        stamps seed, seed_base and seed_rule on each case record (the pool itself is not run here)."""
+        import inspect
+
+        from bouquet.parallel import parallel_cases
+        src = inspect.getsource(parallel_cases)
+        assert "seed_base, seed_rule = sweep_seed_base(config.generation.seed)" in src
+        assert "case_seed(seed_base, c)" in src and "case_seed(seed," not in src.replace(
+            "case_seed(seed_base", "")
+        assert "seed_base=seed_base" in src and "seed_rule=seed_rule" in src
 
 
 # ---------------------------------------------------------------------------
@@ -510,6 +533,27 @@ class TestMergeCases:
             assert f.attrs["schema_version"] == SCHEMA_VERSION
         with h5py.File(merged["IDA_B"], "r") as f:
             assert list(f["scan"].keys()) == ["4000"]
+
+    def test_the_merged_archive_carries_the_sweeps_seed_stamp(self, tmp_path):
+        from bouquet.units import sweep_seed_base
+        base, rule = sweep_seed_base(None)
+        results = [dict(_case_archive(tmp_path, i, "A", k), seed=case_seed(base, self._c(k)),
+                        seed_base=base, seed_rule=rule) for i, k in ((0, 2000), (1, 2500))]
+        merged = merge_cases(results, str(tmp_path / "sweep"))
+        with h5py.File(merged["A"], "r") as f:
+            assert f.attrs["seed_rule"] == "entropy" and int(f.attrs["seed_base"]) == base
+            rows = json.loads(f.attrs["merge_case_seeds_json"])
+        assert [r["seed"] for r in rows] == [results[0]["seed"], results[1]["seed"]]
+        assert {r["seed_rule"] for r in rows} == {"entropy"}
+        # records without a stamp (a direct merge of older records) write none
+        merged = merge_cases([_case_archive(tmp_path, 2, "B", 3000)], str(tmp_path / "old"))
+        with h5py.File(merged["B"], "r") as f:
+            assert "seed_rule" not in f.attrs and "merge_case_seeds_json" not in f.attrs
+
+    @staticmethod
+    def _c(key):
+        return CaseSpec(source=ReconstructionSource(geqdsk_path="g", profiles_path="p"),
+                        header="sweep", scan_key=key, group="A")
 
     def test_merged_archive_is_readable_by_the_archive_api(self, tmp_path):
         results = [_case_archive(tmp_path, 0, "A", 2000),

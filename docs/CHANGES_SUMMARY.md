@@ -49,6 +49,16 @@ a PARTIAL merge (root attrs `merge_partial`, `merge_expected_cases`,
 A complete merge carries `merge_partial=False`. `merge_cases` no longer
 replaces an existing merged archive unless `overwrite=True`.
 
+**`seed=None` on the sweep tiers is OS entropy, stamped** (review of #78, A5).
+`parallel_cases`, `units.make_units` and `units.units_from_cases` hashed a `None`
+run seed to the fixed string `"None_<case>"`, so every default-seed sweep
+repeated the same draws. One base is now drawn per sweep from
+`numpy.random.SeedSequence().entropy` (`units.sweep_seed_base`) and the per-case
+seeds derive from it as before; each case record, unit record and merged
+archive carries `seed_base` and `seed_rule` (`"config"`, `"entropy"`, or
+`"override"` for an explicit per-unit seed). A configured integer seed gives the
+same per-case seeds as before.
+
 **A reused solver starts every case clean.** `Bouquet.set_case` (and so
 `set_slice`, `run_slices`, `parallel_cases`, units) resets every per-case
 attribute of the Bouquet, not a hand-kept list: whatever `prepare_baseline`,

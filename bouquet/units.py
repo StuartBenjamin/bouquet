@@ -33,13 +33,31 @@ import traceback
 from . import workqueue as wq
 from .threads import worker_env
 
-__all__ = ["make_units", "units_from_cases", "add_units", "run_unit", "unit_seed", "archive_counts", "work",
-           "record_queue_failures"]
+__all__ = ["make_units", "units_from_cases", "add_units", "run_unit", "unit_seed", "sweep_seed_base",
+           "archive_counts", "work", "record_queue_failures"]
 
 
 def unit_seed(seed, uid):
     """Seed of unit ``uid``: independent of which worker runs it, different across units."""
     return int(hashlib.sha256(f"{seed}_{uid}".encode()).hexdigest()[:8], 16)
+
+
+#: ``seed_rule`` stamps of the sweep tiers (:func:`sweep_seed_base`): the per-case / per-unit seeds derive
+#: from the run's ``generation.seed`` ("config"), from one base drawn from OS entropy because that seed was
+#: None ("entropy"), or were set explicitly per unit ("override").
+SEED_RULES = ("config", "entropy", "override")
+
+
+def sweep_seed_base(seed):
+    """``(seed_base, seed_rule)`` of a sweep tier (``parallel_cases``, ``make_units``, ``units_from_cases``),
+    resolved ONCE in the parent.  ``seed=None`` (the default: OS entropy in a serial run) draws one base
+    from ``numpy.random.SeedSequence().entropy`` ("entropy"), so two sweeps at the default seed are not
+    identical and the stamp shows entropy was asked for; any other seed is the base itself ("config").
+    The per-case / per-unit seeds then derive from the base as before (:func:`unit_seed`)."""
+    if seed is None:
+        import numpy as np
+        return int(np.random.SeedSequence().entropy), "entropy"
+    return seed, "config"
 
 
 def _set(d, dotted, value):
@@ -56,22 +74,28 @@ def make_units(config, overrides, ids):
 
     ``overrides``: one dict per unit of dotted config fields, e.g.
     ``{"source.time": 2.4, "source.ida_time": 2.413, "source.LCFS_geqdsk": g, "generation.scan_key": 2413}``.
-    ``ids``: unit ids (``[a-zA-Z0-9_.-]``). A unit's seed is :func:`unit_seed` of the config seed unless its
-    overrides set ``generation.seed``. Each unit's config is validated here (``BouquetConfig.from_dict``)
-    and stored with absolute input paths.
+    ``ids``: unit ids (``[a-zA-Z0-9_.-]``). A unit's seed is :func:`unit_seed` of the sweep's base seed
+    (:func:`sweep_seed_base` of the config seed: a config seed of None draws one base from OS entropy here)
+    unless its overrides set ``generation.seed``; each unit carries ``seed_base`` and ``seed_rule``, which
+    its record repeats. Each unit's config is validated here (``BouquetConfig.from_dict``) and stored with
+    absolute input paths.
     """
     from .config import BouquetConfig, with_absolute_paths
     base = config.to_dict()
     units = []
     if len(ids) != len(overrides):
         raise ValueError(f"make_units: {len(ids)} ids for {len(overrides)} overrides")
+    seed_base, seed_rule = sweep_seed_base(base["generation"].get("seed"))
     for uid, over in zip(ids, overrides):
         d = copy.deepcopy(base)
         for k, v in over.items():
             _set(d, k, v)
         if "generation.seed" not in over:
-            d["generation"]["seed"] = unit_seed(d["generation"].get("seed", 0), uid)
-        units.append(dict(id=uid, config=with_absolute_paths(BouquetConfig.from_dict(d)).to_dict()))
+            d["generation"]["seed"] = unit_seed(seed_base, uid)
+            stamp = dict(seed_base=seed_base, seed_rule=seed_rule)
+        else:
+            stamp = dict(seed_base=None, seed_rule="override")
+        units.append(dict(id=uid, config=with_absolute_paths(BouquetConfig.from_dict(d)).to_dict(), **stamp))
     return units
 
 
@@ -87,9 +111,10 @@ def units_from_cases(config, cases, ids=None):
     check_cases(cases, config)
     if ids is None:
         ids = [re.sub(r"[^a-zA-Z0-9_.-]", "_", f"{i:04d}_{c.group}_{c.scan_key}") for i, c in enumerate(cases)]
-    return [dict(u, group=c.group) for u, c in zip(make_units(config, [
+    seed_base, seed_rule = sweep_seed_base(config.generation.seed)       # once, here (seed=None: entropy)
+    return [dict(u, group=c.group, seed_base=seed_base, seed_rule=seed_rule) for u, c in zip(make_units(config, [
         {"source": _encode_source(c.source), "generation.scan_key": c.scan_key,
-         "generation.seed": case_seed(config.generation.seed, c)} for c in cases], ids), cases)]
+         "generation.seed": case_seed(seed_base, c)} for c in cases], ids), cases)]
 
 
 def add_units(queue, units):
@@ -111,6 +136,18 @@ def archive_counts(h5):
                         sel.append(int(c))
                     coord = coord or str(sc[c].attrs.get("profile_coord", "psi_n"))
     return sorted(counts), sorted(sel), coord
+
+
+def write_seed_stamp(h5, stamp):
+    """Root attrs of a sweep archive: how its seeds were based (``seed_rule``, ``seed_base``; the base as a
+    decimal string -- an entropy base is 128 bits, wider than an HDF5 integer) and, for one case or unit,
+    its ``seed``."""
+    import h5py
+    with h5py.File(h5, "a") as f:
+        f.attrs["seed_rule"] = "" if stamp.get("seed_rule") is None else str(stamp["seed_rule"])
+        f.attrs["seed_base"] = "" if stamp.get("seed_base") is None else str(stamp["seed_base"])
+        if stamp.get("seed") is not None:
+            f.attrs["seed"] = int(stamp["seed"])
 
 
 def write_record(out_dir, uid, status, **info):
@@ -155,10 +192,14 @@ def _run_unit_pinned(queue, uid, out_dir, work_root=None, keep_work=False, mesh=
     os.makedirs(out_dir, exist_ok=True)
     tmp = os.path.join(out_dir, f"{uid}.h5.tmp.{socket.gethostname()}.{os.getpid()}")
     shutil.copyfile(res["path"], tmp)
+    seed_stamp = dict(seed=cfg.generation.seed, seed_base=unit.get("seed_base"),
+                      seed_rule=unit.get("seed_rule"))
+    write_seed_stamp(tmp, seed_stamp)
     os.replace(tmp, os.path.join(out_dir, f"{uid}.h5"))
     rec = write_record(out_dir, uid, "done", archive=f"{uid}.h5", group=case.group, scan_key=case.scan_key,
                        n_draws=len(counts), n_selected=len(sel), all_counts=counts, selected_counts=sel,
-                       profile_coord=coord, seed=cfg.generation.seed, bouquet_version=__version__,
+                       profile_coord=coord, seed=cfg.generation.seed, seed_base=seed_stamp["seed_base"],
+                       seed_rule=seed_stamp["seed_rule"], bouquet_version=__version__,
                        config_hash=hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()[:12],
                        F0=res["F0"], threads=res["threads"], started=t0, finished=time.time(),
                        wall_s=round(time.time() - t0, 1))
