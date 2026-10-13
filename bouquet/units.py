@@ -63,7 +63,9 @@ def make_units(config, overrides, ids):
     from .config import BouquetConfig, with_absolute_paths
     base = config.to_dict()
     units = []
-    for uid, over in zip(ids, overrides, strict=True):
+    if len(ids) != len(overrides):
+        raise ValueError(f"make_units: {len(ids)} ids for {len(overrides)} overrides")
+    for uid, over in zip(ids, overrides):
         d = copy.deepcopy(base)
         for k, v in over.items():
             _set(d, k, v)
