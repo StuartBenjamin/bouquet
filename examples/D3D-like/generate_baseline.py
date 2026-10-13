@@ -13,10 +13,12 @@ import os, sys
 import numpy as np
 import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
-sys.path[:] = [p for p in sys.path if not p.rstrip('/').endswith('/plasma/bouquet')
-               and not p.rstrip('/').endswith('/plasma/bouquet_phantom_vsc')]
-sys.path.insert(0, '/Users/danielburgess/Desktop/plasma/bouquet_coil_bounds')
-sys.path.append('/Users/danielburgess/Desktop/plasma/OpenFUSIONToolkit/build_release/python')
+# OFT_PYTHON: the OpenFUSIONToolkit python build dir (.../build_release/python);
+# the bouquet checkout this script lives in is importable from its own tree.
+D3DDIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(D3DDIR, '..', '..')))
+if os.environ.get('OFT_PYTHON'):
+    sys.path.append(os.environ['OFT_PYTHON'])
 from OpenFUSIONToolkit import OFT_env
 from OpenFUSIONToolkit.TokaMaker import TokaMaker
 from OpenFUSIONToolkit.TokaMaker.meshing import load_gs_mesh
@@ -24,8 +26,10 @@ from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
 from bouquet import read_geqdsk, reconstruct_equilibrium
 from bouquet.io.pfile import read_pfile
 
-D3DDIR = '/Users/danielburgess/Desktop/plasma/bouquet/examples/D3D-like'
-GFILE  = '/Users/danielburgess/Desktop/plasma/CTM-processing/Oak_iterative_beta_scan/g147131.02300_DIIID_KEFIT'
+# SOURCE_GFILE: the kinetic-EFIT g-file of the public source discharge (147131 @ 2300 ms,
+# the GPEC example case) the D3D-like baseline was derived from; not shipped with bouquet.
+GFILE  = os.environ.get('SOURCE_GFILE') or sys.exit(
+    'set SOURCE_GFILE to the 147131 @ 2300 ms kinetic-EFIT g-file')
 PFILE  = os.path.join(D3DDIR, 'D3Dlike_Hmode_baseline.peqdsk')
 MESH   = os.path.join(D3DDIR, 'DIIID_mesh.h5')
 NISO   = int(os.environ.get('N_ISO', '16'))

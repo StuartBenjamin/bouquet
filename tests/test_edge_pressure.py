@@ -586,7 +586,7 @@ def _generate(tmp_path, monkeypatch, pin, sep, n=3):
         jBS_scale_range=(0.99, 1.01), coil_drift=0.01,
         homotopy_passes=[(0.05, 0.1), (0.01, 0.01)], seed=12345,
         capture_live_eq=False, store_achieved_jphi=True,
-        jbs_loop=G.loop_settings, rejection_log=[], engine_draw=G,
+        jbs_loop=G.loop_settings, rejection_log=[], draw_method=G,
         coil_filter="legacy")
     return diags, saves, h, eng
 
@@ -700,7 +700,7 @@ def test_a_negative_separatrix_pressure_refuses_the_legacy_baseline(
     before any solve (a stand-in solver)."""
     import bouquet as bq
     import bouquet.baseline as B
-    from _engine_fake_gs import FakeTokaMaker
+    from _engine_fake_gs import FakeTokaMaker, point_without_solver
     _ex = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        os.pardir, "examples", "D3D-like")
     b = bq.Bouquet.from_imas(
@@ -729,6 +729,7 @@ def test_a_negative_separatrix_pressure_refuses_the_legacy_baseline(
             solves.append(1)
             raise AssertionError("the refusal comes before any solve")
     b.mygs = _Fake(None)
+    point_without_solver(monkeypatch)
     with pytest.raises(EP.NegativeSeparatrixPressure) as ei:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")

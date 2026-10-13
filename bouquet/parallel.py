@@ -1,4 +1,5 @@
-"""Process-parallel bouquet generation.
+"""Process-parallel bouquets: the draws of one bouquet (:func:`parallel_generate`) or many bouquets on
+one node (:func:`parallel_cases`).
 
 ``OFT_env`` is a per-process singleton, so a second TokaMaker cannot live in the
 same interpreter -- parallelism is across **processes**, each with its own
@@ -11,9 +12,8 @@ serial path (``setup_solver -> prepare_baseline -> generate``) on its shard of
 Two launchers, one ``run_shard`` entry point:
 
 * **laptop / single node** -- :func:`parallel_generate` drives a
-  ``ProcessPoolExecutor`` (spawn). Budget ``n_workers x threads_per_worker`` to
-  the physical cores; the ``nthreads=1`` regime (``threads_per_worker=1``,
-  ``n_workers = cores``) is both the most reproducible and the most parallel.
+  ``ProcessPoolExecutor`` (spawn), one single-threaded worker per core
+  (:mod:`bouquet.threads`).
 * **cluster** -- :func:`emit_slurm_script` writes a SLURM job-array + dependent
   merge job that call ``python -m bouquet.parallel`` on the same ``run_shard``.
 
@@ -59,6 +59,8 @@ import hashlib
 import json
 import os
 
+from .threads import pin_threads, require_single_thread, worker_env, worker_environment
+
 __all__ = [
     "run_shard",
     "merge_archives",
@@ -69,6 +71,12 @@ __all__ = [
     "ManagerYieldLedger",
     "FileYieldLedger",
     "shared_until_n_budget",
+    "parallel_cases",
+    "run_case",
+    "run_case_on",
+    "case_seed",
+    "merge_cases",
+    "check_cases",
 ]
 
 
@@ -106,51 +114,31 @@ def _derive_seed(seed_base, worker_id, scan_key):
     return int(np.random.SeedSequence(entropy).generate_state(1)[0])
 
 
-def _physical_cores():
-    """Physical core count (one TokaMaker per physical core is the budget).
-
-    ``os.cpu_count()`` reports *logical* cores; with SMT that oversubscribes
-    the solver 2x. Try psutil, then the macOS sysctl, then fall back to
-    logical count.
-    """
+def _get_num_cpus(use_logical=True):
+    """Worker count: the CPUs this process may use (its affinity mask, so a 4-CPU allocation on a
+    128-core node gives 4), capped by the scheduler's CPU count (SLURM, PBS, LSF, SGE).
+    ``use_logical=False``: one worker per physical core (Linux sysfs), to keep SMT siblings idle."""
     try:
-        import psutil
-        n = psutil.cpu_count(logical=False)
-        if n:
-            return int(n)
-    except ImportError:
-        pass
-    import sys
-    if sys.platform == "darwin":
+        affinity = os.sched_getaffinity(0)
+        n_logical = len(affinity)
+    except AttributeError:                      # macOS / Windows
+        affinity, n_logical = None, os.cpu_count() or 1
+    for var in ("SLURM_CPUS_PER_TASK", "PBS_NUM_PPN", "LSB_DJOB_NUMPROC", "NSLOTS"):
+        if os.environ.get(var):
+            n_logical = min(n_logical, int(os.environ[var]))
+            break
+    if use_logical or affinity is None:
+        return n_logical
+    cores = set()
+    for cpu in affinity:
         try:
-            import subprocess
-            return int(subprocess.check_output(
-                ["sysctl", "-n", "hw.physicalcpu"]).strip())
-        except Exception:
+            with open(f"/sys/devices/system/cpu/cpu{cpu}/topology/physical_package_id") as f:
+                pkg = f.read().strip()
+            with open(f"/sys/devices/system/cpu/cpu{cpu}/topology/core_id") as f:
+                cores.add((pkg, f.read().strip()))
+        except OSError:
             pass
-    return os.cpu_count() or 1
-
-
-def _warn_multithreaded(threads_per_worker):
-    """Warn when a worker's TokaMaker would run nthreads>1.
-
-    One solver per core is the validated regime: nthreads>1 makes the OpenMP
-    reduction order non-deterministic (~±1% li_1 jitter -- so workers converge
-    to DIFFERENT l_i targets and the merged draw set mixes acceptance bands)
-    and can tip the GS DLSODE solve into a non-convergence hang on stiff
-    slices (on SLURM that burns the task's whole time limit and loses the
-    shard). For throughput, raise n_workers instead.
-    """
-    if int(threads_per_worker) > 1:
-        import warnings
-        warnings.warn(
-            f"threads_per_worker={threads_per_worker} sets nthreads="
-            f"{threads_per_worker} on every worker's TokaMaker. This breaks "
-            "run-to-run determinism (~±1% li_1 jitter -> workers accept draws "
-            "against different l_i targets) and risks DLSODE hangs on stiff "
-            "slices. Use threads_per_worker=1 and more workers instead.",
-            stacklevel=3,
-        )
+    return min(len(cores), n_logical) if cores else n_logical
 
 
 # --------------------------------------------------------------------------
@@ -314,6 +302,7 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
     # returns through the pool and exceptions propagate as pickled objects, so
     # nothing needed for results or debugging is lost. verbose=True streams it.
     _saved = None
+    _pin = None
     if not verbose:
         _dn = os.open(os.devnull, os.O_WRONLY)
         _saved = (os.dup(1), os.dup(2))
@@ -321,9 +310,12 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
         os.dup2(_dn, 2)
         os.close(_dn)
     try:
+        # one thread for the shard, undone on return: a spawned worker loses
+        # nothing, and an in-process caller (tests) is not left pinned
+        _pin = pin_threads()
         import bouquet as bq
         cfg = copy.deepcopy(config)
-        cfg.solver.nthreads = int(threads_per_worker)
+        cfg.solver.nthreads = 1
         cfg.generation.n_equils = int(n)
         if budget is not None:
             # This worker's share of the run's attempt cap, and a local
@@ -379,6 +371,11 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
         b = bq.Bouquet(cfg)
         b.setup_solver()
         b.prepare_baseline()
+        # the baseline holds what it needs: release the parsed dd(s) the
+        # read cached (#72 B3), so a pool worker's resident memory is what
+        # it was before the shared cache (a later read re-parses)
+        from .io.imas import clear_dd_cache
+        clear_dd_cache()
         b.generate(progress_callback=cb, on_inspec=on_inspec,
                    stop_check=stop_check)
         rec = dict(worker_id=int(worker_id), path=f"{cfg.output_header}.h5",
@@ -386,7 +383,8 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
                    n_inspec=int(_inspec[0]),
                    seed=int(cfg.generation.seed),
                    li_target=float(b.baseline.l_i_target),
-                   Ip_target=float(b.baseline.Ip_target))
+                   Ip_target=float(b.baseline.Ip_target),
+                   threads=list(_pin.report))
         if budget is not None:
             rec.update(shared_target=int(tgt), local_target=budget["local_target"],
                        attempt_cap=budget["cap"], total_cap=budget["total_cap"])
@@ -403,6 +401,8 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
         _write_worker_record(rec["path"], scan_key, rec)
         return rec
     finally:
+        if _pin is not None:
+            _pin.unpin()
         if _saved is not None:
             os.dup2(_saved[0], 1)
             os.dup2(_saved[1], 2)
@@ -451,7 +451,8 @@ def _read_worker_record(src, base_path):
 #  merge per-worker shards into one archive
 # --------------------------------------------------------------------------
 def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
-                   baseline_match_rtol=1e-6, config=None, missing_workers=None):
+                   baseline_match_rtol=1e-6, config=None, missing_workers=None,
+                   rescued="include"):
     """Concatenate per-worker shard archives into ``{out_header}.h5``.
 
     Draw groups are renumbered to a contiguous running index; under schema v2
@@ -473,7 +474,8 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
     own guard -- unlike the pre-merge check in :func:`parallel_generate` it
     also covers the SLURM CLI path, where drifted baselines (heterogeneous
     nodes, a stray ``nthreads>1``) would otherwise merge silently, mixing
-    draws accepted against different l_i targets. A listed shard that does not
+    draws accepted against different l_i targets. Shards whose baselines differ
+    in ``profile_coord`` (ψ_N vs Φ_N grids) also raise. A listed shard that does not
     exist on disk raises (missing workers must be handled by the caller, not
     dropped silently).
 
@@ -484,11 +486,27 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
     delivered by the shards merged. Shards whose worker records disagree on
     the generation mode or the shared target, or that counted against
     different boundary cuts, are refused before anything is written.
+
+    ``rescued`` (owner decision D5): draws whose solve was rescued by the
+    opt-in draw-solve rescue (stamped ``solve_recovered``) are merged by
+    default (``"include"``, counted and warned); ``"exclude"`` leaves them
+    out.  Either way, when any shard holds one, the scan group records
+    ``merge_rescued_json`` (the policy, the count and each rescued draw's
+    shard, index and ``recovered_by``).  On a shared until-N merge,
+    ``"exclude"`` takes the dropped draws the loop had counted in spec (their
+    ``until_n_inspec`` attr) off ``until_n.n_inspec_recorded`` and records
+    the subtraction (``n_inspec_recorded_by_shards``,
+    ``n_inspec_excluded_rescued``, ``..._unknown`` for draws without the
+    attr, warned).
     """
+    if rescued not in ("include", "exclude"):
+        raise ValueError(f"rescued must be 'include' or 'exclude', got "
+                         f"{rescued!r}")
     import warnings
     import h5py
+    from .schema import UNTIL_N_INSPEC_ATTR
     from .utils import (initialize_equilibrium_database, _scan_key,
-                        _group_path)
+                        _group_path, group_coord)
 
     bkey = _scan_key(scan_key)
     base_path = f"scan/{bkey}" if bkey is not None else None
@@ -504,6 +522,11 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
             return None
         return float(a["l_i_target"]), float(a["Ip_target"])
 
+    def _baseline_coord(src):
+        parent = src[base_path] if base_path else src
+        return (group_coord(parent["_baseline"]) if "_baseline" in parent
+                else None)
+
     def _inloop_cut(src):
         parent = src[base_path] if base_path else src
         a = parent.attrs
@@ -516,7 +539,7 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
         return (("until_n", rec.get("shared_target"), rec.get("total_cap"))
                 if "shared_target" in rec else ("fixed", None, None))
 
-    targets = []
+    targets, shard_coords = [], {}
     cuts = {}
     modes = {}
     for sp in shard_paths:
@@ -529,8 +552,15 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                 "or drop the path explicitly from shard_paths.")
         with h5py.File(sp, "r") as src:
             targets.append((sp, _baseline_targets(src)))
+            c = _baseline_coord(src)
+            if c is not None:
+                shard_coords[sp] = c
             cuts[sp] = _inloop_cut(src)
             modes[sp] = _mode(src)
+    if len(set(shard_coords.values())) > 1:
+        raise RuntimeError(
+            f"shards differ in profile_coord: {shard_coords}. "
+            "Nothing was merged.")
     _mode_set = {m for m in modes.values() if m is not None}
     if len(_mode_set) > 1:
         raise RuntimeError(
@@ -575,6 +605,10 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
 
     offset = 0
     workers = []
+    _resc = []                  # rescued draws met in the shards
+    # the in-loop until-N verdicts of the rescued draws a "exclude" merge
+    # drops (True / False; None: the shard did not archive one)
+    _excl_inspec = []
     n_unrecorded = 0            # shards with no worker record (draws still merged)
     with h5py.File(out_path, "a") as out:
         if bkey is not None and base_path not in out:
@@ -610,6 +644,20 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                     and str(k).lstrip("-").isdigit()
                 )
                 for i in idxs:
+                    _ga = parent[str(i)].attrs
+                    if bool(_ga.get("solve_recovered", False)):
+                        _rb = _ga.get("solve_recovered_by", "")
+                        _resc.append(dict(
+                            shard=os.path.basename(sp), index=int(i),
+                            recovered_by=(_rb.decode() if isinstance(_rb, bytes)
+                                          else str(_rb)),
+                            merged_as=(None if rescued == "exclude"
+                                       else int(offset))))
+                        if rescued == "exclude":
+                            _v = _ga.get(UNTIL_N_INSPEC_ATTR, None)
+                            _excl_inspec.append(None if _v is None
+                                                else bool(_v))
+                            continue
                     dst = _group_path(scan_key, offset)
                     out.copy(parent[str(i)], dst)
                     g = out[dst]
@@ -619,6 +667,18 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                     # coordinate. load_equilibrium resolves by the fixed name.
                     offset += 1
 
+    if _resc:
+        with h5py.File(out_path, "a") as out:
+            gp = base_path if base_path else "/"
+            out[gp].attrs["merge_rescued_json"] = json.dumps(dict(
+                policy=rescued, n_rescued=len(_resc), draws=_resc))
+        if rescued == "include":
+            warnings.warn(
+                f"merge_archives: {len(_resc)} merged draw(s) had their solve "
+                "RESCUED (solve_recovered; a different urf or a looser "
+                "nl_tol) -- recorded in merge_rescued_json; pass "
+                "rescued='exclude' to leave them out", UserWarning,
+                stacklevel=2)
     # Run-level provenance on the merged archive (schema/version/timestamp
     # always; config_json when the caller supplied the run config).
     from .utils import write_provenance
@@ -632,13 +692,32 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                if missing_workers else None)
     if workers:
         shared = [w for w in workers if "shared_target" in w]
+        # rescued="exclude": the shards counted each in-spec rescued draw
+        # when the loop accepted it; the merge dropped it, so it comes off
+        # the recorded count, and the subtraction is recorded (review of
+        # #78, A8)
+        _n_shards_inspec = sum(int(w.get("n_inspec", 0)) for w in shared)
+        _n_ex_in = sum(1 for v in _excl_inspec if v is True)
+        _n_ex_unknown = sum(1 for v in _excl_inspec if v is None)
+        _excl_rec = ({} if not (shared and _excl_inspec) else dict(
+            n_inspec_recorded_by_shards=int(_n_shards_inspec),
+            n_inspec_excluded_rescued=int(_n_ex_in),
+            n_inspec_excluded_rescued_unknown=int(_n_ex_unknown)))
+        if shared and _n_ex_unknown:
+            warnings.warn(
+                f"merge_archives: {_n_ex_unknown} excluded rescued draw(s) "
+                "carry no in-loop until-N verdict (until_n_inspec attr; a "
+                "shard written before it was archived), so the merged "
+                "n_inspec_recorded may still count them -- recorded as "
+                "until_n.n_inspec_excluded_rescued_unknown", UserWarning,
+                stacklevel=2)
         manifest = dict(
             n_workers=len(workers), n_draws=int(offset), workers=workers,
             n_shards_without_record=int(n_unrecorded), partial=partial,
             until_n=(dict(target=shared[0]["shared_target"],
                           total_cap=shared[0].get("total_cap"),
-                          n_inspec_recorded=sum(int(w.get("n_inspec", 0))
-                                                for w in shared),
+                          n_inspec_recorded=int(_n_shards_inspec - _n_ex_in),
+                          **_excl_rec,
                           # the one boundary cut every shard counted against
                           # (only when the shards recorded it)
                           **({k: v for k, v in zip(_INLOOP_CUT_KEYS, next(iter(_distinct)))}
@@ -679,7 +758,10 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
             _u = manifest["until_n"]
             print(f"[until-N] merged {offset} draws from {len(workers)} "
                   f"workers; {_u['n_inspec_recorded']} in-spec recorded "
-                  f"against a shared target of {_u['target']}.")
+                  f"against a shared target of {_u['target']}"
+                  + (f" ({_u['n_inspec_excluded_rescued']} in-spec rescued "
+                     "draw(s) excluded by rescued='exclude')"
+                     if _u.get("n_inspec_excluded_rescued") else "") + ".")
 
     if partial and not workers:            # no worker records, still partial
         from .utils import stamp_generation_provenance
@@ -720,9 +802,9 @@ def parallel_generate(config, *, n_workers=None, threads_per_worker=1, seed=0,
     :func:`emit_slurm_script` (pass options as the ``slurm`` dict) and returns
     their paths without running.
 
-    ``n_workers=None`` defaults to the machine's **physical** core count
-    (one single-threaded TokaMaker per physical core; logical/SMT cores
-    oversubscribe the solver). Pass it explicitly on shared machines.
+    ``n_workers=None`` defaults to the physical cores this process may use
+    (one single-threaded worker per core; :func:`_get_num_cpus`).
+    ``threads_per_worker`` must be 1 (:mod:`bouquet.threads`).
 
     The cross-worker **baseline check**: every worker reports its forward-solved
     baseline ``l_i``/``Ip``; if any drifts beyond ``baseline_match_rtol`` the run
@@ -738,8 +820,9 @@ def parallel_generate(config, *, n_workers=None, threads_per_worker=1, seed=0,
             n_total, 1, 0)["total_cap"]
     scan_key = config.generation.scan_key
     out_header = config.output_header
+    require_single_thread(threads_per_worker, "threads_per_worker")
     if n_workers is None:
-        n_workers = _physical_cores()
+        n_workers = _get_num_cpus(use_logical=False)
     nw = max(1, min(int(n_workers), n_total))
 
     if backend == "slurm":
@@ -750,22 +833,8 @@ def parallel_generate(config, *, n_workers=None, threads_per_worker=1, seed=0,
     if backend != "laptop":
         raise ValueError(f"backend must be 'laptop' or 'slurm', got {backend!r}")
 
-    _warn_multithreaded(threads_per_worker)
-
     from concurrent.futures import ProcessPoolExecutor, as_completed
     import multiprocessing as mp
-
-    # Pin each worker's BLAS/LAPACK + OpenMP to threads_per_worker BEFORE the
-    # workers spawn (they inherit this env). Without it, OFT runs nthreads=1 but
-    # the underlying BLAS grabs ~all cores per worker, so N workers oversubscribe
-    # the machine (~Nx cores) and thrash -- the dominant cause of slow runs. The
-    # spawned workers read these at their fresh numpy/OFT import.
-    _thr = str(max(1, int(threads_per_worker)))
-    _tvars = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
-              "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS")
-    _saved_env = {k: os.environ.get(k) for k in _tvars}
-    for k in _tvars:
-        os.environ[k] = _thr
 
     ctx = mp.get_context("spawn")
     results = [None] * nw
@@ -807,7 +876,7 @@ def parallel_generate(config, *, n_workers=None, threads_per_worker=1, seed=0,
         drain_thread.start()
 
     try:
-        with ProcessPoolExecutor(max_workers=nw, mp_context=ctx) as ex:
+        with worker_environment(), ProcessPoolExecutor(max_workers=nw, mp_context=ctx) as ex:
             futs = {
                 ex.submit(run_shard, config, i, nw,
                           n_equils_total=n_total, seed_base=seed,
@@ -827,11 +896,6 @@ def parallel_generate(config, *, n_workers=None, threads_per_worker=1, seed=0,
             bar.close()
         if mgr is not None:
             mgr.shutdown()
-        for k, v in _saved_env.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
 
     # cross-worker baseline check (the one-line guard)
     solved = [r for r in results if r and r["li_target"] is not None]
@@ -903,7 +967,7 @@ def emit_slurm_script(config, *, n_workers, seed, threads_per_worker,
     shard/merged ``.h5`` outputs land there too unless
     ``config.output_header`` is an absolute path.)
     """
-    _warn_multithreaded(threads_per_worker)
+    require_single_thread(threads_per_worker, "threads_per_worker")
     os.makedirs(out_dir, exist_ok=True)
     tgt = getattr(config.generation, "n_inspec_target", None)
     if tgt is not None:      # validate the pooled budget now, not on the node
@@ -928,13 +992,7 @@ def emit_slurm_script(config, *, n_workers, seed, threads_per_worker,
         # archive (the serial run.filter() equivalent); the merge CLI's
         # --no-filter flag also switches it off
         apply_filters=bool(apply_filters),
-        # The stored config is the TEMPLATE: the shard runner overwrites
-        # solver.nthreads with threads_per_worker at run time (see _cli),
-        # so a reader of this file must not take solver.nthreads at face
-        # value for the parallel run it describes.
-        _shard_note=(f"solver.nthreads is overwritten to threads_per_worker "
-                     f"(= {int(threads_per_worker)}) by the shard runner; "
-                     f"the embedded value is the serial-template default"),
+        _shard_note="solver.nthreads is overwritten to 1 by the shard runner",
     )
     bname = f"{job_name}_bundle.json"
     bpath = os.path.join(out_dir, bname)
@@ -954,21 +1012,7 @@ def emit_slurm_script(config, *, n_workers, seed, threads_per_worker,
                  "# module load conda && conda activate bouquet\n"
                  "# export OFT_PYTHONPATH=/path/to/OpenFUSIONToolkit"
                  "/build_release/python\n")
-    # threads_per_worker > 1 trades bit-reproducibility for per-worker speed;
-    # the Python API warns at call time (_warn_multithreaded), but someone
-    # running the sbatch directly never sees that warning -- carry it in the
-    # script itself.
-    thread_note = ("" if int(threads_per_worker) <= 1 else
-                   "# NOTE threads_per_worker > 1: BLAS/OpenMP reductions are\n"
-                   "# no longer bit-reproducible run-to-run, and DLSODE has\n"
-                   "# been observed to hang under heavy oversubscription --\n"
-                   "# keep cpus-per-task == threads_per_worker (see\n"
-                   "# bouquet.parallel._warn_multithreaded).\n")
-    # threads pinned to the task's cores; BLAS held to the same to avoid nesting.
-    env = (f"export OMP_NUM_THREADS={threads_per_worker}\n"
-           "export OMP_PROC_BIND=close OMP_PLACES=cores\n"
-           f"export OPENBLAS_NUM_THREADS={threads_per_worker} "
-           f"MKL_NUM_THREADS={threads_per_worker}\n")
+    env = "".join(f"export {k}={v}\n" for k, v in worker_env({}).items())
 
     # The bundle is referenced by BASENAME: sbatch tasks run in the submission
     # CWD, and submit.sh cd's to this directory first -- so the pair works
@@ -979,7 +1023,7 @@ def emit_slurm_script(config, *, n_workers, seed, threads_per_worker,
         f"#SBATCH --array=0-{n_workers - 1}\n"
         f"#SBATCH --cpus-per-task={threads_per_worker}\n"
         f"#SBATCH --time={time_limit}\n#SBATCH --mem={mem_per_task}\n{part}"
-        f"{extra}{thread_note}{env}"
+        f"{extra}{env}"
         f"{python} -m bouquet.parallel shard {bname} $SLURM_ARRAY_TASK_ID\n"
     )
     merge = (
@@ -1015,6 +1059,419 @@ def emit_slurm_script(config, *, n_workers, seed, threads_per_worker,
 # --------------------------------------------------------------------------
 #  CLI used by the SLURM scripts:  python -m bouquet.parallel {shard|merge} ...
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+#  tier 2: many bouquets on one node, one standing solver per worker
+# --------------------------------------------------------------------------
+#  A case is a CaseSpec swapped onto a worker's Bouquet (set_case), so every case runs the ordinary
+#  prepare_baseline -> generate -> filter.  parallel_generate splits the draws of ONE bouquet; never call
+#  it inside a case worker.  Across jobs and nodes, bouquet.units queues the same cases.
+
+_worker_state: dict = {}
+
+
+class _IndexMap:
+    """Picklable ``idx -> case`` map, saved as ``map_object.pkl`` (completion order is not run order)."""
+
+    def __init__(self, flat_list):
+        self.flat_list = list(flat_list)
+
+    def __call__(self, idx):
+        return self.flat_list[idx]
+
+    def __len__(self):
+        return len(self.flat_list)
+
+    def __iter__(self):
+        return iter(self.flat_list)
+
+
+def check_cases(cases, config):
+    """Refuse a sweep that cannot run: a parallel config at ``nthreads != 1``, or a case source the solve
+    method does not take (swb runs on IDS sources only)."""
+    from .config import ImasSource, resolve_solve_method
+    require_single_thread(config.solver.nthreads, "solver.nthreads")
+    if resolve_solve_method(config.generation) == "swb":
+        bad = [i for i, c in enumerate(cases) if not isinstance(c.source, ImasSource)]
+        if bad:
+            raise ValueError(f"solve_method='swb' takes IDS sources only; cases {bad} are not ImasSource")
+
+
+def release_dd_cache(bouquet, case):
+    """``after_baseline`` hook: release the parsed dd(s) the baseline read cached (``io.imas._cached_dd``,
+    up to two ~GB files).  For a sweep over different dd files on few workers; a slice sweep over one
+    dd would then re-parse it per case."""
+    from .io.imas import clear_dd_cache
+    clear_dd_cache()
+
+
+def run_case_on(bouquet, case, header, hooks=None) -> dict:
+    """One case on a standing solver: ``set_case`` -> ``before_baseline`` -> ``prepare_baseline`` ->
+    ``after_baseline`` -> ``generate`` -> ``filter``.  Not ``Bouquet.run()``: its export would write a
+    second archive per case.  Returns the case record."""
+    from .threads import pinned, thread_report
+    hooks = hooks or {}
+    bouquet.set_case(case)
+    bouquet.output_header = header
+    if hooks.get("before_baseline"):
+        hooks["before_baseline"](bouquet, case)
+    bouquet.prepare_baseline()
+    if hooks.get("after_baseline"):
+        hooks["after_baseline"](bouquet, case)
+    bouquet.generate()
+    bouquet.filter()
+    bl = bouquet.baseline
+    geom = bouquet.solver_geometry_record() if hasattr(bouquet, "solver_geometry_record") else None
+    rec = dict(path=os.path.abspath(f"{header}.h5"), group=case.group, scan_key=case.scan_key,
+                n_all=len(bouquet.selected_indices("all")), n_sel=len(bouquet.selected_indices("selected")),
+                l_i_target=float(bl.l_i_target), Ip_target=float(bl.Ip_target), F0=float(bouquet._geom.F0),
+                threads=thread_report(), threads_pinned=pinned(),
+               solver_use=None if geom is None else geom.get("solver_use"))
+    if rec["solver_use"] is not None:
+        rec["solver_reused"] = rec["solver_use"] > 1
+    return rec
+
+
+def _init_case_worker(worker_id_queue, master_working_dir, config_dict, init_status_queue, hooks=None,
+                      verbose=False):
+    """Pool initialiser: one thread, own directory and log, own mesh copy, one ``setup_solver``.
+
+    Reports ``(worker_id, traceback)`` on failure, which the parent raises once the pool breaks."""
+    import shutil
+    import sys
+    import traceback
+    worker_id = -1
+    try:
+        pin_threads()
+        worker_id = worker_id_queue.get(timeout=60)     # 0..n-1: the executor never replaces a worker
+        master_working_dir = os.path.abspath(master_working_dir)
+        working_dir = os.path.join(master_working_dir, f"worker_{worker_id}")
+        os.makedirs(working_dir, exist_ok=True)
+        os.chdir(working_dir)               # TokaMaker writes scratch files in the cwd
+        log_path = os.path.join(master_working_dir, f"worker_{worker_id}.log")
+        if not verbose:                     # fd level: OFT writes to fd 1/2 directly
+            fh = open(log_path, "w", buffering=1)
+            os.dup2(fh.fileno(), 1)
+            os.dup2(fh.fileno(), 2)
+            sys.stdout = sys.stderr = fh
+        from .config import BouquetConfig
+        from .paths import add_oft_to_path
+        from .run import Bouquet
+        config = BouquetConfig.from_dict(config_dict)
+        # one mesh file opened by many OFT processes at once has deadlocked a serial HDF5 build
+        local_mesh = os.path.join(working_dir, os.path.basename(config.solver.mesh_path))
+        shutil.copy2(config.solver.mesh_path, local_mesh)   # before the toolkit import: a missing mesh is reported as such
+        config.solver.mesh_path = local_mesh
+        add_oft_to_path()
+        _worker_state.update(worker_id=worker_id, working_dir=working_dir, log_path=log_path,
+                             bouquet=Bouquet(config).setup_solver(), hooks=dict(hooks or {}))
+    except Exception:
+        tb = traceback.format_exc()
+        print(f"[worker {worker_id}] init failed:\n{tb}", flush=True)
+        try:
+            init_status_queue.put((worker_id, tb))
+        except Exception:
+            pass
+        raise
+
+
+def case_seed(seed, case) -> int:
+    """Seed of one case of a sweep, from the run seed and the case's ``group``/``scan_key``: independent
+    of the worker, the run order and the tier (:func:`parallel_cases`, ``units.units_from_cases``)."""
+    from .units import unit_seed
+    return unit_seed(seed, f"{case.group}/{case.scan_key}")
+
+
+def run_case(run_args):
+    """Pool task: one case on this worker's solver, at its own seed.  Never raises: a failed case returns
+    its traceback, so one bad slice cannot stop a sweep."""
+    import traceback
+    idx, case, case_dir, seed = run_args
+    header = os.path.join(case_dir, f"{os.path.basename(case.header)}_idx{idx}")
+    try:
+        _worker_state["bouquet"].config.generation.seed = seed
+        rec = run_case_on(_worker_state["bouquet"], case, header, _worker_state.get("hooks"))
+        return idx, True, None, dict(rec, idx=idx, worker_id=_worker_state["worker_id"])
+    except Exception:
+        tb = traceback.format_exc()
+        print(f"[worker {_worker_state.get('worker_id')} | case {idx}] failed:\n{tb}", flush=True)
+        return idx, False, tb, None
+
+
+def _worker_config(config, case) -> dict:
+    """The run-level config with a case's source, so a worker's ``setup_solver`` points at a real baseline
+    (the run-level source may be a placeholder)."""
+    from .config import _encode_source
+    return dict(config.to_dict(), source=_encode_source(case.source))
+
+
+def _picklable_hooks(**hooks) -> dict:
+    import pickle
+    out = {}
+    for name, fn in hooks.items():
+        if fn is None:
+            continue
+        if not callable(fn):
+            raise TypeError(f"{name} must be callable, got {type(fn).__name__}")
+        try:
+            pickle.loads(pickle.dumps(fn))
+        except Exception as exc:
+            raise TypeError(f"{name} is not picklable ({exc}); workers are spawned, so a hook must be a "
+                            "module-level function (not a lambda, closure or bound method)") from exc
+        out[name] = fn
+    return out
+
+
+def parallel_cases(source, config, master_working_dir, *, use_logical_cpus=True, n_cpus_override=None,
+                   verbose=False, merge=True, group_by="group", cleanup=False, before_baseline=None,
+                   after_baseline=None, overwrite=False):
+    """Run many independent bouquets in parallel on one node, one single-threaded solver per worker.
+
+    Call it under ``if __name__ == "__main__":`` in a script: workers are spawned (OFT's Fortran is not
+    fork-safe) and re-import the main module.  Input paths may be relative to the launch directory.
+    Each case runs at :func:`case_seed` of the sweep's base seed: ``config.generation.seed``, or, when that
+    is None, one base drawn here from OS entropy (``units.sweep_seed_base``); each case record and the
+    merged archive carry ``seed_base`` and ``seed_rule`` ("config" / "entropy").  A worker that dies (a crash or
+    an out-of-memory kill) ends the sweep: finished cases are kept and merged, the unfinished ones are
+    reported in ``errors``.
+
+    Parameters
+    ----------
+    source : ParallelSource or list of CaseSpec
+        The cases (a ``ParallelSource`` is expanded).
+    config : BouquetConfig
+        The run-level config (solver, uncertainty, generation); each case supplies the source.
+    master_working_dir : str
+        Holds ``worker_N/`` (scratch, mesh copy), ``worker_N.log``, ``cases/*_idxN.h5``,
+        ``map_object.pkl``, ``errors.pkl`` and the merged archives.
+    use_logical_cpus : bool
+        One worker per logical CPU (default) or per physical core.  Every worker is single-threaded.
+    n_cpus_override : int, optional
+        The worker count, bypassing detection.
+    verbose : bool
+        Stream worker output to the terminal instead of ``worker_N.log``.
+    merge, group_by, cleanup, overwrite
+        :func:`merge_cases` on the cases: the successful ones are merged, the failed ones recorded as
+        refused scans with a partial-merge mark; an existing merged archive raises unless ``overwrite``.
+    before_baseline, after_baseline : callable, optional
+        ``f(bouquet, case)`` either side of ``prepare_baseline()`` on the worker: per-case setup a
+        ``CaseSpec`` cannot express (solver targets before; anything on the baseline's grid after, e.g.
+        ``uncertainty.aux_baselines``).  Module-level functions only (they are pickled).
+
+    Returns
+    -------
+    dict
+        ``n_runs, n_success, cases, results, errors, merged, map_object_path``.
+    """
+    import dataclasses
+    import multiprocessing
+    import pickle
+    import queue
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from concurrent.futures.process import BrokenProcessPool
+
+    from .config import absolute_source, with_absolute_paths
+
+    config = with_absolute_paths(config)        # workers run in their own directories
+    cases = [dataclasses.replace(c, source=absolute_source(c.source))
+             for c in (source.expand() if hasattr(source, "expand") else source)]
+    check_cases(cases, config)
+    hooks = _picklable_hooks(before_baseline=before_baseline, after_baseline=after_baseline)
+    master_working_dir = os.path.abspath(master_working_dir)
+    case_dir = os.path.join(master_working_dir, "cases")
+    os.makedirs(case_dir, exist_ok=True)
+    n_runs = len(cases)
+    if n_runs == 0:
+        return dict(n_runs=0, n_success=0, cases=[], results={}, errors={}, merged={}, map_object_path=None)
+
+    n_cpus = int(n_cpus_override) if n_cpus_override is not None else _get_num_cpus(use_logical_cpus)
+    n_workers = max(1, min(n_cpus, n_runs))
+    print(f"[parallel_cases] {n_runs} case(s) on {n_workers} worker(s)", flush=True)
+    map_object_path = os.path.join(master_working_dir, "map_object.pkl")
+    with open(map_object_path, "wb") as fh:
+        pickle.dump(_IndexMap(cases), fh)
+
+    ctx = multiprocessing.get_context("spawn")
+    init_status_queue, worker_id_queue = ctx.Queue(), ctx.Queue()
+    for w in range(n_workers):
+        worker_id_queue.put(w)
+    # one base for the sweep, drawn here (seed=None: from OS entropy, so two default-seed sweeps differ)
+    from .units import sweep_seed_base
+    seed_base, seed_rule = sweep_seed_base(config.generation.seed)
+    errors, results = {}, {}
+    with worker_environment():
+        ex = ProcessPoolExecutor(n_workers, mp_context=ctx, initializer=_init_case_worker,
+                                 initargs=(worker_id_queue, master_working_dir, _worker_config(config, cases[0]),
+                                           init_status_queue, hooks, bool(verbose)))
+        try:
+            futs = {ex.submit(run_case, (i, c, case_dir, case_seed(seed_base, c))): i
+                    for i, c in enumerate(cases)}
+            for fut in as_completed(futs):
+                idx, ok, tb, rec = fut.result()
+                c = cases[idx]
+                if ok:
+                    results[idx] = dict(rec, seed=case_seed(seed_base, c), seed_base=seed_base,
+                                        seed_rule=seed_rule)
+                    print(f"[parallel_cases] case {idx} ({c.group}/{c.scan_key}) done: "
+                          f"{rec['n_sel']}/{rec['n_all']} in spec", flush=True)
+                else:
+                    errors[idx] = tb
+                    print(f"[parallel_cases] case {idx} ({c.group}/{c.scan_key}) failed:\n{tb}", flush=True)
+        except BrokenProcessPool:
+            failed = []
+            while True:
+                try:
+                    failed.append(init_status_queue.get(timeout=1.0))
+                except queue.Empty:
+                    break
+            if failed:
+                raise RuntimeError(f"{len(failed)} worker(s) failed to initialise:\n"
+                                   + "\n".join(f"  worker {w}:\n{t}" for w, t in failed)) from None
+            lost = sorted(set(range(n_runs)) - set(results) - set(errors))
+            for i in lost:
+                errors[i] = "not finished: a worker process died (crash or out-of-memory kill) during the sweep"
+            print(f"[parallel_cases] a worker died; {len(lost)} case(s) not finished: {lost}", flush=True)
+        finally:
+            ex.shutdown(wait=True, cancel_futures=True)
+
+    if errors:
+        with open(os.path.join(master_working_dir, "errors.pkl"), "wb") as fh:
+            pickle.dump(errors, fh)
+    merged = {}
+    if merge and (results or errors):
+        failed = [dict(idx=i, group=cases[i].group, scan_key=cases[i].scan_key, error=errors[i])
+                  for i in sorted(errors)]
+        merged = merge_cases([results[i] for i in sorted(results)],
+                             os.path.join(master_working_dir, os.path.basename(config.output_header)),
+                             group_by=group_by, cleanup=cleanup, failed=failed, overwrite=overwrite)
+    print(f"[parallel_cases] {n_runs - len(errors)}/{n_runs} case(s) succeeded", flush=True)
+    return dict(n_runs=n_runs, n_success=n_runs - len(errors), cases=cases, results=results, errors=errors,
+                merged=merged, map_object_path=map_object_path)
+
+
+def _failure_reason(tb) -> str:
+    """The last line of a traceback (the exception), for a refused scan's reason."""
+    lines = [ln for ln in str(tb or "").strip().splitlines() if ln.strip()]
+    return lines[-1].strip() if lines else "unknown error"
+
+
+def _seed_stamp(out_path, rows):
+    """How the merged cases were seeded, from their records (``parallel_cases`` stamps ``seed``,
+    ``seed_base`` and ``seed_rule`` on each): root attrs ``seed_rule`` / ``seed_base``
+    (:func:`bouquet.units.write_seed_stamp`) when every case shares them, and ``merge_case_seeds_json``
+    (per case: idx, scan_key, seed, seed_base, seed_rule).  Records without a stamp write nothing."""
+    import json
+    stamped = [r for r in rows if "seed_rule" in r]
+    if not stamped:
+        return
+    from .units import write_seed_stamp
+    import h5py
+    bases = {(str(r.get("seed_base")), r.get("seed_rule")) for r in stamped}
+    if len(bases) == 1 and len(stamped) == len(rows):
+        r0 = stamped[0]
+        write_seed_stamp(out_path, dict(seed_base=r0.get("seed_base"), seed_rule=r0.get("seed_rule")))
+    with h5py.File(out_path, "a") as dst:
+        dst.attrs["merge_case_seeds_json"] = json.dumps(
+            [dict(idx=r.get("idx"), scan_key=r.get("scan_key"), seed=r.get("seed"),
+                  seed_base=None if r.get("seed_base") is None else str(r["seed_base"]),
+                  seed_rule=r.get("seed_rule")) for r in sorted(stamped, key=lambda x: x.get("idx", 0))],
+            default=str)
+
+
+def merge_cases(results, out_header, *, group_by="group", cleanup=False, failed=None, overwrite=False):
+    """Merge per-case archives into ``{out_header}_{group}.h5`` per case group (``group_by=None``: one
+    ``{out_header}.h5``).  Each case's ``scan/<scan_key>`` group is copied whole, with its own
+    ``config_json`` and ``_baseline``.  A duplicate scan_key in a group, a missing archive or a missing
+    scan group raises: a partial merge would silently shrink the sweep.  Returns ``{group: path}``.
+
+    ``failed``: records ``{"idx", "group", "scan_key", "error"}`` of the cases that did not complete.  Each
+    is written into its group's archive as a REFUSED scan (:func:`~bouquet.utils.write_refused_scan`:
+    ``refused_reason`` names the case and its exception), so a series reader reports it as
+    ``status="refused"`` instead of a gap, and the archive is marked as a PARTIAL merge (the convention of
+    :func:`merge_archives`): root attrs ``merge_partial=True``, ``merge_expected_cases``,
+    ``merge_failed_cases_json`` and ``merge_partial_json`` (expected / merged / failed case indices).  A
+    complete merge carries ``merge_partial=False`` and ``merge_expected_cases``.
+
+    An existing merged archive is never replaced silently: it raises ``FileExistsError`` unless
+    ``overwrite=True`` (a re-run that lost cases would otherwise replace a complete merge by a partial one).
+    """
+    import json
+
+    import h5py
+    from .utils import _scan_key, initialize_equilibrium_database, write_provenance, write_refused_scan
+
+    def _bucket(r):
+        return r.get("group") if group_by == "group" else None
+
+    buckets, fails = {}, {}
+    for r in results:
+        if r and r.get("path"):
+            buckets.setdefault(_bucket(r), []).append(r)
+    for f in failed or ():
+        fails.setdefault(_bucket(f), []).append(f)
+        buckets.setdefault(_bucket(f), [])
+    plan = {}
+    for gname, rows in buckets.items():
+        seen = {}
+        for r in list(rows) + fails.get(gname, []):
+            k = _scan_key(r["scan_key"])
+            if k in seen:
+                raise ValueError(f"duplicate scan_key {r['scan_key']!r} in group {gname!r}: cases {seen[k]} "
+                                 f"and {r['idx']} would overwrite each other; give each case its own scan_key")
+            seen[k] = r["idx"]
+        stem = out_header if gname is None else f"{out_header}_{gname}"
+        out_path = os.path.abspath(f"{stem}.h5")
+        if os.path.exists(out_path) and not overwrite:
+            raise FileExistsError(f"merged archive {out_path} exists; pass overwrite=True to replace it "
+                                  "(nothing was merged)")
+        plan[gname] = (stem, out_path)
+    merged = {}
+    for gname, rows in buckets.items():
+        stem, out_path = plan[gname]
+        if os.path.exists(out_path):
+            os.remove(out_path)
+        initialize_equilibrium_database(stem)
+        with h5py.File(out_path, "a") as dst:
+            for r in sorted(rows, key=lambda x: x["idx"]):
+                if not os.path.exists(r["path"]):
+                    raise FileNotFoundError(f"case archive not found: {r['path']} (group {gname!r}, scan_key "
+                                            f"{r['scan_key']!r}); re-run the case or drop it from `results`")
+                grp = f"scan/{_scan_key(r['scan_key'])}"
+                with h5py.File(r["path"], "r") as src:
+                    if grp not in src:
+                        raise KeyError(f"{r['path']} has no '{grp}' group: the case ran with a different "
+                                       f"scan_key than its CaseSpec ({r['scan_key']!r})")
+                    dst.copy(src[grp], grp)
+        gfails = sorted(fails.get(gname, []), key=lambda x: x["idx"])
+        for f in gfails:
+            write_refused_scan(out_path, f["scan_key"],
+                               f"parallel case {f['idx']} failed: {_failure_reason(f.get('error'))}")
+        write_provenance(stem)
+        n_expected = len(rows) + len(gfails)
+        _seed_stamp(out_path, rows)
+        with h5py.File(out_path, "a") as dst:
+            dst.attrs["merge_partial"] = bool(gfails)
+            dst.attrs["merge_expected_cases"] = int(n_expected)
+            if gfails:
+                frec = [dict(idx=int(f["idx"]), group=f.get("group"), scan_key=f["scan_key"],
+                             error=_failure_reason(f.get("error"))) for f in gfails]
+                dst.attrs["merge_failed_cases_json"] = json.dumps(frec, default=str)
+                dst.attrs["merge_partial_json"] = json.dumps(dict(
+                    expected_cases=int(n_expected),
+                    merged_cases=sorted(int(r["idx"]) for r in rows),
+                    failed_cases=[f["idx"] for f in frec]))
+        if gfails:
+            import warnings
+            warnings.warn(f"merge_cases: PARTIAL merge of {stem}.h5 -- {len(gfails)} of {n_expected} case(s) "
+                          f"failed ({[f['idx'] for f in gfails]}); recorded as refused scans and "
+                          "merge_partial_json", RuntimeWarning, stacklevel=2)
+        merged[gname] = out_path
+        if cleanup:
+            for r in rows:
+                if os.path.exists(r["path"]):
+                    os.remove(r["path"])
+    return merged
+
+
 def _cli(argv=None):
     import sys
     argv = list(sys.argv[1:] if argv is None else argv)

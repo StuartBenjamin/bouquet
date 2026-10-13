@@ -27,6 +27,9 @@ env/
 # NetCDF / proprietary IDA data (IDA_*.cdf) — never commit
 *.nc
 *.cdf
+# ...but track the synthetic IDA-layout test fixtures (tests/data/README.md)
+!tests/data/diiid_profs_synthetic.cdf
+!tests/data/ida_synthetic_lmode.cdf
 *.dat
 *.npz
 *.npy

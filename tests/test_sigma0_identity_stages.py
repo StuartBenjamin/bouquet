@@ -149,8 +149,25 @@ class ToyGS:
                  "dV/dPsi": 1.0 + x}
         return (x, 1.0 + 3.0 * x, ravgs, None, None, None)
 
+    def sauter_fc(self, psi=None, npsi=None, psi_pad=None):
+        """The flux-surface averages the SWB conversion reads
+        (physics._swb_geometry): a flat <|B|^2>.  The toy's p' is zero, so
+        the pressure-driven p'G the conversion takes off a TokaMaker-jphi
+        toolkit's SWB output is exactly zero here."""
+        x = self._grid(psi, npsi)
+        one = np.ones_like(x)
+        return (None, None, {"<|B|>": one, "<|B|^2>": one})
+
     def flux_integral(self, psi_N, prof):
-        return _trap(prof, psi_N)
+        """The plasma-area integral of a flux function: TokaMaker's
+        ``int f dA`` is ``int f (dA/dpsi) dpsi``, and the toy's dA/dpsi is
+        the per-surface Ip weight ``_W`` -- the measure its solve normalises
+        Ip in (to the 1e-4 self-check).  The loop-off draw roots the
+        inductive amplitude in THIS integral; an unweighted one sat 1.9 % of
+        Ip away from the solver's measure, and the l_i stage's core rescale
+        (find_optimal_scale) silently absorbed it."""
+        x = np.asarray(psi_N, float)
+        return _trap(np.interp(x, _X, _W) * np.asarray(prof, float), x)
 
     def get_coil_currents(self):
         return ({"C1": 1.0}, None)
@@ -160,8 +177,15 @@ class ToyGS:
 
 
 def _toy_redl(eq, psi_N, ne, te, ni, ti, Zeff, psi_pad=1e-3,
-              isolate_edge=False, smooth_axis=True):
-    """Bootstrap that depends on the kinetics AND on the equilibrium."""
+              isolate_edge=False, smooth_axis=True, coord="psi_n",
+              eps_definition=None):
+    """Bootstrap that depends on the kinetics AND on the equilibrium.
+    ``eps_definition`` (GenerationConfig.eps_definition, passed at every
+    call site) is checked like the real evaluator does; the toy's bootstrap
+    does not depend on it."""
+    if eps_definition is not None:
+        from bouquet.physics import check_eps_definition
+        check_eps_definition(eps_definition)
     kin = (np.asarray(ne, float) * np.asarray(te, float)) / (
         np.asarray(ne, float)[0] * np.asarray(te, float)[0])
     base = (3.0e5 * np.exp(-0.5 * ((psi_N - 0.92) / 0.04) ** 2)
@@ -218,7 +242,10 @@ def toy(monkeypatch):
             inp0 = j_inductive[0] + spike_prof[0]
             if abs(inp0 - out0) / out0 < tolerance:
                 return 1.0, f * fp
-            raise AssertionError("stub find_optimal_scale: scale != 1")
+            raise AssertionError(
+                "stub find_optimal_scale: scale != 1 (requested j0 = "
+                f"{inp0:.6g}, achieved f*fp[0] = {out0:.6g}, rel "
+                f"{(inp0 - out0) / out0:+.3e} vs tolerance {tolerance})")
 
         boot.find_optimal_scale = _fos
         boot.solve_with_bootstrap = None
@@ -240,7 +267,7 @@ def toy(monkeypatch):
         monkeypatch.setattr(mod, "eq_jphi_profile", prof)
         monkeypatch.setattr(mod, "Ip_fsa_weights", wts)
     monkeypatch.setattr(L, "residual_weights",
-                        lambda eq, psi_N, psi_pad=1e-3: (_W.copy(), _X,
+                        lambda eq, psi_N, psi_pad=1e-3, coord="psi_n": (_W.copy(), _X,
                                                          "toy"))
     monkeypatch.setattr(P, "evaluate_jBS", _toy_redl)
     monkeypatch.delenv("BOUQUET_R2_IP_MODE", raising=False)
@@ -367,6 +394,16 @@ def test_delivered_split_sums_to_the_normalised_request_and_resolves_to_F(toy):
     np.testing.assert_allclose(mean_t + jbs + fx + off, dv["request"],
                                rtol=1e-12)
     np.testing.assert_allclose(mean_t + jbs + fx, dv["achieved"], rtol=1e-12)
+
+
+def test_the_toy_flux_integral_is_its_solver_ip_measure(toy):
+    """Harness consistency: the area integral the loop-off draw roots its
+    inductive amplitude in measures Ip as the toy's solve does (to the
+    measure's 1e-4 self-check), as TokaMaker's plasma-area integral does."""
+    req, _jbs, _fx = _reconstruct(toy)
+    assert toy.flux_integral(_X, req) == pytest.approx(_IP, rel=1e-12)
+    # what the solver actually ran (its own Ip normalisation of the request)
+    assert abs(toy.flux_integral(_X, toy.req) / _IP - 1.0) < 1e-4
 
 
 def test_request_offset_floors_the_target_inductive_and_counts_it():

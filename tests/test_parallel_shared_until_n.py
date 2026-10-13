@@ -93,13 +93,15 @@ class _FakeBouquet:
     every attempt, one archived draw per attempt, on_inspec on the passing
     ones, local break at the (local) target."""
     inspec_pattern = None            # per test: list of bools, cycled
+    fail_setup = False
 
     def __init__(self, cfg):
         self.config = cfg
         self.baseline = _FakeBaseline()
 
     def setup_solver(self):
-        pass
+        if self.fail_setup:
+            raise RuntimeError("synthetic setup failure")
 
     def prepare_baseline(self):
         pass
@@ -161,6 +163,26 @@ def _shard(cfg, w, nw, ledger, tmp_path):
                      seed_base=1, out_header=str(tmp_path / "run"),
                      scan_key=0, threads_per_worker=1, verbose=True,
                      ledger=ledger)
+
+
+def test_an_in_process_shard_leaves_the_process_unpinned(fake_bouquet, tmp_path):
+    """run_shard pins for the shard and restores on return (and on failure):
+    a test calling it in-process must not leave the session pinned (#76 B5)."""
+    import os
+    from bouquet.threads import THREAD_VARS, pinned
+    keys = THREAD_VARS + ("HDF5_USE_FILE_LOCKING",)
+    before = {k: os.environ.get(k) for k in keys}
+    cfg = _cfg(tmp_path, n_inspec_target=2, max_total_draws=4)
+    rec = _shard(cfg, 0, 1, FileYieldLedger(tmp_path / "l"), tmp_path)
+    assert {k: os.environ.get(k) for k in keys} == before and not pinned()
+    assert all(p["num_threads"] == 1 for p in rec["threads"])
+    fake_bouquet.fail_setup = True
+    try:
+        with pytest.raises(RuntimeError, match="synthetic setup failure"):
+            _shard(cfg, 0, 1, FileYieldLedger(tmp_path / "l2"), tmp_path)
+    finally:
+        fake_bouquet.fail_setup = False
+    assert {k: os.environ.get(k) for k in keys} == before and not pinned()
 
 
 def test_worker_stops_at_the_shared_target_and_records_it(fake_bouquet, tmp_path):
@@ -337,3 +359,27 @@ def test_apply_filters_travels_through_the_slurm_bundle(fake_bouquet, tmp_path, 
     from bouquet.filtering import read_filter_flags
     flags = read_filter_flags(str(tmp_path / "run.h5"), scan_key=0)
     assert all("passes_coil_filter" not in f for f in flags.values())
+
+
+def test_a_worker_releases_the_dd_cache_after_its_baseline(fake_bouquet,
+                                                           tmp_path,
+                                                           monkeypatch):
+    """#72 B3 (D.md item): after prepare_baseline() the worker clears the
+    shared parsed-dd cache, before it draws."""
+    import bouquet.io.imas as IM
+    order = []
+    monkeypatch.setattr(IM, "clear_dd_cache", lambda: order.append("clear"))
+    real_prep, real_gen = (_FakeBouquet.prepare_baseline,
+                           _FakeBouquet.generate)
+    monkeypatch.setattr(_FakeBouquet, "prepare_baseline",
+                        lambda self: (order.append("prepare"),
+                                      real_prep(self))[1])
+
+    def gen(self, *a, **k):
+        order.append("generate")
+        return real_gen(self, *a, **k)
+    monkeypatch.setattr(_FakeBouquet, "generate", gen)
+    led = FileYieldLedger(tmp_path / "l")
+    _shard(_cfg(tmp_path, n_inspec_target=1, max_total_draws=2), 0, 1, led,
+           tmp_path)
+    assert order == ["prepare", "clear", "generate"]

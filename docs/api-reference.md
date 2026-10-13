@@ -59,6 +59,9 @@ Layout spec: [archive-schema.md](archive-schema.md). Code source of truth:
 | Function | Description |
 |---|---|
 | `parallel_generate()` | Process-parallel driver (`backend="laptop"` pool or `"slurm"` job array) |
+| `parallel_cases()` / `run_case()` / `merge_cases()` | Many bouquets on one node: one standing solver per worker, cases swapped on (`Bouquet.set_case`), merged per input group |
+| `CaseSpec` / `GeqdskProfilePairs` / `IdaTimeslices` / `ImasTimeslices` | The cases of a sweep (one baseline source each) and the sources that expand into them |
+| `units.make_units()` / `units.units_from_cases()` / `units.add_units()` / `python -m bouquet.units work` | Many bouquets (one per baseline) on a shared-filesystem queue, across processes, nodes and jobs (`bouquet.workqueue`) |
 | `run_shard()` | The per-worker serial pipeline on one shard |
 | `merge_archives()` | Concatenate shards, verifying every shard hit the same baseline |
 | `emit_slurm_script()` | Write the SLURM job-array + submit scripts |
@@ -83,6 +86,8 @@ Details: [io-and-plotting.md](io-and-plotting.md).
 | Function | Description |
 |---|---|
 | `parallel_to_toroidal()` / `toroidal_to_parallel()` | Current-convention conversion `⟨j_φ⟩ = κ⟨j·B⟩`, `κ = F⟨1/R⟩/⟨B²⟩` (`field_aligned_conversion`), and its exact inverse; or the source's own `j_tor/j_total` ratio |
+| `jpar_to_jphi_tokamaker()` / `jphi_tokamaker_to_jpar()` / `jphi_tokamaker_pressure_term()` | ⟨J·B⟩ ↔ TokaMaker `jphi` (field-aligned part) and the pressure term p′G ([current-conventions.md](current-conventions.md) A7) |
+| `jtor_imas_to_jphi_tokamaker()` / `jphi_tokamaker_to_jtor_imas()` | IMAS `j_tor` ↔ TokaMaker `jphi` (A5) |
 | `isotropize_fast_pressure()` | Anisotropic fast-pressure reduction for the isotropic GS solve (`method` is **required** — the two dd conventions differ by 3×) |
 | `detect_p_fast_convention()` / `resolve_p_fast_reduction()` | Which fast-pressure storage convention a dd was written in, and the reduction rule that follows (`bouquet.io.imas`) |
 | `fast_pressure_residual()` / `infer_fast_pressure()` | Fast-ion pressure accounting |

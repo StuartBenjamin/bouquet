@@ -56,6 +56,7 @@ import numpy as np
 import pytest
 
 import _engine_toy as T
+from _engine_fake_gs import point_without_solver
 import test_engine_draws as TD
 from _engine_fake_gs import EXAMPLE_GEQDSK, FakeTokaMaker
 from bouquet import edge_pressure as EP
@@ -131,7 +132,7 @@ def _generate(fake, eng, res, h, n=3):
         jBS_scale_range=(0.99, 1.01), coil_drift=0.01,
         homotopy_passes=[(0.05, 0.1), (0.01, 0.01)], seed=12345,
         capture_live_eq=False, store_achieved_jphi=True,
-        jbs_loop=G.loop_settings, rejection_log=[], engine_draw=G,
+        jbs_loop=G.loop_settings, rejection_log=[], draw_method=G,
         coil_filter="legacy")
 
 
@@ -285,6 +286,7 @@ def test_an_engine_prepare_baseline_arms_the_writer_with_its_own_p_sep(
             _write_frame_gfile(filename, kw.get("lcfs_pressure", 0.0))
 
     b.mygs = _GS()
+    point_without_solver(monkeypatch)
     bl = _q(b.prepare_baseline)
     p_sep = float(np.asarray(made["c"].pressure, dtype=float)[-1])
     assert p_sep > 0.0

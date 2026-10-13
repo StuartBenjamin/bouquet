@@ -10,6 +10,7 @@ controls it. See [`../README.md`](../README.md) for the short version and
 - [Stage reference](#stage-reference)
 - [What is perturbed vs. held fixed](#what-is-perturbed-vs-held-fixed)
 - [Configuration reference](#configuration-reference)
+- [Experimental features and their validation status](#experimental-features-and-their-validation-status)
 - [until-N in-spec draws](#until-n-in-spec-draws)
 - [Workflow presets and the guard](#workflow-presets-and-the-guard)
 - [Reading an archive back](#reading-an-archive-back)
@@ -17,6 +18,8 @@ controls it. See [`../README.md`](../README.md) for the short version and
 - [Exporting draws](#exporting-draws)
 - [Timeseries sweeps](#timeseries-sweeps)
 - [Process-parallel generation](#process-parallel-generation)
+- [Many bouquets on one node](#many-bouquets-on-one-node)
+- [Many bouquets on a cluster](#many-bouquets-on-a-cluster)
 
 ---
 
@@ -91,7 +94,7 @@ non-default knobs), `archive` (its `BouquetArchive`), `selected_indices()`,
 | Inductive current (j_ind) | ✓ | GPR-perturbed, then scaled to match l_i |
 | Coil currents | ✓ | Adjusted by TokaMaker within the homotopy bounds |
 | Aux channels (ω_tor, E_r, χ_e, χ_i) | optional | Switchboard: perturbed + stored when sigmas are supplied (passive) |
-| p_fast, j_NBI, j_RF | ✗ | Fixed additive components, never perturbed |
+| p_fast, j_NBI, j_RF, j_other | ✗ | Fixed additive components, never perturbed (`j_other`: fusion, runaways, sawteeth and unknown-index core_sources entries on the IMAS path) |
 | Equilibrium anchors (p_diff, jphi_diff, jBS_diff) | ✗ | Fixed offsets applied to the baseline **and** every draw |
 
 ## Configuration reference
@@ -114,6 +117,23 @@ is a navigational summary of the defaults.
 | `saddle_targets`, `saddle_weights` | `None` | Opt-in X-point pins. Without them a diverted forward solve typically rounds the boundary corner by a few cm |
 | `coil_vsc` | `{"F9A": 1.0, "F9B": -1.0}` | Antisymmetric vertical-stability channel definition |
 
+### Ion and Z_eff fields of the sources (`b.source`, PR #56)
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `ReconstructionSource.ni_source` | `"standard"` | IDA `.cdf` profiles: where Z_eff and n_i come from. `"standard"` (the route before PR #56): Z_eff is the file's visible-bremsstrahlung value, n_i = n_e(Z − Z_eff)/(Z − 1) at Z_eff clamped to `[1, Z]`, σ_ni the n_e fraction; the Z_eff envelope comes from the carbon > VB > scalar ladder below. **EXPERIMENTAL** (see [Experimental features](#experimental-features-and-their-validation-status), `ida_ion_route`): `"Zeff"` = the VB Z_eff with a propagated σ_ni; `"CER"` = `Z_eff = 1 + Z(Z−1)·n_C/n_e` from the measured `n_12C6` (needs `impurity_Z=6`); `"all"` = the equal-weight mean of the two, each clamped to `[1, Z]` first, their disagreement beyond σ added to σ_ni / σ_Zeff (a file lacking one route's envelope uses the other **alone**: an older vintage without `Zeff_err` gets the CER value). Recorded as `IDAProfiles.zeff_provenance`. Ignored for p-files |
+| `ImasSource.ni_source` | `"standard"` | The same choice for `ida_hybrid`. `"standard"`: Z_eff stays the dd's and n_i = n_e,IDA(Z − Z_eff,dd)/(Z − 1). **EXPERIMENTAL** `"Zeff"` / `"CER"` / `"all"` (`ida_ion_route`): Z_eff and n_i from IDA |
+| `ImasSource.zeff_from_fuse` | `False` | `ida_hybrid` with an experimental `ni_source` only: `True` keeps the dd's Z_eff while n_e/T_e/T_i/n_i come from IDA. Under `"standard"` the Z_eff is the dd's anyway |
+| `ImasSource.ni_subtract_fast` | `False` | **EXPERIMENTAL** (`ida_ni_beam_subtraction`): `ida_hybrid` with an experimental `ni_source`: subtract the dd's fast-ion density equivalent from IDA's (total) n_i. Refused with `ni_source="standard"` |
+| `ImasSource.include_pfast` | `True` | Add the dd's fast-ion pressure `p_fast` to the equilibrium pressure (an explicit `FixedComponentsConfig.p_fast` still wins). With an experimental `ni_source` on `ida_hybrid`, match it to `ni_subtract_fast`: both `True` puts the fast ions in `p_fast`, both `False` leaves them inside the IDA n_i; on a beam slice the reader warns when they differ (fast ions counted twice, or left out) |
+| `ImasSource.zeff_fast_ions` | `False` | **EXPERIMENTAL** (`fuse_zeff_fast_ions`): classify the dd's stored Z_eff against the thermal-only and thermal+fast numerators (`io.imas._dd_zeff`) and give the bootstrap `Z_eff,th + z2_fast/n_e` where it counts the fast ions. `False`: the thermal-only Z_eff recomputed from the dd's thermal ion densities (as before PR #56). The decision is archived as `li_metrics["zeff_dd_provenance"]` |
+| `Baseline.z2_fast` | — (read) | Σ_s Z_s² n_s^fast on the kinetic grid, from the dd's fast-ion species (IMAS path); `None` without a fast population. Archived per draw with `z_fast` |
+| `Baseline.zeff_includes_fast` | — (read) | Whether the baseline Z_eff's numerator counts the fast ions. `False` by default; with `ImasSource.zeff_fast_ions=True` classified from the dd's stored `zeff` against both numerators (`io.imas._dd_zeff`; with no stored Z_eff and a beam, `True`), and `True` for a measured (IDA) Z_eff on the experimental `ida_hybrid` route. When `True`, the bootstrap sees `Z_eff,th + z2_fast/n_e` (since PR #56; see [physics-notes.md](physics-notes.md#kinetic-assumptions-z_eff-n_i-and-the-clips-pr-56)) and the draw window is `physics.zeff_bounds`' includes-fast one |
+
+`read_ida(sigma_ni_from_ne=...)` is accepted as a deprecated no-op (it warns);
+`UncertaintyConfig.sigma_ni_from_ne` was removed (it was already a no-op), and a
+stored config carrying it still loads.
+
 ### `UncertaintyConfig` (`b.uncertainty`)
 
 | Knob | Default | Meaning |
@@ -128,9 +148,59 @@ is a navigational summary of the defaults.
 | `jphi_scalar_sigma` | `0.10` | Inductive-current envelope. **Must be > 0** — setting it to 0 freezes `j_inductive` and trips the workflow guard |
 | `zeff_scalar_sigma` | `0.05` | One Z_eff perturbation per draw; n_i / n_z follow from quasi-neutrality. Also the width of the bottom tier below |
 | `zeff_sigma_source` | `"auto"` | Which tier supplies the Z_eff envelope's **magnitude**: `"auto"` / `"carbon"` / `"measured"` / `"scalar"` — see the ladder below |
-| `sigma_profiles` | `{}` | Explicit `{name: sigma(psi_N)}` envelopes, highest precedence |
-| `n_ls` / `t_ls` / `j_ls` | `0.5` / `0.4` / `0.25` | GPR correlation lengths for density / temperature / current |
-| `aux_sigmas`, `aux_baselines`, `aux_length_scales` | `{}` | The passive switchboard: any extra channel gets perturbed and archived alongside the physics |
+| `ni_from_zeff` | `None` (auto) | With the Z_eff channel on: `True` derives n_i per draw from the drawn (n_e, Z_eff) as an increment on the baseline n_i; `False` draws n_i from its own σ and Z_eff passively after T_i (different RNG order). Auto: `True` (n_i always derived, as before PR #56). With an **experimental** `ni_source` (`ida_ion_route`) auto is the PR #56 rule: `True` when n_i's σ is the scalar fallback, or n_i and the Z_eff envelope are the same IDA resolution (tier `"IDA-resolved"`); `False` for any other real n_i envelope. That rule follows the Z_eff tier: pin it for an A/B of Z_eff envelopes |
+| `kinetic_clips` | `None` (auto) | **EXPERIMENTAL** (`kinetic_sampler_clips`): the PR #56 sampler clips -- a drawn Z_eff floored at 1 where `physics.zeff_bounds` allows less, a derived n_i held in `[0, n_e − z_fast]`, an independent n_i capped at `n_e − z_fast` when `Z_imp` is declared, a passive Z_eff aux draw clipped to the window. Auto: on only when a PR #56 kinetic feature is (`ida_ion_route`, `fuse_zeff_fast_ions`, `ida_ni_beam_subtraction`); `False`: only the `zeff_bounds` window (the bound before PR #56). Each clip that fires is counted per draw (`KineticDraw.clips`, `kinetic_sampler/3`) |
+| `sigma_profiles` | `{}` | Explicit `{name: sigma(psi_N)}` envelopes on the kinetic run grid (`psi_N_kinetic`; Φ_N in a `"phi_n"` run), highest precedence |
+| `n_ls` / `t_ls` / `j_ls` | `0.5` / `0.4` / `0.25` | GPR correlation lengths for density / temperature / current, in units of the run coordinate (Φ_N lengths in a `"phi_n"` run; the defaults are not converted) |
+| `aux_sigmas`, `aux_baselines`, `aux_length_scales` | `{}` | The passive switchboard: any extra channel gets perturbed and archived alongside the physics. Arrays on the kinetic run grid; length scales in the run coordinate |
+
+### Radial coordinate (`b.source.coord`)
+
+`"psi_n"` (default) keeps every profile on normalised poloidal flux.
+`"phi_n"` puts the whole run on normalised toroidal flux: the reader relabels
+the source's nodes with their Φ_N (the IMAS `core_profiles` `grid.rho_tor_norm²`;
+the g-file's own q-integral `rhovn²`, with the p-file/IDA nodes inside the LCFS
+mapped through it), and every profile, envelope and GPR draw then stays on that
+grid. TokaMaker receives the profiles as-is, tagged `phi_n`, and remaps them to
+ψ each nonlinear step with the equilibrium's own q; bouquet samples readbacks at
+the ψ_N the solver's map gives for each node. `"rho_tor"` is accepted as an
+input spelling and runs as `"phi_n"` on ρ². A `"phi_n"` run needs an
+OpenFUSIONToolkit with toroidal-flux profiles (`TokaMaker.get_torflux_map`) and
+the internal bootstrap solve; both are checked in `prepare()`. The archive's
+baseline group records the coordinate as the `profile_coord` attr. Fields and
+datasets named `psi_N` / `psi_N_kinetic` keep that name but hold the run grid:
+Φ_N in a `"phi_n"` run.
+
+The self-consistent bootstrap loop (`jbs_self_consistent=True`) and the unified
+engine run Φ_N as well.
+- Every solve tags its profiles with the run coordinate.
+- After each solve the run nodes are mapped to ψ_N on that equilibrium's own
+  toroidal-flux map (`get_torflux_map`, inverse), and the Redl evaluation
+  (`physics.evaluate_jBS(..., coord=)`), the loop's residual weights and the
+  FSA current integrals work on those ψ_N. This is what OFT's Fortran bootstrap
+  does: kinetic values at the mapped nodes, gradients numerical in ψ.
+- The engine's structured basis lives on the run grid, so the closure
+  coefficients describe the same profile on every pass and draw; its integrals
+  are over each geometry's own ψ_N.
+- The g-file engine labels the g-file's nodes with `rhovn²` and the kinetic
+  nodes by their own map, as the legacy reconstruction does. Its inductive
+  basis and q-row radius stay in ψ_N.
+
+With IDA-hybrid kinetics (`kinetic_source="ida_hybrid"`) the IDA fits, their
+sigmas and ω_tor are placed on the run nodes by their own Φ_N, integrated from
+the IDA file's `q`, not by the dd's map; a `"phi_n"` run refuses an IDA file
+without `q`. The g-file path does the same for an IDA `.cdf` (a p-file, which
+carries no q, goes through the g-file's map; an IDA `.cdf` without q is
+refused). An `UncertaintyConfig.ida_path` other than the source's IDA file is
+placed by its own q when it has one. q95 stays in ψ_N.
+Window-type helpers (`sampling.sigmoid_length_scale`,
+`uncertainties.new_uncertainty_profiles`, `synthetic_ida_sigma`) take the grid
+they are given: pass the run grid and their widths/positions are Φ_N in a
+`"phi_n"` run. Fixed radial windows (edge > 0.9, pedestal 0.85) and the SWB
+inductive seed shape are in ψ_N in either run. `source.coord` is checked when
+the config is built; the toolkit is checked before the baseline and the draws. If the
+solver's toroidal-flux map cannot be built (surfaces fail to trace), the solve
+fails like any other and the draw is rejected.
 
 **Precedence, per kinetic channel:** `sigma_profiles[chan]` > an IDA `.cdf` >
 `<chan>_scalar_sigma`. A `.cdf` handed to `ReconstructionSource.profiles_path`
@@ -155,7 +225,8 @@ their scalars always apply.
 **The Z_eff envelope has its own ladder (`zeff_sigma_source`).** Z_eff is the
 primary density channel — each draw perturbs it and *derives* n_i / n_z — so the
 width of its envelope sets the width of every dilution band in the ensemble.
-`"auto"` takes the highest-fidelity tier the file supports:
+With the default `ni_source="standard"`, `"auto"` takes the highest-fidelity tier
+the file supports:
 
 | Tier | Where the magnitude comes from | Forced by |
 |---|---|---|
@@ -168,8 +239,17 @@ which is why it outranks the visible-bremsstrahlung sigma. Both measured tiers
 require the Z_eff baseline to be the IDA one — the reconstruction path, and the
 **same** file that supplies the sigmas (compared as resolved paths, so a
 relative, `~`-prefixed or symlinked spelling is still the same file). An
-IMAS/`ida_hybrid` or p-file baseline therefore always gets the scalar: pairing a
+IMAS/`ida_hybrid` or p-file baseline therefore gets the scalar: pairing a
 FUSE Z_eff with an IDA envelope would mix channels.
+
+With an **experimental** `ni_source` (`ida_ion_route`) the measured tier is
+instead `read_ida`'s own resolution, **IDA-resolved**: VB+CER > CER > VB over
+what the file supports, equal-weight combined, with the routes' disagreement
+beyond their combined σ added one-sidedly (`"auto"` / `"measured"`; `"carbon"`
+is then a single-route override), and `ImasSource.ida_path` on `ida_hybrid` is
+eligible (also with `zeff_from_fuse=True`, the envelope then carried absolute).
+The assumptions behind the VB/CER combination are stated and cited in
+[physics-notes.md](physics-notes.md#kinetic-assumptions-z_eff-n_i-and-the-clips-pr-56).
 
 **No step down this ladder is silent.** Each one emits a single warning naming
 the tier chosen, each tier skipped and its reason class (*source ineligible* /
@@ -193,7 +273,14 @@ as an enormous sigma.
 | `constrain_sawteeth` | `False` | Gate draws on q0 |
 | `recalculate_j_BS` | `True` | Recompute the Sauter bootstrap per draw (vs. reusing the baseline's) |
 | `single_profile_jphi` | `False` | Legacy path: perturb the TOTAL `j_phi` as one profile (no inductive / bootstrap split; no per-draw Sauter call). `jphi_scalar_sigma` then applies to the total, a larger absolute perturbation -- re-tune it. Needs `jbs_self_consistent=False` (refused otherwise); the unified engine refuses it |
-| `jBS_scale_range` | `(0.99, 1.01)` | Legacy draws: the per-draw multiplicative spread of the bootstrap (uniform in the range; default `None` -> `(0.99, 1.01)` on 2026-06-04) |
+| `jBS_scale_range` | `(0.99, 1.01)` | Legacy draws: the per-draw multiplicative spread of the bootstrap (uniform in the range; default `None` -> `(0.99, 1.01)` on 2026-06-04). The baseline's multiplier (`bs_scale` / `s_bs(ψ)`) is applied after SWB on SWB draws and re-centres this range on loop draws -- see [physics-notes.md](physics-notes.md) ("The bootstrap multiplier") |
+| `swb_seed` | `None` | IMAS path, every legacy SWB call (baseline split, draws, σ=0 check): `"source"` seeds SWB with the source's `j_inductive` and holds its NBI + RF + other current fixed (`jphi_fixed`); `"generic"` the `(1 - s^1.5)^1.5` seed. `None` resolves at `prepare_baseline()` to `"source"` when the installed OFT's `solve_with_bootstrap` takes `jphi_fixed`, else `"generic"` -- never an error; an explicit `"source"` on a toolkit without `jphi_fixed` is refused at the first SWB call only. Stamped in `li_metrics["swb_seed"]` |
+| `solve_method` | `None` | The internal solve method: `"legacy"`, `"swb"` (**EXPERIMENTAL**, [`swb_solve_method`](#experimental-features-and-their-validation-status); `solve_with_bootstrap` is the baseline and every draw; IMAS sources) or `"engine"` (the unified engine). `None` derives it from `imas_baseline` / `reconstruction_engine`. Nothing is rewritten at construction; the effective fields are set where the run is resolved (`prepare_baseline()`, the draw method, the solver setup) and a later switch back restores the user's own fields. A contradicting pair (`imas_baseline="swb"` with another method, `reconstruction_engine="legacy"` with `"engine"`) is refused |
+| `imas_baseline` | `"closure"` | IMAS path: `"swb"` (**EXPERIMENTAL**, [`swb_solve_method`](#experimental-features-and-their-validation-status)) selects the swb method (solve A at the setup coil reg, solve B with a strong reg toward A's coils is the baseline, every draw is solve B with resampled kinetics and a GPR redraw of the inductive seed; 20 negative redraws refuse the draw, `swb_jind_redraw_refused`) |
+| `swb_coil_reg_weight` | `1e3` | swb only: weight of solve B's (and every draw's) coil reg toward solve A's coils |
+| `swb_edge_taper_psi0` | `None` | swb only: taper `j_phi` to zero from this ψ_N to the LCFS in every SWB solve (OFT `taper_edge_jBS`). **Opt-in** (owner decision D4; was 0.999): `None` is off and is sent as `taper_edge_jBS=False` where the toolkit has the option (a toolkit whose own default is taper-on keeps it on otherwise; such a taper with the setting off warns). The channel taper factor is measured, not assumed |
+| `swb_ip_tol` | `5e-3` | swb only: the largest `|Ip/Ip_target - 1|` an swb solve (solve A, solve B, every draw) is accepted at; beyond it the solve raises. Validated in (0, 1); stamped on `_baseline` (`swb_ip_tol`, `swb_ip_rel_err`, `swb_ip_rel_err_solve_A`) and per draw (`swb_ip_rel_err`); a solve accepted above 1e-4 (the engine's acceptance) warns. Value pending owner decision E6 |
+| `swb_saw_q` / `swb_saw_dq` / `swb_saw_tol` / `swb_saw_ramp` / `swb_saw_rule` | `None` / `0.03` / `1e-4` / `0.01` / `"local"` | swb only: the sawtooth q reset inside SWB (OFT `saw_q_s` ...; `None` = off). Set from these fields, never from `bootstrap_kwargs` |
 | `jbs_delta_mode` | `False` | Opt-in differential bootstrap composition — see [physics-notes.md](physics-notes.md#differential-bootstrap-jbs_delta_mode) |
 | `isolate_edge_jBS` | `None` | Legacy path only. `None` is resolved per engine at `prepare_baseline()`: **`False`** under `reconstruction_engine="legacy"` (both input types; the unified forward decomposition -- pure-ohmic `j_inductive`, full bootstrap in `j_BS` -- closes exactly and yields better), `True` under `"unified"` (never read; the engine refuses `False`). Set `True` explicitly only for dedicated edge-spike studies (kept, with a warning). Recorded in the archive ([engine.md](engine.md)) |
 | `jBS_baseline_mode` | `"diff"` | IMAS path: how the SWB bootstrap is reconciled with the source (`"diff"` / `"rescale"`) |
@@ -215,13 +302,15 @@ as an enormous sigma.
 | `structured_mse_sigma_sys` / `structured_mse_min_chords` | `0.0` / `4` | `"structured"` + `mse_data`: an optional caller-stated systematic added in quadrature to every chord's `sigma_eff` (default 0: nothing inflated), and the fewest usable chords a block may carry. Every `structured_mse_*` knob is validated when the config is built (steps an integer ≥ 1, `fd_step` finite > 0, `sigma_sys` finite ≥ 0, `min_chords` an integer ≥ 1), and an unknown key in `mse_data` is refused; a dropped chord (weight ≤ 0, a non-finite value, a NaN E<sub>r</sub> inside a supplied E<sub>r</sub> profile, off the solver mesh) is recorded with its reason |
 | `q0_gate` | `1.1` | `closure_channel="sawtooth_bootstrap"` (and the engine's `"q0"` row): the axis row is admitted only where the source's sawtooth model is active at the slice OR its own axis `|q0_dd|` is at/below this value; otherwise the slice falls back to `"bootstrap"` with a printed note (`q0_gate_basis` recorded) |
 | `accept_anchor_inband` | `False` | Legacy draws (Fix B): when the reconstruction anchor's l_i is already in the band, accept the anchor and skip the scale search and the corrective iteration. Refused non-default under the unified engine |
-| `kinetic_source` | `"fuse"` | IMAS path: `"ida_hybrid"` takes ne/Te/Ti/ω_tor from an IDA `.cdf` while keeping FUSE Z_eff / currents / equilibrium. `from_imas(ida_path=…)` selects it automatically |
+| `kinetic_source` | `"fuse"` | IMAS path: `"ida_hybrid"` takes ne/Te/Ti/ω_tor from an IDA `.cdf` while keeping FUSE currents / equilibrium / p_fast; with the default `ImasSource.ni_source="standard"` Z_eff stays the dd's and n_i follows from it and the IDA n_e. The **experimental** `ni_source` routes take n_i and Z_eff from IDA (`zeff_from_fuse=True` keeps the dd's Z_eff; `ni_subtract_fast=True` subtracts the dd's fast-ion density from IDA's measured n_i). `from_imas(ida_path=…)` selects it automatically |
 | `anchor_jtor_to_equilibrium` | `True` | IMAS path: anchor total j_phi to `equilibrium.profiles_1d.j_tor` rather than `core_profiles.j_tor` |
 | `anchor_pressure_to_equilibrium` | `False` | IMAS path: add the fixed `p_diff = equilibrium.pressure − p_reconstructed` offset |
 | `imas_corrective_jphi` | `False` | Opt-in corrective j_phi iteration on the IMAS baseline solve (still being validated) |
 | `floor_j_BS` | `False` | Clip negative bootstrap excursions; only needed with `isolate_edge_jBS=False` on sources that carry an inner negative lobe |
-| `swb_iterations` | `3` | **Deprecated; legacy only** (`jbs_self_consistent=False`): `solve_with_bootstrap`'s fixed Picard pass count per draw. The IMAS baseline's own SWB call never read it (OFT's default 3). Ignored under the self-consistent loop; a non-default value with the loop on raises a `DeprecationWarning` at config validation |
-| `draw_solve_maxits` | `None` | Grad-Shafranov iteration cap for the solves inside `generate()`'s draw loop. `None` keeps the solver's own setup cap, so nothing changes unless it is set. A solve that hits the cap fails its draw exactly as before (no re-solve at another tolerance). Every draw solve that raises is recorded, whatever the cap: per draw in `diagnostics['solve_failures']` (site, seconds, error, `exceeded_maxits`), on `Bouquet.solve_failures`, and in one printed `[draw-solves]` line (with the largest iteration count seen when a cap is set) The legacy draws' cap: with `reconstruction_engine="unified"` it is refused, and the engine draws use `engine_draw_solve_maxits` (default 100; see docs/engine.md "The solve cap") |
+| `bootstrap_kwargs` | `{}` | Keyword options passed through to `solve_with_bootstrap` on the **legacy** paths (e.g. `{"iterations": 2}`; replaces `swb_iterations`). Checked when the config is built **and whenever the attribute is reassigned**: a key outside the explicit allow-list `config.BOOTSTRAP_KWARGS_ALLOWED` is refused (a typo is refused with or without the toolkit), a key the call sites already set is refused, and on the legacy path a key the **installed** toolkit lacks (the internal-solve options `use_python_solve`, `use_sauter_eps`, `diagnose_bs`, `djBS_tol`, `saw_relax`, `taper_edge_*` exist only on a toolkit with the internal Fortran bootstrap solve) is refused -- warned instead while a stored config is loaded, so an archive written on another build reloads. Under the self-consistent loop SWB runs only for `jbs_init="swb"` and the jBS-delta / `DIFF_BS` caches (a non-empty dict is warned). It reaches **every** SWB call (reconstruction / IMAS baseline, caches, σ=0 check, draws): a stored `swb_iterations=n` (which reached only the draws) loads as `{"iterations": n}` with a warning that the baseline SWB now runs with it too. With `reconstruction_engine="unified"` only the engine's own keys are read -- the edge taper (`taper_edge_jBS`, `taper_edge_psi0`, `taper_edge_shape`; **off** by default, 0.999, quintic; implemented by bouquet, so no toolkit capability is needed) and `use_sauter_eps=True` (an accepted no-op: the engine's ε is `eps_definition`; `False` is refused, pointing at `eps_definition="a_over_R"`); any other key is refused (and dropped with a warning from a stored unified config, which never ran it) |
+| `eps_definition` | `"r_over_R_geo"` | The inverse aspect ratio of the Redl collisionalities **and** the major radius R in ν\*_e, ν\*_i (Sauter Eqs. 18b/18c), at every bouquet Redl evaluation (unified engine reconstruction and draws, legacy self-consistent loop, IMAS baseline loop, delta caches); engine-independent. `"r_over_R_geo"`: ε = (R_max − R_min)/(R_max + R_min), R_geo = (R_max + R_min)/2 in ν\* (Sauter 1999 / Redl 2021 "ε = r/R0"; OMFIT, FUSE). Opt-ins: `"half_width_over_fsa_R"`, (R_max − R_min)/(2⟨R⟩) with ⟨R⟩ in ν\*; `"a_over_R"`, ⟨a⟩/⟨R⟩ with ⟨R⟩ in ν\* (the pre-2026-10-09 evaluator, bit for bit). R_min/R_max/⟨R⟩ from `get_fsa` on every OFT build. Recorded in every loop record's `evaluate_jBS_version` and the `_baseline` attr `bootstrap_eps_json`. A stored config without the field replays with the default (warned); toolkit-internal `solve_with_bootstrap` calls do not read it: on `solve_method="swb"` and the frozen legacy route (`jbs_self_consistent=False`), whose bootstrap is the toolkit's, `bootstrap_eps_json` records the toolkit's own definition (`bootstrap: "toolkit solve_with_bootstrap"`; upstream OFT `<a>/<R>`; on the internal-solve toolkit what `bootstrap_kwargs["use_sauter_eps"]` selects, or "the toolkit's own default"), with the configured value as `eps_definition_configured`. See [physics-notes](physics-notes.md) |
+| `bootstrap_convergence_override` | `False` | **EXPERIMENTAL** ([`bootstrap_convergence_override`](#experimental-features-and-their-validation-status)). The explicit opt-in for the `bootstrap_kwargs` keys that change a **convergence criterion** of the toolkit's bootstrap solve (`config.BOOTSTRAP_CONVERGENCE_KWARGS`: `djBS_tol`, the j_BS freeze threshold; `saw_relax`). Without it such a key is refused; with it the key is accepted with a warning, and the archive's `config_json` records the flag and the values. Legacy paths only (the unified engine refuses those keys). A stored config that carries such a key from before the flag existed loads with it on, warned |
+| `draw_solve_maxits` / `draw_solve_retry_urf` / `draw_solve_loose_tol` | `"auto"` / `()` / `None` | The legacy and swb draws' GS iteration cap and its OPT-IN rescue. `"auto"` resolves at `prepare_baseline()` (recorded in `engine_resolved_defaults`): 100 for the legacy draws; with `reconstruction_engine="unified"` all three are refused (the engine draws use `engine_draw_solve_maxits`, see engine.md "The solve cap", and are never rescued). `None` keeps the solver's setup cap (800) for the legacy draws, which is also what a stored config without the field, or with `null`, replays; the swb draws always run with at least `SWB_DRAW_MAXITS` = 100 iterations (`max(100, draw_solve_maxits)`, so `None` gives 100 there). The cap and the rescue act on DRAW solves only: the cold baseline re-solve and the σ=0 reference solve before the draw loop keep the setup cap. Draw solves converge in ≤ ~25 iterations; one that does not sits in a limit cycle just above `nl_tol`. The rescue (off by default) re-solves a capped draw solve from where it stopped at each `draw_solve_retry_urf` (the same criterion), then, if `draw_solve_loose_tol` is set, accepts it at that LOOSER `nl_tol`. With the rescue on every stored draw is stamped `solve_recovered`, and a rescued one `solve_recovered_by`, `solve_nl_tol_accepted`, `solve_residual_upper` / `solve_residual_lower` (bounds: OFT reports no residual value), `solve_strict_nl_tol` and `solve_rescue_its`; `draw_band(rescued="exclude")` and `merge_archives(rescued="exclude")` leave rescued draws out (the default keeps them and warns with their count). Failed solves, and what recovered each, are listed per draw in `diagnostics['solve_failures']`, on `Bouquet.solve_failures`, and in one printed `[draw-solves]` line |
 | `jbs_self_consistent` | `True` | Iterate the bootstrap to self-consistency with the delivered equilibrium (Redl on the caller's own ψ_N grid, re-evaluated after every solve; joint under-relaxation of the bootstrap and the solved current) in the baseline, every closure channel, the MSE stage, every draw and the reconstruction -- see [physics-notes.md](physics-notes.md#self-consistent-bootstrap-jbs_self_consistent). `False` = the **legacy** frozen-SWB bootstrap (legacy engine only; the unified engine refuses it); required with `single_profile_jphi=True` or `recalculate_j_BS=False` (refused otherwise). Not by itself a pre-release reproduction: that needs `reconstruction_engine="legacy"` + `separatrix_pressure="legacy"` too, and the coil-solve mode and the current conversion still differ (CHANGES_SUMMARY, "Reproducing a run made before this release"). A stored config without the field (pre-loop archive) loads as `False` |
 | `jbs_init` | `"anchor"` | The loop's initial guess: Redl on the anchor equilibrium, or `"swb"` (legacy result; A/B only). The fixed point does not depend on it |
 | `jbs_rtol_j` / `jbs_rtol_Ip` | `1e-3` / `1e-4` | Loop convergence: current-weighted L2 residual of the j_BS profile, and its current integral over I_p |
@@ -256,6 +345,27 @@ as an enormous sigma.
 | `capture_npsi` | `257` | FSA grid for that block |
 | `capture_exact_inv_R2` | `True` | Record ⟨1/R²⟩ in the draw's `eq_fsa` block (read from `get_q`, else by flux-surface quadrature). Archived geometry only: since 2026-10-06 the current conversion is the one field-aligned factor `F⟨1/R⟩/⟨B²⟩`, which does not read it |
 | `diagnostic_plots` | `False` | Per-draw diagnostic figures |
+| `write_ifile` / `ifile_npsi` / `ifile_ntheta` | `False` / `129` / `257` | Also archive an OFT i-file (`TokaMaker.save_ifile`: ψ, F, p, q per flux surface and R, Z on the surfaces; GPEC `eq_type="ldp_i"`) per stored draw and for the baseline (`DrawView.ifile_bytes`, `extract(formats=("ifile",))`), traced from the same state and with the same `lcfs_pressure` (the separatrix pressure) and `lcfs_pad` as that state's g-file, so its pressure is the g-file's. Every route writes the baseline i-file (with `coil_drift=None` from the recon-converged state). Each group is stamped `ifile_written` (and `ifile_error` when the save failed), the grid, `ifile_lcfs_pressure` and `ifile_frame`: like every bouquet output it is in the positive-Ip frame (issue #68); the scan's `_baseline` `source_current_sign` / `source_b0_sign` map it back. Refused at `generate()` on a solver without `save_ifile`; a failed state restore after the save rejects the draw (`ifile_restore_failed`). Grid sizes are integers ≥ 2. About 0.5 MB per draw at the defaults |
+
+**Timing the IDA slice (`ImasSource.ida_time`, ida_hybrid only).** By default
+the IDA slice is read at the dd slice `time`; `ida_time` reads it at another
+time while `time` still picks the dd slices (equilibrium, core_profiles,
+core_sources) — for example the IDA slice FUSE paired with a macro step when it
+computed the dd's bootstrap. The IDA slice is the file's own slice nearest the
+requested time, never interpolated, accepted within half the IDA file's local
+time-step (a single-slice IDA file: half the dd step when paired with `time`,
+the 10 µs floor for an explicit `ida_time`); paired with `time` it must also
+sit within half the dd step of the core_profiles slice. Anything else is
+refused. **EXPERIMENTAL** (see [Experimental features](#experimental-features-and-their-validation-status),
+`ida_fuse_timing`): `ImasSource.ida_timing="ida_fuse"` takes the nearest IDA slice at any
+distance instead, without the window acceptance, as IDA_fuse pairs its own dd and IDA slices (this applies to a
+separate `uncertainty.ida_path` too). The match — requested and used IDA time, `dt`, the window and its
+basis, the dd slice times, and the verdict of FUSE's `ida_provenance.json`
+replay pairing when that table names this run's IDA file and holds the dd
+slice — is archived in the baseline's `li_metrics["ida_time_match"]`.
+`ida_time` outside ida_hybrid is refused. `set_slice(time=t)` keeps a
+configured `ida_time` (with a warning), `set_slice(ida_time=x)` applies it
+alone, and a series takes one per slice: `run_slices(times, ida_times=[…])`.
 
 ### `FilterConfig` (`b.filtering`)
 
@@ -280,8 +390,12 @@ as an enormous sigma.
 
 ### `FixedComponentsConfig` (`b.fixed_components`)
 
-`p_fast`, `j_NBI`, `j_RF` on their own `psi_N` grid — additive components that
-are never perturbed. `j_NBI` / `j_RF` are given in bouquet's **positive-Ip
+`p_fast`, `j_NBI`, `j_RF`, `j_other` on their own `psi_N` grid — additive
+components that are never perturbed (an explicit `j_other` replaces every
+fusion / runaways / sawteeth / unknown-index entry the IMAS reader would hold,
+and zeroes `j_sawteeth`). `coord` (default `"run"`) is the coordinate of that grid:
+`"run"` (Φ_N in a `"phi_n"` run) or `"psi_n"`, mapped to the run coordinate
+through the source equilibrium's ψ_N → Φ_N map. `j_NBI` / `j_RF` are given in bouquet's **positive-Ip
 frame** — co-current drive positive — on both source paths and for either
 orientation of the source; unlike the dd's own currents they are *not*
 multiplied by `sign(ip)` on the IMAS path (see
@@ -321,6 +435,115 @@ anisotropic fast-pressure reduction applied before the isotropic GS solve.
 > calibrated to a realistic `<P>` measurement uncertainty) is currently a
 > `generate_bouquet` keyword only — it is not surfaced on `GenerationConfig`,
 > so the class API always uses the default.
+
+## Experimental features and their validation status
+
+A feature listed here is reachable only by an explicit configuration value and
+is not validated on real data, so it is never a default. The list is
+`bouquet.experimental.REGISTRY` (the block below is generated from it by
+`bouquet.experimental.docs_markdown()`, and a test holds the two in step).
+When a run enables one:
+
+- `Bouquet.prepare_baseline()` emits one `bouquet.experimental.ExperimentalFeatureWarning`
+  per feature, naming it and its open validation items;
+- the baseline record carries the list (`Baseline.experimental_features`) and the
+  archive carries it as the `_baseline` attr `experimental_features_json` on every
+  solve method (engine, legacy, swb), next to `engine_resolved_defaults_json`
+  (`[]` when none; absent on an archive that predates the record;
+  `utils.load_experimental_features`);
+- `stats.draw_band` adds it to every record's provenance and limitations, and
+  `BouquetArchive` / `ScanView` print it with their summaries.
+
+`bouquet.experimental.experimental_features_enabled(config)` lists the keys a
+configuration enables. The PR #56 kinetic combination is here because on real
+H-mode slices the combined route moved core n_i and Z_eff far outside the
+measurement uncertainties; it is opt-in pending validation. (The geometric
+Redl ε default of PR #60 is a declared physics change, not an experimental
+feature.)
+
+<!-- experimental-registry:begin (generated by bouquet.experimental.docs_markdown) -->
+
+#### `ida_ion_route` (experimental; introduced PR #56, 1.4.0)
+
+Z_eff and n_i from the PR #56 IDA ladder: the visible-bremsstrahlung Z_eff ('Zeff'), the CER carbon density ('CER'), or the clamped mean of the two ('all'), with the route disagreement folded into sigma_ni / sigma_Zeff, the 'IDA-resolved' Z_eff envelope and the PR #56 auto rule of UncertaintyConfig.ni_from_zeff.  On ida_hybrid it also takes Z_eff and n_i from the IDA file instead of the dd (unless ImasSource.zeff_from_fuse).  Default 'standard': Z_eff is the file's VB value (the dd's on ida_hybrid), n_i follows from it by quasineutrality with the n_e-fraction sigma, and the Z_eff envelope comes from the carbon > VB > scalar ladder.
+
+Enabled by: `ReconstructionSource.ni_source in ('Zeff', 'CER', 'all') with an IDA .cdf profiles_path or uncertainty.ida_path`; `ImasSource.ni_source in ('Zeff', 'CER', 'all') with an ida_path or uncertainty.ida_path`
+
+Validation to do:
+
+- compare the IDA-derived n_i against the dd's total n_i on >= 5 real slices; agree within the combined 1-sigma envelope, or explain each disagreement
+- Z_eff on axis: the VB+CER mean against the CER-only and the VB-only routes on the same slices, with the route tension (zeff_route_chi) reported
+- I_BS, l_i(3), q0 and beta_N sensitivity to the route on >= 5 real H-mode slices, against the standard route and the measurement uncertainties
+- old IDA vintages without Zeff_err ('all' falls to CER alone): show the CER-only Z_eff is no worse than VB on those files
+
+#### `fuse_zeff_fast_ions` (experimental; introduced PR #56, 1.4.0)
+
+On the FUSE (IMAS) path, classify the dd's stored Z_eff against the thermal-only and the thermal+fast numerators (io.imas._dd_zeff) and, where it counts the fast ions (or when no Z_eff is stored and the dd carries a beam), hand the bootstrap Z_eff_th + z2_fast/n_e with Baseline.zeff_includes_fast=True.  Default: the thermal-only Z_eff recomputed from the dd's thermal ion densities.
+
+Enabled by: `ImasSource.zeff_fast_ions=True`
+
+Validation to do:
+
+- on >= 5 real beam-heated dd's: the classification against the dd's own j_bootstrap (which numerator reproduces it)
+- I_BS and l_i sensitivity to the fast-ion term on the same dd's
+
+#### `ida_ni_beam_subtraction` (experimental; introduced PR #56, 1.4.0)
+
+ida_hybrid with an experimental ni_source: subtract the dd's fast-ion density equivalent from the IDA (total) n_i to give a thermal n_i (io.imas._subtract_fast_ni).  The IDA n_i and the dd's total n_i are compared at psi_N 0, 0.2, ..., 0.8 and a disagreement above 1 % warns.  Default: no subtraction.
+
+Enabled by: `ImasSource.ni_subtract_fast=True (with kinetic_source='ida_hybrid' and an experimental ni_source)`
+
+Validation to do:
+
+- the IDA n_i against the dd's total n_i on >= 5 real beam slices (the gate the subtraction prints); the disagreement must be within the measurement uncertainty before the subtracted density can be trusted
+- the thermal n_i floor at 0 must not bind on real slices
+
+#### `kinetic_sampler_clips` (experimental; introduced PR #56, 1.4.0)
+
+The PR #56 clips in the kinetic sampler: a drawn Z_eff floored at 1 even where physics.zeff_bounds allows less (thermal-numerator Z_eff with a beam), a derived n_i held in [0, n_e - z_fast], an independent n_i capped at n_e - z_fast when Z_imp is declared, and a passive Z_eff aux draw clipped to the same window.  Every clip that fires is counted per draw.  Default: only the Z_eff window physics.zeff_bounds gives (the bound in place before PR #56).
+
+Enabled by: `UncertaintyConfig.kinetic_clips=True`; `UncertaintyConfig.kinetic_clips=None (auto) with ida_ion_route, fuse_zeff_fast_ions or ida_ni_beam_subtraction enabled`
+
+Validation to do:
+
+- per-clip counts on a real ensemble (KineticDraw.clips): the fraction of draws and nodes each clip moves
+- the bias each clip introduces in the drawn Z_eff, n_i and I_BS distributions against the unclipped draws, same seed
+
+#### `swb_solve_method` (experimental; introduced PR #64 / #69 / #70, 1.4.0)
+
+solve_with_bootstrap as the baseline and every draw on the IMAS path (bouquet.swb): solve A at the setup coil regularisation, solve B regularised toward A's coils, the draws solve B with resampled kinetics; I_p accepted within swb_ip_tol; the edge taper (swb_edge_taper_psi0) opt-in.
+
+Enabled by: `GenerationConfig.solve_method='swb'`; `GenerationConfig.imas_baseline='swb'`
+
+Validation to do:
+
+- real-data arms on an OpenFUSIONToolkit build whose solve_with_bootstrap takes x / jphi_fixed / p_fixed, on dd's from a current IDA_fuse (so far: 6 of 8 IDA-hybrid reconstructions converged on the PR author's build; dd vintage unrecorded)
+- swb_ip_tol statistics: the distribution of each solve's |I_p/I_p,target - 1| (swb_ip_rel_err) over real draws, against the 5e-3 acceptance
+- taper off (swb_edge_taper_psi0=None) verified on real slices: the Picard 2-cycle the taper was added for does not occur, or is caught
+
+#### `bootstrap_convergence_override` (experimental; introduced PR #60, 1.4.0)
+
+Accept the bootstrap_kwargs keys that change a convergence criterion of the toolkit's internal bootstrap solve (BOOTSTRAP_CONVERGENCE_KWARGS: djBS_tol, saw_relax).  Legacy and swb paths only; the unified engine refuses it.
+
+Enabled by: `GenerationConfig.bootstrap_convergence_override=True`
+
+Validation to do:
+
+- for each key, the converged j_BS, l_i and q0 against the toolkit's default criterion on >= 5 real slices; a value that changes a converged result beyond the default criterion's own residual is a loosened criterion and must be flagged
+- the effective values stamped per run are read back by load_config and shown with the archive summary
+
+#### `ida_fuse_timing` (experimental; introduced #79, 1.4.0)
+
+Read the IDA slice (ida_hybrid's ImasSource.ida_path, or a separate uncertainty.ida_path) at the file's nearest own slice to the requested time AT ANY DISTANCE, as IDA_fuse pairs its own dd and IDA slices (io.imas.IDA_FUSE_TIME_RULE, the #73 timing before review).  It removes the IDA time-window acceptance: an IDA slice far from the dd slice is read without a refusal (the match, dt included, is still archived in li_metrics['ida_time_match']).  Default 'window': the nearest slice within half the IDA file's local time-step, else refused (io.imas.IDA_TIME_RULE).
+
+Enabled by: `ImasSource.ida_timing='ida_fuse' with an ida_path or uncertainty.ida_path`
+
+Validation to do:
+
+- on >= 5 real IDA_fuse runs: the |dt| distribution of the slices it accepts beyond the window rule's half-step, and the kinetic profiles of each against the in-window slice
+- I_BS, l_i(3), q0 and beta_N of a run timed by 'ida_fuse' against the same slice timed by 'window', where both accept it, and wherever 'window' refuses: show the accepted slice is the one FUSE's replay pairing used (ida_provenance.json)
+
+<!-- experimental-registry:end -->
 
 ## until-N in-spec draws
 
@@ -552,22 +775,22 @@ geometry (`eq_fsa`).
 
 ### IDS current-split fidelity
 
-The toroidal current `j_tor` in the IDS is always exact. The *parallel* split
-IMAS stores (`j_total` / `j_ohmic` / `j_bootstrap` = ⟨**j**·**B**⟩/B₀) needs a
-flux-surface geometry factor to convert from bouquet's toroidal components, and
-`fidelity` picks where that factor comes from:
+bouquet's currents are TokaMaker `jphi`; the IDS `j_tor` (IMAS convention) and
+the parallel split (`j_total` / `j_ohmic` / `j_bootstrap` = ⟨**j**·**B**⟩/B₀)
+are converted with flux-surface geometry ([current-conventions.md](current-conventions.md)),
+and `fidelity` picks where that geometry comes from:
 
-| `fidelity` | Parallel split uses | When |
+| `fidelity` | Geometry | When |
 |---|---|---|
-| `"exact"` | an engine draw's stored `<j.B>` parts (`jB_parallel/`, no conversion); otherwise the draw's **own** captured `eq_fsa` geometry (`toroidal_to_parallel`) | draws deviate from the baseline; the split must track each perturbed equilibrium |
-| `"reconstruct"` | the baseline template ratio `c = j_tor/j_total` | exact only when a draw's flux geometry matches the baseline's |
-| `"auto"` *(default)* | stored parts, else exact when the `eq_fsa` block is present, else reconstruct | — |
+| `"exact"` | an engine draw's stored `<j.B>` parts (`jB_parallel/`, no conversion); otherwise the draw's **own** captured `eq_fsa` geometry (needs `avg_R`, `avg_inv_R2`, `pprime`) | draws deviate from the baseline; the split must track each perturbed equilibrium |
+| `"reconstruct"` | the template's baseline equilibrium (`gm1/gm5/gm8/gm9/f/dpressure_dpsi`) | exact only when a draw's flux geometry matches the baseline's |
+| `"auto"` *(default)* | stored parts, else exact when a complete `eq_fsa` block is present, else reconstruct | — |
 
 No exported parallel current carries the pressure-driven term
 `P = p'(<R> - F^2<1/R>/<B^2>)` (its `<j.B>` is zero; a reader recovers it from
 the pressure): `j_ohmic` is the field-aligned inductive only and `j_total =
-j_ohmic + j_bootstrap + driven`. The archived toroidal `j_inductive` is the
-residual `j_phi - j_BS - fixed` and carries `P`; when the draw has no stored
+j_ohmic + j_bootstrap + driven`. The archived toroidal `j_BS` carries `P`
+(FUSE's convention); when the draw has no stored
 `<j.B>` parts the exporter subtracts `P` (from the archived eqdsk's own flux
 surfaces) before converting. Export -> `IdsAdapter.read` returns the archived
 `<j.B>` parts and `<j_phi>` (2026-10-06; before, `P/kappa` sat inside the
@@ -609,12 +832,35 @@ refusal the same way before re-raising. A later baseline or draw written into
 the same scan supersedes the refusal (kept as `refused_reason_superseded`).
 Parallel shards do not write refused records (a refused worker raises).
 
+The parsed dd is **cached per file** (`bouquet.io.imas._load_dd`, keyed on the
+real path, mtime, size and inode) and shared by the legacy reader, the unified
+engine's IDS adapter, the geometry reader and the plotting readers, so a sweep
+(or a `plot_jphi` loop over its scan keys) parses the file once. The cost is
+memory: up to two parsed files, about twice the file size each, stay resident
+for the life of the process — in a `parallel_generate` pool, in every worker
+for its whole `generate()`. `bouquet.io.imas.clear_dd_cache()` releases them;
+call it too after rewriting a dd in place with the same size within the
+filesystem's mtime granule, or across hosts on NFS within its attribute-cache
+window, where the stat key cannot see the change.
+
 ## Process-parallel generation
 
-Draws are embarrassingly parallel, and `OFT_env` is a per-process singleton —
-so parallelism is across **processes**, one single-threaded TokaMaker per
-physical core (`nthreads=1` is the validated regime: bit-reproducible
-baselines, no OpenMP l_i jitter, no DLSODE hangs).
+`OFT_env` is a per-process singleton, so parallelism is across **processes**, and every parallel path
+runs one thread per process: TokaMaker at `nthreads=1` (bit-reproducible baselines, no OpenMP l_i
+jitter, no DLSODE hangs) and every BLAS/OpenMP pool at 1 (`bouquet.threads`: the environment plus
+`threadpoolctl`; `HDF5_USE_FILE_LOCKING=FALSE` too, since shared inputs are only read).  A config or
+`threads_per_worker` asking for more is refused.
+
+| | splits | use when | entry point |
+|---|---|---|---|
+| **draws** | one bouquet's draws across workers | one case, finished sooner | `bq.parallel_generate` |
+| **cases, one node** | whole bouquets, one standing solver per worker | many cases | `bq.parallel_cases` |
+| **cases, many jobs** | whole bouquets on a shared-filesystem queue, a fresh process each | many cases, many nodes or jobs | `bouquet.units` |
+
+Never nest them.  One solver serves many baselines: `prepare_baseline` points it at each baseline's
+own F0, boundary and isoflux (`Bouquet.point_solver`), and every reset returns to that baseline's
+geometry; the mesh, solve method and thread count are fixed per solver (`Bouquet.set_case` refuses a
+change).
 
 ```python
 cfg = b.config                       # any BouquetConfig
@@ -641,3 +887,100 @@ stamps the run-level config provenance. Worker seeds derive from
 `SeedSequence(seed, worker_id, scan_key)`, so timeseries slices swept with one
 seed are decorrelated. Parallel draws are statistically equivalent to — but not
 bit-identical with — a serial run of the same seed.
+
+## Many bouquets on one node
+
+One complete bouquet per case (g-file/p-file pair, IDA time slice, IMAS time).  Each worker stands up its
+solver once, in its own directory (TokaMaker's scratch files) with its own copy of the mesh, and swaps
+case after case onto it (`Bouquet.set_case`).  A failed case returns its traceback (`errors`,
+`errors.pkl`) and the sweep goes on; the merge records it in its group's archive as a refused scan
+(`refused_reason` names the case and its exception, so `draw_bands` reports `status="refused"`) and marks
+the archive as a PARTIAL merge (root attrs `merge_partial`, `merge_expected_cases`,
+`merge_failed_cases_json`, `merge_partial_json`).  An existing merged archive is not replaced unless
+`overwrite=True`.  Each case runs at its own seed (`bouquet.parallel.case_seed`, from
+the sweep's base seed and the case's group and scan_key), the one `units.units_from_cases` gives it too.
+The base is the run seed; with the default `seed=None` one base is drawn from OS entropy when the sweep
+starts (`units.sweep_seed_base`), so two default-seed sweeps differ.  Each case record, unit record and
+merged archive carries `seed_base` and `seed_rule` (`"config"` or `"entropy"`; root attrs of the
+archive, plus `merge_case_seeds_json` per case).  Input
+paths may be relative to the launch directory.  A sweep is one run-level config plus the cases:
+
+```python
+src = bq.ImasTimeslices(header="sweep", ids_path="dd_sim.json", times=[3.163, 3.263, 3.363],
+                        ida_path="IDA_synthetic.cdf", LCFS_geqdsk="g_synthetic.geqdsk")  # or one g-file per time
+src = bq.IdaTimeslices(header="sweep", inputs=[("IDA_synthetic.cdf", ["g_synthetic.geqdsk", ...])])
+src = bq.GeqdskProfilePairs(header="sweep", pairs=[(geqdsk, pfile), ...])
+
+if __name__ == "__main__":           # required: workers are spawned
+    summary = bq.parallel_cases(src, cfg, "work_dir")
+```
+
+A hand-built `list[CaseSpec]` works as well.  swb takes IDS sources only (`ImasTimeslices`); the engine
+and legacy take all three.  Cases are keyed `scan_key` = time in ms (or the g-file stem) and grouped by
+input (one `.cdf`, one IDS): the merge writes one archive per group, its cases under `scan/<key>/`, the
+layout `bq.plot_bouquet_timeseries` reads.
+
+```
+work_dir/
+  worker_0/ ...            per-worker cwd and mesh copy
+  worker_0.log ...         per-worker output (fd level, so OFT's too)
+  cases/sweep_<stem>_idx0.h5 ...   one archive per case
+  sweep_<group>.h5         merged
+  map_object.pkl           idx -> CaseSpec
+  errors.pkl               {idx: traceback} (also recorded in the merged archives)
+```
+
+`group_by=None` merges into one archive, `merge=False` keeps only the per-case files, `cleanup=True`
+deletes them once merged.  The worker count follows the affinity mask and the scheduler's CPU count
+(`SLURM_CPUS_PER_TASK`, `PBS_NUM_PPN`, `LSB_DJOB_NUMPROC`, `NSLOTS`); `use_logical_cpus=False` puts one
+worker per physical core.  A worker that fails to start (a bad mesh, a missing OFT) fails the run with
+its traceback.  A worker that dies mid-sweep (a crash, an out-of-memory kill) ends the sweep: the finished
+cases are kept and merged, the unfinished ones listed in `errors`.  Each case record carries its F0 and
+the thread count of every loaded pool.
+
+Per-case setup a `CaseSpec` cannot express goes in two hooks, `f(bouquet, case)`, run on the worker:
+`before_baseline` (after `set_case`; e.g. solver targets from this slice's g-file) and `after_baseline`
+(after `prepare_baseline`; anything on this baseline's grid, e.g. `uncertainty.aux_baselines`).  Workers
+are spawned, so a hook must be a module-level function; a lambda or closure is refused before the pool
+starts.  Each worker keeps up to two parsed dd files cached (#72); for a sweep over many dd files,
+`after_baseline=bouquet.parallel.release_dd_cache` releases them after each baseline (a slice sweep over
+one dd would then re-parse it per case).  `bouquet.units` releases them in every unit.
+
+## Many bouquets on a cluster
+
+`parallel_generate` splits the draws of one bouquet. To run many bouquets (one per baseline: time
+slices, shots, variants) across processes, nodes and jobs, `bouquet.units` puts them on a
+shared-filesystem queue (`bouquet.workqueue`; `mkdir` claims, heartbeat leases, correct on NFSv4 and
+Lustre). Each unit runs in a fresh single-threaded process, in its worker's directory, on its worker's
+copy of the mesh.  `units.units_from_cases(cfg, src)` queues the same cases `parallel_cases` takes.
+
+```python
+from bouquet import units
+us = units.make_units(cfg, [{"source.time": t, "source.ida_time": None, "generation.scan_key": round(1e3 * t)}
+                            for t in times], ids=[f"{shot}_{round(1e3 * t)}" for t in times])
+units.add_units("queue", us)            # idempotent: ids already queued are skipped; add more any time
+```
+
+```bash
+python -m bouquet.units work --queue queue --out-dir out --workers 64   # one per node: srun --ntasks-per-node=1
+python -m bouquet.units status --queue queue                            # counts, failures grouped by signature
+python -m bouquet.units stop|drain|undrain --queue queue
+python -m bouquet.units retry-failed --queue queue --out-dir out       # reopens failed units, removes their records
+```
+
+- **Outputs.** `out/<id>.h5` (moved into place when complete), then `out/<id>.json`, the unit record
+  (`status` `done`/`failed`, `selected_counts`, `profile_coord`, `seed`, ...). Readers wait for the record:
+  a unit that raised gets it at once, a unit the queue failed (a crash or preemption on every attempt)
+  when `work` ends. Relative paths are fine: inputs are stored absolute, queue and output resolve from
+  where `work` starts.
+- **Seeds.** Each unit's `generation.seed` is derived from the config seed and the unit id (from the case,
+  for `units_from_cases`): reproducible, independent of which worker runs it, and different across units.
+- **Failures.** A unit that raises is retried once more (`MAX_FAILURES=2`), then gets a `failed` record;
+  `MAX_ATTEMPTS=4` bounds crashes and preemptions. A worker stops after 3 failures in a row; when workers
+  of 2 jobs break within an hour the queue writes `STOP`. Leases of dead workers (OOM, node loss,
+  preemption) expire after 300 s and are taken over. Policy overrides: `queue/config.json`.
+- **Jobs.** Single-node or multi-node, or both at once: every launcher claims from the same queue, and
+  units added mid-run are picked up. On Perlmutter prefer multi-node `regular` (or `preempt`) jobs sized
+  to the backlog; set `--workers` to min(cores, memory / peak RSS per unit) and `--margin`/`--min-left`
+  so no unit starts that cannot finish before the walltime.
+
