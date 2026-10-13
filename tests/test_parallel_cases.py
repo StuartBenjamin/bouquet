@@ -206,7 +206,7 @@ class TestImasTimeslices:
     def _source(self, **kw):
         kw.setdefault("times", [3.163, 3.263, 3.363])
         return ImasTimeslices(header="sweep", ids_path="/data/dd_sim.json",
-                              ida_path="/data/IDA_154080_.cdf", **kw)
+                              ida_path="/data/IDA_synthetic.cdf", **kw)
 
     def test_one_case_per_time_labelled_in_ms(self):
         cases = self._source().expand()
@@ -215,7 +215,7 @@ class TestImasTimeslices:
         assert [c.source.time for c in cases] == [3.163, 3.263, 3.363]
         assert all(isinstance(c.source, ImasSource) for c in cases)
         assert all(c.source.ids_path == "/data/dd_sim.json" for c in cases)
-        assert all(c.source.ida_path == "/data/IDA_154080_.cdf" for c in cases)
+        assert all(c.source.ida_path == "/data/IDA_synthetic.cdf" for c in cases)
 
     def test_whole_sweep_is_one_group_so_the_merge_writes_one_archive(self):
         cases = self._source().expand()
@@ -223,11 +223,11 @@ class TestImasTimeslices:
         assert {c.header for c in cases} == {"sweep_dd_sim"}
 
     def test_group_override(self):
-        assert {c.group for c in self._source(group="154080").expand()} == {"154080"}
+        assert {c.group for c in self._source(group="run1").expand()} == {"run1"}
 
     def test_one_shared_gfile_is_broadcast(self):
-        cases = self._source(LCFS_geqdsk="/data/g154080.03260").expand()
-        assert [c.source.LCFS_geqdsk for c in cases] == ["/data/g154080.03260"] * 3
+        cases = self._source(LCFS_geqdsk="/data/g000001.00000").expand()
+        assert [c.source.LCFS_geqdsk for c in cases] == ["/data/g000001.00000"] * 3
 
     def test_one_gfile_per_slice_is_paired_in_order(self):
         gs = ["/g.03160", "/g.03260", "/g.03360"]

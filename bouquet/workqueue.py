@@ -1,9 +1,7 @@
 """Shared-filesystem work queue: many workers on many nodes claim units by ``mkdir``.
 
 Stdlib only. Correct on NFSv4 and Lustre: ``mkdir``'s EEXIST is the claim, ``rename`` is the
-single point that serialises stealing an expired lease. Vendored byte-identically as
-``bouquet/workqueue.py`` and ``tearing_physics_suite/drivers/fsqueue.py``; edit the eq_stab copy
-(``D3D_V1/FUSE_IDAlite_BOUQUET/common/fsqueue.py``) and copy it over.
+single point that serialises stealing an expired lease.
 
 Layout under ``root`` (one queue per tool)::
 
