@@ -205,8 +205,9 @@ class ReconstructionSource:
     cocos: int = 1
     time: Optional[float] = None       # IDA time slice [s] (multi-time .cdf files)
     impurity_Z: float = 6.0            # effective impurity charge (carbon); set per machine
-    # IDA path: "standard" | EXPERIMENTAL "Zeff" | "CER" | "all" (see above)
-    ni_source: str = "standard"
+    # IDA path: "standard" | EXPERIMENTAL "Zeff" | "CER" | "all" (see above).  PSFC_dev:
+    # "all", the swb runs' route before owner decision #56.
+    ni_source: str = "all"
     profile_overrides: dict = field(default_factory=dict)  # name -> array, manual override
     # reconstruction knobs
     psi_pad: float = 1e-3
@@ -259,8 +260,9 @@ class ImasSource:
     ida_time: Optional[float] = None
     # "window" (default): the rule above.  "ida_fuse": the IDA file's nearest slice to
     # ida_time (else `time`) at any distance, as IDA_fuse pairs its own dd slices with IDA
-    # slices (the #73 timing before review); the match is still recorded.
-    ida_timing: str = "window"
+    # slices (the #73 timing before review); the match is still recorded.  PSFC_dev:
+    # "ida_fuse" by default.
+    ida_timing: str = "ida_fuse"
     # --- IDA-hybrid kinetics (GenerationConfig.kinetic_source = "ida_hybrid") ---
     # When set, the baseline ne/Te/Ti/ni/Z_eff/omega_tor come from this IDA
     # .cdf (externally fit, smoother across time than FUSE's per-slice fits),
@@ -275,8 +277,8 @@ class ImasSource:
     # Z_eff / ni route for ida_hybrid (and for an IDA sigma file):
     # "standard" (default) | EXPERIMENTAL "Zeff" | "CER" | "all" -- see
     # ReconstructionSource.ni_source and
-    # bouquet.experimental.REGISTRY["ida_ion_route"].
-    ni_source: str = "standard"
+    # bouquet.experimental.REGISTRY["ida_ion_route"].  PSFC_dev: "all" by default.
+    ni_source: str = "all"
     # ida_hybrid with an EXPERIMENTAL ni_source only: True keeps the dd's
     # Z_eff while ne/Te/Ti/ni come from IDA; False takes IDA's resolved Z_eff,
     # which counts the fast ions in its numerator (a measured Z_eff), so
@@ -329,14 +331,15 @@ class ImasSource:
     # True classifies the dd's stored Z_eff against the thermal-only and the
     # thermal+fast numerators (io.imas._dd_zeff) and hands the bootstrap the
     # thermal+fast Z_eff where the dd's convention counts the fast ions.
-    # False (default, as before PR #56): the thermal-only Z_eff recomputed
-    # from the dd's thermal ion densities.
-    zeff_fast_ions: bool = False
+    # False: the thermal-only Z_eff recomputed from the dd's thermal ion
+    # densities.  PSFC_dev: True by default.
+    zeff_fast_ions: bool = True
     # EXPERIMENTAL -- see
     # bouquet.experimental.REGISTRY["ida_ni_beam_subtraction"].  ida_hybrid
     # with an experimental ni_source: subtract the dd's fast-ion density
-    # equivalent from the IDA (total) n_i.  False (default): no subtraction.
-    ni_subtract_fast: bool = False
+    # equivalent from the IDA (total) n_i.  False: no subtraction.  PSFC_dev: True by
+    # default.
+    ni_subtract_fast: bool = True
     # Add the dd's fast-ion pressure p_fast to the equilibrium pressure (default).  With
     # an experimental ni_source on ida_hybrid, match it to ni_subtract_fast: the fast ions
     # in p_fast (both True) or inside the IDA n_i (both False); the reader warns otherwise.
@@ -1479,8 +1482,8 @@ class GenerationConfig:
     # (owner decision D4, 2026-10-09; was 0.999): None is off, and is sent to
     # the toolkit as taper_edge_jphi=False where it has the option, because a
     # toolkit whose own default is taper-on keeps it on otherwise
-    # (swb_bootstrap_kwargs).
-    swb_edge_taper_psi0: Optional[float] = None
+    # (swb_bootstrap_kwargs).  PSFC_dev: 0.999 by default.
+    swb_edge_taper_psi0: Optional[float] = 0.999
     # swb only.  Largest |Ip/Ip_target - 1| an swb solve (solve A, solve B,
     # every draw) is accepted at; beyond it the solve raises.  Stamped on
     # _baseline (swb_ip_tol) with each solve's own error (swb_ip_rel_err);
