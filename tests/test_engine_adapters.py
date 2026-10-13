@@ -451,6 +451,74 @@ def test_user_driven_currents_are_positive_frame_for_any_orientation(
 # ---------------------------------------------------------------------------
 #  identity (I2) on the golden fixture's stored geometry (read-only)
 # ---------------------------------------------------------------------------
+def test_fixed_j_other_reaches_the_engine_on_both_adapters(tmp_path, ids):
+    """Review of #78 (A4): FixedComponentsConfig.j_other is held fixed by
+    the unified engine exactly as j_NBI / j_RF are, and as the legacy paths
+    take it -- the g-file reconstruction (baseline._resolve_fixed) and the
+    IMAS reader (an explicit j_other replaces the dd's "other" channel)."""
+    from bouquet.baseline import _resolve_fixed
+    from bouquet.config import (BouquetConfig, FixedComponentsConfig,
+                                GenerationConfig, ReconstructionSource,
+                                SolverConfig)
+    x = np.linspace(0.0, 1.0, 33)
+    j_other = 2.0e4 * np.exp(-0.5 * ((x - 0.2) / 0.1) ** 2)
+    j_nbi = 4.0e4 * (1.0 - x ** 2)
+    fixed = FixedComponentsConfig(psi_N=x, j_NBI=j_nbi, j_other=j_other)
+    # ---- g-file: in the fixed <j.B> and its "other" part
+    cfg = BouquetConfig(
+        source=ReconstructionSource(geqdsk_path=_GEQ, profiles_path=_PF),
+        solver=SolverConfig(mesh_path=_MESH), output_header="t",
+        generation=GenerationConfig(reconstruction_engine="unified"),
+        fixed_components=fixed)
+    ad = GFileAdapter(cfg.source, cfg)
+    c0 = ad.read()
+    jB, parts = gfile_parallel_current(ad.eqdsk)
+    geom = _geom(parts)
+    kap = conversion_factor(geom)
+    expect_other = _resolve_fixed(j_other, x, c0.psi_N)
+    np.testing.assert_array_equal(ad._fix_tor["other"], expect_other)
+    c = ad.finalize(np.zeros_like(c0.psi_N), geom)
+    np.testing.assert_array_equal(c.jB_fix_parts["other"],
+                                  expect_other / kap)
+    np.testing.assert_array_equal(
+        c.jB_fix, (_resolve_fixed(j_nbi, x, c0.psi_N) / kap
+                   + np.zeros_like(c0.psi_N) / kap) + expect_other / kap)
+    assert np.max(np.abs(c.jB_fix_parts["other"])) > 0.0
+    # without j_other the "other" part is zero and adds nothing
+    cfg_no = BouquetConfig(
+        source=cfg.source, solver=cfg.solver, output_header="t",
+        generation=GenerationConfig(reconstruction_engine="unified"),
+        fixed_components=FixedComponentsConfig(psi_N=x, j_NBI=j_nbi))
+    ad_no = GFileAdapter(cfg_no.source, cfg_no)
+    ad_no.read()
+    c_no = ad_no.finalize(np.zeros_like(c0.psi_N), geom)
+    assert not np.any(c_no.jB_fix_parts["other"])
+    np.testing.assert_array_equal(
+        c_no.jB_fix, c_no.jB_fix_parts["nbi"] + c_no.jB_fix_parts["rf"])
+    # ---- IDS: replaces the dd's "other" channel, as the legacy reader
+    _a, ref, _bl = ids
+    ad_i, ci, bl_i = _ids_contract(_OMAS, fixed=FixedComponentsConfig(
+        psi_N=x, j_other=j_other))
+    np.testing.assert_array_equal(ad_i._user_fix_tor["other"],
+                                  np.interp(ci.psi_N, x, j_other))
+    # the legacy reader took the same array as Baseline.j_other
+    np.testing.assert_allclose(bl_i.j_other,
+                               np.interp(bl_i.psi_N, x, j_other),
+                               rtol=0, atol=0)
+    psi_i = ci.psi_N
+    g_i = dict(F=np.full(psi_i.size, 3.4), R_avg=np.full(psi_i.size, 1.7),
+               inv_R=np.full(psi_i.size, 1.0 / 1.7),
+               B2=np.full(psi_i.size, 4.2), pprime=np.zeros(psi_i.size))
+    k_i = conversion_factor(g_i)
+    cf = ad_i.finalize(np.zeros(psi_i.size), g_i)
+    np.testing.assert_array_equal(cf.jB_fix_parts["other"],
+                                  np.interp(psi_i, x, j_other) / k_i)
+    # the dd's own nbi / rf channels are kept (only "other" is replaced)
+    for k in ("nbi", "rf"):
+        np.testing.assert_array_equal(cf.jB_fix_parts[k],
+                                      ref.jB_fix_parts[k])
+
+
 def test_identity_I2_on_the_golden_fixtures_stored_geometry():
     import h5py
     from bouquet.io.geqdsk import GEQDSKEquilibrium

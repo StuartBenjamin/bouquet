@@ -87,7 +87,7 @@ class EngineContract:
     pressure_parts: dict                   # thermal / impurity / fast
     jB_ind: Optional[np.ndarray]           # parallel inductive (after finalize)
     jB_fix: np.ndarray                     # parallel fixed driven (sum)
-    jB_fix_parts: dict                     # nbi / rf
+    jB_fix_parts: dict                     # nbi / rf / other
     boundary: np.ndarray                   # (N, 2) LCFS points [m]
     Ip: float                              # |Ip| [A] (positive frame)
     rows: dict                             # Ip / l_i / q0 / mse
@@ -427,8 +427,12 @@ class GFileAdapter:
                    f"{int(eqdsk.cocos)} (sigma_RpZ {_srpz:+.0f})"))
         # user fixed parts are TOROIDAL (FixedComponentsConfig); converted to
         # parallel in finalize() with the anchor geometry
+        # (j_other as the legacy reconstruction takes it, review of #78 A4;
+        # the engine archives it inside j_RF = rf + other)
         self._fix_tor = dict(nbi=_resolve_fixed(fc.j_NBI, fc_x, x_run),
-                             rf=_resolve_fixed(fc.j_RF, fc_x, x_run))
+                             rf=_resolve_fixed(fc.j_RF, fc_x, x_run),
+                             other=_resolve_fixed(
+                                 getattr(fc, "j_other", None), fc_x, x_run))
         psi_pad = float(src.psi_pad)
         from .engine import gfile_li_row_tol
         tol = (gfile_li_row_tol() if self.li_row_tol is None
@@ -469,7 +473,8 @@ class GFileAdapter:
                                 Z_imp=Z_imp),
             jB_ind=None, jB_fix=np.zeros_like(psi_N),
             jB_fix_parts=dict(nbi=np.zeros_like(psi_N),
-                              rf=np.zeros_like(psi_N)),
+                              rf=np.zeros_like(psi_N),
+                              other=np.zeros_like(psi_N)),
             boundary=np.column_stack([eqdsk.boundary_R, eqdsk.boundary_Z]),
             Ip=abs(float(eqdsk.Ip)), rows=rows,
             signs=dict(current_sign=float(parts["sign"]),
@@ -509,7 +514,8 @@ class GFileAdapter:
         kap = conversion_factor(anchor_geom)
         jB_nbi = np.asarray(self._fix_tor["nbi"], float) / kap
         jB_rf = np.asarray(self._fix_tor["rf"], float) / kap
-        jB_fix = jB_nbi + jB_rf
+        jB_other = np.asarray(self._fix_tor["other"], float) / kap
+        jB_fix = jB_nbi + jB_rf + jB_other
         resid = self._jB_in - np.asarray(jB_bs_anchor, float) - jB_fix
         src = self.source
         # on the g-file's psi_N (its bridge and core thresholds are psi_N)
@@ -517,7 +523,7 @@ class GFileAdapter:
                                  psi_bridge=float(src.psi_bridge))
         c.jB_ind = jB_ind
         c.jB_fix = jB_fix
-        c.jB_fix_parts = dict(nbi=jB_nbi, rf=jB_rf)
+        c.jB_fix_parts = dict(nbi=jB_nbi, rf=jB_rf, other=jB_other)
         c.jB_bs_anchor = np.asarray(jB_bs_anchor, float).copy()
         c.provenance.update(
             residual_negative_nodes=int(np.sum(resid < 0.0)),
@@ -1236,6 +1242,12 @@ class IdsAdapter:
         if fc.j_RF is not None:
             user_fix["rf"] = np.interp(psi_N, fc_x, fc.j_RF) \
                 if fc.psi_N is not None else np.asarray(fc.j_RF, float)
+        # an explicit j_other replaces the dd's "other" channel (fusion,
+        # runaways, sawteeth, unknown indices), as the legacy reader does
+        # (review of #78, A4)
+        if getattr(fc, "j_other", None) is not None:
+            user_fix["other"] = np.interp(psi_N, fc_x, fc.j_other) \
+                if fc.psi_N is not None else np.asarray(fc.j_other, float)
         self._user_fix_tor = user_fix
         # kinetics + pressure exactly as the reader resolved them (thermal +
         # impurity + fast; NO p_diff -- the engine does not anchor pressure)
