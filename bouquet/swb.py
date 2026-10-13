@@ -208,7 +208,7 @@ class SwbBaseline:
         the equilibrium the SWB call left in ``mygs``, before anything else
         touches it."""
         from .physics import (SWB_JBS_TOROIDAL, _swb_jbs_to_toroidal,
-                              edge_taper_weight, swb_jbs_convention,
+                              swb_edge_taper, swb_jbs_convention,
                               swb_pressure_term)
         gc = self.config.generation
         conv = swb_jbs_convention()
@@ -223,17 +223,28 @@ class SwbBaseline:
         grid = (np.asarray(coords.psi_at(mygs, x, coord), dtype=float)
                 if coords._swb_grid_arg() else None)
         P = swb_pressure_term(mygs, x.size, 1e-3, grid)
+        # the edge taper multiplies every toroidal component SWB returns,
+        # p'G included: the SAME weight tapers j_pressure and is taken off
+        # the bootstrap (review of #78, B3: an untapered p'G subtracted from
+        # the tapered output left j_BS short by (1-w)P, moved into
+        # j_inductive)
+        # (the call's own kwargs, swb_bootstrap_kwargs: psi0 from
+        # swb_edge_taper_psi0, a taper_edge_shape from bootstrap_kwargs)
+        w = None
         if gc.swb_edge_taper_psi0 is not None:
-            P = P * edge_taper_weight(coords.swb_grid(x) if grid is None
-                                      else grid, gc.swb_edge_taper_psi0)
+            w = swb_edge_taper(
+                dict(gc.bootstrap_kwargs, taper_edge_jBS=True,
+                     taper_edge_psi0=float(gc.swb_edge_taper_psi0)),
+                coords.swb_grid(x) if grid is None else grid)
+            P = P * w
         raw_iso = np.asarray(res["isolated_j_BS"], dtype=float)
         raw_bs = np.asarray(res.get("j_BS", raw_iso), dtype=float)
         raw_ind = np.asarray(res["j_inductive"], dtype=float)
         fa_bs = _swb_jbs_to_toroidal(mygs, raw_bs, 1e-3, psi=grid,
-                                     convention=conv)
+                                     convention=conv, taper=w)
         fa_iso = (fa_bs if np.array_equal(raw_iso, raw_bs) else
                   _swb_jbs_to_toroidal(mygs, raw_iso, 1e-3, psi=grid,
-                                       convention=conv))
+                                       convention=conv, taper=w))
         res = dict(res)
         res.update(swb_raw_j_BS=raw_bs, swb_raw_isolated_j_BS=raw_iso,
                    swb_raw_j_inductive=raw_ind, j_BS=fa_bs,

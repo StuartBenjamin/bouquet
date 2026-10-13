@@ -149,6 +149,14 @@ restores the index pairing.
 - **Stamped:** per draw `swb_jbs_convention` / `swb_jbs_conversion` group
   attrs; on the baseline `li_metrics["swb_conversion"]`; on the σ=0 SWB
   check's record.
+- **Edge taper on the TokaMaker-jphi toolkit (review of #78, B3).** With
+  the toolkit's edge taper on (`swb_edge_taper_psi0` on the swb method,
+  `bootstrap_kwargs["taper_edge_jBS"]` on the legacy call sites), SWB returns
+  `w (κ⟨j·B⟩ + p′G)`; the untapered `p′G` was subtracted, leaving `j_BS`
+  short by `(1 − w) p′G` in the taper zone and moving that into
+  `j_inductive`. The `p′G` taken off now carries the same weight
+  (`physics.swb_edge_taper`), so `j_BS = w κ⟨j·B⟩` and `j_pressure = w p′G`.
+  Nothing changes with the taper off or on upstream OFT (no taper there).
 
 ### Archived split: `p′G` is its own `j_pressure` on every path (owner decision D2; archive convention)
 

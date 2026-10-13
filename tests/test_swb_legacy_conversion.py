@@ -128,3 +128,77 @@ def test_an_unevaluable_state_keeps_the_old_convention_loudly():
         pass
     with pytest.warns(RuntimeWarning, match="pre-#64 convention"):
         assert TI.archived_pressure_term(_NoGeo(), X, what="draw 3") is None
+
+
+# ---------------------------------------------------------------------------
+#  review of #78 (B3): the edge taper multiplies every toroidal component the
+#  TokaMaker-jphi toolkit returns, p'G included; the p'G taken off must carry
+#  the same weight, or j_BS is short by (1-w)P in the taper zone
+# ---------------------------------------------------------------------------
+_TAPER = {"taper_edge_jBS": True, "taper_edge_psi0": 0.8}
+
+
+@pytest.mark.parametrize("scale", [1.0, 0.7])
+def test_a_tapered_tokamaker_jphi_output_loses_the_tapered_p_g(
+        uniform, monkeypatch, scale):
+    monkeypatch.setattr(P, "swb_jbs_convention",
+                        lambda *a, **k: P.SWB_JBS_TOROIDAL)
+    g = _Geo()
+    PG = P.swb_pressure_term(g, N, 1e-3, None)
+    w = P.edge_taper_weight(X, 0.8)
+    zone = (w > 0.0) & (w < 1.0)
+    assert zone.sum() >= 2 and np.max(np.abs(PG[zone])) > 0.0
+    kjb = _raw()["j_BS"]
+    tapered = scale * w * (kjb + PG)          # what the toolkit returns
+    raw = dict(_raw(), j_BS=tapered, isolated_j_BS=tapered.copy())
+    out = TI.swb_result_toroidal(g, raw, X, scale_jBS=scale,
+                                 bootstrap_kwargs=dict(_TAPER, iterations=2))
+    tol = 1e-12 * np.max(np.abs(kjb))
+    # the identity in the taper zone (and everywhere): j_BS = w kappa<j.B>,
+    # and j_BS + w p'G is the toolkit's output
+    np.testing.assert_allclose(out["j_BS"], scale * w * kjb, rtol=0,
+                               atol=tol)
+    np.testing.assert_allclose(out["j_BS"] + scale * w * PG, tapered,
+                               rtol=0, atol=tol)
+    # the untapered subtraction this replaces was short by (1-w)P there
+    wrong = TI.swb_result_toroidal(g, raw, X, scale_jBS=scale)["j_BS"]
+    np.testing.assert_allclose(scale * w * kjb - wrong,
+                               scale * (1.0 - w) * PG, rtol=0, atol=tol)
+    # taper off (absent or False): unchanged
+    for kw in (None, {}, {"taper_edge_jBS": False}):
+        np.testing.assert_array_equal(
+            TI.swb_result_toroidal(g, raw, X, scale_jBS=scale,
+                                   bootstrap_kwargs=kw)["j_BS"], wrong)
+
+
+def test_the_swb_split_tapers_p_g_with_the_bootstrap(uniform, monkeypatch):
+    """The swb method's split (SwbBaseline._swb_split) with
+    swb_edge_taper_psi0: j_pressure = w p'G, j_BS = w kappa<j.B>, and the
+    inductive is SWB's own -- nothing of p'G moves into it."""
+    from types import SimpleNamespace
+
+    from bouquet.swb import SwbBaseline
+    monkeypatch.setattr(P, "swb_jbs_convention",
+                        lambda *a, **k: P.SWB_JBS_TOROIDAL)
+    g = _Geo()
+    PG = P.swb_pressure_term(g, N, 1e-3, None)
+    w = P.edge_taper_weight(X, 0.8)
+    kjb = _raw()["j_BS"]
+    raw_ind = 1e6 * (1 - X) * w
+    tapered = w * (kjb + PG)
+    res = {"j_BS": tapered, "isolated_j_BS": tapered.copy(),
+           "j_inductive": raw_ind}
+    me = SimpleNamespace(mygs=g, config=SimpleNamespace(
+        generation=SimpleNamespace(isolate_edge_jBS=False,
+                                   swb_edge_taper_psi0=0.8,
+                                   bootstrap_kwargs={})))
+    out = SwbBaseline._swb_split(me, res, None, X, "psi_n")
+    tol = 1e-12 * np.max(np.abs(kjb))
+    np.testing.assert_allclose(out["j_pressure"], w * PG, rtol=0, atol=tol)
+    np.testing.assert_allclose(out["isolated_j_BS"], w * kjb, rtol=0,
+                               atol=tol)
+    np.testing.assert_allclose(out["j_inductive"], raw_ind, rtol=0,
+                               atol=tol)
+    np.testing.assert_allclose(
+        out["j_inductive"] + out["isolated_j_BS"] + out["j_pressure"],
+        raw_ind + tapered, rtol=0, atol=tol)

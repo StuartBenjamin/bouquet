@@ -534,7 +534,8 @@ def swb_pressure_term(mygs, n, psi_pad=1e-3, psi=None):
     return sign * g["pp"] * (g["R"] - g["F"] ** 2 * g["inv_R"] / g["B2"])
 
 
-def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad, psi=None, convention=None):
+def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad, psi=None, convention=None,
+                         taper=None):
     """``solve_with_bootstrap``'s ``j_BS`` (or ``isolated_j_BS``) as the
     field-aligned toroidal bootstrap ``kappa <j.B>`` bouquet stores
     (:func:`field_aligned_conversion`), whatever the installed toolkit
@@ -550,6 +551,11 @@ def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad, psi=None, convention=None):
     * :data:`SWB_JBS_TOROIDAL` -- SWB returned ``kappa <j.B> + p'G`` (A7);
       ``p'G`` (:func:`swb_pressure_term`) comes off: the pressure-driven
       current is the third bucket ``j_pressure``, never part of ``j_BS``.
+      With the toolkit's edge taper on, SWB returned ``w (kappa <j.B> +
+      p'G)`` (the taper multiplies every toroidal component): *taper* is that
+      weight ``w`` on the same nodes (:func:`swb_edge_taper`), and ``w p'G``
+      comes off, so ``j_BS = w kappa <j.B>`` and nothing of ``p'G`` is moved
+      into the inductive (review of #78, B3).  None: no taper.
 
     Evaluated on the equilibrium the SWB call just left in ``mygs``: call it
     IMMEDIATELY after ``solve_with_bootstrap``, before any further solve.
@@ -560,7 +566,10 @@ def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad, psi=None, convention=None):
     j = np.asarray(j_bs_swb, dtype=float)
     conv = swb_jbs_convention() if convention is None else convention
     if conv == SWB_JBS_TOROIDAL:
-        return j - swb_pressure_term(mygs, j.size, psi_pad, psi)
+        P = swb_pressure_term(mygs, j.size, psi_pad, psi)
+        if taper is not None:
+            P = np.asarray(taper, dtype=float) * P
+        return j - P
     if conv != SWB_JBS_RAVG_OVER_F:
         raise ValueError(f"convention must be one of {SWB_JBS_CONVENTIONS}, "
                          f"got {conv!r}")
@@ -841,6 +850,22 @@ def edge_taper_weight(psi_N, psi0=0.999, shape=2):
         raise ValueError(f"edge_taper_weight: unknown shape {shape!r} "
                          f"(one of {sorted(EDGE_TAPER_SHAPES)})")
     return w
+
+
+def swb_edge_taper(bootstrap_kwargs, psi_N):
+    """The edge-taper weight ``w`` (:func:`edge_taper_weight`) a
+    ``solve_with_bootstrap`` call made with *bootstrap_kwargs* applies on the
+    nodes *psi_N*, or None when the call did not turn the taper on
+    (``taper_edge_jBS`` absent or False).  Unset ``taper_edge_psi0`` /
+    ``taper_edge_shape`` take the toolkit defaults bouquet's own taper
+    mirrors (``bouquet.engine.ENGINE_EDGE_TAPER_DEFAULT``)."""
+    kw = dict(bootstrap_kwargs or {})
+    if not bool(kw.get("taper_edge_jBS", False)):
+        return None
+    from .engine import ENGINE_EDGE_TAPER_DEFAULT as _D
+    return edge_taper_weight(
+        psi_N, kw.get("taper_edge_psi0", _D["taper_edge_psi0"]),
+        kw.get("taper_edge_shape", _D["taper_edge_shape"]))
 
 
 #: The inverse aspect ratio entering the Redl collisionalities

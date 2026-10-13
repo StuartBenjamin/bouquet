@@ -5430,7 +5430,7 @@ class Bouquet(SwbBaseline):
                     from .TokaMaker_interface import swb_result_toroidal
                     _swb = swb_result_toroidal(
                         mygs, _swb, psi_N, coord, isolate_edge_jBS=iso,
-                        grid_passed=_passed)
+                        grid_passed=_passed, bootstrap_kwargs=_kw)
                     _j = smooth_jbs_transition(np.asarray(
                         _swb["isolated_j_BS"], dtype=float))
                     if gc.floor_j_BS:
@@ -6033,7 +6033,8 @@ class Bouquet(SwbBaseline):
                 # stamp is archived with the baseline (li_metrics)
                 from .TokaMaker_interface import swb_result_toroidal
                 swb = swb_result_toroidal(mygs, swb, psi_N, coord,
-                                          isolate_edge_jBS=iso)
+                                          isolate_edge_jBS=iso,
+                                          bootstrap_kwargs=gc.bootstrap_kwargs)
                 self._swb_conversion_record = dict(swb["swb_conversion"])
                 # Same axis-transition smoothing every per-draw spike receives, so
                 # the sigma=0 draw reproduces this baseline split exactly.
@@ -6827,7 +6828,8 @@ class Bouquet(SwbBaseline):
         res = swb_result_toroidal(
             mygs, res, psi_N, coord,
             scale_jBS=float(sigma0_reference_scale(_rng0)),
-            isolate_edge_jBS=bool(gc.isolate_edge_jBS))
+            isolate_edge_jBS=bool(gc.isolate_edge_jBS),
+            bootstrap_kwargs=gc.bootstrap_kwargs)
         spike0 = (1.0 if _mult is None else _mult) * smooth_jbs_transition(
             np.asarray(res["isolated_j_BS"], dtype=float))
         if gc.floor_j_BS:

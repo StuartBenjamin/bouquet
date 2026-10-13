@@ -2498,7 +2498,8 @@ def smooth_jbs_transition(j_BS):
 #  Core perturbation routine
 # ====================================================================
 def swb_result_toroidal(mygs, results, psi_N, coord="psi_n", scale_jBS=1.0,
-                        isolate_edge_jBS=False, grid_passed=None):
+                        isolate_edge_jBS=False, grid_passed=None,
+                        bootstrap_kwargs=None):
     """``solve_with_bootstrap``'s result with its ``j_BS`` / ``isolated_j_BS``
     as the field-aligned toroidal bootstrap ``kappa <j.B>`` bouquet stores
     (:func:`bouquet.physics._swb_jbs_to_toroidal`, for the INSTALLED
@@ -2520,9 +2521,14 @@ def swb_result_toroidal(mygs, results, psi_N, coord="psi_n", scale_jBS=1.0,
     ``swb_conversion``.  ``grid_passed``: whether the call was given its grid
     (default: whenever the toolkit takes one, as
     :func:`bouquet.coords.swb_grid_kwargs` passes it); False for a call made
-    on OFT's own uniform grid."""
+    on OFT's own uniform grid.  ``bootstrap_kwargs``: the keyword options the
+    call was made with; with ``taper_edge_jBS`` on, the toolkit tapered every
+    toroidal component it returned, ``p'G`` included, so the same weight
+    (:func:`bouquet.physics.swb_edge_taper`) tapers the ``p'G`` taken off
+    (review of #78, B3)."""
     from .physics import (SWB_JBS_TOROIDAL, _swb_jbs_to_toroidal,
-                          swb_conversion_record, swb_jbs_convention)
+                          swb_conversion_record, swb_edge_taper,
+                          swb_jbs_convention)
     conv = swb_jbs_convention()
     if conv == SWB_JBS_TOROIDAL and bool(isolate_edge_jBS):
         raise RuntimeError(
@@ -2536,16 +2542,21 @@ def swb_result_toroidal(mygs, results, psi_N, coord="psi_n", scale_jBS=1.0,
     grid = (np.asarray(coords.psi_at(mygs, x, coord), dtype=float)
             if grid_passed else None)
     s = float(scale_jBS)
+    # the toolkit's edge taper on the nodes of its outputs (the grid it was
+    # given, else OFT's uniform grid); None: no taper
+    w = (swb_edge_taper(bootstrap_kwargs, np.linspace(0.0, 1.0, x.size)
+                        if grid is None else grid)
+         if conv == SWB_JBS_TOROIDAL else None)
 
     def _conv(raw):
         raw = np.asarray(raw, dtype=float)
         if conv != SWB_JBS_TOROIDAL or s == 1.0:
             return _swb_jbs_to_toroidal(mygs, raw, 1e-3, psi=grid,
-                                        convention=conv)
+                                        convention=conv, taper=w)
         if s == 0.0:
             return np.zeros_like(raw)
         return s * _swb_jbs_to_toroidal(mygs, raw / s, 1e-3, psi=grid,
-                                        convention=conv)
+                                        convention=conv, taper=w)
 
     raw_iso = np.asarray(results["isolated_j_BS"], dtype=float)
     raw_bs = np.asarray(results.get("j_BS", raw_iso), dtype=float)
@@ -3709,7 +3720,7 @@ def perturb_kinetic_equilibrium(
         # axis-smoothed) the same way at cache time.
         _results_diff = swb_result_toroidal(
             mygs, _results_diff, psi_N, coord, scale_jBS=scale_jBS,
-            isolate_edge_jBS=isolate_edge_jBS)
+            isolate_edge_jBS=isolate_edge_jBS, bootstrap_kwargs=kwargs)
         _swb_conv_rec = _results_diff["swb_conversion"]
         _spike_perturbed = smooth_jbs_transition(
             np.asarray(_results_diff["isolated_j_BS"], dtype=float))
@@ -4277,7 +4288,8 @@ def perturb_kinetic_equilibrium(
         # B1), on the equilibrium the call left in mygs, before any solve
         results = swb_result_toroidal(mygs, results, psi_N, coord,
                                       scale_jBS=scale_jBS,
-                                      isolate_edge_jBS=isolate_edge_jBS)
+                                      isolate_edge_jBS=isolate_edge_jBS,
+                                      bootstrap_kwargs=kwargs)
         _swb_conv_rec = results["swb_conversion"]
         # NOTE: the weak reg installed for SWB is intentionally LEFT ACTIVE
         # through the rest of perturb_kinetic_equilibrium -- the recon-anchor
@@ -7026,7 +7038,8 @@ def generate_bouquet(
                     _cache_results = swb_result_toroidal(
                         mygs, _cache_results, psi_N, coord,
                         scale_jBS=_scale_ref,
-                        isolate_edge_jBS=isolate_edge_jBS)
+                        isolate_edge_jBS=isolate_edge_jBS,
+                        bootstrap_kwargs=kwargs)
                     # RAW profile for delta mode (artifacts cancel in the delta);
                     # smoothed version for DIFF_BS (whose per-draw spikes are also
                     # smoothed).
@@ -9013,7 +9026,8 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         # (review PR64 B1), on the equilibrium the call left in mygs, before
         # any further solve; the stamp goes with the result
         results = swb_result_toroidal(mygs, results, _x, coord,
-                                      isolate_edge_jBS=isolate_edge_jBS)
+                                      isolate_edge_jBS=isolate_edge_jBS,
+                                      bootstrap_kwargs=kwargs)
         _recon_swb_conv = results["swb_conversion"]
 
         # Smooth the fragile near-axis / shelf-transition zone IMMEDIATELY
