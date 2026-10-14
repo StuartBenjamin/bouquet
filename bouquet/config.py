@@ -183,7 +183,8 @@ class ReconstructionSource:
     value, n_i follows from it by single-impurity quasineutrality with the
     n_e-fraction sigma, and the Z_eff envelope comes from the carbon > VB >
     scalar ladder (``UncertaintyConfig.zeff_sigma_source``).
-    EXPERIMENTAL -- see ``bouquet.experimental.REGISTRY["ida_ion_route"]``:
+    The measured routes (``bouquet.experimental.GRADUATED["ida_ion_route"]``,
+    the ida_hybrid default since 2026-10; an explicit choice here):
     ``"Zeff"`` (the VB Z_eff with a propagated sigma_ni), ``"CER"``
     (``Z_eff = 1 + Z(Z-1) n_C/n_e`` from the measured ``n_12C6``, i.e.
     ``ni = ne - Z_imp n_C``; needs ``impurity_Z=6``) or ``"all"``: the
@@ -191,10 +192,9 @@ class ReconstructionSource:
     their disagreement beyond the combined sigma added to ``sigma_ni`` /
     ``sigma_Zeff``; a file lacking one route's envelope falls to the other
     route ALONE (an older vintage without ``Zeff_err`` gets the CER value).
-    ``IDAProfiles.zeff_provenance`` records the route.  The PR #56 routes are
-    opt-in pending validation: on real H-mode slices the combined route moved
-    core n_i and Z_eff far outside the measurement uncertainties.  Ignored
-    for p-files.
+    ``IDAProfiles.zeff_provenance`` records the route; its known limitations
+    are listed in ``bouquet.experimental.GRADUATED["ida_ion_route"]``.
+    Ignored for p-files.
     """
 
     geqdsk_path: str
@@ -202,7 +202,7 @@ class ReconstructionSource:
     cocos: int = 1
     time: Optional[float] = None       # IDA time slice [s] (multi-time .cdf files)
     impurity_Z: float = 6.0            # effective impurity charge (carbon); set per machine
-    # IDA path: "standard" | EXPERIMENTAL "Zeff" | "CER" | "all" (see above)
+    # IDA path: "standard" | measured "Zeff" | "CER" | "all" (see above)
     ni_source: str = "standard"
     profile_overrides: dict = field(default_factory=dict)  # name -> array, manual override
     # reconstruction knobs
@@ -227,10 +227,11 @@ class ReconstructionSource:
 IDA_TIMINGS = ("window", "ida_fuse")
 
 
-def _check_ni_source(v, who):
+def _check_ni_source(v, who, allowed=None):
     from .experimental import NI_SOURCES
-    if v not in NI_SOURCES:
-        raise ValueError(f"{who}.ni_source={v!r} must be one of {NI_SOURCES}")
+    allowed = NI_SOURCES if allowed is None else allowed
+    if v not in allowed:
+        raise ValueError(f"{who}.ni_source={v!r} must be one of {allowed}")
 
 
 @dataclass
@@ -262,23 +263,36 @@ class ImasSource:
     # When set, the baseline ne/Te/Ti/ni/Z_eff/omega_tor come from this IDA
     # .cdf (externally fit, smoother across time than FUSE's per-slice fits),
     # resampled onto the FUSE core_profiles psi_N grid; currents, equilibrium,
-    # p_fast and anchors stay FUSE.  With ni_source="standard" (the default)
-    # Z_eff stays the dd's and n_i follows from it and the IDA n_e (as before
-    # PR #56); the EXPERIMENTAL ni_source routes take Z_eff / n_i from IDA.
+    # p_fast and anchors stay FUSE.  ONE thermal-kinetics source per run
+    # (owner decision 2026-10): by default (ni_source="auto") Z_eff and n_i
+    # come from the IDA file too; the dd's Z_eff is an explicit choice
+    # (ni_source="standard" or zeff_from_fuse=True).
     # Pass the same file as UncertaintyConfig.ida_path (from_imas does) for
     # the IDA sigma envelopes.
     ida_path: Optional[str] = None
     impurity_Z: float = 6.0            # machine impurity charge (carbon); ni dilution
     # Z_eff / ni route for ida_hybrid (and for an IDA sigma file):
-    # "standard" (default) | EXPERIMENTAL "Zeff" | "CER" | "all" -- see
-    # ReconstructionSource.ni_source and
-    # bouquet.experimental.REGISTRY["ida_ion_route"].
-    ni_source: str = "standard"
-    # ida_hybrid with an EXPERIMENTAL ni_source only: True keeps the dd's
-    # Z_eff while ne/Te/Ti/ni come from IDA; False takes IDA's resolved Z_eff,
-    # which counts the fast ions in its numerator (a measured Z_eff), so
-    # Baseline.zeff_includes_fast is True.  Under ni_source="standard" the
-    # Z_eff is the dd's either way.
+    #   "auto" (default) -> resolved per run (bouquet.experimental.
+    #       resolved_ni_source): the measured IDA route "all" when an IDA file
+    #       supplies the kinetics (kinetic_source="ida_hybrid" with an
+    #       ida_path) -- the VB+CER mean where both routes have an envelope,
+    #       else whichever does, each clamped to [1, Z_imp] and counted
+    #       (IDAProfiles.zeff_provenance) -- and "standard" otherwise (FUSE
+    #       kinetics: the dd's Z_eff).  An IDA file with NO Z_eff information
+    #       (no 'Zeff', no 'n_12C6') is refused on ida_hybrid, naming the
+    #       explicit choices below.
+    #   "standard" -> the dd's Z_eff, n_i from it and the IDA n_e (the default
+    #       before 2026-10; an explicit choice now).
+    #   "Zeff" | "CER" | "all" -> that measured route explicitly (see
+    #       ReconstructionSource.ni_source).
+    # The route a run took is stamped warning-free in li_metrics
+    # ("zeff_source": "ida" / "dd"; "kinetics_route").
+    ni_source: str = "auto"
+    # ida_hybrid on a measured route only: True keeps the dd's Z_eff while
+    # ne/Te/Ti/ni come from IDA (an explicit choice of the dd's Z_eff); False
+    # takes IDA's resolved Z_eff, which counts the fast ions in its numerator
+    # (a measured Z_eff), so Baseline.zeff_includes_fast is True.  Under
+    # ni_source="standard" the Z_eff is the dd's either way.
     zeff_from_fuse: bool = False
     # OPTIONAL. A gEQDSK whose LCFS replaces the dd boundary outline as the
     # isoflux separatrix target. Leave None to use the source's own boundary.
@@ -329,14 +343,18 @@ class ImasSource:
     # False (default, as before PR #56): the thermal-only Z_eff recomputed
     # from the dd's thermal ion densities.
     zeff_fast_ions: bool = False
-    # EXPERIMENTAL -- see
-    # bouquet.experimental.REGISTRY["ida_ni_beam_subtraction"].  ida_hybrid
-    # with an experimental ni_source: subtract the dd's fast-ion density
-    # equivalent from the IDA (total) n_i.  False (default): no subtraction.
-    ni_subtract_fast: bool = False
-    # Add the dd's fast-ion pressure p_fast to the equilibrium pressure (default).  With
-    # an experimental ni_source on ida_hybrid, match it to ni_subtract_fast: the fast ions
-    # in p_fast (both True) or inside the IDA n_i (both False); the reader warns otherwise.
+    # ida_hybrid on a measured ni_source: subtract the dd's fast-ion density
+    # equivalent from the IDA (total) n_i (bouquet.experimental.
+    # GRADUATED["ida_ni_beam_subtraction"]).  None (default): follows
+    # include_pfast on that route (the #79 rule -- the fast ions in p_fast
+    # with the subtraction, or both off), False elsewhere; True / False:
+    # explicit (True with ni_source="standard" is refused).
+    ni_subtract_fast: Optional[bool] = None
+    # Add the dd's fast-ion pressure p_fast to the equilibrium pressure (default): on
+    # ida_hybrid the ONE declared cross-source input (the fast ions are not in the IDA
+    # fits).  On a measured ni_source match it to ni_subtract_fast: the fast ions in
+    # p_fast (both True, the default) or inside the IDA n_i (both False); the reader
+    # warns otherwise.
     include_pfast: bool = True
 
     def __post_init__(self):
@@ -345,20 +363,26 @@ class ImasSource:
         if not isinstance(self.hold_sawteeth, bool):
             raise ValueError(f"hold_sawteeth={self.hold_sawteeth!r}: must be "
                              "True or False")
-        _check_ni_source(self.ni_source, "ImasSource")
+        from .experimental import IMAS_NI_SOURCES
+        _check_ni_source(self.ni_source, "ImasSource", IMAS_NI_SOURCES)
         if self.ida_timing not in IDA_TIMINGS:
             raise ValueError(f"ImasSource.ida_timing={self.ida_timing!r} must be one of "
                              f"{IDA_TIMINGS}")
-        for _n in ("zeff_fast_ions", "ni_subtract_fast", "include_pfast"):
+        for _n in ("zeff_fast_ions", "include_pfast"):
             if not isinstance(getattr(self, _n), bool):
                 raise ValueError(f"ImasSource.{_n}={getattr(self, _n)!r}: "
                                  "must be True or False")
-        if self.ni_subtract_fast and self.ni_source == "standard":
+        if self.ni_subtract_fast is not None and \
+                not isinstance(self.ni_subtract_fast, bool):
+            raise ValueError(f"ImasSource.ni_subtract_fast="
+                             f"{self.ni_subtract_fast!r}: must be None (auto), "
+                             "True or False")
+        if self.ni_subtract_fast is True and self.ni_source == "standard":
             raise ValueError(
                 "ImasSource.ni_subtract_fast=True subtracts the beam density "
                 "from an IDA-derived n_i, but ni_source='standard' derives n_i "
-                "from the dd's own (thermal) Z_eff; set an experimental "
-                "ni_source ('Zeff' | 'CER' | 'all') or drop ni_subtract_fast")
+                "from the dd's own (thermal) Z_eff; set a measured ni_source "
+                "('auto' | 'Zeff' | 'CER' | 'all') or drop ni_subtract_fast")
 
 
 BaselineSource = Union[ReconstructionSource, ImasSource]
@@ -728,13 +752,13 @@ class UncertaintyConfig:
     #   "carbon"   -- the same order, warning on a fallback.
     #   "measured" -- VB-measured, warning on a fallback.
     #   "scalar"   -- always the flat zeff_scalar_sigma fraction.
-    # With an EXPERIMENTAL ni_source (bouquet.experimental.REGISTRY
-    # ["ida_ion_route"]) "auto"/"measured" take the IDA-resolved envelope
+    # With a measured ni_source (the ida_hybrid default; bouquet.experimental.
+    # GRADUATED["ida_ion_route"]) "auto"/"measured" take the IDA-resolved envelope
     # (read_ida walks VB+CER > CER > VB, the route disagreement folded in)
     # and "carbon" is a single-route override.
     # The measured tiers are eligible only when the Z_eff baseline came from
     # the sigma .cdf itself: the reconstruction source's own profiles file
-    # (or, on the experimental route only, ImasSource.ida_path).  A p-file
+    # (or, on a measured route only, ImasSource.ida_path).  A p-file
     # or IMAS/FUSE Z_eff baseline, or a different .cdf vintage named via
     # ida_path, is refused: it would mix channels.  That file
     # test compares RESOLVED paths (expanduser + realpath, samefile when both
@@ -751,8 +775,8 @@ class UncertaintyConfig:
     # sigma_ni unused); False draws ni from its own sigma_ni and Z_eff
     # passively AFTER Ti (a different RNG order).
     # None = auto: True (ni is always derived when the channel has dilution,
-    # as before PR #56) -- unless the source's ni_source is EXPERIMENTAL
-    # (bouquet.experimental.REGISTRY["ida_ion_route"]), where the PR #56 rule
+    # as before PR #56) -- unless the source's resolved ni_source is a
+    # measured route (the ida_hybrid default), where the PR #56 rule
     # applies: True when ni's sigma is the flat ni_scalar_sigma fallback, or
     # when ni AND the Z_eff envelope are the same IDA resolution (Z_eff tier
     # "IDA-resolved"; sigma_ni kept via IDAProfiles.zeff_dne); False for any
@@ -764,9 +788,10 @@ class UncertaintyConfig:
     # where physics.zeff_bounds allows less, a derived n_i held in
     # [0, ne - z_fast], an independent n_i capped at ne - z_fast when Z_imp is
     # declared, a passive Z_eff aux draw clipped to the window.  None = auto:
-    # on only when an experimental PR #56 kinetic feature is (ida_ion_route,
-    # fuse_zeff_fast_ions, ida_ni_beam_subtraction); False: only the
-    # zeff_bounds window (the bound in place before PR #56); True: on.
+    # on only with a PR #56 opt-in (fuse_zeff_fast_ions, an explicitly SET
+    # measured ni_source, an explicit ni_subtract_fast=True) -- never by the
+    # ida_hybrid default; False: only the zeff_bounds window (the bound in
+    # place before PR #56); True: on.
     kinetic_clips: Optional[bool] = None
 
     # GPR correlation length scales (psi_N units) -- define the perturbation
@@ -1745,6 +1770,16 @@ class GenerationConfig:
     # loop's PATH only (no criterion, tolerance or ceiling; zero extra
     # solves).  False (default) is the behaviour before the setting existed.
     engine_draw_bootstrap_refresh: bool = False
+    # Opt-in bistability check (unified engine only; refused non-default
+    # under "legacy"): after the reconstruction, ONE extra solve of the same
+    # inputs from a COLD start (psi re-initialised as the reconstruction's
+    # own start) is compared with the delivered state -- l_i(3) and q0 at the
+    # q-row radius at the sigma=0 gates (jbs_tol_li, jbs_tol_q0), beta_pol
+    # and the magnetic axis reported.  A miss stamps the baseline
+    # bistable=True with the deltas (Baseline.engine["bistability"], archived
+    # with the baseline's engine record) and warns.  The delivered
+    # equilibrium is restored; the baseline is never changed.
+    check_bistability: bool = False
     # The Grad-Shafranov iteration cap on EVERY solve inside an engine draw:
     # the loop (its anchor and passes), each coil-homotopy stage, a
     # homotopy rollback re-solve and the post-homotopy bootstrap passes (and

@@ -1,5 +1,100 @@
 # Bouquet — change summaries
 
+## Unreleased — IDA-hybrid: the IDA file's own Z_eff is the default (numbers move on every IDA-hybrid run)
+
+**Default change (owner decision): one thermal-kinetics source per run.** When an
+IDA file supplies the kinetics (`kinetic_source="ida_hybrid"`), Z_eff and n_i now
+come from that file too. `ImasSource.ni_source` defaults to `"auto"`, which
+resolves to the measured IDA route `"all"` on `ida_hybrid` (the VB+CER mean where
+both routes have an envelope, else whichever does; each clamped to `[1, Z]` with
+the clamped nodes counted, as before) and to `"standard"` with FUSE kinetics.
+Before, `ida_hybrid` kept the dd's Z_eff with the IDA n_e/T_e/T_i. The dd's Z_eff
+is now an explicit choice: `ni_source="standard"` (n_i from the dd's Z_eff and
+the IDA n_e, the previous default) or `zeff_from_fuse=True`. `from_imas` follows
+(`ni_source="auto"`, `ni_subtract_fast=None`). `ReconstructionSource.ni_source`
+(g-file + IDA) keeps `"standard"`, which is already the IDA file's own VB Z_eff.
+
+**Numbers move on every IDA-hybrid run**: the baseline Z_eff, n_i, Z_imp and
+the impurity pressure, hence the bootstrap, I_BS, l_i, q0 and beta of the
+reconstruction and of every draw; the Z_eff / n_i sigma envelopes (the
+IDA-resolved tier and the PR #56 `ni_from_zeff` auto rule now apply);
+`Baseline.zeff_includes_fast` becomes True (a measured Z_eff). On two real
+slices the dd's Z_eff was 0.78x and 3.9x the IDA file's (median over
+psi_N <= 0.9). A stored config that carries `ni_source="standard"` (every config
+stored before this change) reproduces what it ran.
+
+**Fast ions: the one declared cross-source input.** The dd's fast-ion pressure
+still enters (`include_pfast=True`). `ImasSource.ni_subtract_fast` now defaults to
+`None`, which follows `include_pfast` on the IDA-hybrid measured route (the #79
+rule): **the fast ions in `p_fast`, with the dd's beam density subtracted from
+the IDA (total) n_i**, so they are counted once and the "counted twice" warning
+no longer fires on the default. Set `include_pfast=False` to keep them inside the
+IDA n_i instead (the subtraction then follows it off). Explicit `True` / `False`
+win; `True` on the dd route is refused.
+
+**Refusal.** An IDA file with no Z_eff information at all (no `Zeff` and no
+`n_12C6`) is refused on the `ida_hybrid` default, with a message naming
+`ni_source="standard"` and `zeff_from_fuse=True` as the explicit choices; no
+silent fallback. Those choices read such a file (the dd's Z_eff stands in for
+the missing `Zeff` in the reader's own n_i derivation, stamped in
+`zeff_provenance`). A file with `n_12C6` but no `Zeff` takes the CER route alone.
+
+**Left the experimental registry.** `ida_ion_route` (the measured route) and
+`ida_ni_beam_subtraction` are no longer in `bouquet.experimental.REGISTRY`; they
+are listed in `bouquet.experimental.GRADUATED` with the evidence and their
+former validation items kept as KNOWN LIMITATIONS (docs/workflows.md, "Graduated
+features and their known limitations"). No `ExperimentalFeatureWarning` for
+them. The sampler clips (`kinetic_sampler_clips`) stay experimental and are not
+turned on by the default: their auto rule follows only an explicitly SET
+measured `ni_source`, `zeff_fast_ions`, or an explicit `ni_subtract_fast=True`
+(every explicit configuration behaves as before).
+
+**Stamped, warning-free.** Every IMAS baseline carries
+`li_metrics["zeff_source"]` (`"ida"` / `"dd"`) and `li_metrics["kinetics_route"]`
+(the `ni_source` setting and its resolution, `zeff_from_fuse`,
+`ni_subtract_fast` setting and resolution, `include_pfast`, whether the IDA file
+carries `Zeff` / `n_12C6`, and the cross-source inputs in words).
+
+## Unreleased — the engine draws hold the reconstruction's isoflux (numbers move on every engine draw)
+
+**What moves (owner decision).** Every unified-engine draw's homotopy now holds
+the boundary with the RECONSTRUCTION's own isoflux pattern -- the very points
+and weights the reconstruction was pointed at -- instead of re-pointing the
+isoflux to the draw's traced LCFS (thousands of points, every one at the
+legacy weight 200). IDS route: the solver geometry's pattern (the source
+boundary at `solver_geometry.ISOFLUX_WEIGHT` = 500); g-file route: the pattern
+that route installs itself (the g-file boundary at weight 200; the two
+routes' weights are not standardised here). Every engine draw's boundary
+constraint changes, so its coil drift, LCFS deviation, in-spec yield and every
+archived quantity of a perturbed engine draw move. The legacy and swb routes
+are unchanged (`DrawMethod.homotopy_isoflux` returns `None`: the re-trace).
+
+**Why.** On a reversed-Ip, near-double-null slice the free-boundary problem
+is bistable: the re-trace at weight 200, under the strong coil
+regularisation, moved the zero-perturbation draw onto the other equilibrium
+(axis 1.7 cm lower, Delta q0 -3.8e-3 against the 2e-3 gate), although its
+loop stage reproduced the reconstruction. The reconstruction's own pattern
+keeps it on the reconstruction's branch. This fixes the branch selection
+there; it does not prove robustness on other near-double-null slices.
+
+**Stamped.** `prepare_baseline()` records the pattern
+(`Bouquet._engine_run["recon_isoflux"]`, `Baseline.engine["recon_isoflux"]`:
+`n`, `weight_min`/`weight_max`, `origin`, `sha256`); every engine draw stamps
+the pattern it installed as `engine["homotopy"]["isoflux"]` (plus
+`installed`), and the baseline's engine record carries it as
+`draws.homotopy_isoflux`. The solver geometry record (`solver_geometry_json`)
+gains `isoflux_sha256`, the fingerprint of its isoflux points and weights,
+which the IDS route's stamp equals by construction.
+
+**New, opt-in: `GenerationConfig.check_bistability` (default `False`).** Unified
+engine only (refused under `"legacy"`). After the reconstruction, one extra
+solve of the same inputs from a cold start is compared with the delivered
+state: l_i(3) and q0 at the q-row radius at the sigma=0 gates (`jbs_tol_li`,
+`jbs_tol_q0`), beta_pol and the magnetic axis reported. A miss stamps
+`Baseline.engine["bistability"]` with `bistable=True` and the deltas and
+warns; the delivered equilibrium is restored. Off by default: no extra solve,
+nothing moves.
+
 ## Unreleased — PR #76: one reusable solver per process; every baseline at its own F0 (numbers move on multi-slice runs)
 
 **What moves.** The solver's vacuum field F0, its LCFS isoflux targets and its
@@ -84,7 +179,7 @@ defaults are the routes before PR #56 (main `afe1a99` / `6116d5f`):
 | `ReconstructionSource.ni_source`, `ImasSource.ni_source`, `read_ida(ni_source=)`, `from_imas(ni_source=)` | `"standard"` (new value): Z_eff = the stored VB value, n_i from it by quasineutrality, σ_ni the n_e fraction; the Z_eff envelope from the carbon > VB > scalar ladder; on `ida_hybrid` Z_eff stays the dd's and n_i = n_e,IDA (Z − Z_eff,dd)/(Z − 1) | `"Zeff"` / `"CER"` / `"all"` (`ida_ion_route`) |
 | `ImasSource.zeff_fast_ions` (new) | `False`: the bootstrap gets the thermal-only Z_eff of the dd's densities | `True` (`fuse_zeff_fast_ions`): the `_dd_zeff` classification and the fast-ion term |
 | `ImasSource.ni_subtract_fast` (new) | `False`: no beam subtraction | `True` with an experimental `ni_source` (`ida_ni_beam_subtraction`) |
-| `UncertaintyConfig.kinetic_clips` (new) | `None` (auto: off unless a PR #56 kinetic feature is on): a Z_eff draw held in `physics.zeff_bounds` only, n_i not clipped | `True` (`kinetic_sampler_clips`): the floor at 1, the n_i floor / ceiling, the passive Z_eff aux clip |
+| `UncertaintyConfig.kinetic_clips` (new) | `None` (auto: on with the measured IDA route, the IDA-hybrid default since 2026-10-14, the beam subtraction or `fuse_zeff_fast_ions`; off otherwise): a Z_eff draw held in `physics.zeff_bounds` only, n_i not clipped | `True` (`kinetic_sampler_clips`): the floor at 1, the n_i floor / ceiling, the passive Z_eff aux clip |
 | `UncertaintyConfig.ni_from_zeff` | `None` (auto): always derived | auto follows the PR #56 rule only with an experimental `ni_source` |
 
 **Kept from PR #56 regardless of route:** the n_i-as-increment σ=0 fix and the

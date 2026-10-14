@@ -1161,8 +1161,21 @@ class GenerateEngineDraws(DrawMethod):
 
     def __init__(self, ctx, *, unc, psi_pad, q_psi=None, maxits=None,
                  homotopy=True, l_i_tolerance=0.05, p_thresh=0.05,
-                 max_proxy_draws=500, coil_reg=None):
+                 max_proxy_draws=500, coil_reg=None, delivered_eq=None,
+                 recon_isoflux=None):
         self.ctx = ctx
+        #: the isoflux pattern the reconstruction was pointed at
+        #: (``Bouquet._engine_run["recon_isoflux"]``: ``pts``, ``w``,
+        #: ``origin``, ``stamp``); every draw's homotopy holds the boundary
+        #: with exactly it (:meth:`homotopy_isoflux`).  ``None``: not on
+        #: record (a test stand-in) -- the isoflux in place is left alone
+        self.recon_isoflux = recon_isoflux
+        #: the reconstruction's delivered equilibrium as prepare_baseline()
+        #: left it (``Bouquet._engine_run["delivered_eq"]``, a ``copy_eq``
+        #: snapshot); generate_bouquet's baseline re-solve starts from it
+        #: (:meth:`baseline_resolve_start`).  ``None``: not on record (a test
+        #: stand-in) -- the re-solve starts warm from the state on entry
+        self.delivered_eq = delivered_eq
         #: the coil regularisation the reconstruction solved under
         #: (:func:`bouquet.engine.reconstruction_coil_reg`: ``terms`` and
         #: ``record``); every draw installs exactly ``terms``.  ``None`` or
@@ -1195,6 +1208,57 @@ class GenerateEngineDraws(DrawMethod):
         #: (one zero-perturbation draw through ``generate()``): the loop
         #: stage's and the archived state's verdicts are written into it
         self.sigma0_probe = None
+
+    # ---- where the baseline re-solve starts ---------------------------
+    def baseline_resolve_start(self, mygs):
+        """generate_bouquet's baseline re-solve starts from the
+        reconstruction's DELIVERED equilibrium, warm -- the state, settings
+        and inputs of the reconstruction's own final solve (its delivery is
+        a jphi-linterp solve of this very request) -- never from the cold
+        psi re-init the legacy route needs (issue #24).  A cold start can
+        land a free-boundary solve on a different equilibrium of identical
+        inputs, and the re-solved state is what every draw's warm start,
+        strong coil regularisation target and drift reference are taken
+        from: the zero-perturbation draw would then reproduce THAT state,
+        not the reconstruction (docs/engine.md, "the re-solve starts from
+        the reconstruction")."""
+        if self.delivered_eq is not None and hasattr(mygs, "replace_eq"):
+            mygs.replace_eq(source_eq=self.delivered_eq)
+            how = ("restored to the reconstruction's delivered equilibrium "
+                   "(prepare_baseline's snapshot)")
+        else:
+            how = ("the state on entry (no delivered-equilibrium snapshot "
+                   "on record)")
+        return ("unified engine: the re-solve starts warm from " + how
+                + "; no psi re-init")
+
+    # ---- the isoflux every draw's homotopy holds ----------------------
+    def homotopy_isoflux(self, mygs=None):
+        """The RECONSTRUCTION's own isoflux pattern -- the very points and
+        weights it was pointed at (the solver geometry's on the IDS route,
+        the g-file route's own pattern on that route) -- never the draw's
+        traced LCFS at the legacy route's weight 200.  On a near-double-null
+        slice the free-boundary problem can be bistable, and re-pointing the
+        isoflux to thousands of traced points at another weight under the
+        strong coil regularisation selected the other branch at sigma=0
+        (docs/engine.md, "The homotopy holds the reconstruction's
+        isoflux").  ``pts=None`` (none on record): the isoflux in place is
+        left alone, and the stamp says so."""
+        ri = self.recon_isoflux
+        if ri is None or ri.get("pts") is None:
+            stamp = dict(n=None, weight_min=None, weight_max=None,
+                         origin=("none on record: the isoflux in place "
+                                 "(not re-pointed)"), sha256=None,
+                         installed=False)
+            out = dict(pts=None, w=None, stamp=stamp)
+        else:
+            stamp = dict(ri.get("stamp") or {})
+            stamp["installed"] = True
+            out = dict(pts=ri["pts"], w=ri["w"], stamp=stamp)
+        if self._cur is not None:
+            # the same object: generate_bouquet marks a failed install on it
+            self._cur["homotopy_isoflux"] = out["stamp"]
+        return out
 
     # ---- the pressure the baseline re-solve and every draw use --------
     def solve_pressure(self, psi_N=None, pressure_solve=None):
@@ -1717,6 +1781,11 @@ class GenerateEngineDraws(DrawMethod):
             homotopy_VSC_lim=diagnostics.get("homotopy_VSC_lim"),
             max_F_drift_pct=diagnostics.get("max_F_drift_pct"),
             max_VSC_drift_pct=diagnostics.get("max_VSC_drift_pct"),
+            # the isoflux pattern the homotopy held (n, weight, origin,
+            # sha256 -- the reconstruction's), or that it was not re-pointed
+            isoflux=dict(cur.get("homotopy_isoflux") or dict(
+                installed=False,
+                origin="the homotopy's iso-update did not run")),
             note=("generate()'s coil homotopy (homotopy_passes) and the "
                   "post-homotopy bootstrap check" if self.homotopy else
                   "engine_draw_homotopy=False: no homotopy stage; the "
@@ -1822,7 +1891,9 @@ class GenerateEngineDraws(DrawMethod):
             homotopy=self.homotopy, l_i_tolerance=self.l_i_tolerance,
             ip_row=("the Ip the delivered composition carries in the exact "
                     "measure on G*"), Ip_target_A=self.ctx.Ip_star,
-            reference=self.ctx.ref)
+            reference=self.ctx.ref,
+            homotopy_isoflux=(None if self.recon_isoflux is None else
+                              dict(self.recon_isoflux.get("stamp") or {})))
         store_baseline_engine(header, rec, scan_key=scan_key)
 
 
@@ -1890,7 +1961,9 @@ def build_generate_context(bq, env):
         maxits=engine_draw_maxits(gc),
         homotopy=bool(getattr(gc, "engine_draw_homotopy", True)),
         l_i_tolerance=float(gc.l_i_tolerance),
-        coil_reg=run.get("coil_reg"))
+        coil_reg=run.get("coil_reg"),
+        delivered_eq=run.get("delivered_eq"),
+        recon_isoflux=run.get("recon_isoflux"))
 
 
 def context_from_run(run, gc, bl):

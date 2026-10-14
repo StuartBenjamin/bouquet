@@ -27,12 +27,14 @@ Stage order follows one draw through `generate_bouquet`.
 |---|---|---|---|---|
 | `validate` (noop) | setup | — | refuses PIN_JPHI, DIFF_BS, delta mode, l_i σ, loop off; prints the banner | — |
 | `jphi_baseline` (pass) | setup | as configured | as configured | `False`: solve B is the baseline |
+| `baseline_resolve_start` (none) | setup | `None`: re-initialise psi from the landed LCFS (issue #24) | restore the reconstruction's delivered equilibrium; re-solve warm, no re-init | not reached (`jphi_baseline=False`) |
 | `solve_pressure`, `edge` (pass) | setup | the legacy assembly | the contract's pressure and edge settings | legacy |
 | `strong_coil_reg` (flag) / `announce_coil_reg` | setup | strong reg toward the baseline coils | same | none; the per-draw recipe installs its own reg |
 | `pin_bounds_on_skip` (flag) | per draw | SKIP_HOMOTOPY pin | same | no |
 | `draw` (legacy) | per draw | `perturb_kinetic_equilibrium(...)` | `GenerateEngineDraws.draw` | `swb_draw` |
 | `rejection_reason`, `annotate_rejection` | per draw | `_draw_rejection_reason` | adds the engine codes (caps, closure refused, non-finite) | legacy |
 | `iso_update` (flag) | after Ip align | isoflux update | same | no |
+| `homotopy_isoflux` (none) | after Ip align | `None`: re-point the isoflux to the draw's traced LCFS, every point at weight 200 | the reconstruction's own isoflux pattern (its points and weights), stamped per draw (`engine["homotopy"]["isoflux"]`) | not reached (`iso_update=False`) |
 | `drift_without_homotopy` (none) | coils | None: homotopy | `engine_draw_homotopy=False`: measured drift | always measured drift (no bounds) |
 | `homotopy` (flag), `cap_solver`/`uncap_solver`, `hit_cap`, `announce_cap`, `announce_rollback_failed` | homotopy | homotopy, no cap | homotopy under `engine_draw_solve_maxits`, cap events recorded | no homotopy |
 | `post_homotopy_jbs`, `post_homotopy_split` (legacy) | post-homotopy | `_post_homotopy_jbs`, `_decompose_draw_currents` | the engine draw's own passes and split | not reached |

@@ -226,9 +226,11 @@ EDGES = ("pre_change", "default")
 _P_EDGE = 500.0                      # p_sep of the block's solve pressure
 
 
-def _run_block(stub, capsys=None, edge="pre_change"):
-    """Exec the shipped jphi_baseline block against ``stub``."""
+def _run_block(stub, capsys=None, edge="pre_change", method=None):
+    """Exec the shipped jphi_baseline block against ``stub`` (the draw method
+    *method*; default the legacy :class:`~bouquet.draw_methods.DrawMethod`)."""
     import numpy as np
+    from bouquet.draw_methods import DrawMethod
     from bouquet.TokaMaker_interface import (_count_masked_anchor_failure,
                                              ANCHOR_MASKED_FAILURES)
     from bouquet.utils import _shape_from_boundary, pchip_derivative
@@ -243,6 +245,7 @@ def _run_block(stub, capsys=None, edge="pre_change"):
 
     ns = dict(
         mygs=stub, np=np, psi_N=psi_N, psi_pad=1e-3,
+        _m=(DrawMethod() if method is None else method),
         safe_trace_surf=lambda g, v: lcfs,
         _shape_from_boundary=_shape_from_boundary,
         pchip_derivative=pchip_derivative,
@@ -328,4 +331,61 @@ def test_a_successful_baseline_solve_does_not_restore_anything(edge):
     assert stub.replaced_with is None, (
         "a SUCCESSFUL baseline solve restored the pre-solve snapshot, "
         "discarding the very equilibrium it just computed")
+    assert stub.state == "baseline-converged"
+
+
+# ---------------------------------------------------------------------------
+#  the unified engine: the re-solve starts from the reconstruction, warm
+# ---------------------------------------------------------------------------
+class _EngineStart:
+    """The engine draw method's start hook, on a delivered snapshot."""
+
+    def __init__(self, delivered_eq):
+        self.delivered_eq = delivered_eq
+
+    from bouquet.engine_draws import GenerateEngineDraws as _G
+    baseline_resolve_start = _G.baseline_resolve_start
+    del _G
+
+
+def test_the_legacy_method_keeps_the_reinit():
+    from bouquet.draw_methods import DrawMethod
+    assert DrawMethod().baseline_resolve_start(object()) is None
+
+
+@pytest.mark.parametrize("edge", EDGES)
+def test_the_engine_resolve_starts_from_the_delivered_state(edge):
+    """The engine's reconstruction is itself a jphi-linterp solve of the
+    request the re-solve hands the solver: the re-solve starts from that
+    delivered equilibrium (restored from prepare_baseline's snapshot), with
+    no cold psi re-init -- a cold start can land a free-boundary solve on a
+    different equilibrium of the same inputs."""
+    stub = _JphiBaselineStub(fail=False)
+    stub.state = "moved-since-the-reconstruction"
+    delivered = ("snap", 0, "recon-delivered")
+    _run_block(stub, edge=edge, method=_EngineStart(delivered))
+    assert not stub.init_psi_called, (
+        "the engine baseline re-solve re-initialised psi: it no longer "
+        "starts from the reconstruction's delivered state")
+    assert stub.replaced_with == delivered, (
+        "the engine baseline re-solve did not start from the "
+        "reconstruction's delivered equilibrium")
+    assert stub.state == "baseline-converged"
+
+
+def test_a_failed_engine_resolve_restores_the_delivered_state():
+    stub = _JphiBaselineStub(fail=True)
+    stub.state = "moved-since-the-reconstruction"
+    _run_block(stub, method=_EngineStart(("snap", 0, "recon-delivered")))
+    assert not stub.init_psi_called
+    assert stub.state == "recon-delivered", (
+        f"state is {stub.state!r} after the fallback; a failed engine "
+        "re-solve must leave the reconstruction's delivered state")
+
+
+def test_the_engine_resolve_without_a_snapshot_starts_warm_on_entry():
+    stub = _JphiBaselineStub(fail=False)
+    _run_block(stub, method=_EngineStart(None))
+    assert not stub.init_psi_called
+    assert stub.replaced_with is None
     assert stub.state == "baseline-converged"

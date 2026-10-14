@@ -180,6 +180,31 @@ def test_an_ids_engine_baseline_is_a_complete_baseline(toy_solver,
     assert bl.engine["contract"]["kind"] == "ids"
 
 
+def test_the_ids_reconstruction_isoflux_is_the_solver_geometrys(toy_solver):
+    """The IDS route solves under the solver geometry's isoflux (the reset
+    installs it; the engine does not re-point it): the pattern recorded for
+    the draws' homotopy IS the one the solver geometry record fingerprints."""
+    import bouquet as bq
+    from bouquet.solver_geometry import ISOFLUX_WEIGHT
+    b = bq.Bouquet.from_imas(_OMAS, mesh=_MESH, time=2.3043, n_draws=1,
+                             reconstruction_engine="unified")
+    b.config.generation.engine_rows = ["Ip"]
+    b._install_solver(_ResettableFakeGS())
+    bl = _quiet(b.prepare_baseline)
+    ri = b._engine_run["recon_isoflux"]
+    geo = b.solver_geometry_record()
+    assert ri["stamp"]["sha256"] == geo["isoflux_sha256"] is not None
+    assert ri["stamp"]["n"] == geo["isoflux_n"] == len(ri["pts"])
+    assert ri["stamp"]["weight_min"] == ri["stamp"]["weight_max"] \
+        == ISOFLUX_WEIGHT
+    assert ri["stamp"]["origin"] == "solver geometry: source boundary"
+    np.testing.assert_array_equal(ri["pts"], b._geom.iso_pts)
+    assert bl.engine["recon_isoflux"] == ri["stamp"]
+    # the only isoflux installed during the reconstruction is the reset's
+    assert [c for c in b.mygs.calls if c[0] == "set_isoflux"] == [
+        ("set_isoflux", len(ri["pts"]), ISOFLUX_WEIGHT)]
+
+
 def test_a_failed_engine_build_leaves_no_baseline(toy_solver, monkeypatch):
     import bouquet as bq
     import bouquet.engine as be
