@@ -179,7 +179,7 @@ defaults are the routes before PR #56 (main `afe1a99` / `6116d5f`):
 | `ReconstructionSource.ni_source`, `ImasSource.ni_source`, `read_ida(ni_source=)`, `from_imas(ni_source=)` | `"standard"` (new value): Z_eff = the stored VB value, n_i from it by quasineutrality, σ_ni the n_e fraction; the Z_eff envelope from the carbon > VB > scalar ladder; on `ida_hybrid` Z_eff stays the dd's and n_i = n_e,IDA (Z − Z_eff,dd)/(Z − 1) | `"Zeff"` / `"CER"` / `"all"` (`ida_ion_route`) |
 | `ImasSource.zeff_fast_ions` (new) | `False`: the bootstrap gets the thermal-only Z_eff of the dd's densities | `True` (`fuse_zeff_fast_ions`): the `_dd_zeff` classification and the fast-ion term |
 | `ImasSource.ni_subtract_fast` (new) | `False`: no beam subtraction | `True` with an experimental `ni_source` (`ida_ni_beam_subtraction`) |
-| `UncertaintyConfig.kinetic_clips` (new) | `None` (auto: off unless a PR #56 kinetic feature is on): a Z_eff draw held in `physics.zeff_bounds` only, n_i not clipped | `True` (`kinetic_sampler_clips`): the floor at 1, the n_i floor / ceiling, the passive Z_eff aux clip |
+| `UncertaintyConfig.kinetic_clips` (new) | `None` (auto: on with the measured IDA route, the IDA-hybrid default since 2026-10-14, the beam subtraction or `fuse_zeff_fast_ions`; off otherwise): a Z_eff draw held in `physics.zeff_bounds` only, n_i not clipped | `True` (`kinetic_sampler_clips`): the floor at 1, the n_i floor / ceiling, the passive Z_eff aux clip |
 | `UncertaintyConfig.ni_from_zeff` | `None` (auto): always derived | auto follows the PR #56 rule only with an experimental `ni_source` |
 
 **Kept from PR #56 regardless of route:** the n_i-as-increment σ=0 fix and the

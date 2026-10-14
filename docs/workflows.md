@@ -150,7 +150,7 @@ stored config carrying it still loads.
 | `zeff_scalar_sigma` | `0.05` | One Z_eff perturbation per draw; n_i / n_z follow from quasi-neutrality. Also the width of the bottom tier below |
 | `zeff_sigma_source` | `"auto"` | Which tier supplies the Z_eff envelope's **magnitude**: `"auto"` / `"carbon"` / `"measured"` / `"scalar"` — see the ladder below |
 | `ni_from_zeff` | `None` (auto) | With the Z_eff channel on: `True` derives n_i per draw from the drawn (n_e, Z_eff) as an increment on the baseline n_i; `False` draws n_i from its own σ and Z_eff passively after T_i (different RNG order). Auto: `True` (n_i always derived, as before PR #56). On a measured `ni_source` (the `ida_hybrid` default) auto is the PR #56 rule: `True` when n_i's σ is the scalar fallback, or n_i and the Z_eff envelope are the same IDA resolution (tier `"IDA-resolved"`); `False` for any other real n_i envelope. That rule follows the Z_eff tier: pin it for an A/B of Z_eff envelopes |
-| `kinetic_clips` | `None` (auto) | **EXPERIMENTAL** (`kinetic_sampler_clips`): the PR #56 sampler clips -- a drawn Z_eff floored at 1 where `physics.zeff_bounds` allows less, a derived n_i held in `[0, n_e − z_fast]`, an independent n_i capped at `n_e − z_fast` when `Z_imp` is declared, a passive Z_eff aux draw clipped to the window. Auto: on only with a PR #56 opt-in (`fuse_zeff_fast_ions`, an explicitly SET measured `ni_source`, an explicit `ni_subtract_fast=True`) -- never by the `ida_hybrid` default; `False`: only the `zeff_bounds` window (the bound before PR #56). Each clip that fires is counted per draw (`KineticDraw.clips`, `kinetic_sampler/3`) |
+| `kinetic_clips` | `None` (auto) | The PR #56 sampler clips (graduated 2026-10-14, `kinetic_sampler_clips`) -- a drawn Z_eff floored at 1 where `physics.zeff_bounds` allows less, a derived n_i held in `[0, n_e − z_fast]`, an independent n_i capped at `n_e − z_fast` when `Z_imp` is declared, a passive Z_eff aux draw clipped to the window. Auto: on with the measured IDA `ni_source` route in play (the IDA-hybrid default, or a route set explicitly), the beam subtraction resolved on, or `fuse_zeff_fast_ions`; every clip that fires is counted per draw |
 | `sigma_profiles` | `{}` | Explicit `{name: sigma(psi_N)}` envelopes on the kinetic run grid (`psi_N_kinetic`; Φ_N in a `"phi_n"` run), highest precedence |
 | `n_ls` / `t_ls` / `j_ls` | `0.5` / `0.4` / `0.25` | GPR correlation lengths for density / temperature / current, in units of the run coordinate (Φ_N lengths in a `"phi_n"` run; the defaults are not converted) |
 | `aux_sigmas`, `aux_baselines`, `aux_length_scales` | `{}` | The passive switchboard: any extra channel gets perturbed and archived alongside the physics. Arrays on the kinetic run grid; length scales in the run coordinate |
@@ -479,17 +479,6 @@ Validation to do:
 - on >= 5 real beam-heated dd's: the classification against the dd's own j_bootstrap (which numerator reproduces it)
 - I_BS and l_i sensitivity to the fast-ion term on the same dd's
 
-#### `kinetic_sampler_clips` (experimental; introduced PR #56, 1.4.0)
-
-The PR #56 clips in the kinetic sampler: a drawn Z_eff floored at 1 even where physics.zeff_bounds allows less (thermal-numerator Z_eff with a beam), a derived n_i held in [0, n_e - z_fast], an independent n_i capped at n_e - z_fast when Z_imp is declared, and a passive Z_eff aux draw clipped to the same window.  Every clip that fires is counted per draw.  Default: only the Z_eff window physics.zeff_bounds gives (the bound in place before PR #56).
-
-Enabled by: `UncertaintyConfig.kinetic_clips=True`; `UncertaintyConfig.kinetic_clips=None (auto) with fuse_zeff_fast_ions enabled, an explicitly set IDA ni_source route ('Zeff', 'CER', 'all') with an IDA file in play, or an explicit ImasSource.ni_subtract_fast=True`
-
-Validation to do:
-
-- per-clip counts on a real ensemble (KineticDraw.clips): the fraction of draws and nodes each clip moves
-- the bias each clip introduces in the drawn Z_eff, n_i and I_BS distributions against the unclipped draws, same seed
-
 #### `swb_solve_method` (experimental; introduced PR #64 / #69 / #70, 1.4.0)
 
 solve_with_bootstrap as the baseline and every draw on the IMAS path (bouquet.swb): solve A at the setup coil regularisation, solve B regularised toward A's coils, the draws solve B with resampled kinetics; I_p accepted within swb_ip_tol; the edge taper (swb_edge_taper_psi0) opt-in.
@@ -553,6 +542,20 @@ Known limitations (open validation items, kept):
 - Z_eff on axis: the VB+CER mean has not been compared against the CER-only and VB-only routes on the same slices with the route tension (zeff_route_chi) reported
 - the I_BS, l_i(3), q0 and beta_N sensitivity to the route has not been measured on >= 5 real H-mode slices against the dd route and the measurement uncertainties
 - old IDA vintages without Zeff_err ('all' falls to CER alone): not shown that the CER-only Z_eff is no worse than VB on those files
+
+#### `kinetic_sampler_clips` (graduated 2026-10-14 (owner decision): on with the measured route, default included; left the experimental registry with it)
+
+The PR #56 clips in the kinetic sampler: a drawn Z_eff floored at 1 even where physics.zeff_bounds allows less (thermal-numerator Z_eff with a beam), a derived n_i held in [0, n_e - z_fast], an independent n_i capped at n_e - z_fast when Z_imp is declared, and a passive Z_eff aux draw clipped to the same window.  Every clip that fires is counted per draw (KineticDraw.clips).  On (UncertaintyConfig.kinetic_clips=None, auto) with the measured IDA ni_source route in play -- the IDA-hybrid DEFAULT -- the beam subtraction or fuse_zeff_fast_ions; off otherwise; an explicit bool wins.
+
+Evidence:
+
+- the clips change no draw unless they bind, and every clip that fires is counted per draw and archived
+- they ride with the measured IDA route (graduated 2026-10 on the sigma=0 evidence of a reversed-Ip near-double-null slice)
+
+Known limitations (open validation items, kept):
+
+- per-clip counts on a real ensemble (KineticDraw.clips): the fraction of draws and nodes each clip moves
+- the bias each clip introduces in the drawn Z_eff, n_i and I_BS distributions against the unclipped draws, same seed
 
 #### `ida_ni_beam_subtraction` (graduated 2026-10 (owner decision): default with the measured route and include_pfast=True (the #79 rule: the fast ions in p_fast with the subtraction, or both off))
 

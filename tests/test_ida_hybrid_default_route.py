@@ -89,9 +89,9 @@ def test_the_measured_route_is_no_longer_experimental(tmp_path):
         generation=GenerationConfig(kinetic_source="ida_hybrid"),
         uncertainty=UncertaintyConfig())
     # the default IDA-hybrid run enables nothing experimental (the sampler
-    # clips stay opt-in: no clipping beyond the route's own counted clamps)
+    # clips come on with the measured route, default included (owner decision 2026-10-14); every clip is counted
     assert X.experimental_features_enabled(cfg) == []
-    assert X.kinetic_clips_on(cfg) is False
+    assert X.kinetic_clips_on(cfg) is True
 
 
 # ---------------------------------------------------------------------------

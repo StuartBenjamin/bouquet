@@ -90,30 +90,6 @@ REGISTRY = {
             "I_BS and l_i sensitivity to the fast-ion term on the same dd's",
         ],
         status="experimental"),
-    "kinetic_sampler_clips": dict(
-        description=(
-            "The PR #56 clips in the kinetic sampler: a drawn Z_eff floored "
-            "at 1 even where physics.zeff_bounds allows less (thermal-"
-            "numerator Z_eff with a beam), a derived n_i held in "
-            "[0, n_e - z_fast], an independent n_i capped at n_e - z_fast "
-            "when Z_imp is declared, and a passive Z_eff aux draw clipped to "
-            "the same window.  Every clip that fires is counted per draw.  "
-            "Default: only the Z_eff window physics.zeff_bounds gives (the "
-            "bound in place before PR #56)."),
-        enabled_by=["UncertaintyConfig.kinetic_clips=True",
-                    "UncertaintyConfig.kinetic_clips=None (auto) with "
-                    "fuse_zeff_fast_ions enabled, an explicitly set IDA "
-                    "ni_source route ('Zeff', 'CER', 'all') with an IDA "
-                    "file in play, or an explicit "
-                    "ImasSource.ni_subtract_fast=True"],
-        introduced="PR #56, 1.4.0",
-        validation_todo=[
-            "per-clip counts on a real ensemble (KineticDraw.clips): the "
-            "fraction of draws and nodes each clip moves",
-            "the bias each clip introduces in the drawn Z_eff, n_i and I_BS "
-            "distributions against the unclipped draws, same seed",
-        ],
-        status="experimental"),
     "swb_solve_method": dict(
         description=(
             "solve_with_bootstrap as the baseline and every draw on the IMAS "
@@ -225,6 +201,32 @@ GRADUATED = {
             "not shown that the CER-only Z_eff is no worse than VB on those "
             "files",
         ]),
+    "kinetic_sampler_clips": dict(
+        description=(
+            "The PR #56 clips in the kinetic sampler: a drawn Z_eff floored "
+            "at 1 even where physics.zeff_bounds allows less (thermal-"
+            "numerator Z_eff with a beam), a derived n_i held in "
+            "[0, n_e - z_fast], an independent n_i capped at n_e - z_fast "
+            "when Z_imp is declared, and a passive Z_eff aux draw clipped to "
+            "the same window.  Every clip that fires is counted per draw "
+            "(KineticDraw.clips).  On (UncertaintyConfig.kinetic_clips=None, "
+            "auto) with the measured IDA ni_source route in play -- the "
+            "IDA-hybrid DEFAULT -- the beam subtraction or "
+            "fuse_zeff_fast_ions; off otherwise; an explicit bool wins."),
+        graduated=("2026-10-14 (owner decision): on with the measured route, "
+                   "default included; left the experimental registry with it"),
+        evidence=[
+            "the clips change no draw unless they bind, and every clip that "
+            "fires is counted per draw and archived",
+            "they ride with the measured IDA route (graduated 2026-10 on the "
+            "sigma=0 evidence of a reversed-Ip near-double-null slice)",
+        ],
+known_limitations=[
+            "per-clip counts on a real ensemble (KineticDraw.clips): the "
+            "fraction of draws and nodes each clip moves",
+            "the bias each clip introduces in the drawn Z_eff, n_i and I_BS "
+            "distributions against the unclipped draws, same seed",
+        ],),
     "ida_ni_beam_subtraction": dict(
         description=(
             "ida_hybrid on a measured route: subtract the dd's fast-ion "
@@ -335,21 +337,20 @@ def ida_ni_beam_subtraction_on(source, kinetic_source=None) -> bool:
 
 def kinetic_clips_on(config) -> bool:
     """``UncertaintyConfig.kinetic_clips`` resolved: an explicit bool wins;
-    ``None`` (auto) follows the PR #56 opt-ins -- on with
-    ``fuse_zeff_fast_ions``, an explicitly SET measured ``ni_source`` with an
-    IDA file in play, or an explicit ``ImasSource.ni_subtract_fast=True``.
-    The IDA-hybrid DEFAULT (``ni_source="auto"`` -> the measured route,
-    ``ni_subtract_fast=None``) does not turn them on: the default clips
-    nothing beyond the route's own counted clamps."""
+    ``None`` (auto) is on whenever a kinetic route that can draw outside the
+    physical window is in play -- the measured IDA ``ni_source`` route
+    (resolved, so the IDA-hybrid DEFAULT counts; owner decision 2026-10-14),
+    the beam subtraction (resolved), or ``fuse_zeff_fast_ions``.  Every clip
+    that fires is counted per draw, so the default changes nothing unless a
+    clip binds, and then the archive says so."""
     unc = getattr(config, "uncertainty", None)
     v = getattr(unc, "kinetic_clips", None)
     if v is not None:
         return bool(v)
     src = getattr(config, "source", None)
-    from .config import ImasSource
-    return (_explicit_ida_ion_route(src, unc) or fuse_zeff_fast_ions_on(src)
-            or (isinstance(src, ImasSource)
-                and getattr(src, "ni_subtract_fast", None) is True))
+    ks = getattr(getattr(config, "generation", None), "kinetic_source", None)
+    return (ida_ion_route_on(src, unc, ks) or fuse_zeff_fast_ions_on(src)
+            or ida_ni_beam_subtraction_on(src, ks))
 
 
 def ida_fuse_timing_on(source, uncertainty=None) -> bool:
@@ -373,7 +374,6 @@ def _swb_on(config) -> bool:
 _PREDICATES = {
     "fuse_zeff_fast_ions": lambda c: fuse_zeff_fast_ions_on(
         getattr(c, "source", None)),
-    "kinetic_sampler_clips": kinetic_clips_on,
     "swb_solve_method": _swb_on,
     "bootstrap_convergence_override": lambda c: bool(getattr(
         getattr(c, "generation", None), "bootstrap_convergence_override",

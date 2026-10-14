@@ -55,12 +55,12 @@ def test_every_record_is_complete():
 
 def test_the_registered_features():
     assert list(X.REGISTRY) == [
-        "fuse_zeff_fast_ions", "kinetic_sampler_clips", "swb_solve_method",
+        "fuse_zeff_fast_ions", "swb_solve_method",
         "bootstrap_convergence_override", "ida_fuse_timing"]
-    # the measured IDA route and the beam subtraction left the registry
+    # the measured IDA route, the beam subtraction and the sampler clips left the registry
     # (owner decision 2026-10: the ida_hybrid default), their open items
     # kept as known limitations
-    assert list(X.GRADUATED) == ["ida_ion_route", "ida_ni_beam_subtraction"]
+    assert list(X.GRADUATED) == ["ida_ion_route", "kinetic_sampler_clips", "ida_ni_beam_subtraction"]
     for r in X.GRADUATED.values():
         assert r["known_limitations"] and r["evidence"] and r["graduated"]
     # the eps default (PR #60 E4/E7, r_over_R_geo) is a declared physics change,
@@ -100,49 +100,52 @@ def test_defaults_enable_nothing(tmp_path):
 
 @pytest.mark.parametrize("route", ["Zeff", "CER", "all"])
 def test_an_explicit_ida_route_still_enables_the_clips(tmp_path, route):
-    """The measured route is no longer experimental; SETTING it is still the
-    PR #56 opt-in the sampler clips' auto rule follows."""
-    on = X.experimental_features_enabled(_recon(tmp_path, ni_source=route))
-    assert on == ["kinetic_sampler_clips"]
+    """The measured route and the clips that ride with it are graduated:
+    nothing experimental, the clips on."""
+    cfg = _recon(tmp_path, ni_source=route)
+    assert X.experimental_features_enabled(cfg) == []
+    assert X.kinetic_clips_on(cfg) is True
 
 
 def test_an_ida_route_without_an_ida_file_is_inert(tmp_path):
     cfg = _recon(tmp_path, profiles="p.peqdsk", ni_source="all")
     assert X.experimental_features_enabled(cfg) == []
+    assert X.kinetic_clips_on(cfg) is False
     cfg.uncertainty.ida_path = str(tmp_path / "sig.cdf")   # now an IDA is in play
-    assert X.experimental_features_enabled(cfg) == ["kinetic_sampler_clips"]
+    assert X.experimental_features_enabled(cfg) == []
+    assert X.kinetic_clips_on(cfg) is True
 
 
 def test_the_ida_hybrid_default_enables_nothing(tmp_path):
     """ni_source="auto" resolves to the measured route on ida_hybrid and the
     beam subtraction follows include_pfast: neither is experimental, and the
-    default does not turn the sampler clips on."""
+    sampler clips come on with them (graduated 2026-10-14)."""
     cfg = _imas(tmp_path, gen=GenerationConfig(kinetic_source="ida_hybrid"),
                 ida_path=str(tmp_path / "i.cdf"))
     assert X.ida_ion_route_on(cfg.source, cfg.uncertainty,
                               kinetic_source="ida_hybrid") is True
     assert X.ida_ni_beam_subtraction_on(cfg.source, "ida_hybrid") is True
     assert X.experimental_features_enabled(cfg) == []
+    assert X.kinetic_clips_on(cfg) is True
 
 
 def test_each_imas_switch(tmp_path):
     cdf = str(tmp_path / "i.cdf")
     assert X.experimental_features_enabled(
-        _imas(tmp_path, zeff_fast_ions=True)) == [
-        "fuse_zeff_fast_ions", "kinetic_sampler_clips"]
+        _imas(tmp_path, zeff_fast_ions=True)) == ["fuse_zeff_fast_ions"]
+    assert X.kinetic_clips_on(_imas(tmp_path, zeff_fast_ions=True)) is True
     assert X.experimental_features_enabled(
         _imas(tmp_path, ida_path=cdf, ni_source="all",
-              ni_subtract_fast=True)) == ["kinetic_sampler_clips"]
+              ni_subtract_fast=True)) == []
 
 
 def test_explicit_clips_win_over_auto(tmp_path):
-    assert X.experimental_features_enabled(_imas(
-        tmp_path, unc=UncertaintyConfig(kinetic_clips=True))) == [
-        "kinetic_sampler_clips"]
-    on = X.experimental_features_enabled(_imas(
-        tmp_path, unc=UncertaintyConfig(kinetic_clips=False),
-        zeff_fast_ions=True))
-    assert on == ["fuse_zeff_fast_ions"]
+    cfg = _imas(tmp_path, unc=UncertaintyConfig(kinetic_clips=True))
+    assert X.experimental_features_enabled(cfg) == []      # graduated: never experimental
+    assert X.kinetic_clips_on(cfg) is True
+    cfg = _imas(tmp_path, unc=UncertaintyConfig(kinetic_clips=False), zeff_fast_ions=True)
+    assert X.experimental_features_enabled(cfg) == ["fuse_zeff_fast_ions"]
+    assert X.kinetic_clips_on(cfg) is False
 
 
 def test_swb_and_the_convergence_override(tmp_path):
@@ -197,10 +200,10 @@ def test_the_warning_names_the_feature_and_its_todo(tmp_path):
     cfg = _imas(tmp_path, zeff_fast_ions=True)
     with pytest.warns(X.ExperimentalFeatureWarning) as rec:
         on = X.warn_experimental_features(cfg)
-    assert on == ["fuse_zeff_fast_ions", "kinetic_sampler_clips"]
+    assert on == ["fuse_zeff_fast_ions"]
     msgs = [str(w.message) for w in rec
             if issubclass(w.category, X.ExperimentalFeatureWarning)]
-    assert len(msgs) == 2
+    assert len(msgs) == 1                      # the clips it switches on are graduated: no second warning
     for k, m in zip(on, msgs):
         assert repr(k) in m
         assert X.REGISTRY[k]["validation_todo"][0] in m
@@ -237,7 +240,7 @@ def test_prepare_baseline_warns_and_records(tmp_path, monkeypatch, opt_in):
         assert b.prepare_baseline() is stub
     got = [str(w.message) for w in rec
            if issubclass(w.category, X.ExperimentalFeatureWarning)]
-    want = ["kinetic_sampler_clips"] if opt_in else []
+    want = []                                   # the clips are graduated: no warning either way
     assert len(got) == len(want)
     assert stub.experimental_features == want
     assert stub.engine["experimental_features"] == want
@@ -275,7 +278,7 @@ def test_the_archive_records_the_enabled_features(tmp_path, toy_bouquet_solver,
             warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
         b.prepare_baseline()
-    want = ["kinetic_sampler_clips"] if clips else []
+    want = []                                   # the clips are graduated: no warning either way
     assert b.baseline.experimental_features == want
     assert b.baseline.engine["experimental_features"] == want
     assert len([w for w in rec if issubclass(
