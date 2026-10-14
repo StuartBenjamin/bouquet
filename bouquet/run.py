@@ -215,7 +215,7 @@ class Bouquet(SwbBaseline):
                   n_draws=20, header="bouquet",
                   ida_path=None, LCFS_geqdsk=None, impurity_Z=6.0,
                   ni_source="all", zeff_from_fuse=False,
-                  zeff_fast_ions=True, ni_subtract_fast=True,
+                  zeff_fast_ions=True, ni_subtract_fast=None,
                   kinetic_source=None, anchor_pressure_to_equilibrium=False,
                   reconstruction_engine=None, solve_method=None,
                   **solver_kwargs) -> "Bouquet":
@@ -229,7 +229,7 @@ class Bouquet(SwbBaseline):
         fits while keeping FUSE currents/equilibrium.  With
         ``ni_source="standard"`` Z_eff stays the dd's and n_i follows from it
         and the IDA n_e (PSFC_dev defaults: ``ni_source="all"``,
-        ``ni_subtract_fast=True``, ``zeff_fast_ions=True``).  EXPERIMENTAL
+        ``ni_subtract_fast=None`` (auto), ``zeff_fast_ions=True``).  EXPERIMENTAL
         (``bouquet.experimental.REGISTRY``): ``ni_source`` "Zeff"/"CER"/"all"
         takes Z_eff and n_i from IDA (``zeff_from_fuse=True`` keeps the dd's
         Z_eff), ``ni_subtract_fast=True`` subtracts the dd's beam density from

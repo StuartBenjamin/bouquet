@@ -2522,7 +2522,7 @@ def read_imas_baseline(
 
     _pfast_in = bool(getattr(source, "include_pfast", True))
     if _ida_ion_route and np.any(p_fast) and \
-            bool(getattr(source, "ni_subtract_fast", False)) != _pfast_in:
+            ida_ni_beam_subtraction_on(source) != _pfast_in:
         import warnings
         warnings.warn(
             f"ImasSource.ni_subtract_fast={not _pfast_in} with include_pfast={_pfast_in} on a "

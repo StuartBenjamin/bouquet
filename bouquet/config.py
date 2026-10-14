@@ -337,9 +337,10 @@ class ImasSource:
     # EXPERIMENTAL -- see
     # bouquet.experimental.REGISTRY["ida_ni_beam_subtraction"].  ida_hybrid
     # with an experimental ni_source: subtract the dd's fast-ion density
-    # equivalent from the IDA (total) n_i.  False: no subtraction.  PSFC_dev: True by
-    # default.
-    ni_subtract_fast: bool = True
+    # equivalent from the IDA (total) n_i.  False: no subtraction.  PSFC_dev: None
+    # (default) subtracts where it can (experimental.ida_ni_beam_subtraction_on: an IDA
+    # file and an experimental ni_source); an explicit True elsewhere is refused.
+    ni_subtract_fast: Optional[bool] = None
     # Add the dd's fast-ion pressure p_fast to the equilibrium pressure (default).  With
     # an experimental ni_source on ida_hybrid, match it to ni_subtract_fast: the fast ions
     # in p_fast (both True) or inside the IDA n_i (both False); the reader warns otherwise.
@@ -356,7 +357,8 @@ class ImasSource:
             raise ValueError(f"ImasSource.ida_timing={self.ida_timing!r} must be one of "
                              f"{IDA_TIMINGS}")
         for _n in ("zeff_fast_ions", "ni_subtract_fast", "include_pfast"):
-            if not isinstance(getattr(self, _n), bool):
+            if not isinstance(getattr(self, _n), bool) and not (
+                    _n == "ni_subtract_fast" and self.ni_subtract_fast is None):
                 raise ValueError(f"ImasSource.{_n}={getattr(self, _n)!r}: "
                                  "must be True or False")
         if self.ni_subtract_fast and self.ni_source == "standard":

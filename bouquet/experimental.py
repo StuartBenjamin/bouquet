@@ -247,11 +247,14 @@ def fuse_zeff_fast_ions_on(source) -> bool:
         getattr(source, "zeff_fast_ions", False))
 
 
-def ida_ni_beam_subtraction_on(source) -> bool:
-    """:data:`REGISTRY` ``"ida_ni_beam_subtraction"``."""
+def ida_ni_beam_subtraction_on(source, uncertainty=None) -> bool:
+    """:data:`REGISTRY` ``"ida_ni_beam_subtraction"``: ``ni_subtract_fast``, with ``None``
+    (auto) on where the IDA ion route is (:func:`ida_ion_route_on`)."""
     from .config import ImasSource
-    return isinstance(source, ImasSource) and bool(
-        getattr(source, "ni_subtract_fast", False))
+    if not isinstance(source, ImasSource):
+        return False
+    v = getattr(source, "ni_subtract_fast", False)
+    return ida_ion_route_on(source, uncertainty) if v is None else bool(v)
 
 
 def kinetic_clips_on(config) -> bool:
@@ -265,7 +268,7 @@ def kinetic_clips_on(config) -> bool:
         return bool(v)
     src = getattr(config, "source", None)
     return (ida_ion_route_on(src, unc) or fuse_zeff_fast_ions_on(src)
-            or ida_ni_beam_subtraction_on(src))
+            or ida_ni_beam_subtraction_on(src, unc))
 
 
 def ida_fuse_timing_on(source, uncertainty=None) -> bool:
@@ -292,7 +295,7 @@ _PREDICATES = {
     "fuse_zeff_fast_ions": lambda c: fuse_zeff_fast_ions_on(
         getattr(c, "source", None)),
     "ida_ni_beam_subtraction": lambda c: ida_ni_beam_subtraction_on(
-        getattr(c, "source", None)),
+        getattr(c, "source", None), getattr(c, "uncertainty", None)),
     "kinetic_sampler_clips": kinetic_clips_on,
     "swb_solve_method": _swb_on,
     "bootstrap_convergence_override": lambda c: bool(getattr(
