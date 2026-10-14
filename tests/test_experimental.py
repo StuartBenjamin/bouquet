@@ -55,9 +55,14 @@ def test_every_record_is_complete():
 
 def test_the_registered_features():
     assert list(X.REGISTRY) == [
-        "ida_ion_route", "fuse_zeff_fast_ions", "ida_ni_beam_subtraction",
-        "kinetic_sampler_clips", "swb_solve_method",
+        "fuse_zeff_fast_ions", "kinetic_sampler_clips", "swb_solve_method",
         "bootstrap_convergence_override", "ida_fuse_timing"]
+    # the measured IDA route and the beam subtraction left the registry
+    # (owner decision 2026-10: the ida_hybrid default), their open items
+    # kept as known limitations
+    assert list(X.GRADUATED) == ["ida_ion_route", "ida_ni_beam_subtraction"]
+    for r in X.GRADUATED.values():
+        assert r["known_limitations"] and r["evidence"] and r["graduated"]
     # the eps default (PR #60 E4/E7, r_over_R_geo) is a declared physics change,
     # not an experimental feature
     assert not [k for k in X.REGISTRY if "eps" in k]
@@ -75,6 +80,14 @@ def test_docs_and_registry_agree():
     assert keys == set(X.REGISTRY)
 
 
+def test_docs_and_graduated_agree():
+    """docs/workflows.md carries exactly the known-limitations block
+    generated from GRADUATED."""
+    text = open(WORKFLOWS, encoding="utf-8").read()
+    i, j = text.index(X.GRADUATED_BEGIN), text.index(X.GRADUATED_END)
+    assert text[i:j + len(X.GRADUATED_END)] == X.graduated_markdown()
+
+
 # ---------------------------------------------------------------------------
 #  which configurations enable what
 # ---------------------------------------------------------------------------
@@ -86,16 +99,30 @@ def test_defaults_enable_nothing(tmp_path):
 
 
 @pytest.mark.parametrize("route", ["Zeff", "CER", "all"])
-def test_an_ida_route_enables_the_route_and_the_clips(tmp_path, route):
+def test_an_explicit_ida_route_still_enables_the_clips(tmp_path, route):
+    """The measured route is no longer experimental; SETTING it is still the
+    PR #56 opt-in the sampler clips' auto rule follows."""
     on = X.experimental_features_enabled(_recon(tmp_path, ni_source=route))
-    assert on == ["ida_ion_route", "kinetic_sampler_clips"]
+    assert on == ["kinetic_sampler_clips"]
 
 
 def test_an_ida_route_without_an_ida_file_is_inert(tmp_path):
     cfg = _recon(tmp_path, profiles="p.peqdsk", ni_source="all")
     assert X.experimental_features_enabled(cfg) == []
     cfg.uncertainty.ida_path = str(tmp_path / "sig.cdf")   # now an IDA is in play
-    assert "ida_ion_route" in X.experimental_features_enabled(cfg)
+    assert X.experimental_features_enabled(cfg) == ["kinetic_sampler_clips"]
+
+
+def test_the_ida_hybrid_default_enables_nothing(tmp_path):
+    """ni_source="auto" resolves to the measured route on ida_hybrid and the
+    beam subtraction follows include_pfast: neither is experimental, and the
+    default does not turn the sampler clips on."""
+    cfg = _imas(tmp_path, gen=GenerationConfig(kinetic_source="ida_hybrid"),
+                ida_path=str(tmp_path / "i.cdf"))
+    assert X.ida_ion_route_on(cfg.source, cfg.uncertainty,
+                              kinetic_source="ida_hybrid") is True
+    assert X.ida_ni_beam_subtraction_on(cfg.source, "ida_hybrid") is True
+    assert X.experimental_features_enabled(cfg) == []
 
 
 def test_each_imas_switch(tmp_path):
@@ -105,8 +132,7 @@ def test_each_imas_switch(tmp_path):
         "fuse_zeff_fast_ions", "kinetic_sampler_clips"]
     assert X.experimental_features_enabled(
         _imas(tmp_path, ida_path=cdf, ni_source="all",
-              ni_subtract_fast=True)) == [
-        "ida_ion_route", "ida_ni_beam_subtraction", "kinetic_sampler_clips"]
+              ni_subtract_fast=True)) == ["kinetic_sampler_clips"]
 
 
 def test_explicit_clips_win_over_auto(tmp_path):
@@ -168,10 +194,10 @@ def test_ni_source_is_validated(tmp_path):
 #  warning, baseline record, archive stamp
 # ---------------------------------------------------------------------------
 def test_the_warning_names_the_feature_and_its_todo(tmp_path):
-    cfg = _recon(tmp_path, ni_source="all")
+    cfg = _imas(tmp_path, zeff_fast_ions=True)
     with pytest.warns(X.ExperimentalFeatureWarning) as rec:
         on = X.warn_experimental_features(cfg)
-    assert on == ["ida_ion_route", "kinetic_sampler_clips"]
+    assert on == ["fuse_zeff_fast_ions", "kinetic_sampler_clips"]
     msgs = [str(w.message) for w in rec
             if issubclass(w.category, X.ExperimentalFeatureWarning)]
     assert len(msgs) == 2
@@ -211,7 +237,7 @@ def test_prepare_baseline_warns_and_records(tmp_path, monkeypatch, opt_in):
         assert b.prepare_baseline() is stub
     got = [str(w.message) for w in rec
            if issubclass(w.category, X.ExperimentalFeatureWarning)]
-    want = ["ida_ion_route", "kinetic_sampler_clips"] if opt_in else []
+    want = ["kinetic_sampler_clips"] if opt_in else []
     assert len(got) == len(want)
     assert stub.experimental_features == want
     assert stub.engine["experimental_features"] == want

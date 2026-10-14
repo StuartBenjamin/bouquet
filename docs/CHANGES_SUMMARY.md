@@ -1,5 +1,60 @@
 # Bouquet — change summaries
 
+## Unreleased — IDA-hybrid: the IDA file's own Z_eff is the default (numbers move on every IDA-hybrid run)
+
+**Default change (owner decision): one thermal-kinetics source per run.** When an
+IDA file supplies the kinetics (`kinetic_source="ida_hybrid"`), Z_eff and n_i now
+come from that file too. `ImasSource.ni_source` defaults to `"auto"`, which
+resolves to the measured IDA route `"all"` on `ida_hybrid` (the VB+CER mean where
+both routes have an envelope, else whichever does; each clamped to `[1, Z]` with
+the clamped nodes counted, as before) and to `"standard"` with FUSE kinetics.
+Before, `ida_hybrid` kept the dd's Z_eff with the IDA n_e/T_e/T_i. The dd's Z_eff
+is now an explicit choice: `ni_source="standard"` (n_i from the dd's Z_eff and
+the IDA n_e, the previous default) or `zeff_from_fuse=True`. `from_imas` follows
+(`ni_source="auto"`, `ni_subtract_fast=None`). `ReconstructionSource.ni_source`
+(g-file + IDA) keeps `"standard"`, which is already the IDA file's own VB Z_eff.
+
+**Numbers move on every IDA-hybrid run**: the baseline Z_eff, n_i, Z_imp and
+the impurity pressure, hence the bootstrap, I_BS, l_i, q0 and beta of the
+reconstruction and of every draw; the Z_eff / n_i sigma envelopes (the
+IDA-resolved tier and the PR #56 `ni_from_zeff` auto rule now apply);
+`Baseline.zeff_includes_fast` becomes True (a measured Z_eff). On two real
+slices the dd's Z_eff was 0.78x and 3.9x the IDA file's (median over
+psi_N <= 0.9). A stored config that carries `ni_source="standard"` (every config
+stored before this change) reproduces what it ran.
+
+**Fast ions: the one declared cross-source input.** The dd's fast-ion pressure
+still enters (`include_pfast=True`). `ImasSource.ni_subtract_fast` now defaults to
+`None`, which follows `include_pfast` on the IDA-hybrid measured route (the #79
+rule): **the fast ions in `p_fast`, with the dd's beam density subtracted from
+the IDA (total) n_i**, so they are counted once and the "counted twice" warning
+no longer fires on the default. Set `include_pfast=False` to keep them inside the
+IDA n_i instead (the subtraction then follows it off). Explicit `True` / `False`
+win; `True` on the dd route is refused.
+
+**Refusal.** An IDA file with no Z_eff information at all (no `Zeff` and no
+`n_12C6`) is refused on the `ida_hybrid` default, with a message naming
+`ni_source="standard"` and `zeff_from_fuse=True` as the explicit choices; no
+silent fallback. Those choices read such a file (the dd's Z_eff stands in for
+the missing `Zeff` in the reader's own n_i derivation, stamped in
+`zeff_provenance`). A file with `n_12C6` but no `Zeff` takes the CER route alone.
+
+**Left the experimental registry.** `ida_ion_route` (the measured route) and
+`ida_ni_beam_subtraction` are no longer in `bouquet.experimental.REGISTRY`; they
+are listed in `bouquet.experimental.GRADUATED` with the evidence and their
+former validation items kept as KNOWN LIMITATIONS (docs/workflows.md, "Graduated
+features and their known limitations"). No `ExperimentalFeatureWarning` for
+them. The sampler clips (`kinetic_sampler_clips`) stay experimental and are not
+turned on by the default: their auto rule follows only an explicitly SET
+measured `ni_source`, `zeff_fast_ions`, or an explicit `ni_subtract_fast=True`
+(every explicit configuration behaves as before).
+
+**Stamped, warning-free.** Every IMAS baseline carries
+`li_metrics["zeff_source"]` (`"ida"` / `"dd"`) and `li_metrics["kinetics_route"]`
+(the `ni_source` setting and its resolution, `zeff_from_fuse`,
+`ni_subtract_fast` setting and resolution, `include_pfast`, whether the IDA file
+carries `Zeff` / `n_12C6`, and the cross-source inputs in words).
+
 ## Unreleased — the engine draws hold the reconstruction's isoflux (numbers move on every engine draw)
 
 **What moves (owner decision).** Every unified-engine draw's homotopy now holds

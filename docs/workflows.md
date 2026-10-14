@@ -11,6 +11,7 @@ controls it. See [`../README.md`](../README.md) for the short version and
 - [What is perturbed vs. held fixed](#what-is-perturbed-vs-held-fixed)
 - [Configuration reference](#configuration-reference)
 - [Experimental features and their validation status](#experimental-features-and-their-validation-status)
+- [Graduated features and their known limitations](#graduated-features-and-their-known-limitations)
 - [until-N in-spec draws](#until-n-in-spec-draws)
 - [Workflow presets and the guard](#workflow-presets-and-the-guard)
 - [Reading an archive back](#reading-an-archive-back)
@@ -121,14 +122,14 @@ is a navigational summary of the defaults.
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `ReconstructionSource.ni_source` | `"standard"` | IDA `.cdf` profiles: where Z_eff and n_i come from. `"standard"` (the route before PR #56): Z_eff is the file's visible-bremsstrahlung value, n_i = n_e(Z − Z_eff)/(Z − 1) at Z_eff clamped to `[1, Z]`, σ_ni the n_e fraction; the Z_eff envelope comes from the carbon > VB > scalar ladder below. **EXPERIMENTAL** (see [Experimental features](#experimental-features-and-their-validation-status), `ida_ion_route`): `"Zeff"` = the VB Z_eff with a propagated σ_ni; `"CER"` = `Z_eff = 1 + Z(Z−1)·n_C/n_e` from the measured `n_12C6` (needs `impurity_Z=6`); `"all"` = the equal-weight mean of the two, each clamped to `[1, Z]` first, their disagreement beyond σ added to σ_ni / σ_Zeff (a file lacking one route's envelope uses the other **alone**: an older vintage without `Zeff_err` gets the CER value). Recorded as `IDAProfiles.zeff_provenance`. Ignored for p-files |
-| `ImasSource.ni_source` | `"standard"` | The same choice for `ida_hybrid`. `"standard"`: Z_eff stays the dd's and n_i = n_e,IDA(Z − Z_eff,dd)/(Z − 1). **EXPERIMENTAL** `"Zeff"` / `"CER"` / `"all"` (`ida_ion_route`): Z_eff and n_i from IDA |
-| `ImasSource.zeff_from_fuse` | `False` | `ida_hybrid` with an experimental `ni_source` only: `True` keeps the dd's Z_eff while n_e/T_e/T_i/n_i come from IDA. Under `"standard"` the Z_eff is the dd's anyway |
-| `ImasSource.ni_subtract_fast` | `False` | **EXPERIMENTAL** (`ida_ni_beam_subtraction`): `ida_hybrid` with an experimental `ni_source`: subtract the dd's fast-ion density equivalent from IDA's (total) n_i. Refused with `ni_source="standard"` |
-| `ImasSource.include_pfast` | `True` | Add the dd's fast-ion pressure `p_fast` to the equilibrium pressure (an explicit `FixedComponentsConfig.p_fast` still wins). With an experimental `ni_source` on `ida_hybrid`, match it to `ni_subtract_fast`: both `True` puts the fast ions in `p_fast`, both `False` leaves them inside the IDA n_i; on a beam slice the reader warns when they differ (fast ions counted twice, or left out) |
+| `ReconstructionSource.ni_source` | `"standard"` | IDA `.cdf` profiles: where Z_eff and n_i come from. `"standard"` (the route before PR #56): Z_eff is the file's visible-bremsstrahlung value, n_i = n_e(Z − Z_eff)/(Z − 1) at Z_eff clamped to `[1, Z]`, σ_ni the n_e fraction; the Z_eff envelope comes from the carbon > VB > scalar ladder below. The measured routes (no longer experimental since 2026-10; [known limitations](#graduated-features-and-their-known-limitations), `ida_ion_route`): `"Zeff"` = the VB Z_eff with a propagated σ_ni; `"CER"` = `Z_eff = 1 + Z(Z−1)·n_C/n_e` from the measured `n_12C6` (needs `impurity_Z=6`); `"all"` = the equal-weight mean of the two, each clamped to `[1, Z]` first, their disagreement beyond σ added to σ_ni / σ_Zeff (a file lacking one route's envelope uses the other **alone**: an older vintage without `Zeff_err` gets the CER value). Recorded as `IDAProfiles.zeff_provenance`. Ignored for p-files |
+| `ImasSource.ni_source` | `"auto"` | The same choice for the IMAS path. **`"auto"` (default since 2026-10): ONE thermal-kinetics source per run** -- on `ida_hybrid` it resolves to the measured IDA route `"all"` (Z_eff and n_i from the IDA file: the VB+CER mean where both routes have an envelope, else whichever does, each clamped to `[1, Z]` and counted); with FUSE kinetics to `"standard"`. An IDA file with no Z_eff information (no `Zeff`, no `n_12C6`) is **refused** on `ida_hybrid`, naming the explicit choices. `"standard"` (the default before 2026-10, an explicit choice now): Z_eff stays the dd's and n_i = n_e,IDA(Z − Z_eff,dd)/(Z − 1). `"Zeff"` / `"CER"` / `"all"`: that measured route explicitly. The route taken is stamped warning-free: `li_metrics["zeff_source"]` (`"ida"` / `"dd"`) and `li_metrics["kinetics_route"]` |
+| `ImasSource.zeff_from_fuse` | `False` | `ida_hybrid` on a measured route: `True` keeps the dd's Z_eff (an explicit choice of the dd's Z_eff) while n_e/T_e/T_i/n_i come from IDA (on a file with no Z_eff information n_i then follows the dd's Z_eff too). Under `"standard"` the Z_eff is the dd's anyway |
+| `ImasSource.ni_subtract_fast` | `None` (auto) | `ida_hybrid` on a measured route: subtract the dd's fast-ion density equivalent from IDA's (total) n_i (no longer experimental since 2026-10; [known limitations](#graduated-features-and-their-known-limitations), `ida_ni_beam_subtraction`). `None`: follows `include_pfast` on that route (the #79 rule: the fast ions in `p_fast` with the subtraction, or both off), `False` elsewhere. `True` with `ni_source="standard"` (or on FUSE kinetics) is refused |
+| `ImasSource.include_pfast` | `True` | Add the dd's fast-ion pressure `p_fast` to the equilibrium pressure (an explicit `FixedComponentsConfig.p_fast` still wins). On `ida_hybrid` the **one declared cross-source input** (the IDA fits carry no fast ions). On a measured `ni_source` match it to `ni_subtract_fast` (the default does): both `True` puts the fast ions in `p_fast`, both `False` leaves them inside the IDA n_i; on a beam slice the reader warns when they differ (fast ions counted twice, or left out) |
 | `ImasSource.zeff_fast_ions` | `False` | **EXPERIMENTAL** (`fuse_zeff_fast_ions`): classify the dd's stored Z_eff against the thermal-only and thermal+fast numerators (`io.imas._dd_zeff`) and give the bootstrap `Z_eff,th + z2_fast/n_e` where it counts the fast ions. `False`: the thermal-only Z_eff recomputed from the dd's thermal ion densities (as before PR #56). The decision is archived as `li_metrics["zeff_dd_provenance"]` |
 | `Baseline.z2_fast` | — (read) | Σ_s Z_s² n_s^fast on the kinetic grid, from the dd's fast-ion species (IMAS path); `None` without a fast population. Archived per draw with `z_fast` |
-| `Baseline.zeff_includes_fast` | — (read) | Whether the baseline Z_eff's numerator counts the fast ions. `False` by default; with `ImasSource.zeff_fast_ions=True` classified from the dd's stored `zeff` against both numerators (`io.imas._dd_zeff`; with no stored Z_eff and a beam, `True`), and `True` for a measured (IDA) Z_eff on the experimental `ida_hybrid` route. When `True`, the bootstrap sees `Z_eff,th + z2_fast/n_e` (since PR #56; see [physics-notes.md](physics-notes.md#kinetic-assumptions-z_eff-n_i-and-the-clips-pr-56)) and the draw window is `physics.zeff_bounds`' includes-fast one |
+| `Baseline.zeff_includes_fast` | — (read) | Whether the baseline Z_eff's numerator counts the fast ions. `False` by default; with `ImasSource.zeff_fast_ions=True` classified from the dd's stored `zeff` against both numerators (`io.imas._dd_zeff`; with no stored Z_eff and a beam, `True`), and `True` for a measured (IDA) Z_eff on the `ida_hybrid` measured route (the default; not with `zeff_from_fuse=True`). When `True`, the bootstrap sees `Z_eff,th + z2_fast/n_e` (since PR #56; see [physics-notes.md](physics-notes.md#kinetic-assumptions-z_eff-n_i-and-the-clips-pr-56)) and the draw window is `physics.zeff_bounds`' includes-fast one |
 
 `read_ida(sigma_ni_from_ne=...)` is accepted as a deprecated no-op (it warns);
 `UncertaintyConfig.sigma_ni_from_ne` was removed (it was already a no-op), and a
@@ -148,8 +149,8 @@ stored config carrying it still loads.
 | `jphi_scalar_sigma` | `0.10` | Inductive-current envelope. **Must be > 0** — setting it to 0 freezes `j_inductive` and trips the workflow guard |
 | `zeff_scalar_sigma` | `0.05` | One Z_eff perturbation per draw; n_i / n_z follow from quasi-neutrality. Also the width of the bottom tier below |
 | `zeff_sigma_source` | `"auto"` | Which tier supplies the Z_eff envelope's **magnitude**: `"auto"` / `"carbon"` / `"measured"` / `"scalar"` — see the ladder below |
-| `ni_from_zeff` | `None` (auto) | With the Z_eff channel on: `True` derives n_i per draw from the drawn (n_e, Z_eff) as an increment on the baseline n_i; `False` draws n_i from its own σ and Z_eff passively after T_i (different RNG order). Auto: `True` (n_i always derived, as before PR #56). With an **experimental** `ni_source` (`ida_ion_route`) auto is the PR #56 rule: `True` when n_i's σ is the scalar fallback, or n_i and the Z_eff envelope are the same IDA resolution (tier `"IDA-resolved"`); `False` for any other real n_i envelope. That rule follows the Z_eff tier: pin it for an A/B of Z_eff envelopes |
-| `kinetic_clips` | `None` (auto) | **EXPERIMENTAL** (`kinetic_sampler_clips`): the PR #56 sampler clips -- a drawn Z_eff floored at 1 where `physics.zeff_bounds` allows less, a derived n_i held in `[0, n_e − z_fast]`, an independent n_i capped at `n_e − z_fast` when `Z_imp` is declared, a passive Z_eff aux draw clipped to the window. Auto: on only when a PR #56 kinetic feature is (`ida_ion_route`, `fuse_zeff_fast_ions`, `ida_ni_beam_subtraction`); `False`: only the `zeff_bounds` window (the bound before PR #56). Each clip that fires is counted per draw (`KineticDraw.clips`, `kinetic_sampler/3`) |
+| `ni_from_zeff` | `None` (auto) | With the Z_eff channel on: `True` derives n_i per draw from the drawn (n_e, Z_eff) as an increment on the baseline n_i; `False` draws n_i from its own σ and Z_eff passively after T_i (different RNG order). Auto: `True` (n_i always derived, as before PR #56). On a measured `ni_source` (the `ida_hybrid` default) auto is the PR #56 rule: `True` when n_i's σ is the scalar fallback, or n_i and the Z_eff envelope are the same IDA resolution (tier `"IDA-resolved"`); `False` for any other real n_i envelope. That rule follows the Z_eff tier: pin it for an A/B of Z_eff envelopes |
+| `kinetic_clips` | `None` (auto) | **EXPERIMENTAL** (`kinetic_sampler_clips`): the PR #56 sampler clips -- a drawn Z_eff floored at 1 where `physics.zeff_bounds` allows less, a derived n_i held in `[0, n_e − z_fast]`, an independent n_i capped at `n_e − z_fast` when `Z_imp` is declared, a passive Z_eff aux draw clipped to the window. Auto: on only with a PR #56 opt-in (`fuse_zeff_fast_ions`, an explicitly SET measured `ni_source`, an explicit `ni_subtract_fast=True`) -- never by the `ida_hybrid` default; `False`: only the `zeff_bounds` window (the bound before PR #56). Each clip that fires is counted per draw (`KineticDraw.clips`, `kinetic_sampler/3`) |
 | `sigma_profiles` | `{}` | Explicit `{name: sigma(psi_N)}` envelopes on the kinetic run grid (`psi_N_kinetic`; Φ_N in a `"phi_n"` run), highest precedence |
 | `n_ls` / `t_ls` / `j_ls` | `0.5` / `0.4` / `0.25` | GPR correlation lengths for density / temperature / current, in units of the run coordinate (Φ_N lengths in a `"phi_n"` run; the defaults are not converted) |
 | `aux_sigmas`, `aux_baselines`, `aux_length_scales` | `{}` | The passive switchboard: any extra channel gets perturbed and archived alongside the physics. Arrays on the kinetic run grid; length scales in the run coordinate |
@@ -225,8 +226,9 @@ their scalars always apply.
 **The Z_eff envelope has its own ladder (`zeff_sigma_source`).** Z_eff is the
 primary density channel — each draw perturbs it and *derives* n_i / n_z — so the
 width of its envelope sets the width of every dilution band in the ensemble.
-With the default `ni_source="standard"`, `"auto"` takes the highest-fidelity tier
-the file supports:
+With `ni_source="standard"` (the `ReconstructionSource` default; on the IMAS
+path the explicit dd route), `"auto"` takes the highest-fidelity tier the file
+supports:
 
 | Tier | Where the magnitude comes from | Forced by |
 |---|---|---|
@@ -239,10 +241,11 @@ which is why it outranks the visible-bremsstrahlung sigma. Both measured tiers
 require the Z_eff baseline to be the IDA one — the reconstruction path, and the
 **same** file that supplies the sigmas (compared as resolved paths, so a
 relative, `~`-prefixed or symlinked spelling is still the same file). An
-IMAS/`ida_hybrid` or p-file baseline therefore gets the scalar: pairing a
-FUSE Z_eff with an IDA envelope would mix channels.
+IMAS baseline on the dd route (FUSE kinetics, or `ida_hybrid` with
+`ni_source="standard"`) or a p-file baseline therefore gets the scalar:
+pairing a FUSE Z_eff with an IDA envelope would mix channels.
 
-With an **experimental** `ni_source` (`ida_ion_route`) the measured tier is
+With a measured `ni_source` (the `ida_hybrid` default, `ida_ion_route`) the measured tier is
 instead `read_ida`'s own resolution, **IDA-resolved**: VB+CER > CER > VB over
 what the file supports, equal-weight combined, with the routes' disagreement
 beyond their combined σ added one-sidedly (`"auto"` / `"measured"`; `"carbon"`
@@ -302,7 +305,7 @@ as an enormous sigma.
 | `structured_mse_sigma_sys` / `structured_mse_min_chords` | `0.0` / `4` | `"structured"` + `mse_data`: an optional caller-stated systematic added in quadrature to every chord's `sigma_eff` (default 0: nothing inflated), and the fewest usable chords a block may carry. Every `structured_mse_*` knob is validated when the config is built (steps an integer ≥ 1, `fd_step` finite > 0, `sigma_sys` finite ≥ 0, `min_chords` an integer ≥ 1), and an unknown key in `mse_data` is refused; a dropped chord (weight ≤ 0, a non-finite value, a NaN E<sub>r</sub> inside a supplied E<sub>r</sub> profile, off the solver mesh) is recorded with its reason |
 | `q0_gate` | `1.1` | `closure_channel="sawtooth_bootstrap"` (and the engine's `"q0"` row): the axis row is admitted only where the source's sawtooth model is active at the slice OR its own axis `|q0_dd|` is at/below this value; otherwise the slice falls back to `"bootstrap"` with a printed note (`q0_gate_basis` recorded) |
 | `accept_anchor_inband` | `False` | Legacy draws (Fix B): when the reconstruction anchor's l_i is already in the band, accept the anchor and skip the scale search and the corrective iteration. Refused non-default under the unified engine |
-| `kinetic_source` | `"fuse"` | IMAS path: `"ida_hybrid"` takes ne/Te/Ti/ω_tor from an IDA `.cdf` while keeping FUSE currents / equilibrium / p_fast; with the default `ImasSource.ni_source="standard"` Z_eff stays the dd's and n_i follows from it and the IDA n_e. The **experimental** `ni_source` routes take n_i and Z_eff from IDA (`zeff_from_fuse=True` keeps the dd's Z_eff; `ni_subtract_fast=True` subtracts the dd's fast-ion density from IDA's measured n_i). `from_imas(ida_path=…)` selects it automatically |
+| `kinetic_source` | `"fuse"` | IMAS path: `"ida_hybrid"` takes n_e/T_e/T_i/ω_tor -- and by default (`ImasSource.ni_source="auto"`) Z_eff and n_i -- from an IDA `.cdf` while keeping FUSE currents / equilibrium / p_fast: one thermal-kinetics source per run, with the dd's fast-ion pressure the one declared cross-source input and its beam density subtracted from the IDA n_i (`ni_subtract_fast` follows `include_pfast`). The dd's Z_eff is an explicit choice (`ni_source="standard"`, or `zeff_from_fuse=True`); an IDA file with no Z_eff information is refused. `from_imas(ida_path=…)` selects it automatically |
 | `anchor_jtor_to_equilibrium` | `True` | IMAS path: anchor total j_phi to `equilibrium.profiles_1d.j_tor` rather than `core_profiles.j_tor` |
 | `anchor_pressure_to_equilibrium` | `False` | IMAS path: add the fixed `p_diff = equilibrium.pressure − p_reconstructed` offset |
 | `imas_corrective_jphi` | `False` | Opt-in corrective j_phi iteration on the IMAS baseline solve (still being validated) |
@@ -456,26 +459,14 @@ When a run enables one:
   `BouquetArchive` / `ScanView` print it with their summaries.
 
 `bouquet.experimental.experimental_features_enabled(config)` lists the keys a
-configuration enables. The PR #56 kinetic combination is here because on real
-H-mode slices the combined route moved core n_i and Z_eff far outside the
-measurement uncertainties; it is opt-in pending validation. (The geometric
-Redl ε default of PR #60 is a declared physics change, not an experimental
-feature.)
+configuration enables. The PR #56 dd fast-ion Z_eff term and the sampler clips
+are here pending validation. The measured IDA Z_eff / n_i route and the beam
+subtraction LEFT the registry in 2026-10 (owner decision): they are the
+`ida_hybrid` default, with their open items kept as known limitations (next
+section). (The geometric Redl ε default of PR #60 is a declared physics change,
+not an experimental feature.)
 
 <!-- experimental-registry:begin (generated by bouquet.experimental.docs_markdown) -->
-
-#### `ida_ion_route` (experimental; introduced PR #56, 1.4.0)
-
-Z_eff and n_i from the PR #56 IDA ladder: the visible-bremsstrahlung Z_eff ('Zeff'), the CER carbon density ('CER'), or the clamped mean of the two ('all'), with the route disagreement folded into sigma_ni / sigma_Zeff, the 'IDA-resolved' Z_eff envelope and the PR #56 auto rule of UncertaintyConfig.ni_from_zeff.  On ida_hybrid it also takes Z_eff and n_i from the IDA file instead of the dd (unless ImasSource.zeff_from_fuse).  Default 'standard': Z_eff is the file's VB value (the dd's on ida_hybrid), n_i follows from it by quasineutrality with the n_e-fraction sigma, and the Z_eff envelope comes from the carbon > VB > scalar ladder.
-
-Enabled by: `ReconstructionSource.ni_source in ('Zeff', 'CER', 'all') with an IDA .cdf profiles_path or uncertainty.ida_path`; `ImasSource.ni_source in ('Zeff', 'CER', 'all') with an ida_path or uncertainty.ida_path`
-
-Validation to do:
-
-- compare the IDA-derived n_i against the dd's total n_i on >= 5 real slices; agree within the combined 1-sigma envelope, or explain each disagreement
-- Z_eff on axis: the VB+CER mean against the CER-only and the VB-only routes on the same slices, with the route tension (zeff_route_chi) reported
-- I_BS, l_i(3), q0 and beta_N sensitivity to the route on >= 5 real H-mode slices, against the standard route and the measurement uncertainties
-- old IDA vintages without Zeff_err ('all' falls to CER alone): show the CER-only Z_eff is no worse than VB on those files
 
 #### `fuse_zeff_fast_ions` (experimental; introduced PR #56, 1.4.0)
 
@@ -488,22 +479,11 @@ Validation to do:
 - on >= 5 real beam-heated dd's: the classification against the dd's own j_bootstrap (which numerator reproduces it)
 - I_BS and l_i sensitivity to the fast-ion term on the same dd's
 
-#### `ida_ni_beam_subtraction` (experimental; introduced PR #56, 1.4.0)
-
-ida_hybrid with an experimental ni_source: subtract the dd's fast-ion density equivalent from the IDA (total) n_i to give a thermal n_i (io.imas._subtract_fast_ni).  The IDA n_i and the dd's total n_i are compared at psi_N 0, 0.2, ..., 0.8 and a disagreement above 1 % warns.  Default: no subtraction.
-
-Enabled by: `ImasSource.ni_subtract_fast=True (with kinetic_source='ida_hybrid' and an experimental ni_source)`
-
-Validation to do:
-
-- the IDA n_i against the dd's total n_i on >= 5 real beam slices (the gate the subtraction prints); the disagreement must be within the measurement uncertainty before the subtracted density can be trusted
-- the thermal n_i floor at 0 must not bind on real slices
-
 #### `kinetic_sampler_clips` (experimental; introduced PR #56, 1.4.0)
 
 The PR #56 clips in the kinetic sampler: a drawn Z_eff floored at 1 even where physics.zeff_bounds allows less (thermal-numerator Z_eff with a beam), a derived n_i held in [0, n_e - z_fast], an independent n_i capped at n_e - z_fast when Z_imp is declared, and a passive Z_eff aux draw clipped to the same window.  Every clip that fires is counted per draw.  Default: only the Z_eff window physics.zeff_bounds gives (the bound in place before PR #56).
 
-Enabled by: `UncertaintyConfig.kinetic_clips=True`; `UncertaintyConfig.kinetic_clips=None (auto) with ida_ion_route, fuse_zeff_fast_ions or ida_ni_beam_subtraction enabled`
+Enabled by: `UncertaintyConfig.kinetic_clips=True`; `UncertaintyConfig.kinetic_clips=None (auto) with fuse_zeff_fast_ions enabled, an explicitly set IDA ni_source route ('Zeff', 'CER', 'all') with an IDA file in play, or an explicit ImasSource.ni_subtract_fast=True`
 
 Validation to do:
 
@@ -545,6 +525,49 @@ Validation to do:
 - I_BS, l_i(3), q0 and beta_N of a run timed by 'ida_fuse' against the same slice timed by 'window', where both accept it, and wherever 'window' refuses: show the accepted slice is the one FUSE's replay pairing used (ida_provenance.json)
 
 <!-- experimental-registry:end -->
+
+## Graduated features and their known limitations
+
+A feature listed here was experimental and is now a default, on validation
+evidence (owner decision); the open validation items of its registry record are
+kept as KNOWN LIMITATIONS. It is not warned about; the route a run took is
+stamped on the baseline record (`li_metrics["zeff_source"]`,
+`li_metrics["kinetics_route"]`, `IDAProfiles.zeff_provenance`). The list is
+`bouquet.experimental.GRADUATED` (the block below is generated from it by
+`bouquet.experimental.graduated_markdown()`, and a test holds the two in step).
+
+<!-- graduated-features:begin (generated by bouquet.experimental.graduated_markdown) -->
+
+#### `ida_ion_route` (graduated 2026-10 (owner decision): default on ida_hybrid; left the experimental registry)
+
+Z_eff and n_i from the IDA file's measured routes: the visible-bremsstrahlung Z_eff ('Zeff'), the CER carbon density ('CER'), or the clamped equal-weight mean of the two ('all'), with the route disagreement folded into sigma_ni / sigma_Zeff, the 'IDA-resolved' Z_eff envelope and the PR #56 auto rule of UncertaintyConfig.ni_from_zeff.  The DEFAULT on ida_hybrid (ImasSource.ni_source='auto' -> 'all'; ONE thermal-kinetics source per run); on a g-file + IDA run an explicit ReconstructionSource.ni_source.
+
+Evidence:
+
+- the sigma=0 draw reproduced the reconstruction on a reversed-Ip near-double-null IDA-hybrid slice with the measured route, where the dd-Z_eff route missed the archived-stage gates (before the engine draws held the reconstruction's isoflux)
+- on real IDA-hybrid slices the dd's Z_eff differed from the IDA file's own by factors 0.78 and 3.9 (median over psi_N <= 0.9), with no signal of the disagreement on the dd route
+
+Known limitations (open validation items, kept):
+
+- the IDA-derived n_i has not been compared against the dd's total n_i on >= 5 real slices (agreement within the combined 1-sigma envelope, or each disagreement explained)
+- Z_eff on axis: the VB+CER mean has not been compared against the CER-only and VB-only routes on the same slices with the route tension (zeff_route_chi) reported
+- the I_BS, l_i(3), q0 and beta_N sensitivity to the route has not been measured on >= 5 real H-mode slices against the dd route and the measurement uncertainties
+- old IDA vintages without Zeff_err ('all' falls to CER alone): not shown that the CER-only Z_eff is no worse than VB on those files
+
+#### `ida_ni_beam_subtraction` (graduated 2026-10 (owner decision): default with the measured route and include_pfast=True (the #79 rule: the fast ions in p_fast with the subtraction, or both off))
+
+ida_hybrid on a measured route: subtract the dd's fast-ion density equivalent from the IDA (total) n_i to give a thermal n_i (io.imas._subtract_fast_ni), so the fast ions are counted once -- in the dd's p_fast, the one declared cross-source input.  The IDA n_i and the dd's total n_i are compared at psi_N 0, 0.2, ..., 0.8 and a disagreement above 1 % warns.  The DEFAULT there (ImasSource.ni_subtract_fast=None follows include_pfast=True).
+
+Evidence:
+
+- the sigma=0 draw reproduced the reconstruction on a reversed-Ip near-double-null IDA-hybrid slice with the measured route and the subtraction
+
+Known limitations (open validation items, kept):
+
+- the IDA n_i has not been compared against the dd's total n_i on >= 5 real beam slices (the gate the subtraction prints); the subtracted density is trustworthy only where that disagreement is within the measurement uncertainty
+- the thermal n_i floor at 0 (counted, ni_fast_meta.n_floored) is not shown not to bind on real slices
+
+<!-- graduated-features:end -->
 
 ## until-N in-spec draws
 

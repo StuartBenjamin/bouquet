@@ -213,8 +213,8 @@ class Bouquet(SwbBaseline):
     def from_imas(cls, ids_path, *, mesh, time=None, ida_time=None,
                   n_draws=20, header="bouquet",
                   ida_path=None, LCFS_geqdsk=None, impurity_Z=6.0,
-                  ni_source="standard", zeff_from_fuse=False,
-                  zeff_fast_ions=False, ni_subtract_fast=False,
+                  ni_source="auto", zeff_from_fuse=False,
+                  zeff_fast_ions=False, ni_subtract_fast=None,
                   kinetic_source=None, anchor_pressure_to_equilibrium=False,
                   reconstruction_engine=None, solve_method=None,
                   **solver_kwargs) -> "Bouquet":
@@ -225,14 +225,19 @@ class Bouquet(SwbBaseline):
 
         IDA-hybrid kinetics: pass ``ida_path`` (an IDA ``.cdf``) to take the
         baseline ne/Te/Ti/omega_tor (and the kinetic sigma envelopes) from IDA
-        fits while keeping FUSE currents/equilibrium.  With
-        ``ni_source="standard"`` (the default) Z_eff stays the dd's and n_i
-        follows from it and the IDA n_e.  EXPERIMENTAL
-        (``bouquet.experimental.REGISTRY``): ``ni_source`` "Zeff"/"CER"/"all"
-        takes Z_eff and n_i from IDA (``zeff_from_fuse=True`` keeps the dd's
-        Z_eff), ``ni_subtract_fast=True`` subtracts the dd's beam density from
-        that n_i, and ``zeff_fast_ions=True`` gives the bootstrap the dd's
-        thermal+fast Z_eff where its convention counts the fast ions.
+        fits while keeping FUSE currents/equilibrium -- and, by default
+        (``ni_source="auto"``), Z_eff and n_i from the IDA file too: ONE
+        thermal-kinetics source per run (the measured route "all": the
+        VB+CER mean where both exist, else whichever).  The dd's Z_eff is an
+        explicit choice (``ni_source="standard"``: n_i from it and the IDA
+        n_e; or ``zeff_from_fuse=True``).  An IDA file with no Z_eff
+        information is refused.  The dd's fast-ion pressure stays in
+        (``ImasSource.include_pfast``, the one declared cross-source input)
+        and its beam density is subtracted from the IDA n_i
+        (``ni_subtract_fast=None`` follows it).  EXPERIMENTAL
+        (``bouquet.experimental.REGISTRY``): ``zeff_fast_ions=True`` gives the
+        bootstrap the dd's thermal+fast Z_eff where its convention counts the
+        fast ions.
         ``kinetic_source`` defaults to ``"ida_hybrid"`` when an ``ida_path``
         is given, else ``"fuse"``.
 
