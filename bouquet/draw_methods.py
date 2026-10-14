@@ -37,6 +37,15 @@ class DrawMethod:
         no psi re-init."""
         return None
 
+    def homotopy_isoflux(self, mygs):
+        """The isoflux the draw's homotopy holds the boundary with (the
+        iso-update before the coil-bound passes).  ``None`` (legacy): re-point
+        it to the draw's own traced LCFS, every traced point at weight 200.
+        A dict: ``pts`` / ``w`` to install (``pts=None``: leave the isoflux
+        in place) and ``stamp`` (n, weight, origin, sha256), which the method
+        archives on the draw."""
+        return None
+
     def solve_pressure(self, psi_N, pressure_solve):
         """The pressure every draw solve and the baseline archive use."""
         return pressure_solve

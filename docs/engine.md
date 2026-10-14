@@ -672,23 +672,44 @@ one more solve from that state, or a warm re-solve from the reconstruction,
 returns to the reconstruction to ~1e-7 in q0. The legacy route keeps the
 re-init (`DrawMethod.baseline_resolve_start` returns `None`).
 
-Known open item (2026-10): on that same slice the homotopy's first solve --
-the isoflux re-pointed to the draw's traced boundary (every traced point,
-weight 200) under the strong coil regularisation -- selects the other
-equilibrium too, starting from the reproduced reconstruction, so its
-zero-perturbation draw still misses the archived-stage gates (Delta q0
--3.8e-3 against 2e-3) although its loop stage reproduces the reconstruction.
-With the re-pointed isoflux in the reconstruction's own pattern (its point
-count and weight) the same draw passes; that choice changes every engine
-draw's homotopy and is an open decision, not made here.
+**The homotopy holds the reconstruction's isoflux.** On that same slice the
+homotopy's first solve -- with the isoflux re-pointed to the draw's traced
+boundary (every traced point, weight 200, the legacy route's pattern) under
+the strong coil regularisation -- selected the other equilibrium too,
+starting from the reproduced reconstruction, so the zero-perturbation draw
+missed the archived-stage gates (Delta q0 -3.8e-3 against 2e-3) although its
+loop stage reproduced the reconstruction. The selection needed both the
+re-pointed pattern and the strong regularisation, and was not monotone in
+the isoflux weight: a branch-selection sensitivity of a bistable
+equilibrium. Since 2026-10 (owner decision) every ENGINE draw's homotopy
+holds the boundary with the RECONSTRUCTION's own isoflux pattern -- the very
+points and weights the reconstruction was pointed at
+(`GenerateEngineDraws.homotopy_isoflux`): on the IDS route the solver
+geometry's (`CaseGeometry.iso_pts` / `iso_w`, the source boundary at
+`solver_geometry.ISOFLUX_WEIGHT`, whose fingerprint the solver geometry record
+carries as `isoflux_sha256`); on the g-file route the pattern that route
+installs itself (the g-file boundary at weight 200; standardising the two
+routes' weights is a separate change). `prepare_baseline()` records it
+(`Bouquet._engine_run["recon_isoflux"]`, stamped as
+`Baseline.engine["recon_isoflux"]`), and every draw stamps the pattern it
+installed under `engine["homotopy"]["isoflux"]` (`n`, `weight_min` /
+`weight_max`, `origin`, `sha256`, `installed`); the baseline's engine record
+carries it as `draws.homotopy_isoflux`. With no pattern on record the isoflux
+in place is left alone and the stamp says so -- never a silent re-trace. The
+legacy and swb routes keep the re-trace (`DrawMethod.homotopy_isoflux`
+returns `None`). This changes every engine draw's homotopy -- its boundary
+constraint density and weight, hence coil drift, LCFS deviation and yield of
+perturbed draws -- and it fixes the branch selection on the slice above; it
+does not prove robustness on other near-double-null slices.
 
 `verify_sigma0_consistency()` under the engine runs ONE draw through the
 route `generate()` runs -- it calls `generate(n=1)` itself, with every
 perturbation zero and the bootstrap scale 1.0, archiving into a temporary
 file (the configured archive is never touched): generate_bouquet's baseline
 re-solve and warm start, its strong coil regularisation and the
-reconstruction's own one installed for the loop (above), the isoflux
-re-pointed to the draw's own boundary, the homotopy and the post-homotopy
+reconstruction's own one installed for the loop (above), the
+reconstruction's own isoflux held by the homotopy (above), the homotopy and
+the post-homotopy
 stage, under `engine_draw_solve_maxits`. (Until 2026-10-04 it ran only the
 loop, `engine_draws.verify_zero_perturbation`, from whatever state the
 solver held, under whatever regularisation was installed -- not the draw's

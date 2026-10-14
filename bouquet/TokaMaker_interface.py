@@ -6300,7 +6300,14 @@ def generate_bouquet(
                 _wiso = getattr(mygs, '_isoflux_targets', None)
             if _wiso is None:
                 _wiso = getattr(mygs, '_isoflux', None)
-            if _wiso is not None and len(_wiso) >= 4:
+            _wpat = _m.homotopy_isoflux(mygs)
+            if _wpat is not None and _wpat.get("pts") is not None:
+                # the method's own pattern (the unified engine: the
+                # reconstruction's isoflux, its points AND weights)
+                _warmstart_iso_pts = np.asarray(_wpat["pts"]).copy()
+                _warmstart_iso_w = (None if _wpat["w"] is None
+                                    else np.asarray(_wpat["w"]).copy())
+            elif _wiso is not None and len(_wiso) >= 4:
                 _warmstart_iso_pts = np.asarray(_wiso).copy()
                 _warmstart_iso_w = (np.ones(
                     len(_warmstart_iso_pts)) * 200.0)
@@ -7670,7 +7677,29 @@ def generate_bouquet(
                 # coil-pin block can see them.  Reads here removed
                 # to avoid shadowing.
                 _iso_updated = False
-                if (_ip_aligned and not _skip_hard and not _skip_iso
+                # The method's own homotopy isoflux (the unified engine: the
+                # RECONSTRUCTION's isoflux pattern, never a re-trace); None
+                # (legacy): re-point it to the traced LCFS below.
+                _iso_pattern = (_m.homotopy_isoflux(mygs)
+                                if (_ip_aligned and not _skip_hard
+                                    and not _skip_iso and _m.iso_update)
+                                else None)
+                if _iso_pattern is not None:
+                    try:
+                        if _iso_pattern.get("pts") is not None:
+                            mygs.set_isoflux(_iso_pattern["pts"],
+                                             weights=_iso_pattern["w"])
+                            _iso_updated = True
+                        _st = _iso_pattern.get("stamp") or {}
+                        print(f"  [iso-update] {_m.name}: the homotopy holds "
+                              f"{_st.get('origin')} ({_st.get('n')} pts, "
+                              f"weight {_st.get('weight_max')})")
+                    except Exception as _iso_exc:
+                        print(f"  [iso-update] failed: {_iso_exc}")
+                        if isinstance(_iso_pattern.get("stamp"), dict):
+                            _iso_pattern["stamp"]["installed"] = False
+                            _iso_pattern["stamp"]["error"] = repr(_iso_exc)
+                elif (_ip_aligned and not _skip_hard and not _skip_iso
                         and _m.iso_update):
                     try:
                         # Iso-update is PHYSICS (LCFS feeds the next solve's

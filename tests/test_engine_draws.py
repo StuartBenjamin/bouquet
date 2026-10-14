@@ -837,6 +837,78 @@ def test_bouquet_generate_runs_on_the_engine(tmp_path, toy_bouquet_solver):
     assert ids["core_profiles"]["profiles_1d"]
 
 
+def test_every_engine_draw_holds_the_reconstructions_isoflux(
+        tmp_path, toy_bouquet_solver):
+    """REGRESSION (the sigma=0 rule on a bistable slice): every engine
+    draw's homotopy holds the boundary with the RECONSTRUCTION's own isoflux
+    pattern -- the very points and weights the reconstruction was pointed at
+    -- not the draw's traced LCFS re-pointed at the legacy weight 200 (the
+    stand-in traces 200 points).  On a near-double-null slice that re-trace,
+    under the strong coil regularisation, selected the other branch of a
+    bistable free-boundary problem at zero perturbation.  Each draw stamps
+    the pattern it installed (n, weight, origin, sha256)."""
+    from bouquet.engine import load_baseline_engine
+    from bouquet.solver_geometry import isoflux_fingerprint
+    b = _bq(tmp_path)
+    b.setup_solver()
+    installs = []
+    real = b.mygs.set_isoflux
+
+    def set_isoflux(pts, weights=None):
+        installs.append((np.array(pts, dtype=float),
+                         None if weights is None
+                         else np.array(weights, dtype=float)))
+        return real(pts, weights=weights)
+    b.mygs.set_isoflux = set_isoflux
+    _quiet(b.prepare_baseline)
+    ri = b._engine_run["recon_isoflux"]
+    # the reconstruction's own last install IS the pattern on record (the
+    # g-file route installs its own, weight 200, over the geometry's reset)
+    rp, rw = installs[-1]
+    np.testing.assert_array_equal(ri["pts"], rp)
+    np.testing.assert_array_equal(ri["w"], rw)
+    assert set(np.unique(rw)) == {200.0}
+    assert ri["stamp"]["sha256"] == isoflux_fingerprint(rp, rw)
+    assert b.baseline.engine["recon_isoflux"] == ri["stamp"]
+    n0 = len(installs)
+    diags = _quiet(b.generate)
+    assert len(diags) == 2
+    later = installs[n0:]
+    assert later, "no isoflux was installed for the draws"
+    for p, w in later:
+        assert p.shape == ri["pts"].shape, (
+            "a draw re-pointed the isoflux to another pattern "
+            f"({len(p)} points vs the reconstruction's {len(ri['pts'])})")
+        np.testing.assert_array_equal(p, ri["pts"])
+        np.testing.assert_array_equal(w, ri["w"])
+    for i, d in enumerate(diags):
+        st = d["engine"]["homotopy"]["isoflux"]
+        assert st["installed"] is True
+        assert st["sha256"] == ri["stamp"]["sha256"]
+        assert st["n"] == len(ri["pts"]) and st["weight_max"] == 200.0
+        assert st["origin"].startswith("engine g-file route")
+        assert ED.read_draw_engine(b.config.output_header, i, scan_key=
+                                   b.config.generation.scan_key
+                                   )["homotopy"]["isoflux"] == st
+    rec = load_baseline_engine(b.config.output_header,
+                               scan_key=b.config.generation.scan_key)
+    assert rec["draws"]["homotopy_isoflux"]["sha256"] == \
+        ri["stamp"]["sha256"]
+
+
+def test_the_engine_homotopy_isoflux_without_a_record_is_left_alone():
+    """No reconstruction pattern on record (a stand-in): nothing is
+    installed and the stamp says so -- never a silent re-trace."""
+    G = ED.GenerateEngineDraws.__new__(ED.GenerateEngineDraws)
+    G.recon_isoflux = None
+    G._cur = dict(count=0)
+    out = G.homotopy_isoflux(None)
+    assert out["pts"] is None and out["stamp"]["installed"] is False
+    assert G._cur["homotopy_isoflux"] is out["stamp"]
+    from bouquet.draw_methods import DrawMethod
+    assert DrawMethod().homotopy_isoflux(None) is None     # legacy: trace
+
+
 def test_a_legacy_baseline_is_not_drawn_on_the_engine(tmp_path,
                                                        toy_bouquet_solver):
     b = _bq(tmp_path)

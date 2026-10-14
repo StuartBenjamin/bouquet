@@ -2795,6 +2795,22 @@ def engine_closure_health(eng, where):
     return ch
 
 
+def _geometry_isoflux(geom):
+    """The isoflux pattern of the solver geometry ``geom`` (a
+    :class:`bouquet.solver_geometry.CaseGeometry`, whose ``record()`` is the
+    archived ``solver_geometry_json``): ``dict(pts, w, origin)``, or ``None``
+    when it carries none.  Its fingerprint equals the record's
+    ``isoflux_sha256`` by construction."""
+    if geom is None or getattr(geom, "iso_pts", None) is None:
+        return None
+    pts = np.asarray(geom.iso_pts, dtype=float).reshape(-1, 2).copy()
+    # weights exactly as the reset installs them (None: the solver's own)
+    w = (None if geom.iso_w is None
+         else np.asarray(geom.iso_w, dtype=float).copy())
+    return dict(pts=pts, w=w,
+                origin=f"solver geometry: {geom.iso_origin}")
+
+
 def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
     from .baseline import Baseline, _reconstruction_metrics
     mygs, src, c = bq.mygs, bq.config.source, eng.c
@@ -3085,6 +3101,7 @@ def prepare_engine_baseline(bq):
     bq._engine_run = None
     verbose = bool(getattr(cfg, "verbose", False))
     bl = None
+    recon_iso = None
     try:
         with capture_native_output(enabled=not verbose) as cap:
             if isinstance(src, ReconstructionSource):
@@ -3094,6 +3111,15 @@ def prepare_engine_baseline(bq):
                 iso_pts = np.asarray(c0.boundary, dtype=float)
                 iso_w = np.ones(len(iso_pts)) * 200.0
                 mygs.set_isoflux(iso_pts, weights=iso_w)
+                # the isoflux this reconstruction is pointed at, which every
+                # engine draw's homotopy holds (GenerateEngineDraws.
+                # homotopy_isoflux): the g-file route's own pattern, installed
+                # over the solver geometry's reset isoflux
+                recon_iso = dict(
+                    pts=iso_pts.copy(), w=iso_w.copy(),
+                    origin=("engine g-file route: the contract's g-file "
+                            "boundary at weight 200 (installed over the "
+                            "solver geometry's reset isoflux)"))
                 geo = ad.eqdsk.geometry
                 mygs.init_psi(geo["R"][-1], geo["Z"][-1], geo["a"][-1],
                               geo["kappa"][-1], geo["delta"][-1])
@@ -3107,6 +3133,10 @@ def prepare_engine_baseline(bq):
                 psi_pad = ad.psi_pad
                 R0, Z0, a, kappa, delta = _shape_from_boundary(
                     bq._geom.boundary_RZ)
+                # the IDS route solves under the solver geometry's isoflux
+                # (installed by the reset, CaseGeometry.apply; nothing here
+                # re-points it): the pattern its record fingerprints
+                recon_iso = _geometry_isoflux(bq._geom)
                 mygs.init_psi(R0, Z0, a, kappa, delta)
                 bq._seed_coil_init(mygs)
             else:
@@ -3147,12 +3177,22 @@ def prepare_engine_baseline(bq):
     # and its delivered EQUILIBRIUM (psi, coils, targets, constraints), the
     # state generate()'s baseline re-solve starts from (GenerateEngineDraws.
     # baseline_resolve_start; None on a solver object without copy_eq)
+    # ... and the isoflux pattern the reconstruction was pointed at, which
+    # every engine draw's homotopy holds (stamped on the baseline's engine
+    # record; each draw stamps the pattern it installed)
+    if recon_iso is not None:
+        from .solver_geometry import isoflux_stamp
+        recon_iso["stamp"] = isoflux_stamp(recon_iso["pts"], recon_iso["w"],
+                                           recon_iso["origin"])
+        if isinstance(getattr(bl, "engine", None), dict):
+            bl.engine["recon_isoflux"] = dict(recon_iso["stamp"])
     bq._engine_run = dict(engine=eng, result=res, psi_pad=float(psi_pad),
                           q_psi=getattr(backend, "q_psi", None),
                           baseline=bl, coil_reg=coil_reg,
                           delivered_eq=(mygs.copy_eq()
                                         if hasattr(mygs, "copy_eq")
-                                        else None))
+                                        else None),
+                          recon_isoflux=recon_iso)
     if bl.reconstruction_metrics is not None:
         bq._flag_nonconverged_recon_loop()
         bq._print_reconstruction_summary()

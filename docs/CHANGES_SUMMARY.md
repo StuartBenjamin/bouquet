@@ -1,5 +1,36 @@
 # Bouquet — change summaries
 
+## Unreleased — the engine draws hold the reconstruction's isoflux (numbers move on every engine draw)
+
+**What moves (owner decision).** Every unified-engine draw's homotopy now holds
+the boundary with the RECONSTRUCTION's own isoflux pattern -- the very points
+and weights the reconstruction was pointed at -- instead of re-pointing the
+isoflux to the draw's traced LCFS (thousands of points, every one at the
+legacy weight 200). IDS route: the solver geometry's pattern (the source
+boundary at `solver_geometry.ISOFLUX_WEIGHT` = 500); g-file route: the pattern
+that route installs itself (the g-file boundary at weight 200; the two
+routes' weights are not standardised here). Every engine draw's boundary
+constraint changes, so its coil drift, LCFS deviation, in-spec yield and every
+archived quantity of a perturbed engine draw move. The legacy and swb routes
+are unchanged (`DrawMethod.homotopy_isoflux` returns `None`: the re-trace).
+
+**Why.** On a reversed-Ip, near-double-null slice the free-boundary problem
+is bistable: the re-trace at weight 200, under the strong coil
+regularisation, moved the zero-perturbation draw onto the other equilibrium
+(axis 1.7 cm lower, Delta q0 -3.8e-3 against the 2e-3 gate), although its
+loop stage reproduced the reconstruction. The reconstruction's own pattern
+keeps it on the reconstruction's branch. This fixes the branch selection
+there; it does not prove robustness on other near-double-null slices.
+
+**Stamped.** `prepare_baseline()` records the pattern
+(`Bouquet._engine_run["recon_isoflux"]`, `Baseline.engine["recon_isoflux"]`:
+`n`, `weight_min`/`weight_max`, `origin`, `sha256`); every engine draw stamps
+the pattern it installed as `engine["homotopy"]["isoflux"]` (plus
+`installed`), and the baseline's engine record carries it as
+`draws.homotopy_isoflux`. The solver geometry record (`solver_geometry_json`)
+gains `isoflux_sha256`, the fingerprint of its isoflux points and weights,
+which the IDS route's stamp equals by construction.
+
 ## Unreleased — PR #76: one reusable solver per process; every baseline at its own F0 (numbers move on multi-slice runs)
 
 **What moves.** The solver's vacuum field F0, its LCFS isoflux targets and its
