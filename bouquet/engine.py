@@ -105,6 +105,9 @@ ENGINE_FIELD_DEFAULTS = {
     # (mse_chi2_per_chord_high; never acceptance).  10.0: owner-approved
     # 2026-10-07, flag only (see GenerationConfig.mse_chi2n_flag)
     "mse_chi2n_flag": 10.0,
+    # the opt-in bistability check after the reconstruction (one extra cold
+    # solve; check_bistability)
+    "check_bistability": False,
 }
 
 
@@ -3052,6 +3055,130 @@ def reconstruction_coil_reg(mygs) -> dict:
         terms=[dict(t) for t in rec["terms"]]))
 
 
+#: The opt-in check of :func:`check_bistability` (GenerationConfig.check_bistability).
+BISTABILITY_CHECK_VERSION = "bistability/1"
+
+
+def _o_point(mygs):
+    try:
+        op = np.asarray(mygs.o_point, dtype=float).ravel()
+        return (float(op[0]), float(op[1])) if op.size >= 2 else None
+    except Exception:
+        return None
+
+
+def check_bistability(bq, backend, cold_start):
+    """The opt-in bistability check (``GenerationConfig.check_bistability``,
+    unified engine only): ONE extra solve after the reconstruction.
+
+    The solver is put back on the reconstruction's delivered equilibrium
+    (``Bouquet._engine_run["delivered_eq"]``: its psi, coils, targets,
+    profiles and constraints -- the same inputs), psi is re-initialised COLD
+    by ``cold_start(mygs)`` (the start the reconstruction itself took) and
+    the solver solves once.  The cold state is measured by the engine
+    backend's own final measurement and compared with the delivered one:
+    l_i(3), q0 at the q-row radius, beta_pol and the magnetic axis.  l_i and
+    q0 are gated at the sigma=0 gates (``jbs_tol_li``, ``jbs_tol_q0``, the
+    zero-perturbation draw's own); beta_pol and the axis have no sigma=0 gate
+    and are reported, not gated.  ``bistable`` is True when a gate is missed:
+    the same inputs converge to a different equilibrium from a cold start,
+    and a warning names it.  ``None`` when the cold solve failed or could not
+    be measured (warned too).  The delivered equilibrium is restored
+    afterwards; the baseline itself is never changed.  Returns the record
+    (stamped by the caller on ``Baseline.engine["bistability"]``)."""
+    import warnings
+    from .engine_draws import draw_loop_settings, sigma0_gate
+    mygs, run = bq.mygs, bq._engine_run
+    s = draw_loop_settings(bq.config.generation)
+    tol_li, tol_q0 = float(s["tol_li"]), float(s["tol_q0"])
+    m_del = run["engine"].delivered_meas
+    snap = run.get("delivered_eq")
+    rec = dict(version=BISTABILITY_CHECK_VERSION, checked=True,
+               bistable=None, outcome=None, extra_solves=0,
+               start=("cold: psi re-initialised as the reconstruction's own "
+                      "start, from the delivered equilibrium's inputs"),
+               gated=("l_i(3) at jbs_tol_li and q0 at the q-row radius at "
+                      "jbs_tol_q0 (the sigma=0 gates); beta_pol and the "
+                      "magnetic axis reported, not gated"))
+    if snap is None or not hasattr(mygs, "replace_eq"):
+        rec.update(outcome="not_checked", error=(
+            "no delivered-equilibrium snapshot to return to (the solver "
+            "has no copy_eq/replace_eq)"))
+        warnings.warn("check_bistability: the check could not be made: "
+                      + rec["error"], UserWarning, stacklevel=3)
+        return rec
+    ax_del = _o_point(mygs)
+    st_del = m_del.get("stats") or {}
+    m_cold = ax_cold = None
+    try:
+        mygs.replace_eq(source_eq=snap)
+        cold_start(mygs)
+        rec["extra_solves"] = 1
+        mygs.solve()
+        m_cold = backend.measure(final=True)
+        ax_cold = _o_point(mygs)
+    except Exception as exc:
+        rec.update(outcome="cold_solve_failed", error=repr(exc)[:400])
+    finally:
+        mygs.replace_eq(source_eq=snap)
+    if m_cold is None:
+        warnings.warn("check_bistability: the cold re-solve failed ("
+                      f"{rec.get('error')}); bistability unknown "
+                      "(Baseline.engine['bistability'])", UserWarning,
+                      stacklevel=3)
+        return rec
+    st_cold = m_cold.get("stats") or {}
+
+    def _d(a, b):
+        try:
+            a, b = float(a), float(b)
+        except (TypeError, ValueError):
+            return None
+        return (a - b) if np.isfinite(a) and np.isfinite(b) else None
+    deltas = dict(
+        l_i=_d(m_cold.get("li"), m_del.get("li")),
+        q0=_d(m_cold.get("q_row"), m_del.get("q_row")),
+        q0_stats=_d(st_cold.get("q_0"), st_del.get("q_0")),
+        beta_pol=_d(st_cold.get("beta_pol"), st_del.get("beta_pol")),
+        axis_R=(None if ax_cold is None or ax_del is None
+                else _d(ax_cold[0], ax_del[0])),
+        axis_Z=(None if ax_cold is None or ax_del is None
+                else _d(ax_cold[1], ax_del[1])))
+    rec["delivered"] = dict(l_i=m_del.get("li"), q0=m_del.get("q_row"),
+                            beta_pol=st_del.get("beta_pol"), axis=ax_del)
+    rec["cold"] = dict(l_i=m_cold.get("li"), q0=m_cold.get("q_row"),
+                       beta_pol=st_cold.get("beta_pol"), axis=ax_cold)
+    rec["deltas"] = deltas
+    if deltas["l_i"] is None or deltas["q0"] is None:
+        rec["outcome"] = "unmeasured"
+        warnings.warn("check_bistability: the cold state's l_i / q0 could "
+                      "not be measured; bistability unknown", UserWarning,
+                      stacklevel=3)
+        return rec
+    gates = dict(dl_i=sigma0_gate(deltas["l_i"], tol_li, setting="jbs_tol_li"),
+                 dq0=sigma0_gate(deltas["q0"], tol_q0, setting="jbs_tol_q0"))
+    rec["gates"] = gates
+    rec["bistable"] = not all(g["passed"] for g in gates.values())
+    rec["outcome"] = "bistable" if rec["bistable"] else "single"
+    if rec["bistable"]:
+        _ax = ("" if deltas["axis_Z"] is None
+               else f", axis dZ {1e3 * deltas['axis_Z']:+.1f} mm")
+        _bp = ("" if deltas["beta_pol"] is None
+               else f", dbeta_pol {deltas['beta_pol']:+.3g}")
+        warnings.warn(
+            "BISTABLE baseline: a cold re-solve of the reconstruction's own "
+            "inputs converges to a different equilibrium beyond the sigma=0 "
+            f"gates (dl_i {deltas['l_i']:+.2e} vs {tol_li:.0e}, dq0 "
+            f"{deltas['q0']:+.2e} vs {tol_q0:.0e}{_bp}{_ax}); the "
+            "free-boundary solution depends on its start, and draws may "
+            "select either branch (Baseline.engine['bistability'])",
+            RuntimeWarning, stacklevel=3)
+    print(f"[engine] bistability check: {rec['outcome']} (dl_i "
+          f"{deltas['l_i']:+.2e}, dq0 {deltas['q0']:+.2e}; one extra solve)",
+          flush=True)
+    return rec
+
+
 def prepare_engine_baseline(bq):
     """``Bouquet.prepare_baseline()`` under ``reconstruction_engine=
     "unified"``, for both input types.
@@ -3102,6 +3229,7 @@ def prepare_engine_baseline(bq):
     verbose = bool(getattr(cfg, "verbose", False))
     bl = None
     recon_iso = None
+    cold_start = None
     try:
         with capture_native_output(enabled=not verbose) as cap:
             if isinstance(src, ReconstructionSource):
@@ -3115,6 +3243,12 @@ def prepare_engine_baseline(bq):
                 # engine draw's homotopy holds (GenerateEngineDraws.
                 # homotopy_isoflux): the g-file route's own pattern, installed
                 # over the solver geometry's reset isoflux
+                _geo0 = ad.eqdsk.geometry
+
+                def cold_start(gs, _g=_geo0):
+                    # the g-file route's own start (below)
+                    gs.init_psi(_g["R"][-1], _g["Z"][-1], _g["a"][-1],
+                                _g["kappa"][-1], _g["delta"][-1])
                 recon_iso = dict(
                     pts=iso_pts.copy(), w=iso_w.copy(),
                     origin=("engine g-file route: the contract's g-file "
@@ -3139,6 +3273,11 @@ def prepare_engine_baseline(bq):
                 recon_iso = _geometry_isoflux(bq._geom)
                 mygs.init_psi(R0, Z0, a, kappa, delta)
                 bq._seed_coil_init(mygs)
+
+                def cold_start(gs, _s=(R0, Z0, a, kappa, delta)):
+                    # the IDS route's own start (above)
+                    gs.init_psi(*_s)
+                    bq._seed_coil_init(gs)
             else:
                 raise TypeError(f"unknown baseline source type "
                                 f"{type(src).__name__}")
@@ -3193,6 +3332,12 @@ def prepare_engine_baseline(bq):
                                         if hasattr(mygs, "copy_eq")
                                         else None),
                           recon_isoflux=recon_iso)
+    if bool(getattr(gc, "check_bistability", False)):
+        # opt-in: ONE extra cold solve of the same inputs, compared with the
+        # delivered state; the delivered equilibrium is restored after it
+        _bis = check_bistability(bq, backend, cold_start)
+        if isinstance(getattr(bl, "engine", None), dict):
+            bl.engine["bistability"] = _bis
     if bl.reconstruction_metrics is not None:
         bq._flag_nonconverged_recon_loop()
         bq._print_reconstruction_summary()

@@ -31,6 +31,15 @@ the pattern it installed as `engine["homotopy"]["isoflux"]` (plus
 gains `isoflux_sha256`, the fingerprint of its isoflux points and weights,
 which the IDS route's stamp equals by construction.
 
+**New, opt-in: `GenerationConfig.check_bistability` (default `False`).** Unified
+engine only (refused under `"legacy"`). After the reconstruction, one extra
+solve of the same inputs from a cold start is compared with the delivered
+state: l_i(3) and q0 at the q-row radius at the sigma=0 gates (`jbs_tol_li`,
+`jbs_tol_q0`), beta_pol and the magnetic axis reported. A miss stamps
+`Baseline.engine["bistability"]` with `bistable=True` and the deltas and
+warns; the delivered equilibrium is restored. Off by default: no extra solve,
+nothing moves.
+
 ## Unreleased — PR #76: one reusable solver per process; every baseline at its own F0 (numbers move on multi-slice runs)
 
 **What moves.** The solver's vacuum field F0, its LCFS isoflux targets and its

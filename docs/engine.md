@@ -702,6 +702,27 @@ constraint density and weight, hence coil drift, LCFS deviation and yield of
 perturbed draws -- and it fixes the branch selection on the slice above; it
 does not prove robustness on other near-double-null slices.
 
+**Is this baseline bistable? (`check_bistability`, opt-in.)** With
+`GenerationConfig.check_bistability=True` (default `False`; unified engine
+only, refused under `"legacy"`), `prepare_baseline()` spends ONE extra solve
+after the reconstruction (`engine.check_bistability`): the solver is put
+back on the reconstruction's delivered equilibrium (its targets, profiles,
+isoflux and coil regularisation -- the same inputs), psi is re-initialised
+COLD as the reconstruction's own start (g-file: `init_psi` from its LCFS
+shape; IDS: from the boundary's shape, with the `coil_init` seed), and the
+solver solves once. The cold state is measured by the engine backend's own
+final measurement and compared with the delivered one: l_i(3) and q0 at the
+q-row radius against the sigma=0 gates (`jbs_tol_li`, `jbs_tol_q0` -- the
+zero-perturbation draw's own), beta_pol and the magnetic axis reported (the
+sigma=0 rule gates neither). A miss stamps `Baseline.engine["bistability"]`
+with `bistable=True`, the deltas, both states and the gates, and a
+`RuntimeWarning` names it; a cold solve that fails is recorded
+(`outcome="cold_solve_failed"`, `bistable=None`) and warned, never hidden.
+The delivered equilibrium is restored afterwards: the baseline, its archive
+and the draws are unchanged. The record is archived with the baseline's
+engine record. A cold start converging to the delivered state does not prove
+there is no other branch; a miss shows there is one.
+
 `verify_sigma0_consistency()` under the engine runs ONE draw through the
 route `generate()` runs -- it calls `generate(n=1)` itself, with every
 perturbation zero and the bootstrap scale 1.0, archiving into a temporary
