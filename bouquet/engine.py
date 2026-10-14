@@ -3143,10 +3143,16 @@ def prepare_engine_baseline(bq):
         raise
     bq.baseline = bl
     # the LIVE reconstruction the draws inherit (bouquet.engine_draws): its
-    # contract, state, basis and delivered measurement, in this session
+    # contract, state, basis and delivered measurement, in this session --
+    # and its delivered EQUILIBRIUM (psi, coils, targets, constraints), the
+    # state generate()'s baseline re-solve starts from (GenerateEngineDraws.
+    # baseline_resolve_start; None on a solver object without copy_eq)
     bq._engine_run = dict(engine=eng, result=res, psi_pad=float(psi_pad),
                           q_psi=getattr(backend, "q_psi", None),
-                          baseline=bl, coil_reg=coil_reg)
+                          baseline=bl, coil_reg=coil_reg,
+                          delivered_eq=(mygs.copy_eq()
+                                        if hasattr(mygs, "copy_eq")
+                                        else None))
     if bl.reconstruction_metrics is not None:
         bq._flag_nonconverged_recon_loop()
         bq._print_reconstruction_summary()

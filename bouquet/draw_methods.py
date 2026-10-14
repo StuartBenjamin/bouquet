@@ -29,6 +29,14 @@ class DrawMethod:
         """Whether the baseline is re-solved from its j_phi first."""
         return jphi_baseline
 
+    def baseline_resolve_start(self, mygs):
+        """Where that baseline re-solve starts.  ``None``: re-initialise psi
+        from the landed LCFS first (the converged-on-entry guard of issue
+        #24, for a reconstruction solved in another mode).  A string: the
+        method has put *mygs* on its own start state and says which (printed);
+        no psi re-init."""
+        return None
+
     def solve_pressure(self, psi_N, pressure_solve):
         """The pressure every draw solve and the baseline archive use."""
         return pressure_solve

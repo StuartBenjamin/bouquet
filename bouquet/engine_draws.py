@@ -1161,8 +1161,14 @@ class GenerateEngineDraws(DrawMethod):
 
     def __init__(self, ctx, *, unc, psi_pad, q_psi=None, maxits=None,
                  homotopy=True, l_i_tolerance=0.05, p_thresh=0.05,
-                 max_proxy_draws=500, coil_reg=None):
+                 max_proxy_draws=500, coil_reg=None, delivered_eq=None):
         self.ctx = ctx
+        #: the reconstruction's delivered equilibrium as prepare_baseline()
+        #: left it (``Bouquet._engine_run["delivered_eq"]``, a ``copy_eq``
+        #: snapshot); generate_bouquet's baseline re-solve starts from it
+        #: (:meth:`baseline_resolve_start`).  ``None``: not on record (a test
+        #: stand-in) -- the re-solve starts warm from the state on entry
+        self.delivered_eq = delivered_eq
         #: the coil regularisation the reconstruction solved under
         #: (:func:`bouquet.engine.reconstruction_coil_reg`: ``terms`` and
         #: ``record``); every draw installs exactly ``terms``.  ``None`` or
@@ -1195,6 +1201,29 @@ class GenerateEngineDraws(DrawMethod):
         #: (one zero-perturbation draw through ``generate()``): the loop
         #: stage's and the archived state's verdicts are written into it
         self.sigma0_probe = None
+
+    # ---- where the baseline re-solve starts ---------------------------
+    def baseline_resolve_start(self, mygs):
+        """generate_bouquet's baseline re-solve starts from the
+        reconstruction's DELIVERED equilibrium, warm -- the state, settings
+        and inputs of the reconstruction's own final solve (its delivery is
+        a jphi-linterp solve of this very request) -- never from the cold
+        psi re-init the legacy route needs (issue #24).  A cold start can
+        land a free-boundary solve on a different equilibrium of identical
+        inputs, and the re-solved state is what every draw's warm start,
+        strong coil regularisation target and drift reference are taken
+        from: the zero-perturbation draw would then reproduce THAT state,
+        not the reconstruction (docs/engine.md, "the re-solve starts from
+        the reconstruction")."""
+        if self.delivered_eq is not None and hasattr(mygs, "replace_eq"):
+            mygs.replace_eq(source_eq=self.delivered_eq)
+            how = ("restored to the reconstruction's delivered equilibrium "
+                   "(prepare_baseline's snapshot)")
+        else:
+            how = ("the state on entry (no delivered-equilibrium snapshot "
+                   "on record)")
+        return ("unified engine: the re-solve starts warm from " + how
+                + "; no psi re-init")
 
     # ---- the pressure the baseline re-solve and every draw use --------
     def solve_pressure(self, psi_N=None, pressure_solve=None):
@@ -1890,7 +1919,8 @@ def build_generate_context(bq, env):
         maxits=engine_draw_maxits(gc),
         homotopy=bool(getattr(gc, "engine_draw_homotopy", True)),
         l_i_tolerance=float(gc.l_i_tolerance),
-        coil_reg=run.get("coil_reg"))
+        coil_reg=run.get("coil_reg"),
+        delivered_eq=run.get("delivered_eq"))
 
 
 def context_from_run(run, gc, bl):

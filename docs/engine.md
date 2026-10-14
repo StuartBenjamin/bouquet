@@ -653,6 +653,35 @@ reconstruction to the loop tolerances. With the current gate standing (it is
 measured one pass late) the loop takes `JBS_REQUIRED_CONSECUTIVE + 1 = 3`
 passes.
 
+**The re-solve starts from the reconstruction.** "The warm state" is
+generate_bouquet's baseline re-solve: the reconstruction's request solved
+once more through the draws' jphi-linterp machinery, whose result is every
+draw's warm start, the target of the strong coil regularisation and the
+reference of the coil drift and the homotopy. On the engine route it starts
+from the reconstruction's DELIVERED equilibrium -- restored from the
+snapshot `prepare_baseline()` takes (`Bouquet._engine_run["delivered_eq"]`)
+-- with the reconstruction's own settings and inputs, warm
+(`GenerateEngineDraws.baseline_resolve_start`). It never re-initialises psi
+first: that is the legacy route's guard (issue #24), for a reconstruction
+solved in inverse mode, and a free-boundary solve from a cold analytic psi
+can converge to a DIFFERENT equilibrium of identical inputs. Measured on a
+reversed-Ip, near-double-null IDS slice (2026-10): the cold re-solve put the
+magnetic axis 1.7 cm lower, with q0 -1.5e-3, l_i -0.2 % and beta_pol
++0.9 % against the reconstruction, at nl_tol 1e-6 and still at 1e-9, while
+one more solve from that state, or a warm re-solve from the reconstruction,
+returns to the reconstruction to ~1e-7 in q0. The legacy route keeps the
+re-init (`DrawMethod.baseline_resolve_start` returns `None`).
+
+Known open item (2026-10): on that same slice the homotopy's first solve --
+the isoflux re-pointed to the draw's traced boundary (every traced point,
+weight 200) under the strong coil regularisation -- selects the other
+equilibrium too, starting from the reproduced reconstruction, so its
+zero-perturbation draw still misses the archived-stage gates (Delta q0
+-3.8e-3 against 2e-3) although its loop stage reproduces the reconstruction.
+With the re-pointed isoflux in the reconstruction's own pattern (its point
+count and weight) the same draw passes; that choice changes every engine
+draw's homotopy and is an open decision, not made here.
+
 `verify_sigma0_consistency()` under the engine runs ONE draw through the
 route `generate()` runs -- it calls `generate(n=1)` itself, with every
 perturbation zero and the bootstrap scale 1.0, archiving into a temporary

@@ -27,6 +27,7 @@ Stage order follows one draw through `generate_bouquet`.
 |---|---|---|---|---|
 | `validate` (noop) | setup | — | refuses PIN_JPHI, DIFF_BS, delta mode, l_i σ, loop off; prints the banner | — |
 | `jphi_baseline` (pass) | setup | as configured | as configured | `False`: solve B is the baseline |
+| `baseline_resolve_start` (none) | setup | `None`: re-initialise psi from the landed LCFS (issue #24) | restore the reconstruction's delivered equilibrium; re-solve warm, no re-init | not reached (`jphi_baseline=False`) |
 | `solve_pressure`, `edge` (pass) | setup | the legacy assembly | the contract's pressure and edge settings | legacy |
 | `strong_coil_reg` (flag) / `announce_coil_reg` | setup | strong reg toward the baseline coils | same | none; the per-draw recipe installs its own reg |
 | `pin_bounds_on_skip` (flag) | per draw | SKIP_HOMOTOPY pin | same | no |
