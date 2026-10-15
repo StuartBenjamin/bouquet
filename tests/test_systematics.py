@@ -29,9 +29,13 @@ RMS below; the other side is always a full trace) and each replayed draw's
 own RMS to that subsample, measured by the generator on the draw's full
 trace; see ``make_golden_fixture.LEGACY_LCFS_STRIDE``.
 
-Reconstruction itself is covered by a separate test (future).  Needs OFT + the
-D3D-like mesh/baseline; runs by default when available, marked ``solver``
-(deselect with ``pytest -m "not solver"``).
+The golden's source is the synthetic g-file + IDA-layout profile fixture
+pair (``tests/data/g_synthetic.geqdsk`` + ``tests/data/diiid_profs_synthetic.cdf``)
+at the library defaults (``tests/golden/regenerate_golden_run.py``); the
+replay reconstructs from the same pair.  Reconstruction itself is covered by
+a separate test (future).  Needs OFT + the D3D-like example mesh; runs by
+default when available, marked ``solver`` (deselect with
+``pytest -m "not solver"``).
 """
 import json
 import os
@@ -47,12 +51,14 @@ from bouquet.utils import _read_coil_names
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _EXAMPLE = os.path.abspath(os.path.join(_HERE, "..", "examples", "D3D-like"))
-_GEQ = os.path.join(_EXAMPLE, "D3Dlike_Hmode_baseline.geqdsk")
-_PF = os.path.join(_EXAMPLE, "D3Dlike_Hmode_baseline.peqdsk")
+_DATA = os.path.join(_HERE, "data")
+# the legacy golden's own source pair (the synthetic fixtures)
+_GEQ = os.path.join(_DATA, "g_synthetic.geqdsk")
+_PROF = os.path.join(_DATA, "diiid_profs_synthetic.cdf")
 _MESH = os.path.join(_EXAMPLE, "DIIID_mesh.h5")
 _GOLDEN = os.path.join(_HERE, "golden", "D3Dlike_Hmode_legacy_golden.json")
 
-_files_ok = all(os.path.isfile(p) for p in (_GEQ, _PF, _MESH, _GOLDEN))
+_files_ok = all(os.path.isfile(p) for p in (_GEQ, _PROF, _MESH, _GOLDEN))
 
 
 def _oft_importable():
@@ -75,8 +81,9 @@ pytestmark = [
     pytest.mark.solver,
     pytest.mark.skipif(
         not (_files_ok and _oft_importable()),
-        reason="solver replay test needs OFT + the D3D-like mesh/baseline + "
-               "legacy golden; skipped when unavailable"),
+        reason="solver replay test needs OFT + the D3D-like mesh + the "
+               "synthetic g-file/IDA fixtures + the legacy golden; skipped "
+               "when unavailable"),
 ]
 
 # Replay a fixed, representative subset of in-spec golden draws.  Each replayed
@@ -134,7 +141,8 @@ def _legacy_input_inductive(rec):
     beside a ``j_inductive`` that does NOT carry it, so the two are put back
     together here; a pre-#64 record stored the carried form as is.  Without
     this the replay is short the pedestal's ``p'G`` (~8 % of the peak
-    current on the D3D-like fixture) and lands ~6 % high in l_i, outside
+    current on the earlier D3D-like example golden) and lands ~6 % high in
+    l_i, outside
     every band -- a mismatch of conventions, not of physics."""
     from bouquet.schema import (SPLIT_PRESSURE_IN_INDUCTIVE,
                                 SPLIT_PRESSURE_SEPARATE)
@@ -312,7 +320,7 @@ def replay(tmp_path_factory):
     # nthreads=1) puts the replay in the generator's exact environment.
     _work = str(tmp_path_factory.mktemp("replay_recon"))
     run = bq.Bouquet.from_geqdsk(
-        _GEQ, profiles=_PF, mesh=_MESH, n_draws=1,
+        _GEQ, profiles=_PROF, mesh=_MESH, n_draws=1,
         header=os.path.join(_work, "replay_recon"),
         reconstruction_engine="legacy")
     # Replay on the bootstrap model the golden was GENERATED with (its own
@@ -401,10 +409,12 @@ def replay(tmp_path_factory):
 
     z = np.zeros_like(psi_pf)
     zj = np.zeros_like(psi_N)
-    with open(_GEQ, 'rb') as fh:
-        geq_raw = fh.read()
-    with open(_PF, 'rb') as fh:
-        pf_raw = fh.read()
+    # the source bytes generate() archives with each draw (the g-file, and
+    # the profile file's bytes where the source has a text p-file; an IDA
+    # .cdf source hands none): read off generate()'s own call
+    geq_raw = _gen_kw.get("baseline_eqdsk_bytes")
+    pf_raw = _gen_kw.get("pfile_bytes")
+    pf_bl_raw = _gen_kw.get("baseline_pfile_bytes")
 
     def _run(header, ne, te, ni, ti, input_jphi, input_jind, l_i_target,
              pin_jphi, Zeff_run=None, **model):
@@ -423,7 +433,7 @@ def replay(tmp_path_factory):
             l_i_tolerance=0.05, psi_pad=pad,
             constrain_sawteeth=False, recalculate_j_BS=True,
             pfile_bytes=pf_raw, baseline_eqdsk_bytes=geq_raw,
-            baseline_pfile_bytes=pf_raw,
+            baseline_pfile_bytes=pf_bl_raw,
             diagnostic_plots=False, scan_key=0, psi_N_kinetic=psi_pf,
             coil_drift=0.01,
             homotopy_passes=[(0.05, 0.10), (0.02, 0.05), (0.01, 0.01)],
