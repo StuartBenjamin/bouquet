@@ -911,7 +911,12 @@ testable below 6 draws. The scan carries `axis_bimodal` and
 whose reconstruction stamp is not "bistable" stamps the baseline
 `bistability_source="draws"` (`_baseline` attr and the archived and live
 `Baseline.engine["bistability"]`, with `draws_evidence`); the reconstruction
-check's own "bistable" carries `bistability_source="reconstruction"`. The
+check's own "bistable" carries `bistability_source="reconstruction"`. A
+`"draws"` source belongs to ONE scan: the session's live record never
+carries it into another scan's archived `_baseline`
+(`GenerateEngineDraws.store_baseline` drops it), and a scan with no axis
+record or too few draws to test clears it from its baseline and from the
+live record. The
 summaries, `ScanView.spread()` and `draw_scalars` report it
 ([workflows.md](workflows.md#the-in-spec-rule), "Bistable equilibria"). All
 of it is a report: nothing is accepted, refused or filtered on it. Archives

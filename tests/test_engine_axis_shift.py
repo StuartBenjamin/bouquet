@@ -418,6 +418,77 @@ def test_a_bimodal_scan_under_a_single_stamp_gets_the_draws_source(
         load_baseline_engine(h, scan_key=sk)["bistability"]
 
 
+def test_another_scans_draws_source_never_lands_in_this_scans_baseline(
+        tmp_path, toy_bouquet_solver, monkeypatch):
+    """Scan A is bimodal, so the session's live baseline carries
+    bistability_source="draws".  Scan B archives its baseline from that live
+    record and then has no axis entry (0 archived draws): B's archived record
+    must not carry A's evidence, its group attr and its JSON agree, and the
+    live record is cleared."""
+    import bouquet.engine_draws as ED
+    from bouquet.engine import load_baseline_engine
+    from bouquet.engine_draws import stamp_axis_scan
+    from bouquet.schema import BISTABILITY_SOURCE_ATTR
+    from bouquet.utils import _baseline_group_path, _group_path
+    b = _generated(tmp_path, monkeypatch, 6)
+    h, sk_a = b.config.output_header, b.config.generation.scan_key
+    _set_axis(h + ".h5", sk_a, {0: 0.0, 1: 0.1, 2: -0.1,
+                                3: -15.0, 4: -16.0, 5: -14.5})
+    out_a = stamp_axis_scan(h, sk_a)
+    assert out_a["bistability_source"] == "draws"
+    with pytest.warns(RuntimeWarning, match="BIMODAL"), \
+            contextlib.redirect_stdout(io.StringIO()):
+        b._note_axis_scan(out_a)
+    assert b.baseline.engine["bistability"]["bistability_source"] == "draws"
+    # scan B: its baseline is archived from the live record; its own scan
+    # stamp is held back here so the archived record is store_baseline's
+    sk_b = "B"
+    b.config.generation.scan_key = sk_b
+    real_stamp = ED.stamp_axis_scan
+    monkeypatch.setattr(ED, "stamp_axis_scan",
+                        lambda *a, **k: dict(n_large=0, n_recorded=0,
+                                             bimodality=None,
+                                             bistability_source="draws"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _quiet(b.generate)
+    monkeypatch.setattr(ED, "stamp_axis_scan", real_stamp)
+    bis_b = load_baseline_engine(h, scan_key=sk_b)["bistability"]
+    assert bis_b.get("bistability_source") != "draws"
+    assert "draws_evidence" not in bis_b
+    assert bis_b["outcome"] == "single"                 # the check's own verdict
+    # B with 0 archived draws, and a stale "draws" put on its baseline: the
+    # recount (no axis entry) removes it from the attr and the JSON alike
+    with h5py.File(h + ".h5", "a") as hf:
+        for i in range(6):
+            del hf[_group_path(sk_b, i)]
+        hf[_baseline_group_path(sk_b)].attrs[BISTABILITY_SOURCE_ATTR] = "draws"
+    from bouquet.engine import read_engine_json, write_engine_json
+    with h5py.File(h + ".h5", "a") as hf:
+        g = hf[_baseline_group_path(sk_b)]
+        rec = read_engine_json(g)
+        rec["bistability"].update(bistability_source="draws",
+                                  draws_evidence={"counts": [3, 3]})
+        write_engine_json(g, rec)
+    out_b = stamp_axis_scan(h, sk_b)
+    assert (out_b["n_recorded"], out_b["bimodality"]) == (0, None)
+    assert out_b["bistability_source"] is None
+    with h5py.File(h + ".h5", "r") as hf:
+        assert BISTABILITY_SOURCE_ATTR not in hf[_baseline_group_path(
+            sk_b)].attrs
+    bis_b = load_baseline_engine(h, scan_key=sk_b)["bistability"]
+    assert bis_b.get("bistability_source") is None
+    assert "draws_evidence" not in bis_b
+    # ... and the live record follows, though B's n is untestable
+    b._note_axis_scan(out_b)
+    live = b.baseline.engine["bistability"]
+    assert live.get("bistability_source") != "draws"
+    assert "draws_evidence" not in live
+    # scan A's own archived stamp is untouched
+    assert load_baseline_engine(h, scan_key=sk_a)["bistability"][
+        "bistability_source"] == "draws"
+
+
 def test_a_bistable_stamp_is_not_overwritten_by_the_draws(
         tmp_path, toy_bouquet_solver, monkeypatch):
     from bouquet.engine import (load_baseline_engine, read_engine_json,

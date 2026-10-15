@@ -6652,14 +6652,23 @@ class Bouquet(SwbBaseline):
         warned.  Reported, never a filter."""
         bim = (axs or {}).get("bimodality")
         self.engine_axis_bimodality = bim
+        bl = getattr(self, "baseline", None)
+        eng = getattr(bl, "engine", None)
+        src = (axs or {}).get("bistability_source")
+        if (src != "draws" and isinstance(eng, dict)
+                and (eng.get("bistability") or {}).get(
+                    "bistability_source") == "draws"):
+            # another scan's evidence: removed also when this scan has no
+            # axis record or too few draws to test
+            bis = dict(eng["bistability"])
+            bis.pop("bistability_source", None)
+            bis.pop("draws_evidence", None)
+            eng["bistability"] = bis
         if not bim or bim.get("axis_bimodal") is None:
             return
         from .engine import axis_bimodality_text
         print(f"[axis] scan {self.config.generation.scan_key!r}: "
               + axis_bimodality_text(bim), flush=True)
-        bl = getattr(self, "baseline", None)
-        eng = getattr(bl, "engine", None)
-        src = axs.get("bistability_source")
         if isinstance(eng, dict):
             bis = dict(eng.get("bistability") or {})
             if src == "draws":
@@ -6668,10 +6677,6 @@ class Bouquet(SwbBaseline):
                     gap_mm=bim["gap_mm"], n=bim["n"],
                     version=bim["version"],
                     reconstruction_outcome=bis.get("outcome")))
-                eng["bistability"] = bis
-            elif bis.get("bistability_source") == "draws":
-                bis.pop("bistability_source", None)
-                bis.pop("draws_evidence", None)
                 eng["bistability"] = bis
         if bim["axis_bimodal"]:
             import warnings
