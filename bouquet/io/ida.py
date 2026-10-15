@@ -347,6 +347,10 @@ def read_ida(
         # The CER route's value + envelope, filled by whichever layout
         # branch runs below; None when the file carries no carbon channel.
         n_carbon = sigma_n_carbon = None
+        # whether the carbon validity screen (_carbon_tier_usable) has run on
+        # this file's carbon data; its verdict is sigma_Zeff_carbon (None:
+        # rejected, or not run)
+        _carbon_screened = False
 
         if is_ensemble:
             def _samples(key):  # (n_samples, n_radial) at the selected slice
@@ -382,6 +386,7 @@ def read_ida(
                 # one sample at one radius is enough to put ~1e17 into the band,
                 # and _band (a percentile half-width) is always finite and
                 # non-negative, so nothing downstream would catch it.
+                _carbon_screened = True
                 if _carbon_tier_usable(nc_s, ne_s, unit="sample points",
                                        datasets="n_12C6/n_e samples"):
                     zc_s = (1.0 + impurity_Z * (impurity_Z - 1.0) * nc_s
@@ -413,6 +418,7 @@ def read_ida(
                 # The propagation is only meaningful where the carbon data is
                 # physical; see _carbon_tier_usable for what "physical" means
                 # here and why a single bad radius drops the tier.
+                _carbon_screened = True
                 if _carbon_tier_usable(_nc, ne, sigma_nC=_snc, sigma_ne=sigma_ne):
                     with np.errstate(divide="ignore", invalid="ignore"):
                         _dil = (impurity_Z * (impurity_Z - 1.0) * _nc
@@ -551,11 +557,49 @@ def read_ida(
         # vintages carry no *_err): take the VB value, ne-fraction sigma --
         # or, with no VB value at all, the carbon value.
         zeff_sigma_from_ne = not (use_vb or use_cer)
+        zeff_from_carbon = False
         if zeff_sigma_from_ne:
             if zeff_vb is not None:
                 use_vb = True
             elif zeff_cer is not None:
+                # No Zeff dataset: Z_eff DERIVED from the carbon density.
+                # The same two checks the carbon route enforces (review F3):
+                # the carbon validity screen (run here, without sigmas, when
+                # the file has no n_12C6_err to run it with) and a carbon
+                # impurity (Z_eff = 1 + Z(Z-1) n_C/n_e holds for the C6+
+                # density only).  Either failing: refused, like a file with
+                # no Z_eff information at all.
+                _why = None
+                if float(impurity_Z) != 6.0:
+                    _why = (f"impurity_Z={float(impurity_Z):g}, but the "
+                            "file's impurity density is carbon ('n_12C6', "
+                            "Z = 6)")
+                elif sigma_Zeff_carbon is None and (
+                        _carbon_screened
+                        or not _carbon_tier_usable(
+                            n_carbon, ne, unit="radii",
+                            datasets="n_12C6/n_e (no n_12C6_err)")):
+                    _why = ("the carbon validity screen rejected its "
+                            "'n_12C6' data (negative, non-finite or fill "
+                            "values)")
+                if _why is not None:
+                    raise KeyError(
+                        f"{path!r} carries no usable Z_eff information: no "
+                        f"'Zeff' dataset, and Z_eff cannot be derived from "
+                        f"the carbon density because {_why}; "
+                        f"ni_source={ni_source!r} has no Z_eff to resolve. "
+                        "Take the dd's Z_eff explicitly "
+                        "(ImasSource.ni_source='standard') or use a file "
+                        "with a Zeff dataset")
                 use_cer = True
+                zeff_from_carbon = True
+                import warnings
+                warnings.warn(
+                    f"read_ida: {path!r} has no 'Zeff' dataset; Z_eff is "
+                    "DERIVED from the carbon density (1 + Z(Z-1) n_C/n_e, "
+                    "the validity screen passed, Z = 6) with an n_e-fraction "
+                    "sigma (zeff_provenance['zeff_source'] = "
+                    "'carbon_density')", UserWarning, stacklevel=2)
             else:
                 raise KeyError(
                     f"{path!r} carries no Z_eff information (no 'Zeff' and no "
@@ -597,6 +641,12 @@ def read_ida(
             n_clipped_cer=_n_out(zeff_cer) if w_c else 0,
             n_nodes=int(np.size(ne)),
             impurity_Z=float(impurity_Z),
+            # where the resolved Z_eff comes from: the file's Zeff dataset,
+            # the carbon density, or both (a file without Zeff derives it
+            # from n_12C6 -- the bottom rung stamps zeff_from_carbon)
+            zeff_source=("carbon_density" if not w_v else
+                         "Zeff+carbon_density" if w_c else "Zeff"),
+            zeff_from_carbon_fallback=bool(zeff_from_carbon),
         )
 
         _inv = 1.0 / (impurity_Z - 1.0)

@@ -129,6 +129,16 @@ route. Closes #84.
   written before (no `in_spec_source`) `in_spec` is the drift verdict and
   `in_spec_source` says so. Goldens that store `in_spec` / `n_in_spec` move
   when regenerated.
+- `read_ida`'s bottom rung -- a file with no `Zeff` dataset whose carbon
+  route has no usable envelope -- derives Z_eff from the carbon density only
+  after the same two checks the carbon route enforces: the carbon validity
+  screen (run without sigmas when the file has no `n_12C6_err`) and
+  `impurity_Z == 6`. Either failing is refused ("no usable Z_eff
+  information"; take the dd's Z_eff with `ni_source='standard'`) instead of
+  taking screened-out or non-carbon data. A derived Z_eff warns once and is
+  stamped (`zeff_provenance["zeff_source"]="carbon_density"`,
+  `zeff_from_carbon_fallback`, and `kinetics_route["ida_zeff_source"]` on the
+  baseline record).
 
 ## Unreleased — the golden recipe runs the synthetic fixtures at the current defaults; a new IDS-route golden (owner decisions 2026-10-15)
 

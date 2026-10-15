@@ -2700,6 +2700,11 @@ def read_imas_baseline(
         ni_subtract_fast=bool(_subtract), include_pfast=bool(_pfast_in),
         ida_file_has_zeff=(None if not use_ida else bool(_has_z)),
         ida_file_has_carbon=(None if not use_ida else bool(_has_c)),
+        # where the IDA Z_eff came from on the measured route: the file's
+        # Zeff dataset, the carbon density ("carbon_density": a file with no
+        # Zeff derives it from n_12C6, screened, Z = 6), or both
+        ida_zeff_source=((getattr(_ida_read, "zeff_provenance", None) or {})
+                         .get("zeff_source") if _ida_ion_route else None),
         cross_source=_cross)
 
     # --- user overrides for fixed additive components ---
