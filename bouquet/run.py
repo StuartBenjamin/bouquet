@@ -8702,7 +8702,15 @@ class Bouquet(SwbBaseline):
             from .filtering import resolve_inspec_bands
             bands = resolve_inspec_bands(self.config.generation)
             extra = {"route": "post-hoc re-filter"}
-        except Exception:
+        except (KeyError, TypeError) as _exc:
+            # a stand-in config without the rule's fields: the archive's
+            # flags are left as they are -- loudly (anything else propagates)
+            import warnings as _w
+            _w.warn(
+                f"filter(): the in-spec rule could not be resolved from this "
+                f"config ({type(_exc).__name__}: {_exc}); the archive's band "
+                "flags and `selected` are left as stamped, not re-judged",
+                UserWarning, stacklevel=3)
             return {"rule": None, "refiltered": False, "previous_rule": None}
         try:
             prev_rule, prev = read_inspec_rule(header, scan_key=sk)

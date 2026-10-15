@@ -645,3 +645,31 @@ def test_an_old_archive_reads_through_read_filter_flags_and_drawview(
     ar = BouquetArchive(h + ".h5")
     d0 = ar.scan(ar.scan_keys[0])[0].flags
     assert d0["in_spec_source"] == F.IN_SPEC_DRIFT_SOURCE
+
+
+# --------------------------------------------------------------------------
+#  _apply_inspec_rule: a config the rule cannot be resolved from is warned
+#  about; anything else propagates
+# --------------------------------------------------------------------------
+class _NoRule:
+    def __init__(self, exc):
+        self._exc = exc
+
+    def _inspec_bands(self):
+        raise self._exc
+
+
+@pytest.mark.parametrize("exc", [KeyError("l_i_sigma"),
+                                 TypeError("bad field")])
+def test_an_unresolvable_rule_is_warned_about(exc):
+    from bouquet.run import Bouquet
+    with pytest.warns(UserWarning, match=type(exc).__name__):
+        out = Bouquet._apply_inspec_rule(_NoRule(exc), "unused", None)
+    assert out == {"rule": None, "refiltered": False, "previous_rule": None}
+
+
+def test_another_error_resolving_the_rule_propagates():
+    from bouquet.run import Bouquet
+    with pytest.raises(RuntimeError, match="boom"):
+        Bouquet._apply_inspec_rule(_NoRule(RuntimeError("boom")), "unused",
+                                   None)

@@ -156,6 +156,10 @@ route. Closes #84.
   (graduated 2026-10-14: on with the measured route, default included). The
   comments now say so; the unused `experimental._explicit_ida_ion_route` is
   removed.
+- `Bouquet.filter()`'s in-spec rule step no longer swallows every exception
+  from resolving the rule: a `KeyError` / `TypeError` (a config without the
+  rule's fields) is warned about with its type and message, and anything else
+  propagates.
 
 ## Unreleased — the golden recipe runs the synthetic fixtures at the current defaults; a new IDS-route golden (owner decisions 2026-10-15)
 
