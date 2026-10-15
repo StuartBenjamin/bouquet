@@ -91,6 +91,16 @@ def test_every_engine_dependent_field_defaults_to_none():
         assert engine_dependent_unset(name, getattr(g, name)), name
 
 
+def _error_on_any_warning_but_the_deprecation():
+    """``simplefilter("error")``, except the one warning the legacy route
+    carries by design since 1.4.0: its DeprecationWarning (removal in 1.5,
+    #90; tests/test_legacy_route_deprecation.py)."""
+    warnings.simplefilter("error")
+    warnings.filterwarnings(
+        "ignore", category=DeprecationWarning,
+        message=r"reconstruction_engine='legacy' / solve_method='legacy' is deprecated")
+
+
 @pytest.mark.parametrize("kind", ["imas", "gfile"])
 def test_a_factory_config_switched_to_legacy_runs_the_legacy_values(
         kind, monkeypatch):
@@ -101,7 +111,7 @@ def test_a_factory_config_switched_to_legacy_runs_the_legacy_values(
     b = _factory(kind)
     b.config.generation.reconstruction_engine = "legacy"
     with warnings.catch_warnings():
-        warnings.simplefilter("error")       # a resolution is not a warning
+        _error_on_any_warning_but_the_deprecation()       # a resolution is not a warning
         assert _what_the_baseline_builder_sees(b, monkeypatch) == \
             _LEGACY[kind]
     rec = b._engine_resolved_defaults
@@ -134,7 +144,7 @@ def test_a_switch_after_a_previous_resolution_is_re_resolved(kind,
     assert _what_the_baseline_builder_sees(b, monkeypatch) == _UNIFIED
     b.config.generation.reconstruction_engine = "legacy"
     with warnings.catch_warnings():
-        warnings.simplefilter("error")
+        _error_on_any_warning_but_the_deprecation()
         assert _what_the_baseline_builder_sees(b, monkeypatch) == \
             _LEGACY[kind]
     b.config.generation.reconstruction_engine = "unified"
@@ -173,7 +183,7 @@ def test_an_explicit_agreeing_value_is_kept_silently(monkeypatch):
     g.reconstruction_engine = "legacy"
     g.perturb_jind_in_anchor = True
     with warnings.catch_warnings():
-        warnings.simplefilter("error")
+        _error_on_any_warning_but_the_deprecation()
         assert _what_the_baseline_builder_sees(b, monkeypatch) == \
             (False, True)
     assert b._engine_resolved_defaults["perturb_jind_in_anchor"] == \
