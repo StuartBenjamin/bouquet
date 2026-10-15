@@ -4,6 +4,10 @@ Self-consistent synthetic DIII-D-like H-mode, built from shot 147131 @ 2300 ms
 profiles + boundary at generic round-number targets.  See
 D3Dlike_Hmode_baseline_RECIPE.md for the full rationale.
 
+This script builds the baseline equilibrium only (no draws). A bouquet drawn
+from it uses until-N 24 in spec (generation.n_inspec_target = 24), the default
+of every example: 30 for 5/95 bands, 50 for paper widths.
+
 Run:
   N_ISO=16 ISO_W=200 USE_SADDLE=1 SAD_W=200 IP_TARGET=1200000 BT_ABS=2.0 \
   FLIP_BT=1 SR=0.99 SZ=0.97 DZ=0.02 NLEVELS=257 \

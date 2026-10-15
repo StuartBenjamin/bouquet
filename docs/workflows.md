@@ -308,7 +308,7 @@ as an enormous sigma.
 | `single_profile_jphi` | `False` | Legacy path: perturb the TOTAL `j_phi` as one profile (no inductive / bootstrap split; no per-draw Sauter call). `jphi_scalar_sigma` then applies to the total, a larger absolute perturbation -- re-tune it. Needs `jbs_self_consistent=False` (refused otherwise); the unified engine refuses it |
 | `jBS_scale_range` | `(0.99, 1.01)` | Legacy draws: the per-draw multiplicative spread of the bootstrap (uniform in the range; default `None` -> `(0.99, 1.01)` on 2026-06-04). The baseline's multiplier (`bs_scale` / `s_bs(ψ)`) is applied after SWB on SWB draws and re-centres this range on loop draws -- see [physics-notes.md](physics-notes.md) ("The bootstrap multiplier") |
 | `swb_seed` | `None` | IMAS path, every legacy SWB call (baseline split, draws, σ=0 check): `"source"` seeds SWB with the source's `j_inductive` and holds its NBI + RF + other current fixed (`jphi_fixed`); `"generic"` the `(1 - s^1.5)^1.5` seed. `None` resolves at `prepare_baseline()` to `"source"` when the installed OFT's `solve_with_bootstrap` takes `jphi_fixed`, else `"generic"` -- never an error; an explicit `"source"` on a toolkit without `jphi_fixed` is refused at the first SWB call only. Stamped in `li_metrics["swb_seed"]` |
-| `solve_method` | `None` | The internal solve method: `"legacy"`, `"swb"` (**EXPERIMENTAL**, [`swb_solve_method`](#experimental-features-and-their-validation-status); `solve_with_bootstrap` is the baseline and every draw; IMAS sources) or `"engine"` (the unified engine). `None` derives it from `imas_baseline` / `reconstruction_engine`. Nothing is rewritten at construction; the effective fields are set where the run is resolved (`prepare_baseline()`, the draw method, the solver setup) and a later switch back restores the user's own fields. A contradicting pair (`imas_baseline="swb"` with another method, `reconstruction_engine="legacy"` with `"engine"`) is refused |
+| `solve_method` | `None` | The internal solve method: `"legacy"` (**deprecated in 1.4.0, removed in 1.5, #90**; one `DeprecationWarning` per run), `"swb"` (**EXPERIMENTAL**, [`swb_solve_method`](#experimental-features-and-their-validation-status); `solve_with_bootstrap` is the baseline and every draw; IMAS sources) or `"engine"` (the unified engine). `None` derives it from `imas_baseline` / `reconstruction_engine`. Nothing is rewritten at construction; the effective fields are set where the run is resolved (`prepare_baseline()`, the draw method, the solver setup) and a later switch back restores the user's own fields. A contradicting pair (`imas_baseline="swb"` with another method, `reconstruction_engine="legacy"` with `"engine"`) is refused |
 | `imas_baseline` | `"closure"` | IMAS path: `"swb"` (**EXPERIMENTAL**, [`swb_solve_method`](#experimental-features-and-their-validation-status)) selects the swb method (solve A at the setup coil reg, solve B with a strong reg toward A's coils is the baseline, every draw is solve B with resampled kinetics and a GPR redraw of the inductive seed; 20 negative redraws refuse the draw, `swb_jind_redraw_refused`) |
 | `swb_coil_reg_weight` | `1e3` | swb only: weight of solve B's (and every draw's) coil reg toward solve A's coils |
 | `swb_edge_taper_psi0` | `None` | swb only: taper `j_phi` to zero from this ψ_N to the LCFS in every SWB solve (OFT `taper_edge_jBS`). **Opt-in** (owner decision D4; was 0.999): `None` is off and is sent as `taper_edge_jBS=False` where the toolkit has the option (a toolkit whose own default is taper-on keeps it on otherwise; such a taper with the setting off warns). The channel taper factor is measured, not assumed |
@@ -354,7 +354,7 @@ as an enormous sigma.
 | `jbs_gate_current_residual` | `False` | Legacy loop, opt-in: ADD the closure-half current residual `‖jc_k − js_k−1‖_w/‖jc_k‖_w ≤ jbs_rtol_j` to the loop's criteria (same two consecutive passes; nothing relaxed; pass 1 cannot count). The unified engine applies it always (a standing criterion) |
 | `jbs_loop_on_fail` | `"raise"` | Non-convergence: raise `JBSNotConverged` (with the residual history), or `"flag"` the slice closure-limited and keep the last iterate. A non-converged draw is always a failed draw |
 | `jbs_loop_q0_corrector` | `False` | The q0 pin under the loop (`"sawtooth_bootstrap"`, or `"structured"` with the axis row admitted). `False`: record-only, with the axis row held and the q0 residual flagged against `q0_tol`. `True`: the axis row is moved once per pass from the measured q0 (`j_ref0 ← j0_solved·q0/q0_target`), and convergence also requires `|q0 − q0_target| ≤ q0_tol` (unchanged); failure raises or flags like the loop. The l_i row is not covered. See [physics-notes.md](physics-notes.md#the-q0-pin-under-the-loop-jbs_loop_q0_corrector) |
-| `reconstruction_engine` | `"unified"` | **Default `"unified"` since 2026-10-06** (was `"legacy"`): ONE reconstruction loop for g-file and IDS inputs, which also runs the draws ([engine.md](engine.md)). `"legacy"` = the existing g-file reconstruction / IMAS baseline paths and the legacy draws, opt-in by name (`from_geqdsk` / `from_imas(..., reconstruction_engine="legacy")`). Legacy-path settings the engine never reads are refused under `"unified"`, naming the field and saying to set `"legacy"`. A stored config without the field (written before 2026-09-29) loads as `"legacy"` with a warning. `generate()` / `verify_sigma0_consistency()` under `"unified"` run the engine draws from the engine baseline `prepare_baseline()` built IN THIS SESSION (its live state); a baseline built by the other engine, or one loaded without that state, is refused (`Bouquet._refuse_unified_engine_draws`) |
+| `reconstruction_engine` | `"unified"` | **Default `"unified"` since 2026-10-06** (was `"legacy"`): ONE reconstruction loop for g-file and IDS inputs, which also runs the draws ([engine.md](engine.md)). `"legacy"` (**deprecated in 1.4.0, removed in 1.5, #90**: one `DeprecationWarning` per run, where the run is resolved) = the existing g-file reconstruction / IMAS baseline paths and the legacy draws, opt-in by name (`from_geqdsk` / `from_imas(..., reconstruction_engine="legacy")`). Legacy-path settings the engine never reads are refused under `"unified"`, naming the field and saying to set `"legacy"`. A stored config without the field (written before 2026-09-29) loads as `"legacy"` with a warning. `generate()` / `verify_sigma0_consistency()` under `"unified"` run the engine draws from the engine baseline `prepare_baseline()` built IN THIS SESSION (its live state); a baseline built by the other engine, or one loaded without that state, is refused (`Bouquet._refuse_unified_engine_draws`) |
 | `engine_preset` | `"structured"` | `"unified"` only: `"structured"` (4 Gaussians, `li_soft_onesided` priors), `"structured_uniform"` (the same basis under the uniform σ = 1 ladder: the prior-sensitivity run), `"bootstrap_scalar"` (rows Ip), `"sawtooth_two_scalar"` (rows Ip, q0; falls back to `"bootstrap_scalar"` with a notice when the sawtooth gate rejects q0) or `"two_scalar_li"` (rows Ip, l_i: the legacy secant's two-scalar family). Refused when changed under `"legacy"` |
 | `engine_rows` | `("Ip", "l_i")` | `"unified"` only: the measurement rows -- `"Ip"` (mandatory), `"l_i"` (g-file: hard at 1e-3; IDS: soft σ 0.04), `"q0"` (the source's own q at the row radius, only where the sawtooth gate admits it), `"mse"` (needs `mse_data` with `er_corrected=True`; raw E_r is refused) |
 | `engine_delivery_correction` | `False` | `"unified"` only: add `request − achieved/c` of the previous pass to each request (one Newton step per pass; part of the state a draw inherits). Default to be decided after the solver's `jphi-linterp` defect is fixed |
@@ -709,13 +709,17 @@ draws are in spec** -- by [the in-spec rule](#the-in-spec-rule) in force: the
 coil test and the boundary cut, plus any opt-in band -- then stops.
 
 ```python
-b.generation.n_equils = 20            # initial allocation, not the total
-b.generation.n_inspec_target = 20     # what you actually want delivered
+b.generation.n_equils = 24            # initial allocation, not the total
+b.generation.n_inspec_target = 24     # what you actually want delivered
 b.generation.max_total_draws = 60     # optional; default is 5 x the target
 b.filtering.rms_max_mm = 5.0          # the bounds the loop stops on
 b.generate()
 b.filter()                            # -> >= 20 selected
 ```
+
+**How many.** 24 in-spec draws is the default of every example and launcher;
+use 30 for 5/95 bands or band-against-band comparisons and 50 for widths
+quoted in a paper.
 
 Points worth knowing:
 
@@ -901,6 +905,32 @@ values, or a g-file baseline overlaid on `eq_fsa` draws (axis q0 vs
 innermost-surface q0), is stated in the limitations and marks
 `baseline_status` `"…:source_mismatch"`. `ScanView.spread()` remains the
 quick-look mean/std summary.
+
+**The standard summary in one call** (what every example notebook ends with):
+
+```python
+s = bq.bands_summary("run.h5", key, scalars=("beta_N", "l_i_3", "Lambda"),
+                     gradients=("dp_dpsi", "djphi_dpsi"), at={"q": 2.0},
+                     fallback_psi_N=0.5)
+print(s.table())        # median, p16-p84, full range, n per quantity
+s.plot()                # one band figure, n stated
+s["dp_dpsi"].provenance["surface"]     # where each draw was evaluated
+```
+
+It is `draw_band` with one evaluator, so the population, floors, counts and
+provenance are the recipe's. Scalars: `beta_N` (the draw's g-file),
+`beta_p`, `Lambda`, `l_i_3`, `l_i_1`, `q0`, `q95`. Gradients: `dp_dpsi` and
+`djphi_dpsi`, d/dψ_N of the draw's own archived `pressure` [Pa] and `j_phi`
+[A m⁻²] (central differences on the archived grid; a Φ_N-coordinate archive
+is mapped to ψ_N through the draw's own q), evaluated on each draw at **its
+own** `at` surface: the outermost q = 2 crossing of its archived q profile
+(`eq_fsa/q`, else its g-file; the source per draw is recorded). A draw without
+that surface is counted and excluded (`regular=False`, `no_q=2_surface`; the
+majority gate applies). When no in-spec draw has one, every draw is evaluated
+at `fallback_psi_N` and the summary and every gradient record say so
+(`surface["mode"] = "fallback_psi_N"` and a limitation line);
+`fallback_psi_N=None` returns the gradients `empty` instead. `at={"psi_N":
+x}` evaluates every draw at a fixed ψ_N.
 
 ## Exporting draws
 

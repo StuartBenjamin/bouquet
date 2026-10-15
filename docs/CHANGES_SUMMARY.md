@@ -1,5 +1,34 @@
 # Bouquet — change summaries
 
+## Unreleased — `bands_summary`, the legacy route deprecated, the notebooks on the synthetic fixtures (owner decisions 2026-10-15)
+
+**New: `bouquet.stats.bands_summary`** (exported as `bq.bands_summary`, with
+`BandSummary` and `plot_bands_summary`): the standard error bars of one slice
+in one call -- per quantity the median, the 16-84 % band, the full range and n
+over the in-spec draws, through `draw_band` (same population, floors, counts,
+provenance). Scalars `beta_N`, `beta_p`, `Lambda`, `l_i_3`, `l_i_1`, `q0`,
+`q95`; gradients `dp_dpsi` and `djphi_dpsi` (d/dpsi_N of each draw's own
+archived pressure / j_phi) evaluated at each draw's OWN q = 2 surface from its
+archived q profile; draws without one are counted and excluded, and when none
+has one the gradients fall back to a named psi_N (default 0.5) and the record
+says so. `.table()` prints the table, `.plot()` draws one band figure with n.
+Nothing is filtered on; no existing record changes.
+
+**Deprecated: the legacy route.** `reconstruction_engine="legacy"` and
+`solve_method="legacy"` emit one `DeprecationWarning` per run where the run is
+resolved (`prepare_baseline()`, the draw method), naming removal in 1.5 (#90);
+the warning is attributed to the caller's frame so the default filters show it.
+Behaviour is unchanged.
+
+**Examples.** The four notebooks run on the synthetic fixtures under
+`tests/data` (the g-file notebook on the H-mode pair with the L-mode pair as a
+second case; the IMAS notebook on the dd's 1.2 s slice as an IDA-hybrid run;
+the parallel notebook sweeping the dd's five slices through `parallel_cases`;
+the systematics notebook on the 1.2 s pair), draw until 24 are in spec (30 for
+5/95 bands, 50 for paper widths), and end with an "Error bars" section that
+calls `bands_summary`. The p-file variant is dropped: the synthetic set has no
+p-file.
+
 ## Unreleased — bistability check on by default; per-draw axis record and branch flag (owner decisions 2026-10-15)
 
 **Default change: `GenerationConfig.check_bistability` is ON under the unified
