@@ -366,7 +366,7 @@ as an enormous sigma.
 | `engine_draw_q0_row` | `False` | `"unified"` draws: also keep the reconstruction's q0 row acting in every draw (`AxisRowPin` on the bootstrap amplitude) -- for sawtoothing discharges; needs `"q0"` in `engine_rows` |
 | `engine_draw_homotopy` | `True` | `"unified"` draws: run the coil homotopy after a draw's loop (then the post-homotopy bootstrap check with its saturation guard); `False` measures the coil drift of the loop's own delivered draw |
 | `engine_draw_bootstrap_refresh` | `False` | `"unified"` draws: after a draw's first loop solve, restart the bootstrap iterate from the anchor's Redl increment re-evaluated on that solved geometry. Path only (no criterion, tolerance or ceiling; zero extra solves) |
-| `check_bistability` | `None` (on) | `"unified"` only. `None` resolves at `prepare_baseline()` (recorded in `engine_resolved_defaults`): **`True` under `"unified"`** (on by default since 2026-10-15, owner decision -- ONE extra GS solve per reconstruction), `False` under `"legacy"` (not applicable there: the default is never refused, an explicit `True` is). An explicit value, a stored config's included, is kept (an explicit `False` under `"unified"` prints a note). After the reconstruction, ONE extra solve of the same inputs from a COLD start (psi re-initialised as the reconstruction's own start) is compared with the delivered state -- l_i(3) and q0 at the q-row radius at the σ=0 gates (`jbs_tol_li`, `jbs_tol_q0`), β_pol and the magnetic axis reported. A miss stamps `Baseline.engine["bistability"]` with `bistable=True` and the deltas (archived with the baseline's engine record) and warns; the delivered equilibrium is restored and nothing is refused. See [engine.md](engine.md) |
+| `check_bistability` | `None` (on) | `"unified"` only. `None` resolves at `prepare_baseline()` (recorded in `engine_resolved_defaults`): **`True` under `"unified"`** (on by default since 2026-10-15, owner decision -- ONE extra GS solve per reconstruction), `False` under `"legacy"` (not applicable there: the default is never refused, an explicit `True` is). An explicit value, a stored config's included, is kept (an explicit `False` under `"unified"` prints a note). After the reconstruction, ONE extra solve of the same inputs from a COLD start (psi re-initialised as the reconstruction's own start) is compared with the delivered state -- l_i(3) and q0 at the q-row radius at the σ=0 gates (`jbs_tol_li`, `jbs_tol_q0`), β_pol and the magnetic axis reported. A miss stamps `Baseline.engine["bistability"]` with `bistable=True` and the deltas (archived with the baseline's engine record) and warns; the delivered equilibrium is restored and nothing is refused. See [Bistable equilibria](#the-in-spec-rule) and [engine.md](engine.md) |
 | `edge_pprime_pin` | `True` | Every solve: `True` zeroes the last node of `P'` (ψ_N = 1), so `P'` ramps to zero across the final interval (the behaviour before the setting); `False` keeps the profile's own derivative there -- a physics change (edge current and q95 move; see [physics-notes.md](physics-notes.md#the-pressure-handed-to-the-solver-separatrix-pressure-and-the-edge-p-pin)). The solver's resulting uniform `P'` rescale is recorded as `p_scale` |
 | `separatrix_pressure` | `"offset"` | Every solve: `"offset"` (default since 2026-10-02, owner-approved physics change) hands the solver `p_axis − p_sep` and adds `p_sep` back wherever pressure, β or W_MHD is reported or delivered (written g-files carry the full `PRES`); `"legacy"` hands the full axis pressure (a non-zero `p_sep` then inflates `P'` by `p_axis/(p_axis − p_sep)`). A negative `p_sep` is refused under `"offset"` |
 | `coil_drift` | `0.01` | Soft coil-drift target |
@@ -665,6 +665,39 @@ off. A config written since keeps exactly what it says.
 **What moves.** Yields rise wherever the l_i band was binding, and every
 reported l_i band becomes a result of the ensemble rather than a reflection of
 the 5 % tolerance. The coil and boundary thresholds are unchanged.
+
+**Bistable equilibria.** On a near-double-null slice the free-boundary problem
+can have two neighbouring solutions of the same inputs. On the one known case
+(a reversed-Ip slice) their magnetic axes sit 17 mm (2.8 % of a) apart, and
+l_i(3) differs by 2e-3 and q0 by 4e-3 -- an order of magnitude below the
+ensemble's band widths. Two records say where a run stands; neither refuses
+or filters anything:
+
+* the reconstruction's **bistability stamp** (`check_bistability`, on by
+  default under the unified engine, one extra solve per reconstruction):
+  `Baseline.engine["bistability"]` with `bistable=True`, the deltas and a
+  warning when a cold re-solve of the same inputs lands outside the σ=0
+  gates. The delivered equilibrium is kept.
+* every engine draw's **axis record and branch flag**: the archived state's
+  magnetic axis against the reconstruction's delivered one
+  (`engine["axis"]`: `R`, `Z`, `reference_R`, `reference_Z`, `dR_mm`,
+  `dZ_mm`, `displacement_mm`, `displacement_frac_a`, `minor_radius_m`) and
+  `axis_branch` = `"same"` when the displacement is within
+  `engine.AXIS_BRANCH_FRAC` (1 %) of a, `"other"` above -- the discriminator
+  the MSE stage's branch check uses. The flag is on the draw group
+  (`axis_branch`, `axis_shift_frac_a`), the σ=0 draw of
+  `verify_sigma0_consistency()` carries it too (`["axis"]`, not gated), the
+  count of `"other"` draws is in the `[generate]` / `[draw summary]` line, in
+  `ScanView.spread()["axis_branch"]` and in every `draw_scalars` record's
+  provenance (`axis_branch`, with a limitation when any used draw is
+  `"other"`), and on the scan (`n_axis_other`, `n_axis_recorded`).
+
+The magnetics do not distinguish the branches on the known case: a σ=0 draw
+that landed on the other branch passed the coil test (F 0.023 %, VSC 0.012 %)
+and the boundary cut (0.50 mm). So both branches pass the in-spec rule, and a
+band over both may be bimodal: that is the physics of the slice, not a defect
+to filter away. A continuity guard for the draws (keeping a draw on the
+reconstruction's branch through its homotopy) is tracked as #87.
 
 ## until-N in-spec draws
 

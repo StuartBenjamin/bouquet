@@ -78,10 +78,23 @@ ENGINE_MSE_JACOBIANS = ("fd_broyden", "fd_chord")
 #: owner-approved 2026-10-07 (non-converged only: it can only mark a stage
 #: not converged); recorded in :func:`convergence_table`.
 MSE_JACOBIAN_MAX_REFRESHES = 3
+#: The ONE axis-displacement discriminator between the two solutions of a
+#: bistable free-boundary problem: a state whose magnetic axis sits farther
+#: than this fraction of the reference state's minor radius ``a`` from the
+#: reference axis is on the OTHER solution branch.  Measured on a
+#: near-double-null slice with two nearly equal flux extrema: the two
+#: solutions' axes sit 17 mm (2.8 % of a) apart, while a continuous
+#: response to a coefficient step or a kinetic draw moves the axis by well
+#: under 1 mm.  Used by the MSE stage's finite-difference branch check
+#: (:data:`MSE_FD_BRANCH_AXIS_FRAC`) and by every engine draw's
+#: ``axis_branch`` flag (:func:`axis_branch_record`) -- a DISCRIMINATOR,
+#: never an acceptance criterion: nothing is accepted, refused or filtered
+#: on it.
+AXIS_BRANCH_FRAC = 0.01
 #: The MSE stage's finite-difference Jacobian keeps every perturbed solve on
 #: the base equilibrium's solution branch (2026-10-14).  A perturbed solve
-#: whose magnetic axis lands farther than this fraction of the base state's
-#: minor radius from the base axis has left the branch -- on a slice with
+#: whose magnetic axis lands farther than :data:`AXIS_BRANCH_FRAC` of the
+#: base state's minor radius from the base axis has left the branch -- on a slice with
 #: two nearly equal flux extrema the free-boundary solve has two solutions
 #: whose axes sit ~1-2 cm apart (measured: 17 mm, 2.8 % of a), while a
 #: continuous response to one coefficient step moves the axis by well under
@@ -92,7 +105,7 @@ MSE_JACOBIAN_MAX_REFRESHES = 3
 #: and nothing is accepted or refused on it; a column whose solves never
 #: stay on the branch keeps its original step (the Jacobian before the
 #: check) and is recorded as unresolved.
-MSE_FD_BRANCH_AXIS_FRAC = 0.01
+MSE_FD_BRANCH_AXIS_FRAC = AXIS_BRANCH_FRAC
 #: At most this many step halvings per Jacobian column (h -> h / 16).
 MSE_FD_MAX_HALVINGS = 4
 #: The engine fields of :class:`~bouquet.config.GenerationConfig` and their
@@ -3215,6 +3228,99 @@ def reconstruction_coil_reg(mygs) -> dict:
 BISTABILITY_CHECK_VERSION = "bistability/1"
 
 
+def state_axis(mygs):
+    """``(R, Z)`` [m] of the solver's CURRENT magnetic axis (its
+    ``o_point``), or ``None`` when it reports none, a non-finite one or the
+    solver's "no O-point" value (R <= 0).  The one reader of the axis
+    record (:func:`delivered_axis_reference`, :func:`axis_record_of`)."""
+    ax = _o_point(mygs)
+    if ax is None or not (np.isfinite(ax[0]) and np.isfinite(ax[1])
+                          and ax[0] > 0.0):
+        return None
+    return ax
+
+
+def axis_record_of(mygs, reference) -> dict:
+    """:func:`axis_branch_record` of the solver's CURRENT state (its
+    :func:`state_axis`) against *reference*."""
+    return axis_branch_record(state_axis(mygs), reference)
+
+
+def delivered_axis_reference(mygs, meas, backend=None) -> dict:
+    """The reconstruction's delivered magnetic axis and minor radius, read
+    on the delivered state: ``R``, ``Z`` [m] (:func:`state_axis`; ``None``
+    when the solver reports none) and
+    ``minor_radius_m`` (the delivered measurement's ``a_geo``, else the
+    backend's ``minor_radius()``, else the solver's ``get_stats()``
+    ``a_geo``; ``None`` when none is available).  The
+    reference of every engine draw's :func:`axis_branch_record`."""
+    ax = state_axis(mygs)
+    a = (meas.get("stats") or {}).get("a_geo") if isinstance(meas, dict) \
+        else None
+    src = "the delivered measurement's a_geo"
+    if a is None and callable(getattr(backend, "minor_radius", None)):
+        try:
+            a = backend.minor_radius()
+            src = "the backend's minor_radius() on the delivered state"
+        except Exception:                           # noqa: BLE001
+            a = None
+    if a is None and callable(getattr(mygs, "get_stats", None)):
+        try:
+            a = mygs.get_stats().get("a_geo")
+            src = "the solver's get_stats() a_geo on the delivered state"
+        except Exception:                           # noqa: BLE001
+            a = None
+    try:
+        a = float(a)
+        if not (np.isfinite(a) and a > 0.0):
+            a = None
+    except (TypeError, ValueError):
+        a = None
+    return dict(R=None if ax is None else float(ax[0]),
+                Z=None if ax is None else float(ax[1]),
+                minor_radius_m=a,
+                minor_radius_source=(src if a is not None else None),
+                state="the reconstruction's delivered equilibrium")
+
+
+def axis_branch_record(axis, reference) -> dict:
+    """The axis record of one state against the reconstruction's delivered
+    axis *reference* (:func:`delivered_axis_reference`): the state's axis
+    ``R``, ``Z`` [m], the reference's, ``dR_mm`` / ``dZ_mm`` and the
+    displacement ``|d axis|`` in mm and as a fraction of the reference's
+    minor radius ``a``, and ``axis_branch``: ``"same"`` when
+    ``|d axis| <= AXIS_BRANCH_FRAC x a``, ``"other"`` above (the
+    discriminator of the MSE stage's branch check, :data:`AXIS_BRANCH_FRAC`),
+    ``None`` when either axis or ``a`` is unknown.  A REPORT: nothing is
+    accepted, refused or filtered on it."""
+    ref = dict(reference or {})
+    rec = dict(R=None, Z=None, reference_R=ref.get("R"),
+               reference_Z=ref.get("Z"),
+               minor_radius_m=ref.get("minor_radius_m"), dR_mm=None,
+               dZ_mm=None, displacement_mm=None, displacement_frac_a=None,
+               threshold_frac_a=float(AXIS_BRANCH_FRAC), axis_branch=None,
+               rule=("axis_branch = 'other' when the magnetic axis sits "
+                     "more than threshold_frac_a x a (the reconstruction's "
+                     "minor radius) from the reconstruction's delivered "
+                     "axis, else 'same'; reported, never a filter"))
+    if axis is not None:
+        rec["R"], rec["Z"] = float(axis[0]), float(axis[1])
+    if rec["R"] is None or rec["reference_R"] is None \
+            or rec["reference_Z"] is None:
+        return rec
+    dR = rec["R"] - float(rec["reference_R"])
+    dZ = rec["Z"] - float(rec["reference_Z"])
+    d = float(np.hypot(dR, dZ))
+    rec.update(dR_mm=1e3 * dR, dZ_mm=1e3 * dZ, displacement_mm=1e3 * d)
+    a = rec["minor_radius_m"]
+    if a is not None and float(a) > 0.0:
+        frac = d / float(a)
+        rec["displacement_frac_a"] = frac
+        rec["axis_branch"] = ("other" if frac > float(AXIS_BRANCH_FRAC)
+                              else "same")
+    return rec
+
+
 def bistability_check_on(gc) -> bool:
     """Whether the reconstruction runs :func:`check_bistability`:
     ``GenerationConfig.check_bistability``, an unset value (``None``, not
@@ -3494,13 +3600,20 @@ def prepare_engine_baseline(bq):
                                            recon_iso["origin"])
         if isinstance(getattr(bl, "engine", None), dict):
             bl.engine["recon_isoflux"] = dict(recon_iso["stamp"])
+    # ... and its delivered magnetic axis and minor radius: the reference
+    # of every engine draw's axis record and branch flag (axis_branch_record)
+    delivered_axis = delivered_axis_reference(mygs, eng.delivered_meas,
+                                              backend)
+    if isinstance(getattr(bl, "engine", None), dict):
+        bl.engine["delivered_axis"] = dict(delivered_axis)
     bq._engine_run = dict(engine=eng, result=res, psi_pad=float(psi_pad),
                           q_psi=getattr(backend, "q_psi", None),
                           baseline=bl, coil_reg=coil_reg,
                           delivered_eq=(mygs.copy_eq()
                                         if hasattr(mygs, "copy_eq")
                                         else None),
-                          recon_isoflux=recon_iso)
+                          recon_isoflux=recon_iso,
+                          delivered_axis=delivered_axis)
     if bistability_check_on(gc):
         # on by default (check_bistability, resolved per engine): ONE extra
         # cold solve of the same inputs, compared with the delivered state;

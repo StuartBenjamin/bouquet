@@ -756,6 +756,19 @@ and the draws are unchanged. The record is archived with the baseline's
 engine record. A cold start converging to the delivered state does not prove
 there is no other branch; a miss shows there is one.
 
+**Which branch is each draw on? (`engine["axis"]`, always recorded.)** Every
+archived engine draw records its archived state's magnetic axis against the
+reconstruction's delivered axis (`Baseline.engine["delivered_axis"]`, the
+reference, with the delivered minor radius a): `R`, `Z`, `reference_R`,
+`reference_Z`, `dR_mm`, `dZ_mm`, `displacement_mm`, `displacement_frac_a`
+and `axis_branch` -- `"same"` within `engine.AXIS_BRANCH_FRAC` (0.01) x a,
+`"other"` beyond it (`engine.axis_branch_record`; the same constant is the
+MSE stage's branch-check discriminator, `MSE_FD_BRANCH_AXIS_FRAC`). The flag
+is stamped on the draw group (`axis_branch`, `axis_shift_frac_a`), counted
+on the scan (`n_axis_other`) and in the summaries
+([workflows.md](workflows.md#the-in-spec-rule), "Bistable equilibria"). It is
+a report: nothing is accepted, refused or filtered on it.
+
 `verify_sigma0_consistency()` under the engine runs ONE draw through the
 route `generate()` runs -- it calls `generate(n=1)` itself, with every
 perturbation zero and the bootstrap scale 1.0, archiving into a temporary

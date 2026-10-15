@@ -501,9 +501,12 @@ def _draw_rejection_reason(exc, stage):
     return "perturb_failed"
 
 
-def _rejection_summary(rejections, n_attempts, n_archived, masked=None):
+def _rejection_summary(rejections, n_attempts, n_archived, masked=None,
+                       diagnostics=None):
     """One line: attempts, archived, rejected by reason (+ masked loop
-    failures that did not reject a draw)."""
+    failures that did not reject a draw; + the archived engine draws'
+    axis-branch count, :func:`bouquet.engine_draws.axis_branch_counts`,
+    when *diagnostics* carry it)."""
     from collections import Counter
     c = Counter(r["reason"] for r in rejections)
     by = (", ".join(f"{k}={v}" for k, v in sorted(c.items()))
@@ -515,6 +518,11 @@ def _rejection_summary(rejections, n_attempts, n_archived, masked=None):
         _m = ", ".join(f"{k}={v}" for k, v in sorted(masked.items()) if v)
         if _m:
             txt += f"; masked inside kept draws: {_m}"
+    if diagnostics:
+        from .engine_draws import axis_branch_counts, axis_branch_text
+        _ax = axis_branch_text(axis_branch_counts(diagnostics))
+        if _ax:
+            txt += "; " + _ax
     return txt
 
 
@@ -8882,7 +8890,8 @@ def generate_bouquet(
                    for k in ANCHOR_MASKED_FAILURES}
     print("\n[draw summary] " + _rejection_summary(
         _rejections, len(_rejections) + len(all_diagnostics),
-        len(all_diagnostics), masked=_masked_run), flush=True)
+        len(all_diagnostics), masked=_masked_run,
+        diagnostics=all_diagnostics), flush=True)
     return all_diagnostics
 
 

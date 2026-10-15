@@ -499,7 +499,13 @@ class ScanView:
           * ``beta_p`` and ``Lambda`` = beta_p + l_i(3)/2
             (:data:`bouquet.filtering.LAMBDA_DEFINITION`) -- the stored
             per-draw values (else formed from the draw's edge-pressure
-            record and ``l_i(3)``); reported, never a filter.
+            record and ``l_i(3)``); reported, never a filter;
+          * ``axis_branch`` -- not a statistic: ``{n, n_other, n_same}``,
+            the draws whose archived magnetic axis sits more than
+            ``engine.AXIS_BRANCH_FRAC`` x a from the reconstruction's
+            (``"other"``: the free-boundary problem's other solution) among
+            those that carry the flag (engine draws); ``None`` when none
+            does.  Reported, never a filter.
 
         ``<P>`` and ``beta_N`` are read from each draw's g-file geometry (one
         flux-surface trace per draw, so this is O(seconds) for a full family),
@@ -515,10 +521,16 @@ class ScanView:
         per-stage counts and a provenance record.
         """
         draws = self._draws(selection)
+        from .engine_draws import AXIS_BRANCH_ATTR
         from .stats import _shafranov_entries
         cols = {"l_i(1)": [], "l_i(3)": [], "<P> [kPa]": [], "beta_N": [],
                 "beta_p": [], "Lambda": []}
+        branches = []
         for d in draws:
+            _b = d.attrs.get(AXIS_BRANCH_ATTR)
+            if _b is not None:
+                branches.append(_b.decode() if isinstance(_b, bytes)
+                                else str(_b))
             cols["l_i(1)"].append(d.li1)
             cols["l_i(3)"].append(d.li3)
             p_avg_kpa, beta_n = _gfile_pressure_scalars(d.equilibrium())
@@ -540,6 +552,10 @@ class ScanView:
             out[name] = {"n": int(x.size), "mean": m, "std": s,
                          "rel_std": (s / m if m else float("nan")),
                          "min": float(x.min()), "max": float(x.max())}
+        n_other = sum(1 for b in branches if b == "other")
+        out["axis_branch"] = (None if not branches else {
+            "n": len(branches), "n_other": int(n_other),
+            "n_same": len(branches) - int(n_other)})
 
         if print_table:
             print(f"Bouquet output spread -- scan {self.scan_key!r}, "
@@ -554,11 +570,19 @@ class ScanView:
                       "predates the record)")
             print(f"  {'quantity':<11}{'mean':>10}{'1sigma':>10}{'σ/mean':>8}   range")
             for name, st in out.items():
+                if name == "axis_branch":
+                    continue
                 if st is None:
                     print(f"  {name:<11}  (no finite draws)")
                     continue
                 print(f"  {name:<11}{st['mean']:>10.3f}{st['std']:>10.3f}"
                       f"{100 * st['rel_std']:>7.2f}%   [{st['min']:.3f}, {st['max']:.3f}]")
+            ab = out["axis_branch"]
+            if ab is not None:
+                from .engine import AXIS_BRANCH_FRAC
+                print(f"  axis branch: {ab['n_other']} of {ab['n']} draws "
+                      f"'other' (axis > {AXIS_BRANCH_FRAC:g} x a from the "
+                      "reconstruction's; reported, never a filter)")
         return out
 
     def __getitem__(self, count: int) -> DrawView:

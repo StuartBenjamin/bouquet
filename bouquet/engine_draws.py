@@ -1178,8 +1178,16 @@ class GenerateEngineDraws(DrawMethod):
     def __init__(self, ctx, *, unc, psi_pad, q_psi=None, maxits=None,
                  homotopy=True, l_i_tolerance=None, p_thresh=0.05,
                  max_proxy_draws=500, coil_reg=None, delivered_eq=None,
-                 recon_isoflux=None, bands=None):
+                 recon_isoflux=None, bands=None, delivered_axis=None):
         self.ctx = ctx
+        #: the reconstruction's delivered magnetic axis and minor radius
+        #: (``Bouquet._engine_run["delivered_axis"]``, :func:`bouquet.engine.
+        #: delivered_axis_reference`): the reference of every draw's axis
+        #: record and ``axis_branch`` flag (:meth:`post_hoc`).  ``None``: not
+        #: on record (a test stand-in) -- each draw's axis is recorded with
+        #: no displacement and no branch
+        self.delivered_axis = (None if delivered_axis is None
+                               else dict(delivered_axis))
         #: the isoflux pattern the reconstruction was pointed at
         #: (``Bouquet._engine_run["recon_isoflux"]``: ``pts``, ``w``,
         #: ``origin``, ``stamp``); every draw's homotopy holds the boundary
@@ -1774,6 +1782,11 @@ class GenerateEngineDraws(DrawMethod):
             **flux_range_change(rec["archived"]["flux_range"],
                                 self.ctx.ref["flux_range"]))
         rec["post_hoc"] = v
+        # the archived state's magnetic axis against the reconstruction's
+        # delivered axis, and its branch flag (engine.AXIS_BRANCH_FRAC x a):
+        # REPORTED, never a filter
+        from .engine import axis_record_of
+        rec["axis"] = axis_record_of(mygs, self.delivered_axis)
         if getattr(self, "sigma0_probe", None) is not None:
             self.sigma0_probe["archived"] = zero_perturbation_archived_verdict(
                 self.ctx, cur["draw"]["jbs_used"], fin)
@@ -1789,6 +1802,12 @@ class GenerateEngineDraws(DrawMethod):
         for _k, _x in ((BETA_P_ATTR, v["beta_p"]), (LAMBDA_ATTR, v["Lambda"])):
             if np.isfinite(_x):
                 _fl[_k] = float(_x)
+        # the axis branch flag and displacement on the group (read by the
+        # stats tables; never by a filter)
+        _ax = rec["axis"]
+        if _ax["axis_branch"] is not None:
+            _fl[AXIS_BRANCH_ATTR] = str(_ax["axis_branch"])
+            _fl[AXIS_SHIFT_ATTR] = float(_ax["displacement_frac_a"])
         diagnostics["inspec_draw_attrs"] = _fl
         if v["reasons"]:
             print("  [engine draw post-hoc] OUT OF BAND (archived, "
@@ -1886,7 +1905,11 @@ class GenerateEngineDraws(DrawMethod):
 
     def summarize(self, bq):
         """Every engine-draw solve that stopped at engine_draw_solve_maxits
-        (stage, iterations, seconds, rolled back or rejected)."""
+        (stage, iterations, seconds, rolled back or rejected); the archived
+        draws' axis-branch count (:func:`axis_branch_counts`) on
+        ``Bouquet.engine_axis_branch``."""
+        bq.engine_axis_branch = axis_branch_counts(
+            getattr(bq, "diagnostics", None) or [])
         bq.engine_draw_cap_events = [dict(e) for e in self.cap_events]
         if self.cap_events:
             from collections import Counter as _Ctr
@@ -1937,7 +1960,10 @@ class GenerateEngineDraws(DrawMethod):
                     "measure on G*"), Ip_target_A=self.ctx.Ip_star,
             reference=self.ctx.ref,
             homotopy_isoflux=(None if self.recon_isoflux is None else
-                              dict(self.recon_isoflux.get("stamp") or {})))
+                              dict(self.recon_isoflux.get("stamp") or {})),
+            # the reference of every draw's axis record / axis_branch flag
+            axis_reference=(None if self.delivered_axis is None
+                            else dict(self.delivered_axis)))
         store_baseline_engine(header, rec, scan_key=scan_key)
         # the reconstruction's beta_p and Lambda (filtering.
         # LAMBDA_DEFINITION): its delivered full-pressure frame and l_i
@@ -1968,6 +1994,76 @@ def _jbs_block(loop_rec):
                     n_passes=int(loop_rec.get("n_passes", 0)),
                     converged=bool(loop_rec.get("converged")))],
         final=loop_rec))
+
+
+#: Per-draw group attribute: the archived state's axis branch, ``"same"`` /
+#: ``"other"`` (:func:`bouquet.engine.axis_branch_record`; written only when
+#: known).  Reported, never a filter.
+AXIS_BRANCH_ATTR = "axis_branch"
+#: Per-draw group attribute: the axis displacement from the
+#: reconstruction's delivered axis, as a fraction of its minor radius.
+AXIS_SHIFT_ATTR = "axis_shift_frac_a"
+#: Scan-group attribute: the number of archived draws of the scan flagged
+#: ``axis_branch="other"`` (and, beside it, how many carry the flag).
+AXIS_OTHER_SCAN_ATTR = "n_axis_other"
+AXIS_RECORDED_SCAN_ATTR = "n_axis_recorded"
+
+
+def axis_branch_counts(diagnostics) -> dict:
+    """``dict(n_recorded, n_other, n_same, other_draws)`` over archived
+    draw *diagnostics*: the engine draws whose ``engine["axis"]`` record
+    carries an ``axis_branch`` (:func:`bouquet.engine.axis_branch_record`);
+    ``other_draws`` are their positions in *diagnostics*."""
+    br = []
+    for i, d in enumerate(diagnostics or []):
+        ax = ((d or {}).get("engine") or {}).get("axis") \
+            if isinstance(d, dict) else None
+        b = (ax or {}).get("axis_branch")
+        if b is not None:
+            br.append((i, b))
+    other = [i for i, b in br if b == "other"]
+    return dict(n_recorded=len(br), n_other=len(other),
+                n_same=len(br) - len(other), other_draws=other)
+
+
+def axis_branch_text(counts) -> str:
+    """The summary-line fragment of :func:`axis_branch_counts` (``""``
+    when no draw carries the flag)."""
+    if not counts or not counts.get("n_recorded"):
+        return ""
+    from .engine import AXIS_BRANCH_FRAC
+    return (f"axis branch: {counts['n_other']} of {counts['n_recorded']} "
+            f"archived engine draw(s) 'other' (axis > {AXIS_BRANCH_FRAC:g} "
+            "x a from the reconstruction's; reported, never a filter)")
+
+
+def stamp_axis_branch_count(h5path_or_header, scan_key=None):
+    """Stamp :data:`AXIS_OTHER_SCAN_ATTR` / :data:`AXIS_RECORDED_SCAN_ATTR`
+    on the scan group: the count of the scan's archived draws whose
+    :data:`AXIS_BRANCH_ATTR` is ``"other"`` / is present, read from the
+    archive itself (so a scan generated in several calls is counted whole).
+    Nothing is written when no draw carries the flag (a legacy scan).
+    Returns ``(n_other, n_recorded)``."""
+    import h5py
+    from .filtering import _resolve, _scan_group_path
+    from .utils import _group_path, list_equilibrium_indices
+    h5path = _resolve(h5path_or_header)
+    idx = list_equilibrium_indices(h5path, scan_key=scan_key)
+    n_o = n_r = 0
+    with h5py.File(h5path, "a") as hf:
+        for i in idx:
+            gp = _group_path(scan_key, i)
+            if gp not in hf or AXIS_BRANCH_ATTR not in hf[gp].attrs:
+                continue
+            v = hf[gp].attrs[AXIS_BRANCH_ATTR]
+            v = v.decode() if isinstance(v, bytes) else str(v)
+            n_r += 1
+            n_o += int(v == "other")
+        gs = _scan_group_path(scan_key)
+        if n_r and gs in hf:
+            hf[gs].attrs[AXIS_OTHER_SCAN_ATTR] = int(n_o)
+            hf[gs].attrs[AXIS_RECORDED_SCAN_ATTR] = int(n_r)
+    return n_o, n_r
 
 
 def _write_draw_block(header, count, scan_key, record, band, parallel=None,
@@ -2025,7 +2121,8 @@ def build_generate_context(bq, env):
         bands=resolve_inspec_bands(gc),
         coil_reg=run.get("coil_reg"),
         delivered_eq=run.get("delivered_eq"),
-        recon_isoflux=run.get("recon_isoflux"))
+        recon_isoflux=run.get("recon_isoflux"),
+        delivered_axis=run.get("delivered_axis"))
 
 
 def context_from_run(run, gc, bl):

@@ -7006,6 +7006,10 @@ class Bouquet(SwbBaseline):
         # the coil regularisation the draw's loop solved under (the
         # reconstruction's own term list)
         out["coil_reg"] = (out["record"] or {}).get("coil_reg")
+        # the zero-perturbation draw's archived axis against the
+        # reconstruction's and its branch flag (engine.axis_branch_record):
+        # REPORTED, not gated
+        out["axis"] = (out["record"] or {}).get("axis")
         if loop is not None:
             for k in ("request_bit_identical", "request_max_abs_diff",
                       "loop_converged", "n_passes", "dq0_stats",
@@ -8164,7 +8168,7 @@ class Bouquet(SwbBaseline):
         _n_arch = len(self.diagnostics or [])
         _summ = _rejection_summary(self.draw_rejections,
                                    len(self.draw_rejections) + _n_arch,
-                                   _n_arch)
+                                   _n_arch, diagnostics=self.diagnostics)
         print(f"[generate] {_summ}")
         _loop_codes = _m.loop_codes((
             "jbs_not_converged", "coil_saturation_jbs_loop",
@@ -8249,11 +8253,15 @@ class Bouquet(SwbBaseline):
         # plus the opt-in bands) on the scan, and beta_p / Lambda on every
         # draw that does not carry them yet (the legacy routes; an engine draw
         # stamps its own at archive time)
+        from .engine_draws import stamp_axis_branch_count
         from .filtering import stamp_inspec_rule, stamp_shafranov
         try:
             stamp_inspec_rule(header, gc.scan_key, _inspec_bands,
                               extra=_inspec_extra)
             stamp_shafranov(header, gc.scan_key)
+            # the count of the scan's engine draws on the other axis branch
+            # (n_axis_other; reported, never a filter)
+            stamp_axis_branch_count(header, gc.scan_key)
         except (OSError, KeyError) as _exc:
             import warnings as _w
             _w.warn(f"the in-spec rule ({_inspec_bands.rule()}) could not be "

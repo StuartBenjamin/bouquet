@@ -1,6 +1,6 @@
 # Bouquet — change summaries
 
-## Unreleased — bistability check on by default (owner decision 2026-10-15)
+## Unreleased — bistability check on by default; per-draw axis record and branch flag (owner decisions 2026-10-15)
 
 **Default change: `GenerationConfig.check_bistability` is ON under the unified
 engine.** The field now defaults to `None`, resolved at `prepare_baseline()`
@@ -14,6 +14,27 @@ nothing is refused). An explicit value is kept, so a stored config that
 carries `check_bistability: false` replays without the check (a note is
 printed); one that predates the field runs it (the delivered equilibrium is
 the same either way).
+
+**New: a per-draw axis record and branch flag (reported, never a filter).**
+Every archived engine draw's record carries `axis`: the archived state's
+magnetic axis (`R`, `Z`), the reconstruction's delivered axis (`reference_R`,
+`reference_Z`; the reference is also `Baseline.engine["delivered_axis"]` and
+the baseline engine record's `draws.axis_reference`), the displacement
+(`dR_mm`, `dZ_mm`, `displacement_mm`, and `displacement_frac_a` of the
+reconstruction's minor radius `minor_radius_m`) and `axis_branch` = `"same"`
+within 1 % of a, `"other"` beyond (`engine.AXIS_BRANCH_FRAC`, the constant the
+MSE stage's finite-difference branch check already used, now named once). The
+σ=0 draw of `verify_sigma0_consistency()` carries the same fields
+(`["axis"]`, not gated). The flag is stamped on the draw group (`axis_branch`,
+`axis_shift_frac_a`); the count of `"other"` draws is in the `[generate]` /
+`[draw summary]` line, in `ScanView.spread()["axis_branch"]`, in every
+`draw_scalars` record's provenance (`axis_branch`, with a limitation when a
+used draw is `"other"`) and on the scan (`n_axis_other`, `n_axis_recorded`;
+recounted by `merge_archives`). On the known near-double-null case the two
+branches' axes sit 17 mm (2.8 % of a) apart with l_i(3) 2e-3 and q0 4e-3
+apart, and the magnetics pass both, so a band over both may be bimodal: that
+is the slice's physics. No draw, verdict, band or yield changes. The draws'
+continuity guard is #87.
 
 ## Unreleased — coil-saturation test measured against the installed bound (owner decision 2026-10-15)
 
