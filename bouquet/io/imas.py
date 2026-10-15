@@ -19,6 +19,8 @@ Field mapping (verified against a D3D FUSE run)::
     core_profiles.profiles_1d[t].electrons.{density_thermal,temperature}
     core_profiles.profiles_1d[t].ion[*].{density_thermal,temperature,element[].z_n}
     core_profiles.profiles_1d[t].{electrons,ion[*]}.pressure_fast_{perpendicular,parallel}
+    core_profiles.profiles_1d[t].{electrons,ion[main]}.{density_thermal,temperature}_error_upper,
+                                 .zeff_error_upper            -> sigma envelopes (read_imas_sigmas)
     core_sources.source[*].profiles_1d[t].j_parallel          -> jphi_nbi (beam), jphi_rf (EC/LH/IC),
                                                                  jphi_other (fusion, runaways, sawteeth)
 
@@ -1597,6 +1599,81 @@ def _psi_rho_drift(psi_N, rho, gfile):
                 f"tol {PSI_RHO_DRIFT_TOL:g})")}
 
 
+#: core_profiles error fields read as the kinetic sigma envelopes, per
+#: bouquet channel: (node, field candidates in order).  ``node`` "electrons",
+#: "main_ion" (the first Z = 1 ion, as the reader takes n_i / T_i) or "cp"
+#: (the profiles_1d slice itself, for Z_eff).
+IMAS_SIGMA_FIELDS = {
+    "ne": ("electrons", ("density_thermal", "density")),
+    "te": ("electrons", ("temperature",)),
+    "ni": ("main_ion", ("density_thermal", "density")),
+    "ti": ("main_ion", ("temperature",)),
+    "zeff": ("cp", ("zeff",)),
+}
+
+
+def read_imas_sigmas(cp, n=None):
+    """The 1-sigma envelopes a core_profiles slice carries, by channel.
+
+    Returns ``(sigmas, record)``.  ``sigmas``: ``{"ne" | "te" | "ni" | "ti" |
+    "zeff": array}`` for each channel whose IMAS error field is present and
+    valid (``IMAS_SIGMA_FIELDS``: ``<field>_error_upper``, the profile's own
+    field first -- ``density_thermal`` before ``density``; a field whose
+    profile is absent is not paired).  The envelope is symmetric: the upper
+    error, the mean of upper and lower where both are present, the lower
+    alone where only it is.  ``record``: per channel, the field used and how,
+    or why it was skipped (absent / wrong length / non-finite / negative /
+    all zero).  Nothing is interpolated: the arrays are on the slice's own
+    grid (the IMAS baseline's kinetic grid).
+    """
+    main = None
+    for ion in cp.get("ion", []) or []:
+        try:
+            if float(ion["element"][0]["z_n"]) == 1.0:
+                main = ion
+                break
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+    nodes = {"electrons": cp.get("electrons") or {}, "main_ion": main or {},
+             "cp": cp}
+    sigmas, record = {}, {}
+    for ch, (node, cands) in IMAS_SIGMA_FIELDS.items():
+        d = nodes[node]
+        where = {"electrons": "electrons.", "main_ion": "ion[main].",
+                 "cp": ""}[node]
+        rec = None
+        for fld in cands:
+            if fld not in d:
+                continue
+            up, lo = d.get(fld + "_error_upper"), d.get(fld + "_error_lower")
+            if up is None and lo is None:
+                continue
+            arrs = [np.asarray(a, dtype=float) for a in (up, lo) if a is not None]
+            name = where + fld + ("_error_upper" if up is not None else "_error_lower")
+            how = ("upper" if lo is None else "lower" if up is None
+                   else "mean of upper and lower")
+            size = np.asarray(d[fld], dtype=float).size if n is None else int(n)
+            bad = None
+            if any(a.shape != (size,) for a in arrs):
+                bad = f"wrong length (profile {size} nodes)"
+            elif not all(np.all(np.isfinite(a)) for a in arrs):
+                bad = "non-finite entries"
+            elif any(np.any(a < 0.0) for a in arrs):
+                bad = "negative entries (these are 1-sigma magnitudes)"
+            elif not any(np.any(a > 0.0) for a in arrs):
+                bad = "all zero"
+            if bad is not None:
+                rec = {"field": name, "used": False, "reason": bad}
+                break
+            sigmas[ch] = arrs[0] if len(arrs) == 1 else 0.5 * (arrs[0] + arrs[1])
+            rec = {"field": name, "used": True, "how": how}
+            break
+        record[ch] = rec or {"field": None, "used": False,
+                             "reason": "absent (no *_error_upper/_lower on "
+                                       + "/".join(where + f for f in cands) + ")"}
+    return sigmas, record
+
+
 #: Relative core mismatch above which a stored Z_eff matches neither numerator.
 ZEFF_CONVENTION_RTOL = 1e-2
 
@@ -2393,6 +2470,9 @@ def read_imas_baseline(
             main_ion = ion
     if ni is None:
         raise ValueError("no hydrogenic (Z=1) main ion found in core_profiles.ion")
+    # the slice's own sigma envelopes (IMAS *_error_upper), if it carries any;
+    # used by resolve_uncertainty when no IDA sigma file is in play
+    _imas_sig, _imas_sig_rec = read_imas_sigmas(cp, n)
     _warn_missing_parallel(_no_par, p_fast_rule)
     if fast_p_no_n:
         # Silence is the dangerous case here: the run looks exactly like an
@@ -2573,6 +2653,12 @@ def read_imas_baseline(
         aux["sigma_te_ida"] = sigma_te_ida
         aux["sigma_ni_ida"] = sigma_ni_ida
         aux["sigma_ti_ida"] = sigma_ti_ida
+    else:
+        # FUSE kinetics: the dd's own envelopes belong to them.  (On
+        # ida_hybrid the kinetics, and so the envelopes, are the IDA file's.)
+        for _ch, _sg in _imas_sig.items():
+            aux[f"sigma_{_ch}_imas"] = _sg
+        aux["imas_sigma_fields"] = _imas_sig_rec
 
     _pfast_in = bool(getattr(source, "include_pfast", True))
     if _ida_ion_route and np.any(p_fast) and _subtract != _pfast_in:
@@ -3509,8 +3595,51 @@ def _write_draw_ion_species(cp, ni_t, ti_t, ne_t, z_fast_t, Z_imp):
     return rec
 
 
+def _export_template(template_ids_path, time=None, fidelity="auto"):
+    """``(out, tmpl_geom, tmpl_pair)``: :func:`write_imas_draw`'s template, a fresh
+    parse cut to the exported slice, with its paired current geometry (for
+    ``fidelity != "exact"``).  Depends only on the template, ``time`` and
+    ``fidelity``, so :func:`export_imas_drawset` builds it once per scan."""
+    import json
+    # a FRESH parse: _slice_in_time cuts this object in place, so it must
+    # never be the shared cached dd of _load_dd (#72 B5)
+    with open(template_ids_path) as fh:
+        out = json.load(fh)
+
+    eq_ids = out["equilibrium"]
+    ie = _nearest_index(eq_ids["time"], time, "equilibrium")
+    _nearest_index(out["core_profiles"]["time"], time, "core_profiles")  # validates time
+    # Only the exported slice is written: every IDS is cut at the
+    # core_profiles slice nearest the time, core_sources by the reader's rule
+    # with its windows recorded (#71).  The cut first keeps every equilibrium
+    # slice the reader reads there (the template's currents are paired with
+    # one of them: _paired_current_geometry), so the template-geometry
+    # conversion uses the slice the template's currents belong to; the
+    # equilibrium is then cut to the ONE slice the draw is written into (a
+    # draw is one equilibrium, and its currents are written on its own
+    # geometry, so a re-read pairs them with it).
+    t_cp = _slice_in_time(out, eq_ids["time"][ie] if time is None else time)
+    cp = out["core_profiles"]["profiles_1d"][0]
+    tmpl_geom, tmpl_pair = None, None
+    if fidelity != "exact" and t_cp is not None:
+        try:
+            tmpl_geom, tmpl_pair = _paired_current_geometry(
+                eq_ids, cp, t_cp, cp.get("j_total"), cp.get("j_tor"))
+        except (KeyError, TypeError, ValueError):
+            tmpl_geom = None
+    _cut_ids(eq_ids, t_cp)
+    _set_export_window(eq_ids, dict(
+        core_profiles_time=t_cp, kept_times=[float(x) for x in eq_ids["time"]],
+        rule=("write_imas_draw: the draw's own equilibrium, the one slice "
+              "kept (nearest the core_profiles time); the exported currents "
+              "are written on its geometry"),
+        template_current_pairing_time=(None if tmpl_pair is None
+                                       else tmpl_pair["time"])))
+    return out, tmpl_geom, tmpl_pair
+
+
 def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
-                    scan_key=None, time=None, fidelity="auto"):
+                    scan_key=None, time=None, fidelity="auto", template=None):
     """Reconstruct a perturbed IMAS/OMAS IDS for one draw from the bouquet HDF5.
 
     Orientation: the exported file is in the SOURCE's frame throughout.  The
@@ -3612,6 +3741,9 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
         more than one scan.
     time : float, optional
         Time slice [s]; defaults to the template's nearest single slice.
+    template : tuple, optional
+        ``_export_template(template_ids_path, time, fidelity)`` built once by
+        the caller (:func:`export_imas_drawset`); deep-copied, never mutated.
 
     Returns
     -------
@@ -3628,42 +3760,11 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
         raise ValueError(
             f"fidelity must be 'auto'|'exact'|'reconstruct', got {fidelity!r}")
 
-    # a FRESH parse: _slice_in_time cuts this object in place, so it must
-    # never be the shared cached dd of _load_dd (#72 B5)
-    with open(template_ids_path) as fh:
-        out = json.load(fh)
-
-    eq_ids = out["equilibrium"]
-    ie = _nearest_index(eq_ids["time"], time, "equilibrium")
-    cp_ids = out["core_profiles"]
-    ic = _nearest_index(cp_ids["time"], time, "core_profiles")
-    # Only the exported slice is written: every IDS is cut at the
-    # core_profiles slice nearest the time, core_sources by the reader's rule
-    # with its windows recorded (#71).  The cut first keeps every equilibrium
-    # slice the reader reads there (the template's currents are paired with
-    # one of them: _paired_current_geometry), so the template-geometry
-    # conversion below uses the slice the template's currents belong to;
-    # the equilibrium is then cut to the ONE slice the draw is written into
-    # (a draw is one equilibrium, and its currents are written on its own
-    # geometry, so a re-read pairs them with it).  This MUST stay before
-    # ie = ic = 0: every index below addresses the one kept slice.
-    t_cp = _slice_in_time(out, eq_ids["time"][ie] if time is None else time)
+    out, tmpl_geom, tmpl_pair = (
+        _export_template(template_ids_path, time, fidelity) if template is None
+        else copy.deepcopy(template))
+    eq_ids, cp_ids = out["equilibrium"], out["core_profiles"]
     cp = cp_ids["profiles_1d"][0]
-    tmpl_geom, tmpl_pair = None, None
-    if fidelity != "exact" and t_cp is not None:
-        try:
-            tmpl_geom, tmpl_pair = _paired_current_geometry(
-                eq_ids, cp, t_cp, cp.get("j_total"), cp.get("j_tor"))
-        except (KeyError, TypeError, ValueError):
-            tmpl_geom = None
-    _cut_ids(eq_ids, t_cp)
-    _set_export_window(eq_ids, dict(
-        core_profiles_time=t_cp, kept_times=[float(x) for x in eq_ids["time"]],
-        rule=("write_imas_draw: the draw's own equilibrium, the one slice "
-              "kept (nearest the core_profiles time); the exported currents "
-              "are written on its geometry"),
-        template_current_pairing_time=(None if tmpl_pair is None
-                                       else tmpl_pair["time"])))
     ie = ic = 0
 
     h5 = _resolve_h5(h5path_or_header)
@@ -3946,10 +4047,13 @@ def export_imas_drawset(h5path_or_header, template_ids_path, out_dir,
                 f"{h5} holds {len(idxs)} scans {sorted(idxs)}; pass an "
                 "explicit scan_key to export_imas_drawset().")
         scan_key, idxs = next(iter(idxs.items()))
+    # every draw of the scan is written at the same time: parse and cut the
+    # template once
+    tmpl = _export_template(template_ids_path, time, fidelity) if idxs else None
     paths = []
     for i in idxs:
         out = os.path.join(out_dir, f"{base}_draw{i}.json")
         paths.append(write_imas_draw(h5, i, template_ids_path, out,
                                      scan_key=scan_key, time=time,
-                                     fidelity=fidelity))
+                                     fidelity=fidelity, template=tmpl))
     return paths

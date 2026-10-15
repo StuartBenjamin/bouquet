@@ -44,6 +44,7 @@ from .edge_pressure import (NegativeSeparatrixPressure,
 from . import coords
 from ._renamed import accepts_old_names
 from .swb import SwbBaseline
+from .filtering import l_i_construction_tolerance
 
 
 def _baseline_negative_psep_named(fn):
@@ -7007,6 +7008,10 @@ class Bouquet(SwbBaseline):
         # the coil regularisation the draw's loop solved under (the
         # reconstruction's own term list)
         out["coil_reg"] = (out["record"] or {}).get("coil_reg")
+        # the zero-perturbation draw's archived axis against the
+        # reconstruction's and its branch flag (engine.axis_branch_record):
+        # REPORTED, not gated
+        out["axis"] = (out["record"] or {}).get("axis")
         if loop is not None:
             for k in ("request_bit_identical", "request_max_abs_diff",
                       "loop_converged", "n_passes", "dq0_stats",
@@ -7504,7 +7509,8 @@ class Bouquet(SwbBaseline):
                     env["n_ls"], env["t_ls"], env["j_ls"], Ip,
                     float(bl.l_i_target), Zeff_eq, len(psi_N),
                     jphi_ind_input=np.asarray(bl.jphi_ind, dtype=float),
-                    l_i_tolerance=gc.l_i_tolerance, psi_pad=psi_pad,
+                    l_i_tolerance=l_i_construction_tolerance(gc),
+                    psi_pad=psi_pad,
                     constrain_sawteeth=gc.constrain_sawteeth,
                     recalculate_jbs=gc.recalculate_jbs,
                     isolate_edge_jbs=gc.isolate_edge_jbs,
@@ -7933,6 +7939,9 @@ class Bouquet(SwbBaseline):
                 f"this run draws exactly {n_equils} (max_total_draws="
                 f"{gc.max_total_draws} ignored).", UserWarning, stacklevel=2)
 
+        # the in-spec rule this run's draws are judged under (refuses an
+        # opt-in measurement band on a route that cannot apply it in flight)
+        _inspec_bands, _inspec_extra = self._inspec_bands()
         env = resolve_uncertainty(self.config, bl)
         self._resolved_uncertainty = env
         # the draw method of the solve method (bouquet.draw_methods): the
@@ -8015,7 +8024,10 @@ class Bouquet(SwbBaseline):
                 baseline_jphi_bs=(np.asarray(bl.jphi_bs, dtype=float)
                                + (0.0 if bl.jphi_bs_diff is None
                                   else np.asarray(bl.jphi_bs_diff, dtype=float))),
-                l_i_tolerance=gc.l_i_tolerance,
+                # the LEGACY routes' draw-construction tolerance (gc's when
+                # set, else the old 0.05); the engine's opt-in bands are its
+                # draw method's own (InspecBands)
+                l_i_tolerance=l_i_construction_tolerance(gc),
                 psi_pad=psi_pad,
                 constrain_sawteeth=gc.constrain_sawteeth,
                 recalculate_jbs=gc.recalculate_jbs,
@@ -8159,7 +8171,7 @@ class Bouquet(SwbBaseline):
         _n_arch = len(self.diagnostics or [])
         _summ = _rejection_summary(self.draw_rejections,
                                    len(self.draw_rejections) + _n_arch,
-                                   _n_arch)
+                                   _n_arch, diagnostics=self.diagnostics)
         print(f"[generate] {_summ}")
         _loop_codes = _m.loop_codes((
             "jbs_not_converged", "coil_saturation_jbs_loop",
@@ -8240,6 +8252,24 @@ class Bouquet(SwbBaseline):
         # the method's own record on _baseline (engine: the reconstruction's
         # engine record + the draws' settings; swb: solve A/B, the saw reset)
         _m.store_baseline(header, gc.scan_key, bl)
+        # the in-spec rule in force (owner decision 2026-10-14: the magnetics,
+        # plus the opt-in bands) on the scan, and beta_p / Lambda on every
+        # draw that does not carry them yet (the legacy routes; an engine draw
+        # stamps its own at archive time)
+        from .engine_draws import stamp_axis_branch_count
+        from .filtering import stamp_inspec_rule, stamp_shafranov
+        try:
+            stamp_inspec_rule(header, gc.scan_key, _inspec_bands,
+                              extra=_inspec_extra)
+            stamp_shafranov(header, gc.scan_key)
+            # the count of the scan's engine draws on the other axis branch
+            # (n_axis_other; reported, never a filter)
+            stamp_axis_branch_count(header, gc.scan_key)
+        except (OSError, KeyError) as _exc:
+            import warnings as _w
+            _w.warn(f"the in-spec rule ({_inspec_bands.rule()}) could not be "
+                    f"stamped on the archive: {_exc}", RuntimeWarning,
+                    stacklevel=2)
 
         # Stamp provenance (schema/version/timestamp + full config JSON) onto the
         # archive so the run is self-describing and load_config() can round-trip it.
@@ -8292,6 +8322,48 @@ class Bouquet(SwbBaseline):
                                             None))
 
         return self.diagnostics
+
+    def _inspec_bands(self):
+        """``(bands, extra)`` -- the in-spec rule this run's draws are judged
+        under (:class:`bouquet.filtering.InspecBands`; owner decision
+        2026-10-14: the magnetics, plus OPT-IN bands) and the extra record
+        stamped beside it.
+
+        The unified engine judges every band in flight (its post-hoc stage),
+        so the until-N target counts them.  The legacy and swb routes have no
+        post-hoc stage: there ``l_i_tolerance`` and ``constrain_sawteeth``
+        act inside the draw CONSTRUCTION (rejection sampling), as they
+        always did, and are recorded as such; the rule they are judged under
+        afterwards is the magnetics.  A measurement band (``l_i_sigma``,
+        ``beta_p_target``) on those routes is refused -- apply it after
+        generation with :func:`bouquet.filtering.refilter_inspec`."""
+        from .config import resolve_solve_method
+        from .filtering import InspecBands, resolve_inspec_bands
+        gc = self.config.generation
+        bands = resolve_inspec_bands(gc)
+        try:
+            sm = resolve_solve_method(gc)
+        except Exception:
+            sm = "legacy"
+        if sm == "engine":
+            return bands, {"route": "engine"}
+        if bands.l_i_sigma is not None or bands.beta_p_on:
+            raise ValueError(
+                f"generation.l_i_sigma / beta_p_target: the opt-in "
+                f"measurement bands of the in-spec rule are applied by the "
+                f"unified engine's post-hoc stage; the {sm!r} route has none "
+                "(its l_i_tolerance / constrain_sawteeth act inside the draw "
+                "construction). Generate without them and apply them to the "
+                "archive with bouquet.refilter_inspec(path, bands), or use "
+                "reconstruction_engine='unified'.")
+        return InspecBands(), {
+            "route": sm,
+            "l_i_construction_tolerance": l_i_construction_tolerance(gc),
+            "constrain_sawteeth_construction": bool(gc.constrain_sawteeth),
+            "note": ("the legacy/swb draws are CONSTRUCTED by rejection "
+                     "sampling against l_i_construction_tolerance (and the "
+                     "q0 gate when constrain_sawteeth): not a post-hoc "
+                     "filter")}
 
     def _draw_method(self, env):
         """The :class:`~bouquet.draw_methods.DrawMethod` of this run's solve
@@ -8397,7 +8469,9 @@ class Bouquet(SwbBaseline):
     def plot_traces(self, **kwargs):
         """Per-draw l_i / LCFS-deviation / anchor-displacement traces for this run."""
         from .plotting import plot_traces as _f
-        kwargs.setdefault("li_band", self.config.generation.l_i_tolerance)
+        # the l_i band of the in-spec rule, when it is a fractional one (off
+        # by default since 2026-10-14: no band is drawn)
+        kwargs.setdefault("li_band", self._inspec_bands()[0].l_i_tolerance)
         kwargs.setdefault("rms_max_mm", self._boundary_cut(quiet=True)[0])
         return _f(f"{self.config.output_header}.h5",
                   scan_key=self.config.generation.scan_key, **kwargs)
@@ -8510,13 +8584,57 @@ class Bouquet(SwbBaseline):
             header, scan_key=sk, rms_max_mm=rms, apply=True, plot=plot,
             cut_source=rms_source,
         )
+        inspec = self._apply_inspec_rule(header, sk)
         # one scan key -> each summary is a single {counts, draws} dict
         self._selection = {"coil": coil_summary, "boundary": bnd_summary,
-                           "coil_filter_used": coil_filter_used}
+                           "coil_filter_used": coil_filter_used,
+                           "inspec": inspec}
         if plot:
             self._selection["figures"] = (coil_fig, bnd_fig)
         self._print_generation_summary(coil_summary, bnd_summary)
         return self._selection
+
+    def _apply_inspec_rule(self, header, sk):
+        """The in-spec rule part of :meth:`filter`: ``{"rule", "refiltered",
+        "previous_rule"}``.
+
+        The archive's band flags stand when it was judged under this run's
+        rule (:meth:`_inspec_bands`, stamped ``inspec_rule`` /
+        ``inspec_bands_json`` at generation).  An archive with no stamp (made
+        before the 2026-10-14 rule: its engine draws carry the old
+        unconditional l_i band) or stamped under other bands is RE-JUDGED
+        under this run's rule from its stored numbers
+        (:func:`bouquet.filtering.refilter_inspec`), and the change is
+        printed.  A stand-in config without the fields is left alone."""
+        from .filtering import read_inspec_rule, refilter_inspec
+        try:
+            bands, extra = self._inspec_bands()
+        except ValueError:
+            # a measurement band on a legacy-route config: it is applied
+            # post hoc here, from the stored numbers, like any re-cut
+            from .filtering import resolve_inspec_bands
+            bands = resolve_inspec_bands(self.config.generation)
+            extra = {"route": "post-hoc re-filter"}
+        except Exception:
+            return {"rule": None, "refiltered": False, "previous_rule": None}
+        try:
+            prev_rule, prev = read_inspec_rule(header, scan_key=sk)
+        except (OSError, KeyError):
+            return {"rule": None, "refiltered": False, "previous_rule": None}
+        if prev is not None and prev.same_as(bands):
+            return {"rule": bands.rule(), "refiltered": False,
+                    "previous_rule": prev_rule}
+        why = ("the archive predates the in-spec rule record (judged under "
+               "the old unconditional l_i band)" if prev_rule is None
+               else f"the archive was judged under {prev_rule!r}")
+        print(f"[in-spec rule] {why}; re-judging its opt-in bands under "
+              f"{bands.rule()!r} from the stored numbers (no physics re-run)")
+        refilter_inspec(header, bands, scan_key=sk, verbose=True)
+        if extra:
+            from .filtering import stamp_inspec_rule
+            stamp_inspec_rule(header, sk, bands, extra=extra)
+        return {"rule": bands.rule(), "refiltered": True,
+                "previous_rule": prev_rule}
 
     def boundary_cut(self):
         """``(rms_max_mm, source)`` of the LCFS boundary cut this run applies.
@@ -8827,6 +8945,28 @@ class Bouquet(SwbBaseline):
         if rs:
             print(f"  boundary      RMS median {rs.get('median', float('nan')):.2f} mm"
                   f"   max {rs.get('max', float('nan')):.2f} mm")
+        # the in-spec rule in force: the magnetics (coil + boundary) unless an
+        # opt-in band is on (owner decision 2026-10-14)
+        try:
+            from .filtering import read_inspec_rule
+            _rule, _bands = read_inspec_rule(header, scan_key=sk)
+        except Exception:
+            _rule, _bands = None, None
+        if _rule is not None:
+            _on = []
+            if _bands is not None and _bands.l_i_tolerance is not None:
+                _on.append(f"l_i +/-{100 * _bands.l_i_tolerance:g}%")
+            if _bands is not None and _bands.l_i_sigma is not None:
+                _on.append(f"l_i +/-{_bands.nsigma:g} x {_bands.l_i_sigma:g}")
+            if _bands is not None and _bands.beta_p_on:
+                _on.append(f"beta_p {_bands.beta_p_target:g} +/-"
+                           f"{_bands.nsigma:g} x {_bands.beta_p_sigma:g}")
+            if _bands is not None and _bands.constrain_sawteeth:
+                _on.append("q0 >= 1")
+            print(f"  in-spec rule  {_rule}"
+                  + (f"   (opt-in: {', '.join(_on)})" if _on
+                     else "   (coil test + boundary cut; l_i, beta_p and "
+                          "Lambda reported, not filtered)"))
 
     def export(self, out_path: Optional[str] = None, selection: str = "selected"):
         """Write a pruned HDF5 with only the selected draws.

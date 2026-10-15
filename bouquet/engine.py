@@ -78,6 +78,36 @@ ENGINE_MSE_JACOBIANS = ("fd_broyden", "fd_chord")
 #: owner-approved 2026-10-07 (non-converged only: it can only mark a stage
 #: not converged); recorded in :func:`convergence_table`.
 MSE_JACOBIAN_MAX_REFRESHES = 3
+#: The ONE axis-displacement discriminator between the two solutions of a
+#: bistable free-boundary problem: a state whose magnetic axis sits farther
+#: than this fraction of the reference state's minor radius ``a`` from the
+#: reference axis is on the OTHER solution branch.  Measured on a
+#: near-double-null slice with two nearly equal flux extrema: the two
+#: solutions' axes sit 17 mm (2.8 % of a) apart, while a continuous
+#: response to a coefficient step or a kinetic draw moves the axis by well
+#: under 1 mm.  Used by the MSE stage's finite-difference branch check
+#: (:data:`MSE_FD_BRANCH_AXIS_FRAC`) and by every engine draw's
+#: ``axis_branch`` flag (:func:`axis_branch_record`) -- a DISCRIMINATOR,
+#: never an acceptance criterion: nothing is accepted, refused or filtered
+#: on it.
+AXIS_BRANCH_FRAC = 0.01
+#: The MSE stage's finite-difference Jacobian keeps every perturbed solve on
+#: the base equilibrium's solution branch (2026-10-14).  A perturbed solve
+#: whose magnetic axis lands farther than :data:`AXIS_BRANCH_FRAC` of the
+#: base state's minor radius from the base axis has left the branch -- on a slice with
+#: two nearly equal flux extrema the free-boundary solve has two solutions
+#: whose axes sit ~1-2 cm apart (measured: 17 mm, 2.8 % of a), while a
+#: continuous response to one coefficient step moves the axis by well under
+#: 1 mm -- and its column would difference ACROSS the jump.  Such a column is
+#: re-taken with the step halved (at most :data:`MSE_FD_MAX_HALVINGS` times):
+#: a finer difference step on the same derivative, never a tolerance.  A
+#: NUMERICAL-METHOD parameter: it decides only which FD step a column uses,
+#: and nothing is accepted or refused on it; a column whose solves never
+#: stay on the branch keeps its original step (the Jacobian before the
+#: check) and is recorded as unresolved.
+MSE_FD_BRANCH_AXIS_FRAC = AXIS_BRANCH_FRAC
+#: At most this many step halvings per Jacobian column (h -> h / 16).
+MSE_FD_MAX_HALVINGS = 4
 #: The engine fields of :class:`~bouquet.config.GenerationConfig` and their
 #: defaults (refused when changed with ``reconstruction_engine="legacy"``).
 ENGINE_FIELD_DEFAULTS = {
@@ -105,9 +135,12 @@ ENGINE_FIELD_DEFAULTS = {
     # (mse_chi2_per_chord_high; never acceptance).  10.0: owner-approved
     # 2026-10-07, flag only (see GenerationConfig.mse_chi2n_flag)
     "mse_chi2n_flag": 10.0,
-    # the opt-in bistability check after the reconstruction (one extra cold
-    # solve; check_bistability)
-    "check_bistability": False,
+    # the bistability check after the reconstruction (one extra cold solve;
+    # check_bistability): None = resolved per engine at prepare_baseline()
+    # (ENGINE_DEPENDENT_DEFAULTS: True under "unified"); under "legacy" its
+    # default is unset or False (the value it resolves to there), and only
+    # an explicit True is refused
+    "check_bistability": None,
 }
 
 
@@ -216,6 +249,12 @@ def _closure_scale_bounds():
 
 def _is_default(name, v):
     d = ENGINE_FIELD_DEFAULTS[name]
+    if name in ENGINE_DEPENDENT_DEFAULTS:
+        # an engine field resolved per engine (check_bistability): at its
+        # default under "legacy" when unset or at the legacy value it is
+        # resolved to (an explicit True stays refused)
+        return engine_dependent_unset(name, v) or _same_value(
+            v, engine_validated_value(name, "legacy", "reconstruction"))
     if name == "engine_rows":
         try:
             return tuple(v) == tuple(d)
@@ -259,7 +298,14 @@ def validate_engine_settings(gc) -> None:
                          f"{ENGINE_CHOICES}, got {eng!r}")
     vals = {k: getattr(gc, k, d) for k, d in ENGINE_FIELD_DEFAULTS.items()}
     if eng == "legacy":
-        changed = [k for k, v in vals.items() if not _is_default(k, v)]
+        # an engine-dependent engine field resolve_engine_defaults filled for
+        # ANOTHER engine (the config was switched to "legacy" after a
+        # unified prepare_baseline()) is not the user's: it is re-resolved
+        # at the next prepare_baseline(), never refused here
+        mine = getattr(gc, "_engine_resolved", None) or {}
+        changed = [k for k, v in vals.items() if not _is_default(k, v)
+                   and not (k in ENGINE_DEPENDENT_DEFAULTS and k in mine
+                            and _same_value(v, mine[k][2]))]
         if changed:
             raise ValueError(
                 f"generation.{', '.join(changed)} set with "
@@ -313,6 +359,11 @@ def validate_engine_settings(gc) -> None:
         if not isinstance(vals[_b], (bool, np.bool_)):
             raise ValueError(f"generation.{_b} must be a bool, got "
                              f"{vals[_b]!r}")
+    _cb = vals["check_bistability"]
+    if _cb is not None and not isinstance(_cb, (bool, np.bool_)):
+        raise ValueError(f"generation.check_bistability must be a bool, or "
+                         f"None (resolved per engine: True under 'unified'), "
+                         f"got {_cb!r}")
     if vals["engine_draw_q0_row"] and "q0" not in rows:
         raise ValueError("generation.engine_draw_q0_row=True keeps the "
                          "reconstruction's q0 row in the draws, but "
@@ -537,7 +588,20 @@ ENGINE_DEPENDENT_DEFAULTS = {
     # #75 review: the legacy draws' GS cap (TokaMaker_interface.
     # DRAW_SOLVE_MAXITS, draws only); the engine never reads it
     "draw_solve_maxits": {"unified": None, "legacy": 100},
+    # the bistability check after the reconstruction (an ENGINE field; owner
+    # decision 2026-10-15: on by default under "unified", one extra cold
+    # solve per reconstruction).  "legacy" has no such check: False there is
+    # "not applicable" (validate_engine_settings refuses only an explicit
+    # True under "legacy")
+    "check_bistability": {"unified": True, "legacy": False},
 }
+
+#: :data:`ENGINE_DEPENDENT_DEFAULTS` fields that switch a DIAGNOSTIC only:
+#: an explicit value that differs from the engine's resolved one changes no
+#: result (no equilibrium, draw or verdict), so it is recorded
+#: (``engine_validated`` in the resolution record) and NOTED, not warned as
+#: a configuration the engine was not validated with.
+ENGINE_DEPENDENT_DIAGNOSTICS = frozenset(("check_bistability",))
 
 #: The UNSET marker of an :data:`ENGINE_DEPENDENT_DEFAULTS` field whose
 #: ``None`` is a meaningful value (default: ``None`` is the marker).
@@ -618,7 +682,15 @@ def resolve_engine_defaults(config, *, stacklevel=2) -> dict:
             continue
         mine.pop(name, None)
         rec[name] = {"value": v, "origin": "explicit"}
-        if not _same_value(v, want):
+        if not _same_value(v, want) and name in ENGINE_DEPENDENT_DIAGNOSTICS:
+            # a diagnostic switched explicitly (a stored config's value
+            # included): kept and recorded, no result depends on it
+            rec[name]["engine_validated"] = want
+            print(f"NOTE: generation.{name}={v!r} (explicit; "
+                  f"reconstruction_engine={eng!r} resolves it to {want!r}): "
+                  "kept -- a diagnostic only, no result depends on it",
+                  flush=True)
+        elif not _same_value(v, want):
             rec[name]["engine_validated"] = want
             warnings.warn(
                 f"generation.{name}={v!r} was set explicitly, but "
@@ -1163,6 +1235,7 @@ class UnifiedEngine:
         #: (the FD base state), once the stage has read them
         self._mse_pre = None
         self._mse_stage_fd = None    # the MSE stage's Jacobian record
+        self._mse_fd_last = None     # the last FD Jacobian's branch check
         #: the MSE outcome recorded as ``engine_record()["mse"]``
         self.mse_summary = dict(requested=("mse" in settings["rows"]),
                                 applied=False, mse_converged=None,
@@ -1888,7 +1961,7 @@ class UnifiedEngine:
         self._mse_pre = dict(chi2=float(c2_pre), n_chords=int(ch["n_active"]),
                              chi2_per_chord=float(c2_pre)
                              / int(ch["n_active"]))
-        J = self._mse_fd(g_last, lam, x0, tg0, snap)
+        J = self._mse_fd(g_last, lam, x0, tg0, snap, axis0=m0.get("axis"))
         self.b.restore(snap)
         st.mse_J, st.mse_x0, st.mse_tg0 = J, x0, tg0
         st.geom = complete_geometry(m0["geom"])
@@ -1909,6 +1982,7 @@ class UnifiedEngine:
                       disagrees=bool(chk["disagrees"]), note=chk["note"]),
                   sign_table={k: float(v) for k, v in table.items()},
                   scheme=mse_scheme_text(s["mse_jacobian"]),
+                  branch_check=self._mse_fd_last,
                   J_initial=J.tolist(), tg_base=tg0.tolist(),
                   chi2_pre_mse=float(c2_pre))
         self._mse_stage_fd = fd
@@ -2011,23 +2085,108 @@ class UnifiedEngine:
         m = self.b.measure(want_chords=True)
         return m, self.b.snapshot()
 
-    def _mse_fd(self, g, lam, x, tg, snap):
+    def _mse_fd(self, g, lam, x, tg, snap, axis0=None):
         """``d tan(gamma) / d x`` by forward differences around the base
         state *snap* (coefficients *x*, tan(gamma) *tg*): one solve per free
         coefficient, each from the base state
-        (:func:`bouquet.utils.structured_mse_jacobian`)."""
+        (:func:`bouquet.utils.structured_mse_jacobian`).
+
+        **Branch check** (2026-10-14).  With the base state's magnetic axis
+        *axis0* known and a backend that reports its minor radius
+        (``minor_radius()``), every perturbed solve's axis is compared with
+        *axis0*: a solve whose axis moved farther than
+        :data:`MSE_FD_BRANCH_AXIS_FRAC` x the minor radius has jumped to the
+        free-boundary problem's OTHER solution, and its column is re-taken
+        with the step halved (at most :data:`MSE_FD_MAX_HALVINGS` times;
+        one extra solve each, from the base state).  Measured on a reversed-
+        Ip slice with two flux extrema 17 mm apart: 7 of 8 perturbed solves
+        of a refresh jumped, the refreshed Jacobian differenced across the
+        jump, its Gauss-Newton step sent the MSE stage to the other branch
+        (chi2/N 0.745 -> 0.790) and the next refresh into a period-3 cycle
+        between the two (JBSNotConverged at the pass ceiling); with the
+        check every column stayed on its branch at h/2 .. h/8 and the stage
+        converged at its first refresh.  A path change of the Jacobian's
+        numerics only: no criterion, tolerance or ceiling is touched, a
+        state without a jump is differenced exactly as before (bit for
+        bit), and the outcome is recorded in :attr:`_mse_fd_last`
+        (``branch_check`` of the phase's / refresh round's record)."""
         from .utils import structured_mse_jacobian
         dlt = self.state.delivery_correction
+        probe = getattr(self.b, "minor_radius", None)
+        chk = dict(rule=("a perturbed FD solve whose magnetic axis moved "
+                         "more than axis_frac x the base minor radius from "
+                         "the base axis left the base solution branch: its "
+                         "column is re-taken with the step halved (at most "
+                         "max_halvings times)"),
+                   axis_frac=float(MSE_FD_BRANCH_AXIS_FRAC),
+                   max_halvings=int(MSE_FD_MAX_HALVINGS), active=False,
+                   minor_radius_m=None, threshold_m=None,
+                   n_extra_solves=0, n_columns_refined=0,
+                   n_columns_unresolved=0, columns=[])
+        self._mse_fd_last = chk
+        thr = None
+        if axis0 is not None and callable(probe):
+            try:
+                a0 = float(probe())
+            except Exception:                       # noqa: BLE001
+                a0 = float("nan")
+            if np.isfinite(a0) and a0 > 0.0:
+                thr = float(MSE_FD_BRANCH_AXIS_FRAC) * a0
+                chk.update(active=True, minor_radius_m=a0, threshold_m=thr,
+                           base_axis=[float(v) for v in axis0])
+        last = dict(shift=None)
 
         def _tg_of(xp):
             self.b.restore(snap)
             r = self.close(g, lam, x=xp)["jc"] + (0.0 if dlt is None
                                                   else dlt)
             self.b.solve(r, n_passes=1)
-            return self._tg(self.b.measure(want_chords=True))
+            m = self.b.measure(want_chords=True)
+            ax = m.get("axis")
+            last["shift"] = (None if (ax is None or thr is None) else float(
+                np.hypot(float(ax[0]) - float(axis0[0]),
+                         float(ax[1]) - float(axis0[1]))))
+            return self._tg(m)
 
-        return structured_mse_jacobian(_tg_of, x, tg, self._mse_free(),
-                                       step=self.s["mse_fd_step"])
+        cols = {}
+
+        def _on_branch(i, h):
+            sh = last["shift"]
+            ok = bool(sh is None or sh <= thr)
+            c = cols.get(i)
+            if c is None and ok:
+                return True                 # the ordinary column: no entry
+            if c is None:
+                c = cols[i] = dict(coefficient=int(i), steps=[],
+                                   axis_shift_m=[])
+            c["steps"].append(float(h))
+            c["axis_shift_m"].append(sh)
+            return ok
+
+        J = structured_mse_jacobian(
+            _tg_of, x, tg, self._mse_free(), step=self.s["mse_fd_step"],
+            on_branch=(None if thr is None else _on_branch),
+            max_halvings=int(MSE_FD_MAX_HALVINGS))
+        for i in sorted(cols):
+            c = cols[i]
+            sh = c["axis_shift_m"][-1]
+            c["resolved"] = bool(sh is not None and sh <= thr)
+            c["step_used"] = (c["steps"][-1] if c["resolved"]
+                              else c["steps"][0])
+            chk["columns"].append(c)
+        chk["n_columns_refined"] = len(cols)
+        chk["n_columns_unresolved"] = sum(1 for c in chk["columns"]
+                                          if not c["resolved"])
+        chk["n_extra_solves"] = sum(len(c["steps"]) - 1
+                                    for c in chk["columns"])
+        if cols:
+            print(f"  [engine] {self.label} +MSE: FD Jacobian branch check: "
+                  f"{len(cols)} column(s) re-taken with a finer step (the "
+                  f"perturbed solve's magnetic axis jumped > {thr * 1e3:.2f} "
+                  f"mm = {MSE_FD_BRANCH_AXIS_FRAC:g} x a); "
+                  f"{chk['n_columns_unresolved']} unresolved, "
+                  f"{chk['n_extra_solves']} extra solve(s)", flush=True)
+        return J
 
     def _mse_loop(self, lam, meas0, *, label, init_source):
         from .jbs_loop import run_jbs_loop
@@ -2078,7 +2237,7 @@ class UnifiedEngine:
         conv = self.b.snapshot()
         m_b, snap_b = self._mse_base_solve(g, lam, x_b)
         tg_b = self._tg(m_b)
-        J_new = self._mse_fd(g, lam, x_b, tg_b, snap_b)
+        J_new = self._mse_fd(g, lam, x_b, tg_b, snap_b, axis0=m_b.get("axis"))
         lin_old = structured_mse_linear_model(x_b, tg_b, J_old, ch,
                                               who=self.label + " MSE refresh")
         lin_new = structured_mse_linear_model(x_b, tg_b, J_new, ch,
@@ -2106,6 +2265,7 @@ class UnifiedEngine:
             tol_sigma=float(s["mse_tol_sigma"]), ok=ok,
             base_dtg_vs_last_pass_max_sigma=float(np.max(np.abs(
                 tg_b - np.asarray(p["tg"], dtype=float)) / sig)),
+            branch_check=self._mse_fd_last,
             continued=not ok)
         print(f"  [engine] {self.label} +MSE: Jacobian refreshed at "
               f"convergence: |dJ|/|J| = "
@@ -2413,6 +2573,15 @@ class TokaMakerBackend:
 
     def restore(self, eq):
         self.mygs.replace_eq(source_eq=eq)
+
+    def minor_radius(self) -> float:
+        """The minor radius [m] of the CURRENT equilibrium (the solver's
+        ``a_geo``, read on a copy so the live state is untouched) -- the
+        length scale of the MSE stage's finite-difference branch check
+        (:data:`MSE_FD_BRANCH_AXIS_FRAC`)."""
+        st = self.mygs.copy_eq().get_stats(lcfs_pad=self.psi_pad,
+                                           li_normalization="iter")
+        return float(st["a_geo"])
 
     def measure(self, want_chords=False, final=False):
         from .physics import evaluate_jbs
@@ -3055,8 +3224,113 @@ def reconstruction_coil_reg(mygs) -> dict:
         terms=[dict(t) for t in rec["terms"]]))
 
 
-#: The opt-in check of :func:`check_bistability` (GenerationConfig.check_bistability).
+#: The check of :func:`check_bistability` (GenerationConfig.check_bistability).
 BISTABILITY_CHECK_VERSION = "bistability/1"
+
+
+def state_axis(mygs):
+    """``(R, Z)`` [m] of the solver's CURRENT magnetic axis (its
+    ``o_point``), or ``None`` when it reports none, a non-finite one or the
+    solver's "no O-point" value (R <= 0).  The one reader of the axis
+    record (:func:`delivered_axis_reference`, :func:`axis_record_of`)."""
+    ax = _o_point(mygs)
+    if ax is None or not (np.isfinite(ax[0]) and np.isfinite(ax[1])
+                          and ax[0] > 0.0):
+        return None
+    return ax
+
+
+def axis_record_of(mygs, reference) -> dict:
+    """:func:`axis_branch_record` of the solver's CURRENT state (its
+    :func:`state_axis`) against *reference*."""
+    return axis_branch_record(state_axis(mygs), reference)
+
+
+def delivered_axis_reference(mygs, meas, backend=None) -> dict:
+    """The reconstruction's delivered magnetic axis and minor radius, read
+    on the delivered state: ``R``, ``Z`` [m] (:func:`state_axis`; ``None``
+    when the solver reports none) and
+    ``minor_radius_m`` (the delivered measurement's ``a_geo``, else the
+    backend's ``minor_radius()``, else the solver's ``get_stats()``
+    ``a_geo``; ``None`` when none is available).  The
+    reference of every engine draw's :func:`axis_branch_record`."""
+    ax = state_axis(mygs)
+    a = (meas.get("stats") or {}).get("a_geo") if isinstance(meas, dict) \
+        else None
+    src = "the delivered measurement's a_geo"
+    if a is None and callable(getattr(backend, "minor_radius", None)):
+        try:
+            a = backend.minor_radius()
+            src = "the backend's minor_radius() on the delivered state"
+        except Exception:                           # noqa: BLE001
+            a = None
+    if a is None and callable(getattr(mygs, "get_stats", None)):
+        try:
+            a = mygs.get_stats().get("a_geo")
+            src = "the solver's get_stats() a_geo on the delivered state"
+        except Exception:                           # noqa: BLE001
+            a = None
+    try:
+        a = float(a)
+        if not (np.isfinite(a) and a > 0.0):
+            a = None
+    except (TypeError, ValueError):
+        a = None
+    return dict(R=None if ax is None else float(ax[0]),
+                Z=None if ax is None else float(ax[1]),
+                minor_radius_m=a,
+                minor_radius_source=(src if a is not None else None),
+                state="the reconstruction's delivered equilibrium")
+
+
+def axis_branch_record(axis, reference) -> dict:
+    """The axis record of one state against the reconstruction's delivered
+    axis *reference* (:func:`delivered_axis_reference`): the state's axis
+    ``R``, ``Z`` [m], the reference's, ``dR_mm`` / ``dZ_mm`` and the
+    displacement ``|d axis|`` in mm and as a fraction of the reference's
+    minor radius ``a``, and ``axis_branch``: ``"same"`` when
+    ``|d axis| <= AXIS_BRANCH_FRAC x a``, ``"other"`` above (the
+    discriminator of the MSE stage's branch check, :data:`AXIS_BRANCH_FRAC`),
+    ``None`` when either axis or ``a`` is unknown.  A REPORT: nothing is
+    accepted, refused or filtered on it."""
+    ref = dict(reference or {})
+    rec = dict(R=None, Z=None, reference_R=ref.get("R"),
+               reference_Z=ref.get("Z"),
+               minor_radius_m=ref.get("minor_radius_m"), dR_mm=None,
+               dZ_mm=None, displacement_mm=None, displacement_frac_a=None,
+               threshold_frac_a=float(AXIS_BRANCH_FRAC), axis_branch=None,
+               rule=("axis_branch = 'other' when the magnetic axis sits "
+                     "more than threshold_frac_a x a (the reconstruction's "
+                     "minor radius) from the reconstruction's delivered "
+                     "axis, else 'same'; reported, never a filter"))
+    if axis is not None:
+        rec["R"], rec["Z"] = float(axis[0]), float(axis[1])
+    if rec["R"] is None or rec["reference_R"] is None \
+            or rec["reference_Z"] is None:
+        return rec
+    dR = rec["R"] - float(rec["reference_R"])
+    dZ = rec["Z"] - float(rec["reference_Z"])
+    d = float(np.hypot(dR, dZ))
+    rec.update(dR_mm=1e3 * dR, dZ_mm=1e3 * dZ, displacement_mm=1e3 * d)
+    a = rec["minor_radius_m"]
+    if a is not None and float(a) > 0.0:
+        frac = d / float(a)
+        rec["displacement_frac_a"] = frac
+        rec["axis_branch"] = ("other" if frac > float(AXIS_BRANCH_FRAC)
+                              else "same")
+    return rec
+
+
+def bistability_check_on(gc) -> bool:
+    """Whether the reconstruction runs :func:`check_bistability`:
+    ``GenerationConfig.check_bistability``, an unset value (``None``, not
+    yet resolved by ``prepare_baseline()``) read as the unified engine's
+    resolved default (:data:`ENGINE_DEPENDENT_DEFAULTS`: True)."""
+    v = getattr(gc, "check_bistability", None)
+    if engine_dependent_unset("check_bistability", v):
+        v = engine_validated_value("check_bistability", "unified",
+                                   "reconstruction")
+    return bool(v)
 
 
 def _o_point(mygs):
@@ -3068,8 +3342,9 @@ def _o_point(mygs):
 
 
 def check_bistability(bq, backend, cold_start):
-    """The opt-in bistability check (``GenerationConfig.check_bistability``,
-    unified engine only): ONE extra solve after the reconstruction.
+    """The bistability check (``GenerationConfig.check_bistability``,
+    unified engine only, on by default since 2026-10-15): ONE extra solve
+    after the reconstruction.
 
     The solver is put back on the reconstruction's delivered equilibrium
     (``Bouquet._engine_run["delivered_eq"]``: its psi, coils, targets,
@@ -3325,16 +3600,24 @@ def prepare_engine_baseline(bq):
                                            recon_iso["origin"])
         if isinstance(getattr(bl, "engine", None), dict):
             bl.engine["recon_isoflux"] = dict(recon_iso["stamp"])
+    # ... and its delivered magnetic axis and minor radius: the reference
+    # of every engine draw's axis record and branch flag (axis_branch_record)
+    delivered_axis = delivered_axis_reference(mygs, eng.delivered_meas,
+                                              backend)
+    if isinstance(getattr(bl, "engine", None), dict):
+        bl.engine["delivered_axis"] = dict(delivered_axis)
     bq._engine_run = dict(engine=eng, result=res, psi_pad=float(psi_pad),
                           q_psi=getattr(backend, "q_psi", None),
                           baseline=bl, coil_reg=coil_reg,
                           delivered_eq=(mygs.copy_eq()
                                         if hasattr(mygs, "copy_eq")
                                         else None),
-                          recon_isoflux=recon_iso)
-    if bool(getattr(gc, "check_bistability", False)):
-        # opt-in: ONE extra cold solve of the same inputs, compared with the
-        # delivered state; the delivered equilibrium is restored after it
+                          recon_isoflux=recon_iso,
+                          delivered_axis=delivered_axis)
+    if bistability_check_on(gc):
+        # on by default (check_bistability, resolved per engine): ONE extra
+        # cold solve of the same inputs, compared with the delivered state;
+        # the delivered equilibrium is restored after it
         _bis = check_bistability(bq, backend, cold_start)
         if isinstance(getattr(bl, "engine", None), dict):
             bl.engine["bistability"] = _bis

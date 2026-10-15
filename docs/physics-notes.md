@@ -8,6 +8,7 @@ covers the guarantees a user should know about and the knobs that change them.
 ## Contents
 
 - [What the ensemble is (and isn't)](#what-the-ensemble-is-and-isnt)
+- [Λ = β_p + l_i/2: reported, never filtered](#lambda--beta_p--l_i2-reported-never-filtered)
 - [The σ=0 consistency guard](#the-0-consistency-guard)
 - [Bootstrap current treatment](#bootstrap-current-treatment)
 - [Differential bootstrap (`jbs_delta_mode`)](#differential-bootstrap-jbs_delta_mode)
@@ -40,10 +41,14 @@ intervals from. Specifically:
   Pinning the coils instead (and letting the boundary move) gives a *different*
   ensemble — neither is "the" posterior; the choice privileges the
   magnetics-measured boundary.
-- Selection is a **hard threshold** on coil drift and boundary RMS (approximate
-  Bayesian computation), **not** a likelihood weighting by the real measurement
-  covariances, and there is no joint correlation structure between the
-  perturbed quantities and the constraints.
+- Selection is a **hard threshold** on the coil χ² test and boundary RMS
+  (approximate Bayesian computation), **not** a likelihood weighting by the
+  real measurement covariances, and there is no joint correlation structure
+  between the perturbed quantities and the constraints. Since 2026-10-14
+  (owner decision) that is the whole default selection: the magnetics. l_i
+  and β_p are no longer cut on unless the source states their uncertainty
+  (the opt-in bands of [workflows.md](workflows.md#the-in-spec-rule)), so
+  their spread across the selected draws is a result of the ensemble.
 - The coil thresholds (especially the VSC channel metric) are **engineering
   heuristics**, not the true measurement/control uncertainties — see
   [coil-constraints.md](coil-constraints.md) for the specific assumptions and
@@ -52,6 +57,48 @@ intervals from. Specifically:
 A genuinely calibrated posterior would replace the hard cut with soft
 likelihood weighting using the joint coil/magnetics/kinetics covariances; that
 is future work.
+
+## Λ = β_p + l_i/2: reported, never filtered
+
+<a id="lambda--beta_p--l_i2-reported-never-filtered"></a>
+The external magnetics see the plasma through the field its current and
+pressure make outside it. To lowest order in the inverse aspect ratio that
+field fixes I_p, the boundary and one combination of the internal
+quantities, the Shafranov parameter Λ = β_p + l_i/2 -- not β_p and l_i
+separately. This is why the in-spec rule is the magnetics
+([workflows.md](workflows.md#the-in-spec-rule)): the l_i(3) of a draw is an
+equilibrium inference, and banding it alone conditions the ensemble on
+information the coils do not carry.
+
+**The definition bouquet stores** (`bouquet.filtering.LAMBDA_DEFINITION`, the
+`Lambda` attr on every draw and on the unified engine's `_baseline`, the
+`lambda_definition` attr on the scan):
+
+- **Λ = β_p + l_i(3)/2**, with no "−1" (the large-aspect-ratio Shafranov-shift
+  form β_p + l_i/2 − 1 is a different convention, not used);
+- **β_p = 2 μ0 ⟨p⟩_V / B_pa²**, B_pa = μ0 I_p / L_p, L_p the poloidal
+  circumference of the LCFS, ⟨p⟩_V the volume average of the **full** pressure
+  -- thermal plus fast, the separatrix pressure added back (the full-pressure
+  frame of [the separatrix-pressure section](#the-pressure-handed-to-the-solver-separatrix-pressure-and-the-edge-p-pin);
+  TokaMaker's `beta_pol` / 100 times the frame factor);
+- **l_i(3) = 2 ∫ B_p² dV / (μ0² I_p² R_0)**, R_0 the magnetic-axis major
+  radius (TokaMaker `li_normalization="iter"`, the archived `l_i(3)` attr).
+
+On an engine draw both come from the archived state the post-hoc stage judged
+(its `engine_json` `archived` / `post_hoc` blocks hold the same numbers); on a
+legacy draw from its edge-pressure record's full frame and its `l_i(3)`.
+
+**What it is not.** For a shaped plasma the magnetics' true observable is not
+the scalar Λ but a shape-weighted combination of the current and pressure
+moments (the virial / Shafranov integrals evaluated with the real boundary).
+The coil χ² test against the free-boundary draw solve enforces exactly that
+observable -- every draw's coils must reproduce the measured currents within
+their uncertainties for the draw's own current and pressure -- so Λ is the
+scalar summary bouquet **reports** (`draw_scalars`, `ScanView.spread()`,
+`read_filter_flags`) alongside l_i(3), β_p and β_N, and never a filter.
+Comparing its band with the l_i(3) and β_p bands shows how far the selected
+draws trade one against the other; that comparison is a result of each
+ensemble, not a property bouquet imposes.
 
 ## The σ=0 consistency guard
 

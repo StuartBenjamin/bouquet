@@ -485,7 +485,11 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
     ``n_requested_source`` says so, since the run-level request was not
     delivered by the shards merged. Shards whose worker records disagree on
     the generation mode or the shared target, or that counted against
-    different boundary cuts, are refused before anything is written.
+    different boundary cuts, or under different in-spec rules
+    (``inspec_rule`` / ``inspec_bands_json``; a shard without the record
+    predates the 2026-10-14 rule), are refused before anything is written.
+    The one rule is stamped on the merged scan and recorded in the manifest
+    (``inspec_rule``, ``inspec_bands``).
 
     ``rescued`` (owner decision D5): draws whose solve was rescued by the
     opt-in draw-solve rescue (stamped ``solve_recovered``) are merged by
@@ -532,6 +536,14 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
         a = parent.attrs
         return tuple(_attr_value(a[k]) if k in a else None for k in _INLOOP_CUT_KEYS)
 
+    def _inspec(src):
+        # the in-spec rule the shard's band flags were judged under
+        # (owner decision 2026-10-14; None: a shard that predates the record)
+        from .filtering import INSPEC_BANDS_ATTR, INSPEC_RULE_ATTR
+        a = (src[base_path] if base_path else src).attrs
+        return tuple(_attr_value(a[k]) if k in a else None
+                     for k in (INSPEC_RULE_ATTR, INSPEC_BANDS_ATTR))
+
     def _mode(src):
         rec = _read_worker_record(src, base_path)
         if rec is None:
@@ -542,6 +554,7 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
     targets, shard_coords = [], {}
     cuts = {}
     modes = {}
+    rules = {}
     for sp in shard_paths:
         if sp is None:
             continue
@@ -557,6 +570,7 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                 shard_coords[sp] = c
             cuts[sp] = _inloop_cut(src)
             modes[sp] = _mode(src)
+            rules[sp] = _inspec(src)
     if len(set(shard_coords.values())) > 1:
         raise RuntimeError(
             f"shards differ in profile_coord: {shard_coords}. "
@@ -578,6 +592,19 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
             + "; ".join(f"{os.path.basename(sp)}: {c}" for sp, c in cuts.items())
             + ". Nothing was merged -- set filtering.rms_max_mm (or "
             "config.device) explicitly and re-run.")
+    # every shard's band flags (and its until-N count) must have been
+    # judged under ONE in-spec rule; a shard without the record predates it
+    # (its engine draws carry the old unconditional l_i band)
+    if len(set(rules.values())) > 1:
+        raise RuntimeError(
+            "shards were judged under different in-spec rules (inspec_rule, "
+            "inspec_bands_json): "
+            + "; ".join(f"{os.path.basename(sp)}: "
+                        f"{r[0] if r[0] is not None else 'unrecorded'}"
+                        for sp, r in rules.items())
+            + ". Nothing was merged -- re-filter the old shard(s) with "
+            "bouquet.refilter_inspec, or re-run them, under one rule.")
+    _rule = next(iter(rules.values()), (None, None))
     present = [(sp, t) for sp, t in targets if t is not None]
     unchecked = [sp for sp, t in targets if t is None]
     if unchecked and present:
@@ -667,6 +694,20 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                     # coordinate. load_equilibrium resolves by the fixed name.
                     offset += 1
 
+    if _rule[0] is not None:
+        # the one rule every shard was judged under, on the merged scan
+        from .filtering import (INSPEC_BANDS_ATTR, INSPEC_RULE_ATTR,
+                                LAMBDA_DEFINITION, LAMBDA_DEFINITION_ATTR)
+        with h5py.File(out_path, "a") as out:
+            gp = base_path if base_path else "/"
+            out[gp].attrs[INSPEC_RULE_ATTR] = str(_rule[0])
+            if _rule[1] is not None:
+                out[gp].attrs[INSPEC_BANDS_ATTR] = str(_rule[1])
+            out[gp].attrs[LAMBDA_DEFINITION_ATTR] = LAMBDA_DEFINITION
+    # the merged scan's axis-branch count (n_axis_other), recounted on the
+    # merged draws' own flags (reported, never a filter)
+    from .engine_draws import stamp_axis_branch_count
+    stamp_axis_branch_count(out_path, scan_key)
     if _resc:
         with h5py.File(out_path, "a") as out:
             gp = base_path if base_path else "/"
@@ -714,6 +755,11 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
         manifest = dict(
             n_workers=len(workers), n_draws=int(offset), workers=workers,
             n_shards_without_record=int(n_unrecorded), partial=partial,
+            # the in-spec rule the shards' flags and counts were judged under
+            # (None: the shards predate the record)
+            inspec_rule=_rule[0],
+            inspec_bands=(json.loads(_rule[1]) if _rule[1] is not None
+                          else None),
             until_n=(dict(target=shared[0]["shared_target"],
                           total_cap=shared[0].get("total_cap"),
                           n_inspec_recorded=int(_n_shards_inspec - _n_ex_in),
@@ -1449,6 +1495,17 @@ def merge_cases(results, out_header, *, group_by="group", cleanup=False, failed=
         n_expected = len(rows) + len(gfails)
         _seed_stamp(out_path, rows)
         with h5py.File(out_path, "a") as dst:
+            # the in-spec rule of every merged case (scan key -> rule; the
+            # scan groups carry their own, copied whole)
+            _rules = {}
+            for r in rows:
+                _g = f"scan/{_scan_key(r['scan_key'])}"
+                if _g in dst:
+                    _v = dst[_g].attrs.get("inspec_rule")
+                    _rules[str(r["scan_key"])] = (
+                        None if _v is None else
+                        (_v.decode() if isinstance(_v, bytes) else str(_v)))
+            dst.attrs["inspec_rules_json"] = json.dumps(_rules)
             dst.attrs["merge_partial"] = bool(gfails)
             dst.attrs["merge_expected_cases"] = int(n_expected)
             if gfails:

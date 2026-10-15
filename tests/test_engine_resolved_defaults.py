@@ -84,7 +84,8 @@ def test_every_engine_dependent_field_defaults_to_none():
     g = GenerationConfig()
     assert set(ENGINE_DEPENDENT_DEFAULTS) == {"isolate_edge_jbs",
                                               "perturb_jind_in_anchor",
-                                              "draw_solve_maxits"}
+                                              "draw_solve_maxits",
+                                              "check_bistability"}
     assert ENGINE_DEPENDENT_UNSET == {"draw_solve_maxits": "auto"}
     for name in ENGINE_DEPENDENT_DEFAULTS:
         assert engine_dependent_unset(name, getattr(g, name)), name
@@ -255,7 +256,10 @@ def test_the_archive_records_the_resolution(tmp_path, toy_bouquet_solver):
                 "value": False, "origin": "resolved from engine=unified"},
             # #75 review: the legacy draws' cap, which the engine never reads
             "draw_solve_maxits": {
-                "value": None, "origin": "resolved from engine=unified"}}
+                "value": None, "origin": "resolved from engine=unified"},
+            # owner decision 2026-10-15: the bistability check on
+            "check_bistability": {
+                "value": True, "origin": "resolved from engine=unified"}}
     assert b.baseline.engine_resolved_defaults == want
     assert b.baseline.engine["engine_resolved_defaults"] == want
     _quiet(b.generate)
