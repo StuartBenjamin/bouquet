@@ -5987,6 +5987,19 @@ def generate_bouquet(
         _baseline_li3 = float(l_i_target)
         _n_bl_masked0 = ANCHOR_MASKED_FAILURES["jphi_baseline"]
         if jphi_baseline:
+            # ---- where this re-solve starts (DrawMethod.baseline_resolve_start)
+            # None (legacy): the issue-#24 psi re-init below.  The unified
+            # engine's reconstruction already IS a jphi-linterp solve of this
+            # very request (its delivery, solved twice, warm), so the engine
+            # re-solves from that delivered state under the same settings
+            # and inputs instead: a cold re-init can land a free-boundary
+            # solve on a DIFFERENT equilibrium of the same inputs (measured on
+            # a near-double-null reversed-Ip case: magnetic axis 1.7 cm lower,
+            # q0 -1.5e-3, beta_pol +0.9 %, even at nl_tol 1e-9), and that
+            # state -- its coils the strong-reg target and drift reference of
+            # every draw -- then anchors the zero-perturbation draw off the
+            # reconstruction (docs/engine.md, the sigma=0 rule).
+            _bl_start = _m.baseline_resolve_start(mygs)
             _psi_range_b = mygs.psi_bounds[1] - mygs.psi_bounds[0]
             _pp_b = solver_pp_profile(
                 psi_N, pressure_solve, _psi_range_b, _edge, coord=coord)
@@ -6030,36 +6043,44 @@ def generate_bouquet(
             _bl_can_snap = (hasattr(mygs, "copy_eq")
                             and hasattr(mygs, "replace_eq"))
             _init_lcfs_exc = None
-            try:
-                _init_lcfs = safe_trace_surf(mygs, 1.0 - psi_pad)
-            except Exception as _exc:
-                _init_lcfs = None
-                _init_lcfs_exc = _exc
-            if _init_lcfs is not None and len(np.asarray(_init_lcfs)) >= 4:
-                _bR0, _bZ0, _ba, _bkap, _bdel = _shape_from_boundary(_init_lcfs)
+            if _bl_start is not None:
+                # The method's own start (the unified engine: the
+                # reconstruction's delivered equilibrium, warm).  Snapshot it
+                # so the failure handler below restores exactly that state.
                 if _bl_can_snap:
                     _bl_snap = mygs.copy_eq()
-                mygs.init_psi(_bR0, _bZ0, _ba, _bkap, _bdel)
-                print(f"  [jphi-baseline] psi re-initialised from the landed "
-                      f"LCFS (R0={_bR0:.4f} a={_ba:.4f} kappa={_bkap:.4f} "
-                      f"delta={_bdel:.4f}) before the forward solve "
-                      f"(converged-on-entry guard, issue #24)")
+                print(f"  [jphi-baseline] {_bl_start}")
             else:
-                # Say WHY the trace was unusable.  The fallback is deliberately
-                # non-fatal, so this line is the only record a run keeps of it;
-                # dropping the exception detail makes a trace failure and a
-                # merely-too-short contour indistinguishable after the fact.
-                if _init_lcfs_exc is not None:
-                    _why = (f"safe_trace_surf raised "
-                            f"{type(_init_lcfs_exc).__name__}: {_init_lcfs_exc}")
-                elif _init_lcfs is None:
-                    _why = "safe_trace_surf returned None"
+                try:
+                    _init_lcfs = safe_trace_surf(mygs, 1.0 - psi_pad)
+                except Exception as _exc:
+                    _init_lcfs = None
+                    _init_lcfs_exc = _exc
+                if _init_lcfs is not None and len(np.asarray(_init_lcfs)) >= 4:
+                    _bR0, _bZ0, _ba, _bkap, _bdel = _shape_from_boundary(_init_lcfs)
+                    if _bl_can_snap:
+                        _bl_snap = mygs.copy_eq()
+                    mygs.init_psi(_bR0, _bZ0, _ba, _bkap, _bdel)
+                    print(f"  [jphi-baseline] psi re-initialised from the landed "
+                          f"LCFS (R0={_bR0:.4f} a={_ba:.4f} kappa={_bkap:.4f} "
+                          f"delta={_bdel:.4f}) before the forward solve "
+                          f"(converged-on-entry guard, issue #24)")
                 else:
-                    _why = (f"traced contour has only "
-                            f"{len(np.asarray(_init_lcfs))} points (need >= 4)")
-                print(f"  [jphi-baseline] WARN: could not trace an LCFS to "
-                      f"re-initialise psi from ({_why}); solving warm (the "
-                      f"converged-on-entry stall of issue #24 is possible here)")
+                    # Say WHY the trace was unusable.  The fallback is deliberately
+                    # non-fatal, so this line is the only record a run keeps of it;
+                    # dropping the exception detail makes a trace failure and a
+                    # merely-too-short contour indistinguishable after the fact.
+                    if _init_lcfs_exc is not None:
+                        _why = (f"safe_trace_surf raised "
+                                f"{type(_init_lcfs_exc).__name__}: {_init_lcfs_exc}")
+                    elif _init_lcfs is None:
+                        _why = "safe_trace_surf returned None"
+                    else:
+                        _why = (f"traced contour has only "
+                                f"{len(np.asarray(_init_lcfs))} points (need >= 4)")
+                    print(f"  [jphi-baseline] WARN: could not trace an LCFS to "
+                          f"re-initialise psi from ({_why}); solving warm (the "
+                          f"converged-on-entry stall of issue #24 is possible here)")
             mygs.set_targets(Ip=initial_Ip_target, pax=solver_pax(pressure_solve, _edge))
             mygs.set_profiles(pp_prof=_pp_b, ffp_prof=_ffp_b)
             try:
@@ -6320,7 +6341,14 @@ def generate_bouquet(
                 _wiso = getattr(mygs, '_isoflux_targets', None)
             if _wiso is None:
                 _wiso = getattr(mygs, '_isoflux', None)
-            if _wiso is not None and len(_wiso) >= 4:
+            _wpat = _m.homotopy_isoflux(mygs)
+            if _wpat is not None and _wpat.get("pts") is not None:
+                # the method's own pattern (the unified engine: the
+                # reconstruction's isoflux, its points AND weights)
+                _warmstart_iso_pts = np.asarray(_wpat["pts"]).copy()
+                _warmstart_iso_w = (None if _wpat["w"] is None
+                                    else np.asarray(_wpat["w"]).copy())
+            elif _wiso is not None and len(_wiso) >= 4:
                 _warmstart_iso_pts = np.asarray(_wiso).copy()
                 _warmstart_iso_w = (np.ones(
                     len(_warmstart_iso_pts)) * 200.0)
@@ -7689,7 +7717,29 @@ def generate_bouquet(
                 # coil-pin block can see them.  Reads here removed
                 # to avoid shadowing.
                 _iso_updated = False
-                if (_ip_aligned and not _skip_hard and not _skip_iso
+                # The method's own homotopy isoflux (the unified engine: the
+                # RECONSTRUCTION's isoflux pattern, never a re-trace); None
+                # (legacy): re-point it to the traced LCFS below.
+                _iso_pattern = (_m.homotopy_isoflux(mygs)
+                                if (_ip_aligned and not _skip_hard
+                                    and not _skip_iso and _m.iso_update)
+                                else None)
+                if _iso_pattern is not None:
+                    try:
+                        if _iso_pattern.get("pts") is not None:
+                            mygs.set_isoflux(_iso_pattern["pts"],
+                                             weights=_iso_pattern["w"])
+                            _iso_updated = True
+                        _st = _iso_pattern.get("stamp") or {}
+                        print(f"  [iso-update] {_m.name}: the homotopy holds "
+                              f"{_st.get('origin')} ({_st.get('n')} pts, "
+                              f"weight {_st.get('weight_max')})")
+                    except Exception as _iso_exc:
+                        print(f"  [iso-update] failed: {_iso_exc}")
+                        if isinstance(_iso_pattern.get("stamp"), dict):
+                            _iso_pattern["stamp"]["installed"] = False
+                            _iso_pattern["stamp"]["error"] = repr(_iso_exc)
+                elif (_ip_aligned and not _skip_hard and not _skip_iso
                         and _m.iso_update):
                     try:
                         # Iso-update is PHYSICS (LCFS feeds the next solve's

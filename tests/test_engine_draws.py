@@ -557,7 +557,8 @@ def test_selected_ands_the_band_flag_only_where_present(tmp_path):
 #  end to end: generate_bouquet on a TokaMaker stand-in
 # ---------------------------------------------------------------------------
 def _generate(tmp_path, monkeypatch, *, n=3, l_i_tolerance=0.05,
-              n_inspec_target=None, homotopy=True, seed=12345, **extra):
+              n_inspec_target=None, homotopy=True, seed=12345,
+              fake_cls=None, before=None, **extra):
     from _engine_fake_gs import FakeTokaMaker
     from bouquet.TokaMaker_interface import generate_bouquet
     from bouquet.utils import initialize_equilibrium_database
@@ -565,12 +566,16 @@ def _generate(tmp_path, monkeypatch, *, n=3, l_i_tolerance=0.05,
     eng, res, rec, b = _recon()
     ctx = _ctx(eng, res)
     unc = _unc(ctx)
+    # before(b): a test's hook on the reconstruction's toy; returns extra
+    # GenerateEngineDraws keywords
     G = ED.GenerateEngineDraws(ctx, unc=unc, psi_pad=T.PAD,
                                homotopy=homotopy,
-                               l_i_tolerance=l_i_tolerance)
+                               l_i_tolerance=l_i_tolerance,
+                               **((before or (lambda _b: {}))(b)))
     monkeypatch.setattr(ED, "tokamaker_backend",
                         lambda mygs, c, **kw: mygs.toy)
-    fake = FakeTokaMaker(b)
+    fake = (fake_cls or FakeTokaMaker)(b)
+    G.fake = fake
     h = str(tmp_path / "e2e")
     initialize_equilibrium_database(h)
     rej = []
@@ -589,6 +594,89 @@ def _generate(tmp_path, monkeypatch, *, n=3, l_i_tolerance=0.05,
         jbs_loop=G.loop_settings, rejection_log=rej, draw_method=G,
         coil_filter="legacy", n_inspec_target=n_inspec_target, **extra)
     return diags, rej, h, G
+
+
+def _cold_branch_fake():
+    """A stand-in whose solve issued right after ``init_psi`` lands on a
+    DIFFERENT equilibrium of the same inputs (l_i(3) +0.5 %), as a
+    free-boundary solve from a cold analytic psi can; a solve from a
+    converged state reproduces it."""
+    from _engine_fake_gs import FakeTokaMaker
+
+    class ColdBranchFake(FakeTokaMaker):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self._cold = False
+
+        def init_psi(self, *a):
+            super().init_psi(*a)
+            self._cold = True
+
+        def replace_eq(self, source_eq=None):
+            self.calls.append(("replace_eq", id(source_eq)))
+            super().replace_eq(source_eq=source_eq)
+
+        def solve(self, *a, **k):
+            super().solve(*a, **k)
+            if self._cold:
+                self.toy.state["li"] *= 1.005
+                self._cold = False
+    return ColdBranchFake
+
+
+def _delivered_state_record(h):
+    import json
+    import h5py
+    from bouquet.utils import DELIVERED_STATE_ATTR
+    found = []
+    with h5py.File(h + ".h5", "r") as hf:
+        hf.visititems(lambda n, o: found.append(o.attrs[DELIVERED_STATE_ATTR])
+                      if DELIVERED_STATE_ATTR in getattr(o, "attrs", {})
+                      else None)
+    assert len(found) == 1, found
+    return json.loads(found[0])
+
+
+@pytest.mark.parametrize("snapshot", [True, False])
+def test_the_baseline_resolve_reproduces_the_reconstruction(
+        tmp_path, monkeypatch, snapshot):
+    """REGRESSION (the three-level sigma=0 rule): generate_bouquet's
+    baseline re-solve -- every draw's warm start, its strong coil
+    regularisation target and drift reference -- must BE the
+    reconstruction's state on the engine route.  It used to re-initialise
+    psi first (the legacy route's issue-#24 guard), and a cold start can
+    land the solver on a different equilibrium of identical inputs; the
+    zero-perturbation draw then reproduced that state, not the
+    reconstruction.  Here the stand-in lands 0.5 % off in l_i(3) after a
+    cold start; the engine route must not take one, and must start from the
+    reconstruction's delivered snapshot when it has one."""
+    seen = {}
+
+    def before(b):
+        seen["li"] = float(b.state["li"])
+        if not snapshot:
+            return {}
+        kw = dict(delivered_eq=b.snapshot())
+        seen["snap"] = id(kw["delivered_eq"])
+        return kw
+    diags, rej, h, G = _generate(tmp_path / str(snapshot), monkeypatch, n=1,
+                                 fake_cls=_cold_branch_fake(), before=before)
+    ref_li = seen["li"]
+    assert ("init_psi",) not in G.fake.calls, (
+        "the engine route re-initialised psi before its baseline re-solve")
+    if snapshot:
+        # the first solve issued (the baseline re-solve) starts from the
+        # reconstruction's delivered snapshot
+        first = G.fake.calls.index(("solve",))
+        assert ("replace_eq", seen["snap"]) in G.fake.calls[:first], (
+            "the engine baseline re-solve did not start from the "
+            "reconstruction's delivered equilibrium")
+    br = _delivered_state_record(h)["baseline_resolve"]
+    assert br is not None
+    # the re-solved state IS the reconstruction's (the cold branch would put
+    # it 0.5 % off in l_i(3))
+    assert abs(br["l_i"] - ref_li) <= 1e-12 * ref_li, (br, ref_li)
+    assert abs(br["dl_i_vs_l_i_target"]) <= 1e-12 * ref_li, br
 
 
 def test_generate_bouquet_runs_engine_draws_end_to_end(tmp_path,
@@ -747,6 +835,78 @@ def test_bouquet_generate_runs_on_the_engine(tmp_path, toy_bouquet_solver):
     with open(out) as fh:
         ids = json.load(fh)
     assert ids["core_profiles"]["profiles_1d"]
+
+
+def test_every_engine_draw_holds_the_reconstructions_isoflux(
+        tmp_path, toy_bouquet_solver):
+    """REGRESSION (the sigma=0 rule on a bistable slice): every engine
+    draw's homotopy holds the boundary with the RECONSTRUCTION's own isoflux
+    pattern -- the very points and weights the reconstruction was pointed at
+    -- not the draw's traced LCFS re-pointed at the legacy weight 200 (the
+    stand-in traces 200 points).  On a near-double-null slice that re-trace,
+    under the strong coil regularisation, selected the other branch of a
+    bistable free-boundary problem at zero perturbation.  Each draw stamps
+    the pattern it installed (n, weight, origin, sha256)."""
+    from bouquet.engine import load_baseline_engine
+    from bouquet.solver_geometry import isoflux_fingerprint
+    b = _bq(tmp_path)
+    b.setup_solver()
+    installs = []
+    real = b.mygs.set_isoflux
+
+    def set_isoflux(pts, weights=None):
+        installs.append((np.array(pts, dtype=float),
+                         None if weights is None
+                         else np.array(weights, dtype=float)))
+        return real(pts, weights=weights)
+    b.mygs.set_isoflux = set_isoflux
+    _quiet(b.prepare_baseline)
+    ri = b._engine_run["recon_isoflux"]
+    # the reconstruction's own last install IS the pattern on record (the
+    # g-file route installs its own, weight 200, over the geometry's reset)
+    rp, rw = installs[-1]
+    np.testing.assert_array_equal(ri["pts"], rp)
+    np.testing.assert_array_equal(ri["w"], rw)
+    assert set(np.unique(rw)) == {200.0}
+    assert ri["stamp"]["sha256"] == isoflux_fingerprint(rp, rw)
+    assert b.baseline.engine["recon_isoflux"] == ri["stamp"]
+    n0 = len(installs)
+    diags = _quiet(b.generate)
+    assert len(diags) == 2
+    later = installs[n0:]
+    assert later, "no isoflux was installed for the draws"
+    for p, w in later:
+        assert p.shape == ri["pts"].shape, (
+            "a draw re-pointed the isoflux to another pattern "
+            f"({len(p)} points vs the reconstruction's {len(ri['pts'])})")
+        np.testing.assert_array_equal(p, ri["pts"])
+        np.testing.assert_array_equal(w, ri["w"])
+    for i, d in enumerate(diags):
+        st = d["engine"]["homotopy"]["isoflux"]
+        assert st["installed"] is True
+        assert st["sha256"] == ri["stamp"]["sha256"]
+        assert st["n"] == len(ri["pts"]) and st["weight_max"] == 200.0
+        assert st["origin"].startswith("engine g-file route")
+        assert ED.read_draw_engine(b.config.output_header, i, scan_key=
+                                   b.config.generation.scan_key
+                                   )["homotopy"]["isoflux"] == st
+    rec = load_baseline_engine(b.config.output_header,
+                               scan_key=b.config.generation.scan_key)
+    assert rec["draws"]["homotopy_isoflux"]["sha256"] == \
+        ri["stamp"]["sha256"]
+
+
+def test_the_engine_homotopy_isoflux_without_a_record_is_left_alone():
+    """No reconstruction pattern on record (a stand-in): nothing is
+    installed and the stamp says so -- never a silent re-trace."""
+    G = ED.GenerateEngineDraws.__new__(ED.GenerateEngineDraws)
+    G.recon_isoflux = None
+    G._cur = dict(count=0)
+    out = G.homotopy_isoflux(None)
+    assert out["pts"] is None and out["stamp"]["installed"] is False
+    assert G._cur["homotopy_isoflux"] is out["stamp"]
+    from bouquet.draw_methods import DrawMethod
+    assert DrawMethod().homotopy_isoflux(None) is None     # legacy: trace
 
 
 def test_a_legacy_baseline_is_not_drawn_on_the_engine(tmp_path,
