@@ -1729,6 +1729,11 @@ def bands_summary(archive, scan_key=None, *,
         sel = next(iter(sel.values()), [])
     excl = {int(d) for d in (kw.get("exclude") or {})}
     considered = [int(d) for d in sel if int(d) not in excl]
+    if kw.get("rescued") == "exclude":
+        # the band's own population (draw_band drops them): a rescued draw's
+        # surface must not keep the mode at own_surface
+        _resc = rescued_draws(ar.path, key, considered)
+        considered = [d for d in considered if d not in _resc]
     located, no_surface, no_q, q_src = {}, [], [], {}
     mode = "fixed_psi_N" if at_key == "psi_N" else "own_surface"
     if gradients and at_key == "q":

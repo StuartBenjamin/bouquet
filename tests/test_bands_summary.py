@@ -165,6 +165,35 @@ def test_falls_back_to_the_named_psi_n_and_says_so(stamped):
     assert n["dp_dpsi"].empty_reason == "no_regular_draws"
 
 
+def test_the_fallback_is_decided_on_the_bands_own_population(stamped, tmp_path):
+    """rescued="exclude": when the only in-spec draws with the surface are
+    rescued ones, the band (which drops them) has no draw on the surface, so
+    the mode is the fallback and n_located counts only the band's draws."""
+    p0, key, ms, inspec = stamped
+    q0 = sorted(float(_q(p0, key, d)[1].min()) for d in inspec)
+    cut = [0.5 * (a + b) for a, b in zip(q0, q0[1:]) if b > a]
+    if not cut:
+        pytest.skip("every in-spec golden draw has the same q0")
+    t = cut[len(cut) // 2]
+    reach = [d for d in inspec if _outermost(*_q(p0, key, d), t) is not None]
+    assert 0 < len(reach) < len(inspec)
+    p = str(tmp_path / "rescued.h5")
+    shutil.copy(p0, p)
+    with h5py.File(p, "a") as hf:
+        for d in reach:
+            hf[f"scan/{key}/{d}"].attrs["solve_recovered"] = True
+            hf[f"scan/{key}/{d}"].attrs["solve_recovered_by"] = "test"
+    inc = bq.bands_summary(p, key, at={"q": t}, fallback_psi_N=0.5)
+    assert inc.surface["mode"] == "own_surface"
+    assert inc.surface["n_located"] == len(reach)
+    exc = bq.bands_summary(p, key, at={"q": t}, fallback_psi_N=0.5,
+                           rescued="exclude")
+    assert exc.surface["mode"] == "fallback_psi_N"
+    assert exc.surface["n_located"] == 0
+    assert exc.surface["n_considered"] == len(inspec) - len(reach)
+    assert exc["dp_dpsi"].n_used == len(inspec) - len(reach)
+
+
 def test_phi_n_profiles_are_mapped_through_the_draws_own_q(stamped, tmp_path):
     """A Phi_N-coordinate archive: d/dpsi_N comes back through the draw's own
     q map. Analytic profiles of psi_N, written on a Phi_N-uniform grid, must
