@@ -1322,6 +1322,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     # Self-consistent bootstrap (GenerationConfig.jbs_self_consistent): the
     # loop wraps fit + l_i match + corrective; None -> the legacy SWB path.
     from .jbs_loop import jbs_settings as _jbs_settings
+    from .filtering import l_i_construction_tolerance
     _jbs = _jbs_settings(config.generation)
     _jbs_kw = {"jbs_loop": _jbs} if _jbs["enabled"] else {}
     from .edge_pressure import resolve_edge_pressure
@@ -1339,7 +1340,10 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             initialize_psi=True,
             p_fast=p_fast_eq,
             Z_imp=Z_imp_recon,
-            l_i_tolerance=float(config.generation.l_i_tolerance),
+            # the band the post-corrective l_i REPORT compares against (the
+            # legacy draws' construction tolerance: l_i_tolerance when set,
+            # else the old 0.05 -- not an in-spec filter)
+            l_i_tolerance=l_i_construction_tolerance(config.generation),
             **_recon_coord,
             edge_pressure=_edge,
             **_jbs_kw,
