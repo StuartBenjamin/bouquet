@@ -1,5 +1,52 @@
 # Bouquet — change summaries
 
+## Unreleased — the boundary constraint per unit length (#84, owner decision for 1.4.0)
+
+**Every reconstruction and every draw of the unified engine moves slightly.**
+The boundary (isoflux) constraint is standardised per unit length, for the
+reconstruction AND the draws, with one constant (`bouquet.solver_geometry`):
+the source boundary is resampled to `N_ISOFLUX` = 256 points by arc length
+(closed, counter-clockwise, X-points kept exactly -- a vertex turning by more
+than 45 deg over 1 % of the boundary length either side, or the vertex a
+saddle target marks; the saddle constraints themselves unchanged), each point
+weighted by the arc length it represents, the weights summing to
+`ISOFLUX_WEIGHT_TOTAL` = 2e5. The first point (TokaMaker's isoflux reference)
+is the outermost point, not the X-point (with the X-point first a reversed-Ip
+near-double-null IDS reconstruction stopped at maxits). Before, the IDS route
+held its outline at 500 per point and the engine's g-file route installed its
+own set at 200 per point, so the strength followed the source's point count;
+that g-file set is removed, and the draws hold the reconstruction's set as
+before (from its record). `SolverConfig.isoflux_pts` / `isoflux_weights` are
+used as given (never resampled). The legacy and swb routes are unchanged
+(source boundary at `ISOFLUX_WEIGHT` = 500 per point; the legacy g-file
+reconstruction's own set at 200; the legacy draws' re-trace).
+
+Why 2e5: on a real g-file case the draws' homotopy, holding that route's
+former set (total 2e4) against the strong coil regularisation, found a
+different fixed point and the sigma=0 draw failed its archived bootstrap gate
+(r_I 1.06e-4); 5x-10x that total held it, the same total per unit length did
+not. At 2e5 it passes (r_I 1.5e-6, VSC drift 0.09 % instead of 0.51 %) and 4 of
+its 6 perturbed draws are in spec (0 of 6 before; the other two miss the l_i
+band as before). The IDS validation slices (including the reversed-Ip
+near-double-null one) and the synthetic dd / H-mode g-file fixtures still pass
+sigma=0; their reconstructions moved by at most 1.4e-4 in l_i(3) and 3.7e-4 in
+q, and hold the source boundary as well or better. Draw wall time 95-132 s
+per draw on the validation cases (was 112-173 s). Details and tables:
+docs/engine.md, "The boundary constraint per unit length".
+
+Stamps: `solver_geometry_json` gains `isoflux_rule`, `isoflux_weight_total`,
+`isoflux_source_n`, `boundary_length_m` and `isoflux_resampling` (method
+`arc_length_resample/1`, N, the X-points kept and how, the source's point
+count, the lengths); every isoflux stamp (the reconstruction's
+`recon_isoflux`, each draw's `engine["homotopy"]["isoflux"]`) gains
+`weight_total`. Tests: `tests/test_isoflux_per_length.py`; the tests that
+pinned the former counts and weights (`test_engine_wiring`,
+`test_engine_draws`, `test_solver_geometry_record`) now pin the standard set.
+**The goldens are not regenerated here**: every unified-engine number moves,
+so they are regenerated on the merged code. The legacy draws' iso-update
+weighted per unit length of the traced LCFS (#81) is the same form on that
+route. Closes #84.
+
 ## Unreleased — the golden recipe runs the synthetic fixtures at the current defaults; a new IDS-route golden (owner decisions 2026-10-15)
 
 **The golden recipe moves to the synthetic test fixtures** (`tests/data/`).

@@ -43,10 +43,12 @@ N_ISOFLUX = 256
 #: route's weight held the state (VSC 0.055 / 0.020 %), whereas spreading the SAME total per unit
 #: length changed nothing.  2e5 is the 10x end of that window in total weight (TokaMaker scales each
 #: isoflux row by its weight, so in least-squares terms 256 points at 2e5/256 sit between the 5x and
-#: 10x cases of that route) and twice the IDS route's former total, whose reconstructions it
-#: reproduces within the sigma=0 gates' order.  The verification -- sigma=0 and perturbed draws on
-#: the g-file and IDS cases and the synthetic fixtures -- is summarised in docs/engine.md ("The
-#: boundary constraint per unit length").
+#: 10x cases of that route) and twice the IDS route's former total.  Verified at 2e5 (docs/engine.md,
+#: "The boundary constraint per unit length"): that g-file case's sigma=0 now passes with margin
+#: (archived r_I 1.5e-6 against 1e-4, VSC 0.09 %) and 4 of its 6 perturbed draws are in spec
+#: (0 of 6 before; the other 2 miss the l_i band, as before); the ladder's IDS slices and the
+#: synthetic fixtures still pass sigma=0, and their reconstructions moved by <= 1.4e-4 in l_i(3) and
+#: <= 3.7e-4 in q -- under a fifth of the sigma=0 gates -- while holding the source boundary closer.
 ISOFLUX_WEIGHT_TOTAL = 2.0e5
 
 #: X-point detection on the source boundary (#84; X-points are kept as exact resampled points): a

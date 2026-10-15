@@ -119,6 +119,32 @@ is a navigational summary of the defaults.
 | `saddle_targets`, `saddle_weights` | `None` | Opt-in X-point pins. Without them a diverted forward solve typically rounds the boundary corner by a few cm |
 | `coil_vsc` | `{"F9A": 1.0, "F9B": -1.0}` | Antisymmetric vertical-stability channel definition |
 
+### The boundary constraint per unit length (#84)
+
+Under the unified engine every reconstruction and every draw holds the
+boundary with ONE standard isoflux set, whatever the source carried: the
+source boundary (g-file boundary, IDS `boundary.outline`, or `LCFS_geqdsk`)
+resampled to `solver_geometry.N_ISOFLUX` = **256** points by arc length
+(closed, counter-clockwise, the X-points kept as exact points), each point
+weighted by the arc length it represents, the weights summing to
+`solver_geometry.ISOFLUX_WEIGHT_TOTAL` = **2e5**. The first point -- the one
+TokaMaker measures the other points' flux against -- is the outermost point,
+never the X-point. Before (1.3.x and the 1.4.0 candidates), the IDS route held
+its ~200 outline points at 500 each and the g-file route its 100-257 boundary
+points at 200 each, so the strength followed the file's point count. **Every
+reconstruction and draw therefore moves slightly**: on the validation cases
+l_i(3) by at most 1.4e-4 and q by at most 3.7e-4 (under a fifth of the sigma=0
+gates), with the source boundary held as well or better; the g-file case whose
+sigma=0 draw failed before now passes, and its perturbed draws are in spec
+(numbers: [engine.md, "The boundary constraint per unit length"](engine.md)).
+`SolverConfig.isoflux_pts` / `isoflux_weights` are used as given (never
+resampled; also on the engine's g-file route); `saddle_targets` are installed
+as configured and mark their X-point for the resampling. The legacy route is
+unchanged (the source boundary at `ISOFLUX_WEIGHT` = 500 per point; its g-file
+reconstruction's own set at 200). The archive's `solver_geometry_json` stamps
+`isoflux_rule`, `isoflux_n`, `isoflux_weight_total`, `isoflux_source_n`,
+`boundary_length_m` and `isoflux_resampling` (method, N, the X-points kept).
+
 ### Ion and Z_eff fields of the sources (`b.source`, PR #56)
 
 | Knob | Default | Meaning |
