@@ -90,6 +90,14 @@ def test_counts_and_scalar_bands_follow_the_manifest(stamped):
         r = s[q]
         assert r.status == "ok" and r.n_used == len(inspec), q
         assert r.min <= r.p16 <= r.median <= r.p84 <= r.max, q
+    # the baseline overlay of l_i(3): the recorded TokaMaker value, else the
+    # baseline's l_i_target on the estimator its l_i_scale names
+    bl = bq.load_baseline_profiles(p, scan_key=key)
+    want = (bl.get("li_metrics") or {}).get("tokamaker_li_3")
+    if want is None and str(bl.get("l_i_scale", "")).startswith("iter"):
+        want = bl.get("l_i_target")
+    if want is not None:
+        assert li.baseline_value == pytest.approx(float(want), rel=1e-12)
 
 
 def test_gradients_at_each_draws_own_q2_surface(stamped):

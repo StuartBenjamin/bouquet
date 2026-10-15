@@ -1677,8 +1677,18 @@ def bands_summary(archive, scan_key=None, *,
         bl = load_baseline_profiles(ar.path, scan_key=key)
     except KeyError:
         bl = {}
-    li_base = {"l_i_3": (bl.get("li_metrics") or {}).get("tokamaker_li_3"),
-               "l_i_1": (bl.get("li_metrics") or {}).get("tokamaker_li_1")}
+    # the baseline's l_i overlay: the recorded TokaMaker value (legacy
+    # li_metrics), else the baseline's l_i_target on the estimator its
+    # l_i_scale names (the unified engine's delivered l_i)
+    _lm = bl.get("li_metrics") or {}
+    _scale = str(_decode(bl.get("l_i_scale", "")))
+    _tgt = bl.get("l_i_target")
+    li_base = {"l_i_3": _lm.get("tokamaker_li_3"), "l_i_1": _lm.get("tokamaker_li_1")}
+    li_base_src = {k: ("li_metrics" if v is not None else None) for k, v in li_base.items()}
+    for k, pre in (("l_i_3", "iter"), ("l_i_1", "std")):
+        if li_base[k] is None and _tgt is not None and _scale.startswith(pre):
+            li_base[k] = float(_decode(_tgt))
+            li_base_src[k] = f"_baseline.l_i_target ({_scale})"
 
     q_cache = {}
 
@@ -1740,6 +1750,9 @@ def bands_summary(archive, scan_key=None, *,
                    q_source_by_draw=dict(sorted(q_src.items())))
     if at_key == "psi_N":
         surface["psi_N"] = at_val
+    # filled by the evaluator: where the baseline overlay was evaluated
+    surface["baseline_q_source"] = None
+    surface["baseline_psi_N"] = None
 
     def _surface_psi(view, eq_fn):
         if mode == "fixed_psi_N":
@@ -1811,6 +1824,9 @@ def bands_summary(archive, scan_key=None, *,
                                              np.interp(0.95, psi, q)), "status": "ok"}
         if gradients:
             psi_s, why = _surface_psi(view, eq_fn)
+            if view.is_baseline:
+                surface["baseline_psi_N"] = psi_s
+                surface["baseline_q_source"] = _q_of(view, eq_fn)[2]
             for g in gradients:
                 if psi_s is None:
                     out[g] = ({"value": _NAN, "status": "no_q_profile"}
@@ -1827,7 +1843,9 @@ def bands_summary(archive, scan_key=None, *,
     meta.update(scalar_definitions={s: SUMMARY_SCALARS[s][1] for s in scalars},
                 gradient_definition=GRADIENT_DEFINITION if gradients else None,
                 lambda_definition=LAMBDA_DEFINITION, surface_rule=rule,
-                surface_mode=mode)
+                surface_mode=mode,
+                baseline_l_i_source={k: li_base_src[k] for k in scalars
+                                     if k in li_base_src})
     meta.setdefault("regular_label", f"the draw has a {rule} surface")
     kw["quantities"] = [*scalars, *gradients]
     recs = draw_band(ar, key, _evaluate, evaluator_meta=meta, **kw)
