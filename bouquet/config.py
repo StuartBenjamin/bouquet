@@ -805,15 +805,19 @@ class UncertaintyConfig:
     # other real ni envelope.  That rule changes with the Z_eff tier; pin
     # this field explicitly for an A/B of Z_eff envelopes.
     ni_from_zeff: Optional[bool] = None
-    # EXPERIMENTAL -- see bouquet.experimental.REGISTRY["kinetic_sampler_clips"].
+    # GRADUATED (owner decision 2026-10-14) -- see bouquet.experimental.
+    # GRADUATED["kinetic_sampler_clips"].
     # The PR #56 clips of the kinetic sampler: a drawn Z_eff floored at 1
     # where physics.zeff_bounds allows less, a derived n_i held in
     # [0, ne - z_fast], an independent n_i capped at ne - z_fast when Z_imp is
-    # declared, a passive Z_eff aux draw clipped to the window.  None = auto:
-    # on only with a PR #56 opt-in (fuse_zeff_fast_ions, an explicitly SET
-    # measured ni_source, an explicit ni_subtract_fast=True) -- never by the
-    # ida_hybrid default; False: only the zeff_bounds window (the bound in
-    # place before PR #56); True: on.
+    # declared, a passive Z_eff aux draw clipped to the window.  None = auto
+    # (bouquet.experimental.kinetic_clips_on): ON whenever the run's resolved
+    # ni_source is a measured IDA route -- INCLUDING the ida_hybrid default
+    # (ni_source="auto" -> "all") -- or the beam subtraction
+    # (ni_subtract_fast, which follows include_pfast there) or
+    # fuse_zeff_fast_ions is on; off otherwise.  Every clip that fires is
+    # counted per draw (KineticDraw.clips) and archived.  False: only the
+    # zeff_bounds window (the bound in place before PR #56); True: on.
     kinetic_clips: Optional[bool] = None
 
     # GPR correlation length scales (psi_N units) -- define the perturbation

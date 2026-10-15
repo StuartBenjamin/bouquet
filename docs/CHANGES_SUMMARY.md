@@ -151,6 +151,11 @@ route. Closes #84.
   cannot honour raises a ValueError naming the file and the missing data
   instead of being downgraded. The envelope records `ni_source` and the
   Z_eff tier its `ladder`.
+- Documentation: `UncertaintyConfig.kinetic_clips` and `resolve_uncertainty`
+  said the sampler clips were never on by the IDA-hybrid default; they are
+  (graduated 2026-10-14: on with the measured route, default included). The
+  comments now say so; the unused `experimental._explicit_ida_ion_route` is
+  removed.
 
 ## Unreleased — the golden recipe runs the synthetic fixtures at the current defaults; a new IDS-route golden (owner decisions 2026-10-15)
 

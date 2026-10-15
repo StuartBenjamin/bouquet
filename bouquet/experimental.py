@@ -343,14 +343,6 @@ def ida_ion_route_on(source, uncertainty=None, kinetic_source=None,
             in IDA_ION_ROUTES and _ida_in_play(source, uncertainty))
 
 
-def _explicit_ida_ion_route(source, uncertainty=None) -> bool:
-    """``ni_source`` was SET to a measured route (not resolved from
-    ``"auto"``) and an IDA file is in play: the PR #56 opt-in the sampler
-    clips' auto rule follows, unchanged."""
-    return (getattr(source, "ni_source", STANDARD_NI_SOURCE) in IDA_ION_ROUTES
-            and _ida_in_play(source, uncertainty))
-
-
 def fuse_zeff_fast_ions_on(source) -> bool:
     """:data:`REGISTRY` ``"fuse_zeff_fast_ions"``."""
     from .config import ImasSource
