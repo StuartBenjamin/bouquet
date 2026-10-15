@@ -91,6 +91,8 @@ import numpy as np
 __all__ = [
     "BandRecord", "BandTable", "UnfilteredArchiveError", "NonScalarQuantityError",
     "draw_band", "draw_bands", "draw_scalars", "plot_band",
+    "BandSummary", "bands_summary", "plot_bands_summary",
+    "SUMMARY_SCALARS", "SUMMARY_GRADIENTS",
 ]
 
 UNRECORDED = "unrecorded"
@@ -1209,13 +1211,9 @@ def _rational_rho(eq, m, n):
     q = np.abs(np.asarray(eq.qpsi, dtype=float))
     psi = np.asarray(eq.psi_N, dtype=float)
     rho = np.asarray(eq.rhovn, dtype=float)
-    dq = q - float(m) / float(n)
-    idx = np.nonzero((dq[:-1] * dq[1:] <= 0) & ~((dq[:-1] == 0) & (dq[1:] == 0)))[0]
-    if idx.size == 0:
+    psi_s = _outermost_crossing(psi, q, float(m) / float(n))
+    if psi_s is None:
         return None
-    i = int(idx[-1])
-    t = 0.0 if dq[i] == dq[i + 1] else dq[i] / (dq[i] - dq[i + 1])
-    psi_s = psi[i] + t * (psi[i + 1] - psi[i])
     return float(np.interp(psi_s, psi, rho))
 
 
@@ -1443,6 +1441,424 @@ def draw_scalars(archive, scan_key=None, *, rational=((2, 1), (3, 1)),
 
 
 # --------------------------------------------------------------------------
+#  the standard error-bar summary (one call per archive slice)
+# --------------------------------------------------------------------------
+#: scalars :func:`bands_summary` reports: ``name -> (unit, definition)``
+SUMMARY_SCALARS = {
+    "beta_N": ("", "beta_N of the draw's g-file (as draw_scalars / ScanView.spread)"),
+    "beta_p": ("", "the draw's stored beta_p (full-pressure frame)"),
+    "Lambda": ("", "beta_p + l_i(3)/2 (bouquet.filtering.LAMBDA_DEFINITION)"),
+    "l_i_3": ("", "the draw's archived l_i(3) (TokaMaker 'iter' normalisation)"),
+    "l_i_1": ("", "the draw's archived l_i(1) (TokaMaker 'std' normalisation)"),
+    "q0": ("", "q at the innermost stored surface of the draw's eq_fsa (else the g-file axis)"),
+    "q95": ("", "q at psi_N = 0.95 of the draw's eq_fsa (else its g-file)"),
+}
+#: gradients :func:`bands_summary` reports: ``name -> (dataset, unit)``;
+#: each is d(dataset)/d(psi_N) of the draw's own archived profile
+SUMMARY_GRADIENTS = {
+    "dp_dpsi": ("pressure", "Pa/psi_N"),
+    "djphi_dpsi": ("j_phi", "A m^-2/psi_N"),
+}
+GRADIENT_DEFINITION = (
+    "d(profile)/d(psi_N) of the draw's own archived profile (pressure: the "
+    "'pressure' dataset [Pa]; j_phi: the 'j_phi' dataset [A m^-2]), by "
+    "second-order central differences (numpy.gradient) on the archived grid "
+    "(mapped to psi_N through the draw's own q when the profile coordinate "
+    "is Phi_N), linearly interpolated to the evaluation surface")
+
+
+def _outermost_crossing(x, y, target):
+    """``x`` at the OUTERMOST crossing ``y = target`` (linear), or None."""
+    x = np.asarray(x, dtype=float)
+    dy = np.asarray(y, dtype=float) - float(target)
+    idx = np.nonzero((dy[:-1] * dy[1:] <= 0) & ~((dy[:-1] == 0) & (dy[1:] == 0)))[0]
+    if idx.size == 0:
+        return None
+    i = int(idx[-1])
+    t = 0.0 if dy[i] == dy[i + 1] else dy[i] / (dy[i] - dy[i + 1])
+    return float(x[i] + t * (x[i + 1] - x[i]))
+
+
+def _psi_from_phi(phi_grid, psi_q, q):
+    """psi_N at the Phi_N values ``phi_grid``, from the draw's own q(psi_N)
+    (Phi_N = int_0^psi q dpsi_N / int_0^1 q dpsi_N; q held flat to the axis
+    and to psi_N = 1 where the q grid stops short of them)."""
+    from scipy.integrate import cumulative_trapezoid
+    psi_q = np.asarray(psi_q, dtype=float)
+    q = np.abs(np.asarray(q, dtype=float))
+    xe = np.unique(np.concatenate([[0.0], psi_q[(psi_q > 0) & (psi_q < 1)], [1.0]]))
+    phi = cumulative_trapezoid(np.interp(xe, psi_q, q), xe, initial=0.0)
+    return np.interp(np.asarray(phi_grid, dtype=float), phi / phi[-1], xe)
+
+
+@dataclass(repr=False)
+class BandSummary:
+    """What :func:`bands_summary` returns: one :class:`BandRecord` per
+    quantity plus where the gradients were evaluated.
+
+    ``records[q]`` holds the median (``median``), the band (``p16`` /
+    ``p84``), the full range (``min`` / ``max``) and the count (``n_used``)
+    over the in-spec draws, with the whole provenance of :func:`draw_band`.
+    ``surface`` says how the evaluation surface was found: ``mode`` is
+    ``"own_surface"`` (each draw at its own ``at`` surface),
+    ``"fallback_psi_N"`` (no in-spec draw has one: every draw at the named
+    psi_N) or ``"fixed_psi_N"`` (``at={"psi_N": x}``).
+    """
+
+    records: dict
+    surface: dict
+    scan_key: Optional[str]
+    archive: Optional[str]
+    n_selected: int
+    units: dict = field(default_factory=dict)
+
+    def __getitem__(self, quantity):
+        return self.records[quantity]
+
+    def __iter__(self):
+        return iter(self.records)
+
+    @property
+    def population(self) -> str:
+        """``"in-spec draws"`` for the default selection on a filtered
+        archive; otherwise what the population actually is."""
+        r = next(iter(self.records.values()), None)
+        prov = (r.provenance if r is not None else {}) or {}
+        sel = prov.get("selection", "selected")
+        if sel == "selected" and prov.get("coil_filter", "none") != "none":
+            return "in-spec draws"
+        if sel == "selected":
+            return "stored draws of an UNFILTERED archive"
+        return f"{sel!r} draws"
+
+    @property
+    def where(self) -> str:
+        """One phrase: where the gradients were evaluated."""
+        s = self.surface
+        if s.get("mode") == "own_surface":
+            return f"each draw's own {s['rule']} surface"
+        if s.get("mode") == "fallback_psi_N":
+            return (f"psi_N = {s['fallback_psi_N']:g} (FALLBACK: no in-spec "
+                    f"draw has a {s['rule']} surface)")
+        if s.get("mode") == "fixed_psi_N":
+            return f"psi_N = {s['psi_N']:g}"
+        return "no gradients requested"
+
+    def rows(self) -> list:
+        """One plain dict per quantity (what :meth:`table` prints)."""
+        out = []
+        for q, r in self.records.items():
+            flags = [n for n in ("below_floor", "no_band", "gated")
+                     if getattr(r, n)]
+            if r.status != "ok":
+                flags.insert(0, r.status + (f"({r.empty_reason})"
+                                            if r.empty_reason else ""))
+            out.append(dict(
+                quantity=q, unit=self.units.get(q, ""), median=r.median,
+                p16=r.p16, p84=r.p84, min=r.min, max=r.max, n=r.n_used,
+                n_selected=r.n_selected, n_irregular=r.n_irregular,
+                kind="gradient" if q in SUMMARY_GRADIENTS else "scalar",
+                flags=flags))
+        return out
+
+    def table(self) -> str:
+        """The error-bar table as text (median, 16-84 % band, full range, n)."""
+        lo, hi = (next(iter(self.records.values())).percentiles
+                  if self.records else (16, 84))
+        head = (f"Error bars over the {self.population} of scan "
+                f"{self.scan_key!r}: n = {self.n_selected}  (median, "
+                f"p{lo:g}-p{hi:g} band, full range, n used)")
+        lines = [head]
+        if self.population != "in-spec draws":
+            lines.append(f"NOTE: the population is the {self.population}, "
+                         "not an in-spec selection")
+        if any(q in SUMMARY_GRADIENTS for q in self.records):
+            s = self.surface
+            g = f"gradients d/dpsi_N at {self.where}"
+            if s.get("mode") == "own_surface":
+                g += (f": located on {s['n_located']} of {s['n_considered']} "
+                      f"draws ({s['n_no_surface']} without one, "
+                      "counted and excluded)")
+            lines.append(g)
+        cols = ("quantity", "median", f"p{lo:g}", f"p{hi:g}", "min", "max", "n")
+        w = max([len(c) for c in self.records] + [8])
+        lines.append(f"{cols[0]:<{w}}  " + "  ".join(f"{c:>11}" for c in cols[1:6])
+                     + f"  {cols[6]:>4}  unit / flags")
+        for row in self.rows():
+            vals = "  ".join(f"{row[k]:>11.4g}" for k in ("median", "p16", "p84",
+                                                           "min", "max"))
+            tail = row["unit"]
+            if row["flags"]:
+                tail = (tail + "  " if tail else "") + ",".join(row["flags"])
+            lines.append(f"{row['quantity']:<{w}}  {vals}  {row['n']:>4}  {tail}")
+        return "\n".join(lines)
+
+    def __str__(self):
+        return self.table()
+
+    def __repr__(self):
+        return (f"<BandSummary scan={self.scan_key!r} n_selected="
+                f"{self.n_selected} quantities={list(self.records)} "
+                f"gradients at: {self.where}>")
+
+    def to_dict(self) -> dict:
+        return {"scan_key": self.scan_key, "archive": self.archive,
+                "n_selected": self.n_selected, "surface": _jsonable(self.surface),
+                "units": dict(self.units),
+                "records": {q: r.to_dict() for q, r in self.records.items()}}
+
+    def plot(self, ax=None):
+        """One band figure: see :func:`plot_bands_summary`."""
+        return plot_bands_summary(self, ax=ax)
+
+
+def bands_summary(archive, scan_key=None, *,
+                  scalars=("beta_N", "l_i_3", "Lambda"),
+                  gradients=("dp_dpsi", "djphi_dpsi"), at=None,
+                  fallback_psi_N=0.5, **kw) -> BandSummary:
+    r"""The standard error bars of one archive slice, in one call.
+
+    Per quantity: the median, the 16-84 % band, the full range (min, max)
+    and n over the in-spec draws -- the population and statistic of
+    :func:`draw_band` (``**kw`` is passed on: ``selection``,
+    ``require_filter``, ``min_n``, ``hard_min``, ``percentiles``,
+    ``exclude``, ``rescued``, ...). Nothing is hand-rolled and nothing is
+    filtered on.
+
+    ``scalars``: names from :data:`SUMMARY_SCALARS` -- ``beta_N`` (the draw's
+    g-file), ``beta_p`` and ``Lambda`` = beta_p + l_i(3)/2 (the stored attrs,
+    else formed as :func:`draw_scalars` does), ``l_i_3`` / ``l_i_1`` (the
+    archived attrs), ``q0`` / ``q95``.
+
+    ``gradients``: names from :data:`SUMMARY_GRADIENTS` -- ``dp_dpsi`` and
+    ``djphi_dpsi``, the derivative with respect to psi_N of the draw's own
+    archived ``pressure`` [Pa] and ``j_phi`` [A m^-2] profiles
+    (:data:`GRADIENT_DEFINITION`), evaluated on each draw at its OWN
+    surface:
+
+    * ``at={"q": 2.0}`` (the default): the outermost q = 2 crossing of the
+      draw's archived q profile (``eq_fsa/q``, else its g-file ``qpsi``; the
+      source of every draw is recorded). A draw without a q = 2 surface is
+      counted and excluded from the gradient bands (``regular=False``, label
+      ``no_q=2_surface``; when half or fewer have one the record is ``gated``,
+      the draw_band rule). When NO in-spec draw has one the gradients fall
+      back to ``fallback_psi_N`` on every draw and the record says so
+      (``surface["mode"] = "fallback_psi_N"``, a limitation line on every
+      gradient record); ``fallback_psi_N=None`` disables the fallback (the
+      gradient records then come back ``empty``).
+    * ``at={"psi_N": x}``: every draw at psi_N = x.
+
+    The baseline is overlaid on the same rule (its own surface, from its
+    g-file), never the centre. Returns a :class:`BandSummary`; print it (or
+    ``.table()``) for the table, ``.plot()`` for one band figure with n.
+    """
+    from .archive import DrawView, _gfile_pressure_scalars
+    from .filtering import select_indices
+    from .utils import load_baseline_profiles, load_eq_fsa
+    at = {"q": 2.0} if at is None else dict(at)
+    if len(at) != 1 or next(iter(at)) not in ("q", "psi_N"):
+        raise ValueError(f"at must be {{'q': value}} or {{'psi_N': value}}, got {at!r}")
+    at_key, at_val = next(iter(at.items()))
+    at_val = float(at_val)
+    bad_s = [s for s in scalars if s not in SUMMARY_SCALARS]
+    bad_g = [g for g in gradients if g not in SUMMARY_GRADIENTS]
+    if bad_s or bad_g:
+        raise ValueError(
+            f"unknown quantities {bad_s + bad_g}: scalars are "
+            f"{sorted(SUMMARY_SCALARS)}, gradients {sorted(SUMMARY_GRADIENTS)}")
+    if fallback_psi_N is not None and not (0.0 <= float(fallback_psi_N) <= 1.0):
+        raise ValueError(f"fallback_psi_N must lie in [0, 1], got {fallback_psi_N!r}")
+    ar = _as_archive(archive)
+    key = _resolve_key(ar, scan_key)
+    rule = f"q = {at_val:g}" if at_key == "q" else f"psi_N = {at_val:g}"
+    label = f"no_q={at_val:g}_surface"
+
+    try:
+        bl = load_baseline_profiles(ar.path, scan_key=key)
+    except KeyError:
+        bl = {}
+    li_base = {"l_i_3": (bl.get("li_metrics") or {}).get("tokamaker_li_3"),
+               "l_i_1": (bl.get("li_metrics") or {}).get("tokamaker_li_1")}
+
+    q_cache = {}
+
+    def _q_of(view, eq_fn):
+        """(psi_N, |q|, source) of the view's archived q profile."""
+        ck = "_baseline" if view.is_baseline else int(view.count)
+        if ck in q_cache:
+            return q_cache[ck]
+        out = (None, None, None)
+        if not view.is_baseline:
+            fsa = load_eq_fsa(ar.path, view.count, scan_key=key)
+            if fsa is not None and "q" in fsa and "psi_N" in fsa:
+                out = (np.asarray(fsa["psi_N"], float), np.abs(fsa["q"]), "eq_fsa")
+        if out[0] is None:
+            eq = eq_fn()
+            if eq is not None:
+                out = (np.asarray(eq.psi_N, float),
+                       np.abs(np.asarray(eq.qpsi, float)), "geqdsk")
+        q_cache[ck] = out
+        return out
+
+    # ---- pass 1: which in-spec draws have the surface (decides the fallback)
+    selection = kw.get("selection", "selected")
+    sel = select_indices(ar.path, scan_key=key, selection=selection)
+    if isinstance(sel, dict):
+        sel = next(iter(sel.values()), [])
+    excl = {int(d) for d in (kw.get("exclude") or {})}
+    considered = [int(d) for d in sel if int(d) not in excl]
+    located, no_surface, no_q, q_src = {}, [], [], {}
+    mode = "fixed_psi_N" if at_key == "psi_N" else "own_surface"
+    if gradients and at_key == "q":
+        for d in considered:
+            v = DrawView(ar, key, d)
+
+            def _eq(v=v):
+                try:
+                    return v.equilibrium()
+                except KeyError:
+                    return None
+            psi, q, src = _q_of(v, _eq)
+            q_src[d] = src
+            if psi is None:
+                no_q.append(d)            # no q profile at all: a status, not "no surface"
+                continue
+            x = _outermost_crossing(psi, q, at_val)
+            if x is None:
+                no_surface.append(d)
+            else:
+                located[d] = x
+        if no_surface and not located and fallback_psi_N is not None:
+            mode = "fallback_psi_N"
+    surface = dict(rule=rule, mode=mode, target=at_val, coordinate=at_key,
+                   crossing="outermost", fallback_psi_N=(
+                       None if fallback_psi_N is None else float(fallback_psi_N)),
+                   n_considered=len(considered), n_located=len(located),
+                   n_no_surface=len(no_surface), no_surface_draws=sorted(no_surface),
+                   n_no_q_profile=len(no_q), no_q_profile_draws=sorted(no_q),
+                   psi_N_by_draw=dict(sorted(located.items())),
+                   q_source_by_draw=dict(sorted(q_src.items())))
+    if at_key == "psi_N":
+        surface["psi_N"] = at_val
+
+    def _surface_psi(view, eq_fn):
+        if mode == "fixed_psi_N":
+            return at_val, None
+        if mode == "fallback_psi_N":
+            return float(fallback_psi_N), None
+        if not view.is_baseline and int(view.count) in located:
+            return located[int(view.count)], None
+        psi, q, _src = _q_of(view, eq_fn)
+        x = None if psi is None else _outermost_crossing(psi, q, at_val)
+        return x, (None if x is not None else
+                   ("no_q_profile" if psi is None else "no_surface"))
+
+    def _gradient(view, name, psi_s, eq_fn):
+        ds = SUMMARY_GRADIENTS[name][0]
+        prof = view.profiles
+        if ds not in prof or "psi_N" not in prof:
+            return {"value": _NAN, "status": f"no_{ds}"}
+        y = np.asarray(prof[ds], float)
+        x = np.asarray(prof["psi_N"], float)
+        if y.shape != x.shape:
+            return {"value": _NAN, "status": f"{ds}_grid_mismatch"}
+        coord = str(_decode(view.attrs.get("profile_coord", "psi_n")))
+        if coord == "phi_n":
+            psi, q, _src = _q_of(view, eq_fn)
+            if psi is None:
+                return {"value": _NAN, "status": "no_q_profile"}
+            x = _psi_from_phi(x, psi, q)
+        if x.size < 3 or not np.all(np.diff(x) > 0):
+            return {"value": _NAN, "status": "non_monotone_grid"}
+        g = np.gradient(y, x)
+        return {"value": float(np.interp(psi_s, x, g)), "status": "ok",
+                "regular": True}
+
+    def _evaluate(view):
+        eq_box = []
+
+        def eq_fn():
+            if not eq_box:
+                try:
+                    eq_box.append(view.equilibrium())
+                except KeyError:
+                    eq_box.append(None)
+            return eq_box[0]
+        out = {}
+        a = view.attrs
+        for s in scalars:
+            if s == "beta_N":
+                eq = eq_fn()
+                out[s] = ({"value": _NAN, "status": "no_eqdsk"} if eq is None else
+                          {"value": _gfile_pressure_scalars(eq)[1], "status": "ok"})
+            elif s in ("beta_p", "Lambda"):
+                out[s] = _shafranov_entries(view)[s]
+            elif s in ("l_i_3", "l_i_1"):
+                attr = "l_i(3)" if s == "l_i_3" else "l_i(1)"
+                if view.is_baseline:
+                    v = li_base[s]
+                    out[s] = ({"value": float(v), "status": "ok"} if v is not None
+                              else {"value": _NAN, "status": UNRECORDED})
+                else:
+                    out[s] = ({"value": float(a[attr]), "status": "ok"} if attr in a
+                              else {"value": _NAN, "status": f"no_{attr}_attr"})
+            else:                                   # q0 / q95
+                psi, q, _src = _q_of(view, eq_fn)
+                if psi is None:
+                    out[s] = {"value": _NAN, "status": "no_q_profile"}
+                else:
+                    out[s] = {"value": float(q[0] if s == "q0" else
+                                             np.interp(0.95, psi, q)), "status": "ok"}
+        if gradients:
+            psi_s, why = _surface_psi(view, eq_fn)
+            for g in gradients:
+                if psi_s is None:
+                    out[g] = ({"value": _NAN, "status": "no_q_profile"}
+                              if why == "no_q_profile" else
+                              {"value": _NAN, "status": "ok", "regular": False,
+                               "label": label})
+                else:
+                    out[g] = _gradient(view, g, psi_s, eq_fn)
+        return out
+
+    from .filtering import LAMBDA_DEFINITION
+    meta = dict(kw.pop("evaluator_meta", None) or {})
+    meta.setdefault("code", "bouquet.bands_summary")
+    meta.update(scalar_definitions={s: SUMMARY_SCALARS[s][1] for s in scalars},
+                gradient_definition=GRADIENT_DEFINITION if gradients else None,
+                lambda_definition=LAMBDA_DEFINITION, surface_rule=rule,
+                surface_mode=mode)
+    meta.setdefault("regular_label", f"the draw has a {rule} surface")
+    kw["quantities"] = [*scalars, *gradients]
+    recs = draw_band(ar, key, _evaluate, evaluator_meta=meta, **kw)
+    for g in gradients:
+        r = recs.get(g)
+        if r is None:
+            continue
+        prov = dict(r.provenance or {})
+        prov["surface"] = _jsonable(surface)
+        lim = list(prov.get("limitations") or [])
+        if mode == "fallback_psi_N":
+            lim.append(
+                f"No in-spec draw has a {rule} surface: {g} is evaluated at the "
+                f"FALLBACK psi_N = {float(fallback_psi_N):g} on every draw, NOT "
+                f"at {rule}.")
+        elif mode == "own_surface" and no_surface:
+            lim.append(
+                f"{len(no_surface)} of the {len(considered)} in-spec draws have no "
+                f"{rule} surface and are excluded from the {g} band (counted as "
+                f"irregular: draws {sorted(no_surface)}).")
+        prov["limitations"] = lim
+        r.provenance = prov
+    units = {s: SUMMARY_SCALARS[s][0] for s in scalars}
+    units.update({g: SUMMARY_GRADIENTS[g][1] for g in gradients})
+    n_sel = next(iter(recs.values())).n_selected if recs else 0
+    return BandSummary(records=recs, surface=surface,
+                       scan_key=None if key is None else str(key),
+                       archive=ar.path, n_selected=int(n_sel), units=units)
+
+
+# --------------------------------------------------------------------------
 #  plotting
 # --------------------------------------------------------------------------
 def plot_band(table, quantity, ax=None, x=None):
@@ -1500,4 +1916,60 @@ def plot_band(table, quantity, ax=None, x=None):
                else f"{r.n_regular}/{r.n_ok}" if r.n_ok else "n=0")
         ax.text(xi, 0.03, txt, transform=tr, ha="center", va="bottom", fontsize=8)
     ax.set_ylabel(str(quantity))
+    return ax
+
+
+def plot_bands_summary(summary, ax=None):
+    """One band figure of a :class:`BandSummary`, n stated.
+
+    One row per quantity, every value as its deviation from that quantity's
+    median in % of |median|: the thick bar is the p16-p84 band, the thin line
+    the full range (min, max), the dot the median (hollow when
+    ``below_floor``), the cross the baseline overlay. The row label carries
+    the median and n; the title the in-spec count and where the gradients
+    were evaluated. A record with no band (or ``show=False``) is drawn
+    without one and labelled with its status. Returns the axes.
+    """
+    import matplotlib.pyplot as plt
+    rows = list(summary.records.items())
+    made = ax is None
+    if made:
+        _, ax = plt.subplots(figsize=(8.0, 0.55 * len(rows) + 1.8))
+    labels = []
+    for i, (q, r) in enumerate(rows):
+        y = len(rows) - 1 - i
+        med = r.median
+        unit = summary.units.get(q, "")
+        if r.status != "ok" or not np.isfinite(med) or med == 0.0:
+            labels.append(f"{q}: {r.status if r.status != 'ok' else 'no median'}"
+                          f" (n={r.n_used})")
+            continue
+        scale = 100.0 / abs(med)
+
+        def dev(v):
+            return (v - med) * scale if v is not None and np.isfinite(v) else np.nan
+        ax.plot([dev(r.min), dev(r.max)], [y, y], "-", color="0.45", lw=1.0)
+        if r.show and not r.no_band:
+            ax.plot([dev(r.p16), dev(r.p84)], [y, y], "-", color="C0", lw=6,
+                    solid_capstyle="butt", alpha=0.8)
+        ax.plot([0.0], [y], "o", color="C0",
+                mfc="none" if r.below_floor else "C0", ms=6)
+        if r.baseline_value is not None:
+            ax.plot([dev(r.baseline_value)], [y], "x", color="k", ms=7)
+        tag = "" if (r.show and not r.no_band) else "  [no band]"
+        labels.append(f"{q} = {med:.3g} {unit} (n={r.n_used}){tag}".replace("  (", " ("))
+    ax.set_yticks(range(len(rows) - 1, -1, -1))
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.axvline(0.0, color="0.7", lw=0.8, zorder=0)
+    lo, hi = (rows[0][1].percentiles if rows else (16, 84))
+    ax.set_xlabel(f"deviation from the median [% of |median|]\n"
+                  f"bar: p{lo:g}-p{hi:g}, line: full range, dot: median, "
+                  f"x: baseline", fontsize=8)
+    title = f"{summary.population}: n = {summary.n_selected}"
+    if any(q in SUMMARY_GRADIENTS for q in summary.records):
+        title += f"\ngradients at {summary.where}"
+    ax.set_title(title, fontsize=9)
+    ax.grid(axis="x", alpha=0.3)
+    if made:
+        ax.figure.tight_layout()
     return ax
