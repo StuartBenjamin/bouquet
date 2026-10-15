@@ -746,8 +746,12 @@ ONE standard set on both routes, for the reconstruction and every draw
   `LCFS_geqdsk` boundary) is resampled to `solver_geometry.N_ISOFLUX` = 256
   points by arc length (`resample_boundary`): an interpolating cubic spline
   through the source points, broken at the X-points and at any vertex where
-  the source polygon turns by more than `SPLINE_BREAK_DEG` = 20 deg (so a
-  corner is never smoothed or overshot), spaced uniformly in arc length
+  the source polygon turns by more than `SPLINE_BREAK_DEG` = 20 deg AND by
+  more than `SPLINE_BREAK_MEDIAN_RATIO` = 3x the median turn of the vertices
+  within `SPLINE_BREAK_MEDIAN_WINDOW` = 3 of it (so a corner is never
+  smoothed or overshot, while a coarse smooth source -- 16-30 points, whose
+  tips turn 29-46 deg per vertex -- keeps one smooth spline instead of
+  becoming a polygon 6-24 mm inside its curve), spaced uniformly in arc length
   between X-points; a closed contour (no repeated point), counter-clockwise;
 - the source's X-points are kept as EXACT points (the source's own
   vertices): a vertex whose turning angle over a window of

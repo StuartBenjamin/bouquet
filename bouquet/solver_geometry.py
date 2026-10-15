@@ -70,7 +70,19 @@ XPOINT_SADDLE_MATCH_FRAC = 0.01
 #: neighbouring edges: a corner the X-point test keeps only one vertex of (a corner the writer cut
 #: in two) would otherwise make the cubic overshoot by millimetres.  Smooth boundaries turn by
 #: <= ~5 deg per vertex at 257 points (<= ~13 deg at 100); the cut corners of the fixtures 28-39 deg.
+#:
+#: The per-vertex turn depends on the sampling density (a smooth D sampled at 16-30 points turns by
+#: 29-46 deg at its tips), so the fixed angle alone would break a coarse smooth source at every
+#: high-curvature vertex and leave it a polygon, centimetres inside the curve.  A vertex is
+#: therefore a break only when its turn ALSO exceeds :data:`SPLINE_BREAK_MEDIAN_RATIO` x the median
+#: turn of the vertices around it (itself and :data:`SPLINE_BREAK_MEDIAN_WINDOW` on either side).
+#: A corner is a local outlier against its neighbours, a coarse smooth boundary's tip is not: its
+#: neighbours turn almost as much (measured: smooth D shapes, kappa 1.8, delta +/-0.5, 12-100 points,
+#: turn / local median <= 2.8; the fixtures' corners and X-points 14-160).  A neighbourhood median
+#: rather than the whole boundary's, because the curvature of a shaped boundary varies round it.
 SPLINE_BREAK_DEG = 20.0
+SPLINE_BREAK_MEDIAN_RATIO = 3.0
+SPLINE_BREAK_MEDIAN_WINDOW = 3
 
 #: The resampling method's name and version, stamped in the solver geometry record.
 ISOFLUX_RESAMPLING_METHOD = "arc_length_resample/1"
@@ -199,13 +211,26 @@ def _spline(t, xy, periodic):
     return lambda u: np.column_stack([interpolate.splev(u, tr), interpolate.splev(u, tz)])
 
 
-def _local_kinks(P):
-    """Vertex indices of ``P`` (open, closed round) where the polygon itself turns by more than
-    :data:`SPLINE_BREAK_DEG` between its two neighbouring edges."""
+def _vertex_turns(P):
+    """The turning angle [deg] of the polygon ``P`` (open, closed round) at each vertex, between
+    its two neighbouring edges."""
     a = P - np.roll(P, 1, axis=0)
     b = np.roll(P, -1, axis=0) - P
     c = np.sum(a * b, axis=1) / np.maximum(np.hypot(*a.T) * np.hypot(*b.T), 1e-300)
-    return np.flatnonzero(np.degrees(np.arccos(np.clip(c, -1.0, 1.0))) > SPLINE_BREAK_DEG)
+    return np.degrees(np.arccos(np.clip(c, -1.0, 1.0)))
+
+
+def _local_kinks(P):
+    """Vertex indices of ``P`` (open, closed round) where the polygon itself turns by more than
+    :data:`SPLINE_BREAK_DEG` between its two neighbouring edges AND by more than
+    :data:`SPLINE_BREAK_MEDIAN_RATIO` x the median turn of the vertices within
+    :data:`SPLINE_BREAK_MEDIAN_WINDOW` of it (itself included), so a coarse but smooth source is
+    not cut into a polygon."""
+    turn = _vertex_turns(P)
+    k = SPLINE_BREAK_MEDIAN_WINDOW
+    idx = (np.arange(len(P))[:, None] + np.arange(-k, k + 1)[None, :]) % len(P)
+    local = np.median(turn[idx], axis=1)
+    return np.flatnonzero((turn > SPLINE_BREAK_DEG) & (turn > SPLINE_BREAK_MEDIAN_RATIO * local))
 
 
 class _Curve:
@@ -348,6 +373,8 @@ def resample_boundary(boundary_RZ, n=N_ISOFLUX, saddle_targets=None):
         x_point_rule=dict(turn_deg=XPOINT_TURN_DEG, window_frac=XPOINT_WINDOW_FRAC,
                           saddle_match_frac=XPOINT_SADDLE_MATCH_FRAC),
         spline_breaks=len(breaks), spline_break_deg=SPLINE_BREAK_DEG,
+        spline_break_median_ratio=SPLINE_BREAK_MEDIAN_RATIO,
+        spline_break_median_window=SPLINE_BREAK_MEDIAN_WINDOW,
         spacing_m=dict(min=float(np.min(arc)), max=float(np.max(arc))))
     return pts, arc, info
 

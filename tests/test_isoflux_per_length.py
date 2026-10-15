@@ -122,6 +122,92 @@ def test_a_degenerate_boundary_is_refused():
         resample_boundary(np.array([[1.0, 0.0], [2.0, np.nan], [1.5, 1.0]]))
 
 
+# ── the density-aware spline breaks ───────────────────────────────────────────────────────────────
+_DATA = os.path.join(_HERE, "data")
+
+
+def _fixture_boundaries():
+    """The shipped fixtures' source boundaries: the synthetic g-files, the synthetic dd's slices
+    and the D3D-like example (and every third point of it)."""
+    import gzip
+    import json
+    from bouquet.io.geqdsk import read_geqdsk
+    out = {}
+    for f in ("g_synthetic.geqdsk", "g_synthetic_pfast.geqdsk", "g_synthetic_lmode.geqdsk",
+              "d3dlike.geqdsk"):
+        g = read_geqdsk(os.path.join(_DATA, f))
+        out[f] = np.column_stack([g.boundary_R, g.boundary_Z])
+    with gzip.open(os.path.join(_DATA, "dd_synthetic.json.gz"), "rt") as fh:
+        dd = json.load(fh)
+    for i, ts in enumerate(dd["equilibrium"]["time_slice"]):
+        o = ts["boundary"]["outline"]
+        out[f"dd slice {i}"] = np.column_stack([o["r"], o["z"]])
+    out["example"] = _gfile_boundary()
+    out["example, every third point"] = out["example"][::3]
+    return out
+
+
+def _old_kinks(P):
+    """The pre-fix break rule: the vertex's own turn above SPLINE_BREAK_DEG, nothing else."""
+    from bouquet.solver_geometry import SPLINE_BREAK_DEG, _vertex_turns
+    return np.flatnonzero(_vertex_turns(P) > SPLINE_BREAK_DEG)
+
+
+def test_the_density_aware_break_rule_leaves_the_fixtures_identical(monkeypatch):
+    """The relative test only removes breaks a coarse smooth source would otherwise get: on every
+    shipped fixture boundary the break vertices and the resampled set are bit-identical to the
+    fixed-angle rule's."""
+    import bouquet.solver_geometry as sg
+    for name, b in _fixture_boundaries().items():
+        P = sg._open_ccw(b)
+        np.testing.assert_array_equal(sg._local_kinks(P), _old_kinks(P), err_msg=name)
+        new = sg.resample_boundary(b)
+        with monkeypatch.context() as m:
+            m.setattr(sg, "_local_kinks", _old_kinks)
+            old = sg.resample_boundary(b)
+        np.testing.assert_array_equal(new[0], old[0], err_msg=name)
+        np.testing.assert_array_equal(new[1], old[1], err_msg=name)
+        assert new[2]["spline_breaks"] == old[2]["spline_breaks"], name
+
+
+def _smooth_d(m):
+    """A smooth D (R0 1.7 m, a 0.6 m, kappa 1.8, delta 0.5, no X-point) sampled at ``m`` points."""
+    th = np.linspace(0.0, 2.0 * np.pi, m, endpoint=False)
+    return np.column_stack([1.7 + 0.6 * np.cos(th + 0.5 * np.sin(th)), 1.8 * 0.6 * np.sin(th)])
+
+
+@pytest.mark.parametrize("m, dev_mm", [(16, 7.0), (20, 3.0), (24, 1.5), (30, 0.5)])
+def test_a_coarse_smooth_source_is_not_cut_into_a_polygon(m, dev_mm):
+    """At 16-30 source points the tips of a smooth D turn by 29-46 deg per vertex; the fixed angle
+    alone broke the spline there and left the set on the chords (6-24 mm inside the curve).  Now
+    no vertex breaks and the set lies on the periodic spline (its own error: 6.3 / 2.6 / 1.1 /
+    0.43 mm at 16 / 20 / 24 / 30 points)."""
+    from bouquet.solver_geometry import _local_kinks, _open_ccw
+    src = _smooth_d(m)
+    assert len(_local_kinks(_open_ccw(src))) == 0
+    assert len(_old_kinks(_open_ccw(src))) > 0                       # what the fixed angle did
+    pts, _, info = resample_boundary(src)
+    assert info["spline_breaks"] == 0 and info["x_points"] == []
+    true = _smooth_d(2 * 10**5)
+    seg_d = []
+    for p in pts:                                                    # distance to the true curve
+        seg_d.append(np.min(np.hypot(true[:, 0] - p[0], true[:, 1] - p[1])))
+    assert 1e3 * max(seg_d) < dev_mm
+
+
+def test_a_90_degree_corner_still_breaks_the_spline():
+    from bouquet.solver_geometry import XPOINT_TURN_DEG, _local_kinks, _open_ccw
+    src = _shape(256, corner=1.0)                                    # ~90 deg over the window
+    P = _open_ccw(src)
+    corner = int(np.flatnonzero(np.all(P == src[0], axis=1))[0])
+    assert corner in set(_local_kinks(P).tolist())                   # by the break rule itself
+    _, xp = find_xpoints(src)
+    assert [x["index"] for x in xp] == [corner] and xp[0]["turn_deg"] > XPOINT_TURN_DEG
+    pts, _, info = resample_boundary(src)
+    assert info["spline_breaks"] >= 1
+    assert np.any(np.all(pts == src[0], axis=1))
+
+
 # ── the weights ───────────────────────────────────────────────────────────────────────────────────
 def test_the_weights_sum_to_the_total_and_follow_the_arc_length():
     w = per_length_weights(np.array([1.0, 2.0, 3.0, 2.0]))
