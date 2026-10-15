@@ -6609,6 +6609,47 @@ class Bouquet(SwbBaseline):
             raise self._swb_source_unavailable()
         return coords.swb_seed(psi_N, coords.psi_at(mygs, psi_N, coord)), {}
 
+    def _note_axis_scan(self, axs):
+        """Record the scan's axis stamp (:func:`bouquet.engine_draws.
+        stamp_axis_scan`) on the session: ``Bouquet.engine_axis_bimodality``
+        (the per-scan bimodality of the archived draws' axis positions,
+        ``None`` on a scan without axis records) and, when the stamp put
+        ``bistability_source="draws"`` on the archived baseline, the same on
+        ``Baseline.engine["bistability"]``; a bimodal scan is printed and
+        warned.  Reported, never a filter."""
+        bim = (axs or {}).get("bimodality")
+        self.engine_axis_bimodality = bim
+        if not bim or bim.get("axis_bimodal") is None:
+            return
+        from .engine import axis_bimodality_text
+        print(f"[axis] scan {self.config.generation.scan_key!r}: "
+              + axis_bimodality_text(bim), flush=True)
+        bl = getattr(self, "baseline", None)
+        eng = getattr(bl, "engine", None)
+        src = axs.get("bistability_source")
+        if isinstance(eng, dict):
+            bis = dict(eng.get("bistability") or {})
+            if src == "draws":
+                bis.update(bistability_source="draws", draws_evidence=dict(
+                    centres_dZ_mm=bim["centres_dZ_mm"], counts=bim["counts"],
+                    gap_mm=bim["gap_mm"], n=bim["n"],
+                    version=bim["version"],
+                    reconstruction_outcome=bis.get("outcome")))
+                eng["bistability"] = bis
+            elif bis.get("bistability_source") == "draws":
+                bis.pop("bistability_source", None)
+                bis.pop("draws_evidence", None)
+                eng["bistability"] = bis
+        if bim["axis_bimodal"]:
+            import warnings
+            warnings.warn(
+                "the archived draws' magnetic-axis positions are BIMODAL ("
+                + axis_bimodality_text(bim) + ")"
+                + ("; the reconstruction's bistability check did not see it: "
+                   "bistability_source='draws' stamped on the baseline"
+                   if src == "draws" else ""),
+                RuntimeWarning, stacklevel=3)
+
     def verify_sigma0_consistency(self, tol_frac=0.02, draw_route=True,
                                   draw_routes=None):
         """Regression guard: the draw pipeline must reproduce the baseline
@@ -7007,7 +7048,7 @@ class Bouquet(SwbBaseline):
         # reconstruction's own term list)
         out["coil_reg"] = (out["record"] or {}).get("coil_reg")
         # the zero-perturbation draw's archived axis against the
-        # reconstruction's and its branch flag (engine.axis_branch_record):
+        # reconstruction's and its displacement flag (engine.axis_shift_record):
         # REPORTED, not gated
         out["axis"] = (out["record"] or {}).get("axis")
         if loop is not None:
@@ -8253,15 +8294,19 @@ class Bouquet(SwbBaseline):
         # plus the opt-in bands) on the scan, and beta_p / Lambda on every
         # draw that does not carry them yet (the legacy routes; an engine draw
         # stamps its own at archive time)
-        from .engine_draws import stamp_axis_branch_count
+        from .engine_draws import stamp_axis_scan
         from .filtering import stamp_inspec_rule, stamp_shafranov
         try:
             stamp_inspec_rule(header, gc.scan_key, _inspec_bands,
                               extra=_inspec_extra)
             stamp_shafranov(header, gc.scan_key)
-            # the count of the scan's engine draws on the other axis branch
-            # (n_axis_other; reported, never a filter)
-            stamp_axis_branch_count(header, gc.scan_key)
+            # the scan's axis record: the count of its engine draws displaced
+            # beyond AXIS_BRANCH_FRAC x a and the per-scan bimodality of
+            # their axis positions (+ bistability_source="draws" on the
+            # baseline when bimodal under a "single" stamp); reported, never
+            # a filter
+            _axs = stamp_axis_scan(header, gc.scan_key)
+            self._note_axis_scan(_axs)
         except (OSError, KeyError) as _exc:
             import warnings as _w
             _w.warn(f"the in-spec rule ({_inspec_bands.rule()}) could not be "

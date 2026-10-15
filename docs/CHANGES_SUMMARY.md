@@ -1,5 +1,40 @@
 # Bouquet — change summaries
 
+## Unreleased — the per-draw axis flag is a displacement; a per-scan bimodality stamp (owner decision 2026-10-15)
+
+**Renamed (archive attrs migrated): the per-draw `axis_branch` is now
+`axis_shift_large`.** The flag says whether the draw's archived magnetic axis
+sits more than `engine.AXIS_BRANCH_FRAC` (1 %) of a from the reconstruction's
+-- a displacement, not a branch label: in the validation runs it fired on
+continuous axis spreads of ordinary ensembles (up to 28 of 43 draws), where
+no second solution exists. `engine.axis_branch_record` is now
+`engine.axis_shift_record` (`axis_shift_large`: True / False / None); the
+draw group carries `axis_shift_large`, `axis_shift_frac_a`, `axis_dR_mm`,
+`axis_dZ_mm`, `axis_minor_radius_m`; the scan `n_axis_shift_large` /
+`n_axis_recorded`; `Bouquet.engine_axis_shift` (was `engine_axis_branch`);
+`ScanView.spread()["axis_shift"]` (was `["axis_branch"]`); `draw_scalars`
+provenance `axis_shift` (was `axis_branch`, and the per-draw "OTHER branch"
+limitation is gone). Archives written since the record was introduced carry
+`axis_branch` / `n_axis_other`: both are read
+(`schema.read_axis_entry`, `schema.read_scan_axis_counts`) and a re-stamp
+writes the new names.
+
+**New: the per-scan bimodality stamp (`engine.axis_bimodality`).** The
+archived draws' axis Z is split at its largest gap (at least 3 draws a
+side) and called bimodal when that gap exceeds the larger within-cluster
+standard deviation and the two centres sit more than 1 % of a apart; below 6
+draws it is not testable. Stamped on the scan (`axis_bimodal`,
+`axis_bimodal_json` with method, constants, centres and counts), printed in
+the `[generate]` / `[draw summary]` line (and an `[axis]` line with a
+`RuntimeWarning` when bimodal), reported in `spread()["axis_bimodality"]` and
+in every `draw_scalars` provenance (`axis_bimodality`, with the limitation
+"the ensemble is bimodal in the axis position: two equilibrium branches; the
+bands are mixtures"), recounted by `merge_archives`. A bimodal scan under a
+"single" (or absent) reconstruction stamp stamps the baseline
+`bistability_source="draws"`; the check's own "bistable" now carries
+`bistability_source="reconstruction"`. No draw, verdict, band, yield, gate or
+filter changes.
+
 ## Unreleased — bistability check on by default; per-draw axis record and branch flag (owner decisions 2026-10-15)
 
 **Default change: `GenerationConfig.check_bistability` is ON under the unified

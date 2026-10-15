@@ -78,19 +78,44 @@ ENGINE_MSE_JACOBIANS = ("fd_broyden", "fd_chord")
 #: owner-approved 2026-10-07 (non-converged only: it can only mark a stage
 #: not converged); recorded in :func:`convergence_table`.
 MSE_JACOBIAN_MAX_REFRESHES = 3
-#: The ONE axis-displacement discriminator between the two solutions of a
-#: bistable free-boundary problem: a state whose magnetic axis sits farther
-#: than this fraction of the reference state's minor radius ``a`` from the
-#: reference axis is on the OTHER solution branch.  Measured on a
-#: near-double-null slice with two nearly equal flux extrema: the two
-#: solutions' axes sit 17 mm (2.8 % of a) apart, while a continuous
-#: response to a coefficient step or a kinetic draw moves the axis by well
-#: under 1 mm.  Used by the MSE stage's finite-difference branch check
-#: (:data:`MSE_FD_BRANCH_AXIS_FRAC`) and by every engine draw's
-#: ``axis_branch`` flag (:func:`axis_branch_record`) -- a DISCRIMINATOR,
-#: never an acceptance criterion: nothing is accepted, refused or filtered
-#: on it.
+#: The ONE axis-displacement threshold, as a fraction of the reference
+#: state's minor radius ``a``.  Measured on a near-double-null slice with two
+#: nearly equal flux extrema: the two solutions' axes sit 17 mm (2.8 % of a)
+#: apart, while a continuous response to ONE coefficient step moves the axis
+#: by well under 1 mm.  Used (i) by the MSE stage's finite-difference branch
+#: check (:data:`MSE_FD_BRANCH_AXIS_FRAC`): a perturbed solve of one
+#: coefficient step that moves the axis farther than this has jumped
+#: branch; (ii) by every engine draw's ``axis_shift_large`` flag
+#: (:func:`axis_shift_record`) -- a DISPLACEMENT flag: an ensemble's kinetic
+#: draws move the axis continuously by up to several % of a, so a large shift
+#: of ONE draw is not evidence of a second solution (that is the per-scan
+#: bimodality test, :func:`axis_bimodality`); (iii) as the minimum
+#: separation of that test's two clusters.  Never an acceptance criterion:
+#: nothing is accepted, refused or filtered on it.
 AXIS_BRANCH_FRAC = 0.01
+#: The per-scan bimodality test of the archived engine draws' magnetic-axis
+#: positions (:func:`axis_bimodality`; owner decision 2026-10-15): the draws'
+#: axis Z (relative to the reconstruction's delivered axis) sorted, split at
+#: the largest gap that leaves at least :data:`AXIS_BIMODAL_MIN_COUNT` draws
+#: on each side, and called BIMODAL when (1) that gap is larger than
+#: :data:`AXIS_BIMODAL_GAP_RATIO` x the larger of the two clusters' sample
+#: standard deviations (the gap exceeds the within-cluster spread) and (2)
+#: the two cluster centres sit more than :data:`AXIS_BRANCH_FRAC` x a apart
+#: (two branches, not a split of a sub-threshold scatter).  Fewer than
+#: 2 x :data:`AXIS_BIMODAL_MIN_COUNT` draws with an axis: not testable
+#: (``axis_bimodal=None``).  A REPORT: nothing is filtered on it.
+AXIS_BIMODAL_METHOD = ("largest-gap two-cluster split of the archived draws' "
+                       "axis Z; bimodal when the gap exceeds the larger "
+                       "within-cluster standard deviation x gap_ratio and the "
+                       "cluster centres sit more than separation_frac_a x a "
+                       "apart, each cluster holding at least min_count draws")
+AXIS_BIMODAL_VERSION = "axis_bimodality/1"
+#: Each cluster holds at least this many draws ("both clusters populated by
+#: at least a few draws").
+AXIS_BIMODAL_MIN_COUNT = 3
+#: The gap must exceed this multiple of the larger within-cluster standard
+#: deviation.
+AXIS_BIMODAL_GAP_RATIO = 1.0
 #: The MSE stage's finite-difference Jacobian keeps every perturbed solve on
 #: the base equilibrium's solution branch (2026-10-14).  A perturbed solve
 #: whose magnetic axis lands farther than :data:`AXIS_BRANCH_FRAC` of the
@@ -3241,9 +3266,9 @@ def state_axis(mygs):
 
 
 def axis_record_of(mygs, reference) -> dict:
-    """:func:`axis_branch_record` of the solver's CURRENT state (its
+    """:func:`axis_shift_record` of the solver's CURRENT state (its
     :func:`state_axis`) against *reference*."""
-    return axis_branch_record(state_axis(mygs), reference)
+    return axis_shift_record(state_axis(mygs), reference)
 
 
 def delivered_axis_reference(mygs, meas, backend=None) -> dict:
@@ -3253,7 +3278,7 @@ def delivered_axis_reference(mygs, meas, backend=None) -> dict:
     ``minor_radius_m`` (the delivered measurement's ``a_geo``, else the
     backend's ``minor_radius()``, else the solver's ``get_stats()``
     ``a_geo``; ``None`` when none is available).  The
-    reference of every engine draw's :func:`axis_branch_record`."""
+    reference of every engine draw's :func:`axis_shift_record`."""
     ax = state_axis(mygs)
     a = (meas.get("stats") or {}).get("a_geo") if isinstance(meas, dict) \
         else None
@@ -3283,26 +3308,29 @@ def delivered_axis_reference(mygs, meas, backend=None) -> dict:
                 state="the reconstruction's delivered equilibrium")
 
 
-def axis_branch_record(axis, reference) -> dict:
+def axis_shift_record(axis, reference) -> dict:
     """The axis record of one state against the reconstruction's delivered
     axis *reference* (:func:`delivered_axis_reference`): the state's axis
     ``R``, ``Z`` [m], the reference's, ``dR_mm`` / ``dZ_mm`` and the
     displacement ``|d axis|`` in mm and as a fraction of the reference's
-    minor radius ``a``, and ``axis_branch``: ``"same"`` when
-    ``|d axis| <= AXIS_BRANCH_FRAC x a``, ``"other"`` above (the
-    discriminator of the MSE stage's branch check, :data:`AXIS_BRANCH_FRAC`),
-    ``None`` when either axis or ``a`` is unknown.  A REPORT: nothing is
-    accepted, refused or filtered on it."""
+    minor radius ``a``, and ``axis_shift_large``: ``True`` when
+    ``|d axis| > AXIS_BRANCH_FRAC x a``, ``False`` within it, ``None`` when
+    either axis or ``a`` is unknown.  A DISPLACEMENT flag, not a branch
+    label: whether an ensemble sits on two solutions is the per-scan
+    :func:`axis_bimodality`.  A REPORT: nothing is accepted, refused or
+    filtered on it."""
     ref = dict(reference or {})
     rec = dict(R=None, Z=None, reference_R=ref.get("R"),
                reference_Z=ref.get("Z"),
                minor_radius_m=ref.get("minor_radius_m"), dR_mm=None,
                dZ_mm=None, displacement_mm=None, displacement_frac_a=None,
-               threshold_frac_a=float(AXIS_BRANCH_FRAC), axis_branch=None,
-               rule=("axis_branch = 'other' when the magnetic axis sits "
+               threshold_frac_a=float(AXIS_BRANCH_FRAC),
+               axis_shift_large=None,
+               rule=("axis_shift_large = True when the magnetic axis sits "
                      "more than threshold_frac_a x a (the reconstruction's "
                      "minor radius) from the reconstruction's delivered "
-                     "axis, else 'same'; reported, never a filter"))
+                     "axis, else False; a displacement, not a branch label; "
+                     "reported, never a filter"))
     if axis is not None:
         rec["R"], rec["Z"] = float(axis[0]), float(axis[1])
     if rec["R"] is None or rec["reference_R"] is None \
@@ -3316,9 +3344,99 @@ def axis_branch_record(axis, reference) -> dict:
     if a is not None and float(a) > 0.0:
         frac = d / float(a)
         rec["displacement_frac_a"] = frac
-        rec["axis_branch"] = ("other" if frac > float(AXIS_BRANCH_FRAC)
-                              else "same")
+        rec["axis_shift_large"] = bool(frac > float(AXIS_BRANCH_FRAC))
     return rec
+
+
+def axis_bimodality(dZ_mm, minor_radius_m=None, reference_Z=None) -> dict:
+    """The per-scan bimodality test (:data:`AXIS_BIMODAL_METHOD`) of the
+    archived draws' axis displacements *dZ_mm* [mm, relative to the
+    reconstruction's delivered axis; ``None`` / non-finite entries are
+    skipped] with the reconstruction's minor radius *minor_radius_m* [m].
+
+    Returns ``axis_bimodal`` (True / False; ``None`` when not testable:
+    fewer than 2 x :data:`AXIS_BIMODAL_MIN_COUNT` draws, or ``a`` unknown),
+    ``reason``, ``n``, and for a testable set the two clusters
+    (``centres_dZ_mm`` lower/upper, ``counts``, ``spread_mm`` = their sample
+    standard deviations, ``centres_Z_m`` when *reference_Z* is given), the
+    ``gap_mm`` split at, ``separation_mm`` between the centres, and the
+    thresholds; ``method``, ``version`` and ``constants`` always.  A REPORT:
+    nothing is accepted, refused or filtered on it."""
+    z = np.sort(np.asarray([float(v) for v in (dZ_mm or [])
+                            if v is not None and np.isfinite(float(v))],
+                           dtype=float))
+    n, m = int(z.size), int(AXIS_BIMODAL_MIN_COUNT)
+    a = None
+    try:
+        a = float(minor_radius_m)
+        if not (np.isfinite(a) and a > 0.0):
+            a = None
+    except (TypeError, ValueError):
+        a = None
+    rec = dict(version=AXIS_BIMODAL_VERSION, method=AXIS_BIMODAL_METHOD,
+               constants=dict(min_count=m,
+                              gap_ratio=float(AXIS_BIMODAL_GAP_RATIO),
+                              separation_frac_a=float(AXIS_BRANCH_FRAC)),
+               coordinate=("axis Z of each archived draw relative to the "
+                           "reconstruction's delivered axis [mm]"),
+               n=n, minor_radius_m=a, axis_bimodal=None, reason=None)
+    if n < 2 * m:
+        rec["reason"] = (f"not testable: {n} draw(s) with an axis record, "
+                         f"fewer than 2 x min_count = {2 * m}")
+        return rec
+    if a is None:
+        rec["reason"] = "not testable: the reconstruction's minor radius is unknown"
+        return rec
+    gaps = np.diff(z)
+    lo, hi = m - 1, n - m - 1            # split after index i, lo <= i <= hi
+    i = lo + int(np.argmax(gaps[lo:hi + 1]))
+    low, up = z[:i + 1], z[i + 1:]
+    s_low = float(np.std(low, ddof=1))
+    s_up = float(np.std(up, ddof=1))
+    gap = float(gaps[i])
+    sep = float(np.mean(up) - np.mean(low))
+    spread = max(s_low, s_up)
+    sep_thr = 1e3 * float(AXIS_BRANCH_FRAC) * a
+    gap_ok = gap > float(AXIS_BIMODAL_GAP_RATIO) * spread
+    sep_ok = sep > sep_thr
+    rec.update(
+        axis_bimodal=bool(gap_ok and sep_ok),
+        centres_dZ_mm=[float(np.mean(low)), float(np.mean(up))],
+        counts=[int(low.size), int(up.size)],
+        spread_mm=[s_low, s_up], gap_mm=gap, separation_mm=sep,
+        gap_threshold_mm=float(AXIS_BIMODAL_GAP_RATIO) * spread,
+        separation_threshold_mm=sep_thr)
+    if reference_Z is not None:
+        rec["centres_Z_m"] = [float(reference_Z) + 1e-3 * c
+                              for c in rec["centres_dZ_mm"]]
+    rec["reason"] = (
+        "bimodal: two clusters of the axis position (two equilibrium "
+        "branches)" if rec["axis_bimodal"] else
+        "not bimodal: " + ("; ".join(
+            ([] if gap_ok else [f"gap {gap:.2f} mm <= {AXIS_BIMODAL_GAP_RATIO:g}"
+                                f" x within-cluster spread {spread:.2f} mm"])
+            + ([] if sep_ok else [f"centres {sep:.2f} mm apart <= "
+                                  f"{AXIS_BRANCH_FRAC:g} x a = {sep_thr:.2f}"
+                                  " mm"]))))
+    return rec
+
+
+def axis_bimodality_text(rec) -> str:
+    """One line of :func:`axis_bimodality` for the summaries (``""`` when
+    not testable)."""
+    if not rec or rec.get("axis_bimodal") is None:
+        return ""
+    lo, up = rec["centres_dZ_mm"]
+    nl, nu = rec["counts"]
+    if rec["axis_bimodal"]:
+        return (f"axis BIMODAL: two clusters of the axis position, {nl} "
+                f"draw(s) at dZ {lo:+.1f} mm and {nu} at {up:+.1f} mm (gap "
+                f"{rec['gap_mm']:.1f} mm > within-cluster spread "
+                f"{rec['gap_threshold_mm']:.1f} mm): two equilibrium "
+                "branches, the bands are mixtures; reported, never a filter")
+    return (f"axis not bimodal ({rec['n']} draws; largest gap "
+            f"{rec['gap_mm']:.1f} mm vs within-cluster spread "
+            f"{rec['gap_threshold_mm']:.1f} mm)")
 
 
 def bistability_check_on(gc) -> bool:
@@ -3435,6 +3553,11 @@ def check_bistability(bq, backend, cold_start):
     rec["gates"] = gates
     rec["bistable"] = not all(g["passed"] for g in gates.values())
     rec["outcome"] = "bistable" if rec["bistable"] else "single"
+    # where the bistability evidence comes from: this cold re-solve; a
+    # "single" stamp may later gain bistability_source="draws" when the
+    # archived draws' axis positions are bimodal (engine_draws.stamp_axis_scan)
+    rec["bistability_source"] = ("reconstruction" if rec["bistable"]
+                                 else None)
     if rec["bistable"]:
         _ax = ("" if deltas["axis_Z"] is None
                else f", axis dZ {1e3 * deltas['axis_Z']:+.1f} mm")
@@ -3601,7 +3724,7 @@ def prepare_engine_baseline(bq):
         if isinstance(getattr(bl, "engine", None), dict):
             bl.engine["recon_isoflux"] = dict(recon_iso["stamp"])
     # ... and its delivered magnetic axis and minor radius: the reference
-    # of every engine draw's axis record and branch flag (axis_branch_record)
+    # of every engine draw's axis record and displacement flag (axis_shift_record)
     delivered_axis = delivered_axis_reference(mygs, eng.delivered_meas,
                                               backend)
     if isinstance(getattr(bl, "engine", None), dict):
