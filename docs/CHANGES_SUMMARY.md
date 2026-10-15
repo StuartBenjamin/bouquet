@@ -79,7 +79,7 @@ the volume average):
 | Z_eff | 5 % | 11 % | 16 / 8.7 / 12 / 41 % |
 
 The material changes are T_e (too tight by 1.6-3.8x from mid radius to the
-separatrix at a flat 5 %, exactly where the pedestal gradient drives j_BS) and
+separatrix at a flat 5 %, exactly where the pedestal gradient drives jphi_bs) and
 Z_eff; n_e narrows at mid radius and widens 3x at the separatrix. (The design
 note quotes 9.7 % / 9.8 % for n_i / T_i, the means of the unrounded median; the
 shipped 2-s.f. nodes give 9.6 % / 9.7 %.) A Φ_N run evaluates the templates at
