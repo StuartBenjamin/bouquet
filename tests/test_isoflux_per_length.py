@@ -300,6 +300,59 @@ def test_a_user_supplied_set_is_used_as_given():
     assert case_geometry(_gsrc(), sc, standard=False).iso_pts is pts
 
 
+def test_a_user_set_without_weights_gets_the_standard_per_length_weights():
+    """Points without weights are never left at TokaMaker's 1 per point on the unified engine:
+    per-length weights over the points as given, summing to the standard total, stamped, with a
+    UserWarning naming the config field."""
+    from bouquet.engine import _geometry_isoflux
+    from bouquet.solver_geometry import ISOFLUX_RULE_USER_PER_LENGTH, isoflux_stamp
+    sc = _sc()
+    pts = _shape(40, corner=0.0)
+    sc.isoflux_pts = pts
+    with pytest.warns(UserWarning, match="SolverConfig.isoflux_weights"):
+        geo = case_geometry(_gsrc(), sc)
+    assert geo.iso_pts is pts                                        # the points: as given
+    assert np.sum(geo.iso_w) == pytest.approx(ISOFLUX_WEIGHT_TOTAL, rel=1e-12)
+    d = _spacing(pts)                                                # closed: half each side
+    np.testing.assert_allclose(geo.iso_w, ISOFLUX_WEIGHT_TOTAL * 0.5 * (d + np.roll(d, 1))
+                               / np.sum(d), rtol=1e-12)
+    rec = geo.record()
+    assert rec["isoflux_rule"] == ISOFLUX_RULE_USER_PER_LENGTH
+    assert rec["isoflux_weight_total"] == pytest.approx(ISOFLUX_WEIGHT_TOTAL, rel=1e-12)
+    inst = _geometry_isoflux(geo)                                    # what the engine installs
+    np.testing.assert_array_equal(inst["w"], geo.iso_w)
+    st = isoflux_stamp(inst["pts"], inst["w"], inst["origin"])
+    assert st["weight_total"] == pytest.approx(ISOFLUX_WEIGHT_TOTAL, rel=1e-12)
+    # an open arc (the upper half): its two end points represent half of their one spacing
+    half = pts[:21]
+    sc.isoflux_pts = half
+    with pytest.warns(UserWarning):
+        w = case_geometry(_gsrc(), sc).iso_w
+    dh = _spacing(half)[:-1]
+    np.testing.assert_allclose(w, ISOFLUX_WEIGHT_TOTAL * 0.5 * (np.r_[0.0, dh] + np.r_[dh, 0.0])
+                               / np.sum(dh), rtol=1e-12)
+
+
+def test_a_user_set_with_weights_is_stamped_as_given_and_never_none():
+    from bouquet.solver_geometry import isoflux_stamp
+    sc = _sc()
+    pts, w = _shape(40, corner=0.0), np.linspace(1.0, 2.0, 40)
+    sc.isoflux_pts, sc.isoflux_weights = pts, w
+    import warnings as _w
+    with _w.catch_warnings():
+        _w.simplefilter("error", UserWarning)                        # no per-length warning
+        geo = case_geometry(_gsrc(), sc)
+    assert geo.iso_w is w
+    assert isoflux_stamp(geo.iso_pts, geo.iso_w, "x")["weight_total"] == pytest.approx(np.sum(w))
+    # the legacy route keeps TokaMaker's 1 per point for a set without weights, stamped as such
+    sc.isoflux_weights = None
+    geo = case_geometry(_gsrc(), sc, standard=False)
+    assert geo.iso_w is None
+    assert geo.record()["isoflux_weight_total"] == pytest.approx(40.0)
+    assert geo.record()["isoflux_weights"]["min"] == geo.record()["isoflux_weights"]["max"] == 1.0
+    assert isoflux_stamp(pts, None, "x")["weight_total"] == pytest.approx(40.0)
+
+
 def test_the_legacy_route_keeps_the_source_boundary_per_point():
     geo = case_geometry(_gsrc(), _sc(), standard=False)
     src = _gfile_boundary()

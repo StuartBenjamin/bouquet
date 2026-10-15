@@ -72,7 +72,7 @@ class SolverConfig:
     order: int = 3
     F0: Optional[float] = None                       # vacuum R*Bt; default from g-file/IDS
     isoflux_pts: Optional["np.ndarray"] = None       # (N, 2) boundary constraints
-    isoflux_weights: Optional["np.ndarray"] = None   # (N,)
+    isoflux_weights: Optional["np.ndarray"] = None   # (N,); None: per unit length, total ISOFLUX_WEIGHT_TOTAL
     # Optional saddle (X-point) constraints: (N, 2) points where B_pol is driven
     # to zero (TokaMaker set_saddle_constraints). Pins the separatrix X-point --
     # without it a diverted forward solve typically ROUNDS the boundary corner

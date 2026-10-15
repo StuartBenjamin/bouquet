@@ -775,7 +775,15 @@ ONE standard set on both routes, for the reconstruction and every draw
 
 A `SolverConfig.isoflux_pts` (with `isoflux_weights`) set is used AS GIVEN,
 never resampled, on every route (also on the engine's g-file route, which
-before #84 replaced it with its own set). The legacy and swb routes are
+before #84 replaced it with its own set). Given WITHOUT `isoflux_weights`,
+the unified engine does not leave it at TokaMaker's default of 1 per point
+(about 780x weaker than the standard set): each point is weighted by the arc
+length it represents along the points in the order given (a closed contour
+when the closing gap is no longer than the longest other spacing, else an
+open arc), the weights summing to `ISOFLUX_WEIGHT_TOTAL`
+(`solver_geometry.user_isoflux_weights`), and a UserWarning says so; the
+record stamps those weights and the rule. On the legacy route such a set is
+installed at 1 per point as before, and stamped as 1 per point. The legacy and swb routes are
 unchanged: the reset installs the source boundary as given at
 `ISOFLUX_WEIGHT` per point, the legacy g-file reconstruction its own set at
 200 per point, and the legacy draws re-trace (`DrawMethod.homotopy_isoflux`
