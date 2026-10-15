@@ -1,5 +1,20 @@
 # Bouquet — change summaries
 
+## Unreleased — bistability check on by default (owner decision 2026-10-15)
+
+**Default change: `GenerationConfig.check_bistability` is ON under the unified
+engine.** The field now defaults to `None`, resolved at `prepare_baseline()`
+with the other engine-dependent settings (`engine.ENGINE_DEPENDENT_DEFAULTS`,
+recorded in `engine_resolved_defaults`): `True` under `"unified"`, `False`
+under `"legacy"` (not applicable; the default is not refused there, an
+explicit `True` still is). **Cost: ONE extra GS solve per reconstruction.**
+The stamp is unchanged (`Baseline.engine["bistability"]`: `bistable=True`,
+the deltas and a warning on a miss; the delivered equilibrium is restored;
+nothing is refused). An explicit value is kept, so a stored config that
+carries `check_bistability: false` replays without the check (a note is
+printed); one that predates the field runs it (the delivered equilibrium is
+the same either way).
+
 ## Unreleased — coil-saturation test measured against the installed bound (owner decision 2026-10-15)
 
 The homotopy's coil-saturation test, its early stop and the post-homotopy /
@@ -280,7 +295,8 @@ state: l_i(3) and q0 at the q-row radius at the sigma=0 gates (`jbs_tol_li`,
 `jbs_tol_q0`), beta_pol and the magnetic axis reported. A miss stamps
 `Baseline.engine["bistability"]` with `bistable=True` and the deltas and
 warns; the delivered equilibrium is restored. Off by default: no extra solve,
-nothing moves.
+nothing moves. (Superseded 2026-10-15: on by default under the unified engine,
+see the entry at the top.)
 
 ## Unreleased — PR #76: one reusable solver per process; every baseline at its own F0 (numbers move on multi-slice runs)
 

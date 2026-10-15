@@ -1818,16 +1818,22 @@ class GenerationConfig:
     # loop's PATH only (no criterion, tolerance or ceiling; zero extra
     # solves).  False (default) is the behaviour before the setting existed.
     engine_draw_bootstrap_refresh: bool = False
-    # Opt-in bistability check (unified engine only; refused non-default
-    # under "legacy"): after the reconstruction, ONE extra solve of the same
-    # inputs from a COLD start (psi re-initialised as the reconstruction's
-    # own start) is compared with the delivered state -- l_i(3) and q0 at the
-    # q-row radius at the sigma=0 gates (jbs_tol_li, jbs_tol_q0), beta_pol
-    # and the magnetic axis reported.  A miss stamps the baseline
-    # bistable=True with the deltas (Baseline.engine["bistability"], archived
-    # with the baseline's engine record) and warns.  The delivered
-    # equilibrium is restored; the baseline is never changed.
-    check_bistability: bool = False
+    # The bistability check (unified engine only): after the reconstruction,
+    # ONE extra solve of the same inputs from a COLD start (psi
+    # re-initialised as the reconstruction's own start) is compared with the
+    # delivered state -- l_i(3) and q0 at the q-row radius at the sigma=0
+    # gates (jbs_tol_li, jbs_tol_q0), beta_pol and the magnetic axis
+    # reported.  A miss stamps the baseline bistable=True with the deltas
+    # (Baseline.engine["bistability"], archived with the baseline's engine
+    # record) and warns.  The delivered equilibrium is restored; the
+    # baseline is never changed and nothing is refused.  None (default):
+    # resolved per engine at prepare_baseline() (bouquet.engine.
+    # ENGINE_DEPENDENT_DEFAULTS; recorded in engine_resolved_defaults): True
+    # under "unified" (ON by default since 2026-10-15, owner decision: one
+    # extra solve per reconstruction), False under "legacy" (the check does
+    # not exist there; an explicit True is refused).  An explicit value --
+    # a stored config's included -- is kept.
+    check_bistability: Optional[bool] = None
     # The Grad-Shafranov iteration cap on EVERY solve inside an engine draw:
     # the loop (its anchor and passes), each coil-homotopy stage, a
     # homotopy rollback re-solve and the post-homotopy bootstrap passes (and

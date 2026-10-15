@@ -122,9 +122,12 @@ ENGINE_FIELD_DEFAULTS = {
     # (mse_chi2_per_chord_high; never acceptance).  10.0: owner-approved
     # 2026-10-07, flag only (see GenerationConfig.mse_chi2n_flag)
     "mse_chi2n_flag": 10.0,
-    # the opt-in bistability check after the reconstruction (one extra cold
-    # solve; check_bistability)
-    "check_bistability": False,
+    # the bistability check after the reconstruction (one extra cold solve;
+    # check_bistability): None = resolved per engine at prepare_baseline()
+    # (ENGINE_DEPENDENT_DEFAULTS: True under "unified"); under "legacy" its
+    # default is unset or False (the value it resolves to there), and only
+    # an explicit True is refused
+    "check_bistability": None,
 }
 
 
@@ -233,6 +236,12 @@ def _closure_scale_bounds():
 
 def _is_default(name, v):
     d = ENGINE_FIELD_DEFAULTS[name]
+    if name in ENGINE_DEPENDENT_DEFAULTS:
+        # an engine field resolved per engine (check_bistability): at its
+        # default under "legacy" when unset or at the legacy value it is
+        # resolved to (an explicit True stays refused)
+        return engine_dependent_unset(name, v) or _same_value(
+            v, engine_validated_value(name, "legacy", "reconstruction"))
     if name == "engine_rows":
         try:
             return tuple(v) == tuple(d)
@@ -276,7 +285,14 @@ def validate_engine_settings(gc) -> None:
                          f"{ENGINE_CHOICES}, got {eng!r}")
     vals = {k: getattr(gc, k, d) for k, d in ENGINE_FIELD_DEFAULTS.items()}
     if eng == "legacy":
-        changed = [k for k, v in vals.items() if not _is_default(k, v)]
+        # an engine-dependent engine field resolve_engine_defaults filled for
+        # ANOTHER engine (the config was switched to "legacy" after a
+        # unified prepare_baseline()) is not the user's: it is re-resolved
+        # at the next prepare_baseline(), never refused here
+        mine = getattr(gc, "_engine_resolved", None) or {}
+        changed = [k for k, v in vals.items() if not _is_default(k, v)
+                   and not (k in ENGINE_DEPENDENT_DEFAULTS and k in mine
+                            and _same_value(v, mine[k][2]))]
         if changed:
             raise ValueError(
                 f"generation.{', '.join(changed)} set with "
@@ -330,6 +346,11 @@ def validate_engine_settings(gc) -> None:
         if not isinstance(vals[_b], (bool, np.bool_)):
             raise ValueError(f"generation.{_b} must be a bool, got "
                              f"{vals[_b]!r}")
+    _cb = vals["check_bistability"]
+    if _cb is not None and not isinstance(_cb, (bool, np.bool_)):
+        raise ValueError(f"generation.check_bistability must be a bool, or "
+                         f"None (resolved per engine: True under 'unified'), "
+                         f"got {_cb!r}")
     if vals["engine_draw_q0_row"] and "q0" not in rows:
         raise ValueError("generation.engine_draw_q0_row=True keeps the "
                          "reconstruction's q0 row in the draws, but "
@@ -554,7 +575,20 @@ ENGINE_DEPENDENT_DEFAULTS = {
     # #75 review: the legacy draws' GS cap (TokaMaker_interface.
     # DRAW_SOLVE_MAXITS, draws only); the engine never reads it
     "draw_solve_maxits": {"unified": None, "legacy": 100},
+    # the bistability check after the reconstruction (an ENGINE field; owner
+    # decision 2026-10-15: on by default under "unified", one extra cold
+    # solve per reconstruction).  "legacy" has no such check: False there is
+    # "not applicable" (validate_engine_settings refuses only an explicit
+    # True under "legacy")
+    "check_bistability": {"unified": True, "legacy": False},
 }
+
+#: :data:`ENGINE_DEPENDENT_DEFAULTS` fields that switch a DIAGNOSTIC only:
+#: an explicit value that differs from the engine's resolved one changes no
+#: result (no equilibrium, draw or verdict), so it is recorded
+#: (``engine_validated`` in the resolution record) and NOTED, not warned as
+#: a configuration the engine was not validated with.
+ENGINE_DEPENDENT_DIAGNOSTICS = frozenset(("check_bistability",))
 
 #: The UNSET marker of an :data:`ENGINE_DEPENDENT_DEFAULTS` field whose
 #: ``None`` is a meaningful value (default: ``None`` is the marker).
@@ -635,7 +669,15 @@ def resolve_engine_defaults(config, *, stacklevel=2) -> dict:
             continue
         mine.pop(name, None)
         rec[name] = {"value": v, "origin": "explicit"}
-        if not _same_value(v, want):
+        if not _same_value(v, want) and name in ENGINE_DEPENDENT_DIAGNOSTICS:
+            # a diagnostic switched explicitly (a stored config's value
+            # included): kept and recorded, no result depends on it
+            rec[name]["engine_validated"] = want
+            print(f"NOTE: generation.{name}={v!r} (explicit; "
+                  f"reconstruction_engine={eng!r} resolves it to {want!r}): "
+                  "kept -- a diagnostic only, no result depends on it",
+                  flush=True)
+        elif not _same_value(v, want):
             rec[name]["engine_validated"] = want
             warnings.warn(
                 f"generation.{name}={v!r} was set explicitly, but "
@@ -3169,8 +3211,20 @@ def reconstruction_coil_reg(mygs) -> dict:
         terms=[dict(t) for t in rec["terms"]]))
 
 
-#: The opt-in check of :func:`check_bistability` (GenerationConfig.check_bistability).
+#: The check of :func:`check_bistability` (GenerationConfig.check_bistability).
 BISTABILITY_CHECK_VERSION = "bistability/1"
+
+
+def bistability_check_on(gc) -> bool:
+    """Whether the reconstruction runs :func:`check_bistability`:
+    ``GenerationConfig.check_bistability``, an unset value (``None``, not
+    yet resolved by ``prepare_baseline()``) read as the unified engine's
+    resolved default (:data:`ENGINE_DEPENDENT_DEFAULTS`: True)."""
+    v = getattr(gc, "check_bistability", None)
+    if engine_dependent_unset("check_bistability", v):
+        v = engine_validated_value("check_bistability", "unified",
+                                   "reconstruction")
+    return bool(v)
 
 
 def _o_point(mygs):
@@ -3182,8 +3236,9 @@ def _o_point(mygs):
 
 
 def check_bistability(bq, backend, cold_start):
-    """The opt-in bistability check (``GenerationConfig.check_bistability``,
-    unified engine only): ONE extra solve after the reconstruction.
+    """The bistability check (``GenerationConfig.check_bistability``,
+    unified engine only, on by default since 2026-10-15): ONE extra solve
+    after the reconstruction.
 
     The solver is put back on the reconstruction's delivered equilibrium
     (``Bouquet._engine_run["delivered_eq"]``: its psi, coils, targets,
@@ -3446,9 +3501,10 @@ def prepare_engine_baseline(bq):
                                         if hasattr(mygs, "copy_eq")
                                         else None),
                           recon_isoflux=recon_iso)
-    if bool(getattr(gc, "check_bistability", False)):
-        # opt-in: ONE extra cold solve of the same inputs, compared with the
-        # delivered state; the delivered equilibrium is restored after it
+    if bistability_check_on(gc):
+        # on by default (check_bistability, resolved per engine): ONE extra
+        # cold solve of the same inputs, compared with the delivered state;
+        # the delivered equilibrium is restored after it
         _bis = check_bistability(bq, backend, cold_start)
         if isinstance(getattr(bl, "engine", None), dict):
             bl.engine["bistability"] = _bis

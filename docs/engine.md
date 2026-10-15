@@ -730,9 +730,14 @@ constraint density and weight, hence coil drift, LCFS deviation and yield of
 perturbed draws -- and it fixes the branch selection on the slice above; it
 does not prove robustness on other near-double-null slices.
 
-**Is this baseline bistable? (`check_bistability`, opt-in.)** With
-`GenerationConfig.check_bistability=True` (default `False`; unified engine
-only, refused under `"legacy"`), `prepare_baseline()` spends ONE extra solve
+**Is this baseline bistable? (`check_bistability`, on by default.)**
+`GenerationConfig.check_bistability` defaults to `None`, resolved at
+`prepare_baseline()` like the other engine-dependent settings
+(`engine.ENGINE_DEPENDENT_DEFAULTS`, recorded in `engine_resolved_defaults`):
+`True` under the unified engine (owner decision 2026-10-15), `False` under
+`"legacy"`, which has no such check (its default is never refused; an
+explicit `True` is). An explicit value, a stored config's included, is kept.
+With it on, `prepare_baseline()` spends ONE extra solve
 after the reconstruction (`engine.check_bistability`): the solver is put
 back on the reconstruction's delivered equilibrium (its targets, profiles,
 isoflux and coil regularisation -- the same inputs), psi is re-initialised
