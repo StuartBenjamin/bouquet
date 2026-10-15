@@ -5,8 +5,9 @@ Git-tracked regression fixtures. Every golden is a real bouquet run, made by
 runs the synthetic test fixtures in `tests/data/` at the library's defaults.
 **Status (2026-10-15):** the IDS golden is such a run; the g-file h5 golden and
 the legacy JSON golden are still the earlier runs of the older D3D-like
-example g-file + p-file (2026-10-09), because the synthetic g-file pair is to
-be corrected first (see "The current goldens" below).
+example g-file + p-file (2026-10-09); the synthetic g-file pair they are to be
+regenerated on was corrected 2026-10-15 (the g-file is now thermal-only; see
+"The current goldens" below).
 
 | golden | source | engine | files | read by |
 |--------|--------|--------|-------|---------|
@@ -199,12 +200,16 @@ coil verdict.
   golden test reads there.
 
 **The g-file h5 golden and the legacy JSON golden are NOT yet regenerated.**
-The synthetic g-file pair is internally inconsistent: the g-file's on-axis
-pressure (90.4 kPa) is the dd's TOTAL pressure, fast ions included, while
+The synthetic g-file pair was internally inconsistent: the g-file's on-axis
+pressure (90.4 kPa) was the dd's TOTAL pressure, fast ions included, while
 its profile file carries the thermal pressure only (46.1 kPa), and the g-file
-route has no fast-pressure source, so a reconstruction on the pair gives
-beta_N 0.80 against the g-file's 1.68. Both goldens are to be regenerated with
-the commands above once that g-file is corrected (owner decision pending).
+route has no fast-pressure source, so a reconstruction on the pair gave
+beta_N 0.80 against the g-file's 1.68. Corrected 2026-10-15 (owner decision):
+`g_synthetic.geqdsk` is now the thermal-only equilibrium of the same slice
+(46.1 kPa on axis, beta_N 0.80, q0 1.41, l_i(3) 0.835), the total-pressure
+file is kept as `g_synthetic_pfast.geqdsk` with a p-file
+(`tests/data/README.md`). Both goldens are to be regenerated on the corrected
+pair with the commands above.
 Until then the committed records are the earlier runs of the older D3D-like
 example g-file + p-file, regenerated 2026-10-09 at `67aba59` on the same OFT
 build under the defaults of that date (the old l_i band among them): unified

@@ -1,5 +1,32 @@
 # Bouquet — change summaries
 
+## Unreleased — the synthetic H-mode g-file is thermal-only; the total-pressure file kept with a p-file (owner decision 2026-10-15)
+
+**Fixtures.** `tests/data/g_synthetic.geqdsk` carried the dd's TOTAL pressure
+at 1.2 s (90.4 kPa on axis, fast ions included) while its profile file
+`diiid_profs_synthetic.cdf` carries thermal kinetics only (46.1 kPa as the
+g-file route reads it), so every reconstruction on the pair recovered about
+half the beta_N (0.80 against 1.68). It is now the THERMAL-only equilibrium of
+the same slice -- e (n_e T_e + n_i T_i), n_i from Z_eff, the pressure the
+route rebuilds; same boundary targets, coils, Ip, mesh, current model and
+solver settings, re-solved self-consistently (46.08 kPa on axis, beta_N 0.80,
+beta_p 0.44, q0 1.41, l_i(3) 0.835; the total-pressure one: 90.40 kPa, 1.68,
+0.92, 1.31, 0.833). The IDA file's `q` follows it (its profiles and sigma
+envelopes are unchanged). The total-pressure file is kept, bit-identical, as
+`g_synthetic_pfast.geqdsk`, paired with a new Osborne p-file
+`p_synthetic.peqdsk` (n_e, T_e, thermal n_i, T_i, n_b, the beam pressure `pb`,
+n_z1, omeg, ptot): thermal + pb = 90.03 kPa against the g-file's 90.40.
+`tests/test_fixture_pressure_consistency.py` checks every pair to 2 % on axis.
+Every test and notebook that read `g_synthetic.geqdsk` keeps reading it, so
+the solver tests on the pair (`test_swb_systematics_solver.py`,
+`test_phi_imas_solver.py`, `test_parallel_cases_solver.py`,
+`test_solver_reuse_solver.py`, `test_units.py`'s solver test) and the g-file
+notebooks' stored outputs move on their next run (their "measured" comments
+are to be re-measured). On the IMAS route with `LCFS_geqdsk=g_synthetic.geqdsk`
+the reader's psi_N(rho) drift check now warns (0.022 against its 0.02: the dd
+slice carries the fast-ion pressure, the g-file not). The g-file and legacy
+goldens are still to be regenerated on the corrected pair.
+
 ## Unreleased — the golden recipe runs the synthetic fixtures at the current defaults; a new IDS-route golden (owner decisions 2026-10-15)
 
 **The golden recipe moves to the synthetic test fixtures** (`tests/data/`).
