@@ -505,7 +505,8 @@ def _rejection_summary(rejections, n_attempts, n_archived, masked=None,
                        diagnostics=None):
     """One line: attempts, archived, rejected by reason (+ masked loop
     failures that did not reject a draw; + the archived engine draws'
-    axis-branch count, :func:`bouquet.engine_draws.axis_branch_counts`,
+    axis-displacement count and bimodality,
+    :func:`bouquet.engine_draws.axis_shift_counts`,
     when *diagnostics* carry it)."""
     from collections import Counter
     c = Counter(r["reason"] for r in rejections)
@@ -519,8 +520,8 @@ def _rejection_summary(rejections, n_attempts, n_archived, masked=None,
         if _m:
             txt += f"; masked inside kept draws: {_m}"
     if diagnostics:
-        from .engine_draws import axis_branch_counts, axis_branch_text
-        _ax = axis_branch_text(axis_branch_counts(diagnostics))
+        from .engine_draws import axis_shift_counts, axis_shift_text
+        _ax = axis_shift_text(axis_shift_counts(diagnostics))
         if _ax:
             txt += "; " + _ax
     return txt

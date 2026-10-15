@@ -72,6 +72,32 @@ def _gfile_pressure_scalars(eq):
     return p_avg_kpa, float(eq.betas["beta_n"])
 
 
+def _axis_entries(path, draws) -> dict:
+    """``{count: entry}``: :func:`bouquet.schema.read_axis_entry` of each of
+    *draws* (views) that carries an axis record (one file open)."""
+    import h5py
+    from .schema import read_axis_entry
+    out = {}
+    if not draws:
+        return out
+    with h5py.File(path, "r") as hf:
+        for d in draws:
+            if getattr(d, "is_baseline", False) or d._gp not in hf:
+                continue
+            e = read_axis_entry(hf[d._gp])
+            if e is not None:
+                out[int(d.count)] = e
+    return out
+
+
+def _axis_bimodality_of(entries) -> dict:
+    """:func:`bouquet.engine.axis_bimodality` of ``{count: entry}``."""
+    from .engine import axis_bimodality
+    a = next((e["minor_radius_m"] for e in entries.values()
+              if e["minor_radius_m"] is not None), None)
+    return axis_bimodality([e["dZ_mm"] for e in entries.values()], a)
+
+
 class DrawView:
     """Lazy view of one perturbed draw (``scan/<key>/<count>``)."""
 
@@ -500,12 +526,16 @@ class ScanView:
             (:data:`bouquet.filtering.LAMBDA_DEFINITION`) -- the stored
             per-draw values (else formed from the draw's edge-pressure
             record and ``l_i(3)``); reported, never a filter;
-          * ``axis_branch`` -- not a statistic: ``{n, n_other, n_same}``,
+          * ``axis_shift`` -- not a statistic: ``{n, n_large, n_small}``,
             the draws whose archived magnetic axis sits more than
             ``engine.AXIS_BRANCH_FRAC`` x a from the reconstruction's
-            (``"other"``: the free-boundary problem's other solution) among
-            those that carry the flag (engine draws); ``None`` when none
-            does.  Reported, never a filter.
+            (``axis_shift_large``: a displacement, not a branch label) among
+            those that carry the record (engine draws); ``None`` when none
+            does;
+          * ``axis_bimodality`` -- :func:`bouquet.engine.axis_bimodality` of
+            the same draws' axis positions (``axis_bimodal`` True: two
+            equilibrium branches, the bands are mixtures); ``None`` when no
+            draw carries the record.  Both reported, never a filter.
 
         ``<P>`` and ``beta_N`` are read from each draw's g-file geometry (one
         flux-surface trace per draw, so this is O(seconds) for a full family),
@@ -521,16 +551,11 @@ class ScanView:
         per-stage counts and a provenance record.
         """
         draws = self._draws(selection)
-        from .engine_draws import AXIS_BRANCH_ATTR
         from .stats import _shafranov_entries
         cols = {"l_i(1)": [], "l_i(3)": [], "<P> [kPa]": [], "beta_N": [],
                 "beta_p": [], "Lambda": []}
-        branches = []
+        axes = _axis_entries(self._ar.path, draws)
         for d in draws:
-            _b = d.attrs.get(AXIS_BRANCH_ATTR)
-            if _b is not None:
-                branches.append(_b.decode() if isinstance(_b, bytes)
-                                else str(_b))
             cols["l_i(1)"].append(d.li1)
             cols["l_i(3)"].append(d.li3)
             p_avg_kpa, beta_n = _gfile_pressure_scalars(d.equilibrium())
@@ -552,10 +577,12 @@ class ScanView:
             out[name] = {"n": int(x.size), "mean": m, "std": s,
                          "rel_std": (s / m if m else float("nan")),
                          "min": float(x.min()), "max": float(x.max())}
-        n_other = sum(1 for b in branches if b == "other")
-        out["axis_branch"] = (None if not branches else {
-            "n": len(branches), "n_other": int(n_other),
-            "n_same": len(branches) - int(n_other)})
+        n_large = sum(1 for e in axes.values() if e["shift_large"])
+        out["axis_shift"] = (None if not axes else {
+            "n": len(axes), "n_large": int(n_large),
+            "n_small": len(axes) - int(n_large)})
+        out["axis_bimodality"] = (None if not axes else
+                                  _axis_bimodality_of(axes))
 
         if print_table:
             print(f"Bouquet output spread -- scan {self.scan_key!r}, "
@@ -570,19 +597,23 @@ class ScanView:
                       "predates the record)")
             print(f"  {'quantity':<11}{'mean':>10}{'1sigma':>10}{'σ/mean':>8}   range")
             for name, st in out.items():
-                if name == "axis_branch":
+                if name in ("axis_shift", "axis_bimodality"):
                     continue
                 if st is None:
                     print(f"  {name:<11}  (no finite draws)")
                     continue
                 print(f"  {name:<11}{st['mean']:>10.3f}{st['std']:>10.3f}"
                       f"{100 * st['rel_std']:>7.2f}%   [{st['min']:.3f}, {st['max']:.3f}]")
-            ab = out["axis_branch"]
+            ab = out["axis_shift"]
             if ab is not None:
-                from .engine import AXIS_BRANCH_FRAC
-                print(f"  axis branch: {ab['n_other']} of {ab['n']} draws "
-                      f"'other' (axis > {AXIS_BRANCH_FRAC:g} x a from the "
-                      "reconstruction's; reported, never a filter)")
+                from .engine import AXIS_BRANCH_FRAC, axis_bimodality_text
+                print(f"  axis shift: {ab['n_large']} of {ab['n']} draws "
+                      f"displaced > {AXIS_BRANCH_FRAC:g} x a from the "
+                      "reconstruction's axis (a displacement, not a branch "
+                      "label; reported, never a filter)")
+                bt = axis_bimodality_text(out["axis_bimodality"])
+                if bt:
+                    print("  " + bt)
         return out
 
     def __getitem__(self, count: int) -> DrawView:

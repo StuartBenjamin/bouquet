@@ -1256,14 +1256,16 @@ def draw_scalars(archive, scan_key=None, *, rational=((2, 1), (3, 1)),
       shaped plasma the coil test enforces the shape-weighted observable
       exactly).
 
-    Every record's provenance carries ``axis_branch``: among the draws the
-    statistic USED, how many carry the engine draws' axis flag
-    (``n_recorded``) and how many of them are ``"other"`` (``n_other``,
-    ``other_draws``: the archived magnetic axis more than
-    ``engine.AXIS_BRANCH_FRAC`` x a from the reconstruction's -- the
-    free-boundary problem's other solution), with a limitation when any is.
-    Reported, never a filter: a band over both branches may be bimodal, and
-    that is the physics of the slice.
+    Every record's provenance carries ``axis_shift``: among the draws the
+    statistic USED, how many carry the engine draws' axis record
+    (``n_recorded``) and how many of them are displaced more than
+    ``engine.AXIS_BRANCH_FRAC`` x a from the reconstruction's axis
+    (``n_large``, ``large_draws``; a displacement, not a branch label), and
+    ``axis_bimodality``: :func:`bouquet.engine.axis_bimodality` of those
+    draws' axis positions, with the limitation "the ensemble is bimodal in
+    the axis position: two equilibrium branches; the bands are mixtures"
+    when it is.  Reported, never a filter: a band over both branches is the
+    physics of the slice.
     """
     if q_source not in ("auto", "geqdsk", "eq_fsa"):
         raise ValueError(f"q_source must be 'auto', 'geqdsk' or 'eq_fsa', got {q_source!r}")
@@ -1288,16 +1290,18 @@ def draw_scalars(archive, scan_key=None, *, rational=((2, 1), (3, 1)),
 
     q_used = {"draws": set(), "baseline": None, "by_draw": {}}
     axis_by_draw = {}
-    from .engine_draws import AXIS_BRANCH_ATTR
+    from .schema import read_axis_entry
     labels = {(m, n): f"rho(q={m}/{n})" for m, n in rational}
 
     def _evaluate(view):
         out = {}
         if not view.is_baseline:
-            _b = view.attrs.get(AXIS_BRANCH_ATTR)
-            if _b is not None:
-                axis_by_draw[int(view.count)] = (
-                    _b.decode() if isinstance(_b, bytes) else str(_b))
+            import h5py
+            with h5py.File(ar.path, "r") as _hf:
+                _e = (read_axis_entry(_hf[view._gp]) if view._gp in _hf
+                      else None)
+            if _e is not None:
+                axis_by_draw[int(view.count)] = _e
         try:
             eq = view.equilibrium()
         except KeyError:
@@ -1413,29 +1417,37 @@ def draw_scalars(archive, scan_key=None, *, rational=((2, 1), (3, 1)),
                 "baseline_outside_range compare different quantities (pass "
                 "q_source='geqdsk' for a single source).")
         r.provenance["limitations"] = lim
-    # the axis-branch count over each statistic's USED draws (reported,
-    # never a filter)
-    from .engine import AXIS_BRANCH_FRAC
+    # the axis-displacement count and the bimodality of the axis positions
+    # over each statistic's USED draws (reported, never a filter)
+    from .engine import AXIS_BRANCH_FRAC, axis_bimodality
     for r in recs.values():
         used_d = [d for d in (getattr(r, "values", None) or {})
                   if d in axis_by_draw]
-        other = sorted(int(d) for d in used_d if axis_by_draw[d] == "other")
+        large = sorted(int(d) for d in used_d
+                       if axis_by_draw[d]["shift_large"])
         prov = dict(getattr(r, "provenance", None) or {})
-        prov["axis_branch"] = dict(
-            n_recorded=len(used_d), n_other=len(other),
-            n_same=len(used_d) - len(other), other_draws=other,
+        prov["axis_shift"] = dict(
+            n_recorded=len(used_d), n_large=len(large),
+            n_small=len(used_d) - len(large), large_draws=large,
             threshold_frac_a=float(AXIS_BRANCH_FRAC),
-            rule=("'other': the draw's archived magnetic axis more than "
-                  "threshold_frac_a x a from the reconstruction's; "
-                  "reported, never a filter"))
-        if other:
+            rule=("large: the draw's archived magnetic axis more than "
+                  "threshold_frac_a x a from the reconstruction's -- a "
+                  "displacement, not a branch label; reported, never a "
+                  "filter"))
+        _a = next((axis_by_draw[d]["minor_radius_m"] for d in used_d
+                   if axis_by_draw[d]["minor_radius_m"] is not None), None)
+        bim = (axis_bimodality([axis_by_draw[d]["dZ_mm"] for d in used_d],
+                               _a) if used_d else None)
+        prov["axis_bimodality"] = bim
+        if bim is not None and bim.get("axis_bimodal"):
+            lo, up = bim["centres_dZ_mm"]
+            nl, nu = bim["counts"]
             prov["limitations"] = list(prov.get("limitations") or []) + [
-                f"{len(other)} of the {len(used_d)} used draws with an axis "
-                "record sit on the OTHER free-boundary solution branch "
-                "(axis_branch='other', axis > "
-                f"{AXIS_BRANCH_FRAC:g} x a from the reconstruction's): the "
-                "band spans both solutions and may be bimodal -- that is "
-                "the physics of the slice, nothing is filtered on it."]
+                "the ensemble is bimodal in the axis position: two "
+                "equilibrium branches; the bands are mixtures "
+                f"({nl} used draw(s) at axis dZ {lo:+.1f} mm, {nu} at "
+                f"{up:+.1f} mm; {bim['version']}). Nothing is filtered on "
+                "it."]
         r.provenance = prov
     return recs
 

@@ -759,18 +759,41 @@ and the draws are unchanged. The record is archived with the baseline's
 engine record. A cold start converging to the delivered state does not prove
 there is no other branch; a miss shows there is one.
 
-**Which branch is each draw on? (`engine["axis"]`, always recorded.)** Every
+**Where is each draw's axis? (`engine["axis"]`, always recorded.)** Every
 archived engine draw records its archived state's magnetic axis against the
 reconstruction's delivered axis (`Baseline.engine["delivered_axis"]`, the
 reference, with the delivered minor radius a): `R`, `Z`, `reference_R`,
 `reference_Z`, `dR_mm`, `dZ_mm`, `displacement_mm`, `displacement_frac_a`
-and `axis_branch` -- `"same"` within `engine.AXIS_BRANCH_FRAC` (0.01) x a,
-`"other"` beyond it (`engine.axis_branch_record`; the same constant is the
-MSE stage's branch-check discriminator, `MSE_FD_BRANCH_AXIS_FRAC`). The flag
-is stamped on the draw group (`axis_branch`, `axis_shift_frac_a`), counted
-on the scan (`n_axis_other`) and in the summaries
-([workflows.md](workflows.md#the-in-spec-rule), "Bistable equilibria"). It is
-a report: nothing is accepted, refused or filtered on it.
+and `axis_shift_large` -- whether the displacement exceeds
+`engine.AXIS_BRANCH_FRAC` (0.01) x a (`engine.axis_shift_record`; the same
+constant is the MSE stage's branch-check discriminator,
+`MSE_FD_BRANCH_AXIS_FRAC`, where it judges ONE coefficient step). On a draw
+it is a displacement, not a branch label: kinetic draws move the axis
+continuously by several % of a. The flag, the displacement and its
+components are stamped on the draw group (`axis_shift_large`,
+`axis_shift_frac_a`, `axis_dR_mm`, `axis_dZ_mm`, `axis_minor_radius_m`;
+names in `bouquet.schema`) and counted on the scan (`n_axis_shift_large`).
+
+**Is the ensemble on two branches? (`engine.axis_bimodality`, per scan.)**
+After a scan is archived (and again after `merge_archives`),
+`engine_draws.stamp_axis_scan` recounts the scan's draws from the archive and
+tests their axis Z for two clusters: split at the largest gap leaving at
+least `AXIS_BIMODAL_MIN_COUNT` (3) draws per side; bimodal when the gap
+exceeds `AXIS_BIMODAL_GAP_RATIO` (1.0) x the larger within-cluster standard
+deviation and the centres sit more than `AXIS_BRANCH_FRAC` x a apart; not
+testable below 6 draws. The scan carries `axis_bimodal` and
+`axis_bimodal_json` (method `AXIS_BIMODAL_METHOD`, version
+`axis_bimodality/1`, the constants, both centres and counts); a bimodal scan
+whose reconstruction stamp is not "bistable" stamps the baseline
+`bistability_source="draws"` (`_baseline` attr and the archived and live
+`Baseline.engine["bistability"]`, with `draws_evidence`); the reconstruction
+check's own "bistable" carries `bistability_source="reconstruction"`. The
+summaries, `ScanView.spread()` and `draw_scalars` report it
+([workflows.md](workflows.md#the-in-spec-rule), "Bistable equilibria"). All
+of it is a report: nothing is accepted, refused or filtered on it. Archives
+written with the earlier per-draw `axis_branch` / scan `n_axis_other` names
+are read (`schema.read_axis_entry`, `schema.read_scan_axis_counts`) and
+migrated when re-stamped.
 
 `verify_sigma0_consistency()` under the engine runs ONE draw through the
 route `generate()` runs -- it calls `generate(n=1)` itself, with every

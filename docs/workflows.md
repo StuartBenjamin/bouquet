@@ -670,7 +670,7 @@ the 5 % tolerance. The coil and boundary thresholds are unchanged.
 can have two neighbouring solutions of the same inputs. On the one known case
 (a reversed-Ip slice) their magnetic axes sit 17 mm (2.8 % of a) apart, and
 l_i(3) differs by 2e-3 and q0 by 4e-3 -- an order of magnitude below the
-ensemble's band widths. Two records say where a run stands; neither refuses
+ensemble's band widths. Three records say where a run stands; none refuses
 or filters anything:
 
 * the reconstruction's **bistability stamp** (`check_bistability`, on by
@@ -678,25 +678,68 @@ or filters anything:
   `Baseline.engine["bistability"]` with `bistable=True`, the deltas and a
   warning when a cold re-solve of the same inputs lands outside the σ=0
   gates. The delivered equilibrium is kept.
-* every engine draw's **axis record and branch flag**: the archived state's
-  magnetic axis against the reconstruction's delivered one
+* every engine draw's **axis record and displacement flag**: the archived
+  state's magnetic axis against the reconstruction's delivered one
   (`engine["axis"]`: `R`, `Z`, `reference_R`, `reference_Z`, `dR_mm`,
   `dZ_mm`, `displacement_mm`, `displacement_frac_a`, `minor_radius_m`) and
-  `axis_branch` = `"same"` when the displacement is within
-  `engine.AXIS_BRANCH_FRAC` (1 %) of a, `"other"` above -- the discriminator
-  the MSE stage's branch check uses. The flag is on the draw group
-  (`axis_branch`, `axis_shift_frac_a`), the σ=0 draw of
-  `verify_sigma0_consistency()` carries it too (`["axis"]`, not gated), the
-  count of `"other"` draws is in the `[generate]` / `[draw summary]` line, in
-  `ScanView.spread()["axis_branch"]` and in every `draw_scalars` record's
-  provenance (`axis_branch`, with a limitation when any used draw is
-  `"other"`), and on the scan (`n_axis_other`, `n_axis_recorded`).
+  `axis_shift_large` = whether the displacement exceeds
+  `engine.AXIS_BRANCH_FRAC` (1 %) of a. It is a DISPLACEMENT flag, not a
+  branch label: the kinetic draws of an ordinary ensemble move the axis
+  continuously by up to several % of a (in the validation runs: 0-28 of
+  24-43 draws per synthetic case and 10-37 per real case beyond 1 % of a, all
+  but one case one continuous spread), so a large shift of one draw says
+  nothing about a second solution. The draw group carries `axis_shift_large`,
+  `axis_shift_frac_a`, `axis_dR_mm`, `axis_dZ_mm` and `axis_minor_radius_m`;
+  the σ=0 draw of `verify_sigma0_consistency()` carries the record too
+  (`["axis"]`, not gated); the count is in the `[generate]` /
+  `[draw summary]` line, in `ScanView.spread()["axis_shift"]`, in every
+  `draw_scalars` record's provenance (`axis_shift`) and on the scan
+  (`n_axis_shift_large`, `n_axis_recorded`).
+* the per-scan **axis bimodality stamp** (`engine.axis_bimodality`): whether
+  the archived draws' axis positions form TWO clusters -- the evidence of two
+  equilibrium branches. Method (`engine.AXIS_BIMODAL_METHOD`, version
+  `axis_bimodality/1`): sort the draws' axis Z (relative to the
+  reconstruction's axis), split at the largest gap that leaves at least
+  `AXIS_BIMODAL_MIN_COUNT` = 3 draws on each side, and call the scan bimodal
+  when the gap exceeds `AXIS_BIMODAL_GAP_RATIO` = 1.0 x the larger of the two
+  clusters' sample standard deviations AND the cluster centres sit more than
+  `AXIS_BRANCH_FRAC` x a apart; fewer than 6 draws with an axis, or an
+  unknown a: not testable (`None`). The scan carries `axis_bimodal` (when
+  testable) and `axis_bimodal_json` (method, constants, both centres and
+  counts, the gap, the spreads); it is printed on the `[generate]` /
+  `[draw summary]` line and as an `[axis]` line with a `RuntimeWarning` when
+  bimodal, reported in `ScanView.spread()["axis_bimodality"]` and in every
+  `draw_scalars` record's provenance (`axis_bimodality`, over that
+  statistic's used draws) with the limitation "the ensemble is bimodal in the
+  axis position: two equilibrium branches; the bands are mixtures", and
+  recounted by `merge_archives`. When a scan is bimodal and the
+  reconstruction's own stamp said "single" (or the check did not run), the
+  baseline is stamped `bistability_source="draws"` (`_baseline` attr and
+  `Baseline.engine["bistability"]`, with the clusters as `draws_evidence`):
+  the draws' own evidence meets the release rule "no bimodal band without a
+  bistability stamp". A recount that no longer finds two clusters removes
+  it; a reconstruction stamp "bistable" (`bistability_source=
+  "reconstruction"`) is never overwritten. Caveat, measured on random
+  unimodal samples: a normal spread of 24 (36) draws whose width is far above
+  the 1 %-of-a separation is called bimodal in about 11 % (3 %) of samples,
+  a sub-threshold scatter never; it is a report, and a false "bimodal" only
+  adds a limitation. Archives written before the rename carry `axis_branch`
+  (`"other"` / `"same"`) per draw and `n_axis_other` on the scan: both are
+  read (`schema.read_axis_entry`, `schema.read_scan_axis_counts`; the
+  displacement from the draw's engine record), and a re-stamp writes the
+  current names.
 
 The magnetics do not distinguish the branches on the known case: a σ=0 draw
 that landed on the other branch passed the coil test (F 0.023 %, VSC 0.012 %)
 and the boundary cut (0.50 mm). So both branches pass the in-spec rule, and a
 band over both may be bimodal: that is the physics of the slice, not a defect
-to filter away. A continuity guard for the draws (keeping a draw on the
+to filter away. The reconstruction's cold re-solve can miss a second branch
+the draws find: on the same slice's no-MSE arm the stamp said "single" while
+30 of 36 archived draws sat 6-24 mm below the delivered axis -- the case the
+per-scan bimodality stamp exists for (applied after the fact it calls that
+ensemble bimodal: 30 and 6 draws, centres 15.8 mm apart, gap 6.4 mm against
+a 4.5 mm within-cluster spread; and none of thirteen ordinary ensembles of
+the same validation runs). A continuity guard for the draws (keeping a draw on the
 reconstruction's branch through its homotopy) is tracked as #87.
 
 ## until-N in-spec draws
