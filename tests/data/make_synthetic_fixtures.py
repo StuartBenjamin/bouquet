@@ -625,7 +625,8 @@ def solve_scenario(mygs, sc, ip, label, init=None, n_pass=None, gate_raise=True)
 
 def save_gfile(mygs, path, rec):
     """``save_eqdsk`` (COCOS 7, Bt > 0), then COCOS 1 with Bt = B0 < 0 (the
-    Bt-only flip of examples/D3D-like/generate_baseline.py)."""
+    Bt-only flip: negate BCENTR and FPOL, keep CURRENT, PSIRZ, PPRIME,
+    FFPRIM and QPSI)."""
     from bouquet.io.geqdsk import read_geqdsk
     tmp = path + ".cocos7"
     mygs.save_eqdsk(tmp, nr=N_GEQDSK, nz=N_GEQDSK, lcfs_pad=GFILE_PAD, rcentr=R0,

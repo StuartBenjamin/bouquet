@@ -89,6 +89,17 @@ on GitHub without running anything.
 - `D3Dlike_Hmode_baseline.geqdsk` / `.peqdsk` — H-mode equilibrium + kinetic profiles
 - `D3Dlike_baseline_omas.json` — synthetic FUSE OMAS data dictionary (3-slice L→H)
 - `DIIID_mesh.h5` — TokaMaker mesh
+- `legacy/TkMkr_D3Dlike_Hmode_BSamp=*.geqdsk` / `.peqdsk` — the earlier
+  TokaMaker-generated equilibria the legacy notebook and the
+  `COCOS_Bt_Ip/` notebooks read
+
+These are the older D3D-like example set, kept because the notebooks here and
+a number of solver tests still read them; their generator scripts and recipe
+were retired (they are in the git history). The regression goldens
+(`tests/golden/`) are made from the newer synthetic fixtures in `tests/data/`
+(`g_synthetic.geqdsk` + `diiid_profs_synthetic.cdf`, and
+`dd_synthetic.json.gz` with the same profile file; see
+[`tests/data/README.md`](../tests/data/README.md)).
 
 Real machine data (`*.cdf`, proprietary g-files, FUSE `dd_sim.json`) is
 gitignored and never committed.
