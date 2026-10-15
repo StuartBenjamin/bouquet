@@ -32,6 +32,7 @@ from .TokaMaker_interface import (
 
 from .uncertainties import (
     new_uncertainty_profiles,
+    sigma_template,
     synthetic_ida_sigma,
 )
 
@@ -80,6 +81,8 @@ from .filtering import (
     read_filter_flags,
     select_indices,
     export_filtered,
+    refilter_inspec,
+    InspecBands,
 )
 
 from .utils import (
@@ -188,6 +191,7 @@ __all__ = [
     "resolve_coil_sigma", "CoilSigmaUnavailable", "coil_sigma_floor_fraction", "detect_device", "DEVICES",
     "filter_boundaries", "read_filter_flags",
     "select_indices", "export_filtered",
+    "refilter_inspec", "InspecBands",
     # ---- plotting ----
     "set_plot_style", "WONG",
     "plot_bouquet", "plot_bouquet_timeseries",  # plot_imas_bouquet demoted (F6): wrapper of plot_bouquet, still importable
@@ -217,7 +221,7 @@ __all__ = [
     "GPRProfilePerturber", "generate_perturbed_GPR", "make_rng",
     "sigmoid_length_scale",
     "verify_gpr_statistics", "calc_cylindrical_li_proxy",
-    "new_uncertainty_profiles", "synthetic_ida_sigma",
+    "new_uncertainty_profiles", "sigma_template", "synthetic_ida_sigma",
     # ---- advanced: functional (pre-class) API ----
     "generate_bouquet", "perturb_kinetic_equilibrium", "reconstruct_equilibrium",
     # ---- process-parallel: the draws of one bouquet, or many bouquets ----

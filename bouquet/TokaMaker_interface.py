@@ -503,9 +503,12 @@ def _draw_rejection_reason(exc, stage):
     return "perturb_failed"
 
 
-def _rejection_summary(rejections, n_attempts, n_archived, masked=None):
+def _rejection_summary(rejections, n_attempts, n_archived, masked=None,
+                       diagnostics=None):
     """One line: attempts, archived, rejected by reason (+ masked loop
-    failures that did not reject a draw)."""
+    failures that did not reject a draw; + the archived engine draws'
+    axis-branch count, :func:`bouquet.engine_draws.axis_branch_counts`,
+    when *diagnostics* carry it)."""
     from collections import Counter
     c = Counter(r["reason"] for r in rejections)
     by = (", ".join(f"{k}={v}" for k, v in sorted(c.items()))
@@ -517,6 +520,11 @@ def _rejection_summary(rejections, n_attempts, n_archived, masked=None):
         _m = ", ".join(f"{k}={v}" for k, v in sorted(masked.items()) if v)
         if _m:
             txt += f"; masked inside kept draws: {_m}"
+    if diagnostics:
+        from .engine_draws import axis_branch_counts, axis_branch_text
+        _ax = axis_branch_text(axis_branch_counts(diagnostics))
+        if _ax:
+            txt += "; " + _ax
     return txt
 
 
@@ -1400,6 +1408,26 @@ def _coil_max_drifts(drifts, vsc_in_set):
     return max_f, max_vsc
 
 
+def _coil_bound_max_f(cur, baseline, vsc_in_set, drift_F, floor_A):
+    """Max non-VSC F-coil drift in % of ``max(|I_base|, floor_A / drift_F)``,
+    so that ``100 * drift_F`` is exactly the half-width of the bound the
+    homotopy INSTALLED for that coil, ``max(drift_F |I_base|, floor_A)``.
+    Identical to the plain percentage for every coil whose bound is not the
+    floor; for a floored coil (|I_base| < floor_A / drift_F) the drift is
+    measured against the floor, as the bound is.  Before (review of the
+    synthetic 0.7 s slice, 2026-10-15): a coil carrying 10 A had a 50 A bound
+    installed but was called saturated at 0.5 A, so every draw of a
+    low-current slice was refused in the first, loosest pass (owner decision:
+    measure saturation against the installed bound)."""
+    den_floor = (float(floor_A) / float(drift_F)) if drift_F > 0 else 1.0
+    out = 0.0
+    for n, b in baseline.items():
+        if n.startswith('F') and n not in vsc_in_set:
+            out = max(out, abs(float(cur[n]) - b)
+                      / max(abs(b), den_floor, 1.0) * 100.0)
+    return out
+
+
 def _coil_saturation(max_f, max_vsc, drift_F, drift_VSC):
     """``(sat_F, sat_VSC)``: is either coil group at
     ``COIL_SATURATION_FRACTION`` of its bound (``drift_F``/``drift_VSC`` as
@@ -1410,7 +1438,7 @@ def _coil_saturation(max_f, max_vsc, drift_F, drift_VSC):
 
 
 def _make_coil_saturation_guard(mygs, baseline_coils, vsc_in_set, drift_F,
-                                drift_VSC, stage):
+                                drift_VSC, stage, floor_A=50.0):
     """A callable ``guard(label)`` that measures the coil currents mygs holds
     NOW and raises :class:`CoilSaturated` when the solve that put them there
     is saturated against the bounds ``(drift_F, drift_VSC)`` around
@@ -1428,6 +1456,8 @@ def _make_coil_saturation_guard(mygs, baseline_coils, vsc_in_set, drift_F,
         cur, _ = mygs.get_coil_currents()
         max_f, max_vsc = _coil_max_drifts(
             _coil_drift_pct(cur, baseline_coils), vsc_in_set)
+        max_f = _coil_bound_max_f(cur, baseline_coils, vsc_in_set, drift_F,
+                                  floor_A)          # against the installed bound
         sat_F, sat_VSC = _coil_saturation(max_f, max_vsc, drift_F, drift_VSC)
         entry = dict(label=str(label), max_F_drift_pct=float(max_f),
                      max_VSC_drift_pct=float(max_vsc),
@@ -3271,9 +3301,11 @@ def perturb_kinetic_equilibrium(
     jphi_ind_input : ndarray or None
         Dimensionless inductive :math:`j_\phi` shape (required when
         ``recalculate_jbs=True``).
-    l_i_tolerance : float
+    l_i_tolerance : float or None
         :math:`l_i` matching tolerance as a FRACTION of ``l_i_target``
-        (e.g. ``0.01`` == 1 %).
+        (e.g. ``0.01`` == 1 %); ``None`` (``GenerationConfig.l_i_tolerance``
+        unset) is the old default 0.05
+        (:data:`bouquet.filtering.LEGACY_L_I_CONSTRUCTION_TOLERANCE`).
     psi_pad : float
         Padding inside the LCFS for profile queries.
     constrain_sawteeth : bool
@@ -3370,6 +3402,10 @@ def perturb_kinetic_equilibrium(
         When ``psi_N_kinetic`` is provided, the kinetic profiles
         (``ne_perturb`` etc.) are on the ``psi_N_kinetic`` grid.
     """
+    # the draw-construction tolerance: an unset GenerationConfig.l_i_tolerance
+    # (None since the 2026-10-14 in-spec rule) is the old 0.05 here
+    from .filtering import l_i_construction_tolerance
+    l_i_tolerance = l_i_construction_tolerance(l_i_tolerance)
     # solve_with_bootstrap options: an explicit parameter (review PR60 B5);
     # a private copy, so the caller's dict is never mutated
     kwargs = dict(bootstrap_kwargs or {})
@@ -6633,7 +6669,7 @@ def generate_bouquet(
                 _hard_sat_guard = _make_coil_saturation_guard(
                     mygs, _baseline_coils, _vsc_in_set, _hard, _hard,
                     stage="draw jphi_bs loop under the hard coil bounds "
-                          f"(+/-{_hard * 100:.1f}%)")
+                          f"(+/-{_hard * 100:.1f}%)", floor_A=coil_drift_floor_A)
         else:
             # No hard bounds requested: install none.  (Bouquet.setup_solver
             # already put the coil solve in OpenFUSIONToolkit's one-way
@@ -7980,6 +8016,11 @@ def generate_bouquet(
                             # (COIL_SATURATION_FRACTION = 0.99: the same
                             # criterion guards the post-homotopy jphi_bs passes
                             # and the jphi_bs loop under the hard bounds.)
+                            # F drift against the bound INSTALLED for each coil
+                            # (the 5 % and the floor), not the bare percentage
+                            _max_f = _coil_bound_max_f(
+                                _cur, _baseline_coils, _vsc_in_set, _dF,
+                                coil_drift_floor_A)
                             _sat_F, _sat_VSC = _coil_saturation(
                                 _max_f, _max_vsc, _dF, _dVSC)
                             if _sat_F or _sat_VSC:
@@ -8036,6 +8077,9 @@ def generate_bouquet(
                             # case (bound not binding), in its general form.
                             if _p_idx + 1 < len(_passes):
                                 _nF, _nVSC = _passes[_p_idx + 1]
+                                _max_f = _coil_bound_max_f(
+                                    _cur, _baseline_coils, _vsc_in_set, _nF,
+                                    coil_drift_floor_A)
                                 if (_max_f > _nF * 100.0
                                         or _max_vsc > _nVSC * 100.0):
                                     print(f"  [homotopy {_label}] natural drift "
@@ -8101,7 +8145,7 @@ def generate_bouquet(
                                 mygs, _baseline_coils, _vsc_in_set,
                                 _final_drift_F_lim, _final_drift_VSC_lim,
                                 stage=(f"post-homotopy jphi_bs pass at homotopy "
-                                       f"pass {_final_pass_idx + 1} bounds"))
+                                       f"pass {_final_pass_idx + 1} bounds"), floor_A=coil_drift_floor_A)
                             _ph_rec, _ph_spk, _ph_full, _ph_jphi = \
                                 _m.post_homotopy_jbs(
                                     jbs_loop, coil_guard=_ph_guard,
@@ -8884,7 +8928,8 @@ def generate_bouquet(
                    for k in ANCHOR_MASKED_FAILURES}
     print("\n[draw summary] " + _rejection_summary(
         _rejections, len(_rejections) + len(all_diagnostics),
-        len(all_diagnostics), masked=_masked_run), flush=True)
+        len(all_diagnostics), masked=_masked_run,
+        diagnostics=all_diagnostics), flush=True)
     return all_diagnostics
 
 

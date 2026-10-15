@@ -28,6 +28,7 @@ import pytest
 
 from bouquet.baseline import resolve_zeff_envelope, zeff_sigma_eligibility
 from bouquet.io.ida import read_ida
+from bouquet.uncertainties import sigma_template
 
 _NPSI = 40
 
@@ -497,7 +498,7 @@ class TestEnvelopeWiring:
         bl = self._bl(np.linspace(0.0, 1.2, _NPSI))
         env = resolve_uncertainty(cfg, bl)
         np.testing.assert_allclose(env["aux_sigmas"]["zeff"],
-                                   0.05 * np.abs(bl.Zeff), rtol=1e-6)
+                                   sigma_template(bl.psi_N_kinetic, "zeff") * np.abs(bl.Zeff), rtol=1e-6)
 
     def test_mismatched_ida_path_falls_back_to_scalar(self, tmp_path):
         """unc.ida_path naming a DIFFERENT .cdf than the source's own file
@@ -511,7 +512,7 @@ class TestEnvelopeWiring:
         cfg = self._cfg(own, tmp_path, unc=UncertaintyConfig(ida_path=other))
         env = resolve_uncertainty(cfg, self._bl(psi))
         np.testing.assert_allclose(env["aux_sigmas"]["zeff"],
-                                   0.05 * np.abs(zeff), rtol=1e-6)
+                                   sigma_template(psi, "zeff") * np.abs(zeff), rtol=1e-6)
 
     def test_impurity_Z_reaches_the_carbon_tier(self, tmp_path):
         """The sigma-envelope read must carry source.impurity_Z: the carbon
@@ -673,7 +674,7 @@ class TestSigmaPathSpelling:
     def test_a_different_file_falls_back_loudly_and_is_recorded(
             self, tmp_path):
         """The refusal is correct -- but it must WARN and be RECORDED, not
-        silently hand the run an assumed 5 %-class envelope."""
+        silently hand the run an assumed envelope (the H-mode flat-top template)."""
         from bouquet.baseline import resolve_uncertainty
         from bouquet.config import UncertaintyConfig
         own, psi, zeff = self._own(tmp_path)
@@ -684,7 +685,7 @@ class TestSigmaPathSpelling:
         with pytest.warns(UserWarning, match="genuinely different file"):
             env = resolve_uncertainty(cfg, _mk_bl(psi))
         np.testing.assert_allclose(env["aux_sigmas"]["zeff"],
-                                   0.05 * np.abs(zeff), rtol=1e-6)
+                                   sigma_template(psi, "zeff") * np.abs(zeff), rtol=1e-6)
         meta = env["zeff_sigma_tier"]
         assert meta["tier"] == "scalar" and meta["warned"]
         assert not meta["eligible"]
@@ -704,7 +705,7 @@ class TestSigmaPathSpelling:
         meta = env["zeff_sigma_tier"]
         assert meta["tier"] == "scalar" and meta["warned"]
         np.testing.assert_allclose(env["aux_sigmas"]["zeff"],
-                                   0.05 * np.abs(_mk_bl(psi).Zeff), rtol=1e-6)
+                                   sigma_template(psi, "zeff") * np.abs(_mk_bl(psi).Zeff), rtol=1e-6)
 
     def test_missing_dataset_fallback_is_warned_and_recorded(self, tmp_path):
         """Falling back because the FILE lacks a tier is reported with a

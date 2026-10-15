@@ -39,7 +39,10 @@ def _stored(sha, eng):
 
 #: stored keys translated on load (checked by their own tests): swb_iterations
 #: is retired for bootstrap_kwargs["iterations"]
-_TRANSLATED = ("swb_iterations", "bootstrap_kwargs")
+# loaded as something other than stored, by rule: swb_iterations ->
+# bootstrap_kwargs; l_i_tolerance at the old default 0.05 -> None (the
+# 2026-10-14 in-spec rule; tests/test_inspec_magnetics.py)
+_TRANSLATED = ("swb_iterations", "bootstrap_kwargs", "l_i_tolerance")
 
 
 def _load(d):
@@ -92,10 +95,16 @@ def test_every_stored_unified_config_loads_with_what_it_ran_with(sha):
     if sha == "d874822":
         # the newest stored config: silent but for the one field added
         # after it was written (generation.eps_definition, owner decision
-        # E7): it replays with the new default, said exactly once
-        assert [m for m in msgs if "eps_definition" not in m] == []
+        # E7): it replays with the new default, said exactly once -- and the
+        # one-line note of the 2026-10-14 in-spec rule (its l_i_tolerance at
+        # the old default 0.05 loads as None: the band off)
+        _rule = [m for m in msgs if "2026-10-14 in-spec rule" in m]
+        assert [m for m in msgs if "eps_definition" not in m
+                and m not in _rule] == []
         assert len([m for m in msgs if "eps_definition" in m]) == 1
         assert g.eps_definition == "r_over_R_geo"
+        assert len(_rule) == 1 and stored["l_i_tolerance"] == 0.05
+        assert g.l_i_tolerance is None
 
 
 @pytest.mark.parametrize("path", ["legacy", "unified"])

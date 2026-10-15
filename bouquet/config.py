@@ -688,7 +688,14 @@ class UncertaintyConfig:
                                        profiles_path when it ends in '.cdf',
                                        which baseline.resolve_uncertainty
                                        adopts automatically
-        3. <chan>_scalar_sigma         flat fraction x |baseline profile|
+        3. the IMAS source's own       core_profiles *_error_upper (an
+           error fields                ImasSource without an IDA sigma file,
+                                       sigma_mode "auto" / "direct")
+        4. the ASSUMED default         <chan>_scalar_sigma x |baseline| when
+                                       the scalar is set; else (the default,
+                                       None) the H-mode flat-top radial
+                                       template x |baseline|
+                                       (bouquet.uncertainties.sigma_template)
 
     **The scalars do nothing when an IDA file is in play.** Setting
     ``ne_scalar_sigma = te_scalar_sigma = ... = 0.0`` to get a deterministic
@@ -713,17 +720,26 @@ class UncertaintyConfig:
     #      diagnostic envelope;
     #   2. an IDA `.cdf` (`ida_path`, or the reconstruction source's own .cdf) --
     #      its `*_err` datasets;
-    #   3. a flat fractional fallback, `<chan>_scalar_sigma` * baseline profile.
+    #   3. an ImasSource's own core_profiles *_error_upper (io.imas.
+    #      read_imas_sigmas), with sigma_mode "auto" / "direct";
+    #   4. the ASSUMED default: `<chan>_scalar_sigma` * |baseline| when set,
+    #      else the H-mode flat-top template shape * |baseline|.
+    # resolve_uncertainty() stamps the winner per channel ("sigma_source").
     ida_path: Optional[str] = None
     sigma_mode: str = "auto"               # "auto" (by dim) | "direct" (*_err) | "ensemble"
     sigma_method: str = "percentile"       # "percentile" | "std"  (ensemble only)
 
-    # flat fractional kinetic sigma envelopes (per channel). ni/Ti default wider
-    # than ne/Te -- ion density and temperature are harder to diagnose.
-    ne_scalar_sigma: float = 0.05
-    te_scalar_sigma: float = 0.05
-    ni_scalar_sigma: float = 0.10
-    ti_scalar_sigma: float = 0.10
+    # The assumed envelope of a channel with no measured sigma.  None (the
+    # default since 2026-10-14) = the H-mode flat-top radial template
+    # (bouquet.uncertainties.sigma_template(psi_N, chan), relative sigma vs
+    # psi_N; n_i the derived-n_i row) x |baseline|; uniform-psi_N means
+    # n_e 4.0 %, T_e 8.4 %, n_i 9.6 %, T_i 9.7 %.  A float is an explicit
+    # flat fraction and wins over the template (a stored config carrying the
+    # old 0.05 / 0.05 / 0.10 / 0.10 keeps them).
+    ne_scalar_sigma: Optional[float] = None
+    te_scalar_sigma: Optional[float] = None
+    ni_scalar_sigma: Optional[float] = None
+    ti_scalar_sigma: Optional[float] = None
     # explicit psi_N-dependent ABSOLUTE sigma profiles (on the kinetic grid),
     # keyed by 'ne'/'te'/'ni'/'ti'. Present channels override the scalar/IDA path.
     sigma_profiles: dict = field(default_factory=dict)
@@ -742,13 +758,15 @@ class UncertaintyConfig:
     # DERIVES the main-ion density ni from (ne, Z_eff) via quasineutrality, so
     # ni/nz/Z_eff stay mutually consistent; ni_scalar_sigma is then unused
     # (it IS used whenever ni_from_zeff resolves False -- see below).
-    # Real Z_eff (visible bremsstrahlung / CER) is ~10-20% uncertain; the 0.05
-    # default is deliberately conservative -- widen it for a realistic envelope.
-    # Set 0.0 to disable (Z_eff held at baseline, ni drawn independently).
+    # None (the default since 2026-10-14; it was 0.05) = the channel ON with
+    # the H-mode flat-top Z_eff template x |Z_eff| as the assumed tier
+    # (uniform-psi_N mean 11 %; real Z_eff is ~10-20 % uncertain); a float is
+    # an explicit flat fraction for that tier.  Set 0.0 to disable (Z_eff
+    # held at baseline, ni drawn independently).
     # An explicit aux_sigmas['zeff'] always overrides this.
-    zeff_scalar_sigma: float = 0.05
+    zeff_scalar_sigma: Optional[float] = None
     # Where the Z_eff envelope's MAGNITUDE comes from (the channel is enabled
-    # by zeff_scalar_sigma > 0 either way).  With the source's
+    # by zeff_scalar_sigma None or > 0 either way).  With the source's
     # ni_source="standard" (the default) the ladder is carbon > VB > scalar:
     #   "auto"     -- carbon-propagated (n_12C6_err / the dilution
     #                 posterior) > VB-measured (Zeff_err / the Z_eff sample
@@ -875,7 +893,37 @@ class GenerationConfig:
     # scan/<scan_key>/. Use it to keep several bouquets in one file under a
     # meaningful key (a time in ms, a beta value, ...). Default 0.
     scan_key: float = 0
-    l_i_tolerance: float = 0.05            # l_i acceptance band (fraction of target)
+    # --- the in-spec rule: the magnetics, plus OPT-IN bands -----------------
+    # Owner decision 2026-10-14: a draw is IN SPEC when it passes the coil test
+    # and the boundary cut (FilterConfig) -- the magnetics, which constrain I_p,
+    # the boundary and beta_p + l_i/2 through the free-boundary solve.  l_i(3)
+    # alone is an equilibrium inference, not a magnetics measurement, so its
+    # band is no longer applied by default (until 2026-10-14: l_i_tolerance =
+    # 0.05 on every engine draw).  Every band below is OFF by default and is
+    # meant for a source that STATES a measurement uncertainty.
+    #
+    # l_i_tolerance: an explicit FRACTIONAL l_i(3) band around the
+    # reconstruction's l_i (0.05 == +/-5%); None (default) = no l_i band.  The
+    # LEGACY routes also construct their draws with it (rejection sampling of
+    # the GPR inductive inside the draw, and the legacy reconstruction's
+    # post-corrective report): unset, they use the old 0.05
+    # (filtering.LEGACY_L_I_CONSTRUCTION_TOLERANCE), so those routes are
+    # unchanged.  A stored config written before the decision at the old
+    # default 0.05 loads with the band OFF (one-line note); any other stored
+    # value keeps its band.
+    l_i_tolerance: Optional[float] = None
+    # l_i_sigma: the stated 1-sigma of l_i(3) (absolute, l_i(3) units) of the
+    # source's MSE / diamagnetic fit; the band is |l_i - l_i*| <=
+    # inspec_band_nsigma * l_i_sigma.  Exclusive with l_i_tolerance.
+    l_i_sigma: Optional[float] = None
+    # beta_p_target / beta_p_sigma: a diamagnetic beta_p measurement and its
+    # 1-sigma (both or neither); the band is |beta_p - beta_p_target| <=
+    # inspec_band_nsigma * beta_p_sigma, beta_p the full-pressure frame's
+    # (filtering.LAMBDA_DEFINITION).
+    beta_p_target: Optional[float] = None
+    beta_p_sigma: Optional[float] = None
+    # half-width of a sigma band (l_i_sigma, beta_p_sigma) in sigma
+    inspec_band_nsigma: float = 2.0
     constrain_sawteeth: bool = False
     # When True, recompute bootstrap each draw via TokaMaker solve_with_bootstrap
     # (its jphi_bs converted to the field-aligned kappa <j.B> for the installed
@@ -1775,16 +1823,22 @@ class GenerationConfig:
     # loop's PATH only (no criterion, tolerance or ceiling; zero extra
     # solves).  False (default) is the behaviour before the setting existed.
     engine_draw_bootstrap_refresh: bool = False
-    # Opt-in bistability check (unified engine only; refused non-default
-    # under "legacy"): after the reconstruction, ONE extra solve of the same
-    # inputs from a COLD start (psi re-initialised as the reconstruction's
-    # own start) is compared with the delivered state -- l_i(3) and q0 at the
-    # q-row radius at the sigma=0 gates (jbs_tol_li, jbs_tol_q0), beta_pol
-    # and the magnetic axis reported.  A miss stamps the baseline
-    # bistable=True with the deltas (Baseline.engine["bistability"], archived
-    # with the baseline's engine record) and warns.  The delivered
-    # equilibrium is restored; the baseline is never changed.
-    check_bistability: bool = False
+    # The bistability check (unified engine only): after the reconstruction,
+    # ONE extra solve of the same inputs from a COLD start (psi
+    # re-initialised as the reconstruction's own start) is compared with the
+    # delivered state -- l_i(3) and q0 at the q-row radius at the sigma=0
+    # gates (jbs_tol_li, jbs_tol_q0), beta_pol and the magnetic axis
+    # reported.  A miss stamps the baseline bistable=True with the deltas
+    # (Baseline.engine["bistability"], archived with the baseline's engine
+    # record) and warns.  The delivered equilibrium is restored; the
+    # baseline is never changed and nothing is refused.  None (default):
+    # resolved per engine at prepare_baseline() (bouquet.engine.
+    # ENGINE_DEPENDENT_DEFAULTS; recorded in engine_resolved_defaults): True
+    # under "unified" (ON by default since 2026-10-15, owner decision: one
+    # extra solve per reconstruction), False under "legacy" (the check does
+    # not exist there; an explicit True is refused).  An explicit value --
+    # a stored config's included -- is kept.
+    check_bistability: Optional[bool] = None
     # The Grad-Shafranov iteration cap on EVERY solve inside an engine draw:
     # the loop (its anchor and passes), each coil-homotopy stage, a
     # homotopy rollback re-solve and the post-homotopy bootstrap passes (and
@@ -1988,6 +2042,10 @@ class GenerationConfig:
                              "own cap")
         validate_draw_solve_rescue(self.draw_solve_retry_urf,
                                    self.draw_solve_loose_tol)
+        # the in-spec rule's opt-in bands (refuses a malformed or ambiguous
+        # setting: both l_i spellings, half a beta_p band, sigma <= 0)
+        from .filtering import resolve_inspec_bands
+        resolve_inspec_bands(self)
 
 
 def validate_draw_solve_rescue(retry_urf, loose_tol):
@@ -2747,6 +2805,17 @@ class BouquetConfig:
                         f"{self.device!r}; available: {sorted(known)}")
         if self.uncertainty.sigma_mode not in ("auto", "direct", "ensemble"):
             raise ValueError("uncertainty.sigma_mode must be 'auto', 'direct', or 'ensemble'")
+        import math
+        import numbers
+        for _c in ("ne", "te", "ni", "ti", "zeff"):
+            _v = getattr(self.uncertainty, f"{_c}_scalar_sigma")
+            if _v is not None and not (isinstance(_v, numbers.Real)
+                                       and not isinstance(_v, bool)
+                                       and math.isfinite(float(_v))
+                                       and float(_v) >= 0.0):
+                raise ValueError(
+                    f"uncertainty.{_c}_scalar_sigma must be None (the H-mode "
+                    f"flat-top template) or a finite fraction >= 0, not {_v!r}")
         if self.uncertainty.sigma_method not in ("percentile", "std"):
             raise ValueError(
                 "uncertainty.sigma_method must be 'percentile' or 'std'")
@@ -2879,6 +2948,7 @@ class BouquetConfig:
                 "from_imas.", UserWarning, stacklevel=2)
             gend["reconstruction_engine"] = "legacy"
         _stored_config_compat(gend)
+        _stored_inspec_compat(gend)
         if (isinstance(source, ImasSource)
                 and gend.get("reconstruction_engine") == "unified"
                 and "imas_li3_radius" not in gend):
@@ -3029,7 +3099,8 @@ FIELD_PRE_INTRODUCTION = {
         1, "omega halved on every growth of r_j before the field "
            "(2026-09-25 to 2026-09-27)"),
     # older changed defaults (2026-06): not knowable from the config alone
-    "l_i_tolerance": (None, "default 0.01 -> 0.05 on 2026-06-04"),
+    "l_i_tolerance": (None, "default 0.01 -> 0.05 on 2026-06-04, then the "
+                            "band off (None) on 2026-10-14"),
     "jbs_scale_range": (None, "default None -> (0.99, 1.01) on 2026-06-04"),
     "homotopy_passes": (None, "default None -> three passes on 2026-06-04"),
     "floor_jbs": (None, "default True -> False on 2026-06-24"),
@@ -3289,6 +3360,42 @@ def _stored_config_compat(gend: dict) -> None:
             gend["homotopy_passes"] = d
     _pre_introduction_backfill(gend, list(_ENGINE_ONLY_PRE_INTRODUCTION),
                                "unified")
+
+
+#: The l_i band's default before the in-spec rule became the magnetics
+#: (owner decision 2026-10-14).
+L_I_TOLERANCE_OLD_DEFAULT = 0.05
+
+
+def _stored_inspec_compat(gend: dict) -> None:
+    """The in-spec rule of a stored ``generation`` dict (in place).
+
+    A config stored before 2026-10-14 (it has no ``inspec_band_nsigma``,
+    which ``to_dict()`` writes since) carrying ``l_i_tolerance`` at the old
+    default 0.05 was not asking for an l_i band: it had the default.  It
+    loads with the band OFF (``l_i_tolerance=None``) and a one-line note --
+    the in-spec rule is now the magnetics (owner decision).  Any other stored
+    value was an explicit choice and keeps its band.  A config that lacks
+    ``l_i_tolerance`` altogether is handled by the pre-introduction
+    back-fill (loud; today's default, the band off)."""
+    if "inspec_band_nsigma" in gend:
+        return
+    v = gend.get("l_i_tolerance", None)
+    if v is None:
+        return
+    try:
+        old_default = float(v) == L_I_TOLERANCE_OLD_DEFAULT
+    except (TypeError, ValueError):
+        return
+    if old_default:
+        import warnings
+        warnings.warn(
+            "stored config predates the 2026-10-14 in-spec rule: "
+            "generation.l_i_tolerance=0.05 (the old default) loads as None -- "
+            "the l_i band is OFF and a draw is in spec on the magnetics alone "
+            "(coil test + boundary cut); set l_i_tolerance (or l_i_sigma) to "
+            "apply an l_i band", UserWarning, stacklevel=4)
+        gend["l_i_tolerance"] = None
 
 
 def _pre_introduction_backfill(gend, names, kind):

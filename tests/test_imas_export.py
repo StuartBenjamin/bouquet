@@ -353,3 +353,30 @@ class TestReconstructFidelityValues:
         write_imas_draw(arc, 0, tmpl, a, scan_key=0, fidelity="auto")
         write_imas_draw(arc, 0, tmpl, r, scan_key=0, fidelity="reconstruct")
         assert json.load(open(a)) == json.load(open(r))
+
+
+@pytest.mark.skipif(not os.path.isfile(_GEQ), reason="d3dlike.geqdsk absent")
+def test_a_drawset_parses_the_template_once(tmp_path, monkeypatch):
+    """export_imas_drawset cuts the template once per scan and no draw mutates
+    it; every draw's file is the one write_imas_draw writes on its own."""
+    import bouquet.io.imas as imas
+    arc = str(tmp_path / "run.h5"); _make_archive(arc, with_fsa=True)
+    with h5py.File(arc, "r+") as hf:
+        hf.copy("scan/0/0", "scan/0/1")
+        hf["scan/0/1/jphi_total"][...] = 1.1 * _J_PHI
+    tmpl = str(tmp_path / "tmpl.json"); _make_template(tmpl)
+    built = []
+    real = imas._export_template
+    monkeypatch.setattr(imas, "_export_template",
+                        lambda *a, **k: built.append(real(*a, **k)) or built[-1])
+    paths = imas.export_imas_drawset(arc, tmpl, str(tmp_path / "set"), scan_key=0,
+                                     selection="all", fidelity="exact")
+    assert len(paths) == 2 and len(built) == 1
+    shared = json.dumps(built[0][0], sort_keys=True)
+    assert shared == json.dumps(real(tmpl, None, "exact")[0], sort_keys=True)
+    files = [open(p).read() for p in paths]
+    assert files[0] != files[1]
+    for i, f in enumerate(files):
+        one = str(tmp_path / f"one{i}.json")
+        write_imas_draw(arc, i, tmpl, one, scan_key=0, fidelity="exact")
+        assert f == open(one).read()
