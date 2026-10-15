@@ -93,13 +93,13 @@ on GitHub without running anything.
   TokaMaker-generated equilibria the legacy notebook and the
   `COCOS_Bt_Ip/` notebooks read
 
-These are the older D3D-like example set, kept because the notebooks here and
-a number of solver tests still read them; their generator scripts and recipe
-were retired (they are in the git history). The regression goldens
-(`tests/golden/`) are made from the newer synthetic fixtures in `tests/data/`
-(`g_synthetic.geqdsk` + `diiid_profs_synthetic.cdf`, and
-`dd_synthetic.json.gz` with the same profile file; see
-[`tests/data/README.md`](../tests/data/README.md)).
+These are the older D3D-like example set, kept because the notebooks here, a
+number of solver tests and (until their regeneration) the g-file regression
+goldens still read them; their generator scripts and recipe were retired
+(they are in the git history). The golden recipe (`tests/golden/`) runs the
+newer synthetic fixtures in `tests/data/` (`g_synthetic.geqdsk` +
+`diiid_profs_synthetic.cdf`, and `dd_synthetic.json.gz` with the same profile
+file; see [`tests/data/README.md`](../tests/data/README.md)).
 
 Real machine data (`*.cdf`, proprietary g-files, FUSE `dd_sim.json`) is
 gitignored and never committed.

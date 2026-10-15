@@ -1,5 +1,47 @@
 # Bouquet — change summaries
 
+## Unreleased — the golden recipe runs the synthetic fixtures at the current defaults; a new IDS-route golden (owner decisions 2026-10-15)
+
+**The golden recipe moves to the synthetic test fixtures** (`tests/data/`).
+`tests/golden/regenerate_golden_run.py` now builds each golden's config FRESH
+by the class constructor, every setting at its default except the run's
+identity (20 attempts, seed 12345, one thread, the engine), instead of
+replaying the previous fixture's stored config: `--golden gfile`
+(`g_synthetic.geqdsk` + `diiid_profs_synthetic.cdf`, unified or legacy) and
+`--golden ids` (`dd_synthetic.json.gz` at 1.2 s, IDA-hybrid with the same
+profile file: the production IDS route). `--config-from` keeps the verbatim
+replay; `--sigma0-probe` runs `verify_sigma0_consistency()` on the same
+reconstruction in its own process. `make_golden_fixture.py --golden ids`
+writes the IDS golden in the h5 layout.
+
+**New: the IDS-route golden** (`D3Dlike_ids_golden_slim.h5`,
+`ids_golden_manifest.json`, `ids_rng_stream_manifest.json`): 20 attempts, 19
+archived, 18 in spec; sigma=0 probe PASS. It embodies the defaults that
+landed since the last regeneration: the in-spec rule is the magnetics, the
+IDA file's own Z_eff on IDA-hybrid, the radial sigma templates, the warm
+baseline re-solve, engine draws on the reconstruction's isoflux,
+`check_bistability` on, the coil-saturation test against the installed
+bound, and the Redl epsilon of `evaluate_jBS/4`. Every h5 golden test runs on
+both h5 goldens (`tests/test_golden_bouquet.py`,
+`tests/test_rng_reproducibility.py`); `tests/test_golden_ids.py` states what
+the IDS golden is. The IDS route archives no schema `jbs_loop` block on its
+`_baseline` (its loop verdict is in the baseline's engine record); the golden
+test reads it there. No bar changed.
+
+**The g-file h5 golden and the legacy JSON golden are not regenerated yet**:
+the synthetic g-file pair is to be corrected first (the g-file carries the
+dd's total pressure, fast ions included; its profile file the thermal
+pressure only). They remain the 2026-10-09 runs of the older D3D-like example
+g-file + p-file; the legacy replay (`tests/test_systematics.py`) now
+reconstructs from whatever pair the legacy golden's stored config names.
+
+**Examples.** Of the older D3D-like example set, what nothing reads any more
+is removed (the baseline's recipe, overview figure and generator script, the
+dd geometry script, the two profile tables beside the legacy equilibria). The
+baseline g-file / p-file, the OMAS json, the mesh and the legacy equilibria
+stay: the example notebooks (the COCOS notebooks among them), a number of
+solver tests and the current g-file goldens still read them.
+
 ## Unreleased — bistability check on by default; per-draw axis record and branch flag (owner decisions 2026-10-15)
 
 **Default change: `GenerationConfig.check_bistability` is ON under the unified
