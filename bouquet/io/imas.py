@@ -3509,8 +3509,51 @@ def _write_draw_ion_species(cp, ni_t, ti_t, ne_t, z_fast_t, Z_imp):
     return rec
 
 
+def _export_template(template_ids_path, time=None, fidelity="auto"):
+    """``(out, tmpl_geom, tmpl_pair)``: :func:`write_imas_draw`'s template, a fresh
+    parse cut to the exported slice, with its paired current geometry (for
+    ``fidelity != "exact"``).  Depends only on the template, ``time`` and
+    ``fidelity``, so :func:`export_imas_drawset` builds it once per scan."""
+    import json
+    # a FRESH parse: _slice_in_time cuts this object in place, so it must
+    # never be the shared cached dd of _load_dd (#72 B5)
+    with open(template_ids_path) as fh:
+        out = json.load(fh)
+
+    eq_ids = out["equilibrium"]
+    ie = _nearest_index(eq_ids["time"], time, "equilibrium")
+    _nearest_index(out["core_profiles"]["time"], time, "core_profiles")  # validates time
+    # Only the exported slice is written: every IDS is cut at the
+    # core_profiles slice nearest the time, core_sources by the reader's rule
+    # with its windows recorded (#71).  The cut first keeps every equilibrium
+    # slice the reader reads there (the template's currents are paired with
+    # one of them: _paired_current_geometry), so the template-geometry
+    # conversion uses the slice the template's currents belong to; the
+    # equilibrium is then cut to the ONE slice the draw is written into (a
+    # draw is one equilibrium, and its currents are written on its own
+    # geometry, so a re-read pairs them with it).
+    t_cp = _slice_in_time(out, eq_ids["time"][ie] if time is None else time)
+    cp = out["core_profiles"]["profiles_1d"][0]
+    tmpl_geom, tmpl_pair = None, None
+    if fidelity != "exact" and t_cp is not None:
+        try:
+            tmpl_geom, tmpl_pair = _paired_current_geometry(
+                eq_ids, cp, t_cp, cp.get("j_total"), cp.get("j_tor"))
+        except (KeyError, TypeError, ValueError):
+            tmpl_geom = None
+    _cut_ids(eq_ids, t_cp)
+    _set_export_window(eq_ids, dict(
+        core_profiles_time=t_cp, kept_times=[float(x) for x in eq_ids["time"]],
+        rule=("write_imas_draw: the draw's own equilibrium, the one slice "
+              "kept (nearest the core_profiles time); the exported currents "
+              "are written on its geometry"),
+        template_current_pairing_time=(None if tmpl_pair is None
+                                       else tmpl_pair["time"])))
+    return out, tmpl_geom, tmpl_pair
+
+
 def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
-                    scan_key=None, time=None, fidelity="auto"):
+                    scan_key=None, time=None, fidelity="auto", template=None):
     """Reconstruct a perturbed IMAS/OMAS IDS for one draw from the bouquet HDF5.
 
     Orientation: the exported file is in the SOURCE's frame throughout.  The
@@ -3612,6 +3655,9 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
         more than one scan.
     time : float, optional
         Time slice [s]; defaults to the template's nearest single slice.
+    template : tuple, optional
+        ``_export_template(template_ids_path, time, fidelity)`` built once by
+        the caller (:func:`export_imas_drawset`); deep-copied, never mutated.
 
     Returns
     -------
@@ -3628,42 +3674,11 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
         raise ValueError(
             f"fidelity must be 'auto'|'exact'|'reconstruct', got {fidelity!r}")
 
-    # a FRESH parse: _slice_in_time cuts this object in place, so it must
-    # never be the shared cached dd of _load_dd (#72 B5)
-    with open(template_ids_path) as fh:
-        out = json.load(fh)
-
-    eq_ids = out["equilibrium"]
-    ie = _nearest_index(eq_ids["time"], time, "equilibrium")
-    cp_ids = out["core_profiles"]
-    ic = _nearest_index(cp_ids["time"], time, "core_profiles")
-    # Only the exported slice is written: every IDS is cut at the
-    # core_profiles slice nearest the time, core_sources by the reader's rule
-    # with its windows recorded (#71).  The cut first keeps every equilibrium
-    # slice the reader reads there (the template's currents are paired with
-    # one of them: _paired_current_geometry), so the template-geometry
-    # conversion below uses the slice the template's currents belong to;
-    # the equilibrium is then cut to the ONE slice the draw is written into
-    # (a draw is one equilibrium, and its currents are written on its own
-    # geometry, so a re-read pairs them with it).  This MUST stay before
-    # ie = ic = 0: every index below addresses the one kept slice.
-    t_cp = _slice_in_time(out, eq_ids["time"][ie] if time is None else time)
+    out, tmpl_geom, tmpl_pair = (
+        _export_template(template_ids_path, time, fidelity) if template is None
+        else copy.deepcopy(template))
+    eq_ids, cp_ids = out["equilibrium"], out["core_profiles"]
     cp = cp_ids["profiles_1d"][0]
-    tmpl_geom, tmpl_pair = None, None
-    if fidelity != "exact" and t_cp is not None:
-        try:
-            tmpl_geom, tmpl_pair = _paired_current_geometry(
-                eq_ids, cp, t_cp, cp.get("j_total"), cp.get("j_tor"))
-        except (KeyError, TypeError, ValueError):
-            tmpl_geom = None
-    _cut_ids(eq_ids, t_cp)
-    _set_export_window(eq_ids, dict(
-        core_profiles_time=t_cp, kept_times=[float(x) for x in eq_ids["time"]],
-        rule=("write_imas_draw: the draw's own equilibrium, the one slice "
-              "kept (nearest the core_profiles time); the exported currents "
-              "are written on its geometry"),
-        template_current_pairing_time=(None if tmpl_pair is None
-                                       else tmpl_pair["time"])))
     ie = ic = 0
 
     h5 = _resolve_h5(h5path_or_header)
@@ -3946,10 +3961,13 @@ def export_imas_drawset(h5path_or_header, template_ids_path, out_dir,
                 f"{h5} holds {len(idxs)} scans {sorted(idxs)}; pass an "
                 "explicit scan_key to export_imas_drawset().")
         scan_key, idxs = next(iter(idxs.items()))
+    # every draw of the scan is written at the same time: parse and cut the
+    # template once
+    tmpl = _export_template(template_ids_path, time, fidelity) if idxs else None
     paths = []
     for i in idxs:
         out = os.path.join(out_dir, f"{base}_draw{i}.json")
         paths.append(write_imas_draw(h5, i, template_ids_path, out,
                                      scan_key=scan_key, time=time,
-                                     fidelity=fidelity))
+                                     fidelity=fidelity, template=tmpl))
     return paths
