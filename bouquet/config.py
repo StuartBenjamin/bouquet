@@ -280,13 +280,17 @@ class ImasSource:
     #       (IDAProfiles.zeff_provenance) -- and "standard" otherwise (FUSE
     #       kinetics: the dd's Z_eff).  An IDA file with NO Z_eff information
     #       (no 'Zeff', no 'n_12C6') is refused on ida_hybrid, naming the
-    #       explicit choices below.
+    #       explicit choices below -- with zeff_from_fuse=True "auto"
+    #       resolves to "standard" there instead.
     #   "standard" -> the dd's Z_eff, n_i from it and the IDA n_e (the default
     #       before 2026-10; an explicit choice now).
     #   "Zeff" | "CER" | "all" -> that measured route explicitly (see
-    #       ReconstructionSource.ni_source).
+    #       ReconstructionSource.ni_source); a file that lacks its data is
+    #       REFUSED (ValueError), never downgraded, zeff_from_fuse or not.
     # The route a run took is stamped warning-free in li_metrics
-    # ("zeff_source": "ida" / "dd"; "kinetics_route").
+    # ("zeff_source": "ida" / "dd"; "kinetics_route"), and that ONE route is
+    # what the uncertainty, the sampler clips and the Z_eff ladder follow
+    # (bouquet.experimental.baseline_kinetics_route).
     ni_source: str = "auto"
     # ida_hybrid on a measured route only: True keeps the dd's Z_eff while
     # ne/Te/Ti/ni come from IDA (an explicit choice of the dd's Z_eff); False

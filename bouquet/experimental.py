@@ -42,6 +42,7 @@ __all__ = ["REGISTRY", "ExperimentalFeatureWarning",
            "STANDARD_NI_SOURCE", "IDA_ION_ROUTES", "NI_SOURCES",
            "AUTO_NI_SOURCE", "MEASURED_NI_SOURCE", "IMAS_NI_SOURCES",
            "GRADUATED", "resolved_ni_source", "resolved_ni_subtract_fast",
+           "baseline_kinetics_route",
            "ida_ion_route_on", "fuse_zeff_fast_ions_on",
            "ida_ni_beam_subtraction_on", "kinetic_clips_on",
            "ida_fuse_timing_on", "graduated_markdown", "GRADUATED_BEGIN",
@@ -272,12 +273,32 @@ def _ida_in_play(source, uncertainty=None) -> bool:
     return False
 
 
-def resolved_ni_source(source, kinetic_source=None) -> str:
-    """The Z_eff / n_i route a run takes.  An explicit ``ni_source`` is
-    honoured as given; ``"auto"`` (:class:`~bouquet.config.ImasSource`'s
+def baseline_kinetics_route(baseline):
+    """The kinetics route the READER resolved for *baseline*
+    (``li_metrics["kinetics_route"]``, stamped by the IMAS reader where the
+    file is known), or ``None`` (no baseline, or one that carries none: a
+    g-file reconstruction).  ONE route per run (review F4): once a baseline
+    exists, the resolvers below answer from it, not from the config."""
+    lm = getattr(baseline, "li_metrics", None) if baseline is not None \
+        else None
+    kr = (lm or {}).get("kinetics_route") if isinstance(lm, dict) else None
+    return kr if isinstance(kr, dict) and "ni_source" in kr else None
+
+
+def resolved_ni_source(source, kinetic_source=None, baseline=None) -> str:
+    """The Z_eff / n_i route a run takes.  With a *baseline* that records
+    the route its reader resolved (:func:`baseline_kinetics_route`), that
+    route -- the reader is where the file is known: ``"auto"`` on an IDA
+    file with no Z_eff information and ``zeff_from_fuse=True`` resolves to
+    ``"standard"`` there.  Otherwise from the config: an explicit
+    ``ni_source`` is honoured as given (the reader refuses one the file
+    cannot honour); ``"auto"`` (:class:`~bouquet.config.ImasSource`'s
     default) is the measured route :data:`MEASURED_NI_SOURCE` when an IDA file
     supplies the kinetics (``kinetic_source="ida_hybrid"`` with an
     ``ida_path``), else ``"standard"`` (FUSE kinetics: the dd's Z_eff)."""
+    kr = baseline_kinetics_route(baseline)
+    if kr is not None:
+        return str(kr["ni_source"])
     v = getattr(source, "ni_source", STANDARD_NI_SOURCE)
     if v != AUTO_NI_SOURCE:
         return v
@@ -288,15 +309,21 @@ def resolved_ni_source(source, kinetic_source=None) -> str:
     return STANDARD_NI_SOURCE
 
 
-def resolved_ni_subtract_fast(source, kinetic_source=None) -> bool:
+def resolved_ni_subtract_fast(source, kinetic_source=None,
+                              baseline=None) -> bool:
     """Whether the dd's beam density is subtracted from the IDA (total) n_i.
-    An explicit ``ImasSource.ni_subtract_fast`` is honoured; ``None`` (the
+    With a *baseline* recording its reader's route, what the reader did
+    (``kinetics_route["ni_subtract_fast"]``).  Otherwise: an explicit
+    ``ImasSource.ni_subtract_fast`` is honoured; ``None`` (the
     default) follows ``include_pfast`` on the ida_hybrid measured route --
     the fast ions in ``p_fast`` with the subtraction, or both off (the #79
     rule) -- and is False elsewhere (no IDA-derived n_i)."""
     from .config import ImasSource
     if not isinstance(source, ImasSource):
         return False
+    kr = baseline_kinetics_route(baseline)
+    if kr is not None and "ni_subtract_fast" in kr:
+        return bool(kr["ni_subtract_fast"])
     v = getattr(source, "ni_subtract_fast", None)
     if v is not None:
         return bool(v)
@@ -307,11 +334,13 @@ def resolved_ni_subtract_fast(source, kinetic_source=None) -> bool:
                 and bool(getattr(source, "include_pfast", True)))
 
 
-def ida_ion_route_on(source, uncertainty=None, kinetic_source=None) -> bool:
-    """The resolved ``ni_source`` (:func:`resolved_ni_source`) is a measured
-    IDA route and an IDA file is in play."""
-    return (resolved_ni_source(source, kinetic_source) in IDA_ION_ROUTES
-            and _ida_in_play(source, uncertainty))
+def ida_ion_route_on(source, uncertainty=None, kinetic_source=None,
+                     baseline=None) -> bool:
+    """The resolved ``ni_source`` (:func:`resolved_ni_source`, from the
+    *baseline*'s recorded route when it has one) is a measured IDA route and
+    an IDA file is in play."""
+    return (resolved_ni_source(source, kinetic_source, baseline=baseline)
+            in IDA_ION_ROUTES and _ida_in_play(source, uncertainty))
 
 
 def _explicit_ida_ion_route(source, uncertainty=None) -> bool:
@@ -329,28 +358,33 @@ def fuse_zeff_fast_ions_on(source) -> bool:
         getattr(source, "zeff_fast_ions", False))
 
 
-def ida_ni_beam_subtraction_on(source, kinetic_source=None) -> bool:
+def ida_ni_beam_subtraction_on(source, kinetic_source=None,
+                               baseline=None) -> bool:
     """:func:`resolved_ni_subtract_fast` (:data:`GRADUATED`
     ``"ida_ni_beam_subtraction"``)."""
-    return resolved_ni_subtract_fast(source, kinetic_source)
+    return resolved_ni_subtract_fast(source, kinetic_source,
+                                     baseline=baseline)
 
 
-def kinetic_clips_on(config) -> bool:
+def kinetic_clips_on(config, baseline=None) -> bool:
     """``UncertaintyConfig.kinetic_clips`` resolved: an explicit bool wins;
     ``None`` (auto) is on whenever a kinetic route that can draw outside the
     physical window is in play -- the measured IDA ``ni_source`` route
     (resolved, so the IDA-hybrid DEFAULT counts; owner decision 2026-10-14),
     the beam subtraction (resolved), or ``fuse_zeff_fast_ions``.  Every clip
     that fires is counted per draw, so the default changes nothing unless a
-    clip binds, and then the archive says so."""
+    clip binds, and then the archive says so.  With a *baseline*, the
+    routes are the ones its reader resolved (:func:`baseline_kinetics_route`),
+    so the clips follow the run's one route."""
     unc = getattr(config, "uncertainty", None)
     v = getattr(unc, "kinetic_clips", None)
     if v is not None:
         return bool(v)
     src = getattr(config, "source", None)
     ks = getattr(getattr(config, "generation", None), "kinetic_source", None)
-    return (ida_ion_route_on(src, unc, ks) or fuse_zeff_fast_ions_on(src)
-            or ida_ni_beam_subtraction_on(src, ks))
+    return (ida_ion_route_on(src, unc, ks, baseline=baseline)
+            or fuse_zeff_fast_ions_on(src)
+            or ida_ni_beam_subtraction_on(src, ks, baseline=baseline))
 
 
 def ida_fuse_timing_on(source, uncertainty=None) -> bool:

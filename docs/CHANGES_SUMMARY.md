@@ -139,6 +139,18 @@ route. Closes #84.
   stamped (`zeff_provenance["zeff_source"]="carbon_density"`,
   `zeff_from_carbon_fallback`, and `kinetics_route["ida_zeff_source"]` on the
   baseline record).
+- One `ni_source` route per run: the IMAS reader resolves it where the
+  file is known and stamps it (`li_metrics["kinetics_route"]`), and
+  `resolve_uncertainty`, `kinetic_clips_on` and the Z_eff ladder follow that
+  stamp (`resolved_ni_source` / `ida_ion_route_on` /
+  `resolved_ni_subtract_fast` / `kinetic_clips_on` take `baseline=`;
+  `experimental.baseline_kinetics_route`). With `ni_source="auto"` and
+  `zeff_from_fuse=True` on a file without Z_eff information the run is
+  "standard" throughout (it was "standard" in the reader but "all", clips on,
+  in the sigma ladder). An EXPLICIT `"CER"` / `"Zeff"` / `"all"` the file
+  cannot honour raises a ValueError naming the file and the missing data
+  instead of being downgraded. The envelope records `ni_source` and the
+  Z_eff tier its `ladder`.
 
 ## Unreleased — the golden recipe runs the synthetic fixtures at the current defaults; a new IDS-route golden (owner decisions 2026-10-15)
 
