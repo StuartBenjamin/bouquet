@@ -78,6 +78,23 @@ ENGINE_MSE_JACOBIANS = ("fd_broyden", "fd_chord")
 #: owner-approved 2026-10-07 (non-converged only: it can only mark a stage
 #: not converged); recorded in :func:`convergence_table`.
 MSE_JACOBIAN_MAX_REFRESHES = 3
+#: The MSE stage's finite-difference Jacobian keeps every perturbed solve on
+#: the base equilibrium's solution branch (2026-10-14).  A perturbed solve
+#: whose magnetic axis lands farther than this fraction of the base state's
+#: minor radius from the base axis has left the branch -- on a slice with
+#: two nearly equal flux extrema the free-boundary solve has two solutions
+#: whose axes sit ~1-2 cm apart (measured: 17 mm, 2.8 % of a), while a
+#: continuous response to one coefficient step moves the axis by well under
+#: 1 mm -- and its column would difference ACROSS the jump.  Such a column is
+#: re-taken with the step halved (at most :data:`MSE_FD_MAX_HALVINGS` times):
+#: a finer difference step on the same derivative, never a tolerance.  A
+#: NUMERICAL-METHOD parameter: it decides only which FD step a column uses,
+#: and nothing is accepted or refused on it; a column whose solves never
+#: stay on the branch keeps its original step (the Jacobian before the
+#: check) and is recorded as unresolved.
+MSE_FD_BRANCH_AXIS_FRAC = 0.01
+#: At most this many step halvings per Jacobian column (h -> h / 16).
+MSE_FD_MAX_HALVINGS = 4
 #: The engine fields of :class:`~bouquet.config.GenerationConfig` and their
 #: defaults (refused when changed with ``reconstruction_engine="legacy"``).
 ENGINE_FIELD_DEFAULTS = {
@@ -1163,6 +1180,7 @@ class UnifiedEngine:
         #: (the FD base state), once the stage has read them
         self._mse_pre = None
         self._mse_stage_fd = None    # the MSE stage's Jacobian record
+        self._mse_fd_last = None     # the last FD Jacobian's branch check
         #: the MSE outcome recorded as ``engine_record()["mse"]``
         self.mse_summary = dict(requested=("mse" in settings["rows"]),
                                 applied=False, mse_converged=None,
@@ -1888,7 +1906,7 @@ class UnifiedEngine:
         self._mse_pre = dict(chi2=float(c2_pre), n_chords=int(ch["n_active"]),
                              chi2_per_chord=float(c2_pre)
                              / int(ch["n_active"]))
-        J = self._mse_fd(g_last, lam, x0, tg0, snap)
+        J = self._mse_fd(g_last, lam, x0, tg0, snap, axis0=m0.get("axis"))
         self.b.restore(snap)
         st.mse_J, st.mse_x0, st.mse_tg0 = J, x0, tg0
         st.geom = complete_geometry(m0["geom"])
@@ -1909,6 +1927,7 @@ class UnifiedEngine:
                       disagrees=bool(chk["disagrees"]), note=chk["note"]),
                   sign_table={k: float(v) for k, v in table.items()},
                   scheme=mse_scheme_text(s["mse_jacobian"]),
+                  branch_check=self._mse_fd_last,
                   J_initial=J.tolist(), tg_base=tg0.tolist(),
                   chi2_pre_mse=float(c2_pre))
         self._mse_stage_fd = fd
@@ -2011,23 +2030,108 @@ class UnifiedEngine:
         m = self.b.measure(want_chords=True)
         return m, self.b.snapshot()
 
-    def _mse_fd(self, g, lam, x, tg, snap):
+    def _mse_fd(self, g, lam, x, tg, snap, axis0=None):
         """``d tan(gamma) / d x`` by forward differences around the base
         state *snap* (coefficients *x*, tan(gamma) *tg*): one solve per free
         coefficient, each from the base state
-        (:func:`bouquet.utils.structured_mse_jacobian`)."""
+        (:func:`bouquet.utils.structured_mse_jacobian`).
+
+        **Branch check** (2026-10-14).  With the base state's magnetic axis
+        *axis0* known and a backend that reports its minor radius
+        (``minor_radius()``), every perturbed solve's axis is compared with
+        *axis0*: a solve whose axis moved farther than
+        :data:`MSE_FD_BRANCH_AXIS_FRAC` x the minor radius has jumped to the
+        free-boundary problem's OTHER solution, and its column is re-taken
+        with the step halved (at most :data:`MSE_FD_MAX_HALVINGS` times;
+        one extra solve each, from the base state).  Measured on a reversed-
+        Ip slice with two flux extrema 17 mm apart: 7 of 8 perturbed solves
+        of a refresh jumped, the refreshed Jacobian differenced across the
+        jump, its Gauss-Newton step sent the MSE stage to the other branch
+        (chi2/N 0.745 -> 0.790) and the next refresh into a period-3 cycle
+        between the two (JBSNotConverged at the pass ceiling); with the
+        check every column stayed on its branch at h/2 .. h/8 and the stage
+        converged at its first refresh.  A path change of the Jacobian's
+        numerics only: no criterion, tolerance or ceiling is touched, a
+        state without a jump is differenced exactly as before (bit for
+        bit), and the outcome is recorded in :attr:`_mse_fd_last`
+        (``branch_check`` of the phase's / refresh round's record)."""
         from .utils import structured_mse_jacobian
         dlt = self.state.delivery_correction
+        probe = getattr(self.b, "minor_radius", None)
+        chk = dict(rule=("a perturbed FD solve whose magnetic axis moved "
+                         "more than axis_frac x the base minor radius from "
+                         "the base axis left the base solution branch: its "
+                         "column is re-taken with the step halved (at most "
+                         "max_halvings times)"),
+                   axis_frac=float(MSE_FD_BRANCH_AXIS_FRAC),
+                   max_halvings=int(MSE_FD_MAX_HALVINGS), active=False,
+                   minor_radius_m=None, threshold_m=None,
+                   n_extra_solves=0, n_columns_refined=0,
+                   n_columns_unresolved=0, columns=[])
+        self._mse_fd_last = chk
+        thr = None
+        if axis0 is not None and callable(probe):
+            try:
+                a0 = float(probe())
+            except Exception:                       # noqa: BLE001
+                a0 = float("nan")
+            if np.isfinite(a0) and a0 > 0.0:
+                thr = float(MSE_FD_BRANCH_AXIS_FRAC) * a0
+                chk.update(active=True, minor_radius_m=a0, threshold_m=thr,
+                           base_axis=[float(v) for v in axis0])
+        last = dict(shift=None)
 
         def _tg_of(xp):
             self.b.restore(snap)
             r = self.close(g, lam, x=xp)["jc"] + (0.0 if dlt is None
                                                   else dlt)
             self.b.solve(r, n_passes=1)
-            return self._tg(self.b.measure(want_chords=True))
+            m = self.b.measure(want_chords=True)
+            ax = m.get("axis")
+            last["shift"] = (None if (ax is None or thr is None) else float(
+                np.hypot(float(ax[0]) - float(axis0[0]),
+                         float(ax[1]) - float(axis0[1]))))
+            return self._tg(m)
 
-        return structured_mse_jacobian(_tg_of, x, tg, self._mse_free(),
-                                       step=self.s["mse_fd_step"])
+        cols = {}
+
+        def _on_branch(i, h):
+            sh = last["shift"]
+            ok = bool(sh is None or sh <= thr)
+            c = cols.get(i)
+            if c is None and ok:
+                return True                 # the ordinary column: no entry
+            if c is None:
+                c = cols[i] = dict(coefficient=int(i), steps=[],
+                                   axis_shift_m=[])
+            c["steps"].append(float(h))
+            c["axis_shift_m"].append(sh)
+            return ok
+
+        J = structured_mse_jacobian(
+            _tg_of, x, tg, self._mse_free(), step=self.s["mse_fd_step"],
+            on_branch=(None if thr is None else _on_branch),
+            max_halvings=int(MSE_FD_MAX_HALVINGS))
+        for i in sorted(cols):
+            c = cols[i]
+            sh = c["axis_shift_m"][-1]
+            c["resolved"] = bool(sh is not None and sh <= thr)
+            c["step_used"] = (c["steps"][-1] if c["resolved"]
+                              else c["steps"][0])
+            chk["columns"].append(c)
+        chk["n_columns_refined"] = len(cols)
+        chk["n_columns_unresolved"] = sum(1 for c in chk["columns"]
+                                          if not c["resolved"])
+        chk["n_extra_solves"] = sum(len(c["steps"]) - 1
+                                    for c in chk["columns"])
+        if cols:
+            print(f"  [engine] {self.label} +MSE: FD Jacobian branch check: "
+                  f"{len(cols)} column(s) re-taken with a finer step (the "
+                  f"perturbed solve's magnetic axis jumped > {thr * 1e3:.2f} "
+                  f"mm = {MSE_FD_BRANCH_AXIS_FRAC:g} x a); "
+                  f"{chk['n_columns_unresolved']} unresolved, "
+                  f"{chk['n_extra_solves']} extra solve(s)", flush=True)
+        return J
 
     def _mse_loop(self, lam, meas0, *, label, init_source):
         from .jbs_loop import run_jbs_loop
@@ -2078,7 +2182,7 @@ class UnifiedEngine:
         conv = self.b.snapshot()
         m_b, snap_b = self._mse_base_solve(g, lam, x_b)
         tg_b = self._tg(m_b)
-        J_new = self._mse_fd(g, lam, x_b, tg_b, snap_b)
+        J_new = self._mse_fd(g, lam, x_b, tg_b, snap_b, axis0=m_b.get("axis"))
         lin_old = structured_mse_linear_model(x_b, tg_b, J_old, ch,
                                               who=self.label + " MSE refresh")
         lin_new = structured_mse_linear_model(x_b, tg_b, J_new, ch,
@@ -2106,6 +2210,7 @@ class UnifiedEngine:
             tol_sigma=float(s["mse_tol_sigma"]), ok=ok,
             base_dtg_vs_last_pass_max_sigma=float(np.max(np.abs(
                 tg_b - np.asarray(p["tg"], dtype=float)) / sig)),
+            branch_check=self._mse_fd_last,
             continued=not ok)
         print(f"  [engine] {self.label} +MSE: Jacobian refreshed at "
               f"convergence: |dJ|/|J| = "
@@ -2413,6 +2518,15 @@ class TokaMakerBackend:
 
     def restore(self, eq):
         self.mygs.replace_eq(source_eq=eq)
+
+    def minor_radius(self) -> float:
+        """The minor radius [m] of the CURRENT equilibrium (the solver's
+        ``a_geo``, read on a copy so the live state is untouched) -- the
+        length scale of the MSE stage's finite-difference branch check
+        (:data:`MSE_FD_BRANCH_AXIS_FRAC`)."""
+        st = self.mygs.copy_eq().get_stats(lcfs_pad=self.psi_pad,
+                                           li_normalization="iter")
+        return float(st["a_geo"])
 
     def measure(self, want_chords=False, final=False):
         from .physics import evaluate_jBS

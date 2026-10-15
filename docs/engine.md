@@ -346,6 +346,33 @@ and the refreshed step stays below 0.01 σ (data the profile family fits);
 on a toy whose pitch angles respond non-linearly to the current the first
 refreshed step is 0.3 σ and one continuation brings it to 0.003 σ.
 
+**Branch-consistent finite differences (2026-10-14).** Every finite-
+difference Jacobian of the stage (the first and each refresh) checks that
+its perturbed solves stay on the base equilibrium's solution branch: a
+perturbed solve whose magnetic axis lands farther than
+`engine.MSE_FD_BRANCH_AXIS_FRAC` (0.01) × the base state's minor radius
+from the base axis has jumped to the free-boundary problem's other solution,
+and its column is re-taken from the base state with the step halved, at most
+`engine.MSE_FD_MAX_HALVINGS` (4) times. The first step that stays gives the
+column; a column whose solves never stay keeps its original step and is
+recorded unresolved. Why: on a slice with two flux extrema of nearly equal
+depth the free-boundary solve has two solutions for nearly the same current
+(measured on a reversed-Ip slice: axes 17 mm apart, Δl_i 2e-3, Δq0 4e-3). A
+column taken across that jump made the refreshed Jacobian's Gauss–Newton
+step send the stage to the other branch (χ²/N 0.745 → 0.790) and the next
+refresh into a period-3 cycle between the two that ended at the pass ceiling
+(`JBSNotConverged`); with the check every column stayed on its branch at
+h/2 … h/8 and the stage converged at its first refresh. A numerical-method
+parameter only: it chooses which difference step a column uses; no
+criterion, tolerance or ceiling is touched, and a state without a jump is
+differenced exactly as before (bit for bit; the extra solves are counted in
+`solves["mse_fd"]` / `solves["mse_refresh"]`). Recorded as `branch_check`
+on the MSE phase's `jacobian` record and on each refresh round (threshold,
+minor radius, the refined columns with their steps and axis shifts). The
+backend reports its minor radius (`TokaMakerBackend.minor_radius()`, the
+solver's `a_geo` on a copy of the state); a backend without it runs the
+Jacobian unchecked.
+
 **When the MSE stage fails (2026-10-07).** With `structured_mse_required=
 False` (the default) ANY exception inside the stage (a failed solve in the
 finite differences or a pass, a closure refusal, a non-converged MSE loop
