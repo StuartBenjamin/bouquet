@@ -72,16 +72,18 @@ def test_the_resampling_has_the_fixed_count_closed_and_uniform_in_arc_length():
     np.testing.assert_allclose(resample_boundary(cw)[0], pts, rtol=0, atol=1e-9)
 
 
-def test_the_x_point_is_kept_exactly_and_is_the_first_point():
+def test_the_x_point_is_kept_exactly_and_the_outermost_point_is_the_reference():
     src = _shape(200, corner=0.8, roll=37)
     P, xp = find_xpoints(src)
     assert len(xp) == 1 and xp[0]["origin"] == "turning angle"
     assert xp[0]["turn_deg"] > XPOINT_TURN_DEG
     corner = _shape(200, corner=0.8)[0]                            # phi = 0, exactly
     pts, arc, info = resample_boundary(src)
-    assert tuple(pts[0]) == tuple(corner)                          # exact, not interpolated
+    assert np.any(np.all(pts == corner, axis=1))                   # exact, not interpolated
     assert info["x_points"][0]["R"] == corner[0] and info["x_points"][0]["Z"] == corner[1]
-    assert info["first_point"]["kind"] == "lowest X-point"
+    # TokaMaker's isoflux reference (the first point) is the outermost point, never the X-point
+    assert info["first_point"]["kind"].startswith("outermost point")
+    assert pts[0, 0] == np.max(pts[:, 0]) and tuple(pts[0]) != tuple(corner)
     # spacing stays uniform right up to the corner on both sides
     d = _spacing(pts)
     assert np.std(d) / np.mean(d) < 5e-3
@@ -96,7 +98,7 @@ def test_two_x_points_split_the_points_by_length_and_both_are_exact():
     raw = _shape(400, corner=0.8, top_corner=0.9)
     for xy in (raw[0], raw[200]):                                  # phi = 0 and phi = pi
         assert np.any(np.all(pts == xy, axis=1)), "an X-point was not kept exactly"
-    assert tuple(pts[0]) == tuple(raw[0])                          # the lower one first
+    assert pts[0, 0] == np.max(pts[:, 0])                         # the reference: outermost
     assert pts.shape == (N_ISOFLUX, 2)
     assert np.sum(arc) == pytest.approx(info["boundary_length_m"], rel=1e-12)
 
@@ -108,7 +110,7 @@ def test_a_saddle_target_marks_a_corner_the_angle_test_misses():
     P, xp = find_xpoints(src, saddle_targets=[[corner[0] + 0.004, corner[1] - 0.003]])
     assert len(xp) == 1 and xp[0]["origin"] == "saddle target 0"
     pts, _, info = resample_boundary(src, saddle_targets=[[corner[0] + 0.004, corner[1] - 0.003]])
-    assert tuple(pts[0]) == tuple(corner)
+    assert np.any(np.all(pts == corner, axis=1))
     # a saddle target far from the boundary marks nothing
     assert find_xpoints(src, saddle_targets=[[1.7, 0.0]])[1] == []
 
@@ -190,7 +192,7 @@ def test_the_record_stamps_the_standard_constraint():
     assert len(rs["x_points"]) == 1
     xp = (rs["x_points"][0]["R"], rs["x_points"][0]["Z"])
     assert np.any(np.all(src == xp, axis=1))
-    assert tuple(geo.iso_pts[0]) == xp
+    assert np.any(np.all(geo.iso_pts == xp, axis=1))
     # JSON-safe (it is archived as solver_geometry_json)
     import json
     assert json.loads(json.dumps(rec))["isoflux_resampling"]["x_points"][0]["R"] == xp[0]
@@ -237,15 +239,16 @@ def test_the_saddle_targets_are_installed_as_configured_and_mark_the_x_point():
     sc = _sc()
     src = _gfile_boundary()
     geo0 = case_geometry(_gsrc(), sc)
-    xp = np.array([[geo0.iso_pts[0, 0] + 0.003, geo0.iso_pts[0, 1] - 0.002]])
+    x0 = geo0.record()["isoflux_resampling"]["x_points"][0]
+    xp = np.array([[x0["R"] + 0.003, x0["Z"] - 0.002]])
     sc.saddle_targets, sc.saddle_weights = xp, np.array([7.0])
     geo = case_geometry(_gsrc(), sc)
     np.testing.assert_array_equal(geo.saddle_pts, xp)              # the saddles unchanged
     np.testing.assert_array_equal(geo.saddle_w, [7.0])
     rs = geo.record()["isoflux_resampling"]
     assert [x["origin"] for x in rs["x_points"]] == ["saddle target 0"]
-    assert tuple(geo.iso_pts[0]) == tuple(geo0.iso_pts[0])        # the same source vertex
-    assert np.any(np.all(src == geo.iso_pts[0], axis=1))
+    np.testing.assert_array_equal(geo.iso_pts, geo0.iso_pts)      # the same source vertex
+    assert np.any(np.all(src == (x0["R"], x0["Z"]), axis=1))
 
 
 def test_a_coarser_writer_of_the_same_boundary_gets_the_same_constraint_strength():

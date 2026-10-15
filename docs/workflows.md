@@ -115,7 +115,7 @@ is a navigational summary of the defaults.
 | `nthreads` | `1` | **Keep at 1.** OpenMP reduction order is non-deterministic and jitters `l_i(1)` by ~1%; parallelise across processes instead |
 | `order` | `3` | FE order |
 | `F0` | `None` | Vacuum `R·B_t`; defaults from the g-file / IDS |
-| `isoflux_pts`, `isoflux_weights` | `None` | Boundary constraint points; default from the source boundary |
+| `isoflux_pts`, `isoflux_weights` | `None` | Boundary (isoflux) constraint points and weights, **used as given** (never resampled). Default (unified engine, #84): the source boundary resampled to `solver_geometry.N_ISOFLUX` = 256 points by arc length, X-points kept exactly, each point weighted by the arc length it represents, the weights summing to `solver_geometry.ISOFLUX_WEIGHT_TOTAL` = 2e5 -- one constant for the reconstruction and the draws, whatever the source's point count. Legacy route: the source boundary as given at `ISOFLUX_WEIGHT` = 500 per point. See [The boundary constraint](#the-boundary-constraint-per-unit-length-84) |
 | `saddle_targets`, `saddle_weights` | `None` | Opt-in X-point pins. Without them a diverted forward solve typically rounds the boundary corner by a few cm |
 | `coil_vsc` | `{"F9A": 1.0, "F9B": -1.0}` | Antisymmetric vertical-stability channel definition |
 
@@ -1090,7 +1090,8 @@ jitter, no DLSODE hangs) and every BLAS/OpenMP pool at 1 (`bouquet.threads`: the
 | **cases, many jobs** | whole bouquets on a shared-filesystem queue, a fresh process each | many cases, many nodes or jobs | `bouquet.units` |
 
 Never nest them.  One solver serves many baselines: `prepare_baseline` points it at each baseline's
-own F0, boundary and isoflux (`Bouquet.point_solver`), and every reset returns to that baseline's
+own F0, boundary and isoflux (`Bouquet.point_solver`; under the unified engine the isoflux is each
+baseline's own boundary resampled per unit length, #84), and every reset returns to that baseline's
 geometry; the mesh, solve method and thread count are fixed per solver (`Bouquet.set_case` refuses a
 change).
 

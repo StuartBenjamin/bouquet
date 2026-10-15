@@ -280,9 +280,15 @@ def resample_boundary(boundary_RZ, n=N_ISOFLUX, saddle_targets=None):
     smoothed or overshot (the reasoning of :func:`bouquet.io.geqdsk._resample_contour`) --, its arc
     length is measured on dense samples, and the points are spaced uniformly in arc length: each
     stretch between two X-points gets a share of ``n`` proportional to its length, its starting
-    X-point first.  The first point (TokaMaker's isoflux reference point) is the lowest X-point, or
-    without one the outermost (largest-R) point of the curve, so it does not depend on the source's
-    sampling.  Returns ``(pts, arc, info)``: ``arc[i]`` is the arc length point ``i`` represents
+    X-point first (the spacing starts at the lowest X-point).  The first point of the set -- the
+    point TokaMaker measures every other isoflux point's flux against (``set_isoflux``'s reference
+    point) -- is the outermost (largest-R) point: on the curve itself without X-points, of the
+    spaced set with them, so it does not depend on the source's sampling.  It is deliberately NOT
+    the X-point: the flux at a saddle is the worst-determined flux on the boundary, and with the
+    X-point as the reference a reversed-Ip near-double-null IDS slice's reconstruction stopped at
+    maxits, while the same set with the outermost point first converged and reproduced at sigma=0
+    (the pre-#84 sets started at the source's first point, the outboard midplane on the sources
+    we read).  Returns ``(pts, arc, info)``: ``arc[i]`` is the arc length point ``i`` represents
     (half the spacing to each neighbour; the sum is the boundary length) and ``info`` the record
     (method, n, the X-points kept, the source's point count, the lengths)."""
     n = int(n)
@@ -321,7 +327,10 @@ def resample_boundary(boundary_RZ, n=N_ISOFLUX, saddle_targets=None):
             pts.append(p)
             arc.append(np.concatenate([[0.5 * (d_prev + d)], np.full(cnt[j] - 1, d)]))
         pts, arc = np.vstack(pts), np.concatenate(arc)
-        anchor = "lowest X-point"
+        # the reference point: the outermost resampled point, NOT the X-point (see the docstring)
+        k = int(np.argmax(pts[:, 0]))
+        pts, arc = np.roll(pts, -k, axis=0), np.roll(arc, -k)
+        anchor = "outermost point (largest R) of the set spaced from the lowest X-point"
     pts = np.ascontiguousarray(pts, dtype=np.float64)
     arc = np.asarray(arc, dtype=np.float64)
     info = dict(

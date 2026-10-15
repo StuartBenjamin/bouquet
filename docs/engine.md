@@ -715,12 +715,10 @@ the isoflux weight: a branch-selection sensitivity of a bistable
 equilibrium. Since 2026-10 (owner decision) every ENGINE draw's homotopy
 holds the boundary with the RECONSTRUCTION's own isoflux pattern -- the very
 points and weights the reconstruction was pointed at
-(`GenerateEngineDraws.homotopy_isoflux`): on the IDS route the solver
-geometry's (`CaseGeometry.iso_pts` / `iso_w`, the source boundary at
-`solver_geometry.ISOFLUX_WEIGHT`, whose fingerprint the solver geometry record
-carries as `isoflux_sha256`); on the g-file route the pattern that route
-installs itself (the g-file boundary at weight 200; standardising the two
-routes' weights is a separate change). `prepare_baseline()` records it
+(`GenerateEngineDraws.homotopy_isoflux`): on both routes the solver
+geometry's (`CaseGeometry.iso_pts` / `iso_w`, the standard boundary
+constraint below, whose fingerprint the solver geometry record carries as
+`isoflux_sha256`). `prepare_baseline()` records it
 (`Bouquet._engine_run["recon_isoflux"]`, stamped as
 `Baseline.engine["recon_isoflux"]`), and every draw stamps the pattern it
 installed under `engine["homotopy"]["isoflux"]` (`n`, `weight_min` /
