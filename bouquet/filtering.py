@@ -4,8 +4,18 @@ These routines operate on the stored equilibria *after* a run, so the
 user can see the distribution of in-spec / out-of-spec draws before
 deciding what to cut.  They are **non-destructive**: each filter writes
 per-draw boolean flags into the H5 (``passes_coil_filter``,
-``passes_boundary_filter``) and a derived ``selected`` flag (the AND of
-all applied filters), but never deletes data.  Re-running a filter with
+``passes_boundary_filter``; the opt-in bands ``passes_l_i_band`` /
+``passes_beta_p_band`` / ``passes_q0_gate`` and their AND
+``passes_draw_band``) and a derived ``selected`` flag (the AND of all
+applied filters), but never deletes data.
+
+**The in-spec rule** (owner decision 2026-10-14): a draw is in spec when it
+passes the configured coil test and the boundary cut -- the magnetics.  The
+l_i band (``GenerationConfig.l_i_tolerance`` / ``l_i_sigma``) and the beta_p
+band (``beta_p_target`` / ``beta_p_sigma``) are opt-in, for a source that
+states a measurement uncertainty of them; the rule in force is stamped on
+the scan (``inspec_rule``) and :func:`refilter_inspec` re-judges an archive
+under another one.  Re-running a filter with
 different thresholds simply overwrites the flags -- no physics is re-run.
 
 Typical workflow
@@ -55,23 +65,38 @@ __all__ = [
     "passes_all_filters",
     "make_coil_predicate",
     "until_n_delivered",
+    "InspecBands",
+    "resolve_inspec_bands",
+    "refilter_inspec",
+    "read_inspec_rule",
+    "shafranov_lambda",
+    "LAMBDA_DEFINITION",
 ]
 
 #: Per-draw pass flags ANDed into ``selected``.  ``passes_draw_band`` is
-#: written at archive time on draws made by the unified engine only
-#: (bouquet.engine_draws: its post-hoc l_i band / constrain_sawteeth
-#: verdict); a legacy draw never carries it, so its ``selected`` is exactly
-#: the coil + boundary verdict as before.
+#: the AND of the OPT-IN bands of the in-spec rule (:class:`InspecBands`:
+#: an l_i band, a beta_p band, the constrain_sawteeth q0 gate; all off by
+#: default, owner decision 2026-10-14), written at archive time on draws
+#: made by the unified engine (True when no band is on) and by
+#: :func:`refilter_inspec`; a legacy draw never carries it from generation,
+#: so its ``selected`` is exactly the coil + boundary verdict as before.
 _FILTER_FLAGS = ("passes_coil_filter", "passes_boundary_filter",
                  "passes_draw_band")
+#: The opt-in bands' own per-draw verdicts (their AND is
+#: ``passes_draw_band``): reported by :func:`read_filter_flags`, not ANDed
+#: into ``selected`` a second time.
+_BAND_FLAGS = ("passes_l_i_band", "passes_beta_p_band", "passes_q0_gate")
 
 
 # --------------------------------------------------------------------------
 #  the selection predicate -- ONE definition, two call sites
 # --------------------------------------------------------------------------
-#  These three are the whole of what "in spec" means. They are used BOTH by
-#  the postprocess filters below AND, in-loop, by generate_bouquet's
-#  until-N-in-spec stopping rule (GenerationConfig.n_inspec_target).
+#  These three are the whole of what "in spec" means by default (the
+#  magnetics: the coil test and the boundary cut; owner decision 2026-10-14
+#  -- the opt-in bands of InspecBands, below, are the only additions). They
+#  are used BOTH by the postprocess filters below AND, in-loop, by
+#  generate_bouquet's until-N-in-spec stopping rule
+#  (GenerationConfig.n_inspec_target).
 #
 #  Keeping one definition is not tidiness -- it is the guarantee that a run
 #  which stops after counting N in-spec draws still shows N selected draws
@@ -301,6 +326,519 @@ def until_n_delivered(diagnostics_list):
 
 
 # --------------------------------------------------------------------------
+#  the in-spec rule: the magnetics, plus OPT-IN measured bands
+# --------------------------------------------------------------------------
+#  Owner decision, 2026-10-14.  The external magnetics constrain I_p, the
+#  boundary and the Shafranov combination beta_p + l_i/2; bouquet applies
+#  that constraint through the free-boundary draw solve, the coil chi-squared
+#  test and the boundary-deviation cut.  l_i(3) alone is an equilibrium
+#  inference, not a magnetics measurement, so the l_i band that used to be
+#  applied to every engine draw (l_i_tolerance = 0.05) is no longer part of
+#  the default: a draw is IN SPEC when it passes the configured coil test and
+#  the boundary cut (and was not rejected before archiving).  The l_i band
+#  and a beta_p band are opt-in, for a source that STATES a measurement
+#  uncertainty of them (an MSE-constrained fit, a diamagnetic loop).
+#
+#  Lambda = beta_p + l_i(3)/2 is computed and stored for every draw and for
+#  the reconstruction, and reported in the band tables; it never filters.
+
+#: Scan-group attribute: the in-spec rule the archive's band flags were
+#: judged under (:meth:`InspecBands.rule`): ``"magnetics"`` (the default),
+#: ``"magnetics+li"``, ``"magnetics+beta_p"``, ``"magnetics+li+beta_p"``,
+#: with ``"+q0"`` when the ``constrain_sawteeth`` gate is on.
+INSPEC_RULE_ATTR = "inspec_rule"
+#: Scan-group attribute: the JSON record of the band settings
+#: (:meth:`InspecBands.record`), so a later re-filter knows what was applied.
+INSPEC_BANDS_ATTR = "inspec_bands_json"
+#: Per-draw opt-in band verdicts (written only while that band is on).
+L_I_BAND_FLAG = "passes_l_i_band"
+BETA_P_BAND_FLAG = "passes_beta_p_band"
+Q0_GATE_FLAG = "passes_q0_gate"
+#: Per-draw (and ``_baseline``) stored scalars: beta_p and Lambda.
+BETA_P_ATTR = "beta_p"
+LAMBDA_ATTR = "Lambda"
+#: Scan-group attribute naming the Lambda definition used.
+LAMBDA_DEFINITION_ATTR = "lambda_definition"
+
+#: The exact definition of the stored Lambda (also docs/physics-notes.md).
+LAMBDA_DEFINITION = (
+    "Lambda = beta_p + l_i(3)/2. beta_p = 2 mu0 <p>_V / B_pa^2 with B_pa = "
+    "mu0 I_p / L_p (L_p the poloidal circumference of the LCFS) and <p>_V "
+    "the volume average of the FULL pressure (thermal + fast, the "
+    "separatrix pressure added back: the full-pressure frame of "
+    "bouquet.edge_pressure; TokaMaker beta_pol / 100). l_i(3) = 2 int B_p^2 "
+    "dV / (mu0^2 I_p^2 R_0) with R_0 the magnetic-axis major radius "
+    "(TokaMaker li_normalization='iter'). No '-1' (the large-aspect-ratio "
+    "Shafranov-shift convention beta_p + l_i/2 - 1 is not used). For a "
+    "shaped plasma the magnetics' true observable is a shape-weighted "
+    "combination of the current and pressure moments, which the coil "
+    "chi-squared test against the free-boundary solve enforces exactly; "
+    "Lambda is the scalar summary, reported, never filtered on.")
+
+#: The l_i tolerance the LEGACY routes keep using to CONSTRUCT their draws
+#: (rejection sampling of the GPR inductive inside the draw, and the legacy
+#: reconstruction's post-corrective report) when ``l_i_tolerance`` is unset:
+#: the old default, so those routes are unchanged.  It is not a filter.
+LEGACY_L_I_CONSTRUCTION_TOLERANCE = 0.05
+#: Default half-width of a measurement-derived band, in units of the stated
+#: 1-sigma (``GenerationConfig.inspec_band_nsigma``).
+DEFAULT_BAND_NSIGMA = 2.0
+
+
+def shafranov_lambda(beta_p, l_i):
+    """``beta_p + l_i/2`` (:data:`LAMBDA_DEFINITION`); NaN when either is
+    missing or non-finite."""
+    try:
+        b, li = float(beta_p), float(l_i)
+    except (TypeError, ValueError):
+        return float("nan")
+    if not (np.isfinite(b) and np.isfinite(li)):
+        return float("nan")
+    return b + 0.5 * li
+
+
+def l_i_construction_tolerance(value):
+    """The l_i tolerance a LEGACY route constructs its draws (and reports its
+    reconstruction) with: ``value`` (``GenerationConfig.l_i_tolerance``) when
+    set, else :data:`LEGACY_L_I_CONSTRUCTION_TOLERANCE`.  Accepts the config
+    itself."""
+    if hasattr(value, "l_i_tolerance"):
+        value = value.l_i_tolerance
+    return (LEGACY_L_I_CONSTRUCTION_TOLERANCE if value is None
+            else float(value))
+
+
+def _positive(name, v, allow_none=True):
+    import math
+    import numbers
+    if v is None and allow_none:
+        return None
+    if (isinstance(v, bool) or not isinstance(v, numbers.Real)
+            or not math.isfinite(float(v)) or not float(v) > 0.0):
+        raise ValueError(f"{name}={v!r} must be a finite number > 0"
+                         + (" (or None = off)" if allow_none else ""))
+    return float(v)
+
+
+class InspecBands:
+    """The opt-in bands of the in-spec rule (everything beyond the
+    magnetics).  Built by :func:`resolve_inspec_bands` from a
+    :class:`~bouquet.config.GenerationConfig`; every band off by default.
+
+    * ``l_i_tolerance`` -- a FRACTIONAL l_i(3) band ``|l_i - l_i*| <=
+      l_i_tolerance * l_i*`` (``l_i*`` the reconstruction's l_i), the
+      historical knob, applied only when set explicitly;
+    * ``l_i_sigma`` -- the stated 1-sigma of l_i(3) (absolute, l_i(3)
+      units) of the source's MSE / diamagnetic fit: the band is ``|l_i -
+      l_i*| <= nsigma * l_i_sigma``; exclusive with ``l_i_tolerance``;
+    * ``beta_p_target`` / ``beta_p_sigma`` -- a diamagnetic beta_p and its
+      1-sigma: ``|beta_p - beta_p_target| <= nsigma * beta_p_sigma``, beta_p
+      as in :data:`LAMBDA_DEFINITION`; both or neither;
+    * ``nsigma`` -- the half-width of a sigma band, in sigma;
+    * ``constrain_sawteeth`` -- the q0 >= 1 gate (``GenerationConfig.
+      constrain_sawteeth``), carried here because it is judged with them.
+
+    A draw whose banded quantity is missing or non-finite FAILS that band.
+    """
+
+    __slots__ = ("l_i_tolerance", "l_i_sigma", "beta_p_target",
+                 "beta_p_sigma", "nsigma", "constrain_sawteeth")
+
+    def __init__(self, l_i_tolerance=None, l_i_sigma=None, beta_p_target=None,
+                 beta_p_sigma=None, nsigma=DEFAULT_BAND_NSIGMA,
+                 constrain_sawteeth=False):
+        import math
+        import numbers
+        self.l_i_tolerance = _positive("l_i_tolerance", l_i_tolerance)
+        self.l_i_sigma = _positive("l_i_sigma", l_i_sigma)
+        if self.l_i_tolerance is not None and self.l_i_sigma is not None:
+            raise ValueError(
+                "l_i_tolerance and l_i_sigma are two spellings of the l_i "
+                "band (a fraction, or a stated 1-sigma); set one, not both")
+        if (beta_p_target is None) != (beta_p_sigma is None):
+            raise ValueError(
+                "the beta_p band needs both beta_p_target and beta_p_sigma "
+                "(a diamagnetic measurement and its 1-sigma), or neither")
+        if beta_p_target is not None:
+            if (isinstance(beta_p_target, bool)
+                    or not isinstance(beta_p_target, numbers.Real)
+                    or not math.isfinite(float(beta_p_target))):
+                raise ValueError(f"beta_p_target={beta_p_target!r} must be a "
+                                 "finite number")
+            beta_p_target = float(beta_p_target)
+        self.beta_p_target = beta_p_target
+        self.beta_p_sigma = _positive("beta_p_sigma", beta_p_sigma)
+        self.nsigma = _positive("inspec_band_nsigma", nsigma, allow_none=False)
+        self.constrain_sawteeth = bool(constrain_sawteeth)
+
+    # ---- what is on ---------------------------------------------------
+    @property
+    def l_i_on(self) -> bool:
+        return self.l_i_tolerance is not None or self.l_i_sigma is not None
+
+    @property
+    def beta_p_on(self) -> bool:
+        return self.beta_p_target is not None
+
+    @property
+    def any_on(self) -> bool:
+        return self.l_i_on or self.beta_p_on or self.constrain_sawteeth
+
+    def rule(self) -> str:
+        """The in-spec rule's name (:data:`INSPEC_RULE_ATTR`)."""
+        return ("magnetics" + ("+li" if self.l_i_on else "")
+                + ("+beta_p" if self.beta_p_on else "")
+                + ("+q0" if self.constrain_sawteeth else ""))
+
+    def record(self) -> dict:
+        """JSON-able record of the settings (:data:`INSPEC_BANDS_ATTR`)."""
+        return dict(rule=self.rule(), l_i_tolerance=self.l_i_tolerance,
+                    l_i_sigma=self.l_i_sigma,
+                    beta_p_target=self.beta_p_target,
+                    beta_p_sigma=self.beta_p_sigma, nsigma=self.nsigma,
+                    constrain_sawteeth=self.constrain_sawteeth)
+
+    @classmethod
+    def from_record(cls, rec):
+        rec = dict(rec or {})
+        return cls(l_i_tolerance=rec.get("l_i_tolerance"),
+                   l_i_sigma=rec.get("l_i_sigma"),
+                   beta_p_target=rec.get("beta_p_target"),
+                   beta_p_sigma=rec.get("beta_p_sigma"),
+                   nsigma=rec.get("nsigma", DEFAULT_BAND_NSIGMA),
+                   constrain_sawteeth=rec.get("constrain_sawteeth", False))
+
+    def same_as(self, other) -> bool:
+        return other is not None and self.record() == other.record()
+
+    def __eq__(self, other):
+        return isinstance(other, InspecBands) and self.same_as(other)
+
+    def __hash__(self):
+        return hash(tuple(sorted(self.record().items())))
+
+    def __repr__(self):
+        return f"<InspecBands {self.rule()} {self.record()}>"
+
+    # ---- the verdict --------------------------------------------------
+    def verdicts(self, *, l_i=None, l_i_reference=None, beta_p=None,
+                 q0=None, q0_psi_N=None) -> dict:
+        """The opt-in bands' verdicts for one draw.
+
+        Returns ``l_i_in_band`` / ``beta_p_in_band`` / ``q0_ok`` (``None``
+        for a band that is off), the numbers judged (``l_i_3``,
+        ``l_i_reference``, ``l_i_rel``, ``l_i_half_width``, ``beta_p``,
+        ``beta_p_z``, ``q0``), ``Lambda`` (reported, never judged),
+        ``in_band`` (the AND of the bands that are on; True with none on),
+        ``reasons`` and ``rule``."""
+        def _f(v):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return float("nan")
+        li, li_ref, bp = _f(l_i), _f(l_i_reference), _f(beta_p)
+        rel = (abs(li - li_ref) / li_ref
+               if np.isfinite(li) and np.isfinite(li_ref) and li_ref
+               else float("nan"))
+        out = dict(rule=self.rule(), l_i_3=li, l_i_reference=li_ref,
+                   l_i_rel=float(rel), beta_p=bp,
+                   Lambda=shafranov_lambda(bp, li),
+                   l_i_tolerance=self.l_i_tolerance, l_i_sigma=self.l_i_sigma,
+                   beta_p_target=self.beta_p_target,
+                   beta_p_sigma=self.beta_p_sigma, nsigma=self.nsigma,
+                   constrain_sawteeth=self.constrain_sawteeth,
+                   l_i_in_band=None, beta_p_in_band=None, q0_ok=None,
+                   l_i_half_width=None, beta_p_z=None, q0=_f(q0))
+        reasons = []
+        if self.l_i_on:
+            if self.l_i_tolerance is not None:
+                hw = self.l_i_tolerance * abs(li_ref)
+                what = f"l_i_tolerance {self.l_i_tolerance:g} (fraction)"
+            else:
+                hw = self.nsigma * self.l_i_sigma
+                what = f"{self.nsigma:g} x l_i_sigma {self.l_i_sigma:g}"
+            dev = abs(li - li_ref)
+            ok = bool(np.isfinite(dev) and np.isfinite(hw) and dev <= hw)
+            out["l_i_half_width"] = float(hw)
+            out["l_i_in_band"] = ok
+            if not ok:
+                reasons.append(f"l_i band: |l_i - l_i*| = {dev:.4g} > {hw:.4g} "
+                               f"({what}; l_i = {li:.4f}, l_i* = {li_ref:.4f})")
+        if self.beta_p_on:
+            z = (bp - self.beta_p_target) / self.beta_p_sigma
+            ok = bool(np.isfinite(z) and abs(z) <= self.nsigma)
+            out["beta_p_z"] = float(z)
+            out["beta_p_in_band"] = ok
+            if not ok:
+                reasons.append(f"beta_p band: beta_p = {bp:.4g} is {z:+.2f} "
+                               f"sigma from {self.beta_p_target:g} (|z| <= "
+                               f"{self.nsigma:g})")
+        if self.constrain_sawteeth:
+            q = out["q0"]
+            ok = bool(np.isfinite(q) and q >= 1.0)
+            out["q0_ok"] = ok
+            if not ok:
+                reasons.append(f"constrain_sawteeth: q0 = {q:.4f} < 1"
+                               + ("" if q0_psi_N is None
+                                  else f" at psi_N {float(q0_psi_N):g}"))
+        out["in_band"] = bool(all(v for v in (out["l_i_in_band"],
+                                              out["beta_p_in_band"],
+                                              out["q0_ok"]) if v is not None))
+        out["reasons"] = reasons
+        return out
+
+    def flags(self, verdicts) -> dict:
+        """The per-draw flag attrs of *verdicts* (only the bands that are
+        on) plus ``passes_draw_band`` (their AND)."""
+        out = {}
+        if verdicts.get("l_i_in_band") is not None:
+            out[L_I_BAND_FLAG] = bool(verdicts["l_i_in_band"])
+        if verdicts.get("beta_p_in_band") is not None:
+            out[BETA_P_BAND_FLAG] = bool(verdicts["beta_p_in_band"])
+        if verdicts.get("q0_ok") is not None:
+            out[Q0_GATE_FLAG] = bool(verdicts["q0_ok"])
+        out["passes_draw_band"] = bool(verdicts["in_band"])
+        return out
+
+
+def resolve_inspec_bands(gc) -> InspecBands:
+    """The :class:`InspecBands` of a :class:`~bouquet.config.GenerationConfig`
+    (``l_i_tolerance``, ``l_i_sigma``, ``beta_p_target``, ``beta_p_sigma``,
+    ``inspec_band_nsigma``, ``constrain_sawteeth``).  Validates; a field a
+    stand-in config does not carry is off."""
+    return InspecBands(
+        l_i_tolerance=getattr(gc, "l_i_tolerance", None),
+        l_i_sigma=getattr(gc, "l_i_sigma", None),
+        beta_p_target=getattr(gc, "beta_p_target", None),
+        beta_p_sigma=getattr(gc, "beta_p_sigma", None),
+        nsigma=getattr(gc, "inspec_band_nsigma", DEFAULT_BAND_NSIGMA),
+        constrain_sawteeth=bool(getattr(gc, "constrain_sawteeth", False)))
+
+
+def _scan_group_path(scan_key):
+    bkey = _scan_key(scan_key)
+    return f"scan/{bkey}" if bkey is not None else "/"
+
+
+def read_inspec_rule(h5path_or_header, scan_key=None):
+    """``(rule, InspecBands or None)`` stamped on a scan, or ``(None,
+    None)`` on an archive that predates the record (its engine draws' band
+    flags were then judged under the old unconditional l_i band)."""
+    import json
+    h5path = _resolve(h5path_or_header)
+    with h5py.File(h5path, "r") as hf:
+        gp = _scan_group_path(scan_key)
+        if gp not in hf:
+            return None, None
+        a = hf[gp].attrs
+        rule = a.get(INSPEC_RULE_ATTR)
+        rec = a.get(INSPEC_BANDS_ATTR)
+    if rule is None:
+        return None, None
+    rule = rule.decode() if isinstance(rule, bytes) else str(rule)
+    bands = None
+    if rec is not None:
+        try:
+            bands = InspecBands.from_record(json.loads(
+                rec.decode() if isinstance(rec, bytes) else str(rec)))
+        except (TypeError, ValueError):
+            bands = None
+    return rule, bands
+
+
+def stamp_inspec_rule(h5path_or_header, scan_key, bands, extra=None):
+    """Stamp the in-spec rule and its band settings on the scan group
+    (:data:`INSPEC_RULE_ATTR`, :data:`INSPEC_BANDS_ATTR`) and the Lambda
+    definition (:data:`LAMBDA_DEFINITION_ATTR`).  *extra* is merged into the
+    JSON record (e.g. a legacy route's draw-construction tolerance)."""
+    import json
+    h5path = _resolve(h5path_or_header)
+    rec = dict(bands.record(), **(extra or {}))
+    with h5py.File(h5path, "a") as hf:
+        gp = _scan_group_path(scan_key)
+        if gp not in hf:
+            return
+        a = hf[gp].attrs
+        a[INSPEC_RULE_ATTR] = bands.rule()
+        a[INSPEC_BANDS_ATTR] = json.dumps(rec)
+        a[LAMBDA_DEFINITION_ATTR] = LAMBDA_DEFINITION
+
+
+def _full_beta_p(edge_record):
+    """beta_p (fraction) of an archived edge-pressure record's FULL frame,
+    or NaN."""
+    try:
+        return float(edge_record["frames"]["full"]["beta_pol"]) / 100.0
+    except (KeyError, TypeError, ValueError):
+        return float("nan")
+
+
+def _engine_post_hoc(grp):
+    try:
+        from .engine import read_engine_json
+        rec = read_engine_json(grp)
+    except Exception:
+        return None
+    return (rec or {}).get("post_hoc") if isinstance(rec, dict) else None
+
+
+def _draw_scalars_for_rule(grp, l_i_reference):
+    """``(l_i, l_i_reference, beta_p, q0, q0_psi_N, source)`` of one
+    archived draw: the engine's own post-hoc record when present (the very
+    numbers its in-flight verdict judged), else the archived ``l_i(3)`` /
+    ``beta_p`` attrs (beta_p from the edge-pressure record's full frame when
+    the attr is absent) against the baseline's ``l_i_target``."""
+    import json
+    from .edge_pressure import EDGE_PRESSURE_ATTR
+    a = grp.attrs
+    ph = _engine_post_hoc(grp) or {}
+    li = ph.get("l_i_3", a.get("l_i(3)", np.nan))
+    ref = ph.get("l_i_reference", l_i_reference)
+    bp = ph.get("beta_p", a.get(BETA_P_ATTR, None))
+    if bp is None:
+        raw = a.get(EDGE_PRESSURE_ATTR)
+        try:
+            bp = (_full_beta_p(json.loads(raw.decode() if isinstance(raw, bytes)
+                                          else str(raw)))
+                  if raw is not None else np.nan)
+        except (TypeError, ValueError):
+            bp = np.nan
+    src = ENGINE_RECORD_SOURCE if ph else "archived attrs"
+    return (li, ref, bp, ph.get("q0", np.nan), ph.get("q0_psi_N"), src)
+
+
+ENGINE_RECORD_SOURCE = "engine post_hoc record"
+
+
+def refilter_inspec(h5path_or_header, bands=None, scan_key=None, *,
+                    verbose=True):
+    """Re-judge the opt-in bands of an archive under *bands* (an
+    :class:`InspecBands`, a GenerationConfig, or ``None`` = the default
+    rule, the magnetics alone), from the stored per-draw numbers; no physics
+    is re-run.
+
+    For every archived draw: the band flags that are on are (re)written
+    (:data:`L_I_BAND_FLAG`, :data:`BETA_P_BAND_FLAG`, :data:`Q0_GATE_FLAG`),
+    those that are off are REMOVED, ``passes_draw_band`` is the AND of the
+    ones on (written whenever a band is on or the draw already carried the
+    flag -- every engine draw; removed from another draw when no band is
+    on), ``beta_p`` / ``Lambda`` are stamped where
+    missing, and ``selected`` is recomputed with the coil and boundary flags
+    already there (run the coil / boundary filters, e.g.
+    :meth:`bouquet.run.Bouquet.filter`, to re-judge those).  The scan is
+    stamped with the rule (:func:`stamp_inspec_rule`).
+
+    The numbers judged: an engine draw's own post-hoc record (``l_i_3``
+    against its ``l_i_reference``, ``beta_p``, ``q0``) where present, else
+    the archived ``l_i(3)`` against the baseline's ``l_i_target`` and the
+    archived ``beta_p`` (else the edge-pressure record's full-frame
+    beta_pol / 100).  The q0 gate is judged on engine draws only (a legacy
+    draw records no q0 at the gate's radius; its flag is left absent).
+
+    This is how an archive made before the 2026-10-14 rule is re-filtered:
+    its engine draws carry ``passes_draw_band`` from the old unconditional
+    l_i band, which ``refilter_inspec(path)`` resets to the magnetics rule.
+    The in-loop ``until_n_inspec`` stamps are NOT rewritten: they record what
+    the loop counted when it ran.
+
+    Returns ``{scan_key: {"rule", "n_draws", "n_in_band", "n_selected",
+    "draws": {idx: verdicts}}}`` (unwrapped for an explicit ``scan_key``).
+    """
+    if bands is None:
+        bands = InspecBands()
+    elif not isinstance(bands, InspecBands):
+        bands = resolve_inspec_bands(bands)
+    h5path = _resolve(h5path_or_header)
+    _require_scan_key(h5path, scan_key)
+    no_q0 = InspecBands.from_record(dict(bands.record(),
+                                         constrain_sawteeth=False))
+    out = {}
+    for sv in _iter_scan_keys(h5path, scan_key):
+        bkey = _scan_key(sv)
+        bl_path = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
+        rows = {}
+        idxs = list_equilibrium_indices(h5path, scan_key=sv)
+        with h5py.File(h5path, "a") as hf:
+            ref = (float(hf[bl_path].attrs["l_i_target"])
+                   if bl_path in hf and "l_i_target" in hf[bl_path].attrs
+                   else np.nan)
+            for i in idxs:
+                gp = _group_path(sv, i)
+                if gp not in hf:
+                    continue
+                g = hf[gp]
+                li, li_ref, bp, q0, q0_psi, src = _draw_scalars_for_rule(g, ref)
+                b = (bands if src == ENGINE_RECORD_SOURCE
+                     or not bands.constrain_sawteeth else no_q0)
+                v = b.verdicts(l_i=li, l_i_reference=li_ref, beta_p=bp, q0=q0,
+                               q0_psi_N=q0_psi)
+                v["rule"], v["source"] = bands.rule(), src
+                fl = b.flags(v)
+                for name in (L_I_BAND_FLAG, BETA_P_BAND_FLAG, Q0_GATE_FLAG):
+                    if name in fl:
+                        g.attrs[name] = fl[name]
+                    elif name in g.attrs:
+                        del g.attrs[name]
+                # passes_draw_band: written while a band is on; with none on
+                # it stays (True) on an engine draw, which always carries it,
+                # and is removed from any other draw, where it would be an
+                # earlier re-filter's
+                if b.any_on or (src == ENGINE_RECORD_SOURCE
+                                and "passes_draw_band" in g.attrs):
+                    g.attrs["passes_draw_band"] = fl["passes_draw_band"]
+                elif "passes_draw_band" in g.attrs:
+                    del g.attrs["passes_draw_band"]
+                if BETA_P_ATTR not in g.attrs and np.isfinite(v["beta_p"]):
+                    g.attrs[BETA_P_ATTR] = float(v["beta_p"])
+                if LAMBDA_ATTR not in g.attrs and np.isfinite(v["Lambda"]):
+                    g.attrs[LAMBDA_ATTR] = float(v["Lambda"])
+                _recompute_selected(g)
+                rows[i] = v
+        stamp_inspec_rule(h5path, sv, bands)
+        sel = select_indices(h5path, scan_key=sv, selection="selected")
+        n_in = sum(1 for v in rows.values() if v["in_band"])
+        out[sv] = dict(rule=bands.rule(), n_draws=len(rows), n_in_band=n_in,
+                       n_selected=len(sel), draws=rows)
+        if verbose:
+            print(f"[in-spec rule] scan {sv!r}: {bands.rule()} -- "
+                  + (f"{n_in}/{len(rows)} draws inside the opt-in bands"
+                     if bands.any_on else "no opt-in band on")
+                  + f"; {len(sel)} of {len(rows)} selected")
+    return _finalize_scan_result(out, scan_key)
+
+
+def stamp_shafranov(h5path_or_header, scan_key=None):
+    """Stamp ``beta_p`` and ``Lambda`` (:data:`LAMBDA_DEFINITION`) on every
+    archived draw of the scan that lacks them, from its ``l_i(3)`` and its
+    edge-pressure record's full frame, and the Lambda definition on the
+    scan.  Returns the number of draws stamped.  (Engine draws stamp their
+    own at archive time, from the state their band verdict judged.)"""
+    h5path = _resolve(h5path_or_header)
+    n = 0
+    svs = _iter_scan_keys(h5path, scan_key)
+    idx = {sv: list_equilibrium_indices(h5path, scan_key=sv) for sv in svs}
+    with h5py.File(h5path, "a") as hf:
+        for sv in svs:
+            gs = _scan_group_path(sv)
+            if gs in hf:
+                hf[gs].attrs[LAMBDA_DEFINITION_ATTR] = LAMBDA_DEFINITION
+            for i in idx[sv]:
+                gp = _group_path(sv, i)
+                if gp not in hf:
+                    continue
+                g = hf[gp]
+                if LAMBDA_ATTR in g.attrs and BETA_P_ATTR in g.attrs:
+                    continue
+                li, _, bp, _, _, _ = _draw_scalars_for_rule(g, np.nan)
+                lam = shafranov_lambda(bp, li)
+                if np.isfinite(lam):
+                    g.attrs[BETA_P_ATTR] = float(bp)
+                    g.attrs[LAMBDA_ATTR] = float(lam)
+                    n += 1
+    return n
+
+
+# --------------------------------------------------------------------------
 #  internal helpers
 # --------------------------------------------------------------------------
 def _resolve(h5path_or_header):
@@ -422,9 +960,12 @@ def _boundary_devs(bl_boundary, grp):
 def read_filter_flags(h5path_or_header, scan_key=None):
     """Per-draw filter flags: ``{idx: {flag: value, ...}}`` for stored draws.
 
-    Each inner dict carries ``passes_coil_filter``, ``passes_boundary_filter``
-    and ``selected`` when present (missing flags are omitted), plus the raw
-    metrics ``max_F_drift_pct``, ``max_VSC_drift_pct``, ``in_spec``. An explicit
+    Each inner dict carries ``passes_coil_filter``, ``passes_boundary_filter``,
+    ``passes_draw_band`` (and the opt-in bands' own ``passes_l_i_band`` /
+    ``passes_beta_p_band`` / ``passes_q0_gate``) and ``selected`` when
+    present (missing flags are omitted), plus the raw metrics
+    ``max_F_drift_pct``, ``max_VSC_drift_pct``, ``in_spec``, ``beta_p`` and
+    ``Lambda``. An explicit
     ``scan_key`` returns the ``{idx: {...}}`` dict directly; the default
     ``scan_key=None`` returns ``{scan_key: {idx: {...}}}`` (shape follows the
     call, same convention as the other accessors).
@@ -440,11 +981,12 @@ def read_filter_flags(h5path_or_header, scan_key=None):
                     continue
                 a = hf[gp].attrs
                 rec = {}
-                for k in (*_FILTER_FLAGS, "selected"):
+                for k in (*_FILTER_FLAGS, *_BAND_FLAGS, "selected"):
                     if k in a:
                         rec[k] = bool(a[k])
                 for k in ("max_F_drift_pct", "max_VSC_drift_pct", "in_spec",
-                          "boundary_rms_mm", "boundary_max_mm"):
+                          "boundary_rms_mm", "boundary_max_mm", "beta_p",
+                          "Lambda"):
                     if k in a:
                         rec[k] = (float(a[k]) if k != "in_spec"
                                   else bool(a[k]))
