@@ -441,7 +441,7 @@ def _same_path(a, b) -> bool:
         return False
 
 
-def zeff_sigma_eligibility(source, ida_path):
+def zeff_sigma_eligibility(source, ida_path, kinetic_source=None):
     """May a measured Z_eff envelope be paired with this baseline?
 
     Returns ``(eligible, reason)``.  ``reason`` is ``""`` when eligible and a
@@ -450,8 +450,9 @@ def zeff_sigma_eligibility(source, ida_path):
 
     The measured tiers are absolute sigmas from one IDA ``.cdf`` and pair
     only with a Z_eff baseline from that same file: the source's own
-    ``profiles_path`` (:class:`ReconstructionSource`) or, on the
-    EXPERIMENTAL ``ni_source`` routes only, ``ida_path``
+    ``profiles_path`` (:class:`ReconstructionSource`) or, on the measured
+    ``ni_source`` routes only (resolved with ``kinetic_source``:
+    :func:`bouquet.experimental.resolved_ni_source`), ``ida_path``
     (:class:`ImasSource`; ``zeff_from_fuse=True`` stays eligible, the
     envelope carried absolute).  Refusals: no IDA file configured; an
     :class:`ImasSource` with ``ni_source="standard"`` (its Z_eff is the
@@ -466,13 +467,13 @@ def zeff_sigma_eligibility(source, ida_path):
         return False, "no IDA sigma file is configured (no ladder applies)"
     ida_name = os.path.basename(_norm_path(ida_path)) or str(ida_path)
 
-    from .experimental import IDA_ION_ROUTES
+    from .experimental import IDA_ION_ROUTES, resolved_ni_source
     if isinstance(source, ReconstructionSource):
         own, own_kind = str(getattr(source, "profiles_path", "") or ""), "profiles file"
     elif (isinstance(source, ImasSource)
-          and getattr(source, "ni_source", "standard") not in IDA_ION_ROUTES):
-        # ni_source="standard" (as before PR #56): the IMAS/ida_hybrid Z_eff
-        # is the dd's, never the IDA one
+          and resolved_ni_source(source, kinetic_source) not in IDA_ION_ROUTES):
+        # the dd route (ni_source="standard", or "auto" off ida_hybrid): the
+        # IMAS Z_eff is the dd's, never the IDA one
         return False, (
             "the Z_eff baseline comes from the IMAS/FUSE source rather than "
             f"from {ida_name}; pairing a FUSE Z_eff with an IDA-measured "
@@ -823,10 +824,12 @@ def resolve_uncertainty(config, baseline) -> dict:
     src = config.source
     psi_kin = np.asarray(baseline.psi_N_kinetic, dtype=float)
 
-    # The PR #56 Z_eff / n_i route (EXPERIMENTAL; bouquet.experimental.
-    # REGISTRY["ida_ion_route"]) or the standard one.
-    from .experimental import STANDARD_NI_SOURCE, ida_ion_route_on
-    _ion_route = ida_ion_route_on(src, unc)
+    # The measured IDA Z_eff / n_i route (the ida_hybrid default; bouquet.
+    # experimental.GRADUATED["ida_ion_route"]) or the standard one.
+    from .experimental import (STANDARD_NI_SOURCE, ida_ion_route_on,
+                               resolved_ni_source)
+    _kin_src = getattr(config.generation, "kinetic_source", None)
+    _ion_route = ida_ion_route_on(src, unc, kinetic_source=_kin_src)
     # IDA file for the sigmas: unc.ida_path, else the source's own .cdf.
     ida_path = unc.ida_path
     if ida_path is None:
@@ -834,8 +837,8 @@ def resolve_uncertainty(config, baseline) -> dict:
                 and src.profiles_path.endswith(".cdf"):
             ida_path = src.profiles_path
         elif isinstance(src, ImasSource) and _ion_route:
-            # EXPERIMENTAL route only: the IMAS source's own IDA file; under
-            # ni_source="standard" only unc.ida_path supplies IDA sigmas
+            # measured route only: the IMAS source's own IDA file; on the
+            # dd route only unc.ida_path supplies IDA sigmas
             # (from_imas sets it), as before PR #56
             ida_path = getattr(src, "ida_path", None)
 
@@ -873,7 +876,7 @@ def resolve_uncertainty(config, baseline) -> dict:
             ida = read_ida(
                 ida_path, time=_t_req,
                 sigma_mode=unc.sigma_mode, sigma_method=unc.sigma_method,
-                ni_source=(getattr(src, "ni_source", STANDARD_NI_SOURCE)
+                ni_source=(resolved_ni_source(src, _kin_src)
                            if _ion_route else STANDARD_NI_SOURCE),
                 # the carbon tier's Z(Z-1) propagation is quadratically
                 # Z-sensitive; the kinetics loader already passes this, and
@@ -1042,7 +1045,7 @@ def resolve_uncertainty(config, baseline) -> dict:
         # spelling of the very same file.  It returns the REASON as well as
         # the verdict so the fallback can be warned about and recorded.
         _zeff_baseline_is_ida, _zeff_inelig = zeff_sigma_eligibility(
-            src, ida_path)
+            src, ida_path, kinetic_source=_kin_src)
         _z_env, _z_label, _z_meta = resolve_zeff_envelope(
             getattr(unc, "zeff_sigma_source", "auto"),
             unc.zeff_scalar_sigma,

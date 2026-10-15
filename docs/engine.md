@@ -654,13 +654,84 @@ reconstruction to the loop tolerances. With the current gate standing (it is
 measured one pass late) the loop takes `JBS_REQUIRED_CONSECUTIVE + 1 = 3`
 passes.
 
+**The re-solve starts from the reconstruction.** "The warm state" is
+generate_bouquet's baseline re-solve: the reconstruction's request solved
+once more through the draws' jphi-linterp machinery, whose result is every
+draw's warm start, the target of the strong coil regularisation and the
+reference of the coil drift and the homotopy. On the engine route it starts
+from the reconstruction's DELIVERED equilibrium -- restored from the
+snapshot `prepare_baseline()` takes (`Bouquet._engine_run["delivered_eq"]`)
+-- with the reconstruction's own settings and inputs, warm
+(`GenerateEngineDraws.baseline_resolve_start`). It never re-initialises psi
+first: that is the legacy route's guard (issue #24), for a reconstruction
+solved in inverse mode, and a free-boundary solve from a cold analytic psi
+can converge to a DIFFERENT equilibrium of identical inputs. Measured on a
+reversed-Ip, near-double-null IDS slice (2026-10): the cold re-solve put the
+magnetic axis 1.7 cm lower, with q0 -1.5e-3, l_i -0.2 % and beta_pol
++0.9 % against the reconstruction, at nl_tol 1e-6 and still at 1e-9, while
+one more solve from that state, or a warm re-solve from the reconstruction,
+returns to the reconstruction to ~1e-7 in q0. The legacy route keeps the
+re-init (`DrawMethod.baseline_resolve_start` returns `None`).
+
+**The homotopy holds the reconstruction's isoflux.** On that same slice the
+homotopy's first solve -- with the isoflux re-pointed to the draw's traced
+boundary (every traced point, weight 200, the legacy route's pattern) under
+the strong coil regularisation -- selected the other equilibrium too,
+starting from the reproduced reconstruction, so the zero-perturbation draw
+missed the archived-stage gates (Delta q0 -3.8e-3 against 2e-3) although its
+loop stage reproduced the reconstruction. The selection needed both the
+re-pointed pattern and the strong regularisation, and was not monotone in
+the isoflux weight: a branch-selection sensitivity of a bistable
+equilibrium. Since 2026-10 (owner decision) every ENGINE draw's homotopy
+holds the boundary with the RECONSTRUCTION's own isoflux pattern -- the very
+points and weights the reconstruction was pointed at
+(`GenerateEngineDraws.homotopy_isoflux`): on the IDS route the solver
+geometry's (`CaseGeometry.iso_pts` / `iso_w`, the source boundary at
+`solver_geometry.ISOFLUX_WEIGHT`, whose fingerprint the solver geometry record
+carries as `isoflux_sha256`); on the g-file route the pattern that route
+installs itself (the g-file boundary at weight 200; standardising the two
+routes' weights is a separate change). `prepare_baseline()` records it
+(`Bouquet._engine_run["recon_isoflux"]`, stamped as
+`Baseline.engine["recon_isoflux"]`), and every draw stamps the pattern it
+installed under `engine["homotopy"]["isoflux"]` (`n`, `weight_min` /
+`weight_max`, `origin`, `sha256`, `installed`); the baseline's engine record
+carries it as `draws.homotopy_isoflux`. With no pattern on record the isoflux
+in place is left alone and the stamp says so -- never a silent re-trace. The
+legacy and swb routes keep the re-trace (`DrawMethod.homotopy_isoflux`
+returns `None`). This changes every engine draw's homotopy -- its boundary
+constraint density and weight, hence coil drift, LCFS deviation and yield of
+perturbed draws -- and it fixes the branch selection on the slice above; it
+does not prove robustness on other near-double-null slices.
+
+**Is this baseline bistable? (`check_bistability`, opt-in.)** With
+`GenerationConfig.check_bistability=True` (default `False`; unified engine
+only, refused under `"legacy"`), `prepare_baseline()` spends ONE extra solve
+after the reconstruction (`engine.check_bistability`): the solver is put
+back on the reconstruction's delivered equilibrium (its targets, profiles,
+isoflux and coil regularisation -- the same inputs), psi is re-initialised
+COLD as the reconstruction's own start (g-file: `init_psi` from its LCFS
+shape; IDS: from the boundary's shape, with the `coil_init` seed), and the
+solver solves once. The cold state is measured by the engine backend's own
+final measurement and compared with the delivered one: l_i(3) and q0 at the
+q-row radius against the sigma=0 gates (`jbs_tol_li`, `jbs_tol_q0` -- the
+zero-perturbation draw's own), beta_pol and the magnetic axis reported (the
+sigma=0 rule gates neither). A miss stamps `Baseline.engine["bistability"]`
+with `bistable=True`, the deltas, both states and the gates, and a
+`RuntimeWarning` names it; a cold solve that fails is recorded
+(`outcome="cold_solve_failed"`, `bistable=None`) and warned, never hidden.
+The delivered equilibrium is restored afterwards: the baseline, its archive
+and the draws are unchanged. The record is archived with the baseline's
+engine record. A cold start converging to the delivered state does not prove
+there is no other branch; a miss shows there is one.
+
 `verify_sigma0_consistency()` under the engine runs ONE draw through the
 route `generate()` runs -- it calls `generate(n=1)` itself, with every
 perturbation zero and the bootstrap scale 1.0, archiving into a temporary
 file (the configured archive is never touched): generate_bouquet's baseline
 re-solve and warm start, its strong coil regularisation and the
-reconstruction's own one installed for the loop (above), the isoflux
-re-pointed to the draw's own boundary, the homotopy and the post-homotopy
+reconstruction's own one installed for the loop (above), the
+reconstruction's own isoflux held by the homotopy (above), the homotopy and
+the post-homotopy
 stage, under `engine_draw_solve_maxits`. (Until 2026-10-04 it ran only the
 loop, `engine_draws.verify_zero_perturbation`, from whatever state the
 solver held, under whatever regularisation was installed -- not the draw's

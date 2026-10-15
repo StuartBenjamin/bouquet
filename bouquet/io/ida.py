@@ -215,6 +215,7 @@ def read_ida(
     sigma_method: str = "percentile",   # ensemble-layout band estimator
     ensemble_median: bool = False,      # ensemble-layout central estimator
     ni_source: str = "standard",
+    zeff_substitute=None,
     impurity_Z: float = 6.0,
     sigma_ni_from_ne: Optional[bool] = None,
 ) -> IDAProfiles:
@@ -252,6 +253,15 @@ def read_ida(
         without it; ``"all"`` uses whichever routes the file supports.
     impurity_Z : float
         Impurity charge Z (carbon Z=6).
+    zeff_substitute : callable, optional
+        ``f(psi_N) -> Z_eff`` used in place of a MISSING ``Zeff`` dataset on
+        the ``"standard"`` route only (the IDA-hybrid dd route, whose Z_eff
+        is the dd's anyway: ``io.imas._merge_ida_kinetics`` passes the dd's
+        thermal Z_eff).  Stamped in ``zeff_provenance`` (``source`` "dd
+        (substitute: the file has no Zeff)").  Ignored when the file has
+        ``Zeff``.  A file without ``Zeff`` takes the CER route alone on
+        ``"all"``; ``"Zeff"``, and ``"standard"`` without a substitute,
+        refuse it.
     sigma_ni_from_ne : bool, optional
         **Deprecated, no effect.**  Accepted so existing callers keep
         working; it was already a no-op before the ``ni_source`` ladder
@@ -317,6 +327,17 @@ def read_ida(
             raise ValueError("sigma_mode='ensemble' but the file is a 2-D direct "
                              "IDA; use sigma_mode='auto' or 'direct'")
         # An explicit ni_source is strict ("CER" is checked by the ladder).
+        if ni_source == "Zeff" and "Zeff" not in f:
+            raise KeyError(
+                f"{path!r} has no 'Zeff' dataset, so ni_source='Zeff' has no "
+                "Z_eff to read; pass ni_source='CER' or 'all' to derive Z_eff "
+                "from the carbon density instead")
+        if ni_source == "standard" and "Zeff" not in f \
+                and zeff_substitute is None:
+            raise KeyError(
+                f"{path!r} has no 'Zeff' dataset: ni_source='standard' reads "
+                "the file's VB Z_eff; pass ni_source='CER' or 'all' to derive "
+                "Z_eff from the carbon density")
         if ni_source == "Zeff" and not is_ensemble and "Zeff_err" not in f:
             raise KeyError(
                 f"{path!r} has no 'Zeff_err' dataset, so the Zeff term of sigma_ni "
@@ -342,13 +363,14 @@ def read_ida(
 
             psi_N = np.asarray(f["psi_n"][t_idx], dtype=float)[0]   # shared radial grid
             ne_s, te_s = _samples("n_e"), _samples("T_e")
-            ti_s, zf_s = _samples("T_12C6"), _samples("Zeff")
-            ne, te, ti, Zeff = (_center(ne_s), _center(te_s),
-                                _center(ti_s), _center(zf_s))
+            ti_s = _samples("T_12C6")
+            zf_s = _samples("Zeff") if "Zeff" in f else None
+            ne, te, ti = _center(ne_s), _center(te_s), _center(ti_s)
+            Zeff = None if zf_s is None else _center(zf_s)
             sigma_ne, sigma_te, sigma_ti = _band(ne_s), _band(te_s), _band(ti_s)
             # Highest-fidelity tier: the posterior carries Zeff samples, so the
             # Zeff envelope is measured the same way as the kinetic ones.
-            sigma_Zeff = _band(zf_s)
+            sigma_Zeff = None if zf_s is None else _band(zf_s)
             # Carbon tier: the dilution's own posterior, per sample.
             sigma_Zeff_carbon, sigma_Zeff_carbon_source = None, "none"
             if "n_12C6" in f:
@@ -372,7 +394,9 @@ def read_ida(
 
             psi_N = np.asarray(f["psi_n"][:], dtype=float)
             ne, te = col("n_e"), col("T_e")          # m^-3, eV
-            ti, Zeff = col("T_12C6"), col("Zeff")    # eV (carbon CER), dimensionless
+            ti = col("T_12C6")                       # eV (carbon CER)
+            # the VB Z_eff (dimensionless); None: the file carries none
+            Zeff = col("Zeff") if "Zeff" in f else None
             sigma_ne, sigma_te, sigma_ti = col("n_e_err"), col("T_e_err"), col("T_12C6_err")
             if "n_12C6" in f:
                 n_carbon = col("n_12C6")
@@ -381,7 +405,8 @@ def read_ida(
             # Newer direct-layout vintages carry a measured Zeff_err profile;
             # older ones do not.  None (NOT a guessed scalar) marks the older
             # vintage, which is what drops the VB rung of the ladder below.
-            sigma_Zeff = col("Zeff_err") if "Zeff_err" in f else None
+            sigma_Zeff = (col("Zeff_err") if ("Zeff_err" in f
+                                              and Zeff is not None) else None)
             sigma_Zeff_carbon, sigma_Zeff_carbon_source = None, "none"
             if "n_12C6" in f and "n_12C6_err" in f:
                 _nc, _snc = col("n_12C6"), col("n_12C6_err")
@@ -411,7 +436,7 @@ def read_ida(
         # deviation flags THIS file (non-carbon impurity, calibration, or
         # fit vintage), not the method.  No acceptance criterion -- one line.
         zeff_carbon_dev = None
-        if "n_12C6" in f:
+        if "n_12C6" in f and Zeff is not None:
             n_c_raw = np.asarray(f["n_12C6"][t_idx], dtype=float)
             n_c = n_c_raw.mean(0) if n_c_raw.ndim == 2 else n_c_raw
             # Restrict to VALID core points: an edge-only fit vintage
@@ -449,6 +474,11 @@ def read_ida(
             # 0 <= ni <= ne), sigma_ni the ne fraction.  The Z_eff envelope
             # is the file's own; the carbon > VB > scalar choice is made by
             # baseline.resolve_zeff_envelope.
+            _substituted = Zeff is None
+            if _substituted:
+                # the IDA-hybrid dd route on a file with no Zeff: the caller's
+                # Z_eff (the dd's) in its place, stamped below
+                Zeff = np.asarray(zeff_substitute(psi_N), dtype=float)
             ni = main_ion_density_from_zeff(
                 ne, np.clip(Zeff, 1.0, impurity_Z), impurity_Z)
             with np.errstate(divide="ignore", invalid="ignore"):
@@ -459,9 +489,12 @@ def read_ida(
                                  else "none")
             ni_route_chi = zeff_route_chi = zeff_dne = None
             zeff_provenance = dict(
-                convention=("measured (VB bremsstrahlung; includes any fast "
+                convention=("the caller's substitute (the file has no Zeff)"
+                            if _substituted else
+                            "measured (VB bremsstrahlung; includes any fast "
                             "ions the measurement sees)"),
-                source="VB", ni_source="standard",
+                source=("dd (substitute: the file has no Zeff)"
+                        if _substituted else "VB"), ni_source="standard",
                 weights=dict(VB=1.0, CER=0.0),
                 window=[1.0, float(impurity_Z)],
                 n_clipped_vb=int(np.count_nonzero(
@@ -497,7 +530,7 @@ def read_ida(
         # A route is LIVE only with a value AND a validated envelope.
         # sigma_Zeff_carbon carries the carbon screen's verdict (see
         # _carbon_tier_usable), so the ladder and the tier share ONE screen.
-        _vb_ok = sigma_Zeff is not None
+        _vb_ok = sigma_Zeff is not None and zeff_vb is not None
         _cer_ok = (zeff_cer is not None and sigma_Zeff_carbon is not None
                    and sigma_n_carbon is not None
                    and float(impurity_Z) == 6.0)
@@ -515,10 +548,19 @@ def read_ida(
             use_vb, use_cer = _vb_ok, _cer_ok
 
         # Bottom rung: neither route has a usable envelope (the oldest
-        # vintages carry no *_err): take the VB value, ne-fraction sigma.
+        # vintages carry no *_err): take the VB value, ne-fraction sigma --
+        # or, with no VB value at all, the carbon value.
         zeff_sigma_from_ne = not (use_vb or use_cer)
         if zeff_sigma_from_ne:
-            use_vb = True
+            if zeff_vb is not None:
+                use_vb = True
+            elif zeff_cer is not None:
+                use_cer = True
+            else:
+                raise KeyError(
+                    f"{path!r} carries no Z_eff information (no 'Zeff' and no "
+                    f"'n_12C6' dataset): ni_source={ni_source!r} has no "
+                    "Z_eff to resolve")
 
         w_v = 0.5 if (use_vb and use_cer) else (1.0 if use_vb else 0.0)
         w_c = 0.5 if (use_vb and use_cer) else (1.0 if use_cer else 0.0)

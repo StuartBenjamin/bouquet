@@ -1,8 +1,10 @@
-"""Thermal ni for the bootstrap on the ida_hybrid path -- EXPERIMENTAL
-(PR #56; bouquet.experimental.REGISTRY["ida_ion_route"],
-["ida_ni_beam_subtraction"], ["fuse_zeff_fast_ions"]).  Every read here opts
-in explicitly (:data:`PR56`); the defaults, which are the pre-#56 reader, are
-pinned in :class:`TestDefaultsArePre56`.
+"""Thermal ni for the bootstrap on the ida_hybrid path (PR #56; the
+measured route and the beam subtraction are the ida_hybrid default since
+2026-10, bouquet.experimental.GRADUATED; the dd's fast-ion Z_eff term stays
+EXPERIMENTAL, REGISTRY["fuse_zeff_fast_ions"]).  Every read here sets the
+options explicitly (:data:`PR56`); the explicit dd route and the FUSE path
+are pinned in :class:`TestDefaultsArePre56`, the new default in
+tests/test_ida_hybrid_default_route.py.
 
 IDA's ni is a TOTAL deuteron density (VB Z_eff and CER carbon do not see the
 beam); FUSE's bootstrap uses ``density_thermal`` only, so the dd's fast
@@ -715,12 +717,14 @@ class TestDefaultsArePre56:
         assert rec["convention"] == "thermal-only" and rec["source"] == "default"
 
     def test_ida_hybrid_keeps_the_dd_zeff_and_derives_ni_from_it(self, tmp_path):
-        """ida_hybrid defaults: n_e/T_e/T_i from IDA; Z_eff the dd's thermal
+        """ida_hybrid with the explicit dd route (ni_source="standard"; the
+        default before 2026-10): n_e/T_e/T_i from IDA; Z_eff the dd's thermal
         one; n_i = n_e(IDA) (Z - Z_eff)/(Z - 1); no beam subtraction."""
         from bouquet.physics import main_ion_density_from_zeff
         ddp, cdf, *_ = _build(tmp_path)
         bl = read_imas_baseline(
-            ImasSource(ids_path=ddp, time=1.0, ida_path=cdf, impurity_Z=Z_IMP),
+            ImasSource(ids_path=ddp, time=1.0, ida_path=cdf, impurity_Z=Z_IMP,
+                       ni_source="standard"),
             kinetic_source="ida_hybrid")
         _, zth = self._dd_thermal(ddp)
         np.testing.assert_array_equal(bl.Zeff, zth)
@@ -736,11 +740,21 @@ class TestDefaultsArePre56:
 
     def test_the_beam_subtraction_needs_an_ida_route(self, tmp_path):
         with pytest.raises(ValueError, match="ni_subtract_fast"):
-            ImasSource(ids_path="x.json", ni_subtract_fast=True)
+            ImasSource(ids_path="x.json", ni_source="standard",
+                       ni_subtract_fast=True)
+        # "auto" is checked where the route resolves: FUSE kinetics have no
+        # IDA-derived n_i to subtract from
+        ddp, cdf, *_ = _build(tmp_path)
+        with pytest.raises(ValueError, match="ni_subtract_fast"):
+            read_imas_baseline(ImasSource(ids_path=ddp, time=1.0,
+                                          impurity_Z=Z_IMP,
+                                          ni_subtract_fast=True),
+                               kinetic_source="fuse")
 
     def test_subtraction_is_opt_in_on_the_experimental_route(self, tmp_path):
-        """ni_source='all' without ni_subtract_fast: the IDA total n_i is
-        used as is (the subtraction is its own opt-in)."""
+        """ni_source='all' with ni_subtract_fast=False set explicitly: the
+        IDA total n_i is used as is (the explicit setting wins over the
+        default, which follows include_pfast)."""
         ddp, cdf, ni_total, *_ = _build(tmp_path)
         bl = _read(ddp, cdf, ni_subtract_fast=False)
         assert bl.aux["ni_fast_meta"]["applied"] is False
