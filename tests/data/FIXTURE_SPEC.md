@@ -71,6 +71,16 @@ together if the pairing moves.
 * Grid: 257 points, uniform in rho_tor_norm (so NON-uniform in psi_N: this is
   what exercises the psi_N-path node sampling, review E5). Keep it
   rho-uniform.
+* Sigma envelopes (optional; read by `io.imas.read_imas_sigmas` as the
+  kinetic sigmas of a run with no IDA sigma file, `sigma_mode` "auto" /
+  "direct"): `electrons.density_thermal_error_upper`,
+  `electrons.temperature_error_upper`, `ion[].density_thermal_error_upper`,
+  `ion[].temperature_error_upper`, `zeff_error_upper`. Every slice carries
+  them: the radial template of its phase (section 7) times the slice's own
+  profile -- 0.7 s L-mode, 1.1 s and 1.2 s ramp, 1.4 s and 3.0 s H-mode flat
+  top; main ion n_i takes the derived n_i template, carbon the n_C template,
+  both ions the T_i template. Upper only (symmetric). Both dependent tests
+  pass an IDA sigma file, which wins, so they do not read these.
 
 `core_sources`
 * `time`; `source[].identifier.index`, `.name`; `source[].profiles_1d[].time`,
@@ -100,12 +110,15 @@ together if the pairing moves.
 | `n_e_err`, `T_e_err`, `T_12C6_err`, `Zeff_err`, `n_12C6_err` | (1, n) | sigma envelopes |
 | `q` | (1, n) | the fit equilibrium's q: Phi_N placement of the IDA nodes |
 
-Not read: `omega_tor_12C6_err`. Minimum n ~ 50 (the pedestal must be resolved).
+Not read: `omega_tor_12C6_err` (a constant 10 % of |omega|; no template). Minimum n ~ 50 (the pedestal must be resolved).
 Consistency: `q` must be the g-file's q at the same psi_N (the IDA file "was
 fitted on" that equilibrium); n_e, T_e, T_i, Z_eff, n_C must satisfy
 n_i = n_e - 6 n_C >= 0 and Z_eff = (n_i + 36 n_C)/n_e within 1e-2 (the reader
-compares the two routes, report-only); sigmas are currently constant
-fractions (n_e 4 %, T_e 8 %, the rest 10 %) -- keep explicit fractions.
+compares the two routes, report-only); the five read sigmas are explicit
+2-s.f. radial templates (section 7) times the profile: this file the ramp
+template (its paired dd slice, 1.2 s, is pedestal-forming), the L-mode file
+(section 6) the L-mode template. Until 2026-10-14 they were constant fractions
+(n_e 4 %, T_e 8 %, the rest 10 %).
 
 ## 3. `g_synthetic.geqdsk` (EFIT g-eqdsk, COCOS 1)
 
@@ -178,3 +191,37 @@ the source g-file's edge current swings negative at the separatrix and is
 replaced by a smooth monotone fall to 0.024 MA/m^2, stated here). Same
 layouts as sections 2 and 3. Reserved for g-file + IDA workflows and the
 real-data ladder's synthetic rung; no test reads it yet.
+
+## 7. Sigma envelopes: the radial templates
+
+Every kinetic sigma of every fixture is `bouquet.uncertainties.sigma_template`
+of the fixture's phase times the synthetic profile itself:
+`sigma(psi_N) = max(interp(min(psi_N, 1), GRID, TEMPLATE[q]), FLOOR[q]) * |x|`,
+piecewise linear between 14 psi_N nodes (0, 0.1, ..., 0.8, 0.85, 0.9, 0.95,
+0.98, 1.0), the psi_N = 1 value held on the IDA files' SOL nodes, 2 s.f. on the
+template (the product is not re-rounded). The templates are the median relative
+envelopes of IDA-lite deliveries on DIII-D H-mode flat-top, ramp / early
+H-mode and L-mode slices, one per quantity (n_e, T_e, T_i, Z_eff and n_C each
+from its own envelope, so Z_eff_err is not derived from n_C_err; n_i derived
+with independent errors).
+
+| fixture | phase | template |
+|---------|-------|----------|
+| dd 0.7 s | ramp-up L-mode | lmode |
+| dd 1.1 s | L-H transition | ramp |
+| dd 1.2 s | pedestal forming | ramp |
+| dd 1.4 s | peak pedestal | hmode_flattop |
+| dd 3.0 s | dense flat top | hmode_flattop |
+| `diiid_profs_synthetic.cdf` | the 1.2 s profiles | ramp |
+| `ida_synthetic_lmode.cdf` | L-mode | lmode |
+
+The phase decides, not the clock: the 1.4 s slice is a developed pedestal and
+takes the flat-top template. The g-files carry no kinetics. Written by
+`apply_sigma_templates.py` (in place on existing fixtures, refusing any change
+to a non-envelope dataset; `make_synthetic_fixtures.py` calls the same
+functions); checked by `tests/test_fixture_sigma.py`.
+
+With the carbon tier of the Z_eff ladder (`zeff_sigma_source="auto"` on a
+g-file + IDA run) sigma_Z = (Z - 1) sqrt((sigma_nC/n_C)^2 + (sigma_ne/n_e)^2)
+follows from these envelopes: wider than the old flat fractions, most at the
+edge.

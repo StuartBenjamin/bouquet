@@ -9,6 +9,11 @@
     g_synthetic_lmode.geqdsk      a separate upper-single-null L-mode equilibrium
     ida_synthetic_lmode.cdf       and the IDA-layout kinetic fit that belongs to it
 
+Every kinetic sigma (the IDA files' ``*_err``, the dd's core_profiles
+``*_error_upper``) is the radial template of the fixture's phase, applied by the
+functions of ``apply_sigma_templates.py`` (which also rewrites the envelopes of
+existing fixtures in place, without a solve).
+
 Run (OpenFUSIONToolkit on the path, or ``OFT_PYTHONPATH`` set; one thread):
 
     python tests/data/make_synthetic_fixtures.py OUT_DIR [--mesh PATH]
@@ -84,6 +89,9 @@ MESH = os.path.join(REPO, "examples", "D3D-like", "DIIID_mesh.h5")   # default; 
 sys.path.insert(0, REPO)
 if os.environ.get("OFT_PYTHONPATH"):
     sys.path.append(os.environ["OFT_PYTHONPATH"])
+sys.path.insert(0, HERE)
+from apply_sigma_templates import (IDA_REGIME, add_dd_errors, dd_regime,  # noqa: E402
+                                   ida_errors, write_dd)
 
 
 def P(fam, p, dip=None):
@@ -196,9 +204,10 @@ LMODE = dict(name="lmode", pedestal=False,
 JPHI_LMODE = P("hmode", (0.0, 0.11, 2.4, 1.1, 1.7, 0.011, 0.98))
 
 SOL_DECAY = 0.05        # IDA nodes past psi_N = 1: value(1) exp(-(psi_N - 1)/SOL_DECAY); Z_eff held
-# IDA file: explicit constant sigma fractions (FIXTURE_SPEC.md section 2)
-IDA_SIGMA = {"n_e": 0.04, "T_e": 0.08, "T_12C6": 0.10, "Zeff": 0.10,
-             "n_12C6": 0.10, "omega_tor_12C6": 0.10}
+# Sigma envelopes: the radial templates of the fixture's phase
+# (apply_sigma_templates.py: IDA_REGIME, DD_REGIME; FIXTURE_SPEC.md sections 1-2).
+# omega has no template: its (unread) envelope stays this constant fraction.
+OMEGA_SIGMA = 0.10
 
 # Grids and solver settings
 N_SOLVE = 513           # psi_N nodes of the FF' / j_BS fixed point
@@ -732,6 +741,7 @@ def core_profiles_slice(rec, ts, eq, k_pair):
            "j_total": j_total.tolist(), "j_tor": j_tor.tolist(),
            "j_bootstrap": j_bs.tolist(), "j_ohmic": j_ohm.tolist(),
            "j_non_inductive": (j_bs + j_beam).tolist()}
+    add_dd_errors(cp1, dd_regime(ts["time"]))      # the IMAS *_error_upper envelopes
     extra = dict(xc=xc, rho=rho, psi=psi_cp, K=K, j_ohm=j_ohm, j_bs=j_bs, j_beam=j_beam,
                  j_total=j_total, j_tor=j_tor)
     return cp1, extra
@@ -753,7 +763,8 @@ def core_sources(cps):
 
 def write_ida(path, g, sc, t):
     """IDA "direct" layout (FIXTURE_SPEC.md section 2) of scenario ``sc`` on
-    the g-file's q."""
+    the g-file's q; the sigmas are the template of the file's phase
+    (``IDA_REGIME``)."""
     import h5py
     x = np.round(np.concatenate([np.linspace(0.0, 0.9, N_IDA_CORE, endpoint=False),
                                  np.linspace(0.9, 1.2, N_IDA_EDGE)]), 6)
@@ -765,9 +776,11 @@ def write_ida(path, g, sc, t):
     with h5py.File(path, "w") as f:
         f["time"] = np.array([1e3 * t])
         f["psi_n"] = x
+        err = ida_errors(x, data, IDA_REGIME[os.path.basename(path)])
+        err["omega_tor_12C6_err"] = OMEGA_SIGMA * np.abs(data["omega_tor_12C6"])
         for k, v in data.items():
             f[k] = v[None, :]
-            f[k + "_err"] = (IDA_SIGMA[k] * np.abs(v))[None, :]
+            f[k + "_err"] = err[k + "_err"][None, :]
         f["q"] = q[None, :]
     return dict(x=x, K=K, zeff=K["zeff"], q=q)
 
@@ -1012,8 +1025,7 @@ def main(out_dir, mesh=None):
           "core_profiles": {"ids_properties": {"comment": "synthetic test dd; p_fast_reduction=sum"},
                             "time": [float(s["t"]) for s in SLICES], "profiles_1d": cp1s},
           "core_sources": core_sources(cps)}
-    with gzip.open(os.path.join(out_dir, "dd_synthetic.json.gz"), "wt") as fh:
-        json.dump(dd, fh)
+    write_dd(dd, os.path.join(out_dir, "dd_synthetic.json.gz"))
     # -- the g-file the IDA fit belongs to: the T_IDA slice's kinetics, EFIT-like current
     sg = dict(SLICES[k_ida], name="g", model="efit", jbeam=None)
     rec_g = solve_scenario(mygs, sg, SLICES[k_ida]["ip"], "g")
