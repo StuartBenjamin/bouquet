@@ -891,9 +891,14 @@ class Bouquet(SwbBaseline):
         self._geom.apply(mygs)
 
     def point_solver(self, geom=None) -> "Bouquet":
-        """Point the solver at a baseline's geometry (default: this config's source) and reset to it."""
-        from .solver_geometry import case_geometry
-        self._geom = geom if geom is not None else case_geometry(self.config.source, self.config.solver)
+        """Point the solver at a baseline's geometry (default: this config's source) and reset to it.
+        The unified engine's geometry holds the standard boundary constraint (#84,
+        :func:`bouquet.solver_geometry.standard_isoflux`); the legacy and swb routes the source
+        boundary at ``ISOFLUX_WEIGHT`` per point, as before."""
+        from .solver_geometry import case_geometry, standard_isoflux_for
+        self._geom = geom if geom is not None else case_geometry(
+            self.config.source, self.config.solver,
+            standard=standard_isoflux_for(getattr(self.config, "generation", None)))
         self._reset_solver_state()
         return self
 

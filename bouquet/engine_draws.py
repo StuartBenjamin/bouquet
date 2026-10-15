@@ -1269,8 +1269,9 @@ class GenerateEngineDraws(DrawMethod):
     # ---- the isoflux every draw's homotopy holds ----------------------
     def homotopy_isoflux(self, mygs=None):
         """The RECONSTRUCTION's own isoflux pattern -- the very points and
-        weights it was pointed at (the solver geometry's on the IDS route,
-        the g-file route's own pattern on that route) -- never the draw's
+        weights it was pointed at (the solver geometry's on both routes: the
+        standard boundary constraint of #84, the source boundary resampled
+        by arc length with weights per unit length) -- never the draw's
         traced LCFS at the legacy route's weight 200.  On a near-double-null
         slice the free-boundary problem can be bistable, and re-pointing the
         isoflux to thousands of traced points at another weight under the
