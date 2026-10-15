@@ -1,5 +1,228 @@
 # Bouquet — change summaries
 
+## Unreleased — bistability check on by default; per-draw axis record and branch flag (owner decisions 2026-10-15)
+
+**Default change: `GenerationConfig.check_bistability` is ON under the unified
+engine.** The field now defaults to `None`, resolved at `prepare_baseline()`
+with the other engine-dependent settings (`engine.ENGINE_DEPENDENT_DEFAULTS`,
+recorded in `engine_resolved_defaults`): `True` under `"unified"`, `False`
+under `"legacy"` (not applicable; the default is not refused there, an
+explicit `True` still is). **Cost: ONE extra GS solve per reconstruction.**
+The stamp is unchanged (`Baseline.engine["bistability"]`: `bistable=True`,
+the deltas and a warning on a miss; the delivered equilibrium is restored;
+nothing is refused). An explicit value is kept, so a stored config that
+carries `check_bistability: false` replays without the check (a note is
+printed); one that predates the field runs it (the delivered equilibrium is
+the same either way).
+
+**New: a per-draw axis record and branch flag (reported, never a filter).**
+Every archived engine draw's record carries `axis`: the archived state's
+magnetic axis (`R`, `Z`), the reconstruction's delivered axis (`reference_R`,
+`reference_Z`; the reference is also `Baseline.engine["delivered_axis"]` and
+the baseline engine record's `draws.axis_reference`), the displacement
+(`dR_mm`, `dZ_mm`, `displacement_mm`, and `displacement_frac_a` of the
+reconstruction's minor radius `minor_radius_m`) and `axis_branch` = `"same"`
+within 1 % of a, `"other"` beyond (`engine.AXIS_BRANCH_FRAC`, the constant the
+MSE stage's finite-difference branch check already used, now named once). The
+σ=0 draw of `verify_sigma0_consistency()` carries the same fields
+(`["axis"]`, not gated). The flag is stamped on the draw group (`axis_branch`,
+`axis_shift_frac_a`); the count of `"other"` draws is in the `[generate]` /
+`[draw summary]` line, in `ScanView.spread()["axis_branch"]`, in every
+`draw_scalars` record's provenance (`axis_branch`, with a limitation when a
+used draw is `"other"`) and on the scan (`n_axis_other`, `n_axis_recorded`;
+recounted by `merge_archives`). On the known near-double-null case the two
+branches' axes sit 17 mm (2.8 % of a) apart with l_i(3) 2e-3 and q0 4e-3
+apart, and the magnetics pass both, so a band over both may be bimodal: that
+is the slice's physics. No draw, verdict, band or yield changes. The draws'
+continuity guard is #87.
+
+## Unreleased — coil-saturation test measured against the installed bound (owner decision 2026-10-15)
+
+The homotopy's coil-saturation test, its early stop and the post-homotopy /
+hard-bound guard now measure each non-VSC F coil's drift against the bound
+actually installed for it, `max(drift_F |I_base|, coil_drift_floor_A)`
+(`_coil_bound_max_f`), instead of the bare percentage of the coil's own
+current. Identical for every coil whose bound is not the floor; a low-current
+coil whose bound IS the floor is no longer called saturated at a small fraction
+of it (a 10 A coil with a 50 A bound tripped at 0.5 A, and every draw of the
+synthetic 0.7 s slice was refused `homotopy_saturated` in the first, loosest
+pass; with the installed bound it yields 24 in-spec draws in 34 attempts, and
+the other synthetic equilibria are identical draw for draw). The caps, the
+floor, the VSC test, the sigma=0 coil gate and every filter are unchanged.
+
+## Unreleased — radial sigma templates: assumed defaults, IMAS error fields, fixtures (numbers move on every sigma-less run)
+
+**Default change (owner decision): the assumed envelope is a shape, not a flat
+number.** `UncertaintyConfig.{ne,te,ni,ti,zeff}_scalar_sigma` now default to
+`None`, meaning the **H-mode flat-top radial template** times |baseline|
+(`bouquet.sigma_template(psi_N, chan)`; `bouquet.uncertainties.SIGMA_TEMPLATES`:
+the median relative envelopes of IDA-lite deliveries on DIII-D H-mode
+flat-top, ramp / early H-mode and L-mode slices, 14 ψ_N nodes, 2 s.f.,
+piecewise linear, the ψ_N = 1 value held outside the LCFS). It applies to every
+channel with no measured sigma: no IDA file and no IMAS error field. A set
+scalar is an explicit flat fraction and still wins; a stored config carries the
+old 0.05 / 0.05 / 0.10 / 0.10 / 0.05 explicitly and reproduces what it ran.
+The Z_eff channel stays on by default (`zeff_scalar_sigma=0.0` turns it off),
+its assumed tier (still named `"scalar"`) now the Z_eff template.
+
+**Numbers move on every sigma-less run** (p-file / g-file-only / FUSE dd
+without error fields): the kinetic and Z_eff draw widths, hence the spread of
+every derived quantity. Uniform-in-ψ_N means of the relative envelope (about
+the volume average):
+
+| channel | before | now | ψ_N 0 / 0.5 / 0.9 / 1.0 now |
+|---|---|---|---|
+| n_e | 5 % | 4.0 % | 5.7 / 2.8 / 5.8 / 15 % |
+| T_e | 5 % | 8.4 % | 5.2 / 7.8 / 13 / 19 % |
+| n_i | 10 % | 9.6 % | 17 / 8.1 / 9.7 / 22 % (used only when `ni_from_zeff` resolves False) |
+| T_i | 10 % | 9.7 % | 8.9 / 8.7 / 14 / 31 % |
+| Z_eff | 5 % | 11 % | 16 / 8.7 / 12 / 41 % |
+
+The material changes are T_e (too tight by 1.6-3.8x from mid radius to the
+separatrix at a flat 5 %, exactly where the pedestal gradient drives j_BS) and
+Z_eff; n_e narrows at mid radius and widens 3x at the separatrix. (The design
+note quotes 9.7 % / 9.8 % for n_i / T_i, the means of the unrounded median; the
+shipped 2-s.f. nodes give 9.6 % / 9.7 %.) A Φ_N run evaluates the templates at
+the nodes' ψ_N. Which default applied is stamped:
+`resolve_uncertainty()["sigma_source"][chan]["assumed_default"]` is
+`"template hmode_flattop"` or `"scalar <x>"`, and the Z_eff tier record carries
+`"assumed_default"`. A negative, non-finite or non-numeric scalar is refused
+when the config is built.
+
+**The IMAS reader takes the dd's own error fields.** `io.imas.read_imas_sigmas`
+reads core_profiles `electrons.density_thermal_error_upper` (`density_` as a
+fallback), `electrons.temperature_error_upper`, the main ion's
+`density_thermal_error_upper` / `temperature_error_upper` and
+`zeff_error_upper` (the mean with `*_error_lower` where both exist; a wrong
+length, non-finite, negative or all-zero field is skipped with the reason
+recorded). With `sigma_mode` `"auto"` (or `"direct"`) an `ImasSource` with no
+IDA sigma file uses them; without them, the assumed defaults as before. The
+precedence per channel is now `sigma_profiles` > IDA `.cdf` > IMAS error fields
+> assumed default, and the Z_eff ladder gains an **IMAS-measured** tier above
+the assumed one for the dd's own Z_eff baseline (also on the dd route with an
+IDA sigma file, whose Z_eff tiers are ineligible there: such a run's Z_eff
+envelope moves from the assumed tier to the dd's `zeff_error_upper` when the dd
+carries one). `ida_hybrid` is unchanged: its kinetics and envelopes are the IDA
+file's and the dd's error fields are not read. The winner of every channel is
+stamped warning-free as `resolve_uncertainty()["sigma_source"]` (kind
+`explicit` / `ida` / `imas` / `assumed`).
+
+**`synthetic_ida_sigma` is the flat-top template.** Same interface; it now also
+takes `zeff` and `nc`, and `ni` is the derived n_i envelope (it was an alias of
+`ne`). The previous constants were a sine-basis fit (const + sin(kπψ) harmonics
++ sin(πψ/2)^p edge terms) to the fractional-sigma shape of one reference case,
+for n_e / T_e / T_i only; against the flat-top median they were 1.2-1.5x too
+low in the core and at mid radius and 1.6-3x too low at the separatrix, with no
+on-axis rise.
+
+| at ψ_N 0 / 0.5 / 0.9 / 1.0 | old | new |
+|---|---|---|
+| n_e | 2.4 / 2.4 / 4.0 / 6.0 % | 5.7 / 2.8 / 5.8 / 15 % |
+| T_e | 3.2 / 5.5 / 8.6 / 12 % | 5.2 / 7.8 / 13 / 19 % |
+| T_i | 5.7 / 7.1 / 7.4 / 9.6 % | 8.9 / 8.7 / 14 / 31 % |
+| n_i | = n_e | 17 / 8.1 / 9.7 / 22 % |
+| Z_eff, n_C | — | 16 / 8.7 / 12 / 41 %, 16 / 9.7 / 12 / 45 % |
+
+**Fixtures.** The two IDA-layout files' `n_e/T_e/T_12C6/Zeff/n_12C6_err` are now
+the template of their phase times the profile (`diiid_profs_synthetic.cdf`:
+ramp; `ida_synthetic_lmode.cdf`: L-mode) instead of flat 4 / 8 / 10 / 10 / 10 %,
+and every dd core_profiles slice carries the IMAS `*_error_upper` envelopes
+(0.7 s L-mode, 1.1 and 1.2 s ramp, 1.4 and 3.0 s H-mode flat top). No profile
+changed (checked bit for bit). `tests/data/apply_sigma_templates.py` writes
+them in place; `make_synthetic_fixtures.py` calls the same functions
+(tests/data/FIXTURE_SPEC.md section 7). The solver tests that read the
+fixtures run `from_imas(..., ida_path=...)`, i.e. `ida_hybrid`: the dd's error
+fields stay inert there and the IDA file's envelopes, now the ramp template,
+drive the draws (T_e 5.5-20 % instead of 8 %, n_e 2.2-16 % instead of 4 %, T_i
+9.7-31 % instead of 10 %, and the IDA-resolved Z_eff / n_i envelopes built from
+the wider Zeff_err and n_12C6_err). Their bars are unchanged; their measured
+values are to be re-taken.
+
+## Unreleased — the in-spec rule is the magnetics (yields rise; every l_i band becomes a result)
+
+**Default change (owner decision, 2026-10-14): the l_i band is removed from the
+default in-spec filter.** A draw is now IN SPEC when it passes the configured
+coil test (χ²/ν and the worst-coil |z| against the device's coil
+uncertainties) and the boundary-deviation cut, and was not rejected before
+archiving -- the magnetics. The external magnetics constrain I_p, the boundary
+and β_p + l_i/2, which bouquet already enforces exactly through the
+free-boundary draw solve, the coil test and the boundary cut; l_i(3) alone is
+an equilibrium inference, not a magnetics measurement. Until now every
+unified-engine draw was also held to `|l_i - l_i*| <= 0.05 l_i*`
+(`GenerationConfig.l_i_tolerance = 0.05`), which conditioned each ensemble on
+information the magnetics do not provide and was the binding filter on the
+synthetic ensembles. **No threshold is loosened**: the coil χ² acceptance, the
+boundary cut and every tolerance keep their values; one filter leaves the
+default.
+
+**What moves.** On the unified engine (the default route): the in-spec yield
+and every until-N attempt count, the `selected` population and so every band
+built on it (`draw_band` / `draw_bands` / `draw_scalars`), the archived
+`in_spec` and `passes_draw_band` of each draw (`passes_draw_band` is now True
+unless an opt-in band is on). **Yields rise** wherever the l_i band was binding,
+and **every reported l_i band becomes a result of the ensemble rather than a
+reflection of the 5 % tolerance** (on the synthetic ensembles the l_i band was
+the most frequent reason an archived draw was out of spec). The legacy and swb routes are unchanged:
+there `l_i_tolerance` acts inside the draw construction (rejection sampling
+of the inductive current, and the legacy reconstruction's post-corrective
+report), and unset it keeps its old value 0.05
+(`filtering.LEGACY_L_I_CONSTRUCTION_TOLERANCE`). **The goldens and the
+ladder are regenerated on the new rule**: the unified-engine golden fixture's
+recorded `in_spec` / `n_in_spec` (tests/test_golden_bouquet.py) were made
+under the old band and are not edited by hand.
+
+**The opt-in bands** (unified engine; all off by default), for a source that
+STATES a measurement uncertainty:
+
+- `generation.l_i_tolerance` (now `None` by default): an explicit fractional
+  l_i(3) band, as before when set;
+- `generation.l_i_sigma`: the stated 1σ of l_i(3) of an MSE / diamagnetic fit
+  (absolute); band `|l_i - l_i*| <= inspec_band_nsigma * l_i_sigma`
+  (exclusive with `l_i_tolerance`);
+- `generation.beta_p_target` + `generation.beta_p_sigma`: a diamagnetic β_p
+  band, `|β_p - beta_p_target| <= inspec_band_nsigma * beta_p_sigma`;
+- `generation.inspec_band_nsigma` (default 2.0): the σ bands' half-width;
+- `constrain_sawteeth` keeps its meaning and joins them (`+q0`).
+
+A measurement band on the legacy/swb routes is refused at `generate()` (they
+have no post-hoc stage); `bouquet.refilter_inspec` applies any band to any
+archive afterwards.
+
+**Λ = β_p + l_i(3)/2, stored and reported, never filtered.** Every draw carries
+`beta_p` and `Lambda` attrs (the unified engine's `_baseline` too), also in its
+engine `post_hoc` / `archived` records; `draw_scalars` adds the quantities
+`beta_p` and `Lambda`, `ScanView.spread()` the two columns, `read_filter_flags`
+the two values. Definition (`filtering.LAMBDA_DEFINITION`, docs/physics-notes.md):
+β_p = 2 μ0 ⟨p⟩_V / B_pa² with B_pa = μ0 I_p / L_p and the FULL pressure (thermal
++ fast, the separatrix pressure added back); l_i(3) in TokaMaker's `"iter"`
+normalisation (R_0 at the magnetic axis); no "−1". For a shaped plasma the
+magnetics' true observable is the shape-weighted combination, which the coil
+test against the free-boundary solve already enforces exactly.
+
+**Recorded, re-filterable.** The scan group carries `inspec_rule`
+(`"magnetics"`, `"magnetics+li"`, `"magnetics+beta_p"`, ... `"+q0"`),
+`inspec_bands_json` and `lambda_definition`; each band that is on writes its
+own per-draw flag (`passes_l_i_band`, `passes_beta_p_band`, `passes_q0_gate`)
+beside `passes_draw_band` (their AND), `passes_coil_filter` and
+`passes_boundary_filter`. The until-N target counts in-spec by the rule in
+force. `bouquet.refilter_inspec(path, bands)` re-judges an archive from its
+stored numbers (no physics re-run); `Bouquet.filter()` does it automatically,
+and says so, for an archive that predates the record (its engine draws carry
+the old unconditional band) or was judged under other bands. A band's
+provenance records `inspec_rule`, with a limitation line on an archive that
+predates it. `merge_archives` refuses shards judged under different rules and
+records the one rule on the merged scan and in its manifest (`inspec_rule`,
+`inspec_bands`); `merge_cases` records each case's rule
+(`inspec_rules_json`). The ensemble summary printed by `filter()` names the
+rule.
+
+**Stored configs.** A config stored before the rule (it lacks
+`generation.inspec_band_nsigma`) with `l_i_tolerance` at the old default 0.05
+loads with the band OFF and a one-line note in the stored-load warnings; any
+other stored value was explicit and keeps its band (rule `"magnetics+li"`); a
+config without the field loads loud, band off. A config written since
+round-trips exactly (an explicit 0.05 keeps its band).
+
 ## Unreleased — IDA-hybrid: the IDA file's own Z_eff is the default (numbers move on every IDA-hybrid run)
 
 **Default change (owner decision): one thermal-kinetics source per run.** When an
@@ -93,7 +316,8 @@ state: l_i(3) and q0 at the q-row radius at the sigma=0 gates (`jbs_tol_li`,
 `jbs_tol_q0`), beta_pol and the magnetic axis reported. A miss stamps
 `Baseline.engine["bistability"]` with `bistable=True` and the deltas and
 warns; the delivered equilibrium is restored. Off by default: no extra solve,
-nothing moves.
+nothing moves. (Superseded 2026-10-15: on by default under the unified engine,
+see the entry at the top.)
 
 ## Unreleased — PR #76: one reusable solver per process; every baseline at its own F0 (numbers move on multi-slice runs)
 

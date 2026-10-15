@@ -12,6 +12,7 @@ controls it. See [`../README.md`](../README.md) for the short version and
 - [Configuration reference](#configuration-reference)
 - [Experimental features and their validation status](#experimental-features-and-their-validation-status)
 - [Graduated features and their known limitations](#graduated-features-and-their-known-limitations)
+- [The in-spec rule](#the-in-spec-rule)
 - [until-N in-spec draws](#until-n-in-spec-draws)
 - [Workflow presets and the guard](#workflow-presets-and-the-guard)
 - [Reading an archive back](#reading-an-archive-back)
@@ -88,7 +89,7 @@ non-default knobs), `archive` (its `BouquetArchive`), `selected_indices()`,
 | Quantity | Perturbed? | Notes |
 |----------|:----------:|-------|
 | n_e, T_e, T_i | ✓ | Drawn from the GPR posterior |
-| Z_eff | ✓ | Active channel (default on via `zeff_scalar_sigma`) |
+| Z_eff | ✓ | Active channel (on by default; `zeff_scalar_sigma=0.0` turns it off) |
 | n_i, n_z (impurity) | derived | Quasi-neutrality with the drawn Z_eff (`impurity_Z`) |
 | Total pressure (p_tot) | ✓ | Recomputed from the perturbed kinetics |
 | Bootstrap current (j_BS) | ✓ | Sauter model recomputed per draw (`recalculate_j_BS`) |
@@ -139,15 +140,15 @@ stored config carrying it still loads.
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `ida_path` | `None` | IDA `.cdf` supplying measured sigma envelopes (overrides the scalars below) |
-| `sigma_mode` / `sigma_method` | `"auto"` / `"percentile"` | IDA layout dispatch (direct `*_err` vs. ensemble posterior) and ensemble reduction |
+| `ida_path` | `None` | IDA `.cdf` supplying measured sigma envelopes (overrides the IMAS error fields and the assumed defaults below) |
+| `sigma_mode` / `sigma_method` | `"auto"` / `"percentile"` | IDA layout dispatch (direct `*_err` vs. ensemble posterior) and ensemble reduction. An `ImasSource` with no IDA sigma file reads the dd's own core_profiles `*_error_upper` under `"auto"` / `"direct"` (`io.imas.read_imas_sigmas`; not on `ida_hybrid`, not under `"ensemble"`) |
 | `log_sigma_sources` | `True` | Log one line per kinetic channel naming the source that actually won the precedence |
-| `ne_scalar_sigma` | `0.05` | Flat fractional envelope used when no IDA sigmas are supplied |
-| `te_scalar_sigma` | `0.05` | " |
-| `ni_scalar_sigma` | `0.10` | " |
-| `ti_scalar_sigma` | `0.10` | " |
+| `ne_scalar_sigma` | `None` | The **assumed** envelope of a channel with no measured sigma (no IDA file, no IMAS error field). `None` = the H-mode flat-top radial template, `bouquet.sigma_template(psi_N, chan)` × \|profile\| (relative σ vs ψ_N, evaluated at the nodes' ψ_N in a Φ_N run); a number = an explicit flat fraction, which wins. Default changed 2026-10-14 (was `0.05`; see below) |
+| `te_scalar_sigma` | `None` | " (was `0.05`) |
+| `ni_scalar_sigma` | `None` | " (the derived-n_i template row; was `0.10`; used only when `ni_from_zeff` resolves False) |
+| `ti_scalar_sigma` | `None` | " (was `0.10`) |
 | `jphi_scalar_sigma` | `0.10` | Inductive-current envelope. **Must be > 0** — setting it to 0 freezes `j_inductive` and trips the workflow guard |
-| `zeff_scalar_sigma` | `0.05` | One Z_eff perturbation per draw; n_i / n_z follow from quasi-neutrality. Also the width of the bottom tier below |
+| `zeff_scalar_sigma` | `None` | One Z_eff perturbation per draw; n_i / n_z follow from quasi-neutrality. The width of the bottom (assumed) tier below: `None` = the Z_eff template (was `0.05`), a number = a flat fraction, `0.0` = the channel off |
 | `zeff_sigma_source` | `"auto"` | Which tier supplies the Z_eff envelope's **magnitude**: `"auto"` / `"carbon"` / `"measured"` / `"scalar"` — see the ladder below |
 | `ni_from_zeff` | `None` (auto) | With the Z_eff channel on: `True` derives n_i per draw from the drawn (n_e, Z_eff) as an increment on the baseline n_i; `False` draws n_i from its own σ and Z_eff passively after T_i (different RNG order). Auto: `True` (n_i always derived, as before PR #56). On a measured `ni_source` (the `ida_hybrid` default) auto is the PR #56 rule: `True` when n_i's σ is the scalar fallback, or n_i and the Z_eff envelope are the same IDA resolution (tier `"IDA-resolved"`); `False` for any other real n_i envelope. That rule follows the Z_eff tier: pin it for an A/B of Z_eff envelopes |
 | `kinetic_clips` | `None` (auto) | The PR #56 sampler clips (graduated 2026-10-14, `kinetic_sampler_clips`) -- a drawn Z_eff floored at 1 where `physics.zeff_bounds` allows less, a derived n_i held in `[0, n_e − z_fast]`, an independent n_i capped at `n_e − z_fast` when `Z_imp` is declared, a passive Z_eff aux draw clipped to the window. Auto: on with the measured IDA `ni_source` route in play (the IDA-hybrid default, or a route set explicitly), the beam subtraction resolved on, or `fuse_zeff_fast_ions`; every clip that fires is counted per draw |
@@ -204,7 +205,9 @@ solver's toroidal-flux map cannot be built (surfaces fail to trace), the solve
 fails like any other and the draw is rejected.
 
 **Precedence, per kinetic channel:** `sigma_profiles[chan]` > an IDA `.cdf` >
-`<chan>_scalar_sigma`. A `.cdf` handed to `ReconstructionSource.profiles_path`
+an `ImasSource`'s own core_profiles `*_error_upper` > the assumed default
+(`<chan>_scalar_sigma` when set, else the H-mode flat-top template). A `.cdf`
+handed to `ReconstructionSource.profiles_path`
 is adopted as an IDA source automatically, so it counts here even when
 `ida_path` is unset. A winning source **shadows** the ones below it rather than
 combining with them — which means zeroing `*_scalar_sigma` to get a
@@ -219,8 +222,30 @@ b.uncertainty.sigma_profiles = {ch: np.zeros(n_kin)
 ```
 
 `resolve_uncertainty` logs the winning source per channel (disable with
-`log_sigma_sources=False`) and warns when a scalar you moved off its default is
-being ignored. `sigma_jphi` and the aux channels have no `.cdf` branch, so
+`log_sigma_sources=False`), returns it warning-free as `"sigma_source"`
+(`{chan: {"kind": "explicit" | "ida" | "imas" | "assumed", "source", "assumed_default"}}`,
+Z_eff included, with its tier), and warns when a scalar you set is being
+ignored.
+
+**Every sigma-less run's widths moved on 2026-10-14.** The assumed default is
+the H-mode flat-top template shape (the median relative envelope of IDA-lite
+deliveries on DIII-D H-mode flat-top slices; 14 ψ_N nodes, 2 s.f.,
+`bouquet.uncertainties.SIGMA_TEMPLATES`) instead of the flat scalars. As
+uniform-in-ψ_N means (about the volume average):
+
+| channel | before | now | at ψ_N 0 / 0.5 / 0.9 / 1.0 now |
+|---|---|---|---|
+| n_e | 5 % | 4.0 % | 5.7 / 2.8 / 5.8 / 15 % |
+| T_e | 5 % | 8.4 % | 5.2 / 7.8 / 13 / 19 % |
+| n_i | 10 % | 9.6 % | 17 / 8.1 / 9.7 / 22 % |
+| T_i | 10 % | 9.7 % | 8.9 / 8.7 / 14 / 31 % |
+| Z_eff | 5 % | 11 % | 16 / 8.7 / 12 / 41 % |
+
+(The design note's 9.7 % / 9.8 % for n_i / T_i are the means of the unrounded
+median; the shipped 2-s.f. nodes give 9.6 % / 9.7 %.) Which default applied is
+stamped (`sigma_source[chan]["assumed_default"]`: `"template hmode_flattop"` or
+`"scalar <x>"`). A stored config carries the old scalars explicitly and
+reproduces what it ran; set them to get the flat envelopes back. `sigma_jphi` and the aux channels have no `.cdf` branch, so
 their scalars always apply.
 
 **The Z_eff envelope has its own ladder (`zeff_sigma_source`).** Z_eff is the
@@ -234,7 +259,8 @@ supports:
 |---|---|---|
 | carbon-propagated | `n_12C6_err` + `n_e_err` (direct layout) or the dilution posterior (ensemble), propagated through `Z_eff = 1 + Z(Z−1)·n_C/n_e` | `"carbon"` |
 | VB-measured | the file's own `Zeff_err` (direct) or `Zeff` sample spread (ensemble) | `"measured"` |
-| scalar | `zeff_scalar_sigma` × abs(Z_eff) — an **assumed** width, not a measured one | `"scalar"` |
+| IMAS-measured | an `ImasSource`'s own `zeff_error_upper`, for the dd's own Z_eff baseline (no IDA tier chosen; not on `ida_hybrid`) | — (`"auto"` / `"measured"`) |
+| scalar | the Z_eff template × abs(Z_eff) (`zeff_scalar_sigma=None`, the default) or `zeff_scalar_sigma` × abs(Z_eff) — an **assumed** width, not a measured one | `"scalar"` |
 
 CER carbon is the direct measurement of the dilution the draw actually moves,
 which is why it outranks the visible-bremsstrahlung sigma. Both measured tiers
@@ -242,8 +268,9 @@ require the Z_eff baseline to be the IDA one — the reconstruction path, and th
 **same** file that supplies the sigmas (compared as resolved paths, so a
 relative, `~`-prefixed or symlinked spelling is still the same file). An
 IMAS baseline on the dd route (FUSE kinetics, or `ida_hybrid` with
-`ni_source="standard"`) or a p-file baseline therefore gets the scalar:
-pairing a FUSE Z_eff with an IDA envelope would mix channels.
+`ni_source="standard"`) or a p-file baseline therefore gets the dd's own
+`zeff_error_upper` where the dd carries one (FUSE kinetics), else the assumed
+tier: pairing a FUSE Z_eff with an IDA envelope would mix channels.
 
 With a measured `ni_source` (the `ida_hybrid` default, `ida_ion_route`) the measured tier is
 instead `read_ida`'s own resolution, **IDA-resolved**: VB+CER > CER > VB over
@@ -268,12 +295,15 @@ as an enormous sigma.
 | Knob | Default | Meaning |
 |---|---|---|
 | `n_equils` | `20` | Draws to attempt — or, with `n_inspec_target` set, the initial allocation |
-| `n_inspec_target` | `None` | Draw **until N draws pass both filters** rather than exactly `n_equils`. See [until-N](#until-n-in-spec-draws) below |
+| `n_inspec_target` | `None` | Draw **until N draws are in spec** ([the in-spec rule](#the-in-spec-rule): by default the coil test and the boundary cut) rather than exactly `n_equils`. See [until-N](#until-n-in-spec-draws) below |
 | `max_total_draws` | `None` | Attempt cap for `n_inspec_target` (default `5 ×` the target, never below `n_equils`). Hitting it is a loud, non-fatal outcome |
 | `seed` | `None` | The run's one RNG seed. Consumed once into a single `numpy.random.Generator` threaded into every draw (GPR kinetic/aux/j_φ, the per-draw `scale_jBS`, the per-draw l_i target), so the same seed + inputs + solver gives a **bitwise-identical** archive on one machine (across machines the draws agree to ~1e-9, not bitwise -- LAPACK/BLAS). `None` = OS entropy |
 | `scan_key` | `0` | Label for this bouquet within the archive (`scan/<key>/`) — a time in ms, a beta value, … |
-| `l_i_tolerance` | `0.05` | l_i acceptance band, as a **fraction** of target |
-| `constrain_sawteeth` | `False` | Gate draws on q0 |
+| `l_i_tolerance` | `None` | **Opt-in** fractional l_i(3) band of the in-spec rule, `\|l_i - l_i*\| <= l_i_tolerance * l_i*` around the reconstruction's l_i (a **fraction**: `0.05` = ±5 %). `None` = no l_i band (**default since 2026-10-14**, owner decision; it was `0.05` and applied to every engine draw). The legacy routes also *construct* their draws with it (rejection sampling inside the draw, not a filter): unset, they use the old `0.05`. See [the in-spec rule](#the-in-spec-rule) |
+| `l_i_sigma` | `None` | **Opt-in** l_i(3) band from a **stated measurement uncertainty** (absolute 1σ of an MSE / diamagnetic fit): `\|l_i - l_i*\| <= inspec_band_nsigma * l_i_sigma`. Exclusive with `l_i_tolerance`; unified engine only (refused on the legacy routes at `generate()`; `refilter_inspec` applies it to any archive afterwards) |
+| `beta_p_target` / `beta_p_sigma` | `None` / `None` | **Opt-in** β_p band for a diamagnetic measurement (both or neither): `\|β_p - beta_p_target\| <= inspec_band_nsigma * beta_p_sigma`, β_p of the full-pressure frame (see [Λ](physics-notes.md#lambda--beta_p--l_i2-reported-never-filtered)). Unified engine only, as `l_i_sigma` |
+| `inspec_band_nsigma` | `2.0` | Half-width of a σ band (`l_i_sigma`, `beta_p_sigma`) in σ |
+| `constrain_sawteeth` | `False` | Gate draws on q0 ≥ 1 (unified engine: a post-hoc gate of the in-spec rule, `+q0` in its name; legacy routes: inside the draw construction) |
 | `recalculate_j_BS` | `True` | Recompute the Sauter bootstrap per draw (vs. reusing the baseline's) |
 | `single_profile_jphi` | `False` | Legacy path: perturb the TOTAL `j_phi` as one profile (no inductive / bootstrap split; no per-draw Sauter call). `jphi_scalar_sigma` then applies to the total, a larger absolute perturbation -- re-tune it. Needs `jbs_self_consistent=False` (refused otherwise); the unified engine refuses it |
 | `jBS_scale_range` | `(0.99, 1.01)` | Legacy draws: the per-draw multiplicative spread of the bootstrap (uniform in the range; default `None` -> `(0.99, 1.01)` on 2026-06-04). The baseline's multiplier (`bs_scale` / `s_bs(ψ)`) is applied after SWB on SWB draws and re-centres this range on loop draws -- see [physics-notes.md](physics-notes.md) ("The bootstrap multiplier") |
@@ -336,7 +366,7 @@ as an enormous sigma.
 | `engine_draw_q0_row` | `False` | `"unified"` draws: also keep the reconstruction's q0 row acting in every draw (`AxisRowPin` on the bootstrap amplitude) -- for sawtoothing discharges; needs `"q0"` in `engine_rows` |
 | `engine_draw_homotopy` | `True` | `"unified"` draws: run the coil homotopy after a draw's loop (then the post-homotopy bootstrap check with its saturation guard); `False` measures the coil drift of the loop's own delivered draw |
 | `engine_draw_bootstrap_refresh` | `False` | `"unified"` draws: after a draw's first loop solve, restart the bootstrap iterate from the anchor's Redl increment re-evaluated on that solved geometry. Path only (no criterion, tolerance or ceiling; zero extra solves) |
-| `check_bistability` | `False` | `"unified"` only (refused under `"legacy"`): after the reconstruction, ONE extra solve of the same inputs from a COLD start (psi re-initialised as the reconstruction's own start) is compared with the delivered state -- l_i(3) and q0 at the q-row radius at the σ=0 gates (`jbs_tol_li`, `jbs_tol_q0`), β_pol and the magnetic axis reported. A miss stamps `Baseline.engine["bistability"]` with `bistable=True` and the deltas (archived with the baseline's engine record) and warns; the delivered equilibrium is restored. See [engine.md](engine.md) |
+| `check_bistability` | `None` (on) | `"unified"` only. `None` resolves at `prepare_baseline()` (recorded in `engine_resolved_defaults`): **`True` under `"unified"`** (on by default since 2026-10-15, owner decision -- ONE extra GS solve per reconstruction), `False` under `"legacy"` (not applicable there: the default is never refused, an explicit `True` is). An explicit value, a stored config's included, is kept (an explicit `False` under `"unified"` prints a note). After the reconstruction, ONE extra solve of the same inputs from a COLD start (psi re-initialised as the reconstruction's own start) is compared with the delivered state -- l_i(3) and q0 at the q-row radius at the σ=0 gates (`jbs_tol_li`, `jbs_tol_q0`), β_pol and the magnetic axis reported. A miss stamps `Baseline.engine["bistability"]` with `bistable=True` and the deltas (archived with the baseline's engine record) and warns; the delivered equilibrium is restored and nothing is refused. See [Bistable equilibria](#the-in-spec-rule) and [engine.md](engine.md) |
 | `edge_pprime_pin` | `True` | Every solve: `True` zeroes the last node of `P'` (ψ_N = 1), so `P'` ramps to zero across the final interval (the behaviour before the setting); `False` keeps the profile's own derivative there -- a physics change (edge current and q95 move; see [physics-notes.md](physics-notes.md#the-pressure-handed-to-the-solver-separatrix-pressure-and-the-edge-p-pin)). The solver's resulting uniform `P'` rescale is recorded as `p_scale` |
 | `separatrix_pressure` | `"offset"` | Every solve: `"offset"` (default since 2026-10-02, owner-approved physics change) hands the solver `p_axis − p_sep` and adds `p_sep` back wherever pressure, β or W_MHD is reported or delivered (written g-files carry the full `PRES`); `"legacy"` hands the full axis pressure (a non-zero `p_sep` then inflates `P'` by `p_axis/(p_axis − p_sep)`). A negative `p_sep` is refused under `"offset"` |
 | `coil_drift` | `0.01` | Soft coil-drift target |
@@ -433,7 +463,8 @@ anisotropic fast-pressure reduction applied before the isotropic GS solve.
 > for both conventions.
 
 > **Tolerances are fractions, not percentages.** `l_i_tolerance=0.05` means
-> 5%. This applies to every tolerance argument in the package.
+> 5%. This applies to every tolerance argument in the package (`l_i_sigma`
+> and `beta_p_sigma` are absolute 1σ values, not fractions).
 
 > **`p_thresh`** (the volume-averaged pressure acceptance band, default `0.05`,
 > calibrated to a realistic `<P>` measurement uncertainty) is currently a
@@ -572,13 +603,110 @@ Known limitations (open validation items, kept):
 
 <!-- graduated-features:end -->
 
+## The in-spec rule
+
+**A draw is in spec when it passes the magnetics: the configured coil test
+and the boundary cut** (and was not rejected before it was archived). Owner
+decision, 2026-10-14. The external magnetics constrain I_p, the boundary and
+the Shafranov combination β_p + l_i/2; bouquet applies that constraint exactly
+through the free-boundary draw solve (the coils carry the boundary), the coil
+χ² test (χ²/ν and the worst-coil |z| against the device's coil uncertainties)
+and the boundary-deviation cut (DIII-D: 8.5 mm). l_i(3) on its own is an
+equilibrium *inference*, not a magnetics measurement, so the l_i band that was
+applied to every unified-engine draw until then (`l_i_tolerance = 0.05`)
+conditioned every ensemble on information the magnetics do not provide -- and
+it was the binding filter on the synthetic ensembles. It is now opt-in.
+
+| filter | default | per-draw flag | applied by |
+|---|---|---|---|
+| coil χ² test (`filtering.coil_filter="chi2"`; the legacy ±% band on request) | **on** | `passes_coil_filter` | `filter()`; the until-N loop in flight |
+| boundary-deviation cut (`filtering.rms_max_mm="auto"`) | **on** | `passes_boundary_filter` | `filter()`; the until-N loop in flight |
+| l_i band (`l_i_tolerance` fraction, or `l_i_sigma` × `inspec_band_nsigma`) | off | `passes_l_i_band` | the engine's post-hoc stage; `refilter_inspec` |
+| β_p band (`beta_p_target`, `beta_p_sigma` × `inspec_band_nsigma`) | off | `passes_beta_p_band` | the engine's post-hoc stage; `refilter_inspec` |
+| q0 ≥ 1 gate (`constrain_sawteeth`) | off | `passes_q0_gate` | the engine's post-hoc stage; `refilter_inspec` (engine draws) |
+
+`passes_draw_band` is the AND of the opt-in bands that are on (True when none
+is: every engine draw carries it), and `selected` = coil AND boundary AND
+`passes_draw_band`. A banded quantity that is missing or non-finite fails its
+band; with the band off it is not judged. **Use an opt-in band only when the
+source states the uncertainty** (an MSE-constrained fit's l_i error, a
+diamagnetic loop's β_p error): the band then conditions the ensemble on a
+measurement, not on the tolerance.
+
+**Recorded.** The scan group carries `inspec_rule` (`"magnetics"`,
+`"magnetics+li"`, `"magnetics+beta_p"`, `"magnetics+li+beta_p"`, with `"+q0"`
+when the gate is on), `inspec_bands_json` (the band settings and the route;
+on the legacy/swb routes also the draw-construction tolerance, which is not a
+filter) and `lambda_definition`. Every draw carries `beta_p` and `Lambda`
+(β_p + l_i(3)/2, [physics-notes](physics-notes.md#lambda--beta_p--l_i2-reported-never-filtered));
+reported in `draw_scalars`, `ScanView.spread()` and `read_filter_flags`, never
+a filter. The until-N target counts in-spec draws by the rule in force.
+`merge_archives` refuses shards judged under different rules and records the
+one rule in the merged scan and its manifest (`inspec_rule`, `inspec_bands`).
+
+**Re-filtering.** `bq.refilter_inspec(path, bands=None, scan_key=None)`
+re-judges the opt-in bands from the stored numbers (an engine draw's own
+post-hoc record, else the archived `l_i(3)` / `beta_p`); no physics is re-run.
+`Bouquet.filter()` does it automatically when the archive's stamped rule is
+missing (an archive made before the rule, whose engine draws carry the old
+unconditional 5 % band) or differs from the config's, and says so.
+
+```python
+bq.refilter_inspec("old_run.h5")                         # the magnetics rule
+bq.refilter_inspec("run.h5", bq.InspecBands(l_i_sigma=0.03))   # a stated 1-sigma
+```
+
+**Stored configs.** A config stored before the rule (no
+`generation.inspec_band_nsigma`) with `l_i_tolerance` at the old default
+`0.05` loads with the band **off** and a one-line note; any other stored value
+was explicit and keeps its band; a config without the field loads loud, band
+off. A config written since keeps exactly what it says.
+
+**What moves.** Yields rise wherever the l_i band was binding, and every
+reported l_i band becomes a result of the ensemble rather than a reflection of
+the 5 % tolerance. The coil and boundary thresholds are unchanged.
+
+**Bistable equilibria.** On a near-double-null slice the free-boundary problem
+can have two neighbouring solutions of the same inputs. On the one known case
+(a reversed-Ip slice) their magnetic axes sit 17 mm (2.8 % of a) apart, and
+l_i(3) differs by 2e-3 and q0 by 4e-3 -- an order of magnitude below the
+ensemble's band widths. Two records say where a run stands; neither refuses
+or filters anything:
+
+* the reconstruction's **bistability stamp** (`check_bistability`, on by
+  default under the unified engine, one extra solve per reconstruction):
+  `Baseline.engine["bistability"]` with `bistable=True`, the deltas and a
+  warning when a cold re-solve of the same inputs lands outside the σ=0
+  gates. The delivered equilibrium is kept.
+* every engine draw's **axis record and branch flag**: the archived state's
+  magnetic axis against the reconstruction's delivered one
+  (`engine["axis"]`: `R`, `Z`, `reference_R`, `reference_Z`, `dR_mm`,
+  `dZ_mm`, `displacement_mm`, `displacement_frac_a`, `minor_radius_m`) and
+  `axis_branch` = `"same"` when the displacement is within
+  `engine.AXIS_BRANCH_FRAC` (1 %) of a, `"other"` above -- the discriminator
+  the MSE stage's branch check uses. The flag is on the draw group
+  (`axis_branch`, `axis_shift_frac_a`), the σ=0 draw of
+  `verify_sigma0_consistency()` carries it too (`["axis"]`, not gated), the
+  count of `"other"` draws is in the `[generate]` / `[draw summary]` line, in
+  `ScanView.spread()["axis_branch"]` and in every `draw_scalars` record's
+  provenance (`axis_branch`, with a limitation when any used draw is
+  `"other"`), and on the scan (`n_axis_other`, `n_axis_recorded`).
+
+The magnetics do not distinguish the branches on the known case: a σ=0 draw
+that landed on the other branch passed the coil test (F 0.023 %, VSC 0.012 %)
+and the boundary cut (0.50 mm). So both branches pass the in-spec rule, and a
+band over both may be bimodal: that is the physics of the slice, not a defect
+to filter away. A continuity guard for the draws (keeping a draw on the
+reconstruction's branch through its homotopy) is tracked as #87.
+
 ## until-N in-spec draws
 
 By default a run draws exactly `n_equils` times and you get whatever yield the
 equilibrium gives — 20 draws might leave 12 selected on a stiff case and 19 on
 an easy one, so ensembles are not comparable in size across shots. Setting
 `generation.n_inspec_target` inverts that: the loop keeps drawing until **N
-draws pass both filters**, then stops.
+draws are in spec** -- by [the in-spec rule](#the-in-spec-rule) in force: the
+coil test and the boundary cut, plus any opt-in band -- then stops.
 
 ```python
 b.generation.n_equils = 20            # initial allocation, not the total
@@ -734,7 +862,7 @@ band a profile as one named quantity per point); the statistic is the median wit
 
 ```python
 ar = bq.BouquetArchive("run.h5"); key = ar.scan_keys[0]
-sc = bq.draw_scalars(ar, key)             # q0, q95, rho(q=2/1), rho(q=3/1), l_i, beta_N, <P>
+sc = bq.draw_scalars(ar, key)             # q0, q95, rho(q=2/1), rho(q=3/1), l_i, beta_N, <P>, beta_p, Lambda
 def my_dprime(view):                      # user code; bouquet never sees the external code
     res = run_my_code(view.eqdsk_bytes)   # same accessor on draws and on the baseline
     return {"dp21": {"value": res.dp21, "status": res.status, "regular": res.has_q2}}
@@ -749,7 +877,11 @@ bq.plot_band(t, "dp21"); t.to_csv("dp21_bands.csv")
 counts at each stage (`n_requested` … `n_used`), every dropped draw with its
 reason (`not_selected`, `user:<reason>`, `status:<code>`, `irregular:<label>`,
 `non_finite`), and a `provenance` block (filters, thresholds, versions,
-limitations). Below `min_n=15` a record is flagged `below_floor` (shown hollow);
+limitations; `inspec_rule` / `inspec_bands` name [the in-spec rule](#the-in-spec-rule)
+the population was selected under -- an archive that predates the record
+gets a limitation saying its engine-draw selection includes the old 5 % l_i
+band, and a rule with an opt-in band one saying that a band of the banded
+quantity reflects the band's width). Below `min_n=15` a record is flagged `below_floor` (shown hollow);
 below `hard_min=5` p16/p84 are NaN. If half or fewer of the ok draws are regular
 the record is `gated` (`show=False`); there is no magnitude cut. Whenever any ok
 draw is irregular the band is conditional on the regular outcome: the record

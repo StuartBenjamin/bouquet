@@ -90,46 +90,121 @@ def new_uncertainty_profiles(
     return profile + shelf
 
 
+
 # ====================================================================
-#  Synthetic "IDA-like" fractional-sigma profiles (sine basis).
+#  Radial sigma templates (relative 1-sigma, sigma / |x|).
 #
-#  A shareable, non-proprietary stand-in for operational DIII-D IDA
-#  uncertainty envelopes, fit to a real reference case's fractional-sigma
-#  SHAPE with an all-sine basis so it can ship in the public example +
-#  golden tests:
+#  The median relative envelopes of IDA-lite deliveries on DIII-D slices,
+#  in three regimes, sampled on 14 psi_N nodes and rounded to two
+#  significant figures:
 #
-#     s(psi)   = sin(pi/2 * psi_N)              (0 at axis -> 1 at edge)
-#     frac(psi)= const
-#                + sum_k  c_k  * sin(k*pi*psi_N)   (core/mid oscillation; Te,Ti)
-#                + sum_p  e_p  * s**p              (edge rise/spike; e_p >= 0)
+#    "hmode_flattop"  developed pedestal (peak pedestal, steady flat top)
+#    "ramp"           L-H transition and pedestal formation
+#    "lmode"          no pedestal (L-mode, including the ramp-up)
 #
-#  Coefficients were obtained by bounded least squares against the real
-#  reference-case IDA fractional sigma (edge powers constrained >= 0 so the
-#  edge can only add, never dig a pre-edge trough).  ne uses no harmonics
-#  (flat core + smooth edge); Te/Ti carry the mid-radius shoulder/bump.
-#  These constants ARE the golden definition -- do not refit casually.
+#  Quantities: n_e, T_e, T_i, Z_eff and the carbon density n_C each from
+#  its own delivered envelope; n_i is derived per slice as
+#  n_i = n_e (6 - Z_eff) / 5 with independent errors,
+#  sigma_ni/n_i = sqrt((sigma_ne/n_e)^2 + (sigma_Z/(6 - Z_eff))^2).
+#  Between nodes the template is piecewise linear in psi_N; past psi_N = 1
+#  the separatrix value is held.  SIGMA_TEMPLATE_FLOOR is the smallest
+#  relative sigma seen on psi_N in [0, 1] in any slice, rounded down to
+#  2 s.f.; every node exceeds it, so it binds only for a scaled or
+#  smoothed template.
+#
+#  The H-mode flat-top shapes are the ASSUMED default envelope of a run
+#  with no measured sigmas (UncertaintyConfig.*_scalar_sigma = None) and
+#  the definition of synthetic_ida_sigma; the tests/data fixtures carry
+#  the template of their own phase (tests/data/apply_sigma_templates.py).
 # ====================================================================
-_SYNTHETIC_IDA_SIGMA = {
-    # channel: (const, {harmonic_k: coeff}, {edge_power_p: coeff})  [fractional]
-    "ne": (0.0238, {},                                  {64: 0.0361}),
-    "te": (0.0317, {1: 0.0292, 2: -0.0035, 3: 0.0059},  {64: 0.0846}),
-    "ti": (0.0569, {1: 0.0139, 2: 0.0111, 3: 0.0002},   {16: 0.0045, 64: 0.0348}),
+SIGMA_TEMPLATE_GRID = (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85,
+                       0.9, 0.95, 0.98, 1.0)
+
+SIGMA_TEMPLATES = {
+    "hmode_flattop": {
+        "ne":   (0.057, 0.034, 0.031, 0.029, 0.028, 0.028, 0.031, 0.037, 0.045, 0.051, 0.058, 0.071, 0.10, 0.15),
+        "te":   (0.052, 0.039, 0.046, 0.055, 0.066, 0.078, 0.092, 0.10, 0.12, 0.13, 0.13, 0.14, 0.16, 0.19),
+        "ti":   (0.089, 0.062, 0.059, 0.066, 0.076, 0.087, 0.099, 0.11, 0.13, 0.13, 0.14, 0.15, 0.18, 0.31),
+        "zeff": (0.16, 0.11, 0.089, 0.086, 0.086, 0.087, 0.089, 0.093, 0.10, 0.11, 0.12, 0.14, 0.21, 0.41),
+        "nc":   (0.16, 0.11, 0.10, 0.10, 0.10, 0.097, 0.093, 0.095, 0.10, 0.11, 0.12, 0.15, 0.25, 0.45),
+        "ni":   (0.17, 0.11, 0.094, 0.089, 0.085, 0.081, 0.078, 0.079, 0.085, 0.090, 0.097, 0.11, 0.15, 0.22),
+    },
+    "ramp": {
+        "ne":   (0.063, 0.039, 0.034, 0.028, 0.024, 0.022, 0.023, 0.024, 0.030, 0.036, 0.044, 0.059, 0.095, 0.16),
+        "te":   (0.055, 0.048, 0.065, 0.078, 0.089, 0.10, 0.11, 0.12, 0.12, 0.12, 0.13, 0.13, 0.14, 0.20),
+        "ti":   (0.15, 0.10, 0.097, 0.11, 0.11, 0.12, 0.12, 0.11, 0.11, 0.12, 0.12, 0.13, 0.15, 0.31),
+        "zeff": (0.17, 0.12, 0.095, 0.088, 0.089, 0.089, 0.089, 0.090, 0.097, 0.10, 0.11, 0.13, 0.21, 0.45),
+        "nc":   (0.23, 0.15, 0.15, 0.16, 0.18, 0.18, 0.17, 0.16, 0.14, 0.15, 0.15, 0.17, 0.24, 0.43),
+        "ni":   (0.11, 0.085, 0.072, 0.067, 0.064, 0.062, 0.061, 0.065, 0.069, 0.076, 0.085, 0.10, 0.15, 0.27),
+    },
+    "lmode": {
+        "ne":   (0.045, 0.031, 0.026, 0.027, 0.032, 0.037, 0.043, 0.050, 0.060, 0.063, 0.065, 0.067, 0.068, 0.069),
+        "te":   (0.039, 0.035, 0.050, 0.069, 0.083, 0.094, 0.11, 0.12, 0.14, 0.14, 0.15, 0.16, 0.17, 0.17),
+        "ti":   (0.074, 0.064, 0.075, 0.090, 0.10, 0.11, 0.11, 0.11, 0.12, 0.12, 0.13, 0.15, 0.18, 0.23),
+        "zeff": (0.24, 0.14, 0.10, 0.11, 0.12, 0.14, 0.15, 0.15, 0.17, 0.17, 0.19, 0.21, 0.24, 0.32),
+        "nc":   (0.10, 0.087, 0.078, 0.075, 0.097, 0.13, 0.14, 0.13, 0.11, 0.10, 0.12, 0.14, 0.16, 0.21),
+        "ni":   (0.11, 0.081, 0.065, 0.067, 0.083, 0.10, 0.12, 0.15, 0.18, 0.20, 0.22, 0.25, 0.29, 0.37),
+    },
 }
-# aliases -> canonical channel key
+
+SIGMA_TEMPLATE_FLOOR = {"ne": 0.013, "te": 0.025, "ti": 0.039, "zeff": 0.062,
+                        "nc": 0.038, "ni": 0.035}
+
+#: the template of the ASSUMED default envelope (sigma-less runs)
+DEFAULT_SIGMA_TEMPLATE = "hmode_flattop"
+
+# aliases -> canonical quantity key
 _SIGMA_ALIASES = {
-    "ne": "ne", "n_e": "ne", "density": "ne", "ni": "ne", "n_i": "ne",
+    "ne": "ne", "n_e": "ne", "density": "ne",
+    "ni": "ni", "n_i": "ni",
     "te": "te", "t_e": "te",
     "ti": "ti", "t_i": "ti", "t_12c6": "ti",
+    "zeff": "zeff", "z_eff": "zeff",
+    "nc": "nc", "n_c": "nc", "n_12c6": "nc", "nz": "nc",
 }
+
+
+def sigma_template(psi_N, quantity, regime=DEFAULT_SIGMA_TEMPLATE):
+    r"""Relative 1-sigma envelope :math:`\sigma_X / |X|` of a radial template.
+
+    ``max(interp(clip(psi_N, 0, 1), SIGMA_TEMPLATE_GRID, template),
+    SIGMA_TEMPLATE_FLOOR[quantity])``: piecewise linear between the 14
+    nodes, the psi_N = 1 value held outside the LCFS (and the axis value
+    below 0).
+
+    Parameters
+    ----------
+    psi_N : array_like
+        Normalised poloidal flux.  In a toroidal-flux run map the run grid
+        to psi_N first (the templates are tabulated in psi_N).
+    quantity : str
+        ``ne``, ``te``, ``ti``, ``zeff``, ``nc`` (carbon density) or ``ni``
+        (the derived main-ion density); aliases ``n_e``, ``t_e``, ``t_i``,
+        ``t_12c6``, ``z_eff``, ``n_c``, ``n_12c6``, ``nz``, ``n_i``,
+        ``density`` (= ``ne``).
+    regime : str
+        ``"hmode_flattop"`` (default), ``"ramp"`` or ``"lmode"``.
+    """
+    key = _SIGMA_ALIASES.get(str(quantity).strip().lower())
+    if key is None:
+        raise ValueError(
+            f"Unknown quantity {quantity!r}; expected one of {sorted(set(_SIGMA_ALIASES))}")
+    if regime not in SIGMA_TEMPLATES:
+        raise ValueError(
+            f"Unknown sigma template {regime!r}; expected one of {sorted(SIGMA_TEMPLATES)}")
+    psi = np.clip(np.asarray(psi_N, dtype=float), 0.0, 1.0)
+    rel = np.interp(psi, SIGMA_TEMPLATE_GRID, SIGMA_TEMPLATES[regime][key])
+    return np.maximum(rel, SIGMA_TEMPLATE_FLOOR[key])
 
 
 def synthetic_ida_sigma(psi_N, channel):
     r"""Synthetic IDA-like **fractional** 1-sigma uncertainty envelope.
 
-    Returns the fractional uncertainty :math:`\sigma_X / X` on a sine basis
-    (see module notes), calibrated to an operational DIII-D IDA shape.
-    Multiply by the profile to get the absolute sigma, e.g.
-    ``sigma_ne = synthetic_ida_sigma(psi_N, 'ne') * ne_SI``.
+    Returns :math:`\sigma_X / X` for an H-mode flat-top slice: the
+    ``"hmode_flattop"`` radial template (:func:`sigma_template`; the median
+    relative envelope of IDA-lite deliveries on DIII-D H-mode flat-top
+    slices, 14 psi_N nodes, 2 s.f.).  Multiply by the profile to get the
+    absolute sigma, e.g. ``sigma_ne = synthetic_ida_sigma(psi_N, 'ne') * ne_SI``.
 
     Parameters
     ----------
@@ -137,31 +212,29 @@ def synthetic_ida_sigma(psi_N, channel):
         Normalised poloidal flux (0 = axis, 1 = LCFS).  Values > 1 (SOL)
         are clamped to 1 so the envelope holds its edge value.
     channel : str
-        One of ``ne``/``ni``/``te``/``ti`` (aliases ``n_e``, ``t_e``,
-        ``t_i``, ``t_12c6``, ``density`` accepted).  ``ni`` reuses ``ne``.
+        ``ne`` / ``te`` / ``ti`` / ``ni`` / ``zeff`` / ``nc`` (aliases as for
+        :func:`sigma_template`).  ``ni`` is the derived main-ion envelope
+        (it was an alias of ``ne`` before 2026-10-14).
 
     Returns
     -------
     ndarray
-        Fractional sigma, same shape as ``psi_N``, clipped to >= 0.
+        Fractional sigma, same shape as ``psi_N``, >= the template floor.
 
     Notes
     -----
-    Used by the D3D-like example notebook and the backend golden tests as a
-    deterministic, non-proprietary uncertainty model.  The j_phi envelope is
-    handled separately (flat 10 % fractional), as in the operational workflow.
+    Values at psi_N 0 / 0.5 / 0.9 / 1.0: n_e 5.7 / 2.8 / 5.8 / 15 %,
+    T_e 5.2 / 7.8 / 13 / 19 %, T_i 8.9 / 8.7 / 14 / 31 %, Z_eff 16 / 8.7 /
+    12 / 41 %, n_C 16 / 9.7 / 12 / 45 %, n_i 17 / 8.1 / 9.7 / 22 %.
+
+    Until 2026-10-14 this was a sine-basis fit (const + sin(k pi psi_N)
+    harmonics + sin(pi psi_N / 2)^p edge terms) to the fractional-sigma
+    shape of ONE reference case, for n_e (n_i an alias), T_e and T_i only.
+    Its shapes were qualitatively right but its levels were 1.2-1.5x too low
+    in the core and at mid radius and 1.6-3x too low at the separatrix
+    against the flat-top median, and it had no on-axis rise; the values at
+    psi_N 0 / 0.5 / 0.9 / 1.0 were n_e 2.4 / 2.4 / 4.0 / 6.0 %, T_e 3.2 /
+    5.5 / 8.6 / 12 %, T_i 5.7 / 7.1 / 7.4 / 9.6 %.  docs/CHANGES_SUMMARY.md
+    records the change.  The j_phi envelope is handled separately.
     """
-    key = _SIGMA_ALIASES.get(str(channel).strip().lower())
-    if key is None:
-        raise ValueError(
-            f"Unknown channel {channel!r}; expected one of {sorted(set(_SIGMA_ALIASES))}"
-        )
-    const, harm, edge = _SYNTHETIC_IDA_SIGMA[key]
-    psi = np.clip(np.asarray(psi_N, dtype=float), 0.0, 1.0)
-    s = np.sin(np.pi / 2.0 * psi)
-    frac = np.full_like(psi, float(const))
-    for k, c in harm.items():
-        frac = frac + c * np.sin(k * np.pi * psi)
-    for p, e in edge.items():
-        frac = frac + e * s ** p
-    return np.clip(frac, 0.0, None)
+    return np.clip(sigma_template(psi_N, channel, "hmode_flattop"), 0.0, None)

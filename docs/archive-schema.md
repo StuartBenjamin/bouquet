@@ -21,7 +21,15 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
 │                                      per-scan copies below are authoritative)
 └── scan/<scan_key>/                   one group per scan point / time slice
     ├── config_json                    this slice's exact config
-    │   attrs: [coil_filter]           'chi2' | 'legacy' -- which coil filter wrote
+    │   attrs: [inspec_rule, inspec_bands_json, lambda_definition]
+    │                                  the in-spec rule the band flags were judged under
+    │                                  ('magnetics' = coil + boundary, the default since
+    │                                  2026-10-14; '+li' / '+beta_p' / '+q0' opt-in bands),
+    │                                  its settings (JSON; route, and on the legacy/swb
+    │                                  routes the draw-construction l_i tolerance) and the
+    │                                  Lambda definition. Absent: an archive made before
+    │                                  the rule (bouquet.refilter_inspec re-judges it)
+    │          [coil_filter]           'chi2' | 'legacy' -- which coil filter wrote
     │          [coil_sigma_model]      passes_coil_filter last (chi2: the sigma model JSON)
     │          [boundary_rms_max_mm, boundary_max_max_mm, boundary_cut_source]
     │                                  the LCFS cut filter_boundaries applied and where it
@@ -159,6 +167,13 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
                                        ← the draw's jbs_loop block (v3)
                    [engine_json, passes_draw_band]
                                        ← engine draws only (added; see below)
+                   [passes_l_i_band, passes_beta_p_band, passes_q0_gate]
+                                       ← the opt-in bands' own verdicts, only
+                                         while that band is on (their AND is
+                                         passes_draw_band)
+                   [beta_p, Lambda]    ← beta_p (full-pressure frame) and
+                                         Lambda = beta_p + l_i(3)/2; reported,
+                                         never a filter (2026-10-14)
                    [current_split_convention]  where p'G sits (below)
                    [kinetic_sampler_json]  legacy / swb draws: the shared
                                        kinetic sampler's record (version
@@ -364,8 +379,11 @@ pressure + that equilibrium's `p_sep`).
     and `flux_range_rel`; `archived.deltas` the same for the archived
     state; `delivered.flux_range` / `archived.flux_range` the values),
     `post_hoc`
-    (the l_i band and `constrain_sawteeth` verdicts, `coil_in_spec`,
-    `in_spec`), `homotopy`, `post_homotopy`, and `cost` (solves, passes and
+    (the opt-in bands' verdicts -- `rule`, `l_i_in_band` / `beta_p_in_band`
+    (`null` while that band is off), `q0_ok`, the numbers judged (`l_i_3`,
+    `l_i_reference`, `l_i_rel`, `beta_p`, `beta_p_z`, `q0`), `Lambda`,
+    `in_band`, `coil_in_spec`, `in_spec`; `archived` also carries `beta_p`
+    and `Lambda`), `homotopy`, `post_homotopy`, and `cost` (solves, passes and
     wall time for the stages `anchor`, `loop`, `homotopy`, `post_homotopy`,
     `filters`, `archive`, and their `total`).
   - **The current split of an engine draw group** (`j_phi`, `j_BS`,
@@ -403,7 +421,9 @@ pressure + that equilibrium's `p_sep`).
     archived eqdsk's own flux surfaces (`io.imas.archived_pressure_term`,
     COCOS 7) from `j_BS` before converting with the `eq_fsa` geometry.
   - `passes_draw_band` (bool attr, engine draws only): the post-hoc band
-    verdict. It is one of the filter flags ANDed into `selected`
+    verdict -- the AND of the OPT-IN bands of the in-spec rule (True when
+    none is on, the default since 2026-10-14; before, the unconditional
+    5 % l_i band). It is one of the filter flags ANDed into `selected`
     (`filtering._FILTER_FLAGS`), so `.filter()` selects what the until-N
     ledger counted; `in_spec` is the coil verdict AND this band.
   - **Fields whose MEANING differs on an engine archive** (names and units

@@ -500,7 +500,8 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
                           zeff_is_ida, measured_sigma, measured_source,
                           carbon_sigma=None, carbon_source="none",
                           ineligible_reason="", ida_in_play=False,
-                          ladder="standard"):
+                          ladder="standard", imas_sigma=None,
+                          imas_source="none", psi_N=None):
     """The Z_eff envelope ladder: highest-fidelity tier available per file.
 
     Returns ``(sigma_array, label, meta)``.
@@ -518,10 +519,20 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
        spread).  Conservative -- the visible-bremsstrahlung inversion's own
        error, which carries n_e^2 sqrt(T_e) propagation, calibration and
        mantle-subtraction systematics.
-    3. the flat ``zeff_scalar_sigma`` fraction of ``|Z_eff|``.
+    3. the ASSUMED width: the flat ``zeff_scalar_sigma`` fraction of
+       ``|Z_eff|``, or with ``zeff_scalar_sigma=None`` (the default) the
+       H-mode flat-top Z_eff template on ``psi_N`` (required then) times
+       ``|Z_eff|``; the tier keeps the name "scalar", and
+       ``meta["assumed_default"]`` says which applied.
 
     ``zeff_sigma_source`` picks "auto" (carbon > VB > scalar), "carbon",
     "measured" (VB), "scalar".
+
+    On either ladder an **IMAS-measured** tier sits just above the assumed
+    one: ``imas_sigma``, the IMAS source's own ``zeff_error_upper``
+    (:func:`bouquet.io.imas.read_imas_sigmas`; ``imas_source`` names the
+    field), taken with "auto" / "measured" when no IDA tier was chosen.  The
+    caller passes it only for a Z_eff baseline that is the dd's own.
 
     ``ladder="resolved"`` (EXPERIMENTAL, an experimental ``ni_source``;
     ``bouquet.experimental.REGISTRY["ida_ion_route"]``) -- tiers:
@@ -575,8 +586,21 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
     _resolved = ladder == "resolved"
     _measured_tier = "IDA-resolved" if _resolved else "VB-measured"
     base = np.abs(np.asarray(base_zeff, dtype=float))
-    scalar_env = float(zeff_scalar_sigma) * base
-    scalar_label = f"scalar zeff_scalar_sigma={float(zeff_scalar_sigma):g}"
+    if zeff_scalar_sigma is None:
+        from .uncertainties import DEFAULT_SIGMA_TEMPLATE, sigma_template
+        if psi_N is None or np.shape(psi_N) != base.shape:
+            raise ValueError(
+                "resolve_zeff_envelope: zeff_scalar_sigma=None (the assumed "
+                "template) needs psi_N on the Z_eff baseline's grid")
+        assumed = f"template {DEFAULT_SIGMA_TEMPLATE}"
+        scalar_env = sigma_template(psi_N, "zeff", DEFAULT_SIGMA_TEMPLATE) * base
+        scalar_label = f"assumed Z_eff template {DEFAULT_SIGMA_TEMPLATE}"
+        scalar_prov = f"zeff_scalar_sigma=None (template {DEFAULT_SIGMA_TEMPLATE})"
+    else:
+        assumed = f"scalar {float(zeff_scalar_sigma):g}"
+        scalar_env = float(zeff_scalar_sigma) * base
+        scalar_label = f"scalar zeff_scalar_sigma={float(zeff_scalar_sigma):g}"
+        scalar_prov = f"zeff_scalar_sigma={float(zeff_scalar_sigma):g}"
 
     skipped = []                      # [(tier, reason)], in ladder order
 
@@ -659,9 +683,17 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
                                 "missing dataset: this IDA file carries no "
                                 "Zeff uncertainty (older direct vintage)"))
 
+    if env is None and zeff_sigma_source in ("auto", "measured") \
+            and imas_sigma is not None:
+        m = _usable(imas_sigma, "IMAS-measured")
+        if m is not None:
+            env, tier = m, "IMAS-measured"
+            provenance = str(imas_source)
+            label = f"measured {imas_source}"
+
     if env is None:
         env, tier = scalar_env, "scalar"
-        provenance = f"zeff_scalar_sigma={float(zeff_scalar_sigma):g}"
+        provenance = scalar_prov
         label = scalar_label + ("" if zeff_sigma_source == "scalar"
                                 else " (FALLBACK -- an ASSUMED width)")
 
@@ -707,6 +739,7 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
         "fell_back": bool(skipped),
         "warned": bool(warned),
         "median_fraction_of_zeff": _frac,
+        "assumed_default": assumed,
     }
     return env, label, meta
 
@@ -793,8 +826,16 @@ def resolve_uncertainty(config, baseline) -> dict:
     Kinetic sigma source precedence:
       1. ``UncertaintyConfig.ida_path`` if set;
       2. else the reconstruction source's own IDA ``.cdf`` (sigmas read once);
-      3. else a per-channel flat fraction ``<chan>_scalar_sigma * |profile|``.
+      3. else an :class:`ImasSource`'s own core_profiles ``*_error_upper``
+         (:func:`bouquet.io.imas.read_imas_sigmas`; ``sigma_mode`` "auto" /
+         "direct"; not on ``ida_hybrid``);
+      4. else the ASSUMED default: ``<chan>_scalar_sigma * |profile|`` when
+         the scalar is set, otherwise (``None``, the default) the H-mode
+         flat-top radial template ``sigma_template(psi_N, chan) * |profile|``.
     An explicit ``UncertaintyConfig.sigma_profiles[chan]`` array overrides all.
+    The winner per channel (and the Z_eff tier) is returned warning-free as
+    ``"sigma_source"``: ``{chan: {"kind", "source"[, "assumed_default"]}}``,
+    kind ``"explicit"`` / ``"ida"`` / ``"imas"`` / ``"assumed"``.
 
     The resolved source is LOGGED, one line per channel (disable with
     ``UncertaintyConfig.log_sigma_sources=False``), and a ``UserWarning`` is
@@ -811,11 +852,15 @@ def resolve_uncertainty(config, baseline) -> dict:
     from .config import ImasSource, ReconstructionSource, UncertaintyConfig
 
     # Read the defaults off the dataclass so "the user changed this" can never
-    # drift from the declared defaults.
+    # drift from the declared defaults (None: the assumed template).
     _SCALAR_SIGMA_DEFAULTS = {
-        _c: float(getattr(UncertaintyConfig, f"{_c}_scalar_sigma"))
+        _c: getattr(UncertaintyConfig, f"{_c}_scalar_sigma")
         for _c in ("ne", "te", "ni", "ti")
     }
+
+    def _scalar_set(v, c):
+        return v is not None and (_SCALAR_SIGMA_DEFAULTS[c] is None
+                                  or float(v) != float(_SCALAR_SIGMA_DEFAULTS[c]))
 
     unc = config.uncertainty
     src = config.source
@@ -921,7 +966,24 @@ def resolve_uncertainty(config, baseline) -> dict:
             _ida_zeff_carbon_source = str(
                 getattr(ida, "sigma_Zeff_carbon_source", "?"))
 
-    # Per-channel resolution: explicit profile > IDA > flat scalar fraction.
+    # The IMAS source's own envelopes (core_profiles *_error_upper, read by
+    # io.imas.read_imas_sigmas onto the kinetic grid; never on ida_hybrid,
+    # whose kinetics are the IDA file's).  Used below the IDA file and above
+    # the assumed defaults, with sigma_mode "auto" / "direct".
+    _imas_sig = {}
+    if isinstance(src, ImasSource) and unc.sigma_mode in ("auto", "direct"):
+        for _c in ("ne", "te", "ni", "ti", "zeff"):
+            _a = (baseline.aux or {}).get(f"sigma_{_c}_imas")
+            if _a is not None and np.shape(_a) == psi_kin.shape:
+                _imas_sig[_c] = np.asarray(_a, dtype=float)
+    _imas_fields = (baseline.aux or {}).get("imas_sigma_fields") or {}
+
+    def _imas_label(_c):
+        _f = (_imas_fields.get(_c) or {}).get("field") or f"{_c} error field"
+        return f"IMAS core_profiles {_f}"
+
+    # Per-channel resolution: explicit profile > IDA > IMAS error fields >
+    # flat scalar fraction.
     _profiles = unc.sigma_profiles or {}
     _scalars = {"ne": unc.ne_scalar_sigma, "te": unc.te_scalar_sigma,
                 "ni": unc.ni_scalar_sigma, "ti": unc.ti_scalar_sigma}
@@ -936,6 +998,14 @@ def resolve_uncertainty(config, baseline) -> dict:
                                    or {}, ida_sigma_time_match=dict(
                                        _sig_match))
     _won = {}       # channel -> human-readable winning source (for the log)
+    _kind = {}      # channel -> "explicit" | "ida" | "imas" | "assumed"
+    _assumed = {}   # channel -> which assumed default applied
+    # psi_N of the kinetic nodes: the templates are tabulated in psi_N (a
+    # toroidal-flux run maps its grid back through the source's own map)
+    from .uncertainties import DEFAULT_SIGMA_TEMPLATE, sigma_template
+    _psi_tpl = (psi_kin if baseline.psi_map is None else np.interp(
+        psi_kin, np.asarray(baseline.psi_map[1], dtype=float),
+        np.asarray(baseline.psi_map[0], dtype=float)))
     _shadowed = []  # channels whose deliberately-set scalar lost to the IDA
     for _ch in ("ne", "te", "ni", "ti"):
         if _ch in _profiles and _profiles[_ch] is not None:
@@ -946,21 +1016,40 @@ def resolve_uncertainty(config, baseline) -> dict:
                     f"the kinetic grid {psi_kin.shape} (psi_N_kinetic)")
             out[f"sigma_{_ch}"] = _arr
             _won[_ch] = "explicit sigma_profiles"
+            _kind[_ch] = "explicit"
         elif ida_sig is not None:
             out[f"sigma_{_ch}"] = ida_sig[_ch]
             _won[_ch] = f"IDA {os.path.basename(ida_path)}"
+            _kind[_ch] = "ida"
             # A scalar the user moved off its default is being SILENTLY
             # ignored. Zeroing them is the classic footgun: it reads like
             # "no perturbation" but leaves the full operational IDA envelope
             # in place, so a run intended as deterministic is a full-sigma
             # ensemble (the 2026-08 beta-scan case).
-            if float(_scalars[_ch]) != _SCALAR_SIGMA_DEFAULTS[_ch]:
+            if _scalar_set(_scalars[_ch], _ch):
                 _shadowed.append(
                     f"{_ch}_scalar_sigma={float(_scalars[_ch]):g}")
-        else:
+        elif _ch in _imas_sig:
+            out[f"sigma_{_ch}"] = _imas_sig[_ch]
+            _won[_ch] = _imas_label(_ch)
+            _kind[_ch] = "imas"
+            if _scalar_set(_scalars[_ch], _ch):
+                _shadowed.append(
+                    f"{_ch}_scalar_sigma={float(_scalars[_ch]):g}")
+        elif _scalars[_ch] is not None:
             out[f"sigma_{_ch}"] = float(_scalars[_ch]) * np.abs(
                 np.asarray(_baseprof[_ch], dtype=float))
             _won[_ch] = f"scalar {float(_scalars[_ch]):g} x |baseline|"
+            _kind[_ch] = "assumed"
+            _assumed[_ch] = f"scalar {float(_scalars[_ch]):g}"
+        else:
+            # the assumed default: the H-mode flat-top template SHAPE
+            out[f"sigma_{_ch}"] = sigma_template(
+                _psi_tpl, _ch, DEFAULT_SIGMA_TEMPLATE) * np.abs(
+                np.asarray(_baseprof[_ch], dtype=float))
+            _won[_ch] = f"template {DEFAULT_SIGMA_TEMPLATE} x |baseline|"
+            _kind[_ch] = "assumed"
+            _assumed[_ch] = f"template {DEFAULT_SIGMA_TEMPLATE}"
 
     # REPORT ONLY: a kinetic sigma larger than its own profile over a stated
     # fraction of the radius (draws through zero are rejected, never clipped)
@@ -976,6 +1065,15 @@ def resolve_uncertainty(config, baseline) -> dict:
 
     out["sigma_jphi"] = unc.jphi_scalar_sigma * np.abs(np.asarray(baseline.j_phi, dtype=float))
     _won["jphi"] = f"scalar {float(unc.jphi_scalar_sigma):g} x |j_phi|"
+    # Which source each envelope came from, warning-free (the uncertainty
+    # record): kind "explicit" (sigma_profiles), "ida" (an IDA .cdf),
+    # "imas" (the IMAS source's own *_error_upper), "assumed" (the assumed
+    # default); "source" is the log's wording.  Z_eff is added below.
+    out["sigma_source"] = {
+        _c: dict({"kind": _kind[_c], "source": _won[_c]},
+                 **({"assumed_default": _assumed[_c]} if _c in _assumed else {}))
+        for _c in ("ne", "te", "ni", "ti")}
+    out["sigma_source"]["jphi"] = {"kind": "scalar", "source": _won["jphi"]}
     out["n_ls"], out["t_ls"], out["j_ls"] = unc.n_ls, unc.t_ls, unc.j_ls
 
     # --- precedence audit trail ---------------------------------------------
@@ -991,12 +1089,16 @@ def resolve_uncertainty(config, baseline) -> dict:
                   f"(peak {_pk:.4g}{', ALL ZERO' if _pk == 0.0 else ''})")
 
     if _shadowed:
+        _winner = (f"an IDA source ({os.path.basename(ida_path)})"
+                   if ida_sig is not None else
+                   "the IMAS source's own core_profiles error fields")
         warnings.warn(
             f"resolve_uncertainty: {', '.join(_shadowed)} was set but IGNORED "
-            f"-- an IDA source ({os.path.basename(ida_path)}) is active and "
+            f"-- {_winner} is active and "
             f"wins the kinetic sigma precedence "
-            f"(sigma_profiles > IDA .cdf > <chan>_scalar_sigma). The resolved "
-            f"sigmas are the full IDA envelope, NOT your scalars. To force a "
+            f"(sigma_profiles > IDA .cdf > IMAS *_error_upper > "
+            f"<chan>_scalar_sigma). The resolved "
+            f"sigmas are the full measured envelope, NOT your scalars. To force a "
             f"specific envelope (e.g. zero, for a deterministic run) pass "
             f"explicit arrays instead:  "
             f"unc.sigma_profiles = {{ch: np.zeros_like(baseline.psi_N_kinetic) "
@@ -1023,7 +1125,12 @@ def resolve_uncertainty(config, baseline) -> dict:
     # never ran (an explicit aux_sigmas['zeff'], or the channel disabled),
     # else the full tier record -- chosen tier, skipped tiers and why.
     out["zeff_sigma_tier"] = None
-    if "zeff" not in user_sigmas and float(getattr(unc, "zeff_scalar_sigma", 0.0)) > 0:
+    out["sigma_source"]["zeff"] = (
+        {"kind": "explicit", "source": "explicit aux_sigmas['zeff']"}
+        if "zeff" in user_sigmas else
+        {"kind": "off", "source": "Z_eff channel disabled"})
+    _zs = getattr(unc, "zeff_scalar_sigma", None)
+    if "zeff" not in user_sigmas and (_zs is None or float(_zs) > 0):
         base_zeff = src_aux.get("zeff")
         if base_zeff is None:
             base_zeff = np.asarray(baseline.Zeff, dtype=float)
@@ -1055,9 +1162,22 @@ def resolve_uncertainty(config, baseline) -> dict:
             ineligible_reason=_zeff_inelig,
             ida_in_play=ida_path is not None,
             ladder="resolved" if _ion_route else "standard",
+            # the dd's own Z_eff envelope pairs with the dd's Z_eff baseline
+            # only (not with a manual aux_baselines['zeff'])
+            imas_sigma=(_imas_sig.get("zeff")
+                        if "zeff" not in (unc.aux_baselines or {}) else None),
+            imas_source=_imas_label("zeff"),
+            psi_N=_psi_tpl,
         )
         user_sigmas["zeff"] = _z_env
         out["zeff_sigma_tier"] = _z_meta
+        out["sigma_source"]["zeff"] = {
+            "kind": {"carbon-propagated": "ida", "VB-measured": "ida",
+                     "IDA-resolved": "ida", "IMAS-measured": "imas",
+                     "scalar": "assumed"}[_z_meta["tier"]],
+            "source": _z_label, "tier": _z_meta["tier"],
+            **({"assumed_default": _z_meta["assumed_default"]}
+               if _z_meta["tier"] == "scalar" else {})}
         if getattr(unc, "log_sigma_sources", True):
             print(f"[sigma] zeff envelope <- {_z_label}")
             for _sk in _z_meta["skipped"]:
@@ -1071,7 +1191,7 @@ def resolve_uncertainty(config, baseline) -> dict:
     # the scalar fallback; any other real ni envelope stays its own channel.
     # unc.ni_from_zeff wins either way.
     _ida_pair = bool(
-        _ion_route and ida_sig is not None and _won["ni"].startswith("IDA")
+        _ion_route and ida_sig is not None and _kind["ni"] == "ida"
         and (out["zeff_sigma_tier"] or {}).get("tier") == "IDA-resolved"
         and "zeff" not in (unc.aux_baselines or {})
         and not getattr(src, "zeff_from_fuse", False)
@@ -1081,7 +1201,7 @@ def resolve_uncertainty(config, baseline) -> dict:
     _nfz = getattr(unc, "ni_from_zeff", None)
     out["ni_from_zeff"] = (
         bool(_nfz) if _nfz is not None else
-        bool(_won["ni"].startswith("scalar") or _ida_pair) if _ion_route
+        bool(_kind["ni"] == "assumed" or _ida_pair) if _ion_route
         else True)
     # the PR #56 sampler clips (EXPERIMENTAL; kinetic_sampler_clips): the
     # explicit setting, else on only with a PR #56 kinetic feature
@@ -1322,6 +1442,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     # Self-consistent bootstrap (GenerationConfig.jbs_self_consistent): the
     # loop wraps fit + l_i match + corrective; None -> the legacy SWB path.
     from .jbs_loop import jbs_settings as _jbs_settings
+    from .filtering import l_i_construction_tolerance
     _jbs = _jbs_settings(config.generation)
     _jbs_kw = {"jbs_loop": _jbs} if _jbs["enabled"] else {}
     from .edge_pressure import resolve_edge_pressure
@@ -1339,7 +1460,10 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             initialize_psi=True,
             p_fast=p_fast_eq,
             Z_imp=Z_imp_recon,
-            l_i_tolerance=float(config.generation.l_i_tolerance),
+            # the band the post-corrective l_i REPORT compares against (the
+            # legacy draws' construction tolerance: l_i_tolerance when set,
+            # else the old 0.05 -- not an in-spec filter)
+            l_i_tolerance=l_i_construction_tolerance(config.generation),
             **_recon_coord,
             edge_pressure=_edge,
             **_jbs_kw,
