@@ -729,8 +729,9 @@ or filters anything:
   `AXIS_BIMODAL_MIN_COUNT` = 3 draws on each side, and call the scan bimodal
   when the gap exceeds `AXIS_BIMODAL_GAP_RATIO` = 1.0 x the larger of the two
   clusters' sample standard deviations AND the cluster centres sit more than
-  `AXIS_BRANCH_FRAC` x a apart; fewer than 6 draws with an axis, or an
-  unknown a: not testable (`None`). The scan carries `axis_bimodal` (when
+  `AXIS_BRANCH_FRAC` x a apart; fewer than `AXIS_BIMODAL_MIN_N` = 24 draws
+  with an axis, or an unknown a: not testable (`None`, with the count and
+  the reason; no verdict, no draws' source, no warning, no limitation). The scan carries `axis_bimodal` (when
   testable) and `axis_bimodal_json` (method, constants, both centres and
   counts, the gap, the spreads); it is printed on the `[generate]` /
   `[draw summary]` line and as an `[axis]` line with a `RuntimeWarning` when
@@ -745,11 +746,13 @@ or filters anything:
   the draws' own evidence meets the release rule "no bimodal band without a
   bistability stamp". A recount that no longer finds two clusters removes
   it; a reconstruction stamp "bistable" (`bistability_source=
-  "reconstruction"`) is never overwritten. Caveat, measured on random
-  unimodal samples: a normal spread of 24 (36) draws whose width is far above
-  the 1 %-of-a separation is called bimodal in about 11 % (3 %) of samples,
-  a sub-threshold scatter never; it is a report, and a false "bimodal" only
-  adds a limitation. Archives written before the rename carry `axis_branch`
+  "reconstruction"`) is never overwritten. Why at least 24 draws (owner decision 2026-10-15),
+  measured on random unimodal normal samples (a = 0.6 m): at n = 6-12 the
+  rule calls a single Gaussian "bimodal" in about 20-37 % of samples when its
+  spread is 6-20 mm (about 5-9 % at 3 mm); at n = 24 (36) about 10-11 %
+  (3 %), a sub-threshold scatter never. Until 2026-10-15 the verdict was
+  issued from n = 6. It is a report, and a false "bimodal" only adds a
+  limitation and the draws' source. Archives written before the rename carry `axis_branch`
   (`"other"` / `"same"`) per draw and `n_axis_other` on the scan: both are
   read (`schema.read_axis_entry`, `schema.read_scan_axis_counts`; the
   displacement from the draw's engine record), and a re-stamp writes the

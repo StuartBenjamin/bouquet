@@ -905,7 +905,11 @@ tests their axis Z for two clusters: split at the largest gap leaving at
 least `AXIS_BIMODAL_MIN_COUNT` (3) draws per side; bimodal when the gap
 exceeds `AXIS_BIMODAL_GAP_RATIO` (1.0) x the larger within-cluster standard
 deviation and the centres sit more than `AXIS_BRANCH_FRAC` x a apart; not
-testable below 6 draws. The scan carries `axis_bimodal` and
+testable below `AXIS_BIMODAL_MIN_N` = 24 draws (owner decision 2026-10-15:
+on unimodal normal samples the rule says "bimodal" in about 20-37 % of
+samples at n = 6-12 for axis spreads of 6-20 mm, about 5-9 % at 3 mm, about
+10-11 % at n = 24 and 3 % at n = 36; until then the verdict was issued from
+n = 6). The scan carries `axis_bimodal` and
 `axis_bimodal_json` (method `AXIS_BIMODAL_METHOD`, version
 `axis_bimodality/1`, the constants, both centres and counts); a bimodal scan
 whose reconstruction stamp is not "bistable" stamps the baseline

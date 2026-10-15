@@ -74,6 +74,36 @@ so they are regenerated on the merged code. The legacy draws' iso-update
 weighted per unit length of the traced LCFS (#81) is the same form on that
 route. Closes #84.
 
+**Unreleased: review fixes to the boundary constraint and the scan stamps.**
+
+- Spline breaks are density-aware: a source vertex breaks the resampling
+  spline only when its turn exceeds `SPLINE_BREAK_DEG` and 3x the median turn
+  of the seven vertices around it, so a coarse smooth source (16-30 points) is
+  no longer cut into a polygon 6-24 mm inside its curve; the shipped fixtures
+  resample bit-identically.
+- A `SolverConfig.isoflux_pts` set given without `isoflux_weights` is
+  weighted per unit length to `ISOFLUX_WEIGHT_TOTAL` on the unified engine
+  (with a UserWarning) instead of TokaMaker's 1 per point, and no record or
+  stamp of an installed set says `None` for its weights any more.
+- A saddle target marks the sharpest vertex inside its match radius (when it
+  exceeds `XPOINT_TURN_DEG`, else the nearest, stamped as `xpoint_match`), so
+  a target a centimetre or two off the X-point still keeps the X-point exact.
+- The record and every isoflux stamp carry the installed total
+  (`isoflux_weight_installed_total`, `weight_installed_total`): TokaMaker does
+  not apply the reference point's weight, so it is the nominal total minus
+  `w[0]`; the weights themselves are unchanged.
+- A `bistability_source="draws"` from one scan no longer lands in another
+  scan's archived baseline: `store_baseline` drops it, and a scan with no
+  axis record or too few draws clears it from its baseline and the live
+  record.
+- `bands_summary` decides own-surface versus fallback on the band's own
+  population: under `rescued="exclude"` the rescued draws are left out of
+  that decision and of `n_located` too.
+- The axis-bimodality verdict needs at least `AXIS_BIMODAL_MIN_N` = 24
+  archived draws with an axis (owner decision 2026-10-15; it was issued from
+  6): on unimodal samples the rule says "bimodal" 20-37 % of the time at
+  n = 6-12. Below 24 the scan is stamped not testable, with the count.
+
 ## Unreleased — the golden recipe runs the synthetic fixtures at the current defaults; a new IDS-route golden (owner decisions 2026-10-15)
 
 **The golden recipe moves to the synthetic test fixtures** (`tests/data/`).
@@ -167,8 +197,9 @@ writes the new names.
 **New: the per-scan bimodality stamp (`engine.axis_bimodality`).** The
 archived draws' axis Z is split at its largest gap (at least 3 draws a
 side) and called bimodal when that gap exceeds the larger within-cluster
-standard deviation and the two centres sit more than 1 % of a apart; below 6
-draws it is not testable. Stamped on the scan (`axis_bimodal`,
+standard deviation and the two centres sit more than 1 % of a apart; below 24
+draws it is not testable (`engine.AXIS_BIMODAL_MIN_N`; see the unreleased
+entry below). Stamped on the scan (`axis_bimodal`,
 `axis_bimodal_json` with method, constants, centres and counts), printed in
 the `[generate]` / `[draw summary]` line (and an `[axis]` line with a
 `RuntimeWarning` when bimodal), reported in `spread()["axis_bimodality"]` and
