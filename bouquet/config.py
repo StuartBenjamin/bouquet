@@ -2238,6 +2238,16 @@ def _user_solve_fields(gc):
                  for c, wr, u in zip(cur, w["wrote"], w["user"]))
 
 
+#: 1.4.0: the legacy reconstruction / draw route is deprecated and goes in
+#: 1.5 (issue #90). One DeprecationWarning per run
+#: (:meth:`bouquet.run.Bouquet._warn_legacy_route`).
+LEGACY_ROUTE_DEPRECATION = (
+    "reconstruction_engine='legacy' / solve_method='legacy' is deprecated "
+    "since bouquet 1.4.0 and will be removed in bouquet 1.5 (#90). The "
+    "unified engine (reconstruction_engine='unified', the default) is the "
+    "validated route; archives written by the legacy route stay readable.")
+
+
 def solve_method_of(gc) -> str:
     """The solve method of *gc* (one of :data:`SOLVE_METHODS`), WITHOUT
     touching it: ``solve_method`` when set, else derived from the user's

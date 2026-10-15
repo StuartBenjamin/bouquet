@@ -898,6 +898,33 @@ class Bouquet(SwbBaseline):
         return self
 
     # ── stage 2: baseline (reconstruction OR imas) ----------------------
+    def _warn_legacy_route(self, sm=None) -> bool:
+        """One ``DeprecationWarning`` per run when this run resolves to the
+        legacy route (``reconstruction_engine="legacy"`` or
+        ``solve_method="legacy"``; removal in 1.5, #90). Called where the run
+        is resolved (:meth:`prepare_baseline`, the draw method); later calls
+        on the same run are silent. The warning is attributed to the first
+        caller outside bouquet, so the default warning filters show it in a
+        script or notebook. Returns True when it warned."""
+        if getattr(self, "_legacy_route_warned", False):
+            return False
+        from .config import LEGACY_ROUTE_DEPRECATION, solve_method_of
+        if sm is None:
+            sm = solve_method_of(self.config.generation)
+        if sm != "legacy":
+            return False
+        import os
+        import sys
+        import warnings
+        pkg = os.path.dirname(os.path.abspath(__file__)) + os.sep
+        level, f = 1, sys._getframe(0)
+        while f is not None and os.path.abspath(f.f_code.co_filename).startswith(pkg):
+            f, level = f.f_back, level + 1
+        warnings.warn(LEGACY_ROUTE_DEPRECATION, DeprecationWarning,
+                      stacklevel=level)
+        self._legacy_route_warned = True
+        return True
+
     @_baseline_negative_psep_named
     def prepare_baseline(self) -> "Baseline":
         """Resolve the baseline from ``config.source`` and cache it.
@@ -908,7 +935,8 @@ class Bouquet(SwbBaseline):
         """
         from .baseline import resolve_baseline
         from .config import ImasSource, resolve_solve_method
-        resolve_solve_method(self.config.generation)
+        # (called on the class: test stand-ins pass a namespace as self)
+        Bouquet._warn_legacy_route(self, resolve_solve_method(self.config.generation))
         # EXPERIMENTAL features (bouquet.experimental.REGISTRY): one
         # ExperimentalFeatureWarning each, naming its validation TODO; the
         # list goes on the baseline record and into the archive
@@ -8370,6 +8398,7 @@ class Bouquet(SwbBaseline):
         from .config import resolve_solve_method
         from .draw_methods import DrawMethod
         sm = resolve_solve_method(self.config.generation)
+        self._warn_legacy_route(sm)
         if sm == "engine":
             from .engine_draws import build_generate_context
             _s0 = getattr(self, "_sigma0_route", None)

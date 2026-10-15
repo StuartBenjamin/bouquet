@@ -8,7 +8,10 @@ profiles) and a modelling source (IMAS / OMAS IDS) -- behind
 run unless a configuration says `reconstruction_engine="legacy"` -- the
 existing g-file reconstruction / IMAS baseline paths and the legacy draws,
 still available by name (`Bouquet.from_geqdsk` / `from_imas(...,
-reconstruction_engine="legacy")`). A stored configuration that predates the
+reconstruction_engine="legacy")`) but **deprecated in 1.4.0 and removed in
+1.5 (#90)**: a run that resolves to the legacy route (`reconstruction_engine=
+"legacy"` or `solve_method="legacy"`) emits one `DeprecationWarning` where it
+is resolved (`prepare_baseline()`, the draw method). A stored configuration that predates the
 field (written before 2026-09-29) loads as `"legacy"`, with a warning. The
 legacy-path settings the engine never reads are refused under `"unified"`
 (see [Settings the engine does not read](#settings-the-engine-does-not-read-refused)), and the refusal
