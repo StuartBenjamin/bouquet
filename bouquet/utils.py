@@ -2599,13 +2599,25 @@ def structured_objective_no_mse(out):
     return structured_prior_value(out)
 
 
-def structured_mse_jacobian(tan_gamma_of, x0, tg0, free, step=STRUCTURED_MSE_FD_STEP):
+def structured_mse_jacobian(tan_gamma_of, x0, tg0, free, step=STRUCTURED_MSE_FD_STEP,
+                            on_branch=None, max_halvings=0):
     """Forward-difference ``d tan_gamma / d x`` at ``x0``, free columns only.
 
     ``tan_gamma_of(x)`` must return the synthetic tan(gamma) of the equilibrium
     SOLVED with coefficients *x* (one GS solve per call); ``tg0`` is its value
     at ``x0``, already known.  Columns of pinned coefficients (``free`` False)
     are left at zero -- they cannot move.  Costs ``free.sum()`` calls.
+
+    ``on_branch(i, h)`` (optional) is asked after each perturbed solve
+    whether that solve stayed on the base equilibrium's solution branch (the
+    caller's test, e.g. the unified engine's magnetic-axis check); when it
+    says no, the column is re-taken with the step halved, at most
+    *max_halvings* times, each from the caller's base state -- a finer
+    difference step, never a different derivative definition.  The first
+    step that stays on the branch gives the column; when none does, the
+    column of the original step is kept (exactly what it was without the
+    check).  With ``on_branch=None`` (default) or ``max_halvings=0`` the
+    function is the one before the option existed, call for call.
     """
     x0 = np.asarray(x0, dtype=float).ravel()
     tg0 = np.asarray(tg0, dtype=float).ravel()
@@ -2617,16 +2629,32 @@ def structured_mse_jacobian(tan_gamma_of, x0, tg0, free, step=STRUCTURED_MSE_FD_
     if free.shape != x0.shape:
         raise ValueError("structured_mse_jacobian: free mask and x0 differ in "
                          "shape")
+    n_half = int(max_halvings) if on_branch is not None else 0
+    if n_half < 0:
+        raise ValueError(f"structured_mse_jacobian: max_halvings must be >= 0,"
+                         f" got {max_halvings!r}")
     J = np.zeros((tg0.size, x0.size), dtype=float)
     for i in np.nonzero(free)[0]:
-        xp = x0.copy()
-        xp[i] += h
-        tg_i = np.asarray(tan_gamma_of(xp), dtype=float).ravel()
-        if tg_i.shape != tg0.shape or not np.all(np.isfinite(tg_i)):
-            raise RuntimeError("structured_mse_jacobian: the perturbed solve "
-                               f"for coefficient {int(i)} returned an unusable "
-                               "tan(gamma)")
-        J[:, i] = (tg_i - tg0) / h
+        hi = h
+        first = None
+        for n in range(n_half + 1):
+            xp = x0.copy()
+            xp[i] += hi
+            tg_i = np.asarray(tan_gamma_of(xp), dtype=float).ravel()
+            if tg_i.shape != tg0.shape or not np.all(np.isfinite(tg_i)):
+                raise RuntimeError("structured_mse_jacobian: the perturbed "
+                                   f"solve for coefficient {int(i)} returned "
+                                   "an unusable tan(gamma)")
+            if first is None:
+                first = (tg_i, hi)
+            if on_branch is None or bool(on_branch(int(i), hi)):
+                break
+            if n == n_half:
+                # no step stayed on the branch: the original column
+                tg_i, hi = first
+                break
+            hi = 0.5 * hi
+        J[:, i] = (tg_i - tg0) / hi
     return J
 
 

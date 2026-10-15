@@ -132,7 +132,8 @@ class FakeTokaMaker:
         q = self.get_q(psi=[0.02, 0.95])[1]
         return dict(l_i=float(st["li"]), Ip=float(self.toy.Ip),
                     q_0=float(q[0]), q_95=float(q[1]), beta_n=1.5,
-                    beta_pol=60.0, W_MHD=5.0e5, kappa=1.7, delta=0.3)
+                    beta_pol=60.0, W_MHD=5.0e5, kappa=1.7, delta=0.3,
+                    a_geo=float(T.A_MIN * self.lcfs_scale))
 
     def get_profiles(self, psi=None, npsi=None, psi_pad=None):
         x = (np.linspace(0.0, 1.0, int(npsi or 50)) if psi is None

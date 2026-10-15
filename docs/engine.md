@@ -347,6 +347,33 @@ and the refreshed step stays below 0.01 σ (data the profile family fits);
 on a toy whose pitch angles respond non-linearly to the current the first
 refreshed step is 0.3 σ and one continuation brings it to 0.003 σ.
 
+**Branch-consistent finite differences (2026-10-14).** Every finite-
+difference Jacobian of the stage (the first and each refresh) checks that
+its perturbed solves stay on the base equilibrium's solution branch: a
+perturbed solve whose magnetic axis lands farther than
+`engine.MSE_FD_BRANCH_AXIS_FRAC` (0.01) × the base state's minor radius
+from the base axis has jumped to the free-boundary problem's other solution,
+and its column is re-taken from the base state with the step halved, at most
+`engine.MSE_FD_MAX_HALVINGS` (4) times. The first step that stays gives the
+column; a column whose solves never stay keeps its original step and is
+recorded unresolved. Why: on a slice with two flux extrema of nearly equal
+depth the free-boundary solve has two solutions for nearly the same current
+(measured on a reversed-Ip slice: axes 17 mm apart, Δl_i 2e-3, Δq0 4e-3). A
+column taken across that jump made the refreshed Jacobian's Gauss–Newton
+step send the stage to the other branch (χ²/N 0.745 → 0.790) and the next
+refresh into a period-3 cycle between the two that ended at the pass ceiling
+(`JBSNotConverged`); with the check every column stayed on its branch at
+h/2 … h/8 and the stage converged at its first refresh. A numerical-method
+parameter only: it chooses which difference step a column uses; no
+criterion, tolerance or ceiling is touched, and a state without a jump is
+differenced exactly as before (bit for bit; the extra solves are counted in
+`solves["mse_fd"]` / `solves["mse_refresh"]`). Recorded as `branch_check`
+on the MSE phase's `jacobian` record and on each refresh round (threshold,
+minor radius, the refined columns with their steps and axis shifts). The
+backend reports its minor radius (`TokaMakerBackend.minor_radius()`, the
+solver's `a_geo` on a copy of the state); a backend without it runs the
+Jacobian unchecked.
+
 **When the MSE stage fails (2026-10-07).** With `structured_mse_required=
 False` (the default) ANY exception inside the stage (a failed solve in the
 finite differences or a pass, a closure refusal, a non-converged MSE loop
@@ -605,8 +632,9 @@ historical list, and its record says so.
  saturation guard)
             |
             v
- post-hoc filters on the archived draw: l_i band (l_i_tolerance), 
- constrain_sawteeth; coil + boundary as always  ->  in_spec / selected
+ post-hoc filters on the archived draw: the OPT-IN bands (l_i, beta_p,
+ constrain_sawteeth; all off by default); coil + boundary as always
+   ->  in_spec / selected
 ```
 
 **Inputs.** Every perturbed quantity is formed as `base + (drawn - base)`:
@@ -703,9 +731,14 @@ constraint density and weight, hence coil drift, LCFS deviation and yield of
 perturbed draws -- and it fixes the branch selection on the slice above; it
 does not prove robustness on other near-double-null slices.
 
-**Is this baseline bistable? (`check_bistability`, opt-in.)** With
-`GenerationConfig.check_bistability=True` (default `False`; unified engine
-only, refused under `"legacy"`), `prepare_baseline()` spends ONE extra solve
+**Is this baseline bistable? (`check_bistability`, on by default.)**
+`GenerationConfig.check_bistability` defaults to `None`, resolved at
+`prepare_baseline()` like the other engine-dependent settings
+(`engine.ENGINE_DEPENDENT_DEFAULTS`, recorded in `engine_resolved_defaults`):
+`True` under the unified engine (owner decision 2026-10-15), `False` under
+`"legacy"`, which has no such check (its default is never refused; an
+explicit `True` is). An explicit value, a stored config's included, is kept.
+With it on, `prepare_baseline()` spends ONE extra solve
 after the reconstruction (`engine.check_bistability`): the solver is put
 back on the reconstruction's delivered equilibrium (its targets, profiles,
 isoflux and coil regularisation -- the same inputs), psi is re-initialised
@@ -723,6 +756,19 @@ The delivered equilibrium is restored afterwards: the baseline, its archive
 and the draws are unchanged. The record is archived with the baseline's
 engine record. A cold start converging to the delivered state does not prove
 there is no other branch; a miss shows there is one.
+
+**Which branch is each draw on? (`engine["axis"]`, always recorded.)** Every
+archived engine draw records its archived state's magnetic axis against the
+reconstruction's delivered axis (`Baseline.engine["delivered_axis"]`, the
+reference, with the delivered minor radius a): `R`, `Z`, `reference_R`,
+`reference_Z`, `dR_mm`, `dZ_mm`, `displacement_mm`, `displacement_frac_a`
+and `axis_branch` -- `"same"` within `engine.AXIS_BRANCH_FRAC` (0.01) x a,
+`"other"` beyond it (`engine.axis_branch_record`; the same constant is the
+MSE stage's branch-check discriminator, `MSE_FD_BRANCH_AXIS_FRAC`). The flag
+is stamped on the draw group (`axis_branch`, `axis_shift_frac_a`), counted
+on the scan (`n_axis_other`) and in the summaries
+([workflows.md](workflows.md#the-in-spec-rule), "Bistable equilibria"). It is
+a report: nothing is accepted, refused or filtered on it.
 
 `verify_sigma0_consistency()` under the engine runs ONE draw through the
 route `generate()` runs -- it calls `generate(n=1)` itself, with every
@@ -756,11 +802,15 @@ state, the isoflux targets and every attribute `generate()` sets are
 restored afterwards.
 
 **Post-hoc filters, not matching.** A draw matches no l_i, q0 or MSE row;
-l_i and beta_N drift and are recorded. The l_i band
-(`|l_i - l_i*| <= l_i_tolerance l_i*`, default 0.05, around the
-reconstruction's l_i) and `constrain_sawteeth` (`q0 >= 1` at the q-row
-radius, psi_N = psi_pad, the legacy gate's radius) are applied to the
-ARCHIVED draw: a draw outside a band is archived with `in_spec=False` and
+l_i, beta_p, beta_N and Lambda = beta_p + l_i(3)/2 drift and are
+recorded. Since 2026-10-14 (owner decision) a draw is in spec on the
+magnetics alone ([workflows.md](workflows.md#the-in-spec-rule)); the
+OPT-IN bands -- an l_i band (`|l_i - l_i*| <= l_i_tolerance l_i*`, or
+`<= inspec_band_nsigma l_i_sigma`, around the reconstruction's l_i; the
+old default `l_i_tolerance = 0.05` applied it to every draw), a beta_p band
+(`beta_p_target`, `beta_p_sigma`) and `constrain_sawteeth` (`q0 >= 1` at
+the q-row radius, psi_N = psi_pad, the legacy gate's radius) -- are applied
+to the ARCHIVED draw when on: a draw outside a band is archived with `in_spec=False` and
 `passes_draw_band=False`, never dropped; the until-N ledger and
 `.filter()`'s `selected` both AND the band into the coil + boundary verdict.
 Rejected (never archived, never counted), with their
