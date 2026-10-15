@@ -1,5 +1,19 @@
 # Bouquet — change summaries
 
+## Unreleased — coil-saturation test measured against the installed bound (owner decision 2026-10-15)
+
+The homotopy's coil-saturation test, its early stop and the post-homotopy /
+hard-bound guard now measure each non-VSC F coil's drift against the bound
+actually installed for it, `max(drift_F |I_base|, coil_drift_floor_A)`
+(`_coil_bound_max_f`), instead of the bare percentage of the coil's own
+current. Identical for every coil whose bound is not the floor; a low-current
+coil whose bound IS the floor is no longer called saturated at a small fraction
+of it (a 10 A coil with a 50 A bound tripped at 0.5 A, and every draw of the
+synthetic 0.7 s slice was refused `homotopy_saturated` in the first, loosest
+pass; with the installed bound it yields 24 in-spec draws in 34 attempts, and
+the other synthetic equilibria are identical draw for draw). The caps, the
+floor, the VSC test, the sigma=0 coil gate and every filter are unchanged.
+
 ## Unreleased — radial sigma templates: assumed defaults, IMAS error fields, fixtures (numbers move on every sigma-less run)
 
 **Default change (owner decision): the assumed envelope is a shape, not a flat

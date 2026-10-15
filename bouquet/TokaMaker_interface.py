@@ -1392,6 +1392,26 @@ def _coil_max_drifts(drifts, vsc_in_set):
     return max_f, max_vsc
 
 
+def _coil_bound_max_f(cur, baseline, vsc_in_set, drift_F, floor_A):
+    """Max non-VSC F-coil drift in % of ``max(|I_base|, floor_A / drift_F)``,
+    so that ``100 * drift_F`` is exactly the half-width of the bound the
+    homotopy INSTALLED for that coil, ``max(drift_F |I_base|, floor_A)``.
+    Identical to the plain percentage for every coil whose bound is not the
+    floor; for a floored coil (|I_base| < floor_A / drift_F) the drift is
+    measured against the floor, as the bound is.  Before (review of the
+    synthetic 0.7 s slice, 2026-10-15): a coil carrying 10 A had a 50 A bound
+    installed but was called saturated at 0.5 A, so every draw of a
+    low-current slice was refused in the first, loosest pass (owner decision:
+    measure saturation against the installed bound)."""
+    den_floor = (float(floor_A) / float(drift_F)) if drift_F > 0 else 1.0
+    out = 0.0
+    for n, b in baseline.items():
+        if n.startswith('F') and n not in vsc_in_set:
+            out = max(out, abs(float(cur[n]) - b)
+                      / max(abs(b), den_floor, 1.0) * 100.0)
+    return out
+
+
 def _coil_saturation(max_f, max_vsc, drift_F, drift_VSC):
     """``(sat_F, sat_VSC)``: is either coil group at
     ``COIL_SATURATION_FRACTION`` of its bound (``drift_F``/``drift_VSC`` as
@@ -1402,7 +1422,7 @@ def _coil_saturation(max_f, max_vsc, drift_F, drift_VSC):
 
 
 def _make_coil_saturation_guard(mygs, baseline_coils, vsc_in_set, drift_F,
-                                drift_VSC, stage):
+                                drift_VSC, stage, floor_A=50.0):
     """A callable ``guard(label)`` that measures the coil currents mygs holds
     NOW and raises :class:`CoilSaturated` when the solve that put them there
     is saturated against the bounds ``(drift_F, drift_VSC)`` around
@@ -1420,6 +1440,8 @@ def _make_coil_saturation_guard(mygs, baseline_coils, vsc_in_set, drift_F,
         cur, _ = mygs.get_coil_currents()
         max_f, max_vsc = _coil_max_drifts(
             _coil_drift_pct(cur, baseline_coils), vsc_in_set)
+        max_f = _coil_bound_max_f(cur, baseline_coils, vsc_in_set, drift_F,
+                                  floor_A)          # against the installed bound
         sat_F, sat_VSC = _coil_saturation(max_f, max_vsc, drift_F, drift_VSC)
         entry = dict(label=str(label), max_F_drift_pct=float(max_f),
                      max_VSC_drift_pct=float(max_vsc),
@@ -6598,7 +6620,7 @@ def generate_bouquet(
                 _hard_sat_guard = _make_coil_saturation_guard(
                     mygs, _baseline_coils, _vsc_in_set, _hard, _hard,
                     stage="draw j_BS loop under the hard coil bounds "
-                          f"(+/-{_hard * 100:.1f}%)")
+                          f"(+/-{_hard * 100:.1f}%)", floor_A=coil_drift_floor_A)
         else:
             # No hard bounds requested: install none.  (Bouquet.setup_solver
             # already put the coil solve in OpenFUSIONToolkit's one-way
@@ -7948,6 +7970,11 @@ def generate_bouquet(
                             # (COIL_SATURATION_FRACTION = 0.99: the same
                             # criterion guards the post-homotopy j_BS passes
                             # and the j_BS loop under the hard bounds.)
+                            # F drift against the bound INSTALLED for each coil
+                            # (the 5 % and the floor), not the bare percentage
+                            _max_f = _coil_bound_max_f(
+                                _cur, _baseline_coils, _vsc_in_set, _dF,
+                                coil_drift_floor_A)
                             _sat_F, _sat_VSC = _coil_saturation(
                                 _max_f, _max_vsc, _dF, _dVSC)
                             if _sat_F or _sat_VSC:
@@ -8004,6 +8031,9 @@ def generate_bouquet(
                             # case (bound not binding), in its general form.
                             if _p_idx + 1 < len(_passes):
                                 _nF, _nVSC = _passes[_p_idx + 1]
+                                _max_f = _coil_bound_max_f(
+                                    _cur, _baseline_coils, _vsc_in_set, _nF,
+                                    coil_drift_floor_A)
                                 if (_max_f > _nF * 100.0
                                         or _max_vsc > _nVSC * 100.0):
                                     print(f"  [homotopy {_label}] natural drift "
@@ -8069,7 +8099,7 @@ def generate_bouquet(
                                 mygs, _baseline_coils, _vsc_in_set,
                                 _final_drift_F_lim, _final_drift_VSC_lim,
                                 stage=(f"post-homotopy j_BS pass at homotopy "
-                                       f"pass {_final_pass_idx + 1} bounds"))
+                                       f"pass {_final_pass_idx + 1} bounds"), floor_A=coil_drift_floor_A)
                             _ph_rec, _ph_spk, _ph_full, _ph_jphi = \
                                 _m.post_homotopy_jbs(
                                     jbs_loop, coil_guard=_ph_guard,
