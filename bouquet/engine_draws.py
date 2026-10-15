@@ -1243,6 +1243,16 @@ class GenerateEngineDraws(DrawMethod):
         #: stage's and the archived state's verdicts are written into it
         self.sigma0_probe = None
 
+    def note_q0_gate(self, record):
+        """The q0 gate as generate_bouquet applied it: switched off (a
+        sawtoothing reconstruction), the bands this method judges and
+        records (``inspec_bands`` of the baseline record) lose it too."""
+        super().note_q0_gate(record)
+        from .filtering import InspecBands, q0_gate_switched_off
+        if q0_gate_switched_off(record) and self.bands.constrain_sawteeth:
+            self.bands = InspecBands.from_record(dict(
+                self.bands.record(), constrain_sawteeth=False))
+
     # ---- where the baseline re-solve starts ---------------------------
     def baseline_resolve_start(self, mygs):
         """generate_bouquet's baseline re-solve starts from the
@@ -1958,6 +1968,18 @@ class GenerateEngineDraws(DrawMethod):
         rec = dict(getattr(baseline, "engine", None) or {})
         if not rec:
             return
+        # a bistability_source="draws" on the session's live record is ANOTHER
+        # scan's evidence (Bouquet._note_axis_scan): never archived with this
+        # scan's baseline -- this scan's own stamp (stamp_axis_scan) re-adds
+        # it from its own draws.  The reconstruction's own verdict is kept.
+        bis = rec.get("bistability")
+        if isinstance(bis, dict) and (bis.get("bistability_source") == "draws"
+                                      or "draws_evidence" in bis):
+            bis = dict(bis)
+            bis.pop("draws_evidence", None)
+            if bis.get("bistability_source") == "draws":
+                bis["bistability_source"] = None
+            rec["bistability"] = bis
         rec["draws"] = dict(
             version=ENGINE_DRAW_VERSION, rng_stream=RNG_STREAM,
             loop=self.loop_settings, q0_row=self.ctx.q0_row,
@@ -1965,6 +1987,9 @@ class GenerateEngineDraws(DrawMethod):
             solve_maxits=self.maxits,
             homotopy=self.homotopy, l_i_tolerance=self.l_i_tolerance,
             inspec_bands=self.bands.record(),
+            # the q0 gate as generate_bouquet applied it (filtering.
+            # Q0_GATE_RECORD_KEY; None: no generate_bouquet decision)
+            q0_gate=(None if self.q0_gate is None else dict(self.q0_gate)),
             ip_row=("the Ip the delivered composition carries in the exact "
                     "measure on G*"), Ip_target_A=self.ctx.Ip_star,
             reference=self.ctx.ref,
@@ -2089,7 +2114,9 @@ def stamp_axis_scan(h5path_or_header, scan_key=None) -> dict:
       branches.  A ``"draws"`` source a recount no longer supports is
       removed.
 
-    Nothing is written when no draw carries the record (a legacy scan).
+    Nothing else is written when no draw carries the record (a legacy scan,
+    a scan with no archived draw): a ``"draws"`` source on its baseline,
+    which can only be stale, is still removed.
     Returns ``dict(n_large, n_recorded, bimodality, bistability_source)``."""
     import json
     import h5py
@@ -2105,10 +2132,16 @@ def stamp_axis_scan(h5path_or_header, scan_key=None) -> dict:
     try:
         idx = list_equilibrium_indices(h5path, scan_key=scan_key)
     except KeyError:
+        idx = []
+    import os
+    if not os.path.exists(h5path):
         return out
     with h5py.File(h5path, "a") as hf:
         ents = scan_axis_entries(hf, scan_key, idx)
         if not ents:
+            # no axis record, so no draws' evidence: a "draws" source on the
+            # baseline (another scan's, carried over) is removed
+            _clear_draws_bistability(hf, scan_key)
             return out
         out["n_recorded"] = len(ents)
         out["n_large"] = sum(1 for _, e in ents if e["shift_large"])
@@ -2171,6 +2204,35 @@ def stamp_axis_scan(h5path_or_header, scan_key=None) -> dict:
 
 def _s(v):
     return v.decode() if isinstance(v, bytes) else str(v)
+
+
+def _clear_draws_bistability(hf, scan_key):
+    """Remove ``bistability_source="draws"`` (the group attr, and the engine
+    record's ``bistability_source`` / ``draws_evidence``) from the scan's
+    ``_baseline`` group in the open file *hf*; other sources are kept."""
+    from .engine import read_engine_json, write_engine_json
+    from .schema import BISTABILITY_SOURCE_ATTR
+    from .utils import _baseline_group_path
+    bp = _baseline_group_path(scan_key)
+    if bp not in hf:
+        return
+    bl = hf[bp]
+    try:
+        brec = read_engine_json(bl)
+    except (ValueError, KeyError, TypeError):
+        brec = None
+    bis = (brec or {}).get("bistability")
+    if isinstance(bis, dict) and (bis.get("bistability_source") == "draws"
+                                  or "draws_evidence" in bis):
+        bis = dict(bis)
+        if bis.get("bistability_source") == "draws":
+            bis.pop("bistability_source", None)
+        bis.pop("draws_evidence", None)
+        brec["bistability"] = bis
+        write_engine_json(bl, brec)
+    if BISTABILITY_SOURCE_ATTR in bl.attrs and _s(
+            bl.attrs[BISTABILITY_SOURCE_ATTR]) == "draws":
+        del bl.attrs[BISTABILITY_SOURCE_ATTR]
 
 
 def _write_draw_block(header, count, scan_key, record, band, parallel=None,

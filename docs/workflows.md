@@ -115,7 +115,7 @@ is a navigational summary of the defaults.
 | `nthreads` | `1` | **Keep at 1.** OpenMP reduction order is non-deterministic and jitters `l_i(1)` by ~1%; parallelise across processes instead |
 | `order` | `3` | FE order |
 | `F0` | `None` | Vacuum `R·B_t`; defaults from the g-file / IDS |
-| `isoflux_pts`, `isoflux_weights` | `None` | Boundary (isoflux) constraint points and weights, **used as given** (never resampled). Default (unified engine, #84): the source boundary resampled to `solver_geometry.N_ISOFLUX` = 256 points by arc length, X-points kept exactly, each point weighted by the arc length it represents, the weights summing to `solver_geometry.ISOFLUX_WEIGHT_TOTAL` = 2e5 -- one constant for the reconstruction and the draws, whatever the source's point count. Legacy route: the source boundary as given at `ISOFLUX_WEIGHT` = 500 per point. See [The boundary constraint](#the-boundary-constraint-per-unit-length-84) |
+| `isoflux_pts`, `isoflux_weights` | `None` | Boundary (isoflux) constraint points and weights, **used as given** (never resampled; points without weights get per-length weights summing to `ISOFLUX_WEIGHT_TOTAL` under the unified engine, with a UserWarning). Default (unified engine, #84): the source boundary resampled to `solver_geometry.N_ISOFLUX` = 256 points by arc length, X-points kept exactly, each point weighted by the arc length it represents, the weights summing to `solver_geometry.ISOFLUX_WEIGHT_TOTAL` = 2e5 -- one constant for the reconstruction and the draws, whatever the source's point count. Legacy route: the source boundary as given at `ISOFLUX_WEIGHT` = 500 per point. See [The boundary constraint](#the-boundary-constraint-per-unit-length-84) |
 | `saddle_targets`, `saddle_weights` | `None` | Opt-in X-point pins. Without them a diverted forward solve typically rounds the boundary corner by a few cm |
 | `coil_vsc` | `{"F9A": 1.0, "F9B": -1.0}` | Antisymmetric vertical-stability channel definition |
 
@@ -663,7 +663,13 @@ measurement, not on the tolerance.
 `"magnetics+li"`, `"magnetics+beta_p"`, `"magnetics+li+beta_p"`, with `"+q0"`
 when the gate is on), `inspec_bands_json` (the band settings and the route;
 on the legacy/swb routes also the draw-construction tolerance, which is not a
-filter) and `lambda_definition`. Every draw carries `beta_p` and `Lambda`
+filter) and `lambda_definition`. The rule stamped is the one APPLIED: when
+`constrain_sawteeth` is set but the reconstruction's q(0) < 1,
+`generate_bouquet` switches the gate off for the scan, the stamp carries no
+`"+q0"`, and `inspec_bands_json["q0_gate"]` (also the baseline engine record's
+`draws.q0_gate`) records `configured`, `applied`, the q0 and the reason;
+`filter()` and a re-filter under the stamped rule then do not apply the gate
+either. Every draw carries `beta_p` and `Lambda`
 (β_p + l_i(3)/2, [physics-notes](physics-notes.md#lambda--beta_p--l_i2-reported-never-filtered));
 reported in `draw_scalars`, `ScanView.spread()` and `read_filter_flags`, never
 a filter. The until-N target counts in-spec draws by the rule in force.
@@ -729,8 +735,9 @@ or filters anything:
   `AXIS_BIMODAL_MIN_COUNT` = 3 draws on each side, and call the scan bimodal
   when the gap exceeds `AXIS_BIMODAL_GAP_RATIO` = 1.0 x the larger of the two
   clusters' sample standard deviations AND the cluster centres sit more than
-  `AXIS_BRANCH_FRAC` x a apart; fewer than 6 draws with an axis, or an
-  unknown a: not testable (`None`). The scan carries `axis_bimodal` (when
+  `AXIS_BRANCH_FRAC` x a apart; fewer than `AXIS_BIMODAL_MIN_N` = 24 draws
+  with an axis, or an unknown a: not testable (`None`, with the count and
+  the reason; no verdict, no draws' source, no warning, no limitation). The scan carries `axis_bimodal` (when
   testable) and `axis_bimodal_json` (method, constants, both centres and
   counts, the gap, the spreads); it is printed on the `[generate]` /
   `[draw summary]` line and as an `[axis]` line with a `RuntimeWarning` when
@@ -745,11 +752,13 @@ or filters anything:
   the draws' own evidence meets the release rule "no bimodal band without a
   bistability stamp". A recount that no longer finds two clusters removes
   it; a reconstruction stamp "bistable" (`bistability_source=
-  "reconstruction"`) is never overwritten. Caveat, measured on random
-  unimodal samples: a normal spread of 24 (36) draws whose width is far above
-  the 1 %-of-a separation is called bimodal in about 11 % (3 %) of samples,
-  a sub-threshold scatter never; it is a report, and a false "bimodal" only
-  adds a limitation. Archives written before the rename carry `axis_branch`
+  "reconstruction"`) is never overwritten. Why at least 24 draws (owner decision 2026-10-15),
+  measured on random unimodal normal samples (a = 0.6 m): at n = 6-12 the
+  rule calls a single Gaussian "bimodal" in about 20-37 % of samples when its
+  spread is 6-20 mm (about 5-9 % at 3 mm); at n = 24 (36) about 10-11 %
+  (3 %), a sub-threshold scatter never. Until 2026-10-15 the verdict was
+  issued from n = 6. It is a report, and a false "bimodal" only adds a
+  limitation and the draws' source. Archives written before the rename carry `axis_branch`
   (`"other"` / `"same"`) per draw and `n_axis_other` on the scan: both are
   read (`schema.read_axis_entry`, `schema.read_scan_axis_counts`; the
   displacement from the draw's engine record), and a re-stamp writes the

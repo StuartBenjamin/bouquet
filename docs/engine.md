@@ -746,19 +746,32 @@ ONE standard set on both routes, for the reconstruction and every draw
   `LCFS_geqdsk` boundary) is resampled to `solver_geometry.N_ISOFLUX` = 256
   points by arc length (`resample_boundary`): an interpolating cubic spline
   through the source points, broken at the X-points and at any vertex where
-  the source polygon turns by more than `SPLINE_BREAK_DEG` = 20 deg (so a
-  corner is never smoothed or overshot), spaced uniformly in arc length
+  the source polygon turns by more than `SPLINE_BREAK_DEG` = 20 deg AND by
+  more than `SPLINE_BREAK_MEDIAN_RATIO` = 3x the median turn of the vertices
+  within `SPLINE_BREAK_MEDIAN_WINDOW` = 3 of it (so a corner is never
+  smoothed or overshot, while a coarse smooth source -- 16-30 points, whose
+  tips turn 29-46 deg per vertex -- keeps one smooth spline instead of
+  becoming a polygon 6-24 mm inside its curve), spaced uniformly in arc length
   between X-points; a closed contour (no repeated point), counter-clockwise;
 - the source's X-points are kept as EXACT points (the source's own
   vertices): a vertex whose turning angle over a window of
   `XPOINT_WINDOW_FRAC` = 1 % of the boundary length on each side exceeds
   `XPOINT_TURN_DEG` = 45 deg (the sharpest within two windows), or the vertex
   a saddle target (`SolverConfig.saddle_targets`) marks within
-  `XPOINT_SADDLE_MATCH_FRAC` = 1 % of the length; the saddle constraints
+  `XPOINT_SADDLE_MATCH_FRAC` = 1 % of the length -- the sharpest vertex in
+  that radius when it turns by more than `XPOINT_TURN_DEG` (so a target off
+  the X-point still marks the X-point), else the nearest (stamped as
+  `xpoint_match`); the saddle constraints
   themselves are installed exactly as configured;
 - each point is weighted by the arc length it represents (half the spacing to
   each neighbour), the weights summing to
-  `solver_geometry.ISOFLUX_WEIGHT_TOTAL` = 2e5 (`per_length_weights`). The
+  `solver_geometry.ISOFLUX_WEIGHT_TOTAL` = 2e5 (`per_length_weights`). That
+  is the nominal total: TokaMaker's `set_isoflux` does not apply the
+  reference point's (the first point's) weight, so the installed total is
+  the nominal total minus `w[0]` (199 219 for a set without X-points); the
+  record stamps both (`isoflux_weight_total`,
+  `isoflux_weight_installed_total`; the isoflux stamps `weight_total`,
+  `weight_installed_total`). The
   constraint strength then depends on the boundary, not on the writer of the
   file or the mesh: a 100-point and a 10 000-point sampling of one contour
   give the same total and the same points to micrometres;
@@ -771,7 +784,15 @@ ONE standard set on both routes, for the reconstruction and every draw
 
 A `SolverConfig.isoflux_pts` (with `isoflux_weights`) set is used AS GIVEN,
 never resampled, on every route (also on the engine's g-file route, which
-before #84 replaced it with its own set). The legacy and swb routes are
+before #84 replaced it with its own set). Given WITHOUT `isoflux_weights`,
+the unified engine does not leave it at TokaMaker's default of 1 per point
+(about 780x weaker than the standard set): each point is weighted by the arc
+length it represents along the points in the order given (a closed contour
+when the closing gap is no longer than the longest other spacing, else an
+open arc), the weights summing to `ISOFLUX_WEIGHT_TOTAL`
+(`solver_geometry.user_isoflux_weights`), and a UserWarning says so; the
+record stamps those weights and the rule. On the legacy route such a set is
+installed at 1 per point as before, and stamped as 1 per point. The legacy and swb routes are
 unchanged: the reset installs the source boundary as given at
 `ISOFLUX_WEIGHT` per point, the legacy g-file reconstruction its own set at
 200 per point, and the legacy draws re-trace (`DrawMethod.homotopy_isoflux`
@@ -884,13 +905,22 @@ tests their axis Z for two clusters: split at the largest gap leaving at
 least `AXIS_BIMODAL_MIN_COUNT` (3) draws per side; bimodal when the gap
 exceeds `AXIS_BIMODAL_GAP_RATIO` (1.0) x the larger within-cluster standard
 deviation and the centres sit more than `AXIS_BRANCH_FRAC` x a apart; not
-testable below 6 draws. The scan carries `axis_bimodal` and
+testable below `AXIS_BIMODAL_MIN_N` = 24 draws (owner decision 2026-10-15:
+on unimodal normal samples the rule says "bimodal" in about 20-37 % of
+samples at n = 6-12 for axis spreads of 6-20 mm, about 5-9 % at 3 mm, about
+10-11 % at n = 24 and 3 % at n = 36; until then the verdict was issued from
+n = 6). The scan carries `axis_bimodal` and
 `axis_bimodal_json` (method `AXIS_BIMODAL_METHOD`, version
 `axis_bimodality/1`, the constants, both centres and counts); a bimodal scan
 whose reconstruction stamp is not "bistable" stamps the baseline
 `bistability_source="draws"` (`_baseline` attr and the archived and live
 `Baseline.engine["bistability"]`, with `draws_evidence`); the reconstruction
-check's own "bistable" carries `bistability_source="reconstruction"`. The
+check's own "bistable" carries `bistability_source="reconstruction"`. A
+`"draws"` source belongs to ONE scan: the session's live record never
+carries it into another scan's archived `_baseline`
+(`GenerateEngineDraws.store_baseline` drops it), and a scan with no axis
+record or too few draws to test clears it from its baseline and from the
+live record. The
 summaries, `ScanView.spread()` and `draw_scalars` report it
 ([workflows.md](workflows.md#the-in-spec-rule), "Bistable equilibria"). All
 of it is a report: nothing is accepted, refused or filtered on it. Archives

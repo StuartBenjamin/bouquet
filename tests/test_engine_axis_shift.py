@@ -298,7 +298,7 @@ def test_a_continuous_spread_is_not_bimodal():
     assert r["axis_bimodal"] is False
     assert "gap" in r["reason"]
     # a tight sub-threshold scatter split in two is no branch pair either
-    r = axis_bimodality([0.0] * 5 + [0.5] * 5, A_TEST)
+    r = axis_bimodality([0.0] * 12 + [0.5] * 12, A_TEST)
     assert r["axis_bimodal"] is False
     assert "apart" in r["reason"]
 
@@ -310,13 +310,22 @@ def test_a_tiny_set_is_not_testable():
     assert r["axis_bimodal"] is None and "not testable" in r["reason"]
     assert r["n"] == n
     # None / non-finite entries are skipped, an unknown a is not testable
-    r = axis_bimodality([0.0] * 3 + [-20.0] * 3 + [None, float("nan")],
+    r = axis_bimodality([0.0] * 12 + [-20.0] * 12 + [None, float("nan")],
                         None)
-    assert r["axis_bimodal"] is None and r["n"] == 6
+    assert r["axis_bimodal"] is None and r["n"] == 24
     assert "minor radius" in r["reason"]
-    # the smallest testable two-cluster set
-    r = axis_bimodality([0.0, 0.1, 0.2, -20.0, -20.1, -20.2], A_TEST)
-    assert r["axis_bimodal"] is True and r["counts"] == [3, 3]
+    # the verdict needs AXIS_BIMODAL_MIN_N (24) draws: two clean clusters of
+    # 23 draws are not testable, with the count; 24 get the verdict, and the
+    # smallest cluster may still hold AXIS_BIMODAL_MIN_COUNT draws
+    from bouquet.engine import AXIS_BIMODAL_MIN_N
+    assert AXIS_BIMODAL_MIN_N == 24
+    two = [0.0, 0.1, 0.2] + [-20.0 - 0.01 * k for k in range(21)]
+    r = axis_bimodality(two[:23], A_TEST)
+    assert r["axis_bimodal"] is None and r["n"] == 23 and r["min_n"] == 24
+    assert "not testable: 23 draw(s)" in r["reason"] and "24" in r["reason"]
+    assert "counts" not in r
+    r = axis_bimodality(two, A_TEST)
+    assert r["axis_bimodal"] is True and r["counts"] == [21, 3]
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +357,11 @@ def _set_axis(path, sk, dz_by_draw, a=T.A_MIN, legacy=False):
                 g.attrs[AXIS_MINOR_RADIUS_ATTR] = float(a)
 
 
+#: two clusters of 12 draws: ~0 mm and ~-15 mm (AXIS_BIMODAL_MIN_N = 24)
+_BIMODAL24 = {i: (0.1 * (i % 3 - 1) if i < 12 else -15.0 - 0.2 * (i % 5))
+              for i in range(24)}
+
+
 def _generated(tmp_path, monkeypatch, n):
     b = _prepared(tmp_path, monkeypatch)
     b.config.generation.n_equils = n
@@ -367,27 +381,26 @@ def test_a_bimodal_scan_under_a_single_stamp_gets_the_draws_source(
     from bouquet.schema import (AXIS_BIMODAL_ATTR, AXIS_BIMODAL_JSON_ATTR,
                                 BISTABILITY_SOURCE_ATTR)
     from bouquet.utils import _baseline_group_path
-    b = _generated(tmp_path, monkeypatch, 6)
+    b = _generated(tmp_path, monkeypatch, 24)
     h, sk = b.config.output_header, b.config.generation.scan_key
     bis = load_baseline_engine(h, scan_key=sk)["bistability"]
     assert bis["outcome"] == "single" and bis["bistability_source"] is None
-    _set_axis(h + ".h5", sk, {0: 0.0, 1: 0.1, 2: -0.1,
-                              3: -15.0, 4: -16.0, 5: -14.5})
+    _set_axis(h + ".h5", sk, _BIMODAL24)
     out = stamp_axis_scan(h, sk)
     assert out["bimodality"]["axis_bimodal"] is True
-    assert out["bimodality"]["counts"] == [3, 3]
-    assert out["n_large"] == 3 and out["bistability_source"] == "draws"
+    assert out["bimodality"]["counts"] == [12, 12]
+    assert out["n_large"] == 12 and out["bistability_source"] == "draws"
     with h5py.File(h + ".h5", "r") as hf:
         s = hf[_scan_group_path(sk)].attrs
         assert bool(s[AXIS_BIMODAL_ATTR]) is True
-        assert json.loads(s[AXIS_BIMODAL_JSON_ATTR])["counts"] == [3, 3]
+        assert json.loads(s[AXIS_BIMODAL_JSON_ATTR])["counts"] == [12, 12]
         bl = hf[_baseline_group_path(sk)].attrs
         v = bl[BISTABILITY_SOURCE_ATTR]
         assert (v.decode() if isinstance(v, bytes) else v) == "draws"
     bis = load_baseline_engine(h, scan_key=sk)["bistability"]
     assert bis["outcome"] == "single"                  # the check's verdict
     assert bis["bistability_source"] == "draws"        # + the draws'
-    assert bis["draws_evidence"]["counts"] == [3, 3]
+    assert bis["draws_evidence"]["counts"] == [12, 12]
     # the session record follows (generate's own stamp path)
     with pytest.warns(RuntimeWarning, match="BIMODAL"), \
             contextlib.redirect_stdout(io.StringIO()):
@@ -405,7 +418,7 @@ def test_a_bimodal_scan_under_a_single_stamp_gets_the_draws_source(
             "branches; the bands are mixtures") in lim
     assert recs["beta_N"].provenance["axis_bimodality"]["axis_bimodal"]
     # a recount that no longer supports it removes the draws' source
-    _set_axis(h + ".h5", sk, {3: 0.2, 4: -0.2, 5: 0.05})
+    _set_axis(h + ".h5", sk, {i: 0.05 * (i % 3 - 1) for i in range(12, 24)})
     out = stamp_axis_scan(h, sk)
     assert out["bimodality"]["axis_bimodal"] is False
     assert out["bistability_source"] is None
@@ -418,6 +431,122 @@ def test_a_bimodal_scan_under_a_single_stamp_gets_the_draws_source(
         load_baseline_engine(h, scan_key=sk)["bistability"]
 
 
+def test_another_scans_draws_source_never_lands_in_this_scans_baseline(
+        tmp_path, toy_bouquet_solver, monkeypatch):
+    """Scan A is bimodal, so the session's live baseline carries
+    bistability_source="draws".  Scan B archives its baseline from that live
+    record and then has no axis entry (0 archived draws): B's archived record
+    must not carry A's evidence, its group attr and its JSON agree, and the
+    live record is cleared."""
+    import bouquet.engine_draws as ED
+    from bouquet.engine import load_baseline_engine
+    from bouquet.engine_draws import stamp_axis_scan
+    from bouquet.schema import BISTABILITY_SOURCE_ATTR
+    from bouquet.utils import _baseline_group_path, _group_path
+    b = _generated(tmp_path, monkeypatch, 24)
+    h, sk_a = b.config.output_header, b.config.generation.scan_key
+    _set_axis(h + ".h5", sk_a, _BIMODAL24)
+    out_a = stamp_axis_scan(h, sk_a)
+    assert out_a["bistability_source"] == "draws"
+    with pytest.warns(RuntimeWarning, match="BIMODAL"), \
+            contextlib.redirect_stdout(io.StringIO()):
+        b._note_axis_scan(out_a)
+    assert b.baseline.engine["bistability"]["bistability_source"] == "draws"
+    # scan B: its baseline is archived from the live record; its own scan
+    # stamp is held back here so the archived record is store_baseline's
+    sk_b = "B"
+    b.config.generation.scan_key = sk_b
+    real_stamp = ED.stamp_axis_scan
+    monkeypatch.setattr(ED, "stamp_axis_scan",
+                        lambda *a, **k: dict(n_large=0, n_recorded=0,
+                                             bimodality=None,
+                                             bistability_source="draws"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _quiet(b.generate)
+    monkeypatch.setattr(ED, "stamp_axis_scan", real_stamp)
+    bis_b = load_baseline_engine(h, scan_key=sk_b)["bistability"]
+    assert bis_b.get("bistability_source") != "draws"
+    assert "draws_evidence" not in bis_b
+    assert bis_b["outcome"] == "single"                 # the check's own verdict
+    # B with 0 archived draws, and a stale "draws" put on its baseline: the
+    # recount (no axis entry) removes it from the attr and the JSON alike
+    with h5py.File(h + ".h5", "a") as hf:
+        for i in range(24):
+            del hf[_group_path(sk_b, i)]
+        hf[_baseline_group_path(sk_b)].attrs[BISTABILITY_SOURCE_ATTR] = "draws"
+    from bouquet.engine import read_engine_json, write_engine_json
+    with h5py.File(h + ".h5", "a") as hf:
+        g = hf[_baseline_group_path(sk_b)]
+        rec = read_engine_json(g)
+        rec["bistability"].update(bistability_source="draws",
+                                  draws_evidence={"counts": [3, 3]})
+        write_engine_json(g, rec)
+    out_b = stamp_axis_scan(h, sk_b)
+    assert (out_b["n_recorded"], out_b["bimodality"]) == (0, None)
+    assert out_b["bistability_source"] is None
+    with h5py.File(h + ".h5", "r") as hf:
+        assert BISTABILITY_SOURCE_ATTR not in hf[_baseline_group_path(
+            sk_b)].attrs
+    bis_b = load_baseline_engine(h, scan_key=sk_b)["bistability"]
+    assert bis_b.get("bistability_source") is None
+    assert "draws_evidence" not in bis_b
+    # ... and the live record follows, though B's n is untestable
+    b._note_axis_scan(out_b)
+    live = b.baseline.engine["bistability"]
+    assert live.get("bistability_source") != "draws"
+    assert "draws_evidence" not in live
+    # scan A's own archived stamp is untouched
+    assert load_baseline_engine(h, scan_key=sk_a)["bistability"][
+        "bistability_source"] == "draws"
+
+
+def test_a_scan_below_the_minimum_gets_no_verdict_and_loses_a_stale_source(
+        tmp_path, toy_bouquet_solver, monkeypatch):
+    """24 archived draws in two clusters: bimodal, the draws' source stamped.
+    One draw fewer (23): not testable, with the count -- no verdict, and the
+    now unsupported "draws" source is removed from the archive and the live
+    record without a warning."""
+    import json
+    from bouquet.engine import load_baseline_engine
+    from bouquet.engine_draws import stamp_axis_scan
+    from bouquet.filtering import _scan_group_path
+    from bouquet.schema import (AXIS_BIMODAL_ATTR, AXIS_BIMODAL_JSON_ATTR,
+                                BISTABILITY_SOURCE_ATTR)
+    from bouquet.utils import _baseline_group_path, _group_path
+    b = _generated(tmp_path, monkeypatch, 24)
+    h, sk = b.config.output_header, b.config.generation.scan_key
+    _set_axis(h + ".h5", sk, _BIMODAL24)
+    out = stamp_axis_scan(h, sk)
+    assert out["bimodality"]["n"] == 24
+    assert out["bimodality"]["axis_bimodal"] is True
+    with pytest.warns(RuntimeWarning, match="BIMODAL"), \
+            contextlib.redirect_stdout(io.StringIO()):
+        b._note_axis_scan(out)
+    assert b.baseline.engine["bistability"]["bistability_source"] == "draws"
+    with h5py.File(h + ".h5", "a") as hf:
+        del hf[_group_path(sk, 23)]
+    out = stamp_axis_scan(h, sk)
+    bim = out["bimodality"]
+    assert out["n_recorded"] == 23 and bim["n"] == 23
+    assert bim["axis_bimodal"] is None
+    assert "not testable: 23 draw(s)" in bim["reason"]
+    assert out["bistability_source"] is None
+    with h5py.File(h + ".h5", "r") as hf:
+        s = hf[_scan_group_path(sk)].attrs
+        assert AXIS_BIMODAL_ATTR not in s
+        assert json.loads(s[AXIS_BIMODAL_JSON_ATTR])["axis_bimodal"] is None
+        assert BISTABILITY_SOURCE_ATTR not in hf[_baseline_group_path(
+            sk)].attrs
+    assert "bistability_source" not in \
+        load_baseline_engine(h, scan_key=sk)["bistability"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        b._note_axis_scan(out)
+    assert b.baseline.engine["bistability"].get("bistability_source") is None
+    assert b.engine_axis_bimodality["axis_bimodal"] is None
+
+
 def test_a_bistable_stamp_is_not_overwritten_by_the_draws(
         tmp_path, toy_bouquet_solver, monkeypatch):
     from bouquet.engine import (load_baseline_engine, read_engine_json,
@@ -425,7 +554,7 @@ def test_a_bistable_stamp_is_not_overwritten_by_the_draws(
     from bouquet.engine_draws import stamp_axis_scan
     from bouquet.schema import BISTABILITY_SOURCE_ATTR
     from bouquet.utils import _baseline_group_path
-    b = _generated(tmp_path, monkeypatch, 6)
+    b = _generated(tmp_path, monkeypatch, 24)
     h, sk = b.config.output_header, b.config.generation.scan_key
     with h5py.File(h + ".h5", "a") as hf:
         g = hf[_baseline_group_path(sk)]
@@ -433,8 +562,7 @@ def test_a_bistable_stamp_is_not_overwritten_by_the_draws(
         rec["bistability"].update(bistable=True, outcome="bistable",
                                   bistability_source="reconstruction")
         write_engine_json(g, rec)
-    _set_axis(h + ".h5", sk, {0: 0.0, 1: 0.1, 2: -0.1,
-                              3: -15.0, 4: -16.0, 5: -14.5})
+    _set_axis(h + ".h5", sk, _BIMODAL24)
     out = stamp_axis_scan(h, sk)
     assert out["bimodality"]["axis_bimodal"] is True
     assert out["bistability_source"] == "reconstruction"
@@ -486,8 +614,8 @@ def test_an_archive_with_the_old_attr_names_is_read_and_migrated(
 
 
 def test_merge_archives_recounts_the_bimodality(tmp_path, toy_bouquet_solver):
-    """Two shards, each too small to test (4 draws), one on each axis
-    position: the merged scan (8 draws) is recounted -- bimodal -- and its
+    """Two shards, each too small to test (12 draws), one on each axis
+    position: the merged scan (24 draws) is recounted -- bimodal -- and its
     baseline gains the draws' source."""
     import test_engine_draws as TDm
     from bouquet.engine import load_baseline_engine
@@ -495,22 +623,22 @@ def test_merge_archives_recounts_the_bimodality(tmp_path, toy_bouquet_solver):
     from bouquet.filtering import _scan_group_path
     from bouquet.parallel import merge_archives, run_shard
     from bouquet.schema import AXIS_BIMODAL_ATTR, AXIS_SHIFT_SCAN_ATTR
-    b = TDm._bq(tmp_path, n=8)
+    b = TDm._bq(tmp_path, n=24)
     out = str(tmp_path / "par")
-    metas = [_quiet(run_shard, b.config, w, 2, n_equils_total=8,
+    metas = [_quiet(run_shard, b.config, w, 2, n_equils_total=24,
                     seed_base=7, out_header=out, scan_key=0,
                     threads_per_worker=1, verbose=True) for w in (0, 1)]
-    assert [m["n"] for m in metas] == [4, 4]
-    for m, dz in zip(metas, ([0.0, 0.1, -0.1, 0.05],
-                             [-15.0, -16.0, -14.5, -15.5])):
+    assert [m["n"] for m in metas] == [12, 12]
+    for m, dz in zip(metas, ([0.05 * (k % 3 - 1) for k in range(12)],
+                             [-15.0 - 0.2 * (k % 5) for k in range(12)])):
         _set_axis(m["path"], 0, dict(enumerate(dz)))
         r = stamp_axis_scan(m["path"], 0)
-        assert r["bimodality"]["axis_bimodal"] is None      # 4: too few
+        assert r["bimodality"]["axis_bimodal"] is None      # 12: too few
     path, n = merge_archives([m["path"] for m in metas], out, scan_key=0)
-    assert n == 8
+    assert n == 24
     with h5py.File(path, "r") as hf:
         s = hf[_scan_group_path(0)].attrs
         assert bool(s[AXIS_BIMODAL_ATTR]) is True
-        assert int(s[AXIS_SHIFT_SCAN_ATTR]) == 4
+        assert int(s[AXIS_SHIFT_SCAN_ATTR]) == 12
     bis = load_baseline_engine(out, scan_key=0)["bistability"]
     assert bis["bistability_source"] == "draws"

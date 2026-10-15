@@ -6652,14 +6652,23 @@ class Bouquet(SwbBaseline):
         warned.  Reported, never a filter."""
         bim = (axs or {}).get("bimodality")
         self.engine_axis_bimodality = bim
+        bl = getattr(self, "baseline", None)
+        eng = getattr(bl, "engine", None)
+        src = (axs or {}).get("bistability_source")
+        if (src != "draws" and isinstance(eng, dict)
+                and (eng.get("bistability") or {}).get(
+                    "bistability_source") == "draws"):
+            # another scan's evidence: removed also when this scan has no
+            # axis record or too few draws to test
+            bis = dict(eng["bistability"])
+            bis.pop("bistability_source", None)
+            bis.pop("draws_evidence", None)
+            eng["bistability"] = bis
         if not bim or bim.get("axis_bimodal") is None:
             return
         from .engine import axis_bimodality_text
         print(f"[axis] scan {self.config.generation.scan_key!r}: "
               + axis_bimodality_text(bim), flush=True)
-        bl = getattr(self, "baseline", None)
-        eng = getattr(bl, "engine", None)
-        src = axs.get("bistability_source")
         if isinstance(eng, dict):
             bis = dict(eng.get("bistability") or {})
             if src == "draws":
@@ -6668,10 +6677,6 @@ class Bouquet(SwbBaseline):
                     gap_mm=bim["gap_mm"], n=bim["n"],
                     version=bim["version"],
                     reconstruction_outcome=bis.get("outcome")))
-                eng["bistability"] = bis
-            elif bis.get("bistability_source") == "draws":
-                bis.pop("bistability_source", None)
-                bis.pop("draws_evidence", None)
                 eng["bistability"] = bis
         if bim["axis_bimodal"]:
             import warnings
@@ -8315,6 +8320,12 @@ class Bouquet(SwbBaseline):
                 print(f"[until-N] target met: {_got}/{_tgt} in-spec draws "
                       f"in {_tries} attempts.")
 
+        # the in-spec rule AS APPLIED: generate_bouquet switches the q0 gate
+        # off for a sawtoothing reconstruction (q0 < 1), and the stamp must
+        # not name a gate no draw was judged under (review F1)
+        from .filtering import apply_q0_gate_record
+        _inspec_bands, _inspec_extra = apply_q0_gate_record(
+            _inspec_bands, _inspec_extra, getattr(_m, "q0_gate", None))
         # The baseline's self-consistent bootstrap record (schema v3 jbs_loop
         # block on _baseline; a frozen baseline carries none).
         from .utils import store_baseline_jbs_loop
@@ -8691,12 +8702,28 @@ class Bouquet(SwbBaseline):
             from .filtering import resolve_inspec_bands
             bands = resolve_inspec_bands(self.config.generation)
             extra = {"route": "post-hoc re-filter"}
-        except Exception:
+        except (KeyError, TypeError) as _exc:
+            # a stand-in config without the rule's fields: the archive's
+            # flags are left as they are -- loudly (anything else propagates)
+            import warnings as _w
+            _w.warn(
+                f"filter(): the in-spec rule could not be resolved from this "
+                f"config ({type(_exc).__name__}: {_exc}); the archive's band "
+                "flags and `selected` are left as stamped, not re-judged",
+                UserWarning, stacklevel=3)
             return {"rule": None, "refiltered": False, "previous_rule": None}
         try:
             prev_rule, prev = read_inspec_rule(header, scan_key=sk)
+            from .filtering import (Q0_GATE_RECORD_KEY, apply_q0_gate_record,
+                                    read_inspec_record)
+            _prev_rec = read_inspec_record(header, scan_key=sk) or {}
         except (OSError, KeyError):
             return {"rule": None, "refiltered": False, "previous_rule": None}
+        # generation switched the configured q0 gate off for this scan (a
+        # sawtoothing reconstruction): the rule it was judged under -- and
+        # the one a re-filter must reproduce -- has no q0 gate
+        bands, extra = apply_q0_gate_record(
+            bands, extra, _prev_rec.get(Q0_GATE_RECORD_KEY))
         if prev is not None and prev.same_as(bands):
             return {"rule": bands.rule(), "refiltered": False,
                     "previous_rule": prev_rule}

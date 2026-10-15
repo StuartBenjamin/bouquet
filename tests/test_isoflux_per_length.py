@@ -109,10 +109,34 @@ def test_a_saddle_target_marks_a_corner_the_angle_test_misses():
     corner = src[0]
     P, xp = find_xpoints(src, saddle_targets=[[corner[0] + 0.004, corner[1] - 0.003]])
     assert len(xp) == 1 and xp[0]["origin"] == "saddle target 0"
+    assert xp[0]["xpoint_match"] == "nearest"                      # nothing above the angle test
     pts, _, info = resample_boundary(src, saddle_targets=[[corner[0] + 0.004, corner[1] - 0.003]])
     assert np.any(np.all(pts == corner, axis=1))
     # a saddle target far from the boundary marks nothing
     assert find_xpoints(src, saddle_targets=[[1.7, 0.0]])[1] == []
+
+
+@pytest.mark.parametrize("offset_mm", [6.0, 12.0, 30.0])
+def test_a_saddle_target_off_the_x_point_still_marks_the_x_point(offset_mm):
+    """A 256-point single null with a 90 deg corner, vertex spacing ~17 mm, and a saddle target
+    moved off the X-point along the outboard side: the corner (the sharpest vertex in the match
+    radius), not the nearest vertex, is marked and kept exactly."""
+    src = _shape(256, corner=1.0)
+    src = np.array([1.7, 0.0]) + 0.63 * (src - np.array([1.7, 0.0]))   # spacing ~17 mm
+    P, xp0 = find_xpoints(src)
+    c = xp0[0]["index"]
+    assert np.all(P[c] == src[0]) and xp0[0]["turn_deg"] > 80.0
+    leg = (P[c + 1] - P[c]) / np.hypot(*(P[c + 1] - P[c]))          # along the outboard edge
+    tgt = P[c] + 1e-3 * offset_mm * leg
+    nearest = int(np.argmin(np.hypot(*(P - tgt).T)))
+    if offset_mm >= 12.0:
+        assert nearest != c                                            # what nearest-vertex did
+    _, xp = find_xpoints(src, saddle_targets=[tgt])
+    assert [x["index"] for x in xp] == [c]
+    assert xp[0]["origin"] == "saddle target 0" and xp[0]["xpoint_match"] == "largest turn"
+    pts, _, info = resample_boundary(src, saddle_targets=[tgt])
+    assert np.any(np.all(pts == P[c], axis=1))
+    assert info["x_points"][0]["xpoint_match"] == "largest turn"
 
 
 def test_a_degenerate_boundary_is_refused():
@@ -120,6 +144,92 @@ def test_a_degenerate_boundary_is_refused():
         resample_boundary(np.array([[1.0, 0.0], [2.0, 0.0]]))
     with pytest.raises(ValueError, match="non-finite"):
         resample_boundary(np.array([[1.0, 0.0], [2.0, np.nan], [1.5, 1.0]]))
+
+
+# ── the density-aware spline breaks ───────────────────────────────────────────────────────────────
+_DATA = os.path.join(_HERE, "data")
+
+
+def _fixture_boundaries():
+    """The shipped fixtures' source boundaries: the synthetic g-files, the synthetic dd's slices
+    and the D3D-like example (and every third point of it)."""
+    import gzip
+    import json
+    from bouquet.io.geqdsk import read_geqdsk
+    out = {}
+    for f in ("g_synthetic.geqdsk", "g_synthetic_pfast.geqdsk", "g_synthetic_lmode.geqdsk",
+              "d3dlike.geqdsk"):
+        g = read_geqdsk(os.path.join(_DATA, f))
+        out[f] = np.column_stack([g.boundary_R, g.boundary_Z])
+    with gzip.open(os.path.join(_DATA, "dd_synthetic.json.gz"), "rt") as fh:
+        dd = json.load(fh)
+    for i, ts in enumerate(dd["equilibrium"]["time_slice"]):
+        o = ts["boundary"]["outline"]
+        out[f"dd slice {i}"] = np.column_stack([o["r"], o["z"]])
+    out["example"] = _gfile_boundary()
+    out["example, every third point"] = out["example"][::3]
+    return out
+
+
+def _old_kinks(P):
+    """The pre-fix break rule: the vertex's own turn above SPLINE_BREAK_DEG, nothing else."""
+    from bouquet.solver_geometry import SPLINE_BREAK_DEG, _vertex_turns
+    return np.flatnonzero(_vertex_turns(P) > SPLINE_BREAK_DEG)
+
+
+def test_the_density_aware_break_rule_leaves_the_fixtures_identical(monkeypatch):
+    """The relative test only removes breaks a coarse smooth source would otherwise get: on every
+    shipped fixture boundary the break vertices and the resampled set are bit-identical to the
+    fixed-angle rule's."""
+    import bouquet.solver_geometry as sg
+    for name, b in _fixture_boundaries().items():
+        P = sg._open_ccw(b)
+        np.testing.assert_array_equal(sg._local_kinks(P), _old_kinks(P), err_msg=name)
+        new = sg.resample_boundary(b)
+        with monkeypatch.context() as m:
+            m.setattr(sg, "_local_kinks", _old_kinks)
+            old = sg.resample_boundary(b)
+        np.testing.assert_array_equal(new[0], old[0], err_msg=name)
+        np.testing.assert_array_equal(new[1], old[1], err_msg=name)
+        assert new[2]["spline_breaks"] == old[2]["spline_breaks"], name
+
+
+def _smooth_d(m):
+    """A smooth D (R0 1.7 m, a 0.6 m, kappa 1.8, delta 0.5, no X-point) sampled at ``m`` points."""
+    th = np.linspace(0.0, 2.0 * np.pi, m, endpoint=False)
+    return np.column_stack([1.7 + 0.6 * np.cos(th + 0.5 * np.sin(th)), 1.8 * 0.6 * np.sin(th)])
+
+
+@pytest.mark.parametrize("m, dev_mm", [(16, 7.0), (20, 3.0), (24, 1.5), (30, 0.5)])
+def test_a_coarse_smooth_source_is_not_cut_into_a_polygon(m, dev_mm):
+    """At 16-30 source points the tips of a smooth D turn by 29-46 deg per vertex; the fixed angle
+    alone broke the spline there and left the set on the chords (6-24 mm inside the curve).  Now
+    no vertex breaks and the set lies on the periodic spline (its own error: 6.3 / 2.6 / 1.1 /
+    0.43 mm at 16 / 20 / 24 / 30 points)."""
+    from bouquet.solver_geometry import _local_kinks, _open_ccw
+    src = _smooth_d(m)
+    assert len(_local_kinks(_open_ccw(src))) == 0
+    assert len(_old_kinks(_open_ccw(src))) > 0                       # what the fixed angle did
+    pts, _, info = resample_boundary(src)
+    assert info["spline_breaks"] == 0 and info["x_points"] == []
+    true = _smooth_d(2 * 10**5)
+    seg_d = []
+    for p in pts:                                                    # distance to the true curve
+        seg_d.append(np.min(np.hypot(true[:, 0] - p[0], true[:, 1] - p[1])))
+    assert 1e3 * max(seg_d) < dev_mm
+
+
+def test_a_90_degree_corner_still_breaks_the_spline():
+    from bouquet.solver_geometry import XPOINT_TURN_DEG, _local_kinks, _open_ccw
+    src = _shape(256, corner=1.0)                                    # ~90 deg over the window
+    P = _open_ccw(src)
+    corner = int(np.flatnonzero(np.all(P == src[0], axis=1))[0])
+    assert corner in set(_local_kinks(P).tolist())                   # by the break rule itself
+    _, xp = find_xpoints(src)
+    assert [x["index"] for x in xp] == [corner] and xp[0]["turn_deg"] > XPOINT_TURN_DEG
+    pts, _, info = resample_boundary(src)
+    assert info["spline_breaks"] >= 1
+    assert np.any(np.all(pts == src[0], axis=1))
 
 
 # ── the weights ───────────────────────────────────────────────────────────────────────────────────
@@ -212,6 +322,79 @@ def test_a_user_supplied_set_is_used_as_given():
     assert rec["isoflux_weight_total"] == pytest.approx(np.sum(w))
     # ... on the legacy route too
     assert case_geometry(_gsrc(), sc, standard=False).iso_pts is pts
+
+
+def test_the_installed_total_omits_the_reference_points_weight():
+    """TokaMaker's set_isoflux does not apply weights[0] (the reference point's): the record and
+    the stamp carry the installed total, the nominal total minus w[0], next to the nominal one."""
+    from bouquet.solver_geometry import isoflux_stamp
+    geo = case_geometry(_gsrc(), _sc())
+    rec = geo.record()
+    w = np.asarray(geo.iso_w)
+    assert rec["isoflux_weight_total"] == pytest.approx(ISOFLUX_WEIGHT_TOTAL, rel=1e-12)
+    assert rec["isoflux_weight_installed_total"] == pytest.approx(
+        rec["isoflux_weight_total"] - w[0], rel=1e-12)
+    assert rec["isoflux_weights"]["installed_total"] == rec["isoflux_weight_installed_total"]
+    st = isoflux_stamp(geo.iso_pts, geo.iso_w, "x")
+    assert st["weight_installed_total"] == pytest.approx(st["weight_total"] - w[0], rel=1e-12)
+    # no X-point: uniform weights, installed = 2e5 x 255/256
+    _, w0, _ = standard_isoflux(_shape(200, corner=0.0))
+    st0 = isoflux_stamp(np.zeros((N_ISOFLUX, 2)), w0, "x")
+    assert st0["weight_installed_total"] == pytest.approx(ISOFLUX_WEIGHT_TOTAL * 255 / 256,
+                                                         rel=1e-12)
+
+
+def test_a_user_set_without_weights_gets_the_standard_per_length_weights():
+    """Points without weights are never left at TokaMaker's 1 per point on the unified engine:
+    per-length weights over the points as given, summing to the standard total, stamped, with a
+    UserWarning naming the config field."""
+    from bouquet.engine import _geometry_isoflux
+    from bouquet.solver_geometry import ISOFLUX_RULE_USER_PER_LENGTH, isoflux_stamp
+    sc = _sc()
+    pts = _shape(40, corner=0.0)
+    sc.isoflux_pts = pts
+    with pytest.warns(UserWarning, match="SolverConfig.isoflux_weights"):
+        geo = case_geometry(_gsrc(), sc)
+    assert geo.iso_pts is pts                                        # the points: as given
+    assert np.sum(geo.iso_w) == pytest.approx(ISOFLUX_WEIGHT_TOTAL, rel=1e-12)
+    d = _spacing(pts)                                                # closed: half each side
+    np.testing.assert_allclose(geo.iso_w, ISOFLUX_WEIGHT_TOTAL * 0.5 * (d + np.roll(d, 1))
+                               / np.sum(d), rtol=1e-12)
+    rec = geo.record()
+    assert rec["isoflux_rule"] == ISOFLUX_RULE_USER_PER_LENGTH
+    assert rec["isoflux_weight_total"] == pytest.approx(ISOFLUX_WEIGHT_TOTAL, rel=1e-12)
+    inst = _geometry_isoflux(geo)                                    # what the engine installs
+    np.testing.assert_array_equal(inst["w"], geo.iso_w)
+    st = isoflux_stamp(inst["pts"], inst["w"], inst["origin"])
+    assert st["weight_total"] == pytest.approx(ISOFLUX_WEIGHT_TOTAL, rel=1e-12)
+    # an open arc (the upper half): its two end points represent half of their one spacing
+    half = pts[:21]
+    sc.isoflux_pts = half
+    with pytest.warns(UserWarning):
+        w = case_geometry(_gsrc(), sc).iso_w
+    dh = _spacing(half)[:-1]
+    np.testing.assert_allclose(w, ISOFLUX_WEIGHT_TOTAL * 0.5 * (np.r_[0.0, dh] + np.r_[dh, 0.0])
+                               / np.sum(dh), rtol=1e-12)
+
+
+def test_a_user_set_with_weights_is_stamped_as_given_and_never_none():
+    from bouquet.solver_geometry import isoflux_stamp
+    sc = _sc()
+    pts, w = _shape(40, corner=0.0), np.linspace(1.0, 2.0, 40)
+    sc.isoflux_pts, sc.isoflux_weights = pts, w
+    import warnings as _w
+    with _w.catch_warnings():
+        _w.simplefilter("error", UserWarning)                        # no per-length warning
+        geo = case_geometry(_gsrc(), sc)
+    assert geo.iso_w is w
+    assert isoflux_stamp(geo.iso_pts, geo.iso_w, "x")["weight_total"] == pytest.approx(np.sum(w))
+    # the legacy route keeps TokaMaker's 1 per point for a set without weights, stamped as such
+    sc.isoflux_weights = None
+    geo = case_geometry(_gsrc(), sc, standard=False)
+    assert geo.iso_w is None
+    assert geo.record()["isoflux_weight_total"] == pytest.approx(40.0)
+    assert geo.record()["isoflux_weights"]["min"] == geo.record()["isoflux_weights"]["max"] == 1.0
+    assert isoflux_stamp(pts, None, "x")["weight_total"] == pytest.approx(40.0)
 
 
 def test_the_legacy_route_keeps_the_source_boundary_per_point():

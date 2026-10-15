@@ -74,6 +74,93 @@ so they are regenerated on the merged code. The legacy draws' iso-update
 weighted per unit length of the traced LCFS (#81) is the same form on that
 route. Closes #84.
 
+**Unreleased: review fixes to the boundary constraint and the scan stamps.**
+
+- Spline breaks are density-aware: a source vertex breaks the resampling
+  spline only when its turn exceeds `SPLINE_BREAK_DEG` and 3x the median turn
+  of the seven vertices around it, so a coarse smooth source (16-30 points) is
+  no longer cut into a polygon 6-24 mm inside its curve; the shipped fixtures
+  resample bit-identically.
+- A `SolverConfig.isoflux_pts` set given without `isoflux_weights` is
+  weighted per unit length to `ISOFLUX_WEIGHT_TOTAL` on the unified engine
+  (with a UserWarning) instead of TokaMaker's 1 per point, and no record or
+  stamp of an installed set says `None` for its weights any more.
+- A saddle target marks the sharpest vertex inside its match radius (when it
+  exceeds `XPOINT_TURN_DEG`, else the nearest, stamped as `xpoint_match`), so
+  a target a centimetre or two off the X-point still keeps the X-point exact.
+- The record and every isoflux stamp carry the installed total
+  (`isoflux_weight_installed_total`, `weight_installed_total`): TokaMaker does
+  not apply the reference point's weight, so it is the nominal total minus
+  `w[0]`; the weights themselves are unchanged.
+- A `bistability_source="draws"` from one scan no longer lands in another
+  scan's archived baseline: `store_baseline` drops it, and a scan with no
+  axis record or too few draws clears it from its baseline and the live
+  record.
+- `bands_summary` decides own-surface versus fallback on the band's own
+  population: under `rescued="exclude"` the rescued draws are left out of
+  that decision and of `n_located` too.
+- The axis-bimodality verdict needs at least `AXIS_BIMODAL_MIN_N` = 24
+  archived draws with an axis (owner decision 2026-10-15; it was issued from
+  6): on unimodal samples the rule says "bimodal" 20-37 % of the time at
+  n = 6-12. Below 24 the scan is stamped not testable, with the count.
+- `generate_bouquet` restores the reconstruction's delivered equilibrium
+  (unified engine) BEFORE it reads the q0 sawtooth check, the reference coil
+  currents and the Ip: a second `generate()` in one session no longer takes
+  them from the previous run's last draw. A failed warm baseline re-solve with
+  no delivered snapshot on record is refused (RuntimeError) instead of
+  falling back to the entry state.
+- The scan's in-spec stamp is the rule AS APPLIED: with `constrain_sawteeth`
+  set on a reconstruction whose q(0) < 1, `generate_bouquet` switches the q0
+  gate off, and `inspec_rule`, `inspec_bands_json` (new key `q0_gate`:
+  configured, applied, q0, reason) and the baseline engine record's
+  `inspec_bands` / `q0_gate` now say so (no `"+q0"`). `filter()` and
+  `refilter_inspec` under the stamped rule reproduce `selected` instead of
+  applying the gate afterwards.
+- The archived `in_spec` (draw attribute and the engine record's
+  `post_hoc.in_spec`) is the in-spec rule's verdict -- the configured coil
+  test (chi2 by default) AND the boundary cut AND the opt-in bands, the one
+  until-N counts and `selected` reproduces -- judged on every run, not only
+  under until-N. It was the legacy +/-2 % per-coil drift test with no
+  boundary cut, which disagreed systematically with `selected` for a floored
+  low-current coil; that verdict is kept as `coil_drift_in_spec`, and each
+  draw stamps `in_spec_source="inspec_rule"`. `coil_in_spec` in the engine
+  record is now the rule's coil test AND boundary cut. Readers
+  (`read_filter_flags`, `DrawView.flags`) report all three; on an archive
+  written before (no `in_spec_source`) `in_spec` is the drift verdict and
+  `in_spec_source` says so. Goldens that store `in_spec` / `n_in_spec` move
+  when regenerated.
+- `read_ida`'s bottom rung -- a file with no `Zeff` dataset whose carbon
+  route has no usable envelope -- derives Z_eff from the carbon density only
+  after the same two checks the carbon route enforces: the carbon validity
+  screen (run without sigmas when the file has no `n_12C6_err`) and
+  `impurity_Z == 6`. Either failing is refused ("no usable Z_eff
+  information"; take the dd's Z_eff with `ni_source='standard'`) instead of
+  taking screened-out or non-carbon data. A derived Z_eff warns once and is
+  stamped (`zeff_provenance["zeff_source"]="carbon_density"`,
+  `zeff_from_carbon_fallback`, and `kinetics_route["ida_zeff_source"]` on the
+  baseline record).
+- One `ni_source` route per run: the IMAS reader resolves it where the
+  file is known and stamps it (`li_metrics["kinetics_route"]`), and
+  `resolve_uncertainty`, `kinetic_clips_on` and the Z_eff ladder follow that
+  stamp (`resolved_ni_source` / `ida_ion_route_on` /
+  `resolved_ni_subtract_fast` / `kinetic_clips_on` take `baseline=`;
+  `experimental.baseline_kinetics_route`). With `ni_source="auto"` and
+  `zeff_from_fuse=True` on a file without Z_eff information the run is
+  "standard" throughout (it was "standard" in the reader but "all", clips on,
+  in the sigma ladder). An EXPLICIT `"CER"` / `"Zeff"` / `"all"` the file
+  cannot honour raises a ValueError naming the file and the missing data
+  instead of being downgraded. The envelope records `ni_source` and the
+  Z_eff tier its `ladder`.
+- Documentation: `UncertaintyConfig.kinetic_clips` and `resolve_uncertainty`
+  said the sampler clips were never on by the IDA-hybrid default; they are
+  (graduated 2026-10-14: on with the measured route, default included). The
+  comments now say so; the unused `experimental._explicit_ida_ion_route` is
+  removed.
+- `Bouquet.filter()`'s in-spec rule step no longer swallows every exception
+  from resolving the rule: a `KeyError` / `TypeError` (a config without the
+  rule's fields) is warned about with its type and message, and anything else
+  propagates.
+
 ## Unreleased — the golden recipe runs the synthetic fixtures at the current defaults; a new IDS-route golden (owner decisions 2026-10-15)
 
 **The golden recipe moves to the synthetic test fixtures** (`tests/data/`).
@@ -167,8 +254,9 @@ writes the new names.
 **New: the per-scan bimodality stamp (`engine.axis_bimodality`).** The
 archived draws' axis Z is split at its largest gap (at least 3 draws a
 side) and called bimodal when that gap exceeds the larger within-cluster
-standard deviation and the two centres sit more than 1 % of a apart; below 6
-draws it is not testable. Stamped on the scan (`axis_bimodal`,
+standard deviation and the two centres sit more than 1 % of a apart; below 24
+draws it is not testable (`engine.AXIS_BIMODAL_MIN_N`; see the unreleased
+entry below). Stamped on the scan (`axis_bimodal`,
 `axis_bimodal_json` with method, constants, centres and counts), printed in
 the `[generate]` / `[draw summary]` line (and an `[axis]` line with a
 `RuntimeWarning` when bimodal), reported in `spread()["axis_bimodality"]` and

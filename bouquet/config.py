@@ -72,7 +72,7 @@ class SolverConfig:
     order: int = 3
     F0: Optional[float] = None                       # vacuum R*Bt; default from g-file/IDS
     isoflux_pts: Optional["np.ndarray"] = None       # (N, 2) boundary constraints
-    isoflux_weights: Optional["np.ndarray"] = None   # (N,)
+    isoflux_weights: Optional["np.ndarray"] = None   # (N,); None: per unit length, total ISOFLUX_WEIGHT_TOTAL
     # Optional saddle (X-point) constraints: (N, 2) points where B_pol is driven
     # to zero (TokaMaker set_saddle_constraints). Pins the separatrix X-point --
     # without it a diverted forward solve typically ROUNDS the boundary corner
@@ -280,13 +280,17 @@ class ImasSource:
     #       (IDAProfiles.zeff_provenance) -- and "standard" otherwise (FUSE
     #       kinetics: the dd's Z_eff).  An IDA file with NO Z_eff information
     #       (no 'Zeff', no 'n_12C6') is refused on ida_hybrid, naming the
-    #       explicit choices below.
+    #       explicit choices below -- with zeff_from_fuse=True "auto"
+    #       resolves to "standard" there instead.
     #   "standard" -> the dd's Z_eff, n_i from it and the IDA n_e (the default
     #       before 2026-10; an explicit choice now).
     #   "Zeff" | "CER" | "all" -> that measured route explicitly (see
-    #       ReconstructionSource.ni_source).
+    #       ReconstructionSource.ni_source); a file that lacks its data is
+    #       REFUSED (ValueError), never downgraded, zeff_from_fuse or not.
     # The route a run took is stamped warning-free in li_metrics
-    # ("zeff_source": "ida" / "dd"; "kinetics_route").
+    # ("zeff_source": "ida" / "dd"; "kinetics_route"), and that ONE route is
+    # what the uncertainty, the sampler clips and the Z_eff ladder follow
+    # (bouquet.experimental.baseline_kinetics_route).
     ni_source: str = "auto"
     # ida_hybrid on a measured route only: True keeps the dd's Z_eff while
     # ne/Te/Ti/ni come from IDA (an explicit choice of the dd's Z_eff); False
@@ -801,15 +805,19 @@ class UncertaintyConfig:
     # other real ni envelope.  That rule changes with the Z_eff tier; pin
     # this field explicitly for an A/B of Z_eff envelopes.
     ni_from_zeff: Optional[bool] = None
-    # EXPERIMENTAL -- see bouquet.experimental.REGISTRY["kinetic_sampler_clips"].
+    # GRADUATED (owner decision 2026-10-14) -- see bouquet.experimental.
+    # GRADUATED["kinetic_sampler_clips"].
     # The PR #56 clips of the kinetic sampler: a drawn Z_eff floored at 1
     # where physics.zeff_bounds allows less, a derived n_i held in
     # [0, ne - z_fast], an independent n_i capped at ne - z_fast when Z_imp is
-    # declared, a passive Z_eff aux draw clipped to the window.  None = auto:
-    # on only with a PR #56 opt-in (fuse_zeff_fast_ions, an explicitly SET
-    # measured ni_source, an explicit ni_subtract_fast=True) -- never by the
-    # ida_hybrid default; False: only the zeff_bounds window (the bound in
-    # place before PR #56); True: on.
+    # declared, a passive Z_eff aux draw clipped to the window.  None = auto
+    # (bouquet.experimental.kinetic_clips_on): ON whenever the run's resolved
+    # ni_source is a measured IDA route -- INCLUDING the ida_hybrid default
+    # (ni_source="auto" -> "all") -- or the beam subtraction
+    # (ni_subtract_fast, which follows include_pfast there) or
+    # fuse_zeff_fast_ions is on; off otherwise.  Every clip that fires is
+    # counted per draw (KineticDraw.clips) and archived.  False: only the
+    # zeff_bounds window (the bound in place before PR #56); True: on.
     kinetic_clips: Optional[bool] = None
 
     # GPR correlation length scales (psi_N units) -- define the perturbation

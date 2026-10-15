@@ -49,7 +49,8 @@ from .utils import (
     discover_scan_keys, list_equilibrium_indices, load_baseline_profiles,
     read_eqdsk_from_bytes,
 )
-from .filtering import select_indices, _FILTER_FLAGS, _BAND_FLAGS
+from .filtering import (select_indices, in_spec_fields, _FILTER_FLAGS,
+                        _BAND_FLAGS)
 
 
 # Datasets that are not perturbed-profile arrays (excluded from DrawView.profiles).
@@ -57,7 +58,7 @@ _NON_PROFILE = {"config_json", EQDSK_DS, PFILE_DS, IFILE_DS}
 
 # Attr keys surfaced by DrawView.flags (same record shape as read_filter_flags).
 _FLAG_ATTRS = (*_FILTER_FLAGS, *_BAND_FLAGS, "selected")
-_FLAG_METRICS = ("max_F_drift_pct", "max_VSC_drift_pct", "in_spec")
+_FLAG_METRICS = ("max_F_drift_pct", "max_VSC_drift_pct")
 
 
 def _gfile_pressure_scalars(eq):
@@ -162,7 +163,10 @@ class DrawView:
         rec = {k: bool(a[k]) for k in _FLAG_ATTRS if k in a}
         for k in _FLAG_METRICS:
             if k in a:
-                rec[k] = bool(a[k]) if k == "in_spec" else float(a[k])
+                rec[k] = float(a[k])
+        # in_spec (the rule's verdict), coil_drift_in_spec and which one an
+        # older archive's in_spec is (filtering.in_spec_fields)
+        rec.update(in_spec_fields(a))
         return rec
 
     @property

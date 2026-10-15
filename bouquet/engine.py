@@ -102,8 +102,9 @@ AXIS_BRANCH_FRAC = 0.01
 #: standard deviations (the gap exceeds the within-cluster spread) and (2)
 #: the two cluster centres sit more than :data:`AXIS_BRANCH_FRAC` x a apart
 #: (two branches, not a split of a sub-threshold scatter).  Fewer than
-#: 2 x :data:`AXIS_BIMODAL_MIN_COUNT` draws with an axis: not testable
-#: (``axis_bimodal=None``).  A REPORT: nothing is filtered on it.
+#: :data:`AXIS_BIMODAL_MIN_N` draws with an axis: not testable
+#: (``axis_bimodal=None``; no verdict, no ``bistability_source="draws"``, no
+#: warning, no limitation).  A REPORT: nothing is filtered on it.
 AXIS_BIMODAL_METHOD = ("largest-gap two-cluster split of the archived draws' "
                        "axis Z; bimodal when the gap exceeds the larger "
                        "within-cluster standard deviation x gap_ratio and the "
@@ -113,6 +114,13 @@ AXIS_BIMODAL_VERSION = "axis_bimodality/1"
 #: Each cluster holds at least this many draws ("both clusters populated by
 #: at least a few draws").
 AXIS_BIMODAL_MIN_COUNT = 3
+#: The fewest archived draws with an axis record for which the verdict is
+#: issued (owner decision 2026-10-15).  Measured on unimodal normal samples
+#: (a = 0.6 m, so a 6 mm separation threshold): the rule calls a single
+#: Gaussian "bimodal" in about 20-37 % of samples at n = 6-12 when the
+#: spread is 6-20 mm (about 5-9 % at 3 mm), about 10-11 % at n = 24 and
+#: about 3 % at n = 36; below 24 the verdict would be mostly noise.
+AXIS_BIMODAL_MIN_N = 24
 #: The gap must exceed this multiple of the larger within-cluster standard
 #: deviation.
 AXIS_BIMODAL_GAP_RATIO = 1.0
@@ -3355,7 +3363,7 @@ def axis_bimodality(dZ_mm, minor_radius_m=None, reference_Z=None) -> dict:
     skipped] with the reconstruction's minor radius *minor_radius_m* [m].
 
     Returns ``axis_bimodal`` (True / False; ``None`` when not testable:
-    fewer than 2 x :data:`AXIS_BIMODAL_MIN_COUNT` draws, or ``a`` unknown),
+    fewer than :data:`AXIS_BIMODAL_MIN_N` draws, or ``a`` unknown),
     ``reason``, ``n``, and for a testable set the two clusters
     (``centres_dZ_mm`` lower/upper, ``counts``, ``spread_mm`` = their sample
     standard deviations, ``centres_Z_m`` when *reference_Z* is given), the
@@ -3366,6 +3374,7 @@ def axis_bimodality(dZ_mm, minor_radius_m=None, reference_Z=None) -> dict:
                             if v is not None and np.isfinite(float(v))],
                            dtype=float))
     n, m = int(z.size), int(AXIS_BIMODAL_MIN_COUNT)
+    n_min = max(int(AXIS_BIMODAL_MIN_N), 2 * m)
     a = None
     try:
         a = float(minor_radius_m)
@@ -3379,10 +3388,12 @@ def axis_bimodality(dZ_mm, minor_radius_m=None, reference_Z=None) -> dict:
                               separation_frac_a=float(AXIS_BRANCH_FRAC)),
                coordinate=("axis Z of each archived draw relative to the "
                            "reconstruction's delivered axis [mm]"),
-               n=n, minor_radius_m=a, axis_bimodal=None, reason=None)
-    if n < 2 * m:
+               n=n, minor_radius_m=a, axis_bimodal=None, reason=None,
+               min_n=n_min)          # the fewest draws the verdict is issued at
+    if n < n_min:
         rec["reason"] = (f"not testable: {n} draw(s) with an axis record, "
-                         f"fewer than 2 x min_count = {2 * m}")
+                         f"fewer than the {n_min} the verdict needs "
+                         f"(AXIS_BIMODAL_MIN_N)")
         return rec
     if a is None:
         rec["reason"] = "not testable: the reconstruction's minor radius is unknown"

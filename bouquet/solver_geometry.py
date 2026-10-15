@@ -49,6 +49,14 @@ N_ISOFLUX = 256
 #: (0 of 6 before; the other 2 miss the l_i band, as before); the ladder's IDS slices and the
 #: synthetic fixtures still pass sigma=0, and their reconstructions moved by <= 1.4e-4 in l_i(3) and
 #: <= 3.7e-4 in q -- under a fifth of the sigma=0 gates -- while holding the source boundary closer.
+#:
+#: This is the NOMINAL total, the sum of all the set's weights.  TokaMaker's ``set_isoflux`` measures
+#: every other point's flux against the set's first point (the reference) and does not apply that
+#: point's own weight (``weights[0]`` is discarded), so the total actually installed is the nominal
+#: total minus ``w[0]`` (199 219 for a 256-point set without X-points).  The verification above was
+#: measured with exactly this installation; the records stamp both totals
+#: (``isoflux_weight_total`` / ``isoflux_weight_installed_total``, and the isoflux stamps'
+#: ``weight_total`` / ``weight_installed_total``).
 ISOFLUX_WEIGHT_TOTAL = 2.0e5
 
 #: X-point detection on the source boundary (#84; X-points are kept as exact resampled points): a
@@ -57,10 +65,13 @@ ISOFLUX_WEIGHT_TOTAL = 2.0e5
 #: sampling density -- exceeds ``XPOINT_TURN_DEG``; of candidates within two windows of each other
 #: only the sharpest is kept.  An X-point's corner turns the boundary by ~70-90 deg over that window,
 #: a smooth boundary by far less (measured on the synthetic fixtures: X-points 68-84 deg, elsewhere
-#: <= 15 deg away from the corner).  A saddle target (``SolverConfig.saddle_targets``) marks the
-#: source vertex nearest to it as an X-point when that vertex lies within
-#: ``XPOINT_SADDLE_MATCH_FRAC`` x the length of it.  A false detection costs nothing (one point is
-#: kept exactly); a missed one leaves the corner to the spline.
+#: <= 15 deg away from the corner).  A saddle target (``SolverConfig.saddle_targets``) marks an
+#: X-point when source vertices lie within ``XPOINT_SADDLE_MATCH_FRAC`` x the length of it: the
+#: one of them with the largest windowed turning angle, if that exceeds ``XPOINT_TURN_DEG`` (so a
+#: target a centimetre or two off the X-point still marks the X-point, not a leg vertex), else the
+#: nearest one (stamped per X-point as ``xpoint_match`` = "largest turn" / "nearest").  A false
+#: detection costs nothing (one point is kept exactly); a missed one leaves the corner to the
+#: spline.
 XPOINT_TURN_DEG = 45.0
 XPOINT_WINDOW_FRAC = 0.01
 XPOINT_SADDLE_MATCH_FRAC = 0.01
@@ -70,7 +81,19 @@ XPOINT_SADDLE_MATCH_FRAC = 0.01
 #: neighbouring edges: a corner the X-point test keeps only one vertex of (a corner the writer cut
 #: in two) would otherwise make the cubic overshoot by millimetres.  Smooth boundaries turn by
 #: <= ~5 deg per vertex at 257 points (<= ~13 deg at 100); the cut corners of the fixtures 28-39 deg.
+#:
+#: The per-vertex turn depends on the sampling density (a smooth D sampled at 16-30 points turns by
+#: 29-46 deg at its tips), so the fixed angle alone would break a coarse smooth source at every
+#: high-curvature vertex and leave it a polygon, centimetres inside the curve.  A vertex is
+#: therefore a break only when its turn ALSO exceeds :data:`SPLINE_BREAK_MEDIAN_RATIO` x the median
+#: turn of the vertices around it (itself and :data:`SPLINE_BREAK_MEDIAN_WINDOW` on either side).
+#: A corner is a local outlier against its neighbours, a coarse smooth boundary's tip is not: its
+#: neighbours turn almost as much (measured: smooth D shapes, kappa 1.8, delta +/-0.5, 12-100 points,
+#: turn / local median <= 2.8; the fixtures' corners and X-points 14-160).  A neighbourhood median
+#: rather than the whole boundary's, because the curvature of a shaped boundary varies round it.
 SPLINE_BREAK_DEG = 20.0
+SPLINE_BREAK_MEDIAN_RATIO = 3.0
+SPLINE_BREAK_MEDIAN_WINDOW = 3
 
 #: The resampling method's name and version, stamped in the solver geometry record.
 ISOFLUX_RESAMPLING_METHOD = "arc_length_resample/1"
@@ -81,6 +104,10 @@ ISOFLUX_RULE_STANDARD = ("per unit length (#84): the source boundary resampled b
 ISOFLUX_RULE_LEGACY = ("per point (legacy route): the source boundary as given, every point at "
                        "ISOFLUX_WEIGHT")
 ISOFLUX_RULE_USER = "as given: SolverConfig.isoflux_pts / isoflux_weights (not resampled)"
+ISOFLUX_RULE_USER_PER_LENGTH = (
+    "as given: SolverConfig.isoflux_pts (not resampled), isoflux_weights=None so each point "
+    "weighted by the arc length it represents along the points in the order given, summing to "
+    "ISOFLUX_WEIGHT_TOTAL")
 
 #: The F0 rule of a reused solver, stamped in every :meth:`CaseGeometry.record`: since #76 every
 #: baseline (each ``run_slices`` / ``set_slice`` slice, each ``set_case`` case, every swb per-solve
@@ -106,16 +133,20 @@ def isoflux_fingerprint(pts, weights) -> Optional[str]:
 
 def isoflux_stamp(pts, weights, origin) -> dict:
     """The plain-data stamp of an isoflux pattern: ``n`` points, the weight (``weight_min`` /
-    ``weight_max`` / ``weight_total``), its ``origin`` and :func:`isoflux_fingerprint`
-    (``sha256``)."""
+    ``weight_max`` / ``weight_total``, and ``weight_installed_total``, the total without the
+    reference point's weight, which TokaMaker does not apply; ``weights=None`` is stamped as
+    TokaMaker installs it, 1 per point), its ``origin`` and :func:`isoflux_fingerprint` (``sha256``)."""
     n = 0 if pts is None else int(len(pts))
-    w = (None if (pts is None or weights is None) else
+    # weights None: TokaMaker's set_isoflux installs 1 per point, so that is what is stamped
+    w = (None if pts is None else np.ones(n) if weights is None else
          np.atleast_1d(np.asarray(weights, dtype=float)))
+    wn = None if w is None or not w.size else np.broadcast_to(w, (n,))
     return {"n": n,
             "weight_min": None if w is None or not w.size else float(w.min()),
             "weight_max": None if w is None or not w.size else float(w.max()),
-            "weight_total": None if w is None or not w.size else float(
-                np.sum(np.broadcast_to(w, (n,)))),
+            "weight_total": None if wn is None else float(np.sum(wn)),
+            # what TokaMaker applies: the reference point's (the first point's) weight is not
+            "weight_installed_total": None if wn is None else float(np.sum(wn[1:])),
             "origin": None if origin is None else str(origin),
             "sha256": isoflux_fingerprint(pts, weights)}
 
@@ -172,10 +203,17 @@ def find_xpoints(boundary_RZ, saddle_targets=None):
     if saddle_targets is not None:
         for k, xy in enumerate(np.asarray(saddle_targets, dtype=np.float64).reshape(-1, 2)):
             dist = np.hypot(P[:, 0] - xy[0], P[:, 1] - xy[1])
-            i = int(np.argmin(dist))
-            if dist[i] <= XPOINT_SADDLE_MATCH_FRAC * L and all(apart(i, f["index"]) for f in found):
+            near = np.flatnonzero(dist <= XPOINT_SADDLE_MATCH_FRAC * L)
+            if not near.size:
+                continue
+            # the sharpest vertex inside the match radius (a target off the X-point must not
+            # mark a leg vertex in its place); none above XPOINT_TURN_DEG: the nearest vertex
+            j = near[np.argsort(-turn[near], kind="stable")[0]]
+            i, match = ((int(j), "largest turn") if turn[j] > XPOINT_TURN_DEG else
+                        (int(np.argmin(dist)), "nearest"))
+            if all(apart(i, f["index"]) for f in found):
                 found.append(dict(index=i, origin=f"saddle target {k}", turn_deg=float(turn[i]),
-                                  saddle_distance_m=float(dist[i])))
+                                  saddle_distance_m=float(dist[i]), xpoint_match=match))
     for i in np.argsort(-turn, kind="stable"):
         if turn[i] <= XPOINT_TURN_DEG:
             break
@@ -199,13 +237,26 @@ def _spline(t, xy, periodic):
     return lambda u: np.column_stack([interpolate.splev(u, tr), interpolate.splev(u, tz)])
 
 
-def _local_kinks(P):
-    """Vertex indices of ``P`` (open, closed round) where the polygon itself turns by more than
-    :data:`SPLINE_BREAK_DEG` between its two neighbouring edges."""
+def _vertex_turns(P):
+    """The turning angle [deg] of the polygon ``P`` (open, closed round) at each vertex, between
+    its two neighbouring edges."""
     a = P - np.roll(P, 1, axis=0)
     b = np.roll(P, -1, axis=0) - P
     c = np.sum(a * b, axis=1) / np.maximum(np.hypot(*a.T) * np.hypot(*b.T), 1e-300)
-    return np.flatnonzero(np.degrees(np.arccos(np.clip(c, -1.0, 1.0))) > SPLINE_BREAK_DEG)
+    return np.degrees(np.arccos(np.clip(c, -1.0, 1.0)))
+
+
+def _local_kinks(P):
+    """Vertex indices of ``P`` (open, closed round) where the polygon itself turns by more than
+    :data:`SPLINE_BREAK_DEG` between its two neighbouring edges AND by more than
+    :data:`SPLINE_BREAK_MEDIAN_RATIO` x the median turn of the vertices within
+    :data:`SPLINE_BREAK_MEDIAN_WINDOW` of it (itself included), so a coarse but smooth source is
+    not cut into a polygon."""
+    turn = _vertex_turns(P)
+    k = SPLINE_BREAK_MEDIAN_WINDOW
+    idx = (np.arange(len(P))[:, None] + np.arange(-k, k + 1)[None, :]) % len(P)
+    local = np.median(turn[idx], axis=1)
+    return np.flatnonzero((turn > SPLINE_BREAK_DEG) & (turn > SPLINE_BREAK_MEDIAN_RATIO * local))
 
 
 class _Curve:
@@ -348,6 +399,8 @@ def resample_boundary(boundary_RZ, n=N_ISOFLUX, saddle_targets=None):
         x_point_rule=dict(turn_deg=XPOINT_TURN_DEG, window_frac=XPOINT_WINDOW_FRAC,
                           saddle_match_frac=XPOINT_SADDLE_MATCH_FRAC),
         spline_breaks=len(breaks), spline_break_deg=SPLINE_BREAK_DEG,
+        spline_break_median_ratio=SPLINE_BREAK_MEDIAN_RATIO,
+        spline_break_median_window=SPLINE_BREAK_MEDIAN_WINDOW,
         spacing_m=dict(min=float(np.min(arc)), max=float(np.max(arc))))
     return pts, arc, info
 
@@ -358,6 +411,31 @@ def per_length_weights(arc, w_total=ISOFLUX_WEIGHT_TOTAL):
     if arc.ndim != 1 or not arc.size or not np.all(np.isfinite(arc)) or np.any(arc <= 0):
         raise ValueError("per_length_weights needs positive, finite arc lengths")
     return float(w_total) * arc / float(np.sum(arc))
+
+
+def user_isoflux_weights(pts, w_total=ISOFLUX_WEIGHT_TOTAL):
+    """Per-length weights for a user isoflux set given without weights (``SolverConfig.isoflux_pts``
+    with ``isoflux_weights=None``): each point weighted by the arc length it represents along the
+    points IN THE ORDER GIVEN (half the distance to each neighbour), summing to ``w_total``.  The
+    set is taken as a closed contour when its closing gap (last point to first) is no longer than
+    its longest other spacing, else as an open arc whose two end points represent half of their one
+    spacing.  Returns ``(weights, closed)``."""
+    P = np.asarray(pts, dtype=np.float64).reshape(-1, 2)
+    if len(P) < 2 or not np.all(np.isfinite(P)):
+        raise ValueError("SolverConfig.isoflux_pts needs at least 2 finite points to be weighted "
+                         "per unit length: give isoflux_weights")
+    d = np.hypot(*np.diff(P, axis=0).T)
+    gap = float(np.hypot(*(P[0] - P[-1])))
+    closed = len(P) > 2 and gap <= float(np.max(d))
+    if closed:
+        dd = np.concatenate([d, [gap]])
+        arc = 0.5 * (dd + np.roll(dd, 1))
+    else:
+        arc = 0.5 * (np.concatenate([[0.0], d]) + np.concatenate([d, [0.0]]))
+    if np.any(arc <= 0):
+        raise ValueError("SolverConfig.isoflux_pts has repeated points, so it cannot be weighted "
+                         "per unit length: give isoflux_weights")
+    return per_length_weights(arc, w_total), bool(closed)
 
 
 def standard_isoflux(boundary_RZ, saddle_targets=None, n=N_ISOFLUX, w_total=ISOFLUX_WEIGHT_TOTAL):
@@ -404,11 +482,15 @@ class CaseGeometry:
         g-file reconstruction installs its own isoflux afterwards (recorded in ``Baseline.recon``);
         this is the reset state every solve starts from."""
         def _w(w, n):
-            if w is None:
+            if not n:
                 return None
+            if w is None:                      # TokaMaker's set_isoflux: 1 per point
+                w = np.ones(int(n))
             w = np.atleast_1d(np.asarray(w, dtype=float))
+            wn = np.broadcast_to(w, (int(n),))
             return {"n": int(n), "min": float(w.min()), "max": float(w.max()),
-                    "total": float(np.sum(np.broadcast_to(w, (int(n),))))} if w.size else None
+                    "total": float(np.sum(wn)),
+                    "installed_total": float(np.sum(wn[1:]))} if w.size else None
         n_iso = 0 if self.iso_pts is None else int(len(self.iso_pts))
         n_sad = 0 if self.saddle_pts is None else int(len(self.saddle_pts))
         ww = _w(self.iso_w, n_iso)
@@ -425,6 +507,8 @@ class CaseGeometry:
             "isoflux_n": n_iso,
             "isoflux_weights": ww,
             "isoflux_weight_total": None if ww is None else ww["total"],
+            # the total TokaMaker applies: set_isoflux discards the reference point's weight w[0]
+            "isoflux_weight_installed_total": None if ww is None else ww["installed_total"],
             # the source boundary's own point count and length; the resampling (None: as given)
             "isoflux_source_n": None if b is None else int(len(b)),
             "boundary_length_m": (rs["boundary_length_m"] if rs else
@@ -455,7 +539,10 @@ def case_geometry(source, solver, standard=True) -> CaseGeometry:
     |r0*b0(t)| and the boundary outline or ``LCFS_geqdsk``), with ``solver.F0`` / ``isoflux_pts`` /
     ``saddle_targets`` overriding.
 
-    The isoflux set: ``solver.isoflux_pts`` (with ``isoflux_weights``) as given, never resampled;
+    The isoflux set: ``solver.isoflux_pts`` (with ``isoflux_weights``) as given, never resampled
+    (without ``isoflux_weights``, under ``standard``, its points get per-length weights summing
+    to :data:`ISOFLUX_WEIGHT_TOTAL`, :func:`user_isoflux_weights`, with a UserWarning; the legacy
+    route installs them at TokaMaker's 1 per point, as before, and the record says so);
     else, with ``standard`` (the unified engine, :func:`standard_isoflux_for`), the
     standard set of #84 (:func:`standard_isoflux`: :data:`N_ISOFLUX` points by arc length, X-points
     exact -- the saddle targets mark them too --, weights per unit length summing to
@@ -490,6 +577,19 @@ def case_geometry(source, solver, standard=True) -> CaseGeometry:
         sad_w = None if solver.saddle_weights is None else np.asarray(solver.saddle_weights, dtype=np.float64)
     iso_pts, iso_w = solver.isoflux_pts, solver.isoflux_weights
     iso_from, iso_rule, iso_rs = "SolverConfig.isoflux_pts", ISOFLUX_RULE_USER, None
+    if iso_pts is not None and iso_w is None and standard:
+        # never TokaMaker's default of 1 per point (2e5/256 ~ 780x weaker than the standard set);
+        # the legacy route is unchanged (1 per point, stamped as such by record())
+        iso_w, closed = user_isoflux_weights(iso_pts)
+        iso_rule = ISOFLUX_RULE_USER_PER_LENGTH
+        iso_from = (f"SolverConfig.isoflux_pts, isoflux_weights=None: weight per unit length along "
+                    f"the {'closed contour' if closed else 'open arc'} of the points as given "
+                    f"(total {ISOFLUX_WEIGHT_TOTAL:g})")
+        warnings.warn("SolverConfig.isoflux_pts was given without SolverConfig.isoflux_weights: the "
+                      "points received the standard per-length weights (each point weighted by the "
+                      "arc length it represents, summing to ISOFLUX_WEIGHT_TOTAL), not TokaMaker's "
+                      "default of 1 per point; set isoflux_weights to choose them",
+                      UserWarning, stacklevel=2)
     if iso_pts is None:
         if standard:
             iso_pts, iso_w, iso_rs = standard_isoflux(boundary_RZ, saddle_targets=sad)
