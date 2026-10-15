@@ -1559,8 +1559,9 @@ NI_FAST_RTOL = 1e-2
 PSI_RHO_GATE_RHO = (0.2, 0.4, 0.6, 0.8, 0.9)
 
 #: Largest |psi_N_dd - psi_N_g| at :data:`PSI_RHO_GATE_RHO` before the reader
-#: warns.  Advisory only.
-PSI_RHO_DRIFT_TOL = 2e-2
+#: warns.  Advisory only: a FUSE run evolves its own current, so its equilibrium
+#: legitimately moves psi_N at fixed rho by a few 1e-2 from the g-file's.
+PSI_RHO_DRIFT_TOL = 5e-2
 
 
 def _psi_rho_drift(psi_N, rho, gfile):
