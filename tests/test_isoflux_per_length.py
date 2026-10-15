@@ -324,6 +324,26 @@ def test_a_user_supplied_set_is_used_as_given():
     assert case_geometry(_gsrc(), sc, standard=False).iso_pts is pts
 
 
+def test_the_installed_total_omits_the_reference_points_weight():
+    """TokaMaker's set_isoflux does not apply weights[0] (the reference point's): the record and
+    the stamp carry the installed total, the nominal total minus w[0], next to the nominal one."""
+    from bouquet.solver_geometry import isoflux_stamp
+    geo = case_geometry(_gsrc(), _sc())
+    rec = geo.record()
+    w = np.asarray(geo.iso_w)
+    assert rec["isoflux_weight_total"] == pytest.approx(ISOFLUX_WEIGHT_TOTAL, rel=1e-12)
+    assert rec["isoflux_weight_installed_total"] == pytest.approx(
+        rec["isoflux_weight_total"] - w[0], rel=1e-12)
+    assert rec["isoflux_weights"]["installed_total"] == rec["isoflux_weight_installed_total"]
+    st = isoflux_stamp(geo.iso_pts, geo.iso_w, "x")
+    assert st["weight_installed_total"] == pytest.approx(st["weight_total"] - w[0], rel=1e-12)
+    # no X-point: uniform weights, installed = 2e5 x 255/256
+    _, w0, _ = standard_isoflux(_shape(200, corner=0.0))
+    st0 = isoflux_stamp(np.zeros((N_ISOFLUX, 2)), w0, "x")
+    assert st0["weight_installed_total"] == pytest.approx(ISOFLUX_WEIGHT_TOTAL * 255 / 256,
+                                                         rel=1e-12)
+
+
 def test_a_user_set_without_weights_gets_the_standard_per_length_weights():
     """Points without weights are never left at TokaMaker's 1 per point on the unified engine:
     per-length weights over the points as given, summing to the standard total, stamped, with a

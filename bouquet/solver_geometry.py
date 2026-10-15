@@ -49,6 +49,14 @@ N_ISOFLUX = 256
 #: (0 of 6 before; the other 2 miss the l_i band, as before); the ladder's IDS slices and the
 #: synthetic fixtures still pass sigma=0, and their reconstructions moved by <= 1.4e-4 in l_i(3) and
 #: <= 3.7e-4 in q -- under a fifth of the sigma=0 gates -- while holding the source boundary closer.
+#:
+#: This is the NOMINAL total, the sum of all the set's weights.  TokaMaker's ``set_isoflux`` measures
+#: every other point's flux against the set's first point (the reference) and does not apply that
+#: point's own weight (``weights[0]`` is discarded), so the total actually installed is the nominal
+#: total minus ``w[0]`` (199 219 for a 256-point set without X-points).  The verification above was
+#: measured with exactly this installation; the records stamp both totals
+#: (``isoflux_weight_total`` / ``isoflux_weight_installed_total``, and the isoflux stamps'
+#: ``weight_total`` / ``weight_installed_total``).
 ISOFLUX_WEIGHT_TOTAL = 2.0e5
 
 #: X-point detection on the source boundary (#84; X-points are kept as exact resampled points): a
@@ -125,17 +133,20 @@ def isoflux_fingerprint(pts, weights) -> Optional[str]:
 
 def isoflux_stamp(pts, weights, origin) -> dict:
     """The plain-data stamp of an isoflux pattern: ``n`` points, the weight (``weight_min`` /
-    ``weight_max`` / ``weight_total``; ``weights=None`` is stamped as TokaMaker installs it, 1 per
-    point), its ``origin`` and :func:`isoflux_fingerprint` (``sha256``)."""
+    ``weight_max`` / ``weight_total``, and ``weight_installed_total``, the total without the
+    reference point's weight, which TokaMaker does not apply; ``weights=None`` is stamped as
+    TokaMaker installs it, 1 per point), its ``origin`` and :func:`isoflux_fingerprint` (``sha256``)."""
     n = 0 if pts is None else int(len(pts))
     # weights None: TokaMaker's set_isoflux installs 1 per point, so that is what is stamped
     w = (None if pts is None else np.ones(n) if weights is None else
          np.atleast_1d(np.asarray(weights, dtype=float)))
+    wn = None if w is None or not w.size else np.broadcast_to(w, (n,))
     return {"n": n,
             "weight_min": None if w is None or not w.size else float(w.min()),
             "weight_max": None if w is None or not w.size else float(w.max()),
-            "weight_total": None if w is None or not w.size else float(
-                np.sum(np.broadcast_to(w, (n,)))),
+            "weight_total": None if wn is None else float(np.sum(wn)),
+            # what TokaMaker applies: the reference point's (the first point's) weight is not
+            "weight_installed_total": None if wn is None else float(np.sum(wn[1:])),
             "origin": None if origin is None else str(origin),
             "sha256": isoflux_fingerprint(pts, weights)}
 
@@ -476,8 +487,10 @@ class CaseGeometry:
             if w is None:                      # TokaMaker's set_isoflux: 1 per point
                 w = np.ones(int(n))
             w = np.atleast_1d(np.asarray(w, dtype=float))
+            wn = np.broadcast_to(w, (int(n),))
             return {"n": int(n), "min": float(w.min()), "max": float(w.max()),
-                    "total": float(np.sum(np.broadcast_to(w, (int(n),))))} if w.size else None
+                    "total": float(np.sum(wn)),
+                    "installed_total": float(np.sum(wn[1:]))} if w.size else None
         n_iso = 0 if self.iso_pts is None else int(len(self.iso_pts))
         n_sad = 0 if self.saddle_pts is None else int(len(self.saddle_pts))
         ww = _w(self.iso_w, n_iso)
@@ -494,6 +507,8 @@ class CaseGeometry:
             "isoflux_n": n_iso,
             "isoflux_weights": ww,
             "isoflux_weight_total": None if ww is None else ww["total"],
+            # the total TokaMaker applies: set_isoflux discards the reference point's weight w[0]
+            "isoflux_weight_installed_total": None if ww is None else ww["installed_total"],
             # the source boundary's own point count and length; the resampling (None: as given)
             "isoflux_source_n": None if b is None else int(len(b)),
             "boundary_length_m": (rs["boundary_length_m"] if rs else

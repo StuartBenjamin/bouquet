@@ -765,7 +765,13 @@ ONE standard set on both routes, for the reconstruction and every draw
   themselves are installed exactly as configured;
 - each point is weighted by the arc length it represents (half the spacing to
   each neighbour), the weights summing to
-  `solver_geometry.ISOFLUX_WEIGHT_TOTAL` = 2e5 (`per_length_weights`). The
+  `solver_geometry.ISOFLUX_WEIGHT_TOTAL` = 2e5 (`per_length_weights`). That
+  is the nominal total: TokaMaker's `set_isoflux` does not apply the
+  reference point's (the first point's) weight, so the installed total is
+  the nominal total minus `w[0]` (199 219 for a set without X-points); the
+  record stamps both (`isoflux_weight_total`,
+  `isoflux_weight_installed_total`; the isoflux stamps `weight_total`,
+  `weight_installed_total`). The
   constraint strength then depends on the boundary, not on the writer of the
   file or the mesh: a 100-point and a 10 000-point sampling of one contour
   give the same total and the same points to micrometres;
