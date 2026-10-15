@@ -13,9 +13,9 @@ bouquet generates families ("bouquets") of perturbed equilibria from a baseline
 kinetic equilibrium: correlated Gaussian-process perturbations of n_e, T_e,
 T_i, Z_eff-consistent densities and j_phi drawn within measured uncertainties,
 a per-draw bootstrap iterated to self-consistency with each solved
-equilibrium (Redl), l_i band conditioning against
-magnetics, a Grad–Shafranov solve per sample, and coil/boundary in-spec
-filtering — all archived to one self-describing, provenance-stamped HDF5
+equilibrium (Redl), a free-boundary Grad–Shafranov solve per sample, and
+in-spec filtering on the magnetics (coil χ² test + boundary cut; l_i and β_p
+bands only on request, for a source that states their uncertainty) — all archived to one self-describing, provenance-stamped HDF5
 database.
 
 - **Two baseline sources, one API.** A **reconstruction** (g-file plus kinetic
@@ -292,7 +292,7 @@ Knobs live on config sub-objects reachable from the run object; set them before
 b.uncertainty.ne_scalar_sigma = 0.05   # flat 5% envelope when no measured sigmas
 b.uncertainty.jphi_scalar_sigma = 0.10
 b.generation.n_equils = 50
-b.generation.l_i_tolerance = 0.05      # FRACTION of target (0.05 = 5%)
+# b.generation.l_i_sigma = 0.03        # opt-in l_i band, only from a STATED 1-sigma (default: off)
 b.generation.seed = 1234
 ```
 
@@ -305,10 +305,10 @@ b.generation.seed = 1234
 | `uncertainty.ida_path` | `None` | IDA `.cdf` supplying measured sigma envelopes instead of the scalars. **Wins over the scalars above** — see the precedence note below |
 | `uncertainty.log_sigma_sources` | `True` | Log which source each kinetic sigma actually resolved from |
 | `generation.n_equils` | `20` | Draws to attempt |
-| `generation.n_inspec_target` | `None` | Set it to draw **until N draws pass the filters** instead of exactly `n_equils` — `n_equils` becomes the initial allocation. The stopping rule uses the same predicate `filter()` applies — including the configured coil filter (`filtering.coil_filter`, chi2 by default) with the same per-coil sigma, DAQ era and acceptance thresholds — so the count it stops on is the count marked `selected`. On the parallel launchers the workers pool their count through a shared ledger and stop cooperatively once the run's one target is met |
+| `generation.n_inspec_target` | `None` | Set it to draw **until N draws are in spec** (the coil test + boundary cut, plus any opt-in band; [the in-spec rule](docs/workflows.md#the-in-spec-rule)) instead of exactly `n_equils` — `n_equils` becomes the initial allocation. The stopping rule uses the same predicate `filter()` applies — including the configured coil filter (`filtering.coil_filter`, chi2 by default) with the same per-coil sigma, DAQ era and acceptance thresholds — so the count it stops on is the count marked `selected`. On the parallel launchers the workers pool their count through a shared ledger and stop cooperatively once the run's one target is met |
 | `generation.max_total_draws` | `None` | Attempt cap for the above (default `5 × n_inspec_target`, never below `n_equils`; an explicit value is a hard ceiling even below `n_equils`). Reaching it warns and returns what was achieved |
 | `generation.seed` | `None` | The run's one seed. Set it and the ensemble is **bitwise** reproducible |
-| `generation.l_i_tolerance` | `0.05` | l_i acceptance band, as a fraction of target |
+| `generation.l_i_tolerance` | `None` | **Opt-in** fractional l_i band (`0.05` = ±5 %). Off by default since 2026-10-14 (owner decision: a draw is in spec on the magnetics alone; it was `0.05` on every engine draw). `l_i_sigma` / `beta_p_target` + `beta_p_sigma` are the measurement-derived bands — see [the in-spec rule](docs/workflows.md#the-in-spec-rule) |
 | `generation.scan_key` | `0` | Label for this bouquet within the archive |
 | `generation.jbs_delta_mode` | `False` | Opt-in differential bootstrap: per-draw spike as baseline + raw solver delta against a cached σ=0 reference |
 | `generation.kinetic_source` | `"fuse"` | IMAS path; `"ida_hybrid"` takes ne/Te/Ti/ω_tor from IDA fits while keeping FUSE currents and equilibrium |

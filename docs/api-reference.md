@@ -36,7 +36,7 @@ Docstrings in the source are authoritative; this page is a map.
 | `ScanView` / `DrawView` / `BaselineView` | The view objects those return (`ScanView.baseline_view()` exposes the baseline through the draw accessors) |
 | `draw_band()` | Standard across-draw band (median, p16/p84, min/max) for a quantity computed per draw by the caller's evaluator; counts, dropped reasons, floors, pole gate, baseline overlay and provenance — see [workflows.md](workflows.md#error-bars-from-an-archive) |
 | `draw_bands()` | `draw_band` over a requested list of `(archive, scan_key)`; absent keys become `no_archive` records, refused slices `refused`, keys where no draw reaches the statistic (e.g. every draw rejected) `empty` records with an `empty_reason` -- never a silent gap |
-| `draw_scalars()` | `draw_band` for bouquet's own scalars: q0, q95, rho(q=m/n), l_i (archive estimator), beta_N, <P> |
+| `draw_scalars()` | `draw_band` for bouquet's own scalars: q0, q95, rho(q=m/n), l_i (archive estimator), beta_N, <P>, beta_p, Lambda = beta_p + l_i(3)/2 (reported, never a filter) |
 | `BandRecord` / `BandTable` | The per-(key, quantity) record and its container (`to_dataframe()`, `to_csv()`) |
 | `plot_band()` | Median + p16–p84 band across keys; hollow markers below the floor, regular fraction where gated, baseline dashed |
 | `write_provenance()` / `load_config()` | Stamp / recover the exact `BouquetConfig` stored in an archive |
@@ -48,6 +48,7 @@ Docstrings in the source are authoritative; this page is a map.
 | `discover_scan_keys()` / `count_equilibria()` / `list_equilibrium_indices()` | Archive introspection |
 | `select_indices()` / `read_filter_flags()` | Filter-flag queries |
 | `filter_coil_currents()` / `filter_boundaries()` / `export_filtered()` | Post-generation selection of the machine-realizable subset |
+| `refilter_inspec()` / `InspecBands` | Re-judge an archive's opt-in in-spec bands (l_i, beta_p, q0 gate) from its stored numbers; default `bands=None` = the magnetics rule (owner decision 2026-10-14; see [workflows.md](workflows.md#the-in-spec-rule)) |
 | `bouquet.filtering.passes_all_filters()` (+ `passes_coil_spec` / `passes_coil_chi2` / `passes_boundary_spec` / `boundary_deviation_mm`) | The selection predicate itself, on raw numbers rather than an archive. Shared with `generate_bouquet`'s [until-N](workflows.md#until-n-in-spec-draws) stopping rule so the two agree by construction. Module-level, not re-exported at the package root |
 | `bouquet.filtering.make_coil_predicate()` (+ `coil_spec.resolve_coil_acceptance()`) | Builds the **configured** coil verdict (chi2 or legacy, with the loud `CoilSigmaUnavailable` fallback) once per run from the same `FilterConfig` fields `Bouquet.filter()` cuts on — the reason the until-N count and the postprocess selection are the same set |
 

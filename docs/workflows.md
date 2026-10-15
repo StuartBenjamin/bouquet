@@ -12,6 +12,7 @@ controls it. See [`../README.md`](../README.md) for the short version and
 - [Configuration reference](#configuration-reference)
 - [Experimental features and their validation status](#experimental-features-and-their-validation-status)
 - [Graduated features and their known limitations](#graduated-features-and-their-known-limitations)
+- [The in-spec rule](#the-in-spec-rule)
 - [until-N in-spec draws](#until-n-in-spec-draws)
 - [Workflow presets and the guard](#workflow-presets-and-the-guard)
 - [Reading an archive back](#reading-an-archive-back)
@@ -268,12 +269,15 @@ as an enormous sigma.
 | Knob | Default | Meaning |
 |---|---|---|
 | `n_equils` | `20` | Draws to attempt — or, with `n_inspec_target` set, the initial allocation |
-| `n_inspec_target` | `None` | Draw **until N draws pass both filters** rather than exactly `n_equils`. See [until-N](#until-n-in-spec-draws) below |
+| `n_inspec_target` | `None` | Draw **until N draws are in spec** ([the in-spec rule](#the-in-spec-rule): by default the coil test and the boundary cut) rather than exactly `n_equils`. See [until-N](#until-n-in-spec-draws) below |
 | `max_total_draws` | `None` | Attempt cap for `n_inspec_target` (default `5 ×` the target, never below `n_equils`). Hitting it is a loud, non-fatal outcome |
 | `seed` | `None` | The run's one RNG seed. Consumed once into a single `numpy.random.Generator` threaded into every draw (GPR kinetic/aux/j_φ, the per-draw `scale_jBS`, the per-draw l_i target), so the same seed + inputs + solver gives a **bitwise-identical** archive on one machine (across machines the draws agree to ~1e-9, not bitwise -- LAPACK/BLAS). `None` = OS entropy |
 | `scan_key` | `0` | Label for this bouquet within the archive (`scan/<key>/`) — a time in ms, a beta value, … |
-| `l_i_tolerance` | `0.05` | l_i acceptance band, as a **fraction** of target |
-| `constrain_sawteeth` | `False` | Gate draws on q0 |
+| `l_i_tolerance` | `None` | **Opt-in** fractional l_i(3) band of the in-spec rule, `\|l_i - l_i*\| <= l_i_tolerance * l_i*` around the reconstruction's l_i (a **fraction**: `0.05` = ±5 %). `None` = no l_i band (**default since 2026-10-14**, owner decision; it was `0.05` and applied to every engine draw). The legacy routes also *construct* their draws with it (rejection sampling inside the draw, not a filter): unset, they use the old `0.05`. See [the in-spec rule](#the-in-spec-rule) |
+| `l_i_sigma` | `None` | **Opt-in** l_i(3) band from a **stated measurement uncertainty** (absolute 1σ of an MSE / diamagnetic fit): `\|l_i - l_i*\| <= inspec_band_nsigma * l_i_sigma`. Exclusive with `l_i_tolerance`; unified engine only (refused on the legacy routes at `generate()`; `refilter_inspec` applies it to any archive afterwards) |
+| `beta_p_target` / `beta_p_sigma` | `None` / `None` | **Opt-in** β_p band for a diamagnetic measurement (both or neither): `\|β_p - beta_p_target\| <= inspec_band_nsigma * beta_p_sigma`, β_p of the full-pressure frame (see [Λ](physics-notes.md#lambda--beta_p--l_i2-reported-never-filtered)). Unified engine only, as `l_i_sigma` |
+| `inspec_band_nsigma` | `2.0` | Half-width of a σ band (`l_i_sigma`, `beta_p_sigma`) in σ |
+| `constrain_sawteeth` | `False` | Gate draws on q0 ≥ 1 (unified engine: a post-hoc gate of the in-spec rule, `+q0` in its name; legacy routes: inside the draw construction) |
 | `recalculate_j_BS` | `True` | Recompute the Sauter bootstrap per draw (vs. reusing the baseline's) |
 | `single_profile_jphi` | `False` | Legacy path: perturb the TOTAL `j_phi` as one profile (no inductive / bootstrap split; no per-draw Sauter call). `jphi_scalar_sigma` then applies to the total, a larger absolute perturbation -- re-tune it. Needs `jbs_self_consistent=False` (refused otherwise); the unified engine refuses it |
 | `jBS_scale_range` | `(0.99, 1.01)` | Legacy draws: the per-draw multiplicative spread of the bootstrap (uniform in the range; default `None` -> `(0.99, 1.01)` on 2026-06-04). The baseline's multiplier (`bs_scale` / `s_bs(ψ)`) is applied after SWB on SWB draws and re-centres this range on loop draws -- see [physics-notes.md](physics-notes.md) ("The bootstrap multiplier") |
@@ -433,7 +437,8 @@ anisotropic fast-pressure reduction applied before the isotropic GS solve.
 > for both conventions.
 
 > **Tolerances are fractions, not percentages.** `l_i_tolerance=0.05` means
-> 5%. This applies to every tolerance argument in the package.
+> 5%. This applies to every tolerance argument in the package (`l_i_sigma`
+> and `beta_p_sigma` are absolute 1σ values, not fractions).
 
 > **`p_thresh`** (the volume-averaged pressure acceptance band, default `0.05`,
 > calibrated to a realistic `<P>` measurement uncertainty) is currently a
@@ -572,13 +577,77 @@ Known limitations (open validation items, kept):
 
 <!-- graduated-features:end -->
 
+## The in-spec rule
+
+**A draw is in spec when it passes the magnetics: the configured coil test
+and the boundary cut** (and was not rejected before it was archived). Owner
+decision, 2026-10-14. The external magnetics constrain I_p, the boundary and
+the Shafranov combination β_p + l_i/2; bouquet applies that constraint exactly
+through the free-boundary draw solve (the coils carry the boundary), the coil
+χ² test (χ²/ν and the worst-coil |z| against the device's coil uncertainties)
+and the boundary-deviation cut (DIII-D: 8.5 mm). l_i(3) on its own is an
+equilibrium *inference*, not a magnetics measurement, so the l_i band that was
+applied to every unified-engine draw until then (`l_i_tolerance = 0.05`)
+conditioned every ensemble on information the magnetics do not provide -- and
+it was the binding filter on the synthetic ensembles. It is now opt-in.
+
+| filter | default | per-draw flag | applied by |
+|---|---|---|---|
+| coil χ² test (`filtering.coil_filter="chi2"`; the legacy ±% band on request) | **on** | `passes_coil_filter` | `filter()`; the until-N loop in flight |
+| boundary-deviation cut (`filtering.rms_max_mm="auto"`) | **on** | `passes_boundary_filter` | `filter()`; the until-N loop in flight |
+| l_i band (`l_i_tolerance` fraction, or `l_i_sigma` × `inspec_band_nsigma`) | off | `passes_l_i_band` | the engine's post-hoc stage; `refilter_inspec` |
+| β_p band (`beta_p_target`, `beta_p_sigma` × `inspec_band_nsigma`) | off | `passes_beta_p_band` | the engine's post-hoc stage; `refilter_inspec` |
+| q0 ≥ 1 gate (`constrain_sawteeth`) | off | `passes_q0_gate` | the engine's post-hoc stage; `refilter_inspec` (engine draws) |
+
+`passes_draw_band` is the AND of the opt-in bands that are on (True when none
+is: every engine draw carries it), and `selected` = coil AND boundary AND
+`passes_draw_band`. A banded quantity that is missing or non-finite fails its
+band; with the band off it is not judged. **Use an opt-in band only when the
+source states the uncertainty** (an MSE-constrained fit's l_i error, a
+diamagnetic loop's β_p error): the band then conditions the ensemble on a
+measurement, not on the tolerance.
+
+**Recorded.** The scan group carries `inspec_rule` (`"magnetics"`,
+`"magnetics+li"`, `"magnetics+beta_p"`, `"magnetics+li+beta_p"`, with `"+q0"`
+when the gate is on), `inspec_bands_json` (the band settings and the route;
+on the legacy/swb routes also the draw-construction tolerance, which is not a
+filter) and `lambda_definition`. Every draw carries `beta_p` and `Lambda`
+(β_p + l_i(3)/2, [physics-notes](physics-notes.md#lambda--beta_p--l_i2-reported-never-filtered));
+reported in `draw_scalars`, `ScanView.spread()` and `read_filter_flags`, never
+a filter. The until-N target counts in-spec draws by the rule in force.
+`merge_archives` refuses shards judged under different rules and records the
+one rule in the merged scan and its manifest (`inspec_rule`, `inspec_bands`).
+
+**Re-filtering.** `bq.refilter_inspec(path, bands=None, scan_key=None)`
+re-judges the opt-in bands from the stored numbers (an engine draw's own
+post-hoc record, else the archived `l_i(3)` / `beta_p`); no physics is re-run.
+`Bouquet.filter()` does it automatically when the archive's stamped rule is
+missing (an archive made before the rule, whose engine draws carry the old
+unconditional 5 % band) or differs from the config's, and says so.
+
+```python
+bq.refilter_inspec("old_run.h5")                         # the magnetics rule
+bq.refilter_inspec("run.h5", bq.InspecBands(l_i_sigma=0.03))   # a stated 1-sigma
+```
+
+**Stored configs.** A config stored before the rule (no
+`generation.inspec_band_nsigma`) with `l_i_tolerance` at the old default
+`0.05` loads with the band **off** and a one-line note; any other stored value
+was explicit and keeps its band; a config without the field loads loud, band
+off. A config written since keeps exactly what it says.
+
+**What moves.** Yields rise wherever the l_i band was binding, and every
+reported l_i band becomes a result of the ensemble rather than a reflection of
+the 5 % tolerance. The coil and boundary thresholds are unchanged.
+
 ## until-N in-spec draws
 
 By default a run draws exactly `n_equils` times and you get whatever yield the
 equilibrium gives — 20 draws might leave 12 selected on a stiff case and 19 on
 an easy one, so ensembles are not comparable in size across shots. Setting
 `generation.n_inspec_target` inverts that: the loop keeps drawing until **N
-draws pass both filters**, then stops.
+draws are in spec** -- by [the in-spec rule](#the-in-spec-rule) in force: the
+coil test and the boundary cut, plus any opt-in band -- then stops.
 
 ```python
 b.generation.n_equils = 20            # initial allocation, not the total
@@ -734,7 +803,7 @@ band a profile as one named quantity per point); the statistic is the median wit
 
 ```python
 ar = bq.BouquetArchive("run.h5"); key = ar.scan_keys[0]
-sc = bq.draw_scalars(ar, key)             # q0, q95, rho(q=2/1), rho(q=3/1), l_i, beta_N, <P>
+sc = bq.draw_scalars(ar, key)             # q0, q95, rho(q=2/1), rho(q=3/1), l_i, beta_N, <P>, beta_p, Lambda
 def my_dprime(view):                      # user code; bouquet never sees the external code
     res = run_my_code(view.eqdsk_bytes)   # same accessor on draws and on the baseline
     return {"dp21": {"value": res.dp21, "status": res.status, "regular": res.has_q2}}
@@ -749,7 +818,11 @@ bq.plot_band(t, "dp21"); t.to_csv("dp21_bands.csv")
 counts at each stage (`n_requested` … `n_used`), every dropped draw with its
 reason (`not_selected`, `user:<reason>`, `status:<code>`, `irregular:<label>`,
 `non_finite`), and a `provenance` block (filters, thresholds, versions,
-limitations). Below `min_n=15` a record is flagged `below_floor` (shown hollow);
+limitations; `inspec_rule` / `inspec_bands` name [the in-spec rule](#the-in-spec-rule)
+the population was selected under -- an archive that predates the record
+gets a limitation saying its engine-draw selection includes the old 5 % l_i
+band, and a rule with an opt-in band one saying that a band of the banded
+quantity reflects the band's width). Below `min_n=15` a record is flagged `below_floor` (shown hollow);
 below `hard_min=5` p16/p84 are NaN. If half or fewer of the ok draws are regular
 the record is `gated` (`show=False`); there is no magnitude cut. Whenever any ok
 draw is irregular the band is conditional on the regular outcome: the record
