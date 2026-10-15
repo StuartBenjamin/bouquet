@@ -5924,6 +5924,22 @@ def generate_bouquet(
     # coil bounds (built below only when those bounds are installed)
     _hard_sat_guard = None
 
+    # ---- the reconstruction's delivered state, restored FIRST (review F6)
+    # The q0 sawtooth check, the strong-reg / drift reference coils
+    # (_initial_coils) and the Ip every draw is aligned to (_recon_Ip) are
+    # read from the solver state below.  A draw method that keeps the
+    # reconstruction's delivered equilibrium (the unified engine) puts the
+    # solver back on it HERE, before any of the three is read: on entry the
+    # solver holds whatever state the session left it in, which after an
+    # earlier generate() (a second scan_key, verify_sigma0_consistency) is
+    # that run's last archived draw, not the reconstruction.  The legacy
+    # method returns None and leaves the state alone (the caller has just
+    # returned from reconstruct_equilibrium).  The baseline re-solve below
+    # restores the same snapshot again before it solves (idempotent).
+    _entry_start = _m.baseline_resolve_start(mygs)
+    if _entry_start is not None:
+        print(f"  [entry] {_entry_start}")
+
     # Sawtooth check.  We use mygs.get_q on the current (recon) state
     # rather than re-solving here -- a fresh forward solve at
     # abs(eqdsk.Ip) shifts the equilibrium slightly off the recon's
@@ -6122,6 +6138,27 @@ def generate_bouquet(
                     _bl_reverted = ("solver state NOT restored: this object "
                                     "exposes no copy_eq/replace_eq pair")
                 _count_masked_anchor_failure("jphi_baseline", _bl_exc)
+                if (_bl_start is not None
+                        and getattr(_m, "delivered_eq", None) is None):
+                    # A method start with NO snapshot of the reconstruction
+                    # on record (review F6): the only state to fall back to
+                    # is the one the solver held on entry, which after an
+                    # earlier generate() in this session is that run's last
+                    # draw -- and the strong-reg target, the drift reference
+                    # and the Ip of every draw would be taken from it while
+                    # the line below says "recon's".  Refuse instead.
+                    raise RuntimeError(
+                        f"generate_bouquet: the baseline re-solve failed "
+                        f"({type(_bl_exc).__name__}: {_bl_exc}) and the draw "
+                        f"method {getattr(_m, 'name', type(_m).__name__)!r} "
+                        "holds no snapshot of the reconstruction's delivered "
+                        "equilibrium, so the only fallback is the solver "
+                        "state on entry, which need not be the "
+                        "reconstruction (after an earlier generate() in this "
+                        "session it is that run's last draw). Refusing to "
+                        "anchor the draws to it; re-run prepare_baseline() "
+                        "so the delivered state is on record, then "
+                        "generate() again.") from _bl_exc
                 print(f"  [jphi-baseline] solve failed ({_bl_exc}); REVERTING "
                       f"to the recon (inverse) reference [{_bl_reverted}] -- "
                       f"this run's "

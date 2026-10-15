@@ -103,6 +103,12 @@ route. Closes #84.
   archived draws with an axis (owner decision 2026-10-15; it was issued from
   6): on unimodal samples the rule says "bimodal" 20-37 % of the time at
   n = 6-12. Below 24 the scan is stamped not testable, with the count.
+- `generate_bouquet` restores the reconstruction's delivered equilibrium
+  (unified engine) BEFORE it reads the q0 sawtooth check, the reference coil
+  currents and the Ip: a second `generate()` in one session no longer takes
+  them from the previous run's last draw. A failed warm baseline re-solve with
+  no delivered snapshot on record is refused (RuntimeError) instead of
+  falling back to the entry state.
 
 ## Unreleased — the golden recipe runs the synthetic fixtures at the current defaults; a new IDS-route golden (owner decisions 2026-10-15)
 

@@ -389,3 +389,106 @@ def test_the_engine_resolve_without_a_snapshot_starts_warm_on_entry():
     assert not stub.init_psi_called
     assert stub.replaced_with is None
     assert stub.state == "baseline-converged"
+
+
+# ---------------------------------------------------------------------------
+#  review F6: the entry reads come from the RESTORED reconstruction state
+# ---------------------------------------------------------------------------
+def _extract_entry_block():
+    """The shipped entry section of generate_bouquet: the delivered-state
+    restore, the q0 sawtooth check and the reference coil / Ip capture (up
+    to the jphi-linterp baseline solve)."""
+    import textwrap
+    from bouquet.TokaMaker_interface import generate_bouquet
+
+    src = inspect.getsource(generate_bouquet)
+    m = re.search(r"\n(?P<body>[ ]*# ---- the reconstruction's delivered "
+                  r"state, restored FIRST.*?)\n[ ]*# ---- Unperturbed "
+                  r"jphi-linterp baseline solve", src, re.S)
+    assert m, "could not locate generate_bouquet's entry section"
+    return textwrap.dedent(m.group("body"))
+
+
+class _SessionStub:
+    """A solver left on the previous generate()'s last draw: other coils, Ip
+    and a q0 on the other side of 1 than the reconstruction's."""
+
+    STATES = {
+        "previous-draw": dict(coils={"F1A": 5.0e3, "F2A": -2.0e3}, Ip=1.4e6,
+                              q0=0.93),
+        "recon-delivered": dict(coils={"F1A": 1.0e3, "F2A": -1.0e3},
+                                Ip=1.0e6, q0=1.04),
+    }
+
+    def __init__(self):
+        self.state = "previous-draw"
+        self.reads = []
+
+    def replace_eq(self, source_eq=None):
+        self.state = source_eq[2]
+
+    def copy_eq(self):
+        return ("snap", 0, self.state)
+
+    def get_q(self, npsi=None, psi_pad=None):
+        import numpy as np
+        self.reads.append(("q", self.state))
+        q = np.full(int(npsi), 2.0)
+        q[0] = self.STATES[self.state]["q0"]
+        return None, q, None, None, None, None
+
+    def get_coil_currents(self):
+        self.reads.append(("coils", self.state))
+        return dict(self.STATES[self.state]["coils"]), None
+
+    def get_globals(self):
+        self.reads.append(("Ip", self.state))
+        return (self.STATES[self.state]["Ip"],)
+
+
+def _run_entry(stub, method, constrain_sawteeth=True):
+    import numpy as np
+    ns = dict(mygs=stub, np=np, psi_N=np.linspace(0.0, 1.0, 33),
+              psi_pad=1e-3, _m=method, coil_drift=0.01,
+              constrain_sawteeth=constrain_sawteeth)
+    exec(compile(_extract_entry_block(), "<generate_bouquet entry>", "exec"),
+         ns)
+    return ns
+
+
+def test_a_second_generate_reads_the_reconstruction_not_the_last_draw():
+    """One session, a second generate(): the solver arrives on the previous
+    run's last draw.  The q0 gate, the reference coils and the Ip must all
+    be read from the reconstruction's delivered state, restored first."""
+    stub = _SessionStub()
+    delivered = ("snap", 0, "recon-delivered")
+    ns = _run_entry(stub, _EngineStart(delivered))
+    rec = _SessionStub.STATES["recon-delivered"]
+    assert ns["_initial_coils"] == rec["coils"], (
+        "the strong-reg target / drift reference was read from the previous "
+        "draw, not from the reconstruction")
+    assert ns["_recon_Ip"] == rec["Ip"]
+    # the reconstruction's q0 >= 1: the gate stays on (the previous draw's
+    # q0 < 1 would have switched it off)
+    assert ns["constrain_sawteeth"] is True
+    assert stub.reads and all(st == "recon-delivered" for _, st in stub.reads)
+
+
+def test_the_legacy_method_reads_the_state_it_is_handed():
+    from bouquet.draw_methods import DrawMethod
+    stub = _SessionStub()
+    stub.state = "recon-delivered"
+    ns = _run_entry(stub, DrawMethod())
+    assert ns["_initial_coils"] == _SessionStub.STATES["recon-delivered"][
+        "coils"]
+    assert stub.state == "recon-delivered"
+
+
+def test_a_failed_engine_resolve_without_a_snapshot_is_refused():
+    """No delivered snapshot on record and the warm re-solve fails: the only
+    fallback is the entry state (possibly the previous run's last draw), so
+    generate_bouquet refuses instead of anchoring the draws to it."""
+    stub = _JphiBaselineStub(fail=True)
+    with pytest.raises(RuntimeError, match="no snapshot of the "
+                       "reconstruction's delivered"):
+        _run_block(stub, method=_EngineStart(None))
