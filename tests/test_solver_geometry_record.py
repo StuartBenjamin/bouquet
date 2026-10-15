@@ -36,8 +36,15 @@ def test_the_case_geometry_record_names_its_origins():
     assert rec["solver_F0"] == rec["F0_source"] == pytest.approx(_gfile_F0(), rel=0, abs=0)
     assert rec["F0_origin"].startswith("source: g-file")
     assert rec["F0_rule"] == F0_RULE
-    assert rec["isoflux_origin"] == "source boundary" and rec["isoflux_n"] > 10
-    assert rec["isoflux_weights"]["min"] == rec["isoflux_weights"]["max"] == 500.0
+    # the unified engine's standard boundary constraint (#84): the source
+    # boundary resampled to N_ISOFLUX points, weights per unit length summing
+    # to ISOFLUX_WEIGHT_TOTAL (the legacy route: the source boundary at 500
+    # per point, tests/test_isoflux_per_length.py)
+    from bouquet.solver_geometry import ISOFLUX_WEIGHT_TOTAL, N_ISOFLUX
+    assert rec["isoflux_origin"].startswith("source boundary, resampled")
+    assert rec["isoflux_n"] == N_ISOFLUX
+    assert rec["isoflux_weight_total"] == pytest.approx(ISOFLUX_WEIGHT_TOTAL, rel=1e-12)
+    assert rec["isoflux_source_n"] > 10 and rec["boundary_length_m"] > 0
     assert rec["saddle_n"] == 0 and rec["saddle_origin"] is None
 
     sc2 = copy.deepcopy(sc)

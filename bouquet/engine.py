@@ -3031,7 +3031,7 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
         ne=c.kinetics["ne"], te=c.kinetics["te"], ni=c.kinetics["ni"],
         ti=c.kinetics["ti"], Zeff=c.kinetics["zeff"],
         isoflux_pts=np.asarray(iso_pts, float).copy(),
-        weights=np.asarray(iso_w, float).copy(),
+        weights=None if iso_w is None else np.asarray(iso_w, float).copy(),
         psi_lcfs_val=float(mygs.psi_bounds[0]),
         j_inductive_fit=j_ind.copy(), j_phi_fit=A.copy(),
         j_BS_used=j_BS.copy(), psi=mygs.get_psi(False),
@@ -3581,10 +3581,12 @@ def prepare_engine_baseline(bq):
     """``Bouquet.prepare_baseline()`` under ``reconstruction_engine=
     "unified"``, for both input types.
 
-    Sets up the solver exactly as the legacy path of the same input does
-    (g-file: isoflux on the g-file boundary at weight 200 and ``init_psi``
-    from its LCFS shape; IDS: the slice's boundary re-pointed and
-    ``init_psi`` from its shape), runs :func:`reconstruct` and returns the
+    Sets up the solver: both input types solve under the solver geometry's
+    standard boundary constraint (#84: the source boundary resampled to
+    ``solver_geometry.N_ISOFLUX`` points by arc length, weights per unit
+    length summing to ``solver_geometry.ISOFLUX_WEIGHT_TOTAL``; a
+    ``SolverConfig.isoflux_pts`` set as given), ``init_psi`` from the
+    boundary's shape (g-file: its LCFS geometry), runs :func:`reconstruct` and returns the
     :class:`~bouquet.baseline.Baseline` the rest of the package consumes,
     with ``Baseline.engine`` carrying the full engine record.  A failure
     leaves no baseline (the half-built one is on
@@ -3634,24 +3636,28 @@ def prepare_engine_baseline(bq):
                 ad = GFileAdapter(src, cfg)
                 c0 = ad.read()
                 psi_pad = float(src.psi_pad)
-                iso_pts = np.asarray(c0.boundary, dtype=float)
-                iso_w = np.ones(len(iso_pts)) * 200.0
-                mygs.set_isoflux(iso_pts, weights=iso_w)
                 # the isoflux this reconstruction is pointed at, which every
                 # engine draw's homotopy holds (GenerateEngineDraws.
-                # homotopy_isoflux): the g-file route's own pattern, installed
-                # over the solver geometry's reset isoflux
+                # homotopy_isoflux): the solver geometry's standard set (#84;
+                # the g-file boundary resampled, weights per unit length),
+                # the very set the reset installed -- installed again here
+                # (the same points and weights) so the route does not depend
+                # on the reset having run.  Before #84 this route installed
+                # its own set, the g-file boundary at 200 per point.
+                recon_iso = _geometry_isoflux(bq._geom)
+                if recon_iso is None:
+                    raise ValueError(
+                        "the engine's g-file route found no isoflux set on the "
+                        "solver geometry: point_solver() (prepare_baseline) "
+                        "first")
+                iso_pts, iso_w = recon_iso["pts"], recon_iso["w"]
+                mygs.set_isoflux(iso_pts, weights=iso_w)
                 _geo0 = ad.eqdsk.geometry
 
                 def cold_start(gs, _g=_geo0):
                     # the g-file route's own start (below)
                     gs.init_psi(_g["R"][-1], _g["Z"][-1], _g["a"][-1],
                                 _g["kappa"][-1], _g["delta"][-1])
-                recon_iso = dict(
-                    pts=iso_pts.copy(), w=iso_w.copy(),
-                    origin=("engine g-file route: the contract's g-file "
-                            "boundary at weight 200 (installed over the "
-                            "solver geometry's reset isoflux)"))
                 geo = ad.eqdsk.geometry
                 mygs.init_psi(geo["R"][-1], geo["Z"][-1], geo["a"][-1],
                               geo["kappa"][-1], geo["delta"][-1])

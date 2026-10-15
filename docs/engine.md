@@ -110,7 +110,7 @@ the toy and a TokaMaker stand-in over it), `tests/test_one_conversion.py`
 | pressure | thermal + impurity + fast (fixed) | thermal + impurity + fast, **no `p_diff`** |
 | inductive (parallel) | `<j.B>_in = F p' + F'<B^2>/mu0` on the g-file's own traced surfaces (identity I0), minus Redl `<j.B>` on the anchor, minus the fixed parts; smoothed with a verbatim copy of `fit_inductive_profile`'s basis (spline + PCHIP, zero edge anchor, ≥ 0), **no amplitude search** | **the parallel residual by definition** (owner decision, 2026-10-02): `|B0| (j_total − j_bootstrap − Σ driven)` (IMAS `<j.B>/B0`), every driven entry the one held fixed below. The source's `j_ohmic` is a **cross-check**, not a choice: it is compared with the residual and the net (fraction of the total current) and rms (fraction of rms `j_total`) differences are stamped in `provenance["inductive_consistency"]` (action `"residual_by_definition"`; `"unchecked"` when the source has no `j_ohmic`), with no threshold and no warning. A source without `j_total` or `j_bootstrap` is refused (`inductive="j_ohmic"` uses its `j_ohmic` explicitly; there is no silent fallback). Evidence: on self-consistent sources the residual and `j_ohmic` are indistinguishable (`|Δl_i| ≤ 1.8e-3`); on sources whose own split is locally inconsistent the residual is closer to the source's `<j_phi>`. Explicit options (`IdsAdapter(inductive=...)`, passed by the engine from `GenerationConfig.engine_ids_inductive`, default `"residual"`): `"j_ohmic"` takes the source's, warning when the net mismatch exceeds `IdsAdapter(inductive_tol=0.02)` (2 % of the total current, owner-set); `"auto"` takes `j_ohmic` unless it is absent or misses by more than that tolerance, then the residual with a warning. Nothing in the source is altered |
 | fixed driven (parallel) | user `j_NBI` / `j_RF` (toroidal inputs), converted with the anchor's `F<1/R>/<B^2>` | the **driven** core_sources entries by their IMAS identifier (the data dictionary's `core_sources.source[:].identifier` enumeration; `adapters.IDS_DRIVEN_SOURCE_PARTS`), × `|B0|`, held fixed, by part: nbi (2) → `nbi`; ec / lh / ic (3, 4, 5) → `rf`; fusion (6), runaways (501), a model's sawteeth entry (701) → `other`. **Never added**: ohmic (7) and bootstrap (13) (the core_profiles `j_ohmic` / `j_bootstrap` stand for them), AGGREGATES -- total (1), auxiliary (100), the combinations 101-107, radiation (200), 202, 203 -- which would double-count their constituents, and a bootstrap-like `neoclassical` (401); each such entry carrying a non-zero `j_parallel` is listed in `provenance["ignored_sources"]` with its reason and warned about. An unknown index carrying a non-zero `j_parallel` is held fixed under `other` WITH a warning (`unclassified` in its `driven_sources` entry). The core_sources slice is the one nearest the core_profiles slice read and must lie within half the local core_profiles time-step of it, else the read is refused naming both times (`io.imas.core_sources_slice`, shared with the legacy reader; owner decision 2026-10-06). An entry carrying its own per-slice `time` is read at the core_sources slice time (a model's entry may start later than the IDS time base), not at the list index: its nearest own slice, accepted within half its own local time-step AND within half the local core_profiles step of the core_profiles slice time -- never interpolated; when neither time base has a local step (single-time bases, for the core_sources slice and for an entry alike) the window is 10 us (`io.imas.IMAS_SINGLE_TIME_WINDOW_S`, owner-approved 2026-10-07: a rounding-level mismatch of millisecond-stored times is a match, its dt recorded, and the rules below apply only beyond it); outside that window a driven entry carrying current on its own slices bracketing the time is refused, one carrying none there is off at that time (zero, listed in `provenance["off_sources"]`), and one whose own record begins AFTER the slice time is off before its record (zero, listed with `reason="off_before_record"` and its `first_own_time`, announced once per source file and entry); past its last own time an entry carrying current there is refused; one with a different slice count and no times is refused. Every match (both slice times, dt, the windows, the bracketing own times, the status) is in `provenance["source_time_match"]`. `provenance["driven_sources"]` lists what was added; a user override is converted as on the left. The delivered split reports `other` inside `j_RF`. The legacy reader (`read_imas_baseline`, which the engine runs first) reads every driven entry through this same call with the same arguments, so its refusals, `off_sources` stamps and announcements are the engine's; it records `driven_sources` / `ignored_sources` / `off_sources` / `sawteeth_hold` in `Baseline.source_time_match`. `ImasSource.hold_sawteeth=False` (legacy reader only: the sawteeth entry left in the residual inductive) is refused here |
-| boundary | g-file LCFS | equilibrium boundary outline |
+| boundary | g-file LCFS | equilibrium boundary outline (or `LCFS_geqdsk`) -- both held as the standard per-unit-length isoflux set (#84, below) |
 | rows | Ip (exact); l_i(3) = the reader's `li(2)` key, **hard**, absolute tolerance 1e-3; q0 (optional) | Ip (soft, σ = 0.5 % of Ip); li_3 (soft, σ = 0.04); q0 (optional); MSE chords (optional) |
 | signs | positive frame: `sign(Ip)`, `|F|`; a file whose `<j_phi>` disagrees in sign with its Ip is refused (wrong COCOS) | `source_current_sign`, `|B0|`; `b0_sign` recorded |
 
@@ -715,12 +715,10 @@ the isoflux weight: a branch-selection sensitivity of a bistable
 equilibrium. Since 2026-10 (owner decision) every ENGINE draw's homotopy
 holds the boundary with the RECONSTRUCTION's own isoflux pattern -- the very
 points and weights the reconstruction was pointed at
-(`GenerateEngineDraws.homotopy_isoflux`): on the IDS route the solver
-geometry's (`CaseGeometry.iso_pts` / `iso_w`, the source boundary at
-`solver_geometry.ISOFLUX_WEIGHT`, whose fingerprint the solver geometry record
-carries as `isoflux_sha256`); on the g-file route the pattern that route
-installs itself (the g-file boundary at weight 200; standardising the two
-routes' weights is a separate change). `prepare_baseline()` records it
+(`GenerateEngineDraws.homotopy_isoflux`): on both routes the solver
+geometry's (`CaseGeometry.iso_pts` / `iso_w`, the standard boundary
+constraint below, whose fingerprint the solver geometry record carries as
+`isoflux_sha256`). `prepare_baseline()` records it
 (`Bouquet._engine_run["recon_isoflux"]`, stamped as
 `Baseline.engine["recon_isoflux"]`), and every draw stamps the pattern it
 installed under `engine["homotopy"]["isoflux"]` (`n`, `weight_min` /
@@ -732,6 +730,111 @@ returns `None`). This changes every engine draw's homotopy -- its boundary
 constraint density and weight, hence coil drift, LCFS deviation and yield of
 perturbed draws -- and it fixes the branch selection on the slice above; it
 does not prove robustness on other near-double-null slices.
+
+**The boundary constraint per unit length (#84, owner decision for 1.4.0).**
+Before, the strength with which the boundary was held followed the number of
+isoflux points the source happened to carry: the IDS route held the slice's
+boundary outline at `solver_geometry.ISOFLUX_WEIGHT` = 500 per point (about
+200 points, total ~1e5), the g-file route installed its own set, the g-file
+boundary at 200 per point (100-257 points, total 2e4-5e4), and the draws held
+whichever set their reconstruction had. Since #84 the unified engine holds
+ONE standard set on both routes, for the reconstruction and every draw
+(`solver_geometry.standard_isoflux`, installed by the reset through
+`CaseGeometry`; the g-file route no longer installs a set of its own):
+
+- the source boundary (g-file boundary, IDS `boundary.outline` or the
+  `LCFS_geqdsk` boundary) is resampled to `solver_geometry.N_ISOFLUX` = 256
+  points by arc length (`resample_boundary`): an interpolating cubic spline
+  through the source points, broken at the X-points and at any vertex where
+  the source polygon turns by more than `SPLINE_BREAK_DEG` = 20 deg (so a
+  corner is never smoothed or overshot), spaced uniformly in arc length
+  between X-points; a closed contour (no repeated point), counter-clockwise;
+- the source's X-points are kept as EXACT points (the source's own
+  vertices): a vertex whose turning angle over a window of
+  `XPOINT_WINDOW_FRAC` = 1 % of the boundary length on each side exceeds
+  `XPOINT_TURN_DEG` = 45 deg (the sharpest within two windows), or the vertex
+  a saddle target (`SolverConfig.saddle_targets`) marks within
+  `XPOINT_SADDLE_MATCH_FRAC` = 1 % of the length; the saddle constraints
+  themselves are installed exactly as configured;
+- each point is weighted by the arc length it represents (half the spacing to
+  each neighbour), the weights summing to
+  `solver_geometry.ISOFLUX_WEIGHT_TOTAL` = 2e5 (`per_length_weights`). The
+  constraint strength then depends on the boundary, not on the writer of the
+  file or the mesh: a 100-point and a 10 000-point sampling of one contour
+  give the same total and the same points to micrometres;
+- the set's first point -- the point TokaMaker measures every other isoflux
+  point's flux against -- is the outermost (largest-R) point, never the
+  X-point. With the X-point first, the reversed-Ip near-double-null IDS slice
+  of the ladder stopped at maxits in its reconstruction (also at a total of
+  1e5); with the same points and weights and the outermost point first it
+  converged as before.
+
+A `SolverConfig.isoflux_pts` (with `isoflux_weights`) set is used AS GIVEN,
+never resampled, on every route (also on the engine's g-file route, which
+before #84 replaced it with its own set). The legacy and swb routes are
+unchanged: the reset installs the source boundary as given at
+`ISOFLUX_WEIGHT` per point, the legacy g-file reconstruction its own set at
+200 per point, and the legacy draws re-trace (`DrawMethod.homotopy_isoflux`
+returns `None`). The solver geometry record (`solver_geometry_json`) stamps
+`isoflux_rule`, `isoflux_n`, `isoflux_weight_total`, `isoflux_source_n`,
+`boundary_length_m` and `isoflux_resampling` (method
+`arc_length_resample/1`, N, the X-points kept with how each was found, the
+spline breaks, the source's point count, the resampled and source polygon
+lengths, the first point); every isoflux stamp (the reconstruction's
+`recon_isoflux`, each draw's `engine["homotopy"]["isoflux"]`) carries
+`weight_total`. The legacy draws' iso-update normalised per unit length of
+the traced LCFS (#81) is the same form on that route.
+
+**Every reconstruction and draw moves slightly.** The boundary is held at
+resampled points with a per-length weight, at a total 2x the IDS route's
+former one and 4x-10x the g-file route's, so every unified-engine number
+moves. Measured (one thread each, the same tree before and after #84;
+`l_i(3)` and q at the q row are the engine's delivered measurement; the
+boundary RMS is the solved LCFS's distance from the SOURCE boundary polygon,
+the same measure before and after):
+
+| case | isoflux before -> after | l_i(3) | q (q row) | I_BS (Redl), relative change | boundary RMS [mm] | reconstruction wall [s] |
+|---|---|---|---|---|---|---|
+| g-file + IDA profiles + p-file fast pressure (diverted) | 100 @ 200 (2e4) -> 256, 2e5 | 0.825765 -> 0.825773 | 1.030095 -> 1.030043 | +5.6e-4 | 2.21 -> 1.38 | 90 -> 93 |
+| IDA-hybrid IDS slice (ordinary) | 187 @ 500 (9.4e4) -> 256, 2e5 | 0.722319 -> 0.722335 | 0.987696 -> 0.987791 | +3.4e-4 | 0.82 -> 0.67 | 44 -> 43 |
+| IDA-hybrid IDS slice, reversed Ip, near double null | 197 @ 500 (9.9e4) -> 256, 2e5 | 0.838506 -> 0.838477 | 0.957527 -> 0.957725 | +4.1e-4 | 1.49 -> 1.24 | 53 -> 54 |
+| synthetic dd, 1.2 s (dd kinetics) | 257 @ 500 (1.3e5) -> 256, 2e5 | 0.855757 -> 0.855873 | 1.216590 -> 1.216761 | +3.2e-4 | 0.64 -> 0.53 | 58 -> 58 |
+| synthetic H-mode g-file | 257 @ 200 (5.1e4) -> 256, 2e5 | 0.835025 -> 0.834882 | 1.412861 -> 1.413233 | +8.9e-4 | 1.35 -> 0.83 | 59 -> 66 |
+
+Every reconstruction moved by at most 1.4e-4 in l_i(3) and 3.7e-4 in q --
+under a fifth of the sigma=0 gates (1e-3, 2e-3) -- and held the source
+boundary as well or better. The sigma=0 gates, all with margin:
+
+| case | before: r_j / r_I / dl_i / dq0, VSC drift | after: r_j / r_I / dl_i / dq0, VSC drift |
+|---|---|---|
+| g-file + p-file (diverted) | **FAIL**: 3.2e-4 / **1.06e-4** / -2.3e-4 / +6.6e-4, 0.51 % | PASS: 2.0e-5 / 1.5e-6 / +4.0e-5 / +8.1e-5, 0.087 % |
+| IDS slice (ordinary) | PASS: 3.5e-5 / 2.1e-6 / -2.8e-5 / -2.4e-5, 0.029 % | PASS: 4.0e-5 / 2.6e-6 / -1.7e-5 / +3.7e-6, 0.007 % |
+| IDS slice, reversed Ip, near double null | PASS: 7.6e-5 / 7.7e-6 / +2.0e-4 / -5.1e-6, 0.001 % | PASS: 9.5e-5 / 1.0e-5 / -2.2e-5 / -2.8e-7, 0.008 % |
+| synthetic dd, 1.2 s | PASS: 1.6e-4 / 1.6e-5 / +1.9e-5 / -5.5e-5, 0.003 % | PASS: 1.3e-4 / 1.3e-5 / -6.4e-6 / -5.1e-5, 0.010 % |
+| synthetic H-mode g-file | PASS: 2.6e-5 / 1.1e-6 / -5.8e-5 / -5.5e-5, 0.020 % | PASS: 2.7e-5 / 1.5e-7 / -2.2e-5 / +1.2e-5, 0.023 % |
+
+(gates: r_j 1e-3, r_I 1e-4, l_i 1e-3, q0 2e-3; the archived stage, the binding one.)
+
+The g-file case is the one #84 was decided on: before, the draws' homotopy
+(every coil pinned by the strong regularisation, only the VSC channel free)
+found a different fixed point under the g-file route's weak boundary (axis
+0.3 mm away, the VSC pair +/-0.5 %) and the sigma=0 draw missed its
+archived-stage bootstrap gate; spreading the SAME total per unit length had
+no effect, five to ten times that total held the state. At 2e5 the sigma=0
+draw holds the reconstruction (VSC 0.09 %) and its perturbed draws:
+
+| case | before | after |
+|---|---|---|
+| g-file + p-file, 6 attempts (that arm's in-spec: the coil verdict and an l_i band) | 4 archived, **0 in spec**, 2 rejected (homotopy maxits, post-homotopy loop); VSC 2.5-8.4 %, F <= 0.07 %; 173 s per draw | 6 archived, **4 in spec**, 0 rejected; VSC 0.3-4.6 %, F 0.1-1.5 %; 132 s per draw. The two not in spec miss the l_i band (the same draws as before) |
+| synthetic dd 1.2 s, until 6 in spec | 6 in 12 attempts (6 refused as non-physical kinetics); VSC 0.06-1.3 %, F 0.06-0.7 %; 112 s per draw | 6 in 12 attempts (the same 6 refused; the in-draw homotopy coil verdict flags one of the six, F 3.9 %, which the run's coil test passes); VSC 0.01-0.6 %, F 0.5-3.9 %; 95 s per draw |
+| synthetic H-mode g-file, until 6 in spec | 6 in 7 attempts (one archived out of spec, VSC 2.0 %); VSC 0.2-2.0 %, F 0.02-0.25 %; 128 s per draw | 6 in 6 attempts; VSC 0.1-1.1 %, F 0.3-1.4 %; 106 s per draw |
+
+The stronger boundary moves part of the draws' coil response from the VSC pair
+to the shaping coils: their F-coil drifts grow (still inside the homotopy's
+bound), their VSC drifts shrink.
+
+The goldens are not regenerated here: they are regenerated on the merged
+code (the solver-marked golden tests move with every unified-engine number).
 
 **Is this baseline bistable? (`check_bistability`, on by default.)**
 `GenerationConfig.check_bistability` defaults to `None`, resolved at

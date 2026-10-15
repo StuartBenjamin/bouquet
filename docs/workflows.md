@@ -115,9 +115,35 @@ is a navigational summary of the defaults.
 | `nthreads` | `1` | **Keep at 1.** OpenMP reduction order is non-deterministic and jitters `l_i(1)` by ~1%; parallelise across processes instead |
 | `order` | `3` | FE order |
 | `F0` | `None` | Vacuum `R·B_t`; defaults from the g-file / IDS |
-| `isoflux_pts`, `isoflux_weights` | `None` | Boundary constraint points; default from the source boundary |
+| `isoflux_pts`, `isoflux_weights` | `None` | Boundary (isoflux) constraint points and weights, **used as given** (never resampled). Default (unified engine, #84): the source boundary resampled to `solver_geometry.N_ISOFLUX` = 256 points by arc length, X-points kept exactly, each point weighted by the arc length it represents, the weights summing to `solver_geometry.ISOFLUX_WEIGHT_TOTAL` = 2e5 -- one constant for the reconstruction and the draws, whatever the source's point count. Legacy route: the source boundary as given at `ISOFLUX_WEIGHT` = 500 per point. See [The boundary constraint](#the-boundary-constraint-per-unit-length-84) |
 | `saddle_targets`, `saddle_weights` | `None` | Opt-in X-point pins. Without them a diverted forward solve typically rounds the boundary corner by a few cm |
 | `coil_vsc` | `{"F9A": 1.0, "F9B": -1.0}` | Antisymmetric vertical-stability channel definition |
+
+### The boundary constraint per unit length (#84)
+
+Under the unified engine every reconstruction and every draw holds the
+boundary with ONE standard isoflux set, whatever the source carried: the
+source boundary (g-file boundary, IDS `boundary.outline`, or `LCFS_geqdsk`)
+resampled to `solver_geometry.N_ISOFLUX` = **256** points by arc length
+(closed, counter-clockwise, the X-points kept as exact points), each point
+weighted by the arc length it represents, the weights summing to
+`solver_geometry.ISOFLUX_WEIGHT_TOTAL` = **2e5**. The first point -- the one
+TokaMaker measures the other points' flux against -- is the outermost point,
+never the X-point. Before (1.3.x and the 1.4.0 candidates), the IDS route held
+its ~200 outline points at 500 each and the g-file route its 100-257 boundary
+points at 200 each, so the strength followed the file's point count. **Every
+reconstruction and draw therefore moves slightly**: on the validation cases
+l_i(3) by at most 1.4e-4 and q by at most 3.7e-4 (under a fifth of the sigma=0
+gates), with the source boundary held as well or better; the g-file case whose
+sigma=0 draw failed before now passes, and its perturbed draws are in spec
+(numbers: [engine.md, "The boundary constraint per unit length"](engine.md)).
+`SolverConfig.isoflux_pts` / `isoflux_weights` are used as given (never
+resampled; also on the engine's g-file route); `saddle_targets` are installed
+as configured and mark their X-point for the resampling. The legacy route is
+unchanged (the source boundary at `ISOFLUX_WEIGHT` = 500 per point; its g-file
+reconstruction's own set at 200). The archive's `solver_geometry_json` stamps
+`isoflux_rule`, `isoflux_n`, `isoflux_weight_total`, `isoflux_source_n`,
+`boundary_length_m` and `isoflux_resampling` (method, N, the X-points kept).
 
 ### Ion and Z_eff fields of the sources (`b.source`, PR #56)
 
@@ -1090,7 +1116,8 @@ jitter, no DLSODE hangs) and every BLAS/OpenMP pool at 1 (`bouquet.threads`: the
 | **cases, many jobs** | whole bouquets on a shared-filesystem queue, a fresh process each | many cases, many nodes or jobs | `bouquet.units` |
 
 Never nest them.  One solver serves many baselines: `prepare_baseline` points it at each baseline's
-own F0, boundary and isoflux (`Bouquet.point_solver`), and every reset returns to that baseline's
+own F0, boundary and isoflux (`Bouquet.point_solver`; under the unified engine the isoflux is each
+baseline's own boundary resampled per unit length, #84), and every reset returns to that baseline's
 geometry; the mesh, solve method and thread count are fixed per solver (`Bouquet.set_case` refuses a
 change).
 
