@@ -422,6 +422,13 @@ def _scan_context(ar, key) -> dict:
     ctx["boundary_cut_source"] = str(_src) if _src is not None else UNRECORDED
     if ctx["boundary_cut_source"] == "disabled":
         ctx["rms_max_mm"] = ctx["max_max_mm"] = None
+    # the in-spec rule the band flags were judged under (owner decision
+    # 2026-10-14: the magnetics, plus opt-in bands); UNRECORDED on an archive
+    # that predates the record (its engine draws then carry the old
+    # unconditional l_i band in their selection)
+    _rule = sattrs.get("inspec_rule")
+    ctx["inspec_rule"] = str(_rule) if _rule is not None else UNRECORDED
+    ctx["inspec_bands"] = _json_attr(sattrs.get("inspec_bands_json"))
     # the cut an until-N loop counted its target against (generation stamp)
     _isrc = sattrs.get("inspec_cut_source")
     ctx["inloop_cut_source"] = str(_isrc) if _isrc is not None else UNRECORDED
@@ -793,6 +800,8 @@ def draw_band(archive, scan_key, evaluate, *, quantities=None,
         "inloop_cut_source": ctx["inloop_cut_source"],
         "draw_boundary_rms_mm": draw_rms,
         "generation_mode": ctx["generation_mode"],
+        "inspec_rule": ctx["inspec_rule"],
+        "inspec_bands": ctx["inspec_bands"],
         "pole_rule": pole_rule, "regular_label": meta.get("regular_label"),
         "min_n": int(min_n), "hard_min": int(hard_min),
         "percentiles": list(percentiles), "method": method,
@@ -977,6 +986,7 @@ def _status_record(skey, quantity, status, archive, *, refused_reason=None,
         "boundary_cut_source": UNRECORDED, "draw_boundary_rms_mm": {},
         "inloop_rms_max_mm": UNRECORDED, "inloop_cut_source": UNRECORDED,
         "generation_mode": UNRECORDED,
+        "inspec_rule": UNRECORDED, "inspec_bands": None,
         "pole_rule": settings["pole_rule"],
         "regular_label": (settings["evaluator_meta"] or {}).get("regular_label"),
         "min_n": int(settings["min_n"]), "hard_min": int(settings["hard_min"]),
@@ -1015,6 +1025,18 @@ def _limitations(rec, ctx, meta, selection, require_filter, percentiles):
         lim.append(f"No coil_filter stamp on the scan (require_filter="
                    f"{require_filter}): selection={selection!r} may be every "
                    "stored draw.")
+    if ctx.get("inspec_rule", UNRECORDED) == UNRECORDED and selection != "all":
+        lim.append("The in-spec rule is not recorded on this archive (it "
+                   "predates the 2026-10-14 rule): on unified-engine draws "
+                   "the selection includes the old unconditional l_i band "
+                   "(l_i_tolerance = 0.05), so an l_i band from it reflects "
+                   "that tolerance. Re-filter under the magnetics rule with "
+                   "bouquet.refilter_inspec(path) or Bouquet.filter().")
+    elif str(ctx.get("inspec_rule", "")).startswith("magnetics+") \
+            and selection != "all":
+        lim.append(f"The selection includes opt-in band(s) (inspec_rule="
+                   f"{ctx['inspec_rule']!r}): a band of a banded quantity "
+                   "reflects that band's width as well as the ensemble.")
     if ctx["boundary_cut_source"] == "disabled":
         lim.append("No LCFS boundary cut was applied (boundary_cut_source="
                    "'disabled'): the population is the coil filter's alone.")
@@ -1149,6 +1171,35 @@ def _li_attr_for_scale(scale):
     return "l_i(3)" if str(scale).startswith("iter") else "l_i(1)"
 
 
+def _shafranov_entries(view) -> dict:
+    """``{"beta_p": ..., "Lambda": ...}`` entries of one view (draw or
+    baseline): the stored attrs, else -- for a draw -- formed from its
+    edge-pressure record's full frame and ``l_i(3)``."""
+    from .filtering import (BETA_P_ATTR, LAMBDA_ATTR, _full_beta_p,
+                            shafranov_lambda)
+    a = view.attrs
+    bp, lam = a.get(BETA_P_ATTR), a.get(LAMBDA_ATTR)
+    if (bp is None or lam is None) and not view.is_baseline:
+        from .edge_pressure import EDGE_PRESSURE_ATTR
+        raw = a.get(EDGE_PRESSURE_ATTR)
+        if raw is not None:
+            try:
+                bp = _full_beta_p(json.loads(_decode(raw)))
+            except (TypeError, ValueError):
+                bp = None
+        li3 = a.get("l_i(3)")
+        lam = (shafranov_lambda(bp, li3)
+               if bp is not None and li3 is not None else None)
+    out = {}
+    for name, v in (("beta_p", bp), ("Lambda", lam)):
+        if v is None:
+            out[name] = {"value": _NAN, "status": UNRECORDED
+                         if view.is_baseline else f"no_{name}"}
+        else:
+            out[name] = {"value": float(v), "status": "ok"}
+    return out
+
+
 def _rational_rho(eq, m, n):
     r"""rho_tor at the OUTERMOST q = m/n crossing, or None when absent.
 
@@ -1196,6 +1247,16 @@ def draw_scalars(archive, scan_key=None, *, rational=((2, 1), (3, 1)),
       l_i is NOT used: it is a different estimator path.
     * ``beta_N``, ``<P> [kPa]`` -- from the g-file, exactly as
       :meth:`ScanView.spread` computes them.
+    * ``beta_p`` and ``Lambda`` = beta_p + l_i(3)/2
+      (:data:`bouquet.filtering.LAMBDA_DEFINITION`: beta_p of the
+      full-pressure frame, l_i(3) in TokaMaker's 'iter' normalisation) --
+      the draw's stored ``beta_p`` / ``Lambda`` attrs, else formed from its
+      edge-pressure record's full frame and its ``l_i(3)`` (an archive made
+      before they were stored); the baseline's from its ``_baseline`` attrs
+      (unified engine), else unrecorded.  Lambda is the scalar the
+      magnetics constrain; it is REPORTED here and never filters (for a
+      shaped plasma the coil test enforces the shape-weighted observable
+      exactly).
     """
     if q_source not in ("auto", "geqdsk", "eq_fsa"):
         raise ValueError(f"q_source must be 'auto', 'geqdsk' or 'eq_fsa', got {q_source!r}")
@@ -1272,6 +1333,8 @@ def draw_scalars(archive, scan_key=None, *, rational=((2, 1), (3, 1)),
             p_avg, beta_n = _gfile_pressure_scalars(eq)
             out["beta_N"] = {"value": beta_n, "status": "ok"}
             out["<P> [kPa]"] = {"value": p_avg, "status": "ok"}
+        # ---- beta_p and Lambda (stored; never a filter)
+        out.update(_shafranov_entries(view))
         # ---- l_i (archive attribute, estimator named by the archive)
         if view.is_baseline:
             out["l_i"] = ({"value": float(li_base), "status": "ok"} if li_base is not None
@@ -1284,15 +1347,17 @@ def draw_scalars(archive, scan_key=None, *, rational=((2, 1), (3, 1)),
 
     meta = dict(kw.pop("evaluator_meta", None) or {})
     meta.setdefault("code", "bouquet.draw_scalars")
+    from .filtering import LAMBDA_DEFINITION
     meta.update(l_i_estimator=scale, l_i_estimator_source=scale_src,
                 l_i_attr=li_attr, q_source=q_source,
+                lambda_definition=LAMBDA_DEFINITION,
                 rho_definition="rho_tor = sqrt(int q dpsi_N / int_0^1 q dpsi_N), "
                                "outermost crossing, from the g-file qpsi")
     meta.setdefault("regular_label", "rational surface exists")
     # the fixed quantity list, so a slice with no usable draw still reports
     # every quantity (status="empty") instead of returning nothing
     kw.setdefault("quantities", ["q0", "q95", *labels.values(), "beta_N",
-                                 "<P> [kPa]", "l_i"])
+                                 "<P> [kPa]", "l_i", "beta_p", "Lambda"])
     recs = draw_band(ar, key, _evaluate, evaluator_meta=meta, **kw)
     used = {"draws": sorted(q_used["draws"]), "baseline": q_used["baseline"]}
     by_draw = dict(sorted(q_used["by_draw"].items()))

@@ -49,14 +49,14 @@ from .utils import (
     discover_scan_keys, list_equilibrium_indices, load_baseline_profiles,
     read_eqdsk_from_bytes,
 )
-from .filtering import select_indices, _FILTER_FLAGS
+from .filtering import select_indices, _FILTER_FLAGS, _BAND_FLAGS
 
 
 # Datasets that are not perturbed-profile arrays (excluded from DrawView.profiles).
 _NON_PROFILE = {"config_json", EQDSK_DS, PFILE_DS, IFILE_DS}
 
 # Attr keys surfaced by DrawView.flags (same record shape as read_filter_flags).
-_FLAG_ATTRS = (*_FILTER_FLAGS, "selected")
+_FLAG_ATTRS = (*_FILTER_FLAGS, *_BAND_FLAGS, "selected")
 _FLAG_METRICS = ("max_F_drift_pct", "max_VSC_drift_pct", "in_spec")
 
 
@@ -495,7 +495,11 @@ class ScanView:
 
           * ``l_i(1)`` / ``l_i(3)`` -- internal inductance (stored per draw);
           * ``<P>``   -- volume-averaged pressure :math:`\int p\,dV / V` [kPa];
-          * ``beta_N`` -- normalized beta.
+          * ``beta_N`` -- normalized beta;
+          * ``beta_p`` and ``Lambda`` = beta_p + l_i(3)/2
+            (:data:`bouquet.filtering.LAMBDA_DEFINITION`) -- the stored
+            per-draw values (else formed from the draw's edge-pressure
+            record and ``l_i(3)``); reported, never a filter.
 
         ``<P>`` and ``beta_N`` are read from each draw's g-file geometry (one
         flux-surface trace per draw, so this is O(seconds) for a full family),
@@ -511,13 +515,18 @@ class ScanView:
         per-stage counts and a provenance record.
         """
         draws = self._draws(selection)
-        cols = {"l_i(1)": [], "l_i(3)": [], "<P> [kPa]": [], "beta_N": []}
+        from .stats import _shafranov_entries
+        cols = {"l_i(1)": [], "l_i(3)": [], "<P> [kPa]": [], "beta_N": [],
+                "beta_p": [], "Lambda": []}
         for d in draws:
             cols["l_i(1)"].append(d.li1)
             cols["l_i(3)"].append(d.li3)
             p_avg_kpa, beta_n = _gfile_pressure_scalars(d.equilibrium())
             cols["<P> [kPa]"].append(p_avg_kpa)
             cols["beta_N"].append(beta_n)
+            sh = _shafranov_entries(d)
+            cols["beta_p"].append(sh["beta_p"]["value"])
+            cols["Lambda"].append(sh["Lambda"]["value"])
 
         out = {}
         for name, vals in cols.items():

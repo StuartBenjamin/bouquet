@@ -523,7 +523,10 @@ def test_per_quantity_empty_reasons(tmp_path):
 def test_draw_scalars_reports_every_quantity_on_an_all_rejected_slice(tmp_path):
     p = _make_archive(tmp_path / "a.h5", {"1": _rejected(5)})
     out = bq.draw_scalars(p, "1", rational=((2, 1),))
-    assert list(out) == ["q0", "q95", "rho(q=2/1)", "beta_N", "<P> [kPa]", "l_i"]
+    # beta_p and Lambda = beta_p + l_i(3)/2 are reported since the 2026-10-14
+    # in-spec rule (never filtered on)
+    assert list(out) == ["q0", "q95", "rho(q=2/1)", "beta_N", "<P> [kPa]", "l_i",
+                         "beta_p", "Lambda"]
     assert all(r.status == "empty" and r.empty_reason == "all_draws_rejected"
                and r.n_used == 0 for r in out.values())
 
