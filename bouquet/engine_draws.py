@@ -1243,6 +1243,16 @@ class GenerateEngineDraws(DrawMethod):
         #: stage's and the archived state's verdicts are written into it
         self.sigma0_probe = None
 
+    def note_q0_gate(self, record):
+        """The q0 gate as generate_bouquet applied it: switched off (a
+        sawtoothing reconstruction), the bands this method judges and
+        records (``inspec_bands`` of the baseline record) lose it too."""
+        super().note_q0_gate(record)
+        from .filtering import InspecBands, q0_gate_switched_off
+        if q0_gate_switched_off(record) and self.bands.constrain_sawteeth:
+            self.bands = InspecBands.from_record(dict(
+                self.bands.record(), constrain_sawteeth=False))
+
     # ---- where the baseline re-solve starts ---------------------------
     def baseline_resolve_start(self, mygs):
         """generate_bouquet's baseline re-solve starts from the
@@ -1977,6 +1987,9 @@ class GenerateEngineDraws(DrawMethod):
             solve_maxits=self.maxits,
             homotopy=self.homotopy, l_i_tolerance=self.l_i_tolerance,
             inspec_bands=self.bands.record(),
+            # the q0 gate as generate_bouquet applied it (filtering.
+            # Q0_GATE_RECORD_KEY; None: no generate_bouquet decision)
+            q0_gate=(None if self.q0_gate is None else dict(self.q0_gate)),
             ip_row=("the Ip the delivered composition carries in the exact "
                     "measure on G*"), Ip_target_A=self.ctx.Ip_star,
             reference=self.ctx.ref,

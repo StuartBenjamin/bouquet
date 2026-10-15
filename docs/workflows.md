@@ -663,7 +663,13 @@ measurement, not on the tolerance.
 `"magnetics+li"`, `"magnetics+beta_p"`, `"magnetics+li+beta_p"`, with `"+q0"`
 when the gate is on), `inspec_bands_json` (the band settings and the route;
 on the legacy/swb routes also the draw-construction tolerance, which is not a
-filter) and `lambda_definition`. Every draw carries `beta_p` and `Lambda`
+filter) and `lambda_definition`. The rule stamped is the one APPLIED: when
+`constrain_sawteeth` is set but the reconstruction's q(0) < 1,
+`generate_bouquet` switches the gate off for the scan, the stamp carries no
+`"+q0"`, and `inspec_bands_json["q0_gate"]` (also the baseline engine record's
+`draws.q0_gate`) records `configured`, `applied`, the q0 and the reason;
+`filter()` and a re-filter under the stamped rule then do not apply the gate
+either. Every draw carries `beta_p` and `Lambda`
 (β_p + l_i(3)/2, [physics-notes](physics-notes.md#lambda--beta_p--l_i2-reported-never-filtered));
 reported in `draw_scalars`, `ScanView.spread()` and `read_filter_flags`, never
 a filter. The until-N target counts in-spec draws by the rule in force.

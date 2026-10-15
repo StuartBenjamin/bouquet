@@ -8320,6 +8320,12 @@ class Bouquet(SwbBaseline):
                 print(f"[until-N] target met: {_got}/{_tgt} in-spec draws "
                       f"in {_tries} attempts.")
 
+        # the in-spec rule AS APPLIED: generate_bouquet switches the q0 gate
+        # off for a sawtoothing reconstruction (q0 < 1), and the stamp must
+        # not name a gate no draw was judged under (review F1)
+        from .filtering import apply_q0_gate_record
+        _inspec_bands, _inspec_extra = apply_q0_gate_record(
+            _inspec_bands, _inspec_extra, getattr(_m, "q0_gate", None))
         # The baseline's self-consistent bootstrap record (schema v3 jbs_loop
         # block on _baseline; a frozen baseline carries none).
         from .utils import store_baseline_jbs_loop
@@ -8700,8 +8706,16 @@ class Bouquet(SwbBaseline):
             return {"rule": None, "refiltered": False, "previous_rule": None}
         try:
             prev_rule, prev = read_inspec_rule(header, scan_key=sk)
+            from .filtering import (Q0_GATE_RECORD_KEY, apply_q0_gate_record,
+                                    read_inspec_record)
+            _prev_rec = read_inspec_record(header, scan_key=sk) or {}
         except (OSError, KeyError):
             return {"rule": None, "refiltered": False, "previous_rule": None}
+        # generation switched the configured q0 gate off for this scan (a
+        # sawtoothing reconstruction): the rule it was judged under -- and
+        # the one a re-filter must reproduce -- has no q0 gate
+        bands, extra = apply_q0_gate_record(
+            bands, extra, _prev_rec.get(Q0_GATE_RECORD_KEY))
         if prev is not None and prev.same_as(bands):
             return {"rule": bands.rule(), "refiltered": False,
                     "previous_rule": prev_rule}

@@ -479,3 +479,62 @@ def test_merge_carries_the_rule_and_refuses_a_mix(tmp_path,
                       verbose=False)
     with pytest.raises(RuntimeError, match="different in-spec rules"):
         TED._quiet(merge_archives, paths, out + "_x", scan_key=0)
+
+
+# --------------------------------------------------------------------------
+#  review F1: the stamp is the rule AS APPLIED (the q0 gate switched off)
+# --------------------------------------------------------------------------
+def _sawtoothing_run(tmp_path):
+    """constrain_sawteeth=True on a reconstruction whose q(0) < 1: the toy's
+    q scale is lowered after the reconstruction, so generate_bouquet's entry
+    check sees q0 < 1 and switches the gate off for the scan."""
+    b = TED._bq(tmp_path, n=3)
+    b.config.generation.constrain_sawteeth = True
+    b.setup_solver()
+    TED._quiet(b.prepare_baseline)
+    b.mygs.toy.q_scale *= 0.3
+    TED._quiet(b.generate)
+    return b
+
+
+def test_a_switched_off_q0_gate_is_not_stamped(tmp_path, toy_bouquet_solver):
+    b = _sawtoothing_run(tmp_path)
+    h, sk = b.config.output_header, b.config.generation.scan_key
+    rule, bands = F.read_inspec_rule(h, scan_key=sk)
+    assert rule == "magnetics" and bands.constrain_sawteeth is False
+    rec = F.read_inspec_record(h, scan_key=sk)
+    q0g = rec[F.Q0_GATE_RECORD_KEY]
+    assert q0g["configured"] is True and q0g["applied"] is False
+    assert q0g["q0"] < 1.0 and "q(0)" in q0g["reason"]
+    # the baseline's engine record says the same
+    from bouquet.engine import load_baseline_engine
+    eng = load_baseline_engine(h, scan_key=sk)
+    assert eng["draws"]["inspec_bands"]["constrain_sawteeth"] is False
+    assert eng["draws"]["q0_gate"]["applied"] is False
+    # the draws were judged without the gate: q0 < 1, still in band
+    ph = [ED.read_draw_engine(h, i, scan_key=sk)["post_hoc"]
+          for i in F.list_equilibrium_indices(h, scan_key=sk)]
+    assert ph and all(p["q0"] < 1.0 and p["constrain_sawteeth"] is False
+                      and p["in_band"] for p in ph)
+
+
+def test_a_refilter_under_the_stamped_rule_reproduces_selected(
+        tmp_path, toy_bouquet_solver):
+    b = _sawtoothing_run(tmp_path)
+    h, sk = b.config.output_header, b.config.generation.scan_key
+    sel = TED._quiet(b.filter)
+    # filter() sees the stamp as the rule this config applied: no re-judge
+    assert sel["inspec"]["refiltered"] is False
+    assert sel["inspec"]["rule"] == "magnetics"
+    before = F.select_indices(h, scan_key=sk, selection="selected")
+    assert before                                  # something to reproduce
+    F.refilter_inspec(h, F.read_inspec_rule(h, scan_key=sk)[1], scan_key=sk,
+                      verbose=False)
+    assert F.select_indices(h, scan_key=sk, selection="selected") == before
+    # ... and the switched-off record survives that re-stamp, so a later
+    # filter() still does not apply the gate generation switched off
+    assert F.q0_gate_switched_off(
+        F.read_inspec_record(h, scan_key=sk)[F.Q0_GATE_RECORD_KEY])
+    sel = TED._quiet(b.filter)
+    assert sel["inspec"]["refiltered"] is False
+    assert F.select_indices(h, scan_key=sk, selection="selected") == before

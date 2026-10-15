@@ -5945,11 +5945,14 @@ def generate_bouquet(
     # abs(eqdsk.Ip) shifts the equilibrium slightly off the recon's
     # converged state and ends up confusing the soft-reg lock.  Recon
     # already has a populated q profile.
+    _q0_gate = dict(configured=bool(constrain_sawteeth),
+                    applied=bool(constrain_sawteeth), q0=None, reason=None)
     if constrain_sawteeth:
         try:
             _, q_baseline_check, _, _, _, _ = mygs.get_q(
                 npsi=len(psi_N), psi_pad=psi_pad
             )
+            _q0_gate["q0"] = float(q_baseline_check[0])
             if q_baseline_check[0] < 1.0:
                 print(
                     f"NOTE: Baseline equilibrium has q(0) = {q_baseline_check[0]:.4f} < 1.0 "
@@ -5958,9 +5961,17 @@ def generate_bouquet(
                     f"equilibria are not rejected."
                 )
                 constrain_sawteeth = False
+                _q0_gate["applied"] = False
+                _q0_gate["reason"] = (
+                    f"the reconstruction's q(0) = {_q0_gate['q0']:.4f} < 1 "
+                    "(sawtoothing): every draw would fail the q0 >= 1 gate, "
+                    "so generate_bouquet switched it off for this scan")
         except Exception as _q_exc:
             print(f"WARNING: q-profile check failed ({_q_exc}); "
                   f"leaving constrain_sawteeth as is.")
+    # the gate AS APPLIED, for the scan's in-spec stamp and the baseline
+    # record (review F1: the stamp named a gate this override switched off)
+    _m.note_q0_gate(_q0_gate)
 
     if coil_drift is not None:
         # Capture mygs's current (recon) coil currents -- these are the

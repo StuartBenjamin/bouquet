@@ -109,6 +109,13 @@ route. Closes #84.
   them from the previous run's last draw. A failed warm baseline re-solve with
   no delivered snapshot on record is refused (RuntimeError) instead of
   falling back to the entry state.
+- The scan's in-spec stamp is the rule AS APPLIED: with `constrain_sawteeth`
+  set on a reconstruction whose q(0) < 1, `generate_bouquet` switches the q0
+  gate off, and `inspec_rule`, `inspec_bands_json` (new key `q0_gate`:
+  configured, applied, q0, reason) and the baseline engine record's
+  `inspec_bands` / `q0_gate` now say so (no `"+q0"`). `filter()` and
+  `refilter_inspec` under the stamped rule reproduce `selected` instead of
+  applying the gate afterwards.
 
 ## Unreleased — the golden recipe runs the synthetic fixtures at the current defaults; a new IDS-route golden (owner decisions 2026-10-15)
 

@@ -446,6 +446,14 @@ class _SessionStub:
         return (self.STATES[self.state]["Ip"],)
 
 
+class _EngineEntry(_EngineStart):
+    """The engine start hook plus the q0-gate record of the base method."""
+    from bouquet.draw_methods import DrawMethod as _D
+    note_q0_gate = _D.note_q0_gate
+    q0_gate = None
+    del _D
+
+
 def _run_entry(stub, method, constrain_sawteeth=True):
     import numpy as np
     ns = dict(mygs=stub, np=np, psi_N=np.linspace(0.0, 1.0, 33),
@@ -462,7 +470,8 @@ def test_a_second_generate_reads_the_reconstruction_not_the_last_draw():
     be read from the reconstruction's delivered state, restored first."""
     stub = _SessionStub()
     delivered = ("snap", 0, "recon-delivered")
-    ns = _run_entry(stub, _EngineStart(delivered))
+    m = _EngineEntry(delivered)
+    ns = _run_entry(stub, m)
     rec = _SessionStub.STATES["recon-delivered"]
     assert ns["_initial_coils"] == rec["coils"], (
         "the strong-reg target / drift reference was read from the previous "
@@ -471,6 +480,7 @@ def test_a_second_generate_reads_the_reconstruction_not_the_last_draw():
     # the reconstruction's q0 >= 1: the gate stays on (the previous draw's
     # q0 < 1 would have switched it off)
     assert ns["constrain_sawteeth"] is True
+    assert m.q0_gate["applied"] is True and m.q0_gate["q0"] == rec["q0"]
     assert stub.reads and all(st == "recon-delivered" for _, st in stub.reads)
 
 
