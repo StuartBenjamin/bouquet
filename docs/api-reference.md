@@ -105,7 +105,8 @@ Details: [io-and-plotting.md](io-and-plotting.md).
 | `verify_gpr_statistics()` | Monte Carlo validation of the GPR sampling statistics |
 | `calc_cylindrical_li_proxy()` | Fast cylindrical l_i proxy (no GS solve required) |
 | `new_uncertainty_profiles()` | Build 1-D uncertainty envelopes (power-law or flat+tail) |
-| `synthetic_ida_sigma()` | IDA-shaped fractional sigma envelopes for synthetic studies |
+| `sigma_template()` | Relative 1-sigma radial templates (H-mode flat top / ramp / L-mode) of n_e, T_e, T_i, Z_eff, n_C, n_i; the assumed default envelope |
+| `synthetic_ida_sigma()` | The H-mode flat-top template as a fractional sigma envelope for synthetic studies |
 
 ## Plotting
 
