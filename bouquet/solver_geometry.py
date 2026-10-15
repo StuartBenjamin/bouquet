@@ -57,10 +57,13 @@ ISOFLUX_WEIGHT_TOTAL = 2.0e5
 #: sampling density -- exceeds ``XPOINT_TURN_DEG``; of candidates within two windows of each other
 #: only the sharpest is kept.  An X-point's corner turns the boundary by ~70-90 deg over that window,
 #: a smooth boundary by far less (measured on the synthetic fixtures: X-points 68-84 deg, elsewhere
-#: <= 15 deg away from the corner).  A saddle target (``SolverConfig.saddle_targets``) marks the
-#: source vertex nearest to it as an X-point when that vertex lies within
-#: ``XPOINT_SADDLE_MATCH_FRAC`` x the length of it.  A false detection costs nothing (one point is
-#: kept exactly); a missed one leaves the corner to the spline.
+#: <= 15 deg away from the corner).  A saddle target (``SolverConfig.saddle_targets``) marks an
+#: X-point when source vertices lie within ``XPOINT_SADDLE_MATCH_FRAC`` x the length of it: the
+#: one of them with the largest windowed turning angle, if that exceeds ``XPOINT_TURN_DEG`` (so a
+#: target a centimetre or two off the X-point still marks the X-point, not a leg vertex), else the
+#: nearest one (stamped per X-point as ``xpoint_match`` = "largest turn" / "nearest").  A false
+#: detection costs nothing (one point is kept exactly); a missed one leaves the corner to the
+#: spline.
 XPOINT_TURN_DEG = 45.0
 XPOINT_WINDOW_FRAC = 0.01
 XPOINT_SADDLE_MATCH_FRAC = 0.01
@@ -189,10 +192,17 @@ def find_xpoints(boundary_RZ, saddle_targets=None):
     if saddle_targets is not None:
         for k, xy in enumerate(np.asarray(saddle_targets, dtype=np.float64).reshape(-1, 2)):
             dist = np.hypot(P[:, 0] - xy[0], P[:, 1] - xy[1])
-            i = int(np.argmin(dist))
-            if dist[i] <= XPOINT_SADDLE_MATCH_FRAC * L and all(apart(i, f["index"]) for f in found):
+            near = np.flatnonzero(dist <= XPOINT_SADDLE_MATCH_FRAC * L)
+            if not near.size:
+                continue
+            # the sharpest vertex inside the match radius (a target off the X-point must not
+            # mark a leg vertex in its place); none above XPOINT_TURN_DEG: the nearest vertex
+            j = near[np.argsort(-turn[near], kind="stable")[0]]
+            i, match = ((int(j), "largest turn") if turn[j] > XPOINT_TURN_DEG else
+                        (int(np.argmin(dist)), "nearest"))
+            if all(apart(i, f["index"]) for f in found):
                 found.append(dict(index=i, origin=f"saddle target {k}", turn_deg=float(turn[i]),
-                                  saddle_distance_m=float(dist[i])))
+                                  saddle_distance_m=float(dist[i]), xpoint_match=match))
     for i in np.argsort(-turn, kind="stable"):
         if turn[i] <= XPOINT_TURN_DEG:
             break

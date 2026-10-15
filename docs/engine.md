@@ -758,7 +758,10 @@ ONE standard set on both routes, for the reconstruction and every draw
   `XPOINT_WINDOW_FRAC` = 1 % of the boundary length on each side exceeds
   `XPOINT_TURN_DEG` = 45 deg (the sharpest within two windows), or the vertex
   a saddle target (`SolverConfig.saddle_targets`) marks within
-  `XPOINT_SADDLE_MATCH_FRAC` = 1 % of the length; the saddle constraints
+  `XPOINT_SADDLE_MATCH_FRAC` = 1 % of the length -- the sharpest vertex in
+  that radius when it turns by more than `XPOINT_TURN_DEG` (so a target off
+  the X-point still marks the X-point), else the nearest (stamped as
+  `xpoint_match`); the saddle constraints
   themselves are installed exactly as configured;
 - each point is weighted by the arc length it represents (half the spacing to
   each neighbour), the weights summing to

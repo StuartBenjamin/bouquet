@@ -109,10 +109,34 @@ def test_a_saddle_target_marks_a_corner_the_angle_test_misses():
     corner = src[0]
     P, xp = find_xpoints(src, saddle_targets=[[corner[0] + 0.004, corner[1] - 0.003]])
     assert len(xp) == 1 and xp[0]["origin"] == "saddle target 0"
+    assert xp[0]["xpoint_match"] == "nearest"                      # nothing above the angle test
     pts, _, info = resample_boundary(src, saddle_targets=[[corner[0] + 0.004, corner[1] - 0.003]])
     assert np.any(np.all(pts == corner, axis=1))
     # a saddle target far from the boundary marks nothing
     assert find_xpoints(src, saddle_targets=[[1.7, 0.0]])[1] == []
+
+
+@pytest.mark.parametrize("offset_mm", [6.0, 12.0, 30.0])
+def test_a_saddle_target_off_the_x_point_still_marks_the_x_point(offset_mm):
+    """A 256-point single null with a 90 deg corner, vertex spacing ~17 mm, and a saddle target
+    moved off the X-point along the outboard side: the corner (the sharpest vertex in the match
+    radius), not the nearest vertex, is marked and kept exactly."""
+    src = _shape(256, corner=1.0)
+    src = np.array([1.7, 0.0]) + 0.63 * (src - np.array([1.7, 0.0]))   # spacing ~17 mm
+    P, xp0 = find_xpoints(src)
+    c = xp0[0]["index"]
+    assert np.all(P[c] == src[0]) and xp0[0]["turn_deg"] > 80.0
+    leg = (P[c + 1] - P[c]) / np.hypot(*(P[c + 1] - P[c]))          # along the outboard edge
+    tgt = P[c] + 1e-3 * offset_mm * leg
+    nearest = int(np.argmin(np.hypot(*(P - tgt).T)))
+    if offset_mm >= 12.0:
+        assert nearest != c                                            # what nearest-vertex did
+    _, xp = find_xpoints(src, saddle_targets=[tgt])
+    assert [x["index"] for x in xp] == [c]
+    assert xp[0]["origin"] == "saddle target 0" and xp[0]["xpoint_match"] == "largest turn"
+    pts, _, info = resample_boundary(src, saddle_targets=[tgt])
+    assert np.any(np.all(pts == P[c], axis=1))
+    assert info["x_points"][0]["xpoint_match"] == "largest turn"
 
 
 def test_a_degenerate_boundary_is_refused():
