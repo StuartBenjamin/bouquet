@@ -1,30 +1,45 @@
 # Golden bouquet test fixtures
 
-Git-tracked regression fixtures for `tests/test_golden_bouquet.py`.
+Git-tracked regression fixtures. Every golden is a real bouquet run, made by
+`regenerate_golden_run.py` and slimmed by `make_golden_fixture.py`. The recipe
+runs the synthetic test fixtures in `tests/data/` at the library's defaults.
+**Status (2026-10-15):** the IDS golden is such a run; the g-file h5 golden and
+the legacy JSON golden are still the earlier runs of the older D3D-like
+example g-file + p-file (2026-10-09), because the synthetic g-file pair is to
+be corrected first (see "The current goldens" below).
+
+| golden | source | engine | files | read by |
+|--------|--------|--------|-------|---------|
+| g-file (h5) | recipe: `g_synthetic.geqdsk` + `diiid_profs_synthetic.cdf` (the synthetic D3D-like g-file and its IDA-layout profile file); committed record: the D3D-like example `D3Dlike_Hmode_baseline.geqdsk` + `.peqdsk` | unified (default) | `D3Dlike_Hmode_golden_slim.h5`, `golden_manifest.json`, `rng_stream_manifest.json` | `tests/test_golden_bouquet.py`, `tests/test_rng_reproducibility.py`, and the archive/filter/stats tests that read a real archive |
+| IDS (h5) | `dd_synthetic.json.gz` at 1.2 s, IDA-hybrid with `diiid_profs_synthetic.cdf` (the production IDS route) | unified (default) | `D3Dlike_ids_golden_slim.h5`, `ids_golden_manifest.json`, `ids_rng_stream_manifest.json` | `tests/test_golden_bouquet.py` (every test runs on both h5 goldens), `tests/test_golden_ids.py`, `tests/test_rng_reproducibility.py` |
+| legacy (JSON) | the g-file golden's source pair (committed record: the D3D-like example pair) | legacy | `D3Dlike_Hmode_legacy_golden.json` | `tests/test_systematics.py` (the legacy replay, `-m solver`), `tests/test_legacy_golden.py` |
 
 | file | what it is |
 |------|------------|
-| `D3Dlike_Hmode_golden_slim.h5` | a slimmed real bouquet run (~11.3 MB): `*.pfile` byte blobs dropped, the `*.eqdsk` geqdsks **kept but gzip-compressed** (~3x), `Ip` also extracted into an attr, everything the assertions need kept (attrs, `coil_currents`, `x_points`, both LCFS refs, profiles). |
-| `golden_manifest.json` | expected per-draw + baseline values (l_i, Ip, coil drifts, boundary RMS/max, coil currents, X-points) with tolerances. |
-| `rng_stream_manifest.json` | the **seeded GPR draw stream**, pinned bitwise (SHA-256 per channel + sampled values), drawn from the slim fixture's baseline profiles + sigma envelopes. |
-| `regenerate_golden_run.py` | produces that full run: the recipe (stored config, class API, INPUT-current archival). |
-| `make_golden_fixture.py` | regenerates the three files above from a full run. |
-| `D3Dlike_Hmode_legacy_golden.json` | the slim LEGACY golden (~0.2 MB): the same recipe run with `reconstruction_engine="legacy"` -- stored config, reconstruction scalars/profiles/coils, a 1-in-8 subsample of its LCFS trace, every draw's scalars, and the profiles + coils + boundary RMS of the first two in-spec draws (what `tests/test_systematics.py` replays). Built by `make_golden_fixture.py --legacy-json`. |
+| `*_golden_slim.h5` | a slimmed real bouquet run: `*.pfile` byte blobs dropped, the `*.eqdsk` geqdsks **kept but gzip-compressed** (~3x; all of them on the g-file golden, 12.0 MB; a representative subset of 4 on the IDS golden, 7.5 MB), `Ip` also extracted into an attr, everything the assertions need kept (attrs, `coil_currents`, `x_points`, both LCFS refs, profiles, the stored config). |
+| `golden_manifest.json`, `ids_golden_manifest.json` | expected per-draw + baseline values (l_i, Ip, coil drifts, boundary RMS/max, coil currents, X-points, `in_spec`) with tolerances, and the provenance (bouquet commit, OFT build, numerics). |
+| `rng_stream_manifest.json`, `ids_rng_stream_manifest.json` | the **seeded GPR draw stream**, pinned bitwise (SHA-256 per channel + sampled values), drawn from the golden's baseline profiles + sigma envelopes. |
+| `D3Dlike_Hmode_legacy_golden.json` | the slim LEGACY golden (~0.2 MB): the g-file golden's recipe run with `reconstruction_engine="legacy"` -- stored config, reconstruction scalars/profiles/coils, a 1-in-8 subsample of its LCFS trace, every draw's scalars, and the profiles + coils + boundary RMS of the first two in-spec draws (what `tests/test_systematics.py` replays). Built by `make_golden_fixture.py --legacy-json`. |
+| `regenerate_golden_run.py` | produces a full run: the recipe (the synthetic fixtures at the defaults, class API, INPUT-current archival), and the sigma=0 probe of the same reconstruction. |
+| `make_golden_fixture.py` | regenerates the slim fixture + manifests of one golden from a full run (`--golden gfile|ids`, `--legacy-json`). |
+| `structured_closure_pre_mse.json` | a separate record of the structured closure (not a run golden). |
 
-## The draw-stream golden
+## The draw-stream goldens
 
-`rng_stream_manifest.json` is the only draw-*level* golden here, and it became
-possible only when `GenerationConfig.seed` started reaching the GPR: before
-that, every draw site re-seeded from OS entropy and no drawn value was
-reproducible. It replays what `perturb_kinetic_equilibrium` does for one draw
-— ne, Te, ni, Ti through `_draw_monotonic_perturbation`, then the `j_phi` GPR
-candidate — off one `make_rng(seed)` Generator. Pure NumPy: no solver, no
-mesh, so it is bitwise identical on any machine.
+`rng_stream_manifest.json` and `ids_rng_stream_manifest.json` are the
+draw-*level* goldens, and they became possible only when
+`GenerationConfig.seed` started reaching the GPR: before that, every draw site
+re-seeded from OS entropy and no drawn value was reproducible. Each replays
+what `perturb_kinetic_equilibrium` does for one draw -- ne, Te, ni, Ti through
+`_draw_monotonic_perturbation`, then the `j_phi` GPR candidate -- off one
+`make_rng(seed)` Generator, from its golden's baseline profiles. Pure NumPy: no
+solver, no mesh, so it is bitwise identical on the machine that pinned it and
+equal to `1e-7` elsewhere.
 
-Re-pin it on its own (no full run needed) with
+Re-pin one on its own (no full run needed) with
 
 ```bash
-python tests/golden/make_golden_fixture.py --rng-stream-only
+python tests/golden/make_golden_fixture.py --rng-stream-only [--golden ids]
 ```
 
 The manifest carries sampled values and per-channel min/max alongside each
@@ -37,24 +52,25 @@ format and exercising its read/parse path on real files (see the
 `test_geqdsk_*` tests) is worthwhile. They are stored as gzipped `uint8`
 under their original `.eqdsk` dataset names, so every reader
 (`bytes(grp[k][()])`) is unaffected. `make_golden_fixture.py --eqdsk` chooses
-retention: `all` (default, ~11.3 MB), `subset` (baseline + representative
-draws, ~5 MB), or `none` (~3.7 MB, no geqdsk-handling coverage). Eventually,
-when the default interchange migrates to IMAS/OMAS, the fixture can store
-those instead.
-
-The full-fidelity 30 MB run (with p-file bytes and uncompressed eqdsks) stays
-as the shareable example artifact under
-`bouquet/examples/D3D-like/D3Dlike_Hmode_golden.h5` (not tracked here).
+retention: `all` (default), `subset` (baseline + representative draws: the
+first in spec, the first out of spec, the min and max boundary deviation), or
+`none` (no geqdsk-handling coverage).
 
 ## Updating the golden set (on purpose)
 
-**The recipe** (every systematics golden: 0f92d28, bc7a49a, 060bc1f, and the
-input-current rebuild of the self-consistent-bootstrap refresh):
+**The recipe** (`regenerate_golden_run.py`):
 
-* the fixture's **own stored config** (`scan/0/config_json`), verbatim:
-  20 draws, seed 12345, the synthetic-IDA sigmas, the `jbs_*` loop settings
-  and pass ceilings, `solver.nthreads=1`; only the archive name and the log
-  verbosity are set;
+* the **config is built fresh** by the class constructor
+  (`Bouquet.from_geqdsk(g_synthetic.geqdsk, profiles=diiid_profs_synthetic.cdf,
+  ...)`; `Bouquet.from_imas(dd_synthetic.json, time=1.2,
+  ida_path=diiid_profs_synthetic.cdf, ...)` for the IDS golden), **every
+  setting at its default** except the run's identity: 20 attempts (no
+  until-N), seed 12345, `nthreads=1`, the engine. So a golden embodies the
+  defaults of the code that made it; when a default moves, the goldens are
+  regenerated, not edited. (`--config-from FIXTURE` replays a golden's stored
+  config verbatim instead.)
+* the **inputs are linked** into the run directory under their basenames (the
+  dd unpacked from its `.gz`), so the stored config names no path;
 * the **class API**: `Bouquet(cfg) -> setup_solver() -> prepare_baseline() ->
   generate()`;
 * **input-current archival** (`store_achieved_jphi=False`): `_baseline/j_phi`
@@ -65,43 +81,47 @@ input-current rebuild of the self-consistent-bootstrap refresh):
   **`Bouquet.generate()` hard-wires `store_achieved_jphi=True`**, so a plain
   notebook run does NOT follow the recipe (an earlier refresh built that way
   failed the mode-1 replay of `tests/test_systematics.py`; see "Why
-  input-current archival: the mode-1 coil drift" below). The current fixture
-  was built with this recipe.
-  `store_achieved_jphi` changes only what is written, never what is solved;
+  input-current archival: the mode-1 coil drift" below).
+  `store_achieved_jphi` changes only what is written, never what is solved.
+  `regenerate_golden_run.py` flips only `store_achieved_jphi` on
+  `generate()`'s own `generate_bouquet` call, refuses to run if `generate()`
+  stops passing it as `True`, and stamps the archive root with
+  `golden_jphi_archival = "input"`; the builder copies that attr into the
+  fixture and records it in the manifest's provenance
+  (`generator_args.jphi_archival`);
 * one thread (`OMP_NUM_THREADS=1`), on the OFT build the fixture pins, stated
   through `BOUQUET_OFT_COMMIT` / `BOUQUET_OFT_BRANCH` / `BOUQUET_OFT_BUILD_ID`
-  when slimming.
+  when slimming;
+* the **sigma=0 probe** (`--sigma0-probe OUT.json`, same arguments): the same
+  config reconstructed in its own process and
+  `Bouquet.verify_sigma0_consistency()` run on it (the zero-perturbation draw
+  must reproduce the reconstruction). It makes no draws: the probe leaves the
+  solver re-anchored, and the golden run must be the production sequence.
 
-The earlier goldens switched the archival off the same way: their
-regeneration script wrapped `bouquet.TokaMaker_interface.generate_bouquet`
-(which `generate()` imports at call time) to inject
-`store_achieved_jphi=False`. That script was never committed; the commits
-stated the convention, not the mechanism, and the refresh lost it.
-`regenerate_golden_run.py` is that recipe, in the tree. It flips only
-`store_achieved_jphi` on `generate()`'s own `generate_bouquet` call, refuses
-to run if `generate()` stops passing it as `True`, and stamps the archive root
-with `golden_jphi_archival = "input"`. The builder copies that attr into the
-fixture and records it in the manifest's provenance
-(`generator_args.jphi_archival`), so a fixture says how it was archived.
+The commands (each run ~45-60 min at one thread on the engine, ~4 h on the
+legacy path; run them on a machine with the disk and the time):
 
-1. Produce the full run (~6.5 h at one thread for this example; run it on a
-   machine with the disk and the time for it):
-   ```bash
-   OMP_NUM_THREADS=1 python tests/golden/regenerate_golden_run.py RUN_DIR \
-       --reconstruction-engine unified --verbose
-   ```
-   (`--reconstruction-engine legacy` plus `make_golden_fixture.py
-   --legacy-json` in step 2 rebuilds the legacy JSON golden.)
-2. Regenerate the fixture + manifest:
-   ```bash
-   python tests/golden/make_golden_fixture.py \
-       --source RUN_DIR/D3Dlike_Hmode_golden.h5
-   ```
-   (defaults to the D3D-like example artifact path if `--source` is omitted;
-   `rng_stream_manifest.json` is re-pinned from the new slim fixture in the
-   same command).
-3. Review the `golden_manifest.json` git diff — it shows exactly which physics
-   values moved — then commit the new fixture + manifests together.
+```bash
+# the g-file h5 golden (+ golden_manifest.json, rng_stream_manifest.json)
+OMP_NUM_THREADS=1 python tests/golden/regenerate_golden_run.py RUN_G --golden gfile --reconstruction-engine unified --verbose
+BOUQUET_OFT_BUILD_ID=<build> python tests/golden/make_golden_fixture.py --golden gfile --source RUN_G/D3Dlike_Hmode_golden.h5
+# the IDS h5 golden (+ ids_golden_manifest.json, ids_rng_stream_manifest.json)
+OMP_NUM_THREADS=1 python tests/golden/regenerate_golden_run.py RUN_I --golden ids --reconstruction-engine unified --verbose
+BOUQUET_OFT_BUILD_ID=<build> python tests/golden/make_golden_fixture.py --golden ids --eqdsk subset --source RUN_I/D3Dlike_ids_golden.h5
+# the legacy JSON golden
+OMP_NUM_THREADS=1 python tests/golden/regenerate_golden_run.py RUN_L --golden gfile --reconstruction-engine legacy --verbose
+BOUQUET_OFT_BUILD_ID=<build> python tests/golden/make_golden_fixture.py --legacy-json --source RUN_L/D3Dlike_Hmode_golden.h5
+# the sigma=0 probe of any of them (same arguments, its own run directory)
+OMP_NUM_THREADS=1 python tests/golden/regenerate_golden_run.py RUN_S --golden ids --reconstruction-engine unified --sigma0-probe sigma0.json
+```
+
+Slim each golden from a clean checkout of the commit that ran it (the builder
+records `git status` in the provenance: build one golden, move its files
+aside, restore the tree, build the next), then review the manifest / JSON git
+diff -- it shows exactly which physics values moved -- and commit the new
+fixtures and manifests together. The builder refuses a run whose stored
+source or engine is not the golden's (an h5 golden is a unified-engine run of
+its own source class; the legacy JSON a legacy-path g-file run).
 
 The builder refuses to write a fixture that names a filesystem path anywhere
 a reader sees text: string attrs, string datasets (`config_json`), string
@@ -112,19 +132,17 @@ at a token boundary, a `~/` or `~user/` path, a `../` path, or a Windows
 drive path; units and ratios such as `A/m^2` or `1/R` are not
 (`tests/test_no_paths_in_records.py` tries to defeat the guard). It reduces
 the paths inside the self-consistent bootstrap records (`jbs_loop_json`) to
-basenames: records written by earlier builds of the loop carried the OFT
+basenames (records written by earlier builds of the loop carried the OFT
 package path in `oft_build.path`; current builds record a path-free
-`oft_build = {version, git_hash, build_id}`. This repository is public, and
+`oft_build = {version, git_hash, build_id}`). This repository is public, and
 the OFT build is identified by the content digests in the provenance stamp.
-The committed fixture passes the extended guard as it stands (it predates the
-path-free record, so its loop records carry the scrubbed basename
-`oft_build.path = "OpenFUSIONToolkit"`).
 
 ## Build-specific goldens
 
 The goldens record the OFT build they were generated with, and are valid
 for that build only. The record is `provenance.oft` of
-`golden_manifest.json` and of `D3Dlike_Hmode_legacy_golden.json`:
+`golden_manifest.json`, `ids_golden_manifest.json` and
+`D3Dlike_Hmode_legacy_golden.json`:
 `build_id` as stated through `BOUQUET_OFT_BUILD_ID` when slimming,
 `library_sha256` and `sources_sha256` as measured. The policy (owner
 decision, 2026-10-09):
@@ -138,12 +156,13 @@ decision, 2026-10-09):
 * Different build: a pass passes with a `GoldenBuildMismatchWarning` that
   names both builds; a failure FAILS (never xfail, never skip), its message
   starting with `OFT build mismatch: fixture generated with
-  <build_id>/<sha8>, installed <build_id>/<sha8>` and the commands below,
-  followed by the original failure.
+  <build_id>/<sha8>, installed <build_id>/<sha8>` and the regeneration
+  commands, followed by the original failure.
 * No band and no tolerance depends on the build.
 
-Known cross-build deviation: the mode-1 replay of the legacy golden in
-`tests/test_systematics.py` (pinned baseline, bar 0.3 %) gives a maximum
+Known cross-build deviation (measured on the earlier D3D-like example
+golden): the mode-1 replay of the legacy golden in
+`tests/test_systematics.py` (pinned baseline, bar 0.3 %) gave a maximum
 coil drift of 0.027 % on the build the golden was generated with, and
 1.45 % on OFT builds that evaluate the edge FF' from an exact per-node
 `<R>` at the diverted LCFS node: the lower coils move, the boundary stays
@@ -151,67 +170,56 @@ within its bar. Which edge convention is right is an open physics
 question; until it is answered, regenerate on the build in use, never widen
 the bar.
 
-Regenerating on the installed build (the commands the mismatch message
-prints; steps as in "Updating the golden set" above):
+Regenerating on the installed build: the commands of "Updating the golden
+set" above (`tests/_harness.py` prints them in a mismatch message), with
+`BOUQUET_OFT_BUILD_ID` naming the installed build; review the git diff of
+the manifests / JSON before committing.
 
-```bash
-# the h5 fixture + golden_manifest.json (+ rng_stream_manifest.json)
-OMP_NUM_THREADS=1 python tests/golden/regenerate_golden_run.py RUN_DIR --reconstruction-engine unified --verbose
-BOUQUET_OFT_BUILD_ID=<installed build> python tests/golden/make_golden_fixture.py --source RUN_DIR/D3Dlike_Hmode_golden.h5
-# the legacy JSON golden
-OMP_NUM_THREADS=1 python tests/golden/regenerate_golden_run.py RUN_DIR --reconstruction-engine legacy --verbose
-BOUQUET_OFT_BUILD_ID=<installed build> python tests/golden/make_golden_fixture.py --legacy-json --source RUN_DIR/D3Dlike_Hmode_golden.h5
-```
+## The current goldens (2026-10-15)
 
-and review the git diff of the manifest / JSON before committing.
+**The IDS golden** is the recipe's run at bouquet `cced718` (main `dc03156`
+plus this recipe, a clean tree), OFT `fix/jphi-update-ravgs-and-nonfinite-abort`
+7da4f18 (build `20260929_7da4f18`, lib `7885fedc1e62`), one thread. The
+defaults it embodies: the in-spec rule is the magnetics (no l_i band),
+IDA-hybrid takes the IDA file's Z_eff, the radial sigma templates (the profile
+file's own envelopes here), the warm baseline re-solve in `generate()`, engine
+draws held on the reconstruction's isoflux, `check_bistability` on, the
+coil-saturation test against the installed bound, and the Redl epsilon
+`(R_max - R_min)/(R_max + R_min)` (`evaluate_jBS/4`). An engine draw's
+`in_spec` is its coil verdict AND the opt-in bands, none of which is on: the
+coil verdict.
 
-## The current fixture (unified-engine default, 2026-10-07)
+| golden | attempts | archived | in spec | reconstruction | draws | bistability | sigma=0 probe |
+|--------|----------|----------|---------|----------------|-------|-------------|---------------|
+| IDS, unified | 20 | 19 (1 perturb_failed) | 18 (all archived but 15) | 108 s | 44.0 min | single | PASS (dl_i +3.1e-5, dq0 -5.3e-5, r_j 1.6e-4) |
 
-The h5 fixture is a run of the unified engine, the default reconstruction
-engine: the recipe above with the fixture's stored config (seed 12345, 20
-draws, one thread), OFT `fix/jphi-update-ravgs-and-nonfinite-abort` 7da4f18
-(build `20260929_7da4f18`), run with `regenerate_golden_run.py
---reconstruction-engine unified`. That switch puts the legacy-only fields the
-engine never reads back to their defaults (printed and recorded in the run's
-`summary.json`; here only `isolate_edge_jBS` False -> True). No bar changed.
+* The IDS route archives no schema `jbs_loop` block on its `_baseline` (the
+  g-file route does); its reconstruction's loop verdict is in the baseline's
+  engine record (`engine_json`: `converged`, `loop_converged`), which the
+  golden test reads there.
 
-* Unified engine: 20 attempts, **16 archived** (4 rejected), **6 in spec** (draws 0, 7, 8, 9, 13, 17). An engine draw's
-  `in_spec` is the coil verdict AND its post-hoc l_i band
-  (`passes_draw_band`, one of `filtering._FILTER_FLAGS`): 5 of 17 pass the
-  coil rule, 11 of 17 the band. Wall time: reconstruction 66 s, draws
-  42.4 min (123.6 s per equilibrium).
-* The legacy path keeps its numeric record in
-  `D3Dlike_Hmode_legacy_golden.json`, made from a legacy-engine run of the
-  same recipe at the same code (regenerated 2026-10-09: the run at `67aba59`,
-  the record built from its archive at `5c92249`, the builder that carries
-  `j_pressure`; see below): 20 archived, 11 in spec. Wall time: reconstruction 218 s, draws
-  184.2 min (552 s per equilibrium). The record archives the pressure-driven
-  current as its own `j_pressure` beside a `j_inductive` that does not carry
-  it, and says so (`current_split_convention = "pressure_separate"`); the
-  legacy replay composes the legacy path's carried (in-memory) inductive,
-  `j_inductive + j_pressure`, before handing it to `generate_bouquet` as
-  `input_jinductive` -- a record from before that convention replays as is.
-  `tests/test_systematics.py` (legacy replay) reads it;
-  `tests/test_legacy_golden.py` checks what it is.
-* `rng_stream_manifest.json` is pinned from this fixture's baseline.
-* Validation of the fixture and the suites at `1a15685`:
-  [docs/validation-provenance.md](../../docs/validation-provenance.md).
-* **Regenerated 2026-10-09 on the integration branch** (commit `67aba59`,
-  clean tree; OFT build `20260929_7da4f18`, lib `7885fedc1e62`, the same
-  fixed build as before) after the declared changes to the default
-  bootstrap evaluator: the pressure-driven current `p'G` is archived as its
-  own `j_pressure` bucket (owner decision D2) and the default Redl epsilon
-  is `eps_definition = "r_over_R_geo"`, `eps = (R_max - R_min)/(R_max +
-  R_min)` with `R_geo = (R_max + R_min)/2` also as the R of `nu*` (owner
-  decision E7; version tag `evaluate_jBS/4`). Same recipe, same seed, same
-  yield (20 attempts, 16 archived, 6 in spec); reconstruction 62 s, draws
-  43.8 min. The fixture's stored config carries no `eps_definition`, so a
-  replay takes the default (warned once at load); do not add the field to
-  it. The earlier fixtures (2026-10-07 at bouquet `7bd48fb`/`8285201`/
-  `1a15685`; the 2026-10-09 `e838f12` build under the interim
-  `(R_max - R_min)/(2<R>)` default) are in the history of this file.
-* The legacy record `D3Dlike_Hmode_legacy_golden.json` was regenerated in
-  the same session at the same commit and build (its stamp above).
+**The g-file h5 golden and the legacy JSON golden are NOT yet regenerated.**
+The synthetic g-file pair is internally inconsistent: the g-file's on-axis
+pressure (90.4 kPa) is the dd's TOTAL pressure, fast ions included, while
+its profile file carries the thermal pressure only (46.1 kPa), and the g-file
+route has no fast-pressure source, so a reconstruction on the pair gives
+beta_N 0.80 against the g-file's 1.68. Both goldens are to be regenerated with
+the commands above once that g-file is corrected (owner decision pending).
+Until then the committed records are the earlier runs of the older D3D-like
+example g-file + p-file, regenerated 2026-10-09 at `67aba59` on the same OFT
+build under the defaults of that date (the old l_i band among them): unified
+20 attempts, 16 archived, 6 in spec (reconstruction 62 s, draws 43.8 min);
+legacy 20 archived, 11 in spec (reconstruction 218 s, draws 184.2 min). Their
+stored configs replay with the stored-config compatibility rules (the l_i
+band loads OFF, with a note). The legacy replay (`tests/test_systematics.py`)
+reconstructs from whatever pair the legacy golden's stored config names.
+
+* The legacy record archives the pressure-driven current as its own
+  `j_pressure` beside a `j_inductive` that does not carry it, and says so
+  (`current_split_convention = "pressure_separate"`); the legacy replay
+  composes the legacy path's carried (in-memory) inductive, `j_inductive +
+  j_pressure`, before handing it to `generate_bouquet` as `input_jinductive`
+  -- a record from before that convention replays as is.
 
 ## Why input-current archival: the mode-1 coil drift
 
@@ -273,7 +281,8 @@ loosened bar; each narrows what a passing suite shows.
 
 ## Known limitation: a standard draw's post-homotopy re-solve can diverge slowly
 
-In the loop-on regeneration of this example, two of twenty draws were
+In the loop-on regeneration of the earlier D3D-like example golden, two of
+twenty draws were
 rejected after their coil homotopy: Redl on the delivered equilibrium missed
 the bootstrap the draw carried by `r_j` of order 1e-3, the post-homotopy
 stage handed the renormalised target to the corrective `jphi-linterp`

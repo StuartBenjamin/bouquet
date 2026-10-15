@@ -1,26 +1,38 @@
-"""Build the git-tracked golden test fixture + manifest from a full bouquet run.
+"""Build the git-tracked golden test fixtures + manifests from full bouquet runs.
 
-The backend regression tests (``tests/test_golden_bouquet.py``) run against a
-**slimmed** copy of a real bouquet ``.h5`` plus a JSON manifest of expected
-values.  This script produces both, so updating the golden set on purpose is a
-single, reviewable command.
+The backend regression tests (``tests/test_golden_bouquet.py``,
+``tests/test_golden_ids.py``) run against a **slimmed** copy of a real bouquet
+``.h5`` plus a JSON manifest of expected values.  This script produces both,
+so updating the golden set on purpose is a single, reviewable command.
+
+Two h5 goldens share the layout (``--golden``):
+
+* ``gfile`` (default): the unified-engine run of the synthetic g-file +
+  IDA-layout profile fixtures -> ``D3Dlike_Hmode_golden_slim.h5``,
+  ``golden_manifest.json``, ``rng_stream_manifest.json``;
+* ``ids``: the unified-engine IDA-hybrid run of the synthetic dd's 1.2 s
+  slice -> ``D3Dlike_ids_golden_slim.h5``, ``ids_golden_manifest.json``,
+  ``ids_rng_stream_manifest.json``.
+
+``--legacy-json`` writes the slim LEGACY golden (the g-file golden on the
+legacy path) as a small JSON instead.
 
 What it does
 ------------
-1. Reads a full bouquet ``.h5`` (the 30 MB shareable example artifact).
-2. Writes ``D3Dlike_Hmode_golden_slim.h5`` next to this script:
+1. Reads a full bouquet ``.h5`` (a run of ``regenerate_golden_run.py``).
+2. Writes the slim ``.h5`` next to this script:
    - **keeps the ``*.eqdsk`` geqdsks, gzip-compressed** (~3x; ~0.37 MB each)
      so the geqdsk read/parse/handling path -- a deliberately coarse-at-the-
      separatrix format -- is exercised by real files.  The geqdsks are stored
      as gzipped ``uint8`` under their original ``.eqdsk`` dataset names, so
      every reader (``bytes(grp[k][()])``) is unaffected.
    - drops the ``*.pfile`` byte blobs (not needed for equilibrium-handling
-     tests; full p-files stay in the example artifact),
+     tests),
    - extracts the real ``Ip`` from each eqdsk into an ``Ip`` attr,
    - keeps every attr, ``coil_currents``, ``x_points``, both LCFS references,
      and the profile arrays the assertions need.
-3. Writes ``golden_manifest.json`` of expected per-draw + baseline values with
-   tolerances.
+3. Writes the manifest of expected per-draw + baseline values with
+   tolerances, and re-pins the rng-stream manifest from the new fixture.
 
 The ``--eqdsk`` flag controls geqdsk retention:
 ``all`` (default, ~11 MB), ``subset`` (baseline + a few representative draws,
@@ -29,17 +41,15 @@ The ``--eqdsk`` flag controls geqdsk retention:
 Updating the golden set
 -----------------------
 Regenerate the full run with ``regenerate_golden_run.py`` (the recipe: the
-fixture's own stored config, class API, INPUT-current archival -- NOT a plain
-notebook ``generate()``, which archives the achieved current), then::
+synthetic fixtures at the library defaults, class API, INPUT-current
+archival -- NOT a plain notebook ``generate()``, which archives the achieved
+current), then::
 
-    python tests/golden/make_golden_fixture.py \
-        --source /path/to/D3Dlike_Hmode_golden.h5
+    python tests/golden/make_golden_fixture.py [--golden ids] \
+        --source RUN_DIR/<archive>.h5
 
-Review the git diff of ``golden_manifest.json`` (and the slim ``.h5``) before
+Review the git diff of the manifest (and the slim ``.h5``) before
 committing -- the manifest diff shows exactly which physics values moved.
-
-Note: eventually the default equilibrium interchange should migrate to
-IMAS/OMAS; when it does, this fixture can store those instead of geqdsks.
 """
 import argparse
 import hashlib
@@ -57,6 +67,18 @@ _DEFAULT_SOURCE = os.path.abspath(os.path.join(
 SLIM_NAME = "D3Dlike_Hmode_golden_slim.h5"
 MANIFEST_NAME = "golden_manifest.json"
 RNG_MANIFEST_NAME = "rng_stream_manifest.json"
+#: the IDS-route golden (``--golden ids``): the same three-file layout
+IDS_SLIM_NAME = "D3Dlike_ids_golden_slim.h5"
+IDS_MANIFEST_NAME = "ids_golden_manifest.json"
+IDS_RNG_MANIFEST_NAME = "ids_rng_stream_manifest.json"
+#: golden -> (slim h5, manifest, rng-stream manifest, the source class its
+#: stored config must name)
+GOLDEN_FILES = {
+    "gfile": (SLIM_NAME, MANIFEST_NAME, RNG_MANIFEST_NAME,
+              "ReconstructionSource"),
+    "ids": (IDS_SLIM_NAME, IDS_MANIFEST_NAME, IDS_RNG_MANIFEST_NAME,
+            "ImasSource"),
+}
 #: the slim LEGACY golden (``--legacy-json``): the same recipe run with
 #: ``reconstruction_engine="legacy"``, kept as a small JSON instead of a
 #: second h5 blob, so the legacy path keeps a numeric regression record
@@ -424,7 +446,8 @@ def draw_stream(psi_kin, psi_N, profiles, sigmas, seed=RNG_STREAM_SEED):
     return out
 
 
-def build_rng_stream(source_slim=None, out_dir=_HERE, seed=RNG_STREAM_SEED):
+def build_rng_stream(source_slim=None, out_dir=_HERE, seed=RNG_STREAM_SEED,
+                     golden="gfile"):
     """Pin the seeded draw stream against the golden baseline profiles.
 
     Reads the baseline profiles + sigma envelopes out of the slim fixture and
@@ -434,7 +457,8 @@ def build_rng_stream(source_slim=None, out_dir=_HERE, seed=RNG_STREAM_SEED):
     actually reached the GPR -- before that the stream was OS entropy and no
     draw-level value could be pinned at all.
     """
-    slim = source_slim or os.path.join(out_dir, SLIM_NAME)
+    slim_name, _, rng_name, _ = GOLDEN_FILES[golden]
+    slim = source_slim or os.path.join(out_dir, slim_name)
     with h5py.File(slim, "r") as hf:
         bkeys = sorted(hf["scan"].keys()) if "scan" in hf else [None]
         bl = hf[f"scan/{bkeys[0]}/_baseline"] if bkeys[0] is not None \
@@ -472,7 +496,7 @@ def build_rng_stream(source_slim=None, out_dir=_HERE, seed=RNG_STREAM_SEED):
             "sample_values": [float(a[i]) for i in idx],
             "min": float(a.min()), "max": float(a.max()),
         }
-    path = os.path.join(out_dir, RNG_MANIFEST_NAME)
+    path = os.path.join(out_dir, rng_name)
     with open(path, "w") as fh:
         json.dump(man, fh, indent=2, sort_keys=True)
     print(f"[golden] wrote {path}  (seed={seed}, "
@@ -609,14 +633,38 @@ def assert_no_filesystem_paths(slim_path):
                          "(public repo):\n  " + "\n  ".join(hits[:20]))
 
 
-def build(source, out_dir=_HERE, eqdsk="all"):
+def source_config(source):
+    """``(source class name, reconstruction_engine)`` of the run's stored
+    config (``scan/0/config_json``): ``ReconstructionSource`` (g-file) or
+    ``ImasSource`` (IDS); ``"unified"`` or ``"legacy"``."""
+    import sys
+    sys.path.insert(0, os.path.abspath(os.path.join(_HERE, "..", "..")))
+    from bouquet.config import BouquetConfig
+    with h5py.File(source, "r") as hf:
+        cj = hf["scan/0/config_json"][()]
+    cfg = BouquetConfig.from_json(
+        cj.decode() if isinstance(cj, bytes) else str(cj))
+    return type(cfg.source).__name__, cfg.generation.reconstruction_engine
+
+
+def build(source, out_dir=_HERE, eqdsk="all", golden="gfile"):
     if eqdsk not in ("all", "subset", "none"):
         raise ValueError("eqdsk must be 'all', 'subset', or 'none'")
-    slim_path = os.path.join(out_dir, SLIM_NAME)
-    manifest_path = os.path.join(out_dir, MANIFEST_NAME)
+    slim_name, manifest_name, _, want_src = GOLDEN_FILES[golden]
+    got_src, got_eng = source_config(source)
+    if got_src != want_src or got_eng != "unified":
+        raise SystemExit(f"REFUSING: {os.path.basename(source)} is a "
+                         f"{got_src} run on reconstruction_engine="
+                         f"{got_eng!r}; the {golden!r} h5 golden is a "
+                         f"{want_src} run on the unified engine (the legacy "
+                         "golden is --legacy-json)")
+    slim_path = os.path.join(out_dir, slim_name)
+    manifest_path = os.path.join(out_dir, manifest_name)
 
     prov = fixture_provenance(source=source, eqdsk=eqdsk)
+    prov["generator_args"]["golden"] = golden
     manifest = {
+        "golden": golden,
         "source_basename": os.path.basename(source),
         "eqdsk_retention": eqdsk,
         "provenance": prov,
@@ -840,6 +888,10 @@ def build_legacy_json(source, out_dir=_HERE):
             raise SystemExit(f"REFUSING: {os.path.basename(source)} was run "
                              f"with reconstruction_engine={eng!r}; the "
                              "legacy golden is a legacy-path run")
+        if "geqdsk_path" not in json.loads(cj)["source"]:
+            raise SystemExit(f"REFUSING: {os.path.basename(source)} is not "
+                             "a g-file run; the legacy golden is the g-file "
+                             "golden on the legacy path")
         bl = g["_baseline"]
         eqk = [k for k in bl.keys() if _is_eqdsk_name(k)]
         lcfs = np.asarray(bl["recon_lcfs_ref"][()], dtype=float)
@@ -943,8 +995,13 @@ def build_legacy_json(source, out_dir=_HERE):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--source", default=_DEFAULT_SOURCE,
-                    help="full bouquet .h5 to slim (default: the D3D-like "
-                         "example artifact)")
+                    help="full bouquet .h5 to slim (a run of "
+                         "regenerate_golden_run.py)")
+    ap.add_argument("--golden", default="gfile", choices=tuple(GOLDEN_FILES),
+                    help="which h5 golden to write: gfile (default; "
+                         f"{SLIM_NAME} + {MANIFEST_NAME} + "
+                         f"{RNG_MANIFEST_NAME}) or ids ({IDS_SLIM_NAME} + "
+                         f"{IDS_MANIFEST_NAME} + {IDS_RNG_MANIFEST_NAME})")
     ap.add_argument("--eqdsk", default="all",
                     choices=("all", "subset", "none"),
                     help="geqdsk retention: all (default, ~11 MB), subset "
@@ -964,9 +1021,9 @@ if __name__ == "__main__":
         build_legacy_json(args.source)
         raise SystemExit(0)
     if args.rng_stream_only:
-        build_rng_stream()
+        build_rng_stream(golden=args.golden)
         raise SystemExit(0)
     if not os.path.isfile(args.source):
         raise SystemExit(f"source not found: {args.source}")
-    build(args.source, eqdsk=args.eqdsk)
-    build_rng_stream()
+    build(args.source, eqdsk=args.eqdsk, golden=args.golden)
+    build_rng_stream(golden=args.golden)
