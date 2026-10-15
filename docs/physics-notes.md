@@ -881,7 +881,27 @@ come from:
 | Value | ne / Te / Ti / ω_tor | Z_eff, Z_imp, n_i dilution | Currents, equilibrium, p_fast, anchors |
 |---|---|---|---|
 | `"fuse"` *(default)* | FUSE `core_profiles` | FUSE | FUSE |
-| `"ida_hybrid"` | IDA `.cdf` fits, PCHIP-resampled onto the FUSE ψ_N grid | FUSE | FUSE |
+| `"ida_hybrid"` | IDA `.cdf` fits, PCHIP-resampled onto the FUSE ψ_N grid | IDA by default (`ImasSource.ni_source="auto"` -> the measured route `"all"`); FUSE only by explicit choice (`ni_source="standard"` or `zeff_from_fuse=True`) | FUSE (`p_fast`: the one declared cross-source input; the beam density is subtracted from the IDA n_i) |
+
+**One thermal-kinetics source per run (since 2026-10, owner decision).** With
+an IDA file supplying the kinetics, the IDA file's own Z_eff is the default:
+mixing the dd's Z_eff with IDA n_e/T_e/T_i is no longer the default, because
+the two Z_eff's can disagree badly (on two real slices the dd's was 0.78x and
+3.9x the IDA file's, median over psi_N <= 0.9, with nothing flagging it), and
+a run should not pair one source's Z_eff with another's densities and
+temperatures by default.
+`ni_source="auto"` resolves to `"all"`: the VB+CER mean where both routes have
+an envelope, else whichever does, each clamped to `[1, Z]` with the clamped
+nodes counted (`IDAProfiles.zeff_provenance`). An IDA file with no Z_eff
+information at all (no `Zeff`, no `n_12C6`) is refused rather than silently
+falling back to the dd. The fast ions are the one exception: the IDA fits carry
+none, so the dd's `p_fast` stays in the equilibrium pressure
+(`include_pfast=True`) and its beam density is subtracted from the IDA (total)
+n_i (`ni_subtract_fast=None` follows `include_pfast`), so they are counted once.
+The route a run took is stamped warning-free (`li_metrics["zeff_source"]`:
+`"ida"` / `"dd"`; `li_metrics["kinetics_route"]`). The known limitations of the
+measured route are listed in
+[workflows.md](workflows.md#graduated-features-and-their-known-limitations).
 
 `Bouquet.from_imas(..., ida_path=…)` selects `"ida_hybrid"` automatically and
 also points `UncertaintyConfig.ida_path` at the same file, so the sigma
@@ -1075,20 +1095,22 @@ scheme cannot guarantee. One Z_eff value per draw. See
 
 ## Kinetic assumptions: Z_eff, n_i and the clips (PR #56)
 
-These are the assumptions of the IDA / FUSE ion coupling (PR #56). **Since
-1.4.0 they are EXPERIMENTAL and opt-in, not defaults** (owner decision
-2026-10-09): on real H-mode slices the combined route moved core n_i and Z_eff
-far outside the measurement uncertainties, so it awaits validation. Each is
-listed in `bouquet.experimental.REGISTRY` with its open validation items (see
-[workflows.md, Experimental features](workflows.md#experimental-features-and-their-validation-status)):
-item 1 is `fuse_zeff_fast_ions` (`ImasSource.zeff_fast_ions=True`), item 2 is
-`ida_ion_route` (`ni_source="Zeff" | "CER" | "all"`; the beam subtraction
-on `ida_hybrid` is `ida_ni_beam_subtraction`, `ImasSource.ni_subtract_fast`),
-and the floor at 1 and the n_i floor / ceiling of item 3 are
-`kinetic_sampler_clips` (`UncertaintyConfig.kinetic_clips`). The defaults
-are the routes before PR #56: the thermal-only dd Z_eff, the IDA VB Z_eff
-with n_i from quasineutrality and the carbon > VB > scalar envelope ladder,
-and only the `zeff_bounds` window on a drawn Z_eff. Each assumption is stated,
+These are the assumptions of the IDA / FUSE ion coupling (PR #56). In 1.4.0
+they were made EXPERIMENTAL and opt-in (owner decision 2026-10-09). Since
+2026-10 item 2 -- the measured IDA route (`ni_source="Zeff" | "CER" | "all"`)
+and, with it, the beam subtraction on `ida_hybrid` (`ni_subtract_fast`) -- is
+the `ida_hybrid` DEFAULT (owner decision: one thermal-kinetics source per run;
+see [Hybrid kinetics on the IMAS path](#hybrid-kinetics-on-the-imas-path)),
+listed in `bouquet.experimental.GRADUATED` with its open items kept as known
+limitations. Item 1 (`fuse_zeff_fast_ions`, `ImasSource.zeff_fast_ions=True`)
+and the floor at 1 and the n_i floor / ceiling of item 3
+(`kinetic_sampler_clips`, `UncertaintyConfig.kinetic_clips`) stay
+EXPERIMENTAL in `bouquet.experimental.REGISTRY` (see
+[workflows.md, Experimental features](workflows.md#experimental-features-and-their-validation-status));
+the default does not turn the clips on. The other defaults are the routes
+before PR #56: the thermal-only dd Z_eff on FUSE kinetics, the IDA VB Z_eff
+with n_i from quasineutrality and the carbon > VB > scalar envelope ladder on a
+g-file + IDA run, and only the `zeff_bounds` window on a drawn Z_eff. Each assumption is stated,
 justified and cited here, and each is visible in the records (the stamps named
 below). None of them is a tunable tolerance.
 

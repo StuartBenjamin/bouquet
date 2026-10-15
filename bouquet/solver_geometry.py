@@ -19,6 +19,35 @@ ISOFLUX_WEIGHT = 500.0
 F0_RULE = "per-baseline: each baseline solves at its own F0 (since #76)"
 
 
+def isoflux_fingerprint(pts, weights) -> Optional[str]:
+    """A short sha256 of an isoflux pattern (its points AND weights, float64, C order): the
+    identity the solver geometry record, the reconstruction and every engine draw's homotopy stamp,
+    so that "the draw held the reconstruction's own isoflux" is a checkable equality.  ``None``
+    without points."""
+    if pts is None:
+        return None
+    import hashlib
+    p = np.ascontiguousarray(np.asarray(pts, dtype=np.float64).reshape(-1, 2))
+    w = np.ascontiguousarray(np.broadcast_to(
+        np.asarray(1.0 if weights is None else weights, dtype=np.float64), (len(p),)))
+    h = hashlib.sha256(p.tobytes())
+    h.update(w.tobytes())
+    return h.hexdigest()[:16]
+
+
+def isoflux_stamp(pts, weights, origin) -> dict:
+    """The plain-data stamp of an isoflux pattern: ``n`` points, the weight (``weight_min`` /
+    ``weight_max``), its ``origin`` and :func:`isoflux_fingerprint` (``sha256``)."""
+    n = 0 if pts is None else int(len(pts))
+    w = (None if (pts is None or weights is None) else
+         np.atleast_1d(np.asarray(weights, dtype=float)))
+    return {"n": n,
+            "weight_min": None if w is None or not w.size else float(w.min()),
+            "weight_max": None if w is None or not w.size else float(w.max()),
+            "origin": None if origin is None else str(origin),
+            "sha256": isoflux_fingerprint(pts, weights)}
+
+
 @dataclass(frozen=True)
 class CaseGeometry:
     F0: float
@@ -54,6 +83,9 @@ class CaseGeometry:
             "isoflux_origin": str(self.iso_origin) if n_iso else None,
             "isoflux_n": n_iso,
             "isoflux_weights": _w(self.iso_w, n_iso),
+            # the pattern's identity (points and weights): what the unified engine's draws compare
+            # their homotopy isoflux against (engine_draws.GenerateEngineDraws.homotopy_isoflux)
+            "isoflux_sha256": isoflux_fingerprint(self.iso_pts, self.iso_w) if n_iso else None,
             "saddle_origin": "SolverConfig.saddle_targets" if n_sad else None,
             "saddle_n": n_sad,
             "saddle_points": None if not n_sad else np.asarray(self.saddle_pts, float).tolist(),
