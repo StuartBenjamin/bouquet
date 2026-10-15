@@ -684,7 +684,14 @@ class UncertaintyConfig:
                                        profiles_path when it ends in '.cdf',
                                        which baseline.resolve_uncertainty
                                        adopts automatically
-        3. <chan>_scalar_sigma         flat fraction x |baseline profile|
+        3. the IMAS source's own       core_profiles *_error_upper (an
+           error fields                ImasSource without an IDA sigma file,
+                                       sigma_mode "auto" / "direct")
+        4. the ASSUMED default         <chan>_scalar_sigma x |baseline| when
+                                       the scalar is set; else (the default,
+                                       None) the H-mode flat-top radial
+                                       template x |baseline|
+                                       (bouquet.uncertainties.sigma_template)
 
     **The scalars do nothing when an IDA file is in play.** Setting
     ``ne_scalar_sigma = te_scalar_sigma = ... = 0.0`` to get a deterministic
@@ -709,17 +716,26 @@ class UncertaintyConfig:
     #      diagnostic envelope;
     #   2. an IDA `.cdf` (`ida_path`, or the reconstruction source's own .cdf) --
     #      its `*_err` datasets;
-    #   3. a flat fractional fallback, `<chan>_scalar_sigma` * baseline profile.
+    #   3. an ImasSource's own core_profiles *_error_upper (io.imas.
+    #      read_imas_sigmas), with sigma_mode "auto" / "direct";
+    #   4. the ASSUMED default: `<chan>_scalar_sigma` * |baseline| when set,
+    #      else the H-mode flat-top template shape * |baseline|.
+    # resolve_uncertainty() stamps the winner per channel ("sigma_source").
     ida_path: Optional[str] = None
     sigma_mode: str = "auto"               # "auto" (by dim) | "direct" (*_err) | "ensemble"
     sigma_method: str = "percentile"       # "percentile" | "std"  (ensemble only)
 
-    # flat fractional kinetic sigma envelopes (per channel). ni/Ti default wider
-    # than ne/Te -- ion density and temperature are harder to diagnose.
-    ne_scalar_sigma: float = 0.05
-    te_scalar_sigma: float = 0.05
-    ni_scalar_sigma: float = 0.10
-    ti_scalar_sigma: float = 0.10
+    # The assumed envelope of a channel with no measured sigma.  None (the
+    # default since 2026-10-14) = the H-mode flat-top radial template
+    # (bouquet.uncertainties.sigma_template(psi_N, chan), relative sigma vs
+    # psi_N; n_i the derived-n_i row) x |baseline|; uniform-psi_N means
+    # n_e 4.0 %, T_e 8.4 %, n_i 9.6 %, T_i 9.7 %.  A float is an explicit
+    # flat fraction and wins over the template (a stored config carrying the
+    # old 0.05 / 0.05 / 0.10 / 0.10 keeps them).
+    ne_scalar_sigma: Optional[float] = None
+    te_scalar_sigma: Optional[float] = None
+    ni_scalar_sigma: Optional[float] = None
+    ti_scalar_sigma: Optional[float] = None
     # explicit psi_N-dependent ABSOLUTE sigma profiles (on the kinetic grid),
     # keyed by 'ne'/'te'/'ni'/'ti'. Present channels override the scalar/IDA path.
     sigma_profiles: dict = field(default_factory=dict)
@@ -738,13 +754,15 @@ class UncertaintyConfig:
     # DERIVES the main-ion density ni from (ne, Z_eff) via quasineutrality, so
     # ni/nz/Z_eff stay mutually consistent; ni_scalar_sigma is then unused
     # (it IS used whenever ni_from_zeff resolves False -- see below).
-    # Real Z_eff (visible bremsstrahlung / CER) is ~10-20% uncertain; the 0.05
-    # default is deliberately conservative -- widen it for a realistic envelope.
-    # Set 0.0 to disable (Z_eff held at baseline, ni drawn independently).
+    # None (the default since 2026-10-14; it was 0.05) = the channel ON with
+    # the H-mode flat-top Z_eff template x |Z_eff| as the assumed tier
+    # (uniform-psi_N mean 11 %; real Z_eff is ~10-20 % uncertain); a float is
+    # an explicit flat fraction for that tier.  Set 0.0 to disable (Z_eff
+    # held at baseline, ni drawn independently).
     # An explicit aux_sigmas['zeff'] always overrides this.
-    zeff_scalar_sigma: float = 0.05
+    zeff_scalar_sigma: Optional[float] = None
     # Where the Z_eff envelope's MAGNITUDE comes from (the channel is enabled
-    # by zeff_scalar_sigma > 0 either way).  With the source's
+    # by zeff_scalar_sigma None or > 0 either way).  With the source's
     # ni_source="standard" (the default) the ladder is carbon > VB > scalar:
     #   "auto"     -- carbon-propagated (n_12C6_err / the dilution
     #                 posterior) > VB-measured (Zeff_err / the Z_eff sample
@@ -2754,6 +2772,17 @@ class BouquetConfig:
                         f"{self.device!r}; available: {sorted(known)}")
         if self.uncertainty.sigma_mode not in ("auto", "direct", "ensemble"):
             raise ValueError("uncertainty.sigma_mode must be 'auto', 'direct', or 'ensemble'")
+        import math
+        import numbers
+        for _c in ("ne", "te", "ni", "ti", "zeff"):
+            _v = getattr(self.uncertainty, f"{_c}_scalar_sigma")
+            if _v is not None and not (isinstance(_v, numbers.Real)
+                                       and not isinstance(_v, bool)
+                                       and math.isfinite(float(_v))
+                                       and float(_v) >= 0.0):
+                raise ValueError(
+                    f"uncertainty.{_c}_scalar_sigma must be None (the H-mode "
+                    f"flat-top template) or a finite fraction >= 0, not {_v!r}")
         if self.uncertainty.sigma_method not in ("percentile", "std"):
             raise ValueError(
                 "uncertainty.sigma_method must be 'percentile' or 'std'")

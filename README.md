@@ -289,7 +289,7 @@ Knobs live on config sub-objects reachable from the run object; set them before
 `generate()`.
 
 ```python
-b.uncertainty.ne_scalar_sigma = 0.05   # flat 5% envelope when no measured sigmas
+b.uncertainty.ne_scalar_sigma = 0.05   # explicit flat 5% (default None: the H-mode template)
 b.uncertainty.jphi_scalar_sigma = 0.10
 b.generation.n_equils = 50
 b.generation.l_i_tolerance = 0.05      # FRACTION of target (0.05 = 5%)
@@ -298,11 +298,11 @@ b.generation.seed = 1234
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `uncertainty.ne_scalar_sigma` / `te_` / `ni_` / `ti_` | `0.05` / `0.05` / `0.10` / `0.10` | Flat fractional envelopes, used when no IDA sigmas are supplied |
+| `uncertainty.ne_scalar_sigma` / `te_` / `ni_` / `ti_` | `None` | The assumed envelope of a channel with no measured sigma (no IDA file, no IMAS `*_error_upper`). `None` = the H-mode flat-top radial template (`bq.sigma_template`) × \|profile\| (uniform-ψ_N means n_e 4.0 %, T_e 8.4 %, n_i 9.6 %, T_i 9.7 %); a number = an explicit flat fraction, which wins. **The default changed on 2026-10-14** (was 0.05 / 0.05 / 0.10 / 0.10) — see [`docs/CHANGES_SUMMARY.md`](docs/CHANGES_SUMMARY.md) |
 | `uncertainty.jphi_scalar_sigma` | `0.10` | Inductive-current envelope; must be > 0 |
-| `uncertainty.zeff_scalar_sigma` | `0.05` | One Z_eff per draw; n_i / n_z follow from quasi-neutrality |
+| `uncertainty.zeff_scalar_sigma` | `None` | One Z_eff per draw; n_i / n_z follow from quasi-neutrality. `None` = the Z_eff template as the assumed tier (mean 11 %; was 0.05); `0.0` disables the channel |
 | `uncertainty.zeff_sigma_source` | `"auto"` | Tier supplying the Z_eff envelope's magnitude — carbon-propagated > VB-measured > scalar. `"carbon"` / `"measured"` / `"scalar"` force one; every step down warns. With an experimental `ni_source` (PR #56, opt-in) the measured tier is the IDA-resolved envelope instead. See [workflows.md](docs/workflows.md#uncertaintyconfig-buncertainty) |
-| `uncertainty.ida_path` | `None` | IDA `.cdf` supplying measured sigma envelopes instead of the scalars. **Wins over the scalars above** — see the precedence note below |
+| `uncertainty.ida_path` | `None` | IDA `.cdf` supplying measured sigma envelopes instead of the assumed defaults. **Wins over the scalars above** — see the precedence note below |
 | `uncertainty.log_sigma_sources` | `True` | Log which source each kinetic sigma actually resolved from |
 | `generation.n_equils` | `20` | Draws to attempt |
 | `generation.n_inspec_target` | `None` | Set it to draw **until N draws pass the filters** instead of exactly `n_equils` — `n_equils` becomes the initial allocation. The stopping rule uses the same predicate `filter()` applies — including the configured coil filter (`filtering.coil_filter`, chi2 by default) with the same per-coil sigma, DAQ era and acceptance thresholds — so the count it stops on is the count marked `selected`. On the parallel launchers the workers pool their count through a shared ledger and stop cooperatively once the run's one target is met |
@@ -339,12 +339,15 @@ Cholesky, which leaves a LAPACK build no discrete choices, so only rounding
 differs between builds. `seed=None` draws from OS entropy.
 
 **Kinetic-sigma precedence.** Per channel, `uncertainty.sigma_profiles[chan]`
-beats an IDA `.cdf` beats `<chan>_scalar_sigma` — and a `.cdf` passed as
+beats an IDA `.cdf` beats an IMAS source's own core_profiles `*_error_upper`
+beats the assumed default (`<chan>_scalar_sigma` when set, else the H-mode
+flat-top template) — and a `.cdf` passed as
 `ReconstructionSource.profiles_path` counts as an IDA source. A winning source
 *shadows* the others, so zeroing the scalars against an IDA file does nothing:
 to force a specific envelope (e.g. zero, for a deterministic point) pass
-`sigma_profiles`. The resolved source is logged per channel, and a
-deliberately-set-but-ignored scalar raises a warning.
+`sigma_profiles`. The resolved source is logged per channel and stamped in
+the resolved envelope's `sigma_source`, and a deliberately-set-but-ignored
+scalar raises a warning.
 
 ## Examples
 

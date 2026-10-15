@@ -1,5 +1,93 @@
 # Bouquet — change summaries
 
+## Unreleased — radial sigma templates: assumed defaults, IMAS error fields, fixtures (numbers move on every sigma-less run)
+
+**Default change (owner decision): the assumed envelope is a shape, not a flat
+number.** `UncertaintyConfig.{ne,te,ni,ti,zeff}_scalar_sigma` now default to
+`None`, meaning the **H-mode flat-top radial template** times |baseline|
+(`bouquet.sigma_template(psi_N, chan)`; `bouquet.uncertainties.SIGMA_TEMPLATES`:
+the median relative envelopes of IDA-lite deliveries on DIII-D H-mode
+flat-top, ramp / early H-mode and L-mode slices, 14 ψ_N nodes, 2 s.f.,
+piecewise linear, the ψ_N = 1 value held outside the LCFS). It applies to every
+channel with no measured sigma: no IDA file and no IMAS error field. A set
+scalar is an explicit flat fraction and still wins; a stored config carries the
+old 0.05 / 0.05 / 0.10 / 0.10 / 0.05 explicitly and reproduces what it ran.
+The Z_eff channel stays on by default (`zeff_scalar_sigma=0.0` turns it off),
+its assumed tier (still named `"scalar"`) now the Z_eff template.
+
+**Numbers move on every sigma-less run** (p-file / g-file-only / FUSE dd
+without error fields): the kinetic and Z_eff draw widths, hence the spread of
+every derived quantity. Uniform-in-ψ_N means of the relative envelope (about
+the volume average):
+
+| channel | before | now | ψ_N 0 / 0.5 / 0.9 / 1.0 now |
+|---|---|---|---|
+| n_e | 5 % | 4.0 % | 5.7 / 2.8 / 5.8 / 15 % |
+| T_e | 5 % | 8.4 % | 5.2 / 7.8 / 13 / 19 % |
+| n_i | 10 % | 9.6 % | 17 / 8.1 / 9.7 / 22 % (used only when `ni_from_zeff` resolves False) |
+| T_i | 10 % | 9.7 % | 8.9 / 8.7 / 14 / 31 % |
+| Z_eff | 5 % | 11 % | 16 / 8.7 / 12 / 41 % |
+
+The material changes are T_e (too tight by 1.6-3.8x from mid radius to the
+separatrix at a flat 5 %, exactly where the pedestal gradient drives j_BS) and
+Z_eff; n_e narrows at mid radius and widens 3x at the separatrix. (The design
+note quotes 9.7 % / 9.8 % for n_i / T_i, the means of the unrounded median; the
+shipped 2-s.f. nodes give 9.6 % / 9.7 %.) A Φ_N run evaluates the templates at
+the nodes' ψ_N. Which default applied is stamped:
+`resolve_uncertainty()["sigma_source"][chan]["assumed_default"]` is
+`"template hmode_flattop"` or `"scalar <x>"`, and the Z_eff tier record carries
+`"assumed_default"`. A negative, non-finite or non-numeric scalar is refused
+when the config is built.
+
+**The IMAS reader takes the dd's own error fields.** `io.imas.read_imas_sigmas`
+reads core_profiles `electrons.density_thermal_error_upper` (`density_` as a
+fallback), `electrons.temperature_error_upper`, the main ion's
+`density_thermal_error_upper` / `temperature_error_upper` and
+`zeff_error_upper` (the mean with `*_error_lower` where both exist; a wrong
+length, non-finite, negative or all-zero field is skipped with the reason
+recorded). With `sigma_mode` `"auto"` (or `"direct"`) an `ImasSource` with no
+IDA sigma file uses them; without them, the assumed defaults as before. The
+precedence per channel is now `sigma_profiles` > IDA `.cdf` > IMAS error fields
+> assumed default, and the Z_eff ladder gains an **IMAS-measured** tier above
+the assumed one for the dd's own Z_eff baseline (also on the dd route with an
+IDA sigma file, whose Z_eff tiers are ineligible there: such a run's Z_eff
+envelope moves from the assumed tier to the dd's `zeff_error_upper` when the dd
+carries one). `ida_hybrid` is unchanged: its kinetics and envelopes are the IDA
+file's and the dd's error fields are not read. The winner of every channel is
+stamped warning-free as `resolve_uncertainty()["sigma_source"]` (kind
+`explicit` / `ida` / `imas` / `assumed`).
+
+**`synthetic_ida_sigma` is the flat-top template.** Same interface; it now also
+takes `zeff` and `nc`, and `ni` is the derived n_i envelope (it was an alias of
+`ne`). The previous constants were a sine-basis fit (const + sin(kπψ) harmonics
++ sin(πψ/2)^p edge terms) to the fractional-sigma shape of one reference case,
+for n_e / T_e / T_i only; against the flat-top median they were 1.2-1.5x too
+low in the core and at mid radius and 1.6-3x too low at the separatrix, with no
+on-axis rise.
+
+| at ψ_N 0 / 0.5 / 0.9 / 1.0 | old | new |
+|---|---|---|
+| n_e | 2.4 / 2.4 / 4.0 / 6.0 % | 5.7 / 2.8 / 5.8 / 15 % |
+| T_e | 3.2 / 5.5 / 8.6 / 12 % | 5.2 / 7.8 / 13 / 19 % |
+| T_i | 5.7 / 7.1 / 7.4 / 9.6 % | 8.9 / 8.7 / 14 / 31 % |
+| n_i | = n_e | 17 / 8.1 / 9.7 / 22 % |
+| Z_eff, n_C | — | 16 / 8.7 / 12 / 41 %, 16 / 9.7 / 12 / 45 % |
+
+**Fixtures.** The two IDA-layout files' `n_e/T_e/T_12C6/Zeff/n_12C6_err` are now
+the template of their phase times the profile (`diiid_profs_synthetic.cdf`:
+ramp; `ida_synthetic_lmode.cdf`: L-mode) instead of flat 4 / 8 / 10 / 10 / 10 %,
+and every dd core_profiles slice carries the IMAS `*_error_upper` envelopes
+(0.7 s L-mode, 1.1 and 1.2 s ramp, 1.4 and 3.0 s H-mode flat top). No profile
+changed (checked bit for bit). `tests/data/apply_sigma_templates.py` writes
+them in place; `make_synthetic_fixtures.py` calls the same functions
+(tests/data/FIXTURE_SPEC.md section 7). The solver tests that read the
+fixtures run `from_imas(..., ida_path=...)`, i.e. `ida_hybrid`: the dd's error
+fields stay inert there and the IDA file's envelopes, now the ramp template,
+drive the draws (T_e 5.5-20 % instead of 8 %, n_e 2.2-16 % instead of 4 %, T_i
+9.7-31 % instead of 10 %, and the IDA-resolved Z_eff / n_i envelopes built from
+the wider Zeff_err and n_12C6_err). Their bars are unchanged; their measured
+values are to be re-taken.
+
 ## Unreleased — IDA-hybrid: the IDA file's own Z_eff is the default (numbers move on every IDA-hybrid run)
 
 **Default change (owner decision): one thermal-kinetics source per run.** When an

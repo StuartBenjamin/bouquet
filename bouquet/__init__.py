@@ -32,6 +32,7 @@ from .TokaMaker_interface import (
 
 from .uncertainties import (
     new_uncertainty_profiles,
+    sigma_template,
     synthetic_ida_sigma,
 )
 
@@ -217,7 +218,7 @@ __all__ = [
     "GPRProfilePerturber", "generate_perturbed_GPR", "make_rng",
     "sigmoid_length_scale",
     "verify_gpr_statistics", "calc_cylindrical_li_proxy",
-    "new_uncertainty_profiles", "synthetic_ida_sigma",
+    "new_uncertainty_profiles", "sigma_template", "synthetic_ida_sigma",
     # ---- advanced: functional (pre-class) API ----
     "generate_bouquet", "perturb_kinetic_equilibrium", "reconstruct_equilibrium",
     # ---- process-parallel: the draws of one bouquet, or many bouquets ----

@@ -88,7 +88,7 @@ non-default knobs), `archive` (its `BouquetArchive`), `selected_indices()`,
 | Quantity | Perturbed? | Notes |
 |----------|:----------:|-------|
 | n_e, T_e, T_i | ✓ | Drawn from the GPR posterior |
-| Z_eff | ✓ | Active channel (default on via `zeff_scalar_sigma`) |
+| Z_eff | ✓ | Active channel (on by default; `zeff_scalar_sigma=0.0` turns it off) |
 | n_i, n_z (impurity) | derived | Quasi-neutrality with the drawn Z_eff (`impurity_Z`) |
 | Total pressure (p_tot) | ✓ | Recomputed from the perturbed kinetics |
 | Bootstrap current (j_BS) | ✓ | Sauter model recomputed per draw (`recalculate_j_BS`) |
@@ -139,15 +139,15 @@ stored config carrying it still loads.
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `ida_path` | `None` | IDA `.cdf` supplying measured sigma envelopes (overrides the scalars below) |
-| `sigma_mode` / `sigma_method` | `"auto"` / `"percentile"` | IDA layout dispatch (direct `*_err` vs. ensemble posterior) and ensemble reduction |
+| `ida_path` | `None` | IDA `.cdf` supplying measured sigma envelopes (overrides the IMAS error fields and the assumed defaults below) |
+| `sigma_mode` / `sigma_method` | `"auto"` / `"percentile"` | IDA layout dispatch (direct `*_err` vs. ensemble posterior) and ensemble reduction. An `ImasSource` with no IDA sigma file reads the dd's own core_profiles `*_error_upper` under `"auto"` / `"direct"` (`io.imas.read_imas_sigmas`; not on `ida_hybrid`, not under `"ensemble"`) |
 | `log_sigma_sources` | `True` | Log one line per kinetic channel naming the source that actually won the precedence |
-| `ne_scalar_sigma` | `0.05` | Flat fractional envelope used when no IDA sigmas are supplied |
-| `te_scalar_sigma` | `0.05` | " |
-| `ni_scalar_sigma` | `0.10` | " |
-| `ti_scalar_sigma` | `0.10` | " |
+| `ne_scalar_sigma` | `None` | The **assumed** envelope of a channel with no measured sigma (no IDA file, no IMAS error field). `None` = the H-mode flat-top radial template, `bouquet.sigma_template(psi_N, chan)` × \|profile\| (relative σ vs ψ_N, evaluated at the nodes' ψ_N in a Φ_N run); a number = an explicit flat fraction, which wins. Default changed 2026-10-14 (was `0.05`; see below) |
+| `te_scalar_sigma` | `None` | " (was `0.05`) |
+| `ni_scalar_sigma` | `None` | " (the derived-n_i template row; was `0.10`; used only when `ni_from_zeff` resolves False) |
+| `ti_scalar_sigma` | `None` | " (was `0.10`) |
 | `jphi_scalar_sigma` | `0.10` | Inductive-current envelope. **Must be > 0** — setting it to 0 freezes `j_inductive` and trips the workflow guard |
-| `zeff_scalar_sigma` | `0.05` | One Z_eff perturbation per draw; n_i / n_z follow from quasi-neutrality. Also the width of the bottom tier below |
+| `zeff_scalar_sigma` | `None` | One Z_eff perturbation per draw; n_i / n_z follow from quasi-neutrality. The width of the bottom (assumed) tier below: `None` = the Z_eff template (was `0.05`), a number = a flat fraction, `0.0` = the channel off |
 | `zeff_sigma_source` | `"auto"` | Which tier supplies the Z_eff envelope's **magnitude**: `"auto"` / `"carbon"` / `"measured"` / `"scalar"` — see the ladder below |
 | `ni_from_zeff` | `None` (auto) | With the Z_eff channel on: `True` derives n_i per draw from the drawn (n_e, Z_eff) as an increment on the baseline n_i; `False` draws n_i from its own σ and Z_eff passively after T_i (different RNG order). Auto: `True` (n_i always derived, as before PR #56). On a measured `ni_source` (the `ida_hybrid` default) auto is the PR #56 rule: `True` when n_i's σ is the scalar fallback, or n_i and the Z_eff envelope are the same IDA resolution (tier `"IDA-resolved"`); `False` for any other real n_i envelope. That rule follows the Z_eff tier: pin it for an A/B of Z_eff envelopes |
 | `kinetic_clips` | `None` (auto) | The PR #56 sampler clips (graduated 2026-10-14, `kinetic_sampler_clips`) -- a drawn Z_eff floored at 1 where `physics.zeff_bounds` allows less, a derived n_i held in `[0, n_e − z_fast]`, an independent n_i capped at `n_e − z_fast` when `Z_imp` is declared, a passive Z_eff aux draw clipped to the window. Auto: on with the measured IDA `ni_source` route in play (the IDA-hybrid default, or a route set explicitly), the beam subtraction resolved on, or `fuse_zeff_fast_ions`; every clip that fires is counted per draw |
@@ -204,7 +204,9 @@ solver's toroidal-flux map cannot be built (surfaces fail to trace), the solve
 fails like any other and the draw is rejected.
 
 **Precedence, per kinetic channel:** `sigma_profiles[chan]` > an IDA `.cdf` >
-`<chan>_scalar_sigma`. A `.cdf` handed to `ReconstructionSource.profiles_path`
+an `ImasSource`'s own core_profiles `*_error_upper` > the assumed default
+(`<chan>_scalar_sigma` when set, else the H-mode flat-top template). A `.cdf`
+handed to `ReconstructionSource.profiles_path`
 is adopted as an IDA source automatically, so it counts here even when
 `ida_path` is unset. A winning source **shadows** the ones below it rather than
 combining with them — which means zeroing `*_scalar_sigma` to get a
@@ -219,8 +221,30 @@ b.uncertainty.sigma_profiles = {ch: np.zeros(n_kin)
 ```
 
 `resolve_uncertainty` logs the winning source per channel (disable with
-`log_sigma_sources=False`) and warns when a scalar you moved off its default is
-being ignored. `sigma_jphi` and the aux channels have no `.cdf` branch, so
+`log_sigma_sources=False`), returns it warning-free as `"sigma_source"`
+(`{chan: {"kind": "explicit" | "ida" | "imas" | "assumed", "source", "assumed_default"}}`,
+Z_eff included, with its tier), and warns when a scalar you set is being
+ignored.
+
+**Every sigma-less run's widths moved on 2026-10-14.** The assumed default is
+the H-mode flat-top template shape (the median relative envelope of IDA-lite
+deliveries on DIII-D H-mode flat-top slices; 14 ψ_N nodes, 2 s.f.,
+`bouquet.uncertainties.SIGMA_TEMPLATES`) instead of the flat scalars. As
+uniform-in-ψ_N means (about the volume average):
+
+| channel | before | now | at ψ_N 0 / 0.5 / 0.9 / 1.0 now |
+|---|---|---|---|
+| n_e | 5 % | 4.0 % | 5.7 / 2.8 / 5.8 / 15 % |
+| T_e | 5 % | 8.4 % | 5.2 / 7.8 / 13 / 19 % |
+| n_i | 10 % | 9.6 % | 17 / 8.1 / 9.7 / 22 % |
+| T_i | 10 % | 9.7 % | 8.9 / 8.7 / 14 / 31 % |
+| Z_eff | 5 % | 11 % | 16 / 8.7 / 12 / 41 % |
+
+(The design note's 9.7 % / 9.8 % for n_i / T_i are the means of the unrounded
+median; the shipped 2-s.f. nodes give 9.6 % / 9.7 %.) Which default applied is
+stamped (`sigma_source[chan]["assumed_default"]`: `"template hmode_flattop"` or
+`"scalar <x>"`). A stored config carries the old scalars explicitly and
+reproduces what it ran; set them to get the flat envelopes back. `sigma_jphi` and the aux channels have no `.cdf` branch, so
 their scalars always apply.
 
 **The Z_eff envelope has its own ladder (`zeff_sigma_source`).** Z_eff is the
@@ -234,7 +258,8 @@ supports:
 |---|---|---|
 | carbon-propagated | `n_12C6_err` + `n_e_err` (direct layout) or the dilution posterior (ensemble), propagated through `Z_eff = 1 + Z(Z−1)·n_C/n_e` | `"carbon"` |
 | VB-measured | the file's own `Zeff_err` (direct) or `Zeff` sample spread (ensemble) | `"measured"` |
-| scalar | `zeff_scalar_sigma` × abs(Z_eff) — an **assumed** width, not a measured one | `"scalar"` |
+| IMAS-measured | an `ImasSource`'s own `zeff_error_upper`, for the dd's own Z_eff baseline (no IDA tier chosen; not on `ida_hybrid`) | — (`"auto"` / `"measured"`) |
+| scalar | the Z_eff template × abs(Z_eff) (`zeff_scalar_sigma=None`, the default) or `zeff_scalar_sigma` × abs(Z_eff) — an **assumed** width, not a measured one | `"scalar"` |
 
 CER carbon is the direct measurement of the dilution the draw actually moves,
 which is why it outranks the visible-bremsstrahlung sigma. Both measured tiers
@@ -242,8 +267,9 @@ require the Z_eff baseline to be the IDA one — the reconstruction path, and th
 **same** file that supplies the sigmas (compared as resolved paths, so a
 relative, `~`-prefixed or symlinked spelling is still the same file). An
 IMAS baseline on the dd route (FUSE kinetics, or `ida_hybrid` with
-`ni_source="standard"`) or a p-file baseline therefore gets the scalar:
-pairing a FUSE Z_eff with an IDA envelope would mix channels.
+`ni_source="standard"`) or a p-file baseline therefore gets the dd's own
+`zeff_error_upper` where the dd carries one (FUSE kinetics), else the assumed
+tier: pairing a FUSE Z_eff with an IDA envelope would mix channels.
 
 With a measured `ni_source` (the `ida_hybrid` default, `ida_ion_route`) the measured tier is
 instead `read_ida`'s own resolution, **IDA-resolved**: VB+CER > CER > VB over
