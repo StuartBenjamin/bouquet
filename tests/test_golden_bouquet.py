@@ -4,9 +4,10 @@ These run against the slimmed, git-tracked h5 goldens plus their JSON
 manifests of expected values, every test once per golden (``GOLDENS``):
 
 * ``gfile``: ``tests/golden/D3Dlike_Hmode_golden_slim.h5`` +
-  ``golden_manifest.json`` -- the unified-engine run of the synthetic g-file
-  + IDA-layout profile fixtures (``tests/data/g_synthetic.geqdsk`` +
-  ``tests/data/diiid_profs_synthetic.cdf``);
+  ``golden_manifest.json`` -- a unified-engine run of a g-file source (the
+  committed record: the D3D-like example g-file + p-file; its regeneration on
+  the synthetic g-file + IDA-layout profile fixtures is pending the
+  correction of that g-file, ``tests/golden/README.md``);
 * ``ids``: ``tests/golden/D3Dlike_ids_golden_slim.h5`` +
   ``ids_golden_manifest.json`` -- the unified-engine IDA-hybrid run of the
   synthetic dd's 1.2 s slice (``tests/data/dd_synthetic.json.gz`` with the
@@ -198,8 +199,14 @@ def test_the_fixture_says_what_built_it(golden, manifest):
 def test_the_fixture_is_a_self_consistent_bootstrap_run(golden):
     """The golden records the DEFAULT pipeline: the self-consistent bootstrap
     loop (jbs_self_consistent=True).  Its stored config says so, the baseline
-    and every draw carry a converged schema-v3 jbs_loop block, and no loop
-    record names a filesystem path (a public fixture)."""
+    and every draw carry a converged loop record, and no loop record names a
+    filesystem path (a public fixture).
+
+    The g-file golden's baseline carries the schema-v3 ``jbs_loop`` block.
+    The IDS route archives none on its baseline (``read_jbs_loop`` is None
+    there): its reconstruction's loop verdict is in the baseline's engine
+    record (``engine_json``: ``converged`` and ``loop_converged``), which is
+    read instead.  Every draw carries the block on both routes."""
     from bouquet.utils import load_config
     from bouquet.schema import read_jbs_loop
     import sys
@@ -210,7 +217,16 @@ def test_the_fixture_is_a_self_consistent_bootstrap_run(golden):
     with h5py.File(golden.slim, "r") as hf:
         g = hf["scan/0"]
         bl = read_jbs_loop(g["_baseline"])
-        assert bl is not None and bl["converged"], bl
+        if golden.name == "ids":
+            assert bl is None, "the IDS baseline now archives a jbs_loop " \
+                "block: check it here as on the g-file golden"
+            raw = g["_baseline/engine_json"][()]
+            eng = json.loads(raw.decode() if isinstance(raw, bytes)
+                             else bytes(raw).decode())
+            assert eng["converged"] and eng["loop_converged"], \
+                {k: eng.get(k) for k in ("converged", "loop_converged")}
+        else:
+            assert bl is not None and bl["converged"], bl
         draws = [k for k in g if k.isdigit()]
         assert draws
         for k in draws:
