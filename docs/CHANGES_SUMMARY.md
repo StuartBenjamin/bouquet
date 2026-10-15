@@ -88,6 +88,91 @@ drive the draws (T_e 5.5-20 % instead of 8 %, n_e 2.2-16 % instead of 4 %, T_i
 the wider Zeff_err and n_12C6_err). Their bars are unchanged; their measured
 values are to be re-taken.
 
+## Unreleased — the in-spec rule is the magnetics (yields rise; every l_i band becomes a result)
+
+**Default change (owner decision, 2026-10-14): the l_i band is removed from the
+default in-spec filter.** A draw is now IN SPEC when it passes the configured
+coil test (χ²/ν and the worst-coil |z| against the device's coil
+uncertainties) and the boundary-deviation cut, and was not rejected before
+archiving -- the magnetics. The external magnetics constrain I_p, the boundary
+and β_p + l_i/2, which bouquet already enforces exactly through the
+free-boundary draw solve, the coil test and the boundary cut; l_i(3) alone is
+an equilibrium inference, not a magnetics measurement. Until now every
+unified-engine draw was also held to `|l_i - l_i*| <= 0.05 l_i*`
+(`GenerationConfig.l_i_tolerance = 0.05`), which conditioned each ensemble on
+information the magnetics do not provide and was the binding filter on the
+synthetic ensembles. **No threshold is loosened**: the coil χ² acceptance, the
+boundary cut and every tolerance keep their values; one filter leaves the
+default.
+
+**What moves.** On the unified engine (the default route): the in-spec yield
+and every until-N attempt count, the `selected` population and so every band
+built on it (`draw_band` / `draw_bands` / `draw_scalars`), the archived
+`in_spec` and `passes_draw_band` of each draw (`passes_draw_band` is now True
+unless an opt-in band is on). **Yields rise** wherever the l_i band was binding,
+and **every reported l_i band becomes a result of the ensemble rather than a
+reflection of the 5 % tolerance** (on the synthetic ensembles the l_i band was
+the most frequent reason an archived draw was out of spec). The legacy and swb routes are unchanged:
+there `l_i_tolerance` acts inside the draw construction (rejection sampling
+of the inductive current, and the legacy reconstruction's post-corrective
+report), and unset it keeps its old value 0.05
+(`filtering.LEGACY_L_I_CONSTRUCTION_TOLERANCE`). **The goldens and the
+ladder are regenerated on the new rule**: the unified-engine golden fixture's
+recorded `in_spec` / `n_in_spec` (tests/test_golden_bouquet.py) were made
+under the old band and are not edited by hand.
+
+**The opt-in bands** (unified engine; all off by default), for a source that
+STATES a measurement uncertainty:
+
+- `generation.l_i_tolerance` (now `None` by default): an explicit fractional
+  l_i(3) band, as before when set;
+- `generation.l_i_sigma`: the stated 1σ of l_i(3) of an MSE / diamagnetic fit
+  (absolute); band `|l_i - l_i*| <= inspec_band_nsigma * l_i_sigma`
+  (exclusive with `l_i_tolerance`);
+- `generation.beta_p_target` + `generation.beta_p_sigma`: a diamagnetic β_p
+  band, `|β_p - beta_p_target| <= inspec_band_nsigma * beta_p_sigma`;
+- `generation.inspec_band_nsigma` (default 2.0): the σ bands' half-width;
+- `constrain_sawteeth` keeps its meaning and joins them (`+q0`).
+
+A measurement band on the legacy/swb routes is refused at `generate()` (they
+have no post-hoc stage); `bouquet.refilter_inspec` applies any band to any
+archive afterwards.
+
+**Λ = β_p + l_i(3)/2, stored and reported, never filtered.** Every draw carries
+`beta_p` and `Lambda` attrs (the unified engine's `_baseline` too), also in its
+engine `post_hoc` / `archived` records; `draw_scalars` adds the quantities
+`beta_p` and `Lambda`, `ScanView.spread()` the two columns, `read_filter_flags`
+the two values. Definition (`filtering.LAMBDA_DEFINITION`, docs/physics-notes.md):
+β_p = 2 μ0 ⟨p⟩_V / B_pa² with B_pa = μ0 I_p / L_p and the FULL pressure (thermal
++ fast, the separatrix pressure added back); l_i(3) in TokaMaker's `"iter"`
+normalisation (R_0 at the magnetic axis); no "−1". For a shaped plasma the
+magnetics' true observable is the shape-weighted combination, which the coil
+test against the free-boundary solve already enforces exactly.
+
+**Recorded, re-filterable.** The scan group carries `inspec_rule`
+(`"magnetics"`, `"magnetics+li"`, `"magnetics+beta_p"`, ... `"+q0"`),
+`inspec_bands_json` and `lambda_definition`; each band that is on writes its
+own per-draw flag (`passes_l_i_band`, `passes_beta_p_band`, `passes_q0_gate`)
+beside `passes_draw_band` (their AND), `passes_coil_filter` and
+`passes_boundary_filter`. The until-N target counts in-spec by the rule in
+force. `bouquet.refilter_inspec(path, bands)` re-judges an archive from its
+stored numbers (no physics re-run); `Bouquet.filter()` does it automatically,
+and says so, for an archive that predates the record (its engine draws carry
+the old unconditional band) or was judged under other bands. A band's
+provenance records `inspec_rule`, with a limitation line on an archive that
+predates it. `merge_archives` refuses shards judged under different rules and
+records the one rule on the merged scan and in its manifest (`inspec_rule`,
+`inspec_bands`); `merge_cases` records each case's rule
+(`inspec_rules_json`). The ensemble summary printed by `filter()` names the
+rule.
+
+**Stored configs.** A config stored before the rule (it lacks
+`generation.inspec_band_nsigma`) with `l_i_tolerance` at the old default 0.05
+loads with the band OFF and a one-line note in the stored-load warnings; any
+other stored value was explicit and keeps its band (rule `"magnetics+li"`); a
+config without the field loads loud, band off. A config written since
+round-trips exactly (an explicit 0.05 keeps its band).
+
 ## Unreleased — IDA-hybrid: the IDA file's own Z_eff is the default (numbers move on every IDA-hybrid run)
 
 **Default change (owner decision): one thermal-kinetics source per run.** When an

@@ -33,10 +33,14 @@ on) the delivery correction ``Delta*``.  It
 * records l_i(3), l_i(1), beta_N, q0 at its labelled radius, q95, the Ip
   amplitude, the loop record, the delivery check, the change of l_i and of
   the poloidal flux range ``psi_b - psi_a`` against the reconstruction and
-  the cost by stage; the post-hoc filters (the l_i band ``l_i_tolerance``
-  around the reconstruction's l_i, ``constrain_sawteeth``) are applied to
-  the archived draw -- a draw outside a band is ARCHIVED with
-  ``in_spec=False``, never dropped.
+  the cost by stage, beta_p and Lambda = beta_p + l_i(3)/2
+  (:data:`bouquet.filtering.LAMBDA_DEFINITION`; reported, never filtered
+  on); the post-hoc filters are the OPT-IN bands of the in-spec rule
+  (:class:`bouquet.filtering.InspecBands`: an l_i band from
+  ``l_i_tolerance`` or ``l_i_sigma``, a beta_p band, ``constrain_sawteeth``;
+  all off by default since 2026-10-14, owner decision -- a draw is in spec
+  on the magnetics alone) applied to the archived draw -- a draw outside a
+  band is ARCHIVED with ``in_spec=False``, never dropped.
 
 **Zero-perturbation identity by construction.**  Every perturbed quantity is
 formed as ``base + (drawn - base)`` (kinetics, pressure, inductive, aux) so
@@ -1054,35 +1058,47 @@ def post_homotopy(ctx, backend, draw, settings, *, coil_guard=None,
 # ---------------------------------------------------------------------------
 #  the post-hoc filters of the archived draw
 # ---------------------------------------------------------------------------
-def post_hoc_verdicts(ctx, final, *, l_i_tolerance, constrain_sawteeth,
-                      l_i_reference=None):
+def archived_beta_p(final):
+    """beta_p (fraction) of a final measurement: its full-pressure frame's
+    ``beta_pol`` / 100 (:data:`bouquet.filtering.LAMBDA_DEFINITION`), NaN
+    when the backend reports none."""
+    from .engine import _full_frame
+    v = _full_frame(final).get("beta_pol")
+    try:
+        return float(v) / 100.0
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def post_hoc_verdicts(ctx, final, *, l_i_tolerance=None,
+                      constrain_sawteeth=False, l_i_reference=None,
+                      bands=None):
     """The engine draw's post-hoc filters on the ARCHIVED state *final*
-    (a backend measurement): the l_i band ``|l_i - l_i*| <= l_i_tolerance *
-    l_i*`` (``l_i_tolerance`` a FRACTION, ``l_i*`` the reconstruction's
-    delivered l_i unless *l_i_reference*), and, with
+    (a backend measurement): the OPT-IN bands of the in-spec rule
+    (:class:`bouquet.filtering.InspecBands`; *bands*, else built from
+    ``l_i_tolerance`` / ``constrain_sawteeth``) -- the l_i band ``|l_i -
+    l_i*| <= l_i_tolerance * l_i*`` (``l_i_tolerance`` a FRACTION) or
+    ``<= nsigma * l_i_sigma``, ``l_i*`` the reconstruction's delivered l_i
+    unless *l_i_reference*; the beta_p band; and, with
     ``constrain_sawteeth``, ``q0 >= 1`` at the q-row radius (the legacy
-    gate's radius, psi_N = psi_pad).  Returns the verdict dict
-    (``in_band``)."""
+    gate's radius, psi_N = psi_pad).  With every band off (the default
+    since 2026-10-14) ``in_band`` is True: the draw is judged on the
+    magnetics alone.  Also reports ``beta_p`` and ``Lambda`` (never
+    judged).  Returns the verdict dict (``in_band``)."""
+    from .filtering import InspecBands
+    if bands is None:
+        bands = InspecBands(l_i_tolerance=l_i_tolerance,
+                            constrain_sawteeth=constrain_sawteeth)
     li_ref = float(ctx.ref["l_i"] if l_i_reference is None
                    else l_i_reference)
-    li = float(final["li"])
-    rel = abs(li - li_ref) / li_ref if li_ref else float("inf")
-    li_ok = bool(np.isfinite(rel) and rel <= float(l_i_tolerance))
-    q0 = float(final["q_row"])
-    saw_ok = True if not constrain_sawteeth else bool(np.isfinite(q0)
-                                                      and q0 >= 1.0)
-    reasons = []
-    if not li_ok:
-        reasons.append(f"l_i band: |l_i - l_i*|/l_i* = {rel:.4f} > "
-                       f"l_i_tolerance {float(l_i_tolerance):g}")
-    if not saw_ok:
-        reasons.append(f"constrain_sawteeth: q0 = {q0:.4f} < 1 at psi_N "
-                       f"{ctx.ref['q_row_psi_N']:g}")
-    return dict(l_i_3=li, l_i_reference=li_ref, l_i_rel=float(rel),
-                l_i_tolerance=float(l_i_tolerance), l_i_in_band=li_ok,
-                constrain_sawteeth=bool(constrain_sawteeth), q0=q0,
-                q0_psi_N=float(ctx.ref["q_row_psi_N"]), q0_ok=saw_ok,
-                in_band=bool(li_ok and saw_ok), reasons=reasons)
+    v = bands.verdicts(l_i=final["li"], l_i_reference=li_ref,
+                       beta_p=archived_beta_p(final), q0=final["q_row"],
+                       q0_psi_N=ctx.ref["q_row_psi_N"])
+    v["q0_psi_N"] = float(ctx.ref["q_row_psi_N"])
+    # historical spelling: the gate passes when it is off
+    if v["q0_ok"] is None:
+        v["q0_ok"] = True
+    return v
 
 
 #: Group attribute of an archived engine draw: the post-hoc band verdict (an
@@ -1160,9 +1176,9 @@ class GenerateEngineDraws(DrawMethod):
     name = "engine"
 
     def __init__(self, ctx, *, unc, psi_pad, q_psi=None, maxits=None,
-                 homotopy=True, l_i_tolerance=0.05, p_thresh=0.05,
+                 homotopy=True, l_i_tolerance=None, p_thresh=0.05,
                  max_proxy_draws=500, coil_reg=None, delivered_eq=None,
-                 recon_isoflux=None):
+                 recon_isoflux=None, bands=None):
         self.ctx = ctx
         #: the isoflux pattern the reconstruction was pointed at
         #: (``Bouquet._engine_run["recon_isoflux"]``: ``pts``, ``w``,
@@ -1189,7 +1205,16 @@ class GenerateEngineDraws(DrawMethod):
         self.homotopy = bool(homotopy)
         #: jBS_scale_range handed to the draws (set by Bouquet._draw_method)
         self.scale_range = None
-        self.l_i_tolerance = float(l_i_tolerance)
+        #: the opt-in bands of the in-spec rule (bouquet.filtering.
+        #: InspecBands): *bands*, else an l_i band from an explicit
+        #: ``l_i_tolerance`` (None, the default: no band -- the magnetics
+        #: alone).  ``constrain_sawteeth`` is the call's own (post_hoc).
+        from .filtering import InspecBands
+        if bands is None:
+            bands = InspecBands(l_i_tolerance=l_i_tolerance)
+        self.bands = bands
+        self.l_i_tolerance = (None if bands.l_i_tolerance is None
+                              else float(bands.l_i_tolerance))
         self.p_thresh = float(p_thresh)
         self.max_proxy_draws = int(max_proxy_draws)
         self.loop_settings = dict(ctx.loop)
@@ -1687,14 +1712,17 @@ class GenerateEngineDraws(DrawMethod):
     def post_hoc(self, mygs, diagnostics, in_spec, *, constrain_sawteeth,
                  l_i_target=None):
         """The post-hoc filters on the archived state; returns the draw's
-        ``in_spec`` (the coil verdict AND the band)."""
+        ``in_spec`` (the coil verdict AND the opt-in bands -- none on by
+        default: the coil verdict alone)."""
+        from .filtering import InspecBands
         cur = self._cur
         clock = cur["clock"]
         clock.start("filters")
         b = cur["backend"]
         fin = b.measure(final=True)
-        v = post_hoc_verdicts(self.ctx, fin, l_i_tolerance=self.l_i_tolerance,
-                              constrain_sawteeth=constrain_sawteeth,
+        bands = InspecBands.from_record(dict(
+            self.bands.record(), constrain_sawteeth=bool(constrain_sawteeth)))
+        v = post_hoc_verdicts(self.ctx, fin, bands=bands,
                               l_i_reference=l_i_target)
         v["coil_in_spec"] = bool(in_spec)
         v["in_spec"] = bool(in_spec and v["in_band"])
@@ -1704,6 +1732,9 @@ class GenerateEngineDraws(DrawMethod):
         rec["archived"] = dict(
             l_i_3=float(fin["li"]), l_i_1=_f(fin.get("li_1")),
             beta_n=_f(_full_frame(fin).get("beta_n")),
+            # beta_p and Lambda = beta_p + l_i(3)/2 (filtering.
+            # LAMBDA_DEFINITION): reported, never filtered on
+            beta_p=_f(v["beta_p"]), Lambda=_f(v["Lambda"]),
             q0=float(fin["q_row"]),
             q0_psi_N=float(self.ctx.ref["q_row_psi_N"]),
             q95=_f(stats.get("q_95")), flux_range=flux_range(fin),
@@ -1750,6 +1781,15 @@ class GenerateEngineDraws(DrawMethod):
         if _jl.get("post_homotopy") is not None:
             rec["post_homotopy"] = _jl["post_homotopy"]
         diagnostics[DRAW_BAND_FLAG] = bool(v["in_band"])
+        # each band's own verdict (only those on) and the two stored
+        # scalars, written onto the archived group with the band flag
+        _fl = bands.flags(v)
+        _fl.pop(DRAW_BAND_FLAG, None)
+        from .filtering import BETA_P_ATTR, LAMBDA_ATTR
+        for _k, _x in ((BETA_P_ATTR, v["beta_p"]), (LAMBDA_ATTR, v["Lambda"])):
+            if np.isfinite(_x):
+                _fl[_k] = float(_x)
+        diagnostics["inspec_draw_attrs"] = _fl
         if v["reasons"]:
             print("  [engine draw post-hoc] OUT OF BAND (archived, "
                   "in_spec=False): " + "; ".join(v["reasons"]), flush=True)
@@ -1793,14 +1833,16 @@ class GenerateEngineDraws(DrawMethod):
         rec["cost"] = clock.record()
         _write_draw_block(header, count, scan_key, rec,
                           diagnostics.get(DRAW_BAND_FLAG),
-                          parallel=cur.get("parallel"))
+                          parallel=cur.get("parallel"),
+                          attrs=diagnostics.get("inspec_draw_attrs"))
         clock.start("filters")
 
     def until_n(self, ok, reasons, diagnostics, header=None, count=None,
                 scan_key=None):
         """The until-N verdict of an engine draw: the configured coil +
-        boundary verdict AND the post-hoc band (so the ledger counts what
-        ``.filter()`` marks ``selected``)."""
+        boundary verdict AND the opt-in post-hoc bands (so the ledger counts
+        what ``.filter()`` marks ``selected``; with no band on -- the
+        default -- the coil + boundary verdict alone)."""
         band = diagnostics.get(DRAW_BAND_FLAG)
         reasons = list(reasons)
         if band is not None and not band:
@@ -1812,7 +1854,8 @@ class GenerateEngineDraws(DrawMethod):
             if rec is not None:
                 rec["cost"] = cur["clock"].record()
                 _write_draw_block(header, count, scan_key, rec, band,
-                                  parallel=cur.get("parallel"))
+                                  parallel=cur.get("parallel"),
+                                  attrs=diagnostics.get("inspec_draw_attrs"))
         return bool(ok and (band is None or band)), reasons
 
     # ---- Bouquet.generate -------------------------------------------------
@@ -1889,12 +1932,27 @@ class GenerateEngineDraws(DrawMethod):
             bootstrap_refresh=bool(self.ctx.bootstrap_refresh),
             solve_maxits=self.maxits,
             homotopy=self.homotopy, l_i_tolerance=self.l_i_tolerance,
+            inspec_bands=self.bands.record(),
             ip_row=("the Ip the delivered composition carries in the exact "
                     "measure on G*"), Ip_target_A=self.ctx.Ip_star,
             reference=self.ctx.ref,
             homotopy_isoflux=(None if self.recon_isoflux is None else
                               dict(self.recon_isoflux.get("stamp") or {})))
         store_baseline_engine(header, rec, scan_key=scan_key)
+        # the reconstruction's beta_p and Lambda (filtering.
+        # LAMBDA_DEFINITION): its delivered full-pressure frame and l_i
+        from .filtering import BETA_P_ATTR, LAMBDA_ATTR, shafranov_lambda
+        from .utils import stamp_group_attrs
+        try:
+            _bp = float(rec["edge_pressure"]["frames"]["full"]["beta_pol"]) \
+                / 100.0
+        except (KeyError, TypeError, ValueError):
+            _bp = float("nan")
+        _lam = shafranov_lambda(_bp, self.ctx.ref.get("l_i"))
+        if np.isfinite(_lam):
+            stamp_group_attrs(header, scan_key, None,
+                              {BETA_P_ATTR: float(_bp),
+                               LAMBDA_ATTR: float(_lam)})
 
 
 def _jbs_block(loop_rec):
@@ -1912,7 +1970,8 @@ def _jbs_block(loop_rec):
         final=loop_rec))
 
 
-def _write_draw_block(header, count, scan_key, record, band, parallel=None):
+def _write_draw_block(header, count, scan_key, record, band, parallel=None,
+                      attrs=None):
     import h5py
     from .engine import write_engine_json
     from .schema import write_jB_parallel
@@ -1925,6 +1984,8 @@ def _write_draw_block(header, count, scan_key, record, band, parallel=None):
         write_engine_json(grp, record)
         if band is not None:
             grp.attrs[DRAW_BAND_FLAG] = bool(band)
+        for k, v in (attrs or {}).items():
+            grp.attrs[k] = v
         if parallel is not None:
             write_jB_parallel(grp, parallel)
 
@@ -1952,6 +2013,7 @@ def build_generate_context(bq, env):
             "from prepare_baseline() in this session (its live state is what "
             "a draw inherits); call prepare_baseline() first")
     from .engine import engine_draw_maxits
+    from .filtering import resolve_inspec_bands
     gc = bq.config.generation
     bl = bq.baseline
     ctx = context_from_run(run, gc, bl)
@@ -1960,7 +2022,7 @@ def build_generate_context(bq, env):
         ctx, unc=unc, psi_pad=run["psi_pad"], q_psi=run.get("q_psi"),
         maxits=engine_draw_maxits(gc),
         homotopy=bool(getattr(gc, "engine_draw_homotopy", True)),
-        l_i_tolerance=float(gc.l_i_tolerance),
+        bands=resolve_inspec_bands(gc),
         coil_reg=run.get("coil_reg"),
         delivered_eq=run.get("delivered_eq"),
         recon_isoflux=run.get("recon_isoflux"))

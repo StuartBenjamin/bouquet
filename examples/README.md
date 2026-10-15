@@ -54,6 +54,21 @@ run = bq.Bouquet.from_imas('…omas.json', mesh='DIIID_mesh.h5', time=2.3043,
 run.run()                         # setup → baseline → generate → filter → export
 ```
 
+## In-spec counts
+
+A draw is **in spec** when it passes the magnetics: the coil χ² test and the
+boundary-deviation cut (`run.filter()` prints the counts and names the rule;
+see [the in-spec rule](../docs/workflows.md#the-in-spec-rule)). Since
+2026-10-14 (owner decision) the l_i band is **not** part of that default; it
+and a β_p band are opt-in for a source that states their uncertainty
+(`generation.l_i_sigma`, `generation.beta_p_target` / `beta_p_sigma`, or an
+explicit `generation.l_i_tolerance`). Rendered outputs saved before that date
+count in-spec draws under the old unconditional ±5 % l_i band
+(`l_i_tolerance=0.05`), so a fresh run reports a higher yield and wider l_i
+bands; `bq.refilter_inspec(path)` (or `run.filter()`) re-judges an old archive
+under the current rule. β_p and Λ = β_p + l_i(3)/2 are reported per draw
+(`bq.draw_scalars`), never filtered on.
+
 ## Regenerating vs. loading
 
 Each notebook has a `REGENERATE` flag. The HDF5 outputs (`*.h5`) are gitignored,

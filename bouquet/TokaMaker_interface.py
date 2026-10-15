@@ -3243,9 +3243,11 @@ def perturb_kinetic_equilibrium(
     input_jinductive : ndarray or None
         Dimensionless inductive :math:`j_\phi` shape (required when
         ``recalculate_j_BS=True``).
-    l_i_tolerance : float
+    l_i_tolerance : float or None
         :math:`l_i` matching tolerance as a FRACTION of ``l_i_target``
-        (e.g. ``0.01`` == 1 %).
+        (e.g. ``0.01`` == 1 %); ``None`` (``GenerationConfig.l_i_tolerance``
+        unset) is the old default 0.05
+        (:data:`bouquet.filtering.LEGACY_L_I_CONSTRUCTION_TOLERANCE`).
     psi_pad : float
         Padding inside the LCFS for profile queries.
     constrain_sawteeth : bool
@@ -3342,6 +3344,10 @@ def perturb_kinetic_equilibrium(
         When ``psi_N_kinetic`` is provided, the kinetic profiles
         (``ne_perturb`` etc.) are on the ``psi_N_kinetic`` grid.
     """
+    # the draw-construction tolerance: an unset GenerationConfig.l_i_tolerance
+    # (None since the 2026-10-14 in-spec rule) is the old 0.05 here
+    from .filtering import l_i_construction_tolerance
+    l_i_tolerance = l_i_construction_tolerance(l_i_tolerance)
     # solve_with_bootstrap options: an explicit parameter (review PR60 B5);
     # a private copy, so the caller's dict is never mutated
     kwargs = dict(bootstrap_kwargs or {})

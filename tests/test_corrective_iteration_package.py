@@ -317,16 +317,24 @@ def test_the_post_corrective_l_i_condition_is_reported_not_raised():
 
 def test_reconstruct_equilibrium_takes_the_l_i_band_from_the_caller():
     """The band is ``config.generation.l_i_tolerance``, not a hardcoded number:
-    the report compares against the SAME band the draws are held to."""
+    the report compares against the SAME band the legacy draws are
+    constructed with (``filtering.l_i_construction_tolerance``: the
+    configured value, else the old 0.05 since the 2026-10-14 in-spec rule
+    left l_i_tolerance unset by default)."""
     from bouquet.TokaMaker_interface import reconstruct_equilibrium
     import bouquet.baseline as bl
 
     params = inspect.signature(reconstruct_equilibrium).parameters
     assert "l_i_tolerance" in params
     assert params["l_i_tolerance"].default == 0.01
-    assert "l_i_tolerance=float(config.generation.l_i_tolerance)" in \
-        inspect.getsource(bl), \
+    assert ("l_i_tolerance=l_i_construction_tolerance(config.generation)"
+            in inspect.getsource(bl)), \
         "baseline.py does not pass the configured l_i band to the recon"
+    from bouquet.config import GenerationConfig
+    from bouquet.filtering import l_i_construction_tolerance
+    assert l_i_construction_tolerance(GenerationConfig()) == 0.05
+    assert l_i_construction_tolerance(
+        GenerationConfig(l_i_tolerance=0.02)) == 0.02
 
 
 def test_reconstruction_metrics_carries_the_post_corrective_fields():

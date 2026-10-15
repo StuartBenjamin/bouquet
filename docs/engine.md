@@ -631,8 +631,9 @@ historical list, and its record says so.
  saturation guard)
             |
             v
- post-hoc filters on the archived draw: l_i band (l_i_tolerance), 
- constrain_sawteeth; coil + boundary as always  ->  in_spec / selected
+ post-hoc filters on the archived draw: the OPT-IN bands (l_i, beta_p,
+ constrain_sawteeth; all off by default); coil + boundary as always
+   ->  in_spec / selected
 ```
 
 **Inputs.** Every perturbed quantity is formed as `base + (drawn - base)`:
@@ -782,11 +783,15 @@ state, the isoflux targets and every attribute `generate()` sets are
 restored afterwards.
 
 **Post-hoc filters, not matching.** A draw matches no l_i, q0 or MSE row;
-l_i and beta_N drift and are recorded. The l_i band
-(`|l_i - l_i*| <= l_i_tolerance l_i*`, default 0.05, around the
-reconstruction's l_i) and `constrain_sawteeth` (`q0 >= 1` at the q-row
-radius, psi_N = psi_pad, the legacy gate's radius) are applied to the
-ARCHIVED draw: a draw outside a band is archived with `in_spec=False` and
+l_i, beta_p, beta_N and Lambda = beta_p + l_i(3)/2 drift and are
+recorded. Since 2026-10-14 (owner decision) a draw is in spec on the
+magnetics alone ([workflows.md](workflows.md#the-in-spec-rule)); the
+OPT-IN bands -- an l_i band (`|l_i - l_i*| <= l_i_tolerance l_i*`, or
+`<= inspec_band_nsigma l_i_sigma`, around the reconstruction's l_i; the
+old default `l_i_tolerance = 0.05` applied it to every draw), a beta_p band
+(`beta_p_target`, `beta_p_sigma`) and `constrain_sawteeth` (`q0 >= 1` at
+the q-row radius, psi_N = psi_pad, the legacy gate's radius) -- are applied
+to the ARCHIVED draw when on: a draw outside a band is archived with `in_spec=False` and
 `passes_draw_band=False`, never dropped; the until-N ledger and
 `.filter()`'s `selected` both AND the band into the coil + boundary verdict.
 Rejected (never archived, never counted), with their
