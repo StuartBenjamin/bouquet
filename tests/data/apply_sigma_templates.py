@@ -11,7 +11,8 @@ Each fixture takes the template of its phase (``IDA_REGIME``, ``DD_REGIME``)::
     sigma(psi_N) = max(interp(min(psi_N, 1), GRID, TEMPLATE[q]), FLOOR[q]) * |x(psi_N)|
 
 piecewise linear in psi_N, the psi_N = 1 value held outside the LCFS, x the
-synthetic profile itself.  The result is not re-rounded (the 2 s.f. are on the
+synthetic profile itself.  The product is then rounded to 6 significant figures
+(``SIGMA_SIG_FIGS``) so the files regenerate bit for bit on every platform (the 2 s.f. are on the
 template).  What is written:
 
 * the two IDA-layout files: ``n_e_err``, ``T_e_err``, ``T_12C6_err``,
@@ -65,9 +66,23 @@ def relative_sigma(psi_N, quantity, regime):
     return sigma_template(psi_N, quantity, regime)
 
 
+#: Every written sigma is rounded to this many significant figures, so the
+#: fixtures regenerate bit for bit on any platform (the interpolation and the
+#: product differ by an ULP between BLAS / numpy builds; 6 s.f. is far below
+#: anything a draw can see and far above the ULP).
+SIGMA_SIG_FIGS = 6
+
+
+def stable(values):
+    """``values`` rounded to :data:`SIGMA_SIG_FIGS` significant figures, as float64."""
+    v = np.asarray(values, float)
+    out = np.array([float(f"{x:.{SIGMA_SIG_FIGS}g}") for x in v.ravel()], dtype=np.float64)
+    return out.reshape(v.shape)
+
+
 def ida_errors(psi_N, data, regime):
     """``{"<name>_err": sigma}`` for the IDA datasets in ``data`` (1-D profiles)."""
-    return {k + "_err": relative_sigma(psi_N, q, regime) * np.abs(np.asarray(data[k], float))
+    return {k + "_err": stable(relative_sigma(psi_N, q, regime) * np.abs(np.asarray(data[k], float)))
             for k, q in IDA_QUANTITY.items() if k in data}
 
 
@@ -88,7 +103,7 @@ def add_dd_errors(cp1, regime):
     x = _cp_psi_N(cp1)
 
     def err(arr, q):
-        return (relative_sigma(x, q, regime) * np.abs(np.asarray(arr, float))).tolist()
+        return stable(relative_sigma(x, q, regime) * np.abs(np.asarray(arr, float))).tolist()
 
     el = cp1["electrons"]
     el["density_thermal_error_upper"] = err(el["density_thermal"], "ne")

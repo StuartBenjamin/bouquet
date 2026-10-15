@@ -50,7 +50,7 @@ def test_ida_fixture_relative_sigma_is_its_template(name):
         for k, q in IDA_Q.items():
             ok, rel = _rel(f[k + "_err"][0], f[k][0])
             assert ok.sum() >= 140, (name, k)
-            np.testing.assert_allclose(rel, sigma_template(x[ok], q, reg), rtol=1e-12,
+            np.testing.assert_allclose(rel, sigma_template(x[ok], q, reg), rtol=1e-5,
                                        err_msg=f"{name} {k}")
             assert np.ptp(rel) > 0.02, (name, k)       # not a flat fraction any more
         # omega has no template: the unread envelope stays the constant fraction
@@ -79,7 +79,7 @@ def test_dd_slices_carry_their_template_as_imas_error_fields():
         for node, fld, q in checks:
             ok, rel = _rel(node[fld + "_error_upper"], node[fld])
             assert ok.all(), (t, fld)
-            np.testing.assert_allclose(rel, sigma_template(x, q, reg), rtol=1e-12,
+            np.testing.assert_allclose(rel, sigma_template(x, q, reg), rtol=1e-5,
                                        err_msg=f"t={t} {fld} ({q}, {reg})")
             assert fld + "_error_lower" not in node     # symmetric: upper only
 

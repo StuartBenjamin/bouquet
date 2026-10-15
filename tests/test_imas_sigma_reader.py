@@ -87,7 +87,7 @@ def test_reads_the_five_channels_of_a_slice():
                         ("ni", main["density_thermal"], "ni"),
                         ("ti", main["temperature"], "ti"), ("zeff", cp1["zeff"], "zeff")):
         np.testing.assert_allclose(sig[ch], sigma_template(x, q, "ramp") * np.abs(prof),
-                                   rtol=1e-12)
+                                   rtol=1e-5)
         assert rec[ch]["used"] and rec[ch]["how"] == "upper"
     assert rec["ne"]["field"] == "electrons.density_thermal_error_upper"
     assert rec["ti"]["field"] == "ion[main].temperature_error_upper"
