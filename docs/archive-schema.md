@@ -160,7 +160,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
         ├── [engine_json]              engine draw record as a string DATASET
         │                              when too large for an attribute
         └── attrs: l_i(1), l_i(3), count, profile_coord, homotopy_*, max_F_drift_pct,
-                   max_VSC_drift_pct, in_spec, inspec_*, l_i_target_used, [jbs_delta_active],
+                   max_VSC_drift_pct, in_spec, coil_drift_in_spec, in_spec_source,
+                   inspec_*, l_i_target_used, [jbs_delta_active],
                    [diverted], [passes_coil_filter, passes_boundary_filter,
                    selected]           ← filter flags, written post-hoc
                    [jbs_converged, jbs_n_passes, jbs_loop_json]
@@ -382,7 +383,9 @@ pressure + that equilibrium's `p_sep`).
     (the opt-in bands' verdicts -- `rule`, `l_i_in_band` / `beta_p_in_band`
     (`null` while that band is off), `q0_ok`, the numbers judged (`l_i_3`,
     `l_i_reference`, `l_i_rel`, `beta_p`, `beta_p_z`, `q0`), `Lambda`,
-    `in_band`, `coil_in_spec`, `in_spec`; `archived` also carries `beta_p`
+    `in_band`, `coil_in_spec` (the rule's coil test AND boundary cut),
+    `coil_drift_in_spec` (the legacy ±2 % drift test), `in_spec` (=
+    `coil_in_spec` AND `in_band`), `in_spec_source`; `archived` also carries `beta_p`
     and `Lambda`), `homotopy`, `post_homotopy`, and `cost` (solves, passes and
     wall time for the stages `anchor`, `loop`, `homotopy`, `post_homotopy`,
     `filters`, `archive`, and their `total`).
@@ -425,15 +428,19 @@ pressure + that equilibrium's `p_sep`).
     none is on, the default since 2026-10-14; before, the unconditional
     5 % l_i band). It is one of the filter flags ANDed into `selected`
     (`filtering._FILTER_FLAGS`), so `.filter()` selects what the until-N
-    ledger counted; `in_spec` is the coil verdict AND this band.
+    ledger counted; `in_spec` is the rule's coil test AND the boundary cut
+    AND this band (since 2026-10-15; before, the ±2 % drift test AND this
+    band, kept now as `coil_drift_in_spec`).
   - **Fields whose MEANING differs on an engine archive** (names and units
     unchanged; a reader that predates the engine reads them without error
     but must not assume the legacy meaning): `j_inductive` / `j_BS` -- the
     engine's split is NOT floored (`j_inductive` is the residual and may be
     negative; legacy draws floor it at zero and move the sliver into
-    `j_BS`); `in_spec` -- on an engine draw
-    the coil verdict AND the post-hoc band (`passes_draw_band`), on a legacy
-    draw the coil verdict alone. (An older package that RE-FILTERS an engine
+    `j_BS`); `in_spec` -- the in-spec rule's verdict (configured coil test
+    AND boundary cut AND, on an engine draw, the post-hoc band
+    `passes_draw_band`), stamped `in_spec_source="inspec_rule"`; on an
+    archive without `in_spec_source` it is the legacy drift verdict (AND the
+    band on an engine draw). (An older package that RE-FILTERS an engine
     archive would not AND `passes_draw_band` into `selected`; `in_spec`
     still carries the band.) Independently of the engine, under
     `separatrix_pressure="offset"` (the default since 2026-10-02) the stored

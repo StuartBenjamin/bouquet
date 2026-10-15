@@ -116,6 +116,19 @@ route. Closes #84.
   `inspec_bands` / `q0_gate` now say so (no `"+q0"`). `filter()` and
   `refilter_inspec` under the stamped rule reproduce `selected` instead of
   applying the gate afterwards.
+- The archived `in_spec` (draw attribute and the engine record's
+  `post_hoc.in_spec`) is the in-spec rule's verdict -- the configured coil
+  test (chi2 by default) AND the boundary cut AND the opt-in bands, the one
+  until-N counts and `selected` reproduces -- judged on every run, not only
+  under until-N. It was the legacy +/-2 % per-coil drift test with no
+  boundary cut, which disagreed systematically with `selected` for a floored
+  low-current coil; that verdict is kept as `coil_drift_in_spec`, and each
+  draw stamps `in_spec_source="inspec_rule"`. `coil_in_spec` in the engine
+  record is now the rule's coil test AND boundary cut. Readers
+  (`read_filter_flags`, `DrawView.flags`) report all three; on an archive
+  written before (no `in_spec_source`) `in_spec` is the drift verdict and
+  `in_spec_source` says so. Goldens that store `in_spec` / `n_in_spec` move
+  when regenerated.
 
 ## Unreleased — the golden recipe runs the synthetic fixtures at the current defaults; a new IDS-route golden (owner decisions 2026-10-15)
 

@@ -70,6 +70,7 @@ __all__ = [
     "refilter_inspec",
     "read_inspec_rule",
     "read_inspec_record",
+    "in_spec_fields",
     "shafranov_lambda",
     "LAMBDA_DEFINITION",
 ]
@@ -358,6 +359,21 @@ INSPEC_BANDS_ATTR = "inspec_bands_json"
 #: reconstruction, q0 < 1: every draw would fail the gate).  The stamped
 #: rule is the applied one (no ``"+q0"`` when it was switched off).
 Q0_GATE_RECORD_KEY = "q0_gate"
+#: Per-draw attribute saying what the archived ``in_spec`` is.
+#: :data:`IN_SPEC_RULE_SOURCE`: the in-spec rule's verdict -- the configured
+#: coil test (chi2 by default) AND the boundary cut AND the opt-in bands, the
+#: verdict until-N counts and ``selected`` reproduces.  ABSENT on an archive
+#: written before it (2026-10-15), whose ``in_spec`` is the legacy +/-2 %
+#: per-coil drift verdict (AND the engine's opt-in bands; no boundary cut):
+#: readers report it as :data:`IN_SPEC_DRIFT_SOURCE` (:func:`in_spec_fields`).
+IN_SPEC_SOURCE_ATTR = "in_spec_source"
+IN_SPEC_RULE_SOURCE = "inspec_rule"
+IN_SPEC_DRIFT_SOURCE = ("coil_drift: the archive predates the rule verdict; "
+                        "its in_spec is the legacy +/-2 % drift test")
+#: Per-draw attribute: the legacy +/-2 % per-coil drift verdict
+#: (``passes_coil_spec`` on the bare F / VSC-channel drifts), kept beside the
+#: rule's ``in_spec``; never a filter.
+COIL_DRIFT_IN_SPEC_ATTR = "coil_drift_in_spec"
 #: Per-draw opt-in band verdicts (written only while that band is on).
 L_I_BAND_FLAG = "passes_l_i_band"
 BETA_P_BAND_FLAG = "passes_beta_p_band"
@@ -621,6 +637,34 @@ def resolve_inspec_bands(gc) -> InspecBands:
         beta_p_sigma=getattr(gc, "beta_p_sigma", None),
         nsigma=getattr(gc, "inspec_band_nsigma", DEFAULT_BAND_NSIGMA),
         constrain_sawteeth=bool(getattr(gc, "constrain_sawteeth", False)))
+
+
+def in_spec_fields(attrs) -> dict:
+    """``in_spec``, ``coil_drift_in_spec`` and ``in_spec_source`` of one
+    archived draw's attrs (those present).
+
+    An archive that stamps :data:`IN_SPEC_SOURCE_ATTR` carries the rule's
+    verdict in ``in_spec`` and the drift verdict in
+    :data:`COIL_DRIFT_IN_SPEC_ATTR`.  An older one carries only ``in_spec``,
+    which IS the drift verdict: it is reported under both names, with
+    ``in_spec_source`` = :data:`IN_SPEC_DRIFT_SOURCE` saying so -- select
+    on ``selected`` (the filters' verdict) on such an archive."""
+    out = {}
+    src = attrs.get(IN_SPEC_SOURCE_ATTR) if IN_SPEC_SOURCE_ATTR in attrs \
+        else None
+    if isinstance(src, bytes):
+        src = src.decode()
+    if src is not None:
+        if "in_spec" in attrs:
+            out["in_spec"] = bool(attrs["in_spec"])
+        if COIL_DRIFT_IN_SPEC_ATTR in attrs:
+            out[COIL_DRIFT_IN_SPEC_ATTR] = bool(attrs[COIL_DRIFT_IN_SPEC_ATTR])
+        out["in_spec_source"] = str(src)
+    elif "in_spec" in attrs:
+        out["in_spec"] = bool(attrs["in_spec"])
+        out[COIL_DRIFT_IN_SPEC_ATTR] = bool(attrs["in_spec"])
+        out["in_spec_source"] = IN_SPEC_DRIFT_SOURCE
+    return out
 
 
 def q0_gate_switched_off(q0_gate) -> bool:
@@ -1031,8 +1075,11 @@ def read_filter_flags(h5path_or_header, scan_key=None):
     ``passes_draw_band`` (and the opt-in bands' own ``passes_l_i_band`` /
     ``passes_beta_p_band`` / ``passes_q0_gate``) and ``selected`` when
     present (missing flags are omitted), plus the raw metrics
-    ``max_F_drift_pct``, ``max_VSC_drift_pct``, ``in_spec``, ``beta_p`` and
-    ``Lambda``. An explicit
+    ``max_F_drift_pct``, ``max_VSC_drift_pct``, ``beta_p`` and ``Lambda``,
+    and ``in_spec`` / ``coil_drift_in_spec`` / ``in_spec_source``
+    (:func:`in_spec_fields`: the rule's verdict and the legacy drift one; on
+    an archive that predates the rule verdict ``in_spec`` is the drift one,
+    and ``in_spec_source`` says so). An explicit
     ``scan_key`` returns the ``{idx: {...}}`` dict directly; the default
     ``scan_key=None`` returns ``{scan_key: {idx: {...}}}`` (shape follows the
     call, same convention as the other accessors).
@@ -1051,12 +1098,12 @@ def read_filter_flags(h5path_or_header, scan_key=None):
                 for k in (*_FILTER_FLAGS, *_BAND_FLAGS, "selected"):
                     if k in a:
                         rec[k] = bool(a[k])
-                for k in ("max_F_drift_pct", "max_VSC_drift_pct", "in_spec",
+                for k in ("max_F_drift_pct", "max_VSC_drift_pct",
                           "boundary_rms_mm", "boundary_max_mm", "beta_p",
                           "Lambda"):
                     if k in a:
-                        rec[k] = (float(a[k]) if k != "in_spec"
-                                  else bool(a[k]))
+                        rec[k] = float(a[k])
+                rec.update(in_spec_fields(a))
                 sv_out[i] = rec
             out[sv] = sv_out
     return _finalize_scan_result(out, scan_key)

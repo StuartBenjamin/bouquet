@@ -2416,7 +2416,11 @@ def plot_coil_currents(h5path_or_header, scan_key=None, vsc_coils=('F9A', 'F9B')
     relative-drift-limited, and excluded from ``in_spec``; coils with a tiny
     baseline current (< 5% of the median |I_baseline|) are likewise dropped,
     since relative drift on a ~zero baseline is not engineering-meaningful.
-    Draw tick labels are red for out-of-spec draws.
+    Draw tick labels are red for out-of-spec draws: the archived ``in_spec``,
+    the in-spec rule's verdict (configured coil test AND boundary cut AND the
+    opt-in bands), so a draw inside the chi2 test can be in spec with a cell
+    beyond the +/-2 % drift colour scale; on an archive that predates the
+    rule verdict (no ``in_spec_source``) it is the +/-2 % drift test.
 
     Parameters
     ----------

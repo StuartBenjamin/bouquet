@@ -538,3 +538,110 @@ def test_a_refilter_under_the_stamped_rule_reproduces_selected(
     sel = TED._quiet(b.filter)
     assert sel["inspec"]["refiltered"] is False
     assert F.select_indices(h, scan_key=sk, selection="selected") == before
+
+
+# --------------------------------------------------------------------------
+#  review F2: the archived in_spec is the in-spec rule's verdict
+# --------------------------------------------------------------------------
+def _rule_run(tmp_path, monkeypatch, *, coil_ok, drift_ok, **extra):
+    """An engine run whose configured coil test says *coil_ok* (a stand-in
+    for the chi2 predicate) and whose legacy +/-2 % drift test says
+    *drift_ok*, independently."""
+    def _pred(*a, **k):
+        def p(diagnostics, draw_currents=None):
+            return bool(coil_ok), {"chi2_nu": 0.5 if coil_ok else 9.0,
+                                   "max_abs_z": 0.7 if coil_ok else 5.0,
+                                   "coil_nu": 4, "worst_coil": "F1A"}
+        model = {"kind": "stand-in", "acceptance": {
+            "chi2_max": 2.0, "z_max": None, "source": "test",
+            "calibrated_nu": None, "nu_sigma": 4}}
+        return p, "chi2", model
+    monkeypatch.setattr(F, "make_coil_predicate", _pred)
+    monkeypatch.setattr(F, "passes_coil_spec", lambda *a, **k: bool(drift_ok))
+    return TED._generate(tmp_path, monkeypatch, n=2, l_i_tolerance=None,
+                         n_inspec_target=2, **extra)
+
+
+def _archived(h, i):
+    with h5py.File(h + ".h5", "r") as hf:
+        g = hf[f"scan/0/{i}"] if "scan" in hf else hf[str(i)]
+        return dict(g.attrs)
+
+
+def test_a_chi2_in_spec_draw_beyond_the_drift_band_is_in_spec(
+        tmp_path, monkeypatch):
+    diags, rej, h, G = _rule_run(tmp_path, monkeypatch, coil_ok=True,
+                                 drift_ok=False)
+    assert rej == [] and len(diags) == 2
+    flags = next(iter(F.read_filter_flags(h).values()))
+    for i, d in enumerate(diags):
+        assert d["in_spec"] is True and d["until_n_inspec"] is True
+        assert d["coil_drift_in_spec"] is False
+        ph = ED.read_draw_engine(h, i)["post_hoc"]
+        assert ph["in_spec"] is True and ph["coil_in_spec"] is True
+        assert ph["coil_drift_in_spec"] is False
+        assert ph["in_spec_source"] == F.IN_SPEC_RULE_SOURCE
+        a = _archived(h, i)
+        assert bool(a["in_spec"]) is True
+        assert bool(a[F.COIL_DRIFT_IN_SPEC_ATTR]) is False
+        assert a[F.IN_SPEC_SOURCE_ATTR] == F.IN_SPEC_RULE_SOURCE
+        assert flags[i]["in_spec"] is True
+        assert flags[i]["coil_drift_in_spec"] is False
+        assert flags[i]["in_spec_source"] == F.IN_SPEC_RULE_SOURCE
+
+
+@pytest.mark.parametrize("why", ["coil", "boundary"])
+def test_a_drift_in_band_draw_outside_the_rule_is_out_of_spec(
+        tmp_path, monkeypatch, why):
+    """The reverse: inside the +/-2 % drift band, but failing the
+    configured coil test -- or the boundary cut the drift test never
+    had."""
+    extra = ({} if why == "coil" else dict(inspec_rms_max_mm=1e-9))
+    diags, rej, h, G = _rule_run(tmp_path, monkeypatch,
+                                 coil_ok=(why != "coil"), drift_ok=True,
+                                 **extra)
+    assert rej == [] and diags
+    for i, d in enumerate(diags):
+        assert d["in_spec"] is False and d["until_n_inspec"] is False
+        assert d["coil_drift_in_spec"] is True
+        ph = ED.read_draw_engine(h, i)["post_hoc"]
+        assert ph["in_spec"] is False and ph["coil_drift_in_spec"] is True
+        assert ph["in_spec"] == (ph["coil_in_spec"] and ph["in_band"])
+        a = _archived(h, i)
+        assert bool(a["in_spec"]) is False
+        assert bool(a[F.COIL_DRIFT_IN_SPEC_ATTR]) is True
+
+
+def test_an_archive_before_the_rule_verdict_reads_its_drift_in_spec():
+    """No in_spec_source: in_spec IS the drift verdict -- reported under
+    both names, and the reader says which it used."""
+    old = F.in_spec_fields({"in_spec": False})
+    assert old == {"in_spec": False, "coil_drift_in_spec": False,
+                   "in_spec_source": F.IN_SPEC_DRIFT_SOURCE}
+    new = F.in_spec_fields({"in_spec": True, "coil_drift_in_spec": False,
+                            "in_spec_source": b"inspec_rule"})
+    assert new == {"in_spec": True, "coil_drift_in_spec": False,
+                   "in_spec_source": F.IN_SPEC_RULE_SOURCE}
+    assert F.in_spec_fields({}) == {}
+
+
+def test_an_old_archive_reads_through_read_filter_flags_and_drawview(
+        tmp_path, monkeypatch):
+    from bouquet.archive import BouquetArchive
+    diags, rej, h, G = _rule_run(tmp_path, monkeypatch, coil_ok=True,
+                                 drift_ok=False)
+    # strip the new fields: the shape of an archive written before them,
+    # whose in_spec was the drift verdict
+    with h5py.File(h + ".h5", "a") as hf:
+        for i in range(len(diags)):
+            g = hf[f"scan/0/{i}"] if "scan" in hf else hf[str(i)]
+            del g.attrs[F.COIL_DRIFT_IN_SPEC_ATTR]
+            del g.attrs[F.IN_SPEC_SOURCE_ATTR]
+            g.attrs["in_spec"] = False
+    fl = next(iter(F.read_filter_flags(h).values()))
+    assert all(r["in_spec"] is False and r["coil_drift_in_spec"] is False
+               and r["in_spec_source"] == F.IN_SPEC_DRIFT_SOURCE
+               for r in fl.values())
+    ar = BouquetArchive(h + ".h5")
+    d0 = ar.scan(ar.scan_keys[0])[0].flags
+    assert d0["in_spec_source"] == F.IN_SPEC_DRIFT_SOURCE
