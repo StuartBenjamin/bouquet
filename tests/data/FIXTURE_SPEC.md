@@ -80,7 +80,8 @@ together if the pairing moves.
   profile -- 0.7 s L-mode, 1.1 s and 1.2 s ramp, 1.4 s and 3.0 s H-mode flat
   top; main ion n_i takes the derived n_i template, carbon the n_C template,
   both ions the T_i template. Upper only (symmetric). Both dependent tests
-  pass an IDA sigma file, which wins, so they do not read these.
+  run `from_imas(..., ida_path=...)`, i.e. `ida_hybrid`, where the IDA file's
+  envelopes are used and these are not read.
 
 `core_sources`
 * `time`; `source[].identifier.index`, `.name`; `source[].profiles_1d[].time`,
