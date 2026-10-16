@@ -1942,6 +1942,33 @@ def _hybrid_timing(source, T, t_eq, t_cp, aux, tol=1e-6, *, cp_times=None,
     return t_used
 
 
+class IdaTimeNotSimulated(ValueError):
+    """The dd step paired with the IDA time lies outside the window the FUSE
+    run simulated.  Not attempted, so :meth:`~bouquet.Bouquet.run` /
+    ``run_slices`` do not record it as refused."""
+
+
+def _check_simulated(ids_path, t_dd, t_ida):
+    """Raise :class:`IdaTimeNotSimulated` when the dd step *t_dd* paired with
+    IDA time *t_ida* is not a simulated step, ``t0 < t_dd <= reached`` (to
+    1e-9 s; ``time_grid.json`` beside the dd): a run that stopped early still
+    lists its planned steps in ``ida_provenance.json``; ``reached`` sits 1 us
+    below the first step not completed, and step ``t0`` is not in the dd."""
+    import json
+    path = os.path.join(os.path.dirname(os.path.abspath(ids_path)), "time_grid.json")
+    try:
+        with open(path) as fh:
+            g = json.load(fh)
+        t0, reached = float(g["t0"]), float(g["reached"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return
+    if t_dd is not None and not t0 < t_dd <= reached + 1e-9:
+        raise IdaTimeNotSimulated(
+            f"ida_hybrid: IDA time {t_ida:.9g} s is paired with dd step {t_dd:.9g} s, "
+            f"outside the simulated steps ({t0:.9g}, {reached:.9g}] s (time_grid.json "
+            "t0, reached): never simulated, not attempted")
+
+
 def _check_replay_pairing(ids_path, aux, tol=1e-6, *, ida_path=None):
     """``aux['pairing_consistent']``: whether FUSE's own replay_pairing
     (``ida_provenance.json`` beside ``ids_path``, written by the external
@@ -2200,8 +2227,11 @@ def read_imas_baseline(
     """
     from ..baseline import Baseline
 
-    dd = _load_dd(source.ids_path)
     T = source.time
+    if kinetic_source == "ida_hybrid" and getattr(source, "ida_path", None):
+        _ida_t = getattr(source, "ida_time", None)
+        _check_simulated(source.ids_path, T, T if _ida_t is None else _ida_t)
+    dd = _load_dd(source.ids_path)
 
     # Which fast-pressure convention this dd was written in (factor of 3).
     # The metadata is resolved eagerly -- the reduction rule is needed to read the

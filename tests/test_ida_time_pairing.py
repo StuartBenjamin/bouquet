@@ -22,8 +22,9 @@ import pytest
 h5py = pytest.importorskip("h5py")
 
 from bouquet.config import ImasSource
-from bouquet.io.imas import (IMAS_SINGLE_TIME_WINDOW_S, _check_replay_pairing,
-                             _hybrid_timing, match_ida_slice, read_imas_baseline)
+from bouquet.io.imas import (IMAS_SINGLE_TIME_WINDOW_S, IdaTimeNotSimulated,
+                             _check_replay_pairing, _hybrid_timing, match_ida_slice,
+                             read_imas_baseline)
 from _imas_geometry import eq_geometry, jtor_from_jtotal
 
 N = 33
@@ -290,6 +291,22 @@ def test_the_reader_refuses_an_ida_time_off_the_ida_file(files):
     ddp, cdf = files
     with pytest.raises(ValueError, match="no IDA slice within"):
         _read(ddp, cdf, ida_time=1.3)
+
+
+def test_a_dd_step_the_run_never_simulated_is_not_attempted(files):
+    """A run that stopped early (time_grid.json reached < t1): the dd step paired
+    with the IDA time must be a simulated step, t0 < t <= reached (reached sits
+    1 us below the first step not completed), else IdaTimeNotSimulated, raised
+    before the timing refusals and only on ida_hybrid."""
+    ddp, cdf = files
+    with open(ddp.replace("dd_sim.json", "time_grid.json"), "w") as fh:
+        json.dump({"t0": 0.98, "t1": 1.1, "dt": 0.02, "reached": 1.04 - 1e-6}, fh)
+    _read(ddp, cdf, time=1.02, ida_time=1.01)
+    _read(ddp, cdf, time=1.0, ida_time=1.01)
+    for kw in (dict(time=1.04, ida_time=1.01), dict(time=1.06), dict(time=0.98, ida_time=1.0)):
+        with pytest.raises(IdaTimeNotSimulated, match="never simulated"):
+            _read(ddp, cdf, **kw)
+    _read(ddp, cdf, time=1.06, ks="fuse")              # FUSE kinetics: unchanged
 
 
 def test_ida_time_outside_ida_hybrid_is_refused(files):

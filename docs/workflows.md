@@ -398,6 +398,10 @@ separate `uncertainty.ida_path` too). The match — requested and used IDA time,
 basis, the dd slice times, and the verdict of FUSE's `ida_provenance.json`
 replay pairing when that table names this run's IDA file and holds the dd
 slice — is archived in the baseline's `li_metrics["ida_time_match"]`.
+On ida_hybrid, a dd step `time` outside the window the run simulated
+(`time_grid.json`: t0 < t ≤ `reached`; a FUSE run that stopped early still
+lists its planned steps in that table) raises `IdaTimeNotSimulated`: the IDA time
+is not attempted, so `run()` / `run_slices()` do not archive it as refused.
 `ida_time` outside ida_hybrid is refused. `set_slice(time=t)` keeps a
 configured `ida_time` (with a warning), `set_slice(ida_time=x)` applies it
 alone, and a series takes one per slice: `run_slices(times, ida_times=[…])`.
