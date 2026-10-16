@@ -93,6 +93,20 @@ MSE_JACOBIAN_MAX_REFRESHES = 3
 #: separation of that test's two clusters.  Never an acceptance criterion:
 #: nothing is accepted, refused or filtered on it.
 AXIS_BRANCH_FRAC = 0.01
+#: The VERTICAL-RUNAWAY label of a capped homotopy stage
+#: (:func:`vertical_runaway_record`; owner decision 2026-10-16): a stage
+#: whose solve stopped at the iteration cap with the vertical-control pair at
+#: its homotopy bound (the homotopy's own saturation fraction,
+#: ``COIL_SATURATION_FRACTION`` of the bound) AND the magnetic axis more than
+#: this fraction of the minor radius from the reconstruction's delivered
+#: axis (:func:`axis_shift_record`'s displacement) is labelled
+#: ``"vertical_runaway"`` in its cap-event record.  0.1 a: ten times the
+#: displacement flag :data:`AXIS_BRANCH_FRAC` and above the several % of a
+#: that kinetic draws move the axis continuously, while the runaway the label
+#: names moved the axis by about one minor radius (the 2026-10 investigation:
+#: the axis Z ran from -0.016 m to +/-0.7-1.0 m with the channel on its
+#: bound).  A LABEL: nothing is accepted, refused or filtered on it.
+VERTICAL_RUNAWAY_AXIS_FRAC = 0.1
 #: The per-scan bimodality test of the archived engine draws' magnetic-axis
 #: positions (:func:`axis_bimodality`; owner decision 2026-10-15): the draws'
 #: axis Z (relative to the reconstruction's delivered axis) sorted, split at
@@ -3369,6 +3383,36 @@ def axis_shift_record(axis, reference) -> dict:
         rec["displacement_frac_a"] = frac
         rec["axis_shift_large"] = bool(frac > float(AXIS_BRANCH_FRAC))
     return rec
+
+
+def vertical_runaway_record(vsc_bound_frac, axis) -> dict:
+    """The vertical-runaway label of a capped homotopy stage
+    (:data:`VERTICAL_RUNAWAY_AXIS_FRAC`): *vsc_bound_frac* is the
+    vertical-control pair's drift as a fraction of the stage's VSC bound
+    (1 = at it; ``None`` unknown), *axis* the stage's
+    :func:`axis_shift_record`.  ``label`` is ``"vertical_runaway"`` when the
+    pair is at its bound (``>= COIL_SATURATION_FRACTION``) and the axis is
+    displaced by more than the threshold, ``None`` otherwise (also when
+    either is unknown).  A label, never a gate."""
+    from .TokaMaker_interface import COIL_SATURATION_FRACTION
+    frac_a = (axis or {}).get("displacement_frac_a")
+    at_bound = (None if vsc_bound_frac is None
+                else bool(float(vsc_bound_frac) >= COIL_SATURATION_FRACTION))
+    displaced = (None if frac_a is None
+                 else bool(float(frac_a) > VERTICAL_RUNAWAY_AXIS_FRAC))
+    return dict(label=("vertical_runaway" if (at_bound and displaced)
+                       else None),
+                vsc_bound_frac=(None if vsc_bound_frac is None
+                                else float(vsc_bound_frac)),
+                vsc_at_bound=at_bound,
+                axis_displacement_frac_a=(None if frac_a is None
+                                          else float(frac_a)),
+                axis_dZ_mm=(axis or {}).get("dZ_mm"),
+                threshold_frac_a=float(VERTICAL_RUNAWAY_AXIS_FRAC),
+                rule=("vertical_runaway: the vertical-control pair at its "
+                      "homotopy bound and the magnetic axis more than "
+                      "threshold_frac_a x a from the delivered axis; a "
+                      "label, never a gate"))
 
 
 def axis_bimodality(dZ_mm, minor_radius_m=None, reference_Z=None) -> dict:

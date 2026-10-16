@@ -1407,11 +1407,16 @@ class GenerateEngineDraws(DrawMethod):
         return self.maxits is not None and solve_hit_iteration_cap(exc)
 
     def announce_cap(self, where, exc, *, stage=None, seconds=None,
-                     outcome="rejected"):
+                     outcome="rejected", mygs=None, vsc_bound_frac=None):
         """Print and record a capped solve that did not converge.
         *outcome* is ``"rejected"`` (the caller rejects the draw) or
         ``"rolled_back"`` (a homotopy stage: the draw goes back to the last
-        good stage, under the homotopy's own rule)."""
+        good stage, under the homotopy's own rule).  For a homotopy stage
+        (*mygs* given, *vsc_bound_frac* its vertical-control pair's drift as
+        a fraction of the stage's bound) the record also carries
+        ``vertical_runaway`` (:func:`bouquet.engine.vertical_runaway_record`)
+        and ``label`` (``"vertical_runaway"`` or ``None``): a label, never a
+        gate."""
         ev = dict(draw=(None if self._cur is None else self._cur["count"]),
                   where=str(where),
                   stage=str(stage if stage is not None else where),
@@ -1419,6 +1424,15 @@ class GenerateEngineDraws(DrawMethod):
                   seconds=(None if seconds is None else float(seconds)),
                   outcome=str(outcome),
                   error=f"{type(exc).__name__}: {str(exc).strip()[:300]}")
+        if mygs is not None:
+            from .engine import axis_record_of, vertical_runaway_record
+            try:
+                _ax = axis_record_of(mygs, self.delivered_axis)
+            except Exception:                       # noqa: BLE001
+                _ax = None
+            vr = vertical_runaway_record(vsc_bound_frac, _ax)
+            ev["vertical_runaway"] = vr
+            ev["label"] = vr["label"]
         self.cap_events.append(ev)
         what = ("draw REJECTED" if outcome == "rejected" else
                 "rolled back to the last good homotopy stage")
@@ -1426,6 +1440,11 @@ class GenerateEngineDraws(DrawMethod):
         print(f"  [engine draw] {where}: the GS solve stopped at "
               f"engine_draw_solve_maxits={self.maxits}{sec} without "
               f"converging -> {what}", flush=True)
+        if ev.get("label"):
+            print(f"  [engine draw] {where}: labelled {ev['label']} (the "
+                  "vertical-control pair at its bound, the axis displaced "
+                  f"{ev['vertical_runaway']['axis_displacement_frac_a']:.2f} "
+                  "a; a label, not a gate)", flush=True)
         return ev
 
     def announce_rollback_failed(self, exc, after, legacy=None):
@@ -1939,6 +1958,14 @@ class GenerateEngineDraws(DrawMethod):
                       f"{st} {oc} x{n}" for (st, oc), n in
                       sorted(_by.items()))
                   + "; per-solve records: Bouquet.engine_draw_cap_events")
+            _nvr = sum(1 for e in self.cap_events
+                       if e.get("label") == "vertical_runaway")
+            if _nvr:
+                from .engine import VERTICAL_RUNAWAY_AXIS_FRAC
+                print(f"[generate] {_nvr} of them labelled vertical_runaway "
+                      "(the vertical-control pair at its homotopy bound, the "
+                      f"axis displaced > {VERTICAL_RUNAWAY_AXIS_FRAC:g} a; a "
+                      "label, not a gate)", flush=True)
 
     @classmethod
     def verify_sigma0(cls, bq):

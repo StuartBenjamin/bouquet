@@ -8270,7 +8270,11 @@ def generate_bouquet(
                                     seconds=_m.last_homotopy_solve_seconds(),
                                     outcome=("rejected"
                                              if _final_pass_idx < 0
-                                             else "rolled_back"))
+                                             else "rolled_back"),
+                                    mygs=mygs,
+                                    vsc_bound_frac=_vsc_bound_fraction_now(
+                                        mygs, _baseline_coils, _vsc_in_set,
+                                        _dVSC))
                             if _final_pass_idx < 0:
                                 # First pass failed -> draw is rejected
                                 _post_align_failed = True

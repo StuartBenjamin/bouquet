@@ -100,3 +100,40 @@ def test_the_saturation_guard_measures_vsc_on_the_denominator_it_is_given():
         gs, base, ("F9A", "F9B"), 0.05, 0.10, "test", floor_A=50.0)
     with pytest.raises(T.CoilSaturated):
         plain("pass")                          # 21 % >= 9.9 %
+
+
+# ---------------------------------------------------------------------------
+#  the vertical-runaway label (a label, never a gate)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("frac, disp, label", [
+    (1.0, 1.4, "vertical_runaway"),
+    (0.995, 0.11, "vertical_runaway"),
+    (1.0, 0.05, None),            # at the bound, axis within 0.1 a
+    (0.5, 1.4, None),             # displaced, the pair off its bound
+    (None, 1.4, None),            # unknown
+    (1.0, None, None),
+])
+def test_the_vertical_runaway_label(frac, disp, label):
+    from bouquet.engine import (VERTICAL_RUNAWAY_AXIS_FRAC,
+                                vertical_runaway_record)
+    assert VERTICAL_RUNAWAY_AXIS_FRAC == 0.1
+    r = vertical_runaway_record(frac, dict(displacement_frac_a=disp,
+                                           dZ_mm=None))
+    assert r["label"] == label
+    assert r["threshold_frac_a"] == 0.1
+
+
+def test_a_capped_homotopy_stage_carries_the_label_in_its_cap_event():
+    from bouquet.engine_draws import GenerateEngineDraws
+    m = GenerateEngineDraws.__new__(GenerateEngineDraws)
+    m.cap_events, m._cur, m.maxits = [], {"count": 3}, 100
+    m.delivered_axis = dict(R=1.7, Z=0.0, minor_radius_m=0.6)
+    gs = types.SimpleNamespace(o_point=(1.7, 0.75))      # 1.25 a away
+    ev = m.announce_cap("homotopy pass 1/3", RuntimeError("maxits"),
+                        stage="homotopy", outcome="rejected", mygs=gs,
+                        vsc_bound_frac=1.0)
+    assert ev["label"] == "vertical_runaway"
+    assert ev["vertical_runaway"]["axis_displacement_frac_a"] == \
+        pytest.approx(0.75 / 0.6)
+    ev2 = m.announce_cap("loop", RuntimeError("maxits"), stage="loop")
+    assert "label" not in ev2                  # only homotopy stages
