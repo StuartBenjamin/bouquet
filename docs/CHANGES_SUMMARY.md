@@ -1,5 +1,15 @@
 # Bouquet — change summaries
 
+## Unreleased — the g-file and systematics notebooks re-executed on the thermal-only g-file
+
+**Examples.** `examples/D3D-like/bouquet_D3Dlike_geqdsk_example.ipynb` and
+`bouquet_D3Dlike_systematics.ipynb` are re-executed at main 49ebebb on the
+corrected, thermal-only `g_synthetic.geqdsk` (their stored outputs were made on
+the total-pressure file). Same code cells, seeds and until-N 24: H-mode 24/24 in
+spec in 24 attempts (beta_N 0.80 [0.77, 0.83], l_i(3) 0.833 [0.794, 0.883]),
+L-mode 24/25; systematics sigma=0 identity passed, pressure-only and production
+24 in spec each, the baseline inside every band (quantiles 0.42-0.62).
+
 ## Unreleased — the three goldens regenerated at main 49ebebb (the thermal-only g-file, the rule's in_spec)
 
 **Goldens.** The g-file h5 golden is now the recipe's run of the corrected,
