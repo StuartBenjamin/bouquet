@@ -783,17 +783,29 @@ weights decides how a change of the plasma is shared between a boundary miss
 and a coil change; the absolute scale matters only through conditioning. The
 draws are judged on both outcomes (the boundary RMS cut and the coil cut), so
 the ratio is a modelling assumption with a direct effect on which draws are
-accepted. Bouquet chooses it per case as the balance at which a standard
-perturbation (a beta_p change at fixed current profile) moves the boundary and
-the coils by the same fraction of their cuts -- an analytic squared-penalty
-estimate refined by a measured probe on the reconstruction's anchor equilibrium
-([engine.md](engine.md), "The boundary constraint: a calibrated balance ...").
-The assumptions: the two penalties are quadratic (TokaMaker's least squares), the
-flux miss maps to a normal boundary displacement through `R B_p`, and the
-partition of the probe perturbation stands for the partition of the draws'
-perturbations. The last one fails where the VSC pair (regularised almost not at
-all) carries the plasma's rigid motion: the boundary and the VSC then move
-together and the balance does not fix the strength (an open item).
+accepted. Bouquet holds the boundary set of #84 (the source boundary resampled
+by arc length, per-length weights) at ONE constant total, 2e5, chosen inside the
+window in which a boundary miss at the boundary cut and a coil drift at the coil
+cut cost the solver comparably: a standard perturbation (a 2 % beta_p change at
+fixed current request) splits between the two cuts in a ratio of 1 at totals of
+1.8e5-3.8e5 on six equilibria, with the vertical-control pair excluded from the
+coil side, and the draws' yield and sigma=0 reproduction hold over about
+1.5e5-4e5 ([engine.md](engine.md), "The boundary constraint: a constant total
+inside a measured window"). The ratio itself is measured on every
+reconstruction and reported, never used to change the total. The vertical-control
+pair is excluded because it is not a shaping degree of freedom: its `#VSC`
+channel is TokaMaker's vertical-position control, deliberately almost
+unregularised, and it moves together with the boundary as one rigid vertical
+displacement -- with it included the ratio is flat near 1 over most of the
+window and does not fix the strength, which is why a per-case calibration to a
+ratio of 1 was rejected. For the same reason the homotopy's bound on that channel
+is scaled with the same 10 kA current floor as the acceptance metric that judges
+it: bounded relative to a near-zero coil current, the channel cannot hold the
+vertical position, the Picard iteration loses it, and the draws fail for a
+reason that has nothing to do with the plasma's perturbation. The assumptions:
+the two penalties are quadratic (TokaMaker's least squares), the flux miss maps
+to a normal boundary displacement through `R B_p`, and the partition of the probe
+perturbation stands for the partition of the draws' perturbations.
 
 ## The pressure handed to the solver: separatrix pressure and the edge P′ pin
 

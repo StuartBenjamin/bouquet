@@ -765,9 +765,8 @@ ONE standard set on both routes, for the reconstruction and every draw
   themselves are installed exactly as configured;
 - each point is weighted by the arc length it represents (half the spacing to
   each neighbour), the weights summing to the case's total (`per_length_weights`):
-  since 2026-10-16 the calibrated balance of the next section, or
-  `SolverConfig.isoflux_weight_total` when set; `solver_geometry.ISOFLUX_WEIGHT_TOTAL`
-  = 2e5 is the PROVISIONAL total the calibration starts from. A total is
+  `solver_geometry.ISOFLUX_WEIGHT_TOTAL` = 2e5, a constant inside a measured
+  window (next section), or `SolverConfig.isoflux_weight_total` when set. A total is
   nominal: TokaMaker's `set_isoflux` does not apply the
   reference point's (the first point's) weight, so the installed total is
   the nominal total minus `w[0]` (199 219 for a set without X-points); the
@@ -808,8 +807,8 @@ lengths, the first point); every isoflux stamp (the reconstruction's
 `weight_total`. The legacy draws' iso-update normalised per unit length of
 the traced LCFS (#81) is the same form on that route.
 
-**Every reconstruction and draw moves slightly** (measured at the fixed total
-2e5 of #84, before the calibrated balance below). The boundary is held at
+**Every reconstruction and draw moves slightly** (measured at the total 2e5 of
+#84). The boundary is held at
 resampled points with a per-length weight, at a total 2x the IDS route's
 former one and 4x-10x the g-file route's, so every unified-engine number
 moves. Measured (one thread each, the same tree before and after #84;
@@ -860,7 +859,7 @@ bound), their VSC drifts shrink.
 The goldens are not regenerated here: they are regenerated on the merged
 code (the solver-marked golden tests move with every unified-engine number).
 
-### The boundary constraint: a calibrated balance between the boundary cut and the coil cut
+### The boundary constraint: a constant total inside a measured window
 
 **The model choice.** The boundary (isoflux) constraint and the coil
 regularisation are both least-squares penalties in TokaMaker's coil solve:
@@ -869,96 +868,140 @@ difference `psi(x_j) - psi(x_ref)` [Wb/rad] and the coil rows on `mu0 x` the
 current's departure from its target [A]. Only their RATIO shapes the solution: a
 perturbation of the plasma is split between moving the boundary and moving the
 coils in proportion to it. The in-spec rule judges every draw on both -- the
-boundary RMS cut `delta_cut` and the coil cut -- so the total isoflux weight `W` is
-chosen per case so that a perturbation is split evenly between the two cuts: a
-boundary miss of `delta_cut` costs the solver what a coil drift equal to the coil
-cut costs. With `d psi = R B_p d n` along the boundary, in squared-penalty form:
+boundary RMS cut and the coil cut -- so the total isoflux weight `W` should sit
+where a boundary miss equal to the boundary cut and a coil drift equal to the
+coil cut cost the solver comparably.
 
-    sum_j (W u_j (R B_p)_j delta_cut)^2 = sum_c (r_c mu0 dI_c,cut)^2
+**The set** is the standard set of #84 (above): the source boundary resampled
+to 256 points by arc length, per-length weights, the outermost point first.
+**The strength** is ONE constant, `solver_geometry.ISOFLUX_WEIGHT_TOTAL` =
+2e5 (owner decision 2026-10-16), for the reconstruction and every draw, inside
+two measured ranges:
 
-    W_a = mu0 sqrt(sum_c (r_c dI_c,cut)^2) / (delta_cut sqrt(sum_j (u_j (R B_p)_j)^2))
+- the **window**, about 1.5e5-4e5: below it a diverted g-file case's
+  vertical-control drift grows as the boundary weakens and its in-spec draws
+  fall (7 of 10 at 2e5, 3 at 1e5, 1 at 5e4; at the pre-#84 g-file route's
+  ~2e4 its sigma=0 draw missed the archived-stage bootstrap gate); at 4e5 the
+  boundary is already the stiffer side (partition 0.3-0.9) and that case keeps
+  5 of 10 in spec. Every sigma=0 draw passes its gates from 5e4 to 4e5;
+- the **balance-crossing band**, 1.8e5-3.8e5: the total at which the partition
+  below equals 1, measured on six equilibria (three experimental, three
+  synthetic), at 2 % and 10 % probe amplitude, with and without the
+  homotopy's coil bounds (where a bounded probe converges unsaturated it
+  reproduces the unbounded partition to a few %).
 
-`u_j`: the standard set's per-length weight fractions (sum 1; the reference point,
-whose weight TokaMaker does not apply, left out); `(R B_p)_j` on the
-reconstruction's anchor equilibrium; `r_c`: the draws' soft coil regularisation
-weight (`generate_bouquet`'s `soft_reg_weight`, 1e4; the `#VSC` term at 1 is left
-out); `dI_c,cut`: `sqrt(chi2_max) x sigma_c` on the chi2 coil test (a drift of that
-size on every coil sits exactly at `chi2/nu = chi2_max`), `F_max x |I_c|` /
-`VSC_max x |I_c|` on the legacy drift test; `delta_cut`: the boundary cut the
-in-spec rule resolves (`filtering.rms_max_mm`; when the cut is off, the generic
-5 mm, stamped).
+`SolverConfig.isoflux_weight_total` (default `None` = the constant) is the
+explicit override, installed as given and stamped "override"; a
+`SolverConfig.isoflux_pts` set is used as given; the legacy and swb routes are
+unchanged.
 
-**Calibrated, not derived** (`bouquet.boundary_balance`). `W_a` fixes the
-order of magnitude; the partition is MEASURED once per reconstruction, before
-it, by a probe (`calibrate_boundary_constraint`): from the reconstruction's own
-start, the anchor request is solved twice (the reconstruction's anchor solve, at
-the provisional total); then, from that anchor equilibrium, the same request is
-re-solved with the pressure scaled by `1 + PROBE_PRESSURE_SCALE` (0.10: a beta_p
-perturbation at fixed current profile and I_p -- deterministic, no random
-numbers), under the draws' strong coil regularisation toward the anchor's own
-currents and the boundary set at a trial `W`, capped at
-`engine_draw_solve_maxits`. The partition ratio
+**Why not a per-case calibration.** A root find that brings the partition to 1
+on each case was built and rejected (2026-10-16). On cases whose boundary
+and vertical-control pair move as one rigid vertical displacement (the pair's
+`#VSC` channel is nearly unregularised on purpose, below), the partition is
+flat in `W` over most of the window, so `rho = 1` does not fix `W` there: the
+root find landed a decade below the window, where the draws' vertical-control
+drift took most of them out of the coil cut. With the pair excluded the
+partition is monotone, but its crossing then lands inside the band above,
+which a constant already sits in.
 
-    rho(W) = (boundary RMS / delta_cut) / (coil fraction)
+**The partition, reported** (`bouquet.boundary_balance`, report only). After
+the reconstruction has converged, ONE extra solve, capped at
+`engine_draw_solve_maxits`: the delivered request re-solved from the
+delivered equilibrium with the pressure scaled by 1.02
+(`PARTITION_PRESSURE_STEP`; a beta_p perturbation at fixed current request and
+I_p, deterministic; 2 % is the amplitude at which the probe was feasible on
+every case measured, at 10 % some experimental cases stopped at the cap),
+under the draws' strong coil regularisation (1e4, `#VSC` 1) toward the
+delivered currents and the installed set. The partition
 
-uses the in-spec rule's own measures (the boundary RMS as `boundary_deviation_mm`
-measures a draw; the coil fraction is the binding one of the coil test's criteria,
-each exactly 1 at its cut: `sqrt(chi2_nu / chi2_max)` and `max|z| / z_max`). A
-bracketed root find on `log W` from `W_a` (steps of one decade, doubling, within
-three decades; then regula falsi with the Illinois step; at most
-`PROBE_MAX_SOLVES` = 8 probe solves; a failed probe solve halves the step) stops
-when `1/1.2 <= rho <= 1.2` (`BALANCE_TOLERANCE`) and installs that MEASURED point's
-`W`. The solver is then put back exactly on the reconstruction's start, the
-calibrated set is installed (`solver_geometry.with_balanced_total`: the same
-points and per-length shape), and the reconstruction and every draw solve under
-it -- the draws hold the reconstruction's set exactly, as before. No bracket: the
-analytic `W_a` is installed, warned and stamped (`fallback`); a probe that fails
-before `W_a` exists leaves the provisional total, warned and stamped. Cost: the
-two anchor solves plus 2-4 probe solves, 23-47 s per reconstruction measured.
+    rho = (boundary RMS / boundary cut) / (coil fraction)
 
-**Stamped** in the solver geometry record (`isoflux_weight_mode`: "calibrated",
-"override", "provisional", "as given"; `isoflux_balance`) and the baseline's engine
-record (`boundary_balance`): the analytic estimate and its parts, the cuts and the
-coil rule, the calibrated total and the installed total (the reference point's
-weight not applied), the partition ratio at the calibrated total, every probe
-point (W, rho, boundary RMS, coil fraction, worst coil, solve time, error), the
-solve count, the wall time and any fallback.
+uses the in-spec rule's own measures (the boundary RMS as
+`boundary_deviation_mm` measures a draw against the boundary cut the rule
+resolves, the generic 5 mm when the cut is off, stamped; the coil fraction the
+binding one of the coil test's criteria, each exactly 1 at its cut:
+`sqrt(chi2_nu / chi2_max)` and `max|z| / z_max`, or the legacy F-coil drift
+over `F_max`), with the vertical-control pair EXCLUDED from the coil fraction
+(it moves with the boundary as above, and would pin the ratio near 1). The
+delivered equilibrium and the reconstruction's coil regularisation are
+restored afterwards; the baseline is unchanged and the total is never
+changed. Outside `PARTITION_BAND` = [1/3, 3] a UserWarning names it (one cut
+costing the solver more than three times the other; the band holds the
+0.8-2.6 the six cases measured at 2e5). `SolverConfig.boundary_partition_probe`
+(default `True`) switches it off (stamped `status` "off").
 
-**The override.** `SolverConfig.isoflux_weight_total` (default `None` =
-calibrate) installs the given total as is, stamped "override"; a
-`SolverConfig.isoflux_pts` set is used as given (never calibrated); the legacy
-and swb routes are unchanged.
+**Stamped** in the solver geometry record (`isoflux_weight_mode`: "constant",
+"override", "as given"; `isoflux_balance`, with the probe under `partition`)
+and the baseline's engine record (`boundary_balance`, the same): the nominal
+and installed totals (`total_nominal`, `total_installed`: the reference point's
+weight is not applied), `partition`, `boundary_frac`, `coil_frac`, the
+boundary RMS and max, the coil test and its acceptance, the excluded coils,
+`in_band`, `n_solves`, `solve_s`, `wall_s`, `status` and any error.
 
-**Tests.** OFT-free (`tests/test_boundary_balance.py`): the rule is the
-squared-penalty balance and scales as stated; the reference point is left out; the
-root find converges on measured points, reports no bracket and a spent budget;
-the stamps (provisional, override, calibrated; both totals). Live
-(`tests/test_boundary_balance_solver.py`, `-m solver`), on the synthetic H-mode
-and L-mode g-file pairs and the synthetic dd at 1.2 s: the calibration converges,
-the partition at the calibrated total is within a factor of 2 of 1 (the probe and
-the installed set agree), and the calibrated total is within one decade of `W_a`
--- the bar that detects a change in TokaMaker's conventions (the row scaling, the
-`mu0` of the coil rows or the flux units each move the calibrated total away
-from the estimate by that convention's factor); and a fixed-seed set of 10 draw
-attempts archives at least 80 % of the attempts that reach a solve. The third
-leg is the sigma=0 reproduction (`tests/test_sigma0_identity_solver.py`),
-unchanged, under the calibrated total. No reversed-I_p fixture ships with the
-repository; that case is verified on the owner's private ladder.
+**The vertical-control bound of the homotopy.** The draws' homotopy bounds the
+`#VSC` channel at `drift_VSC x` a scale. Before 2026-10-16 the scale was the
+smaller coil of the anti-series pair, `min(|I_F9A|, |I_F9B|)`; on a
+reversed-I_p case whose pair carried 66 kA and 2.8 kA that bound was 279 A in
+the first pass: TokaMaker's vertical-control column sat on it from the first
+iteration, the axis ran away vertically (Z from -0.02 m to +/-0.7-1.0 m) and 9
+of 10 draws stopped at the iteration cap -- an infeasible solve, not a slow
+one (a cap of 400 or 1000 reached a non-finite state instead), while the
+in-spec rule accepts several hundred A on that pair. The scale is now
+`max(min|I_pair|, _COIL_DRIFT_DENOM_FLOOR_A)` (10 kA, the in-spec VSC
+metric's own denominator floor: one constant, one name;
+`TokaMaker_interface._vsc_bound_scale`), and the homotopy's VSC saturation
+measure is taken on the same denominator (`_coil_bound_max_vsc`; the pass
+loop and the post-homotopy j_BS guard). With it that case archived 9 of 10
+(9 in spec) at 2e5. It is inactive for a pair whose smaller coil carries more
+than 10 kA (every synthetic fixture, the diverted g-file case). **This changes
+a homotopy coil bound so that it agrees with the in-spec rule's metric; it
+changes no acceptance gate** (owner-approved 2026-10-16): the in-spec rule and
+the sigma=0 coil gate (the archived per-coil percentage against the tightest
+stage) are unchanged. The hard-factor bounds (`coil_drift_hard_factor`) keep
+their unfloored scale.
+
+**The vertical-control weight** stays `vsc_soft_reg_weight` = 1.0 (its
+docstring records the scans): weights 1, 10 and 100 give identical draws;
+1e3 starves the vertical control (0 of 10 at a total of 5e4, where the sigma=0
+draw fails too); 1e4 fails the sigma=0 draw on every case measured, the axis
+running away with the channel on its bound. A heavier weight does not move
+the pair's drift onto the shaping coils; it removes vertical control.
+
+**The vertical-runaway label.** A homotopy stage whose solve stops at the
+iteration cap with the vertical-control pair at its bound (the homotopy's
+saturation fraction 0.99) and the magnetic axis more than
+`VERTICAL_RUNAWAY_AXIS_FRAC` = 0.1 a from the delivered axis
+(`axis_shift_record`'s displacement) is labelled `"vertical_runaway"` in its
+cap event (below). 0.1 a is ten times the axis-displacement flag and above the
+several % of a that kinetic draws move the axis; the runaway it names moved the
+axis by about one minor radius. A label: nothing is accepted, refused or
+filtered on it.
+
+**Tests.** OFT-free (`tests/test_boundary_balance.py`,
+`tests/test_homotopy_vsc_floor.py`): the constant is 2e5 with its window and
+band in its docstring; the VSC weight is 1.0 with its scans recorded; the
+bound builder uses the floor for a near-zero coil and the coil otherwise,
+saturation sits exactly at the bound; the label; the partition's coil fraction
+leaves the pair out and is 1 at the cut; the probe solves once, restores the
+delivered equilibrium and the coil regularisation, warns outside the band and
+records a failed solve; the stamps. Live (`tests/test_boundary_balance_solver.py`,
+`-m solver`), on the synthetic H-mode and L-mode g-file pairs and the
+synthetic dd at 1.2 s: the stamped partition at the default total lies in
+[1/3, 3] at no more than 2 probe solves -- a change of TokaMaker's conventions
+(the row scaling, the `mu0` of the coil rows, the flux units) moves it by that
+convention's factor, far outside the band; and 10 fixed-seed draw attempts
+archive at least 80 % of the attempts that reach a solve. The sigma=0
+reproduction (`tests/test_sigma0_identity_solver.py`) is unchanged. No fixture
+with a vertical-control coil below 10 kA ships with the repository: the
+floor's yield on such a case is verified on the owner's private ladder, its
+arithmetic by the fast test.
 
 **History.** Before #84 the strength followed the source's point count (about 2e4
-on the g-file route); #84 standardised the set per unit length and fixed the total
-at 2e5 to hold a diverted g-file case's sigma=0 state, and a reversed-I_p case's
-draws then lost their homotopy to the iteration cap. The strength is a ratio to
-the coil regularisation, so it is now calibrated per case.
-
-**Open (2026-10-16).** On diverted cases whose VSC pair dominates the coil test,
-the probe's partition is flat near 1 below a knee (the boundary displacement and
-the VSC excursion are the same rigid motion, and the `#VSC` channel is nearly
-free), so `rho = 1` does not fix `W` there: the root find stops at the first
-bracket point inside the tolerance, one decade below `W_a`, where the draws'
-VSC excursion takes most of them out of the coil cut. Where the partition is
-monotone (the synthetic fixtures, a reversed-I_p case) it calibrates to 1.8e5-2e5.
-The choice of the rule there is an open owner decision.
+on the g-file route); #84 standardised the set per unit length and fixed the
+total at 2e5. A reversed-I_p case's draws then stopped at the iteration cap;
+a per-case calibration was tried (above) and the cause turned out to be the
+homotopy's vertical-control bound, now floored.
 
 **Is this baseline bistable? (`check_bistability`, on by default.)**
 `GenerationConfig.check_bistability` defaults to `None`, resolved at
@@ -1190,7 +1233,12 @@ Every capped solve is recorded on `GenerateEngineDraws.cap_events` and
 `Bouquet.engine_draw_cap_events` (draw, stage, `iterations` = the cap,
 `seconds`, `outcome` = `rolled_back` | `rejected`, the error), in the
 archived draw's `homotopy.cap_events`, and summarised in one printed
-`[generate]` line.
+`[generate]` line. A homotopy stage's event also carries `vertical_runaway`
+(the vertical-control pair's drift as a fraction of the stage's bound, the
+axis displacement in units of a, the threshold) and `label`
+(`"vertical_runaway"` when the pair is at its bound and the axis is more than
+`VERTICAL_RUNAWAY_AXIS_FRAC` = 0.1 a away, else `None`; "The boundary
+constraint" above) -- a label, never a gate.
 
 ## The pressure handed to the solver (`edge_pprime_pin`, `separatrix_pressure`)
 
@@ -1272,9 +1320,9 @@ responds to l_i with the measured log-gain of 2); anchor 2 + passes + delivery
 plus 1 + 8 solves per Jacobian refresh at its convergence (one when the
 refreshed step is within the criterion).
 A draw: 3-5 loop passes of one solve each (see [Draws](#draws)). The live
-numbers are written by the solver probe. The boundary-balance probe adds the
-two anchor solves and 2-4 probe solves to every unified-engine reconstruction
-(23-47 s measured).
+numbers are written by the solver probe. The report-only boundary-partition
+probe adds ONE capped solve to every unified-engine reconstruction (its wall
+is stamped as `boundary_balance.partition.wall_s`).
 
 **Two bounds on a draw's cost.** Structural: every engine-draw solve is capped
 at `engine_draw_solve_maxits` (default 100) iterations and a draw runs a bounded

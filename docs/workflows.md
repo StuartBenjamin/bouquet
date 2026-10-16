@@ -115,8 +115,9 @@ is a navigational summary of the defaults.
 | `nthreads` | `1` | **Keep at 1.** OpenMP reduction order is non-deterministic and jitters `l_i(1)` by ~1%; parallelise across processes instead |
 | `order` | `3` | FE order |
 | `F0` | `None` | Vacuum `R·B_t`; defaults from the g-file / IDS |
-| `isoflux_pts`, `isoflux_weights` | `None` | Boundary (isoflux) constraint points and weights, **used as given** (never resampled; points without weights get per-length weights summing to `ISOFLUX_WEIGHT_TOTAL` under the unified engine, with a UserWarning). Default (unified engine, #84): the source boundary resampled to `solver_geometry.N_ISOFLUX` = 256 points by arc length, X-points kept exactly, each point weighted by the arc length it represents, the weights summing to the case's CALIBRATED total (the balance between the boundary cut and the coil cut, measured once per reconstruction: engine.md "The boundary constraint: a calibrated balance ..."; `solver_geometry.ISOFLUX_WEIGHT_TOTAL` = 2e5 is only the provisional total it starts from) -- one set for the reconstruction and the draws, whatever the source's point count. Legacy route: the source boundary as given at `ISOFLUX_WEIGHT` = 500 per point. See [The boundary constraint](#the-boundary-constraint-per-unit-length-84) |
-| `isoflux_weight_total` | `None` | The total weight of the unified engine's standard boundary set. `None`: calibrated per case as the balance between the in-spec rule's boundary cut and its coil cut (a probe of 2-4 solves before the reconstruction; stamped as `isoflux_weight_mode` "calibrated" with `isoflux_balance` in `solver_geometry_json` and `boundary_balance` in the engine record). A number: an explicit OVERRIDE, installed as given, stamped "override". Also the total of an `isoflux_pts` set given without weights |
+| `isoflux_pts`, `isoflux_weights` | `None` | Boundary (isoflux) constraint points and weights, **used as given** (never resampled; points without weights get per-length weights summing to `ISOFLUX_WEIGHT_TOTAL` under the unified engine, with a UserWarning). Default (unified engine, #84): the source boundary resampled to `solver_geometry.N_ISOFLUX` = 256 points by arc length, X-points kept exactly, each point weighted by the arc length it represents, the weights summing to `solver_geometry.ISOFLUX_WEIGHT_TOTAL` = 2e5 (a constant inside a measured window: engine.md "The boundary constraint: a constant total inside a measured window"), or `isoflux_weight_total` when set -- one set for the reconstruction and the draws, whatever the source's point count. Legacy route: the source boundary as given at `ISOFLUX_WEIGHT` = 500 per point. See [The boundary constraint](#the-boundary-constraint-per-unit-length-84) |
+| `isoflux_weight_total` | `None` | The total weight of the unified engine's standard boundary set. `None`: the constant `solver_geometry.ISOFLUX_WEIGHT_TOTAL` = 2e5, inside the measured window (engine.md, "The boundary constraint: a constant total inside a measured window"; stamped as `isoflux_weight_mode` "constant"). A number: an explicit OVERRIDE, installed as given, stamped "override". Also the total of an `isoflux_pts` set given without weights |
+| `boundary_partition_probe` | `True` | The report-only boundary partition probe: ONE capped solve after the reconstruction measures how a 2 % pressure step splits between the boundary cut and the coil cut at the installed total (vertical-control pair excluded); stamped under `isoflux_balance.partition` in `solver_geometry_json` and `boundary_balance` in the engine record, warned outside [1/3, 3]; never changes the total. `False` skips it |
 | `saddle_targets`, `saddle_weights` | `None` | Opt-in X-point pins. Without them a diverted forward solve typically rounds the boundary corner by a few cm |
 | `coil_vsc` | `{"F9A": 1.0, "F9B": -1.0}` | Antisymmetric vertical-stability channel definition |
 
@@ -128,11 +129,9 @@ source boundary (g-file boundary, IDS `boundary.outline`, or `LCFS_geqdsk`)
 resampled to `solver_geometry.N_ISOFLUX` = **256** points by arc length
 (closed, counter-clockwise, the X-points kept as exact points), each point
 weighted by the arc length it represents, the weights summing to the
-case's total: since 2026-10-16 the calibrated balance between the boundary
-cut and the coil cut (engine.md, "The boundary constraint: a calibrated
-balance ..."; `SolverConfig.isoflux_weight_total` overrides it, and
-`solver_geometry.ISOFLUX_WEIGHT_TOTAL` = 2e5 is the provisional total the
-calibration starts from). The first point -- the one
+case's total: `solver_geometry.ISOFLUX_WEIGHT_TOTAL` = 2e5, a constant inside
+a measured window (engine.md, "The boundary constraint: a constant total
+inside a measured window"; `SolverConfig.isoflux_weight_total` overrides it). The first point -- the one
 TokaMaker measures the other points' flux against -- is the outermost point,
 never the X-point. Before (1.3.x and the 1.4.0 candidates), the IDS route held
 its ~200 outline points at 500 each and the g-file route its 100-257 boundary

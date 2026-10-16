@@ -1,26 +1,38 @@
 # Bouquet — change summaries
 
-## Unreleased — the boundary constraint's strength is a calibrated balance; a per-draw wall budget
+## Unreleased — the boundary constraint at a constant total with a reported partition; the homotopy's VSC bound floor; a per-draw wall budget
 
-- **Boundary constraint (model change, every unified-engine number moves).** The total
-  weight of the standard boundary set is no longer the fixed 2e5 of #84: per case, before
-  the reconstruction, a probe measures how a standard beta_p perturbation is split between
-  the boundary RMS over its cut and the coil drift over its cut, and a bracketed root find
-  on log W from the analytic squared-penalty estimate brings the ratio to 1 within 20 %
-  (`bouquet.boundary_balance`; engine.md, "The boundary constraint: a calibrated balance
-  ..."). The reconstruction and every draw solve under the calibrated set; the geometry
-  record (`isoflux_weight_mode`, `isoflux_balance`) and the engine record
-  (`boundary_balance`) stamp the estimate, the calibrated and installed totals, the
-  partition and every probe point. Cost: 23-47 s per reconstruction.
-  `SolverConfig.isoflux_weight_total` is the explicit override (None = calibrate);
-  `ISOFLUX_WEIGHT_TOTAL` = 2e5 is now the provisional total the probe starts from.
-- **Verification (2026-10-16): open.** The synthetic fixtures and an ordinary IDS slice
-  calibrate to 1.9e5-2.0e5 and pass sigma=0; a reversed-I_p case calibrates to 1.8e5 and
-  archives 4 of 10 draws (homotopy iteration cap; 8 of 10 at 1e5); on diverted cases whose
-  VSC pair dominates the coil test the partition is flat below a knee, so the calibration
-  stops a decade below the estimate, where most draws fail the coil cut. The new draw-yield
-  test (>= 80 % of solved attempts archived) fails on the synthetic g-files (5 and 6 of 10,
-  homotopy_saturated). The rule is an open owner decision before release.
+- **Boundary constraint: a constant inside a measured window (owner decision 2026-10-16).**
+  `ISOFLUX_WEIGHT_TOTAL` = 2e5 is the total of the standard boundary set (mode
+  "constant"), as at #84, now documented with its measured window (about 1.5e5-4e5) and
+  its balance-crossing band (1.8e5-3.8e5 on six equilibria, the vertical-control pair
+  excluded) (engine.md, "The boundary constraint: a constant total inside a measured
+  window"). A per-case calibrated root find was built on this branch and REMOVED as the
+  default path: the partition is flat in the total over most of the window where the
+  boundary and the vertical-control pair move as one rigid displacement.
+  `SolverConfig.isoflux_weight_total` is the explicit override (None = the constant).
+- **The partition, reported (new stamp, report only).** After the reconstruction ONE
+  capped solve (pressure x 1.02 from the delivered state, the draws' strong coil
+  regularisation) measures (boundary RMS / cut) / (coil drift / cut), the
+  vertical-control pair excluded; stamped under `isoflux_balance.partition` in
+  `solver_geometry_json` and `Baseline.engine["boundary_balance"]` (W nominal and
+  installed, the partition and its parts, `n_solves`, `wall_s`), warned (UserWarning)
+  outside [1/3, 3]. The delivered equilibrium and the coil regularisation are restored;
+  the total is never changed. `SolverConfig.boundary_partition_probe=False` skips it.
+- **The homotopy's #VSC bound scale is floored at 10 kA (owner-approved coil-bound
+  change; no acceptance gate changes).** The scale was `min(|F9A|, |F9B|)`; it is now
+  `max(min(|F9A|, |F9B|), _COIL_DRIFT_DENOM_FLOOR_A)`, the in-spec VSC metric's own
+  denominator floor (one constant), and the homotopy's VSC saturation measure uses the
+  same denominator. On a reversed-I_p case with a 2.8 kA coil in the pair it restored 9
+  of 10 archived draws at 2e5 (was 1 of 10: the channel on its 279 A bound, the axis
+  running away). Inactive when the smaller coil carries more than 10 kA. The in-spec
+  rule, the sigma=0 coil gate and the hard-factor bounds are unchanged.
+- **The vertical-runaway label.** A homotopy stage stopped at the iteration cap with the
+  vertical-control pair at its bound and the axis more than 0.1 a from the delivered axis
+  is labelled `"vertical_runaway"` in its cap event (`Bouquet.engine_draw_cap_events`);
+  a label, never a gate or a filter.
+- **`vsc_soft_reg_weight` stays 1.0**; its docstring records the 2026-05 and 2026-10
+  scans (1, 10, 100 identical; 1e3 starves vertical control; 1e4 fails sigma=0).
 - **Per-draw wall budget.** `GenerationConfig.draw_wall_budget_s` (default 600 s, None =
   off): checked before each of a draw's solves (never inside one) and before archiving; a
   draw over it is rejected as `draw_wall_budget`, recorded like every rejection, and the
