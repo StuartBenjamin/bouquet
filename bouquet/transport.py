@@ -7,7 +7,8 @@ dd_source_totals`) are FUSE's at the dd step, the same for every draw of a scan.
 """
 import numpy as np
 
-E_CHARGE = 1.602176634e-19
+from .physics import ELEMENTARY_CHARGE as E_CHARGE
+
 _trapz = getattr(np, "trapezoid", None) or np.trapz
 
 #: Archived per equilibrium (draw group or ``_baseline``): datasets and attrs.
