@@ -1,5 +1,37 @@
 # Bouquet — change summaries
 
+## Unreleased — the boundary constraint's strength is a calibrated balance; a per-draw wall budget
+
+- **Boundary constraint (model change, every unified-engine number moves).** The total
+  weight of the standard boundary set is no longer the fixed 2e5 of #84: per case, before
+  the reconstruction, a probe measures how a standard beta_p perturbation is split between
+  the boundary RMS over its cut and the coil drift over its cut, and a bracketed root find
+  on log W from the analytic squared-penalty estimate brings the ratio to 1 within 20 %
+  (`bouquet.boundary_balance`; engine.md, "The boundary constraint: a calibrated balance
+  ..."). The reconstruction and every draw solve under the calibrated set; the geometry
+  record (`isoflux_weight_mode`, `isoflux_balance`) and the engine record
+  (`boundary_balance`) stamp the estimate, the calibrated and installed totals, the
+  partition and every probe point. Cost: 23-47 s per reconstruction.
+  `SolverConfig.isoflux_weight_total` is the explicit override (None = calibrate);
+  `ISOFLUX_WEIGHT_TOTAL` = 2e5 is now the provisional total the probe starts from.
+- **Verification (2026-10-16): open.** The synthetic fixtures and an ordinary IDS slice
+  calibrate to 1.9e5-2.0e5 and pass sigma=0; a reversed-I_p case calibrates to 1.8e5 and
+  archives 4 of 10 draws (homotopy iteration cap; 8 of 10 at 1e5); on diverted cases whose
+  VSC pair dominates the coil test the partition is flat below a knee, so the calibration
+  stops a decade below the estimate, where most draws fail the coil cut. The new draw-yield
+  test (>= 80 % of solved attempts archived) fails on the synthetic g-files (5 and 6 of 10,
+  homotopy_saturated). The rule is an open owner decision before release.
+- **Per-draw wall budget.** `GenerationConfig.draw_wall_budget_s` (default 600 s, None =
+  off): checked before each of a draw's solves (never inside one) and before archiving; a
+  draw over it is rejected as `draw_wall_budget`, recorded like every rejection, and the
+  budget and its count stamped in the generation provenance. The structural bound (every
+  solve capped at `engine_draw_solve_maxits`, a bounded number of solves per draw) is
+  documented beside it (engine.md, "Cost").
+- **Fixtures.** `tests/data/diiid_profs_synthetic_pfast.cdf`: the H-mode IDA fit on the
+  total-pressure g-file's q; `test_phi_imas_solver` and `test_swb_systematics_solver` pair
+  the dd with it and `g_synthetic_pfast.geqdsk` (their premise did not hold on the
+  thermal-only g-file); no bar moved.
+
 ## Unreleased — the g-file and systematics notebooks re-executed on the thermal-only g-file
 
 **Examples.** `examples/D3D-like/bouquet_D3Dlike_geqdsk_example.ipynb` and

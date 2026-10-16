@@ -771,6 +771,30 @@ closure-half current gate as a standing criterion); the delivery solve is
 checked on every row and is the reconstruction. Stage 2 builds the baseline
 only: the draws refuse an engine baseline until they run on the engine.
 
+### The boundary constraint's strength is a ratio (model choice)
+
+The free-boundary solve does not hold the plasma boundary exactly: TokaMaker
+finds the coil currents by least squares, with the boundary (isoflux) points
+asking that the flux along the source boundary be one value and the coil
+regularisation asking that each coil stay near its target current, each term
+weighted. Inside the Picard iteration (solve for the plasma current at fixed
+coils, then the coils at fixed plasma current, repeat) only the RATIO of the two
+weights decides how a change of the plasma is shared between a boundary miss
+and a coil change; the absolute scale matters only through conditioning. The
+draws are judged on both outcomes (the boundary RMS cut and the coil cut), so
+the ratio is a modelling assumption with a direct effect on which draws are
+accepted. Bouquet chooses it per case as the balance at which a standard
+perturbation (a beta_p change at fixed current profile) moves the boundary and
+the coils by the same fraction of their cuts -- an analytic squared-penalty
+estimate refined by a measured probe on the reconstruction's anchor equilibrium
+([engine.md](engine.md), "The boundary constraint: a calibrated balance ...").
+The assumptions: the two penalties are quadratic (TokaMaker's least squares), the
+flux miss maps to a normal boundary displacement through `R B_p`, and the
+partition of the probe perturbation stands for the partition of the draws'
+perturbations. The last one fails where the VSC pair (regularised almost not at
+all) carries the plasma's rigid motion: the boundary and the VSC then move
+together and the balance does not fix the strength (an open item).
+
 ## The pressure handed to the solver: separatrix pressure and the edge P′ pin
 
 Every Grad-Shafranov solve in the package hands the solver two things about

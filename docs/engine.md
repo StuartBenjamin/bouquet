@@ -764,9 +764,11 @@ ONE standard set on both routes, for the reconstruction and every draw
   `xpoint_match`); the saddle constraints
   themselves are installed exactly as configured;
 - each point is weighted by the arc length it represents (half the spacing to
-  each neighbour), the weights summing to
-  `solver_geometry.ISOFLUX_WEIGHT_TOTAL` = 2e5 (`per_length_weights`). That
-  is the nominal total: TokaMaker's `set_isoflux` does not apply the
+  each neighbour), the weights summing to the case's total (`per_length_weights`):
+  since 2026-10-16 the calibrated balance of the next section, or
+  `SolverConfig.isoflux_weight_total` when set; `solver_geometry.ISOFLUX_WEIGHT_TOTAL`
+  = 2e5 is the PROVISIONAL total the calibration starts from. A total is
+  nominal: TokaMaker's `set_isoflux` does not apply the
   reference point's (the first point's) weight, so the installed total is
   the nominal total minus `w[0]` (199 219 for a set without X-points); the
   record stamps both (`isoflux_weight_total`,
@@ -806,7 +808,8 @@ lengths, the first point); every isoflux stamp (the reconstruction's
 `weight_total`. The legacy draws' iso-update normalised per unit length of
 the traced LCFS (#81) is the same form on that route.
 
-**Every reconstruction and draw moves slightly.** The boundary is held at
+**Every reconstruction and draw moves slightly** (measured at the fixed total
+2e5 of #84, before the calibrated balance below). The boundary is held at
 resampled points with a per-length weight, at a total 2x the IDS route's
 former one and 4x-10x the g-file route's, so every unified-engine number
 moves. Measured (one thread each, the same tree before and after #84;
@@ -856,6 +859,106 @@ bound), their VSC drifts shrink.
 
 The goldens are not regenerated here: they are regenerated on the merged
 code (the solver-marked golden tests move with every unified-engine number).
+
+### The boundary constraint: a calibrated balance between the boundary cut and the coil cut
+
+**The model choice.** The boundary (isoflux) constraint and the coil
+regularisation are both least-squares penalties in TokaMaker's coil solve:
+every constraint row is scaled by its weight, the isoflux rows act on the flux
+difference `psi(x_j) - psi(x_ref)` [Wb/rad] and the coil rows on `mu0 x` the
+current's departure from its target [A]. Only their RATIO shapes the solution: a
+perturbation of the plasma is split between moving the boundary and moving the
+coils in proportion to it. The in-spec rule judges every draw on both -- the
+boundary RMS cut `delta_cut` and the coil cut -- so the total isoflux weight `W` is
+chosen per case so that a perturbation is split evenly between the two cuts: a
+boundary miss of `delta_cut` costs the solver what a coil drift equal to the coil
+cut costs. With `d psi = R B_p d n` along the boundary, in squared-penalty form:
+
+    sum_j (W u_j (R B_p)_j delta_cut)^2 = sum_c (r_c mu0 dI_c,cut)^2
+
+    W_a = mu0 sqrt(sum_c (r_c dI_c,cut)^2) / (delta_cut sqrt(sum_j (u_j (R B_p)_j)^2))
+
+`u_j`: the standard set's per-length weight fractions (sum 1; the reference point,
+whose weight TokaMaker does not apply, left out); `(R B_p)_j` on the
+reconstruction's anchor equilibrium; `r_c`: the draws' soft coil regularisation
+weight (`generate_bouquet`'s `soft_reg_weight`, 1e4; the `#VSC` term at 1 is left
+out); `dI_c,cut`: `sqrt(chi2_max) x sigma_c` on the chi2 coil test (a drift of that
+size on every coil sits exactly at `chi2/nu = chi2_max`), `F_max x |I_c|` /
+`VSC_max x |I_c|` on the legacy drift test; `delta_cut`: the boundary cut the
+in-spec rule resolves (`filtering.rms_max_mm`; when the cut is off, the generic
+5 mm, stamped).
+
+**Calibrated, not derived** (`bouquet.boundary_balance`). `W_a` fixes the
+order of magnitude; the partition is MEASURED once per reconstruction, before
+it, by a probe (`calibrate_boundary_constraint`): from the reconstruction's own
+start, the anchor request is solved twice (the reconstruction's anchor solve, at
+the provisional total); then, from that anchor equilibrium, the same request is
+re-solved with the pressure scaled by `1 + PROBE_PRESSURE_SCALE` (0.10: a beta_p
+perturbation at fixed current profile and I_p -- deterministic, no random
+numbers), under the draws' strong coil regularisation toward the anchor's own
+currents and the boundary set at a trial `W`, capped at
+`engine_draw_solve_maxits`. The partition ratio
+
+    rho(W) = (boundary RMS / delta_cut) / (coil fraction)
+
+uses the in-spec rule's own measures (the boundary RMS as `boundary_deviation_mm`
+measures a draw; the coil fraction is the binding one of the coil test's criteria,
+each exactly 1 at its cut: `sqrt(chi2_nu / chi2_max)` and `max|z| / z_max`). A
+bracketed root find on `log W` from `W_a` (steps of one decade, doubling, within
+three decades; then regula falsi with the Illinois step; at most
+`PROBE_MAX_SOLVES` = 8 probe solves; a failed probe solve halves the step) stops
+when `1/1.2 <= rho <= 1.2` (`BALANCE_TOLERANCE`) and installs that MEASURED point's
+`W`. The solver is then put back exactly on the reconstruction's start, the
+calibrated set is installed (`solver_geometry.with_balanced_total`: the same
+points and per-length shape), and the reconstruction and every draw solve under
+it -- the draws hold the reconstruction's set exactly, as before. No bracket: the
+analytic `W_a` is installed, warned and stamped (`fallback`); a probe that fails
+before `W_a` exists leaves the provisional total, warned and stamped. Cost: the
+two anchor solves plus 2-4 probe solves, 23-47 s per reconstruction measured.
+
+**Stamped** in the solver geometry record (`isoflux_weight_mode`: "calibrated",
+"override", "provisional", "as given"; `isoflux_balance`) and the baseline's engine
+record (`boundary_balance`): the analytic estimate and its parts, the cuts and the
+coil rule, the calibrated total and the installed total (the reference point's
+weight not applied), the partition ratio at the calibrated total, every probe
+point (W, rho, boundary RMS, coil fraction, worst coil, solve time, error), the
+solve count, the wall time and any fallback.
+
+**The override.** `SolverConfig.isoflux_weight_total` (default `None` =
+calibrate) installs the given total as is, stamped "override"; a
+`SolverConfig.isoflux_pts` set is used as given (never calibrated); the legacy
+and swb routes are unchanged.
+
+**Tests.** OFT-free (`tests/test_boundary_balance.py`): the rule is the
+squared-penalty balance and scales as stated; the reference point is left out; the
+root find converges on measured points, reports no bracket and a spent budget;
+the stamps (provisional, override, calibrated; both totals). Live
+(`tests/test_boundary_balance_solver.py`, `-m solver`), on the synthetic H-mode
+and L-mode g-file pairs and the synthetic dd at 1.2 s: the calibration converges,
+the partition at the calibrated total is within a factor of 2 of 1 (the probe and
+the installed set agree), and the calibrated total is within one decade of `W_a`
+-- the bar that detects a change in TokaMaker's conventions (the row scaling, the
+`mu0` of the coil rows or the flux units each move the calibrated total away
+from the estimate by that convention's factor); and a fixed-seed set of 10 draw
+attempts archives at least 80 % of the attempts that reach a solve. The third
+leg is the sigma=0 reproduction (`tests/test_sigma0_identity_solver.py`),
+unchanged, under the calibrated total. No reversed-I_p fixture ships with the
+repository; that case is verified on the owner's private ladder.
+
+**History.** Before #84 the strength followed the source's point count (about 2e4
+on the g-file route); #84 standardised the set per unit length and fixed the total
+at 2e5 to hold a diverted g-file case's sigma=0 state, and a reversed-I_p case's
+draws then lost their homotopy to the iteration cap. The strength is a ratio to
+the coil regularisation, so it is now calibrated per case.
+
+**Open (2026-10-16).** On diverted cases whose VSC pair dominates the coil test,
+the probe's partition is flat near 1 below a knee (the boundary displacement and
+the VSC excursion are the same rigid motion, and the `#VSC` channel is nearly
+free), so `rho = 1` does not fix `W` there: the root find stops at the first
+bracket point inside the tolerance, one decade below `W_a`, where the draws'
+VSC excursion takes most of them out of the coil cut. Where the partition is
+monotone (the synthetic fixtures, a reversed-I_p case) it calibrates to 1.8e5-2e5.
+The choice of the rule there is an open owner decision.
 
 **Is this baseline bistable? (`check_bistability`, on by default.)**
 `GenerationConfig.check_bistability` defaults to `None`, resolved at
@@ -1169,7 +1272,23 @@ responds to l_i with the measured log-gain of 2); anchor 2 + passes + delivery
 plus 1 + 8 solves per Jacobian refresh at its convergence (one when the
 refreshed step is within the criterion).
 A draw: 3-5 loop passes of one solve each (see [Draws](#draws)). The live
-numbers are written by the solver probe.
+numbers are written by the solver probe. The boundary-balance probe adds the
+two anchor solves and 2-4 probe solves to every unified-engine reconstruction
+(23-47 s measured).
+
+**Two bounds on a draw's cost.** Structural: every engine-draw solve is capped
+at `engine_draw_solve_maxits` (default 100) iterations and a draw runs a bounded
+number of solves (the loop's passes, the homotopy stages and a rollback, the
+post-homotopy passes), so no draw runs forever. Wall clock:
+`GenerationConfig.draw_wall_budget_s` (default 600 s, `None` = off) -- checked
+before each of a draw's solves (a running GS solve is never interrupted) and
+once before the draw is archived; a draw over it is rejected as
+`draw_wall_budget`, recorded like every rejection (attempt record, counts, the
+summary line; the reason it pre-empted kept as `masked_reason`), and the budget
+and its rejection count are stamped in the generation provenance
+(`draw_wall_budget_s`, `draw_wall_budget_rejections`). 600 s is five times the
+120 s per-draw target and about three times the slowest normal draws (150-190 s);
+it ends only stalled draws (one was measured at 55 min).
 
 ## Deviations from the design note
 

@@ -17,8 +17,9 @@ calibrated, set).
   them moves the calibrated total away from the estimate by that
   convention's factor (mu0 alone is six decades; a squared-vs-linear weight
   change moves it by orders of magnitude), so the one-decade bar flags a
-  convention change while leaving room for the plasma's own response (the
-  fixtures sit at 0.3-0.6 of a decade).  The factor-2 bar on the ratio
+  convention change while leaving room for the plasma's own response (measured
+  2026-10-16: the three fixtures calibrate 0.13-0.27 of a decade below the
+  estimate).  The factor-2 bar on the ratio
   checks the stamp is a measurement at the installed total: the calibration
   stops within 20 %, so a ratio outside a factor 2 means the probe and the
   installed set disagree.
@@ -29,7 +30,9 @@ calibrated, set).
   The bar is the regression of the symptom that motivated the balance: at a
   fixed total ten times too strong for a reversed-I_p case, 9 of its 10
   draws stopped at the homotopy's iteration cap; the balance archived 8-10
-  of 10 on every case it was verified on.  No reversed-I_p fixture ships with
+  of 10 at totals of 1e5 and below.  MEASURED 2026-10-16 at the calibrated
+  totals (1.97e5 H-mode, 2.02e5 L-mode): 5 and 6 of 10 (homotopy_saturated) --
+  the bar FAILS; the balance's open item (docs/engine.md).  No reversed-I_p fixture ships with
   the repository; that case is verified on the owner's private ladder.
 
 Every solver call runs in a subprocess (``OFT_env`` is a per-process
