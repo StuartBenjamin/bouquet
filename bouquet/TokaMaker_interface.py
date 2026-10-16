@@ -7999,13 +7999,11 @@ def generate_bouquet(
                 # The final accepted draw uses the tightest pass that
                 # converged.
                 _vsc_in_set = tuple(c for c in vsc_coils if c in _baseline_coils)
-                # The #VSC channel's bound scale: the pair's MIN baseline
-                # magnitude (the bound is conservative for both coils),
-                # floored at the in-spec VSC metric's 10 kA
-                # (_vsc_bound_scale; one constant for the bound and the
-                # metric).
-                _vsc_min_base = _vsc_bound_scale(_baseline_coils, _vsc_in_set)
-                _vsc_max_base = _vsc_min_base  # back-compat alias
+                # The #VSC channel's bound scale (in _homotopy_coil_bounds):
+                # the pair's MIN baseline magnitude (the bound is
+                # conservative for both coils), floored at the in-spec VSC
+                # metric's 10 kA (_vsc_bound_scale; one constant for the
+                # bound and the metric).
 
                 def _build_bounds(drift_F, drift_VSC):
                     """The stage's bounds (:func:`_homotopy_coil_bounds`)."""
@@ -8315,8 +8313,7 @@ def generate_bouquet(
                                 mygs, _baseline_coils, _vsc_in_set,
                                 _final_drift_F_lim, _final_drift_VSC_lim,
                                 stage=(f"post-homotopy j_BS pass at homotopy "
-                                       f"pass {_final_pass_idx + 1} bounds"), floor_A=coil_drift_floor_A,
-                                vsc_denom_floor_A=_COIL_DRIFT_DENOM_FLOOR_A)
+                                       f"pass {_final_pass_idx + 1} bounds"), floor_A=coil_drift_floor_A, vsc_denom_floor_A=_COIL_DRIFT_DENOM_FLOOR_A)
                             _ph_rec, _ph_spk, _ph_full, _ph_jphi = \
                                 _m.post_homotopy_jbs(
                                     jbs_loop, coil_guard=_ph_guard,
