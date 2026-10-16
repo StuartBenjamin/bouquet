@@ -147,7 +147,7 @@ stored config carrying it still loads.
 | `te_scalar_sigma` | `None` | " (was `0.05`) |
 | `ni_scalar_sigma` | `None` | " (the derived-n_i template row; was `0.10`; used only when `ni_from_zeff` resolves False) |
 | `ti_scalar_sigma` | `None` | " (was `0.10`) |
-| `jphi_scalar_sigma` | `0.10` | Inductive-current envelope. **Must be > 0** — setting it to 0 freezes `jphi_ind` and trips the workflow guard |
+| `jphi_scalar_sigma` | `0.10` | Inductive-current envelope. **Must be > 0** — setting it to 0 freezes `jphi_ind` and trips the workflow guard. `solve_method="swb"` applies it as a relative width on the inductive seed (`swb.swb_jind_sigma`), not on `|jphi_total|` |
 | `zeff_scalar_sigma` | `None` | One Z_eff perturbation per draw; n_i / n_z follow from quasi-neutrality. The width of the bottom (assumed) tier below: `None` = the Z_eff template (was `0.05`), a number = a flat fraction, `0.0` = the channel off |
 | `zeff_sigma_source` | `"auto"` | Which tier supplies the Z_eff envelope's **magnitude**: `"auto"` / `"carbon"` / `"measured"` / `"scalar"` — see the ladder below |
 | `ni_from_zeff` | `None` (auto) | With the Z_eff channel on: `True` derives n_i per draw from the drawn (n_e, Z_eff) as an increment on the baseline n_i; `False` draws n_i from its own σ and Z_eff passively after T_i (different RNG order). Auto: `True` (n_i always derived, as before PR #56). On a measured `ni_source` (the `ida_hybrid` default) auto is the PR #56 rule: `True` when n_i's σ is the scalar fallback, or n_i and the Z_eff envelope are the same IDA resolution (tier `"IDA-resolved"`); `False` for any other real n_i envelope. That rule follows the Z_eff tier: pin it for an A/B of Z_eff envelopes |
