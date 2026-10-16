@@ -309,12 +309,17 @@ def test_a_stored_unified_config_with_unread_homotopy_passes_loads():
 # ---------------------------------------------------------------------------
 #  the default flip (2026-10-06): a config that PREDATES the engine field
 # ---------------------------------------------------------------------------
-_ENGINE_ERA_KEYS = ("reconstruction_engine",)
+#: the engine-era generation fields an archive written before 2026-09-29
+#: cannot carry, besides the engine_* fields: the engine field itself and
+#: check_bistability (2026-10-14; a unified-engine setting, stored by a
+#: config written since -- the golden fixture's, for one)
+_ENGINE_ERA_KEYS = ("reconstruction_engine", "check_bistability")
 
 
 def _predating_the_engine(gen):
     """A stored generation dict as written before the engine existed
-    (2026-09-29): no reconstruction_engine and no engine_* field."""
+    (2026-09-29): no reconstruction_engine, no check_bistability and no
+    engine_* field."""
     return {k: v for k, v in gen.items()
             if k not in _ENGINE_ERA_KEYS and not k.startswith("engine_")}
 

@@ -1183,9 +1183,10 @@ class GenerateEngineDraws(DrawMethod):
         #: the reconstruction's delivered magnetic axis and minor radius
         #: (``Bouquet._engine_run["delivered_axis"]``, :func:`bouquet.engine.
         #: delivered_axis_reference`): the reference of every draw's axis
-        #: record and ``axis_branch`` flag (:meth:`post_hoc`).  ``None``: not
+        #: record and ``axis_shift_large`` flag (:meth:`post_hoc`).  ``None``:
+        #: not
         #: on record (a test stand-in) -- each draw's axis is recorded with
-        #: no displacement and no branch
+        #: no displacement and no flag
         self.delivered_axis = (None if delivered_axis is None
                                else dict(delivered_axis))
         #: the isoflux pattern the reconstruction was pointed at
@@ -1242,6 +1243,16 @@ class GenerateEngineDraws(DrawMethod):
         #: stage's and the archived state's verdicts are written into it
         self.sigma0_probe = None
 
+    def note_q0_gate(self, record):
+        """The q0 gate as generate_bouquet applied it: switched off (a
+        sawtoothing reconstruction), the bands this method judges and
+        records (``inspec_bands`` of the baseline record) lose it too."""
+        super().note_q0_gate(record)
+        from .filtering import InspecBands, q0_gate_switched_off
+        if q0_gate_switched_off(record) and self.bands.constrain_sawteeth:
+            self.bands = InspecBands.from_record(dict(
+                self.bands.record(), constrain_sawteeth=False))
+
     # ---- where the baseline re-solve starts ---------------------------
     def baseline_resolve_start(self, mygs):
         """generate_bouquet's baseline re-solve starts from the
@@ -1268,8 +1279,9 @@ class GenerateEngineDraws(DrawMethod):
     # ---- the isoflux every draw's homotopy holds ----------------------
     def homotopy_isoflux(self, mygs=None):
         """The RECONSTRUCTION's own isoflux pattern -- the very points and
-        weights it was pointed at (the solver geometry's on the IDS route,
-        the g-file route's own pattern on that route) -- never the draw's
+        weights it was pointed at (the solver geometry's on both routes: the
+        standard boundary constraint of #84, the source boundary resampled
+        by arc length with weights per unit length) -- never the draw's
         traced LCFS at the legacy route's weight 200.  On a near-double-null
         slice the free-boundary problem can be bistable, and re-pointing the
         isoflux to thousands of traced points at another weight under the
@@ -1783,8 +1795,8 @@ class GenerateEngineDraws(DrawMethod):
                                 self.ctx.ref["flux_range"]))
         rec["post_hoc"] = v
         # the archived state's magnetic axis against the reconstruction's
-        # delivered axis, and its branch flag (engine.AXIS_BRANCH_FRAC x a):
-        # REPORTED, never a filter
+        # delivered axis, and its displacement flag (engine.AXIS_BRANCH_FRAC
+        # x a): REPORTED, never a filter
         from .engine import axis_record_of
         rec["axis"] = axis_record_of(mygs, self.delivered_axis)
         if getattr(self, "sigma0_probe", None) is not None:
@@ -1802,12 +1814,19 @@ class GenerateEngineDraws(DrawMethod):
         for _k, _x in ((BETA_P_ATTR, v["beta_p"]), (LAMBDA_ATTR, v["Lambda"])):
             if np.isfinite(_x):
                 _fl[_k] = float(_x)
-        # the axis branch flag and displacement on the group (read by the
-        # stats tables; never by a filter)
+        # the axis displacement flag, the displacement and its components on
+        # the group (read by the stats tables and the per-scan bimodality
+        # test; never by a filter)
         _ax = rec["axis"]
-        if _ax["axis_branch"] is not None:
-            _fl[AXIS_BRANCH_ATTR] = str(_ax["axis_branch"])
+        if _ax["axis_shift_large"] is not None:
+            from .schema import (AXIS_DR_ATTR, AXIS_DZ_ATTR,
+                                 AXIS_MINOR_RADIUS_ATTR,
+                                 AXIS_SHIFT_LARGE_ATTR)
+            _fl[AXIS_SHIFT_LARGE_ATTR] = bool(_ax["axis_shift_large"])
             _fl[AXIS_SHIFT_ATTR] = float(_ax["displacement_frac_a"])
+            _fl[AXIS_DR_ATTR] = float(_ax["dR_mm"])
+            _fl[AXIS_DZ_ATTR] = float(_ax["dZ_mm"])
+            _fl[AXIS_MINOR_RADIUS_ATTR] = float(_ax["minor_radius_m"])
         diagnostics["inspec_draw_attrs"] = _fl
         if v["reasons"]:
             print("  [engine draw post-hoc] OUT OF BAND (archived, "
@@ -1906,9 +1925,9 @@ class GenerateEngineDraws(DrawMethod):
     def summarize(self, bq):
         """Every engine-draw solve that stopped at engine_draw_solve_maxits
         (stage, iterations, seconds, rolled back or rejected); the archived
-        draws' axis-branch count (:func:`axis_branch_counts`) on
-        ``Bouquet.engine_axis_branch``."""
-        bq.engine_axis_branch = axis_branch_counts(
+        draws' axis-displacement count and bimodality
+        (:func:`axis_shift_counts`) on ``Bouquet.engine_axis_shift``."""
+        bq.engine_axis_shift = axis_shift_counts(
             getattr(bq, "diagnostics", None) or [])
         bq.engine_draw_cap_events = [dict(e) for e in self.cap_events]
         if self.cap_events:
@@ -1949,6 +1968,18 @@ class GenerateEngineDraws(DrawMethod):
         rec = dict(getattr(baseline, "engine", None) or {})
         if not rec:
             return
+        # a bistability_source="draws" on the session's live record is ANOTHER
+        # scan's evidence (Bouquet._note_axis_scan): never archived with this
+        # scan's baseline -- this scan's own stamp (stamp_axis_scan) re-adds
+        # it from its own draws.  The reconstruction's own verdict is kept.
+        bis = rec.get("bistability")
+        if isinstance(bis, dict) and (bis.get("bistability_source") == "draws"
+                                      or "draws_evidence" in bis):
+            bis = dict(bis)
+            bis.pop("draws_evidence", None)
+            if bis.get("bistability_source") == "draws":
+                bis["bistability_source"] = None
+            rec["bistability"] = bis
         rec["draws"] = dict(
             version=ENGINE_DRAW_VERSION, rng_stream=RNG_STREAM,
             loop=self.loop_settings, q0_row=self.ctx.q0_row,
@@ -1956,12 +1987,15 @@ class GenerateEngineDraws(DrawMethod):
             solve_maxits=self.maxits,
             homotopy=self.homotopy, l_i_tolerance=self.l_i_tolerance,
             inspec_bands=self.bands.record(),
+            # the q0 gate as generate_bouquet applied it (filtering.
+            # Q0_GATE_RECORD_KEY; None: no generate_bouquet decision)
+            q0_gate=(None if self.q0_gate is None else dict(self.q0_gate)),
             ip_row=("the Ip the delivered composition carries in the exact "
                     "measure on G*"), Ip_target_A=self.ctx.Ip_star,
             reference=self.ctx.ref,
             homotopy_isoflux=(None if self.recon_isoflux is None else
                               dict(self.recon_isoflux.get("stamp") or {})),
-            # the reference of every draw's axis record / axis_branch flag
+            # the reference of every draw's axis record / axis_shift_large
             axis_reference=(None if self.delivered_axis is None
                             else dict(self.delivered_axis)))
         store_baseline_engine(header, rec, scan_key=scan_key)
@@ -1996,74 +2030,209 @@ def _jbs_block(loop_rec):
         final=loop_rec))
 
 
-#: Per-draw group attribute: the archived state's axis branch, ``"same"`` /
-#: ``"other"`` (:func:`bouquet.engine.axis_branch_record`; written only when
-#: known).  Reported, never a filter.
-AXIS_BRANCH_ATTR = "axis_branch"
 #: Per-draw group attribute: the axis displacement from the
-#: reconstruction's delivered axis, as a fraction of its minor radius.
+#: reconstruction's delivered axis, as a fraction of its minor radius (the
+#: other axis attrs: :mod:`bouquet.schema`, ``AXIS_*``).
 AXIS_SHIFT_ATTR = "axis_shift_frac_a"
-#: Scan-group attribute: the number of archived draws of the scan flagged
-#: ``axis_branch="other"`` (and, beside it, how many carry the flag).
-AXIS_OTHER_SCAN_ATTR = "n_axis_other"
-AXIS_RECORDED_SCAN_ATTR = "n_axis_recorded"
 
 
-def axis_branch_counts(diagnostics) -> dict:
-    """``dict(n_recorded, n_other, n_same, other_draws)`` over archived
-    draw *diagnostics*: the engine draws whose ``engine["axis"]`` record
-    carries an ``axis_branch`` (:func:`bouquet.engine.axis_branch_record`);
-    ``other_draws`` are their positions in *diagnostics*."""
-    br = []
+def axis_shift_counts(diagnostics) -> dict:
+    """``dict(n_recorded, n_large, n_small, large_draws, bimodality)`` over
+    archived draw *diagnostics*: the engine draws whose ``engine["axis"]``
+    record carries ``axis_shift_large`` (:func:`bouquet.engine.
+    axis_shift_record`; a legacy ``axis_branch`` key is read too);
+    ``large_draws`` are their positions in *diagnostics*; ``bimodality`` is
+    :func:`bouquet.engine.axis_bimodality` of their axis Z."""
+    from .engine import axis_bimodality
+    rows = []
     for i, d in enumerate(diagnostics or []):
         ax = ((d or {}).get("engine") or {}).get("axis") \
             if isinstance(d, dict) else None
-        b = (ax or {}).get("axis_branch")
+        ax = ax or {}
+        b = ax.get("axis_shift_large")
+        if b is None and ax.get("axis_branch") is not None:
+            b = ax.get("axis_branch") == "other"
         if b is not None:
-            br.append((i, b))
-    other = [i for i, b in br if b == "other"]
-    return dict(n_recorded=len(br), n_other=len(other),
-                n_same=len(br) - len(other), other_draws=other)
+            rows.append((i, bool(b), ax.get("dZ_mm"),
+                         ax.get("minor_radius_m"), ax.get("reference_Z")))
+    large = [i for i, b, *_ in rows if b]
+    a = next((r[3] for r in rows if r[3] is not None), None)
+    z0 = next((r[4] for r in rows if r[4] is not None), None)
+    bim = (axis_bimodality([r[2] for r in rows], a, reference_Z=z0)
+           if rows else None)
+    return dict(n_recorded=len(rows), n_large=len(large),
+                n_small=len(rows) - len(large), large_draws=large,
+                bimodality=bim)
 
 
-def axis_branch_text(counts) -> str:
-    """The summary-line fragment of :func:`axis_branch_counts` (``""``
-    when no draw carries the flag)."""
+def axis_shift_text(counts) -> str:
+    """The summary-line fragment of :func:`axis_shift_counts` (``""``
+    when no draw carries the record): the displacement count and the
+    bimodality verdict."""
     if not counts or not counts.get("n_recorded"):
         return ""
-    from .engine import AXIS_BRANCH_FRAC
-    return (f"axis branch: {counts['n_other']} of {counts['n_recorded']} "
-            f"archived engine draw(s) 'other' (axis > {AXIS_BRANCH_FRAC:g} "
-            "x a from the reconstruction's; reported, never a filter)")
+    from .engine import AXIS_BRANCH_FRAC, axis_bimodality_text
+    txt = (f"axis shift: {counts['n_large']} of {counts['n_recorded']} "
+           f"archived engine draw(s) displaced > {AXIS_BRANCH_FRAC:g} x a "
+           "from the reconstruction's axis (a displacement, not a branch "
+           "label; reported, never a filter)")
+    bt = axis_bimodality_text(counts.get("bimodality"))
+    return txt + ("; " + bt if bt else "")
 
 
-def stamp_axis_branch_count(h5path_or_header, scan_key=None):
-    """Stamp :data:`AXIS_OTHER_SCAN_ATTR` / :data:`AXIS_RECORDED_SCAN_ATTR`
-    on the scan group: the count of the scan's archived draws whose
-    :data:`AXIS_BRANCH_ATTR` is ``"other"`` / is present, read from the
-    archive itself (so a scan generated in several calls is counted whole).
-    Nothing is written when no draw carries the flag (a legacy scan).
-    Returns ``(n_other, n_recorded)``."""
+def scan_axis_entries(hf, scan_key, indices):
+    """``[(count, entry)]``: :func:`bouquet.schema.read_axis_entry` of every
+    archived draw *indices* of *scan_key* in the open file *hf* that carries
+    one."""
+    from .schema import read_axis_entry
+    from .utils import _group_path
+    out = []
+    for i in indices:
+        gp = _group_path(scan_key, i)
+        if gp not in hf:
+            continue
+        e = read_axis_entry(hf[gp])
+        if e is not None:
+            out.append((int(i), e))
+    return out
+
+
+def stamp_axis_scan(h5path_or_header, scan_key=None) -> dict:
+    """The scan's axis record, recounted from the archive itself (so a scan
+    generated in several calls, or merged, is counted whole), and stamped:
+
+    * scan attrs ``n_axis_shift_large`` / ``n_axis_recorded``
+      (:mod:`bouquet.schema`; a legacy ``n_axis_other`` is removed);
+    * the per-scan bimodality (:func:`bouquet.engine.axis_bimodality` of the
+      archived draws' axis Z): ``axis_bimodal`` (written only when the test
+      could be made) and ``axis_bimodal_json`` (method, constants, centres,
+      counts);
+    * when the scan is bimodal and the reconstruction's bistability stamp
+      did not say "bistable" (it said "single", or the check did not run),
+      ``bistability_source="draws"`` on the ``_baseline`` group (attr and
+      its engine record's ``bistability``): the draws' own evidence of two
+      branches.  A ``"draws"`` source a recount no longer supports is
+      removed.
+
+    Nothing else is written when no draw carries the record (a legacy scan,
+    a scan with no archived draw): a ``"draws"`` source on its baseline,
+    which can only be stale, is still removed.
+    Returns ``dict(n_large, n_recorded, bimodality, bistability_source)``."""
+    import json
     import h5py
+    from .engine import axis_bimodality, read_engine_json, write_engine_json
     from .filtering import _resolve, _scan_group_path
-    from .utils import _group_path, list_equilibrium_indices
+    from .schema import (AXIS_BIMODAL_ATTR, AXIS_BIMODAL_JSON_ATTR,
+                         AXIS_OTHER_SCAN_ATTR_LEGACY, AXIS_RECORDED_SCAN_ATTR,
+                         AXIS_SHIFT_SCAN_ATTR, BISTABILITY_SOURCE_ATTR)
+    from .utils import _baseline_group_path, list_equilibrium_indices
     h5path = _resolve(h5path_or_header)
-    idx = list_equilibrium_indices(h5path, scan_key=scan_key)
-    n_o = n_r = 0
+    out = dict(n_large=0, n_recorded=0, bimodality=None,
+               bistability_source=None)
+    try:
+        idx = list_equilibrium_indices(h5path, scan_key=scan_key)
+    except KeyError:
+        idx = []
+    import os
+    if not os.path.exists(h5path):
+        return out
     with h5py.File(h5path, "a") as hf:
-        for i in idx:
-            gp = _group_path(scan_key, i)
-            if gp not in hf or AXIS_BRANCH_ATTR not in hf[gp].attrs:
-                continue
-            v = hf[gp].attrs[AXIS_BRANCH_ATTR]
-            v = v.decode() if isinstance(v, bytes) else str(v)
-            n_r += 1
-            n_o += int(v == "other")
+        ents = scan_axis_entries(hf, scan_key, idx)
+        if not ents:
+            # no axis record, so no draws' evidence: a "draws" source on the
+            # baseline (another scan's, carried over) is removed
+            _clear_draws_bistability(hf, scan_key)
+            return out
+        out["n_recorded"] = len(ents)
+        out["n_large"] = sum(1 for _, e in ents if e["shift_large"])
+        a = next((e["minor_radius_m"] for _, e in ents
+                  if e["minor_radius_m"] is not None), None)
+        bp = _baseline_group_path(scan_key)
+        bl = hf[bp] if bp in hf else None
+        brec = None
+        if bl is not None:
+            try:
+                brec = read_engine_json(bl)
+            except (ValueError, KeyError, TypeError):
+                brec = None
+        ref = ((brec or {}).get("draws") or {}).get("axis_reference") or {}
+        if a is None:
+            a = ref.get("minor_radius_m")
+        bim = axis_bimodality([e["dZ_mm"] for _, e in ents], a,
+                              reference_Z=ref.get("Z"))
+        out["bimodality"] = bim
         gs = _scan_group_path(scan_key)
-        if n_r and gs in hf:
-            hf[gs].attrs[AXIS_OTHER_SCAN_ATTR] = int(n_o)
-            hf[gs].attrs[AXIS_RECORDED_SCAN_ATTR] = int(n_r)
-    return n_o, n_r
+        if gs in hf:
+            g = hf[gs]
+            g.attrs[AXIS_SHIFT_SCAN_ATTR] = int(out["n_large"])
+            g.attrs[AXIS_RECORDED_SCAN_ATTR] = int(out["n_recorded"])
+            if AXIS_OTHER_SCAN_ATTR_LEGACY in g.attrs:
+                del g.attrs[AXIS_OTHER_SCAN_ATTR_LEGACY]
+            if bim["axis_bimodal"] is None:
+                if AXIS_BIMODAL_ATTR in g.attrs:
+                    del g.attrs[AXIS_BIMODAL_ATTR]
+            else:
+                g.attrs[AXIS_BIMODAL_ATTR] = bool(bim["axis_bimodal"])
+            g.attrs[AXIS_BIMODAL_JSON_ATTR] = json.dumps(bim)
+        if bl is not None:
+            bis = dict(((brec or {}).get("bistability")) or {})
+            prior = bis.get("outcome")
+            src = bis.get("bistability_source")
+            if bim["axis_bimodal"] and prior != "bistable":
+                bis.update(bistability_source="draws", draws_evidence=dict(
+                    centres_dZ_mm=bim["centres_dZ_mm"],
+                    counts=bim["counts"], gap_mm=bim["gap_mm"],
+                    n=bim["n"], version=bim["version"],
+                    reconstruction_outcome=prior))
+                src = "draws"
+            elif src == "draws" and not bim["axis_bimodal"]:
+                bis.pop("bistability_source", None)
+                bis.pop("draws_evidence", None)
+                src = None
+            if brec is not None and (bis or (brec.get("bistability")
+                                              is not None)):
+                brec["bistability"] = bis
+                write_engine_json(bl, brec)
+            if src == "draws":
+                bl.attrs[BISTABILITY_SOURCE_ATTR] = "draws"
+            elif BISTABILITY_SOURCE_ATTR in bl.attrs and _s(
+                    bl.attrs[BISTABILITY_SOURCE_ATTR]) == "draws":
+                del bl.attrs[BISTABILITY_SOURCE_ATTR]
+            out["bistability_source"] = src
+    return out
+
+
+def _s(v):
+    return v.decode() if isinstance(v, bytes) else str(v)
+
+
+def _clear_draws_bistability(hf, scan_key):
+    """Remove ``bistability_source="draws"`` (the group attr, and the engine
+    record's ``bistability_source`` / ``draws_evidence``) from the scan's
+    ``_baseline`` group in the open file *hf*; other sources are kept."""
+    from .engine import read_engine_json, write_engine_json
+    from .schema import BISTABILITY_SOURCE_ATTR
+    from .utils import _baseline_group_path
+    bp = _baseline_group_path(scan_key)
+    if bp not in hf:
+        return
+    bl = hf[bp]
+    try:
+        brec = read_engine_json(bl)
+    except (ValueError, KeyError, TypeError):
+        brec = None
+    bis = (brec or {}).get("bistability")
+    if isinstance(bis, dict) and (bis.get("bistability_source") == "draws"
+                                  or "draws_evidence" in bis):
+        bis = dict(bis)
+        if bis.get("bistability_source") == "draws":
+            bis.pop("bistability_source", None)
+        bis.pop("draws_evidence", None)
+        brec["bistability"] = bis
+        write_engine_json(bl, brec)
+    if BISTABILITY_SOURCE_ATTR in bl.attrs and _s(
+            bl.attrs[BISTABILITY_SOURCE_ATTR]) == "draws":
+        del bl.attrs[BISTABILITY_SOURCE_ATTR]
 
 
 def _write_draw_block(header, count, scan_key, record, band, parallel=None,

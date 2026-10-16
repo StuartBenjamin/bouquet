@@ -185,5 +185,10 @@ def test_a_seeded_engine_draw_batch_is_recorded(draw_batch):
         assert c["loop"]["passes"] == row["loop_passes"]
         assert "flux_range" in row["deltas"], row["deltas"]
         ph = row["post_hoc"]
-        assert ph["in_band"] == (ph["l_i_in_band"] and ph["q0_ok"])
+        # in-spec = the magnetics: the l_i band is off by default (its verdict is None) and
+        # in_band is the conjunction of the ACTIVE bands only (filtering.DrawBands)
+        assert ph["l_i_in_band"] is None
+        active = [v for v in (ph.get("l_i_in_band"), ph.get("beta_p_in_band"), ph["q0_ok"])
+                  if v is not None]
+        assert ph["in_band"] == all(active)
         assert row["in_spec"] == (ph["coil_in_spec"] and ph["in_band"])

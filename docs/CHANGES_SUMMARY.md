@@ -1,5 +1,273 @@
 # Bouquet — change summaries
 
+## Unreleased — the synthetic H-mode g-file is thermal-only; the total-pressure file kept with a p-file (owner decision 2026-10-15)
+
+**Fixtures.** `tests/data/g_synthetic.geqdsk` carried the dd's TOTAL pressure
+at 1.2 s (90.4 kPa on axis, fast ions included) while its profile file
+`diiid_profs_synthetic.cdf` carries thermal kinetics only (46.1 kPa as the
+g-file route reads it), so every reconstruction on the pair recovered about
+half the beta_N (0.80 against 1.68). It is now the THERMAL-only equilibrium of
+the same slice -- e (n_e T_e + n_i T_i), n_i from Z_eff, the pressure the
+route rebuilds; same boundary targets, coils, Ip, mesh, current model and
+solver settings, re-solved self-consistently (46.08 kPa on axis, beta_N 0.80,
+beta_p 0.44, q0 1.41, l_i(3) 0.835; the total-pressure one: 90.40 kPa, 1.68,
+0.92, 1.31, 0.833). The IDA file's `q` follows it (its profiles and sigma
+envelopes are unchanged). The total-pressure file is kept, bit-identical, as
+`g_synthetic_pfast.geqdsk`, paired with a new Osborne p-file
+`p_synthetic.peqdsk` (n_e, T_e, thermal n_i, T_i, n_b, the beam pressure `pb`,
+n_z1, omeg, ptot): thermal + pb = 90.03 kPa against the g-file's 90.40.
+`tests/test_fixture_pressure_consistency.py` checks every pair to 2 % on axis.
+Every test and notebook that read `g_synthetic.geqdsk` keeps reading it, so
+the solver tests on the pair (`test_swb_systematics_solver.py`,
+`test_phi_imas_solver.py`, `test_parallel_cases_solver.py`,
+`test_solver_reuse_solver.py`, `test_units.py`'s solver test) and the g-file
+notebooks' stored outputs move on their next run (their "measured" comments
+are to be re-measured). On the IMAS route with `LCFS_geqdsk=g_synthetic.geqdsk`
+the reader's psi_N(rho) drift check now warns (0.022 against its 0.02: the dd
+slice carries the fast-ion pressure, the g-file not). The g-file and legacy
+goldens are still to be regenerated on the corrected pair.
+
+## Unreleased — the boundary constraint per unit length (#84, owner decision for 1.4.0)
+
+**Every reconstruction and every draw of the unified engine moves slightly.**
+The boundary (isoflux) constraint is standardised per unit length, for the
+reconstruction AND the draws, with one constant (`bouquet.solver_geometry`):
+the source boundary is resampled to `N_ISOFLUX` = 256 points by arc length
+(closed, counter-clockwise, X-points kept exactly -- a vertex turning by more
+than 45 deg over 1 % of the boundary length either side, or the vertex a
+saddle target marks; the saddle constraints themselves unchanged), each point
+weighted by the arc length it represents, the weights summing to
+`ISOFLUX_WEIGHT_TOTAL` = 2e5. The first point (TokaMaker's isoflux reference)
+is the outermost point, not the X-point (with the X-point first a reversed-Ip
+near-double-null IDS reconstruction stopped at maxits). Before, the IDS route
+held its outline at 500 per point and the engine's g-file route installed its
+own set at 200 per point, so the strength followed the source's point count;
+that g-file set is removed, and the draws hold the reconstruction's set as
+before (from its record). `SolverConfig.isoflux_pts` / `isoflux_weights` are
+used as given (never resampled). The legacy and swb routes are unchanged
+(source boundary at `ISOFLUX_WEIGHT` = 500 per point; the legacy g-file
+reconstruction's own set at 200; the legacy draws' re-trace).
+
+Why 2e5: on a real g-file case the draws' homotopy, holding that route's
+former set (total 2e4) against the strong coil regularisation, found a
+different fixed point and the sigma=0 draw failed its archived bootstrap gate
+(r_I 1.06e-4); 5x-10x that total held it, the same total per unit length did
+not. At 2e5 it passes (r_I 1.5e-6, VSC drift 0.09 % instead of 0.51 %) and 4 of
+its 6 perturbed draws are in spec (0 of 6 before; the other two miss the l_i
+band as before). The IDS validation slices (including the reversed-Ip
+near-double-null one) and the synthetic dd / H-mode g-file fixtures still pass
+sigma=0; their reconstructions moved by at most 1.4e-4 in l_i(3) and 3.7e-4 in
+q, and hold the source boundary as well or better. Draw wall time 95-132 s
+per draw on the validation cases (was 112-173 s). Details and tables:
+docs/engine.md, "The boundary constraint per unit length".
+
+Stamps: `solver_geometry_json` gains `isoflux_rule`, `isoflux_weight_total`,
+`isoflux_source_n`, `boundary_length_m` and `isoflux_resampling` (method
+`arc_length_resample/1`, N, the X-points kept and how, the source's point
+count, the lengths); every isoflux stamp (the reconstruction's
+`recon_isoflux`, each draw's `engine["homotopy"]["isoflux"]`) gains
+`weight_total`. Tests: `tests/test_isoflux_per_length.py`; the tests that
+pinned the former counts and weights (`test_engine_wiring`,
+`test_engine_draws`, `test_solver_geometry_record`) now pin the standard set.
+**The goldens are not regenerated here**: every unified-engine number moves,
+so they are regenerated on the merged code. The legacy draws' iso-update
+weighted per unit length of the traced LCFS (#81) is the same form on that
+route. Closes #84.
+
+**Unreleased: review fixes to the boundary constraint and the scan stamps.**
+
+- Spline breaks are density-aware: a source vertex breaks the resampling
+  spline only when its turn exceeds `SPLINE_BREAK_DEG` and 3x the median turn
+  of the seven vertices around it, so a coarse smooth source (16-30 points) is
+  no longer cut into a polygon 6-24 mm inside its curve; the shipped fixtures
+  resample bit-identically.
+- A `SolverConfig.isoflux_pts` set given without `isoflux_weights` is
+  weighted per unit length to `ISOFLUX_WEIGHT_TOTAL` on the unified engine
+  (with a UserWarning) instead of TokaMaker's 1 per point, and no record or
+  stamp of an installed set says `None` for its weights any more.
+- A saddle target marks the sharpest vertex inside its match radius (when it
+  exceeds `XPOINT_TURN_DEG`, else the nearest, stamped as `xpoint_match`), so
+  a target a centimetre or two off the X-point still keeps the X-point exact.
+- The record and every isoflux stamp carry the installed total
+  (`isoflux_weight_installed_total`, `weight_installed_total`): TokaMaker does
+  not apply the reference point's weight, so it is the nominal total minus
+  `w[0]`; the weights themselves are unchanged.
+- A `bistability_source="draws"` from one scan no longer lands in another
+  scan's archived baseline: `store_baseline` drops it, and a scan with no
+  axis record or too few draws clears it from its baseline and the live
+  record.
+- `bands_summary` decides own-surface versus fallback on the band's own
+  population: under `rescued="exclude"` the rescued draws are left out of
+  that decision and of `n_located` too.
+- The axis-bimodality verdict needs at least `AXIS_BIMODAL_MIN_N` = 24
+  archived draws with an axis (owner decision 2026-10-15; it was issued from
+  6): on unimodal samples the rule says "bimodal" 20-37 % of the time at
+  n = 6-12. Below 24 the scan is stamped not testable, with the count.
+- `generate_bouquet` restores the reconstruction's delivered equilibrium
+  (unified engine) BEFORE it reads the q0 sawtooth check, the reference coil
+  currents and the Ip: a second `generate()` in one session no longer takes
+  them from the previous run's last draw. A failed warm baseline re-solve with
+  no delivered snapshot on record is refused (RuntimeError) instead of
+  falling back to the entry state.
+- The scan's in-spec stamp is the rule AS APPLIED: with `constrain_sawteeth`
+  set on a reconstruction whose q(0) < 1, `generate_bouquet` switches the q0
+  gate off, and `inspec_rule`, `inspec_bands_json` (new key `q0_gate`:
+  configured, applied, q0, reason) and the baseline engine record's
+  `inspec_bands` / `q0_gate` now say so (no `"+q0"`). `filter()` and
+  `refilter_inspec` under the stamped rule reproduce `selected` instead of
+  applying the gate afterwards.
+- The archived `in_spec` (draw attribute and the engine record's
+  `post_hoc.in_spec`) is the in-spec rule's verdict -- the configured coil
+  test (chi2 by default) AND the boundary cut AND the opt-in bands, the one
+  until-N counts and `selected` reproduces -- judged on every run, not only
+  under until-N. It was the legacy +/-2 % per-coil drift test with no
+  boundary cut, which disagreed systematically with `selected` for a floored
+  low-current coil; that verdict is kept as `coil_drift_in_spec`, and each
+  draw stamps `in_spec_source="inspec_rule"`. `coil_in_spec` in the engine
+  record is now the rule's coil test AND boundary cut. Readers
+  (`read_filter_flags`, `DrawView.flags`) report all three; on an archive
+  written before (no `in_spec_source`) `in_spec` is the drift verdict and
+  `in_spec_source` says so. Goldens that store `in_spec` / `n_in_spec` move
+  when regenerated.
+- `read_ida`'s bottom rung -- a file with no `Zeff` dataset whose carbon
+  route has no usable envelope -- derives Z_eff from the carbon density only
+  after the same two checks the carbon route enforces: the carbon validity
+  screen (run without sigmas when the file has no `n_12C6_err`) and
+  `impurity_Z == 6`. Either failing is refused ("no usable Z_eff
+  information"; take the dd's Z_eff with `ni_source='standard'`) instead of
+  taking screened-out or non-carbon data. A derived Z_eff warns once and is
+  stamped (`zeff_provenance["zeff_source"]="carbon_density"`,
+  `zeff_from_carbon_fallback`, and `kinetics_route["ida_zeff_source"]` on the
+  baseline record).
+- One `ni_source` route per run: the IMAS reader resolves it where the
+  file is known and stamps it (`li_metrics["kinetics_route"]`), and
+  `resolve_uncertainty`, `kinetic_clips_on` and the Z_eff ladder follow that
+  stamp (`resolved_ni_source` / `ida_ion_route_on` /
+  `resolved_ni_subtract_fast` / `kinetic_clips_on` take `baseline=`;
+  `experimental.baseline_kinetics_route`). With `ni_source="auto"` and
+  `zeff_from_fuse=True` on a file without Z_eff information the run is
+  "standard" throughout (it was "standard" in the reader but "all", clips on,
+  in the sigma ladder). An EXPLICIT `"CER"` / `"Zeff"` / `"all"` the file
+  cannot honour raises a ValueError naming the file and the missing data
+  instead of being downgraded. The envelope records `ni_source` and the
+  Z_eff tier its `ladder`.
+- Documentation: `UncertaintyConfig.kinetic_clips` and `resolve_uncertainty`
+  said the sampler clips were never on by the IDA-hybrid default; they are
+  (graduated 2026-10-14: on with the measured route, default included). The
+  comments now say so; the unused `experimental._explicit_ida_ion_route` is
+  removed.
+- `Bouquet.filter()`'s in-spec rule step no longer swallows every exception
+  from resolving the rule: a `KeyError` / `TypeError` (a config without the
+  rule's fields) is warned about with its type and message, and anything else
+  propagates.
+
+## Unreleased — the golden recipe runs the synthetic fixtures at the current defaults; a new IDS-route golden (owner decisions 2026-10-15)
+
+**The golden recipe moves to the synthetic test fixtures** (`tests/data/`).
+`tests/golden/regenerate_golden_run.py` now builds each golden's config FRESH
+by the class constructor, every setting at its default except the run's
+identity (20 attempts, seed 12345, one thread, the engine), instead of
+replaying the previous fixture's stored config: `--golden gfile`
+(`g_synthetic.geqdsk` + `diiid_profs_synthetic.cdf`, unified or legacy) and
+`--golden ids` (`dd_synthetic.json.gz` at 1.2 s, IDA-hybrid with the same
+profile file: the production IDS route). `--config-from` keeps the verbatim
+replay; `--sigma0-probe` runs `verify_sigma0_consistency()` on the same
+reconstruction in its own process. `make_golden_fixture.py --golden ids`
+writes the IDS golden in the h5 layout.
+
+**New: the IDS-route golden** (`D3Dlike_ids_golden_slim.h5`,
+`ids_golden_manifest.json`, `ids_rng_stream_manifest.json`): 20 attempts, 19
+archived, 18 in spec; sigma=0 probe PASS. It embodies the defaults that
+landed since the last regeneration: the in-spec rule is the magnetics, the
+IDA file's own Z_eff on IDA-hybrid, the radial sigma templates, the warm
+baseline re-solve, engine draws on the reconstruction's isoflux,
+`check_bistability` on, the coil-saturation test against the installed
+bound, and the Redl epsilon of `evaluate_jBS/4`. Every h5 golden test runs on
+both h5 goldens (`tests/test_golden_bouquet.py`,
+`tests/test_rng_reproducibility.py`); `tests/test_golden_ids.py` states what
+the IDS golden is. The IDS route archives no schema `jbs_loop` block on its
+`_baseline` (its loop verdict is in the baseline's engine record); the golden
+test reads it there. No bar changed.
+
+**The g-file h5 golden and the legacy JSON golden are not regenerated yet**:
+the synthetic g-file pair is to be corrected first (the g-file carries the
+dd's total pressure, fast ions included; its profile file the thermal
+pressure only). They remain the 2026-10-09 runs of the older D3D-like example
+g-file + p-file; the legacy replay (`tests/test_systematics.py`) now
+reconstructs from whatever pair the legacy golden's stored config names.
+
+**Examples.** Of the older D3D-like example set, what nothing reads any more
+is removed (the baseline's recipe, overview figure and generator script, the
+dd geometry script, the two profile tables beside the legacy equilibria). The
+baseline g-file / p-file, the OMAS json, the mesh and the legacy equilibria
+stay: the example notebooks (the COCOS notebooks among them), a number of
+solver tests and the current g-file goldens still read them.
+
+## Unreleased — `bands_summary`, the legacy route deprecated, the notebooks on the synthetic fixtures (owner decisions 2026-10-15)
+
+**New: `bouquet.stats.bands_summary`** (exported as `bq.bands_summary`, with
+`BandSummary` and `plot_bands_summary`): the standard error bars of one slice
+in one call -- per quantity the median, the 16-84 % band, the full range and n
+over the in-spec draws, through `draw_band` (same population, floors, counts,
+provenance). Scalars `beta_N`, `beta_p`, `Lambda`, `l_i_3`, `l_i_1`, `q0`,
+`q95`; gradients `dp_dpsi` and `djphi_dpsi` (d/dpsi_N of each draw's own
+archived pressure / j_phi) evaluated at each draw's OWN q = 2 surface from its
+archived q profile; draws without one are counted and excluded, and when none
+has one the gradients fall back to a named psi_N (default 0.5) and the record
+says so. `.table()` prints the table, `.plot()` draws one band figure with n.
+Nothing is filtered on; no existing record changes.
+
+**Deprecated: the legacy route.** `reconstruction_engine="legacy"` and
+`solve_method="legacy"` emit one `DeprecationWarning` per run where the run is
+resolved (`prepare_baseline()`, the draw method), naming removal in 1.5 (#90);
+the warning is attributed to the caller's frame so the default filters show it.
+Behaviour is unchanged.
+
+**Examples.** The four notebooks run on the synthetic fixtures under
+`tests/data` (the g-file notebook on the H-mode pair with the L-mode pair as a
+second case; the IMAS notebook on the dd's 1.2 s slice as an IDA-hybrid run;
+the parallel notebook sweeping the dd's five slices through `parallel_cases`;
+the systematics notebook on the 1.2 s pair), draw until 24 are in spec (30 for
+5/95 bands, 50 for paper widths), and end with an "Error bars" section that
+calls `bands_summary`. The p-file variant is dropped: the synthetic set has no
+p-file.
+
+## Unreleased — the per-draw axis flag is a displacement; a per-scan bimodality stamp (owner decision 2026-10-15)
+
+**Renamed (archive attrs migrated): the per-draw `axis_branch` is now
+`axis_shift_large`.** The flag says whether the draw's archived magnetic axis
+sits more than `engine.AXIS_BRANCH_FRAC` (1 %) of a from the reconstruction's
+-- a displacement, not a branch label: in the validation runs it fired on
+continuous axis spreads of ordinary ensembles (up to 28 of 43 draws), where
+no second solution exists. `engine.axis_branch_record` is now
+`engine.axis_shift_record` (`axis_shift_large`: True / False / None); the
+draw group carries `axis_shift_large`, `axis_shift_frac_a`, `axis_dR_mm`,
+`axis_dZ_mm`, `axis_minor_radius_m`; the scan `n_axis_shift_large` /
+`n_axis_recorded`; `Bouquet.engine_axis_shift` (was `engine_axis_branch`);
+`ScanView.spread()["axis_shift"]` (was `["axis_branch"]`); `draw_scalars`
+provenance `axis_shift` (was `axis_branch`, and the per-draw "OTHER branch"
+limitation is gone). Archives written since the record was introduced carry
+`axis_branch` / `n_axis_other`: both are read
+(`schema.read_axis_entry`, `schema.read_scan_axis_counts`) and a re-stamp
+writes the new names.
+
+**New: the per-scan bimodality stamp (`engine.axis_bimodality`).** The
+archived draws' axis Z is split at its largest gap (at least 3 draws a
+side) and called bimodal when that gap exceeds the larger within-cluster
+standard deviation and the two centres sit more than 1 % of a apart; below 24
+draws it is not testable (`engine.AXIS_BIMODAL_MIN_N`; see the unreleased
+entry below). Stamped on the scan (`axis_bimodal`,
+`axis_bimodal_json` with method, constants, centres and counts), printed in
+the `[generate]` / `[draw summary]` line (and an `[axis]` line with a
+`RuntimeWarning` when bimodal), reported in `spread()["axis_bimodality"]` and
+in every `draw_scalars` provenance (`axis_bimodality`, with the limitation
+"the ensemble is bimodal in the axis position: two equilibrium branches; the
+bands are mixtures"), recounted by `merge_archives`. A bimodal scan under a
+"single" (or absent) reconstruction stamp stamps the baseline
+`bistability_source="draws"`; the check's own "bistable" now carries
+`bistability_source="reconstruction"`. No draw, verdict, band, yield, gate or
+filter changes.
+
 ## Unreleased — bistability check on by default; per-draw axis record and branch flag (owner decisions 2026-10-15)
 
 **Default change: `GenerationConfig.check_bistability` is ON under the unified

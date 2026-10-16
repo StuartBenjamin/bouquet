@@ -115,9 +115,35 @@ is a navigational summary of the defaults.
 | `nthreads` | `1` | **Keep at 1.** OpenMP reduction order is non-deterministic and jitters `l_i(1)` by ~1%; parallelise across processes instead |
 | `order` | `3` | FE order |
 | `F0` | `None` | Vacuum `R·B_t`; defaults from the g-file / IDS |
-| `isoflux_pts`, `isoflux_weights` | `None` | Boundary constraint points; default from the source boundary |
+| `isoflux_pts`, `isoflux_weights` | `None` | Boundary (isoflux) constraint points and weights, **used as given** (never resampled; points without weights get per-length weights summing to `ISOFLUX_WEIGHT_TOTAL` under the unified engine, with a UserWarning). Default (unified engine, #84): the source boundary resampled to `solver_geometry.N_ISOFLUX` = 256 points by arc length, X-points kept exactly, each point weighted by the arc length it represents, the weights summing to `solver_geometry.ISOFLUX_WEIGHT_TOTAL` = 2e5 -- one constant for the reconstruction and the draws, whatever the source's point count. Legacy route: the source boundary as given at `ISOFLUX_WEIGHT` = 500 per point. See [The boundary constraint](#the-boundary-constraint-per-unit-length-84) |
 | `saddle_targets`, `saddle_weights` | `None` | Opt-in X-point pins. Without them a diverted forward solve typically rounds the boundary corner by a few cm |
 | `coil_vsc` | `{"F9A": 1.0, "F9B": -1.0}` | Antisymmetric vertical-stability channel definition |
+
+### The boundary constraint per unit length (#84)
+
+Under the unified engine every reconstruction and every draw holds the
+boundary with ONE standard isoflux set, whatever the source carried: the
+source boundary (g-file boundary, IDS `boundary.outline`, or `LCFS_geqdsk`)
+resampled to `solver_geometry.N_ISOFLUX` = **256** points by arc length
+(closed, counter-clockwise, the X-points kept as exact points), each point
+weighted by the arc length it represents, the weights summing to
+`solver_geometry.ISOFLUX_WEIGHT_TOTAL` = **2e5**. The first point -- the one
+TokaMaker measures the other points' flux against -- is the outermost point,
+never the X-point. Before (1.3.x and the 1.4.0 candidates), the IDS route held
+its ~200 outline points at 500 each and the g-file route its 100-257 boundary
+points at 200 each, so the strength followed the file's point count. **Every
+reconstruction and draw therefore moves slightly**: on the validation cases
+l_i(3) by at most 1.4e-4 and q by at most 3.7e-4 (under a fifth of the sigma=0
+gates), with the source boundary held as well or better; the g-file case whose
+sigma=0 draw failed before now passes, and its perturbed draws are in spec
+(numbers: [engine.md, "The boundary constraint per unit length"](engine.md)).
+`SolverConfig.isoflux_pts` / `isoflux_weights` are used as given (never
+resampled; also on the engine's g-file route); `saddle_targets` are installed
+as configured and mark their X-point for the resampling. The legacy route is
+unchanged (the source boundary at `ISOFLUX_WEIGHT` = 500 per point; its g-file
+reconstruction's own set at 200). The archive's `solver_geometry_json` stamps
+`isoflux_rule`, `isoflux_n`, `isoflux_weight_total`, `isoflux_source_n`,
+`boundary_length_m` and `isoflux_resampling` (method, N, the X-points kept).
 
 ### Ion and Z_eff fields of the sources (`b.source`, PR #56)
 
@@ -308,7 +334,7 @@ as an enormous sigma.
 | `single_profile_jphi` | `False` | Legacy path: perturb the TOTAL `j_phi` as one profile (no inductive / bootstrap split; no per-draw Sauter call). `jphi_scalar_sigma` then applies to the total, a larger absolute perturbation -- re-tune it. Needs `jbs_self_consistent=False` (refused otherwise); the unified engine refuses it |
 | `jBS_scale_range` | `(0.99, 1.01)` | Legacy draws: the per-draw multiplicative spread of the bootstrap (uniform in the range; default `None` -> `(0.99, 1.01)` on 2026-06-04). The baseline's multiplier (`bs_scale` / `s_bs(ψ)`) is applied after SWB on SWB draws and re-centres this range on loop draws -- see [physics-notes.md](physics-notes.md) ("The bootstrap multiplier") |
 | `swb_seed` | `None` | IMAS path, every legacy SWB call (baseline split, draws, σ=0 check): `"source"` seeds SWB with the source's `j_inductive` and holds its NBI + RF + other current fixed (`jphi_fixed`); `"generic"` the `(1 - s^1.5)^1.5` seed. `None` resolves at `prepare_baseline()` to `"source"` when the installed OFT's `solve_with_bootstrap` takes `jphi_fixed`, else `"generic"` -- never an error; an explicit `"source"` on a toolkit without `jphi_fixed` is refused at the first SWB call only. Stamped in `li_metrics["swb_seed"]` |
-| `solve_method` | `None` | The internal solve method: `"legacy"`, `"swb"` (**EXPERIMENTAL**, [`swb_solve_method`](#experimental-features-and-their-validation-status); `solve_with_bootstrap` is the baseline and every draw; IMAS sources) or `"engine"` (the unified engine). `None` derives it from `imas_baseline` / `reconstruction_engine`. Nothing is rewritten at construction; the effective fields are set where the run is resolved (`prepare_baseline()`, the draw method, the solver setup) and a later switch back restores the user's own fields. A contradicting pair (`imas_baseline="swb"` with another method, `reconstruction_engine="legacy"` with `"engine"`) is refused |
+| `solve_method` | `None` | The internal solve method: `"legacy"` (**deprecated in 1.4.0, removed in 1.5, #90**; one `DeprecationWarning` per run), `"swb"` (**EXPERIMENTAL**, [`swb_solve_method`](#experimental-features-and-their-validation-status); `solve_with_bootstrap` is the baseline and every draw; IMAS sources) or `"engine"` (the unified engine). `None` derives it from `imas_baseline` / `reconstruction_engine`. Nothing is rewritten at construction; the effective fields are set where the run is resolved (`prepare_baseline()`, the draw method, the solver setup) and a later switch back restores the user's own fields. A contradicting pair (`imas_baseline="swb"` with another method, `reconstruction_engine="legacy"` with `"engine"`) is refused |
 | `imas_baseline` | `"closure"` | IMAS path: `"swb"` (**EXPERIMENTAL**, [`swb_solve_method`](#experimental-features-and-their-validation-status)) selects the swb method (solve A at the setup coil reg, solve B with a strong reg toward A's coils is the baseline, every draw is solve B with resampled kinetics and a GPR redraw of the inductive seed; 20 negative redraws refuse the draw, `swb_jind_redraw_refused`) |
 | `swb_coil_reg_weight` | `1e3` | swb only: weight of solve B's (and every draw's) coil reg toward solve A's coils |
 | `swb_edge_taper_psi0` | `None` | swb only: taper `j_phi` to zero from this ψ_N to the LCFS in every SWB solve (OFT `taper_edge_jBS`). **Opt-in** (owner decision D4; was 0.999): `None` is off and is sent as `taper_edge_jBS=False` where the toolkit has the option (a toolkit whose own default is taper-on keeps it on otherwise; such a taper with the setting off warns). The channel taper factor is measured, not assumed |
@@ -354,7 +380,7 @@ as an enormous sigma.
 | `jbs_gate_current_residual` | `False` | Legacy loop, opt-in: ADD the closure-half current residual `‖jc_k − js_k−1‖_w/‖jc_k‖_w ≤ jbs_rtol_j` to the loop's criteria (same two consecutive passes; nothing relaxed; pass 1 cannot count). The unified engine applies it always (a standing criterion) |
 | `jbs_loop_on_fail` | `"raise"` | Non-convergence: raise `JBSNotConverged` (with the residual history), or `"flag"` the slice closure-limited and keep the last iterate. A non-converged draw is always a failed draw |
 | `jbs_loop_q0_corrector` | `False` | The q0 pin under the loop (`"sawtooth_bootstrap"`, or `"structured"` with the axis row admitted). `False`: record-only, with the axis row held and the q0 residual flagged against `q0_tol`. `True`: the axis row is moved once per pass from the measured q0 (`j_ref0 ← j0_solved·q0/q0_target`), and convergence also requires `|q0 − q0_target| ≤ q0_tol` (unchanged); failure raises or flags like the loop. The l_i row is not covered. See [physics-notes.md](physics-notes.md#the-q0-pin-under-the-loop-jbs_loop_q0_corrector) |
-| `reconstruction_engine` | `"unified"` | **Default `"unified"` since 2026-10-06** (was `"legacy"`): ONE reconstruction loop for g-file and IDS inputs, which also runs the draws ([engine.md](engine.md)). `"legacy"` = the existing g-file reconstruction / IMAS baseline paths and the legacy draws, opt-in by name (`from_geqdsk` / `from_imas(..., reconstruction_engine="legacy")`). Legacy-path settings the engine never reads are refused under `"unified"`, naming the field and saying to set `"legacy"`. A stored config without the field (written before 2026-09-29) loads as `"legacy"` with a warning. `generate()` / `verify_sigma0_consistency()` under `"unified"` run the engine draws from the engine baseline `prepare_baseline()` built IN THIS SESSION (its live state); a baseline built by the other engine, or one loaded without that state, is refused (`Bouquet._refuse_unified_engine_draws`) |
+| `reconstruction_engine` | `"unified"` | **Default `"unified"` since 2026-10-06** (was `"legacy"`): ONE reconstruction loop for g-file and IDS inputs, which also runs the draws ([engine.md](engine.md)). `"legacy"` (**deprecated in 1.4.0, removed in 1.5, #90**: one `DeprecationWarning` per run, where the run is resolved) = the existing g-file reconstruction / IMAS baseline paths and the legacy draws, opt-in by name (`from_geqdsk` / `from_imas(..., reconstruction_engine="legacy")`). Legacy-path settings the engine never reads are refused under `"unified"`, naming the field and saying to set `"legacy"`. A stored config without the field (written before 2026-09-29) loads as `"legacy"` with a warning. `generate()` / `verify_sigma0_consistency()` under `"unified"` run the engine draws from the engine baseline `prepare_baseline()` built IN THIS SESSION (its live state); a baseline built by the other engine, or one loaded without that state, is refused (`Bouquet._refuse_unified_engine_draws`) |
 | `engine_preset` | `"structured"` | `"unified"` only: `"structured"` (4 Gaussians, `li_soft_onesided` priors), `"structured_uniform"` (the same basis under the uniform σ = 1 ladder: the prior-sensitivity run), `"bootstrap_scalar"` (rows Ip), `"sawtooth_two_scalar"` (rows Ip, q0; falls back to `"bootstrap_scalar"` with a notice when the sawtooth gate rejects q0) or `"two_scalar_li"` (rows Ip, l_i: the legacy secant's two-scalar family). Refused when changed under `"legacy"` |
 | `engine_rows` | `("Ip", "l_i")` | `"unified"` only: the measurement rows -- `"Ip"` (mandatory), `"l_i"` (g-file: hard at 1e-3; IDS: soft σ 0.04), `"q0"` (the source's own q at the row radius, only where the sawtooth gate admits it), `"mse"` (needs `mse_data` with `er_corrected=True`; raw E_r is refused) |
 | `engine_delivery_correction` | `False` | `"unified"` only: add `request − achieved/c` of the previous pass to each request (one Newton step per pass; part of the state a draw inherits). Default to be decided after the solver's `jphi-linterp` defect is fixed |
@@ -637,7 +663,13 @@ measurement, not on the tolerance.
 `"magnetics+li"`, `"magnetics+beta_p"`, `"magnetics+li+beta_p"`, with `"+q0"`
 when the gate is on), `inspec_bands_json` (the band settings and the route;
 on the legacy/swb routes also the draw-construction tolerance, which is not a
-filter) and `lambda_definition`. Every draw carries `beta_p` and `Lambda`
+filter) and `lambda_definition`. The rule stamped is the one APPLIED: when
+`constrain_sawteeth` is set but the reconstruction's q(0) < 1,
+`generate_bouquet` switches the gate off for the scan, the stamp carries no
+`"+q0"`, and `inspec_bands_json["q0_gate"]` (also the baseline engine record's
+`draws.q0_gate`) records `configured`, `applied`, the q0 and the reason;
+`filter()` and a re-filter under the stamped rule then do not apply the gate
+either. Every draw carries `beta_p` and `Lambda`
 (β_p + l_i(3)/2, [physics-notes](physics-notes.md#lambda--beta_p--l_i2-reported-never-filtered));
 reported in `draw_scalars`, `ScanView.spread()` and `read_filter_flags`, never
 a filter. The until-N target counts in-spec draws by the rule in force.
@@ -670,7 +702,7 @@ the 5 % tolerance. The coil and boundary thresholds are unchanged.
 can have two neighbouring solutions of the same inputs. On the one known case
 (a reversed-Ip slice) their magnetic axes sit 17 mm (2.8 % of a) apart, and
 l_i(3) differs by 2e-3 and q0 by 4e-3 -- an order of magnitude below the
-ensemble's band widths. Two records say where a run stands; neither refuses
+ensemble's band widths. Three records say where a run stands; none refuses
 or filters anything:
 
 * the reconstruction's **bistability stamp** (`check_bistability`, on by
@@ -678,25 +710,71 @@ or filters anything:
   `Baseline.engine["bistability"]` with `bistable=True`, the deltas and a
   warning when a cold re-solve of the same inputs lands outside the σ=0
   gates. The delivered equilibrium is kept.
-* every engine draw's **axis record and branch flag**: the archived state's
-  magnetic axis against the reconstruction's delivered one
+* every engine draw's **axis record and displacement flag**: the archived
+  state's magnetic axis against the reconstruction's delivered one
   (`engine["axis"]`: `R`, `Z`, `reference_R`, `reference_Z`, `dR_mm`,
   `dZ_mm`, `displacement_mm`, `displacement_frac_a`, `minor_radius_m`) and
-  `axis_branch` = `"same"` when the displacement is within
-  `engine.AXIS_BRANCH_FRAC` (1 %) of a, `"other"` above -- the discriminator
-  the MSE stage's branch check uses. The flag is on the draw group
-  (`axis_branch`, `axis_shift_frac_a`), the σ=0 draw of
-  `verify_sigma0_consistency()` carries it too (`["axis"]`, not gated), the
-  count of `"other"` draws is in the `[generate]` / `[draw summary]` line, in
-  `ScanView.spread()["axis_branch"]` and in every `draw_scalars` record's
-  provenance (`axis_branch`, with a limitation when any used draw is
-  `"other"`), and on the scan (`n_axis_other`, `n_axis_recorded`).
+  `axis_shift_large` = whether the displacement exceeds
+  `engine.AXIS_BRANCH_FRAC` (1 %) of a. It is a DISPLACEMENT flag, not a
+  branch label: the kinetic draws of an ordinary ensemble move the axis
+  continuously by up to several % of a (in the validation runs: 0-28 of
+  24-43 draws per synthetic case and 10-37 per real case beyond 1 % of a, all
+  but one case one continuous spread), so a large shift of one draw says
+  nothing about a second solution. The draw group carries `axis_shift_large`,
+  `axis_shift_frac_a`, `axis_dR_mm`, `axis_dZ_mm` and `axis_minor_radius_m`;
+  the σ=0 draw of `verify_sigma0_consistency()` carries the record too
+  (`["axis"]`, not gated); the count is in the `[generate]` /
+  `[draw summary]` line, in `ScanView.spread()["axis_shift"]`, in every
+  `draw_scalars` record's provenance (`axis_shift`) and on the scan
+  (`n_axis_shift_large`, `n_axis_recorded`).
+* the per-scan **axis bimodality stamp** (`engine.axis_bimodality`): whether
+  the archived draws' axis positions form TWO clusters -- the evidence of two
+  equilibrium branches. Method (`engine.AXIS_BIMODAL_METHOD`, version
+  `axis_bimodality/1`): sort the draws' axis Z (relative to the
+  reconstruction's axis), split at the largest gap that leaves at least
+  `AXIS_BIMODAL_MIN_COUNT` = 3 draws on each side, and call the scan bimodal
+  when the gap exceeds `AXIS_BIMODAL_GAP_RATIO` = 1.0 x the larger of the two
+  clusters' sample standard deviations AND the cluster centres sit more than
+  `AXIS_BRANCH_FRAC` x a apart; fewer than `AXIS_BIMODAL_MIN_N` = 24 draws
+  with an axis, or an unknown a: not testable (`None`, with the count and
+  the reason; no verdict, no draws' source, no warning, no limitation). The scan carries `axis_bimodal` (when
+  testable) and `axis_bimodal_json` (method, constants, both centres and
+  counts, the gap, the spreads); it is printed on the `[generate]` /
+  `[draw summary]` line and as an `[axis]` line with a `RuntimeWarning` when
+  bimodal, reported in `ScanView.spread()["axis_bimodality"]` and in every
+  `draw_scalars` record's provenance (`axis_bimodality`, over that
+  statistic's used draws) with the limitation "the ensemble is bimodal in the
+  axis position: two equilibrium branches; the bands are mixtures", and
+  recounted by `merge_archives`. When a scan is bimodal and the
+  reconstruction's own stamp said "single" (or the check did not run), the
+  baseline is stamped `bistability_source="draws"` (`_baseline` attr and
+  `Baseline.engine["bistability"]`, with the clusters as `draws_evidence`):
+  the draws' own evidence meets the release rule "no bimodal band without a
+  bistability stamp". A recount that no longer finds two clusters removes
+  it; a reconstruction stamp "bistable" (`bistability_source=
+  "reconstruction"`) is never overwritten. Why at least 24 draws (owner decision 2026-10-15),
+  measured on random unimodal normal samples (a = 0.6 m): at n = 6-12 the
+  rule calls a single Gaussian "bimodal" in about 20-37 % of samples when its
+  spread is 6-20 mm (about 5-9 % at 3 mm); at n = 24 (36) about 10-11 %
+  (3 %), a sub-threshold scatter never. Until 2026-10-15 the verdict was
+  issued from n = 6. It is a report, and a false "bimodal" only adds a
+  limitation and the draws' source. Archives written before the rename carry `axis_branch`
+  (`"other"` / `"same"`) per draw and `n_axis_other` on the scan: both are
+  read (`schema.read_axis_entry`, `schema.read_scan_axis_counts`; the
+  displacement from the draw's engine record), and a re-stamp writes the
+  current names.
 
 The magnetics do not distinguish the branches on the known case: a σ=0 draw
 that landed on the other branch passed the coil test (F 0.023 %, VSC 0.012 %)
 and the boundary cut (0.50 mm). So both branches pass the in-spec rule, and a
 band over both may be bimodal: that is the physics of the slice, not a defect
-to filter away. A continuity guard for the draws (keeping a draw on the
+to filter away. The reconstruction's cold re-solve can miss a second branch
+the draws find: on the same slice's no-MSE arm the stamp said "single" while
+30 of 36 archived draws sat 6-24 mm below the delivered axis -- the case the
+per-scan bimodality stamp exists for (applied after the fact it calls that
+ensemble bimodal: 30 and 6 draws, centres 15.8 mm apart, gap 6.4 mm against
+a 4.5 mm within-cluster spread; and none of thirteen ordinary ensembles of
+the same validation runs). A continuity guard for the draws (keeping a draw on the
 reconstruction's branch through its homotopy) is tracked as #87.
 
 ## until-N in-spec draws
@@ -709,13 +787,17 @@ draws are in spec** -- by [the in-spec rule](#the-in-spec-rule) in force: the
 coil test and the boundary cut, plus any opt-in band -- then stops.
 
 ```python
-b.generation.n_equils = 20            # initial allocation, not the total
-b.generation.n_inspec_target = 20     # what you actually want delivered
+b.generation.n_equils = 24            # initial allocation, not the total
+b.generation.n_inspec_target = 24     # what you actually want delivered
 b.generation.max_total_draws = 60     # optional; default is 5 x the target
 b.filtering.rms_max_mm = 5.0          # the bounds the loop stops on
 b.generate()
 b.filter()                            # -> >= 20 selected
 ```
+
+**How many.** 24 in-spec draws is the default of every example and launcher;
+use 30 for 5/95 bands or band-against-band comparisons and 50 for widths
+quoted in a paper.
 
 Points worth knowing:
 
@@ -902,6 +984,32 @@ innermost-surface q0), is stated in the limitations and marks
 `baseline_status` `"…:source_mismatch"`. `ScanView.spread()` remains the
 quick-look mean/std summary.
 
+**The standard summary in one call** (what every example notebook ends with):
+
+```python
+s = bq.bands_summary("run.h5", key, scalars=("beta_N", "l_i_3", "Lambda"),
+                     gradients=("dp_dpsi", "djphi_dpsi"), at={"q": 2.0},
+                     fallback_psi_N=0.5)
+print(s.table())        # median, p16-p84, full range, n per quantity
+s.plot()                # one band figure, n stated
+s["dp_dpsi"].provenance["surface"]     # where each draw was evaluated
+```
+
+It is `draw_band` with one evaluator, so the population, floors, counts and
+provenance are the recipe's. Scalars: `beta_N` (the draw's g-file),
+`beta_p`, `Lambda`, `l_i_3`, `l_i_1`, `q0`, `q95`. Gradients: `dp_dpsi` and
+`djphi_dpsi`, d/dψ_N of the draw's own archived `pressure` [Pa] and `j_phi`
+[A m⁻²] (central differences on the archived grid; a Φ_N-coordinate archive
+is mapped to ψ_N through the draw's own q), evaluated on each draw at **its
+own** `at` surface: the outermost q = 2 crossing of its archived q profile
+(`eq_fsa/q`, else its g-file; the source per draw is recorded). A draw without
+that surface is counted and excluded (`regular=False`, `no_q=2_surface`; the
+majority gate applies). When no in-spec draw has one, every draw is evaluated
+at `fallback_psi_N` and the summary and every gradient record say so
+(`surface["mode"] = "fallback_psi_N"` and a limitation line);
+`fallback_psi_N=None` returns the gradients `empty` instead. `at={"psi_N":
+x}` evaluates every draw at a fixed ψ_N.
+
 ## Exporting draws
 
 Two targets for handing the ensemble to codes that don't read the HDF5
@@ -1017,7 +1125,8 @@ jitter, no DLSODE hangs) and every BLAS/OpenMP pool at 1 (`bouquet.threads`: the
 | **cases, many jobs** | whole bouquets on a shared-filesystem queue, a fresh process each | many cases, many nodes or jobs | `bouquet.units` |
 
 Never nest them.  One solver serves many baselines: `prepare_baseline` points it at each baseline's
-own F0, boundary and isoflux (`Bouquet.point_solver`), and every reset returns to that baseline's
+own F0, boundary and isoflux (`Bouquet.point_solver`; under the unified engine the isoflux is each
+baseline's own boundary resampled per unit length, #84), and every reset returns to that baseline's
 geometry; the mesh, solve method and thread count are fixed per solver (`Bouquet.set_case` refuses a
 change).
 

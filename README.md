@@ -224,9 +224,12 @@ b = bq.Bouquet.from_geqdsk(
     "baseline.geqdsk",
     profiles="baseline.peqdsk",      # p-file or IDA .cdf (auto-detected)
     mesh=bq.find_mesh(),
-    n_draws=20, header="my_run",
-    # reconstruction_engine="legacy",  # the legacy paths (default: "unified")
+    n_draws=24, header="my_run",
+    # reconstruction_engine="legacy",  # the legacy paths (default: "unified");
+                                       # deprecated in 1.4.0, removed in 1.5 (#90)
 )
+b.generation.n_inspec_target = 24    # until-N: draw until 24 are in spec
+                                     # (30 for 5/95 bands, 50 for paper widths)
 
 b.reconstruct()                      # GS reconstruction + fidelity summary
 # b.verify_sigma0_consistency()      # recommended on a new machine/OFT build:
@@ -242,8 +245,9 @@ b.export()                           # -> my_run_selected.h5
 ```python
 b = bq.Bouquet.from_imas(
     "dd_sim.json", mesh=bq.find_mesh(),
-    time=2.1, n_draws=20, header="my_imas_run",
+    time=2.1, n_draws=24, header="my_imas_run",
 )
+b.generation.n_inspec_target = 24    # until-N, as above
 
 b.prepare()                          # source-agnostic baseline stage
 b.generate(); b.filter(); b.export()
@@ -263,6 +267,11 @@ for d in ar["0"].selected:
     print(d.count, d.li1, d.flags)
 
 cfg = bq.load_config("my_run")       # the exact BouquetConfig that made it
+
+# the standard error bars: median, p16-p84, full range and n over the in-spec
+# draws; the gradients at each draw's own q = 2 surface
+s = bq.bands_summary("my_run.h5", 0)
+print(s.table()); s.plot()
 ```
 
 ## The workflow surface
