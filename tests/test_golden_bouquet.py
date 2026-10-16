@@ -4,10 +4,9 @@ These run against the slimmed, git-tracked h5 goldens plus their JSON
 manifests of expected values, every test once per golden (``GOLDENS``):
 
 * ``gfile``: ``tests/golden/D3Dlike_Hmode_golden_slim.h5`` +
-  ``golden_manifest.json`` -- a unified-engine run of a g-file source (the
-  committed record: the D3D-like example g-file + p-file; its regeneration on
-  the synthetic g-file + IDA-layout profile fixtures is pending the
-  correction of that g-file, ``tests/golden/README.md``);
+  ``golden_manifest.json`` -- the unified-engine run of the synthetic g-file
+  + IDA-layout profile fixtures (``tests/data/g_synthetic.geqdsk`` +
+  ``tests/data/diiid_profs_synthetic.cdf``);
 * ``ids``: ``tests/golden/D3Dlike_ids_golden_slim.h5`` +
   ``ids_golden_manifest.json`` -- the unified-engine IDA-hybrid run of the
   synthetic dd's 1.2 s slice (``tests/data/dd_synthetic.json.gz`` with the
@@ -108,6 +107,33 @@ def test_the_goldens_are_the_builders_files():
     import make_golden_fixture as mgf
     for name, (slim, man) in GOLDENS.items():
         assert mgf.GOLDEN_FILES[name][:2] == (slim, man), name
+
+
+def test_the_golden_is_its_recipe(golden, manifest):
+    """Each golden is its regeneration recipe's run
+    (``tests/golden/regenerate_golden_run.py``): the synthetic fixtures by
+    basename, the unified engine, 20 attempts at seed 12345, one thread,
+    everything else at the defaults of the code that made it."""
+    import sys
+    sys.path.insert(0, _GOLDEN_DIR)
+    import regenerate_golden_run as rgr
+    from bouquet.config import ImasSource, ReconstructionSource
+    from bouquet.utils import load_config
+    cfg = load_config(golden.slim, scan_key=0)
+    gc = cfg.generation
+    assert manifest.get("golden") == golden.name
+    assert gc.reconstruction_engine == "unified"
+    assert gc.n_equils == rgr.N_DRAWS and gc.seed == rgr.SEED
+    assert gc.n_inspec_target is None
+    assert cfg.solver.nthreads == rgr.NTHREADS
+    assert cfg.solver.mesh_path == rgr.MESH
+    if golden.name == "gfile":
+        assert isinstance(cfg.source, ReconstructionSource)
+        assert cfg.source.geqdsk_path == rgr.GFILE
+        assert cfg.source.profiles_path == rgr.PROFILES
+    else:
+        assert isinstance(cfg.source, ImasSource)   # tests/test_golden_ids.py
+        assert cfg.source.ids_path == rgr.DD
 
 
 # ---------------------------------------------------------------------------

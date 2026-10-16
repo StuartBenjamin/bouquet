@@ -1,5 +1,18 @@
 # Bouquet — change summaries
 
+## Unreleased — the goldens regenerated at main 49ebebb (the thermal-only g-file, the rule's in_spec)
+
+**Goldens.** The g-file h5 golden is now the recipe's run of the corrected,
+thermal-only `g_synthetic.geqdsk` + `diiid_profs_synthetic.cdf` (20 attempts:
+18 archived, 2 rejected homotopy_saturated, 18 in spec); the IDS golden is
+regenerated on the same code (20 archived, 20 in spec), seed 12345 as before.
+Both at main `49ebebb`, OFT build `20260929_7da4f18`, one thread; sigma=0 probe
+passes on both, bistability single. Their archived `in_spec` is now the in-spec
+rule's verdict (coil chi2 AND boundary cut), with the old drift verdict as
+`coil_drift_in_spec` (9 of 18 and 18 of 20 drift-pass). The recipe-identity
+check of the h5 goldens (`test_the_golden_is_its_recipe`) is back. No tolerance
+changed.
+
 ## Unreleased — the synthetic H-mode g-file is thermal-only; the total-pressure file kept with a p-file (owner decision 2026-10-15)
 
 **Fixtures.** `tests/data/g_synthetic.geqdsk` carried the dd's TOTAL pressure
