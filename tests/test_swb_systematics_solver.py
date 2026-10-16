@@ -44,14 +44,14 @@ _N_P, _N, _N_R = 10, 16, 3            # pressure-only, production, each seeded t
 _KIN_NODES = (0.1, 0.5, 0.9)
 _KIN = ("n_e", "T_e", "T_i", "n_i", "aux_zeff")
 
-_S0_REL = 1e-9            # pressure-only inductive seed vs solve B: measured 0
+_S0_REL = 1e-9            # pressure-only inductive seed vs solve B: measured 2.2e-16
 # Pressure-only boundary and coil bars (owner decision, 2026-10-11): bouquet's OWN default draw
 # filters, resolved through the library for this device, replace the bespoke per-coil 4 % band and
 # the fixed 1.5 mm boundary RMS bar -- the chi2 coil filter (coil_filter="chi2", PR #49) and the
 # calibrated boundary cut (rms_max_mm="auto", PR #63).  Nothing is re-implemented here.
-_BIAS_MM = 2.0            # |signed-mean| boundary shift (test_systematics mode 2): measured <= 0.21
-_K = 4.0                  # |mean - base| < _K std/sqrt(N), ~25 checks on t15 tails: measured <= 1.9
-_IP_REL = 1e-4            # every draw's |Ip/Ip_target - 1|: measured <= 8e-6
+_BIAS_MM = 2.0            # |signed-mean| boundary shift (test_systematics mode 2): measured <= 0.20
+_K = 4.0                  # |mean - base| < _K std/sqrt(N), ~25 checks on t15 tails: measured <= 2.9
+_IP_REL = 1e-4            # every draw's |Ip/Ip_target - 1|: measured 1.1e-4 on the worst draw (red; #81)
 
 pytestmark = pytest.mark.solver
 

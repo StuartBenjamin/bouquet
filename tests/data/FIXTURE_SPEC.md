@@ -190,22 +190,23 @@ psi_N in [0.1, 0.98]:
 
 `tests/test_swb_systematics_solver.py` (`-m solver`; needs an OFT whose
 solve_with_bootstrap takes x, jphi_fixed, p_fixed): one swb baseline, then
-(the "measured" values below were taken with the total-pressure g-file as the
-LCFS source; to be re-measured on the thermal-only `g_synthetic.geqdsk`)
+(the "measured" values below were re-measured 2026-10-16 on the thermal-only
+`g_synthetic.geqdsk` as the LCFS source, main 49ebebb)
 * sigma=0 draw after a perturbed draw = solve B bit for bit (li_3, q0, Ip,
   coils, LCFS, kinetics at psi_N 0.1/0.5/0.9, the inductive seed);
-* pressure-only (10 draws): seed relative change < 1e-9 (measured 0);
+* pressure-only (10 draws): seed relative change < 1e-9 (measured 2.2e-16);
   every draw passes bouquet's OWN default draw filters as the library
   resolves them for the device (owner decision 2026-10-11: the chi2 coil
   filter, `coil_filter = "chi2"`, PR #49, and the calibrated boundary cut,
   `rms_max_mm = "auto"`, PR #63 -- 8.5 mm, chi2/nu <= 6.1, |z| <= 6.3 on
-  DIII-D; measured RMS 0.55-1.0 mm, chi2/nu <= 0.63, |z| <= 2.4);
+  DIII-D; measured RMS 0.49-2.6 mm, chi2/nu <= 3.8, |z| <= 5.3);
   |signed-mean| boundary shift < min(2 mm, 4 se); li_3, q0 means within 4 se;
 * production (16 draws): every draw's |Ip/Ip_target - 1| < 1e-4; boundary
   means as above; li_3, q0, n_e, T_e, T_i, n_i, Z_eff and the seed at psi_N
   0.1/0.5/0.9 within 4 se of the baseline (measured on this set: Ip closure
-  1.19e-4 on the worst draw and the seed at psi_N 0.1 at 4.17 se -- both
-  reported to the swb route's author; the bars are unchanged);
+  1.13e-4 on the worst draw, the largest bias the seed at psi_N 0.1 at 2.9 se;
+  the Ip closure is reported to the swb route's author; the bars are
+  unchanged);
 * seeded twins reproduce every archived dataset; another seed differs;
 * NO draw rejected in any generation (`run.draw_rejections` empty).
   With the new `swb_jind_redraw_refused` rejection (review PR69 B3), the
