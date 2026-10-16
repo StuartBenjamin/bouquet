@@ -74,12 +74,17 @@ class SolverConfig:
     isoflux_pts: Optional["np.ndarray"] = None       # (N, 2) boundary constraints
     isoflux_weights: Optional["np.ndarray"] = None   # (N,); None: per unit length (see below)
     # The TOTAL weight of the unified engine's standard boundary (isoflux) set.  None (default):
-    # calibrated per case as a balance between the in-spec rule's boundary cut and its coil cut
-    # (bouquet.boundary_balance; docs/engine.md, "The boundary constraint: a calibrated balance
-    # ..."), stamped in the solver-geometry record.  A number: an explicit OVERRIDE, installed as
-    # given (no calibration) and stamped as mode "override".  Also the total of an isoflux_pts set
-    # given without isoflux_weights (None there: solver_geometry.ISOFLUX_WEIGHT_TOTAL).
+    # the constant solver_geometry.ISOFLUX_WEIGHT_TOTAL (2e5, inside the measured window; docs/
+    # engine.md, "The boundary constraint: a constant total inside a measured window").  A number:
+    # an explicit OVERRIDE, installed as given and stamped as mode "override".  Also the total of an
+    # isoflux_pts set given without isoflux_weights.
     isoflux_weight_total: Optional[float] = None
+    # The report-only boundary PARTITION probe (bouquet.boundary_balance): after the unified
+    # engine's reconstruction, ONE capped re-solve with the pressure x 1.02 measures how the
+    # perturbation splits between the boundary cut and the coil cut at the installed total, stamps
+    # it (solver-geometry record "isoflux_balance"["partition"], Baseline.engine["boundary_balance"])
+    # and warns outside [1/3, 3].  It never changes the total; False skips it (stamped "off").
+    boundary_partition_probe: bool = True
     # Optional saddle (X-point) constraints: (N, 2) points where B_pol is driven
     # to zero (TokaMaker set_saddle_constraints). Pins the separatrix X-point --
     # without it a diverted forward solve typically ROUNDS the boundary corner

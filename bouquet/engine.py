@@ -3014,19 +3014,14 @@ def engine_closure_health(eng, where):
     return ch
 
 
-def _probe_capable(mygs) -> bool:
-    from .boundary_balance import probe_capable
-    return probe_capable(mygs)
-
-
-def balance_calibration_on(geom) -> bool:
-    """Whether the reconstruction calibrates its boundary constraint's total
-    (:mod:`bouquet.boundary_balance`): only the standard set at its
-    PROVISIONAL total -- not an override (``SolverConfig.
-    isoflux_weight_total``), a user set or the legacy route's."""
-    bal = getattr(geom, "iso_balance", None)
-    return (geom is not None and getattr(geom, "iso_pts", None) is not None
-            and isinstance(bal, dict) and bal.get("mode") == "provisional")
+def partition_probe_on(bq) -> bool:
+    """Whether the reconstruction measures the report-only boundary partition
+    (``SolverConfig.boundary_partition_probe``, default on;
+    :mod:`bouquet.boundary_balance`): only when the solver geometry carries
+    an isoflux set."""
+    geom = getattr(bq, "_geom", None)
+    return (bool(getattr(bq.config.solver, "boundary_partition_probe", True))
+            and geom is not None and getattr(geom, "iso_pts", None) is not None)
 
 
 def _geometry_isoflux(geom):
@@ -3766,31 +3761,6 @@ def prepare_engine_baseline(bq):
                     coord=getattr(_ad, "coord", "psi_n"),
                     eps_definition=s.get("eps_definition"),
                     maxits=maxits)
-            # the boundary constraint's strength: the calibrated balance
-            # between the boundary cut and the coil cut (boundary_balance),
-            # measured from this very start and installed BEFORE the
-            # reconstruction, so the reconstruction and every draw solve
-            # under the same set; an override (SolverConfig.
-            # isoflux_weight_total) or a user set is installed as given
-            if (balance_calibration_on(bq._geom)
-                    and not _probe_capable(mygs)):
-                import dataclasses as _dc
-                bq._geom = _dc.replace(bq._geom, iso_balance=dict(
-                    bq._geom.iso_balance, status=(
-                        "not calibrated: the solver object cannot be "
-                        "probed (no copy_eq / field evaluation; a test "
-                        "stand-in); the provisional total is installed")))
-            elif balance_calibration_on(bq._geom):
-                from .boundary_balance import calibrate_boundary_constraint
-                from .solver_geometry import with_balanced_total
-                _W, _brec = calibrate_boundary_constraint(
-                    bq, c0, _backend, psi_pad=psi_pad,
-                    maxits=s["draw_solve_maxits"])
-                bq._geom = with_balanced_total(bq._geom, _W, _brec)
-                recon_iso = _geometry_isoflux(bq._geom)
-                mygs.set_isoflux(recon_iso["pts"], weights=recon_iso["w"])
-                if c0.kind == "gfile":
-                    iso_pts, iso_w = recon_iso["pts"], recon_iso["w"]
             # the reconstruction runs under the solver's own cap
             # (engine_draw_solve_maxits caps the DRAWS only)
             backend = _backend(None)
@@ -3827,11 +3797,6 @@ def prepare_engine_baseline(bq):
                                            recon_iso["origin"])
         if isinstance(getattr(bl, "engine", None), dict):
             bl.engine["recon_isoflux"] = dict(recon_iso["stamp"])
-    if isinstance(getattr(bl, "engine", None), dict):
-        # how the boundary constraint's total was chosen (boundary_balance:
-        # the calibration with its probe points, an override, as given)
-        _bal = getattr(bq._geom, "iso_balance", None)
-        bl.engine["boundary_balance"] = None if _bal is None else dict(_bal)
     # ... and its delivered magnetic axis and minor radius: the reference
     # of every engine draw's axis record and displacement flag (axis_shift_record)
     delivered_axis = delivered_axis_reference(mygs, eng.delivered_meas,
@@ -3853,6 +3818,28 @@ def prepare_engine_baseline(bq):
         _bis = check_bistability(bq, backend, cold_start)
         if isinstance(getattr(bl, "engine", None), dict):
             bl.engine["bistability"] = _bis
+    # the boundary constraint's PARTITION at the installed total (report only;
+    # boundary_balance): ONE capped re-solve with the pressure x 1.02 from the
+    # delivered state, which is restored afterwards (with the reconstruction's
+    # coil regularisation); it never changes the total
+    if bq._geom is not None and getattr(bq._geom, "iso_balance", None) is not None:
+        from .solver_geometry import with_partition
+        if partition_probe_on(bq):
+            from .boundary_balance import measure_partition
+            _part = measure_partition(
+                bq, bq._engine_run["engine"].state.request, c0.pressure,
+                _backend, psi_pad=psi_pad, maxits=s["draw_solve_maxits"],
+                coil_reg_terms=coil_reg["terms"],
+                geom_record=bq._geom.record())
+        else:
+            _part = dict(status="off", report_only=True, reason=(
+                "SolverConfig.boundary_partition_probe=False"))
+        bq._geom = with_partition(bq._geom, _part)
+    if isinstance(getattr(bl, "engine", None), dict):
+        # how the boundary constraint's total was chosen (constant, override,
+        # as given) and the partition measured at it
+        _bal = getattr(bq._geom, "iso_balance", None)
+        bl.engine["boundary_balance"] = None if _bal is None else dict(_bal)
     if bl.reconstruction_metrics is not None:
         bq._flag_nonconverged_recon_loop()
         bq._print_reconstruction_summary()

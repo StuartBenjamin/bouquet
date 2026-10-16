@@ -1,11 +1,14 @@
-"""The boundary constraint's calibrated balance (bouquet.boundary_balance) --
-OFT-free half.
+"""The boundary constraint's strength (a constant inside a measured window),
+its report-only partition probe (bouquet.boundary_balance), the homotopy's
+#VSC bound floor and the vertical-runaway label -- OFT-free half.
 
-The live probes (the partition probe and the draw-yield probe on the
-synthetic fixtures) are tests/test_boundary_balance_solver.py.
+The live probes (the stamped partition and the draw yield on the synthetic
+fixtures) are tests/test_boundary_balance_solver.py.
 """
+import inspect
 import math
 import os
+import types
 
 import numpy as np
 import pytest
@@ -17,137 +20,178 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 # ---------------------------------------------------------------------------
-#  the analytic rule
+#  the constants and their recorded measurements
 # ---------------------------------------------------------------------------
-def test_the_analytic_total_is_the_squared_penalty_balance():
-    # sum_j (W u_j rbp_j delta)^2 == sum_c (r_c mu0 dI_c)^2 at W = W_a
-    n = 64
-    u = np.full(n, 1.0 / n)
-    rbp = np.linspace(0.2, 0.6, n)
-    cuts = {"A": 1500.0, "B": 900.0, "C": 300.0}
-    reg = {"A": 1e4, "B": 1e4, "C": 2e3}
-    W, parts = BB.analytic_weight_total(u, rbp, 8.5e-3, cuts, reg)
-    lhs = np.sum((W * u[1:] * rbp[1:] * 8.5e-3) ** 2)
-    rhs = sum((reg[c] * BB.MU0 * cuts[c]) ** 2 for c in cuts)
-    assert lhs == pytest.approx(rhs, rel=1e-12)
-    assert parts["n_points_applied"] == n - 1 and parts["n_coils"] == 3
+def test_the_boundary_total_is_the_constant_with_its_measured_window():
+    # 2e5 is a constant inside a MEASURED window (owner decision 2026-10-16);
+    # the window and the balance band are part of its definition: a change
+    # of the constant must come with a change of this record
+    assert SG.ISOFLUX_WEIGHT_TOTAL == 200_000
+    src = inspect.getsource(SG)
+    block = src[src.index("#: The TOTAL isoflux weight"):
+                src.index("ISOFLUX_WEIGHT_TOTAL = ")]
+    for text in ("MEASURED WINDOW", "1.5e5-4e5", "1.8e5-3.8e5",
+                 "balance-crossing band"):
+        assert text in block, text
 
 
-def test_the_reference_point_is_not_in_the_boundary_sum():
-    u = np.array([0.5, 0.25, 0.25])
-    a, _ = BB.analytic_weight_total(u, [1e6, 1.0, 1.0], 1e-3, {"A": 1.0},
-                                    {"A": 1.0})
-    b, _ = BB.analytic_weight_total(u, [0.0, 1.0, 1.0], 1e-3, {"A": 1.0},
-                                    {"A": 1.0})
-    assert a == b
-
-
-@pytest.mark.parametrize("k", [2.0, 10.0])
-def test_the_analytic_total_scales_as_the_rule_says(k):
-    u = np.full(16, 1 / 16)
-    rbp = np.full(16, 0.4)
-    base, _ = BB.analytic_weight_total(u, rbp, 5e-3, {"A": 1e3}, {"A": 1e4})
-    assert BB.analytic_weight_total(u, rbp, k * 5e-3, {"A": 1e3},
-                                    {"A": 1e4})[0] == pytest.approx(base / k)
-    assert BB.analytic_weight_total(u, rbp, 5e-3, {"A": k * 1e3},
-                                    {"A": 1e4})[0] == pytest.approx(base * k)
-    assert BB.analytic_weight_total(u, k * rbp, 5e-3, {"A": 1e3},
-                                    {"A": 1e4})[0] == pytest.approx(base / k)
-
-
-def test_no_regularised_coil_or_no_field_gives_no_estimate():
-    u = np.full(4, 0.25)
-    assert math.isnan(BB.analytic_weight_total(u, np.ones(4), 1e-3,
-                                               {"A": 1.0}, {})[0])
-    assert math.isnan(BB.analytic_weight_total(u, np.full(4, np.nan), 1e-3,
-                                               {"A": 1.0}, {"A": 1.0})[0])
-
-
-def test_the_coil_cut_and_fraction_are_one_exactly_at_the_cut():
-    base = {"A": 1e4, "F9A": -2e3}
-    sig = {"A": 100.0, "F9A": 50.0}
-    cuts = BB.coil_cuts_for("chi2", base, sig, chi2_max=6.1)
-    assert cuts["A"] == pytest.approx(math.sqrt(6.1) * 100.0)
-    # every coil exactly at its cut: chi2/nu = chi2_max
-    z = {c: cuts[c] / sig[c] for c in sig}
-    chi2_nu = float(np.mean(np.square(list(z.values()))))
-    assert BB.coil_fraction("chi2", dict(chi2_nu=chi2_nu, max_abs_z=0.0),
-                            chi2_max=6.1, z_max=6.3) == pytest.approx(1.0)
-    assert BB.coil_fraction("chi2", dict(chi2_nu=0.0, max_abs_z=6.3),
-                            chi2_max=6.1, z_max=6.3) == pytest.approx(1.0)
-    lg = BB.coil_cuts_for("legacy", base, inspec_F_max=0.02,
-                          inspec_VSC_max=0.01, vsc_coils=("F9A",))
-    assert lg == {"A": pytest.approx(200.0), "F9A": pytest.approx(20.0)}
-    d = BB.drift_pcts({"A": 1.02e4, "F9A": -2.02e3}, base, ("F9A",))
-    assert BB.coil_fraction("legacy", d, inspec_F_max=0.02,
-                            inspec_VSC_max=0.01) == pytest.approx(1.0)
+# ---------------------------------------------------------------------------
+#  the report-only partition
+# ---------------------------------------------------------------------------
+def test_the_coil_fraction_is_one_at_the_cut_and_leaves_the_vsc_pair_out():
+    sig = {"A": 100.0, "B": 80.0, "F9A": 50.0, "F9B": 50.0}
+    base = {"A": 1e4, "B": -5e3, "F9A": -6e4, "F9B": 3e3}
+    cuts = dict(kind="chi2", sigma=sig, vsc_coils=("F9A", "F9B"),
+                delta_cut_mm=5.0,
+                frac_kw=dict(chi2_max=6.1, z_max=6.3, inspec_F_max=0.02,
+                             inspec_VSC_max=0.01))
+    s = math.sqrt(6.1)
+    cur = dict(A=1e4 + s * 100.0, B=-5e3 + s * 80.0, F9A=-6e4 + 5e3,
+               F9B=3e3 - 5e3)            # the pair far off: not counted
+    rho, bf, cf, info = BB.partition_of(cur, base, 5.0, cuts)
+    assert cf == pytest.approx(1.0) and bf == pytest.approx(1.0)
+    assert rho == pytest.approx(1.0) and info["nu"] == 2
+    lg = dict(cuts, kind="legacy")
+    d = BB.drift_pcts({"A": 1.02e4, "B": -5e3, "F9A": 0.0, "F9B": 0.0},
+                      base, ("F9A", "F9B"))
+    assert BB.coil_fraction("legacy", d, **lg["frac_kw"]) == \
+        pytest.approx(1.0)
+    rho2, _, _, _ = BB.partition_of({"A": 1.02e4, "B": -5e3, "F9A": 0.0,
+                                     "F9B": 0.0}, base, 10.0, lg)
+    assert rho2 == pytest.approx(2.0)
     assert math.isnan(BB.coil_fraction("chi2", {}, chi2_max=6.1))
 
 
-# ---------------------------------------------------------------------------
-#  the root find on log W
-# ---------------------------------------------------------------------------
-def _model(Wstar, alpha=1.0, fail=lambda W: False):
+@pytest.mark.parametrize("rho, ok", [(1.0, True), (0.34, True), (2.9, True),
+                                     (0.3, False), (3.2, False),
+                                     (float("nan"), None), (None, None)])
+def test_the_partition_band(rho, ok):
+    assert BB.PARTITION_BAND == (pytest.approx(1 / 3), 3.0)
+    assert BB.in_band(rho) is ok
+
+
+def _fake_case(monkeypatch, solve_raises=False, coil_shift=0.0, rms=2.0):
+    import bouquet.filtering as F
+    import bouquet.utils as U
     calls = []
+    base = {"A": 1e4, "B": -5e3, "F9A": -6e4, "F9B": 3e3}
+    state = dict(cur=dict(base))
 
-    def ev(W):
-        calls.append(W)
-        if fail(W):
-            raise RuntimeError("engine GS solve failed: Exceeded maxits")
-        return dict(rho=(Wstar / W) ** alpha)
-    return ev, calls
+    class _GS:
+        coil_sets = list(base)
+
+        def copy_eq(self):
+            return "DELIVERED"
+
+        def replace_eq(self, source_eq=None):
+            calls.append(("replace_eq", source_eq))
+            state["cur"] = dict(base)
+
+        def trace_surf(self, psi):
+            return None
+
+        def get_coil_currents(self):
+            return dict(state["cur"]), None
+
+        def set_coil_reg(self, reg_terms=None):
+            calls.append(("set_coil_reg", len(reg_terms)))
+
+        def coil_reg_term(self, coffs, target=0.0, weight=1.0):
+            return (coffs, target, weight)
+
+    class _Backend:
+        def set_inputs(self, pressure=None, kinetics=None):
+            calls.append(("pressure", float(np.max(pressure))))
+
+        def solve(self, request, n_passes=1):
+            calls.append(("solve", n_passes))
+            if solve_raises:
+                raise RuntimeError("engine GS solve failed: maxits")
+            state["cur"] = dict(base, A=base["A"] * (1 + coil_shift))
+
+    monkeypatch.setattr(U, "safe_trace_surf", lambda gs, psi: "LCFS")
+    monkeypatch.setattr(F, "boundary_deviation_mm", lambda a, b: (rms, 2 * rms))
+    fc = types.SimpleNamespace(coil_filter="legacy", inspec_F_max=0.02,
+                               inspec_VSC_max=0.01)
+    bq = types.SimpleNamespace(
+        mygs=_GS(), config=types.SimpleNamespace(
+            filtering=fc, solver=types.SimpleNamespace(
+                coil_vsc={"F9A": 1.0, "F9B": -1.0})),
+        _boundary_cut=lambda quiet=True: (5.0, "test"))
+    return bq, _Backend, calls
 
 
-@pytest.mark.parametrize("Wstar", [2e3, 4e4, 3e5, 5e6])
-@pytest.mark.parametrize("alpha", [0.5, 1.0, 2.0])
-def test_the_root_find_brings_rho_within_tolerance(Wstar, alpha):
-    ev, calls = _model(Wstar, alpha)
-    r = BB.calibrate_log_root(ev, 1e5)
-    assert r["status"] == "converged"
-    assert 1 / BB.BALANCE_TOLERANCE <= r["rho"] <= BB.BALANCE_TOLERANCE
-    assert r["n_solves"] == len(calls) <= BB.PROBE_MAX_SOLVES
-    assert r["W"] in calls                      # a MEASURED point, never extrapolated
+def test_the_probe_measures_once_restores_and_never_changes_the_total(
+        monkeypatch):
+    bq, Backend, calls = _fake_case(monkeypatch, coil_shift=0.02, rms=5.0)
+    rec = BB.measure_partition(
+        bq, np.ones(3), np.full(3, 1e4), lambda maxits: Backend(),
+        psi_pad=1e-3, maxits=100, coil_reg_terms=["RECON"],
+        geom_record=dict(isoflux_weight_total=2e5,
+                         isoflux_weight_installed_total=199_219.0))
+    assert rec["status"] == "measured" and rec["n_solves"] == 1
+    assert rec["partition"] == pytest.approx(1.0) and rec["in_band"] is True
+    assert rec["pressure_step"] == 0.02 and rec["report_only"] is True
+    assert rec["total_nominal"] == 2e5 and rec["total_installed"] == 199_219.0
+    assert rec["excluded_coils"] == ["F9A", "F9B"]
+    assert ("pressure", pytest.approx(1.02e4)) in calls
+    # restored: the delivered equilibrium, then the reconstruction's reg
+    assert calls[-2:] == [("replace_eq", "DELIVERED"), ("set_coil_reg", 1)]
 
 
-def test_a_start_within_tolerance_costs_one_solve():
-    ev, calls = _model(1.1e5)
-    r = BB.calibrate_log_root(ev, 1e5)
-    assert r["status"] == "converged" and r["W"] == 1e5 and len(calls) == 1
+def test_a_partition_outside_the_band_is_warned_not_acted_on(monkeypatch):
+    bq, Backend, calls = _fake_case(monkeypatch, coil_shift=0.002, rms=5.0)
+    with pytest.warns(UserWarning, match="outside"):
+        rec = BB.measure_partition(
+            bq, np.ones(3), np.full(3, 1e4), lambda maxits: Backend(),
+            psi_pad=1e-3, maxits=100, coil_reg_terms=["RECON"],
+            geom_record=dict(isoflux_weight_total=2e5))
+    assert rec["partition"] == pytest.approx(10.0) and rec["in_band"] is False
 
 
-def test_a_root_beyond_the_reach_is_no_bracket():
-    ev, _ = _model(1e10)
-    r = BB.calibrate_log_root(ev, 1e5)
-    assert r["status"] == "no_bracket" and r["W"] is None
+def test_a_failed_probe_solve_is_recorded_and_restored(monkeypatch):
+    bq, Backend, calls = _fake_case(monkeypatch, solve_raises=True)
+    with pytest.warns(UserWarning, match="not measured"):
+        rec = BB.measure_partition(
+            bq, np.ones(3), np.full(3, 1e4), lambda maxits: Backend(),
+            psi_pad=1e-3, maxits=100, coil_reg_terms=["RECON"],
+            geom_record=dict(isoflux_weight_total=2e5))
+    assert rec["status"] == "probe_failed" and "maxits" in rec["error"]
+    assert calls[-2:] == [("replace_eq", "DELIVERED"), ("set_coil_reg", 1)]
 
 
-def test_failed_points_shorten_the_step_and_are_recorded():
-    # the stiff side fails (the I4 symptom: a too-strong boundary does not
-    # converge); the root lies between
-    ev, calls = _model(3e5, fail=lambda W: W > 2e6)
-    r = BB.calibrate_log_root(ev, 1e5)
-    assert any(p.get("error") for p in r["points"]) or r["status"] == "converged"
-    assert r["status"] == "converged"
-    ev2, _ = _model(3e5, fail=lambda W: True)
-    r2 = BB.calibrate_log_root(ev2, 1e5)
-    assert r2["status"] == "no_bracket" and r2["W"] is None
-    assert all("Exceeded maxits" in p["error"] for p in r2["points"])
+def test_the_probe_is_skipped_when_it_could_not_be_undone(monkeypatch):
+    bq, Backend, calls = _fake_case(monkeypatch)
+    with pytest.warns(UserWarning, match="not on record"):
+        rec = BB.measure_partition(
+            bq, np.ones(3), np.full(3, 1e4), lambda maxits: Backend(),
+            psi_pad=1e-3, maxits=100, coil_reg_terms=None,
+            geom_record=dict(isoflux_weight_total=2e5))
+    assert rec["n_solves"] == 0 and not calls
+    bq.mygs = object()                          # a stand-in: not probed
+    with pytest.warns(UserWarning, match="cannot be probed"):
+        rec = BB.measure_partition(
+            bq, np.ones(3), np.full(3, 1e4), lambda maxits: Backend(),
+            psi_pad=1e-3, maxits=100, coil_reg_terms=["RECON"],
+            geom_record={})
+    assert rec["n_solves"] == 0
 
 
-def test_a_budget_ends_on_the_best_measured_point():
-    calls = []
-
-    def ev(W):                       # not a power law: regula falsi needs steps
-        calls.append(W)
-        return dict(rho=(3.3e5 / W) ** (2.0 if W < 3.3e5 else 0.5))
-    r = BB.calibrate_log_root(ev, 1e5, tol=1.0001, max_solves=3)
-    assert r["status"] == "budget" and r["W"] in calls
-    best = min(calls, key=lambda W: abs(math.log(3.3e5 / W)))
-    assert r["W"] == best
+def test_the_probe_switch():
+    from bouquet.config import SolverConfig
+    from bouquet.engine import partition_probe_on
+    assert SolverConfig(mesh_path="m").boundary_partition_probe is True
+    geom = types.SimpleNamespace(iso_pts=np.zeros((4, 2)))
+    bq = types.SimpleNamespace(_geom=geom, config=types.SimpleNamespace(
+        solver=SolverConfig(mesh_path="m")))
+    assert partition_probe_on(bq)
+    bq.config.solver.boundary_partition_probe = False
+    assert not partition_probe_on(bq)
+    assert BB.partition_warning(dict(status="off")) is None
 
 
 # ---------------------------------------------------------------------------
-#  the geometry: provisional, override, calibrated -- and the stamps
+#  the geometry: constant, override -- and the stamps
 # ---------------------------------------------------------------------------
 def _square(n=40):
     t = np.linspace(0, 2 * np.pi, n, endpoint=False)
@@ -178,47 +222,38 @@ def _geom(monkeypatch, override=None):
     return SG.case_geometry(src, s, standard=True)
 
 
-def test_the_default_geometry_is_provisional_and_calibration_is_on(monkeypatch):
-    from bouquet.engine import balance_calibration_on
+def test_the_default_geometry_installs_the_constant(monkeypatch):
     g = _geom(monkeypatch)
     rec = g.record()
-    assert rec["isoflux_weight_mode"] == "provisional"
+    assert rec["isoflux_weight_mode"] == "constant"
     assert rec["isoflux_weight_total"] == pytest.approx(SG.ISOFLUX_WEIGHT_TOTAL)
-    assert balance_calibration_on(g)
+    assert rec["isoflux_balance"]["source"] == \
+        "solver_geometry.ISOFLUX_WEIGHT_TOTAL"
 
 
-def test_an_override_is_installed_as_given_and_never_calibrated(monkeypatch):
-    from bouquet.engine import balance_calibration_on
+def test_an_override_is_installed_as_given(monkeypatch):
     g = _geom(monkeypatch, override=5e4)
     rec = g.record()
     assert rec["isoflux_weight_mode"] == "override"
     assert rec["isoflux_weight_total"] == pytest.approx(5e4)
     assert rec["isoflux_balance"]["source"] == "SolverConfig.isoflux_weight_total"
-    assert not balance_calibration_on(g)
 
 
-def test_the_calibrated_set_keeps_points_and_shape_and_stamps_both_totals(
-        monkeypatch):
+def test_the_partition_stamp_keeps_the_set(monkeypatch):
     g = _geom(monkeypatch)
-    brec = dict(mode="calibrated", total=7.5e4, analytic_total=1e5,
-                partition_ratio=0.97, status="converged")
-    c = SG.with_balanced_total(g, 7.5e4, brec)
+    part = dict(partition=0.97, in_band=True, status="measured",
+                n_solves=1, wall_s=12.0)
+    c = SG.with_partition(g, part)
     assert np.array_equal(c.iso_pts, g.iso_pts)
-    np.testing.assert_allclose(c.iso_w / c.iso_w.sum(),
-                               g.iso_w / g.iso_w.sum(), rtol=1e-14)
+    assert np.array_equal(c.iso_w, g.iso_w)
     rec = c.record()
-    assert rec["isoflux_weight_mode"] == "calibrated"
-    assert rec["isoflux_weight_total"] == pytest.approx(7.5e4)
-    # F5: the reference point's weight is not applied by TokaMaker
+    assert rec["isoflux_sha256"] == g.record()["isoflux_sha256"]
+    assert rec["isoflux_weight_mode"] == "constant"
+    assert rec["isoflux_balance"]["partition"]["partition"] == 0.97
     assert rec["isoflux_weight_installed_total"] == pytest.approx(
-        7.5e4 - c.iso_w[0])
-    assert rec["isoflux_balance"]["partition_ratio"] == 0.97
-    assert rec["isoflux_resampling"]["weight_total"] == pytest.approx(7.5e4)
-    assert rec["isoflux_sha256"] != g.record()["isoflux_sha256"]
-    from bouquet.engine import balance_calibration_on
-    assert not balance_calibration_on(c)       # never re-calibrated in place
+        SG.ISOFLUX_WEIGHT_TOTAL - g.iso_w[0])
 
 
-def test_the_override_field_exists_and_defaults_to_calibrate():
+def test_the_override_field_exists_and_defaults_to_the_constant():
     from bouquet.config import SolverConfig
     assert SolverConfig(mesh_path="m").isoflux_weight_total is None

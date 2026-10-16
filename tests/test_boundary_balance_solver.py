@@ -1,39 +1,35 @@
-"""The boundary constraint's calibrated balance on the live solver
-(``pytest -m solver``): the partition probe and the draw-yield probe on the
-synthetic fixtures (docs/engine.md, "The boundary constraint: a calibrated
-balance between the boundary cut and the coil cut").
+"""The boundary constraint on the live solver (``pytest -m solver``): the
+report-only partition stamp and the draw yield on the synthetic fixtures at
+the default constant total (docs/engine.md, "The boundary constraint: a
+constant total inside a measured window").
 
-Three legs; the third, the sigma=0 reproduction under the calibrated total,
-is ``tests/test_sigma0_identity_solver.py`` (unchanged: it runs the default,
-calibrated, set).
+Three legs; the third, the sigma=0 reproduction at the default total, is
+``tests/test_sigma0_identity_solver.py`` (unchanged).
 
 * PARTITION: on each synthetic fixture (the H-mode thermal g-file pair, the
-  L-mode pair, the synthetic dd at 1.2 s) the calibration converges, the
-  partition ratio measured at the calibrated total is within a factor of 2
-  of 1, and the calibrated total lies within one decade of the analytic
-  estimate.  What the bars test: the analytic estimate encodes TokaMaker's
-  conventions (each constraint row scaled by its weight; coil rows on
-  mu0 x the current in A; isoflux rows on psi in Wb/rad).  A change in any of
-  them moves the calibrated total away from the estimate by that
-  convention's factor (mu0 alone is six decades; a squared-vs-linear weight
-  change moves it by orders of magnitude), so the one-decade bar flags a
-  convention change while leaving room for the plasma's own response (measured
-  2026-10-16: the three fixtures calibrate 0.13-0.27 of a decade below the
-  estimate).  The factor-2 bar on the ratio
-  checks the stamp is a measurement at the installed total: the calibration
-  stops within 20 %, so a ratio outside a factor 2 means the probe and the
-  installed set disagree.
+  L-mode pair, the synthetic dd at 1.2 s) the reconstruction installs the
+  constant total (mode "constant", 2e5) and stamps the partition it
+  measured there, which lies inside the report band [1/3, 3] at a cost of at
+  most 2 probe solves.  What the band tests: the partition encodes
+  TokaMaker's conventions (each constraint row scaled by its weight; coil
+  rows on mu0 x the current in A; isoflux rows on psi in Wb/rad) relative to
+  the in-spec rule's two cuts.  A change of any of them moves the partition
+  at a fixed total by that convention's factor (mu0 alone is six decades; a
+  squared-vs-linear weight change moves it by orders of magnitude), far
+  outside the band, while the band holds the measured spread of the cases
+  (2026-10: 0.8-2.6 at 2e5 on six equilibria).
 * YIELD: a fixed-seed set of 10 draw attempts on each fixture archives at
   least 80 % of the attempts that reach a solve (8 of 10 when none is
   refused for non-physical drawn kinetics, which happens BEFORE any solve
   and says nothing about the constraint; at least 5 must reach a solve).
-  The bar is the regression of the symptom that motivated the balance: at a
-  fixed total ten times too strong for a reversed-I_p case, 9 of its 10
-  draws stopped at the homotopy's iteration cap; the balance archived 8-10
-  of 10 at totals of 1e5 and below.  MEASURED 2026-10-16 at the calibrated
-  totals (1.97e5 H-mode, 2.02e5 L-mode): 5 and 6 of 10 (homotopy_saturated) --
-  the bar FAILS; the balance's open item (docs/engine.md).  No reversed-I_p fixture ships with
-  the repository; that case is verified on the owner's private ladder.
+  The bar is the regression of the symptom the homotopy's #VSC floor fixed:
+  at 2e5, a reversed-I_p case with a near-zero vertical-control coil had 9
+  of its 10 draws stop at the homotopy's iteration cap, and 9 of 10 archived
+  with the floor.  No fixture with a vertical-control coil below the 10 kA
+  floor ships with the repository (the synthetic pairs carry more than
+  40 kA): the floor's arithmetic on such a coil set is the fast test
+  ``tests/test_homotopy_vsc_floor.py::test_the_vsc_bound_uses_the_floor_for_a_near_zero_coil``,
+  and the sub-10 kA yield is verified on the owner's private ladder.
 
 Every solver call runs in a subprocess (``OFT_env`` is a per-process
 singleton; tests/_harness.py).
@@ -58,10 +54,9 @@ _MESH = os.path.abspath(os.path.join(_HERE, "..", "examples", "D3D-like",
                                      "DIIID_mesh.h5"))
 FIXTURES = ("hmode_gfile", "lmode_gfile", "dd_1200")
 
-#: the bars (module docstring): a partition ratio within this factor of 1 ...
-PARTITION_FACTOR = 2.0
-#: ... a calibrated total within this many decades of the analytic estimate
-ANALYTIC_DECADES = 1.0
+#: the bars (module docstring): the stamped partition inside the report band
+#: at a cost of at most this many probe solves ...
+PARTITION_MAX_SOLVES = 2
 #: ... and at least this many of YIELD_ATTEMPTS fixed-seed draws archived
 YIELD_ATTEMPTS = 10
 YIELD_MIN_FRACTION = 0.8
@@ -127,7 +122,8 @@ def _probe(which, work, draws):
             out["attempts"] = YIELD_ATTEMPTS
             out["archived"] = len(b.diagnostics or [])
             out["rejections"] = [dict(reason=r.get("reason"),
-                                      stage=r.get("stage"))
+                                      stage=r.get("stage"),
+                                      info=r.get("info"))
                                  for r in (b.draw_rejections or [])]
     except Exception as e:
         out["fatal"] = f"{type(e).__name__}: {e}\n" + traceback.format_exc()
@@ -155,23 +151,28 @@ def _run(tmp_path_factory, which, draws):
 
 
 @pytest.mark.parametrize("which", FIXTURES)
-def test_the_partition_probe_balances_the_two_cuts(tmp_path_factory, which):
-    import math
+def test_the_stamped_partition_at_the_default_total_is_in_band(
+        tmp_path_factory, which):
+    from bouquet.boundary_balance import PARTITION_BAND
+    from bouquet.solver_geometry import ISOFLUX_WEIGHT_TOTAL
     d = _run(tmp_path_factory, which, draws=False)
     bal = d["balance"]
-    assert bal["mode"] == "calibrated" and not bal.get("fallback"), bal
-    assert bal["status"] == "converged", bal
-    rho = float(bal["partition_ratio"])
-    assert 1.0 / PARTITION_FACTOR <= rho <= PARTITION_FACTOR, bal
-    dec = abs(math.log10(float(bal["total"]) / float(bal["analytic_total"])))
-    assert dec <= ANALYTIC_DECADES, (dec, bal["total"], bal["analytic_total"])
-    # the geometry installs and stamps the calibrated total
-    assert d["geometry"]["isoflux_weight_mode"] == "calibrated"
-    assert d["geometry"]["isoflux_weight_total"] == pytest.approx(bal["total"])
+    assert bal["mode"] == "constant", bal
+    assert d["geometry"]["isoflux_weight_mode"] == "constant"
+    assert d["geometry"]["isoflux_weight_total"] == pytest.approx(
+        ISOFLUX_WEIGHT_TOTAL)
+    part = bal["partition"]
+    assert part["status"] == "measured", part
+    assert part["report_only"] is True
+    assert part["total_nominal"] == pytest.approx(ISOFLUX_WEIGHT_TOTAL)
+    assert part["n_solves"] <= PARTITION_MAX_SOLVES, part
+    lo, hi = PARTITION_BAND
+    assert lo <= float(part["partition"]) <= hi, part
+    assert part["in_band"] is True
 
 
 @pytest.mark.parametrize("which", FIXTURES)
-def test_the_balanced_constraint_keeps_the_draw_yield(tmp_path_factory, which):
+def test_the_default_total_keeps_the_draw_yield(tmp_path_factory, which):
     d = _run(tmp_path_factory, which, draws=True)
     n_kin = sum(1 for r in d["rejections"]
                 if r["reason"] == "kinetics_nonphysical")

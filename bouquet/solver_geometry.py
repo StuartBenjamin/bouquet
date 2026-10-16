@@ -28,29 +28,37 @@ ISOFLUX_WEIGHT = 500.0
 #: source carried (#84): the source boundary is resampled to ``N_ISOFLUX`` points by arc length.
 N_ISOFLUX = 256
 
-#: The PROVISIONAL total isoflux weight of the unified engine's boundary constraint (#84).  The
-#: strength the reconstruction and every draw solve under is NOT this number: it is calibrated per
-#: case as a balance between the in-spec rule's boundary cut and its coil cut
-#: (:mod:`bouquet.boundary_balance`; docs/engine.md, "The boundary constraint: a calibrated
-#: balance between the boundary cut and the coil cut"), or set explicitly by
-#: ``SolverConfig.isoflux_weight_total`` (an override, stamped as such).  This total is what the
-#: solver geometry installs BEFORE the calibration (the reset state; the anchor solve the probe
-#: starts from), and the total of a ``SolverConfig.isoflux_pts`` set given without weights.  Each
-#: point carries ``total x (the arc length it represents) / (the boundary length)``, so the
-#: constraint's strength depends on the boundary itself, not on how many points the g-file
-#: writer, the IDS writer or the mesh gave it.
+#: The TOTAL isoflux weight of the unified engine's boundary constraint (#84), ONE constant for the
+#: reconstruction and every draw (the draws hold the reconstruction's own set), unless
+#: ``SolverConfig.isoflux_weight_total`` overrides it (stamped as mode "override").  Each point
+#: carries ``total x (the arc length it represents) / (the boundary length)``, so the constraint
+#: strength depends on the boundary itself, not on how many points the g-file writer, the IDS
+#: writer or the mesh gave it.
 #:
-#: History.  Before #84 the strength followed the source's point count (~2e4 on the engine's g-file
-#: route); #84 fixed it at 2e5 to hold a g-file case's sigma=0 state, and a reversed-I_p case's
-#: draws then lost their homotopy (most attempts stopped at the iteration cap) -- the strength is a
-#: ratio to the coil regularisation, so no single total serves every case; hence the calibration.
+#: Why 2e5: a constant inside a MEASURED WINDOW (docs/engine.md, "The boundary constraint: a
+#: constant total inside a measured window").  Only the ratio of this total to the draws' coil
+#: regularisation matters to the solution.  The measured window is about 1.5e5-4e5: below it a
+#: diverted g-file case's vertical-control drift grows as the boundary weakens and its in-spec
+#: draws fall (7 of 10 at 2e5, 3 at 1e5, 1 at 5e4; before #84, at the route's ~2e4, its sigma=0
+#: draw missed the archived-stage bootstrap gate); at 4e5 the boundary is already the stiffer
+#: side (partition 0.3-0.9) and that case keeps only 5 of 10 in spec.  The balance-crossing band
+#: is 1.8e5-3.8e5: the total at which a boundary miss equal to the boundary cut and a coil drift
+#: equal to the coil cut cost the solver the same (partition = 1, the vertical-control pair
+#: excluded), measured on six equilibria (three experimental, three synthetic), at 2 % and 10 %
+#: probe amplitude, with and without the homotopy's coil bounds.  Every sigma=0 draw passes its
+#: gates from 5e4 to 4e5.  2e5 sits inside both.  The partition at the installed total is
+#: measured on every reconstruction and reported (:mod:`bouquet.boundary_balance`; it never
+#: changes the total).  A calibrated per-case root find was tried and rejected: on cases where
+#: the boundary and the vertical-control pair move as one rigid displacement the partition is
+#: flat in the total over most of the window, so the root find lands anywhere on the plateau.
 #:
-#: TokaMaker's ``set_isoflux`` measures every other point's flux against the set's first point (the
-#: reference) and does not apply that point's own weight (``weights[0]`` is discarded), so the
-#: total actually installed is the nominal total minus ``w[0]`` (199 219 for a 256-point set at 2e5
-#: without X-points).  The records stamp both totals (``isoflux_weight_total`` /
-#: ``isoflux_weight_installed_total``, and the isoflux stamps' ``weight_total`` /
-#: ``weight_installed_total``).
+#: This is the NOMINAL total, the sum of all the set's weights.  TokaMaker's ``set_isoflux`` measures
+#: every other point's flux against the set's first point (the reference) and does not apply that
+#: point's own weight (``weights[0]`` is discarded), so the total actually installed is the nominal
+#: total minus ``w[0]`` (199 219 for a 256-point set without X-points).  The measurements above were
+#: made with exactly this installation; the records stamp both totals
+#: (``isoflux_weight_total`` / ``isoflux_weight_installed_total``, and the isoflux stamps'
+#: ``weight_total`` / ``weight_installed_total``).
 ISOFLUX_WEIGHT_TOTAL = 2.0e5
 
 #: X-point detection on the source boundary (#84; X-points are kept as exact resampled points): a
@@ -467,8 +475,9 @@ class CaseGeometry:
     # how the isoflux set was made (ISOFLUX_RULE_*) and, for the standard set, the resampling
     iso_rule: Optional[str] = None
     iso_resampling: Optional[dict] = None
-    # how the total was chosen (bouquet.boundary_balance): mode "provisional" (before the
-    # calibration), "calibrated", "override" (SolverConfig.isoflux_weight_total) or "as given"
+    # how the total was chosen: mode "constant" (ISOFLUX_WEIGHT_TOTAL), "override"
+    # (SolverConfig.isoflux_weight_total) or "as given"; after the reconstruction also the
+    # report-only partition (bouquet.boundary_balance), under "partition"
     iso_balance: Optional[dict] = None
 
     def record(self) -> dict:
@@ -512,7 +521,7 @@ class CaseGeometry:
                                   None if b is None or len(b) < 3 else
                                   float(_polyline_s(_open_ccw(b))[-1])),
             "isoflux_resampling": None if rs is None else dict(rs),
-            # the total's provenance: calibrated balance, override, provisional (boundary_balance)
+            # the total's provenance (constant, override, as given) and the measured partition
             "isoflux_weight_mode": (None if not n_iso or self.iso_balance is None
                                     else self.iso_balance.get("mode")),
             "isoflux_balance": None if self.iso_balance is None else dict(self.iso_balance),
@@ -535,19 +544,14 @@ class CaseGeometry:
             mygs.set_saddle_constraints(self.saddle_pts, weights=self.saddle_w)
 
 
-def with_balanced_total(geom: CaseGeometry, W: float, record: dict) -> CaseGeometry:
-    """*geom* with its (provisional) standard set re-weighted to the total *W*, the same points
-    and the same per-length shape, and *record* (:mod:`bouquet.boundary_balance`) as its
-    ``iso_balance``.  Every later reset installs it; the reconstruction and every draw hold it."""
+def with_partition(geom: CaseGeometry, partition: dict) -> CaseGeometry:
+    """*geom* with the report-only partition record *partition* (:mod:`bouquet.boundary_balance`)
+    added to its ``iso_balance`` under ``"partition"``.  The points and weights are unchanged: the
+    partition is a measurement at the installed total, never a reason to change it."""
     import dataclasses
-    w = np.asarray(geom.iso_w, dtype=float)
-    w = w / float(np.sum(w)) * float(W)
-    origin = (f"source boundary, resampled to {len(w)} points by arc length, weight per unit "
-              f"length (total {float(W):.6g}: {record.get('mode', 'calibrated')} boundary balance"
-              + (f", {record['fallback']}" if record.get("fallback") else "") + ")")
-    rs = None if geom.iso_resampling is None else dict(geom.iso_resampling, weight_total=float(W))
-    return dataclasses.replace(geom, iso_w=w, iso_origin=origin, iso_balance=dict(record),
-                               iso_resampling=rs)
+    bal = dict(geom.iso_balance or {})
+    bal["partition"] = dict(partition)
+    return dataclasses.replace(geom, iso_balance=bal)
 
 
 def case_geometry(source, solver, standard=True) -> CaseGeometry:
@@ -562,10 +566,8 @@ def case_geometry(source, solver, standard=True) -> CaseGeometry:
     else, with ``standard`` (the unified engine, :func:`standard_isoflux_for`), the
     standard set of #84 (:func:`standard_isoflux`: :data:`N_ISOFLUX` points by arc length, X-points
     exact -- the saddle targets mark them too --, weights per unit length summing to
-    ``solver.isoflux_weight_total`` when set (an override), else to the PROVISIONAL
-    :data:`ISOFLUX_WEIGHT_TOTAL`, which the unified engine's reconstruction replaces by the
-    calibrated balance (:func:`bouquet.boundary_balance.calibrate_boundary_constraint`,
-    :func:`with_balanced_total`); else (the legacy route) the source boundary as given, every
+    ``solver.isoflux_weight_total`` when set (an override), else to the constant
+    :data:`ISOFLUX_WEIGHT_TOTAL`; else (the legacy route) the source boundary as given, every
     point at :data:`ISOFLUX_WEIGHT`.  The saddle constraints are installed as configured."""
     from .config import ImasSource, ReconstructionSource
     if isinstance(source, ReconstructionSource):
@@ -623,9 +625,9 @@ def case_geometry(source, solver, standard=True) -> CaseGeometry:
                                                       w_total=w_total)
             if w_over is None:
                 iso_from = (f"source boundary, resampled to {N_ISOFLUX} points by arc length, weight "
-                            f"per unit length (provisional total {w_total:g}, before the "
-                            "boundary-balance calibration)")
-                iso_bal = dict(mode="provisional", total=w_total)
+                            f"per unit length (total {w_total:g})")
+                iso_bal = dict(mode="constant", total=w_total,
+                               source="solver_geometry.ISOFLUX_WEIGHT_TOTAL")
             else:
                 iso_from = (f"source boundary, resampled to {N_ISOFLUX} points by arc length, weight "
                             f"per unit length (total {w_total:g}: SolverConfig.isoflux_weight_total)")
