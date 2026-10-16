@@ -4595,8 +4595,11 @@ def stamp_generation_provenance(h5path_or_header, scan_key=None, **attrs):
     against: ``inspec_rms_max_mm`` / ``inspec_max_max_mm`` (the numbers the
     loop applied; absent = no bound) and ``inspec_cut_source`` (``"explicit"``
     / ``"device:<name>"`` / ``"generic"`` / ``"disabled"``, from
-    ``Bouquet.generate``). A fixed-N run records none of the three. A value
-    of None removes the attr.
+    ``Bouquet.generate``). A fixed-N run records none of the three.  Every run
+    records the per-draw wall budget it applied, ``draw_wall_budget_s``
+    (``GenerationConfig.draw_wall_budget_s``; absent = off), and
+    ``draw_wall_budget_rejections`` (the attempts it rejected). A value of
+    None removes the attr.
     """
     h5path = _resolve_h5(h5path_or_header)
     bkey = _scan_key(scan_key)

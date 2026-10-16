@@ -174,6 +174,14 @@ DRAW_REJECTION_REASONS = {
     "post_homotopy_maxits": "an engine draw's post-homotopy j_BS pass "
                             "solve stopped at engine_draw_solve_maxits "
                             "without converging",
+    # both paths: the per-draw wall-clock budget (GenerationConfig.
+    # draw_wall_budget_s), checked between solves and before archiving
+    "draw_wall_budget": "the draw's elapsed wall time exceeded "
+                        "GenerationConfig.draw_wall_budget_s (checked before "
+                        "each of its solves and once before archiving; a "
+                        "running GS solve is never interrupted); the "
+                        "rejection the budget pre-empted, if any, is kept "
+                        "as masked_reason",
     # both paths: the delivered state cannot be traced into a g-file
     "eqdsk_save_failed": "the draw's g-file could not be written "
                          "(save_eqdsk failed on the delivered state); the "
@@ -191,6 +199,14 @@ DRAW_REJECTION_REASONS = {
                                "refused rather than run on the unperturbed "
                                "seed (review PR69 B3)",
 }
+
+
+class DrawWallBudgetExceeded(RuntimeError):
+    """A draw's elapsed wall time exceeded ``GenerationConfig.
+    draw_wall_budget_s`` before its next solve: raised by
+    :class:`DrawSolveGuard` INSTEAD of starting that solve (a running solve
+    is never interrupted).  The draw is rejected with reason code
+    ``"draw_wall_budget"`` (:data:`DRAW_REJECTION_REASONS`)."""
 
 
 class DrawAnchorSolveFailed(RuntimeError):
@@ -272,7 +288,15 @@ class DrawSolveGuard:
     """
 
     def __init__(self, mygs, maxits=DRAW_SOLVE_MAXITS, retry_urf=DRAW_SOLVE_RETRY_URF,
-                 loose_tol=DRAW_SOLVE_LOOSE_TOL):
+                 loose_tol=DRAW_SOLVE_LOOSE_TOL, wall_budget_s=None):
+        #: the per-draw wall-clock budget [s] (GenerationConfig.
+        #: draw_wall_budget_s; None: off): checked before every draw solve
+        #: (:class:`DrawWallBudgetExceeded`) and by :meth:`check_wall_budget`
+        self.wall_budget_s = (None if wall_budget_s is None
+                              else float(wall_budget_s))
+        self._draw_t0 = None
+        #: the draws whose budget ran out: {draw: elapsed s when found}
+        self.over_budget = {}
         if isinstance(maxits, bool) or (maxits is not None
                                         and int(maxits) != maxits):
             raise ValueError(f"draw_solve_maxits={maxits!r} must be an "
@@ -346,6 +370,12 @@ class DrawSolveGuard:
             return out if want else out[0]
 
         def solve(*a, **k):
+            if self.check_wall_budget():
+                # between solves: the budget is spent, this solve never starts
+                raise DrawWallBudgetExceeded(
+                    f"draw {self.draw}: elapsed wall {self.over_budget[self.draw]:.1f} s "
+                    f"exceeds draw_wall_budget_s={self.wall_budget_s:g} s; the next "
+                    "solve was not started")
             self.n_solves += 1
             t0 = time.perf_counter()
             try:
@@ -413,9 +443,27 @@ class DrawSolveGuard:
 
     def begin_draw(self, draw):
         """Enter draw *draw* (``None``: outside the draws): from the first
-        draw on, the cap is applied and the rescue armed."""
+        draw on, the cap is applied and the rescue armed; the draw's wall
+        clock (the budget's) starts here."""
         self.draw = draw
+        self._draw_t0 = None if draw is None else time.perf_counter()
         self._set_cap(draw is not None)
+
+    def check_wall_budget(self):
+        """Whether the CURRENT draw has exceeded the wall budget (records it
+        in :attr:`over_budget` the first time).  ``False`` outside a draw or
+        with the budget off.  Called before every draw solve and once by
+        ``generate_bouquet`` before a draw is archived."""
+        if (self.wall_budget_s is None or self.draw is None
+                or self._draw_t0 is None):
+            return False
+        if self.draw in self.over_budget:
+            return True
+        el = time.perf_counter() - self._draw_t0
+        if el > self.wall_budget_s:
+            self.over_budget[self.draw] = float(el)
+            return True
+        return False
 
     def failures(self, draw):
         """This draw's failed solves, recovered or not (list of dicts)."""
@@ -486,6 +534,12 @@ def _draw_rejection_reason(exc, stage):
     (``"perturb"`` or ``"post_homotopy"``); see
     :data:`DRAW_REJECTION_REASONS`."""
     from .jbs_loop import JBSNotConverged
+    _e, _seen = exc, set()
+    while _e is not None and id(_e) not in _seen:
+        _seen.add(id(_e))
+        if isinstance(_e, DrawWallBudgetExceeded):
+            return "draw_wall_budget"
+        _e = _e.__cause__ or _e.__context__
     if isinstance(exc, DrawAnchorSolveFailed):
         return "anchor_solve_failed"
     if stage == "post_homotopy":
@@ -5810,6 +5864,16 @@ def generate_bouquet(
                   error_type=(None if exc is None else type(exc).__name__),
                   message=str(message if message is not None
                               else (exc if exc is not None else ""))[:500])
+        _ob = (None if solve_guard is None else
+               getattr(solve_guard, "over_budget", {}).get(int(count_)))
+        if _ob is not None and _r["reason"] != "draw_wall_budget":
+            # the budget ran out first: whatever failed after it (a solve
+            # refused by the guard, a rollback, a stage) is its consequence
+            _r["masked_reason"] = _r["reason"]
+            _r["reason"] = "draw_wall_budget"
+        if _ob is not None:
+            _r["elapsed_s"] = float(_ob)
+            _r["wall_budget_s"] = float(solve_guard.wall_budget_s)
         if isinstance(exc, CoilSaturated):
             _r["info"] = dict(exc.info)
         _rejections.append(_r)
@@ -8249,6 +8313,15 @@ def generate_bouquet(
                 _post_align_reason = ("post_perturb_failed", "post-perturb",
                                       _post_exc)
 
+            if (not _post_align_failed and solve_guard is not None
+                    and hasattr(solve_guard, "check_wall_budget")
+                    and solve_guard.check_wall_budget()):
+                _post_align_failed = True
+                _post_align_reason = (
+                    "draw_wall_budget", "wall_budget",
+                    f"elapsed wall {solve_guard.over_budget[count]:.1f} s "
+                    f"exceeds draw_wall_budget_s="
+                    f"{solve_guard.wall_budget_s:g} s (checked before archiving)")
             if _post_align_failed:
                 _m.uncap_solver(mygs)
                 _pr_code, _pr_stage, _pr_what = (

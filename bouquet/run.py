@@ -8088,7 +8088,8 @@ class Bouquet(SwbBaseline):
                 DrawSolveGuard(self.mygs,
                                _m.solve_maxits(gc.draw_solve_maxits),
                                retry_urf=_m.solve_retry_urf(gc.draw_solve_retry_urf),
-                               loose_tol=_m.solve_loose_tol(gc.draw_solve_loose_tol)) as _solve_guard:
+                               loose_tol=_m.solve_loose_tol(gc.draw_solve_loose_tol),
+                               wall_budget_s=getattr(gc, "draw_wall_budget_s", None)) as _solve_guard:
             self.diagnostics = generate_bouquet(
                 self.mygs, np.asarray(bl.psi_N, dtype=float), n_equils, header,
                 np.asarray(bl.j_phi, dtype=float),
@@ -8272,7 +8273,12 @@ class Bouquet(SwbBaseline):
             stamp_generation_provenance(
                 header, scan_key=gc.scan_key,
                 inspec_rms_max_mm=(_cut_mm if _until else None),
-                inspec_cut_source=(_cut_source if _until else None))
+                inspec_cut_source=(_cut_source if _until else None),
+                # the per-draw wall budget this run applied and what it cost
+                draw_wall_budget_s=getattr(gc, "draw_wall_budget_s", None),
+                draw_wall_budget_rejections=int(sum(
+                    1 for _r in self.draw_rejections
+                    if _r.get("reason") == "draw_wall_budget")))
         except OSError as _exc:        # the draws are stored; say what is missing
             import warnings as _w
             _w.warn(f"the until-N boundary cut ({_cut_mm} mm, {_cut_source}) "

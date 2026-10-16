@@ -1863,6 +1863,18 @@ class GenerationConfig:
     # is untouched.  The engine refuses draw_solve_maxits (the legacy draws'
     # cap); the legacy path never reads this field.
     engine_draw_solve_maxits: Optional[int] = 100
+    # The per-draw WALL-CLOCK budget [s] (both routes).  Checked between solves only -- never
+    # inside a running GS solve: when a draw's elapsed wall time exceeds it before its next
+    # solve starts (or at the end of its homotopy), the draw is rejected with reason
+    # "draw_wall_budget", recorded like every other rejection (attempt record, counts, the
+    # generate summary line) and the budget stamped in the archive's generation provenance.
+    # None switches it off.  600 s: five times the 120 s per-draw target and about three times
+    # the slowest normal draws measured (150-190 s), so it only ends draws that have stalled
+    # (one draw was measured at 55 min).  The structural bound that already exists is separate:
+    # every engine-draw solve is capped at engine_draw_solve_maxits iterations and a draw runs
+    # a bounded number of solves (loop passes, homotopy stages, post-homotopy passes), so a draw
+    # cannot run forever; the budget bounds how long it may take.
+    draw_wall_budget_s: Optional[float] = 600.0
     # --- the pressure handed to the GS solver (bouquet.edge_pressure) --------
     # Both settings act on EVERY solve of the package (legacy paths, the
     # unified engine, the draws, the zero-perturbation checks).
@@ -1999,6 +2011,13 @@ class GenerationConfig:
         switches the channel on -- ``structured_preset=None`` resolves to the
         DEFAULT preset only when the channel is already ``"structured"``.
         """
+        if self.draw_wall_budget_s is not None:
+            import math as _math
+            _b = self.draw_wall_budget_s
+            if (isinstance(_b, bool) or not isinstance(_b, (int, float))
+                    or not _math.isfinite(float(_b)) or float(_b) <= 0):
+                raise ValueError("generation.draw_wall_budget_s must be None or a "
+                                 f"positive number of seconds, got {_b!r}")
         if self.swb_seed not in (None, "source", "generic"):
             raise ValueError(f"swb_seed={self.swb_seed!r} not in (None, 'source', 'generic')")
         if self.imas_baseline not in ("closure", "swb"):
