@@ -20,6 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["jupyter", "pytest"]
+anim = ["imageio-ffmpeg", "pillow"]   # bouquet.animate
 
 [project.scripts]
 plot-family = "bouquet.gui:main"
