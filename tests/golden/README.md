@@ -3,17 +3,15 @@
 Git-tracked regression fixtures. Every golden is a real bouquet run, made by
 `regenerate_golden_run.py` and slimmed by `make_golden_fixture.py`. The recipe
 runs the synthetic test fixtures in `tests/data/` at the library's defaults.
-**Status (2026-10-16):** the g-file h5 golden and the IDS golden are such runs
-(main `49ebebb`, the g-file one on the corrected thermal-only g-file); the
-legacy JSON golden is still the earlier run of the older D3D-like example
-g-file + p-file (2026-10-09), to be regenerated on the same pair (see "The
+**Status (2026-10-16):** all three goldens are such runs, at main `49ebebb`,
+the g-file and legacy ones on the corrected, thermal-only g-file (see "The
 current goldens" below).
 
 | golden | source | engine | files | read by |
 |--------|--------|--------|-------|---------|
 | g-file (h5) | `g_synthetic.geqdsk` + `diiid_profs_synthetic.cdf` (the synthetic D3D-like g-file, thermal pressure only, and its IDA-layout profile file) | unified (default) | `D3Dlike_Hmode_golden_slim.h5`, `golden_manifest.json`, `rng_stream_manifest.json` | `tests/test_golden_bouquet.py`, `tests/test_rng_reproducibility.py`, and the archive/filter/stats tests that read a real archive |
 | IDS (h5) | `dd_synthetic.json.gz` at 1.2 s, IDA-hybrid with `diiid_profs_synthetic.cdf` (the production IDS route) | unified (default) | `D3Dlike_ids_golden_slim.h5`, `ids_golden_manifest.json`, `ids_rng_stream_manifest.json` | `tests/test_golden_bouquet.py` (every test runs on both h5 goldens), `tests/test_golden_ids.py`, `tests/test_rng_reproducibility.py` |
-| legacy (JSON) | the g-file golden's source pair (committed record: the D3D-like example pair) | legacy | `D3Dlike_Hmode_legacy_golden.json` | `tests/test_systematics.py` (the legacy replay, `-m solver`), `tests/test_legacy_golden.py` |
+| legacy (JSON) | the g-file golden's source pair | legacy | `D3Dlike_Hmode_legacy_golden.json` | `tests/test_systematics.py` (the legacy replay, `-m solver`), `tests/test_legacy_golden.py` |
 
 | file | what it is |
 |------|------------|
@@ -208,14 +206,12 @@ the drift test; the IDS golden: 18 of 20).
   engine record (`engine_json`: `converged`, `loop_converged`), which the
   golden test reads there.
 
-**The legacy JSON golden is NOT yet regenerated** on the corrected pair: the
-committed record is still the earlier run of the older D3D-like example g-file
-+ p-file, regenerated 2026-10-09 at `67aba59` on the same OFT build under the
-defaults of that date (the old l_i band among them): 20 archived, 11 in spec
-(reconstruction 218 s, draws 184.2 min). Its stored config replays with the
-stored-config compatibility rules (the l_i band loads OFF, with a note). The
-legacy replay (`tests/test_systematics.py`) reconstructs from whatever pair the
-legacy golden's stored config names.
+**The legacy JSON golden** is the same recipe on `reconstruction_engine="legacy"`
+(same commit, build and pair): 20 attempts, 19 archived (1 perturb_failed), 19
+in spec, reconstruction 240 s, draws 178 min; its sigma=0 probe passes on every
+route the configuration can use (j_BS max deviation 0.018 % of peak). The
+legacy replay (`tests/test_systematics.py`) reconstructs from the pair its
+stored config names.
 
 * The legacy record archives the pressure-driven current as its own
   `j_pressure` beside a `j_inductive` that does not carry it, and says so
