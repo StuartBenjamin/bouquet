@@ -1475,6 +1475,86 @@ def _coil_bound_max_f(cur, baseline, vsc_in_set, drift_F, floor_A):
     return out
 
 
+def _vsc_bound_scale(baseline, vsc_in_set):
+    """The homotopy's ``#VSC`` bound scale [A]: ``max(min(|I_base|) over the
+    vertical-control pair, _COIL_DRIFT_DENOM_FLOOR_A)``; the channel's bound
+    at a stage is ``drift_VSC`` times it (and at least the per-coil floor).
+
+    The floor is the in-spec VSC metric's own denominator floor
+    (:func:`_vsc_channel_drift_pct`), one constant for both: the homotopy
+    bounds the channel on the same scale the acceptance metric judges it.
+    Without it (before 2026-10-16) a pair with one near-zero coil (a
+    reversed-I_p case: 66 kA and 2.8 kA) got a bound of 10 % of 2.8 kA in the
+    first pass, 279 A: TokaMaker's vertical-control channel sat on it, the
+    axis ran away vertically and 9 of 10 draws stopped at the iteration cap,
+    while the in-spec rule accepts several hundred A on that pair.  With the
+    floor, 9 of 10 were archived (9 in spec).  It is inactive for a pair
+    whose smaller coil carries more than the floor.  Owner-approved: it
+    changes a homotopy coil bound so that it agrees with the in-spec rule's
+    metric; it changes no acceptance gate."""
+    if not vsc_in_set:
+        return 0.0
+    return max(min(abs(float(baseline[c])) for c in vsc_in_set),
+               float(_COIL_DRIFT_DENOM_FLOOR_A))
+
+
+def _coil_bound_max_vsc(cur, baseline, vsc_in_set,
+                        denom_floor_A=_COIL_DRIFT_DENOM_FLOOR_A):
+    """Max vertical-control-pair coil drift in % of ``max(|I_base|,
+    denom_floor_A)``: the homotopy's VSC saturation measure, on the same
+    denominator as its ``#VSC`` bound (:func:`_vsc_bound_scale`), so that
+    ``100 * drift_VSC`` is the bound for the smaller coil.  With
+    ``denom_floor_A=1.0`` it is the plain per-coil percentage of
+    :func:`_coil_drift_pct` (the hard-factor bounds' guard, whose bound
+    keeps the unfloored scale)."""
+    out = 0.0
+    for n in vsc_in_set:
+        b = float(baseline[n])
+        out = max(out, abs(float(cur[n]) - b)
+                  / max(abs(b), float(denom_floor_A), 1.0) * 100.0)
+    return out
+
+
+def _vsc_bound_fraction_now(mygs, baseline, vsc_in_set, drift_VSC):
+    """The vertical-control pair's drift NOW as a fraction of the homotopy
+    stage's VSC bound (:func:`_coil_bound_max_vsc` / ``100 drift_VSC``; 1 =
+    at the bound), or ``None`` when it cannot be read (no pair, a zero bound,
+    a solver that cannot report its coils after a failed solve)."""
+    if not vsc_in_set or not drift_VSC > 0:
+        return None
+    try:
+        cur, _ = mygs.get_coil_currents()
+        v = _coil_bound_max_vsc(cur, baseline, vsc_in_set) / (
+            100.0 * float(drift_VSC))
+    except Exception:                               # noqa: BLE001
+        return None
+    return float(v) if np.isfinite(v) else None
+
+
+def _homotopy_coil_bounds(baseline, vsc_in_set, drift_F, drift_VSC, floor_A):
+    """The homotopy's coil bounds at one stage ``(drift_F, drift_VSC)``.
+
+    Pure per-coil semantics:
+    - every coil set (the vertical-control pair included): bare ``I_base +/-
+      max(drift_F |I_base|, floor_A)``;
+    - the ``#VSC`` channel: ``+/- max(drift_VSC x`` :func:`_vsc_bound_scale`
+      ``, floor_A)``, so the channel's contribution to the smaller coil is at
+      most ``drift_VSC`` of the scale.
+
+    Total F9 drift = bare +/- VSC contribution; worst case ``drift_F +
+    drift_VSC``.  The caller picks ``drift_F + drift_VSC`` within the spec
+    for the pair."""
+    b = {}
+    for name, base in baseline.items():
+        d = max(drift_F * abs(base), float(floor_A))
+        b[name] = [base - d, base + d]
+    if vsc_in_set:
+        vd = max(drift_VSC * _vsc_bound_scale(baseline, vsc_in_set),
+                 float(floor_A))
+        b['#VSC'] = [-vd, vd]
+    return b
+
+
 def _coil_saturation(max_f, max_vsc, drift_F, drift_VSC):
     """``(sat_F, sat_VSC)``: is either coil group at
     ``COIL_SATURATION_FRACTION`` of its bound (``drift_F``/``drift_VSC`` as
@@ -1485,7 +1565,8 @@ def _coil_saturation(max_f, max_vsc, drift_F, drift_VSC):
 
 
 def _make_coil_saturation_guard(mygs, baseline_coils, vsc_in_set, drift_F,
-                                drift_VSC, stage, floor_A=50.0):
+                                drift_VSC, stage, floor_A=50.0,
+                                vsc_denom_floor_A=1.0):
     """A callable ``guard(label)`` that measures the coil currents mygs holds
     NOW and raises :class:`CoilSaturated` when the solve that put them there
     is saturated against the bounds ``(drift_F, drift_VSC)`` around
@@ -1496,6 +1577,9 @@ def _make_coil_saturation_guard(mygs, baseline_coils, vsc_in_set, drift_F,
     loop passes under the hard bounds).  It only CHECKS: nothing is relaxed,
     retried or rolled back here; the caller rejects the draw.  Each call is
     appended to ``guard.log`` (label, drifts, verdict) for the draw record.
+    *vsc_denom_floor_A*: the VSC saturation measure's denominator floor
+    (:func:`_coil_bound_max_vsc`): ``_COIL_DRIFT_DENOM_FLOOR_A`` under the
+    homotopy's bounds, 1 A (the plain percentage) under the hard-factor ones.
     """
     log = []
 
@@ -1505,6 +1589,8 @@ def _make_coil_saturation_guard(mygs, baseline_coils, vsc_in_set, drift_F,
             _coil_drift_pct(cur, baseline_coils), vsc_in_set)
         max_f = _coil_bound_max_f(cur, baseline_coils, vsc_in_set, drift_F,
                                   floor_A)          # against the installed bound
+        max_vsc = _coil_bound_max_vsc(cur, baseline_coils, vsc_in_set,
+                                      vsc_denom_floor_A)
         sat_F, sat_VSC = _coil_saturation(max_f, max_vsc, drift_F, drift_VSC)
         entry = dict(label=str(label), max_F_drift_pct=float(max_f),
                      max_VSC_drift_pct=float(max_vsc),
@@ -5776,7 +5862,24 @@ def generate_bouquet(
     vsc_soft_reg_weight : float
         Soft-reg weight for the ``#VSC`` channel (default 1.0).  Kept
         much lower than ``soft_reg_weight`` so the VSC has freedom to
-        do vertical-mode control work without being heavily penalized.
+        do vertical-mode control work without being heavily penalized:
+        ``#VSC`` is TokaMaker's vertical-position control column of the
+        coil least-squares problem, a third degree of freedom on the
+        two-coil pair whose bare currents ``soft_reg_weight`` already pins.
+        Measured, not tuned (keep 1.0):
+
+        * 2026-05 (five-point bracket, 15 draws per point, one real-data
+          case): 1 and 100 usable (100 best in spec at sigma = 0.5,
+          40 % vs 23 %); 1e3 and 1e4 "QP singular", 0 of 15 draws.
+        * 2026-10 (three cases, 10 fixed draw attempts per arm, boundary
+          totals 5e4, 1e5, 2e5): 1, 10 and 100 give identical draws, draw
+          for draw; 1e3 starves the vertical control (0 of 10 on every
+          case at a boundary total of 5e4, where the sigma=0 draw also
+          fails); 1e4 fails the sigma=0 draw on every case and archives
+          0 of 10, the axis running away vertically with the channel on
+          its homotopy bound.  A heavier weight does not move the
+          vertical-control pair's drift onto the shaping coils; it removes
+          vertical control.
     coord : str
         As in :func:`perturb_kinetic_equilibrium`.
     source_seed_profile, source_jphi_fixed : ndarray, optional
@@ -7896,38 +7999,19 @@ def generate_bouquet(
                 # The final accepted draw uses the tightest pass that
                 # converged.
                 _vsc_in_set = tuple(c for c in vsc_coils if c in _baseline_coils)
-                # Use MIN baseline magnitude so the VSC channel bound is
-                # conservative for BOTH coils.  Per-coil drift = |VSC_value|
-                # / |baseline_coil|, so max drift = VSC_bound / min_baseline.
-                # Using max would let the smaller coil drift more than spec.
-                _vsc_min_base = (min(abs(_baseline_coils[c]) for c in _vsc_in_set)
-                                  if _vsc_in_set else 0.0)
+                # The #VSC channel's bound scale: the pair's MIN baseline
+                # magnitude (the bound is conservative for both coils),
+                # floored at the in-spec VSC metric's 10 kA
+                # (_vsc_bound_scale; one constant for the bound and the
+                # metric).
+                _vsc_min_base = _vsc_bound_scale(_baseline_coils, _vsc_in_set)
                 _vsc_max_base = _vsc_min_base  # back-compat alias
 
                 def _build_bounds(drift_F, drift_VSC):
-                    """Build per-coil bare bounds + #VSC channel bound.
-
-                    Pure per-coil semantics:
-                    - Non-VSC F-coils: bare ≤ drift_F → total drift ≤ drift_F
-                    - F9A/F9B (VSC pair): bare ≤ drift_F (same per-coil bound)
-                    - #VSC channel: ≤ drift_VSC × min(|F9A|, |F9B|)
-                      so VSC contribution to either coil ≤ drift_VSC
-
-                    Total F9 drift = bare ± VSC contribution.  Worst case:
-                    drift_F + drift_VSC.  Caller must pick drift_F + drift_VSC
-                    ≤ user spec for F9 (e.g. drift_F=1%, drift_VSC=1% for
-                    a global ≤2% spec).
-                    """
-                    _b = {}
-                    for _name, _base in _baseline_coils.items():
-                        _delta = max(drift_F * abs(_base),
-                                      float(coil_drift_floor_A))
-                        _b[_name] = [_base - _delta, _base + _delta]
-                    if _vsc_in_set:
-                        _vsc_delta = max(drift_VSC * _vsc_min_base,
-                                          float(coil_drift_floor_A))
-                        _b['#VSC'] = [-_vsc_delta, _vsc_delta]
-                    return _b
+                    """The stage's bounds (:func:`_homotopy_coil_bounds`)."""
+                    return _homotopy_coil_bounds(
+                        _baseline_coils, _vsc_in_set, drift_F, drift_VSC,
+                        coil_drift_floor_A)
 
                 _final_drifts = None  # last successful pass's drifts
                 _final_pass_idx = -1
@@ -8066,6 +8150,10 @@ def generate_bouquet(
                                 _cur, _baseline_coils)
                             _max_f, _max_vsc = _coil_max_drifts(
                                 _all_drifts, _vsc_in_set)
+                            # the VSC pair against the bound's own scale
+                            # (_vsc_bound_scale: the 10 kA floor)
+                            _max_vsc = _coil_bound_max_vsc(
+                                _cur, _baseline_coils, _vsc_in_set)
                             print(f"  [homotopy {_label}] F=+/-{_dF*100:.1f}%  "
                                   f"VSC=+/-{_dVSC*100:.1f}% -> SOLVED "
                                   f"(max non-VSC F-coil drift={_max_f:.2f}%, "
@@ -8223,7 +8311,8 @@ def generate_bouquet(
                                 mygs, _baseline_coils, _vsc_in_set,
                                 _final_drift_F_lim, _final_drift_VSC_lim,
                                 stage=(f"post-homotopy j_BS pass at homotopy "
-                                       f"pass {_final_pass_idx + 1} bounds"), floor_A=coil_drift_floor_A)
+                                       f"pass {_final_pass_idx + 1} bounds"), floor_A=coil_drift_floor_A,
+                                vsc_denom_floor_A=_COIL_DRIFT_DENOM_FLOOR_A)
                             _ph_rec, _ph_spk, _ph_full, _ph_jphi = \
                                 _m.post_homotopy_jbs(
                                     jbs_loop, coil_guard=_ph_guard,
