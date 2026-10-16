@@ -24,7 +24,8 @@ sys.path.insert(0, DATA)
 import apply_sigma_templates as ast  # noqa: E402
 
 #: the assignment (FIXTURE_SPEC.md): phase -> template
-IDA_FILES = {"diiid_profs_synthetic.cdf": "ramp", "ida_synthetic_lmode.cdf": "lmode"}
+IDA_FILES = {"diiid_profs_synthetic.cdf": "ramp", "diiid_profs_synthetic_pfast.cdf": "ramp",
+             "ida_synthetic_lmode.cdf": "lmode"}
 DD_SLICES = {0.7: "lmode", 1.1: "ramp", 1.2: "ramp", 1.4: "hmode_flattop",
              3.0: "hmode_flattop"}
 IDA_Q = {"n_e": "ne", "T_e": "te", "T_12C6": "ti", "Zeff": "zeff", "n_12C6": "nc"}

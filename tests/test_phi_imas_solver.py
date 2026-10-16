@@ -1,15 +1,19 @@
 """ida_hybrid kinetics held on Φ_N vs ψ_N: where they land in real space.
 
-IDA fits its profiles on one equilibrium's flux surfaces (``g_synthetic``);
+IDA fits its profiles on one equilibrium's flux surfaces (``g_synthetic_pfast``);
 bouquet re-solves with the dd's current profile, which differs from that
 equilibrium's, so the surfaces move.  Profiles held on ψ_N move with them;
 profiles held on Φ_N (the IDA file's own q map) stay tied to the geometry.
 
 Fixtures (tests/data, see tests/data/README.md): ``dd_synthetic.json.gz``
-(currents), ``diiid_profs_synthetic.cdf`` (kinetics, on g_synthetic's ψ_N and q) and
-``g_synthetic.geqdsk`` (the equilibrium IDA was fitted on; also the LCFS).
+(currents), ``diiid_profs_synthetic_pfast.cdf`` (kinetics, on g_synthetic_pfast's ψ_N
+and q) and ``g_synthetic_pfast.geqdsk`` (the equilibrium IDA was fitted on; also the
+LCFS).  The pair is the TOTAL-pressure g-file, the equilibrium the dd's slice
+produces: the thermal-only ``g_synthetic.geqdsk`` is not, so on it the premise
+(the dd re-solve reproduces the IDA geometry up to the current-profile change)
+does not hold.
 
-Each IDA node's surface on the run is compared with its surface on g_synthetic all
+Each IDA node's surface on the run is compared with its surface on g_synthetic_pfast all
 the way round: the area between the two over the perimeter (the area-averaged
 normal displacement), so an outward axis shift that a reshaped current cancels on
 the outboard side is still seen inboard.  Every solve runs in a subprocess
@@ -37,8 +41,8 @@ from test_phi_solver_draws import _oft_phi_ready
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _DATA = os.path.join(_HERE, "data")
 _DD = os.path.join(_DATA, "dd_synthetic.json.gz")
-_IDA = os.path.join(_DATA, "diiid_profs_synthetic.cdf")
-_GEQ = os.path.join(_DATA, "g_synthetic.geqdsk")
+_IDA = os.path.join(_DATA, "diiid_profs_synthetic_pfast.cdf")
+_GEQ = os.path.join(_DATA, "g_synthetic_pfast.geqdsk")
 _MESH = os.path.abspath(os.path.join(_HERE, "..", "examples", "D3D-like", "DIIID_mesh.h5"))
 _TIME = 1.200
 _METHODS = ("legacy", "swb", "engine")
@@ -58,7 +62,7 @@ pytestmark = [
 # ---------------------------------------------------------------------------
 #  probes (subprocess)
 # ---------------------------------------------------------------------------
-_THETA = np.linspace(-np.pi, np.pi, 721)[:-1]   # poloidal angle about g_synthetic's axis
+_THETA = np.linspace(-np.pi, np.pi, 721)[:-1]   # poloidal angle about g_synthetic_pfast's axis
 
 
 def _surfaces(geq, psi_N, axis):
@@ -114,8 +118,8 @@ def _probe(work, coord, method):
     # where the run holds each IDA node: at its ψ_N, or at the solved ψ_N of its Φ_N
     psi_run = (psi_nodes if coord == "psi_n"
                else coords.psi_at(mygs, phi_ida[sel], coords.PHI))
-    # each node's surface all the way round, on g_synthetic and on the run, about
-    # g_synthetic's axis: the area between them over the perimeter is the
+    # each node's surface all the way round, on g_synthetic_pfast and on the run, about
+    # g_synthetic_pfast's axis: the area between them over the perimeter is the
     # area-averaged normal displacement
     axis = (g_ref.R_mag, g_ref.Z_mag)
     r_ref, r_run = _surfaces(g_ref, psi_nodes, axis), _surfaces(g_run, psi_run, axis)
@@ -178,8 +182,8 @@ def _pair(probes, method):
 @pytest.mark.parametrize("method", _METHODS)
 def test_phi_held_kinetics_stay_nearer_their_ida_placement(probes, method):
     # area-averaged normal displacement of each IDA node's surface (inboard and
-    # outboard together); measured on the 1.2 s pair: ψ_N-held up to 6.4-9.3 mm,
-    # Φ_N-held up to 5.2-5.9 mm (the re-solve's axis sits ~8 mm further out)
+    # outboard together); measured on the 1.2 s pair (g_synthetic_pfast, 2026-10-16):
+    # ψ_N-held up to 4.8-5.7 mm, Φ_N-held up to 0.8-1.1 mm
     psi, phi = _pair(probes, method)
     worse = [(x, a, b) for x, a, b in zip(psi["psi_N"], psi["dr_mm"], phi["dr_mm"]) if b >= a]
     assert not worse, f"Φ_N-held not nearer at (ψ_N, ψ-held mm, Φ-held mm): {worse[:5]}"
@@ -193,7 +197,8 @@ def test_phi_held_kinetics_stay_nearer_their_ida_placement(probes, method):
 def test_phi_held_ne_matches_ida_in_real_space(probes, method):
     psi, phi = _pair(probes, method)
     # n_e at the points of each IDA surface, averaged round it; measured on the
-    # 1.2 s pair: 0.7-1.1 % of peak (ψ_N-held) vs 0.6 % (Φ_N-held)
+    # 1.2 s pair (g_synthetic_pfast, 2026-10-16): 0.58-0.69 % of peak (ψ_N-held) vs
+    # 0.16-0.17 % (Φ_N-held)
     assert phi["ne_misfit"] < psi["ne_misfit"], (psi["ne_misfit"], phi["ne_misfit"])
 
 

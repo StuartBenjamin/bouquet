@@ -121,6 +121,18 @@ template (its paired dd slice, 1.2 s, is pedestal-forming), the L-mode file
 (section 6) the L-mode template. Until 2026-10-14 they were constant fractions
 (n_e 4 %, T_e 8 %, the rest 10 %).
 
+## 2b. `diiid_profs_synthetic_pfast.cdf` (the same IDA fit on the total-pressure g-file)
+
+The same file as section 2 -- the same `psi_n` grid, kinetics and every `*_err`
+(the ramp template), bit for bit -- with `q` taken from `g_synthetic_pfast.geqdsk`
+(section 3b) instead of `g_synthetic.geqdsk` (max difference 7 %). It is the IDA
+file that belongs to the total-pressure g-file: the routes that pair the dd's
+1.2 s slice with a g-file (`LCFS_geqdsk`) and an IDA file use this pair, because
+the dd slice carries the fast-ion pressure and its Shafranov shift, which the
+thermal-only `g_synthetic.geqdsk` does not (written by `make_synthetic_fixtures.py`,
+also without a solve: `--pfast-ida-only OUT_DIR` next to an existing
+`g_synthetic_pfast.geqdsk`).
+
 ## 3. `g_synthetic.geqdsk` (EFIT g-eqdsk, COCOS 1; thermal pressure only)
 
 Read through `read_geqdsk`: `boundary_R/Z` (the LCFS: isoflux targets of every
@@ -180,31 +192,34 @@ psi_N in [0.1, 0.98]:
 * Phi_N-held move by `< min(10, 0.4 x psi-held)` mm;
 * `ne_misfit` (max |n_e(run, R) - n_e(IDA, R)| / max n_e) of the Phi_N run
   `< 0.5 x` the psi_N run's.
-  Measured on this set at the 1.2 s pairing (2026-10-11, all three methods,
-  against the then total-pressure `g_synthetic.geqdsk`; to be re-measured on
-  the thermal-only file, whose magnetic axis sits 30 mm further inboard; the
-  generator's own dd-vs-g-file estimate moves from 4.5 mm psi_N-held / 0.8 mm
-  Phi_N-held to 21.1 / 28.3 mm):
-  psi_N-held 2.8-5.6 mm, Phi_N-held 8.7-9.3 mm -- the reverse of the bars,
-  handed to the route's author; the bars are unchanged.
+  The test pairs the dd with `g_synthetic_pfast.geqdsk` and
+  `diiid_profs_synthetic_pfast.cdf` (section 2b; since 2026-10-16): the premise
+  -- the g-file is the equilibrium the dd's slice produces -- does not hold
+  for the thermal-only `g_synthetic.geqdsk` (on it the Phi_N-held placement
+  measured 18.7 mm against the 10 mm bound). Measured on the pfast pairing
+  (2026-10-16, all three methods): psi_N-held up to 4.8-5.7 mm, Phi_N-held up
+  to 0.8-1.1 mm, Phi_N-held nearer at every node; ne_misfit 0.58-0.69 %
+  (psi_N-held) vs 0.16-0.17 % (Phi_N-held). The bars are unchanged.
 
 `tests/test_swb_systematics_solver.py` (`-m solver`; needs an OFT whose
 solve_with_bootstrap takes x, jphi_fixed, p_fixed): one swb baseline, then
-(the "measured" values below were re-measured 2026-10-16 on the thermal-only
-`g_synthetic.geqdsk` as the LCFS source, main 49ebebb)
+(the "measured" values below were re-measured 2026-10-16 on the total-pressure
+pairing, `g_synthetic_pfast.geqdsk` as the LCFS source and
+`diiid_profs_synthetic_pfast.cdf` as the IDA file -- section 2b)
 * sigma=0 draw after a perturbed draw = solve B bit for bit (li_3, q0, Ip,
   coils, LCFS, kinetics at psi_N 0.1/0.5/0.9, the inductive seed);
-* pressure-only (10 draws): seed relative change < 1e-9 (measured 2.2e-16);
+* pressure-only (10 draws): seed relative change < 1e-9 (measured 4.4e-16);
   every draw passes bouquet's OWN default draw filters as the library
   resolves them for the device (owner decision 2026-10-11: the chi2 coil
   filter, `coil_filter = "chi2"`, PR #49, and the calibrated boundary cut,
   `rms_max_mm = "auto"`, PR #63 -- 8.5 mm, chi2/nu <= 6.1, |z| <= 6.3 on
-  DIII-D; measured RMS 0.49-2.6 mm, chi2/nu <= 3.8, |z| <= 5.3);
+  DIII-D; measured RMS <= 2.4 mm, chi2/nu <= 3.6, |z| <= 6.1);
   |signed-mean| boundary shift < min(2 mm, 4 se); li_3, q0 means within 4 se;
 * production (16 draws): every draw's |Ip/Ip_target - 1| < 1e-4; boundary
   means as above; li_3, q0, n_e, T_e, T_i, n_i, Z_eff and the seed at psi_N
   0.1/0.5/0.9 within 4 se of the baseline (measured on this set: Ip closure
-  1.13e-4 on the worst draw, the largest bias the seed at psi_N 0.1 at 2.9 se;
+  1.06e-4 on the worst draw -- red, #81 --, the largest bias 2.9 se; boundary
+  |signed mean| <= 0.20 mm;
   the Ip closure is reported to the swb route's author; the bars are
   unchanged);
 * seeded twins reproduce every archived dataset; another seed differs;
@@ -264,6 +279,7 @@ with independent errors).
 | dd 1.4 s | peak pedestal | hmode_flattop |
 | dd 3.0 s | dense flat top | hmode_flattop |
 | `diiid_profs_synthetic.cdf` | the 1.2 s profiles | ramp |
+| `diiid_profs_synthetic_pfast.cdf` | the 1.2 s profiles (q of the total-pressure g-file) | ramp |
 | `ida_synthetic_lmode.cdf` | L-mode | lmode |
 
 The phase decides, not the clock: the 1.4 s slice is a developed pedestal and
