@@ -26,6 +26,16 @@ checks (`test_the_golden_is_its_recipe`,
 `test_it_is_the_gfile_golden_on_the_legacy_path`) are back. No tolerance
 changed.
 
+**Golden filter tests (owner-approved 2026-10-16).** `test_coil_filter_reproduces_in_spec`,
+`test_selection_partition` and `test_export_filtered_keeps_selected` compared the
+archived `in_spec` with the legacy +/-2 % drift filter, a premise the rule's
+`in_spec` no longer meets. They are replaced by
+`test_filter_under_the_stamped_rule_reproduces_in_spec` (and the partition and
+export tests filtering the same way): `Bouquet.filter()` on the golden's own
+stored config reproduces `in_spec` on every draw judged by the rule, and
+`refilter_inspec` under the stamped bands leaves the selection unchanged. The
+change was committed as a proposal and is approved as committed.
+
 ## Unreleased — the synthetic H-mode g-file is thermal-only; the total-pressure file kept with a p-file (owner decision 2026-10-15)
 
 **Fixtures.** `tests/data/g_synthetic.geqdsk` carried the dd's TOTAL pressure
