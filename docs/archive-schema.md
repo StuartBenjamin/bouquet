@@ -56,6 +56,9 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │                                  [refused_reason_superseded]
     ├── _baseline/                     written once per scan point
     │   ├── eqdsk, [pfile]             raw byte-perfect g-file / p-file
+    │   ├── [dd_sources/]              IMAS sources only: FUSE's core_sources at the dd step,
+    │   │                              summed (rho_tor_norm, Q_e, Q_i, Gamma_e; attrs P_net,
+    │   │                              P_rad, b0, r0, sources_json, skipped_json, rule)
     │   ├── psi_N, psi_N_kinetic         run grids, in the `profile_coord` coordinate
     │   ├── n_e, T_e, n_i, T_i         kinetic profiles
     │   ├── pressure[, pressure_thermal]
@@ -148,6 +151,9 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
         ├── [aux_<name>]               perturbed switchboard channels
         ├── [coil_currents, coil_names]
         ├── [perturbed_lcfs_ref], [x_points]
+        ├── [chi_perp_e, chi_perp_i]   IMAS sources only: power-balance chi_perp (m^2/s);
+        │                              attrs tau_E_th, tau_E, tau_98, H_98, tau_DS03, W_th,
+        │                              W_fast, P_net (also on _baseline; see below)
         ├── [eq_fsa/]                  live-equilibrium flux-surface averages
         │   ├── psi_N                  always ψ_N (subgroup; see below)
         │   ├── F, avg_inv_R, avg_inv_R2, avg_B2
@@ -273,6 +279,18 @@ pressure + that equilibrium's `p_sep`).
   TokaMaker-jphi → IMAS current conversion in the IMAS/OMAS exporter
   (`write_imas_draw(..., fidelity="exact")`); read it back with
   `bq.load_eq_fsa`.
+
+- **Transport (`chi_perp_*`, `tau_*`; 2026-10-16).** IMAS sources only (the
+  reader found `core_sources`): FUSE's sources at the dd step, summed as
+  IMAS.jl `total_sources` (`retain_source`; radiation as negative sources), are
+  stored once as `_baseline/dd_sources/` (`bq.load_dd_sources`). Every
+  equilibrium (`_baseline` and each draw) then gets `chi_perp_e`, `chi_perp_i`
+  (m² s⁻¹, on its `psi_N_kinetic` nodes) and the attrs `tau_E_th` = W_th/P_net,
+  `tau_E` = (W_th + W_fast)/P_net (W = 3/2∫p dV), `tau_98` (IPB98(y,2)), `H_98`,
+  `tau_DS03`, `W_th`, `W_fast` (J), `P_net` (W), from that equilibrium's own
+  profiles and TokaMaker geometry (`get_fsa`) and the same sources
+  (`bouquet.transport`). χ_⊥ is power balance, conduction only, as IMAS.jl
+  `calculate_diffusivities` (Γ_i = Γ_e n_i/n_e); τ = inf where P_net = 0.
 
 - **Self-consistent bootstrap record (`jbs_loop` block, schema v3).** When
   the bootstrap came from the self-consistent loop

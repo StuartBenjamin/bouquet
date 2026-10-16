@@ -5423,6 +5423,23 @@ ISO_UPDATE_REF_POINTS = 9000
 @accepts_old_names
 
 
+def _store_transport(mygs, header, scan_key, count, src, x_kin, ne, te, ni, ti,
+                     x_eq, p_thermal, Ip, coord, p_fast, psi_pad, geom=None):
+    """chi_perp and tau_E of the equilibrium *mygs* holds (bouquet.transport)
+    into its archive group; a failure warns, never sinks the run."""
+    from .transport import flux_geometry, transport_record
+    from .utils import store_transport
+    try:
+        if geom is None:
+            geom = flux_geometry(mygs, src["b0"], psi_pad=psi_pad)
+        store_transport(header, scan_key, count, transport_record(
+            geom, x_kin, ne, te, ni, ti, x_eq, p_thermal, src, Ip,
+            coord=coord, p_fast=p_fast))
+    except Exception as exc:
+        print(f"  WARN: chi_perp/tau_E not stored for "
+              f"{'the baseline' if count is None else f'draw {count}'} ({exc})")
+
+
 def generate_bouquet(
     mygs,
     psi_N,
@@ -5552,6 +5569,9 @@ def generate_bouquet(
     # A list to fill with one record per REJECTED draw attempt (reason code,
     # stage, error); None keeps them internal (still printed in the summary).
     rejection_log=None,
+    # Baseline.dd_sources (IMAS path): FUSE's summed sources; with it every
+    # equilibrium's chi_perp and tau_E are archived (bouquet.transport).
+    dd_sources=None,
     # Self-consistent loop only: Baseline.jphi_request_offset (the standard
     # draw route's achieved-convention offset; see perturb_kinetic_equilibrium)
     # and Baseline.delivered_state (the ONE reconstruction state, recorded on
@@ -6927,6 +6947,13 @@ def generate_bouquet(
     write_group_current_split(header, scan_key, None, _bl_jp)
     if write_ifile and _bl_ifile_rec is not None:
         stamp_group_attrs(header, scan_key, None, _bl_ifile_rec)
+    if dd_sources is not None:
+        from .utils import store_dd_sources
+        store_dd_sources(header, scan_key, dd_sources)
+        _store_transport(mygs, header, scan_key, None, dd_sources,
+                         psi_N if psi_N_kinetic is None else psi_N_kinetic,
+                         ne, te, ni, ti, psi_N, pressure, initial_Ip_target,
+                         coord, p_fast, psi_pad)
 
     # ---- the ONE reconstruction state (self-consistent loop) ------------
     # What the reconstruction recorded (delivered_state: l_i == l_i_target,
@@ -8439,6 +8466,14 @@ def generate_bouquet(
                 print(f"  WARN: live-equilibrium FSA capture failed "
                       f"({_fsa_exc}); IMAS export for this draw will use the "
                       f"template (baseline) geometry")
+        diagnostics['flux_geom'] = None
+        if dd_sources is not None:
+            try:
+                from .transport import flux_geometry
+                diagnostics['flux_geom'] = flux_geometry(
+                    mygs, dd_sources["b0"], psi_pad=psi_pad)
+            except Exception as _geo_exc:
+                print(f"  WARN: flux geometry capture failed ({_geo_exc})")
 
         # Guard get_stats: a degenerate draw (Ip->0 / collapsed plasma, e.g.
         # after Sauter "corrector convergence failed") makes OFT's l_i
@@ -8738,6 +8773,12 @@ def generate_bouquet(
         )
         if _ifile_rec is not None:
             stamp_group_attrs(header, scan_key, count, _ifile_rec)
+        if diagnostics.get('flux_geom') is not None:
+            _store_transport(mygs, header, scan_key, count, dd_sources,
+                             psi_N if psi_N_kinetic is None else psi_N_kinetic,
+                             ne_perturb, te_perturb, ni_perturb, ti_perturb,
+                             psi_N, pressure_perturb, initial_Ip_target, coord,
+                             p_fast, psi_pad, geom=diagnostics['flux_geom'])
         # the third bucket (owner decision D2): a method that splits p'G off
         # (engine, swb) hands it in diagnostics["jphi_pd"]; its archived
         # inductive already excludes it, so the stamp is written whenever

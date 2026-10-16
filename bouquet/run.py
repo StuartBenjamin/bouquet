@@ -252,7 +252,10 @@ class Bouquet(SwbBaseline):
         ``ida_provenance.json["replay_pairing"]`` it writes beside the dd
         means the dd j_bootstrap(time) was computed on IDA(ida_time); the
         reader checks that table (only when it names this run's IDA file and
-        holds this dd slice) and records the verdict.  The whole pairing
+        holds this dd slice) and records the verdict.  A dd step ``time``
+        outside the window the run simulated (``time_grid.json`` ``t0`` to
+        ``reached``; a run that stopped early) raises
+        ``io.imas.IdaTimeNotSimulated``: not attempted.  The whole pairing
         record (requested/used IDA time, dt, window, dd slice times,
         ``pairing_consistent``) is archived in the baseline's
         ``li_metrics["ida_time_match"]``.
@@ -8140,6 +8143,8 @@ class Bouquet(SwbBaseline):
                 jbs_loop=_m.draw_jbs_loop(_jbs_draw if _jbs_draw["enabled"]
                                           else None),
                 rejection_log=_rejections,
+                # IMAS path: FUSE's summed sources -> per-draw chi_perp, tau_E
+                dd_sources=getattr(bl, "dd_sources", None),
                 # the ONE reconstruction state (loop only; None = legacy)
                 jphi_request_offset=getattr(bl, "jphi_request_offset", None),
                 delivered_state=getattr(bl, "delivered_state", None),
@@ -9038,12 +9043,14 @@ class Bouquet(SwbBaseline):
         ``status="refused"`` rather than a gap; *time* (the slice time [s])
         is stamped with it.  Returns the recorded reason, or None when
         nothing could be recorded (flat layout, or the scan already holds
-        draws -- then the earlier draws stand)."""
+        draws -- then the earlier draws stand) or nothing was attempted
+        (:class:`~bouquet.io.imas.IdaTimeNotSimulated`)."""
         import warnings
+        from .io.imas import IdaTimeNotSimulated
         from .utils import write_refused_scan
         sk = self.config.generation.scan_key
         reason = f"prepare_baseline raised {type(exc).__name__}: {exc}"[:500]
-        if sk is None:
+        if sk is None or isinstance(exc, IdaTimeNotSimulated):
             return None
         try:
             write_refused_scan(self.config.output_header, sk, reason,
@@ -9080,7 +9087,9 @@ class Bouquet(SwbBaseline):
         (``refused=<reason>``, no draws) and carries on with the next
         slice; after the last slice the count and the reasons are printed
         and warned once.  ``"raise"`` re-raises at the first refusal, the
-        behaviour before.
+        behaviour before.  A dd step the FUSE run never simulated
+        (:class:`~bouquet.io.imas.IdaTimeNotSimulated`) is not attempted:
+        nothing is archived, and the summary has ``not_attempted=<reason>``.
 
         ``ida_times`` (ida_hybrid; #73): the IDA slice per dd slice, a
         sequence aligned with ``times`` (an entry ``None`` reads the IDA
@@ -9119,6 +9128,7 @@ class Bouquet(SwbBaseline):
             ida_times = [None if x is None else float(x) for x in ida_times]
             if len(ida_times) != len(times):
                 raise ValueError("ida_times must match times in length")
+        from .io.imas import IdaTimeNotSimulated
         if header is not None:
             self.config.output_header = header
         self.setup_solver()                                       # once
@@ -9133,12 +9143,14 @@ class Bouquet(SwbBaseline):
                 self.prepare_baseline()
             except Exception as exc:
                 reason = self._record_refusal(exc, time=t)
-                if on_refusal == "raise":
+                skipped = isinstance(exc, IdaTimeNotSimulated)
+                if on_refusal == "raise" and not skipped:
                     raise
                 self.baseline = None
                 results[sk] = dict(time=t, n_all=0, n_sel=0, l_i=float("nan"),
-                                   Ip=float("nan"),
-                                   refused=reason or f"{type(exc).__name__}: {exc}")
+                                   Ip=float("nan"))
+                results[sk]["not_attempted" if skipped else "refused"] = (
+                    reason or f"{type(exc).__name__}: {exc}")
                 if t_ida is not None:
                     results[sk]["ida_time"] = t_ida
                 continue
@@ -9164,6 +9176,10 @@ class Bouquet(SwbBaseline):
                    "refused_time; no draws):\n" + "\n".join(lines))
             print(f"[run_slices] {msg}", flush=True)
             warnings.warn(msg, UserWarning, stacklevel=2)
+        not_attempted = [k for k, r in results.items() if "not_attempted" in r]
+        if not_attempted:
+            print(f"[run_slices] {len(not_attempted)} of {len(results)} slices not "
+                  f"attempted (dd step never simulated): {not_attempted}", flush=True)
         if export:
             self.export()
         return results
