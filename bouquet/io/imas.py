@@ -494,6 +494,85 @@ def core_sources_slice(src_ids, cp_times, ic, T=None, who="IMAS reader"):
     return isrc, t_src, rec
 
 
+#: core_sources radiation indices (IMAS.jl radiation_losses).
+RADIATION_SOURCE_INDICES = (8, 9, 10, 200, 201, 202, 203)
+
+
+def _retain_source(index, all_indices):
+    """IMAS.jl ``retain_source`` (default call): whether an entry counts in a total."""
+    if index == 0:
+        return False
+    if index == 1 and any(i > 1 for i in all_indices):
+        return False
+    if 100 <= index <= 107 and any(i < 5 for i in all_indices):
+        return False
+    if index == 200 and any(200 < i < 300 for i in all_indices):
+        return False
+    return True
+
+
+def dd_source_totals(src_ids, isrc, n_time, t_slice, rho_cp, *, t_cp=None,
+                     cp_half=None):
+    """FUSE's ``core_sources`` at the dd step, summed as IMAS.jl ``total_sources``:
+    ``Q_e`` / ``Q_i`` [W] (electrons.power_inside, total_ion_power_inside),
+    ``Gamma_e`` [1/s] (electrons.particles_inside) on the core_profiles nodes
+    *rho_cp* (rho_tor_norm), ``P_net`` = max(0, Q_e + Q_i at the edge) and
+    ``P_rad`` [W]; entries by :func:`_retain_source`, each at its own slice
+    (:func:`_source_slice_at`, the currents' rule).  None when nothing is read."""
+    rho_cp = np.asarray(rho_cp, dtype=float)
+    srcs = src_ids.get("source", []) or []
+    idx = [int((s.get("identifier") or {}).get("index", 0) or 0) for s in srcs]
+    tot = {k: np.zeros(rho_cp.size) for k in ("Q_e", "Q_i", "Gamma_e")}
+    used, skipped, p_rad = [], [], 0.0
+    pairs = (("Q_e", "electrons", "power_inside", "energy"),
+             ("Q_i", None, "total_ion_power_inside", "total_ion_energy"),
+             ("Gamma_e", "electrons", "particles_inside", "particles"))
+    for s, i in zip(srcs, idx):
+        name = (s.get("identifier") or {}).get("name")
+        if not _retain_source(i, idx):
+            continue
+        try:
+            pr, how = _source_slice_at(s, isrc, t_slice, n_time, t_cp=t_cp,
+                                       cp_half=cp_half)
+        except ValueError as exc:
+            pr, how = None, str(exc)
+        if pr is None:
+            skipped.append(dict(index=i, name=name, why=how))
+            continue
+        grid = pr.get("grid") or {}
+        rho = grid.get("rho_tor_norm")
+        vol = grid.get("volume")
+        got = {}
+        for key, part, inside, density in pairs:
+            d = pr.get(part, {}) if part else pr
+            y = d.get(inside)
+            if y is None and d.get(density) is not None and vol is not None:
+                from scipy.integrate import cumulative_trapezoid
+                y = cumulative_trapezoid(np.asarray(d[density], float),
+                                         np.asarray(vol, float), initial=0.0)
+            if y is None:
+                continue
+            y = np.asarray(y, dtype=float)
+            if rho is not None and len(rho) == y.size:
+                y = np.interp(rho_cp, np.asarray(rho, float), y)
+            elif y.size != rho_cp.size:
+                continue
+            got[key] = y
+            tot[key] += y
+        if not got:
+            continue
+        used.append(dict(index=i, name=name, time=pr.get("time")))
+        if i in RADIATION_SOURCE_INDICES and "Q_e" in got:
+            p_rad += float(got["Q_e"][-1])
+    if not used:
+        return None
+    return dict(rho_tor_norm=rho_cp, **tot,
+                P_net=max(0.0, float(tot["Q_e"][-1] + tot["Q_i"][-1])),
+                P_rad=-p_rad, sources=used, skipped=skipped,
+                rule="IMAS.jl total_sources/retain_source; radiation enters "
+                     "as negative sources; P_net = max(0, Q_e + Q_i at the edge)")
+
+
 def _source_slice_at(s, isrc, t_slice, n_time, base_times=None, *,
                      t_cp=None, cp_half=None, rec=None):
     """``(profile, how)``: a ``core_sources`` entry's ``profiles_1d`` at the
@@ -2419,6 +2498,15 @@ def read_imas_baseline(
     jphi_rf = s_ip * to_jphi(_m * _parts["rf"])
     jphi_other = s_ip * to_jphi(_m * _parts["other"])
     jphi_saw = s_ip * to_jphi(_m * _saw)
+    # FUSE's heating, radiation and particle sources at this step, summed, for
+    # the per-draw chi_perp and tau_E (bouquet.transport)
+    _rho_cp = cp.get("grid", {}).get("rho_tor_norm")
+    dd_sources = (None if _rho_cp is None else dd_source_totals(
+        src_ids, isrc, _src_nt, _src_t, _rho_cp, t_cp=_t_cp, cp_half=_cp_half))
+    if dd_sources is not None:
+        _vtf = eq.get("vacuum_toroidal_field", {})
+        dd_sources.update(b0=abs(_slice_b0(eq, ie)), r0=float(_vtf.get("r0", np.nan)),
+                          core_profiles_time=_t_cp)
 
     # --- sawtooth model presence/amplitude at this slice (gate input only) ----
     # Read here, from the same parsed dd as the currents above (the cached,
@@ -3008,6 +3096,7 @@ def read_imas_baseline(
         source_current_sign_origin=cur_origin,
         source_b0_sign=b0_sign,
         source_time_match=source_time_match,
+        dd_sources=dd_sources,
     )
     # the third current bucket (owner decision D2), beside the solve split
     # (which carries it in jphi_ind; li_metrics["imas_current_conversion"])

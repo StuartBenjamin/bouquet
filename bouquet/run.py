@@ -8143,6 +8143,8 @@ class Bouquet(SwbBaseline):
                 jbs_loop=_m.draw_jbs_loop(_jbs_draw if _jbs_draw["enabled"]
                                           else None),
                 rejection_log=_rejections,
+                # IMAS path: FUSE's summed sources -> per-draw chi_perp, tau_E
+                dd_sources=getattr(bl, "dd_sources", None),
                 # the ONE reconstruction state (loop only; None = legacy)
                 jphi_request_offset=getattr(bl, "jphi_request_offset", None),
                 delivered_state=getattr(bl, "delivered_state", None),

@@ -97,6 +97,7 @@ from .utils import (
     load_equilibrium,
     load_equilibrium_by_path,
     load_eq_fsa,
+    load_dd_sources,
     store_baseline_profiles,
     load_baseline_profiles,
     discover_scan_keys,
@@ -182,7 +183,7 @@ __all__ = [
     "read_eqdsk_from_bytes",
     # ---- archive readers ----
     "initialize_equilibrium_database",
-    "load_equilibrium", "load_equilibrium_by_path", "load_eq_fsa",
+    "load_equilibrium", "load_equilibrium_by_path", "load_eq_fsa", "load_dd_sources",
     "load_baseline_profiles",
     "discover_scan_keys", "count_equilibria", "list_equilibrium_indices",
     "write_provenance", "write_refused_scan", "load_config",
