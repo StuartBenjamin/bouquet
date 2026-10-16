@@ -457,6 +457,17 @@ class SwbBaseline:
                     swb_dev=dev)
 
 
+def swb_jind_sigma(sigma_jphi, jphi_total, seed):
+    """The swb inductive redraw's sigma, in seed units: sigma_jphi's relative
+    width (sigma_jphi / |jphi_total|) on |seed|, i.e. on the inductive current
+    itself.  sigma_jphi in absolute units would be the total's width, which in
+    a bootstrap-dominated pedestal exceeds the inductive current there, so no
+    non-negative redraw exists (every draw refused)."""
+    jt = np.abs(np.asarray(jphi_total, dtype=float))
+    rel = np.divide(np.asarray(sigma_jphi, dtype=float), jt, out=np.zeros_like(jt), where=jt > 0)
+    return rel * np.abs(np.asarray(seed, dtype=float))
+
+
 def build_swb_context(bq, env):
     """The :class:`~bouquet.swb_draws.SwbDraws` of a prepared swb baseline:
     each draw is solve B (``_swb_solve`` toward solve A's coils) with
@@ -495,6 +506,5 @@ def build_swb_context(bq, env):
     return SwbDraws(
         partial(bq._swb_solve, coil_reg_target=bl.coil_reg_target),
         np.asarray(bl.swb_seed_profile, dtype=float),
-        # sigma_jphi is on the solved inductive (alpha * seed)
-        np.asarray(env["sigma_jphi"], dtype=float) / float(bl.ohm_scale),
+        swb_jind_sigma(env["sigma_jphi"], bl.jphi_total, bl.swb_seed_profile),
         stamp=stamp, jphi_pd=getattr(bl, "jphi_pd", None))
