@@ -323,8 +323,10 @@ def measure_partition(bq, request, pressure, make_backend, *, psi_pad,
         warnings.warn(msg, UserWarning, stacklevel=3)
     if rec["status"] == "measured":
         print(f"[engine] boundary partition {rec['partition']:.3g} at W = "
-              f"{rec['total_nominal']} (boundary {rec['boundary_frac']:.3g} "
-              f"/ coils {rec['coil_frac']:.3g} of their cuts; "
+              + ("?" if rec["total_nominal"] is None
+                 else f"{float(rec['total_nominal']):.4g}") + " (boundary "
+              f"{rec['boundary_frac']:.3g} / coils {rec['coil_frac']:.3g} "
+              "of their cuts; "
               f"{rec['n_solves']} probe solve, {rec['wall_s']:.1f} s; "
               "report only)", flush=True)
     return rec
