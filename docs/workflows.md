@@ -402,6 +402,11 @@ On ida_hybrid, a dd step `time` outside the window the run simulated
 (`time_grid.json`: t0 < t ≤ `reached`; a FUSE run that stopped early still
 lists its planned steps in that table) raises `IdaTimeNotSimulated`: the IDA time
 is not attempted, so `run()` / `run_slices()` do not archive it as refused.
+With `ida_timing="ida_fuse"`, the pair must also be one of the run's consistent pairs
+(`bq.consistent_pairs(ida_provenance.json)`: each IDA slice a reached macro step replayed, with
+the nearest such step), else the same `IdaTimeNotSimulated`; the check is skipped (and stamped
+in `li_metrics["ida_time_match"]["consistent_pair"]`) when the two json files are absent or
+the table names another IDA file.
 `ida_time` outside ida_hybrid is refused. `set_slice(time=t)` keeps a
 configured `ida_time` (with a warning), `set_slice(ida_time=x)` applies it
 alone, and a series takes one per slice: `run_slices(times, ida_times=[…])`.

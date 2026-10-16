@@ -2048,6 +2048,82 @@ def _check_simulated(ids_path, t_dd, t_ida):
             "t0, reached): never simulated, not attempted")
 
 
+def _macro_steps(t0, Nt, dt, reached):
+    """dd_sim macro steps t0 < t <= reached, in FUSE's literal instant arithmetic (sim_instants[::2])."""
+    d = (Nt * dt) / Nt
+    steps = (t0 + kk * (d / 2) for kk in range(0, 2 * Nt + 1, 2))
+    return [t for t in steps if t0 < t <= reached + 1e-9]
+
+
+def consistent_pairs(provenance_path, grid=None):
+    """``{ida_time: dd_sim_time}``, ascending: each IDA-lite slice some reached
+    macro step (t0 < t <= reached) replayed, with the nearest such step (earlier
+    on a tie); slices absent have no consistent dd_sim time.  *provenance_path*:
+    ``fuseruns/<shot>/ida_provenance.json``; *grid*: its ``time_grid.json`` dict
+    (default: the file beside it).  ``{}`` for a run without IDA kinetics; a
+    reached step without a ``replay_pairing`` row raises ``ValueError``.
+    (omega/ida_consistent_pairs.py, validated against FUSE's replay.)"""
+    import json
+    with open(provenance_path) as fh:
+        prov = json.load(fh)
+    if grid is None:
+        with open(os.path.join(os.path.dirname(os.path.abspath(provenance_path)), "time_grid.json")) as fh:
+            grid = json.load(fh)
+    if grid.get("kinetic_source", "ida") != "ida":
+        return {}
+    rows = {round(float(r["t_sim"]), 6): r for r in prov["replay_pairing"]}
+    best = {}   # round(ida_time) -> (ida_time, t_sim)
+    for t in _macro_steps(float(grid["t0"]), int(grid["Nt"]), float(grid["dt"]), float(grid["reached"])):
+        r = rows.get(round(t, 6))
+        if r is None:
+            raise ValueError(f"{provenance_path}: replay_pairing has no row for macro step {t!r}")
+        if r["ida_time"] is None:
+            continue
+        tau = float(r["ida_time"])
+        k = round(tau, 6)
+        if k not in best or abs(t - tau) < abs(best[k][1] - tau):   # strict: a tie keeps the earlier step
+            best[k] = (tau, t)
+    return dict(sorted(best.values()))
+
+
+def _check_consistent_pair(source, T, tol=1e-6):
+    """``ImasSource.ida_timing="ida_fuse"``: the dd step *T* and the IDA slice
+    that will be read (the file's nearest to ``ida_time``, else *T*) must be one
+    of :func:`consistent_pairs`' pairs, else :class:`IdaTimeNotSimulated` (not
+    attempted).  Returns the check's status: ``"checked"``, or why it was not
+    made (no ``ida_provenance.json`` / ``time_grid.json`` beside the dd, or a
+    table naming another IDA file)."""
+    import json
+    import warnings
+    run = os.path.dirname(os.path.abspath(source.ids_path))
+    prov_path = os.path.join(run, "ida_provenance.json")
+    if T is None or not all(os.path.isfile(os.path.join(run, f))
+                            for f in ("ida_provenance.json", "time_grid.json")):
+        return "absent"
+    try:
+        with open(prov_path) as fh:
+            ida_file = json.load(fh).get("ida_file")
+    except (OSError, ValueError):
+        return "unreadable"
+    if ida_file is None or os.path.basename(str(ida_file)) != os.path.basename(str(source.ida_path)):
+        warnings.warn(f"ida_hybrid: {prov_path} names another IDA file ({ida_file!r}); "
+                      "the consistent-pair rule of ida_timing='ida_fuse' is not applied")
+        return "not bound"
+    from .ida import ida_time_base
+    tt = np.asarray(ida_time_base(source.ida_path), dtype=float).ravel()
+    t_req = T if getattr(source, "ida_time", None) is None else float(source.ida_time)
+    t_ida = float(tt[np.argmin(np.abs(tt - t_req))])
+    pairs = consistent_pairs(prov_path)
+    t_pair = next((t for tau, t in pairs.items() if abs(tau - t_ida) <= tol), None)
+    if t_pair is None or abs(t_pair - float(T)) > tol:
+        raise IdaTimeNotSimulated(
+            f"ida_hybrid (ida_timing='ida_fuse'): IDA slice {t_ida:.9g} s and dd step "
+            f"{float(T):.9g} s are not a consistent pair of the FUSE run ("
+            + ("no reached step replayed that slice" if t_pair is None else
+               f"its consistent dd step is {t_pair:.9g} s") + "): not attempted")
+    return "checked"
+
+
 def _check_replay_pairing(ids_path, aux, tol=1e-6, *, ida_path=None):
     """``aux['pairing_consistent']``: whether FUSE's own replay_pairing
     (``ida_provenance.json`` beside ``ids_path``, written by the external
@@ -2310,6 +2386,9 @@ def read_imas_baseline(
     if kinetic_source == "ida_hybrid" and getattr(source, "ida_path", None):
         _ida_t = getattr(source, "ida_time", None)
         _check_simulated(source.ids_path, T, T if _ida_t is None else _ida_t)
+    _pair_status = (_check_consistent_pair(source, T)
+                    if kinetic_source == "ida_hybrid" and getattr(source, "ida_path", None)
+                    and getattr(source, "ida_timing", "window") == "ida_fuse" else None)
     dd = _load_dd(source.ids_path)
 
     # Which fast-pressure convention this dd was written in (factor of 3).
@@ -2723,6 +2802,7 @@ def read_imas_baseline(
     if use_ida:
         T_ida = _hybrid_timing(source, T, eq["time"][ie], cp_ids["time"][ic], aux,
                                cp_times=_cp_time_grid(cp_ids))
+        aux["ida_time_match"]["consistent_pair"] = _pair_status
         (ne, te, ti, ni, Zeff, _omega,
          sigma_ne_ida, sigma_te_ida, sigma_ni_ida, sigma_ti_ida,
          _ida_read, _ni_fast_meta, _ida_map) = _merge_ida_kinetics(

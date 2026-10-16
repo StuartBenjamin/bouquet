@@ -150,7 +150,8 @@ from .paths import add_oft_to_path, find_mesh, find_ida
 from .io.ida import read_ida, read_ida_cer, IDAProfiles, IDACERProfiles
 from .io.imas import (read_imas_baseline, read_imas_geometry,
                       write_imas_draw, export_imas_drawset,
-                      detect_p_fast_convention, resolve_p_fast_reduction)
+                      detect_p_fast_convention, resolve_p_fast_reduction,
+                      consistent_pairs, IdaTimeNotSimulated)
 from .run import Bouquet
 from .archive import BouquetArchive, ScanView, DrawView, BaselineView
 from .stats import (draw_band, draw_bands, draw_scalars, BandRecord,
@@ -177,7 +178,7 @@ __all__ = [
     # ---- I/O: sources and IMAS write-back ----
     "GEQDSKEquilibrium", "read_geqdsk", "find_lcfs_xpoints", "PFile", "read_pfile",
     "read_ida", "read_ida_cer", "IDAProfiles", "IDACERProfiles",
-    "read_imas_baseline", "read_imas_geometry",
+    "read_imas_baseline", "read_imas_geometry", "consistent_pairs", "IdaTimeNotSimulated",
     "write_imas_draw", "export_imas_drawset",
     "detect_p_fast_convention", "resolve_p_fast_reduction",
     "read_eqdsk_from_bytes",
