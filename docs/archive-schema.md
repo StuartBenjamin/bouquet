@@ -189,7 +189,7 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
                                        in engine_json's inputs)
                    [swb_jbs_convention, swb_jbs_conversion]  draws whose
                                        bootstrap came from solve_with_bootstrap
-                   [swb_alpha, swb_ip_rel_err, swb_jind_resamples,
+                   [swb_alpha, swb_ip_rel_err, swb_jind_resamples, swb_jind_clipped,
                     jphi_saw_out, swb_saw_*]  solve_method="swb" draws
                    [edge_pressure_json] ← the draw's edge-pressure record
                                        (added): its own p_sep, the offset

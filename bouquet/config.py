@@ -1556,6 +1556,13 @@ class GenerationConfig:
     # toolkit whose own default is taper-on keeps it on otherwise
     # (swb_bootstrap_kwargs).  PSFC_dev: 0.999 by default.
     swb_edge_taper_psi0: Optional[float] = 0.999
+    # swb only, with swb_edge_taper_psi0 set.  The read-in SWB currents
+    # (inductive seed, jphi_fixed, sawteeth input) are zeroed on the LCFS node,
+    # where the taper's weight is 0 (the solve discards them there: unchanged),
+    # and any negative node left in the inductive seed is clipped to 0 (warned,
+    # stamped); each draw's seed redraw is clipped to 0 too (swb_jind_clipped)
+    # instead of redrawn.
+    swb_taper_source: bool = False
     # swb only.  Largest |Ip/Ip_target - 1| an swb solve (solve A, solve B,
     # every draw) is accepted at; beyond it the solve raises.  Stamped on
     # _baseline (swb_ip_tol) with each solve's own error (swb_ip_rel_err);
@@ -2351,6 +2358,8 @@ def swb_config_problems(config):
     t = gc.swb_edge_taper_psi0
     if t is not None and not 0.0 < float(t) < 1.0:
         p.append(f"swb_edge_taper_psi0={t!r} must be in (0, 1) or None")
+    if gc.swb_taper_source and t is None:
+        p.append("swb_taper_source needs the edge taper (swb_edge_taper_psi0)")
     for env in ("DIFF_BS", "PIN_JPHI"):
         if os.environ.get(env, "0") == "1":
             p.append(f"{env}=1")

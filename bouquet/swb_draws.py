@@ -58,7 +58,7 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
              p_fast=None, z_fast=None, z2_fast=None, zeff_includes_fast=False,
              Z_imp=None, aux_sigmas=None, aux_baselines=None,
              aux_length_scales=None, ni_from_zeff=True, zeff_dne=None,
-             isolate_edge_jbs=False, kinetic_clips=False):
+             isolate_edge_jbs=False, kinetic_clips=False, jind_clip=False):
     """One ``imas_baseline="swb"`` draw: the baseline's solve B with resampled
     inputs.
 
@@ -71,6 +71,8 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
     Returns the :func:`perturb_kinetic_equilibrium` tuple; with the sawtooth
     reset on, the diagnostics carry ``jphi_saw_out``, ``saw_rho_m``, ``saw_rho_out``,
     ``saw_n_dips`` (and ``saw_map_warn`` from the recipe's jphi_saw check).
+    ``jind_clip`` (``swb_taper_source``): the seed redraw's negative nodes are
+    clipped to 0 (counted in ``jind_clipped``) instead of redrawn.
     """
     rng = make_rng(rng)
     psi_kin = psi_N_kinetic if psi_N_kinetic is not None else psi_N
@@ -108,7 +110,7 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
         _ks = _k.get("kinetic_sampler")
 
     jind_seed = np.asarray(jind_seed, dtype=float)
-    j_seed, n_tries = jind_seed, 0
+    j_seed, n_tries, n_clip = jind_seed, 0, 0
     if not _zero(sigma_jind):
         # resample until non-negative, at most SWB_JIND_MAX_RESAMPLES tries;
         # then the draw is REFUSED, never run on the unperturbed seed
@@ -122,6 +124,9 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
                 psi_N, jind_seed / _j0,
                 sigma_profile=np.asarray(sigma_jind, dtype=float) / _j0,
                 length_scale=j_ls, n_samples=1, rng=rng, diag_plot=False) * _j0
+            if jind_clip:
+                n_clip = int(np.sum(_c < 0.0))
+                _c = np.maximum(_c, 0.0)
             if np.all(_c >= 0.0):
                 j_seed = _c
                 break
@@ -166,6 +171,7 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
         "kinetic_sampler": _ks,
         "swb_alpha": alpha,
         "jind_resamples": int(n_tries),
+        "jind_clipped": n_clip,
         "jphi_pd": (None if res.get("jphi_pd") is None
                        else np.asarray(res["jphi_pd"], dtype=float)),
         "swb_ip_rel_err": res.get("ip_rel_err"),
@@ -212,7 +218,7 @@ class SwbDraws(DrawMethod):
     homotopy = False
 
     def __init__(self, recipe, jind_seed, sigma_jind, *, stamp=None,
-                 jphi_pd=None):
+                 jphi_pd=None, jind_clip=False):
         #: the per-draw solve ``recipe(kin, j_seed)``: solve B's recipe
         self.recipe = recipe
         self.jind_seed = np.asarray(jind_seed, dtype=float)
@@ -227,6 +233,8 @@ class SwbDraws(DrawMethod):
         self.jphi_pd = jphi_pd
         #: the attrs stamped on _baseline (bouquet.swb.build_swb_context)
         self.stamp = dict(stamp or {})
+        #: clip the seed redraw's negative nodes to 0 (swb_taper_source)
+        self.jind_clip = bool(jind_clip)
 
     def jphi_baseline(self, jphi_baseline):
         return False               # the prepared solve B IS the baseline
@@ -246,7 +254,8 @@ class SwbDraws(DrawMethod):
             aux_length_scales=i["aux_length_scales"],
             ni_from_zeff=i["ni_from_zeff"], zeff_dne=i["zeff_dne"],
             isolate_edge_jbs=i["isolate_edge_jbs"],
-            kinetic_clips=bool(i.get("kinetic_clips", False)))
+            kinetic_clips=bool(i.get("kinetic_clips", False)),
+            jind_clip=self.jind_clip)
 
     def announce_coil_reg(self):
         print("  [swb] coil reg left to the per-draw recipe; drift "
@@ -274,6 +283,7 @@ class SwbDraws(DrawMethod):
             "swb_alpha": diagnostics.get("swb_alpha"),
             "swb_ip_rel_err": diagnostics.get("swb_ip_rel_err"),
             "swb_jind_resamples": diagnostics.get("jind_resamples"),
+            "swb_jind_clipped": diagnostics.get("jind_clipped"),
             "jphi_saw_out": diagnostics.get("jphi_saw_out"),
             "swb_saw_rho_m": diagnostics.get("saw_rho_m"),
             "swb_saw_rho_out": diagnostics.get("saw_rho_out"),

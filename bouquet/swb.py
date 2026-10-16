@@ -29,6 +29,26 @@ _SWB_SAW_KEYS = ("jphi_saw_out", "saw_rho_m", "saw_rho_out", "saw_n_dips")
 SWB_SAW_MAP_TOL = 1e-3
 
 
+def swb_source_edge(x, seed, *others):
+    """``(seed, others, record)``: the read-in SWB currents zeroed on the LCFS
+    node (``x >= 1``, where the edge taper's weight is 0), then the seed's
+    remaining negative nodes clipped to 0 (``swb_taper_source``)."""
+    edge = coords.swb_grid(x) >= 1.0
+    seed, *others = [np.where(edge, 0.0, np.asarray(a, dtype=float))
+                     for a in (seed, *others)]
+    neg = seed < 0.0
+    rec = {"swb_source_edge_zeroed": int(edge.sum()),
+           "swb_source_clipped": int(neg.sum())}
+    if neg.any():
+        rec["swb_source_clip_min"] = float(seed[neg].min())
+        import warnings
+        warnings.warn(f"swb_taper_source: inductive seed negative on "
+                      f"{int(neg.sum())} node(s) inside the LCFS (min "
+                      f"{seed[neg].min():.4g} A/m^2); clipped to 0")
+        seed = np.where(neg, 0.0, seed)
+    return seed, others, rec
+
+
 def _swb_taper_factor(j_fixed_out, jf_in):
     """OFT's edge-taper factor ``j_fixed / jphi_fixed``: 1 where the input is 0
     or the node is untapered (bit-identical there)."""
@@ -118,13 +138,18 @@ class SwbBaseline:
             j_ind = j_ind - np.asarray(P, dtype=float)
         bl.jphi_saw_input = None
         if self.config.generation.swb_saw_q is None:
-            bl.swb_seed_profile, bl.jphi_fixed = coords.swb_source_seed(
-                psi_N, j_ind, j_fix)
-            return
-        j_st = getattr(bl, "jphi_saw", None)
-        j_st = np.zeros_like(j_fix) if j_st is None else np.asarray(j_st, dtype=float)
-        bl.swb_seed_profile, bl.jphi_fixed, bl.jphi_saw_input = \
-            coords.swb_source_seed(psi_N, j_ind, j_fix, j_st)
+            out = coords.swb_source_seed(psi_N, j_ind, j_fix)
+        else:
+            j_st = getattr(bl, "jphi_saw", None)
+            j_st = np.zeros_like(j_fix) if j_st is None else np.asarray(j_st, dtype=float)
+            out = coords.swb_source_seed(psi_N, j_ind, j_fix, j_st)
+        self._swb_source_edge = None
+        if getattr(self.config.generation, "swb_taper_source", False):
+            seed, rest, self._swb_source_edge = swb_source_edge(psi_N, *out)
+            out = (seed, *rest)
+        bl.swb_seed_profile, bl.jphi_fixed = out[:2]
+        if len(out) == 3:
+            bl.jphi_saw_input = out[2]
 
     def _swb_saw_kwargs(self):
         """``solve_with_bootstrap`` sawtooth-reset arguments; empty when
@@ -490,6 +515,8 @@ def build_swb_context(bq, env):
         "swb_ip_rel_err_solve_A": _ic.get("ip_rel_err_solve_A"),
         "swb_edge_taper_psi0": ("off" if gc.swb_edge_taper_psi0 is None
                                 else float(gc.swb_edge_taper_psi0)),
+        "swb_taper_source": bool(getattr(gc, "swb_taper_source", False)),
+        **(getattr(bq, "_swb_source_edge", None) or {}),
         **{k: res_b[k] for k in ("swb_jbs_convention", "swb_jbs_conversion")},
         "swb_alpha": float(bl.ohm_scale),
         "swb_alpha_solve_A": _ic.get("alpha_solve_A"),
@@ -507,4 +534,5 @@ def build_swb_context(bq, env):
         partial(bq._swb_solve, coil_reg_target=bl.coil_reg_target),
         np.asarray(bl.swb_seed_profile, dtype=float),
         swb_jind_sigma(env["sigma_jphi"], bl.jphi_total, bl.swb_seed_profile),
-        stamp=stamp, jphi_pd=getattr(bl, "jphi_pd", None))
+        stamp=stamp, jphi_pd=getattr(bl, "jphi_pd", None),
+        jind_clip=bool(getattr(gc, "swb_taper_source", False)))
