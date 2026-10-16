@@ -26,8 +26,8 @@ Three legs; the third, the sigma=0 reproduction at the default total, is
   at 2e5, a reversed-I_p case with a near-zero vertical-control coil had 9
   of its 10 draws stop at the homotopy's iteration cap, and 9 of 10 archived
   with the floor.  No fixture with a vertical-control coil below the 10 kA
-  floor ships with the repository (the synthetic pairs carry more than
-  40 kA): the floor's arithmetic on such a coil set is the fast test
+  floor ships with the repository (the synthetic pairs' smaller coil
+  carries more than 80 kA): the floor's arithmetic on such a coil set is the fast test
   ``tests/test_homotopy_vsc_floor.py::test_the_vsc_bound_uses_the_floor_for_a_near_zero_coil``,
   and the sub-10 kA yield is verified on the owner's private ladder.
 
