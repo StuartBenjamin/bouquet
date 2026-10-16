@@ -72,6 +72,6 @@ def test_the_redraw_refused_on_the_source_seed_runs_on_the_edged_one():
 
 def test_it_needs_the_edge_taper():
     assert any("swb_taper_source" in m
-               for m in swb_config_problems(swb_cfg(swb_taper_source=True)))
+               for m in swb_config_problems(swb_cfg(swb_taper_source=True, swb_edge_taper_psi0=None)))
     assert not any("swb_taper_source" in m for m in swb_config_problems(
         swb_cfg(swb_taper_source=True, swb_edge_taper_psi0=0.999)))
