@@ -21,7 +21,8 @@ The tests:
     manifest within tight tolerances (l_i, Ip, coil drifts, boundary
     deviation, coil currents, TokaMaker X-points);
   * exercise the postprocessing filters and selection helpers on the golden
-    data (coil filter must reproduce the stored ``in_spec`` decision);
+    data (filter() under the stamped in-spec rule must reproduce the stored
+    ``in_spec`` decision);
   * confirm the stored X-points drive ``_extract_boundary_points``.
 
 To intentionally update the golden set: regenerate the full ``.h5``, run
@@ -40,7 +41,7 @@ import h5py
 import _harness
 
 import bouquet
-from bouquet import (filter_coil_currents, filter_boundaries,
+from bouquet import (filter_boundaries,
                      select_indices, read_filter_flags, export_filtered)
 from bouquet.plotting import _extract_boundary_points
 from bouquet.utils import read_eqdsk_from_bytes  # noqa: F401  (import smoke)
@@ -406,39 +407,51 @@ def test_geqdsk_separatrix_is_coarse(golden, manifest):
 # ---------------------------------------------------------------------------
 #  filtering behaviour on golden data
 # ---------------------------------------------------------------------------
-def test_coil_filter_reproduces_in_spec(golden, tmp_path, manifest):
-    """The postprocess coil filter (stored thresholds) AND the engine's
-    post-hoc draw band == stored in_spec.
-
-    Since 2026-10 the fixture is a unified-engine run, whose archived
-    ``in_spec`` is the coil verdict AND the post-hoc l_i band
-    (``passes_draw_band``, ``bouquet.engine_draws``; one of
-    ``filtering._FILTER_FLAGS``).  A legacy draw carries no band flag, for
-    which this is the coil verdict alone, as before."""
+def _filter_under_the_stamped_rule(golden, tmp_path):
+    """A copy of the golden filtered as ``Bouquet.filter()`` filters it, on
+    the golden's own stored config: the configured coil filter (chi2 by
+    default) and the boundary cut, then the in-spec rule the archive was
+    stamped with.  Returns ``(work_path, filter() summary)``."""
+    from bouquet.utils import load_config
     work = str(tmp_path / "work.h5")
     shutil.copy(golden.slim, work)
-    summ, _ = filter_coil_currents(work, apply=True, plot=False)
+    cfg = load_config(work, scan_key=0)
+    cfg.output_header = work[:-len(".h5")]
+    return work, bouquet.Bouquet(cfg).filter()
+
+
+def test_filter_under_the_stamped_rule_reproduces_in_spec(golden, tmp_path,
+                                                          manifest):
+    """The archived ``in_spec`` is the in-spec rule's verdict:
+    ``generate_bouquet`` judged every draw by the rule before archiving it
+    (the configured coil test AND the boundary cut AND an engine draw's band
+    flag; ``in_spec_source = "inspec_rule"``).  ``filter()`` under the
+    stamped rule reproduces it draw for draw, and ``refilter_inspec`` under
+    the stamped bands leaves the selection unchanged.  The legacy +/-2 %
+    drift verdict is kept as ``coil_drift_in_spec``; it is not the rule and
+    is not compared here."""
+    from bouquet.filtering import read_inspec_rule, refilter_inspec
+    rule, _ = read_inspec_rule(golden.slim, scan_key="0")
+    assert rule is not None
+    work, sel = _filter_under_the_stamped_rule(golden, tmp_path)
+    assert sel["inspec"]["rule"] == rule
+    assert sel["inspec"]["refiltered"] is False     # the stamp is this rule
     flags = read_filter_flags(work)
-    n_spec = {}
-    for sv, drect in flags.items():
-        n_coil = 0
-        for i, rec in drect.items():
-            n_coil += bool(rec["passes_coil_filter"])
-            if "in_spec" in rec:
-                assert rec["in_spec"] == (
-                    rec["passes_coil_filter"]
-                    and rec.get("passes_draw_band", True)), (sv, i, rec)
-        assert summ[sv]["n_pass"] == n_coil
-        n_spec[sv] = sum(bool(r.get("in_spec")) for r in drect.values())
-    # counts line up with the manifest
     for bkey, sv, entry in _iter_scans(manifest):
-        assert n_spec[sv] == entry["n_in_spec"]
+        drect = flags[sv]
+        for i, rec in drect.items():
+            assert rec["in_spec_source"] == "inspec_rule", (sv, i, rec)
+            assert rec["selected"] == rec["in_spec"], (sv, i, rec)
+        assert sum(bool(r["in_spec"]) for r in drect.values()) == \
+            entry["n_in_spec"]
+        before = select_indices(work, scan_key=sv, selection="selected")
+        refilter_inspec(work, read_inspec_rule(work, scan_key=sv)[1],
+                        scan_key=sv, verbose=False)
+        assert select_indices(work, scan_key=sv, selection="selected") == before
 
 
 def test_selection_partition(golden, tmp_path, manifest):
-    work = str(tmp_path / "work.h5")
-    shutil.copy(golden.slim, work)
-    filter_coil_currents(work, apply=True, plot=False)
+    work, _ = _filter_under_the_stamped_rule(golden, tmp_path)
     for bkey, sv, entry in _iter_scans(manifest):
         alli = select_indices(work, scan_key=sv, selection="all")
         sel = select_indices(work, scan_key=sv, selection="selected")
@@ -456,9 +469,7 @@ def test_selection_unfiltered_defaults(golden):
 
 
 def test_export_filtered_keeps_selected(golden, tmp_path, manifest):
-    work = str(tmp_path / "work.h5")
-    shutil.copy(golden.slim, work)
-    filter_coil_currents(work, apply=True, plot=False)
+    work, _ = _filter_under_the_stamped_rule(golden, tmp_path)
     out = str(tmp_path / "selected.h5")
     kept = export_filtered(work, out)
     total_sel = sum(e["n_in_spec"] for _, _, e in _iter_scans(manifest))
