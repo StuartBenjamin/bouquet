@@ -3000,6 +3000,21 @@ def engine_closure_health(eng, where):
     return ch
 
 
+def _probe_capable(mygs) -> bool:
+    from .boundary_balance import probe_capable
+    return probe_capable(mygs)
+
+
+def balance_calibration_on(geom) -> bool:
+    """Whether the reconstruction calibrates its boundary constraint's total
+    (:mod:`bouquet.boundary_balance`): only the standard set at its
+    PROVISIONAL total -- not an override (``SolverConfig.
+    isoflux_weight_total``), a user set or the legacy route's."""
+    bal = getattr(geom, "iso_balance", None)
+    return (geom is not None and getattr(geom, "iso_pts", None) is not None
+            and isinstance(bal, dict) and bal.get("mode") == "provisional")
+
+
 def _geometry_isoflux(geom):
     """The isoflux pattern of the solver geometry ``geom`` (a
     :class:`bouquet.solver_geometry.CaseGeometry`, whose ``record()`` is the
@@ -3697,16 +3712,44 @@ def prepare_engine_baseline(bq):
                 raise TypeError(f"unknown baseline source type "
                                 f"{type(src).__name__}")
             mse = (c0.rows.get("mse") if "mse" in s["rows"] else None)
-            backend = TokaMakerBackend(
-                mygs, c0, psi_pad=psi_pad, li_kind="li_3",
-                chords=(None if mse is None else mse["chords"]),
-                edge_pressure=s["edge_pressure"],
-                edge_taper=s["edge_taper"],
-                coord=getattr(ad, "coord", "psi_n"),
-                eps_definition=s.get("eps_definition"),
-                # the reconstruction runs under the solver's own cap
-                # (engine_draw_solve_maxits caps the DRAWS only)
-                maxits=None)
+
+            def _backend(maxits, _c=c0, _mse=mse, _pp=psi_pad, _ad=ad):
+                return TokaMakerBackend(
+                    mygs, _c, psi_pad=_pp, li_kind="li_3",
+                    chords=(None if _mse is None else _mse["chords"]),
+                    edge_pressure=s["edge_pressure"],
+                    edge_taper=s["edge_taper"],
+                    coord=getattr(_ad, "coord", "psi_n"),
+                    eps_definition=s.get("eps_definition"),
+                    maxits=maxits)
+            # the boundary constraint's strength: the calibrated balance
+            # between the boundary cut and the coil cut (boundary_balance),
+            # measured from this very start and installed BEFORE the
+            # reconstruction, so the reconstruction and every draw solve
+            # under the same set; an override (SolverConfig.
+            # isoflux_weight_total) or a user set is installed as given
+            if (balance_calibration_on(bq._geom)
+                    and not _probe_capable(mygs)):
+                import dataclasses as _dc
+                bq._geom = _dc.replace(bq._geom, iso_balance=dict(
+                    bq._geom.iso_balance, status=(
+                        "not calibrated: the solver object cannot be "
+                        "probed (no copy_eq / field evaluation; a test "
+                        "stand-in); the provisional total is installed")))
+            elif balance_calibration_on(bq._geom):
+                from .boundary_balance import calibrate_boundary_constraint
+                from .solver_geometry import with_balanced_total
+                _W, _brec = calibrate_boundary_constraint(
+                    bq, c0, _backend, psi_pad=psi_pad,
+                    maxits=s["draw_solve_maxits"])
+                bq._geom = with_balanced_total(bq._geom, _W, _brec)
+                recon_iso = _geometry_isoflux(bq._geom)
+                mygs.set_isoflux(recon_iso["pts"], weights=recon_iso["w"])
+                if c0.kind == "gfile":
+                    iso_pts, iso_w = recon_iso["pts"], recon_iso["w"]
+            # the reconstruction runs under the solver's own cap
+            # (engine_draw_solve_maxits caps the DRAWS only)
+            backend = _backend(None)
             # the coil regularisation this reconstruction solves under
             # (recorded; every draw installs exactly it)
             coil_reg = reconstruction_coil_reg(mygs)
@@ -3740,6 +3783,11 @@ def prepare_engine_baseline(bq):
                                            recon_iso["origin"])
         if isinstance(getattr(bl, "engine", None), dict):
             bl.engine["recon_isoflux"] = dict(recon_iso["stamp"])
+    if isinstance(getattr(bl, "engine", None), dict):
+        # how the boundary constraint's total was chosen (boundary_balance:
+        # the calibration with its probe points, an override, as given)
+        _bal = getattr(bq._geom, "iso_balance", None)
+        bl.engine["boundary_balance"] = None if _bal is None else dict(_bal)
     # ... and its delivered magnetic axis and minor radius: the reference
     # of every engine draw's axis record and displacement flag (axis_shift_record)
     delivered_axis = delivered_axis_reference(mygs, eng.delivered_meas,

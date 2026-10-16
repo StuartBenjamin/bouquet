@@ -72,7 +72,14 @@ class SolverConfig:
     order: int = 3
     F0: Optional[float] = None                       # vacuum R*Bt; default from g-file/IDS
     isoflux_pts: Optional["np.ndarray"] = None       # (N, 2) boundary constraints
-    isoflux_weights: Optional["np.ndarray"] = None   # (N,); None: per unit length, total ISOFLUX_WEIGHT_TOTAL
+    isoflux_weights: Optional["np.ndarray"] = None   # (N,); None: per unit length (see below)
+    # The TOTAL weight of the unified engine's standard boundary (isoflux) set.  None (default):
+    # calibrated per case as a balance between the in-spec rule's boundary cut and its coil cut
+    # (bouquet.boundary_balance; docs/engine.md, "The boundary constraint: a calibrated balance
+    # ..."), stamped in the solver-geometry record.  A number: an explicit OVERRIDE, installed as
+    # given (no calibration) and stamped as mode "override".  Also the total of an isoflux_pts set
+    # given without isoflux_weights (None there: solver_geometry.ISOFLUX_WEIGHT_TOTAL).
+    isoflux_weight_total: Optional[float] = None
     # Optional saddle (X-point) constraints: (N, 2) points where B_pol is driven
     # to zero (TokaMaker set_saddle_constraints). Pins the separatrix X-point --
     # without it a diverted forward solve typically ROUNDS the boundary corner
