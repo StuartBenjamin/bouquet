@@ -335,6 +335,10 @@ class Baseline:
     # Bouquet.prepare_baseline on every path; archived as the _baseline attr
     # solver_geometry_json (and in the engine record).
     solver_geometry: Optional[dict] = None
+    # IMAS reader: FUSE's core_sources at the dd step, summed
+    # (io.imas.dd_source_totals) for the per-draw chi_perp and tau_E
+    # (bouquet.transport).  None off the IMAS path.
+    dd_sources: Optional[dict] = None
 
     def __repr__(self):
         # concise summary -- the default dataclass repr dumps every numpy array,

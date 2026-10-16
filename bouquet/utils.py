@@ -4389,6 +4389,72 @@ def stamp_source_orientation(h5path_or_header, scan_key=None,
         grp.attrs["current_frame"] = CURRENT_FRAME
 
 
+#: ``_baseline`` subgroup holding FUSE's summed sources (io.imas.dd_source_totals).
+DD_SOURCES_GROUP = "dd_sources"
+DD_SOURCES_UNITS = {"rho_tor_norm": "", "Q_e": "W", "Q_i": "W", "Gamma_e": "s^-1",
+                    "P_net": "W", "P_rad": "W", "b0": "T", "r0": "m",
+                    "core_profiles_time": "s"}
+
+
+def store_transport(h5path_or_header, scan_key, count, rec):
+    """Write one equilibrium's chi_perp profiles (datasets) and tau scalars
+    (attrs) from :func:`bouquet.transport.transport_record` on its draw group,
+    or on ``_baseline`` when *count* is None."""
+    from .transport import TRANSPORT_PROFILES, TRANSPORT_SCALARS
+    bkey = _scan_key(scan_key)
+    path = (_group_path(scan_key, count) if count is not None
+            else (f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"))
+    with h5py.File(_resolve_h5(h5path_or_header), "a") as hf:
+        grp = hf[path]
+        for k, u in TRANSPORT_PROFILES.items():
+            if k in grp:
+                del grp[k]
+            grp.create_dataset(k, data=np.asarray(rec[k], dtype=float)).attrs["units"] = u
+        for k in TRANSPORT_SCALARS:
+            grp.attrs[k] = float(rec[k])
+
+
+def store_dd_sources(h5path_or_header, scan_key, src):
+    """Write FUSE's summed sources (``Baseline.dd_sources``) as the
+    ``_baseline/dd_sources`` group: arrays as datasets, scalars and the
+    included / skipped entries (JSON) as attrs.  A no-op without ``_baseline``."""
+    import json
+    bkey = _scan_key(scan_key)
+    path = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
+    with h5py.File(_resolve_h5(h5path_or_header), "a") as hf:
+        if path not in hf:
+            return
+        if DD_SOURCES_GROUP in hf[path]:
+            del hf[path][DD_SOURCES_GROUP]
+        grp = hf[path].create_group(DD_SOURCES_GROUP)
+        for k, u in DD_SOURCES_UNITS.items():
+            v = src.get(k)
+            if v is None:
+                continue
+            if np.ndim(v):
+                grp.create_dataset(k, data=np.asarray(v, dtype=float)).attrs["units"] = u
+            else:
+                grp.attrs[k] = float(v)
+        grp.attrs["sources_json"] = json.dumps(src.get("sources", []), default=str)
+        grp.attrs["skipped_json"] = json.dumps(src.get("skipped", []), default=str)
+        grp.attrs["rule"] = str(src.get("rule", ""))
+
+
+def load_dd_sources(h5path_or_header, scan_key=None):
+    """``_baseline/dd_sources`` as a dict (see :func:`store_dd_sources`), or None."""
+    import json
+    bkey = _scan_key(scan_key)
+    path = (f"scan/{bkey}/_baseline" if bkey is not None else "_baseline") + "/" + DD_SOURCES_GROUP
+    with h5py.File(_resolve_h5(h5path_or_header), "r") as hf:
+        if path not in hf:
+            return None
+        grp = hf[path]
+        out = {k: np.array(grp[k]) for k in grp}
+        for k, v in grp.attrs.items():
+            out[k] = json.loads(v) if k.endswith("_json") else v
+    return out
+
+
 #: The coil-solve mode every solve of a run is in since 2026-10-06
 #: (bouquet.solver_state.enter_bounded_coil_mode at Bouquet.setup_solver).
 CANONICAL_COIL_SOLVE_MODE = "bounded"
@@ -5658,9 +5724,10 @@ def load_baseline_profiles(h5path_or_header, scan_key=None):
             )
         grp = hf[grp_path]
         for key in grp.keys():
+            if key == DD_SOURCES_GROUP:
+                continue                       # load_dd_sources reads it
             if isinstance(grp[key], h5py.Group):
-                # the structured closure's per-chord MSE record (the only
-                # subgroup a baseline carries)
+                # the structured closure's per-chord MSE record
                 result[key] = _read_mse_record(grp[key])
                 continue
             result[key] = np.array(grp[key])

@@ -494,6 +494,85 @@ def core_sources_slice(src_ids, cp_times, ic, T=None, who="IMAS reader"):
     return isrc, t_src, rec
 
 
+#: core_sources radiation indices (IMAS.jl radiation_losses).
+RADIATION_SOURCE_INDICES = (8, 9, 10, 200, 201, 202, 203)
+
+
+def _retain_source(index, all_indices):
+    """IMAS.jl ``retain_source`` (default call): whether an entry counts in a total."""
+    if index == 0:
+        return False
+    if index == 1 and any(i > 1 for i in all_indices):
+        return False
+    if 100 <= index <= 107 and any(i < 5 for i in all_indices):
+        return False
+    if index == 200 and any(200 < i < 300 for i in all_indices):
+        return False
+    return True
+
+
+def dd_source_totals(src_ids, isrc, n_time, t_slice, rho_cp, *, t_cp=None,
+                     cp_half=None):
+    """FUSE's ``core_sources`` at the dd step, summed as IMAS.jl ``total_sources``:
+    ``Q_e`` / ``Q_i`` [W] (electrons.power_inside, total_ion_power_inside),
+    ``Gamma_e`` [1/s] (electrons.particles_inside) on the core_profiles nodes
+    *rho_cp* (rho_tor_norm), ``P_net`` = max(0, Q_e + Q_i at the edge) and
+    ``P_rad`` [W]; entries by :func:`_retain_source`, each at its own slice
+    (:func:`_source_slice_at`, the currents' rule).  None when nothing is read."""
+    rho_cp = np.asarray(rho_cp, dtype=float)
+    srcs = src_ids.get("source", []) or []
+    idx = [int((s.get("identifier") or {}).get("index", 0) or 0) for s in srcs]
+    tot = {k: np.zeros(rho_cp.size) for k in ("Q_e", "Q_i", "Gamma_e")}
+    used, skipped, p_rad = [], [], 0.0
+    pairs = (("Q_e", "electrons", "power_inside", "energy"),
+             ("Q_i", None, "total_ion_power_inside", "total_ion_energy"),
+             ("Gamma_e", "electrons", "particles_inside", "particles"))
+    for s, i in zip(srcs, idx):
+        name = (s.get("identifier") or {}).get("name")
+        if not _retain_source(i, idx):
+            continue
+        try:
+            pr, how = _source_slice_at(s, isrc, t_slice, n_time, t_cp=t_cp,
+                                       cp_half=cp_half)
+        except ValueError as exc:
+            pr, how = None, str(exc)
+        if pr is None:
+            skipped.append(dict(index=i, name=name, why=how))
+            continue
+        grid = pr.get("grid") or {}
+        rho = grid.get("rho_tor_norm")
+        vol = grid.get("volume")
+        got = {}
+        for key, part, inside, density in pairs:
+            d = pr.get(part, {}) if part else pr
+            y = d.get(inside)
+            if y is None and d.get(density) is not None and vol is not None:
+                from scipy.integrate import cumulative_trapezoid
+                y = cumulative_trapezoid(np.asarray(d[density], float),
+                                         np.asarray(vol, float), initial=0.0)
+            if y is None:
+                continue
+            y = np.asarray(y, dtype=float)
+            if rho is not None and len(rho) == y.size:
+                y = np.interp(rho_cp, np.asarray(rho, float), y)
+            elif y.size != rho_cp.size:
+                continue
+            got[key] = y
+            tot[key] += y
+        if not got:
+            continue
+        used.append(dict(index=i, name=name, time=pr.get("time")))
+        if i in RADIATION_SOURCE_INDICES and "Q_e" in got:
+            p_rad += float(got["Q_e"][-1])
+    if not used:
+        return None
+    return dict(rho_tor_norm=rho_cp, **tot,
+                P_net=max(0.0, float(tot["Q_e"][-1] + tot["Q_i"][-1])),
+                P_rad=-p_rad, sources=used, skipped=skipped,
+                rule="IMAS.jl total_sources/retain_source; radiation enters "
+                     "as negative sources; P_net = max(0, Q_e + Q_i at the edge)")
+
+
 def _source_slice_at(s, isrc, t_slice, n_time, base_times=None, *,
                      t_cp=None, cp_half=None, rec=None):
     """``(profile, how)``: a ``core_sources`` entry's ``profiles_1d`` at the
@@ -1942,6 +2021,109 @@ def _hybrid_timing(source, T, t_eq, t_cp, aux, tol=1e-6, *, cp_times=None,
     return t_used
 
 
+class IdaTimeNotSimulated(ValueError):
+    """The dd step paired with the IDA time lies outside the window the FUSE
+    run simulated.  Not attempted, so :meth:`~bouquet.Bouquet.run` /
+    ``run_slices`` do not record it as refused."""
+
+
+def _check_simulated(ids_path, t_dd, t_ida):
+    """Raise :class:`IdaTimeNotSimulated` when the dd step *t_dd* paired with
+    IDA time *t_ida* is not a simulated step, ``t0 < t_dd <= reached`` (to
+    1e-9 s; ``time_grid.json`` beside the dd): a run that stopped early still
+    lists its planned steps in ``ida_provenance.json``; ``reached`` sits 1 us
+    below the first step not completed, and step ``t0`` is not in the dd."""
+    import json
+    path = os.path.join(os.path.dirname(os.path.abspath(ids_path)), "time_grid.json")
+    try:
+        with open(path) as fh:
+            g = json.load(fh)
+        t0, reached = float(g["t0"]), float(g["reached"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return
+    if t_dd is not None and not t0 < t_dd <= reached + 1e-9:
+        raise IdaTimeNotSimulated(
+            f"ida_hybrid: IDA time {t_ida:.9g} s is paired with dd step {t_dd:.9g} s, "
+            f"outside the simulated steps ({t0:.9g}, {reached:.9g}] s (time_grid.json "
+            "t0, reached): never simulated, not attempted")
+
+
+def _macro_steps(t0, Nt, dt, reached):
+    """dd_sim macro steps t0 < t <= reached, in FUSE's literal instant arithmetic (sim_instants[::2])."""
+    d = (Nt * dt) / Nt
+    steps = (t0 + kk * (d / 2) for kk in range(0, 2 * Nt + 1, 2))
+    return [t for t in steps if t0 < t <= reached + 1e-9]
+
+
+def consistent_pairs(provenance_path, grid=None):
+    """``{ida_time: dd_sim_time}``, ascending: each IDA-lite slice some reached
+    macro step (t0 < t <= reached) replayed, with the nearest such step (earlier
+    on a tie); slices absent have no consistent dd_sim time.  *provenance_path*:
+    ``fuseruns/<shot>/ida_provenance.json``; *grid*: its ``time_grid.json`` dict
+    (default: the file beside it).  ``{}`` for a run without IDA kinetics; a
+    reached step without a ``replay_pairing`` row raises ``ValueError``.
+    (omega/ida_consistent_pairs.py, validated against FUSE's replay.)"""
+    import json
+    with open(provenance_path) as fh:
+        prov = json.load(fh)
+    if grid is None:
+        with open(os.path.join(os.path.dirname(os.path.abspath(provenance_path)), "time_grid.json")) as fh:
+            grid = json.load(fh)
+    if grid.get("kinetic_source", "ida") != "ida":
+        return {}
+    rows = {round(float(r["t_sim"]), 6): r for r in prov["replay_pairing"]}
+    best = {}   # round(ida_time) -> (ida_time, t_sim)
+    for t in _macro_steps(float(grid["t0"]), int(grid["Nt"]), float(grid["dt"]), float(grid["reached"])):
+        r = rows.get(round(t, 6))
+        if r is None:
+            raise ValueError(f"{provenance_path}: replay_pairing has no row for macro step {t!r}")
+        if r["ida_time"] is None:
+            continue
+        tau = float(r["ida_time"])
+        k = round(tau, 6)
+        if k not in best or abs(t - tau) < abs(best[k][1] - tau):   # strict: a tie keeps the earlier step
+            best[k] = (tau, t)
+    return dict(sorted(best.values()))
+
+
+def _check_consistent_pair(source, T, tol=1e-6):
+    """``ImasSource.ida_timing="ida_fuse"``: the dd step *T* and the IDA slice
+    that will be read (the file's nearest to ``ida_time``, else *T*) must be one
+    of :func:`consistent_pairs`' pairs, else :class:`IdaTimeNotSimulated` (not
+    attempted).  Returns the check's status: ``"checked"``, or why it was not
+    made (no ``ida_provenance.json`` / ``time_grid.json`` beside the dd, or a
+    table naming another IDA file)."""
+    import json
+    import warnings
+    run = os.path.dirname(os.path.abspath(source.ids_path))
+    prov_path = os.path.join(run, "ida_provenance.json")
+    if T is None or not all(os.path.isfile(os.path.join(run, f))
+                            for f in ("ida_provenance.json", "time_grid.json")):
+        return "absent"
+    try:
+        with open(prov_path) as fh:
+            ida_file = json.load(fh).get("ida_file")
+    except (OSError, ValueError):
+        return "unreadable"
+    if ida_file is None or os.path.basename(str(ida_file)) != os.path.basename(str(source.ida_path)):
+        warnings.warn(f"ida_hybrid: {prov_path} names another IDA file ({ida_file!r}); "
+                      "the consistent-pair rule of ida_timing='ida_fuse' is not applied")
+        return "not bound"
+    from .ida import ida_time_base
+    tt = np.asarray(ida_time_base(source.ida_path), dtype=float).ravel()
+    t_req = T if getattr(source, "ida_time", None) is None else float(source.ida_time)
+    t_ida = float(tt[np.argmin(np.abs(tt - t_req))])
+    pairs = consistent_pairs(prov_path)
+    t_pair = next((t for tau, t in pairs.items() if abs(tau - t_ida) <= tol), None)
+    if t_pair is None or abs(t_pair - float(T)) > tol:
+        raise IdaTimeNotSimulated(
+            f"ida_hybrid (ida_timing='ida_fuse'): IDA slice {t_ida:.9g} s and dd step "
+            f"{float(T):.9g} s are not a consistent pair of the FUSE run ("
+            + ("no reached step replayed that slice" if t_pair is None else
+               f"its consistent dd step is {t_pair:.9g} s") + "): not attempted")
+    return "checked"
+
+
 def _check_replay_pairing(ids_path, aux, tol=1e-6, *, ida_path=None):
     """``aux['pairing_consistent']``: whether FUSE's own replay_pairing
     (``ida_provenance.json`` beside ``ids_path``, written by the external
@@ -2200,8 +2382,14 @@ def read_imas_baseline(
     """
     from ..baseline import Baseline
 
-    dd = _load_dd(source.ids_path)
     T = source.time
+    if kinetic_source == "ida_hybrid" and getattr(source, "ida_path", None):
+        _ida_t = getattr(source, "ida_time", None)
+        _check_simulated(source.ids_path, T, T if _ida_t is None else _ida_t)
+    _pair_status = (_check_consistent_pair(source, T)
+                    if kinetic_source == "ida_hybrid" and getattr(source, "ida_path", None)
+                    and getattr(source, "ida_timing", "window") == "ida_fuse" else None)
+    dd = _load_dd(source.ids_path)
 
     # Which fast-pressure convention this dd was written in (factor of 3).
     # The metadata is resolved eagerly -- the reduction rule is needed to read the
@@ -2389,6 +2577,15 @@ def read_imas_baseline(
     jphi_rf = s_ip * to_jphi(_m * _parts["rf"])
     jphi_other = s_ip * to_jphi(_m * _parts["other"])
     jphi_saw = s_ip * to_jphi(_m * _saw)
+    # FUSE's heating, radiation and particle sources at this step, summed, for
+    # the per-draw chi_perp and tau_E (bouquet.transport)
+    _rho_cp = cp.get("grid", {}).get("rho_tor_norm")
+    dd_sources = (None if _rho_cp is None else dd_source_totals(
+        src_ids, isrc, _src_nt, _src_t, _rho_cp, t_cp=_t_cp, cp_half=_cp_half))
+    if dd_sources is not None:
+        _vtf = eq.get("vacuum_toroidal_field", {})
+        dd_sources.update(b0=abs(_slice_b0(eq, ie)), r0=float(_vtf.get("r0", np.nan)),
+                          core_profiles_time=_t_cp)
 
     # --- sawtooth model presence/amplitude at this slice (gate input only) ----
     # Read here, from the same parsed dd as the currents above (the cached,
@@ -2605,6 +2802,7 @@ def read_imas_baseline(
     if use_ida:
         T_ida = _hybrid_timing(source, T, eq["time"][ie], cp_ids["time"][ic], aux,
                                cp_times=_cp_time_grid(cp_ids))
+        aux["ida_time_match"]["consistent_pair"] = _pair_status
         (ne, te, ti, ni, Zeff, _omega,
          sigma_ne_ida, sigma_te_ida, sigma_ni_ida, sigma_ti_ida,
          _ida_read, _ni_fast_meta, _ida_map) = _merge_ida_kinetics(
@@ -2978,6 +3176,7 @@ def read_imas_baseline(
         source_current_sign_origin=cur_origin,
         source_b0_sign=b0_sign,
         source_time_match=source_time_match,
+        dd_sources=dd_sources,
     )
     # the third current bucket (owner decision D2), beside the solve split
     # (which carries it in jphi_ind; li_metrics["imas_current_conversion"])
