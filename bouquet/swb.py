@@ -499,6 +499,7 @@ def build_swb_context(bq, env):
     resampled inputs.  Puts ``mygs`` back on solve B first (generate_bouquet
     reads its drift / LCFS / warm-start references off ``mygs``)."""
     from functools import partial
+    from .filtering import resolve_inspec_bands
     from .swb_draws import SwbDraws
     bl, gc = bq.baseline, bq.config.generation
     if bl.coil_reg_target is None or bl.swb_baseline is None:
@@ -535,4 +536,8 @@ def build_swb_context(bq, env):
         np.asarray(bl.swb_seed_profile, dtype=float),
         swb_jind_sigma(env["sigma_jphi"], bl.jphi_total, bl.swb_seed_profile),
         stamp=stamp, jphi_pd=getattr(bl, "jphi_pd", None),
-        jind_clip=bool(getattr(gc, "swb_taper_source", False)))
+        jind_clip=bool(getattr(gc, "swb_taper_source", False)),
+        core_bands=resolve_inspec_bands(gc),
+        core_ref=(np.asarray(bl.psi_N, dtype=float),
+                  np.asarray(bl.jphi_total, dtype=float),
+                  np.asarray(env["sigma_jphi"], dtype=float)))
