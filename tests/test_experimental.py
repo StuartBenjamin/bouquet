@@ -12,6 +12,7 @@ import h5py
 import numpy as np
 import pytest
 
+import main_defaults as MD
 from bouquet import experimental as X
 from bouquet.config import (BouquetConfig, GenerationConfig, ImasSource,
                             ReconstructionSource, SolverConfig,
@@ -25,14 +26,14 @@ def _recon(tmp_path, profiles="x.cdf", **kw):
     return BouquetConfig(
         source=ReconstructionSource(geqdsk_path=str(tmp_path / "g"),
                                     profiles_path=str(tmp_path / profiles),
-                                    **kw),
+                                    **dict(MD.RECON, **kw)),
         solver=SolverConfig(mesh_path="unused"),
         output_header=str(tmp_path / "out"))
 
 
 def _imas(tmp_path, gen=None, unc=None, **kw):
     return BouquetConfig(
-        source=ImasSource(ids_path=str(tmp_path / "dd.json"), **kw),
+        source=ImasSource(ids_path=str(tmp_path / "dd.json"), **dict(MD.IMAS, **kw)),
         solver=SolverConfig(mesh_path="unused"),
         output_header=str(tmp_path / "out"),
         generation=gen or GenerationConfig(),

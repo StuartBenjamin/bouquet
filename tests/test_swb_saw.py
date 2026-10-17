@@ -9,6 +9,8 @@ import types
 import numpy as np
 import pytest
 
+import main_defaults as MD
+
 from bouquet import coords
 from bouquet import run as run_mod  # noqa: F401
 from bouquet import swb as swb_mod
@@ -473,7 +475,7 @@ def test_the_split_takes_the_pressure_term_off_a_toroidal_swb(fake_swb):
     the archived jphi_bs is SWB's minus p'G, jphi_pd is p'G, and the split
     still sums to SWB's total exactly (D2)."""
     from bouquet.physics import swb_pressure_term
-    ns = _run()
+    ns = _run(**MD.GEN)
     ns.mygs = _PGS()
     ns._swb_imas_baseline()
     bl = ns.baseline

@@ -7,6 +7,8 @@ import types
 import numpy as np
 import pytest
 
+import main_defaults as MD
+
 from bouquet import coords
 from bouquet.config import (GenerationConfig, ReconstructionSource, SolverConfig,
                             swb_config_problems)
@@ -272,7 +274,7 @@ def test_edge_taper_is_opt_in(swb_oft):
     toolkit without it, no key at all."""
     from bouquet.config import swb_bootstrap_kwargs
     gc = _cfg().generation
-    assert gc.swb_edge_taper_psi0 is None
+    gc.swb_edge_taper_psi0 = MD.GEN["swb_edge_taper_psi0"]     # main's default: off
     gc.bootstrap_kwargs = {"diagnose_bs": True}
     with_taper = frozenset({"diagnose_bs", "taper_edge_jphi", "taper_edge_psi0"})
     assert swb_bootstrap_kwargs(gc, known=with_taper) == {

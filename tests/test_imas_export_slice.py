@@ -26,6 +26,8 @@ import warnings
 import numpy as np
 import pytest
 
+import main_defaults as MD
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 _EX = os.path.join(os.path.dirname(_HERE), "examples", "D3D-like")
@@ -471,7 +473,7 @@ def test_an_ida_hybrid_read_of_a_cut_keeps_the_core_profiles_window(
     _ida_cdf(cdf, dd, T + 0.02)
     p0 = tmp_path / "multi.json"
     p0.write_text(json.dumps(dd))
-    kw = dict(ida_path=cdf, impurity_Z=6.0)
+    kw = dict(MD.IMAS, ida_path=cdf, impurity_Z=6.0)
     from bouquet.config import ImasSource
     from bouquet.io.imas import read_imas_baseline
 

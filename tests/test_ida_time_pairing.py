@@ -21,6 +21,7 @@ import pytest
 
 h5py = pytest.importorskip("h5py")
 
+import main_defaults as MD
 from bouquet.config import ImasSource
 from bouquet.io.imas import (IMAS_SINGLE_TIME_WINDOW_S, IdaTimeNotSimulated,
                              _check_replay_pairing, consistent_pairs, _hybrid_timing, match_ida_slice,
@@ -35,7 +36,7 @@ Z_IMP = 6.0
 #  the helpers in isolation
 # ---------------------------------------------------------------------------
 def _src(**kw):
-    return ImasSource(ids_path="x.json", **kw)
+    return ImasSource(ids_path="x.json", **dict(MD.IMAS, **kw))
 
 
 def test_ida_time_defaults_to_time_and_is_matched_exactly():
@@ -270,7 +271,7 @@ def _read(ddp, cdf, time=1.0, ks="ida_hybrid", **kw):
         warnings.simplefilter("ignore")
         return read_imas_baseline(
             ImasSource(ids_path=ddp, time=time, ida_path=cdf,
-                       impurity_Z=Z_IMP, **kw), kinetic_source=ks)
+                       impurity_Z=Z_IMP, **dict(MD.IMAS, **kw)), kinetic_source=ks)
 
 
 def test_the_reader_reads_the_kinetics_at_ida_time_and_the_currents_at_time(files):
