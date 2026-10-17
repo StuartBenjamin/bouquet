@@ -5555,6 +5555,7 @@ def generate_bouquet(
     write_ifile=False,
     ifile_npsi=129,
     ifile_ntheta=257,
+    compress_file_bytes=False,
     # the source orientation stamped with every i-file (issue #68):
     # {"source_current_sign": .., "source_b0_sign": ..} (None: not stamped)
     ifile_orientation=None,
@@ -6977,6 +6978,7 @@ def generate_bouquet(
         eqdsk_bytes=baseline_eqdsk_bytes,
         ifile_bytes=baseline_ifile_bytes,
         pfile_bytes=stored_pfile_bytes,
+        compress_file_bytes=compress_file_bytes,
         psi_N_kinetic=psi_N_kinetic,
         coil_currents=_bl_coil_dict,
         recon_lcfs_ref=recon_lcfs_ref,
@@ -8865,6 +8867,7 @@ def generate_bouquet(
             # on its archived state -- engine -- else the baseline's)
             fixed_currents=(diagnostics.get("fixed_currents")
                             or _fixed_channels),
+            compress_file_bytes=compress_file_bytes,
         )
         if _ifile_rec is not None:
             stamp_group_attrs(header, scan_key, count, _ifile_rec)
