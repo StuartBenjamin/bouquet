@@ -199,11 +199,14 @@ psi_N in [0.1, 0.98]:
   measured 18.7 mm against the 10 mm bound). Measured on the pfast pairing
   (2026-10-16, all three methods): psi_N-held up to 4.8-5.7 mm, Phi_N-held up
   to 0.8-1.1 mm, Phi_N-held nearer at every node; ne_misfit 0.58-0.69 %
-  (psi_N-held) vs 0.16-0.17 % (Phi_N-held). The bars are unchanged.
+  (psi_N-held) vs 0.14-0.17 % (Phi_N-held) (re-measured 2026-10-17: the same
+  ranges, the Phi_N-held ne_misfit down to 0.14 % on the engine method). The
+  bars are unchanged.
 
 `tests/test_swb_systematics_solver.py` (`-m solver`; needs an OFT whose
 solve_with_bootstrap takes x, jphi_fixed, p_fixed): one swb baseline, then
-(the "measured" values below were re-measured 2026-10-16 on the total-pressure
+(the "measured" values below were re-measured 2026-10-16, and again 2026-10-17
+with the same values, on the total-pressure
 pairing, `g_synthetic_pfast.geqdsk` as the LCFS source and
 `diiid_profs_synthetic_pfast.cdf` as the IDA file -- section 2b)
 * sigma=0 draw after a perturbed draw = solve B bit for bit (li_3, q0, Ip,
