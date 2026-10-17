@@ -895,13 +895,45 @@ class Bouquet(SwbBaseline):
         self._geom.apply(mygs)
 
     def point_solver(self, geom=None) -> "Bouquet":
-        """Point the solver at a baseline's geometry (default: this config's source) and reset to it."""
-        from .solver_geometry import case_geometry
-        self._geom = geom if geom is not None else case_geometry(self.config.source, self.config.solver)
+        """Point the solver at a baseline's geometry (default: this config's source) and reset to it.
+        The unified engine's geometry holds the standard boundary constraint (#84,
+        :func:`bouquet.solver_geometry.standard_isoflux`); the legacy and swb routes the source
+        boundary at ``ISOFLUX_WEIGHT`` per point, as before."""
+        from .solver_geometry import case_geometry, standard_isoflux_for
+        self._geom = geom if geom is not None else case_geometry(
+            self.config.source, self.config.solver,
+            standard=standard_isoflux_for(getattr(self.config, "generation", None)))
         self._reset_solver_state()
         return self
 
     # ── stage 2: baseline (reconstruction OR imas) ----------------------
+    def _warn_legacy_route(self, sm=None) -> bool:
+        """One ``DeprecationWarning`` per run when this run resolves to the
+        legacy route (``reconstruction_engine="legacy"`` or
+        ``solve_method="legacy"``; removal in 1.5, #90). Called where the run
+        is resolved (:meth:`prepare_baseline`, the draw method); later calls
+        on the same run are silent. The warning is attributed to the first
+        caller outside bouquet, so the default warning filters show it in a
+        script or notebook. Returns True when it warned."""
+        if getattr(self, "_legacy_route_warned", False):
+            return False
+        from .config import LEGACY_ROUTE_DEPRECATION, solve_method_of
+        if sm is None:
+            sm = solve_method_of(self.config.generation)
+        if sm != "legacy":
+            return False
+        import os
+        import sys
+        import warnings
+        pkg = os.path.dirname(os.path.abspath(__file__)) + os.sep
+        level, f = 1, sys._getframe(0)
+        while f is not None and os.path.abspath(f.f_code.co_filename).startswith(pkg):
+            f, level = f.f_back, level + 1
+        warnings.warn(LEGACY_ROUTE_DEPRECATION, DeprecationWarning,
+                      stacklevel=level)
+        self._legacy_route_warned = True
+        return True
+
     @_baseline_negative_psep_named
     def prepare_baseline(self) -> "Baseline":
         """Resolve the baseline from ``config.source`` and cache it.
@@ -912,7 +944,8 @@ class Bouquet(SwbBaseline):
         """
         from .baseline import resolve_baseline
         from .config import ImasSource, resolve_solve_method
-        resolve_solve_method(self.config.generation)
+        # (called on the class: test stand-ins pass a namespace as self)
+        Bouquet._warn_legacy_route(self, resolve_solve_method(self.config.generation))
         # EXPERIMENTAL features (bouquet.experimental.REGISTRY): one
         # ExperimentalFeatureWarning each, naming its validation TODO; the
         # list goes on the baseline record and into the archive
@@ -6615,6 +6648,52 @@ class Bouquet(SwbBaseline):
             raise self._swb_source_unavailable()
         return coords.swb_seed(psi_N, coords.psi_at(mygs, psi_N, coord)), {}
 
+    def _note_axis_scan(self, axs):
+        """Record the scan's axis stamp (:func:`bouquet.engine_draws.
+        stamp_axis_scan`) on the session: ``Bouquet.engine_axis_bimodality``
+        (the per-scan bimodality of the archived draws' axis positions,
+        ``None`` on a scan without axis records) and, when the stamp put
+        ``bistability_source="draws"`` on the archived baseline, the same on
+        ``Baseline.engine["bistability"]``; a bimodal scan is printed and
+        warned.  Reported, never a filter."""
+        bim = (axs or {}).get("bimodality")
+        self.engine_axis_bimodality = bim
+        bl = getattr(self, "baseline", None)
+        eng = getattr(bl, "engine", None)
+        src = (axs or {}).get("bistability_source")
+        if (src != "draws" and isinstance(eng, dict)
+                and (eng.get("bistability") or {}).get(
+                    "bistability_source") == "draws"):
+            # another scan's evidence: removed also when this scan has no
+            # axis record or too few draws to test
+            bis = dict(eng["bistability"])
+            bis.pop("bistability_source", None)
+            bis.pop("draws_evidence", None)
+            eng["bistability"] = bis
+        if not bim or bim.get("axis_bimodal") is None:
+            return
+        from .engine import axis_bimodality_text
+        print(f"[axis] scan {self.config.generation.scan_key!r}: "
+              + axis_bimodality_text(bim), flush=True)
+        if isinstance(eng, dict):
+            bis = dict(eng.get("bistability") or {})
+            if src == "draws":
+                bis.update(bistability_source="draws", draws_evidence=dict(
+                    centres_dZ_mm=bim["centres_dZ_mm"], counts=bim["counts"],
+                    gap_mm=bim["gap_mm"], n=bim["n"],
+                    version=bim["version"],
+                    reconstruction_outcome=bis.get("outcome")))
+                eng["bistability"] = bis
+        if bim["axis_bimodal"]:
+            import warnings
+            warnings.warn(
+                "the archived draws' magnetic-axis positions are BIMODAL ("
+                + axis_bimodality_text(bim) + ")"
+                + ("; the reconstruction's bistability check did not see it: "
+                   "bistability_source='draws' stamped on the baseline"
+                   if src == "draws" else ""),
+                RuntimeWarning, stacklevel=3)
+
     def verify_sigma0_consistency(self, tol_frac=0.02, draw_route=True,
                                   draw_routes=None):
         """Regression guard: the draw pipeline must reproduce the baseline
@@ -7012,7 +7091,7 @@ class Bouquet(SwbBaseline):
         # reconstruction's own term list)
         out["coil_reg"] = (out["record"] or {}).get("coil_reg")
         # the zero-perturbation draw's archived axis against the
-        # reconstruction's and its branch flag (engine.axis_branch_record):
+        # reconstruction's and its displacement flag (engine.axis_shift_record):
         # REPORTED, not gated
         out["axis"] = (out["record"] or {}).get("axis")
         if loop is not None:
@@ -8249,6 +8328,12 @@ class Bouquet(SwbBaseline):
                 print(f"[until-N] target met: {_got}/{_tgt} in-spec draws "
                       f"in {_tries} attempts.")
 
+        # the in-spec rule AS APPLIED: generate_bouquet switches the q0 gate
+        # off for a sawtoothing reconstruction (q0 < 1), and the stamp must
+        # not name a gate no draw was judged under (review F1)
+        from .filtering import apply_q0_gate_record
+        _inspec_bands, _inspec_extra = apply_q0_gate_record(
+            _inspec_bands, _inspec_extra, getattr(_m, "q0_gate", None))
         # The baseline's self-consistent bootstrap record (schema v3 jbs_loop
         # block on _baseline; a frozen baseline carries none).
         from .utils import store_baseline_jbs_loop
@@ -8261,15 +8346,19 @@ class Bouquet(SwbBaseline):
         # plus the opt-in bands) on the scan, and beta_p / Lambda on every
         # draw that does not carry them yet (the legacy routes; an engine draw
         # stamps its own at archive time)
-        from .engine_draws import stamp_axis_branch_count
+        from .engine_draws import stamp_axis_scan
         from .filtering import stamp_inspec_rule, stamp_shafranov
         try:
             stamp_inspec_rule(header, gc.scan_key, _inspec_bands,
                               extra=_inspec_extra)
             stamp_shafranov(header, gc.scan_key)
-            # the count of the scan's engine draws on the other axis branch
-            # (n_axis_other; reported, never a filter)
-            stamp_axis_branch_count(header, gc.scan_key)
+            # the scan's axis record: the count of its engine draws displaced
+            # beyond AXIS_BRANCH_FRAC x a and the per-scan bimodality of
+            # their axis positions (+ bistability_source="draws" on the
+            # baseline when bimodal under a "single" stamp); reported, never
+            # a filter
+            _axs = stamp_axis_scan(header, gc.scan_key)
+            self._note_axis_scan(_axs)
         except (OSError, KeyError) as _exc:
             import warnings as _w
             _w.warn(f"the in-spec rule ({_inspec_bands.rule()}) could not be "
@@ -8378,6 +8467,7 @@ class Bouquet(SwbBaseline):
         from .config import resolve_solve_method
         from .draw_methods import DrawMethod
         sm = resolve_solve_method(self.config.generation)
+        self._warn_legacy_route(sm)
         if sm == "engine":
             from .engine_draws import build_generate_context
             _s0 = getattr(self, "_sigma0_route", None)
@@ -8620,12 +8710,28 @@ class Bouquet(SwbBaseline):
             from .filtering import resolve_inspec_bands
             bands = resolve_inspec_bands(self.config.generation)
             extra = {"route": "post-hoc re-filter"}
-        except Exception:
+        except (KeyError, TypeError) as _exc:
+            # a stand-in config without the rule's fields: the archive's
+            # flags are left as they are -- loudly (anything else propagates)
+            import warnings as _w
+            _w.warn(
+                f"filter(): the in-spec rule could not be resolved from this "
+                f"config ({type(_exc).__name__}: {_exc}); the archive's band "
+                "flags and `selected` are left as stamped, not re-judged",
+                UserWarning, stacklevel=3)
             return {"rule": None, "refiltered": False, "previous_rule": None}
         try:
             prev_rule, prev = read_inspec_rule(header, scan_key=sk)
+            from .filtering import (Q0_GATE_RECORD_KEY, apply_q0_gate_record,
+                                    read_inspec_record)
+            _prev_rec = read_inspec_record(header, scan_key=sk) or {}
         except (OSError, KeyError):
             return {"rule": None, "refiltered": False, "previous_rule": None}
+        # generation switched the configured q0 gate off for this scan (a
+        # sawtoothing reconstruction): the rule it was judged under -- and
+        # the one a re-filter must reproduce -- has no q0 gate
+        bands, extra = apply_q0_gate_record(
+            bands, extra, _prev_rec.get(Q0_GATE_RECORD_KEY))
         if prev is not None and prev.same_as(bands):
             return {"rule": bands.rule(), "refiltered": False,
                     "previous_rule": prev_rule}

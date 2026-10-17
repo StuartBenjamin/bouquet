@@ -34,7 +34,7 @@ Stage order follows one draw through `generate_bouquet`.
 | `draw` (legacy) | per draw | `perturb_kinetic_equilibrium(...)` | `GenerateEngineDraws.draw` | `swb_draw` |
 | `rejection_reason`, `annotate_rejection` | per draw | `_draw_rejection_reason` | adds the engine codes (caps, closure refused, non-finite) | legacy |
 | `iso_update` (flag) | after Ip align | isoflux update | same | no |
-| `homotopy_isoflux` (none) | after Ip align | `None`: re-point the isoflux to the draw's traced LCFS, every point at weight 200 | the reconstruction's own isoflux pattern (its points and weights), stamped per draw (`engine["homotopy"]["isoflux"]`) | not reached (`iso_update=False`) |
+| `homotopy_isoflux` (none) | after Ip align | `None`: re-point the isoflux to the draw's traced LCFS, every point at weight 200 | the reconstruction's own isoflux pattern (its points and weights: the standard per-unit-length set of #84 unless `SolverConfig.isoflux_pts` is given), stamped per draw (`engine["homotopy"]["isoflux"]`, with `weight_total`) | not reached (`iso_update=False`) |
 | `drift_without_homotopy` (none) | coils | None: homotopy | `engine_draw_homotopy=False`: measured drift | always measured drift (no bounds) |
 | `homotopy` (flag), `cap_solver`/`uncap_solver`, `hit_cap`, `announce_cap`, `announce_rollback_failed` | homotopy | homotopy, no cap | homotopy under `engine_draw_solve_maxits`, cap events recorded | no homotopy |
 | `post_homotopy_jbs`, `post_homotopy_split` (legacy) | post-homotopy | `_post_homotopy_jbs`, `_decompose_draw_currents` | the engine draw's own passes and split | not reached |

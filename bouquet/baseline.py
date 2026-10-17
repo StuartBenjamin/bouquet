@@ -445,7 +445,8 @@ def _same_path(a, b) -> bool:
         return False
 
 
-def zeff_sigma_eligibility(source, ida_path, kinetic_source=None):
+def zeff_sigma_eligibility(source, ida_path, kinetic_source=None,
+                           baseline=None):
     """May a measured Z_eff envelope be paired with this baseline?
 
     Returns ``(eligible, reason)``.  ``reason`` is ``""`` when eligible and a
@@ -475,7 +476,8 @@ def zeff_sigma_eligibility(source, ida_path, kinetic_source=None):
     if isinstance(source, ReconstructionSource):
         own, own_kind = str(getattr(source, "profiles_path", "") or ""), "profiles file"
     elif (isinstance(source, ImasSource)
-          and resolved_ni_source(source, kinetic_source) not in IDA_ION_ROUTES):
+          and resolved_ni_source(source, kinetic_source, baseline=baseline)
+          not in IDA_ION_ROUTES):
         # the dd route (ni_source="standard", or "auto" off ida_hybrid): the
         # IMAS Z_eff is the dd's, never the IDA one
         return False, (
@@ -878,7 +880,12 @@ def resolve_uncertainty(config, baseline) -> dict:
     from .experimental import (STANDARD_NI_SOURCE, ida_ion_route_on,
                                resolved_ni_source)
     _kin_src = getattr(config.generation, "kinetic_source", None)
-    _ion_route = ida_ion_route_on(src, unc, kinetic_source=_kin_src)
+    # the route the baseline's reader resolved, when it recorded one (ONE
+    # route per run: the uncertainty, the clips and the Z_eff ladder below
+    # all follow it; bouquet.experimental.baseline_kinetics_route)
+    _ion_route = ida_ion_route_on(src, unc, kinetic_source=_kin_src,
+                                  baseline=baseline)
+    out_ni_source = resolved_ni_source(src, _kin_src, baseline=baseline)
     # IDA file for the sigmas: unc.ida_path, else the source's own .cdf.
     ida_path = unc.ida_path
     if ida_path is None:
@@ -925,8 +932,8 @@ def resolve_uncertainty(config, baseline) -> dict:
             ida = read_ida(
                 ida_path, time=_t_req,
                 sigma_mode=unc.sigma_mode, sigma_method=unc.sigma_method,
-                ni_source=(resolved_ni_source(src, _kin_src)
-                           if _ion_route else STANDARD_NI_SOURCE),
+                ni_source=(out_ni_source if _ion_route
+                           else STANDARD_NI_SOURCE),
                 # the carbon tier's Z(Z-1) propagation is quadratically
                 # Z-sensitive; the kinetics loader already passes this, and
                 # omitting it here silently pinned the sigma math to carbon
@@ -1156,7 +1163,7 @@ def resolve_uncertainty(config, baseline) -> dict:
         # spelling of the very same file.  It returns the REASON as well as
         # the verdict so the fallback can be warned about and recorded.
         _zeff_baseline_is_ida, _zeff_inelig = zeff_sigma_eligibility(
-            src, ida_path, kinetic_source=_kin_src)
+            src, ida_path, kinetic_source=_kin_src, baseline=baseline)
         _z_env, _z_label, _z_meta = resolve_zeff_envelope(
             getattr(unc, "zeff_sigma_source", "auto"),
             unc.zeff_scalar_sigma,
@@ -1177,6 +1184,9 @@ def resolve_uncertainty(config, baseline) -> dict:
             psi_N=_psi_tpl,
         )
         user_sigmas["zeff"] = _z_env
+        # which ladder ran: the run's one resolved route
+        _z_meta = dict(_z_meta, ladder="resolved" if _ion_route
+                       else "standard")
         out["zeff_sigma_tier"] = _z_meta
         out["sigma_source"]["zeff"] = {
             "kind": {"carbon-propagated": "ida", "VB-measured": "ida",
@@ -1210,10 +1220,15 @@ def resolve_uncertainty(config, baseline) -> dict:
         bool(_nfz) if _nfz is not None else
         bool(_kind["ni"] == "assumed" or _ida_pair) if _ion_route
         else True)
-    # the PR #56 sampler clips (EXPERIMENTAL; kinetic_sampler_clips): the
-    # explicit setting, else on only with a PR #56 kinetic feature
+    # the PR #56 sampler clips (GRADUATED["kinetic_sampler_clips"], owner
+    # decision 2026-10-14): the explicit setting, else ON whenever the
+    # run's resolved route is the measured IDA one -- the IDA-hybrid
+    # DEFAULT included -- or with the beam subtraction or
+    # fuse_zeff_fast_ions; every clip that fires is counted per draw
     from .experimental import kinetic_clips_on
-    out["kinetic_clips"] = bool(kinetic_clips_on(config))
+    out["kinetic_clips"] = bool(kinetic_clips_on(config, baseline=baseline))
+    # the Z_eff / n_i route this envelope was resolved on (the reader's)
+    out["ni_source"] = str(out_ni_source)
     out["zeff_dne"] = (_to_kin(ida.zeff_dne)
                        if _ida_pair and out["ni_from_zeff"] else None)
     if bool(getattr(unc, "log_sigma_sources", True)) and "zeff" in user_sigmas:
