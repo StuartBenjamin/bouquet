@@ -6,7 +6,7 @@ RECON = dict(ni_source="standard")
 #: ImasSource
 IMAS = dict(ida_timing="window", zeff_fast_ions=False)
 #: GenerationConfig
-GEN = dict(swb_edge_taper_psi0=None)
+GEN = dict(swb_edge_taper_psi0=None, compress_file_bytes=False)
 
 
 def from_imas(*args, **kw):

@@ -1956,7 +1956,8 @@ class GenerationConfig:
     ifile_ntheta: int = 257
     # Store each group's g-file / p-file / i-file bytes as a gzip-compressed uint8 array
     # (the g-file ~2.7x smaller) instead of opaque np.void; bytes(ds[()]) reads either.
-    compress_file_bytes: bool = False
+    # PSFC_dev: on by default (main: False).
+    compress_file_bytes: bool = True
 
     #: Set from the ``swb_saw_*`` fields, never from ``bootstrap_kwargs``.
     _SAW_RESERVED = frozenset(

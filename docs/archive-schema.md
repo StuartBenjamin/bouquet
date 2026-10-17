@@ -56,7 +56,7 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │                                  raises); a later baseline/draw write moves it to
     │                                  [refused_reason_superseded]
     ├── _baseline/                     written once per scan point
-    │   ├── eqdsk, [pfile]             byte-perfect g-file / p-file (gzip uint8)
+    │   ├── eqdsk, [pfile]             raw byte-perfect g-file / p-file
     │   ├── [dd_sources/]              IMAS sources only: FUSE's core_sources at the dd step,
     │   │                              summed (rho_tor_norm, Q_e, Q_i, Gamma_e; attrs P_net,
     │   │                              P_rad, b0, r0, sources_json (each source's edge
