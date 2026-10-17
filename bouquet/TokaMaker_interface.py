@@ -178,7 +178,8 @@ DRAW_REJECTION_REASONS = {
     # draw_wall_budget_s), checked between solves and before archiving
     "draw_wall_budget": "the draw's elapsed wall time exceeded "
                         "GenerationConfig.draw_wall_budget_s (checked before "
-                        "each of its solves and once before archiving; a "
+                        "each of its solves, the opt-in rescue's retries "
+                        "included, and once before archiving; a "
                         "running GS solve is never interrupted); the "
                         "rejection the budget pre-empted, if any, is kept "
                         "as masked_reason",
@@ -290,8 +291,9 @@ class DrawSolveGuard:
     def __init__(self, mygs, maxits=DRAW_SOLVE_MAXITS, retry_urf=DRAW_SOLVE_RETRY_URF,
                  loose_tol=DRAW_SOLVE_LOOSE_TOL, wall_budget_s=None):
         #: the per-draw wall-clock budget [s] (GenerationConfig.
-        #: draw_wall_budget_s; None: off): checked before every draw solve
-        #: (:class:`DrawWallBudgetExceeded`) and by :meth:`check_wall_budget`
+        #: draw_wall_budget_s; None: off): checked before every draw solve,
+        #: each rescue retry included (:class:`DrawWallBudgetExceeded`), and
+        #: by :meth:`check_wall_budget`
         self.wall_budget_s = (None if wall_budget_s is None
                               else float(wall_budget_s))
         self._draw_t0 = None
@@ -402,6 +404,19 @@ class DrawSolveGuard:
                     steps.append(({"nl_tol": self.loose_tol},
                                   f"nl_tol={self.loose_tol:g}", self.loose_tol))
                 for settings, label, tol in steps:
+                    if self.check_wall_budget():
+                        # each rescue retry is a full solve: the budget is
+                        # checked before it like before any other draw
+                        # solve (review of #94, C6)
+                        rec["attempts"].append(dict(
+                            step=label, its=None,
+                            error="not started: draw_wall_budget"))
+                        rec["retry_seconds"] = time.perf_counter() - t1
+                        raise DrawWallBudgetExceeded(
+                            f"draw {self.draw}: elapsed wall "
+                            f"{self.over_budget[self.draw]:.1f} s exceeds "
+                            f"draw_wall_budget_s={self.wall_budget_s:g} s; "
+                            f"the rescue retry {label} was not started") from exc
                     n_its = len(self.its)
                     try:
                         out = self._retry(call, a, k, **settings)

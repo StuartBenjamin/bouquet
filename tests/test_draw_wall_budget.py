@@ -127,3 +127,40 @@ def test_a_slow_draw_is_rejected_by_generate_and_counted(tmp_path, monkeypatch):
     assert all(r["elapsed_s"] > 0.05 and r["wall_budget_s"] == 0.05
                for r in rej)
     assert "draw_wall_budget=2" in _rejection_summary(rej, 2, 0)
+
+
+def test_the_budget_is_checked_before_each_rescue_retry():
+    """Review of #94, C6: a capped draw solve that ends over the budget
+    starts no rescue retry (each is a full solve); the refusal is recorded
+    on the failed solve and raised as DrawWallBudgetExceeded, chained to
+    the cap error."""
+    from test_draw_solve_guard import FakeGS
+    from bouquet.TokaMaker_interface import (DrawWallBudgetExceeded,
+                                             DrawSolveGuard,
+                                             _draw_rejection_reason)
+
+    class SlowStuck(FakeGS):
+        def solve(self, return_its=False):
+            time.sleep(0.06)
+            return super().solve(return_its=return_its)
+
+    gs = SlowStuck(stuck={1}, escape="urf")
+    with DrawSolveGuard(gs, maxits=50, retry_urf=(0.3, 0.1),
+                        loose_tol=2e-5, wall_budget_s=0.03) as g:
+        g.begin_draw(0)
+        with pytest.raises(DrawWallBudgetExceeded) as ei:
+            gs.solve()            # starts in budget, ends over it, capped
+    assert len(gs.attempts) == 1                  # no retry ran
+    rec = g.records[-1]
+    assert rec["recovered_by"] is None
+    assert rec["attempts"] == [dict(step="urf=0.3", its=None,
+                                    error="not started: draw_wall_budget")]
+    assert "maxits" in str(ei.value.__cause__)
+    assert _draw_rejection_reason(ei.value, "perturb") == "draw_wall_budget"
+    # the same draw inside its budget is rescued as before
+    gs2 = FakeGS(stuck={1}, escape="urf")
+    with DrawSolveGuard(gs2, maxits=50, retry_urf=(0.3, 0.1),
+                        loose_tol=2e-5, wall_budget_s=60.0) as g2:
+        g2.begin_draw(0)
+        gs2.solve()
+    assert g2.records[-1]["recovered_by"] == "urf=0.3"

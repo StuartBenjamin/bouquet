@@ -71,6 +71,8 @@ or on a downgraded route now assert on.
     `clips` flag, archived under the new on-by-default rule (the `/3` string said "opt-in").
   - The VSC floor's docstrings and engine.md state what it shares with each metric (the
     constant only), replacing "the same scale the acceptance metric judges it".
+  - The wall budget is also checked before each of the opt-in rescue's retries (each a
+    full solve); a retry it refuses is recorded on the failed solve.
 
 ## Unreleased — the g-file and systematics notebooks re-executed on the thermal-only g-file
 
