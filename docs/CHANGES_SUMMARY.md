@@ -1,5 +1,23 @@
 # Bouquet — change summaries
 
+## Unreleased — the kinetic clips reach the engine-grid Z_eff
+
+- **Engine draws: the Z_eff floor at 1 now acts on the Z_eff the bootstrap
+  receives.** The sampler floored the drawn Z_eff channel on the kinetic grid,
+  but the engine hands the solve an increment, base + (drawn - drawn base), on
+  its own base Z_eff. On the plain IMAS route the channel is drawn around the
+  dd's own `zeff` while the base is the Z_eff recomputed from the dd's
+  densities; where the first sits above the second the sum fell below 1, and
+  with the clips on (the default since 2026-10-17) the draw was still refused
+  before any solve (`kinetics_nonphysical`). With the clips on the engine grid
+  is now floored too and the node count is archived as
+  `inputs.kinetic_sampler.eq_zeff_floor_1` (`clipped` includes it; the
+  `clips` counter set is unchanged). Draws whose Z_eff never fell below 1 are
+  unchanged seed for seed. On the synthetic dd at 1.2 s
+  (`test_boundary_balance_solver.py` yield, seed fixed): 10 of 10 attempts
+  reach a solve (was 3), 10 archived, 7 with the floor binding (80-125 of
+  the engine grid's nodes). Explicit `kinetic_clips=False` is unchanged.
+
 ## Unreleased — the goldens regenerated at main 27979d1 (the 1.4.0 code)
 
 - **Goldens.** The g-file h5 golden and the IDS golden (seed 12345) are the
