@@ -6995,6 +6995,13 @@ class Bouquet(SwbBaseline):
           (:meth:`_sigma0_geometry_gates`);
         * a draw that is REJECTED fails (``rejection``).
 
+        The kinetic clips stay on for this draw (the same path as every
+        draw); their counters are recorded (``sigma0_clips``) and a clip that
+        fired is recorded as the finding ``baseline_outside_physical_window``
+        (:func:`bouquet.engine_draws.sigma0_clip_finding`) -- the baseline
+        itself lies outside the clips' window there.  It does not change the
+        verdict.
+
         ``passed`` needs every stage.  The top-level ``r_j`` / ``r_I`` /
         ``dl_i`` / ``dq0`` / ``dq95`` are the ARCHIVED state's (what a draw
         delivers); the identity and loop fields are the loop stage's.
@@ -7097,6 +7104,18 @@ class Bouquet(SwbBaseline):
                 max_F_drift_pct=d0.get("max_F_drift_pct"),
                 max_VSC_drift_pct=d0.get("max_VSC_drift_pct"))
         out["record"] = (d0 or {}).get("engine")
+        # the kinetic clips at sigma=0 (review of #94, P2): counted, and a
+        # clip that fired is a FINDING on the baseline, recorded beside the
+        # verdict (which it does not change)
+        from .engine_draws import sigma0_clip_finding
+        out["sigma0_clips"], _bopw = sigma0_clip_finding(out["record"])
+        if _bopw is not None:
+            out["baseline_outside_physical_window"] = _bopw
+            print("[sigma0-check engine route] FINDING: baseline outside the "
+                  "physical window -- kinetic clips fired at sigma=0: "
+                  + ", ".join(f"{k}={v}" for k, v in _bopw["clips"].items())
+                  + " node(s) (recorded as baseline_outside_physical_window; "
+                  "the verdict is unchanged)", flush=True)
         # the coil regularisation the draw's loop solved under (the
         # reconstruction's own term list)
         out["coil_reg"] = (out["record"] or {}).get("coil_reg")

@@ -1362,7 +1362,11 @@ until-N run with a fixed seed can then archive a different set; the stamp and
 the rejection count say when it bit. The sigma=0 verification draw
 (`verify_sigma0_consistency`) runs with the budget OFF and records so
 (`wall_budget`): it verifies reproduction, and a budget rejection there would be
-a false failure set by machine load.
+a false failure set by machine load. Its kinetic clips stay on (the same path as every
+draw); their counters are recorded (`sigma0_clips`), and a clip that fired at
+sigma=0 -- the baseline itself outside `Z_eff >= 1` or `0 <= n_i <= n_e - z_fast`
+there -- is recorded as `baseline_outside_physical_window` with the counts: a
+finding on the baseline, not a changed verdict.
 
 ## Deviations from the design note
 

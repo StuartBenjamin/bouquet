@@ -84,6 +84,10 @@ or on a downgraded route now assert on.
     (`wall_budget`): a reproduction check must not fail on machine load. The draws keep
     the 600 s default (owner decision 2026-10-16), which is wall-clock and therefore
     machine-dependent; that is now said in the config comment and engine.md.
+  - The sigma=0 verification counts the kinetic clips on its zero-perturbation draw
+    (`sigma0_clips`; the clips stay on, the same path as every draw) and, when one fired,
+    records `baseline_outside_physical_window` with the counts: a finding on the baseline,
+    not a changed verdict.
 
 ## Unreleased — the g-file and systematics notebooks re-executed on the thermal-only g-file
 

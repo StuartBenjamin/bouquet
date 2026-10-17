@@ -442,6 +442,37 @@ class EngineDrawContext:
             scale=float(scale), sampler=dict(zero_perturbation=True))
 
 
+def sigma0_clip_finding(record):
+    """``(clips, finding)`` of a zero-perturbation draw's engine *record*:
+    the kinetic sampler's per-draw clip counters (``inputs.kinetic_sampler.
+    clips``; ``None`` when the record carries none) and, when any clip moved
+    a node, the finding ``baseline_outside_physical_window`` (the clips that
+    fired and their node counts), else ``None``.
+
+    At sigma = 0 every drawn profile is the baseline itself, so a clip that
+    fires there moved the BASELINE: its Z_eff dips below 1, or its n_i
+    leaves ``[0, n_e - z_fast]``, somewhere.  The clips stay on at sigma = 0
+    (the same path as every draw); the sigma = 0 verification counts them
+    and records the finding -- a finding, not a verdict: the comparison
+    arithmetic is untouched (review of #94, P2)."""
+    ks = (((record or {}).get("inputs") or {}).get("kinetic_sampler") or {})
+    clips = ks.get("clips")
+    if clips is None:
+        return None, None
+    clips = {str(k): int(v) for k, v in dict(clips).items()}
+    fired = {k: v for k, v in clips.items() if v > 0}
+    if not fired:
+        return clips, None
+    return clips, dict(
+        clips=fired, clips_enabled=ks.get("clips_enabled"),
+        sampler_version=ks.get("version"),
+        note=("a kinetic clip fired on the zero-perturbation draw, so the "
+              "baseline itself lies outside the physical window the clips "
+              "enforce (Z_eff >= 1, 0 <= n_i <= n_e - z_fast) at the counted "
+              "nodes; the sigma=0 draw carries the clipped profile there. "
+              "Reported, not a verdict"))
+
+
 def flux_range(m):
     """``|psi_b - psi_a|`` [Wb/rad] of a backend measurement (its geometry's
     ``dpsi_dpsiN``), or ``None``."""
