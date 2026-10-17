@@ -115,10 +115,10 @@
   "source_fixture": "D3Dlike_ids_golden_slim.h5",
   "source_provenance": {
     "prov_bouquet_branch": "main",
-    "prov_bouquet_commit": "49ebebb7320f0bbdfa5e21ae712443219e1b3612",
+    "prov_bouquet_commit": "27979d1eff2c78a9e0871675202d8015c0c3842d",
     "prov_bouquet_dirty": false,
     "prov_bouquet_version": "1.3.1",
-    "prov_created": "2026-10-16T00:01:27",
+    "prov_created": "2026-10-17T10:31:41",
     "prov_generator": "make_golden_fixture.py",
     "prov_generator_args_eqdsk": "subset",
     "prov_generator_args_golden": "ids",

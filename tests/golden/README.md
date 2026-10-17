@@ -3,9 +3,10 @@
 Git-tracked regression fixtures. Every golden is a real bouquet run, made by
 `regenerate_golden_run.py` and slimmed by `make_golden_fixture.py`. The recipe
 runs the synthetic test fixtures in `tests/data/` at the library's defaults.
-**Status (2026-10-16):** all three goldens are such runs, at main `49ebebb`,
-the g-file and legacy ones on the corrected, thermal-only g-file (see "The
-current goldens" below).
+**Status (2026-10-17):** all three goldens are such runs, at main `27979d1`
+(1.4.0: the homotopy's VSC bound floor, the boundary-partition stamp, the
+per-draw wall budget, the kinetic clips on by default), the g-file and legacy
+ones on the thermal-only g-file (see "The current goldens" below).
 
 | golden | source | engine | files | read by |
 |--------|--------|--------|-------|---------|
@@ -174,10 +175,10 @@ set" above (`tests/_harness.py` prints them in a mismatch message), with
 `BOUQUET_OFT_BUILD_ID` naming the installed build; review the git diff of
 the manifests / JSON before committing.
 
-## The current goldens (2026-10-16)
+## The current goldens (2026-10-17)
 
 **The g-file h5 golden and the IDS golden** are the recipe's runs at bouquet
-main `49ebebb` (a clean tree), OFT `fix/jphi-update-ravgs-and-nonfinite-abort`
+main `27979d1` (a clean tree), OFT `fix/jphi-update-ravgs-and-nonfinite-abort`
 7da4f18 (build `20260929_7da4f18`, lib `7885fedc1e62`), one thread; the
 g-file golden on the corrected, thermal-only `g_synthetic.geqdsk` +
 `diiid_profs_synthetic.cdf`. The defaults they embody: the in-spec rule is
@@ -186,7 +187,13 @@ radial sigma templates (the profile file's own envelopes here), the warm
 baseline re-solve in `generate()`, engine draws held on the reconstruction's
 isoflux with the boundary constraint weighted per unit length, `check_bistability`
 on, the coil-saturation test against the installed bound, and the Redl epsilon
-`(R_max - R_min)/(R_max + R_min)` (`evaluate_jBS/4`).
+`(R_max - R_min)/(R_max + R_min)` (`evaluate_jBS/4`); since `27979d1` also the
+homotopy's VSC bound floor (10 kA), the report-only boundary-partition probe
+(stamped in the baseline's `solver_geometry_json`: g-file 1.16, IDS 0.95), the
+600 s per-draw wall budget (stamped in the generation provenance; 0 rejections
+here) and the kinetic clips on by default (no clip fired on any draw of
+either golden). Their draws, counts and manifests' numbers are those of the
+`49ebebb` regeneration (only the provenance and the new stamps differ).
 
 **`in_spec` is the in-spec rule's verdict.** Since main `49ebebb`,
 `generate_bouquet` judges every draw by the rule before archiving it (the
@@ -198,8 +205,8 @@ the drift test; the IDS golden: 18 of 20).
 
 | golden | attempts | archived | in spec (`coil_drift_in_spec`) | reconstruction | draws | bistability | sigma=0 probe |
 |--------|----------|----------|-------------------------------|----------------|-------|-------------|---------------|
-| g-file, unified | 20 | 18 (2 homotopy_saturated) | 18 (9) | 71 s | 32 min | single | PASS (archived dl_i -1.5e-5, dq0 +4.1e-5, r_j 5.6e-5, r_I 7.8e-6) |
-| IDS, unified | 20 | 20 | 20 (18) | 68 s | 31 min | single | PASS (archived dl_i -9.6e-6, dq0 -4.7e-5, r_j 1.4e-4, r_I 1.4e-5) |
+| g-file, unified | 20 | 18 (2 homotopy_saturated) | 18 (9) | 76 s | 32 min | single | PASS (archived dl_i -1.5e-5, dq0 +4.1e-5, r_j 5.6e-5, r_I 7.8e-6) |
+| IDS, unified | 20 | 20 | 20 (18) | 73 s | 31 min | single | PASS (archived dl_i -9.6e-6, dq0 -4.7e-5, r_j 1.4e-4, r_I 1.4e-5) |
 
 * The IDS route archives no schema `jbs_loop` block on its `_baseline` (the
   g-file route does); its reconstruction's loop verdict is in the baseline's

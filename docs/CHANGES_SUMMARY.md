@@ -1,5 +1,18 @@
 # Bouquet — change summaries
 
+## Unreleased — the goldens regenerated at main 27979d1 (the 1.4.0 code)
+
+- **Goldens.** The g-file h5 golden and the IDS golden (seed 12345) are the
+  recipe's runs at main 27979d1, so their archives now carry the homotopy's
+  VSC bound floor, the report-only boundary-partition stamp (g-file 1.16, IDS
+  0.95, both inside [1/3, 3]), the per-draw wall budget (600 s; 0 rejections)
+  and the kinetic clips on by default (no clip fired on any archived draw).
+  Counts unchanged from the previous regeneration: g-file 20 attempts, 18
+  archived (2 homotopy_saturated), 18 in spec (9 pass the old drift test);
+  IDS 20 / 20 / 20 (18). The manifests' numbers are identical; only the
+  provenance differs. No golden tolerance changed; the recipe-identity checks
+  pass on both.
+
 ## Unreleased — the boundary constraint at a constant total with a reported partition; the homotopy's VSC bound floor; a per-draw wall budget
 
 **Kinetic sampler clips on by default on every route (owner decision 2026-10-17).**
