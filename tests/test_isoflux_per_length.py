@@ -443,3 +443,57 @@ def test_a_coarser_writer_of_the_same_boundary_gets_the_same_constraint_strength
     assert np.sum(w_sub) == pytest.approx(np.sum(g1.iso_w), rel=1e-12)
     assert i_sub["boundary_length_m"] == pytest.approx(
         g1.record()["boundary_length_m"], rel=5e-3)
+
+
+# ---------------------------------------------------------------------------
+# SolverConfig.isoflux_weight_total: validated, and an ignored override is said
+# (review of #94, C2)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bad", [0, 0.0, -2e5, float("nan"), float("inf"), True, False,
+                                 "2e5", [2e5]])
+def test_the_total_override_is_refused_unless_finite_and_positive(bad):
+    from bouquet.config import SolverConfig
+    with pytest.raises(ValueError, match="isoflux_weight_total"):
+        SolverConfig(mesh_path="m.h5", isoflux_weight_total=bad)
+
+
+@pytest.mark.parametrize("good", [None, 2e5, 300000, np.float64(1.5e5), np.int64(4)])
+def test_the_total_override_accepts_none_or_a_positive_number(good):
+    from bouquet.config import SolverConfig
+    sc = SolverConfig(mesh_path="m.h5", isoflux_weight_total=good)
+    assert sc.isoflux_weight_total == (None if good is None else float(good))
+
+
+def test_an_override_with_user_weights_is_warned_and_recorded_as_ignored():
+    sc = _sc()
+    pts, w = _shape(40, corner=0.0), np.linspace(1.0, 2.0, 40)
+    sc.isoflux_pts, sc.isoflux_weights = pts, w
+    sc.isoflux_weight_total = 3e5
+    with pytest.warns(UserWarning, match=r"isoflux_weight_total=300000 is IGNORED: "
+                                         r"SolverConfig.isoflux_weights is given"):
+        geo = case_geometry(_gsrc(), sc)
+    assert geo.iso_w is w                                            # installed as given
+    bal = geo.record()["isoflux_balance"]
+    assert bal["mode"] == "as given"
+    assert bal["isoflux_weight_total_ignored"]["value"] == 3e5
+
+
+def test_an_override_on_the_legacy_route_is_warned_as_ignored():
+    sc = _sc()
+    sc.isoflux_weight_total = 3e5
+    with pytest.warns(UserWarning, match=r"IGNORED: the legacy route installs the boundary at "
+                                         r"ISOFLUX_WEIGHT=500 per point"):
+        geo = case_geometry(_gsrc(), sc, standard=False)
+    assert np.all(geo.iso_w == ISOFLUX_WEIGHT)
+
+
+def test_an_override_on_the_standard_set_is_not_warned():
+    import warnings as _w
+    sc = _sc()
+    sc.isoflux_weight_total = 3e5
+    with _w.catch_warnings():
+        _w.simplefilter("error", UserWarning)
+        geo = case_geometry(_gsrc(), sc)
+    assert geo.record()["isoflux_balance"]["mode"] == "override"
+    assert float(np.sum(geo.iso_w)) == pytest.approx(3e5, rel=0.05)

@@ -60,6 +60,9 @@ or on a downgraded route now assert on.
     shards under different budgets are refused) and the summed
     `draw_wall_budget_rejections`; both are generation-provenance keys, and an attempt the
     budget ended has the outcome `"draw_wall_budget"`.
+  - `SolverConfig.isoflux_weight_total` is validated (None, or a finite number > 0; 0,
+    NaN, negative and bool are refused); set but ignored (with `isoflux_weights`, or on the
+    legacy route) it warns and, where there is a balance record, is recorded as ignored.
 
 ## Unreleased — the g-file and systematics notebooks re-executed on the thermal-only g-file
 

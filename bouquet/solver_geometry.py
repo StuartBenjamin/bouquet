@@ -619,6 +619,23 @@ def case_geometry(source, solver, standard=True) -> CaseGeometry:
     elif iso_pts is not None:
         iso_bal = dict(mode="as given", total=float(np.sum(np.broadcast_to(
             np.asarray(1.0 if iso_w is None else iso_w, dtype=float), (len(iso_pts),)))))
+    # an override that this route does not use: say so (warned once per
+    # message by the default filter) and, where there is a balance record,
+    # record it (review of #94, C2)
+    _w_ignored = None
+    if w_over is not None:
+        if solver.isoflux_pts is not None and solver.isoflux_weights is not None:
+            _w_ignored = ("SolverConfig.isoflux_weights is given, and those weights are "
+                          "installed as given")
+        elif not standard:
+            _w_ignored = ("the legacy route installs the boundary at "
+                          + ("1 per point" if solver.isoflux_pts is not None
+                             else f"ISOFLUX_WEIGHT={ISOFLUX_WEIGHT:g} per point"))
+    if _w_ignored is not None:
+        warnings.warn(f"SolverConfig.isoflux_weight_total={w_over:g} is IGNORED: {_w_ignored}",
+                      UserWarning, stacklevel=2)
+        if iso_bal is not None:
+            iso_bal["isoflux_weight_total_ignored"] = dict(value=float(w_over), why=_w_ignored)
     if iso_pts is None:
         if standard:
             iso_pts, iso_w, iso_rs = standard_isoflux(boundary_RZ, saddle_targets=sad,

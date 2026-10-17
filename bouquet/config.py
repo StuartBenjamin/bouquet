@@ -77,7 +77,9 @@ class SolverConfig:
     # the constant solver_geometry.ISOFLUX_WEIGHT_TOTAL (2e5, inside the measured window; docs/
     # engine.md, "The boundary constraint: a constant total inside a measured window").  A number:
     # an explicit OVERRIDE, installed as given and stamped as mode "override".  Also the total of an
-    # isoflux_pts set given without isoflux_weights.
+    # isoflux_pts set given without isoflux_weights.  Validated: None or a finite number > 0
+    # (0, NaN, a negative value or a bool is refused).  Ignored, with a UserWarning, when
+    # isoflux_weights is given or on the legacy route.
     isoflux_weight_total: Optional[float] = None
     # The report-only boundary PARTITION probe (bouquet.boundary_balance): after the unified
     # engine's reconstruction, ONE capped re-solve with the pressure x 1.02 measures how the
@@ -157,6 +159,20 @@ class SolverConfig:
                         raise TypeError(
                             f"{where}[{key!r}] must be a number, got "
                             f"{type(term[key]).__name__}") from None
+        # the boundary set's total weight override: None, or a finite number > 0
+        # (0 would install an unconstrained boundary, NaN NaN weights, a
+        # negative total negative weights; a bool is a typo, not a weight)
+        if self.isoflux_weight_total is not None:
+            import math
+            import numbers
+            _w = self.isoflux_weight_total
+            if (isinstance(_w, bool) or not isinstance(_w, numbers.Real)
+                    or not math.isfinite(float(_w)) or float(_w) <= 0.0):
+                raise ValueError(
+                    "solver.isoflux_weight_total must be None (the constant "
+                    "solver_geometry.ISOFLUX_WEIGHT_TOTAL) or a finite number > 0 "
+                    f"(the boundary set's total weight), got {_w!r}")
+            self.isoflux_weight_total = float(_w)
         if self.coil_init is not None and not hasattr(self.coil_init, "items"):
             raise TypeError(
                 "solver.coil_init must be a {coil_name: current_A_turns} mapping, got "
