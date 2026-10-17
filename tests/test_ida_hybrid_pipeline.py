@@ -132,6 +132,11 @@ def _probe(work, method):
                                header=header, ida_path=cdf, LCFS_geqdsk=_GEQ,
                                impurity_Z=_Z, solve_method=method, **_PR56)
     run.config.generation.seed = _SEED
+    if method == "swb":
+        # as the studies run it: the inductive seed here is negative on the
+        # LCFS node, and without swb_taper_source every redraw is refused
+        run.config.generation.swb_edge_taper_psi0 = 0.999
+        run.config.generation.swb_taper_source = True
     run.prepare()
     rb = run.baseline
     env = resolve_uncertainty(run.config, rb)

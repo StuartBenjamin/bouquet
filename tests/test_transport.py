@@ -32,6 +32,10 @@ def test_sources_are_summed_as_imas_total_sources():
     ]}
     d = dd_source_totals(src, 0, 1, 1.0, RHO)
     assert [s["index"] for s in d["sources"]] == [2, 8, 3]
+    nbi, brem, ec = d["sources"]
+    assert (nbi["P_e"], nbi["P_i"]) == pytest.approx((1e6, 2e6))
+    assert brem["P_e"] == pytest.approx(-1e5) and "P_i" not in brem
+    assert ec["P_e"] == pytest.approx(1e6)
     np.testing.assert_allclose(d["Q_i"], 2e6 * RHO)
     np.testing.assert_allclose(d["Gamma_e"], 1e20 * RHO)
     # ec: cumtrapz(volume, energy) = 5e5 * 2 rho^2

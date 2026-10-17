@@ -518,7 +518,8 @@ def dd_source_totals(src_ids, isrc, n_time, t_slice, rho_cp, *, t_cp=None,
     ``Gamma_e`` [1/s] (electrons.particles_inside) on the core_profiles nodes
     *rho_cp* (rho_tor_norm), ``P_net`` = max(0, Q_e + Q_i at the edge) and
     ``P_rad`` [W]; entries by :func:`_retain_source`, each at its own slice
-    (:func:`_source_slice_at`, the currents' rule).  None when nothing is read."""
+    (:func:`_source_slice_at`, the currents' rule), listed in ``sources`` with
+    their own edge ``P_e`` / ``P_i`` [W].  None when nothing is read."""
     rho_cp = np.asarray(rho_cp, dtype=float)
     srcs = src_ids.get("source", []) or []
     idx = [int((s.get("identifier") or {}).get("index", 0) or 0) for s in srcs]
@@ -561,7 +562,8 @@ def dd_source_totals(src_ids, isrc, n_time, t_slice, rho_cp, *, t_cp=None,
             tot[key] += y
         if not got:
             continue
-        used.append(dict(index=i, name=name, time=pr.get("time")))
+        used.append(dict(index=i, name=name, time=pr.get("time"),
+                         **{f"P_{k[2]}": float(got[k][-1]) for k in ("Q_e", "Q_i") if k in got}))
         if i in RADIATION_SOURCE_INDICES and "Q_e" in got:
             p_rad += float(got["Q_e"][-1])
     if not used:

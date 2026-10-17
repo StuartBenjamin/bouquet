@@ -412,7 +412,7 @@ IFILE_FRAME = ("bouquet positive-Ip frame (|F0|, Ip > 0; issue #68): map to "
 def try_save_ifile(mygs, filename, record=None, **kwargs):
     r'''Snapshot/restore-wrapped `mygs.save_ifile` (see :func:`safe_save_eqdsk`),
     returning `filename`; on failure warn, remove any partial file and return
-    None (the i-file is optional; the run continues without it).  The
+    None (the caller refuses: generate_bouquet rejects the draw).  The
     failure text goes to ``record["ifile_error"]`` when a dict is given.  A
     failed RESTORE of the snapshot is not swallowed: it raises
     :class:`SnapshotRestoreError`.'''
@@ -424,7 +424,7 @@ def try_save_ifile(mygs, filename, record=None, **kwargs):
             os.remove(filename)
         raise
     except Exception as exc:
-        msg = f"save_ifile failed ({type(exc).__name__}: {exc}); stored without an i-file"
+        msg = f"save_ifile failed ({type(exc).__name__}: {exc})"
         print(f"  WARN: {msg}")
         import warnings
         warnings.warn(msg, RuntimeWarning, stacklevel=2)
