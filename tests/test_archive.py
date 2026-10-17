@@ -172,6 +172,44 @@ class TestBinarySourceDedup:
                 assert "pfile" in hf[f"scan/900/{c}"]            # per-draw kept
 
 
+
+class TestCompressedBlobs:
+    """The g-file / p-file bytes are written gzip-compressed and read back unchanged."""
+    _store = TestBinarySourceDedup._store
+
+    def test_blobs_are_compressed_and_read_back(self, tmp_path):
+        text_pf = b"5 psinorm ne(10^20/m^3) dne/dpsiN\n 0.0 1.0 0.0\n"
+        p = str(tmp_path / "gz.h5")
+        self._store(p, text_pf)
+        with h5py.File(p, "r") as hf:
+            for g in ("_baseline", "0"):
+                for name in ("eqdsk", "pfile"):
+                    ds = hf[f"scan/900/{g}/{name}"]
+                    assert ds.compression == "gzip" and ds.dtype == np.uint8
+        d = bq.BouquetArchive(p)["900"][0]
+        assert d.eqdsk_bytes == b"GEQDSK-BYTES" and d.pfile_bytes == text_pf
+        rec = bq.load_equilibrium(os.path.splitext(p)[0], count=0, scan_key="900")
+        assert rec["pfile_bytes"] == text_pf
+
+
+def test_export_filtered_holds_only_the_kept_draws(tmp_path):
+    from bouquet.filtering import export_filtered
+    src, out = str(tmp_path / "all.h5"), str(tmp_path / "sel.h5")
+    blob = np.random.default_rng(0).integers(0, 256, 2 ** 20, dtype=np.uint8)
+    with h5py.File(src, "w") as hf:
+        hf.attrs["schema_version"] = 4
+        hf.require_group("scan/900/_baseline")["psi_N"] = np.linspace(0, 1, 5)
+        for c in range(4):
+            g = hf.require_group(f"scan/900/{c}")
+            g["eqdsk"] = blob
+            g.attrs["selected"] = c == 2
+    assert export_filtered(src, out) == 1
+    assert os.path.getsize(out) < 0.4 * os.path.getsize(src)
+    with h5py.File(out, "r") as hf:
+        assert sorted(hf["scan/900"]) == ["2", "_baseline"]
+        assert hf.attrs["schema_version"] == 4 and hf["scan/900/2"].attrs["selected"]
+        np.testing.assert_array_equal(hf["scan/900/2/eqdsk"][()], blob)
+
 class TestDethread:
     """Phase 3: readers accept a run/archive; bad scan_key raises (F1)."""
 

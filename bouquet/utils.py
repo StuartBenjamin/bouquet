@@ -4966,11 +4966,11 @@ def store_equilibrium(
 
         # ---- raw eqdsk (opaque binary -- bit-perfect; schema-v2 fixed
         # name, the group path carries the coordinates) --------------------
-        from .schema import EQDSK_DS, IFILE_DS
-        grp.create_dataset(EQDSK_DS, data=np.void(eqdsk_bytes))
+        from .schema import EQDSK_DS, IFILE_DS, write_bytes
+        write_bytes(grp, EQDSK_DS, eqdsk_bytes)
         if ifile_filepath is not None:
             with open(ifile_filepath, "rb") as fh:
-                grp.create_dataset(IFILE_DS, data=np.void(fh.read()))
+                write_bytes(grp, IFILE_DS, fh.read())
 
         # ---- 1-D profiles -----------------------------------------------
         write_profile(grp, "psi_N", psi_N)
@@ -5022,10 +5022,9 @@ def store_equilibrium(
         # duplicated verbatim into every draw (~190 MB x n_draws with the new
         # IDA-database files); it lives ONCE in _baseline and per-draw readers
         # (BouquetArchive.DrawView.pfile_bytes, load_equilibrium) fall back.
-        from .schema import is_binary_profile_source
+        from .schema import PFILE_DS, is_binary_profile_source, write_bytes
         if pfile_bytes is not None and not is_binary_profile_source(pfile_bytes):
-            pf_ds = "pfile"
-            grp.create_dataset(pf_ds, data=np.void(pfile_bytes))
+            write_bytes(grp, PFILE_DS, pfile_bytes)
 
         # ---- optional: Zeff profile ----------------------------------------
         if Zeff is not None:
@@ -5559,12 +5558,10 @@ def store_baseline_profiles(
             if isinstance(_icl, dict) and "closure_limited" in _icl:
                 grp.attrs["closure_limited"] = bool(_icl["closure_limited"])
 
-        if eqdsk_bytes is not None:
-            grp.create_dataset("eqdsk", data=np.void(eqdsk_bytes))
-        if ifile_bytes is not None:
-            grp.create_dataset("ifile", data=np.void(ifile_bytes))
-        if pfile_bytes is not None:
-            grp.create_dataset("pfile", data=np.void(pfile_bytes))
+        from .schema import EQDSK_DS, IFILE_DS, PFILE_DS, write_bytes
+        for ds, b in ((EQDSK_DS, eqdsk_bytes), (IFILE_DS, ifile_bytes), (PFILE_DS, pfile_bytes)):
+            if b is not None:
+                write_bytes(grp, ds, b)
 
         # ---- Recon-LCFS reference for downstream boundary-deviation
         # measurements.  Captured by the caller via mygs.trace_surf() at

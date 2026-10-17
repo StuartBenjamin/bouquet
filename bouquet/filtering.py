@@ -1747,30 +1747,40 @@ def export_filtered(h5path_or_header, out_path, scan_key=None,
     """Write a pruned copy of the database keeping only ``selection`` draws.
 
     Baseline groups and all top-level metadata are preserved; only the
-    excluded per-draw groups are removed.  Indices are NOT renumbered, so
+    excluded per-draw groups are left out.  Indices are NOT renumbered, so
     the surviving draws keep their original labels (gaps are expected).
-    The source file is never modified.
+    The copy holds only what it keeps (a deleted HDF5 group would leave its
+    space in the file).  The source file is never modified.
 
     Returns the number of draws kept (summed over scan values).
     """
-    import shutil
     src = _resolve(h5path_or_header)
     out = os.path.abspath(out_path)
     if os.path.exists(out) and not overwrite:
         raise FileExistsError(
             f"{out} exists; pass overwrite=True to replace it")
-    shutil.copy(src, out)
-    kept = 0
-    with h5py.File(out, "a") as hf:
-        for sv in _iter_scan_keys(out, scan_key):
-            keep = set(select_indices(out, scan_key=sv, selection=selection))
-            for i in list_equilibrium_indices(out, scan_key=sv):
-                if i in keep:
-                    kept += 1
-                else:
-                    gp = _group_path(sv, i)
-                    if gp in hf:
-                        del hf[gp]
+    kept, drop = 0, set()
+    for sv in _iter_scan_keys(src, scan_key):
+        keep = set(select_indices(src, scan_key=sv, selection=selection))
+        for i in list_equilibrium_indices(src, scan_key=sv):
+            if i in keep:
+                kept += 1
+            else:
+                drop.add("/" + _group_path(sv, i).strip("/"))
+    above = {p.rsplit("/", k)[0] for p in drop for k in range(1, p.count("/"))}
+
+    def _copy(g_src, g_dst):
+        g_dst.attrs.update(g_src.attrs)
+        for name, obj in g_src.items():
+            if obj.name in drop:
+                continue
+            if obj.name in above:
+                _copy(obj, g_dst.create_group(name))
+            else:
+                g_src.copy(obj, g_dst, name=name)
+
+    with h5py.File(src, "r") as hs, h5py.File(out, "w") as hd:
+        _copy(hs, hd)
     return kept
 
 
