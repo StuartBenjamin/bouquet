@@ -164,3 +164,54 @@ def test_the_budget_is_checked_before_each_rescue_retry():
         g2.begin_draw(0)
         gs2.solve()
     assert g2.records[-1]["recovered_by"] == "urf=0.3"
+
+
+def test_the_pre_archive_budget_check_is_outside_the_coil_handling_block():
+    """Review of #94, P5: the "once before archiving" check is on every
+    draw, not inside ``if coil_drift is not None and _recon_Ip is not
+    None:`` (where a coil_drift=None draw skipped it)."""
+    import inspect
+    from bouquet.TokaMaker_interface import generate_bouquet
+    src = inspect.getsource(generate_bouquet)
+    blk = src.index("        if coil_drift is not None and _recon_Ip is not None:")
+    chk = src.index("(checked before \"\n                             \"archiving)")
+    # the next statement at the block's indentation after the block opens
+    nxt = src.index("\n        # The per-draw wall budget, once before archiving", blk)
+    assert blk < nxt < chk
+    assert src.count("check_wall_budget()") == 1
+
+
+def test_the_pre_archive_budget_check_rejects_a_draw_over_its_budget(
+        tmp_path, monkeypatch):
+    """A draw whose solves all STARTED within the budget but whose clock is
+    over it at archive time is rejected as draw_wall_budget, not archived."""
+    coil_drift = 0.01
+    import sys
+    import test_engine_draws as TED
+    import bouquet.TokaMaker_interface as TI
+    from bouquet.TokaMaker_interface import DrawSolveGuard
+
+    class ArchiveTimeOver(DrawSolveGuard):
+        # in budget for every solve; over it when generate_bouquet asks
+        # directly (the pre-archive check)
+        def check_wall_budget(self):
+            if (self.draw is not None
+                    and sys._getframe(1).f_code.co_name == "generate_bouquet"):
+                self.over_budget.setdefault(self.draw, 1.0)
+                return True
+            return False
+
+    real = TI.generate_bouquet
+
+    def wrapped(mygs, *a, **k):
+        k["coil_drift"] = coil_drift
+        with ArchiveTimeOver(mygs, maxits=None, wall_budget_s=0.5) as g:
+            return real(mygs, *a, solve_guard=g, **k)
+    monkeypatch.setattr(TI, "generate_bouquet", wrapped)
+    try:
+        diags, rej, h, G = TED._generate(tmp_path / "p5", monkeypatch, n=2)
+    finally:
+        monkeypatch.setattr(TI, "generate_bouquet", real)
+    assert len(diags) == 0 and len(rej) == 2
+    assert {r["reason"] for r in rej} == {"draw_wall_budget"}
+    assert {r["stage"] for r in rej} == {"wall_budget"}

@@ -971,8 +971,10 @@ needs to one that is still tighter than the legacy metric's scale. **This
 changes a homotopy coil bound; it changes no acceptance gate**
 (owner-approved 2026-10-16): the in-spec rule and
 the sigma=0 coil gate (the archived per-coil percentage against the tightest
-stage) are unchanged. The hard-factor bounds (`coil_drift_hard_factor`) keep
-their unfloored scale.
+stage) are unchanged. The hard-factor bounds (`coil_drift_hard_factor`, not
+default) build their `#VSC` bound on the same floored scale and their guard
+measures on it: an outer ceiling tighter than the homotopy's own bound would
+bring the infeasibility back in the draw's j_BS loop.
 
 **The vertical-control weight** stays `vsc_soft_reg_weight` = 1.0 (its
 docstring records the scans): weights 1, 10 and 100 give identical draws;
@@ -982,10 +984,13 @@ running away with the channel on its bound. A heavier weight does not move
 the pair's drift onto the shaping coils; it removes vertical control.
 
 **The vertical-runaway label.** A homotopy stage whose solve stops at the
-iteration cap with the vertical-control pair at its bound (the homotopy's
-saturation fraction 0.99) and the magnetic axis more than
-`VERTICAL_RUNAWAY_AXIS_FRAC` = 0.1 a from the delivered axis
-(`axis_shift_record`'s displacement) is labelled `"vertical_runaway"` in its
+iteration cap with the vertical-control channel at its `#VSC` bound (the
+homotopy's saturation fraction 0.99; OpenFUSIONToolkit does not report the
+channel's current, so it is read as the pair's anti-series drift `|dI_A -
+dI_B|/2` over the installed half-width -- a bare drift of one coil or a
+same-sign drift does not count) and the magnetic axis more than
+`VERTICAL_RUNAWAY_AXIS_FRAC` = 0.1 a from the delivered axis VERTICALLY
+(`|dZ|`; a radial excursion does not count) is labelled `"vertical_runaway"` in its
 cap event (below). 0.1 a is ten times the axis-displacement flag and above the
 several % of a that kinetic draws move the axis; the runaway it names moved the
 axis by about one minor radius. A label: nothing is accepted, refused or
@@ -1247,10 +1252,11 @@ Every capped solve is recorded on `GenerateEngineDraws.cap_events` and
 `seconds`, `outcome` = `rolled_back` | `rejected`, the error), in the
 archived draw's `homotopy.cap_events`, and summarised in one printed
 `[generate]` line. A homotopy stage's event also carries `vertical_runaway`
-(the vertical-control pair's drift as a fraction of the stage's bound, the
-axis displacement in units of a, the threshold) and `label`
-(`"vertical_runaway"` when the pair is at its bound and the axis is more than
-`VERTICAL_RUNAWAY_AXIS_FRAC` = 0.1 a away, else `None`; "The boundary
+(the vertical-control channel's excursion as a fraction of the stage's `#VSC`
+bound, the axis displacement and its vertical part `axis_dZ_frac_a` in units
+of a, the threshold) and `label` (`"vertical_runaway"` when the channel is at
+its bound and `|dZ|` is more than `VERTICAL_RUNAWAY_AXIS_FRAC` = 0.1 a, else
+`None`; "The boundary
 constraint" above) -- a label, never a gate.
 
 ## The pressure handed to the solver (`edge_pprime_pin`, `separatrix_pressure`)

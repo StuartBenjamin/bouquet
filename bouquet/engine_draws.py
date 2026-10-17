@@ -1963,8 +1963,9 @@ class GenerateEngineDraws(DrawMethod):
             if _nvr:
                 from .engine import VERTICAL_RUNAWAY_AXIS_FRAC
                 print(f"[generate] {_nvr} of them labelled vertical_runaway "
-                      "(the vertical-control pair at its homotopy bound, the "
-                      f"axis displaced > {VERTICAL_RUNAWAY_AXIS_FRAC:g} a; a "
+                      "(the vertical-control channel at its homotopy bound, "
+                      f"the axis displaced vertically > "
+                      f"{VERTICAL_RUNAWAY_AXIS_FRAC:g} a; a "
                       "label, not a gate)", flush=True)
 
     @classmethod

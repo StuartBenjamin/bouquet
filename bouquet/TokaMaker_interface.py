@@ -1526,33 +1526,55 @@ def _vsc_bound_scale(baseline, vsc_in_set):
 
 
 def _coil_bound_max_vsc(cur, baseline, vsc_in_set,
-                        denom_floor_A=_COIL_DRIFT_DENOM_FLOOR_A):
+                        denom_floor_A=_COIL_DRIFT_DENOM_FLOOR_A,
+                        drift_VSC=None, floor_A=None):
     """Max vertical-control-pair coil drift in % of ``max(|I_base|,
-    denom_floor_A)``: the homotopy's VSC saturation measure, on the same
-    denominator as its ``#VSC`` bound (:func:`_vsc_bound_scale`), so that
-    ``100 * drift_VSC`` is the bound for the smaller coil.  With
-    ``denom_floor_A=1.0`` it is the plain per-coil percentage of
-    :func:`_coil_drift_pct` (the hard-factor bounds' guard, whose bound
-    keeps the unfloored scale)."""
+    denom_floor_A, floor_A / drift_VSC)``: the homotopy's VSC saturation
+    measure, on the same denominator as its ``#VSC`` bound
+    (:func:`_vsc_bound_scale`, and the per-coil floor ``floor_A`` the
+    installed bound never goes below), so that ``100 * drift_VSC`` is the
+    installed bound for the smaller coil -- as :func:`_coil_bound_max_f`
+    does for the F coils (review of #94, P4: without the ``floor_A`` term a
+    20 A drift under a 50 A installed bound read as saturated).  Without
+    *drift_VSC* / *floor_A* the floor term is left out; with
+    ``denom_floor_A=1.0`` and neither, it is the plain per-coil percentage
+    of :func:`_coil_drift_pct`."""
+    fl = float(denom_floor_A)
+    if drift_VSC is not None and floor_A is not None and float(drift_VSC) > 0:
+        fl = max(fl, float(floor_A) / float(drift_VSC))
     out = 0.0
     for n in vsc_in_set:
         b = float(baseline[n])
         out = max(out, abs(float(cur[n]) - b)
-                  / max(abs(b), float(denom_floor_A), 1.0) * 100.0)
+                  / max(abs(b), fl, 1.0) * 100.0)
     return out
 
 
-def _vsc_bound_fraction_now(mygs, baseline, vsc_in_set, drift_VSC):
-    """The vertical-control pair's drift NOW as a fraction of the homotopy
-    stage's VSC bound (:func:`_coil_bound_max_vsc` / ``100 drift_VSC``; 1 =
-    at the bound), or ``None`` when it cannot be read (no pair, a zero bound,
-    a solver that cannot report its coils after a failed solve)."""
-    if not vsc_in_set or not drift_VSC > 0:
+def _vsc_bound_fraction_now(mygs, baseline, vsc_in_set, drift_VSC,
+                            floor_A=0.0):
+    """The vertical-control CHANNEL's excursion NOW as a fraction of the
+    homotopy stage's ``#VSC`` bound (1 = at it), or ``None`` when it cannot
+    be read (not a two-coil pair, a zero bound, a solver that cannot report
+    its coils after a failed solve).
+
+    OpenFUSIONToolkit does not report the ``#VSC`` channel's current, so the
+    channel is read as the pair's anti-series (common-mode) drift
+    ``|dI_A - dI_B| / 2`` -- the mode the channel drives, the common-mode
+    channel of :func:`_vsc_channel_drift_pct` -- over the installed half-width
+    ``max(drift_VSC x`` :func:`_vsc_bound_scale` ``, floor_A)``.  A bare
+    drift of one pair coil reads half of it and a same-sign (shaping) drift
+    none, so neither alone puts the channel at its bound (review of #94, P6;
+    before, the pair's largest per-coil drift was used)."""
+    if not vsc_in_set or len(vsc_in_set) != 2 or not drift_VSC > 0:
         return None
     try:
         cur, _ = mygs.get_coil_currents()
-        v = _coil_bound_max_vsc(cur, baseline, vsc_in_set) / (
-            100.0 * float(drift_VSC))
+        a, b = vsc_in_set
+        cm = abs((float(cur[a]) - float(baseline[a]))
+                 - (float(cur[b]) - float(baseline[b]))) / 2.0
+        vd = max(float(drift_VSC) * _vsc_bound_scale(baseline, vsc_in_set),
+                 float(floor_A))
+        v = cm / vd
     except Exception:                               # noqa: BLE001
         return None
     return float(v) if np.isfinite(v) else None
@@ -1605,8 +1627,10 @@ def _make_coil_saturation_guard(mygs, baseline_coils, vsc_in_set, drift_F,
     retried or rolled back here; the caller rejects the draw.  Each call is
     appended to ``guard.log`` (label, drifts, verdict) for the draw record.
     *vsc_denom_floor_A*: the VSC saturation measure's denominator floor
-    (:func:`_coil_bound_max_vsc`): ``_COIL_DRIFT_DENOM_FLOOR_A`` under the
-    homotopy's bounds, 1 A (the plain percentage) under the hard-factor ones.
+    (:func:`_coil_bound_max_vsc`, which also honours ``floor_A /
+    drift_VSC``): ``_COIL_DRIFT_DENOM_FLOOR_A`` under the homotopy's bounds
+    and under the hard-factor ones (their ``#VSC`` scale is floored too
+    since review of #94, P3); the default 1 A is the plain percentage.
     """
     log = []
 
@@ -1617,7 +1641,8 @@ def _make_coil_saturation_guard(mygs, baseline_coils, vsc_in_set, drift_F,
         max_f = _coil_bound_max_f(cur, baseline_coils, vsc_in_set, drift_F,
                                   floor_A)          # against the installed bound
         max_vsc = _coil_bound_max_vsc(cur, baseline_coils, vsc_in_set,
-                                      vsc_denom_floor_A)
+                                      vsc_denom_floor_A, drift_VSC=drift_VSC,
+                                      floor_A=floor_A)
         sat_F, sat_VSC = _coil_saturation(max_f, max_vsc, drift_F, drift_VSC)
         entry = dict(label=str(label), max_F_drift_pct=float(max_f),
                      max_VSC_drift_pct=float(max_vsc),
@@ -6870,8 +6895,13 @@ def generate_bouquet(
                 _delta = max(_hard * abs(_base), float(coil_drift_floor_A))
                 _bounds[_name] = [_base - _delta, _base + _delta]
             if len(_vsc_in_set) > 0:
-                _vsc_min_base = min(abs(_baseline_coils[c]) for c in _vsc_in_set)
-                _vsc_delta = max(_hard * _vsc_min_base, float(coil_drift_floor_A))
+                # the homotopy's floored #VSC scale (_vsc_bound_scale): an
+                # outer ceiling must not be tighter than the homotopy's
+                # bound, or the reversed-I_p infeasibility the floor fixed
+                # recurs in the draw's j_BS loop (review of #94, P3)
+                _vsc_delta = max(
+                    _hard * _vsc_bound_scale(_baseline_coils, _vsc_in_set),
+                    float(coil_drift_floor_A))
                 _bounds['#VSC'] = [-_vsc_delta, _vsc_delta]
             mygs.set_coil_bounds(_bounds)
             mygs._coil_drift_bounds = _bounds
@@ -6881,7 +6911,8 @@ def generate_bouquet(
                 _hard_sat_guard = _make_coil_saturation_guard(
                     mygs, _baseline_coils, _vsc_in_set, _hard, _hard,
                     stage="draw j_BS loop under the hard coil bounds "
-                          f"(+/-{_hard * 100:.1f}%)", floor_A=coil_drift_floor_A)
+                          f"(+/-{_hard * 100:.1f}%)", floor_A=coil_drift_floor_A,
+                    vsc_denom_floor_A=_COIL_DRIFT_DENOM_FLOOR_A)
         else:
             # No hard bounds requested: install none.  (Bouquet.setup_solver
             # already put the coil solve in OpenFUSIONToolkit's one-way
@@ -8189,7 +8220,8 @@ def generate_bouquet(
                             # the VSC pair against the bound's own scale
                             # (_vsc_bound_scale: the 10 kA floor)
                             _max_vsc = _coil_bound_max_vsc(
-                                _cur, _baseline_coils, _vsc_in_set)
+                                _cur, _baseline_coils, _vsc_in_set,
+                                drift_VSC=_dVSC, floor_A=coil_drift_floor_A)
                             print(f"  [homotopy {_label}] F=+/-{_dF*100:.1f}%  "
                                   f"VSC=+/-{_dVSC*100:.1f}% -> SOLVED "
                                   f"(max non-VSC F-coil drift={_max_f:.2f}%, "
@@ -8282,6 +8314,10 @@ def generate_bouquet(
                                 _max_f = _coil_bound_max_f(
                                     _cur, _baseline_coils, _vsc_in_set, _nF,
                                     coil_drift_floor_A)
+                                _max_vsc = _coil_bound_max_vsc(
+                                    _cur, _baseline_coils, _vsc_in_set,
+                                    drift_VSC=_nVSC,
+                                    floor_A=coil_drift_floor_A)
                                 if (_max_f > _nF * 100.0
                                         or _max_vsc > _nVSC * 100.0):
                                     print(f"  [homotopy {_label}] natural drift "
@@ -8310,7 +8346,7 @@ def generate_bouquet(
                                     mygs=mygs,
                                     vsc_bound_frac=_vsc_bound_fraction_now(
                                         mygs, _baseline_coils, _vsc_in_set,
-                                        _dVSC))
+                                        _dVSC, coil_drift_floor_A))
                             if _final_pass_idx < 0:
                                 # First pass failed -> draw is rejected
                                 _post_align_failed = True
@@ -8441,15 +8477,6 @@ def generate_bouquet(
                 _post_align_reason = ("post_perturb_failed", "post-perturb",
                                       _post_exc)
 
-            if (not _post_align_failed and solve_guard is not None
-                    and hasattr(solve_guard, "check_wall_budget")
-                    and solve_guard.check_wall_budget()):
-                _post_align_failed = True
-                _post_align_reason = (
-                    "draw_wall_budget", "wall_budget",
-                    f"elapsed wall {solve_guard.over_budget[count]:.1f} s "
-                    f"exceeds draw_wall_budget_s="
-                    f"{solve_guard.wall_budget_s:g} s (checked before archiving)")
             if _post_align_failed:
                 _m.uncap_solver(mygs)
                 _pr_code, _pr_stage, _pr_what = (
@@ -8478,6 +8505,33 @@ def generate_bouquet(
                 if pbar is not None:
                     pbar.update(1)
                 continue
+
+        # The per-draw wall budget, once before archiving: on EVERY draw,
+        # whether or not the coil handling above ran (review of #94, P5:
+        # it used to sit inside that block, so with coil_drift=None a draw
+        # whose last solve ran past the budget was archived).
+        if (solve_guard is not None
+                and hasattr(solve_guard, "check_wall_budget")
+                and solve_guard.check_wall_budget()):
+            _m.uncap_solver(mygs)
+            _reject(count, "draw_wall_budget", "wall_budget",
+                    message=(f"elapsed wall {solve_guard.over_budget[count]:.1f} s "
+                             f"exceeds draw_wall_budget_s="
+                             f"{solve_guard.wall_budget_s:g} s (checked before "
+                             "archiving)"))
+            if coil_drift is not None and _baseline_psi is not None:
+                try:
+                    if _warmstart_eq_snap is not None:
+                        mygs.replace_eq(source_eq=_warmstart_eq_snap)
+                    else:
+                        mygs.set_coil_currents(_baseline_coils)
+                        mygs.set_psi(_baseline_psi, update_bounds=True)
+                except Exception:
+                    pass
+            _attempt_outcomes[int(count)] = "draw_wall_budget"
+            if pbar is not None:
+                pbar.update(1)
+            continue
 
         # the method's post-hoc filters on the state about to be archived
         # (engine: the l_i band, constrain_sawteeth; a draw outside a band is

@@ -39,10 +39,11 @@ or on a downgraded route now assert on.
   the same denominator. On a reversed-I_p case with a 2.8 kA coil in the pair it restored 9
   of 10 archived draws at 2e5 (was 1 of 10: the channel on its 279 A bound, the axis
   running away). Inactive when the smaller coil carries more than 10 kA. The in-spec
-  rule, the sigma=0 coil gate and the hard-factor bounds are unchanged.
+  rule and the sigma=0 coil gate are unchanged; the hard-factor bounds use the same
+  floored scale (review fix below).
 - **The vertical-runaway label.** A homotopy stage stopped at the iteration cap with the
-  vertical-control pair at its bound and the axis more than 0.1 a from the delivered axis
-  is labelled `"vertical_runaway"` in its cap event (`Bouquet.engine_draw_cap_events`);
+  vertical-control channel at its bound and the axis more than 0.1 a from the delivered
+  axis vertically is labelled `"vertical_runaway"` in its cap event (`Bouquet.engine_draw_cap_events`);
   a label, never a gate or a filter.
 - **`vsc_soft_reg_weight` stays 1.0**; its docstring records the 2026-05 and 2026-10
   scans (1, 10, 100 identical; 1e3 starves vertical control; 1e4 fails sigma=0).
@@ -73,6 +74,12 @@ or on a downgraded route now assert on.
     constant only), replacing "the same scale the acceptance metric judges it".
   - The wall budget is also checked before each of the opt-in rescue's retries (each a
     full solve); a retry it refuses is recorded on the failed solve.
+  - Non-default paths: the hard-factor `#VSC` bound uses the floored scale (and its guard
+    the 10 kA denominator); the VSC saturation measure honours the per-coil floor
+    (`floor_A / drift_VSC`, as for the F coils); the pre-archive budget check runs on every
+    draw, not only inside the coil-handling block; the `vertical_runaway` label needs the
+    channel at its bound (the pair's anti-series drift, not a bare coil drift) AND a
+    vertical axis displacement (`|dZ|`) beyond 0.1 a.
 
 ## Unreleased — the g-file and systematics notebooks re-executed on the thermal-only g-file
 

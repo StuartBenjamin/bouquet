@@ -95,11 +95,12 @@ MSE_JACOBIAN_MAX_REFRESHES = 3
 AXIS_BRANCH_FRAC = 0.01
 #: The VERTICAL-RUNAWAY label of a capped homotopy stage
 #: (:func:`vertical_runaway_record`; owner decision 2026-10-16): a stage
-#: whose solve stopped at the iteration cap with the vertical-control pair at
-#: its homotopy bound (the homotopy's own saturation fraction,
-#: ``COIL_SATURATION_FRACTION`` of the bound) AND the magnetic axis more than
-#: this fraction of the minor radius from the reconstruction's delivered
-#: axis (:func:`axis_shift_record`'s displacement) is labelled
+#: whose solve stopped at the iteration cap with the vertical-control channel
+#: at its homotopy ``#VSC`` bound (the pair's anti-series drift; the
+#: homotopy's own saturation fraction, ``COIL_SATURATION_FRACTION`` of the
+#: bound) AND the magnetic axis more than this fraction of the minor radius
+#: from the reconstruction's delivered axis VERTICALLY (``|dZ|`` of
+#: :func:`axis_shift_record`; a radial excursion does not count) is labelled
 #: ``"vertical_runaway"`` in its cap-event record.  0.1 a: ten times the
 #: displacement flag :data:`AXIS_BRANCH_FRAC` and above the several % of a
 #: that kinetic draws move the axis continuously, while the runaway the label
@@ -3383,18 +3384,26 @@ def axis_shift_record(axis, reference) -> dict:
 def vertical_runaway_record(vsc_bound_frac, axis) -> dict:
     """The vertical-runaway label of a capped homotopy stage
     (:data:`VERTICAL_RUNAWAY_AXIS_FRAC`): *vsc_bound_frac* is the
-    vertical-control pair's drift as a fraction of the stage's VSC bound
-    (1 = at it; ``None`` unknown), *axis* the stage's
-    :func:`axis_shift_record`.  ``label`` is ``"vertical_runaway"`` when the
-    pair is at its bound (``>= COIL_SATURATION_FRACTION``) and the axis is
-    displaced by more than the threshold, ``None`` otherwise (also when
-    either is unknown).  A label, never a gate."""
+    vertical-control channel's excursion (the pair's anti-series drift,
+    :func:`bouquet.TokaMaker_interface._vsc_bound_fraction_now`) as a
+    fraction of the stage's ``#VSC`` bound (1 = at it; ``None`` unknown),
+    *axis* the stage's :func:`axis_shift_record`.  ``label`` is
+    ``"vertical_runaway"`` when the channel is at its bound (``>=
+    COIL_SATURATION_FRACTION``) AND the axis is displaced VERTICALLY by more
+    than the threshold (``|dZ| > VERTICAL_RUNAWAY_AXIS_FRAC x a``; a radial
+    excursion does not count), ``None`` otherwise (also when either is
+    unknown).  The total displacement is reported beside it.  A label,
+    never a gate."""
     from .TokaMaker_interface import COIL_SATURATION_FRACTION
-    frac_a = (axis or {}).get("displacement_frac_a")
+    ax = axis or {}
+    frac_a = ax.get("displacement_frac_a")
+    _dz, _a = ax.get("dZ_mm"), ax.get("minor_radius_m")
+    frac_z = (None if _dz is None or _a is None or not float(_a) > 0.0
+              else abs(float(_dz)) / 1e3 / float(_a))
     at_bound = (None if vsc_bound_frac is None
                 else bool(float(vsc_bound_frac) >= COIL_SATURATION_FRACTION))
-    displaced = (None if frac_a is None
-                 else bool(float(frac_a) > VERTICAL_RUNAWAY_AXIS_FRAC))
+    displaced = (None if frac_z is None
+                 else bool(frac_z > VERTICAL_RUNAWAY_AXIS_FRAC))
     return dict(label=("vertical_runaway" if (at_bound and displaced)
                        else None),
                 vsc_bound_frac=(None if vsc_bound_frac is None
@@ -3402,12 +3411,14 @@ def vertical_runaway_record(vsc_bound_frac, axis) -> dict:
                 vsc_at_bound=at_bound,
                 axis_displacement_frac_a=(None if frac_a is None
                                           else float(frac_a)),
-                axis_dZ_mm=(axis or {}).get("dZ_mm"),
+                axis_dZ_frac_a=frac_z,
+                axis_dZ_mm=ax.get("dZ_mm"),
                 threshold_frac_a=float(VERTICAL_RUNAWAY_AXIS_FRAC),
-                rule=("vertical_runaway: the vertical-control pair at its "
-                      "homotopy bound and the magnetic axis more than "
-                      "threshold_frac_a x a from the delivered axis; a "
-                      "label, never a gate"))
+                rule=("vertical_runaway: the vertical-control channel (the "
+                      "pair's anti-series drift) at its homotopy #VSC bound "
+                      "and the magnetic axis more than threshold_frac_a x a "
+                      "VERTICALLY (|dZ|) from the delivered axis; a label, "
+                      "never a gate"))
 
 
 def axis_bimodality(dZ_mm, minor_radius_m=None, reference_Z=None) -> dict:

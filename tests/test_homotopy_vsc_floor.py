@@ -72,14 +72,28 @@ def test_vsc_saturation_is_measured_on_the_bound_denominator():
     sat_F, sat_V = T._coil_saturation(0.0, T._coil_bound_max_vsc(
         cur, base, vsc), 0.05, dV)
     assert sat_V and not sat_F
-    # the old per-coil percentage (denominator floor 1 A) is unchanged for
-    # the hard-factor bounds' guard
+    # the plain per-coil percentage (denominator floor 1 A) is still the
+    # measure's 1 A form (the guard's default)
     old = T._coil_max_drifts(T._coil_drift_pct(cur, base), vsc)[1]
     assert T._coil_bound_max_vsc(cur, base, vsc, 1.0) == pytest.approx(old)
     assert old == pytest.approx(100 * dV * 1e4 / 2.8e3)
-    # the fraction of the stage's bound now (1 = at it); None when unread
-    gs = types.SimpleNamespace(get_coil_currents=lambda: (cur, None))
+    # the CHANNEL's excursion now as a fraction of the stage's #VSC bound
+    # (1 = at it): the pair's anti-series drift (review of #94, P6) -- the
+    # channel at its bound reads 1; a bare drift of one coil by the same
+    # amount reads 0.5 and a same-sign (shaping) drift 0
+    vd = dV * 1e4
+    chan = dict(base, F9A=-6.6e4 + vd, F9B=2.8e3 - vd)
+    gs = types.SimpleNamespace(get_coil_currents=lambda: (chan, None))
     assert T._vsc_bound_fraction_now(gs, base, vsc, dV) == pytest.approx(1.0)
+    gs = types.SimpleNamespace(get_coil_currents=lambda: (cur, None))
+    assert T._vsc_bound_fraction_now(gs, base, vsc, dV) == pytest.approx(0.5)
+    same = dict(base, F9A=-6.6e4 + vd, F9B=2.8e3 + vd)
+    gs = types.SimpleNamespace(get_coil_currents=lambda: (same, None))
+    assert T._vsc_bound_fraction_now(gs, base, vsc, dV) == pytest.approx(0.0)
+    # the installed half-width never goes below the per-coil floor
+    gs = types.SimpleNamespace(get_coil_currents=lambda: (chan, None))
+    assert T._vsc_bound_fraction_now(gs, base, vsc, dV, 4 * vd) == \
+        pytest.approx(0.25)
 
     def _boom():
         raise RuntimeError("no equilibrium")
@@ -118,10 +132,60 @@ def test_the_vertical_runaway_label(frac, disp, label):
     from bouquet.engine import (VERTICAL_RUNAWAY_AXIS_FRAC,
                                 vertical_runaway_record)
     assert VERTICAL_RUNAWAY_AXIS_FRAC == 0.1
-    r = vertical_runaway_record(frac, dict(displacement_frac_a=disp,
-                                           dZ_mm=None))
+    # a purely vertical displacement of disp x a (a = 0.6 m)
+    r = vertical_runaway_record(frac, dict(
+        displacement_frac_a=disp, minor_radius_m=0.6,
+        dZ_mm=(None if disp is None else disp * 600.0)))
     assert r["label"] == label
     assert r["threshold_frac_a"] == 0.1
+
+
+def test_a_radial_excursion_is_not_a_vertical_runaway():
+    """Review of #94, P6: the label needs |dZ| beyond the threshold; a
+    radial excursion of the same size is reported, not labelled."""
+    from bouquet.engine import vertical_runaway_record
+    r = vertical_runaway_record(1.0, dict(displacement_frac_a=1.4,
+                                          minor_radius_m=0.6, dZ_mm=6.0))
+    assert r["label"] is None and r["vsc_at_bound"] is True
+    assert r["axis_displacement_frac_a"] == 1.4
+    assert r["axis_dZ_frac_a"] == pytest.approx(0.01)
+    assert vertical_runaway_record(1.0, dict(displacement_frac_a=1.4,
+                                             dZ_mm=840.0))["label"] is None
+
+
+def test_the_vsc_saturation_measure_honours_the_per_coil_floor():
+    """Review of #94, P4: with drift_VSC x scale below floor_A the installed
+    #VSC bound is floor_A, and the saturation measure is taken against it,
+    as _coil_bound_max_f does for the F coils."""
+    import bouquet.TokaMaker_interface as T
+    base = {"F1A": 1.2e5, "F9A": -6.6e4, "F9B": 2.8e3}
+    vsc, dV, floor = ("F9A", "F9B"), 0.001, 50.0
+    b = T._homotopy_coil_bounds(base, vsc, 0.05, dV, floor)
+    assert b["#VSC"] == [-50.0, 50.0]                 # floor_A, not 10 A
+    cur = dict(base, F9B=2.8e3 + 20.0)                # 20 A under a 50 A bound
+    m = T._coil_bound_max_vsc(cur, base, vsc, drift_VSC=dV, floor_A=floor)
+    assert not T._coil_saturation(0.0, m, 0.05, dV)[1]
+    assert m == pytest.approx(100 * dV * 20.0 / 50.0)
+    at = dict(base, F9B=2.8e3 + 50.0)                 # at the 50 A bound
+    m = T._coil_bound_max_vsc(at, base, vsc, drift_VSC=dV, floor_A=floor)
+    assert T._coil_saturation(0.0, m, 0.05, dV)[1]
+    # the default stages (drift_VSC >= 0.01, floor 50 A) are unaffected
+    assert T._coil_bound_max_vsc(cur, base, vsc, drift_VSC=0.01,
+                                 floor_A=floor) == \
+        pytest.approx(T._coil_bound_max_vsc(cur, base, vsc))
+
+
+def test_the_hard_factor_vsc_bound_uses_the_floored_scale():
+    """Review of #94, P3: the hard-factor #VSC bound (an outer ceiling) is
+    built on _vsc_bound_scale and its guard measures on the 10 kA floor, so
+    it is never tighter than the homotopy's bound for the same factor."""
+    import bouquet.TokaMaker_interface as T
+    src = inspect.getsource(T.generate_bouquet)
+    blk = src[src.index("if coil_drift_hard_factor is not None:"):
+              src.index("_hard_msg = (")]
+    assert "_hard * _vsc_bound_scale(_baseline_coils, _vsc_in_set)" in blk
+    assert "vsc_denom_floor_A=_COIL_DRIFT_DENOM_FLOOR_A" in blk
+    assert "_vsc_min_base" not in blk
 
 
 def test_a_capped_homotopy_stage_carries_the_label_in_its_cap_event():
