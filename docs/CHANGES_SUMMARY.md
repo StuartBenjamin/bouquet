@@ -12,6 +12,11 @@
   IDS 20 / 20 / 20 (18). The manifests' numbers are identical; only the
   provenance differs. No golden tolerance changed; the recipe-identity checks
   pass on both.
+- **Notebooks.** The g-file and systematics example notebooks re-executed at
+  main 27979d1: their stored output now shows the boundary-partition line of
+  each reconstruction (1.16 H-mode, 1.38 L-mode g-file) and the
+  vertical_runaway label count of each capped draw solve. Every draw, figure
+  and number is otherwise unchanged (the figures are byte-identical).
 
 ## Unreleased — the boundary constraint at a constant total with a reported partition; the homotopy's VSC bound floor; a per-draw wall budget
 
