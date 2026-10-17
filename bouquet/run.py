@@ -8428,9 +8428,11 @@ class Bouquet(SwbBaseline):
         post-hoc stage: there ``l_i_tolerance`` and ``constrain_sawteeth``
         act inside the draw CONSTRUCTION (rejection sampling), as they
         always did, and are recorded as such; the rule they are judged under
-        afterwards is the magnetics.  A measurement band (``l_i_sigma``,
-        ``beta_p_target``) on those routes is refused -- apply it after
-        generation with :func:`bouquet.filtering.refilter_inspec`."""
+        afterwards is the magnetics (plus, on swb, the core-current checks,
+        which its draws judge in flight).  A measurement band (``l_i_sigma``,
+        ``beta_p_target``) on those routes, or a core-current check off swb,
+        is refused -- apply it after generation with
+        :func:`bouquet.filtering.refilter_inspec`."""
         from .config import resolve_solve_method
         from .filtering import InspecBands, resolve_inspec_bands
         gc = self.config.generation
@@ -8439,6 +8441,12 @@ class Bouquet(SwbBaseline):
             sm = resolve_solve_method(gc)
         except Exception:
             sm = "legacy"
+        if bands.core_on and sm != "swb":
+            raise ValueError(
+                f"generation.jphi_band_nsigma / core_gradient_ratio: the "
+                f"core-current checks are judged in flight by the swb draws "
+                f"only; on the {sm!r} route apply them to the archive with "
+                "bouquet.refilter_inspec(path, bands).")
         if sm == "engine":
             return bands, {"route": "engine"}
         if bands.l_i_sigma is not None or bands.beta_p_on:
@@ -8450,7 +8458,8 @@ class Bouquet(SwbBaseline):
                 "construction). Generate without them and apply them to the "
                 "archive with bouquet.refilter_inspec(path, bands), or use "
                 "reconstruction_engine='unified'.")
-        return InspecBands(), {
+        return InspecBands(jphi_band_nsigma=bands.jphi_band_nsigma,
+                           core_gradient_ratio=bands.core_gradient_ratio), {
             "route": sm,
             "l_i_construction_tolerance": l_i_construction_tolerance(gc),
             "constrain_sawteeth_construction": bool(gc.constrain_sawteeth),

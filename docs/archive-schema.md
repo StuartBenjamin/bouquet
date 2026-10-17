@@ -173,8 +173,12 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
                    [jbs_converged, jbs_n_passes, jbs_loop_json]
                                        ← the draw's jbs_loop block (v3)
                    [engine_json, passes_draw_band]
-                                       ← engine draws only (added; see below)
-                   [passes_l_i_band, passes_beta_p_band, passes_q0_gate]
+                                       ← engine draws only (added; see below);
+                                         passes_draw_band also on swb draws
+                                         with a core-current check on
+                   [passes_l_i_band, passes_beta_p_band, passes_q0_gate,
+                    passes_jphi_band, passes_core_gradient, jphi_band_z,
+                    core_gradient_ratio]
                                        ← the opt-in bands' own verdicts, only
                                          while that band is on (their AND is
                                          passes_draw_band)

@@ -330,6 +330,7 @@ as an enormous sigma.
 | `beta_p_target` / `beta_p_sigma` | `None` / `None` | **Opt-in** β_p band for a diamagnetic measurement (both or neither): `\|β_p - beta_p_target\| <= inspec_band_nsigma * beta_p_sigma`, β_p of the full-pressure frame (see [Λ](physics-notes.md#lambda--beta_p--l_i2-reported-never-filtered)). Unified engine only, as `l_i_sigma` |
 | `inspec_band_nsigma` | `2.0` | Half-width of a σ band (`l_i_sigma`, `beta_p_sigma`) in σ |
 | `constrain_sawteeth` | `False` | Gate draws on q0 ≥ 1 (unified engine: a post-hoc gate of the in-spec rule, `+q0` in its name; legacy routes: inside the draw construction) |
+| `jphi_band_nsigma` / `core_gradient_ratio` | `None` / `None` | swb only: the core-current checks of the in-spec rule (`+jphi`, `+jgrad`), judged on each draw's solved `jphi_total` inside the pedestal top (`filtering.pedestal_top`: the baseline's current minimum between x = 0.5 and its edge peak): within `jphi_band_nsigma` × the baseline's `sigma_jphi` of the baseline's current, and the steepest d`jphi_total`/d√x at most `core_gradient_ratio` × the baseline's. They remove the draws whose single-solve sawtooth reset leaves an unrelaxed current step. Counted by until-N; `refilter_inspec` applies them to any archive |
 | `recalculate_jbs` | `True` | Recompute the Sauter bootstrap per draw (vs. reusing the baseline's) |
 | `single_profile_jphi` | `False` | Legacy path: perturb the TOTAL `jphi_total` as one profile (no inductive / bootstrap split; no per-draw Sauter call). `jphi_scalar_sigma` then applies to the total, a larger absolute perturbation -- re-tune it. Needs `jbs_self_consistent=False` (refused otherwise); the unified engine refuses it |
 | `jbs_scale_range` | `(0.99, 1.01)` | Legacy draws: the per-draw multiplicative spread of the bootstrap (uniform in the range; default `None` -> `(0.99, 1.01)` on 2026-06-04). The baseline's multiplier (`bs_scale` / `s_bs(ψ)`) is applied after SWB on SWB draws and re-centres this range on loop draws -- see [physics-notes.md](physics-notes.md) ("The bootstrap multiplier") |
@@ -661,6 +662,8 @@ it was the binding filter on the synthetic ensembles. It is now opt-in.
 | l_i band (`l_i_tolerance` fraction, or `l_i_sigma` × `inspec_band_nsigma`) | off | `passes_l_i_band` | the engine's post-hoc stage; `refilter_inspec` |
 | β_p band (`beta_p_target`, `beta_p_sigma` × `inspec_band_nsigma`) | off | `passes_beta_p_band` | the engine's post-hoc stage; `refilter_inspec` |
 | q0 ≥ 1 gate (`constrain_sawteeth`) | off | `passes_q0_gate` | the engine's post-hoc stage; `refilter_inspec` (engine draws) |
+| core current band (`jphi_band_nsigma`): the draw's `jphi_total` inside the pedestal top within this many of the baseline's `sigma_jphi` | off | `passes_jphi_band` (+ `jphi_band_z`) | the swb draws in flight; `refilter_inspec` |
+| core gradient (`core_gradient_ratio`): the draw's steepest d`jphi_total`/d√x inside the pedestal top over the baseline's | off | `passes_core_gradient` (+ `core_gradient_ratio`) | the swb draws in flight; `refilter_inspec` |
 
 `passes_draw_band` is the AND of the opt-in bands that are on (True when none
 is: every engine draw carries it), and `selected` = coil AND boundary AND

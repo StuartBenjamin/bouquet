@@ -935,6 +935,14 @@ class GenerationConfig:
     # half-width of a sigma band (l_i_sigma, beta_p_sigma) in sigma
     inspec_band_nsigma: float = 2.0
     constrain_sawteeth: bool = False
+    # Core-current checks (swb only; None = off), judged on each draw's solved
+    # jphi_total inside the pedestal top (filtering.core_current_metrics):
+    # jphi_band_nsigma -- within this many of the baseline's sigma_jphi of the
+    # baseline's jphi_total; core_gradient_ratio -- the steepest
+    # d jphi_total / d sqrt(x) at most this times the baseline's.  They remove
+    # the swb draws whose sawtooth reset leaves an unrelaxed current step.
+    jphi_band_nsigma: Optional[float] = None
+    core_gradient_ratio: Optional[float] = None
     # When True, recompute bootstrap each draw via TokaMaker solve_with_bootstrap
     # (its jphi_bs converted to the field-aligned kappa <j.B> for the installed
     # toolkit's output convention: TokaMaker_interface.swb_result_toroidal),
