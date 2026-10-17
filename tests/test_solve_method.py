@@ -3,6 +3,8 @@ engine solve methods, its older spellings, and the settings both comparable
 methods must share.  Solver-free; no data."""
 import pytest
 
+import main_defaults as MD
+
 from bouquet.config import (GenerationConfig, SOLVE_METHODS,
                             resolve_solve_method)
 
@@ -110,7 +112,7 @@ def test_the_default_engine_path_is_untouched_when_swb_is_not_selected():
     from bouquet.config import solve_method_of
     from bouquet.draw_methods import method_hooks
     from bouquet.engine_draws import GenerateEngineDraws
-    g = GenerationConfig()
+    g = GenerationConfig(**MD.GEN)
     before = dataclasses.asdict(g)
     assert solve_method_of(g) == "engine"
     assert resolve_solve_method(g) == "engine"

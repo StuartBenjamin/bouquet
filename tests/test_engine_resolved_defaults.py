@@ -26,6 +26,7 @@ import warnings
 import pytest
 
 import bouquet as bq
+import main_defaults as MD
 from bouquet.config import BouquetConfig, GenerationConfig
 from bouquet.engine import (ENGINE_DEPENDENT_DEFAULTS, engine_validated_value,
                             resolve_engine_defaults)
@@ -43,7 +44,7 @@ _UNIFIED = (True, False)
 
 def _factory(kind, **kw):
     if kind == "imas":
-        return bq.Bouquet.from_imas(
+        return MD.from_imas(
             os.path.join(_EX, "D3Dlike_baseline_omas.json"),
             mesh=os.path.join(_EX, "DIIID_mesh.h5"), time=2.3043,
             n_draws=1, **kw)

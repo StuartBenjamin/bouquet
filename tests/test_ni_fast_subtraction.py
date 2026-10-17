@@ -18,6 +18,7 @@ import h5py
 import numpy as np
 import pytest
 
+import main_defaults as MD
 from bouquet.config import ImasSource
 from bouquet.io.imas import (NI_FAST_GATE_PSI_N, NI_FAST_RTOL,
                              _subtract_fast_ni, read_imas_baseline)
@@ -704,7 +705,7 @@ class TestDefaultsArePre56:
         the thermal one without it) -- as before PR #56."""
         ddp, *_ = _build(tmp_path, dd_mutate=_store_zeff(kind))
         bl = read_imas_baseline(ImasSource(ids_path=ddp, time=1.0,
-                                           impurity_Z=Z_IMP),
+                                           impurity_Z=Z_IMP, **MD.IMAS),
                                 kinetic_source="fuse")
         ne, zth = self._dd_thermal(ddp)
         np.testing.assert_array_equal(bl.Zeff, zth)
@@ -724,7 +725,7 @@ class TestDefaultsArePre56:
         ddp, cdf, *_ = _build(tmp_path)
         bl = read_imas_baseline(
             ImasSource(ids_path=ddp, time=1.0, ida_path=cdf, impurity_Z=Z_IMP,
-                       ni_source="standard"),
+                       **dict(MD.IMAS, ni_source="standard")),
             kinetic_source="ida_hybrid")
         _, zth = self._dd_thermal(ddp)
         np.testing.assert_array_equal(bl.Zeff, zth)

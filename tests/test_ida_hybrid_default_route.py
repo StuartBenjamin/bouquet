@@ -23,6 +23,7 @@ import h5py
 import numpy as np
 import pytest
 
+import main_defaults as MD
 import test_ni_fast_subtraction as NF
 from bouquet import experimental as X
 from bouquet.config import (BouquetConfig, GenerationConfig, ImasSource,
@@ -32,7 +33,7 @@ from bouquet.io.imas import read_imas_baseline
 
 def _src(ddp, cdf, **kw):
     return ImasSource(ids_path=ddp, time=1.0, ida_path=cdf,
-                      impurity_Z=NF.Z_IMP, **kw)
+                      impurity_Z=NF.Z_IMP, **dict(MD.IMAS, **kw))
 
 
 def _read(ddp, cdf, **kw):

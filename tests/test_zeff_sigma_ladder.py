@@ -26,6 +26,8 @@ import h5py
 import numpy as np
 import pytest
 
+import main_defaults as MD
+
 from bouquet.baseline import resolve_zeff_envelope, zeff_sigma_eligibility
 from bouquet.io.ida import read_ida
 from bouquet.uncertainties import sigma_template
@@ -462,7 +464,7 @@ def _mk_cfg(profiles_path, tmp_path, unc=None, impurity_Z=6.0):
         source=ReconstructionSource(
             geqdsk_path=str(tmp_path / "g.geqdsk"),
             profiles_path=profiles_path, time=3.0,
-            impurity_Z=impurity_Z),
+            impurity_Z=impurity_Z, **MD.RECON),
         solver=SolverConfig(mesh_path=str(tmp_path / "mesh.h5")),
         output_header=str(tmp_path / "out"),
         uncertainty=unc or UncertaintyConfig(),
