@@ -68,8 +68,9 @@ COIL_FRACTION_RULE = {
     "chi2": ("coil fraction = max(sqrt(chi2_nu / chi2_max), max|z| / z_max) "
              "over the regularised coils (the vertical-control pair "
              "excluded)"),
-    "legacy": ("coil fraction = max F-coil drift / F_max over the "
-               "regularised coils (the vertical-control pair excluded)"),
+    "legacy": ("coil fraction = max F-coil drift / F_max, the legacy in-spec "
+               "F metric itself (coils named F*, 100 |dI| / max(|I0|, 1 A); "
+               "the vertical-control pair excluded)"),
 }
 
 PROBE_RULE = ("partition probe (report only): after the reconstruction, the "
@@ -101,13 +102,18 @@ def coil_fraction(kind, info, chi2_max=None, z_max=None, inspec_F_max=None,
 
 def drift_pcts(draw, base, vsc_coils=()):
     """The legacy drift test's F-coil number [%] of a coil-current dict, the
-    vertical-control pair *vsc_coils* left out."""
-    F = []
-    for c, i0 in base.items():
-        if c in vsc_coils or c not in draw or abs(float(i0)) <= 0:
-            continue
-        F.append(100.0 * abs(float(draw[c]) - float(i0)) / abs(float(i0)))
-    return dict(max_F_drift_pct=float(max(F)) if F else float("nan"))
+    vertical-control pair *vsc_coils* left out.
+
+    The in-spec legacy metric's own functions, not a re-derivation:
+    :func:`~bouquet.TokaMaker_interface._coil_drift_pct` (``100 |dI| /
+    max(|I0|, 1 A)``) and :func:`~bouquet.TokaMaker_interface._coil_max_drifts`
+    (coils named ``F*`` only, the pair excluded), so the partition's legacy
+    coil fraction is the number the legacy in-spec rule judges (review of
+    #94, C3).  A coil set with no ``F*`` coil gives 0, as the metric does."""
+    from .TokaMaker_interface import _coil_drift_pct, _coil_max_drifts
+    b = {c: float(i0) for c, i0 in base.items() if c in draw}
+    max_f, _ = _coil_max_drifts(_coil_drift_pct(draw, b), tuple(vsc_coils))
+    return dict(max_F_drift_pct=float(max_f))
 
 
 def partition_cuts(bq, base):

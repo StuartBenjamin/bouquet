@@ -19,6 +19,27 @@ from bouquet import solver_geometry as SG
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+def test_the_legacy_partition_fraction_is_the_inspec_legacy_metric():
+    """Review of #94, C3: same coil set (F* only, the pair out) and the same
+    1 A floor as the in-spec legacy F metric; a small non-F coil's change,
+    which the metric never judges, leaves the fraction alone."""
+    from bouquet.TokaMaker_interface import _coil_drift_pct, _coil_max_drifts
+    base = {"F1A": 5.0e4, "F2A": -3.0e4, "ECOILA": 0.25, "F9A": -6.6e4,
+            "F9B": 2.8e3, "F5B": 0.4}
+    cur = {"F1A": 5.05e4, "F2A": -3.0e4, "ECOILA": 0.5, "F9A": -6.0e4,
+           "F9B": 2.0e3, "F5B": 0.9}
+    vsc = ("F9A", "F9B")
+    metric, _ = _coil_max_drifts(_coil_drift_pct(cur, base), vsc)
+    got = BB.drift_pcts(cur, base, vsc)["max_F_drift_pct"]
+    assert got == metric
+    # the sub-amp F coil is judged on the 1 A floor (50 %), not on |I0|
+    # (125 %); the 0.25 A ECOILA (100 % of itself) is not judged at all
+    assert got == pytest.approx(50.0)
+    # a coil set with no F* coil: the metric's 0, not a number from other coils
+    assert BB.drift_pcts({"E1": 2.0, "F9A": 0.0}, {"E1": 1.0, "F9A": 1.0},
+                         vsc)["max_F_drift_pct"] == 0.0
+
+
 # ---------------------------------------------------------------------------
 #  the constants and their recorded measurements
 # ---------------------------------------------------------------------------
@@ -51,13 +72,15 @@ def test_the_coil_fraction_is_one_at_the_cut_and_leaves_the_vsc_pair_out():
     rho, bf, cf, info = BB.partition_of(cur, base, 5.0, cuts)
     assert cf == pytest.approx(1.0) and bf == pytest.approx(1.0)
     assert rho == pytest.approx(1.0) and info["nu"] == 2
+    # the legacy fraction is the legacy in-spec F metric, which judges coils
+    # named F* only (review of #94, C3): the same numbers on F-named coils
     lg = dict(cuts, kind="legacy")
-    d = BB.drift_pcts({"A": 1.02e4, "B": -5e3, "F9A": 0.0, "F9B": 0.0},
-                      base, ("F9A", "F9B"))
+    lbase = {"F1A": 1e4, "F2B": -5e3, "F9A": -6e4, "F9B": 3e3}
+    lcur = {"F1A": 1.02e4, "F2B": -5e3, "F9A": 0.0, "F9B": 0.0}
+    d = BB.drift_pcts(lcur, lbase, ("F9A", "F9B"))
     assert BB.coil_fraction("legacy", d, **lg["frac_kw"]) == \
         pytest.approx(1.0)
-    rho2, _, _, _ = BB.partition_of({"A": 1.02e4, "B": -5e3, "F9A": 0.0,
-                                     "F9B": 0.0}, base, 10.0, lg)
+    rho2, _, _, _ = BB.partition_of(lcur, lbase, 10.0, lg)
     assert rho2 == pytest.approx(2.0)
     assert math.isnan(BB.coil_fraction("chi2", {}, chi2_max=6.1))
 
@@ -74,7 +97,9 @@ def _fake_case(monkeypatch, solve_raises=False, coil_shift=0.0, rms=2.0):
     import bouquet.filtering as F
     import bouquet.utils as U
     calls = []
-    base = {"A": 1e4, "B": -5e3, "F9A": -6e4, "F9B": 3e3}
+    # F-named coils: the legacy fraction is the legacy in-spec F metric,
+    # which judges coils named F* only (review of #94, C3)
+    base = {"F1A": 1e4, "F2B": -5e3, "F9A": -6e4, "F9B": 3e3}
     state = dict(cur=dict(base))
 
     class _GS:
@@ -107,7 +132,7 @@ def _fake_case(monkeypatch, solve_raises=False, coil_shift=0.0, rms=2.0):
             calls.append(("solve", n_passes))
             if solve_raises:
                 raise RuntimeError("engine GS solve failed: maxits")
-            state["cur"] = dict(base, A=base["A"] * (1 + coil_shift))
+            state["cur"] = dict(base, F1A=base["F1A"] * (1 + coil_shift))
 
     monkeypatch.setattr(U, "safe_trace_surf", lambda gs, psi: "LCFS")
     monkeypatch.setattr(F, "boundary_deviation_mm", lambda a, b: (rms, 2 * rms))

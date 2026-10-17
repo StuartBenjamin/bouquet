@@ -63,6 +63,8 @@ or on a downgraded route now assert on.
   - `SolverConfig.isoflux_weight_total` is validated (None, or a finite number > 0; 0,
     NaN, negative and bool are refused); set but ignored (with `isoflux_weights`, or on the
     legacy route) it warns and, where there is a balance record, is recorded as ignored.
+  - The partition probe's legacy coil fraction is the legacy in-spec F metric itself
+    (coils named F*, the 1 A floor), not a re-derivation over every non-VSC coil.
 
 ## Unreleased — the g-file and systematics notebooks re-executed on the thermal-only g-file
 
