@@ -214,9 +214,13 @@ the drift test; the IDS golden: 18 of 20).
   golden test reads there.
 
 **The legacy JSON golden** is the same recipe on `reconstruction_engine="legacy"`
-(same commit, build and pair): 20 attempts, 19 archived (1 perturb_failed), 19
-in spec, reconstruction 240 s, draws 178 min; its sigma=0 probe passes on every
-route the configuration can use (j_BS max deviation 0.018 % of peak). The
+(same commit, build and pair): 20 attempts, 15 archived (4 rejected by the
+600 s per-draw wall budget, 1 perturb_failed), 15 in spec, reconstruction
+239 s, draws 131 min; its sigma=0 probe passes on every route the
+configuration can use. The wall budget is wall-clock, so on the legacy route,
+whose draws take 2.5-10 min each, which draws survive depends on the machine
+and its load: a regeneration elsewhere can archive a different set (the
+`49ebebb` run, before the budget existed, archived 19). The
 legacy replay (`tests/test_systematics.py`) reconstructs from the pair its
 stored config names.
 

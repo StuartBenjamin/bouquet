@@ -12,6 +12,12 @@
   IDS 20 / 20 / 20 (18). The manifests' numbers are identical; only the
   provenance differs. No golden tolerance changed; the recipe-identity checks
   pass on both.
+- **Legacy JSON golden** regenerated on the same code and pair: 20 attempts,
+  15 archived, 15 in spec. Four attempts were rejected by the new 600 s
+  per-draw wall budget (the legacy route's draws take 2.5-10 min each on the
+  regeneration host), one perturb_failed; the previous run, before the
+  budget, archived 19. Because the budget is wall-clock, this golden's draw
+  set depends on the host's speed and load.
 - **Notebooks.** The g-file and systematics example notebooks re-executed at
   main 27979d1: their stored output now shows the boundary-partition line of
   each reconstruction (1.16 H-mode, 1.38 L-mode g-file) and the
