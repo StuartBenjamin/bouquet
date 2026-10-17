@@ -1897,7 +1897,11 @@ class GenerationConfig:
     # (one draw was measured at 55 min).  The structural bound that already exists is separate:
     # every engine-draw solve is capped at engine_draw_solve_maxits iterations and a draw runs
     # a bounded number of solves (loop passes, homotopy stages, post-homotopy passes), so a draw
-    # cannot run forever; the budget bounds how long it may take.
+    # cannot run forever; the budget bounds how long it may take.  Owner decision 2026-10-16
+    # (600 s, on by default).  It is wall-clock: a slower or busier machine can reject a draw a
+    # faster one archives, so an until-N run's draw set is not machine-independent; the
+    # stamped budget and rejection count say when it bit.  verify_sigma0_consistency's
+    # zero-perturbation draw runs with it OFF (a reproduction check must not fail on load).
     draw_wall_budget_s: Optional[float] = 600.0
     # --- the pressure handed to the GS solver (bouquet.edge_pressure) --------
     # Both settings act on EVERY solve of the package (legacy paths, the

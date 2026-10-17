@@ -1355,7 +1355,14 @@ summary line; the reason it pre-empted kept as `masked_reason`), and the budget
 and its rejection count are stamped in the generation provenance
 (`draw_wall_budget_s`, `draw_wall_budget_rejections`). 600 s is five times the
 120 s per-draw target and about three times the slowest normal draws (150-190 s);
-it ends only stalled draws (one was measured at 55 min).
+it ends only stalled draws (one was measured at 55 min). Owner decision
+2026-10-16. It is wall-clock, so it is machine-dependent: on a slower or busier
+host a draw near it can be rejected where a faster one archives it, and an
+until-N run with a fixed seed can then archive a different set; the stamp and
+the rejection count say when it bit. The sigma=0 verification draw
+(`verify_sigma0_consistency`) runs with the budget OFF and records so
+(`wall_budget`): it verifies reproduction, and a budget rejection there would be
+a false failure set by machine load.
 
 ## Deviations from the design note
 

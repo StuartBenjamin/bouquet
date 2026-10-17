@@ -1593,6 +1593,36 @@ def test_a_rejected_sigma0_draw_fails_the_check(tmp_path,
     assert _quiet(ED.verify_zero_perturbation, ctx, b.mygs.toy)["passed"]
 
 
+def test_the_sigma0_draw_runs_without_the_wall_budget_the_draws_keep(
+        tmp_path, toy_bouquet_solver, monkeypatch):
+    """Review of #94, P1: every solve slowed past a tiny budget -- the
+    sigma=0 verification draw is NOT budget-rejected (it runs with the
+    budget off and records so; the configured budget is restored), while
+    the same slowed solver under generate() rejects its draws as
+    draw_wall_budget."""
+    import time
+    b = _bq(tmp_path, n=1)
+    b.setup_solver()
+    _quiet(b.prepare_baseline)
+    fake = b.mygs
+    real = type(fake).solve
+
+    def slow(self, *a, **k):
+        time.sleep(0.02)
+        return real(self, *a, **k)
+    monkeypatch.setattr(type(fake), "solve", slow)
+    gc = b.config.generation
+    gc.draw_wall_budget_s = 0.01
+    v = _quiet(b.verify_sigma0_consistency)
+    assert "rejection" not in v and v["passed"]
+    assert v["wall_budget"]["applied_s"] is None
+    assert v["wall_budget"]["configured_s"] == 0.01
+    assert gc.draw_wall_budget_s == 0.01           # restored
+    _quiet(b.generate)
+    assert b.draw_rejections
+    assert {r["reason"] for r in b.draw_rejections} == {"draw_wall_budget"}
+
+
 @pytest.mark.parametrize("what", ["bootstrap", "l_i"])
 def test_an_archived_stage_miss_fails_the_sigma0_check(tmp_path,
                                                        toy_bouquet_solver,

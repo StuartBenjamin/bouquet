@@ -6971,9 +6971,11 @@ class Bouquet(SwbBaseline):
         it solved under, ``_engine_run["coil_reg"]``; recorded as
         ``coil_reg``), the isoflux re-pointed to the draw's own boundary,
         the homotopy and the post-homotopy stage, under
-        ``engine_draw_solve_maxits``.  Judged on that route at the unchanged
-        tolerances, stage by stage, every gated quantity recorded with its
-        value and bound (``gates``):
+        ``engine_draw_solve_maxits``, with the per-draw wall budget OFF
+        (``draw_wall_budget_s``; recorded as ``wall_budget``: a reproduction
+        check must not fail on machine load).  Judged on that route at the
+        unchanged tolerances, stage by stage, every gated quantity recorded
+        with its value and bound (``gates``):
 
         * ``stages["loop"]`` -- the draw's delivered loop state (before the
           homotopy): the first request BIT-IDENTICAL to the stored request,
@@ -7022,7 +7024,8 @@ class Bouquet(SwbBaseline):
         saved = {k: self.__dict__[k] for k in keep_attrs
                  if k in self.__dict__}
         saved_cfg = dict(header=self.config.output_header,
-                         target=gc.n_inspec_target, cap=gc.max_total_draws)
+                         target=gc.n_inspec_target, cap=gc.max_total_draws,
+                         budget=getattr(gc, "draw_wall_budget_s", None))
         probe = {}
         out = dict(invariant="engine-draw", route="generate()",
                    criterion=(
@@ -7036,11 +7039,22 @@ class Bouquet(SwbBaseline):
                        "rtol_Ip, |dl_i| <= tol_li, |dq0| <= tol_q0; its "
                        "coil drift within the hard coil bound and its LCFS "
                        "rms within the in-spec boundary cut; not rejected"))
+        # The per-draw wall budget is OFF for this draw (review of #94 P1,
+        # 2026-10-17): the check verifies REPRODUCTION, and
+        # a wall-clock rejection here would be a false failure that depends
+        # on the machine's load, not on the physics.  The draws keep it.
+        out["wall_budget"] = dict(
+            applied_s=None, configured_s=saved_cfg["budget"],
+            rule=("GenerationConfig.draw_wall_budget_s is switched off for "
+                  "the sigma=0 verification draw: a reproduction check "
+                  "must not fail on machine load; the configured budget "
+                  "applies to generate()'s draws"))
         try:
             with tempfile.TemporaryDirectory(prefix="bq_sigma0_") as td:
                 self.config.output_header = os.path.join(td, "sigma0_route")
                 gc.n_inspec_target = None
                 gc.max_total_draws = None
+                gc.draw_wall_budget_s = None
                 self._sigma0_route = probe
                 try:
                     diags = self.generate(n=1)
@@ -7057,6 +7071,7 @@ class Bouquet(SwbBaseline):
             self.config.output_header = saved_cfg["header"]
             gc.n_inspec_target = saved_cfg["target"]
             gc.max_total_draws = saved_cfg["cap"]
+            gc.draw_wall_budget_s = saved_cfg["budget"]
             for k in keep_attrs:
                 if k in saved:
                     self.__dict__[k] = saved[k]

@@ -80,6 +80,10 @@ or on a downgraded route now assert on.
     draw, not only inside the coil-handling block; the `vertical_runaway` label needs the
     channel at its bound (the pair's anti-series drift, not a bare coil drift) AND a
     vertical axis displacement (`|dZ|`) beyond 0.1 a.
+  - The sigma=0 verification draw runs with the wall budget off and records so
+    (`wall_budget`): a reproduction check must not fail on machine load. The draws keep
+    the 600 s default (owner decision 2026-10-16), which is wall-clock and therefore
+    machine-dependent; that is now said in the config comment and engine.md.
 
 ## Unreleased — the g-file and systematics notebooks re-executed on the thermal-only g-file
 
