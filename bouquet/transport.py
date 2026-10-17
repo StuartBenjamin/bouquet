@@ -41,21 +41,23 @@ def flux_geometry(mygs, b0, npsi=65, psi_pad=1e-3):
                 R_geo=0.5 * (rmax[-1] + rmin[-1]), kappa=float(zr))
 
 
-def transport_record(geom, x_kin, ne, te, ni, ti, x_eq, p_thermal, src, Ip,
+def transport_record(geom, x_kin, ne, te, zeff, ti, x_eq, p_thermal, src, Ip,
                      coord="psi_n", p_fast=None, main_ion_mass=2.0):
     """chi_perp_e / chi_perp_i [m^2/s] on the kinetic nodes *x_kin* and the tau
     scalars of one equilibrium (:data:`TRANSPORT_SCALARS`).
 
     Power balance, conduction only: chi_s = L_eff (Q_s - 5/2 e T_s Gamma_s) /
-    (S n_s e T_s dlnT_s/drho_N), L_eff = rho_tor,b (dV/drho_tor) / S, Gamma_i =
-    Gamma_e n_i/n_e with this n_i (IMAS.jl 7.4: n_i = n_e/Z_eff).  tau_E,th = W_th/P_net, tau_E = (W_th + W_fast)/P_net,
+    (S n_s e T_s dlnT_s/drho_N), L_eff = rho_tor,b (dV/drho_tor) / S, and the
+    main ions as IMAS.jl 7.4: n_i = n_e/Z_eff, Gamma_i = Gamma_e/Z_eff (*zeff* on
+    *x_kin*).  tau_E,th = W_th/P_net, tau_E = (W_th + W_fast)/P_net,
     W = 3/2 int p dV; tau_98 (IPB98y2), tau_DS03 as IMAS.jl, H_98 = tau_E,th/tau_98.
     *x_kin* / *x_eq* are in the run coordinate *coord* ("psi_n" or "phi_n");
     temperatures in eV."""
     key = "phi_N" if coord == "phi_n" else "psi_N"
     g = {k: np.interp(np.asarray(x_kin, float), geom[key], geom[k])
          for k in ("phi_N", "rho_tor", "V", "S", "R_min", "R_max")}
-    ne, te, ni, ti = (np.asarray(v, dtype=float) for v in (ne, te, ni, ti))
+    ne, te, zeff, ti = (np.asarray(v, dtype=float) for v in (ne, te, zeff, ti))
+    ni = ne / zeff
     rho_n = np.sqrt(np.clip(g["phi_N"], 0.0, None))
     rho_b = geom["rho_tor"][-1]
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -64,7 +66,7 @@ def transport_record(geom, x_kin, ne, te, ni, ti, x_eq, p_thermal, src, Ip,
         rho_src = np.asarray(src["rho_tor_norm"], dtype=float)
         Qe, Qi, Ge = (np.interp(rho_n, rho_src, np.asarray(src[k], float))
                       for k in ("Q_e", "Q_i", "Gamma_e"))
-        Gi = Ge * ni / ne
+        Gi = Ge / zeff
 
         def chi(Q, G, n, T):
             dlnT = -np.gradient(T, rho_n) / T
