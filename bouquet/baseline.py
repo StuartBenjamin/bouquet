@@ -1213,11 +1213,11 @@ def resolve_uncertainty(config, baseline) -> dict:
         bool(_nfz) if _nfz is not None else
         bool(_kind["ni"] == "assumed" or _ida_pair) if _ion_route
         else True)
-    # the PR #56 sampler clips (GRADUATED["kinetic_sampler_clips"], owner
-    # decision 2026-10-14): the explicit setting, else ON whenever the
-    # run's resolved route is the measured IDA one -- the IDA-hybrid
-    # DEFAULT included -- or with the beam subtraction or
-    # fuse_zeff_fast_ions; every clip that fires is counted per draw
+    # the PR #56 sampler clips (GRADUATED["kinetic_sampler_clips"]): the
+    # explicit setting, else ON on every route (owner decision 2026-10-17;
+    # before it, auto was on only with the measured IDA route, the beam
+    # subtraction or fuse_zeff_fast_ions); every clip that fires is counted
+    # per draw
     from .experimental import kinetic_clips_on
     out["kinetic_clips"] = bool(kinetic_clips_on(config, baseline=baseline))
     # the Z_eff / n_i route this envelope was resolved on (the reader's)

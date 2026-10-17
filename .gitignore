@@ -30,6 +30,7 @@ env/
 # ...but track the synthetic IDA-layout test fixtures (tests/data/README.md)
 !tests/data/diiid_profs_synthetic.cdf
 !tests/data/ida_synthetic_lmode.cdf
+!tests/data/diiid_profs_synthetic_pfast.cdf
 *.dat
 *.npz
 *.npy

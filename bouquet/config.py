@@ -72,7 +72,21 @@ class SolverConfig:
     order: int = 3
     F0: Optional[float] = None                       # vacuum R*Bt; default from g-file/IDS
     isoflux_pts: Optional["np.ndarray"] = None       # (N, 2) boundary constraints
-    isoflux_weights: Optional["np.ndarray"] = None   # (N,); None: per unit length, total ISOFLUX_WEIGHT_TOTAL
+    isoflux_weights: Optional["np.ndarray"] = None   # (N,); None: per unit length (see below)
+    # The TOTAL weight of the unified engine's standard boundary (isoflux) set.  None (default):
+    # the constant solver_geometry.ISOFLUX_WEIGHT_TOTAL (2e5, inside the measured window; docs/
+    # engine.md, "The boundary constraint: a constant total inside a measured window").  A number:
+    # an explicit OVERRIDE, installed as given and stamped as mode "override".  Also the total of an
+    # isoflux_pts set given without isoflux_weights.  Validated: None or a finite number > 0
+    # (0, NaN, a negative value or a bool is refused).  Ignored, with a UserWarning, when
+    # isoflux_weights is given or on the legacy route.
+    isoflux_weight_total: Optional[float] = None
+    # The report-only boundary PARTITION probe (bouquet.boundary_balance): after the unified
+    # engine's reconstruction, ONE capped re-solve with the pressure x 1.02 measures how the
+    # perturbation splits between the boundary cut and the coil cut at the installed total, stamps
+    # it (solver-geometry record "isoflux_balance"["partition"], Baseline.engine["boundary_balance"])
+    # and warns outside [1/3, 3].  It never changes the total; False skips it (stamped "off").
+    boundary_partition_probe: bool = True
     # Optional saddle (X-point) constraints: (N, 2) points where B_pol is driven
     # to zero (TokaMaker set_saddle_constraints). Pins the separatrix X-point --
     # without it a diverted forward solve typically ROUNDS the boundary corner
@@ -145,6 +159,20 @@ class SolverConfig:
                         raise TypeError(
                             f"{where}[{key!r}] must be a number, got "
                             f"{type(term[key]).__name__}") from None
+        # the boundary set's total weight override: None, or a finite number > 0
+        # (0 would install an unconstrained boundary, NaN NaN weights, a
+        # negative total negative weights; a bool is a typo, not a weight)
+        if self.isoflux_weight_total is not None:
+            import math
+            import numbers
+            _w = self.isoflux_weight_total
+            if (isinstance(_w, bool) or not isinstance(_w, numbers.Real)
+                    or not math.isfinite(float(_w)) or float(_w) <= 0.0):
+                raise ValueError(
+                    "solver.isoflux_weight_total must be None (the constant "
+                    "solver_geometry.ISOFLUX_WEIGHT_TOTAL) or a finite number > 0 "
+                    f"(the boundary set's total weight), got {_w!r}")
+            self.isoflux_weight_total = float(_w)
         if self.coil_init is not None and not hasattr(self.coil_init, "items"):
             raise TypeError(
                 "solver.coil_init must be a {coil_name: current_A_turns} mapping, got "
@@ -811,13 +839,16 @@ class UncertaintyConfig:
     # where physics.zeff_bounds allows less, a derived n_i held in
     # [0, ne - z_fast], an independent n_i capped at ne - z_fast when Z_imp is
     # declared, a passive Z_eff aux draw clipped to the window.  None = auto
-    # (bouquet.experimental.kinetic_clips_on): ON whenever the run's resolved
-    # ni_source is a measured IDA route -- INCLUDING the ida_hybrid default
-    # (ni_source="auto" -> "all") -- or the beam subtraction
-    # (ni_subtract_fast, which follows include_pfast there) or
-    # fuse_zeff_fast_ions is on; off otherwise.  Every clip that fires is
-    # counted per draw (KineticDraw.clips) and archived.  False: only the
-    # zeff_bounds window (the bound in place before PR #56); True: on.
+    # (bouquet.experimental.kinetic_clips_on): ON on every route (owner
+    # decision 2026-10-17; before that only with a measured IDA ni_source
+    # route, the beam subtraction or fuse_zeff_fast_ions).  The Z_eff floor
+    # at 1 is a physical constraint; without the clip a draw below 1 is
+    # refused before any solve (kinetics_nonphysical).  Every clip that
+    # fires is counted per draw (KineticDraw.clips) and archived, and the
+    # clipped fraction is the number to watch on a clean plasma (Z_eff
+    # near 1): the clip truncates the lower tail there, so the Z_eff, n_i
+    # and I_BS bands become one-sided.  False: only the zeff_bounds window
+    # (the bound in place before PR #56); True: on.
     kinetic_clips: Optional[bool] = None
 
     # GPR correlation length scales (psi_N units) -- define the perturbation
@@ -1856,6 +1887,22 @@ class GenerationConfig:
     # is untouched.  The engine refuses draw_solve_maxits (the legacy draws'
     # cap); the legacy path never reads this field.
     engine_draw_solve_maxits: Optional[int] = 100
+    # The per-draw WALL-CLOCK budget [s] (both routes).  Checked between solves only -- never
+    # inside a running GS solve: when a draw's elapsed wall time exceeds it before its next
+    # solve starts (or at the end of its homotopy), the draw is rejected with reason
+    # "draw_wall_budget", recorded like every other rejection (attempt record, counts, the
+    # generate summary line) and the budget stamped in the archive's generation provenance.
+    # None switches it off.  600 s: five times the 120 s per-draw target and about three times
+    # the slowest normal draws measured (150-190 s), so it only ends draws that have stalled
+    # (one draw was measured at 55 min).  The structural bound that already exists is separate:
+    # every engine-draw solve is capped at engine_draw_solve_maxits iterations and a draw runs
+    # a bounded number of solves (loop passes, homotopy stages, post-homotopy passes), so a draw
+    # cannot run forever; the budget bounds how long it may take.  Owner decision 2026-10-16
+    # (600 s, on by default).  It is wall-clock: a slower or busier machine can reject a draw a
+    # faster one archives, so an until-N run's draw set is not machine-independent; the
+    # stamped budget and rejection count say when it bit.  verify_sigma0_consistency's
+    # zero-perturbation draw runs with it OFF (a reproduction check must not fail on load).
+    draw_wall_budget_s: Optional[float] = 600.0
     # --- the pressure handed to the GS solver (bouquet.edge_pressure) --------
     # Both settings act on EVERY solve of the package (legacy paths, the
     # unified engine, the draws, the zero-perturbation checks).
@@ -1992,6 +2039,13 @@ class GenerationConfig:
         switches the channel on -- ``structured_preset=None`` resolves to the
         DEFAULT preset only when the channel is already ``"structured"``.
         """
+        if self.draw_wall_budget_s is not None:
+            import math as _math
+            _b = self.draw_wall_budget_s
+            if (isinstance(_b, bool) or not isinstance(_b, (int, float))
+                    or not _math.isfinite(float(_b)) or float(_b) <= 0):
+                raise ValueError("generation.draw_wall_budget_s must be None or a "
+                                 f"positive number of seconds, got {_b!r}")
         if self.swb_seed not in (None, "source", "generic"):
             raise ValueError(f"swb_seed={self.swb_seed!r} not in (None, 'source', 'generic')")
         if self.imas_baseline not in ("closure", "swb"):

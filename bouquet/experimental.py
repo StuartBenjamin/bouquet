@@ -210,17 +210,23 @@ GRADUATED = {
             "[0, n_e - z_fast], an independent n_i capped at n_e - z_fast "
             "when Z_imp is declared, and a passive Z_eff aux draw clipped to "
             "the same window.  Every clip that fires is counted per draw "
-            "(KineticDraw.clips).  On (UncertaintyConfig.kinetic_clips=None, "
-            "auto) with the measured IDA ni_source route in play -- the "
-            "IDA-hybrid DEFAULT -- the beam subtraction or "
-            "fuse_zeff_fast_ions; off otherwise; an explicit bool wins."),
+            "(KineticDraw.clips).  On by default on EVERY route "
+            "(UncertaintyConfig.kinetic_clips=None, auto); an explicit bool "
+            "wins.  The Z_eff floor at 1 is a physical constraint: without "
+            "the clip a draw below 1 is refused before any solve "
+            "(kinetics_nonphysical), which cost 7 of 10 attempts on the "
+            "synthetic dd fixture (core Z_eff 1.7, template sigma 0.4)."),
         graduated=("2026-10-14 (owner decision): on with the measured route, "
-                   "default included; left the experimental registry with it"),
+                   "default included; left the experimental registry with it. "
+                   "2026-10-17 (owner decision): on by default on every route "
+                   "-- the floor is physical, every clip is counted"),
         evidence=[
             "the clips change no draw unless they bind, and every clip that "
             "fires is counted per draw and archived",
-            "they ride with the measured IDA route (graduated 2026-10 on the "
-            "sigma=0 evidence of a reversed-Ip near-double-null slice)",
+            "graduated 2026-10 with the measured IDA route on the sigma=0 "
+            "evidence of a reversed-Ip near-double-null slice; on every route "
+            "since 2026-10-17 (a sigma=0 verification counts any clip that "
+            "fires on the baseline and records it)",
         ],
 known_limitations=[
             "per-clip counts on a real ensemble (KineticDraw.clips): the "
@@ -360,23 +366,23 @@ def ida_ni_beam_subtraction_on(source, kinetic_source=None,
 
 def kinetic_clips_on(config, baseline=None) -> bool:
     """``UncertaintyConfig.kinetic_clips`` resolved: an explicit bool wins;
-    ``None`` (auto) is on whenever a kinetic route that can draw outside the
-    physical window is in play -- the measured IDA ``ni_source`` route
-    (resolved, so the IDA-hybrid DEFAULT counts; owner decision 2026-10-14),
-    the beam subtraction (resolved), or ``fuse_zeff_fast_ions``.  Every clip
-    that fires is counted per draw, so the default changes nothing unless a
-    clip binds, and then the archive says so.  With a *baseline*, the
-    routes are the ones its reader resolved (:func:`baseline_kinetics_route`),
-    so the clips follow the run's one route."""
+    ``None`` (auto) is ON on every route (owner decision 2026-10-17).  The
+    floor ``Z_eff >= 1`` is a physical constraint, and a draw below it is
+    refused before any solve otherwise (``kinetics_nonphysical``): on the
+    synthetic dd fixture, whose core Z_eff is 1.7 against a template sigma
+    of 0.4, that refused 7 of 10 attempts.  Every clip that fires is counted
+    per draw (``KineticDraw.clips``) and archived, so the default changes
+    nothing unless a clip binds, and then the archive says so.  Before
+    2026-10-17 auto was on only with a measured IDA ``ni_source`` route
+    (the IDA-hybrid default), the beam subtraction or
+    ``fuse_zeff_fast_ions``; *baseline* is accepted for that history and
+    for callers that resolve the run's route, and no longer changes the
+    answer."""
     unc = getattr(config, "uncertainty", None)
     v = getattr(unc, "kinetic_clips", None)
     if v is not None:
         return bool(v)
-    src = getattr(config, "source", None)
-    ks = getattr(getattr(config, "generation", None), "kinetic_source", None)
-    return (ida_ion_route_on(src, unc, ks, baseline=baseline)
-            or fuse_zeff_fast_ions_on(src)
-            or ida_ni_beam_subtraction_on(src, ks, baseline=baseline))
+    return True
 
 
 def ida_fuse_timing_on(source, uncertainty=None) -> bool:

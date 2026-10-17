@@ -3,21 +3,19 @@
 Git-tracked regression fixtures. Every golden is a real bouquet run, made by
 `regenerate_golden_run.py` and slimmed by `make_golden_fixture.py`. The recipe
 runs the synthetic test fixtures in `tests/data/` at the library's defaults.
-**Status (2026-10-15):** the IDS golden is such a run; the g-file h5 golden and
-the legacy JSON golden are still the earlier runs of the older D3D-like
-example g-file + p-file (2026-10-09); the synthetic g-file pair they are to be
-regenerated on was corrected 2026-10-15 (the g-file is now thermal-only; see
-"The current goldens" below).
+**Status (2026-10-16):** all three goldens are such runs, at main `49ebebb`,
+the g-file and legacy ones on the corrected, thermal-only g-file (see "The
+current goldens" below).
 
 | golden | source | engine | files | read by |
 |--------|--------|--------|-------|---------|
-| g-file (h5) | recipe: `g_synthetic.geqdsk` + `diiid_profs_synthetic.cdf` (the synthetic D3D-like g-file and its IDA-layout profile file); committed record: the D3D-like example `D3Dlike_Hmode_baseline.geqdsk` + `.peqdsk` | unified (default) | `D3Dlike_Hmode_golden_slim.h5`, `golden_manifest.json`, `rng_stream_manifest.json` | `tests/test_golden_bouquet.py`, `tests/test_rng_reproducibility.py`, and the archive/filter/stats tests that read a real archive |
+| g-file (h5) | `g_synthetic.geqdsk` + `diiid_profs_synthetic.cdf` (the synthetic D3D-like g-file, thermal pressure only, and its IDA-layout profile file) | unified (default) | `D3Dlike_Hmode_golden_slim.h5`, `golden_manifest.json`, `rng_stream_manifest.json` | `tests/test_golden_bouquet.py`, `tests/test_rng_reproducibility.py`, and the archive/filter/stats tests that read a real archive |
 | IDS (h5) | `dd_synthetic.json.gz` at 1.2 s, IDA-hybrid with `diiid_profs_synthetic.cdf` (the production IDS route) | unified (default) | `D3Dlike_ids_golden_slim.h5`, `ids_golden_manifest.json`, `ids_rng_stream_manifest.json` | `tests/test_golden_bouquet.py` (every test runs on both h5 goldens), `tests/test_golden_ids.py`, `tests/test_rng_reproducibility.py` |
-| legacy (JSON) | the g-file golden's source pair (committed record: the D3D-like example pair) | legacy | `D3Dlike_Hmode_legacy_golden.json` | `tests/test_systematics.py` (the legacy replay, `-m solver`), `tests/test_legacy_golden.py` |
+| legacy (JSON) | the g-file golden's source pair | legacy | `D3Dlike_Hmode_legacy_golden.json` | `tests/test_systematics.py` (the legacy replay, `-m solver`), `tests/test_legacy_golden.py` |
 
 | file | what it is |
 |------|------------|
-| `*_golden_slim.h5` | a slimmed real bouquet run: `*.pfile` byte blobs dropped, the `*.eqdsk` geqdsks **kept but gzip-compressed** (~3x; all of them on the g-file golden, 12.0 MB; a representative subset of 4 on the IDS golden, 7.5 MB), `Ip` also extracted into an attr, everything the assertions need kept (attrs, `coil_currents`, `x_points`, both LCFS refs, profiles, the stored config). |
+| `*_golden_slim.h5` | a slimmed real bouquet run: `*.pfile` byte blobs dropped, the `*.eqdsk` geqdsks **kept but gzip-compressed** (~3x; all of them on the g-file golden, 12.7 MB; a representative subset of 4 on the IDS golden, 7.5 MB), `Ip` also extracted into an attr, everything the assertions need kept (attrs, `coil_currents`, `x_points`, both LCFS refs, profiles, the stored config). |
 | `golden_manifest.json`, `ids_golden_manifest.json` | expected per-draw + baseline values (l_i, Ip, coil drifts, boundary RMS/max, coil currents, X-points, `in_spec`) with tolerances, and the provenance (bouquet commit, OFT build, numerics). |
 | `rng_stream_manifest.json`, `ids_rng_stream_manifest.json` | the **seeded GPR draw stream**, pinned bitwise (SHA-256 per channel + sampled values), drawn from the golden's baseline profiles + sigma envelopes. |
 | `D3Dlike_Hmode_legacy_golden.json` | the slim LEGACY golden (~0.2 MB): the g-file golden's recipe run with `reconstruction_engine="legacy"` -- stored config, reconstruction scalars/profiles/coils, a 1-in-8 subsample of its LCFS trace, every draw's scalars, and the profiles + coils + boundary RMS of the first two in-spec draws (what `tests/test_systematics.py` replays). Built by `make_golden_fixture.py --legacy-json`. |
@@ -176,48 +174,44 @@ set" above (`tests/_harness.py` prints them in a mismatch message), with
 `BOUQUET_OFT_BUILD_ID` naming the installed build; review the git diff of
 the manifests / JSON before committing.
 
-## The current goldens (2026-10-15)
+## The current goldens (2026-10-16)
 
-**The IDS golden** is the recipe's run at bouquet `cced718` (main `dc03156`
-plus this recipe, a clean tree), OFT `fix/jphi-update-ravgs-and-nonfinite-abort`
-7da4f18 (build `20260929_7da4f18`, lib `7885fedc1e62`), one thread. The
-defaults it embodies: the in-spec rule is the magnetics (no l_i band),
-IDA-hybrid takes the IDA file's Z_eff, the radial sigma templates (the profile
-file's own envelopes here), the warm baseline re-solve in `generate()`, engine
-draws held on the reconstruction's isoflux, `check_bistability` on, the
-coil-saturation test against the installed bound, and the Redl epsilon
-`(R_max - R_min)/(R_max + R_min)` (`evaluate_jBS/4`). An engine draw's
-`in_spec` is its coil verdict AND the opt-in bands, none of which is on: the
-coil verdict.
+**The g-file h5 golden and the IDS golden** are the recipe's runs at bouquet
+main `49ebebb` (a clean tree), OFT `fix/jphi-update-ravgs-and-nonfinite-abort`
+7da4f18 (build `20260929_7da4f18`, lib `7885fedc1e62`), one thread; the
+g-file golden on the corrected, thermal-only `g_synthetic.geqdsk` +
+`diiid_profs_synthetic.cdf`. The defaults they embody: the in-spec rule is
+the magnetics (no l_i band), IDA-hybrid takes the IDA file's Z_eff, the
+radial sigma templates (the profile file's own envelopes here), the warm
+baseline re-solve in `generate()`, engine draws held on the reconstruction's
+isoflux with the boundary constraint weighted per unit length, `check_bistability`
+on, the coil-saturation test against the installed bound, and the Redl epsilon
+`(R_max - R_min)/(R_max + R_min)` (`evaluate_jBS/4`).
 
-| golden | attempts | archived | in spec | reconstruction | draws | bistability | sigma=0 probe |
-|--------|----------|----------|---------|----------------|-------|-------------|---------------|
-| IDS, unified | 20 | 19 (1 perturb_failed) | 18 (all archived but 15) | 108 s | 44.0 min | single | PASS (dl_i +3.1e-5, dq0 -5.3e-5, r_j 1.6e-4) |
+**`in_spec` is the in-spec rule's verdict.** Since main `49ebebb`,
+`generate_bouquet` judges every draw by the rule before archiving it (the
+configured coil test, chi2 by default, AND the boundary cut, AND an engine
+draw's band flag; `in_spec_source = "inspec_rule"`). The old +/-2 % coil-drift
+verdict is kept beside it as `coil_drift_in_spec`; it is not the rule, and on
+these goldens it differs (the g-file golden: 9 of its 18 in-spec draws pass
+the drift test; the IDS golden: 18 of 20).
+
+| golden | attempts | archived | in spec (`coil_drift_in_spec`) | reconstruction | draws | bistability | sigma=0 probe |
+|--------|----------|----------|-------------------------------|----------------|-------|-------------|---------------|
+| g-file, unified | 20 | 18 (2 homotopy_saturated) | 18 (9) | 71 s | 32 min | single | PASS (archived dl_i -1.5e-5, dq0 +4.1e-5, r_j 5.6e-5, r_I 7.8e-6) |
+| IDS, unified | 20 | 20 | 20 (18) | 68 s | 31 min | single | PASS (archived dl_i -9.6e-6, dq0 -4.7e-5, r_j 1.4e-4, r_I 1.4e-5) |
 
 * The IDS route archives no schema `jbs_loop` block on its `_baseline` (the
   g-file route does); its reconstruction's loop verdict is in the baseline's
   engine record (`engine_json`: `converged`, `loop_converged`), which the
   golden test reads there.
 
-**The g-file h5 golden and the legacy JSON golden are NOT yet regenerated.**
-The synthetic g-file pair was internally inconsistent: the g-file's on-axis
-pressure (90.4 kPa) was the dd's TOTAL pressure, fast ions included, while
-its profile file carries the thermal pressure only (46.1 kPa), and the g-file
-route has no fast-pressure source, so a reconstruction on the pair gave
-beta_N 0.80 against the g-file's 1.68. Corrected 2026-10-15 (owner decision):
-`g_synthetic.geqdsk` is now the thermal-only equilibrium of the same slice
-(46.1 kPa on axis, beta_N 0.80, q0 1.41, l_i(3) 0.835), the total-pressure
-file is kept as `g_synthetic_pfast.geqdsk` with a p-file
-(`tests/data/README.md`). Both goldens are to be regenerated on the corrected
-pair with the commands above.
-Until then the committed records are the earlier runs of the older D3D-like
-example g-file + p-file, regenerated 2026-10-09 at `67aba59` on the same OFT
-build under the defaults of that date (the old l_i band among them): unified
-20 attempts, 16 archived, 6 in spec (reconstruction 62 s, draws 43.8 min);
-legacy 20 archived, 11 in spec (reconstruction 218 s, draws 184.2 min). Their
-stored configs replay with the stored-config compatibility rules (the l_i
-band loads OFF, with a note). The legacy replay (`tests/test_systematics.py`)
-reconstructs from whatever pair the legacy golden's stored config names.
+**The legacy JSON golden** is the same recipe on `reconstruction_engine="legacy"`
+(same commit, build and pair): 20 attempts, 19 archived (1 perturb_failed), 19
+in spec, reconstruction 240 s, draws 178 min; its sigma=0 probe passes on every
+route the configuration can use (j_BS max deviation 0.018 % of peak). The
+legacy replay (`tests/test_systematics.py`) reconstructs from the pair its
+stored config names.
 
 * The legacy record archives the pressure-driven current as its own
   `j_pressure` beside a `j_inductive` that does not carry it, and says so

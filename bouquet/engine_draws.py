@@ -442,6 +442,37 @@ class EngineDrawContext:
             scale=float(scale), sampler=dict(zero_perturbation=True))
 
 
+def sigma0_clip_finding(record):
+    """``(clips, finding)`` of a zero-perturbation draw's engine *record*:
+    the kinetic sampler's per-draw clip counters (``inputs.kinetic_sampler.
+    clips``; ``None`` when the record carries none) and, when any clip moved
+    a node, the finding ``baseline_outside_physical_window`` (the clips that
+    fired and their node counts), else ``None``.
+
+    At sigma = 0 every drawn profile is the baseline itself, so a clip that
+    fires there moved the BASELINE: its Z_eff dips below 1, or its n_i
+    leaves ``[0, n_e - z_fast]``, somewhere.  The clips stay on at sigma = 0
+    (the same path as every draw); the sigma = 0 verification counts them
+    and records the finding -- a finding, not a verdict: the comparison
+    arithmetic is untouched (review of #94, P2)."""
+    ks = (((record or {}).get("inputs") or {}).get("kinetic_sampler") or {})
+    clips = ks.get("clips")
+    if clips is None:
+        return None, None
+    clips = {str(k): int(v) for k, v in dict(clips).items()}
+    fired = {k: v for k, v in clips.items() if v > 0}
+    if not fired:
+        return clips, None
+    return clips, dict(
+        clips=fired, clips_enabled=ks.get("clips_enabled"),
+        sampler_version=ks.get("version"),
+        note=("a kinetic clip fired on the zero-perturbation draw, so the "
+              "baseline itself lies outside the physical window the clips "
+              "enforce (Z_eff >= 1, 0 <= n_i <= n_e - z_fast) at the counted "
+              "nodes; the sigma=0 draw carries the clipped profile there. "
+              "Reported, not a verdict"))
+
+
 def flux_range(m):
     """``|psi_b - psi_a|`` [Wb/rad] of a backend measurement (its geometry's
     ``dpsi_dpsiN``), or ``None``."""
@@ -1407,11 +1438,16 @@ class GenerateEngineDraws(DrawMethod):
         return self.maxits is not None and solve_hit_iteration_cap(exc)
 
     def announce_cap(self, where, exc, *, stage=None, seconds=None,
-                     outcome="rejected"):
+                     outcome="rejected", mygs=None, vsc_bound_frac=None):
         """Print and record a capped solve that did not converge.
         *outcome* is ``"rejected"`` (the caller rejects the draw) or
         ``"rolled_back"`` (a homotopy stage: the draw goes back to the last
-        good stage, under the homotopy's own rule)."""
+        good stage, under the homotopy's own rule).  For a homotopy stage
+        (*mygs* given, *vsc_bound_frac* its vertical-control pair's drift as
+        a fraction of the stage's bound) the record also carries
+        ``vertical_runaway`` (:func:`bouquet.engine.vertical_runaway_record`)
+        and ``label`` (``"vertical_runaway"`` or ``None``): a label, never a
+        gate."""
         ev = dict(draw=(None if self._cur is None else self._cur["count"]),
                   where=str(where),
                   stage=str(stage if stage is not None else where),
@@ -1419,6 +1455,15 @@ class GenerateEngineDraws(DrawMethod):
                   seconds=(None if seconds is None else float(seconds)),
                   outcome=str(outcome),
                   error=f"{type(exc).__name__}: {str(exc).strip()[:300]}")
+        if mygs is not None:
+            from .engine import axis_record_of, vertical_runaway_record
+            try:
+                _ax = axis_record_of(mygs, self.delivered_axis)
+            except Exception:                       # noqa: BLE001
+                _ax = None
+            vr = vertical_runaway_record(vsc_bound_frac, _ax)
+            ev["vertical_runaway"] = vr
+            ev["label"] = vr["label"]
         self.cap_events.append(ev)
         what = ("draw REJECTED" if outcome == "rejected" else
                 "rolled back to the last good homotopy stage")
@@ -1426,6 +1471,11 @@ class GenerateEngineDraws(DrawMethod):
         print(f"  [engine draw] {where}: the GS solve stopped at "
               f"engine_draw_solve_maxits={self.maxits}{sec} without "
               f"converging -> {what}", flush=True)
+        if ev.get("label"):
+            print(f"  [engine draw] {where}: labelled {ev['label']} (the "
+                  "vertical-control pair at its bound, the axis displaced "
+                  f"{ev['vertical_runaway']['axis_displacement_frac_a']:.2f} "
+                  "a; a label, not a gate)", flush=True)
         return ev
 
     def announce_rollback_failed(self, exc, after, legacy=None):
@@ -1939,6 +1989,15 @@ class GenerateEngineDraws(DrawMethod):
                       f"{st} {oc} x{n}" for (st, oc), n in
                       sorted(_by.items()))
                   + "; per-solve records: Bouquet.engine_draw_cap_events")
+            _nvr = sum(1 for e in self.cap_events
+                       if e.get("label") == "vertical_runaway")
+            if _nvr:
+                from .engine import VERTICAL_RUNAWAY_AXIS_FRAC
+                print(f"[generate] {_nvr} of them labelled vertical_runaway "
+                      "(the vertical-control channel at its homotopy bound, "
+                      f"the axis displaced vertically > "
+                      f"{VERTICAL_RUNAWAY_AXIS_FRAC:g} a; a "
+                      "label, not a gate)", flush=True)
 
     @classmethod
     def verify_sigma0(cls, bq):

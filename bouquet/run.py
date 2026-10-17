@@ -6971,9 +6971,11 @@ class Bouquet(SwbBaseline):
         it solved under, ``_engine_run["coil_reg"]``; recorded as
         ``coil_reg``), the isoflux re-pointed to the draw's own boundary,
         the homotopy and the post-homotopy stage, under
-        ``engine_draw_solve_maxits``.  Judged on that route at the unchanged
-        tolerances, stage by stage, every gated quantity recorded with its
-        value and bound (``gates``):
+        ``engine_draw_solve_maxits``, with the per-draw wall budget OFF
+        (``draw_wall_budget_s``; recorded as ``wall_budget``: a reproduction
+        check must not fail on machine load).  Judged on that route at the
+        unchanged tolerances, stage by stage, every gated quantity recorded
+        with its value and bound (``gates``):
 
         * ``stages["loop"]`` -- the draw's delivered loop state (before the
           homotopy): the first request BIT-IDENTICAL to the stored request,
@@ -6992,6 +6994,13 @@ class Bouquet(SwbBaseline):
           and the LCFS rms deviation within the in-spec boundary cut
           (:meth:`_sigma0_geometry_gates`);
         * a draw that is REJECTED fails (``rejection``).
+
+        The kinetic clips stay on for this draw (the same path as every
+        draw); their counters are recorded (``sigma0_clips``) and a clip that
+        fired is recorded as the finding ``baseline_outside_physical_window``
+        (:func:`bouquet.engine_draws.sigma0_clip_finding`) -- the baseline
+        itself lies outside the clips' window there.  It does not change the
+        verdict.
 
         ``passed`` needs every stage.  The top-level ``r_j`` / ``r_I`` /
         ``dl_i`` / ``dq0`` / ``dq95`` are the ARCHIVED state's (what a draw
@@ -7022,7 +7031,8 @@ class Bouquet(SwbBaseline):
         saved = {k: self.__dict__[k] for k in keep_attrs
                  if k in self.__dict__}
         saved_cfg = dict(header=self.config.output_header,
-                         target=gc.n_inspec_target, cap=gc.max_total_draws)
+                         target=gc.n_inspec_target, cap=gc.max_total_draws,
+                         budget=getattr(gc, "draw_wall_budget_s", None))
         probe = {}
         out = dict(invariant="engine-draw", route="generate()",
                    criterion=(
@@ -7036,11 +7046,22 @@ class Bouquet(SwbBaseline):
                        "rtol_Ip, |dl_i| <= tol_li, |dq0| <= tol_q0; its "
                        "coil drift within the hard coil bound and its LCFS "
                        "rms within the in-spec boundary cut; not rejected"))
+        # The per-draw wall budget is OFF for this draw (review of #94 P1,
+        # 2026-10-17): the check verifies REPRODUCTION, and
+        # a wall-clock rejection here would be a false failure that depends
+        # on the machine's load, not on the physics.  The draws keep it.
+        out["wall_budget"] = dict(
+            applied_s=None, configured_s=saved_cfg["budget"],
+            rule=("GenerationConfig.draw_wall_budget_s is switched off for "
+                  "the sigma=0 verification draw: a reproduction check "
+                  "must not fail on machine load; the configured budget "
+                  "applies to generate()'s draws"))
         try:
             with tempfile.TemporaryDirectory(prefix="bq_sigma0_") as td:
                 self.config.output_header = os.path.join(td, "sigma0_route")
                 gc.n_inspec_target = None
                 gc.max_total_draws = None
+                gc.draw_wall_budget_s = None
                 self._sigma0_route = probe
                 try:
                     diags = self.generate(n=1)
@@ -7057,6 +7078,7 @@ class Bouquet(SwbBaseline):
             self.config.output_header = saved_cfg["header"]
             gc.n_inspec_target = saved_cfg["target"]
             gc.max_total_draws = saved_cfg["cap"]
+            gc.draw_wall_budget_s = saved_cfg["budget"]
             for k in keep_attrs:
                 if k in saved:
                     self.__dict__[k] = saved[k]
@@ -7082,6 +7104,18 @@ class Bouquet(SwbBaseline):
                 max_F_drift_pct=d0.get("max_F_drift_pct"),
                 max_VSC_drift_pct=d0.get("max_VSC_drift_pct"))
         out["record"] = (d0 or {}).get("engine")
+        # the kinetic clips at sigma=0 (review of #94, P2): counted, and a
+        # clip that fired is a FINDING on the baseline, recorded beside the
+        # verdict (which it does not change)
+        from .engine_draws import sigma0_clip_finding
+        out["sigma0_clips"], _bopw = sigma0_clip_finding(out["record"])
+        if _bopw is not None:
+            out["baseline_outside_physical_window"] = _bopw
+            print("[sigma0-check engine route] FINDING: baseline outside the "
+                  "physical window -- kinetic clips fired at sigma=0: "
+                  + ", ".join(f"{k}={v}" for k, v in _bopw["clips"].items())
+                  + " node(s) (recorded as baseline_outside_physical_window; "
+                  "the verdict is unchanged)", flush=True)
         # the coil regularisation the draw's loop solved under (the
         # reconstruction's own term list)
         out["coil_reg"] = (out["record"] or {}).get("coil_reg")
@@ -7149,7 +7183,10 @@ class Bouquet(SwbBaseline):
         """The zero-perturbation draw's archived coil currents and LCFS
         against the reconstruction's, from the archive *header*: per-coil
         drift [%] (:func:`bouquet.TokaMaker_interface._coil_drift_pct`, the
-        homotopy's own measure) of draw 0's ``coil_currents`` against
+        plain per-coil percentage; deliberately NOT the homotopy's VSC
+        saturation measure, :func:`~bouquet.TokaMaker_interface.
+        _coil_bound_max_vsc`, whose denominator is floored at 10 kA) of draw
+        0's ``coil_currents`` against
         ``_baseline/coil_currents`` (the reconstruction's state at
         ``generate()`` entry), the max non-VSC F-coil and max VSC-coil drift
         (:func:`~bouquet.TokaMaker_interface._coil_max_drifts`), and the
@@ -8088,7 +8125,8 @@ class Bouquet(SwbBaseline):
                 DrawSolveGuard(self.mygs,
                                _m.solve_maxits(gc.draw_solve_maxits),
                                retry_urf=_m.solve_retry_urf(gc.draw_solve_retry_urf),
-                               loose_tol=_m.solve_loose_tol(gc.draw_solve_loose_tol)) as _solve_guard:
+                               loose_tol=_m.solve_loose_tol(gc.draw_solve_loose_tol),
+                               wall_budget_s=getattr(gc, "draw_wall_budget_s", None)) as _solve_guard:
             self.diagnostics = generate_bouquet(
                 self.mygs, np.asarray(bl.psi_N, dtype=float), n_equils, header,
                 np.asarray(bl.j_phi, dtype=float),
@@ -8185,7 +8223,8 @@ class Bouquet(SwbBaseline):
                 # Who draws ni when zeff is active (see UncertaintyConfig).
                 ni_from_zeff=env.get("ni_from_zeff", True),
                 zeff_dne=env.get("zeff_dne"),
-                # EXPERIMENTAL PR #56 sampler clips (resolve_uncertainty)
+                # the PR #56 sampler clips, resolved by resolve_uncertainty
+                # (on by default on every route; explicit False off)
                 kinetic_clips=bool(env.get("kinetic_clips", False)),
                 progress_callback=progress_callback,
                 # shared until-N hooks (bouquet.parallel); None on the serial path
@@ -8272,7 +8311,12 @@ class Bouquet(SwbBaseline):
             stamp_generation_provenance(
                 header, scan_key=gc.scan_key,
                 inspec_rms_max_mm=(_cut_mm if _until else None),
-                inspec_cut_source=(_cut_source if _until else None))
+                inspec_cut_source=(_cut_source if _until else None),
+                # the per-draw wall budget this run applied and what it cost
+                draw_wall_budget_s=getattr(gc, "draw_wall_budget_s", None),
+                draw_wall_budget_rejections=int(sum(
+                    1 for _r in self.draw_rejections
+                    if _r.get("reason") == "draw_wall_budget")))
         except OSError as _exc:        # the draws are stored; say what is missing
             import warnings as _w
             _w.warn(f"the until-N boundary cut ({_cut_mm} mm, {_cut_source}) "

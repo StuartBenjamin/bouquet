@@ -9,8 +9,11 @@ then ``Ti`` -- redrawn together until the pressure integral is within
 A drawn Z_eff is clipped to :func:`bouquet.physics.zeff_bounds`; a derived
 ``ni`` is an increment on the baseline ``ni``.  The PR #56 clips -- the
 Z_eff floor at 1, ``ni`` held inside ``[0, ne - z_fast]``, the passive Z_eff
-aux clip -- are EXPERIMENTAL and opt-in (``KineticBase.clips``;
-``bouquet.experimental.REGISTRY["kinetic_sampler_clips"]``).  Every clip
+aux clip -- are switched by ``KineticBase.clips`` (False here, for a
+direct caller); a run resolves them from ``UncertaintyConfig.kinetic_clips``,
+ON by default on every route since 2026-10-17
+(:func:`bouquet.experimental.kinetic_clips_on`; an explicit False wins).
+Every clip
 that moves a node is counted on the draw (:attr:`KineticDraw.clips`,
 :meth:`KineticDraw.record`); the version is :data:`KINETIC_SAMPLER_VERSION`.
 """
@@ -19,7 +22,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-#: drawn Z_eff floor of the EXPERIMENTAL clips (``KineticBase.clips``)
+#: drawn Z_eff floor of the PR #56 clips (``KineticBase.clips``)
 ZEFF_DRAW_MIN = 1.0
 
 #: Version of the kinetic draw, to be recorded with every draw.
@@ -47,10 +50,17 @@ ZEFF_DRAW_MIN = 1.0
 #: :func:`bouquet.physics.zeff_bounds` alone (the window before PR #56) and
 #: ``ni`` is not clipped.  With ``clips=True`` a draw equals ``/2``'s.  The
 #: record says which (``clips_enabled``).
+#: ``/3.1`` (2026-10-17): the draw arithmetic of ``/3`` for a given
+#: ``clips`` flag, seed for seed; only the run-level default changed: a run
+#: resolves the clips ON on every route (``UncertaintyConfig.kinetic_clips``
+#: None = auto; an explicit False wins), so the ``/3`` string's "clips
+#: opt-in" no longer described the archived draws.  The minor number marks
+#: archives written under the new default; ``clips_enabled`` on each record
+#: remains the per-draw truth.
 KINETIC_SAMPLER_VERSION = (
-    "kinetic_sampler/3 (shared sampler; derived ni = increment on the "
-    "baseline ni; Z_eff window = zeff_bounds; PR #56 clips opt-in; clips "
-    "counted per draw)")
+    "kinetic_sampler/3.1 (shared sampler; derived ni = increment on the "
+    "baseline ni; Z_eff window = zeff_bounds; PR #56 clips on by default "
+    "(auto), explicit False off; clips counted per draw)")
 
 #: The names of :attr:`KineticDraw.clips` (each the number of kinetic-grid
 #: nodes the clip moved, on the ACCEPTED draw).
@@ -107,9 +117,10 @@ class KineticBase:
     zeff_includes_fast: bool = False
     ni_from_zeff: bool = True
     zeff_dne: Optional[np.ndarray] = None
-    #: EXPERIMENTAL PR #56 clips (the Z_eff floor at 1, ni in
-    #: [0, ne - z_fast], the passive Z_eff aux clip); False keeps only the
-    #: zeff_bounds window
+    #: the PR #56 clips (the Z_eff floor at 1, ni in [0, ne - z_fast], the
+    #: passive Z_eff aux clip); False keeps only the zeff_bounds window.
+    #: False here for a direct caller; a run passes the resolved
+    #: UncertaintyConfig.kinetic_clips (on by default on every route)
     clips: bool = False
 
     def __post_init__(self):
@@ -135,7 +146,7 @@ class KineticBase:
     def zeff_window(self, ne, Z_imp):
         """``(lo, hi)`` a Z_eff draw is clipped to on *ne* (``hi`` None: open):
         :meth:`zeff_bounds_raw`, floored at :data:`ZEFF_DRAW_MIN` only with
-        the experimental :attr:`clips`."""
+        the PR #56 :attr:`clips`."""
         lo, hi = self.zeff_bounds_raw(ne, Z_imp)
         if not self.clips:
             return lo, hi
@@ -173,7 +184,7 @@ class KineticDraw:
     #: when nothing was clipped
     clips: dict = field(default_factory=lambda: dict.fromkeys(
         CLIP_COUNTERS, 0))
-    #: whether the experimental PR #56 clips were on (KineticBase.clips)
+    #: whether the PR #56 clips were on (KineticBase.clips)
     clips_enabled: bool = False
     #: the impurity charge the Z_eff channel used (None: no channel or no
     #: dilution) and where it came from: ``"declared"`` (the caller's
@@ -219,7 +230,7 @@ def _count_zeff_clips(raw, lo_bounds, lo, hi, prefix=""):
     lo = np.broadcast_to(np.asarray(lo, dtype=float), raw.shape)
     lo_b = np.broadcast_to(np.asarray(lo_bounds, dtype=float), raw.shape)
     below = raw < lo
-    # lifted by the floor (the experimental clips) above zeff_bounds' edge
+    # lifted by the floor (the PR #56 clips) above zeff_bounds' edge
     floor1 = below & (lo_b < ZEFF_DRAW_MIN) & (lo > lo_b)
     out = {prefix + "zeff_floor_1": int(np.count_nonzero(floor1)),
            prefix + "zeff_window_lo": int(np.count_nonzero(below & ~floor1)),
