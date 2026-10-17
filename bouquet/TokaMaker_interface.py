@@ -180,6 +180,10 @@ DRAW_REJECTION_REASONS = {
     "eqdsk_save_failed": "the draw's g-file could not be written "
                          "(save_eqdsk failed on the delivered state); the "
                          "state is restored and the draw is not archived",
+    # write_ifile: the draw's i-file could not be written
+    "ifile_save_failed": "the draw's i-file could not be written "
+                         "(save_ifile failed, write_ifile): the draw is "
+                         "not archived",
     # write_ifile: restoring the equilibrium after the i-file save failed
     "ifile_restore_failed": "restoring the solver state after the draw's "
                             "i-file save failed (write_ifile): the state the "
@@ -6879,10 +6883,9 @@ def generate_bouquet(
         elif os.path.exists(_bl_if_path0):
             os.unlink(_bl_if_path0)
     if write_ifile and not (_bl_ifile_rec or {}).get("ifile_written"):
-        warnings.warn(
+        raise RuntimeError(
             "write_ifile=True but the baseline has no i-file: "
-            f"{(_bl_ifile_rec or {}).get('ifile_error')}", RuntimeWarning,
-            stacklevel=2)
+            f"{(_bl_ifile_rec or {}).get('ifile_error')}")
     if _bl_xpts is None:
         print(f"  NOTE: no baseline X-points captured; "
               f"plot_boundary_point_traces will fall back to the "
@@ -8446,16 +8449,21 @@ def generate_bouquet(
         # Optional OFT i-file for GPEC eq_type='ldp_i', from the same state
         # and with the same lcfs_pressure (this draw's own p_sep) and
         # lcfs_pad as the g-file just written (#74 review B1).  A failed
-        # save is stamped on the draw (ifile_written=False, ifile_error); a
-        # failed state RESTORE rejects the draw like a failed g-file save.
+        # save rejects the draw (a run that writes i-files hands them on),
+        # as does a failed state RESTORE, like a failed g-file save.
         ifile_path, _ifile_rec = None, None
         if write_ifile:
             try:
                 ifile_path, _ifile_rec = save_state_ifile(
                     mygs, os.path.abspath(f"{header}_count={count}.ifile"),
                     p_sep=_p_lcfs, **_ifile_kw)
-            except SnapshotRestoreError as _if_exc:
-                _reject(count, "ifile_restore_failed", "save", _if_exc)
+                _if_exc = (None if ifile_path is not None else
+                           RuntimeError(_ifile_rec["ifile_error"]))
+                _if_reason = "ifile_save_failed"
+            except SnapshotRestoreError as _exc:
+                _if_exc, _if_reason = _exc, "ifile_restore_failed"
+            if _if_exc is not None:
+                _reject(count, _if_reason, "save", _if_exc)
                 try:
                     if _warmstart_eq_snap is not None:
                         mygs.replace_eq(source_eq=_warmstart_eq_snap)

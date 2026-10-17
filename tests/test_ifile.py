@@ -1,5 +1,6 @@
 """OFT i-file archiving (GenerationConfig.write_ifile): storage, reader, snapshot-wrapped save."""
 import os
+import shutil
 import h5py
 import numpy as np
 
@@ -233,3 +234,41 @@ def test_generate_refuses_write_ifile_on_a_solver_without_save_ifile(tmp_path):
             0.9 * ne, te, 0.05 * ne, 0.05 * te, 0.05 * ne, 0.05 * te,
             0.05 * jphi, 0.4, 0.4, 0.25, 1.0e6, 0.8, 1.5 * np.ones(_N),
             diagnostic_plots=False, seed=3, write_ifile=True)
+
+
+
+def _ifile_gs(R, fail_from):
+    """The rejection tests' mock with a g-file save and an i-file save that
+    fails from call *fail_from* on (0: the baseline's)."""
+    class _GS(R._FakeGS):
+        n_ifile = 0
+
+        def save_eqdsk(self, filename, *a, **k):
+            shutil.copy(os.path.join(os.path.dirname(__file__), "data",
+                                     "g_synthetic.geqdsk"), filename)
+
+        def save_ifile(self, filename, *a, **k):
+            type(self).n_ifile += 1
+            if type(self).n_ifile > fail_from:
+                raise RuntimeError("trace failed")
+            with open(filename, "w") as fh:
+                fh.write("i")
+    return _GS
+
+
+def test_a_draw_whose_ifile_save_fails_is_rejected(tmp_path, monkeypatch):
+    """write_ifile hands the i-file on: a draw without one is not archived."""
+    import test_draw_rejections as R
+    monkeypatch.setattr(R, "_FakeGS", _ifile_gs(R, 1))
+    out, rej, header = R._run(tmp_path, monkeypatch, ["ok"], write_ifile=True)
+    assert [r["reason"] for r in rej] == ["ifile_save_failed"]
+    assert "trace failed" in rej[0]["message"] and out == []
+    assert R._draw_groups(header) == []
+
+
+def test_a_baseline_without_an_ifile_refuses_the_run(tmp_path, monkeypatch):
+    import pytest
+    import test_draw_rejections as R
+    monkeypatch.setattr(R, "_FakeGS", _ifile_gs(R, 0))
+    with pytest.raises(RuntimeError, match="baseline has no i-file: .*trace failed"):
+        R._run(tmp_path, monkeypatch, ["ok"], write_ifile=True)
