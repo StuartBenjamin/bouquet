@@ -65,6 +65,9 @@ or on a downgraded route now assert on.
     legacy route) it warns and, where there is a balance record, is recorded as ignored.
   - The partition probe's legacy coil fraction is the legacy in-spec F metric itself
     (coils named F*, the 1 A floor), not a re-derivation over every non-VSC coil.
+  - The text that still called the kinetic clips opt-in / EXPERIMENTAL is corrected, and
+    `KINETIC_SAMPLER_VERSION` is `kinetic_sampler/3.1`: the `/3` draw arithmetic for a given
+    `clips` flag, archived under the new on-by-default rule (the `/3` string said "opt-in").
 
 ## Unreleased — the g-file and systematics notebooks re-executed on the thermal-only g-file
 

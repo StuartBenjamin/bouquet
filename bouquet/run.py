@@ -8186,7 +8186,8 @@ class Bouquet(SwbBaseline):
                 # Who draws ni when zeff is active (see UncertaintyConfig).
                 ni_from_zeff=env.get("ni_from_zeff", True),
                 zeff_dne=env.get("zeff_dne"),
-                # EXPERIMENTAL PR #56 sampler clips (resolve_uncertainty)
+                # the PR #56 sampler clips, resolved by resolve_uncertainty
+                # (on by default on every route; explicit False off)
                 kinetic_clips=bool(env.get("kinetic_clips", False)),
                 progress_callback=progress_callback,
                 # shared until-N hooks (bouquet.parallel); None on the serial path

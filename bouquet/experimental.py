@@ -223,8 +223,10 @@ GRADUATED = {
         evidence=[
             "the clips change no draw unless they bind, and every clip that "
             "fires is counted per draw and archived",
-            "they ride with the measured IDA route (graduated 2026-10 on the "
-            "sigma=0 evidence of a reversed-Ip near-double-null slice)",
+            "graduated 2026-10 with the measured IDA route on the sigma=0 "
+            "evidence of a reversed-Ip near-double-null slice; on every route "
+            "since 2026-10-17 (a sigma=0 verification counts any clip that "
+            "fires on the baseline and records it)",
         ],
 known_limitations=[
             "per-clip counts on a real ensemble (KineticDraw.clips): the "

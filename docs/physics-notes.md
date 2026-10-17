@@ -1263,9 +1263,11 @@ n_i down). This is the case `zeff_floor_1` counts separately from the
 physical window, so its frequency can be measured on a real run before the
 floor is revisited. Every clip changes values exactly as before; only the
 counting is new. Each draw's `record()` carries the sampler version
-(`kinetic_sampler/3`), whether the clips were on (`clips_enabled`) and the
-counters, and a log line names every clip that fires. Default (clips off):
-only the Z_eff window row applies.
+(`kinetic_sampler/3.1`; `/3` before the 2026-10-17 default), whether the clips
+were on (`clips_enabled`) and the counters, and a log line names every clip
+that fires. Default: the clips are on on every route
+(`UncertaintyConfig.kinetic_clips=None`, owner decision 2026-10-17); with
+`kinetic_clips=False` only the Z_eff window row applies.
 
 ## Corrective j_phi iteration
 

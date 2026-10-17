@@ -3289,8 +3289,9 @@ def perturb_kinetic_equilibrium(
     aux_length_scales=None,
     ni_from_zeff=True,
     zeff_dne=None,
-    # EXPERIMENTAL PR #56 sampler clips (bouquet.experimental.REGISTRY
-    # ["kinetic_sampler_clips"]; KineticBase.clips)
+    # the PR #56 sampler clips (KineticBase.clips). False for a direct
+    # caller; a run passes UncertaintyConfig.kinetic_clips resolved
+    # (bouquet.experimental.kinetic_clips_on: on by default on every route)
     kinetic_clips=False,
     max_proxy_draws=500,
     bnd_diag_callback=None,
@@ -5630,7 +5631,8 @@ def generate_bouquet(
     aux_length_scales=None,
     ni_from_zeff=True,
     zeff_dne=None,
-    kinetic_clips=False,         # EXPERIMENTAL; see perturb_kinetic_equilibrium
+    kinetic_clips=False,         # PR #56 clips; a run passes the resolved
+                                 # (default on) value; see perturb_kinetic_equilibrium
     progress_callback=None,
     source_kind=None,
     capture_live_eq=True,
