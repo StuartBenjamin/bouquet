@@ -272,3 +272,19 @@ def test_a_baseline_without_an_ifile_refuses_the_run(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "_FakeGS", _ifile_gs(R, 0))
     with pytest.raises(RuntimeError, match="baseline has no i-file: .*trace failed"):
         R._run(tmp_path, monkeypatch, ["ok"], write_ifile=True)
+
+
+def test_compress_file_bytes_reaches_every_blob(tmp_path, monkeypatch):
+    import test_draw_rejections as R
+    monkeypatch.setattr(R, "_FakeGS", _ifile_gs(R, 9))
+    out, rej, header = R._run(tmp_path, monkeypatch, ["ok"], write_ifile=True,
+                              compress_file_bytes=True)
+    assert rej == [] and len(out) == 1
+    blobs = []
+    with h5py.File(header + ".h5", "r") as hf:
+        hf.visititems(lambda n, o: blobs.append((n.split("/")[-2], n.split("/")[-1],
+                                                 o.compression, o.dtype))
+                      if n.split("/")[-1] in ("eqdsk", "ifile") else None)
+    assert sorted(b[:2] for b in blobs) == [("0", "eqdsk"), ("0", "ifile"),
+                                            ("_baseline", "eqdsk"), ("_baseline", "ifile")]
+    assert all(c == "gzip" and t == np.uint8 for *_, c, t in blobs)

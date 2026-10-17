@@ -233,8 +233,11 @@ pressure + that equilibrium's `p_sep`).
   (`PROFILE_UNITS` in `schema.py`). v1 archives embedded units in the name
   (`"jphi_total [A m^-2]"`).
 - **Fixed byte-blob names.** The g-file / p-file bytes are stored as `eqdsk` /
-  `pfile` inside each group — the group path carries the coordinates. Bytes
-  are stored opaque (`np.void`) and round-trip bit-perfect.
+  `pfile` (and `ifile`) inside each group — the group path carries the
+  coordinates. The bytes round-trip bit-perfect: opaque (`np.void`), or with
+  `GenerationConfig.compress_file_bytes` a gzip-compressed uint8 array
+  (`schema.write_bytes`; the g-file is ~2.7× smaller). HDF5 decompresses on
+  read; `bytes(ds[()])` reads either.
 - **Always `scan/<key>/`.** The scan key is a user-chosen label
   (`GenerationConfig.scan_key`, default `0`) — a time in ms, a beta value, …
   Several bouquets can share one file under different keys.

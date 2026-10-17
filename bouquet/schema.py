@@ -433,6 +433,19 @@ def is_binary_profile_source(data: bytes) -> bool:
     return head.startswith(b"\x89HDF") or head.startswith(b"CDF")
 
 
+def write_bytes(grp, name, data, compress=False):
+    """Store the file bytes ``data`` (g-file, p-file, i-file) as dataset
+    ``name`` of ``grp``: opaque ``np.void``, or with ``compress`` a
+    gzip-compressed uint8 array (the g-file text is ~2.7x smaller).
+    ``bytes(ds[()])`` reads either back unchanged."""
+    import numpy as np
+    if not compress:
+        return grp.create_dataset(name, data=np.void(bytes(data)))
+    a = np.frombuffer(bytes(data), dtype=np.uint8)
+    return grp.create_dataset(name, data=a, **(dict(compression="gzip", compression_opts=4)
+                                              if a.size else {}))
+
+
 def find_bytes_dataset(grp, kind=EQDSK_DS):
     """Name of ``grp``'s eqdsk/pfile byte blob, or ``None`` if absent.
 

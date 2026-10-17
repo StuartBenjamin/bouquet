@@ -129,7 +129,7 @@ class TestBinarySourceDedup:
     (the new IDA-database files are ~190 MB -> a 20-draw archive hit ~4 GB).
     Text p-files stay per-draw (they carry the draw's perturbed kinetics)."""
 
-    def _store(self, path, pfile_bytes):
+    def _store(self, path, pfile_bytes, compress=False):
         from bouquet.utils import store_equilibrium, store_baseline_profiles
         stem = os.path.splitext(path)[0]
         psi = np.linspace(0, 1, 9)
@@ -141,13 +141,15 @@ class TestBinarySourceDedup:
             stem, psi, one, one, one, one, one, one,          # ne te ni ti p jphi
             one, one, one, one, one,                          # 5 sigmas
             1e6, 1.0, scan_key="900",
-            eqdsk_bytes=b"GEQDSK-BYTES", pfile_bytes=pfile_bytes)
+            eqdsk_bytes=b"GEQDSK-BYTES", pfile_bytes=pfile_bytes,
+            compress_file_bytes=compress)
         for c in range(2):
             store_equilibrium(
                 stem, c, eq_path, psi,
                 one, one, one,                                 # jphi_total jphi_bs j_ind
                 one, one, one, one, one,                       # ne Te ni Ti wExB
-                1.0, 0.8, scan_key="900", pfile_bytes=pfile_bytes)
+                1.0, 0.8, scan_key="900", pfile_bytes=pfile_bytes,
+                compress_file_bytes=compress)
 
     def test_binary_cdf_stored_once_with_reader_fallback(self, tmp_path):
         fake_cdf = b"\x89HDF\r\n\x1a\n" + b"x" * 4096   # netCDF4/HDF5 magic
@@ -171,6 +173,49 @@ class TestBinarySourceDedup:
             for c in ("0", "1"):
                 assert "pfile" in hf[f"scan/900/{c}"]            # per-draw kept
 
+
+
+class TestCompressedBlobs:
+    """compress_file_bytes: the g-file / p-file bytes are written gzip-compressed
+    (else opaque) and read back unchanged."""
+    _store = TestBinarySourceDedup._store
+
+    @pytest.mark.parametrize("compress", [False, True])
+    def test_blobs_are_stored_as_asked_and_read_back(self, tmp_path, compress):
+        text_pf = b"5 psinorm ne(10^20/m^3) dne/dpsiN\n 0.0 1.0 0.0\n"
+        p = str(tmp_path / "gz.h5")
+        self._store(p, text_pf, compress=compress)
+        with h5py.File(p, "r") as hf:
+            for g in ("_baseline", "0"):
+                for name in ("eqdsk", "pfile"):
+                    ds = hf[f"scan/900/{g}/{name}"]
+                    if compress:
+                        assert ds.compression == "gzip" and ds.dtype == np.uint8
+                    else:
+                        assert ds.compression is None and ds.dtype.kind == "V"
+        d = bq.BouquetArchive(p)["900"][0]
+        assert d.eqdsk_bytes == b"GEQDSK-BYTES" and d.pfile_bytes == text_pf
+        rec = bq.load_equilibrium(os.path.splitext(p)[0], count=0, scan_key="900")
+        assert rec["pfile_bytes"] == text_pf
+
+
+def test_export_filtered_holds_only_the_kept_draws(tmp_path):
+    from bouquet.filtering import export_filtered
+    src, out = str(tmp_path / "all.h5"), str(tmp_path / "sel.h5")
+    blob = np.random.default_rng(0).integers(0, 256, 2 ** 20, dtype=np.uint8)
+    with h5py.File(src, "w") as hf:
+        hf.attrs["schema_version"] = 4
+        hf.require_group("scan/900/_baseline")["psi_N"] = np.linspace(0, 1, 5)
+        for c in range(4):
+            g = hf.require_group(f"scan/900/{c}")
+            g["eqdsk"] = blob
+            g.attrs["selected"] = c == 2
+    assert export_filtered(src, out) == 1
+    assert os.path.getsize(out) < 0.4 * os.path.getsize(src)
+    with h5py.File(out, "r") as hf:
+        assert sorted(hf["scan/900"]) == ["2", "_baseline"]
+        assert hf.attrs["schema_version"] == 4 and hf["scan/900/2"].attrs["selected"]
+        np.testing.assert_array_equal(hf["scan/900/2/eqdsk"][()], blob)
 
 class TestDethread:
     """Phase 3: readers accept a run/archive; bad scan_key raises (F1)."""

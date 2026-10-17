@@ -8130,6 +8130,7 @@ class Bouquet(SwbBaseline):
                 write_ifile=gc.write_ifile,
                 ifile_npsi=gc.ifile_npsi,
                 ifile_ntheta=gc.ifile_ntheta,
+                compress_file_bytes=gc.compress_file_bytes,
                 ifile_orientation=dict(
                     source_current_sign=getattr(bl, "source_current_sign",
                                                 None),
