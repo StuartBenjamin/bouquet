@@ -5984,6 +5984,14 @@ def generate_bouquet(
               f"({_r['stage']}): {_r['message'][:200]}", flush=True)
         return _r
 
+    def _budget_outcome(count_):
+        # an attempt the wall budget ended is labelled as such in the attempt
+        # outcomes (not by the stage that tripped over it), so an archive --
+        # merged or not -- can say which attempts the budget cost
+        if (solve_guard is not None and int(count_) in
+                getattr(solve_guard, "over_budget", {})):
+            _attempt_outcomes[int(count_)] = "draw_wall_budget"
+
     # ---- the reproducibility contract: ONE Generator per run ----------
     # `seed` is consumed exactly here and nowhere else.  The resulting
     # Generator is threaded explicitly into every draw site -- the per-draw
@@ -7847,6 +7855,7 @@ def generate_bouquet(
                 except Exception:
                     pass
             _attempt_outcomes[int(count)] = "solve_failed"
+            _budget_outcome(count)
             if pbar is not None:
                 pbar.update(1)
             continue
@@ -8436,6 +8445,7 @@ def generate_bouquet(
                 except Exception:
                     pass
                 _attempt_outcomes[int(count)] = "post_align_failed"
+                _budget_outcome(count)
                 if pbar is not None:
                     pbar.update(1)
                 continue

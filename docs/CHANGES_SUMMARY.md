@@ -55,6 +55,11 @@ or on a downgraded route now assert on.
   total-pressure g-file's q; `test_phi_imas_solver` and `test_swb_systematics_solver` pair
   the dd with it and `g_synthetic_pfast.geqdsk` (their premise did not hold on the
   thermal-only g-file); no bar moved.
+- **Review fixes (#94).**
+  - A process-parallel merge carries `draw_wall_budget_s` (one budget for every shard;
+    shards under different budgets are refused) and the summed
+    `draw_wall_budget_rejections`; both are generation-provenance keys, and an attempt the
+    budget ended has the outcome `"draw_wall_budget"`.
 
 ## Unreleased — the g-file and systematics notebooks re-executed on the thermal-only g-file
 
