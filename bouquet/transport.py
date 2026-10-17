@@ -48,7 +48,7 @@ def transport_record(geom, x_kin, ne, te, ni, ti, x_eq, p_thermal, src, Ip,
 
     Power balance, conduction only: chi_s = L_eff (Q_s - 5/2 e T_s Gamma_s) /
     (S n_s e T_s dlnT_s/drho_N), L_eff = rho_tor,b (dV/drho_tor) / S, Gamma_i =
-    Gamma_e n_i/n_e.  tau_E,th = W_th/P_net, tau_E = (W_th + W_fast)/P_net,
+    Gamma_e n_i/n_e with this n_i (IMAS.jl 7.4: n_i = n_e/Z_eff).  tau_E,th = W_th/P_net, tau_E = (W_th + W_fast)/P_net,
     W = 3/2 int p dV; tau_98 (IPB98y2), tau_DS03 as IMAS.jl, H_98 = tau_E,th/tau_98.
     *x_kin* / *x_eq* are in the run coordinate *coord* ("psi_n" or "phi_n");
     temperatures in eV."""
