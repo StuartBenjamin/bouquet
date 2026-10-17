@@ -479,3 +479,197 @@ def test_merge_carries_the_rule_and_refuses_a_mix(tmp_path,
                       verbose=False)
     with pytest.raises(RuntimeError, match="different in-spec rules"):
         TED._quiet(merge_archives, paths, out + "_x", scan_key=0)
+
+
+# --------------------------------------------------------------------------
+#  review F1: the stamp is the rule AS APPLIED (the q0 gate switched off)
+# --------------------------------------------------------------------------
+def _sawtoothing_run(tmp_path):
+    """constrain_sawteeth=True on a reconstruction whose q(0) < 1: the toy's
+    q scale is lowered after the reconstruction, so generate_bouquet's entry
+    check sees q0 < 1 and switches the gate off for the scan."""
+    b = TED._bq(tmp_path, n=3)
+    b.config.generation.constrain_sawteeth = True
+    b.setup_solver()
+    TED._quiet(b.prepare_baseline)
+    b.mygs.toy.q_scale *= 0.3
+    TED._quiet(b.generate)
+    return b
+
+
+def test_a_switched_off_q0_gate_is_not_stamped(tmp_path, toy_bouquet_solver):
+    b = _sawtoothing_run(tmp_path)
+    h, sk = b.config.output_header, b.config.generation.scan_key
+    rule, bands = F.read_inspec_rule(h, scan_key=sk)
+    assert rule == "magnetics" and bands.constrain_sawteeth is False
+    rec = F.read_inspec_record(h, scan_key=sk)
+    q0g = rec[F.Q0_GATE_RECORD_KEY]
+    assert q0g["configured"] is True and q0g["applied"] is False
+    assert q0g["q0"] < 1.0 and "q(0)" in q0g["reason"]
+    # the baseline's engine record says the same
+    from bouquet.engine import load_baseline_engine
+    eng = load_baseline_engine(h, scan_key=sk)
+    assert eng["draws"]["inspec_bands"]["constrain_sawteeth"] is False
+    assert eng["draws"]["q0_gate"]["applied"] is False
+    # the draws were judged without the gate: q0 < 1, still in band
+    ph = [ED.read_draw_engine(h, i, scan_key=sk)["post_hoc"]
+          for i in F.list_equilibrium_indices(h, scan_key=sk)]
+    assert ph and all(p["q0"] < 1.0 and p["constrain_sawteeth"] is False
+                      and p["in_band"] for p in ph)
+
+
+def test_a_refilter_under_the_stamped_rule_reproduces_selected(
+        tmp_path, toy_bouquet_solver):
+    b = _sawtoothing_run(tmp_path)
+    h, sk = b.config.output_header, b.config.generation.scan_key
+    sel = TED._quiet(b.filter)
+    # filter() sees the stamp as the rule this config applied: no re-judge
+    assert sel["inspec"]["refiltered"] is False
+    assert sel["inspec"]["rule"] == "magnetics"
+    before = F.select_indices(h, scan_key=sk, selection="selected")
+    assert before                                  # something to reproduce
+    F.refilter_inspec(h, F.read_inspec_rule(h, scan_key=sk)[1], scan_key=sk,
+                      verbose=False)
+    assert F.select_indices(h, scan_key=sk, selection="selected") == before
+    # ... and the switched-off record survives that re-stamp, so a later
+    # filter() still does not apply the gate generation switched off
+    assert F.q0_gate_switched_off(
+        F.read_inspec_record(h, scan_key=sk)[F.Q0_GATE_RECORD_KEY])
+    sel = TED._quiet(b.filter)
+    assert sel["inspec"]["refiltered"] is False
+    assert F.select_indices(h, scan_key=sk, selection="selected") == before
+
+
+# --------------------------------------------------------------------------
+#  review F2: the archived in_spec is the in-spec rule's verdict
+# --------------------------------------------------------------------------
+def _rule_run(tmp_path, monkeypatch, *, coil_ok, drift_ok, **extra):
+    """An engine run whose configured coil test says *coil_ok* (a stand-in
+    for the chi2 predicate) and whose legacy +/-2 % drift test says
+    *drift_ok*, independently."""
+    def _pred(*a, **k):
+        def p(diagnostics, draw_currents=None):
+            return bool(coil_ok), {"chi2_nu": 0.5 if coil_ok else 9.0,
+                                   "max_abs_z": 0.7 if coil_ok else 5.0,
+                                   "coil_nu": 4, "worst_coil": "F1A"}
+        model = {"kind": "stand-in", "acceptance": {
+            "chi2_max": 2.0, "z_max": None, "source": "test",
+            "calibrated_nu": None, "nu_sigma": 4}}
+        return p, "chi2", model
+    monkeypatch.setattr(F, "make_coil_predicate", _pred)
+    monkeypatch.setattr(F, "passes_coil_spec", lambda *a, **k: bool(drift_ok))
+    return TED._generate(tmp_path, monkeypatch, n=2, l_i_tolerance=None,
+                         n_inspec_target=2, **extra)
+
+
+def _archived(h, i):
+    with h5py.File(h + ".h5", "r") as hf:
+        g = hf[f"scan/0/{i}"] if "scan" in hf else hf[str(i)]
+        return dict(g.attrs)
+
+
+def test_a_chi2_in_spec_draw_beyond_the_drift_band_is_in_spec(
+        tmp_path, monkeypatch):
+    diags, rej, h, G = _rule_run(tmp_path, monkeypatch, coil_ok=True,
+                                 drift_ok=False)
+    assert rej == [] and len(diags) == 2
+    flags = next(iter(F.read_filter_flags(h).values()))
+    for i, d in enumerate(diags):
+        assert d["in_spec"] is True and d["until_n_inspec"] is True
+        assert d["coil_drift_in_spec"] is False
+        ph = ED.read_draw_engine(h, i)["post_hoc"]
+        assert ph["in_spec"] is True and ph["coil_in_spec"] is True
+        assert ph["coil_drift_in_spec"] is False
+        assert ph["in_spec_source"] == F.IN_SPEC_RULE_SOURCE
+        a = _archived(h, i)
+        assert bool(a["in_spec"]) is True
+        assert bool(a[F.COIL_DRIFT_IN_SPEC_ATTR]) is False
+        assert a[F.IN_SPEC_SOURCE_ATTR] == F.IN_SPEC_RULE_SOURCE
+        assert flags[i]["in_spec"] is True
+        assert flags[i]["coil_drift_in_spec"] is False
+        assert flags[i]["in_spec_source"] == F.IN_SPEC_RULE_SOURCE
+
+
+@pytest.mark.parametrize("why", ["coil", "boundary"])
+def test_a_drift_in_band_draw_outside_the_rule_is_out_of_spec(
+        tmp_path, monkeypatch, why):
+    """The reverse: inside the +/-2 % drift band, but failing the
+    configured coil test -- or the boundary cut the drift test never
+    had."""
+    extra = ({} if why == "coil" else dict(inspec_rms_max_mm=1e-9))
+    diags, rej, h, G = _rule_run(tmp_path, monkeypatch,
+                                 coil_ok=(why != "coil"), drift_ok=True,
+                                 **extra)
+    assert rej == [] and diags
+    for i, d in enumerate(diags):
+        assert d["in_spec"] is False and d["until_n_inspec"] is False
+        assert d["coil_drift_in_spec"] is True
+        ph = ED.read_draw_engine(h, i)["post_hoc"]
+        assert ph["in_spec"] is False and ph["coil_drift_in_spec"] is True
+        assert ph["in_spec"] == (ph["coil_in_spec"] and ph["in_band"])
+        a = _archived(h, i)
+        assert bool(a["in_spec"]) is False
+        assert bool(a[F.COIL_DRIFT_IN_SPEC_ATTR]) is True
+
+
+def test_an_archive_before_the_rule_verdict_reads_its_drift_in_spec():
+    """No in_spec_source: in_spec IS the drift verdict -- reported under
+    both names, and the reader says which it used."""
+    old = F.in_spec_fields({"in_spec": False})
+    assert old == {"in_spec": False, "coil_drift_in_spec": False,
+                   "in_spec_source": F.IN_SPEC_DRIFT_SOURCE}
+    new = F.in_spec_fields({"in_spec": True, "coil_drift_in_spec": False,
+                            "in_spec_source": b"inspec_rule"})
+    assert new == {"in_spec": True, "coil_drift_in_spec": False,
+                   "in_spec_source": F.IN_SPEC_RULE_SOURCE}
+    assert F.in_spec_fields({}) == {}
+
+
+def test_an_old_archive_reads_through_read_filter_flags_and_drawview(
+        tmp_path, monkeypatch):
+    from bouquet.archive import BouquetArchive
+    diags, rej, h, G = _rule_run(tmp_path, monkeypatch, coil_ok=True,
+                                 drift_ok=False)
+    # strip the new fields: the shape of an archive written before them,
+    # whose in_spec was the drift verdict
+    with h5py.File(h + ".h5", "a") as hf:
+        for i in range(len(diags)):
+            g = hf[f"scan/0/{i}"] if "scan" in hf else hf[str(i)]
+            del g.attrs[F.COIL_DRIFT_IN_SPEC_ATTR]
+            del g.attrs[F.IN_SPEC_SOURCE_ATTR]
+            g.attrs["in_spec"] = False
+    fl = next(iter(F.read_filter_flags(h).values()))
+    assert all(r["in_spec"] is False and r["coil_drift_in_spec"] is False
+               and r["in_spec_source"] == F.IN_SPEC_DRIFT_SOURCE
+               for r in fl.values())
+    ar = BouquetArchive(h + ".h5")
+    d0 = ar.scan(ar.scan_keys[0])[0].flags
+    assert d0["in_spec_source"] == F.IN_SPEC_DRIFT_SOURCE
+
+
+# --------------------------------------------------------------------------
+#  _apply_inspec_rule: a config the rule cannot be resolved from is warned
+#  about; anything else propagates
+# --------------------------------------------------------------------------
+class _NoRule:
+    def __init__(self, exc):
+        self._exc = exc
+
+    def _inspec_bands(self):
+        raise self._exc
+
+
+@pytest.mark.parametrize("exc", [KeyError("l_i_sigma"),
+                                 TypeError("bad field")])
+def test_an_unresolvable_rule_is_warned_about(exc):
+    from bouquet.run import Bouquet
+    with pytest.warns(UserWarning, match=type(exc).__name__):
+        out = Bouquet._apply_inspec_rule(_NoRule(exc), "unused", None)
+    assert out == {"rule": None, "refiltered": False, "previous_rule": None}
+
+
+def test_another_error_resolving_the_rule_propagates():
+    from bouquet.run import Bouquet
+    with pytest.raises(RuntimeError, match="boom"):
+        Bouquet._apply_inspec_rule(_NoRule(RuntimeError("boom")), "unused",
+                                   None)

@@ -2750,8 +2750,29 @@ def read_imas_baseline(
     _ni_setting = getattr(source, "ni_source", STANDARD_NI_SOURCE)
     _zeff_absent = False
     if use_ida:
+        from ..experimental import AUTO_NI_SOURCE
         _has_z, _has_c = _ida_zeff_information(source.ida_path)
         _zeff_absent = not _has_z
+        # ONE resolved route per run (review F4), decided here where the file
+        # is known and stamped (li_metrics["kinetics_route"]) for everything
+        # downstream.  An EXPLICIT measured route the file cannot honour is
+        # refused -- never downgraded; only "auto" may resolve to "standard".
+        if _ni_setting != AUTO_NI_SOURCE and _ni_route != STANDARD_NI_SOURCE:
+            _missing = (
+                "no 'Zeff' dataset (the visible-bremsstrahlung Z_eff route)"
+                if _ni_route == "Zeff" and not _has_z else
+                "no 'n_12C6' dataset (the CER carbon route)"
+                if _ni_route == "CER" and not _has_c else
+                "no 'Zeff' and no 'n_12C6' dataset (no Z_eff information)"
+                if not (_has_z or _has_c) else None)
+            if _missing is not None:
+                raise ValueError(
+                    f"ida_hybrid: ImasSource.ni_source={_ni_setting!r} was "
+                    f"set explicitly, but {source.ida_path} carries "
+                    f"{_missing}, so that route cannot be taken (an explicit "
+                    "route is never downgraded). Set ni_source='auto' (the "
+                    "measured route the file supports) or 'standard' (the "
+                    "dd's Z_eff), or use a file with the data")
         if _ni_route != STANDARD_NI_SOURCE and not (_has_z or _has_c):
             if not getattr(source, "zeff_from_fuse", False):
                 raise ValueError(
@@ -2763,9 +2784,11 @@ def read_imas_baseline(
                     "choice: set ImasSource.ni_source='standard' (the dd's "
                     "Z_eff, n_i from it and the IDA n_e) or "
                     "ImasSource.zeff_from_fuse=True")
-            # zeff_from_fuse=True: there is no IDA Z_eff to dilute with, so
-            # n_i follows the dd's Z_eff too -- the standard derivation,
-            # stamped (li_metrics["kinetics_route"])
+            # "auto" with zeff_from_fuse=True: there is no IDA Z_eff to
+            # dilute with, so n_i follows the dd's Z_eff too -- the standard
+            # derivation, stamped (li_metrics["kinetics_route"]); the
+            # uncertainty, the clips and the Z_eff ladder read it from there
+            # (bouquet.experimental.baseline_kinetics_route)
             _ni_route = STANDARD_NI_SOURCE
     # ida_hybrid with a measured ni_source: Z_eff / n_i from IDA
     _ida_ion_route = bool(use_ida and _ni_route != STANDARD_NI_SOURCE)
@@ -2899,6 +2922,11 @@ def read_imas_baseline(
         ni_subtract_fast=bool(_subtract), include_pfast=bool(_pfast_in),
         ida_file_has_zeff=(None if not use_ida else bool(_has_z)),
         ida_file_has_carbon=(None if not use_ida else bool(_has_c)),
+        # where the IDA Z_eff came from on the measured route: the file's
+        # Zeff dataset, the carbon density ("carbon_density": a file with no
+        # Zeff derives it from n_12C6, screened, Z = 6), or both
+        ida_zeff_source=((getattr(_ida_read, "zeff_provenance", None) or {})
+                         .get("zeff_source") if _ida_ion_route else None),
         cross_source=_cross)
 
     # --- user overrides for fixed additive components ---

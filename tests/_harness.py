@@ -198,6 +198,15 @@ REGENERATE_H5_GOLDEN = (
     "tests/golden/make_golden_fixture.py --source "
     "RUN_DIR/D3Dlike_Hmode_golden.h5")
 
+#: The regeneration recipe of the IDS-route h5 golden + its manifest,
+#: verbatim from ``tests/golden/README.md`` ("Build-specific goldens").
+REGENERATE_IDS_GOLDEN = (
+    "OMP_NUM_THREADS=1 python tests/golden/regenerate_golden_run.py RUN_DIR "
+    "--golden ids --reconstruction-engine unified --verbose\n"
+    "BOUQUET_OFT_BUILD_ID=<installed build> python "
+    "tests/golden/make_golden_fixture.py --golden ids --source "
+    "RUN_DIR/D3Dlike_ids_golden.h5")
+
 #: The regeneration recipe of the slim LEGACY golden JSON, verbatim from
 #: ``tests/golden/README.md`` ("Build-specific goldens").
 REGENERATE_LEGACY_GOLDEN = (

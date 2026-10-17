@@ -13,8 +13,10 @@ These are the solver-free halves of the contract:
   * every draw call site in the perturbation path passes ``rng=`` -- a source
     check, because the defect was silent at runtime (unseeded draws still
     *look* fine) and only a structural assertion prevents its return;
-  * a committed golden pins the seeded draw stream bitwise
-    (``tests/golden/rng_stream_manifest.json``).
+  * the committed goldens pin the seeded draw stream bitwise
+    (``tests/golden/rng_stream_manifest.json`` from the g-file golden's
+    baseline, ``tests/golden/ids_rng_stream_manifest.json`` from the IDS
+    golden's).
 
 The live-solver half -- two seeded ``generate()`` runs producing bitwise
 identical archives -- is in ``test_seeded_reproducibility.py`` (``solver``).
@@ -32,8 +34,23 @@ from bouquet.sampling import (make_rng, generate_perturbed_GPR,
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _GOLDEN_DIR = os.path.join(_HERE, "golden")
-_SLIM = os.path.join(_GOLDEN_DIR, "D3Dlike_Hmode_golden_slim.h5")
-_RNG_MANIFEST = os.path.join(_GOLDEN_DIR, "rng_stream_manifest.json")
+#: golden -> (slim fixture, rng-stream manifest), as
+#: tests/golden/make_golden_fixture.GOLDEN_FILES names them
+_RNG_GOLDENS = {
+    "gfile": ("D3Dlike_Hmode_golden_slim.h5", "rng_stream_manifest.json"),
+    "ids": ("D3Dlike_ids_golden_slim.h5", "ids_rng_stream_manifest.json"),
+}
+
+
+@pytest.fixture(params=sorted(_RNG_GOLDENS))
+def rng_golden(request):
+    """``(slim, rng manifest)`` paths of one golden; skipped when absent."""
+    slim, man = (os.path.join(_GOLDEN_DIR, n)
+                 for n in _RNG_GOLDENS[request.param])
+    if not (os.path.isfile(slim) and os.path.isfile(man)):
+        pytest.skip(f"golden {request.param!r} not built; run "
+                    "tests/golden/make_golden_fixture.py")
+    return slim, man
 
 _PSI = np.linspace(0.0, 1.0, 65)
 _PROFILE = 1.0 - 0.85 * _PSI ** 2
@@ -292,10 +309,7 @@ class TestDrawIsFactorizationStable:
 # ---------------------------------------------------------------------------
 #  committed golden: the seeded draw stream
 # ---------------------------------------------------------------------------
-@pytest.mark.skipif(
-    not (os.path.isfile(_SLIM) and os.path.isfile(_RNG_MANIFEST)),
-    reason="golden fixture not built; run tests/golden/make_golden_fixture.py")
-def test_seeded_draw_stream_matches_golden():
+def test_seeded_draw_stream_matches_golden(rng_golden):
     """Pin the seeded draw stream against the golden baseline profiles.
 
     The first draw-level golden the package can hold at all: before the seed
@@ -325,10 +339,12 @@ def test_seeded_draw_stream_matches_golden():
     sys.path.insert(0, _GOLDEN_DIR)
     from make_golden_fixture import draw_stream, blas_provenance
 
-    with open(_RNG_MANIFEST) as fh:
+    slim, rng_manifest = rng_golden
+    with open(rng_manifest) as fh:
         man = json.load(fh)
+    assert man["source_fixture"] == os.path.basename(slim)
 
-    with h5py.File(_SLIM, "r") as hf:
+    with h5py.File(slim, "r") as hf:
         bkeys = sorted(hf["scan"].keys()) if "scan" in hf else [None]
         bl = (hf[f"scan/{bkeys[0]}/_baseline"] if bkeys[0] is not None
               else hf["_baseline"])
@@ -368,14 +384,11 @@ def test_seeded_draw_stream_matches_golden():
                 f"is elsewhere in the profile)")
 
 
-@pytest.mark.skipif(
-    not (os.path.isfile(_SLIM) and os.path.isfile(_RNG_MANIFEST)),
-    reason="golden fixture not built; run tests/golden/make_golden_fixture.py")
-def test_golden_draw_stream_actually_perturbs():
+def test_golden_draw_stream_actually_perturbs(rng_golden):
     """Guard the guard: a golden of an all-zero-sigma stream would pass for
     the wrong reason."""
     import h5py
-    with h5py.File(_SLIM, "r") as hf:
+    with h5py.File(rng_golden[0], "r") as hf:
         bkeys = sorted(hf["scan"].keys()) if "scan" in hf else [None]
         bl = (hf[f"scan/{bkeys[0]}/_baseline"] if bkeys[0] is not None
               else hf["_baseline"])

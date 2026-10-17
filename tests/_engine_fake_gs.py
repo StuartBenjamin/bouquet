@@ -163,9 +163,11 @@ def point_without_solver(monkeypatch):
     """For stand-in solvers that carry no geometry: ``Bouquet.point_solver`` records the baseline's
     geometry and leaves the stand-in alone."""
     from bouquet.run import Bouquet
-    from bouquet.solver_geometry import case_geometry
+    from bouquet.solver_geometry import case_geometry, standard_isoflux_for
 
     def _point(self, geom=None):
-        self._geom = geom if geom is not None else case_geometry(self.config.source, self.config.solver)
+        self._geom = geom if geom is not None else case_geometry(
+            self.config.source, self.config.solver,
+            standard=standard_isoflux_for(self.config.generation))
         return self
     monkeypatch.setattr(Bouquet, "point_solver", _point)

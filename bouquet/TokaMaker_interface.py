@@ -507,7 +507,8 @@ def _rejection_summary(rejections, n_attempts, n_archived, masked=None,
                        diagnostics=None):
     """One line: attempts, archived, rejected by reason (+ masked loop
     failures that did not reject a draw; + the archived engine draws'
-    axis-branch count, :func:`bouquet.engine_draws.axis_branch_counts`,
+    axis-displacement count and bimodality,
+    :func:`bouquet.engine_draws.axis_shift_counts`,
     when *diagnostics* carry it)."""
     from collections import Counter
     c = Counter(r["reason"] for r in rejections)
@@ -521,8 +522,8 @@ def _rejection_summary(rejections, n_attempts, n_archived, masked=None,
         if _m:
             txt += f"; masked inside kept draws: {_m}"
     if diagnostics:
-        from .engine_draws import axis_branch_counts, axis_branch_text
-        _ax = axis_branch_text(axis_branch_counts(diagnostics))
+        from .engine_draws import axis_shift_counts, axis_shift_text
+        _ax = axis_shift_text(axis_shift_counts(diagnostics))
         if _ax:
             txt += "; " + _ax
     return txt
@@ -5984,16 +5985,35 @@ def generate_bouquet(
     # coil bounds (built below only when those bounds are installed)
     _hard_sat_guard = None
 
+    # ---- the reconstruction's delivered state, restored FIRST (review F6)
+    # The q0 sawtooth check, the strong-reg / drift reference coils
+    # (_initial_coils) and the Ip every draw is aligned to (_recon_Ip) are
+    # read from the solver state below.  A draw method that keeps the
+    # reconstruction's delivered equilibrium (the unified engine) puts the
+    # solver back on it HERE, before any of the three is read: on entry the
+    # solver holds whatever state the session left it in, which after an
+    # earlier generate() (a second scan_key, verify_sigma0_consistency) is
+    # that run's last archived draw, not the reconstruction.  The legacy
+    # method returns None and leaves the state alone (the caller has just
+    # returned from reconstruct_equilibrium).  The baseline re-solve below
+    # restores the same snapshot again before it solves (idempotent).
+    _entry_start = _m.baseline_resolve_start(mygs)
+    if _entry_start is not None:
+        print(f"  [entry] {_entry_start}")
+
     # Sawtooth check.  We use mygs.get_q on the current (recon) state
     # rather than re-solving here -- a fresh forward solve at
     # abs(eqdsk.Ip) shifts the equilibrium slightly off the recon's
     # converged state and ends up confusing the soft-reg lock.  Recon
     # already has a populated q profile.
+    _q0_gate = dict(configured=bool(constrain_sawteeth),
+                    applied=bool(constrain_sawteeth), q0=None, reason=None)
     if constrain_sawteeth:
         try:
             _, q_baseline_check, _, _, _, _ = mygs.get_q(
                 npsi=len(psi_N), psi_pad=psi_pad
             )
+            _q0_gate["q0"] = float(q_baseline_check[0])
             if q_baseline_check[0] < 1.0:
                 print(
                     f"NOTE: Baseline equilibrium has q(0) = {q_baseline_check[0]:.4f} < 1.0 "
@@ -6002,9 +6022,17 @@ def generate_bouquet(
                     f"equilibria are not rejected."
                 )
                 constrain_sawteeth = False
+                _q0_gate["applied"] = False
+                _q0_gate["reason"] = (
+                    f"the reconstruction's q(0) = {_q0_gate['q0']:.4f} < 1 "
+                    "(sawtoothing): every draw would fail the q0 >= 1 gate, "
+                    "so generate_bouquet switched it off for this scan")
         except Exception as _q_exc:
             print(f"WARNING: q-profile check failed ({_q_exc}); "
                   f"leaving constrain_sawteeth as is.")
+    # the gate AS APPLIED, for the scan's in-spec stamp and the baseline
+    # record (review F1: the stamp named a gate this override switched off)
+    _m.note_q0_gate(_q0_gate)
 
     if coil_drift is not None:
         # Capture mygs's current (recon) coil currents -- these are the
@@ -6182,6 +6210,27 @@ def generate_bouquet(
                     _bl_reverted = ("solver state NOT restored: this object "
                                     "exposes no copy_eq/replace_eq pair")
                 _count_masked_anchor_failure("jphi_baseline", _bl_exc)
+                if (_bl_start is not None
+                        and getattr(_m, "delivered_eq", None) is None):
+                    # A method start with NO snapshot of the reconstruction
+                    # on record (review F6): the only state to fall back to
+                    # is the one the solver held on entry, which after an
+                    # earlier generate() in this session is that run's last
+                    # draw -- and the strong-reg target, the drift reference
+                    # and the Ip of every draw would be taken from it while
+                    # the line below says "recon's".  Refuse instead.
+                    raise RuntimeError(
+                        f"generate_bouquet: the baseline re-solve failed "
+                        f"({type(_bl_exc).__name__}: {_bl_exc}) and the draw "
+                        f"method {getattr(_m, 'name', type(_m).__name__)!r} "
+                        "holds no snapshot of the reconstruction's delivered "
+                        "equilibrium, so the only fallback is the solver "
+                        "state on entry, which need not be the "
+                        "reconstruction (after an earlier generate() in this "
+                        "session it is that run's last draw). Refusing to "
+                        "anchor the draws to it; re-run prepare_baseline() "
+                        "so the delivered state is on record, then "
+                        "generate() again.") from _bl_exc
                 print(f"  [jphi-baseline] solve failed ({_bl_exc}); REVERTING "
                       f"to the recon (inverse) reference [{_bl_reverted}] -- "
                       f"this run's "
@@ -7256,6 +7305,22 @@ def generate_bouquet(
     # the cap, breaking early the moment the target is met.
     _until_n, _max_attempts = _resolve_attempt_budget(
         n_equils, n_inspec_target, max_total_draws)
+    # ---- the CONFIGURED coil predicate, resolved ONCE -------------------
+    # The in-spec rule's coil half is whatever Bouquet.filter() will apply
+    # to this archive afterwards: the measurement-referenced chi2 test by
+    # default, the legacy band when asked for it or when the per-coil sigma
+    # cannot be resolved (unregistered mesh, no stored coil names) -- the
+    # same CoilSigmaUnavailable fallback, with the same warning, as the
+    # postprocess. The sigma is resolved here, from the baseline currents
+    # already in hand, and reused for every draw.  Built on EVERY run (not
+    # only under until-N): the archived ``in_spec`` of each draw is this
+    # rule's verdict (review F2), the until-N count's too.
+    from .filtering import make_coil_predicate
+    _coil_predicate, _coil_kind, _coil_model = make_coil_predicate(
+        coil_filter, _bl_coil_dict,
+        inspec_F_max=inspec_F_max, inspec_VSC_max=inspec_VSC_max,
+        sigma=coil_sigma, device=coil_device, era=coil_daq_era,
+        chi2_max=coil_chi2_max, z_max=coil_z_max)
     if _until_n is not None:
         if max_total_draws is not None and _max_attempts < int(n_equils):
             # An explicit cap is a hard ceiling and wins over the allocation
@@ -7264,20 +7329,7 @@ def generate_bouquet(
             print(f"[until-N] NOTE: explicit max_total_draws="
                   f"{_max_attempts} is below the allocation n_equils="
                   f"{n_equils}; attempts are capped at {_max_attempts}.")
-        # ---- the CONFIGURED coil predicate, resolved ONCE ---------------
-        # The stopping rule's coil half is whatever Bouquet.filter() will
-        # apply to this archive afterwards: the measurement-referenced chi2
-        # test by default, the legacy band when asked for it or when the
-        # per-coil sigma cannot be resolved (unregistered mesh, no stored
-        # coil names) -- the same CoilSigmaUnavailable fallback, with the
-        # same warning, as the postprocess. The sigma is resolved here, from
-        # the baseline currents already in hand, and reused for every draw.
-        from .filtering import make_coil_predicate
-        _coil_predicate, _coil_kind, _coil_model = make_coil_predicate(
-            coil_filter, _bl_coil_dict,
-            inspec_F_max=inspec_F_max, inspec_VSC_max=inspec_VSC_max,
-            sigma=coil_sigma, device=coil_device, era=coil_daq_era,
-            chi2_max=coil_chi2_max, z_max=coil_z_max)
+        # (the configured coil predicate is built above, for every run)
         # The coil channel must be measurable or no draw can EVER count as
         # in-spec (passes_coil_spec fails NaN by design): without this the
         # loop grinds through the full attempt cap -- hours of solves --
@@ -8293,6 +8345,10 @@ def generate_bouquet(
         # the method's post-hoc filters on the state about to be archived
         # (engine: the l_i band, constrain_sawteeth; a draw outside a band is
         # ARCHIVED, in_spec False, never dropped)
+        # the legacy +/-2 % per-coil drift verdict, kept as such
+        # (coil_drift_in_spec); the archived in_spec is the in-spec rule's
+        # verdict, judged below on the archived contours and coil vector
+        _coil_drift_in_spec = bool(_in_spec)
         _in_spec = _m.post_hoc(mygs, diagnostics, _in_spec,
                                constrain_sawteeth=constrain_sawteeth,
                                l_i_target=l_i_target)
@@ -8725,6 +8781,33 @@ def generate_bouquet(
                 _dr_jind_store = np.asarray(_dr_jind_store, dtype=float) - _dr_jp
                 diagnostics["jphi_pd"] = _dr_jp
 
+        # ---- the in-spec rule's verdict on this draw (review F2) --------
+        # The configured coil test (chi2 by default) AND the boundary cut
+        # (filtering.passes_all_filters, the same predicate .filter() and
+        # until-N use) AND the method's opt-in bands (engine: its post-hoc
+        # band flag).  This is the archived in_spec (attr and the engine
+        # record's post_hoc), so the archive, until-N and `selected` agree;
+        # the legacy +/-2 % drift test is kept as coil_drift_in_spec.
+        _rule_ok, _rule_rms, _rule_max, _rule_reasons, _rule_coil = \
+            _until_n_verdict(
+                diagnostics, recon_lcfs_ref, perturbed_lcfs_ref,
+                _coil_predicate, draw_currents=coil_current_dict,
+                rms_max_mm=inspec_rms_max_mm, max_max_mm=inspec_max_max_mm)
+        from .engine_draws import DRAW_BAND_FLAG as _DBF
+        from .filtering import IN_SPEC_RULE_SOURCE
+        _band_ok = diagnostics.get(_DBF)
+        diagnostics['coil_drift_in_spec'] = _coil_drift_in_spec
+        diagnostics['in_spec'] = bool(
+            _rule_ok and (_band_ok is None or bool(_band_ok)))
+        diagnostics['in_spec_coil_filter'] = _coil_kind
+        _ph_rec = (diagnostics.get('engine') or {}).get('post_hoc')
+        if isinstance(_ph_rec, dict):
+            # coil_in_spec: the rule's magnetics verdict (coil test AND
+            # boundary cut), so in_spec == coil_in_spec AND in_band holds
+            _ph_rec['coil_in_spec'] = bool(_rule_ok)
+            _ph_rec['coil_drift_in_spec'] = _coil_drift_in_spec
+            _ph_rec['in_spec'] = diagnostics['in_spec']
+            _ph_rec['in_spec_source'] = IN_SPEC_RULE_SOURCE
         store_equilibrium(
             header, count, full_path,
             psi_N,
@@ -8802,6 +8885,11 @@ def generate_bouquet(
                          if solve_guard is not None else None)
         if _rescue_stamp:
             stamp_group_attrs(header, scan_key, count, _rescue_stamp)
+        # what the archived in_spec is, and the legacy drift verdict beside it
+        from .filtering import IN_SPEC_SOURCE_ATTR, COIL_DRIFT_IN_SPEC_ATTR
+        stamp_group_attrs(header, scan_key, count, {
+            COIL_DRIFT_IN_SPEC_ATTR: _coil_drift_in_spec,
+            IN_SPEC_SOURCE_ATTR: IN_SPEC_RULE_SOURCE})
         # the method's own per-draw record (engine block, swb attrs)
         _m.store_draw(header, count, scan_key, diagnostics)
         # the draw's edge-pressure record: its p_sep and both pressure frames
@@ -8858,11 +8946,9 @@ def generate_bouquet(
             # reads back out of the archive, so the metric is identical rather
             # than merely similar. A draw with no coil currents is unjudgeable
             # and FAILS (it is archived, and the postprocess fails it too).
-            _ok, _rms_mm, _max_mm, _reasons, _coil_info = _until_n_verdict(
-                diagnostics, recon_lcfs_ref, perturbed_lcfs_ref,
-                _coil_predicate, draw_currents=coil_current_dict,
-                rms_max_mm=inspec_rms_max_mm,
-                max_max_mm=inspec_max_max_mm)
+            # (the rule's verdict, judged above before the archive write)
+            _ok, _rms_mm, _max_mm, _reasons, _coil_info = (
+                _rule_ok, _rule_rms, _rule_max, _rule_reasons, _rule_coil)
             # a method's own until-N condition (engine: inside its post-hoc
             # band too, what .filter() ANDs into 'selected')
             _ok, _reasons = _m.until_n(_ok, _reasons, diagnostics,
