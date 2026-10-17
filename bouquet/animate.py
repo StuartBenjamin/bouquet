@@ -140,6 +140,7 @@ def animate_shot(archives, out_dir, kinds=tuple(KINDS), fps=2):
 def main(argv=None):
     import matplotlib
     matplotlib.use("Agg")
+    matplotlib.rcParams["figure.max_open_warning"] = 0   # a kind's frames stay open until their limits are shared
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--study", action="append", required=True, help="study dir; repeat, in priority order")
     p.add_argument("--shot", type=int, required=True)
