@@ -5428,7 +5428,7 @@ ISO_UPDATE_REF_POINTS = 9000
 @accepts_old_names
 
 
-def _store_transport(mygs, header, scan_key, count, src, x_kin, ne, te, ni, ti,
+def _store_transport(mygs, header, scan_key, count, src, x_kin, ne, te, zeff, ti,
                      x_eq, p_thermal, Ip, coord, p_fast, psi_pad, geom=None):
     """chi_perp and tau_E of the equilibrium *mygs* holds (bouquet.transport)
     into its archive group; a failure warns, never sinks the run."""
@@ -5438,7 +5438,7 @@ def _store_transport(mygs, header, scan_key, count, src, x_kin, ne, te, ni, ti,
         if geom is None:
             geom = flux_geometry(mygs, src["b0"], psi_pad=psi_pad)
         store_transport(header, scan_key, count, transport_record(
-            geom, x_kin, ne, te, ni, ti, x_eq, p_thermal, src, Ip,
+            geom, x_kin, ne, te, zeff, ti, x_eq, p_thermal, src, Ip,
             coord=coord, p_fast=p_fast))
     except Exception as exc:
         print(f"  WARN: chi_perp/tau_E not stored for "
@@ -6999,13 +6999,17 @@ def generate_bouquet(
     write_group_current_split(header, scan_key, None, _bl_jp)
     if write_ifile and _bl_ifile_rec is not None:
         stamp_group_attrs(header, scan_key, None, _bl_ifile_rec)
+    # chi_perp's kinetic nodes and the baseline Z_eff on them (a draw's own,
+    # when the zeff channel draws one)
+    _x_kin = psi_N if psi_N_kinetic is None else psi_N_kinetic
+    _zeff_kin = np.interp(_x_kin, psi_N, np.broadcast_to(np.asarray(Zeff, dtype=float),
+                                                         np.shape(psi_N)))
     if dd_sources is not None:
         from .utils import store_dd_sources
         store_dd_sources(header, scan_key, dd_sources)
         _store_transport(mygs, header, scan_key, None, dd_sources,
-                         psi_N if psi_N_kinetic is None else psi_N_kinetic,
-                         ne, te, ni, ti, psi_N, pressure, initial_Ip_target,
-                         coord, p_fast, psi_pad)
+                         _x_kin, ne, te, _zeff_kin, ti, psi_N, pressure,
+                         initial_Ip_target, coord, p_fast, psi_pad)
 
     # ---- the ONE reconstruction state (self-consistent loop) ------------
     # What the reconstruction recorded (delivered_state: l_i == l_i_target,
@@ -8865,9 +8869,11 @@ def generate_bouquet(
         if _ifile_rec is not None:
             stamp_group_attrs(header, scan_key, count, _ifile_rec)
         if diagnostics.get('flux_geom') is not None:
-            _store_transport(mygs, header, scan_key, count, dd_sources,
-                             psi_N if psi_N_kinetic is None else psi_N_kinetic,
-                             ne_perturb, te_perturb, ni_perturb, ti_perturb,
+            _zd = (diagnostics.get('aux') or {}).get('zeff')
+            _store_transport(mygs, header, scan_key, count, dd_sources, _x_kin,
+                             ne_perturb, te_perturb,
+                             _zeff_kin if _zd is None else np.clip(_zd, 1.0, None),
+                             ti_perturb,
                              psi_N, pressure_perturb, initial_Ip_target, coord,
                              p_fast, psi_pad, geom=diagnostics['flux_geom'])
         # the third bucket (owner decision D2): a method that splits p'G off

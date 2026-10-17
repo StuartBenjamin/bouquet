@@ -63,7 +63,7 @@ def test_chi_perp_matches_the_analytic_cylinder():
                Gamma_e=np.zeros_like(rho), P_net=2 * Qa, b0=2.0, r0=R0)
     T = T0 * (1 - rho ** 2) + 1.0
     ne = np.full_like(rho, n)
-    rec = transport_record(geom, x, ne, T, ne, T, x, np.full_like(x, 1e4), src, 1e6)
+    rec = transport_record(geom, x, ne, T, 1 + 0 * ne, T, x, np.full_like(x, 1e4), src, 1e6)
     want = Qa / (8 * np.pi ** 2 * R0 * n * E_CHARGE * T0)
     mid = slice(20, 80)
     np.testing.assert_allclose(rec["chi_perp_e"][mid], want, rtol=2e-2)
@@ -72,10 +72,27 @@ def test_chi_perp_matches_the_analytic_cylinder():
     assert rec["tau_E_th"] == pytest.approx(rec["W_th"] / (2 * Qa))
     assert rec["tau_E"] == rec["tau_E_th"]
     assert rec["H_98"] == pytest.approx(rec["tau_E_th"] / rec["tau_98"])
-    rec0 = transport_record(geom, x, ne, T, ne, T, x, np.full_like(x, 1e4),
+    rec0 = transport_record(geom, x, ne, T, 1 + 0 * ne, T, x, np.full_like(x, 1e4),
                             dict(src, P_net=0.0), 1e6)
     assert np.isinf(rec0["tau_E_th"]) and np.isinf(rec0["tau_98"])
 
+
+
+def test_chi_perp_i_takes_the_main_ions_as_imas_jl():
+    """n_i = n_e/Z_eff and Gamma_i = Gamma_e/Z_eff (IMAS.jl 7.4 calculate_diffusivities)."""
+    geom, x = _cylinder(), np.linspace(0.0, 1.0, 101)
+    rho = np.sqrt(x)
+    T, ne, z = 2e3 * (1 - rho ** 2) + 1.0, np.full_like(rho, 5e19), np.full_like(rho, 2.0)
+    src = dict(rho_tor_norm=rho, Q_e=3e6 * rho ** 2, Q_i=3e6 * rho ** 2,
+               Gamma_e=1e21 * rho ** 2, P_net=6e6, b0=2.0, r0=1.7)
+    one, two = (transport_record(geom, x, ne, T, zz, T, x, np.full_like(x, 1e4), src, 1e6)
+                for zz in (np.ones_like(z), z))
+    np.testing.assert_array_equal(two["chi_perp_e"], one["chi_perp_e"])
+    num = lambda G: src["Q_i"] - 2.5 * E_CHARGE * T * G       # noqa: E731
+    mid = slice(20, 80)
+    np.testing.assert_allclose(two["chi_perp_i"][mid] / one["chi_perp_i"][mid],
+                               (2.0 * num(src["Gamma_e"] / 2.0) / num(src["Gamma_e"]))[mid],
+                               rtol=1e-12)
 
 def test_the_archive_groups_round_trip(tmp_path):
     from bouquet.utils import (load_baseline_profiles, load_dd_sources,

@@ -299,9 +299,9 @@ pressure + that equilibrium's `p_sep`).
   `tau_DS03`, `W_th`, `W_fast` (J), `P_net` (W), from that equilibrium's own
   profiles and TokaMaker geometry (`get_fsa`) and the same sources
   (`bouquet.transport`). χ_⊥ is power balance, conduction only, as IMAS.jl
-  `calculate_diffusivities`; Γ_i is derived, not stored: Γ_i = Γ_e n_i/n_e with
-  the equilibrium's own n_i (IMAS.jl 7.4 takes n_i = n_e/Z_eff, also in χ_i's
-  denominator). τ = inf where P_net = 0.
+  `calculate_diffusivities` (7.4), main ions included: n_i = n_e/Z_eff and
+  Γ_i = Γ_e/Z_eff (derived, not stored), with the equilibrium's own Z_eff.
+  τ = inf where P_net = 0.
 
 - **Self-consistent bootstrap record (`jbs_loop` block, schema v3).** When
   the bootstrap came from the self-consistent loop
