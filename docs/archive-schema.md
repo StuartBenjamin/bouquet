@@ -1,8 +1,9 @@
-# The bouquet HDF5 archive — schema v3
+# The bouquet HDF5 archive — schema v4
 
 Authoritative description of the on-disk layout written by bouquet ≥ 1.0.0
 (schema v2 first shipped in the 1.0.0 release; v3 adds the self-consistent
-bootstrap record — see [v2 → v3](#v2--v3-the-self-consistent-bootstrap-record)).
+bootstrap record — see [v2 → v3](#v2--v3-the-self-consistent-bootstrap-record);
+v4 renames the current components — see [v3 → v4](#v3--v4-the-current-component-names)).
 The single source of truth in code is [`bouquet/schema.py`](../bouquet/schema.py)
 (`SCHEMA_VERSION`, `PROFILE_UNITS`, fixed dataset names, `write_profile` /
 `find_bytes_dataset`); this document mirrors it for human readers. Prefer
@@ -14,7 +15,7 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
 ## Layout
 
 ```
-{header}.h5                            file attrs: schema_version (=3),
+{header}.h5                            file attrs: schema_version (=4),
 │                                      bouquet_version, created, updated
 ├── config_json                        JSON dump of the run BouquetConfig
 │                                      (root copy = most recent write; the
@@ -494,6 +495,21 @@ is:
 The IDS exporter takes `p′G` off whichever bucket carries it before it
 converts to parallel currents (and groups it with the non-inductive
 currents, never `j_ohmic`).
+
+## v3 → v4: the current-component names
+
+Schema v4 stores the current components under OpenFUSIONToolkit's `boot_profs`
+names: `j_phi` → `jphi_total`, `j_inductive` → `jphi_ind`, `j_BS` → `jphi_bs`,
+`j_pressure` → `jphi_pd`, `j_NBI` / `j_RF` / `j_other` → `jphi_nbi` / `jphi_rf` /
+`jphi_other`, `j_sawteeth` → `jphi_saw`, `swb_j_saw` → `jphi_saw_out`, `jBS_diff`
+→ `jphi_bs_diff`, the `jB_parallel/` group → `jdotB/` (`schema.LEGACY_NAMES`).
+
+- **Readers accept both.** `schema.stored_name(group, name)` finds a v4 name or its
+  v3 spelling; the package readers use it, so a v3 archive reads unchanged.
+- **Migration is optional.** `schema.migrate_names(h5)` renames a v3 archive's
+  datasets in place.
+- **Also added in v4:** the transport records (`chi_perp_e` / `chi_perp_i`, the
+  τ / W / P scalars, `_baseline/dd_sources`; see above), additive.
 
 ## v2 → v3: the self-consistent bootstrap record
 
