@@ -4894,6 +4894,7 @@ def store_equilibrium(
     profile_coord="psi_n",
     ifile_filepath=None,
     fixed_currents=None,
+    compress_file_bytes=False,
 ):
     """
     Write one perturbed equilibrium into the HDF5 database.
@@ -4925,6 +4926,9 @@ def store_equilibrium(
         Raw p-file content to store alongside the g-file bytes.
     ifile_filepath : str or None
         OFT i-file (``save_ifile``) to store as the ``ifile`` blob.
+    compress_file_bytes : bool
+        Store the g-file / p-file / i-file bytes gzip-compressed
+        (:func:`schema.write_bytes`).
     fixed_currents : dict or None
         The draw's held-fixed driven currents on ``psi_N``
         (:data:`FIXED_CURRENT_DATASETS`: ``jphi_nbi``, ``jphi_rf``, ``jphi_other`` and
@@ -4967,10 +4971,10 @@ def store_equilibrium(
         # ---- raw eqdsk (opaque binary -- bit-perfect; schema-v2 fixed
         # name, the group path carries the coordinates) --------------------
         from .schema import EQDSK_DS, IFILE_DS, write_bytes
-        write_bytes(grp, EQDSK_DS, eqdsk_bytes)
+        write_bytes(grp, EQDSK_DS, eqdsk_bytes, compress_file_bytes)
         if ifile_filepath is not None:
             with open(ifile_filepath, "rb") as fh:
-                write_bytes(grp, IFILE_DS, fh.read())
+                write_bytes(grp, IFILE_DS, fh.read(), compress_file_bytes)
 
         # ---- 1-D profiles -----------------------------------------------
         write_profile(grp, "psi_N", psi_N)
@@ -5024,7 +5028,7 @@ def store_equilibrium(
         # (BouquetArchive.DrawView.pfile_bytes, load_equilibrium) fall back.
         from .schema import PFILE_DS, is_binary_profile_source, write_bytes
         if pfile_bytes is not None and not is_binary_profile_source(pfile_bytes):
-            write_bytes(grp, PFILE_DS, pfile_bytes)
+            write_bytes(grp, PFILE_DS, pfile_bytes, compress_file_bytes)
 
         # ---- optional: Zeff profile ----------------------------------------
         if Zeff is not None:
@@ -5431,6 +5435,7 @@ def store_baseline_profiles(
     profile_coord="psi_n",
     ifile_bytes=None,
     fixed_currents=None,
+    compress_file_bytes=False,
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -5449,6 +5454,8 @@ def store_baseline_profiles(
         Raw baseline p-file content.
     ifile_bytes : bytes or None
         Raw baseline OFT i-file content (``write_ifile`` runs).
+    compress_file_bytes : bool
+        As :func:`store_equilibrium`.
     fixed_currents : dict or None
         The baseline's held-fixed driven currents
         (:data:`FIXED_CURRENT_DATASETS`), as :func:`store_equilibrium`.
@@ -5561,7 +5568,7 @@ def store_baseline_profiles(
         from .schema import EQDSK_DS, IFILE_DS, PFILE_DS, write_bytes
         for ds, b in ((EQDSK_DS, eqdsk_bytes), (IFILE_DS, ifile_bytes), (PFILE_DS, pfile_bytes)):
             if b is not None:
-                write_bytes(grp, ds, b)
+                write_bytes(grp, ds, b, compress_file_bytes)
 
         # ---- Recon-LCFS reference for downstream boundary-deviation
         # measurements.  Captured by the caller via mygs.trace_surf() at
