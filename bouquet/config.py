@@ -823,13 +823,16 @@ class UncertaintyConfig:
     # where physics.zeff_bounds allows less, a derived n_i held in
     # [0, ne - z_fast], an independent n_i capped at ne - z_fast when Z_imp is
     # declared, a passive Z_eff aux draw clipped to the window.  None = auto
-    # (bouquet.experimental.kinetic_clips_on): ON whenever the run's resolved
-    # ni_source is a measured IDA route -- INCLUDING the ida_hybrid default
-    # (ni_source="auto" -> "all") -- or the beam subtraction
-    # (ni_subtract_fast, which follows include_pfast there) or
-    # fuse_zeff_fast_ions is on; off otherwise.  Every clip that fires is
-    # counted per draw (KineticDraw.clips) and archived.  False: only the
-    # zeff_bounds window (the bound in place before PR #56); True: on.
+    # (bouquet.experimental.kinetic_clips_on): ON on every route (owner
+    # decision 2026-10-17; before that only with a measured IDA ni_source
+    # route, the beam subtraction or fuse_zeff_fast_ions).  The Z_eff floor
+    # at 1 is a physical constraint; without the clip a draw below 1 is
+    # refused before any solve (kinetics_nonphysical).  Every clip that
+    # fires is counted per draw (KineticDraw.clips) and archived, and the
+    # clipped fraction is the number to watch on a clean plasma (Z_eff
+    # near 1): the clip truncates the lower tail there, so the Z_eff, n_i
+    # and I_BS bands become one-sided.  False: only the zeff_bounds window
+    # (the bound in place before PR #56); True: on.
     kinetic_clips: Optional[bool] = None
 
     # GPR correlation length scales (psi_N units) -- define the perturbation

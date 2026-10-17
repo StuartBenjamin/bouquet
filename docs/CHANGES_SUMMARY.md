@@ -2,6 +2,18 @@
 
 ## Unreleased — the boundary constraint at a constant total with a reported partition; the homotopy's VSC bound floor; a per-draw wall budget
 
+**Kinetic sampler clips on by default on every route (owner decision 2026-10-17).**
+`UncertaintyConfig.kinetic_clips=None` now resolves to on everywhere, not only
+with a measured IDA route, the beam subtraction or `fuse_zeff_fast_ions`.
+The Z_eff floor at 1 is a physical constraint; without the clip a draw below
+it was refused before any solve (`kinetics_nonphysical`), which cost 7 of 10
+attempts on the synthetic dd fixture (core Z_eff 1.7, template sigma 0.4).
+Every clip that fires is still counted per draw and archived. On a clean
+plasma the clip truncates the lower tail, so the clipped fraction is the
+number to report; a draw in a transformed variable (log-normal on Z_eff - 1)
+is the 1.5 candidate. Tests that asserted the clips off on the plain dd route
+or on a downgraded route now assert on.
+
 - **Boundary constraint: a constant inside a measured window (owner decision 2026-10-16).**
   `ISOFLUX_WEIGHT_TOTAL` = 2e5 is the total of the standard boundary set (mode
   "constant"), as at #84, now documented with its measured window (about 1.5e5-4e5) and

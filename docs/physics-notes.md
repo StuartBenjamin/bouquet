@@ -1186,11 +1186,13 @@ the `ida_hybrid` DEFAULT (owner decision: one thermal-kinetics source per run;
 see [Hybrid kinetics on the IMAS path](#hybrid-kinetics-on-the-imas-path)),
 listed in `bouquet.experimental.GRADUATED` with its open items kept as known
 limitations. Item 1 (`fuse_zeff_fast_ions`, `ImasSource.zeff_fast_ions=True`)
-and the floor at 1 and the n_i floor / ceiling of item 3
-(`kinetic_sampler_clips`, `UncertaintyConfig.kinetic_clips`) stay
-EXPERIMENTAL in `bouquet.experimental.REGISTRY` (see
-[workflows.md, Experimental features](workflows.md#experimental-features-and-their-validation-status));
-the default does not turn the clips on. The other defaults are the routes
+stays EXPERIMENTAL in `bouquet.experimental.REGISTRY` (see
+[workflows.md, Experimental features](workflows.md#experimental-features-and-their-validation-status)).
+The floor at 1 and the n_i floor / ceiling of item 3
+(`kinetic_sampler_clips`, `UncertaintyConfig.kinetic_clips`) are graduated
+and on by default on every route since 2026-10-17: the floor is a physical
+constraint, every clip that fires is counted per draw and archived, and the
+clipped fraction is the number to watch on a clean plasma. The other defaults are the routes
 before PR #56: the thermal-only dd Z_eff on FUSE kinetics, the IDA VB Z_eff
 with n_i from quasineutrality and the carbon > VB > scalar envelope ladder on a
 g-file + IDA run, and only the `zeff_bounds` window on a drawn Z_eff. Each assumption is stated,

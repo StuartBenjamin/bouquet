@@ -110,7 +110,9 @@ def test_an_explicit_ida_route_still_enables_the_clips(tmp_path, route):
 def test_an_ida_route_without_an_ida_file_is_inert(tmp_path):
     cfg = _recon(tmp_path, profiles="p.peqdsk", ni_source="all")
     assert X.experimental_features_enabled(cfg) == []
-    assert X.kinetic_clips_on(cfg) is False
+    # the clips are on by default on every route (owner decision
+    # 2026-10-17); the inert route no longer switches them off
+    assert X.kinetic_clips_on(cfg) is True
     cfg.uncertainty.ida_path = str(tmp_path / "sig.cdf")   # now an IDA is in play
     assert X.experimental_features_enabled(cfg) == []
     assert X.kinetic_clips_on(cfg) is True
@@ -329,3 +331,16 @@ def test_archive_views_show_the_features(tmp_path, capsys):
     sv0 = BouquetArchive(p0).scan("1")
     assert sv0.experimental_features is None
     assert "EXPERIMENTAL" not in repr(sv0)
+
+
+def test_clips_are_on_by_default_on_the_plain_dd_route(tmp_path):
+    """Owner decision 2026-10-17: the Z_eff floor at 1 is a physical
+    constraint, so the sampler clips are on by default on every route,
+    the plain dd route included (before: refused before any solve as
+    kinetics_nonphysical -- 7 of 10 attempts on the synthetic dd).  An
+    explicit False still wins."""
+    cfg = _imas(tmp_path)
+    assert X.kinetic_clips_on(cfg) is True
+    assert X.experimental_features_enabled(cfg) == []
+    cfg = _imas(tmp_path, unc=UncertaintyConfig(kinetic_clips=False))
+    assert X.kinetic_clips_on(cfg) is False
