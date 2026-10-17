@@ -218,7 +218,7 @@ class SwbDraws(DrawMethod):
     homotopy = False
 
     def __init__(self, recipe, jind_seed, sigma_jind, *, stamp=None,
-                 jphi_pd=None, jind_clip=False):
+                 jphi_pd=None, jind_clip=False, core_bands=None, core_ref=None):
         #: the per-draw solve ``recipe(kin, j_seed)``: solve B's recipe
         self.recipe = recipe
         self.jind_seed = np.asarray(jind_seed, dtype=float)
@@ -235,6 +235,11 @@ class SwbDraws(DrawMethod):
         self.stamp = dict(stamp or {})
         #: clip the seed redraw's negative nodes to 0 (swb_taper_source)
         self.jind_clip = bool(jind_clip)
+        #: the core-current checks (filtering.InspecBands with core_on) and
+        #: their baseline ``(x, jphi_total, sigma_jphi)``; judged per draw
+        self.core_bands = (core_bands if core_bands is not None
+                           and core_bands.core_on else None)
+        self.core_ref = core_ref
 
     def jphi_baseline(self, jphi_baseline):
         return False               # the prepared solve B IS the baseline
@@ -242,7 +247,7 @@ class SwbDraws(DrawMethod):
     def draw(self, mygs, rng, scale, count, *, coil_guard=None, bnd_diag=None,
              solve_guard=None, inputs=None, legacy=None):
         i = dict(inputs)
-        return swb_draw(
+        out = swb_draw(
             mygs, i["psi_N"], i["pressure"], i["ne"], i["te"], i["ni"],
             i["ti"], i["sigma_ne"], i["sigma_te"], i["sigma_ni"],
             i["sigma_ti"], self.sigma_jind, i["n_ls"], i["t_ls"], i["j_ls"],
@@ -256,6 +261,41 @@ class SwbDraws(DrawMethod):
             isolate_edge_jbs=i["isolate_edge_jbs"],
             kinetic_clips=bool(i.get("kinetic_clips", False)),
             jind_clip=self.jind_clip)
+        if self.core_bands is not None:
+            self._judge_core(out[5], out[6])
+        return out
+
+    def _judge_core(self, jphi_total, diagnostics):
+        """The core-current checks on the draw's solved jphi_total: the band
+        flag (ANDed into in_spec, until-N and ``selected``) and the archived
+        numbers."""
+        from .engine_draws import DRAW_BAND_FLAG
+        from .filtering import (CORE_GRADIENT_RATIO_ATTR, JPHI_BAND_Z_ATTR,
+                                core_current_metrics)
+        z, ratio, _ = core_current_metrics(self.core_ref[0], jphi_total,
+                                           *self.core_ref[1:])
+        v = self.core_bands.verdicts(jphi_z=z, gradient_ratio=ratio)
+        diagnostics[DRAW_BAND_FLAG] = bool(v["in_band"])
+        diagnostics["core_band_reasons"] = list(v["reasons"])
+        diagnostics["core_band_attrs"] = dict(
+            self.core_bands.flags(v),
+            **{JPHI_BAND_Z_ATTR: float(z), CORE_GRADIENT_RATIO_ATTR: float(ratio)})
+        print(f"  [swb-draw] core current: {z:.2f} sigma_jphi, gradient "
+              f"{ratio:.2f} x baseline -> "
+              + ("in band" if v["in_band"] else "; ".join(v["reasons"])))
+
+    def post_hoc(self, mygs, diagnostics, in_spec, **kwargs):
+        from .engine_draws import DRAW_BAND_FLAG
+        band = diagnostics.get(DRAW_BAND_FLAG)
+        return bool(in_spec and (band is None or band))
+
+    def until_n(self, ok, reasons, diagnostics, **kwargs):
+        """The until-N verdict AND the core-current checks (what ``.filter()``
+        marks ``selected``)."""
+        from .engine_draws import DRAW_BAND_FLAG
+        band = diagnostics.get(DRAW_BAND_FLAG)
+        reasons = list(reasons) + list(diagnostics.get("core_band_reasons") or [])
+        return bool(ok and (band is None or band)), reasons
 
     def announce_coil_reg(self):
         print("  [swb] coil reg left to the per-draw recipe; drift "
@@ -288,7 +328,8 @@ class SwbDraws(DrawMethod):
             "swb_saw_rho_m": diagnostics.get("saw_rho_m"),
             "swb_saw_rho_out": diagnostics.get("saw_rho_out"),
             "swb_saw_n_dips": diagnostics.get("saw_n_dips"),
-            "swb_saw_map_warn": diagnostics.get("saw_map_warn")})
+            "swb_saw_map_warn": diagnostics.get("saw_map_warn"),
+            **(diagnostics.get("core_band_attrs") or {})})
 
     # ---- Bouquet.generate -------------------------------------------------
     def scale_settings(self, jbs_range, bs_mult):
