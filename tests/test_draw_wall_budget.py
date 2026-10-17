@@ -6,28 +6,52 @@ import time
 
 import pytest
 
+
+class _FakeClock:
+    """A clock the solver double advances: the budget test must not depend
+    on real wall time (a loaded machine turned 3 x 50 ms sleeps against a
+    120 ms budget into a spurious failure).  Everything but ``perf_counter``
+    is the real ``time`` module."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def perf_counter(self):
+        return self.now
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
 class _SlowSolver:
-    """A solver double whose every solve takes *dt* seconds."""
+    """A solver double whose every solve takes *dt* seconds of the clock."""
 
     class settings:
         maxits = 100
 
-    def __init__(self, dt):
+    def __init__(self, dt, clock=None):
         self.dt = dt
         self.n = 0
+        self.clock = clock
 
     def solve(self, *a, **k):
-        time.sleep(self.dt)
+        if self.clock is not None:
+            self.clock.now += self.dt
+        else:
+            time.sleep(self.dt)
         self.n += 1
 
     def update_settings(self):
         pass
 
 
-def test_the_budget_refuses_the_next_solve_never_interrupts_one():
+def test_the_budget_refuses_the_next_solve_never_interrupts_one(monkeypatch):
+    import bouquet.TokaMaker_interface as TI
     from bouquet.TokaMaker_interface import (DrawSolveGuard,
                                              DrawWallBudgetExceeded)
-    s = _SlowSolver(0.05)
+    clock = _FakeClock()
+    monkeypatch.setattr(TI, "time", clock)
+    s = _SlowSolver(0.05, clock)
     with DrawSolveGuard(s, maxits=None, wall_budget_s=0.12) as g:
         g.begin_draw(0)
         s.solve()
