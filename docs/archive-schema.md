@@ -59,7 +59,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │   ├── eqdsk, [pfile]             raw byte-perfect g-file / p-file
     │   ├── [dd_sources/]              IMAS sources only: FUSE's core_sources at the dd step,
     │   │                              summed (rho_tor_norm, Q_e, Q_i, Gamma_e; attrs P_net,
-    │   │                              P_rad, b0, r0, sources_json, skipped_json, rule)
+    │   │                              P_rad, b0, r0, sources_json (each source's edge
+    │   │                              P_e / P_i [W]), skipped_json, rule)
     │   ├── psi_N, psi_N_kinetic         run grids, in the `profile_coord` coordinate
     │   ├── n_e, T_e, n_i, T_i         kinetic profiles
     │   ├── pressure[, pressure_thermal]
