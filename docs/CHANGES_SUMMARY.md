@@ -33,9 +33,10 @@ or on a downgraded route now assert on.
   the total is never changed. `SolverConfig.boundary_partition_probe=False` skips it.
 - **The homotopy's #VSC bound scale is floored at 10 kA (owner-approved coil-bound
   change; no acceptance gate changes).** The scale was `min(|F9A|, |F9B|)`; it is now
-  `max(min(|F9A|, |F9B|), _COIL_DRIFT_DENOM_FLOOR_A)`, the in-spec VSC metric's own
-  denominator floor (one constant), and the homotopy's VSC saturation measure uses the
-  same denominator. On a reversed-I_p case with a 2.8 kA coil in the pair it restored 9
+  `max(min(|F9A|, |F9B|), _COIL_DRIFT_DENOM_FLOOR_A)`, reusing the legacy in-spec VSC
+  metric's constant (that metric adds the 10 kA to hypot/2; the default chi2 rule does not
+  use it, so the two are not on one scale), and the homotopy's VSC saturation measure uses
+  the same denominator. On a reversed-I_p case with a 2.8 kA coil in the pair it restored 9
   of 10 archived draws at 2e5 (was 1 of 10: the channel on its 279 A bound, the axis
   running away). Inactive when the smaller coil carries more than 10 kA. The in-spec
   rule, the sigma=0 coil gate and the hard-factor bounds are unchanged.
@@ -68,6 +69,8 @@ or on a downgraded route now assert on.
   - The text that still called the kinetic clips opt-in / EXPERIMENTAL is corrected, and
     `KINETIC_SAMPLER_VERSION` is `kinetic_sampler/3.1`: the `/3` draw arithmetic for a given
     `clips` flag, archived under the new on-by-default rule (the `/3` string said "opt-in").
+  - The VSC floor's docstrings and engine.md state what it shares with each metric (the
+    constant only), replacing "the same scale the acceptance metric judges it".
 
 ## Unreleased — the g-file and systematics notebooks re-executed on the thermal-only g-file
 

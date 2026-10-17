@@ -948,15 +948,28 @@ iteration, the axis ran away vertically (Z from -0.02 m to +/-0.7-1.0 m) and 9
 of 10 draws stopped at the iteration cap -- an infeasible solve, not a slow
 one (a cap of 400 or 1000 reached a non-finite state instead), while the
 in-spec rule accepts several hundred A on that pair. The scale is now
-`max(min|I_pair|, _COIL_DRIFT_DENOM_FLOOR_A)` (10 kA, the in-spec VSC
-metric's own denominator floor: one constant, one name;
+`max(min|I_pair|, _COIL_DRIFT_DENOM_FLOOR_A)` (10 kA;
 `TokaMaker_interface._vsc_bound_scale`), and the homotopy's VSC saturation
 measure is taken on the same denominator (`_coil_bound_max_vsc`; the pass
-loop and the post-homotopy j_BS guard). With it that case archived 9 of 10
-(9 in spec) at 2e5. It is inactive for a pair whose smaller coil carries more
-than 10 kA (every synthetic fixture, the diverted g-file case). **This changes
-a homotopy coil bound so that it agrees with the in-spec rule's metric; it
-changes no acceptance gate** (owner-approved 2026-10-16): the in-spec rule and
+loop, the early-stop check and the post-homotopy j_BS guard). With it that
+case archived 9 of 10 (9 in spec) at 2e5. It is inactive for a pair whose
+smaller coil carries more than 10 kA (every synthetic fixture, the diverted
+g-file case).
+
+*What the floor shares with the acceptance rules, exactly.* It reuses the
+legacy in-spec VSC metric's CONSTANT, not that metric's scale. The legacy
+metric (`_vsc_channel_drift_pct`; `coil_filter="legacy"` and the chi2
+rule's fallback) judges the pair's common-mode and differential channels
+against `sigma_VSC = hypot(I_A, I_B)/2 + 10 kA`: the 10 kA is ADDED to the
+propagated coil scale, so on the 66 kA / 2.8 kA pair that scale is 43 kA,
+while the homotopy's is `max(2.8 kA, 10 kA)` = 10 kA. The default acceptance
+(`coil_filter="chi2"`) judges each coil against its own measurement sigma
+(`bouquet.coil_spec`) and does not use the constant at all. The floor
+therefore does not put the homotopy on the scale an acceptance rule judges
+the pair on: it lifts a bound that was far tighter than any acceptance rule
+needs to one that is still tighter than the legacy metric's scale. **This
+changes a homotopy coil bound; it changes no acceptance gate**
+(owner-approved 2026-10-16): the in-spec rule and
 the sigma=0 coil gate (the archived per-coil percentage against the tightest
 stage) are unchanged. The hard-factor bounds (`coil_drift_hard_factor`) keep
 their unfloored scale.

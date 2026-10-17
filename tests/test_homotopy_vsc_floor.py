@@ -2,9 +2,10 @@
 regularisation weight's recorded scans and the vertical-runaway label of a
 capped homotopy stage -- OFT-free.
 
-The floor changes a homotopy coil bound so that it agrees with the in-spec
-rule's VSC metric (one constant, ``_COIL_DRIFT_DENOM_FLOOR_A``); it changes
-no acceptance gate.  The label is a label, never a gate.
+The floor changes a homotopy coil bound, reusing the legacy in-spec VSC
+metric's constant ``_COIL_DRIFT_DENOM_FLOOR_A`` (that metric ADDS it to its
+scale; the default chi2 rule does not use it); it changes no acceptance
+gate.  The label is a label, never a gate.
 """
 import inspect
 import types

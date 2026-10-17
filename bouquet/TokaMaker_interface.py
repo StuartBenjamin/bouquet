@@ -1360,7 +1360,9 @@ def classify_jphi_profile(psi_N, eqdsk_jphi, spike_profile,
 
 # ---- Coil-current drift metric (in-spec) -------------------------------------
 # Additive coil-current measurement+eddy-current uncertainty for the VSC in-spec
-# channel metric, carried as a denominator floor [A]. ASSUMPTION: no published
+# channel metric, ADDED to that metric's propagated coil scale [A] (the
+# homotopy's #VSC bound reuses the constant as a floor on ITS scale,
+# _vsc_bound_scale; the default chi2 acceptance does not use it). ASSUMPTION: no published
 # DIII-D coil-current measurement-noise figure was found; the literature puts
 # Rogowski/PF current measurement at ~0.1-1%, with eddy currents in the vessel/
 # passive structure contributing a current-INDEPENDENT (additive) term. So this
@@ -1373,12 +1375,17 @@ _COIL_DRIFT_DENOM_FLOOR_A = 10000.0
 def _coil_drift_pct(cur, baseline):
     r"""Per-coil current drift [%] = ``100 * (I_draw - I_base) / max(|I_base|, 1)``.
 
-    Used for the SOLVE-time homotopy bounds/saturation (per coil, per power
-    supply) and for the non-VSC F-coil in-spec metric -- there the measurement
-    uncertainty is gain-dominated (~2% of 35-180 kA), so a relative % is the
-    right scale. The anti-series VSC pair is scored separately by
-    :func:`_vsc_channel_drift_pct` (per-coil % breaks on its near-zero coil).
-    Signed; caller takes abs()/max().
+    Used for the non-VSC F-coil legacy in-spec metric (via
+    :func:`_coil_max_drifts`) -- there the measurement uncertainty is
+    gain-dominated (~2% of 35-180 kA), so a relative % is the right scale --,
+    for the sigma=0 archived-geometry coil gate (plain per-coil %, the VSC
+    pair included) and for the homotopy's logged F-coil drift.  NOT the
+    homotopy's saturation measures: the F coils are judged against their
+    installed bound by :func:`_coil_bound_max_f`, the vertical-control pair
+    by :func:`_coil_bound_max_vsc` (denominator floored at 10 kA,
+    :func:`_vsc_bound_scale`).  The anti-series pair's in-spec number is
+    :func:`_vsc_channel_drift_pct` (per-coil % breaks on its near-zero
+    coil).  Signed; caller takes abs()/max().
     """
     return {n: (float(cur[n]) - baseline[n]) / max(abs(baseline[n]), 1.0) * 100.0
             for n in baseline}
@@ -1480,18 +1487,23 @@ def _vsc_bound_scale(baseline, vsc_in_set):
     vertical-control pair, _COIL_DRIFT_DENOM_FLOOR_A)``; the channel's bound
     at a stage is ``drift_VSC`` times it (and at least the per-coil floor).
 
-    The floor is the in-spec VSC metric's own denominator floor
-    (:func:`_vsc_channel_drift_pct`), one constant for both: the homotopy
-    bounds the channel on the same scale the acceptance metric judges it.
-    Without it (before 2026-10-16) a pair with one near-zero coil (a
+    The floor reuses the CONSTANT of the legacy in-spec VSC metric
+    (:func:`_vsc_channel_drift_pct`), not that metric's scale: the metric
+    ADDS the 10 kA to its propagated coil scale (``sigma_VSC =
+    hypot(I_A, I_B)/2 + 10 kA``, 43 kA on a 66 kA / 2.8 kA pair, against
+    this function's 10 kA there), and the default acceptance
+    (``coil_filter="chi2"``, per-coil measurement sigmas) does not use the
+    constant at all.  So the homotopy does NOT bound the channel on the
+    scale an acceptance rule judges it; the floor only lifts a bound far
+    tighter than any acceptance rule needs.  Without it (before 2026-10-16) a pair with one near-zero coil (a
     reversed-I_p case: 66 kA and 2.8 kA) got a bound of 10 % of 2.8 kA in the
     first pass, 279 A: TokaMaker's vertical-control channel sat on it, the
     axis ran away vertically and 9 of 10 draws stopped at the iteration cap,
     while the in-spec rule accepts several hundred A on that pair.  With the
     floor, 9 of 10 were archived (9 in spec).  It is inactive for a pair
     whose smaller coil carries more than the floor.  Owner-approved: it
-    changes a homotopy coil bound so that it agrees with the in-spec rule's
-    metric; it changes no acceptance gate."""
+    changes a homotopy coil bound; it changes no acceptance gate (docs/
+    engine.md, "The vertical-control bound of the homotopy")."""
     if not vsc_in_set:
         return 0.0
     return max(min(abs(float(baseline[c])) for c in vsc_in_set),

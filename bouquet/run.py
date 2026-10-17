@@ -7149,7 +7149,10 @@ class Bouquet(SwbBaseline):
         """The zero-perturbation draw's archived coil currents and LCFS
         against the reconstruction's, from the archive *header*: per-coil
         drift [%] (:func:`bouquet.TokaMaker_interface._coil_drift_pct`, the
-        homotopy's own measure) of draw 0's ``coil_currents`` against
+        plain per-coil percentage; deliberately NOT the homotopy's VSC
+        saturation measure, :func:`~bouquet.TokaMaker_interface.
+        _coil_bound_max_vsc`, whose denominator is floored at 10 kA) of draw
+        0's ``coil_currents`` against
         ``_baseline/coil_currents`` (the reconstruction's state at
         ``generate()`` entry), the max non-VSC F-coil and max VSC-coil drift
         (:func:`~bouquet.TokaMaker_interface._coil_max_drifts`), and the
