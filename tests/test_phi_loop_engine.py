@@ -112,7 +112,7 @@ def test_every_engine_solve_is_tagged_with_the_run_coordinate(coord):
     TokaMakerBackend(mg, c, coord=coord).solve(1e6 * (1 - x ** 2))
     p = mg.profiles[-1]
     if coord == "phi_n":
-        assert p["ffp_prof"]["coord"] == "phi_n_relabel"
+        assert p["ffp_prof"]["coord"] == "phi_n"
         assert p["pp_prof"]["coord"] == "phi_n"
     else:
         assert "coord" not in p["ffp_prof"] and "coord" not in p["pp_prof"]

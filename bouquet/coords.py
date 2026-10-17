@@ -120,8 +120,8 @@ def gfile_run_grids(eqdsk, kin, profiles_path, coord=PSI):
 def oft_prof(kind, x, y, coord=PSI):
     """A TokaMaker profile dict on the run grid.
 
-    In a Φ_N run a ``jphi-*`` profile holds values (tag ``phi_n_relabel``)
-    and any other profile holds a derivative, y = dY/dΦ_N (tag ``phi_n``).
+    In a Φ_N run (tag ``phi_n``) a ``jphi-*`` profile holds values and any
+    other profile holds a derivative, y = dY/dΦ_N; TokaMaker tells them apart.
     """
     return tag_prof({"type": kind, "y": np.array(y, dtype=float), "x": x},
                     coord)
@@ -132,7 +132,7 @@ def tag_prof(d, coord=PSI):
     it; ``d`` itself in a ψ_N run (e.g. a ``bouquet.edge_pressure`` P')."""
     if check_coord(coord) == PHI:
         d = dict(d)
-        d["coord"] = "phi_n_relabel" if d["type"].startswith("jphi") else PHI
+        d["coord"] = PHI
     return d
 
 

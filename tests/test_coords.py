@@ -45,7 +45,7 @@ def test_psi_profile_dicts_carry_no_coord():
 
 
 def test_phi_profile_tags():
-    assert coords.oft_prof("jphi-linterp", X, X, coords.PHI)["coord"] == "phi_n_relabel"
+    assert coords.oft_prof("jphi-linterp", X, X, coords.PHI)["coord"] == "phi_n"
     assert coords.oft_prof("linterp", X, X, coords.PHI)["coord"] == "phi_n"
 
 
