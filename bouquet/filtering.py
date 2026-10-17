@@ -69,6 +69,8 @@ __all__ = [
     "resolve_inspec_bands",
     "refilter_inspec",
     "read_inspec_rule",
+    "read_inspec_record",
+    "in_spec_fields",
     "shafranov_lambda",
     "LAMBDA_DEFINITION",
 ]
@@ -401,6 +403,28 @@ INSPEC_RULE_ATTR = "inspec_rule"
 #: Scan-group attribute: the JSON record of the band settings
 #: (:meth:`InspecBands.record`), so a later re-filter knows what was applied.
 INSPEC_BANDS_ATTR = "inspec_bands_json"
+#: Key of the :data:`INSPEC_BANDS_ATTR` record (and of the baseline engine
+#: record's ``draws``): the q0 gate as ``generate_bouquet`` APPLIED it --
+#: ``configured`` (``constrain_sawteeth``), ``applied``, the reconstruction's
+#: ``q0`` and the ``reason`` when it was switched off (a sawtoothing
+#: reconstruction, q0 < 1: every draw would fail the gate).  The stamped
+#: rule is the applied one (no ``"+q0"`` when it was switched off).
+Q0_GATE_RECORD_KEY = "q0_gate"
+#: Per-draw attribute saying what the archived ``in_spec`` is.
+#: :data:`IN_SPEC_RULE_SOURCE`: the in-spec rule's verdict -- the configured
+#: coil test (chi2 by default) AND the boundary cut AND the opt-in bands, the
+#: verdict until-N counts and ``selected`` reproduces.  ABSENT on an archive
+#: written before it (2026-10-15), whose ``in_spec`` is the legacy +/-2 %
+#: per-coil drift verdict (AND the engine's opt-in bands; no boundary cut):
+#: readers report it as :data:`IN_SPEC_DRIFT_SOURCE` (:func:`in_spec_fields`).
+IN_SPEC_SOURCE_ATTR = "in_spec_source"
+IN_SPEC_RULE_SOURCE = "inspec_rule"
+IN_SPEC_DRIFT_SOURCE = ("coil_drift: the archive predates the rule verdict; "
+                        "its in_spec is the legacy +/-2 % drift test")
+#: Per-draw attribute: the legacy +/-2 % per-coil drift verdict
+#: (``passes_coil_spec`` on the bare F / VSC-channel drifts), kept beside the
+#: rule's ``in_spec``; never a filter.
+COIL_DRIFT_IN_SPEC_ATTR = "coil_drift_in_spec"
 #: Per-draw opt-in band verdicts (written only while that band is on).
 L_I_BAND_FLAG = "passes_l_i_band"
 BETA_P_BAND_FLAG = "passes_beta_p_band"
@@ -666,6 +690,78 @@ def resolve_inspec_bands(gc) -> InspecBands:
         constrain_sawteeth=bool(getattr(gc, "constrain_sawteeth", False)))
 
 
+def in_spec_fields(attrs) -> dict:
+    """``in_spec``, ``coil_drift_in_spec`` and ``in_spec_source`` of one
+    archived draw's attrs (those present).
+
+    An archive that stamps :data:`IN_SPEC_SOURCE_ATTR` carries the rule's
+    verdict in ``in_spec`` and the drift verdict in
+    :data:`COIL_DRIFT_IN_SPEC_ATTR`.  An older one carries only ``in_spec``,
+    which IS the drift verdict: it is reported under both names, with
+    ``in_spec_source`` = :data:`IN_SPEC_DRIFT_SOURCE` saying so -- select
+    on ``selected`` (the filters' verdict) on such an archive."""
+    out = {}
+    src = attrs.get(IN_SPEC_SOURCE_ATTR) if IN_SPEC_SOURCE_ATTR in attrs \
+        else None
+    if isinstance(src, bytes):
+        src = src.decode()
+    if src is not None:
+        if "in_spec" in attrs:
+            out["in_spec"] = bool(attrs["in_spec"])
+        if COIL_DRIFT_IN_SPEC_ATTR in attrs:
+            out[COIL_DRIFT_IN_SPEC_ATTR] = bool(attrs[COIL_DRIFT_IN_SPEC_ATTR])
+        out["in_spec_source"] = str(src)
+    elif "in_spec" in attrs:
+        out["in_spec"] = bool(attrs["in_spec"])
+        out[COIL_DRIFT_IN_SPEC_ATTR] = bool(attrs["in_spec"])
+        out["in_spec_source"] = IN_SPEC_DRIFT_SOURCE
+    return out
+
+
+def q0_gate_switched_off(q0_gate) -> bool:
+    """Whether a :data:`Q0_GATE_RECORD_KEY` record says the configured q0
+    gate was switched off for the scan."""
+    return bool(isinstance(q0_gate, dict) and q0_gate.get("configured")
+                and not q0_gate.get("applied"))
+
+
+def apply_q0_gate_record(bands, extra, q0_gate):
+    """``(bands, extra)`` of the rule AS APPLIED: with the q0 gate switched
+    off by ``generate_bouquet`` (*q0_gate*, :data:`Q0_GATE_RECORD_KEY`) the
+    bands lose ``constrain_sawteeth`` (and a legacy route's
+    ``constrain_sawteeth_construction`` is False); the record rides in
+    *extra* either way when one was made."""
+    extra = dict(extra or {})
+    if not isinstance(q0_gate, dict):
+        return bands, extra
+    extra[Q0_GATE_RECORD_KEY] = dict(q0_gate)
+    if q0_gate_switched_off(q0_gate):
+        bands = InspecBands.from_record(dict(bands.record(),
+                                             constrain_sawteeth=False))
+        if "constrain_sawteeth_construction" in extra:
+            extra["constrain_sawteeth_construction"] = False
+    return bands, extra
+
+
+def read_inspec_record(h5path_or_header, scan_key=None):
+    """The scan's stamped :data:`INSPEC_BANDS_ATTR` record as a dict (the
+    bands plus the extra keys stamped beside them), or ``None``."""
+    import json
+    h5path = _resolve(h5path_or_header)
+    with h5py.File(h5path, "r") as hf:
+        gp = _scan_group_path(scan_key)
+        if gp not in hf:
+            return None
+        rec = hf[gp].attrs.get(INSPEC_BANDS_ATTR)
+    if rec is None:
+        return None
+    try:
+        out = json.loads(rec.decode() if isinstance(rec, bytes) else str(rec))
+    except (TypeError, ValueError):
+        return None
+    return out if isinstance(out, dict) else None
+
+
 def _scan_group_path(scan_key):
     bkey = _scan_key(scan_key)
     return f"scan/{bkey}" if bkey is not None else "/"
@@ -701,7 +797,12 @@ def stamp_inspec_rule(h5path_or_header, scan_key, bands, extra=None):
     """Stamp the in-spec rule and its band settings on the scan group
     (:data:`INSPEC_RULE_ATTR`, :data:`INSPEC_BANDS_ATTR`) and the Lambda
     definition (:data:`LAMBDA_DEFINITION_ATTR`).  *extra* is merged into the
-    JSON record (e.g. a legacy route's draw-construction tolerance)."""
+    JSON record (e.g. a legacy route's draw-construction tolerance).
+
+    A :data:`Q0_GATE_RECORD_KEY` record already on the scan that says the
+    q0 gate was switched off is kept when *bands* carry no q0 gate and
+    *extra* brings none (a re-filter under the stamped rule must not lose
+    why the configured gate is absent)."""
     import json
     h5path = _resolve(h5path_or_header)
     rec = dict(bands.record(), **(extra or {}))
@@ -710,6 +811,16 @@ def stamp_inspec_rule(h5path_or_header, scan_key, bands, extra=None):
         if gp not in hf:
             return
         a = hf[gp].attrs
+        if Q0_GATE_RECORD_KEY not in rec and not bands.constrain_sawteeth:
+            old = a.get(INSPEC_BANDS_ATTR)
+            try:
+                old = (json.loads(old.decode() if isinstance(old, bytes)
+                                  else str(old)) if old is not None else None)
+            except (TypeError, ValueError):
+                old = None
+            if (isinstance(old, dict)
+                    and q0_gate_switched_off(old.get(Q0_GATE_RECORD_KEY))):
+                rec[Q0_GATE_RECORD_KEY] = old[Q0_GATE_RECORD_KEY]
         a[INSPEC_RULE_ATTR] = bands.rule()
         a[INSPEC_BANDS_ATTR] = json.dumps(rec)
         a[LAMBDA_DEFINITION_ATTR] = LAMBDA_DEFINITION
@@ -1015,8 +1126,11 @@ def read_filter_flags(h5path_or_header, scan_key=None):
     ``passes_draw_band`` (and the opt-in bands' own ``passes_l_i_band`` /
     ``passes_beta_p_band`` / ``passes_q0_gate``) and ``selected`` when
     present (missing flags are omitted), plus the raw metrics
-    ``max_F_drift_pct``, ``max_VSC_drift_pct``, ``in_spec``, ``beta_p`` and
-    ``Lambda``. An explicit
+    ``max_F_drift_pct``, ``max_VSC_drift_pct``, ``beta_p`` and ``Lambda``,
+    and ``in_spec`` / ``coil_drift_in_spec`` / ``in_spec_source``
+    (:func:`in_spec_fields`: the rule's verdict and the legacy drift one; on
+    an archive that predates the rule verdict ``in_spec`` is the drift one,
+    and ``in_spec_source`` says so). An explicit
     ``scan_key`` returns the ``{idx: {...}}`` dict directly; the default
     ``scan_key=None`` returns ``{scan_key: {idx: {...}}}`` (shape follows the
     call, same convention as the other accessors).
@@ -1035,12 +1149,12 @@ def read_filter_flags(h5path_or_header, scan_key=None):
                 for k in (*_FILTER_FLAGS, *_BAND_FLAGS, "selected"):
                     if k in a:
                         rec[k] = bool(a[k])
-                for k in ("max_F_drift_pct", "max_VSC_drift_pct", "in_spec",
+                for k in ("max_F_drift_pct", "max_VSC_drift_pct",
                           "boundary_rms_mm", "boundary_max_mm", "beta_p",
                           "Lambda"):
                     if k in a:
-                        rec[k] = (float(a[k]) if k != "in_spec"
-                                  else bool(a[k]))
+                        rec[k] = float(a[k])
+                rec.update(in_spec_fields(a))
                 sv_out[i] = rec
             out[sv] = sv_out
     return _finalize_scan_result(out, scan_key)

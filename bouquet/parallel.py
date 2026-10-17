@@ -704,10 +704,11 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
             if _rule[1] is not None:
                 out[gp].attrs[INSPEC_BANDS_ATTR] = str(_rule[1])
             out[gp].attrs[LAMBDA_DEFINITION_ATTR] = LAMBDA_DEFINITION
-    # the merged scan's axis-branch count (n_axis_other), recounted on the
-    # merged draws' own flags (reported, never a filter)
-    from .engine_draws import stamp_axis_branch_count
-    stamp_axis_branch_count(out_path, scan_key)
+    # the merged scan's axis record (n_axis_shift_large, the per-scan
+    # bimodality and the baseline's bistability_source), recounted on the
+    # merged draws' own records (reported, never a filter)
+    from .engine_draws import stamp_axis_scan
+    stamp_axis_scan(out_path, scan_key)
     if _resc:
         with h5py.File(out_path, "a") as out:
             gp = base_path if base_path else "/"

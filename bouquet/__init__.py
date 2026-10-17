@@ -155,7 +155,8 @@ from .io.imas import (read_imas_baseline, read_imas_geometry,
 from .run import Bouquet
 from .archive import BouquetArchive, ScanView, DrawView, BaselineView
 from .stats import (draw_band, draw_bands, draw_scalars, BandRecord,
-                    BandTable, plot_band)
+                    BandTable, plot_band, bands_summary, BandSummary,
+                    plot_bands_summary)
 from .parallel import (parallel_generate, run_shard, merge_archives,
                        emit_slurm_script, parallel_cases, run_case, merge_cases)
 
@@ -170,7 +171,7 @@ __all__ = [
     "BouquetArchive", "ScanView", "DrawView", "BaselineView",
     # ---- standard error bars from an archive (bouquet.stats) ----
     "draw_band", "draw_bands", "draw_scalars", "BandRecord", "BandTable",
-    "plot_band",
+    "plot_band", "bands_summary", "BandSummary", "plot_bands_summary",
     "BouquetConfig", "SolverConfig", "ReconstructionSource", "ImasSource",
     "FixedComponentsConfig", "UncertaintyConfig", "GenerationConfig",
     "FilterConfig",

@@ -120,7 +120,13 @@ def test_a_gfile_engine_baseline_is_a_complete_baseline(toy_solver, monkeypatch)
     # the solver was set up as the legacy reconstruction does it
     kinds = [c[0] for c in b.mygs.calls]
     assert kinds[:2] == ["set_isoflux", "init_psi"]
-    assert b.mygs.calls[0][2] == 200.0
+    # the solver geometry's standard boundary constraint (#84), not the
+    # route's former g-file boundary at 200 per point
+    from bouquet.solver_geometry import N_ISOFLUX
+    assert b.mygs.calls[0][1] == N_ISOFLUX
+    np.testing.assert_array_equal(b._engine_run["recon_isoflux"]["w"],
+                                  b._geom.iso_w)
+    assert b.mygs.calls[0][2] == b._geom.iso_w[0]
     # the split sums to the delivered request, which one solve reproduces
     st = bl.engine["state"]
     # ... with the pressure-driven p'G as its own bucket (owner decision D2)
@@ -164,7 +170,10 @@ def test_an_ids_engine_baseline_is_a_complete_baseline(toy_solver,
     from bouquet.io.imas import read_imas_geometry
     F0, lcfs = read_imas_geometry(b.config.source)
     assert b.mygs.calls[2] == ("foffset", F0)
-    assert b.mygs.calls[3][1:] == (len(lcfs), 500.0)
+    # the slice's boundary resampled to the standard set (#84)
+    from bouquet.solver_geometry import N_ISOFLUX, standard_isoflux
+    _p, _w, _ = standard_isoflux(lcfs)
+    assert b.mygs.calls[3][1:] == (N_ISOFLUX, float(_w[0]))
     # the legacy anchors are not carried into the engine's baseline
     assert bl.jphi_bs_diff is None and bl.jphi_diff is None and bl.p_diff is None
     icl = bl.ip_closure
@@ -183,9 +192,11 @@ def test_an_ids_engine_baseline_is_a_complete_baseline(toy_solver,
 def test_the_ids_reconstruction_isoflux_is_the_solver_geometrys(toy_solver):
     """The IDS route solves under the solver geometry's isoflux (the reset
     installs it; the engine does not re-point it): the pattern recorded for
-    the draws' homotopy IS the one the solver geometry record fingerprints."""
+    the draws' homotopy IS the one the solver geometry record fingerprints --
+    the standard set of #84, N_ISOFLUX points whose weights sum to
+    ISOFLUX_WEIGHT_TOTAL."""
     import bouquet as bq
-    from bouquet.solver_geometry import ISOFLUX_WEIGHT
+    from bouquet.solver_geometry import ISOFLUX_WEIGHT_TOTAL, N_ISOFLUX
     b = bq.Bouquet.from_imas(_OMAS, mesh=_MESH, time=2.3043, n_draws=1,
                              reconstruction_engine="unified")
     b.config.generation.engine_rows = ["Ip"]
@@ -194,15 +205,17 @@ def test_the_ids_reconstruction_isoflux_is_the_solver_geometrys(toy_solver):
     ri = b._engine_run["recon_isoflux"]
     geo = b.solver_geometry_record()
     assert ri["stamp"]["sha256"] == geo["isoflux_sha256"] is not None
-    assert ri["stamp"]["n"] == geo["isoflux_n"] == len(ri["pts"])
-    assert ri["stamp"]["weight_min"] == ri["stamp"]["weight_max"] \
-        == ISOFLUX_WEIGHT
-    assert ri["stamp"]["origin"] == "solver geometry: source boundary"
+    assert ri["stamp"]["n"] == geo["isoflux_n"] == len(ri["pts"]) == N_ISOFLUX
+    assert ri["stamp"]["weight_total"] == pytest.approx(
+        ISOFLUX_WEIGHT_TOTAL, rel=1e-12) == geo["isoflux_weight_total"]
+    assert ri["stamp"]["origin"].startswith(
+        "solver geometry: source boundary, resampled")
     np.testing.assert_array_equal(ri["pts"], b._geom.iso_pts)
+    np.testing.assert_array_equal(ri["w"], b._geom.iso_w)
     assert bl.engine["recon_isoflux"] == ri["stamp"]
     # the only isoflux installed during the reconstruction is the reset's
     assert [c for c in b.mygs.calls if c[0] == "set_isoflux"] == [
-        ("set_isoflux", len(ri["pts"]), ISOFLUX_WEIGHT)]
+        ("set_isoflux", N_ISOFLUX, float(ri["w"][0]))]
 
 
 def test_a_failed_engine_build_leaves_no_baseline(toy_solver, monkeypatch):

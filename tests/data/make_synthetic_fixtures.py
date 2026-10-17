@@ -5,7 +5,14 @@
     diiid_profs_synthetic.cdf     an IDA-layout ("direct") kinetic fit at the dd's
                                   pedestal-forming slice (1.2 s, T_IDA) -- spec 2
     g_synthetic.geqdsk            the kinetic-EFIT-like equilibrium that IDA fit
-                                  belongs to (COCOS 1) -- spec 3
+                                  belongs to (COCOS 1), THERMAL pressure only (the
+                                  pressure the g-file + IDA route reads from that
+                                  file) -- spec 3
+    g_synthetic_pfast.geqdsk      the same slice and current model with the TOTAL
+                                  pressure (thermal + fast ions) -- spec 3b
+    p_synthetic.peqdsk            an Osborne p-file of that slice (n_e, T_e, n_i,
+                                  T_i, n_b, the beam pressure p_b, n_z1, omeg, ptot)
+                                  that belongs to g_synthetic_pfast -- spec 3b
     g_synthetic_lmode.geqdsk      a separate upper-single-null L-mode equilibrium
     ida_synthetic_lmode.cdf       and the IDA-layout kinetic fit that belongs to it
 
@@ -44,11 +51,19 @@ TokaMaker on the D3D-like example mesh (``examples/D3D-like/DIIID_mesh.h5``):
   A7) to the printed residual r_j.  ``core_profiles.j_tor`` of every slice is
   built from its ``j_total`` on the PREVIOUS equilibrium slice (the first slice:
   on itself), as FUSE does (``bouquet.io.imas._jtor_from_jpar``).
-* **The g-file the IDA fit belongs to** (``g_synthetic.geqdsk``): the T_IDA
-  slice's (1.2 s: pedestal forming, ~0.1 MA of beam current) kinetics and pressure solved with a kinetic-EFIT-like current model --
-  the slice's ohmic shape (amplitude re-solved for Ip) plus the Redl bootstrap,
-  no beam current channel (``G_OHMIC``).  It differs from the dd's T_IDA
-  slice by that current model only (the beam current is the difference).
+* **The g-files of the T_IDA slice** (1.2 s: pedestal forming, ~0.1 MA of
+  beam current), both solved with a kinetic-EFIT-like current model -- the
+  slice's ohmic shape (amplitude re-solved for Ip) plus the Redl bootstrap, no
+  beam current channel (``G_OHMIC``):
+  ``g_synthetic_pfast.geqdsk`` carries the slice's TOTAL pressure (thermal +
+  beam; it differs from the dd's T_IDA slice by the current model only) and
+  belongs to the p-file ``p_synthetic.peqdsk``, whose ``pb`` block is that
+  beam pressure (:func:`write_pfile`); ``g_synthetic.geqdsk`` carries the
+  THERMAL pressure only, e (n_e T_e + n_i T_i) with n_i from Z_eff by
+  single-impurity quasineutrality, i.e. exactly what the g-file + IDA route
+  reads from the IDA file (which has no fast-ion channel), and belongs to the
+  IDA file.  The thermal-only solve continues from the total-pressure state
+  (``PRESSURE_THERMAL``).
 * **The L-mode case** (``LMODE``, ``JPHI_LMODE``, ``LCFS_LMODE``): an
   upper-single-null L-mode with q0 < 1; its current is a prescribed smooth
   <j_phi> profile, its pressure is thermal (no beam).
@@ -183,7 +198,14 @@ SLICES = (
          jbeam=P("hmode", (0.0, 0.0012, 0.012, 1.1, 0.71, 0.041, 0.87)),
          johm=P("hmode", (0.0051, 0.22, 1.3, 1.2, 2.6, 0.061, 0.96))),
 )
-T_IDA = 1.2             # s, the dd slice the IDA file and g_synthetic.geqdsk belong to
+T_IDA = 1.2             # s, the dd slice the IDA file, p-file and both H-mode g-files belong to
+# g_synthetic.geqdsk's pressure: "thermal" = e (n_e T_e + n_i T_i), n_i =
+# n_e (Z_IMP - Z_eff)/(Z_IMP - 1) (bouquet.physics.main_ion_density_from_zeff,
+# the IDA reader's n_i; no impurity term, no fast ions) -- the pressure the
+# g-file + IDA route rebuilds from the IDA file.  g_synthetic_pfast.geqdsk keeps
+# the total (thermal + beam), as the dd slices.
+PRESSURE_THERMAL = "thermal"
+N_PFILE = 201           # p-file psinorm nodes (uniform on [0, 1])
 # g_synthetic.geqdsk's EFIT-like current: ohmic + Redl bootstrap, no beam channel.
 # "fit": the T_IDA slice's own ohmic shape (amplitude re-solved for Ip);
 # "sigma_neo": a steady-state neoclassical ohmic current (uniform loop voltage).
@@ -304,7 +326,19 @@ def _kinetics(x, sc):
     te, ti = 1e3 * prof(x, sc["te"]), 1e3 * prof(x, sc["ti"])
     pf = 1e3 * prof(x, sc["pfast"]) if sc.get("pfast") else zero
     p_th = EC * (ne * te + (nd + nc) * ti)
-    return dict(ne=ne, te=te, ti=ti, nc=nc, nf=nf, nd=nd, pf=pf, p_th=p_th, p=p_th + pf,
+    # the thermal pressure the g-file + IDA route reads: n_i from Z_eff (= n_D +
+    # n_fast here: Z_eff counts the beam deuterons), no impurity term
+    from bouquet.physics import main_ion_density_from_zeff
+    ni_r = main_ion_density_from_zeff(ne, zeff, Z_IMP)
+    p_th_reader = EC * (ne * te + ni_r * ti)
+    if sc.get("pressure") == PRESSURE_THERMAL:
+        p = p_th_reader
+    elif sc.get("pressure") is None:
+        p = p_th + pf
+    else:
+        raise ValueError(f"unknown pressure model {sc.get('pressure')!r}")
+    return dict(ne=ne, te=te, ti=ti, nc=nc, nf=nf, nd=nd, pf=pf, p_th=p_th, p=p,
+                ni_reader=ni_r, p_th_reader=p_th_reader,
                 omega=1e4 * prof(x, sc["omega"]), zeff=zeff,
                 j_beam=1e6 * prof(x, sc["jbeam"]) if sc.get("jbeam") else zero,
                 j_ohm_shape=1e6 * prof(x, sc["johm"]) if sc.get("johm") else None)
@@ -625,7 +659,8 @@ def solve_scenario(mygs, sc, ip, label, init=None, n_pass=None, gate_raise=True)
 
 def save_gfile(mygs, path, rec):
     """``save_eqdsk`` (COCOS 7, Bt > 0), then COCOS 1 with Bt = B0 < 0 (the
-    Bt-only flip of examples/D3D-like/generate_baseline.py)."""
+    Bt-only flip: negate BCENTR and FPOL, keep CURRENT, PSIRZ, PPRIME,
+    FFPRIM and QPSI)."""
     from bouquet.io.geqdsk import read_geqdsk
     tmp = path + ".cocos7"
     mygs.save_eqdsk(tmp, nr=N_GEQDSK, nz=N_GEQDSK, lcfs_pad=GFILE_PAD, rcentr=R0,
@@ -785,6 +820,35 @@ def write_ida(path, g, sc, t):
     return dict(x=x, K=K, zeff=K["zeff"], q=q)
 
 
+#: the p-file's ion-species footer (Osborne / OMFIT order: impurities, main ion, beam ion)
+PFILE_SPECIES = dict(N=(6.0, 1.0, 1.0), Z=(Z_IMP, 1.0, 1.0), A=(A_C, A_D, A_D))
+
+
+def write_pfile(path, sc):
+    """Osborne p-file (the DIII-D kinetic-EFIT layout ``bouquet.io.pfile``
+    reads) of scenario ``sc`` on a uniform psinorm grid of N_PFILE nodes:
+    ne, te, ni (the THERMAL main ions, n_D), ti, nb (the beam ions, n_fast),
+    pb (the beam pressure [kPa]: the dd's fast-ion fields p_par = p_perp =
+    p_fast/3 isotropised by ``bouquet.physics.isotropize_fast_pressure`` with
+    the dd's 'sum' rule), nz1 (carbon), omeg (toroidal rotation [kRad/s]),
+    ptot (``PFile.compute_pressure``: ne Te + (ni + nz1) Ti + pb) and the
+    ``N Z A`` footer.  Densities 1e20 m^-3, temperatures keV."""
+    from bouquet.io.pfile import PFile
+    from bouquet.physics import isotropize_fast_pressure
+    x = np.linspace(0.0, 1.0, N_PFILE)
+    K = kinetics(x, sc)
+    pb = isotropize_fast_pressure(K["pf"] / 3.0, K["pf"] / 3.0, "sum")
+    pf = PFile.new()
+    for key, v in (("ne", K["ne"] / 1e20), ("te", K["te"] / 1e3), ("ni", K["nd"] / 1e20),
+                   ("ti", K["ti"] / 1e3), ("nb", K["nf"] / 1e20), ("pb", pb / 1e3),
+                   ("nz1", K["nc"] / 1e20), ("omeg", K["omega"] / 1e3)):
+        pf.set_profile(key, x, v)
+    pf.compute_pressure()
+    pf.set_ion_species(**PFILE_SPECIES)
+    pf.save(path)
+    return dict(x=x, K=K, pb=pb)
+
+
 # =============================================================================
 #  self-checks (FIXTURE_SPEC.md section 1)
 # =============================================================================
@@ -799,7 +863,36 @@ def r_out(g, psi_N):
     return np.interp(psi_N, np.maximum.accumulate(pn[:k]), r[:k])
 
 
-def self_checks(out_dir, recs, ida, gfile_dd_t, ida_l, gl_path):
+def pressure_consistency(g_path, prof_path):
+    """``(axis_rel, profile_max_rel, p_g_axis, p_prof_axis)``: the g-file's
+    pressure vs the pressure its profile file gives as the g-file route reads
+    it -- e (n_e T_e + n_i T_i) [+ the p-file's ``pb``] -- with n_i from Z_eff
+    (IDA file, ``main_ion_density_from_zeff``) or the p-file's own ``ni``;
+    the profile maximum over psi_N <= 0.95 of |p_g/p_prof - 1|."""
+    import h5py
+    from bouquet.io.geqdsk import read_geqdsk
+    from bouquet.io.pfile import read_pfile
+    from bouquet.physics import main_ion_density_from_zeff
+    g = read_geqdsk(g_path)
+    pg = np.abs(np.asarray(g.pres, float))
+    xg = np.linspace(0.0, 1.0, pg.size)
+    if prof_path.endswith(".cdf"):
+        with h5py.File(prof_path, "r") as f:
+            x = np.asarray(f["psi_n"][()], float)
+            ne, te, ti, zf = (np.asarray(f[k][0], float) for k in ("n_e", "T_e", "T_12C6", "Zeff"))
+        ni = main_ion_density_from_zeff(ne, np.clip(zf, 1.0, Z_IMP), Z_IMP)
+        pp = EC * (ne * te + ni * ti)
+    else:
+        pf = read_pfile(prof_path)
+        x = np.asarray(pf.psinorm_for("ne"), float)
+        pp = (EC * 1e20 * 1e3 * (np.asarray(pf.ne) * np.asarray(pf.te) + np.asarray(pf.ni) * np.asarray(pf.ti))
+              + 1e3 * np.asarray(pf.pb))
+    m = (x >= 0.0) & (x <= 0.95)
+    rel = np.interp(x[m], xg, pg) / pp[m] - 1.0
+    return float(pg[0] / pp[0] - 1.0), float(np.max(np.abs(rel))), float(pg[0]), float(pp[0])
+
+
+def self_checks(out_dir, recs, ida, gfile_dd_t, ida_l, gl_path, pfile=None):
     from scipy.integrate import cumulative_trapezoid
     from scipy.interpolate import CubicSpline
     from bouquet.io.geqdsk import read_geqdsk
@@ -956,6 +1049,34 @@ def self_checks(out_dir, recs, ida, gfile_dd_t, ida_l, gl_path):
     except Exception as exc:                      # pragma: no cover
         print(f"  reader check FAILED: {type(exc).__name__}: {exc}")
         hard.append(("reader read", False))
+    # -- pressure consistency of each g-file with its profile file (2 % on axis)
+    pairs = (("H-mode thermal", "g_synthetic.geqdsk", "diiid_profs_synthetic.cdf"),
+             ("H-mode total", "g_synthetic_pfast.geqdsk", "p_synthetic.peqdsk"),
+             ("L-mode", "g_synthetic_lmode.geqdsk", "ida_synthetic_lmode.cdf"))
+    for lab, gn, pn in pairs:
+        a, pm, pg0, pp0 = pressure_consistency(os.path.join(out_dir, gn), os.path.join(out_dir, pn))
+        print(f"  pressure {lab}: {gn} axis {pg0 / 1e3:.2f} kPa vs {pn} {pp0 / 1e3:.2f} kPa "
+              f"(thermal{' + pb' if pn.endswith('.peqdsk') else ''}): {100 * a:+.2f} % "
+              f"(tol 2 %); max |rel| over psi_N <= 0.95 {100 * pm:.2f} %")
+        hard.append((f"{lab} pressure consistency", abs(a) < 0.02))
+    if pfile is not None:
+        from bouquet.io.pfile import read_pfile
+        from bouquet.physics import isotropize_fast_pressure
+        pf = read_pfile(os.path.join(out_dir, "p_synthetic.peqdsk"))
+        pf.compute_quasineutrality()
+        xz, zf = pf.compute_zeff()
+        ez = float(np.max(np.abs(zf - np.interp(xz, pfile["x"], pfile["K"]["zeff"]))))
+        print(f"  p-file read back: |Z_eff(p-file) - Z_eff| max {ez:.1e} (tol 1e-2); "
+              f"pb axis {pf.pb[0]:.2f} kPa, ptot axis {pf.ptot[0]:.2f} kPa")
+        hard.append(("p-file Z_eff", ez < 1e-2))
+        par = sum(np.asarray(s_.get("pressure_fast_parallel", np.zeros(len(x_cp))), float)
+                  for s_ in [cp["electrons"]] + list(cp["ion"]))
+        perp = sum(np.asarray(s_.get("pressure_fast_perpendicular", np.zeros(len(x_cp))), float)
+                   for s_ in [cp["electrons"]] + list(cp["ion"]))
+        p_dd = isotropize_fast_pressure(perp, par, "sum")
+        e_pb = float(np.max(np.abs(np.interp(pfile["x"], x_cp, p_dd) - pfile["pb"])) / np.max(p_dd))
+        print(f"  p-file pb vs the dd's t = {T_IDA} fast pressure ('sum'), on the p-file grid: "
+              f"max |diff| {e_pb:.1e} of its peak ({np.max(p_dd) / 1e3:.2f} kPa)")
     lrec = [r for r in recs if r["label"] == "lmode"][0]
     print(f"  L-mode q0 {lrec['q0']:.3f} (< 1: {lrec['q0'] < 1})")
     hard.append(("L-mode q0 < 1", lrec["q0"] < 1))
@@ -974,6 +1095,8 @@ def gate_only(out_dir, mesh=None, n_pass=3):
     scs = [(dict(s, model="fuse"), s["ip"], s["name"], LCFS_DD) for s in SLICES]
     k_ida = [round(s["t"], 9) for s in SLICES].index(round(T_IDA, 9))
     scs.append((dict(SLICES[k_ida], name="g", model="efit", jbeam=None), SLICES[k_ida]["ip"], "g", LCFS_DD))
+    scs.append((dict(SLICES[k_ida], name="g_thermal", model="efit", jbeam=None, pressure=PRESSURE_THERMAL),
+                SLICES[k_ida]["ip"], "g_thermal", LCFS_DD))
     scs.append((dict(LMODE, model="jphi", jphi=JPHI_LMODE), IP_LMODE, "lmode", LCFS_LMODE))
     dump, fails = {}, []
     for sc, ip, label, lcfs in scs:
@@ -1026,12 +1149,16 @@ def main(out_dir, mesh=None):
                             "time": [float(s["t"]) for s in SLICES], "profiles_1d": cp1s},
           "core_sources": core_sources(cps)}
     write_dd(dd, os.path.join(out_dir, "dd_synthetic.json.gz"))
-    # -- the g-file the IDA fit belongs to: the T_IDA slice's kinetics, EFIT-like current
+    # -- the T_IDA slice's g-files, EFIT-like current: first the TOTAL pressure
+    # (g_synthetic_pfast + its p-file) ...
     sg = dict(SLICES[k_ida], name="g", model="efit", jbeam=None)
     rec_g = solve_scenario(mygs, sg, SLICES[k_ida]["ip"], "g")
     recs.append(rec_g)
-    g = save_gfile(mygs, os.path.join(out_dir, "g_synthetic.geqdsk"), rec_g)
-    ida = write_ida(os.path.join(out_dir, "diiid_profs_synthetic.cdf"), g, sg, T_IDA)
+    save_gfile(mygs, os.path.join(out_dir, "g_synthetic_pfast.geqdsk"), rec_g)
+    pfile = write_pfile(os.path.join(out_dir, "p_synthetic.peqdsk"), sg)
+    # the state the thermal-only solve continues from (solved after the L-mode,
+    # so that the L-mode solve sees the same solver history as before)
+    snap_g = (mygs.copy_eq(), np.array(mygs._bq_offset, copy=True))
     # -- the L-mode g-file and its IDA file
     sl = dict(LMODE, model="jphi", jphi=JPHI_LMODE)
     shape_l = set_shape(mygs, LCFS_LMODE)
@@ -1040,8 +1167,18 @@ def main(out_dir, mesh=None):
     gl_path = os.path.join(out_dir, "g_synthetic_lmode.geqdsk")
     gl = save_gfile(mygs, gl_path, rec_l)
     ida_l = write_ida(os.path.join(out_dir, "ida_synthetic_lmode.cdf"), gl, sl, T_LMODE)
+    # -- ... then the THERMAL-only g-file the IDA fit belongs to, continued
+    # from the total-pressure state (same boundary, coils, Ip, mesh, settings)
+    mygs.replace_eq(source_eq=snap_g[0])
+    set_shape(mygs, LCFS_DD)
+    mygs._bq_offset = snap_g[1]
+    sgt = dict(sg, name="g_thermal", pressure=PRESSURE_THERMAL)
+    rec_gt = solve_scenario(mygs, sgt, SLICES[k_ida]["ip"], "g_thermal")
+    recs.append(rec_gt)
+    g = save_gfile(mygs, os.path.join(out_dir, "g_synthetic.geqdsk"), rec_gt)
+    ida = write_ida(os.path.join(out_dir, "diiid_profs_synthetic.cdf"), g, sgt, T_IDA)
     ok = self_checks(out_dir, recs, ida, os.path.join(work, f"{SLICES[k_ida]['name']}.geqdsk"),
-                     ida_l, gl_path)
+                     ida_l, gl_path, pfile=pfile)
     np.savez(os.path.join(work, "states.npz"), **{
         f"{r['label']}_{k}": v for r in recs for k, v in
         dict(x=r["x"], J=r["J"], jeq=r["G"]["jeq"], q=r["G"]["q"], j_ohm_tor=r["j_ohm_tor"],

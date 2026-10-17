@@ -862,12 +862,17 @@ def test_every_engine_draw_holds_the_reconstructions_isoflux(
     b.mygs.set_isoflux = set_isoflux
     _quiet(b.prepare_baseline)
     ri = b._engine_run["recon_isoflux"]
-    # the reconstruction's own last install IS the pattern on record (the
-    # g-file route installs its own, weight 200, over the geometry's reset)
+    # the reconstruction's own last install IS the pattern on record: the
+    # solver geometry's standard set (#84), which the g-file route installs
+    # again over the reset's identical one
+    from bouquet.solver_geometry import ISOFLUX_WEIGHT_TOTAL, N_ISOFLUX
     rp, rw = installs[-1]
     np.testing.assert_array_equal(ri["pts"], rp)
     np.testing.assert_array_equal(ri["w"], rw)
-    assert set(np.unique(rw)) == {200.0}
+    np.testing.assert_array_equal(rp, b._geom.iso_pts)
+    np.testing.assert_array_equal(rw, b._geom.iso_w)
+    assert len(rp) == N_ISOFLUX
+    assert np.sum(rw) == pytest.approx(ISOFLUX_WEIGHT_TOTAL, rel=1e-12)
     assert ri["stamp"]["sha256"] == isoflux_fingerprint(rp, rw)
     assert b.baseline.engine["recon_isoflux"] == ri["stamp"]
     n0 = len(installs)
@@ -885,8 +890,11 @@ def test_every_engine_draw_holds_the_reconstructions_isoflux(
         st = d["engine"]["homotopy"]["isoflux"]
         assert st["installed"] is True
         assert st["sha256"] == ri["stamp"]["sha256"]
-        assert st["n"] == len(ri["pts"]) and st["weight_max"] == 200.0
-        assert st["origin"].startswith("engine g-file route")
+        assert st["n"] == len(ri["pts"]) == N_ISOFLUX
+        assert st["weight_total"] == pytest.approx(ISOFLUX_WEIGHT_TOTAL,
+                                                   rel=1e-12)
+        assert st["origin"].startswith("solver geometry: source boundary, "
+                                       "resampled")
         assert ED.read_draw_engine(b.config.output_header, i, scan_key=
                                    b.config.generation.scan_key
                                    )["homotopy"]["isoflux"] == st

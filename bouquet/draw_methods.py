@@ -29,6 +29,17 @@ class DrawMethod:
         """Whether the baseline is re-solved from its jphi_total first."""
         return jphi_baseline
 
+    #: generate_bouquet's q0 gate as applied (:meth:`note_q0_gate`): None
+    #: until a generate_bouquet call has decided it
+    q0_gate = None
+
+    def note_q0_gate(self, record):
+        """generate_bouquet's decision on the q0 >= 1 gate
+        (``configured``, ``applied``, ``q0``, ``reason``;
+        :data:`bouquet.filtering.Q0_GATE_RECORD_KEY`): kept so the scan's
+        in-spec stamp records the rule AS APPLIED."""
+        self.q0_gate = dict(record)
+
     def baseline_resolve_start(self, mygs):
         """Where that baseline re-solve starts.  ``None``: re-initialise psi
         from the landed LCFS first (the converged-on-entry guard of issue

@@ -175,3 +175,133 @@ def test_a_file_with_no_zeff_information_is_refused(tmp_path):
         assert bl.li_metrics["kinetics_route"]["ni_source"] == "standard"
         assert bl.aux["ida_profiles"][1].zeff_provenance["source"] \
             .startswith("dd")
+
+
+# ---------------------------------------------------------------------------
+#  review F3: Z_eff derived from the carbon density -- screened, Z = 6,
+#  stamped, or refused
+# ---------------------------------------------------------------------------
+def test_no_zeff_and_valid_carbon_derives_and_stamps(tmp_path):
+    """No Zeff dataset and no n_12C6_err (the bottom rung): Z_eff derived
+    from the carbon density after the validity screen, stamped and
+    warned about."""
+    ddp, cdf, *_ = NF._build(tmp_path)
+    _strip(cdf, "Zeff", "Zeff_err", "n_12C6_err")
+    bl, rec = _read(ddp, cdf)
+    prov = bl.aux["ida_profiles"][1].zeff_provenance
+    assert prov["source"] == "CER"
+    assert prov["zeff_source"] == "carbon_density"
+    assert prov["zeff_from_carbon_fallback"] is True
+    assert bl.li_metrics["zeff_provenance"]["zeff_source"] == \
+        "carbon_density"
+    assert bl.li_metrics["kinetics_route"]["ida_zeff_source"] == \
+        "carbon_density"
+    assert [w for w in rec if "DERIVED from the carbon density"
+            in str(w.message)]
+
+
+def test_a_file_with_zeff_stamps_its_own_zeff(tmp_path):
+    ddp, cdf, *_ = NF._build(tmp_path)
+    bl, _ = _read(ddp, cdf)
+    prov = bl.aux["ida_profiles"][1].zeff_provenance
+    assert prov["zeff_source"] == "Zeff+carbon_density"
+    assert prov["zeff_from_carbon_fallback"] is False
+
+
+def _no_zeff_cdf(tmp_path, bad_carbon=False):
+    ddp, cdf, *_ = NF._build(tmp_path)
+    _strip(cdf, "Zeff", "Zeff_err", "n_12C6_err")
+    if bad_carbon:
+        with h5py.File(cdf, "a") as f:
+            nc = np.array(f["n_12C6"])
+            nc[0, 3] = 9.97e36                    # one netCDF fill value
+            f["n_12C6"][...] = nc
+    return ddp, cdf
+
+
+def test_no_zeff_and_screened_out_carbon_is_refused(tmp_path):
+    from bouquet.io.ida import read_ida
+    ddp, cdf = _no_zeff_cdf(tmp_path, bad_carbon=True)
+    with pytest.raises(KeyError, match="validity screen rejected"):
+        read_ida(cdf, ni_source="all", impurity_Z=NF.Z_IMP)
+    # the same refusal through the IDA-hybrid default
+    with pytest.raises(KeyError, match="no usable Z_eff information"):
+        _read(ddp, cdf)
+    # the explicit dd route still reads the file
+    bl, _ = _read(ddp, cdf, ni_source="standard")
+    assert bl.li_metrics["kinetics_route"]["ni_source"] == "standard"
+
+
+def test_no_zeff_and_a_non_carbon_impurity_is_refused(tmp_path):
+    from bouquet.io.ida import read_ida
+    _, cdf = _no_zeff_cdf(tmp_path)
+    with pytest.raises(KeyError, match="impurity_Z=8"):
+        read_ida(cdf, ni_source="all", impurity_Z=8.0)
+    # at Z = 6 the same file derives
+    r = read_ida(cdf, ni_source="all", impurity_Z=6.0)
+    assert r.zeff_provenance["zeff_source"] == "carbon_density"
+
+
+# ---------------------------------------------------------------------------
+#  review F4: ONE resolved route per run; an explicit route is never
+#  downgraded
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("route, strip, missing", [
+    ("CER", ("n_12C6", "n_12C6_err"), "no 'n_12C6' dataset"),
+    ("Zeff", ("Zeff", "Zeff_err"), "no 'Zeff' dataset"),
+    ("all", ("Zeff", "Zeff_err", "n_12C6", "n_12C6_err"),
+     "no 'Zeff' and no 'n_12C6'"),
+    ("CER", ("Zeff", "Zeff_err", "n_12C6", "n_12C6_err"),
+     "no 'n_12C6' dataset"),
+])
+@pytest.mark.parametrize("from_fuse", [False, True])
+def test_an_explicit_route_the_file_cannot_honour_is_refused(
+        tmp_path, route, strip, missing, from_fuse):
+    ddp, cdf, *_ = NF._build(tmp_path)
+    _strip(cdf, *strip)
+    with pytest.raises(ValueError) as ei:
+        _read(ddp, cdf, ni_source=route, zeff_from_fuse=from_fuse)
+    msg = str(ei.value)
+    assert f"ni_source={route!r}" in msg and cdf in msg and missing in msg
+
+
+def test_auto_without_zeff_information_is_standard_everywhere(tmp_path):
+    """auto + zeff_from_fuse=True on a file with no Z_eff information: the
+    reader resolves "standard", and the uncertainty, the clips and the Z_eff
+    ladder all follow that ONE route (they resolved "all" from the config
+    before)."""
+    from bouquet.baseline import resolve_uncertainty
+    ddp, cdf, *_ = NF._build(tmp_path)
+    _strip(cdf, "Zeff", "Zeff_err", "n_12C6", "n_12C6_err")
+    bl, _ = _read(ddp, cdf, zeff_from_fuse=True)
+    src = _src(ddp, cdf, zeff_from_fuse=True)
+    cfg = BouquetConfig(source=src, solver=SolverConfig(mesh_path="unused"),
+                        generation=GenerationConfig(
+                            kinetic_source="ida_hybrid"),
+                        output_header="unused")
+    assert bl.li_metrics["kinetics_route"]["ni_source"] == "standard"
+    # the config alone still says "all"; the run's route is the reader's
+    assert X.resolved_ni_source(src, "ida_hybrid") == "all"
+    assert X.resolved_ni_source(src, "ida_hybrid", baseline=bl) == "standard"
+    assert X.ida_ion_route_on(src, None, "ida_hybrid", baseline=bl) is False
+    assert X.kinetic_clips_on(cfg, baseline=bl) is False
+    env = resolve_uncertainty(cfg, bl)
+    assert env["ni_source"] == "standard"
+    assert env["kinetic_clips"] is False
+    assert env["zeff_sigma_tier"]["ladder"] == "standard"
+    assert env["ni_from_zeff"] is True          # the standard route's rule
+
+
+def test_the_default_route_resolves_all_everywhere(tmp_path):
+    from bouquet.baseline import resolve_uncertainty
+    ddp, cdf, *_ = NF._build(tmp_path)
+    bl, _ = _read(ddp, cdf)
+    src = _src(ddp, cdf)
+    cfg = BouquetConfig(source=src, solver=SolverConfig(mesh_path="unused"),
+                        generation=GenerationConfig(
+                            kinetic_source="ida_hybrid"),
+                        output_header="unused")
+    assert X.resolved_ni_source(src, "ida_hybrid", baseline=bl) == "all"
+    env = resolve_uncertainty(cfg, bl)
+    assert env["ni_source"] == "all" and env["kinetic_clips"] is True
+    assert env["zeff_sigma_tier"]["ladder"] == "resolved"

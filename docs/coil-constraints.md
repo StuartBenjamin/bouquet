@@ -4,7 +4,9 @@ Forward-mode perturbed equilibria must keep coil currents close to the
 reconstructed baseline to be engineering-realistic. Bouquet enforces this with
 per-coil hard bounds on TokaMaker's QP, applied through a **progressive
 homotopy** that warm-starts each tighter pass from the prior pass's converged
-ψ. Each draw is then tagged `in_spec` against class-specific tolerances; out-of-
+ψ. Each draw is then tagged `in_spec` with the in-spec rule's verdict (the
+configured coil test AND the boundary cut AND the opt-in bands) and
+`coil_drift_in_spec` with the class-specific drift tolerances below; out-of-
 spec draws are still archived.
 
 The full source-cited tolerance budget, bound construction, and homotopy
@@ -141,13 +143,19 @@ without re-running anything:
 | `homotopy_F_lim`, `homotopy_VSC_lim` | The `(drift_F, drift_VSC)` of that pass |
 | `max_F_drift_pct` | Max non-VSC F-coil drift, percent |
 | `max_VSC_drift_pct` | Max VSC channel drift, percent (the metric above) |
-| `in_spec` | `max_F_drift_pct ≤ inspec_F_max` **and** `max_VSC_drift_pct ≤ inspec_VSC_max` |
-| `inspec_F_max`, `inspec_VSC_max` | The thresholds that were applied |
+| `coil_drift_in_spec` | `max_F_drift_pct ≤ inspec_F_max` **and** `max_VSC_drift_pct ≤ inspec_VSC_max` (the legacy drift verdict; never a filter) |
+| `in_spec` | The in-spec rule's verdict: the configured coil test (`filtering.coil_filter`, χ² by default) **and** the boundary cut **and** the opt-in bands -- what until-N counts and `.filter()` marks `selected` |
+| `in_spec_source` | `"inspec_rule"` (what `in_spec` is) |
+| `inspec_F_max`, `inspec_VSC_max` | The drift thresholds that were applied |
 
-`in_spec` is the **legacy** verdict and stays that way whichever filter runs, so
-on a default (χ²) run it means something different from `selected`: `in_spec`
-answers "inside the ±`inspec_*` band", `selected` answers "χ²/ν ≤ `chi2_max` and
-worst \|z\| ≤ `z_max`". Say which one a quoted in-spec fraction came from.
+Since 2026-10-15 `in_spec` is the rule's verdict, the same predicate
+`selected` and the until-N count use (before, it was the ±`inspec_*` drift
+band with no boundary cut, which on a default χ² run disagreed with
+`selected`, systematically so for a floored low-current coil). The drift band
+is kept as `coil_drift_in_spec`. An archive written before carries no
+`in_spec_source`: there `in_spec` is the drift verdict, and
+`read_filter_flags` / `DrawView.flags` report it under both names with
+`in_spec_source` saying so.
 
 `Bouquet.filter()` writes the non-destructive `passes_coil_filter` /
 `passes_boundary_filter` / `selected` flags. Its coil rule is

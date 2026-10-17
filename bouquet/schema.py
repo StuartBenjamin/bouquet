@@ -71,6 +71,105 @@ def migrate_names(h5):
             n += 1
     return n
 
+# ---- the engine draws' magnetic-axis record (additive) ---------------------
+#: Draw-group attrs of an engine draw's archived magnetic axis against the
+#: reconstruction's delivered axis (``bouquet.engine.axis_shift_record``):
+#: ``axis_shift_large`` (bool: the displacement exceeds
+#: ``engine.AXIS_BRANCH_FRAC`` x a -- a DISPLACEMENT flag, not a branch
+#: label), the displacement as a fraction of the reconstruction's minor
+#: radius, its components [mm] and that minor radius [m].  Reported, never a
+#: filter.
+AXIS_SHIFT_LARGE_ATTR = "axis_shift_large"
+AXIS_SHIFT_FRAC_ATTR = "axis_shift_frac_a"
+AXIS_DR_ATTR = "axis_dR_mm"
+AXIS_DZ_ATTR = "axis_dZ_mm"
+AXIS_MINOR_RADIUS_ATTR = "axis_minor_radius_m"
+#: The draw-group attr archives written between the per-draw axis record's
+#: introduction and its rename carry instead of :data:`AXIS_SHIFT_LARGE_ATTR`:
+#: ``"other"`` / ``"same"`` (= large / not).  Read by
+#: :func:`read_axis_entry`; never written.
+AXIS_BRANCH_ATTR_LEGACY = "axis_branch"
+#: Scan-group attrs: how many archived draws carry the axis record
+#: (``n_axis_recorded``) and how many of them have ``axis_shift_large``
+#: (``n_axis_shift_large``); the per-scan bimodality stamp
+#: (``axis_bimodal``, written only when the test could be made, and its
+#: record ``axis_bimodal_json``: method, constants, cluster centres and
+#: counts; ``bouquet.engine.axis_bimodality``).
+AXIS_SHIFT_SCAN_ATTR = "n_axis_shift_large"
+AXIS_RECORDED_SCAN_ATTR = "n_axis_recorded"
+AXIS_BIMODAL_ATTR = "axis_bimodal"
+AXIS_BIMODAL_JSON_ATTR = "axis_bimodal_json"
+#: The scan attr the same archives carry instead of
+#: :data:`AXIS_SHIFT_SCAN_ATTR` (read, never written; removed when a scan is
+#: re-stamped).
+AXIS_OTHER_SCAN_ATTR_LEGACY = "n_axis_other"
+#: ``_baseline`` attr: where the run's bistability evidence comes from when
+#: it is not the reconstruction's own cold re-solve -- ``"draws"``: the
+#: reconstruction's check said "single" (or did not run) but the archived
+#: draws' axis positions are bimodal.
+BISTABILITY_SOURCE_ATTR = "bistability_source"
+
+
+def _attr_str(v):
+    return v.decode() if isinstance(v, bytes) else str(v)
+
+
+def read_axis_entry(grp):
+    """The axis record of one archived draw group *grp* as plain data:
+    ``dict(shift_large, frac_a, dR_mm, dZ_mm, minor_radius_m, source)``, or
+    ``None`` when the draw carries none (a legacy or swb draw).
+
+    Reads the current attrs (:data:`AXIS_SHIFT_LARGE_ATTR` ...) and, for an
+    archive written before the rename, the legacy :data:`AXIS_BRANCH_ATTR_LEGACY`
+    (``"other"`` = large); a component the attrs do not carry is taken from
+    the draw's engine record (``engine["axis"]``), else ``None``."""
+    a = grp.attrs
+    if AXIS_SHIFT_LARGE_ATTR in a:
+        large = bool(a[AXIS_SHIFT_LARGE_ATTR])
+        source = "attrs"
+    elif AXIS_BRANCH_ATTR_LEGACY in a:
+        large = _attr_str(a[AXIS_BRANCH_ATTR_LEGACY]) == "other"
+        source = f"legacy attr {AXIS_BRANCH_ATTR_LEGACY!r}"
+    else:
+        return None
+
+    def _f(k):
+        if k not in a:
+            return None
+        try:
+            return float(a[k])
+        except (TypeError, ValueError):
+            return None
+    out = dict(shift_large=large, frac_a=_f(AXIS_SHIFT_FRAC_ATTR),
+               dR_mm=_f(AXIS_DR_ATTR), dZ_mm=_f(AXIS_DZ_ATTR),
+               minor_radius_m=_f(AXIS_MINOR_RADIUS_ATTR), source=source)
+    if out["dZ_mm"] is None or out["minor_radius_m"] is None:
+        from .engine import read_engine_json
+        try:
+            ax = (read_engine_json(grp) or {}).get("axis") or {}
+        except (ValueError, KeyError, TypeError):
+            ax = {}
+        for k, kk in (("dR_mm", "dR_mm"), ("dZ_mm", "dZ_mm"),
+                      ("minor_radius_m", "minor_radius_m")):
+            if out[k] is None and ax.get(kk) is not None:
+                out[k] = float(ax[kk])
+                out["source"] = source + " + engine record"
+    return out
+
+
+def read_scan_axis_counts(attrs):
+    """``(n_shift_large, n_recorded)`` of a scan group's *attrs* (the
+    current names, else the legacy :data:`AXIS_OTHER_SCAN_ATTR_LEGACY`), or
+    ``None`` when the scan carries no count."""
+    a = dict(attrs)
+    if AXIS_RECORDED_SCAN_ATTR not in a:
+        return None
+    n = a.get(AXIS_SHIFT_SCAN_ATTR, a.get(AXIS_OTHER_SCAN_ATTR_LEGACY))
+    if n is None:
+        return None
+    return int(n), int(a[AXIS_RECORDED_SCAN_ATTR])
+
+
 # ---- the self-consistent bootstrap record (v3) ------------------------------
 #: Group attrs of the per-draw (and ``_baseline``) ``jbs_loop`` block.
 JBS_CONVERGED_ATTR = "jbs_converged"

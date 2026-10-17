@@ -159,10 +159,11 @@ def test_an_error_that_is_not_a_comparison_passes_through_unchanged():
 
 
 def test_the_committed_fixtures_are_stamped():
-    """Both committed goldens carry the digest the policy keys on."""
+    """Every committed golden carries the digest the policy keys on."""
     import os
     here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden")
-    for name in ("golden_manifest.json", "D3Dlike_Hmode_legacy_golden.json"):
+    for name in ("golden_manifest.json", "ids_golden_manifest.json",
+                 "D3Dlike_Hmode_legacy_golden.json"):
         path = os.path.join(here, name)
         if not os.path.isfile(path):
             pytest.skip(f"{name} absent")
