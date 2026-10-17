@@ -172,6 +172,25 @@ class TestBinarySourceDedup:
                 assert "pfile" in hf[f"scan/900/{c}"]            # per-draw kept
 
 
+
+class TestCompressedBlobs:
+    """The g-file / p-file bytes are written gzip-compressed and read back unchanged."""
+    _store = TestBinarySourceDedup._store
+
+    def test_blobs_are_compressed_and_read_back(self, tmp_path):
+        text_pf = b"5 psinorm ne(10^20/m^3) dne/dpsiN\n 0.0 1.0 0.0\n"
+        p = str(tmp_path / "gz.h5")
+        self._store(p, text_pf)
+        with h5py.File(p, "r") as hf:
+            for g in ("_baseline", "0"):
+                for name in ("eqdsk", "pfile"):
+                    ds = hf[f"scan/900/{g}/{name}"]
+                    assert ds.compression == "gzip" and ds.dtype == np.uint8
+        d = bq.BouquetArchive(p)["900"][0]
+        assert d.eqdsk_bytes == b"GEQDSK-BYTES" and d.pfile_bytes == text_pf
+        rec = bq.load_equilibrium(os.path.splitext(p)[0], count=0, scan_key="900")
+        assert rec["pfile_bytes"] == text_pf
+
 class TestDethread:
     """Phase 3: readers accept a run/archive; bad scan_key raises (F1)."""
 
