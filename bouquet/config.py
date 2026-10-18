@@ -1999,6 +1999,10 @@ class GenerationConfig:
     write_ifile: bool = False
     ifile_npsi: int = 129
     ifile_ntheta: int = 257
+    # The archived g-files' R x Z grid (TokaMaker.save_eqdsk nr / nz; the 1-D profiles come on nr
+    # uniform psi_N points), for the baseline and every draw.  Integers >= 2.
+    eqdsk_nr: int = 257
+    eqdsk_nz: int = 257
     # Store each group's g-file / p-file / i-file bytes as a gzip-compressed uint8 array
     # (the g-file ~2.7x smaller) instead of opaque np.void; bytes(ds[()]) reads either.
     compress_file_bytes: bool = False
@@ -2106,7 +2110,7 @@ class GenerationConfig:
         validate_edge_pressure_settings(self.edge_pprime_pin,
                                         self.separatrix_pressure)
         import numbers
-        for _n in ("ifile_npsi", "ifile_ntheta"):
+        for _n in ("ifile_npsi", "ifile_ntheta", "eqdsk_nr", "eqdsk_nz"):
             _v = getattr(self, _n)
             # the OFT sampler divides by n - 1
             if isinstance(_v, bool) or not isinstance(

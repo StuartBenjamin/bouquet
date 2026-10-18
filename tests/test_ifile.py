@@ -288,3 +288,22 @@ def test_compress_file_bytes_reaches_every_blob(tmp_path, monkeypatch):
     assert sorted(b[:2] for b in blobs) == [("0", "eqdsk"), ("0", "ifile"),
                                             ("_baseline", "eqdsk"), ("_baseline", "ifile")]
     assert all(c == "gzip" and t == np.uint8 for *_, c, t in blobs)
+
+
+def test_the_gfile_grid_reaches_every_save(tmp_path, monkeypatch):
+    import pytest
+    import test_draw_rejections as R
+    grids = []
+
+    class _GS(_ifile_gs(R, 9)):
+        def save_eqdsk(self, filename, *a, **k):
+            grids.append((k.get("nr"), k.get("nz")))
+            super().save_eqdsk(filename, *a, **k)
+    monkeypatch.setattr(R, "_FakeGS", _GS)
+    out, rej, _ = R._run(tmp_path, monkeypatch, ["ok"], write_ifile=True,
+                         eqdsk_nr=129, eqdsk_nz=193)
+    assert rej == [] and len(out) == 1
+    assert len(grids) == 2 and set(grids) == {(129, 193)}      # baseline + draw
+    with pytest.raises(ValueError, match="eqdsk_nr"):
+        GenerationConfig(eqdsk_nr=1)
+    assert GenerationConfig().eqdsk_nr == GenerationConfig().eqdsk_nz == 257

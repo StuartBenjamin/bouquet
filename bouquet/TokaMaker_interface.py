@@ -5749,6 +5749,8 @@ def generate_bouquet(
     write_ifile=False,
     ifile_npsi=129,
     ifile_ntheta=257,
+    eqdsk_nr=257,
+    eqdsk_nz=257,
     compress_file_bytes=False,
     # the source orientation stamped with every i-file (issue #68):
     # {"source_current_sign": .., "source_b0_sign": ..} (None: not stamped)
@@ -6862,13 +6864,11 @@ def generate_bouquet(
                         with open(_bl_if_path, 'rb') as _if:
                             _bl_if_bytes = _if.read()
                         os.unlink(_bl_if_path)
-                # nr/nz=257 matches the per-draw save_eqdsk call
-                # inside the per-draw loop further down, so the
-                # baseline and per-draw eqdsks have the same grid
-                # resolution.
+                # the per-draw save_eqdsk's grid, so the baseline and
+                # per-draw eqdsks have the same grid resolution
                 mygs.save_eqdsk(
                     _tmp_eqdsk_path,
-                    nr=257, nz=257,
+                    nr=int(eqdsk_nr), nz=int(eqdsk_nz),
                     truncate_eq=save_truncate_eq,
                     lcfs_pad=psi_pad,
                     # the delivered baseline g-file carries the FULL pressure
@@ -8686,7 +8686,7 @@ def generate_bouquet(
             safe_save_eqdsk(
                 mygs,
                 eqdsk_filename,
-                nr=257, nz=257,
+                nr=int(eqdsk_nr), nz=int(eqdsk_nz),
                 truncate_eq=save_truncate_eq,
                 lcfs_pad=psi_pad,
                 **lcfs_kwargs(_p_lcfs),
