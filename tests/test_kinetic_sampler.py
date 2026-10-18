@@ -254,3 +254,36 @@ def test_the_record_carries_the_resolved_Z_imp_and_its_origin():
     b = _base()
     rec = sample_kinetics(b, make_rng(1), _thermal, _thermal(b)).record()
     assert rec["Z_imp"] is None and rec["Z_imp_origin"] is None
+
+
+def test_a_sigma0_draw_on_a_baseline_below_z_eff_1_is_a_recorded_finding():
+    """Review of #94, P2: at sigma = 0 with the clips on, a baseline whose
+    Z_eff dips below 1 at ONE node is clipped there; the verification's
+    reader turns the counters into the finding baseline_outside_physical_
+    window (a finding: nothing else in the record changes)."""
+    from bouquet.engine_draws import sigma0_clip_finding
+    zb = np.full(PSI.size, 1.8)
+    zb[7] = 0.95                                   # one node below 1
+    b = KineticBase(psi_kin=PSI, ne=NE, te=TE, ni=0.8 * NE, ti=TI,
+                    sigma_ne=0 * NE, sigma_te=0 * TE, sigma_ni=0 * NE,
+                    sigma_ti=0 * TI, n_ls=0.3, t_ls=0.3,
+                    aux_sigmas={"zeff": np.zeros_like(PSI)},
+                    aux_baselines={"zeff": zb},
+                    aux_length_scales={"zeff": 0.4}, Z_imp=Z_IMP, clips=True)
+    d = sample_kinetics(b, make_rng(0), _thermal, _thermal(b))
+    # lifted to the window's lower edge at that node (zeff_bounds' own edge
+    # is >= 1 on a thermal plasma, so it counts as the window clip)
+    assert d.zeff[7] >= 1.0 and d.clipped
+    clips, finding = sigma0_clip_finding(
+        dict(inputs=dict(kinetic_sampler=d.record())))
+    assert clips["zeff_window_lo"] + clips["zeff_floor_1"] == 1
+    assert finding["clips"] == {k: v for k, v in clips.items() if v}
+    assert finding["clips_enabled"] is True
+    # a clean baseline: counted, no finding
+    zb[7] = 1.8
+    d = sample_kinetics(b, make_rng(0), _thermal, _thermal(b))
+    clips, finding = sigma0_clip_finding(
+        dict(inputs=dict(kinetic_sampler=d.record())))
+    assert finding is None and sum(clips.values()) == 0
+    # a record without the counters (the zero_inputs route): nothing counted
+    assert sigma0_clip_finding(dict(inputs=dict(scale=1.0))) == (None, None)

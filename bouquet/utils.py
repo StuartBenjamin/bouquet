@@ -4659,7 +4659,9 @@ GENERATION_PROVENANCE_KEYS = ("n_requested", "n_requested_source",
                               "generation_mode", "n_attempted", "n_stored",
                               "attempt_outcomes_json", "bouquet_version",
                               "inspec_rms_max_mm", "inspec_max_max_mm",
-                              "inspec_cut_source", "merge_partial_json")
+                              "inspec_cut_source", "merge_partial_json",
+                              "draw_wall_budget_s",
+                              "draw_wall_budget_rejections")
 
 
 def stamp_generation_provenance(h5path_or_header, scan_key=None, **attrs):
@@ -4679,8 +4681,13 @@ def stamp_generation_provenance(h5path_or_header, scan_key=None, **attrs):
     against: ``inspec_rms_max_mm`` / ``inspec_max_max_mm`` (the numbers the
     loop applied; absent = no bound) and ``inspec_cut_source`` (``"explicit"``
     / ``"device:<name>"`` / ``"generic"`` / ``"disabled"``, from
-    ``Bouquet.generate``). A fixed-N run records none of the three. A value
-    of None removes the attr.
+    ``Bouquet.generate``). A fixed-N run records none of the three.  Every run
+    records the per-draw wall budget it applied, ``draw_wall_budget_s``
+    (``GenerationConfig.draw_wall_budget_s``; absent = off), and
+    ``draw_wall_budget_rejections`` (the attempts it rejected; each such
+    attempt's outcome in ``attempt_outcomes_json`` is ``"draw_wall_budget"``).
+    A process-parallel merge carries both (one budget for every shard, the
+    rejections summed). A value of None removes the attr.
     """
     h5path = _resolve_h5(h5path_or_header)
     bkey = _scan_key(scan_key)

@@ -412,6 +412,9 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
 
 #: the until-N loop's boundary cut, as stamped on each shard's scan group
 _INLOOP_CUT_KEYS = ("inspec_rms_max_mm", "inspec_max_max_mm", "inspec_cut_source")
+# the per-draw wall budget a shard applied and the attempts it rejected
+# (stamped by Bouquet.generate; an absent budget is "off")
+_WALL_BUDGET_KEYS = ("draw_wall_budget_s", "draw_wall_budget_rejections")
 
 
 def _attr_value(v):
@@ -487,7 +490,10 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
     the generation mode or the shared target, or that counted against
     different boundary cuts, or under different in-spec rules
     (``inspec_rule`` / ``inspec_bands_json``; a shard without the record
-    predates the 2026-10-14 rule), are refused before anything is written.
+    predates the 2026-10-14 rule), or under different per-draw wall budgets
+    (``draw_wall_budget_s``; absent = off), are refused before anything is
+    written. The merged scan carries the one budget and the summed
+    ``draw_wall_budget_rejections`` (None when a shard did not record it).
     The one rule is stamped on the merged scan and recorded in the manifest
     (``inspec_rule``, ``inspec_bands``).
 
@@ -544,6 +550,11 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
         return tuple(_attr_value(a[k]) if k in a else None
                      for k in (INSPEC_RULE_ATTR, INSPEC_BANDS_ATTR))
 
+    def _budget(src):
+        a = (src[base_path] if base_path else src).attrs
+        v = a.get("draw_wall_budget_s", None)
+        return None if v is None else float(_attr_value(v))
+
     def _mode(src):
         rec = _read_worker_record(src, base_path)
         if rec is None:
@@ -555,6 +566,7 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
     cuts = {}
     modes = {}
     rules = {}
+    budgets = {}
     for sp in shard_paths:
         if sp is None:
             continue
@@ -571,6 +583,7 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
             cuts[sp] = _inloop_cut(src)
             modes[sp] = _mode(src)
             rules[sp] = _inspec(src)
+            budgets[sp] = _budget(src)
     if len(set(shard_coords.values())) > 1:
         raise RuntimeError(
             f"shards differ in profile_coord: {shard_coords}. "
@@ -605,6 +618,18 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
             + ". Nothing was merged -- re-filter the old shard(s) with "
             "bouquet.refilter_inspec, or re-run them, under one rule.")
     _rule = next(iter(rules.values()), (None, None))
+    # one per-draw wall budget for every shard: it is an acceptance criterion
+    # (a draw over it is rejected), so shards run under different budgets
+    # (or one with and one without) are different set-ups
+    if len(set(budgets.values())) > 1:
+        raise RuntimeError(
+            "shards ran under different per-draw wall budgets "
+            "(draw_wall_budget_s; None = off): "
+            + "; ".join(f"{os.path.basename(sp)}: {b}"
+                        for sp, b in budgets.items())
+            + ". Nothing was merged -- re-run the shards under one "
+            "GenerationConfig.draw_wall_budget_s.")
+    _budget_s = next(iter(budgets.values()), None)
     present = [(sp, t) for sp, t in targets if t is not None]
     unchecked = [sp for sp, t in targets if t is None]
     if unchecked and present:
@@ -659,7 +684,8 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                                 _raw.decode() if isinstance(_raw, bytes) else str(_raw))
                         except (ValueError, TypeError):
                             pass
-                    for _k in ("n_attempted", "bouquet_version", *_INLOOP_CUT_KEYS):
+                    for _k in ("n_attempted", "bouquet_version", *_INLOOP_CUT_KEYS,
+                               *_WALL_BUDGET_KEYS):
                         if _k in _pa:
                             _wrec[_k] = _attr_value(_pa[_k])
                     workers.append(_wrec)
@@ -778,6 +804,8 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
         # worker since shard attempt indices overlap)
         from .utils import stamp_generation_provenance
         _n_att = [w.get("n_attempted") for w in workers]
+        # the budget's rejections are known only if every shard counted them
+        _n_wb = [w.get("draw_wall_budget_rejections") for w in workers]
         _vers = sorted({str(w["bouquet_version"]) for w in workers
                         if w.get("bouquet_version") is not None})
         stamp_generation_provenance(
@@ -800,6 +828,13 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                                    for w in workers},
             bouquet_version=(",".join(_vers) if _vers else None),
             **dict(zip(_INLOOP_CUT_KEYS, next(iter(_distinct), (None, None, None)))),
+            # the one budget every shard applied (refused above otherwise)
+            # and the attempts it rejected, summed over the shards
+            draw_wall_budget_s=_budget_s,
+            draw_wall_budget_rejections=(
+                int(sum(int(r) for r in _n_wb))
+                if n_unrecorded == 0 and all(r is not None for r in _n_wb)
+                else None),
         )
         if shared:
             _u = manifest["until_n"]
