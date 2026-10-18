@@ -5749,6 +5749,8 @@ def generate_bouquet(
     write_ifile=False,
     ifile_npsi=129,
     ifile_ntheta=257,
+    ifile_profile_derivs=False,
+    ifile_psi_bounds=False,
     eqdsk_nr=257,
     eqdsk_nz=257,
     compress_file_bytes=False,
@@ -6079,7 +6081,9 @@ def generate_bouquet(
             "save_ifile (OFT main since #151); this solver has none -- "
             "update OFT or set write_ifile=False")
     _ifile_kw = dict(npsi=int(ifile_npsi), ntheta=int(ifile_ntheta),
-                     psi_pad=psi_pad, orientation=ifile_orientation)
+                     psi_pad=psi_pad, orientation=ifile_orientation,
+                     profile_derivs=bool(ifile_profile_derivs),
+                     psi_bounds=bool(ifile_psi_bounds))
     # ---- rejected draw attempts: one record each, a summary at the end ----
     _rejections = rejection_log if rejection_log is not None else []
     _masked_at_start = dict(ANCHOR_MASKED_FAILURES)
