@@ -1469,6 +1469,17 @@ class Bouquet(SwbBaseline):
                       f"{_f['W_MHD_MJ']['tokamaker']:.4f} MJ (input "
                       f"{_f['W_MHD_MJ']['input']:.4f}, "
                       f"{_f['W_MHD_MJ']['err_pct']:+.2f}%)")
+        # decision B (2026-10-17): the report-only pressure fidelity, and
+        # its warning beyond the on-axis band (never part of the verdict)
+        _pfid = m.get("pressure_fidelity") or {}
+        if _pfid.get("rel_rms") is not None:
+            print(f"  {'pressure':<12} full p vs input: rel RMS "
+                  f"{_pfid['rel_rms']:.3f}, on axis "
+                  f"{_pfid['axis_rel_err_pct']:+.1f}% (report-only; warns "
+                  f"beyond -{_pfid['warn_band_pct']:g}%)"
+                  + ("  ⚠" if _pfid.get("axis_deficit_flag") else ""))
+            from .baseline import warn_pressure_fidelity
+            warn_pressure_fidelity(_pfid)
         print(f"  {'boundary':<12} RMS {m['boundary_rms_mm']:.2f} mm   "
               f"max {m['boundary_max_mm']:.2f} mm   axis off {m['axis_offset_mm']:.2f} mm")
         print(f"  {'jphi resid':<12} core RMS {m['jphi_core_rms_MA']:.3f}   "

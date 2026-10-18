@@ -1822,8 +1822,26 @@ def _deliver_reconstruction_state(mygs, config, source, result, psi_N, ne_eq,
 PRESSURE_FIDELITY_WARN_PCT = 10.0
 
 
+def warn_pressure_fidelity(record, stacklevel=2):
+    """The UserWarning of a :func:`pressure_fidelity_record` whose on-axis
+    deficit is beyond its band (``axis_deficit_flag``); nothing otherwise.
+    Issued where the reconstruction summary is printed, outside the
+    captured solver output, so it reaches the user."""
+    if not isinstance(record, dict) or not record.get("axis_deficit_flag"):
+        return
+    import warnings
+    warnings.warn(
+        f"pressure fidelity (report-only): the reconstruction's on-axis "
+        f"pressure is {record['axis_rel_err_pct']:+.1f} % against the input "
+        f"g-file's (beyond the {record['warn_band_pct']:g} % band; relative "
+        f"RMS {record['rel_rms']:.3f}): a pressure component of the g-file "
+        "is missing from the kinetics -- e.g. a fast-ion pressure "
+        "(fixed_components.p_fast, or the p-file's pb)",
+        UserWarning, stacklevel=stacklevel + 1)
+
+
 def pressure_fidelity_record(psi_N, p_full, p_input, *,
-                             warn_pct=PRESSURE_FIDELITY_WARN_PCT):
+                             warn_pct=PRESSURE_FIDELITY_WARN_PCT, warn=True):
     """The REPORT-ONLY pressure-fidelity stamp of a g-file-route
     reconstruction (decision B, 2026-10-17): the reconstruction's full
     pressure *p_full* (the solver's, separatrix pressure added back) against
@@ -1831,8 +1849,9 @@ def pressure_fidelity_record(psi_N, p_full, p_input, *,
 
     ``rel_rms`` = RMS(p_full - p_input) / RMS(p_input); ``axis_rel_err_pct``
     = 100 (p_full - p_input) / p_input at the first node.  A UserWarning
-    when the on-axis DEFICIT exceeds *warn_pct* (``axis_deficit_flag``).
-    Never part of the verdict."""
+    (:func:`warn_pressure_fidelity`; with *warn*) when the on-axis DEFICIT
+    exceeds *warn_pct* (``axis_deficit_flag``).  Never part of the
+    verdict."""
     import numpy as np
     pf = np.asarray(p_full, dtype=float)
     pi = np.asarray(p_input, dtype=float)
@@ -1842,20 +1861,14 @@ def pressure_fidelity_record(psi_N, p_full, p_input, *,
     ax = (float(100.0 * (pf[0] - pi[0]) / abs(pi[0])) if pi[0] != 0.0
           else float("nan"))
     flag = bool(np.isfinite(ax) and ax < -float(warn_pct))
-    if flag:
-        import warnings
-        warnings.warn(
-            f"pressure fidelity (report-only): the reconstruction's on-axis "
-            f"pressure is {ax:+.1f} % against the input g-file's (beyond the "
-            f"{warn_pct:g} % band; relative RMS {rel_rms:.3f}): a pressure "
-            "component of the g-file is missing from the kinetics -- e.g. a "
-            "fast-ion pressure (fixed_components.p_fast, or the p-file's pb)",
-            UserWarning, stacklevel=2)
-    return dict(report_only=True, frame="full (p_sep added back)",
-                psi_N_axis=float(np.asarray(psi_N, dtype=float)[0]),
-                p_axis_Pa=float(pf[0]), p_axis_input_Pa=float(pi[0]),
-                rel_rms=rel_rms, axis_rel_err_pct=ax,
-                warn_band_pct=float(warn_pct), axis_deficit_flag=flag)
+    rec = dict(report_only=True, frame="full (p_sep added back)",
+               psi_N_axis=float(np.asarray(psi_N, dtype=float)[0]),
+               p_axis_Pa=float(pf[0]), p_axis_input_Pa=float(pi[0]),
+               rel_rms=rel_rms, axis_rel_err_pct=ax,
+               warn_band_pct=float(warn_pct), axis_deficit_flag=flag)
+    if warn:
+        warn_pressure_fidelity(rec)
+    return rec
 
 
 def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
@@ -1990,9 +2003,12 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
         _ps = np.clip(np.asarray(eqdsk.psi_N, dtype=float), _pad, 1.0 - _pad)
         _p_sol = np.asarray(mygs.get_profiles(psi=_ps.copy())[3], dtype=float)
         _p_sep = float((_edge_rec or {}).get("p_sep_applied") or 0.0)
+        # warned where the summary is printed (Bouquet.prepare_baseline),
+        # outside the captured solver output
         _pfid = pressure_fidelity_record(
             _ps, _p_sol + _p_sep,
-            np.interp(_ps, _psiN_eq, np.asarray(eqdsk.pres, dtype=float)))
+            np.interp(_ps, _psiN_eq, np.asarray(eqdsk.pres, dtype=float)),
+            warn=False)
     except Exception as exc:     # report-only: recorded, never raised
         _pfid = dict(report_only=True,
                      error=f"{type(exc).__name__}: {exc}")

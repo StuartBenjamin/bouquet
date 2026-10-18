@@ -121,6 +121,14 @@ def test_the_pressure_fidelity_stamp_reports_and_warns_never_gates():
     assert r["rel_rms"] == pytest.approx(0.63, rel=1e-9)
     assert r["warn_band_pct"] == B.PRESSURE_FIDELITY_WARN_PCT == 10.0
     # within the band (and an excess, not a deficit): recorded, no warning
+    # warn=False (inside the captured reconstruction): recorded, the warning
+    # left to warn_pressure_fidelity where the summary is printed
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        r = B.pressure_fidelity_record(psi, 0.37 * p_in, p_in, warn=False)
+    assert r["axis_deficit_flag"] is True
+    with pytest.warns(UserWarning, match="fixed_components.p_fast"):
+        B.warn_pressure_fidelity(r)
     for f in (0.95, 1.30):
         with warnings.catch_warnings():
             warnings.simplefilter("error")
