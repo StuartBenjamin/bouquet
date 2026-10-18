@@ -93,6 +93,21 @@ MSE_JACOBIAN_MAX_REFRESHES = 3
 #: separation of that test's two clusters.  Never an acceptance criterion:
 #: nothing is accepted, refused or filtered on it.
 AXIS_BRANCH_FRAC = 0.01
+#: The VERTICAL-RUNAWAY label of a capped homotopy stage
+#: (:func:`vertical_runaway_record`; owner decision 2026-10-16): a stage
+#: whose solve stopped at the iteration cap with the vertical-control channel
+#: at its homotopy ``#VSC`` bound (the pair's anti-series drift; the
+#: homotopy's own saturation fraction, ``COIL_SATURATION_FRACTION`` of the
+#: bound) AND the magnetic axis more than this fraction of the minor radius
+#: from the reconstruction's delivered axis VERTICALLY (``|dZ|`` of
+#: :func:`axis_shift_record`; a radial excursion does not count) is labelled
+#: ``"vertical_runaway"`` in its cap-event record.  0.1 a: ten times the
+#: displacement flag :data:`AXIS_BRANCH_FRAC` and above the several % of a
+#: that kinetic draws move the axis continuously, while the runaway the label
+#: names moved the axis by about one minor radius (the 2026-10 investigation:
+#: the axis Z ran from -0.016 m to +/-0.7-1.0 m with the channel on its
+#: bound).  A LABEL: nothing is accepted, refused or filtered on it.
+VERTICAL_RUNAWAY_AXIS_FRAC = 0.1
 #: The per-scan bimodality test of the archived engine draws' magnetic-axis
 #: positions (:func:`axis_bimodality`; owner decision 2026-10-15): the draws'
 #: axis Z (relative to the reconstruction's delivered axis) sorted, split at
@@ -3000,6 +3015,16 @@ def engine_closure_health(eng, where):
     return ch
 
 
+def partition_probe_on(bq) -> bool:
+    """Whether the reconstruction measures the report-only boundary partition
+    (``SolverConfig.boundary_partition_probe``, default on;
+    :mod:`bouquet.boundary_balance`): only when the solver geometry carries
+    an isoflux set."""
+    geom = getattr(bq, "_geom", None)
+    return (bool(getattr(bq.config.solver, "boundary_partition_probe", True))
+            and geom is not None and getattr(geom, "iso_pts", None) is not None)
+
+
 def _geometry_isoflux(geom):
     """The isoflux pattern of the solver geometry ``geom`` (a
     :class:`bouquet.solver_geometry.CaseGeometry`, whose ``record()`` is the
@@ -3356,6 +3381,46 @@ def axis_shift_record(axis, reference) -> dict:
     return rec
 
 
+def vertical_runaway_record(vsc_bound_frac, axis) -> dict:
+    """The vertical-runaway label of a capped homotopy stage
+    (:data:`VERTICAL_RUNAWAY_AXIS_FRAC`): *vsc_bound_frac* is the
+    vertical-control channel's excursion (the pair's anti-series drift,
+    :func:`bouquet.TokaMaker_interface._vsc_bound_fraction_now`) as a
+    fraction of the stage's ``#VSC`` bound (1 = at it; ``None`` unknown),
+    *axis* the stage's :func:`axis_shift_record`.  ``label`` is
+    ``"vertical_runaway"`` when the channel is at its bound (``>=
+    COIL_SATURATION_FRACTION``) AND the axis is displaced VERTICALLY by more
+    than the threshold (``|dZ| > VERTICAL_RUNAWAY_AXIS_FRAC x a``; a radial
+    excursion does not count), ``None`` otherwise (also when either is
+    unknown).  The total displacement is reported beside it.  A label,
+    never a gate."""
+    from .TokaMaker_interface import COIL_SATURATION_FRACTION
+    ax = axis or {}
+    frac_a = ax.get("displacement_frac_a")
+    _dz, _a = ax.get("dZ_mm"), ax.get("minor_radius_m")
+    frac_z = (None if _dz is None or _a is None or not float(_a) > 0.0
+              else abs(float(_dz)) / 1e3 / float(_a))
+    at_bound = (None if vsc_bound_frac is None
+                else bool(float(vsc_bound_frac) >= COIL_SATURATION_FRACTION))
+    displaced = (None if frac_z is None
+                 else bool(frac_z > VERTICAL_RUNAWAY_AXIS_FRAC))
+    return dict(label=("vertical_runaway" if (at_bound and displaced)
+                       else None),
+                vsc_bound_frac=(None if vsc_bound_frac is None
+                                else float(vsc_bound_frac)),
+                vsc_at_bound=at_bound,
+                axis_displacement_frac_a=(None if frac_a is None
+                                          else float(frac_a)),
+                axis_dZ_frac_a=frac_z,
+                axis_dZ_mm=ax.get("dZ_mm"),
+                threshold_frac_a=float(VERTICAL_RUNAWAY_AXIS_FRAC),
+                rule=("vertical_runaway: the vertical-control channel (the "
+                      "pair's anti-series drift) at its homotopy #VSC bound "
+                      "and the magnetic axis more than threshold_frac_a x a "
+                      "VERTICALLY (|dZ|) from the delivered axis; a label, "
+                      "never a gate"))
+
+
 def axis_bimodality(dZ_mm, minor_radius_m=None, reference_Z=None) -> dict:
     """The per-scan bimodality test (:data:`AXIS_BIMODAL_METHOD`) of the
     archived draws' axis displacements *dZ_mm* [mm, relative to the
@@ -3697,16 +3762,19 @@ def prepare_engine_baseline(bq):
                 raise TypeError(f"unknown baseline source type "
                                 f"{type(src).__name__}")
             mse = (c0.rows.get("mse") if "mse" in s["rows"] else None)
-            backend = TokaMakerBackend(
-                mygs, c0, psi_pad=psi_pad, li_kind="li_3",
-                chords=(None if mse is None else mse["chords"]),
-                edge_pressure=s["edge_pressure"],
-                edge_taper=s["edge_taper"],
-                coord=getattr(ad, "coord", "psi_n"),
-                eps_definition=s.get("eps_definition"),
-                # the reconstruction runs under the solver's own cap
-                # (engine_draw_solve_maxits caps the DRAWS only)
-                maxits=None)
+
+            def _backend(maxits, _c=c0, _mse=mse, _pp=psi_pad, _ad=ad):
+                return TokaMakerBackend(
+                    mygs, _c, psi_pad=_pp, li_kind="li_3",
+                    chords=(None if _mse is None else _mse["chords"]),
+                    edge_pressure=s["edge_pressure"],
+                    edge_taper=s["edge_taper"],
+                    coord=getattr(_ad, "coord", "psi_n"),
+                    eps_definition=s.get("eps_definition"),
+                    maxits=maxits)
+            # the reconstruction runs under the solver's own cap
+            # (engine_draw_solve_maxits caps the DRAWS only)
+            backend = _backend(None)
             # the coil regularisation this reconstruction solves under
             # (recorded; every draw installs exactly it)
             coil_reg = reconstruction_coil_reg(mygs)
@@ -3761,6 +3829,28 @@ def prepare_engine_baseline(bq):
         _bis = check_bistability(bq, backend, cold_start)
         if isinstance(getattr(bl, "engine", None), dict):
             bl.engine["bistability"] = _bis
+    # the boundary constraint's PARTITION at the installed total (report only;
+    # boundary_balance): ONE capped re-solve with the pressure x 1.02 from the
+    # delivered state, which is restored afterwards (with the reconstruction's
+    # coil regularisation); it never changes the total
+    if bq._geom is not None and getattr(bq._geom, "iso_balance", None) is not None:
+        from .solver_geometry import with_partition
+        if partition_probe_on(bq):
+            from .boundary_balance import measure_partition
+            _part = measure_partition(
+                bq, bq._engine_run["engine"].state.request, c0.pressure,
+                _backend, psi_pad=psi_pad, maxits=s["draw_solve_maxits"],
+                coil_reg_terms=coil_reg["terms"],
+                geom_record=bq._geom.record())
+        else:
+            _part = dict(status="off", report_only=True, reason=(
+                "SolverConfig.boundary_partition_probe=False"))
+        bq._geom = with_partition(bq._geom, _part)
+    if isinstance(getattr(bl, "engine", None), dict):
+        # how the boundary constraint's total was chosen (constant, override,
+        # as given) and the partition measured at it
+        _bal = getattr(bq._geom, "iso_balance", None)
+        bl.engine["boundary_balance"] = None if _bal is None else dict(_bal)
     if bl.reconstruction_metrics is not None:
         bq._flag_nonconverged_recon_loop()
         bq._print_reconstruction_summary()

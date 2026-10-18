@@ -43,6 +43,24 @@ def test_it_is_a_legacy_path_self_consistent_run(doc):
     assert loop is not None and loop["converged"], loop
 
 
+def test_it_is_the_gfile_golden_on_the_legacy_path(doc):
+    """The g-file golden's recipe (``tests/golden/regenerate_golden_run.py``)
+    on ``reconstruction_engine="legacy"``: the synthetic g-file + IDA-layout
+    profile fixtures by basename, 20 attempts at seed 12345, one thread."""
+    from bouquet.config import BouquetConfig, ReconstructionSource
+    sys.path.insert(0, _GOLDEN_DIR)
+    import regenerate_golden_run as rgr
+    cfg = BouquetConfig.from_json(doc["config_json"])
+    assert isinstance(cfg.source, ReconstructionSource)
+    assert cfg.source.geqdsk_path == rgr.GFILE
+    assert cfg.source.profiles_path == rgr.PROFILES
+    assert cfg.solver.mesh_path == rgr.MESH
+    gen = cfg.generation
+    assert gen.n_equils == rgr.N_DRAWS and gen.seed == rgr.SEED
+    assert gen.n_inspec_target is None
+    assert cfg.solver.nthreads == rgr.NTHREADS
+
+
 def test_it_says_what_built_it(doc):
     prov = doc["provenance"]
     assert prov["bouquet"].get("commit"), prov["bouquet"]

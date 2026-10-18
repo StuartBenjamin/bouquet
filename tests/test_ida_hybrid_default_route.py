@@ -284,10 +284,12 @@ def test_auto_without_zeff_information_is_standard_everywhere(tmp_path):
     assert X.resolved_ni_source(src, "ida_hybrid") == "all"
     assert X.resolved_ni_source(src, "ida_hybrid", baseline=bl) == "standard"
     assert X.ida_ion_route_on(src, None, "ida_hybrid", baseline=bl) is False
-    assert X.kinetic_clips_on(cfg, baseline=bl) is False
+    # the clips are on by default on every route (owner decision
+    # 2026-10-17), so the downgrade to "standard" no longer turns them off
+    assert X.kinetic_clips_on(cfg, baseline=bl) is True
     env = resolve_uncertainty(cfg, bl)
     assert env["ni_source"] == "standard"
-    assert env["kinetic_clips"] is False
+    assert env["kinetic_clips"] is True
     assert env["zeff_sigma_tier"]["ladder"] == "standard"
     assert env["ni_from_zeff"] is True          # the standard route's rule
 

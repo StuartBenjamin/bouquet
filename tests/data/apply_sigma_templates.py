@@ -48,6 +48,8 @@ from bouquet.uncertainties import sigma_template  # noqa: E402
 #: the template of each fixture's phase (FIXTURE_SPEC.md: no pedestal ->
 #: L-mode; pedestal still building -> ramp; developed pedestal -> H-mode)
 IDA_REGIME = {"diiid_profs_synthetic.cdf": "ramp",       # 1.2 s, pedestal forming
+              # the same kinetic fit on the q of g_synthetic_pfast.geqdsk (the hybrid-route pair)
+              "diiid_profs_synthetic_pfast.cdf": "ramp",
               "ida_synthetic_lmode.cdf": "lmode"}
 DD_REGIME = {0.7: "lmode",              # ramp-up L-mode
              1.1: "ramp",               # L-H transition
