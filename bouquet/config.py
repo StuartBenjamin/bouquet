@@ -374,8 +374,10 @@ class ImasSource:
     # thermal+fast Z_eff where the dd's convention counts the fast ions.
     # False (default; owner decision A1, 2026-10-17): on the plain dd route
     # the dd's own TOTAL Z_eff (the zeff dataset, else the all-ion sum over
-    # n_e); the ida_hybrid dd sub-routes keep the thermal-only Z_eff
-    # recomputed from the dd's thermal ion densities.
+    # n_e), and the same on the ida_hybrid ni_source="standard" sub-route
+    # (owner decision 2026-10-18); zeff_from_fuse=True on a measured
+    # ida_hybrid route keeps the thermal-only Z_eff recomputed from the dd's
+    # thermal ion densities.
     zeff_fast_ions: bool = False
     # ida_hybrid on a measured ni_source: subtract the dd's fast-ion density
     # equivalent from the IDA (total) n_i (bouquet.experimental.
@@ -813,11 +815,15 @@ class UncertaintyConfig:
     # GRADUATED["ida_ion_route"]) "auto"/"measured" take the IDA-resolved envelope
     # (read_ida walks VB+CER > CER > VB, the route disagreement folded in)
     # and "carbon" is a single-route override.
-    # The measured tiers are eligible only when the Z_eff baseline came from
-    # the sigma .cdf itself: the reconstruction source's own profiles file
-    # (or, on a measured route only, ImasSource.ida_path).  A p-file
-    # or IMAS/FUSE Z_eff baseline, or a different .cdf vintage named via
-    # ida_path, is refused: it would mix channels.  That file
+    # The measured tiers are eligible only when the Z_eff baseline measures
+    # the same total Z_eff of the discharge the sigma .cdf measured: the
+    # reconstruction source's own profiles file, ImasSource.ida_path on a
+    # measured route, and ImasSource.ida_path on the ida_hybrid
+    # ni_source="standard" sub-route, whose baseline is the dd's TOTAL Z_eff
+    # (owner decision 2026-10-18; the label says "on a dd-derived total-Z_eff
+    # baseline").  A p-file Z_eff baseline, the plain dd route's (FUSE
+    # kinetics), or a different .cdf vintage named via ida_path, is refused:
+    # it would mix channels.  That file
     # test compares RESOLVED paths (expanduser + realpath, samefile when both
     # exist), so a relative-vs-absolute, '~'-prefixed, trailing-slash or
     # symlinked spelling of the same file stays eligible.

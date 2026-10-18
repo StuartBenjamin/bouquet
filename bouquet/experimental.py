@@ -85,7 +85,9 @@ REGISTRY = {
             "Default (owner decision A1, 2026-10-17): the dd's own TOTAL "
             "Z_eff -- the zeff dataset when it agrees with the all-ion sum "
             "over n_e from the dd's densities (within 5 %), else that sum -- "
-            "with no classification (io.imas._dd_total_zeff)."),
+            "with no classification (io.imas._dd_total_zeff), on the plain "
+            "dd route and (owner decision 2026-10-18) the ida_hybrid "
+            "ni_source='standard' sub-route."),
         enabled_by=["ImasSource.zeff_fast_ions=True"],
         introduced="PR #56, 1.4.0",
         validation_todo=[

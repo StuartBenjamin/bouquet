@@ -843,17 +843,21 @@ class TestDefaultsArePre56:
 
     def test_ida_hybrid_keeps_the_dd_zeff_and_derives_ni_from_it(self, tmp_path):
         """ida_hybrid with the explicit dd route (ni_source="standard"; the
-        default before 2026-10): n_e/T_e/T_i from IDA; Z_eff the dd's thermal
-        one; n_i = n_e(IDA) (Z - Z_eff)/(Z - 1); no beam subtraction."""
+        default before 2026-10): n_e/T_e/T_i from IDA; Z_eff the dd's TOTAL
+        one (owner decision 2026-10-18; no stored zeff here, so the all-ion
+        sum over n_e), zeff_includes_fast following the beam; n_i = n_e(IDA)
+        (Z - Z_eff,th)/(Z - 1) from the THERMAL numerator; no beam
+        subtraction."""
         from bouquet.physics import main_ion_density_from_zeff
         ddp, cdf, *_ = _build(tmp_path)
         bl = read_imas_baseline(
             ImasSource(ids_path=ddp, time=1.0, ida_path=cdf, impurity_Z=Z_IMP,
                        ni_source="standard"),
             kinetic_source="ida_hybrid")
-        _, zth = self._dd_thermal(ddp)
-        np.testing.assert_array_equal(bl.Zeff, zth)
-        assert bl.zeff_includes_fast is False
+        ne_dd, zth = self._dd_thermal(ddp)
+        assert bl.z2_fast is not None
+        np.testing.assert_array_equal(bl.Zeff, zth + bl.z2_fast / ne_dd)
+        assert bl.zeff_includes_fast is True
         ida = bl.aux["ida_profiles"][1]
         assert ida.zeff_provenance["ni_source"] == "standard"
         np.testing.assert_array_equal(bl.ne, ida.ne)
@@ -864,26 +868,28 @@ class TestDefaultsArePre56:
         assert bl.li_metrics["zeff_dd_provenance"]["baseline_zeff_from"] == "dd"
 
     def test_the_hybrid_standard_draw_is_centred_on_the_base(self, tmp_path):
-        """C3 (review of A1): on ida_hybrid with ni_source="standard" the
-        base Z_eff is the dd's thermal numerator; the Z_eff channel is drawn
-        around that same array (aux['zeff']), not the dd's stored (total)
-        zeff, and the stamp records both definitions.  The measured route
-        keeps the IDA Z_eff as base and centre."""
+        """C3 (review of A1) and the owner decision of 2026-10-18: on
+        ida_hybrid with ni_source="standard" the base Z_eff is the dd's TOTAL
+        Z_eff (here the stored dataset, which matches the total), the Z_eff
+        channel is drawn around that same array (aux['zeff']), and the stamp
+        records it.  The measured route keeps the IDA Z_eff as base and
+        centre."""
         ddp, cdf, *_ = _build(tmp_path, dd_mutate=_store_zeff("all"))
         _, zth = self._dd_thermal(ddp)
         stored = np.asarray(json.load(open(ddp))["core_profiles"][
             "profiles_1d"][0]["zeff"], dtype=float)
-        assert stored[0] > zth[0] + 0.1            # a real two-base split
+        assert stored[0] > zth[0] + 0.1            # total and thermal differ
         bl = read_imas_baseline(
             ImasSource(ids_path=ddp, time=1.0, ida_path=cdf, impurity_Z=Z_IMP,
                        ni_source="standard"),
             kinetic_source="ida_hybrid")
-        np.testing.assert_array_equal(bl.Zeff, zth)
+        np.testing.assert_array_equal(bl.Zeff, stored)
         np.testing.assert_array_equal(bl.aux["zeff"], bl.Zeff)
+        assert bl.zeff_includes_fast is True
         d = bl.li_metrics["zeff_dd_provenance"]["zeff_definition"]
-        assert d["definition"] == "thermal-numerator"
-        assert d["draw_centre"] == dict(definition="thermal-numerator",
-                                        source="from_densities")
+        assert (d["definition"], d["source"], d["matches"]) == (
+            "total", "dataset", "total")
+        assert d["draw_centre"] == dict(definition="total", source="dataset")
         assert d["draw_centred_on_base"] is True
         # the measured route: unchanged, IDA Z_eff as base and centre
         bm = read_imas_baseline(

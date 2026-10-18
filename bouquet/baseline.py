@@ -446,64 +446,139 @@ def _same_path(a, b) -> bool:
         return False
 
 
+#: The pairing reason of the one measured-envelope pairing whose baseline is
+#: not from the sigma file itself (owner decision 2026-10-18): the
+#: ``ida_hybrid`` ``ni_source="standard"`` sub-route.  Recorded in
+#: ``zeff_sigma_tier["pairing"]["reason"]``.
+ZEFF_PAIRING_HYBRID_DD_TOTAL = (
+    "ida_hybrid with ni_source='standard': the Z_eff baseline is the dd's "
+    "TOTAL Z_eff (all ions, fast included, over n_e) and the envelope is the "
+    "IDA file's measured one -- two measurements of the same total Z_eff of "
+    "the same discharge, paired by file identity (owner decision "
+    "2026-10-18); the draw is conditional at the dd's fixed beam fraction")
+
+#: Label suffix of a measured IDA tier on that sub-route.
+ZEFF_PAIRING_HYBRID_DD_TOTAL_LABEL = "on a dd-derived total-Z_eff baseline"
+
+
+def hybrid_dd_total_zeff_subroute(source, kinetic_source=None,
+                                  baseline=None):
+    """Is this the ``ida_hybrid`` ``ni_source="standard"`` sub-route whose
+    Z_eff baseline is the dd's TOTAL Z_eff (owner decision 2026-10-18)?
+
+    :class:`~bouquet.config.ImasSource`; IDA kinetics (the *baseline*'s
+    recorded ``kinetics_route["ida"]`` when it has one, else
+    ``kinetic_source="ida_hybrid"`` with an ``ida_path``); the resolved
+    ``ni_source`` is ``"standard"``; the EXPERIMENTAL classification
+    (``zeff_fast_ions``) off; and, when the *baseline* records its Z_eff
+    definition, that definition is ``"total"`` (a baseline read before the
+    decision carries the thermal numerator and is not this sub-route)."""
+    from .config import ImasSource
+    from .experimental import (IDA_ION_ROUTES, baseline_kinetics_route,
+                               fuse_zeff_fast_ions_on, resolved_ni_source)
+    if not isinstance(source, ImasSource) or fuse_zeff_fast_ions_on(source):
+        return False
+    if resolved_ni_source(source, kinetic_source,
+                          baseline=baseline) in IDA_ION_ROUTES:
+        return False
+    kr = baseline_kinetics_route(baseline)
+    if kr is not None and "ida" in kr:
+        ida = bool(kr["ida"])
+    else:
+        ida = bool(kinetic_source == "ida_hybrid"
+                   and getattr(source, "ida_path", None))
+    if not ida:
+        return False
+    lm = getattr(baseline, "li_metrics", None) if baseline is not None \
+        else None
+    zd = (((lm or {}).get("zeff_dd_provenance") or {})
+          .get("zeff_definition") if isinstance(lm, dict) else None)
+    if isinstance(zd, dict) and zd.get("definition") is not None:
+        return zd.get("definition") == "total"
+    return True
+
+
 def zeff_sigma_eligibility(source, ida_path, kinetic_source=None,
-                           baseline=None):
+                           baseline=None, with_pairing=False):
     """May a measured Z_eff envelope be paired with this baseline?
 
     Returns ``(eligible, reason)``.  ``reason`` is ``""`` when eligible and a
     human-readable explanation otherwise, so a refusal can be WARNED about
     and RECORDED instead of silently costing the run its measured tiers.
+    With ``with_pairing=True`` a third element is returned: ``None`` for
+    the same-file pairing, and for the ``ida_hybrid`` ``ni_source=
+    "standard"`` sub-route a dict ``{"case", "reason"}`` naming that
+    sub-route's own pairing (:data:`ZEFF_PAIRING_HYBRID_DD_TOTAL`).
 
     The measured tiers are absolute sigmas from one IDA ``.cdf`` and pair
-    only with a Z_eff baseline from that same file: the source's own
-    ``profiles_path`` (:class:`ReconstructionSource`) or, on the measured
-    ``ni_source`` routes only (resolved with ``kinetic_source``:
-    :func:`bouquet.experimental.resolved_ni_source`), ``ida_path``
+    with a Z_eff baseline that measures the same total Z_eff of the same
+    discharge: the source's own ``profiles_path``
+    (:class:`ReconstructionSource`); on the measured ``ni_source`` routes
+    (resolved with ``kinetic_source``:
+    :func:`bouquet.experimental.resolved_ni_source`) ``ida_path``
     (:class:`ImasSource`; ``zeff_from_fuse=True`` stays eligible, the
-    envelope carried absolute).  Refusals: no IDA file configured; an
-    :class:`ImasSource` with ``ni_source="standard"`` (its Z_eff is the
-    dd's); the source declares no ``.cdf``; different files (compared
-    resolved, by :func:`_same_path`).
+    envelope carried absolute); and, on the ``ida_hybrid``
+    ``ni_source="standard"`` sub-route (:func:`hybrid_dd_total_zeff_subroute`,
+    owner decision 2026-10-18), ``ida_path`` too -- the baseline there is the
+    dd's TOTAL Z_eff of the discharge whose kinetics that file supplies, so
+    the file's Z_eff envelope is the measured sigma of the same quantity.
+    Refusals: no IDA file configured; an :class:`ImasSource` on the plain dd
+    route (FUSE kinetics: its Z_eff is the dd's, with no IDA file in the
+    kinetics) or under the EXPERIMENTAL classification; the source declares
+    no ``.cdf``; different files (compared resolved, by :func:`_same_path`)
+    -- the file test applies to the sub-route exactly as to the others.
     """
     import os
 
     from .config import ImasSource, ReconstructionSource
 
+    def _out(ok, why, pairing=None):
+        return (ok, why, pairing) if with_pairing else (ok, why)
+
     if ida_path is None:
-        return False, "no IDA sigma file is configured (no ladder applies)"
+        return _out(False,
+                    "no IDA sigma file is configured (no ladder applies)")
     ida_name = os.path.basename(_norm_path(ida_path)) or str(ida_path)
 
     from .experimental import IDA_ION_ROUTES, resolved_ni_source
+    pairing = None
     if isinstance(source, ReconstructionSource):
         own, own_kind = str(getattr(source, "profiles_path", "") or ""), "profiles file"
+    elif hybrid_dd_total_zeff_subroute(source, kinetic_source,
+                                       baseline=baseline):
+        # the sub-route's own allowed case: same file test below
+        own, own_kind = str(getattr(source, "ida_path", "") or ""), "ida_path"
+        pairing = {"case": "ida_hybrid ni_source='standard'",
+                   "reason": ZEFF_PAIRING_HYBRID_DD_TOTAL}
     elif (isinstance(source, ImasSource)
           and resolved_ni_source(source, kinetic_source, baseline=baseline)
           not in IDA_ION_ROUTES):
-        # the dd route (ni_source="standard", or "auto" off ida_hybrid): the
-        # IMAS Z_eff is the dd's, never the IDA one
-        return False, (
+        # the plain dd route (FUSE kinetics) or the EXPERIMENTAL
+        # classification: the IMAS Z_eff is the dd's, and no IDA file
+        # measured that discharge's kinetics for this run
+        return _out(False, (
             "the Z_eff baseline comes from the IMAS/FUSE source rather than "
             f"from {ida_name}; pairing a FUSE Z_eff with an IDA-measured "
-            "envelope would mix channels")
+            "envelope would mix channels"))
     elif isinstance(source, ImasSource):
         own, own_kind = str(getattr(source, "ida_path", "") or ""), "ida_path"
     else:
-        return False, (
+        return _out(False, (
             f"source type {type(source).__name__} declares no IDA file, so "
-            f"its Z_eff baseline did not come from {ida_name}")
+            f"its Z_eff baseline did not come from {ida_name}"))
     own_norm = _norm_path(own)
     if not own_norm.endswith(".cdf"):
-        return False, (
+        return _out(False, (
             f"the source's own {own_kind} is not an IDA .cdf "
             f"({os.path.basename(own_norm) or '<unset>'}), so its Z_eff "
-            f"baseline did not come from {ida_name}")
+            f"baseline did not come from {ida_name}"))
     if not _same_path(ida_path, own):
-        return False, (
+        return _out(False, (
             f"the sigma file ({ida_name}) is a genuinely different file "
             f"from the source's own {own_kind} "
             f"({os.path.basename(own_norm)}) -- compared after expanduser + "
-            f"realpath, so this is a real mismatch, not a path spelling")
-    return True, ""
+            f"realpath, so this is a real mismatch, not a path spelling"))
+    return _out(True, "", pairing)
 
 
 def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
@@ -511,7 +586,7 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
                           carbon_sigma=None, carbon_source="none",
                           ineligible_reason="", ida_in_play=False,
                           ladder="standard", imas_sigma=None,
-                          imas_source="none", psi_N=None):
+                          imas_source="none", psi_N=None, pairing=None):
     """The Z_eff envelope ladder: highest-fidelity tier available per file.
 
     Returns ``(sigma_array, label, meta)``.
@@ -582,6 +657,15 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
 
     A chosen envelope whose median fraction of |Zeff| exceeds 25 % draws a
     separate report-only warning naming the alternatives.
+
+    ``pairing`` (the third element of :func:`zeff_sigma_eligibility` with
+    ``with_pairing=True``): ``None`` for the same-file pairing, which leaves
+    the label and ``meta`` exactly as without it.  For the ``ida_hybrid``
+    ``ni_source="standard"`` sub-route (owner decision 2026-10-18) a dict:
+    a measured IDA tier's label gains
+    :data:`ZEFF_PAIRING_HYBRID_DD_TOTAL_LABEL`, and ``meta["pairing"]``
+    records the dict plus ``tier``, ``width_source`` (the label) and
+    ``measured`` (False on the assumed fallback, which stays loud).
     """
     import warnings
 
@@ -706,6 +790,10 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
         provenance = scalar_prov
         label = scalar_label + ("" if zeff_sigma_source == "scalar"
                                 else " (FALLBACK -- an ASSUMED width)")
+    if pairing is not None and tier in ("carbon-propagated", _measured_tier):
+        # the dd-derived total-Z_eff baseline of the hybrid standard
+        # sub-route: the label says what the measured width is paired with
+        label = f"{label} {ZEFF_PAIRING_HYBRID_DD_TOTAL_LABEL}"
 
     # ONE warning, naming the tier chosen, the tiers skipped and why.  It
     # fires whenever an IDA file was actually in play (so a path mismatch or
@@ -751,6 +839,10 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
         "median_fraction_of_zeff": _frac,
         "assumed_default": assumed,
     }
+    if pairing is not None:
+        meta["pairing"] = dict(
+            pairing, tier=tier, width_source=label,
+            measured=tier in ("carbon-propagated", _measured_tier))
     return env, label, meta
 
 
@@ -1163,8 +1255,26 @@ def resolve_uncertainty(config, baseline) -> dict:
         # relative-vs-absolute, '~'-prefixed, trailing-slash or symlinked
         # spelling of the very same file.  It returns the REASON as well as
         # the verdict so the fallback can be warned about and recorded.
-        _zeff_baseline_is_ida, _zeff_inelig = zeff_sigma_eligibility(
-            src, ida_path, kinetic_source=_kin_src, baseline=baseline)
+        _zeff_baseline_is_ida, _zeff_inelig, _z_pair = zeff_sigma_eligibility(
+            src, ida_path, kinetic_source=_kin_src, baseline=baseline,
+            with_pairing=True)
+        if _z_pair is not None:
+            # the ida_hybrid ni_source="standard" sub-route (owner decision
+            # 2026-10-18): what the measured width is paired with, recorded
+            _zd = (((getattr(baseline, "li_metrics", None) or {})
+                    .get("zeff_dd_provenance") or {})
+                   .get("zeff_definition") or {})
+            _z_pair = dict(
+                _z_pair,
+                base_definition=dict(
+                    definition=_zd.get("definition", "total"),
+                    source=_zd.get("source"), of="the dd"),
+                draw_centre=("the base (the dd's total Z_eff)"
+                             if "zeff" not in (unc.aux_baselines or {})
+                             else "explicit aux_baselines['zeff']"),
+                conditional=("conditional at fixed beam fraction: the dd's "
+                             "fast-ion charge moments (z_fast, z2_fast) "
+                             "are held fixed in every draw"))
         _z_env, _z_label, _z_meta = resolve_zeff_envelope(
             getattr(unc, "zeff_sigma_source", "auto"),
             unc.zeff_scalar_sigma,
@@ -1183,6 +1293,7 @@ def resolve_uncertainty(config, baseline) -> dict:
                         if "zeff" not in (unc.aux_baselines or {}) else None),
             imas_source=_imas_label("zeff"),
             psi_N=_psi_tpl,
+            pairing=_z_pair,
         )
         user_sigmas["zeff"] = _z_env
         # which ladder ran: the run's one resolved route

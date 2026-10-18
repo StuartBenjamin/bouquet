@@ -553,7 +553,7 @@ not an experimental feature.)
 
 #### `fuse_zeff_fast_ions` (experimental; introduced PR #56, 1.4.0)
 
-On the FUSE (IMAS) path, classify the dd's stored Z_eff against the thermal-only and the thermal+fast numerators (io.imas._dd_zeff) and, where it counts the fast ions (or when no Z_eff is stored and the dd carries a beam), hand the bootstrap Z_eff_th + z2_fast/n_e with Baseline.zeff_includes_fast=True (a stored Z_eff classified thermal-only: the thermal-only Z_eff).  Default (owner decision A1, 2026-10-17): the dd's own TOTAL Z_eff -- the zeff dataset when it agrees with the all-ion sum over n_e from the dd's densities (within 5 %), else that sum -- with no classification (io.imas._dd_total_zeff).
+On the FUSE (IMAS) path, classify the dd's stored Z_eff against the thermal-only and the thermal+fast numerators (io.imas._dd_zeff) and, where it counts the fast ions (or when no Z_eff is stored and the dd carries a beam), hand the bootstrap Z_eff_th + z2_fast/n_e with Baseline.zeff_includes_fast=True (a stored Z_eff classified thermal-only: the thermal-only Z_eff).  Default (owner decision A1, 2026-10-17): the dd's own TOTAL Z_eff -- the zeff dataset when it agrees with the all-ion sum over n_e from the dd's densities (within 5 %), else that sum -- with no classification (io.imas._dd_total_zeff), on the plain dd route and (owner decision 2026-10-18) the ida_hybrid ni_source='standard' sub-route.
 
 Enabled by: `ImasSource.zeff_fast_ions=True`
 

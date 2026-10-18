@@ -2210,8 +2210,9 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
     see :func:`_subtract_fast_ni`.
 
     ``ni_source="standard"`` (an explicit choice on ida_hybrid since
-    2026-10): Zeff stays the dd's (``Zeff_fuse``) and ni is re-derived from
-    the dd's thermal Z_eff (``zeff_for_ni``, else ``Zeff_fuse``) under
+    2026-10): Zeff stays the dd's (``Zeff_fuse``; the caller passes the dd's
+    TOTAL Z_eff, owner decision 2026-10-18) and ni is re-derived from the
+    dd's thermal-numerator Z_eff (``zeff_for_ni``, else ``Zeff_fuse``) under
     single-impurity quasineutrality applied to the IDA electron density.
     ``zeff_absent``: the file carries no ``Zeff`` dataset, so read_ida's own
     standard derivation is handed the dd's thermal Z_eff in its place (the
@@ -2611,10 +2612,11 @@ def read_imas_baseline(
     # Z_imp derivation below uses (impurity_charge_with_fast_ions, the
     # ida_hybrid zeff_for_ni) on every route, A1 included.
     Zeff_th = zeff_num / ne
-    # The dd's Z_eff as handed to the ida_hybrid route (its zeff_from_fuse /
-    # ni_source="standard" sub-routes: unchanged by A1) and its convention.
-    # On the plain dd route A1 (owner decision 2026-10-17, below, once the
-    # route is known) replaces it with the dd's own TOTAL Z_eff
+    # The dd's Z_eff as handed to the ida_hybrid measured route's
+    # zeff_from_fuse=True (unchanged by A1) and its convention.  On the
+    # plain dd route (A1, owner decision 2026-10-17) and the ida_hybrid
+    # ni_source="standard" sub-route (owner decision 2026-10-18), below once
+    # the route is known, it is replaced with the dd's own TOTAL Z_eff
     # (_dd_total_zeff); the EXPERIMENTAL classification (ImasSource.
     # zeff_fast_ions; bouquet.experimental.REGISTRY["fuse_zeff_fast_ions"],
     # _dd_zeff) keeps its own rule on both routes.
@@ -2736,11 +2738,16 @@ def read_imas_baseline(
             "the ida_hybrid IDA slice -- unset it, or use "
             "kinetic_source='ida_hybrid' with an ida_path")
     zeff_includes_fast = dd_zeff_includes_fast
-    if not use_ida and not _zeff_classified:
+    if not _ida_ion_route and not _zeff_classified:
         # A1 (owner decision 2026-10-17): the plain dd route's kinetics and
         # Sauter coefficients take the dd's own TOTAL Z_eff, and the Z_eff
         # channel is drawn around the same quantity (aux["zeff"]).  The
         # n_i / Z_imp derivations keep Zeff_th (thermal numerator).
+        # Owner decision 2026-10-18: the same on the ida_hybrid
+        # ni_source="standard" sub-route (use_ida, dd Z_eff) -- the Z_eff
+        # handed to the bootstrap coefficients is the TOTAL one on every
+        # route; there _merge_ida_kinetics returns this array as the run's
+        # Z_eff while its n_i keeps zeff_for_ni=Zeff_th.
         Zeff_total, _zeff_def = _dd_total_zeff(cp, Zeff_th, z2_fast, ne,
                                                 psi_N)
         Zeff = Zeff_total
@@ -2753,7 +2760,10 @@ def read_imas_baseline(
             source=("stored cp.zeff" if _zeff_def["source"] == "dataset"
                     else "stored cp.zeff inconsistent"
                     if _zeff_def.get("reason") else "no stored zeff"),
-            basis=("owner decision A1 (2026-10-17): the dd's own total Z_eff "
+            basis=("owner decision A1 (2026-10-17"
+                   + (", ida_hybrid ni_source='standard': 2026-10-18"
+                      if use_ida else "")
+                   + "): the dd's own total Z_eff "
                    "(all ions, fast included, over n_e), "
                    + ("as stored" if _zeff_def["source"] == "dataset" else
                       "recomputed from the dd's thermal + fast densities")
@@ -2764,7 +2774,8 @@ def read_imas_baseline(
             source, "zeff_from_fuse", False):
         _zeff_def = dict(definition="total", source="ida")
     else:
-        # the ida_hybrid dd sub-routes and the experimental classification
+        # zeff_from_fuse=True on a measured route and the experimental
+        # classification
         _zeff_def = dict(
             definition=("total" if dd_zeff_includes_fast
                         else "thermal-numerator"),
@@ -2820,12 +2831,15 @@ def read_imas_baseline(
             if not getattr(source, "zeff_from_fuse", False):
                 zeff_includes_fast = True
         else:
-            # ni_source="standard" (review of A1, C3): the Z_eff channel is
-            # drawn around the base the engine uses (the dd's thermal-
-            # numerator Z_eff, Zeff_fuse above), not the dd's stored zeff --
-            # the same centring A1 gives the plain dd route, so the draw is
-            # the conditional draw at the slice's fixed beam fraction.  The
-            # measured routes are the branch above, unchanged.
+            # ni_source="standard": the Z_eff channel is drawn around the
+            # base the engine uses (C3) -- since the owner decision of
+            # 2026-10-18 the dd's TOTAL Z_eff (set above, as A1 on the plain
+            # dd route), with zeff_includes_fast following the beam, so the
+            # draw is the conditional draw at the slice's fixed beam
+            # fraction and the floor at 1 is the right floor.  Its width is
+            # the IDA file's measured Z_eff envelope (baseline.
+            # zeff_sigma_eligibility's sub-route case).  The measured routes
+            # are the branch above, unchanged.
             aux["zeff"] = Zeff
         # Read once, shared: resolve_uncertainty reuses this instead of
         # opening the same file again (and possibly at another slice).
