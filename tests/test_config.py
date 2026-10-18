@@ -56,6 +56,17 @@ class TestSerialization:
         assert isinstance(cfg2.source, ImasSource)
         assert cfg2.source.ida_path == "x.cdf"
 
+    def test_psi_pad_is_a_field_of_both_sources(self):
+        cfg = BouquetConfig(source=ImasSource(ids_path="dd.json", psi_pad=5e-3),
+                            solver=SolverConfig(mesh_path="m.h5"), output_header="I")
+        assert BouquetConfig.from_json(cfg.to_json()).source.psi_pad == 5e-3
+        assert ImasSource(ids_path="dd.json").psi_pad == 1e-3
+        for src in (lambda v: ImasSource(ids_path="dd.json", psi_pad=v),
+                    lambda v: ReconstructionSource(geqdsk_path="g", profiles_path="p", psi_pad=v)):
+            for bad in (-1e-3, 1.0, float("nan"), True, "1e-3"):
+                with pytest.raises(ValueError, match="psi_pad"):
+                    src(bad)
+
     def test_to_dict_is_json_serializable(self):
         json.dumps(_full_recon_cfg().to_dict())   # must not raise
 

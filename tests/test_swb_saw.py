@@ -226,7 +226,8 @@ def _run(**gen):
     gen.setdefault("imas_baseline", "swb")
     ns = types.SimpleNamespace(
         baseline=bl, mygs=_GS(), _geom=types.SimpleNamespace(boundary_RZ=None),
-        config=types.SimpleNamespace(generation=GenerationConfig(**gen)),
+        config=types.SimpleNamespace(source=types.SimpleNamespace(psi_pad=1e-3),
+                                     generation=GenerationConfig(**gen)),
         _reset_solver_state=lambda: None, _seed_coil_init=lambda m: None,
         _swb_baseline_kinetics=lambda: dict(
             ne=1e19 + 0 * x, te=1e3 + 0 * x, ni=1e19 + 0 * x, ti=1e3 + 0 * x,

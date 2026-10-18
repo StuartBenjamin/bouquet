@@ -4736,7 +4736,7 @@ class Bouquet(SwbBaseline):
         mygs = self.mygs
         psi_N = np.asarray(bl.psi_N, dtype=float)
         coord = getattr(bl, "coord", coords.PSI)
-        psi_pad = 1e-3
+        psi_pad = float(self.config.source.psi_pad)
         from .physics import ELEMENTARY_CHARGE as EC
 
         # init psi from the LCFS shape parameters
@@ -6199,12 +6199,12 @@ class Bouquet(SwbBaseline):
                     if _structured_state.get("mse_applied"):
                         self._structured_mse_delivered(_structured_state, bl, mygs)
 
-        self._finish_imas_baseline(nl_its, psi_pad, ctx=dict(
+        self._finish_imas_baseline(nl_its, psi_pad=psi_pad, ctx=dict(
             edge=_edge, p_total=p_total, psi_N=psi_N, p_components=_pc,
             delivery=_delivery, ne=ne, te=te, ni=ni, ti=ti, Zeff=Zeff,
             k2e=k2e))
 
-    def _finish_imas_baseline(self, nl_its, psi_pad=1e-3, *, ctx):
+    def _finish_imas_baseline(self, nl_its, psi_pad, *, ctx):
         """Common tail of the IMAS baselines: check Ip on ``mygs``'s converged
         state, record TokaMaker li_1/li_3 and the closure metrics in
         ``li_metrics``, and set ``l_i_target`` (li_3, 'iter').  ``ctx``: the

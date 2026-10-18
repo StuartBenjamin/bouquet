@@ -3741,7 +3741,7 @@ def prepare_engine_baseline(bq):
             elif isinstance(src, ImasSource):
                 from .baseline import resolve_baseline
                 bl_src = resolve_baseline(cfg, mygs)
-                ad = IdsAdapter(src, cfg, bl_src,
+                ad = IdsAdapter(src, cfg, bl_src, psi_pad=float(src.psi_pad),
                                 inductive=s["ids_inductive"])
                 c0 = ad.read()
                 psi_pad = ad.psi_pad
