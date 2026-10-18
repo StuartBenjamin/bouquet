@@ -12,7 +12,8 @@ IDA-hybrid (the measured IDA Z_eff), which A1 does not change, so every draw
 and every manifest number is identical to the 27979d1 run; the archive adds
 the Z_eff definition stamps (`zeff_definition`: total, from the IDA file).
 The g-file golden (thermal g-file + IDA `.cdf`, no p-file) is not affected by
-B's p-file `pb` default and was not regenerated.
+B's p-file `pb` default and was not regenerated. The legacy JSON golden was
+regenerated at `35c75f0` with the per-draw wall budget off (decision C, below).
 
 | golden | source | engine | files | read by |
 |--------|--------|--------|-------|---------|
@@ -227,7 +228,11 @@ each on the validation host (2.5-10 min), so under the default 600 s budget
 which draws survive depended on the machine and its load (the 27979d1 run with
 the budget archived 15 of 20, 4 rejected by it; the `49ebebb` run, before the
 budget existed, 19); a golden must be host-independent, and the legacy route
-is deprecated (#90). The h5 goldens keep the default budget. The replay
+is deprecated (#90). The current legacy golden is that recipe at `35c75f0`
+(the A1 / B / C code; the g-file + IDA `.cdf` pair, so neither A1 nor B acts
+on it): 20 attempts, **19 archived** (1 perturb_failed), 19 in spec, draws
+177 min at one thread; its replayed draws are the first two in-spec ones,
+0 and 1. The h5 goldens keep the default budget. The replay
 (`tests/test_systematics.py`) calls `generate_bouquet` directly, outside the
 class API's `DrawSolveGuard`, so it runs with no budget too -- the same
 setting. The legacy replay reconstructs from the pair its stored config names.

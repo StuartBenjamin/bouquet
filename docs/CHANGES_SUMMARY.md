@@ -7,6 +7,14 @@
   27979d1 run (the golden is IDA-hybrid, which A1 leaves unchanged); the
   archive now carries the `zeff_definition` stamps. The g-file h5 golden
   (thermal g-file + IDA `.cdf`) is unaffected by B and not regenerated.
+- **Legacy JSON golden: the per-draw wall budget off (owner decision C,
+  2026-10-17).** Its recipe now sets `draw_wall_budget_s=None`
+  (`regenerate_golden_run.LEGACY_DRAW_WALL_BUDGET_S`): legacy draws take up
+  to about ten minutes each, so a wall-clock budget made the archived draw set
+  depend on the host (15 of 20 archived with it). Regenerated at the A1 / B /
+  C code: 20 attempts, 19 archived (1 perturb_failed), 19 in spec. The legacy
+  replay runs without a budget too (it calls `generate_bouquet` outside the
+  class API's solve guard). No tolerance changed.
 
 ## Unreleased — the p-file's beam pressure by default and a pressure-fidelity stamp (B)
 
