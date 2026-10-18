@@ -83,8 +83,9 @@ REGISTRY = {
             "Z_eff_th + z2_fast/n_e with Baseline.zeff_includes_fast=True "
             "(a stored Z_eff classified thermal-only: the thermal-only Z_eff).  "
             "Default (owner decision A1, 2026-10-17): the dd's own TOTAL "
-            "Z_eff -- the zeff dataset as stored, else the all-ion sum over "
-            "n_e -- with no classification (io.imas._dd_total_zeff)."),
+            "Z_eff -- the zeff dataset when it agrees with the all-ion sum "
+            "over n_e from the dd's densities (within 5 %), else that sum -- "
+            "with no classification (io.imas._dd_total_zeff)."),
         enabled_by=["ImasSource.zeff_fast_ions=True"],
         introduced="PR #56, 1.4.0",
         validation_todo=[

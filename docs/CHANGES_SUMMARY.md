@@ -12,6 +12,19 @@
   deferred_warnings`) and issued once per run after the reconstruction
   summary, on both engines and both input types; a second run warns again. A
   direct call of the reading functions outside a run warns at once, as before.
+- **The dd route validates a stored `zeff` against the densities on every dd
+  (A1 review).** `_dd_total_zeff` used the dataset unchecked except on a beam
+  slice whose array sat closer to the thermal numerator. It now compares the
+  dataset with the all-ion total from the dd's densities on the core
+  (psi_N <= 0.8), beam or not: within `io.imas.ZEFF_DATASET_RTOL` (5 %, new;
+  a consistent dd reproduces the IMAS definition to three figures or better,
+  the shipped synthetic dds to ~1e-16) it is used as stored; closer to the
+  thermal numerator (within 5 % of it) it is warned about and used as stored,
+  as before; matching neither it is warned about ("matches neither
+  definition", both relative misfits) and the densities' total is used,
+  stamped `source="from_densities"`, `reason="dataset inconsistent"`. The
+  `zeff_definition` stamp adds `matches`, `rtol` and `warned`. The shipped
+  dds are unaffected (every stored `zeff` matches its densities to ~1e-16).
 
 ## Unreleased — goldens after A1 / B / C
 

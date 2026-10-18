@@ -1676,6 +1676,18 @@ def read_imas_sigmas(cp, n=None):
 #: Relative core mismatch above which a stored Z_eff matches neither numerator.
 ZEFF_CONVENTION_RTOL = 1e-2
 
+#: Plain dd route (A1, :func:`_dd_total_zeff`): the relative core mismatch
+#: (max over psi_N <= ``NI_FAST_GATE_PSI_N[-1]``, relative to the stored
+#: value) within which a stored ``core_profiles.zeff`` is accepted as the dd's
+#: total Z_eff.  On a self-consistent dd the IMAS definition
+#: sum_s Z_s^2 (n_s^th + n_s^fast) / n_e reproduces the stored array to three
+#: figures or better (the shipped synthetic dds: ~1e-16), so 5 % is a wide
+#: margin for a dd written with rounded or separately post-processed
+#: profiles, and far below the misfits that make the array a different
+#: quantity (the review's stale dataset: 0.36; a thermal-numerator dataset on
+#: a beam slice: the beam's share, 0.29 on the synthetic dd at 1.2 s).
+ZEFF_DATASET_RTOL = 5e-2
+
 
 def _dd_zeff(cp, zeff_th, z2_fast, ne, psi_N, record=None):
     """``(zeff, includes_fast)``: the Z_eff the dd's own bootstrap consumed.
@@ -1737,46 +1749,80 @@ def _dd_total_zeff(cp, zeff_th, z2_fast, ne, psi_N):
 
     Total means every ion species in the numerator, fast ions included,
     over the full ``n_e`` -- the standard IMAS ``core_profiles.zeff``
-    definition and what a measured Z_eff is.  The ``zeff`` dataset when the
-    dd stores one (``source="dataset"``), else
+    definition and what a measured Z_eff is.  ``zeff_all`` =
     ``sum_s Z_s^2 (n_s^thermal + n_s^fast) / n_e`` from the dd's own
-    densities (``source="from_densities"``).  A stored ``zeff`` is taken as
-    stored; with a fast population both numerators are compared on the core
-    (``psi_N <= NI_FAST_GATE_PSI_N[-1]``) for the record, and a dataset
-    closer to the thermal-only numerator (a ``zeff`` written before the
-    beam) is warned about, not replaced.
+    densities; without a ``zeff`` dataset it is the answer
+    (``source="from_densities"``).
+
+    A stored ``zeff`` is validated against the densities on EVERY dd, beam
+    or not: the relative core misfits (max over ``psi_N <=
+    NI_FAST_GATE_PSI_N[-1]``, relative to the stored value) to the total
+    (``d_all``) and to the thermal-only numerator (``d_th``; equal to
+    ``d_all`` without a beam) decide:
+
+    * closer to the thermal numerator on a beam slice (``d_all >
+      ZEFF_CONVENTION_RTOL`` and ``d_th < d_all``) and within
+      :data:`ZEFF_DATASET_RTOL` of it -- a ``zeff`` written before the beam:
+      warned, used as stored (``matches="thermal-numerator"``);
+    * else within :data:`ZEFF_DATASET_RTOL` of the total: used as stored
+      (``source="dataset"``, ``matches="total"``);
+    * else it matches NEITHER definition: warned, and the all-ion value from
+      the densities is used instead (``source="from_densities"``,
+      ``matches="neither"``, ``reason="dataset inconsistent"``) -- an array
+      that is neither quantity is never handed to the Sauter coefficients.
 
     ``stamp`` (archived as ``li_metrics["zeff_dd_provenance"]
-    ["zeff_definition"]`` and in every draw's ``kinetic_sampler`` record):
-    ``definition="total"``, ``source``, and the core misfits ``d_th`` /
-    ``d_all`` (None where not compared).
+    ["zeff_definition"]``; ``definition`` / ``source`` also in every draw's
+    ``kinetic_sampler`` record): ``definition="total"``, ``source``,
+    ``d_th`` / ``d_all`` (None without a dataset), ``rtol``, ``matches``,
+    ``warned`` and, on a fallback, ``reason``.  The warnings are collected
+    inside a run and issued from the reconstruction summary
+    (:func:`bouquet.utils.warn_or_defer`).
     """
+    from ..utils import warn_or_defer
     _ne = np.clip(np.asarray(ne, dtype=float), 1e-30, None)
-    zeff_all = np.asarray(zeff_th, dtype=float) + np.asarray(
-        z2_fast, dtype=float) / _ne
-    stamp = dict(definition="total", d_th=None, d_all=None)
+    zeff_th = np.asarray(zeff_th, dtype=float)
+    zeff_all = zeff_th + np.asarray(z2_fast, dtype=float) / _ne
+    stamp = dict(definition="total", d_th=None, d_all=None,
+                 rtol=float(ZEFF_DATASET_RTOL), matches=None, warned=False)
     if "zeff" not in cp:
         stamp["source"] = "from_densities"
         return zeff_all, stamp
     stored = np.asarray(cp["zeff"], dtype=float)
-    stamp["source"] = "dataset"
-    if np.any(z2_fast):
-        core = np.asarray(psi_N, dtype=float) <= NI_FAST_GATE_PSI_N[-1]
-        _s = np.abs(stored[core])
+    core = np.asarray(psi_N, dtype=float) <= NI_FAST_GATE_PSI_N[-1]
+    _s = np.abs(stored[core])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        # a zero or non-finite stored value gives inf / NaN: matches neither
         d_th = float(np.max(np.abs(stored - zeff_th)[core] / _s))
         d_all = float(np.max(np.abs(stored - zeff_all)[core] / _s))
-        stamp.update(d_th=d_th, d_all=d_all)
-        if d_all > ZEFF_CONVENTION_RTOL and d_th < d_all:
-            # collected, inside a run, for the reconstruction summary: the
-            # engine reads the dd inside the captured solver output
-            from ..utils import warn_or_defer
-            warn_or_defer(
-                f"core_profiles.zeff is closer to the THERMAL-only numerator "
-                f"(core misfit {d_th:.1e}) than to the total one of the dd's "
-                f"own densities ({d_all:.1e}); it is used as the total Z_eff "
-                f"as stored (owner decision A1). A zeff stored before the "
-                f"beam was added does this.", UserWarning, stacklevel=3)
-    return stored, stamp
+    stamp.update(d_th=d_th, d_all=d_all)
+    thermal_closer = bool(np.any(z2_fast)) and (
+        d_all > ZEFF_CONVENTION_RTOL and d_th < d_all)
+    if thermal_closer and d_th <= ZEFF_DATASET_RTOL:
+        stamp.update(source="dataset", matches="thermal-numerator",
+                     warned=True)
+        warn_or_defer(
+            f"core_profiles.zeff is closer to the THERMAL-only numerator "
+            f"(core misfit {d_th:.1e}) than to the total one of the dd's "
+            f"own densities ({d_all:.1e}); it is used as the total Z_eff "
+            f"as stored (owner decision A1). A zeff stored before the "
+            f"beam was added does this.", UserWarning, stacklevel=3)
+        return stored, stamp
+    if d_all <= ZEFF_DATASET_RTOL:
+        stamp.update(source="dataset", matches="total")
+        return stored, stamp
+    stamp.update(source="from_densities", matches="neither", warned=True,
+                 reason="dataset inconsistent")
+    warn_or_defer(
+        f"core_profiles.zeff matches neither definition on the core "
+        f"(psi_N <= {NI_FAST_GATE_PSI_N[-1]:g}): rel. diff to the total "
+        f"(all ions over n_e, from the dd's densities) {d_all:.2e}, to the "
+        f"thermal-only numerator {d_th:.2e}, both beyond "
+        f"{ZEFF_DATASET_RTOL:g}; the dataset is NOT used -- the total Z_eff "
+        f"is recomputed from the dd's densities. A zeff stored before the "
+        f"dd's ne or ion densities were last changed does this.",
+        UserWarning, stacklevel=3)
+    return zeff_all, stamp
 
 
 def _subtract_fast_ni(psi_N, ni, ni_fuse_thermal, z_fast, z2_fast, impurity_Z):
@@ -2679,11 +2725,14 @@ def read_imas_baseline(
         _zeff_dd_rec.update(
             convention="thermal+fast",
             source=("stored cp.zeff" if _zeff_def["source"] == "dataset"
-                    else "no stored zeff"),
+                    else "stored cp.zeff inconsistent"
+                    if _zeff_def.get("reason") else "no stored zeff"),
             basis=("owner decision A1 (2026-10-17): the dd's own total Z_eff "
                    "(all ions, fast included, over n_e), "
                    + ("as stored" if _zeff_def["source"] == "dataset" else
-                      "recomputed from the dd's thermal + fast densities")),
+                      "recomputed from the dd's thermal + fast densities")
+                   + (" (the stored zeff matches neither definition)"
+                      if _zeff_def.get("reason") else "")),
             d_th=_zeff_def["d_th"], d_all=_zeff_def["d_all"])
     elif use_ida and _ida_ion_route and not getattr(
             source, "zeff_from_fuse", False):

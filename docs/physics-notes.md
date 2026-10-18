@@ -1222,10 +1222,15 @@ contribution to the ion collisionality is an approximation, small where
 n_fast ≪ n_i. *Stamp:* `Baseline.zeff_includes_fast`.
 
 **Since A1 (owner decision 2026-10-17) the plain dd route uses the TOTAL
-Z_eff by default**, without the classification: the dd's `zeff` dataset as
-stored (the standard IMAS definition), else Σ_s Z_s² (n_s^th + n_s^fast) / n_e
-from its densities (`io.imas._dd_total_zeff`; a stored Z_eff closer to the
-thermal-only numerator is warned about and used as stored). The Z_eff channel
+Z_eff by default**, without the classification: Σ_s Z_s² (n_s^th + n_s^fast)
+/ n_e from the dd's densities (the standard IMAS definition), or the dd's
+`zeff` dataset when it agrees with that on the core within 5 %
+(`io.imas.ZEFF_DATASET_RTOL`; a consistent dd reproduces it to three figures or
+better). A stored Z_eff closer to the thermal-only numerator (within 5 % of
+it) is warned about and used as stored; one that matches neither definition is
+warned about and replaced by the densities' total (stamped `source=
+"from_densities"`, `reason="dataset inconsistent"`), whether or not the dd
+carries a beam (`io.imas._dd_total_zeff`). The Z_eff channel
 is drawn around the same array, with the dd's absolute σ, so the draw is
 centred on the quantity it perturbs and the floor at 1 binds only in the tail
 (on the synthetic dd at 1.2 s: 1.40 on axis, against the thermal-numerator

@@ -745,6 +745,102 @@ class TestDefaultsArePre56:
         np.testing.assert_array_equal(bl.ni, ref.ni)
         assert bl.Z_imp == ref.Z_imp
 
+    @staticmethod
+    def _stored(op):
+        """dd_mutate: store zeff = op(the dd's total Z_eff from its
+        densities, thermal + fast, over n_e)."""
+        def mutate(dd):
+            cp = dd["core_profiles"]["profiles_1d"][0]
+            ne = np.asarray(cp["electrons"]["density_thermal"])
+            num = np.zeros_like(ne)
+            for ion in cp["ion"]:
+                Z = ion["element"][0]["z_n"]
+                n = np.asarray(ion["density_thermal"])
+                num += Z * Z * (n + np.asarray(ion.get("density_fast",
+                                                       0.0 * n)))
+            cp["zeff"] = op(num / ne).tolist()
+        return mutate
+
+    @pytest.mark.parametrize("case, fast_frac, op", [
+        ("total within tolerance", 0.2, lambda z: 1.02 * z),
+        ("beam, total + 0.6", 0.2, lambda z: z + 0.6),
+        ("no beam, stale x2", 0.0, lambda z: 2.0 * z),
+        ("no beam, consistent", 0.0, lambda z: z),
+    ])
+    def test_the_stored_zeff_is_validated_against_the_densities(
+            self, tmp_path, case, fast_frac, op):
+        """C2 (review of A1): a stored zeff is checked against the dd's own
+        densities on every dd, beam or not.  Within ZEFF_DATASET_RTOL (5 %)
+        of the total it is used as stored; matching NEITHER definition it is
+        warned about and replaced by the all-ion value from the densities,
+        stamped source "from_densities", reason "dataset inconsistent"."""
+        import warnings
+        from bouquet.io.imas import ZEFF_DATASET_RTOL
+        assert ZEFF_DATASET_RTOL == 5e-2
+        ddp, *_ = _build(tmp_path, fast_frac=fast_frac,
+                         dd_mutate=self._stored(op))
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            bl = read_imas_baseline(ImasSource(ids_path=ddp, time=1.0,
+                                               impurity_Z=Z_IMP),
+                                    kinetic_source="fuse")
+        neither = [x for x in w if "matches neither definition"
+                   in str(x.message)]
+        ne, zth = self._dd_thermal(ddp)
+        z_all = zth + (0.0 if bl.z2_fast is None else bl.z2_fast / ne)
+        stored = np.asarray(json.load(open(ddp))["core_profiles"][
+            "profiles_1d"][0]["zeff"], dtype=float)
+        d = bl.li_metrics["zeff_dd_provenance"]["zeff_definition"]
+        assert d["definition"] == "total" and d["rtol"] == ZEFF_DATASET_RTOL
+        np.testing.assert_array_equal(bl.aux["zeff"], bl.Zeff)  # draw centre
+        if case in ("total within tolerance", "no beam, consistent"):
+            assert not neither and d["warned"] is False
+            assert d["source"] == "dataset" and d["matches"] == "total"
+            np.testing.assert_array_equal(bl.Zeff, stored)
+        else:
+            assert len(neither) == 1
+            assert d["source"] == "from_densities" and d["warned"] is True
+            assert d["matches"] == "neither"
+            assert d["reason"] == "dataset inconsistent"
+            assert d["d_all"] > ZEFF_DATASET_RTOL
+            assert d["d_th"] > ZEFF_DATASET_RTOL
+            np.testing.assert_allclose(bl.Zeff, z_all, rtol=1e-12)
+            assert "inconsistent" in bl.li_metrics["zeff_dd_provenance"][
+                "source"]
+        # the thermal-numerator derivations never see the dataset
+        (tmp_path / "ref").mkdir()
+        ref = read_imas_baseline(
+            ImasSource(ids_path=_build(tmp_path / "ref",
+                                       fast_frac=fast_frac)[0],
+                       time=1.0, impurity_Z=Z_IMP), kinetic_source="fuse")
+        np.testing.assert_array_equal(bl.ni, ref.ni)
+        assert bl.Z_imp == ref.Z_imp
+
+    def test_the_review_cases_with_the_bare_function(self):
+        """The review's two numbers, on bare arrays: a no-beam dd storing
+        2.0 against 1.0 from its densities, and a beam dd storing the total
+        + 0.6: both fall back to the densities' total, warned."""
+        import warnings
+        from bouquet.io.imas import _dd_total_zeff
+        psi = np.linspace(0.0, 1.0, 41)
+        ne = 5e19 * (1.0 - 0.8 * psi ** 2)
+        for zth, z2, stored in (
+                (np.ones_like(psi), np.zeros_like(psi), 2.0 + 0.0 * psi),
+                (1.0 + 0.0 * psi, 0.2 * ne * (1.0 - psi ** 2), None)):
+            z_all = zth + z2 / ne
+            st = z_all + 0.6 if stored is None else stored
+            with pytest.warns(UserWarning, match="matches neither") as rec:
+                z, d = _dd_total_zeff({"zeff": st}, zth, z2, ne, psi)
+            assert len(rec) == 1
+            np.testing.assert_array_equal(z, z_all)
+            assert d["source"] == "from_densities"
+            assert d["reason"] == "dataset inconsistent"
+        # a consistent dataset: no warning, used as stored
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            z, d = _dd_total_zeff({"zeff": z_all}, zth, z2, ne, psi)
+        assert d["source"] == "dataset" and d["matches"] == "total"
+
     def test_ida_hybrid_keeps_the_dd_zeff_and_derives_ni_from_it(self, tmp_path):
         """ida_hybrid with the explicit dd route (ni_source="standard"; the
         default before 2026-10): n_e/T_e/T_i from IDA; Z_eff the dd's thermal
