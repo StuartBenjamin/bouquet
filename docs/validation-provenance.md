@@ -142,14 +142,17 @@ Each was run at the library defaults until 24 draws were in spec.
 ![In-spec draw bands of the nine synthetic equilibria](figures/synthetic_bands_overview.png)
 
 *The figure shows the in-spec draws: the median, the 16–84 % band and the
-full range, with n per band (filled: `27979d1`; open: `49ebebb`; ×: the
-reconstruction). The panels are β_N, l_i(3), Λ = β_p + l_i/2, and dp/dψ_N and
-dj_φ/dψ_N at each draw's own q = 2 surface. The 0.7 s slice's q = 2 gradient
-bands rest on n = 13, because its other draws have no q = 2 surface. The
-figure predates `8e095fe`, so the total-pressure g-file + p-file case is
-shown without the p-file's beam pressure (β_N 0.63); at the release it
-carries it (β_N 1.666 [1.635, 1.712]). The dd slices' bands moved by less
-than their widths (table below).*
+full range, with n per band (grey, open: the validation pass at `27979d1`;
+blue, filled: the release tree, for the cases re-run after the dd-route Z_eff
+and p-file beam-pressure changes; ×: the reconstruction). The panels are
+β_N, l_i(3), Λ = β_p + l_i/2, and dp/dψ_N and dj_φ/dψ_N at each draw's own
+q = 2 surface. The 0.7 s slice's q = 2 gradient bands rest on n = 13, because
+its other draws have no q = 2 surface. The total-pressure g-file + p-file
+case shows the effect of the beam-pressure default: without it (grey) the
+reconstruction sits at β_N 0.63 against the file's 1.68; with it (blue) at
+1.666 [1.635, 1.712]. The dd slices' bands moved by less than their widths
+(table below); the two IDA-route g-file cases and the IDA-hybrid slice were
+not re-run because their routes did not change.*
 
 At `27979d1`:
 
