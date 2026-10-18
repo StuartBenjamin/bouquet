@@ -1308,7 +1308,10 @@ def _resolve_fixed(comp, src_psi, dst_psi):
 #: An Osborne p-file's ``pb`` block is in kPa; ``p_fast`` is in Pa.
 PFILE_PB_TO_PA = 1e3
 #: profiles files already warned about carrying ``pb`` beside an explicit
-#: ``fixed_components.p_fast`` (the warning is issued once per file)
+#: ``fixed_components.p_fast`` by a DIRECT call (outside a run; once per
+#: file).  Inside a run (``Bouquet.prepare_baseline``, either engine) the
+#: warning is collected and issued from the reconstruction summary once per
+#: run (:func:`bouquet.utils.deferred_warnings`), and never recorded here.
 _PB_TWO_SOURCES_WARNED = set()
 
 
@@ -1319,7 +1322,10 @@ def resolve_p_fast_input(fc, kin, profiles_path, psi_map):
     * ``fixed_components.p_fast`` set: it wins, on ``fixed_components.psi_N``
       in its ``coord`` (exactly as before); ``p_fast_source=
       "fixed_components"``.  A p-file that ALSO carries a ``pb`` block is
-      warned about once (two sources), naming the field.
+      warned about (two sources), naming the field: inside a run once per
+      run, issued from the reconstruction summary
+      (:func:`bouquet.utils.deferred_warnings`); on a direct call once per
+      file.
     * unset, and the profiles file is a p-file with a ``pb`` block: p_fast
       defaults to ``PFILE_PB_TO_PA * pb`` on ``pb``'s own psinorm (coord
       ``"psi_n"``, mapped to the run grid through *psi_map*);
@@ -1337,16 +1343,17 @@ def resolve_p_fast_input(fc, kin, profiles_path, psi_map):
     has_pb = kin.get("pb") is not None
     if fc.p_fast is not None:
         if has_pb:
+            from .utils import _DEFERRED_WARNINGS, warn_or_defer
             key = str(profiles_path)
-            if key not in _PB_TWO_SOURCES_WARNED:
-                _PB_TWO_SOURCES_WARNED.add(key)
-                import warnings
-                warnings.warn(
-                    f"the p-file {os.path.basename(key)!r} carries a fast-ion "
-                    "pressure block 'pb' AND fixed_components.p_fast is set: "
-                    "two sources of p_fast; fixed_components.p_fast is used "
-                    "and the p-file's pb is ignored", UserWarning,
-                    stacklevel=3)
+            if (_DEFERRED_WARNINGS is not None
+                    or key not in _PB_TWO_SOURCES_WARNED):
+                if not warn_or_defer(
+                        f"the p-file {os.path.basename(key)!r} carries a "
+                        "fast-ion pressure block 'pb' AND "
+                        "fixed_components.p_fast is set: two sources of "
+                        "p_fast; fixed_components.p_fast is used and the "
+                        "p-file's pb is ignored", UserWarning, stacklevel=3):
+                    _PB_TWO_SOURCES_WARNED.add(key)   # issued visibly
         return (fc.p_fast,
                 coords.to_run_grid(fc.psi_N, getattr(fc, "coord", coords.RUN),
                                    psi_map),

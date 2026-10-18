@@ -1,5 +1,18 @@
 # Bouquet — change summaries
 
+## Unreleased — review fixes to A1 / B
+
+- **The baseline's input warnings now reach the user on the unified engine.**
+  The dd's stored-Z_eff warning (A1) and the p-file's "two sources of
+  p_fast" warning (B) are raised while the source is read, which the unified
+  engine does inside the captured solver output: they went into
+  `Baseline.reconstruction_log`, and Python's registry (and, for `pb`, a
+  process-global set) then suppressed them for the rest of the session. They
+  are now collected while the source is read (`bouquet.utils.
+  deferred_warnings`) and issued once per run after the reconstruction
+  summary, on both engines and both input types; a second run warns again. A
+  direct call of the reading functions outside a run warns at once, as before.
+
 ## Unreleased — goldens after A1 / B / C
 
 - **IDS golden** regenerated at the A1 / B / C code (seed 12345, 20 attempts):

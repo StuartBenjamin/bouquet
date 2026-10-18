@@ -3709,6 +3709,13 @@ def prepare_engine_baseline(bq):
     bl = None
     recon_iso = None
     cold_start = None
+    # the baseline's input warnings (the dd's stored Z_eff, the p-file's pb)
+    # are raised while the dd / p-file is read, inside the captured solver
+    # output: collected there, issued once per run below, where the
+    # reconstruction summary is printed (as warn_pressure_fidelity)
+    from .utils import deferred_warnings, emit_deferred_warnings
+    _dw = deferred_warnings()
+    _deferred = _dw.__enter__()
     try:
         with capture_native_output(enabled=not verbose) as cap:
             if isinstance(src, ReconstructionSource):
@@ -3795,7 +3802,10 @@ def prepare_engine_baseline(bq):
         bq.baseline = None
         print(f"[baseline] FAILED ({type(exc).__name__}) in the unified "
               "engine: no usable baseline", flush=True)
+        emit_deferred_warnings(_deferred, stacklevel=2)
         raise
+    finally:
+        _dw.__exit__(None, None, None)
     bq.baseline = bl
     # the LIVE reconstruction the draws inherit (bouquet.engine_draws): its
     # contract, state, basis and delivered measurement, in this session --
@@ -3867,6 +3877,7 @@ def prepare_engine_baseline(bq):
                + _flag_reason(res, rec))
         print("[engine] WARNING " + msg, flush=True)
         warnings.warn(msg, RuntimeWarning, stacklevel=2)
+    emit_deferred_warnings(_deferred, stacklevel=2)
     print(f"[engine] {ENGINE_VERSION}: {'converged' if res['converged'] else 'NOT converged (flagged)'}; "
           f"l_i(3)={bl.l_i_target:.6f}; solves {rec['solves']}", flush=True)
     return bl

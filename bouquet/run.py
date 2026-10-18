@@ -1027,7 +1027,17 @@ class Bouquet(SwbBaseline):
         # failed rebuild.
         self.baseline = None
         self._failed_baseline = None
-        bl_new = resolve_baseline(self.config, self.mygs)
+        # the baseline's input warnings (the dd's stored Z_eff, the p-file's
+        # pb): collected while the source is read and issued once per run
+        # after the reconstruction summary, as on the unified engine (where
+        # the read is inside the captured solver output)
+        from .utils import deferred_warnings, emit_deferred_warnings
+        with deferred_warnings() as _deferred:
+            try:
+                bl_new = resolve_baseline(self.config, self.mygs)
+            except BaseException:
+                emit_deferred_warnings(_deferred, stacklevel=2)
+                raise
         self.baseline = bl_new
         try:
             # IMAS path: read_imas_baseline does no GS solve, so establish a
@@ -1065,12 +1075,14 @@ class Bouquet(SwbBaseline):
                   "refuse until prepare_baseline() succeeds (the half-built "
                   "object is on Bouquet._failed_baseline for debugging only)",
                   flush=True)
+            emit_deferred_warnings(_deferred, stacklevel=2)
             raise
 
         # Reconstruction path: surface a glanceable quality summary (the verbose
         # solver chatter was captured to baseline.reconstruction_log).
         if self.baseline.reconstruction_metrics is not None:
             self._print_reconstruction_summary()
+        emit_deferred_warnings(_deferred, stacklevel=2)
         self._record_engine_resolved_defaults(self.baseline)
         self._record_experimental_features(self.baseline)
         self._record_coil_solve_mode(self.baseline)

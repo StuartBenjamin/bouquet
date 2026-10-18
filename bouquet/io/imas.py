@@ -1767,8 +1767,10 @@ def _dd_total_zeff(cp, zeff_th, z2_fast, ne, psi_N):
         d_all = float(np.max(np.abs(stored - zeff_all)[core] / _s))
         stamp.update(d_th=d_th, d_all=d_all)
         if d_all > ZEFF_CONVENTION_RTOL and d_th < d_all:
-            import warnings
-            warnings.warn(
+            # collected, inside a run, for the reconstruction summary: the
+            # engine reads the dd inside the captured solver output
+            from ..utils import warn_or_defer
+            warn_or_defer(
                 f"core_profiles.zeff is closer to the THERMAL-only numerator "
                 f"(core misfit {d_th:.1e}) than to the total one of the dd's "
                 f"own densities ({d_all:.1e}); it is used as the total Z_eff "
