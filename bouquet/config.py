@@ -2019,8 +2019,9 @@ class GenerationConfig:
     # Julia GPEC "derivatives"), and the unpadded [psi_axis, psi_LCFS] last (GPEC and Julia GPEC then
     # normalize psi_N to the true LCFS).  A save_ifile without them fails the baseline i-file, which
     # refuses the run.
-    ifile_profile_derivs: bool = False
-    ifile_psi_bounds: bool = False
+    # PSFC_dev: both on by default (main: False).
+    ifile_profile_derivs: bool = True
+    ifile_psi_bounds: bool = True
     # The archived g-files' R x Z grid (TokaMaker.save_eqdsk nr / nz; the 1-D profiles come on nr
     # uniform psi_N points), for the baseline and every draw.  Integers >= 2.
     eqdsk_nr: int = 257
