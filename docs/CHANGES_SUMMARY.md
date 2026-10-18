@@ -1,5 +1,13 @@
 # Bouquet — change summaries
 
+## Unreleased — goldens after A1 / B / C
+
+- **IDS golden** regenerated at the A1 / B / C code (seed 12345, 20 attempts):
+  20 archived, 20 in spec; draws and manifest numbers identical to the
+  27979d1 run (the golden is IDA-hybrid, which A1 leaves unchanged); the
+  archive now carries the `zeff_definition` stamps. The g-file h5 golden
+  (thermal g-file + IDA `.cdf`) is unaffected by B and not regenerated.
+
 ## Unreleased — the p-file's beam pressure by default and a pressure-fidelity stamp (B)
 
 - **g-file + p-file: the p-file's `pb` is the default `p_fast` (decision B,

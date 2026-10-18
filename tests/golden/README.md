@@ -6,7 +6,13 @@ runs the synthetic test fixtures in `tests/data/` at the library's defaults.
 **Status (2026-10-17):** all three goldens are such runs, at main `27979d1`
 (1.4.0: the homotopy's VSC bound floor, the boundary-partition stamp, the
 per-draw wall budget, the kinetic clips on by default), the g-file and legacy
-ones on the thermal-only g-file (see "The current goldens" below).
+ones on the thermal-only g-file (see "The current goldens" below). The IDS
+golden was regenerated after A1 / B / C (2026-10-17, commit `35c75f0`): it is
+IDA-hybrid (the measured IDA Z_eff), which A1 does not change, so every draw
+and every manifest number is identical to the 27979d1 run; the archive adds
+the Z_eff definition stamps (`zeff_definition`: total, from the IDA file).
+The g-file golden (thermal g-file + IDA `.cdf`, no p-file) is not affected by
+B's p-file `pb` default and was not regenerated.
 
 | golden | source | engine | files | read by |
 |--------|--------|--------|-------|---------|
