@@ -1825,6 +1825,32 @@ def _dd_total_zeff(cp, zeff_th, z2_fast, ne, psi_N):
     return zeff_all, stamp
 
 
+def _zeff_draw_centre_stamp(base_def, centre, base, cp, zeff_th):
+    """The draw centre's half of the ``zeff_definition`` stamp (review of
+    A1, C3): the definition of the array the Z_eff channel is drawn around
+    (``aux["zeff"]``) beside the base's own (``definition`` / ``source``),
+    and whether the two are the same array -- so an archive shows a
+    two-base split instead of hiding it.  After C3 the only route left
+    split is the EXPERIMENTAL classification (``ImasSource.zeff_fast_ions``)
+    on the plain dd, whose channel is the dd's stored zeff."""
+    if centre is None:
+        return dict(draw_centre=None, draw_centred_on_base=None)
+    c = np.asarray(centre, dtype=float)
+    same = bool(c.shape == np.shape(base)
+                and np.array_equal(c, np.asarray(base, dtype=float)))
+    if same:
+        dc = dict(definition=base_def.get("definition"),
+                  source=base_def.get("source"))
+    elif "zeff" in cp and np.array_equal(
+            c, np.asarray(cp["zeff"], dtype=float)):
+        dc = dict(definition="dataset as stored", source="dataset")
+    elif np.array_equal(c, np.asarray(zeff_th, dtype=float)):
+        dc = dict(definition="thermal-numerator", source="from_densities")
+    else:
+        dc = dict(definition="other", source="other")
+    return dict(draw_centre=dc, draw_centred_on_base=same)
+
+
 def _subtract_fast_ni(psi_N, ni, ni_fuse_thermal, z_fast, z2_fast, impurity_Z):
     """Thermal ``(ni, meta)`` from a MEASURED (total) ni.
 
@@ -2793,6 +2819,14 @@ def read_imas_baseline(
             # zeff_from_fuse carries the dd's own convention over with its value.
             if not getattr(source, "zeff_from_fuse", False):
                 zeff_includes_fast = True
+        else:
+            # ni_source="standard" (review of A1, C3): the Z_eff channel is
+            # drawn around the base the engine uses (the dd's thermal-
+            # numerator Z_eff, Zeff_fuse above), not the dd's stored zeff --
+            # the same centring A1 gives the plain dd route, so the draw is
+            # the conditional draw at the slice's fixed beam fraction.  The
+            # measured routes are the branch above, unchanged.
+            aux["zeff"] = Zeff
         # Read once, shared: resolve_uncertainty reuses this instead of
         # opening the same file again (and possibly at another slice).
         aux["ida_profiles"] = (str(source.ida_path), _ida_read)
@@ -3126,7 +3160,10 @@ def read_imas_baseline(
                         _zeff_dd_rec,
                         # A1 (2026-10-17): the definition of the Z_eff the
                         # kinetics and the bootstrap are handed
-                        zeff_definition=dict(_zeff_def),
+                        zeff_definition=dict(
+                            _zeff_def, **_zeff_draw_centre_stamp(
+                                _zeff_def, aux.get("zeff"), Zeff, cp,
+                                Zeff_th)),
                         baseline_zeff_includes_fast=bool(zeff_includes_fast),
                         baseline_zeff_from=(
                             "dd" if (not _ida_ion_route or getattr(

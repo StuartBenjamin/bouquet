@@ -25,6 +25,17 @@
   stamped `source="from_densities"`, `reason="dataset inconsistent"`. The
   `zeff_definition` stamp adds `matches`, `rtol` and `warned`. The shipped
   dds are unaffected (every stored `zeff` matches its densities to ~1e-16).
+- **`ida_hybrid` with `ni_source="standard"`: the Z_eff draw is centred on the
+  base (A1 review).** The base there is the dd's thermal-numerator Z_eff, but
+  the channel was drawn around the dd's stored (typically total) `zeff`, the
+  two-base split A1 removed from the plain dd route. `aux["zeff"]` is now the
+  base on that sub-route too (the conditional draw at the slice's fixed beam
+  fraction); the measured routes (`"Zeff"` / `"CER"` / `"all"`, the default)
+  are unchanged. The envelope there is the assumed width (a fraction of
+  |Z_eff|: the dd's error fields are not read on `ida_hybrid`), so it follows
+  the new centre. The `zeff_definition` stamp now carries the draw centre's
+  definition beside the base's (`draw_centre`, `draw_centred_on_base`), so an
+  archive shows any remaining split (only the experimental classification).
 
 ## Unreleased — goldens after A1 / B / C
 

@@ -1238,14 +1238,19 @@ centred on the quantity it perturbs and the floor at 1 binds only in the tail
 n_i and Z_imp derivations keep the thermal-numerator Z_eff on every route
 (`impurity_charge_with_fast_ions`, the `ida_hybrid` `zeff_for_ni`), so A1
 moves no density. *Stamp:* `li_metrics["zeff_dd_provenance"]["zeff_definition"]`
-and every draw's `inputs.kinetic_sampler.zeff_definition`.
+(the base's `definition` / `source`, and the draw centre's beside it:
+`draw_centre`, `draw_centred_on_base`) and every draw's
+`inputs.kinetic_sampler.zeff_definition`. On every default and `ida_hybrid`
+route the channel is drawn around the base itself; only the experimental
+classification (`zeff_fast_ions=True`) still draws around the dd's stored
+`zeff`, and its stamp says so (`draw_centred_on_base` False).
 
 | route | Z_eff handed to the kinetics and the bootstrap | `zeff_includes_fast` | Z_eff for n_i / Z_imp |
 |---|---|---|---|
 | plain dd (`kinetic_source="fuse"`, `ni_source="standard"`) | the dd's total: `zeff` dataset, else the all-ion sum (A1) | `True` with a beam | thermal numerator (dd densities) |
 | plain dd, `zeff_fast_ions=True` (experimental) | classified: thermal + Σ Z_s² n_s^fast / n_e where the stored Z_eff counts the beam, else thermal | as classified | thermal numerator |
 | `ida_hybrid`, measured route (default) | IDA's measured Z_eff (total) | `True` | IDA's Z_eff (beam subtracted from n_i) |
-| `ida_hybrid`, `zeff_from_fuse` / `ni_source="standard"` | the dd's thermal-numerator Z_eff (unchanged by A1) | `False` | thermal numerator |
+| `ida_hybrid`, `zeff_from_fuse` / `ni_source="standard"` | the dd's thermal-numerator Z_eff (unchanged by A1); the Z_eff channel is drawn around it, not the dd's stored zeff (review fix C3) | `False` | thermal numerator |
 | g-file + IDA `.cdf` / p-file | the file's Z_eff (VB / route ladder; the p-file's ion mix) | `False` (no beam channel) | the file's |
 
 **2. IDA Z_eff and n_i: the mean of the bremsstrahlung (VB) and carbon-CER

@@ -863,6 +863,61 @@ class TestDefaultsArePre56:
         assert bl.aux["ni_fast_meta"]["applied"] is False
         assert bl.li_metrics["zeff_dd_provenance"]["baseline_zeff_from"] == "dd"
 
+    def test_the_hybrid_standard_draw_is_centred_on_the_base(self, tmp_path):
+        """C3 (review of A1): on ida_hybrid with ni_source="standard" the
+        base Z_eff is the dd's thermal numerator; the Z_eff channel is drawn
+        around that same array (aux['zeff']), not the dd's stored (total)
+        zeff, and the stamp records both definitions.  The measured route
+        keeps the IDA Z_eff as base and centre."""
+        ddp, cdf, *_ = _build(tmp_path, dd_mutate=_store_zeff("all"))
+        _, zth = self._dd_thermal(ddp)
+        stored = np.asarray(json.load(open(ddp))["core_profiles"][
+            "profiles_1d"][0]["zeff"], dtype=float)
+        assert stored[0] > zth[0] + 0.1            # a real two-base split
+        bl = read_imas_baseline(
+            ImasSource(ids_path=ddp, time=1.0, ida_path=cdf, impurity_Z=Z_IMP,
+                       ni_source="standard"),
+            kinetic_source="ida_hybrid")
+        np.testing.assert_array_equal(bl.Zeff, zth)
+        np.testing.assert_array_equal(bl.aux["zeff"], bl.Zeff)
+        d = bl.li_metrics["zeff_dd_provenance"]["zeff_definition"]
+        assert d["definition"] == "thermal-numerator"
+        assert d["draw_centre"] == dict(definition="thermal-numerator",
+                                        source="from_densities")
+        assert d["draw_centred_on_base"] is True
+        # the measured route: unchanged, IDA Z_eff as base and centre
+        bm = read_imas_baseline(
+            ImasSource(ids_path=ddp, time=1.0, ida_path=cdf, impurity_Z=Z_IMP,
+                       ni_source="all"),
+            kinetic_source="ida_hybrid")
+        ida = bm.aux["ida_profiles"][1]
+        np.testing.assert_array_equal(bm.aux["zeff"], bm.Zeff)
+        np.testing.assert_array_equal(bm.Zeff, np.interp(
+            bm.psi_N_kinetic, ida.psi_N, ida.Zeff))
+        dm = bm.li_metrics["zeff_dd_provenance"]["zeff_definition"]
+        assert (dm["definition"], dm["source"]) == ("total", "ida")
+        assert dm["draw_centre"] == dict(definition="total", source="ida")
+
+    def test_the_stamp_shows_the_experimental_routes_split(self, tmp_path):
+        """The one route left with two bases (the EXPERIMENTAL
+        classification on the plain dd, whose channel is the stored zeff):
+        the stamp says so instead of hiding it."""
+        import warnings
+        ddp, *_ = _build(tmp_path, dd_mutate=_store_zeff("neither"))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            bl = read_imas_baseline(
+                ImasSource(ids_path=ddp, time=1.0, impurity_Z=Z_IMP,
+                           zeff_fast_ions=True), kinetic_source="fuse")
+        d = bl.li_metrics["zeff_dd_provenance"]["zeff_definition"]
+        stored = np.asarray(json.load(open(ddp))["core_profiles"][
+            "profiles_1d"][0]["zeff"], dtype=float)
+        np.testing.assert_array_equal(bl.aux["zeff"], stored)
+        assert not np.array_equal(bl.Zeff, stored)
+        assert d["draw_centred_on_base"] is False
+        assert d["draw_centre"] == dict(definition="dataset as stored",
+                                        source="dataset")
+
     def test_the_beam_subtraction_needs_an_ida_route(self, tmp_path):
         with pytest.raises(ValueError, match="ni_subtract_fast"):
             ImasSource(ids_path="x.json", ni_source="standard",
