@@ -108,7 +108,7 @@ BOUQUET_OFT_BUILD_ID=<build> python tests/golden/make_golden_fixture.py --golden
 # the IDS h5 golden (+ ids_golden_manifest.json, ids_rng_stream_manifest.json)
 OMP_NUM_THREADS=1 python tests/golden/regenerate_golden_run.py RUN_I --golden ids --reconstruction-engine unified --verbose
 BOUQUET_OFT_BUILD_ID=<build> python tests/golden/make_golden_fixture.py --golden ids --eqdsk subset --source RUN_I/D3Dlike_ids_golden.h5
-# the legacy JSON golden
+# the legacy JSON golden (the recipe switches the per-draw wall budget off: draw_wall_budget_s=None)
 OMP_NUM_THREADS=1 python tests/golden/regenerate_golden_run.py RUN_L --golden gfile --reconstruction-engine legacy --verbose
 BOUQUET_OFT_BUILD_ID=<build> python tests/golden/make_golden_fixture.py --legacy-json --source RUN_L/D3Dlike_Hmode_golden.h5
 # the sigma=0 probe of any of them (same arguments, its own run directory)
@@ -214,15 +214,17 @@ the drift test; the IDS golden: 18 of 20).
   golden test reads there.
 
 **The legacy JSON golden** is the same recipe on `reconstruction_engine="legacy"`
-(same commit, build and pair): 20 attempts, 15 archived (4 rejected by the
-600 s per-draw wall budget, 1 perturb_failed), 15 in spec, reconstruction
-239 s, draws 131 min; its sigma=0 probe passes on every route the
-configuration can use. The wall budget is wall-clock, so on the legacy route,
-whose draws take 2.5-10 min each, which draws survive depends on the machine
-and its load: a regeneration elsewhere can archive a different set (the
-`49ebebb` run, before the budget existed, archived 19). The
-legacy replay (`tests/test_systematics.py`) reconstructs from the pair its
-stored config names.
+(same commit, build and pair) **with the per-draw wall budget off**
+(`draw_wall_budget_s=None`, `regenerate_golden_run.LEGACY_DRAW_WALL_BUDGET_S`;
+owner decision 2026-10-17). Why: legacy draws take up to about ten minutes
+each on the validation host (2.5-10 min), so under the default 600 s budget
+which draws survive depended on the machine and its load (the 27979d1 run with
+the budget archived 15 of 20, 4 rejected by it; the `49ebebb` run, before the
+budget existed, 19); a golden must be host-independent, and the legacy route
+is deprecated (#90). The h5 goldens keep the default budget. The replay
+(`tests/test_systematics.py`) calls `generate_bouquet` directly, outside the
+class API's `DrawSolveGuard`, so it runs with no budget too -- the same
+setting. The legacy replay reconstructs from the pair its stored config names.
 
 * The legacy record archives the pressure-driven current as its own
   `j_pressure` beside a `j_inductive` that does not carry it, and says so
