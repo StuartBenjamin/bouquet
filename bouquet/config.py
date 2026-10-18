@@ -372,8 +372,10 @@ class ImasSource:
     # True classifies the dd's stored Z_eff against the thermal-only and the
     # thermal+fast numerators (io.imas._dd_zeff) and hands the bootstrap the
     # thermal+fast Z_eff where the dd's convention counts the fast ions.
-    # False (default, as before PR #56): the thermal-only Z_eff recomputed
-    # from the dd's thermal ion densities.
+    # False (default; owner decision A1, 2026-10-17): on the plain dd route
+    # the dd's own TOTAL Z_eff (the zeff dataset, else the all-ion sum over
+    # n_e); the ida_hybrid dd sub-routes keep the thermal-only Z_eff
+    # recomputed from the dd's thermal ion densities.
     zeff_fast_ions: bool = False
     # ida_hybrid on a measured ni_source: subtract the dd's fast-ion density
     # equivalent from the IDA (total) n_i (bouquet.experimental.

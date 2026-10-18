@@ -1193,7 +1193,8 @@ The floor at 1 and the n_i floor / ceiling of item 3
 and on by default on every route since 2026-10-17: the floor is a physical
 constraint, every clip that fires is counted per draw and archived, and the
 clipped fraction is the number to watch on a clean plasma. The other defaults are the routes
-before PR #56: the thermal-only dd Z_eff on FUSE kinetics, the IDA VB Z_eff
+before PR #56 (except the plain dd route's Z_eff, the dd's own TOTAL Z_eff
+since A1, below): the IDA VB Z_eff
 with n_i from quasineutrality and the carbon > VB > scalar envelope ladder on a
 g-file + IDA run, and only the `zeff_bounds` window on a drawn Z_eff. Each assumption is stated,
 justified and cited here, and each is visible in the records (the stamps named
@@ -1219,6 +1220,28 @@ Z_eff includes the fast ions (with no stored Z_eff and a beam present, always).
 *Caveat:* the ion-ion terms of the theory assume Maxwellian ions; the fast-ion
 contribution to the ion collisionality is an approximation, small where
 n_fast ≪ n_i. *Stamp:* `Baseline.zeff_includes_fast`.
+
+**Since A1 (owner decision 2026-10-17) the plain dd route uses the TOTAL
+Z_eff by default**, without the classification: the dd's `zeff` dataset as
+stored (the standard IMAS definition), else Σ_s Z_s² (n_s^th + n_s^fast) / n_e
+from its densities (`io.imas._dd_total_zeff`; a stored Z_eff closer to the
+thermal-only numerator is warned about and used as stored). The Z_eff channel
+is drawn around the same array, with the dd's absolute σ, so the draw is
+centred on the quantity it perturbs and the floor at 1 binds only in the tail
+(on the synthetic dd at 1.2 s: 1.40 on axis, against the thermal-numerator
+0.98 used before; the engine-grid floor of the clips stays as a backstop). The
+n_i and Z_imp derivations keep the thermal-numerator Z_eff on every route
+(`impurity_charge_with_fast_ions`, the `ida_hybrid` `zeff_for_ni`), so A1
+moves no density. *Stamp:* `li_metrics["zeff_dd_provenance"]["zeff_definition"]`
+and every draw's `inputs.kinetic_sampler.zeff_definition`.
+
+| route | Z_eff handed to the kinetics and the bootstrap | `zeff_includes_fast` | Z_eff for n_i / Z_imp |
+|---|---|---|---|
+| plain dd (`kinetic_source="fuse"`, `ni_source="standard"`) | the dd's total: `zeff` dataset, else the all-ion sum (A1) | `True` with a beam | thermal numerator (dd densities) |
+| plain dd, `zeff_fast_ions=True` (experimental) | classified: thermal + Σ Z_s² n_s^fast / n_e where the stored Z_eff counts the beam, else thermal | as classified | thermal numerator |
+| `ida_hybrid`, measured route (default) | IDA's measured Z_eff (total) | `True` | IDA's Z_eff (beam subtracted from n_i) |
+| `ida_hybrid`, `zeff_from_fuse` / `ni_source="standard"` | the dd's thermal-numerator Z_eff (unchanged by A1) | `False` | thermal numerator |
+| g-file + IDA `.cdf` / p-file | the file's Z_eff (VB / route ladder; the p-file's ion mix) | `False` (no beam channel) | the file's |
 
 **2. IDA Z_eff and n_i: the mean of the bremsstrahlung (VB) and carbon-CER
 routes (`ni_source="all"`), each clamped to the single-impurity window first.**

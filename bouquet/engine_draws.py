@@ -246,7 +246,7 @@ class EngineDrawContext:
 
     def __init__(self, eng, res, *, loop, native, q0_row=False,
                  label="engine draw", bootstrap_refresh=False, Z_imp=None,
-                 zeff_includes_fast=False):
+                 zeff_includes_fast=False, zeff_definition=None):
         from .engine import _lin, complete_geometry  # noqa: F401
         from .edge_pressure import pressure_gradient, resolve_edge_pressure
         from .utils import closure_sign_convention, structured_basis_eval
@@ -339,6 +339,11 @@ class EngineDrawContext:
         #: Z_eff window and ni derivation; bouquet.kinetic_sampler)
         self.Z_imp = None if not Z_imp else float(Z_imp)
         self.zeff_includes_fast = bool(zeff_includes_fast)
+        #: the definition of the base Z_eff (A1, 2026-10-17: ``{definition,
+        #: source}`` from the reader's ``zeff_dd_provenance``; None off the
+        #: IMAS path), stamped in every draw's kinetic_sampler record
+        self.zeff_definition = (None if not zeff_definition else {
+            k: zeff_definition.get(k) for k in ("definition", "source")})
         self._kin_eq_native = {k: _pchip(self.psi_kin, self.native[k],
                                          self.psi)
                                for k in ("ne", "te", "ni", "ti")}
@@ -599,6 +604,8 @@ def sample_kinetics(ctx, rng, unc, flux_integral, *, p_thresh=0.05,
                   f"{n_eq_floor} engine-grid node(s) (the increment on the "
                   "base Z_eff fell below it; clips on)", flush=True)
     ks_rec["eq_zeff_floor_1"] = n_eq_floor
+    if getattr(ctx, "zeff_definition", None):
+        ks_rec["zeff_definition"] = dict(ctx.zeff_definition)
     ks_rec["clipped"] = bool(ks_rec["clipped"] or n_eq_floor > 0)
     p, th = ctx.pressures(kin)
     return EngineDrawInputs(
@@ -2389,6 +2396,8 @@ def context_from_run(run, gc, bl):
         run["engine"], run["result"], loop=draw_loop_settings(gc),
         native=native, Z_imp=getattr(bl, "Z_imp", None),
         zeff_includes_fast=bool(getattr(bl, "zeff_includes_fast", False)),
+        zeff_definition=((getattr(bl, "li_metrics", None) or {}).get(
+            "zeff_dd_provenance") or {}).get("zeff_definition"),
         q0_row=bool(getattr(gc, "engine_draw_q0_row", False)),
         bootstrap_refresh=bool(getattr(gc, "engine_draw_bootstrap_refresh",
                                        False)))

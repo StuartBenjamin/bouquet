@@ -1714,6 +1714,16 @@ def zeff_bounds(ne, Z_imp, z_fast=None, z2_fast=None,
     hydrogenic beam.  Returns scalars when ``z_fast`` is None and arrays
     otherwise; ``hi`` is not clamped above ``lo``, so a surface whose fast
     population overwhelms ``ne`` yields an empty window the caller can detect.
+
+    The ``False`` window's lower edge ``ne_th/ne < 1`` (a thermal-numerator
+    Z_eff with a beam may lie below 1; the PR #56 clips floor a draw at 1
+    there) is no longer reached on the plain dd route: since A1 (owner
+    decision 2026-10-17) that route carries the dd's TOTAL Z_eff with
+    ``zeff_includes_fast=True``, whose lower edge is 1 for a hydrogenic
+    beam.  It remains reachable on the ida_hybrid dd sub-routes
+    (``zeff_from_fuse`` / ``ni_source="standard"``) and under the
+    experimental ``fuse_zeff_fast_ions`` classification of a thermal-only
+    stored Z_eff.
     """
     Z_imp = float(Z_imp)
     if z_fast is None:

@@ -80,9 +80,11 @@ REGISTRY = {
             "the thermal-only and the thermal+fast numerators (io.imas."
             "_dd_zeff) and, where it counts the fast ions (or when no Z_eff "
             "is stored and the dd carries a beam), hand the bootstrap "
-            "Z_eff_th + z2_fast/n_e with Baseline.zeff_includes_fast=True.  "
-            "Default: the thermal-only Z_eff recomputed from the dd's "
-            "thermal ion densities."),
+            "Z_eff_th + z2_fast/n_e with Baseline.zeff_includes_fast=True "
+            "(a stored Z_eff classified thermal-only: the thermal-only Z_eff).  "
+            "Default (owner decision A1, 2026-10-17): the dd's own TOTAL "
+            "Z_eff -- the zeff dataset as stored, else the all-ion sum over "
+            "n_e -- with no classification (io.imas._dd_total_zeff)."),
         enabled_by=["ImasSource.zeff_fast_ions=True"],
         introduced="PR #56, 1.4.0",
         validation_todo=[

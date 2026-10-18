@@ -1,5 +1,25 @@
 # Bouquet — change summaries
 
+## Unreleased — the dd route's total Z_eff (A1)
+
+- **Plain dd route: the kinetics and the Sauter bootstrap take the dd's own
+  TOTAL Z_eff (owner decision A1, 2026-10-17).** On `ImasSource` with FUSE
+  kinetics (`ni_source="standard"`) the Z_eff handed to the engine and the
+  bootstrap coefficients is the dd's `zeff` dataset as stored (the standard
+  IMAS definition: all ions, fast included, over n_e), else
+  Σ_s Z_s² (n_s^th + n_s^fast) / n_e from its densities -- no longer the
+  thermal-numerator recomputation -- with `Baseline.zeff_includes_fast=True`
+  on a beam slice. The Z_eff draw is now centred on the quantity it is drawn
+  from (the dd's absolute σ kept), so the floor at 1 binds only in the tail;
+  the engine-grid floor stays as a backstop. n_i and Z_imp keep the
+  thermal-numerator derivation (no density moves). Stamped as
+  `li_metrics["zeff_dd_provenance"]["zeff_definition"]` (`definition`,
+  `source` "dataset" | "from_densities") and in every draw's
+  `inputs.kinetic_sampler.zeff_definition`. The `ida_hybrid` route and the
+  experimental `zeff_fast_ions` classification are unchanged. Synthetic dd at
+  1.2 s: Z_eff on axis 0.98 -> 1.40; Redl I_BS 105.8 -> 107.2 kA, beta_N
+  1.626 -> 1.627; 10 fixed-seed draws with a clip 8 -> 1.
+
 ## Unreleased — the kinetic clips reach the engine-grid Z_eff
 
 - **Engine draws: the Z_eff floor at 1 now acts on the Z_eff the bootstrap

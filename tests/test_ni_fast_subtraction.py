@@ -684,7 +684,8 @@ class TestPFileFastIonBlock:
 
 # ---------------------------------------------------------------------------
 # owner decision 2026-10-09: the PR #56 combination is opt-in; the defaults
-# are the reader before PR #56
+# are the reader before PR #56 -- except the plain dd route's Z_eff, the dd's
+# own TOTAL Z_eff since A1 (owner decision 2026-10-17)
 # ---------------------------------------------------------------------------
 class TestDefaultsArePre56:
     def _dd_thermal(self, ddp):
@@ -697,24 +698,52 @@ class TestDefaultsArePre56:
         return ne, num / ne
 
     @pytest.mark.parametrize("kind", [None, "thermal", "all"])
-    def test_fuse_bootstrap_zeff_is_thermal_only(self, tmp_path, kind):
-        """kinetic_source='fuse', a 20 % beam: whatever the stored zeff's
-        numerator, the bootstrap Z_eff is the thermal recompute, the
-        convention flag stays False, and aux['zeff'] is the stored zeff (or
-        the thermal one without it) -- as before PR #56."""
+    def test_fuse_bootstrap_zeff_is_the_dds_total(self, tmp_path, kind):
+        """kinetic_source='fuse', a 20 % beam (owner decision A1,
+        2026-10-17): the bootstrap Z_eff is the dd's own TOTAL Z_eff -- the
+        stored zeff as stored, else the all-ion sum over n_e -- with the
+        convention flag True; the Z_eff channel is drawn around the same
+        array (aux['zeff']); n_i and Z_imp keep the thermal-numerator
+        derivation (identical whatever is stored); the definition is
+        stamped.  A stored zeff closer to the thermal numerator is warned
+        about and used as stored."""
+        import warnings
         ddp, *_ = _build(tmp_path, dd_mutate=_store_zeff(kind))
-        bl = read_imas_baseline(ImasSource(ids_path=ddp, time=1.0,
-                                           impurity_Z=Z_IMP),
-                                kinetic_source="fuse")
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            bl = read_imas_baseline(ImasSource(ids_path=ddp, time=1.0,
+                                               impurity_Z=Z_IMP),
+                                    kinetic_source="fuse")
+        warned = [x for x in w if "closer to the THERMAL-only" in str(x.message)]
+        assert bool(warned) is (kind == "thermal")
         ne, zth = self._dd_thermal(ddp)
-        np.testing.assert_array_equal(bl.Zeff, zth)
-        assert bl.zeff_includes_fast is False
         cp = json.load(open(ddp))["core_profiles"]["profiles_1d"][0]
-        np.testing.assert_array_equal(
-            bl.aux["zeff"], np.asarray(cp["zeff"], dtype=float)
-            if kind is not None else zth)
+        if kind is None:
+            np.testing.assert_allclose(bl.Zeff, zth + bl.z2_fast / ne,
+                                       rtol=1e-12)
+        else:
+            np.testing.assert_array_equal(
+                bl.Zeff, np.asarray(cp["zeff"], dtype=float))
+        # the beam (zero at the edge) is in the numerator -- unless the dd
+        # stored the thermal one, which A1 takes as stored (and warned)
+        if kind != "thermal":
+            assert np.all(bl.Zeff >= zth) and bl.Zeff[0] > zth[0]
+        assert bl.zeff_includes_fast is True
+        np.testing.assert_array_equal(bl.aux["zeff"], bl.Zeff)   # draw centre
         rec = bl.li_metrics["zeff_dd_provenance"]
-        assert rec["convention"] == "thermal-only" and rec["source"] == "default"
+        assert rec["convention"] == "thermal+fast"
+        assert rec["zeff_definition"]["definition"] == "total"
+        assert rec["zeff_definition"]["source"] == (
+            "from_densities" if kind is None else "dataset")
+        assert rec["baseline_zeff_includes_fast"] is True
+        json.dumps(rec)
+        # the thermal-numerator derivations are unchanged by A1
+        (tmp_path / "ref").mkdir()
+        ref = read_imas_baseline(
+            ImasSource(ids_path=_build(tmp_path / "ref")[0], time=1.0,
+                       impurity_Z=Z_IMP), kinetic_source="fuse")
+        np.testing.assert_array_equal(bl.ni, ref.ni)
+        assert bl.Z_imp == ref.Z_imp
 
     def test_ida_hybrid_keeps_the_dd_zeff_and_derives_ni_from_it(self, tmp_path):
         """ida_hybrid with the explicit dd route (ni_source="standard"; the

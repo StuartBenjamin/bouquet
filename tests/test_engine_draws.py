@@ -235,6 +235,40 @@ def test_the_clips_floor_the_engine_grid_zeff_the_bootstrap_receives(recon):
     assert lows > 0 and floors > 0
 
 
+def test_the_zeff_definition_is_stamped_and_the_draw_is_centred_on_it(recon):
+    """A1 (owner decision 2026-10-17): on the plain dd route the drawn Z_eff
+    channel and the engine's base Z_eff are the same quantity (the dd's
+    total Z_eff), so the increment the solve receives IS the drawn channel
+    (no engine-grid floor binds unless the draw itself sits below 1), and
+    the base's definition is stamped in every draw's kinetic_sampler
+    record; a context without one stamps nothing."""
+    from bouquet.sampling import make_rng
+    eng, res, rec, b = recon
+    base = np.asarray(eng.c.kinetics["zeff"], dtype=float)
+    unc = _unc(_ctx(eng, res), f=0.03)
+    unc.update(aux_sigmas={"zeff": np.full(PSI.size, 0.1)},
+               aux_baselines={"zeff": np.interp(PSI, PSI, base)},
+               aux_length_scales={"zeff": 0.4}, kinetic_clips=True)
+    stamp = {"definition": "total", "source": "dataset"}
+    ctx = _ctx(eng, res)
+    ctx.zeff_definition = dict(stamp)
+    bare = _ctx(eng, res)
+    for seed in range(4):
+        inp = ED.sample_kinetics(ctx, make_rng(seed), unc, b.flux_integral,
+                                 p_thresh=0.05)
+        ks = inp.sampler["kinetic_sampler"]
+        assert ks["zeff_definition"] == stamp
+        assert ks["eq_zeff_floor_1"] == 0
+        np.testing.assert_allclose(
+            inp.kinetics["zeff"],
+            ED._pchip(ctx.psi_kin, inp.aux["zeff"], ctx.psi),
+            rtol=0, atol=1e-12)
+        ks_bare = ED.sample_kinetics(bare, make_rng(seed), unc,
+                                     b.flux_integral, p_thresh=0.05
+                                     ).sampler["kinetic_sampler"]
+        assert "zeff_definition" not in ks_bare
+
+
 def test_a_zero_sigma_sample_is_exactly_the_base(recon):
     eng, res, rec, b = recon
     ctx = _ctx(eng, res)
