@@ -181,10 +181,13 @@ Z_eff = (n_i + 36 n_z1 + n_b)/n_e: equal to the IDA file's Z_eff to 4.6e-5
 `p_fast` (decision B, 2026-10-17): with `fixed_components.p_fast` unset it uses
 1e3 x `pb` (Pa) on `pb`'s own psinorm (coord `"psi_n"`), stamped
 `li_metrics["p_fast_source"]["p_fast_source"] = "pfile_pb"`; an explicit
-`fixed_components.p_fast` still wins (a warning names the field, once). Measured
+`fixed_components.p_fast` still wins (a warning names the field, once per run).
+The `pb` header's unit is checked: this file says `KPa`; any other label warns
+and is not converted (stamped `pb_header_units`, `pb_units_ok`). Measured
 on `g_synthetic_pfast.geqdsk` + this file at the defaults (engine route, one
 reconstruction): beta_N 1.671 against the g-file's 1.684 (-0.7 %), report-only
-`pressure_fidelity` relative RMS 0.0055, on axis -0.42 %. Before B the defaults
+`pressure_fidelity` relative RMS 0.0055, on axis -0.42 % (silent: it warns
+beyond +/-10 % on axis, either sign). Before B the defaults
 dropped `pb`: beta_N 0.630 (-62.6 %) with every verdict check passing
 (`tests/test_pfile_pfast_default.py` holds the fast tests).
 

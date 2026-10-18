@@ -463,14 +463,18 @@ stamped `li_metrics["p_fast_source"] = {"p_fast_source": "pfile_pb", ...}`
 (and `Baseline.p_fast_source`; `Baseline.p_fast_meta` stays the IMAS route's
 reduction record).
 An explicit `p_fast` still wins (stamped `"fixed_components"`; a p-file with
-`pb` beside it warns once, naming the field); a p-file without `pb`, and an
+`pb` beside it warns once per run, naming the field); a p-file without `pb`, and an
 IDA `.cdf`, give zero fast pressure as before (`"none"`). Every g-file-route
 reconstruction also carries the **report-only** `reconstruction_metrics
 ["pressure_fidelity"]`: the full pressure (the solver's, separatrix pressure
 added back) against the input g-file's, as a relative RMS and the on-axis
-relative error, with a `UserWarning` when the on-axis deficit exceeds 10 %
-(the band that would have caught, with wide margin, the −63 % of a dropped
-`pb`). It is never part of the verdict.
+relative error, with a `UserWarning` when the on-axis error exceeds 10 %
+either way (the band that would have caught, with wide margin, the −63 % of a
+dropped `pb`; an excess warns too, since a default `pb` can only add pressure:
+a g-file whose pressure is thermal only, or a `pb` not in kPa). It is never
+part of the verdict. The `pb` block's header unit is checked: anything but
+kPa warns and is **not** converted (stamped `pb_header_units`,
+`pb_units_ok`).
 
 `p_fast`, `j_NBI`, `j_RF`, `j_other` on their own `psi_N` grid — additive
 components that are never perturbed (an explicit `j_other` replaces every

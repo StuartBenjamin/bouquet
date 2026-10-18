@@ -44,6 +44,15 @@
   `Baseline.p_fast_source` (appended, default None); `p_fast_meta` is the IMAS
   record only (None on the g-file route, as before B). The archived stamp
   `li_metrics["p_fast_source"]` is unchanged.
+- **The pressure-fidelity warning is two-sided; the `pb` header unit is
+  checked (B review).** The report-only stamp warned only on an on-axis
+  DEFICIT beyond 10 %, but the p-file's `pb` is now added by default, so its
+  likely errors are excesses (a g-file whose pressure is thermal only beside
+  a p-file with `pb`; a `pb` written in Pa, 1000 x too large). It now also
+  warns on an on-axis EXCESS beyond the same 10 % (`axis_excess_flag` beside
+  `axis_deficit_flag`); still report-only, never in the verdict. The reader
+  records the `pb` block's header unit and warns when it is not kPa, without
+  converting (`pb_header_units`, `pb_units_ok` in the stamp).
 
 ## Unreleased — goldens after A1 / B / C
 

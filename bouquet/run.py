@@ -1488,8 +1488,9 @@ class Bouquet(SwbBaseline):
             print(f"  {'pressure':<12} full p vs input: rel RMS "
                   f"{_pfid['rel_rms']:.3f}, on axis "
                   f"{_pfid['axis_rel_err_pct']:+.1f}% (report-only; warns "
-                  f"beyond -{_pfid['warn_band_pct']:g}%)"
-                  + ("  ⚠" if _pfid.get("axis_deficit_flag") else ""))
+                  f"beyond +/-{_pfid['warn_band_pct']:g}%)"
+                  + ("  ⚠" if (_pfid.get("axis_deficit_flag")
+                               or _pfid.get("axis_excess_flag")) else ""))
             from .baseline import warn_pressure_fidelity
             warn_pressure_fidelity(_pfid)
         print(f"  {'boundary':<12} RMS {m['boundary_rms_mm']:.2f} mm   "

@@ -335,7 +335,7 @@ class Baseline:
     # The g-file route's fast-ion pressure INPUT record (decision B,
     # 2026-10-17; resolve_p_fast_input): {"p_fast_source": "pfile_pb" |
     # "fixed_components" | "none", "pfile_has_pb", and for "pfile_pb" "coord",
-    # "units", "p_fast_axis_Pa"}.  None on the IMAS route,
+    # "units", "pb_header_units", "pb_units_ok", "p_fast_axis_Pa"}.  None on the IMAS route,
     # whose fast-pressure REDUCTION record is p_fast_meta (a different schema,
     # kept apart so a summary over mixed baselines never mixes them).
     # Archived as li_metrics["p_fast_source"].
@@ -1337,7 +1337,10 @@ def resolve_p_fast_input(fc, kin, profiles_path, psi_map):
     * unset, and the profiles file is a p-file with a ``pb`` block: p_fast
       defaults to ``PFILE_PB_TO_PA * pb`` on ``pb``'s own psinorm (coord
       ``"psi_n"``, mapped to the run grid through *psi_map*);
-      ``p_fast_source="pfile_pb"``.
+      ``p_fast_source="pfile_pb"``.  The block header's unit label is
+      checked (``pb_header_units``, ``pb_units_ok``): anything but kPa is
+      warned about and NOT converted (a label cannot say what the numbers
+      are); the warning is collected inside a run like the two-source one.
     * otherwise (an IDA file, a p-file without ``pb``): ``(None, None, ...)``
       -- zero fast pressure, as before; ``p_fast_source="none"``.
 
@@ -1369,10 +1372,27 @@ def resolve_p_fast_input(fc, kin, profiles_path, psi_map):
                 dict(p_fast_source="fixed_components", pfile_has_pb=has_pb))
     if has_pb:
         pb = PFILE_PB_TO_PA * np.asarray(kin["pb"], dtype=float)
+        # the Osborne p-file writes pb in kPa (the reader's UNITS); a header
+        # that says otherwise is warned about, never converted: its label
+        # alone cannot say what the numbers are (the pressure-fidelity stamp
+        # then reports any excess or deficit against the g-file)
+        units = kin.get("pb_units")
+        units_ok = isinstance(units, str) and units.strip().lower() == "kpa"
+        if not units_ok:
+            from .utils import warn_or_defer
+            warn_or_defer(
+                f"the p-file {os.path.basename(str(profiles_path))!r} labels "
+                f"its fast-ion pressure block pb in {units!r}, not kPa: p_fast "
+                f"is taken as {PFILE_PB_TO_PA:g} x pb (the p-file's kPa "
+                "convention) WITHOUT conversion -- check the file (a pb in Pa "
+                "would be 1000 x too large; the report-only pressure-fidelity "
+                "stamp compares the result with the g-file's pressure), or "
+                "set fixed_components.p_fast", UserWarning, stacklevel=3)
         return (pb, coords.to_run_grid(np.asarray(kin["pb_psi_N"], dtype=float),
                                        coords.PSI, psi_map),
                 dict(p_fast_source="pfile_pb", pfile_has_pb=True,
                      coord=coords.PSI, units="Pa (1e3 x the p-file's kPa)",
+                     pb_header_units=units, pb_units_ok=bool(units_ok),
                      p_fast_axis_Pa=float(pb[0])))
     return None, None, dict(p_fast_source="none", pfile_has_pb=False)
 
@@ -1432,6 +1452,9 @@ def _load_kinetic_profiles(source) -> dict:
     if pf.pb is not None:
         out["pb"] = np.asarray(pf.pb, dtype=float)
         out["pb_psi_N"] = np.asarray(pf["pb"]["psinorm"], dtype=float)
+        # the block header's unit label, checked (not converted) by
+        # resolve_p_fast_input
+        out["pb_units"] = pf.units_for("pb")
     return out
 
 
@@ -1830,29 +1853,41 @@ def _deliver_reconstruction_state(mygs, config, source, result, psi_N, ne_eq,
     return j_phi, j_ind, j_BS, offset, state
 
 
-#: The on-axis pressure deficit (%) beyond which the report-only pressure
-#: fidelity stamp warns (decision B, 2026-10-17).  10 % is the band that
-#: would have caught, with wide margin, the g-file + p-file case whose beam
-#: pressure (the p-file's pb) was dropped: -63 % on axis, while every
-#: verdict check (Ip, boundary, l_i) passed.  Never a gate.
+#: The on-axis pressure error (%, either sign) beyond which the report-only
+#: pressure fidelity stamp warns (decision B, 2026-10-17; two-sided since the
+#: review of B).  10 % is the band that would have caught, with wide margin,
+#: the g-file + p-file case whose beam pressure (the p-file's pb) was
+#: dropped: -63 % on axis, while every verdict check (Ip, boundary, l_i)
+#: passed.  The same band applies to an EXCESS: the p-file's pb is added by
+#: default, so its likely errors add pressure (a g-file whose pressure does
+#: not contain the beam, or a pb block not in kPa).  Never a gate.
 PRESSURE_FIDELITY_WARN_PCT = 10.0
 
 
 def warn_pressure_fidelity(record, stacklevel=2):
     """The UserWarning of a :func:`pressure_fidelity_record` whose on-axis
-    deficit is beyond its band (``axis_deficit_flag``); nothing otherwise.
-    Issued where the reconstruction summary is printed, outside the
-    captured solver output, so it reaches the user."""
-    if not isinstance(record, dict) or not record.get("axis_deficit_flag"):
+    error is beyond its band, either sign (``axis_deficit_flag`` /
+    ``axis_excess_flag``); nothing otherwise.  Issued where the
+    reconstruction summary is printed, outside the captured solver output,
+    so it reaches the user."""
+    if not isinstance(record, dict):
+        return
+    if record.get("axis_deficit_flag"):
+        why = ("a pressure component of the g-file is missing from the "
+               "kinetics -- e.g. a fast-ion pressure (fixed_components."
+               "p_fast, or the p-file's pb)")
+    elif record.get("axis_excess_flag"):
+        why = ("the kinetics carry pressure the g-file does not -- e.g. a "
+               "fast-ion pressure counted twice (a p-file pb beside a g-file "
+               "whose pressure is thermal only), or a pb block not in kPa")
+    else:
         return
     import warnings
     warnings.warn(
         f"pressure fidelity (report-only): the reconstruction's on-axis "
         f"pressure is {record['axis_rel_err_pct']:+.1f} % against the input "
-        f"g-file's (beyond the {record['warn_band_pct']:g} % band; relative "
-        f"RMS {record['rel_rms']:.3f}): a pressure component of the g-file "
-        "is missing from the kinetics -- e.g. a fast-ion pressure "
-        "(fixed_components.p_fast, or the p-file's pb)",
+        f"g-file's (beyond the +/-{record['warn_band_pct']:g} % band; "
+        f"relative RMS {record['rel_rms']:.3f}): {why}",
         UserWarning, stacklevel=stacklevel + 1)
 
 
@@ -1865,9 +1900,9 @@ def pressure_fidelity_record(psi_N, p_full, p_input, *,
 
     ``rel_rms`` = RMS(p_full - p_input) / RMS(p_input); ``axis_rel_err_pct``
     = 100 (p_full - p_input) / p_input at the first node.  A UserWarning
-    (:func:`warn_pressure_fidelity`; with *warn*) when the on-axis DEFICIT
-    exceeds *warn_pct* (``axis_deficit_flag``).  Never part of the
-    verdict."""
+    (:func:`warn_pressure_fidelity`; with *warn*) when the on-axis error
+    exceeds *warn_pct* either way: a DEFICIT (``axis_deficit_flag``) or an
+    EXCESS (``axis_excess_flag``).  Never part of the verdict."""
     import numpy as np
     pf = np.asarray(p_full, dtype=float)
     pi = np.asarray(p_input, dtype=float)
@@ -1877,11 +1912,13 @@ def pressure_fidelity_record(psi_N, p_full, p_input, *,
     ax = (float(100.0 * (pf[0] - pi[0]) / abs(pi[0])) if pi[0] != 0.0
           else float("nan"))
     flag = bool(np.isfinite(ax) and ax < -float(warn_pct))
+    excess = bool(np.isfinite(ax) and ax > float(warn_pct))
     rec = dict(report_only=True, frame="full (p_sep added back)",
                psi_N_axis=float(np.asarray(psi_N, dtype=float)[0]),
                p_axis_Pa=float(pf[0]), p_axis_input_Pa=float(pi[0]),
                rel_rms=rel_rms, axis_rel_err_pct=ax,
-               warn_band_pct=float(warn_pct), axis_deficit_flag=flag)
+               warn_band_pct=float(warn_pct), axis_deficit_flag=flag,
+               axis_excess_flag=excess)
     if warn:
         warn_pressure_fidelity(rec)
     return rec

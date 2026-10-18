@@ -120,7 +120,7 @@ def test_the_pressure_fidelity_stamp_reports_and_warns_never_gates():
     assert r["axis_rel_err_pct"] == pytest.approx(-63.0, rel=1e-9)
     assert r["rel_rms"] == pytest.approx(0.63, rel=1e-9)
     assert r["warn_band_pct"] == B.PRESSURE_FIDELITY_WARN_PCT == 10.0
-    # within the band (and an excess, not a deficit): recorded, no warning
+    assert r["axis_excess_flag"] is False
     # warn=False (inside the captured reconstruction): recorded, the warning
     # left to warn_pressure_fidelity where the summary is printed
     with warnings.catch_warnings():
@@ -129,12 +129,24 @@ def test_the_pressure_fidelity_stamp_reports_and_warns_never_gates():
     assert r["axis_deficit_flag"] is True
     with pytest.warns(UserWarning, match="fixed_components.p_fast"):
         B.warn_pressure_fidelity(r)
-    for f in (0.95, 1.30):
+    # within the band either way: recorded, no warning
+    for f in (0.95, 1.05):
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             r = B.pressure_fidelity_record(psi, f * p_in, p_in)
         assert r["axis_deficit_flag"] is False
+        assert r["axis_excess_flag"] is False
         assert r["axis_rel_err_pct"] == pytest.approx(100.0 * (f - 1.0))
+    # an EXCESS beyond the band warns too (two-sided since the review of B:
+    # the p-file's pb is added by default, so its likely errors add
+    # pressure); +30 % was silent before
+    for f in (1.30, 2.0, 10.0):
+        with pytest.warns(UserWarning, match="pressure the g-file does not"):
+            r = B.pressure_fidelity_record(psi, f * p_in, p_in)
+        assert r["axis_excess_flag"] is True
+        assert r["axis_deficit_flag"] is False
+        assert r["axis_rel_err_pct"] == pytest.approx(100.0 * (f - 1.0))
+        assert r["report_only"] is True
 
 
 def test_the_input_record_has_its_own_baseline_field():
@@ -160,3 +172,32 @@ def test_the_input_record_has_its_own_baseline_field():
                for k in n.keywords}
         assert "p_fast_source" in kws, fn.__name__
         assert "p_fast_meta" not in kws, fn.__name__
+
+
+def test_a_pb_header_not_in_kpa_warns_and_is_not_converted(tmp_path):
+    """Review of B (P1): the pb block's header unit is checked.  The shipped
+    p-file says kPa (silent, stamped); a header saying anything else warns,
+    and the values are still taken as kPa -- never converted on a label."""
+    kin = _kin(PFILE)
+    assert kin["pb_units"].lower() == "kpa"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _, _, st = B.resolve_p_fast_input(FixedComponentsConfig(), kin,
+                                          PFILE, None)
+    assert st["pb_units_ok"] is True and st["pb_header_units"] == "KPa"
+    p = tmp_path / "p_pb_pa.peqdsk"
+    p.write_text(open(PFILE).read().replace(" pb(KPa) ", " pb(Pa) "))
+    kpa = _kin(str(p))
+    assert kpa["pb_units"] == "Pa"
+    with pytest.warns(UserWarning, match="not kPa"):
+        vals, _, st = B.resolve_p_fast_input(FixedComponentsConfig(), kpa,
+                                             str(p), None)
+    np.testing.assert_array_equal(vals, B.PFILE_PB_TO_PA * kpa["pb"])
+    assert st["pb_units_ok"] is False and st["pb_header_units"] == "Pa"
+    # inside a run: collected for the reconstruction summary
+    from bouquet.utils import deferred_warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with deferred_warnings() as got:
+            B.resolve_p_fast_input(FixedComponentsConfig(), kpa, str(p), None)
+    assert len(got) == 1 and "not kPa" in got[0][0]
