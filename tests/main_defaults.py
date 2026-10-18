@@ -4,7 +4,7 @@ on both branches."""
 #: ReconstructionSource
 RECON = dict(ni_source="standard")
 #: ImasSource
-IMAS = dict(ida_timing="window", zeff_fast_ions=False)
+IMAS = dict(ida_timing="window", zeff_fast_ions=False, psi_pad=1e-3)
 #: GenerationConfig
 GEN = dict(swb_edge_taper_psi0=None, compress_file_bytes=False)
 
@@ -13,6 +13,8 @@ def from_imas(*args, **kw):
     """``Bouquet.from_imas`` on main's defaults (``kw`` still wins)."""
     import bouquet as bq
     ida_timing = kw.pop("ida_timing", IMAS["ida_timing"])
+    psi_pad = kw.pop("psi_pad", IMAS["psi_pad"])
     b = bq.Bouquet.from_imas(*args, **dict(zeff_fast_ions=IMAS["zeff_fast_ions"], **kw))
     b.config.source.ida_timing = ida_timing
+    b.config.source.psi_pad = psi_pad
     return b

@@ -402,8 +402,9 @@ class ImasSource:
     # warns otherwise.
     include_pfast: bool = True
     # LCFS pad in psi_N: every surface trace and statistic stops at psi_N = 1 - psi_pad, and the
-    # archived g-files and i-files end there (save_eqdsk / save_ifile lcfs_pad).
-    psi_pad: float = 1e-3
+    # archived g-files and i-files end there (save_eqdsk / save_ifile lcfs_pad).  PSFC_dev: 1e-4
+    # by default (main: 1e-3).
+    psi_pad: float = 1e-4
 
     def __post_init__(self):
         from .coords import run_coord
