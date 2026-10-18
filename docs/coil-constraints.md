@@ -118,7 +118,20 @@ homotopy_passes = [
 ```
 
 Total F9A/F9B drift is `drift_F + drift_VSC`, so pick passes such that their
-sum is the desired total F9 tolerance. A single direct solve at the tight
+sum is the desired total F9 tolerance.
+
+The `#VSC` channel's bound at a stage is `drift_VSC x max(min(|F9A|, |F9B|),
+_COIL_DRIFT_DENOM_FLOOR_A)` (10 kA; owner-approved 2026-10-16, at least the
+per-coil floor), and the homotopy's VSC saturation test is taken on the same
+denominator (and against the per-coil floor when that is the installed bound).
+The floor reuses the legacy in-spec VSC metric's constant, not its scale: that
+metric ADDS the 10 kA to `hypot(F9A, F9B)/2`, and the default chi2 rule does
+not use the constant (engine.md, "The vertical-control bound of the homotopy").
+Without the floor a pair with one near-zero coil got a bound of a few hundred
+A, the vertical control sat on it and the draws' axis ran away. This changes a
+homotopy coil bound, not an acceptance gate. The hard-factor bounds below use
+the same floored `#VSC` scale (an outer ceiling must not be tighter than the
+homotopy's bound). A single direct solve at the tight
 target is usually QP-infeasible from a cold start — the schedule is what makes
 ±1% coils reachable.
 

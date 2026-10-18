@@ -4,6 +4,11 @@
                                   core_profiles and core_sources at every time -- spec 1
     diiid_profs_synthetic.cdf     an IDA-layout ("direct") kinetic fit at the dd's
                                   pedestal-forming slice (1.2 s, T_IDA) -- spec 2
+    diiid_profs_synthetic_pfast.cdf  the same kinetic fit (same psi_N grid, same
+                                  kinetics and sigmas) with the q of
+                                  g_synthetic_pfast.geqdsk: the IDA file that
+                                  belongs to the total-pressure g-file, for the
+                                  routes that pair the dd with a g-file -- spec 2b
     g_synthetic.geqdsk            the kinetic-EFIT-like equilibrium that IDA fit
                                   belongs to (COCOS 1), THERMAL pressure only (the
                                   pressure the g-file + IDA route reads from that
@@ -1086,6 +1091,21 @@ def self_checks(out_dir, recs, ida, gfile_dd_t, ida_l, gl_path, pfile=None):
 
 
 # =============================================================================
+def pfast_ida_only(out_dir):
+    """Write ``diiid_profs_synthetic_pfast.cdf`` (spec 2b) next to an EXISTING
+    ``g_synthetic_pfast.geqdsk`` in ``out_dir``, without a solve: the kinetics
+    of the thermal H-mode scenario (exactly those of
+    ``diiid_profs_synthetic.cdf``) on the IDA grid, the q of that g-file, the
+    sigma template of IDA_REGIME."""
+    from bouquet.io.geqdsk import read_geqdsk
+    k_ida = [round(s["t"], 9) for s in SLICES].index(round(T_IDA, 9))
+    sg = dict(SLICES[k_ida], name="g", model="efit", jbeam=None)
+    sgt = dict(sg, name="g_thermal", pressure=PRESSURE_THERMAL)
+    g_pf = read_geqdsk(os.path.join(out_dir, "g_synthetic_pfast.geqdsk"), cocos=1)
+    write_ida(os.path.join(out_dir, "diiid_profs_synthetic_pfast.cdf"), g_pf, sgt, T_IDA)
+    return 0
+
+
 def gate_only(out_dir, mesh=None, n_pass=3):
     """Evaluate the sanity gate of every scenario after a fresh start and
     ``n_pass`` composition passes (no fixture is written; ``gate_dump.npz``
@@ -1154,7 +1174,7 @@ def main(out_dir, mesh=None):
     sg = dict(SLICES[k_ida], name="g", model="efit", jbeam=None)
     rec_g = solve_scenario(mygs, sg, SLICES[k_ida]["ip"], "g")
     recs.append(rec_g)
-    save_gfile(mygs, os.path.join(out_dir, "g_synthetic_pfast.geqdsk"), rec_g)
+    g_pf = save_gfile(mygs, os.path.join(out_dir, "g_synthetic_pfast.geqdsk"), rec_g)
     pfile = write_pfile(os.path.join(out_dir, "p_synthetic.peqdsk"), sg)
     # the state the thermal-only solve continues from (solved after the L-mode,
     # so that the L-mode solve sees the same solver history as before)
@@ -1177,6 +1197,7 @@ def main(out_dir, mesh=None):
     recs.append(rec_gt)
     g = save_gfile(mygs, os.path.join(out_dir, "g_synthetic.geqdsk"), rec_gt)
     ida = write_ida(os.path.join(out_dir, "diiid_profs_synthetic.cdf"), g, sgt, T_IDA)
+    write_ida(os.path.join(out_dir, "diiid_profs_synthetic_pfast.cdf"), g_pf, sgt, T_IDA)
     ok = self_checks(out_dir, recs, ida, os.path.join(work, f"{SLICES[k_ida]['name']}.geqdsk"),
                      ida_l, gl_path, pfile=pfile)
     np.savez(os.path.join(work, "states.npz"), **{
@@ -1200,5 +1221,10 @@ if __name__ == "__main__":
                     "D3D-like example mesh); the fixtures written do not depend on it")
     ap.add_argument("--gate-only", action="store_true", help="evaluate the sanity gate of every "
                     "scenario after a short fresh-start solve; write only gate_dump.npz")
+    ap.add_argument("--pfast-ida-only", action="store_true", help="write only "
+                    "diiid_profs_synthetic_pfast.cdf next to an existing g_synthetic_pfast.geqdsk "
+                    "in out_dir (no solve)")
     a = ap.parse_args()
+    if a.pfast_ida_only:
+        sys.exit(pfast_ida_only(a.out_dir))
     sys.exit(gate_only(a.out_dir, a.mesh) if a.gate_only else main(a.out_dir, a.mesh))

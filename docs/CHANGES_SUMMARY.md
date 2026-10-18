@@ -1,5 +1,130 @@
 # Bouquet — change summaries
 
+## Unreleased — the boundary constraint at a constant total with a reported partition; the homotopy's VSC bound floor; a per-draw wall budget
+
+**Kinetic sampler clips on by default on every route (owner decision 2026-10-17).**
+`UncertaintyConfig.kinetic_clips=None` now resolves to on everywhere, not only
+with a measured IDA route, the beam subtraction or `fuse_zeff_fast_ions`.
+The Z_eff floor at 1 is a physical constraint; without the clip a draw below
+it was refused before any solve (`kinetics_nonphysical`), which cost 7 of 10
+attempts on the synthetic dd fixture (core Z_eff 1.7, template sigma 0.4).
+Every clip that fires is still counted per draw and archived. On a clean
+plasma the clip truncates the lower tail, so the clipped fraction is the
+number to report; a draw in a transformed variable (log-normal on Z_eff - 1)
+is the 1.5 candidate. Tests that asserted the clips off on the plain dd route
+or on a downgraded route now assert on.
+
+- **Boundary constraint: a constant inside a measured window (owner decision 2026-10-16).**
+  `ISOFLUX_WEIGHT_TOTAL` = 2e5 is the total of the standard boundary set (mode
+  "constant"), as at #84, now documented with its measured window (about 1.5e5-4e5) and
+  its balance-crossing band (1.8e5-3.8e5 on six equilibria, the vertical-control pair
+  excluded) (engine.md, "The boundary constraint: a constant total inside a measured
+  window"). A per-case calibrated root find was built on this branch and REMOVED as the
+  default path: the partition is flat in the total over most of the window where the
+  boundary and the vertical-control pair move as one rigid displacement.
+  `SolverConfig.isoflux_weight_total` is the explicit override (None = the constant).
+- **The partition, reported (new stamp, report only).** After the reconstruction ONE
+  capped solve (pressure x 1.02 from the delivered state, the draws' strong coil
+  regularisation) measures (boundary RMS / cut) / (coil drift / cut), the
+  vertical-control pair excluded; stamped under `isoflux_balance.partition` in
+  `solver_geometry_json` and `Baseline.engine["boundary_balance"]` (W nominal and
+  installed, the partition and its parts, `n_solves`, `wall_s`), warned (UserWarning)
+  outside [1/3, 3]. The delivered equilibrium and the coil regularisation are restored;
+  the total is never changed. `SolverConfig.boundary_partition_probe=False` skips it.
+- **The homotopy's #VSC bound scale is floored at 10 kA (owner-approved coil-bound
+  change; no acceptance gate changes).** The scale was `min(|F9A|, |F9B|)`; it is now
+  `max(min(|F9A|, |F9B|), _COIL_DRIFT_DENOM_FLOOR_A)`, reusing the legacy in-spec VSC
+  metric's constant (that metric adds the 10 kA to hypot/2; the default chi2 rule does not
+  use it, so the two are not on one scale), and the homotopy's VSC saturation measure uses
+  the same denominator. On a reversed-I_p case with a 2.8 kA coil in the pair it restored 9
+  of 10 archived draws at 2e5 (was 1 of 10: the channel on its 279 A bound, the axis
+  running away). Inactive when the smaller coil carries more than 10 kA. The in-spec
+  rule and the sigma=0 coil gate are unchanged; the hard-factor bounds use the same
+  floored scale (review fix below).
+- **The vertical-runaway label.** A homotopy stage stopped at the iteration cap with the
+  vertical-control channel at its bound and the axis more than 0.1 a from the delivered
+  axis vertically is labelled `"vertical_runaway"` in its cap event (`Bouquet.engine_draw_cap_events`);
+  a label, never a gate or a filter.
+- **`vsc_soft_reg_weight` stays 1.0**; its docstring records the 2026-05 and 2026-10
+  scans (1, 10, 100 identical; 1e3 starves vertical control; 1e4 fails sigma=0).
+- **Per-draw wall budget.** `GenerationConfig.draw_wall_budget_s` (default 600 s, None =
+  off): checked before each of a draw's solves (never inside one) and before archiving; a
+  draw over it is rejected as `draw_wall_budget`, recorded like every rejection, and the
+  budget and its count stamped in the generation provenance. The structural bound (every
+  solve capped at `engine_draw_solve_maxits`, a bounded number of solves per draw) is
+  documented beside it (engine.md, "Cost").
+- **Fixtures.** `tests/data/diiid_profs_synthetic_pfast.cdf`: the H-mode IDA fit on the
+  total-pressure g-file's q; `test_phi_imas_solver` and `test_swb_systematics_solver` pair
+  the dd with it and `g_synthetic_pfast.geqdsk` (their premise did not hold on the
+  thermal-only g-file); no bar moved.
+- **Review fixes (#94).**
+  - A process-parallel merge carries `draw_wall_budget_s` (one budget for every shard;
+    shards under different budgets are refused) and the summed
+    `draw_wall_budget_rejections`; both are generation-provenance keys, and an attempt the
+    budget ended has the outcome `"draw_wall_budget"`.
+  - `SolverConfig.isoflux_weight_total` is validated (None, or a finite number > 0; 0,
+    NaN, negative and bool are refused); set but ignored (with `isoflux_weights`, or on the
+    legacy route) it warns and, where there is a balance record, is recorded as ignored.
+  - The partition probe's legacy coil fraction is the legacy in-spec F metric itself
+    (coils named F*, the 1 A floor), not a re-derivation over every non-VSC coil.
+  - The text that still called the kinetic clips opt-in / EXPERIMENTAL is corrected, and
+    `KINETIC_SAMPLER_VERSION` is `kinetic_sampler/3.1`: the `/3` draw arithmetic for a given
+    `clips` flag, archived under the new on-by-default rule (the `/3` string said "opt-in").
+  - The VSC floor's docstrings and engine.md state what it shares with each metric (the
+    constant only), replacing "the same scale the acceptance metric judges it".
+  - The wall budget is also checked before each of the opt-in rescue's retries (each a
+    full solve); a retry it refuses is recorded on the failed solve.
+  - Non-default paths: the hard-factor `#VSC` bound uses the floored scale (and its guard
+    the 10 kA denominator); the VSC saturation measure honours the per-coil floor
+    (`floor_A / drift_VSC`, as for the F coils); the pre-archive budget check runs on every
+    draw, not only inside the coil-handling block; the `vertical_runaway` label needs the
+    channel at its bound (the pair's anti-series drift, not a bare coil drift) AND a
+    vertical axis displacement (`|dZ|`) beyond 0.1 a.
+  - The sigma=0 verification draw runs with the wall budget off and records so
+    (`wall_budget`): a reproduction check must not fail on machine load. The draws keep
+    the 600 s default (owner decision 2026-10-16), which is wall-clock and therefore
+    machine-dependent; that is now said in the config comment and engine.md.
+  - The sigma=0 verification counts the kinetic clips on its zero-perturbation draw
+    (`sigma0_clips`; the clips stay on, the same path as every draw) and, when one fired,
+    records `baseline_outside_physical_window` with the counts: a finding on the baseline,
+    not a changed verdict.
+
+## Unreleased — the g-file and systematics notebooks re-executed on the thermal-only g-file
+
+**Examples.** `examples/D3D-like/bouquet_D3Dlike_geqdsk_example.ipynb` and
+`bouquet_D3Dlike_systematics.ipynb` are re-executed at main 49ebebb on the
+corrected, thermal-only `g_synthetic.geqdsk` (their stored outputs were made on
+the total-pressure file). Same code cells, seeds and until-N 24: H-mode 24/24 in
+spec in 24 attempts (beta_N 0.80 [0.77, 0.83], l_i(3) 0.833 [0.794, 0.883]),
+L-mode 24/25; systematics sigma=0 identity passed, pressure-only and production
+24 in spec each, the baseline inside every band (quantiles 0.42-0.62).
+
+## Unreleased — the three goldens regenerated at main 49ebebb (the thermal-only g-file, the rule's in_spec)
+
+**Goldens.** The g-file h5 golden is now the recipe's run of the corrected,
+thermal-only `g_synthetic.geqdsk` + `diiid_profs_synthetic.cdf` (20 attempts:
+18 archived, 2 rejected homotopy_saturated, 18 in spec); the IDS golden is
+regenerated on the same code (20 archived, 20 in spec), and the legacy JSON golden
+is the recipe's legacy-route run of the corrected pair (19 archived, 1
+perturb_failed, 19 in spec); seed 12345 as before.
+Both at main `49ebebb`, OFT build `20260929_7da4f18`, one thread; sigma=0 probe
+passes on both, bistability single. Their archived `in_spec` is now the in-spec
+rule's verdict (coil chi2 AND boundary cut), with the old drift verdict as
+`coil_drift_in_spec` (9 of 18 and 18 of 20 drift-pass). The recipe-identity
+checks (`test_the_golden_is_its_recipe`,
+`test_it_is_the_gfile_golden_on_the_legacy_path`) are back. No tolerance
+changed.
+
+**Golden filter tests (owner-approved 2026-10-16).** `test_coil_filter_reproduces_in_spec`,
+`test_selection_partition` and `test_export_filtered_keeps_selected` compared the
+archived `in_spec` with the legacy +/-2 % drift filter, a premise the rule's
+`in_spec` no longer meets. They are replaced by
+`test_filter_under_the_stamped_rule_reproduces_in_spec` (and the partition and
+export tests filtering the same way): `Bouquet.filter()` on the golden's own
+stored config reproduces `in_spec` on every draw judged by the rule, and
+`refilter_inspec` under the stamped bands leaves the selection unchanged. The
+change was committed as a proposal and is approved as committed.
+
 ## Unreleased — the synthetic H-mode g-file is thermal-only; the total-pressure file kept with a p-file (owner decision 2026-10-15)
 
 **Fixtures.** `tests/data/g_synthetic.geqdsk` carried the dd's TOTAL pressure

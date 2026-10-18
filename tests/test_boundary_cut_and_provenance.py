@@ -237,6 +237,10 @@ def test_generate_bouquet_records_every_exit_of_an_attempt():
     src = inspect.getsource(generate_bouquet)
     for label in ("solve_failed", "post_align_failed", "stored"):
         assert f'_attempt_outcomes[int(count)] = "{label}"' in src
+    # an attempt the wall budget ended is labelled by the budget, at both
+    # rejection exits (review of #94, C1)
+    assert src.count("_budget_outcome(count)") == 2
+    assert '_attempt_outcomes[int(count_)] = "draw_wall_budget"' in src
     assert src.index("stamp_generation_provenance(") > src.index('= "stored"')
     assert "n_attempted=int(_n_att)" in src
 
@@ -255,7 +259,7 @@ def test_refused_slice_is_recorded_not_a_gap(tmp_path):
 # parallel merge aggregates the shards' provenance
 # ---------------------------------------------------------------------------
 
-def _shard(path, worker, n_draws, outcomes, cut=None):
+def _shard(path, worker, n_draws, outcomes, cut=None, budget=None):
     with h5py.File(path, "w") as hf:
         g = hf.create_group("scan/0/_baseline")
         g.attrs["l_i_target"] = 0.9
@@ -273,6 +277,10 @@ def _shard(path, worker, n_draws, outcomes, cut=None):
         if cut is not None:                  # the until-N loop's recorded cut
             sg.attrs["inspec_rms_max_mm"] = cut[0]
             sg.attrs["inspec_cut_source"] = cut[1]
+        if budget is not None:               # (budget_s, its rejections)
+            sg.attrs["draw_wall_budget_s"] = budget[0]
+            if budget[1] is not None:
+                sg.attrs["draw_wall_budget_rejections"] = budget[1]
 
 
 def test_merge_sums_attempts_and_keys_outcomes_by_worker(tmp_path):
@@ -303,6 +311,58 @@ def test_merge_carries_the_loops_boundary_cut(tmp_path):
     assert man["until_n"]["inspec_rms_max_mm"] == 8.5
     assert man["until_n"]["inspec_cut_source"] == "device:DIII-D"
     assert all(w["inspec_rms_max_mm"] == 8.5 for w in man["workers"])
+
+
+def test_wall_budget_is_generation_provenance(tmp_path):
+    assert "draw_wall_budget_s" in GENERATION_PROVENANCE_KEYS
+    assert "draw_wall_budget_rejections" in GENERATION_PROVENANCE_KEYS
+    h = str(tmp_path / "p")
+    stamp_generation_provenance(h, scan_key=0, draw_wall_budget_s=600.0,
+                                draw_wall_budget_rejections=2)
+    rec = read_generation_provenance(h, scan_key=0)
+    assert rec["draw_wall_budget_s"] == 600.0
+    assert rec["draw_wall_budget_rejections"] == 2
+
+
+def test_merge_carries_the_wall_budget_and_sums_its_rejections(tmp_path):
+    """Review of #94, C1: a merged archive must not read as "budget off"."""
+    from bouquet.parallel import merge_archives
+    s0, s1 = str(tmp_path / "w0.h5"), str(tmp_path / "w1.h5")
+    _shard(s0, 0, 2, {0: "stored", 1: "draw_wall_budget", 2: "stored"},
+           budget=(600.0, 1))
+    _shard(s1, 1, 1, {0: "draw_wall_budget", 1: "draw_wall_budget",
+                      2: "stored"}, budget=(600.0, 2))
+    out, _ = merge_archives([s0, s1], str(tmp_path / "m"), scan_key=0)
+    rec = read_generation_provenance(out, scan_key=0)
+    assert rec["draw_wall_budget_s"] == 600.0
+    assert rec["draw_wall_budget_rejections"] == 3
+    oc = rec["attempt_outcomes_json"]
+    assert sum(v == "draw_wall_budget" for w in oc.values()
+               for v in w.values()) == 3          # each one findable
+    with h5py.File(out, "r") as hf:
+        man = json.loads(hf["scan/0"].attrs["parallel_manifest_json"])
+    assert [w["draw_wall_budget_rejections"] for w in man["workers"]] == [1, 2]
+
+
+def test_merge_wall_budget_rejections_unknown_when_a_shard_did_not_count(tmp_path):
+    from bouquet.parallel import merge_archives
+    s0, s1 = str(tmp_path / "w0.h5"), str(tmp_path / "w1.h5")
+    _shard(s0, 0, 1, {0: "stored"}, budget=(600.0, 0))
+    _shard(s1, 1, 1, {0: "stored"}, budget=(600.0, None))
+    out, _ = merge_archives([s0, s1], str(tmp_path / "m"), scan_key=0)
+    rec = read_generation_provenance(out, scan_key=0)
+    assert rec["draw_wall_budget_s"] == 600.0
+    assert rec["draw_wall_budget_rejections"] is None     # never guessed
+
+
+def test_merge_refuses_shards_run_under_different_wall_budgets(tmp_path):
+    from bouquet.parallel import merge_archives
+    s0, s1 = str(tmp_path / "w0.h5"), str(tmp_path / "w1.h5")
+    _shard(s0, 0, 1, {0: "stored"}, budget=(600.0, 0))
+    _shard(s1, 1, 1, {0: "stored"})                       # budget off
+    with pytest.raises(RuntimeError, match="different per-draw wall budgets"):
+        merge_archives([s0, s1], str(tmp_path / "m"), scan_key=0)
+    assert not (tmp_path / "m.h5").exists()
 
 
 def test_merge_refuses_shards_counted_against_different_cuts(tmp_path):

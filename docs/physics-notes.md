@@ -771,6 +771,42 @@ closure-half current gate as a standing criterion); the delivery solve is
 checked on every row and is the reconstruction. Stage 2 builds the baseline
 only: the draws refuse an engine baseline until they run on the engine.
 
+### The boundary constraint's strength is a ratio (model choice)
+
+The free-boundary solve does not hold the plasma boundary exactly: TokaMaker
+finds the coil currents by least squares, with the boundary (isoflux) points
+asking that the flux along the source boundary be one value and the coil
+regularisation asking that each coil stay near its target current, each term
+weighted. Inside the Picard iteration (solve for the plasma current at fixed
+coils, then the coils at fixed plasma current, repeat) only the RATIO of the two
+weights decides how a change of the plasma is shared between a boundary miss
+and a coil change; the absolute scale matters only through conditioning. The
+draws are judged on both outcomes (the boundary RMS cut and the coil cut), so
+the ratio is a modelling assumption with a direct effect on which draws are
+accepted. Bouquet holds the boundary set of #84 (the source boundary resampled
+by arc length, per-length weights) at ONE constant total, 2e5, chosen inside the
+window in which a boundary miss at the boundary cut and a coil drift at the coil
+cut cost the solver comparably: a standard perturbation (a 2 % beta_p change at
+fixed current request) splits between the two cuts in a ratio of 1 at totals of
+1.8e5-3.8e5 on six equilibria, with the vertical-control pair excluded from the
+coil side, and the draws' yield and sigma=0 reproduction hold over about
+1.5e5-4e5 ([engine.md](engine.md), "The boundary constraint: a constant total
+inside a measured window"). The ratio itself is measured on every
+reconstruction and reported, never used to change the total. The vertical-control
+pair is excluded because it is not a shaping degree of freedom: its `#VSC`
+channel is TokaMaker's vertical-position control, deliberately almost
+unregularised, and it moves together with the boundary as one rigid vertical
+displacement -- with it included the ratio is flat near 1 over most of the
+window and does not fix the strength, which is why a per-case calibration to a
+ratio of 1 was rejected. For the same reason the homotopy's bound on that channel
+is scaled with the same 10 kA current floor as the acceptance metric that judges
+it: bounded relative to a near-zero coil current, the channel cannot hold the
+vertical position, the Picard iteration loses it, and the draws fail for a
+reason that has nothing to do with the plasma's perturbation. The assumptions:
+the two penalties are quadratic (TokaMaker's least squares), the flux miss maps
+to a normal boundary displacement through `R B_p`, and the partition of the probe
+perturbation stands for the partition of the draws' perturbations.
+
 ## The pressure handed to the solver: separatrix pressure and the edge P′ pin
 
 Every Grad-Shafranov solve in the package hands the solver two things about
@@ -1150,11 +1186,13 @@ the `ida_hybrid` DEFAULT (owner decision: one thermal-kinetics source per run;
 see [Hybrid kinetics on the IMAS path](#hybrid-kinetics-on-the-imas-path)),
 listed in `bouquet.experimental.GRADUATED` with its open items kept as known
 limitations. Item 1 (`fuse_zeff_fast_ions`, `ImasSource.zeff_fast_ions=True`)
-and the floor at 1 and the n_i floor / ceiling of item 3
-(`kinetic_sampler_clips`, `UncertaintyConfig.kinetic_clips`) stay
-EXPERIMENTAL in `bouquet.experimental.REGISTRY` (see
-[workflows.md, Experimental features](workflows.md#experimental-features-and-their-validation-status));
-the default does not turn the clips on. The other defaults are the routes
+stays EXPERIMENTAL in `bouquet.experimental.REGISTRY` (see
+[workflows.md, Experimental features](workflows.md#experimental-features-and-their-validation-status)).
+The floor at 1 and the n_i floor / ceiling of item 3
+(`kinetic_sampler_clips`, `UncertaintyConfig.kinetic_clips`) are graduated
+and on by default on every route since 2026-10-17: the floor is a physical
+constraint, every clip that fires is counted per draw and archived, and the
+clipped fraction is the number to watch on a clean plasma. The other defaults are the routes
 before PR #56: the thermal-only dd Z_eff on FUSE kinetics, the IDA VB Z_eff
 with n_i from quasineutrality and the carbon > VB > scalar envelope ladder on a
 g-file + IDA run, and only the `zeff_bounds` window on a drawn Z_eff. Each assumption is stated,
@@ -1225,9 +1263,11 @@ n_i down). This is the case `zeff_floor_1` counts separately from the
 physical window, so its frequency can be measured on a real run before the
 floor is revisited. Every clip changes values exactly as before; only the
 counting is new. Each draw's `record()` carries the sampler version
-(`kinetic_sampler/3`), whether the clips were on (`clips_enabled`) and the
-counters, and a log line names every clip that fires. Default (clips off):
-only the Z_eff window row applies.
+(`kinetic_sampler/3.1`; `/3` before the 2026-10-17 default), whether the clips
+were on (`clips_enabled`) and the counters, and a log line names every clip
+that fires. Default: the clips are on on every route
+(`UncertaintyConfig.kinetic_clips=None`, owner decision 2026-10-17); with
+`kinetic_clips=False` only the Z_eff window row applies.
 
 ## Corrective jphi_total iteration
 

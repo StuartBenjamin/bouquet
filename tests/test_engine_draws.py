@@ -1593,6 +1593,73 @@ def test_a_rejected_sigma0_draw_fails_the_check(tmp_path,
     assert _quiet(ED.verify_zero_perturbation, ctx, b.mygs.toy)["passed"]
 
 
+def test_the_sigma0_draw_runs_without_the_wall_budget_the_draws_keep(
+        tmp_path, toy_bouquet_solver, monkeypatch):
+    """Review of #94, P1: every solve slowed past a tiny budget -- the
+    sigma=0 verification draw is NOT budget-rejected (it runs with the
+    budget off and records so; the configured budget is restored), while
+    the same slowed solver under generate() rejects its draws as
+    draw_wall_budget."""
+    import time
+    b = _bq(tmp_path, n=1)
+    b.setup_solver()
+    _quiet(b.prepare_baseline)
+    fake = b.mygs
+    real = type(fake).solve
+
+    def slow(self, *a, **k):
+        time.sleep(0.02)
+        return real(self, *a, **k)
+    monkeypatch.setattr(type(fake), "solve", slow)
+    gc = b.config.generation
+    gc.draw_wall_budget_s = 0.01
+    v = _quiet(b.verify_sigma0_consistency)
+    assert "rejection" not in v and v["passed"]
+    assert v["wall_budget"]["applied_s"] is None
+    assert v["wall_budget"]["configured_s"] == 0.01
+    assert gc.draw_wall_budget_s == 0.01           # restored
+    _quiet(b.generate)
+    assert b.draw_rejections
+    assert {r["reason"] for r in b.draw_rejections} == {"draw_wall_budget"}
+
+
+def test_a_clip_at_sigma0_is_recorded_as_a_baseline_finding(
+        tmp_path, toy_bouquet_solver, monkeypatch):
+    """Review of #94, P2, end to end on the engine toy: the sampler is
+    handed a baseline Z_eff that dips below 1 at one node (sigma 0, clips
+    on) -- the sigma=0 record carries baseline_outside_physical_window with
+    the clip count; the comparison arithmetic is untouched (the verdict is
+    whatever the route gives)."""
+    import dataclasses
+    import bouquet.kinetic_sampler as KS
+    b = _bq(tmp_path)
+    b.setup_solver()
+    _quiet(b.prepare_baseline)
+    real = KS.sample_kinetics
+
+    def dipped(base, rng, *a, **k):
+        zb = np.full(np.asarray(base.ne).shape, 1.5)
+        zb[3] = 0.9                                 # one node below 1
+        base = dataclasses.replace(
+            base, aux_sigmas={"zeff": np.zeros_like(zb)},
+            aux_baselines={"zeff": zb}, aux_length_scales={"zeff": 0.4},
+            Z_imp=6.0, clips=True)
+        return real(base, rng, *a, **k)
+    monkeypatch.setattr(KS, "sample_kinetics", dipped)
+    v = _quiet(b.verify_sigma0_consistency)
+    f = v.get("baseline_outside_physical_window")
+    assert f is not None
+    assert f["clips"].get("zeff_window_lo", 0) \
+        + f["clips"].get("zeff_floor_1", 0) == 1         # the one node
+    assert f["clips"] == {k: n for k, n in v["sigma0_clips"].items() if n}
+    assert "passed" in v and "gates" in v           # verdict still computed
+    # without the dip: counted, no finding
+    monkeypatch.setattr(KS, "sample_kinetics", real)
+    v = _quiet(b.verify_sigma0_consistency)
+    assert "baseline_outside_physical_window" not in v
+    assert v["sigma0_clips"] is None or sum(v["sigma0_clips"].values()) == 0
+
+
 @pytest.mark.parametrize("what", ["bootstrap", "l_i"])
 def test_an_archived_stage_miss_fails_the_sigma0_check(tmp_path,
                                                        toy_bouquet_solver,
