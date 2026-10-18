@@ -135,3 +135,28 @@ def test_the_pressure_fidelity_stamp_reports_and_warns_never_gates():
             r = B.pressure_fidelity_record(psi, f * p_in, p_in)
         assert r["axis_deficit_flag"] is False
         assert r["axis_rel_err_pct"] == pytest.approx(100.0 * (f - 1.0))
+
+
+def test_the_input_record_has_its_own_baseline_field():
+    """Review of B (C4): the g-file route's p_fast INPUT record lives on
+    Baseline.p_fast_source, appended with a None default; Baseline.p_fast_meta
+    stays the IMAS route's reduction record (rule / basis / requested /
+    warned), so a summary over mixed baselines never meets two schemas.  Both
+    g-file baselines (legacy and engine) fill the new field, never
+    p_fast_meta."""
+    import ast
+    import dataclasses
+    import inspect
+    import textwrap
+    from bouquet import Baseline
+    from bouquet import engine as E
+    fields = dataclasses.fields(Baseline)
+    assert fields[-1].name == "p_fast_source"
+    assert fields[-1].default is None
+    for fn in (B._resolve_reconstruction, E._gfile_baseline):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        kws = {k.arg for n in ast.walk(tree) if isinstance(n, ast.Call)
+               and getattr(n.func, "id", None) == "Baseline"
+               for k in n.keywords}
+        assert "p_fast_source" in kws, fn.__name__
+        assert "p_fast_meta" not in kws, fn.__name__

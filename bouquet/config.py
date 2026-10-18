@@ -685,7 +685,9 @@ class FixedComponentsConfig:
     #              provenance; if that cannot be determined, fall back to "sum"
     #              with a loud one-time warning. An explicit rule always wins and
     #              is applied silently. The rule used and the grounds for it are
-    #              recorded on Baseline.p_fast_meta.
+    #              recorded on Baseline.p_fast_meta (IMAS route only; the
+    #              g-file route's p_fast input record, decision B, is
+    #              Baseline.p_fast_source).
     p_fast_reduction: str = "auto"
 
     def __post_init__(self):

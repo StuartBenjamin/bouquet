@@ -332,6 +332,14 @@ class Baseline:
     # Bouquet.prepare_baseline on every path; archived as the _baseline attr
     # solver_geometry_json (and in the engine record).
     solver_geometry: Optional[dict] = None
+    # The g-file route's fast-ion pressure INPUT record (decision B,
+    # 2026-10-17; resolve_p_fast_input): {"p_fast_source": "pfile_pb" |
+    # "fixed_components" | "none", "pfile_has_pb", and for "pfile_pb" "coord",
+    # "units", "p_fast_axis_Pa"}.  None on the IMAS route,
+    # whose fast-pressure REDUCTION record is p_fast_meta (a different schema,
+    # kept apart so a summary over mixed baselines never mixes them).
+    # Archived as li_metrics["p_fast_source"].
+    p_fast_source: Optional[dict] = None
 
     def __repr__(self):
         # concise summary -- the default dataclass repr dumps every numpy array,
@@ -1335,7 +1343,8 @@ def resolve_p_fast_input(fc, kin, profiles_path, psi_map):
 
     *kin* is :func:`_load_kinetic_profiles`' dict (``pb`` / ``pb_psi_N``
     when the p-file carries the block).  ``stamp`` is archived as
-    ``li_metrics["p_fast_source"]`` (and ``Baseline.p_fast_meta``).
+    ``li_metrics["p_fast_source"]`` (and ``Baseline.p_fast_source``; not
+    ``Baseline.p_fast_meta``, the IMAS route's reduction record).
     """
     import os
     import numpy as np
@@ -1708,7 +1717,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         j_RF=j_RF,
         j_other=j_other,
         p_fast=p_fast,
-        p_fast_meta=dict(_p_fast_stamp),
+        p_fast_source=dict(_p_fast_stamp),
         # SAME source as the value handed to the reconstruction above, so the
         # two paths activate together or not at all.  The draws read
         # `Baseline.Z_imp` (run.py hands it to generate_bouquet, and the

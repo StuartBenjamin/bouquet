@@ -36,6 +36,14 @@
   the new centre. The `zeff_definition` stamp now carries the draw centre's
   definition beside the base's (`draw_centre`, `draw_centred_on_base`), so an
   archive shows any remaining split (only the experimental classification).
+- **`Baseline.p_fast_source` (B review).** The g-file route's fast-pressure
+  input record (`p_fast_source`: `"pfile_pb"` / `"fixed_components"` /
+  `"none"`, ...) was stored on `Baseline.p_fast_meta`, which on the IMAS route
+  is the fast-pressure reduction record (`rule`, `basis`, `requested`,
+  `warned`): one attribute, two schemas. It now has its own field,
+  `Baseline.p_fast_source` (appended, default None); `p_fast_meta` is the IMAS
+  record only (None on the g-file route, as before B). The archived stamp
+  `li_metrics["p_fast_source"]` is unchanged.
 
 ## Unreleased — goldens after A1 / B / C
 

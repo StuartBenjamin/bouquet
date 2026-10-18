@@ -3133,8 +3133,10 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
         # PR #56 (owner item E2 stamp): how the IDA Z_eff / n_i were
         # resolved; archived as _baseline li_metrics_json (as on the legacy
         # reconstruction route)
-        p_fast_meta=(dict(kn["p_fast_source"]) if kn.get("p_fast_source")
-                     else None),
+        # decision B: the g-file route's p_fast INPUT record (its own
+        # attribute; p_fast_meta is the IMAS reduction record)
+        p_fast_source=(dict(kn["p_fast_source"]) if kn.get("p_fast_source")
+                       else None),
         li_metrics=({k: dict(kn[k]) for k in ("zeff_provenance",
                                                "p_fast_source")
                      if kn.get(k)} or None))
