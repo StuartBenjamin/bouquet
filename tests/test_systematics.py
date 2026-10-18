@@ -437,6 +437,11 @@ def replay(tmp_path_factory):
     pf_raw = _gen_kw.get("pfile_bytes")
     pf_bl_raw = _gen_kw.get("baseline_pfile_bytes")
 
+    # No per-draw wall budget here: generate_bouquet is called directly,
+    # outside the class API's DrawSolveGuard, which is where
+    # GenerationConfig.draw_wall_budget_s acts -- the setting the legacy
+    # golden's recipe uses (draw_wall_budget_s=None, owner decision
+    # 2026-10-17; tests/golden/README.md).
     def _run(header, ne, te, ni, ti, input_jphi, input_jind, l_i_target,
              pin_jphi, Zeff_run=None, **model):
         mygs.replace_eq(base_snapshot)            # restore baseline each time

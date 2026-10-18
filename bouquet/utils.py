@@ -251,6 +251,60 @@ class DerivativeSanityWarning(UserWarning):
     """
 
 
+#: the open collector of :func:`deferred_warnings` (None: warn at once)
+_DEFERRED_WARNINGS = None
+
+
+@contextlib.contextmanager
+def deferred_warnings():
+    """Collect the baseline's input warnings for one run, to be issued with
+    :func:`emit_deferred_warnings` once the captured solver output is closed.
+
+    A reconstruction runs inside :func:`capture_native_output`, which
+    redirects stderr: a ``warnings.warn`` issued there lands in
+    ``Baseline.reconstruction_log`` and is never seen, and Python's
+    per-location registry then marks it as shown for the rest of the session.
+    Warnings raised through :func:`warn_or_defer` while this block is open are
+    collected instead (each distinct message once) and the block yields the
+    list.  Outside any block :func:`warn_or_defer` warns at once."""
+    global _DEFERRED_WARNINGS
+    prev, _DEFERRED_WARNINGS = _DEFERRED_WARNINGS, []
+    try:
+        yield _DEFERRED_WARNINGS
+    finally:
+        _DEFERRED_WARNINGS = prev
+
+
+def warn_or_defer(message, category=UserWarning, stacklevel=2):
+    """Collect *message* into the open :func:`deferred_warnings` block
+    (returns True), else ``warnings.warn`` it now (returns False)."""
+    if _DEFERRED_WARNINGS is not None:
+        if (message, category) not in _DEFERRED_WARNINGS:
+            _DEFERRED_WARNINGS.append((message, category))
+        return True
+    warnings.warn(message, category, stacklevel=stacklevel + 1)
+    return False
+
+
+def emit_deferred_warnings(records, stacklevel=2):
+    """Issue the warnings a :func:`deferred_warnings` block collected, from
+    the caller's frame (where the reconstruction summary is printed), outside
+    the captured output.  Once per RUN: each is issued against a fresh
+    registry, so a second run of the same input warns again (Python's own
+    registry would show it once per session); the warning filters still
+    apply."""
+    if not records:
+        return
+    try:
+        f = sys._getframe(stacklevel)
+    except ValueError:            # shallower stack than asked for
+        f = sys._getframe(1)
+    for message, category in records:
+        warnings.warn_explicit(message, category, f.f_code.co_filename,
+                               f.f_lineno, module=f.f_globals.get("__name__"),
+                               registry={}, module_globals=f.f_globals)
+
+
 @contextlib.contextmanager
 def capture_native_output(enabled=True):
     """Capture *all* stdout/stderr — both Python-level and OS-level.

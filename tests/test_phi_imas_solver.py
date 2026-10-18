@@ -182,8 +182,8 @@ def _pair(probes, method):
 @pytest.mark.parametrize("method", _METHODS)
 def test_phi_held_kinetics_stay_nearer_their_ida_placement(probes, method):
     # area-averaged normal displacement of each IDA node's surface (inboard and
-    # outboard together); measured on the 1.2 s pair (g_synthetic_pfast, 2026-10-16):
-    # ψ_N-held up to 4.8-5.7 mm, Φ_N-held up to 0.8-1.1 mm
+    # outboard together); measured on the 1.2 s pair (g_synthetic_pfast, 2026-10-16;
+    # unchanged 2026-10-17): ψ_N-held up to 4.8-5.7 mm, Φ_N-held up to 0.8-1.1 mm
     psi, phi = _pair(probes, method)
     worse = [(x, a, b) for x, a, b in zip(psi["psi_N"], psi["dr_mm"], phi["dr_mm"]) if b >= a]
     assert not worse, f"Φ_N-held not nearer at (ψ_N, ψ-held mm, Φ-held mm): {worse[:5]}"
@@ -197,8 +197,8 @@ def test_phi_held_kinetics_stay_nearer_their_ida_placement(probes, method):
 def test_phi_held_ne_matches_ida_in_real_space(probes, method):
     psi, phi = _pair(probes, method)
     # n_e at the points of each IDA surface, averaged round it; measured on the
-    # 1.2 s pair (g_synthetic_pfast, 2026-10-16): 0.58-0.69 % of peak (ψ_N-held) vs
-    # 0.16-0.17 % (Φ_N-held)
+    # 1.2 s pair (g_synthetic_pfast, 2026-10-16; re-measured 2026-10-17): 0.58-0.69 %
+    # of peak (ψ_N-held) vs 0.14-0.17 % (Φ_N-held)
     assert phi["ne_misfit"] < psi["ne_misfit"], (psi["ne_misfit"], phi["ne_misfit"])
 
 

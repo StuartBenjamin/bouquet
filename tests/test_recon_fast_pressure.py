@@ -363,11 +363,14 @@ def test_baseline_regrids_p_fast_before_handing_it_to_the_recon():
     src = _resolve_reconstruction_source()
 
     # p_fast_eq is built by regridding the kinetic-grid array, and is None
-    # (not zeros) when the fixed component is unset, so the default-off path
-    # provably does not enter the new branch.
+    # (not zeros) when no p_fast input resolves (fixed_components.p_fast
+    # unset and no p-file pb block -- decision B, resolve_p_fast_input), so
+    # the default-off path provably does not enter the new branch.
+    assert re.search(r"resolve_p_fast_input\(", src), (
+        "the p_fast input is no longer resolved by resolve_p_fast_input")
     assert re.search(r"p_fast_eq\s*=\s*to_eq\(p_fast_kin\)\s*"
-                     r"if\s+fc\.p_fast\s+is\s+not\s+None\s+else\s+None", src), (
-        "p_fast_eq is no longer `to_eq(p_fast_kin) if fc.p_fast is not None "
+                     r"if\s+_pf_in\s+is\s+not\s+None\s+else\s+None", src), (
+        "p_fast_eq is no longer `to_eq(p_fast_kin) if _pf_in is not None "
         "else None`; the recon may be receiving a kinetic-grid array, or "
         "zeros where None is required for the bitwise default-off path")
 

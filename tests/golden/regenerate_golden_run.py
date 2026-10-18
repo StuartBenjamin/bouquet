@@ -21,6 +21,13 @@ The recipe
 * **Config**: built fresh by the class constructor, every setting at its
   default except the run's identity: ``n_draws`` 20 (attempts; no until-N),
   ``seed`` 12345, ``nthreads`` 1, the engine, and for ``ids`` the slice time.
+  The legacy run (``--reconstruction-engine legacy``) also switches the
+  per-draw wall budget off (``draw_wall_budget_s=None``,
+  :data:`LEGACY_DRAW_WALL_BUDGET_S`; owner decision 2026-10-17): its draws
+  take up to about ten minutes each on the validation host, and a wall-clock
+  budget would make which draws a golden archives depend on the host's speed
+  and load -- a golden must be host-independent (the legacy route is
+  deprecated, #90).
   Only ``output_header`` (the archive name) and ``verbose`` (log output only,
   no numerics) are set besides.  So a golden embodies the defaults of the
   code that made it.  ``--config-from FIXTURE.h5|LEGACY.json`` instead
@@ -107,6 +114,9 @@ IDS_TIME = 1.2
 N_DRAWS = 20
 SEED = 12345
 NTHREADS = 1
+#: the legacy golden's per-draw wall budget: off (owner decision 2026-10-17;
+#: see the module doc).  The h5 goldens keep the default (600 s).
+LEGACY_DRAW_WALL_BUDGET_S = None
 
 #: archive header (= archive basename) of each golden
 ARCHIVE_HEADER = "D3Dlike_Hmode_golden"
@@ -151,6 +161,8 @@ def default_config(golden, engine):
         raise ValueError(golden)
     cfg = b.config
     cfg.generation.seed = SEED
+    if engine == "legacy":
+        cfg.generation.draw_wall_budget_s = LEGACY_DRAW_WALL_BUDGET_S
     return cfg
 
 

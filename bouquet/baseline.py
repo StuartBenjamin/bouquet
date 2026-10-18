@@ -332,6 +332,14 @@ class Baseline:
     # Bouquet.prepare_baseline on every path; archived as the _baseline attr
     # solver_geometry_json (and in the engine record).
     solver_geometry: Optional[dict] = None
+    # The g-file route's fast-ion pressure INPUT record (decision B,
+    # 2026-10-17; resolve_p_fast_input): {"p_fast_source": "pfile_pb" |
+    # "fixed_components" | "none", "pfile_has_pb", and for "pfile_pb" "coord",
+    # "units", "pb_header_units", "pb_units_ok", "p_fast_axis_Pa"}.  None on the IMAS route,
+    # whose fast-pressure REDUCTION record is p_fast_meta (a different schema,
+    # kept apart so a summary over mixed baselines never mixes them).
+    # Archived as li_metrics["p_fast_source"].
+    p_fast_source: Optional[dict] = None
 
     def __repr__(self):
         # concise summary -- the default dataclass repr dumps every numpy array,
@@ -438,64 +446,188 @@ def _same_path(a, b) -> bool:
         return False
 
 
+#: The pairing reason of the one measured-envelope pairing whose baseline is
+#: not from the sigma file itself (owner decision 2026-10-18): the
+#: ``ida_hybrid`` ``ni_source="standard"`` sub-route.  Recorded in
+#: ``zeff_sigma_tier["pairing"]["reason"]``.
+ZEFF_PAIRING_HYBRID_DD_TOTAL = (
+    "ida_hybrid with ni_source='standard': the Z_eff baseline is the dd's "
+    "TOTAL Z_eff (all ions, fast included, over n_e) and the envelope is the "
+    "IDA file's measured one -- two measurements of the same total Z_eff of "
+    "the same discharge, paired by file identity (owner decision "
+    "2026-10-18); the draw is conditional at the dd's fixed beam fraction")
+
+#: Label suffix of a measured IDA tier on that sub-route (and on a measured
+#: route with ``zeff_from_fuse=True``).
+ZEFF_PAIRING_HYBRID_DD_TOTAL_LABEL = "on a dd-derived total-Z_eff baseline"
+
+#: The pairing reason with ``ImasSource.zeff_from_fuse=True`` on a measured
+#: ``ida_hybrid`` route (owner decision 2026-10-18): the Z_eff baseline is
+#: the dd's TOTAL Z_eff, the envelope the IDA file's measured one.
+ZEFF_PAIRING_HYBRID_FROM_FUSE_TOTAL = (
+    "ida_hybrid on a measured ni_source with zeff_from_fuse=True: the Z_eff "
+    "baseline is the dd's TOTAL Z_eff (all ions, fast included, over n_e) "
+    "and the envelope is the IDA file's measured one -- two measurements of "
+    "the same total Z_eff of the same discharge, paired by file identity "
+    "(owner decision 2026-10-18); n_i comes from the IDA Z_eff; the draw is "
+    "conditional at the dd's fixed beam fraction")
+
+
+def hybrid_zeff_from_fuse_total(source, kinetic_source=None, baseline=None):
+    """Is this a measured ``ida_hybrid`` route with ``zeff_from_fuse=True``
+    whose Z_eff baseline is the dd's TOTAL Z_eff (owner decision
+    2026-10-18)?  :class:`~bouquet.config.ImasSource` with
+    ``zeff_from_fuse=True``, the EXPERIMENTAL classification off, the
+    resolved ``ni_source`` a measured one and, when the *baseline* records
+    its Z_eff definition, that definition ``"total"`` (a baseline read
+    before the decision carries the thermal numerator)."""
+    from .config import ImasSource
+    from .experimental import (IDA_ION_ROUTES, fuse_zeff_fast_ions_on,
+                               resolved_ni_source)
+    if (not isinstance(source, ImasSource)
+            or not getattr(source, "zeff_from_fuse", False)
+            or fuse_zeff_fast_ions_on(source)):
+        return False
+    if resolved_ni_source(source, kinetic_source,
+                          baseline=baseline) not in IDA_ION_ROUTES:
+        return False
+    lm = getattr(baseline, "li_metrics", None) if baseline is not None \
+        else None
+    zd = (((lm or {}).get("zeff_dd_provenance") or {})
+          .get("zeff_definition") if isinstance(lm, dict) else None)
+    if isinstance(zd, dict) and zd.get("definition") is not None:
+        return zd.get("definition") == "total"
+    return True
+
+
+def hybrid_dd_total_zeff_subroute(source, kinetic_source=None,
+                                  baseline=None):
+    """Is this the ``ida_hybrid`` ``ni_source="standard"`` sub-route whose
+    Z_eff baseline is the dd's TOTAL Z_eff (owner decision 2026-10-18)?
+
+    :class:`~bouquet.config.ImasSource`; IDA kinetics (the *baseline*'s
+    recorded ``kinetics_route["ida"]`` when it has one, else
+    ``kinetic_source="ida_hybrid"`` with an ``ida_path``); the resolved
+    ``ni_source`` is ``"standard"``; the EXPERIMENTAL classification
+    (``zeff_fast_ions``) off; and, when the *baseline* records its Z_eff
+    definition, that definition is ``"total"`` (a baseline read before the
+    decision carries the thermal numerator and is not this sub-route)."""
+    from .config import ImasSource
+    from .experimental import (IDA_ION_ROUTES, baseline_kinetics_route,
+                               fuse_zeff_fast_ions_on, resolved_ni_source)
+    if not isinstance(source, ImasSource) or fuse_zeff_fast_ions_on(source):
+        return False
+    if resolved_ni_source(source, kinetic_source,
+                          baseline=baseline) in IDA_ION_ROUTES:
+        return False
+    kr = baseline_kinetics_route(baseline)
+    if kr is not None and "ida" in kr:
+        ida = bool(kr["ida"])
+    else:
+        ida = bool(kinetic_source == "ida_hybrid"
+                   and getattr(source, "ida_path", None))
+    if not ida:
+        return False
+    lm = getattr(baseline, "li_metrics", None) if baseline is not None \
+        else None
+    zd = (((lm or {}).get("zeff_dd_provenance") or {})
+          .get("zeff_definition") if isinstance(lm, dict) else None)
+    if isinstance(zd, dict) and zd.get("definition") is not None:
+        return zd.get("definition") == "total"
+    return True
+
+
 def zeff_sigma_eligibility(source, ida_path, kinetic_source=None,
-                           baseline=None):
+                           baseline=None, with_pairing=False):
     """May a measured Z_eff envelope be paired with this baseline?
 
     Returns ``(eligible, reason)``.  ``reason`` is ``""`` when eligible and a
     human-readable explanation otherwise, so a refusal can be WARNED about
     and RECORDED instead of silently costing the run its measured tiers.
+    With ``with_pairing=True`` a third element is returned: ``None`` for
+    the same-file pairing, and for the ``ida_hybrid`` ``ni_source=
+    "standard"`` sub-route a dict ``{"case", "reason"}`` naming that
+    sub-route's own pairing (:data:`ZEFF_PAIRING_HYBRID_DD_TOTAL`); likewise
+    for ``zeff_from_fuse=True`` on a measured route
+    (:data:`ZEFF_PAIRING_HYBRID_FROM_FUSE_TOTAL`).
 
     The measured tiers are absolute sigmas from one IDA ``.cdf`` and pair
-    only with a Z_eff baseline from that same file: the source's own
-    ``profiles_path`` (:class:`ReconstructionSource`) or, on the measured
-    ``ni_source`` routes only (resolved with ``kinetic_source``:
-    :func:`bouquet.experimental.resolved_ni_source`), ``ida_path``
+    with a Z_eff baseline that measures the same total Z_eff of the same
+    discharge: the source's own ``profiles_path``
+    (:class:`ReconstructionSource`); on the measured ``ni_source`` routes
+    (resolved with ``kinetic_source``:
+    :func:`bouquet.experimental.resolved_ni_source`) ``ida_path``
     (:class:`ImasSource`; ``zeff_from_fuse=True`` stays eligible, the
-    envelope carried absolute).  Refusals: no IDA file configured; an
-    :class:`ImasSource` with ``ni_source="standard"`` (its Z_eff is the
-    dd's); the source declares no ``.cdf``; different files (compared
-    resolved, by :func:`_same_path`).
+    envelope carried absolute, and since the owner decision of 2026-10-18
+    its baseline is the dd's TOTAL Z_eff, recorded as its own pairing
+    :data:`ZEFF_PAIRING_HYBRID_FROM_FUSE_TOTAL`,
+    :func:`hybrid_zeff_from_fuse_total`); and, on the ``ida_hybrid``
+    ``ni_source="standard"`` sub-route (:func:`hybrid_dd_total_zeff_subroute`,
+    owner decision 2026-10-18), ``ida_path`` too -- the baseline there is the
+    dd's TOTAL Z_eff of the discharge whose kinetics that file supplies, so
+    the file's Z_eff envelope is the measured sigma of the same quantity.
+    Refusals: no IDA file configured; an :class:`ImasSource` on the plain dd
+    route (FUSE kinetics: its Z_eff is the dd's, with no IDA file in the
+    kinetics) or under the EXPERIMENTAL classification; the source declares
+    no ``.cdf``; different files (compared resolved, by :func:`_same_path`)
+    -- the file test applies to the sub-route exactly as to the others.
     """
     import os
 
     from .config import ImasSource, ReconstructionSource
 
+    def _out(ok, why, pairing=None):
+        return (ok, why, pairing) if with_pairing else (ok, why)
+
     if ida_path is None:
-        return False, "no IDA sigma file is configured (no ladder applies)"
+        return _out(False,
+                    "no IDA sigma file is configured (no ladder applies)")
     ida_name = os.path.basename(_norm_path(ida_path)) or str(ida_path)
 
     from .experimental import IDA_ION_ROUTES, resolved_ni_source
+    pairing = None
     if isinstance(source, ReconstructionSource):
         own, own_kind = str(getattr(source, "profiles_path", "") or ""), "profiles file"
+    elif hybrid_dd_total_zeff_subroute(source, kinetic_source,
+                                       baseline=baseline):
+        # the sub-route's own allowed case: same file test below
+        own, own_kind = str(getattr(source, "ida_path", "") or ""), "ida_path"
+        pairing = {"case": "ida_hybrid ni_source='standard'",
+                   "reason": ZEFF_PAIRING_HYBRID_DD_TOTAL}
     elif (isinstance(source, ImasSource)
           and resolved_ni_source(source, kinetic_source, baseline=baseline)
           not in IDA_ION_ROUTES):
-        # the dd route (ni_source="standard", or "auto" off ida_hybrid): the
-        # IMAS Z_eff is the dd's, never the IDA one
-        return False, (
+        # the plain dd route (FUSE kinetics) or the EXPERIMENTAL
+        # classification: the IMAS Z_eff is the dd's, and no IDA file
+        # measured that discharge's kinetics for this run
+        return _out(False, (
             "the Z_eff baseline comes from the IMAS/FUSE source rather than "
             f"from {ida_name}; pairing a FUSE Z_eff with an IDA-measured "
-            "envelope would mix channels")
+            "envelope would mix channels"))
     elif isinstance(source, ImasSource):
         own, own_kind = str(getattr(source, "ida_path", "") or ""), "ida_path"
+        if hybrid_zeff_from_fuse_total(source, kinetic_source,
+                                       baseline=baseline):
+            pairing = {"case": "ida_hybrid measured ni_source, "
+                               "zeff_from_fuse=True",
+                       "reason": ZEFF_PAIRING_HYBRID_FROM_FUSE_TOTAL}
     else:
-        return False, (
+        return _out(False, (
             f"source type {type(source).__name__} declares no IDA file, so "
-            f"its Z_eff baseline did not come from {ida_name}")
+            f"its Z_eff baseline did not come from {ida_name}"))
     own_norm = _norm_path(own)
     if not own_norm.endswith(".cdf"):
-        return False, (
+        return _out(False, (
             f"the source's own {own_kind} is not an IDA .cdf "
             f"({os.path.basename(own_norm) or '<unset>'}), so its Z_eff "
-            f"baseline did not come from {ida_name}")
+            f"baseline did not come from {ida_name}"))
     if not _same_path(ida_path, own):
-        return False, (
+        return _out(False, (
             f"the sigma file ({ida_name}) is a genuinely different file "
             f"from the source's own {own_kind} "
             f"({os.path.basename(own_norm)}) -- compared after expanduser + "
-            f"realpath, so this is a real mismatch, not a path spelling")
-    return True, ""
+            f"realpath, so this is a real mismatch, not a path spelling"))
+    return _out(True, "", pairing)
 
 
 def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
@@ -503,7 +635,7 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
                           carbon_sigma=None, carbon_source="none",
                           ineligible_reason="", ida_in_play=False,
                           ladder="standard", imas_sigma=None,
-                          imas_source="none", psi_N=None):
+                          imas_source="none", psi_N=None, pairing=None):
     """The Z_eff envelope ladder: highest-fidelity tier available per file.
 
     Returns ``(sigma_array, label, meta)``.
@@ -574,6 +706,16 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
 
     A chosen envelope whose median fraction of |Zeff| exceeds 25 % draws a
     separate report-only warning naming the alternatives.
+
+    ``pairing`` (the third element of :func:`zeff_sigma_eligibility` with
+    ``with_pairing=True``): ``None`` for the same-file pairing, which leaves
+    the label and ``meta`` exactly as without it.  For the ``ida_hybrid``
+    ``ni_source="standard"`` sub-route and ``zeff_from_fuse=True`` on a
+    measured route (owner decisions 2026-10-18) a dict:
+    a measured IDA tier's label gains
+    :data:`ZEFF_PAIRING_HYBRID_DD_TOTAL_LABEL`, and ``meta["pairing"]``
+    records the dict plus ``tier``, ``width_source`` (the label) and
+    ``measured`` (False on the assumed fallback, which stays loud).
     """
     import warnings
 
@@ -698,6 +840,10 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
         provenance = scalar_prov
         label = scalar_label + ("" if zeff_sigma_source == "scalar"
                                 else " (FALLBACK -- an ASSUMED width)")
+    if pairing is not None and tier in ("carbon-propagated", _measured_tier):
+        # the dd-derived total-Z_eff baseline of the hybrid standard
+        # sub-route: the label says what the measured width is paired with
+        label = f"{label} {ZEFF_PAIRING_HYBRID_DD_TOTAL_LABEL}"
 
     # ONE warning, naming the tier chosen, the tiers skipped and why.  It
     # fires whenever an IDA file was actually in play (so a path mismatch or
@@ -743,6 +889,10 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
         "median_fraction_of_zeff": _frac,
         "assumed_default": assumed,
     }
+    if pairing is not None:
+        meta["pairing"] = dict(
+            pairing, tier=tier, width_source=label,
+            measured=tier in ("carbon-propagated", _measured_tier))
     return env, label, meta
 
 
@@ -1155,8 +1305,27 @@ def resolve_uncertainty(config, baseline) -> dict:
         # relative-vs-absolute, '~'-prefixed, trailing-slash or symlinked
         # spelling of the very same file.  It returns the REASON as well as
         # the verdict so the fallback can be warned about and recorded.
-        _zeff_baseline_is_ida, _zeff_inelig = zeff_sigma_eligibility(
-            src, ida_path, kinetic_source=_kin_src, baseline=baseline)
+        _zeff_baseline_is_ida, _zeff_inelig, _z_pair = zeff_sigma_eligibility(
+            src, ida_path, kinetic_source=_kin_src, baseline=baseline,
+            with_pairing=True)
+        if _z_pair is not None:
+            # the ida_hybrid ni_source="standard" sub-route, or
+            # zeff_from_fuse=True on a measured route (owner decisions
+            # 2026-10-18): what the measured width is paired with, recorded
+            _zd = (((getattr(baseline, "li_metrics", None) or {})
+                    .get("zeff_dd_provenance") or {})
+                   .get("zeff_definition") or {})
+            _z_pair = dict(
+                _z_pair,
+                base_definition=dict(
+                    definition=_zd.get("definition", "total"),
+                    source=_zd.get("source"), of="the dd"),
+                draw_centre=("the base (the dd's total Z_eff)"
+                             if "zeff" not in (unc.aux_baselines or {})
+                             else "explicit aux_baselines['zeff']"),
+                conditional=("conditional at fixed beam fraction: the dd's "
+                             "fast-ion charge moments (z_fast, z2_fast) "
+                             "are held fixed in every draw"))
         _z_env, _z_label, _z_meta = resolve_zeff_envelope(
             getattr(unc, "zeff_sigma_source", "auto"),
             unc.zeff_scalar_sigma,
@@ -1175,6 +1344,7 @@ def resolve_uncertainty(config, baseline) -> dict:
                         if "zeff" not in (unc.aux_baselines or {}) else None),
             imas_source=_imas_label("zeff"),
             psi_N=_psi_tpl,
+            pairing=_z_pair,
         )
         user_sigmas["zeff"] = _z_env
         # which ladder ran: the run's one resolved route
@@ -1305,6 +1475,90 @@ def _resolve_fixed(comp, src_psi, dst_psi):
     return np.interp(dst_psi, np.asarray(src_psi, dtype=float), comp)
 
 
+#: An Osborne p-file's ``pb`` block is in kPa; ``p_fast`` is in Pa.
+PFILE_PB_TO_PA = 1e3
+#: profiles files already warned about carrying ``pb`` beside an explicit
+#: ``fixed_components.p_fast`` by a DIRECT call (outside a run; once per
+#: file).  Inside a run (``Bouquet.prepare_baseline``, either engine) the
+#: warning is collected and issued from the reconstruction summary once per
+#: run (:func:`bouquet.utils.deferred_warnings`), and never recorded here.
+_PB_TWO_SOURCES_WARNED = set()
+
+
+def resolve_p_fast_input(fc, kin, profiles_path, psi_map):
+    """``(values, x, stamp)``: the g-file route's fast-ion pressure input
+    (decision B, 2026-10-17), before it is resolved onto the kinetic grid.
+
+    * ``fixed_components.p_fast`` set: it wins, on ``fixed_components.psi_N``
+      in its ``coord`` (exactly as before); ``p_fast_source=
+      "fixed_components"``.  A p-file that ALSO carries a ``pb`` block is
+      warned about (two sources), naming the field: inside a run once per
+      run, issued from the reconstruction summary
+      (:func:`bouquet.utils.deferred_warnings`); on a direct call once per
+      file.
+    * unset, and the profiles file is a p-file with a ``pb`` block: p_fast
+      defaults to ``PFILE_PB_TO_PA * pb`` on ``pb``'s own psinorm (coord
+      ``"psi_n"``, mapped to the run grid through *psi_map*);
+      ``p_fast_source="pfile_pb"``.  The block header's unit label is
+      checked (``pb_header_units``, ``pb_units_ok``): anything but kPa is
+      warned about and NOT converted (a label cannot say what the numbers
+      are); the warning is collected inside a run like the two-source one.
+    * otherwise (an IDA file, a p-file without ``pb``): ``(None, None, ...)``
+      -- zero fast pressure, as before; ``p_fast_source="none"``.
+
+    *kin* is :func:`_load_kinetic_profiles`' dict (``pb`` / ``pb_psi_N``
+    when the p-file carries the block).  ``stamp`` is archived as
+    ``li_metrics["p_fast_source"]`` (and ``Baseline.p_fast_source``; not
+    ``Baseline.p_fast_meta``, the IMAS route's reduction record).
+    """
+    import os
+    import numpy as np
+    from . import coords
+    has_pb = kin.get("pb") is not None
+    if fc.p_fast is not None:
+        if has_pb:
+            from .utils import _DEFERRED_WARNINGS, warn_or_defer
+            key = str(profiles_path)
+            if (_DEFERRED_WARNINGS is not None
+                    or key not in _PB_TWO_SOURCES_WARNED):
+                if not warn_or_defer(
+                        f"the p-file {os.path.basename(key)!r} carries a "
+                        "fast-ion pressure block 'pb' AND "
+                        "fixed_components.p_fast is set: two sources of "
+                        "p_fast; fixed_components.p_fast is used and the "
+                        "p-file's pb is ignored", UserWarning, stacklevel=3):
+                    _PB_TWO_SOURCES_WARNED.add(key)   # issued visibly
+        return (fc.p_fast,
+                coords.to_run_grid(fc.psi_N, getattr(fc, "coord", coords.RUN),
+                                   psi_map),
+                dict(p_fast_source="fixed_components", pfile_has_pb=has_pb))
+    if has_pb:
+        pb = PFILE_PB_TO_PA * np.asarray(kin["pb"], dtype=float)
+        # the Osborne p-file writes pb in kPa (the reader's UNITS); a header
+        # that says otherwise is warned about, never converted: its label
+        # alone cannot say what the numbers are (the pressure-fidelity stamp
+        # then reports any excess or deficit against the g-file)
+        units = kin.get("pb_units")
+        units_ok = isinstance(units, str) and units.strip().lower() == "kpa"
+        if not units_ok:
+            from .utils import warn_or_defer
+            warn_or_defer(
+                f"the p-file {os.path.basename(str(profiles_path))!r} labels "
+                f"its fast-ion pressure block pb in {units!r}, not kPa: p_fast "
+                f"is taken as {PFILE_PB_TO_PA:g} x pb (the p-file's kPa "
+                "convention) WITHOUT conversion -- check the file (a pb in Pa "
+                "would be 1000 x too large; the report-only pressure-fidelity "
+                "stamp compares the result with the g-file's pressure), or "
+                "set fixed_components.p_fast", UserWarning, stacklevel=3)
+        return (pb, coords.to_run_grid(np.asarray(kin["pb_psi_N"], dtype=float),
+                                       coords.PSI, psi_map),
+                dict(p_fast_source="pfile_pb", pfile_has_pb=True,
+                     coord=coords.PSI, units="Pa (1e3 x the p-file's kPa)",
+                     pb_header_units=units, pb_units_ok=bool(units_ok),
+                     p_fast_axis_Pa=float(pb[0])))
+    return None, None, dict(p_fast_source="none", pfile_has_pb=False)
+
+
 def _load_kinetic_profiles(source) -> dict:
     """Kinetic profiles (SI) from the reconstruction source's ``profiles_path``.
 
@@ -1346,7 +1600,7 @@ def _load_kinetic_profiles(source) -> dict:
         )
     pf.compute_quasineutrality()
     psi_pf, Zeff = pf.compute_zeff()
-    return dict(
+    out = dict(
         psi_N=np.asarray(psi_pf, dtype=float),
         ne=np.asarray(pf.ne, dtype=float) * 1e20,
         te=np.asarray(pf.te, dtype=float) * 1e3,
@@ -1355,6 +1609,15 @@ def _load_kinetic_profiles(source) -> dict:
         Zeff=np.clip(np.asarray(Zeff, dtype=float), 1.0, None),
         raw_bytes=raw,
     )
+    # the fast-ion pressure block (kPa, on its own psinorm): the default
+    # p_fast of the g-file route (decision B; resolve_p_fast_input)
+    if pf.pb is not None:
+        out["pb"] = np.asarray(pf.pb, dtype=float)
+        out["pb_psi_N"] = np.asarray(pf["pb"]["psinorm"], dtype=float)
+        # the block header's unit label, checked (not converted) by
+        # resolve_p_fast_input
+        out["pb_units"] = pf.units_for("pb")
+    return out
 
 
 def _resolve_reconstruction(source, config, mygs) -> Baseline:
@@ -1365,7 +1628,9 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     the (toroidal) fitted currents. The reconstructed total ``j_phi_fit`` already
     contains all driven current, so fixed components (j_NBI / j_RF) default to
     zero and only re-partition the inductive part if the user supplies them;
-    ``p_fast`` (absent from thermal IDA profiles) likewise defaults to zero.
+    ``p_fast`` is ``fixed_components.p_fast`` when set, else a p-file's own
+    ``pb`` block (decision B, 2026-10-17; :func:`resolve_p_fast_input`),
+    else zero (an IDA file has no fast-ion channel).
     """
     import numpy as np
 
@@ -1441,8 +1706,12 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     # fc.psi_N in the run coordinate (a psi_n input via the g-file's map).
     fc_x = coords.to_run_grid(fc.psi_N, getattr(fc, "coord", coords.RUN),
                               None if coord == coords.PSI else (psi_N, x_run))
-    p_fast_kin = _resolve_fixed(fc.p_fast, fc_x, x_kin)
-    p_fast_eq = to_eq(p_fast_kin) if fc.p_fast is not None else None
+    # p_fast: fixed_components.p_fast, else a p-file's pb (decision B)
+    _pf_in, _pf_x, _p_fast_stamp = resolve_p_fast_input(
+        fc, kin, source.profiles_path,
+        None if coord == coords.PSI else (psi_N, x_run))
+    p_fast_kin = _resolve_fixed(_pf_in, _pf_x, x_kin)
+    p_fast_eq = to_eq(p_fast_kin) if _pf_in is not None else None
     # Z_imp is plumbed for symmetry with the draw path, but is INERT here today:
     # FixedComponentsConfig (config.py) carries no Z_imp field at all -- Z_imp is
     # an *output* field of the Baseline dataclass, populated only on the IMAS
@@ -1633,6 +1902,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         j_RF=j_RF,
         j_other=j_other,
         p_fast=p_fast,
+        p_fast_source=dict(_p_fast_stamp),
         # SAME source as the value handed to the reconstruction above, so the
         # two paths activate together or not at all.  The draws read
         # `Baseline.Z_imp` (run.py hands it to generate_bouquet, and the
@@ -1664,6 +1934,9 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             # PR #56 (owner item E2 stamp): how the IDA Z_eff / n_i were
             # resolved; archived as _baseline li_metrics_json
             ("zeff_provenance", kin.get("zeff_provenance")),
+            # decision B: where p_fast came from (pfile_pb /
+            # fixed_components / none)
+            ("p_fast_source", _p_fast_stamp),
             # review PR64 B1: how SWB's bootstrap was converted (absent on
             # the self-consistent loop, which runs no SWB)
             ("swb_conversion", result.get("swb_conversion"))) if v}
@@ -1740,6 +2013,77 @@ def _deliver_reconstruction_state(mygs, config, source, result, psi_N, ne_eq,
              "landed request (every loop pass ends there); one jphi-linterp "
              "solve of j_phi reproduces it"))
     return j_phi, j_ind, j_BS, offset, state
+
+
+#: The on-axis pressure error (%, either sign) beyond which the report-only
+#: pressure fidelity stamp warns (decision B, 2026-10-17; two-sided since the
+#: review of B).  10 % is the band that would have caught, with wide margin,
+#: the g-file + p-file case whose beam pressure (the p-file's pb) was
+#: dropped: -63 % on axis, while every verdict check (Ip, boundary, l_i)
+#: passed.  The same band applies to an EXCESS: the p-file's pb is added by
+#: default, so its likely errors add pressure (a g-file whose pressure does
+#: not contain the beam, or a pb block not in kPa).  Never a gate.
+PRESSURE_FIDELITY_WARN_PCT = 10.0
+
+
+def warn_pressure_fidelity(record, stacklevel=2):
+    """The UserWarning of a :func:`pressure_fidelity_record` whose on-axis
+    error is beyond its band, either sign (``axis_deficit_flag`` /
+    ``axis_excess_flag``); nothing otherwise.  Issued where the
+    reconstruction summary is printed, outside the captured solver output,
+    so it reaches the user."""
+    if not isinstance(record, dict):
+        return
+    if record.get("axis_deficit_flag"):
+        why = ("a pressure component of the g-file is missing from the "
+               "kinetics -- e.g. a fast-ion pressure (fixed_components."
+               "p_fast, or the p-file's pb)")
+    elif record.get("axis_excess_flag"):
+        why = ("the kinetics carry pressure the g-file does not -- e.g. a "
+               "fast-ion pressure counted twice (a p-file pb beside a g-file "
+               "whose pressure is thermal only), or a pb block not in kPa")
+    else:
+        return
+    import warnings
+    warnings.warn(
+        f"pressure fidelity (report-only): the reconstruction's on-axis "
+        f"pressure is {record['axis_rel_err_pct']:+.1f} % against the input "
+        f"g-file's (beyond the +/-{record['warn_band_pct']:g} % band; "
+        f"relative RMS {record['rel_rms']:.3f}): {why}",
+        UserWarning, stacklevel=stacklevel + 1)
+
+
+def pressure_fidelity_record(psi_N, p_full, p_input, *,
+                             warn_pct=PRESSURE_FIDELITY_WARN_PCT, warn=True):
+    """The REPORT-ONLY pressure-fidelity stamp of a g-file-route
+    reconstruction (decision B, 2026-10-17): the reconstruction's full
+    pressure *p_full* (the solver's, separatrix pressure added back) against
+    the input g-file's *p_input*, both on *psi_N* (axis first).
+
+    ``rel_rms`` = RMS(p_full - p_input) / RMS(p_input); ``axis_rel_err_pct``
+    = 100 (p_full - p_input) / p_input at the first node.  A UserWarning
+    (:func:`warn_pressure_fidelity`; with *warn*) when the on-axis error
+    exceeds *warn_pct* either way: a DEFICIT (``axis_deficit_flag``) or an
+    EXCESS (``axis_excess_flag``).  Never part of the verdict."""
+    import numpy as np
+    pf = np.asarray(p_full, dtype=float)
+    pi = np.asarray(p_input, dtype=float)
+    rms_in = float(np.sqrt(np.mean(pi ** 2)))
+    rel_rms = (float(np.sqrt(np.mean((pf - pi) ** 2))) / rms_in
+               if rms_in > 0.0 else float("nan"))
+    ax = (float(100.0 * (pf[0] - pi[0]) / abs(pi[0])) if pi[0] != 0.0
+          else float("nan"))
+    flag = bool(np.isfinite(ax) and ax < -float(warn_pct))
+    excess = bool(np.isfinite(ax) and ax > float(warn_pct))
+    rec = dict(report_only=True, frame="full (p_sep added back)",
+               psi_N_axis=float(np.asarray(psi_N, dtype=float)[0]),
+               p_axis_Pa=float(pf[0]), p_axis_input_Pa=float(pi[0]),
+               rel_rms=rel_rms, axis_rel_err_pct=ax,
+               warn_band_pct=float(warn_pct), axis_deficit_flag=flag,
+               axis_excess_flag=excess)
+    if warn:
+        warn_pressure_fidelity(rec)
+    return rec
 
 
 def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
@@ -1866,6 +2210,24 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
         import warnings
         warnings.warn(f"like-for-like pressure frames unavailable: {exc}")
 
+    # Pressure fidelity (decision B, 2026-10-17; REPORT-ONLY, never in the
+    # verdict): the reconstruction's full pressure (the solver's, p_sep
+    # added back) against the input g-file's pressure profile.
+    try:
+        _pad = float(source.psi_pad)
+        _ps = np.clip(np.asarray(eqdsk.psi_N, dtype=float), _pad, 1.0 - _pad)
+        _p_sol = np.asarray(mygs.get_profiles(psi=_ps.copy())[3], dtype=float)
+        _p_sep = float((_edge_rec or {}).get("p_sep_applied") or 0.0)
+        # warned where the summary is printed (Bouquet.prepare_baseline),
+        # outside the captured solver output
+        _pfid = pressure_fidelity_record(
+            _ps, _p_sol + _p_sep,
+            np.interp(_ps, _psiN_eq, np.asarray(eqdsk.pres, dtype=float)),
+            warn=False)
+    except Exception as exc:     # report-only: recorded, never raised
+        _pfid = dict(report_only=True,
+                     error=f"{type(exc).__name__}: {exc}")
+
     bnd_rms = float(q.get("boundary_rms_mm", float("nan")))
     bnd_max = float(q.get("boundary_max_dev_mm", float("nan")))
     axis_off_mm = float(np.hypot(o_point[0] - g("R_mag"),
@@ -1963,6 +2325,8 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
         # equilibrium, and the like-for-like comparison with the input
         "edge_pressure": _edge_rec,
         "pressure_like_for_like": _like,
+        # decision B (2026-10-17): REPORT-ONLY, never in the verdict
+        "pressure_fidelity": _pfid,
         # zero-ideal residuals (absolute)
         "boundary_rms_mm": bnd_rms, "boundary_max_mm": bnd_max,
         "axis_offset_mm": axis_off_mm,
