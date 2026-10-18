@@ -103,8 +103,8 @@ class _RecordingGS:
         _write_ifile(filename, kw["npsi"], 4, kw.get("lcfs_pressure", 0.0))
 
 
-def _write_ifile(path, npsi, ntheta, p_add):
-    """A Fortran sequential-unformatted i-file in OFT's layout."""
+def _write_ifile(path, npsi, ntheta, p_add, extra=()):
+    """A Fortran sequential-unformatted i-file in OFT's layout (+ ``extra`` records)."""
     import struct
 
     def rec(b):
@@ -116,6 +116,8 @@ def _write_ifile(path, npsi, ntheta, p_add):
         body += rec(np.asarray(col, "<f8").tobytes())
     for _ in range(2):
         body += rec(np.zeros(npsi * ntheta, "<f8").tobytes())
+    for col in extra:
+        body += rec(np.asarray(col, "<f8").tobytes())
     with open(path, "wb") as fh:
         fh.write(body)
 
@@ -145,6 +147,24 @@ def test_the_ifile_gets_the_gfiles_lcfs_pressure_and_pad(tmp_path):
             d = read_ifile(fh.read())
         assert (d["npsi"], d["ntheta"]) == (9, 4)
         np.testing.assert_allclose(d["p"], 1e4 * d["psi"] + p_sep)
+
+
+def test_the_extended_records_reach_the_save_and_the_reader(tmp_path):
+    from bouquet.utils import read_ifile, save_state_ifile
+    gs = _RecordingGS()
+    for on in (False, True):
+        gs.calls.clear()
+        _, rec = save_state_ifile(gs, str(tmp_path / f"{on}.ifile"), npsi=9, ntheta=4,
+                                  psi_pad=1e-3, p_sep=0.0, profile_derivs=on, psi_bounds=on)
+        kw = gs.calls[0][1]
+        assert (kw.get("profile_derivs"), kw.get("psi_bounds")) == ((True, True) if on else (None, None))
+        assert rec["ifile_profile_derivs"] is on and rec["ifile_psi_bounds"] is on
+    path = str(tmp_path / "ext.ifile")
+    _write_ifile(path, 9, 4, 0.0, extra=(np.full(9, 2.0), np.full(9, 3.0), (1.0, 0.0)))
+    d = read_ifile(open(path, "rb").read())
+    assert d["ffp"].tolist() == [2.0] * 9 and d["pp"].tolist() == [3.0] * 9
+    assert d["psi_bounds"].tolist() == [1.0, 0.0]
+    assert not {"ffp", "pp", "psi_bounds"} & set(read_ifile(open(str(tmp_path / "False.ifile"), "rb").read()))
 
 
 def test_a_failed_save_is_stamped_and_warned(tmp_path):

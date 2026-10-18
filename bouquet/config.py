@@ -2011,6 +2011,13 @@ class GenerationConfig:
     write_ifile: bool = False
     ifile_npsi: int = 129
     ifile_ntheta: int = 257
+    # OFT save_ifile's extended records (readers of the standard format stop before them), stamped
+    # ifile_profile_derivs / ifile_psi_bounds: FF' and p' after Z (GPEC profile_source "integrate",
+    # Julia GPEC "derivatives"), and the unpadded [psi_axis, psi_LCFS] last (GPEC and Julia GPEC then
+    # normalize psi_N to the true LCFS).  A save_ifile without them fails the baseline i-file, which
+    # refuses the run.
+    ifile_profile_derivs: bool = False
+    ifile_psi_bounds: bool = False
     # The archived g-files' R x Z grid (TokaMaker.save_eqdsk nr / nz; the 1-D profiles come on nr
     # uniform psi_N points), for the baseline and every draw.  Integers >= 2.
     eqdsk_nr: int = 257
