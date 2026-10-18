@@ -2214,6 +2214,23 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
     TOTAL Z_eff, owner decision 2026-10-18) and ni is re-derived from the
     dd's thermal-numerator Z_eff (``zeff_for_ni``, else ``Zeff_fuse``) under
     single-impurity quasineutrality applied to the IDA electron density.
+    With a beam (``z_fast`` = sum_s Z_s n_s^fast, non-zero; owner decision
+    2026-10-18) the beam's charge enters that quasineutrality::
+
+        n_e           = n_i + Z n_z + z_fast
+        Z_eff,th n_e  = n_i + Z^2 n_z          (thermal numerator)
+        =>  Z n_z = n_e - z_fast - n_i,
+            Z_eff,th n_e = n_i + Z (n_e - z_fast - n_i)
+        =>  n_i = [n_e (Z - Z_eff,th) - Z z_fast] / (Z - 1)
+
+    (:func:`bouquet.physics.main_ion_density_from_zeff` with
+    ``zeff_includes_fast=False``), held to the thermal window
+    ``0 <= n_i <= n_e - z_fast`` (``n_z >= 0``), each bound counted in
+    ``ni_fast_meta`` (``n_floored`` / ``n_capped``) and warned when it binds.
+    Without a beam it is the old ``n_e (Z - Z_eff,th)/(Z - 1)`` with Z_eff,th
+    clipped to ``[1, Z]``, bit for bit.  ``Z_imp`` and ``n_z`` follow from
+    this n_i in the caller (:func:`bouquet.physics.
+    impurity_charge_with_fast_ions`).
     ``zeff_absent``: the file carries no ``Zeff`` dataset, so read_ida's own
     standard derivation is handed the dd's thermal Z_eff in its place (the
     run's Z_eff is the dd's on this route anyway; stamped in
@@ -2256,12 +2273,40 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
         zeff = np.asarray(Zeff_fuse, dtype=float)
         _zn = np.asarray(Zeff_fuse if zeff_for_ni is None else zeff_for_ni,
                          dtype=float)
-        ni = main_ion_density_from_zeff(ne, np.clip(_zn, 1.0, impurity_Z),
-                                        impurity_Z)
-        ni_fast_meta = {"applied": False, "agrees": None, "mismatch": None,
-                        "gate": None,
-                        "evidence": "ni_source='standard': ni from the dd's "
-                                    "thermal Z_eff, no subtraction"}
+        if z_fast is None or not np.any(z_fast):
+            # no beam: the plain form, bit for bit as before
+            ni = main_ion_density_from_zeff(
+                ne, np.clip(_zn, 1.0, impurity_Z), impurity_Z)
+            ni_fast_meta = {"applied": False, "agrees": None,
+                            "mismatch": None, "gate": None,
+                            "evidence": "ni_source='standard': ni from the "
+                                        "dd's thermal Z_eff, no subtraction"}
+        else:
+            # with the beam's charge in quasineutrality (owner decision
+            # 2026-10-18; derivation in the docstring); the thermal window
+            # 0 <= n_i <= n_e - z_fast (n_z >= 0) applied and counted (E3)
+            ni_raw = main_ion_density_from_zeff(
+                ne, _zn, impurity_Z, z_fast=z_fast, z2_fast=z2_fast,
+                zeff_includes_fast=False)
+            _cap = np.maximum(ne - np.asarray(z_fast, dtype=float), 0.0)
+            n_floored = int(np.count_nonzero(ni_raw < 0.0))
+            n_capped = int(np.count_nonzero(ni_raw > _cap))
+            ni = np.clip(ni_raw, 0.0, _cap)
+            if n_floored or n_capped:
+                import warnings
+                warnings.warn(
+                    "ni_source='standard': the thermal n_i from the dd's "
+                    "thermal Z_eff and the beam's charge is floored at 0 on "
+                    f"{n_floored} node(s) and capped at n_e - z_fast (n_z >= "
+                    f"0) on {n_capped} (recorded as ni_fast_meta.n_floored / "
+                    "n_capped)", UserWarning, stacklevel=2)
+            ni_fast_meta = {"applied": False, "agrees": None,
+                            "mismatch": None, "gate": None,
+                            "n_floored": n_floored, "n_capped": n_capped,
+                            "evidence": "ni_source='standard': ni from the "
+                                        "dd's thermal Z_eff with the beam's "
+                                        "charge z_fast in quasineutrality, "
+                                        "no subtraction"}
         omega = _read_ida_omega(ida_path, time, psi_N,
                                 place=None if x_phi is None else g)
         return (ne, te, ti, ni, zeff, omega, sigma_ne, sigma_te, sigma_ni,

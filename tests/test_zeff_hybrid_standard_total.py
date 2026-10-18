@@ -138,12 +138,15 @@ def test_the_base_is_the_dds_total_and_the_species_the_thermal_numerator(
     np.testing.assert_array_equal(bl.aux["zeff"], bl.Zeff)  # draw centre
     assert d["draw_centred_on_base"] is True
     assert bl.li_metrics["kinetics_route"]["ni_source"] == "standard"
-    # rule 2: n_i from the THERMAL numerator on the IDA n_e, Z_imp likewise
+    # rule 2: n_i from the THERMAL numerator on the IDA n_e with the beam's
+    # charge in quasineutrality (owner-approved correction 2026-10-18; it
+    # was the no-beam form), Z_imp likewise
     ida = bl.aux["ida_profiles"][1]
     np.testing.assert_array_equal(
         bl.ni, main_ion_density_from_zeff(
             np.interp(bl.psi_N_kinetic, ida.psi_N, ida.ne),
-            np.clip(zth, 1.0, Z_IMP), Z_IMP))
+            zth, Z_IMP, z_fast=bl.z_fast, z2_fast=bl.z2_fast,
+            zeff_includes_fast=False))
     (tmp_path / "ref").mkdir()
     ref = _read(*NF._build(tmp_path / "ref")[:2], ni_source="standard")
     np.testing.assert_array_equal(bl.ni, ref.ni)
@@ -217,10 +220,8 @@ def test_no_zeff_envelope_in_the_file_falls_back_loudly(tmp_path):
 
 def test_the_draws_are_centred_on_the_total_with_the_ida_width(tmp_path):
     """Fixed-seed draws on the sub-route: the Z_eff channel moves around the
-    total base; at zero width the drawn Z_eff is the base exactly.  (n_i is
-    not asserted here: the sub-route's base n_i omits the beam's charge,
-    so the n_i ceiling n_e - z_fast clips it on every draw, before and
-    after this decision; docs/physics-notes.md, the Z_eff definition table.)"""
+    total base; at zero width the drawn Z_eff is the base exactly.  (n_i:
+    tests/test_hybrid_standard_ni_beam.py.)"""
     ddp, cdf, *_ = NF._build(tmp_path)
     bl = _read(ddp, cdf, ni_source="standard")
     env = resolve_uncertainty(_cfg(_src(ddp, cdf, ni_source="standard"),

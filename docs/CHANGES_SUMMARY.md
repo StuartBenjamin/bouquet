@@ -2,6 +2,19 @@
 
 ## Unreleased — one Z_eff rule on every route (owner decision 2026-10-18)
 
+- **`ida_hybrid` with `ni_source="standard"`: the base n_i carries the
+  beam's charge.** Quasineutrality with a beam is n_e = n_i + Z n_z + z_fast,
+  so with the thermal-numerator Z_eff the thermal n_i is
+  [n_e (Z − Z_eff,th) − Z z_fast]/(Z − 1) (z_fast from the dd, as on the
+  other routes); the sub-route used the no-beam form n_e (Z − Z_eff,th)/(Z − 1),
+  which overstated n_i by Z z_fast/(Z − 1). n_i is held to
+  0 ≤ n_i ≤ n_e − z_fast, each bound counted (`ni_fast_meta["n_floored"]` /
+  `["n_capped"]`) and warned when it binds; n_z, Z_imp and p_imp follow.
+  Without a beam the result is unchanged bit for bit. On the synthetic dd at
+  1.2 s: implied Z_imp 10.7 -> 6.0 (the carbon plasma), n_i on axis
+  2.40e19 -> 1.21e19 m^-3, Redl I_BS 142.4 -> 106.8 kA, β_N 1.791 -> 1.625,
+  and the sampler's n_i-ceiling clip no longer fires (10 of 10 draws -> 0 of
+  10). Not on the defaults or any golden.
 - **`ida_hybrid` with `ni_source="standard"`: the bootstrap gets the dd's
   TOTAL Z_eff, and the draw the IDA file's measured width.** The sub-route's
   base was the dd's thermal-numerator Z_eff; it is now the dd's total (the

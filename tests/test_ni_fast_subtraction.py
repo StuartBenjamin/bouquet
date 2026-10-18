@@ -845,9 +845,11 @@ class TestDefaultsArePre56:
         """ida_hybrid with the explicit dd route (ni_source="standard"; the
         default before 2026-10): n_e/T_e/T_i from IDA; Z_eff the dd's TOTAL
         one (owner decision 2026-10-18; no stored zeff here, so the all-ion
-        sum over n_e), zeff_includes_fast following the beam; n_i = n_e(IDA)
-        (Z - Z_eff,th)/(Z - 1) from the THERMAL numerator; no beam
-        subtraction."""
+        sum over n_e), zeff_includes_fast following the beam; n_i from the
+        THERMAL numerator with the beam's charge in quasineutrality, n_i =
+        [n_e(IDA) (Z - Z_eff,th) - Z z_fast]/(Z - 1) (owner-approved
+        correction 2026-10-18; it was the no-beam form n_e (Z - Z_eff,th)/
+        (Z - 1)); no beam subtraction."""
         from bouquet.physics import main_ion_density_from_zeff
         ddp, cdf, *_ = _build(tmp_path)
         bl = read_imas_baseline(
@@ -861,10 +863,17 @@ class TestDefaultsArePre56:
         ida = bl.aux["ida_profiles"][1]
         assert ida.zeff_provenance["ni_source"] == "standard"
         np.testing.assert_array_equal(bl.ne, ida.ne)
+        assert np.any(bl.z_fast)
+        ni_qn = (ida.ne * (Z_IMP - zth) - Z_IMP * bl.z_fast) / (Z_IMP - 1.0)
+        assert np.all(ni_qn >= 0.0) and np.all(ni_qn <= ida.ne - bl.z_fast)
+        np.testing.assert_allclose(bl.ni, ni_qn, rtol=1e-12)
         np.testing.assert_array_equal(
             bl.ni, main_ion_density_from_zeff(
-                ida.ne, np.clip(zth, 1.0, Z_IMP), Z_IMP))
+                ida.ne, zth, Z_IMP, z_fast=bl.z_fast, z2_fast=bl.z2_fast,
+                zeff_includes_fast=False))
         assert bl.aux["ni_fast_meta"]["applied"] is False
+        assert bl.aux["ni_fast_meta"]["n_floored"] == 0
+        assert bl.aux["ni_fast_meta"]["n_capped"] == 0
         assert bl.li_metrics["zeff_dd_provenance"]["baseline_zeff_from"] == "dd"
 
     def test_the_hybrid_standard_draw_is_centred_on_the_base(self, tmp_path):
