@@ -237,7 +237,7 @@ class ReconstructionSource:
     ni_source: str = "standard"
     profile_overrides: dict = field(default_factory=dict)  # name -> array, manual override
     # reconstruction knobs
-    psi_pad: float = 1e-3
+    psi_pad: float = 1e-3              # LCFS pad in psi_N (see ImasSource.psi_pad)
     n_k: int = 5                       # inductive-spline knots
     psi_bridge: float = 0.99          # Hermite edge-bridge location
     rescale_jbs: bool = False
@@ -252,10 +252,18 @@ class ReconstructionSource:
         from .coords import run_coord
         run_coord(self.coord)
         _check_ni_source(self.ni_source, "ReconstructionSource")
+        _check_psi_pad(self.psi_pad, "ReconstructionSource")
 
 
 #: ImasSource.ida_timing: the reviewed window rule, or IDA_fuse's own pairing.
 IDA_TIMINGS = ("window", "ida_fuse")
+
+
+def _check_psi_pad(v, who):
+    import math
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not (
+            math.isfinite(v) and 0.0 <= v < 1.0):
+        raise ValueError(f"{who}.psi_pad={v!r} must be a number in [0, 1)")
 
 
 def _check_ni_source(v, who, allowed=None):
@@ -391,10 +399,14 @@ class ImasSource:
     # p_fast (both True, the default) or inside the IDA n_i (both False); the reader
     # warns otherwise.
     include_pfast: bool = True
+    # LCFS pad in psi_N: every surface trace and statistic stops at psi_N = 1 - psi_pad, and the
+    # archived g-files and i-files end there (save_eqdsk / save_ifile lcfs_pad).
+    psi_pad: float = 1e-3
 
     def __post_init__(self):
         from .coords import run_coord
         run_coord(self.coord)
+        _check_psi_pad(self.psi_pad, "ImasSource")
         if not isinstance(self.hold_sawteeth, bool):
             raise ValueError(f"hold_sawteeth={self.hold_sawteeth!r}: must be "
                              "True or False")

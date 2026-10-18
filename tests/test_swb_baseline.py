@@ -245,7 +245,8 @@ def test_edge_taper_keeps_the_channel_split(monkeypatch, swb_oft, taper, saw):
         if saw:
             st.update(jphi_saw_out=res["jphi_saw_out"], saw_rho_m=0.4, saw_n_dips=1)
         return st
-    ns = types.SimpleNamespace(baseline=bl, config=types.SimpleNamespace(generation=gen),
+    ns = types.SimpleNamespace(baseline=bl, config=types.SimpleNamespace(
+                                   source=types.SimpleNamespace(psi_pad=1e-3), generation=gen),
                                _swb_baseline_kinetics=lambda: {
                                    k: np.ones_like(x) for k in
                                    ("ne", "te", "ni", "ti", "p_fixed")},

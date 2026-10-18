@@ -286,7 +286,7 @@ class SwbBaseline:
                    **swb_conversion_record(conv, reported is not None))
         return res
 
-    def _swb_state(self, res, j_seed, psi_pad=1e-3):
+    def _swb_state(self, res, j_seed, psi_pad):
         """Record of one swb solve on ``mygs``: alpha, coils, LCFS, li, Ip
         (and jphi_saw_out, saw_rho_m, saw_rho_out, saw_n_dips and the jphi_saw map
         check with the sawtooth reset on)."""
@@ -340,10 +340,11 @@ class SwbBaseline:
         self._swb_source_split(psi_N)
         kin = self._swb_baseline_kinetics()
 
+        pad = float(self.config.source.psi_pad)
         st_a = self._swb_state(self._swb_solve(kin, bl.swb_seed_profile),
-                               bl.swb_seed_profile)
+                               bl.swb_seed_profile, pad)
         res = self._swb_solve(kin, bl.swb_seed_profile, coil_reg_target=st_a["coils"])
-        st_b = self._swb_state(res, bl.swb_seed_profile)
+        st_b = self._swb_state(res, bl.swb_seed_profile, pad)
 
         bl.coil_reg_target = st_a["coils"]
         bl.swb_baseline = st_b                 # what the sigma=0 check repeats
@@ -416,7 +417,7 @@ class SwbBaseline:
         _pth_e = _EC * kin["ne"] * kin["te"]
         _pth_i = _EC * kin["ni"] * kin["ti"]
         _pfix = np.asarray(kin["p_fixed"], dtype=float)
-        self._finish_imas_baseline(-1, ctx=dict(
+        self._finish_imas_baseline(-1, psi_pad=pad, ctx=dict(
             p_total=_pth_e + _pth_i + _pfix, psi_N=np.asarray(bl.psi_N, float),
             p_components={"electron_thermal": _pth_e, "ion_thermal": _pth_i,
                           "fixed": _pfix}))
@@ -452,7 +453,7 @@ class SwbBaseline:
             zeff_includes_fast=bool(getattr(bl, "zeff_includes_fast", False)),
             ni_from_zeff=True,
             isolate_edge_jbs=bool(self.config.generation.isolate_edge_jbs)))
-        st = self._swb_state(got["res"], got["j_seed"])
+        st = self._swb_state(got["res"], got["j_seed"], float(self.config.source.psi_pad))
         psi_N = np.asarray(bl.psi_N, dtype=float)
         dev = {k: float(np.max(np.abs(st[k] - ref[k])))
                for k in ("jphi_ind", "jphi_bs", "jphi_total", "jphi_saw_out", "jphi_pd")
