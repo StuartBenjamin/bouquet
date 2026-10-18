@@ -1245,13 +1245,9 @@ route the channel is drawn around the base itself; only the experimental
 classification (`zeff_fast_ions=True`) still draws around the dd's stored
 `zeff`, and its stamp says so (`draw_centred_on_base` False).
 
-| route | Z_eff handed to the kinetics and the bootstrap | `zeff_includes_fast` | Z_eff for n_i / Z_imp |
-|---|---|---|---|
-| plain dd (`kinetic_source="fuse"`, `ni_source="standard"`) | the dd's total: `zeff` dataset, else the all-ion sum (A1) | `True` with a beam | thermal numerator (dd densities) |
-| plain dd, `zeff_fast_ions=True` (experimental) | classified: thermal + Σ Z_s² n_s^fast / n_e where the stored Z_eff counts the beam, else thermal | as classified | thermal numerator |
-| `ida_hybrid`, measured route (default) | IDA's measured Z_eff (total) | `True` | IDA's Z_eff (beam subtracted from n_i) |
-| `ida_hybrid`, `zeff_from_fuse` / `ni_source="standard"` | the dd's thermal-numerator Z_eff (unchanged by A1); the Z_eff channel is drawn around it, not the dd's stored zeff (review fix C3) | `False` | thermal numerator |
-| g-file + IDA `.cdf` / p-file | the file's Z_eff (VB / route ladder; the p-file's ion mix) | `False` (no beam channel) | the file's |
+The definitions on every route, the `ida_hybrid` `ni_source="standard"`
+sub-route included (owner decision 2026-10-18), are in one table below:
+[Z_eff: which definition feeds what, on every route](#z_eff-which-definition-feeds-what-on-every-route).
 
 **2. IDA Z_eff and n_i: the mean of the bremsstrahlung (VB) and carbon-CER
 routes (`ni_source="all"`), each clamped to the single-impurity window first.**
@@ -1301,6 +1297,43 @@ were on (`clips_enabled`) and the counters, and a log line names every clip
 that fires. Default: the clips are on on every route
 (`UncertaintyConfig.kinetic_clips=None`, owner decision 2026-10-17); with
 `kinetic_clips=False` only the Z_eff window row applies.
+
+### Z_eff: which definition feeds what, on every route
+
+At every step bouquet takes the Z_eff definition that is most physically
+self-consistent with the data available, not the one a particular code or
+model prefers: the bootstrap coefficients (Sauter / Redl) take the TOTAL Z_eff
+(every ion, fast ions included, over n_e), the species derivations take the
+thermal numerator, and a draw perturbs the measured total Z_eff with its
+measured absolute σ wherever a measurement exists (owner decision 2026-10-18).
+
+| route | base for the bootstrap coefficients | base for the species derivations (thermal n_i, Z_imp, p_imp) | draw centre | width source | floor | held fixed |
+|---|---|---|---|---|---|---|
+| plain dd (`kinetic_source="fuse"`) | the dd's total Z_eff: the `zeff` dataset validated against the densities (C2), else Σ_s Z_s² (n_s^th + n_s^fast)/n_e (A1); `zeff_includes_fast` follows the beam | the dd's thermal numerator Σ_s Z_s² n_s^th/n_e on the dd's n_e | the base | the dd's own `zeff_error_upper` (IMAS-measured tier) when it carries one -- a real FUSE dd carries none -- else the assumed H-mode template × \|Z_eff\| | 1 (`zeff_bounds`' includes-fast window) | the beam fraction (the dd's z_fast, z2_fast, p_fast); Z_imp as inferred at the baseline |
+| `ida_hybrid`, measured routes (`ni_source` "Zeff" / "CER" / "all"; "all" is the default) | IDA's measured Z_eff (total: VB, CER, or their mean) | IDA's total Z_eff with the dd's beam density subtracted from n_i (equivalent to its thermal numerator); Z_imp = `impurity_Z` | the base | the IDA-resolved envelope (VB+CER > CER > VB), else the assumed template | 1 | the beam fraction (the dd's z_fast, z2_fast, p_fast); `impurity_Z` |
+| `ida_hybrid`, `ni_source="standard"` | the dd's total Z_eff, as on the plain dd route (2026-10-18; before it, the thermal numerator) | the dd's thermal numerator on the IDA n_e (its n_i omits the beam's charge term: known limitations) | the base | the IDA file's Z_eff envelope (carbon-propagated > VB-measured), labelled "... on a dd-derived total-Z_eff baseline"; else the assumed template, warned | 1 | the beam fraction (the dd's z_fast, z2_fast, p_fast); Z_imp as inferred at the baseline |
+| g-file + IDA `.cdf` | the file's Z_eff (VB on `ni_source="standard"`, the default; the route ladder on a measured `ni_source`) | the file's (ne, Z_eff) under single-impurity quasineutrality, `impurity_Z` | the base | the file's envelope (carbon-propagated > VB-measured; IDA-resolved on a measured `ni_source`), else the assumed template | 1 | `impurity_Z`; p_fast (no fast-ion density channel) |
+| g-file + p-file | the p-file's ion mix, Σ n_s Z_s²/n_e including its beam density `nb` | the p-file's own n_i (its quasineutrality) | the base | the assumed template (a p-file carries no Z_eff σ; an IDA envelope is refused) | 1 | the p-file's species charges; p_fast = its `pb` (no fast-ion density channel) |
+
+The draw perturbs the total Z_eff with the beam fraction held at its baseline
+value, because the beam's charge moments come from the dd (or the p-file) and
+carry no measured uncertainty: it is the conditional distribution of the total
+Z_eff given the beam. The thermal numerator then moves by exactly the drawn
+change of the total (Z_eff,th = Z_eff − z2_fast/n_e at fixed z2_fast), which
+is what the per-draw n_i derivation (`zeff_includes_fast=True`) takes.
+
+Outside the table: `zeff_from_fuse=True` on a measured `ida_hybrid` route
+still hands the bootstrap the dd's thermal numerator (`zeff_includes_fast`
+False) with the IDA envelope carried absolute, and the EXPERIMENTAL
+classification (`zeff_fast_ions=True`) keeps its own rule; neither is a
+default. The floor at 1 is the PR #56 clip on the drawn channel; the engine
+also floors the Z_eff it hands the solve at 1 (the engine-grid backstop,
+counted separately) on every route. The beam fraction's own uncertainty is not drawn (1.5 item, known
+limitations). *Stamps:* `li_metrics["zeff_dd_provenance"]["zeff_definition"]`
+(base and draw centre), every draw's `inputs.kinetic_sampler.zeff_definition`,
+and `zeff_sigma_tier` (tier, label and, on the `ni_source="standard"`
+sub-route, `pairing`: base definition, draw centre, width source,
+"conditional at fixed beam fraction").
 
 ## Corrective j_phi iteration
 

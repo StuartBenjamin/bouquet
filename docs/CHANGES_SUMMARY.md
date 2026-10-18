@@ -1,5 +1,28 @@
 # Bouquet — change summaries
 
+## Unreleased — one Z_eff rule on every route (owner decision 2026-10-18)
+
+- **`ida_hybrid` with `ni_source="standard"`: the bootstrap gets the dd's
+  TOTAL Z_eff, and the draw the IDA file's measured width.** The sub-route's
+  base was the dd's thermal-numerator Z_eff; it is now the dd's total (the
+  `zeff` dataset validated against the densities, else the all-ion sum over
+  n_e, as A1 on the plain dd route), with `zeff_includes_fast` following the
+  beam, so the floor at 1 is the right floor. The thermal n_i, Z_imp and
+  p_imp keep the thermal numerator (unchanged). The IDA file's Z_eff
+  envelope (carbon-propagated > VB-measured) is now eligible there: the base
+  and the envelope measure the same total Z_eff of the same discharge
+  (`baseline.hybrid_dd_total_zeff_subroute`; a different `.cdf` is still
+  refused). The label reads e.g. "carbon-propagated (n_12C6_err) on a
+  dd-derived total-Z_eff baseline" and `zeff_sigma_tier["pairing"]` records
+  the base definition, the draw centre, the width source and "conditional at
+  fixed beam fraction"; the assumed template stays the loud fallback. On the
+  synthetic dd at 1.2 s: Z_eff on axis 0.98 -> 1.40, Redl I_BS 140.4 -> 142.4
+  kA, envelope assumed template -> carbon-propagated. The measured routes
+  (`"Zeff"` / `"CER"` / `"all"`, the default) and every golden are unchanged.
+  One table in docs/physics-notes.md now gives the definition that feeds the
+  bootstrap, the species derivations, the draw centre, the width, the floor
+  and what is held fixed, on every route.
+
 ## Unreleased — review fixes to A1 / B
 
 - **The baseline's input warnings now reach the user on the unified engine.**
