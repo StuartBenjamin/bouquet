@@ -2,6 +2,21 @@
 
 ## Unreleased — one Z_eff rule on every route (owner decision 2026-10-18)
 
+- **`zeff_from_fuse=True` on a measured `ida_hybrid` route: the bootstrap
+  gets the dd's TOTAL Z_eff.** It got the dd's thermal numerator
+  (`zeff_includes_fast` False). The base is now the dd's total Z_eff (the
+  validated `zeff` dataset, else the all-ion sum over n_e, as on the plain dd
+  route), `zeff_includes_fast` following the beam, the draw centred on it;
+  n_i (the IDA Z_eff, beam subtracted), Z_imp = `impurity_Z` and the IDA
+  envelope (carried absolute) are unchanged. The stamps say so:
+  `zeff_definition` "total", and the label "... on a dd-derived total-Z_eff
+  baseline" with `zeff_sigma_tier["pairing"]`
+  (`baseline.ZEFF_PAIRING_HYBRID_FROM_FUSE_TOTAL`,
+  `baseline.hybrid_zeff_from_fuse_total`). On the synthetic dd at 1.2 s:
+  Z_eff on axis 0.98 -> 1.40, Redl I_BS 105.5 -> 106.8 kA. With
+  `zeff_from_fuse=False` (the default) every measured route is unchanged
+  bit for bit; the EXPERIMENTAL classification keeps its own rule. Not on
+  the defaults or any golden.
 - **`ida_hybrid` with `ni_source="standard"`: the base n_i carries the
   beam's charge.** Quasineutrality with a beam is n_e = n_i + Z n_z + z_fast,
   so with the thermal-numerator Z_eff the thermal n_i is

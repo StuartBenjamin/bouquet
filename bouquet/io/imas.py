@@ -2657,11 +2657,11 @@ def read_imas_baseline(
     # Z_imp derivation below uses (impurity_charge_with_fast_ions, the
     # ida_hybrid zeff_for_ni) on every route, A1 included.
     Zeff_th = zeff_num / ne
-    # The dd's Z_eff as handed to the ida_hybrid measured route's
-    # zeff_from_fuse=True (unchanged by A1) and its convention.  On the
-    # plain dd route (A1, owner decision 2026-10-17) and the ida_hybrid
-    # ni_source="standard" sub-route (owner decision 2026-10-18), below once
-    # the route is known, it is replaced with the dd's own TOTAL Z_eff
+    # The dd's Z_eff and its convention before the route is known.  On the
+    # plain dd route (A1, owner decision 2026-10-17), the ida_hybrid
+    # ni_source="standard" sub-route and zeff_from_fuse=True on a measured
+    # ida_hybrid route (owner decisions 2026-10-18), below once the route is
+    # known, it is replaced with the dd's own TOTAL Z_eff
     # (_dd_total_zeff); the EXPERIMENTAL classification (ImasSource.
     # zeff_fast_ions; bouquet.experimental.REGISTRY["fuse_zeff_fast_ions"],
     # _dd_zeff) keeps its own rule on both routes.
@@ -2783,7 +2783,12 @@ def read_imas_baseline(
             "the ida_hybrid IDA slice -- unset it, or use "
             "kinetic_source='ida_hybrid' with an ida_path")
     zeff_includes_fast = dd_zeff_includes_fast
-    if not _ida_ion_route and not _zeff_classified:
+    # zeff_from_fuse=True on a measured ida_hybrid route (owner decision
+    # 2026-10-18, Fix 2): the dd's Z_eff handed to the bootstrap is its
+    # TOTAL one too; the IDA-derived n_i and Z_imp = impurity_Z are untouched
+    _from_fuse_total = bool(_ida_ion_route
+                            and getattr(source, "zeff_from_fuse", False))
+    if (not _ida_ion_route or _from_fuse_total) and not _zeff_classified:
         # A1 (owner decision 2026-10-17): the plain dd route's kinetics and
         # Sauter coefficients take the dd's own TOTAL Z_eff, and the Z_eff
         # channel is drawn around the same quantity (aux["zeff"]).  The
@@ -2792,7 +2797,10 @@ def read_imas_baseline(
         # ni_source="standard" sub-route (use_ida, dd Z_eff) -- the Z_eff
         # handed to the bootstrap coefficients is the TOTAL one on every
         # route; there _merge_ida_kinetics returns this array as the run's
-        # Z_eff while its n_i keeps zeff_for_ni=Zeff_th.
+        # Z_eff while its n_i keeps zeff_for_ni=Zeff_th.  And (2026-10-18,
+        # Fix 2) with zeff_from_fuse=True on a measured route, where
+        # _merge_ida_kinetics returns it as the run's Z_eff and n_i comes
+        # from the IDA Z_eff as without the option.
         Zeff_total, _zeff_def = _dd_total_zeff(cp, Zeff_th, z2_fast, ne,
                                                 psi_N)
         Zeff = Zeff_total
@@ -2806,7 +2814,9 @@ def read_imas_baseline(
                     else "stored cp.zeff inconsistent"
                     if _zeff_def.get("reason") else "no stored zeff"),
             basis=("owner decision A1 (2026-10-17"
-                   + (", ida_hybrid ni_source='standard': 2026-10-18"
+                   + (", ida_hybrid zeff_from_fuse=True on a measured "
+                      "ni_source: 2026-10-18" if _from_fuse_total else
+                      ", ida_hybrid ni_source='standard': 2026-10-18"
                       if use_ida else "")
                    + "): the dd's own total Z_eff "
                    "(all ions, fast included, over n_e), "
@@ -2819,8 +2829,8 @@ def read_imas_baseline(
             source, "zeff_from_fuse", False):
         _zeff_def = dict(definition="total", source="ida")
     else:
-        # zeff_from_fuse=True on a measured route and the experimental
-        # classification
+        # the experimental classification (zeff_from_fuse=True on a
+        # measured route included: it keeps its own rule)
         _zeff_def = dict(
             definition=("total" if dd_zeff_includes_fast
                         else "thermal-numerator"),
@@ -2872,7 +2882,9 @@ def read_imas_baseline(
         if _ida_ion_route:
             aux["zeff"] = Zeff   # keep the switchboard's zeff baseline consistent
             # IDA's Z_eff is MEASURED, so its numerator counts the fast ions;
-            # zeff_from_fuse carries the dd's own convention over with its value.
+            # zeff_from_fuse carries the dd's own convention over with its
+            # value (the dd's total since 2026-10-18: the flag follows the
+            # beam, set above; under the classification, the classified one)
             if not getattr(source, "zeff_from_fuse", False):
                 zeff_includes_fast = True
         else:

@@ -457,8 +457,47 @@ ZEFF_PAIRING_HYBRID_DD_TOTAL = (
     "the same discharge, paired by file identity (owner decision "
     "2026-10-18); the draw is conditional at the dd's fixed beam fraction")
 
-#: Label suffix of a measured IDA tier on that sub-route.
+#: Label suffix of a measured IDA tier on that sub-route (and on a measured
+#: route with ``zeff_from_fuse=True``).
 ZEFF_PAIRING_HYBRID_DD_TOTAL_LABEL = "on a dd-derived total-Z_eff baseline"
+
+#: The pairing reason with ``ImasSource.zeff_from_fuse=True`` on a measured
+#: ``ida_hybrid`` route (owner decision 2026-10-18): the Z_eff baseline is
+#: the dd's TOTAL Z_eff, the envelope the IDA file's measured one.
+ZEFF_PAIRING_HYBRID_FROM_FUSE_TOTAL = (
+    "ida_hybrid on a measured ni_source with zeff_from_fuse=True: the Z_eff "
+    "baseline is the dd's TOTAL Z_eff (all ions, fast included, over n_e) "
+    "and the envelope is the IDA file's measured one -- two measurements of "
+    "the same total Z_eff of the same discharge, paired by file identity "
+    "(owner decision 2026-10-18); n_i comes from the IDA Z_eff; the draw is "
+    "conditional at the dd's fixed beam fraction")
+
+
+def hybrid_zeff_from_fuse_total(source, kinetic_source=None, baseline=None):
+    """Is this a measured ``ida_hybrid`` route with ``zeff_from_fuse=True``
+    whose Z_eff baseline is the dd's TOTAL Z_eff (owner decision
+    2026-10-18)?  :class:`~bouquet.config.ImasSource` with
+    ``zeff_from_fuse=True``, the EXPERIMENTAL classification off, the
+    resolved ``ni_source`` a measured one and, when the *baseline* records
+    its Z_eff definition, that definition ``"total"`` (a baseline read
+    before the decision carries the thermal numerator)."""
+    from .config import ImasSource
+    from .experimental import (IDA_ION_ROUTES, fuse_zeff_fast_ions_on,
+                               resolved_ni_source)
+    if (not isinstance(source, ImasSource)
+            or not getattr(source, "zeff_from_fuse", False)
+            or fuse_zeff_fast_ions_on(source)):
+        return False
+    if resolved_ni_source(source, kinetic_source,
+                          baseline=baseline) not in IDA_ION_ROUTES:
+        return False
+    lm = getattr(baseline, "li_metrics", None) if baseline is not None \
+        else None
+    zd = (((lm or {}).get("zeff_dd_provenance") or {})
+          .get("zeff_definition") if isinstance(lm, dict) else None)
+    if isinstance(zd, dict) and zd.get("definition") is not None:
+        return zd.get("definition") == "total"
+    return True
 
 
 def hybrid_dd_total_zeff_subroute(source, kinetic_source=None,
@@ -508,7 +547,9 @@ def zeff_sigma_eligibility(source, ida_path, kinetic_source=None,
     With ``with_pairing=True`` a third element is returned: ``None`` for
     the same-file pairing, and for the ``ida_hybrid`` ``ni_source=
     "standard"`` sub-route a dict ``{"case", "reason"}`` naming that
-    sub-route's own pairing (:data:`ZEFF_PAIRING_HYBRID_DD_TOTAL`).
+    sub-route's own pairing (:data:`ZEFF_PAIRING_HYBRID_DD_TOTAL`); likewise
+    for ``zeff_from_fuse=True`` on a measured route
+    (:data:`ZEFF_PAIRING_HYBRID_FROM_FUSE_TOTAL`).
 
     The measured tiers are absolute sigmas from one IDA ``.cdf`` and pair
     with a Z_eff baseline that measures the same total Z_eff of the same
@@ -517,7 +558,10 @@ def zeff_sigma_eligibility(source, ida_path, kinetic_source=None,
     (resolved with ``kinetic_source``:
     :func:`bouquet.experimental.resolved_ni_source`) ``ida_path``
     (:class:`ImasSource`; ``zeff_from_fuse=True`` stays eligible, the
-    envelope carried absolute); and, on the ``ida_hybrid``
+    envelope carried absolute, and since the owner decision of 2026-10-18
+    its baseline is the dd's TOTAL Z_eff, recorded as its own pairing
+    :data:`ZEFF_PAIRING_HYBRID_FROM_FUSE_TOTAL`,
+    :func:`hybrid_zeff_from_fuse_total`); and, on the ``ida_hybrid``
     ``ni_source="standard"`` sub-route (:func:`hybrid_dd_total_zeff_subroute`,
     owner decision 2026-10-18), ``ida_path`` too -- the baseline there is the
     dd's TOTAL Z_eff of the discharge whose kinetics that file supplies, so
@@ -562,6 +606,11 @@ def zeff_sigma_eligibility(source, ida_path, kinetic_source=None,
             "envelope would mix channels"))
     elif isinstance(source, ImasSource):
         own, own_kind = str(getattr(source, "ida_path", "") or ""), "ida_path"
+        if hybrid_zeff_from_fuse_total(source, kinetic_source,
+                                       baseline=baseline):
+            pairing = {"case": "ida_hybrid measured ni_source, "
+                               "zeff_from_fuse=True",
+                       "reason": ZEFF_PAIRING_HYBRID_FROM_FUSE_TOTAL}
     else:
         return _out(False, (
             f"source type {type(source).__name__} declares no IDA file, so "
@@ -661,7 +710,8 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
     ``pairing`` (the third element of :func:`zeff_sigma_eligibility` with
     ``with_pairing=True``): ``None`` for the same-file pairing, which leaves
     the label and ``meta`` exactly as without it.  For the ``ida_hybrid``
-    ``ni_source="standard"`` sub-route (owner decision 2026-10-18) a dict:
+    ``ni_source="standard"`` sub-route and ``zeff_from_fuse=True`` on a
+    measured route (owner decisions 2026-10-18) a dict:
     a measured IDA tier's label gains
     :data:`ZEFF_PAIRING_HYBRID_DD_TOTAL_LABEL`, and ``meta["pairing"]``
     records the dict plus ``tier``, ``width_source`` (the label) and
@@ -1259,7 +1309,8 @@ def resolve_uncertainty(config, baseline) -> dict:
             src, ida_path, kinetic_source=_kin_src, baseline=baseline,
             with_pairing=True)
         if _z_pair is not None:
-            # the ida_hybrid ni_source="standard" sub-route (owner decision
+            # the ida_hybrid ni_source="standard" sub-route, or
+            # zeff_from_fuse=True on a measured route (owner decisions
             # 2026-10-18): what the measured width is paired with, recorded
             _zd = (((getattr(baseline, "li_metrics", None) or {})
                     .get("zeff_dd_provenance") or {})

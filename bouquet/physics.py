@@ -1720,11 +1720,11 @@ def zeff_bounds(ne, Z_imp, z_fast=None, z2_fast=None,
     there) is no longer reached on the plain dd route: since A1 (owner
     decision 2026-10-17) that route carries the dd's TOTAL Z_eff with
     ``zeff_includes_fast=True``, whose lower edge is 1 for a hydrogenic
-    beam, and since the owner decision of 2026-10-18 so does the
-    ida_hybrid ``ni_source="standard"`` sub-route.  It remains reachable
-    with ``zeff_from_fuse=True`` on a measured ida_hybrid route and under
-    the experimental ``fuse_zeff_fast_ions`` classification of a
-    thermal-only stored Z_eff.
+    beam, and since the owner decisions of 2026-10-18 so do the
+    ida_hybrid ``ni_source="standard"`` sub-route and ``zeff_from_fuse=True``
+    on a measured ida_hybrid route.  It remains reachable under the
+    experimental ``fuse_zeff_fast_ions`` classification of a thermal-only
+    stored Z_eff.
     """
     Z_imp = float(Z_imp)
     if z_fast is None:

@@ -27,6 +27,7 @@ import test_ni_fast_subtraction as NF
 from bouquet.baseline import (ZEFF_PAIRING_HYBRID_DD_TOTAL,
                               ZEFF_PAIRING_HYBRID_DD_TOTAL_LABEL,
                               hybrid_dd_total_zeff_subroute,
+                              hybrid_zeff_from_fuse_total,
                               resolve_uncertainty, resolve_zeff_envelope,
                               zeff_sigma_eligibility)
 from bouquet.config import (BouquetConfig, GenerationConfig, ImasSource,
@@ -314,11 +315,29 @@ def test_the_measured_routes_are_bit_identical(tmp_path, route):
     no pairing.  Envelope, label and meta: those of the legacy
     resolve_zeff_envelope call (no pairing argument), bit for bit, with no
     "pairing" key.  Draws: fixed-seed draws on that legacy envelope are the
-    run's draws, bit for bit."""
+    run's draws, bit for bit.  zeff_from_fuse=False set explicitly (the
+    default) is the same read bit for bit, with the measured route's own
+    record and no zeff_from_fuse pairing (Fix 2 of 2026-10-18 moves only
+    zeff_from_fuse=True)."""
     ddp, cdf, *_ = NF._build(tmp_path)
     bl = _read(ddp, cdf, ni_source=route)
     src = _src(ddp, cdf, ni_source=route)
     ida = bl.aux["ida_profiles"][1]
+    (tmp_path / "explicit").mkdir()
+    ddx, cdx, *_ = NF._build(tmp_path / "explicit")
+    blx = _read(ddx, cdx, ni_source=route, zeff_from_fuse=False)
+    for k in ("Zeff", "ne", "te", "ni", "ti", "p_fast", "z_fast", "z2_fast"):
+        np.testing.assert_array_equal(getattr(blx, k), getattr(bl, k))
+    np.testing.assert_array_equal(blx.aux["zeff"], bl.aux["zeff"])
+    assert (blx.Z_imp, blx.zeff_includes_fast) == (bl.Z_imp,
+                                                    bl.zeff_includes_fast)
+    for k in ("sigma_ne_ida", "sigma_te_ida", "sigma_ni_ida", "sigma_ti_ida"):
+        np.testing.assert_array_equal(blx.aux[k], bl.aux[k])
+    rec = bl.li_metrics["zeff_dd_provenance"]
+    assert blx.li_metrics["zeff_dd_provenance"] == rec
+    assert (rec["convention"], rec["source"]) == ("thermal-only", "default")
+    assert rec["baseline_zeff_from"].startswith("IDA")
+    assert not hybrid_zeff_from_fuse_total(src, "ida_hybrid", baseline=bl)
     np.testing.assert_array_equal(
         bl.Zeff, np.interp(bl.psi_N_kinetic, ida.psi_N, ida.Zeff))
     np.testing.assert_array_equal(bl.aux["zeff"], bl.Zeff)

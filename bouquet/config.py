@@ -320,7 +320,9 @@ class ImasSource:
     # what the uncertainty, the sampler clips and the Z_eff ladder follow
     # (bouquet.experimental.baseline_kinetics_route).
     ni_source: str = "auto"
-    # ida_hybrid on a measured route only: True keeps the dd's Z_eff while
+    # ida_hybrid on a measured route only: True keeps the dd's Z_eff -- its
+    # TOTAL Z_eff (validated zeff dataset, else the all-ion sum; owner
+    # decision 2026-10-18), zeff_includes_fast following the beam -- while
     # ne/Te/Ti/ni come from IDA (an explicit choice of the dd's Z_eff); False
     # takes IDA's resolved Z_eff, which counts the fast ions in its numerator
     # (a measured Z_eff), so Baseline.zeff_includes_fast is True.  Under
@@ -375,9 +377,9 @@ class ImasSource:
     # False (default; owner decision A1, 2026-10-17): on the plain dd route
     # the dd's own TOTAL Z_eff (the zeff dataset, else the all-ion sum over
     # n_e), and the same on the ida_hybrid ni_source="standard" sub-route
-    # (owner decision 2026-10-18); zeff_from_fuse=True on a measured
-    # ida_hybrid route keeps the thermal-only Z_eff recomputed from the dd's
-    # thermal ion densities.
+    # (owner decision 2026-10-18), and with zeff_from_fuse=True on a
+    # measured ida_hybrid route (owner decision 2026-10-18; n_i there from
+    # the IDA Z_eff).
     zeff_fast_ions: bool = False
     # ida_hybrid on a measured ni_source: subtract the dd's fast-ion density
     # equivalent from the IDA (total) n_i (bouquet.experimental.
