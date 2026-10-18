@@ -436,25 +436,31 @@ def try_save_ifile(mygs, filename, record=None, **kwargs):
 
 
 def save_state_ifile(mygs, filename, *, npsi, ntheta, psi_pad, p_sep,
-                     orientation=None):
+                     orientation=None, profile_derivs=False, psi_bounds=False):
     r'''The OFT i-file of ``mygs``'s current state, carrying the SAME
     pressure frame as the g-file bouquet writes of that state: the
     separatrix pressure ``p_sep`` is passed as ``lcfs_pressure`` exactly as
     :func:`bouquet.edge_pressure.lcfs_kwargs` passes it to ``save_eqdsk``
     (#74 review B1), with the same ``lcfs_pad``.  Returns ``(path or None,
     record)``; the record (``ifile_written``, ``ifile_error``, the grid,
-    the ``lcfs_pressure`` handed over, the frame and the source orientation
-    signs) is stamped on the archive group by the caller.'''
+    the ``lcfs_pressure`` handed over, the extended records written, the
+    frame and the source orientation signs) is stamped on the archive group
+    by the caller.  ``profile_derivs`` / ``psi_bounds`` are handed to
+    ``save_ifile`` only when True (an older OFT has neither).'''
     from .edge_pressure import lcfs_kwargs
     rec = dict(ifile_written=False, ifile_error=None, ifile_npsi=int(npsi),
                ifile_ntheta=int(ntheta), ifile_lcfs_pad=float(psi_pad),
-               ifile_lcfs_pressure=float(p_sep), ifile_frame=IFILE_FRAME)
+               ifile_lcfs_pressure=float(p_sep), ifile_frame=IFILE_FRAME,
+               ifile_profile_derivs=bool(profile_derivs),
+               ifile_psi_bounds=bool(psi_bounds))
+    ext = {k: True for k, v in dict(profile_derivs=profile_derivs,
+                                    psi_bounds=psi_bounds).items() if v}
     for k, v in (orientation or {}).items():
         if v is not None:
             rec[f"ifile_{k}"] = float(v)
     path = try_save_ifile(mygs, filename, record=rec, npsi=int(npsi),
                           ntheta=int(ntheta), lcfs_pad=psi_pad,
-                          **lcfs_kwargs(p_sep))
+                          **lcfs_kwargs(p_sep), **ext)
     rec["ifile_written"] = path is not None
     return path, rec
 
@@ -464,7 +470,9 @@ def read_ifile(data):
     unformatted, little-endian, 4-byte record markers): ``dict(npsi, ntheta,
     psi, f, p, q, R, Z)`` -- ``psi`` / ``f`` / ``p`` / ``q`` per flux surface
     (``p`` in Pa, including the ``lcfs_pressure`` handed to the writer),
-    ``R`` / ``Z`` the surfaces.  Double or single precision.'''
+    ``R`` / ``Z`` the surfaces -- plus, when the file has them, ``ffp`` /
+    ``pp`` (``profile_derivs``) and ``psi_bounds`` = [psi_axis, psi_LCFS]
+    (``psi_bounds``), told apart by length.  Double or single precision.'''
     import struct
     buf = bytes(data)
     recs, pos = [], 0
@@ -480,6 +488,12 @@ def read_ifile(data):
                p=cols[2], q=cols[3])
     if len(rz) == 2:
         out["R"], out["Z"] = rz
+    extra = [np.frombuffer(r, dtype=dt).astype(float) for r in recs[7:]]
+    if len(extra) >= 2 and extra[0].size == npsi:
+        out["ffp"], out["pp"] = extra[:2]
+        extra = extra[2:]
+    if extra and extra[0].size == 2:
+        out["psi_bounds"] = extra[0]
     return out
 
 
