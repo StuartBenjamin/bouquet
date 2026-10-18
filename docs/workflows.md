@@ -455,6 +455,21 @@ alone, and a series takes one per slice: `run_slices(times, ida_times=[…])`.
 
 ### `FixedComponentsConfig` (`b.fixed_components`)
 
+**g-file + p-file: the p-file's `pb` is the default `p_fast`** (decision B,
+2026-10-17). When the profiles file is an Osborne p-file carrying a `pb`
+block and `p_fast` is unset, the reconstruction and every draw take
+`p_fast = 1e3 * pb` (kPa → Pa) on `pb`'s own psinorm (coord `"psi_n"`),
+stamped `li_metrics["p_fast_source"] = {"p_fast_source": "pfile_pb", ...}`.
+An explicit `p_fast` still wins (stamped `"fixed_components"`; a p-file with
+`pb` beside it warns once, naming the field); a p-file without `pb`, and an
+IDA `.cdf`, give zero fast pressure as before (`"none"`). Every g-file-route
+reconstruction also carries the **report-only** `reconstruction_metrics
+["pressure_fidelity"]`: the full pressure (the solver's, separatrix pressure
+added back) against the input g-file's, as a relative RMS and the on-axis
+relative error, with a `UserWarning` when the on-axis deficit exceeds 10 %
+(the band that would have caught, with wide margin, the −63 % of a dropped
+`pb`). It is never part of the verdict.
+
 `p_fast`, `j_NBI`, `j_RF`, `j_other` on their own `psi_N` grid — additive
 components that are never perturbed (an explicit `j_other` replaces every
 fusion / runaways / sawteeth / unknown-index entry the IMAS reader would hold,

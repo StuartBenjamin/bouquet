@@ -1,5 +1,25 @@
 # Bouquet — change summaries
 
+## Unreleased — the p-file's beam pressure by default and a pressure-fidelity stamp (B)
+
+- **g-file + p-file: the p-file's `pb` is the default `p_fast` (decision B,
+  2026-10-17).** When a `ReconstructionSource` p-file carries a `pb` block and
+  `fixed_components.p_fast` is unset, the reconstruction and the draws take
+  `p_fast = 1e3 * pb` (Pa) on `pb`'s psinorm (coord `"psi_n"`), stamped
+  `li_metrics["p_fast_source"]` (`"pfile_pb"`; `"fixed_components"` for an
+  explicit array, which still wins and warns once, naming the field, when the
+  p-file also has `pb`; `"none"` for an IDA file or a p-file without `pb`,
+  which behave as before). The shipped total-pressure pair
+  (`g_synthetic_pfast.geqdsk` + `p_synthetic.peqdsk`) now reconstructs at the
+  defaults with beta_N 1.671 (g-file 1.684), against 0.630 when `pb` was
+  dropped. The thermal g-file + IDA `.cdf` goldens are unaffected.
+- **Report-only `reconstruction_metrics["pressure_fidelity"]`** on every
+  g-file-route reconstruction: the full pressure (p_sep added back) against
+  the input g-file's pressure profile, as a relative RMS and the on-axis
+  relative error; a `UserWarning` when the on-axis deficit exceeds 10 %
+  (`baseline.PRESSURE_FIDELITY_WARN_PCT`, the band that would have caught the
+  -63 % of a dropped `pb`). Never part of the verdict.
+
 ## Unreleased — the dd route's total Z_eff (A1)
 
 - **Plain dd route: the kinetics and the Sauter bootstrap take the dd's own

@@ -1305,6 +1305,62 @@ def _resolve_fixed(comp, src_psi, dst_psi):
     return np.interp(dst_psi, np.asarray(src_psi, dtype=float), comp)
 
 
+#: An Osborne p-file's ``pb`` block is in kPa; ``p_fast`` is in Pa.
+PFILE_PB_TO_PA = 1e3
+#: profiles files already warned about carrying ``pb`` beside an explicit
+#: ``fixed_components.p_fast`` (the warning is issued once per file)
+_PB_TWO_SOURCES_WARNED = set()
+
+
+def resolve_p_fast_input(fc, kin, profiles_path, psi_map):
+    """``(values, x, stamp)``: the g-file route's fast-ion pressure input
+    (decision B, 2026-10-17), before it is resolved onto the kinetic grid.
+
+    * ``fixed_components.p_fast`` set: it wins, on ``fixed_components.psi_N``
+      in its ``coord`` (exactly as before); ``p_fast_source=
+      "fixed_components"``.  A p-file that ALSO carries a ``pb`` block is
+      warned about once (two sources), naming the field.
+    * unset, and the profiles file is a p-file with a ``pb`` block: p_fast
+      defaults to ``PFILE_PB_TO_PA * pb`` on ``pb``'s own psinorm (coord
+      ``"psi_n"``, mapped to the run grid through *psi_map*);
+      ``p_fast_source="pfile_pb"``.
+    * otherwise (an IDA file, a p-file without ``pb``): ``(None, None, ...)``
+      -- zero fast pressure, as before; ``p_fast_source="none"``.
+
+    *kin* is :func:`_load_kinetic_profiles`' dict (``pb`` / ``pb_psi_N``
+    when the p-file carries the block).  ``stamp`` is archived as
+    ``li_metrics["p_fast_source"]`` (and ``Baseline.p_fast_meta``).
+    """
+    import os
+    import numpy as np
+    from . import coords
+    has_pb = kin.get("pb") is not None
+    if fc.p_fast is not None:
+        if has_pb:
+            key = str(profiles_path)
+            if key not in _PB_TWO_SOURCES_WARNED:
+                _PB_TWO_SOURCES_WARNED.add(key)
+                import warnings
+                warnings.warn(
+                    f"the p-file {os.path.basename(key)!r} carries a fast-ion "
+                    "pressure block 'pb' AND fixed_components.p_fast is set: "
+                    "two sources of p_fast; fixed_components.p_fast is used "
+                    "and the p-file's pb is ignored", UserWarning,
+                    stacklevel=3)
+        return (fc.p_fast,
+                coords.to_run_grid(fc.psi_N, getattr(fc, "coord", coords.RUN),
+                                   psi_map),
+                dict(p_fast_source="fixed_components", pfile_has_pb=has_pb))
+    if has_pb:
+        pb = PFILE_PB_TO_PA * np.asarray(kin["pb"], dtype=float)
+        return (pb, coords.to_run_grid(np.asarray(kin["pb_psi_N"], dtype=float),
+                                       coords.PSI, psi_map),
+                dict(p_fast_source="pfile_pb", pfile_has_pb=True,
+                     coord=coords.PSI, units="Pa (1e3 x the p-file's kPa)",
+                     p_fast_axis_Pa=float(pb[0])))
+    return None, None, dict(p_fast_source="none", pfile_has_pb=False)
+
+
 def _load_kinetic_profiles(source) -> dict:
     """Kinetic profiles (SI) from the reconstruction source's ``profiles_path``.
 
@@ -1346,7 +1402,7 @@ def _load_kinetic_profiles(source) -> dict:
         )
     pf.compute_quasineutrality()
     psi_pf, Zeff = pf.compute_zeff()
-    return dict(
+    out = dict(
         psi_N=np.asarray(psi_pf, dtype=float),
         ne=np.asarray(pf.ne, dtype=float) * 1e20,
         te=np.asarray(pf.te, dtype=float) * 1e3,
@@ -1355,6 +1411,12 @@ def _load_kinetic_profiles(source) -> dict:
         Zeff=np.clip(np.asarray(Zeff, dtype=float), 1.0, None),
         raw_bytes=raw,
     )
+    # the fast-ion pressure block (kPa, on its own psinorm): the default
+    # p_fast of the g-file route (decision B; resolve_p_fast_input)
+    if pf.pb is not None:
+        out["pb"] = np.asarray(pf.pb, dtype=float)
+        out["pb_psi_N"] = np.asarray(pf["pb"]["psinorm"], dtype=float)
+    return out
 
 
 def _resolve_reconstruction(source, config, mygs) -> Baseline:
@@ -1365,7 +1427,9 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     the (toroidal) fitted currents. The reconstructed total ``j_phi_fit`` already
     contains all driven current, so fixed components (j_NBI / j_RF) default to
     zero and only re-partition the inductive part if the user supplies them;
-    ``p_fast`` (absent from thermal IDA profiles) likewise defaults to zero.
+    ``p_fast`` is ``fixed_components.p_fast`` when set, else a p-file's own
+    ``pb`` block (decision B, 2026-10-17; :func:`resolve_p_fast_input`),
+    else zero (an IDA file has no fast-ion channel).
     """
     import numpy as np
 
@@ -1441,8 +1505,12 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     # fc.psi_N in the run coordinate (a psi_n input via the g-file's map).
     fc_x = coords.to_run_grid(fc.psi_N, getattr(fc, "coord", coords.RUN),
                               None if coord == coords.PSI else (psi_N, x_run))
-    p_fast_kin = _resolve_fixed(fc.p_fast, fc_x, x_kin)
-    p_fast_eq = to_eq(p_fast_kin) if fc.p_fast is not None else None
+    # p_fast: fixed_components.p_fast, else a p-file's pb (decision B)
+    _pf_in, _pf_x, _p_fast_stamp = resolve_p_fast_input(
+        fc, kin, source.profiles_path,
+        None if coord == coords.PSI else (psi_N, x_run))
+    p_fast_kin = _resolve_fixed(_pf_in, _pf_x, x_kin)
+    p_fast_eq = to_eq(p_fast_kin) if _pf_in is not None else None
     # Z_imp is plumbed for symmetry with the draw path, but is INERT here today:
     # FixedComponentsConfig (config.py) carries no Z_imp field at all -- Z_imp is
     # an *output* field of the Baseline dataclass, populated only on the IMAS
@@ -1633,6 +1701,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         j_RF=j_RF,
         j_other=j_other,
         p_fast=p_fast,
+        p_fast_meta=dict(_p_fast_stamp),
         # SAME source as the value handed to the reconstruction above, so the
         # two paths activate together or not at all.  The draws read
         # `Baseline.Z_imp` (run.py hands it to generate_bouquet, and the
@@ -1664,6 +1733,9 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             # PR #56 (owner item E2 stamp): how the IDA Z_eff / n_i were
             # resolved; archived as _baseline li_metrics_json
             ("zeff_provenance", kin.get("zeff_provenance")),
+            # decision B: where p_fast came from (pfile_pb /
+            # fixed_components / none)
+            ("p_fast_source", _p_fast_stamp),
             # review PR64 B1: how SWB's bootstrap was converted (absent on
             # the self-consistent loop, which runs no SWB)
             ("swb_conversion", result.get("swb_conversion"))) if v}
@@ -1740,6 +1812,50 @@ def _deliver_reconstruction_state(mygs, config, source, result, psi_N, ne_eq,
              "landed request (every loop pass ends there); one jphi-linterp "
              "solve of j_phi reproduces it"))
     return j_phi, j_ind, j_BS, offset, state
+
+
+#: The on-axis pressure deficit (%) beyond which the report-only pressure
+#: fidelity stamp warns (decision B, 2026-10-17).  10 % is the band that
+#: would have caught, with wide margin, the g-file + p-file case whose beam
+#: pressure (the p-file's pb) was dropped: -63 % on axis, while every
+#: verdict check (Ip, boundary, l_i) passed.  Never a gate.
+PRESSURE_FIDELITY_WARN_PCT = 10.0
+
+
+def pressure_fidelity_record(psi_N, p_full, p_input, *,
+                             warn_pct=PRESSURE_FIDELITY_WARN_PCT):
+    """The REPORT-ONLY pressure-fidelity stamp of a g-file-route
+    reconstruction (decision B, 2026-10-17): the reconstruction's full
+    pressure *p_full* (the solver's, separatrix pressure added back) against
+    the input g-file's *p_input*, both on *psi_N* (axis first).
+
+    ``rel_rms`` = RMS(p_full - p_input) / RMS(p_input); ``axis_rel_err_pct``
+    = 100 (p_full - p_input) / p_input at the first node.  A UserWarning
+    when the on-axis DEFICIT exceeds *warn_pct* (``axis_deficit_flag``).
+    Never part of the verdict."""
+    import numpy as np
+    pf = np.asarray(p_full, dtype=float)
+    pi = np.asarray(p_input, dtype=float)
+    rms_in = float(np.sqrt(np.mean(pi ** 2)))
+    rel_rms = (float(np.sqrt(np.mean((pf - pi) ** 2))) / rms_in
+               if rms_in > 0.0 else float("nan"))
+    ax = (float(100.0 * (pf[0] - pi[0]) / abs(pi[0])) if pi[0] != 0.0
+          else float("nan"))
+    flag = bool(np.isfinite(ax) and ax < -float(warn_pct))
+    if flag:
+        import warnings
+        warnings.warn(
+            f"pressure fidelity (report-only): the reconstruction's on-axis "
+            f"pressure is {ax:+.1f} % against the input g-file's (beyond the "
+            f"{warn_pct:g} % band; relative RMS {rel_rms:.3f}): a pressure "
+            "component of the g-file is missing from the kinetics -- e.g. a "
+            "fast-ion pressure (fixed_components.p_fast, or the p-file's pb)",
+            UserWarning, stacklevel=2)
+    return dict(report_only=True, frame="full (p_sep added back)",
+                psi_N_axis=float(np.asarray(psi_N, dtype=float)[0]),
+                p_axis_Pa=float(pf[0]), p_axis_input_Pa=float(pi[0]),
+                rel_rms=rel_rms, axis_rel_err_pct=ax,
+                warn_band_pct=float(warn_pct), axis_deficit_flag=flag)
 
 
 def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
@@ -1866,6 +1982,21 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
         import warnings
         warnings.warn(f"like-for-like pressure frames unavailable: {exc}")
 
+    # Pressure fidelity (decision B, 2026-10-17; REPORT-ONLY, never in the
+    # verdict): the reconstruction's full pressure (the solver's, p_sep
+    # added back) against the input g-file's pressure profile.
+    try:
+        _pad = float(source.psi_pad)
+        _ps = np.clip(np.asarray(eqdsk.psi_N, dtype=float), _pad, 1.0 - _pad)
+        _p_sol = np.asarray(mygs.get_profiles(psi=_ps.copy())[3], dtype=float)
+        _p_sep = float((_edge_rec or {}).get("p_sep_applied") or 0.0)
+        _pfid = pressure_fidelity_record(
+            _ps, _p_sol + _p_sep,
+            np.interp(_ps, _psiN_eq, np.asarray(eqdsk.pres, dtype=float)))
+    except Exception as exc:     # report-only: recorded, never raised
+        _pfid = dict(report_only=True,
+                     error=f"{type(exc).__name__}: {exc}")
+
     bnd_rms = float(q.get("boundary_rms_mm", float("nan")))
     bnd_max = float(q.get("boundary_max_dev_mm", float("nan")))
     axis_off_mm = float(np.hypot(o_point[0] - g("R_mag"),
@@ -1963,6 +2094,8 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
         # equilibrium, and the like-for-like comparison with the input
         "edge_pressure": _edge_rec,
         "pressure_like_for_like": _like,
+        # decision B (2026-10-17): REPORT-ONLY, never in the verdict
+        "pressure_fidelity": _pfid,
         # zero-ideal residuals (absolute)
         "boundary_rms_mm": bnd_rms, "boundary_max_mm": bnd_max,
         "axis_offset_mm": axis_off_mm,

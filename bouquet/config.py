@@ -632,8 +632,11 @@ class FixedComponentsConfig:
     Provenance / defaults:
       * ``p_fast`` -- :class:`ImasSource` builds it from per-species
         ``pressure_fast_{perpendicular,parallel}`` (reduced via
-        ``p_fast_reduction``); :class:`ReconstructionSource` defaults to zero.
-        Either way an explicit array here wins (e.g. from TRANSP/ONETWO).
+        ``p_fast_reduction``); :class:`ReconstructionSource` takes a
+        p-file's own ``pb`` block (x 1e3, Pa, on its psinorm; decision B,
+        2026-10-17) and defaults to zero otherwise (an IDA file).  Either way
+        an explicit array here wins (e.g. from TRANSP/ONETWO); a p-file with
+        ``pb`` beside an explicit array is warned about once.
       * ``j_NBI`` -- :class:`ImasSource` sums beam-source ``j_parallel``;
         :class:`ReconstructionSource` defaults to zero. Explicit array wins.
       * ``j_RF`` -- :class:`ImasSource` sums EC/LH/IC ``j_parallel``;

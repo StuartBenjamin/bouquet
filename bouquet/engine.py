@@ -3133,8 +3133,11 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
         # PR #56 (owner item E2 stamp): how the IDA Z_eff / n_i were
         # resolved; archived as _baseline li_metrics_json (as on the legacy
         # reconstruction route)
-        li_metrics=({"zeff_provenance": dict(kn["zeff_provenance"])}
-                    if kn.get("zeff_provenance") else None))
+        p_fast_meta=(dict(kn["p_fast_source"]) if kn.get("p_fast_source")
+                     else None),
+        li_metrics=({k: dict(kn[k]) for k in ("zeff_provenance",
+                                               "p_fast_source")
+                     if kn.get(k)} or None))
     # the third bucket (owner decision D2), archived beside the split
     from .schema import SPLIT_PRESSURE_SEPARATE
     bl.j_pressure = P

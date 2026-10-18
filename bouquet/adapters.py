@@ -373,7 +373,8 @@ class GFileAdapter:
 
     def read(self) -> EngineContract:
         """Everything that needs no solve: the contract minus the inductive."""
-        from .baseline import _load_kinetic_profiles, _resolve_fixed
+        from .baseline import (_load_kinetic_profiles, _resolve_fixed,
+                               resolve_p_fast_input)
         from .io.geqdsk import read_geqdsk
         from .physics import ELEMENTARY_CHARGE as _EC, impurity_pressure
         from .utils import pchip_interp
@@ -405,8 +406,11 @@ class GFileAdapter:
         fc = cfg.fixed_components
         fc_x = coords.to_run_grid(fc.psi_N, getattr(fc, "coord", coords.RUN),
                                   psi_map)
-        p_fast_kin = _resolve_fixed(fc.p_fast, fc_x, psi_kin)
-        p_fast = (to_eq(p_fast_kin) if fc.p_fast is not None
+        # p_fast: fixed_components.p_fast, else a p-file's pb (decision B)
+        _pf_in, _pf_x, p_fast_stamp = resolve_p_fast_input(
+            fc, kin, src.profiles_path, psi_map)
+        p_fast_kin = _resolve_fixed(_pf_in, _pf_x, psi_kin)
+        p_fast = (to_eq(p_fast_kin) if _pf_in is not None
                   else np.zeros_like(psi_N))
         Z_imp = getattr(fc, "Z_imp", None)
         p_th = _EC * (ne * te + ni * ti)
@@ -467,6 +471,7 @@ class GFileAdapter:
                                  ni=kin["ni"], ti=kin["ti"], Zeff=kin["Zeff"],
                                  raw_bytes=kin.get("raw_bytes"),
                                  p_fast=p_fast_kin,
+                                 p_fast_source=p_fast_stamp,
                                  zeff_provenance=kin.get("zeff_provenance")),
             pressure=p_th + p_imp + p_fast,
             pressure_parts=dict(thermal=p_th, impurity=p_imp, fast=p_fast,
