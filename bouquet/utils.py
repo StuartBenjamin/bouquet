@@ -536,6 +536,23 @@ def save_state_ifile(mygs, filename, *, npsi, ntheta, psi_pad, p_sep,
     return path, rec
 
 
+def load_mesh(mesh_path):
+    r'''``load_gs_mesh(mesh_path)`` with the coils of the detected device's turn
+    table (the DIII-D F coils) at ``nturns = 1``, so their solver current is in
+    ampere-turns -- the unit of bouquet's coil sigma floors, coil-reg weights and
+    targets and archived currents -- whatever turns the mesh carries (OFT #268
+    gave the F coils 58 / 55).  The field is the same (region current = current
+    x nturns); coils outside the table (the E coils) keep the mesh's turns.'''
+    from OpenFUSIONToolkit.TokaMaker.meshing import load_gs_mesh
+    from .devices import resolve_device
+    pts, lc, reg, coils, conds = load_gs_mesh(mesh_path)
+    spec = resolve_device(None, {c["coil_set"] for c in coils.values()})
+    for c in coils.values():
+        if spec is not None and c["coil_set"] in spec.turns:
+            c["nturns"] = 1.0
+    return pts, lc, reg, coils, conds
+
+
 @functools.lru_cache(maxsize=None)
 def tokamaker_on_mesh(mesh_path, order, nthreads=1):
     r'''A TokaMaker set up on ``mesh_path`` at FE ``order`` and nothing else:
@@ -543,9 +560,8 @@ def tokamaker_on_mesh(mesh_path, order, nthreads=1):
     once per process and reused (``OFT_env`` is a per-process singleton).'''
     from OpenFUSIONToolkit import OFT_env
     from OpenFUSIONToolkit.TokaMaker import TokaMaker
-    from OpenFUSIONToolkit.TokaMaker.meshing import load_gs_mesh
     mygs = TokaMaker(OFT_env(nthreads=nthreads))
-    pts, lc, reg, coils, conds = load_gs_mesh(mesh_path)
+    pts, lc, reg, coils, conds = load_mesh(mesh_path)
     mygs.setup_mesh(pts, lc, reg)
     mygs.setup_regions(cond_dict=conds, coil_dict=coils)
     mygs.setup(order=order)

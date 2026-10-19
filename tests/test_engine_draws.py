@@ -269,6 +269,40 @@ def test_the_zeff_definition_is_stamped_and_the_draw_is_centred_on_it(recon):
         assert "zeff_definition" not in ks_bare
 
 
+@pytest.mark.parametrize("stamp, expect", [
+    # the reader's thermal-closer branch: used as the total as stored
+    ({"definition": "total", "source": "dataset",
+      "matches": "thermal-numerator", "warned": True, "d_th": 0.0},
+     {"definition": "total", "source": "dataset",
+      "matches": "thermal-numerator"}),
+    # a rejected dataset: the qualifier and the reason
+    ({"definition": "total", "source": "from_densities", "matches": "neither",
+      "reason": "dataset inconsistent", "warned": True},
+     {"definition": "total", "source": "from_densities", "matches": "neither",
+      "reason": "dataset inconsistent"}),
+    # the measured routes' stamp: copied exactly as before
+    ({"definition": "total", "source": "ida"},
+     {"definition": "total", "source": "ida"}),
+])
+def test_the_draw_record_keeps_the_definition_qualifiers(recon, stamp,
+                                                         expect):
+    """Review F4: the per-draw kinetic_sampler record carries the reader's
+    ``matches`` (and ``reason``), so a draw of a stored zeff closer to the
+    thermal numerator does not read as an unqualified total."""
+    from bouquet.sampling import make_rng
+    eng, res, rec, b = recon
+    k = eng.c.kinetics
+    ctx = ED.EngineDrawContext(
+        eng, res, loop=ED.draw_loop_settings(
+            GenerationConfig(reconstruction_engine="unified")),
+        native=dict(psi_N=PSI, ne=k["ne"], te=k["te"], ni=k["ni"],
+                    ti=k["ti"]), zeff_definition=stamp)
+    assert ctx.zeff_definition == expect
+    inp = ED.sample_kinetics(ctx, make_rng(0), _unc(ctx), b.flux_integral,
+                             p_thresh=0.05)
+    assert inp.sampler["kinetic_sampler"]["zeff_definition"] == expect
+
+
 def test_a_zero_sigma_sample_is_exactly_the_base(recon):
     eng, res, rec, b = recon
     ctx = _ctx(eng, res)

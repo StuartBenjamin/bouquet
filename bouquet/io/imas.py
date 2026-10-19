@@ -1758,9 +1758,9 @@ def read_imas_sigmas(cp, n=None):
 #: Relative core mismatch above which a stored Z_eff matches neither numerator.
 ZEFF_CONVENTION_RTOL = 1e-2
 
-#: Plain dd route (A1, :func:`_dd_total_zeff`): the relative core mismatch
-#: (max over psi_N <= ``NI_FAST_GATE_PSI_N[-1]``, relative to the stored
-#: value) within which a stored ``core_profiles.zeff`` is accepted as the dd's
+#: Plain dd route (A1, :func:`_dd_total_zeff`): the relative mismatch (max
+#: over every node with n_e > 0 and finite inputs, pedestal and edge
+#: included, relative to the stored value) within which a stored ``core_profiles.zeff`` is accepted as the dd's
 #: total Z_eff.  On a self-consistent dd the IMAS definition
 #: sum_s Z_s^2 (n_s^th + n_s^fast) / n_e reproduces the stored array to three
 #: figures or better (the shipped synthetic dds: ~1e-16), so 5 % is a wide
@@ -1824,6 +1824,25 @@ def _dd_zeff(cp, zeff_th, z2_fast, ne, psi_N, record=None):
     return stored, includes
 
 
+def _ion_charge_state(ion, z_n, n):
+    """The charge an IMAS ``core_profiles`` ion weighs with in Z_eff: its
+    average charge state ``ion["z_ion"]`` (a scalar, or a profile of length
+    *n*) when present, finite and positive everywhere, else the element's
+    nuclear charge *z_n* (fully stripped).  ``z_ion_1d`` is not read."""
+    if "z_ion" not in ion:
+        return z_n
+    try:
+        zq = np.asarray(ion["z_ion"], dtype=float)
+    except (TypeError, ValueError):
+        return z_n
+    if zq.ndim == 0:
+        zq = float(zq)
+        return zq if np.isfinite(zq) and zq > 0.0 else z_n
+    if zq.shape == (n,) and np.all(np.isfinite(zq)) and np.all(zq > 0.0):
+        return zq
+    return z_n
+
+
 def _dd_total_zeff(cp, zeff_th, z2_fast, ne, psi_N):
     """``(zeff, stamp)``: the dd's own TOTAL Z_eff (owner decision
     2026-10-17, A1), the Z_eff the plain dd route hands the kinetics and the
@@ -1836,11 +1855,23 @@ def _dd_total_zeff(cp, zeff_th, z2_fast, ne, psi_N):
     densities; without a ``zeff`` dataset it is the answer
     (``source="from_densities"``).
 
+    ``Z_s`` is the ion's CHARGE STATE: the caller builds *zeff_th* and
+    *z2_fast* with ``ion[].z_ion`` (the average charge state, IMAS) when the
+    dd carries it and the element's ``z_n`` only when it does not
+    (:func:`_ion_charge_state`), so a partially ionised impurity (z_ion <
+    z_n) is weighted as the IMAS definition weights it, in the check and in
+    the fallback value alike.  Without ``z_ion`` (fully stripped light
+    impurities, every shipped dd) both are the z_n sums bit for bit.  The
+    n_i / Z_imp derivations keep z_n.
+
     A stored ``zeff`` is validated against the densities on EVERY dd, beam
-    or not: the relative core misfits (max over ``psi_N <=
-    NI_FAST_GATE_PSI_N[-1]``, relative to the stored value) to the total
-    (``d_all``) and to the thermal-only numerator (``d_th``; equal to
-    ``d_all`` without a beam) decide:
+    or not: the relative misfits (relative to the stored value, max over
+    every node with ``n_e > 0`` and finite densities and ``psi_N`` -- the
+    pedestal and the edge included, where the bootstrap current peaks;
+    review F6, it was ``psi_N <= NI_FAST_GATE_PSI_N[-1]`` = 0.8) to the
+    total (``d_all``) and to the thermal-only numerator (``d_th``; equal to
+    ``d_all`` without a beam) decide.  A zero or non-finite STORED value on
+    such a node gives an infinite / NaN misfit, so matches neither:
 
     * closer to the thermal numerator on a beam slice (``d_all >
       ZEFF_CONVENTION_RTOL`` and ``d_th < d_all``) and within
@@ -1854,10 +1885,13 @@ def _dd_total_zeff(cp, zeff_th, z2_fast, ne, psi_N):
       that is neither quantity is never handed to the Sauter coefficients.
 
     ``stamp`` (archived as ``li_metrics["zeff_dd_provenance"]
-    ["zeff_definition"]``; ``definition`` / ``source`` also in every draw's
-    ``kinetic_sampler`` record): ``definition="total"``, ``source``,
-    ``d_th`` / ``d_all`` (None without a dataset), ``rtol``, ``matches``,
-    ``warned`` and, on a fallback, ``reason``.  The warnings are collected
+    ["zeff_definition"]``; ``definition`` / ``source``, and ``matches`` /
+    ``reason`` when set, also in every engine draw's ``kinetic_sampler``
+    record, :func:`bouquet.engine_draws.draw_zeff_definition`): ``definition="total"``, ``source``,
+    ``d_th`` / ``d_all`` (None without a dataset), the node each comes from
+    (``d_th_psi_N`` / ``d_all_psi_N``: the worst node's psi_N), ``window``
+    (the nodes compared), ``rtol``, ``matches``, ``warned`` and, on a
+    fallback, ``reason``.  The warnings are collected
     inside a run and issued from the reconstruction summary
     (:func:`bouquet.utils.warn_or_defer`).
     """
@@ -1871,13 +1905,30 @@ def _dd_total_zeff(cp, zeff_th, z2_fast, ne, psi_N):
         stamp["source"] = "from_densities"
         return zeff_all, stamp
     stored = np.asarray(cp["zeff"], dtype=float)
-    core = np.asarray(psi_N, dtype=float) <= NI_FAST_GATE_PSI_N[-1]
-    _s = np.abs(stored[core])
+    _psi = np.asarray(psi_N, dtype=float)
+    _ne_raw = np.asarray(ne, dtype=float)
+    # every node where the densities define a Z_eff (review F6: the
+    # pedestal and the edge too, not only psi_N <= 0.8)
+    win = (np.isfinite(_ne_raw) & (_ne_raw > 0.0) & np.isfinite(_psi)
+           & np.isfinite(zeff_th) & np.isfinite(zeff_all))
+    if not np.any(win):
+        raise ValueError(
+            "core_profiles.zeff cannot be checked: no node has n_e > 0 with "
+            "finite densities")
+    _s = np.abs(stored[win])
     with np.errstate(divide="ignore", invalid="ignore"):
         # a zero or non-finite stored value gives inf / NaN: matches neither
-        d_th = float(np.max(np.abs(stored - zeff_th)[core] / _s))
-        d_all = float(np.max(np.abs(stored - zeff_all)[core] / _s))
-    stamp.update(d_th=d_th, d_all=d_all)
+        r_th = np.abs(stored - zeff_th)[win] / _s
+        r_all = np.abs(stored - zeff_all)[win] / _s
+    d_th, d_all = float(np.max(r_th)), float(np.max(r_all))
+
+    def _worst_psi(r):
+        bad = ~np.isfinite(r)
+        i = int(np.argmax(bad)) if np.any(bad) else int(np.argmax(r))
+        return float(_psi[win][i])
+    stamp.update(d_th=d_th, d_all=d_all, d_th_psi_N=_worst_psi(r_th),
+                 d_all_psi_N=_worst_psi(r_all),
+                 window="every node with n_e > 0 and finite inputs")
     thermal_closer = bool(np.any(z2_fast)) and (
         d_all > ZEFF_CONVENTION_RTOL and d_th < d_all)
     if thermal_closer and d_th <= ZEFF_DATASET_RTOL:
@@ -1885,7 +1936,8 @@ def _dd_total_zeff(cp, zeff_th, z2_fast, ne, psi_N):
                      warned=True)
         warn_or_defer(
             f"core_profiles.zeff is closer to the THERMAL-only numerator "
-            f"(core misfit {d_th:.1e}) than to the total one of the dd's "
+            f"(misfit {d_th:.1e}, worst at psi_N = "
+            f"{stamp['d_th_psi_N']:.3f}) than to the total one of the dd's "
             f"own densities ({d_all:.1e}); it is used as the total Z_eff "
             f"as stored (owner decision A1). A zeff stored before the "
             f"beam was added does this.", UserWarning, stacklevel=3)
@@ -1896,10 +1948,11 @@ def _dd_total_zeff(cp, zeff_th, z2_fast, ne, psi_N):
     stamp.update(source="from_densities", matches="neither", warned=True,
                  reason="dataset inconsistent")
     warn_or_defer(
-        f"core_profiles.zeff matches neither definition on the core "
-        f"(psi_N <= {NI_FAST_GATE_PSI_N[-1]:g}): rel. diff to the total "
-        f"(all ions over n_e, from the dd's densities) {d_all:.2e}, to the "
-        f"thermal-only numerator {d_th:.2e}, both beyond "
+        f"core_profiles.zeff matches neither definition (every node with "
+        f"n_e > 0): rel. diff to the total (all ions over n_e, from the "
+        f"dd's densities) {d_all:.2e} (worst at psi_N = "
+        f"{stamp['d_all_psi_N']:.3f}), to the thermal-only numerator "
+        f"{d_th:.2e} (psi_N = {stamp['d_th_psi_N']:.3f}), both beyond "
         f"{ZEFF_DATASET_RTOL:g}; the dataset is NOT used -- the total Z_eff "
         f"is recomputed from the dd's densities. A zeff stored before the "
         f"dd's ne or ion densities were last changed does this.",
@@ -2478,8 +2531,10 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
             n_capped = int(np.count_nonzero(ni_raw > _cap))
             ni = np.clip(ni_raw, 0.0, _cap)
             if n_floored or n_capped:
-                import warnings
-                warnings.warn(
+                # collected inside a run (issued after the captured
+                # reconstruction, once per run), else warned at once
+                from ..utils import warn_or_defer
+                warn_or_defer(
                     "ni_source='standard': the thermal n_i from the dd's "
                     "thermal Z_eff and the beam's charge is floored at 0 on "
                     f"{n_floored} node(s) and capped at n_e - z_fast (n_z >= "
@@ -2812,6 +2867,14 @@ def read_imas_baseline(
     # fast_ion_density_equivalent).  No beam charge is assumed anywhere.
     z_fast = np.zeros(n)          # sum_s Z_s   n_s^fast  [m^-3]
     z2_fast = np.zeros(n)         # sum_s Z_s^2 n_s^fast  [m^-3]
+    # The same two Z^2 moments weighted by each ion's CHARGE STATE
+    # (ion[].z_ion when present, else z_n; _ion_charge_state): what the IMAS
+    # core_profiles.zeff definition weights by, so what the stored zeff is
+    # validated against and the all-ion total recomputed from
+    # (_dd_total_zeff).  The species derivations (n_i, Z_imp) keep z_n.
+    # Identical to zeff_num / z2_fast, bit for bit, without z_ion.
+    zeff_num_q = np.zeros(n)
+    z2_fast_q = np.zeros(n)
     # pressure_fast_* and density_fast are independent fields: a dd can carry
     # one without the other, and a species with fast pressure but no fast
     # density gets the full p_fast treatment and ZERO dilution correction.
@@ -2820,10 +2883,13 @@ def read_imas_baseline(
         Z = float(ion["element"][0]["z_n"])
         n_s = np.asarray(ion["density_thermal"], dtype=float)
         zeff_num += n_s * Z * Z
+        Zq = _ion_charge_state(ion, Z, n)
+        zeff_num_q += n_s * Zq * Zq
         if "density_fast" in ion:
             _nf = np.asarray(ion["density_fast"], dtype=float)
             z_fast += Z * _nf
             z2_fast += Z * Z * _nf
+            z2_fast_q += Zq * Zq * _nf
         p_fast_s = _isotropic_fast_pressure(
             ion, p_fast_rule, n, _no_par, str(ion.get("label", f"Z={Z:g}")))
         if np.any(p_fast_s) and not np.any(
@@ -3001,8 +3067,10 @@ def read_imas_baseline(
         # Fix 2) with zeff_from_fuse=True on a measured route, where
         # _merge_ida_kinetics returns it as the run's Z_eff and n_i comes
         # from the IDA Z_eff as without the option.
-        Zeff_total, _zeff_def = _dd_total_zeff(cp, Zeff_th, z2_fast, ne,
-                                                psi_N)
+        # charge-state weighted (z_ion when present, else z_n: the same
+        # arrays bit for bit), the IMAS zeff definition
+        Zeff_total, _zeff_def = _dd_total_zeff(cp, zeff_num_q / ne,
+                                                z2_fast_q, ne, psi_N)
         Zeff = Zeff_total
         aux["zeff"] = Zeff_total
         # the flag follows the beam: without one both numerators coincide

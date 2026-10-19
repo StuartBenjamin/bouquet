@@ -553,14 +553,14 @@ class Bouquet(SwbBaseline):
             return self
         from OpenFUSIONToolkit import OFT_env
         from OpenFUSIONToolkit.TokaMaker import TokaMaker
-        from OpenFUSIONToolkit.TokaMaker.meshing import load_gs_mesh
+        from .utils import load_mesh
 
         sc = self.config.solver
 
         myOFT = OFT_env(nthreads=sc.nthreads)
         mygs = TokaMaker(myOFT)
 
-        mesh_pts, mesh_lc, mesh_reg, coil_dict, cond_dict = load_gs_mesh(sc.mesh_path)
+        mesh_pts, mesh_lc, mesh_reg, coil_dict, cond_dict = load_mesh(sc.mesh_path)
         mygs.setup_mesh(mesh_pts, mesh_lc, mesh_reg)
         mygs.setup_regions(cond_dict=cond_dict, coil_dict=coil_dict)
 
