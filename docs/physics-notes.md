@@ -1227,9 +1227,11 @@ Z_eff by default**, without the classification: Σ_s Z_s² (n_s^th + n_s^fast)
 charge state `ion[].z_ion` when the dd carries it, else its `z_n`, so a
 partially ionised impurity is weighted as IMAS weights it -- the n_i / Z_imp
 derivations keep `z_n`), or the dd's
-`zeff` dataset when it agrees with that on the core within 5 %
+`zeff` dataset when it agrees with that within 5 % on every node with n_e > 0
+and finite densities -- the pedestal and the edge included, where j_BS peaks
 (`io.imas.ZEFF_DATASET_RTOL`; a consistent dd reproduces it to three figures or
-better). A stored Z_eff closer to the thermal-only numerator (within 5 % of
+better; every shipped dd to ~1e-15; the worst node's psi_N is stamped,
+`d_th_psi_N` / `d_all_psi_N`). A stored Z_eff closer to the thermal-only numerator (within 5 % of
 it) is warned about and used as stored; one that matches neither definition is
 warned about and replaced by the densities' total (stamped `source=
 "from_densities"`, `reason="dataset inconsistent"`), whether or not the dd

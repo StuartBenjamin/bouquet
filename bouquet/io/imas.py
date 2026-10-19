@@ -1676,9 +1676,9 @@ def read_imas_sigmas(cp, n=None):
 #: Relative core mismatch above which a stored Z_eff matches neither numerator.
 ZEFF_CONVENTION_RTOL = 1e-2
 
-#: Plain dd route (A1, :func:`_dd_total_zeff`): the relative core mismatch
-#: (max over psi_N <= ``NI_FAST_GATE_PSI_N[-1]``, relative to the stored
-#: value) within which a stored ``core_profiles.zeff`` is accepted as the dd's
+#: Plain dd route (A1, :func:`_dd_total_zeff`): the relative mismatch (max
+#: over every node with n_e > 0 and finite inputs, pedestal and edge
+#: included, relative to the stored value) within which a stored ``core_profiles.zeff`` is accepted as the dd's
 #: total Z_eff.  On a self-consistent dd the IMAS definition
 #: sum_s Z_s^2 (n_s^th + n_s^fast) / n_e reproduces the stored array to three
 #: figures or better (the shipped synthetic dds: ~1e-16), so 5 % is a wide
@@ -1783,10 +1783,13 @@ def _dd_total_zeff(cp, zeff_th, z2_fast, ne, psi_N):
     n_i / Z_imp derivations keep z_n.
 
     A stored ``zeff`` is validated against the densities on EVERY dd, beam
-    or not: the relative core misfits (max over ``psi_N <=
-    NI_FAST_GATE_PSI_N[-1]``, relative to the stored value) to the total
-    (``d_all``) and to the thermal-only numerator (``d_th``; equal to
-    ``d_all`` without a beam) decide:
+    or not: the relative misfits (relative to the stored value, max over
+    every node with ``n_e > 0`` and finite densities and ``psi_N`` -- the
+    pedestal and the edge included, where the bootstrap current peaks;
+    review F6, it was ``psi_N <= NI_FAST_GATE_PSI_N[-1]`` = 0.8) to the
+    total (``d_all``) and to the thermal-only numerator (``d_th``; equal to
+    ``d_all`` without a beam) decide.  A zero or non-finite STORED value on
+    such a node gives an infinite / NaN misfit, so matches neither:
 
     * closer to the thermal numerator on a beam slice (``d_all >
       ZEFF_CONVENTION_RTOL`` and ``d_th < d_all``) and within
@@ -1803,8 +1806,10 @@ def _dd_total_zeff(cp, zeff_th, z2_fast, ne, psi_N):
     ["zeff_definition"]``; ``definition`` / ``source``, and ``matches`` /
     ``reason`` when set, also in every engine draw's ``kinetic_sampler``
     record, :func:`bouquet.engine_draws.draw_zeff_definition`): ``definition="total"``, ``source``,
-    ``d_th`` / ``d_all`` (None without a dataset), ``rtol``, ``matches``,
-    ``warned`` and, on a fallback, ``reason``.  The warnings are collected
+    ``d_th`` / ``d_all`` (None without a dataset), the node each comes from
+    (``d_th_psi_N`` / ``d_all_psi_N``: the worst node's psi_N), ``window``
+    (the nodes compared), ``rtol``, ``matches``, ``warned`` and, on a
+    fallback, ``reason``.  The warnings are collected
     inside a run and issued from the reconstruction summary
     (:func:`bouquet.utils.warn_or_defer`).
     """
@@ -1818,13 +1823,30 @@ def _dd_total_zeff(cp, zeff_th, z2_fast, ne, psi_N):
         stamp["source"] = "from_densities"
         return zeff_all, stamp
     stored = np.asarray(cp["zeff"], dtype=float)
-    core = np.asarray(psi_N, dtype=float) <= NI_FAST_GATE_PSI_N[-1]
-    _s = np.abs(stored[core])
+    _psi = np.asarray(psi_N, dtype=float)
+    _ne_raw = np.asarray(ne, dtype=float)
+    # every node where the densities define a Z_eff (review F6: the
+    # pedestal and the edge too, not only psi_N <= 0.8)
+    win = (np.isfinite(_ne_raw) & (_ne_raw > 0.0) & np.isfinite(_psi)
+           & np.isfinite(zeff_th) & np.isfinite(zeff_all))
+    if not np.any(win):
+        raise ValueError(
+            "core_profiles.zeff cannot be checked: no node has n_e > 0 with "
+            "finite densities")
+    _s = np.abs(stored[win])
     with np.errstate(divide="ignore", invalid="ignore"):
         # a zero or non-finite stored value gives inf / NaN: matches neither
-        d_th = float(np.max(np.abs(stored - zeff_th)[core] / _s))
-        d_all = float(np.max(np.abs(stored - zeff_all)[core] / _s))
-    stamp.update(d_th=d_th, d_all=d_all)
+        r_th = np.abs(stored - zeff_th)[win] / _s
+        r_all = np.abs(stored - zeff_all)[win] / _s
+    d_th, d_all = float(np.max(r_th)), float(np.max(r_all))
+
+    def _worst_psi(r):
+        bad = ~np.isfinite(r)
+        i = int(np.argmax(bad)) if np.any(bad) else int(np.argmax(r))
+        return float(_psi[win][i])
+    stamp.update(d_th=d_th, d_all=d_all, d_th_psi_N=_worst_psi(r_th),
+                 d_all_psi_N=_worst_psi(r_all),
+                 window="every node with n_e > 0 and finite inputs")
     thermal_closer = bool(np.any(z2_fast)) and (
         d_all > ZEFF_CONVENTION_RTOL and d_th < d_all)
     if thermal_closer and d_th <= ZEFF_DATASET_RTOL:
@@ -1832,7 +1854,8 @@ def _dd_total_zeff(cp, zeff_th, z2_fast, ne, psi_N):
                      warned=True)
         warn_or_defer(
             f"core_profiles.zeff is closer to the THERMAL-only numerator "
-            f"(core misfit {d_th:.1e}) than to the total one of the dd's "
+            f"(misfit {d_th:.1e}, worst at psi_N = "
+            f"{stamp['d_th_psi_N']:.3f}) than to the total one of the dd's "
             f"own densities ({d_all:.1e}); it is used as the total Z_eff "
             f"as stored (owner decision A1). A zeff stored before the "
             f"beam was added does this.", UserWarning, stacklevel=3)
@@ -1843,10 +1866,11 @@ def _dd_total_zeff(cp, zeff_th, z2_fast, ne, psi_N):
     stamp.update(source="from_densities", matches="neither", warned=True,
                  reason="dataset inconsistent")
     warn_or_defer(
-        f"core_profiles.zeff matches neither definition on the core "
-        f"(psi_N <= {NI_FAST_GATE_PSI_N[-1]:g}): rel. diff to the total "
-        f"(all ions over n_e, from the dd's densities) {d_all:.2e}, to the "
-        f"thermal-only numerator {d_th:.2e}, both beyond "
+        f"core_profiles.zeff matches neither definition (every node with "
+        f"n_e > 0): rel. diff to the total (all ions over n_e, from the "
+        f"dd's densities) {d_all:.2e} (worst at psi_N = "
+        f"{stamp['d_all_psi_N']:.3f}), to the thermal-only numerator "
+        f"{d_th:.2e} (psi_N = {stamp['d_th_psi_N']:.3f}), both beyond "
         f"{ZEFF_DATASET_RTOL:g}; the dataset is NOT used -- the total Z_eff "
         f"is recomputed from the dd's densities. A zeff stored before the "
         f"dd's ne or ion densities were last changed does this.",

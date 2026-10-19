@@ -228,3 +228,63 @@ def test_a_thermal_closer_dataset_is_qualified_in_the_draw_stamp(tmp_path):
     assert rec == {"definition": "total", "source": "dataset",
                    "matches": "thermal-numerator"}
     json.dumps(rec)
+
+
+# --------------------------------------------------------------------- F6
+def _pedestal_off(factor):
+    """dd_mutate: store the dd's total, times *factor* on psi_N > 0.85
+    only (a zeff that predates a change of the edge impurity density)."""
+    def mutate(dd):
+        cp = dd["core_profiles"]["profiles_1d"][0]
+        z = _total(cp, _z_n)
+        psi = np.linspace(0.0, 1.0, z.size)
+        cp["zeff"] = np.where(psi > 0.85, factor * z, z).tolist()
+    return mutate
+
+
+def test_a_pedestal_misfit_is_caught_and_located(tmp_path):
+    """The check covers every node with n_e > 0: a stored zeff right on the
+    core but 10 % off in the pedestal matches neither (the 5 % tolerance is
+    unchanged), and the worst node's psi_N is stamped and warned."""
+    assert ZEFF_DATASET_RTOL == 5e-2
+    ddp, *_ = NF._build(tmp_path, dd_mutate=_pedestal_off(1.10))
+    bl, msgs = _read(ddp)
+    neither = [m for m in msgs if "matches neither" in m]
+    assert len(neither) == 1
+    d = bl.li_metrics["zeff_dd_provenance"]["zeff_definition"]
+    assert d["matches"] == "neither" and d["reason"] == "dataset inconsistent"
+    assert d["d_all"] == pytest.approx(0.1 / 1.1, rel=1e-9)
+    assert d["d_all_psi_N"] > 0.85
+    assert d["window"] == "every node with n_e > 0 and finite inputs"
+    assert f"psi_N = {d['d_all_psi_N']:.3f}" in neither[0]
+    np.testing.assert_allclose(bl.Zeff, _total(_cp(ddp), _z_n), rtol=1e-12)
+
+
+def test_a_small_pedestal_misfit_is_within_the_tolerance(tmp_path):
+    ddp, *_ = NF._build(tmp_path, dd_mutate=_pedestal_off(1.03))
+    bl, msgs = _read(ddp)
+    assert not [m for m in msgs if "matches neither" in m]
+    d = bl.li_metrics["zeff_dd_provenance"]["zeff_definition"]
+    assert d["matches"] == "total" and d["d_all_psi_N"] > 0.85
+    np.testing.assert_array_equal(bl.Zeff,
+                                  np.asarray(_cp(ddp)["zeff"], dtype=float))
+
+
+def test_nodes_without_electrons_are_not_compared():
+    """n_e = 0 (or non-finite densities) at a node: not part of the check;
+    a zero STORED value on a compared node still matches neither."""
+    from bouquet.io.imas import _dd_total_zeff
+    psi = np.linspace(0.0, 1.0, 21)
+    ne = 5e19 * (1.0 - psi ** 2)                 # 0 at psi_N = 1
+    zth = np.full(psi.size, 1.5)
+    z2 = np.zeros_like(psi)
+    stored = zth.copy()
+    stored[-1] = 7.0                             # meaningless where n_e = 0
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        z, d = _dd_total_zeff({"zeff": stored}, zth, z2, ne, psi)
+    assert d["matches"] == "total" and d["d_all"] == 0.0
+    stored[10] = 0.0
+    with pytest.warns(UserWarning, match="matches neither"):
+        z, d = _dd_total_zeff({"zeff": stored}, zth, z2, ne, psi)
+    assert d["d_all_psi_N"] == pytest.approx(psi[10])
