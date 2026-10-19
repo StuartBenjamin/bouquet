@@ -422,3 +422,27 @@ def test_the_archived_state_rebuilds_the_files_and_they_can_be_dropped(tmp_path,
     d = bq.BouquetArchive(header + ".h5")[ar.scan_keys[0]][0]
     assert d.eqdsk_bytes == b"REBUILT" and calls[-2] == b"STATE"
     assert (calls[-1]["nr"], calls[-1]["lcfs_pad"]) == (257, d.attrs["ifile_lcfs_pad"])
+
+
+def test_store_eqdsk_off_archives_the_state_and_no_gfile(tmp_path, monkeypatch):
+    import pytest
+    import test_draw_rejections as R
+
+    class _GS(_ifile_gs(R, 9)):
+        def copy_eq(self):
+            return _State(super().copy_eq())
+    monkeypatch.setattr(R, "_FakeGS", _GS)
+    out, rej, header = R._run(tmp_path, monkeypatch, ["ok"], write_ifile=True,
+                              store_tokamaker_state=True, store_eqdsk=False)
+    assert rej == [] and len(out) == 1
+    blobs = {}
+    with h5py.File(header + ".h5", "r") as hf:
+        hf.visititems(lambda n, o: blobs.setdefault(n.split("/")[-2], set()).add(n.split("/")[-1])
+                      if isinstance(o, h5py.Dataset) else None)
+    for g in ("0", "_baseline"):
+        assert "tokamaker_state" in blobs[g] and "eqdsk" not in blobs[g]
+    for kw in (dict(write_ifile=True, store_tokamaker_state=False),
+               dict(write_ifile=False, store_tokamaker_state=True)):
+        with pytest.raises(ValueError, match="store_tokamaker_state"):
+            GenerationConfig(store_eqdsk=False, **kw)
+
