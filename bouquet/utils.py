@@ -557,10 +557,11 @@ def load_mesh(mesh_path):
 def tokamaker_on_mesh(mesh_path, order, nthreads=1):
     r'''A TokaMaker set up on ``mesh_path`` at FE ``order`` and nothing else:
     enough to load an archived state (:meth:`DrawView.rebuild_ifile`).  Made
-    once per process and reused (``OFT_env`` is a per-process singleton).'''
+    once per process and reused; on the process's ``OFT_env`` when one exists
+    (a per-process singleton: e.g. a generating run's).'''
     from OpenFUSIONToolkit import OFT_env
     from OpenFUSIONToolkit.TokaMaker import TokaMaker
-    mygs = TokaMaker(OFT_env(nthreads=nthreads))
+    mygs = TokaMaker(getattr(OFT_env, "instance", None) or OFT_env(nthreads=nthreads))
     pts, lc, reg, coils, conds = load_mesh(mesh_path)
     mygs.setup_mesh(pts, lc, reg)
     mygs.setup_regions(cond_dict=conds, coil_dict=coils)
@@ -5030,9 +5031,10 @@ def store_equilibrium(
         Base name (same string passed to ``initialize_equilibrium_database``).
     count : int
         Perturbation index (typically 0 -- N-1).
-    eqdsk_filepath : str
+    eqdsk_filepath : str or None
         Path to the ``.geqdsk`` / ``.eqdsk`` file.  Read as raw bytes so
-        the Fortran-namelist formatting is preserved exactly.
+        the Fortran-namelist formatting is preserved exactly.  ``None``
+        stores no g-file (``GenerationConfig.store_eqdsk=False``).
     psi_N, jphi_total, jphi_bs, jphi_ind,
     n_e, T_e, n_i, T_i, w_ExB : array_like, 1-D
         Profile arrays.
@@ -5083,9 +5085,6 @@ def store_equilibrium(
             f"Call initialize_equilibrium_database('{header}') first."
         )
 
-    with open(eqdsk_filepath, "rb") as fh:
-        eqdsk_bytes = fh.read()
-
     grp_path = _group_path(scan_key, count)
 
     with h5py.File(db_path, "a") as hf:
@@ -5099,8 +5098,8 @@ def store_equilibrium(
         # ---- raw eqdsk (opaque binary -- bit-perfect; schema-v2 fixed
         # name, the group path carries the coordinates) --------------------
         from .schema import EQDSK_DS, IFILE_DS, TOKAMAKER_STATE_DS, write_bytes
-        write_bytes(grp, EQDSK_DS, eqdsk_bytes, compress_file_bytes)
-        for ds, p in ((IFILE_DS, ifile_filepath), (TOKAMAKER_STATE_DS, tokamaker_state_filepath)):
+        for ds, p in ((EQDSK_DS, eqdsk_filepath), (IFILE_DS, ifile_filepath),
+                      (TOKAMAKER_STATE_DS, tokamaker_state_filepath)):
             if p is not None:
                 with open(p, "rb") as fh:
                     write_bytes(grp, ds, fh.read(), compress_file_bytes)

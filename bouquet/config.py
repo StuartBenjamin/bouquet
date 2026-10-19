@@ -2049,6 +2049,9 @@ class GenerationConfig:
     # the archived i-files can be dropped once used (filtering.drop_file_blobs).  Only with
     # write_ifile.  PSFC_dev: on by default (main: False).
     store_tokamaker_state: bool = True
+    # Archive each group's g-file.  False (needs write_ifile + store_tokamaker_state): none is
+    # stored, the run still writes and uses it, and DrawView.eqdsk_bytes rebuilds it from the state.
+    store_eqdsk: bool = True
     # The archived g-files' R x Z grid (TokaMaker.save_eqdsk nr / nz; the 1-D profiles come on nr
     # uniform psi_N points), for the baseline and every draw.  Integers >= 2.
     eqdsk_nr: int = 257
@@ -2161,6 +2164,9 @@ class GenerationConfig:
         validate_edge_pressure_settings(self.edge_pprime_pin,
                                         self.separatrix_pressure)
         import numbers
+        if not self.store_eqdsk and not (self.write_ifile and self.store_tokamaker_state):
+            raise ValueError("store_eqdsk=False needs write_ifile and store_tokamaker_state: the "
+                             "archive would keep no equilibrium to rebuild the g-file from")
         for _n in ("ifile_npsi", "ifile_ntheta", "eqdsk_nr", "eqdsk_nz"):
             _v = getattr(self, _n)
             # the OFT sampler divides by n - 1

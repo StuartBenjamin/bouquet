@@ -5753,6 +5753,7 @@ def generate_bouquet(
     ifile_psi_bounds=False,
     ifile_axis_pack=0.0,
     store_tokamaker_state=False,
+    store_eqdsk=True,
     eqdsk_nr=257,
     eqdsk_nz=257,
     compress_file_bytes=False,
@@ -7234,7 +7235,7 @@ def generate_bouquet(
         z_fast=z_fast,
         z2_fast=z2_fast,
         Z_imp=Z_imp,
-        eqdsk_bytes=baseline_eqdsk_bytes,
+        eqdsk_bytes=baseline_eqdsk_bytes if store_eqdsk else None,
         ifile_bytes=baseline_ifile_bytes,
         tokamaker_state_bytes=baseline_state_bytes,
         pfile_bytes=stored_pfile_bytes,
@@ -9105,7 +9106,7 @@ def generate_bouquet(
             _ph_rec['in_spec'] = diagnostics['in_spec']
             _ph_rec['in_spec_source'] = IN_SPEC_RULE_SOURCE
         store_equilibrium(
-            header, count, full_path,
+            header, count, full_path if store_eqdsk else None,
             psi_N,
             _dr_jphi_store,
             _dr_jbs_store,

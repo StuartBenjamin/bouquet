@@ -8198,6 +8198,7 @@ class Bouquet(SwbBaseline):
                 ifile_psi_bounds=gc.ifile_psi_bounds,
                 ifile_axis_pack=gc.ifile_axis_pack,
                 store_tokamaker_state=gc.store_tokamaker_state,
+                store_eqdsk=gc.store_eqdsk,
                 eqdsk_nr=gc.eqdsk_nr,
                 eqdsk_nz=gc.eqdsk_nz,
                 compress_file_bytes=gc.compress_file_bytes,
