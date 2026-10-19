@@ -2035,6 +2035,10 @@ class GenerationConfig:
     # refuses the run.
     ifile_profile_derivs: bool = False
     ifile_psi_bounds: bool = False
+    # OFT save_ifile's axis zone: psi_N of the innermost surface (0: none, today's file), the spacing
+    # growing outward until it joins the packed grid; the zone's surfaces count in ifile_npsi.
+    # Stamped ifile_axis_pack.  Needs an OFT with save_ifile(axis_pack=).
+    ifile_axis_pack: float = 0.0
     # Also archive the TokaMaker equilibrium each i-file is written from (save_TokaMaker; ~0.9 MB
     # per group on the D3D mesh), so any i-file can be rebuilt later (DrawView.rebuild_ifile) and
     # the archived i-files can be dropped once used (filtering.drop_file_blobs).  Only with

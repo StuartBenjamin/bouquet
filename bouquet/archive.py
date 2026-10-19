@@ -287,6 +287,8 @@ class DrawView:
         from .edge_pressure import lcfs_kwargs
         a, mygs = self.attrs, self._load_state(mygs)
         ext = {k: True for k in ("profile_derivs", "psi_bounds") if a.get(f"ifile_{k}")}
+        if a.get("ifile_axis_pack"):
+            ext["axis_pack"] = float(a["ifile_axis_pack"])
         mygs.save_ifile(filename, npsi=int(npsi or a["ifile_npsi"]),
                         ntheta=int(ntheta or a["ifile_ntheta"]),
                         lcfs_pad=float(a["ifile_lcfs_pad"]),
