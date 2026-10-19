@@ -15,8 +15,8 @@ closed by loosening a bar. The measurements behind them are in
   read its `axis_shift` record and bimodality stamp before quoting its bands.
   Planned for 1.4.1.
 - **MSE-stage runtime (#88).** Reconstructions with the structured MSE stage
-  take about 150–215 s (legacy route 178–192 s), against the 90–120 s
-  target; without MSE they take 40–105 s. A study that needs MSE on many
+  take 149–213 s (legacy route 178–192 s), against the 90–120 s
+  target; without MSE they take 41–103 s. A study that needs MSE on many
   slices costs about twice the target per slice; the MSE stage still fits the
   raw chords best on every validated slice.
 - **Series refusals (no issue).** A slice of a time series that the engine
@@ -36,8 +36,8 @@ closed by loosening a bar. The measurements behind them are in
   ([Running bouquet on another device](workflows.md#running-bouquet-on-another-device)).
   A per-case rule is deferred to 1.5.
 - **One synthetic slice's partition sits outside the band (#93).** The
-  synthetic dd at 0.7 s stamps a partition of about 3.2–3.3 at the default
-  total and the library warns; its draws do not suffer (24 in spec in 24–25
+  synthetic dd at 0.7 s stamps a partition of 3.17 at the default total on
+  the release tree (3.34 at `27979d1`) and the library warns; its draws do not suffer (24 in spec in 24–25
   attempts). The warning is informative there, not a failure; it stays as
   evidence for the 1.5 rule.
 
@@ -52,8 +52,8 @@ closed by loosening a bar. The measurements behind them are in
 - **The per-draw wall budget depends on the host (no issue).** The default
   600 s budget is wall-clock, so on a slow or loaded host an until-N run can
   archive a different draw set than on a fast one. Unified-engine draws took
-  about 45–170 s in validation (no rejection); the legacy route's take
-  2.5–10 min, so legacy runs should set `draw_wall_budget_s=None`. The σ=0
+  47–168 s in validation (no rejection); the legacy route's take
+  156–598 s (2.6–10 min), so legacy runs should set `draw_wall_budget_s=None`. The σ=0
   verification always runs without the budget.
 - **The beam fraction's own uncertainty is not drawn (1.5 plan).** Every
   draw holds the beam's charge moments and `p_fast` fixed and samples the
