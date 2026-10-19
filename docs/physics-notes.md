@@ -1223,10 +1223,15 @@ n_fast ≪ n_i. *Stamp:* `Baseline.zeff_includes_fast`.
 
 **Since A1 (owner decision 2026-10-17) the plain dd route uses the TOTAL
 Z_eff by default**, without the classification: Σ_s Z_s² (n_s^th + n_s^fast)
-/ n_e from the dd's densities (the standard IMAS definition), or the dd's
-`zeff` dataset when it agrees with that on the core within 5 %
+/ n_e from the dd's densities (the standard IMAS definition; Z_s is the ion's
+charge state `ion[].z_ion` when the dd carries it, else its `z_n`, so a
+partially ionised impurity is weighted as IMAS weights it -- the n_i / Z_imp
+derivations keep `z_n`), or the dd's
+`zeff` dataset when it agrees with that within 5 % on every node with n_e > 0
+and finite densities -- the pedestal and the edge included, where j_BS peaks
 (`io.imas.ZEFF_DATASET_RTOL`; a consistent dd reproduces it to three figures or
-better). A stored Z_eff closer to the thermal-only numerator (within 5 % of
+better; every shipped dd to ~1e-15; the worst node's psi_N is stamped,
+`d_th_psi_N` / `d_all_psi_N`). A stored Z_eff closer to the thermal-only numerator (within 5 % of
 it) is warned about and used as stored; one that matches neither definition is
 warned about and replaced by the densities' total (stamped `source=
 "from_densities"`, `reason="dataset inconsistent"`), whether or not the dd
@@ -1240,7 +1245,9 @@ n_i and Z_imp derivations keep the thermal-numerator Z_eff on every route
 moves no density. *Stamp:* `li_metrics["zeff_dd_provenance"]["zeff_definition"]`
 (the base's `definition` / `source`, and the draw centre's beside it:
 `draw_centre`, `draw_centred_on_base`) and every draw's
-`inputs.kinetic_sampler.zeff_definition`. On every default and `ida_hybrid`
+`inputs.kinetic_sampler.zeff_definition` (with the base's `matches` and
+`reason`, so a stored Z_eff used as stored although closer to the thermal
+numerator reads `matches="thermal-numerator"` in each draw). On every default and `ida_hybrid`
 route the channel is drawn around the base itself; only the experimental
 classification (`zeff_fast_ions=True`) still draws around the dd's stored
 `zeff`, and its stamp says so (`draw_centred_on_base` False).
@@ -1309,7 +1316,7 @@ measured absolute σ wherever a measurement exists (owner decision 2026-10-18).
 
 | route | base for the bootstrap coefficients | base for the species derivations (thermal n_i, Z_imp, p_imp) | draw centre | width source | floor | held fixed |
 |---|---|---|---|---|---|---|
-| plain dd (`kinetic_source="fuse"`) | the dd's total Z_eff: the `zeff` dataset validated against the densities (C2), else Σ_s Z_s² (n_s^th + n_s^fast)/n_e (A1); `zeff_includes_fast` follows the beam | the dd's thermal numerator Σ_s Z_s² n_s^th/n_e on the dd's n_e | the base | the dd's own `zeff_error_upper` (IMAS-measured tier) when it carries one -- a real FUSE dd carries none -- else the assumed H-mode template × \|Z_eff\| | 1 (`zeff_bounds`' includes-fast window) | the beam fraction (the dd's z_fast, z2_fast, p_fast); Z_imp as inferred at the baseline |
+| plain dd (`kinetic_source="fuse"`) | the dd's total Z_eff: the `zeff` dataset validated against the densities (C2), else Σ_s Z_s² (n_s^th + n_s^fast)/n_e (A1); `zeff_includes_fast` follows the beam | the dd's thermal numerator Σ_s Z_s² n_s^th/n_e on the dd's n_e | the base | the dd's own `zeff_error_upper` (IMAS-measured tier) when it carries one and C2 accepted its `zeff` (a rejected dataset lends no width: skipped as "dataset rejected", warned) -- a real FUSE dd carries none -- else the assumed H-mode template × \|Z_eff\| | 1 (`zeff_bounds`' includes-fast window) | the beam fraction (the dd's z_fast, z2_fast, p_fast); Z_imp as inferred at the baseline |
 | `ida_hybrid`, measured routes (`ni_source` "Zeff" / "CER" / "all"; "all" is the default) | IDA's measured Z_eff (total: VB, CER, or their mean); with `zeff_from_fuse=True` the dd's total Z_eff, as on the plain dd route (2026-10-18; below the table) | IDA's total Z_eff with the dd's beam density subtracted from n_i (equivalent to its thermal numerator); Z_imp = `impurity_Z` | the base | the IDA-resolved envelope (VB+CER > CER > VB), else the assumed template | 1 | the beam fraction (the dd's z_fast, z2_fast, p_fast); `impurity_Z` |
 | `ida_hybrid`, `ni_source="standard"` | the dd's total Z_eff, as on the plain dd route (2026-10-18; before it, the thermal numerator) | the dd's thermal numerator on the IDA n_e, with the beam's charge in quasineutrality: n_i = [n_e (Z − Z_eff,th) − Z z_fast]/(Z − 1), held to 0 ≤ n_i ≤ n_e − z_fast and counted (2026-10-18; before it the no-beam form, which overstated n_i by Z z_fast/(Z − 1)) | the base | the IDA file's Z_eff envelope (carbon-propagated > VB-measured), labelled "... on a dd-derived total-Z_eff baseline"; else the assumed template, warned | 1 | the beam fraction (the dd's z_fast, z2_fast, p_fast); Z_imp as inferred at the baseline |
 | g-file + IDA `.cdf` | the file's Z_eff (VB on `ni_source="standard"`, the default; the route ladder on a measured `ni_source`) | the file's (ne, Z_eff) under single-impurity quasineutrality, `impurity_Z` | the base | the file's envelope (carbon-propagated > VB-measured; IDA-resolved on a measured `ni_source`), else the assumed template | 1 | `impurity_Z`; p_fast (no fast-ion density channel) |

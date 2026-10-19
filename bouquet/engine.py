@@ -3809,76 +3809,83 @@ def prepare_engine_baseline(bq):
     finally:
         _dw.__exit__(None, None, None)
     bq.baseline = bl
-    # the LIVE reconstruction the draws inherit (bouquet.engine_draws): its
-    # contract, state, basis and delivered measurement, in this session --
-    # and its delivered EQUILIBRIUM (psi, coils, targets, constraints), the
-    # state generate()'s baseline re-solve starts from (GenerateEngineDraws.
-    # baseline_resolve_start; None on a solver object without copy_eq)
-    # ... and the isoflux pattern the reconstruction was pointed at, which
-    # every engine draw's homotopy holds (stamped on the baseline's engine
-    # record; each draw stamps the pattern it installed)
-    if recon_iso is not None:
-        from .solver_geometry import isoflux_stamp
-        recon_iso["stamp"] = isoflux_stamp(recon_iso["pts"], recon_iso["w"],
-                                           recon_iso["origin"])
+    # everything after the capture (the bistability check's cold solve, the
+    # partition probe's re-solve, the stamps, the summary) may raise: the
+    # collected input warnings are issued on that path too (review F5)
+    try:
+        # the LIVE reconstruction the draws inherit (bouquet.engine_draws): its
+        # contract, state, basis and delivered measurement, in this session --
+        # and its delivered EQUILIBRIUM (psi, coils, targets, constraints), the
+        # state generate()'s baseline re-solve starts from (GenerateEngineDraws.
+        # baseline_resolve_start; None on a solver object without copy_eq)
+        # ... and the isoflux pattern the reconstruction was pointed at, which
+        # every engine draw's homotopy holds (stamped on the baseline's engine
+        # record; each draw stamps the pattern it installed)
+        if recon_iso is not None:
+            from .solver_geometry import isoflux_stamp
+            recon_iso["stamp"] = isoflux_stamp(recon_iso["pts"], recon_iso["w"],
+                                               recon_iso["origin"])
+            if isinstance(getattr(bl, "engine", None), dict):
+                bl.engine["recon_isoflux"] = dict(recon_iso["stamp"])
+        # ... and its delivered magnetic axis and minor radius: the reference
+        # of every engine draw's axis record and displacement flag (axis_shift_record)
+        delivered_axis = delivered_axis_reference(mygs, eng.delivered_meas,
+                                                  backend)
         if isinstance(getattr(bl, "engine", None), dict):
-            bl.engine["recon_isoflux"] = dict(recon_iso["stamp"])
-    # ... and its delivered magnetic axis and minor radius: the reference
-    # of every engine draw's axis record and displacement flag (axis_shift_record)
-    delivered_axis = delivered_axis_reference(mygs, eng.delivered_meas,
-                                              backend)
-    if isinstance(getattr(bl, "engine", None), dict):
-        bl.engine["delivered_axis"] = dict(delivered_axis)
-    bq._engine_run = dict(engine=eng, result=res, psi_pad=float(psi_pad),
-                          q_psi=getattr(backend, "q_psi", None),
-                          baseline=bl, coil_reg=coil_reg,
-                          delivered_eq=(mygs.copy_eq()
-                                        if hasattr(mygs, "copy_eq")
-                                        else None),
-                          recon_isoflux=recon_iso,
-                          delivered_axis=delivered_axis)
-    if bistability_check_on(gc):
-        # on by default (check_bistability, resolved per engine): ONE extra
-        # cold solve of the same inputs, compared with the delivered state;
-        # the delivered equilibrium is restored after it
-        _bis = check_bistability(bq, backend, cold_start)
+            bl.engine["delivered_axis"] = dict(delivered_axis)
+        bq._engine_run = dict(engine=eng, result=res, psi_pad=float(psi_pad),
+                              q_psi=getattr(backend, "q_psi", None),
+                              baseline=bl, coil_reg=coil_reg,
+                              delivered_eq=(mygs.copy_eq()
+                                            if hasattr(mygs, "copy_eq")
+                                            else None),
+                              recon_isoflux=recon_iso,
+                              delivered_axis=delivered_axis)
+        if bistability_check_on(gc):
+            # on by default (check_bistability, resolved per engine): ONE extra
+            # cold solve of the same inputs, compared with the delivered state;
+            # the delivered equilibrium is restored after it
+            _bis = check_bistability(bq, backend, cold_start)
+            if isinstance(getattr(bl, "engine", None), dict):
+                bl.engine["bistability"] = _bis
+        # the boundary constraint's PARTITION at the installed total (report only;
+        # boundary_balance): ONE capped re-solve with the pressure x 1.02 from the
+        # delivered state, which is restored afterwards (with the reconstruction's
+        # coil regularisation); it never changes the total
+        if bq._geom is not None and getattr(bq._geom, "iso_balance", None) is not None:
+            from .solver_geometry import with_partition
+            if partition_probe_on(bq):
+                from .boundary_balance import measure_partition
+                _part = measure_partition(
+                    bq, bq._engine_run["engine"].state.request, c0.pressure,
+                    _backend, psi_pad=psi_pad, maxits=s["draw_solve_maxits"],
+                    coil_reg_terms=coil_reg["terms"],
+                    geom_record=bq._geom.record())
+            else:
+                _part = dict(status="off", report_only=True, reason=(
+                    "SolverConfig.boundary_partition_probe=False"))
+            bq._geom = with_partition(bq._geom, _part)
         if isinstance(getattr(bl, "engine", None), dict):
-            bl.engine["bistability"] = _bis
-    # the boundary constraint's PARTITION at the installed total (report only;
-    # boundary_balance): ONE capped re-solve with the pressure x 1.02 from the
-    # delivered state, which is restored afterwards (with the reconstruction's
-    # coil regularisation); it never changes the total
-    if bq._geom is not None and getattr(bq._geom, "iso_balance", None) is not None:
-        from .solver_geometry import with_partition
-        if partition_probe_on(bq):
-            from .boundary_balance import measure_partition
-            _part = measure_partition(
-                bq, bq._engine_run["engine"].state.request, c0.pressure,
-                _backend, psi_pad=psi_pad, maxits=s["draw_solve_maxits"],
-                coil_reg_terms=coil_reg["terms"],
-                geom_record=bq._geom.record())
-        else:
-            _part = dict(status="off", report_only=True, reason=(
-                "SolverConfig.boundary_partition_probe=False"))
-        bq._geom = with_partition(bq._geom, _part)
-    if isinstance(getattr(bl, "engine", None), dict):
-        # how the boundary constraint's total was chosen (constant, override,
-        # as given) and the partition measured at it
-        _bal = getattr(bq._geom, "iso_balance", None)
-        bl.engine["boundary_balance"] = None if _bal is None else dict(_bal)
-    if bl.reconstruction_metrics is not None:
-        bq._flag_nonconverged_recon_loop()
-        bq._print_reconstruction_summary()
-    elif not res["converged"]:
-        # the IDS baseline records it on ip_closure / li_metrics (closure
-        # health); warned here as loudly as _flag_nonconverged_recon_loop
-        # does for a g-file baseline
-        import warnings
-        msg = ("engine IDS baseline: NOT converged (jbs_loop_on_fail="
-               "'flag') -- delivered flagged closure_limited: "
-               + _flag_reason(res, rec))
-        print("[engine] WARNING " + msg, flush=True)
-        warnings.warn(msg, RuntimeWarning, stacklevel=2)
+            # how the boundary constraint's total was chosen (constant, override,
+            # as given) and the partition measured at it
+            _bal = getattr(bq._geom, "iso_balance", None)
+            bl.engine["boundary_balance"] = None if _bal is None else dict(_bal)
+        if bl.reconstruction_metrics is not None:
+            bq._flag_nonconverged_recon_loop()
+            bq._print_reconstruction_summary()
+        elif not res["converged"]:
+            # the IDS baseline records it on ip_closure / li_metrics (closure
+            # health); warned here as loudly as _flag_nonconverged_recon_loop
+            # does for a g-file baseline
+            import warnings
+            msg = ("engine IDS baseline: NOT converged (jbs_loop_on_fail="
+                   "'flag') -- delivered flagged closure_limited: "
+                   + _flag_reason(res, rec))
+            print("[engine] WARNING " + msg, flush=True)
+            warnings.warn(msg, RuntimeWarning, stacklevel=2)
+    except BaseException:
+        emit_deferred_warnings(_deferred, stacklevel=2)
+        raise
     emit_deferred_warnings(_deferred, stacklevel=2)
     print(f"[engine] {ENGINE_VERSION}: {'converged' if res['converged'] else 'NOT converged (flagged)'}; "
           f"l_i(3)={bl.l_i_target:.6f}; solves {rec['solves']}", flush=True)

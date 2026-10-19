@@ -1,5 +1,23 @@
 # Bouquet — change summaries
 
+## 1.4.0 detail — post-review fixes
+
+- **The stored-Z_eff check and its warnings, after the last pre-tag
+  review.** The `ni_source="standard"` n_i floor/cap warning goes through
+  the run's collector, so the unified engine issues it after the captured
+  reconstruction, once per run; the collected input warnings are issued
+  even when the bistability check or the partition probe raises after the
+  capture. The consistency check of a stored `core_profiles.zeff` (and the
+  all-ion total it falls back to) weighs each ion by its charge state
+  `ion[].z_ion` when present, else `z_n`, and covers every node with
+  n_e > 0 (the pedestal included; the worst node's psi_N stamped) at the
+  same 5 % tolerance; a dataset it rejects lends no `zeff_error_upper`
+  width either (skipped as "dataset rejected", warned, assumed template);
+  and every engine draw's Z_eff definition stamp keeps the reader's
+  `matches` / `reason`. Every shipped dd reads bit-identically (no
+  `z_ion`; stored zeff consistent to ~1e-15 on every node); no golden
+  route reaches this code.
+
 ## Unreleased — one Z_eff rule on every route (owner decision 2026-10-18)
 
 - **`zeff_from_fuse=True` on a measured `ida_hybrid` route: the bootstrap
