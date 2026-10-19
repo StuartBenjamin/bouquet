@@ -1742,6 +1742,25 @@ def _dd_zeff(cp, zeff_th, z2_fast, ne, psi_N, record=None):
     return stored, includes
 
 
+def _ion_charge_state(ion, z_n, n):
+    """The charge an IMAS ``core_profiles`` ion weighs with in Z_eff: its
+    average charge state ``ion["z_ion"]`` (a scalar, or a profile of length
+    *n*) when present, finite and positive everywhere, else the element's
+    nuclear charge *z_n* (fully stripped).  ``z_ion_1d`` is not read."""
+    if "z_ion" not in ion:
+        return z_n
+    try:
+        zq = np.asarray(ion["z_ion"], dtype=float)
+    except (TypeError, ValueError):
+        return z_n
+    if zq.ndim == 0:
+        zq = float(zq)
+        return zq if np.isfinite(zq) and zq > 0.0 else z_n
+    if zq.shape == (n,) and np.all(np.isfinite(zq)) and np.all(zq > 0.0):
+        return zq
+    return z_n
+
+
 def _dd_total_zeff(cp, zeff_th, z2_fast, ne, psi_N):
     """``(zeff, stamp)``: the dd's own TOTAL Z_eff (owner decision
     2026-10-17, A1), the Z_eff the plain dd route hands the kinetics and the
@@ -1753,6 +1772,15 @@ def _dd_total_zeff(cp, zeff_th, z2_fast, ne, psi_N):
     ``sum_s Z_s^2 (n_s^thermal + n_s^fast) / n_e`` from the dd's own
     densities; without a ``zeff`` dataset it is the answer
     (``source="from_densities"``).
+
+    ``Z_s`` is the ion's CHARGE STATE: the caller builds *zeff_th* and
+    *z2_fast* with ``ion[].z_ion`` (the average charge state, IMAS) when the
+    dd carries it and the element's ``z_n`` only when it does not
+    (:func:`_ion_charge_state`), so a partially ionised impurity (z_ion <
+    z_n) is weighted as the IMAS definition weights it, in the check and in
+    the fallback value alike.  Without ``z_ion`` (fully stripped light
+    impurities, every shipped dd) both are the z_n sums bit for bit.  The
+    n_i / Z_imp derivations keep z_n.
 
     A stored ``zeff`` is validated against the densities on EVERY dd, beam
     or not: the relative core misfits (max over ``psi_N <=
@@ -2614,6 +2642,14 @@ def read_imas_baseline(
     # fast_ion_density_equivalent).  No beam charge is assumed anywhere.
     z_fast = np.zeros(n)          # sum_s Z_s   n_s^fast  [m^-3]
     z2_fast = np.zeros(n)         # sum_s Z_s^2 n_s^fast  [m^-3]
+    # The same two Z^2 moments weighted by each ion's CHARGE STATE
+    # (ion[].z_ion when present, else z_n; _ion_charge_state): what the IMAS
+    # core_profiles.zeff definition weights by, so what the stored zeff is
+    # validated against and the all-ion total recomputed from
+    # (_dd_total_zeff).  The species derivations (n_i, Z_imp) keep z_n.
+    # Identical to zeff_num / z2_fast, bit for bit, without z_ion.
+    zeff_num_q = np.zeros(n)
+    z2_fast_q = np.zeros(n)
     # pressure_fast_* and density_fast are independent fields: a dd can carry
     # one without the other, and a species with fast pressure but no fast
     # density gets the full p_fast treatment and ZERO dilution correction.
@@ -2622,10 +2658,13 @@ def read_imas_baseline(
         Z = float(ion["element"][0]["z_n"])
         n_s = np.asarray(ion["density_thermal"], dtype=float)
         zeff_num += n_s * Z * Z
+        Zq = _ion_charge_state(ion, Z, n)
+        zeff_num_q += n_s * Zq * Zq
         if "density_fast" in ion:
             _nf = np.asarray(ion["density_fast"], dtype=float)
             z_fast += Z * _nf
             z2_fast += Z * Z * _nf
+            z2_fast_q += Zq * Zq * _nf
         p_fast_s = _isotropic_fast_pressure(
             ion, p_fast_rule, n, _no_par, str(ion.get("label", f"Z={Z:g}")))
         if np.any(p_fast_s) and not np.any(
@@ -2803,8 +2842,10 @@ def read_imas_baseline(
         # Fix 2) with zeff_from_fuse=True on a measured route, where
         # _merge_ida_kinetics returns it as the run's Z_eff and n_i comes
         # from the IDA Z_eff as without the option.
-        Zeff_total, _zeff_def = _dd_total_zeff(cp, Zeff_th, z2_fast, ne,
-                                                psi_N)
+        # charge-state weighted (z_ion when present, else z_n: the same
+        # arrays bit for bit), the IMAS zeff definition
+        Zeff_total, _zeff_def = _dd_total_zeff(cp, zeff_num_q / ne,
+                                                z2_fast_q, ne, psi_N)
         Zeff = Zeff_total
         aux["zeff"] = Zeff_total
         # the flag follows the beam: without one both numerators coincide

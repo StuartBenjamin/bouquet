@@ -1223,7 +1223,10 @@ n_fast ≪ n_i. *Stamp:* `Baseline.zeff_includes_fast`.
 
 **Since A1 (owner decision 2026-10-17) the plain dd route uses the TOTAL
 Z_eff by default**, without the classification: Σ_s Z_s² (n_s^th + n_s^fast)
-/ n_e from the dd's densities (the standard IMAS definition), or the dd's
+/ n_e from the dd's densities (the standard IMAS definition; Z_s is the ion's
+charge state `ion[].z_ion` when the dd carries it, else its `z_n`, so a
+partially ionised impurity is weighted as IMAS weights it -- the n_i / Z_imp
+derivations keep `z_n`), or the dd's
 `zeff` dataset when it agrees with that on the core within 5 %
 (`io.imas.ZEFF_DATASET_RTOL`; a consistent dd reproduces it to three figures or
 better). A stored Z_eff closer to the thermal-only numerator (within 5 % of
