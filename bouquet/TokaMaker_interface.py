@@ -5751,6 +5751,7 @@ def generate_bouquet(
     ifile_ntheta=257,
     ifile_profile_derivs=False,
     ifile_psi_bounds=False,
+    store_tokamaker_state=False,
     eqdsk_nr=257,
     eqdsk_nz=257,
     compress_file_bytes=False,
@@ -6084,6 +6085,19 @@ def generate_bouquet(
                      psi_pad=psi_pad, orientation=ifile_orientation,
                      profile_derivs=bool(ifile_profile_derivs),
                      psi_bounds=bool(ifile_psi_bounds))
+
+    def _state_of(ifile_path):
+        # where save_state_ifile also saves the TokaMaker state (None: not stored)
+        return ifile_path + ".tmk.h5" if store_tokamaker_state else None
+
+    def _pop_state(ifile_path):
+        p = _state_of(ifile_path)
+        if p is None or not os.path.exists(p):
+            return None
+        with open(p, "rb") as fh:
+            b = fh.read()
+        os.unlink(p)
+        return b
     # ---- rejected draw attempts: one record each, a summary at the end ----
     _rejections = rejection_log if rejection_log is not None else []
     _masked_at_start = dict(ANCHOR_MASKED_FAILURES)
@@ -6216,6 +6230,7 @@ def generate_bouquet(
     _baseline_coils = None
     _recon_Ip = None
     baseline_ifile_bytes = None  # set with the warmstart baseline.eqdsk re-save
+    baseline_state_bytes = _bl_state_bytes = None  # its TokaMaker state (store_tokamaker_state)
     # the baseline i-file's stamp (write_ifile): set where it is traced
     _bl_ifile_rec = None
     # self-consistent loop: l_i / q0 / q95 of the jphi-linterp baseline
@@ -6863,11 +6878,13 @@ def generate_bouquet(
                 if write_ifile:
                     _bl_if_path, _bl_ifile_rec = save_state_ifile(
                         mygs, _tmp_eqdsk_path + '.ifile',
-                        p_sep=_edge.p_offset(pressure_solve), **_ifile_kw)
+                        p_sep=_edge.p_offset(pressure_solve),
+                        state_path=_state_of(_tmp_eqdsk_path + '.ifile'), **_ifile_kw)
                     if _bl_if_path is not None:
                         with open(_bl_if_path, 'rb') as _if:
                             _bl_if_bytes = _if.read()
                         os.unlink(_bl_if_path)
+                        _bl_state_bytes = _pop_state(_bl_if_path)
                 # the per-draw save_eqdsk's grid, so the baseline and
                 # per-draw eqdsks have the same grid resolution
                 mygs.save_eqdsk(
@@ -6893,6 +6910,7 @@ def generate_bouquet(
                         and _bl_ifile_rec["ifile_written"]:
                     # archived with the eqdsk it was traced beside
                     baseline_ifile_bytes = _bl_if_bytes
+                    baseline_state_bytes = _bl_state_bytes
                     _bl_ifile_rec["ifile_state"] = (
                         "the warm-start baseline state (the archived "
                         "baseline eqdsk's)")
@@ -6922,7 +6940,7 @@ def generate_bouquet(
                       f"the pre-bouquet snapshot")
                 if write_ifile:
                     # no i-file of a state the archive does not hold
-                    baseline_ifile_bytes = None
+                    baseline_ifile_bytes = baseline_state_bytes = None
                     _bl_ifile_rec = dict(
                         (_bl_ifile_rec or {}), ifile_written=False,
                         ifile_error=("the baseline eqdsk re-save failed "
@@ -7112,11 +7130,12 @@ def generate_bouquet(
             _bl_if_path0 = _tf.name
         _bl_if_path, _bl_ifile_rec = save_state_ifile(
             mygs, _bl_if_path0, p_sep=_edge.p_offset(pressure_solve),
-            **_ifile_kw)
+            state_path=_state_of(_bl_if_path0), **_ifile_kw)
         if _bl_if_path is not None:
             with open(_bl_if_path, 'rb') as _if:
                 baseline_ifile_bytes = _if.read()
             os.unlink(_bl_if_path)
+            baseline_state_bytes = _pop_state(_bl_if_path)
             _bl_ifile_rec["ifile_state"] = (
                 "the recon-converged state on entry to generate_bouquet "
                 "(no warm-start re-save: coil_drift=None)")
@@ -7216,6 +7235,7 @@ def generate_bouquet(
         Z_imp=Z_imp,
         eqdsk_bytes=baseline_eqdsk_bytes,
         ifile_bytes=baseline_ifile_bytes,
+        tokamaker_state_bytes=baseline_state_bytes,
         pfile_bytes=stored_pfile_bytes,
         compress_file_bytes=compress_file_bytes,
         psi_N_kinetic=psi_N_kinetic,
@@ -8720,9 +8740,10 @@ def generate_bouquet(
         ifile_path, _ifile_rec = None, None
         if write_ifile:
             try:
+                _if_name = os.path.abspath(f"{header}_count={count}.ifile")
                 ifile_path, _ifile_rec = save_state_ifile(
-                    mygs, os.path.abspath(f"{header}_count={count}.ifile"),
-                    p_sep=_p_lcfs, **_ifile_kw)
+                    mygs, _if_name, p_sep=_p_lcfs, state_path=_state_of(_if_name),
+                    **_ifile_kw)
                 _if_exc = (None if ifile_path is not None else
                            RuntimeError(_ifile_rec["ifile_error"]))
                 _if_reason = "ifile_save_failed"
@@ -9123,6 +9144,7 @@ def generate_bouquet(
                               if jbs_delta_mode else None),
             profile_coord=coord,
             ifile_filepath=ifile_path,
+            tokamaker_state_filepath=_state_of(ifile_path) if ifile_path else None,
             # the held-fixed driven channels of this draw (the method's own
             # on its archived state -- engine -- else the baseline's)
             fixed_currents=(diagnostics.get("fixed_currents")
@@ -9176,8 +9198,8 @@ def generate_bouquet(
                 p_sep_applied=_p_lcfs, p_scale=_p_scale_draw),
             scan_key=scan_key, count=count)
 
-        # Clean up on-disk eqdsk (and i-file) after archiving
-        for _path in (full_path, ifile_path):
+        # Clean up on-disk eqdsk (and i-file, state) after archiving
+        for _path in (full_path, ifile_path, _state_of(ifile_path) if ifile_path else None):
             if _path is None:
                 continue
             try:

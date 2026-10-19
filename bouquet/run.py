@@ -8170,6 +8170,7 @@ class Bouquet(SwbBaseline):
                 ifile_ntheta=gc.ifile_ntheta,
                 ifile_profile_derivs=gc.ifile_profile_derivs,
                 ifile_psi_bounds=gc.ifile_psi_bounds,
+                store_tokamaker_state=gc.store_tokamaker_state,
                 eqdsk_nr=gc.eqdsk_nr,
                 eqdsk_nz=gc.eqdsk_nz,
                 compress_file_bytes=gc.compress_file_bytes,
