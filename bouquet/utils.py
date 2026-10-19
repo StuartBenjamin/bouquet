@@ -436,7 +436,8 @@ def try_save_ifile(mygs, filename, record=None, **kwargs):
 
 
 def save_state_ifile(mygs, filename, *, npsi, ntheta, psi_pad, p_sep,
-                     orientation=None, profile_derivs=False, psi_bounds=False):
+                     orientation=None, profile_derivs=False, psi_bounds=False,
+                     state_path=None):
     r'''The OFT i-file of ``mygs``'s current state, carrying the SAME
     pressure frame as the g-file bouquet writes of that state: the
     separatrix pressure ``p_sep`` is passed as ``lcfs_pressure`` exactly as
@@ -446,7 +447,9 @@ def save_state_ifile(mygs, filename, *, npsi, ntheta, psi_pad, p_sep,
     the ``lcfs_pressure`` handed over, the extended records written, the
     frame and the source orientation signs) is stamped on the archive group
     by the caller.  ``profile_derivs`` / ``psi_bounds`` are handed to
-    ``save_ifile`` only when True (an older OFT has neither).'''
+    ``save_ifile`` only when True (an older OFT has neither).  With
+    ``state_path`` the same state's TokaMaker equilibrium is saved there too
+    (``save_TokaMaker``); a failed state save fails the i-file the same way.'''
     from .edge_pressure import lcfs_kwargs
     rec = dict(ifile_written=False, ifile_error=None, ifile_npsi=int(npsi),
                ifile_ntheta=int(ntheta), ifile_lcfs_pad=float(psi_pad),
@@ -461,8 +464,34 @@ def save_state_ifile(mygs, filename, *, npsi, ntheta, psi_pad, p_sep,
     path = try_save_ifile(mygs, filename, record=rec, npsi=int(npsi),
                           ntheta=int(ntheta), lcfs_pad=psi_pad,
                           **lcfs_kwargs(p_sep), **ext)
+    if path is not None and state_path is not None:
+        try:
+            mygs.copy_eq().save_TokaMaker(state_path)
+        except Exception as exc:
+            rec["ifile_error"] = f"save_TokaMaker failed ({type(exc).__name__}: {exc})"[:500]
+            for p in (path, state_path):
+                if os.path.exists(p):
+                    os.remove(p)
+            path = None
     rec["ifile_written"] = path is not None
+    if state_path is not None:
+        rec["tokamaker_state_written"] = path is not None
     return path, rec
+
+
+def tokamaker_on_mesh(mesh_path, order, nthreads=1):
+    r'''A TokaMaker set up on ``mesh_path`` at FE ``order`` and nothing else:
+    enough to load an archived state (:meth:`DrawView.rebuild_ifile`).  One
+    per process (``OFT_env`` is a per-process singleton).'''
+    from OpenFUSIONToolkit import OFT_env
+    from OpenFUSIONToolkit.TokaMaker import TokaMaker
+    from OpenFUSIONToolkit.TokaMaker.meshing import load_gs_mesh
+    mygs = TokaMaker(OFT_env(nthreads=nthreads))
+    pts, lc, reg, coils, conds = load_gs_mesh(mesh_path)
+    mygs.setup_mesh(pts, lc, reg)
+    mygs.setup_regions(cond_dict=conds, coil_dict=coils)
+    mygs.setup(order=order)
+    return mygs
 
 
 def read_ifile(data):
@@ -4914,6 +4943,7 @@ def store_equilibrium(
     jbs_loop=None,
     profile_coord="psi_n",
     ifile_filepath=None,
+    tokamaker_state_filepath=None,
     fixed_currents=None,
     compress_file_bytes=False,
 ):
@@ -4947,6 +4977,9 @@ def store_equilibrium(
         Raw p-file content to store alongside the g-file bytes.
     ifile_filepath : str or None
         OFT i-file (``save_ifile``) to store as the ``ifile`` blob.
+    tokamaker_state_filepath : str or None
+        The TokaMaker equilibrium of that state (``save_TokaMaker``), stored
+        as the ``tokamaker_state`` blob.
     compress_file_bytes : bool
         Store the g-file / p-file / i-file bytes gzip-compressed
         (:func:`schema.write_bytes`).
@@ -4991,11 +5024,12 @@ def store_equilibrium(
 
         # ---- raw eqdsk (opaque binary -- bit-perfect; schema-v2 fixed
         # name, the group path carries the coordinates) --------------------
-        from .schema import EQDSK_DS, IFILE_DS, write_bytes
+        from .schema import EQDSK_DS, IFILE_DS, TOKAMAKER_STATE_DS, write_bytes
         write_bytes(grp, EQDSK_DS, eqdsk_bytes, compress_file_bytes)
-        if ifile_filepath is not None:
-            with open(ifile_filepath, "rb") as fh:
-                write_bytes(grp, IFILE_DS, fh.read(), compress_file_bytes)
+        for ds, p in ((IFILE_DS, ifile_filepath), (TOKAMAKER_STATE_DS, tokamaker_state_filepath)):
+            if p is not None:
+                with open(p, "rb") as fh:
+                    write_bytes(grp, ds, fh.read(), compress_file_bytes)
 
         # ---- 1-D profiles -----------------------------------------------
         write_profile(grp, "psi_N", psi_N)
@@ -5455,6 +5489,7 @@ def store_baseline_profiles(
     baseline_meta=None,
     profile_coord="psi_n",
     ifile_bytes=None,
+    tokamaker_state_bytes=None,
     fixed_currents=None,
     compress_file_bytes=False,
 ):
@@ -5475,6 +5510,8 @@ def store_baseline_profiles(
         Raw baseline p-file content.
     ifile_bytes : bytes or None
         Raw baseline OFT i-file content (``write_ifile`` runs).
+    tokamaker_state_bytes : bytes or None
+        The TokaMaker equilibrium that i-file was written from.
     compress_file_bytes : bool
         As :func:`store_equilibrium`.
     fixed_currents : dict or None
@@ -5586,8 +5623,9 @@ def store_baseline_profiles(
             if isinstance(_icl, dict) and "closure_limited" in _icl:
                 grp.attrs["closure_limited"] = bool(_icl["closure_limited"])
 
-        from .schema import EQDSK_DS, IFILE_DS, PFILE_DS, write_bytes
-        for ds, b in ((EQDSK_DS, eqdsk_bytes), (IFILE_DS, ifile_bytes), (PFILE_DS, pfile_bytes)):
+        from .schema import EQDSK_DS, IFILE_DS, PFILE_DS, TOKAMAKER_STATE_DS, write_bytes
+        for ds, b in ((EQDSK_DS, eqdsk_bytes), (IFILE_DS, ifile_bytes), (PFILE_DS, pfile_bytes),
+                      (TOKAMAKER_STATE_DS, tokamaker_state_bytes)):
             if b is not None:
                 write_bytes(grp, ds, b, compress_file_bytes)
 

@@ -2022,6 +2022,11 @@ class GenerationConfig:
     # PSFC_dev: both on by default (main: False).
     ifile_profile_derivs: bool = True
     ifile_psi_bounds: bool = True
+    # Also archive the TokaMaker equilibrium each i-file is written from (save_TokaMaker; ~0.9 MB
+    # per group on the D3D mesh), so any i-file can be rebuilt later (DrawView.rebuild_ifile) and
+    # the archived i-files can be dropped once used (filtering.drop_file_blobs).  Only with
+    # write_ifile.
+    store_tokamaker_state: bool = False
     # The archived g-files' R x Z grid (TokaMaker.save_eqdsk nr / nz; the 1-D profiles come on nr
     # uniform psi_N points), for the baseline and every draw.  Integers >= 2.
     eqdsk_nr: int = 257

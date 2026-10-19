@@ -327,3 +327,76 @@ def test_the_gfile_grid_reaches_every_save(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="eqdsk_nr"):
         GenerationConfig(eqdsk_nr=1)
     assert GenerationConfig().eqdsk_nr == GenerationConfig().eqdsk_nz == 257
+
+
+class _State(dict):
+    """A copy_eq() snapshot that can save itself (TokaMaker_equilibrium.save_TokaMaker)."""
+    fail = False
+
+    def save_TokaMaker(self, path):
+        with open(path, "wb") as fh:
+            fh.write(b"STATE")
+        if self.fail:
+            raise RuntimeError("h5 write failed")
+
+
+def test_the_tokamaker_state_is_saved_beside_the_ifile(tmp_path):
+    from bouquet.utils import save_state_ifile
+
+    class _GS(_RecordingGS):
+        def copy_eq(self):
+            return _State()
+    kw = dict(npsi=9, ntheta=4, psi_pad=1e-3, p_sep=0.0)
+    path, rec = save_state_ifile(_GS(), str(tmp_path / "a.ifile"),
+                                 state_path=str(tmp_path / "a.tmk.h5"), **kw)
+    assert path and rec["tokamaker_state_written"]
+    assert open(tmp_path / "a.tmk.h5", "rb").read() == b"STATE"
+    _State.fail = True
+    try:
+        path, rec = save_state_ifile(_GS(), str(tmp_path / "b.ifile"),
+                                     state_path=str(tmp_path / "b.tmk.h5"), **kw)
+    finally:
+        _State.fail = False
+    assert path is None and not rec["ifile_written"] and not rec["tokamaker_state_written"]
+    assert "save_TokaMaker failed" in rec["ifile_error"]
+    assert not (tmp_path / "b.ifile").exists() and not (tmp_path / "b.tmk.h5").exists()
+
+
+def test_the_archived_state_rebuilds_the_ifile_and_the_ifiles_can_be_dropped(tmp_path, monkeypatch):
+    import test_draw_rejections as R
+    from bouquet.filtering import drop_file_blobs
+
+    class _GS(_ifile_gs(R, 9)):
+        def copy_eq(self):
+            return _State(super().copy_eq())
+    monkeypatch.setattr(R, "_FakeGS", _GS)
+    out, rej, header = R._run(tmp_path, monkeypatch, ["ok"], write_ifile=True,
+                              store_tokamaker_state=True)
+    assert rej == [] and len(out) == 1 and not list(tmp_path.rglob("*.tmk.h5"))
+    ar = bq.BouquetArchive(header + ".h5")
+    d = ar[ar.scan_keys[0]][0]
+    assert d.tokamaker_state_bytes == b"STATE" and d.attrs["tokamaker_state_written"]
+    states = {}
+    with h5py.File(header + ".h5", "r") as hf:
+        hf.visititems(lambda n, o: states.update({n.split("/")[-2]: bytes(o[()])})
+                      if n.split("/")[-1] == "tokamaker_state" else None)
+    assert states == {"0": b"STATE", "_baseline": b"STATE"}
+
+    calls = []
+
+    class _Loader:
+        def replace_eq(self, source_file=None):
+            calls.append(open(source_file, "rb").read())
+
+        def save_ifile(self, filename, **kw):
+            calls.append(kw)
+    d.rebuild_ifile(str(tmp_path / "re.ifile"), _Loader(), npsi=513)
+    assert calls[0] == b"STATE"
+    assert (calls[1]["npsi"], calls[1]["ntheta"]) == (513, 257)
+    assert calls[1]["lcfs_pad"] == d.attrs["ifile_lcfs_pad"]
+
+    eq_before = d.eqdsk_bytes
+    assert drop_file_blobs(header + ".h5") == 2                    # baseline + draw
+    d = bq.BouquetArchive(header + ".h5")[ar.scan_keys[0]][0]
+    assert d.ifile_bytes is None and d.eqdsk_bytes == eq_before
+    assert d.tokamaker_state_bytes == b"STATE"

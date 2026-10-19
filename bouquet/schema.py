@@ -271,6 +271,8 @@ EQDSK_DS = "eqdsk"
 PFILE_DS = "pfile"
 # OFT/TokaMaker i-file (inverse R,Z(psi,theta) for GPEC eq_type ldp_i); optional.
 IFILE_DS = "ifile"
+# The TokaMaker equilibrium the i-file was written from (save_TokaMaker HDF5 bytes); optional.
+TOKAMAKER_STATE_DS = "tokamaker_state"
 COIL_VALUES_DS = "coil_currents"
 COIL_NAMES_DS = "coil_names"
 
