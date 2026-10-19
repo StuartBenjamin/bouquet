@@ -22,6 +22,7 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
 │                                      per-scan copies below are authoritative)
 └── scan/<scan_key>/                   one group per scan point / time slice
     ├── config_json                    this slice's exact config
+    │   (scan-group attrs from here down; see "Records added in 1.4.0")
     │   attrs: [inspec_rule, inspec_bands_json, lambda_definition]
     │                                  the in-spec rule the band flags were judged under
     │                                  ('magnetics' = coil + boundary, the default since
@@ -39,7 +40,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │          [n_requested, n_requested_source, generation_mode, n_attempted,
     │           n_stored, attempt_outcomes_json, bouquet_version,
     │           inspec_rms_max_mm, inspec_max_max_mm, inspec_cut_source,
-    │           merge_partial_json]
+    │           merge_partial_json, draw_wall_budget_s,
+    │           draw_wall_budget_rejections]
     │                                  generation provenance (absent from older archives;
     │                                  readers return None): requested vs attempted
     │                                  vs stored; per-attempt outcome (stored |
@@ -50,6 +52,9 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │                                  none; a merge refuses shards that disagree);
     │                                  merge_partial_json marks a merge that knowingly
     │                                  left workers out (--allow-missing)
+    │          [n_axis_shift_large, n_axis_recorded, axis_bimodal,
+    │           axis_bimodal_json]    engine scans: the draws' axis record and the
+    │                                  per-scan bimodality stamp (1.4.0)
     │          [parallel_manifest_json] process-parallel runs: per-worker record
     │          [refused_reason]        a slice refused before any draw (write_refused_scan;
     │                                  run() / run_slices() write it when prepare_baseline
@@ -168,6 +173,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
         ├── [engine_json]              engine draw record as a string DATASET
         │                              when too large for an attribute
         └── attrs: l_i(1), l_i(3), count, profile_coord, homotopy_*, max_F_drift_pct,
+                   [axis_shift_large, axis_shift_frac_a, axis_dR_mm, axis_dZ_mm,
+                    axis_minor_radius_m]  ← engine draws: the axis record (1.4.0)
                    max_VSC_drift_pct, in_spec, coil_drift_in_spec, in_spec_source,
                    inspec_*, l_i_target_used, [jbs_delta_active],
                    [diverted], [passes_coil_filter, passes_boundary_filter,
@@ -475,6 +482,173 @@ pressure + that equilibrium's `p_sep`).
     `separatrix_pressure="offset"` (the default since 2026-10-02) the stored
     `eqdsk` bytes carry `PRES` = the solver's pressure + `p_sep` (it was
     zero at the boundary before).
+
+## Records added in 1.4.0
+
+Every record below is additive: the schema stays v3, a name never changes
+type, and an archive written before the record simply lacks it. Readers
+return `None` (or the stated fallback) for an absent record and never infer
+one. Dates are the owner decisions in [CHANGES_SUMMARY.md](CHANGES_SUMMARY.md).
+Paths: `scan/<key>` is the scan group, `_baseline` its baseline group,
+`<count>` a draw group; "engine record" is the `engine_json` JSON of that
+group (`engine.read_engine_json`).
+
+### The boundary set and its partition (`_baseline@solver_geometry_json`)
+
+A JSON string attr (`utils.load_solver_geometry`), present since #76; 1.4.0
+adds the boundary-set keys (#84, 2026-10-15; the constant total,
+2026-10-16):
+
+| Key | Type | Meaning |
+|---|---|---|
+| `isoflux_rule` | str | How the set was made: per unit length (the unified route), per point (legacy), or as given (`SolverConfig.isoflux_pts`) |
+| `isoflux_n`, `isoflux_source_n`, `boundary_length_m` | int, int, float | Points installed, points of the source boundary, its length [m] |
+| `isoflux_weights` | `{n, min, max, total, installed_total}` | The weights |
+| `isoflux_weight_total` | float | The nominal total (2e5 by default) |
+| `isoflux_weight_installed_total` | float | The total TokaMaker applies: without the reference point's weight `w[0]`, which `set_isoflux` discards |
+| `isoflux_weight_mode` | str or null | `"constant"` (`solver_geometry.ISOFLUX_WEIGHT_TOTAL`), `"override"` (`SolverConfig.isoflux_weight_total`); null when the weights were given |
+| `isoflux_balance` | dict or null | `mode`, `total`, `source`, `[isoflux_weight_total_ignored]` (an override that was not installed, and why) and `partition` (below) |
+| `isoflux_resampling` | dict or null | `method` (`arc_length_resample/1`), `description`, `n`, `source_n`, `source_n_distinct`, `boundary_length_m`, `source_polygon_length_m`, `first_point` (the reference point: `kind`, `R`, `Z`; the outermost resampled point, never an X-point), `x_points` (kept exactly), `x_point_rule` (`turn_deg`, `window_frac`, `saddle_match_frac`: how an X-point is matched to a saddle target), `spline_breaks` (count) with `spline_break_deg` / `spline_break_median_ratio` / `spline_break_median_window`, `spacing_m` (`min`, `max`), `weight_total`; null when the set is not resampled |
+| `isoflux_sha256` | str | Fingerprint of points and weights; every engine draw's homotopy compares its own set with it |
+| `saddle_origin`, `saddle_n`, `saddle_points`, `saddle_weights` | | The saddle (X-point) constraints installed |
+
+Absent keys: the archive predates #84 (its set was the source boundary at
+500 per point); readers report them as unknown.
+
+**The partition stamp** (`SolverConfig.boundary_partition_probe`, on by
+default) sits at `isoflux_balance["partition"]` and, as the same dict, in the
+baseline engine record under `boundary_balance` (the whole
+`isoflux_balance`). Fields: `version` (`boundary_partition/1`),
+`report_only` (true), `status` (`"measured"`, `"unmeasured"`,
+`"probe_failed"` with `error`, `"not measured: ..."`, or `"off"` with
+`reason`), `partition` (ρ = `boundary_frac` / `coil_frac`), `boundary_frac`
+(probe LCFS RMS / `boundary_cut_mm`), `coil_frac` (per
+`coil_fraction_rule`, the vertical-control pair in `excluded_coils`),
+`band` ([1/3, 3]) and `in_band`, `total_nominal` / `total_installed`,
+`pressure_step` (0.02), `boundary_rms_mm`, `boundary_max_mm`,
+`boundary_cut_source`, `coil_test`, `coil_info`, `coil_acceptance`,
+`coil_reg_weight`, `vsc_reg_weight`, `probe_maxits`, `n_solves`, `solve_s`,
+`wall_s`. Never a verdict. Absent: a legacy-route baseline or an archive
+written before the probe.
+
+### Wall budget (`scan/<key>` attrs)
+
+`draw_wall_budget_s` (float, seconds; `GenerationConfig.draw_wall_budget_s`,
+600 by default, 2026-10-16) and `draw_wall_budget_rejections` (int: attempts
+rejected as `"draw_wall_budget"`, each also `"draw_wall_budget"` in
+`attempt_outcomes_json`). Read with `utils.read_generation_provenance`
+(`None` when absent). Absent `draw_wall_budget_s` means the budget was off
+or the archive predates it; `merge_archives` refuses shards with different
+budgets and sums the rejections.
+
+### The in-spec verdict (draw attrs) and the rule (`scan/<key>` attrs)
+
+- `<count>@in_spec` (bool) is the rule's verdict since 2026-10-15: the
+  configured coil test AND the boundary cut AND, on an engine draw,
+  `passes_draw_band`. `<count>@coil_drift_in_spec` (bool) keeps the legacy
+  ±2 % drift verdict, never a filter. `<count>@in_spec_source` (str,
+  `"inspec_rule"`) says which. Absent `in_spec_source`: `in_spec` is the
+  drift verdict, and `filtering.in_spec_fields` reports it under both names
+  with `in_spec_source` naming that; select on `selected` there.
+- `scan/<key>@inspec_rule` (str): `"magnetics"`, with `"+li"` /
+  `"+beta_p"` for the opt-in bands and `"+q0"` only when the q0 gate was
+  APPLIED. `inspec_bands_json` (JSON) carries the band settings and, under
+  `q0_gate`, the gate as applied (`configured`, `applied`, the
+  reconstruction's `q0`, the `reason` when it was switched off for a
+  sawtoothing reconstruction). `lambda_definition` (str). Read with
+  `filtering.read_inspec_rule`; absent → `(None, None)`: the archive's band
+  flags were judged under the old unconditional l_i band, and
+  `Bouquet.filter()` / `refilter_inspec` re-judge it and say so.
+
+### The magnetic axis and bistability
+
+- Engine draw attrs (2026-10-15): `axis_shift_large` (bool:
+  displacement > `engine.AXIS_BRANCH_FRAC` = 0.01 x a from the
+  reconstruction's delivered axis; a displacement, not a branch label),
+  `axis_shift_frac_a`, `axis_dR_mm`, `axis_dZ_mm`, `axis_minor_radius_m`
+  (floats). Archives written before the rename carry `axis_branch`
+  (`"other"` / `"same"`), which `schema.read_axis_entry` reads as
+  `axis_shift_large`; legacy and swb draws carry none (`None`).
+- `scan/<key>` attrs, written by `engine_draws.stamp_axis_scan` from the
+  archive itself (so a merged scan is counted whole): `n_axis_recorded`,
+  `n_axis_shift_large` (ints; the old `n_axis_other` is read and removed on
+  restamping), `axis_bimodal` (bool, written ONLY when the test could be
+  made: at least `engine.AXIS_BIMODAL_MIN_N` = 24 draws with an axis and a
+  known minor radius) and `axis_bimodal_json` (always: `version`
+  `axis_bimodality/1`, method and constants, `n`, cluster centres
+  `centres_dZ_mm`, `counts`, `gap_mm`, or `axis_bimodal: null` with the
+  reason). Report only.
+- Baseline engine record `bistability` (unified engine; on by default
+  2026-10-15): `version` (`bistability/1`), `checked`, `bistable`,
+  `outcome` (`"single"` / `"bistable"`, or `"unmeasured"` /
+  `"not_checked"` / `"cold_solve_failed"` with `error`), `extra_solves`,
+  `start`, `gated`, `delivered` and `cold` (`l_i`, `q0`, `beta_pol`,
+  `axis`), `deltas`, `gates` (`dl_i`, `dq0` at the σ=0 gates),
+  `bistability_source` (`"reconstruction"` when the cold re-solve
+  disagreed, else null, or `"draws"`) and, with `"draws"`,
+  `draws_evidence` (`centres_dZ_mm`, `counts`, `gap_mm`, `n`, `version`,
+  `reconstruction_outcome`). `_baseline@bistability_source = "draws"` (str
+  attr) is written when the scan's draws are bimodal and the reconstruction
+  had not said bistable; a restamp that no longer supports it removes it.
+  Absent `bistability`: the check was off (legacy route, or an explicit
+  `False`) or the archive predates it.
+
+### Capped solves and `vertical_runaway`
+
+An archived engine draw's record carries `homotopy.cap_events`: one dict per
+solve of THAT draw that stopped at `engine_draw_solve_maxits` and was rolled
+back (`draw`, `where`, `stage`, `maxits`, `iterations`, `seconds`,
+`outcome`, `error`). A homotopy stage's event also carries `label`
+(`"vertical_runaway"` or null; 2026-10-16) and `vertical_runaway`
+(`label`, `vsc_bound_frac`, `vsc_at_bound`, `axis_displacement_frac_a`,
+`axis_dZ_frac_a`, `axis_dZ_mm`, `threshold_frac_a` = 0.1, `rule`). Events of
+rejected draws are not archived: they are on `Bouquet.engine_draw_cap_events`
+for the run, beside `Bouquet.draw_rejections`. Absent `label`: the archive
+predates the label.
+
+### The kinetic sampler record
+
+Engine draws: engine record `inputs.kinetic_sampler`; legacy and swb draws:
+the `<count>@kinetic_sampler_json` attr. Fields: `version`
+(`kinetic_sampler.KINETIC_SAMPLER_VERSION`, `"kinetic_sampler/3.1 ..."` since
+the clips went on by default on every route, 2026-10-17; `/3` marks the
+opt-in era), `clips_enabled` (bool, the per-draw truth), `Z_imp`,
+`Z_imp_origin` (`"declared"` / `"inverted"`), `zeff_primary`, `iterations`,
+`p_err_pct`, `clipped` (bool) and `clips` (node counts per clip:
+`zeff_floor_1`, `zeff_window_lo`, `zeff_window_hi`, `aux_zeff_floor_1`,
+`aux_zeff_window_lo`, `aux_zeff_window_hi`, `ni_floor_0`, `ni_ceiling`).
+Engine draws add `eq_zeff_floor_1` (engine-grid nodes floored at Z_eff = 1)
+and, when the baseline records it, `zeff_definition` (`definition`,
+`source`: the Z_eff the draw was handed). An absent counter or field: the
+archive predates it (not counted then).
+
+### Baseline provenance in `_baseline@li_metrics_json`
+
+- `zeff_dd_provenance` (IMAS route): how the dd's Z_eff numerator convention
+  was decided (`convention`, `source`, `basis`, `d_th`, `d_all`), plus
+  `zeff_definition` (the Z_eff the kinetics and the bootstrap are handed:
+  `definition`, `source`, and the draw centre, `draw_centre` /
+  `draw_centred_on_base`; A1, 2026-10-17), `baseline_zeff_includes_fast`,
+  `baseline_zeff_from`. Beside it `zeff_source` (`"ida"` / `"dd"`) and
+  `kinetics_route`.
+- `p_fast_source` (g-file route, decision B, 2026-10-17): `p_fast_source`
+  (`"pfile_pb"`, `"fixed_components"` or `"none"`), `pfile_has_pb`, and for
+  a `pb` default `coord`, `units`, the block's header unit check
+  (`pb_header_units`, `pb_units_ok`) and `p_fast_axis_Pa`.
+
+Absent: the archive predates the stamp; `load_baseline_profiles` returns
+only what is there.
+
+### Not archived in 1.4.0
+
+Three records the 1.4.0 notes name live on the in-memory objects only:
+`Baseline.reconstruction_metrics["pressure_fidelity"]` (the report-only
+g-file pressure check, printed and warned at the reconstruction),
+`Baseline.aux["ni_fast_meta"]` (the IMAS reader's n_i beam-subtraction
+record, with `n_floored` / `n_capped` node counts on the thermal n_i window),
+and `resolve_uncertainty()["zeff_sigma_tier"]` (the Z_eff σ tier, with
+`pairing` on a dd-derived total-Z_eff baseline). Re-run the reconstruction
+(no draws) to see them for an old archive.
 
 ## The current split: where the pressure-driven `p′G` sits (2026-10-09)
 

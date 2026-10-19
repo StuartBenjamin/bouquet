@@ -132,6 +132,36 @@ def _run(kind):
 ])
 def test_the_input_warning_reaches_the_user_once_per_run(
         monkeypatch, capfd, kind, hook, msg):
+    _check_once_per_run(monkeypatch, capfd, kind, hook, msg)
+
+
+NI_WINDOW_MSG = "floored at 0 on"
+
+
+@pytest.mark.skipif(not os.path.exists(_MESH), reason="example mesh missing")
+def test_the_sub_route_n_i_window_warning_reaches_the_user(
+        monkeypatch, capfd, tmp_path):
+    """ida_hybrid ni_source="standard": the n_i floor/cap warning of
+    _merge_ida_kinetics, raised inside the captured dd read, is issued after
+    the reconstruction -- once per run, again on a second run."""
+    import test_ni_fast_subtraction as NF
+    from bouquet.io.imas import _merge_ida_kinetics
+    cdf = str(tmp_path / "ida.cdf")
+    ne, *_ = NF._ida_cdf(cdf)
+    psi = np.linspace(0.0, 1.0, NF.N)
+    zf = 0.2 * ne
+    zth = np.full(NF.N, 1.3)
+    zf[:5], zth[:5] = 0.1 * ne[:5], 0.5           # n_z < 0: capped
+
+    def _hook():
+        _merge_ida_kinetics(psi, ne, ne, zth, cdf, 1.0, NF.Z_IMP,
+                            ni_source="standard", z_fast=zf, z2_fast=zf,
+                            zeff_for_ni=zth)
+
+    _check_once_per_run(monkeypatch, capfd, "ids", _hook, NI_WINDOW_MSG)
+
+
+def _check_once_per_run(monkeypatch, capfd, kind, hook, msg):
     _stub_engine(monkeypatch, kind, hook)
     # exactly once per run (no duplicate from inside the capture)
     with pytest.warns(UserWarning) as rec:
@@ -167,3 +197,46 @@ def test_outside_a_run_the_reading_functions_warn_at_once():
     assert len(got) == 1 and ZEFF_MSG in got[0][0]
     with pytest.warns(UserWarning, match=ZEFF_MSG):
         emit_deferred_warnings(got)
+
+
+class _ProbeFailed(RuntimeError):
+    pass
+
+
+def _raise(*a, **k):
+    raise _ProbeFailed("probe failed")
+
+
+@pytest.mark.skipif(not os.path.exists(_MESH), reason="example mesh missing")
+@pytest.mark.parametrize("step", ["bistability", "partition"])
+def test_the_input_warning_survives_a_failure_after_the_capture(
+        monkeypatch, step):
+    """Review F5: the bistability check's cold solve or the partition
+    probe's re-solve runs after the collector has closed; when it raises,
+    the collected input warnings are still issued (once), then the error
+    propagates."""
+    import bouquet.boundary_balance as BB
+    import bouquet.engine as E
+    _stub_engine(monkeypatch, "ids", _zeff_read)
+    geom = types.SimpleNamespace(boundary_RZ=None, iso_balance=None)
+    if step == "bistability":
+        monkeypatch.setattr(E, "bistability_check_on", lambda _gc: True)
+        monkeypatch.setattr(E, "check_bistability", _raise)
+    else:
+        geom.iso_balance = {"total": 1.0}
+        geom.record = lambda: {}
+        monkeypatch.setattr(E, "partition_probe_on", lambda _bq: True)
+        monkeypatch.setattr(E, "reconstruct", lambda *a, **k: (
+            types.SimpleNamespace(delivered_meas=None,
+                                  state=types.SimpleNamespace(request=None)),
+            {"converged": True}, {"solves": 1}))
+        monkeypatch.setattr(BB, "measure_partition", _raise)
+    from bouquet.engine import prepare_engine_baseline
+    gs = types.SimpleNamespace(set_isoflux=lambda *a, **k: None,
+                               init_psi=lambda *a, **k: None)
+    bq = types.SimpleNamespace(config=_cfg("ids"), mygs=gs, _geom=geom,
+                               _seed_coil_init=lambda _gs: None)
+    with pytest.warns(UserWarning) as rec:
+        with pytest.raises(_ProbeFailed):
+            prepare_engine_baseline(bq)
+    assert sum(ZEFF_MSG in str(w.message) for w in rec) == 1

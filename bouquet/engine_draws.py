@@ -233,6 +233,27 @@ def _pchip(x, y, xn):
 # ---------------------------------------------------------------------------
 #  the reconstruction a draw inherits
 # ---------------------------------------------------------------------------
+def draw_zeff_definition(zeff_definition):
+    """The per-draw copy of the reader's base Z_eff definition stamp
+    (``li_metrics["zeff_dd_provenance"]["zeff_definition"]``), or None.
+
+    ``definition`` / ``source`` always; ``matches`` and ``reason`` too when
+    the reader set them (review F4): a stored zeff closer to the thermal
+    numerator is used as the total as stored (owner decision A1) and stamped
+    ``definition="total"``, so without ``matches="thermal-numerator"`` an
+    archive's draws would read as the total for an array that is not, and
+    nothing would say why the sigma=0 draw is lifted by the floor at 1.
+    Stamps without the qualifiers (the measured routes' ``{"total",
+    "ida"}``) are copied exactly as before."""
+    if not zeff_definition:
+        return None
+    rec = {k: zeff_definition.get(k) for k in ("definition", "source")}
+    for k in ("matches", "reason"):
+        if zeff_definition.get(k) is not None:
+            rec[k] = zeff_definition[k]
+    return rec
+
+
 class EngineDrawContext:
     """Everything a draw inherits from ONE engine reconstruction (built once
     per run from the live engine and its result).
@@ -340,10 +361,10 @@ class EngineDrawContext:
         self.Z_imp = None if not Z_imp else float(Z_imp)
         self.zeff_includes_fast = bool(zeff_includes_fast)
         #: the definition of the base Z_eff (A1, 2026-10-17: ``{definition,
-        #: source}`` from the reader's ``zeff_dd_provenance``; None off the
-        #: IMAS path), stamped in every draw's kinetic_sampler record
-        self.zeff_definition = (None if not zeff_definition else {
-            k: zeff_definition.get(k) for k in ("definition", "source")})
+        #: source}`` from the reader's ``zeff_dd_provenance``, plus its
+        #: ``matches`` / ``reason`` qualifiers when the reader set them; None
+        #: off the IMAS path), stamped in every draw's kinetic_sampler record
+        self.zeff_definition = draw_zeff_definition(zeff_definition)
         self._kin_eq_native = {k: _pchip(self.psi_kin, self.native[k],
                                          self.psi)
                                for k in ("ne", "te", "ni", "ti")}

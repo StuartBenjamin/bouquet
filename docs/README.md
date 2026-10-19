@@ -24,7 +24,8 @@ install it, and a working quickstart. These pages carry the depth.
 | [flowchart/](flowchart/) | The rendered physics workflow and the 550-node interactive logic map ([view](https://d-burg.github.io/bouquet/flowchart/)) |
 | [CI.md](CI.md) | Fast vs. solver test tiers, the manual pre-merge gate, branch protection |
 | [CHANGES_SUMMARY.md](CHANGES_SUMMARY.md) | Historical change summaries by development round |
-| [validation-provenance.md](validation-provenance.md) | What the unified-engine branch was validated on, at which code revision, and the aggregate results |
+| [validation-provenance.md](validation-provenance.md) | What 1.4.0 was validated on: the acceptance ladder's rungs, bars and verdicts, the synthetic ensembles, the goldens, the misses |
+| [known-limitations.md](known-limitations.md) | The known limitations of 1.4.0, each with its consequence and tracking issue |
 | [proposals/](proposals/) | Design proposals |
 
 ## Examples

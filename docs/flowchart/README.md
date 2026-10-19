@@ -1,5 +1,33 @@
 # bouquet workflow & logic map
 
+> **Stale as of 1.4.0 (the full logic map only).** `graph.json` and the
+> rendered `l1_full.svg` / `l0_overview.svg` / `index.html` were last
+> extracted before the unified engine (index.html rendered 2026-09-18,
+> graph.json hand-patched to 2026-10-10). None of the 588 nodes points into
+> `bouquet/engine.py`, `engine_draws.py`, `solver_geometry.py`,
+> `boundary_balance.py` or `kinetic_sampler.py`, and most `file:line` anchors
+> no longer match the code, so a patch of a few nodes would not make the map
+> honest; it needs a re-extraction. The physics workflow
+> (`physics_workflow.svg` / `.pdf`) is unaffected. Nodes that 1.4.0 changed:
+> `fn.run.isoflux_weights or np.ones` and `fn.run.isoflux_pts or
+> eqdsk.isoflux_pts` (now the boundary set: 256 points per unit length at a
+> constant total of 2e5, `solver_geometry.case_geometry`, with the report-only
+> partition probe after the reconstruction); `gate.iso_update` (engine draws
+> hold the reconstruction's isoflux); the homotopy nodes
+> (`fn.TokaMaker_interface.for F_tol, VSC_tol in ...homotopy_passes`,
+> `gate.homotopy_feasible`, `gate.homotopy_early_stop`: the VSC bound is
+> floored at 10 kA, and a capped stage may carry the `vertical_runaway`
+> label); `gate.draw_accepted` (the per-draw wall budget, the kinetic clips
+> on every route); `gate.in_spec_verdict`, `gate.coil_spec`,
+> `gate.boundary_rms` (in spec = the χ² coil test AND the boundary cut, the
+> magnetics); `cfg.generationconfig.l_i_tolerance`, `cfg.l_i_tolerance`,
+> `gate.li_band`, `gate.li_band_loop`, `gate.li_acceptance` (the l_i band is
+> opt-in, default off; it still constructs the legacy draws); and the
+> missing nodes for the unified reconstruction and draw loop, the
+> bistability check and the axis stamps. Until it is re-extracted, read
+> [engine.md](../engine.md) and [workflows.md](../workflows.md) for the
+> 1.4.0 logic.
+
 Two layers, one page (`index.html`, fully self-contained):
 
 1. **The physics workflow** (`physics_workflow.svg` / `.pdf`) — the
