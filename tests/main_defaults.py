@@ -3,6 +3,8 @@ that check main's behaviour pass these explicitly, so they test the same code
 on both branches."""
 #: ReconstructionSource
 RECON = dict(ni_source="standard")
+#: SolverConfig
+SOLVER = dict(nl_tol=None)
 #: ImasSource
 IMAS = dict(ida_timing="window", zeff_fast_ions=False, psi_pad=1e-3)
 #: GenerationConfig

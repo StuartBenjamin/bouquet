@@ -21,6 +21,8 @@ import json
 
 import pytest
 
+import main_defaults as MD
+
 from bouquet.solver_state import (BOUQUET_SOLVER_ATTRS, COIL_SOLVE_BOUNDED,
                                   SolverState, coil_solve_mode,
                                   enter_bounded_coil_mode,
@@ -333,7 +335,7 @@ def test_setup_solver_enters_the_bounded_mode_once_before_any_solve(
 
 
 def test_setup_solver_sets_nl_tol_only_when_given(monkeypatch, tmp_path):
-    b, _ = _real_setup_solver(monkeypatch, tmp_path)
+    b, _ = _real_setup_solver(monkeypatch, tmp_path, **MD.SOLVER)
     assert not hasattr(b.mygs.settings, "nl_tol")         # OpenFUSIONToolkit's default kept
     b, _ = _real_setup_solver(monkeypatch, tmp_path / "tight", nl_tol=1e-8)
     assert b.mygs.settings.nl_tol == 1e-8

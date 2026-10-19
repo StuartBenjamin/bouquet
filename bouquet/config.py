@@ -73,7 +73,8 @@ class SolverConfig:
     nthreads: int = 1
     order: int = 3
     # TokaMaker's Picard tolerance (settings.nl_tol) for every solve; None: OpenFUSIONToolkit's default (1e-6).
-    nl_tol: Optional[float] = None
+    # PSFC_dev: 1e-8 by default (main: None).
+    nl_tol: Optional[float] = 1e-8
     F0: Optional[float] = None                       # vacuum R*Bt; default from g-file/IDS
     isoflux_pts: Optional["np.ndarray"] = None       # (N, 2) boundary constraints
     isoflux_weights: Optional["np.ndarray"] = None   # (N,); None: per unit length (see below)
