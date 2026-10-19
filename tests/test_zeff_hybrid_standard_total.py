@@ -23,6 +23,7 @@ import h5py
 import numpy as np
 import pytest
 
+import main_defaults as MD
 import test_ni_fast_subtraction as NF
 from bouquet.baseline import (ZEFF_PAIRING_HYBRID_DD_TOTAL,
                               ZEFF_PAIRING_HYBRID_DD_TOTAL_LABEL,
@@ -44,7 +45,7 @@ _EC = 1.602176634e-19
 
 def _src(ddp, cdf, **kw):
     return ImasSource(ids_path=ddp, time=1.0, ida_path=cdf,
-                      impurity_Z=Z_IMP, **kw)
+                      impurity_Z=Z_IMP, **dict(MD.IMAS, **kw))
 
 
 def _read(ddp, cdf, **kw):
@@ -278,7 +279,7 @@ def test_the_dd_routes_without_ida_kinetics_are_still_refused(tmp_path, case):
     EXPERIMENTAL classification on ida_hybrid: refused as before."""
     ddp, cdf, *_ = NF._build(tmp_path)
     if case == "fuse kinetics":
-        src = ImasSource(ids_path=ddp, time=1.0, impurity_Z=Z_IMP)
+        src = ImasSource(ids_path=ddp, time=1.0, impurity_Z=Z_IMP, **MD.IMAS)
         ks = "fuse"
     else:
         src = _src(ddp, cdf, ni_source="standard", zeff_fast_ions=True)

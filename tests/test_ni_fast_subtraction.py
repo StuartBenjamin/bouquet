@@ -783,7 +783,7 @@ class TestDefaultsArePre56:
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             bl = read_imas_baseline(ImasSource(ids_path=ddp, time=1.0,
-                                               impurity_Z=Z_IMP),
+                                               impurity_Z=Z_IMP, **MD.IMAS),
                                     kinetic_source="fuse")
         neither = [x for x in w if "matches neither definition"
                    in str(x.message)]
@@ -891,7 +891,7 @@ class TestDefaultsArePre56:
         assert stored[0] > zth[0] + 0.1            # total and thermal differ
         bl = read_imas_baseline(
             ImasSource(ids_path=ddp, time=1.0, ida_path=cdf, impurity_Z=Z_IMP,
-                       ni_source="standard"),
+                       ni_source="standard", **MD.IMAS),
             kinetic_source="ida_hybrid")
         np.testing.assert_array_equal(bl.Zeff, stored)
         np.testing.assert_array_equal(bl.aux["zeff"], bl.Zeff)
@@ -904,7 +904,7 @@ class TestDefaultsArePre56:
         # the measured route: unchanged, IDA Z_eff as base and centre
         bm = read_imas_baseline(
             ImasSource(ids_path=ddp, time=1.0, ida_path=cdf, impurity_Z=Z_IMP,
-                       ni_source="all"),
+                       ni_source="all", **MD.IMAS),
             kinetic_source="ida_hybrid")
         ida = bm.aux["ida_profiles"][1]
         np.testing.assert_array_equal(bm.aux["zeff"], bm.Zeff)
