@@ -1243,7 +1243,9 @@ n_i and Z_imp derivations keep the thermal-numerator Z_eff on every route
 moves no density. *Stamp:* `li_metrics["zeff_dd_provenance"]["zeff_definition"]`
 (the base's `definition` / `source`, and the draw centre's beside it:
 `draw_centre`, `draw_centred_on_base`) and every draw's
-`inputs.kinetic_sampler.zeff_definition`. On every default and `ida_hybrid`
+`inputs.kinetic_sampler.zeff_definition` (with the base's `matches` and
+`reason`, so a stored Z_eff used as stored although closer to the thermal
+numerator reads `matches="thermal-numerator"` in each draw). On every default and `ida_hybrid`
 route the channel is drawn around the base itself; only the experimental
 classification (`zeff_fast_ions=True`) still draws around the dd's stored
 `zeff`, and its stamp says so (`draw_centred_on_base` False).

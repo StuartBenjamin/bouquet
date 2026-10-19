@@ -213,3 +213,18 @@ def test_a_rejected_dataset_lends_no_width(tmp_path):
     assert env["sigma_source"]["zeff"]["kind"] == "assumed"
     fallback = [m for m in msgs if "dataset rejected" in m]
     assert len(fallback) == 1 and "SCALAR tier" in fallback[0]
+
+
+# --------------------------------------------------------------------- F4
+def test_a_thermal_closer_dataset_is_qualified_in_the_draw_stamp(tmp_path):
+    """The reader's own stamp for a stored zeff closer to the thermal
+    numerator, as the engine draws copy it: matches='thermal-numerator'."""
+    from bouquet.engine_draws import draw_zeff_definition
+    ddp, *_ = NF._build(tmp_path, dd_mutate=NF._store_zeff("thermal"))
+    bl, msgs = _read(ddp)
+    assert [m for m in msgs if "closer to the THERMAL-only" in m]
+    d = bl.li_metrics["zeff_dd_provenance"]["zeff_definition"]
+    rec = draw_zeff_definition(d)
+    assert rec == {"definition": "total", "source": "dataset",
+                   "matches": "thermal-numerator"}
+    json.dumps(rec)

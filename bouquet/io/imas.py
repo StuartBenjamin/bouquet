@@ -1800,8 +1800,9 @@ def _dd_total_zeff(cp, zeff_th, z2_fast, ne, psi_N):
       that is neither quantity is never handed to the Sauter coefficients.
 
     ``stamp`` (archived as ``li_metrics["zeff_dd_provenance"]
-    ["zeff_definition"]``; ``definition`` / ``source`` also in every draw's
-    ``kinetic_sampler`` record): ``definition="total"``, ``source``,
+    ["zeff_definition"]``; ``definition`` / ``source``, and ``matches`` /
+    ``reason`` when set, also in every engine draw's ``kinetic_sampler``
+    record, :func:`bouquet.engine_draws.draw_zeff_definition`): ``definition="total"``, ``source``,
     ``d_th`` / ``d_all`` (None without a dataset), ``rtol``, ``matches``,
     ``warned`` and, on a fallback, ``reason``.  The warnings are collected
     inside a run and issued from the reconstruction summary
