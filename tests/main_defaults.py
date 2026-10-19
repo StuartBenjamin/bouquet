@@ -7,7 +7,8 @@ RECON = dict(ni_source="standard")
 IMAS = dict(ida_timing="window", zeff_fast_ions=False, psi_pad=1e-3)
 #: GenerationConfig
 GEN = dict(swb_edge_taper_psi0=None, compress_file_bytes=False,
-           ifile_profile_derivs=False, ifile_psi_bounds=False)
+           ifile_profile_derivs=False, ifile_psi_bounds=False,
+           store_tokamaker_state=False)
 
 
 def from_imas(*args, **kw):
