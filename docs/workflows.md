@@ -290,7 +290,7 @@ supports:
 |---|---|---|
 | carbon-propagated | `n_12C6_err` + `n_e_err` (direct layout) or the dilution posterior (ensemble), propagated through `Z_eff = 1 + Z(Z−1)·n_C/n_e` | `"carbon"` |
 | VB-measured | the file's own `Zeff_err` (direct) or `Zeff` sample spread (ensemble) | `"measured"` |
-| IMAS-measured | an `ImasSource`'s own `zeff_error_upper`, for the dd's own Z_eff baseline (no IDA tier chosen; not on `ida_hybrid`) | — (`"auto"` / `"measured"`) |
+| IMAS-measured | an `ImasSource`'s own `zeff_error_upper`, for the dd's own Z_eff baseline (no IDA tier chosen; not on `ida_hybrid`; skipped, warned, as "dataset rejected" when the stored `zeff` failed the consistency check) | — (`"auto"` / `"measured"`) |
 | scalar | the Z_eff template × abs(Z_eff) (`zeff_scalar_sigma=None`, the default) or `zeff_scalar_sigma` × abs(Z_eff) — an **assumed** width, not a measured one | `"scalar"` |
 
 (On `ida_hybrid` with `ni_source="standard"` the two IDA tiers apply to the
