@@ -637,12 +637,24 @@ def zeff_sigma_eligibility(source, ida_path, kinetic_source=None,
     return _out(True, "", pairing)
 
 
+def _zeff_dd_rejected(baseline):
+    """True when the dd's stored ``zeff`` was rejected by the consistency
+    check (:func:`bouquet.io.imas._dd_total_zeff`): stamped
+    ``reason="dataset inconsistent"`` on the baseline's
+    ``li_metrics["zeff_dd_provenance"]["zeff_definition"]``."""
+    _zd = (((getattr(baseline, "li_metrics", None) or {})
+            .get("zeff_dd_provenance") or {})
+           .get("zeff_definition") or {})
+    return _zd.get("reason") == "dataset inconsistent"
+
+
 def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
                           zeff_is_ida, measured_sigma, measured_source,
                           carbon_sigma=None, carbon_source="none",
                           ineligible_reason="", ida_in_play=False,
                           ladder="standard", imas_sigma=None,
-                          imas_source="none", psi_N=None, pairing=None):
+                          imas_source="none", psi_N=None, pairing=None,
+                          imas_rejected=None):
     """The Z_eff envelope ladder: highest-fidelity tier available per file.
 
     Returns ``(sigma_array, label, meta)``.
@@ -674,6 +686,14 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
     (:func:`bouquet.io.imas.read_imas_sigmas`; ``imas_source`` names the
     field), taken with "auto" / "measured" when no IDA tier was chosen.  The
     caller passes it only for a Z_eff baseline that is the dd's own.
+    ``imas_rejected`` (a reason string; post-review fix F3): the dd's stored
+    ``zeff`` was rejected by the consistency check
+    (:func:`bouquet.io.imas._dd_total_zeff`, ``reason="dataset
+    inconsistent"``), so the same dataset's ``zeff_error_upper`` is not used
+    as the width either: the tier is skipped with reason ``"dataset
+    rejected: ..."``, the ladder falls to the next tier (the assumed
+    template), and the single fallback warning fires even with no IDA file
+    in play.
 
     ``ladder="resolved"`` (EXPERIMENTAL, an experimental ``ni_source``;
     ``bouquet.experimental.REGISTRY["ida_ion_route"]``) -- tiers:
@@ -834,7 +854,14 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
                                 "missing dataset: this IDA file carries no "
                                 "Zeff uncertainty (older direct vintage)"))
 
+    _imas_rejected_skip = False
     if env is None and zeff_sigma_source in ("auto", "measured") \
+            and imas_sigma is not None and imas_rejected:
+        # the width of a dataset the run has just declared inconsistent is
+        # not a width for the quantity that replaced it (review F3)
+        skipped.append(("IMAS-measured", f"dataset rejected: {imas_rejected}"))
+        _imas_rejected_skip = True
+    elif env is None and zeff_sigma_source in ("auto", "measured") \
             and imas_sigma is not None:
         m = _usable(imas_sigma, "IMAS-measured")
         if m is not None:
@@ -856,7 +883,7 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
     # fires whenever an IDA file was actually in play (so a path mismatch or
     # a missing dataset can never drop the run to the assumed scalar
     # unnoticed) and whenever a forced measured mode could not be honoured.
-    warned = bool(skipped) and (bool(ida_in_play)
+    warned = bool(skipped) and (bool(ida_in_play) or _imas_rejected_skip
                                 or zeff_sigma_source in ("carbon", "measured"))
     if warned:
         warnings.warn(
@@ -1352,6 +1379,12 @@ def resolve_uncertainty(config, baseline) -> dict:
             imas_source=_imas_label("zeff"),
             psi_N=_psi_tpl,
             pairing=_z_pair,
+            # C2 rejected the dd's stored zeff: not its error_upper either
+            imas_rejected=(
+                "the dd's stored zeff failed the consistency check against "
+                "its densities (reason 'dataset inconsistent'); its "
+                "zeff_error_upper is not the width of the recomputed total"
+                if _zeff_dd_rejected(baseline) else None),
         )
         user_sigmas["zeff"] = _z_env
         # which ladder ran: the run's one resolved route
