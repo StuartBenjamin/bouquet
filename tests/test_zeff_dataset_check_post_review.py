@@ -157,3 +157,59 @@ def test_the_carbon_fixtures_are_bit_identical(tmp_path, store):
         assert bl.Z_imp == bla.Z_imp
     assert (bla.li_metrics["zeff_dd_provenance"]["zeff_definition"]
             == blb.li_metrics["zeff_dd_provenance"]["zeff_definition"])
+
+
+# --------------------------------------------------------------------- F3
+def _store_with_sigma(scale):
+    """dd_mutate: store zeff = scale x the dd's total and a 5 % absolute
+    zeff_error_upper beside it."""
+    def mutate(dd):
+        cp = dd["core_profiles"]["profiles_1d"][0]
+        z = scale * _total(cp, _z_n)
+        cp["zeff"] = z.tolist()
+        cp["zeff_error_upper"] = (0.05 * z).tolist()
+    return mutate
+
+
+def _plain_env(bl, ddp):
+    from bouquet.baseline import resolve_uncertainty
+    from bouquet.config import (BouquetConfig, GenerationConfig,
+                                SolverConfig, UncertaintyConfig)
+    cfg = BouquetConfig(
+        source=ImasSource(ids_path=ddp, time=1.0, impurity_Z=Z),
+        solver=SolverConfig(mesh_path="unused"), output_header="unused",
+        generation=GenerationConfig(kinetic_source="fuse"),
+        uncertainty=UncertaintyConfig())
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        env = resolve_uncertainty(cfg, bl)
+    return env, [str(x.message) for x in w]
+
+
+def test_an_accepted_dataset_keeps_its_own_width(tmp_path):
+    ddp, *_ = NF._build(tmp_path, dd_mutate=_store_with_sigma(1.0))
+    bl, _ = _read(ddp)
+    env, msgs = _plain_env(bl, ddp)
+    meta = env["zeff_sigma_tier"]
+    assert meta["tier"] == "IMAS-measured"
+    assert "IMAS-measured" not in [s["tier"] for s in meta["skipped"]]
+    assert not [m for m in msgs if "dataset rejected" in m]
+
+
+def test_a_rejected_dataset_lends_no_width(tmp_path):
+    """C2 rejected the stored zeff (x2): its zeff_error_upper is skipped
+    with reason 'dataset rejected', the ladder falls to the assumed
+    template, and the fallback warning fires (no IDA file in play)."""
+    ddp, *_ = NF._build(tmp_path, dd_mutate=_store_with_sigma(2.0))
+    bl, _ = _read(ddp)
+    assert (bl.li_metrics["zeff_dd_provenance"]["zeff_definition"]["reason"]
+            == "dataset inconsistent")
+    env, msgs = _plain_env(bl, ddp)
+    meta = env["zeff_sigma_tier"]
+    assert meta["tier"] == "scalar" and meta["warned"] is True
+    imas = [s for s in meta["skipped"] if s["tier"] == "IMAS-measured"]
+    assert len(imas) == 1 and imas[0]["reason"].startswith("dataset rejected")
+    assert "FALLBACK" in meta["label"]
+    assert env["sigma_source"]["zeff"]["kind"] == "assumed"
+    fallback = [m for m in msgs if "dataset rejected" in m]
+    assert len(fallback) == 1 and "SCALAR tier" in fallback[0]
