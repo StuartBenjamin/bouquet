@@ -22,6 +22,7 @@ controls it. See [`../README.md`](../README.md) for the short version and
 - [Process-parallel generation](#process-parallel-generation)
 - [Many bouquets on one node](#many-bouquets-on-one-node)
 - [Many bouquets on a cluster](#many-bouquets-on-a-cluster)
+- [Running bouquet on another device](#running-bouquet-on-another-device)
 
 ---
 
@@ -1293,3 +1294,160 @@ python -m bouquet.units retry-failed --queue queue --out-dir out       # reopens
   to the backlog; set `--workers` to min(cores, memory / peak RSS per unit) and `--margin`/`--min-left`
   so no unit starts that cannot finish before the walltime.
 
+## Running bouquet on another device
+
+bouquet's defaults were measured on one device (the registered entry in
+`bouquet/devices.py`) and on synthetic fixtures built on its geometry. The
+physics carries over. The numbers listed below do not: each is either a
+property of that device or a value measured on it. This section explains
+what each number means, how it is set, and how to re-measure it. A helper
+that turns a calibration campaign into a registry entry is planned for 1.5
+(#86); until then, the steps below are manual.
+
+### What is device-specific
+
+1. **The mesh and the coil set.** `SolverConfig.mesh_path` is the device's
+   TokaMaker mesh (coils, vessel, limiter). Its coil names select the device
+   entry (`devices.detect_device`, an exact match of the coil set); an
+   unrecognised set gets the generic path below. `SolverConfig.coil_vsc`
+   names the vertical-control pair and its anti-series signs. Its default is
+   the registered device's pair, so on any other device you must set it to
+   your own pair, or the vertical-control channel acts on the wrong coils.
+2. **The coil bounds and the 10 kA VSC floor.** The draw homotopy tightens
+   the coil bounds in stages: `GenerationConfig.homotopy_passes`, default
+   (F, VSC) fractions (0.05, 0.10), (0.02, 0.05), (0.01, 0.01).
+   - Each F coil's bound is max(fraction × |I_base|, 50 A).
+   - The vertical-control channel's bound is the VSC fraction ×
+     max(min(|I_A|, |I_B|), 10 kA).
+
+   Without the floor, a pair with one nearly idle coil would get a channel
+   bound of a few hundred A, too tight to hold the plasma's vertical
+   position. The axis then runs away and the draws are rejected; on a
+   validated reversed-I_p case the floor raised the archived yield from 1
+   to 9 of 10 attempts. The 10 kA is the same constant as the legacy in-spec
+   VSC metric's offset. It is tokamak-scale, and it is a module constant
+   (`TokaMaker_interface._COIL_DRIFT_DENOM_FLOOR_A`), not a configuration
+   field.
+   - If your vertical-control coils carry far less than 10 kA, the floor
+     dominates and the channel bound is looser than the fraction suggests.
+   - If they carry far more, the floor never binds.
+
+   Either way, watch the `vertical_runaway` labels
+   (`Bouquet.engine_draw_cap_events`) and the `homotopy_*` rejections; a
+   device that needs a different floor is a case for #86 / #93.
+3. **The in-spec coil test (χ²/ν and worst |z|).** The registered device has
+   two calibrated parts:
+   - a per-coil current-uncertainty model (floor + fraction, per-coil
+     overrides, acquisition-era floors);
+   - an acceptance of χ²/ν ≤ 6.1 and |z| ≤ 6.3, the 95 % quantiles over real
+     fit residuals with 18 degrees of freedom.
+
+   Another device gets the generic path:
+   - With `FilterConfig.coil_sigma` supplied (a `{"floor", "fraction"}`
+     dict, a per-coil table or a callable), the χ² test runs with the
+     uncalibrated `devices.GENERIC_ACCEPTANCE` (χ²/ν 4.0, |z| 5.0), stamped
+     `generic`.
+   - With nothing supplied, it falls back to the legacy ± % band with a
+     warning.
+
+   To calibrate the acceptance:
+   1. Build the sigma model from your coil-current measurement uncertainty
+      (power-supply or shunt specification).
+   2. Reconstruct a set of your device's discharges and compute each fit's
+      χ²/ν and worst |z| against that model.
+   3. Take the 95 % quantiles, and record the sample size and the degrees of
+      freedom.
+   4. Add a `DeviceSpec` entry with the provenance of each number.
+
+   For a design with no measured residuals, take the sigma from the design
+   specification and declare the generic acceptance.
+4. **The boundary cut.** The registered device's cut is 8.5 mm: the 90th
+   percentile of the LCFS RMS displacement under its magnetics' stated noise,
+   from a boundary-UQ study. Every other device gets the generic 5.0 mm
+   (`devices.GENERIC_BOUNDARY_RMS_MM`), and `FilterConfig.rms_max_mm`
+   overrides either. Measure your own cut the same way from your magnetics'
+   noise, or declare the generic one as uncalibrated.
+5. **The boundary-constraint total (2e5) and its window.** The isoflux set
+   is 256 points, resampled by arc length and weighted per unit length.
+   Their weights sum to `solver_geometry.ISOFLUX_WEIGHT_TOTAL` = 2e5, the
+   same for the reconstruction and every draw. What was measured on six
+   equilibria (three experimental, three synthetic):
+   - the window in which the σ=0 reproduction and the draw yield hold:
+     about 1.5e5 to 4e5;
+   - the band in which a boundary miss at its cut and a coil drift at its
+     cut cost the solver equally (the vertical-control pair excluded):
+     1.8e5 to 3.8e5.
+
+   Re-measure it on a few representative slices of your device with the
+   two probes 1.4.0 ships:
+   - **The partition stamp.** After every reconstruction, one capped solve
+     (pressure × 1.02) measures the partition: boundary RMS over its cut,
+     divided by coil drift over its cut. It is stamped in
+     `Baseline.engine["boundary_balance"]["partition"]` and in the solver
+     geometry record (`isoflux_balance`), and warned outside [1/3, 3]. On
+     the validated cases it read 0.95–1.38 (synthetic), 0.97–1.10 and 2.56
+     (real), with one synthetic slice at 3.2–3.3. If your slices sit well
+     inside the band, keep the constant. If they sit persistently outside
+     it, scan `SolverConfig.isoflux_weight_total` (for example 1e5, 2e5,
+     4e5) and find where the partition crosses 1.
+   - **The fixed-seed yield test.** At each candidate total, run 10
+     fixed-seed draw attempts. At least 5 must reach a solve, and the
+     archived count must be at least 0.8 × the solved count (the template
+     is `tests/test_boundary_balance_solver.py`,
+     `test_the_default_total_keeps_the_draw_yield`). Also check that
+     `Bouquet.verify_sigma0_consistency()` passes.
+
+   Choose a total where both probes hold, and set it with
+   `SolverConfig.isoflux_weight_total`; it is stamped as mode `"override"`.
+   Please report the measured window on #93, which collects windows for a
+   device-independent rule.
+6. **The sigma templates.** When no measured sigma exists (no IDA file, no
+   IMAS error field), each kinetic channel's envelope is the H-mode
+   flat-top radial template times |baseline|. The templates
+   (`bouquet.SIGMA_TEMPLATES`: `hmode_flattop`, `ramp`, `lmode`; 14 ψ_N
+   nodes, read with `bouquet.sigma_template`) are the median relative
+   envelopes of one device's IDA-style profile fits. To use your device's
+   own envelopes, in order of preference:
+   - an IDA-style profile file with your fits' uncertainties
+     (`UncertaintyConfig.ida_path`, or the source's own IDA file);
+   - absolute σ profiles on the kinetic grid
+     (`UncertaintyConfig.sigma_profiles`, keys `ne`, `te`, `ni`, `ti`);
+   - a flat fraction (`UncertaintyConfig.ne_scalar_sigma`, ...,
+     `zeff_scalar_sigma`).
+
+   To build device templates, take the median of σ/|X| over a set of your
+   fits per regime on the same 14-node grid, as the shipped templates were
+   built. Each run logs and stamps which source won for each channel
+   (`log_sigma_sources`).
+7. **The Z_eff definitions.** The rule is the same on every route: the
+   bootstrap coefficients take the total Z_eff; the species derivations
+   take the thermal numerator; each draw is centred on the base and
+   perturbs it with the measured absolute width. Its inputs are
+   device-specific:
+   - the impurity charge (`impurity_Z` on the source, default 6, carbon);
+   - the measured Z_eff tiers (carbon CER through n_C, visible
+     bremsstrahlung), which assume those diagnostics;
+   - the beam's charge moments, which come from the dd on the IMAS routes
+     and are not yet carried on the g-file + p-file route (#97).
+
+   Set `impurity_Z` to your dominant impurity's charge, and read the route
+   table ([physics-notes.md](physics-notes.md#z_eff-which-definition-feeds-what-on-every-route))
+   for what each route takes.
+
+### Checklist
+
+1. A mesh with your coil set, `coil_vsc` set to your pair, and `impurity_Z`
+   set.
+2. A coil sigma model (`coil_sigma`). Either calibrate the acceptance (95 %
+   quantiles over your fits) and register a `DeviceSpec`, or accept the
+   generic acceptance, stamped as such.
+3. A boundary cut measured from your magnetics' noise, or the generic 5 mm
+   declared.
+4. The partition stamp and the fixed-seed yield test on a few slices at the
+   default total. Override the total only if they say so, and report the
+   window on #93.
+5. Measured kinetic σ (an IDA-style file or `sigma_profiles`) rather than
+   another device's templates.
+6. Before quoting a band: σ=0 passes, the in-spec count is at least 24
+   (until-N), and the stamps (partition, clips, `vertical_runaway`,
+   bistability, bimodality) have been read.

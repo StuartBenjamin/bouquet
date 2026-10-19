@@ -1,5 +1,148 @@
 # Bouquet — change summaries
 
+## 1.4.0 — the unified engine, the magnetics as the in-spec rule, one Z_eff rule (2026-10-18)
+
+This is the summary of everything since 1.3.1. The detailed account is in
+the "1.4.0 detail" sections below it, newest first. The validation record is
+in [validation-provenance.md](validation-provenance.md); what ships unfixed
+is in [known-limitations.md](known-limitations.md).
+
+### Behaviour changes that move numbers (check these before re-running an old config)
+
+The unified engine is the default (2026-10-06), with the self-consistent
+bootstrap loop on and one current conversion; see "1.4.0 detail — the
+unified engine becomes the default" and "... self-consistent bootstrap
+current". On top of it:
+
+1. **In spec = the magnetics** (2026-10-14). A draw is in spec when it passes
+   the coil χ² test AND the boundary cut. The l_i band is now opt-in, so
+   yields rise. See workflows.md, "The in-spec rule"; detail "the in-spec
+   rule is the magnetics".
+2. **IDA-hybrid takes the IDA file's own Z_eff and n_i** (2026-10-14). Detail
+   "IDA-hybrid: the IDA file's own Z_eff is the default".
+3. **The boundary constraint: 256 points per unit length at a constant total
+   of 2e5**, in the reconstruction and every draw (#84, 2026-10-15; the
+   constant total and its measured window, 2026-10-16). Details "the
+   boundary constraint per unit length" and "... at a constant total";
+   engine.md.
+4. **The homotopy's VSC bound is floored at 10 kA** (2026-10-16). This
+   recovers a reversed-I_p case whose vertical-control pair has a near-idle
+   coil. Detail "... the homotopy's VSC bound floor"; coil-constraints.md.
+5. **One Z_eff rule on every route** (A1 2026-10-17, the full rule
+   2026-10-18). The bootstrap takes the total Z_eff and the species take the
+   thermal numerator; each draw is centred on the base and carries a
+   measured absolute width. This moves the plain dd route and the opt-in
+   IDA-hybrid sub-routes. Details "the dd route's total Z_eff (A1)" and "one
+   Z_eff rule on every route"; physics-notes.md, the route table.
+6. **The kinetic clips are on by default on every route** (2026-10-17). The
+   floor Z_eff ≥ 1 is physical, and every clip is counted per draw. Detail
+   "... a per-draw wall budget" (top paragraph).
+7. **g-file + p-file: the p-file's `pb` is the default `p_fast`** (B,
+   2026-10-17). It is stamped as `p_fast_source`, beside a report-only
+   pressure-fidelity stamp. Detail "the p-file's beam pressure by default".
+8. **The synthetic H-mode g-file fixture is thermal-only** (2026-10-15). The
+   total-pressure file is kept, paired with a p-file. The goldens and
+   notebooks were regenerated on it. Detail "the synthetic H-mode g-file is
+   thermal-only".
+9. **The bistability check is on by default** under the unified engine
+   (2026-10-15). It costs one extra solve per reconstruction. Detail
+   "bistability check on by default".
+10. **The axis flag is a displacement (`axis_shift_large`), and each scan
+    gets a bimodality stamp** (2026-10-15). The stamp gives a verdict only
+    at n ≥ 24. Detail "the per-draw axis flag is a displacement".
+11. **Radial σ templates replace the flat assumed σ** (2026-10-14). A channel
+    without a measured σ gets the H-mode flat-top template times |baseline|.
+    Detail "radial sigma templates".
+12. **A per-draw wall budget of 600 s** (2026-10-16). A draw over budget is
+    rejected as `draw_wall_budget`. The budget is wall-clock, so it depends
+    on the host; the σ=0 verification runs without it. Detail "... a
+    per-draw wall budget".
+13. **Draw-count defaults** (2026-10-15). Examples and launchers draw until
+    24 are in spec; use 30 for 5/95 bands and 50 for widths quoted in a
+    paper. See workflows.md, "until-N in-spec draws".
+
+Earlier 1.4.0 changes also move numbers; each is described in its detail
+section:
+
+- the Redl ε definition and R in ν\* (PR #60);
+- the IMAS ψ_N readbacks at the dd's own nodes;
+- every baseline at its own F0 (PR #76);
+- the engine draws held on the reconstruction's isoflux;
+- the coil-saturation test against the installed bound;
+- the device-calibrated boundary cut and the χ² coil acceptance;
+- the fast-ion pressure reduction read from provenance;
+- the measured Z_eff envelope;
+- the structured closure's preset;
+- `separatrix_pressure="offset"`;
+- the legacy draw-solve cap.
+
+### New capabilities
+
+- **`bands_summary`** (`bq.bands_summary`, `BandSummary`,
+  `plot_bands_summary`): the standard error bars of one slice in one call,
+  with n in every band.
+- **Report-only stamps**, which never change a verdict:
+  - the boundary partition (`Baseline.engine["boundary_balance"]`, warned
+    outside [1/3, 3]);
+  - the pressure fidelity (`reconstruction_metrics["pressure_fidelity"]`);
+  - the Z_eff definition (`zeff_definition`);
+  - the `p_fast` source;
+  - the clip counts;
+  - the `vertical_runaway` label;
+  - the wall budget and its rejections;
+  - the archived in-spec rule (`inspec_rule`), with the old drift verdict
+    kept as `coil_drift_in_spec`.
+- **Opt-in in-spec bands:** l_i (fractional or σ), β_p and the q0 gate.
+  `bouquet.refilter_inspec` re-judges an archive without re-running the
+  physics.
+- **Parallel work:**
+  - `parallel_cases`;
+  - a reusable solver per process (PR #76);
+  - a work queue for many units on one node or a cluster (`bouquet.units`);
+  - seed stamps;
+  - partial merges, marked as such; `merge_archives` refuses shards judged under different in-spec rules or run under different wall budgets.
+- **The IDS-route golden** (`D3Dlike_ids_golden_slim.h5`): the production
+  IDS route under regression. Every golden is now the recipe's run of the
+  synthetic fixtures at the current defaults, checked by recipe-identity
+  tests.
+
+### Compatibility
+
+- **Stored configurations replay what they ran.** An explicit value a
+  stored config carries wins over the new defaults. Examples: the old flat
+  σ fractions, `ni_source="standard"`, `check_bistability: false`, an
+  `l_i_tolerance`.
+- **Old archives remain readable.** The `axis_branch` attributes are read
+  as `axis_shift_large`. `Bouquet.filter()` re-judges an archive that
+  predates the in-spec record, and says so. The schema is v3; in some
+  fields the meaning changed while the name did not (detail "the unified
+  engine becomes the default").
+- **Deprecated:** the legacy route (`reconstruction_engine="legacy"` /
+  `solve_method="legacy"`) emits a `DeprecationWarning` and will be removed
+  in 1.5 (#90). New work should use the unified engine.
+- **Experimental and opt-in:**
+  - the PR #56 kinetic combination (`fuse_zeff_fast_ions`, the beam
+    subtraction outside the measured route);
+  - `swb_solve_method`;
+  - `bootstrap_convergence_override`;
+  - `ida_fuse_timing`.
+
+  See workflows.md, "Experimental features and their validation status".
+
+### Validation and limits
+
+- **Validated** on a real-data acceptance ladder and nine synthetic
+  equilibria at main `49ebebb`, `27979d1` and `8e095fe`. Every σ=0 gate and
+  in-spec yield bar passes, and the MSE stage never fits the raw chords
+  worse. Misses: the runtime of the MSE arms and of two draw ensembles, and
+  5 refused slices of a 30-slice series. See
+  [validation-provenance.md](validation-provenance.md).
+- **Known limitations:** [known-limitations.md](known-limitations.md),
+  covering #81, #87, #88, #89, #90, #93, #95 and #97. Planned next:
+  1.4.1 (#87), 1.5 (#86, #90, #93, #97).
+
+With contributions from a collaborator's PR chain (#56–#75, #79).
+
 ## 1.4.0 detail — post-review fixes
 
 - **The stored-Z_eff check and its warnings, after the last pre-tag
@@ -18,7 +161,7 @@
   `z_ion`; stored zeff consistent to ~1e-15 on every node); no golden
   route reaches this code.
 
-## Unreleased — one Z_eff rule on every route (owner decision 2026-10-18)
+## 1.4.0 detail — one Z_eff rule on every route (owner decision 2026-10-18)
 
 - **`zeff_from_fuse=True` on a measured `ida_hybrid` route: the bootstrap
   gets the dd's TOTAL Z_eff.** It got the dd's thermal numerator
@@ -69,7 +212,7 @@
   bootstrap, the species derivations, the draw centre, the width, the floor
   and what is held fixed, on every route.
 
-## Unreleased — review fixes to A1 / B
+## 1.4.0 detail — review fixes to A1 / B
 
 - **The baseline's input warnings now reach the user on the unified engine.**
   The dd's stored-Z_eff warning (A1) and the p-file's "two sources of
@@ -123,7 +266,7 @@
   records the `pb` block's header unit and warns when it is not kPa, without
   converting (`pb_header_units`, `pb_units_ok` in the stamp).
 
-## Unreleased — goldens after A1 / B / C
+## 1.4.0 detail — goldens after A1 / B / C
 
 - **IDS golden** regenerated at the A1 / B / C code (seed 12345, 20 attempts):
   20 archived, 20 in spec; draws and manifest numbers identical to the
@@ -139,7 +282,7 @@
   replay runs without a budget too (it calls `generate_bouquet` outside the
   class API's solve guard). No tolerance changed.
 
-## Unreleased — the p-file's beam pressure by default and a pressure-fidelity stamp (B)
+## 1.4.0 detail — the p-file's beam pressure by default and a pressure-fidelity stamp (B)
 
 - **g-file + p-file: the p-file's `pb` is the default `p_fast` (decision B,
   2026-10-17).** When a `ReconstructionSource` p-file carries a `pb` block and
@@ -159,7 +302,7 @@
   (`baseline.PRESSURE_FIDELITY_WARN_PCT`, the band that would have caught the
   -63 % of a dropped `pb`). Never part of the verdict.
 
-## Unreleased — the dd route's total Z_eff (A1)
+## 1.4.0 detail — the dd route's total Z_eff (A1)
 
 - **Plain dd route: the kinetics and the Sauter bootstrap take the dd's own
   TOTAL Z_eff (owner decision A1, 2026-10-17).** On `ImasSource` with FUSE
@@ -179,7 +322,7 @@
   1.2 s: Z_eff on axis 0.98 -> 1.40; Redl I_BS 105.8 -> 107.2 kA, beta_N
   1.626 -> 1.627; 10 fixed-seed draws with a clip 8 -> 1.
 
-## Unreleased — the kinetic clips reach the engine-grid Z_eff
+## 1.4.0 detail — the kinetic clips reach the engine-grid Z_eff
 
 - **Engine draws: the Z_eff floor at 1 now acts on the Z_eff the bootstrap
   receives.** The sampler floored the drawn Z_eff channel on the kinetic grid,
@@ -197,7 +340,7 @@
   reach a solve (was 3), 10 archived, 7 with the floor binding (80-125 of
   the engine grid's nodes). Explicit `kinetic_clips=False` is unchanged.
 
-## Unreleased — the goldens regenerated at main 27979d1 (the 1.4.0 code)
+## 1.4.0 detail — the goldens regenerated at main 27979d1 (the 1.4.0 code)
 
 - **Goldens.** The g-file h5 golden and the IDS golden (seed 12345) are the
   recipe's runs at main 27979d1, so their archives now carry the homotopy's
@@ -221,7 +364,7 @@
   vertical_runaway label count of each capped draw solve. Every draw, figure
   and number is otherwise unchanged (the figures are byte-identical).
 
-## Unreleased — the boundary constraint at a constant total with a reported partition; the homotopy's VSC bound floor; a per-draw wall budget
+## 1.4.0 detail — the boundary constraint at a constant total with a reported partition; the homotopy's VSC bound floor; a per-draw wall budget
 
 **Kinetic sampler clips on by default on every route (owner decision 2026-10-17).**
 `UncertaintyConfig.kinetic_clips=None` now resolves to on everywhere, not only
@@ -310,7 +453,7 @@ or on a downgraded route now assert on.
     records `baseline_outside_physical_window` with the counts: a finding on the baseline,
     not a changed verdict.
 
-## Unreleased — the g-file and systematics notebooks re-executed on the thermal-only g-file
+## 1.4.0 detail — the g-file and systematics notebooks re-executed on the thermal-only g-file
 
 **Examples.** `examples/D3D-like/bouquet_D3Dlike_geqdsk_example.ipynb` and
 `bouquet_D3Dlike_systematics.ipynb` are re-executed at main 49ebebb on the
@@ -320,7 +463,7 @@ spec in 24 attempts (beta_N 0.80 [0.77, 0.83], l_i(3) 0.833 [0.794, 0.883]),
 L-mode 24/25; systematics sigma=0 identity passed, pressure-only and production
 24 in spec each, the baseline inside every band (quantiles 0.42-0.62).
 
-## Unreleased — the three goldens regenerated at main 49ebebb (the thermal-only g-file, the rule's in_spec)
+## 1.4.0 detail — the three goldens regenerated at main 49ebebb (the thermal-only g-file, the rule's in_spec)
 
 **Goldens.** The g-file h5 golden is now the recipe's run of the corrected,
 thermal-only `g_synthetic.geqdsk` + `diiid_profs_synthetic.cdf` (20 attempts:
@@ -346,7 +489,7 @@ stored config reproduces `in_spec` on every draw judged by the rule, and
 `refilter_inspec` under the stamped bands leaves the selection unchanged. The
 change was committed as a proposal and is approved as committed.
 
-## Unreleased — the synthetic H-mode g-file is thermal-only; the total-pressure file kept with a p-file (owner decision 2026-10-15)
+## 1.4.0 detail — the synthetic H-mode g-file is thermal-only; the total-pressure file kept with a p-file (owner decision 2026-10-15)
 
 **Fixtures.** `tests/data/g_synthetic.geqdsk` carried the dd's TOTAL pressure
 at 1.2 s (90.4 kPa on axis, fast ions included) while its profile file
@@ -373,7 +516,7 @@ the reader's psi_N(rho) drift check now warns (0.022 against its 0.02: the dd
 slice carries the fast-ion pressure, the g-file not). The g-file and legacy
 goldens are still to be regenerated on the corrected pair.
 
-## Unreleased — the boundary constraint per unit length (#84, owner decision for 1.4.0)
+## 1.4.0 detail — the boundary constraint per unit length (#84, owner decision for 1.4.0)
 
 **Every reconstruction and every draw of the unified engine moves slightly.**
 The boundary (isoflux) constraint is standardised per unit length, for the
@@ -507,7 +650,7 @@ route. Closes #84.
   rule's fields) is warned about with its type and message, and anything else
   propagates.
 
-## Unreleased — the golden recipe runs the synthetic fixtures at the current defaults; a new IDS-route golden (owner decisions 2026-10-15)
+## 1.4.0 detail — the golden recipe runs the synthetic fixtures at the current defaults; a new IDS-route golden (owner decisions 2026-10-15)
 
 **The golden recipe moves to the synthetic test fixtures** (`tests/data/`).
 `tests/golden/regenerate_golden_run.py` now builds each golden's config FRESH
@@ -549,7 +692,7 @@ baseline g-file / p-file, the OMAS json, the mesh and the legacy equilibria
 stay: the example notebooks (the COCOS notebooks among them), a number of
 solver tests and the current g-file goldens still read them.
 
-## Unreleased — `bands_summary`, the legacy route deprecated, the notebooks on the synthetic fixtures (owner decisions 2026-10-15)
+## 1.4.0 detail — `bands_summary`, the legacy route deprecated, the notebooks on the synthetic fixtures (owner decisions 2026-10-15)
 
 **New: `bouquet.stats.bands_summary`** (exported as `bq.bands_summary`, with
 `BandSummary` and `plot_bands_summary`): the standard error bars of one slice
@@ -578,7 +721,7 @@ the systematics notebook on the 1.2 s pair), draw until 24 are in spec (30 for
 calls `bands_summary`. The p-file variant is dropped: the synthetic set has no
 p-file.
 
-## Unreleased — the per-draw axis flag is a displacement; a per-scan bimodality stamp (owner decision 2026-10-15)
+## 1.4.0 detail — the per-draw axis flag is a displacement; a per-scan bimodality stamp (owner decision 2026-10-15)
 
 **Renamed (archive attrs migrated): the per-draw `axis_branch` is now
 `axis_shift_large`.** The flag says whether the draw's archived magnetic axis
@@ -614,7 +757,7 @@ bands are mixtures"), recounted by `merge_archives`. A bimodal scan under a
 `bistability_source="reconstruction"`. No draw, verdict, band, yield, gate or
 filter changes.
 
-## Unreleased — bistability check on by default; per-draw axis record and branch flag (owner decisions 2026-10-15)
+## 1.4.0 detail — bistability check on by default; per-draw axis record and branch flag (owner decisions 2026-10-15)
 
 **Default change: `GenerationConfig.check_bistability` is ON under the unified
 engine.** The field now defaults to `None`, resolved at `prepare_baseline()`
@@ -650,7 +793,7 @@ apart, and the magnetics pass both, so a band over both may be bimodal: that
 is the slice's physics. No draw, verdict, band or yield changes. The draws'
 continuity guard is #87.
 
-## Unreleased — coil-saturation test measured against the installed bound (owner decision 2026-10-15)
+## 1.4.0 detail — coil-saturation test measured against the installed bound (owner decision 2026-10-15)
 
 The homotopy's coil-saturation test, its early stop and the post-homotopy /
 hard-bound guard now measure each non-VSC F coil's drift against the bound
@@ -664,7 +807,7 @@ pass; with the installed bound it yields 24 in-spec draws in 34 attempts, and
 the other synthetic equilibria are identical draw for draw). The caps, the
 floor, the VSC test, the sigma=0 coil gate and every filter are unchanged.
 
-## Unreleased — radial sigma templates: assumed defaults, IMAS error fields, fixtures (numbers move on every sigma-less run)
+## 1.4.0 detail — radial sigma templates: assumed defaults, IMAS error fields, fixtures (numbers move on every sigma-less run)
 
 **Default change (owner decision): the assumed envelope is a shape, not a flat
 number.** `UncertaintyConfig.{ne,te,ni,ti,zeff}_scalar_sigma` now default to
@@ -752,7 +895,7 @@ drive the draws (T_e 5.5-20 % instead of 8 %, n_e 2.2-16 % instead of 4 %, T_i
 the wider Zeff_err and n_12C6_err). Their bars are unchanged; their measured
 values are to be re-taken.
 
-## Unreleased — the in-spec rule is the magnetics (yields rise; every l_i band becomes a result)
+## 1.4.0 detail — the in-spec rule is the magnetics (yields rise; every l_i band becomes a result)
 
 **Default change (owner decision, 2026-10-14): the l_i band is removed from the
 default in-spec filter.** A draw is now IN SPEC when it passes the configured
@@ -837,7 +980,7 @@ other stored value was explicit and keeps its band (rule `"magnetics+li"`); a
 config without the field loads loud, band off. A config written since
 round-trips exactly (an explicit 0.05 keeps its band).
 
-## Unreleased — IDA-hybrid: the IDA file's own Z_eff is the default (numbers move on every IDA-hybrid run)
+## 1.4.0 detail — IDA-hybrid: the IDA file's own Z_eff is the default (numbers move on every IDA-hybrid run)
 
 **Default change (owner decision): one thermal-kinetics source per run.** When an
 IDA file supplies the kinetics (`kinetic_source="ida_hybrid"`), Z_eff and n_i now
@@ -892,7 +1035,7 @@ measured `ni_source`, `zeff_fast_ions`, or an explicit `ni_subtract_fast=True`
 `ni_subtract_fast` setting and resolution, `include_pfast`, whether the IDA file
 carries `Zeff` / `n_12C6`, and the cross-source inputs in words).
 
-## Unreleased — the engine draws hold the reconstruction's isoflux (numbers move on every engine draw)
+## 1.4.0 detail — the engine draws hold the reconstruction's isoflux (numbers move on every engine draw)
 
 **What moves (owner decision).** Every unified-engine draw's homotopy now holds
 the boundary with the RECONSTRUCTION's own isoflux pattern -- the very points
@@ -933,7 +1076,7 @@ warns; the delivered equilibrium is restored. Off by default: no extra solve,
 nothing moves. (Superseded 2026-10-15: on by default under the unified engine,
 see the entry at the top.)
 
-## Unreleased — PR #76: one reusable solver per process; every baseline at its own F0 (numbers move on multi-slice runs)
+## 1.4.0 detail — PR #76: one reusable solver per process; every baseline at its own F0 (numbers move on multi-slice runs)
 
 **What moves.** The solver's vacuum field F0, its LCFS isoflux targets and its
 saddle constraints now belong to the baseline, not to the solver
@@ -1004,7 +1147,7 @@ solver device as `setup_solver` left it (the `update_settings` values such as
 cache after `prepare_baseline`, as `run_shard` does. A single case without
 `set_case` is untouched by either.
 
-## Unreleased — the PR #56 kinetic combination is EXPERIMENTAL and opt-in (owner decision 2026-10-09)
+## 1.4.0 detail — the PR #56 kinetic combination is EXPERIMENTAL and opt-in (owner decision 2026-10-09)
 
 **What and why.** PR #56's IDA/FUSE ion coupling is not the default for 1.4.0.
 On real H-mode slices the combined route moved core n_i and Z_eff far outside
@@ -1051,7 +1194,7 @@ in the engine record, and on the archive's `_baseline` attr
 archive views print it. See docs/workflows.md, "Experimental features and their
 validation status".
 
-## Unreleased — IMAS ψ_N readbacks sample at the dd's own nodes (owner decision E5, 2026-10-09)
+## 1.4.0 detail — IMAS ψ_N readbacks sample at the dd's own nodes (owner decision E5, 2026-10-09)
 
 The IMAS reader's ψ_N route (PR #64) samples every profile at the dd's own
 radial nodes instead of pairing indices onto a uniform ψ_N grid. On a dd whose
@@ -1061,7 +1204,7 @@ peak and 30 % of the pressure; on a ψ_N-uniform dd (the D3D-like example) the
 two agree exactly. The node-based sampling is the declared default; no option
 restores the index pairing.
 
-## Unreleased — cross-file hooks of the integrated #56–#75 chain (2026-10-09)
+## 1.4.0 detail — cross-file hooks of the integrated #56–#75 chain (2026-10-09)
 
 ### Legacy `solve_with_bootstrap` results converted to the field-aligned bootstrap (PR #64 B1; legacy numbers move)
 
@@ -1122,7 +1265,7 @@ restores the index pairing.
 - **Readers** (`schema.read_current_split_convention`, the IDS exporter)
   read the attr; an archive without it keeps its old meaning.
 
-## Unreleased — PR #56 (IDA/FUSE ion coupling) and PR #60 (bootstrap options), integrated
+## 1.4.0 detail — PR #56 (IDA/FUSE ion coupling) and PR #60 (bootstrap options), integrated
 
 ### Redl ε: `(R_max − R_min)/(R_max + R_min)` with `R_geo` in ν\* by default (`evaluate_jBS/4`, PR #60, owner decisions E4/E7)
 
@@ -1230,7 +1373,7 @@ restores the index pairing.
   at 1, the n_i floor / ceiling and the aux clip are opt-in
   (`UncertaintyConfig.kinetic_clips`).
 
-## Unreleased — the collaborator's #72–#75, integrated (2026-10-09)
+## 1.4.0 detail — the collaborator's #72–#75, integrated (2026-10-09)
 
 ### Legacy draw-solve cap and the opt-in rescue (#75; owner decision D5)
 
@@ -1307,7 +1450,7 @@ restores the index pairing.
   so a sweep parses each dd once. Up to two parsed files stay resident per
   process (`bouquet.io.imas.clear_dd_cache()` releases them).
 
-## Unreleased — the unified engine becomes the default; one current conversion (owner decisions, 2026-10-06)
+## 1.4.0 detail — the unified engine becomes the default; one current conversion (owner decisions, 2026-10-06)
 
 **Both change results by default.**
 
@@ -1810,7 +1953,7 @@ in force is approved.
   stored-configuration load path relaxes to defaults-plus-warning, so
   archives written before the refusal stay loadable.
 
-## Unreleased — second-pass review fixes (2026-10-06)
+## 1.4.0 detail — second-pass review fixes (2026-10-06)
 
 Fixes for the second adversarial review of the engine fix commits
 (d874822..f36b03a). Nothing here changes a default value, a tolerance or a
@@ -1935,7 +2078,7 @@ test bar.
     documented build-dependent rule (see below). It is on the pending list
     for retirement and is not retired here.
 
-## Unreleased — owner-approved decision (2026-10-06)
+## 1.4.0 detail — owner-approved decision (2026-10-06)
 
 - **One coil solver for the whole run: OpenFUSIONToolkit's bounded coil
   mode is entered ONCE, at solver setup, on both paths** (owner-approved
@@ -1980,7 +2123,7 @@ test bar.
   clipping it guards stays, and its guard is still covered without a
   solver.
 
-## Unreleased — owner-approved decisions (2026-10-05)
+## 1.4.0 detail — owner-approved decisions (2026-10-05)
 
 - **Legacy draws: a failed homotopy rollback re-solve rejects the draw**
   (`homotopy_rollback_failed`, the engine draws' code), whatever the cause
@@ -2088,7 +2231,7 @@ test bar.
   load at the defaults with a warning (the stored run is unchanged). Legacy
   configurations, and what the factories set for them, are unchanged.
 
-## Unreleased — review fixes to the unified engine (2026-10-04)
+## 1.4.0 detail — review fixes to the unified engine (2026-10-04)
 
 - **Legacy g-file reconstruction (DEFAULT path): a failed last l_i-secant
   solve hands on the restored state's inductive factor.** When the secant's
@@ -2179,7 +2322,7 @@ test bar.
   field where it is not. Fixtures: the to_dict output at five commits of
   the engine stack (`tests/data/stored_configs/`).
 
-## Unreleased — `engine_ids_inductive` (unified engine, IDS sources)
+## 1.4.0 detail — `engine_ids_inductive` (unified engine, IDS sources)
 
 *The default is now `"residual"` (owner-approved; see "IDS inductive: the
 parallel residual by definition" in the unified-engine section below). As
@@ -2198,7 +2341,7 @@ name, refused when set with `reconstruction_engine="legacy"` and with a
 g-file source (no effect there). Recorded in the engine record
 (`settings.ids_inductive`).
 
-## Unreleased — `engine_li_row_relaxation` (unified engine; default unchanged)
+## 1.4.0 detail — `engine_li_row_relaxation` (unified engine; default unchanged)
 
 New `GenerationConfig.engine_li_row_relaxation` (default `1.0`): an
 under-relaxation `r` (0 < r <= 1) of the unified engine's l_i-row
@@ -2215,7 +2358,7 @@ and when set with `reconstruction_engine="legacy"`). Recorded in the engine
 record (`settings.li_row_relaxation`). Draws carry no l_i row and are not
 affected; nor are the q0 row and the MSE chords.
 
-## Unreleased — approved change of a physics default: `separatrix_pressure` `"legacy"` → `"offset"`
+## 1.4.0 detail — approved change of a physics default: `separatrix_pressure` `"legacy"` → `"offset"`
 
 **This is a change of a physics default, approved by the package owner on
 2026-10-02.** `GenerationConfig.separatrix_pressure` (below, "The pressure
@@ -2260,7 +2403,7 @@ convergence criterion or ceiling moved.
   printed whenever the settings are not the pre-change ones, so it appears
   at the default.
 
-## Unreleased — unified engine (introduced opt-in; the default since 2026-10-06, see the first entry)
+## 1.4.0 detail — unified engine (introduced opt-in; the default since 2026-10-06, see the first entry)
 
 *Introduced opt-in; with `reconstruction_engine="legacy"` nothing changes
 (the legacy paths are untouched; the loop kernel's new hook is proven
@@ -2458,7 +2601,7 @@ which applies to every path.*
   slice time from the source (it used the synthetic example's constant for
   every dd); the table records the slice it used.
 
-## Unreleased, intended for the release after 1.4.0 — self-consistent bootstrap current (default ON)
+## 1.4.0 detail — self-consistent bootstrap current (default ON)
 
 ### Approved change of a pass ceiling: `jbs_max_passes_post_homotopy` 4 → 6
 
@@ -2800,7 +2943,7 @@ legacy corrector already takes its step.
   only) and the rescue exists as an OPT-IN, stamped per draw -- see "Legacy
   draw-solve cap and the opt-in rescue" above.
 
-## Unreleased — MSE pitch angles on the structured closure (opt-in)
+## 1.4.0 detail — MSE pitch angles on the structured closure (opt-in)
 
 `closure_channel="structured"` accepts measured MSE pitch angles
 (`GenerationConfig.mse_data`, schema in `bouquet/mse.py`) as a third
@@ -2839,7 +2982,7 @@ counted into `n_extra_solves`; per-chord arrays and the Jacobian go to
 `Baseline.mse_record`; and the delivered-equilibrium chi² judgement runs on the
 state it delivers.
 
-## Unreleased — reversed-current IMAS sources (hotfix)
+## 1.4.0 detail — reversed-current IMAS sources (hotfix)
 
 **A dd with `ip < 0` is now read into bouquet's positive-current frame.** Before
 this, `read_imas_baseline` kept the dd's (negative) current profiles while every
@@ -2897,7 +3040,7 @@ such a source.
   positive frame (`× sign(CURRENT)`); `plot_input_vs_recon` reads the g-file in
   the source's declared COCOS.
 
-## Unreleased — a report-only core-pressure hollowness record
+## 1.4.0 detail — a report-only core-pressure hollowness record
 
 Every baseline now records `core_pressure_hollow`, which describes whether and
 by how much the core pressure rises above its axis value. It **changes no
@@ -2920,7 +3063,7 @@ it, and a test checks this on the real composition code.
   record does not say why one is there. See
   [physics-notes.md](physics-notes.md#core-pressure-hollowness-record).
 
-## Unreleased — the default LCFS boundary cut is now device-calibrated
+## 1.4.0 detail — the default LCFS boundary cut is now device-calibrated
 
 **For DIII-D the default boundary cut changes from 5.0 mm to 8.5 mm. This
 LOOSENS that acceptance criterion for DIII-D:** a draw whose LCFS deviates from
@@ -2956,7 +3099,7 @@ it did before.
   before this change can select **more** draws than it did. Quote the cut that
   produced any in-spec fraction you report — `draw_band` provenance carries it.
 
-## Unreleased — the default coil acceptance criterion changed
+## 1.4.0 detail — the default coil acceptance criterion changed
 
 **`Bouquet.filter()` now judges coil currents with a measurement-referenced χ²
 test instead of the ±2% band.** `FilterConfig.coil_filter` is a new field and its
@@ -3031,7 +3174,7 @@ header, mesh name or file path, and `filter()` prints the era it resolved, the
 floor that buys and which route it came from, once per call. Full table in
 [`workflows.md`](workflows.md#configuration-reference).
 
-## Unreleased — fast-ion pressure: the reduction rule now comes from dd provenance
+## 1.4.0 detail — fast-ion pressure: the reduction rule now comes from dd provenance
 
 **Behaviour change on the IMAS path.** `FixedComponentsConfig.p_fast_reduction`
 and `read_imas_baseline(..., p_fast_reduction=...)` now default to `"auto"`
@@ -3120,7 +3263,7 @@ synthetic `examples/D3D-like/D3Dlike_baseline_omas.json`.
 * `examples/D3D-like/D3Dlike_baseline_omas.json` carries that stamp now. The
   local (gitignored) generator that produces it should emit it too.
 
-## Unreleased — the Z_eff envelope is measured, not assumed
+## 1.4.0 detail — the Z_eff envelope is measured, not assumed
 
 **Behaviour change on the reconstruction/IDA path.** The Z_eff perturbation
 width used to be `zeff_scalar_sigma · |Z_eff|` — an *assumed* 5 % — even when
@@ -3177,7 +3320,7 @@ source sets `impurity_Z != 6.0`: `ni = n_e − Z·n_C` is re-derived at the
 source's real charge, and the ion-density sigma follows. Users on the default
 carbon `impurity_Z = 6.0` are unaffected.
 
-## Unreleased — the structured closure defaults to its validated preset
+## 1.4.0 detail — the structured closure defaults to its validated preset
 
 ### The structured closure's default prior is now the validated one
 

@@ -57,6 +57,61 @@ Docstrings in the source are authoritative; this page is a map.
 Layout spec: [archive-schema.md](archive-schema.md). Code source of truth:
 [`bouquet/schema.py`](../bouquet/schema.py).
 
+## Added or changed in 1.4.0
+
+The fields, functions and records 1.4.0 added or whose default it changed.
+Dates are the owner decisions recorded in
+[CHANGES_SUMMARY.md](CHANGES_SUMMARY.md) (1.4.0 entry); the linked page
+explains each one. Defaults are read from `bouquet/config.py`.
+
+### Configuration fields
+
+| Field | Default | What it does |
+|---|---|---|
+| `SolverConfig.isoflux_weight_total` | `None` (= `solver_geometry.ISOFLUX_WEIGHT_TOTAL`, 2e5) | The TOTAL weight of the unified engine's standard boundary (isoflux) set, spread per unit length; a number is an explicit override, installed as given and stamped as mode `"override"`. Must be `None` or a finite number > 0; ignored (with a `UserWarning`) when `isoflux_weights` is given or on the legacy route. Decided 2026-10-15 (per unit length, #84) and 2026-10-16 (the constant total). See [engine.md](engine.md#the-boundary-constraint-a-constant-total-inside-a-measured-window) |
+| `SolverConfig.boundary_partition_probe` | `True` | After the unified reconstruction, one capped re-solve with the pressure x 1.02 measures how a perturbation splits between the boundary cut and the coil cut at the installed total; stamped (`Baseline.engine["boundary_balance"]`, the solver-geometry record's `isoflux_balance["partition"]`) and warned outside [1/3, 3]. Report only: it never changes the total. `False` stamps `"off"`. See [engine.md](engine.md#the-boundary-constraint-a-constant-total-inside-a-measured-window) |
+| `GenerationConfig.check_bistability` | `None` (resolved: `True` under the unified engine, `False` under legacy) | One extra cold-start solve after the reconstruction, compared at the σ=0 gates (l_i(3), q0); a miss stamps `bistable=True` and warns, nothing is refused. On by default since 2026-10-15; an explicit `True` is refused on the legacy route. See [workflows.md](workflows.md#generationconfig-bgeneration) |
+| `GenerationConfig.draw_wall_budget_s` | `600.0` | Per-draw wall-clock budget [s] on both routes, checked between solves (a running GS solve is never interrupted); an over-budget draw is rejected as `draw_wall_budget`. `None` switches it off; the σ=0 verification runs without it. Wall-clock, so host-dependent. Decided 2026-10-16. See [engine.md](engine.md#cost) |
+| `GenerationConfig.l_i_tolerance` | `None` (was `0.05` until 2026-10-14) | An explicit fractional l_i(3) band around the reconstruction's l_i; unset, no l_i band (the in-spec rule is the magnetics, 2026-10-14). The legacy routes still construct their draws with 0.05 when unset. A stored config at the old default 0.05 loads with the band off and a one-line note. See [workflows.md](workflows.md#the-in-spec-rule) |
+| `GenerationConfig.l_i_sigma` | `None` | The stated 1σ of l_i(3) (absolute) of the source's MSE / diamagnetic fit; band `\|l_i - l_i*\| <= inspec_band_nsigma * l_i_sigma`. Exclusive with `l_i_tolerance`; unified engine only (refused on the legacy routes at `generate()`). See [workflows.md](workflows.md#the-in-spec-rule) |
+| `GenerationConfig.beta_p_target` / `beta_p_sigma` | `None` / `None` | A diamagnetic β_p and its 1σ (both or neither); band `\|beta_p - beta_p_target\| <= inspec_band_nsigma * beta_p_sigma`. See [workflows.md](workflows.md#the-in-spec-rule) |
+| `GenerationConfig.inspec_band_nsigma` | `2.0` | Half-width of a σ band (`l_i_sigma`, `beta_p_sigma`) in σ. A stored config without this key predates the 2026-10-14 rule (the stored-config compatibility above keys on it). See [workflows.md](workflows.md#the-in-spec-rule) |
+| `UncertaintyConfig.kinetic_clips` | `None` (resolved by `experimental.kinetic_clips_on`: ON on every route) | The kinetic sampler's clips: drawn Z_eff floored at 1, a derived n_i held in [0, n_e − z_fast], an independent n_i capped there when Z_imp is declared, a passive Z_eff aux draw clipped to the window; every clip that fires is counted per draw and archived. On every route since 2026-10-17 (graduated 2026-10-14 on the measured route). `False`: only the `zeff_bounds` window, and a draw with Z_eff < 1 is refused (`kinetics_nonphysical`). See [workflows.md](workflows.md#uncertaintyconfig-buncertainty) |
+| `UncertaintyConfig.ne_scalar_sigma` / `te_` / `ni_` / `ti_` / `zeff_scalar_sigma` | `None` | The assumed σ of a channel with no measured σ, as a fraction of \|baseline\|; `None` takes the H-mode flat-top radial template (`sigma_template`), 2026-10-14. See [workflows.md](workflows.md#uncertaintyconfig-buncertainty) |
+| `ImasSource.ni_source` | `"auto"` | The Z_eff / n_i route on `ida_hybrid`: `"auto"` resolves to the measured IDA route (`"all"`) when an IDA file supplies the kinetics, else `"standard"` (the dd's Z_eff). An IDA file with no Z_eff information is refused on `ida_hybrid` unless `zeff_from_fuse=True`. Decided 2026-10-14. See [workflows.md](workflows.md#ion-and-z_eff-fields-of-the-sources-bsource-pr-56) |
+| `ImasSource.zeff_from_fuse` | `False` | On a measured `ida_hybrid` route, `True` keeps the dd's TOTAL Z_eff (its validated `zeff` dataset, else the all-ion sum; 2026-10-18) for the bootstrap while n_e/T_e/T_i/n_i come from IDA; `False` takes IDA's resolved Z_eff. Under `ni_source="standard"` the Z_eff is the dd's either way. See [workflows.md](workflows.md#ion-and-z_eff-fields-of-the-sources-bsource-pr-56) |
+| `ImasSource.ni_subtract_fast` | `None` (follows `include_pfast` on the measured route, `False` elsewhere) | Subtract the dd's fast-ion density equivalent from the IDA (total) n_i on a measured `ida_hybrid` route; `True` with `ni_source="standard"` is refused. Graduated 2026-10 (the #79 rule: fast ions in `p_fast` with the subtraction, or both off). See [workflows.md](workflows.md#ion-and-z_eff-fields-of-the-sources-bsource-pr-56) |
+| `FixedComponentsConfig.p_fast` | `None` → `ImasSource`: the dd's reduced fast pressure; `ReconstructionSource`: the p-file's `pb` block (x 1e3, Pa), else zero (an IDA file) | The p-file `pb` default is decision B, 2026-10-17; an explicit array wins (a p-file `pb` beside it is warned about once). The source is stamped `p_fast_source`, beside the report-only `pressure_fidelity`. See [workflows.md](workflows.md#fixedcomponentsconfig-bfixed_components) |
+
+`reconstruction_engine="legacy"` / `solve_method="legacy"` emit one
+`DeprecationWarning` per run (text `config.LEGACY_ROUTE_DEPRECATION`); the
+route is removed in 1.5 (#90). See [engine.md](engine.md).
+
+### Functions and classes
+
+| Name | What it does |
+|---|---|
+| `bands_summary(archive, scan_key=None, *, scalars=("beta_N", "l_i_3", "Lambda"), gradients=("dp_dpsi", "djphi_dpsi"), at=None, fallback_psi_N=0.5, **kw) -> BandSummary` | The standard error bars of one slice over the in-spec draws (median, p16/p84, min/max, n), built on `draw_band` (`**kw` goes to it: `selection`, `require_filter`, `min_n`, `hard_min`, `percentiles`, ...). Scalars from `stats.SUMMARY_SCALARS` (`beta_N`, `beta_p`, `Lambda`, `l_i_3`, `l_i_1`, `q0`, `q95`); gradients from `stats.SUMMARY_GRADIENTS`, d/dψ_N of each draw's archived `pressure` / `j_phi` at `at` (`None` = `{"q": 2.0}`, each draw's own outermost crossing; or `{"psi_N": x}`). Draws without the surface are counted and excluded; when no in-spec draw has one, every draw is evaluated at `fallback_psi_N` and the record says so (`None` disables the fallback). See [workflows.md](workflows.md#error-bars-from-an-archive) |
+| `BandSummary` | Fields: `records` (`{quantity: BandRecord}`), `surface` (`mode` = `"own_surface"` / `"fallback_psi_N"` / `"fixed_psi_N"`, the rule, located and no-surface draws, ψ_N and q source per draw, the baseline's evaluation point), `scan_key`, `archive`, `n_selected`, `units`. Properties `population`, `where`; methods `rows()`, `table()`, `plot()`; indexable by quantity |
+| `plot_bands_summary(summary, ax=None)` | One band figure: per quantity the deviation from its median in % (p16–p84 bar, min–max line, median dot, hollow below the floor, baseline cross); n in the row labels and the title |
+| `refilter_inspec(h5path_or_header, bands=None, scan_key=None, *, verbose=True)` | Re-judge an archive's opt-in bands from the stored per-draw numbers (no physics re-run): band flags on are written, flags off removed, `passes_draw_band` and `selected` recomputed with the coil and boundary flags already there, the scan stamped with the rule. `bands` is an `InspecBands`, a `GenerationConfig`, or `None` (the magnetics alone). The in-loop until-N stamps are not rewritten. Returns `{scan_key: {"rule", "n_draws", "n_in_band", "n_selected", "draws"}}`. See [workflows.md](workflows.md#the-in-spec-rule) |
+| `InspecBands` | The opt-in bands (`l_i_tolerance`, `l_i_sigma`, `beta_p_target`, `beta_p_sigma`, `nsigma`, `constrain_sawteeth`), built by `filtering.resolve_inspec_bands` from a `GenerationConfig`; every band off by default; a missing or non-finite banded quantity fails that band |
+| `sigma_template()` | Relative 1σ radial templates (the assumed default envelope, 2026-10-14); listed above under Sampling |
+| `Bouquet.draw_rejections` | After `generate()`: one dict per REJECTED attempt (`draw`, `reason` from `TokaMaker_interface.DRAW_REJECTION_REASONS`, `stage`, `error_type`, `message`; `masked_reason`, `elapsed_s` and `wall_budget_s` when the wall budget ran out first; `info` for a coil saturation). Never archived, never counted toward until-N; summarised in the generate summary line |
+| `Bouquet.engine_draw_cap_events` | After an engine `generate()`: every draw solve that stopped at `engine_draw_solve_maxits` (`draw`, `where`, `stage`, `maxits`, `iterations`, `seconds`, `outcome` = rolled back / rejected, `error`); a homotopy stage also carries `vertical_runaway` (the record of `engine.vertical_runaway_record`) and `label`. See [engine.md](engine.md#l_i-controllability) |
+| `Bouquet.engine_axis_shift` | After an engine `generate()`: the archived draws' `axis_shift_large` count and the scan's `axis_bimodality` record (`engine_draws.axis_shift_counts`) |
+
+### Stamps and rejection codes
+
+| Name | Where | Meaning |
+|---|---|---|
+| `axis_shift_large` | each engine draw's axis record (`engine.axis_shift_record`) | `True` when the draw's magnetic axis sits more than `AXIS_BRANCH_FRAC` = 0.01 x a from the reconstruction's delivered axis; a displacement, not a branch label (2026-10-15). Replaces `axis_branch`, which old archives still answer as `axis_shift_large`. Reported, never a filter |
+| `axis_bimodal` | the scan's `axis_bimodality` record (`engine.axis_bimodality`) | Largest-gap two-cluster test of the draws' axis Z; a verdict only with at least `AXIS_BIMODAL_MIN_N` = 24 draws with an axis, else `None` (2026-10-15). A bimodal scan sets `bistability_source="draws"`. Reported, never a filter. See [workflows.md](workflows.md#the-in-spec-rule) |
+| `draw_wall_budget` | rejection reason | The draw exceeded `draw_wall_budget_s` (checked before each solve and before archiving); the rejection it pre-empted is kept as `masked_reason` |
+| `vertical_runaway` | label on a capped homotopy stage's cap event | The vertical-control channel at its homotopy `#VSC` bound AND the axis displaced vertically by more than `VERTICAL_RUNAWAY_AXIS_FRAC` = 0.1 x a (2026-10-16). A label, never a gate. See [engine.md](engine.md#the-boundary-constraint-a-constant-total-inside-a-measured-window) |
+
+Where each is archived: [archive-schema.md](archive-schema.md#records-added-in-140).
+
 ## Parallel generation
 
 | Function | Description |
