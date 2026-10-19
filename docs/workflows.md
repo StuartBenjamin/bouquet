@@ -111,7 +111,7 @@ is a navigational summary of the defaults.
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `mesh_path` | *(required)* | TokaMaker mesh; `bq.find_mesh()` resolves it |
+| `mesh_path` | *(required)* | TokaMaker mesh; `bq.find_mesh()` resolves it. Loaded by `utils.load_mesh`: the detected device's turn-table coils (DIII-D F coils) at `nturns` 1, so their currents are ampere-turns whatever turns the mesh carries (OFT #268's DIII-D mesh: 58 / 55) |
 | `nthreads` | `1` | **Keep at 1.** OpenMP reduction order is non-deterministic and jitters `l_i(1)` by ~1%; parallelise across processes instead |
 | `order` | `3` | FE order |
 | `nl_tol` | `None` | TokaMaker's Picard tolerance for every solve; `None`: OpenFUSIONToolkit's default (1e-6) |
