@@ -1193,7 +1193,8 @@ The floor at 1 and the n_i floor / ceiling of item 3
 and on by default on every route since 2026-10-17: the floor is a physical
 constraint, every clip that fires is counted per draw and archived, and the
 clipped fraction is the number to watch on a clean plasma. The other defaults are the routes
-before PR #56: the thermal-only dd Z_eff on FUSE kinetics, the IDA VB Z_eff
+before PR #56 (except the plain dd route's Z_eff, the dd's own TOTAL Z_eff
+since A1, below): the IDA VB Z_eff
 with n_i from quasineutrality and the carbon > VB > scalar envelope ladder on a
 g-file + IDA run, and only the `zeff_bounds` window on a drawn Z_eff. Each assumption is stated,
 justified and cited here, and each is visible in the records (the stamps named
@@ -1219,6 +1220,34 @@ Z_eff includes the fast ions (with no stored Z_eff and a beam present, always).
 *Caveat:* the ion-ion terms of the theory assume Maxwellian ions; the fast-ion
 contribution to the ion collisionality is an approximation, small where
 n_fast ≪ n_i. *Stamp:* `Baseline.zeff_includes_fast`.
+
+**Since A1 (owner decision 2026-10-17) the plain dd route uses the TOTAL
+Z_eff by default**, without the classification: Σ_s Z_s² (n_s^th + n_s^fast)
+/ n_e from the dd's densities (the standard IMAS definition), or the dd's
+`zeff` dataset when it agrees with that on the core within 5 %
+(`io.imas.ZEFF_DATASET_RTOL`; a consistent dd reproduces it to three figures or
+better). A stored Z_eff closer to the thermal-only numerator (within 5 % of
+it) is warned about and used as stored; one that matches neither definition is
+warned about and replaced by the densities' total (stamped `source=
+"from_densities"`, `reason="dataset inconsistent"`), whether or not the dd
+carries a beam (`io.imas._dd_total_zeff`). The Z_eff channel
+is drawn around the same array, with the dd's absolute σ, so the draw is
+centred on the quantity it perturbs and the floor at 1 binds only in the tail
+(on the synthetic dd at 1.2 s: 1.40 on axis, against the thermal-numerator
+0.98 used before; the engine-grid floor of the clips stays as a backstop). The
+n_i and Z_imp derivations keep the thermal-numerator Z_eff on every route
+(`impurity_charge_with_fast_ions`, the `ida_hybrid` `zeff_for_ni`), so A1
+moves no density. *Stamp:* `li_metrics["zeff_dd_provenance"]["zeff_definition"]`
+(the base's `definition` / `source`, and the draw centre's beside it:
+`draw_centre`, `draw_centred_on_base`) and every draw's
+`inputs.kinetic_sampler.zeff_definition`. On every default and `ida_hybrid`
+route the channel is drawn around the base itself; only the experimental
+classification (`zeff_fast_ions=True`) still draws around the dd's stored
+`zeff`, and its stamp says so (`draw_centred_on_base` False).
+
+The definitions on every route, the `ida_hybrid` `ni_source="standard"`
+sub-route included (owner decision 2026-10-18), are in one table below:
+[Z_eff: which definition feeds what, on every route](#z_eff-which-definition-feeds-what-on-every-route).
 
 **2. IDA Z_eff and n_i: the mean of the bremsstrahlung (VB) and carbon-CER
 routes (`ni_source="all"`), each clamped to the single-impurity window first.**
@@ -1268,6 +1297,48 @@ were on (`clips_enabled`) and the counters, and a log line names every clip
 that fires. Default: the clips are on on every route
 (`UncertaintyConfig.kinetic_clips=None`, owner decision 2026-10-17); with
 `kinetic_clips=False` only the Z_eff window row applies.
+
+### Z_eff: which definition feeds what, on every route
+
+At every step bouquet takes the Z_eff definition that is most physically
+self-consistent with the data available, not the one a particular code or
+model prefers: the bootstrap coefficients (Sauter / Redl) take the TOTAL Z_eff
+(every ion, fast ions included, over n_e), the species derivations take the
+thermal numerator, and a draw perturbs the measured total Z_eff with its
+measured absolute σ wherever a measurement exists (owner decision 2026-10-18).
+
+| route | base for the bootstrap coefficients | base for the species derivations (thermal n_i, Z_imp, p_imp) | draw centre | width source | floor | held fixed |
+|---|---|---|---|---|---|---|
+| plain dd (`kinetic_source="fuse"`) | the dd's total Z_eff: the `zeff` dataset validated against the densities (C2), else Σ_s Z_s² (n_s^th + n_s^fast)/n_e (A1); `zeff_includes_fast` follows the beam | the dd's thermal numerator Σ_s Z_s² n_s^th/n_e on the dd's n_e | the base | the dd's own `zeff_error_upper` (IMAS-measured tier) when it carries one -- a real FUSE dd carries none -- else the assumed H-mode template × \|Z_eff\| | 1 (`zeff_bounds`' includes-fast window) | the beam fraction (the dd's z_fast, z2_fast, p_fast); Z_imp as inferred at the baseline |
+| `ida_hybrid`, measured routes (`ni_source` "Zeff" / "CER" / "all"; "all" is the default) | IDA's measured Z_eff (total: VB, CER, or their mean); with `zeff_from_fuse=True` the dd's total Z_eff, as on the plain dd route (2026-10-18; below the table) | IDA's total Z_eff with the dd's beam density subtracted from n_i (equivalent to its thermal numerator); Z_imp = `impurity_Z` | the base | the IDA-resolved envelope (VB+CER > CER > VB), else the assumed template | 1 | the beam fraction (the dd's z_fast, z2_fast, p_fast); `impurity_Z` |
+| `ida_hybrid`, `ni_source="standard"` | the dd's total Z_eff, as on the plain dd route (2026-10-18; before it, the thermal numerator) | the dd's thermal numerator on the IDA n_e, with the beam's charge in quasineutrality: n_i = [n_e (Z − Z_eff,th) − Z z_fast]/(Z − 1), held to 0 ≤ n_i ≤ n_e − z_fast and counted (2026-10-18; before it the no-beam form, which overstated n_i by Z z_fast/(Z − 1)) | the base | the IDA file's Z_eff envelope (carbon-propagated > VB-measured), labelled "... on a dd-derived total-Z_eff baseline"; else the assumed template, warned | 1 | the beam fraction (the dd's z_fast, z2_fast, p_fast); Z_imp as inferred at the baseline |
+| g-file + IDA `.cdf` | the file's Z_eff (VB on `ni_source="standard"`, the default; the route ladder on a measured `ni_source`) | the file's (ne, Z_eff) under single-impurity quasineutrality, `impurity_Z` | the base | the file's envelope (carbon-propagated > VB-measured; IDA-resolved on a measured `ni_source`), else the assumed template | 1 | `impurity_Z`; p_fast (no fast-ion density channel) |
+| g-file + p-file | the p-file's ion mix, Σ n_s Z_s²/n_e including its beam density `nb` | the p-file's own n_i (its quasineutrality) | the base | the assumed template (a p-file carries no Z_eff σ; an IDA envelope is refused) | 1 | the p-file's species charges; p_fast = its `pb` (no fast-ion density channel) |
+
+The draw perturbs the total Z_eff with the beam fraction held at its baseline
+value, because the beam's charge moments come from the dd (or the p-file) and
+carry no measured uncertainty: it is the conditional distribution of the total
+Z_eff given the beam. The thermal numerator then moves by exactly the drawn
+change of the total (Z_eff,th = Z_eff − z2_fast/n_e at fixed z2_fast), which
+is what the per-draw n_i derivation (`zeff_includes_fast=True`) takes.
+
+Outside the table: `zeff_from_fuse=True` on a measured `ida_hybrid` route
+hands the bootstrap the dd's total Z_eff, as on the plain dd route
+(`zeff_includes_fast` following the beam; owner decision 2026-10-18 -- before
+it, the dd's thermal numerator), while n_i (IDA Z_eff, beam subtracted) and
+Z_imp = `impurity_Z` stay those of the route without the option; the draw is
+centred on that base and the IDA envelope is carried absolute, its label
+"... on a dd-derived total-Z_eff baseline" and its `zeff_sigma_tier["pairing"]`
+case "ida_hybrid measured ni_source, zeff_from_fuse=True". The EXPERIMENTAL
+classification (`zeff_fast_ions=True`) keeps its own rule. Neither is a
+default. The floor at 1 is the PR #56 clip on the drawn channel; the engine
+also floors the Z_eff it hands the solve at 1 (the engine-grid backstop,
+counted separately) on every route. The beam fraction's own uncertainty is not drawn (1.5 item, known
+limitations). *Stamps:* `li_metrics["zeff_dd_provenance"]["zeff_definition"]`
+(base and draw centre), every draw's `inputs.kinetic_sampler.zeff_definition`,
+and `zeff_sigma_tier` (tier, label and, on the `ni_source="standard"`
+sub-route, `pairing`: base definition, draw centre, width source,
+"conditional at fixed beam fraction").
 
 ## Corrective jphi_total iteration
 
