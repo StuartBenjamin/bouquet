@@ -1786,8 +1786,9 @@ def export_filtered(h5path_or_header, out_path, scan_key=None,
 
 def drop_file_blobs(h5path_or_header, names=(IFILE_DS,)):
     """Rewrite the archive without the byte blobs ``names`` (default the
-    i-files, once they are used: ``GenerationConfig.store_tokamaker_state``
-    keeps the state they can be rebuilt from, ``DrawView.rebuild_ifile``).
+    i-files, once they are used; also ``EQDSK_DS``, the g-files:
+    ``GenerationConfig.store_tokamaker_state`` keeps the state both can be
+    rebuilt from, ``DrawView.rebuild_ifile`` / ``rebuild_eqdsk``).
     Everything else is copied unchanged; the file is replaced atomically (a
     deleted HDF5 dataset would leave its space in the file).  Returns the
     number of blobs dropped."""

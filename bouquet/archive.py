@@ -17,7 +17,8 @@ than hand-rolling h5 tree traversal + ``.eqdsk``-suffix scanning + byte parsing
     d.jbs_loop, sc.baseline_jbs_loop     # self-consistent bootstrap records
     sc.bootstrap_model                   # "self-consistent Redl bootstrap" / legacy
     d.profiles                           # dict of named arrays (psi_N, jphi_total, ...)
-    d.equilibrium()                      # parsed GEQDSKEquilibrium (stored bytes)
+    d.equilibrium()                      # parsed GEQDSKEquilibrium (stored or rebuilt bytes)
+    d.rebuild_eqdsk("g.geqdsk")          # g-file / i-file from the archived TokaMaker state
     d.pfile()                            # parsed PFile (None if absent)
     d.extract("out/", formats=("geqdsk", "pfile"))
 
@@ -223,7 +224,16 @@ class DrawView:
 
     @property
     def eqdsk_bytes(self) -> Optional[bytes]:
-        return self._read_bytes(".eqdsk")[".eqdsk"]
+        """The stored g-file bytes, else the g-file rebuilt from the archived
+        TokaMaker state (:meth:`rebuild_eqdsk`; needs OpenFUSIONToolkit), else
+        ``None``."""
+        b = self._read_bytes(".eqdsk")[".eqdsk"]
+        if b is not None or self.tokamaker_state_bytes is None:
+            return b
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(self.rebuild_eqdsk(os.path.join(tmp, "g.geqdsk")), "rb") as fh:
+                return fh.read()
 
     @property
     def ifile_bytes(self) -> Optional[bytes]:
@@ -236,23 +246,46 @@ class DrawView:
         (``store_tokamaker_state=True`` runs; ``save_TokaMaker`` HDF5 bytes), else ``None``."""
         return self._read_bytes("." + TOKAMAKER_STATE_DS)["." + TOKAMAKER_STATE_DS]
 
-    def rebuild_ifile(self, filename, mygs, npsi=None, ntheta=None):
-        """Write this group's i-file again from its archived TokaMaker state, at
-        ``npsi`` x ``ntheta`` (default: the archived grid) with the archived pad,
-        LCFS pressure and extended records.  ``mygs``: a TokaMaker on the run's
-        mesh and FE order (:func:`bouquet.utils.tokamaker_on_mesh`); its
-        equilibrium is replaced.  Returns ``filename``."""
+    def _load_state(self, mygs=None):
+        """``mygs`` (default: the process's TokaMaker on the run's mesh and FE
+        order, :func:`bouquet.utils.tokamaker_on_mesh`) holding this group's
+        archived TokaMaker state; its equilibrium is replaced."""
         import tempfile
-        from .edge_pressure import lcfs_kwargs
+        from .utils import load_config, tokamaker_on_mesh
         state = self.tokamaker_state_bytes
         if state is None:
             raise ValueError(f"{self!r} has no archived TokaMaker state "
                              "(GenerationConfig.store_tokamaker_state)")
-        a = self.attrs
+        if mygs is None:
+            sc = load_config(self._ar.path, scan_key=self.scan_key).solver
+            mygs = tokamaker_on_mesh(sc.mesh_path, sc.order)
         with tempfile.NamedTemporaryFile(suffix=".tmk.h5") as fh:
             fh.write(state)
             fh.flush()
             mygs.replace_eq(source_file=fh.name)
+        return mygs
+
+    def rebuild_eqdsk(self, filename, mygs=None, nr=None, nz=None):
+        """Write this group's g-file from its archived TokaMaker state, at
+        ``nr`` x ``nz`` (default: the run's ``eqdsk_nr`` x ``eqdsk_nz``) with the
+        pad and LCFS pressure of its i-file (the g-file's own).  ``mygs``: see
+        :meth:`_load_state`.  Returns ``filename``."""
+        from .edge_pressure import lcfs_kwargs
+        from .utils import load_config
+        a, mygs = self.attrs, self._load_state(mygs)
+        gc = load_config(self._ar.path, scan_key=self.scan_key).generation
+        mygs.save_eqdsk(filename, nr=int(nr or gc.eqdsk_nr), nz=int(nz or gc.eqdsk_nz),
+                        truncate_eq=True, lcfs_pad=float(a["ifile_lcfs_pad"]),
+                        **lcfs_kwargs(float(a["ifile_lcfs_pressure"])))
+        return filename
+
+    def rebuild_ifile(self, filename, mygs=None, npsi=None, ntheta=None):
+        """Write this group's i-file again from its archived TokaMaker state, at
+        ``npsi`` x ``ntheta`` (default: the archived grid) with the archived pad,
+        LCFS pressure and extended records.  ``mygs``: see :meth:`_load_state`.
+        Returns ``filename``."""
+        from .edge_pressure import lcfs_kwargs
+        a, mygs = self.attrs, self._load_state(mygs)
         ext = {k: True for k in ("profile_derivs", "psi_bounds") if a.get(f"ifile_{k}")}
         mygs.save_ifile(filename, npsi=int(npsi or a["ifile_npsi"]),
                         ntheta=int(ntheta or a["ifile_ntheta"]),
@@ -283,7 +316,7 @@ class DrawView:
         return None
 
     def equilibrium(self):
-        """Parse the stored eqdsk bytes into a ``GEQDSKEquilibrium``."""
+        """Parse :attr:`eqdsk_bytes` (stored or rebuilt) into a ``GEQDSKEquilibrium``."""
         from .io.geqdsk import read_geqdsk
         b = self.eqdsk_bytes
         if b is None:
@@ -361,11 +394,14 @@ class DrawView:
         paths = {}
         if "geqdsk" in formats or "pfile" in formats:
             blobs = self._read_bytes(".eqdsk", ".pfile")   # one file open for both
-            if "geqdsk" in formats and blobs[".eqdsk"] is not None:
-                p = os.path.join(out_dir, stem + ".geqdsk")
-                with open(p, "wb") as fh:
-                    fh.write(blobs[".eqdsk"])
-                paths["geqdsk"] = os.path.abspath(p)
+            if "geqdsk" in formats:
+                # a dropped g-file is rebuilt from the TokaMaker state -> property fallback
+                eq = blobs[".eqdsk"] if blobs[".eqdsk"] is not None else self.eqdsk_bytes
+                if eq is not None:
+                    p = os.path.join(out_dir, stem + ".geqdsk")
+                    with open(p, "wb") as fh:
+                        fh.write(eq)
+                    paths["geqdsk"] = os.path.abspath(p)
             if "pfile" in formats:
                 # binary IDA sources live once in _baseline -> property fallback
                 pf = blobs[".pfile"] if blobs[".pfile"] is not None else self.pfile_bytes
