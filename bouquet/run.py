@@ -567,6 +567,8 @@ class Bouquet(SwbBaseline):
         mygs.setup(order=sc.order)        # F0 is per baseline: point_solver
         mygs.settings.maxits = 800
         mygs.settings.pm = False
+        if sc.nl_tol is not None:
+            mygs.settings.nl_tol = sc.nl_tol
         mygs.update_settings()
         mygs.set_coil_vsc(sc.coil_vsc)
 
