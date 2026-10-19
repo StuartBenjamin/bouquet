@@ -42,7 +42,7 @@ from typing import Optional
 
 import numpy as np
 
-from .schema import (EQDSK_DS, IFILE_DS, PFILE_DS, JBS_CONVERGED_ATTR,
+from .schema import (EQDSK_DS, IFILE_DS, PFILE_DS, TOKAMAKER_STATE_DS, JBS_CONVERGED_ATTR,
                      JBS_LOOP_JSON_ATTR, find_bytes_dataset)
 from .utils import (
     _resolve_h5, _scan_key, _group_path, profile_coord,
@@ -54,7 +54,7 @@ from .filtering import (select_indices, in_spec_fields, _FILTER_FLAGS,
 
 
 # Datasets that are not perturbed-profile arrays (excluded from DrawView.profiles).
-_NON_PROFILE = {"config_json", EQDSK_DS, PFILE_DS, IFILE_DS}
+_NON_PROFILE = {"config_json", EQDSK_DS, PFILE_DS, IFILE_DS, TOKAMAKER_STATE_DS}
 
 # Attr keys surfaced by DrawView.flags (same record shape as read_filter_flags).
 _FLAG_ATTRS = (*_FILTER_FLAGS, *_BAND_FLAGS, "selected")
@@ -229,6 +229,36 @@ class DrawView:
     def ifile_bytes(self) -> Optional[bytes]:
         """OFT i-file bytes (``write_ifile=True`` runs), else ``None``."""
         return self._read_bytes(".ifile")[".ifile"]
+
+    @property
+    def tokamaker_state_bytes(self) -> Optional[bytes]:
+        """The TokaMaker equilibrium this group's i-file was written from
+        (``store_tokamaker_state=True`` runs; ``save_TokaMaker`` HDF5 bytes), else ``None``."""
+        return self._read_bytes("." + TOKAMAKER_STATE_DS)["." + TOKAMAKER_STATE_DS]
+
+    def rebuild_ifile(self, filename, mygs, npsi=None, ntheta=None):
+        """Write this group's i-file again from its archived TokaMaker state, at
+        ``npsi`` x ``ntheta`` (default: the archived grid) with the archived pad,
+        LCFS pressure and extended records.  ``mygs``: a TokaMaker on the run's
+        mesh and FE order (:func:`bouquet.utils.tokamaker_on_mesh`); its
+        equilibrium is replaced.  Returns ``filename``."""
+        import tempfile
+        from .edge_pressure import lcfs_kwargs
+        state = self.tokamaker_state_bytes
+        if state is None:
+            raise ValueError(f"{self!r} has no archived TokaMaker state "
+                             "(GenerationConfig.store_tokamaker_state)")
+        a = self.attrs
+        with tempfile.NamedTemporaryFile(suffix=".tmk.h5") as fh:
+            fh.write(state)
+            fh.flush()
+            mygs.replace_eq(source_file=fh.name)
+        ext = {k: True for k in ("profile_derivs", "psi_bounds") if a.get(f"ifile_{k}")}
+        mygs.save_ifile(filename, npsi=int(npsi or a["ifile_npsi"]),
+                        ntheta=int(ntheta or a["ifile_ntheta"]),
+                        lcfs_pad=float(a["ifile_lcfs_pad"]),
+                        **lcfs_kwargs(float(a["ifile_lcfs_pressure"])), **ext)
+        return filename
 
     @property
     def pfile_bytes(self) -> Optional[bytes]:

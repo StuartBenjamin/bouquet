@@ -39,7 +39,7 @@ import numpy as np
 import h5py
 from scipy.spatial import cKDTree as _cKDTree
 
-from .schema import find_bytes_dataset
+from .schema import IFILE_DS, find_bytes_dataset
 from .utils import (
     list_equilibrium_indices,
     discover_scan_keys,
@@ -1782,6 +1782,34 @@ def export_filtered(h5path_or_header, out_path, scan_key=None,
     with h5py.File(src, "r") as hs, h5py.File(out, "w") as hd:
         _copy(hs, hd)
     return kept
+
+
+def drop_file_blobs(h5path_or_header, names=(IFILE_DS,)):
+    """Rewrite the archive without the byte blobs ``names`` (default the
+    i-files, once they are used: ``GenerationConfig.store_tokamaker_state``
+    keeps the state they can be rebuilt from, ``DrawView.rebuild_ifile``).
+    Everything else is copied unchanged; the file is replaced atomically (a
+    deleted HDF5 dataset would leave its space in the file).  Returns the
+    number of blobs dropped."""
+    src = _resolve(h5path_or_header)
+    tmp = src + ".dropping"
+    n = 0
+
+    def _copy(g_src, g_dst):
+        nonlocal n
+        g_dst.attrs.update(g_src.attrs)
+        for name, obj in g_src.items():
+            if isinstance(obj, h5py.Group):
+                _copy(obj, g_dst.create_group(name))
+            elif name in names:
+                n += 1
+            else:
+                g_src.copy(obj, g_dst, name=name)
+
+    with h5py.File(src, "r") as hs, h5py.File(tmp, "w") as hd:
+        _copy(hs, hd)
+    os.replace(tmp, src)
+    return n
 
 
 # --------------------------------------------------------------------------
