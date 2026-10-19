@@ -75,7 +75,7 @@ closed by loosening a bar. The measurements behind them are in
   (`coil_drift=0.01`) is unaffected.
 - **IDA versus dd consistency is reported only as warnings (#89).** When an
   IDA file and a dd describe different plasmas (on one validated case their
-  n_i differed about sevenfold at mid-radius), the advisory warnings fire but
+  n_i differed by far more than their uncertainties), the advisory warnings fire but
   there is no pre-run summary. Read the warnings before spending an
   ensemble on an IDA-hybrid pair.
 
