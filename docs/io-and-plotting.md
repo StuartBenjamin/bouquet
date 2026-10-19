@@ -185,7 +185,11 @@ defines them as the full directional pressures, and the scalar `p_fast` that
 follows differs by a factor of 3. `p_fast_reduction` defaults to `"auto"`, which
 reads the dd's own recorded provenance (`detect_p_fast_convention()`), warns
 loudly when that is undeterminable, and records the decision on
-`Baseline.p_fast_meta`. See
+`Baseline.p_fast_meta` (keys `rule`, `basis`, `evidence`, `requested`,
+`warned`; IMAS route only). The g-file route's fast-pressure input record
+(decision B: the p-file's `pb`, `fixed_components.p_fast` or none) is a
+different schema and lives on `Baseline.p_fast_source` (and
+`li_metrics["p_fast_source"]`). See
 [workflows.md](workflows.md#fixedcomponentsconfig-bfixed_components).
 
 ## Plotting

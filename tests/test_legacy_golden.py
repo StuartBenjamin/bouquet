@@ -59,6 +59,9 @@ def test_it_is_the_gfile_golden_on_the_legacy_path(doc):
     assert gen.n_equils == rgr.N_DRAWS and gen.seed == rgr.SEED
     assert gen.n_inspec_target is None
     assert cfg.solver.nthreads == rgr.NTHREADS
+    # the per-draw wall budget off (owner decision 2026-10-17): a
+    # host-independent golden on a route whose draws take up to ~10 min
+    assert gen.draw_wall_budget_s == rgr.LEGACY_DRAW_WALL_BUDGET_S is None
 
 
 def test_it_says_what_built_it(doc):

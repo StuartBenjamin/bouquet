@@ -331,7 +331,9 @@ class ImasSource:
     # what the uncertainty, the sampler clips and the Z_eff ladder follow
     # (bouquet.experimental.baseline_kinetics_route).
     ni_source: str = "auto"
-    # ida_hybrid on a measured route only: True keeps the dd's Z_eff while
+    # ida_hybrid on a measured route only: True keeps the dd's Z_eff -- its
+    # TOTAL Z_eff (validated zeff dataset, else the all-ion sum; owner
+    # decision 2026-10-18), zeff_includes_fast following the beam -- while
     # ne/Te/Ti/ni come from IDA (an explicit choice of the dd's Z_eff); False
     # takes IDA's resolved Z_eff, which counts the fast ions in its numerator
     # (a measured Z_eff), so Baseline.zeff_includes_fast is True.  Under
@@ -383,8 +385,12 @@ class ImasSource:
     # True classifies the dd's stored Z_eff against the thermal-only and the
     # thermal+fast numerators (io.imas._dd_zeff) and hands the bootstrap the
     # thermal+fast Z_eff where the dd's convention counts the fast ions.
-    # False (default, as before PR #56): the thermal-only Z_eff recomputed
-    # from the dd's thermal ion densities.
+    # False (default; owner decision A1, 2026-10-17): on the plain dd route
+    # the dd's own TOTAL Z_eff (the zeff dataset, else the all-ion sum over
+    # n_e), and the same on the ida_hybrid ni_source="standard" sub-route
+    # (owner decision 2026-10-18), and with zeff_from_fuse=True on a
+    # measured ida_hybrid route (owner decision 2026-10-18; n_i there from
+    # the IDA Z_eff).
     zeff_fast_ions: bool = False
     # ida_hybrid on a measured ni_source: subtract the dd's fast-ion density
     # equivalent from the IDA (total) n_i (bouquet.experimental.
@@ -646,8 +652,11 @@ class FixedComponentsConfig:
     Provenance / defaults:
       * ``p_fast`` -- :class:`ImasSource` builds it from per-species
         ``pressure_fast_{perpendicular,parallel}`` (reduced via
-        ``p_fast_reduction``); :class:`ReconstructionSource` defaults to zero.
-        Either way an explicit array here wins (e.g. from TRANSP/ONETWO).
+        ``p_fast_reduction``); :class:`ReconstructionSource` takes a
+        p-file's own ``pb`` block (x 1e3, Pa, on its psinorm; decision B,
+        2026-10-17) and defaults to zero otherwise (an IDA file).  Either way
+        an explicit array here wins (e.g. from TRANSP/ONETWO); a p-file with
+        ``pb`` beside an explicit array is warned about once.
       * ``jphi_nbi`` -- :class:`ImasSource` sums beam-source ``j_parallel``;
         :class:`ReconstructionSource` defaults to zero. Explicit array wins.
       * ``jphi_rf`` -- :class:`ImasSource` sums EC/LH/IC ``j_parallel``;
@@ -696,7 +705,9 @@ class FixedComponentsConfig:
     #              provenance; if that cannot be determined, fall back to "sum"
     #              with a loud one-time warning. An explicit rule always wins and
     #              is applied silently. The rule used and the grounds for it are
-    #              recorded on Baseline.p_fast_meta.
+    #              recorded on Baseline.p_fast_meta (IMAS route only; the
+    #              g-file route's p_fast input record, decision B, is
+    #              Baseline.p_fast_source).
     p_fast_reduction: str = "auto"
 
     def __post_init__(self):
@@ -822,11 +833,15 @@ class UncertaintyConfig:
     # GRADUATED["ida_ion_route"]) "auto"/"measured" take the IDA-resolved envelope
     # (read_ida walks VB+CER > CER > VB, the route disagreement folded in)
     # and "carbon" is a single-route override.
-    # The measured tiers are eligible only when the Z_eff baseline came from
-    # the sigma .cdf itself: the reconstruction source's own profiles file
-    # (or, on a measured route only, ImasSource.ida_path).  A p-file
-    # or IMAS/FUSE Z_eff baseline, or a different .cdf vintage named via
-    # ida_path, is refused: it would mix channels.  That file
+    # The measured tiers are eligible only when the Z_eff baseline measures
+    # the same total Z_eff of the discharge the sigma .cdf measured: the
+    # reconstruction source's own profiles file, ImasSource.ida_path on a
+    # measured route, and ImasSource.ida_path on the ida_hybrid
+    # ni_source="standard" sub-route, whose baseline is the dd's TOTAL Z_eff
+    # (owner decision 2026-10-18; the label says "on a dd-derived total-Z_eff
+    # baseline").  A p-file Z_eff baseline, the plain dd route's (FUSE
+    # kinetics), or a different .cdf vintage named via ida_path, is refused:
+    # it would mix channels.  That file
     # test compares RESOLVED paths (expanduser + realpath, samefile when both
     # exist), so a relative-vs-absolute, '~'-prefixed, trailing-slash or
     # symlinked spelling of the same file stays eligible.

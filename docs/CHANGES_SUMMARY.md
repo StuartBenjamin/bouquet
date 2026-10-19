@@ -1,5 +1,208 @@
 # Bouquet — change summaries
 
+## Unreleased — one Z_eff rule on every route (owner decision 2026-10-18)
+
+- **`zeff_from_fuse=True` on a measured `ida_hybrid` route: the bootstrap
+  gets the dd's TOTAL Z_eff.** It got the dd's thermal numerator
+  (`zeff_includes_fast` False). The base is now the dd's total Z_eff (the
+  validated `zeff` dataset, else the all-ion sum over n_e, as on the plain dd
+  route), `zeff_includes_fast` following the beam, the draw centred on it;
+  n_i (the IDA Z_eff, beam subtracted), Z_imp = `impurity_Z` and the IDA
+  envelope (carried absolute) are unchanged. The stamps say so:
+  `zeff_definition` "total", and the label "... on a dd-derived total-Z_eff
+  baseline" with `zeff_sigma_tier["pairing"]`
+  (`baseline.ZEFF_PAIRING_HYBRID_FROM_FUSE_TOTAL`,
+  `baseline.hybrid_zeff_from_fuse_total`). On the synthetic dd at 1.2 s:
+  Z_eff on axis 0.98 -> 1.40, Redl I_BS 105.5 -> 106.8 kA. With
+  `zeff_from_fuse=False` (the default) every measured route is unchanged
+  bit for bit; the EXPERIMENTAL classification keeps its own rule. Not on
+  the defaults or any golden.
+- **`ida_hybrid` with `ni_source="standard"`: the base n_i carries the
+  beam's charge.** Quasineutrality with a beam is n_e = n_i + Z n_z + z_fast,
+  so with the thermal-numerator Z_eff the thermal n_i is
+  [n_e (Z − Z_eff,th) − Z z_fast]/(Z − 1) (z_fast from the dd, as on the
+  other routes); the sub-route used the no-beam form n_e (Z − Z_eff,th)/(Z − 1),
+  which overstated n_i by Z z_fast/(Z − 1). n_i is held to
+  0 ≤ n_i ≤ n_e − z_fast, each bound counted (`ni_fast_meta["n_floored"]` /
+  `["n_capped"]`) and warned when it binds; n_z, Z_imp and p_imp follow.
+  Without a beam the result is unchanged bit for bit. On the synthetic dd at
+  1.2 s: implied Z_imp 10.7 -> 6.0 (the carbon plasma), n_i on axis
+  2.40e19 -> 1.21e19 m^-3, Redl I_BS 142.4 -> 106.8 kA, β_N 1.791 -> 1.625,
+  and the sampler's n_i-ceiling clip no longer fires (10 of 10 draws -> 0 of
+  10). Not on the defaults or any golden.
+- **`ida_hybrid` with `ni_source="standard"`: the bootstrap gets the dd's
+  TOTAL Z_eff, and the draw the IDA file's measured width.** The sub-route's
+  base was the dd's thermal-numerator Z_eff; it is now the dd's total (the
+  `zeff` dataset validated against the densities, else the all-ion sum over
+  n_e, as A1 on the plain dd route), with `zeff_includes_fast` following the
+  beam, so the floor at 1 is the right floor. The thermal n_i, Z_imp and
+  p_imp keep the thermal numerator (unchanged). The IDA file's Z_eff
+  envelope (carbon-propagated > VB-measured) is now eligible there: the base
+  and the envelope measure the same total Z_eff of the same discharge
+  (`baseline.hybrid_dd_total_zeff_subroute`; a different `.cdf` is still
+  refused). The label reads e.g. "carbon-propagated (n_12C6_err) on a
+  dd-derived total-Z_eff baseline" and `zeff_sigma_tier["pairing"]` records
+  the base definition, the draw centre, the width source and "conditional at
+  fixed beam fraction"; the assumed template stays the loud fallback. On the
+  synthetic dd at 1.2 s: Z_eff on axis 0.98 -> 1.40, Redl I_BS 140.4 -> 142.4
+  kA, envelope assumed template -> carbon-propagated. The measured routes
+  (`"Zeff"` / `"CER"` / `"all"`, the default) and every golden are unchanged.
+  One table in docs/physics-notes.md now gives the definition that feeds the
+  bootstrap, the species derivations, the draw centre, the width, the floor
+  and what is held fixed, on every route.
+
+## Unreleased — review fixes to A1 / B
+
+- **The baseline's input warnings now reach the user on the unified engine.**
+  The dd's stored-Z_eff warning (A1) and the p-file's "two sources of
+  p_fast" warning (B) are raised while the source is read, which the unified
+  engine does inside the captured solver output: they went into
+  `Baseline.reconstruction_log`, and Python's registry (and, for `pb`, a
+  process-global set) then suppressed them for the rest of the session. They
+  are now collected while the source is read (`bouquet.utils.
+  deferred_warnings`) and issued once per run after the reconstruction
+  summary, on both engines and both input types; a second run warns again. A
+  direct call of the reading functions outside a run warns at once, as before.
+- **The dd route validates a stored `zeff` against the densities on every dd
+  (A1 review).** `_dd_total_zeff` used the dataset unchecked except on a beam
+  slice whose array sat closer to the thermal numerator. It now compares the
+  dataset with the all-ion total from the dd's densities on the core
+  (psi_N <= 0.8), beam or not: within `io.imas.ZEFF_DATASET_RTOL` (5 %, new;
+  a consistent dd reproduces the IMAS definition to three figures or better,
+  the shipped synthetic dds to ~1e-16) it is used as stored; closer to the
+  thermal numerator (within 5 % of it) it is warned about and used as stored,
+  as before; matching neither it is warned about ("matches neither
+  definition", both relative misfits) and the densities' total is used,
+  stamped `source="from_densities"`, `reason="dataset inconsistent"`. The
+  `zeff_definition` stamp adds `matches`, `rtol` and `warned`. The shipped
+  dds are unaffected (every stored `zeff` matches its densities to ~1e-16).
+- **`ida_hybrid` with `ni_source="standard"`: the Z_eff draw is centred on the
+  base (A1 review).** The base there is the dd's thermal-numerator Z_eff, but
+  the channel was drawn around the dd's stored (typically total) `zeff`, the
+  two-base split A1 removed from the plain dd route. `aux["zeff"]` is now the
+  base on that sub-route too (the conditional draw at the slice's fixed beam
+  fraction); the measured routes (`"Zeff"` / `"CER"` / `"all"`, the default)
+  are unchanged. The envelope there is the assumed width (a fraction of
+  |Z_eff|: the dd's error fields are not read on `ida_hybrid`), so it follows
+  the new centre. The `zeff_definition` stamp now carries the draw centre's
+  definition beside the base's (`draw_centre`, `draw_centred_on_base`), so an
+  archive shows any remaining split (only the experimental classification).
+- **`Baseline.p_fast_source` (B review).** The g-file route's fast-pressure
+  input record (`p_fast_source`: `"pfile_pb"` / `"fixed_components"` /
+  `"none"`, ...) was stored on `Baseline.p_fast_meta`, which on the IMAS route
+  is the fast-pressure reduction record (`rule`, `basis`, `requested`,
+  `warned`): one attribute, two schemas. It now has its own field,
+  `Baseline.p_fast_source` (appended, default None); `p_fast_meta` is the IMAS
+  record only (None on the g-file route, as before B). The archived stamp
+  `li_metrics["p_fast_source"]` is unchanged.
+- **The pressure-fidelity warning is two-sided; the `pb` header unit is
+  checked (B review).** The report-only stamp warned only on an on-axis
+  DEFICIT beyond 10 %, but the p-file's `pb` is now added by default, so its
+  likely errors are excesses (a g-file whose pressure is thermal only beside
+  a p-file with `pb`; a `pb` written in Pa, 1000 x too large). It now also
+  warns on an on-axis EXCESS beyond the same 10 % (`axis_excess_flag` beside
+  `axis_deficit_flag`); still report-only, never in the verdict. The reader
+  records the `pb` block's header unit and warns when it is not kPa, without
+  converting (`pb_header_units`, `pb_units_ok` in the stamp).
+
+## Unreleased — goldens after A1 / B / C
+
+- **IDS golden** regenerated at the A1 / B / C code (seed 12345, 20 attempts):
+  20 archived, 20 in spec; draws and manifest numbers identical to the
+  27979d1 run (the golden is IDA-hybrid, which A1 leaves unchanged); the
+  archive now carries the `zeff_definition` stamps. The g-file h5 golden
+  (thermal g-file + IDA `.cdf`) is unaffected by B and not regenerated.
+- **Legacy JSON golden: the per-draw wall budget off (owner decision C,
+  2026-10-17).** Its recipe now sets `draw_wall_budget_s=None`
+  (`regenerate_golden_run.LEGACY_DRAW_WALL_BUDGET_S`): legacy draws take up
+  to about ten minutes each, so a wall-clock budget made the archived draw set
+  depend on the host (15 of 20 archived with it). Regenerated at the A1 / B /
+  C code: 20 attempts, 19 archived (1 perturb_failed), 19 in spec. The legacy
+  replay runs without a budget too (it calls `generate_bouquet` outside the
+  class API's solve guard). No tolerance changed.
+
+## Unreleased — the p-file's beam pressure by default and a pressure-fidelity stamp (B)
+
+- **g-file + p-file: the p-file's `pb` is the default `p_fast` (decision B,
+  2026-10-17).** When a `ReconstructionSource` p-file carries a `pb` block and
+  `fixed_components.p_fast` is unset, the reconstruction and the draws take
+  `p_fast = 1e3 * pb` (Pa) on `pb`'s psinorm (coord `"psi_n"`), stamped
+  `li_metrics["p_fast_source"]` (`"pfile_pb"`; `"fixed_components"` for an
+  explicit array, which still wins and warns once, naming the field, when the
+  p-file also has `pb`; `"none"` for an IDA file or a p-file without `pb`,
+  which behave as before). The shipped total-pressure pair
+  (`g_synthetic_pfast.geqdsk` + `p_synthetic.peqdsk`) now reconstructs at the
+  defaults with beta_N 1.671 (g-file 1.684), against 0.630 when `pb` was
+  dropped. The thermal g-file + IDA `.cdf` goldens are unaffected.
+- **Report-only `reconstruction_metrics["pressure_fidelity"]`** on every
+  g-file-route reconstruction: the full pressure (p_sep added back) against
+  the input g-file's pressure profile, as a relative RMS and the on-axis
+  relative error; a `UserWarning` when the on-axis deficit exceeds 10 %
+  (`baseline.PRESSURE_FIDELITY_WARN_PCT`, the band that would have caught the
+  -63 % of a dropped `pb`). Never part of the verdict.
+
+## Unreleased — the dd route's total Z_eff (A1)
+
+- **Plain dd route: the kinetics and the Sauter bootstrap take the dd's own
+  TOTAL Z_eff (owner decision A1, 2026-10-17).** On `ImasSource` with FUSE
+  kinetics (`ni_source="standard"`) the Z_eff handed to the engine and the
+  bootstrap coefficients is the dd's `zeff` dataset as stored (the standard
+  IMAS definition: all ions, fast included, over n_e), else
+  Σ_s Z_s² (n_s^th + n_s^fast) / n_e from its densities -- no longer the
+  thermal-numerator recomputation -- with `Baseline.zeff_includes_fast=True`
+  on a beam slice. The Z_eff draw is now centred on the quantity it is drawn
+  from (the dd's absolute σ kept), so the floor at 1 binds only in the tail;
+  the engine-grid floor stays as a backstop. n_i and Z_imp keep the
+  thermal-numerator derivation (no density moves). Stamped as
+  `li_metrics["zeff_dd_provenance"]["zeff_definition"]` (`definition`,
+  `source` "dataset" | "from_densities") and in every draw's
+  `inputs.kinetic_sampler.zeff_definition`. The `ida_hybrid` route and the
+  experimental `zeff_fast_ions` classification are unchanged. Synthetic dd at
+  1.2 s: Z_eff on axis 0.98 -> 1.40; Redl I_BS 105.8 -> 107.2 kA, beta_N
+  1.626 -> 1.627; 10 fixed-seed draws with a clip 8 -> 1.
+
+## Unreleased — the kinetic clips reach the engine-grid Z_eff
+
+- **Engine draws: the Z_eff floor at 1 now acts on the Z_eff the bootstrap
+  receives.** The sampler floored the drawn Z_eff channel on the kinetic grid,
+  but the engine hands the solve an increment, base + (drawn - drawn base), on
+  its own base Z_eff. On the plain IMAS route the channel is drawn around the
+  dd's own `zeff` while the base is the Z_eff recomputed from the dd's
+  densities; where the first sits above the second the sum fell below 1, and
+  with the clips on (the default since 2026-10-17) the draw was still refused
+  before any solve (`kinetics_nonphysical`). With the clips on the engine grid
+  is now floored too and the node count is archived as
+  `inputs.kinetic_sampler.eq_zeff_floor_1` (`clipped` includes it; the
+  `clips` counter set is unchanged). Draws whose Z_eff never fell below 1 are
+  unchanged seed for seed. On the synthetic dd at 1.2 s
+  (`test_boundary_balance_solver.py` yield, seed fixed): 10 of 10 attempts
+  reach a solve (was 3), 10 archived, 7 with the floor binding (80-125 of
+  the engine grid's nodes). Explicit `kinetic_clips=False` is unchanged.
+
+## Unreleased — the goldens regenerated at main 27979d1 (the 1.4.0 code)
+
+- **Goldens.** The g-file h5 golden and the IDS golden (seed 12345) are the
+  recipe's runs at main 27979d1, so their archives now carry the homotopy's
+  VSC bound floor, the report-only boundary-partition stamp (g-file 1.16, IDS
+  0.95, both inside [1/3, 3]), the per-draw wall budget (600 s; 0 rejections)
+  and the kinetic clips on by default (no clip fired on any archived draw).
+  Counts unchanged from the previous regeneration: g-file 20 attempts, 18
+  archived (2 homotopy_saturated), 18 in spec (9 pass the old drift test);
+  IDS 20 / 20 / 20 (18). The manifests' numbers are identical; only the
+  provenance differs. No golden tolerance changed; the recipe-identity checks
+  pass on both.
+- **Legacy JSON golden** regenerated on the same code and pair: 20 attempts,
+  15 archived, 15 in spec. Four attempts were rejected by the new 600 s
+  per-draw wall budget (the legacy route's draws take 2.5-10 min each on the
+  regeneration host), one perturb_failed; the previous run, before the
+  budget, archived 19. Because the budget is wall-clock, this golden's draw
+  set depends on the host's speed and load.
+- **Notebooks.** The g-file and systematics example notebooks re-executed at
+  main 27979d1: their stored output now shows the boundary-partition line of
+  each reconstruction (1.16 H-mode, 1.38 L-mode g-file) and the
+  vertical_runaway label count of each capped draw solve. Every draw, figure
+  and number is otherwise unchanged (the figures are byte-identical).
+
 ## Unreleased — the boundary constraint at a constant total with a reported partition; the homotopy's VSC bound floor; a per-draw wall budget
 
 **Kinetic sampler clips on by default on every route (owner decision 2026-10-17).**
