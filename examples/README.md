@@ -28,17 +28,19 @@ missing path surfaces later, at `setup_solver()` / `reconstruct()`, as
 
 | Notebook | Inputs (`tests/data`) | What it shows |
 |---|---|---|
-| [`D3D-like/bouquet_D3Dlike_geqdsk_example.ipynb`](D3D-like/bouquet_D3Dlike_geqdsk_example.ipynb) | `g_synthetic.geqdsk` + `diiid_profs_synthetic.cdf` (H-mode); second case `g_synthetic_lmode.geqdsk` + `ida_synthetic_lmode.cdf` (L-mode) | g-file + IDA-layout fit reconstruction, the bistability check, the σ=0 identity, traces, the in-spec filter, a second case on the same solver (`set_case`), reading the archive |
+| [`D3D-like/bouquet_D3Dlike_geqdsk_example.ipynb`](D3D-like/bouquet_D3Dlike_geqdsk_example.ipynb) | `g_synthetic.geqdsk` (thermal pressure only) + `diiid_profs_synthetic.cdf` (H-mode); second case `g_synthetic_lmode.geqdsk` + `ida_synthetic_lmode.cdf` (L-mode) | g-file + IDA-layout fit reconstruction, the bistability check, the σ=0 identity, traces, the in-spec filter, a second case on the same solver (`set_case`), reading the archive |
 | [`D3D-like/bouquet_D3Dlike_omas_example.ipynb`](D3D-like/bouquet_D3Dlike_omas_example.ipynb) | `dd_synthetic.json.gz` at 1.2 s + `diiid_profs_synthetic.cdf` | IMAS/OMAS source on the IDA-hybrid route, perturbed IDS output per draw |
 | [`D3D-like/bouquet_D3Dlike_parallel_IMAS_example.ipynb`](D3D-like/bouquet_D3Dlike_parallel_IMAS_example.ipynb) | `dd_synthetic.json.gz`, all five slices (0.7, 1.1, 1.2, 1.4, 3.0 s) | `parallel_cases`: many bouquets on one node, merged into one archive; the SLURM route |
 | [`D3D-like/bouquet_D3Dlike_systematics.ipynb`](D3D-like/bouquet_D3Dlike_systematics.ipynb) | the 1.2 s pair `g_synthetic.geqdsk` + `diiid_profs_synthetic.cdf` | σ=0 identity, pressure-only and production draws; where the baseline sits among the draws |
-| [`COCOS_Bt_Ip/`](COCOS_Bt_Ip/) | their own g-file | COCOS conventions, the B_t / I_p signs, saving |
+| [`COCOS_Bt_Ip/`](COCOS_Bt_Ip/) | `D3D-like/legacy/TkMkr_D3Dlike_Hmode_BSamp=1.0.geqdsk` | COCOS conventions, the B_t / I_p signs, saving (g-file I/O only; the OMFIT comparison needs `omfit_classes`) |
+| [`omfit-comparison/`](omfit-comparison/) | the same g-file (`d3dlike.geqdsk` links to it) | `read_geqdsk` against OMFIT's `OMFITgeqdsk`, field by field; its reference file `omfit_reference.h5` is not distributed (`*.h5` is gitignored), so the committed outputs are the record |
 
 **New to bouquet?** Start with the **geqdsk** notebook.
 
 Every notebook:
 
-- draws **until 24 draws are in spec** (`generation.n_inspec_target = 24`, the
+- runs the unified engine at the 1.4.0 defaults (the kinetic clips on, the
+  bistability check, the 600 s per-draw wall budget) and draws **until 24 draws are in spec** (`generation.n_inspec_target = 24`, the
   default for examples; use 30 for 5/95 bands, 50 for widths quoted in a
   paper);
 - ends with an **Error bars** section: `bq.bands_summary(archive, key)` prints
@@ -57,8 +59,13 @@ b.reconstruct(); b.generate(); b.filter(); b.export()
 print(bq.bands_summary("my_run.h5", 0).table())
 ```
 
-A p-file (`profiles="....peqdsk"`) takes the same route as the IDA-layout fit;
-the synthetic set has no p-file, so the notebooks show the IDA route only.
+A p-file (`profiles="....peqdsk"`) takes the same route as the IDA-layout fit.
+The synthetic set has one: `g_synthetic_pfast.geqdsk` (the same 1.2 s slice
+with the TOTAL pressure, thermal + fast ions) + `p_synthetic.peqdsk`, whose
+`pb` block is the default `p_fast` on that route (stamped `p_fast_source`;
+`diiid_profs_synthetic_pfast.cdf` is the IDA file of the same total-pressure
+g-file). The notebooks show the IDA route; the pairs are described in
+[`tests/data/README.md`](../tests/data/README.md).
 
 ## In-spec counts
 
@@ -79,9 +86,6 @@ The HDF5 archives (`*.h5`) are written next to the notebooks and gitignored.
 Rendered outputs are saved in the committed notebooks, so you can preview the
 results on GitHub without running anything.
 
-Rendered outputs are saved in the committed notebooks, so you can preview results
-on GitHub without running anything.
-
 ## Fixtures (all synthetic, non-proprietary)
 
 - `D3Dlike_Hmode_baseline.geqdsk` / `.peqdsk` — H-mode equilibrium + kinetic profiles
@@ -92,12 +96,13 @@ on GitHub without running anything.
   `COCOS_Bt_Ip/` notebooks read
 
 These are the older D3D-like example set, kept because a number of solver
-tests, the `COCOS_Bt_Ip/` notebooks and (until their regeneration) the g-file
-regression goldens still read them (the other notebooks run on `tests/data/`); their generator scripts and recipe were retired
-(they are in the git history). The golden recipe (`tests/golden/`) runs the
-newer synthetic fixtures in `tests/data/` (`g_synthetic.geqdsk` +
-`diiid_profs_synthetic.cdf`, and `dd_synthetic.json.gz` with the same profile
-file; see [`tests/data/README.md`](../tests/data/README.md)).
+tests and the `COCOS_Bt_Ip/` and `omfit-comparison/` notebooks still read them
+(the other notebooks run on `tests/data/`); their generator scripts and recipe
+were retired (they are in the git history). The goldens (`tests/golden/`) are
+the recipe's runs of the synthetic fixtures in `tests/data/`
+(`g_synthetic.geqdsk` + `diiid_profs_synthetic.cdf`, and
+`dd_synthetic.json.gz` with the same profile file; see
+[`tests/data/README.md`](../tests/data/README.md)).
 
 Real machine data (`*.cdf`, proprietary g-files, FUSE `dd_sim.json`) is
 gitignored and never committed.
