@@ -4283,9 +4283,13 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
         from ..schema import (find_bytes_dataset, EQ_FSA_GROUP,
                               read_jdotB)
         eqk = find_bytes_dataset(g)
-        if eqk is None:
-            raise KeyError(f"draw {draw_index} has no archived eqdsk")
-        eq_bytes = bytes(g[eqk][()])
+        if eqk is not None:
+            eq_bytes = bytes(g[eqk][()])
+        else:                       # rebuilt from the archived TokaMaker state
+            from ..archive import BouquetArchive, DrawView
+            eq_bytes = DrawView(BouquetArchive(h5), scan_key, draw_index).eqdsk_bytes
+            if eq_bytes is None:
+                raise KeyError(f"draw {draw_index} has no archived eqdsk or TokaMaker state")
         geq = read_eqdsk_from_bytes(eq_bytes, read_geqdsk)
         # the engine draw's stored PARALLEL parts (schema jdotB/)
         jB_par = read_jdotB(g)

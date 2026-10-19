@@ -3,6 +3,7 @@ HDF5 archive helpers and eqdsk I/O utilities for perturbed equilibria.
 """
 
 import contextlib
+import functools
 import json
 import os
 import sys
@@ -533,10 +534,11 @@ def save_state_ifile(mygs, filename, *, npsi, ntheta, psi_pad, p_sep,
     return path, rec
 
 
+@functools.lru_cache(maxsize=None)
 def tokamaker_on_mesh(mesh_path, order, nthreads=1):
     r'''A TokaMaker set up on ``mesh_path`` at FE ``order`` and nothing else:
-    enough to load an archived state (:meth:`DrawView.rebuild_ifile`).  One
-    per process (``OFT_env`` is a per-process singleton).'''
+    enough to load an archived state (:meth:`DrawView.rebuild_ifile`).  Made
+    once per process and reused (``OFT_env`` is a per-process singleton).'''
     from OpenFUSIONToolkit import OFT_env
     from OpenFUSIONToolkit.TokaMaker import TokaMaker
     from OpenFUSIONToolkit.TokaMaker.meshing import load_gs_mesh

@@ -362,7 +362,7 @@ def test_the_tokamaker_state_is_saved_beside_the_ifile(tmp_path):
     assert not (tmp_path / "b.ifile").exists() and not (tmp_path / "b.tmk.h5").exists()
 
 
-def test_the_archived_state_rebuilds_the_ifile_and_the_ifiles_can_be_dropped(tmp_path, monkeypatch):
+def test_the_archived_state_rebuilds_the_files_and_they_can_be_dropped(tmp_path, monkeypatch):
     import test_draw_rejections as R
     from bouquet.filtering import drop_file_blobs
 
@@ -390,6 +390,11 @@ def test_the_archived_state_rebuilds_the_ifile_and_the_ifiles_can_be_dropped(tmp
 
         def save_ifile(self, filename, **kw):
             calls.append(kw)
+
+        def save_eqdsk(self, filename, **kw):
+            calls.append(kw)
+            with open(filename, "wb") as fh:
+                fh.write(b"REBUILT")
     d.rebuild_ifile(str(tmp_path / "re.ifile"), _Loader(), npsi=513)
     assert calls[0] == b"STATE"
     assert (calls[1]["npsi"], calls[1]["ntheta"]) == (513, 257)
@@ -400,3 +405,15 @@ def test_the_archived_state_rebuilds_the_ifile_and_the_ifiles_can_be_dropped(tmp
     d = bq.BouquetArchive(header + ".h5")[ar.scan_keys[0]][0]
     assert d.ifile_bytes is None and d.eqdsk_bytes == eq_before
     assert d.tokamaker_state_bytes == b"STATE"
+    # dropped g-files: eqdsk_bytes rebuilds one on the run's mesh (the process's solver)
+    import bouquet.utils as U
+    from bouquet.schema import EQDSK_DS
+    from types import SimpleNamespace
+    from bouquet.config import GenerationConfig
+    monkeypatch.setattr(U, "tokamaker_on_mesh", lambda mesh, order: _Loader())
+    monkeypatch.setattr(U, "load_config", lambda path, scan_key=None: SimpleNamespace(   # this toy run stores none
+        solver=SimpleNamespace(mesh_path="mesh.h5", order=3), generation=GenerationConfig()))
+    assert drop_file_blobs(header + ".h5", names=(EQDSK_DS,)) == 2
+    d = bq.BouquetArchive(header + ".h5")[ar.scan_keys[0]][0]
+    assert d.eqdsk_bytes == b"REBUILT" and calls[-2] == b"STATE"
+    assert (calls[-1]["nr"], calls[-1]["lcfs_pad"]) == (257, d.attrs["ifile_lcfs_pad"])
