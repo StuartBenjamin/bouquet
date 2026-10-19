@@ -2293,8 +2293,10 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
             n_capped = int(np.count_nonzero(ni_raw > _cap))
             ni = np.clip(ni_raw, 0.0, _cap)
             if n_floored or n_capped:
-                import warnings
-                warnings.warn(
+                # collected inside a run (issued after the captured
+                # reconstruction, once per run), else warned at once
+                from ..utils import warn_or_defer
+                warn_or_defer(
                     "ni_source='standard': the thermal n_i from the dd's "
                     "thermal Z_eff and the beam's charge is floored at 0 on "
                     f"{n_floored} node(s) and capped at n_e - z_fast (n_z >= "

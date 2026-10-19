@@ -132,6 +132,36 @@ def _run(kind):
 ])
 def test_the_input_warning_reaches_the_user_once_per_run(
         monkeypatch, capfd, kind, hook, msg):
+    _check_once_per_run(monkeypatch, capfd, kind, hook, msg)
+
+
+NI_WINDOW_MSG = "floored at 0 on"
+
+
+@pytest.mark.skipif(not os.path.exists(_MESH), reason="example mesh missing")
+def test_the_sub_route_n_i_window_warning_reaches_the_user(
+        monkeypatch, capfd, tmp_path):
+    """ida_hybrid ni_source="standard": the n_i floor/cap warning of
+    _merge_ida_kinetics, raised inside the captured dd read, is issued after
+    the reconstruction -- once per run, again on a second run."""
+    import test_ni_fast_subtraction as NF
+    from bouquet.io.imas import _merge_ida_kinetics
+    cdf = str(tmp_path / "ida.cdf")
+    ne, *_ = NF._ida_cdf(cdf)
+    psi = np.linspace(0.0, 1.0, NF.N)
+    zf = 0.2 * ne
+    zth = np.full(NF.N, 1.3)
+    zf[:5], zth[:5] = 0.1 * ne[:5], 0.5           # n_z < 0: capped
+
+    def _hook():
+        _merge_ida_kinetics(psi, ne, ne, zth, cdf, 1.0, NF.Z_IMP,
+                            ni_source="standard", z_fast=zf, z2_fast=zf,
+                            zeff_for_ni=zth)
+
+    _check_once_per_run(monkeypatch, capfd, "ids", _hook, NI_WINDOW_MSG)
+
+
+def _check_once_per_run(monkeypatch, capfd, kind, hook, msg):
     _stub_engine(monkeypatch, kind, hook)
     # exactly once per run (no duplicate from inside the capture)
     with pytest.warns(UserWarning) as rec:
