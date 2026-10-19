@@ -159,6 +159,11 @@ def test_the_extended_records_reach_the_save_and_the_reader(tmp_path):
         kw = gs.calls[0][1]
         assert (kw.get("profile_derivs"), kw.get("psi_bounds")) == ((True, True) if on else (None, None))
         assert rec["ifile_profile_derivs"] is on and rec["ifile_psi_bounds"] is on
+        assert rec["ifile_axis_pack"] == 0.0 and "axis_pack" not in kw
+    gs.calls.clear()
+    _, rec = save_state_ifile(gs, str(tmp_path / "ax.ifile"), npsi=9, ntheta=4, psi_pad=1e-3,
+                              p_sep=0.0, axis_pack=1e-5)
+    assert gs.calls[0][1]["axis_pack"] == 1e-5 == rec["ifile_axis_pack"]
     path = str(tmp_path / "ext.ifile")
     _write_ifile(path, 9, 4, 0.0, extra=(np.full(9, 2.0), np.full(9, 3.0), (1.0, 0.0)))
     d = read_ifile(open(path, "rb").read())
