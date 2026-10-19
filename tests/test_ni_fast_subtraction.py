@@ -685,7 +685,8 @@ class TestPFileFastIonBlock:
 
 # ---------------------------------------------------------------------------
 # owner decision 2026-10-09: the PR #56 combination is opt-in; the defaults
-# are the reader before PR #56
+# are the reader before PR #56 -- except the plain dd route's Z_eff, the dd's
+# own TOTAL Z_eff since A1 (owner decision 2026-10-17)
 # ---------------------------------------------------------------------------
 class TestDefaultsArePre56:
     def _dd_thermal(self, ddp):
@@ -698,46 +699,240 @@ class TestDefaultsArePre56:
         return ne, num / ne
 
     @pytest.mark.parametrize("kind", [None, "thermal", "all"])
-    def test_fuse_bootstrap_zeff_is_thermal_only(self, tmp_path, kind):
-        """kinetic_source='fuse', a 20 % beam: whatever the stored zeff's
-        numerator, the bootstrap Z_eff is the thermal recompute, the
-        convention flag stays False, and aux['zeff'] is the stored zeff (or
-        the thermal one without it) -- as before PR #56."""
+    def test_fuse_bootstrap_zeff_is_the_dds_total(self, tmp_path, kind):
+        """kinetic_source='fuse', a 20 % beam (owner decision A1,
+        2026-10-17): the bootstrap Z_eff is the dd's own TOTAL Z_eff -- the
+        stored zeff as stored, else the all-ion sum over n_e -- with the
+        convention flag True; the Z_eff channel is drawn around the same
+        array (aux['zeff']); n_i and Z_imp keep the thermal-numerator
+        derivation (identical whatever is stored); the definition is
+        stamped.  A stored zeff closer to the thermal numerator is warned
+        about and used as stored."""
+        import warnings
         ddp, *_ = _build(tmp_path, dd_mutate=_store_zeff(kind))
-        bl = read_imas_baseline(ImasSource(ids_path=ddp, time=1.0,
-                                           impurity_Z=Z_IMP, **MD.IMAS),
-                                kinetic_source="fuse")
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            bl = read_imas_baseline(ImasSource(ids_path=ddp, time=1.0,
+                                               impurity_Z=Z_IMP, **MD.IMAS),
+                                    kinetic_source="fuse")
+        warned = [x for x in w if "closer to the THERMAL-only" in str(x.message)]
+        assert bool(warned) is (kind == "thermal")
         ne, zth = self._dd_thermal(ddp)
-        np.testing.assert_array_equal(bl.Zeff, zth)
-        assert bl.zeff_includes_fast is False
         cp = json.load(open(ddp))["core_profiles"]["profiles_1d"][0]
-        np.testing.assert_array_equal(
-            bl.aux["zeff"], np.asarray(cp["zeff"], dtype=float)
-            if kind is not None else zth)
+        if kind is None:
+            np.testing.assert_allclose(bl.Zeff, zth + bl.z2_fast / ne,
+                                       rtol=1e-12)
+        else:
+            np.testing.assert_array_equal(
+                bl.Zeff, np.asarray(cp["zeff"], dtype=float))
+        # the beam (zero at the edge) is in the numerator -- unless the dd
+        # stored the thermal one, which A1 takes as stored (and warned)
+        if kind != "thermal":
+            assert np.all(bl.Zeff >= zth) and bl.Zeff[0] > zth[0]
+        assert bl.zeff_includes_fast is True
+        np.testing.assert_array_equal(bl.aux["zeff"], bl.Zeff)   # draw centre
         rec = bl.li_metrics["zeff_dd_provenance"]
-        assert rec["convention"] == "thermal-only" and rec["source"] == "default"
+        assert rec["convention"] == "thermal+fast"
+        assert rec["zeff_definition"]["definition"] == "total"
+        assert rec["zeff_definition"]["source"] == (
+            "from_densities" if kind is None else "dataset")
+        assert rec["baseline_zeff_includes_fast"] is True
+        json.dumps(rec)
+        # the thermal-numerator derivations are unchanged by A1
+        (tmp_path / "ref").mkdir()
+        ref = read_imas_baseline(
+            ImasSource(ids_path=_build(tmp_path / "ref")[0], time=1.0,
+                       impurity_Z=Z_IMP), kinetic_source="fuse")
+        np.testing.assert_array_equal(bl.ni, ref.ni)
+        assert bl.Z_imp == ref.Z_imp
+
+    @staticmethod
+    def _stored(op):
+        """dd_mutate: store zeff = op(the dd's total Z_eff from its
+        densities, thermal + fast, over n_e)."""
+        def mutate(dd):
+            cp = dd["core_profiles"]["profiles_1d"][0]
+            ne = np.asarray(cp["electrons"]["density_thermal"])
+            num = np.zeros_like(ne)
+            for ion in cp["ion"]:
+                Z = ion["element"][0]["z_n"]
+                n = np.asarray(ion["density_thermal"])
+                num += Z * Z * (n + np.asarray(ion.get("density_fast",
+                                                       0.0 * n)))
+            cp["zeff"] = op(num / ne).tolist()
+        return mutate
+
+    @pytest.mark.parametrize("case, fast_frac, op", [
+        ("total within tolerance", 0.2, lambda z: 1.02 * z),
+        ("beam, total + 0.6", 0.2, lambda z: z + 0.6),
+        ("no beam, stale x2", 0.0, lambda z: 2.0 * z),
+        ("no beam, consistent", 0.0, lambda z: z),
+    ])
+    def test_the_stored_zeff_is_validated_against_the_densities(
+            self, tmp_path, case, fast_frac, op):
+        """C2 (review of A1): a stored zeff is checked against the dd's own
+        densities on every dd, beam or not.  Within ZEFF_DATASET_RTOL (5 %)
+        of the total it is used as stored; matching NEITHER definition it is
+        warned about and replaced by the all-ion value from the densities,
+        stamped source "from_densities", reason "dataset inconsistent"."""
+        import warnings
+        from bouquet.io.imas import ZEFF_DATASET_RTOL
+        assert ZEFF_DATASET_RTOL == 5e-2
+        ddp, *_ = _build(tmp_path, fast_frac=fast_frac,
+                         dd_mutate=self._stored(op))
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            bl = read_imas_baseline(ImasSource(ids_path=ddp, time=1.0,
+                                               impurity_Z=Z_IMP),
+                                    kinetic_source="fuse")
+        neither = [x for x in w if "matches neither definition"
+                   in str(x.message)]
+        ne, zth = self._dd_thermal(ddp)
+        z_all = zth + (0.0 if bl.z2_fast is None else bl.z2_fast / ne)
+        stored = np.asarray(json.load(open(ddp))["core_profiles"][
+            "profiles_1d"][0]["zeff"], dtype=float)
+        d = bl.li_metrics["zeff_dd_provenance"]["zeff_definition"]
+        assert d["definition"] == "total" and d["rtol"] == ZEFF_DATASET_RTOL
+        np.testing.assert_array_equal(bl.aux["zeff"], bl.Zeff)  # draw centre
+        if case in ("total within tolerance", "no beam, consistent"):
+            assert not neither and d["warned"] is False
+            assert d["source"] == "dataset" and d["matches"] == "total"
+            np.testing.assert_array_equal(bl.Zeff, stored)
+        else:
+            assert len(neither) == 1
+            assert d["source"] == "from_densities" and d["warned"] is True
+            assert d["matches"] == "neither"
+            assert d["reason"] == "dataset inconsistent"
+            assert d["d_all"] > ZEFF_DATASET_RTOL
+            assert d["d_th"] > ZEFF_DATASET_RTOL
+            np.testing.assert_allclose(bl.Zeff, z_all, rtol=1e-12)
+            assert "inconsistent" in bl.li_metrics["zeff_dd_provenance"][
+                "source"]
+        # the thermal-numerator derivations never see the dataset
+        (tmp_path / "ref").mkdir()
+        ref = read_imas_baseline(
+            ImasSource(ids_path=_build(tmp_path / "ref",
+                                       fast_frac=fast_frac)[0],
+                       time=1.0, impurity_Z=Z_IMP), kinetic_source="fuse")
+        np.testing.assert_array_equal(bl.ni, ref.ni)
+        assert bl.Z_imp == ref.Z_imp
+
+    def test_the_review_cases_with_the_bare_function(self):
+        """The review's two numbers, on bare arrays: a no-beam dd storing
+        2.0 against 1.0 from its densities, and a beam dd storing the total
+        + 0.6: both fall back to the densities' total, warned."""
+        import warnings
+        from bouquet.io.imas import _dd_total_zeff
+        psi = np.linspace(0.0, 1.0, 41)
+        ne = 5e19 * (1.0 - 0.8 * psi ** 2)
+        for zth, z2, stored in (
+                (np.ones_like(psi), np.zeros_like(psi), 2.0 + 0.0 * psi),
+                (1.0 + 0.0 * psi, 0.2 * ne * (1.0 - psi ** 2), None)):
+            z_all = zth + z2 / ne
+            st = z_all + 0.6 if stored is None else stored
+            with pytest.warns(UserWarning, match="matches neither") as rec:
+                z, d = _dd_total_zeff({"zeff": st}, zth, z2, ne, psi)
+            assert len(rec) == 1
+            np.testing.assert_array_equal(z, z_all)
+            assert d["source"] == "from_densities"
+            assert d["reason"] == "dataset inconsistent"
+        # a consistent dataset: no warning, used as stored
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            z, d = _dd_total_zeff({"zeff": z_all}, zth, z2, ne, psi)
+        assert d["source"] == "dataset" and d["matches"] == "total"
 
     def test_ida_hybrid_keeps_the_dd_zeff_and_derives_ni_from_it(self, tmp_path):
         """ida_hybrid with the explicit dd route (ni_source="standard"; the
-        default before 2026-10): n_e/T_e/T_i from IDA; Z_eff the dd's thermal
-        one; n_i = n_e(IDA) (Z - Z_eff)/(Z - 1); no beam subtraction."""
+        default before 2026-10): n_e/T_e/T_i from IDA; Z_eff the dd's TOTAL
+        one (owner decision 2026-10-18; no stored zeff here, so the all-ion
+        sum over n_e), zeff_includes_fast following the beam; n_i from the
+        THERMAL numerator with the beam's charge in quasineutrality, n_i =
+        [n_e(IDA) (Z - Z_eff,th) - Z z_fast]/(Z - 1) (owner-approved
+        correction 2026-10-18; it was the no-beam form n_e (Z - Z_eff,th)/
+        (Z - 1)); no beam subtraction."""
         from bouquet.physics import main_ion_density_from_zeff
         ddp, cdf, *_ = _build(tmp_path)
         bl = read_imas_baseline(
             ImasSource(ids_path=ddp, time=1.0, ida_path=cdf, impurity_Z=Z_IMP,
                        **dict(MD.IMAS, ni_source="standard")),
             kinetic_source="ida_hybrid")
-        _, zth = self._dd_thermal(ddp)
-        np.testing.assert_array_equal(bl.Zeff, zth)
-        assert bl.zeff_includes_fast is False
+        ne_dd, zth = self._dd_thermal(ddp)
+        assert bl.z2_fast is not None
+        np.testing.assert_array_equal(bl.Zeff, zth + bl.z2_fast / ne_dd)
+        assert bl.zeff_includes_fast is True
         ida = bl.aux["ida_profiles"][1]
         assert ida.zeff_provenance["ni_source"] == "standard"
         np.testing.assert_array_equal(bl.ne, ida.ne)
+        assert np.any(bl.z_fast)
+        ni_qn = (ida.ne * (Z_IMP - zth) - Z_IMP * bl.z_fast) / (Z_IMP - 1.0)
+        assert np.all(ni_qn >= 0.0) and np.all(ni_qn <= ida.ne - bl.z_fast)
+        np.testing.assert_allclose(bl.ni, ni_qn, rtol=1e-12)
         np.testing.assert_array_equal(
             bl.ni, main_ion_density_from_zeff(
-                ida.ne, np.clip(zth, 1.0, Z_IMP), Z_IMP))
+                ida.ne, zth, Z_IMP, z_fast=bl.z_fast, z2_fast=bl.z2_fast,
+                zeff_includes_fast=False))
         assert bl.aux["ni_fast_meta"]["applied"] is False
+        assert bl.aux["ni_fast_meta"]["n_floored"] == 0
+        assert bl.aux["ni_fast_meta"]["n_capped"] == 0
         assert bl.li_metrics["zeff_dd_provenance"]["baseline_zeff_from"] == "dd"
+
+    def test_the_hybrid_standard_draw_is_centred_on_the_base(self, tmp_path):
+        """C3 (review of A1) and the owner decision of 2026-10-18: on
+        ida_hybrid with ni_source="standard" the base Z_eff is the dd's TOTAL
+        Z_eff (here the stored dataset, which matches the total), the Z_eff
+        channel is drawn around that same array (aux['zeff']), and the stamp
+        records it.  The measured route keeps the IDA Z_eff as base and
+        centre."""
+        ddp, cdf, *_ = _build(tmp_path, dd_mutate=_store_zeff("all"))
+        _, zth = self._dd_thermal(ddp)
+        stored = np.asarray(json.load(open(ddp))["core_profiles"][
+            "profiles_1d"][0]["zeff"], dtype=float)
+        assert stored[0] > zth[0] + 0.1            # total and thermal differ
+        bl = read_imas_baseline(
+            ImasSource(ids_path=ddp, time=1.0, ida_path=cdf, impurity_Z=Z_IMP,
+                       ni_source="standard"),
+            kinetic_source="ida_hybrid")
+        np.testing.assert_array_equal(bl.Zeff, stored)
+        np.testing.assert_array_equal(bl.aux["zeff"], bl.Zeff)
+        assert bl.zeff_includes_fast is True
+        d = bl.li_metrics["zeff_dd_provenance"]["zeff_definition"]
+        assert (d["definition"], d["source"], d["matches"]) == (
+            "total", "dataset", "total")
+        assert d["draw_centre"] == dict(definition="total", source="dataset")
+        assert d["draw_centred_on_base"] is True
+        # the measured route: unchanged, IDA Z_eff as base and centre
+        bm = read_imas_baseline(
+            ImasSource(ids_path=ddp, time=1.0, ida_path=cdf, impurity_Z=Z_IMP,
+                       ni_source="all"),
+            kinetic_source="ida_hybrid")
+        ida = bm.aux["ida_profiles"][1]
+        np.testing.assert_array_equal(bm.aux["zeff"], bm.Zeff)
+        np.testing.assert_array_equal(bm.Zeff, np.interp(
+            bm.psi_N_kinetic, ida.psi_N, ida.Zeff))
+        dm = bm.li_metrics["zeff_dd_provenance"]["zeff_definition"]
+        assert (dm["definition"], dm["source"]) == ("total", "ida")
+        assert dm["draw_centre"] == dict(definition="total", source="ida")
+
+    def test_the_stamp_shows_the_experimental_routes_split(self, tmp_path):
+        """The one route left with two bases (the EXPERIMENTAL
+        classification on the plain dd, whose channel is the stored zeff):
+        the stamp says so instead of hiding it."""
+        import warnings
+        ddp, *_ = _build(tmp_path, dd_mutate=_store_zeff("neither"))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            bl = read_imas_baseline(
+                ImasSource(ids_path=ddp, time=1.0, impurity_Z=Z_IMP,
+                           zeff_fast_ions=True), kinetic_source="fuse")
+        d = bl.li_metrics["zeff_dd_provenance"]["zeff_definition"]
+        stored = np.asarray(json.load(open(ddp))["core_profiles"][
+            "profiles_1d"][0]["zeff"], dtype=float)
+        np.testing.assert_array_equal(bl.aux["zeff"], stored)
+        assert not np.array_equal(bl.Zeff, stored)
+        assert d["draw_centred_on_base"] is False
+        assert d["draw_centre"] == dict(definition="dataset as stored",
+                                        source="dataset")
 
     def test_the_beam_subtraction_needs_an_ida_route(self, tmp_path):
         with pytest.raises(ValueError, match="ni_subtract_fast"):

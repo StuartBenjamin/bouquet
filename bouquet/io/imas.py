@@ -1758,6 +1758,18 @@ def read_imas_sigmas(cp, n=None):
 #: Relative core mismatch above which a stored Z_eff matches neither numerator.
 ZEFF_CONVENTION_RTOL = 1e-2
 
+#: Plain dd route (A1, :func:`_dd_total_zeff`): the relative core mismatch
+#: (max over psi_N <= ``NI_FAST_GATE_PSI_N[-1]``, relative to the stored
+#: value) within which a stored ``core_profiles.zeff`` is accepted as the dd's
+#: total Z_eff.  On a self-consistent dd the IMAS definition
+#: sum_s Z_s^2 (n_s^th + n_s^fast) / n_e reproduces the stored array to three
+#: figures or better (the shipped synthetic dds: ~1e-16), so 5 % is a wide
+#: margin for a dd written with rounded or separately post-processed
+#: profiles, and far below the misfits that make the array a different
+#: quantity (the review's stale dataset: 0.36; a thermal-numerator dataset on
+#: a beam slice: the beam's share, 0.29 on the synthetic dd at 1.2 s).
+ZEFF_DATASET_RTOL = 5e-2
+
 
 def _dd_zeff(cp, zeff_th, z2_fast, ne, psi_N, record=None):
     """``(zeff, includes_fast)``: the Z_eff the dd's own bootstrap consumed.
@@ -1810,6 +1822,115 @@ def _dd_zeff(cp, zeff_th, z2_fast, ne, psi_N, record=None):
             f"stored before the dd's ne or ion densities were last changed "
             f"does this.")
     return stored, includes
+
+
+def _dd_total_zeff(cp, zeff_th, z2_fast, ne, psi_N):
+    """``(zeff, stamp)``: the dd's own TOTAL Z_eff (owner decision
+    2026-10-17, A1), the Z_eff the plain dd route hands the kinetics and the
+    Sauter bootstrap coefficients.
+
+    Total means every ion species in the numerator, fast ions included,
+    over the full ``n_e`` -- the standard IMAS ``core_profiles.zeff``
+    definition and what a measured Z_eff is.  ``zeff_all`` =
+    ``sum_s Z_s^2 (n_s^thermal + n_s^fast) / n_e`` from the dd's own
+    densities; without a ``zeff`` dataset it is the answer
+    (``source="from_densities"``).
+
+    A stored ``zeff`` is validated against the densities on EVERY dd, beam
+    or not: the relative core misfits (max over ``psi_N <=
+    NI_FAST_GATE_PSI_N[-1]``, relative to the stored value) to the total
+    (``d_all``) and to the thermal-only numerator (``d_th``; equal to
+    ``d_all`` without a beam) decide:
+
+    * closer to the thermal numerator on a beam slice (``d_all >
+      ZEFF_CONVENTION_RTOL`` and ``d_th < d_all``) and within
+      :data:`ZEFF_DATASET_RTOL` of it -- a ``zeff`` written before the beam:
+      warned, used as stored (``matches="thermal-numerator"``);
+    * else within :data:`ZEFF_DATASET_RTOL` of the total: used as stored
+      (``source="dataset"``, ``matches="total"``);
+    * else it matches NEITHER definition: warned, and the all-ion value from
+      the densities is used instead (``source="from_densities"``,
+      ``matches="neither"``, ``reason="dataset inconsistent"``) -- an array
+      that is neither quantity is never handed to the Sauter coefficients.
+
+    ``stamp`` (archived as ``li_metrics["zeff_dd_provenance"]
+    ["zeff_definition"]``; ``definition`` / ``source`` also in every draw's
+    ``kinetic_sampler`` record): ``definition="total"``, ``source``,
+    ``d_th`` / ``d_all`` (None without a dataset), ``rtol``, ``matches``,
+    ``warned`` and, on a fallback, ``reason``.  The warnings are collected
+    inside a run and issued from the reconstruction summary
+    (:func:`bouquet.utils.warn_or_defer`).
+    """
+    from ..utils import warn_or_defer
+    _ne = np.clip(np.asarray(ne, dtype=float), 1e-30, None)
+    zeff_th = np.asarray(zeff_th, dtype=float)
+    zeff_all = zeff_th + np.asarray(z2_fast, dtype=float) / _ne
+    stamp = dict(definition="total", d_th=None, d_all=None,
+                 rtol=float(ZEFF_DATASET_RTOL), matches=None, warned=False)
+    if "zeff" not in cp:
+        stamp["source"] = "from_densities"
+        return zeff_all, stamp
+    stored = np.asarray(cp["zeff"], dtype=float)
+    core = np.asarray(psi_N, dtype=float) <= NI_FAST_GATE_PSI_N[-1]
+    _s = np.abs(stored[core])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        # a zero or non-finite stored value gives inf / NaN: matches neither
+        d_th = float(np.max(np.abs(stored - zeff_th)[core] / _s))
+        d_all = float(np.max(np.abs(stored - zeff_all)[core] / _s))
+    stamp.update(d_th=d_th, d_all=d_all)
+    thermal_closer = bool(np.any(z2_fast)) and (
+        d_all > ZEFF_CONVENTION_RTOL and d_th < d_all)
+    if thermal_closer and d_th <= ZEFF_DATASET_RTOL:
+        stamp.update(source="dataset", matches="thermal-numerator",
+                     warned=True)
+        warn_or_defer(
+            f"core_profiles.zeff is closer to the THERMAL-only numerator "
+            f"(core misfit {d_th:.1e}) than to the total one of the dd's "
+            f"own densities ({d_all:.1e}); it is used as the total Z_eff "
+            f"as stored (owner decision A1). A zeff stored before the "
+            f"beam was added does this.", UserWarning, stacklevel=3)
+        return stored, stamp
+    if d_all <= ZEFF_DATASET_RTOL:
+        stamp.update(source="dataset", matches="total")
+        return stored, stamp
+    stamp.update(source="from_densities", matches="neither", warned=True,
+                 reason="dataset inconsistent")
+    warn_or_defer(
+        f"core_profiles.zeff matches neither definition on the core "
+        f"(psi_N <= {NI_FAST_GATE_PSI_N[-1]:g}): rel. diff to the total "
+        f"(all ions over n_e, from the dd's densities) {d_all:.2e}, to the "
+        f"thermal-only numerator {d_th:.2e}, both beyond "
+        f"{ZEFF_DATASET_RTOL:g}; the dataset is NOT used -- the total Z_eff "
+        f"is recomputed from the dd's densities. A zeff stored before the "
+        f"dd's ne or ion densities were last changed does this.",
+        UserWarning, stacklevel=3)
+    return zeff_all, stamp
+
+
+def _zeff_draw_centre_stamp(base_def, centre, base, cp, zeff_th):
+    """The draw centre's half of the ``zeff_definition`` stamp (review of
+    A1, C3): the definition of the array the Z_eff channel is drawn around
+    (``aux["zeff"]``) beside the base's own (``definition`` / ``source``),
+    and whether the two are the same array -- so an archive shows a
+    two-base split instead of hiding it.  After C3 the only route left
+    split is the EXPERIMENTAL classification (``ImasSource.zeff_fast_ions``)
+    on the plain dd, whose channel is the dd's stored zeff."""
+    if centre is None:
+        return dict(draw_centre=None, draw_centred_on_base=None)
+    c = np.asarray(centre, dtype=float)
+    same = bool(c.shape == np.shape(base)
+                and np.array_equal(c, np.asarray(base, dtype=float)))
+    if same:
+        dc = dict(definition=base_def.get("definition"),
+                  source=base_def.get("source"))
+    elif "zeff" in cp and np.array_equal(
+            c, np.asarray(cp["zeff"], dtype=float)):
+        dc = dict(definition="dataset as stored", source="dataset")
+    elif np.array_equal(c, np.asarray(zeff_th, dtype=float)):
+        dc = dict(definition="thermal-numerator", source="from_densities")
+    else:
+        dc = dict(definition="other", source="other")
+    return dict(draw_centre=dc, draw_centred_on_base=same)
 
 
 def _subtract_fast_ni(psi_N, ni, ni_fuse_thermal, z_fast, z2_fast, impurity_Z):
@@ -2274,9 +2395,27 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
     see :func:`_subtract_fast_ni`.
 
     ``ni_source="standard"`` (an explicit choice on ida_hybrid since
-    2026-10): Zeff stays the dd's (``Zeff_fuse``) and ni is re-derived from
-    the dd's thermal Z_eff (``zeff_for_ni``, else ``Zeff_fuse``) under
+    2026-10): Zeff stays the dd's (``Zeff_fuse``; the caller passes the dd's
+    TOTAL Z_eff, owner decision 2026-10-18) and ni is re-derived from the
+    dd's thermal-numerator Z_eff (``zeff_for_ni``, else ``Zeff_fuse``) under
     single-impurity quasineutrality applied to the IDA electron density.
+    With a beam (``z_fast`` = sum_s Z_s n_s^fast, non-zero; owner decision
+    2026-10-18) the beam's charge enters that quasineutrality::
+
+        n_e           = n_i + Z n_z + z_fast
+        Z_eff,th n_e  = n_i + Z^2 n_z          (thermal numerator)
+        =>  Z n_z = n_e - z_fast - n_i,
+            Z_eff,th n_e = n_i + Z (n_e - z_fast - n_i)
+        =>  n_i = [n_e (Z - Z_eff,th) - Z z_fast] / (Z - 1)
+
+    (:func:`bouquet.physics.main_ion_density_from_zeff` with
+    ``zeff_includes_fast=False``), held to the thermal window
+    ``0 <= n_i <= n_e - z_fast`` (``n_z >= 0``), each bound counted in
+    ``ni_fast_meta`` (``n_floored`` / ``n_capped``) and warned when it binds.
+    Without a beam it is the old ``n_e (Z - Z_eff,th)/(Z - 1)`` with Z_eff,th
+    clipped to ``[1, Z]``, bit for bit.  ``Z_imp`` and ``n_z`` follow from
+    this n_i in the caller (:func:`bouquet.physics.
+    impurity_charge_with_fast_ions`).
     ``zeff_absent``: the file carries no ``Zeff`` dataset, so read_ida's own
     standard derivation is handed the dd's thermal Z_eff in its place (the
     run's Z_eff is the dd's on this route anyway; stamped in
@@ -2319,12 +2458,40 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
         zeff = np.asarray(Zeff_fuse, dtype=float)
         _zn = np.asarray(Zeff_fuse if zeff_for_ni is None else zeff_for_ni,
                          dtype=float)
-        ni = main_ion_density_from_zeff(ne, np.clip(_zn, 1.0, impurity_Z),
-                                        impurity_Z)
-        ni_fast_meta = {"applied": False, "agrees": None, "mismatch": None,
-                        "gate": None,
-                        "evidence": "ni_source='standard': ni from the dd's "
-                                    "thermal Z_eff, no subtraction"}
+        if z_fast is None or not np.any(z_fast):
+            # no beam: the plain form, bit for bit as before
+            ni = main_ion_density_from_zeff(
+                ne, np.clip(_zn, 1.0, impurity_Z), impurity_Z)
+            ni_fast_meta = {"applied": False, "agrees": None,
+                            "mismatch": None, "gate": None,
+                            "evidence": "ni_source='standard': ni from the "
+                                        "dd's thermal Z_eff, no subtraction"}
+        else:
+            # with the beam's charge in quasineutrality (owner decision
+            # 2026-10-18; derivation in the docstring); the thermal window
+            # 0 <= n_i <= n_e - z_fast (n_z >= 0) applied and counted (E3)
+            ni_raw = main_ion_density_from_zeff(
+                ne, _zn, impurity_Z, z_fast=z_fast, z2_fast=z2_fast,
+                zeff_includes_fast=False)
+            _cap = np.maximum(ne - np.asarray(z_fast, dtype=float), 0.0)
+            n_floored = int(np.count_nonzero(ni_raw < 0.0))
+            n_capped = int(np.count_nonzero(ni_raw > _cap))
+            ni = np.clip(ni_raw, 0.0, _cap)
+            if n_floored or n_capped:
+                import warnings
+                warnings.warn(
+                    "ni_source='standard': the thermal n_i from the dd's "
+                    "thermal Z_eff and the beam's charge is floored at 0 on "
+                    f"{n_floored} node(s) and capped at n_e - z_fast (n_z >= "
+                    f"0) on {n_capped} (recorded as ni_fast_meta.n_floored / "
+                    "n_capped)", UserWarning, stacklevel=2)
+            ni_fast_meta = {"applied": False, "agrees": None,
+                            "mismatch": None, "gate": None,
+                            "n_floored": n_floored, "n_capped": n_capped,
+                            "evidence": "ni_source='standard': ni from the "
+                                        "dd's thermal Z_eff with the beam's "
+                                        "charge z_fast in quasineutrality, "
+                                        "no subtraction"}
         omega = _read_ida_omega(ida_path, time, psi_N,
                                 place=None if x_phi is None else g)
         return (ne, te, ti, ni, zeff, omega, sigma_ne, sigma_te, sigma_ni,
@@ -2686,17 +2853,22 @@ def read_imas_baseline(
             "core_profiles.ion[].density_fast to enable the correction.")
     # Thermal-only numerator over the full ne: the convention
     # impurity_charge_with_fast_ions inverts, built here from the dd's own
-    # densities so it holds by construction.
+    # densities so it holds by construction.  It stays the Z_eff every n_i /
+    # Z_imp derivation below uses (impurity_charge_with_fast_ions, the
+    # ida_hybrid zeff_for_ni) on every route, A1 included.
     Zeff_th = zeff_num / ne
-    # The dd's bootstrap Z_eff and its convention (see _dd_zeff).  Zeff is its
-    # recomputation from the densities -- bit-identical to Zeff_th without a
-    # beam -- and is what the baseline solve and the draws are handed.
-    # The fast-ion term is EXPERIMENTAL and opt-in (ImasSource.zeff_fast_ions;
-    # bouquet.experimental.REGISTRY["fuse_zeff_fast_ions"]); by default the
-    # bootstrap gets the thermal-only Z_eff, as before PR #56.
+    # The dd's Z_eff and its convention before the route is known.  On the
+    # plain dd route (A1, owner decision 2026-10-17), the ida_hybrid
+    # ni_source="standard" sub-route and zeff_from_fuse=True on a measured
+    # ida_hybrid route (owner decisions 2026-10-18), below once the route is
+    # known, it is replaced with the dd's own TOTAL Z_eff
+    # (_dd_total_zeff); the EXPERIMENTAL classification (ImasSource.
+    # zeff_fast_ions; bouquet.experimental.REGISTRY["fuse_zeff_fast_ions"],
+    # _dd_zeff) keeps its own rule on both routes.
     from ..experimental import fuse_zeff_fast_ions_on
     _zeff_dd_rec = {}
-    if fuse_zeff_fast_ions_on(source):
+    _zeff_classified = bool(fuse_zeff_fast_ions_on(source))
+    if _zeff_classified:
         zeff_dd, dd_zeff_includes_fast = _dd_zeff(
             cp, Zeff_th, z2_fast, ne, psi_N, record=_zeff_dd_rec)
         Zeff = (Zeff_th + z2_fast / np.clip(ne, 1e-30, None)
@@ -2811,6 +2983,58 @@ def read_imas_baseline(
             "the ida_hybrid IDA slice -- unset it, or use "
             "kinetic_source='ida_hybrid' with an ida_path")
     zeff_includes_fast = dd_zeff_includes_fast
+    # zeff_from_fuse=True on a measured ida_hybrid route (owner decision
+    # 2026-10-18, Fix 2): the dd's Z_eff handed to the bootstrap is its
+    # TOTAL one too; the IDA-derived n_i and Z_imp = impurity_Z are untouched
+    _from_fuse_total = bool(_ida_ion_route
+                            and getattr(source, "zeff_from_fuse", False))
+    if (not _ida_ion_route or _from_fuse_total) and not _zeff_classified:
+        # A1 (owner decision 2026-10-17): the plain dd route's kinetics and
+        # Sauter coefficients take the dd's own TOTAL Z_eff, and the Z_eff
+        # channel is drawn around the same quantity (aux["zeff"]).  The
+        # n_i / Z_imp derivations keep Zeff_th (thermal numerator).
+        # Owner decision 2026-10-18: the same on the ida_hybrid
+        # ni_source="standard" sub-route (use_ida, dd Z_eff) -- the Z_eff
+        # handed to the bootstrap coefficients is the TOTAL one on every
+        # route; there _merge_ida_kinetics returns this array as the run's
+        # Z_eff while its n_i keeps zeff_for_ni=Zeff_th.  And (2026-10-18,
+        # Fix 2) with zeff_from_fuse=True on a measured route, where
+        # _merge_ida_kinetics returns it as the run's Z_eff and n_i comes
+        # from the IDA Z_eff as without the option.
+        Zeff_total, _zeff_def = _dd_total_zeff(cp, Zeff_th, z2_fast, ne,
+                                                psi_N)
+        Zeff = Zeff_total
+        aux["zeff"] = Zeff_total
+        # the flag follows the beam: without one both numerators coincide
+        # (and Baseline.z2_fast is None)
+        zeff_includes_fast = bool(np.any(z_fast))
+        _zeff_dd_rec.update(
+            convention="thermal+fast",
+            source=("stored cp.zeff" if _zeff_def["source"] == "dataset"
+                    else "stored cp.zeff inconsistent"
+                    if _zeff_def.get("reason") else "no stored zeff"),
+            basis=("owner decision A1 (2026-10-17"
+                   + (", ida_hybrid zeff_from_fuse=True on a measured "
+                      "ni_source: 2026-10-18" if _from_fuse_total else
+                      ", ida_hybrid ni_source='standard': 2026-10-18"
+                      if use_ida else "")
+                   + "): the dd's own total Z_eff "
+                   "(all ions, fast included, over n_e), "
+                   + ("as stored" if _zeff_def["source"] == "dataset" else
+                      "recomputed from the dd's thermal + fast densities")
+                   + (" (the stored zeff matches neither definition)"
+                      if _zeff_def.get("reason") else "")),
+            d_th=_zeff_def["d_th"], d_all=_zeff_def["d_all"])
+    elif use_ida and _ida_ion_route and not getattr(
+            source, "zeff_from_fuse", False):
+        _zeff_def = dict(definition="total", source="ida")
+    else:
+        # the experimental classification (zeff_from_fuse=True on a
+        # measured route included: it keeps its own rule)
+        _zeff_def = dict(
+            definition=("total" if dd_zeff_includes_fast
+                        else "thermal-numerator"),
+            source="from_densities")
     # Geometry guard: does the dd place its profiles where the g-file does?
     _drift = None
     if getattr(source, "LCFS_geqdsk", None) and "rho_tor_norm" in cp["grid"]:
@@ -2859,9 +3083,22 @@ def read_imas_baseline(
         if _ida_ion_route:
             aux["zeff"] = Zeff   # keep the switchboard's zeff baseline consistent
             # IDA's Z_eff is MEASURED, so its numerator counts the fast ions;
-            # zeff_from_fuse carries the dd's own convention over with its value.
+            # zeff_from_fuse carries the dd's own convention over with its
+            # value (the dd's total since 2026-10-18: the flag follows the
+            # beam, set above; under the classification, the classified one)
             if not getattr(source, "zeff_from_fuse", False):
                 zeff_includes_fast = True
+        else:
+            # ni_source="standard": the Z_eff channel is drawn around the
+            # base the engine uses (C3) -- since the owner decision of
+            # 2026-10-18 the dd's TOTAL Z_eff (set above, as A1 on the plain
+            # dd route), with zeff_includes_fast following the beam, so the
+            # draw is the conditional draw at the slice's fixed beam
+            # fraction and the floor at 1 is the right floor.  Its width is
+            # the IDA file's measured Z_eff envelope (baseline.
+            # zeff_sigma_eligibility's sub-route case).  The measured routes
+            # are the branch above, unchanged.
+            aux["zeff"] = Zeff
         # Read once, shared: resolve_uncertainty reuses this instead of
         # opening the same file again (and possibly at another slice).
         aux["ida_profiles"] = (str(source.ida_path), _ida_read)
@@ -3193,6 +3430,12 @@ def read_imas_baseline(
                     "kinetics_route": _kinetics_route,
                     "zeff_dd_provenance": dict(
                         _zeff_dd_rec,
+                        # A1 (2026-10-17): the definition of the Z_eff the
+                        # kinetics and the bootstrap are handed
+                        zeff_definition=dict(
+                            _zeff_def, **_zeff_draw_centre_stamp(
+                                _zeff_def, aux.get("zeff"), Zeff, cp,
+                                Zeff_th)),
                         baseline_zeff_includes_fast=bool(zeff_includes_fast),
                         baseline_zeff_from=(
                             "dd" if (not _ida_ion_route or getattr(

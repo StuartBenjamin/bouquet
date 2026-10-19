@@ -130,10 +130,18 @@ def test_the_dd_zeff_is_an_explicit_choice(tmp_path):
     assert bl.li_metrics["zeff_source"] == "dd"
     assert bl.li_metrics["kinetics_route"]["ni_source"] == "standard"
     assert bl.aux["ni_fast_meta"]["applied"] is False
-    assert bl.zeff_includes_fast is False
+    # owner decision 2026-10-18: the sub-route's base is the dd's TOTAL
+    # Z_eff, its flag following the beam
+    assert bl.zeff_includes_fast is True
     bl2, _ = _read(ddp, cdf, zeff_from_fuse=True)
     assert bl2.li_metrics["zeff_source"] == "dd"
-    np.testing.assert_allclose(bl2.Zeff, bl.Zeff, rtol=1e-12)
+    # zeff_from_fuse=True on the measured route: the dd's TOTAL Z_eff too
+    # (owner decision 2026-10-18, Fix 2; it was the thermal numerator, the
+    # total minus z2_fast / n_e(dd)), the same array as the sub-route's
+    assert bl2.zeff_includes_fast is True
+    ne_dd, zth = NF.TestDefaultsArePre56._dd_thermal(None, ddp)
+    np.testing.assert_array_equal(bl2.Zeff, bl.Zeff)
+    np.testing.assert_allclose(bl.Zeff, zth + bl.z2_fast / ne_dd, rtol=1e-12)
 
 
 def test_the_two_defaults_differ_on_a_slice_whose_zeffs_differ(tmp_path):
