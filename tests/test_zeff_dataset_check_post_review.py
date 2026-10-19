@@ -16,6 +16,7 @@ import warnings
 import numpy as np
 import pytest
 
+import main_defaults as MD
 import test_ni_fast_subtraction as NF
 from bouquet.config import ImasSource
 from bouquet.io.imas import ZEFF_DATASET_RTOL, read_imas_baseline
@@ -63,7 +64,7 @@ def _read(ddp, **kw):
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         bl = read_imas_baseline(
-            ImasSource(ids_path=ddp, time=1.0, impurity_Z=Z, **kw),
+            ImasSource(ids_path=ddp, time=1.0, impurity_Z=Z, **dict(MD.IMAS, **kw)),
             kinetic_source="fuse")
     return bl, [str(x.message) for x in w]
 
@@ -176,7 +177,7 @@ def _plain_env(bl, ddp):
     from bouquet.config import (BouquetConfig, GenerationConfig,
                                 SolverConfig, UncertaintyConfig)
     cfg = BouquetConfig(
-        source=ImasSource(ids_path=ddp, time=1.0, impurity_Z=Z),
+        source=ImasSource(ids_path=ddp, time=1.0, impurity_Z=Z, **MD.IMAS),
         solver=SolverConfig(mesh_path="unused"), output_header="unused",
         generation=GenerationConfig(kinetic_source="fuse"),
         uncertainty=UncertaintyConfig())
