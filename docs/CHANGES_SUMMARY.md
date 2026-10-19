@@ -143,8 +143,6 @@ section:
 
 With contributions from a collaborator's PR chain (#56–#75, #79).
 
-## 1.4.0 detail — one Z_eff rule on every route (owner decision 2026-10-18)
-
 ## 1.4.0 detail — post-review fixes
 
 - **The stored-Z_eff check and its warnings, after the last pre-tag
@@ -163,7 +161,7 @@ With contributions from a collaborator's PR chain (#56–#75, #79).
   `z_ion`; stored zeff consistent to ~1e-15 on every node); no golden
   route reaches this code.
 
-## Unreleased — one Z_eff rule on every route (owner decision 2026-10-18)
+## 1.4.0 detail — one Z_eff rule on every route (owner decision 2026-10-18)
 
 - **`zeff_from_fuse=True` on a measured `ida_hybrid` route: the bootstrap
   gets the dd's TOTAL Z_eff.** It got the dd's thermal numerator
