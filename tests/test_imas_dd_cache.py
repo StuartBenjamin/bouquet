@@ -194,3 +194,13 @@ def test_a_non_ascii_dd_and_lean_dd_off_read_it_whole(tmp_path):
     assert imas._source_dd(ImasSource(ids_path=p, time=1.0, lean_dd=True)) is \
         imas._load_dd(p, 1.0)
     imas.clear_dd_cache()
+
+
+def test_a_time_far_from_every_core_profiles_slice_reads_it_whole(tmp_path):
+    p = str(tmp_path / "dd_sim.json")
+    whole = _sliced_dd(p)
+    whole["core_profiles"] = {"time": [0.0], "profiles_1d": [{"time": 0.0}]}
+    with open(p, "w") as fh:
+        json.dump(whole, fh)
+    assert imas._load_dd(p, 2.4) == whole
+    imas.clear_dd_cache()
