@@ -287,6 +287,9 @@ class ImasSource:
 
     ids_path: str                      # IMAS/OMAS file (FUSE output)
     time: Optional[float] = None       # time slice [s]; None -> single/first slice
+    # Read the dd's time slices whole only near `time` (io.imas._load_dd: a fraction of a
+    # whole parse's ~3.5x the file size); False: the whole dd, shared across slices.
+    lean_dd: bool = False
     # IDA-lite slice [s] for ida_hybrid ONLY (refused otherwise); None -> `time`. `time`
     # then picks only the dd slices (equilibrium, core_profiles, core_sources).  The IDA
     # slice is the file's own nearest slice within half its local step, never
