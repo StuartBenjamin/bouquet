@@ -72,7 +72,9 @@ from __future__ import annotations
 
 import functools
 import json
+import mmap
 import os
+import re
 from typing import Optional, TYPE_CHECKING
 
 import numpy as np
@@ -96,11 +98,79 @@ if TYPE_CHECKING:
     from ..baseline import Baseline
 
 
+#: The time-sliced lists (each element carries its own ``time``) that
+#: :func:`_load_dd` given a time keeps whole only near it -- by far the largest
+#: part of a dd (core_sources alone is ~70 % of a FUSE dd_sim.json) -- with the
+#: keys every far element keeps: the readers scan whole histories for ``time``
+#: and for whether a source carries ``j_parallel``.
+_DD_TIME_SLICES = {"equilibrium": {"time_slice": ("time",)},
+                   "core_profiles": {"profiles_1d": ("time",)},
+                   "core_sources": {"source": [{"profiles_1d": ("time",
+                                                                "j_parallel")}]}}
+#: Half-width [s] of the window of whole time slices kept around that time.
+DD_TIME_WINDOW = 0.05
+_JSON_WS = re.compile(rb"[ \t\n\r]*")
+_JSON = json.JSONDecoder()
+
+
+def _json_value(b, i: int):
+    """``(value, end)`` of the JSON value at offset ``i`` of the ASCII buffer
+    ``b``, decoding a window that grows until the value ends inside it (a value
+    ending on the window's edge could be a cut number)."""
+    w = 1 << 16
+    while True:
+        s = b[i:i + w].decode("ascii")
+        try:
+            v, n = _JSON.raw_decode(s)
+        except ValueError:
+            if i + w >= len(b):
+                raise
+        else:
+            if n < len(s) or i + w >= len(b):
+                return v, i + n
+        w *= 4
+
+
+def _json_sliced(b, i: int, spec, time: float):
+    """``(value, end)`` of the JSON value at offset ``i`` of ``b``, as
+    :func:`json.loads` gives it, except in the lists ``spec`` marks with a
+    tuple of keys: there an element more than :data:`DD_TIME_WINDOW` from
+    ``time`` keeps only those keys, unless it is the one nearest ``time``.
+    Elements are decoded one at a time, so a whole list never exists."""
+    c = b[i:i + 1]
+    if not (c == b"{" and isinstance(spec, dict)
+            or c == b"[" and isinstance(spec, (list, tuple))):
+        return _json_value(b, i)
+    out, near = ({} if c == b"{" else []), (np.inf, None, None)
+    i = _JSON_WS.match(b, i + 1).end()
+    while b[i:i + 1] not in b"}]":
+        if c == b"{":
+            k, i = _json_value(b, i)
+            i = _JSON_WS.match(b, _JSON_WS.match(b, i).end() + 1).end()
+            out[k], i = _json_sliced(b, i, spec.get(k), time)
+        else:
+            v, i = (_json_value(b, i) if isinstance(spec, tuple)
+                    else _json_sliced(b, i, spec[0], time))
+            if isinstance(spec, tuple) and isinstance(v, dict) and "time" in v:
+                d = abs(float(v["time"]) - time)
+                if d < near[0]:
+                    near = (d, len(out), v)
+                if d > DD_TIME_WINDOW:
+                    v = {key: v[key] for key in spec if key in v}
+            out.append(v)
+        i = _JSON_WS.match(b, i).end()
+        if b[i:i + 1] == b",":
+            i = _JSON_WS.match(b, i + 1).end()
+    if near[1] is not None:
+        out[near[1]] = near[2]
+    return out, i + 1
+
+
 @functools.lru_cache(maxsize=2)
 def _cached_dd(ids_path: str, _mtime_ns: int, _size: int,
-               _ino: int = 0) -> dict:
-    """Parsed ``dd_sim.json`` (up to ~1 GB), cached per (real path, mtime,
-    size, inode): a slice sweep reads one file once.
+               _ino: int = 0, time: Optional[float] = None) -> dict:
+    """Parsed ``dd_sim.json`` (up to ~3 GB), cached per (real path, mtime,
+    size, inode, time): a slice sweep without a time reads one file once.
 
     READ-ONLY CONTRACT: the cache hands out the SAME parsed object to every
     caller (the legacy reader, the unified engine's ``IdsAdapter.read``,
@@ -109,25 +179,42 @@ def _cached_dd(ids_path: str, _mtime_ns: int, _size: int,
     ``write_imas_draw``) must work on its own fresh ``json.load`` or a deep
     copy.  ``tests/test_imas_dd_cache.py`` pins this by digest.
 
-    MEMORY: up to two parsed files (about 2x the file size each, so ~2 GB
-    for a 1 GB dd) stay resident for the life of the process -- in a
-    ``run_parallel`` pool, in every worker for the whole of ``generate()``.
+    MEMORY: a whole parse takes about 3.5x the file size, and up to two stay
+    resident for the life of the process.  Given ``time``, an ASCII file is
+    read through a memory map with only the time slices near it whole
+    (:func:`_json_sliced`): a small fraction of that.
     :func:`clear_dd_cache` releases them."""
     with open(ids_path, "rb") as fh:
-        return json.loads(fh.read())
+        if time is None:
+            return json.loads(fh.read())
+        try:                        # file pages, not a copy of the text
+            with mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as b:
+                return _json_sliced(b, _JSON_WS.match(b).end(),
+                                    _DD_TIME_SLICES, float(time))[0]
+        except UnicodeDecodeError:  # not ASCII: offsets are not characters
+            fh.seek(0)
+            return json.loads(fh.read())
 
 
-def _load_dd(ids_path) -> dict:
+def _load_dd(ids_path, time: Optional[float] = None) -> dict:
     """``dd_sim.json`` at ``ids_path``, via :func:`_cached_dd` (shared,
-    read-only).  Keyed on the real path (``"dd.json"``, its absolute path
-    and a ``Path`` share one entry), mtime_ns, size and inode (a file
-    replaced by rename is re-read).  Limitation: a same-size rewrite within
+    read-only); given ``time``, with its time slices whole only near ``time``
+    (:data:`_DD_TIME_SLICES`).  Keyed on the real path (``"dd.json"``, its absolute path
+    and a ``Path`` share one entry), mtime_ns, size, inode (a file replaced by
+    rename is re-read) and ``time``.  Limitation: a same-size rewrite within
     the filesystem's mtime granule, or one seen through a stale NFS
     attribute cache, is served from the cache -- call
     :func:`clear_dd_cache` after rewriting a dd in place."""
     path = os.path.realpath(os.fspath(ids_path))
     st = os.stat(path)
-    return _cached_dd(path, st.st_mtime_ns, st.st_size, st.st_ino)
+    return _cached_dd(path, st.st_mtime_ns, st.st_size, st.st_ino, time)
+
+
+def _source_dd(source: "ImasSource") -> dict:
+    """The dd of ``source`` (:func:`_load_dd`), whole only near ``source.time``
+    when ``source.lean_dd``."""
+    return _load_dd(source.ids_path,
+                    source.time if getattr(source, "lean_dd", False) else None)
 
 
 def clear_dd_cache() -> None:
@@ -1476,7 +1563,7 @@ def read_imas_geometry(source: "ImasSource"):
     :meth:`Bouquet.setup_solver` when the source is an :class:`ImasSource`
     (replacing the g-file that the reconstruction path reads F0/boundary from).
     """
-    dd = _load_dd(source.ids_path)
+    dd = _source_dd(source)
     eq = dd["equilibrium"]
     ie = _nearest_index(eq["time"], source.time, "equilibrium")
     vtf = eq["vacuum_toroidal_field"]
@@ -2613,7 +2700,7 @@ def read_imas_baseline(
     _pair_status = (_check_consistent_pair(source, T)
                     if kinetic_source == "ida_hybrid" and getattr(source, "ida_path", None)
                     and getattr(source, "ida_timing", "window") == "ida_fuse" else None)
-    dd = _load_dd(source.ids_path)
+    dd = _source_dd(source)
 
     # Which fast-pressure convention this dd was written in (factor of 3).
     # The metadata is resolved eagerly -- the reduction rule is needed to read the
