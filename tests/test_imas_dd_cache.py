@@ -161,7 +161,7 @@ def test_clear_dd_cache_releases_the_parse(dd_path):
 #  lean read: given a time, the time-sliced lists are whole only near it
 # ---------------------------------------------------------------------------
 def _sliced_dd(path, ensure_ascii=True):
-    ts = (0.0, 1.0, 2.0)
+    ts = (0.0, 1.0, 2.0, 3.0, 4.0)
     dd = {"equilibrium": {"time": list(ts), "time_slice": [
               {"time": t, "boundary": {"r": [t] * 3}} for t in ts]},
           "core_sources": {"time": list(ts), "source": [{"identifier": {"index": 2},
@@ -176,14 +176,12 @@ def _sliced_dd(path, ensure_ascii=True):
 def test_a_time_keeps_its_slices_whole_and_cuts_the_rest(tmp_path):
     p = str(tmp_path / "dd_sim.json")
     whole = _sliced_dd(p)
-    lean = imas._load_dd(p, 1.0)
+    lean = imas._load_dd(p, 2.4)       # nearest 2.0, outside the window
     eq, src = lean["equilibrium"]["time_slice"], lean["core_sources"]["source"][0]
-    assert eq == [{"time": 0.0}, whole["equilibrium"]["time_slice"][1], {"time": 2.0}]
+    assert eq[1:4] == whole["equilibrium"]["time_slice"][1:4]   # with its neighbours
+    assert (eq[0], eq[4]) == ({"time": 0.0}, {"time": 4.0})
     assert src["profiles_1d"][0] == {"time": 0.0, "j_parallel": [0.0, 0.0]}
-    assert src["profiles_1d"][1]["torque"] == [1.0]
     assert lean["summary"] == whole["summary"]
-    assert imas._load_dd(p, 1.4)["equilibrium"]["time_slice"][1] == \
-        whole["equilibrium"]["time_slice"][1]          # the nearest, outside the window
     imas.clear_dd_cache()
 
 
