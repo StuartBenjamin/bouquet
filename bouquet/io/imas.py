@@ -190,9 +190,9 @@ def _cached_dd(ids_path: str, _mtime_ns: int, _size: int,
 
     MEMORY: a whole parse takes about 3.5x the file size, and up to two stay
     resident for the life of the process.  Given ``time``, an ASCII file
-    whose core_profiles has a slice within :data:`DD_TIME_WINDOW` of it is
-    read through a memory map with only the time slices near it whole
-    (:func:`_json_sliced`): a small fraction of that.
+    whose core_profiles has a slice at that time (a FUSE macro step, as the
+    study's units ask) is read through a memory map with only the time slices
+    near it whole (:func:`_json_sliced`): a small fraction of that.
     :func:`clear_dd_cache` releases them."""
     with open(ids_path, "rb") as fh:
         if time is not None:
@@ -202,7 +202,8 @@ def _cached_dd(ids_path: str, _mtime_ns: int, _size: int,
                                       _DD_TIME_SLICES, float(time))[0]
                 # the readers anchor the other IDSs on the core_profiles slice
                 t_cp = dd.get("core_profiles", {}).get("time") or [time]
-                if min(abs(float(t) - time) for t in t_cp) <= DD_TIME_WINDOW:
+                tol = 1e-9 * max(1.0, abs(time))
+                if min(abs(float(t) - time) for t in t_cp) <= tol:
                     return dd
             except UnicodeDecodeError:  # not ASCII: offsets are not characters
                 pass
