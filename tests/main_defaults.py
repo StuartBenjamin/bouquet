@@ -6,7 +6,7 @@ RECON = dict(ni_source="standard")
 #: SolverConfig
 SOLVER = dict(nl_tol=None)
 #: ImasSource
-IMAS = dict(ida_timing="window", zeff_fast_ions=False, psi_pad=1e-3)
+IMAS = dict(ida_timing="window", zeff_fast_ions=False, psi_pad=1e-3, lean_dd=False)
 #: GenerationConfig
 GEN = dict(swb_edge_taper_psi0=None, compress_file_bytes=False,
            ifile_profile_derivs=False, ifile_psi_bounds=False,

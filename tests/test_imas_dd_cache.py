@@ -10,6 +10,7 @@ import shutil
 import numpy as np
 import pytest
 
+import main_defaults as MD
 from bouquet.config import ImasSource
 from bouquet.io import imas
 
@@ -46,11 +47,11 @@ def dd_path(tmp_path):
 
 def test_a_slice_sweep_parses_once_and_rereads_identically(dd_path):
     first = _state(imas.read_imas_baseline(ImasSource(ids_path=dd_path,
-                                                      time=2.3043)))
-    imas.read_imas_baseline(ImasSource(ids_path=dd_path, time=2.2))
-    imas.read_imas_geometry(ImasSource(ids_path=dd_path, time=2.2))
+                                                      time=2.3043, **MD.IMAS)))
+    imas.read_imas_baseline(ImasSource(ids_path=dd_path, time=2.2, **MD.IMAS))
+    imas.read_imas_geometry(ImasSource(ids_path=dd_path, time=2.2, **MD.IMAS))
     again = _state(imas.read_imas_baseline(ImasSource(ids_path=dd_path,
-                                                      time=2.3043)))
+                                                      time=2.3043, **MD.IMAS)))
     _same(first, again)
     info = imas._cached_dd.cache_info()
     assert (info.misses, info.hits) == (1, 3)
@@ -84,7 +85,7 @@ def _engine_read(dd_path, t):
     from bouquet.baseline import resolve_baseline
     from bouquet.config import BouquetConfig, GenerationConfig, SolverConfig
     cfg = BouquetConfig(
-        source=ImasSource(ids_path=dd_path, time=t),
+        source=ImasSource(ids_path=dd_path, time=t, **MD.IMAS),
         solver=SolverConfig(mesh_path=None), output_header="t",
         generation=GenerationConfig(reconstruction_engine="unified"))
     with warnings.catch_warnings():
@@ -189,7 +190,7 @@ def test_a_non_ascii_dd_and_lean_dd_off_read_it_whole(tmp_path):
     p = str(tmp_path / "dd_sim.json")
     whole = _sliced_dd(p, ensure_ascii=False)
     assert imas._load_dd(p, 1.0) == whole
-    assert imas._source_dd(ImasSource(ids_path=p, time=1.0)) == whole
+    assert imas._source_dd(ImasSource(ids_path=p, time=1.0, **MD.IMAS)) == whole
     assert imas._source_dd(ImasSource(ids_path=p, time=1.0, lean_dd=True)) is \
         imas._load_dd(p, 1.0)
     imas.clear_dd_cache()
