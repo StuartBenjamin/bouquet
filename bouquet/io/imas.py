@@ -189,20 +189,25 @@ def _cached_dd(ids_path: str, _mtime_ns: int, _size: int,
     copy.  ``tests/test_imas_dd_cache.py`` pins this by digest.
 
     MEMORY: a whole parse takes about 3.5x the file size, and up to two stay
-    resident for the life of the process.  Given ``time``, an ASCII file is
+    resident for the life of the process.  Given ``time``, an ASCII file
+    whose core_profiles has a slice within :data:`DD_TIME_WINDOW` of it is
     read through a memory map with only the time slices near it whole
     (:func:`_json_sliced`): a small fraction of that.
     :func:`clear_dd_cache` releases them."""
     with open(ids_path, "rb") as fh:
-        if time is None:
-            return json.loads(fh.read())
-        try:                        # file pages, not a copy of the text
-            with mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as b:
-                return _json_sliced(b, _JSON_WS.match(b).end(),
-                                    _DD_TIME_SLICES, float(time))[0]
-        except UnicodeDecodeError:  # not ASCII: offsets are not characters
+        if time is not None:
+            try:                    # file pages, not a copy of the text
+                with mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as b:
+                    dd = _json_sliced(b, _JSON_WS.match(b).end(),
+                                      _DD_TIME_SLICES, float(time))[0]
+                # the readers anchor the other IDSs on the core_profiles slice
+                t_cp = dd.get("core_profiles", {}).get("time") or [time]
+                if min(abs(float(t) - time) for t in t_cp) <= DD_TIME_WINDOW:
+                    return dd
+            except UnicodeDecodeError:  # not ASCII: offsets are not characters
+                pass
             fh.seek(0)
-            return json.loads(fh.read())
+        return json.loads(fh.read())
 
 
 def _load_dd(ids_path, time: Optional[float] = None) -> dict:
