@@ -135,34 +135,43 @@ def _json_sliced(b, i: int, spec, time: float):
     """``(value, end)`` of the JSON value at offset ``i`` of ``b``, as
     :func:`json.loads` gives it, except in the lists ``spec`` marks with a
     tuple of keys: there an element more than :data:`DD_TIME_WINDOW` from
-    ``time`` keeps only those keys, unless it is the one nearest ``time``.
-    Elements are decoded one at a time, so a whole list never exists."""
+    ``time`` keeps only those keys, unless it is the one nearest ``time`` or
+    next to it (the readers pair a slice with its neighbours).  Elements are
+    decoded one at a time, so a whole list never exists."""
     c = b[i:i + 1]
     if not (c == b"{" and isinstance(spec, dict)
             or c == b"[" and isinstance(spec, (list, tuple))):
         return _json_value(b, i)
-    out, near = ({} if c == b"{" else []), (np.inf, None, None)
-    i = _JSON_WS.match(b, i + 1).end()
+    out, i = ({} if c == b"{" else []), _JSON_WS.match(b, i + 1).end()
+    near, prev = (np.inf, None, {}), None   # (distance, index, {index: element})
     while b[i:i + 1] not in b"}]":
         if c == b"{":
             k, i = _json_value(b, i)
             i = _JSON_WS.match(b, _JSON_WS.match(b, i).end() + 1).end()
             out[k], i = _json_sliced(b, i, spec.get(k), time)
-        else:
-            v, i = (_json_value(b, i) if isinstance(spec, tuple)
-                    else _json_sliced(b, i, spec[0], time))
-            if isinstance(spec, tuple) and isinstance(v, dict) and "time" in v:
+        elif isinstance(spec, tuple):
+            v, i = _json_value(b, i)
+            k = len(out)
+            if isinstance(v, dict) and "time" in v:
                 d = abs(float(v["time"]) - time)
                 if d < near[0]:
-                    near = (d, len(out), v)
-                if d > DD_TIME_WINDOW:
-                    v = {key: v[key] for key in spec if key in v}
+                    near = (d, k, {k - 1: prev, k: v})
+                elif k == near[1] + 1:
+                    near[2][k] = v
+                out.append(v if d <= DD_TIME_WINDOW else
+                           {key: v[key] for key in spec if key in v})
+            else:
+                out.append(v)
+            prev = v
+        else:
+            v, i = _json_sliced(b, i, spec[0], time)
             out.append(v)
         i = _JSON_WS.match(b, i).end()
         if b[i:i + 1] == b",":
             i = _JSON_WS.match(b, i + 1).end()
-    if near[1] is not None:
-        out[near[1]] = near[2]
+    for k, v in near[2].items():
+        if 0 <= k < len(out):
+            out[k] = v
     return out, i + 1
 
 
