@@ -1019,7 +1019,7 @@ class IdsAdapter:
         self._c = None
 
     def read(self) -> EngineContract:
-        from .io.imas import (_load_dd, _nearest_index, read_imas_geometry,
+        from .io.imas import (_nearest_index, _source_dd, read_imas_geometry,
                               source_current_sign)
         from .physics import ELEMENTARY_CHARGE as _EC, impurity_pressure
         from .utils import STRUCTURED_PRESETS, pchip_interp, q0_gate_admits
@@ -1027,7 +1027,7 @@ class IdsAdapter:
         gc = cfg.generation
         # the parsed dd shared with the reader (cached per file; READ-ONLY:
         # nothing below writes into it -- tests/test_imas_dd_cache.py)
-        dd = _load_dd(src.ids_path)
+        dd = _source_dd(src)
         T = src.time
         eq = dd["equilibrium"]
         ie = _nearest_index(eq["time"], T, "equilibrium")
