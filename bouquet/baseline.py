@@ -1138,8 +1138,10 @@ def resolve_uncertainty(config, baseline) -> dict:
                 _ida_in = _ida_x <= 1.0
                 _ida_x = np.interp(_ida_x[_ida_in], *baseline.psi_map)
 
-        def _to_kin(arr):
-            return np.interp(psi_kin, _ida_x, np.asarray(arr, dtype=float)[_ida_in])
+        from .utils import pchip_interp
+
+        def _to_kin(arr):       # the kinetics' own regrid (io.imas._merge_ida_kinetics)
+            return pchip_interp(_ida_x, np.asarray(arr, dtype=float)[_ida_in], psi_kin)
 
         ida_sig = {"ne": _to_kin(ida.sigma_ne), "te": _to_kin(ida.sigma_te),
                    "ni": _to_kin(ida.sigma_ni), "ti": _to_kin(ida.sigma_ti)}

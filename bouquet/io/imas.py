@@ -2592,10 +2592,11 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
                                     np.asarray(psi_N, dtype=float), _zd)
     ida = read_ida(ida_path, time=time, impurity_Z=impurity_Z, ni_source=ni_source,
                    zeff_substitute=_zsub)
+    from ..utils import pchip_interp      # C1 regrid: np.interp left a p' kink at every IDA knot
     _ipsi = np.asarray(ida.psi_N, dtype=float)
     ida_map = None
     if x_phi is None:
-        g = lambda a: np.interp(psi_N, _ipsi, np.asarray(a, dtype=float))
+        g = lambda a: pchip_interp(_ipsi, np.asarray(a, dtype=float), psi_N)
     else:
         if ida.q is None:
             raise ValueError(f"coord='phi_n': {ida_path!r} carries no q, so its "
@@ -2604,7 +2605,7 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
         _in, _iphi = phi_n_from_q(_ipsi, ida.q, bracket=True)
         _n = int(np.count_nonzero(_ipsi <= 1.0))     # psi_map: inside the LCFS only
         ida_map = (_ipsi[_in][:_n], _iphi[:_n])
-        g = lambda a: np.interp(x_phi, _iphi, np.asarray(a, dtype=float)[_in])
+        g = lambda a: pchip_interp(_iphi, np.asarray(a, dtype=float)[_in], x_phi)
     ne, te, ti = g(ida.ne), g(ida.te), g(ida.ti)
     sigma_ne, sigma_te, sigma_ni, sigma_ti = (
         g(ida.sigma_ne), g(ida.sigma_te), g(ida.sigma_ni), g(ida.sigma_ti))

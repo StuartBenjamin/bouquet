@@ -43,3 +43,16 @@ def test_the_run_grid_ni_is_the_formula_of_the_run_grid_ne_and_zeff(monkeypatch)
     xi = np.linspace(0.0, 1.0, 9)
     np.testing.assert_allclose(ni[np.isin(psi, xi)],
                                _ida().ni[np.isin(xi, psi)], rtol=1e-13)
+
+
+def test_the_ida_profiles_are_regridded_c1(monkeypatch):
+    """IDA's kinetics reach the run grid through pchip_interp (C1): a linear
+    regrid kinks every profile at each IDA knot, and P' (FF') then jumps there."""
+    from bouquet.utils import pchip_interp
+    ida = _ida()
+    psi, out = _merge(monkeypatch, ida)
+    for got, src in zip(out[:3], (ida.ne, ida.te, ida.ti)):
+        np.testing.assert_allclose(got, pchip_interp(ida.psi_N, src, psi), rtol=1e-14)
+    slope = np.diff(out[0]) / np.diff(psi)
+    knot = np.searchsorted(psi, 0.5)                  # an IDA knot that is a run node
+    assert abs(slope[knot] - slope[knot - 1]) < 0.05 * abs(slope[knot])

@@ -17,6 +17,7 @@ from bouquet import coords
 from bouquet.config import ImasSource
 from bouquet.io.imas import read_imas_baseline, write_imas_draw
 from bouquet.io.imas import _fuse_current_geometry
+from bouquet.utils import pchip_interp
 from bouquet.physics import (jphi_tokamaker_to_jpar, jphi_tokamaker_to_jtor_imas,
                              jtor_imas_to_jphi_tokamaker)
 from test_ni_fast_subtraction import N, _dd
@@ -284,7 +285,7 @@ class TestIdaHybridPhi:
         bl = self._read(ddp, cdf, "phi_n")
         ida = bl.aux["ida_profiles"][1]
         _, phi_ida = coords.phi_n_from_q(ida.psi_N, ida.q)
-        np.testing.assert_allclose(bl.te, np.interp(bl.psi_N, phi_ida, ida.te), rtol=1e-12)
+        np.testing.assert_allclose(bl.te, pchip_interp(phi_ida, ida.te, bl.psi_N), rtol=1e-12)
         np.testing.assert_array_equal(bl.psi_map[1], phi_ida)
         # not the psi_N placement the dd's own map would give
         blp = self._read(ddp, cdf, "psi_n")
