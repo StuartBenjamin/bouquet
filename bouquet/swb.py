@@ -166,13 +166,15 @@ class SwbBaseline:
                     saw_tol=float(gc.swb_saw_tol), saw_ramp=float(gc.swb_saw_ramp),
                     saw_rule=SWB_SAW_RULES[gc.swb_saw_rule])
 
-    def _swb_solve(self, kin, j_seed, coil_reg_target=None):
+    def _swb_solve(self, kin, j_seed, coil_reg_target=None, warm_eq=None):
         """The swb recipe: reset ``mygs`` -> coil reg -> ``init_psi`` from the
         slice LCFS -> one ``solve_with_bootstrap``.
 
         ``coil_reg_target`` None keeps the setup coil reg (solve A); a
         ``{coil: A-t}`` dict installs the strong reg toward it (solve B, the
-        sigma=0 check and every draw). ``kin``: ``ne te ni ti Zeff p_fixed`` on
+        sigma=0 check and every draw). ``warm_eq`` (a ``copy_eq``): start from
+        that equilibrium instead of ``init_psi`` (solve B's fallback in
+        :meth:`_swb_imas_baseline`). ``kin``: ``ne te ni ti Zeff p_fixed`` on
         ``psi_N``.  Returns the SWB result dict (its ``jphi_saw_out`` / ``saw_rho_m``
         / ``saw_n_dips`` only when ``swb_saw_q`` is set).
         """
@@ -182,11 +184,14 @@ class SwbBaseline:
         bl, mygs, gc = self.baseline, self.mygs, self.config.generation
         psi_N = np.asarray(bl.psi_N, dtype=float)
         self._reset_solver_state()
+        if warm_eq is not None:
+            mygs.replace_eq(source_eq=warm_eq)   # its psi, coils, targets and setup reg
         if coil_reg_target is not None:
             mygs.set_coil_reg(reg_terms=strong_coil_reg(
                 mygs, coil_reg_target, gc.swb_coil_reg_weight, 1.0))
-        mygs.init_psi(*_shape_from_boundary(self._geom.boundary_RZ))
-        self._seed_coil_init(mygs)
+        if warm_eq is None:
+            mygs.init_psi(*_shape_from_boundary(self._geom.boundary_RZ))
+            self._seed_coil_init(mygs)
         saw_kw = self._swb_saw_kwargs()
         j_seed, jphi_fixed = np.asarray(j_seed, dtype=float), bl.jphi_fixed
         res = solve_with_bootstrap(
@@ -343,7 +348,22 @@ class SwbBaseline:
         pad = float(self.config.source.psi_pad)
         st_a = self._swb_state(self._swb_solve(kin, bl.swb_seed_profile),
                                bl.swb_seed_profile, pad)
-        res = self._swb_solve(kin, bl.swb_seed_profile, coil_reg_target=st_a["coils"])
+        self._swb_eq_a = None
+        try:
+            res = self._swb_solve(kin, bl.swb_seed_profile, coil_reg_target=st_a["coils"])
+        except ValueError as e:
+            # B holds the coils at A's from the first iterate, which can diverge
+            # from the LCFS-shaped start although A converged: retry once from
+            # A's equilibrium (A re-solved, deterministic)
+            if not str(e).startswith("Error in solve"):
+                raise
+            import warnings
+            warnings.warn(f"swb solve B failed cold ({e}); retrying from solve A's "
+                          "equilibrium", RuntimeWarning, stacklevel=2)
+            self._swb_solve(kin, bl.swb_seed_profile)
+            self._swb_eq_a = self.mygs.copy_eq()
+            res = self._swb_solve(kin, bl.swb_seed_profile, coil_reg_target=st_a["coils"],
+                                  warm_eq=self._swb_eq_a)
         st_b = self._swb_state(res, bl.swb_seed_profile, pad)
 
         bl.coil_reg_target = st_a["coils"]
@@ -388,6 +408,7 @@ class SwbBaseline:
             coil_B_minus_A_max=(float(_dc[_worst]) if _worst else 0.0),
             coil_B_minus_A_worst=_worst,
             closure_limited=not (0.5 <= st_b["alpha"] <= 2.0),
+            swb_b_warm_start=self._swb_eq_a is not None,
             ip_rel_err_solve_A=st_a.get("ip_rel_err"),
             ip_rel_err=st_b.get("ip_rel_err"),
             swb_ip_tol=float(getattr(self.config.generation, "swb_ip_tol",
@@ -497,7 +518,8 @@ def swb_jind_sigma(sigma_jphi, jphi_total, seed):
 def build_swb_context(bq, env):
     """The :class:`~bouquet.swb_draws.SwbDraws` of a prepared swb baseline:
     each draw is solve B (``_swb_solve`` toward solve A's coils) with
-    resampled inputs.  Puts ``mygs`` back on solve B first (generate_bouquet
+    resampled inputs, from solve A's equilibrium when solve B needed it
+    (``swb_b_warm_start``).  Puts ``mygs`` back on solve B first (generate_bouquet
     reads its drift / LCFS / warm-start references off ``mygs``)."""
     from functools import partial
     from .filtering import resolve_inspec_bands
@@ -506,8 +528,9 @@ def build_swb_context(bq, env):
     if bl.coil_reg_target is None or bl.swb_baseline is None:
         raise ValueError('imas_baseline="swb": the baseline was not prepared '
                          'by _swb_imas_baseline (no solve A coils)')
+    warm = getattr(bq, "_swb_eq_a", None)      # solve B's and the draws' start (None: cold)
     res_b = bq._swb_solve(bq._swb_baseline_kinetics(), bl.swb_seed_profile,
-                          coil_reg_target=bl.coil_reg_target)
+                          coil_reg_target=bl.coil_reg_target, warm_eq=warm)
     _ic = bl.ip_closure or {}
     stamp = {
         "imas_baseline": "swb",
@@ -523,6 +546,7 @@ def build_swb_context(bq, env):
         "swb_alpha": float(bl.ohm_scale),
         "swb_alpha_solve_A": _ic.get("alpha_solve_A"),
         "swb_li_3_solve_A": _ic.get("li_3_solve_A"),
+        "swb_b_warm_start": bool(_ic.get("swb_b_warm_start", False)),
         "coil_reg_target": bl.coil_reg_target,
         # sawtooth reset (None, so not written, when swb_saw_q is off)
         "swb_saw_q": gc.swb_saw_q,
@@ -533,7 +557,7 @@ def build_swb_context(bq, env):
         "jphi_saw_out": bl.jphi_saw_out,
         "jphi_saw_input": bl.jphi_saw_input}
     return SwbDraws(
-        partial(bq._swb_solve, coil_reg_target=bl.coil_reg_target),
+        partial(bq._swb_solve, coil_reg_target=bl.coil_reg_target, warm_eq=warm),
         np.asarray(bl.swb_seed_profile, dtype=float),
         swb_jind_sigma(env["sigma_jphi"], bl.jphi_total, bl.swb_seed_profile),
         stamp=stamp, jphi_pd=getattr(bl, "jphi_pd", None),
