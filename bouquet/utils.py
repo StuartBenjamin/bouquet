@@ -6021,6 +6021,13 @@ def regrid(x_src, y_src, x_out, method):
     return out
 
 
+def kinetic_regrid(source):
+    """The :func:`regrid` method that takes the source's kinetic profiles onto
+    the run grids: ``ImasSource.ida_regrid`` (ledger B-24), "pchip" for a
+    source without that knob."""
+    return getattr(source, "ida_regrid", "pchip")
+
+
 # ====================================================================
 #  LCFS shape helper
 # ====================================================================

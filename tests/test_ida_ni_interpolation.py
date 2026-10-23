@@ -72,6 +72,19 @@ def test_the_ida_regrid_is_the_configured_method(monkeypatch, method):
         np.testing.assert_allclose(got, regrid(ida.psi_N, src, psi, method), rtol=1e-14)
 
 
+def test_the_kinetic_to_equilibrium_regrid_reads_the_same_knob():
+    """The kinetic -> equilibrium grid step (here the swb baseline's Z_eff)
+    takes the source's ida_regrid (utils.kinetic_regrid); pchip without it."""
+    from bouquet.swb import SwbBaseline
+    from bouquet.utils import kinetic_regrid, regrid
+    x_k, x_e = np.linspace(0.0, 1.0, 9), np.linspace(0.0, 1.0, 101)
+    z = 1.6 + 0.8 * x_k ** 3
+    run = SimpleNamespace(config=SimpleNamespace(source=SimpleNamespace(ida_regrid="cubic")),
+                          baseline=SimpleNamespace(psi_N_kinetic=x_k, psi_N=x_e, Zeff=z))
+    np.testing.assert_array_equal(SwbBaseline._zeff_eq(run), regrid(x_k, z, x_e, "cubic"))
+    assert kinetic_regrid(SimpleNamespace()) == "pchip"
+
+
 def test_an_unknown_ida_regrid_is_refused():
     from bouquet.config import ImasSource
     with pytest.raises(ValueError, match="ida_regrid"):

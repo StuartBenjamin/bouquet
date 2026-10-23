@@ -45,6 +45,7 @@ from . import coords
 from ._renamed import accepts_old_names
 from .swb import SwbBaseline
 from .filtering import l_i_construction_tolerance
+from .utils import kinetic_regrid, regrid
 
 
 def _baseline_negative_psep_named(fn):
@@ -4775,9 +4776,8 @@ class Bouquet(SwbBaseline):
         # kinetic profiles + total pressure on the equilibrium grid (IMAS shares
         # psi_N between the kinetic and current grids).
         def k2e(arr):
-            # PCHIP regrid (shared helper) -- must match the draw path
-            from .utils import pchip_interp
-            return pchip_interp(bl.psi_N_kinetic, arr, psi_N)
+            # the kin->eq regrid -- must match the draw path
+            return regrid(bl.psi_N_kinetic, arr, psi_N, kinetic_regrid(self.config.source))
 
         ne, te, ni, ti = k2e(bl.ne), k2e(bl.te), k2e(bl.ni), k2e(bl.ti)
         Zeff = np.clip(k2e(bl.Zeff), 1.0, None)
@@ -6845,9 +6845,9 @@ class Bouquet(SwbBaseline):
 
         # kinetics + pressure on the equilibrium grid, mirroring
         # generate_bouquet's baseline assembly (incl. impurity/fast/diff terms)
-        from .utils import pchip_interp
         pk = np.asarray(bl.psi_N_kinetic, dtype=float)
-        k2e = lambda a: pchip_interp(pk, a, psi_N)
+        how = kinetic_regrid(self.config.source)
+        k2e = lambda a: regrid(pk, a, psi_N, how)
         ne_eq, te_eq = k2e(bl.ne), k2e(bl.te)
         ni_eq, ti_eq = k2e(bl.ni), k2e(bl.ti)
         Zeff_eq = np.clip(k2e(bl.Zeff), 1.0, None)
@@ -6875,8 +6875,7 @@ class Bouquet(SwbBaseline):
             # solve -- its stored request INCLUDES the fixed total-current
             # anchor jphi_diff (as generate()'s baseline solve and every draw
             # carry it)
-            ffp["y"] = ffp["y"] + pchip_interp(
-                pk, np.asarray(bl.jphi_diff, dtype=float), psi_N)
+            ffp["y"] = ffp["y"] + k2e(np.asarray(bl.jphi_diff, dtype=float))
         # ---- psi re-initialisation before the state-anchor solve ------------
         # The reconstruction leaves mygs on its own converged inverse-mode
         # state.  When that state already sits (to ~1e-4 in the nonlinear
@@ -7363,10 +7362,10 @@ class Bouquet(SwbBaseline):
                         "inductive excludes exactly what the draws hold"))
         if getattr(bl, "jphi_diff", None) is not None:
             # same kinetic -> equilibrium regrid the baseline solve applies
-            from .utils import pchip_interp
-            j_fix = j_fix + pchip_interp(
+            j_fix = j_fix + regrid(
                 np.asarray(bl.psi_N_kinetic, dtype=float),
-                np.asarray(bl.jphi_diff, dtype=float), psi_N)
+                np.asarray(bl.jphi_diff, dtype=float), psi_N,
+                kinetic_regrid(self.config.source))
         ref = np.asarray(bl.jphi_bs, dtype=float) + (0.0 if jdiff is None
                                                   else jdiff)
 
@@ -7666,6 +7665,7 @@ class Bouquet(SwbBaseline):
                     bootstrap_kwargs=gc.bootstrap_kwargs,
                     edge_pressure=_edge,
                     diagnostic_plots=False, psi_N_kinetic=psi_kin,
+                    kin_regrid=kinetic_regrid(self.config.source),
                     p_fast=bl.p_fast, z_fast=getattr(bl, "z_fast", None),
                     z2_fast=getattr(bl, "z2_fast", None),
                     zeff_includes_fast=bool(getattr(
@@ -8106,11 +8106,11 @@ class Bouquet(SwbBaseline):
 
         # Zeff is consumed on the EQUILIBRIUM grid (psi_N) by solve_with_bootstrap,
         # whereas the perturbed kinetic profiles (ne/te/ni/ti, sigmas) live on the
-        # kinetic grid (psi_N_kinetic). PCHIP-regrid Zeff down to psi_N (shared
-        # helper, matching every other kin->eq site).
-        from .utils import pchip_interp
+        # kinetic grid (psi_N_kinetic). Regrid Zeff down to psi_N
+        # (utils.kinetic_regrid, matching every other kin->eq site).
         Zeff_eq = np.clip(
-            pchip_interp(bl.psi_N_kinetic, bl.Zeff, np.asarray(bl.psi_N, dtype=float)),
+            regrid(bl.psi_N_kinetic, bl.Zeff, np.asarray(bl.psi_N, dtype=float),
+                   kinetic_regrid(self.config.source)),
             1.0, None,
         )
 
@@ -8211,6 +8211,7 @@ class Bouquet(SwbBaseline):
                 baseline_eqdsk_bytes=bl.eqdsk_bytes,
                 baseline_pfile_bytes=bl.pfile_bytes,
                 psi_N_kinetic=np.asarray(bl.psi_N_kinetic, dtype=float),
+                kin_regrid=kinetic_regrid(self.config.source),
                 coil_drift=gc.coil_drift,
                 coil_drift_hard_factor=gc.coil_drift_hard_factor,
                 homotopy_passes=gc.homotopy_passes,

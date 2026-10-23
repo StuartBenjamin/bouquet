@@ -46,7 +46,7 @@ from .utils import (
     fsa_current_geometry,
     isoflux_length_weights,
     pchip_derivative,
-    pchip_interp,
+    regrid,
     safe_save_eqdsk,
     safe_trace_surf,
     select_closed_lcfs,
@@ -3361,6 +3361,7 @@ def perturb_kinetic_equilibrium(
     max_pressure_iter=_MAX_PRESSURE_ITER,
     max_li_iter=_MAX_LI_ITER,
     psi_N_kinetic=None,
+    kin_regrid="pchip",
     p_fast=None,
     z_fast=None,
     z2_fast=None,
@@ -3533,6 +3534,8 @@ def perturb_kinetic_equilibrium(
         pressure matching and equilibrium solving.  Returned
         perturbed profiles are on ``psi_N_kinetic``.  If ``None``,
         ``psi_N`` is used for everything (original behaviour).
+    kin_regrid : str
+        The ``psi_N_kinetic`` -> ``psi_N`` regrid (``utils.kinetic_regrid``).
     perturb_jind_in_anchor : bool
         Route R2: GPR-perturb the inductive current in the recon-anchor
         block and accept that equilibrium (band-conditioned), rather than
@@ -3640,14 +3643,12 @@ def perturb_kinetic_equilibrium(
     _dual_grid = psi_N_kinetic is not None
 
     def _kin_to_eq(arr_kin):
-        """Regrid a profile from the kinetic onto the equilibrium grid.
-
-        Shape-preserving PCHIP via the shared helper (linear regrid leaves
-        slope kinks at every kinetic knot -> stepped Sauter jphi_bs; see
-        utils.pchip_interp). Must match every other kin->eq site."""
+        """Regrid a profile from the kinetic onto the equilibrium grid by
+        ``kin_regrid`` (a linear regrid leaves slope kinks at every kinetic
+        knot -> stepped Sauter jphi_bs). Must match every other kin->eq site."""
         if not _dual_grid:
             return arr_kin
-        return pchip_interp(psi_kin, arr_kin, psi_N)
+        return regrid(psi_kin, arr_kin, psi_N, kin_regrid)
 
     # Fixed additive currents (NBI + RF), held constant across draws. They are
     # treated exactly like the bootstrap spike (additive, non-scaled) in the
@@ -5683,6 +5684,7 @@ def generate_bouquet(
     baseline_eqdsk_bytes=None,
     baseline_pfile_bytes=None,
     psi_N_kinetic=None,
+    kin_regrid="pchip",
     max_proxy_draws=500,
     coil_drift=0.01,
     coil_drift_floor_A=50.0,
@@ -6167,8 +6169,8 @@ def generate_bouquet(
     # self-consistent loop, the frozen legacy value otherwise)
     _EC_run = thermal_pressure_charge(jbs_loop)
     if psi_N_kinetic is not None:
-        # PCHIP regrid (shared helper) -- must match _kin_to_eq in the draws
-        _kin2eq = lambda arr: pchip_interp(psi_N_kinetic, arr, psi_N)
+        # the kin->eq regrid -- must match _kin_to_eq in the draws
+        _kin2eq = lambda arr: regrid(psi_N_kinetic, arr, psi_N, kin_regrid)
         pressure = _EC_run * (_kin2eq(ne) * _kin2eq(te)
                               + _kin2eq(ni) * _kin2eq(ti))
     else:
@@ -7370,8 +7372,8 @@ def generate_bouquet(
             # arrays on the same grid as the seed (npsi=len(psi_N)).
             if psi_N_kinetic is not None:
                 def _k2e(a):
-                    # PCHIP regrid -- must match _kin_to_eq in the draws
-                    return pchip_interp(psi_N_kinetic, a, psi_N)
+                    # the kin->eq regrid -- must match _kin_to_eq in the draws
+                    return regrid(psi_N_kinetic, a, psi_N, kin_regrid)
                 ne_cache = _k2e(ne); te_cache = _k2e(te)
                 ni_cache = _k2e(ni); ti_cache = _k2e(ti)
             else:
@@ -7881,6 +7883,7 @@ def generate_bouquet(
                     sigma_ni=sigma_ni, sigma_ti=sigma_ti, n_ls=n_ls,
                     t_ls=t_ls, j_ls=j_ls, Zeff=Zeff, coord=coord,
                     p_thresh=p_thresh, psi_N_kinetic=psi_N_kinetic,
+                    kin_regrid=kin_regrid,
                     p_fast=p_fast, z_fast=z_fast, z2_fast=z2_fast,
                     zeff_includes_fast=zeff_includes_fast, Z_imp=Z_imp,
                     aux_sigmas=aux_sigmas, aux_baselines=aux_baselines,
@@ -7921,6 +7924,7 @@ def generate_bouquet(
                     scale_jbs=scale_jbs,
                     diagnostic_plots=diagnostic_plots,
                     psi_N_kinetic=psi_N_kinetic,
+                    kin_regrid=kin_regrid,
                     p_fast=p_fast,
                     z_fast=z_fast,
                     z2_fast=z2_fast,
@@ -8851,8 +8855,8 @@ def generate_bouquet(
         # Pressure on the equilibrium grid (for storage and plotting).
         # Interpolate kinetic profiles onto psi_N if on a different grid.
         if psi_N_kinetic is not None:
-            # PCHIP regrid (shared helper), matching _kin_to_eq
-            _to_eq = lambda arr: pchip_interp(psi_N_kinetic, arr, psi_N)
+            # the kin->eq regrid, matching _kin_to_eq
+            _to_eq = lambda arr: regrid(psi_N_kinetic, arr, psi_N, kin_regrid)
             _ne_eqp, _te_eqp = _to_eq(ne_perturb), _to_eq(te_perturb)
             _ni_eqp, _ti_eqp = _to_eq(ni_perturb), _to_eq(ti_perturb)
         else:

@@ -63,7 +63,7 @@ def _bouquet(monkeypatch, li_draw, perturb_jind_in_anchor=False,
     b = Bouquet.__new__(Bouquet)
     b.baseline = bl
     b.mygs = _Eq(li_draw)
-    b.config = SimpleNamespace(generation=gc)
+    b.config = SimpleNamespace(generation=gc, source=SimpleNamespace())
     calls = []
     monkeypatch.setattr(B, "resolve_uncertainty", lambda cfg, bl_: dict(
         n_ls=0.5, t_ls=0.4, j_ls=0.25, aux_sigmas={"zeff": np.ones(_XK.size)},

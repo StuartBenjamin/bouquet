@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 
 from . import coords
-from .utils import _shape_from_boundary
+from .utils import _shape_from_boundary, kinetic_regrid, regrid
 
 #: Default of GenerationConfig.swb_ip_tol (the swb solve's Ip acceptance):
 #: kept at 5e-3 pending owner decision E6.
@@ -91,12 +91,12 @@ class SwbBaseline:
     def _swb_baseline_kinetics(self):
         """SWB kinetic inputs on ``psi_N`` from the baseline, built exactly as
         a sigma=0 :func:`~bouquet.swb_draws.swb_draw` builds them."""
-        from .utils import pchip_interp
         from .swb_draws import swb_fixed_pressure
         bl = self.baseline
         psi_N = np.asarray(bl.psi_N, dtype=float)
         pk = np.asarray(bl.psi_N_kinetic, dtype=float)
-        k2e = lambda a: pchip_interp(pk, a, psi_N)
+        how = kinetic_regrid(self.config.source)
+        k2e = lambda a: regrid(pk, a, psi_N, how)
         ne, te, ni, ti = k2e(bl.ne), k2e(bl.te), k2e(bl.ni), k2e(bl.ti)
         zf = getattr(bl, "z_fast", None)
         return dict(ne=ne, te=te, ni=ni, ti=ti, Zeff=self._zeff_eq(),
@@ -108,10 +108,9 @@ class SwbBaseline:
 
     def _zeff_eq(self):
         """Baseline Z_eff on ``psi_N``, clipped at 1 (the generate() input)."""
-        from .utils import pchip_interp
         bl = self.baseline
-        return np.clip(pchip_interp(bl.psi_N_kinetic, bl.Zeff,
-                                    np.asarray(bl.psi_N, dtype=float)), 1.0, None)
+        return np.clip(regrid(bl.psi_N_kinetic, bl.Zeff, np.asarray(bl.psi_N, dtype=float),
+                              kinetic_regrid(self.config.source)), 1.0, None)
 
     def _swb_source_split(self, psi_N):
         """Set ``bl.swb_seed_profile`` / ``jphi_fixed`` from the source
@@ -469,6 +468,7 @@ class SwbBaseline:
             psi_N=np.asarray(bl.psi_N, dtype=float),
             psi_N_kinetic=np.asarray(bl.psi_N_kinetic, dtype=float),
             ne=bl.ne, te=bl.te, ni=bl.ni, ti=bl.ti, Zeff=self._zeff_eq(),
+            kin_regrid=kinetic_regrid(self.config.source),
             coord=getattr(bl, "coord", coords.PSI), p_fast=bl.p_fast,
             z_fast=getattr(bl, "z_fast", None), Z_imp=getattr(bl, "Z_imp", None),
             zeff_includes_fast=bool(getattr(bl, "zeff_includes_fast", False)),

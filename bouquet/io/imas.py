@@ -3219,6 +3219,7 @@ def read_imas_baseline(
                    f"{'psi_N' if coord == _coords.PSI else 'Phi_N'})"
                    if use_ida else ""))
     if use_ida:
+        from ..utils import kinetic_regrid
         T_ida = _hybrid_timing(source, T, eq["time"][ie], cp_ids["time"][ic], aux,
                                cp_times=_cp_time_grid(cp_ids))
         aux["ida_time_match"]["consistent_pair"] = _pair_status
@@ -3233,7 +3234,7 @@ def read_imas_baseline(
             x_phi=None if coord == _coords.PSI else x_run,
             subtract_fast=_subtract,
             zeff_for_ni=Zeff_th, zeff_absent=_zeff_absent,
-            ida_regrid=getattr(source, "ida_regrid", "cubic"))
+            ida_regrid=kinetic_regrid(source))
         if _ni_fast_meta["agrees"] is False and _drift is not None and _drift["exceeds"]:
             _ni_fast_meta["evidence"] += (
                 f"; likely the psi_N(rho) drift ({_drift['evidence']})")

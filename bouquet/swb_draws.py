@@ -14,7 +14,7 @@ from .draw_methods import DrawMethod
 from .physics import ELEMENTARY_CHARGE
 from .sampling import generate_perturbed_GPR, make_rng
 from .TokaMaker_interface import _MAX_PRESSURE_ITER, draw_kinetics
-from .utils import pchip_interp
+from .utils import regrid
 
 #: GS iteration cap of every swb draw solve (Bouquet.generate's DrawSolveGuard
 #: takes the larger of this and draw_solve_maxits)
@@ -58,7 +58,8 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
              p_fast=None, z_fast=None, z2_fast=None, zeff_includes_fast=False,
              Z_imp=None, aux_sigmas=None, aux_baselines=None,
              aux_length_scales=None, ni_from_zeff=True, zeff_dne=None,
-             isolate_edge_jbs=False, kinetic_clips=False, jind_clip=False):
+             isolate_edge_jbs=False, kinetic_clips=False, jind_clip=False,
+             kin_regrid="pchip"):
     """One ``imas_baseline="swb"`` draw: the baseline's solve B with resampled
     inputs.
 
@@ -73,6 +74,7 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
     ``saw_n_dips`` (and ``saw_map_warn`` from the recipe's jphi_saw check).
     ``jind_clip`` (``swb_taper_source``): the seed redraw's negative nodes are
     clipped to 0 (counted in ``jind_clipped``) instead of redrawn.
+    ``kin_regrid``: the kinetic -> equilibrium regrid (``utils.kinetic_regrid``).
     """
     rng = make_rng(rng)
     psi_kin = psi_N_kinetic if psi_N_kinetic is not None else psi_N
@@ -80,7 +82,7 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
     def _kin_to_eq(arr):
         if psi_N_kinetic is None:
             return arr
-        return pchip_interp(psi_kin, arr, psi_N)
+        return regrid(psi_kin, arr, psi_N, kin_regrid)
 
     def _zero(s):
         return s is None or not np.any(np.asarray(s, dtype=float))
@@ -260,6 +262,7 @@ class SwbDraws(DrawMethod):
             ni_from_zeff=i["ni_from_zeff"], zeff_dne=i["zeff_dne"],
             isolate_edge_jbs=i["isolate_edge_jbs"],
             kinetic_clips=bool(i.get("kinetic_clips", False)),
+            kin_regrid=i.get("kin_regrid", "pchip"),
             jind_clip=self.jind_clip)
         if self.core_bands is not None:
             self._judge_core(out[5], out[6])

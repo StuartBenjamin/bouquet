@@ -1138,8 +1138,8 @@ def resolve_uncertainty(config, baseline) -> dict:
                 _ida_in = _ida_x <= 1.0
                 _ida_x = np.interp(_ida_x[_ida_in], *baseline.psi_map)
 
-        from .utils import regrid
-        _how = getattr(src, "ida_regrid", "pchip")
+        from .utils import kinetic_regrid, regrid
+        _how = kinetic_regrid(src)
 
         def _to_kin(arr):       # the kinetics' own regrid (io.imas._merge_ida_kinetics)
             return regrid(_ida_x, np.asarray(arr, dtype=float)[_ida_in], psi_kin, _how)
@@ -1708,14 +1708,13 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         eqdsk, kin, source.profiles_path, coord)
     psi_map = None if _in is None else (np.asarray(psi_N_kin)[_in], x_kin)
 
-    # kinetic profiles (native SI) regridded onto the equilibrium nodes.
-    # Shape-preserving PCHIP (single shared helper): a linear regrid leaves a
-    # slope kink at every kinetic knot, which the Sauter bootstrap inherits
-    # as a stepped jphi_bs (see utils.pchip_interp).
-    from .utils import pchip_interp
+    # kinetic profiles (native SI) regridded onto the equilibrium nodes by the
+    # kinetics' regrid (utils.kinetic_regrid): a linear one would kink them at
+    # every kinetic knot, which the Sauter bootstrap turns into a stepped jphi_bs.
+    from .utils import kinetic_regrid, regrid
 
     def to_eq(arr):
-        return pchip_interp(x_kin, arr, x_run)
+        return regrid(x_kin, arr, x_run, kinetic_regrid(source))
 
     ne_eq, te_eq, ni_eq, ti_eq = to_eq(kin["ne"]), to_eq(kin["te"]), to_eq(kin["ni"]), to_eq(kin["ti"])
     Zeff_eq = np.clip(to_eq(kin["Zeff"]), 1.0, None)
@@ -1740,7 +1739,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     # the equilibrium grid with `to_eq` -- deliberately the same two-step path
     # the draws take (baseline resolves onto x_kin, then
     # perturb_kinetic_equilibrium applies `_kin_to_eq`, which is the identical
-    # pchip_interp).  Resolving fc.psi_N -> x_run in one hop would be a
+    # regrid).  Resolving fc.psi_N -> x_run in one hop would be a
     # slightly different array and would reintroduce the very inconsistency
     # this is fixing.  `p_fast_kin` is also what the returned Baseline.p_fast
     # field carries (kinetic grid), which downstream depends on -- unchanged.

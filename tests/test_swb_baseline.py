@@ -113,7 +113,9 @@ def _baseline():
 
 
 def _ns(bl):
-    ns = types.SimpleNamespace(baseline=bl)
+    # a source without ida_regrid: the kin->eq regrid is pchip, swb_draw's default
+    ns = types.SimpleNamespace(baseline=bl,
+                               config=types.SimpleNamespace(source=types.SimpleNamespace()))
     ns._zeff_eq = lambda: Bouquet._zeff_eq(ns)
     return ns
 

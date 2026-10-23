@@ -120,20 +120,20 @@ def test_recon_and_draw_kin_to_eq_agree_on_the_same_inputs():
     """
     import bouquet.baseline as _baseline
     import bouquet.TokaMaker_interface as _tmi
-    from bouquet.utils import pchip_interp
+    from bouquet.utils import kinetic_regrid, regrid
 
     psi_kin = np.linspace(0.0, 1.0, 150)
     psi_eq = np.linspace(0.0, 1.0, 129)
 
     draw_k2e = _materialize_nested(
         _tmi.perturb_kinetic_equilibrium, "_kin_to_eq",
-        dict(np=np, pchip_interp=pchip_interp,
+        dict(np=np, regrid=regrid, kin_regrid="pchip",
              _dual_grid=True, psi_kin=psi_kin, psi_N=psi_eq),
     )
     recon_k2e = _materialize_nested(
         _baseline._resolve_reconstruction, "to_eq",
-        dict(np=np, pchip_interp=pchip_interp,
-             x_kin=psi_kin, x_run=psi_eq),
+        dict(np=np, regrid=regrid, kinetic_regrid=kinetic_regrid,
+             source=object(), x_kin=psi_kin, x_run=psi_eq),
     )
 
     # A smooth core profile, a pedestal-like profile (where a linear regrid
@@ -156,12 +156,13 @@ def test_recon_and_draw_kin_to_eq_agree_on_the_same_inputs():
     assert np.all(out >= -1e-9), "kin->eq regrid must not undershoot below zero"
 
 
-def test_every_kin_to_eq_site_routes_through_pchip_interp():
+def test_every_kin_to_eq_site_routes_through_regrid():
     """No kin->eq site may use a different interpolant.
 
     The two helpers exercised above are ``def``s; the remaining sites are
     lambdas/defs inside ``generate_bouquet`` that cannot be materialized as
-    cleanly.  Assert structurally that each one calls ``pchip_interp`` and that
+    cleanly.  Assert structurally that each one calls ``regrid`` (with the
+    kinetics' method, ``utils.kinetic_regrid``) and that
     no linear regrid (``np.interp`` / ``interp1d``) has crept into the kin->eq
     role next to it.
     """
@@ -201,9 +202,9 @@ def test_every_kin_to_eq_site_routes_through_pchip_interp():
                 if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
                 and isinstance(c.func.value, ast.Name)
             }
-            assert "pchip_interp" in called, (
+            assert "regrid" in called, (
                 f"{mod.__name__}.{name} (line {body.lineno}) no longer regrids "
-                f"through pchip_interp; it calls {sorted(called | attr_called)}"
+                f"through regrid; it calls {sorted(called | attr_called)}"
             )
             forbidden = {"np.interp", "interp1d", "_interp1d"}
             assert not (forbidden & (called | attr_called)), (
