@@ -46,14 +46,15 @@ def test_the_run_grid_ni_is_the_formula_of_the_run_grid_ne_and_zeff(monkeypatch)
                                _ida().ni[np.isin(xi, psi)], rtol=1e-13)
 
 
-def test_the_ida_profiles_are_regridded_c1(monkeypatch):
-    """IDA's kinetics reach the run grid through pchip_interp (C1): a linear
-    regrid kinks every profile at each IDA knot, and P' (FF') then jumps there."""
-    from bouquet.utils import pchip_interp
+def test_the_ida_profiles_are_regridded_c2(monkeypatch):
+    """IDA's kinetics reach the run grid through the cubic spline (C2) by
+    default: a linear regrid kinks every profile at each IDA knot, and P'
+    (FF') then jumps there."""
+    from bouquet.utils import regrid
     ida = _ida()
     psi, out = _merge(monkeypatch, ida)
     for got, src in zip(out[:3], (ida.ne, ida.te, ida.ti)):
-        np.testing.assert_allclose(got, pchip_interp(ida.psi_N, src, psi), rtol=1e-14)
+        np.testing.assert_allclose(got, regrid(ida.psi_N, src, psi, "cubic"), rtol=1e-14)
     slope = np.diff(out[0]) / np.diff(psi)
     knot = np.searchsorted(psi, 0.5)                  # an IDA knot that is a run node
     assert abs(slope[knot] - slope[knot - 1]) < 0.05 * abs(slope[knot])
@@ -62,7 +63,7 @@ def test_the_ida_profiles_are_regridded_c1(monkeypatch):
 @pytest.mark.parametrize("method", ["linear", "pchip", "cubic"])
 def test_the_ida_regrid_is_the_configured_method(monkeypatch, method):
     """ImasSource.ida_regrid picks how IDA's kinetics and their sigma reach
-    the run grid (ledger B-24: pchip)."""
+    the run grid (ledger B-24: cubic)."""
     from bouquet.utils import regrid
     ida = _ida()
     psi, out = _merge(monkeypatch, ida, ida_regrid=method)

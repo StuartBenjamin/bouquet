@@ -308,8 +308,8 @@ class ImasSource:
     # "ida_fuse" by default.
     ida_timing: str = "ida_fuse"
     # How the IDA kinetics and their sigma reach the run grid: one of
-    # bouquet.utils.REGRIDS ("linear", "pchip", "cubic"); ledger B-24.
-    ida_regrid: str = "pchip"
+    # bouquet.utils.REGRIDS ("linear", "pchip", "cubic"); ledger B-24: cubic (C2).
+    ida_regrid: str = "cubic"
     # --- IDA-hybrid kinetics (GenerationConfig.kinetic_source = "ida_hybrid") ---
     # When set, the baseline ne/Te/Ti/ni/Z_eff/omega_tor come from this IDA
     # .cdf (externally fit, smoother across time than FUSE's per-slice fits),

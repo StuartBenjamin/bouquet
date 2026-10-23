@@ -2532,7 +2532,7 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
                          ni_source="standard", zeff_from_fuse=False,
                          z_fast=None, z2_fast=None, x_phi=None,
                          subtract_fast=False, zeff_for_ni=None,
-                         zeff_absent=False, ida_regrid="pchip"):
+                         zeff_absent=False, ida_regrid="cubic"):
     """IDA-hybrid kinetics: replace FUSE ne/Te/Ti (+omega) -- and on the
     measured routes ni/Zeff -- with IDA fits, resampled onto the FUSE
     ``psi_N`` grid (psi_N == psi_N_kinetic).
@@ -3233,7 +3233,7 @@ def read_imas_baseline(
             x_phi=None if coord == _coords.PSI else x_run,
             subtract_fast=_subtract,
             zeff_for_ni=Zeff_th, zeff_absent=_zeff_absent,
-            ida_regrid=getattr(source, "ida_regrid", "pchip"))
+            ida_regrid=getattr(source, "ida_regrid", "cubic"))
         if _ni_fast_meta["agrees"] is False and _drift is not None and _drift["exceeds"]:
             _ni_fast_meta["evidence"] += (
                 f"; likely the psi_N(rho) drift ({_drift['evidence']})")

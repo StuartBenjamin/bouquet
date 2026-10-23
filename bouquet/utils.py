@@ -5998,8 +5998,8 @@ def regrid(x_src, y_src, x_out, method):
     (a slope kink at every source knot), ``"pchip"`` (C1, shape-preserving) or
     ``"cubic"`` (not-a-knot spline, C2; it may overshoot near a turning point --
     at most 3e-3 of the profile maximum over Engaging's 435 IDA files).
-    Duplicate source points are dropped (first kept) and the endpoint values
-    are held outside the source range.'''
+    Duplicate source points are dropped (first kept); the endpoint values are
+    returned at the end knots and held outside the source range.'''
     from scipy.interpolate import CubicSpline, PchipInterpolator
 
     x_src = np.asarray(x_src, dtype=float)
@@ -6015,9 +6015,9 @@ def regrid(x_src, y_src, x_out, method):
         raise ValueError(f"regrid method {method!r} must be one of {REGRIDS}")
     spline = PchipInterpolator if method == "pchip" else CubicSpline
     out = spline(x_u, y_u, extrapolate=False)(x_out)
-    # hold endpoint values outside the source range (no poly extrapolation)
-    out = np.where(x_out < x_u[0], y_u[0], out)
-    out = np.where(x_out > x_u[-1], y_u[-1], out)
+    # endpoint values at the end knots (exact) and beyond (no poly extrapolation)
+    out = np.where(x_out <= x_u[0], y_u[0], out)
+    out = np.where(x_out >= x_u[-1], y_u[-1], out)
     return out
 
 
