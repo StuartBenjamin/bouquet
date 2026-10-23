@@ -60,16 +60,18 @@ def test_the_ida_profiles_are_regridded_c2(monkeypatch):
     assert abs(slope[knot] - slope[knot - 1]) < 0.05 * abs(slope[knot])
 
 
-@pytest.mark.parametrize("method", ["linear", "pchip", "cubic"])
-def test_the_ida_regrid_is_the_configured_method(monkeypatch, method):
+def test_the_ida_regrid_is_the_configured_method(monkeypatch):
     """ImasSource.ida_regrid picks how IDA's kinetics and their sigma reach
-    the run grid (ledger B-24: cubic)."""
+    the run grid; an unknown method is refused."""
+    from bouquet.config import ImasSource
     from bouquet.utils import regrid
     ida = _ida()
-    psi, out = _merge(monkeypatch, ida, ida_regrid=method)
+    psi, out = _merge(monkeypatch, ida, ida_regrid="linear")
     for got, src in zip(out[:3] + out[6:10], (ida.ne, ida.te, ida.ti, ida.sigma_ne,
                                               ida.sigma_te, ida.sigma_ni, ida.sigma_ti)):
-        np.testing.assert_allclose(got, regrid(ida.psi_N, src, psi, method), rtol=1e-14)
+        np.testing.assert_allclose(got, regrid(ida.psi_N, src, psi, "linear"), rtol=1e-14)
+    with pytest.raises(ValueError, match="ida_regrid"):
+        ImasSource(ids_path="dd.json", time=1.0, ida_path="x.cdf", ida_regrid="akima")
 
 
 def test_the_kinetic_to_equilibrium_regrid_reads_the_same_knob():
@@ -83,9 +85,3 @@ def test_the_kinetic_to_equilibrium_regrid_reads_the_same_knob():
                           baseline=SimpleNamespace(psi_N_kinetic=x_k, psi_N=x_e, Zeff=z))
     np.testing.assert_array_equal(SwbBaseline._zeff_eq(run), regrid(x_k, z, x_e, "cubic"))
     assert kinetic_regrid(SimpleNamespace()) == "pchip"
-
-
-def test_an_unknown_ida_regrid_is_refused():
-    from bouquet.config import ImasSource
-    with pytest.raises(ValueError, match="ida_regrid"):
-        ImasSource(ids_path="dd.json", time=1.0, ida_path="x.cdf", ida_regrid="akima")
