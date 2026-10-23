@@ -186,6 +186,18 @@ def test_a_time_keeps_its_slices_whole_and_cuts_the_rest(tmp_path):
     imas.clear_dd_cache()
 
 
+def test_releasing_the_parsed_pages_leaves_the_lean_read_unchanged(tmp_path, monkeypatch):
+    p = str(tmp_path / "dd_sim.json")
+    _sliced_dd(p)
+    kept = imas._load_dd(p, 2.4)
+    imas.clear_dd_cache()
+    calls, release = [], imas._release_parsed
+    monkeypatch.setattr(imas, "DD_RELEASE_BYTES", 64)
+    monkeypatch.setattr(imas, "_release_parsed", lambda b, i, j: calls.append(j) or release(b, i, j))
+    assert imas._load_dd(p, 2.4) == kept and len(calls) > 10
+    imas.clear_dd_cache()
+
+
 def test_a_non_ascii_dd_and_lean_dd_off_read_it_whole(tmp_path):
     p = str(tmp_path / "dd_sim.json")
     whole = _sliced_dd(p, ensure_ascii=False)

@@ -109,6 +109,8 @@ _DD_TIME_SLICES = {"equilibrium": {"time_slice": ("time",)},
                                                                 "j_parallel")}]}}
 #: Half-width [s] of the window of whole time slices kept around that time.
 DD_TIME_WINDOW = 0.05
+#: Bytes of the memory map parsed between hand-backs of its pages (:func:`_release_parsed`).
+DD_RELEASE_BYTES = 1 << 26
 _JSON_WS = re.compile(rb"[ \t\n\r]*")
 _JSON = json.JSONDecoder()
 
@@ -127,8 +129,20 @@ def _json_value(b, i: int):
                 raise
         else:
             if n < len(s) or i + w >= len(b):
+                _release_parsed(b, i, i + n)
                 return v, i + n
         w *= 4
+
+
+def _release_parsed(b, i, j):
+    """Hand the pages of the memory map ``b`` before the parse back to the kernel
+    each time a value (``b[i:j]``) crosses a :data:`DD_RELEASE_BYTES` boundary:
+    otherwise every page read stays mapped, and counts in the process's
+    memory, until the whole dd is parsed.  The parse only moves forward; a
+    page touched again is read back from the file."""
+    k = j // DD_RELEASE_BYTES * DD_RELEASE_BYTES
+    if k > i and hasattr(b, "madvise"):
+        b.madvise(mmap.MADV_DONTNEED, 0, k)
 
 
 def _json_sliced(b, i: int, spec, time: float):
@@ -192,7 +206,8 @@ def _cached_dd(ids_path: str, _mtime_ns: int, _size: int,
     resident for the life of the process.  Given ``time``, an ASCII file
     whose core_profiles has a slice at that time (a FUSE macro step, as the
     study's units ask) is read through a memory map with only the time slices
-    near it whole (:func:`_json_sliced`): a small fraction of that.
+    near it whole (:func:`_json_sliced`), its parsed pages handed back as it
+    goes (:func:`_release_parsed`): a small fraction of that.
     :func:`clear_dd_cache` releases them."""
     with open(ids_path, "rb") as fh:
         if time is not None:
