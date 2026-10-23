@@ -5986,7 +5986,21 @@ def pchip_interp(x_src, y_src, x_out):
     PCHIP regrids between the recon and draw paths would break the
     sigma=0 consistency that verify_sigma0_consistency() guards.
     '''
-    from scipy.interpolate import PchipInterpolator
+    return regrid(x_src, y_src, x_out, "pchip")
+
+
+#: The profile regrids of :func:`regrid` (``ImasSource.ida_regrid``).
+REGRIDS = ("linear", "pchip", "cubic")
+
+
+def regrid(x_src, y_src, x_out, method):
+    r'''Regrid a profile onto ``x_out`` with one of :data:`REGRIDS`: ``"linear"``
+    (a slope kink at every source knot), ``"pchip"`` (C1, shape-preserving) or
+    ``"cubic"`` (not-a-knot spline, C2; it may overshoot near a turning point --
+    at most 3e-3 of the profile maximum over Engaging's 435 IDA files).
+    Duplicate source points are dropped (first kept) and the endpoint values
+    are held outside the source range.'''
+    from scipy.interpolate import CubicSpline, PchipInterpolator
 
     x_src = np.asarray(x_src, dtype=float)
     y_src = np.asarray(y_src, dtype=float)
@@ -5994,8 +6008,13 @@ def pchip_interp(x_src, y_src, x_out):
     x_u, idx = np.unique(x_src, return_index=True)
     y_u = y_src[idx]
     if x_u.size < 2:
-        raise ValueError("pchip_interp: fewer than 2 unique source points")
-    out = PchipInterpolator(x_u, y_u, extrapolate=False)(x_out)
+        raise ValueError(f"{method} regrid: fewer than 2 unique source points")
+    if method == "linear":
+        return np.interp(x_out, x_u, y_u)
+    if method not in REGRIDS:
+        raise ValueError(f"regrid method {method!r} must be one of {REGRIDS}")
+    spline = PchipInterpolator if method == "pchip" else CubicSpline
+    out = spline(x_u, y_u, extrapolate=False)(x_out)
     # hold endpoint values outside the source range (no poly extrapolation)
     out = np.where(x_out < x_u[0], y_u[0], out)
     out = np.where(x_out > x_u[-1], y_u[-1], out)

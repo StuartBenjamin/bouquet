@@ -6,6 +6,7 @@ Synthetic inputs only.
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 import bouquet.io.imas as I
 from bouquet.physics import main_ion_density_from_zeff
@@ -24,14 +25,14 @@ def _ida():
                            sigma_ti=s, q=None)
 
 
-def _merge(monkeypatch, ida):
+def _merge(monkeypatch, ida, **kw):
     import bouquet.io.ida as IDA
     monkeypatch.setattr(IDA, "read_ida", lambda *a, **k: ida)
     monkeypatch.setattr(I, "_read_ida_omega", lambda *a, **k: None)
     psi = np.linspace(0.0, 1.0, 101)                  # finer run grid
     # the EXPERIMENTAL IDA route (PR #56): ni rebuilt from IDA's (ne, Z_eff)
     return psi, I._merge_ida_kinetics(psi, None, None, None, "x.cdf", 1.0, _Z,
-                                      ni_source="all")
+                                      ni_source="all", **kw)
 
 
 def test_the_run_grid_ni_is_the_formula_of_the_run_grid_ne_and_zeff(monkeypatch):
@@ -56,3 +57,21 @@ def test_the_ida_profiles_are_regridded_c1(monkeypatch):
     slope = np.diff(out[0]) / np.diff(psi)
     knot = np.searchsorted(psi, 0.5)                  # an IDA knot that is a run node
     assert abs(slope[knot] - slope[knot - 1]) < 0.05 * abs(slope[knot])
+
+
+@pytest.mark.parametrize("method", ["linear", "pchip", "cubic"])
+def test_the_ida_regrid_is_the_configured_method(monkeypatch, method):
+    """ImasSource.ida_regrid picks how IDA's kinetics and their sigma reach
+    the run grid (ledger B-24: pchip)."""
+    from bouquet.utils import regrid
+    ida = _ida()
+    psi, out = _merge(monkeypatch, ida, ida_regrid=method)
+    for got, src in zip(out[:3] + out[6:10], (ida.ne, ida.te, ida.ti, ida.sigma_ne,
+                                              ida.sigma_te, ida.sigma_ni, ida.sigma_ti)):
+        np.testing.assert_allclose(got, regrid(ida.psi_N, src, psi, method), rtol=1e-14)
+
+
+def test_an_unknown_ida_regrid_is_refused():
+    from bouquet.config import ImasSource
+    with pytest.raises(ValueError, match="ida_regrid"):
+        ImasSource(ids_path="dd.json", time=1.0, ida_path="x.cdf", ida_regrid="akima")

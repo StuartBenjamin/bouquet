@@ -2532,7 +2532,7 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
                          ni_source="standard", zeff_from_fuse=False,
                          z_fast=None, z2_fast=None, x_phi=None,
                          subtract_fast=False, zeff_for_ni=None,
-                         zeff_absent=False):
+                         zeff_absent=False, ida_regrid="pchip"):
     """IDA-hybrid kinetics: replace FUSE ne/Te/Ti (+omega) -- and on the
     measured routes ni/Zeff -- with IDA fits, resampled onto the FUSE
     ``psi_N`` grid (psi_N == psi_N_kinetic).
@@ -2592,11 +2592,11 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
                                     np.asarray(psi_N, dtype=float), _zd)
     ida = read_ida(ida_path, time=time, impurity_Z=impurity_Z, ni_source=ni_source,
                    zeff_substitute=_zsub)
-    from ..utils import pchip_interp      # C1 regrid: np.interp left a p' kink at every IDA knot
+    from ..utils import regrid            # ImasSource.ida_regrid (B-24)
     _ipsi = np.asarray(ida.psi_N, dtype=float)
     ida_map = None
     if x_phi is None:
-        g = lambda a: pchip_interp(_ipsi, np.asarray(a, dtype=float), psi_N)
+        g = lambda a: regrid(_ipsi, np.asarray(a, dtype=float), psi_N, ida_regrid)
     else:
         if ida.q is None:
             raise ValueError(f"coord='phi_n': {ida_path!r} carries no q, so its "
@@ -2605,7 +2605,7 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
         _in, _iphi = phi_n_from_q(_ipsi, ida.q, bracket=True)
         _n = int(np.count_nonzero(_ipsi <= 1.0))     # psi_map: inside the LCFS only
         ida_map = (_ipsi[_in][:_n], _iphi[:_n])
-        g = lambda a: pchip_interp(_iphi, np.asarray(a, dtype=float)[_in], x_phi)
+        g = lambda a: regrid(_iphi, np.asarray(a, dtype=float)[_in], x_phi, ida_regrid)
     ne, te, ti = g(ida.ne), g(ida.te), g(ida.ti)
     sigma_ne, sigma_te, sigma_ni, sigma_ti = (
         g(ida.sigma_ne), g(ida.sigma_te), g(ida.sigma_ni), g(ida.sigma_ti))
@@ -2650,8 +2650,7 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
                                         "dd's thermal Z_eff with the beam's "
                                         "charge z_fast in quasineutrality, "
                                         "no subtraction"}
-        omega = _read_ida_omega(ida_path, time, psi_N,
-                                place=None if x_phi is None else g)
+        omega = _read_ida_omega(ida_path, time, psi_N, place=g)
         return (ne, te, ti, ni, zeff, omega, sigma_ne, sigma_te, sigma_ni,
                 sigma_ti, ida, ni_fast_meta, ida_map)
     zeff = np.asarray(Zeff_fuse, dtype=float) if zeff_from_fuse else g(ida.Zeff)
@@ -2676,7 +2675,7 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
         ni_fast_meta = {"applied": False, "agrees": None, "mismatch": None,
                         "gate": None,
                         "evidence": "no fast-ion charge moments supplied"}
-    omega = _read_ida_omega(ida_path, time, psi_N, place=None if x_phi is None else g)
+    omega = _read_ida_omega(ida_path, time, psi_N, place=g)
     return (ne, te, ti, ni, zeff, omega, sigma_ne, sigma_te, sigma_ni,
             sigma_ti, ida, ni_fast_meta, ida_map)
 
@@ -3233,7 +3232,8 @@ def read_imas_baseline(
             z_fast=z_fast, z2_fast=z2_fast,
             x_phi=None if coord == _coords.PSI else x_run,
             subtract_fast=_subtract,
-            zeff_for_ni=Zeff_th, zeff_absent=_zeff_absent)
+            zeff_for_ni=Zeff_th, zeff_absent=_zeff_absent,
+            ida_regrid=getattr(source, "ida_regrid", "pchip"))
         if _ni_fast_meta["agrees"] is False and _drift is not None and _drift["exceeds"]:
             _ni_fast_meta["evidence"] += (
                 f"; likely the psi_N(rho) drift ({_drift['evidence']})")

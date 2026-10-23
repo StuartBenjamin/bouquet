@@ -273,12 +273,12 @@ class TestIdaHybridPhi:
                 f["q"] = (1.0 + 4.0 * psi ** 2)[None, :]
         return ddp, cdf, psi
 
-    def _read(self, ddp, cdf, coord):
+    def _read(self, ddp, cdf, coord, **kw):
         from bouquet.io.imas import read_imas_baseline
         from bouquet.config import ImasSource
         return read_imas_baseline(
             ImasSource(ids_path=ddp, time=1.0, ida_path=cdf, impurity_Z=6.0,
-                       coord=coord), kinetic_source="ida_hybrid")
+                       coord=coord, **kw), kinetic_source="ida_hybrid")
 
     def test_te_is_placed_by_the_ida_phi_n(self, tmp_path):
         ddp, cdf, psi = self._build(tmp_path)
@@ -291,17 +291,18 @@ class TestIdaHybridPhi:
         blp = self._read(ddp, cdf, "psi_n")
         assert np.max(np.abs(bl.te - blp.te)) > 0.01 * np.max(blp.te)
 
-    def test_the_envelope_follows_the_same_map(self, tmp_path):
+    @pytest.mark.parametrize("method", ["linear", "pchip", "cubic"])
+    def test_the_envelope_follows_the_same_map(self, tmp_path, method):
         from bouquet.baseline import resolve_uncertainty
         from bouquet.config import (BouquetConfig, ImasSource, SolverConfig,
                                     UncertaintyConfig)
         ddp, cdf, _ = self._build(tmp_path)
-        bl = self._read(ddp, cdf, "phi_n")
+        bl = self._read(ddp, cdf, "phi_n", ida_regrid=method)
         # the IDA sigma file wired as from_imas wires it (under the default
         # ni_source="standard" only uncertainty.ida_path supplies IDA sigmas)
         cfg = BouquetConfig(
             source=ImasSource(ids_path=ddp, time=1.0, ida_path=cdf,
-                              impurity_Z=6.0, coord="phi_n"),
+                              impurity_Z=6.0, coord="phi_n", ida_regrid=method),
             solver=SolverConfig(mesh_path="unused"), output_header="unused",
             uncertainty=UncertaintyConfig(ida_path=cdf))
         env = resolve_uncertainty(cfg, bl)

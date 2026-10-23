@@ -307,6 +307,9 @@ class ImasSource:
     # slices (the #73 timing before review); the match is still recorded.  PSFC_dev:
     # "ida_fuse" by default.
     ida_timing: str = "ida_fuse"
+    # How the IDA kinetics and their sigma reach the run grid: one of
+    # bouquet.utils.REGRIDS ("linear", "pchip", "cubic"); ledger B-24.
+    ida_regrid: str = "pchip"
     # --- IDA-hybrid kinetics (GenerationConfig.kinetic_source = "ida_hybrid") ---
     # When set, the baseline ne/Te/Ti/ni/Z_eff/omega_tor come from this IDA
     # .cdf (externally fit, smoother across time than FUSE's per-slice fits),
@@ -431,6 +434,10 @@ class ImasSource:
         if self.ida_timing not in IDA_TIMINGS:
             raise ValueError(f"ImasSource.ida_timing={self.ida_timing!r} must be one of "
                              f"{IDA_TIMINGS}")
+        from .utils import REGRIDS
+        if self.ida_regrid not in REGRIDS:
+            raise ValueError(f"ImasSource.ida_regrid={self.ida_regrid!r} must be one of "
+                             f"{REGRIDS}")
         for _n in ("zeff_fast_ions", "include_pfast"):
             if not isinstance(getattr(self, _n), bool):
                 raise ValueError(f"ImasSource.{_n}={getattr(self, _n)!r}: "
