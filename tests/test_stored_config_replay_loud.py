@@ -125,7 +125,7 @@ def test_the_loop_loud_entry_waits_for_the_loop():
 # ---------------------------------------------------------------------------
 #  coil_solve_mode read back on load
 # ---------------------------------------------------------------------------
-def _archive(tmp_path, name, mode=None, key=0):
+def _archive(tmp_path, name, mode=None, key=0, swb=False):
     from bouquet.utils import (initialize_equilibrium_database,
                                stamp_coil_solve_mode,
                                store_baseline_profiles, write_provenance)
@@ -138,6 +138,8 @@ def _archive(tmp_path, name, mode=None, key=0):
         warnings.simplefilter("ignore")
         cfg = BouquetConfig.from_dict(_stored("legacy"))
     cfg.generation.scan_key = key
+    if swb:
+        cfg.generation.imas_baseline = "swb"
     write_provenance(header, config=cfg, scan_key=key)
     stamp_coil_solve_mode(header, scan_key=key, mode=mode)
     return header
@@ -170,6 +172,12 @@ def test_an_archive_in_the_canonical_mode_loads_quietly(tmp_path):
     h2 = _archive(tmp_path, "other", mode="unknown")
     msgs = _load_cfg(h2)
     assert len(msgs) == 1 and "coil_solve_mode='unknown'" in msgs[0]
+
+
+def test_an_swb_archive_is_quiet_in_its_own_unbounded_mode(tmp_path):
+    assert _load_cfg(_archive(tmp_path, "swb", mode="unbounded", swb=True)) == []
+    msgs = _load_cfg(_archive(tmp_path, "swb_b", mode="bounded", swb=True))
+    assert len(msgs) == 1 and "canonical one ('unbounded')" in msgs[0]
 
 
 def test_the_engine_record_is_read_when_the_attr_is_absent(tmp_path):

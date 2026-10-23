@@ -4749,28 +4749,31 @@ def load_coil_solve_mode(h5path_or_header, scan_key=None):
     return None, None
 
 
-def _warn_replayed_coil_solve_mode(path, scan_key):
-    """Warn when a stored run's coil-solve mode is not the canonical one
-    (or not recorded: the archive predates the record)."""
+def _warn_replayed_coil_solve_mode(path, scan_key,
+                                   expected=CANONICAL_COIL_SOLVE_MODE):
+    """Warn when a stored run's coil-solve mode is not *expected*, the mode
+    a replay of its config runs in (or not recorded: the archive predates
+    the record)."""
     import warnings
     try:
         mode, where = load_coil_solve_mode(path, scan_key)
     except (OSError, KeyError, ValueError):
         return
-    if mode == CANONICAL_COIL_SOLVE_MODE:
+    if mode == expected:
         return
     state = ("records no coil_solve_mode: it predates the canonical "
              "coil-solve mode" if mode is None else
              f"records coil_solve_mode={mode!r} ({where}), not the "
-             "canonical one")
+             f"canonical one ({expected!r})")
     warnings.warn(
         f"stored run {os.path.basename(str(path))!r}"
         + ("" if scan_key is None else f" (scan {scan_key!r})")
-        + f" {state} (one bounded coil solve entered at setup_solver, "
-        "2026-10-06; not switchable): replaying this config runs every solve "
-        "bounded -- results may differ from the stored run (measured <= 5e-7 "
-        "relative on reconstructions and <= 5e-4 on archived draws; yields "
-        "and in-spec flags unchanged)", UserWarning, stacklevel=3)
+        + f" {state} (one coil solve mode per method, entered at "
+        "setup_solver, 2026-10-06; not switchable): replaying this config "
+        f"runs every solve {expected} -- results may differ from the stored "
+        "run (measured <= 5e-7 relative on reconstructions and <= 5e-4 on "
+        "archived draws; yields and in-spec flags unchanged)", UserWarning,
+        stacklevel=3)
 
 
 GENERATION_PROVENANCE_KEYS = ("n_requested", "n_requested_source",
@@ -4939,9 +4942,13 @@ def load_config(h5path_or_header, scan_key=None):
     cfg = BouquetConfig.from_json(raw.decode() if isinstance(raw, bytes)
                                   else str(raw))
     # the coil-solve mode the stored run was in, read back: a replay runs
-    # the canonical (bounded) mode, so an archive without the record (or
-    # with another mode) is said to differ (2026-10-06)
-    _warn_replayed_coil_solve_mode(path, _sk)
+    # its method's mode (bounded; swb unbounded, SwbDraws.bounded_coil_mode),
+    # so an archive without the record (or with another mode) is said to
+    # differ (2026-10-06)
+    from .config import solve_method_of
+    _warn_replayed_coil_solve_mode(
+        path, _sk, "unbounded" if solve_method_of(cfg.generation) == "swb"
+        else CANONICAL_COIL_SOLVE_MODE)
     return cfg
 
 
