@@ -22,6 +22,10 @@ SWB_IP_TOL = 5e-3
 #: engine's I_p acceptance; the method's own solver test measures <= 8e-6),
 #: so how often the looser acceptance is used is visible (review PR69 B1).
 SWB_IP_WARN = 1e-4
+#: Picard under-relaxation (TokaMaker ``settings.urf``, the old iterate's weight) of a
+#: warm replay's solves: they start near the solution, which the default 0.2 only damps
+#: (a 200061 draw: 29 -> 22 iterations, the same solution within 5e-5).
+SWB_REPLAY_URF = 0.0
 #: solve_with_bootstrap outputs of the sawtooth reset (GenerationConfig.swb_saw_q).
 _SWB_SAW_KEYS = ("jphi_saw_out", "saw_rho_m", "saw_rho_out", "saw_n_dips")
 #: swb_saw_q: with no reset (saw_n_dips 0) warn when max|jphi_saw_out - jphi_saw| exceeds
@@ -174,9 +178,10 @@ class SwbBaseline:
         ``{coil: A-t}`` dict installs the strong reg toward it (solve B, the
         sigma=0 check and every draw). ``warm_eq`` (a ``copy_eq``): start from
         that equilibrium instead of ``init_psi`` (solve B's fallback in
-        :meth:`_swb_imas_baseline`). ``kin``: ``ne te ni ti Zeff p_fixed`` on
-        ``psi_N``.  Returns the SWB result dict (its ``jphi_saw_out`` / ``saw_rho_m``
-        / ``saw_n_dips`` only when ``swb_saw_q`` is set).
+        :meth:`_swb_imas_baseline`; :meth:`replay_swb`'s archived states).
+        ``kin``: ``ne te ni ti Zeff p_fixed`` on ``psi_N``.  Returns the SWB
+        result dict (its ``jphi_saw_out`` / ``saw_rho_m`` / ``saw_n_dips`` only
+        when ``swb_saw_q`` is set).
         """
         from .oft_bootstrap import solve_with_bootstrap
         from .TokaMaker_interface import strong_coil_reg
@@ -313,7 +318,8 @@ class SwbBaseline:
             jphi_total=np.asarray(res["jphi_total"], dtype=float),
             j_fixed=(None if res.get("j_fixed") is None
                      else np.asarray(res["j_fixed"], dtype=float)),
-            ip_rel_err=res.get("ip_rel_err"))
+            ip_rel_err=res.get("ip_rel_err"),
+            **{k: res[k] for k in ("swb_jbs_convention", "swb_jbs_conversion") if k in res})
         if res.get("jphi_pd") is not None:
             st["jphi_pd"] = np.asarray(res["jphi_pd"], dtype=float)
         if res.get("jphi_saw_out") is not None:
@@ -346,11 +352,13 @@ class SwbBaseline:
         kin = self._swb_baseline_kinetics()
 
         pad = float(self.config.source.psi_pad)
-        st_a = self._swb_state(self._swb_solve(kin, bl.swb_seed_profile),
+        warm = getattr(self, "_swb_warm_eq", None)     # replay_swb: the archived baseline
+        st_a = self._swb_state(self._swb_solve(kin, bl.swb_seed_profile, warm_eq=warm),
                                bl.swb_seed_profile, pad)
         self._swb_eq_a = None
         try:
-            res = self._swb_solve(kin, bl.swb_seed_profile, coil_reg_target=st_a["coils"])
+            res = self._swb_solve(kin, bl.swb_seed_profile, coil_reg_target=st_a["coils"],
+                                  warm_eq=warm)
         except ValueError as e:
             # B holds the coils at A's from the first iterate, which can diverge
             # from the LCFS-shaped start although A converged: retry once from
@@ -360,7 +368,7 @@ class SwbBaseline:
             import warnings
             warnings.warn(f"swb solve B failed cold ({e}); retrying from solve A's "
                           "equilibrium", RuntimeWarning, stacklevel=2)
-            self._swb_solve(kin, bl.swb_seed_profile)
+            self._swb_solve(kin, bl.swb_seed_profile, warm_eq=warm)
             self._swb_eq_a = self.mygs.copy_eq()
             res = self._swb_solve(kin, bl.swb_seed_profile, coil_reg_target=st_a["coils"],
                                   warm_eq=self._swb_eq_a)
@@ -503,6 +511,30 @@ class SwbBaseline:
                     coord=getattr(bl, "coord", coords.PSI), passed=passed,
                     swb_dev=dev)
 
+    def replay_swb(self, source, *, warm=True):
+        """:meth:`prepare_baseline` and :meth:`generate` with the draws of the
+        swb archive *source* (this slice) instead of new ones -- e.g. after a
+        change of how the kinetics are regridded: draw k is re-solved on this
+        baseline from its own random numbers, under the same draw number
+        (:class:`~bouquet.swb_draws.SwbReplayDraws`; every archived draw, no
+        until-N stop), and solve B is not repeated for the draws.  ``warm``:
+        solves A and B start from the archived baseline and each draw from its
+        archived equilibrium, at :data:`SWB_REPLAY_URF`."""
+        from .archive import BouquetArchive
+        key = self.config.generation.scan_key
+        scan = BouquetArchive(source).scan(key)
+        settings = self.mygs.settings
+        urf = settings.urf
+        if warm:
+            self._swb_warm_eq = scan.baseline_view().load_state(self.mygs).copy_eq()
+            settings.urf = SWB_REPLAY_URF
+        try:
+            self.prepare_baseline()
+            return self.generate(n=max(scan.indices) + 1,
+                                 replay=dict(source=source, scan_key=key, warm=warm))
+        finally:
+            settings.urf, self._swb_warm_eq = urf, None
+
 
 def swb_jind_sigma(sigma_jphi, jphi_total, seed):
     """The swb inductive redraw's sigma, in seed units: sigma_jphi's relative
@@ -515,22 +547,29 @@ def swb_jind_sigma(sigma_jphi, jphi_total, seed):
     return rel * np.abs(np.asarray(seed, dtype=float))
 
 
-def build_swb_context(bq, env):
+def build_swb_context(bq, env, replay=None):
     """The :class:`~bouquet.swb_draws.SwbDraws` of a prepared swb baseline:
     each draw is solve B (``_swb_solve`` toward solve A's coils) with
     resampled inputs, from solve A's equilibrium when solve B needed it
     (``swb_b_warm_start``).  Puts ``mygs`` back on solve B first (generate_bouquet
-    reads its drift / LCFS / warm-start references off ``mygs``)."""
+    reads its drift / LCFS / warm-start references off ``mygs``).  ``replay``:
+    the :class:`~bouquet.swb_draws.SwbReplayDraws` arguments of
+    :meth:`SwbBaseline.replay_swb` instead, whose solve B is still on ``mygs``."""
     from functools import partial
     from .filtering import resolve_inspec_bands
-    from .swb_draws import SwbDraws
+    from .swb_draws import SwbDraws, SwbReplayDraws
     bl, gc = bq.baseline, bq.config.generation
     if bl.coil_reg_target is None or bl.swb_baseline is None:
         raise ValueError('imas_baseline="swb": the baseline was not prepared '
                          'by _swb_imas_baseline (no solve A coils)')
     warm = getattr(bq, "_swb_eq_a", None)      # solve B's and the draws' start (None: cold)
-    res_b = bq._swb_solve(bq._swb_baseline_kinetics(), bl.swb_seed_profile,
-                          coil_reg_target=bl.coil_reg_target, warm_eq=warm)
+    if replay is None:
+        res_b = bq._swb_solve(bq._swb_baseline_kinetics(), bl.swb_seed_profile,
+                              coil_reg_target=bl.coil_reg_target, warm_eq=warm)
+    else:               # replay_swb has just prepared the baseline: mygs is on solve B
+        res_b = bl.swb_baseline
+        if bq.mygs.get_coil_currents()[0] != res_b["coils"]:
+            raise RuntimeError("replay: mygs is not on solve B (replay_swb prepares the baseline)")
     _ic = bl.ip_closure or {}
     stamp = {
         "imas_baseline": "swb",
@@ -556,7 +595,8 @@ def build_swb_context(bq, env):
         "swb_saw_map_warn": _ic.get("saw_map_warn"),
         "jphi_saw_out": bl.jphi_saw_out,
         "jphi_saw_input": bl.jphi_saw_input}
-    return SwbDraws(
+    draws = SwbDraws if replay is None else partial(SwbReplayDraws, **replay)
+    return draws(
         partial(bq._swb_solve, coil_reg_target=bl.coil_reg_target, warm_eq=warm),
         np.asarray(bl.swb_seed_profile, dtype=float),
         swb_jind_sigma(env["sigma_jphi"], bl.jphi_total, bl.swb_seed_profile),

@@ -167,6 +167,14 @@ class KineticBase:
         zf = 0.0 if self.z_fast is None else self.z_fast
         return np.maximum(ne - zf, 0.0)
 
+    def zeff_sigma(self):
+        """The Z_eff channel's own GPR sigma: the aux sigma less the part
+        ``zeff_dne`` carries over from the ``ne`` draw."""
+        zs = np.asarray(self.aux_sigmas["zeff"], dtype=float)
+        if self.zeff_dne is None:
+            return zs
+        return np.sqrt(np.maximum(zs ** 2 - (self.zeff_dne * self.sigma_ne) ** 2, 0.0))
+
 
 @dataclass
 class KineticDraw:
@@ -287,10 +295,7 @@ def sample_kinetics(base: KineticBase, rng, thermal_integral: Callable,
     if active:
         from .physics import main_ion_density_from_zeff
         zb = np.asarray(aux_baselines["zeff"], dtype=float)
-        zs = np.asarray(aux_sigmas["zeff"], dtype=float)
-        if b.zeff_dne is not None:
-            zs = np.sqrt(np.maximum(zs ** 2 - (b.zeff_dne * b.sigma_ne) ** 2,
-                                    0.0))
+        zs = b.zeff_sigma()
 
         def _ni_of(ne_, z_):
             return main_ion_density_from_zeff(
@@ -370,3 +375,46 @@ def sample_kinetics(base: KineticBase, rng, thermal_integral: Callable,
         print("  [kinetic_sampler] clip(s) fired on this draw (nodes moved): "
               + ", ".join(f"{k}={v}" for k, v in clips.items() if v))
     return draw
+
+
+def kinetic_noise(base: KineticBase, draw: KineticDraw) -> list:
+    """The standard normals :func:`sample_kinetics` made *draw* from on *base*
+    (its accepted candidate, then the aux channels), in the sampler's RNG
+    order: ``z = L^-1 (draw - base)`` per channel, ``L`` its
+    :meth:`~bouquet.sampling.GPRProfilePerturber.factor`.  Served by
+    :class:`~bouquet.sampling.ReplayNoise`, they re-make the draw on another
+    base (a new mean or sigma) from the same random numbers.  A clipped node
+    inverts as clipped; a zero-sigma channel gives zeros."""
+    from scipy.linalg import solve_triangular
+    from .sampling import GPRProfilePerturber
+    b, x = base, base.psi_kin
+    aux_baselines = b.aux_baselines or {}
+    aux_ls = b.aux_length_scales or {}
+
+    def _z(d, prof, sig, ls, p0):       # on the sampler's own scale p0: the same L
+        L = GPRProfilePerturber(length_scale=ls).factor(x, np.asarray(sig, dtype=float) / p0)
+        if L is None:
+            return np.zeros((x.size, 1))
+        return solve_triangular(L, (np.asarray(d, dtype=float) - prof) / p0, lower=True)[:, None]
+
+    def _mono(d, prof, sig, ls):        # sample_kinetics' _mono
+        return _z(d, prof, sig, ls, prof[0])
+
+    def _gpr(d, prof, sig, ls):         # its _gpr
+        prof = np.asarray(prof, dtype=float)
+        p0 = float(np.max(np.abs(prof)))
+        return _z(d, prof, sig, ls, p0 if p0 > 0 else 1.0)
+
+    noise = [_mono(draw.ne, b.ne, b.sigma_ne, b.n_ls), _mono(draw.te, b.te, b.sigma_te, b.t_ls)]
+    if draw.zeff_primary:
+        dz = 0.0 if b.zeff_dne is None else b.zeff_dne * (draw.ne - b.ne)
+        noise.append(_gpr(draw.zeff - dz, aux_baselines["zeff"], b.zeff_sigma(),
+                          aux_ls.get("zeff", 0.4)))
+    else:
+        noise.append(_mono(draw.ni, b.ni, b.sigma_ni, b.n_ls))
+    noise.append(_mono(draw.ti, b.ti, b.sigma_ti, b.t_ls))
+    for name, es in (b.aux_sigmas or {}).items():
+        if (name == "zeff" and draw.zeff_primary) or aux_baselines.get(name) is None:
+            continue
+        noise.append(_gpr(draw.aux[name], aux_baselines[name], es, aux_ls.get(name, 0.4)))
+    return noise

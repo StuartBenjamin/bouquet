@@ -230,7 +230,7 @@ def test_edge_taper_keeps_the_channel_split(monkeypatch, swb_oft, taper, saw):
                                 swb_edge_taper_psi0=0.999 if taper else None)
     dj_saw = 1e4 * np.sin(np.pi * x / 0.4) * (x < 0.4)
 
-    def solve(kin, seed, coil_reg_target=None):
+    def solve(kin, seed, coil_reg_target=None, warm_eq=None):
         jf = np.asarray(bl.jphi_fixed) * fac
         ji = 1.02 * np.asarray(seed) * fac
         res = dict(jphi_ind=ji, jphi_bs=j_bs * fac, j_fixed=jf,
@@ -297,11 +297,13 @@ def test_the_swb_redraw_refusal_is_a_registered_rejection_code():
     assert code in DRAW_REJECTION_REASONS
 
 
+@pytest.mark.parametrize("warm", [None, "archived baseline"])
 @pytest.mark.parametrize("fails", [False, True, "other"])
-def test_solve_b_falls_back_to_solve_a_equilibrium(swb_oft, fails):
+def test_solve_b_falls_back_to_solve_a_equilibrium(swb_oft, fails, warm):
     """Solve B that TokaMaker fails cold is retried once from solve A's
     equilibrium (A re-solved, then copied); a cold success is untouched and
-    any other error propagates."""
+    any other error propagates.  A replay's warm start (``_swb_warm_eq``)
+    starts solves A and B."""
     x = coords.swb_grid(np.linspace(0.0, 1.0, 33))
     z = 0 * x
     bl = types.SimpleNamespace(psi_N=x, jphi_ind=1e6 * (1 - x ** 2) + 2e4, jphi_bs=5e4 * x ** 4,
@@ -312,7 +314,7 @@ def test_solve_b_falls_back_to_solve_a_equilibrium(swb_oft, fails):
 
     def solve(kin, seed, coil_reg_target=None, warm_eq=None):
         calls.append(("A" if coil_reg_target is None else "B", warm_eq))
-        if fails and calls[-1] == ("B", None):
+        if fails and calls[-1] == ("B", warm):
             raise ValueError("Error in solve: Non-finite state or failed flux function"
                              if fails is True else "not a solver error")
         jf = np.asarray(bl.jphi_fixed)
@@ -329,20 +331,20 @@ def test_solve_b_falls_back_to_solve_a_equilibrium(swb_oft, fails):
                                _swb_baseline_kinetics=lambda: {
                                    k: np.ones_like(x) for k in ("ne", "te", "ni", "ti", "p_fixed")},
                                _swb_solve=solve, _swb_state=state,
-                               _finish_imas_baseline=lambda its, **k: None)
+                               _finish_imas_baseline=lambda its, **k: None, _swb_warm_eq=warm)
     ns._swb_source_split = lambda psi_N: Bouquet._swb_source_split(ns, psi_N)
     if fails == "other":
         with pytest.raises(ValueError, match="not a solver error"):
             Bouquet._swb_imas_baseline(ns)
-        assert calls == [("A", None), ("B", None)]
+        assert calls == [("A", warm), ("B", warm)]
         return
     if fails:
         with pytest.warns(RuntimeWarning, match="solve B failed cold"):
             Bouquet._swb_imas_baseline(ns)
-        assert calls == [("A", None), ("B", None), ("A", None), ("B", eq)]
+        assert calls == [("A", warm), ("B", warm), ("A", warm), ("B", eq)]
     else:
         Bouquet._swb_imas_baseline(ns)
-        assert calls == [("A", None), ("B", None)]
+        assert calls == [("A", warm), ("B", warm)]
     assert bl.ip_closure["swb_b_warm_start"] is fails
     assert (ns._swb_eq_a is eq) is fails
 

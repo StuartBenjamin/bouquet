@@ -88,6 +88,33 @@ def make_rng(seed=None) -> np.random.Generator:
     return np.random.default_rng(int(seed))
 
 
+class ReplayExhausted(RuntimeError):
+    """A :class:`ReplayNoise` was asked for a normal it does not hold."""
+
+
+class ReplayNoise(np.random.Generator):
+    """A Generator that serves recorded ``standard_normal`` arrays in order
+    (:func:`bouquet.kinetic_sampler.kinetic_noise`), so a draw site re-makes
+    a draw from its own random numbers.  One past the record, or of another
+    shape, raises :class:`ReplayExhausted`; only ``standard_normal`` is
+    replayed."""
+
+    def __init__(self, noise):
+        super().__init__(np.random.PCG64(0))
+        self._noise = [np.asarray(z, dtype=float) for z in noise]
+
+    @property
+    def remaining(self) -> int:
+        """Recorded arrays not yet served."""
+        return len(self._noise)
+
+    def standard_normal(self, size=None, dtype=np.float64, out=None):
+        if not self._noise or self._noise[0].shape != tuple(np.atleast_1d(size)):
+            raise ReplayExhausted(
+                f"no recorded normal of shape {size} ({self.remaining} left)")
+        return self._noise.pop(0)
+
+
 # ====================================================================
 #  GPR profile perturber
 # ====================================================================
@@ -251,6 +278,22 @@ class GPRProfilePerturber:
             rng = np.random.default_rng()
 
         n = len(psi_N)
+        L = self.factor(psi_N, sigma_profile)      # steps 1-3
+
+        # 4. Sample:  delta_f = L z,   z ~ N(0, I),   L L^T = K + jitter*I.
+        #    z is always drawn, even on the zero-sigma path, so the number of
+        #    normals consumed -- and hence every later channel in a seeded
+        #    run -- never depends on the data.
+        z = rng.standard_normal((n, n_samples))
+        perturbations = np.zeros((n, n_samples)) if L is None else L @ z
+
+        # 5. Perturbed profiles  →  (n_samples, n_points)
+        return input_profile[None, :] + perturbations.T
+
+    def factor(self, psi_N: np.ndarray, sigma_profile: np.ndarray):
+        r"""The lower Cholesky factor ``L`` of :meth:`generate_profiles` (a
+        draw is ``input_profile + L z``), or ``None`` for an all-zero sigma."""
+        n = len(psi_N)
 
         # 1. Unit-variance base kernel
         K = self._kernel(psi_N, psi_N)          # K(x,x) = 1
@@ -285,23 +328,11 @@ class GPRProfilePerturber:
         #    draw acquires a residual std of sqrt(jitter) ~ 2e-4 * max(sigma)
         #    instead of exactly 0.  An all-zero sigma stays exactly zero via
         #    the max_diag guard below.
-        #
-        # 4. Sample:  delta_f = L z,   z ~ N(0, I),   L L^T = K + jitter*I.
-        #    z is always drawn, even on the zero-sigma path, so the number of
-        #    normals consumed -- and hence every later channel in a seeded
-        #    run -- never depends on the data.
-        z = rng.standard_normal((n, n_samples))
-
         max_diag = float(K_scaled.diagonal().max()) if n else 0.0
-        if max_diag > 0.0:
-            jitter = _CHOL_JITTER * n * max_diag
-            L = np.linalg.cholesky(K_scaled + jitter * np.eye(n))
-            perturbations = L @ z
-        else:
-            perturbations = np.zeros((n, n_samples))
-
-        # 5. Perturbed profiles  →  (n_samples, n_points)
-        return input_profile[None, :] + perturbations.T
+        if not max_diag > 0.0:
+            return None
+        jitter = _CHOL_JITTER * n * max_diag
+        return np.linalg.cholesky(K_scaled + jitter * np.eye(n))
 
 
 # ====================================================================

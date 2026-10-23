@@ -8,11 +8,15 @@ is :mod:`bouquet.swb`.  docs/draw-methods.md compares the methods hook by hook.
 """
 from __future__ import annotations
 
+import copy
+import json
+
 import numpy as np
 
 from .draw_methods import DrawMethod
+from .kinetic_sampler import KineticBase, KineticDraw, kinetic_noise
 from .physics import ELEMENTARY_CHARGE
-from .sampling import generate_perturbed_GPR, make_rng
+from .sampling import ReplayExhausted, ReplayNoise, generate_perturbed_GPR, make_rng
 from .TokaMaker_interface import _MAX_PRESSURE_ITER, draw_kinetics
 from .utils import pchip_interp
 
@@ -25,6 +29,9 @@ SWB_DRAW_MAXITS = 100
 SWB_JIND_MAX_RESAMPLES = 20
 #: The draw-rejection code of that refusal (generate_bouquet's record).
 SWB_JIND_REJECTION = "swb_jind_redraw_refused"
+#: The draw-rejection code of an archived draw :class:`SwbReplayDraws` cannot
+#: re-make.
+SWB_REPLAY_REJECTION = "swb_replay_refused"
 
 
 class SwbSeedRedrawRefused(RuntimeError):
@@ -363,3 +370,72 @@ class SwbDraws(DrawMethod):
         from .config import swb_config_problems
         return [f'imas_baseline="swb": {m}'
                 for m in swb_config_problems(bq.config)]
+
+
+class SwbReplayRefused(RuntimeError):
+    """An archived draw :class:`SwbReplayDraws` cannot re-make (recorded as
+    :data:`SWB_REPLAY_REJECTION`)."""
+
+
+class SwbReplayDraws(SwbDraws):
+    """The draws of an archived swb run, re-solved on this run's baseline
+    (:meth:`bouquet.swb.SwbBaseline.replay_swb`).  Attempt ``count`` re-makes
+    archived draw ``count`` from its own random numbers -- the kinetics'
+    (:func:`~bouquet.kinetic_sampler.kinetic_noise` on the archived baseline)
+    and its inductive seed (``jphi_ind / swb_alpha``) -- and solves it from its
+    archived equilibrium (``warm``) or the recipe's own start.  Refused: a
+    count the source did not archive, and a candidate the sampler would
+    redraw on this baseline (not monotonic, <P> off the match)."""
+
+    def __init__(self, *args, source, scan_key, warm=True, **kwargs):
+        from .archive import BouquetArchive
+        super().__init__(*args, **kwargs)
+        self.source = BouquetArchive(source).scan(scan_key)
+        self.counts = set(self.source.indices)
+        self.warm = bool(warm)
+        self.stamp = dict(self.stamp, swb_replay_source=str(source),
+                          swb_replay_warm=self.warm)
+        self._base = None
+
+    def _source_base(self, inputs):
+        """The archived baseline as the sampler's base, with this run's
+        length scales and ``zeff_dne`` (the archive keeps neither)."""
+        if self._base is None:
+            s, names = self.source.baseline, list(inputs["aux_sigmas"] or {})
+            self._base = KineticBase(
+                psi_kin=s["psi_N_kinetic"], ne=s["n_e"], te=s["T_e"], ni=s["n_i"],
+                ti=s["T_i"], sigma_ne=s["sigma_ne"], sigma_te=s["sigma_te"],
+                sigma_ni=s["sigma_ni"], sigma_ti=s["sigma_ti"],
+                n_ls=inputs["n_ls"], t_ls=inputs["t_ls"],
+                aux_sigmas={k: s[f"sigma_aux_{k}"] for k in names},
+                aux_baselines={k: s[f"aux_{k}"] for k in names},
+                aux_length_scales=inputs["aux_length_scales"],
+                zeff_dne=inputs["zeff_dne"])
+        return self._base
+
+    def draw(self, mygs, rng, scale, count, *, inputs=None, **kwargs):
+        if count not in self.counts:
+            raise SwbReplayRefused(f"draw {count} is not in the source archive")
+        d = self.source[count]
+        p, a = d.profiles, d.attrs
+        aux = {k[len("aux_"):]: v for k, v in p.items() if k.startswith("aux_")}
+        noise = ReplayNoise(kinetic_noise(self._source_base(inputs), KineticDraw(
+            ne=p["n_e"], te=p["T_e"], ni=p["n_i"], ti=p["T_i"], zeff=aux.get("zeff"),
+            aux=aux, zeff_primary=json.loads(a["kinetic_sampler_json"])["zeff_primary"])))
+        m = copy.copy(self)
+        # the archived inductive seed as drawn (SWB solved alpha * seed): no redraw
+        m.jind_seed = p["jphi_ind"] / float(a["swb_alpha"])
+        m.sigma_jind = np.zeros_like(m.jind_seed)
+        if self.warm:     # loaded at solve time: the sampler matched <P> on the baseline
+            m.recipe = lambda kin, j: self.recipe(kin, j, warm_eq=d.load_state(mygs).copy_eq())
+        out = SwbDraws.draw(m, mygs, noise, scale, count, inputs=inputs, **kwargs)
+        if noise.remaining:
+            raise SwbReplayRefused(f"{noise.remaining} archived normal(s) left unused")
+        out[6].update(jind_resamples=a.get("swb_jind_resamples"),
+                      jind_clipped=a.get("swb_jind_clipped"))
+        return out
+
+    def rejection_reason(self, exc, stage):
+        if isinstance(exc, (SwbReplayRefused, ReplayExhausted)):
+            return SWB_REPLAY_REJECTION
+        return super().rejection_reason(exc, stage)
