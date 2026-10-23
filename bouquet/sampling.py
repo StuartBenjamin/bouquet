@@ -27,6 +27,7 @@ non-reproducible mode.
 
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.linalg import solve_triangular
 from scipy.spatial.distance import cdist
 from scipy import integrate
 from scipy.stats import norm
@@ -51,9 +52,9 @@ _MAX_MONOTONIC_DRAWS = int(1e4)
 # ── Cholesky regularisation for the GP kernel factorisation ────────────
 #    jitter = _CHOL_JITTER * n * max(diag(K)).  n*max_diag bounds lambda_max,
 #    so this sits ~450x above the eps*lambda_max rounding floor that makes a
-#    raw squared-exponential kernel numerically indefinite, while inflating
-#    each marginal sigma by at most a relative ~3e-8 (sqrt(1 + jitter/sigma^2)).
-#    See GPRProfilePerturber.generate_profiles for why Cholesky and not eigh.
+#    raw squared-exponential kernel numerically indefinite.  Each draw removes
+#    it again (GPRProfilePerturber.generate_profiles); see
+#    GPRProfilePerturber.factor for why Cholesky and not eigh.
 _CHOL_JITTER = 1e-10
 
 
@@ -247,12 +248,11 @@ class GPRProfilePerturber:
         r"""Draw perturbed profiles whose pointwise :math:`1\sigma`
         matches the supplied experimental uncertainty.
 
-        The match is exact up to the Cholesky regularisation jitter: each
-        marginal std is :math:`\sqrt{\sigma_i^2 + \epsilon}` with
-        :math:`\epsilon \approx 10^{-10}\,n\,\max\sigma^2` -- a relative
-        inflation of ~3e-8 where :math:`\sigma_i \sim \max\sigma`, and a
-        residual std of ~2e-4 max(sigma) where :math:`\sigma_i = 0`.  An
-        all-zero sigma profile is returned unperturbed exactly.
+        The Cholesky regularisation :math:`\epsilon` is removed from each
+        draw (step 4), so the match is exact to ~1e-9 relative, a node with
+        :math:`\sigma_i = 0` keeps its input value, and the draw carries no
+        node-level white noise.  An all-zero sigma profile is returned
+        unperturbed exactly.
 
         Parameters
         ----------
@@ -280,19 +280,37 @@ class GPRProfilePerturber:
         n = len(psi_N)
         L = self.factor(psi_N, sigma_profile)      # steps 1-3
 
-        # 4. Sample:  delta_f = L z,   z ~ N(0, I),   L L^T = K + jitter*I.
+        # 4. Sample:  delta_f = L z - eps L^-T z  (= K (K + eps I)^-1 L z),
+        #    z ~ N(0, I),  L L^T = K + eps I.  L z alone carries eps as white
+        #    noise of std sqrt(eps) at every node: invisible in the values, but
+        #    second differences scale it by 1/h^2, so it dominated the draws'
+        #    curvature (and, through grad n and grad T, their bootstrap current).
+        #    The second term removes it with the same factor and normals; the
+        #    covariance K (K + eps I)^-1 K is K wherever K's spectrum is above eps.
         #    z is always drawn, even on the zero-sigma path, so the number of
         #    normals consumed -- and hence every later channel in a seeded
         #    run -- never depends on the data.
         z = rng.standard_normal((n, n_samples))
-        perturbations = np.zeros((n, n_samples)) if L is None else L @ z
+        if L is None:
+            perturbations = np.zeros((n, n_samples))
+        else:
+            perturbations = L @ z - self.jitter(sigma_profile) * solve_triangular(
+                L, z, lower=True, trans="T", check_finite=False)
 
         # 5. Perturbed profiles  →  (n_samples, n_points)
         return input_profile[None, :] + perturbations.T
 
+    @staticmethod
+    def jitter(sigma_profile: np.ndarray) -> float:
+        """The regularisation ``eps`` of :meth:`factor`: ``_CHOL_JITTER * n *
+        max(sigma^2)`` (the base kernel has unit variance)."""
+        s = np.asarray(sigma_profile, dtype=float)
+        return _CHOL_JITTER * s.size * float(np.max(s * s, initial=0.0))
+
     def factor(self, psi_N: np.ndarray, sigma_profile: np.ndarray):
         r"""The lower Cholesky factor ``L`` of :meth:`generate_profiles` (a
-        draw is ``input_profile + L z``), or ``None`` for an all-zero sigma."""
+        draw is ``input_profile + L z - eps L^-T z``), or ``None`` for an
+        all-zero sigma."""
         n = len(psi_N)
 
         # 1. Unit-variance base kernel
@@ -323,16 +341,13 @@ class GPRProfilePerturber:
         #    differently, for ANY kernel, length scale, or sigma shape;
         #    cross-build variation collapses to rounding accumulation
         #    (measured in tests/test_rng_reproducibility.py).  The jitter
-        #    makes the factorisation well-posed and costs at most a relative
-        #    ~3e-8 inflation of each marginal sigma; where sigma_i = 0 the
-        #    draw acquires a residual std of sqrt(jitter) ~ 2e-4 * max(sigma)
-        #    instead of exactly 0.  An all-zero sigma stays exactly zero via
+        #    makes the factorisation well-posed; generate_profiles removes it
+        #    from each draw again.  An all-zero sigma stays exactly zero via
         #    the max_diag guard below.
         max_diag = float(K_scaled.diagonal().max()) if n else 0.0
         if not max_diag > 0.0:
             return None
-        jitter = _CHOL_JITTER * n * max_diag
-        return np.linalg.cholesky(K_scaled + jitter * np.eye(n))
+        return np.linalg.cholesky(K_scaled + self.jitter(sigma_profile) * np.eye(n))
 
 
 # ====================================================================

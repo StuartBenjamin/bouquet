@@ -384,7 +384,9 @@ def kinetic_noise(base: KineticBase, draw: KineticDraw) -> list:
     :meth:`~bouquet.sampling.GPRProfilePerturber.factor`.  Served by
     :class:`~bouquet.sampling.ReplayNoise`, they re-make the draw on another
     base (a new mean or sigma) from the same random numbers.  A clipped node
-    inverts as clipped; a zero-sigma channel gives zeros."""
+    inverts as clipped; a zero-sigma channel gives zeros.  Exact for a draw
+    made as ``L z`` (before the sampler removed its jitter); a draw made since
+    re-makes itself to ~sqrt(eps)."""
     from scipy.linalg import solve_triangular
     from .sampling import GPRProfilePerturber
     b, x = base, base.psi_kin
