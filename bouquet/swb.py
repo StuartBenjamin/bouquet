@@ -10,6 +10,8 @@ compares the methods.
 """
 from __future__ import annotations
 
+import contextlib
+
 import numpy as np
 
 from . import coords
@@ -511,29 +513,51 @@ class SwbBaseline:
                     coord=getattr(bl, "coord", coords.PSI), passed=passed,
                     swb_dev=dev)
 
-    def replay_swb(self, source, *, warm=True):
-        """:meth:`prepare_baseline` and :meth:`generate` with the draws of the
+    def prepare_replay(self, source, *, warm=True):
+        """:meth:`prepare_baseline` for :meth:`replay_swb` of the swb archive
+        *source* (this slice).  ``warm``: solves A and B start from its
+        archived baseline, at :data:`SWB_REPLAY_URF`.  A caller that needs the
+        baseline before the draws calls this, then ``replay_swb(source,
+        prepared=True)``: the baseline is solved once."""
+        from .archive import BouquetArchive
+        with _replay_urf(self.mygs, warm):
+            if warm:
+                scan = BouquetArchive(source).scan(self.config.generation.scan_key)
+                self._swb_warm_eq = scan.baseline_view().load_state(self.mygs).copy_eq()
+            try:
+                return self.prepare_baseline()
+            finally:
+                self._swb_warm_eq = None
+
+    def replay_swb(self, source, *, warm=True, prepared=False):
+        """:meth:`prepare_replay` and :meth:`generate` with the draws of the
         swb archive *source* (this slice) instead of new ones -- e.g. after a
         change of how the kinetics are regridded: draw k is re-solved on this
         baseline from its own random numbers, under the same draw number
         (:class:`~bouquet.swb_draws.SwbReplayDraws`; every archived draw, no
         until-N stop), and solve B is not repeated for the draws.  ``warm``:
-        solves A and B start from the archived baseline and each draw from its
-        archived equilibrium, at :data:`SWB_REPLAY_URF`."""
+        each draw starts from its archived equilibrium, at
+        :data:`SWB_REPLAY_URF`.  ``prepared``: the baseline is already
+        :meth:`prepare_replay`'s (not solved again)."""
         from .archive import BouquetArchive
         key = self.config.generation.scan_key
-        scan = BouquetArchive(source).scan(key)
-        settings = self.mygs.settings
-        urf = settings.urf
-        if warm:
-            self._swb_warm_eq = scan.baseline_view().load_state(self.mygs).copy_eq()
-            settings.urf = SWB_REPLAY_URF
-        try:
-            self.prepare_baseline()
-            return self.generate(n=max(scan.indices) + 1,
+        if not prepared:
+            self.prepare_replay(source, warm=warm)
+        with _replay_urf(self.mygs, warm):
+            return self.generate(n=max(BouquetArchive(source).scan(key).indices) + 1,
                                  replay=dict(source=source, scan_key=key, warm=warm))
-        finally:
-            settings.urf, self._swb_warm_eq = urf, None
+
+
+@contextlib.contextmanager
+def _replay_urf(mygs, warm):
+    """:data:`SWB_REPLAY_URF` on *mygs* while a warm replay solves."""
+    urf = mygs.settings.urf
+    if warm:
+        mygs.settings.urf = SWB_REPLAY_URF
+    try:
+        yield
+    finally:
+        mygs.settings.urf = urf
 
 
 def swb_jind_sigma(sigma_jphi, jphi_total, seed):

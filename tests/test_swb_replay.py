@@ -217,11 +217,15 @@ def test_replay_swb_warm_starts_the_baseline_only_while_it_runs(tmp_path, monkey
     seen = {}
     ns = types.SimpleNamespace(mygs=types.SimpleNamespace(settings=types.SimpleNamespace(urf=0.2)),
                                config=types.SimpleNamespace(generation=types.SimpleNamespace(scan_key="1235")))
+    ns.prepare_replay = types.MethodType(SwbBaseline.prepare_replay, ns)
     ns.prepare_baseline = lambda: seen.update(prep=(ns.mygs.settings.urf, getattr(ns, "_swb_warm_eq", None)))
-    ns.generate = lambda n, replay: seen.update(gen=(n, replay)) or "generated"
+    ns.generate = lambda n, replay: seen.update(gen=(n, replay, ns.mygs.settings.urf)) or "generated"
     assert SwbBaseline.replay_swb(ns, src) == "generated"
     assert seen["prep"] == (SWB_REPLAY_URF, "archived B")
-    assert seen["gen"] == (3, dict(source=src, scan_key="1235", warm=True))
+    assert seen["gen"] == (3, dict(source=src, scan_key="1235", warm=True), SWB_REPLAY_URF)
     assert ns.mygs.settings.urf == 0.2 and ns._swb_warm_eq is None
     SwbBaseline.replay_swb(ns, src, warm=False)                  # cold: the run's own settings
     assert seen["prep"] == (0.2, None)
+    seen.clear()                                                 # prepared: no second baseline solve
+    assert SwbBaseline.replay_swb(ns, src, prepared=True) == "generated"
+    assert "prep" not in seen and seen["gen"][2] == SWB_REPLAY_URF and ns.mygs.settings.urf == 0.2
