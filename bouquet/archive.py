@@ -246,7 +246,7 @@ class DrawView:
         (``store_tokamaker_state=True`` runs; ``save_TokaMaker`` HDF5 bytes), else ``None``."""
         return self._read_bytes("." + TOKAMAKER_STATE_DS)["." + TOKAMAKER_STATE_DS]
 
-    def _load_state(self, mygs=None):
+    def load_state(self, mygs=None):
         """``mygs`` (default: the process's TokaMaker on the run's mesh and FE
         order, :func:`bouquet.utils.tokamaker_on_mesh`) holding this group's
         archived TokaMaker state; its equilibrium is replaced."""
@@ -269,10 +269,10 @@ class DrawView:
         """Write this group's g-file from its archived TokaMaker state, at
         ``nr`` x ``nz`` (default: the run's ``eqdsk_nr`` x ``eqdsk_nz``) with the
         pad and LCFS pressure of its i-file (the g-file's own).  ``mygs``: see
-        :meth:`_load_state`.  Returns ``filename``."""
+        :meth:`load_state`.  Returns ``filename``."""
         from .edge_pressure import lcfs_kwargs
         from .utils import load_config
-        a, mygs = self.attrs, self._load_state(mygs)
+        a, mygs = self.attrs, self.load_state(mygs)
         gc = load_config(self._ar.path, scan_key=self.scan_key).generation
         mygs.save_eqdsk(filename, nr=int(nr or gc.eqdsk_nr), nz=int(nz or gc.eqdsk_nz),
                         truncate_eq=True, lcfs_pad=float(a["ifile_lcfs_pad"]),
@@ -282,10 +282,10 @@ class DrawView:
     def rebuild_ifile(self, filename, mygs=None, npsi=None, ntheta=None):
         """Write this group's i-file again from its archived TokaMaker state, at
         ``npsi`` x ``ntheta`` (default: the archived grid) with the archived pad,
-        LCFS pressure and extended records.  ``mygs``: see :meth:`_load_state`.
+        LCFS pressure and extended records.  ``mygs``: see :meth:`load_state`.
         Returns ``filename``."""
         from .edge_pressure import lcfs_kwargs
-        a, mygs = self.attrs, self._load_state(mygs)
+        a, mygs = self.attrs, self.load_state(mygs)
         ext = {k: True for k in ("profile_derivs", "psi_bounds") if a.get(f"ifile_{k}")}
         if a.get("ifile_axis_pack"):
             ext["axis_pack"] = float(a["ifile_axis_pack"])

@@ -205,6 +205,12 @@ DRAW_REJECTION_REASONS = {
                                "axis value is not positive): the draw is "
                                "refused rather than run on the unperturbed "
                                "seed (review PR69 B3)",
+    # swb replays (bouquet.swb_draws.SWB_REPLAY_REJECTION)
+    "swb_replay_refused": "an swb replay (Bouquet.replay_swb) could not "
+                          "re-make the archived draw: the source did not "
+                          "archive that count, or on this baseline the "
+                          "sampler would redraw its kinetics (not monotonic, "
+                          "<P> off the match)",
 }
 
 

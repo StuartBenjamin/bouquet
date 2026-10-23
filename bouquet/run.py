@@ -8015,7 +8015,7 @@ class Bouquet(SwbBaseline):
             raise ValueError(msg)
 
     def generate(self, n: Optional[int] = None, progress_callback=None,
-                 on_inspec=None, stop_check=None) -> list:
+                 on_inspec=None, stop_check=None, replay=None) -> list:
         """Generate the perturbed bouquet and archive to ``{header}.h5``.
 
         Auto-feeds the baseline (jphi_total, jphi_ind, l_i_target, Ip_target) and
@@ -8031,6 +8031,9 @@ class Bouquet(SwbBaseline):
         capped by ``max_total_draws``; ``n_equils`` is then
         the initial allocation rather than the total, and ``n`` overrides that
         allocation, not the target. Out-of-spec draws are still archived.
+
+        ``replay`` (:meth:`replay_swb`): the draws re-solve an archived swb
+        run's draws instead of new ones, ``n`` attempts and no until-N target.
 
         Requires :meth:`prepare_baseline` first; raises if ``self.baseline`` is
         None.
@@ -8056,6 +8059,9 @@ class Bouquet(SwbBaseline):
         # A baseline set directly skips prepare's guard: re-check its coordinate.
         coords.check_run(self.config, getattr(bl, "coord", coords.PSI))
         gc = self.config.generation
+        if replay is not None:          # a replay re-solves every draw: no until-N
+            gc = copy.copy(gc)
+            gc.n_inspec_target = gc.max_total_draws = None
         fc = self.config.filtering
         n_equils = int(n if n is not None else gc.n_equils)
 
@@ -8091,7 +8097,7 @@ class Bouquet(SwbBaseline):
         self._resolved_uncertainty = env
         # the draw method of the solve method (bouquet.draw_methods): the
         # legacy draws, the unified engine or swb
-        _m = self._draw_method(env)
+        _m = self._draw_method(env, replay)
         env = _m.draw_env(env)
 
         header = self.config.output_header
@@ -8547,14 +8553,16 @@ class Bouquet(SwbBaseline):
                      "q0 gate when constrain_sawteeth): not a post-hoc "
                      "filter")}
 
-    def _draw_method(self, env):
+    def _draw_method(self, env, replay=None):
         """The :class:`~bouquet.draw_methods.DrawMethod` of this run's solve
         method (docs/draw-methods.md): the legacy draws, the unified engine
         (from the live reconstruction of this session) or swb (solve B with
-        resampled inputs)."""
+        resampled inputs; ``replay``: :meth:`replay_swb`'s)."""
         from .config import resolve_solve_method
         from .draw_methods import DrawMethod
         sm = resolve_solve_method(self.config.generation)
+        if replay is not None and sm != "swb":
+            raise ValueError(f"replay: swb draws only (solve_method {sm!r})")
         self._warn_legacy_route(sm)
         if sm == "engine":
             from .engine_draws import build_generate_context
@@ -8579,7 +8587,7 @@ class Bouquet(SwbBaseline):
             return m
         if sm == "swb":
             from .swb import build_swb_context
-            return build_swb_context(self, env)
+            return build_swb_context(self, env, replay)
         return DrawMethod()
 
     def _refuse_unified_engine_draws(self, what):
