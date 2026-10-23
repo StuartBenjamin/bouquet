@@ -52,11 +52,14 @@ def _cylinder(a=0.5, R0=1.7):
                 a=a, R_geo=R0, kappa=1.0)
 
 
-def test_chi_perp_matches_the_analytic_cylinder():
+@pytest.mark.parametrize("every", [1, 10])
+def test_chi_perp_matches_the_analytic_cylinder(every):
     """n flat, T = T0 (1 - rho^2), Q = Q_a rho^2, no particle flux:
-    chi = Q_a / (8 pi^2 R0 n e T0) on every surface."""
+    chi = Q_a / (8 pi^2 R0 n e T0) on every surface.  Also with the geometry
+    on 21 surfaces (TokaMaker's comes on fewer than the nodes): pchip carries
+    it to the nodes without steps (a linear regrid misses by 3.6e-2)."""
     a, R0, n, T0, Qa = 0.5, 1.7, 5e19, 2e3, 3e6
-    geom = _cylinder(a, R0)
+    geom = {k: (v[::every] if np.ndim(v) else v) for k, v in _cylinder(a, R0).items()}
     x = np.linspace(0.0, 1.0, 101)                 # kinetic nodes in psi_N
     rho = np.sqrt(x)
     src = dict(rho_tor_norm=rho, Q_e=Qa * rho ** 2, Q_i=Qa * rho ** 2,

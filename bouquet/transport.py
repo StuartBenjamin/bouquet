@@ -8,6 +8,7 @@ dd_source_totals`) are FUSE's at the dd step, the same for every draw of a scan.
 import numpy as np
 
 from .physics import ELEMENTARY_CHARGE as E_CHARGE
+from .utils import pchip_interp
 
 _trapz = getattr(np, "trapezoid", None) or np.trapz
 
@@ -54,7 +55,9 @@ def transport_record(geom, x_kin, ne, te, zeff, ti, x_eq, p_thermal, src, Ip,
     *x_kin* / *x_eq* are in the run coordinate *coord* ("psi_n" or "phi_n");
     temperatures in eV."""
     key = "phi_N" if coord == "phi_n" else "psi_N"
-    g = {k: np.interp(np.asarray(x_kin, float), geom[key], geom[k])
+    # geometry and sources onto the nodes by pchip: a linear regrid kinks them at
+    # every source node, which dV/drho and dT/drho turn into steps in chi
+    g = {k: pchip_interp(geom[key], geom[k], np.asarray(x_kin, float))
          for k in ("phi_N", "rho_tor", "V", "S", "R_min", "R_max")}
     ne, te, zeff, ti = (np.asarray(v, dtype=float) for v in (ne, te, zeff, ti))
     ni = ne / zeff
@@ -64,7 +67,7 @@ def transport_record(geom, x_kin, ne, te, zeff, ti, x_eq, p_thermal, src, Ip,
         L_eff = rho_b * np.gradient(g["V"], g["rho_tor"]) / g["S"]
         L_eff[0] = L_eff[1]
         rho_src = np.asarray(src["rho_tor_norm"], dtype=float)
-        Qe, Qi, Ge = (np.interp(rho_n, rho_src, np.asarray(src[k], float))
+        Qe, Qi, Ge = (pchip_interp(rho_src, np.asarray(src[k], float), rho_n)
                       for k in ("Q_e", "Q_i", "Gamma_e"))
         Gi = Ge / zeff
 
@@ -74,7 +77,7 @@ def transport_record(geom, x_kin, ne, te, zeff, ti, x_eq, p_thermal, src, Ip,
             c[0] = c[1]
             return c
         rec = dict(chi_perp_e=chi(Qe, Ge, ne, te), chi_perp_i=chi(Qi, Gi, ni, ti))
-    V_eq = np.interp(np.asarray(x_eq, float), geom[key], geom["V"])
+    V_eq = pchip_interp(geom[key], geom["V"], np.asarray(x_eq, float))
     W_th = 1.5 * _trapz(np.asarray(p_thermal, float), V_eq)
     W_fast = (0.0 if p_fast is None else
               1.5 * _trapz(np.asarray(p_fast, float), g["V"]))
