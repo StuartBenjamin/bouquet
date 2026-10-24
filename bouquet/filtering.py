@@ -513,6 +513,21 @@ def pedestal_top(x, jphi_ref):
     return float(x[seg[np.argmin(j[seg])]])
 
 
+def edge_current_minimum(psi_N, jphi, rel=0.02):
+    """The psi_N of the current's local minimum inside its edge bootstrap
+    peak (the pedestal top): the minimum of *jphi* between psi_N 0.6 and the
+    peak, its maximum over psi_N 0.85-0.995; None when the peak does not rise
+    above that minimum by ``rel`` x max |jphi| (no edge peak)."""
+    x, j = np.asarray(psi_N, dtype=float), np.asarray(jphi, dtype=float)
+    pk = np.flatnonzero((x >= 0.85) & (x <= 0.995))
+    if not pk.size:
+        return None
+    ip = pk[np.argmax(j[pk])]
+    inner = np.flatnonzero((x >= 0.6) & (x <= x[ip]))
+    im = inner[np.argmin(j[inner])]
+    return float(x[im]) if im < ip and j[ip] - j[im] > rel * np.max(np.abs(j)) else None
+
+
 def core_current_metrics(x, jphi, jphi_ref, sigma_ref):
     """``(z, gradient_ratio, x_ped)`` of a draw's *jphi* inside the pedestal
     top (:func:`pedestal_top` of the baseline *jphi_ref*): the largest

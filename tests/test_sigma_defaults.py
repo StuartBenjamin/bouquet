@@ -72,6 +72,41 @@ def test_a_sigma_less_run_draws_the_flattop_template(tmp_path):
     assert env["ni_from_zeff"] is True          # the channel is on by default, as before
 
 
+def test_smooth_envelope_rounds_a_kink_inside_the_edge_and_keeps_the_pedestal():
+    from bouquet.baseline import smooth_envelope
+    psi = np.linspace(0.0, 1.0, 201)
+    trend = 0.1 * np.exp(0.8 * psi)
+    np.testing.assert_allclose(smooth_envelope(psi, trend, 0.05, 0.85), trend, rtol=1e-9)   # no bias, ends included
+    ped = 2.0 * (np.clip(psi - 0.9, 0.0, None) / 0.1) ** 2
+    kinked = trend * np.exp(0.3 * np.abs(psi - 0.4) + ped)                    # a slope jump at 0.4, a steep pedestal
+    s = smooth_envelope(psi, kinked, 0.05, 0.85)
+    kink = np.abs(psi[1:-1] - 0.4) < 0.05
+    assert np.max(np.abs(np.diff(np.log(s), 2))[kink]) < 0.2 * np.max(np.abs(np.diff(np.log(kinked), 2))[kink])
+    assert np.max(np.abs(s / kinked - 1)[psi >= 0.9]) < 5e-3
+    zeroed = np.where(psi > 0.99, 0.0, kinked)                                 # a node at zero is kept, not fitted
+    assert np.all(smooth_envelope(psi, zeroed, 0.05, 0.85)[psi > 0.99] == 0.0)
+
+
+def test_every_kinetic_envelope_is_smoothed_to_the_pedestal_top_when_asked(tmp_path):
+    from bouquet.baseline import smooth_envelope
+    from bouquet.filtering import edge_current_minimum
+    psi = np.linspace(0.0, 1.0, 51)
+    bump = 8.0e5 * (1.0 - psi ** 2) + 3.0e5 * np.exp(-0.5 * ((psi - 0.95) / 0.02) ** 2)
+    assert edge_current_minimum(psi, bump) == pytest.approx(0.88, abs=0.03)
+    bl = _bl(psi)                                                             # no edge peak: the edge is psi_N 0.9
+    env = {w: resolve_uncertainty(_cfg(tmp_path, UncertaintyConfig(log_sigma_sources=False, sigma_smooth=w)), bl)
+           for w in (None, 0.05)}
+    edge = 0.9
+    for ch in _CH:
+        np.testing.assert_allclose(env[0.05][f"sigma_{ch}"],
+                                   smooth_envelope(psi, env[None][f"sigma_{ch}"], 0.05, edge), rtol=1e-12)
+    np.testing.assert_allclose(env[0.05]["aux_sigmas"]["zeff"],
+                               smooth_envelope(psi, env[None]["aux_sigmas"]["zeff"], 0.05, edge), rtol=1e-12)
+    assert env[0.05]["sigma_smooth"] == {"width": 0.05, "edge": edge} and env[None]["sigma_smooth"] is None
+    with pytest.raises(ValueError, match="sigma_smooth"):
+        _cfg(tmp_path, UncertaintyConfig(sigma_smooth=0.0))
+
+
 def test_how_much_the_default_widths_moved(tmp_path):
     """Uniform-in-psi_N means of the new default relative envelope vs the old
     flat 5 / 5 / 10 / 10 / 5 % (docs/CHANGES_SUMMARY.md)."""
