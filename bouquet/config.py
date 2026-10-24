@@ -867,13 +867,6 @@ class UncertaintyConfig:
     # missing dataset / invalid data), and the same record is returned as
     # resolve_uncertainty()'s "zeff_sigma_tier" metadata.
     zeff_sigma_source: str = "auto"
-    # rms width (run coordinate) of a Gaussian smoothing of the resolved Z_eff
-    # envelope before drawing (smooth_envelope).  A draw is the baseline +
-    # sigma x smooth noise, so a kink or wiggle of the envelope (the measured,
-    # carbon-propagated one has them) goes into every draw, and through the
-    # derived ni into p' (WB 10-23: Z_eff draws > 2x rougher than their
-    # baseline in 82 of 370 shots).  None: the envelope as resolved.
-    zeff_sigma_smooth: Optional[float] = None
 
     # With the zeff channel active: True derives ni per draw from the drawn
     # (ne, Zeff) as an increment on the baseline ni (kinetic_sampler/3;
@@ -905,6 +898,15 @@ class UncertaintyConfig:
     # and I_BS bands become one-sided.  False: only the zeff_bounds window
     # (the bound in place before PR #56); True: on.
     kinetic_clips: Optional[bool] = None
+
+    # rms width (run coordinate) of a Gaussian smoothing of every drawn envelope
+    # (kinetic sigmas, aux sigmas incl. Z_eff, the n_e-Z_eff coupling) before
+    # drawing (sampling.smooth_envelope).  A draw is the baseline + sigma x
+    # smooth noise, so a kink or wiggle of an envelope goes into every draw
+    # (WB 10-23: the measured Z_eff envelope's made the Z_eff, n_i and p'
+    # draws > 2x rougher than their baseline in 297 of 579 shots).  The
+    # smoothed envelopes are archived, so a replay inverts on them.  None: off.
+    sigma_smooth: Optional[float] = None
 
     # GPR correlation length scales (psi_N units) -- define the perturbation
     n_ls: float = 0.5                      # density

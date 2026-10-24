@@ -73,7 +73,7 @@ def test_a_sigma_less_run_draws_the_flattop_template(tmp_path):
 
 
 def test_smooth_envelope_takes_a_kink_out_and_keeps_the_level():
-    from bouquet.baseline import smooth_envelope
+    from bouquet.sampling import smooth_envelope
     psi = np.linspace(0.0, 1.0, 201)
     kinked = 0.07 * (1.5 + 0.5 * psi) + 0.03 * np.abs(psi - 0.3)             # a slope jump at 0.3
     flat = np.full_like(psi, 0.2)
@@ -83,15 +83,18 @@ def test_smooth_envelope_takes_a_kink_out_and_keeps_the_level():
     assert curv(s) < 0.15 * curv(kinked) and np.max(np.abs(s - kinked)) < 0.01 * kinked.max()
 
 
-def test_a_resolved_zeff_envelope_is_smoothed_and_recorded(tmp_path):
+def test_sigma_smooth_smooths_every_drawn_envelope(tmp_path):
+    from bouquet.sampling import smooth_envelope
     psi = np.linspace(0.0, 1.0, 201)
     bl = _bl(psi)
     env = {w: resolve_uncertainty(_cfg(tmp_path, UncertaintyConfig(
-        log_sigma_sources=False, zeff_sigma_smooth=w)), bl) for w in (None, 0.02)}
-    from bouquet.baseline import smooth_envelope
+        log_sigma_sources=False, sigma_smooth=w)), bl) for w in (None, 0.02)}
+    for k in ("sigma_ne", "sigma_te", "sigma_ni", "sigma_ti"):
+        np.testing.assert_allclose(env[0.02][k], smooth_envelope(psi, env[None][k], 0.02), rtol=1e-12)
     np.testing.assert_allclose(env[0.02]["aux_sigmas"]["zeff"],
                                smooth_envelope(psi, env[None]["aux_sigmas"]["zeff"], 0.02), rtol=1e-12)
-    assert env[0.02]["sigma_source"]["zeff"]["smooth"] == 0.02 and env[None]["sigma_source"]["zeff"]["smooth"] is None
+    np.testing.assert_array_equal(env[0.02]["sigma_jphi"], env[None]["sigma_jphi"])     # a fraction of jphi_total
+    assert (env[0.02]["sigma_smooth"], env[None]["sigma_smooth"]) == (0.02, None)
 
 
 def test_how_much_the_default_widths_moved(tmp_path):
