@@ -648,6 +648,16 @@ def _zeff_dd_rejected(baseline):
     return _zd.get("reason") == "dataset inconsistent"
 
 
+def smooth_envelope(x, sigma, width):
+    """``sigma`` on the grid ``x`` under a Gaussian of rms ``width`` in ``x``,
+    weighted by the grid spacing and renormalised at the ends."""
+    import numpy as np
+    x, sigma = np.asarray(x, dtype=float), np.asarray(sigma, dtype=float)
+    d = (x[:, None] - x[None, :]) / float(width)
+    k = np.exp(-0.5 * d * d) * np.gradient(x)[None, :]
+    return k @ sigma / k.sum(axis=1)
+
+
 def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
                           zeff_is_ida, measured_sigma, measured_source,
                           carbon_sigma=None, carbon_source="none",
@@ -1389,7 +1399,9 @@ def resolve_uncertainty(config, baseline) -> dict:
                 "zeff_error_upper is not the width of the recomputed total"
                 if _zeff_dd_rejected(baseline) else None),
         )
-        user_sigmas["zeff"] = _z_env
+        _zw = getattr(unc, "zeff_sigma_smooth", None)
+        user_sigmas["zeff"] = (_z_env if _zw is None
+                               else smooth_envelope(psi_kin, _z_env, _zw))
         # which ladder ran: the run's one resolved route
         _z_meta = dict(_z_meta, ladder="resolved" if _ion_route
                        else "standard")
@@ -1398,11 +1410,12 @@ def resolve_uncertainty(config, baseline) -> dict:
             "kind": {"carbon-propagated": "ida", "VB-measured": "ida",
                      "IDA-resolved": "ida", "IMAS-measured": "imas",
                      "scalar": "assumed"}[_z_meta["tier"]],
-            "source": _z_label, "tier": _z_meta["tier"],
+            "source": _z_label, "tier": _z_meta["tier"], "smooth": _zw,
             **({"assumed_default": _z_meta["assumed_default"]}
                if _z_meta["tier"] == "scalar" else {})}
         if getattr(unc, "log_sigma_sources", True):
-            print(f"[sigma] zeff envelope <- {_z_label}")
+            print(f"[sigma] zeff envelope <- {_z_label}"
+                  + ("" if _zw is None else f", smoothed (rms {_zw:g})"))
             for _sk in _z_meta["skipped"]:
                 print(f"[sigma]   {_sk['tier']} tier skipped: "
                       f"{_sk['reason']}")

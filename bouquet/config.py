@@ -867,6 +867,13 @@ class UncertaintyConfig:
     # missing dataset / invalid data), and the same record is returned as
     # resolve_uncertainty()'s "zeff_sigma_tier" metadata.
     zeff_sigma_source: str = "auto"
+    # rms width (run coordinate) of a Gaussian smoothing of the resolved Z_eff
+    # envelope before drawing (smooth_envelope).  A draw is the baseline +
+    # sigma x smooth noise, so a kink or wiggle of the envelope (the measured,
+    # carbon-propagated one has them) goes into every draw, and through the
+    # derived ni into p' (WB 10-23: Z_eff draws > 2x rougher than their
+    # baseline in 82 of 370 shots).  None: the envelope as resolved.
+    zeff_sigma_smooth: Optional[float] = None
 
     # With the zeff channel active: True derives ni per draw from the drawn
     # (ne, Zeff) as an increment on the baseline ni (kinetic_sampler/3;

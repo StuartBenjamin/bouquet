@@ -72,6 +72,28 @@ def test_a_sigma_less_run_draws_the_flattop_template(tmp_path):
     assert env["ni_from_zeff"] is True          # the channel is on by default, as before
 
 
+def test_smooth_envelope_takes_a_kink_out_and_keeps_the_level():
+    from bouquet.baseline import smooth_envelope
+    psi = np.linspace(0.0, 1.0, 201)
+    kinked = 0.07 * (1.5 + 0.5 * psi) + 0.03 * np.abs(psi - 0.3)             # a slope jump at 0.3
+    flat = np.full_like(psi, 0.2)
+    np.testing.assert_allclose(smooth_envelope(psi, flat, 0.02), flat, rtol=1e-14)
+    s = smooth_envelope(psi, kinked, 0.02)
+    curv = lambda y: np.max(np.abs(np.diff(y, 2)))                            # noqa: E731
+    assert curv(s) < 0.15 * curv(kinked) and np.max(np.abs(s - kinked)) < 0.01 * kinked.max()
+
+
+def test_a_resolved_zeff_envelope_is_smoothed_and_recorded(tmp_path):
+    psi = np.linspace(0.0, 1.0, 201)
+    bl = _bl(psi)
+    env = {w: resolve_uncertainty(_cfg(tmp_path, UncertaintyConfig(
+        log_sigma_sources=False, zeff_sigma_smooth=w)), bl) for w in (None, 0.02)}
+    from bouquet.baseline import smooth_envelope
+    np.testing.assert_allclose(env[0.02]["aux_sigmas"]["zeff"],
+                               smooth_envelope(psi, env[None]["aux_sigmas"]["zeff"], 0.02), rtol=1e-12)
+    assert env[0.02]["sigma_source"]["zeff"]["smooth"] == 0.02 and env[None]["sigma_source"]["zeff"]["smooth"] is None
+
+
 def test_how_much_the_default_widths_moved(tmp_path):
     """Uniform-in-psi_N means of the new default relative envelope vs the old
     flat 5 / 5 / 10 / 10 / 5 % (docs/CHANGES_SUMMARY.md)."""
