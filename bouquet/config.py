@@ -903,6 +903,14 @@ class UncertaintyConfig:
     n_ls: float = 0.5                      # density
     t_ls: float = 0.4                      # temperature
     j_ls: float = 0.25                     # current density
+    # Width (in psi_N) of the smoothing of the resolved kinetic envelopes
+    # (sigma_ne/te/ni/ti and the Z_eff aux sigma) before drawing
+    # (baseline.smooth_envelope); it narrows to nothing towards the pedestal
+    # top (filtering.edge_current_minimum, at most psi_N 0.9), so the pedestal
+    # is kept.  A draw is the baseline + sigma x smooth noise: a kink or wiggle
+    # of an envelope goes into every draw, and through p' and j_BS into the
+    # equilibria.  None: the envelopes as resolved.
+    sigma_smooth: Optional[float] = None
 
     # --- switchboard: auxiliary perturbed profiles (source-decoupled) --------
     # Supplying a sigma profile (on psi_N_kinetic) ENABLES perturbing a named
@@ -2991,6 +2999,14 @@ class BouquetConfig:
             raise ValueError(
                 "uncertainty.zeff_sigma_source must be 'auto', 'carbon', "
                 "'measured', or 'scalar'")
+        _w = self.uncertainty.sigma_smooth
+        if _w is not None and not (isinstance(_w, numbers.Real)
+                                   and not isinstance(_w, bool)
+                                   and math.isfinite(float(_w))
+                                   and float(_w) > 0.0):
+            raise ValueError(
+                f"uncertainty.sigma_smooth must be None (off) or a finite "
+                f"width > 0, not {_w!r}")
         if self.generation.n_equils < 1:
             raise ValueError("generation.n_equils must be >= 1")
         _tgt = require_integer_count(
