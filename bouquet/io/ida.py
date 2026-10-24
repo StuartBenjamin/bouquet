@@ -204,6 +204,18 @@ def _carbon_tier_usable(nC, ne, sigma_nC=None, sigma_ne=None, *,
     return False
 
 
+def _route_excess(delta, var_delta):
+    """The variance a route disagreement ``delta`` adds beyond its own spread
+    ``var_delta``: with ``e = delta^2 - var_delta``, ``max(e, 0)^3 / (e^2 +
+    var_delta^2)``.  Zero where the routes agree within their errors, ``e``
+    where they clearly disagree, and smooth to its second derivative at the
+    onset: the hard ``max(e, 0)`` put a slope kink in the envelope wherever
+    ``|delta|`` crossed its error, and every draw carried it."""
+    e = np.maximum(delta ** 2 - var_delta, 0.0)
+    return np.divide(e ** 3, e ** 2 + var_delta ** 2, out=np.zeros_like(e),
+                     where=e > 0.0)
+
+
 def _chi(delta, var_delta):
     """Route disagreement in sigma; NaN where the spread is zero."""
     return np.sqrt(np.divide(delta ** 2, var_delta,
@@ -675,7 +687,7 @@ def read_ida(
 
         # Route disagreement, folded into both envelopes.  Both routes are GP
         # fits, so a nonzero difference is a coherent offset in psi_N, not
-        # point-to-point scatter.  max(., 0) keeps the term one-sided; the
+        # point-to-point scatter.  _route_excess keeps the term one-sided; the
         # resolved value is the mean of two routes, so an offset delta
         # displaces it by delta/2 -> variance excess /4.  ne cancels partly in
         # ni and not at all in Z_eff, so each delta gets its own Jacobian.
@@ -683,7 +695,7 @@ def read_ida(
         if use_vb and use_cer:
             d_z = zeff_vb - zeff_cer
             var_dz = sigma_Zeff ** 2 + sigma_Zeff_carbon ** 2
-            var_zeff = var_zeff + np.maximum(d_z ** 2 - var_dz, 0.0) / 4.0
+            var_zeff = var_zeff + _route_excess(d_z, var_dz) / 4.0
             zeff_route_chi = _chi(d_z, var_dz)
 
             ni_vb = main_ion_density_from_zeff(
@@ -694,7 +706,7 @@ def read_ida(
                        * _inv - 1.0) * sigma_ne) ** 2 \
                 + (ne * _inv * sigma_Zeff) ** 2 \
                 + (impurity_Z * sigma_n_carbon) ** 2
-            var_ni = var_ni + np.maximum(d_n ** 2 - var_dn, 0.0) / 4.0
+            var_ni = var_ni + _route_excess(d_n, var_dn) / 4.0
             ni_route_chi = _chi(d_n, var_dn)
 
         zeff_dne = (-w_c * (zeff_cer - 1.0) / np.clip(ne, 1e10, None)

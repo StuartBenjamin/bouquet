@@ -158,7 +158,8 @@ class TestReaderTiers:
         s_vb, s_c = np.std(zf_s, axis=0), np.std(zc_s, axis=0)
         d_z = np.mean(zf_s, axis=0) - np.mean(zc_s, axis=0)
         var_dz = s_vb ** 2 + s_c ** 2
-        expect = np.sqrt(var_dz / 4.0 + np.maximum(d_z ** 2 - var_dz, 0.0) / 4.0)
+        e = np.maximum(d_z ** 2 - var_dz, 0.0)
+        expect = np.sqrt(var_dz / 4.0 + e ** 3 / np.where(e > 0, e ** 2 + var_dz ** 2, 1.0) / 4.0)
         np.testing.assert_allclose(r.sigma_Zeff, expect, rtol=1e-10)
         # (2) at the 6116d5f Monte-Carlo tolerance, against the fixture's
         #     generating spreads: 8 % on Z_eff(VB), 5 % on n_C and 4 % on n_e
@@ -169,6 +170,20 @@ class TestReaderTiers:
         assert frac == pytest.approx(frac_model, rel=0.25)   # 64 samples
         # the combined envelope is TIGHTER than either route alone
         assert frac < spread
+
+    def test_route_excess_switches_on_smoothly(self):
+        """The disagreement term: zero within the routes' errors, the excess
+        delta^2 - var beyond them, and no kink at the onset (the hard max put
+        one in the envelope wherever |delta| crossed its error)."""
+        from bouquet.io.ida import _route_excess
+        var = 4.0
+        d = np.linspace(0.0, 10.0, 20001)
+        x = _route_excess(d, np.full_like(d, var))
+        assert np.all(x[d <= 2.0] == 0.0)
+        np.testing.assert_allclose(x[-1], d[-1] ** 2 - var, rtol=2e-3)
+        np.testing.assert_allclose(_route_excess(np.array([3.0]), np.array([0.0])), [9.0])
+        slope = np.diff(x) / np.diff(d)
+        assert np.max(np.abs(np.diff(slope))) < 1e-2          # per 5e-4 step; the hard max jumps by 2|delta| = 4
 
     def test_carbon_crosscheck_reports_zero_on_a_consistent_file(self, tmp_path, capsys):
         p = str(tmp_path / "cons.cdf")
