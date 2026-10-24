@@ -110,6 +110,18 @@ def test_a_toroidal_flux_run_evaluates_the_template_at_psi_N(tmp_path):
     assert not np.allclose(env["sigma_te"], sigma_template(phi, "te") * _prof(bl, "te"))
 
 
+def test_the_psi_map_between_its_nodes_is_a_spline_not_linear(tmp_path):
+    """psi_N of kinetic nodes between the map's nodes: a linear map put a
+    slope kink in the envelope at every map node."""
+    psi_m = np.linspace(0.0, 1.0, 21)
+    phi = np.linspace(0.0, 1.0, 201)                 # the run grid, off the map's nodes
+    bl = _bl(phi, psi_map=(psi_m, psi_m ** 1.3))
+    env = resolve_uncertainty(_cfg(tmp_path, UncertaintyConfig(log_sigma_sources=False)), bl)
+    exact = sigma_template(phi ** (1 / 1.3), "te") * _prof(bl, "te")
+    inner = phi > 0.05                               # the map's axis cusp aside
+    assert np.max(np.abs(env["sigma_te"] - exact)[inner]) < 2e-4 * exact.max()   # linear map: 7e-4
+
+
 @pytest.mark.parametrize("sha", ["554edfb", "d874822"])
 def test_a_stored_config_keeps_its_explicit_scalars(sha):
     with open(os.path.join(_STORED, f"config_{sha}.json")) as fh:

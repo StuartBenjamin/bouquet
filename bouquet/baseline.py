@@ -1036,6 +1036,7 @@ def resolve_uncertainty(config, baseline) -> dict:
 
     import numpy as np
     from .config import ImasSource, ReconstructionSource, UncertaintyConfig
+    from .utils import kinetic_regrid, regrid
 
     # Read the defaults off the dataclass so "the user changed this" can never
     # drift from the declared defaults (None: the assumed template).
@@ -1123,6 +1124,7 @@ def resolve_uncertainty(config, baseline) -> dict:
                     f"{float(ida.time)!r} s, not the matched "
                     f"{_sig_match['ida_time_used']!r} s")
 
+        _how = kinetic_regrid(src)
         _ida_x, _ida_in = np.asarray(ida.psi_N, dtype=float), slice(None)
         if baseline.psi_map is not None:
             # psi_N -> run coordinate (inside the LCFS): through the source's
@@ -1136,10 +1138,7 @@ def resolve_uncertainty(config, baseline) -> dict:
                 _ida_in, _ida_x = phi_n_from_q(_ida_x, ida.q, bracket=True)
             else:
                 _ida_in = _ida_x <= 1.0
-                _ida_x = np.interp(_ida_x[_ida_in], *baseline.psi_map)
-
-        from .utils import kinetic_regrid, regrid
-        _how = kinetic_regrid(src)
+                _ida_x = regrid(*baseline.psi_map, _ida_x[_ida_in], _how)
 
         def _to_kin(arr):       # the kinetics' own regrid (io.imas._merge_ida_kinetics)
             return regrid(_ida_x, np.asarray(arr, dtype=float)[_ida_in], psi_kin, _how)
@@ -1197,9 +1196,8 @@ def resolve_uncertainty(config, baseline) -> dict:
     # psi_N of the kinetic nodes: the templates are tabulated in psi_N (a
     # toroidal-flux run maps its grid back through the source's own map)
     from .uncertainties import DEFAULT_SIGMA_TEMPLATE, sigma_template
-    _psi_tpl = (psi_kin if baseline.psi_map is None else np.interp(
-        psi_kin, np.asarray(baseline.psi_map[1], dtype=float),
-        np.asarray(baseline.psi_map[0], dtype=float)))
+    _psi_tpl = (psi_kin if baseline.psi_map is None else regrid(
+        baseline.psi_map[1], baseline.psi_map[0], psi_kin, kinetic_regrid(src)))
     _shadowed = []  # channels whose deliberately-set scalar lost to the IDA
     for _ch in ("ne", "te", "ni", "ti"):
         if _ch in _profiles and _profiles[_ch] is not None:
