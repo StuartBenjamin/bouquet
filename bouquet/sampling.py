@@ -89,15 +89,6 @@ def make_rng(seed=None) -> np.random.Generator:
     return np.random.default_rng(int(seed))
 
 
-def smooth_envelope(x, sigma, width):
-    """``sigma`` on the grid ``x`` under a Gaussian of rms ``width`` in ``x``,
-    weighted by the grid spacing and renormalised at the ends."""
-    x, sigma = np.asarray(x, dtype=float), np.asarray(sigma, dtype=float)
-    d = (x[:, None] - x[None, :]) / float(width)
-    k = np.exp(-0.5 * d * d) * np.gradient(x)[None, :]
-    return k @ sigma / k.sum(axis=1)
-
-
 class ReplayExhausted(RuntimeError):
     """A :class:`ReplayNoise` was asked for a normal it does not hold."""
 
