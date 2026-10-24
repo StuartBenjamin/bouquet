@@ -200,15 +200,20 @@ class SwbBaseline:
             self._seed_coil_init(mygs)
         saw_kw = self._swb_saw_kwargs()
         j_seed, jphi_fixed = np.asarray(j_seed, dtype=float), bl.jphi_fixed
+        boot_kw = swb_bootstrap_kwargs(gc)
+        interp = getattr(gc, "swb_jind_interp", None)
+        if interp is not None and boot_kw.get("use_python_solve"):
+            raise ValueError("swb_jind_interp needs OFT's internal solve, not use_python_solve")
         res = solve_with_bootstrap(
             mygs, kin["ne"], kin["te"], kin["ni"], kin["ti"], kin["Zeff"],
-            float(bl.Ip_target), j_seed,
+            float(bl.Ip_target),
+            j_seed if interp is None else {"x": psi_N, "y": j_seed, "interp": interp},
             scale_jbs=1.0, isolate_edge_jbs=bool(gc.isolate_edge_jbs),
             diagnostic_plots=False, verbose=False,
             jphi_fixed=jphi_fixed, p_fixed=kin["p_fixed"],
             **saw_kw,
             **coords.swb_grid_kwargs(psi_N, getattr(bl, "coord", coords.PSI)),
-            **swb_bootstrap_kwargs(gc))
+            **boot_kw)
         res = self._swb_split(res, solve_with_bootstrap, psi_N,
                               getattr(bl, "coord", coords.PSI))
         if saw_kw:
