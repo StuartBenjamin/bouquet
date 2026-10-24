@@ -1677,6 +1677,11 @@ class GenerationConfig:
     swb_saw_tol: float = 1.0e-4
     swb_saw_ramp: float = 0.01
     swb_saw_rule: str = "local"
+    # swb only.  OFT interpolation of the inductive jphi profile between its
+    # nodes (OFT profile key 'interp'; P' inherits it): "cubic" (C2 spline;
+    # an OFT with c2_profile_interp, the internal solve) or "linterp"; None
+    # passes the plain array (OFT's default, linterp).
+    swb_jind_interp: Optional[str] = None
     # --- self-consistent bootstrap loop (bouquet.jbs_loop) -------------------
     # True (default): jphi_bs is re-evaluated (physics.evaluate_jbs: Redl on the
     # caller's own psi_N grid and the CURRENT equilibrium's geometry) inside a
@@ -2166,6 +2171,8 @@ class GenerationConfig:
             raise ValueError(f"swb_saw_ramp={self.swb_saw_ramp!r} must be >= 0")
         if self.swb_saw_rule not in SWB_SAW_RULES:
             raise ValueError(f"swb_saw_rule={self.swb_saw_rule!r} not in {tuple(SWB_SAW_RULES)}")
+        if self.swb_jind_interp not in (None, "linterp", "cubic"):
+            raise ValueError(f"swb_jind_interp={self.swb_jind_interp!r} not in (None, 'linterp', 'cubic')")
         _t = self.swb_ip_tol
         if isinstance(_t, bool) or not (float(_t) > 0.0 and float(_t) < 1.0):
             raise ValueError(f"swb_ip_tol={_t!r} must be in (0, 1)")
