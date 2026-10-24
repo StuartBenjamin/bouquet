@@ -2337,6 +2337,8 @@ BOOTSTRAP_KWARGS_ALLOWED = {
                        "engine implements it itself",
     "taper_edge_shape": "set_boot_ops (internal-solve builds); the unified "
                         "engine implements it itself",
+    "bs_interp": "set_boot_ops (c2_profile_interp builds): the bootstrap "
+                 "update's interpolation (ledger B-29)",
 }
 
 #: Allow-listed keys that change a convergence criterion of the toolkit's
