@@ -33,6 +33,7 @@ Typical workflow
 >>> export_filtered("run.h5", "run_selected.h5")
 """
 import os
+import shutil
 import warnings
 
 import numpy as np
@@ -1782,6 +1783,33 @@ def export_filtered(h5path_or_header, out_path, scan_key=None,
     with h5py.File(src, "r") as hs, h5py.File(out, "w") as hd:
         _copy(hs, hd)
     return kept
+
+
+def append_draws(h5path_or_header, dst, offset, scan_key=None, selection="selected",
+                 deselect=(), reason=None):
+    """Add the ``selection`` draws of one archive to the archive ``dst`` of the
+    same slice, draw ``i`` as ``i + offset`` (e.g. a fill-up run's in-spec
+    draws, numbered after every draw of the runs before it).  ``dst`` keeps
+    its baseline and metadata and is replaced atomically; a number it already
+    holds is refused.  ``deselect``: draws of ``dst`` marked not selected in
+    the same rewrite (data kept, ``reason`` stamped as ``deselected``).
+    Returns ``{i: i + offset}``."""
+    src, dst = _resolve(h5path_or_header), os.path.abspath(dst)
+    new = {i: i + int(offset) for i in select_indices(src, scan_key=scan_key, selection=selection)}
+    taken = set(new.values()) & set(list_equilibrium_indices(dst, scan_key=scan_key))
+    if taken:
+        raise ValueError(f"{os.path.basename(dst)} already holds draw(s) {sorted(taken)}")
+    parent = _group_path(scan_key, 0).rpartition("/")[0] or "/"
+    tmp = f"{dst}.appending"
+    shutil.copyfile(dst, tmp)
+    with h5py.File(src, "r") as hs, h5py.File(tmp, "r+") as hd:
+        for i, j in new.items():
+            hs.copy(hs[_group_path(scan_key, i)], hd[parent], name=str(j))
+            hd[_group_path(scan_key, j)].attrs["count"] = j
+        for c in deselect:
+            hd[_group_path(scan_key, c)].attrs.update(selected=False, deselected=str(reason))
+    os.replace(tmp, dst)
+    return new
 
 
 def drop_file_blobs(h5path_or_header, names=(IFILE_DS,)):

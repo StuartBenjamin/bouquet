@@ -81,6 +81,7 @@ from .filtering import (
     read_filter_flags,
     select_indices,
     export_filtered,
+    append_draws,
     refilter_inspec,
     InspecBands,
 )
@@ -193,7 +194,7 @@ __all__ = [
     "filter_coil_currents", "filter_coil_chi2", "measured_coil_currents",
     "resolve_coil_sigma", "CoilSigmaUnavailable", "coil_sigma_floor_fraction", "detect_device", "DEVICES",
     "filter_boundaries", "read_filter_flags",
-    "select_indices", "export_filtered",
+    "select_indices", "export_filtered", "append_draws",
     "refilter_inspec", "InspecBands",
     # ---- plotting ----
     "set_plot_style", "WONG",

@@ -217,6 +217,28 @@ def test_export_filtered_holds_only_the_kept_draws(tmp_path):
         assert hf.attrs["schema_version"] == 4 and hf["scan/900/2"].attrs["selected"]
         np.testing.assert_array_equal(hf["scan/900/2/eqdsk"][()], blob)
 
+
+def test_append_draws_adds_the_selected_draws_renumbered(tmp_path):
+    from bouquet.filtering import append_draws
+    src, dst = str(tmp_path / "fill.h5"), str(tmp_path / "unit.h5")
+    for path, counts, base in ((src, range(3), 1.0), (dst, (0, 4), 0.0)):
+        with h5py.File(path, "w") as hf:
+            hf.require_group("scan/900/_baseline")["psi_N"] = np.full(5, base)
+            for c in counts:
+                g = hf.require_group(f"scan/900/{c}")
+                g["n_e"] = np.full(5, 10.0 * base + c)
+                g.attrs.update(count=c, selected=c != 1)
+    assert append_draws(src, dst, 5, scan_key=900, deselect=[4], reason="moved") == {0: 5, 2: 7}
+    with h5py.File(dst, "r") as hf:
+        assert sorted(hf["scan/900"], key=str) == ["0", "4", "5", "7", "_baseline"]
+        assert not hf["scan/900/4"].attrs["selected"] and hf["scan/900/4"].attrs["deselected"] == "moved"
+        assert hf["scan/900/4/n_e"][0] == 4.0                       # kept
+        assert hf["scan/900/7"].attrs["count"] == 7 and hf["scan/900/7/n_e"][0] == 12.0
+        assert hf["scan/900/_baseline/psi_N"][0] == 0.0             # the destination's baseline kept
+    with pytest.raises(ValueError, match="already holds"):
+        append_draws(src, dst, 5, scan_key=900)
+    assert not os.path.exists(dst + ".appending")
+
 class TestDethread:
     """Phase 3: readers accept a run/archive; bad scan_key raises (F1)."""
 
