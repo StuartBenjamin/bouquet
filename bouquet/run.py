@@ -6256,9 +6256,9 @@ class Bouquet(SwbBaseline):
                 "the derived l_i target may be unreliable."
             )
 
-        tok_li1 = float(mygs.get_stats(lcfs_pad=psi_pad, li_normalization="std")["l_i"])
-        tok_li3 = float((_st3 := mygs.get_stats(
-            lcfs_pad=psi_pad, li_normalization="iter"))["l_i"])
+        from .utils import stats_both_li
+        _st3, tok_li1 = stats_both_li(mygs, psi_pad)
+        tok_li3 = float(_st3["l_i"])
         # the pressure handed to the solver and both frames of beta / W_MHD
         from .edge_pressure import archive_record as _edge_record
         from .edge_pressure import solver_p_scale as _p_scale

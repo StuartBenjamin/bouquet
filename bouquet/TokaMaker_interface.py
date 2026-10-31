@@ -55,6 +55,7 @@ from .utils import (
     save_state_ifile,
     SnapshotRestoreError,
     stamp_group_attrs,
+    stats_both_li,
     store_baseline_state,
     write_group_current_split,
     _scan_key,
@@ -8844,9 +8845,7 @@ def generate_bouquet(
         # run (which would discard every already-stored draw's filtering/figs):
         # set l_i to nan so the draw is filtered out downstream and continue.
         try:
-            eq_stats_std = mygs.get_stats(li_normalization="std", lcfs_pad=psi_pad)
-            li1 = eq_stats_std["l_i"]
-            eq_stats_iter = mygs.get_stats(li_normalization="iter", lcfs_pad=psi_pad)
+            eq_stats_iter, li1 = stats_both_li(mygs, psi_pad)
             li3 = eq_stats_iter["l_i"]
             # the solver's uniform P' rescale of this draw's state
             _p_scale_draw = edge_pressure_solver_p_scale(mygs)
