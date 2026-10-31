@@ -1769,16 +1769,15 @@ def test_stats_both_li_one_call_when_oft_returns_both():
     calls = []
 
     class _GS:
-        def __init__(self, both):
-            self.both = both
-
-        def get_stats(self, lcfs_pad=None, li_normalization="std", **kw):
-            if kw and not self.both:
-                raise TypeError("unexpected keyword argument 'li_both'")
+        def get_stats(self, lcfs_pad=None, li_normalization="std", li_both=False):
             calls.append(li_normalization)
             st = {"Ip": 1e6, "l_i": 0.9 if li_normalization == "iter" else 0.8}
-            return dict(st, l_i_std=0.8, l_i_iter=0.9) if kw.get("li_both") else st
-    assert stats_both_li(_GS(True), 1e-3)[1] == 0.8 and calls == ["iter"]
+            return dict(st, l_i_std=0.8, l_i_iter=0.9) if li_both else st
+
+    class _OldGS(_GS):
+        def get_stats(self, lcfs_pad=None, li_normalization="std"):
+            return super().get_stats(lcfs_pad, li_normalization)
+    assert stats_both_li(_GS(), 1e-3)[1] == 0.8 and calls == ["iter"]
     calls.clear()
-    st, li1 = stats_both_li(_GS(False), 1e-3)                 # OFT without li_both: a second call
+    st, li1 = stats_both_li(_OldGS(), 1e-3)     # OFT without li_both: a second call
     assert (st["l_i"], li1) == (0.9, 0.8) and calls == ["iter", "std"]

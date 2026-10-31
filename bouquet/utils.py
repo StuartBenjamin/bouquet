@@ -2142,10 +2142,9 @@ def stats_both_li(mygs, lcfs_pad):
     """``(stats, li_1)``: TokaMaker ``get_stats(li_normalization="iter")`` and
     the 'std' l_i from the same call (``li_both=True``: its ``l_i_std``), else,
     on an OFT without that option, from a second 'std' call."""
-    try:
-        st = mygs.get_stats(lcfs_pad=lcfs_pad, li_normalization="iter", li_both=True)
-    except TypeError:                                  # OFT without li_both
-        st = mygs.get_stats(lcfs_pad=lcfs_pad, li_normalization="iter")
+    import inspect
+    both = {"li_both": True} if "li_both" in inspect.signature(mygs.get_stats).parameters else {}
+    st = mygs.get_stats(lcfs_pad=lcfs_pad, li_normalization="iter", **both)
     li1 = st.get("l_i_std")
     if li1 is None:
         li1 = mygs.get_stats(lcfs_pad=lcfs_pad, li_normalization="std")["l_i"]
