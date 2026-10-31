@@ -1163,6 +1163,21 @@ def _lcfs_from_psigrid(eq):
         return None
 
 
+def _rebuilt_geqdsk(ar, grp, scan_key, idx=None):
+    """The g-file of an archive group without stored g-file bytes
+    (``store_eqdsk=False``), rebuilt from its TokaMaker state
+    (:attr:`bouquet.archive.DrawView.eqdsk_bytes`; needs OpenFUSIONToolkit);
+    ``idx=None`` is the baseline.  ``None`` when the group has no state."""
+    from .archive import DrawView
+    from .io import GEQDSKEquilibrium
+    from .schema import TOKAMAKER_STATE_DS
+    if TOKAMAKER_STATE_DS not in grp:
+        return None
+    sv = ar.scan(scan_key)
+    view = sv.baseline_view() if idx is None else DrawView(ar, sv.scan_key, idx)
+    return GEQDSKEquilibrium.from_bytes(view.eqdsk_bytes)
+
+
 def _load_all_boundaries(h5path, scan_key=None, indices=None):
     """Load LCFS boundaries from stored geqdsk bytes for all equilibria.
 
@@ -1171,13 +1186,16 @@ def _load_all_boundaries(h5path, scan_key=None, indices=None):
     first draw), followed by the draws. Each boundary is re-contoured from the
     eqdsk's 2-D psi grid via :func:`_lcfs_from_psigrid` (uniform, identical
     sampling for clean overlay), falling back to the stored ``boundary_R/Z``.
-    Returns an empty list when the file contains no geqdsk bytes. When
-    ``indices`` is given, only those stored draws are loaded (honours a filter
-    selection).
+    Groups without stored geqdsk bytes use the g-file rebuilt from their
+    TokaMaker state (:func:`_rebuilt_geqdsk`); returns an empty list when
+    there is neither. When ``indices`` is given, only those stored draws are
+    loaded (honours a filter selection).
     """
+    from .archive import BouquetArchive
     from .io import GEQDSKEquilibrium
     from .utils import _scan_key, _group_path
 
+    ar = BouquetArchive(h5path)
     if indices is None:
         indices = list_equilibrium_indices(h5path, scan_key=scan_key)
 
@@ -1191,11 +1209,12 @@ def _load_all_boundaries(h5path, scan_key=None, indices=None):
         # references the TRUE baseline rather than draw 0.
         _bk = _scan_key(scan_key)
         bl_path = f"scan/{_bk}/_baseline" if _bk is not None else "_baseline"
-        if bl_path in hf and "eqdsk" in hf[bl_path]:
+        if bl_path in hf:
             try:
-                beq = GEQDSKEquilibrium.from_bytes(
-                    bytes(hf[bl_path]["eqdsk"][()]))
-                boundaries.append(_bnd(beq))
+                beq = (GEQDSKEquilibrium.from_bytes(bytes(hf[bl_path]["eqdsk"][()]))
+                       if "eqdsk" in hf[bl_path] else _rebuilt_geqdsk(ar, hf[bl_path], scan_key))
+                if beq is not None:
+                    boundaries.append(_bnd(beq))
             except Exception:
                 pass
 
@@ -1206,13 +1225,11 @@ def _load_all_boundaries(h5path, scan_key=None, indices=None):
             grp = hf[grp_path]
 
             eqdsk_ds = find_bytes_dataset(grp)
-            if eqdsk_ds is None:
-                continue
-
-            raw = bytes(grp[eqdsk_ds][()])
             try:
-                eq = GEQDSKEquilibrium.from_bytes(raw)
-                boundaries.append(_bnd(eq))
+                eq = (GEQDSKEquilibrium.from_bytes(bytes(grp[eqdsk_ds][()]))
+                      if eqdsk_ds is not None else _rebuilt_geqdsk(ar, grp, scan_key, i))
+                if eq is not None:
+                    boundaries.append(_bnd(eq))
             except Exception:
                 continue
 
@@ -1942,11 +1959,14 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
         Scan-value label for HDF5 mode.  ``None`` loads all.
     count : int or None
         If given with *h5path*, load only this equilibrium index.
+        Groups without stored g-file bytes use the g-file rebuilt from their
+        TokaMaker state (:func:`_rebuilt_geqdsk`).
 
     Returns
     -------
     fig, axes
     """
+    from .archive import BouquetArchive
     from .io import GEQDSKEquilibrium
 
     # --- resolve inputs to a list of equilibrium objects ---
@@ -1987,10 +2007,13 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
             bl_grp = f"scan/{bl_key}/_baseline" if bl_key else "_baseline"
         else:
             bl_grp = "_baseline"
+        ar = BouquetArchive(h5path)
         with h5py.File(h5path, "r") as hf:
             if bl_grp in hf and "eqdsk" in hf[bl_grp]:
                 raw = bytes(hf[bl_grp]["eqdsk"][()])
                 baseline_eq = GEQDSKEquilibrium.from_bytes(raw)
+            elif bl_grp in hf:
+                baseline_eq = _rebuilt_geqdsk(ar, hf[bl_grp], bl_scan)
 
         # Load perturbed equilibria
         for sv, idx in load_pairs:
@@ -2003,6 +2026,10 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
                 if eqdsk_ds is not None:
                     raw = bytes(grp[eqdsk_ds][()])
                     eqs.append(GEQDSKEquilibrium.from_bytes(raw))
+                else:
+                    eq = _rebuilt_geqdsk(ar, grp, sv, idx)
+                    if eq is not None:
+                        eqs.append(eq)
 
         # Prepend baseline if found; otherwise first perturbed is "baseline"
         if baseline_eq is not None:

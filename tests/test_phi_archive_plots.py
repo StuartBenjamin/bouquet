@@ -142,3 +142,21 @@ def test_merge_refuses_mixed_coords(tmp_path):
     with pytest.raises(RuntimeError, match="profile_coord"):
         merge_archives([a, b], str(tmp_path / "out"), scan_key="900")
     assert not os.path.exists(tmp_path / "out.h5")
+
+
+def test_gfile_plots_rebuild_groups_without_stored_gfiles(tmp_path, monkeypatch):
+    from bouquet.archive import DrawView
+    from bouquet.plotting import _load_all_boundaries, plot_geqdsk_bouquet
+    from bouquet.schema import TOKAMAKER_STATE_DS, find_bytes_dataset
+    p = _store(tmp_path / "a.h5", "psi_n", eqdsk=GEQDSK)
+    with h5py.File(p, "a") as hf:                      # a store_eqdsk=False archive
+        for g in (hf["scan/900/_baseline"], hf["scan/900/0"]):
+            del g[find_bytes_dataset(g) or "eqdsk"]
+            g[TOKAMAKER_STATE_DS] = np.void(b"STATE")
+    rebuilt = []
+    monkeypatch.setattr(DrawView, "eqdsk_bytes", property(
+        lambda self: rebuilt.append(self.count) or open(GEQDSK, "rb").read()))
+    assert len(_load_all_boundaries(p, "900")) == 2
+    fig, _ = plot_geqdsk_bouquet(h5path=p, scan_key="900")
+    assert fig is not None and len(rebuilt) == 4
+    plt.close(fig)
