@@ -160,3 +160,12 @@ def test_gfile_plots_rebuild_groups_without_stored_gfiles(tmp_path, monkeypatch)
     fig, _ = plot_geqdsk_bouquet(h5path=p, scan_key="900")
     assert fig is not None and len(rebuilt) == 4
     plt.close(fig)
+
+
+def test_gfile_plot_simple_mode(tmp_path):
+    from bouquet.plotting import plot_geqdsk_bouquet
+    p = _store(tmp_path / "a.h5", "psi_n", n_draws=2, eqdsk=GEQDSK)
+    fig, axes = plot_geqdsk_bouquet(h5path=p, scan_key="900", simple=True)
+    assert all(ax.get_title() == "" for ax in axes)
+    assert [t.get_text() for t in axes[1].get_legend().get_texts()] == ["Baseline"]
+    plt.close(fig)

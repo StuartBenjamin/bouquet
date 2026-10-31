@@ -86,6 +86,32 @@ def set_plot_style(usetex=False):
 set_plot_style()   # auto-apply on import
 
 
+def _simple_style(fig, font=1.44, lw=2.0, nxticks=3):
+    """Bigger text, thicker lines, wider panel gaps and fewer x ticks, for a figure shown small (a plot's
+    ``simple=True``)."""
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.ticker import MaxNLocator
+    tick = FontProperties(size=plt.rcParams["xtick.labelsize"]).get_size_in_points() * font
+    for gs in {ax.get_subplotspec().get_gridspec() for ax in fig.axes if ax.get_subplotspec() is not None}:
+        gs.update(**{k: getattr(gs, k) * font for k in ("wspace", "hspace") if getattr(gs, k, None) is not None})
+    for ax in fig.axes:
+        for t in (ax.title, ax.xaxis.label, ax.yaxis.label):
+            t.set_fontsize(t.get_fontsize() * font)
+        ax.tick_params(labelsize=tick)
+        ax.xaxis.set_major_locator(MaxNLocator(nxticks, steps=[1, 2, 5, 10]))
+        for ln in ax.get_lines():
+            ln.set_linewidth(ln.get_linewidth() * lw)
+        leg = ax.get_legend()
+        if leg is not None:
+            for t in leg.get_texts():
+                t.set_fontsize(t.get_fontsize() * font)
+            for ln in leg.get_lines():
+                ln.set_linewidth(ln.get_linewidth() * lw)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        fig.tight_layout()
+
+
 def _display_figs_row(figs, dpi=110):
     """Display separate matplotlib figures side by side in a notebook.
 
@@ -1919,7 +1945,7 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
 
 
 def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
-                        h5path=None, scan_key=None, count=None):
+                        h5path=None, scan_key=None, count=None, simple=False):
     """Plot one or more geqdsk equilibria: LCFS contours + profile panels.
 
     Layout: narrow flux-surface panel on the left, 2x2 grid of profiles
@@ -1961,6 +1987,11 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
         If given with *h5path*, load only this equilibrium index.
         Groups without stored g-file bytes use the g-file rebuilt from their
         TokaMaker state (:func:`_rebuilt_geqdsk`).
+    simple : bool
+        For a figure shown small: no panel titles, short labels, a Baseline
+        legend on the pressure panel only, thin draw lines in one colour each
+        under a thin black baseline (p' solid, FF' dashed), bigger text and
+        thicker other lines (:func:`_simple_style`).
 
     Returns
     -------
@@ -2068,19 +2099,21 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
     # When loading from HDF5: baseline first (behind), then perturbed on top.
     # When given a list of files: all plotted with the same style.
     colors_list = plt.cm.tab10(np.linspace(0, 1, max(n_eq, 10)))
-    for idx in [0] + list(range(1, n_eq)):
+    draw_colors = plt.cm.turbo(np.linspace(0.05, 0.95, max(n_eq - 1, 1)))   # simple: one colour per draw
+    # simple: the (thin) baseline is drawn last, on top of the draws
+    for idx in list(range(1, n_eq)) + [0] if simple else [0] + list(range(1, n_eq)):
         eq = eqs[idx]
         is_baseline = has_baseline and (idx == 0)
         if has_baseline:
             if is_baseline:
                 c = "k"
-                lw = 1.5
+                lw = 0.5 if simple else 1.5
                 alpha = 1.0
                 lbl = "Baseline"
             else:
-                c = "C1"
-                lw = 1.5
-                alpha = 0.7
+                c = draw_colors[idx - 1] if simple else "C1"
+                lw = 0.225 if simple else 1.5   # simple: thin draws (x2 in _simple_style), each one visible
+                alpha = 1.0 if simple else 0.7
                 lbl = "Perturbed" if idx == 1 else None
         else:
             # File-list mode: uniform styling
@@ -2118,13 +2151,13 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
         pp_max = np.max(np.abs(pp)) if np.max(np.abs(pp)) > 0 else 1.0
         ff_max = np.max(np.abs(ff)) if np.max(np.abs(ff)) > 0 else 1.0
         if is_baseline:
-            ax_ff.plot(x, pp / pp_max, "-", color=_GOLD, lw=lw,
+            ax_ff.plot(x, pp / pp_max, "-", color="k" if simple else _GOLD, lw=lw,
                        label=r"$p' / |p'|_{\max}$")
-            ax_ff.plot(x, ff / ff_max, "--", color=_ORANGE, lw=lw,
+            ax_ff.plot(x, ff / ff_max, "--", color="k" if simple else _ORANGE, lw=lw,
                        label=r"$FF' / |FF'|_{\max}$")
         else:
-            ax_ff.plot(x, pp / pp_max, "-", color=_GOLD, lw=lw, alpha=alpha)
-            ax_ff.plot(x, ff / ff_max, "--", color=_ORANGE, lw=lw, alpha=alpha)
+            ax_ff.plot(x, pp / pp_max, "-", color=c if simple else _GOLD, lw=lw, alpha=alpha)
+            ax_ff.plot(x, ff / ff_max, "--", color=c if simple else _ORANGE, lw=lw, alpha=alpha)
 
     # Labels and formatting (use first eq for sign labels)
     eq0 = eqs[0]
@@ -2175,6 +2208,24 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         plt.tight_layout()
+    if simple:
+        for ax in fig.axes:
+            ax.set_title("")
+        if ax_lcfs.get_legend() is not None:
+            ax_lcfs.get_legend().remove()
+        ax_p.set_ylabel("p [kPa]")
+        if ax_p.get_legend() is not None:            # baseline only: the draws have one colour each
+            h, lb = ax_p.get_legend_handles_labels()
+            ax_p.legend([h[lb.index("Baseline")]], ["Baseline"], fontsize=6)
+        ax_ff.set_ylabel("norm.")
+        if ax_ff.get_legend() is not None:
+            ax_ff.legend(ax_ff.get_legend_handles_labels()[0], [r"$p'$", r"$FF'$"], fontsize=7,
+                         loc="lower center", ncol=2, handlelength=3.5)
+        _simple_style(fig)
+        for ax, w in ((ax_p, 3.0), (ax_ff, 1.5)):    # p'/FF' handles thinner, so FF' shows as dashed
+            if ax.get_legend() is not None:
+                for ln in ax.get_legend().get_lines():
+                    ln.set_linewidth(w)
     return fig, fig.axes
 
 
