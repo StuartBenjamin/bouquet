@@ -2140,9 +2140,12 @@ def lcfs_perimeter(eq, psi_pad=_FSA_PSI_PAD):
 
 def stats_both_li(mygs, lcfs_pad):
     """``(stats, li_1)``: TokaMaker ``get_stats(li_normalization="iter")`` and
-    the 'std' l_i from the same call (its ``l_i_std``), else, on an OFT without
-    that key, from a second 'std' call."""
-    st = mygs.get_stats(lcfs_pad=lcfs_pad, li_normalization="iter")
+    the 'std' l_i from the same call (``li_both=True``: its ``l_i_std``), else,
+    on an OFT without that option, from a second 'std' call."""
+    try:
+        st = mygs.get_stats(lcfs_pad=lcfs_pad, li_normalization="iter", li_both=True)
+    except TypeError:                                  # OFT without li_both
+        st = mygs.get_stats(lcfs_pad=lcfs_pad, li_normalization="iter")
     li1 = st.get("l_i_std")
     if li1 is None:
         li1 = mygs.get_stats(lcfs_pad=lcfs_pad, li_normalization="std")["l_i"]

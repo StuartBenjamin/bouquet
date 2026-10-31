@@ -1772,11 +1772,13 @@ def test_stats_both_li_one_call_when_oft_returns_both():
         def __init__(self, both):
             self.both = both
 
-        def get_stats(self, lcfs_pad=None, li_normalization="std"):
+        def get_stats(self, lcfs_pad=None, li_normalization="std", **kw):
+            if kw and not self.both:
+                raise TypeError("unexpected keyword argument 'li_both'")
             calls.append(li_normalization)
             st = {"Ip": 1e6, "l_i": 0.9 if li_normalization == "iter" else 0.8}
-            return dict(st, l_i_std=0.8, l_i_iter=0.9) if self.both else st
+            return dict(st, l_i_std=0.8, l_i_iter=0.9) if kw.get("li_both") else st
     assert stats_both_li(_GS(True), 1e-3)[1] == 0.8 and calls == ["iter"]
     calls.clear()
-    st, li1 = stats_both_li(_GS(False), 1e-3)                 # older OFT: a second call
+    st, li1 = stats_both_li(_GS(False), 1e-3)                 # OFT without li_both: a second call
     assert (st["l_i"], li1) == (0.9, 0.8) and calls == ["iter", "std"]
