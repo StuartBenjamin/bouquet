@@ -289,6 +289,11 @@ class TestBootstrapKwargValidation:
         with pytest.raises(ValueError, match="passed explicitly"):
             validate_bootstrap_kwargs({"verbose": False}, known=None)
 
+    def test_bs_interp_passes_on_a_toolkit_that_has_it(self):
+        validate_bootstrap_kwargs({"bs_interp": "cubic"}, known=frozenset({"bs_interp"}))
+        with pytest.raises(ValueError, match="bs_interp"):
+            validate_bootstrap_kwargs({"bs_interp": "cubic"}, known=frozenset({"djbs_tol"}))
+
     def test_a_failed_introspection_is_not_cached(self, monkeypatch):
         """A config built before OpenFUSIONToolkit is on the path must not
         switch the capability check off for the whole process."""

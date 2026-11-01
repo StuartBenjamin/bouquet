@@ -648,6 +648,33 @@ def _zeff_dd_rejected(baseline):
     return _zd.get("reason") == "dataset inconsistent"
 
 
+#: The outermost psi_N inside which UncertaintyConfig.sigma_smooth acts, also
+#: without an edge bootstrap peak.
+SIGMA_SMOOTH_EDGE_MAX = 0.9
+
+
+def smooth_envelope(x, sigma, width, edge):
+    """``sigma`` on the grid ``x`` smoothed by local-linear Gaussian regression
+    of ``log(sigma)``, of width ``width`` in ``x``, narrowing smoothly towards
+    ``edge`` so that the kernel never reaches past it (``~ (edge - x) / 2``
+    near it) and to half the grid spacing beyond it (the pedestal is kept).
+    The local-linear fit follows a trend to the grid ends without bias; nodes
+    with ``sigma <= 0`` are kept and left out of the fits."""
+    import numpy as np
+    x, sigma = np.asarray(x, dtype=float), np.asarray(sigma, dtype=float)
+    w0 = 0.5 * np.gradient(x)
+    d = w0 * np.logaddexp(0.0, (edge - x) / w0)        # distance to the edge, smooth through 0
+    h = w0 + (width - w0) * -np.expm1(-d / (2.0 * width))
+    pos = sigma > 0.0
+    ly = np.log(np.where(pos, sigma, 1.0))
+    dx = x[None, :] - x[:, None]
+    k = np.exp(-0.5 * (dx / h[:, None]) ** 2) * pos[None, :]
+    s0, s1, s2 = k.sum(axis=1), (k * dx).sum(axis=1), (k * dx * dx).sum(axis=1)
+    den = s0 * s2 - s1 * s1
+    fit = np.divide(s2 * (k @ ly) - s1 * ((k * dx) @ ly), den, out=ly.copy(), where=den > 0.0)
+    return np.where(pos, np.exp(fit), sigma)
+
+
 def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
                           zeff_is_ida, measured_sigma, measured_source,
                           carbon_sigma=None, carbon_source="none",
@@ -1036,6 +1063,7 @@ def resolve_uncertainty(config, baseline) -> dict:
 
     import numpy as np
     from .config import ImasSource, ReconstructionSource, UncertaintyConfig
+    from .utils import kinetic_regrid, regrid
 
     # Read the defaults off the dataclass so "the user changed this" can never
     # drift from the declared defaults (None: the assumed template).
@@ -1123,6 +1151,7 @@ def resolve_uncertainty(config, baseline) -> dict:
                     f"{float(ida.time)!r} s, not the matched "
                     f"{_sig_match['ida_time_used']!r} s")
 
+        _how = kinetic_regrid(src)
         _ida_x, _ida_in = np.asarray(ida.psi_N, dtype=float), slice(None)
         if baseline.psi_map is not None:
             # psi_N -> run coordinate (inside the LCFS): through the source's
@@ -1136,10 +1165,7 @@ def resolve_uncertainty(config, baseline) -> dict:
                 _ida_in, _ida_x = phi_n_from_q(_ida_x, ida.q, bracket=True)
             else:
                 _ida_in = _ida_x <= 1.0
-                _ida_x = np.interp(_ida_x[_ida_in], *baseline.psi_map)
-
-        from .utils import kinetic_regrid, regrid
-        _how = kinetic_regrid(src)
+                _ida_x = regrid(*baseline.psi_map, _ida_x[_ida_in], _how)
 
         def _to_kin(arr):       # the kinetics' own regrid (io.imas._merge_ida_kinetics)
             return regrid(_ida_x, np.asarray(arr, dtype=float)[_ida_in], psi_kin, _how)
@@ -1197,9 +1223,8 @@ def resolve_uncertainty(config, baseline) -> dict:
     # psi_N of the kinetic nodes: the templates are tabulated in psi_N (a
     # toroidal-flux run maps its grid back through the source's own map)
     from .uncertainties import DEFAULT_SIGMA_TEMPLATE, sigma_template
-    _psi_tpl = (psi_kin if baseline.psi_map is None else np.interp(
-        psi_kin, np.asarray(baseline.psi_map[1], dtype=float),
-        np.asarray(baseline.psi_map[0], dtype=float)))
+    _psi_tpl = (psi_kin if baseline.psi_map is None else regrid(
+        baseline.psi_map[1], baseline.psi_map[0], psi_kin, kinetic_regrid(src)))
     _shadowed = []  # channels whose deliberately-set scalar lost to the IDA
     for _ch in ("ne", "te", "ni", "ti"):
         if _ch in _profiles and _profiles[_ch] is not None:
@@ -1244,6 +1269,23 @@ def resolve_uncertainty(config, baseline) -> dict:
             _won[_ch] = f"template {DEFAULT_SIGMA_TEMPLATE} x |baseline|"
             _kind[_ch] = "assumed"
             _assumed[_ch] = f"template {DEFAULT_SIGMA_TEMPLATE}"
+
+    # the envelopes smoothed in psi_N before drawing, up to the pedestal top
+    # (UncertaintyConfig.sigma_smooth); Z_eff's below, by the same width / edge
+    _sw = getattr(unc, "sigma_smooth", None)
+    out["sigma_smooth"] = None
+    if _sw is not None:
+        from .filtering import edge_current_minimum
+        _psi_j = (np.asarray(baseline.psi_N, dtype=float) if baseline.psi_map is None else regrid(
+            baseline.psi_map[1], baseline.psi_map[0], baseline.psi_N, kinetic_regrid(src)))
+        _x_ped = min(SIGMA_SMOOTH_EDGE_MAX,
+                     edge_current_minimum(_psi_j, baseline.jphi_total) or SIGMA_SMOOTH_EDGE_MAX)
+        out["sigma_smooth"] = {"width": float(_sw), "edge": _x_ped}
+        for _ch in ("ne", "te", "ni", "ti"):
+            out[f"sigma_{_ch}"] = smooth_envelope(_psi_tpl, out[f"sigma_{_ch}"], _sw, _x_ped)
+        if bool(getattr(unc, "log_sigma_sources", True)):
+            print(f"  [sigma-source] kinetic envelopes smoothed: width {float(_sw):g} in psi_N, "
+                  f"the pedestal kept from psi_N {_x_ped:.3f}")
 
     # REPORT ONLY: a kinetic sigma larger than its own profile over a stated
     # fraction of the radius (draws through zero are rejected, never clipped)
@@ -1389,7 +1431,8 @@ def resolve_uncertainty(config, baseline) -> dict:
                 "zeff_error_upper is not the width of the recomputed total"
                 if _zeff_dd_rejected(baseline) else None),
         )
-        user_sigmas["zeff"] = _z_env
+        user_sigmas["zeff"] = (_z_env if _sw is None
+                               else smooth_envelope(_psi_tpl, _z_env, _sw, _x_ped))
         # which ladder ran: the run's one resolved route
         _z_meta = dict(_z_meta, ladder="resolved" if _ion_route
                        else "standard")

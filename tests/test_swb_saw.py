@@ -352,6 +352,26 @@ def test_phi_n_saw_and_fixed_share_grid(fake_swb):
     np.testing.assert_array_equal(bl.jphi_saw_input, bl.jphi_saw)
 
 
+def test_the_inductive_profile_goes_as_a_dict_with_its_interp(fake_swb):
+    swb0, seen = sys.modules["OpenFUSIONToolkit.TokaMaker.bootstrap"].solve_with_bootstrap, []
+
+    def swb(mygs, ne, te, ni, ti, zeff, ip, inductive_jphi, **kw):
+        seen.append(inductive_jphi)
+        j = inductive_jphi["y"] if isinstance(inductive_jphi, dict) else inductive_jphi
+        return swb0(mygs, ne, te, ni, ti, zeff, ip, j, **kw)
+    _swap_swb(swb)
+    ns = _run(swb_jind_interp="cubic")
+    ns._swb_imas_baseline()
+    assert seen and all(j["interp"] == "cubic" and np.array_equal(j["x"], ns.baseline.psi_N) for j in seen)
+    seen.clear()
+    _run()._swb_imas_baseline()                                    # default: the plain array, as before
+    assert seen and not any(isinstance(j, dict) for j in seen)
+    with pytest.raises(ValueError, match="internal solve"):
+        _run(swb_jind_interp="cubic", bootstrap_kwargs={"use_python_solve": True})._swb_imas_baseline()
+    with pytest.raises(ValueError, match="swb_jind_interp"):
+        GenerationConfig(imas_baseline="swb", swb_jind_interp="spline")
+
+
 def _taper(x, x0=0.9):
     return np.where(x > x0, np.cos(0.5 * np.pi * (x - x0) / (1.0 - x0)) ** 2, 1.0)
 

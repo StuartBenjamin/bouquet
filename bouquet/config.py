@@ -903,6 +903,14 @@ class UncertaintyConfig:
     n_ls: float = 0.5                      # density
     t_ls: float = 0.4                      # temperature
     j_ls: float = 0.25                     # current density
+    # Width (in psi_N) of the smoothing of the resolved kinetic envelopes
+    # (sigma_ne/te/ni/ti and the Z_eff aux sigma) before drawing
+    # (baseline.smooth_envelope); it narrows to nothing towards the pedestal
+    # top (filtering.edge_current_minimum, at most psi_N 0.9), so the pedestal
+    # is kept.  A draw is the baseline + sigma x smooth noise: a kink or wiggle
+    # of an envelope goes into every draw, and through p' and j_BS into the
+    # equilibria.  None: the envelopes as resolved.
+    sigma_smooth: Optional[float] = None
 
     # --- switchboard: auxiliary perturbed profiles (source-decoupled) --------
     # Supplying a sigma profile (on psi_N_kinetic) ENABLES perturbing a named
@@ -1669,6 +1677,11 @@ class GenerationConfig:
     swb_saw_tol: float = 1.0e-4
     swb_saw_ramp: float = 0.01
     swb_saw_rule: str = "local"
+    # swb only.  OFT interpolation of the inductive jphi profile between its
+    # nodes (OFT profile key 'interp'; P' inherits it): "cubic" (C2 spline;
+    # an OFT with c2_profile_interp, the internal solve) or "linterp"; None
+    # passes the plain array (OFT's default, linterp).
+    swb_jind_interp: Optional[str] = None
     # --- self-consistent bootstrap loop (bouquet.jbs_loop) -------------------
     # True (default): jphi_bs is re-evaluated (physics.evaluate_jbs: Redl on the
     # caller's own psi_N grid and the CURRENT equilibrium's geometry) inside a
@@ -2158,6 +2171,8 @@ class GenerationConfig:
             raise ValueError(f"swb_saw_ramp={self.swb_saw_ramp!r} must be >= 0")
         if self.swb_saw_rule not in SWB_SAW_RULES:
             raise ValueError(f"swb_saw_rule={self.swb_saw_rule!r} not in {tuple(SWB_SAW_RULES)}")
+        if self.swb_jind_interp not in (None, "linterp", "cubic"):
+            raise ValueError(f"swb_jind_interp={self.swb_jind_interp!r} not in (None, 'linterp', 'cubic')")
         _t = self.swb_ip_tol
         if isinstance(_t, bool) or not (float(_t) > 0.0 and float(_t) < 1.0):
             raise ValueError(f"swb_ip_tol={_t!r} must be in (0, 1)")
@@ -2330,6 +2345,8 @@ BOOTSTRAP_KWARGS_ALLOWED = {
                        "engine implements it itself",
     "taper_edge_shape": "set_boot_ops (internal-solve builds); the unified "
                         "engine implements it itself",
+    "bs_interp": "set_boot_ops (c2_profile_interp builds): the bootstrap "
+                 "update's interpolation (ledger B-29)",
 }
 
 #: Allow-listed keys that change a convergence criterion of the toolkit's
@@ -2991,6 +3008,14 @@ class BouquetConfig:
             raise ValueError(
                 "uncertainty.zeff_sigma_source must be 'auto', 'carbon', "
                 "'measured', or 'scalar'")
+        _w = self.uncertainty.sigma_smooth
+        if _w is not None and not (isinstance(_w, numbers.Real)
+                                   and not isinstance(_w, bool)
+                                   and math.isfinite(float(_w))
+                                   and float(_w) > 0.0):
+            raise ValueError(
+                f"uncertainty.sigma_smooth must be None (off) or a finite "
+                f"width > 0, not {_w!r}")
         if self.generation.n_equils < 1:
             raise ValueError("generation.n_equils must be >= 1")
         _tgt = require_integer_count(
