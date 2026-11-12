@@ -3,10 +3,11 @@
 import numpy as np
 import pytest
 
-from bouquet.io.geqdsk import read_geqdsk
-from bouquet.mse import (mse_chords, mse_equilibrium_orientation,
-                         mse_orientation, mse_tan_gamma)
-from bouquet.q_check import mse_er_at_chords
+from bouquet.io.geqdsk import GEQDSKEquilibrium, _read_geqdsk, read_geqdsk
+from bouquet.mse import (MSEDataUnusable, mse_chords,
+                         mse_equilibrium_orientation, mse_orientation,
+                         mse_tan_gamma)
+from bouquet.q_check import mse_er_at_chords, q_points
 from test_geqdsk import generate_solovev_gfile
 
 R0, A, KAPPA, K = 1.7, 0.5, 1.4, 6e3
@@ -62,3 +63,54 @@ def test_er_err_inflates_sigma_by_forward_model(solovev):
     s_er = (0.2 * 2 * K * (1 + psi) * np.sqrt(psi) / A + 2e3) * np.abs(R - R0) / (A * np.sqrt(psi))
     np.testing.assert_allclose(out["sigma"][:5], np.hypot(0.004, dtg * s_er), rtol=1e-3)
     assert out["sigma"][5] == 0.004 and np.all(blk["sigma"] == 0.004)
+
+
+@pytest.fixture
+def scaled(tmp_path):
+    """(reference, block): angles from the reference with psi scaled by 1.15."""
+    path = str(tmp_path / "g.geqdsk")
+    generate_solovev_gfile(path, R0=R0, a=A, kappa=KAPPA, NW=129, NH=129)
+    raw = _read_geqdsk(path)
+    for k in ("PSIRZ", "SIMAG", "SIBRY"):
+        raw[k] = raw[k] * 1.15
+    raw["QPSI"] = raw["QPSI"] / 1.15
+    true = GEQDSKEquilibrium.from_raw(raw)
+    blk = _block()
+    blk["Er"] = np.array([-3e4, -1e4, 1e4, 3e4, 1e3, 0.0])
+    B = true.field_at(blk["R"], blk["Z"])
+    ch = mse_chords(blk)
+    sp, st = mse_orientation(ch, mse_equilibrium_orientation(B, blk["R"], blk["Z"], (R0, 0.0)))
+    blk["tgamma"] = mse_tan_gamma(B, ch, sp, st)
+    return read_geqdsk(path), true, blk
+
+
+def test_q_points_recover_scaled_flux(scaled):
+    ref, true, blk = scaled
+    pts = q_points(ref, blk)
+    np.testing.assert_allclose(pts["lam"], 1.15, rtol=1e-9)
+    psi = true.psi_N_at(pts["R"], pts["Z"])
+    x = np.linspace(0, 1, true.qpsi.size)
+    np.testing.assert_allclose(pts["q"], np.interp(psi, x, true.qpsi), rtol=1e-9)
+    np.testing.assert_allclose(pts["rho"], np.interp(psi, x, true.rhovn), rtol=1e-9)
+    assert [i for i, _ in pts["excluded"]] == [5]           # outside the LCFS
+
+
+def test_q_points_orientation_is_stated(scaled):
+    ref, _, blk = scaled
+    flipped = q_points(ref.flip_Bt_Ip(copy=True), blk)
+    np.testing.assert_allclose(flipped["lam"], q_points(ref, blk)["lam"], rtol=1e-12)
+    with pytest.raises(MSEDataUnusable, match="median lam"):
+        q_points(ref, dict(blk, ip_sign=-blk["ip_sign"]))
+
+
+def test_q_points_sigma(scaled):
+    ref, _, blk = scaled
+    pts = q_points(ref, blk)
+    d = 1e-6
+    fd = (q_points(ref, dict(blk, tgamma=blk["tgamma"] + d))["lam"]
+          - q_points(ref, dict(blk, tgamma=blk["tgamma"] - d))["lam"]) / (2 * d)
+    np.testing.assert_allclose(pts["sigma_lam"], np.abs(fd) * 0.004, rtol=1e-5)
+    geom = 0.5 * np.abs(q_points(ref, dict(blk, R=blk["R"] + 0.01))["lam"]
+                        - q_points(ref, dict(blk, R=blk["R"] - 0.01))["lam"])
+    np.testing.assert_allclose(q_points(ref, blk, axis_dR=0.01)["sigma_lam"],
+                               np.hypot(pts["sigma_lam"], geom), rtol=1e-9)

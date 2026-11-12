@@ -6,8 +6,9 @@ Blocks are in :mod:`bouquet.mse`'s schema; the reference equilibrium is a
 
 import numpy as np
 
-from .mse import (mse_chords, mse_equilibrium_orientation, mse_orientation,
-                  mse_tan_gamma)
+from .mse import (MSE_MIN_CHORDS, MSEDataUnusable, mse_chords,
+                  mse_equilibrium_orientation, mse_er_terms, mse_exclude,
+                  mse_orientation, mse_tan_gamma)
 
 
 def _outboard_R(eq, psi_N):
@@ -63,3 +64,64 @@ def mse_er_at_chords(eq, block, phi_N, E_r, E_r_err=None):
         sigma[i] = np.hypot(sigma[i], dtg * np.abs(at_chords(E_r_err))[i])
         out["sigma"] = sigma
     return out
+
+
+def q_points(eq, block, axis_dR=0.0, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
+    """MSE pitch angles as iota = 1/q points on the surfaces of the reference *eq*.
+
+    Relabelled-flux model: the true surfaces are *eq*'s with psi relabelled,
+    so on each surface the poloidal field scales by ``lam``, while B_phi,
+    Phi_N and rho_tor are unchanged and ``iota = lam / |q_ref|``.  Per chord
+
+    ``lam = (t a - e) / (s_p (b - t c))``, with ``a = A2 s_t B_phi``,
+    ``b = A1 B_Z``, ``c = A3 B_R + A4 B_Z`` and ``e = A5 E_R``,
+
+    on *eq*'s field in the block's stated orientation ``(s_p, s_t)``.
+    ``sigma_lam`` adds two terms in quadrature: ``|d lam / d t| sigma_eff``
+    and half the change of ``lam`` when the field moves by +-*axis_dR* [m]
+    (the error in the reference axis position, dominant near the axis).
+
+    Chords at psi_N >= 1 are excluded.  Raises :class:`MSEDataUnusable`
+    when fewer than *min_chords* remain, or when the median ``lam`` is
+    <= 0 (the stated orientation contradicts the data).
+
+    Returns ``dict(rho, psi_N, iota, sigma_iota, q, sigma_q, lam,
+    sigma_lam, R, Z, index, excluded, orientation=(s_p, s_t), er_terms)``,
+    one entry per used chord.
+    """
+    ch = mse_chords(block, min_chords=min_chords, sigma_sys=sigma_sys)
+    psi = eq.psi_N_at(ch["R"], ch["Z"])
+    ch = mse_exclude(ch, psi >= 1.0, "outside the reference LCFS (psi_N >= 1)")
+    psi = psi[psi < 1.0]
+    if ch["n_active"] < ch["min_chords"]:
+        raise MSEDataUnusable(f"only {ch['n_active']} MSE chords lie inside the "
+                              f"reference LCFS; at least {ch['min_chords']} "
+                              "are required")
+    R, Z, t = ch["R"], ch["Z"], ch["tgamma"]
+    B = eq.field_at(R, Z)
+    sp, st = mse_orientation(ch, mse_equilibrium_orientation(
+        B, R, Z, (eq.R_mag, eq.Z_mag)))
+    e = ch["A5"] * ch["Er"]
+
+    def lam(B):
+        a = ch["A2"] * st * B[:, 1]
+        b = ch["A1"] * B[:, 2]
+        c = ch["A3"] * B[:, 0] + ch["A4"] * B[:, 2]
+        return (t * a - e) / (sp * (b - t * c)), (a * b - c * e) / (sp * (b - t * c) ** 2)
+
+    lm, dlm = lam(B)
+    if not np.median(lm) > 0:
+        raise MSEDataUnusable(
+            f"median lam = {np.median(lm):.3g} <= 0: the stated ip_sign/bt_sign "
+            "contradict the pitch angles on the reference equilibrium")
+    s_geom = 0.5 * np.abs(lam(eq.field_at(R + axis_dR, Z))[0]
+                          - lam(eq.field_at(R - axis_dR, Z))[0])
+    s_lm = np.hypot(np.abs(dlm) * ch["sigma_eff"], s_geom)
+    x = np.linspace(0.0, 1.0, eq.qpsi.size)
+    q_ref = np.abs(np.interp(psi, x, eq.qpsi))
+    iota, s_iota = lm / q_ref, s_lm / q_ref
+    return dict(rho=np.interp(psi, x, eq.rhovn), psi_N=psi, iota=iota,
+                sigma_iota=s_iota, q=1.0 / iota, sigma_q=s_iota / iota ** 2,
+                lam=lm, sigma_lam=s_lm, R=R, Z=Z, index=ch["index"],
+                excluded=ch["excluded"], orientation=(sp, st),
+                er_terms=mse_er_terms(ch))
