@@ -361,6 +361,37 @@ class TestConvenience:
 
 
 # ---------------------------------------------------------------------------
+# Tests: Point evaluation (psi_N_at, field_at)
+# ---------------------------------------------------------------------------
+
+class TestPointEvaluation:
+    R = np.array([1.35, 1.52, 1.83, 2.04])
+    Z = np.array([0.21, -0.07, 0.33, -0.18])
+
+    def test_field_matches_solovev(self, gfile_path):
+        path, p = gfile_path
+        R0, B0, C = p["R0"], p["B0"], p["SIBRY"] / p["a"] ** 2
+        B = read_geqdsk(path).field_at(self.R, self.Z)
+        expected = np.column_stack([2 * C * self.Z / self.R, R0 * B0 / self.R,
+                                    -2 * C * (self.R - R0) / self.R])
+        np.testing.assert_allclose(B, expected, rtol=1e-4, atol=1e-6)
+
+    def test_invariant_under_cocos(self, gfile_path):
+        eq = read_geqdsk(gfile_path[0])
+        for cocos in (3, 16):   # flips sigma_RpZ and sigma_Bp; 16 adds the 2*pi exponent
+            other = eq.cocosify(cocos, copy=True)
+            np.testing.assert_allclose(other.field_at(self.R, self.Z), eq.field_at(self.R, self.Z),
+                                       rtol=1e-12, atol=1e-12)
+            np.testing.assert_allclose(other.psi_N_at(self.R, self.Z), eq.psi_N_at(self.R, self.Z))
+
+    def test_psi_N_axis_and_boundary(self, gfile_path):
+        path, p = gfile_path
+        eq = read_geqdsk(path)
+        assert abs(eq.psi_N_at(p["R0"], 0.0)) < 1e-8
+        np.testing.assert_allclose(eq.psi_N_at(eq.boundary_R, eq.boundary_Z), 1.0, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
 # Tests: Validation against OMFIT and TokaMaker on a real D3D-like equilibrium
 # ---------------------------------------------------------------------------
 

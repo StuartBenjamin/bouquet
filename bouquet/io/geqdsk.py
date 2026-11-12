@@ -1067,6 +1067,34 @@ class GEQDSKEquilibrium:
         _dBzdZ, dBzdR = np.gradient(Bz, dZ, dR)
         self._cache["Jt"] = cc["sigma_RpZ"] * (dBrdZ - dBzdR) / constants.mu_0
 
+    # --- Point evaluation ---
+
+    def _point_splines(self):
+        """Cached (psi_N, Br, Bz) splines on the (Z, R) grid."""
+        if "point_splines" not in self._cache:
+            self._compute_fields()
+            self._cache["point_splines"] = tuple(
+                interpolate.RectBivariateSpline(self.Z_grid, self.R_grid, a)
+                for a in (self.psi_N_RZ, self._cache["Br"], self._cache["Bz"]))
+        return self._cache["point_splines"]
+
+    def psi_N_at(self, R, Z):
+        """Normalised poloidal flux at the points (R, Z) [m]."""
+        return self._point_splines()[0].ev(Z, R)
+
+    def field_at(self, R, Z):
+        """(B_R, B_phi, B_Z) [T] at the points (R, Z) [m], shape (n, 3).
+
+        Components are in the right-handed (R, phi, Z) frame (phi counter-clockwise
+        seen from above) whatever the COCOS; B_phi = F/R with F(psi_N), held at the
+        boundary value outside psi_N = 1.
+        """
+        R, Z = np.broadcast_arrays(np.atleast_1d(np.asarray(R, dtype=float)),
+                                   np.atleast_1d(np.asarray(Z, dtype=float)))
+        s_psi, s_br, s_bz = self._point_splines()
+        F = np.interp(s_psi.ev(Z, R), np.linspace(0, 1, int(self._raw["NW"])), self._raw["FPOL"])
+        return np.column_stack([s_br.ev(Z, R), self._cocos["sigma_RpZ"] * F / R, s_bz.ev(Z, R)])
+
     # --- Lazy flux-surface tracing and averaging ---
 
     def _trace_surfaces(self):
