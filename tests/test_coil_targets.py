@@ -623,6 +623,17 @@ class TestCoilTargetsAreInTheSolveFrame:
         with pytest.raises(ValueError, match="current_orientation"):
             measured_from_pf_active(p, 2.0, current_orientation=0)
 
+    def test_traces_carry_the_same_factor(self, tmp_path):
+        from bouquet.coil_targets import measured_from_pf_active, pf_active_traces
+
+        p = self._write(tmp_path, self._dd(ip=-1.2e6), "rev.json")
+        traces, sgn, origin = pf_active_traces(p, 2.0)
+        assert (sgn, origin) == (-1.0, "auto: sign(equilibrium ip)")
+        t, d, e = traces["F6A"]
+        assert list(t) == [1.0, 2.0, 3.0] and list(d) == [5.0, 6.0, 7.0] and list(e) == [7.0] * 3
+        assert {k: v[1][1] for k, v in traces.items()} == dict(measured_from_pf_active(p, 2.0))
+        assert pf_active_traces(p, 2.0, current_orientation=+1)[0]["F6A"][1][1] == -6.0
+
     def test_unchecked_when_there_is_nothing_to_check_against(self, tmp_path):
         """No baseline yet (setup_solver), a reconstruction baseline, or a
         term that claims no orientation (a plain dict, a hand-built term)."""

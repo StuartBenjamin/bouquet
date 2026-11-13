@@ -51,8 +51,10 @@ wrong-sign vertical and shaping field.  :func:`measured_from_pf_active`
 therefore multiplies every circuit current by the same orientation factor the
 IMAS reader applies to the plasma currents (``sign(equilibrium ip)`` of the
 same dd at the same slice, or an explicit ``current_orientation``), and it is
-the ONLY place that factor is applied: :func:`coil_reg_from_measured` records
-it on each term (``"source_current_sign"``) without applying it again, and
+the ONLY place that factor is applied (:func:`pf_active_traces` applies the
+same factor, through the same helper, to whole traces):
+:func:`coil_reg_from_measured` records it on each term
+(``"source_current_sign"``) without applying it again, and
 :meth:`bouquet.run.Bouquet._apply_coil_reg` refuses a term whose recorded
 factor disagrees with the IMAS baseline's ``source_current_sign``.  For
 ``ip > 0`` the factor is ``+1.0`` and the targets are exactly what they were.
@@ -66,7 +68,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 __all__ = ["TURNFC_D3D", "DEFAULT_W0", "MIN_SAFE_W0", "coil_reg_from_measured",
-           "measured_from_pf_active", "sigma_from_pf_active",
+           "measured_from_pf_active", "pf_active_traces", "sigma_from_pf_active",
            "inverse_variance_weights", "MeasuredCoilCurrents"]
 
 #: DIII-D F-coil turns::
@@ -180,44 +182,68 @@ def measured_from_pf_active(dd_path: str, time_s: float,
     the returned :class:`MeasuredCoilCurrents`; for ``ip > 0`` the values are
     exactly the stored ones.
     """
+    time_s = float(time_s)
+    dd, sgn, origin = _oriented_dd(dd_path, time_s, current_orientation,
+                                   "measured_from_pf_active")
+    out = MeasuredCoilCurrents()
+    out.current_sign = sgn
+    out.current_sign_origin = origin
+    for name, t, d, _e in _pf_active_coils(dd):
+        out[name] = sgn * float(d[_pf_active_index(t, time_s, name, time_tol_s)])
+    return out
+
+
+def pf_active_traces(dd_path: str, time_s: float, current_orientation="auto"):
+    """``(traces, current_sign, origin)``: every IMAS ``pf_active`` circuit as
+    ``{name: (time [s], current [A], 1-sigma [A] or None)}`` in bouquet's
+    positive-Ip solve frame.
+
+    The currents are multiplied by the orientation factor
+    :func:`measured_from_pf_active` takes at *time_s* (same rule, same
+    arguments); the 1-sigma is ``|data_error_upper|``.
+    """
+    dd, sgn, origin = _oriented_dd(dd_path, float(time_s), current_orientation,
+                                   "pf_active_traces")
+    return ({name: (t, sgn * d, e) for name, t, d, e in _pf_active_coils(dd)},
+            sgn, origin)
+
+
+def _pf_active_coils(dd):
+    """``(name, time, current, error or None)`` of every pf_active circuit with
+    a current time trace."""
+    for c in dd.get("pf_active", {}).get("coil", []):
+        name = c.get("name") or c.get("identifier")
+        cur = c.get("current") or {}
+        if name and "data" in cur and "time" in cur:
+            e = cur.get("data_error_upper")
+            yield (name, np.asarray(cur["time"], dtype=float),
+                   np.asarray(cur["data"], dtype=float),
+                   None if e is None else np.abs(np.asarray(e, dtype=float)))
+
+
+def _oriented_dd(dd_path, time_s, current_orientation, what):
+    """``(dd, factor, origin)``: the loaded dd and the orientation factor of its
+    currents at *time_s* (see the module docstring)."""
     import json
     from .io.imas import (ORIENTATION_ORIGIN_AUTO, parse_current_orientation,
                           source_current_sign)
 
     orient = parse_current_orientation(
-        current_orientation, what="measured_from_pf_active(current_orientation=)")
+        current_orientation, what=f"{what}(current_orientation=)")
     with open(dd_path) as fh:
         dd = json.load(fh)
-    time_s = float(time_s)
-    if orient == "auto":
-        ip = _dd_ip_at(dd, time_s)
-        if ip is None:
-            sgn = 1.0
-            origin = "auto: no equilibrium ip in the dd (taken as +1)"
-            warnings.warn(
-                "measured_from_pf_active: the dd carries no equilibrium ip, so "
-                "the pf_active currents cannot be oriented and are taken AS "
-                "STORED. For a reversed-Ip discharge that pins every coil to "
-                "the wrong-sign field; pass current_orientation=+1/-1 if you "
-                "know the discharge's orientation.", stacklevel=2)
-        else:
-            sgn = source_current_sign(ip)
-            origin = ORIENTATION_ORIGIN_AUTO
-    else:
-        sgn = float(orient)
-        origin = "override: current_orientation"
-    out = MeasuredCoilCurrents()
-    out.current_sign = sgn
-    out.current_sign_origin = origin
-    for c in dd.get("pf_active", {}).get("coil", []):
-        name = c.get("name") or c.get("identifier")
-        cur = c.get("current") or {}
-        if not name or "data" not in cur or "time" not in cur:
-            continue
-        t = np.asarray(cur["time"], dtype=float)
-        d = np.asarray(cur["data"], dtype=float)
-        out[name] = sgn * float(d[_pf_active_index(t, time_s, name, time_tol_s)])
-    return out
+    if orient != "auto":
+        return dd, float(orient), "override: current_orientation"
+    ip = _dd_ip_at(dd, time_s)
+    if ip is None:
+        warnings.warn(
+            f"{what}: the dd carries no equilibrium ip, so "
+            "the pf_active currents cannot be oriented and are taken AS "
+            "STORED. For a reversed-Ip discharge that pins every coil to "
+            "the wrong-sign field; pass current_orientation=+1/-1 if you "
+            "know the discharge's orientation.", stacklevel=3)
+        return dd, 1.0, "auto: no equilibrium ip in the dd (taken as +1)"
+    return dd, source_current_sign(ip), ORIENTATION_ORIGIN_AUTO
 
 
 def sigma_from_pf_active(dd_path: str, time_s: float, turns=None, device=None,
