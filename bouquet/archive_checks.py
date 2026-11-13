@@ -15,8 +15,9 @@ from .utils import _read_coil_names, discover_scan_keys, list_equilibrium_indice
 
 #: Columns of a row; a check that was not asked for, or could not run, is NaN.
 ROW_KEYS = ("archive", "scan", "draw", "is_baseline", "selected", "n_coil_reg",
-            "logL_gp", "d2_gp", "m_gp", "axis_error", "logL_points", "chi2_points", "nu_points",
-            "chi2_direct", "logL_direct", "nu_direct",
+            "chi2_direct", "logL_direct", "nu_direct", "axis_offset_R", "axis_offset_Z",
+            "chi2_direct_aligned", "logL_direct_aligned",
+            "logL_points", "chi2_points", "nu_points", "axis_error", "logL_gp", "d2_gp", "m_gp",
             "logL_coil", "chi2_coil", "nu_coil", "max_abs_z", "worst_coil",
             "coil_units_suspect", "status")
 
@@ -54,21 +55,38 @@ def _score_q(row, qc, g, eq, gp):
         row["status"].append(f"q: {e}")
 
 
-def _score_direct(row, mse, eq):
-    """Direct MSE check of the equilibrium, E_r mapped onto it."""
+def _on(eq, mse, shift=(0.0, 0.0)):
+    """The MSE block with E_r mapped onto *eq* moved by -*shift* (the chords moved by +*shift*)."""
+    block, profile = mse
+    block = dict(block, R=np.asarray(block["R"]) + shift[0], Z=np.asarray(block["Z"]) + shift[1])
+    return mse_er_at_chords(eq, block, *profile) if profile else block
+
+
+def _score_direct(row, mse, eq, axis_ref, align):
+    """Direct MSE check of the equilibrium; with *axis_ref* its axis offset, and with *align*
+    the check again with the equilibrium moved onto that axis (a diagnostic only)."""
     if eq is None:
         row["status"].append("no_eqdsk")
         return
+    shifts = [(0.0, 0.0)]
+    if axis_ref is not None:
+        off = (eq.R_mag - axis_ref[0], eq.Z_mag - axis_ref[1])
+        row.update(axis_offset_R=off[0], axis_offset_Z=off[1])
+        if align:
+            shifts.append(tuple(np.nan_to_num(off)))
     try:
-        r = direct_loglike(eq, mse_er_at_chords(eq, mse[0], *mse[1]))
+        r = [direct_loglike(eq, _on(eq, mse, sh)) for sh in shifts]
     except (ValueError, RuntimeError) as e:
         row["status"].append(f"direct: {e}")
         return
-    row.update(chi2_direct=r["chi2"], logL_direct=r["logL"], nu_direct=r["nu"])
+    row.update(chi2_direct=r[0]["chi2"], logL_direct=r[0]["logL"], nu_direct=r[0]["nu"])
+    if len(r) > 1:
+        row.update(chi2_direct_aligned=r[1]["chi2"], logL_direct_aligned=r[1]["logL"])
 
 
 def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=None,
-                  scan_key=None, exclude_coils=DEFAULT_EXCLUDE, device=None, gp=False):
+                  scan_key=None, exclude_coils=DEFAULT_EXCLUDE, device=None, gp=False,
+                  axis_ref=None, align_axis=False):
     """Rows (dicts with :data:`ROW_KEYS`) scoring the baseline and every draw of
     the archive at *path* (all scans, or *scan_key*).
 
@@ -80,9 +98,14 @@ def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=Non
       the GP fit to the points.
     * *mse* ``(block, profile)``, *profile* being the arguments of
       :func:`~bouquet.q_check.mse_er_at_chords` after the block (``phi_N,
-      E_r[, E_r_err, E_tor, B_theta]``): the direct check of each
-      equilibrium's own eqdsk, with E_r mapped onto it (``chi2_direct``,
-      ``logL_direct``, ``nu_direct``).
+      E_r[, E_r_err, E_tor, B_theta]``, or empty for no E_r): the direct check
+      of each equilibrium's own eqdsk, with E_r mapped onto it
+      (``chi2_direct``, ``logL_direct``, ``nu_direct``), the MSE likelihood of
+      an equilibrium.  With *axis_ref* ``(R, Z)`` [m], e.g. EFIT02's magnetic
+      axis: ``axis_offset_R``, ``axis_offset_Z`` (equilibrium minus *axis_ref*),
+      and with *align_axis* ``chi2_direct_aligned``, ``logL_direct_aligned``
+      with the equilibrium moved onto *axis_ref*: how much of the misfit is
+      the axis position, which stays in the direct columns.
     * *coil_check* (:class:`~bouquet.coil_check.CoilCheck` or its npz) with
       *sigma_model*, which is then required: ``logL_coil``, ``chi2_coil``,
       ``nu_coil``, ``max_abs_z``, ``worst_coil``; ``coil_units_suspect``
@@ -119,7 +142,7 @@ def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=Non
                 if qc is not None:
                     _score_q(row, qc, g, eq, gp)
                 if mse is not None:
-                    _score_direct(row, mse, eq)
+                    _score_direct(row, mse, eq, axis_ref, align_axis)
                 if cc is not None:
                     names = _read_coil_names(g)
                     if names and COIL_VALUES_DS in g:
