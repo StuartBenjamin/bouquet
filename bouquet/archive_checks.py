@@ -74,7 +74,9 @@ def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=Non
       it has no ``eq_fsa`` (the baseline), with the axis error ``axis_dR``
       set by the equilibrium's own magnetic axis (its eqdsk); ``logL_qpts``,
       ``chi2_qpts``, ``nu_qpts`` against the q points alone.
-    * *mse* ``(block, (phi_N, E_r, E_r_err))``: the direct check of each
+    * *mse* ``(block, profile)``, *profile* being the arguments of
+      :func:`~bouquet.q_check.mse_er_at_chords` after the block (``phi_N,
+      E_r[, E_r_err, E_tor, B_theta]``): the direct check of each
       equilibrium's own eqdsk, with E_r mapped onto it (``chi2_mse``,
       ``logL_mse``, ``nu_mse``).
     * *coil_check* (:class:`~bouquet.coil_check.CoilCheck` or its npz) with
