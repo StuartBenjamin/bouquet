@@ -159,6 +159,44 @@ def _dd_ip_at(dd, time_s):
     return orientation_ip(dd, float(time_s))
 
 
+def _pf_active_coils(dd):
+    """``(name, time, current, error or None)`` of every pf_active circuit with
+    a current time trace."""
+    for c in dd.get("pf_active", {}).get("coil", []):
+        name = c.get("name") or c.get("identifier")
+        cur = c.get("current") or {}
+        if name and "data" in cur and "time" in cur:
+            e = cur.get("data_error_upper")
+            yield (name, np.asarray(cur["time"], dtype=float),
+                   np.asarray(cur["data"], dtype=float),
+                   None if e is None else np.abs(np.asarray(e, dtype=float)))
+
+
+def _oriented_dd(dd_path, time_s, current_orientation, what):
+    """``(dd, factor, origin)``: the loaded dd and the orientation factor of its
+    currents at *time_s* (see the module docstring)."""
+    import json
+    from .io.imas import (ORIENTATION_ORIGIN_AUTO, parse_current_orientation,
+                          source_current_sign)
+
+    orient = parse_current_orientation(
+        current_orientation, what=f"{what}(current_orientation=)")
+    with open(dd_path) as fh:
+        dd = json.load(fh)
+    if orient != "auto":
+        return dd, float(orient), "override: current_orientation"
+    ip = _dd_ip_at(dd, time_s)
+    if ip is None:
+        warnings.warn(
+            f"{what}: the dd carries no equilibrium ip, so "
+            "the pf_active currents cannot be oriented and are taken AS "
+            "STORED. For a reversed-Ip discharge that pins every coil to "
+            "the wrong-sign field; pass current_orientation=+1/-1 if you "
+            "know the discharge's orientation.", stacklevel=3)
+        return dd, 1.0, "auto: no equilibrium ip in the dd (taken as +1)"
+    return dd, source_current_sign(ip), ORIENTATION_ORIGIN_AUTO
+
+
 def measured_from_pf_active(dd_path: str, time_s: float,
                             time_tol_s: Optional[float] = PF_ACTIVE_TIME_TOL_S,
                             current_orientation="auto"
@@ -208,44 +246,6 @@ def pf_active_traces(dd_path: str, time_s: float, current_orientation="auto"):
             sgn, origin)
 
 
-def _pf_active_coils(dd):
-    """``(name, time, current, error or None)`` of every pf_active circuit with
-    a current time trace."""
-    for c in dd.get("pf_active", {}).get("coil", []):
-        name = c.get("name") or c.get("identifier")
-        cur = c.get("current") or {}
-        if name and "data" in cur and "time" in cur:
-            e = cur.get("data_error_upper")
-            yield (name, np.asarray(cur["time"], dtype=float),
-                   np.asarray(cur["data"], dtype=float),
-                   None if e is None else np.abs(np.asarray(e, dtype=float)))
-
-
-def _oriented_dd(dd_path, time_s, current_orientation, what):
-    """``(dd, factor, origin)``: the loaded dd and the orientation factor of its
-    currents at *time_s* (see the module docstring)."""
-    import json
-    from .io.imas import (ORIENTATION_ORIGIN_AUTO, parse_current_orientation,
-                          source_current_sign)
-
-    orient = parse_current_orientation(
-        current_orientation, what=f"{what}(current_orientation=)")
-    with open(dd_path) as fh:
-        dd = json.load(fh)
-    if orient != "auto":
-        return dd, float(orient), "override: current_orientation"
-    ip = _dd_ip_at(dd, time_s)
-    if ip is None:
-        warnings.warn(
-            f"{what}: the dd carries no equilibrium ip, so "
-            "the pf_active currents cannot be oriented and are taken AS "
-            "STORED. For a reversed-Ip discharge that pins every coil to "
-            "the wrong-sign field; pass current_orientation=+1/-1 if you "
-            "know the discharge's orientation.", stacklevel=3)
-        return dd, 1.0, "auto: no equilibrium ip in the dd (taken as +1)"
-    return dd, source_current_sign(ip), ORIENTATION_ORIGIN_AUTO
-
-
 def sigma_from_pf_active(dd_path: str, time_s: float, turns=None, device=None,
                          time_tol_s: Optional[float] = PF_ACTIVE_TIME_TOL_S
                          ) -> Dict[str, float]:
@@ -263,14 +263,9 @@ def sigma_from_pf_active(dd_path: str, time_s: float, turns=None, device=None,
         dd = json.load(fh)
     time_s = float(time_s)
     out = {}
-    for c in dd.get("pf_active", {}).get("coil", []):
-        name = c.get("name") or c.get("identifier")
-        cur = c.get("current") or {}
-        e = cur.get("data_error_upper")
-        if not name or e is None or "time" not in cur:
+    for name, t, _d, e in _pf_active_coils(dd):
+        if e is None:
             continue
-        t = np.asarray(cur["time"], dtype=float)
-        e = np.abs(np.asarray(e, dtype=float))
         j = _pf_active_index(t, time_s, name, time_tol_s)
         if np.isfinite(e[j]) and e[j] > 0:
             out[name] = float(e[j]) * float(turns.get(name, 1.0))
