@@ -115,10 +115,11 @@ def test_q_points_sigma(scaled):
     fd = (q_points(ref, dict(blk, tgamma=blk["tgamma"] + d))["lam"]
           - q_points(ref, dict(blk, tgamma=blk["tgamma"] - d))["lam"]) / (2 * d)
     np.testing.assert_allclose(pts["sigma_lam"], np.abs(fd) * 0.004, rtol=1e-5)
-    geom = 0.5 * np.abs(q_points(ref, dict(blk, R=blk["R"] + 0.01))["lam"]
-                        - q_points(ref, dict(blk, R=blk["R"] - 0.01))["lam"])
-    np.testing.assert_allclose(q_points(ref, blk, axis_dR=0.01)["sigma_lam"],
-                               np.hypot(pts["sigma_lam"], geom), rtol=1e-9)
+    h = 1e-4                                                 # field moved along R
+    dlam = (q_points(ref, dict(blk, R=blk["R"] + h))["lam"]
+            - q_points(ref, dict(blk, R=blk["R"] - h))["lam"]) / (2 * h)
+    np.testing.assert_allclose(pts["diota_daxis"], np.abs(dlam) * pts["iota"] / pts["lam"], rtol=1e-2)
+    assert pts["R_axis"] == ref.R_mag
 
 
 PSI = np.linspace(0.001, 0.999, 300)
@@ -139,6 +140,19 @@ def test_gp_prefers_the_true_profile():
     res = fit_q_check(_points()).loglike(PSI, [_q(PSI), 1.05 * _q(PSI), 0.95 * _q(PSI)])
     assert res["logL"][0] > max(res["logL"][1:])
     assert res["d2"][0] < res["m"]
+
+
+def test_gp_axis_error_per_candidate():
+    p = _points()
+    g = np.linspace(2.0, 0.1, p["rho"].size)                 # largest near the axis
+    qc = fit_q_check(dict(p, diota_daxis=g, R_axis=1.70), R_axis_alt=[1.71])
+    rows = [_q(PSI), 1.02 * _q(PSI)]
+    res = qc.loglike(PSI, rows, R_axis=[1.69, 1.74])
+    np.testing.assert_allclose(res["axis_dR"], [0.01, 0.04])  # max |R - 1.70| over EFIT02-like and candidate
+    for i, dR in enumerate((0.01, 0.04)):
+        plain = QCheck(qc.rho, qc.iota, np.hypot(qc.sigma_iota, g * dR), qc.amp, qc.ell)
+        np.testing.assert_allclose(res["logL"][i], plain.loglike(PSI, rows[i])["logL"][0], rtol=1e-12)
+    assert qc.loglike(PSI, rows[0])["axis_dR"][0] == pytest.approx(0.01)
 
 
 def test_gp_batch_and_save(tmp_path):
