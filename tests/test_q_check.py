@@ -281,6 +281,7 @@ def test_plot_q_points(scaled):
     half = [abs(seg[1, 1] - seg[0, 1]) / 2 for seg in bars.lines[2][0].get_segments()]
     s = np.hypot(pts["sigma_iota"], pts["diota_dR_axis"] * 0.01)   # the axis error is in the bars
     np.testing.assert_allclose(half, s / pts["iota"] ** 2, rtol=1e-6)
-    assert {r"q from MSE ($\pm1\sigma$)", "true", r"GP fit to MSE q ($\pm1\sigma$)"} <= set(
-        ax.get_legend_handles_labels()[1])
+    assert [t.get_text() for t in ax.get_legend().get_texts()] == [
+        r"GP fit to MSE q ($\pm1\sigma$)", r"q from MSE ($\pm1\sigma$)", "where the GP check compares",
+        "true"]                                                  # the MSE side first, then the profiles
     plt.close(ax.figure)
