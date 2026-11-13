@@ -43,3 +43,5 @@ def test_loglike_matches_coil_chi2():
     assert cc.loglike(names, rows, sigma_model=0)["chi2"][0] > res["chi2"][0]
     assert cc.loglike(names, 58 * rows, sigma_model=model)["units_suspect"] == ["F"]
     assert res["units_suspect"] == []
+    flat = CoilCheck(["F1A", "F2A"], [1e4, 2e4], [0.0, 50.0])       # e.g. no error, flat trace
+    assert flat.loglike(["F1A", "F2A"], [[1.1e4, 2e4]], sigma_model=0)["coils"] == ["F2A"]

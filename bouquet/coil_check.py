@@ -40,7 +40,7 @@ class CoilCheck:
         sigma}`` table (absent coils are not judged), ``{"floor",
         "fraction"}`` of the measured current, a callable, or a named model of
         *device*.  Judged coils are those both here and in *names*, with a
-        model sigma, and not in *exclude*.
+        model sigma and a positive total sigma, and not in *exclude*.
 
         Returns ``dict(logL, chi2, chi2_nu, max_abs_z, worst_coil, z, coils,
         nu, units, units_suspect, sigma_model)``, per row where it varies:
@@ -54,13 +54,14 @@ class CoilCheck:
             sig_m, model = dict.fromkeys(self.names, 0.0), {"kind": "none"}
         else:
             sig_m, model = resolve_coil_sigma(meas, sigma_model, device=device)
-        coils = [c for c in names if c in meas and c in sig_m and c not in exclude]
+        total = {c: np.hypot(self.sigma_meas[self.names.index(c)], sig_m[c])
+                 for c in names if c in meas and c in sig_m and c not in exclude}
+        coils = [c for c in names if total.get(c, 0.0) > 0.0]
         if not coils:
             raise ValueError("CoilCheck.loglike: no coil to judge (names, measured "
-                             "coils, model sigma and exclude leave none)")
-        i = [self.names.index(c) for c in coils]
-        mu = self.mean[i]
-        sig = np.hypot(self.sigma_meas[i], [sig_m[c] for c in coils])
+                             "coils, sigma and exclude leave none)")
+        mu = np.array([meas[c] for c in coils])
+        sig = np.array([total[c] for c in coils])
         cand = cur[:, [names.index(c) for c in coils]]
         z = (cand - mu) / sig
         chi2 = np.sum(z ** 2, axis=1)
@@ -103,7 +104,8 @@ def coil_distribution(traces, t0, t1, turns, sigma_extra=None, meta=None):
     extra = sigma_extra or {}
     names, mean, sig = [], [], []
     for name, (t, d, e) in traces.items():
-        w = (np.asarray(t) >= t0) & (np.asarray(t) <= t1)
+        t = np.asarray(t)
+        w = (t >= t0) & (t <= t1)
         if w.sum() < 2:
             continue
         f = abs(float(turns.get(name, 1.0)))
