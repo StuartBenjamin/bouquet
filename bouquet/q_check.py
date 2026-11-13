@@ -5,10 +5,14 @@ Blocks are in :mod:`bouquet.mse`'s schema; the reference equilibrium is a
 """
 
 import numpy as np
+from scipy.linalg import solve_triangular
+from scipy.optimize import minimize
 
+from .coords import phi_n_from_q
 from .mse import (MSE_MIN_CHORDS, MSEDataUnusable, mse_chords,
                   mse_equilibrium_orientation, mse_er_terms, mse_exclude,
                   mse_orientation, mse_tan_gamma)
+from .sampling import _CHOL_JITTER
 
 
 def _outboard_R(eq, psi_N):
@@ -125,3 +129,122 @@ def q_points(eq, block, axis_dR=0.0, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
                 lam=lm, sigma_lam=s_lm, R=R, Z=Z, index=ch["index"],
                 excluded=ch["excluded"], orientation=(sp, st),
                 er_terms=mse_er_terms(ch))
+
+
+def _chol(K):
+    """Lower Cholesky factor of *K* with sampling's jitter rule."""
+    n = K.shape[0]
+    return np.linalg.cholesky(K + _CHOL_JITTER * n * np.max(np.diag(K)) * np.eye(n))
+
+
+def _matern52(x1, x2, ell):
+    s = np.sqrt(5.0) * np.abs(x1[:, None] - x2[None, :]) / ell
+    return (1.0 + s + s ** 2 / 3.0) * np.exp(-s)
+
+
+def _basis(x):
+    return np.column_stack([np.ones_like(x), x ** 2])
+
+
+def _gp_factor(x, y, s, amp, ell):
+    """``(L, alpha, Hl, A, beta)`` of the GP with a flat-prior basis (R&W eq. 2.42)."""
+    L = _chol(amp ** 2 * _matern52(x, x, ell) + np.diag(s ** 2))
+    alpha = solve_triangular(L, y, lower=True)
+    Hl = solve_triangular(L, _basis(x), lower=True)
+    A = Hl.T @ Hl
+    return L, alpha, Hl, A, np.linalg.solve(A, Hl.T @ alpha)
+
+
+def _neg_log_ml(th, x, y, s):
+    """Negative log marginal likelihood, basis coefficients integrated out (R&W eq. 2.45)."""
+    L, alpha, Hl, A, beta = _gp_factor(x, y, s, *np.exp(th))
+    return (0.5 * (alpha @ alpha - alpha @ Hl @ beta) + np.log(np.diag(L)).sum()
+            + 0.5 * np.linalg.slogdet(A)[1])
+
+
+class QCheck:
+    """GP posterior of iota(rho_tor) given q points, and candidate q-profiles' likelihood.
+
+    ``iota = b0 + b1 rho^2 + r(rho)``: a flat prior on (b0, b1), so the slope
+    at the axis is zero without a derivative observation; ``r ~ GP(0, amp^2
+    Matern-5/2(ell))``; noise ``diag(sigma_iota^2)`` (Rasmussen & Williams
+    2006, sec. 2.7).  Candidates are scored on the posterior at ``m`` evenly
+    spaced rho over the points' range, ``m = clip(ceil(range / ell) + 1, 2,
+    n)``: about one per correlation length, where the posterior covariance is
+    well conditioned.
+    """
+
+    def __init__(self, rho, iota, sigma_iota, amp, ell):
+        self.rho, self.iota, self.sigma_iota = (
+            np.asarray(a, dtype=float) for a in (rho, iota, sigma_iota))
+        self.amp, self.ell = float(amp), float(ell)
+        self._L, self._alpha, self._Hl, self._A, self._beta = _gp_factor(
+            self.rho, self.iota, self.sigma_iota, self.amp, self.ell)
+        m = int(np.clip(np.ceil(np.ptp(self.rho) / self.ell) + 1, 2, self.rho.size))
+        self.rho_test = np.linspace(self.rho.min(), self.rho.max(), m)
+        self._mean, cov = self.predict(self.rho_test)
+        self._Lt = _chol(cov)
+        self._logdet = 2.0 * np.log(np.diag(self._Lt)).sum() + m * np.log(2.0 * np.pi)
+
+    def predict(self, rho):
+        """Posterior mean and covariance of iota at *rho*."""
+        rho = np.atleast_1d(np.asarray(rho, dtype=float))
+        V = solve_triangular(self._L, self.amp ** 2 * _matern52(self.rho, rho, self.ell),
+                             lower=True)
+        R = _basis(rho) - V.T @ self._Hl
+        return (V.T @ self._alpha + R @ self._beta,
+                self.amp ** 2 * _matern52(rho, rho, self.ell) - V.T @ V
+                + R @ np.linalg.solve(self._A, R.T))
+
+    def loglike(self, psi_N, q):
+        """``dict(logL, d2, m)`` of the candidate profiles q(psi_N), one per row of *q*.
+
+        Each row's iota is placed on rho_tor by its own q.  ``d2`` is its
+        Mahalanobis distance from the posterior at ``rho_test`` (chi^2 with
+        ``m`` degrees of freedom for a draw from it) and ``logL = -(d2 +
+        log|2 pi Sigma|) / 2``.  A row with non-finite q gets NaN.
+        """
+        q = np.abs(np.atleast_2d(np.asarray(q, dtype=float)))
+        psi = np.broadcast_to(np.atleast_2d(np.asarray(psi_N, dtype=float)), q.shape)
+        iota = np.full((q.shape[0], self.rho_test.size), np.nan)
+        for i, (x, y) in enumerate(zip(psi, q)):
+            if np.all(np.isfinite(y)):
+                if x[0] > 0:   # held at the innermost node down to the axis
+                    x, y = np.r_[0.0, x], np.r_[y[0], y]
+                inside, phi = phi_n_from_q(x, y)
+                iota[i] = np.interp(self.rho_test, np.sqrt(phi), 1.0 / y[inside])
+        z = solve_triangular(self._Lt, (iota - self._mean).T, lower=True, check_finite=False)
+        d2 = np.sum(z ** 2, axis=0)
+        return dict(logL=-0.5 * (d2 + self._logdet), d2=d2, m=self.rho_test.size)
+
+    def save(self, path):
+        np.savez(path, rho=self.rho, iota=self.iota, sigma_iota=self.sigma_iota,
+                 amp=self.amp, ell=self.ell)
+
+    @classmethod
+    def load(cls, path):
+        with np.load(path) as f:
+            return cls(f["rho"], f["iota"], f["sigma_iota"], float(f["amp"]), float(f["ell"]))
+
+
+def fit_q_check(points):
+    """:class:`QCheck` of *points* (``rho``, ``iota``, ``sigma_iota``; e.g. :func:`q_points`).
+
+    ``(amp, ell)`` maximise the marginal likelihood, by bounded L-BFGS-B from
+    a fixed grid of starts (deterministic).  ``amp`` is at least the median
+    ``sigma_iota``: when a quadratic fits within the errors, it would
+    otherwise collapse, and the test would claim structure the data cannot
+    resolve.  ``ell`` lies in [0.05, 2 x the rho range].  Non-finite points
+    are dropped; fewer than 3 left raises ``ValueError``.
+    """
+    x, y, s = (np.asarray(points[k], dtype=float) for k in ("rho", "iota", "sigma_iota"))
+    ok = np.isfinite(x) & np.isfinite(y) & np.isfinite(s) & (s > 0)
+    x, y, s = x[ok], y[ok], s[ok]
+    if x.size < 3:
+        raise ValueError(f"fit_q_check: {x.size} finite points; at least 3 are required")
+    bounds = np.log([(np.median(s), 10.0), (0.05, 2.0 * np.ptp(x))])
+    starts = [np.clip(np.log([a, ell]), bounds[:, 0], bounds[:, 1])
+              for a in np.median(s) * np.array([1.0, 10.0]) for ell in (0.15, 0.4, 1.0)]
+    best = min((minimize(_neg_log_ml, th, args=(x, y, s), method="L-BFGS-B", bounds=bounds)
+                for th in starts), key=lambda r: r.fun)
+    return QCheck(x, y, s, *np.exp(best.x))

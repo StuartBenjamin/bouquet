@@ -7,7 +7,7 @@ from bouquet.io.geqdsk import GEQDSKEquilibrium, _read_geqdsk, read_geqdsk
 from bouquet.mse import (MSEDataUnusable, mse_chords,
                          mse_equilibrium_orientation, mse_orientation,
                          mse_tan_gamma)
-from bouquet.q_check import mse_er_at_chords, q_points
+from bouquet.q_check import QCheck, fit_q_check, mse_er_at_chords, q_points
 from test_geqdsk import generate_solovev_gfile
 
 R0, A, KAPPA, K = 1.7, 0.5, 1.4, 6e3
@@ -114,3 +114,36 @@ def test_q_points_sigma(scaled):
                         - q_points(ref, dict(blk, R=blk["R"] - 0.01))["lam"])
     np.testing.assert_allclose(q_points(ref, blk, axis_dR=0.01)["sigma_lam"],
                                np.hypot(pts["sigma_lam"], geom), rtol=1e-9)
+
+
+PSI = np.linspace(0.001, 0.999, 300)
+
+
+def _q(psi):
+    return 1.0 + 2.0 * psi ** 2
+
+
+def _points():
+    """iota = 1/q on rho_tor for q = 1 + 2 psi_N^2 (Phi_N from that q), sigma 0.01."""
+    psi = np.linspace(0.02, 0.9, 15)
+    rho = np.sqrt((psi + 2 * psi ** 3 / 3) / (5 / 3))
+    return dict(rho=rho, iota=1 / _q(psi), sigma_iota=np.full(psi.size, 0.01))
+
+
+def test_gp_prefers_the_true_profile():
+    res = fit_q_check(_points()).loglike(PSI, [_q(PSI), 1.05 * _q(PSI), 0.95 * _q(PSI)])
+    assert res["logL"][0] > max(res["logL"][1:])
+    assert res["d2"][0] < res["m"]
+
+
+def test_gp_batch_and_save(tmp_path):
+    qc = fit_q_check(_points())
+    rows = np.array([_q(PSI) * f for f in (0.97, 1.0, 1.02)])
+    rows[2, 7] = np.nan
+    res = qc.loglike(PSI, rows)
+    for i in range(2):
+        np.testing.assert_allclose(res["logL"][i], qc.loglike(PSI, rows[i])["logL"][0], rtol=1e-12)
+    assert np.isnan(res["logL"][2])
+    qc.save(tmp_path / "qc.npz")
+    np.testing.assert_array_equal(QCheck.load(tmp_path / "qc.npz").loglike(PSI, rows)["logL"],
+                                  res["logL"])
