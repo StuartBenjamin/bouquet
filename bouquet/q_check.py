@@ -52,7 +52,8 @@ def _chords(block, **kw):
     return ch, np.zeros(i.size) if tor is None else np.asarray(tor, dtype=float)[i], cov
 
 
-def mse_er_at_chords(eq, block, phi_N, E_r, E_r_err=None, E_tor=None, B_theta=None, er_corr=0.0):
+def mse_er_at_chords(eq, block, phi_N, E_r, E_r_err=None, E_tor=None, B_theta=None, er_corr=0.0,
+                     profile_eq=None):
     """A copy of MSE *block* with ``Er`` [V/m] at its chords.
 
     *E_r* (and *E_r_err*) is the outboard-midplane radial field on the
@@ -70,6 +71,12 @@ def mse_er_at_chords(eq, block, phi_N, E_r, E_r_err=None, E_tor=None, B_theta=No
     rho_tor: 0 treats the chords as independent, ``inf`` as one shift of the
     whole profile.  The checks add it to the angles' covariance (derivation:
     eq_stab claude_findings/q_coil_check/er_error_covariance.md).
+
+    *profile_eq* is the equilibrium the profile's Phi_N was built on (IDA-lite:
+    EFIT01).  Where it puts a chord at another Phi_N than *eq* does, E_R is
+    uncertain by ``d_k = (E_r(Phi_N,profile) - E_r(Phi_N,eq)) (R B_Z) / (R
+    B_Z)_out``; one disagreement moves every chord, so ``Er_cov`` gains ``d
+    d^T``.
 
     *E_tor* is the part of *E_r* that is v_phi B_theta, computed with the
     outboard-midplane poloidal field *B_theta* [T] (both on *phi_N*).  It is
@@ -89,8 +96,8 @@ def mse_er_at_chords(eq, block, phi_N, E_r, E_r_err=None, E_tor=None, B_theta=No
     rbz_out = rbz(R_out, np.full_like(R_out, eq.Z_mag))
     ratio = rbz(R, Z) / rbz_out
 
-    def at_chords(y):
-        return np.interp(phi_c, phi_N, y, left=np.nan, right=np.nan) * ratio
+    def at_chords(y, phi=phi_c):
+        return np.interp(phi, phi_N, y, left=np.nan, right=np.nan) * ratio
 
     out = dict(block, Er=at_chords(E_r))
     if E_tor is not None:
@@ -105,6 +112,11 @@ def mse_er_at_chords(eq, block, phi_N, E_r, E_r_err=None, E_tor=None, B_theta=No
         dx = np.sqrt(phi_c)[:, None] - np.sqrt(phi_c)[None, :]
         corr = np.eye(s.size) if er_corr <= 0 else np.exp(-0.5 * (dx / er_corr) ** 2)
         out["Er_cov"] = np.outer(s, s) * corr
+    if profile_eq is not None:
+        phi_p = np.interp(profile_eq.psi_N_at(R, Z), np.linspace(0.0, 1.0, profile_eq.rhovn.size),
+                          profile_eq.rhovn ** 2, right=np.nan)
+        d = np.nan_to_num(at_chords(E_r, phi_p) - at_chords(E_r))
+        out["Er_cov"] = out.get("Er_cov", 0.0) + np.outer(d, d)
     return out
 
 

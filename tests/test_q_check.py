@@ -77,6 +77,41 @@ def test_er_err_is_a_chord_covariance(solovev):
                                rtol=4e-3)
 
 
+def _placement(solovev, tmp_path):
+    """(block, E_r mapped on solovev with a frame of other shapes, the expected placement shift d)."""
+    blk, (phi, er) = _block(), _profile()
+    path = str(tmp_path / "frame.geqdsk")
+    generate_solovev_gfile(path, R0=R0 + 0.02, a=A, kappa=1.2, NW=129, NH=129)
+    frame = read_geqdsk(path)
+    out = mse_er_at_chords(solovev, blk, phi, er, profile_eq=frame)
+    on = [np.interp(np.interp(e.psi_N_at(blk["R"], blk["Z"]), np.linspace(0, 1, e.rhovn.size),
+                              e.rhovn ** 2, right=np.nan), phi, er, right=np.nan) for e in (frame, solovev)]
+    return blk, out, np.nan_to_num((on[0] - on[1]) * out["Er"] / on[1])   # Er's own surface ratio
+
+
+def test_er_placement_term(solovev, tmp_path):
+    blk, out, d = _placement(solovev, tmp_path)
+    np.testing.assert_allclose(out["Er_cov"], np.outer(d, d), rtol=1e-9, atol=1e-6)
+    assert np.max(np.abs(d)) > 100.0                           # a real disagreement [V/m]
+    phi, er = _profile()
+    assert "Er_cov" not in mse_er_at_chords(solovev, blk, phi, er)
+    same = mse_er_at_chords(solovev, blk, phi, er, profile_eq=solovev)
+    np.testing.assert_array_equal(np.nan_to_num(same["Er_cov"]), 0.0)
+
+
+def test_direct_check_with_placement(solovev, tmp_path):
+    _, out, d = _placement(solovev, tmp_path)
+    ch = mse_chords({k: v for k, v in out.items() if k != "Er_cov"})
+    B = solovev.field_at(ch["R"], ch["Z"])
+    sp, st = mse_orientation(ch, mse_equilibrium_orientation(B, ch["R"], ch["Z"], (R0, 0.0)))
+    dt = mse_tan_gamma(B, dict(ch, Er=ch["Er"] + 1.0), sp, st) - mse_tan_gamma(B, ch, sp, st)
+    r = mse_tan_gamma(B, ch, sp, st) - ch["tgamma"]
+    p_ = dt * d[ch["index"]]                                   # one disagreement moves every chord
+    cov = np.diag(np.full(r.size, 0.004 ** 2)) + np.outer(p_, p_)
+    np.testing.assert_allclose(direct_loglike(solovev, out)["chi2"], r @ np.linalg.solve(cov, r),
+                               rtol=1e-6)
+
+
 def test_q_points_carry_the_er_covariance(scaled):
     ref, _, blk, _ = scaled
     base = {k: v for k, v in blk.items() if k != "Er"}
