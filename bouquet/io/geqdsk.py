@@ -1099,6 +1099,17 @@ class GEQDSKEquilibrium:
         F = np.interp(s_psi.ev(Z, R), np.linspace(0, 1, int(self._raw["NW"])), self._raw["FPOL"])
         return np.column_stack([s_br.ev(Z, R), self._cocos["sigma_RpZ"] * F / R, s_bz.ev(Z, R)])
 
+    def outboard_R(self, psi_N):
+        """R [m] where the surfaces *psi_N* cross Z = Z_axis outboard (NaN where none does)."""
+        r = np.linspace(self.R_mag, self.R_grid[-1], 2001)
+        p = self.psi_N_at(r, np.full_like(r, self.Z_mag))
+        i0 = int(np.argmin(p))
+        stop = np.nonzero(np.diff(p[i0:]) <= 0)[0]
+        i1 = i0 + (stop[0] + 1 if stop.size else p.size - i0)
+        # sqrt(psi_N) is close to linear in R near the axis
+        return np.interp(np.sqrt(np.clip(psi_N, 0, None)), np.sqrt(np.clip(p[i0:i1], 0, None)),
+                         r[i0:i1], right=np.nan)
+
     # --- Lazy flux-surface tracing and averaging ---
 
     def _trace_surfaces(self):

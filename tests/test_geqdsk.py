@@ -394,6 +394,12 @@ class TestPointEvaluation:
                                        rtol=1e-12, atol=1e-12)
             np.testing.assert_allclose(other.psi_N_at(self.R, self.Z), eq.psi_N_at(self.R, self.Z))
 
+    def test_outboard_R(self, gfile_path):
+        path, p = gfile_path
+        psi = np.array([-1e-9, 0.01, 0.3, 0.9])               # psi_N = ((R - R0) / a)^2 on Z = 0
+        np.testing.assert_allclose(read_geqdsk(path).outboard_R(psi),
+                                   p["R0"] + p["a"] * np.sqrt(np.clip(psi, 0, None)), atol=2e-4)
+
     def test_psi_N_axis_and_boundary(self, gfile_path):
         path, p = gfile_path
         eq = read_geqdsk(path)

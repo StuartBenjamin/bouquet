@@ -22,18 +22,6 @@ def _field(eq, ch):
         B, ch["R"], ch["Z"], (eq.R_mag, eq.Z_mag))))
 
 
-def _outboard_R(eq, psi_N):
-    """R [m] where the surfaces *psi_N* of *eq* cross Z = Z_axis outboard."""
-    r = np.linspace(eq.R_mag, eq.R_grid[-1], 2001)
-    p = eq.psi_N_at(r, np.full_like(r, eq.Z_mag))
-    i0 = int(np.argmin(p))
-    stop = np.nonzero(np.diff(p[i0:]) <= 0)[0]
-    i1 = i0 + (stop[0] + 1 if stop.size else p.size - i0)
-    # sqrt(psi_N) is close to linear in R near the axis
-    return np.interp(np.sqrt(psi_N), np.sqrt(np.clip(p[i0:i1], 0, None)),
-                     r[i0:i1], right=np.nan)
-
-
 def mse_er_at_chords(eq, block, phi_N, E_r, E_r_err=None):
     """A copy of MSE *block* with ``Er`` [V/m] at its chords.
 
@@ -56,7 +44,7 @@ def mse_er_at_chords(eq, block, phi_N, E_r, E_r_err=None):
     psi_c = eq.psi_N_at(R, Z)
     phi_c = np.interp(psi_c, np.linspace(0.0, 1.0, eq.rhovn.size), eq.rhovn ** 2,
                       right=np.nan)
-    R_out = _outboard_R(eq, psi_c)
+    R_out = eq.outboard_R(psi_c)
     ratio = rbz(R, Z) / rbz(R_out, np.full_like(R_out, eq.Z_mag))
 
     def at_chords(y):
