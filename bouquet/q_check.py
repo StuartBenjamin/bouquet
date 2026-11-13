@@ -22,7 +22,17 @@ def _field(eq, ch):
         B, ch["R"], ch["Z"], (eq.R_mag, eq.Z_mag))))
 
 
-def mse_er_at_chords(eq, block, phi_N, E_r, E_r_err=None):
+def _chords(block, **kw):
+    """:func:`bouquet.mse.mse_chords` of *block*, and its ``Er_tor`` (see
+    :func:`mse_er_at_chords`) at the active chords, 0 without it."""
+    blk = dict(block)
+    tor = blk.pop("Er_tor", None)
+    ch = mse_chords(blk, **kw)
+    return ch, (np.zeros(ch["n_active"]) if tor is None
+                else np.asarray(tor, dtype=float)[ch["index"]])
+
+
+def mse_er_at_chords(eq, block, phi_N, E_r, E_r_err=None, E_tor=None, B_theta=None):
     """A copy of MSE *block* with ``Er`` [V/m] at its chords.
 
     *E_r* (and *E_r_err*) is the outboard-midplane radial field on the
@@ -36,6 +46,13 @@ def mse_er_at_chords(eq, block, phi_N, E_r, E_r_err=None):
     With *E_r_err*, ``sigma`` gains ``|d tan(gamma) / d E_R| sigma_ER`` in
     quadrature (the forward model on *eq*'s field, in the block's stated
     orientation).
+
+    *E_tor* is the part of *E_r* that is v_phi B_theta, computed with the
+    outboard-midplane poloidal field *B_theta* [T] (both on *phi_N*).  It is
+    moved onto *eq*'s field, ``E_tor |B_Z(out)| / |B_theta|`` (``E_tor /
+    |B_theta|`` is interpolated: smooth at the axis), and also given at the
+    chords as ``Er_tor``, which :func:`q_points` scales with the poloidal
+    field (bouquet's MSE solvers refuse that key).
     """
     def rbz(R, Z):
         return R * eq.field_at(R, Z)[:, 2]
@@ -45,14 +62,22 @@ def mse_er_at_chords(eq, block, phi_N, E_r, E_r_err=None):
     phi_c = np.interp(psi_c, np.linspace(0.0, 1.0, eq.rhovn.size), eq.rhovn ** 2,
                       right=np.nan)
     R_out = eq.outboard_R(psi_c)
-    ratio = rbz(R, Z) / rbz(R_out, np.full_like(R_out, eq.Z_mag))
+    rbz_out = rbz(R_out, np.full_like(R_out, eq.Z_mag))
+    ratio = rbz(R, Z) / rbz_out
 
     def at_chords(y):
         return np.interp(phi_c, phi_N, y, left=np.nan, right=np.nan) * ratio
 
     out = dict(block, Er=at_chords(E_r))
+    if E_tor is not None:
+        b = np.abs(np.asarray(B_theta, dtype=float))
+        v = np.asarray(E_tor, dtype=float) / np.where(b > 0, b, np.nan)
+        ok = np.isfinite(v)
+        out["Er_tor"] = (np.interp(phi_c, np.asarray(phi_N)[ok], v[ok], right=np.nan)
+                         * np.abs(rbz_out / R_out) * ratio)
+        out["Er"] = at_chords(np.asarray(E_r) - E_tor) + out["Er_tor"]
     if E_r_err is not None:
-        ch = mse_chords(out, min_chords=1)
+        ch, _ = _chords(out, min_chords=1)
         B, sp, st = _field(eq, ch)
         dtg = (mse_tan_gamma(B, dict(ch, Er=np.ones(ch["n_active"])), sp, st)
                - mse_tan_gamma(B, dict(ch, Er=np.zeros(ch["n_active"])), sp, st))
@@ -70,10 +95,13 @@ def q_points(eq, block, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
     so on each surface the poloidal field scales by ``lam``, while B_phi,
     Phi_N and rho_tor are unchanged and ``iota = lam / |q_ref|``.  Per chord
 
-    ``lam = (t a - e) / (s_p (b - t c))``, with ``a = A2 s_t B_phi``,
-    ``b = A1 B_Z``, ``c = A3 B_R + A4 B_Z`` and ``e = A5 E_R``,
+    ``lam = (t a - e) / (s_p (b - t c) + e_tor)``, with ``a = A2 s_t B_phi``,
+    ``b = A1 B_Z``, ``c = A3 B_R + A4 B_Z``, ``e = A5 (E_R - E_tor)`` and
+    ``e_tor = A5 E_tor``,
 
-    on *eq*'s field in the block's stated orientation ``(s_p, s_t)``;
+    on *eq*'s field in the block's stated orientation ``(s_p, s_t)``; E_tor is
+    the block's ``Er_tor`` (:func:`mse_er_at_chords`), the v_phi B_theta part
+    of E_R, which scales with the poloidal field like B_Z;
     ``sigma_lam = |d lam / d t| sigma_eff``.  ``diota_daxis = |d lam / d R| /
     |q_ref|`` [1/m], with the reference field moved along R and q_ref held: the
     iota error per metre of error in the reference axis position, dominant near
@@ -87,23 +115,24 @@ def q_points(eq, block, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
     lam, sigma_lam, R, Z, index, excluded, orientation=(s_p, s_t), er_terms,
     R_axis)``, one entry per used chord (``R_axis``: *eq*'s axis).
     """
-    ch = mse_chords(block, min_chords=min_chords, sigma_sys=sigma_sys)
+    ch, er_tor = _chords(block, min_chords=min_chords, sigma_sys=sigma_sys)
     psi = eq.psi_N_at(ch["R"], ch["Z"])
     ch = mse_exclude(ch, psi >= 1.0, "outside the reference LCFS (psi_N >= 1)")
-    psi = psi[psi < 1.0]
+    psi, er_tor = psi[psi < 1.0], er_tor[psi < 1.0]
     if ch["n_active"] < ch["min_chords"]:
         raise MSEDataUnusable(f"only {ch['n_active']} MSE chords lie inside the "
                               f"reference LCFS; at least {ch['min_chords']} "
                               "are required")
     R, Z, t = ch["R"], ch["Z"], ch["tgamma"]
     B, sp, st = _field(eq, ch)
-    e = ch["A5"] * ch["Er"]
+    e, e_t = ch["A5"] * (ch["Er"] - er_tor), ch["A5"] * er_tor
 
     def lam(B):
         a = ch["A2"] * st * B[:, 1]
         b = ch["A1"] * B[:, 2]
         c = ch["A3"] * B[:, 0] + ch["A4"] * B[:, 2]
-        return (t * a - e) / (sp * (b - t * c)), (a * b - c * e) / (sp * (b - t * c) ** 2)
+        den = sp * (b - t * c) + e_t
+        return (t * a - e) / den, (sp * (a * b - c * e) + a * e_t) / den ** 2
 
     lm, dlm = lam(B)
     if not np.median(lm) > 0:
@@ -128,11 +157,11 @@ def mse_loglike(eq, block, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
 
     bouquet's forward model on ``eq.field_at``, in the block's stated
     orientation.  ``Er`` is used as given, so map it on *eq* itself
-    (:func:`mse_er_at_chords`).  Returns ``dict(chi2, logL, nu, z,
-    excluded)``, where ``logL = -(chi2 + sum log(2 pi sigma_eff^2)) / 2``
-    and ``nu`` is the number of chords used.
+    (:func:`mse_er_at_chords`, which also moves E_tor onto *eq*'s field).
+    Returns ``dict(chi2, logL, nu, z, excluded)``, where ``logL = -(chi2 +
+    sum log(2 pi sigma_eff^2)) / 2`` and ``nu`` is the number of chords used.
     """
-    ch = mse_chords(block, min_chords=min_chords, sigma_sys=sigma_sys)
+    ch, _ = _chords(block, min_chords=min_chords, sigma_sys=sigma_sys)
     B, sp, st = _field(eq, ch)
     chi2, z = mse_chi2(mse_tan_gamma(B, ch, sp, st), ch)
     return dict(chi2=chi2, logL=-0.5 * (chi2 + np.log(2 * np.pi * ch["sigma_eff"] ** 2).sum()),

@@ -66,6 +66,24 @@ def test_er_err_inflates_sigma_by_forward_model(solovev):
     assert out["sigma"][5] == 0.004 and np.all(blk["sigma"] == 0.004)
 
 
+def _b_out(eq):
+    """B_Z at the outboard midplane of *eq*'s surfaces on _profile's grid."""
+    R = eq.outboard_R(np.linspace(0, 1, 401) ** 2)
+    return eq.field_at(R, np.full_like(R, eq.Z_mag))[:, 2]
+
+
+def test_er_tor_moves_to_the_equilibrium_field(solovev):
+    phi, er = _profile()
+    blk = _block()
+    out = mse_er_at_chords(solovev, blk, phi, er, None, 0.6 * er, 2 * _b_out(solovev))
+    full = mse_er_at_chords(solovev, blk, phi, er)["Er"]     # E_tor was made with twice the field
+    np.testing.assert_allclose(out["Er_tor"][:5], 0.3 * full[:5], rtol=1e-3)
+    np.testing.assert_allclose(out["Er"][:5], 0.7 * full[:5], rtol=1e-3)
+    assert np.isnan(out["Er_tor"][5]) and mse_loglike(solovev, out)["nu"] == 5
+    with pytest.raises(MSEDataUnusable, match="unknown key"):
+        mse_chords(out)                                      # bouquet's MSE solvers refuse Er_tor
+
+
 def _scaled_eq(path, c):
     """The g-file at *path* with psi scaled by *c* (B_pol x c, q / c, same surfaces)."""
     raw = _read_geqdsk(path)
@@ -99,6 +117,22 @@ def test_q_points_recover_scaled_flux(scaled):
     np.testing.assert_allclose(pts["q"], np.interp(psi, x, true.qpsi), rtol=1e-9)
     np.testing.assert_allclose(pts["rho"], np.interp(psi, x, true.rhovn), rtol=1e-9)
     assert [i for i, _ in pts["excluded"]] == [5]           # outside the LCFS
+
+
+def test_q_points_scale_the_toroidal_er(scaled):
+    ref, true, blk, _ = scaled
+    prof = (*_profile(), None, 0.8 * _profile()[1], _b_out(ref))   # E_tor made with ref's field
+    base = {k: v for k, v in blk.items() if k != "Er"}
+    on_true = mse_er_at_chords(true, base, *prof)                   # E_tor x 1.15 on the true field
+    ch = mse_chords({k: v for k, v in on_true.items() if k != "Er_tor"})
+    B = true.field_at(ch["R"], ch["Z"])
+    sp, st = mse_orientation(ch, mse_equilibrium_orientation(B, ch["R"], ch["Z"], (R0, 0.0)))
+    tg = blk["tgamma"].copy()
+    tg[ch["index"]] = mse_tan_gamma(B, ch, sp, st)
+    pts = q_points(ref, mse_er_at_chords(ref, dict(base, tgamma=tg), *prof))
+    np.testing.assert_allclose(pts["lam"], 1.15, rtol=1e-9)
+    held = q_points(ref, mse_er_at_chords(ref, dict(base, tgamma=tg), *prof[:2]))
+    assert np.max(np.abs(held["lam"] - 1.15)) > 1e-3                # E_r held fixed misses it
 
 
 def test_q_points_orientation_is_stated(scaled):
