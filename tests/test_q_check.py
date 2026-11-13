@@ -135,6 +135,34 @@ def test_q_points_scale_the_toroidal_er(scaled):
     assert np.max(np.abs(held["lam"] - 1.15)) > 1e-3                # E_r held fixed misses it
 
 
+def _with_pole_chord(true, blk):
+    """*blk* plus chord 6 almost straight above the axis (B_Z ~ 0), angles from *true*."""
+    extra = dict(R=R0 + 0.001, Z=0.15, Er=0.0)
+    blk = {k: np.r_[v, extra.get(k, v[0])] if np.ndim(v) else v for k, v in blk.items()}
+    ch = mse_chords(blk)
+    B = true.field_at(ch["R"], ch["Z"])
+    sp, st = mse_orientation(ch, mse_equilibrium_orientation(B, ch["R"], ch["Z"], (R0, 0.0)))
+    blk["tgamma"][ch["index"]] = mse_tan_gamma(B, ch, sp, st)
+    return blk
+
+
+def test_q_points_drop_chords_near_the_pole(scaled):
+    ref, true, blk, _ = scaled
+    blk = _with_pole_chord(true, blk)
+    pts = q_points(ref, blk)
+    assert 6 not in pts["index"] and "pole" in dict(pts["excluded"])[6]
+    np.testing.assert_allclose(pts["lam"], 1.15, rtol=1e-9)
+    sharp = q_points(ref, dict(blk, sigma=np.r_[blk["sigma"][:6], 1e-6]))
+    assert 6 in sharp["index"]                               # a precise angle: the pole is far in sigma
+    np.testing.assert_allclose(sharp["lam"], 1.15, rtol=1e-9)
+
+
+def test_q_points_count_chords_away_from_the_pole(scaled):
+    ref, true, blk, _ = scaled
+    with pytest.raises(MSEDataUnusable, match="away from the pole"):
+        q_points(ref, _with_pole_chord(true, blk), min_chords=6)   # 6 inside the LCFS, 5 usable
+
+
 def test_q_points_orientation_is_stated(scaled):
     ref, _, blk, _ = scaled
     flipped = q_points(ref.flip_Bt_Ip(copy=True), blk)

@@ -15,6 +15,11 @@ from .mse import (MSE_MIN_CHORDS, MSEDataUnusable, mse_chi2, mse_chords,
 from .sampling import _CHOL_JITTER
 
 
+#: A chord is left out when its tan(gamma) lies within this many sigma_eff of
+#: the pole of lam(tan(gamma)) (:func:`q_points`): lam is far from Gaussian there.
+POLE_SIGMAS = 3.0
+
+
 def _field(eq, ch):
     """``(B, s_p, s_t)``: *eq*'s field at *ch*'s chords and the block's stated orientation."""
     B = eq.field_at(ch["R"], ch["Z"])
@@ -88,6 +93,25 @@ def mse_er_at_chords(eq, block, phi_N, E_r, E_r_err=None, E_tor=None, B_theta=No
     return out
 
 
+def _lam(ch, er_tor, B, sp, st):
+    """``(lam, d lam / d t, distance of t from the pole in sigma_eff)`` per chord
+    of *ch* on the field *B* (:func:`q_points`)."""
+    t = ch["tgamma"]
+    e, e_t = ch["A5"] * (ch["Er"] - er_tor), ch["A5"] * er_tor
+    a = ch["A2"] * st * B[:, 1]
+    b = ch["A1"] * B[:, 2]
+    c = ch["A3"] * B[:, 0] + ch["A4"] * B[:, 2]
+    den = sp * (b - t * c) + e_t
+    return ((t * a - e) / den, (sp * (a * b - c * e) + a * e_t) / den ** 2,
+            np.abs(den / c) / ch["sigma_eff"])
+
+
+def _require(ch, where):
+    if ch["n_active"] < ch["min_chords"]:
+        raise MSEDataUnusable(f"only {ch['n_active']} MSE chords {where}; at least "
+                              f"{ch['min_chords']} are required")
+
+
 def q_points(eq, block, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
     """MSE pitch angles as iota = 1/q points on the surfaces of the reference *eq*.
 
@@ -107,7 +131,9 @@ def q_points(eq, block, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
     iota error per metre of error in the reference axis position, dominant near
     the axis (:class:`QCheck` adds it for an axis error).
 
-    Chords at psi_N >= 1 are excluded.  Raises :class:`MSEDataUnusable`
+    Chords at psi_N >= 1 are excluded, and so are chords whose t lies within
+    :data:`POLE_SIGMAS` sigma_eff of the pole of lam(t), where ``s_p (b - t c)
+    + e_tor = 0`` (B_Z ~ 0 at the chord).  Raises :class:`MSEDataUnusable`
     when fewer than *min_chords* remain, or when the median ``lam`` is
     <= 0 (the stated orientation contradicts the data).
 
@@ -119,28 +145,22 @@ def q_points(eq, block, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
     psi = eq.psi_N_at(ch["R"], ch["Z"])
     ch = mse_exclude(ch, psi >= 1.0, "outside the reference LCFS (psi_N >= 1)")
     psi, er_tor = psi[psi < 1.0], er_tor[psi < 1.0]
-    if ch["n_active"] < ch["min_chords"]:
-        raise MSEDataUnusable(f"only {ch['n_active']} MSE chords lie inside the "
-                              f"reference LCFS; at least {ch['min_chords']} "
-                              "are required")
-    R, Z, t = ch["R"], ch["Z"], ch["tgamma"]
+    _require(ch, "lie inside the reference LCFS")
     B, sp, st = _field(eq, ch)
-    e, e_t = ch["A5"] * (ch["Er"] - er_tor), ch["A5"] * er_tor
-
-    def lam(B):
-        a = ch["A2"] * st * B[:, 1]
-        b = ch["A1"] * B[:, 2]
-        c = ch["A3"] * B[:, 0] + ch["A4"] * B[:, 2]
-        den = sp * (b - t * c) + e_t
-        return (t * a - e) / den, (sp * (a * b - c * e) + a * e_t) / den ** 2
-
-    lm, dlm = lam(B)
+    near = _lam(ch, er_tor, B, sp, st)[2] < POLE_SIGMAS
+    ch = mse_exclude(ch, near, f"tan(gamma) within {POLE_SIGMAS:g} sigma of the pole of "
+                     "lam(tan(gamma)) (B_Z ~ 0 at the chord)")
+    psi, er_tor, B = psi[~near], er_tor[~near], B[~near]
+    _require(ch, "lie inside the reference LCFS, away from the pole of lam")
+    R, Z = ch["R"], ch["Z"]
+    lm, dlm, _ = _lam(ch, er_tor, B, sp, st)
     if not np.median(lm) > 0:
         raise MSEDataUnusable(
             f"median lam = {np.median(lm):.3g} <= 0: the stated ip_sign/bt_sign "
             "contradict the pitch angles on the reference equilibrium")
     h = 1e-3   # [m]
-    dlm_dax = np.abs(lam(eq.field_at(R + h, Z))[0] - lam(eq.field_at(R - h, Z))[0]) / (2 * h)
+    dlm_dax = np.abs(_lam(ch, er_tor, eq.field_at(R + h, Z), sp, st)[0]
+                     - _lam(ch, er_tor, eq.field_at(R - h, Z), sp, st)[0]) / (2 * h)
     s_lm = np.abs(dlm) * ch["sigma_eff"]
     x = np.linspace(0.0, 1.0, eq.qpsi.size)
     q_ref = np.abs(np.interp(psi, x, eq.qpsi))
