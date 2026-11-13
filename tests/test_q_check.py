@@ -51,19 +51,40 @@ def test_er_is_flux_function_field(solovev):
     assert ch["excluded"][0][0] == 5 and "E_r" in ch["excluded"][0][1]
 
 
-def test_er_err_inflates_sigma_by_forward_model(solovev):
-    blk = _block()
-    out = mse_er_at_chords(solovev, blk, *_profile(err=True))
-    ch = mse_chords(out)
-    B = solovev.field_at(ch["R"], ch["Z"])
-    sp, st = mse_orientation(ch, mse_equilibrium_orientation(
-        B, ch["R"], ch["Z"], (solovev.R_mag, solovev.Z_mag)))
-    dtg = mse_tan_gamma(B, dict(ch, Er=ch["Er"] + 1.0), sp, st) - mse_tan_gamma(B, ch, sp, st)
-    R, Z = blk["R"][:5], blk["Z"][:5]
+def _er_sigma(R, Z):
+    """_profile(err=True)'s E_r error carried to the chords: sigma_out(Phi_N) (R B_Z) / (R B_Z)_out."""
     psi = ((R - R0) ** 2 + KAPPA ** 2 * Z ** 2) / A ** 2
-    s_er = (0.2 * 2 * K * (1 + psi) * np.sqrt(psi) / A + 2e3) * np.abs(R - R0) / (A * np.sqrt(psi))
-    np.testing.assert_allclose(out["sigma"][:5], np.hypot(0.004, dtg * s_er), rtol=1e-3)
-    assert out["sigma"][5] == 0.004 and np.all(blk["sigma"] == 0.004)
+    return (0.2 * 2 * K * (1 + psi) * np.sqrt(psi) / A + 2e3) * (R - R0) / (A * np.sqrt(psi))
+
+
+def test_er_err_is_a_chord_covariance(solovev):
+    blk = _block()
+    s = _er_sigma(blk["R"][:5], blk["Z"][:5])
+    ind = mse_er_at_chords(solovev, blk, *_profile(err=True))
+    np.testing.assert_allclose(ind["Er_cov"][:5, :5], np.diag(s ** 2), rtol=2e-3, atol=1e-6)
+    assert ind["sigma"] is blk["sigma"] and np.isnan(ind["Er_cov"][5, 5])
+    full = mse_er_at_chords(solovev, blk, *_profile(err=True), er_corr=np.inf)
+    np.testing.assert_allclose(full["Er_cov"][:5, :5], np.outer(s, s), rtol=2e-3)
+    ch = mse_chords({k: v for k, v in ind.items() if k != "Er_cov"})
+    B = solovev.field_at(ch["R"], ch["Z"])
+    sp, st = mse_orientation(ch, mse_equilibrium_orientation(B, ch["R"], ch["Z"], (R0, 0.0)))
+    d = mse_tan_gamma(B, dict(ch, Er=ch["Er"] + 1.0), sp, st) - mse_tan_gamma(B, ch, sp, st)
+    r = mse_tan_gamma(B, ch, sp, st) - ch["tgamma"]
+    np.testing.assert_allclose(direct_loglike(solovev, ind)["chi2"],             # independent:
+                               np.sum(r ** 2 / (0.004 ** 2 + (d * s) ** 2)), rtol=4e-3)   # sigma^2 + (d s)^2
+    cov = np.diag(np.full(5, 0.004 ** 2)) + np.outer(d * s, d * s)
+    np.testing.assert_allclose(direct_loglike(solovev, full)["chi2"], r @ np.linalg.solve(cov, r),
+                               rtol=4e-3)
+
+
+def test_q_points_carry_the_er_covariance(scaled):
+    ref, _, blk, _ = scaled
+    base = {k: v for k, v in blk.items() if k != "Er"}
+    phi, er, err = _profile(err=True)
+    pts = q_points(ref, mse_er_at_chords(ref, base, phi, er, err, er_corr=np.inf))
+    up = q_points(ref, mse_er_at_chords(ref, base, phi, er + err))  # the whole profile 1 sigma up
+    v = up["iota"] - pts["iota"]                                      # exact: lam is linear in E_R
+    np.testing.assert_allclose(pts["cov_iota_er"], np.outer(v, v), rtol=1e-6, atol=1e-14)
 
 
 def _b_out(eq):
@@ -249,11 +270,13 @@ def test_gp_axis_error_per_candidate():
 def test_points_loglike():
     p = _points()
     g = np.linspace(1.0, -0.5, p["rho"].size)
-    qc = QCheck(p["rho"], p["iota"], p["sigma_iota"], 0.1, 0.4, g, R_axis=1.70, R_axis_alt=[1.72])
+    u = 0.004 * np.cos(4 * p["rho"])                                  # an E_r error, correlated
+    qc = QCheck(p["rho"], p["iota"], p["sigma_iota"], 0.1, 0.4, g, R_axis=1.70, R_axis_alt=[1.72],
+                cov_er=np.outer(u, u))
     res = qc.points_loglike(PSI, [_q(PSI), 1.05 * _q(PSI)], R_axis=[1.70, 1.75])
     assert res["chi2"][0] < 1e-3 and res["nu"] == p["rho"].size
     for i, (f, dR) in enumerate(((1.0, 0.02), (1.05, 0.05))):
-        cov = np.diag(p["sigma_iota"] ** 2) + dR ** 2 * np.outer(g, g)   # one offset, every point
+        cov = np.diag(p["sigma_iota"] ** 2) + np.outer(u, u) + dR ** 2 * np.outer(g, g)
         r = p["iota"] * (1 / f - 1)
         np.testing.assert_allclose(res["chi2"][i], r @ np.linalg.solve(cov, r), rtol=1e-3, atol=1e-3)
         np.testing.assert_allclose(res["logL"][i], -0.5 * (res["chi2"][i]

@@ -59,7 +59,8 @@ def _score_gp(row, qc, mse, eq):
         return
     try:
         pts = q_points(eq, _on(eq, mse))
-        own = QCheck(pts["rho"], pts["iota"], pts["sigma_iota"], qc.amp, qc.ell)
+        own = QCheck(pts["rho"], pts["iota"], pts["sigma_iota"], qc.amp, qc.ell,
+                     cov_er=pts["cov_iota_er"])
         r = own.gp_loglike(np.linspace(0.0, 1.0, eq.qpsi.size), eq.qpsi)
     except (ValueError, RuntimeError) as e:
         row["status"].append(f"gp: {e}")

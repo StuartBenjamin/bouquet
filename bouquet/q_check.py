@@ -23,7 +23,7 @@ from scipy.linalg import solve_triangular
 from scipy.optimize import minimize
 
 from .coords import phi_n_from_q
-from .mse import (MSE_MIN_CHORDS, MSEDataUnusable, mse_chi2, mse_chords,
+from .mse import (MSE_MIN_CHORDS, MSEDataUnusable, mse_chords,
                   mse_equilibrium_orientation, mse_er_terms, mse_exclude,
                   mse_orientation, mse_tan_gamma)
 from .sampling import _CHOL_JITTER
@@ -42,16 +42,17 @@ def _field(eq, ch):
 
 
 def _chords(block, **kw):
-    """:func:`bouquet.mse.mse_chords` of *block*, and its ``Er_tor`` (see
-    :func:`mse_er_at_chords`) at the active chords, 0 without it."""
+    """:func:`bouquet.mse.mse_chords` of *block*, and its ``Er_tor`` and ``Er_cov`` (see
+    :func:`mse_er_at_chords`) at the active chords, 0 without them."""
     blk = dict(block)
-    tor = blk.pop("Er_tor", None)
+    tor, cov = blk.pop("Er_tor", None), blk.pop("Er_cov", None)
     ch = mse_chords(blk, **kw)
-    return ch, (np.zeros(ch["n_active"]) if tor is None
-                else np.asarray(tor, dtype=float)[ch["index"]])
+    i = ch["index"]
+    cov = np.zeros((i.size, i.size)) if cov is None else np.asarray(cov, dtype=float)[np.ix_(i, i)]
+    return ch, np.zeros(i.size) if tor is None else np.asarray(tor, dtype=float)[i], cov
 
 
-def mse_er_at_chords(eq, block, phi_N, E_r, E_r_err=None, E_tor=None, B_theta=None):
+def mse_er_at_chords(eq, block, phi_N, E_r, E_r_err=None, E_tor=None, B_theta=None, er_corr=0.0):
     """A copy of MSE *block* with ``Er`` [V/m] at its chords.
 
     *E_r* (and *E_r_err*) is the outboard-midplane radial field on the
@@ -62,16 +63,20 @@ def mse_er_at_chords(eq, block, phi_N, E_r, E_r_err=None, E_tor=None, B_theta=No
     outboard point at Z_axis.  Chords outside the LCFS or the profile get
     NaN, which :func:`bouquet.mse.mse_chords` excludes with its reason.
 
-    With *E_r_err*, ``sigma`` gains ``|d tan(gamma) / d E_R| sigma_ER`` in
-    quadrature (the forward model on *eq*'s field, in the block's stated
-    orientation).
+    With *E_r_err*, the block also gets ``Er_cov`` [V^2/m^2], the covariance of
+    E_R between its chords: ``s_k s_l exp(-(x_k - x_l)^2 / (2 er_corr^2))``
+    with ``s = E_r_err(Phi_N) (R B_Z) / (R B_Z)_out`` and ``x = rho_tor``.
+    E_r's error is a profile error with correlation length *er_corr* in
+    rho_tor: 0 treats the chords as independent, ``inf`` as one shift of the
+    whole profile.  The checks add it to the angles' covariance (derivation:
+    eq_stab claude_findings/q_coil_check/er_error_covariance.md).
 
     *E_tor* is the part of *E_r* that is v_phi B_theta, computed with the
     outboard-midplane poloidal field *B_theta* [T] (both on *phi_N*).  It is
     moved onto *eq*'s field, ``E_tor |B_Z(out)| / |B_theta|`` (``E_tor /
     |B_theta|`` is interpolated: smooth at the axis), and also given at the
     chords as ``Er_tor``, which :func:`q_points` scales with the poloidal
-    field (bouquet's MSE solvers refuse that key).
+    field (bouquet's MSE solvers refuse both keys).
     """
     def rbz(R, Z):
         return R * eq.field_at(R, Z)[:, 2]
@@ -96,27 +101,23 @@ def mse_er_at_chords(eq, block, phi_N, E_r, E_r_err=None, E_tor=None, B_theta=No
                          * np.abs(rbz_out / R_out) * ratio)
         out["Er"] = at_chords(np.asarray(E_r) - E_tor) + out["Er_tor"]
     if E_r_err is not None:
-        ch, _ = _chords(out, min_chords=1)
-        B, sp, st = _field(eq, ch)
-        dtg = (mse_tan_gamma(B, dict(ch, Er=np.ones(ch["n_active"])), sp, st)
-               - mse_tan_gamma(B, dict(ch, Er=np.zeros(ch["n_active"])), sp, st))
-        i = ch["index"]
-        sigma = np.array(block["sigma"], dtype=float)
-        sigma[i] = np.hypot(sigma[i], dtg * np.abs(at_chords(E_r_err))[i])
-        out["sigma"] = sigma
+        s = at_chords(E_r_err)
+        dx = np.sqrt(phi_c)[:, None] - np.sqrt(phi_c)[None, :]
+        corr = np.eye(s.size) if er_corr <= 0 else np.exp(-0.5 * (dx / er_corr) ** 2)
+        out["Er_cov"] = np.outer(s, s) * corr
     return out
 
 
 def _lam(ch, er_tor, B, sp, st):
-    """``(lam, d lam / d t, distance of t from the pole in sigma_eff)`` per chord
-    of *ch* on the field *B* (:func:`q_points`)."""
+    """``(lam, d lam / d t, d lam / d E_R, distance of t from the pole in sigma_eff)``
+    per chord of *ch* on the field *B* (:func:`q_points`)."""
     t = ch["tgamma"]
     e, e_t = ch["A5"] * (ch["Er"] - er_tor), ch["A5"] * er_tor
     a = ch["A2"] * st * B[:, 1]
     b = ch["A1"] * B[:, 2]
     c = ch["A3"] * B[:, 0] + ch["A4"] * B[:, 2]
     den = sp * (b - t * c) + e_t
-    return ((t * a - e) / den, (sp * (a * b - c * e) + a * e_t) / den ** 2,
+    return ((t * a - e) / den, (sp * (a * b - c * e) + a * e_t) / den ** 2, -ch["A5"] / den,
             np.abs(den / c) / ch["sigma_eff"])
 
 
@@ -140,7 +141,9 @@ def q_points(eq, block, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
     on *eq*'s field in the block's stated orientation ``(s_p, s_t)``; E_tor is
     the block's ``Er_tor`` (:func:`mse_er_at_chords`), the v_phi B_theta part
     of E_R, which scales with the poloidal field like B_Z;
-    ``sigma_lam = |d lam / d t| sigma_eff``.  ``diota_dR_axis = (d lam / d R) /
+    ``sigma_lam = |d lam / d t| sigma_eff``; ``cov_iota_er`` is the block's
+    ``Er_cov`` carried to iota with ``d lam / d E_R = -A5 / (s_p (b - t c) +
+    e_tor)``.  ``diota_dR_axis = (d lam / d R) /
     |q_ref|`` [1/m], with the reference field moved along R and q_ref held: the
     iota error per metre of error in the reference axis position, dominant near
     the axis, signed, since one axis offset moves every point together
@@ -152,23 +155,24 @@ def q_points(eq, block, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
     when fewer than *min_chords* remain, or when the median ``lam`` is
     <= 0 (the stated orientation contradicts the data).
 
-    Returns ``dict(rho, psi_N, iota, sigma_iota, diota_dR_axis, q, sigma_q,
+    Returns ``dict(rho, psi_N, iota, sigma_iota, cov_iota_er, diota_dR_axis, q, sigma_q,
     lam, sigma_lam, R, Z, index, excluded, orientation=(s_p, s_t), er_terms,
     R_axis)``, one entry per used chord (``R_axis``: *eq*'s axis).
     """
-    ch, er_tor = _chords(block, min_chords=min_chords, sigma_sys=sigma_sys)
+    ch, er_tor, er_cov = _chords(block, min_chords=min_chords, sigma_sys=sigma_sys)
     psi = eq.psi_N_at(ch["R"], ch["Z"])
     ch = mse_exclude(ch, psi >= 1.0, "outside the reference LCFS (psi_N >= 1)")
-    psi, er_tor = psi[psi < 1.0], er_tor[psi < 1.0]
+    keep = psi < 1.0
+    psi, er_tor, er_cov = psi[keep], er_tor[keep], er_cov[np.ix_(keep, keep)]
     _require_chords(ch, "lie inside the reference LCFS")
     B, sp, st = _field(eq, ch)
-    near = _lam(ch, er_tor, B, sp, st)[2] < POLE_SIGMAS
-    ch = mse_exclude(ch, near, f"tan(gamma) within {POLE_SIGMAS:g} sigma of the pole of "
+    keep = _lam(ch, er_tor, B, sp, st)[3] >= POLE_SIGMAS
+    ch = mse_exclude(ch, ~keep, f"tan(gamma) within {POLE_SIGMAS:g} sigma of the pole of "
                      "lam(tan(gamma)) (B_Z ~ 0 at the chord)")
-    psi, er_tor, B = psi[~near], er_tor[~near], B[~near]
+    psi, er_tor, er_cov, B = psi[keep], er_tor[keep], er_cov[np.ix_(keep, keep)], B[keep]
     _require_chords(ch, "lie inside the reference LCFS, away from the pole of lam")
     R, Z = ch["R"], ch["Z"]
-    lam, dlam_dt, _ = _lam(ch, er_tor, B, sp, st)
+    lam, dlam_dt, dlam_dE, _ = _lam(ch, er_tor, B, sp, st)
     if not np.median(lam) > 0:
         raise MSEDataUnusable(
             f"median lam = {np.median(lam):.3g} <= 0: the stated ip_sign/bt_sign "
@@ -179,8 +183,9 @@ def q_points(eq, block, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
     sigma_lam = np.abs(dlam_dt) * ch["sigma_eff"]
     x = np.linspace(0.0, 1.0, eq.qpsi.size)
     q_ref = np.abs(np.interp(psi, x, eq.qpsi))
-    iota, sigma_iota = lam / q_ref, sigma_lam / q_ref
+    iota, sigma_iota, u = lam / q_ref, sigma_lam / q_ref, dlam_dE / q_ref
     return dict(rho=np.interp(psi, x, eq.rhovn), psi_N=psi, iota=iota,
+                cov_iota_er=u[:, None] * er_cov * u[None, :],
                 sigma_iota=sigma_iota, diota_dR_axis=dlam_dR / q_ref, q=1.0 / iota,
                 sigma_q=sigma_iota / iota ** 2, lam=lam, sigma_lam=sigma_lam, R=R, Z=Z,
                 index=ch["index"], excluded=ch["excluded"], orientation=(sp, st),
@@ -193,14 +198,24 @@ def direct_loglike(eq, block, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
     bouquet's forward model on ``eq.field_at``, in the block's stated
     orientation.  ``Er`` is used as given, so map it on *eq* itself
     (:func:`mse_er_at_chords`, which also moves E_tor onto *eq*'s field).
-    Returns ``dict(chi2, logL, nu, z, excluded)``, where ``logL = -(chi2 +
-    sum log(2 pi sigma_eff^2)) / 2`` and ``nu`` is the number of chords used.
+    The angles' covariance is ``diag(sigma_eff^2) + D Er_cov D`` with ``D =
+    diag(d tan(gamma) / d E_R)``.  Returns ``dict(chi2, logL, nu, z,
+    excluded)``: ``chi2 = r^T C^-1 r`` for the residuals ``r``, ``logL =
+    -(chi2 + log|2 pi C|) / 2``, ``z = r / sqrt(diag C)`` and ``nu`` the
+    number of chords used.
     """
-    ch, _ = _chords(block, min_chords=min_chords, sigma_sys=sigma_sys)
+    ch, _, er_cov = _chords(block, min_chords=min_chords, sigma_sys=sigma_sys)
     B, sp, st = _field(eq, ch)
-    chi2, z = mse_chi2(mse_tan_gamma(B, ch, sp, st), ch)
-    return dict(chi2=chi2, logL=-0.5 * (chi2 + np.log(2 * np.pi * ch["sigma_eff"] ** 2).sum()),
-                nu=ch["n_active"], z=z, excluded=ch["excluded"])
+    pred = mse_tan_gamma(B, ch, sp, st)
+    d = mse_tan_gamma(B, dict(ch, Er=ch["Er"] + 1.0), sp, st) - pred   # exact: linear in E_R
+    cov = np.diag(ch["sigma_eff"] ** 2) + d[:, None] * er_cov * d[None, :]
+    r = pred - ch["tgamma"]
+    L = np.linalg.cholesky(cov)
+    w = solve_triangular(L, r, lower=True)
+    chi2 = float(w @ w)
+    return dict(chi2=chi2, logL=-0.5 * (chi2 + 2.0 * np.log(np.diag(L)).sum()
+                                        + r.size * np.log(2.0 * np.pi)),
+                nu=ch["n_active"], z=r / np.sqrt(np.diag(cov)), excluded=ch["excluded"])
 
 
 def floor_angles(eq, block, q_floor, profile=()):
@@ -218,7 +233,7 @@ def floor_angles(eq, block, q_floor, profile=()):
     mapped = mse_er_at_chords(eq, block, *profile) if profile else block
     pts = q_points(eq, mapped, min_chords=1)
     low = pts["q"] < q_floor
-    ch, er_tor = _chords(mapped, min_chords=1)
+    ch, er_tor, _ = _chords(mapped, min_chords=1)
     B, sp, st = _field(eq, ch)
     pos = np.searchsorted(ch["index"], pts["index"][low])
     lam = np.ones(ch["n_active"])
@@ -245,19 +260,24 @@ def _basis(x):
     return np.column_stack([np.ones_like(x), x ** 2])
 
 
-def _gp_factor(x, y, s, amp, ell, gd):
+def _noise(s, cov, gd):
+    """Covariance of the q points' errors: ``diag(s^2) + cov + gd gd^T``."""
+    return np.diag(s ** 2) + cov + np.outer(gd, gd)
+
+
+def _gp_factor(x, y, amp, ell, noise):
     """``(L, alpha, Hl, A, beta)`` of the GP with a flat-prior basis (R&W eq. 2.42) and
-    noise ``diag(s^2) + gd gd^T``."""
-    L = _chol(amp ** 2 * _matern52(x, x, ell) + np.diag(s ** 2) + np.outer(gd, gd))
+    the points' error covariance *noise*."""
+    L = _chol(amp ** 2 * _matern52(x, x, ell) + noise)
     alpha = solve_triangular(L, y, lower=True)
     Hl = solve_triangular(L, _basis(x), lower=True)
     A = Hl.T @ Hl
     return L, alpha, Hl, A, np.linalg.solve(A, Hl.T @ alpha)
 
 
-def _neg_log_ml(th, x, y, s, gd):
+def _neg_log_ml(th, x, y, noise):
     """Negative log marginal likelihood, basis coefficients integrated out (R&W eq. 2.45)."""
-    L, alpha, Hl, A, beta = _gp_factor(x, y, s, *np.exp(th), gd)
+    L, alpha, Hl, A, beta = _gp_factor(x, y, *np.exp(th), noise)
     return (0.5 * (alpha @ alpha - alpha @ Hl @ beta) + np.log(np.diag(L)).sum()
             + 0.5 * np.linalg.slogdet(A)[1])
 
@@ -288,9 +308,10 @@ class QCheck:
 
     ``iota = b0 + b1 rho^2 + r(rho)``: a flat prior on (b0, b1), so the slope
     at the axis is zero without a derivative observation; ``r ~ GP(0, amp^2
-    Matern-5/2(ell))``; noise ``diag(sigma_iota^2) + dR^2 g g^T`` with ``g =
-    diota_dR_axis``, as one axis offset moves every point together (Rasmussen &
-    Williams 2006, sec. 2.7).  ``dR`` is the axis error
+    Matern-5/2(ell))``; noise ``diag(sigma_iota^2) + cov_er + dR^2 g g^T``:
+    *cov_er* the E_r profile's error (:func:`q_points` ``cov_iota_er``), and
+    ``g = diota_dR_axis`` as one axis offset moves every point together
+    (Rasmussen & Williams 2006, sec. 2.7).  ``dR`` is the axis error
     (:meth:`axis_error`): the largest distance in R of *R_axis_alt* (other
     reconstructions' axes) and of the candidate's axis from the points'
     reference axis *R_axis*.  Candidates are scored on the posterior at ``m``
@@ -301,7 +322,7 @@ class QCheck:
     """
 
     def __init__(self, rho, iota, sigma_iota, amp, ell, diota_dR_axis=None,
-                 R_axis=np.nan, R_axis_alt=(), q_floor=np.nan):
+                 R_axis=np.nan, R_axis_alt=(), q_floor=np.nan, cov_er=None):
         self.rho, self.iota, self.sigma_iota = (
             np.asarray(a, dtype=float) for a in (rho, iota, sigma_iota))
         self.diota_dR_axis = (np.zeros_like(self.rho) if diota_dR_axis is None
@@ -310,6 +331,8 @@ class QCheck:
         self.R_axis = float(R_axis)
         self.R_axis_alt = np.atleast_1d(np.asarray(R_axis_alt, dtype=float))
         self.q_floor = float(q_floor)
+        self.cov_er = (np.zeros((self.rho.size,) * 2) if cov_er is None
+                       else np.asarray(cov_er, dtype=float))
         m = int(np.clip(np.ceil(np.ptp(self.rho) / self.ell) + 1, 2, self.rho.size))
         self.rho_test = np.linspace(self.rho.min(), self.rho.max(), m)
         self._cache = {}
@@ -322,13 +345,15 @@ class QCheck:
         """GP factor, posterior at ``rho_test`` (mean, Cholesky) and log|2 pi Sigma| for *dR*."""
         key = round(float(dR), 4)   # one posterior per 0.1 mm of axis error
         if key not in self._cache:
-            f = _gp_factor(self.rho, self.iota, self.sigma_iota, self.amp, self.ell,
-                           self.diota_dR_axis * key)
+            f = _gp_factor(self.rho, self.iota, self.amp, self.ell, self._noise(key))
             mean, cov = self._predict(f, self.rho_test)
             Lt = _chol(cov)
             self._cache[key] = (f, mean, Lt, 2.0 * np.log(np.diag(Lt)).sum()
                                 + mean.size * np.log(2.0 * np.pi))
         return self._cache[key]
+
+    def _noise(self, dR):
+        return _noise(self.sigma_iota, self.cov_er, self.diota_dR_axis * dR)
 
     def _predict(self, f, rho):
         L, alpha, Hl, A, beta = f
@@ -366,18 +391,20 @@ class QCheck:
         """``dict(logL, chi2, nu, axis_error)`` of the candidates against the q points alone.
 
         No GP: each row's iota at the points' rho_tor against the points, with
-        covariance ``diag(sigma_iota^2) + dR^2 g g^T`` (axis error as in
-        :meth:`gp_loglike`); ``chi2`` over the ``nu`` points and ``logL = -(chi2 +
-        log|2 pi Sigma|) / 2``.  A cross-check of :meth:`gp_loglike`, free of the GP
-        prior.
+        covariance ``Sigma = diag(sigma_iota^2) + cov_er + dR^2 g g^T`` (axis
+        error as in :meth:`gp_loglike`); ``chi2 = r^T Sigma^-1 r`` over the ``nu``
+        points and ``logL = -(chi2 + log|2 pi Sigma|) / 2``.  A cross-check of
+        :meth:`gp_loglike`, free of the GP prior.
         """
         iota, dR = self._candidates(psi_N, q, self.rho, R_axis)
-        w, g = self.sigma_iota ** -2.0, self.diota_dR_axis
         r = iota - self.iota
-        k = dR ** 2 * np.sum(w * g ** 2)
-        chi2 = r ** 2 @ w - dR ** 2 * (r @ (w * g)) ** 2 / (1.0 + k)   # Sherman-Morrison
-        return dict(logL=-0.5 * (chi2 + np.sum(np.log(2 * np.pi / w)) + np.log1p(k)), chi2=chi2,
-                    nu=self.rho.size, axis_error=dR)
+        chi2, logdet = np.empty(dR.size), np.empty(dR.size)
+        for j, d in enumerate(dR):
+            L = np.linalg.cholesky(self._noise(d))
+            w = solve_triangular(L, r[j], lower=True, check_finite=False)
+            chi2[j] = w @ w
+            logdet[j] = 2.0 * np.log(np.diag(L)).sum() + r.shape[1] * np.log(2.0 * np.pi)
+        return dict(logL=-0.5 * (chi2 + logdet), chi2=chi2, nu=self.rho.size, axis_error=dR)
 
     def _candidates(self, psi_N, q, rho, R_axis):
         """Rows of *q*: iota at *rho* (each placed on rho_tor by its own q; NaN for a
@@ -396,18 +423,20 @@ class QCheck:
     def save(self, path):
         np.savez(path, rho=self.rho, iota=self.iota, sigma_iota=self.sigma_iota,
                  diota_dR_axis=self.diota_dR_axis, amp=self.amp, ell=self.ell,
-                 R_axis=self.R_axis, R_axis_alt=self.R_axis_alt, q_floor=self.q_floor)
+                 R_axis=self.R_axis, R_axis_alt=self.R_axis_alt, q_floor=self.q_floor,
+                 cov_er=self.cov_er)
 
     @classmethod
     def load(cls, path):
         with np.load(path) as f:
             return cls(f["rho"], f["iota"], f["sigma_iota"], float(f["amp"]), float(f["ell"]),
-                       f["diota_dR_axis"], float(f["R_axis"]), f["R_axis_alt"], float(f["q_floor"]))
+                       f["diota_dR_axis"], float(f["R_axis"]), f["R_axis_alt"], float(f["q_floor"]),
+                       f["cov_er"])
 
 
 def fit_q_check(points, R_axis_alt=(), q_floor=None):
     """:class:`QCheck` of *points* (``rho``, ``iota``, ``sigma_iota``, and
-    optionally ``diota_dR_axis``, ``R_axis``; e.g. :func:`q_points`), with
+    optionally ``cov_iota_er``, ``diota_dR_axis``, ``R_axis``; e.g. :func:`q_points`), with
     other reconstructions' axes *R_axis_alt* [m].
 
     With *q_floor*, points below it are clipped to it (iota <= 1 / q_floor) for
@@ -425,37 +454,41 @@ def fit_q_check(points, R_axis_alt=(), q_floor=None):
     x, y, s = (np.asarray(points[k], dtype=float) for k in ("rho", "iota", "sigma_iota"))
     g = np.asarray(points.get("diota_dR_axis", np.zeros_like(x)), dtype=float)
     ok = np.isfinite(x) & np.isfinite(y) & np.isfinite(s) & (s > 0) & np.isfinite(g)
-    x, y, s, g = x[ok], y[ok], s[ok], g[ok]
+    cov = np.asarray(points.get("cov_iota_er", np.zeros((x.size, x.size))), dtype=float)
+    x, y, s, g, cov = x[ok], y[ok], s[ok], g[ok], cov[np.ix_(ok, ok)]
     if q_floor is not None:
         y = np.minimum(y, 1.0 / q_floor)
     if x.size < 3:
         raise ValueError(f"fit_q_check: {x.size} finite points; at least 3 are required")
     R_axis = float(points.get("R_axis", np.nan))
     dR = _axis_error(R_axis, R_axis_alt)
-    se = np.hypot(s, g * dR)
+    se = np.sqrt(s ** 2 + np.diag(cov) + (g * dR) ** 2)
     bounds = np.log([(np.median(se), 10.0), (0.05, 2.0 * np.ptp(x))])
     starts = [np.clip(np.log([a, ell]), bounds[:, 0], bounds[:, 1])
               for a in np.median(se) * np.array([1.0, 10.0]) for ell in (0.15, 0.4, 1.0)]
-    best = min((minimize(_neg_log_ml, th, args=(x, y, s, g * dR), method="L-BFGS-B", bounds=bounds)
+    noise = _noise(s, cov, g * dR)
+    best = min((minimize(_neg_log_ml, th, args=(x, y, noise), method="L-BFGS-B", bounds=bounds)
                 for th in starts), key=lambda r: r.fun)
     return QCheck(x, y, s, *np.exp(best.x), g, R_axis, R_axis_alt,
-                  np.nan if q_floor is None else q_floor)
+                  np.nan if q_floor is None else q_floor, cov)
 
 
 def plot_q_points(points, qc=None, profiles=(), ax=None):
     """q of the MSE points (+-1 sigma) on rho_tor, with *qc*'s posterior band, the points
     where :meth:`QCheck.gp_loglike` compares, and *profiles*.
 
-    *points* as from :func:`q_points`; with *qc* the error bars include its axis error for a
-    candidate of unknown axis.  *profiles*: ``(label, psi_N, q)`` each, placed on rho_tor by
-    its own q.  Returns the axes.
+    *points* as from :func:`q_points`; the error bars include the E_r error and, with
+    *qc*, its axis error for a candidate of unknown axis.  *profiles*: ``(label, psi_N,
+    q)`` each, placed on rho_tor by its own q.  Returns the axes.
     """
     import matplotlib.pyplot as plt
 
     ax = plt.subplots(figsize=(5.0, 3.5))[1] if ax is None else ax
     iota = np.asarray(points["iota"], dtype=float)
     dR = 0.0 if qc is None else qc.axis_error()
-    s = np.hypot(points["sigma_iota"], np.asarray(points.get("diota_dR_axis", 0.0)) * dR)
+    g = np.asarray(points.get("diota_dR_axis", 0.0)) * dR
+    s = np.sqrt(np.asarray(points["sigma_iota"]) ** 2 + g ** 2
+                + np.diag(points.get("cov_iota_er", np.zeros((iota.size, iota.size)))))
     handles = []                                 # legend: the MSE side first, then the profiles
     if qc is not None:
         rho = np.linspace(qc.rho_test[0], qc.rho_test[-1], 100)
