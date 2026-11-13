@@ -9,7 +9,11 @@ Blocks are in :mod:`bouquet.mse`'s schema; the reference equilibrium is a
   candidate q profiles against its posterior;
 * points alone: :meth:`QCheck.points_loglike` scores them against the points;
 * direct: :func:`direct_loglike` compares the angles with a candidate's own field
-  (no mapping; needs the candidate's equilibrium, not just its q).
+  (no mapping; needs the candidate's equilibrium, not just its q).  For
+  candidates with equilibria this is the likelihood; the q points serve the
+  q plot and candidates known only by their q profile.
+
+:func:`floor_angles` takes a known q floor of the candidates out of the data.
 
 :func:`plot_q_points` draws the points, the GP band and candidate profiles.
 """
@@ -197,6 +201,33 @@ def direct_loglike(eq, block, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
     chi2, z = mse_chi2(mse_tan_gamma(B, ch, sp, st), ch)
     return dict(chi2=chi2, logL=-0.5 * (chi2 + np.log(2 * np.pi * ch["sigma_eff"] ** 2).sum()),
                 nu=ch["n_active"], z=z, excluded=ch["excluded"])
+
+
+def floor_angles(eq, block, q_floor, profile=()):
+    """A copy of MSE *block* with the angles of a plasma whose q is clipped at *q_floor*.
+
+    Chords whose q point on *eq* (:func:`q_points`; E_r mapped by
+    ``mse_er_at_chords(eq, block, *profile)`` when *profile* is given) lies
+    below *q_floor* get the tan(gamma) of *eq*'s field scaled to ``lam = q_ref /
+    q_floor`` (the relabelled-flux model, E_tor scaled with it), so that their q
+    point is the floor; the other angles are kept.  For candidates that cannot
+    go below that q by construction: the floor deficit is taken out of the data
+    on *eq*'s geometry (best: an MSE-constrained reconstruction), while the
+    direct check still tests the candidate's own geometry, e.g. its axis.
+    """
+    mapped = mse_er_at_chords(eq, block, *profile) if profile else block
+    pts = q_points(eq, mapped, min_chords=1)
+    low = pts["q"] < q_floor
+    ch, er_tor = _chords(mapped, min_chords=1)
+    B, sp, st = _field(eq, ch)
+    pos = np.searchsorted(ch["index"], pts["index"][low])
+    lam = np.ones(ch["n_active"])
+    lam[pos] = (pts["lam"] / pts["iota"])[low] / q_floor
+    tg = mse_tan_gamma(B * np.c_[lam, np.ones_like(lam), lam],
+                       dict(ch, Er=ch["Er"] + (lam - 1.0) * er_tor), sp, st)
+    t = np.array(block["tgamma"], dtype=float)
+    t[ch["index"][pos]] = tg[pos]
+    return dict(block, tgamma=t)
 
 
 def _chol(K):

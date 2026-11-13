@@ -7,8 +7,8 @@ from bouquet.io.geqdsk import GEQDSKEquilibrium, _read_geqdsk, read_geqdsk
 from bouquet.mse import (MSEDataUnusable, mse_chords,
                          mse_equilibrium_orientation, mse_orientation,
                          mse_tan_gamma)
-from bouquet.q_check import (QCheck, _matern52, fit_q_check, mse_er_at_chords, direct_loglike,
-                             plot_q_points, q_points)
+from bouquet.q_check import (QCheck, _matern52, direct_loglike, fit_q_check, floor_angles,
+                             mse_er_at_chords, plot_q_points, q_points)
 from test_geqdsk import generate_solovev_gfile
 
 R0, A, KAPPA, K = 1.7, 0.5, 1.4, 6e3
@@ -161,6 +161,31 @@ def test_q_points_count_chords_away_from_the_pole(scaled):
     ref, true, blk, _ = scaled
     with pytest.raises(MSEDataUnusable, match="away from the pole"):
         q_points(ref, _with_pole_chord(true, blk), min_chords=6)   # 6 inside the LCFS, 5 usable
+
+
+def test_floor_angles_clip_the_q_points(scaled):
+    ref, true, blk, _ = scaled
+    q_true = q_points(true, blk)["q"]
+    q_floor = np.median(q_true)
+    pts = q_points(true, floor_angles(true, blk, q_floor))
+    np.testing.assert_allclose(pts["q"], np.maximum(q_true, q_floor), rtol=1e-9)
+    kept = q_true > q_floor
+    out = floor_angles(true, blk, q_floor)
+    np.testing.assert_array_equal(out["tgamma"][pts["index"][kept]], blk["tgamma"][pts["index"][kept]])
+    assert set(out) == set(blk)
+
+
+def test_floor_angles_with_er_profile(solovev):
+    blk, prof = _block(), _profile()
+    ch = mse_chords(mse_er_at_chords(solovev, blk, *prof))
+    B = solovev.field_at(ch["R"], ch["Z"])
+    sp, st = mse_orientation(ch, mse_equilibrium_orientation(B, ch["R"], ch["Z"], (R0, 0.0)))
+    blk["tgamma"][ch["index"]] = mse_tan_gamma(B, ch, sp, st)   # the equilibrium's own angles
+    out = floor_angles(solovev, blk, 50.0, prof)                 # every chord lies below q = 50
+    assert "Er" not in out                                       # the raw block, E_r mapped by the caller
+    np.testing.assert_allclose(q_points(solovev, mse_er_at_chords(solovev, out, *prof))["q"], 50.0,
+                               rtol=1e-9)
+    np.testing.assert_array_equal(floor_angles(solovev, blk, 1e-3, prof)["tgamma"], blk["tgamma"])
 
 
 def test_q_points_orientation_is_stated(scaled):
