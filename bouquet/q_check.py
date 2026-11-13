@@ -257,24 +257,43 @@ class QCheck:
         of freedom for a draw from it) and ``logL = -(d2 + log|2 pi Sigma|) /
         2``.  A row with non-finite q gets NaN.
         """
-        q = np.atleast_2d(np.asarray(q, dtype=float))
-        n = q.shape[0]
-        psi = np.broadcast_to(np.atleast_2d(np.asarray(psi_N, dtype=float)), q.shape)
-        iota = np.full((n, self.rho_test.size), np.nan)
-        for i, (x, y) in enumerate(zip(psi, q)):
-            if np.all(np.isfinite(y)):
-                rho, qq = _q_on_rho(x, y)
-                iota[i] = np.interp(self.rho_test, rho, 1.0 / qq)
-        R_c = [None] * n if R_axis is None else np.broadcast_to(np.asarray(R_axis, float), (n,))
-        dR = np.array([self.axis_error(r) for r in R_c])
+        iota, dR = self._candidates(psi_N, q, self.rho_test, R_axis)
         keys = np.round(dR, 4)
-        d2, logdet = np.empty(n), np.empty(n)
+        d2, logdet = np.empty(dR.size), np.empty(dR.size)
         for key in np.unique(keys):
             rows = keys == key
             _, mean, Lt, logdet[rows] = self._gp(key)
             z = solve_triangular(Lt, (iota[rows] - mean).T, lower=True, check_finite=False)
             d2[rows] = np.sum(z ** 2, axis=0)
         return dict(logL=-0.5 * (d2 + logdet), d2=d2, m=self.rho_test.size, axis_dR=dR)
+
+    def points_loglike(self, psi_N, q, R_axis=None):
+        """``dict(logL, chi2, nu, axis_dR)`` of the candidates against the q points alone.
+
+        No GP: each row's iota at the points' rho_tor against ``iota +- sigma``
+        (axis error as in :meth:`loglike`); ``chi2`` over the ``nu`` points and
+        ``logL = -(chi2 + sum log(2 pi sigma^2)) / 2``.  A cross-check of
+        :meth:`loglike`, free of the GP prior.
+        """
+        iota, dR = self._candidates(psi_N, q, self.rho, R_axis)
+        s = np.hypot(self.sigma_iota, self.diota_daxis * dR[:, None])
+        chi2 = np.sum(((iota - self.iota) / s) ** 2, axis=1)
+        return dict(logL=-0.5 * (chi2 + np.sum(np.log(2 * np.pi * s ** 2), axis=1)), chi2=chi2,
+                    nu=self.rho.size, axis_dR=dR)
+
+    def _candidates(self, psi_N, q, rho, R_axis):
+        """Rows of *q*: iota at *rho* (each placed on rho_tor by its own q; NaN for a
+        non-finite row) and the axis error."""
+        q = np.atleast_2d(np.asarray(q, dtype=float))
+        n = q.shape[0]
+        psi = np.broadcast_to(np.atleast_2d(np.asarray(psi_N, dtype=float)), q.shape)
+        iota = np.full((n, rho.size), np.nan)
+        for i, (x, y) in enumerate(zip(psi, q)):
+            if np.all(np.isfinite(y)):
+                r, qq = _q_on_rho(x, y)
+                iota[i] = np.interp(rho, r, 1.0 / qq)
+        R_c = [None] * n if R_axis is None else np.broadcast_to(np.asarray(R_axis, float), (n,))
+        return iota, np.array([self.axis_error(r) for r in R_c])
 
     def save(self, path):
         np.savez(path, rho=self.rho, iota=self.iota, sigma_iota=self.sigma_iota,

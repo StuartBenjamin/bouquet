@@ -158,6 +158,17 @@ def test_gp_axis_error_per_candidate():
     np.testing.assert_allclose(with_nan.loglike(PSI, rows, R_axis=[1.69, np.nan])["axis_dR"], 0.01)
 
 
+def test_points_loglike():
+    p = _points()
+    g = np.full(p["rho"].size, 0.5)
+    qc = QCheck(p["rho"], p["iota"], p["sigma_iota"], 0.1, 0.4, g, R_axis=1.70, R_axis_alt=[1.72])
+    res = qc.points_loglike(PSI, [_q(PSI), 1.05 * _q(PSI)])
+    s = np.hypot(0.01, 0.5 * 0.02)                           # the axis error is in sigma
+    assert res["chi2"][0] < 1e-3 and res["nu"] == p["rho"].size
+    np.testing.assert_allclose(res["chi2"][1], np.sum((p["iota"] * (1 / 1.05 - 1) / s) ** 2), rtol=1e-3)
+    np.testing.assert_allclose(res["logL"][1] - res["logL"][0], -0.5 * (res["chi2"][1] - res["chi2"][0]))
+
+
 def test_gp_batch_and_save(tmp_path):
     qc = fit_q_check(_points())
     rows = np.array([_q(PSI) * f for f in (0.97, 1.0, 1.02)])
