@@ -21,7 +21,8 @@ def _checks():
         fsa = hf["scan/0/0/eq_fsa"]
         psi, q = fsa["psi_N"][()], fsa["q"][()]
     rho = np.sqrt(np.cumsum(q) / np.sum(q))[::40]           # draw 0's own iota on rough rho_tor
-    qc = QCheck(rho, 1 / q[::40], np.full(rho.size, 0.02), amp=0.1, ell=0.4)
+    qc = QCheck(rho, 1 / q[::40], np.full(rho.size, 0.02), amp=0.1, ell=0.4,
+                diota_daxis=np.full(rho.size, 1.0), R_axis=1.70)
     cc = CoilCheck(names, cur, 0.01 * np.abs(cur) + 100.0)
     return qc, cc, names, (psi, q)
 
@@ -32,9 +33,11 @@ def test_rows_match_direct_calls():
     with h5py.File(GOLDEN, "r") as hf:
         draws = sorted(int(k) for k in hf["scan/0"] if k.isdigit())
         cur0 = hf["scan/0/0/coil_currents"][()]
+        R0 = float(bytes(hf["scan/0/0/eqdsk"][()]).split(b"\n")[2][:16])
     assert [r["draw"] for r in rows] == [-1] + draws and rows[0]["is_baseline"]
     r0 = next(r for r in rows if r["draw"] == 0)
-    assert r0["logL_q"] == pytest.approx(qc.loglike(psi, q)["logL"][0])
+    assert r0["axis_dR"] == pytest.approx(abs(R0 - 1.70)) and r0["axis_dR"] > 0
+    assert r0["logL_q"] == pytest.approx(qc.loglike(psi, q, R_axis=R0)["logL"][0])
     ref = cc.loglike(names, cur0, {n: 500.0 for n in names})
     assert r0["chi2_coil"] == pytest.approx(ref["chi2"][0]) and r0["nu_coil"] == ref["nu"]
     assert np.isfinite(rows[0]["logL_q"]) and rows[0]["chi2_coil"] == pytest.approx(0.0)

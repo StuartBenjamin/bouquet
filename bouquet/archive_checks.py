@@ -15,9 +15,14 @@ from .utils import _read_coil_names, discover_scan_keys
 
 #: Columns of a row; a check that was not asked for, or could not run, is NaN.
 ROW_KEYS = ("archive", "scan", "draw", "is_baseline", "selected", "n_coil_reg",
-            "logL_q", "d2_q", "m_q", "chi2_mse", "logL_mse", "nu_mse",
+            "logL_q", "d2_q", "m_q", "axis_dR", "chi2_mse", "logL_mse", "nu_mse",
             "logL_coil", "chi2_coil", "nu_coil", "max_abs_z", "worst_coil",
             "coil_units_suspect", "status")
+
+
+def _eqdsk_R_axis(raw):
+    """RMAXIS [m] from g-file bytes (first field of the third line)."""
+    return float(raw.split(b"\n")[2][:16])
 
 
 def _load(obj, cls):
@@ -31,7 +36,8 @@ def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=Non
 
     * *q_check* (:class:`~bouquet.q_check.QCheck` or its npz): ``logL_q``,
       ``d2_q``, ``m_q`` of the draw's ``eq_fsa`` q, or of its eqdsk's q when
-      it has no ``eq_fsa`` (the baseline).
+      it has no ``eq_fsa`` (the baseline), with the axis error ``axis_dR``
+      set by the equilibrium's own magnetic axis (its eqdsk).
     * *mse* ``(block, (phi_N, E_r, E_r_err))``: the direct check of each
       equilibrium's own eqdsk, with E_r mapped onto it (``chi2_mse``,
       ``logL_mse``, ``nu_mse``).
@@ -81,8 +87,11 @@ def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=Non
                     if psi is None:
                         row["status"].append("no_q")
                     else:
-                        r = qc.loglike(psi, q)
-                        row.update(logL_q=r["logL"][0], d2_q=r["d2"][0], m_q=r["m"])
+                        R_ax = (eq.R_mag if eq is not None else
+                                _eqdsk_R_axis(bytes(g["eqdsk"][()])) if "eqdsk" in g else None)
+                        r = qc.loglike(psi, q, R_axis=R_ax)
+                        row.update(logL_q=r["logL"][0], d2_q=r["d2"][0], m_q=r["m"],
+                                   axis_dR=r["axis_dR"][0])
                 if mse is not None and eq is None:
                     row["status"].append("no_eqdsk")
                 elif mse is not None:
