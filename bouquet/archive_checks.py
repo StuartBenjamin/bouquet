@@ -15,7 +15,8 @@ from .utils import _read_coil_names, discover_scan_keys, list_equilibrium_indice
 
 #: Columns of a row; a check that was not asked for, or could not run, is NaN.
 ROW_KEYS = ("archive", "scan", "draw", "is_baseline", "selected", "n_coil_reg",
-            "logL_q", "d2_q", "m_q", "axis_dR", "chi2_mse", "logL_mse", "nu_mse",
+            "logL_q", "d2_q", "m_q", "axis_dR", "logL_qpts", "chi2_qpts", "nu_qpts",
+            "chi2_mse", "logL_mse", "nu_mse",
             "logL_coil", "chi2_coil", "nu_coil", "max_abs_z", "worst_coil",
             "coil_units_suspect", "status")
 
@@ -40,12 +41,14 @@ def _score_q(row, qc, g, eq):
     else:
         row["status"].append("no_q")
         return
+    R_axis = None if eq is None else eq.R_mag
     try:
-        r = qc.loglike(psi, q, R_axis=None if eq is None else eq.R_mag)
+        r, p = qc.loglike(psi, q, R_axis=R_axis), qc.points_loglike(psi, q, R_axis=R_axis)
     except ValueError as e:
         row["status"].append(f"q: {e}")
         return
-    row.update(logL_q=r["logL"][0], d2_q=r["d2"][0], m_q=r["m"], axis_dR=r["axis_dR"][0])
+    row.update(logL_q=r["logL"][0], d2_q=r["d2"][0], m_q=r["m"], axis_dR=r["axis_dR"][0],
+               logL_qpts=p["logL"][0], chi2_qpts=p["chi2"][0], nu_qpts=p["nu"])
 
 
 def _score_mse(row, mse, eq):
@@ -69,7 +72,8 @@ def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=Non
     * *q_check* (:class:`~bouquet.q_check.QCheck` or its npz): ``logL_q``,
       ``d2_q``, ``m_q`` of the draw's ``eq_fsa`` q, or of its eqdsk's q when
       it has no ``eq_fsa`` (the baseline), with the axis error ``axis_dR``
-      set by the equilibrium's own magnetic axis (its eqdsk).
+      set by the equilibrium's own magnetic axis (its eqdsk); ``logL_qpts``,
+      ``chi2_qpts``, ``nu_qpts`` against the q points alone.
     * *mse* ``(block, (phi_N, E_r, E_r_err))``: the direct check of each
       equilibrium's own eqdsk, with E_r mapped onto it (``chi2_mse``,
       ``logL_mse``, ``nu_mse``).

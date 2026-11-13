@@ -38,6 +38,7 @@ def test_rows_match_direct_calls():
     r0 = next(r for r in rows if r["draw"] == 0)
     assert r0["axis_dR"] == pytest.approx(abs(R0 - 1.70)) and r0["axis_dR"] > 0
     assert r0["logL_q"] == pytest.approx(qc.loglike(psi, q, R_axis=R0)["logL"][0])
+    assert r0["chi2_qpts"] == pytest.approx(qc.points_loglike(psi, q, R_axis=R0)["chi2"][0])
     ref = cc.loglike(names, cur0, {n: 500.0 for n in names})
     assert r0["chi2_coil"] == pytest.approx(ref["chi2"][0]) and r0["nu_coil"] == ref["nu"]
     assert np.isfinite(rows[0]["logL_q"]) and rows[0]["chi2_coil"] == pytest.approx(0.0)
