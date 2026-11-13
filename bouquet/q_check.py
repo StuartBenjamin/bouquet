@@ -9,10 +9,17 @@ from scipy.linalg import solve_triangular
 from scipy.optimize import minimize
 
 from .coords import phi_n_from_q
-from .mse import (MSE_MIN_CHORDS, MSEDataUnusable, mse_chords,
+from .mse import (MSE_MIN_CHORDS, MSEDataUnusable, mse_chi2, mse_chords,
                   mse_equilibrium_orientation, mse_er_terms, mse_exclude,
                   mse_orientation, mse_tan_gamma)
 from .sampling import _CHOL_JITTER
+
+
+def _field(eq, ch):
+    """``(B, s_p, s_t)``: *eq*'s field at the chords of *ch*, and the block's stated orientation."""
+    B = eq.field_at(ch["R"], ch["Z"])
+    return (B, *mse_orientation(ch, mse_equilibrium_orientation(
+        B, ch["R"], ch["Z"], (eq.R_mag, eq.Z_mag))))
 
 
 def _outboard_R(eq, psi_N):
@@ -58,9 +65,7 @@ def mse_er_at_chords(eq, block, phi_N, E_r, E_r_err=None):
     out = dict(block, Er=at_chords(E_r))
     if E_r_err is not None:
         ch = mse_chords(out, min_chords=1)
-        B = eq.field_at(ch["R"], ch["Z"])
-        sp, st = mse_orientation(ch, mse_equilibrium_orientation(
-            B, ch["R"], ch["Z"], (eq.R_mag, eq.Z_mag)))
+        B, sp, st = _field(eq, ch)
         dtg = (mse_tan_gamma(B, dict(ch, Er=np.ones(ch["n_active"])), sp, st)
                - mse_tan_gamma(B, dict(ch, Er=np.zeros(ch["n_active"])), sp, st))
         i = ch["index"]
@@ -102,9 +107,7 @@ def q_points(eq, block, axis_dR=0.0, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
                               f"reference LCFS; at least {ch['min_chords']} "
                               "are required")
     R, Z, t = ch["R"], ch["Z"], ch["tgamma"]
-    B = eq.field_at(R, Z)
-    sp, st = mse_orientation(ch, mse_equilibrium_orientation(
-        B, R, Z, (eq.R_mag, eq.Z_mag)))
+    B, sp, st = _field(eq, ch)
     e = ch["A5"] * ch["Er"]
 
     def lam(B):
@@ -129,6 +132,22 @@ def q_points(eq, block, axis_dR=0.0, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
                 lam=lm, sigma_lam=s_lm, R=R, Z=Z, index=ch["index"],
                 excluded=ch["excluded"], orientation=(sp, st),
                 er_terms=mse_er_terms(ch))
+
+
+def mse_loglike(eq, block, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
+    """Pitch angles of *block* against *eq*'s own field: no mapping assumption.
+
+    bouquet's forward model on ``eq.field_at``, in the block's stated
+    orientation.  ``Er`` is used as given, so map it on *eq* itself
+    (:func:`mse_er_at_chords`).  Returns ``dict(chi2, logL, nu, z,
+    excluded)``, where ``logL = -(chi2 + sum log(2 pi sigma_eff^2)) / 2``
+    and ``nu`` is the number of chords used.
+    """
+    ch = mse_chords(block, min_chords=min_chords, sigma_sys=sigma_sys)
+    B, sp, st = _field(eq, ch)
+    chi2, z = mse_chi2(mse_tan_gamma(B, ch, sp, st), ch)
+    return dict(chi2=chi2, logL=-0.5 * (chi2 + np.log(2 * np.pi * ch["sigma_eff"] ** 2).sum()),
+                nu=ch["n_active"], z=z, excluded=ch["excluded"])
 
 
 def _chol(K):

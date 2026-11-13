@@ -7,7 +7,7 @@ from bouquet.io.geqdsk import GEQDSKEquilibrium, _read_geqdsk, read_geqdsk
 from bouquet.mse import (MSEDataUnusable, mse_chords,
                          mse_equilibrium_orientation, mse_orientation,
                          mse_tan_gamma)
-from bouquet.q_check import QCheck, fit_q_check, mse_er_at_chords, q_points
+from bouquet.q_check import QCheck, fit_q_check, mse_er_at_chords, mse_loglike, q_points
 from test_geqdsk import generate_solovev_gfile
 
 R0, A, KAPPA, K = 1.7, 0.5, 1.4, 6e3
@@ -65,27 +65,32 @@ def test_er_err_inflates_sigma_by_forward_model(solovev):
     assert out["sigma"][5] == 0.004 and np.all(blk["sigma"] == 0.004)
 
 
-@pytest.fixture
-def scaled(tmp_path):
-    """(reference, block): angles from the reference with psi scaled by 1.15."""
-    path = str(tmp_path / "g.geqdsk")
-    generate_solovev_gfile(path, R0=R0, a=A, kappa=KAPPA, NW=129, NH=129)
+def _scaled_eq(path, c):
+    """The g-file at *path* with psi scaled by *c* (B_pol x c, q / c, same surfaces)."""
     raw = _read_geqdsk(path)
     for k in ("PSIRZ", "SIMAG", "SIBRY"):
-        raw[k] = raw[k] * 1.15
-    raw["QPSI"] = raw["QPSI"] / 1.15
-    true = GEQDSKEquilibrium.from_raw(raw)
+        raw[k] = raw[k] * c
+    raw["QPSI"] = raw["QPSI"] / c
+    return GEQDSKEquilibrium.from_raw(raw)
+
+
+@pytest.fixture
+def scaled(tmp_path):
+    """(reference, true, block): angles from the reference with psi scaled by 1.15."""
+    path = str(tmp_path / "g.geqdsk")
+    generate_solovev_gfile(path, R0=R0, a=A, kappa=KAPPA, NW=129, NH=129)
+    true = _scaled_eq(path, 1.15)
     blk = _block()
     blk["Er"] = np.array([-3e4, -1e4, 1e4, 3e4, 1e3, 0.0])
     B = true.field_at(blk["R"], blk["Z"])
     ch = mse_chords(blk)
     sp, st = mse_orientation(ch, mse_equilibrium_orientation(B, blk["R"], blk["Z"], (R0, 0.0)))
     blk["tgamma"] = mse_tan_gamma(B, ch, sp, st)
-    return read_geqdsk(path), true, blk
+    return read_geqdsk(path), true, blk, path
 
 
 def test_q_points_recover_scaled_flux(scaled):
-    ref, true, blk = scaled
+    ref, true, blk, _ = scaled
     pts = q_points(ref, blk)
     np.testing.assert_allclose(pts["lam"], 1.15, rtol=1e-9)
     psi = true.psi_N_at(pts["R"], pts["Z"])
@@ -96,7 +101,7 @@ def test_q_points_recover_scaled_flux(scaled):
 
 
 def test_q_points_orientation_is_stated(scaled):
-    ref, _, blk = scaled
+    ref, _, blk, _ = scaled
     flipped = q_points(ref.flip_Bt_Ip(copy=True), blk)
     np.testing.assert_allclose(flipped["lam"], q_points(ref, blk)["lam"], rtol=1e-12)
     with pytest.raises(MSEDataUnusable, match="median lam"):
@@ -104,7 +109,7 @@ def test_q_points_orientation_is_stated(scaled):
 
 
 def test_q_points_sigma(scaled):
-    ref, _, blk = scaled
+    ref, _, blk, _ = scaled
     pts = q_points(ref, blk)
     d = 1e-6
     fd = (q_points(ref, dict(blk, tgamma=blk["tgamma"] + d))["lam"]
@@ -147,3 +152,13 @@ def test_gp_batch_and_save(tmp_path):
     qc.save(tmp_path / "qc.npz")
     np.testing.assert_array_equal(QCheck.load(tmp_path / "qc.npz").loglike(PSI, rows)["logL"],
                                   res["logL"])
+
+
+def test_direct_and_gp_agree(scaled):
+    ref, true, blk, path = scaled
+    assert mse_loglike(true, blk)["chi2"] < 1e-12
+    cands = [_scaled_eq(path, c) for c in (1.10, 1.15, 1.20)]
+    chi2 = [mse_loglike(eq, blk)["chi2"] for eq in cands]
+    qc = fit_q_check(q_points(ref, blk))
+    logL = qc.loglike(np.linspace(0, 1, ref.qpsi.size), [eq.qpsi for eq in cands])["logL"]
+    assert np.argmin(chi2) == 1 and np.argmax(logL) == 1
