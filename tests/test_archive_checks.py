@@ -29,7 +29,8 @@ def _checks():
 
 def test_rows_match_direct_calls():
     qc, cc, names, (psi, q) = _checks()
-    rows = check_archive(GOLDEN, q_check=qc, coil_check=cc, sigma_model={n: 500.0 for n in names})
+    rows = check_archive(GOLDEN, q_check=qc, coil_check=cc, sigma_model={n: 500.0 for n in names},
+                         gp=True)
     with h5py.File(GOLDEN, "r") as hf:
         draws = sorted(int(k) for k in hf["scan/0"] if k.isdigit())
         cur0 = hf["scan/0/0/coil_currents"][()]
@@ -43,6 +44,8 @@ def test_rows_match_direct_calls():
     assert r0["chi2_coil"] == pytest.approx(ref["chi2"][0]) and r0["nu_coil"] == ref["nu"]
     assert np.isfinite(rows[0]["logL_gp"]) and rows[0]["chi2_coil"] == pytest.approx(0.0)
     assert all(r["status"] == "ok" for r in rows)
+    plain = check_archive(GOLDEN, q_check=qc)                 # the GP check is optional
+    assert np.isnan(plain[1]["logL_gp"]) and plain[1]["chi2_points"] == rows[1]["chi2_points"]
 
 
 def test_parallel_and_status(tmp_path):
@@ -50,7 +53,7 @@ def test_parallel_and_status(tmp_path):
     qc.save(tmp_path / "qc.npz")
     cc.save(tmp_path / "cc.npz")
     job = dict(path=GOLDEN, q_check=str(tmp_path / "qc.npz"), coil_check=str(tmp_path / "cc.npz"),
-               sigma_model=0)
+               sigma_model=0, gp=True)
     jobs = [job, dict(job, path=str(tmp_path / "missing.h5"))]
     one = check_archives(jobs, n_workers=1)
     two = check_archives(jobs, n_workers=2)

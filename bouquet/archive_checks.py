@@ -32,9 +32,9 @@ def _eqdsk(g):
             GEQDSKEquilibrium.from_bytes(bytes(g[name][()]), cocos=ARCHIVE_EQDSK_COCOS))
 
 
-def _score_q(row, qc, g, eq):
-    """GP and points-alone checks of the group's eq_fsa q (else its eqdsk's), axis from
-    its eqdsk."""
+def _score_q(row, qc, g, eq, gp):
+    """Points-alone (and with *gp* the GP) check of the group's eq_fsa q (else its
+    eqdsk's), axis from its eqdsk."""
     if EQ_FSA_GROUP in g:
         psi, q = g[EQ_FSA_GROUP]["psi_N"][()], g[EQ_FSA_GROUP]["q"][()]
     elif eq is not None:
@@ -44,12 +44,14 @@ def _score_q(row, qc, g, eq):
         return
     R_axis = None if eq is None else eq.R_mag
     try:
-        r, p = qc.gp_loglike(psi, q, R_axis=R_axis), qc.points_loglike(psi, q, R_axis=R_axis)
+        p = qc.points_loglike(psi, q, R_axis=R_axis)
+        row.update(logL_points=p["logL"][0], chi2_points=p["chi2"][0], nu_points=p["nu"],
+                   axis_error=p["axis_error"][0])
+        if gp:
+            r = qc.gp_loglike(psi, q, R_axis=R_axis)
+            row.update(logL_gp=r["logL"][0], d2_gp=r["d2"][0], m_gp=r["m"])
     except ValueError as e:
         row["status"].append(f"q: {e}")
-        return
-    row.update(logL_gp=r["logL"][0], d2_gp=r["d2"][0], m_gp=r["m"], axis_error=r["axis_error"][0],
-               logL_points=p["logL"][0], chi2_points=p["chi2"][0], nu_points=p["nu"])
 
 
 def _score_direct(row, mse, eq):
@@ -66,15 +68,16 @@ def _score_direct(row, mse, eq):
 
 
 def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=None,
-                  scan_key=None, exclude_coils=DEFAULT_EXCLUDE, device=None):
+                  scan_key=None, exclude_coils=DEFAULT_EXCLUDE, device=None, gp=False):
     """Rows (dicts with :data:`ROW_KEYS`) scoring the baseline and every draw of
     the archive at *path* (all scans, or *scan_key*).
 
-    * *q_check* (:class:`~bouquet.q_check.QCheck` or its npz): ``logL_gp``,
-      ``d2_gp``, ``m_gp`` of the draw's ``eq_fsa`` q, or of its eqdsk's q when
-      it has no ``eq_fsa`` (the baseline), with the axis error ``axis_error``
-      set by the equilibrium's own magnetic axis (its eqdsk); ``logL_points``,
-      ``chi2_points``, ``nu_points`` against the q points alone.
+    * *q_check* (:class:`~bouquet.q_check.QCheck` or its npz): ``logL_points``,
+      ``chi2_points``, ``nu_points`` of the draw's ``eq_fsa`` q, or of its
+      eqdsk's q when it has no ``eq_fsa`` (the baseline), against the q points,
+      with the axis error ``axis_error`` set by the equilibrium's own magnetic
+      axis (its eqdsk); with *gp* also ``logL_gp``, ``d2_gp``, ``m_gp`` against
+      the GP fit to the points.
     * *mse* ``(block, profile)``, *profile* being the arguments of
       :func:`~bouquet.q_check.mse_er_at_chords` after the block (``phi_N,
       E_r[, E_r_err, E_tor, B_theta]``): the direct check of each
@@ -114,7 +117,7 @@ def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=Non
                 rows.append(row)
                 eq = _eqdsk(g) if qc is not None or mse is not None else None
                 if qc is not None:
-                    _score_q(row, qc, g, eq)
+                    _score_q(row, qc, g, eq, gp)
                 if mse is not None:
                     _score_direct(row, mse, eq)
                 if cc is not None:
