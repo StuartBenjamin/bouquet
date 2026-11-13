@@ -10,8 +10,8 @@ from .coil_check import DEFAULT_EXCLUDE, CoilCheck
 from .io.geqdsk import GEQDSKEquilibrium
 from .io.imas import ARCHIVE_EQDSK_COCOS
 from .q_check import QCheck, mse_er_at_chords, mse_loglike
-from .schema import EQ_FSA_GROUP
-from .utils import _read_coil_names, discover_scan_keys
+from .schema import COIL_VALUES_DS, EQ_FSA_GROUP, find_bytes_dataset
+from .utils import _read_coil_names, discover_scan_keys, list_equilibrium_indices
 
 #: Columns of a row; a check that was not asked for, or could not run, is NaN.
 ROW_KEYS = ("archive", "scan", "draw", "is_baseline", "selected", "n_coil_reg",
@@ -20,13 +20,45 @@ ROW_KEYS = ("archive", "scan", "draw", "is_baseline", "selected", "n_coil_reg",
             "coil_units_suspect", "status")
 
 
-def _eqdsk_R_axis(raw):
-    """RMAXIS [m] from g-file bytes (first field of the third line)."""
-    return float(raw.split(b"\n")[2][:16])
-
-
 def _load(obj, cls):
     return cls.load(obj) if isinstance(obj, (str, os.PathLike)) else obj
+
+
+def _eqdsk(g):
+    """The group's archived eqdsk as an equilibrium, or None."""
+    name = find_bytes_dataset(g)
+    return (None if name is None else
+            GEQDSKEquilibrium.from_bytes(bytes(g[name][()]), cocos=ARCHIVE_EQDSK_COCOS))
+
+
+def _score_q(row, qc, g, eq):
+    """GP q check of the group's eq_fsa q (else its eqdsk's), axis from its eqdsk."""
+    if EQ_FSA_GROUP in g:
+        psi, q = g[EQ_FSA_GROUP]["psi_N"][()], g[EQ_FSA_GROUP]["q"][()]
+    elif eq is not None:
+        psi, q = np.linspace(0.0, 1.0, eq.qpsi.size), eq.qpsi
+    else:
+        row["status"].append("no_q")
+        return
+    try:
+        r = qc.loglike(psi, q, R_axis=None if eq is None else eq.R_mag)
+    except ValueError as e:
+        row["status"].append(f"q: {e}")
+        return
+    row.update(logL_q=r["logL"][0], d2_q=r["d2"][0], m_q=r["m"], axis_dR=r["axis_dR"][0])
+
+
+def _score_mse(row, mse, eq):
+    """Direct MSE check of the equilibrium, E_r mapped onto it."""
+    if eq is None:
+        row["status"].append("no_eqdsk")
+        return
+    try:
+        r = mse_loglike(eq, mse_er_at_chords(eq, mse[0], *mse[1]))
+    except (ValueError, RuntimeError) as e:
+        row["status"].append(f"mse: {e}")
+        return
+    row.update(chi2_mse=r["chi2"], logL_mse=r["logL"], nu_mse=r["nu"])
 
 
 def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=None,
@@ -64,8 +96,8 @@ def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=Non
         n_reg = len((cfg.get("solver") or {}).get("coil_reg") or [])
         for key in keys:
             grp = hf[f"scan/{key}"] if key is not None else hf
-            members = (["_baseline"] if "_baseline" in grp else []) + sorted(
-                (k for k in grp if k.lstrip("-").isdigit()), key=int)
+            members = (["_baseline"] if "_baseline" in grp else []) + [
+                str(i) for i in list_equilibrium_indices(path, key)]
             for k in members:
                 g = grp[k]
                 row = dict(dict.fromkeys(ROW_KEYS, np.nan), archive=str(path), scan=key,
@@ -73,37 +105,15 @@ def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=Non
                            is_baseline=k == "_baseline", selected=g.attrs.get("selected"),
                            n_coil_reg=n_reg, status=[])
                 rows.append(row)
-                eq = None
-                if mse is not None or (qc is not None and EQ_FSA_GROUP not in g):
-                    eq = GEQDSKEquilibrium.from_bytes(
-                        bytes(g["eqdsk"][()]), cocos=ARCHIVE_EQDSK_COCOS) if "eqdsk" in g else None
+                eq = _eqdsk(g) if qc is not None or mse is not None else None
                 if qc is not None:
-                    if EQ_FSA_GROUP in g:
-                        psi, q = g[EQ_FSA_GROUP]["psi_N"][()], g[EQ_FSA_GROUP]["q"][()]
-                    elif eq is not None:
-                        psi, q = np.linspace(0.0, 1.0, eq.qpsi.size), eq.qpsi
-                    else:
-                        psi = None
-                    if psi is None:
-                        row["status"].append("no_q")
-                    else:
-                        R_ax = (eq.R_mag if eq is not None else
-                                _eqdsk_R_axis(bytes(g["eqdsk"][()])) if "eqdsk" in g else None)
-                        r = qc.loglike(psi, q, R_axis=R_ax)
-                        row.update(logL_q=r["logL"][0], d2_q=r["d2"][0], m_q=r["m"],
-                                   axis_dR=r["axis_dR"][0])
-                if mse is not None and eq is None:
-                    row["status"].append("no_eqdsk")
-                elif mse is not None:
-                    try:
-                        r = mse_loglike(eq, mse_er_at_chords(eq, mse[0], *mse[1]))
-                        row.update(chi2_mse=r["chi2"], logL_mse=r["logL"], nu_mse=r["nu"])
-                    except (ValueError, RuntimeError) as e:
-                        row["status"].append(f"mse: {e}")
+                    _score_q(row, qc, g, eq)
+                if mse is not None:
+                    _score_mse(row, mse, eq)
                 if cc is not None:
                     names = _read_coil_names(g)
-                    if names and "coil_currents" in g:
-                        coil_rows.append((row, tuple(names), g["coil_currents"][()]))
+                    if names and COIL_VALUES_DS in g:
+                        coil_rows.append((row, tuple(names), g[COIL_VALUES_DS][()]))
                     else:
                         row["status"].append("no_coil_data")
     for names in {n for _, n, _ in coil_rows}:

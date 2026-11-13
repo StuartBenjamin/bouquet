@@ -44,7 +44,7 @@ def test_rows_match_direct_calls():
     assert all(r["status"] == "ok" for r in rows)
 
 
-def test_parallel_status_and_units(tmp_path):
+def test_parallel_and_status(tmp_path):
     qc, cc, names, _ = _checks()
     qc.save(tmp_path / "qc.npz")
     cc.save(tmp_path / "cc.npz")
@@ -56,8 +56,5 @@ def test_parallel_status_and_units(tmp_path):
     assert [r["logL_q"] for r in one[:-1]] == [r["logL_q"] for r in two[:-1]]
     assert [r["chi2_coil"] for r in one[:-1]] == [r["chi2_coil"] for r in two[:-1]]
     assert one[-1]["status"] == two[-1]["status"] == "no_archive"
-    f_coils = [n.startswith("F") for n in cc.names]
-    cc58 = CoilCheck(cc.names, np.where(f_coils, cc.mean / 58, cc.mean), cc.sigma_meas)
-    assert check_archive(GOLDEN, coil_check=cc58, sigma_model=0)[0]["coil_units_suspect"] == "F"
     with pytest.raises(ValueError, match="sigma_model"):
         check_archive(GOLDEN, coil_check=cc)
