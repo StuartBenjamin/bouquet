@@ -364,6 +364,16 @@ class TestConvenience:
 # Tests: Point evaluation (psi_N_at, field_at)
 # ---------------------------------------------------------------------------
 
+class TestFromBytes:
+    def test_leaves_no_temporary_file(self, gfile_path, tmp_path, monkeypatch):
+        import tempfile
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "t"))
+        os.makedirs(tempfile.tempdir)
+        with open(gfile_path[0], "rb") as f:
+            eq = GEQDSKEquilibrium.from_bytes(f.read())
+        assert eq.qpsi.size and os.listdir(tempfile.tempdir) == []
+
+
 class TestPointEvaluation:
     R = np.array([1.35, 1.52, 1.83, 2.04])
     Z = np.array([0.21, -0.07, 0.33, -0.18])

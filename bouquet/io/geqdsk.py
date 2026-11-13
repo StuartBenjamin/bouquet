@@ -8,6 +8,7 @@ Dependencies: numpy, scipy, contourpy (ships with matplotlib).
 """
 
 import io
+import os
 import tempfile
 import warnings
 
@@ -729,8 +730,11 @@ class GEQDSKEquilibrium:
                                          delete=False) as tmp:
             tmp.write(raw_bytes)
             tmp_path = tmp.name
-        return cls(tmp_path, cocos=cocos, nlevels=nlevels, resample=resample,
-                   extrapolate_edge=extrapolate_edge)
+        try:
+            return cls(tmp_path, cocos=cocos, nlevels=nlevels, resample=resample,
+                       extrapolate_edge=extrapolate_edge)
+        finally:
+            os.remove(tmp_path)
 
     @classmethod
     def from_raw(cls, raw_dict, cocos=1, nlevels=None, resample="theta",
