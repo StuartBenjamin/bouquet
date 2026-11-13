@@ -74,10 +74,10 @@ def q_points(eq, block, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
     ``b = A1 B_Z``, ``c = A3 B_R + A4 B_Z`` and ``e = A5 E_R``,
 
     on *eq*'s field in the block's stated orientation ``(s_p, s_t)``;
-    ``sigma_lam = |d lam / d t| sigma_eff``.  ``diota_daxis`` [1/m] is
-    ``|d iota / d R|`` for the reference field moved along R: the error per
-    metre of error in the reference axis position, dominant near the axis
-    (:class:`QCheck` adds it for a stated axis error).
+    ``sigma_lam = |d lam / d t| sigma_eff``.  ``diota_daxis = |d lam / d R| /
+    |q_ref|`` [1/m], with the reference field moved along R and q_ref held: the
+    iota error per metre of error in the reference axis position, dominant near
+    the axis (:class:`QCheck` adds it for an axis error).
 
     Chords at psi_N >= 1 are excluded.  Raises :class:`MSEDataUnusable`
     when fewer than *min_chords* remain, or when the median ``lam`` is
@@ -181,10 +181,11 @@ def _q_on_rho(psi_N, q):
 
 
 def _axis_error(R_ref, R_alt, R_cand=None):
-    """Largest |R - R_ref| over *R_alt* and *R_cand*; 0 when nothing is known."""
+    """Largest |R - R_ref| over the finite *R_alt* and *R_cand*; 0 when nothing is known."""
     other = np.atleast_1d(np.asarray(R_alt, dtype=float))
     if R_cand is not None:
         other = np.r_[other, R_cand]
+    other = other[np.isfinite(other)]
     if not (np.isfinite(R_ref) and other.size):
         return 0.0
     return float(np.max(np.abs(other - R_ref)))

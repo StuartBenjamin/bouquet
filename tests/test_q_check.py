@@ -154,6 +154,8 @@ def test_gp_axis_error_per_candidate():
         plain = QCheck(qc.rho, qc.iota, np.hypot(qc.sigma_iota, g * dR), qc.amp, qc.ell)
         np.testing.assert_allclose(res["logL"][i], plain.loglike(PSI, rows[i])["logL"][0], rtol=1e-12)
     assert qc.loglike(PSI, rows[0])["axis_dR"][0] == pytest.approx(0.01)
+    with_nan = fit_q_check(dict(p, diota_daxis=g, R_axis=1.70), R_axis_alt=[1.71, np.nan])
+    np.testing.assert_allclose(with_nan.loglike(PSI, rows, R_axis=[1.69, np.nan])["axis_dR"], 0.01)
 
 
 def test_gp_batch_and_save(tmp_path):
