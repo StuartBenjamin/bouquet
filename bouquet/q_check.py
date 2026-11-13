@@ -182,6 +182,16 @@ def _neg_log_ml(th, x, y, s):
             + 0.5 * np.linalg.slogdet(A)[1])
 
 
+def _q_on_rho(psi_N, q):
+    """``(rho_tor, |q|)`` of q(psi_N) inside the LCFS, rho_tor from that q (q held at the
+    innermost node down to the axis)."""
+    x, y = np.asarray(psi_N, dtype=float), np.abs(np.asarray(q, dtype=float))
+    if x[0] > 0:
+        x, y = np.r_[0.0, x], np.r_[y[0], y]
+    inside, phi = phi_n_from_q(x, y)
+    return np.sqrt(phi), y[inside]
+
+
 def _axis_error(R_ref, R_alt, R_cand=None):
     """Largest |R - R_ref| over *R_alt* and *R_cand*; 0 when nothing is known."""
     other = np.atleast_1d(np.asarray(R_alt, dtype=float))
@@ -226,7 +236,7 @@ class QCheck:
 
     def _gp(self, dR):
         """GP factor, posterior at ``rho_test`` (mean, Cholesky) and log|2 pi Sigma| for *dR*."""
-        key = round(float(dR), 4)
+        key = round(float(dR), 4)   # one posterior per 0.1 mm of axis error
         if key not in self._cache:
             f = _gp_factor(self.rho, self.iota, np.hypot(self.sigma_iota, self.diota_daxis * key),
                            self.amp, self.ell)
@@ -258,26 +268,24 @@ class QCheck:
         of freedom for a draw from it) and ``logL = -(d2 + log|2 pi Sigma|) /
         2``.  A row with non-finite q gets NaN.
         """
-        q = np.abs(np.atleast_2d(np.asarray(q, dtype=float)))
+        q = np.atleast_2d(np.asarray(q, dtype=float))
+        n = q.shape[0]
         psi = np.broadcast_to(np.atleast_2d(np.asarray(psi_N, dtype=float)), q.shape)
-        iota = np.full((q.shape[0], self.rho_test.size), np.nan)
+        iota = np.full((n, self.rho_test.size), np.nan)
         for i, (x, y) in enumerate(zip(psi, q)):
             if np.all(np.isfinite(y)):
-                if x[0] > 0:   # held at the innermost node down to the axis
-                    x, y = np.r_[0.0, x], np.r_[y[0], y]
-                inside, phi = phi_n_from_q(x, y)
-                iota[i] = np.interp(self.rho_test, np.sqrt(phi), 1.0 / y[inside])
-        dR = np.array([self.axis_error(r) for r in
-                       (np.broadcast_to(np.asarray(R_axis, dtype=float), q.shape[:1])
-                        if R_axis is not None else [None] * q.shape[0])])
-        d2, logL = np.empty(q.shape[0]), np.empty(q.shape[0])
-        for key in np.unique(np.round(dR, 4)):
-            rows = np.round(dR, 4) == key
-            _, mean, Lt, logdet = self._gp(key)
+                rho, qq = _q_on_rho(x, y)
+                iota[i] = np.interp(self.rho_test, rho, 1.0 / qq)
+        R_c = [None] * n if R_axis is None else np.broadcast_to(np.asarray(R_axis, float), (n,))
+        dR = np.array([self.axis_error(r) for r in R_c])
+        keys = np.round(dR, 4)
+        d2, logdet = np.empty(n), np.empty(n)
+        for key in np.unique(keys):
+            rows = keys == key
+            _, mean, Lt, logdet[rows] = self._gp(key)
             z = solve_triangular(Lt, (iota[rows] - mean).T, lower=True, check_finite=False)
             d2[rows] = np.sum(z ** 2, axis=0)
-            logL[rows] = -0.5 * (d2[rows] + logdet)
-        return dict(logL=logL, d2=d2, m=self.rho_test.size, axis_dR=dR)
+        return dict(logL=-0.5 * (d2 + logdet), d2=d2, m=self.rho_test.size, axis_dR=dR)
 
     def save(self, path):
         np.savez(path, rho=self.rho, iota=self.iota, sigma_iota=self.sigma_iota,
@@ -318,3 +326,33 @@ def fit_q_check(points, R_axis_alt=()):
     best = min((minimize(_neg_log_ml, th, args=(x, y, se), method="L-BFGS-B", bounds=bounds)
                 for th in starts), key=lambda r: r.fun)
     return QCheck(x, y, s, *np.exp(best.x), g, R_axis, R_axis_alt)
+
+
+def plot_q_points(points, qc=None, profiles=(), ax=None):
+    """q of the MSE points (+-1 sigma) on rho_tor, with *qc*'s posterior band and *profiles*.
+
+    *points* as from :func:`q_points`; with *qc* the error bars include its axis error for a
+    candidate of unknown axis.  *profiles*: ``(label, psi_N, q)`` each, placed on rho_tor by
+    its own q.  Returns the axes.
+    """
+    import matplotlib.pyplot as plt
+
+    ax = plt.subplots(figsize=(5.0, 3.5))[1] if ax is None else ax
+    iota = np.asarray(points["iota"], dtype=float)
+    dR = 0.0 if qc is None else qc.axis_error()
+    s = np.hypot(points["sigma_iota"], np.asarray(points.get("diota_daxis", 0.0)) * dR)
+    ax.errorbar(points["rho"], 1.0 / iota, yerr=s / iota ** 2, fmt="o", ms=3, capsize=2,
+                color="k", label="MSE", zorder=3)
+    if qc is not None:
+        rho = np.linspace(qc.rho_test[0], qc.rho_test[-1], 100)
+        mean, cov = qc.predict(rho)
+        sd = np.sqrt(np.diag(cov))
+        ax.fill_between(rho, 1.0 / (mean + sd), 1.0 / np.maximum(mean - sd, 1e-3), alpha=0.3,
+                        label=r"GP $\pm1\sigma$")
+    for label, psi, q in profiles:
+        ax.plot(*_q_on_rho(psi, q), label=label)
+    known = s / iota < 0.5   # q known to within half its value
+    ax.set(xlabel=r"$\rho_{tor} = \sqrt{\Phi_N}$", ylabel="q", xlim=(0.0, 1.0),
+           ylim=(0.0, 1.2 * np.max(1.0 / iota[known], initial=1.0)))
+    ax.legend(fontsize="small")
+    return ax

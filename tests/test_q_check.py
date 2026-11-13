@@ -7,7 +7,8 @@ from bouquet.io.geqdsk import GEQDSKEquilibrium, _read_geqdsk, read_geqdsk
 from bouquet.mse import (MSEDataUnusable, mse_chords,
                          mse_equilibrium_orientation, mse_orientation,
                          mse_tan_gamma)
-from bouquet.q_check import QCheck, fit_q_check, mse_er_at_chords, mse_loglike, q_points
+from bouquet.q_check import (QCheck, fit_q_check, mse_er_at_chords, mse_loglike, plot_q_points,
+                             q_points)
 from test_geqdsk import generate_solovev_gfile
 
 R0, A, KAPPA, K = 1.7, 0.5, 1.4, 6e3
@@ -176,3 +177,20 @@ def test_direct_and_gp_agree(scaled):
     qc = fit_q_check(q_points(ref, blk))
     logL = qc.loglike(np.linspace(0, 1, ref.qpsi.size), [eq.qpsi for eq in cands])["logL"]
     assert np.argmin(chi2) == 1 and np.argmax(logL) == 1
+
+
+def test_plot_q_points(scaled):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    ref, true, blk, _ = scaled
+    pts = q_points(ref, blk)
+    qc = fit_q_check(pts, R_axis_alt=[ref.R_mag + 0.01])
+    ax = plot_q_points(pts, qc, profiles=[("true", np.linspace(0, 1, true.qpsi.size), true.qpsi)])
+    bars = ax.containers[0]
+    np.testing.assert_allclose(bars.lines[0].get_ydata(), pts["q"])
+    half = [abs(seg[1, 1] - seg[0, 1]) / 2 for seg in bars.lines[2][0].get_segments()]
+    s = np.hypot(pts["sigma_iota"], pts["diota_daxis"] * 0.01)   # the axis error is in the bars
+    np.testing.assert_allclose(half, s / pts["iota"] ** 2, rtol=1e-6)
+    assert {"MSE", "true", r"GP $\pm1\sigma$"} <= set(ax.get_legend_handles_labels()[1])
+    plt.close(ax.figure)
