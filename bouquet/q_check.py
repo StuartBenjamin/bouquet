@@ -416,17 +416,17 @@ def plot_q_points(points, qc=None, profiles=(), ax=None):
     dR = 0.0 if qc is None else qc.axis_error()
     s = np.hypot(points["sigma_iota"], np.asarray(points.get("diota_dR_axis", 0.0)) * dR)
     ax.errorbar(points["rho"], 1.0 / iota, yerr=s / iota ** 2, fmt="o", ms=3, capsize=2,
-                color="k", label="MSE", zorder=3)
+                color="k", label=r"q from MSE ($\pm1\sigma$)", zorder=3)
     if qc is not None:
         rho = np.linspace(qc.rho_test[0], qc.rho_test[-1], 100)
         mean, cov = qc.predict(rho)
         sd = np.sqrt(np.diag(cov))
         ax.fill_between(rho, 1.0 / (mean + sd), 1.0 / np.maximum(mean - sd, 1e-3), alpha=0.3,
-                        label=r"GP $\pm1\sigma$")
+                        label=r"GP fit to MSE q ($\pm1\sigma$)")
     for label, psi, q in profiles:
         ax.plot(*_q_on_rho(psi, q), label=label)
     known = s / iota < 0.5   # q known to within half its value
-    ax.set(xlabel=r"$\rho_{tor} = \sqrt{\Phi_N}$", ylabel="q", xlim=(0.0, 1.0),
-           ylim=(0.0, 1.2 * np.max(1.0 / iota[known], initial=1.0)))
+    ax.set(xlabel=r"$\rho_{tor} = \sqrt{\Phi / \Phi_{edge}}$", ylabel="safety factor q",
+           xlim=(0.0, 1.0), ylim=(0.0, 1.2 * np.max(1.0 / iota[known], initial=1.0)))
     ax.legend(fontsize="small")
     return ax
