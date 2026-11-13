@@ -7,8 +7,8 @@ from bouquet.io.geqdsk import GEQDSKEquilibrium, _read_geqdsk, read_geqdsk
 from bouquet.mse import (MSEDataUnusable, mse_chords,
                          mse_equilibrium_orientation, mse_orientation,
                          mse_tan_gamma)
-from bouquet.q_check import (QCheck, fit_q_check, mse_er_at_chords, mse_loglike, plot_q_points,
-                             q_points)
+from bouquet.q_check import (QCheck, _matern52, fit_q_check, mse_er_at_chords, mse_loglike,
+                             plot_q_points, q_points)
 from test_geqdsk import generate_solovev_gfile
 
 R0, A, KAPPA, K = 1.7, 0.5, 1.4, 6e3
@@ -181,7 +181,8 @@ def test_q_points_sigma(scaled):
     h = 1e-4                                                 # field moved along R
     dlam = (q_points(ref, dict(blk, R=blk["R"] + h))["lam"]
             - q_points(ref, dict(blk, R=blk["R"] - h))["lam"]) / (2 * h)
-    np.testing.assert_allclose(pts["diota_daxis"], np.abs(dlam) * pts["iota"] / pts["lam"], rtol=1e-2)
+    np.testing.assert_allclose(pts["diota_daxis"], dlam * pts["iota"] / pts["lam"], rtol=1e-2)
+    assert np.ptp(np.sign(pts["diota_daxis"])) == 2          # signed: opposite across the axis
     assert pts["R_axis"] == ref.R_mag
 
 
@@ -213,7 +214,7 @@ def test_gp_axis_error_per_candidate():
     res = qc.loglike(PSI, rows, R_axis=[1.69, 1.74])
     np.testing.assert_allclose(res["axis_dR"], [0.01, 0.04])  # max |R - 1.70| over EFIT02-like and candidate
     for i, dR in enumerate((0.01, 0.04)):
-        plain = QCheck(qc.rho, qc.iota, np.hypot(qc.sigma_iota, g * dR), qc.amp, qc.ell)
+        plain = QCheck(qc.rho, qc.iota, qc.sigma_iota, qc.amp, qc.ell, g, 1.70, [1.70 + dR])
         np.testing.assert_allclose(res["logL"][i], plain.loglike(PSI, rows[i])["logL"][0], rtol=1e-12)
     assert qc.loglike(PSI, rows[0])["axis_dR"][0] == pytest.approx(0.01)
     with_nan = fit_q_check(dict(p, diota_daxis=g, R_axis=1.70), R_axis_alt=[1.71, np.nan])
@@ -222,13 +223,26 @@ def test_gp_axis_error_per_candidate():
 
 def test_points_loglike():
     p = _points()
-    g = np.full(p["rho"].size, 0.5)
+    g = np.linspace(1.0, -0.5, p["rho"].size)
     qc = QCheck(p["rho"], p["iota"], p["sigma_iota"], 0.1, 0.4, g, R_axis=1.70, R_axis_alt=[1.72])
-    res = qc.points_loglike(PSI, [_q(PSI), 1.05 * _q(PSI)])
-    s = np.hypot(0.01, 0.5 * 0.02)                           # the axis error is in sigma
+    res = qc.points_loglike(PSI, [_q(PSI), 1.05 * _q(PSI)], R_axis=[1.70, 1.75])
     assert res["chi2"][0] < 1e-3 and res["nu"] == p["rho"].size
-    np.testing.assert_allclose(res["chi2"][1], np.sum((p["iota"] * (1 / 1.05 - 1) / s) ** 2), rtol=1e-3)
-    np.testing.assert_allclose(res["logL"][1] - res["logL"][0], -0.5 * (res["chi2"][1] - res["chi2"][0]))
+    for i, (f, dR) in enumerate(((1.0, 0.02), (1.05, 0.05))):
+        cov = np.diag(p["sigma_iota"] ** 2) + dR ** 2 * np.outer(g, g)   # one offset, every point
+        r = p["iota"] * (1 / f - 1)
+        np.testing.assert_allclose(res["chi2"][i], r @ np.linalg.solve(cov, r), rtol=1e-3, atol=1e-3)
+        np.testing.assert_allclose(res["logL"][i], -0.5 * (res["chi2"][i]
+                                   + np.linalg.slogdet(2 * np.pi * cov)[1]), rtol=1e-12)
+
+
+def test_gp_noise_is_rank_one():
+    p = _points()
+    g = np.linspace(1.0, -0.5, p["rho"].size)
+    qc = QCheck(p["rho"], p["iota"], p["sigma_iota"], 0.05, 0.4, g, R_axis=1.70, R_axis_alt=[1.73])
+    L = qc._gp(qc.axis_error())[0][0]
+    K = (0.05 ** 2 * _matern52(p["rho"], p["rho"], 0.4) + np.diag(p["sigma_iota"] ** 2)
+         + 0.03 ** 2 * np.outer(g, g))
+    np.testing.assert_allclose(L @ L.T, K, rtol=1e-6, atol=1e-12)
 
 
 def test_gp_batch_and_save(tmp_path):

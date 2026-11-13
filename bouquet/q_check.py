@@ -126,10 +126,11 @@ def q_points(eq, block, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
     on *eq*'s field in the block's stated orientation ``(s_p, s_t)``; E_tor is
     the block's ``Er_tor`` (:func:`mse_er_at_chords`), the v_phi B_theta part
     of E_R, which scales with the poloidal field like B_Z;
-    ``sigma_lam = |d lam / d t| sigma_eff``.  ``diota_daxis = |d lam / d R| /
+    ``sigma_lam = |d lam / d t| sigma_eff``.  ``diota_daxis = (d lam / d R) /
     |q_ref|`` [1/m], with the reference field moved along R and q_ref held: the
     iota error per metre of error in the reference axis position, dominant near
-    the axis (:class:`QCheck` adds it for an axis error).
+    the axis, signed, since one axis offset moves every point together
+    (:class:`QCheck` adds it for an axis error).
 
     Chords at psi_N >= 1 are excluded, and so are chords whose t lies within
     :data:`POLE_SIGMAS` sigma_eff of the pole of lam(t), where ``s_p (b - t c)
@@ -159,8 +160,8 @@ def q_points(eq, block, min_chords=MSE_MIN_CHORDS, sigma_sys=0.0):
             f"median lam = {np.median(lm):.3g} <= 0: the stated ip_sign/bt_sign "
             "contradict the pitch angles on the reference equilibrium")
     h = 1e-3   # [m]
-    dlm_dax = np.abs(_lam(ch, er_tor, eq.field_at(R + h, Z), sp, st)[0]
-                     - _lam(ch, er_tor, eq.field_at(R - h, Z), sp, st)[0]) / (2 * h)
+    dlm_dax = (_lam(ch, er_tor, eq.field_at(R + h, Z), sp, st)[0]
+               - _lam(ch, er_tor, eq.field_at(R - h, Z), sp, st)[0]) / (2 * h)
     s_lm = np.abs(dlm) * ch["sigma_eff"]
     x = np.linspace(0.0, 1.0, eq.qpsi.size)
     q_ref = np.abs(np.interp(psi, x, eq.qpsi))
@@ -203,18 +204,19 @@ def _basis(x):
     return np.column_stack([np.ones_like(x), x ** 2])
 
 
-def _gp_factor(x, y, s, amp, ell):
-    """``(L, alpha, Hl, A, beta)`` of the GP with a flat-prior basis (R&W eq. 2.42)."""
-    L = _chol(amp ** 2 * _matern52(x, x, ell) + np.diag(s ** 2))
+def _gp_factor(x, y, s, amp, ell, gd):
+    """``(L, alpha, Hl, A, beta)`` of the GP with a flat-prior basis (R&W eq. 2.42) and
+    noise ``diag(s^2) + gd gd^T``."""
+    L = _chol(amp ** 2 * _matern52(x, x, ell) + np.diag(s ** 2) + np.outer(gd, gd))
     alpha = solve_triangular(L, y, lower=True)
     Hl = solve_triangular(L, _basis(x), lower=True)
     A = Hl.T @ Hl
     return L, alpha, Hl, A, np.linalg.solve(A, Hl.T @ alpha)
 
 
-def _neg_log_ml(th, x, y, s):
+def _neg_log_ml(th, x, y, s, gd):
     """Negative log marginal likelihood, basis coefficients integrated out (R&W eq. 2.45)."""
-    L, alpha, Hl, A, beta = _gp_factor(x, y, s, *np.exp(th))
+    L, alpha, Hl, A, beta = _gp_factor(x, y, s, *np.exp(th), gd)
     return (0.5 * (alpha @ alpha - alpha @ Hl @ beta) + np.log(np.diag(L)).sum()
             + 0.5 * np.linalg.slogdet(A)[1])
 
@@ -245,8 +247,9 @@ class QCheck:
 
     ``iota = b0 + b1 rho^2 + r(rho)``: a flat prior on (b0, b1), so the slope
     at the axis is zero without a derivative observation; ``r ~ GP(0, amp^2
-    Matern-5/2(ell))``; noise ``sigma_iota^2 + (diota_daxis dR)^2`` per point
-    (Rasmussen & Williams 2006, sec. 2.7).  ``dR`` is the axis error
+    Matern-5/2(ell))``; noise ``diag(sigma_iota^2) + dR^2 g g^T`` with ``g =
+    diota_daxis``, as one axis offset moves every point together (Rasmussen &
+    Williams 2006, sec. 2.7).  ``dR`` is the axis error
     (:meth:`axis_error`): the largest distance in R of *R_axis_alt* (other
     reconstructions' axes) and of the candidate's axis from the points'
     reference axis *R_axis*.  Candidates are scored on the posterior at ``m``
@@ -276,8 +279,8 @@ class QCheck:
         """GP factor, posterior at ``rho_test`` (mean, Cholesky) and log|2 pi Sigma| for *dR*."""
         key = round(float(dR), 4)   # one posterior per 0.1 mm of axis error
         if key not in self._cache:
-            f = _gp_factor(self.rho, self.iota, np.hypot(self.sigma_iota, self.diota_daxis * key),
-                           self.amp, self.ell)
+            f = _gp_factor(self.rho, self.iota, self.sigma_iota, self.amp, self.ell,
+                           self.diota_daxis * key)
             mean, cov = self._predict(f, self.rho_test)
             Lt = _chol(cov)
             self._cache[key] = (f, mean, Lt, 2.0 * np.log(np.diag(Lt)).sum()
@@ -319,15 +322,18 @@ class QCheck:
     def points_loglike(self, psi_N, q, R_axis=None):
         """``dict(logL, chi2, nu, axis_dR)`` of the candidates against the q points alone.
 
-        No GP: each row's iota at the points' rho_tor against ``iota +- sigma``
-        (axis error as in :meth:`loglike`); ``chi2`` over the ``nu`` points and
-        ``logL = -(chi2 + sum log(2 pi sigma^2)) / 2``.  A cross-check of
-        :meth:`loglike`, free of the GP prior.
+        No GP: each row's iota at the points' rho_tor against the points, with
+        covariance ``diag(sigma_iota^2) + dR^2 g g^T`` (axis error as in
+        :meth:`loglike`); ``chi2`` over the ``nu`` points and ``logL = -(chi2 +
+        log|2 pi Sigma|) / 2``.  A cross-check of :meth:`loglike`, free of the GP
+        prior.
         """
         iota, dR = self._candidates(psi_N, q, self.rho, R_axis)
-        s = np.hypot(self.sigma_iota, self.diota_daxis * dR[:, None])
-        chi2 = np.sum(((iota - self.iota) / s) ** 2, axis=1)
-        return dict(logL=-0.5 * (chi2 + np.sum(np.log(2 * np.pi * s ** 2), axis=1)), chi2=chi2,
+        w, g = self.sigma_iota ** -2.0, self.diota_daxis
+        r = iota - self.iota
+        k = dR ** 2 * np.sum(w * g ** 2)
+        chi2 = r ** 2 @ w - dR ** 2 * (r @ (w * g)) ** 2 / (1.0 + k)   # Sherman-Morrison
+        return dict(logL=-0.5 * (chi2 + np.sum(np.log(2 * np.pi / w)) + np.log1p(k)), chi2=chi2,
                     nu=self.rho.size, axis_dR=dR)
 
     def _candidates(self, psi_N, q, rho, R_axis):
@@ -376,11 +382,12 @@ def fit_q_check(points, R_axis_alt=()):
     if x.size < 3:
         raise ValueError(f"fit_q_check: {x.size} finite points; at least 3 are required")
     R_axis = float(points.get("R_axis", np.nan))
-    se = np.hypot(s, g * _axis_error(R_axis, R_axis_alt))
+    dR = _axis_error(R_axis, R_axis_alt)
+    se = np.hypot(s, g * dR)
     bounds = np.log([(np.median(se), 10.0), (0.05, 2.0 * np.ptp(x))])
     starts = [np.clip(np.log([a, ell]), bounds[:, 0], bounds[:, 1])
               for a in np.median(se) * np.array([1.0, 10.0]) for ell in (0.15, 0.4, 1.0)]
-    best = min((minimize(_neg_log_ml, th, args=(x, y, se), method="L-BFGS-B", bounds=bounds)
+    best = min((minimize(_neg_log_ml, th, args=(x, y, s, g * dR), method="L-BFGS-B", bounds=bounds)
                 for th in starts), key=lambda r: r.fun)
     return QCheck(x, y, s, *np.exp(best.x), g, R_axis, R_axis_alt)
 
