@@ -1,7 +1,17 @@
 """Checks of an equilibrium's q against MSE pitch angles.
 
 Blocks are in :mod:`bouquet.mse`'s schema; the reference equilibrium is a
-:class:`bouquet.io.geqdsk.GEQDSKEquilibrium`.
+:class:`bouquet.io.geqdsk.GEQDSKEquilibrium`.  Three checks of a candidate:
+
+* GP: :func:`q_points` turns the angles into iota = 1/q points on a reference
+  equilibrium (E_r first mapped onto it by :func:`mse_er_at_chords`),
+  :func:`fit_q_check` fits a GP to them, and :meth:`QCheck.loglike` scores
+  candidate q profiles against its posterior;
+* points alone: :meth:`QCheck.points_loglike` scores them against the points;
+* direct: :func:`mse_loglike` compares the angles with a candidate's own field
+  (no mapping; needs the candidate's equilibrium, not just its q).
+
+:func:`plot_q_points` draws the points, the GP band and candidate profiles.
 """
 
 import numpy as np
