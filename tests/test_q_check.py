@@ -7,7 +7,7 @@ from bouquet.io.geqdsk import GEQDSKEquilibrium, _read_geqdsk, read_geqdsk
 from bouquet.mse import (MSEDataUnusable, mse_chords,
                          mse_equilibrium_orientation, mse_orientation,
                          mse_tan_gamma)
-from bouquet.q_check import (QCheck, _matern52, fit_q_check, mse_er_at_chords, mse_loglike,
+from bouquet.q_check import (QCheck, _matern52, fit_q_check, mse_er_at_chords, direct_loglike,
                              plot_q_points, q_points)
 from test_geqdsk import generate_solovev_gfile
 
@@ -79,7 +79,7 @@ def test_er_tor_moves_to_the_equilibrium_field(solovev):
     full = mse_er_at_chords(solovev, blk, phi, er)["Er"]     # E_tor was made with twice the field
     np.testing.assert_allclose(out["Er_tor"][:5], 0.3 * full[:5], rtol=1e-3)
     np.testing.assert_allclose(out["Er"][:5], 0.7 * full[:5], rtol=1e-3)
-    assert np.isnan(out["Er_tor"][5]) and mse_loglike(solovev, out)["nu"] == 5
+    assert np.isnan(out["Er_tor"][5]) and direct_loglike(solovev, out)["nu"] == 5
     with pytest.raises(MSEDataUnusable, match="unknown key"):
         mse_chords(out)                                      # bouquet's MSE solvers refuse Er_tor
 
@@ -181,8 +181,8 @@ def test_q_points_sigma(scaled):
     h = 1e-4                                                 # field moved along R
     dlam = (q_points(ref, dict(blk, R=blk["R"] + h))["lam"]
             - q_points(ref, dict(blk, R=blk["R"] - h))["lam"]) / (2 * h)
-    np.testing.assert_allclose(pts["diota_daxis"], dlam * pts["iota"] / pts["lam"], rtol=1e-2)
-    assert np.ptp(np.sign(pts["diota_daxis"])) == 2          # signed: opposite across the axis
+    np.testing.assert_allclose(pts["diota_dR_axis"], dlam * pts["iota"] / pts["lam"], rtol=1e-2)
+    assert np.ptp(np.sign(pts["diota_dR_axis"])) == 2          # signed: opposite across the axis
     assert pts["R_axis"] == ref.R_mag
 
 
@@ -201,7 +201,7 @@ def _points():
 
 
 def test_gp_prefers_the_true_profile():
-    res = fit_q_check(_points()).loglike(PSI, [_q(PSI), 1.05 * _q(PSI), 0.95 * _q(PSI)])
+    res = fit_q_check(_points()).gp_loglike(PSI, [_q(PSI), 1.05 * _q(PSI), 0.95 * _q(PSI)])
     assert res["logL"][0] > max(res["logL"][1:])
     assert res["d2"][0] < res["m"]
 
@@ -209,16 +209,16 @@ def test_gp_prefers_the_true_profile():
 def test_gp_axis_error_per_candidate():
     p = _points()
     g = np.linspace(2.0, 0.1, p["rho"].size)                 # largest near the axis
-    qc = fit_q_check(dict(p, diota_daxis=g, R_axis=1.70), R_axis_alt=[1.71])
+    qc = fit_q_check(dict(p, diota_dR_axis=g, R_axis=1.70), R_axis_alt=[1.71])
     rows = [_q(PSI), 1.02 * _q(PSI)]
-    res = qc.loglike(PSI, rows, R_axis=[1.69, 1.74])
-    np.testing.assert_allclose(res["axis_dR"], [0.01, 0.04])  # max |R - 1.70| over EFIT02-like and candidate
+    res = qc.gp_loglike(PSI, rows, R_axis=[1.69, 1.74])
+    np.testing.assert_allclose(res["axis_error"], [0.01, 0.04])  # max |R - 1.70| over EFIT02-like and candidate
     for i, dR in enumerate((0.01, 0.04)):
         plain = QCheck(qc.rho, qc.iota, qc.sigma_iota, qc.amp, qc.ell, g, 1.70, [1.70 + dR])
-        np.testing.assert_allclose(res["logL"][i], plain.loglike(PSI, rows[i])["logL"][0], rtol=1e-12)
-    assert qc.loglike(PSI, rows[0])["axis_dR"][0] == pytest.approx(0.01)
-    with_nan = fit_q_check(dict(p, diota_daxis=g, R_axis=1.70), R_axis_alt=[1.71, np.nan])
-    np.testing.assert_allclose(with_nan.loglike(PSI, rows, R_axis=[1.69, np.nan])["axis_dR"], 0.01)
+        np.testing.assert_allclose(res["logL"][i], plain.gp_loglike(PSI, rows[i])["logL"][0], rtol=1e-12)
+    assert qc.gp_loglike(PSI, rows[0])["axis_error"][0] == pytest.approx(0.01)
+    with_nan = fit_q_check(dict(p, diota_dR_axis=g, R_axis=1.70), R_axis_alt=[1.71, np.nan])
+    np.testing.assert_allclose(with_nan.gp_loglike(PSI, rows, R_axis=[1.69, np.nan])["axis_error"], 0.01)
 
 
 def test_points_loglike():
@@ -249,22 +249,22 @@ def test_gp_batch_and_save(tmp_path):
     qc = fit_q_check(_points())
     rows = np.array([_q(PSI) * f for f in (0.97, 1.0, 1.02)])
     rows[2, 7] = np.nan
-    res = qc.loglike(PSI, rows)
+    res = qc.gp_loglike(PSI, rows)
     for i in range(2):
-        np.testing.assert_allclose(res["logL"][i], qc.loglike(PSI, rows[i])["logL"][0], rtol=1e-12)
+        np.testing.assert_allclose(res["logL"][i], qc.gp_loglike(PSI, rows[i])["logL"][0], rtol=1e-12)
     assert np.isnan(res["logL"][2])
     qc.save(tmp_path / "qc.npz")
-    np.testing.assert_array_equal(QCheck.load(tmp_path / "qc.npz").loglike(PSI, rows)["logL"],
+    np.testing.assert_array_equal(QCheck.load(tmp_path / "qc.npz").gp_loglike(PSI, rows)["logL"],
                                   res["logL"])
 
 
 def test_direct_and_gp_agree(scaled):
     ref, true, blk, path = scaled
-    assert mse_loglike(true, blk)["chi2"] < 1e-12
+    assert direct_loglike(true, blk)["chi2"] < 1e-12
     cands = [_scaled_eq(path, c) for c in (1.10, 1.15, 1.20)]
-    chi2 = [mse_loglike(eq, blk)["chi2"] for eq in cands]
+    chi2 = [direct_loglike(eq, blk)["chi2"] for eq in cands]
     qc = fit_q_check(q_points(ref, blk))
-    logL = qc.loglike(np.linspace(0, 1, ref.qpsi.size), [eq.qpsi for eq in cands])["logL"]
+    logL = qc.gp_loglike(np.linspace(0, 1, ref.qpsi.size), [eq.qpsi for eq in cands])["logL"]
     assert np.argmin(chi2) == 1 and np.argmax(logL) == 1
 
 
@@ -279,7 +279,7 @@ def test_plot_q_points(scaled):
     bars = ax.containers[0]
     np.testing.assert_allclose(bars.lines[0].get_ydata(), pts["q"])
     half = [abs(seg[1, 1] - seg[0, 1]) / 2 for seg in bars.lines[2][0].get_segments()]
-    s = np.hypot(pts["sigma_iota"], pts["diota_daxis"] * 0.01)   # the axis error is in the bars
+    s = np.hypot(pts["sigma_iota"], pts["diota_dR_axis"] * 0.01)   # the axis error is in the bars
     np.testing.assert_allclose(half, s / pts["iota"] ** 2, rtol=1e-6)
     assert {"MSE", "true", r"GP $\pm1\sigma$"} <= set(ax.get_legend_handles_labels()[1])
     plt.close(ax.figure)
