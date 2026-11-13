@@ -265,11 +265,12 @@ class QCheck:
     reference axis *R_axis*.  Candidates are scored on the posterior at ``m``
     evenly spaced rho over the points' range, ``m = clip(ceil(range / ell) +
     1, 2, n)``: about one per correlation length, where the posterior
-    covariance is well conditioned.
+    covariance is well conditioned.  *q_floor* records the floor the points were
+    clipped to (:func:`fit_q_check`), or NaN.
     """
 
     def __init__(self, rho, iota, sigma_iota, amp, ell, diota_dR_axis=None,
-                 R_axis=np.nan, R_axis_alt=()):
+                 R_axis=np.nan, R_axis_alt=(), q_floor=np.nan):
         self.rho, self.iota, self.sigma_iota = (
             np.asarray(a, dtype=float) for a in (rho, iota, sigma_iota))
         self.diota_dR_axis = (np.zeros_like(self.rho) if diota_dR_axis is None
@@ -277,6 +278,7 @@ class QCheck:
         self.amp, self.ell = float(amp), float(ell)
         self.R_axis = float(R_axis)
         self.R_axis_alt = np.atleast_1d(np.asarray(R_axis_alt, dtype=float))
+        self.q_floor = float(q_floor)
         m = int(np.clip(np.ceil(np.ptp(self.rho) / self.ell) + 1, 2, self.rho.size))
         self.rho_test = np.linspace(self.rho.min(), self.rho.max(), m)
         self._cache = {}
@@ -363,19 +365,23 @@ class QCheck:
     def save(self, path):
         np.savez(path, rho=self.rho, iota=self.iota, sigma_iota=self.sigma_iota,
                  diota_dR_axis=self.diota_dR_axis, amp=self.amp, ell=self.ell,
-                 R_axis=self.R_axis, R_axis_alt=self.R_axis_alt)
+                 R_axis=self.R_axis, R_axis_alt=self.R_axis_alt, q_floor=self.q_floor)
 
     @classmethod
     def load(cls, path):
         with np.load(path) as f:
             return cls(f["rho"], f["iota"], f["sigma_iota"], float(f["amp"]), float(f["ell"]),
-                       f["diota_dR_axis"], float(f["R_axis"]), f["R_axis_alt"])
+                       f["diota_dR_axis"], float(f["R_axis"]), f["R_axis_alt"], float(f["q_floor"]))
 
 
-def fit_q_check(points, R_axis_alt=()):
+def fit_q_check(points, R_axis_alt=(), q_floor=None):
     """:class:`QCheck` of *points* (``rho``, ``iota``, ``sigma_iota``, and
     optionally ``diota_dR_axis``, ``R_axis``; e.g. :func:`q_points`), with
     other reconstructions' axes *R_axis_alt* [m].
+
+    With *q_floor*, points below it are clipped to it (iota <= 1 / q_floor) for
+    candidates that cannot go below that q by construction: they are then
+    judged only on how far they sit above what the floor forces.
 
     ``(amp, ell)`` maximise the marginal likelihood, with the axis error of
     *R_axis_alt* alone, by bounded L-BFGS-B from a fixed grid of starts
@@ -389,6 +395,8 @@ def fit_q_check(points, R_axis_alt=()):
     g = np.asarray(points.get("diota_dR_axis", np.zeros_like(x)), dtype=float)
     ok = np.isfinite(x) & np.isfinite(y) & np.isfinite(s) & (s > 0) & np.isfinite(g)
     x, y, s, g = x[ok], y[ok], s[ok], g[ok]
+    if q_floor is not None:
+        y = np.minimum(y, 1.0 / q_floor)
     if x.size < 3:
         raise ValueError(f"fit_q_check: {x.size} finite points; at least 3 are required")
     R_axis = float(points.get("R_axis", np.nan))
@@ -399,7 +407,8 @@ def fit_q_check(points, R_axis_alt=()):
               for a in np.median(se) * np.array([1.0, 10.0]) for ell in (0.15, 0.4, 1.0)]
     best = min((minimize(_neg_log_ml, th, args=(x, y, s, g * dR), method="L-BFGS-B", bounds=bounds)
                 for th in starts), key=lambda r: r.fun)
-    return QCheck(x, y, s, *np.exp(best.x), g, R_axis, R_axis_alt)
+    return QCheck(x, y, s, *np.exp(best.x), g, R_axis, R_axis_alt,
+                  np.nan if q_floor is None else q_floor)
 
 
 def plot_q_points(points, qc=None, profiles=(), ax=None):
@@ -428,6 +437,9 @@ def plot_q_points(points, qc=None, profiles=(), ax=None):
     if qc is not None:
         handles += ax.plot(qc.rho_test, 1.0 / qc.predict(qc.rho_test)[0], "kd", ms=5, zorder=4,
                            label="where the GP check compares")
+    if qc is not None and np.isfinite(qc.q_floor):
+        handles.append(ax.axhline(qc.q_floor, color="0.4", ls="--", lw=0.8,
+                                  label=f"q floor {qc.q_floor:g}: points below it clipped"))
     for label, psi, q in profiles:
         handles += ax.plot(*_q_on_rho(psi, q), label=label)
     known = s / iota < 0.5   # q known to within half its value

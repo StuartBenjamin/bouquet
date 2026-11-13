@@ -245,6 +245,17 @@ def test_gp_noise_is_rank_one():
     np.testing.assert_allclose(L @ L.T, K, rtol=1e-6, atol=1e-12)
 
 
+def test_q_floor_clips_the_points(tmp_path):
+    p = _points()                                            # q = 1 + 2 psi^2: q < 1.05 for psi < 0.16
+    qf = fit_q_check(p, q_floor=1.05)
+    np.testing.assert_allclose(qf.iota, np.minimum(p["iota"], 1 / 1.05))
+    floored = np.maximum(_q(PSI), 1.05)                     # a candidate held at the floor
+    assert qf.points_loglike(PSI, floored)["chi2"][0] < 1.0      # 15 points (rho from its own q)
+    assert fit_q_check(p).points_loglike(PSI, floored)["chi2"][0] > 10.0
+    qf.save(tmp_path / "qf.npz")
+    assert QCheck.load(tmp_path / "qf.npz").q_floor == 1.05 and np.isnan(fit_q_check(p).q_floor)
+
+
 def test_gp_batch_and_save(tmp_path):
     qc = fit_q_check(_points())
     rows = np.array([_q(PSI) * f for f in (0.97, 1.0, 1.02)])
@@ -284,4 +295,15 @@ def test_plot_q_points(scaled):
     assert [t.get_text() for t in ax.get_legend().get_texts()] == [
         r"GP fit to MSE q ($\pm1\sigma$)", r"q from MSE ($\pm1\sigma$)", "where the GP check compares",
         "true"]                                                  # the MSE side first, then the profiles
+    plt.close(ax.figure)
+
+
+def test_plot_shows_the_q_floor():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    ax = plot_q_points(_points(), fit_q_check(_points(), q_floor=1.05))
+    labels = [t.get_text() for t in ax.get_legend().get_texts()]
+    assert labels[3] == "q floor 1.05: points below it clipped"
+    assert 1.05 in [ln.get_ydata()[0] for ln in ax.lines]
     plt.close(ax.figure)
