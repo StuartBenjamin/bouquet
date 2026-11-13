@@ -1,0 +1,60 @@
+"""bouquet.archive_checks on the golden slim archive (read-only)."""
+
+import os
+
+import h5py
+import numpy as np
+import pytest
+
+from bouquet.archive_checks import check_archive, check_archives
+from bouquet.coil_check import CoilCheck
+from bouquet.q_check import QCheck
+
+GOLDEN = os.path.join(os.path.dirname(__file__), "golden", "D3Dlike_Hmode_golden_slim.h5")
+
+
+def _checks():
+    with h5py.File(GOLDEN, "r") as hf:
+        bl = hf["scan/0/_baseline"]
+        names = [n.decode() for n in bl["coil_names"][()]]
+        cur = bl["coil_currents"][()]
+        fsa = hf["scan/0/0/eq_fsa"]
+        psi, q = fsa["psi_N"][()], fsa["q"][()]
+    rho = np.sqrt(np.cumsum(q) / np.sum(q))[::40]           # draw 0's own iota on rough rho_tor
+    qc = QCheck(rho, 1 / q[::40], np.full(rho.size, 0.02), amp=0.1, ell=0.4)
+    cc = CoilCheck(names, cur, 0.01 * np.abs(cur) + 100.0)
+    return qc, cc, names, (psi, q)
+
+
+def test_rows_match_direct_calls():
+    qc, cc, names, (psi, q) = _checks()
+    rows = check_archive(GOLDEN, q_check=qc, coil_check=cc, sigma_model={n: 500.0 for n in names})
+    with h5py.File(GOLDEN, "r") as hf:
+        draws = sorted(int(k) for k in hf["scan/0"] if k.isdigit())
+        cur0 = hf["scan/0/0/coil_currents"][()]
+    assert [r["draw"] for r in rows] == [-1] + draws and rows[0]["is_baseline"]
+    r0 = next(r for r in rows if r["draw"] == 0)
+    assert r0["logL_q"] == pytest.approx(qc.loglike(psi, q)["logL"][0])
+    ref = cc.loglike(names, cur0, {n: 500.0 for n in names})
+    assert r0["chi2_coil"] == pytest.approx(ref["chi2"][0]) and r0["nu_coil"] == ref["nu"]
+    assert np.isfinite(rows[0]["logL_q"]) and rows[0]["chi2_coil"] == pytest.approx(0.0)
+    assert all(r["status"] == "ok" for r in rows)
+
+
+def test_parallel_status_and_units(tmp_path):
+    qc, cc, names, _ = _checks()
+    qc.save(tmp_path / "qc.npz")
+    cc.save(tmp_path / "cc.npz")
+    job = dict(path=GOLDEN, q_check=str(tmp_path / "qc.npz"), coil_check=str(tmp_path / "cc.npz"),
+               sigma_model=0)
+    jobs = [job, dict(job, path=str(tmp_path / "missing.h5"))]
+    one = check_archives(jobs, n_workers=1)
+    two = check_archives(jobs, n_workers=2)
+    assert [r["logL_q"] for r in one[:-1]] == [r["logL_q"] for r in two[:-1]]
+    assert [r["chi2_coil"] for r in one[:-1]] == [r["chi2_coil"] for r in two[:-1]]
+    assert one[-1]["status"] == two[-1]["status"] == "no_archive"
+    f_coils = [n.startswith("F") for n in cc.names]
+    cc58 = CoilCheck(cc.names, np.where(f_coils, cc.mean / 58, cc.mean), cc.sigma_meas)
+    assert check_archive(GOLDEN, coil_check=cc58, sigma_model=0)[0]["coil_units_suspect"] == "F"
+    with pytest.raises(ValueError, match="sigma_model"):
+        check_archive(GOLDEN, coil_check=cc)
