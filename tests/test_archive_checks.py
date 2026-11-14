@@ -104,11 +104,13 @@ def test_gp_on_own_surfaces():
     pts = q_points(eq0, blk)
     own = QCheck(pts["rho"], pts["iota"], pts["sigma_iota"], qc.amp, qc.ell)
     ref = own.gp_loglike(np.linspace(0, 1, eq0.qpsi.size), eq0.qpsi)
-    assert rows[0]["d2_gp"] == pytest.approx(ref["d2"][0]) and rows[0]["m_gp"] == ref["m"]
-    assert rows[0]["d2_gp"] < rows[0]["m_gp"]                  # its own angles: consistent
+    assert rows[0]["d2_gp_own"] == pytest.approx(ref["d2"][0]) and rows[0]["m_gp_own"] == ref["m"]
+    assert rows[0]["d2_gp_own"] < rows[0]["m_gp_own"]          # its own angles: consistent
 
 
-def test_gp_needs_the_mse_block():
-    qc, _, _, _ = _checks()
+def test_gp_on_the_points_needs_no_mse():
+    qc, _, _, (psi, q) = _checks()
     alone = check_archive(GOLDEN, q_check=qc, gp=True)
-    assert np.isnan(alone[0]["d2_gp"]) and "gp: needs mse" in alone[0]["status"]
+    r0 = next(r for r in alone if r["draw"] == 0)
+    assert r0["d2_gp"] == pytest.approx(qc.gp_loglike(psi, q)["d2"][0]) and r0["m_gp"] == qc.rho_test.size
+    assert np.isnan(r0["d2_gp_own"]) and "gp_own: needs mse" in r0["status"]

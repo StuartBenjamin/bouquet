@@ -18,6 +18,7 @@ ROW_KEYS = ("archive", "scan", "draw", "is_baseline", "selected", "n_coil_reg",
             "chi2_direct", "logL_direct", "nu_direct", "axis_offset_R", "axis_offset_Z",
             "chi2_direct_aligned", "logL_direct_aligned",
             "logL_points", "chi2_points", "nu_points", "axis_error", "logL_gp", "d2_gp", "m_gp",
+            "logL_gp_own", "d2_gp_own", "m_gp_own",
             "logL_coil", "chi2_coil", "nu_coil", "max_abs_z", "worst_coil",
             "coil_units_suspect", "status")
 
@@ -33,28 +34,34 @@ def _eqdsk(g):
             GEQDSKEquilibrium.from_bytes(bytes(g[name][()]), cocos=ARCHIVE_EQDSK_COCOS))
 
 
-def _score_q(row, qc, g, eq):
-    """Points-alone check of the group's eq_fsa q (else its eqdsk's)."""
+def _q_profile(g, eq):
+    """The group's eq_fsa q (else its eqdsk's) as ``(psi_N, q)``, or None."""
     if EQ_FSA_GROUP in g:
-        psi, q = g[EQ_FSA_GROUP]["psi_N"][()], g[EQ_FSA_GROUP]["q"][()]
-    elif eq is not None:
-        psi, q = np.linspace(0.0, 1.0, eq.qpsi.size), eq.qpsi
-    else:
+        return g[EQ_FSA_GROUP]["psi_N"][()], g[EQ_FSA_GROUP]["q"][()]
+    return None if eq is None else (np.linspace(0.0, 1.0, eq.qpsi.size), eq.qpsi)
+
+
+def _score_q(row, qc, prof, gp):
+    """Points-alone check of the q profile *prof*, and with *gp* its GP check, against *qc*."""
+    if prof is None:
         row["status"].append("no_q")
         return
     try:
-        p = qc.points_loglike(psi, q)
+        p = qc.points_loglike(*prof)
         row.update(logL_points=p["logL"][0], chi2_points=p["chi2"][0], nu_points=p["nu"],
                    axis_error=qc.axis_error)
+        if gp:
+            r = qc.gp_loglike(*prof)
+            row.update(logL_gp=r["logL"][0], d2_gp=r["d2"][0], m_gp=r["m"])
     except ValueError as e:
         row["status"].append(f"q: {e}")
 
 
-def _score_gp(row, qc, mse, eq):
+def _score_gp_own(row, qc, mse, eq):
     """GP check on the equilibrium's own surfaces: the MSE q points mapped on *eq*, a GP
     with *qc*'s hyperparameters through them, and *eq*'s own q against it."""
     if eq is None or mse is None:
-        row["status"].append("gp: needs mse and the eqdsk")
+        row["status"].append("gp_own: needs mse and the eqdsk")
         return
     try:
         pts = q_points(eq, _on(eq, mse))
@@ -62,9 +69,9 @@ def _score_gp(row, qc, mse, eq):
                      cov_er=pts["cov_iota_er"])
         r = own.gp_loglike(np.linspace(0.0, 1.0, eq.qpsi.size), eq.qpsi)
     except (ValueError, RuntimeError) as e:
-        row["status"].append(f"gp: {e}")
+        row["status"].append(f"gp_own: {e}")
         return
-    row.update(logL_gp=r["logL"][0], d2_gp=r["d2"][0], m_gp=r["m"])
+    row.update(logL_gp_own=r["logL"][0], d2_gp_own=r["d2"][0], m_gp_own=r["m"])
 
 
 def _on(eq, mse, shift=(0.0, 0.0)):
@@ -105,9 +112,12 @@ def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=Non
     * *q_check* (:class:`~bouquet.q_check.QCheck` or its npz): ``logL_points``,
       ``chi2_points``, ``nu_points`` of the draw's ``eq_fsa`` q, or of its
       eqdsk's q when it has no ``eq_fsa`` (the baseline), against the q points,
-      with *q_check*'s axis error ``axis_error``.  With *gp* and *mse*:
-      ``logL_gp``, ``d2_gp``, ``m_gp`` of the GP check on each equilibrium's own surfaces (the MSE q points
-      mapped on it, a GP with *q_check*'s hyperparameters through them).
+      with *q_check*'s axis error ``axis_error``.  With *gp*: ``logL_gp``,
+      ``d2_gp``, ``m_gp`` of the same q against *q_check*'s GP through the q
+      points; with *gp* and *mse* also ``logL_gp_own``, ``d2_gp_own``,
+      ``m_gp_own`` of the GP check on each equilibrium's own surfaces (the MSE
+      q points mapped on it, a GP with *q_check*'s hyperparameters through
+      them).
     * *mse* ``(block, profile)``, *profile* being the arguments of
       :func:`~bouquet.q_check.mse_er_at_chords` after the block (``phi_N,
       E_r[, E_r_err, E_tor, B_theta]``, or empty for no E_r): the direct check
@@ -152,9 +162,9 @@ def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=Non
                 rows.append(row)
                 eq = _eqdsk(g) if qc is not None or mse is not None else None
                 if qc is not None:
-                    _score_q(row, qc, g, eq)
+                    _score_q(row, qc, _q_profile(g, eq), gp)
                     if gp:
-                        _score_gp(row, qc, mse, eq)
+                        _score_gp_own(row, qc, mse, eq)
                 if mse is not None:
                     _score_direct(row, mse, eq, axis_ref, align_axis)
                 if cc is not None:
