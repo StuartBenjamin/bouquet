@@ -176,6 +176,27 @@ class TestCOCOS:
         cc = _cocos_params(11)
         assert cc["exp_Bp"] == 1
 
+    def test_table_matches_sauter_medvedev(self):
+        # Sauter & Medvedev, CPC 184 (2013) 293, Table 1: (sigma_Bp, sigma_RpZ, sigma_rhotp)
+        table = {1: (1, 1, 1), 2: (1, -1, 1), 3: (-1, 1, -1), 4: (-1, -1, -1),
+                 5: (1, 1, -1), 6: (1, -1, -1), 7: (-1, 1, 1), 8: (-1, -1, 1)}
+        for base, signs in table.items():
+            for k, exp_Bp in ((base, 0), (base + 10, 1)):
+                cc = _cocos_params(k)
+                got = (cc["sigma_Bp"], cc["sigma_RpZ"], cc["sigma_rhotp"], cc["exp_Bp"])
+                assert got == (*signs, exp_Bp), k
+
+    def test_cocosify_signs_follow_sauter_medvedev(self, gfile_path):
+        # COCOS 1 -> 2 reverses phi (sigma_RpZ): psi, F, Ip and B0 change sign, q does not.
+        # COCOS 1 -> 5 reverses theta (sigma_rhotp): only q changes sign.
+        expected = {2: dict(PSIRZ=-1, FPOL=-1, QPSI=1, CURRENT=-1, BCENTR=-1),
+                    5: dict(PSIRZ=1, FPOL=1, QPSI=-1, CURRENT=1, BCENTR=1)}
+        eq = read_geqdsk(gfile_path[0], cocos=1)
+        for out, signs in expected.items():
+            g = eq.cocosify(out, copy=True)._raw
+            for key, s in signs.items():
+                assert np.array_equal(np.sign(g[key]), s * np.sign(eq._raw[key])), (out, key)
+
     def test_invalid(self):
         with pytest.raises(ValueError):
             _cocos_params(0)

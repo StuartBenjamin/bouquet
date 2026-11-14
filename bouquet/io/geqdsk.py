@@ -43,11 +43,11 @@ def _cocos_params(cocos_index):
     # sigma_Bp: sign of poloidal flux (psi increasing outward = +1)
     sigma_Bp = +1 if base in (1, 2, 5, 6) else -1
 
-    # sigma_RpZ: right-hand (R,phi,Z) vs (R,Z,phi) orientation
-    sigma_RpZ = +1 if base in (1, 2, 7, 8) else -1
+    # sigma_RpZ: +1 if (R, phi, Z) is right-handed (odd COCOS), -1 if (R, Z, phi) is
+    sigma_RpZ = +1 if base in (1, 3, 5, 7) else -1
 
-    # sigma_rhotp: sign of theta_pol*phi_tor product
-    sigma_rhotp = +1 if base in (1, 3, 5, 7) else -1
+    # sigma_rhotp: +1 if (rho, theta, phi) is right-handed
+    sigma_rhotp = +1 if base in (1, 2, 7, 8) else -1
 
     return {
         "sigma_Bp": sigma_Bp,
