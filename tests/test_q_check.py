@@ -287,31 +287,29 @@ def test_gp_prefers_the_true_profile():
     assert res["d2"][0] < res["m"]
 
 
-def test_gp_axis_error_per_candidate():
+def test_axis_error_is_given(tmp_path):
     p = _points()
     g = np.linspace(2.0, 0.1, p["rho"].size)                 # largest near the axis
-    qc = fit_q_check(dict(p, diota_dR_axis=g, R_axis=1.70), R_axis_alt=[1.71])
+    qc = fit_q_check(dict(p, diota_dR_axis=g), axis_error=0.02)
     rows = [_q(PSI), 1.02 * _q(PSI)]
-    res = qc.gp_loglike(PSI, rows, R_axis=[1.69, 1.74])
-    np.testing.assert_allclose(res["axis_error"], [0.01, 0.04])  # max |R - 1.70| over EFIT02-like and candidate
-    for i, dR in enumerate((0.01, 0.04)):
-        plain = QCheck(qc.rho, qc.iota, qc.sigma_iota, qc.amp, qc.ell, g, 1.70, [1.70 + dR])
-        np.testing.assert_allclose(res["logL"][i], plain.gp_loglike(PSI, rows[i])["logL"][0], rtol=1e-12)
-    assert qc.gp_loglike(PSI, rows[0])["axis_error"][0] == pytest.approx(0.01)
-    with_nan = fit_q_check(dict(p, diota_dR_axis=g, R_axis=1.70), R_axis_alt=[1.71, np.nan])
-    np.testing.assert_allclose(with_nan.gp_loglike(PSI, rows, R_axis=[1.69, np.nan])["axis_error"], 0.01)
+    res = qc.gp_loglike(PSI, rows)
+    plain = QCheck(qc.rho, qc.iota, qc.sigma_iota, qc.amp, qc.ell, g, axis_error=0.02)
+    np.testing.assert_allclose(res["logL"], plain.gp_loglike(PSI, rows)["logL"], rtol=1e-12)
+    loose = QCheck(qc.rho, qc.iota, qc.sigma_iota, qc.amp, qc.ell, g, axis_error=0.05)
+    assert loose.gp_loglike(PSI, rows)["d2"][1] < res["d2"][1]   # a larger axis error is more lenient
+    qc.save(tmp_path / "qc.npz")
+    assert QCheck.load(tmp_path / "qc.npz").axis_error == 0.02
 
 
 def test_points_loglike():
     p = _points()
     g = np.linspace(1.0, -0.5, p["rho"].size)
     u = 0.004 * np.cos(4 * p["rho"])                                  # an E_r error, correlated
-    qc = QCheck(p["rho"], p["iota"], p["sigma_iota"], 0.1, 0.4, g, R_axis=1.70, R_axis_alt=[1.72],
-                cov_er=np.outer(u, u))
-    res = qc.points_loglike(PSI, [_q(PSI), 1.05 * _q(PSI)], R_axis=[1.70, 1.75])
+    qc = QCheck(p["rho"], p["iota"], p["sigma_iota"], 0.1, 0.4, g, axis_error=0.02, cov_er=np.outer(u, u))
+    res = qc.points_loglike(PSI, [_q(PSI), 1.05 * _q(PSI)])
     assert res["chi2"][0] < 1e-3 and res["nu"] == p["rho"].size
-    for i, (f, dR) in enumerate(((1.0, 0.02), (1.05, 0.05))):
-        cov = np.diag(p["sigma_iota"] ** 2) + np.outer(u, u) + dR ** 2 * np.outer(g, g)
+    cov = np.diag(p["sigma_iota"] ** 2) + np.outer(u, u) + 0.02 ** 2 * np.outer(g, g)
+    for i, f in enumerate((1.0, 1.05)):
         r = p["iota"] * (1 / f - 1)
         np.testing.assert_allclose(res["chi2"][i], r @ np.linalg.solve(cov, r), rtol=1e-3, atol=1e-3)
         np.testing.assert_allclose(res["logL"][i], -0.5 * (res["chi2"][i]
@@ -321,8 +319,8 @@ def test_points_loglike():
 def test_gp_noise_is_rank_one():
     p = _points()
     g = np.linspace(1.0, -0.5, p["rho"].size)
-    qc = QCheck(p["rho"], p["iota"], p["sigma_iota"], 0.05, 0.4, g, R_axis=1.70, R_axis_alt=[1.73])
-    L = qc._gp(qc.axis_error())[0][0]
+    qc = QCheck(p["rho"], p["iota"], p["sigma_iota"], 0.05, 0.4, g, axis_error=0.03)
+    L = qc._gp()[0][0]
     K = (0.05 ** 2 * _matern52(p["rho"], p["rho"], 0.4) + np.diag(p["sigma_iota"] ** 2)
          + 0.03 ** 2 * np.outer(g, g))
     np.testing.assert_allclose(L @ L.T, K, rtol=1e-6, atol=1e-12)
@@ -368,7 +366,7 @@ def test_plot_q_points(scaled):
     import matplotlib.pyplot as plt
     ref, true, blk, _ = scaled
     pts = q_points(ref, blk)
-    qc = fit_q_check(pts, R_axis_alt=[ref.R_mag + 0.01])
+    qc = fit_q_check(pts, axis_error=0.01)
     ax = plot_q_points(pts, qc, profiles=[("true", np.linspace(0, 1, true.qpsi.size), true.qpsi)])
     bars = ax.containers[0]
     np.testing.assert_allclose(bars.lines[0].get_ydata(), pts["q"])

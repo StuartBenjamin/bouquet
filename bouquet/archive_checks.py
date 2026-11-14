@@ -34,7 +34,7 @@ def _eqdsk(g):
 
 
 def _score_q(row, qc, g, eq):
-    """Points-alone check of the group's eq_fsa q (else its eqdsk's), axis from its eqdsk."""
+    """Points-alone check of the group's eq_fsa q (else its eqdsk's)."""
     if EQ_FSA_GROUP in g:
         psi, q = g[EQ_FSA_GROUP]["psi_N"][()], g[EQ_FSA_GROUP]["q"][()]
     elif eq is not None:
@@ -42,11 +42,10 @@ def _score_q(row, qc, g, eq):
     else:
         row["status"].append("no_q")
         return
-    R_axis = None if eq is None else eq.R_mag
     try:
-        p = qc.points_loglike(psi, q, R_axis=R_axis)
+        p = qc.points_loglike(psi, q)
         row.update(logL_points=p["logL"][0], chi2_points=p["chi2"][0], nu_points=p["nu"],
-                   axis_error=p["axis_error"][0])
+                   axis_error=qc.axis_error)
     except ValueError as e:
         row["status"].append(f"q: {e}")
 
@@ -106,9 +105,8 @@ def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=Non
     * *q_check* (:class:`~bouquet.q_check.QCheck` or its npz): ``logL_points``,
       ``chi2_points``, ``nu_points`` of the draw's ``eq_fsa`` q, or of its
       eqdsk's q when it has no ``eq_fsa`` (the baseline), against the q points,
-      with the axis error ``axis_error`` set by the equilibrium's own magnetic
-      axis (its eqdsk).  With *gp* and *mse*: ``logL_gp``, ``d2_gp``, ``m_gp``
-      of the GP check on each equilibrium's own surfaces (the MSE q points
+      with *q_check*'s axis error ``axis_error``.  With *gp* and *mse*:
+      ``logL_gp``, ``d2_gp``, ``m_gp`` of the GP check on each equilibrium's own surfaces (the MSE q points
       mapped on it, a GP with *q_check*'s hyperparameters through them).
     * *mse* ``(block, profile)``, *profile* being the arguments of
       :func:`~bouquet.q_check.mse_er_at_chords` after the block (``phi_N,

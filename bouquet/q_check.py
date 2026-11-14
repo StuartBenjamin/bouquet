@@ -304,17 +304,6 @@ def _q_on_rho(psi_N, q):
     return np.sqrt(phi), y[inside]
 
 
-def _axis_error(R_ref, R_alt, R_cand=None):
-    """Largest |R - R_ref| over the finite *R_alt* and *R_cand*; 0 when nothing is known."""
-    other = np.atleast_1d(np.asarray(R_alt, dtype=float))
-    if R_cand is not None:
-        other = np.r_[other, R_cand]
-    other = other[np.isfinite(other)]
-    if not (np.isfinite(R_ref) and other.size):
-        return 0.0
-    return float(np.max(np.abs(other - R_ref)))
-
-
 class QCheck:
     """GP posterior of iota(rho_tor) given q points, and candidate q-profiles' likelihood.
 
@@ -323,10 +312,9 @@ class QCheck:
     Matern-5/2(ell))``; noise ``diag(sigma_iota^2) + cov_er + dR^2 g g^T``:
     *cov_er* the E_r profile's error (:func:`q_points` ``cov_iota_er``), and
     ``g = diota_dR_axis`` as one axis offset moves every point together
-    (Rasmussen & Williams 2006, sec. 2.7).  ``dR`` is the axis error
-    (:meth:`axis_error`): the largest distance in R of *R_axis_alt* (other
-    reconstructions' axes) and of the candidate's axis from the points'
-    reference axis *R_axis*.  Candidates are scored on the posterior at ``m``
+    (Rasmussen & Williams 2006, sec. 2.7).  ``dR`` = *axis_error* [m] is the
+    error in R of the points' reference axis, the same for every candidate.
+    Candidates are scored on the posterior at ``m``
     evenly spaced rho over the points' range, ``m = clip(ceil(range / ell) +
     1, 2, n)``: about one per correlation length, where the posterior
     covariance is well conditioned.  *q_floor* records the floor the points were
@@ -334,38 +322,31 @@ class QCheck:
     """
 
     def __init__(self, rho, iota, sigma_iota, amp, ell, diota_dR_axis=None,
-                 R_axis=np.nan, R_axis_alt=(), q_floor=np.nan, cov_er=None):
+                 axis_error=0.0, q_floor=np.nan, cov_er=None):
         self.rho, self.iota, self.sigma_iota = (
             np.asarray(a, dtype=float) for a in (rho, iota, sigma_iota))
         self.diota_dR_axis = (np.zeros_like(self.rho) if diota_dR_axis is None
                               else np.asarray(diota_dR_axis, dtype=float))
         self.amp, self.ell = float(amp), float(ell)
-        self.R_axis = float(R_axis)
-        self.R_axis_alt = np.atleast_1d(np.asarray(R_axis_alt, dtype=float))
+        self.axis_error = float(axis_error)
         self.q_floor = float(q_floor)
         self.cov_er = (np.zeros((self.rho.size,) * 2) if cov_er is None
                        else np.asarray(cov_er, dtype=float))
         m = int(np.clip(np.ceil(np.ptp(self.rho) / self.ell) + 1, 2, self.rho.size))
         self.rho_test = np.linspace(self.rho.min(), self.rho.max(), m)
-        self._cache = {}
+        self._post = None
 
-    def axis_error(self, R_axis=None):
-        """Axis error [m] for a candidate whose axis is at *R_axis* (None: unknown)."""
-        return _axis_error(self.R_axis, self.R_axis_alt, R_axis)
-
-    def _gp(self, dR):
-        """GP factor, posterior at ``rho_test`` (mean, Cholesky) and log|2 pi Sigma| for *dR*."""
-        key = round(float(dR), 4)   # one posterior per 0.1 mm of axis error
-        if key not in self._cache:
-            f = _gp_factor(self.rho, self.iota, self.amp, self.ell, self._noise(key))
+    def _gp(self):
+        """GP factor, posterior at ``rho_test`` (mean, Cholesky) and log|2 pi Sigma|."""
+        if self._post is None:
+            f = _gp_factor(self.rho, self.iota, self.amp, self.ell, self._noise())
             mean, cov = self._predict(f, self.rho_test)
             Lt = _chol(cov)
-            self._cache[key] = (f, mean, Lt, 2.0 * np.log(np.diag(Lt)).sum()
-                                + mean.size * np.log(2.0 * np.pi))
-        return self._cache[key]
+            self._post = (f, mean, Lt, 2.0 * np.log(np.diag(Lt)).sum() + mean.size * np.log(2.0 * np.pi))
+        return self._post
 
-    def _noise(self, dR):
-        return _noise(self.sigma_iota, self.cov_er, self.diota_dR_axis * dR)
+    def _noise(self):
+        return _noise(self.sigma_iota, self.cov_er, self.diota_dR_axis * self.axis_error)
 
     def _predict(self, f, rho):
         L, alpha, Hl, A, beta = f
@@ -374,53 +355,43 @@ class QCheck:
         return (V.T @ alpha + R @ beta, self.amp ** 2 * _matern52(rho, rho, self.ell)
                 - V.T @ V + R @ np.linalg.solve(A, R.T))
 
-    def predict(self, rho, R_axis=None):
-        """Posterior mean and covariance of iota at *rho* (axis error as in :meth:`gp_loglike`)."""
-        return self._predict(self._gp(self.axis_error(R_axis))[0],
-                             np.atleast_1d(np.asarray(rho, dtype=float)))
+    def predict(self, rho):
+        """Posterior mean and covariance of iota at *rho*."""
+        return self._predict(self._gp()[0], np.atleast_1d(np.asarray(rho, dtype=float)))
 
-    def gp_loglike(self, psi_N, q, R_axis=None):
-        """``dict(logL, d2, m, axis_error)`` of the candidate profiles q(psi_N), one per row of *q*.
+    def gp_loglike(self, psi_N, q):
+        """``dict(logL, d2, m)`` of the candidate profiles q(psi_N), one per row of *q*.
 
-        Each row's iota is placed on rho_tor by its own q.  *R_axis* is the
-        candidates' magnetic-axis R (scalar or one per row; None: not known),
-        which sets each row's axis error.  ``d2`` is the row's Mahalanobis
+        Each row's iota is placed on rho_tor by its own q.  ``d2`` is the row's Mahalanobis
         distance from the posterior at ``rho_test`` (chi^2 with ``m`` degrees
         of freedom for a draw from it) and ``logL = -(d2 + log|2 pi Sigma|) /
         2``.  A row with non-finite q gets NaN.
         """
-        iota, dR = self._candidates(psi_N, q, self.rho_test, R_axis)
-        keys = np.round(dR, 4)
-        d2, logdet = np.empty(dR.size), np.empty(dR.size)
-        for key in np.unique(keys):
-            rows = keys == key
-            _, mean, Lt, logdet[rows] = self._gp(key)
-            z = solve_triangular(Lt, (iota[rows] - mean).T, lower=True, check_finite=False)
-            d2[rows] = np.sum(z ** 2, axis=0)
-        return dict(logL=-0.5 * (d2 + logdet), d2=d2, m=self.rho_test.size, axis_error=dR)
+        _, mean, Lt, logdet = self._gp()
+        z = solve_triangular(Lt, (self._candidates(psi_N, q, self.rho_test) - mean).T, lower=True,
+                             check_finite=False)
+        d2 = np.sum(z ** 2, axis=0)
+        return dict(logL=-0.5 * (d2 + logdet), d2=d2, m=self.rho_test.size)
 
-    def points_loglike(self, psi_N, q, R_axis=None):
-        """``dict(logL, chi2, nu, axis_error)`` of the candidates against the q points alone.
+    def points_loglike(self, psi_N, q):
+        """``dict(logL, chi2, nu)`` of the candidates against the q points alone.
 
         No GP: each row's iota at the points' rho_tor against the points, with
-        covariance ``Sigma = diag(sigma_iota^2) + cov_er + dR^2 g g^T`` (axis
-        error as in :meth:`gp_loglike`); ``chi2 = r^T Sigma^-1 r`` over the ``nu``
-        points and ``logL = -(chi2 + log|2 pi Sigma|) / 2``.  A cross-check of
-        :meth:`gp_loglike`, free of the GP prior.
+        covariance ``Sigma = diag(sigma_iota^2) + cov_er + dR^2 g g^T``;
+        ``chi2 = r^T Sigma^-1 r`` over the ``nu`` points and ``logL = -(chi2 +
+        log|2 pi Sigma|) / 2``.  A cross-check of :meth:`gp_loglike`, free of
+        the GP prior.
         """
-        iota, dR = self._candidates(psi_N, q, self.rho, R_axis)
-        r = iota - self.iota
-        chi2, logdet = np.empty(dR.size), np.empty(dR.size)
-        for j, d in enumerate(dR):
-            L = np.linalg.cholesky(self._noise(d))
-            w = solve_triangular(L, r[j], lower=True, check_finite=False)
-            chi2[j] = w @ w
-            logdet[j] = 2.0 * np.log(np.diag(L)).sum() + r.shape[1] * np.log(2.0 * np.pi)
-        return dict(logL=-0.5 * (chi2 + logdet), chi2=chi2, nu=self.rho.size, axis_error=dR)
+        L = np.linalg.cholesky(self._noise())
+        w = solve_triangular(L, (self._candidates(psi_N, q, self.rho) - self.iota).T, lower=True,
+                             check_finite=False)
+        chi2 = np.sum(w ** 2, axis=0)
+        logdet = 2.0 * np.log(np.diag(L)).sum() + self.rho.size * np.log(2.0 * np.pi)
+        return dict(logL=-0.5 * (chi2 + logdet), chi2=chi2, nu=self.rho.size)
 
-    def _candidates(self, psi_N, q, rho, R_axis):
-        """Rows of *q*: iota at *rho* (each placed on rho_tor by its own q; NaN for a
-        non-finite row) and the axis error."""
+    def _candidates(self, psi_N, q, rho):
+        """Rows of *q*: iota at *rho*, each placed on rho_tor by its own q; NaN for a
+        non-finite row."""
         q = np.atleast_2d(np.asarray(q, dtype=float))
         n = q.shape[0]
         psi = np.broadcast_to(np.atleast_2d(np.asarray(psi_N, dtype=float)), q.shape)
@@ -429,34 +400,32 @@ class QCheck:
             if np.all(np.isfinite(y)):
                 r, qq = _q_on_rho(x, y)
                 iota[i] = np.interp(rho, r, 1.0 / qq)
-        R_c = [None] * n if R_axis is None else np.broadcast_to(np.asarray(R_axis, float), (n,))
-        return iota, np.array([self.axis_error(r) for r in R_c])
+        return iota
 
     def save(self, path):
         np.savez(path, rho=self.rho, iota=self.iota, sigma_iota=self.sigma_iota,
                  diota_dR_axis=self.diota_dR_axis, amp=self.amp, ell=self.ell,
-                 R_axis=self.R_axis, R_axis_alt=self.R_axis_alt, q_floor=self.q_floor,
-                 cov_er=self.cov_er)
+                 axis_error=self.axis_error, q_floor=self.q_floor, cov_er=self.cov_er)
 
     @classmethod
     def load(cls, path):
         with np.load(path) as f:
             return cls(f["rho"], f["iota"], f["sigma_iota"], float(f["amp"]), float(f["ell"]),
-                       f["diota_dR_axis"], float(f["R_axis"]), f["R_axis_alt"], float(f["q_floor"]),
-                       f["cov_er"])
+                       f["diota_dR_axis"], float(f["axis_error"]), float(f["q_floor"]), f["cov_er"])
 
 
-def fit_q_check(points, R_axis_alt=(), q_floor=None):
+def fit_q_check(points, axis_error=0.0, q_floor=None):
     """:class:`QCheck` of *points* (``rho``, ``iota``, ``sigma_iota``, and
-    optionally ``cov_iota_er``, ``diota_dR_axis``, ``R_axis``; e.g. :func:`q_points`), with
-    other reconstructions' axes *R_axis_alt* [m].
+    optionally ``cov_iota_er``, ``diota_dR_axis``; e.g. :func:`q_points`), with
+    the error *axis_error* [m] in R of their reference axis, e.g. how far
+    independent reconstructions' axes typically disagree.  It does not depend on
+    the candidates, so an offset axis never loosens a candidate's score.
 
     With *q_floor*, points below it are clipped to it (iota <= 1 / q_floor) for
     candidates that cannot go below that q by construction: they are then
     judged only on how far they sit above what the floor forces.
 
-    ``(amp, ell)`` maximise the marginal likelihood, with the axis error of
-    *R_axis_alt* alone, by bounded L-BFGS-B from a fixed grid of starts
+    ``(amp, ell)`` maximise the marginal likelihood by bounded L-BFGS-B from a fixed grid of starts
     (deterministic).  ``amp`` is at least the median point error: when a
     quadratic fits within the errors, it would otherwise collapse, and the
     test would claim structure the data cannot resolve.  ``ell`` lies in
@@ -472,8 +441,7 @@ def fit_q_check(points, R_axis_alt=(), q_floor=None):
         y = np.minimum(y, 1.0 / q_floor)
     if x.size < 3:
         raise ValueError(f"fit_q_check: {x.size} finite points; at least 3 are required")
-    R_axis = float(points.get("R_axis", np.nan))
-    dR = _axis_error(R_axis, R_axis_alt)
+    dR = float(axis_error)
     se = np.sqrt(s ** 2 + np.diag(cov) + (g * dR) ** 2)
     bounds = np.log([(np.median(se), 10.0), (0.05, 2.0 * np.ptp(x))])
     starts = [np.clip(np.log([a, ell]), bounds[:, 0], bounds[:, 1])
@@ -481,8 +449,7 @@ def fit_q_check(points, R_axis_alt=(), q_floor=None):
     noise = _noise(s, cov, g * dR)
     best = min((minimize(_neg_log_ml, th, args=(x, y, noise), method="L-BFGS-B", bounds=bounds)
                 for th in starts), key=lambda r: r.fun)
-    return QCheck(x, y, s, *np.exp(best.x), g, R_axis, R_axis_alt,
-                  np.nan if q_floor is None else q_floor, cov)
+    return QCheck(x, y, s, *np.exp(best.x), g, dR, np.nan if q_floor is None else q_floor, cov)
 
 
 def plot_q_points(points, qc=None, profiles=(), ax=None):
@@ -490,14 +457,14 @@ def plot_q_points(points, qc=None, profiles=(), ax=None):
     where :meth:`QCheck.gp_loglike` compares, and *profiles*.
 
     *points* as from :func:`q_points`; the error bars include the E_r error and, with
-    *qc*, its axis error for a candidate of unknown axis.  *profiles*: ``(label, psi_N,
+    *qc*, its axis error.  *profiles*: ``(label, psi_N,
     q)`` each, placed on rho_tor by its own q.  Returns the axes.
     """
     import matplotlib.pyplot as plt
 
     ax = plt.subplots(figsize=(5.0, 3.5))[1] if ax is None else ax
     iota = np.asarray(points["iota"], dtype=float)
-    dR = 0.0 if qc is None else qc.axis_error()
+    dR = 0.0 if qc is None else qc.axis_error
     g = np.asarray(points.get("diota_dR_axis", 0.0)) * dR
     s = np.sqrt(np.asarray(points["sigma_iota"]) ** 2 + g ** 2
                 + np.diag(points.get("cov_iota_er", np.zeros((iota.size, iota.size)))))
