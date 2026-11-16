@@ -287,6 +287,29 @@ def test_gp_prefers_the_true_profile():
     assert res["d2"][0] < res["m"]
 
 
+def test_gp_modes_follow_the_data():
+    p, rows = _points(), [1.02 * _q(PSI), 0.97 * _q(PSI)]
+    qc = lambda s, ell: QCheck(p["rho"], p["iota"], np.full(p["rho"].size, s), 0.05, ell)
+    assert qc(1.0, 0.4).gp_loglike(PSI, rows)["m"] == 2          # errors far above the prior: the flat basis
+    sharp = qc(1e-4, 0.05)                                          # every mode resolved: the points check
+    res, pts = sharp.gp_loglike(PSI, rows), sharp.points_loglike(PSI, rows)
+    assert res["m"] == p["rho"].size
+    np.testing.assert_allclose(res["d2"], pts["chi2"], rtol=1e-9)
+
+
+def test_gp_d2_is_chi2_on_its_modes():
+    p = _points()
+    qc = QCheck(p["rho"], p["iota"], p["sigma_iota"], 0.05, 0.3)
+    L, m = np.linalg.cholesky(qc._noise()), qc.gp_loglike(PSI, _q(PSI))["m"]
+    rng = np.random.default_rng(1)
+    d2 = []
+    for _ in range(400):                   # the true profile against noisy points
+        qc.iota = p["iota"] + L @ rng.standard_normal(p["rho"].size)
+        d2.append(qc.gp_loglike(PSI, _q(PSI))["d2"][0])
+    assert 2 < m < p["rho"].size
+    assert abs(np.mean(d2) - m) < 4 * np.sqrt(2 * m / len(d2))
+
+
 def test_axis_error_is_given(tmp_path):
     p = _points()
     g = np.linspace(2.0, 0.1, p["rho"].size)                 # largest near the axis
@@ -320,7 +343,7 @@ def test_gp_noise_is_rank_one():
     p = _points()
     g = np.linspace(1.0, -0.5, p["rho"].size)
     qc = QCheck(p["rho"], p["iota"], p["sigma_iota"], 0.05, 0.4, g, axis_error=0.03)
-    L = qc._gp()[0][0]
+    L = qc._gp()[0]
     K = (0.05 ** 2 * _matern52(p["rho"], p["rho"], 0.4) + np.diag(p["sigma_iota"] ** 2)
          + 0.03 ** 2 * np.outer(g, g))
     np.testing.assert_allclose(L @ L.T, K, rtol=1e-6, atol=1e-12)
@@ -374,7 +397,7 @@ def test_plot_q_points(scaled):
     s = np.hypot(pts["sigma_iota"], pts["diota_dR_axis"] * 0.01)   # the axis error is in the bars
     np.testing.assert_allclose(half, s / pts["iota"] ** 2, rtol=1e-6)
     assert [t.get_text() for t in ax.get_legend().get_texts()] == [
-        r"GP fit to MSE q ($\pm1\sigma$)", r"q from MSE ($\pm1\sigma$)", "where the GP check compares",
+        r"GP fit to MSE q ($\pm1\sigma$)", r"q from MSE ($\pm1\sigma$)",
         "true"]                                                  # the MSE side first, then the profiles
     plt.close(ax.figure)
 
@@ -385,6 +408,6 @@ def test_plot_shows_the_q_floor():
     import matplotlib.pyplot as plt
     ax = plot_q_points(_points(), fit_q_check(_points(), q_floor=1.05))
     labels = [t.get_text() for t in ax.get_legend().get_texts()]
-    assert labels[3] == "q floor 1.05: points below it clipped"
+    assert labels[2] == "q floor 1.05: points below it clipped"
     assert 1.05 in [ln.get_ydata()[0] for ln in ax.lines]
     plt.close(ax.figure)

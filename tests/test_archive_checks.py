@@ -112,5 +112,6 @@ def test_gp_on_the_points_needs_no_mse():
     qc, _, _, (psi, q) = _checks()
     alone = check_archive(GOLDEN, q_check=qc, gp=True)
     r0 = next(r for r in alone if r["draw"] == 0)
-    assert r0["d2_gp"] == pytest.approx(qc.gp_loglike(psi, q)["d2"][0]) and r0["m_gp"] == qc.rho_test.size
+    gp = qc.gp_loglike(psi, q)
+    assert r0["d2_gp"] == pytest.approx(gp["d2"][0]) and r0["m_gp"] == gp["m"]
     assert np.isnan(r0["d2_gp_own"]) and "gp_own: needs mse" in r0["status"]

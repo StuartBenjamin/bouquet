@@ -6,7 +6,7 @@ Blocks are in :mod:`bouquet.mse`'s schema; the reference equilibrium is a
 * GP: :func:`q_points` turns the angles into iota = 1/q points on a reference
   equilibrium (E_r first mapped onto it by :func:`mse_er_at_chords`),
   :func:`fit_q_check` fits a GP to them, and :meth:`QCheck.gp_loglike` scores
-  candidate q profiles against its posterior;
+  candidate q profiles against the points on the modes they resolve under its prior;
 * points alone: :meth:`QCheck.points_loglike` scores them against the points;
 * direct: :func:`direct_loglike` compares the angles with a candidate's own field
   (no mapping; needs the candidate's equilibrium, not just its q).  For
@@ -32,6 +32,10 @@ from .sampling import _CHOL_JITTER
 #: A chord is left out when its tan(gamma) lies within this many sigma_eff of
 #: the pole of lam(tan(gamma)) (:func:`q_points`): lam is far from Gaussian there.
 POLE_SIGMAS = 3.0
+
+#: A mode of the q points counts in :meth:`QCheck.gp_loglike` when the GP prior's variance
+#: along it exceeds the points' error variance (signal-to-noise > 1).
+GP_MODE_SNR = 1.0
 
 
 def _field(eq, ch):
@@ -314,10 +318,8 @@ class QCheck:
     ``g = diota_dR_axis`` as one axis offset moves every point together
     (Rasmussen & Williams 2006, sec. 2.7).  ``dR`` = *axis_error* [m] is the
     error in R of the points' reference axis, the same for every candidate.
-    Candidates are scored on the posterior at ``m``
-    evenly spaced rho over the points' range, ``m = clip(ceil(range / ell) +
-    1, 2, n)``: about one per correlation length, where the posterior
-    covariance is well conditioned.  *q_floor* records the floor the points were
+    Candidates are scored on the modes the points resolve (:meth:`_modes`), so
+    no test points are placed.  *q_floor* records the floor the points were
     clipped to (:func:`fit_q_check`), or NaN.
     """
 
@@ -332,18 +334,28 @@ class QCheck:
         self.q_floor = float(q_floor)
         self.cov_er = (np.zeros((self.rho.size,) * 2) if cov_er is None
                        else np.asarray(cov_er, dtype=float))
-        m = int(np.clip(np.ceil(np.ptp(self.rho) / self.ell) + 1, 2, self.rho.size))
-        self.rho_test = np.linspace(self.rho.min(), self.rho.max(), m)
-        self._post = None
+        self._fit = self._mode_basis = None
 
     def _gp(self):
-        """GP factor, posterior at ``rho_test`` (mean, Cholesky) and log|2 pi Sigma|."""
-        if self._post is None:
-            f = _gp_factor(self.rho, self.iota, self.amp, self.ell, self._noise())
-            mean, cov = self._predict(f, self.rho_test)
-            Lt = _chol(cov)
-            self._post = (f, mean, Lt, 2.0 * np.log(np.diag(Lt)).sum() + mean.size * np.log(2.0 * np.pi))
-        return self._post
+        """The GP factor through the points (:func:`_gp_factor`)."""
+        if self._fit is None:
+            self._fit = _gp_factor(self.rho, self.iota, self.amp, self.ell, self._noise())
+        return self._fit
+
+    def _modes(self):
+        """``(L, U)``: the points' error covariance ``L L^T``, and an orthonormal basis (columns)
+        of the modes the points resolve, in the frame where their errors are white: the flat
+        basis (b0, b1), and the eigenvectors of the Matern prior's covariance off it whose
+        eigenvalue exceeds :data:`GP_MODE_SNR` (the flat prior's limit of the prior's
+        signal-to-noise eigenvectors)."""
+        if self._mode_basis is None:
+            L = np.linalg.cholesky(self._noise())
+            Q = np.linalg.qr(solve_triangular(L, _basis(self.rho), lower=True))[0]
+            P = np.eye(self.rho.size) - Q @ Q.T
+            K = solve_triangular(L, self.amp ** 2 * _matern52(self.rho, self.rho, self.ell), lower=True)
+            gam, V = np.linalg.eigh(P @ solve_triangular(L, K.T, lower=True) @ P)
+            self._mode_basis = (L, np.column_stack([Q, V[:, gam > GP_MODE_SNR]]))
+        return self._mode_basis
 
     def _noise(self):
         return _noise(self.sigma_iota, self.cov_er, self.diota_dR_axis * self.axis_error)
@@ -357,21 +369,23 @@ class QCheck:
 
     def predict(self, rho):
         """Posterior mean and covariance of iota at *rho*."""
-        return self._predict(self._gp()[0], np.atleast_1d(np.asarray(rho, dtype=float)))
+        return self._predict(self._gp(), np.atleast_1d(np.asarray(rho, dtype=float)))
 
     def gp_loglike(self, psi_N, q):
         """``dict(logL, d2, m)`` of the candidate profiles q(psi_N), one per row of *q*.
 
-        Each row's iota is placed on rho_tor by its own q.  ``d2`` is the row's Mahalanobis
-        distance from the posterior at ``rho_test`` (chi^2 with ``m`` degrees
-        of freedom for a draw from it) and ``logL = -(d2 + log|2 pi Sigma|) /
-        2``.  A row with non-finite q gets NaN.
+        Each row's iota is placed on rho_tor by its own q.  Its residual at the points,
+        whitened by their error covariance, is projected on the ``m`` modes they resolve
+        (:meth:`_modes`); ``d2`` is the projection's squared length (chi^2 with ``m``
+        degrees of freedom for the true profile) and ``logL = -(d2 + m log 2 pi) / 2``.
+        :meth:`points_loglike` is the same over all ``n`` directions.  A row with non-finite
+        q gets NaN.
         """
-        _, mean, Lt, logdet = self._gp()
-        z = solve_triangular(Lt, (self._candidates(psi_N, q, self.rho_test) - mean).T, lower=True,
+        L, U = self._modes()
+        w = solve_triangular(L, (self._candidates(psi_N, q, self.rho) - self.iota).T, lower=True,
                              check_finite=False)
-        d2 = np.sum(z ** 2, axis=0)
-        return dict(logL=-0.5 * (d2 + logdet), d2=d2, m=self.rho_test.size)
+        d2 = np.sum((U.T @ w) ** 2, axis=0)
+        return dict(logL=-0.5 * (d2 + U.shape[1] * np.log(2.0 * np.pi)), d2=d2, m=U.shape[1])
 
     def points_loglike(self, psi_N, q):
         """``dict(logL, chi2, nu)`` of the candidates against the q points alone.
@@ -453,8 +467,7 @@ def fit_q_check(points, axis_error=0.0, q_floor=None):
 
 
 def plot_q_points(points, qc=None, profiles=(), ax=None):
-    """q of the MSE points (+-1 sigma) on rho_tor, with *qc*'s posterior band, the points
-    where :meth:`QCheck.gp_loglike` compares, and *profiles*.
+    """q of the MSE points (+-1 sigma) on rho_tor, with *qc*'s posterior band, and *profiles*.
 
     *points* as from :func:`q_points`; the error bars include the E_r error and, with
     *qc*, its axis error.  *profiles*: ``(label, psi_N,
@@ -470,16 +483,13 @@ def plot_q_points(points, qc=None, profiles=(), ax=None):
                 + np.diag(points.get("cov_iota_er", np.zeros((iota.size, iota.size)))))
     handles = []                                 # legend: the MSE side first, then the profiles
     if qc is not None:
-        rho = np.linspace(qc.rho_test[0], qc.rho_test[-1], 100)
+        rho = np.linspace(qc.rho.min(), qc.rho.max(), 100)
         mean, cov = qc.predict(rho)
         sd = np.sqrt(np.diag(cov))
         handles.append(ax.fill_between(rho, 1.0 / (mean + sd), 1.0 / np.maximum(mean - sd, 1e-3),
                                        alpha=0.3, label=r"GP fit to MSE q ($\pm1\sigma$)"))
     handles.append(ax.errorbar(points["rho"], 1.0 / iota, yerr=s / iota ** 2, fmt="o", ms=3,
                                capsize=2, color="k", label=r"q from MSE ($\pm1\sigma$)", zorder=3))
-    if qc is not None:
-        handles += ax.plot(qc.rho_test, 1.0 / qc.predict(qc.rho_test)[0], "kd", ms=5, zorder=4,
-                           label="where the GP check compares")
     if qc is not None and np.isfinite(qc.q_floor):
         handles.append(ax.axhline(qc.q_floor, color="0.4", ls="--", lw=0.8,
                                   label=f"q floor {qc.q_floor:g}: points below it clipped"))
