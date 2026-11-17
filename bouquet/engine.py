@@ -189,6 +189,9 @@ ENGINE_FIELD_DEFAULTS = {
     # default is unset or False (the value it resolves to there), and only
     # an explicit True is refused
     "check_bistability": None,
+    # the homotopy branch guard, a diagnostic for bistable equilibria (#87; opt-in,
+    # bouquet.homotopy_guard): False = the guard does not exist
+    "guard_bistability": False,
 }
 
 
@@ -412,6 +415,15 @@ def validate_engine_settings(gc) -> None:
         raise ValueError(f"generation.check_bistability must be a bool, or "
                          f"None (resolved per engine: True under 'unified'), "
                          f"got {_cb!r}")
+    _gb = vals["guard_bistability"]
+    if not isinstance(_gb, (bool, np.bool_)):
+        raise ValueError(f"generation.guard_bistability must be a bool, got "
+                         f"{_gb!r}")
+    if _gb and not vals["engine_draw_homotopy"]:
+        raise ValueError("generation.guard_bistability=True watches the "
+                         "engine draws' coil homotopy, but "
+                         "engine_draw_homotopy=False runs none: there is "
+                         "nothing for the guard to watch")
     if vals["engine_draw_q0_row"] and "q0" not in rows:
         raise ValueError("generation.engine_draw_q0_row=True keeps the "
                          "reconstruction's q0 row in the draws, but "
@@ -3261,9 +3273,12 @@ def reconstruction_coil_reg(mygs) -> dict:
     ``source`` and, when known, the ``terms`` as ``coils`` / ``target`` /
     ``weight``).
 
-    * ``"strong (left installed by generate())"`` -- a previous
-      ``generate()`` left its strong regularisation installed
-      (``_strong_coil_reg``; ``Bouquet._reset_solver_state`` clears it);
+    * ``"strong (left installed by generate())"`` -- a strong
+      regularisation stash (``_strong_coil_reg``) is on the solver.  Since
+      1.4.1 ``generate_bouquet`` removes its own on every exit (issue #13,
+      :func:`bouquet.TokaMaker_interface.generate_exit_teardown`), and
+      ``Bouquet._reset_solver_state`` clears it too, so this is a stash
+      set some other way;
     * ``"configured"`` / ``"default"`` -- what :meth:`bouquet.run.Bouquet.
       _apply_coil_reg` installed (``SolverConfig.coil_reg``'s terms at
       their configured weights, or the toward-zero default);

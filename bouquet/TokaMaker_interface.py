@@ -18,6 +18,7 @@ Provides:
     via secant iteration.
 """
 
+import contextlib
 import os
 import tempfile
 import time
@@ -310,6 +311,9 @@ class DrawSolveGuard:
         self.wall_budget_s = (None if wall_budget_s is None
                               else float(wall_budget_s))
         self._draw_t0 = None
+        #: while :meth:`budget_paused` is active: the clock reading at the
+        #: pause (the budget reads the elapsed time as of then)
+        self._paused_at = None
         #: the draws whose budget ran out: {draw: elapsed s when found}
         self.over_budget = {}
         if isinstance(maxits, bool) or (maxits is not None
@@ -487,11 +491,33 @@ class DrawSolveGuard:
             return False
         if self.draw in self.over_budget:
             return True
-        el = time.perf_counter() - self._draw_t0
+        now = (time.perf_counter() if self._paused_at is None
+               else self._paused_at)
+        el = now - self._draw_t0
         if el > self.wall_budget_s:
             self.over_budget[self.draw] = float(el)
             return True
         return False
+
+    @contextlib.contextmanager
+    def budget_paused(self):
+        """Exclude the time spent inside the block from the current draw's
+        wall budget: the budget reads the elapsed time as of the pause while
+        it lasts, and the draw's clock is moved forward by the block's
+        duration on exit (the opt-in homotopy branch guard's continuation
+        sub-steps, a diagnostic, are not charged to the draw).  Nested
+        pauses are one pause."""
+        if self._paused_at is not None or self._draw_t0 is None:
+            yield
+            return
+        t0 = time.perf_counter()
+        self._paused_at = t0
+        try:
+            yield
+        finally:
+            self._paused_at = None
+            if self._draw_t0 is not None:
+                self._draw_t0 += time.perf_counter() - t0
 
     def failures(self, draw):
         """This draw's failed solves, recovered or not (list of dicts)."""
@@ -2867,6 +2893,121 @@ def strong_coil_reg(mygs, targets, soft_reg_weight=1.0e4,
     rt.append(mygs.coil_reg_term({'#VSC': 1.0}, target=0.0,
                                  weight=float(vsc_soft_reg_weight)))
     return rt
+
+
+def generate_entry_snapshot(mygs):
+    """What :func:`generate_exit_teardown` needs from the entry of
+    :func:`generate_bouquet` (review of #100, F7): a copy of the caller's
+    equilibrium object when the solver carries NO record of the
+    reconstruction's coil regularisation (``_recon_coil_reg``; a functional
+    caller that did not go through ``Bouquet.setup_solver``).  The coil
+    regularisation lives in that object (OpenFUSIONToolkit's ``copy_eq``
+    copies its matrix, targets and weights), and there is no other way to
+    read back what the caller installed.  ``None`` when the record exists
+    (the teardown re-installs it) or the solver cannot copy its equilibrium.
+    Never raises."""
+    if getattr(mygs, "__dict__", {}).get("_recon_coil_reg") is not None:
+        return None
+    if not (hasattr(mygs, "copy_eq") and hasattr(mygs, "replace_eq")):
+        return None
+    try:
+        return mygs.copy_eq()
+    except Exception:
+        return None
+
+
+def generate_exit_teardown(mygs, entry_eq=None):
+    """Put back the solver state ``generate_bouquet`` changed for its draws
+    (issue #13); run on every exit of :func:`generate_bouquet`, an
+    exception included.  Returns a record of what was done.
+
+    The draw phase installs a strong coil regularisation (stashed as
+    ``mygs._strong_coil_reg``) and, with ``coil_drift_hard_factor``, hard
+    coil bounds (stashed as ``mygs._coil_drift_bounds``).  Left in place,
+    a second run in the same process (a direct functional caller, or two
+    ``generate()`` calls on one prepared baseline) starts under them.  On
+    exit:
+
+    * the coil regularisation is the reconstruction's own term list
+      (``mygs._recon_coil_reg``, published by ``Bouquet._apply_coil_reg``);
+      the equilibrium is then not touched (the next run's entry restores
+      its own starting state);
+    * with no such record (a functional caller), the CALLER'S
+      regularisation, whatever it was: the equilibrium object copied at
+      entry (*entry_eq*, :func:`generate_entry_snapshot`) is restored, and
+      it carries the caller's coil regularisation.  The solver is therefore
+      left at the caller's entry equilibrium (psi, coil currents,
+      constraints and targets as they were), not at the last draw;
+    * only when neither is available (no record and no entry copy) and
+      this run left the strong regularisation installed, the toward-zero
+      default ``setup_solver`` installs without a configured ``coil_reg``
+      (every coil at weight 1, the #VSC at 1e-2), recorded as a guess;
+    * the coil bounds are released (``set_coil_bounds(None)``, +/-1e98),
+      on a solver already in the bounded coil mode or with bounds on
+      record only (the mode is one-way; see
+      :mod:`bouquet.solver_state`);
+    * the ``_coil_drift_bounds`` and ``_strong_coil_reg`` stashes are
+      removed.
+
+    A failure is printed and recorded, never raised (this runs in a
+    ``finally``)."""
+    from .solver_state import COIL_SOLVE_BOUNDED, coil_solve_mode
+    rec = dict(coil_reg=None, bounds_released=False, stashes_cleared=[])
+    d = getattr(mygs, "__dict__", {})
+    try:
+        terms = d.get("_recon_coil_reg")
+        if terms is not None:
+            mygs.set_coil_reg(reg_terms=list(terms))
+            rec["coil_reg"] = "reconstruction"
+        elif entry_eq is not None:
+            mygs.replace_eq(source_eq=entry_eq)
+            rec["coil_reg"] = ("the caller's (the entry equilibrium "
+                               "restored)")
+        elif d.get("_strong_coil_reg") is not None:
+            dflt = [mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.0)
+                    for name in mygs.coil_sets]
+            dflt.append(mygs.coil_reg_term({'#VSC': 1.0}, target=0.0,
+                                           weight=1e-2))
+            mygs.set_coil_reg(reg_terms=dflt)
+            rec["coil_reg"] = ("default (neither the reconstruction's nor "
+                               "the caller's is on record)")
+            print("  [teardown] no record of the coil regularisation the "
+                  "run started under: the toward-zero default is installed")
+    except Exception as exc:
+        rec["coil_reg_error"] = f"{type(exc).__name__}: {exc}"
+        print(f"  [teardown] coil-regularisation restore failed ({exc})")
+    try:
+        if (hasattr(mygs, "set_coil_bounds")
+                and (d.get("_coil_drift_bounds") is not None
+                     or coil_solve_mode(mygs) == COIL_SOLVE_BOUNDED)):
+            mygs.set_coil_bounds(None)
+            rec["bounds_released"] = True
+    except Exception as exc:
+        rec["bounds_error"] = f"{type(exc).__name__}: {exc}"
+        print(f"  [teardown] coil-bound release failed ({exc})")
+    for k in ("_coil_drift_bounds", "_strong_coil_reg"):
+        if k in d:
+            try:
+                delattr(mygs, k)
+                rec["stashes_cleared"].append(k)
+            except Exception:
+                pass
+    return rec
+
+
+def _with_exit_teardown(fn):
+    """Run :func:`generate_exit_teardown` on every exit of *fn* (#13), with
+    the entry snapshot :func:`generate_entry_snapshot` takes."""
+    import functools
+
+    @functools.wraps(fn)
+    def generate_bouquet(mygs, *args, **kwargs):
+        entry_eq = generate_entry_snapshot(mygs)
+        try:
+            return fn(mygs, *args, **kwargs)
+        finally:
+            generate_exit_teardown(mygs, entry_eq=entry_eq)
+    return generate_bouquet
 
 
 def _install_weak_swb_coil_reg(mygs):
@@ -5626,9 +5767,6 @@ def _extend_scale_block(scales, rng, scale_range, chunk):
 ISO_UPDATE_REF_POINTS = 9000
 
 
-@accepts_old_names
-
-
 def _store_transport(mygs, header, scan_key, count, src, x_kin, ne, te, zeff, ti,
                      x_eq, p_thermal, Ip, coord, p_fast, psi_pad, geom=None):
     """chi_perp and tau_E of the equilibrium *mygs* holds (bouquet.transport)
@@ -5646,6 +5784,8 @@ def _store_transport(mygs, header, scan_key, count, src, x_kin, ne, te, zeff, ti
               f"{'the baseline' if count is None else f'draw {count}'} ({exc})")
 
 
+@accepts_old_names
+@_with_exit_teardown
 def generate_bouquet(
     mygs,
     psi_N,
@@ -6251,6 +6391,36 @@ def generate_bouquet(
     # coil bounds (built below only when those bounds are installed)
     _hard_sat_guard = None
 
+    # ---- names the per-draw loop reads, bound before the coil branch -----
+    # (#95) With coil handling off (coil_drift=None) the branch below never
+    # runs, and the loop read these names unbound (UnboundLocalError before
+    # any draw was archived).  Bound here to their "nothing captured" values;
+    # the branch overwrites them exactly as before when coil handling is on.
+    #
+    # SKIP_HARD / SKIP_ISO / SKIP_HOMOTOPY env-var reads at function scope so
+    # the per-draw loop's pre-solve coil-pin block can reference them (it runs
+    # BEFORE the Step-3 homotopy block where these were originally defined).
+    # Reading them once gives a consistent view across all draws -- if a user
+    # toggles an env var mid-run we use the value captured here, not a
+    # per-draw race.
+    _skip_hard = os.environ.get('SKIP_HARD', '0') == '1'
+    _skip_iso  = os.environ.get('SKIP_ISO',  '0') == '1'
+    _skip_homotopy = os.environ.get('SKIP_HOMOTOPY', '0') == '1'
+    # the warm-start snapshot of the reconstruction state: none captured
+    # (each draw then starts from the solver's state as the draw method
+    # leaves it)
+    _warmstart_eq_snap = None
+    _warmstart_psi = None
+    _warmstart_coils = None
+    _warmstart_iso_pts = None
+    _warmstart_iso_w = None
+    _warmstart_captured = False
+
+    def _report_bnd(stage):
+        """The boundary-deviation diagnostic: a no-op unless the coil
+        branch below installs its reference LCFS (it rebinds this name)."""
+        return None
+
     # ---- the reconstruction's delivered state, restored FIRST (review F6)
     # The q0 sawtooth check, the strong-reg / drift reference coils
     # (_initial_coils) and the Ip every draw is aligned to (_recon_Ip) are
@@ -6650,16 +6820,8 @@ def generate_bouquet(
         _baseline_psi = mygs.get_psi(False).copy()
         _baseline_coils = dict(_initial_coils)
 
-        # Hoist SKIP_HARD / SKIP_ISO / SKIP_HOMOTOPY env-var reads
-        # to function scope so the per-draw loop's pre-solve coil-pin
-        # block can reference them (it runs BEFORE the Step-3 homotopy
-        # block where these were originally defined).  Reading at
-        # function entry also gives a consistent view across all
-        # draws -- if a user toggles an env var mid-run we use the
-        # value captured here, not a per-draw race.
-        _skip_hard = os.environ.get('SKIP_HARD', '0') == '1'
-        _skip_iso  = os.environ.get('SKIP_ISO',  '0') == '1'
-        _skip_homotopy = os.environ.get('SKIP_HOMOTOPY', '0') == '1'
+        # (SKIP_HARD / SKIP_ISO / SKIP_HOMOTOPY are read at function scope,
+        # before the coil-handling branch: see "coil handling off" above.)
 
         # Warm-start snapshot for per-draw state restoration.
         # Captured AT THE END of the first successful draw (not at
@@ -8265,6 +8427,13 @@ def generate_bouquet(
                     _passes = (homotopy_passes if homotopy_passes is not None
                                else [(coil_drift, coil_drift)])
                     _m.cap_solver(mygs)
+                    # the branch guard of the stages (opt-in diagnostic,
+                    # guard_bistability, #87; bouquet.homotopy_guard): None
+                    # -- every method by default -- solves each stage with
+                    # one plain mygs.solve(), as before the setting existed
+                    _hguard = _m.homotopy_guard(
+                        mygs, baseline_coils=_baseline_coils,
+                        vsc_pair=_vsc_in_set)
                     _last_good_psi   = mygs.get_psi(False).copy()
                     _last_good_coils = dict(_baseline_coils)  # fallback only
                     # Full snapshot of the last good pass (psi, coils, profile
@@ -8321,7 +8490,22 @@ def generate_bouquet(
                         _label = (f"pass {_p_idx+1}/{len(_passes)}"
                                    if len(_passes) > 1 else "single-pass")
                         try:
-                            mygs.solve()
+                            if _hguard is None:
+                                mygs.solve()
+                            else:
+                                # the stage's starting state was solved
+                                # under the last good stage's bounds (stage
+                                # 1: the loop's, its hard bounds if any)
+                                _hguard.solve_stage(
+                                    mygs, _p_idx, f"homotopy {_label}",
+                                    _bounds_p,
+                                    prev_bounds=(
+                                        _build_bounds(
+                                            *_passes[_final_pass_idx])
+                                        if _final_pass_idx >= 0 else
+                                        getattr(mygs, '_coil_drift_bounds',
+                                                None)),
+                                    first=(_p_idx == 0))
                             # Snapshot success
                             _cur, _ = mygs.get_coil_currents()
                             _all_drifts = _coil_drift_pct(

@@ -1,5 +1,131 @@
 # Bouquet — change summaries
 
+## 1.4.1 — bug fixes, a template-fallback warning, an opt-in branch-guard diagnostic (2026-10-30)
+
+A patch on 1.4.0: bug fixes, a warning and an opt-in experimental
+diagnostic. No default moves. The goldens' numbers are identical to 1.4.0
+(the shipped fixtures never reach the changed code, or reach it bit for
+bit; the two h5 goldens were regenerated and differ only in provenance).
+One fix changes output bytes on purpose: the IMAS export's
+`profiles_2d.psi` is no longer transposed (#101, below).
+
+- **`generate_bouquet(coil_drift=None)` archives its draws (#95).** With
+  coil handling off the per-draw loop read names only the coil-handling
+  block bound, and every run raised `UnboundLocalError` before archiving.
+  They are bound before the branch now. A coil-off draw is stamped
+  `homotopy_pass` -1 with NaN coil drifts, so the legacy drift verdict
+  `coil_drift_in_spec` is False. Its `in_spec` is the in-spec rule's
+  verdict with the configured coil filter: always False under the legacy
+  filter; under the default χ² filter its coil currents are judged like
+  any draw's. (Under the legacy filter a coil-off run with
+  `n_inspec_target` set therefore cannot reach its target.)
+- **p-file ion species roles by charge, mass and `nb` (#19).**
+  `PFile.compute_zeff` read the main ion as `Z[-2]`, which on a two-entry
+  `[impurity, main]` block is the impurity (a carbon plasma came out at
+  Z_eff ~ 30). `PFile.ion_roles()` identifies the beam (the last species,
+  only with a non-zero `nb`), the main ion (the first hydrogenic species,
+  Z = 1 and 0.5 ≤ A ≤ 3.5) and the impurity (the first other one). A block
+  with no non-hydrogenic species (`[D, D]`, `[D, T]`: a clean plasma)
+  loads as in 1.4.0, Z_eff = 1. It raises when a role is ambiguous (a
+  two-entry `[C, D]` block with a non-zero `nb`, in `compute_zeff`) and
+  when a non-hydrogenic species lighter than the impurity could be the main
+  ion, i.e. no hydrogenic species precedes the last one (`[C, He, D]`): a
+  non-hydrogenic main ion is not supported. Multi-impurity blocks with a D
+  main ion (`[C, He, D, D]`, `[Ne, C, D, D]`) read as in 1.4.0. The
+  shipped three-entry p-files read bit-identically.
+- **`generate_bouquet` exit teardown (#13).** On every exit, an exception
+  included, it re-installs the reconstruction's coil regularisation (with
+  none on record, a functional caller's own: the equilibrium object copied
+  at entry, which carries it, is restored), releases the coil bounds and
+  removes the `_strong_coil_reg` / `_coil_drift_bounds` stashes, so a
+  second run in the same process does not start under the first one's
+  draw-phase state. A direct `generate_bouquet` caller with no
+  reconstruction reg on record therefore gets its solver back at the
+  equilibrium it passed in (ψ, coil currents, targets, isoflux), not at the
+  last draw. Through the class API the solver was already
+  restored on entry in 1.4.0, so two sequential σ=0 `generate()` calls
+  were identical before and are guarded now; the direct functional path
+  is what the fix changes.
+- **`read_ida_cer` returns B_θ with the force balance's sign.** IDA's
+  `Bpol_midplane` is B_Z at the outboard midplane; `read_ida_cer` now returns
+  B_θ = −B_Z (a geometric identity, for either I_p / B_T direction), so E_r
+  from `radial_field_from_impurity_force_balance` has IDA's own sign (the
+  v_φ B_θ term had the wrong sign). Public API only; the library does not
+  consume it internally. An E_r built with 1.4.0 or earlier from this
+  reader (for example an `e_r` auxiliary channel) has the wrong sign. The
+  agreement with IDA's E_r was checked on normal-orientation cases only;
+  take B_φ from the input (lab-frame) g-file. From #81, by @StuartBenjamin.
+- **The experimental Z_eff classification follows the stored-Z_eff check's
+  rule.** With `ImasSource.zeff_fast_ions=True`, `_dd_zeff` checks a stored
+  `core_profiles.zeff` on every node with n_e > 0 (it was ψ_N ≤ 0.8) and
+  weighs each ion by its charge state `ion[].z_ion` when present, as the
+  default route's check does since 1.4.0; the worst node is stamped and the
+  "matches neither" warning goes through the run's collector. The choice
+  between the two numerators stays on the core ψ_N ≤ 0.8, where the beam
+  makes them differ, so an edge misfit cannot flip it. Experimental route
+  only; dds without `z_ion` whose stored zeff fits on every node read
+  bit-identically.
+- **IDA-hybrid `ni_source="standard"`: the template fallback warns.** A
+  hand-built config without `UncertaintyConfig.ida_path` gets the assumed σ
+  templates on that sub-route although the run's IDA file is in play
+  (`Bouquet.from_imas` sets it). It now says so, naming the channels that
+  fell back and the assumed sigma each got, once per `generate()`; what is
+  resolved is unchanged.
+- **IMAS export: `equilibrium.time_slice[].profiles_2d.psi` is written
+  dim1 (R) first (#101). This changes the exported bytes.** The data
+  dictionary indexes the rectangular `psi` as `[i_R][i_Z]` under
+  `grid.dim1 = R`, `grid.dim2 = Z`. `write_imas_draw` (and so
+  `export_imas_drawset`) wrote the g-file's `[Z][R]` array unchanged under
+  that grid, so **every `profiles_2d.psi` exported before 1.4.1 is
+  transposed**. On the shipped square grids the shape gave no error, but an
+  external reader got the R and Z indices swapped. Any
+  consumer that read `profiles_2d` from such an export has to **re-export**
+  with 1.4.1. The 1-D profiles, `global_quantities`, `boundary` and the
+  flux-surface averages (`gm*`) were right before and are unchanged.
+  bouquet's own reader expects the DD layout and still applies `.T`, so
+  export → re-read gives the g-file array back exactly. It now refuses a
+  `psi` whose shape is not `(len(dim1), len(dim2))`, i.e. a transposed
+  array on a non-square grid. The template's other `profiles_2d` fields are
+  not carried, so `psi` is the only 2-D field written.
+- **An experimental, opt-in diagnostic for bistable equilibria: the
+  homotopy branch guard (#87 stays open).** `GenerationConfig.guard_bistability`
+  (default `False`; unified engine only; the experimental feature
+  `bistability_guard`). It watches each coil-homotopy stage of an engine
+  draw: a stage whose solve moves the magnetic axis more than 1 % of the
+  minor radius (`engine.AXIS_BRANCH_FRAC`) is re-solved from the stage's
+  starting state in sub-steps of 1/2, 1/4 and 1/8, and the draw records what
+  it found (`"legitimate"`: a continuous move; `"crossed"`: the jump persists
+  at 1/8; `"failed"`: a sub-step did not solve; `"held"`: the full step had
+  hopped branches and the continuous state is kept). Its verdict never
+  enters the in-spec rule or a rejection reason, its sub-steps are not
+  charged to the draw's wall budget, and a failure inside it keeps the
+  unguarded state: a draw's acceptance is the same on or off except when
+  `"held"` replaces the jumped state (which never occurred in validation)
+  and when a jumped state cannot be restored, which fails the stage under
+  the homotopy's own rule.
+  Below the threshold it only reads the solver. Stamped per
+  draw (`engine["bistability_guard"]`; attrs `bistability_guard_armed` /
+  `_fired` / `_action`) and per scan (`n_bistability_guard_armed` /
+  `_fired`, `bistability_guard_counts_json`). **What the validation showed:**
+  it does not fix the known bistable case. On that reversed-I_p slice the
+  draws leave the reconstruction's branch earlier, in the draw's bootstrap
+  loop (22 of 28 archived draws entered the homotopy 16.5-17.6 mm below the
+  reconstruction's axis), which the guard does not watch; it stamped 7 of
+  the 28 draws (three continuous moves; four first-stage moves between the
+  solutions, two each way: two persisted at 1/8, `"crossed"`, two stopped
+  at the iteration cap, `"failed"`) and changed none (`"held"` never
+  occurred). On two
+  single-solution slices it flagged 5 of 62 draws, all continuous moves of
+  1.0-1.6 % of a, and left them unchanged; on the reversed-I_p control case
+  it never fired. Cost: only firing draws pay, +2 solves per legitimate firing on the single-solution slices (2-4 on the bistable case); up to 10 per stage; the bistable case took 23 extra solves over 7
+  firings. Use it to locate where a draw leaves its branch, not as a fix;
+  the loop stage is #87's next target. With the setting off no solve, RNG
+  draw, solver-state change or archived number changes (`config_json` gains
+  the flag): both h5 goldens regenerated with numerically identical
+  manifests (only the provenance differs).
+- **Docs:** known-limitations.md drops the #95 entry and rewrites the #87
+  entry (the promised continuity guard is not met yet; see above).
+
 ## 1.4.0 — the unified engine, the magnetics as the in-spec rule, one Z_eff rule (2026-10-18)
 
 This is the summary of everything since 1.3.1. The detailed account is in

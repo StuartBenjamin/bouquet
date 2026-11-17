@@ -1374,6 +1374,12 @@ def _fsa_from_profiles_2d(ts, nlevels=257):
     for name, x in (("dim1", R), ("dim2", Z)):
         if not np.allclose(np.diff(x), x[1] - x[0], rtol=1e-6, atol=0):
             raise ValueError(f"profiles_2d grid {name} is not uniform")
+    if np.shape(p2["psi"]) != (R.size, Z.size):
+        raise ValueError(
+            f"profiles_2d.psi has shape {np.shape(p2['psi'])}, not (len(dim1), "
+            f"len(dim2)) = ({R.size}, {Z.size}): the data dictionary indexes it "
+            "dim1 (R) first.  (bouquet exports before 1.4.1 wrote it "
+            "transposed, #101: re-export them.)")
     # traced with psi rising from axis to edge: a mirrored slice traces the
     # same arrays (the averages do not depend on the psi sign)
     sg = -1.0 if float(p1["psi"][-1]) < float(p1["psi"][0]) else 1.0
@@ -1396,7 +1402,8 @@ def _fsa_from_profiles_2d(ts, nlevels=257):
                FPOL=on_u("f"), PRES=on_u("pressure"),
                PPRIME=on_u("dpressure_dpsi", sg), FFPRIM=on_u("f_df_dpsi", sg),
                QPSI=on_u("q"),
-               PSIRZ=sg * np.asarray(p2["psi"], dtype=float).T,  # [R][Z] -> [Z][R]
+               # the DD's psi[i_R][i_Z] (dim1 = R) -> the g-file's [Z][R]
+               PSIRZ=sg * np.asarray(p2["psi"], dtype=float).T,
                RBBBS=rb, ZBBBS=zb, RLIM=rb, ZLIM=zb,
                CURRENT=0.0, RCENTR=float(ax["r"]), BCENTR=0.0)
     avg = GEQDSKEquilibrium.from_raw(raw, cocos=11, nlevels=nlevels).averages
@@ -1746,7 +1753,8 @@ def _read_ida_omega(path, time_s, psi_N, place=None):
 
 #: psi_N points of the advisory IDA-vs-dd total-ni check: interior (an edge
 #: ratio reports the edge model) and the axis (where a beam peaks).  The last
-#: point also bounds the core :func:`_dd_zeff` classifies Z_eff on.
+#: point also bounds the core on which :func:`_dd_zeff` CHOOSES the numerator
+#: (its consistency check covers every node with n_e > 0).
 NI_FAST_GATE_PSI_N = (0.0, 0.2, 0.4, 0.6, 0.8)
 
 #: Relative IDA-vs-dd TOTAL ni disagreement, at any of
@@ -1889,19 +1897,47 @@ ZEFF_DATASET_RTOL = 5e-2
 
 
 def _dd_zeff(cp, zeff_th, z2_fast, ne, psi_N, record=None):
-    """``(zeff, includes_fast)``: the Z_eff the dd's own bootstrap consumed.
+    """``(zeff, includes_fast)``: the Z_eff the dd's own bootstrap consumed
+    (the EXPERIMENTAL classification, ``ImasSource.zeff_fast_ions``).
 
     A stored ``cp1d.zeff`` may or may not include the fast ions in its
     numerator (IMAS's expression does; FUSE may have stored it before the
-    beam), so it is classified against both on the core (``psi_N <= 0.8``).
+    beam), so it is classified against both:
+
+    * the CHOICE between the two numerators is made on the core, the nodes
+      with ``n_e > 0``, finite inputs and ``psi_N <= NI_FAST_GATE_PSI_N[-1]``
+      (= 0.8), where the beam sits and the two numerators differ; at the
+      edge z2_fast ~ 0 and they coincide, so an edge misfit (a clipped or
+      zeroed edge value) must not decide it (review of #100, F1).  With no
+      core node, every node with n_e > 0 decides.
+    * the CONSISTENCY check follows :func:`_dd_total_zeff`'s rule (1.4.1):
+      the misfits ``d_th`` / ``d_all`` are the max over EVERY node with
+      ``n_e > 0`` and finite inputs, the pedestal and the edge included; a
+      zero or non-finite stored value gives an infinite / NaN misfit; when
+      neither numerator fits within :data:`ZEFF_CONVENTION_RTOL` there, the
+      worst node is named in a warning (issued through the run's collector,
+      :func:`bouquet.utils.warn_or_defer`), and the stored array is still
+      the one returned, as before.
+
+    The caller passes *zeff_th* / *z2_fast* weighted by each ion's CHARGE
+    STATE (``ion[].z_ion`` when present, else ``z_n``;
+    :func:`_ion_charge_state`), so the numerators are the IMAS definition's,
+    in the check and in the no-dataset value alike.  Without ``z_ion`` they
+    are the ``z_n`` sums bit for bit.
 
     *record* (a dict, optional) is filled with how the convention was
     decided (owner item E1, archived as ``li_metrics["zeff_dd_provenance"]``):
     ``convention`` ("thermal+fast" / "thermal-only"), ``source`` ("stored
     cp.zeff" / "no stored zeff"), ``basis`` and, where both numerators were
-    compared, the core misfits ``d_th`` / ``d_all`` and ``rtol``.
+    compared, the core misfits that chose (``d_th_core`` / ``d_all_core``,
+    ``choice_window``), the every-node misfits (``d_th`` / ``d_all``), the
+    worst node of each (``d_th_psi_N`` / ``d_all_psi_N``), ``window``,
+    ``rtol`` and ``matches_neither``.
     """
+    from ..utils import warn_or_defer
     rec = {} if record is None else record
+    zeff_th = np.asarray(zeff_th, dtype=float)
+    z2_fast = np.asarray(z2_fast, dtype=float)
     if "zeff" not in cp:
         zeff_all = zeff_th + z2_fast / np.clip(ne, 1e-30, None)
         inc = bool(np.any(z2_fast))
@@ -1919,25 +1955,56 @@ def _dd_zeff(cp, zeff_th, z2_fast, ne, psi_N, record=None):
                    d_th=None, d_all=None)
         return stored, False
     zeff_all = zeff_th + z2_fast / np.clip(ne, 1e-30, None)
-    core = np.asarray(psi_N, dtype=float) <= NI_FAST_GATE_PSI_N[-1]
-    _s = np.abs(stored[core])
-    d_th = float(np.max(np.abs(stored - zeff_th)[core] / _s))
-    d_all = float(np.max(np.abs(stored - zeff_all)[core] / _s))
-    includes = d_all < d_th
+    _psi = np.asarray(psi_N, dtype=float)
+    _ne_raw = np.asarray(ne, dtype=float)
+    # every node where the densities define a Z_eff (as _dd_total_zeff)
+    win = (np.isfinite(_ne_raw) & (_ne_raw > 0.0) & np.isfinite(_psi)
+           & np.isfinite(zeff_th) & np.isfinite(zeff_all))
+    if not np.any(win):
+        raise ValueError(
+            "core_profiles.zeff cannot be classified: no node has n_e > 0 "
+            "with finite densities")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        # a zero or non-finite stored value gives inf / NaN: matches neither
+        r_th_all = np.abs(stored - zeff_th) / np.abs(stored)
+        r_all_all = np.abs(stored - zeff_all) / np.abs(stored)
+    r_th, r_all = r_th_all[win], r_all_all[win]
+    d_th, d_all = float(np.max(r_th)), float(np.max(r_all))
+    core = win & (_psi <= NI_FAST_GATE_PSI_N[-1])
+    if np.any(core):
+        d_th_c = float(np.max(r_th_all[core]))
+        d_all_c = float(np.max(r_all_all[core]))
+        choice = f"psi_N <= {NI_FAST_GATE_PSI_N[-1]:g} with n_e > 0"
+    else:
+        d_th_c, d_all_c = d_th, d_all
+        choice = "every node with n_e > 0 and finite inputs (no core node)"
+
+    def _worst_psi(r):
+        bad = ~np.isfinite(r)
+        k = int(np.argmax(bad)) if np.any(bad) else int(np.argmax(r))
+        return float(_psi[win][k])
+    includes = bool(d_all_c < d_th_c)
+    neither = not (d_th <= ZEFF_CONVENTION_RTOL
+                   or d_all <= ZEFF_CONVENTION_RTOL)
     rec.update(convention="thermal+fast" if includes else "thermal-only",
                source="stored cp.zeff",
-               basis=("the closer of the two numerators on the core psi_N <= "
-                      f"{NI_FAST_GATE_PSI_N[-1]:g}"),
-               d_th=d_th, d_all=d_all, rtol=float(ZEFF_CONVENTION_RTOL),
-               matches_neither=bool(min(d_th, d_all) > ZEFF_CONVENTION_RTOL))
-    if min(d_th, d_all) > ZEFF_CONVENTION_RTOL:
-        import warnings
-        warnings.warn(
-            f"core_profiles.zeff matches neither Z_eff numerator on the core "
-            f"(thermal-only {d_th:.1e}, thermal+fast {d_all:.1e}); taking the "
-            f"closer ({'thermal+fast' if includes else 'thermal-only'}). A zeff "
-            f"stored before the dd's ne or ion densities were last changed "
-            f"does this.")
+               basis=("the closer of the two numerators on the core ("
+                      + choice + "); checked on every node with n_e > 0"),
+               d_th_core=d_th_c, d_all_core=d_all_c, choice_window=choice,
+               d_th=d_th, d_all=d_all, d_th_psi_N=_worst_psi(r_th),
+               d_all_psi_N=_worst_psi(r_all),
+               window="every node with n_e > 0 and finite inputs",
+               rtol=float(ZEFF_CONVENTION_RTOL), matches_neither=neither)
+    if neither:
+        warn_or_defer(
+            f"core_profiles.zeff matches neither Z_eff numerator on every "
+            f"node with n_e > 0 (thermal-only {d_th:.1e}, worst at psi_N = "
+            f"{rec['d_th_psi_N']:.3f}; thermal+fast {d_all:.1e}, psi_N = "
+            f"{rec['d_all_psi_N']:.3f}); the numerator is the closer one on "
+            f"the core ({'thermal+fast' if includes else 'thermal-only'}; "
+            f"core misfits {d_th_c:.1e} / {d_all_c:.1e}). A zeff stored "
+            f"before the dd's ne or ion densities were last changed, or "
+            f"clipped at the edge, does this.", UserWarning, stacklevel=3)
     return stored, includes
 
 
@@ -3052,10 +3119,14 @@ def read_imas_baseline(
     _zeff_dd_rec = {}
     _zeff_classified = bool(fuse_zeff_fast_ions_on(source))
     if _zeff_classified:
+        # charge-state weighted numerators (z_ion when present, else z_n:
+        # the same arrays bit for bit), as _dd_total_zeff's (1.4.1); the
+        # species derivations keep Zeff_th (z_n)
+        _zeff_th_q = zeff_num_q / ne
         zeff_dd, dd_zeff_includes_fast = _dd_zeff(
-            cp, Zeff_th, z2_fast, ne, psi_N, record=_zeff_dd_rec)
-        Zeff = (Zeff_th + z2_fast / np.clip(ne, 1e-30, None)
-                if dd_zeff_includes_fast else Zeff_th)
+            cp, _zeff_th_q, z2_fast_q, ne, psi_N, record=_zeff_dd_rec)
+        Zeff = (_zeff_th_q + z2_fast_q / np.clip(ne, 1e-30, None)
+                if dd_zeff_includes_fast else _zeff_th_q)
     else:
         zeff_dd = (np.asarray(cp["zeff"], dtype=float) if "zeff" in cp
                    else Zeff_th)
@@ -4535,8 +4606,15 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     ts["profiles_2d"] = [{
         "grid_type": {"name": "rectangular", "index": 1},
         "grid": {"dim1": geq.R_grid.tolist(), "dim2": geq.Z_grid.tolist()},
-        # psi_RZ is indexed [R][Z], matching IMAS dim1=R, dim2=Z
-        "psi": (s_I * c11 * np.asarray(geq.psi_RZ, dtype=float)).tolist(),
+        # The data dictionary indexes a rectangular 2-D field dim1 first:
+        # psi[i_R][i_Z] with dim1 = R, dim2 = Z.  The g-file array psi_RZ is
+        # [Z][R] (PSIRZ = flat.reshape((NH, NW)), io/geqdsk.py), so it is
+        # TRANSPOSED here (#101: before 1.4.1 it was written [Z][R] under
+        # this grid).  _fsa_from_profiles_2d reads it back with .T, so an
+        # export re-read by bouquet is the g-file array again.  Every 2-D
+        # field written into profiles_2d must follow the same rule; psi is
+        # the only one (this block replaces the template's profiles_2d).
+        "psi": (s_I * c11 * np.asarray(geq.psi_RZ, dtype=float).T).tolist(),
     }]
     gq = dict(ts.get("global_quantities", {}))
     gq.update(
