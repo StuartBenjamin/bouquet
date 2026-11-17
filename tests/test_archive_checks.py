@@ -58,6 +58,9 @@ def test_parallel_and_status(tmp_path):
     assert [r["chi2_points"] for r in one[:-1]] == [r["chi2_points"] for r in two[:-1]]
     assert [r["chi2_coil"] for r in one[:-1]] == [r["chi2_coil"] for r in two[:-1]]
     assert one[-1]["status"] == two[-1]["status"] == "no_archive"
+    (tmp_path / "broken.h5").write_bytes(b"not hdf5")
+    rows = check_archives([dict(job, path=str(tmp_path / "broken.h5")), job], n_workers=2)
+    assert rows[0]["status"].startswith("error: OSError") and rows[1]["status"] == "ok"
     with pytest.raises(ValueError, match="sigma_model"):
         check_archive(GOLDEN, coil_check=cc)
 

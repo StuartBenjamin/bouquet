@@ -36,6 +36,11 @@ def _eqdsk(g, view=None):
     return None if b is None else GEQDSKEquilibrium.from_bytes(b, cocos=ARCHIVE_EQDSK_COCOS)
 
 
+def _archive_row(path, status):
+    """The one row of an archive that could not be checked."""
+    return dict(dict.fromkeys(ROW_KEYS, np.nan), archive=str(path), status=status)
+
+
 def _q_profile(g, eq):
     """The group's eq_fsa q (else its eqdsk's) as ``(psi_N, q)``, or None."""
     if EQ_FSA_GROUP in g:
@@ -140,12 +145,13 @@ def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=Non
     (:attr:`~bouquet.archive.DrawView.eqdsk_bytes`; needs OpenFUSIONToolkit).
 
     A missing archive, or an equilibrium without the data a check needs, is a
-    ``status`` entry, never an exception.  ``n_coil_reg`` counts the run's
+    ``status`` entry, never an exception (and in :func:`check_archives`, so is
+    any error of one archive).  ``n_coil_reg`` counts the run's
     ``solver.coil_reg`` terms: the coil check is a measurement test only for
     runs pinned to the measured currents.
     """
     if not os.path.isfile(path):
-        return [dict(dict.fromkeys(ROW_KEYS, np.nan), archive=str(path), status="no_archive")]
+        return [_archive_row(path, "no_archive")]
     qc, cc = _load(q_check, QCheck), _load(coil_check, CoilCheck)
     if cc is not None and sigma_model is None:
         raise ValueError("check_archive: coil_check needs sigma_model (0 for the "
@@ -208,7 +214,10 @@ def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=Non
 
 
 def _check_job(job):
-    return check_archive(**job)
+    try:
+        return check_archive(**job)
+    except Exception as e:   # loses this archive (time slice) only
+        return [_archive_row(job["path"], f"error: {type(e).__name__}: {e}")]
 
 
 def check_archives(jobs, n_workers=1):
