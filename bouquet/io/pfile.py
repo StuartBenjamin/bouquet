@@ -12,6 +12,7 @@ This module has **no** OMFIT or OMAS dependencies.
 """
 
 import re
+import os
 import tempfile
 import warnings
 from collections import OrderedDict
@@ -316,7 +317,10 @@ class PFile:
         ) as tmp:
             tmp.write(raw_bytes)
             tmp_path = tmp.name
-        return cls(tmp_path, remap=remap, remap_key=remap_key)
+        try:
+            return cls(tmp_path, remap=remap, remap_key=remap_key)
+        finally:
+            os.remove(tmp_path)
 
     # --- Persistence ---
 

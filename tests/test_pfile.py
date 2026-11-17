@@ -247,6 +247,12 @@ class TestRoundTrip:
         assert pf.ne is not None
         assert len(pf.ne) == 64
 
+    def test_from_bytes_leaves_no_temp_file(self, pfile_path, tmp_path, monkeypatch):
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        with open(pfile_path, "rb") as f:
+            PFile.from_bytes(f.read())
+        assert list(tmp_path.glob("*.pfile")) == []
+
 
 # ---------------------------------------------------------------------------
 # Remap tests
