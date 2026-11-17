@@ -1,6 +1,7 @@
 """bouquet.archive_checks on the golden slim archive (read-only)."""
 
 import os
+import shutil
 
 import h5py
 import numpy as np
@@ -115,3 +116,37 @@ def test_gp_on_the_points_needs_no_mse():
     gp = qc.gp_loglike(psi, q)
     assert r0["d2_gp"] == pytest.approx(gp["d2"][0]) and r0["m_gp"] == gp["m"]
     assert np.isnan(r0["d2_gp_own"]) and "gp_own: needs mse" in r0["status"]
+
+
+def _without_baseline_eqdsk(tmp_path):
+    """A copy of the golden archive whose baseline has no stored eqdsk, and that eqdsk's bytes."""
+    path = str(tmp_path / "no_eqdsk.h5")
+    shutil.copy(GOLDEN, path)
+    with h5py.File(path, "r+") as hf:
+        b = bytes(hf["scan/0/_baseline/eqdsk"][()])
+        del hf["scan/0/_baseline/eqdsk"]
+    return path, b
+
+
+def test_a_group_without_eqdsk_is_checked_on_its_rebuilt_gfile(tmp_path, monkeypatch):
+    from bouquet.archive import DrawView
+    blk, _ = _mse_of_baseline()
+    path, b = _without_baseline_eqdsk(tmp_path)
+    assert check_archive(path, mse=(blk, ()))[0]["status"] == "no_eqdsk"
+    monkeypatch.setattr(DrawView, "eqdsk_bytes", property(lambda self: b))   # the rebuild, without OFT
+    rows = check_archive(path, mse=(blk, ()), rebuild_eqdsk=True)
+    assert rows[0]["status"] == "ok" and rows[0]["chi2_direct"] < 1e-12       # its own angles
+    assert rows[1]["chi2_direct"] == check_archive(GOLDEN, mse=(blk, ()))[1]["chi2_direct"]
+
+
+def test_a_failed_rebuild_is_a_status(tmp_path, monkeypatch):
+    from bouquet.archive import DrawView
+
+    def fail(self):
+        raise ValueError("no archived TokaMaker state")
+    blk, _ = _mse_of_baseline()
+    path, _ = _without_baseline_eqdsk(tmp_path)
+    monkeypatch.setattr(DrawView, "eqdsk_bytes", property(fail))
+    rows = check_archive(path, mse=(blk, ()), rebuild_eqdsk=True)
+    assert rows[0]["status"].startswith("eqdsk rebuild: no archived TokaMaker state")
+    assert np.isnan(rows[0]["chi2_direct"]) and rows[1]["status"] == "ok"

@@ -27,11 +27,13 @@ def _load(obj, cls):
     return cls.load(obj) if isinstance(obj, (str, os.PathLike)) else obj
 
 
-def _eqdsk(g):
-    """The group's archived eqdsk as an equilibrium, or None."""
+def _eqdsk(g, view=None):
+    """The group's archived eqdsk as an equilibrium; with *view* (the group's
+    :class:`~bouquet.archive.DrawView`) and none stored, the g-file rebuilt from
+    its TokaMaker state; else None."""
     name = find_bytes_dataset(g)
-    return (None if name is None else
-            GEQDSKEquilibrium.from_bytes(bytes(g[name][()]), cocos=ARCHIVE_EQDSK_COCOS))
+    b = bytes(g[name][()]) if name is not None else (None if view is None else view.eqdsk_bytes)
+    return None if b is None else GEQDSKEquilibrium.from_bytes(b, cocos=ARCHIVE_EQDSK_COCOS)
 
 
 def _q_profile(g, eq):
@@ -105,7 +107,7 @@ def _score_direct(row, mse, eq, axis_ref, align):
 
 def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=None,
                   scan_key=None, exclude_coils=DEFAULT_EXCLUDE, device=None, gp=False,
-                  axis_ref=None, align_axis=False):
+                  axis_ref=None, align_axis=False, rebuild_eqdsk=False):
     """Rows (dicts with :data:`ROW_KEYS`) scoring the baseline and every draw of
     the archive at *path* (all scans, or *scan_key*).
 
@@ -133,6 +135,10 @@ def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=Non
       ``nu_coil``, ``max_abs_z``, ``worst_coil``; ``coil_units_suspect``
       names the coil families whose currents look like a turns mismatch.
 
+    With *rebuild_eqdsk*, an equilibrium stored without its eqdsk (``store_eqdsk``
+    off) is checked on the g-file rebuilt from its TokaMaker state
+    (:attr:`~bouquet.archive.DrawView.eqdsk_bytes`; needs OpenFUSIONToolkit).
+
     A missing archive, or an equilibrium without the data a check needs, is a
     ``status`` entry, never an exception.  ``n_coil_reg`` counts the run's
     ``solver.coil_reg`` terms: the coil check is a measurement test only for
@@ -146,6 +152,9 @@ def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=Non
                          "measurement alone); it has no default")
     keys = [scan_key] if scan_key is not None else (discover_scan_keys(path) or [None])
     rows, coil_rows = [], []
+    if rebuild_eqdsk:
+        from .archive import BaselineView, BouquetArchive, DrawView
+        ar = BouquetArchive(path)
     with h5py.File(path, "r") as hf:
         cfg = json.loads(hf["config_json"][()]) if "config_json" in hf else {}
         n_reg = len((cfg.get("solver") or {}).get("coil_reg") or [])
@@ -160,7 +169,14 @@ def check_archive(path, q_check=None, coil_check=None, sigma_model=None, mse=Non
                            is_baseline=k == "_baseline", selected=g.attrs.get("selected"),
                            n_coil_reg=n_reg, status=[])
                 rows.append(row)
-                eq = _eqdsk(g) if qc is not None or mse is not None else None
+                view = None
+                if rebuild_eqdsk:
+                    view = BaselineView(ar, key) if k == "_baseline" else DrawView(ar, key, int(k))
+                try:
+                    eq = _eqdsk(g, view) if qc is not None or mse is not None else None
+                except (ValueError, RuntimeError, OSError) as e:
+                    row["status"].append(f"eqdsk rebuild: {e}")
+                    eq = None
                 if qc is not None:
                     _score_q(row, qc, _q_profile(g, eq), gp)
                     if gp:
