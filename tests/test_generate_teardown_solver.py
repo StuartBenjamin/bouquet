@@ -89,13 +89,14 @@ def _strip_clock(obj):
 
 
 def _attr_value(v):
-    """An attribute as comparable data (JSON attrs parsed, clocks dropped)."""
+    """An attribute as comparable data (JSON attrs parsed, NaN kept as a token so it
+    equals itself, clocks dropped)."""
     import numpy as np
     if isinstance(v, bytes):
         v = v.decode()
     if isinstance(v, str) and v[:1] in "{[":
         try:
-            return ("json", _strip_clock(json.loads(v)))
+            return ("json", _strip_clock(json.loads(v, parse_constant=str)))
         except ValueError:
             return ("str", v)
     if isinstance(v, np.ndarray):
