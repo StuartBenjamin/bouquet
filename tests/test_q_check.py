@@ -1,0 +1,413 @@
+"""bouquet.q_check on an analytic Solov'ev equilibrium (test_geqdsk's)."""
+
+import numpy as np
+import pytest
+
+from bouquet.io.geqdsk import GEQDSKEquilibrium, _read_geqdsk, read_geqdsk
+from bouquet.mse import (MSEDataUnusable, mse_chords,
+                         mse_equilibrium_orientation, mse_orientation,
+                         mse_tan_gamma)
+from bouquet.q_check import (QCheck, _matern52, direct_loglike, fit_q_check, floor_angles,
+                             mse_er_at_chords, plot_q_points, q_points)
+from test_geqdsk import generate_solovev_gfile
+
+R0, A, KAPPA, K = 1.7, 0.5, 1.4, 6e3
+
+
+@pytest.fixture
+def solovev(tmp_path):
+    """psi_N = ((R - R0)^2 + kappa^2 Z^2) / a^2, q = q0 (1 + psi_N / 2)."""
+    path = str(tmp_path / "g.geqdsk")
+    generate_solovev_gfile(path, R0=R0, a=A, kappa=KAPPA, NW=129, NH=129)
+    return read_geqdsk(path)
+
+
+def _profile(err=False):
+    """Phi_e' = -K (1 + psi_N): E_r,out = 2 K (1 + psi) sqrt(psi) / a on Phi_N."""
+    psi = np.linspace(0, 1, 401) ** 2
+    phi = (psi + psi ** 2 / 4) / 1.25
+    er = 2 * K * (1 + psi) * np.sqrt(psi) / A
+    return (phi, er, 0.2 * er + 2e3) if err else (phi, er)
+
+
+def _block():
+    R = np.array([1.35, 1.52, 1.83, 2.04, 1.72, 2.30])
+    Z = np.array([0.21, -0.07, 0.15, -0.18, 0.01, 0.00])
+    one = np.ones(R.size)
+    return dict(R=R, Z=Z, tgamma=0.1 * one, sigma=0.004 * one, weight=one,
+                A1=-0.63 * one, A2=0.75 * one, A3=-0.4 * one, A4=0.05 * one,
+                A5=-3.5e-7 * one, ip_sign=1, bt_sign=1)
+
+
+def test_er_is_flux_function_field(solovev):
+    blk = _block()
+    out = mse_er_at_chords(solovev, blk, *_profile())
+    psi = ((blk["R"] - R0) ** 2 + KAPPA ** 2 * blk["Z"] ** 2) / A ** 2
+    expected = K * (1 + psi) * 2 * (blk["R"] - R0) / A ** 2   # E_R = -Phi_e' dpsi_N/dR
+    np.testing.assert_allclose(out["Er"][:5], expected[:5], rtol=1e-3, atol=1.0)
+    assert np.isnan(out["Er"][5])                             # outside the LCFS
+    assert out["sigma"] is blk["sigma"] and "Er" not in blk
+    ch = mse_chords(out)
+    assert ch["excluded"][0][0] == 5 and "E_r" in ch["excluded"][0][1]
+
+
+def _er_sigma(R, Z):
+    """_profile(err=True)'s E_r error carried to the chords: sigma_out(Phi_N) (R B_Z) / (R B_Z)_out."""
+    psi = ((R - R0) ** 2 + KAPPA ** 2 * Z ** 2) / A ** 2
+    return (0.2 * 2 * K * (1 + psi) * np.sqrt(psi) / A + 2e3) * (R - R0) / (A * np.sqrt(psi))
+
+
+def test_er_err_is_a_chord_covariance(solovev):
+    blk = _block()
+    s = _er_sigma(blk["R"][:5], blk["Z"][:5])
+    ind = mse_er_at_chords(solovev, blk, *_profile(err=True))
+    np.testing.assert_allclose(ind["Er_cov"][:5, :5], np.diag(s ** 2), rtol=2e-3, atol=1e-6)
+    assert ind["sigma"] is blk["sigma"] and np.isnan(ind["Er_cov"][5, 5])
+    full = mse_er_at_chords(solovev, blk, *_profile(err=True), er_corr=np.inf)
+    np.testing.assert_allclose(full["Er_cov"][:5, :5], np.outer(s, s), rtol=2e-3)
+    ch = mse_chords({k: v for k, v in ind.items() if k != "Er_cov"})
+    B = solovev.field_at(ch["R"], ch["Z"])
+    sp, st = mse_orientation(ch, mse_equilibrium_orientation(B, ch["R"], ch["Z"], (R0, 0.0)))
+    d = mse_tan_gamma(B, dict(ch, Er=ch["Er"] + 1.0), sp, st) - mse_tan_gamma(B, ch, sp, st)
+    r = mse_tan_gamma(B, ch, sp, st) - ch["tgamma"]
+    np.testing.assert_allclose(direct_loglike(solovev, ind)["chi2"],             # independent:
+                               np.sum(r ** 2 / (0.004 ** 2 + (d * s) ** 2)), rtol=4e-3)   # sigma^2 + (d s)^2
+    cov = np.diag(np.full(5, 0.004 ** 2)) + np.outer(d * s, d * s)
+    np.testing.assert_allclose(direct_loglike(solovev, full)["chi2"], r @ np.linalg.solve(cov, r),
+                               rtol=4e-3)
+
+
+def _placement(solovev, tmp_path):
+    """(block, E_r mapped on solovev with a frame of other shapes, the expected placement shift d)."""
+    blk, (phi, er) = _block(), _profile()
+    path = str(tmp_path / "frame.geqdsk")
+    generate_solovev_gfile(path, R0=R0 + 0.02, a=A, kappa=1.2, NW=129, NH=129)
+    frame = read_geqdsk(path)
+    out = mse_er_at_chords(solovev, blk, phi, er, profile_eq=frame)
+    on = [np.interp(np.interp(e.psi_N_at(blk["R"], blk["Z"]), np.linspace(0, 1, e.rhovn.size),
+                              e.rhovn ** 2, right=np.nan), phi, er, right=np.nan) for e in (frame, solovev)]
+    return blk, out, np.nan_to_num((on[0] - on[1]) * out["Er"] / on[1])   # Er's own surface ratio
+
+
+def test_er_placement_term(solovev, tmp_path):
+    blk, out, d = _placement(solovev, tmp_path)
+    np.testing.assert_allclose(out["Er_cov"], np.outer(d, d), rtol=1e-9, atol=1e-6)
+    assert np.max(np.abs(d)) > 100.0                           # a real disagreement [V/m]
+    phi, er = _profile()
+    assert "Er_cov" not in mse_er_at_chords(solovev, blk, phi, er)
+    same = mse_er_at_chords(solovev, blk, phi, er, profile_eq=solovev)
+    np.testing.assert_array_equal(np.nan_to_num(same["Er_cov"]), 0.0)
+
+
+def test_direct_check_with_placement(solovev, tmp_path):
+    _, out, d = _placement(solovev, tmp_path)
+    ch = mse_chords({k: v for k, v in out.items() if k != "Er_cov"})
+    B = solovev.field_at(ch["R"], ch["Z"])
+    sp, st = mse_orientation(ch, mse_equilibrium_orientation(B, ch["R"], ch["Z"], (R0, 0.0)))
+    dt = mse_tan_gamma(B, dict(ch, Er=ch["Er"] + 1.0), sp, st) - mse_tan_gamma(B, ch, sp, st)
+    r = mse_tan_gamma(B, ch, sp, st) - ch["tgamma"]
+    p_ = dt * d[ch["index"]]                                   # one disagreement moves every chord
+    cov = np.diag(np.full(r.size, 0.004 ** 2)) + np.outer(p_, p_)
+    np.testing.assert_allclose(direct_loglike(solovev, out)["chi2"], r @ np.linalg.solve(cov, r),
+                               rtol=1e-6)
+
+
+def test_q_points_carry_the_er_covariance(scaled):
+    ref, _, blk, _ = scaled
+    base = {k: v for k, v in blk.items() if k != "Er"}
+    phi, er, err = _profile(err=True)
+    pts = q_points(ref, mse_er_at_chords(ref, base, phi, er, err, er_corr=np.inf))
+    up = q_points(ref, mse_er_at_chords(ref, base, phi, er + err))  # the whole profile 1 sigma up
+    v = up["iota"] - pts["iota"]                                      # exact: lam is linear in E_R
+    np.testing.assert_allclose(pts["cov_iota_er"], np.outer(v, v), rtol=1e-6, atol=1e-14)
+
+
+def _b_out(eq):
+    """B_Z at the outboard midplane of *eq*'s surfaces on _profile's grid."""
+    R = eq.outboard_R(np.linspace(0, 1, 401) ** 2)
+    return eq.field_at(R, np.full_like(R, eq.Z_mag))[:, 2]
+
+
+def test_er_tor_moves_to_the_equilibrium_field(solovev):
+    phi, er = _profile()
+    blk = _block()
+    out = mse_er_at_chords(solovev, blk, phi, er, None, 0.6 * er, 2 * _b_out(solovev))
+    full = mse_er_at_chords(solovev, blk, phi, er)["Er"]     # E_tor was made with twice the field
+    np.testing.assert_allclose(out["Er_tor"][:5], 0.3 * full[:5], rtol=1e-3)
+    np.testing.assert_allclose(out["Er"][:5], 0.7 * full[:5], rtol=1e-3)
+    assert np.isnan(out["Er_tor"][5]) and direct_loglike(solovev, out)["nu"] == 5
+    with pytest.raises(MSEDataUnusable, match="unknown key"):
+        mse_chords(out)                                      # bouquet's MSE solvers refuse Er_tor
+
+
+def _scaled_eq(path, c):
+    """The g-file at *path* with psi scaled by *c* (B_pol x c, q / c, same surfaces)."""
+    raw = _read_geqdsk(path)
+    for k in ("PSIRZ", "SIMAG", "SIBRY"):
+        raw[k] = raw[k] * c
+    raw["QPSI"] = raw["QPSI"] / c
+    return GEQDSKEquilibrium.from_raw(raw)
+
+
+@pytest.fixture
+def scaled(tmp_path):
+    """(reference, true, block): angles from the reference with psi scaled by 1.15."""
+    path = str(tmp_path / "g.geqdsk")
+    generate_solovev_gfile(path, R0=R0, a=A, kappa=KAPPA, NW=129, NH=129)
+    true = _scaled_eq(path, 1.15)
+    blk = _block()
+    blk["Er"] = np.array([-3e4, -1e4, 1e4, 3e4, 1e3, 0.0])
+    B = true.field_at(blk["R"], blk["Z"])
+    ch = mse_chords(blk)
+    sp, st = mse_orientation(ch, mse_equilibrium_orientation(B, blk["R"], blk["Z"], (R0, 0.0)))
+    blk["tgamma"] = mse_tan_gamma(B, ch, sp, st)
+    return read_geqdsk(path), true, blk, path
+
+
+def test_q_points_recover_scaled_flux(scaled):
+    ref, true, blk, _ = scaled
+    pts = q_points(ref, blk)
+    np.testing.assert_allclose(pts["lam"], 1.15, rtol=1e-9)
+    psi = true.psi_N_at(pts["R"], pts["Z"])
+    x = np.linspace(0, 1, true.qpsi.size)
+    np.testing.assert_allclose(pts["q"], np.interp(psi, x, true.qpsi), rtol=1e-9)
+    np.testing.assert_allclose(pts["rho"], np.interp(psi, x, true.rhovn), rtol=1e-9)
+    assert [i for i, _ in pts["excluded"]] == [5]           # outside the LCFS
+
+
+def test_q_points_scale_the_toroidal_er(scaled):
+    ref, true, blk, _ = scaled
+    prof = (*_profile(), None, 0.8 * _profile()[1], _b_out(ref))   # E_tor made with ref's field
+    base = {k: v for k, v in blk.items() if k != "Er"}
+    on_true = mse_er_at_chords(true, base, *prof)                   # E_tor x 1.15 on the true field
+    ch = mse_chords({k: v for k, v in on_true.items() if k != "Er_tor"})
+    B = true.field_at(ch["R"], ch["Z"])
+    sp, st = mse_orientation(ch, mse_equilibrium_orientation(B, ch["R"], ch["Z"], (R0, 0.0)))
+    tg = blk["tgamma"].copy()
+    tg[ch["index"]] = mse_tan_gamma(B, ch, sp, st)
+    pts = q_points(ref, mse_er_at_chords(ref, dict(base, tgamma=tg), *prof))
+    np.testing.assert_allclose(pts["lam"], 1.15, rtol=1e-9)
+    held = q_points(ref, mse_er_at_chords(ref, dict(base, tgamma=tg), *prof[:2]))
+    assert np.max(np.abs(held["lam"] - 1.15)) > 1e-3                # E_r held fixed misses it
+
+
+def _with_pole_chord(true, blk):
+    """*blk* plus chord 6 almost straight above the axis (B_Z ~ 0), angles from *true*."""
+    extra = dict(R=R0 + 0.001, Z=0.15, Er=0.0)
+    blk = {k: np.r_[v, extra.get(k, v[0])] if np.ndim(v) else v for k, v in blk.items()}
+    ch = mse_chords(blk)
+    B = true.field_at(ch["R"], ch["Z"])
+    sp, st = mse_orientation(ch, mse_equilibrium_orientation(B, ch["R"], ch["Z"], (R0, 0.0)))
+    blk["tgamma"][ch["index"]] = mse_tan_gamma(B, ch, sp, st)
+    return blk
+
+
+def test_q_points_drop_chords_near_the_pole(scaled):
+    ref, true, blk, _ = scaled
+    blk = _with_pole_chord(true, blk)
+    pts = q_points(ref, blk)
+    assert 6 not in pts["index"] and "pole" in dict(pts["excluded"])[6]
+    np.testing.assert_allclose(pts["lam"], 1.15, rtol=1e-9)
+    sharp = q_points(ref, dict(blk, sigma=np.r_[blk["sigma"][:6], 1e-6]))
+    assert 6 in sharp["index"]                               # a precise angle: the pole is far in sigma
+    np.testing.assert_allclose(sharp["lam"], 1.15, rtol=1e-9)
+
+
+def test_q_points_count_chords_away_from_the_pole(scaled):
+    ref, true, blk, _ = scaled
+    with pytest.raises(MSEDataUnusable, match="away from the pole"):
+        q_points(ref, _with_pole_chord(true, blk), min_chords=6)   # 6 inside the LCFS, 5 usable
+
+
+def test_floor_angles_clip_the_q_points(scaled):
+    ref, true, blk, _ = scaled
+    q_true = q_points(true, blk)["q"]
+    q_floor = np.median(q_true)
+    pts = q_points(true, floor_angles(true, blk, q_floor))
+    np.testing.assert_allclose(pts["q"], np.maximum(q_true, q_floor), rtol=1e-9)
+    kept = q_true > q_floor
+    out = floor_angles(true, blk, q_floor)
+    np.testing.assert_array_equal(out["tgamma"][pts["index"][kept]], blk["tgamma"][pts["index"][kept]])
+    assert set(out) == set(blk)
+
+
+def test_floor_angles_with_er_profile(solovev):
+    blk, prof = _block(), _profile()
+    ch = mse_chords(mse_er_at_chords(solovev, blk, *prof))
+    B = solovev.field_at(ch["R"], ch["Z"])
+    sp, st = mse_orientation(ch, mse_equilibrium_orientation(B, ch["R"], ch["Z"], (R0, 0.0)))
+    blk["tgamma"][ch["index"]] = mse_tan_gamma(B, ch, sp, st)   # the equilibrium's own angles
+    out = floor_angles(solovev, blk, 50.0, prof)                 # every chord lies below q = 50
+    assert "Er" not in out                                       # the raw block, E_r mapped by the caller
+    np.testing.assert_allclose(q_points(solovev, mse_er_at_chords(solovev, out, *prof))["q"], 50.0,
+                               rtol=1e-9)
+    np.testing.assert_array_equal(floor_angles(solovev, blk, 1e-3, prof)["tgamma"], blk["tgamma"])
+
+
+def test_q_points_orientation_is_stated(scaled):
+    ref, _, blk, _ = scaled
+    flipped = q_points(ref.flip_Bt_Ip(copy=True), blk)
+    np.testing.assert_allclose(flipped["lam"], q_points(ref, blk)["lam"], rtol=1e-12)
+    with pytest.raises(MSEDataUnusable, match="median lam"):
+        q_points(ref, dict(blk, ip_sign=-blk["ip_sign"]))
+
+
+def test_q_points_sigma(scaled):
+    ref, _, blk, _ = scaled
+    pts = q_points(ref, blk)
+    d = 1e-6
+    fd = (q_points(ref, dict(blk, tgamma=blk["tgamma"] + d))["lam"]
+          - q_points(ref, dict(blk, tgamma=blk["tgamma"] - d))["lam"]) / (2 * d)
+    np.testing.assert_allclose(pts["sigma_lam"], np.abs(fd) * 0.004, rtol=1e-5)
+    h = 1e-4                                                 # field moved along R
+    dlam = (q_points(ref, dict(blk, R=blk["R"] + h))["lam"]
+            - q_points(ref, dict(blk, R=blk["R"] - h))["lam"]) / (2 * h)
+    np.testing.assert_allclose(pts["diota_dR_axis"], dlam * pts["iota"] / pts["lam"], rtol=1e-2)
+    assert np.ptp(np.sign(pts["diota_dR_axis"])) == 2          # signed: opposite across the axis
+    assert pts["R_axis"] == ref.R_mag
+
+
+PSI = np.linspace(0.001, 0.999, 300)
+
+
+def _q(psi):
+    return 1.0 + 2.0 * psi ** 2
+
+
+def _points():
+    """iota = 1/q on rho_tor for q = 1 + 2 psi_N^2 (Phi_N from that q), sigma 0.01."""
+    psi = np.linspace(0.02, 0.9, 15)
+    rho = np.sqrt((psi + 2 * psi ** 3 / 3) / (5 / 3))
+    return dict(rho=rho, iota=1 / _q(psi), sigma_iota=np.full(psi.size, 0.01))
+
+
+def test_gp_prefers_the_true_profile():
+    res = fit_q_check(_points()).gp_loglike(PSI, [_q(PSI), 1.05 * _q(PSI), 0.95 * _q(PSI)])
+    assert res["logL"][0] > max(res["logL"][1:])
+    assert res["d2"][0] < res["m"]
+
+
+def test_gp_modes_follow_the_data():
+    p, rows = _points(), [1.02 * _q(PSI), 0.97 * _q(PSI)]
+    qc = lambda s, ell: QCheck(p["rho"], p["iota"], np.full(p["rho"].size, s), 0.05, ell)
+    assert qc(1.0, 0.4).gp_loglike(PSI, rows)["m"] == 2          # errors far above the prior: the flat basis
+    sharp = qc(1e-4, 0.05)                                          # every mode resolved: the points check
+    res, pts = sharp.gp_loglike(PSI, rows), sharp.points_loglike(PSI, rows)
+    assert res["m"] == p["rho"].size
+    np.testing.assert_allclose(res["d2"], pts["chi2"], rtol=1e-9)
+
+
+def test_gp_d2_is_chi2_on_its_modes():
+    p = _points()
+    qc = QCheck(p["rho"], p["iota"], p["sigma_iota"], 0.05, 0.3)
+    L, m = np.linalg.cholesky(qc._noise()), qc.gp_loglike(PSI, _q(PSI))["m"]
+    rng = np.random.default_rng(1)
+    d2 = []
+    for _ in range(400):                   # the true profile against noisy points
+        qc.iota = p["iota"] + L @ rng.standard_normal(p["rho"].size)
+        d2.append(qc.gp_loglike(PSI, _q(PSI))["d2"][0])
+    assert 2 < m < p["rho"].size
+    assert abs(np.mean(d2) - m) < 4 * np.sqrt(2 * m / len(d2))
+
+
+def test_axis_error_is_given(tmp_path):
+    p = _points()
+    g = np.linspace(2.0, 0.1, p["rho"].size)                 # largest near the axis
+    qc = fit_q_check(dict(p, diota_dR_axis=g), axis_error=0.02)
+    rows = [_q(PSI), 1.02 * _q(PSI)]
+    res = qc.gp_loglike(PSI, rows)
+    plain = QCheck(qc.rho, qc.iota, qc.sigma_iota, qc.amp, qc.ell, g, axis_error=0.02)
+    np.testing.assert_allclose(res["logL"], plain.gp_loglike(PSI, rows)["logL"], rtol=1e-12)
+    loose = QCheck(qc.rho, qc.iota, qc.sigma_iota, qc.amp, qc.ell, g, axis_error=0.05)
+    assert loose.gp_loglike(PSI, rows)["d2"][1] < res["d2"][1]   # a larger axis error is more lenient
+    qc.save(tmp_path / "qc.npz")
+    assert QCheck.load(tmp_path / "qc.npz").axis_error == 0.02
+
+
+def test_points_loglike():
+    p = _points()
+    g = np.linspace(1.0, -0.5, p["rho"].size)
+    u = 0.004 * np.cos(4 * p["rho"])                                  # an E_r error, correlated
+    qc = QCheck(p["rho"], p["iota"], p["sigma_iota"], 0.1, 0.4, g, axis_error=0.02, cov_er=np.outer(u, u))
+    res = qc.points_loglike(PSI, [_q(PSI), 1.05 * _q(PSI)])
+    assert res["chi2"][0] < 1e-3 and res["nu"] == p["rho"].size
+    cov = np.diag(p["sigma_iota"] ** 2) + np.outer(u, u) + 0.02 ** 2 * np.outer(g, g)
+    for i, f in enumerate((1.0, 1.05)):
+        r = p["iota"] * (1 / f - 1)
+        np.testing.assert_allclose(res["chi2"][i], r @ np.linalg.solve(cov, r), rtol=1e-3, atol=1e-3)
+        np.testing.assert_allclose(res["logL"][i], -0.5 * (res["chi2"][i]
+                                   + np.linalg.slogdet(2 * np.pi * cov)[1]), rtol=1e-12)
+
+
+def test_gp_noise_is_rank_one():
+    p = _points()
+    g = np.linspace(1.0, -0.5, p["rho"].size)
+    qc = QCheck(p["rho"], p["iota"], p["sigma_iota"], 0.05, 0.4, g, axis_error=0.03)
+    L = qc._gp()[0]
+    K = (0.05 ** 2 * _matern52(p["rho"], p["rho"], 0.4) + np.diag(p["sigma_iota"] ** 2)
+         + 0.03 ** 2 * np.outer(g, g))
+    np.testing.assert_allclose(L @ L.T, K, rtol=1e-6, atol=1e-12)
+
+
+def test_q_floor_clips_the_points(tmp_path):
+    p = _points()                                            # q = 1 + 2 psi^2: q < 1.05 for psi < 0.16
+    qf = fit_q_check(p, q_floor=1.05)
+    np.testing.assert_allclose(qf.iota, np.minimum(p["iota"], 1 / 1.05))
+    floored = np.maximum(_q(PSI), 1.05)                     # a candidate held at the floor
+    assert qf.points_loglike(PSI, floored)["chi2"][0] < 1.0      # 15 points (rho from its own q)
+    assert fit_q_check(p).points_loglike(PSI, floored)["chi2"][0] > 10.0
+    qf.save(tmp_path / "qf.npz")
+    assert QCheck.load(tmp_path / "qf.npz").q_floor == 1.05 and np.isnan(fit_q_check(p).q_floor)
+
+
+def test_gp_batch_and_save(tmp_path):
+    qc = fit_q_check(_points())
+    rows = np.array([_q(PSI) * f for f in (0.97, 1.0, 1.02)])
+    rows[2, 7] = np.nan
+    res = qc.gp_loglike(PSI, rows)
+    for i in range(2):
+        np.testing.assert_allclose(res["logL"][i], qc.gp_loglike(PSI, rows[i])["logL"][0], rtol=1e-12)
+    assert np.isnan(res["logL"][2])
+    qc.save(tmp_path / "qc.npz")
+    np.testing.assert_array_equal(QCheck.load(tmp_path / "qc.npz").gp_loglike(PSI, rows)["logL"],
+                                  res["logL"])
+
+
+def test_direct_and_gp_agree(scaled):
+    ref, true, blk, path = scaled
+    assert direct_loglike(true, blk)["chi2"] < 1e-12
+    cands = [_scaled_eq(path, c) for c in (1.10, 1.15, 1.20)]
+    chi2 = [direct_loglike(eq, blk)["chi2"] for eq in cands]
+    qc = fit_q_check(q_points(ref, blk))
+    logL = qc.gp_loglike(np.linspace(0, 1, ref.qpsi.size), [eq.qpsi for eq in cands])["logL"]
+    assert np.argmin(chi2) == 1 and np.argmax(logL) == 1
+
+
+def test_plot_q_points(scaled):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    ref, true, blk, _ = scaled
+    pts = q_points(ref, blk)
+    qc = fit_q_check(pts, axis_error=0.01)
+    ax = plot_q_points(pts, qc, profiles=[("true", np.linspace(0, 1, true.qpsi.size), true.qpsi)])
+    bars = ax.containers[0]
+    np.testing.assert_allclose(bars.lines[0].get_ydata(), pts["q"])
+    half = [abs(seg[1, 1] - seg[0, 1]) / 2 for seg in bars.lines[2][0].get_segments()]
+    s = np.hypot(pts["sigma_iota"], pts["diota_dR_axis"] * 0.01)   # the axis error is in the bars
+    np.testing.assert_allclose(half, s / pts["iota"] ** 2, rtol=1e-6)
+    assert [t.get_text() for t in ax.get_legend().get_texts()] == [
+        r"GP fit to MSE q ($\pm1\sigma$)", r"q from MSE ($\pm1\sigma$)",
+        "true"]                                                  # the MSE side first, then the profiles
+    plt.close(ax.figure)
+
+
+def test_plot_shows_the_q_floor():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    ax = plot_q_points(_points(), fit_q_check(_points(), q_floor=1.05))
+    labels = [t.get_text() for t in ax.get_legend().get_texts()]
+    assert labels[2] == "q floor 1.05: points below it clipped"
+    assert 1.05 in [ln.get_ydata()[0] for ln in ax.lines]
+    plt.close(ax.figure)

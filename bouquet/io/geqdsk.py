@@ -8,6 +8,7 @@ Dependencies: numpy, scipy, contourpy (ships with matplotlib).
 """
 
 import io
+import os
 import tempfile
 import warnings
 
@@ -729,8 +730,11 @@ class GEQDSKEquilibrium:
                                          delete=False) as tmp:
             tmp.write(raw_bytes)
             tmp_path = tmp.name
-        return cls(tmp_path, cocos=cocos, nlevels=nlevels, resample=resample,
-                   extrapolate_edge=extrapolate_edge)
+        try:
+            return cls(tmp_path, cocos=cocos, nlevels=nlevels, resample=resample,
+                       extrapolate_edge=extrapolate_edge)
+        finally:
+            os.remove(tmp_path)
 
     @classmethod
     def from_raw(cls, raw_dict, cocos=1, nlevels=None, resample="theta",
@@ -1066,6 +1070,45 @@ class GEQDSKEquilibrium:
         dBrdZ, dBrdR = np.gradient(Br, dZ, dR)
         _dBzdZ, dBzdR = np.gradient(Bz, dZ, dR)
         self._cache["Jt"] = cc["sigma_RpZ"] * (dBrdZ - dBzdR) / constants.mu_0
+
+    # --- Point evaluation ---
+
+    def _point_splines(self):
+        """Cached (psi_N, Br, Bz) splines on the (Z, R) grid."""
+        if "point_splines" not in self._cache:
+            self._compute_fields()
+            self._cache["point_splines"] = tuple(
+                interpolate.RectBivariateSpline(self.Z_grid, self.R_grid, a)
+                for a in (self.psi_N_RZ, self._cache["Br"], self._cache["Bz"]))
+        return self._cache["point_splines"]
+
+    def psi_N_at(self, R, Z):
+        """Normalised poloidal flux at the points (R, Z) [m]."""
+        return self._point_splines()[0].ev(Z, R)
+
+    def field_at(self, R, Z):
+        """(B_R, B_phi, B_Z) [T] at the points (R, Z) [m], shape (n, 3).
+
+        Components are in the right-handed (R, phi, Z) frame (phi counter-clockwise
+        seen from above) whatever the COCOS; B_phi = F/R with F(psi_N), held at the
+        boundary value outside psi_N = 1.
+        """
+        R, Z = np.broadcast_arrays(np.atleast_1d(np.asarray(R, dtype=float)),
+                                   np.atleast_1d(np.asarray(Z, dtype=float)))
+        s_psi, s_br, s_bz = self._point_splines()
+        F = np.interp(s_psi.ev(Z, R), np.linspace(0, 1, int(self._raw["NW"])), self._raw["FPOL"])
+        return np.column_stack([s_br.ev(Z, R), self._cocos["sigma_RpZ"] * F / R, s_bz.ev(Z, R)])
+
+    def outboard_R(self, psi_N):
+        """R [m] where the surfaces *psi_N* cross Z = Z_axis outboard (NaN where none does)."""
+        r = np.linspace(self.R_mag, self.R_grid[-1], 2001)
+        p = self.psi_N_at(r, np.full_like(r, self.Z_mag))
+        i0 = int(np.argmin(p))
+        stop = np.nonzero(np.diff(p[i0:]) <= 0)[0]
+        i1 = i0 + (stop[0] + 1 if stop.size else p.size - i0)
+        # sqrt(psi_N) is close to linear in R near the axis
+        return np.interp(np.sqrt(np.clip(psi_N, 0, None)), np.sqrt(np.clip(p[i0:i1], 0, None)),
+                         r[i0:i1], right=np.nan)
 
     # --- Lazy flux-surface tracing and averaging ---
 
