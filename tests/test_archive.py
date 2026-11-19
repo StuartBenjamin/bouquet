@@ -501,3 +501,16 @@ class TestBootstrapModelFileOpens:
         assert label == ("self-consistent Redl bootstrap"
                          if any(d.jbs_loop is not None for d in sc.all)
                          else "frozen SWB bootstrap (legacy)")
+
+
+def test_baseline_eq_fsa_is_stored_as_a_draws(tmp_path):
+    from bouquet.utils import store_baseline_profiles
+    stem = str(tmp_path / "bfsa")
+    psi, one = np.linspace(0, 1, 9), np.ones(9)
+    store_baseline_profiles(stem, psi, one, one, one, one, one, one, one, one, one, one, one,
+                            1e6, 1.0, scan_key="900",
+                            eq_fsa=dict(psi_N=psi, q=1 + psi, F=2 * one, avg_inv_R2=None))
+    with h5py.File(stem + ".h5", "r") as hf:
+        g = hf["scan/900/_baseline/eq_fsa"]
+        assert sorted(g) == ["F", "psi_N", "q"] and g["q"].dtype == np.float64
+        assert np.array_equal(g["q"][()], 1 + psi) and g["F"].attrs["units"] == "T m"

@@ -4993,6 +4993,20 @@ def _read_coil_names(grp):
 @accepts_old_names
 
 
+def write_eq_fsa(grp, eq_fsa):
+    """``grp/eq_fsa``: a live-equilibrium FSA block
+    (:func:`bouquet.physics.capture_equilibrium_fsa`) as float64 datasets with
+    their units; ``None`` entries are skipped."""
+    from .schema import EQ_FSA_GROUP, EQ_FSA_UNITS
+    fsa_grp = grp.create_group(EQ_FSA_GROUP)
+    for name, arr in eq_fsa.items():
+        if arr is None:
+            continue
+        ds = fsa_grp.create_dataset(name, data=np.asarray(arr, dtype=np.float64))
+        if EQ_FSA_UNITS.get(name):
+            ds.attrs["units"] = EQ_FSA_UNITS[name]
+
+
 def store_equilibrium(
     header,
     count,
@@ -5262,16 +5276,7 @@ def store_equilibrium(
         # exact current conversions at IMAS export
         # (physics.capture_equilibrium_fsa -> io.imas.write_imas_draw).
         if eq_fsa:
-            from .schema import EQ_FSA_GROUP, EQ_FSA_UNITS
-            fsa_grp = grp.create_group(EQ_FSA_GROUP)
-            for _name, _arr in eq_fsa.items():
-                if _arr is None:
-                    continue
-                ds = fsa_grp.create_dataset(
-                    _name, data=np.asarray(_arr, dtype=np.float64))
-                _u = EQ_FSA_UNITS.get(_name)
-                if _u:
-                    ds.attrs["units"] = _u
+            write_eq_fsa(grp, eq_fsa)
 
         # ---- self-consistent bootstrap record (schema v3 jbs_loop block;
         # None -- the frozen bootstrap -- writes nothing) -------------------
@@ -5585,6 +5590,7 @@ def store_baseline_profiles(
     tokamaker_state_bytes=None,
     fixed_currents=None,
     compress_file_bytes=False,
+    eq_fsa=None,
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -5610,6 +5616,9 @@ def store_baseline_profiles(
     fixed_currents : dict or None
         The baseline's held-fixed driven currents
         (:data:`FIXED_CURRENT_DATASETS`), as :func:`store_equilibrium`.
+    eq_fsa : dict or None
+        The baseline's live-equilibrium FSA block, as :func:`store_equilibrium`'s
+        per draw (``_baseline/eq_fsa``).
     mse_record : dict or None
         ``Baseline.mse_record`` (structured closure with MSE data): per-chord
         arrays and the Jacobian, written as DATASETS in the subgroup
@@ -5721,6 +5730,8 @@ def store_baseline_profiles(
                       (TOKAMAKER_STATE_DS, tokamaker_state_bytes)):
             if b is not None:
                 write_bytes(grp, ds, b, compress_file_bytes)
+        if eq_fsa:
+            write_eq_fsa(grp, eq_fsa)
 
         # ---- Recon-LCFS reference for downstream boundary-deviation
         # measurements.  Captured by the caller via mygs.trace_surf() at

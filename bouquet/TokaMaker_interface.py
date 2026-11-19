@@ -6249,6 +6249,21 @@ def generate_bouquet(
             b = fh.read()
         os.unlink(p)
         return b
+
+    def _capture_eq_fsa(on_fail):
+        # mygs's live-equilibrium FSA block (capture_live_eq), else None;
+        # never raises: a failure prints on_fail
+        if not capture_live_eq:
+            return None
+        try:
+            from .physics import capture_equilibrium_fsa
+            return capture_equilibrium_fsa(
+                mygs, npsi=int(capture_npsi), psi_pad=psi_pad,
+                exact_inv_R2=bool(capture_exact_inv_R2))
+        except Exception as _fsa_exc:
+            print(f"  WARN: live-equilibrium FSA capture failed "
+                  f"({_fsa_exc}); {on_fail}")
+            return None
     # ---- rejected draw attempts: one record each, a summary at the end ----
     _rejections = rejection_log if rejection_log is not None else []
     _masked_at_start = dict(ANCHOR_MASKED_FAILURES)
@@ -6382,6 +6397,7 @@ def generate_bouquet(
     _recon_Ip = None
     baseline_ifile_bytes = None  # set with the warmstart baseline.eqdsk re-save
     baseline_state_bytes = _bl_state_bytes = None  # its TokaMaker state (store_tokamaker_state)
+    baseline_eq_fsa = _bl_eq_fsa = None  # its live-equilibrium FSA block (capture_live_eq)
     # the baseline i-file's stamp (write_ifile): set where it is traced
     _bl_ifile_rec = None
     # self-consistent loop: l_i / q0 / q95 of the jphi-linterp baseline
@@ -7068,6 +7084,8 @@ def generate_bouquet(
                     # the delivered baseline g-file carries the FULL pressure
                     # (bouquet.edge_pressure; {} unless p_sep is added back)
                     **lcfs_kwargs(_edge.p_offset(pressure_solve)))
+                # at the state of that g-file, as each draw's after its save
+                _bl_eq_fsa = _capture_eq_fsa("the baseline is archived without it")
                 with open(_tmp_eqdsk_path, 'rb') as _ef:
                     _new_eqdsk_bytes = _ef.read()
                 _new_eq_obj = read_eqdsk_from_bytes(
@@ -7078,6 +7096,7 @@ def generate_bouquet(
                 # store_baseline_profiles call writes the recon-
                 # converged eqdsk + Ip into the H5 _baseline group.
                 baseline_eqdsk_bytes = _new_eqdsk_bytes
+                baseline_eq_fsa = _bl_eq_fsa
                 initial_Ip_target = _new_eq_Ip
                 if write_ifile and _bl_ifile_rec is not None \
                         and _bl_ifile_rec["ifile_written"]:
@@ -7314,6 +7333,9 @@ def generate_bouquet(
                 "(no warm-start re-save: coil_drift=None)")
         elif os.path.exists(_bl_if_path0):
             os.unlink(_bl_if_path0)
+    if coil_drift is None:
+        # no warm-start re-save: the archived baseline is the state mygs holds
+        baseline_eq_fsa = _capture_eq_fsa("the baseline is archived without it")
     if write_ifile and not (_bl_ifile_rec or {}).get("ifile_written"):
         raise RuntimeError(
             "write_ifile=True but the baseline has no i-file: "
@@ -7409,6 +7431,7 @@ def generate_bouquet(
         eqdsk_bytes=baseline_eqdsk_bytes if store_eqdsk else None,
         ifile_bytes=baseline_ifile_bytes,
         tokamaker_state_bytes=baseline_state_bytes,
+        eq_fsa=baseline_eq_fsa,
         pfile_bytes=stored_pfile_bytes,
         compress_file_bytes=compress_file_bytes,
         psi_N_kinetic=psi_N_kinetic,
@@ -9003,17 +9026,8 @@ def generate_bouquet(
         # current conversions at IMAS export. Defensive: a capture failure
         # never sinks a draw -- IMAS export just falls back to the template
         # (baseline) geometry for it.
-        diagnostics['eq_fsa'] = None
-        if capture_live_eq:
-            try:
-                from .physics import capture_equilibrium_fsa
-                diagnostics['eq_fsa'] = capture_equilibrium_fsa(
-                    mygs, npsi=int(capture_npsi), psi_pad=psi_pad,
-                    exact_inv_R2=bool(capture_exact_inv_R2))
-            except Exception as _fsa_exc:
-                print(f"  WARN: live-equilibrium FSA capture failed "
-                      f"({_fsa_exc}); IMAS export for this draw will use the "
-                      f"template (baseline) geometry")
+        diagnostics['eq_fsa'] = _capture_eq_fsa(
+            "IMAS export for this draw will use the template (baseline) geometry")
         diagnostics['flux_geom'] = None
         if dd_sources is not None:
             try:
