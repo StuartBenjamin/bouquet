@@ -1343,8 +1343,9 @@ class GEQDSKEquilibrium:
                 if gk in geo_k:
                     geo_arrays[gk][k] = geo_k[gk]
 
-            # Accumulate for li calculation: sum(|Bp| * dl * 2*pi) * dpsi_k
-            Bpl = np.sum(Bp_mod * dl * 2 * np.pi)
+            # Accumulate for li calculation: int Bp^2 dV = sum(|Bp| dl (2 pi)^(1 - exp_Bp)) dpsi_k,
+            # since dV = (2 pi)^(1 - exp_Bp) dl dpsi / |Bp| (|grad psi| = (2 pi)^exp_Bp R |Bp|)
+            Bpl = np.sum(Bp_mod * dl) * (2.0 * np.pi) ** (1.0 - cc["exp_Bp"])
             Bp2_vol += Bpl * dpsi_arr[k]
 
         # Fix q on axis by quadratic extrapolation

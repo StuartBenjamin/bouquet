@@ -17,6 +17,7 @@ from bouquet.io.geqdsk import (
     _read_geqdsk,
     _trace_contours,
     _select_main_contour,
+    _write_geqdsk,
     GEQDSKEquilibrium,
     read_geqdsk,
 )
@@ -318,6 +319,19 @@ class TestEquilibrium:
         assert "li(3)" in li
         # For a synthetic case, just check it's finite and positive
         assert np.isfinite(li["li(3)"])
+
+    def test_li_full_flux_cocos(self, gfile_path):
+        """The same equilibrium in COCOS 11 (psi in Wb, not Wb/rad) has the same l_i."""
+        path, _ = gfile_path
+        g = _read_geqdsk(path)
+        tp = 2.0 * np.pi
+        g11 = dict(g, PSIRZ=g["PSIRZ"] * tp, SIMAG=g["SIMAG"] * tp, SIBRY=g["SIBRY"] * tp,
+                   FFPRIM=g["FFPRIM"] / tp, PPRIME=g["PPRIME"] / tp)
+        _write_geqdsk(g11, path + "_cocos11")
+        li1 = GEQDSKEquilibrium(path, cocos=1, nlevels=33).li
+        li11 = GEQDSKEquilibrium(path + "_cocos11", cocos=11, nlevels=33).li
+        for k in ("li(1)", "li(3)"):
+            assert li11[k] == pytest.approx(li1[k], rel=1e-6)
 
     def test_geometry(self, gfile_path):
         path, params = gfile_path
