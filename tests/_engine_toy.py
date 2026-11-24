@@ -59,7 +59,7 @@ class ToyGS:
 
     def __init__(self, psi=PSI, *, Ip=1.2e6, defect=0.02, gain=True,
                  dpsi0=0.30, li_ref=0.80, q_scale=1.5e6, chords=None,
-                 nan_redl_at=None, redl_scale=1.0):
+                 nan_redl_at=None, redl_scale=1.0, q_area=1.03e6):
         self.psi = np.asarray(psi, dtype=float)
         self.Ip = float(Ip)
         self.defect = float(defect)
@@ -67,6 +67,7 @@ class ToyGS:
         self.dpsi0 = float(dpsi0)
         self.li_ref = float(li_ref)
         self.q_scale = float(q_scale)
+        self.q_area = float(q_area)     # the q profile: q = q_area A/I (q I geometric), q0 ~ 0.9
         self.chords = chords
         self.nan_redl_at = nan_redl_at
         self.redl_scale = float(redl_scale)
@@ -94,7 +95,8 @@ class ToyGS:
         return dict(psi_N=x.copy(), psi_q=np.clip(x, PAD, 1 - PAD),
                     R_avg=R_avg, inv_R=inv_R, inv_R2=inv_R2,
                     dV_dpsi=np.full_like(x, VTOT / dpsi),
-                    dpsi_dpsiN=float(dpsi), pprime=-dp / dpsi, F=F, B2=B2)
+                    dpsi_dpsiN=float(dpsi), pprime=-dp / dpsi, F=F, B2=B2,
+                    dA_dpsiN=VTOT * inv_R / (2.0 * np.pi))
 
     def li_geom(self, geom):
         from bouquet.utils import Ip_fsa_affine_profile
@@ -194,6 +196,14 @@ class ToyGS:
             j[50] = np.nan
         return j
 
+    def q_profile(self, st, g):
+        from scipy.integrate import cumulative_trapezoid
+        A = cumulative_trapezoid(g["dA_dpsiN"], self.psi, initial=0.0)
+        q = np.empty_like(A)
+        q[1:] = self.q_area * A[1:] / st["I"][1:]
+        q[0] = q[1]
+        return q
+
     def q_at(self, st, psi0):
         j0 = float(np.interp(psi0, self.psi, st["A"]))
         return self.q_scale / j0
@@ -221,7 +231,7 @@ class ToyGS:
         out = dict(geom=g, jdotB_bs=self._redl_profile(st["dpsi"], self.kin),
                    li=st["li"],
                    q_row=self.q_at(st, float(g["psi_q"][0])), Ip=self.Ip,
-                   achieved=st["A"].copy())
+                   q=self.q_profile(st, g), achieved=st["A"].copy())
         if want_chords and self.chords is not None:
             out["B_chords"], out["chords_found"] = self.field_at_chords(st)
             out["axis"] = (R0, 0.0)
