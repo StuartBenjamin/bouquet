@@ -1677,10 +1677,10 @@ class GenerationConfig:
     swb_saw_tol: float = 1.0e-4
     swb_saw_ramp: float = 0.01
     swb_saw_rule: str = "local"
-    # swb_saw_q only.  Pressure flattening inside the reset's mixing radius
-    # rho_m (swb.swb_saw_flatten): n_e, T_e, n_i, T_i, Z_eff and p_fixed
-    # (fast + impurity) made flat inside rho_m of the solve, which is then
-    # repeated until rho_m settles.  "value": each at its value at rho_m;
+    # swb_saw_q only.  Pressure flattening inside the core edge, the outermost
+    # crossing of q = swb_saw_q + swb_saw_dq (the reset's rho_m where it fires;
+    # swb.swb_saw_flatten): n_e, T_e, n_i, T_i, Z_eff and p_fixed (fast +
+    # impurity) made flat inside it, and the solve repeated until it settles.  "value": each at its value at rho_m;
     # "volume": volume averages (densities, n T and p_fixed; Z_eff weighted
     # by n_e), so particles and stored energy inside rho_m are kept.  None:
     # off.

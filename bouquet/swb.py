@@ -33,7 +33,7 @@ _SWB_SAW_KEYS = ("jphi_saw_out", "saw_rho_m", "saw_rho_out", "saw_n_dips")
 #: swb_saw_q: with no reset (saw_n_dips 0) warn when max|jphi_saw_out - jphi_saw| exceeds
 #: this fraction of max|jphi_total| (an OFT mis-mapping jphi_saw; also frozen-saw reporting).
 SWB_SAW_MAP_TOL = 1e-3
-#: swb_saw_flatten: the solve is repeated until rho_m moves by at most this, at most SWB_FLAT_MAXIT times.
+#: swb_saw_flatten: the solve is repeated until the core edge's rho moves by at most this, at most SWB_FLAT_MAXIT times.
 SWB_FLAT_TOL = 1e-3
 SWB_FLAT_MAXIT = 6
 #: swb_saw_flatten "volume": profiles averaged with a density weight (T_e: n_e T_e, T_i: n_i T_i, Z_eff: n_e Z_eff).
@@ -61,14 +61,25 @@ def swb_saw_flatten(kin, x, V, x_m, rule):
     return {k: np.where(inside, flat[k], v) for k, v in kin.items()}
 
 
-def _swb_volume(mygs, x, coord):
-    """Enclosed volume (up to a constant factor) on the run grid ``x`` of
-    ``mygs``'s last solve."""
+def core_edge(x, q, q_core):
+    """Outermost crossing of ``|q| = q_core`` on the grid ``x`` (None when q is
+    above ``q_core`` everywhere or up to the last node)."""
+    x, q = np.asarray(x, dtype=float), np.abs(np.asarray(q, dtype=float))
+    i = np.flatnonzero(q <= q_core)
+    if not i.size or i[-1] == x.size - 1:
+        return None
+    i = i[-1]
+    return float(x[i] + (q_core - q[i]) * (x[i + 1] - x[i]) / (q[i + 1] - q[i]))
+
+
+def _swb_q_volume(mygs, x, coord):
+    """``(q, V)`` on the run grid ``x`` of ``mygs``'s last solve: the safety
+    factor and the enclosed volume (up to a constant factor)."""
     from .physics import q_ravg
     pn = np.clip(np.asarray(coords.psi_at(mygs, x, coord), dtype=float), 1e-4, 1.0 - 1e-4)
-    _, _, geo, *_ = mygs.get_q(psi=pn, compute_geo=True)
+    _, q, geo, *_ = mygs.get_q(psi=pn, compute_geo=True)
     w = np.abs(np.asarray(q_ravg(geo, "dV/dPsi"), dtype=float))
-    return np.r_[0.0, np.cumsum(0.5 * (w[1:] + w[:-1]) * np.diff(pn))]
+    return np.asarray(q, dtype=float), np.r_[0.0, np.cumsum(0.5 * (w[1:] + w[:-1]) * np.diff(pn))]
 
 
 def swb_source_edge(x, seed, *others):
@@ -209,30 +220,33 @@ class SwbBaseline:
 
     def _swb_solve(self, kin, j_seed, coil_reg_target=None, warm_eq=None):
         """:meth:`_swb_solve_once`; with ``swb_saw_flatten``, repeated on the
-        kinetics flattened inside the last solve's rho_m (:func:`swb_saw_flatten`)
-        until rho_m settles.  The result then carries ``saw_flat``: the rule,
-        the rho_m flattened inside, the repeats and (when flattened) the
-        flattened ``kin``, its edge ``x_m`` and the volume ``V`` on ``psi_N``."""
+        kinetics flattened (:func:`swb_saw_flatten`) inside the last solve's core
+        edge -- the outermost crossing of q = swb_saw_q + swb_saw_dq (the reset's
+        rho_m where it fires; :func:`core_edge`) -- until its rho = sqrt(x)
+        settles.  The result then carries ``saw_flat``: the rule, the rho
+        flattened inside, the repeats and (when flattened) the flattened
+        ``kin``, its edge ``x_m`` and the volume ``V`` on ``psi_N``."""
         res = self._swb_solve_once(kin, j_seed, coil_reg_target, warm_eq)
-        rule = self.config.generation.swb_saw_flatten
+        gc = self.config.generation
+        rule = gc.swb_saw_flatten
         if rule is None:
             return res
         x = np.asarray(self.baseline.psi_N, dtype=float)
         coord = getattr(self.baseline, "coord", coords.PSI)
+        q_core = float(gc.swb_saw_q) + float(gc.swb_saw_dq)
         rho_used, flat = None, None
         for n in range(SWB_FLAT_MAXIT + 1):
-            rho = float(res.get("saw_rho_m") or 0.0) if res.get("saw_n_dips") else 0.0
+            q, V = _swb_q_volume(self.mygs, x, coord)
+            x_1 = core_edge(x, q, q_core)
+            rho = 0.0 if x_1 is None else float(np.sqrt(x_1))
             if rho <= 0.0 or (rho_used is not None and abs(rho - rho_used) <= SWB_FLAT_TOL):
                 break
             if n == SWB_FLAT_MAXIT:
                 import warnings
-                warnings.warn(f"swb_saw_flatten: rho_m {rho_used:.4f} -> {rho:.4f} after "
+                warnings.warn(f"swb_saw_flatten: core edge rho {rho_used:.4f} -> {rho:.4f} after "
                               f"{n} repeats (tol {SWB_FLAT_TOL:g})", RuntimeWarning, stacklevel=2)
                 break
-            x_m = (rho * rho if coords.check_coord(coord) == coords.PHI
-                   else float(coords.psi_at(self.mygs, [rho * rho], coords.PHI)[0]))
-            V = _swb_volume(self.mygs, x, coord)
-            flat = swb_saw_flatten(kin, x, V, x_m, rule)
+            flat, x_m = swb_saw_flatten(kin, x, V, x_1, rule), x_1
             rho_used = rho
             res = self._swb_solve_once(flat, j_seed, coil_reg_target, warm_eq)
         res["saw_flat"] = dict(rule=rule, rho_m=rho_used, repeats=n, kin=flat,

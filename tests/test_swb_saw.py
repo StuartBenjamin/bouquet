@@ -614,22 +614,23 @@ def test_flatten_rules_keep_the_edge_value_or_the_content():
         assert S(f(vol)) == pytest.approx(S(f(kin)), rel=2e-3)       # particles, energy, sum n Z^2 kept
 
 
-def test_flatten_repeats_until_rho_m_settles(monkeypatch):
+def test_flatten_repeats_until_the_core_edge_settles(monkeypatch):
     x = np.linspace(0.0, 1.0, 101)
-    rhos, seen = iter([0.3, 0.32, 0.3205]), []
+    edges, seen = iter([0.3 ** 2, 0.32 ** 2, 0.3205 ** 2]), []    # q = 1.07 (= 1.02 + 0.05) crossings
 
     def once(kin, j_seed, coil_reg_target, warm_eq):
         seen.append(kin)
-        return {"saw_rho_m": next(rhos), "saw_n_dips": 1}
+        return {}
 
-    monkeypatch.setattr(swb_mod, "_swb_volume", lambda mygs, x, coord: x)
+    monkeypatch.setattr(swb_mod, "_swb_q_volume", lambda mygs, x, coord: (1.0 + 0.07 * x / next(edges), x))
     stub = types.SimpleNamespace(config=types.SimpleNamespace(generation=GenerationConfig(
-        swb_saw_q=1.02, swb_saw_flatten="value")), baseline=types.SimpleNamespace(psi_N=x, coord="phi_n"),
+        swb_saw_q=1.02, swb_saw_dq=0.05, swb_saw_flatten="value")), baseline=types.SimpleNamespace(psi_N=x, coord="phi_n"),
         mygs=None, _swb_solve_once=once)
     res = Bouquet._swb_solve(stub, _kin(x), np.ones_like(x))
     assert len(seen) == 3 and seen[0]["ne"][0] == _kin(x)["ne"][0]   # first solve unflattened
-    assert res["saw_flat"]["rho_m"] == 0.32 and res["saw_flat"]["repeats"] == 2
+    assert res["saw_flat"]["rho_m"] == pytest.approx(0.32) and res["saw_flat"]["repeats"] == 2
     assert np.allclose(seen[2]["ne"][x < 0.32 ** 2], np.interp(0.32 ** 2, x, _kin(x)["ne"]))
+    assert swb_mod.core_edge(x, 1.2 + x, 1.07) is None               # no core: not flattened
 
 
 def test_flatten_needs_the_reset():
