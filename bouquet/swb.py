@@ -36,42 +36,62 @@ SWB_SAW_MAP_TOL = 1e-3
 #: swb_saw_flatten: the solve is repeated until the core edge's rho moves by at most this, at most SWB_FLAT_MAXIT times.
 SWB_FLAT_TOL = 1e-3
 SWB_FLAT_MAXIT = 6
-#: swb_saw_flatten "volume": profiles averaged with a density weight (T_e: n_e T_e, T_i: n_i T_i, Z_eff: n_e Z_eff).
+#: swb_saw_flatten "volume" / "stiff": profiles kept as contents with a density weight (T_e: n_e T_e, T_i: n_i T_i,
+#: Z_eff: n_e Z_eff).
 _FLAT_WEIGHT = {"te": "ne", "ti": "ni", "Zeff": "ne"}
+
+
+def _falloff(r, r0, dr):
+    """1 up to ``r0``, a smoothstep down to 0 at ``r0 + dr`` (C1), 0 beyond."""
+    t = np.clip((r - r0) / dr, 0.0, 1.0)
+    return 1.0 - t * t * (3.0 - 2.0 * t)
 
 
 def swb_saw_flatten(kin, x, V, x_m, rule, width=0.0):
     """``kin`` (``ne te ni ti Zeff p_fixed`` on the grid ``x``) made flat inside
-    ``x_m`` (``GenerationConfig.swb_saw_flatten``).  ``"value"``: each at its
-    value at ``x_m``.  ``"volume"``: at volume averages (``V`` the enclosed
-    volume on ``x``, any constant factor, 0 on the axis) of the densities and
-    p_fixed as they are and of T_e, T_i, Z_eff weighted by n_e, n_i, n_e.  With
-    ``width`` (``swb_saw_flatten_width``, in rho = sqrt(x)) > 0 the "volume"
-    profiles blend into the originals over rho_m .. rho_m + width with the
-    smoothstep weight w (1 inside ``x_m``), each level the w-weighted average
-    there, so no step is left; either way the particles, the stored energy and
-    sum n Z^2 inside the flattened range are kept.  Any subset of the keys (a
+    ``x_m`` (``GenerationConfig.swb_saw_flatten``), ``V`` the enclosed volume
+    on ``x`` (any constant factor, 0 on the axis).  ``"value"``: each at its
+    value at ``x_m``.  ``"volume"``: at volume averages of the densities and
+    p_fixed as they are and of T_e, T_i, Z_eff weighted by n_e, n_i, n_e, so
+    the particles, the stored energy and sum n Z^2 inside the flattened range
+    are kept.  ``"stiff"``: those contents outside scaled by 1 + a h (h = 1 at
+    rho_m, a smoothstep down to 0 at the LCFS: gradient lengths kept where h
+    is flat) and inside at the scaled value at rho_m, a such that the
+    whole-plasma contents are kept.  ``width`` (``swb_saw_flatten_width``, in
+    rho = sqrt(x)) > 0: the flat level blends into the profile outside over
+    rho_m .. rho_m + width with the smoothstep weight w (1 inside ``x_m``), so
+    the profiles have no kink ("volume": each level the w-weighted average
+    there, the contents of that range kept).  Any subset of the keys (a
     weighted one with its weight)."""
     x = np.asarray(x, dtype=float)
     kin = {k: np.asarray(v, dtype=float) for k, v in kin.items()}
-    if rule == "value":
-        return {k: np.where(x < x_m, float(np.interp(x_m, x, v)), v) for k, v in kin.items()}
+    V = np.asarray(V, dtype=float)
     r_m = float(np.sqrt(x_m))
     x_b = (r_m + width) ** 2
 
     def weight(xx):
-        if width <= 0.0:
-            return np.ones_like(xx)
-        t = np.clip((np.sqrt(np.clip(xx, 0.0, None)) - r_m) / width, 0.0, 1.0)
-        return 1.0 - t * t * (3.0 - 2.0 * t)
+        return _falloff(np.sqrt(np.clip(xx, 0.0, None)), r_m, width) if width > 0.0 else np.ones_like(xx)
 
-    xs = np.r_[x[x < x_b], x_b]
-    Vs, ws = np.interp(xs, x, np.asarray(V, dtype=float)), weight(xs)
-    lev = lambda a: float(np.trapezoid(ws * np.interp(xs, x, a), Vs) / np.trapezoid(ws, Vs))   # noqa: E731
     w = np.where(x < x_b, weight(x), 0.0)
-    blend = lambda a: w * lev(a) + (1.0 - w) * a                                               # noqa: E731
-    return {k: np.where(w > 0.0, blend(kin[_FLAT_WEIGHT[k]] * v) / blend(kin[_FLAT_WEIGHT[k]])
-                        if k in _FLAT_WEIGHT else blend(v), v) for k, v in kin.items()}
+    if rule == "value":
+        return {k: np.where(w > 0.0, w * float(np.interp(x_m, x, v)) + (1.0 - w) * v, v) for k, v in kin.items()}
+    if rule == "stiff":
+        h = _falloff(np.sqrt(np.clip(x, 0.0, None)), r_m, 1.0 - r_m)
+
+        def keep(c):
+            flat = w * float(np.interp(x_m, x, c))
+            base, slope = flat + (1.0 - w) * c, flat + (1.0 - w) * c * h
+            return base + (np.trapezoid(c, V) - np.trapezoid(base, V)) / np.trapezoid(slope, V) * slope
+    else:
+        xs = np.r_[x[x < x_b], x_b]
+        Vs, ws = np.interp(xs, x, V), weight(xs)
+        lev = lambda a: float(np.trapezoid(ws * np.interp(xs, x, a), Vs) / np.trapezoid(ws, Vs))   # noqa: E731
+
+        def keep(c):
+            return w * lev(c) + (1.0 - w) * c
+    out = {k: keep(kin[_FLAT_WEIGHT[k]] * v) / keep(kin[_FLAT_WEIGHT[k]]) if k in _FLAT_WEIGHT else keep(v)
+           for k, v in kin.items()}
+    return out if rule == "stiff" else {k: np.where(w > 0.0, out[k], v) for k, v in kin.items()}
 
 
 def core_edge(x, q, q_core):

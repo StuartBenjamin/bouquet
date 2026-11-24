@@ -620,6 +620,24 @@ def test_flatten_rules_keep_the_edge_value_or_the_content():
     assert np.abs(np.diff(wid["ne"])).max() < 0.2 * np.abs(np.diff(vol["ne"])).max()   # no step left
 
 
+def test_flatten_value_smoothed_and_stiff_keep_the_whole_content():
+    x = np.linspace(0.0, 1.0, 2001)
+    V = x ** 1.5
+    kin, x_m = _kin(x), 0.3
+    sharp = swb_mod.swb_saw_flatten(kin, x, V, x_m, "value")
+    val = swb_mod.swb_saw_flatten(kin, x, V, x_m, "value", width=0.1)   # blend over rho_m .. rho_m + 0.1
+    out = x >= (np.sqrt(x_m) + 0.1) ** 2
+    kink = lambda a: np.abs(np.diff(a, 2)).max()                     # noqa: E731
+    for k, v in kin.items():
+        assert np.allclose(val[k][x < x_m], np.interp(x_m, x, v)) and np.array_equal(val[k][out], v[out])
+        assert kink(val[k]) < 0.2 * kink(sharp[k])
+    st = swb_mod.swb_saw_flatten(kin, x, V, x_m, "stiff", width=0.1)
+    for a, b in (("ne", None), ("p_fixed", None), ("ne", "te"), ("ni", "ti"), ("ne", "Zeff")):
+        f = lambda d: d[a] * (d[b] if b else 1.0)                    # noqa: E731
+        assert np.trapezoid(f(st), V) == pytest.approx(np.trapezoid(f(kin), V), rel=1e-12)   # whole plasma kept
+    assert np.ptp(st["ne"][x < x_m]) == 0.0 and st["ne"][-1] == kin["ne"][-1]
+
+
 def test_flatten_repeats_until_the_core_edge_settles(monkeypatch):
     x = np.linspace(0.0, 1.0, 101)
     edges, seen = iter([0.3 ** 2, 0.32 ** 2, 0.3205 ** 2]), []    # q = 1.07 (= 1.02 + 0.05) crossings
