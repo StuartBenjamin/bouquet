@@ -1685,6 +1685,9 @@ class GenerationConfig:
     # by n_e), so particles and stored energy inside rho_m are kept.  None:
     # off.
     swb_saw_flatten: Optional[str] = None
+    # "volume" only: width in rho = sqrt(x) of the smooth blend just outside the
+    # core edge (swb.swb_saw_flatten); 0: a step there.
+    swb_saw_flatten_width: float = 0.0
     # swb only.  OFT interpolation of the inductive jphi profile between its
     # nodes (OFT profile key 'interp'; P' inherits it): "cubic" (C2 spline;
     # an OFT with c2_profile_interp, the internal solve) or "linterp"; None
@@ -2179,6 +2182,8 @@ class GenerationConfig:
             raise ValueError(f"swb_saw_ramp={self.swb_saw_ramp!r} must be >= 0")
         if self.swb_saw_rule not in SWB_SAW_RULES:
             raise ValueError(f"swb_saw_rule={self.swb_saw_rule!r} not in {tuple(SWB_SAW_RULES)}")
+        if not float(self.swb_saw_flatten_width) >= 0.0:
+            raise ValueError(f"swb_saw_flatten_width={self.swb_saw_flatten_width!r} must be >= 0")
         if self.swb_saw_flatten not in (None, "value", "volume"):
             raise ValueError(f"swb_saw_flatten={self.swb_saw_flatten!r} not in (None, 'value', 'volume')")
         if self.swb_jind_interp not in (None, "linterp", "cubic"):

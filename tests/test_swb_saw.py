@@ -612,6 +612,12 @@ def test_flatten_rules_keep_the_edge_value_or_the_content():
     for a, b in (("ne", None), ("ni", None), ("p_fixed", None), ("ne", "te"), ("ni", "ti"), ("ne", "Zeff")):
         f = lambda d: d[a] * (d[b] if b else 1.0)                    # noqa: E731
         assert S(f(vol)) == pytest.approx(S(f(kin)), rel=2e-3)       # particles, energy, sum n Z^2 kept
+    wid = swb_mod.swb_saw_flatten(kin, x, V, x_m, "volume", width=0.1)    # blend over rho_m .. rho_m + 0.1
+    out, S2 = x >= (np.sqrt(x_m) + 0.1) ** 2, lambda a: np.trapezoid(np.where(x < (np.sqrt(x_m) + 0.1) ** 2, a, 0.0), V)
+    for k, v in kin.items():
+        assert np.ptp(wid[k][inside]) == 0.0 and np.array_equal(wid[k][out], v[out])
+    assert S2(wid["ne"] * wid["te"]) == pytest.approx(S2(kin["ne"] * kin["te"]), rel=2e-3)
+    assert np.abs(np.diff(wid["ne"])).max() < 0.2 * np.abs(np.diff(vol["ne"])).max()   # no step left
 
 
 def test_flatten_repeats_until_the_core_edge_settles(monkeypatch):

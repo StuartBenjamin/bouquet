@@ -160,7 +160,7 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
     if flat.get("kin") is not None:   # swb_saw_flatten: the kinetics the solve used, kinetic grid too
         from .swb import swb_saw_flatten
         f = swb_saw_flatten(dict(ne=ne_p, te=te_p, ni=ni_p, ti=ti_p), psi_kin,
-                            np.interp(psi_kin, psi_N, flat["V"]), flat["x_m"], flat["rule"])
+                            np.interp(psi_kin, psi_N, flat["V"]), flat["x_m"], flat["rule"], flat["width"])
         ne_p, te_p, ni_p, ti_p = f["ne"], f["te"], f["ni"], f["ti"]
     # the recipe returns bouquet's split (Bouquet._swb_split): jphi_bs the
     # field-aligned bootstrap, jphi_pd the third bucket, SWB's own

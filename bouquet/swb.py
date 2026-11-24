@@ -40,25 +40,38 @@ SWB_FLAT_MAXIT = 6
 _FLAT_WEIGHT = {"te": "ne", "ti": "ni", "Zeff": "ne"}
 
 
-def swb_saw_flatten(kin, x, V, x_m, rule):
+def swb_saw_flatten(kin, x, V, x_m, rule, width=0.0):
     """``kin`` (``ne te ni ti Zeff p_fixed`` on the grid ``x``) made flat inside
     ``x_m`` (``GenerationConfig.swb_saw_flatten``).  ``"value"``: each at its
-    value at ``x_m``.  ``"volume"``: the volume averages over ``x <= x_m`` (``V``
-    the enclosed volume on ``x``, any constant factor, 0 on the axis) of n_e,
-    n_i, n_e T_e, n_i T_i, n_e Z_eff and p_fixed, so the particles, the stored
-    energy and sum n Z^2 inside ``x_m`` are kept."""
+    value at ``x_m``.  ``"volume"``: at volume averages (``V`` the enclosed
+    volume on ``x``, any constant factor, 0 on the axis) of the densities and
+    p_fixed as they are and of T_e, T_i, Z_eff weighted by n_e, n_i, n_e.  With
+    ``width`` (``swb_saw_flatten_width``, in rho = sqrt(x)) > 0 the "volume"
+    profiles blend into the originals over rho_m .. rho_m + width with the
+    smoothstep weight w (1 inside ``x_m``), each level the w-weighted average
+    there, so no step is left; either way the particles, the stored energy and
+    sum n Z^2 inside the flattened range are kept.  Any subset of the keys (a
+    weighted one with its weight)."""
     x = np.asarray(x, dtype=float)
     kin = {k: np.asarray(v, dtype=float) for k, v in kin.items()}
-    inside = x < x_m
     if rule == "value":
-        flat = {k: float(np.interp(x_m, x, v)) for k, v in kin.items()}
-    else:
-        xs = np.r_[x[inside], x_m]
-        Vs = np.interp(xs, x, np.asarray(V, dtype=float))
-        avg = lambda a: float(np.trapezoid(np.interp(xs, x, a), Vs) / Vs[-1])   # noqa: E731
-        flat = {k: (avg(kin[_FLAT_WEIGHT[k]] * v) / avg(kin[_FLAT_WEIGHT[k]]) if k in _FLAT_WEIGHT
-                    else avg(v)) for k, v in kin.items()}
-    return {k: np.where(inside, flat[k], v) for k, v in kin.items()}
+        return {k: np.where(x < x_m, float(np.interp(x_m, x, v)), v) for k, v in kin.items()}
+    r_m = float(np.sqrt(x_m))
+    x_b = (r_m + width) ** 2
+
+    def weight(xx):
+        if width <= 0.0:
+            return np.ones_like(xx)
+        t = np.clip((np.sqrt(np.clip(xx, 0.0, None)) - r_m) / width, 0.0, 1.0)
+        return 1.0 - t * t * (3.0 - 2.0 * t)
+
+    xs = np.r_[x[x < x_b], x_b]
+    Vs, ws = np.interp(xs, x, np.asarray(V, dtype=float)), weight(xs)
+    lev = lambda a: float(np.trapezoid(ws * np.interp(xs, x, a), Vs) / np.trapezoid(ws, Vs))   # noqa: E731
+    w = np.where(x < x_b, weight(x), 0.0)
+    blend = lambda a: w * lev(a) + (1.0 - w) * a                                               # noqa: E731
+    return {k: np.where(w > 0.0, blend(kin[_FLAT_WEIGHT[k]] * v) / blend(kin[_FLAT_WEIGHT[k]])
+                        if k in _FLAT_WEIGHT else blend(v), v) for k, v in kin.items()}
 
 
 def core_edge(x, q, q_core):
@@ -246,10 +259,10 @@ class SwbBaseline:
                 warnings.warn(f"swb_saw_flatten: core edge rho {rho_used:.4f} -> {rho:.4f} after "
                               f"{n} repeats (tol {SWB_FLAT_TOL:g})", RuntimeWarning, stacklevel=2)
                 break
-            flat, x_m = swb_saw_flatten(kin, x, V, x_1, rule), x_1
+            flat, x_m = swb_saw_flatten(kin, x, V, x_1, rule, gc.swb_saw_flatten_width), x_1
             rho_used = rho
             res = self._swb_solve_once(flat, j_seed, coil_reg_target, warm_eq)
-        res["saw_flat"] = dict(rule=rule, rho_m=rho_used, repeats=n, kin=flat,
+        res["saw_flat"] = dict(rule=rule, width=gc.swb_saw_flatten_width, rho_m=rho_used, repeats=n, kin=flat,
                                **({} if flat is None else dict(x_m=x_m, V=V)))
         return res
 
