@@ -892,17 +892,7 @@ def engine_settings(gc) -> dict:
         mse_tol_sigma=float(MSE_CHORD_OFFSET_TOL_SIGMA),
         mse_chi2n_flag=float(getattr(gc, "mse_chi2n_flag",
                                      ENGINE_FIELD_DEFAULTS["mse_chi2n_flag"])),
-        saw=_saw_settings(gc),
     )
-
-
-def _saw_settings(gc):
-    """OFT's sawtooth reset settings of ``GenerationConfig.swb_saw_*`` (None: off)."""
-    from .config import SWB_SAW_RULES
-    if getattr(gc, "swb_saw_q", None) is None:
-        return None
-    return dict(q_s=float(gc.swb_saw_q), dq=float(gc.swb_saw_dq), tol=float(gc.swb_saw_tol),
-                ramp=float(gc.swb_saw_ramp), rule=int(SWB_SAW_RULES[gc.swb_saw_rule]))
 
 
 def _eps_definition_of(gc) -> str:
@@ -1115,73 +1105,6 @@ def complete_geometry(geom):
     return g
 
 
-def saw_reset(geom, q, J, j_saw, saw):
-    """OFT's sawtooth q reset (``TokaMaker.bootstrap._saw_reset_1d``, the Fortran reset SWB applies) of the
-    base current ``J - j_saw`` on the solved geometry *geom* (completed), with *saw* =
-    ``engine_settings()["saw"]``.  q_base = q I / I_base (q I is geometric) on rho = sqrt(Phi_N);
-    c1 = w_lin / (dA/dpsi_N), so the reset current (``jphi-linterp``) is Ip-neutral in this geometry's Ip
-    measure.  Returns ``(j_reset, info)``; no reset (zeros) when OFT reports a failed gradient."""
-    from scipy.integrate import cumulative_trapezoid
-    from OpenFUSIONToolkit.TokaMaker.bootstrap import _saw_reset_1d
-    psi = np.asarray(geom["psi_N"], dtype=float)
-    w = np.asarray(geom["w_lin"], dtype=float)
-    dA = np.asarray(geom["dA_dpsiN"], dtype=float)
-    q = np.abs(np.asarray(q, dtype=float))
-    I = (cumulative_trapezoid(w * np.asarray(J, float), psi, initial=0.0)
-         + np.asarray(geom["li_geom"]["affine_cum"], dtype=float))
-    I_b = I - cumulative_trapezoid(w * np.asarray(j_saw, float), psi, initial=0.0)
-    ok = (I != 0.0) & (I_b != 0.0)
-    r = np.ones_like(I)
-    r[ok] = I[ok] / I_b[ok]
-    r[~ok] = r[np.argmax(ok)] if ok.any() else 1.0          # the axis: the next node's ratio
-    phi = cumulative_trapezoid(q, psi, initial=0.0)
-    _q, dj, info = _saw_reset_1d(np.sqrt(phi / phi[-1]), q * r, I_b,
-                                 cumulative_trapezoid(dA, psi, initial=0.0), w / dA,
-                                 saw["q_s"], saw["dq"], saw["ramp"], saw["rule"])
-    return np.asarray(dj, dtype=float), {k: v for k, v in info.items() if k != "wr"}
-
-
-class SawReset:
-    """The sawtooth reset current: held fixed in a pass, updated between passes as OFT's SWB updates it
-    (saw_relax = 1): ``j`` <- :func:`saw_reset` of the solved base current.  ``change`` is OFT's freeze
-    measure, rms(j_new - j) / rms(J); the pass criterion is change <= ``saw["tol"]`` (a
-    :func:`bouquet.jbs_loop.run_jbs_loop` ``extra``)."""
-
-    names = ("saw",)
-
-    def __init__(self, saw, j):
-        self.saw = saw
-        self.j = np.asarray(j, dtype=float).copy()
-        self.change = None
-        self.info = {}
-        self.log = []
-
-    def observe(self, k, meas):
-        self.log.append(self.change)
-        return self.ok(), None, ("saw=n/a" if self.change is None else
-                                 f"saw={self.change:.2e} (tol {self.saw['tol']:g}, "
-                                 f"n_dips {self.info.get('n_dips')})")
-
-    def record(self):
-        return dict(settings=dict(self.saw), change=list(self.log), last=dict(self.info))
-
-    def history_text(self):
-        return ("saw_change=[" + ", ".join("n/a" if v is None else f"{v:.2e}" for v in self.log)
-                + f"] (tol {self.saw['tol']:g})")
-
-    def update(self, geom, m):
-        J = np.asarray(m["achieved"], dtype=float)
-        dj, info = saw_reset(geom, m["q"], J, self.j, self.saw)
-        self.change = float(np.sqrt(np.mean((dj - self.j) ** 2))
-                            / max(float(np.sqrt(np.mean(J ** 2))), 1e-30))
-        self.j = dj
-        self.info = dict(info, change=self.change,
-                         max_rel=float(np.max(np.abs(dj)) / max(float(np.max(np.abs(J))), 1e-30)))
-
-    def ok(self):
-        return self.change is not None and self.change <= self.saw["tol"]
-
-
 def _lin(geom, j):
     from scipy.integrate import trapezoid
     return float(trapezoid(np.asarray(geom["w_lin"], float)
@@ -1234,7 +1157,6 @@ class EngineState:
     delivery_correction: Optional[np.ndarray] = None   # toroidal Delta
     geom: Optional[dict] = None               # geometry the next pass uses
     request: Optional[np.ndarray] = None      # the last solved request
-    saw: Optional[np.ndarray] = None          # sawtooth reset current in use
     extras: dict = field(default_factory=dict)
 
     def record(self) -> dict:
@@ -1255,7 +1177,7 @@ class EngineState:
                                if k in ("dpsi_dpsiN", "vol", "perimeter",
                                         "R_axis", "affine_cum", "psi_pad")}
                               or None),
-            request=self.request, saw=self.saw, **self.extras))
+            request=self.request, **self.extras))
 
 
 # ---------------------------------------------------------------------------
@@ -1283,9 +1205,6 @@ class EngineRows:
             names.append("li_row")
         if mse_tol is not None:
             names.append("mse_chords")
-        self.saw = getattr(engine, "saw", None)     # SawReset (the reset's criterion) or None
-        if self.saw is not None:
-            names.append("saw")
         self.names = tuple(names)
         self.log = dict(li_row_error=[], li_row_ok=[], mse_dtg_max_sigma=[],
                         mse_ok=[])
@@ -1315,17 +1234,12 @@ class EngineRows:
             ok = ok and o
             txt.append("mse_dtg=n/a" if dt is None else
                        f"mse_dtg={dt:.2e}sig (tol {self.mse_tol:g})")
-        if self.saw is not None:
-            o, _, t = self.saw.observe(k, meas)
-            ok = ok and o
-            txt.append(t)
         return ok, never, " ".join(txt)
 
     def record(self):
         from .jbs_loop import jsonable
-        saw = None if self.saw is None else self.saw.record()
         return jsonable(dict(li_tol=self.li_tol, mse_tol_sigma=self.mse_tol,
-                             **self.log, **({} if saw is None else dict(saw=saw))))
+                             **self.log))
 
     def history_text(self):
         out = []
@@ -1339,8 +1253,6 @@ class EngineRows:
                 "n/a" if v is None else f"{v:.2e}"
                 for v in self.log["mse_dtg_max_sigma"])
                 + f"] (tol {self.mse_tol:g})")
-        if self.saw is not None:
-            out.append(self.saw.history_text())
         return " ".join(out)
 
 
@@ -1404,14 +1316,6 @@ class UnifiedEngine:
             self.pin = AxisRowPin(q["target"], self.s["q0_tol"], row0,
                                   label=self.label)
             self.state.q0_target = float(q["target"])
-        #: the sawtooth reset (GenerationConfig.swb_saw_q): a fixed current, zero on the first pass
-        self.saw = None
-        if self.s.get("saw") is not None:
-            if self.pin is not None:
-                from .adapters import EngineInputRefused
-                raise EngineInputRefused(f"{self.label}: swb_saw_q and the q0 row both set the axis q")
-            self.saw = SawReset(self.s["saw"], np.zeros_like(self.psi))
-            self.state.saw = self.saw.j.copy()
 
     # ---- rows ------------------------------------------------------------
     def _resolve_rows(self):
@@ -1536,10 +1440,8 @@ class UnifiedEngine:
         _bx = (None if getattr(self.b, "coord", "psi_n") == "psi_n"
                else self.psi)
         _, parts = compose(geom, c.jB_ind, lam_bs, c.jB_fix)
-        if self.saw is not None:
-            parts["saw"] = self.saw.j.copy()
         j_ind, j_bs = parts["ind"], parts["bs"]
-        j_fix = parts["fix"] + parts["pressure"] + parts.get("saw", 0.0)
+        j_fix = parts["fix"] + parts["pressure"]
         Ip_abs = float(self.rows["Ip"]["target"])
         ip_ind, ip_bs, ip_fix = (_lin(geom, j_ind), _lin(geom, j_bs),
                                  _lin(geom, j_fix))
@@ -1738,10 +1640,6 @@ class UnifiedEngine:
             st.delivery_correction = np.asarray(p["dvec"], dtype=float).copy()
             self.passes[-1]["delivery_correction_max"] = float(np.max(np.abs(
                 st.delivery_correction)))
-        if self.saw is not None:
-            self.saw.update(complete_geometry(p["m"]["geom"]), p["m"])
-            st.saw = self.saw.j.copy()
-            self.passes[-1]["saw"] = dict(self.saw.info)
         if self._mse_phase is not None:
             # Broyden (good) update of d tan(gamma)/d x from the pass just
             # solved, then refresh the linearisation point from the solve
@@ -2540,8 +2438,6 @@ class UnifiedEngine:
         dstat, dvec = _delivery_stats(R, m["achieved"], g1)
         st.x = cl["x"]
         st.request = R
-        if self.saw is not None:
-            st.saw = self.saw.j.copy()
         ok = not misses
         rec = dict(ok=bool(ok), checks=checks, misses=misses,
                    delivery=dstat, n_passes_solve=2,
@@ -2787,7 +2683,7 @@ class TokaMakerBackend:
         achieved = np.asarray(eq_jphi_profile(geom, "jphi-linterp", eq=eq),
                               dtype=float)
         out = dict(geom=geom, jdotB_bs=redl, redl_I_bs=float(d["I_BS"]), li=li,
-                   q_row=q_row, q=_q, Ip=Ip, achieved=achieved)
+                   q_row=q_row, Ip=Ip, achieved=achieved)
         if want_chords and self.chords is not None:
             from .mse import mse_field_at
             # (B, found): an off-mesh chord is REPORTED (NaN, found=False),
@@ -3042,13 +2938,10 @@ def _split(eng, res):
     P = np.asarray(split_pressure_term(g), dtype=float)
     jphi_nbi = kap * np.asarray(c.jB_fix_parts["nbi"], float)
     # jphi_rf carries the RF part AND any other driven core_sources entry (the
-    # IDS adapter's "other" part; absent on the g-file path), and the sawtooth
-    # reset current (Baseline.jphi_saw, as SWB's sawteeth share), so the split
+    # IDS adapter's "other" part; absent on the g-file path), so the split
     # sums exactly to the request
     jphi_rf = kap * (np.asarray(c.jB_fix_parts["rf"], float)
                   + np.asarray(c.jB_fix_parts.get("other", 0.0), float))
-    if getattr(st, "saw", None) is not None:
-        jphi_rf = jphi_rf + np.asarray(st.saw, dtype=float)
     return R, R - jphi_bs - jphi_nbi - jphi_rf - P, jphi_bs, jphi_nbi, jphi_rf, P
 
 
@@ -3069,7 +2962,6 @@ def _delivered_state(eng, res, rec, path):
         q0_row_psi_N=(None if "q0" not in eng.rows
                       else float(eng.rows["q0"]["psi"])),
         q95=float(stats.get("q_95", float("nan"))),
-        saw=(None if eng.saw is None else dict(eng.saw.info)),
         Ip_target=float(eng.c.Ip), request_normalisation=cfac,
         edge_pressure=edge_pressure_record(eng),
         achieved_normalisation=None, n_floored_inductive=0,
@@ -3244,7 +3136,6 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
         te=kn["te"], ni=kn["ni"], ti=kn["ti"], Zeff=kn["Zeff"],
         Ip_target=float(c.Ip), l_i_target=float(m["li"]),
         provenance="reconstruction", jphi_nbi=jphi_nbi, jphi_rf=jphi_rf,
-        jphi_saw=res["state"].saw,
         p_fast=kn.get("p_fast"), Z_imp=c.pressure_parts.get("Z_imp"),
         eqdsk_bytes=eqdsk_bytes, pfile_bytes=kn.get("raw_bytes"),
         aux={"zeff": np.asarray(kn["Zeff"], dtype=float)}, recon=recon,

@@ -1671,9 +1671,7 @@ class GenerationConfig:
     # Baseline.jphi_saw becomes SWB's jphi_saw input.  swb_saw_dq / _tol /
     # _ramp map onto OFT's saw_dq / saw_tol / saw_ramp, swb_saw_rule onto
     # saw_rule ("local": each dip below swb_saw_q; "fuse": axis to the mixing
-    # radius).  saw_relax goes via bootstrap_kwargs.  The unified engine applies the
-    # same reset (OFT's 1-D saw_reset_1d, engine.SawReset) to its own passes, as a
-    # fixed reset current updated between passes (saw_relax 1), converged at swb_saw_tol.
+    # radius).  saw_relax goes via bootstrap_kwargs.
     swb_saw_q: Optional[float] = None
     swb_saw_dq: float = 0.03
     swb_saw_tol: float = 1.0e-4
